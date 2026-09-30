@@ -1,0 +1,104 @@
+To honour the JVM settings for this build a single-use Daemon process will be forked. For more on this, please refer to https://docs.gradle.org/8.8/userguide/gradle_daemon.html#sec:disabling_the_daemon in the Gradle documentation.
+Daemon will be stopped at the end of the build 
+
+> Configure project :
+MixinGradle is skipping eclipse integration, extension not found
+Neither the 'eclipse' nor the 'idea' plugins were found, but IDE resource copy has been enabled.
+
+> Task :downloadMcpConfig
+> Task :extractSrg
+> Task :createMcpToSrg
+
+ע: SpongePowered MIXIN Annotation Processor Version=0.8.5 (MixinGradle Version=0.7)
+ע: Supported obfuscation types: ObfuscationServiceMCP supports [notch] ObfuscationServiceFG3 supports [searge]
+ע: Loading searge mappings from C:\Users\Scorn\Desktop\MOD\Ronova-Pro-����\MOD\.work\pro-a-final-20260928\candidate\build\createMcpToSrg\output.tsrg
+ע: Writing refmap to C:\Users\Scorn\Desktop\MOD\Ronova-Pro-����\MOD\.work\pro-a-final-20260928\candidate\build\tmp\compileJava\compileJava-refmap.json
+C:\Users\Scorn\Desktop\MOD\Ronova-Pro-����\MOD\.work\pro-a-final-20260928\candidate\src\main\java\dev\ronova\pro\mixin\Access.java:47: ����: Unable to locate obfuscation mapping for @Accessor target canUpdate
+        @Accessor("canUpdate") boolean pro$canUpdate();
+        ^
+C:\Users\Scorn\Desktop\MOD\Ronova-Pro-����\MOD\.work\pro-a-final-20260928\candidate\src\main\java\dev\ronova\pro\mixin\Access.java:48: ����: Unable to locate obfuscation mapping for @Accessor target canUpdate
+        @Accessor("canUpdate") void pro$canUpdate(boolean value);
+        ^
+C:\Users\Scorn\Desktop\MOD\Ronova-Pro-����\MOD\.work\pro-a-final-20260928\candidate\src\main\java\dev\ronova\pro\mixin\Access.java:51: ����: Unable to locate obfuscation mapping for @Accessor target isAddedToWorld
+        @Accessor("isAddedToWorld") void pro$added(boolean value);
+        ^
+ע: Writing refmap to C:\Users\Scorn\Desktop\MOD\Ronova-Pro-����\MOD\.work\pro-a-final-20260928\candidate\build\tmp\compileJava\compileJava-refmap.json
+ע: Writing searge composite mappings to C:\Users\Scorn\Desktop\MOD\Ronova-Pro-����\MOD\.work\pro-a-final-20260928\candidate\build\tmp\compileJava\compileJava-mappings.tsrg
+> Task :compileJava
+ע: Writing refmap to C:\Users\Scorn\Desktop\MOD\Ronova-Pro-����\MOD\.work\pro-a-final-20260928\candidate\build\tmp\compileJava\compileJava-refmap.json
+ע: Writing refmap to C:\Users\Scorn\Desktop\MOD\Ronova-Pro-����\MOD\.work\pro-a-final-20260928\candidate\build\tmp\compileJava\compileJava-refmap.json
+ע: Writing searge composite mappings to C:\Users\Scorn\Desktop\MOD\Ronova-Pro-����\MOD\.work\pro-a-final-20260928\candidate\build\tmp\compileJava\compileJava-mappings.tsrg
+C:\Users\Scorn\Desktop\MOD\Ronova-Pro-����\MOD\.work\pro-a-final-20260928\candidate\src\main\java\dev\ronova\pro\ProNetwork.java:14: ����: [removal] ResourceLocation �е� ResourceLocation(String,String) �ѹ�ʱ, �ұ��Ϊ��ɾ��
+    static final SimpleChannel CHANNEL=NetworkRegistry.newSimpleChannel(new ResourceLocation("ronova_pro","presence"),
+                                                                        ^
+ע: ĳЩ�����ļ�ʹ�û򸲸����ѹ�ʱ�� API��
+ע: �й���ϸ��Ϣ, ��ʹ�� -Xlint:deprecation ���±��롣
+4 ������
+
+> Task :addMixinsToJar
+> Task :processResources
+> Task :classes
+> Task :addMixinsToRecoveryAgentJar
+> Task :compileAgentJava
+> Task :processAgentResources NO-SOURCE
+> Task :agentClasses
+> Task :recoveryAgentJar
+> Task :addMixinsToRecoveryBootstrapJar
+> Task :compileBootstrapJava
+> Task :processBootstrapResources NO-SOURCE
+> Task :bootstrapClasses
+> Task :recoveryBootstrapJar
+> Task :jar
+> Task :configureReobfTaskForReobfJar
+> Task :reobfJar
+> Task :addMixinsToFixtureJar
+
+> Task :compileFixtureJava
+C:\Users\Scorn\Desktop\MOD\Ronova-Pro-����\MOD\.work\pro-a-final-20260928\candidate\validation\src\main\java\dev\ronova\pro\validation\ClientDrawFixture.java:35: ����: [removal] ResourceLocation �е� ResourceLocation(String,String) �ѹ�ʱ, �ұ��Ϊ��ɾ��
+    private static final ResourceLocation BAD_FONT=new ResourceLocation("pro_fixture","effect_font");
+                                                   ^
+C:\Users\Scorn\Desktop\MOD\Ronova-Pro-����\MOD\.work\pro-a-final-20260928\candidate\validation\src\main\java\dev\ronova\pro\validation\ClientFaultFixture.java:52: ����: [removal] ResourceLocation �е� ResourceLocation(String,String) �ѹ�ʱ, �ұ��Ϊ��ɾ��
+        ShaderInstance partial=new ShaderInstance(event.getResourceProvider(),new ResourceLocation("pro_fixture","partial"),DefaultVertexFormat.POSITION_COLOR);
+                                                                              ^
+C:\Users\Scorn\Desktop\MOD\Ronova-Pro-����\MOD\.work\pro-a-final-20260928\candidate\validation\src\main\java\dev\ronova\pro\validation\ClientFaultFixture.java:63: ����: [removal] ResourceLocation �е� ResourceLocation(String,String) �ѹ�ʱ, �ұ��Ϊ��ɾ��
+        event.registerShader(new ShaderInstance(event.getResourceProvider(),new ResourceLocation("pro_fixture","publication"),DefaultVertexFormat.POSITION_COLOR),s->{
+                                                                            ^
+C:\Users\Scorn\Desktop\MOD\Ronova-Pro-����\MOD\.work\pro-a-final-20260928\candidate\validation\src\main\java\dev\ronova\pro\validation\ClientFaultFixture.java:70: ����: [removal] ResourceLocation �е� ResourceLocation(String,String) �ѹ�ʱ, �ұ��Ϊ��ɾ��
+        event.registerShader(new ShaderInstance(event.getResourceProvider(),new ResourceLocation("pro_fixture","healthy"),DefaultVertexFormat.POSITION_COLOR),s->{healthy=s;healthyPublished++;});
+                                                                            ^
+C:\Users\Scorn\Desktop\MOD\Ronova-Pro-����\MOD\.work\pro-a-final-20260928\candidate\validation\src\main\java\dev\ronova\pro\validation\ClientFaultFixture.java:77: ����: [removal] ResourceLocation �е� ResourceLocation(String,String) �ѹ�ʱ, �ұ��Ϊ��ɾ��
+        BrokenConstructor(ResourceProvider resources)throws IOException { super(resources,new ResourceLocation("pro_fixture","broken"),DefaultVertexFormat.POSITION_COLOR); }
+                                                                                          ^
+C:\Users\Scorn\Desktop\MOD\Ronova-Pro-����\MOD\.work\pro-a-final-20260928\candidate\validation\src\main\java\dev\ronova\pro\validation\ClientFaultFixture.java:83: ����: [removal] ResourceLocation �е� ResourceLocation(String,String) �ѹ�ʱ, �ұ��Ϊ��ɾ��
+        BrokenDraw(ResourceProvider resources)throws IOException { super(resources,new ResourceLocation("pro_fixture","draw_fault"),DefaultVertexFormat.POSITION_COLOR); }
+                                                                                   ^
+C:\Users\Scorn\Desktop\MOD\Ronova-Pro-����\MOD\.work\pro-a-final-20260928\candidate\validation\src\main\java\dev\ronova\pro\validation\SourceAdmissionFixture.java:51: ����: [removal] FMLJavaModLoadingContext �е� get() �ѹ�ʱ, �ұ��Ϊ��ɾ��
+        TYPES.register(FMLJavaModLoadingContext.get().getModEventBus());
+                                               ^
+C:\Users\Scorn\Desktop\MOD\Ronova-Pro-����\MOD\.work\pro-a-final-20260928\candidate\validation\src\main\java\dev\ronova\pro\validation\SourceAdmissionFixture.java:52: ����: [removal] FMLJavaModLoadingContext �е� get() �ѹ�ʱ, �ұ��Ϊ��ɾ��
+        FMLJavaModLoadingContext.get().getModEventBus().addListener((net.minecraftforge.event.entity.EntityAttributeCreationEvent event)->
+                                ^
+C:\Users\Scorn\Desktop\MOD\Ronova-Pro-����\MOD\.work\pro-a-final-20260928\candidate\validation\src\main\java\dev\ronova\pro\validation\WorldFixture.java:43: ����: [removal] FMLJavaModLoadingContext �е� get() �ѹ�ʱ, �ұ��Ϊ��ɾ��
+            var bus=net.minecraftforge.fml.javafmlmod.FMLJavaModLoadingContext.get().getModEventBus();
+                                                                              ^
+C:\Users\Scorn\Desktop\MOD\Ronova-Pro-����\MOD\.work\pro-a-final-20260928\candidate\validation\src\main\java\dev\ronova\pro\validation\WorldFixture.java:51: ����: [removal] FMLJavaModLoadingContext �е� get() �ѹ�ʱ, �ұ��Ϊ��ɾ��
+        if(Boolean.getBoolean("ronova.pro.validation")&&"audit-r6".equals(System.getProperty("ronova.pro.fixture"))) {AuditR6Fixture.BLOCKS.register(net.minecraftforge.fml.javafmlmod.FMLJavaModLoadingContext.get().getModEventBus());new AuditR6Fixture();return;}
+                                                                                                                                                                                                               ^
+C:\Users\Scorn\Desktop\MOD\Ronova-Pro-����\MOD\.work\pro-a-final-20260928\candidate\validation\src\main\java\dev\ronova\pro\validation\WorldFixture.java:83: ����: [removal] FMLJavaModLoadingContext �е� get() �ѹ�ʱ, �ұ��Ϊ��ɾ��
+            var bus=net.minecraftforge.fml.javafmlmod.FMLJavaModLoadingContext.get().getModEventBus();
+                                                                              ^
+11 ������
+
+> Task :processFixtureResources
+> Task :fixtureClasses
+> Task :fixtureJar
+> Task :configureReobfTaskForReobfFixtureJar
+> Task :reobfFixtureJar
+> Task :addMixinsToPrelaunchJar
+> Task :compilePrelaunchJava
+> Task :processPrelaunchResources NO-SOURCE
+> Task :prelaunchClasses
+> Task :prelaunchJar
+
+BUILD SUCCESSFUL in 39s
+24 actionable tasks: 24 executed

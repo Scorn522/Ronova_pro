@@ -1,0 +1,18 @@
+SERVER_PID=42084
+PROTECT_STATE=current=ACTIVE,removed=null,health=10.0,indexed=true;object=ACTIVE,removed=null,indexed=true;blockHolder=true
+SERVER_EXIT=0
+RONOVA_PRELAUNCH_READY targets=NONE
+[00:04:35] [Server thread/INFO] [minecraft/MinecraftServer]: [Not Secure] [Server] MOD_GROUP_BLOCK_PROTECTED
+[00:04:35] [Server thread/ERROR] [ne.mi.ev.EventBus/EVENTBUS]: Exception caught during firing event: java.lang.IllegalAccessException: RONOVA_PROTECTED_FIELD_WRITE_REFUSED
+java.lang.IllegalStateException: java.lang.IllegalAccessException: RONOVA_PROTECTED_FIELD_WRITE_REFUSED
+Caused by: java.lang.IllegalAccessException: RONOVA_PROTECTED_FIELD_WRITE_REFUSED
+[00:04:35] [Server thread/ERROR] [minecraft/MinecraftServer]: Encountered an unexpected exception
+java.lang.IllegalStateException: java.lang.IllegalAccessException: RONOVA_PROTECTED_FIELD_WRITE_REFUSED
+Caused by: java.lang.IllegalAccessException: RONOVA_PROTECTED_FIELD_WRITE_REFUSED
+[00:04:36] [Server thread/ERROR] [minecraft/MinecraftServer]: This crash report has been saved to: C:\Users\Scorn\Desktop\MOD\Ronova-Pro-����\MOD\.work\pro-a-final-20260928\runtime\mod-group-protectmigration-baseline\.\crash-reports\crash-2026-10-01_00.04.36-server.txt
+Traceback (most recent call last):
+  File "C:\Users\Scorn\Desktop\MOD\Ronova-Pro-����\MOD\.work\pro-a-final-20260928\run-group-effect.py", line 107, in <module>
+    until(lambda:'MOD_GROUP_BODY_PROTECTED' in output(),15)
+  File "C:\Users\Scorn\Desktop\MOD\Ronova-Pro-����\MOD\.work\pro-a-final-20260928\run-group-effect.py", line 48, in until
+    raise TimeoutError('server did not reach required game effect')
+TimeoutError: server did not reach required game effect

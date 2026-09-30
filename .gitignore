@@ -1,0 +1,23 @@
+.gradle/
+build/
+run/
+*.log
+!/validation/a-final-20260928/evidence-20261001/*.log
+validation/run-*/
+validation/journal-classes/
+validation/journal-run-*/
+validation/__pycache__/
+validation/a-takeover-guard-01/server/Pro-A-Takeover/
+validation/a-takeover-tasks-01/server/Pro-A-Tasks/
+
+# Public repository: current source, design and delivery only.
+/docs/history/
+/docs/research/
+/distribution/*
+!/distribution/candidate-modwide-a-20261001/
+/validation/*/
+!/validation/src/
+!/validation/a-final-20260928/
+/validation/a-final-20260928/*
+!/validation/a-final-20260928/REPORT.md
+!/validation/a-final-20260928/evidence-20261001/

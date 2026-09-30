@@ -1,0 +1,95 @@
+{
+  "name": "Ronova Pro Design",
+  "version": "1.4",
+  "revision": "R3-DIRECT-EXECUTION-LOWER-BOUNDARIES",
+  "status": "DESIGN_REVIEW_NOT_IMPLEMENTED",
+  "date": "2026-09-20",
+  "entrypoint": "直接实施方案-V1.4-R3.md",
+  "parent_archive": {
+    "sha256": "cedc3dd022470a372ee61526c3ab8782fff2fde2a85733d50f25539d4618d021",
+    "name": "Ronova-Pro-Design-V1.4-Preemptive-R2-20260920.zip"
+  },
+  "source_archive_sha256": "1a94b3cd311d0ce37bc867d2bd44f43140b377d63bbbaefc3b7c2f0a83a971c1",
+  "static_reference": {
+    "name": "Secret-4.1-decompiled.zip",
+    "bundled": false,
+    "sha256": "ea191b0617c6175b7001e3627d6eae9ddc7993c0abf1f265d02f3951d2821d74",
+    "executed": false
+  },
+  "scope": "Design only. Production code, ABI and runtime schema unchanged. No JAR, compile or runtime acceptance. Direct in-memory actions do not share a universal ACK prerequisite.",
+  "counts": {
+    "mechanism_subcase_ids": 59,
+    "primitive_groups": 16,
+    "parent_scenarios": 39,
+    "added_test_runners_in_R3": 0,
+    "outcomes": 5,
+    "executor_roles": 10
+  },
+  "files": [
+    {
+      "file": "能力与验收矩阵-V1.4.md",
+      "bytes": 45686,
+      "sha256": "007897eb3761fae0f2661f9fb974dad6c1ff555ee2c5176b009fbe17593ee51a"
+    },
+    {
+      "file": "平台依据与实现边界-V1.4.md",
+      "bytes": 8247,
+      "sha256": "86b42a47d7e4ec8a1a34be37cc0cc05ac1796072602243f02ca1fd1cf17b5994"
+    },
+    {
+      "file": "前置阻断验收合同-V1.4.md",
+      "bytes": 19136,
+      "sha256": "a04920c71dbdb358e632411d3aa2af78902d531f58a1c008d8fd8adaef84ca5a"
+    },
+    {
+      "file": "实施接续-V1.4.md",
+      "bytes": 12976,
+      "sha256": "8590ccc25ad986772cdd941329cf0bd62967c51bca3322b43501dad18f8f03dd"
+    },
+    {
+      "file": "修订说明-V1.4-R1.md",
+      "bytes": 3010,
+      "sha256": "42642f9113d078333b7ff0c75a2618de03585bdc6d4f5371263c19006b0abb78"
+    },
+    {
+      "file": "修订说明-V1.4-R2.md",
+      "bytes": 3058,
+      "sha256": "e6c4b6f111545573a7c74f2aa9f588fcb728000b72c827ede80dde2399063a82"
+    },
+    {
+      "file": "修订说明-V1.4-R3.md",
+      "bytes": 3110,
+      "sha256": "8480e723051daca7b3774e75e5486ab223aa97cdad6f51487247a7022f10b1ec"
+    },
+    {
+      "file": "源码对照与前置阻断落点-V1.4.md",
+      "bytes": 33355,
+      "sha256": "0ba537f3d5090353451ed5275a62434156aa8cdc75e5b559b15a7fd68d11b836"
+    },
+    {
+      "file": "直接实施方案-V1.4-R3.md",
+      "bytes": 7721,
+      "sha256": "ac75bf5f83d49b9d1c939ac7ea09f3e16658a556d0e2605862727bb6c5561f5e"
+    },
+    {
+      "file": "Legacy-Traceability-Annex-V1.4.md",
+      "bytes": 8265,
+      "sha256": "bd5c5edb624f72b3bc6a0affc20234d1d2d13c24939677b08d6713d47ffd470b"
+    },
+    {
+      "file": "README.md",
+      "bytes": 2772,
+      "sha256": "30ed629707849910588763ebc751016b9fdb9195bf8bb7f00fe79db0485114a4"
+    },
+    {
+      "file": "Ronova-Pro-设计方案-V1.4.md",
+      "bytes": 82566,
+      "sha256": "3da4e9badcccea04a016eb3fcb666ac1e6271d862bf988f233eec4edc630f5e5"
+    },
+    {
+      "file": "Secret-4.1-静态参考与R3取舍.md",
+      "bytes": 7071,
+      "sha256": "5e23388c17d45d9a426c6a531887829cc78f432d987a0c2525e6c9824837e564"
+    }
+  ]
+}

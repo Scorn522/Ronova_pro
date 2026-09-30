@@ -1,0 +1,139 @@
+plugins {
+    id 'java'
+    id 'net.minecraftforge.gradle' version '6.0.54'
+    id 'org.spongepowered.mixin' version '0.7-SNAPSHOT'
+}
+version = '0.1.0-stage-b-dev'
+group = 'dev.ronova.pro'
+base { archivesName = 'ronova-pro-core' }
+java { toolchain.languageVersion = JavaLanguageVersion.of(17) }
+
+sourceSets {
+    prelaunch { java.srcDir 'prelaunch/src/main/java' }
+    bootstrap { java.srcDir 'bootstrap/src/main/java' }
+    agent { java.srcDir 'agent/src/main/java' }
+    stateChecks {
+        java.srcDir 'validation/src/test/java'
+        compileClasspath += sourceSets.main.output + sourceSets.main.compileClasspath + sourceSets.bootstrap.output
+        runtimeClasspath += sourceSets.main.output + sourceSets.main.runtimeClasspath + sourceSets.bootstrap.output
+    }
+    fixture {
+        java.srcDir 'validation/src/main/java'
+        resources.srcDir 'validation/src/main/resources'
+        compileClasspath += sourceSets.main.output
+        runtimeClasspath += sourceSets.main.output
+    }
+}
+configurations {
+    fixtureImplementation.extendsFrom implementation
+    fixtureRuntimeOnly.extendsFrom runtimeOnly
+    configureEach {
+        resolutionStrategy.eachDependency { d ->
+            if (d.requested.group == 'org.apache.logging.log4j' && d.requested.version == '2.11.+') d.useVersion '2.19.0'
+        }
+    }
+}
+repositories { maven { url = 'https://repo.spongepowered.org/repository/maven-public/' } }
+dependencies {
+    minecraft 'net.minecraftforge:forge:1.20.1-47.4.22'
+    annotationProcessor 'org.spongepowered:mixin:0.8.5:processor'
+}
+minecraft {
+    mappings channel: 'official', version: '1.20.1'
+    copyIdeResources = true
+    runs {
+        configureEach {
+            workingDirectory project.file(project.findProperty('runDir') ?: 'run')
+            jvmArgs '-Xmx2G'
+            if (project.hasProperty('validation')) property 'ronova.pro.validation', 'true'
+            if (project.hasProperty('validation') && project.hasProperty('fixtureCase')) property 'ronova.pro.fixture', project.property('fixtureCase')
+            if (project.hasProperty('validation') && project.hasProperty('fixtureVariant')) property 'ronova.pro.fixture.variant', project.property('fixtureVariant')
+            if (project.hasProperty('recoveryAgent') && project.hasProperty('recoveryBootstrap')) {
+                def bootstrapPath=project.file(project.property('recoveryBootstrap')).absolutePath
+                def encodedPath=java.util.Base64.urlEncoder.withoutPadding().encodeToString(bootstrapPath.getBytes('UTF-8'))
+                jvmArgs "-javaagent:${project.file(project.property('recoveryAgent')).absolutePath}=base64:${encodedPath}"
+            }
+            if (project.hasProperty('storageNative')) property 'ronova.pro.storage.native', project.file(project.property('storageNative')).absolutePath
+            if (project.hasProperty('validation') && project.hasProperty('faultPoint')) {
+                property 'ronova.pro.fault.point', project.property('faultPoint')
+                property 'ronova.pro.fault.action', project.findProperty('faultAction') ?: 'throw'
+            }
+            property 'forge.logging.console.level', 'info'
+            property 'mixin.env.remapRefMap', 'true'
+            mods {
+                ronova_pro { source sourceSets.main }
+                if (project.hasProperty('validation')) pro_fixture { source sourceSets.fixture }
+            }
+        }
+        server { args '--nogui' }
+        client { args '--username', 'ProVerifier' }
+    }
+}
+tasks.matching { it.name in ['runClient','runServer'] }.configureEach {
+    if (project.hasProperty('validation')) dependsOn tasks.named('fixtureClasses')
+}
+mixin { add sourceSets.main, 'ronova_pro.refmap.json'; config 'ronova_pro.mixins.json' }
+tasks.withType(JavaCompile).configureEach { options.encoding = 'UTF-8' }
+tasks.named('compileAgentJava',JavaCompile).configure {
+    options.compilerArgs += ['--add-exports','java.base/jdk.internal.org.objectweb.asm=ALL-UNNAMED',
+                             '--add-exports','java.base/jdk.internal.org.objectweb.asm.tree=ALL-UNNAMED',
+                             '--add-exports','java.base/jdk.internal.org.objectweb.asm.tree.analysis=ALL-UNNAMED']
+}
+// The release entry is one mod jar. The player supplies no JVM argument, so the agent and bootstrap payloads
+// ship inside it and the mod extracts and attaches them itself. The separate jars stay available for diagnosis.
+tasks.register('compileControlNative',Exec) {
+    onlyIf { System.getProperty('os.name').startsWith('Windows') }
+    inputs.files('native/control.c','native/build-control.ps1')
+    outputs.file(layout.buildDirectory.file('control-native/ronova-native/windows-x86_64/ronova-pro-control.dll'))
+    doFirst {
+        def jdk=javaToolchains.launcherFor { languageVersion = JavaLanguageVersion.of(17) }.get().metadata.installationPath.asFile
+        commandLine 'powershell.exe','-NoProfile','-ExecutionPolicy','Bypass','-File',file('native/build-control.ps1').absolutePath,'-JdkHome',jdk.absolutePath
+        if(project.hasProperty('controlZig')) args '-Zig',project.property('controlZig')
+    }
+}
+tasks.register('recoveryBootstrapJar',Jar) {
+    dependsOn 'compileControlNative'
+    archiveBaseName='ronova-pro-bootstrap'
+    archiveVersion=''
+    from sourceSets.bootstrap.output
+    from(layout.buildDirectory.dir('control-native')) { include '**/*.dll' }
+}
+tasks.register('recoveryAgentJar',Jar) {
+    archiveBaseName='ronova-pro-agent'
+    archiveVersion=''
+    from sourceSets.agent.output
+    manifest { attributes('Premain-Class':'dev.ronova.pro.agent.RecoveryAgent',
+            'Agent-Class':'dev.ronova.pro.agent.RecoveryAgent',
+            'Main-Class':'dev.ronova.pro.agent.AttachMain',
+            'Can-Retransform-Classes':'true','Can-Redefine-Classes':'true') }
+}
+tasks.register('prelaunchJar',Jar) {
+    archiveBaseName='ronova-pro-prelaunch'
+    archiveVersion=''
+    from sourceSets.prelaunch.output
+    manifest { attributes('Main-Class':'dev.ronova.pro.prelaunch.PrelaunchMain') }
+}
+tasks.named('jar').configure {
+    dependsOn 'recoveryAgentJar','recoveryBootstrapJar'
+    manifest { attributes('MixinConfigs': 'ronova_pro.mixins.json') }
+    // Nested payloads keep their own manifests, which is how the mod recognises them at runtime.
+    from(tasks.named('recoveryAgentJar').flatMap { it.archiveFile }) { into 'ronova-payload' }
+    from(tasks.named('recoveryBootstrapJar').flatMap { it.archiveFile }) { into 'ronova-payload' }
+    finalizedBy 'reobfJar'
+}
+tasks.register('fixtureJar',Jar) {
+    archiveBaseName='ronova-pro-isolated-fixture'
+    from sourceSets.fixture.output
+    manifest { attributes('MixinConfigs':'ronova_pro.fixture.mixins.json') }
+    finalizedBy 'reobfFixtureJar'
+}
+reobf { fixtureJar {} }
+
+// Explicit metadata regression only. Does not start Forge, attach an agent, build DLLs, or certify O02/O05.
+tasks.register('runTaskStateChecks',JavaExec) {
+    dependsOn tasks.named('stateChecksClasses')
+    classpath = sourceSets.stateChecks.runtimeClasspath
+    mainClass = 'dev.ronova.pro.TaskStateCheck'
+    jvmArgs '--add-opens=java.base/java.util.concurrent=ALL-UNNAMED'
+    javaLauncher = javaToolchains.launcherFor { languageVersion = JavaLanguageVersion.of(17) }
+}

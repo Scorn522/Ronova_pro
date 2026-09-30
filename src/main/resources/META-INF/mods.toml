@@ -1,0 +1,20 @@
+modLoader="javafml"
+loaderVersion="[47,)"
+license="All Rights Reserved"
+[[mods]]
+modId="ronova_pro"
+version="0.1.0-stage-b-dev"
+displayName="Ronova Pro"
+description='''Independent Primitive-first core. Stage B recovery candidate; later Pro stages are separate.'''
+[[dependencies.ronova_pro]]
+modId="forge"
+mandatory=true
+versionRange="[47.4.22,48)"
+ordering="NONE"
+side="BOTH"
+[[dependencies.ronova_pro]]
+modId="minecraft"
+mandatory=true
+versionRange="[1.20.1]"
+ordering="NONE"
+side="BOTH"
