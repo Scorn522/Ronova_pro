@@ -30,6 +30,7 @@ public final class PrelaunchMain {
         String selected=selection.getProperty("stop","");
         String protectedIds=selection.getProperty("protect","");
         String remoteAllowed=selection.getProperty("allow_remote_stop","");
+        String returns=selection.getProperty("returns","default");
         Path cache=directory.resolve("ronova-pro/bootstrap-prelaunch");Files.createDirectories(cache);
         Path agent=extract(core,cache,"ronova-pro-agent.jar");
         Path bootstrap=extract(core,cache,"ronova-pro-bootstrap.jar");
@@ -37,6 +38,7 @@ public final class PrelaunchMain {
                 .encodeToString(bootstrap.toString().getBytes(StandardCharsets.UTF_8));
         List<String> command=new ArrayList<>();command.add(java.toString());
         if(!selected.isEmpty())command.add("-Dronova.pro.bootStop="+selected);
+        if(!selected.isEmpty())command.add("-Dronova.pro.bootReturns="+returns);
         if(!protectedIds.isEmpty())command.add("-Dronova.pro.bootProtect="+protectedIds);
         if(!remoteAllowed.isEmpty())command.add("-Dronova.pro.clientAllowedStop="+remoteAllowed);
         command.add("-javaagent:"+agent+"=base64:"+encoded);
@@ -58,6 +60,10 @@ public final class PrelaunchMain {
         Properties selected=new Properties();
         for(String action:List.of("stop","protect","allow_remote_stop"))
             selected.setProperty(action,normalize(properties.getProperty(action,"")));
+        String returns=properties.getProperty("returns","default").trim().toLowerCase(java.util.Locale.ROOT);
+        if(!List.of("default","null","empty","uuid-fixed","uuid-each","invalid-id").contains(returns))
+            throw new IOException("INVALID_RETURN_POLICY:"+returns);
+        selected.setProperty("returns",returns);
         return selected;
     }
     private static String normalize(String selection) throws IOException {

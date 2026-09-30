@@ -15,6 +15,7 @@ validation/a-takeover-tasks-01/server/Pro-A-Tasks/
 /docs/research/
 /distribution/*
 !/distribution/candidate-modwide-a-20261001/
+!/distribution/candidate-modwide-a-complete-20261001/
 /validation/*/
 !/validation/src/
 !/validation/a-final-20260928/

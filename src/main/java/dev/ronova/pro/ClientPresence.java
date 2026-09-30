@@ -39,6 +39,7 @@ public final class ClientPresence {
         if(message==null||!current(source))return;
         UUID known=policy.session();
         if(known!=null&&!known.equals(message.session()))return;
+        if(!Set.of("default","null","empty","uuid-fixed","uuid-each","invalid-id").contains(message.returns()))return;
         // A remote server cannot turn its policy packet into a client-side JVM mod shutdown.
         // Dedicated multiplayer clients opt in locally before launch; integrated play owns both sides.
         boolean integrated=Minecraft.getInstance().getSingleplayerServer()!=null;
@@ -58,8 +59,8 @@ public final class ClientPresence {
         if(accepted.isEmpty())return;
         try {
             Class<?> agent=Class.forName("dev.ronova.pro.agent.RecoveryAgent",false,ClassLoader.getSystemClassLoader());
-            String result=String.valueOf(agent.getMethod("stopModIds",String[].class).invoke(null,
-                    (Object)accepted.toArray(String[]::new)));
+            String result=String.valueOf(agent.getMethod("stopModIds",String[].class,String.class).invoke(null,
+                    (Object)accepted.toArray(String[]::new),message.returns()));
             LOG.log(System.Logger.Level.INFO,"RONOVA_CLIENT_MOD_GROUP "+result);
         } catch(ReflectiveOperationException unavailable) {
             LOG.log(System.Logger.Level.WARNING,"RONOVA_CLIENT_MOD_GROUP_UNAVAILABLE "+unavailable.getClass().getSimpleName());

@@ -28,6 +28,9 @@ import jdk.internal.org.objectweb.asm.tree.MethodInsnNode;
 import jdk.internal.org.objectweb.asm.tree.MethodNode;
 import jdk.internal.org.objectweb.asm.tree.TableSwitchInsnNode;
 import jdk.internal.org.objectweb.asm.tree.VarInsnNode;
+import jdk.internal.org.objectweb.asm.tree.LdcInsnNode;
+import jdk.internal.org.objectweb.asm.tree.IntInsnNode;
+import jdk.internal.org.objectweb.asm.tree.TypeInsnNode;
 import jdk.internal.org.objectweb.asm.tree.analysis.Analyzer;
 import jdk.internal.org.objectweb.asm.tree.analysis.AnalyzerException;
 import jdk.internal.org.objectweb.asm.tree.analysis.Frame;
@@ -43,6 +46,23 @@ final class ModGroupBoundary {
     private static final Map<Module,Set<String>> metadata=Collections.synchronizedMap(new IdentityHashMap<>());
     private static final AtomicInteger methods=new AtomicInteger();
     private static final Set<String> unresolved=ConcurrentHashMap.newKeySet();
+    private record Returns(String mode,String uuid) { }
+    private static final Map<Module,Returns> returns=Collections.synchronizedMap(new IdentityHashMap<>());
+    private static final Map<Module,Set<String>> groupGaps=Collections.synchronizedMap(new IdentityHashMap<>());
+    private static final ThreadLocal<Class<?>[]> batch=new ThreadLocal<>();
+    static String returnMode(String mode) {
+        String normalized=mode.trim().toLowerCase(java.util.Locale.ROOT);
+        if(!Set.of("default","null","empty","uuid-fixed","uuid-each","invalid-id").contains(normalized))
+            throw new IllegalArgumentException("INVALID_RETURN_POLICY:"+mode);
+        return normalized;
+    }
+    private static void gap(Module module,String value) {
+        unresolved.add(value);
+        synchronized(groupGaps) {groupGaps.computeIfAbsent(module,ignored->ConcurrentHashMap.newKeySet()).add(value);}
+    }
+    static void failed(Module module,String name,Throwable failure) {gap(module,name+":TRANSFORM_FAILED:"+failure.getClass().getSimpleName());}
+    static void beginBatch(Instrumentation api) { if(api!=null)batch.set(api.getAllLoadedClasses()); }
+    static void endBatch() {batch.remove();}
     static {
         String configured=System.getProperty("ronova.pro.bootStop","")+","+System.getenv().getOrDefault("RONOVA_PRO_BOOT_STOP","");
         for(String id:configured.split(",")) {
@@ -80,10 +100,14 @@ final class ModGroupBoundary {
         if(denied.isEmpty())return false;
         Set<String> owners=ids(module);
         if(Collections.disjoint(owners,denied))return false;
-        if(!denied.containsAll(owners)) {
-            unresolved.add(String.valueOf(module.getName())+":MULTI_MOD_MODULE_REQUIRES_ALL_IDS:"+owners);
+        if(owners.stream().anyMatch(id->!valid(id))) {
+            gap(module,String.valueOf(module.getName())+":RESERVED_MOD_IN_SHARED_MODULE:"+owners);
             return false;
         }
+        // A file/module is indivisible; selecting an owner includes all its declared aliases.
+        denied.addAll(owners);
+        synchronized(exact) {exact.add(module);}
+        returns.computeIfAbsent(module,ignored->new Returns(returnMode(System.getProperty("ronova.pro.bootReturns","default")),java.util.UUID.randomUUID().toString()));
         return true;
     }
     static byte[] transform(ClassLoader loader,Module module,String name,byte[] bytes) {
@@ -99,32 +123,68 @@ final class ModGroupBoundary {
                 changed=true;continue;
             }
             if(method.name.equals("<init>")) {
-                if(shortConstructor(node,method))changed=true;
-                else unresolved.add(name+"#"+method.name+method.desc+":CONSTRUCTOR_PREFIX_UNCONTROLLED");
+                boolean modCarrier=node.visibleAnnotations!=null&&node.visibleAnnotations.stream()
+                        .anyMatch(annotation->annotation.desc.equals("Lnet/minecraftforge/fml/common/Mod;"));
+                if(modCarrier) {
+                    // Forge still needs its inert @Mod carrier; ordinary business allocations are refused.
+                    if(shortConstructor(node,method))changed=true;
+                    else gap(module,name+"#"+method.name+method.desc+":MOD_CARRIER_PREFIX_UNCONTROLLED");
+                } else {
+                    InsnList rejected=new InsnList();
+                    rejected.add(new TypeInsnNode(Opcodes.NEW,"java/lang/IllegalStateException"));
+                    rejected.add(new InsnNode(Opcodes.DUP));rejected.add(new LdcInsnNode("RONOVA_MOD_GROUP_CREATION_REFUSED"));
+                    rejected.add(new MethodInsnNode(Opcodes.INVOKESPECIAL,"java/lang/IllegalStateException","<init>","(Ljava/lang/String;)V",false));
+                    rejected.add(new InsnNode(Opcodes.ATHROW));replace(method,rejected);changed=true;
+                }
                 continue;
             }
-            if((method.access&(Opcodes.ACC_ABSTRACT|Opcodes.ACC_NATIVE))!=0) {
-                unresolved.add(name+"#"+method.name+method.desc+":ABSTRACT_OR_NATIVE");continue;
+            if((method.access&Opcodes.ACC_ABSTRACT)!=0)continue;
+            if((method.access&Opcodes.ACC_NATIVE)!=0) {
+                gap(module,name+"#"+method.name+method.desc+":NATIVE_BINDING_UNCONTROLLED");continue;
             }
             Type result=Type.getReturnType(method.desc);
             InsnList code=new InsnList();
             switch(result.getSort()) {
                 case Type.VOID -> code.add(new InsnNode(Opcodes.RETURN));
                 case Type.BOOLEAN,Type.BYTE,Type.CHAR,Type.SHORT,Type.INT -> {
-                    code.add(new InsnNode(Opcodes.ICONST_0));code.add(new InsnNode(Opcodes.IRETURN));
+                    code.add(new InsnNode(result.getSort()==Type.INT&&returns.get(module).mode().equals("invalid-id")?Opcodes.ICONST_M1:Opcodes.ICONST_0));code.add(new InsnNode(Opcodes.IRETURN));
                 }
                 case Type.LONG -> {code.add(new InsnNode(Opcodes.LCONST_0));code.add(new InsnNode(Opcodes.LRETURN));}
                 case Type.FLOAT -> {code.add(new InsnNode(Opcodes.FCONST_0));code.add(new InsnNode(Opcodes.FRETURN));}
                 case Type.DOUBLE -> {code.add(new InsnNode(Opcodes.DCONST_0));code.add(new InsnNode(Opcodes.DRETURN));}
                 default -> {
                     String type=result.getSort()==Type.OBJECT?result.getInternalName():"";
-                    if(type.equals("java/util/Optional"))code.add(new MethodInsnNode(Opcodes.INVOKESTATIC,type,"empty","()Ljava/util/Optional;",false));
+                    Returns policy=returns.get(module);
+                    if((policy.mode().equals("uuid-fixed")||policy.mode().equals("uuid-each"))
+                            &&(type.equals("java/util/UUID")||type.equals("java/lang/String"))) {
+                        if(policy.mode().equals("uuid-fixed")) {
+                            code.add(new LdcInsnNode(policy.uuid()));
+                            if(type.equals("java/util/UUID"))code.add(new MethodInsnNode(Opcodes.INVOKESTATIC,"java/util/UUID","fromString","(Ljava/lang/String;)Ljava/util/UUID;",false));
+                        } else {
+                            code.add(new MethodInsnNode(Opcodes.INVOKESTATIC,"java/util/UUID","randomUUID","()Ljava/util/UUID;",false));
+                            if(type.equals("java/lang/String"))code.add(new MethodInsnNode(Opcodes.INVOKEVIRTUAL,"java/util/UUID","toString","()Ljava/lang/String;",false));
+                        }
+                    } else if(policy.mode().equals("null"))code.add(new InsnNode(Opcodes.ACONST_NULL));
+                    else if(result.getSort()==Type.ARRAY&&policy.mode().equals("empty")) {
+                        String component=result.getDescriptor().substring(1);
+                        code.add(new InsnNode(Opcodes.ICONST_0));
+                        if(component.length()==1)code.add(new IntInsnNode(Opcodes.NEWARRAY,switch(component.charAt(0)) {
+                            case 'Z'->Opcodes.T_BOOLEAN;case 'B'->Opcodes.T_BYTE;case 'C'->Opcodes.T_CHAR;case 'S'->Opcodes.T_SHORT;
+                            case 'I'->Opcodes.T_INT;case 'J'->Opcodes.T_LONG;case 'F'->Opcodes.T_FLOAT;case 'D'->Opcodes.T_DOUBLE;
+                            default->throw new IllegalArgumentException("ARRAY_COMPONENT:"+component);
+                        }));
+                        else code.add(new TypeInsnNode(Opcodes.ANEWARRAY,component.startsWith("L")?component.substring(1,component.length()-1):component));
+                    } else if(Set.of("java/util/Optional","java/util/OptionalInt","java/util/OptionalLong","java/util/OptionalDouble").contains(type))
+                        code.add(new MethodInsnNode(Opcodes.INVOKESTATIC,type,"empty","()L"+type+";",false));
                     else if(type.equals("java/util/List")||type.equals("java/util/Collection")||type.equals("java/lang/Iterable"))
                         code.add(new MethodInsnNode(Opcodes.INVOKESTATIC,"java/util/List","of","()Ljava/util/List;",true));
                     else if(type.equals("java/util/Set"))code.add(new MethodInsnNode(Opcodes.INVOKESTATIC,type,"of","()Ljava/util/Set;",true));
                     else if(type.equals("java/util/Map"))code.add(new MethodInsnNode(Opcodes.INVOKESTATIC,type,"of","()Ljava/util/Map;",true));
-                    else if(type.equals("java/util/stream/Stream"))code.add(new MethodInsnNode(Opcodes.INVOKESTATIC,type,"empty","()Ljava/util/stream/Stream;",true));
-                    else if(type.equals("java/util/concurrent/CompletableFuture")||type.equals("java/util/concurrent/CompletionStage")) {
+                    else if(type.equals("java/util/Iterator")||type.equals("java/util/Enumeration"))
+                        code.add(new MethodInsnNode(Opcodes.INVOKESTATIC,"java/util/Collections",type.equals("java/util/Iterator")?"emptyIterator":"emptyEnumeration","()L"+type+";",false));
+                    else if(Set.of("java/util/stream/Stream","java/util/stream/IntStream","java/util/stream/LongStream","java/util/stream/DoubleStream").contains(type))
+                        code.add(new MethodInsnNode(Opcodes.INVOKESTATIC,type,"empty","()L"+type+";",true));
+                    else if(Set.of("java/util/concurrent/CompletableFuture","java/util/concurrent/CompletionStage","java/util/concurrent/Future").contains(type)) {
                         code.add(new InsnNode(Opcodes.ACONST_NULL));
                         code.add(new MethodInsnNode(Opcodes.INVOKESTATIC,"java/util/concurrent/CompletableFuture","completedFuture",
                                 "(Ljava/lang/Object;)Ljava/util/concurrent/CompletableFuture;",false));
@@ -132,14 +192,17 @@ final class ModGroupBoundary {
                     code.add(new InsnNode(Opcodes.ARETURN));
                 }
             }
-            method.instructions=code;method.tryCatchBlocks.clear();method.localVariables=null;
-            method.visibleLocalVariableAnnotations=null;method.invisibleLocalVariableAnnotations=null;
+            replace(method,code);
             methods.incrementAndGet();changed=true;
         }
         if(!changed)return null;
         // Replaced bodies are straight-line returns. Existing constructors keep their original frames.
         // Recomputing unrelated Forge hierarchy here would make a mod stop depend on loader resources.
         ClassWriter writer=new ClassWriter(ClassWriter.COMPUTE_MAXS);node.accept(writer);return writer.toByteArray();
+    }
+    private static void replace(MethodNode method,InsnList code) {
+        method.instructions=code;method.tryCatchBlocks.clear();method.localVariables=null;
+        method.visibleLocalVariableAnnotations=null;method.invisibleLocalVariableAnnotations=null;
     }
     private static boolean shortConstructor(ClassNode owner,MethodNode method) {
         try {
@@ -170,15 +233,18 @@ final class ModGroupBoundary {
         } catch(AnalyzerException|RuntimeException unavailable) {return false;}
         return false;
     }
-    static synchronized String stop(Instrumentation api,String[] ids,Module[] hints) {
+    static synchronized String stop(Instrumentation api,String[] ids,Module[] hints,String mode) {
         if(api==null)return "AGENT_UNAVAILABLE";
+        mode=returnMode(mode);
         String selection=validate(ids,hints);
         if(!selection.equals("READY"))return selection;
         for(int i=0;i<ids.length;i++) {
             denied.add(ids[i].trim().toLowerCase(java.util.Locale.ROOT));
             synchronized(exact){exact.add(hints[i]);}
+            Returns old=returns.get(hints[i]);
+            returns.put(hints[i],new Returns(mode,old==null?java.util.UUID.randomUUID().toString():old.uuid()));
         }
-        return retransform(api);
+        return retransform(api,new HashSet<>(Arrays.asList(hints)));
     }
     static String validate(String[] ids,Module[] hints) {
         if(ids.length!=hints.length||ids.length==0)return "EMPTY_OR_MISMATCHED_SELECTION";
@@ -191,25 +257,40 @@ final class ModGroupBoundary {
         }
         return "READY";
     }
-    static synchronized String stopByIds(Instrumentation api,String[] ids) {
+    static synchronized String stopByIds(Instrumentation api,String[] ids,String mode) {
         if(api==null)return "AGENT_UNAVAILABLE";
         if(ids.length==0)return "EMPTY_SELECTION";
         for(String id:ids)if(!valid(id.trim().toLowerCase(java.util.Locale.ROOT)))return "INVALID_TARGET:"+id;
-        for(String id:ids)denied.add(id.trim().toLowerCase(java.util.Locale.ROOT));
-        return retransform(api);
-    }
-    private static String retransform(Instrumentation api) {
-        int loaded=0,failed=0;
+        Set<String> selected=new HashSet<>(Arrays.asList(ids));
+        Map<String,Module> targets=new java.util.LinkedHashMap<>();
         for(Class<?> type:api.getAllLoadedClasses()) {
-            if(type.isArray()||type.isPrimitive()||!stopped(type.getModule())
+            Set<String> owners=ids(type.getModule());
+            if(Collections.disjoint(owners,selected))continue;
+            if(!selected.containsAll(owners))return "CLIENT_SHARED_MODULE_NOT_FULLY_AUTHORIZED:"+owners;
+            for(String owner:owners)targets.put(owner,type.getModule());
+        }
+        if(targets.isEmpty())return "MOD_GROUP_NOT_LOADED";
+        return stop(api,targets.keySet().toArray(String[]::new),targets.values().toArray(Module[]::new),mode);
+    }
+    private static String retransform(Instrumentation api,Set<Module> selected) {
+        int loaded=0,failed=0;
+        Class<?>[] snapshot=batch.get();
+        for(Class<?> type:snapshot==null?api.getAllLoadedClasses():snapshot) {
+            if(type.isArray()||type.isPrimitive()||!selected.contains(type.getModule())||!stopped(type.getModule())
                     ||type.getName().startsWith("dev.ronova.pro.agent.")||type.getName().startsWith("dev.ronova.pro.bootstrap."))continue;
-            if(!api.isModifiableClass(type)) {unresolved.add(type.getName()+":UNMODIFIABLE");failed++;continue;}
+            if(!api.isModifiableClass(type)) {gap(type.getModule(),type.getName()+":UNMODIFIABLE");failed++;continue;}
             try {api.retransformClasses(type);loaded++;}
             catch(UnmodifiableClassException|RuntimeException|LinkageError failure) {
-                unresolved.add(type.getName()+":"+failure.getClass().getSimpleName());failed++;
+                gap(type.getModule(),type.getName()+":"+failure.getClass().getSimpleName());failed++;
             }
         }
-        return "TARGETS="+denied+";RETRANSFORMED_CLASSES="+loaded+";FAILED="+failed+";METHODS="+methods.get()+";UNRESOLVED="+unresolved.size()+";GAPS="+unresolved.stream().limit(8).toList();
+        Returns policy=returns.get(selected.iterator().next());
+        return "TARGETS="+denied+";RETRANSFORMED_CLASSES="+loaded+";FAILED="+failed+";METHODS="+methods.get()+";RETURNS="+policy.mode()+";UNRESOLVED="+unresolved.size()+";GAPS="+unresolved.stream().limit(8).toList();
     }
     static String state() {return "TARGETS="+denied+";METHODS="+methods.get()+";UNRESOLVED="+unresolved.size()+";GAPS="+unresolved.stream().limit(8).toList();}
+    static String state(Module module) {
+        Set<String> gaps=groupGaps.getOrDefault(module,Set.of());Returns policy=returns.get(module);
+        return "MODS="+ids(module)+";STATE="+(stopped(module)?gaps.isEmpty()?"STOPPED":"STOPPED_PARTIAL":"ACTIVE")
+                +";RETURNS="+(policy==null?"default":policy.mode())+";UNRESOLVED="+gaps.size()+";GAPS="+gaps.stream().limit(8).toList();
+    }
 }

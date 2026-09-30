@@ -30,6 +30,8 @@ public final class TaskBridge {
     private static volatile Module[] stoppedModules=new Module[0];
     private static final java.lang.ref.ReferenceQueue<Object> EVENT_QUEUE=new java.lang.ref.ReferenceQueue<>();
     private static final java.util.HashMap<EventKey,Module> EVENT_OWNERS=new java.util.HashMap<>();
+    private static final java.lang.ref.ReferenceQueue<Object> CREATION_QUEUE=new java.lang.ref.ReferenceQueue<>();
+    private static final java.util.HashMap<EventKey,Module> CREATION_OWNERS=new java.util.HashMap<>();
     private static final class EventKey extends java.lang.ref.WeakReference<Object> {
         final int hash;
         EventKey(Object listener,java.lang.ref.ReferenceQueue<Object> queue){super(listener,queue);hash=System.identityHashCode(listener);}
@@ -297,6 +299,10 @@ public final class TaskBridge {
         return inputs.toArray();
     }
     public static boolean deliveringCreationTo(Class<?> owner) { return CREATION_DELIVERY.get()==owner; }
+    public static Module creationModule(Object object) {
+        if(object==null)return null;
+        synchronized(CREATION_OWNERS) {return CREATION_OWNERS.get(new EventKey(object,null));}
+    }
     public static void creationObserved(Object object) {
         deliverCreation(object,false);
     }
@@ -306,6 +312,10 @@ public final class TaskBridge {
         if(observer==null||object==null||CREATION_DELIVERY.get()!=null)return;
         var caller=CREATION_CALLER.walk(frames->frames.skip(2).findFirst().orElse(null));
         if(caller==null||!CREATION_SITES.get(caller.getDeclaringClass()).contains(caller.getMethodName()+caller.getDescriptor()+":"+caller.getByteCodeIndex()))return;
+        if(!failed) synchronized(CREATION_OWNERS) {
+            EventKey stale;while((stale=(EventKey)CREATION_QUEUE.poll())!=null)CREATION_OWNERS.remove(stale);
+            CREATION_OWNERS.put(new EventKey(object,CREATION_QUEUE),caller.getDeclaringClass().getModule());
+        }
         if(!failed&&PRODUCERS.get()!=null) {
             var frame=PRODUCERS.get();if(frame.created.size()<64)frame.created.add(object);else frame.overflow=true;
         }

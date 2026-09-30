@@ -1,0 +1,11 @@
+SERVER_PID=46320
+BOOT_TARGET_METHODS_DID_NOT_EXECUTE
+SERVER_EXIT=0
+RONOVA_PRELAUNCH_READY targets=pro_fixture
+[02:16:40] [Server thread/INFO] [minecraft/MinecraftServer]: [Not Secure] [Server] RONOVA_NEIGHBOR_ALIVE
+Traceback (most recent call last):
+  File "C:\Users\Scorn\Desktop\MOD\Ronova-Pro-����\MOD\.work\pro-a-final-20260928\run-group-effect.py", line 145, in <module>
+    until(lambda:'RONOVA_NEIGHBOR_ALIVE' in output(),15)
+  File "C:\Users\Scorn\Desktop\MOD\Ronova-Pro-����\MOD\.work\pro-a-final-20260928\run-group-effect.py", line 48, in until
+    raise TimeoutError('server did not reach required game effect')
+TimeoutError: server did not reach required game effect

@@ -2,7 +2,31 @@
 
 日期：2026-10-01。主工程：`C:\Users\Scorn\Desktop\MOD\Ronova-Pro-接续\ronova_GPT`。Core／Agent／Bootstrap ABI 25，持久格式未变。
 
-## 换机接续六项修复与当前结果
+## A 批最终收口（当前结论）
+
+**A 在 V1.5 已声明的范围内完成实现与当前效果验证。** 当前交付为 `distribution/candidate-modwide-a-complete-20261001/`。运行中整组停用仍按实际未控路径报告部分覆盖，不能把这项 A 收口结论理解为任意 Mod 的隐藏类、Native 或完整来源链全部失效。
+
+本轮补齐同一实际 Module 的所有 `[[mods]]` 所有者合并、多组共用一次已加载类快照、六种返回策略、普通业务构造拒绝、逐组未控状态、策略对应的基础客户端同步。普通构造在合法异常入口拒绝，不执行原构造前缀、不交出半对象；Forge 必需的 `@Mod` 承载实例保留父类初始化并停业务后缀，无法控制的承载前缀继续报缺口。
+
+进一步修复了目标工厂直接创建原版实体时的漏清：复用已有经过实际字节码调用点认证的创建观测，记录真实创建 Module，清除和防护均纳入这些当前／后续对象；不会按名称或命名空间猜归属。Mod 自定义 Item 实现的掉落物也按实际实现 Module 纳入。
+
+| 当前直接场景 | 实际结果 |
+| --- | --- |
+| 六种普通返回策略 | `default`、`null`、`empty`、`uuid-fixed`、`uuid-each`、`invalid-id` 的真实模块外消费者均通过；所有基本类型／void、引用／数组、UUID／字符串、标准空消费者与 Future 合同成立；原始业务效果计数为 0，业务构造在前缀执行前被拒，组外 Java 框架继续工作。 |
+| `mod-group-dynamica-factory-final2` | 无效组不阻塞有效组；同模块两个所有者均纳入。清除 4 个实体、1 个非 ticker 方块实体，包含目标工厂创建的原版 Cow 和 ItemEntity；目标 tick／隐藏事件委托／已登记命令回调停止，世界命令响应，服务端 exit 0。 |
+| `mod-group-protecta-factory-final` | 当前／后续自定义生命与非生命实体，以及工厂创建的当前／后续原版 Cow 与 ItemEntity 均抵御 /kill；方块、准确 Map 与反射／Unsafe 字段防护成立，无关条目仍能清除。原始 removed=null、准确 UUID 索引和真实未来 callback 保留；世界命令响应，服务端 exit 0。 |
+| `mod-group-boota-thread` | 启动前选集生效，目标方法和隐藏监听器未执行；自动纳入两个所有者，UNRESOLVED=0，世界命令响应，服务端 exit 0，原等待时限未增加。 |
+| `mod-group-client-a-final` | 同一交付 Core／前置入口真实联机，本地允许两个 modid 后接受 `returns=empty`；客户端回调计数 before=160、frozen=180、after=180，客户端继续处理普通聊天，服务端 exit 0。客户端检查后由脚本终止，不将清理动作写成客户端正常退出。 |
+
+基础同步协议升级为 `r3-client-5`，双方使用本轮同版本主包；共享模块的每个 modid 必须在客户端本地允许列表中。用法见主工程 README。
+
+**保留的真实限制与失败：** 动态服务端仍列 7 个不可重变换隐藏类，客户端列 6 个；已登记事件／命令委托入口的停止效果已测，其他隐藏使用点不宣称全控。完整私有池／来源／资源／持久接续归 B，完整隐藏定义／Native／Host／网络与视觉广度归 C，原第三方样本本轮未跑。Native 源码未改，复用已有 DLL，Java 载荷重新构建。
+
+`boot-a-complete` 与 `boot-a-final` 两次在原 15 秒命令等待处失败，命令随后到达且服务端 exit 0；二者仍记 FAIL。为超时现场加入线程采集后，`boot-a-thread` 在原时限内通过，没有触发采集；前两次慢点仍缺现场，不写成根因已修。首次工厂复查还因受限环境拒绝访问隔离游戏目录失败；获准本机运行后的新场景通过，失败日志保留。
+
+本轮集中构建、消费者及实机结果见 [A 收口报告](../validation/a-final-20260928/REPORT.md)，摘要在该报告旁 `evidence-20261001/`。旧候选和旧失败均保留。
+
+## 以下为同日此前的换机接续六项修复与结果
 
 接续包中的六项源码修复已集中构建、完成下述直接场景，并同步到主工程与本次新候选 JAR：只从 `[[mods]]` 解析所属 modid；清体前通过 `prepareModGroup` 封住事件／任务发布并拒绝目标实体准入；准确登记方块实体 Map 槽位；补齐正式 SRG 字段名和 Unsafe 映射；Agent 按 ProMod 绑定的真实类、Module、ClassLoader 识别控制调用；同步清单包含最新 FieldWriteBoundary。
 

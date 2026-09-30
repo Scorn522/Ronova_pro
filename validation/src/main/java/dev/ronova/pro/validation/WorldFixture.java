@@ -24,12 +24,39 @@ import net.minecraftforge.fml.common.Mod;
 /** One ordinary world driver composes the Stage A cases. It cannot supply final production evidence. */
 @Mod("pro_fixture")
 public final class WorldFixture {
+    @Mod("pro_fixture_alias")
+    public static final class GroupAlias { public GroupAlias() { } }
+    /** Business calls used by the existing external boundary consumer, outside the stopped module. */
+    public static final class GroupReturns {
+        public static int effects;
+        public GroupReturns() {effects++;}
+        public static void action(){effects++;}
+        public static boolean bool(){effects++;return true;}
+        public static byte bytes(){effects++;return 7;}
+        public static char chars(){effects++;return 'x';}
+        public static short shorts(){effects++;return 7;}
+        public static int ints(){effects++;return 7;}
+        public static long longs(){effects++;return 7L;}
+        public static float floats(){effects++;return 7F;}
+        public static double doubles(){effects++;return 7D;}
+        public static Object object(){effects++;return new Object();}
+        public static String text(){effects++;return "live";}
+        public static UUID identity(){effects++;return UUID.randomUUID();}
+        public static int[] array(){effects++;return new int[]{7};}
+        public static String[][] matrix(){effects++;return new String[][]{{"live"}};}
+        public static java.util.OptionalInt optional(){effects++;return java.util.OptionalInt.of(7);}
+        public static java.util.Iterator<?> iterator(){effects++;return List.of(7).iterator();}
+        public static java.util.stream.IntStream stream(){effects++;return java.util.stream.IntStream.of(7);}
+        public static Future<?> future(){effects++;return new CompletableFuture<>();}
+    }
     int phase, age, enteredAt, stoppedTicks;
     int commandCalls;
     boolean groupBackingChecked;
     int removedAt=-1;
     StubbornCow target, neighbor, clone, pending;
     net.minecraft.world.entity.item.ItemEntity groupObject,groupFutureObject;
+    Cow groupVanilla,groupFutureVanilla;
+    net.minecraft.world.entity.item.ItemEntity groupVanillaItem,groupFutureVanillaItem;
     UUID operation, protection, blockOp, cancelledOp;
     UUID serverOnlyOp, missingClientOp;
     CompoundTag snapshot;
@@ -120,6 +147,12 @@ public final class WorldFixture {
             target=spawn(level,2,y,"ModGroupTarget");
             groupObject=new StubbornDrop(level,3,y,4);groupObject.setCustomName(Component.literal("ModGroupObject"));
             require(level.addFreshEntity(groupObject),"spawn ModGroupObject");
+            groupVanilla=new Cow(EntityType.COW,level);groupVanilla.moveTo(4,y,4,0,0);
+            groupVanilla.setCustomName(Component.literal("ModGroupVanillaFactory"));
+            require(level.addFreshEntity(groupVanilla),"publish a vanilla body from the actual mod factory");
+            groupVanillaItem=new net.minecraft.world.entity.item.ItemEntity(level,4,y,5,new ItemStack(Items.DIAMOND));
+            groupVanillaItem.setCustomName(Component.literal("ModGroupVanillaItem"));groupVanillaItem.setUnlimitedLifetime();
+            require(level.addFreshEntity(groupVanillaItem),"publish a vanilla item body from the actual mod factory");
             BlockPos blockPos=new BlockPos(8,y,4);
             require(level.setBlock(blockPos,ModGroupBlockFixture.BLOCK.get().defaultBlockState(),3),"place ModGroupBlock");
             require(level.getBlockEntity(blockPos) instanceof ModGroupBlockFixture.Holder,"publish non-ticking block holder");
@@ -134,6 +167,12 @@ public final class WorldFixture {
             neighbor=spawn(level,5,y,"ModGroupFuture");
             groupFutureObject=new StubbornDrop(level,6,y,4);groupFutureObject.setCustomName(Component.literal("ModGroupFutureObject"));
             require(level.addFreshEntity(groupFutureObject),"spawn ModGroupFutureObject");
+            groupFutureVanilla=new Cow(EntityType.COW,level);groupFutureVanilla.moveTo(7,y,4,0,0);
+            groupFutureVanilla.setCustomName(Component.literal("ModGroupFutureVanillaFactory"));
+            require(level.addFreshEntity(groupFutureVanilla),"publish a future vanilla body from the actual mod factory");
+            groupFutureVanillaItem=new net.minecraft.world.entity.item.ItemEntity(level,7,y,5,new ItemStack(Items.DIAMOND));
+            groupFutureVanillaItem.setCustomName(Component.literal("ModGroupFutureVanillaItem"));groupFutureVanillaItem.setUnlimitedLifetime();
+            require(level.addFreshEntity(groupFutureVanillaItem),"publish a future vanilla item from the actual mod factory");
         }
         if(!groupBackingChecked&&age>=80&&"protect".equals(System.getProperty("ronova.pro.fixture.variant"))) {
             ServerLevel level=event.getServer().overworld();

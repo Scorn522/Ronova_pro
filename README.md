@@ -28,7 +28,7 @@ Native 构建需要 Zig，可用 Gradle `-PcontrolZig=编译器路径` 指定。
 
 `distribution/package-stage-b.py` 是早期 Stage B 的打包脚本，依赖当时候选与证据；不能用来宣称当前源码已完成验收。
 
-最新候选：`distribution/candidate-modwide-a-20261001/`；当前效果和限制见 A 批状态。
+最新候选：`distribution/candidate-modwide-a-complete-20261001/`；当前效果和限制见 A 批状态。
 
 ## 整 Mod A 候选的使用
 
@@ -42,8 +42,24 @@ java -jar ronova-pro-prelaunch.jar --java <启动器使用的 java.exe> --core <
 
 ```properties
 stop=target_mod_a,target_mod_b
+returns=default
 protect=ally_mod
 allow_remote_stop=target_mod_a,target_mod_b
 ```
 
-`stop` 在目标 Mod 类加载前建立整组方法、构造／静态入口及事件控制；`protect` 在当前和后续实体、方块实体上建立防护。`allow_remote_stop` 是多人游戏客户端允许当前服务器请求停用的本地 Mod 列表，不会在启动时直接停用它们。运行中可用 `/ronova_pro mod stop modid1,modid2`、`/ronova_pro mod protect modid` 和 `/ronova_pro mod status [modid1,modid2]`。实际覆盖和未决路径见 [A 批状态](docs/A-批验收状态.md)。单纯把 JAR 放进 `mods` 不能在游戏 JVM 创建前运行前置入口。
+`stop` 在目标 Mod 类加载前建立整组方法、构造／静态入口及事件控制；`protect` 在当前和后续实体、方块实体上建立防护。`allow_remote_stop` 是多人游戏客户端允许当前服务器请求停用的本地 Mod 列表，不会在启动时直接停用它们。运行中可用 `/ronova_pro mod stop modid1,modid2 [returns=策略]`、`/ronova_pro mod protect modid` 和 `/ronova_pro mod status [modid1,modid2]`。实际覆盖和未决路径见 [A 批状态](docs/A-批验收状态.md)。单纯把 JAR 放进 `mods` 不能在游戏 JVM 创建前运行前置入口。
+
+选择同一实际 Module 内的一个 Mod 会纳入该模块的其他 `[[mods]]` 所有者，结果会列出完整作用组。多人客户端必须在本地 `allow_remote_stop` 中允许该组的每个 modid。客户端与服务端需使用本轮同版本主包，基础同步协议为 `r3-client-5`。
+
+`returns` 支持以下策略；启动配置与运行命令使用相同名称。所有策略都跳过目标普通业务方法，void 直接结束，基本类型默认返回零值。
+
+| 策略 | 引用与专用返回 |
+| --- | --- |
+| `default` | 普通对象和数组为 null；标准集合、Optional、迭代器、流提供合法空结果，标准 Future 提供已完成空结果 |
+| `null` | 引用和数组统一为 null；不会启动原来的异步生产 |
+| `empty` | 在 default 基础上，数组返回类型正确的零长度数组 |
+| `uuid-fixed` | UUID／String 返回同一模块的固定随机 UUID 值；其他返回沿用 default |
+| `uuid-each` | UUID／String 每次调用产生新的 UUID 值；其他返回沿用 default |
+| `invalid-id` | 所有 int 返回 -1；其他返回沿用 default |
+
+UUID 策略只控制查询返回，真实实体标识和登记不会被它直接重写。清除使用已有真实引用。普通业务构造会抛出 `RONOVA_MOD_GROUP_CREATION_REFUSED`，避免返回半对象；Forge 为完成装载所需的 `@Mod` 承载实例只保留必要父类初始化，业务后缀停用。无法控制的承载前缀、隐藏类或 Native 路径继续报告未控，不能把单组部分结果读成全部停用。

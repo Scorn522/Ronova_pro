@@ -94,12 +94,29 @@ public final class ProRuntime implements AutoCloseable {
     final RecoveryChain recoveryChain;
     final UUID session=UUID.randomUUID();
     private final Set<String> stoppedMods=new LinkedHashSet<>();
+    private final Map<String,String> stoppedReturns=new LinkedHashMap<>();
     private final Set<Module> stoppedModules=Collections.newSetFromMap(new IdentityHashMap<>());
     private final Set<String> protectedMods=new LinkedHashSet<>();
     private final Set<Module> protectedModules=Collections.newSetFromMap(new IdentityHashMap<>());
     boolean groupClosing() { return closing; }
     boolean modStopped(Module module) { return !closing&&stoppedModules.contains(module); }
     boolean modProtected(Module module) { return !closing&&protectedModules.contains(module); }
+    private static volatile java.lang.reflect.Method creationModuleQuery;
+    private static Module bodyModule(Entity entity,Set<Module> selected) {
+        Module direct=entity.getClass().getModule();if(selected.isEmpty()||selected.contains(direct))return direct;
+        try {
+            var query=creationModuleQuery;
+            if(query==null)creationModuleQuery=query=Class.forName("dev.ronova.pro.bootstrap.TaskBridge",false,null)
+                    .getMethod("creationModule",Object.class);
+            Module origin=(Module)query.invoke(null,entity);if(selected.contains(origin))return origin;
+        } catch(ReflectiveOperationException unavailable) { }
+        if(entity instanceof net.minecraft.world.entity.item.ItemEntity item) {
+            Module value=item.getItem().getItem().getClass().getModule();if(selected.contains(value))return value;
+        }
+        return direct;
+    }
+    private boolean stoppedBody(Entity entity) {return !closing&&stoppedModules.contains(bodyModule(entity,stoppedModules));}
+    private boolean protectedBody(Entity entity) {return !closing&&protectedModules.contains(bodyModule(entity,protectedModules));}
     private final Set<Entity> pendingGroupAdoptions=Collections.newSetFromMap(new WeakIdentityMap<Entity,Boolean>());
     final Map<Entity,Binding> bindings=new WeakIdentityMap<>();
     final Map<CompoundTag,UUID> saved=new WeakIdentityMap<>();
@@ -211,14 +228,26 @@ public final class ProRuntime implements AutoCloseable {
         for(String id:bootSelection.split(","))if(!id.isBlank()) {
             String normalized=id.trim().toLowerCase(Locale.ROOT);stoppedMods.add(normalized);
             net.minecraftforge.fml.ModList.get().getModContainerById(normalized).ifPresent(container->{
-                Object instance=container.getMod();if(instance!=null)stoppedModules.add(instance.getClass().getModule());
+                Object instance=container.getMod();if(instance!=null) {
+                    Module module=instance.getClass().getModule();stoppedModules.add(module);
+                    try {
+                        Class<?> agent=Class.forName("dev.ronova.pro.agent.RecoveryAgent",false,ClassLoader.getSystemClassLoader());
+                        stoppedMods.addAll(Arrays.asList((String[])agent.getMethod("modGroupIds",Module.class).invoke(null,module)));
+                    } catch(ReflectiveOperationException unavailable) {coverageGap=true;}
+                }
             });
         }
         String protectSelection=System.getProperty("ronova.pro.bootProtect","")+","+System.getenv().getOrDefault("RONOVA_PRO_BOOT_PROTECT","");
         for(String id:protectSelection.split(","))if(!id.isBlank()) {
             String normalized=id.trim().toLowerCase(Locale.ROOT);protectedMods.add(normalized);
             net.minecraftforge.fml.ModList.get().getModContainerById(normalized).ifPresent(container->{
-                Object instance=container.getMod();if(instance!=null)protectedModules.add(instance.getClass().getModule());
+                Object instance=container.getMod();if(instance!=null) {
+                    Module module=instance.getClass().getModule();protectedModules.add(module);
+                    try {
+                        Class<?> agent=Class.forName("dev.ronova.pro.agent.RecoveryAgent",false,ClassLoader.getSystemClassLoader());
+                        protectedMods.addAll(Arrays.asList((String[])agent.getMethod("modGroupIds",Module.class).invoke(null,module)));
+                    } catch(ReflectiveOperationException unavailable) {coverageGap=true;}
+                }
             });
         }
         journal=new IntentJournal(s.getWorldPath(LevelResource.ROOT).resolve("ronova-pro"));
@@ -391,13 +420,26 @@ public final class ProRuntime implements AutoCloseable {
     /** Fence publication first, clear current bodies, then suppress their defining methods. */
     public String stopModGroup(String selection) {
         commandAction();
+        String[] request=selection.trim().split("\\s+",-1);
+        if(request.length>2||request.length==2&&!request[1].startsWith("returns="))
+            throw new IllegalArgumentException("USE_MOD_IDS_OPTIONAL_RETURNS_POLICY");
+        String returns=request.length==2?request[1].substring("returns=".length()).toLowerCase(Locale.ROOT):"default";
+        if(!Set.of("default","null","empty","uuid-fixed","uuid-each","invalid-id").contains(returns))
+            throw new IllegalArgumentException("INVALID_RETURN_POLICY:"+returns);
+        selection=request[0];
         var groups=resolveGroups(selection);
-        if(groups.size()==1&&groups.get(0).error()==null)return stopResolved(groups.get(0).targets());
+        Class<?> agent;
+        try {
+            agent=Class.forName("dev.ronova.pro.agent.RecoveryAgent",false,ClassLoader.getSystemClassLoader());
+            agent.getMethod("beginModGroupBatch").invoke(null);
+        } catch(ReflectiveOperationException unavailable) {throw new IllegalStateException("MOD_GROUP_AGENT_UNAVAILABLE",unavailable);}
+        try {
+        if(groups.size()==1&&groups.get(0).error()==null)return stopResolved(groups.get(0).targets(),returns);
         List<String> results=new ArrayList<>();int failures=0;
         for(var group:groups) {
             if(group.error()!=null) {results.add(group.error());failures++;continue;}
             try {
-                String result=stopResolved(group.targets());
+                String result=stopResolved(group.targets(),returns);
                 results.add(group.targets().keySet()+":"+result);
                 if(!result.contains("BODY_FAILURES=0")||!result.contains(";FAILED=0"))failures++;
             } catch(RuntimeException|LinkageError unavailable) {
@@ -406,8 +448,12 @@ public final class ProRuntime implements AutoCloseable {
             }
         }
         return "GROUP_FAILURES="+failures+";GROUPS="+results;
+        } finally {
+            try {agent.getMethod("endModGroupBatch").invoke(null);}
+            catch(ReflectiveOperationException unavailable) {coverageGap=true;}
+        }
     }
-    private String stopResolved(LinkedHashMap<String,Module> targets) {
+    private String stopResolved(LinkedHashMap<String,Module> targets,String returns) {
         Set<Module> modules=Collections.newSetFromMap(new IdentityHashMap<>());modules.addAll(targets.values());
         stoppedModules.addAll(modules);
         String prepared;
@@ -423,7 +469,7 @@ public final class ProRuntime implements AutoCloseable {
         }
         ArrayList<Entity> bodies=new ArrayList<>();
         for(ServerLevel level:server.getAllLevels())for(Entity entity:level.getAllEntities())
-            if(modules.contains(entity.getClass().getModule())&&!(entity instanceof ServerPlayer))bodies.add(entity);
+            if(modules.contains(bodyModule(entity,modules))&&!(entity instanceof ServerPlayer))bodies.add(entity);
         record BlockTarget(ServerLevel level,net.minecraft.world.level.block.entity.BlockEntity entity) { }
         ArrayList<BlockTarget> blocks=new ArrayList<>();
         for(ServerLevel level:server.getAllLevels())for(var block:BlockGroupPolicy.loaded(level))
@@ -444,13 +490,14 @@ public final class ProRuntime implements AutoCloseable {
         String result;
         try {
             Class<?> agent=Class.forName("dev.ronova.pro.agent.RecoveryAgent",false,ClassLoader.getSystemClassLoader());
-            result=String.valueOf(agent.getMethod("stopModGroup",String[].class,Module[].class).invoke(null,
-                    (Object)targets.keySet().toArray(String[]::new),(Object)targets.values().toArray(Module[]::new)));
+            result=String.valueOf(agent.getMethod("stopModGroup",String[].class,Module[].class,String.class).invoke(null,
+                    (Object)targets.keySet().toArray(String[]::new),(Object)targets.values().toArray(Module[]::new),returns));
         } catch(ReflectiveOperationException unavailable) {
             throw new IllegalStateException("MOD_GROUP_AGENT_UNAVAILABLE",unavailable);
         }
         if(result.startsWith("TARGETS=")) {
             stoppedMods.addAll(targets.keySet());
+            for(String id:targets.keySet())stoppedReturns.put(id,returns);
             stoppedModules.addAll(targets.values());
             protectedMods.removeAll(targets.keySet());protectedModules.removeAll(targets.values());
             for(ServerPlayer player:server.getPlayerList().getPlayers())sendModGroup(player);
@@ -482,7 +529,7 @@ public final class ProRuntime implements AutoCloseable {
         protectedMods.addAll(targets.keySet());protectedModules.addAll(targets.values());
         int protectedCount=0,failed=0;
         for(ServerLevel level:server.getAllLevels())for(Entity entity:level.getAllEntities())
-            if(modules.contains(entity.getClass().getModule())) {
+            if(modules.contains(bodyModule(entity,modules))) {
                 try {protect(entity,true);protectedCount++;}
                 catch(RuntimeException|LinkageError unavailable) {failed++;coverageGap=true;}
             }
@@ -526,8 +573,13 @@ public final class ProRuntime implements AutoCloseable {
             try {
                 Class<?> agent=Class.forName("dev.ronova.pro.agent.RecoveryAgent",false,ClassLoader.getSystemClassLoader());
                 Set<String> declared=Set.of((String[])agent.getMethod("modGroupIds",Module.class).invoke(null,entry.getKey()));
-                if(declared.isEmpty()||!entry.getValue().keySet().containsAll(declared))
-                    mismatch="MULTI_MOD_MODULE_REQUIRES_ALL_IDS:"+declared;
+                if(declared.isEmpty())mismatch="MOD_GROUP_METADATA_UNAVAILABLE";
+                else for(String id:declared) {
+                    if(Set.of("ronova_pro","minecraft","forge","java").contains(id)) {
+                        mismatch="RESERVED_MOD_IN_SHARED_MODULE:"+declared;break;
+                    }
+                    entry.getValue().putIfAbsent(id,entry.getKey());
+                }
             } catch(ReflectiveOperationException unavailable) {mismatch="MOD_GROUP_AGENT_UNAVAILABLE";}
             results.add(new GroupSelection(entry.getValue(),mismatch));
         }
@@ -535,7 +587,9 @@ public final class ProRuntime implements AutoCloseable {
         return results;
     }
     public void sendModGroup(ServerPlayer player) {
-        if(!stoppedMods.isEmpty())ProNetwork.modGroup(player,session,String.join(",",stoppedMods));
+        Map<String,List<String>> grouped=new LinkedHashMap<>();
+        for(String id:stoppedMods)grouped.computeIfAbsent(stoppedReturns.getOrDefault(id,System.getProperty("ronova.pro.bootReturns","default")),ignored->new ArrayList<>()).add(id);
+        for(var entry:grouped.entrySet())ProNetwork.modGroup(player,session,String.join(",",entry.getValue()),entry.getKey());
     }
     public String modGroupState() {
         try {
@@ -548,10 +602,11 @@ public final class ProRuntime implements AutoCloseable {
         List<String> states=new ArrayList<>();
         for(var group:resolveGroups(selection)) {
             if(group.error()!=null) {states.add(group.error());continue;}
-            for(var entry:group.targets().entrySet())states.add(entry.getKey()+"="+
-                    (stoppedModules.contains(entry.getValue())?
-                            stoppedMods.contains(entry.getKey())?"STOPPED":"FENCED_PARTIAL":
-                    protectedModules.contains(entry.getValue())?"PROTECTED":"ACTIVE"));
+            try {
+                Class<?> agent=Class.forName("dev.ronova.pro.agent.RecoveryAgent",false,ClassLoader.getSystemClassLoader());
+                states.add(group.targets().keySet()+":"+(protectedModules.contains(group.targets().values().iterator().next())?"PROTECTED;":"")
+                        +agent.getMethod("modGroupState",Module.class).invoke(null,group.targets().values().iterator().next()));
+            } catch(ReflectiveOperationException unavailable) {states.add(group.targets().keySet()+":AGENT_UNAVAILABLE");}
         }
         return "GROUPS="+states+";"+modGroupState();
     }
@@ -1578,11 +1633,11 @@ public final class ProRuntime implements AutoCloseable {
 
     public static void joined(Entity e) {
         ProRuntime r=runtime(e); if(r==null)return;
-        if(r.stoppedModules.contains(e.getClass().getModule())) {
+        if(r.stoppedBody(e)) {
             try {r.clearBody(e);}catch(RuntimeException|LinkageError unavailable){r.coverageGap=true;}
             return;
         }
-        if(r.protectedModules.contains(e.getClass().getModule())) {
+        if(r.protectedBody(e)) {
             try {r.protect(e,true);r.pendingGroupAdoptions.add(e);}
             catch(RuntimeException|LinkageError unavailable){r.coverageGap=true;}
         }
@@ -1854,7 +1909,7 @@ public final class ProRuntime implements AutoCloseable {
         if(clientDispatchDenied(receiver,operation,value))return true;
         if(!(receiver instanceof Entity entity))return false;
         ProRuntime groupRuntime=runtime(entity);
-        if(groupRuntime!=null&&groupRuntime.modStopped(entity.getClass().getModule())&&switch(operation) {
+        if(groupRuntime!=null&&groupRuntime.stoppedBody(entity)&&switch(operation) {
             case "tick","m_8119_","baseTick","m_6061_","aiStep","m_8107_",
                  "serverAiStep","customServerAiStep","onAddedToWorld","onRemovedFromWorld",
                  "hurt","m_6469_","actuallyHurt","m_6475_","die","m_6667_" -> true;
@@ -2107,7 +2162,7 @@ public final class ProRuntime implements AutoCloseable {
     }
     public static boolean preventAdmission(Entity e) {
         ProRuntime current=runtime(e);
-        if(current!=null&&current.modStopped(e.getClass().getModule()))return true;
+        if(current!=null&&current.stoppedBody(e))return true;
         var snapshot=PROTECTION.get(e);
         if(snapshot!=null&&!snapshot.runtime().closing&&snapshot.binding().subject.terminal)return true;
         // A real load/clone publishes its origin on the producing thread. Do not leave an

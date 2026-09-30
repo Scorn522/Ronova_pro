@@ -1,0 +1,14 @@
+SERVER_PID=37972
+BLOCK_HOLDER_MAP_FIELD_PROTECTED
+CURRENT_AND_FUTURE_LIVING_AND_NONLIVING_PROTECTED
+WORLD_COMMAND_RESPONDED
+SHARED_MODULE_ALIAS_INCLUDED
+PROTECT_STATE=current=ACTIVE,removed=null,health=10.0,indexed=true;future=ACTIVE,removed=null,indexed=true,registered=true,bound=true,conflict=false,callback=net.minecraft.world.level.entity.PersistentEntitySectionManager$Callback;object=ACTIVE,removed=null,indexed=true;futureObject=ACTIVE,removed=null,indexed=true;blockHolder=true
+SERVER_EXIT=0
+RONOVA_PRELAUNCH_READY targets=NONE
+[01:44:56] [Server thread/INFO] [minecraft/MinecraftServer]: [Not Secure] [Server] MOD_GROUP_BLOCK_PROTECTED
+[01:44:59] [Server thread/INFO] [minecraft/MinecraftServer]: [Not Secure] [Server] MOD_GROUP_BODY_PROTECTED
+[01:45:02] [Server thread/INFO] [minecraft/MinecraftServer]: [Not Secure] [Server] MOD_GROUP_OBJECT_PROTECTED
+[01:45:05] [Server thread/INFO] [minecraft/MinecraftServer]: [Not Secure] [Server] MOD_GROUP_FUTURE_PROTECTED
+[01:45:08] [Server thread/INFO] [minecraft/MinecraftServer]: [Not Secure] [Server] MOD_GROUP_FUTURE_OBJECT_PROTECTED
+[01:45:09] [Server thread/INFO] [minecraft/MinecraftServer]: [Not Secure] [Server] RONOVA_NEIGHBOR_ALIVE

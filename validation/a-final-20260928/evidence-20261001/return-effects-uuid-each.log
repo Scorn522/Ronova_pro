@@ -1,0 +1,21 @@
+RONOVA_PRO_TASK_AGENT OBJECT_CLONE_JNI_READY
+RONOVA_PRO_TASK_AGENT INSTRUMENTATION_REMOVAL_AND_PUBLICATION_GUARD:true
+RONOVA_PRO_TASK_AGENT INSTALLED:TRANSFORMED_JDK17_HASHMAP_RESOLVED_NODE_CLEAR_VALUE;NODE=TRANSFORMED_NODE_SET_VALUE;DEFAULT=TRANSFORMED_DEFAULT_MAP_MUTATIONS;FASTUTIL={}
+RONOVA_PRO_TASK_AGENT CONSOLE_BOUNDARY:NOT_SEEN
+RONOVA_PRO_TASK_AGENT REFLECTION_FIELD_GUARD_INSTALLED:9
+RONOVA_PRO_TASK_AGENT UNSAFE_OBJECT_PUT_CAS_ATOMIC_OBJECT_BULK:true:RAW_ADDRESS_INTERNAL_UNSUPPORTED
+RONOVA_PRO_TASK_AGENT BACKING_JDK:true:HANDLE_FACTORIES:30/30
+RONOVA_PRO_TASK_AGENT CLIENT_FAULT_DISPATCH:false
+RONOVA_PRO_TASK_AGENT JDK_FUTURE_WORKER_SCHEDULED_FORKJOIN_CF_DEFERRED_AND_STAGE_INVOCATIONS
+PASS all primitive and void entries suppress business effects
+PASS reference business object is not published
+PASS primitive and multidimensional arrays honor the chosen policy
+PASS UUID and String policies return valid identities
+PASS fixed and per-call UUID semantics differ as selected
+PASS typed empty consumers stay usable
+PASS Future consumer has no pending business work
+PASS Future consumer returns an empty result
+PASS business constructor is refused before its prefix executes
+PASS raw business effect count remains zero
+PASS outside shared framework remains active
+MOD_GROUP_RETURN_EFFECTS_PASS profile=uuid-each

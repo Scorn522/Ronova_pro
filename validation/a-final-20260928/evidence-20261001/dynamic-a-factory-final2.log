@@ -1,0 +1,15 @@
+SERVER_PID=47100
+MARKER before=60 frozen=140 after=140
+HIDDEN_LISTENER before=121 frozen=283 after=283
+MOD_COMMAND_CALLBACK_STOPPED
+TARGET_BODY_SELECTOR_ABSENT
+KNOWN_FACTORY_VANILLA_BODIES_CLEARED
+WORLD_COMMAND_RESPONDED
+SHARED_MODULE_ALIAS_INCLUDED
+SERVER_EXIT=0
+RONOVA_PRELAUNCH_READY targets=NONE
+[02:10:46] [Server thread/INFO] [minecraft/MinecraftServer]: [Not Secure] [Server] MOD_GROUP_BODY_PRESENT
+[02:10:47] [Server thread/INFO] [minecraft/MinecraftServer]: [Not Secure] [Server] MOD_GROUP_OBJECT_PRESENT
+[02:10:51] [Server thread/INFO] [minecraft/MinecraftServer]: GROUP_FAILURES=2;GROUPS=[MOD_NOT_LOADED:missing_mod, [pro_fixture, pro_fixture_alias]:BODIES_CLEARED=4;BLOCKS_QUEUED=1;BODY_FAILURES=0;TARGETS=[pro_fixture_alias, pro_fixture];RETRANSFORMED_CLASSES=8;FAILED=7;METHODS=23;RETURNS=empty;UNRESOLVED=7;GAPS=[dev.ronova.pro.validation.ModGroupBlockFixture$$Lambda$4486/0x0000015857b40240:UNMODIFIABLE, dev.ronova.pr
+[02:10:51] [Server thread/INFO] [minecraft/MinecraftServer]: [Not Secure] [Server] MOD_GROUP_BLOCK_CLEARED
+[02:11:07] [Server thread/INFO] [minecraft/MinecraftServer]: [Not Secure] [Server] RONOVA_NEIGHBOR_ALIVE

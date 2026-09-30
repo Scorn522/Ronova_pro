@@ -47,6 +47,9 @@ public final class ClientFixture {
     }
     private static void modGroupTick() {
         Minecraft mc=Minecraft.getInstance();
+        ticks++;
+        if(ticks%20==0)try {Files.writeString(Path.of("mod-group-client-ticks.txt"),Integer.toString(ticks));}
+        catch(java.io.IOException unavailable) {throw new IllegalStateException(unavailable);}
         if(!connecting&&mc.screen instanceof TitleScreen&&mc.getOverlay()==null) {
             connecting=true;
             ConnectScreen.startConnecting(mc.screen,mc,new ServerAddress("127.0.0.1",25894),

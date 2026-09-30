@@ -1,0 +1,22 @@
+SERVER_PID=5768
+SERVER_EXIT=0
+RONOVA_PRELAUNCH_READY targets=NONE
+java.net.ConnectException: Permission denied: getsockopt
+Caused by: java.net.ConnectException: Permission denied: getsockopt
+	at jdk.internal.net.http.common.Utils.toConnectException(Utils.java:1107) ~[java.net.http:?] {}
+Caused by: java.net.SocketException: Permission denied: getsockopt
+[02:08:12] [Yggdrasil Key Fetcher/ERROR] [mojang/YggdrasilServicesKeyInfo]: Failed to request yggdrasil public key
+com.mojang.authlib.exceptions.AuthenticationUnavailableException: Cannot contact authentication server
+Caused by: java.net.SocketException: Permission denied: getsockopt
+[02:08:13] [main/ERROR] [minecraft/Main]: Failed to start the minecraft server
+java.io.UncheckedIOException: java.nio.file.AccessDeniedException: C:\Users\Scorn\Desktop\MOD\Ronova-Pro-����\MOD\.work\pro-a-final-20260928\runtime\mod-group-dynamica-factory-final
+Caused by: java.nio.file.AccessDeniedException: C:\Users\Scorn\Desktop\MOD\Ronova-Pro-����\MOD\.work\pro-a-final-20260928\runtime\mod-group-dynamica-factory-final
+	at sun.nio.fs.WindowsException.translateToIOException(WindowsException.java:89) ~[?:?] {}
+	at sun.nio.fs.WindowsException.rethrowAsIOException(WindowsException.java:96) ~[?:?] {}
+Traceback (most recent call last):
+  File "C:\Users\Scorn\Desktop\MOD\Ronova-Pro-����\MOD\.work\pro-a-final-20260928\run-group-effect.py", line 50, in <module>
+    until(lambda:'Done (' in output(),700)
+  File "C:\Users\Scorn\Desktop\MOD\Ronova-Pro-����\MOD\.work\pro-a-final-20260928\run-group-effect.py", line 45, in until
+    if process.poll() is not None:raise RuntimeError('server exited '+str(process.returncode))
+                                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+RuntimeError: server exited 0

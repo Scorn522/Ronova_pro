@@ -209,6 +209,12 @@ public final class RecoveryAgent {
                         if(controlFailure==null)controlFailure=String.valueOf(name)+":"+failure.getClass().getSimpleName();
                         System.err.println("RONOVA_CONTROL_TRANSFORM_FAILED:"+controlFailure);
                         if(Boolean.getBoolean("ronova.pro.validation"))failure.printStackTrace(System.err);
+                        if(ModGroupBoundary.stopped(module)) {
+                            ModGroupBoundary.failed(module,String.valueOf(name),failure);
+                            // Transformer exceptions alone are ignored by Instrumentation. Invalid bytes refuse
+                            // this selected definition; a failed retransform retains and reports the old body.
+                            return new byte[]{0,0,0,0};
+                        }
                         throw failure;
                     }
                 }
@@ -367,17 +373,37 @@ public final class RecoveryAgent {
     }
     public static String stopModGroup(String[] ids,Module[] modules) {
         requireModGroupCaller("dev.ronova.pro.ProRuntime");
-        String result=ModGroupBoundary.stop(instrumentation,ids,modules);
+        String result=ModGroupBoundary.stop(instrumentation,ids,modules,"default");
         if(result.startsWith("TARGETS="))for(Module module:modules)publishStoppedModule(module);
         return result;
     }
+    public static String stopModGroup(String[] ids,Module[] modules,String returns) {
+        requireModGroupCaller("dev.ronova.pro.ProRuntime");
+        String result=ModGroupBoundary.stop(instrumentation,ids,modules,returns);
+        if(result.startsWith("TARGETS="))for(Module module:modules)publishStoppedModule(module);
+        return result;
+    }
+    public static void beginModGroupBatch() {
+        requireModGroupCaller("dev.ronova.pro.ProRuntime");ModGroupBoundary.beginBatch(instrumentation);
+    }
+    public static void endModGroupBatch() {
+        requireModGroupCaller("dev.ronova.pro.ProRuntime");ModGroupBoundary.endBatch();
+    }
     public static String stopModIds(String[] ids) {
         requireModGroupCaller("dev.ronova.pro.ClientPresence");
-        String result=ModGroupBoundary.stopByIds(instrumentation,ids);
+        String result=ModGroupBoundary.stopByIds(instrumentation,ids,"default");
         if(result.startsWith("TARGETS="))for(Class<?> type:instrumentation.getAllLoadedClasses())
             if(ModGroupBoundary.stopped(type.getModule()))publishStoppedModule(type.getModule());
         return result;
     }
+    public static String stopModIds(String[] ids,String returns) {
+        requireModGroupCaller("dev.ronova.pro.ClientPresence");
+        String result=ModGroupBoundary.stopByIds(instrumentation,ids,returns);
+        if(result.startsWith("TARGETS="))for(Class<?> type:instrumentation.getAllLoadedClasses())
+            if(ModGroupBoundary.stopped(type.getModule()))publishStoppedModule(type.getModule());
+        return result;
+    }
+    public static String modGroupState(Module module) { return ModGroupBoundary.state(module); }
     public static String modGroupState() { return ModGroupBoundary.state()+";"+EventBusBoundary.state()
             +";COMMAND_GATE="+(CommandBoundary.installed()?"INSTALLED":"NOT_INSTALLED"); }
     private static void requireModGroupCaller(String expected) {

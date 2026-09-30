@@ -1,0 +1,11 @@
+SERVER_PID=33040
+CLIENT_PID=45724
+CLIENT_JOINED
+CLIENT_EFFECT_COUNTER before=160 frozen=180 after=180
+CLIENT_OUTSIDE_CHAT_PROCESSED
+REMOTE_ALLOWED_CLIENT_MOD_GROUP_STOPPED_AND_GAME_ALIVE
+SERVER_EXIT=0
+RONOVA_PRELAUNCH_READY targets=NONE
+[02:25:33] [Worker-Main-12/WARN] [minecraft/ModelBakery]: Exception loading blockstate definition: 'pro_fixture:blockstates/group_holder.json' missing model for variant: 'pro_fixture:group_holder#'
+[02:25:42] [Realms Notification Availability checker #1/INFO] [mojang/RealmsClient]: Could not authorize you against Realms server: java.lang.RuntimeException: Failed to parse into SignedJWT: 0
+��Ϣ: RONOVA_CLIENT_MOD_GROUP TARGETS=[pro_fixture_alias, pro_fixture];RETRANSFORMED_CLASSES=26;FAILED=6;METHODS=95;RETURNS=empty;UNRESOLVED=6;GAPS=[dev.ronova.pro.validation.ModGroupBlockFixture$$Lambda$4861/0x0000028a39c33840:UNMODIFIABLE, dev.ronova.pro.validation.WorldFixture$$Lambda$4927/0x0000028a39c83148:UNMODIFIABLE, dev.ronova.pro.validation.WorldFixture$$Lambda$4890/0x0000028a39c3def8:UNMODIFIABLE, dev.ronova.pro.validation.WorldFixture$$Lambda$4889/0x0000028a39c3d3d8:UNMODIFIABLE, dev.r

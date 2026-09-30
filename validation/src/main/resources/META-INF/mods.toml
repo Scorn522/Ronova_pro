@@ -6,6 +6,11 @@ modId="pro_fixture"
 version="1"
 displayName="Ronova Pro isolated validation"
 description="Scenario setup and independent assertions only."
+[[mods]]
+modId="pro_fixture_alias"
+version="1"
+displayName="Same-module group alias"
+description="A second declared owner in the same real fixture file."
 [[dependencies.pro_fixture]]
 modId="forge"
 mandatory=true

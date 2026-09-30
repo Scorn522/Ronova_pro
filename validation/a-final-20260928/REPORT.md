@@ -1,6 +1,43 @@
 # Ronova Pro V1.5 A 批收口报告
 
-## 2026-10-01 换机接续修复
+## 2026-10-01 A 批最终收口（当前候选）
+
+**A 在 V1.5 已声明范围内完成。** 当前主工程为 `C:\Users\Scorn\Desktop\MOD\Ronova-Pro-接续\ronova_GPT`，源码、夹具及本节当前实机场景使用同一最终 Java 候选。六种返回消费者检查在工厂归属修复前通过；后续改动只补已有创建观测和实体归属，不改返回生成器，未重复无关已通过检查。
+
+### 修复与交付
+
+同一实际 Module 的多个 `[[mods]]` 所有者自动合并；批量请求共用一次真实已加载类枚举，单组失败继续处理有效组。逐组状态保留未控位置，部分覆盖报告 `STOPPED_PARTIAL`。普通方法按描述符提供六种策略，普通业务构造在合法异常入口拒绝创建，不执行原前缀；Forge `@Mod` 承载实例保留必要父类初始化，无法控制的前缀仍报缺口。新类转换失败时拒绝该定义，已加载类改写失败保持未控记录。
+
+目标工厂直接创建原版 Cow／ItemEntity 的实现类属于 Minecraft，旧类模块筛选会漏清。本轮沿已认证的实际创建调用点保存弱身份归属，当前／后续实体清除、防护和准入使用实际创建 Module；自定义 Item 掉落物亦沿真实 Item 实现归属。未用实体名称、命名空间或夹具回报替代生产归属。
+
+`returns` 支持 default、null、empty、uuid-fixed、uuid-each、invalid-id；UUID／String 查询扰动与真实标识重写分开，后者本轮未新增。提供标准 Future 停用结果时它已完成；null 策略不新建 Future，不发布挂起生产。基础同步协议为 `r3-client-5`，本地客户端必须允许共享模块所有 modid。
+
+交付目录：[candidate-modwide-a-complete-20261001](../../distribution/candidate-modwide-a-complete-20261001/)。Core 为 866,976 字节，前置入口为 5,905 字节，SHA-256 见该目录 SHA256SUMS.txt。普通安装只放 Core 入 mods，前置入口按 README 接入实际启动器；独立 Agent／Bootstrap 已嵌入主包。Core／Agent／Bootstrap ABI 25，持久格式未变。Native 源码未改，复用已有控制 DLL，构建使用 `-x compileControlNative`，不宣称 Native 重建。
+
+### 构建与实际效果
+
+| 既有场景／摘要日志 | 实际结果 |
+| --- | --- |
+| `build-a-complete-20261001.log` | 完整返回／分组／同步代码集中构建成功，42 秒，24 项任务。 |
+| `build-a-factory-20261001.log` | 工厂归属工作包写齐后 jar／fixtureJar／prelaunchJar 集中构建成功，35 秒。 |
+| `return-effects-*.log`（六份） | 复用 BoundaryCheck 的真实 ModuleLayer 与夹具实际 mods.toml，模块外消费者在 `-Xverify:all` 下调用。六策略均有 MOD_GROUP_RETURN_EFFECTS_PASS，基本类型／void 无业务效果，引用和数组合法，固定／按次 UUID 与 int=-1 合同成立，标准空消费者可用，Future 消费不挂起，构造拒绝前缀执行，原始 effects=0，组外 ArrayList 正常。 |
+| `dynamic-a-factory-final2.log` | BODIES_CLEARED=4、BLOCKS_QUEUED=1、BODY_FAILURES=0。before=60、frozen=140、after=140；隐藏事件委托 before=121、frozen=283、after=283。MOD_COMMAND_CALLBACK_STOPPED、TARGET_BODY_SELECTOR_ABSENT、KNOWN_FACTORY_VANILLA_BODIES_CLEARED、WORLD_COMMAND_RESPONDED、SHARED_MODULE_ALIAS_INCLUDED、SERVER_EXIT=0。missing_mod 与实际隐藏缺口合计 GROUP_FAILURES=2，不将其读成全组绝对成功。 |
+| `protect-a-factory-final.log` | BLOCK_HOLDER_MAP_FIELD_PROTECTED、CURRENT_AND_FUTURE_LIVING_AND_NONLIVING_PROTECTED、CURRENT_AND_FUTURE_KNOWN_FACTORY_VANILLA_BODIES_PROTECTED、WORLD_COMMAND_RESPONDED、SHARED_MODULE_ALIAS_INCLUDED、SERVER_EXIT=0。Map／字段拒写直接核对准确原值，无关条目可清。当前／后续原版 Cow 和 ItemEntity 经 /kill 后仍由选择器找到；自定义对象 removed=null、indexed=true，未来 registered=true、bound=true、conflict=false、callback=真实 PersistentEntitySectionManager$Callback，blockHolder=true。 |
+| `boot-a-thread.log` | BOOT_TARGET_METHODS_DID_NOT_EXECUTE、WORLD_COMMAND_RESPONDED、SHARED_MODULE_ALIAS_INCLUDED、SERVER_EXIT=0。TARGETS 含 pro_fixture／pro_fixture_alias，METHODS=16、UNRESOLVED=0，事件和命令门已接入。原 15 秒命令时限内通过。 |
+| `client-a-final.log` | CLIENT_JOINED；CLIENT_EFFECT_COUNTER before=160 frozen=180 after=180；CLIENT_OUTSIDE_CHAT_PROCESSED；REMOTE_ALLOWED_CLIENT_MOD_GROUP_STOPPED_AND_GAME_ALIVE；SERVER_EXIT=0。真实客户端用同包、前置入口及 allow_remote_stop=pro_fixture,pro_fixture_alias，接受 returns=empty 后回调停止，普通聊天继续到达。随后由脚本清理客户端，不记客户端正常退出。 |
+
+摘要日志位于本报告旁 [evidence-20261001](evidence-20261001/)。原始 launch.log、字段状态和存档保留在本地 `MOD/.work/pro-a-final-20260928/runtime/` 对应场景，公开仓库不上传游戏存档和依赖。沿用现有 `run-group-effect.py`、`run-client-group-effect.py`；本机 JAVA_HOME 指向 JDK 17，客户端游戏依赖在 stage/tools/forge-client-game，资源使用已有 ForgeGradle assets。
+
+### 未控路径与保留失败
+
+- 动态服务端 FAILED=7／UNRESOLVED=7，客户端 FAILED=6／UNRESOLVED=6，均为真实不可重变换隐藏类。已登记事件与命令委托实际被阻断，但其他隐藏使用点不冒充全控。完整 B 来源／私有池／资源／持久链、完整 C 动态定义／Native／Host／网络／视觉及原第三方样本本轮未验。
+- `boot-a-complete.log` 与 `boot-a-final.log`：世界 Done 后原 15 秒命令等待超时，整个场景 FAIL；命令随后落日志，服务端 exit 0 不替代效果通过。复查 `boot-a-thread` 在原时限内成功，新增的超时线程采集未触发，前两次慢点仍没有当时栈，不能说根因已修。旧 protect10 历史根因也仍未证明。
+- `dynamic-a-factory-final.log`：受限环境中 Minecraft 对隔离工作目录的真实路径访问被拒，未进入世界，场景 FAIL。获准本机运行后的 `dynamic-a-factory-final2` 通过，生产代码没有为该环境错误改动。
+- `dynamic-a-complete.log` 与 `protect-a-complete.log` 是工厂归属修复前的通过结果，只包含原自定义对象；本节当前清除／防护结论来自后续最终候选场景，不能拿前次两实体结果证明工厂全量纳入。
+
+本次实机环境：Windows x64、Eclipse Adoptium Java 17.0.19+10、Gradle 8.8、Minecraft 1.20.1／Forge 47.4.23；编译映射 Forge 47.4.22。所有当前进度统一维护在 docs/A-批验收状态.md，以下内容仅保留历史。
+
+## 同日此前的换机接续修复
 
 主工程：`C:\Users\Scorn\Desktop\MOD\Ronova-Pro-接续\ronova_GPT`。修复候选：`C:\Users\Scorn\Desktop\MOD\Ronova-Pro-接续\MOD\.work\pro-a-final-20260928\candidate`。以下结果均来自本次同一 Core 与修正后的现有夹具；本轮没有更改 Native 源码或原游戏/存档。
 

@@ -10,7 +10,7 @@ import net.minecraftforge.network.*;
 import net.minecraftforge.network.simple.SimpleChannel;
 
 public final class ProNetwork {
-    static final String WIRE_VERSION="r3-client-4";
+    static final String WIRE_VERSION="r3-client-5";
     static final SimpleChannel CHANNEL=NetworkRegistry.newSimpleChannel(new ResourceLocation("ronova_pro","presence"),
             ()->WIRE_VERSION,v->v.equals(WIRE_VERSION)||v.equals(NetworkRegistry.ABSENT),v->v.equals(WIRE_VERSION)||v.equals(NetworkRegistry.ABSENT));
     public record Probe(UUID session,UUID operation,UUID challenge,String dimension,int entityId,UUID entityUuid) {}
@@ -24,7 +24,7 @@ public final class ProNetwork {
     record HudPolicy(UUID session,long scope,String dimension,long revision,UUID hud,boolean protectedNow,boolean terminal) {}
     record Terminal(UUID session,long scope,String dimension,long revision,int entityId,UUID entityUuid,boolean terminal) {}
     record PolicyReset(UUID session,long scope,String dimension) {}
-    record ModGroup(UUID session,String ids) {}
+    record ModGroup(UUID session,String ids,String returns) {}
     private ProNetwork() {}
     public static void init() {
         CHANNEL.messageBuilder(Probe.class,0,NetworkDirection.PLAY_TO_CLIENT)
@@ -63,8 +63,8 @@ public final class ProNetwork {
             .decoder(b->new HudPolicy(b.readUUID(),b.readLong(),b.readUtf(256),b.readLong(),b.readUUID(),b.readBoolean(),b.readBoolean()))
             .consumerMainThread((p,c)->DistExecutor.unsafeRunWhenOn(Dist.CLIENT,()->()->ClientPresence.hudPolicy(p,c.get().getNetworkManager()))).add();
         CHANNEL.messageBuilder(ModGroup.class,7,NetworkDirection.PLAY_TO_CLIENT)
-            .encoder((p,b)->{b.writeUUID(p.session);b.writeUtf(p.ids,2048);})
-            .decoder(b->new ModGroup(b.readUUID(),b.readUtf(2048)))
+            .encoder((p,b)->{b.writeUUID(p.session);b.writeUtf(p.ids,2048);b.writeUtf(p.returns,32);})
+            .decoder(b->new ModGroup(b.readUUID(),b.readUtf(2048),b.readUtf(32)))
             .consumerMainThread((p,c)->DistExecutor.unsafeRunWhenOn(Dist.CLIENT,()->()->ClientPresence.modGroup(p,c.get().getNetworkManager()))).add();
 
     }
@@ -99,9 +99,9 @@ public final class ProNetwork {
         if(!present(player)||hud==null)return false;
         CHANNEL.send(PacketDistributor.PLAYER.with(()->player),new HudPolicy(session,scope,dimension,revision,hud,protect,terminal));return true;
     }
-    static void modGroup(ServerPlayer player,UUID session,String ids) {
+    static void modGroup(ServerPlayer player,UUID session,String ids,String returns) {
         if(present(player)&&session!=null&&!ids.isBlank())
-            CHANNEL.send(PacketDistributor.PLAYER.with(()->player),new ModGroup(session,ids));
+            CHANNEL.send(PacketDistributor.PLAYER.with(()->player),new ModGroup(session,ids,returns));
     }
 
 }
