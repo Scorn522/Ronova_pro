@@ -9,17 +9,22 @@ base { archivesName = 'ronova-pro-core' }
 java { toolchain.languageVersion = JavaLanguageVersion.of(17) }
 
 sourceSets {
-    prelaunch { java.srcDir 'prelaunch/src/main/java' }
-    bootstrap { java.srcDir 'bootstrap/src/main/java' }
-    agent { java.srcDir 'agent/src/main/java' }
+    // Source folders are grouped by payload; package declarations keep binary names unchanged.
+    main {
+        java.setSrcDirs(['src/core', 'src/journal'])
+        resources.setSrcDirs(['src/resources'])
+    }
+    prelaunch { java.setSrcDirs(['src/prelaunch', 'src/journal']) }
+    bootstrap { java.setSrcDirs(['src/bootstrap']) }
+    agent { java.setSrcDirs(['src/agent']) }
     stateChecks {
-        java.srcDir 'validation/src/test/java'
+        java.setSrcDirs(['validation/checks'])
         compileClasspath += sourceSets.main.output + sourceSets.main.compileClasspath + sourceSets.bootstrap.output
         runtimeClasspath += sourceSets.main.output + sourceSets.main.runtimeClasspath + sourceSets.bootstrap.output
     }
     fixture {
-        java.srcDir 'validation/src/main/java'
-        resources.srcDir 'validation/src/main/resources'
+        java.setSrcDirs(['validation/fixture'])
+        resources.setSrcDirs(['validation/resources'])
         compileClasspath += sourceSets.main.output
         runtimeClasspath += sourceSets.main.output
     }
@@ -76,6 +81,7 @@ mixin { add sourceSets.main, 'ronova_pro.refmap.json'; config 'ronova_pro.mixins
 tasks.withType(JavaCompile).configureEach { options.encoding = 'UTF-8' }
 tasks.named('compileAgentJava',JavaCompile).configure {
     options.compilerArgs += ['--add-exports','java.base/jdk.internal.org.objectweb.asm=ALL-UNNAMED',
+                             '--add-exports','java.base/jdk.internal.org.objectweb.asm.commons=ALL-UNNAMED',
                              '--add-exports','java.base/jdk.internal.org.objectweb.asm.tree=ALL-UNNAMED',
                              '--add-exports','java.base/jdk.internal.org.objectweb.asm.tree.analysis=ALL-UNNAMED']
 }
@@ -83,7 +89,7 @@ tasks.named('compileAgentJava',JavaCompile).configure {
 // ship inside it and the mod extracts and attaches them itself. The separate jars stay available for diagnosis.
 tasks.register('compileControlNative',Exec) {
     onlyIf { System.getProperty('os.name').startsWith('Windows') }
-    inputs.files('native/control.c','native/build-control.ps1')
+    inputs.files('native/control.c','native/bindings.c','native/arrays.c','native/sources.c','native/code.c','native/vm_metadata.c','native/host.c','native/heap.c','native/unsafe.c','native/memory.c','native/file.c','native/methods.c','native/thread.c','native/buffer.c','native/build-control.ps1')
     outputs.file(layout.buildDirectory.file('control-native/ronova-native/windows-x86_64/ronova-pro-control.dll'))
     doFirst {
         def jdk=javaToolchains.launcherFor { languageVersion = JavaLanguageVersion.of(17) }.get().metadata.installationPath.asFile
@@ -107,6 +113,17 @@ tasks.register('recoveryAgentJar',Jar) {
             'Main-Class':'dev.ronova.pro.agent.AttachMain',
             'Can-Retransform-Classes':'true','Can-Redefine-Classes':'true') }
 }
+tasks.register('compileStorageNative',Exec) {
+    onlyIf { System.getProperty('os.name').startsWith('Windows') && System.getProperty('os.arch') == 'amd64' }
+    inputs.files('native/storage.cpp','native/storage_transaction.hpp','native/build.ps1')
+    outputs.file(layout.buildDirectory.file('native/ronova-pro-storage.dll'))
+    doFirst {
+        def jdk=javaToolchains.launcherFor { languageVersion = JavaLanguageVersion.of(17) }.get().metadata.installationPath.asFile
+        commandLine 'powershell.exe','-NoProfile','-ExecutionPolicy','Bypass','-File',file('native/build.ps1').absolutePath,'-JdkHome',jdk.absolutePath
+        def zig=project.findProperty('storageZig') ?: project.findProperty('controlZig')
+        if(zig) args '-Zig',zig
+    }
+}
 tasks.register('prelaunchJar',Jar) {
     archiveBaseName='ronova-pro-prelaunch'
     archiveVersion=''
@@ -114,11 +131,12 @@ tasks.register('prelaunchJar',Jar) {
     manifest { attributes('Main-Class':'dev.ronova.pro.prelaunch.PrelaunchMain') }
 }
 tasks.named('jar').configure {
-    dependsOn 'recoveryAgentJar','recoveryBootstrapJar'
+    dependsOn 'recoveryAgentJar','recoveryBootstrapJar','prelaunchJar','compileStorageNative'
     manifest { attributes('MixinConfigs': 'ronova_pro.mixins.json') }
     // Nested payloads keep their own manifests, which is how the mod recognises them at runtime.
     from(tasks.named('recoveryAgentJar').flatMap { it.archiveFile }) { into 'ronova-payload' }
     from(tasks.named('recoveryBootstrapJar').flatMap { it.archiveFile }) { into 'ronova-payload' }
+    from(layout.buildDirectory.file('native/ronova-pro-storage.dll')) { into 'ronova-payload' }
     finalizedBy 'reobfJar'
 }
 tasks.register('fixtureJar',Jar) {

@@ -1,0 +1,254 @@
+2026-10-03 18:59:37
+Full thread dump OpenJDK 64-Bit Server VM (17.0.19+10 mixed mode, sharing):
+
+Threads class SMR info:
+_java_thread_list=0x000002196c321fe0, length=13, elements={
+0x00000219054c3770, 0x00000219268bf670, 0x00000219268c0230, 0x00000219268e2440,
+0x00000219268e2d10, 0x00000219268e56e0, 0x00000219268e60a0, 0x00000219268ec6b0,
+0x00000219268fcfe0, 0x00000219268ee3c0, 0x0000021926a1a7b0, 0x000002196c3c0df0,
+0x0000021974c703f0
+}
+
+"main" #1 prio=5 os_prio=0 cpu=60765.62ms elapsed=66.76s tid=0x00000219054c3770 nid=0x15b64 runnable  [0x0000009c0c0fa000]
+   java.lang.Thread.State: RUNNABLE
+	at dev.ronova.pro.bootstrap.CodeSourceBridge$ControlRegistry.find(CodeSourceBridge.java:126)
+	at dev.ronova.pro.bootstrap.CodeSourceBridge$ControlRegistry.add(CodeSourceBridge.java:135)
+	at dev.ronova.pro.bootstrap.CodeSourceBridge.protect(CodeSourceBridge.java:477)
+	- locked <0x0000000080603220> (a dev.ronova.pro.bootstrap.CodeSourceBridge$ControlRegistry)
+	at dev.ronova.pro.bootstrap.CodeSourceBridge.protectControls(CodeSourceBridge.java:1217)
+	at dev.ronova.pro.bootstrap.CodeSourceBridge.codeControls(CodeSourceBridge.java:1201)
+	at jdk.internal.reflect.GeneratedMethodAccessor17.invoke(java.base@17.0.19/Unknown Source)
+	at jdk.internal.reflect.DelegatingMethodAccessorImpl.invoke(java.base@17.0.19/DelegatingMethodAccessorImpl.java:43)
+	at java.lang.reflect.Method.invoke(java.base@17.0.19/Method.java:569)
+	at dev.ronova.pro.agent.RecoveryAgent.protectExternalCode(RecoveryAgent.java:599)
+	at dev.ronova.pro.agent.ExternalCodeImages.protect(ExternalCodeImages.java:705)
+	at dev.ronova.pro.agent.ExternalCodeImages.protectExecution(ExternalCodeImages.java:549)
+	at dev.ronova.pro.agent.ExternalCodeDefinitions$Definition.<init>(ExternalCodeDefinitions.java:111)
+	at dev.ronova.pro.agent.ExternalCodeDefinitions.accepted(ExternalCodeDefinitions.java:154)
+	at dev.ronova.pro.agent.ExternalCodeRuntime.accepted(ExternalCodeRuntime.java:101)
+	at dev.ronova.pro.agent.ExternalCodeRuntime.finish(ExternalCodeRuntime.java:66)
+	at dev.ronova.pro.agent.RecoveryAgent$2.transform(RecoveryAgent.java:131)
+	at sun.instrument.TransformerManager.transform(java.instrument@17.0.19/TransformerManager.java:188)
+	at sun.instrument.InstrumentationImpl.transform(java.instrument@17.0.19/InstrumentationImpl.java:541)
+	at java.lang.ClassLoader.defineClass1(java.base@17.0.19/Native Method)
+	at java.lang.ClassLoader.defineClass(java.base@17.0.19/ClassLoader.java:1017)
+	at cpw.mods.cl.ModuleClassLoader.readerToClass(cpw.mods.securejarhandler/ModuleClassLoader.java:119)
+	at cpw.mods.cl.ModuleClassLoader.lambda$findClass$15(cpw.mods.securejarhandler/ModuleClassLoader.java:219)
+	at cpw.mods.cl.ModuleClassLoader$$Lambda$371/0x000002192811ac88.apply(cpw.mods.securejarhandler/Unknown Source)
+	at cpw.mods.cl.ModuleClassLoader.loadFromModule(cpw.mods.securejarhandler/ModuleClassLoader.java:229)
+	at cpw.mods.cl.ModuleClassLoader.findClass(cpw.mods.securejarhandler/ModuleClassLoader.java:219)
+	at cpw.mods.cl.ModuleClassLoader.loadClass(cpw.mods.securejarhandler/ModuleClassLoader.java:135)
+	- locked <0x00000000a8b1ee10> (a java.lang.Object)
+	at java.lang.ClassLoader.loadClass(java.base@17.0.19/ClassLoader.java:525)
+	at org.apache.commons.lang3.math.NumberUtils.isDigits(org.apache.commons.lang3@3.12.0/NumberUtils.java:1550)
+	at org.apache.maven.artifact.versioning.DefaultArtifactVersion.tryParseInt(maven.artifact@3.8.5/DefaultArtifactVersion.java:225)
+	at org.apache.maven.artifact.versioning.DefaultArtifactVersion.parseVersion(maven.artifact@3.8.5/DefaultArtifactVersion.java:147)
+	at org.apache.maven.artifact.versioning.DefaultArtifactVersion.<init>(maven.artifact@3.8.5/DefaultArtifactVersion.java:48)
+	at org.apache.maven.artifact.versioning.VersionRange.parseRestriction(maven.artifact@3.8.5/VersionRange.java:223)
+	at org.apache.maven.artifact.versioning.VersionRange.createFromVersionSpec(maven.artifact@3.8.5/VersionRange.java:146)
+	at net.minecraftforge.forgespi.language.MavenVersionAdapter.createFromVersionSpec(net.minecraftforge.forgespi@7.0.1/MavenVersionAdapter.java:33)
+	at net.minecraftforge.fml.loading.moddiscovery.ModFileInfo$$Lambda$704/0x00000219282e6b70.apply(fmlloader@1.20.1-47.4.23/Unknown Source)
+	at java.util.Optional.map(java.base@17.0.19/Optional.java:260)
+	at net.minecraftforge.fml.loading.moddiscovery.ModFileInfo.<init>(fmlloader@1.20.1-47.4.23/ModFileInfo.java:68)
+	at net.minecraftforge.fml.loading.moddiscovery.ModFileParser.modsTomlParser(fmlloader@1.20.1-47.4.23/ModFileParser.java:49)
+	at net.minecraftforge.fml.loading.moddiscovery.AbstractModProvider$$Lambda$700/0x00000219282e3c18.build(fmlloader@1.20.1-47.4.23/Unknown Source)
+	at net.minecraftforge.fml.loading.moddiscovery.ModFileParser.readModList(fmlloader@1.20.1-47.4.23/ModFileParser.java:32)
+	at net.minecraftforge.fml.loading.moddiscovery.ModFile.<init>(fmlloader@1.20.1-47.4.23/ModFile.java:82)
+	at net.minecraftforge.fml.loading.moddiscovery.ModFile.<init>(fmlloader@1.20.1-47.4.23/ModFile.java:71)
+	at net.minecraftforge.fml.loading.moddiscovery.AbstractModProvider.createMod(fmlloader@1.20.1-47.4.23/AbstractModProvider.java:57)
+	at net.minecraftforge.fml.loading.moddiscovery.AbstractModProvider.createMod(fmlloader@1.20.1-47.4.23/AbstractModProvider.java:37)
+	at net.minecraftforge.fml.loading.moddiscovery.AbstractJarFileModLocator.lambda$scanMods$0(fmlloader@1.20.1-47.4.23/AbstractJarFileModLocator.java:19)
+	at net.minecraftforge.fml.loading.moddiscovery.AbstractJarFileModLocator$$Lambda$695/0x00000219282e2d08.apply(fmlloader@1.20.1-47.4.23/Unknown Source)
+	at java.util.stream.ReferencePipeline$3$1.accept(java.base@17.0.19/ReferencePipeline.java:197)
+	at java.util.stream.SortedOps$RefSortingSink$$Lambda$696/0x00000219282720e0.accept(java.base@17.0.19/Unknown Source)
+	at java.util.ArrayList.forEach(java.base@17.0.19/ArrayList.java:1511)
+	at java.util.stream.SortedOps$RefSortingSink.end(java.base@17.0.19/SortedOps.java:395)
+	at java.util.stream.Sink$ChainedReference.end(java.base@17.0.19/Sink.java:258)
+	at java.util.stream.AbstractPipeline.copyInto(java.base@17.0.19/AbstractPipeline.java:510)
+	at java.util.stream.AbstractPipeline.wrapAndCopyInto(java.base@17.0.19/AbstractPipeline.java:499)
+	at java.util.stream.AbstractPipeline.evaluate(java.base@17.0.19/AbstractPipeline.java:575)
+	at java.util.stream.AbstractPipeline.evaluateToArrayNode(java.base@17.0.19/AbstractPipeline.java:260)
+	at java.util.stream.ReferencePipeline.toArray(java.base@17.0.19/ReferencePipeline.java:616)
+	at java.util.stream.ReferencePipeline.toArray(java.base@17.0.19/ReferencePipeline.java:622)
+	at java.util.stream.ReferencePipeline.toList(java.base@17.0.19/ReferencePipeline.java:627)
+	at net.minecraftforge.fml.loading.moddiscovery.AbstractJarFileModLocator.scanMods(fmlloader@1.20.1-47.4.23/AbstractJarFileModLocator.java:19)
+	at net.minecraftforge.fml.loading.moddiscovery.ModDiscoverer.discoverMods(fmlloader@1.20.1-47.4.23/ModDiscoverer.java:78)
+	at net.minecraftforge.fml.loading.FMLLoader.beginModScan(fmlloader@1.20.1-47.4.23/FMLLoader.java:173)
+	at net.minecraftforge.fml.loading.FMLServiceProvider.beginScanning(fmlloader@1.20.1-47.4.23/FMLServiceProvider.java:86)
+	at cpw.mods.modlauncher.TransformationServiceDecorator.runScan(cpw.mods.modlauncher@10.0.9/TransformationServiceDecorator.java:112)
+	at cpw.mods.modlauncher.TransformationServicesHandler.lambda$runScanningTransformationServices$8(cpw.mods.modlauncher@10.0.9/TransformationServicesHandler.java:100)
+	at cpw.mods.modlauncher.TransformationServicesHandler$$Lambda$663/0x00000219282dc488.apply(cpw.mods.modlauncher@10.0.9/Unknown Source)
+	at java.util.stream.ReferencePipeline$3$1.accept(java.base@17.0.19/ReferencePipeline.java:197)
+	at java.util.HashMap$ValueSpliterator.forEachRemaining(java.base@17.0.19/HashMap.java:1779)
+	at java.util.stream.AbstractPipeline.copyInto(java.base@17.0.19/AbstractPipeline.java:509)
+	at java.util.stream.AbstractPipeline.wrapAndCopyInto(java.base@17.0.19/AbstractPipeline.java:499)
+	at java.util.stream.AbstractPipeline.evaluate(java.base@17.0.19/AbstractPipeline.java:575)
+	at java.util.stream.AbstractPipeline.evaluateToArrayNode(java.base@17.0.19/AbstractPipeline.java:260)
+	at java.util.stream.ReferencePipeline.toArray(java.base@17.0.19/ReferencePipeline.java:616)
+	at java.util.stream.ReferencePipeline.toArray(java.base@17.0.19/ReferencePipeline.java:622)
+	at java.util.stream.ReferencePipeline.toList(java.base@17.0.19/ReferencePipeline.java:627)
+	at cpw.mods.modlauncher.TransformationServicesHandler.runScanningTransformationServices(cpw.mods.modlauncher@10.0.9/TransformationServicesHandler.java:102)
+	at cpw.mods.modlauncher.TransformationServicesHandler.initializeTransformationServices(cpw.mods.modlauncher@10.0.9/TransformationServicesHandler.java:55)
+	at cpw.mods.modlauncher.Launcher.run(cpw.mods.modlauncher@10.0.9/Launcher.java:88)
+	at cpw.mods.modlauncher.Launcher.main(cpw.mods.modlauncher@10.0.9/Launcher.java:78)
+	at cpw.mods.modlauncher.BootstrapLaunchConsumer.accept(cpw.mods.modlauncher@10.0.9/BootstrapLaunchConsumer.java:26)
+	at cpw.mods.modlauncher.BootstrapLaunchConsumer.accept(cpw.mods.modlauncher@10.0.9/BootstrapLaunchConsumer.java:23)
+	at cpw.mods.bootstraplauncher.BootstrapLauncher.main(cpw.mods.bootstraplauncher@1.1.2/BootstrapLauncher.java:141)
+
+"Reference Handler" #2 daemon prio=10 os_prio=2 cpu=500.00ms elapsed=66.74s tid=0x00000219268bf670 nid=0x18654 waiting on condition  [0x0000009c0c7ff000]
+   java.lang.Thread.State: RUNNABLE
+	at java.lang.ref.Reference.waitForReferencePendingList(java.base@17.0.19/Native Method)
+	at java.lang.ref.Reference.processPendingReferences(java.base@17.0.19/Reference.java:253)
+	at java.lang.ref.Reference$ReferenceHandler.run(java.base@17.0.19/Reference.java:215)
+
+"Finalizer" #3 daemon prio=8 os_prio=1 cpu=0.00ms elapsed=66.74s tid=0x00000219268c0230 nid=0x47f0 in Object.wait()  [0x0000009c0c8ff000]
+   java.lang.Thread.State: WAITING (on object monitor)
+	at java.lang.Object.wait(java.base@17.0.19/Native Method)
+	- waiting on <0x0000000080601478> (a java.lang.ref.ReferenceQueue$Lock)
+	at java.lang.ref.ReferenceQueue.remove(java.base@17.0.19/ReferenceQueue.java:155)
+	- locked <0x0000000080601478> (a java.lang.ref.ReferenceQueue$Lock)
+	at java.lang.ref.ReferenceQueue.remove(java.base@17.0.19/ReferenceQueue.java:176)
+	at java.lang.ref.Finalizer$FinalizerThread.run(java.base@17.0.19/Finalizer.java:172)
+
+"Signal Dispatcher" #4 daemon prio=9 os_prio=2 cpu=0.00ms elapsed=66.73s tid=0x00000219268e2440 nid=0x138dc waiting on condition  [0x0000000000000000]
+   java.lang.Thread.State: RUNNABLE
+
+"Attach Listener" #5 daemon prio=5 os_prio=2 cpu=0.00ms elapsed=66.73s tid=0x00000219268e2d10 nid=0x18c98 waiting on condition  [0x0000000000000000]
+   java.lang.Thread.State: RUNNABLE
+
+"Service Thread" #6 daemon prio=9 os_prio=0 cpu=0.00ms elapsed=66.73s tid=0x00000219268e56e0 nid=0x18738 runnable  [0x0000000000000000]
+   java.lang.Thread.State: RUNNABLE
+
+"Monitor Deflation Thread" #7 daemon prio=9 os_prio=0 cpu=0.00ms elapsed=66.73s tid=0x00000219268e60a0 nid=0x189fc runnable  [0x0000000000000000]
+   java.lang.Thread.State: RUNNABLE
+
+"C2 CompilerThread0" #8 daemon prio=9 os_prio=2 cpu=20750.00ms elapsed=66.73s tid=0x00000219268ec6b0 nid=0x17de0 waiting on condition  [0x0000000000000000]
+   java.lang.Thread.State: RUNNABLE
+   No compile task
+
+"C1 CompilerThread0" #16 daemon prio=9 os_prio=2 cpu=1031.25ms elapsed=66.73s tid=0x00000219268fcfe0 nid=0x16938 waiting on condition  [0x0000000000000000]
+   java.lang.Thread.State: RUNNABLE
+   No compile task
+
+"Sweeper thread" #20 daemon prio=9 os_prio=2 cpu=187.50ms elapsed=66.73s tid=0x00000219268ee3c0 nid=0x17014 runnable  [0x0000000000000000]
+   java.lang.Thread.State: RUNNABLE
+
+"Common-Cleaner" #21 daemon prio=8 os_prio=1 cpu=187.50ms elapsed=66.72s tid=0x0000021926a1a7b0 nid=0x18f40 in Object.wait()  [0x0000009c0d2ff000]
+   java.lang.Thread.State: TIMED_WAITING (on object monitor)
+	at java.lang.Object.wait(java.base@17.0.19/Native Method)
+	- waiting on <0x0000000080603630> (a java.lang.ref.ReferenceQueue$Lock)
+	at java.lang.ref.ReferenceQueue.remove(java.base@17.0.19/ReferenceQueue.java:155)
+	- locked <0x0000000080603630> (a java.lang.ref.ReferenceQueue$Lock)
+	at jdk.internal.ref.CleanerImpl.run(java.base@17.0.19/CleanerImpl.java:140)
+	at java.lang.Thread.run(java.base@17.0.19/Unknown Source)
+	at jdk.internal.misc.InnocuousThread.run(java.base@17.0.19/InnocuousThread.java:162)
+
+"Ronova external code continuation" #22 daemon prio=5 os_prio=0 cpu=22390.62ms elapsed=62.07s tid=0x000002196c3c0df0 nid=0x15f10 waiting for monitor entry  [0x0000009c0f2fe000]
+   java.lang.Thread.State: BLOCKED (on object monitor)
+	at dev.ronova.pro.bootstrap.CodeSourceBridge.controlled(CodeSourceBridge.java:1225)
+	- waiting to lock <0x0000000080603220> (a dev.ronova.pro.bootstrap.CodeSourceBridge$ControlRegistry)
+	at dev.ronova.pro.bootstrap.TaskBridge.controlled(TaskBridge.java:1174)
+	at dev.ronova.pro.bootstrap.TaskBridge.controlMutationAllowed(TaskBridge.java:1188)
+	at dev.ronova.pro.bootstrap.BackingBridge.deny(BackingBridge.java:65)
+	at dev.ronova.pro.bootstrap.BackingBridge.incomingAllowed(BackingBridge.java:71)
+	at dev.ronova.pro.bootstrap.SourceMapBridge.valueAllowed(SourceMapBridge.java:118)
+	at java.util.HashMap.putVal(java.base@17.0.19/HashMap.java)
+	at java.util.HashMap.put(java.base@17.0.19/HashMap.java:610)
+	at java.util.HashSet.add(java.base@17.0.19/HashSet.java:221)
+	at java.util.AbstractCollection.addAll(java.base@17.0.19/AbstractCollection.java:336)
+	at java.util.HashSet.<init>(java.base@17.0.19/HashSet.java:121)
+	at java.util.Set.copyOf(java.base@17.0.19/Set.java:732)
+	at dev.ronova.pro.agent.ExternalCodeDefinitions.bind(ExternalCodeDefinitions.java:686)
+	at dev.ronova.pro.agent.ExternalCodeDefinitions.target(ExternalCodeDefinitions.java:644)
+	at dev.ronova.pro.agent.ExternalCodeDefinitions.resolveCall(ExternalCodeDefinitions.java:509)
+	at dev.ronova.pro.agent.ExternalCodeDefinitions.resolve(ExternalCodeDefinitions.java:463)
+	at dev.ronova.pro.agent.ExternalCodeDefinitions.expandGraph(ExternalCodeDefinitions.java:403)
+	at dev.ronova.pro.agent.ExternalCodeDefinitions.expand(ExternalCodeDefinitions.java:375)
+	at dev.ronova.pro.agent.ExternalCodeDefinitions.refreshes(ExternalCodeDefinitions.java:308)
+	at dev.ronova.pro.agent.ExternalCodeDefinitions.refreshes(ExternalCodeDefinitions.java:274)
+	at dev.ronova.pro.agent.ExternalCodeDefinitions.run(Unknown Source)
+	at dev.ronova.pro.agent.ExternalCodeDefinitions.lambda$start$4(Unknown Source)
+	at dev.ronova.pro.agent.ExternalCodeDefinitions$$Lambda$132/0x000002192809fb60.run(Unknown Source)
+	at java.lang.Thread.run(java.base@17.0.19/Thread.java:840)
+
+"Notification Thread" #23 daemon prio=9 os_prio=0 cpu=0.00ms elapsed=49.90s tid=0x0000021974c703f0 nid=0x182c0 runnable  [0x0000000000000000]
+   java.lang.Thread.State: RUNNABLE
+
+"G1 Conc#3" os_prio=2 cpu=906.25ms elapsed=19.83s tid=0x000002196e7c9500 nid=0x1891c runnable  
+
+"G1 Conc#2" os_prio=2 cpu=906.25ms elapsed=19.83s tid=0x000002196e7c7140 nid=0x174ac runnable  
+
+"G1 Conc#1" os_prio=2 cpu=906.25ms elapsed=19.83s tid=0x000002196e7c9240 nid=0x161a4 runnable  
+
+"G1 Refine#14" os_prio=2 cpu=0.00ms elapsed=47.28s tid=0x000002197336d0f0 nid=0x18ddc runnable  
+
+"VM Periodic Task Thread" os_prio=2 cpu=93.75ms elapsed=49.90s tid=0x0000021973ba2aa0 nid=0x1870c waiting on condition  
+
+"G1 Refine#13" os_prio=2 cpu=0.00ms elapsed=59.02s tid=0x000002197336a4e0 nid=0x18074 runnable  
+
+"G1 Refine#12" os_prio=2 cpu=0.00ms elapsed=60.26s tid=0x000002196e618af0 nid=0x185d0 runnable  
+
+"G1 Refine#11" os_prio=2 cpu=0.00ms elapsed=61.51s tid=0x000002196e618510 nid=0x1695c runnable  
+
+"G1 Refine#10" os_prio=2 cpu=0.00ms elapsed=61.51s tid=0x000002196e618220 nid=0x18de0 runnable  
+
+"G1 Refine#9" os_prio=2 cpu=0.00ms elapsed=62.15s tid=0x000002196e615ee0 nid=0x17274 runnable  
+
+"G1 Refine#8" os_prio=2 cpu=0.00ms elapsed=62.15s tid=0x000002196e615bf0 nid=0x18aec runnable  
+
+"G1 Refine#7" os_prio=2 cpu=0.00ms elapsed=63.88s tid=0x000002196e751e00 nid=0x15c40 runnable  
+
+"G1 Refine#6" os_prio=2 cpu=0.00ms elapsed=64.49s tid=0x000002196e751820 nid=0x16450 runnable  
+
+"G1 Refine#5" os_prio=2 cpu=0.00ms elapsed=64.49s tid=0x000002196fa96d20 nid=0x167bc runnable  
+
+"G1 Refine#4" os_prio=2 cpu=15.62ms elapsed=64.49s tid=0x00000219714cacc0 nid=0x1920c runnable  
+
+"G1 Refine#3" os_prio=2 cpu=31.25ms elapsed=64.49s tid=0x000002196eb45c80 nid=0x14450 runnable  
+
+"G1 Refine#2" os_prio=2 cpu=62.50ms elapsed=64.49s tid=0x000002196df61540 nid=0x17e4c runnable  
+
+"G1 Refine#1" os_prio=2 cpu=187.50ms elapsed=64.49s tid=0x000002196d4f59b0 nid=0x15430 runnable  
+
+"GC Thread#14" os_prio=2 cpu=890.62ms elapsed=66.39s tid=0x000002196d9cc680 nid=0x16c48 runnable  
+
+"GC Thread#13" os_prio=2 cpu=859.38ms elapsed=66.39s tid=0x000002196d675390 nid=0x18ba0 runnable  
+
+"GC Thread#12" os_prio=2 cpu=921.88ms elapsed=66.39s tid=0x000002196d6750d0 nid=0x155dc runnable  
+
+"GC Thread#11" os_prio=2 cpu=906.25ms elapsed=66.39s tid=0x000002196d674e10 nid=0x158fc runnable  
+
+"GC Thread#10" os_prio=2 cpu=921.88ms elapsed=66.39s tid=0x000002196d675650 nid=0x183c4 runnable  
+
+"GC Thread#9" os_prio=2 cpu=875.00ms elapsed=66.39s tid=0x000002196d6745d0 nid=0x149fc runnable  
+
+"GC Thread#8" os_prio=2 cpu=859.38ms elapsed=66.39s tid=0x000002196d674310 nid=0x179a0 runnable  
+
+"GC Thread#7" os_prio=2 cpu=843.75ms elapsed=66.39s tid=0x000002196d674b50 nid=0x162a4 runnable  
+
+"GC Thread#6" os_prio=2 cpu=812.50ms elapsed=66.39s tid=0x000002196d674890 nid=0x1826c runnable  
+
+"GC Thread#5" os_prio=2 cpu=890.62ms elapsed=66.39s tid=0x000002196d675bd0 nid=0x176b4 runnable  
+
+"GC Thread#4" os_prio=2 cpu=890.62ms elapsed=66.39s tid=0x000002196d675910 nid=0x190bc runnable  
+
+"GC Thread#3" os_prio=2 cpu=906.25ms elapsed=66.39s tid=0x000002196d674050 nid=0x18eb4 runnable  
+
+"GC Thread#2" os_prio=2 cpu=906.25ms elapsed=66.39s tid=0x000002196cee8e60 nid=0x17aac runnable  
+
+"GC Thread#1" os_prio=2 cpu=890.62ms elapsed=66.39s tid=0x000002196d34db90 nid=0x185e8 runnable  
+
+"VM Thread" os_prio=2 cpu=2578.12ms elapsed=66.74s tid=0x00000219268b7d30 nid=0x16e74 runnable  
+
+"G1 Service" os_prio=2 cpu=15.62ms elapsed=66.75s tid=0x00000219264ee620 nid=0x1617c runnable  
+
+"G1 Refine#0" os_prio=2 cpu=1421.88ms elapsed=66.75s tid=0x000002190556eca0 nid=0x13f9c runnable  
+
+"G1 Conc#0" os_prio=2 cpu=890.62ms elapsed=66.76s tid=0x00000219055369b0 nid=0x13460 runnable  
+
+"G1 Main Marker" os_prio=2 cpu=15.62ms elapsed=66.76s tid=0x00000219055357f0 nid=0x1863c runnable  
+
+"GC Thread#0" os_prio=2 cpu=828.12ms elapsed=66.76s tid=0x0000021905523bd0 nid=0x18798 runnable  
+
+JNI global refs: 68, weak refs: 1573
+

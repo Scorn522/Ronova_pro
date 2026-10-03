@@ -1,0 +1,297 @@
+To honour the JVM settings for this build a single-use Daemon process will be forked. For more on this, please refer to https://docs.gradle.org/8.8/userguide/gradle_daemon.html#sec:disabling_the_daemon in the Gradle documentation.
+Daemon will be stopped at the end of the build 
+
+> Configure project :
+MixinGradle is skipping eclipse integration, extension not found
+Neither the 'eclipse' nor the 'idea' plugins were found, but IDE resource copy has been enabled.
+
+> Task :downloadMcpConfig
+> Task :extractSrg UP-TO-DATE
+> Task :createMcpToSrg UP-TO-DATE
+
+> Task :compileJava
+ע: SpongePowered MIXIN Annotation Processor Version=0.8.5 (MixinGradle Version=0.7)
+ע: Supported obfuscation types: ObfuscationServiceMCP supports [notch] ObfuscationServiceFG3 supports [searge]
+ע: Loading searge mappings from C:\Users\Scorn\Desktop\MOD\Ronova-Pro-����\ronova_GPT\build\createMcpToSrg\output.tsrg
+C:\Users\Scorn\Desktop\MOD\Ronova-Pro-����\ronova_GPT\src\main\java\dev\ronova\pro\mixin\NbtOperationsHooks.java:23: ����: Unable to locate method mapping for @At(INVOKE.<target>) 'Lcom/mojang/serialization/DataResult;success(Ljava/lang/Object;)Lcom/mojang/serialization/DataResult;'
+        @Redirect(method="mergeToMap(Lnet/minecraft/nbt/Tag;Lnet/minecraft/nbt/Tag;Lnet/minecraft/nbt/Tag;)Lcom/mojang/serialization/DataResult;",
+        ^
+C:\Users\Scorn\Desktop\MOD\Ronova-Pro-����\ronova_GPT\src\main\java\dev\ronova\pro\mixin\NbtOperationsHooks.java:28: ����: Unable to locate method mapping for @At(INVOKE.<target>) 'Lcom/mojang/serialization/DataResult;success(Ljava/lang/Object;)Lcom/mojang/serialization/DataResult;'
+        @Redirect(method="mergeToMap(Lnet/minecraft/nbt/Tag;Lcom/mojang/serialization/MapLike;)Lcom/mojang/serialization/DataResult;",
+        ^
+C:\Users\Scorn\Desktop\MOD\Ronova-Pro-����\ronova_GPT\src\main\java\dev\ronova\pro\mixin\NbtOperationsHooks.java:33: ����: Unable to locate method mapping for @At(INVOKE.<target>) 'Lcom/mojang/serialization/DataResult;error(Ljava/util/function/Supplier;Ljava/lang/Object;)Lcom/mojang/serialization/DataResult;'
+        @Redirect(method="mergeToMap(Lnet/minecraft/nbt/Tag;Lcom/mojang/serialization/MapLike;)Lcom/mojang/serialization/DataResult;",
+        ^
+C:\Users\Scorn\Desktop\MOD\Ronova-Pro-����\ronova_GPT\src\main\java\dev\ronova\pro\mixin\NbtOperationsHooks.java:45: ����: Unable to locate method mapping for @At(INVOKE.<target>) 'Lcom/mojang/serialization/DataResult;success(Ljava/lang/Object;)Lcom/mojang/serialization/DataResult;'
+        @Redirect(method="build(Lnet/minecraft/nbt/CompoundTag;Lnet/minecraft/nbt/Tag;)Lcom/mojang/serialization/DataResult;",
+        ^
+ע: Writing refmap to C:\Users\Scorn\Desktop\MOD\Ronova-Pro-����\ronova_GPT\build\tmp\compileJava\compileJava-refmap.json
+C:\Users\Scorn\Desktop\MOD\Ronova-Pro-����\ronova_GPT\src\main\java\dev\ronova\pro\mixin\Access.java:49: ����: Unable to locate obfuscation mapping for @Accessor target canUpdate
+        @Accessor("canUpdate") boolean pro$canUpdate();
+        ^
+C:\Users\Scorn\Desktop\MOD\Ronova-Pro-����\ronova_GPT\src\main\java\dev\ronova\pro\mixin\Access.java:50: ����: Unable to locate obfuscation mapping for @Accessor target canUpdate
+        @Accessor("canUpdate") void pro$canUpdate(boolean value);
+        ^
+C:\Users\Scorn\Desktop\MOD\Ronova-Pro-����\ronova_GPT\src\main\java\dev\ronova\pro\mixin\Access.java:53: ����: Unable to locate obfuscation mapping for @Accessor target isAddedToWorld
+        @Accessor("isAddedToWorld") void pro$added(boolean value);
+        ^
+ע: Writing refmap to C:\Users\Scorn\Desktop\MOD\Ronova-Pro-����\ronova_GPT\build\tmp\compileJava\compileJava-refmap.json
+ע: Writing searge composite mappings to C:\Users\Scorn\Desktop\MOD\Ronova-Pro-����\ronova_GPT\build\tmp\compileJava\compileJava-mappings.tsrg
+ע: Writing refmap to C:\Users\Scorn\Desktop\MOD\Ronova-Pro-����\ronova_GPT\build\tmp\compileJava\compileJava-refmap.json
+ע: Writing refmap to C:\Users\Scorn\Desktop\MOD\Ronova-Pro-����\ronova_GPT\build\tmp\compileJava\compileJava-refmap.json
+ע: Writing searge composite mappings to C:\Users\Scorn\Desktop\MOD\Ronova-Pro-����\ronova_GPT\build\tmp\compileJava\compileJava-mappings.tsrg
+C:\Users\Scorn\Desktop\MOD\Ronova-Pro-����\ronova_GPT\src\main\java\dev\ronova\pro\WorldArchive.java:75: ����: [removal] ResourceLocation �е� ResourceLocation(String) �ѹ�ʱ, �ұ��Ϊ��ɾ��
+            Job job=new Job(tag.getUUID("Id"),tag.hasUUID("Source")?tag.getUUID("Source"):null,Kind.valueOf(tag.getString("Kind")),ResourceKey.create(Registries.DIMENSION,new ResourceLocation(tag.getString("Dimension"))),
+                                                                                                                                                                           ^
+C:\Users\Scorn\Desktop\MOD\Ronova-Pro-����\ronova_GPT\src\main\java\dev\ronova\pro\WorldArchive.java:191: ����: [removal] ResourceLocation �е� ResourceLocation(String) �ѹ�ʱ, �ұ��Ϊ��ɾ��
+        for(Tag value:saved){CompoundTag tag=(CompoundTag)value;BlockPos pos=NbtUtils.readBlockPos(tag.getCompound("Position"));T type=registry.getOptional(new ResourceLocation(tag.getString("Type"))).orElseThrow(()->new IllegalStateException("WORLD_TICK_TYPE_UNAVAILABLE"));
+                                                                                                                                                            ^
+C:\Users\Scorn\Desktop\MOD\Ronova-Pro-����\ronova_GPT\src\main\java\dev\ronova\pro\WorldArchive.java:196: ����: [removal] ResourceLocation �е� ResourceLocation(String) �ѹ�ʱ, �ұ��Ϊ��ɾ��
+        for(Tag value:saved.getList("Starts",Tag.TAG_COMPOUND)){CompoundTag tag=(CompoundTag)value;var type=structures.getOptional(new ResourceLocation(tag.getString("RonovaStructure"))).orElseThrow();StructureStart start=StructureStart.loadStaticStart(StructurePieceSerializationContext.fromLevel(level),tag,level.getSeed());if(start!=null)starts.put(type,start);}
+                                                                                                                                   ^
+C:\Users\Scorn\Desktop\MOD\Ronova-Pro-����\ronova_GPT\src\main\java\dev\ronova\pro\WorldArchive.java:198: ����: [removal] ResourceLocation �е� ResourceLocation(String) �ѹ�ʱ, �ұ��Ϊ��ɾ��
+        for(Tag value:saved.getList("References",Tag.TAG_COMPOUND)){CompoundTag tag=(CompoundTag)value;references.put(structures.getOptional(new ResourceLocation(tag.getString("Type"))).orElseThrow(),new it.unimi.dsi.fastutil.longs.LongOpenHashSet(tag.getLongArray("References")));}chunk.setAllReferences(references);level.onStructureStartsAvailable(chunk);
+                                                                                                                                             ^
+C:\Users\Scorn\Desktop\MOD\Ronova-Pro-����\ronova_GPT\src\main\java\dev\ronova\pro\WorldArchive.java:201: ����: [removal] ResourceLocation �е� ResourceLocation(String) �ѹ�ʱ, �ұ��Ϊ��ɾ��
+        chunk.fillBiomesFromNoise((x,y,z,sampler)->biomes.getHolderOrThrow(ResourceKey.create(Registries.BIOME,new ResourceLocation(encoded.getString((y-minimum)*16+Math.floorMod(z,4)*4+Math.floorMod(x,4))))),level.getChunkSource().randomState().sampler());
+                                                                                                               ^
+C:\Users\Scorn\Desktop\MOD\Ronova-Pro-����\ronova_GPT\src\main\java\dev\ronova\pro\ProNetwork.java:16: ����: [removal] ResourceLocation �е� ResourceLocation(String,String) �ѹ�ʱ, �ұ��Ϊ��ɾ��
+    static final SimpleChannel CHANNEL=NetworkRegistry.newSimpleChannel(new ResourceLocation("ronova_pro","presence"),
+                                                                        ^
+ע: ĳЩ�����ļ�ʹ�û򸲸����ѹ�ʱ�� API��
+ע: �й���ϸ��Ϣ, ��ʹ�� -Xlint:deprecation ���±��롣
+13 ������
+
+> Task :addMixinsToJar
+> Task :processResources
+> Task :classes
+
+> Task :compileStorageNative
+C:\Users\Scorn\Desktop\MOD\Ronova-Pro-����\ronova_GPT\native\storage.cpp:3:9: warning: '_WIN32_WINNT' macro redefined [-Wmacro-redefined]
+    3 | #define _WIN32_WINNT 0x0602
+      |         ^
+<command line>:9:9: note: previous definition is here
+    9 | #define _WIN32_WINNT 0x0603
+      |         ^
+.work\tools\zig-windows-x86_64-0.13.0\lib\libunwind\src\UnwindLevel1.c:537:1: warning: redeclaration of '_Unwind_DeleteException' should not add 'dllexport' attribute [-Wdll-attribute-on-redeclaration]
+  537 | _Unwind_DeleteException(_Unwind_Exception *exception_object) {
+      | ^
+.work\tools\zig-windows-x86_64-0.13.0\lib\libunwind\include/unwind_itanium.h:63:13: note: previous declaration is here
+   63 | extern void _Unwind_DeleteException(_Unwind_Exception *exception_object);
+      |             ^
+.work\tools\zig-windows-x86_64-0.13.0\lib\libunwind\src\UnwindLevel1.c:547:1: warning: redeclaration of '_Unwind_GetGR' should not add 'dllexport' attribute [-Wdll-attribute-on-redeclaration]
+  547 | _Unwind_GetGR(struct _Unwind_Context *context, int index) {
+      | ^
+.work\tools\zig-windows-x86_64-0.13.0\lib\libunwind\include/unwind_itanium.h:66:18: note: previous declaration is here
+   66 | extern uintptr_t _Unwind_GetGR(struct _Unwind_Context *context, int index);
+      |                  ^
+.work\tools\zig-windows-x86_64-0.13.0\lib\libunwind\src\UnwindLevel1.c:557:24: warning: redeclaration of '_Unwind_SetGR' should not add 'dllexport' attribute [-Wdll-attribute-on-redeclaration]
+  557 | _LIBUNWIND_EXPORT void _Unwind_SetGR(struct _Unwind_Context *context, int index,
+      |                        ^
+.work\tools\zig-windows-x86_64-0.13.0\lib\libunwind\include/unwind_itanium.h:67:13: note: previous declaration is here
+   67 | extern void _Unwind_SetGR(struct _Unwind_Context *context, int index,
+      |             ^
+.work\tools\zig-windows-x86_64-0.13.0\lib\libunwind\src\UnwindLevel1.c:567:29: warning: redeclaration of '_Unwind_GetIP' should not add 'dllexport' attribute [-Wdll-attribute-on-redeclaration]
+  567 | _LIBUNWIND_EXPORT uintptr_t _Unwind_GetIP(struct _Unwind_Context *context) {
+      |                             ^
+.work\tools\zig-windows-x86_64-0.13.0\lib\libunwind\include/unwind_itanium.h:69:18: note: previous declaration is here
+   69 | extern uintptr_t _Unwind_GetIP(struct _Unwind_Context *context);
+      |                  ^
+.work\tools\zig-windows-x86_64-0.13.0\lib\libunwind\src\UnwindLevel1.c:579:24: warning: redeclaration of '_Unwind_SetIP' should not add 'dllexport' attribute [-Wdll-attribute-on-redeclaration]
+  579 | _LIBUNWIND_EXPORT void _Unwind_SetIP(struct _Unwind_Context *context,
+      |                        ^
+.work\tools\zig-windows-x86_64-0.13.0\lib\libunwind\include/unwind_itanium.h:70:13: note: previous declaration is here
+   70 | extern void _Unwind_SetIP(struct _Unwind_Context *, uintptr_t new_value);
+      |             ^
+5 warnings generated.
+.work\tools\zig-windows-x86_64-0.13.0\lib\libunwind\src\UnwindLevel1-gcc-ext.c:41:1: warning: redeclaration of '_Unwind_Resume_or_Rethrow' should not add 'dllexport' attribute [-Wdll-attribute-on-redeclaration]
+   41 | _Unwind_Resume_or_Rethrow(_Unwind_Exception *exception_object) {
+      | ^
+.work\tools\zig-windows-x86_64-0.13.0\lib\libunwind\include/unwind.h:107:5: note: previous declaration is here
+  107 |     _Unwind_Resume_or_Rethrow(_Unwind_Exception *exception_object);
+      |     ^
+.work\tools\zig-windows-x86_64-0.13.0\lib\libunwind\src\UnwindLevel1-gcc-ext.c:65:1: warning: redeclaration of '_Unwind_GetDataRelBase' should not add 'dllexport' attribute [-Wdll-attribute-on-redeclaration]
+   65 | _Unwind_GetDataRelBase(struct _Unwind_Context *context) {
+      | ^
+.work\tools\zig-windows-x86_64-0.13.0\lib\libunwind\include/unwind.h:164:18: note: previous declaration is here
+  164 | extern uintptr_t _Unwind_GetDataRelBase(struct _Unwind_Context *context)
+      |                  ^
+.work\tools\zig-windows-x86_64-0.13.0\lib\libunwind\src\UnwindLevel1-gcc-ext.c:78:1: warning: redeclaration of '_Unwind_GetTextRelBase' should not add 'dllexport' attribute [-Wdll-attribute-on-redeclaration]
+   78 | _Unwind_GetTextRelBase(struct _Unwind_Context *context) {
+      | ^
+.work\tools\zig-windows-x86_64-0.13.0\lib\libunwind\include/unwind.h:166:18: note: previous declaration is here
+  166 | extern uintptr_t _Unwind_GetTextRelBase(struct _Unwind_Context *context)
+      |                  ^
+.work\tools\zig-windows-x86_64-0.13.0\lib\libunwind\src\UnwindLevel1-gcc-ext.c:87:25: warning: redeclaration of '_Unwind_FindEnclosingFunction' should not add 'dllexport' attribute [-Wdll-attribute-on-redeclaration]
+   87 | _LIBUNWIND_EXPORT void *_Unwind_FindEnclosingFunction(void *pc) {
+      |                         ^
+.work\tools\zig-windows-x86_64-0.13.0\lib\libunwind\include/unwind.h:160:14: note: previous declaration is here
+  160 | extern void *_Unwind_FindEnclosingFunction(void *pc);
+      |              ^
+.work\tools\zig-windows-x86_64-0.13.0\lib\libunwind\src\UnwindLevel1-gcc-ext.c:133:1: warning: redeclaration of '_Unwind_Backtrace' should not add 'dllexport' attribute [-Wdll-attribute-on-redeclaration]
+  133 | _Unwind_Backtrace(_Unwind_Trace_Fn callback, void *ref) {
+      | ^
+.work\tools\zig-windows-x86_64-0.13.0\lib\libunwind\include/unwind.h:115:28: note: previous declaration is here
+  115 | extern _Unwind_Reason_Code _Unwind_Backtrace(_Unwind_Trace_Fn, void *);
+      |                            ^
+.work\tools\zig-windows-x86_64-0.13.0\lib\libunwind\src\UnwindLevel1-gcc-ext.c:212:31: warning: redeclaration of '_Unwind_Find_FDE' should not add 'dllexport' attribute [-Wdll-attribute-on-redeclaration]
+  212 | _LIBUNWIND_EXPORT const void *_Unwind_Find_FDE(const void *pc,
+      |                               ^
+.work\tools\zig-windows-x86_64-0.13.0\lib\libunwind\include/unwind.h:152:20: note: previous declaration is here
+  152 | extern const void *_Unwind_Find_FDE(const void *pc, struct dwarf_eh_bases *);
+      |                    ^
+.work\tools\zig-windows-x86_64-0.13.0\lib\libunwind\src\UnwindLevel1-gcc-ext.c:233:29: warning: redeclaration of '_Unwind_GetCFA' should not add 'dllexport' attribute [-Wdll-attribute-on-redeclaration]
+  233 | _LIBUNWIND_EXPORT uintptr_t _Unwind_GetCFA(struct _Unwind_Context *context) {
+      |                             ^
+.work\tools\zig-windows-x86_64-0.13.0\lib\libunwind\include/unwind.h:120:18: note: previous declaration is here
+  120 | extern uintptr_t _Unwind_GetCFA(struct _Unwind_Context *);
+      |                  ^
+.work\tools\zig-windows-x86_64-0.13.0\lib\libunwind\src\UnwindLevel1-gcc-ext.c:246:29: warning: redeclaration of '_Unwind_GetIPInfo' should not add 'dllexport' attribute [-Wdll-attribute-on-redeclaration]
+  246 | _LIBUNWIND_EXPORT uintptr_t _Unwind_GetIPInfo(struct _Unwind_Context *context,
+      |                             ^
+.work\tools\zig-windows-x86_64-0.13.0\lib\libunwind\include/unwind.h:129:18: note: previous declaration is here
+  129 | extern uintptr_t _Unwind_GetIPInfo(struct _Unwind_Context *context,
+      |                  ^
+8 warnings generated.
+.work\tools\zig-windows-x86_64-0.13.0\lib\libunwind\src\Unwind-seh.cpp:59:1: warning: redeclaration of '_GCC_specific_handler' should not add 'dllexport' attribute [-Wdll-attribute-on-redeclaration]
+   59 | _GCC_specific_handler(PEXCEPTION_RECORD ms_exc, PVOID frame, PCONTEXT ms_ctx,
+      | ^
+.work\tools\zig-windows-x86_64-0.13.0\lib\libunwind\include/unwind.h:197:30: note: previous declaration is here
+  197 | extern EXCEPTION_DISPOSITION _GCC_specific_handler(EXCEPTION_RECORD *exc,
+      |                              ^
+.work\tools\zig-windows-x86_64-0.13.0\lib\libunwind\src\libunwind.cpp:38:36: warning: redeclaration of 'unw_local_addr_space' should not add 'dllexport' attribute [-Wdll-attribute-on-redeclaration]
+   38 | _LIBUNWIND_EXPORT unw_addr_space_t unw_local_addr_space =
+      |                                    ^
+.work\tools\zig-windows-x86_64-0.13.0\lib\libunwind\include/libunwind.h:134:25: note: previous declaration is here
+  134 | extern unw_addr_space_t unw_local_addr_space;
+      |                         ^
+.work\tools\zig-windows-x86_64-0.13.0\lib\libunwind\src\libunwind.cpp:95:41: warning: redeclaration of 'unw_init_local' should not add 'dllexport' attribute [-Wdll-attribute-on-redeclaration]
+   95 | _LIBUNWIND_WEAK_ALIAS(__unw_init_local, unw_init_local)
+      |                                         ^
+.work\tools\zig-windows-x86_64-0.13.0\lib\libunwind\include/libunwind.h:110:12: note: previous declaration is here
+  110 | extern int unw_init_local(unw_cursor_t *, unw_context_t *) LIBUNWIND_AVAIL;
+      |            ^
+.work\tools\zig-windows-x86_64-0.13.0\lib\libunwind\src\Unwind-seh.cpp:352:1: warning: redeclaration of '_Unwind_RaiseException' should not add 'dllexport' attribute [-Wdll-attribute-on-redeclaration]
+  352 | _Unwind_RaiseException(_Unwind_Exception *exception_object) {
+      | ^
+.work\tools\zig-windows-x86_64-0.13.0\lib\libunwind\include/unwind_itanium.h:60:5: note: previous declaration is here
+   60 |     _Unwind_RaiseException(_Unwind_Exception *exception_object);
+      |     ^
+.work\tools\zig-windows-x86_64-0.13.0\lib\libunwind\src\libunwind.cpp:110:38: warning: redeclaration of 'unw_get_reg' should not add 'dllexport' attribute [-Wdll-attribute-on-redeclaration]
+  110 | _LIBUNWIND_WEAK_ALIAS(__unw_get_reg, unw_get_reg)
+      |                                      ^
+.work\tools\zig-windows-x86_64-0.13.0\lib\libunwind\include/libunwind.h:112:12: note: previous declaration is here
+  112 | extern int unw_get_reg(unw_cursor_t *, unw_regnum_t, unw_w.work\tools\zig-windows-x86_64-0.13.0\lib\libunwind\src\Unwind-seh.cpp:381:1: warning: redeclaration of '_Unwind_Resume' should not add 'dllexport' attribute [-Wdll-attribute-on-redeclaration]
+or  381 | _Unwd_tind_Resume(_Unwind *) _ExceptLIiBUNWIonND_AVAIL;
+      |            ^
+ *exception_object) {
+      | ^
+.work\tools\zig-windows-x86_64-0.13.0\lib\libunwind\include/unwind_itanium.h:61:13: note: previous declaration is here
+   61 | extern void _Unwind_Resume(_Unwind_Exception *exception_object);
+      |             ^
+.work\tools\zig-windows-x86_64-0.13.0\lib\libunwind\src\libunwind.cpp:142:38: warning: redeclaration of 'unw_set_reg' should not add 'dllexport' attribute [-Wdll-attribute-on-redeclaration]
+  142 | _LIBUNWIND_WEAK_ALIAS(__unw_set_reg, unw_set_reg)
+      |                                      ^
+.work\tools\zig-windows-x86_64-0.13.0\lib\libunwind\include/libunwind.h:114:12: note: previous declaration is here
+  114 | extern int unw_set_reg(unw_cursor_t *, unw_regnum_t, unw_word_t) LIBUNWIND_AVAIL;
+      |            ^
+.work\tools\zig-windows-x86_64-0.13.0\lib\libunwind\src\Unwind-seh.cpp:420:1: warning: redeclaration of '_Unwind_ForcedUnwind' should not add 'dllexport' attribute [-Wdll-attribute-on-redeclaration]
+  420 | _Unwind_ForcedUnwind(_Unwind_Exception *exception_object,
+      | ^
+.work\tools\zig-windows-x86_64-0.13.0\lib\libunwind\include/unwind.h:85:5: note: previous declaration is here
+   85 |     _Unwind_ForcedUnwind(_Unwind_Exception *exception_object.work\tools\zig-windows-x86_64-0.13.0\lib\libunwind\src\libunwind.cpp:157,
+      |     ^
+:40: warning: redeclaration of 'unw_get_fpreg' should not add 'dllexport' attribute [-Wdll-attribute-on-redeclaration]
+  157 | _LIBUNWIND_WEAK_ALIAS(__unw_get_fpreg, unw_get_fpreg)
+      |                                        ^
+.work\tools\zig-windows-x86_64-0.13.0\lib\libunwind\include/libunwind.h:113:12: note: previous declaration is here
+  113 | extern int unw_get_fpreg(unw_cursor_t *, unw_regnum_t, unw_fpreg_t *) LIBUNWIND_AVAIL;
+      |            ^
+.work\tools\zig-windows-x86_64-0.13.0\lib\libunwind\src\Unwind-seh.cpp:438:1: warning: redeclaration of '_Unwind_GetLanguageSpecificData' should not add 'dllexport' attribute [-Wdll-attribute-on-redeclaration]
+  438 | _Unwind_GetLanguageSpecificData(struct _Unwind_Context *context) {
+      | ^
+.work\tools\zig-windows-x86_64-0.13.0\lib\libunwind\include/unwind.h:78:5: note: previous declaration is here
+   78 |     _Unwind_GetLanguageSpecificData(struct _Unwind_Context *context);
+      |     ^
+.work\tools\zig-windows-x86_64-0.13.0\lib\libunwind\src\Unwind-seh.cpp:450:1: warning: redeclaration of '_Unwind_GetRegionStart' should not add 'dllexport' attribute [-Wdll-attribute-on-redeclaration]
+  450.work\tools\zig-windows-x86_64-0.13.0\lib\libunwind\src\libunwind.cpp:176:40:  | _Uwarning: redeclaration of 'unw_set_fpreg' should not add 'dllexport' attribute [-Wdll-attribute-on-redeclaration]
+  nwind_G176 | _LIBUNWINDe_tRegWEAK_ALIAS(__unw_setionStart(struct _Un_fpreg, unw_set_fprewind_Context *contexg)
+      |                                        ^
+t) {
+      | ^
+.work\tools\zig-windows-x86_64-0.13.0\lib\libunwind\include/libunwind.h.work\tools\zig-windows-x86_64-0.13.0\lib\libunwind\include/unwind.h:115:12: note: previous declaration is here:76:18: note: previous declaration is here
+   76 | extern ui
+  115 | extern int unw_set_fpreg(unw_cursor_t *, unw_regnum_t, unw_fpreg_t)  LIBUNWIND_AVAIL;
+      |            ^
+ntptr_t _Unwind_GetRegionStart(struct _Unwind_Context *context);
+      |                  ^
+.work\tools\zig-windows-x86_64-0.13.0\lib\libunwind\src\libunwind.cpp:184:35: warning: redeclaration of 'unw_step' should not add 'dllexport' attribute [-Wdll-attribute-on-redeclaration]
+  184 | _LIBUNWIND_WEAK_ALIAS(__unw_step, unw_step)
+      |                                   ^
+.work\tools\zig-windows-x86_64-0.13.0\lib\libunwind\include/libunwind.h:111:12: note: previous declaration is here
+  111 | extern int unw_step(unw_cursor_t *) LIBUNWIND_AVAIL;
+      |            ^
+.work\tools\zig-windows-x86_64-0.13.0\lib\libunwind\src\libunwind.cpp:206:44: warning: redeclaration of 'unw_get_proc_info' should not add 'dllexport' attribute [-Wdll-attribute-on-redeclaration]
+  206 | _LIBUNWIND_WEAK_ALIAS(__unw_get_proc_info, unw_get_proc_info)
+      |                                            ^
+.work\tools\zig-windows-x86_64-0.13.0\lib\libunwind\include/libunwind.h:128:12: note: previous declaration is here
+  128 | extern int unw_get_proc_info(unw_cursor_t *, unw_proc_info_t *) LIBUNWIND_AVAIL;
+      |            ^
+.work\tools\zig-windows-x86_64-0.13.0\lib\libunwind\src\libunwind.cpp:219:37: warning: redeclaration of 'unw_resume' should not add 'dllexport' attribute [-Wdll-attribute-on-redeclaration]
+  219 | _LIBUNWIND_WEAK_ALIAS(__unw_resume, unw_resume)
+      |                                     ^
+.work\tools\zig-windows-x86_64-0.13.0\lib\libunwind\include/libunwind.h:116:12: note: previous declaration is here
+  116 | extern int unw_resume(unw_cursor_t *) LIBUNWIND_AVAIL;
+      |            ^
+.work\tools\zig-windows-x86_64-0.13.0\lib\libunwind\src\libunwind.cpp:232:44: warning: redeclaration of 'unw_get_proc_name' should not add 'dllexport' attribute [-Wdll-attribute-on-redeclaration]
+  232 | _LIBUNWIND_WEAK_ALIAS(__unw_get_proc_name, unw_get_proc_name)
+      |                                            ^
+.work\tools\zig-windows-x86_64-0.13.0\lib\libunwind\include/libunwind.h:131:12: note: previous declaration is here
+  131 | extern int unw_get_proc_name(unw_cursor_t *, char *, size_t, unw_word_t *) LIBUNWIND_AVAIL;
+      |            ^
+.work\tools\zig-windows-x86_64-0.13.0\lib\libunwind\src\libunwind.cpp:242:39: warning: redeclaration of 'unw_is_fpreg' should not add 'dllexport' attribute [-Wdll-attribute-on-redeclaration]
+  242 | _LIBUNWIND_WEAK_ALIAS(__unw_is_fpreg, unw_is_fpreg)
+      |                                       ^
+.work\tools\zig-windows-x86_64-0.13.0\lib\libunwind\include/libunwind.h:129:12: note: previous declaration is here
+  129 | extern int unw_is_fpreg(unw_cursor_t *, unw_regnum_t) LIBUNWIND_AVAIL;
+      |            ^
+.work\tools\zig-windows-x86_64-0.13.0\lib\libunwind\src\libunwind.cpp:252:38: warning: redeclaration of 'unw_regname' should not add 'dllexport' attribute [-Wdll-attribute-on-redeclaration]
+  252 | _LIBUNWIND_WEAK_ALIAS(__unw_regname, unw_regname)
+      |                                      ^
+.work\tools\zig-windows-x86_64-0.13.0\lib\libunwind\include/libunwind.h:127:20: note: previous declaration is here
+  127 | extern const char *unw_regname(unw_cursor_t *, unw_regnum_t) LIBUNWIND_AVAIL;
+      |                    ^
+.work\tools\zig-windows-x86_64-0.13.0\lib\libunwind\src\libunwind.cpp:261:46: warning: redeclaration of 'unw_is_signal_frame' should not add 'dllexport' attribute [-Wdll-attribute-on-redeclaration]
+  261 | _LIBUNWIND_WEAK_ALIAS(__unw_is_signal_frame, unw_is_signal_frame)
+      |                                              ^
+.work\tools\zig-windows-x86_64-0.13.0\lib\libunwind\include/libunwind.h:130:12: note: previous declaration is here
+  130 | extern int unw_is_signal_frame(unw_cursor_t *) LIBUNWIND_AVAIL;
+      |            ^
+13 warnings generated.
+6 warnings generated.
+1 warning generated.
+Get-FileHash : ???????Get-FileHash???????? cmdlet????????????????????��???????????????????��?????????��???????
+??��????????????????��?
+????��?? C:\Users\Scorn\Desktop\MOD\Ronova-Pro-????\ronova_GPT\native\build.ps1:25 ???: 1
++ Get-FileHash -LiteralPath $outputDll -Algorithm SHA256
++ ~~~~~~~~~~~~
+    + CategoryInfo          : ObjectNotFound: (Get-FileHash:String) [], ParentContainsErrorRecordException
+    + FullyQualifiedErrorId : CommandNotFoundException
+ 
+
+FAILURE: Build failed with an exception.
+
+* What went wrong:
+Execution failed for task ':compileStorageNative'.
+> Process 'command 'powershell.exe'' finished with non-zero exit value 1
+
+* Try:
+> Run with --stacktrace option to get the stack trace.
+> Run with --info or --debug option to get more log output.
+> Run with --scan to get full insights.
+> Get more help at https://help.gradle.org.
+
+
+BUILD FAILED in 33s
+> Task :compileStorageNative FAILED
+7 actionable tasks: 5 executed, 2 up-to-date

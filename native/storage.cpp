@@ -1,4 +1,5 @@
 #define WIN32_LEAN_AND_MEAN
+#define NOMINMAX
 #define _WIN32_WINNT 0x0602
 #include <windows.h>
 #include <jni.h>
@@ -9,7 +10,7 @@
 #include <cstdio>
 #include "storage_transaction.hpp"
 
-extern "C" JNIEXPORT jint JNICALL Java_dev_ronova_pro_StorageNative_abi0(JNIEnv*,jclass) { return 2; }
+extern "C" JNIEXPORT jint JNICALL Java_dev_ronova_pro_StorageNative_abi0(JNIEnv*,jclass) { return 3; }
 
 // Borrow the live Java stream handle: no path-open and no ownership transfer.
 extern "C" JNIEXPORT jstring JNICALL

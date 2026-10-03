@@ -1,0 +1,87 @@
+To honour the JVM settings for this build a single-use Daemon process will be forked. For more on this, please refer to https://docs.gradle.org/8.8/userguide/gradle_daemon.html#sec:disabling_the_daemon in the Gradle documentation.
+Daemon will be stopped at the end of the build 
+
+> Configure project :
+MixinGradle is skipping eclipse integration, extension not found
+Neither the 'eclipse' nor the 'idea' plugins were found, but IDE resource copy has been enabled.
+
+> Task :downloadMcpConfig
+> Task :extractSrg UP-TO-DATE
+> Task :createMcpToSrg UP-TO-DATE
+
+> Task :compileJava
+ע: SpongePowered MIXIN Annotation Processor Version=0.8.5 (MixinGradle Version=0.7)
+ע: Supported obfuscation types: ObfuscationServiceMCP supports [notch] ObfuscationServiceFG3 supports [searge]
+ע: Loading searge mappings from C:\Users\Scorn\Desktop\MOD\Ronova-Pro-����\ronova_GPT\build\createMcpToSrg\output.tsrg
+C:\Users\Scorn\Desktop\MOD\Ronova-Pro-����\ronova_GPT\src\main\java\dev\ronova\pro\mixin\NbtOperationsHooks.java:23: ����: Unable to locate method mapping for @At(INVOKE.<target>) 'Lcom/mojang/serialization/DataResult;success(Ljava/lang/Object;)Lcom/mojang/serialization/DataResult;'
+        @Redirect(method="mergeToMap(Lnet/minecraft/nbt/Tag;Lnet/minecraft/nbt/Tag;Lnet/minecraft/nbt/Tag;)Lcom/mojang/serialization/DataResult;",
+        ^
+C:\Users\Scorn\Desktop\MOD\Ronova-Pro-����\ronova_GPT\src\main\java\dev\ronova\pro\mixin\NbtOperationsHooks.java:28: ����: Unable to locate method mapping for @At(INVOKE.<target>) 'Lcom/mojang/serialization/DataResult;success(Ljava/lang/Object;)Lcom/mojang/serialization/DataResult;'
+        @Redirect(method="mergeToMap(Lnet/minecraft/nbt/Tag;Lcom/mojang/serialization/MapLike;)Lcom/mojang/serialization/DataResult;",
+        ^
+C:\Users\Scorn\Desktop\MOD\Ronova-Pro-����\ronova_GPT\src\main\java\dev\ronova\pro\mixin\NbtOperationsHooks.java:33: ����: Unable to locate method mapping for @At(INVOKE.<target>) 'Lcom/mojang/serialization/DataResult;error(Ljava/util/function/Supplier;Ljava/lang/Object;)Lcom/mojang/serialization/DataResult;'
+        @Redirect(method="mergeToMap(Lnet/minecraft/nbt/Tag;Lcom/mojang/serialization/MapLike;)Lcom/mojang/serialization/DataResult;",
+        ^
+C:\Users\Scorn\Desktop\MOD\Ronova-Pro-����\ronova_GPT\src\main\java\dev\ronova\pro\mixin\NbtOperationsHooks.java:45: ����: Unable to locate method mapping for @At(INVOKE.<target>) 'Lcom/mojang/serialization/DataResult;success(Ljava/lang/Object;)Lcom/mojang/serialization/DataResult;'
+        @Redirect(method="build(Lnet/minecraft/nbt/CompoundTag;Lnet/minecraft/nbt/Tag;)Lcom/mojang/serialization/DataResult;",
+        ^
+ע: Writing refmap to C:\Users\Scorn\Desktop\MOD\Ronova-Pro-����\ronova_GPT\build\tmp\compileJava\compileJava-refmap.json
+C:\Users\Scorn\Desktop\MOD\Ronova-Pro-����\ronova_GPT\src\main\java\dev\ronova\pro\mixin\Access.java:49: ����: Unable to locate obfuscation mapping for @Accessor target canUpdate
+        @Accessor("canUpdate") boolean pro$canUpdate();
+        ^
+C:\Users\Scorn\Desktop\MOD\Ronova-Pro-����\ronova_GPT\src\main\java\dev\ronova\pro\mixin\Access.java:50: ����: Unable to locate obfuscation mapping for @Accessor target canUpdate
+        @Accessor("canUpdate") void pro$canUpdate(boolean value);
+        ^
+C:\Users\Scorn\Desktop\MOD\Ronova-Pro-����\ronova_GPT\src\main\java\dev\ronova\pro\mixin\Access.java:53: ����: Unable to locate obfuscation mapping for @Accessor target isAddedToWorld
+        @Accessor("isAddedToWorld") void pro$added(boolean value);
+        ^
+ע: Writing refmap to C:\Users\Scorn\Desktop\MOD\Ronova-Pro-����\ronova_GPT\build\tmp\compileJava\compileJava-refmap.json
+ע: Writing searge composite mappings to C:\Users\Scorn\Desktop\MOD\Ronova-Pro-����\ronova_GPT\build\tmp\compileJava\compileJava-mappings.tsrg
+ע: Writing refmap to C:\Users\Scorn\Desktop\MOD\Ronova-Pro-����\ronova_GPT\build\tmp\compileJava\compileJava-refmap.json
+ע: Writing refmap to C:\Users\Scorn\Desktop\MOD\Ronova-Pro-����\ronova_GPT\build\tmp\compileJava\compileJava-refmap.json
+ע: Writing searge composite mappings to C:\Users\Scorn\Desktop\MOD\Ronova-Pro-����\ronova_GPT\build\tmp\compileJava\compileJava-mappings.tsrg
+C:\Users\Scorn\Desktop\MOD\Ronova-Pro-����\ronova_GPT\src\main\java\dev\ronova\pro\WorldArchive.java:75: ����: [removal] ResourceLocation �е� ResourceLocation(String) �ѹ�ʱ, �ұ��Ϊ��ɾ��
+            Job job=new Job(tag.getUUID("Id"),tag.hasUUID("Source")?tag.getUUID("Source"):null,Kind.valueOf(tag.getString("Kind")),ResourceKey.create(Registries.DIMENSION,new ResourceLocation(tag.getString("Dimension"))),
+                                                                                                                                                                           ^
+C:\Users\Scorn\Desktop\MOD\Ronova-Pro-����\ronova_GPT\src\main\java\dev\ronova\pro\WorldArchive.java:191: ����: [removal] ResourceLocation �е� ResourceLocation(String) �ѹ�ʱ, �ұ��Ϊ��ɾ��
+        for(Tag value:saved){CompoundTag tag=(CompoundTag)value;BlockPos pos=NbtUtils.readBlockPos(tag.getCompound("Position"));T type=registry.getOptional(new ResourceLocation(tag.getString("Type"))).orElseThrow(()->new IllegalStateException("WORLD_TICK_TYPE_UNAVAILABLE"));
+                                                                                                                                                            ^
+C:\Users\Scorn\Desktop\MOD\Ronova-Pro-����\ronova_GPT\src\main\java\dev\ronova\pro\WorldArchive.java:196: ����: [removal] ResourceLocation �е� ResourceLocation(String) �ѹ�ʱ, �ұ��Ϊ��ɾ��
+        for(Tag value:saved.getList("Starts",Tag.TAG_COMPOUND)){CompoundTag tag=(CompoundTag)value;var type=structures.getOptional(new ResourceLocation(tag.getString("RonovaStructure"))).orElseThrow();StructureStart start=StructureStart.loadStaticStart(StructurePieceSerializationContext.fromLevel(level),tag,level.getSeed());if(start!=null)starts.put(type,start);}
+                                                                                                                                   ^
+C:\Users\Scorn\Desktop\MOD\Ronova-Pro-����\ronova_GPT\src\main\java\dev\ronova\pro\WorldArchive.java:198: ����: [removal] ResourceLocation �е� ResourceLocation(String) �ѹ�ʱ, �ұ��Ϊ��ɾ��
+        for(Tag value:saved.getList("References",Tag.TAG_COMPOUND)){CompoundTag tag=(CompoundTag)value;references.put(structures.getOptional(new ResourceLocation(tag.getString("Type"))).orElseThrow(),new it.unimi.dsi.fastutil.longs.LongOpenHashSet(tag.getLongArray("References")));}chunk.setAllReferences(references);level.onStructureStartsAvailable(chunk);
+                                                                                                                                             ^
+C:\Users\Scorn\Desktop\MOD\Ronova-Pro-����\ronova_GPT\src\main\java\dev\ronova\pro\WorldArchive.java:201: ����: [removal] ResourceLocation �е� ResourceLocation(String) �ѹ�ʱ, �ұ��Ϊ��ɾ��
+        chunk.fillBiomesFromNoise((x,y,z,sampler)->biomes.getHolderOrThrow(ResourceKey.create(Registries.BIOME,new ResourceLocation(encoded.getString((y-minimum)*16+Math.floorMod(z,4)*4+Math.floorMod(x,4))))),level.getChunkSource().randomState().sampler());
+                                                                                                               ^
+C:\Users\Scorn\Desktop\MOD\Ronova-Pro-����\ronova_GPT\src\main\java\dev\ronova\pro\ProNetwork.java:14: ����: [removal] ResourceLocation �е� ResourceLocation(String,String) �ѹ�ʱ, �ұ��Ϊ��ɾ��
+    static final SimpleChannel CHANNEL=NetworkRegistry.newSimpleChannel(new ResourceLocation("ronova_pro","presence"),
+                                                                        ^
+ע: ĳЩ�����ļ�ʹ�û򸲸����ѹ�ʱ�� API��
+ע: �й���ϸ��Ϣ, ��ʹ�� -Xlint:deprecation ���±��롣
+13 ������
+
+> Task :addMixinsToJar
+> Task :processResources UP-TO-DATE
+> Task :classes
+> Task :addMixinsToRecoveryAgentJar
+> Task :compileAgentJava
+> Task :processAgentResources NO-SOURCE
+> Task :agentClasses
+> Task :recoveryAgentJar
+> Task :addMixinsToRecoveryBootstrapJar
+> Task :compileBootstrapJava
+> Task :processBootstrapResources NO-SOURCE
+> Task :bootstrapClasses
+
+> Task :compileControlNative
+8EE7BCD9D92302F956102FDE231B8E0BE02A60DDB3AF5D078A52AA2DE120ED2D
+
+> Task :recoveryBootstrapJar
+> Task :jar
+> Task :configureReobfTaskForReobfJar
+> Task :reobfJar
+
+BUILD SUCCESSFUL in 26s
+16 actionable tasks: 13 executed, 3 up-to-date

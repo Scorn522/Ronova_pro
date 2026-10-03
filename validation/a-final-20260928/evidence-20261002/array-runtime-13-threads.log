@@ -1,0 +1,88 @@
+2026-10-02 22:23:51
+Full thread dump OpenJDK 64-Bit Server VM (17.0.19+10 mixed mode, sharing):
+
+Threads class SMR info:
+_java_thread_list=0x000001edede801b0, length=12, elements={
+0x000001ed81fe76a0, 0x000001eda3413e40, 0x000001eda3414a00, 0x000001eda3434b70,
+0x000001eda3435530, 0x000001eda3436910, 0x000001eda34392e0, 0x000001eda343a9f0,
+0x000001eda343e320, 0x000001eda34406b0, 0x000001eda3588fe0, 0x000001edeab55d00
+}
+
+"main" #1 prio=5 os_prio=0 cpu=75718.75ms elapsed=77.93s tid=0x000001ed81fe76a0 nid=0xad88 runnable  [0x0000004da7bfc000]
+   java.lang.Thread.State: RUNNABLE
+	at java.util.zip.Inflater.inflateBytesBytes(java.base@17.0.19/Native Method)
+	at java.util.zip.Inflater.inflate(java.base@17.0.19/Inflater.java:378)
+	- locked <0x00000000800135b0> (a java.util.zip.Inflater$InflaterZStreamRef)
+	at java.util.zip.InflaterInputStream.read(java.base@17.0.19/InflaterInputStream.java:152)
+	at jdk.internal.loader.Resource.getBytes(java.base@17.0.19/Resource.java:126)
+	at jdk.internal.loader.URLClassPath$JarLoader$2.getBytes(java.base@17.0.19/URLClassPath.java:895)
+	at jdk.internal.loader.BuiltinClassLoader.defineClass(java.base@17.0.19/BuiltinClassLoader.java:859)
+	at jdk.internal.loader.BuiltinClassLoader.findClassOnClassPathOrNull(java.base@17.0.19/BuiltinClassLoader.java:760)
+	at jdk.internal.loader.BuiltinClassLoader.loadClassOrNull(java.base@17.0.19/BuiltinClassLoader.java:681)
+	- locked <0x00000000a95965a0> (a java.lang.Object)
+	at jdk.internal.loader.BuiltinClassLoader.loadClass(java.base@17.0.19/BuiltinClassLoader.java:639)
+	at jdk.internal.loader.ClassLoaders$AppClassLoader.loadClass(java.base@17.0.19/ClassLoaders.java:188)
+	at java.lang.ClassLoader.loadClass(java.base@17.0.19/ClassLoader.java:525)
+	at dev.ronova.pro.agent.ControlImages.critical(ControlImages.java:42)
+	at dev.ronova.pro.agent.ControlImages.transform(ControlImages.java:60)
+	- locked <0x000000008001d7b0> (a dev.ronova.pro.agent.ControlImages)
+	at sun.instrument.TransformerManager.transform(java.instrument@17.0.19/TransformerManager.java:188)
+	at sun.instrument.InstrumentationImpl.transform(java.instrument@17.0.19/InstrumentationImpl.java:541)
+	at sun.instrument.InstrumentationImpl.retransformClasses0(java.instrument@17.0.19/Native Method)
+	at sun.instrument.InstrumentationImpl.retransformClasses(java.instrument@17.0.19/InstrumentationImpl.java:169)
+	at dev.ronova.pro.agent.RecoveryAgent.install(RecoveryAgent.java:296)
+	- locked <0x0000000080004c38> (a java.lang.Class for dev.ronova.pro.agent.RecoveryAgent)
+	at dev.ronova.pro.agent.RecoveryAgent.start(RecoveryAgent.java:45)
+	- locked <0x0000000080004c38> (a java.lang.Class for dev.ronova.pro.agent.RecoveryAgent)
+	at dev.ronova.pro.agent.RecoveryAgent.premain(RecoveryAgent.java:29)
+	at jdk.internal.reflect.NativeMethodAccessorImpl.invoke0(java.base@17.0.19/Native Method)
+	at jdk.internal.reflect.NativeMethodAccessorImpl.invoke(java.base@17.0.19/NativeMethodAccessorImpl.java:77)
+	at jdk.internal.reflect.DelegatingMethodAccessorImpl.invoke(java.base@17.0.19/DelegatingMethodAccessorImpl.java:43)
+	at java.lang.reflect.Method.invoke(java.base@17.0.19/Method.java:569)
+	at sun.instrument.InstrumentationImpl.loadClassAndStartAgent(java.instrument@17.0.19/InstrumentationImpl.java:491)
+	at sun.instrument.InstrumentationImpl.loadClassAndCallPremain(java.instrument@17.0.19/InstrumentationImpl.java:503)
+
+   Locked ownable synchronizers:
+	- <0x00000000a910cc58> (a java.util.concurrent.locks.ReentrantLock$NonfairSync)
+
+"Reference Handler" #2 daemon prio=10 os_prio=2 cpu=15.62ms elapsed=77.92s tid=0x000001eda3413e40 nid=0xb69c waiting on condition  [0x0000004da82ff000]
+   java.lang.Thread.State: RUNNABLE
+	at java.lang.ref.Reference.waitForReferencePendingList(java.base@17.0.19/Native Method)
+	at java.lang.ref.Reference.processPendingReferences(java.base@17.0.19/Reference.java:253)
+	at java.lang.ref.Reference$ReferenceHandler.run(java.base@17.0.19/Reference.java:215)
+
+   Locked ownable synchronizers:
+	- None
+
+"Finalizer" #3 daemon prio=8 os_prio=1 cpu=0.00ms elapsed=77.92s tid=0x000001eda3414a00 nid=0x4ae4 in Object.wait()  [0x0000004da83ff000]
+   java.lang.Thread.State: WAITING (on object monitor)
+	at java.lang.Object.wait(java.base@17.0.19/Native Method)
+	- waiting on <0x0000000080002cb0> (a java.lang.ref.ReferenceQueue$Lock)
+	at java.lang.ref.ReferenceQueue.remove(java.base@17.0.19/ReferenceQueue.java:155)
+	- locked <0x0000000080002cb0> (a java.lang.ref.ReferenceQueue$Lock)
+	at java.lang.ref.ReferenceQueue.remove(java.base@17.0.19/ReferenceQueue.java:176)
+	at java.lang.ref.Finalizer$FinalizerThread.run(java.base@17.0.19/Finalizer.java:172)
+
+   Locked ownable synchronizers:
+	- None
+
+"Signal Dispatcher" #4 daemon prio=9 os_prio=2 cpu=0.00ms elapsed=77.91s tid=0x000001eda3434b70 nid=0xcdc waiting on condition  [0x0000000000000000]
+   java.lang.Thread.State: RUNNABLE
+
+   Locked ownable synchronizers:
+	- None
+
+"Attach Listener" #5 daemon prio=5 os_prio=2 cpu=0.00ms elapsed=77.91s tid=0x000001eda3435530 nid=0x84ac waiting on condition  [0x0000000000000000]
+   java.lang.Thread.State: RUNNABLE
+
+   Locked ownable synchronizers:
+	- None
+
+"Service Thread" #6 daemon prio=9 os_prio=0 cpu=0.00ms elapsed=77.91s tid=0x000001eda3436910 nid=0x14c0 runnable  [0x0000000000000000]
+   java.lang.Thread.State: RUNNABLE
+
+   Locked ownable synchronizers:
+	- None
+
+"Monitor Deflation Thread" #7 daemon prio=9 os_prio=0 cpu=0.00ms elapsed=77.91s tid=0x000001eda34392e0 nid=0xeac runnable  [0x0000000000000000]
+   java.lang.Thread.State: RUNNABLE

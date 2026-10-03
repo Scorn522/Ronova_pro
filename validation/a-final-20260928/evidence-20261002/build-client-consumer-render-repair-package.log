@@ -1,0 +1,74 @@
+To honour the JVM settings for this build a single-use Daemon process will be forked. For more on this, please refer to https://docs.gradle.org/8.8/userguide/gradle_daemon.html#sec:disabling_the_daemon in the Gradle documentation.
+Daemon will be stopped at the end of the build 
+
+> Configure project :
+MixinGradle is skipping eclipse integration, extension not found
+Neither the 'eclipse' nor the 'idea' plugins were found, but IDE resource copy has been enabled.
+
+> Task :downloadMcpConfig
+> Task :extractSrg UP-TO-DATE
+> Task :createMcpToSrg UP-TO-DATE
+
+> Task :compileJava
+ע: SpongePowered MIXIN Annotation Processor Version=0.8.5 (MixinGradle Version=0.7)
+ע: Supported obfuscation types: ObfuscationServiceMCP supports [notch] ObfuscationServiceFG3 supports [searge]
+ע: Loading searge mappings from C:\Users\Scorn\Desktop\MOD\Ronova-Pro-����\ronova_GPT\build\createMcpToSrg\output.tsrg
+C:\Users\Scorn\Desktop\MOD\Ronova-Pro-����\ronova_GPT\src\main\java\dev\ronova\pro\mixin\ClientWorldHooks.java:99: ����: Cannot find target method "render(Lnet/minecraft/world/level/block/entity/BlockEntity;FLcom/mojang/blaze3d/vertex/PoseStack;Lnet/minecraft/client/renderer/MultiBufferSource;II)V" for @Redirect.method="render(Lnet/minecraft/world/level/block/entity/BlockEntity;FLcom/mojang/blaze3d/vertex/PoseStack;Lnet/minecraft/client/renderer/MultiBufferSource;II)V" in net.minecraft.client.renderer.blockentity.BlockEntityRenderDispatcher
+        @Redirect(method="render(Lnet/minecraft/world/level/block/entity/BlockEntity;FLcom/mojang/blaze3d/vertex/PoseStack;Lnet/minecraft/client/renderer/MultiBufferSource;II)V",at=@At(value="INVOKE",target="Lit/unimi/dsi/fastutil/floats/Float2FloatFunction;get(F)F",remap=false),require=0)
+        ^
+C:\Users\Scorn\Desktop\MOD\Ronova-Pro-����\ronova_GPT\src\main\java\dev\ronova\pro\mixin\ClientWorldHooks.java:99: ����: Cannot find target method "render(Lnet/minecraft/world/level/block/entity/BlockEntity;FLcom/mojang/blaze3d/vertex/PoseStack;Lnet/minecraft/client/renderer/MultiBufferSource;II)V" for @Redirect.method="render(Lnet/minecraft/world/level/block/entity/BlockEntity;FLcom/mojang/blaze3d/vertex/PoseStack;Lnet/minecraft/client/renderer/MultiBufferSource;II)V" in net.minecraft.client.renderer.blockentity.ChestRenderer
+        @Redirect(method="render(Lnet/minecraft/world/level/block/entity/BlockEntity;FLcom/mojang/blaze3d/vertex/PoseStack;Lnet/minecraft/client/renderer/MultiBufferSource;II)V",at=@At(value="INVOKE",target="Lit/unimi/dsi/fastutil/floats/Float2FloatFunction;get(F)F",remap=false),require=0)
+        ^
+C:\Users\Scorn\Desktop\MOD\Ronova-Pro-����\ronova_GPT\src\main\java\dev\ronova\pro\mixin\ClientWorldHooks.java:99: ����: Unable to locate obfuscation mapping for @Redirect target render
+        @Redirect(method="render(Lnet/minecraft/world/level/block/entity/BlockEntity;FLcom/mojang/blaze3d/vertex/PoseStack;Lnet/minecraft/client/renderer/MultiBufferSource;II)V",at=@At(value="INVOKE",target="Lit/unimi/dsi/fastutil/floats/Float2FloatFunction;get(F)F",remap=false),require=0)
+        ^
+C:\Users\Scorn\Desktop\MOD\Ronova-Pro-����\ronova_GPT\src\main\java\dev\ronova\pro\mixin\NbtOperationsHooks.java:23: ����: Unable to locate method mapping for @At(INVOKE.<target>) 'Lcom/mojang/serialization/DataResult;success(Ljava/lang/Object;)Lcom/mojang/serialization/DataResult;'
+        @Redirect(method="mergeToMap(Lnet/minecraft/nbt/Tag;Lnet/minecraft/nbt/Tag;Lnet/minecraft/nbt/Tag;)Lcom/mojang/serialization/DataResult;",
+        ^
+C:\Users\Scorn\Desktop\MOD\Ronova-Pro-����\ronova_GPT\src\main\java\dev\ronova\pro\mixin\NbtOperationsHooks.java:28: ����: Unable to locate method mapping for @At(INVOKE.<target>) 'Lcom/mojang/serialization/DataResult;success(Ljava/lang/Object;)Lcom/mojang/serialization/DataResult;'
+        @Redirect(method="mergeToMap(Lnet/minecraft/nbt/Tag;Lcom/mojang/serialization/MapLike;)Lcom/mojang/serialization/DataResult;",
+        ^
+C:\Users\Scorn\Desktop\MOD\Ronova-Pro-����\ronova_GPT\src\main\java\dev\ronova\pro\mixin\NbtOperationsHooks.java:33: ����: Unable to locate method mapping for @At(INVOKE.<target>) 'Lcom/mojang/serialization/DataResult;error(Ljava/util/function/Supplier;Ljava/lang/Object;)Lcom/mojang/serialization/DataResult;'
+        @Redirect(method="mergeToMap(Lnet/minecraft/nbt/Tag;Lcom/mojang/serialization/MapLike;)Lcom/mojang/serialization/DataResult;",
+        ^
+C:\Users\Scorn\Desktop\MOD\Ronova-Pro-����\ronova_GPT\src\main\java\dev\ronova\pro\mixin\NbtOperationsHooks.java:45: ����: Unable to locate method mapping for @At(INVOKE.<target>) 'Lcom/mojang/serialization/DataResult;success(Ljava/lang/Object;)Lcom/mojang/serialization/DataResult;'
+        @Redirect(method="build(Lnet/minecraft/nbt/CompoundTag;Lnet/minecraft/nbt/Tag;)Lcom/mojang/serialization/DataResult;",
+        ^
+C:\Users\Scorn\Desktop\MOD\Ronova-Pro-����\ronova_GPT\src\main\java\dev\ronova\pro\mixin\ClientWorldHooks.java:96: ����: Cannot find target method "render(Lnet/minecraft/world/level/block/entity/BlockEntity;FLcom/mojang/blaze3d/vertex/PoseStack;Lnet/minecraft/client/renderer/MultiBufferSource;)V" for @ModifyVariable.method="render(Lnet/minecraft/world/level/block/entity/BlockEntity;FLcom/mojang/blaze3d/vertex/PoseStack;Lnet/minecraft/client/renderer/MultiBufferSource;)V" in net.minecraft.client.renderer.blockentity.ChestRenderer
+        @ModifyVariable(method="render(Lnet/minecraft/world/level/block/entity/BlockEntity;FLcom/mojang/blaze3d/vertex/PoseStack;Lnet/minecraft/client/renderer/MultiBufferSource;)V",at=@At("HEAD"),argsOnly=true,ordinal=0,require=0)
+        ^
+C:\Users\Scorn\Desktop\MOD\Ronova-Pro-����\ronova_GPT\src\main\java\dev\ronova\pro\mixin\ClientWorldHooks.java:96: ����: Unable to locate obfuscation mapping for @ModifyVariable target render
+        @ModifyVariable(method="render(Lnet/minecraft/world/level/block/entity/BlockEntity;FLcom/mojang/blaze3d/vertex/PoseStack;Lnet/minecraft/client/renderer/MultiBufferSource;)V",at=@At("HEAD"),argsOnly=true,ordinal=0,require=0)
+        ^
+ע: Writing refmap to C:\Users\Scorn\Desktop\MOD\Ronova-Pro-����\ronova_GPT\build\tmp\compileJava\compileJava-refmap.json
+C:\Users\Scorn\Desktop\MOD\Ronova-Pro-����\ronova_GPT\src\main\java\dev\ronova\pro\mixin\Access.java:49: ����: Unable to locate obfuscation mapping for @Accessor target canUpdate
+        @Accessor("canUpdate") boolean pro$canUpdate();
+        ^
+C:\Users\Scorn\Desktop\MOD\Ronova-Pro-����\ronova_GPT\src\main\java\dev\ronova\pro\mixin\Access.java:50: ����: Unable to locate obfuscation mapping for @Accessor target canUpdate
+        @Accessor("canUpdate") void pro$canUpdate(boolean value);
+        ^
+C:\Users\Scorn\Desktop\MOD\Ronova-Pro-����\ronova_GPT\src\main\java\dev\ronova\pro\mixin\Access.java:53: ����: Unable to locate obfuscation mapping for @Accessor target isAddedToWorld
+        @Accessor("isAddedToWorld") void pro$added(boolean value);
+        ^
+ע: Writing refmap to C:\Users\Scorn\Desktop\MOD\Ronova-Pro-����\ronova_GPT\build\tmp\compileJava\compileJava-refmap.json
+ע: Writing searge composite mappings to C:\Users\Scorn\Desktop\MOD\Ronova-Pro-����\ronova_GPT\build\tmp\compileJava\compileJava-mappings.tsrg
+ע: Writing refmap to C:\Users\Scorn\Desktop\MOD\Ronova-Pro-����\ronova_GPT\build\tmp\compileJava\compileJava-refmap.json
+ע: Writing refmap to C:\Users\Scorn\Desktop\MOD\Ronova-Pro-����\ronova_GPT\build\tmp\compileJava\compileJava-refmap.json
+ע: Writing searge composite mappings to C:\Users\Scorn\Desktop\MOD\Ronova-Pro-����\ronova_GPT\build\tmp\compileJava\compileJava-mappings.tsrg
+2 ������
+10 ������
+
+
+> Task :compileJava FAILED
+FAILURE: Build failed with an exception.
+
+* What went wrong:
+Execution failed for task ':compileJava'.
+> Compilation failed; see the compiler error output for details.
+
+* Try:
+> Run with --info option to get more log output.
+> Run with --scan to get full insights.
+
+BUILD FAILED in 12s
+4 actionable tasks: 2 executed, 2 up-to-date

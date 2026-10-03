@@ -1,0 +1,18 @@
+ISOLATED_SERVER_PID=74488
+Traceback (most recent call last):
+  File "C:\Users\Scorn\Desktop\MOD\Ronova-Pro-����\MOD\.work\pro-a-final-20260928\run-isolated.py", line 34, in <module>
+    code = process.wait(timeout=360)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\Scorn\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\Lib\subprocess.py", line 1264, in wait
+    return self._wait(timeout=timeout)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\Scorn\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\Lib\subprocess.py", line 1593, in _wait
+    raise TimeoutExpired(self.args, timeout)
+subprocess.TimeoutExpired: Command '['C:\\Program Files\\Eclipse Adoptium\\jdk-17.0.19.10-hotspot\\bin\\java.exe', '-Xmx2G', '-Dfile.encoding=UTF-8', '-Dronova.pro.validation=true', '-Dronova.pro.fixture=raw-backing', '-Dronova.pro.fixture.variant=direct-fields', '-javaagent:C:\\Users\\Scorn\\Desktop\\MOD\\Ronova-Pro-����\\ronova_GPT\\build\\libs\\ronova-pro-agent.jar=base64:QzpcVXNlcnNcU2Nvcm5cRGVza3RvcFxNT0RcUm9ub3ZhLVByby3mjqXnu61ccm9ub3ZhX0dQVFxidWlsZFxsaWJzXHJvbm92YS1wcm8tYm9vdHN0cmFwLmphcg', '@libraries/net/minecraftforge/forge/1.20.1-47.4.23/win_args.txt', 'nogui']' timed out after 360 seconds
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "C:\Users\Scorn\Desktop\MOD\Ronova-Pro-����\MOD\.work\pro-a-final-20260928\run-isolated.py", line 39, in <module>
+    raise RuntimeError('isolated fixture timed out; logs retained')
+RuntimeError: isolated fixture timed out; logs retained

@@ -1,9 +1,15 @@
 param(
     [string]$JdkHome = $env:JAVA_HOME,
-    [string]$Zig = 'D:/桌面/MOD/.build-tools/zig-windows-x86_64-0.13.0/zig.exe'
+    [string]$Zig = $env:RONOVA_STORAGE_ZIG
 )
 $ErrorActionPreference = 'Stop'
 $projectRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
+if (-not $Zig) {
+    $zigCommand = Get-Command zig -ErrorAction SilentlyContinue
+    $Zig = if ($zigCommand) { $zigCommand.Source } else { Join-Path $projectRoot '.work/tools/zig-windows-x86_64-0.13.0/zig.exe' }
+}
+if (-not $env:ZIG_GLOBAL_CACHE_DIR) { $env:ZIG_GLOBAL_CACHE_DIR = Join-Path $projectRoot 'build/zig-global' }
+if (-not $env:ZIG_LOCAL_CACHE_DIR) { $env:ZIG_LOCAL_CACHE_DIR = Join-Path $projectRoot 'build/zig-local' }
 $includeRoot = Join-Path $JdkHome 'include'
 if (-not (Test-Path -LiteralPath (Join-Path $includeRoot 'jni.h'))) {
     throw 'The selected JDK must contain JNI headers.'
@@ -16,4 +22,6 @@ $outputDll = Join-Path $outputDirectory 'ronova-pro-storage.dll'
     (Join-Path $PSScriptRoot 'storage.cpp') '-I' $includeRoot '-I' (Join-Path $includeRoot 'win32') `
     '-lbcrypt' '-lkernel32' '-o' $outputDll
 if ($LASTEXITCODE -ne 0) { throw "Native backend build failed: $LASTEXITCODE" }
-Get-FileHash -LiteralPath $outputDll -Algorithm SHA256
+$digest = [Security.Cryptography.SHA256]::Create()
+try { [BitConverter]::ToString($digest.ComputeHash([IO.File]::ReadAllBytes($outputDll))).Replace('-','') }
+finally { $digest.Dispose() }

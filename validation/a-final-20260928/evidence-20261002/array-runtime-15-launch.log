@@ -1,0 +1,94 @@
+OpenJDK 64-Bit Server VM warning: Sharing is only supported for boot loader classes because bootstrap classpath has been appended
+RONOVA_PRO_TASK_AGENT NATIVE_BIND_AND_JNI_FIELD_READY
+RONOVA_PRO_TASK_AGENT NATIVE_THREAD_CURRENT_BINDINGS_READY
+RONOVA_NATIVE_FILE_BINDING_PENDING:Ljava/io/FileInputStream;#read0()I:UNRESOLVED_ENTRY
+RONOVA_NATIVE_FILE_BINDING_PENDING:Ljava/io/FileInputStream;#length0()J:UNRESOLVED_ENTRY
+RONOVA_NATIVE_FILE_BINDING_PENDING:Ljava/io/FileInputStream;#position0()J:UNRESOLVED_ENTRY
+RONOVA_NATIVE_FILE_BINDING_PENDING:Ljava/io/FileInputStream;#skip0(J)J:UNRESOLVED_ENTRY
+RONOVA_NATIVE_FILE_BINDING_PENDING:Ljava/io/FileInputStream;#available0()I:UNRESOLVED_ENTRY
+RONOVA_NATIVE_FILE_BINDING_PENDING:Ljava/io/FileOutputStream;#write(IZ)V:UNRESOLVED_ENTRY
+RONOVA_NATIVE_FILE_BINDING_PENDING:Ljava/io/FileOutputStream;#open0(Ljava/lang/String;Z)V:UNRESOLVED_ENTRY
+RONOVA_NATIVE_FILE_BINDING_PENDING:Ljava/io/RandomAccessFile;#setLength(J)V:UNRESOLVED_ENTRY
+RONOVA_NATIVE_FILE_BINDING_PENDING:Ljava/io/RandomAccessFile;#read0()I:UNRESOLVED_ENTRY
+RONOVA_NATIVE_FILE_BINDING_PENDING:Ljava/io/RandomAccessFile;#writeBytes([BII)V:UNRESOLVED_ENTRY
+RONOVA_NATIVE_FILE_BINDING_PENDING:Ljava/io/RandomAccessFile;#getFilePointer()J:UNRESOLVED_ENTRY
+RONOVA_NATIVE_FILE_BINDING_PENDING:Ljava/io/RandomAccessFile;#write0(I)V:UNRESOLVED_ENTRY
+RONOVA_NATIVE_FILE_BINDING_PENDING:Lsun/nio/ch/FileDispatcherImpl;#read0(Ljava/io/FileDescriptor;JI)I:UNRESOLVED_ENTRY
+RONOVA_NATIVE_FILE_BINDING_PENDING:Lsun/nio/ch/FileDispatcherImpl;#close0(Ljava/io/FileDescriptor;)V:UNRESOLVED_ENTRY
+RONOVA_NATIVE_FILE_BINDING_PENDING:Lsun/nio/ch/FileDispatcherImpl;#seek0(Ljava/io/FileDescriptor;J)J:UNRESOLVED_ENTRY
+RONOVA_NATIVE_FILE_BINDING_PENDING:Lsun/nio/ch/FileDispatcherImpl;#readv0(Ljava/io/FileDescriptor;JI)J:UNRESOLVED_ENTRY
+RONOVA_NATIVE_FILE_BINDING_PENDING:Lsun/nio/ch/FileDispatcherImpl;#writev0(Ljava/io/FileDescriptor;JIZ)J:UNRESOLVED_ENTRY
+RONOVA_NATIVE_FILE_BINDING_PENDING:Lsun/nio/ch/FileDispatcherImpl;#pread0(Ljava/io/FileDescriptor;JIJ)I:UNRESOLVED_ENTRY
+RONOVA_NATIVE_FILE_BINDING_PENDING:Lsun/nio/ch/FileDispatcherImpl;#pwrite0(Ljava/io/FileDescriptor;JIJ)I:UNRESOLVED_ENTRY
+RONOVA_NATIVE_FILE_BINDING_PENDING:Lsun/nio/ch/FileDispatcherImpl;#force0(Ljava/io/FileDescriptor;Z)I:UNRESOLVED_ENTRY
+RONOVA_NATIVE_FILE_BINDING_PENDING:Lsun/nio/ch/FileDispatcherImpl;#truncate0(Ljava/io/FileDescriptor;J)I:UNRESOLVED_ENTRY
+RONOVA_NATIVE_FILE_BINDING_PENDING:Lsun/nio/ch/FileDispatcherImpl;#size0(Ljava/io/FileDescriptor;)J:UNRESOLVED_ENTRY
+RONOVA_NATIVE_FILE_BINDING_PENDING:Lsun/nio/ch/FileDispatcherImpl;#lock0(Ljava/io/FileDescriptor;ZJJZ)I:UNRESOLVED_ENTRY
+RONOVA_NATIVE_FILE_BINDING_PENDING:Lsun/nio/ch/FileDispatcherImpl;#release0(Ljava/io/FileDescriptor;JJ)V:UNRESOLVED_ENTRY
+RONOVA_NATIVE_FILE_BINDING_PENDING:Lsun/nio/ch/FileDispatcherImpl;#setDirect0(Ljava/io/FileDescriptor;Ljava/nio/CharBuffer;)I:UNRESOLVED_ENTRY
+RONOVA_NATIVE_FILE_BINDING_PENDING:Ljava/io/FileDescriptor;#sync()V:UNRESOLVED_ENTRY
+RONOVA_NATIVE_FILE_BINDING_PENDING:Lsun/nio/ch/FileChannelImpl;#transferTo0(Ljava/io/FileDescriptor;JJLjava/io/FileDescriptor;)J:UNRESOLVED_ENTRY
+RONOVA_NATIVE_FILE_BINDING_PENDING:Lsun/nio/ch/FileChannelImpl;#map0(IJJZ)J:UNRESOLVED_ENTRY
+RONOVA_NATIVE_FILE_BINDING_PENDING:Lsun/nio/ch/FileChannelImpl;#unmap0(JJ)I:UNRESOLVED_ENTRY
+RONOVA_NATIVE_FILE_BINDING_PENDING:Lsun/nio/ch/SocketDispatcher;#read0(Ljava/io/FileDescriptor;JI)I:UNRESOLVED_ENTRY
+RONOVA_NATIVE_FILE_BINDING_PENDING:Lsun/nio/ch/SocketDispatcher;#close0(I)V:UNRESOLVED_ENTRY
+RONOVA_NATIVE_FILE_BINDING_PENDING:Lsun/nio/ch/SocketDispatcher;#write0(Ljava/io/FileDescriptor;JI)I:UNRESOLVED_ENTRY
+RONOVA_NATIVE_FILE_BINDING_PENDING:Lsun/nio/ch/SocketDispatcher;#readv0(Ljava/io/FileDescriptor;JI)J:UNRESOLVED_ENTRY
+RONOVA_NATIVE_FILE_BINDING_PENDING:Lsun/nio/ch/SocketDispatcher;#writev0(Ljava/io/FileDescriptor;JI)J:UNRESOLVED_ENTRY
+RONOVA_NATIVE_FILE_BINDING_PENDING:Lsun/nio/ch/DatagramDispatcher;#read0(Ljava/io/FileDescriptor;JI)I:UNRESOLVED_ENTRY
+RONOVA_NATIVE_FILE_BINDING_PENDING:Lsun/nio/ch/DatagramDispatcher;#write0(Ljava/io/FileDescriptor;JI)I:UNRESOLVED_ENTRY
+RONOVA_NATIVE_FILE_BINDING_PENDING:Lsun/nio/ch/DatagramDispatcher;#readv0(Ljava/io/FileDescriptor;JI)J:UNRESOLVED_ENTRY
+RONOVA_NATIVE_FILE_BINDING_PENDING:Lsun/nio/ch/DatagramDispatcher;#writev0(Ljava/io/FileDescriptor;JI)J:UNRESOLVED_ENTRY
+RONOVA_NATIVE_FILE_BINDING_PENDING:Lsun/nio/ch/Net;#shutdown(Ljava/io/FileDescriptor;I)V:UNRESOLVED_ENTRY
+RONOVA_NATIVE_FILE_BINDING_PENDING:Lsun/nio/ch/Net;#listen(Ljava/io/FileDescriptor;I)V:UNRESOLVED_ENTRY
+RONOVA_NATIVE_FILE_BINDING_PENDING:Lsun/nio/ch/Net;#accept(Ljava/io/FileDescriptor;Ljava/io/FileDescriptor;[Ljava/net/InetSocketAddress;)I:UNRESOLVED_ENTRY
+RONOVA_NATIVE_FILE_BINDING_PENDING:Lsun/nio/ch/Net;#poll(Ljava/io/FileDescriptor;IJ)I:UNRESOLVED_ENTRY
+RONOVA_NATIVE_FILE_BINDING_PENDING:Lsun/nio/ch/Net;#available(Ljava/io/FileDescriptor;)I:UNRESOLVED_ENTRY
+RONOVA_NATIVE_FILE_BINDING_PENDING:Lsun/nio/ch/Net;#sendOOB(Ljava/io/FileDescriptor;B)I:UNRESOLVED_ENTRY
+RONOVA_NATIVE_FILE_BINDING_PENDING:Lsun/nio/ch/Net;#setInterface6(Ljava/io/FileDescriptor;I)V:UNRESOLVED_ENTRY
+RONOVA_NATIVE_FILE_BINDING_PENDING:Lsun/nio/ch/Net;#setInterface4(Ljava/io/FileDescriptor;I)V:UNRESOLVED_ENTRY
+RONOVA_NATIVE_FILE_BINDING_PENDING:Lsun/nio/ch/Net;#getInterface4(Ljava/io/FileDescriptor;)I:UNRESOLVED_ENTRY
+RONOVA_NATIVE_FILE_BINDING_PENDING:Lsun/nio/ch/Net;#getInterface6(Ljava/io/FileDescriptor;)I:UNRESOLVED_ENTRY
+RONOVA_NATIVE_FILE_BINDING_PENDING:Lsun/nio/ch/Net;#connect0(ZLjava/io/FileDescriptor;Ljava/net/InetAddress;I)I:UNRESOLVED_ENTRY
+RONOVA_NATIVE_FILE_BINDING_PENDING:Lsun/nio/ch/Net;#localPort(Ljava/io/FileDescriptor;)I:UNRESOLVED_ENTRY
+RONOVA_NATIVE_FILE_BINDING_PENDING:Lsun/nio/ch/Net;#setIntOption0(Ljava/io/FileDescriptor;ZIIIZ)V:UNRESOLVED_ENTRY
+RONOVA_NATIVE_FILE_BINDING_PENDING:Lsun/nio/ch/Net;#getIntOption0(Ljava/io/FileDescriptor;ZII)I:UNRESOLVED_ENTRY
+RONOVA_NATIVE_FILE_BINDING_PENDING:Lsun/nio/ch/Net;#bind0(Ljava/io/FileDescriptor;ZZLjava/net/InetAddress;I)V:UNRESOLVED_ENTRY
+RONOVA_NATIVE_FILE_BINDING_PENDING:Lsun/nio/ch/Net;#localInetAddress(Ljava/io/FileDescriptor;)Ljava/net/InetAddress;:UNRESOLVED_ENTRY
+RONOVA_NATIVE_FILE_BINDING_PENDING:Lsun/nio/ch/Net;#remoteInetAddress(Ljava/io/FileDescriptor;)Ljava/net/InetAddress;:UNRESOLVED_ENTRY
+RONOVA_NATIVE_FILE_BINDING_PENDING:Lsun/nio/ch/Net;#remotePort(Ljava/io/FileDescriptor;)I:UNRESOLVED_ENTRY
+RONOVA_NATIVE_FILE_BINDING_PENDING:Lsun/nio/ch/Net;#pollConnect(Ljava/io/FileDescriptor;J)Z:UNRESOLVED_ENTRY
+RONOVA_NATIVE_FILE_BINDING_PENDING:Lsun/nio/ch/Net;#joinOrDrop4(ZLjava/io/FileDescriptor;III)I:UNRESOLVED_ENTRY
+RONOVA_NATIVE_FILE_BINDING_PENDING:Lsun/nio/ch/Net;#blockOrUnblock4(ZLjava/io/FileDescriptor;III)I:UNRESOLVED_ENTRY
+RONOVA_NATIVE_FILE_BINDING_PENDING:Lsun/nio/ch/Net;#joinOrDrop6(ZLjava/io/FileDescriptor;[BI[B)I:UNRESOLVED_ENTRY
+RONOVA_NATIVE_FILE_BINDING_PENDING:Lsun/nio/ch/Net;#blockOrUnblock6(ZLjava/io/FileDescriptor;[BI[B)I:UNRESOLVED_ENTRY
+RONOVA_NATIVE_FILE_BINDING_PENDING:Lsun/nio/ch/Net;#discardOOB(Ljava/io/FileDescriptor;)Z:UNRESOLVED_ENTRY
+RONOVA_NATIVE_FILE_BINDING_PENDING:Lsun/nio/ch/DatagramChannelImpl;#receive0(Ljava/io/FileDescriptor;JIJZ)I:UNRESOLVED_ENTRY
+RONOVA_NATIVE_FILE_BINDING_PENDING:Lsun/nio/ch/DatagramChannelImpl;#send0(Ljava/io/FileDescriptor;JIJI)I:UNRESOLVED_ENTRY
+RONOVA_NATIVE_FILE_BINDING_PENDING:Lsun/nio/ch/DatagramChannelImpl;#disconnect0(Ljava/io/FileDescriptor;Z)V:UNRESOLVED_ENTRY
+RONOVA_NATIVE_FILE_BINDING_PENDING:Lsun/nio/ch/WindowsAsynchronousSocketChannelImpl;#read0(JIJJ)I:UNRESOLVED_ENTRY
+RONOVA_NATIVE_FILE_BINDING_PENDING:Lsun/nio/ch/WindowsAsynchronousSocketChannelImpl;#write0(JIJJ)I:UNRESOLVED_ENTRY
+RONOVA_NATIVE_FILE_BINDING_PENDING:Lsun/nio/ch/WindowsAsynchronousSocketChannelImpl;#closesocket0(J)V:UNRESOLVED_ENTRY
+RONOVA_NATIVE_FILE_BINDING_PENDING:Lsun/nio/ch/WindowsAsynchronousSocketChannelImpl;#connect0(JZLjava/net/InetAddress;IJ)I:UNRESOLVED_ENTRY
+RONOVA_NATIVE_FILE_BINDING_PENDING:Lsun/nio/ch/WindowsAsynchronousSocketChannelImpl;#updateConnectContext(J)V:UNRESOLVED_ENTRY
+RONOVA_NATIVE_FILE_BINDING_PENDING:Lsun/nio/ch/WindowsAsynchronousSocketChannelImpl;#shutdown0(JI)V:UNRESOLVED_ENTRY
+RONOVA_NATIVE_FILE_BINDING_PENDING:Lsun/nio/ch/WindowsAsynchronousServerSocketChannelImpl;#closesocket0(J)V:UNRESOLVED_ENTRY
+RONOVA_NATIVE_FILE_BINDING_PENDING:Lsun/nio/ch/WindowsAsynchronousServerSocketChannelImpl;#accept0(JJJJ)I:UNRESOLVED_ENTRY
+RONOVA_NATIVE_FILE_BINDING_PENDING:Lsun/nio/ch/WindowsAsynchronousServerSocketChannelImpl;#updateAcceptContext(JJ)V:UNRESOLVED_ENTRY
+RONOVA_NATIVE_FILE_BINDING_PENDING:Lsun/nio/ch/WindowsAsynchronousFileChannelImpl;#readFile(JJIJJ)I:UNRESOLVED_ENTRY
+RONOVA_NATIVE_FILE_BINDING_PENDING:Lsun/nio/ch/WindowsAsynchronousFileChannelImpl;#writeFile(JJIJJ)I:UNRESOLVED_ENTRY
+RONOVA_NATIVE_FILE_BINDING_PENDING:Lsun/nio/ch/WindowsAsynchronousFileChannelImpl;#lockFile(JJJZJ)I:UNRESOLVED_ENTRY
+RONOVA_PRO_TASK_AGENT NATIVE_FILE_CURRENT_BINDINGS_PENDING:77
+RONOVA_PRO_TASK_AGENT INSTRUMENTATION_REMOVAL_AND_PUBLICATION_GUARD:true
+RONOVA_NATIVE_ARRAY_FAILURE:BEGIN:B:0:1143:Ljava/lang/ClassCircularityError;:dev/ronova/pro/bootstrap/SourceMapBridge$Frame
+*** java.lang.instrument ASSERTION FAILED ***: "!errorOutstanding" with message can't set byte array region at s\src\java.instrument\share\native\libinstrument\JPLISAgent.c line: 848
+RONOVA_NATIVE_ARRAY_FAILURE:BEGIN:B:0:899:Ljava/lang/ClassCircularityError;:dev/ronova/pro/bootstrap/SourceMapBridge$Frame
+*** java.lang.instrument ASSERTION FAILED ***: "!errorOutstanding" with message can't set byte array region at s\src\java.instrument\share\native\libinstrument\JPLISAgent.c line: 848
+Exception in thread "main" RONOVA_NATIVE_ARRAY_FAILURE:BEGIN:B:0:829:Ljava/lang/ClassCircularityError;:dev/ronova/pro/bootstrap/SourceMapBridge$Frame
+*** java.lang.instrument ASSERTION FAILED ***: "!errorOutstanding" with message can't set byte array region at s\src\java.instrument\share\native\libinstrument\JPLISAgent.c line: 848
+RONOVA_NATIVE_ARRAY_FAILURE:BEGIN:B:0:489:Ljava/lang/ClassCircularityError;:dev/ronova/pro/bootstrap/SourceMapBridge$Frame
+*** java.lang.instrument ASSERTION FAILED ***: "!errorOutstanding" with message can't set byte array region at s\src\java.instrument\share\native\libinstrument\JPLISAgent.c line: 848
+*** java.lang.instrument ASSERTION FAILED ***: "!errorOutstanding" with message Outstanding error when calling method in invokeJavaAgentMainMethod at s\src\java.instrument\share\native\libinstrument\JPLISAgent.c line: 619
+*** java.lang.instrument ASSERTION FAILED ***: "success" with message invokeJavaAgentMainMethod failed at s\src\java.instrument\share\native\libinstrument\JPLISAgent.c line: 459
+*** java.lang.instrument ASSERTION FAILED ***: "result" with message agent load/premain call failed at s\src\java.instrument\share\native\libinstrument\JPLISAgent.c line: 422
+FATAL ERROR in native method: processing of -javaagent failed, processJavaStart failed

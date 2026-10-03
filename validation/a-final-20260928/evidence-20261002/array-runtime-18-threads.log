@@ -1,0 +1,405 @@
+2026-10-02 23:49:52
+Full thread dump OpenJDK 64-Bit Server VM (17.0.19+10 mixed mode, sharing):
+
+Threads class SMR info:
+_java_thread_list=0x000002691d22a4b0, length=12, elements={
+0x00000268b7423970, 0x00000268d6b13fa0, 0x00000268d6b18980, 0x00000268d6b32960,
+0x00000268d6b33320, 0x00000268d6b33ce0, 0x00000268d6b36ab0, 0x00000268d6b377a0,
+0x00000268d6b394d0, 0x00000268d6b4f770, 0x00000268d6abbdd0, 0x000002691ffafc00
+}
+
+"main" #1 prio=5 os_prio=0 cpu=42484.38ms elapsed=94.61s tid=0x00000268b7423970 nid=0xce28 waiting for monitor entry  [0x0000008573bf8000]
+   java.lang.Thread.State: BLOCKED (on object monitor)
+	at dev.ronova.pro.agent.ExternalCodeDefinitions.definitions(ExternalCodeDefinitions.java:160)
+	- waiting to lock <0x0000000080601a08> (a java.lang.Class for dev.ronova.pro.agent.ExternalCodeDefinitions)
+	at dev.ronova.pro.agent.ExternalCodeDefinitions.expand(ExternalCodeDefinitions.java:260)
+	at dev.ronova.pro.agent.ExternalCodeRuntime.prepare(ExternalCodeRuntime.java:19)
+	at dev.ronova.pro.agent.ExternalCodeRuntime.prepare(ExternalCodeRuntime.java:15)
+	at dev.ronova.pro.agent.RecoveryAgent$2.transform(RecoveryAgent.java:122)
+	at sun.instrument.TransformerManager.transform(java.instrument@17.0.19/TransformerManager.java:188)
+	at sun.instrument.InstrumentationImpl.transform(java.instrument@17.0.19/InstrumentationImpl.java:541)
+	at java.lang.ClassLoader.defineClass1(java.base@17.0.19/Native Method)
+	at java.lang.System$2.defineClass(java.base@17.0.19/System.java:2320)
+	at jdk.internal.reflect.ClassDefiner.defineClass(java.base@17.0.19/ClassDefiner.java:66)
+	at jdk.internal.reflect.MethodAccessorGenerator$1.run(java.base@17.0.19/MethodAccessorGenerator.java:401)
+	at jdk.internal.reflect.MethodAccessorGenerator$1.run(java.base@17.0.19/MethodAccessorGenerator.java:395)
+	at java.security.AccessController.executePrivileged(java.base@17.0.19/AccessController.java:776)
+	at java.security.AccessController.doPrivileged(java.base@17.0.19/AccessController.java:318)
+	at jdk.internal.reflect.MethodAccessorGenerator.generate(java.base@17.0.19/MethodAccessorGenerator.java:394)
+	at jdk.internal.reflect.MethodAccessorGenerator.generateMethod(java.base@17.0.19/MethodAccessorGenerator.java:75)
+	at jdk.internal.reflect.NativeMethodAccessorImpl.invoke(java.base@17.0.19/NativeMethodAccessorImpl.java:63)
+	at jdk.internal.reflect.DelegatingMethodAccessorImpl.invoke(java.base@17.0.19/DelegatingMethodAccessorImpl.java:43)
+	at java.lang.reflect.Method.invoke(java.base@17.0.19/Method.java:569)
+	at dev.ronova.pro.bootstrap.ResourceBridge.arrayLayout(ResourceBridge.java:1265)
+	at dev.ronova.pro.bootstrap.ExecutionFlow.byteMemorySources(ExecutionFlow.java:640)
+	- locked <0x0000000080cb0e18> (a java.util.HashMap)
+	at dev.ronova.pro.bootstrap.ExecutionFlow.byteMemoryReadBefore(ExecutionFlow.java:666)
+	- locked <0x0000000080cb0e18> (a java.util.HashMap)
+	at dev.ronova.pro.bootstrap.CodeSourceBridge.executionByteMemoryReadBefore(CodeSourceBridge.java:234)
+	at dev.ronova.pro.bootstrap.TaskBridge.readReceipt(TaskBridge.java:1859)
+	at dev.ronova.pro.bootstrap.TaskBridge.bufferReadBefore(TaskBridge.java:1836)
+	at dev.ronova.pro.bootstrap.ResourceBridge.bufferRead(ResourceBridge.java:829)
+	at dev.ronova.pro.bootstrap.ResourceBridge.bufferOperation(ResourceBridge.java:1030)
+	at java.nio.HeapByteBuffer.getShort(java.base@17.0.19/HeapByteBuffer.java)
+	at sun.reflect.annotation.AnnotationParser.parseAnnotation2(java.base@17.0.19/AnnotationParser.java:272)
+	at sun.reflect.annotation.AnnotationParser.parseAnnotations2(java.base@17.0.19/AnnotationParser.java:121)
+	at sun.reflect.annotation.AnnotationParser.parseAnnotations(java.base@17.0.19/AnnotationParser.java:73)
+	at java.lang.reflect.Executable.declaredAnnotations(java.base@17.0.19/Executable.java:625)
+	- locked <0x0000000096dd7870> (a java.lang.reflect.Method)
+	at java.lang.reflect.Executable.declaredAnnotations(java.base@17.0.19/Executable.java:623)
+	- locked <0x000000009ccdf5c8> (a java.lang.reflect.Method)
+	at java.lang.reflect.Executable.getAnnotation(java.base@17.0.19/Executable.java:591)
+	at java.lang.reflect.Method.getAnnotation(java.base@17.0.19/Method.java:739)
+	at java.lang.reflect.AnnotatedElement.isAnnotationPresent(java.base@17.0.19/AnnotatedElement.java:292)
+	at java.lang.reflect.AccessibleObject.isAnnotationPresent(java.base@17.0.19/AccessibleObject.java:518)
+	at jdk.internal.reflect.Reflection.isCallerSensitive(java.base@17.0.19/Reflection.java:342)
+	at jdk.internal.reflect.ReflectionFactory.newMethodAccessor(java.base@17.0.19/ReflectionFactory.java:191)
+	at java.lang.reflect.Method.acquireMethodAccessor(java.base@17.0.19/Method.java:675)
+	at java.lang.reflect.Method.invoke(java.base@17.0.19/Method.java:567)
+	at dev.ronova.pro.bootstrap.ResourceBridge.fieldSpan(ResourceBridge.java:1275)
+	at dev.ronova.pro.bootstrap.ExecutionFlow.byteMemorySources(ExecutionFlow.java:651)
+	- locked <0x0000000080cb0e18> (a java.util.HashMap)
+	at dev.ronova.pro.bootstrap.ExecutionFlow.byteMemoryReadBefore(ExecutionFlow.java:666)
+	- locked <0x0000000080cb0e18> (a java.util.HashMap)
+	at dev.ronova.pro.bootstrap.CodeSourceBridge.executionByteMemoryReadBefore(CodeSourceBridge.java:234)
+	at dev.ronova.pro.bootstrap.TaskBridge.readReceipt(TaskBridge.java:1859)
+	at dev.ronova.pro.bootstrap.TaskBridge.beginNativeUnsafeRead(TaskBridge.java:1764)
+	at jdk.internal.misc.Unsafe.getInt(java.base@17.0.19/Native Method)
+	at java.util.concurrent.ThreadLocalRandom.getProbe(java.base@17.0.19/ThreadLocalRandom.java:263)
+	at java.util.concurrent.ConcurrentHashMap.addCount(java.base@17.0.19/ConcurrentHashMap.java:2331)
+	at java.util.concurrent.ConcurrentHashMap.replaceNode(java.base@17.0.19/ConcurrentHashMap.java:1173)
+	at java.util.concurrent.ConcurrentHashMap.remove(java.base@17.0.19/ConcurrentHashMap.java:1102)
+	at java.lang.invoke.MethodType$ConcurrentWeakInternSet.expungeStaleElements(java.base@17.0.19/MethodType.java:1407)
+	at java.lang.invoke.MethodType$ConcurrentWeakInternSet.get(java.base@17.0.19/MethodType.java:1366)
+	at java.lang.invoke.MethodType.makeImpl(java.base@17.0.19/MethodType.java:341)
+	at java.lang.invoke.MethodType.insertParameterTypes(java.base@17.0.19/MethodType.java:448)
+	at java.lang.invoke.MethodType.insertParameterTypes(java.base@17.0.19/MethodType.java:476)
+	at java.lang.invoke.MethodHandles.dropArguments0(java.base@17.0.19/MethodHandles.java:5261)
+	at java.lang.invoke.MethodHandles.dropArguments(java.base@17.0.19/MethodHandles.java:5332)
+	at java.lang.invoke.StringConcatFactory.generateMHInlineCopy(java.base@17.0.19/StringConcatFactory.java:514)
+	at java.lang.invoke.StringConcatFactory.makeConcatWithConstants(java.base@17.0.19/StringConcatFactory.java:358)
+	at java.lang.invoke.DirectMethodHandle$Holder.invokeStatic(java.base@17.0.19/DirectMethodHandle$Holder)
+	at java.lang.invoke.DelegatingMethodHandle$Holder.delegate(java.base@17.0.19/DelegatingMethodHandle$Holder)
+	at java.lang.invoke.Invokers$Holder.invokeExact_MT(java.base@17.0.19/Invokers$Holder)
+	at java.lang.invoke.BootstrapMethodInvoker.invoke(java.base@17.0.19/BootstrapMethodInvoker.java:102)
+	at java.lang.invoke.CallSite.makeSite(java.base@17.0.19/CallSite.java:315)
+	at java.lang.invoke.MethodHandleNatives.linkCallSiteImpl(java.base@17.0.19/MethodHandleNatives.java:281)
+	at java.lang.invoke.MethodHandleNatives.linkCallSite(java.base@17.0.19/MethodHandleNatives.java:271)
+	at dev.ronova.pro.agent.RecoveryAgent.install(Unknown Source)
+	- locked <0x0000000080608e50> (a java.lang.Class for dev.ronova.pro.agent.RecoveryAgent)
+	at dev.ronova.pro.agent.RecoveryAgent.start(Unknown Source)
+	- locked <0x0000000080608e50> (a java.lang.Class for dev.ronova.pro.agent.RecoveryAgent)
+	at dev.ronova.pro.agent.RecoveryAgent.premain(Unknown Source)
+	at jdk.internal.reflect.NativeMethodAccessorImpl.invoke0(java.base@17.0.19/Native Method)
+	at jdk.internal.reflect.NativeMethodAccessorImpl.invoke(java.base@17.0.19/NativeMethodAccessorImpl.java:77)
+	at jdk.internal.reflect.DelegatingMethodAccessorImpl.invoke(java.base@17.0.19/DelegatingMethodAccessorImpl.java:43)
+	at java.lang.reflect.Method.invoke(java.base@17.0.19/Unknown Source)
+	at sun.instrument.InstrumentationImpl.loadClassAndStartAgent(java.instrument@17.0.19/Unknown Source)
+	at sun.instrument.InstrumentationImpl.loadClassAndCallPremain(java.instrument@17.0.19/Unknown Source)
+
+   Locked ownable synchronizers:
+	- <0x00000000964b7fe8> (a java.util.concurrent.locks.ReentrantLock$NonfairSync)
+	- <0x000000009cb64468> (a java.util.concurrent.locks.ReentrantLock$NonfairSync)
+
+"Reference Handler" #2 daemon prio=10 os_prio=2 cpu=46.88ms elapsed=94.60s tid=0x00000268d6b13fa0 nid=0xb6dc waiting on condition  [0x00000085742ff000]
+   java.lang.Thread.State: RUNNABLE
+	at java.lang.ref.Reference.waitForReferencePendingList(java.base@17.0.19/Native Method)
+	at java.lang.ref.Reference.processPendingReferences(java.base@17.0.19/Reference.java:253)
+	at java.lang.ref.Reference$ReferenceHandler.run(java.base@17.0.19/Reference.java:215)
+
+   Locked ownable synchronizers:
+	- None
+
+"Finalizer" #3 daemon prio=8 os_prio=1 cpu=0.00ms elapsed=94.60s tid=0x00000268d6b18980 nid=0x11038 in Object.wait()  [0x00000085743ff000]
+   java.lang.Thread.State: WAITING (on object monitor)
+	at java.lang.Object.wait(java.base@17.0.19/Native Method)
+	- waiting on <0x0000000080600af8> (a java.lang.ref.ReferenceQueue$Lock)
+	at java.lang.ref.ReferenceQueue.remove(java.base@17.0.19/ReferenceQueue.java:155)
+	- locked <0x0000000080600af8> (a java.lang.ref.ReferenceQueue$Lock)
+	at java.lang.ref.ReferenceQueue.remove(java.base@17.0.19/ReferenceQueue.java:176)
+	at java.lang.ref.Finalizer$FinalizerThread.run(java.base@17.0.19/Finalizer.java:172)
+
+   Locked ownable synchronizers:
+	- None
+
+"Signal Dispatcher" #4 daemon prio=9 os_prio=2 cpu=15.62ms elapsed=94.59s tid=0x00000268d6b32960 nid=0xecc0 waiting on condition  [0x0000000000000000]
+   java.lang.Thread.State: RUNNABLE
+
+   Locked ownable synchronizers:
+	- None
+
+"Attach Listener" #5 daemon prio=5 os_prio=2 cpu=0.00ms elapsed=94.59s tid=0x00000268d6b33320 nid=0xa5a4 waiting on condition  [0x0000000000000000]
+   java.lang.Thread.State: RUNNABLE
+
+   Locked ownable synchronizers:
+	- None
+
+"Service Thread" #6 daemon prio=9 os_prio=0 cpu=0.00ms elapsed=94.59s tid=0x00000268d6b33ce0 nid=0x113c4 runnable  [0x0000000000000000]
+   java.lang.Thread.State: RUNNABLE
+
+   Locked ownable synchronizers:
+	- None
+
+"Monitor Deflation Thread" #7 daemon prio=9 os_prio=0 cpu=15.62ms elapsed=94.59s tid=0x00000268d6b36ab0 nid=0xd8c8 runnable  [0x0000000000000000]
+   java.lang.Thread.State: RUNNABLE
+
+   Locked ownable synchronizers:
+	- None
+
+"C2 CompilerThread0" #8 daemon prio=9 os_prio=2 cpu=12828.12ms elapsed=94.59s tid=0x00000268d6b377a0 nid=0x2e18 waiting on condition  [0x0000000000000000]
+   java.lang.Thread.State: RUNNABLE
+   No compile task
+
+   Locked ownable synchronizers:
+	- None
+
+"C1 CompilerThread0" #16 daemon prio=9 os_prio=2 cpu=671.88ms elapsed=94.59s tid=0x00000268d6b394d0 nid=0x6230 waiting on condition  [0x0000000000000000]
+   java.lang.Thread.State: RUNNABLE
+   No compile task
+
+   Locked ownable synchronizers:
+	- None
+
+"Sweeper thread" #20 daemon prio=9 os_prio=2 cpu=15.62ms elapsed=94.59s tid=0x00000268d6b4f770 nid=0x1013c runnable  [0x0000000000000000]
+   java.lang.Thread.State: RUNNABLE
+
+   Locked ownable synchronizers:
+	- None
+
+"Common-Cleaner" #21 daemon prio=8 os_prio=1 cpu=93.75ms elapsed=94.58s tid=0x00000268d6abbdd0 nid=0x7f48 in Object.wait()  [0x0000008574dff000]
+   java.lang.Thread.State: TIMED_WAITING (on object monitor)
+	at java.lang.Object.wait(java.base@17.0.19/Native Method)
+	- waiting on <0x0000000080603e40> (a java.lang.ref.ReferenceQueue$Lock)
+	at java.lang.ref.ReferenceQueue.remove(java.base@17.0.19/ReferenceQueue.java:155)
+	- locked <0x0000000080603e40> (a java.lang.ref.ReferenceQueue$Lock)
+	at jdk.internal.ref.CleanerImpl.run(java.base@17.0.19/CleanerImpl.java:140)
+	at java.lang.Thread.run(java.base@17.0.19/Unknown Source)
+	at jdk.internal.misc.InnocuousThread.run(java.base@17.0.19/InnocuousThread.java:162)
+
+   Locked ownable synchronizers:
+	- None
+
+"Ronova external code continuation" #22 daemon prio=5 os_prio=0 cpu=421.88ms elapsed=84.24s tid=0x000002691ffafc00 nid=0xd968 waiting for monitor entry  [0x0000008574cfe000]
+   java.lang.Thread.State: BLOCKED (on object monitor)
+	at dev.ronova.pro.bootstrap.ExecutionFlow.byteMemoryBefore(ExecutionFlow.java:618)
+	- waiting to lock <0x0000000080cb0e18> (a java.util.HashMap)
+	at dev.ronova.pro.bootstrap.CodeSourceBridge.executionByteMemoryBefore(CodeSourceBridge.java:309)
+	at dev.ronova.pro.bootstrap.TaskBridge.beginNativeUnsafeMutation(TaskBridge.java:1758)
+	at jdk.internal.misc.Unsafe.compareAndSetReference(java.base@17.0.19/Native Method)
+	at java.lang.Class$Atomic.casReflectionData(java.base@17.0.19/Class.java:3157)
+	at java.lang.Class.newReflectionData(java.base@17.0.19/Class.java:3230)
+	at java.lang.Class.reflectionData(java.base@17.0.19/Class.java:3222)
+	at java.lang.Class.privateGetDeclaredFields(java.base@17.0.19/Class.java:3293)
+	at java.lang.Class.getDeclaredFields(java.base@17.0.19/Class.java:2373)
+	at dev.ronova.pro.bootstrap.CodeSourceBridge.protectControls(CodeSourceBridge.java:1103)
+	at dev.ronova.pro.bootstrap.CodeSourceBridge.agentControls(CodeSourceBridge.java:1096)
+	at dev.ronova.pro.bootstrap.TaskBridge.registerAgentControls(TaskBridge.java:1218)
+	at jdk.internal.reflect.GeneratedMethodAccessor22.invoke(java.base@17.0.19/Unknown Source)
+	at jdk.internal.reflect.DelegatingMethodAccessorImpl.invoke(java.base@17.0.19/DelegatingMethodAccessorImpl.java:43)
+	at java.lang.reflect.Method.invoke(java.base@17.0.19/Method.java:569)
+	at dev.ronova.pro.agent.ControlImages.protect(ControlImages.java:77)
+	at dev.ronova.pro.agent.ExternalCodeDefinitions.run(Unknown Source)
+	- locked <0x0000000080601a08> (a java.lang.Class for dev.ronova.pro.agent.ExternalCodeDefinitions)
+	at dev.ronova.pro.agent.ExternalCodeDefinitions.lambda$start$2(Unknown Source)
+	at dev.ronova.pro.agent.ExternalCodeDefinitions$$Lambda$147/0x00000268d8098fc8.run(Unknown Source)
+	at java.lang.Thread.run(java.base@17.0.19/Thread.java:840)
+
+   Locked ownable synchronizers:
+	- <0x000000009c4015e0> (a java.util.concurrent.locks.ReentrantLock$NonfairSync)
+
+"G1 Refine#14" os_prio=2 cpu=46.88ms elapsed=89.07s tid=0x0000026921442610 nid=0xc318 runnable  
+
+"G1 Refine#13" os_prio=2 cpu=46.88ms elapsed=89.64s tid=0x0000026921441760 nid=0x3220 runnable  
+
+"G1 Refine#12" os_prio=2 cpu=62.50ms elapsed=91.81s tid=0x000002692143ffe0 nid=0x77c4 runnable  
+
+"G1 Refine#11" os_prio=2 cpu=78.12ms elapsed=91.81s tid=0x000002692143f710 nid=0xd380 runnable  
+
+"G1 Refine#10" os_prio=2 cpu=78.12ms elapsed=91.81s tid=0x00000269214408b0 nid=0xabd4 runnable  
+
+"G1 Refine#9" os_prio=2 cpu=78.12ms elapsed=91.81s tid=0x0000026921442320 nid=0x4908 runnable  
+
+"G1 Refine#8" os_prio=2 cpu=93.75ms elapsed=91.81s tid=0x0000026921442030 nid=0x11094 runnable  
+
+"G1 Refine#7" os_prio=2 cpu=93.75ms elapsed=91.81s tid=0x000002691d81ff60 nid=0xba5c runnable  
+
+"G1 Refine#6" os_prio=2 cpu=93.75ms elapsed=91.81s tid=0x000002691d81ead0 nid=0xe0a4 runnable  
+
+"G1 Refine#5" os_prio=2 cpu=93.75ms elapsed=91.82s tid=0x000002691d820540 nid=0x5a30 runnable  
+
+"G1 Refine#4" os_prio=2 cpu=109.38ms elapsed=91.82s tid=0x000002691d81fc70 nid=0xc4b4 runnable  
+
+"G1 Refine#3" os_prio=2 cpu=93.75ms elapsed=91.82s tid=0x000002691d81f980 nid=0xe9e4 runnable  
+
+"G1 Refine#2" os_prio=2 cpu=187.50ms elapsed=91.82s tid=0x000002691d81f3a0 nid=0x1474 runnable  
+
+"G1 Refine#1" os_prio=2 cpu=359.38ms elapsed=91.82s tid=0x000002691d81edc0 nid=0x722c runnable  
+
+"GC Thread#14" os_prio=2 cpu=281.25ms elapsed=94.27s tid=0x000002691cd45610 nid=0x511c runnable  
+
+"GC Thread#13" os_prio=2 cpu=265.62ms elapsed=94.27s tid=0x000002691cd44b30 nid=0xd094 runnable  
+
+"GC Thread#4" os_prio=2 cpu=281.25ms elapsed=94.27s tid=0x000002691cf32eb0 nid=0x110fc runnable  
+
+"GC Thread#11" os_prio=2 cpu=281.25ms elapsed=94.27s tid=0x000002691cd43590 nid=0xc798 runnable  
+
+"GC Thread#10" os_prio=2 cpu=265.62ms elapsed=94.27s tid=0x000002691cd432d0 nid=0xd77c runnable  
+
+"GC Thread#9" os_prio=2 cpu=281.25ms elapsed=94.27s tid=0x000002691cd43010 nid=0xe27c runnable  
+
+"GC Thread#1" os_prio=2 cpu=281.25ms elapsed=94.27s tid=0x000002691c42e2b0 nid=0xe34 runnable  
+
+"GC Thread#8" os_prio=2 cpu=281.25ms elapsed=94.27s tid=0x000002691cf35a10 nid=0xf420 runnable  
+
+"GC Thread#6" os_prio=2 cpu=281.25ms elapsed=94.27s tid=0x000002691cf34c70 nid=0x65e4 runnable  
+
+"GC Thread#5" os_prio=2 cpu=265.62ms elapsed=94.27s tid=0x000002691cf349b0 nid=0x70cc runnable  
+
+"GC Thread#12" os_prio=2 cpu=281.25ms elapsed=94.27s tid=0x000002691cd44060 nid=0xcb48 runnable  
+
+"GC Thread#3" os_prio=2 cpu=281.25ms elapsed=94.27s tid=0x000002691cf32bf0 nid=0x1698 runnable  
+
+"GC Thread#7" os_prio=2 cpu=281.25ms elapsed=94.27s tid=0x000002691cf35750 nid=0xd59c runnable  
+
+"GC Thread#2" os_prio=2 cpu=265.62ms elapsed=94.27s tid=0x000002691cf32930 nid=0x396c runnable  
+
+"VM Thread" os_prio=2 cpu=2203.12ms elapsed=94.60s tid=0x00000268d6b10020 nid=0x65ac runnable  
+
+"G1 Service" os_prio=2 cpu=15.62ms elapsed=94.61s tid=0x00000268b74bec00 nid=0x8b90 runnable  
+
+"G1 Refine#0" os_prio=2 cpu=968.75ms elapsed=94.61s tid=0x00000268b74be330 nid=0x111c4 runnable  
+
+"G1 Conc#0" os_prio=2 cpu=0.00ms elapsed=94.61s tid=0x00000268d37838e0 nid=0xe180 runnable  
+
+"G1 Main Marker" os_prio=2 cpu=0.00ms elapsed=94.61s tid=0x00000268d3782010 nid=0x11180 runnable  
+
+"GC Thread#0" os_prio=2 cpu=296.88ms elapsed=94.61s tid=0x00000268b7482950 nid=0x96b4 runnable  
+
+JNI global refs: 56, weak refs: 244
+
+
+Found one Java-level deadlock:
+=============================
+"main":
+  waiting to lock monitor 0x000002692204f550 (object 0x0000000080601a08, a java.lang.Class),
+  which is held by "Ronova external code continuation"
+
+"Ronova external code continuation":
+  waiting to lock monitor 0x00000268d3927f50 (object 0x0000000080cb0e18, a java.util.HashMap),
+  which is held by "main"
+
+Java stack information for the threads listed above:
+===================================================
+"main":
+	at dev.ronova.pro.agent.ExternalCodeDefinitions.definitions(ExternalCodeDefinitions.java:160)
+	- waiting to lock <0x0000000080601a08> (a java.lang.Class for dev.ronova.pro.agent.ExternalCodeDefinitions)
+	at dev.ronova.pro.agent.ExternalCodeDefinitions.expand(ExternalCodeDefinitions.java:260)
+	at dev.ronova.pro.agent.ExternalCodeRuntime.prepare(ExternalCodeRuntime.java:19)
+	at dev.ronova.pro.agent.ExternalCodeRuntime.prepare(ExternalCodeRuntime.java:15)
+	at dev.ronova.pro.agent.RecoveryAgent$2.transform(RecoveryAgent.java:122)
+	at sun.instrument.TransformerManager.transform(java.instrument@17.0.19/TransformerManager.java:188)
+	at sun.instrument.InstrumentationImpl.transform(java.instrument@17.0.19/InstrumentationImpl.java:541)
+	at java.lang.ClassLoader.defineClass1(java.base@17.0.19/Native Method)
+	at java.lang.System$2.defineClass(java.base@17.0.19/System.java:2320)
+	at jdk.internal.reflect.ClassDefiner.defineClass(java.base@17.0.19/ClassDefiner.java:66)
+	at jdk.internal.reflect.MethodAccessorGenerator$1.run(java.base@17.0.19/MethodAccessorGenerator.java:401)
+	at jdk.internal.reflect.MethodAccessorGenerator$1.run(java.base@17.0.19/MethodAccessorGenerator.java:395)
+	at java.security.AccessController.executePrivileged(java.base@17.0.19/AccessController.java:776)
+	at java.security.AccessController.doPrivileged(java.base@17.0.19/AccessController.java:318)
+	at jdk.internal.reflect.MethodAccessorGenerator.generate(java.base@17.0.19/MethodAccessorGenerator.java:394)
+	at jdk.internal.reflect.MethodAccessorGenerator.generateMethod(java.base@17.0.19/MethodAccessorGenerator.java:75)
+	at jdk.internal.reflect.NativeMethodAccessorImpl.invoke(java.base@17.0.19/NativeMethodAccessorImpl.java:63)
+	at jdk.internal.reflect.DelegatingMethodAccessorImpl.invoke(java.base@17.0.19/DelegatingMethodAccessorImpl.java:43)
+	at java.lang.reflect.Method.invoke(java.base@17.0.19/Method.java:569)
+	at dev.ronova.pro.bootstrap.ResourceBridge.arrayLayout(ResourceBridge.java:1265)
+	at dev.ronova.pro.bootstrap.ExecutionFlow.byteMemorySources(ExecutionFlow.java:640)
+	- locked <0x0000000080cb0e18> (a java.util.HashMap)
+	at dev.ronova.pro.bootstrap.ExecutionFlow.byteMemoryReadBefore(ExecutionFlow.java:666)
+	- locked <0x0000000080cb0e18> (a java.util.HashMap)
+	at dev.ronova.pro.bootstrap.CodeSourceBridge.executionByteMemoryReadBefore(CodeSourceBridge.java:234)
+	at dev.ronova.pro.bootstrap.TaskBridge.readReceipt(TaskBridge.java:1859)
+	at dev.ronova.pro.bootstrap.TaskBridge.bufferReadBefore(TaskBridge.java:1836)
+	at dev.ronova.pro.bootstrap.ResourceBridge.bufferRead(ResourceBridge.java:829)
+	at dev.ronova.pro.bootstrap.ResourceBridge.bufferOperation(ResourceBridge.java:1030)
+	at java.nio.HeapByteBuffer.getShort(java.base@17.0.19/HeapByteBuffer.java)
+	at sun.reflect.annotation.AnnotationParser.parseAnnotation2(java.base@17.0.19/AnnotationParser.java:272)
+	at sun.reflect.annotation.AnnotationParser.parseAnnotations2(java.base@17.0.19/AnnotationParser.java:121)
+	at sun.reflect.annotation.AnnotationParser.parseAnnotations(java.base@17.0.19/AnnotationParser.java:73)
+	at java.lang.reflect.Executable.declaredAnnotations(java.base@17.0.19/Executable.java:625)
+	- locked <0x0000000096dd7870> (a java.lang.reflect.Method)
+	at java.lang.reflect.Executable.declaredAnnotations(java.base@17.0.19/Executable.java:623)
+	- locked <0x000000009ccdf5c8> (a java.lang.reflect.Method)
+	at java.lang.reflect.Executable.getAnnotation(java.base@17.0.19/Executable.java:591)
+	at java.lang.reflect.Method.getAnnotation(java.base@17.0.19/Method.java:739)
+	at java.lang.reflect.AnnotatedElement.isAnnotationPresent(java.base@17.0.19/AnnotatedElement.java:292)
+	at java.lang.reflect.AccessibleObject.isAnnotationPresent(java.base@17.0.19/AccessibleObject.java:518)
+	at jdk.internal.reflect.Reflection.isCallerSensitive(java.base@17.0.19/Reflection.java:342)
+	at jdk.internal.reflect.ReflectionFactory.newMethodAccessor(java.base@17.0.19/ReflectionFactory.java:191)
+	at java.lang.reflect.Method.acquireMethodAccessor(java.base@17.0.19/Method.java:675)
+	at java.lang.reflect.Method.invoke(java.base@17.0.19/Method.java:567)
+	at dev.ronova.pro.bootstrap.ResourceBridge.fieldSpan(ResourceBridge.java:1275)
+	at dev.ronova.pro.bootstrap.ExecutionFlow.byteMemorySources(ExecutionFlow.java:651)
+	- locked <0x0000000080cb0e18> (a java.util.HashMap)
+	at dev.ronova.pro.bootstrap.ExecutionFlow.byteMemoryReadBefore(ExecutionFlow.java:666)
+	- locked <0x0000000080cb0e18> (a java.util.HashMap)
+	at dev.ronova.pro.bootstrap.CodeSourceBridge.executionByteMemoryReadBefore(CodeSourceBridge.java:234)
+	at dev.ronova.pro.bootstrap.TaskBridge.readReceipt(TaskBridge.java:1859)
+	at dev.ronova.pro.bootstrap.TaskBridge.beginNativeUnsafeRead(TaskBridge.java:1764)
+	at jdk.internal.misc.Unsafe.getInt(java.base@17.0.19/Native Method)
+	at java.util.concurrent.ThreadLocalRandom.getProbe(java.base@17.0.19/ThreadLocalRandom.java:263)
+	at java.util.concurrent.ConcurrentHashMap.addCount(java.base@17.0.19/ConcurrentHashMap.java:2331)
+	at java.util.concurrent.ConcurrentHashMap.replaceNode(java.base@17.0.19/ConcurrentHashMap.java:1173)
+	at java.util.concurrent.ConcurrentHashMap.remove(java.base@17.0.19/ConcurrentHashMap.java:1102)
+	at java.lang.invoke.MethodType$ConcurrentWeakInternSet.expungeStaleElements(java.base@17.0.19/MethodType.java:1407)
+	at java.lang.invoke.MethodType$ConcurrentWeakInternSet.get(java.base@17.0.19/MethodType.java:1366)
+	at java.lang.invoke.MethodType.makeImpl(java.base@17.0.19/MethodType.java:341)
+	at java.lang.invoke.MethodType.insertParameterTypes(java.base@17.0.19/MethodType.java:448)
+	at java.lang.invoke.MethodType.insertParameterTypes(java.base@17.0.19/MethodType.java:476)
+	at java.lang.invoke.MethodHandles.dropArguments0(java.base@17.0.19/MethodHandles.java:5261)
+	at java.lang.invoke.MethodHandles.dropArguments(java.base@17.0.19/MethodHandles.java:5332)
+	at java.lang.invoke.StringConcatFactory.generateMHInlineCopy(java.base@17.0.19/StringConcatFactory.java:514)
+	at java.lang.invoke.StringConcatFactory.makeConcatWithConstants(java.base@17.0.19/StringConcatFactory.java:358)
+	at java.lang.invoke.DirectMethodHandle$Holder.invokeStatic(java.base@17.0.19/DirectMethodHandle$Holder)
+	at java.lang.invoke.DelegatingMethodHandle$Holder.delegate(java.base@17.0.19/DelegatingMethodHandle$Holder)
+	at java.lang.invoke.Invokers$Holder.invokeExact_MT(java.base@17.0.19/Invokers$Holder)
+	at java.lang.invoke.BootstrapMethodInvoker.invoke(java.base@17.0.19/BootstrapMethodInvoker.java:102)
+	at java.lang.invoke.CallSite.makeSite(java.base@17.0.19/CallSite.java:315)
+	at java.lang.invoke.MethodHandleNatives.linkCallSiteImpl(java.base@17.0.19/MethodHandleNatives.java:281)
+	at java.lang.invoke.MethodHandleNatives.linkCallSite(java.base@17.0.19/MethodHandleNatives.java:271)
+	at dev.ronova.pro.agent.RecoveryAgent.install(Unknown Source)
+	- locked <0x0000000080608e50> (a java.lang.Class for dev.ronova.pro.agent.RecoveryAgent)
+	at dev.ronova.pro.agent.RecoveryAgent.start(Unknown Source)
+	- locked <0x0000000080608e50> (a java.lang.Class for dev.ronova.pro.agent.RecoveryAgent)
+	at dev.ronova.pro.agent.RecoveryAgent.premain(Unknown Source)
+	at jdk.internal.reflect.NativeMethodAccessorImpl.invoke0(java.base@17.0.19/Native Method)
+	at jdk.internal.reflect.NativeMethodAccessorImpl.invoke(java.base@17.0.19/NativeMethodAccessorImpl.java:77)
+	at jdk.internal.reflect.DelegatingMethodAccessorImpl.invoke(java.base@17.0.19/DelegatingMethodAccessorImpl.java:43)
+	at java.lang.reflect.Method.invoke(java.base@17.0.19/Unknown Source)
+	at sun.instrument.InstrumentationImpl.loadClassAndStartAgent(java.instrument@17.0.19/Unknown Source)
+	at sun.instrument.InstrumentationImpl.loadClassAndCallPremain(java.instrument@17.0.19/Unknown Source)
+"Ronova external code continuation":
+	at dev.ronova.pro.bootstrap.ExecutionFlow.byteMemoryBefore(ExecutionFlow.java:618)
+	- waiting to lock <0x0000000080cb0e18> (a java.util.HashMap)
+	at dev.ronova.pro.bootstrap.CodeSourceBridge.executionByteMemoryBefore(CodeSourceBridge.java:309)
+	at dev.ronova.pro.bootstrap.TaskBridge.beginNativeUnsafeMutation(TaskBridge.java:1758)
+	at jdk.internal.misc.Unsafe.compareAndSetReference(java.base@17.0.19/Native Method)
+	at java.lang.Class$Atomic.casReflectionData(java.base@17.0.19/Class.java:3157)
+	at java.lang.Class.newReflectionData(java.base@17.0.19/Class.java:3230)
+	at java.lang.Class.reflectionData(java.base@17.0.19/Class.java:3222)
+	at java.lang.Class.privateGetDeclaredFields(java.base@17.0.19/Class.java:3293)
+	at java.lang.Class.getDeclaredFields(java.base@17.0.19/Class.java:2373)
+	at dev.ronova.pro.bootstrap.CodeSourceBridge.protectControls(CodeSourceBridge.java:1103)
+	at dev.ronova.pro.bootstrap.CodeSourceBridge.agentControls(CodeSourceBridge.java:1096)
+	at dev.ronova.pro.bootstrap.TaskBridge.registerAgentControls(TaskBridge.java:1218)
+	at jdk.internal.reflect.GeneratedMethodAccessor22.invoke(java.base@17.0.19/Unknown Source)
+	at jdk.internal.reflect.DelegatingMethodAccessorImpl.invoke(java.base@17.0.19/DelegatingMethodAccessorImpl.java:43)
+	at java.lang.reflect.Method.invoke(java.base@17.0.19/Method.java:569)
+	at dev.ronova.pro.agent.ControlImages.protect(ControlImages.java:77)
+	at dev.ronova.pro.agent.ExternalCodeDefinitions.run(Unknown Source)
+	- locked <0x0000000080601a08> (a java.lang.Class for dev.ronova.pro.agent.ExternalCodeDefinitions)
+	at dev.ronova.pro.agent.ExternalCodeDefinitions.lambda$start$2(Unknown Source)
+	at dev.ronova.pro.agent.ExternalCodeDefinitions$$Lambda$147/0x00000268d8098fc8.run(Unknown Source)
+	at java.lang.Thread.run(java.base@17.0.19/Thread.java:840)
+
+Found 1 deadlock.
+

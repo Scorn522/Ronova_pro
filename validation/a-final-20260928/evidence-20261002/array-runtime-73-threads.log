@@ -1,0 +1,452 @@
+2026-10-03 23:14:10
+Full thread dump OpenJDK 64-Bit Server VM (17.0.19+10 mixed mode, sharing):
+
+Threads class SMR info:
+_java_thread_list=0x000001df8f98ebc0, length=14, elements={
+0x000001df21b89480, 0x000001df41264550, 0x000001df41266f20, 0x000001df41285b50,
+0x000001df41286510, 0x000001df41288ee0, 0x000001df4128b8b0, 0x000001df4128d4c0,
+0x000001df412912d0, 0x000001df41291be0, 0x000001df4120c810, 0x000001df8842d180,
+0x000001df8de31ce0, 0x000001df895a7580
+}
+
+"main" #1 prio=5 os_prio=0 cpu=53203.12ms elapsed=66.05s tid=0x000001df21b89480 nid=0x162d0 waiting for monitor entry  [0x0000009b5c3fd000]
+   java.lang.Thread.State: BLOCKED (on object monitor)
+	at dev.ronova.pro.bootstrap.ResourceBridge.bufferOperation(ResourceBridge.java:1088)
+	- waiting to lock <0x000000008002ca48> (a java.util.HashMap)
+	at java.nio.CharBuffer.position(java.base@17.0.19/CharBuffer.java)
+	at java.nio.CharBuffer.position(java.base@17.0.19/CharBuffer.java:267)
+	at sun.nio.cs.UTF_8.updatePositions(java.base@17.0.19/UTF_8.java:82)
+	at sun.nio.cs.UTF_8$Encoder.encodeArrayLoopSlow(java.base@17.0.19/UTF_8.java:509)
+	at sun.nio.cs.UTF_8$Encoder.encodeArrayLoop(java.base@17.0.19/UTF_8.java:461)
+	at sun.nio.cs.UTF_8$Encoder.encodeLoop(java.base@17.0.19/UTF_8.java:564)
+	at java.nio.charset.CharsetEncoder.encode(java.base@17.0.19/CharsetEncoder.java:585)
+	at org.apache.logging.log4j.core.layout.TextEncoderHelper.encodeText(org.apache.logging.log4j.core@2.19.0/TextEncoderHelper.java:62)
+	at org.apache.logging.log4j.core.layout.StringBuilderEncoder.encode(org.apache.logging.log4j.core@2.19.0/StringBuilderEncoder.java:67)
+	at org.apache.logging.log4j.core.layout.StringBuilderEncoder.encode(org.apache.logging.log4j.core@2.19.0/StringBuilderEncoder.java:32)
+	at org.apache.logging.log4j.core.layout.PatternLayout.encode(org.apache.logging.log4j.core@2.19.0/PatternLayout.java:227)
+	at org.apache.logging.log4j.core.layout.PatternLayout.encode(org.apache.logging.log4j.core@2.19.0/PatternLayout.java:59)
+	at org.apache.logging.log4j.core.appender.AbstractOutputStreamAppender.directEncodeEvent(org.apache.logging.log4j.core@2.19.0/AbstractOutputStreamAppender.java:215)
+	at org.apache.logging.log4j.core.appender.AbstractOutputStreamAppender.tryAppend(org.apache.logging.log4j.core@2.19.0/AbstractOutputStreamAppender.java:208)
+	at org.apache.logging.log4j.core.appender.AbstractOutputStreamAppender.append(org.apache.logging.log4j.core@2.19.0/AbstractOutputStreamAppender.java:199)
+	at org.apache.logging.log4j.core.appender.RollingRandomAccessFileAppender.append(org.apache.logging.log4j.core@2.19.0/RollingRandomAccessFileAppender.java:243)
+	at org.apache.logging.log4j.core.config.AppenderControl.tryCallAppender(org.apache.logging.log4j.core@2.19.0/AppenderControl.java:161)
+	at org.apache.logging.log4j.core.config.AppenderControl.callAppender0(org.apache.logging.log4j.core@2.19.0/AppenderControl.java:134)
+	at org.apache.logging.log4j.core.config.AppenderControl.callAppenderPreventRecursion(org.apache.logging.log4j.core@2.19.0/AppenderControl.java:125)
+	at org.apache.logging.log4j.core.config.AppenderControl.callAppender(org.apache.logging.log4j.core@2.19.0/AppenderControl.java:89)
+	at org.apache.logging.log4j.core.config.LoggerConfig.callAppenders(org.apache.logging.log4j.core@2.19.0/LoggerConfig.java:683)
+	at org.apache.logging.log4j.core.config.LoggerConfig.processLogEvent(org.apache.logging.log4j.core@2.19.0/LoggerConfig.java:641)
+	at org.apache.logging.log4j.core.config.LoggerConfig.log(org.apache.logging.log4j.core@2.19.0/LoggerConfig.java:624)
+	at org.apache.logging.log4j.core.config.LoggerConfig.log(org.apache.logging.log4j.core@2.19.0/LoggerConfig.java:560)
+	at org.apache.logging.log4j.core.config.AwaitCompletionReliabilityStrategy.log(org.apache.logging.log4j.core@2.19.0/AwaitCompletionReliabilityStrategy.java:82)
+	at org.apache.logging.log4j.core.Logger.log(org.apache.logging.log4j.core@2.19.0/Logger.java:162)
+	at org.apache.logging.log4j.spi.AbstractLogger.tryLogMessage(org.apache.logging.log4j@2.19.0/AbstractLogger.java:2205)
+	at org.apache.logging.log4j.spi.AbstractLogger.logMessageTrackRecursion(org.apache.logging.log4j@2.19.0/AbstractLogger.java:2159)
+	at org.apache.logging.log4j.spi.AbstractLogger.logMessageSafely(org.apache.logging.log4j@2.19.0/AbstractLogger.java:2142)
+	at org.apache.logging.log4j.spi.AbstractLogger.logMessage(org.apache.logging.log4j@2.19.0/AbstractLogger.java:2017)
+	at org.apache.logging.log4j.spi.AbstractLogger.logIfEnabled(org.apache.logging.log4j@2.19.0/AbstractLogger.java:1983)
+	at org.apache.logging.log4j.spi.AbstractLogger.debug(org.apache.logging.log4j@2.19.0/AbstractLogger.java:282)
+	at cpw.mods.modlauncher.TransformationServicesHandler.initialiseServiceTransformers(cpw.mods.modlauncher@10.0.9/TransformationServicesHandler.java:84)
+	at cpw.mods.modlauncher.Launcher.run(cpw.mods.modlauncher@10.0.9/Launcher.java:102)
+	at cpw.mods.modlauncher.Launcher.main(cpw.mods.modlauncher@10.0.9/Launcher.java:78)
+	at cpw.mods.modlauncher.BootstrapLaunchConsumer.accept(cpw.mods.modlauncher@10.0.9/BootstrapLaunchConsumer.java:26)
+	at cpw.mods.modlauncher.BootstrapLaunchConsumer.accept(cpw.mods.modlauncher@10.0.9/BootstrapLaunchConsumer.java:23)
+	at cpw.mods.bootstraplauncher.BootstrapLauncher.main(cpw.mods.bootstraplauncher@1.1.2/BootstrapLauncher.java:141)
+
+"Reference Handler" #2 daemon prio=10 os_prio=2 cpu=671.88ms elapsed=66.03s tid=0x000001df41264550 nid=0x167fc waiting on condition  [0x0000009b5cafe000]
+   java.lang.Thread.State: RUNNABLE
+	at java.lang.ref.Reference.waitForReferencePendingList(java.base@17.0.19/Native Method)
+	at java.lang.ref.Reference.processPendingReferences(java.base@17.0.19/Reference.java:253)
+	at java.lang.ref.Reference$ReferenceHandler.run(java.base@17.0.19/Reference.java:215)
+
+"Finalizer" #3 daemon prio=8 os_prio=1 cpu=0.00ms elapsed=66.03s tid=0x000001df41266f20 nid=0x18544 in Object.wait()  [0x0000009b5cbff000]
+   java.lang.Thread.State: WAITING (on object monitor)
+	at java.lang.Object.wait(java.base@17.0.19/Native Method)
+	- waiting on <0x0000000080000af8> (a java.lang.ref.ReferenceQueue$Lock)
+	at java.lang.ref.ReferenceQueue.remove(java.base@17.0.19/ReferenceQueue.java:155)
+	- locked <0x0000000080000af8> (a java.lang.ref.ReferenceQueue$Lock)
+	at java.lang.ref.ReferenceQueue.remove(java.base@17.0.19/ReferenceQueue.java:176)
+	at java.lang.ref.Finalizer$FinalizerThread.run(java.base@17.0.19/Finalizer.java:172)
+
+"Signal Dispatcher" #4 daemon prio=9 os_prio=2 cpu=0.00ms elapsed=66.03s tid=0x000001df41285b50 nid=0x1999c waiting on condition  [0x0000000000000000]
+   java.lang.Thread.State: RUNNABLE
+
+"Attach Listener" #5 daemon prio=5 os_prio=2 cpu=0.00ms elapsed=66.03s tid=0x000001df41286510 nid=0x184a8 waiting on condition  [0x0000000000000000]
+   java.lang.Thread.State: RUNNABLE
+
+"Service Thread" #6 daemon prio=9 os_prio=0 cpu=31.25ms elapsed=66.03s tid=0x000001df41288ee0 nid=0x181d0 runnable  [0x0000000000000000]
+   java.lang.Thread.State: RUNNABLE
+
+"Monitor Deflation Thread" #7 daemon prio=9 os_prio=0 cpu=0.00ms elapsed=66.03s tid=0x000001df4128b8b0 nid=0x1745c runnable  [0x0000000000000000]
+   java.lang.Thread.State: RUNNABLE
+
+"C2 CompilerThread0" #8 daemon prio=9 os_prio=2 cpu=15203.12ms elapsed=66.03s tid=0x000001df4128d4c0 nid=0x17d74 waiting on condition  [0x0000000000000000]
+   java.lang.Thread.State: RUNNABLE
+   No compile task
+
+"C1 CompilerThread0" #16 daemon prio=9 os_prio=2 cpu=781.25ms elapsed=66.03s tid=0x000001df412912d0 nid=0x19a78 waiting on condition  [0x0000000000000000]
+   java.lang.Thread.State: RUNNABLE
+   No compile task
+
+"Sweeper thread" #20 daemon prio=9 os_prio=2 cpu=78.12ms elapsed=66.03s tid=0x000001df41291be0 nid=0x192e0 runnable  [0x0000000000000000]
+   java.lang.Thread.State: RUNNABLE
+
+"Common-Cleaner" #21 daemon prio=8 os_prio=1 cpu=109.38ms elapsed=66.02s tid=0x000001df4120c810 nid=0x18008 in Object.wait()  [0x0000009b5d5ff000]
+   java.lang.Thread.State: TIMED_WAITING (on object monitor)
+	at java.lang.Object.wait(java.base@17.0.19/Native Method)
+	- waiting on <0x0000000080002738> (a java.lang.ref.ReferenceQueue$Lock)
+	at java.lang.ref.ReferenceQueue.remove(java.base@17.0.19/ReferenceQueue.java:155)
+	- locked <0x0000000080002738> (a java.lang.ref.ReferenceQueue$Lock)
+	at jdk.internal.ref.CleanerImpl.run(java.base@17.0.19/CleanerImpl.java:140)
+	at java.lang.Thread.run(java.base@17.0.19/Unknown Source)
+	at jdk.internal.misc.InnocuousThread.run(java.base@17.0.19/InnocuousThread.java:162)
+
+"Ronova external code continuation" #22 daemon prio=5 os_prio=0 cpu=26468.75ms elapsed=63.31s tid=0x000001df8842d180 nid=0x1903c waiting for monitor entry  [0x0000009b5f8fd000]
+   java.lang.Thread.State: BLOCKED (on object monitor)
+	at dev.ronova.pro.bootstrap.ResourceBridge.critical(ResourceBridge.java:1301)
+	- waiting to lock <0x000000008002ca48> (a java.util.HashMap)
+	at dev.ronova.pro.bootstrap.ResourceBridge.unsafeMutationAllowed(ResourceBridge.java:1331)
+	at dev.ronova.pro.bootstrap.TaskBridge.unsafeWriteAllowed(TaskBridge.java:1565)
+	at dev.ronova.pro.bootstrap.TaskBridge.unsafeWriteAllowed(TaskBridge.java:1561)
+	at dev.ronova.pro.bootstrap.TaskBridge.beginNativeUnsafeMutation(TaskBridge.java:1858)
+	at jdk.internal.misc.Unsafe.compareAndSetLong(java.base@17.0.19/Native Method)
+	at java.util.concurrent.ConcurrentHashMap.fullAddCount(java.base@17.0.19/ConcurrentHashMap.java:2619)
+	at java.util.concurrent.ConcurrentHashMap.addCount(java.base@17.0.19/ConcurrentHashMap.java:2334)
+	at java.util.concurrent.ConcurrentHashMap.computeIfAbsent(java.base@17.0.19/ConcurrentHashMap.java:1776)
+	at dev.ronova.pro.bootstrap.SourceMapBridge.scope(SourceMapBridge.java:157)
+	at dev.ronova.pro.bootstrap.SourceMapBridge.born(SourceMapBridge.java:164)
+	at java.util.HashMap.<init>(java.base@17.0.19/HashMap.java:471)
+	at dev.ronova.pro.agent.ExternalCodeDefinitions.lambda$lookup$19(ExternalCodeDefinitions.java:631)
+	at dev.ronova.pro.agent.ExternalCodeDefinitions$$Lambda$139/0x000001df430e7aa0.apply(Unknown Source)
+	at java.util.Map.computeIfAbsent(java.base@17.0.19/Map.java:1054)
+	at dev.ronova.pro.agent.ExternalCodeDefinitions.lookup(ExternalCodeDefinitions.java:631)
+	at dev.ronova.pro.agent.ExternalCodeDefinitions.resolveCall(ExternalCodeDefinitions.java:512)
+	at dev.ronova.pro.agent.ExternalCodeDefinitions.resolve(ExternalCodeDefinitions.java:489)
+	at dev.ronova.pro.agent.ExternalCodeDefinitions.expandGraph(ExternalCodeDefinitions.java:422)
+	at dev.ronova.pro.agent.ExternalCodeDefinitions.expand(ExternalCodeDefinitions.java:376)
+	at dev.ronova.pro.agent.ExternalCodeDefinitions.refreshes(ExternalCodeDefinitions.java:309)
+	at dev.ronova.pro.agent.ExternalCodeDefinitions.refreshes(ExternalCodeDefinitions.java:275)
+	at dev.ronova.pro.agent.ExternalCodeDefinitions.run(Unknown Source)
+	at dev.ronova.pro.agent.ExternalCodeDefinitions.lambda$start$4(Unknown Source)
+	at dev.ronova.pro.agent.ExternalCodeDefinitions$$Lambda$129/0x000001df430ca868.run(Unknown Source)
+	at java.lang.Thread.run(java.base@17.0.19/Thread.java:840)
+
+"Notification Thread" #23 daemon prio=9 os_prio=0 cpu=0.00ms elapsed=54.61s tid=0x000001df8de31ce0 nid=0x17504 runnable  [0x0000000000000000]
+   java.lang.Thread.State: RUNNABLE
+
+"pool-2-thread-1" #26 daemon prio=5 os_prio=0 cpu=15.62ms elapsed=6.95s tid=0x000001df895a7580 nid=0x156fc waiting on condition  [0x0000009b5dcfc000]
+   java.lang.Thread.State: WAITING (parking)
+	at jdk.internal.misc.Unsafe.park(java.base@17.0.19/Native Method)
+	- parking to wait for  <0x0000000083d9a5e0> (a java.util.concurrent.locks.ReentrantLock$NonfairSync)
+	at java.util.concurrent.locks.LockSupport.park(java.base@17.0.19/LockSupport.java:211)
+	at java.util.concurrent.locks.AbstractQueuedSynchronizer.acquire(java.base@17.0.19/AbstractQueuedSynchronizer.java:715)
+	at java.util.concurrent.locks.AbstractQueuedSynchronizer.acquire(java.base@17.0.19/AbstractQueuedSynchronizer.java:938)
+	at java.util.concurrent.locks.ReentrantLock$Sync.lock(java.base@17.0.19/ReentrantLock.java:153)
+	at java.util.concurrent.locks.ReentrantLock.lock(java.base@17.0.19/ReentrantLock.java:322)
+	at dev.ronova.pro.bootstrap.TaskBridge.beginNativeUnsafeMutation(TaskBridge.java:1856)
+	at jdk.internal.misc.Unsafe.compareAndSetLong(java.base@17.0.19/Native Method)
+	at java.util.concurrent.ConcurrentHashMap.addCount(java.base@17.0.19/ConcurrentHashMap.java:2333)
+	at java.util.concurrent.ConcurrentHashMap.computeIfAbsent(java.base@17.0.19/ConcurrentHashMap.java:1776)
+	at dev.ronova.pro.bootstrap.SourceMapBridge.scope(SourceMapBridge.java:157)
+	at dev.ronova.pro.bootstrap.SourceMapBridge.node(SourceMapBridge.java:218)
+	at java.util.HashMap.newNode(java.base@17.0.19/HashMap.java:1901)
+	at java.util.HashMap.putVal(java.base@17.0.19/HashMap.java:629)
+	at java.util.HashMap.put(java.base@17.0.19/HashMap.java:610)
+	at dev.ronova.pro.bootstrap.ResourceBridge.bufferCleaner(ResourceBridge.java:771)
+	- locked <0x000000008002ca48> (a java.util.HashMap)
+	at java.nio.DirectByteBuffer.<init>(java.base@17.0.19/DirectByteBuffer.java:138)
+	at java.nio.ByteBuffer.allocateDirect(java.base@17.0.19/ByteBuffer.java:332)
+	at sun.nio.ch.Util.getTemporaryDirectBuffer(java.base@17.0.19/Util.java:243)
+	at sun.nio.ch.IOUtil.read(java.base@17.0.19/IOUtil.java:293)
+	at sun.nio.ch.IOUtil.read(java.base@17.0.19/IOUtil.java:273)
+	at sun.nio.ch.FileChannelImpl.readInternal(java.base@17.0.19/FileChannelImpl.java:839)
+	at sun.nio.ch.FileChannelImpl.read(java.base@17.0.19/FileChannelImpl.java:821)
+	- locked <0x0000000092d7ed50> (a java.lang.Object)
+	at jdk.nio.zipfs.ZipFileSystem.readFullyAt(jdk.zipfs@17.0.19/ZipFileSystem.java:1241)
+	at jdk.nio.zipfs.ZipFileSystem$EntryInputStream.read(jdk.zipfs@17.0.19/ZipFileSystem.java:2334)
+	at jdk.nio.zipfs.ZipFileSystem$2.fill(jdk.zipfs@17.0.19/ZipFileSystem.java:2271)
+	at java.util.zip.InflaterInputStream.read(java.base@17.0.19/InflaterInputStream.java:158)
+	at java.io.InputStream.readNBytes(java.base@17.0.19/InputStream.java:409)
+	at java.io.InputStream.readAllBytes(java.base@17.0.19/InputStream.java:346)
+	at jdk.nio.zipfs.ZipFileSystem.newByteChannel(jdk.zipfs@17.0.19/ZipFileSystem.java:977)
+	at jdk.nio.zipfs.ZipPath.newByteChannel(jdk.zipfs@17.0.19/ZipPath.java:864)
+	at jdk.nio.zipfs.ZipFileSystemProvider.newByteChannel(jdk.zipfs@17.0.19/ZipFileSystemProvider.java:238)
+	at java.nio.file.Files.newByteChannel(java.base@17.0.19/Files.java:380)
+	at java.nio.file.Files.newByteChannel(java.base@17.0.19/Files.java:432)
+	at cpw.mods.niofs.union.UnionFileSystem.byteChannel(cpw.mods.securejarhandler/UnionFileSystem.java:348)
+	at cpw.mods.niofs.union.UnionFileSystem$$Lambda$275/0x000001df4314e628.apply(cpw.mods.securejarhandler/Unknown Source)
+	at java.util.Optional.map(java.base@17.0.19/Optional.java:260)
+	at cpw.mods.niofs.union.UnionFileSystem.newReadByteChannel(cpw.mods.securejarhandler/UnionFileSystem.java:339)
+	at cpw.mods.niofs.union.UnionFileSystemProvider.newByteChannel(cpw.mods.securejarhandler/UnionFileSystemProvider.java:149)
+	at java.nio.file.Files.newByteChannel(java.base@17.0.19/Files.java:380)
+	at java.nio.file.Files.newByteChannel(java.base@17.0.19/Files.java:432)
+	at java.nio.file.spi.FileSystemProvider.newInputStream(java.base@17.0.19/FileSystemProvider.java:422)
+	at java.nio.file.Files.newInputStream(java.base@17.0.19/Files.java:160)
+	at cpw.mods.jarhandling.impl.Jar$JarModuleDataProvider.lambda$open$0(cpw.mods.securejarhandler/Jar.java:291)
+	at cpw.mods.jarhandling.impl.Jar$JarModuleDataProvider$$Lambda$369/0x000001df43158f68.apply(cpw.mods.securejarhandler/Unknown Source)
+	at cpw.mods.util.LambdaExceptionUtils.lambda$rethrowFunction$2(cpw.mods.securejarhandler/LambdaExceptionUtils.java:42)
+	at cpw.mods.util.LambdaExceptionUtils$$Lambda$367/0x000001df43158af0.apply(cpw.mods.securejarhandler/Unknown Source)
+	at java.util.Optional.map(java.base@17.0.19/Optional.java:260)
+	at cpw.mods.jarhandling.impl.Jar$JarModuleDataProvider.open(cpw.mods.securejarhandler/Jar.java:291)
+	at cpw.mods.cl.JarModuleFinder$JarModuleReader.open(cpw.mods.securejarhandler/JarModuleFinder.java:76)
+	at cpw.mods.cl.ModuleClassLoader.lambda$getClassBytes$10(cpw.mods.securejarhandler/ModuleClassLoader.java:105)
+	at cpw.mods.cl.ModuleClassLoader$$Lambda$366/0x000001df431586d0.apply(cpw.mods.securejarhandler/Unknown Source)
+	at cpw.mods.util.LambdaExceptionUtils.lambda$rethrowFunction$2(cpw.mods.securejarhandler/LambdaExceptionUtils.java:42)
+	at cpw.mods.util.LambdaExceptionUtils$$Lambda$367/0x000001df43158af0.apply(cpw.mods.securejarhandler/Unknown Source)
+	at java.util.Optional.flatMap(java.base@17.0.19/Optional.java:289)
+	at cpw.mods.cl.ModuleClassLoader.getClassBytes(cpw.mods.securejarhandler/ModuleClassLoader.java:105)
+	at cpw.mods.cl.ModuleClassLoader.readerToClass(cpw.mods.securejarhandler/ModuleClassLoader.java:113)
+	at cpw.mods.cl.ModuleClassLoader.lambda$findClass$15(cpw.mods.securejarhandler/ModuleClassLoader.java:219)
+	at cpw.mods.cl.ModuleClassLoader$$Lambda$365/0x000001df431582a8.apply(cpw.mods.securejarhandler/Unknown Source)
+	at cpw.mods.cl.ModuleClassLoader.loadFromModule(cpw.mods.securejarhandler/ModuleClassLoader.java:229)
+	at cpw.mods.cl.ModuleClassLoader.findClass(cpw.mods.securejarhandler/ModuleClassLoader.java:219)
+	at cpw.mods.cl.ModuleClassLoader.loadClass(cpw.mods.securejarhandler/ModuleClassLoader.java:135)
+	- locked <0x00000000b7be7800> (a java.lang.Object)
+	at java.lang.ClassLoader.loadClass(java.base@17.0.19/ClassLoader.java:525)
+	at net.minecraftforge.fml.loading.moddiscovery.ModFile.compileContent(fmlloader@1.20.1-47.4.23/ModFile.java:156)
+	at net.minecraftforge.fml.loading.moddiscovery.BackgroundScanHandler$$Lambda$958/0x000001df43422440.get(fmlloader@1.20.1-47.4.23/Unknown Source)
+	at java.util.concurrent.CompletableFuture$AsyncSupply.run(java.base@17.0.19/CompletableFuture.java:1768)
+	at java.util.concurrent.ThreadPoolExecutor.runWorker(java.base@17.0.19/ThreadPoolExecutor.java:1136)
+	at java.util.concurrent.ThreadPoolExecutor$Worker.run(java.base@17.0.19/ThreadPoolExecutor.java:635)
+	at java.lang.Thread.run(java.base@17.0.19/Thread.java:840)
+
+"G1 Conc#3" os_prio=2 cpu=734.38ms elapsed=35.71s tid=0x000001df41349c70 nid=0x17ef4 runnable  
+
+"G1 Conc#2" os_prio=2 cpu=750.00ms elapsed=35.71s tid=0x000001df413478b0 nid=0x18150 runnable  
+
+"G1 Conc#1" os_prio=2 cpu=750.00ms elapsed=35.71s tid=0x000001df413480f0 nid=0x18ee4 runnable  
+
+"VM Periodic Task Thread" os_prio=2 cpu=171.88ms elapsed=54.61s tid=0x000001df9228d850 nid=0x189fc waiting on condition  
+
+"G1 Refine#14" os_prio=2 cpu=15.62ms elapsed=60.93s tid=0x000001df8af199d0 nid=0x17ae0 runnable  
+
+"G1 Refine#13" os_prio=2 cpu=15.62ms elapsed=60.93s tid=0x000001df8af193f0 nid=0x18564 runnable  
+
+"G1 Refine#12" os_prio=2 cpu=31.25ms elapsed=60.93s tid=0x000001df8af16ad0 nid=0x18750 runnable  
+
+"G1 Refine#11" os_prio=2 cpu=15.62ms elapsed=63.51s tid=0x000001df8af17690 nid=0x17b50 runnable  
+
+"G1 Refine#10" os_prio=2 cpu=31.25ms elapsed=63.51s tid=0x000001df8af173a0 nid=0x18770 runnable  
+
+"G1 Refine#9" os_prio=2 cpu=31.25ms elapsed=63.51s tid=0x000001df8af18e10 nid=0x17fd0 runnable  
+
+"G1 Refine#8" os_prio=2 cpu=31.25ms elapsed=63.51s tid=0x000001df8af196e0 nid=0x18828 runnable  
+
+"G1 Refine#7" os_prio=2 cpu=31.25ms elapsed=63.51s tid=0x000001df891c34a0 nid=0x1700c runnable  
+
+"G1 Refine#6" os_prio=2 cpu=31.25ms elapsed=63.51s tid=0x000001df891c2bd0 nid=0x17014 runnable  
+
+"G1 Refine#5" os_prio=2 cpu=46.88ms elapsed=63.56s tid=0x000001df891c4060 nid=0x18cd4 runnable  
+
+"G1 Refine#4" os_prio=2 cpu=46.88ms elapsed=64.68s tid=0x000001df891c2ec0 nid=0x15fb0 runnable  
+
+"G1 Refine#3" os_prio=2 cpu=46.88ms elapsed=64.68s tid=0x000001df891c31b0 nid=0x17e3c runnable  
+
+"G1 Refine#2" os_prio=2 cpu=93.75ms elapsed=64.68s tid=0x000001df891c3a80 nid=0x15960 runnable  
+
+"G1 Refine#1" os_prio=2 cpu=203.12ms elapsed=64.69s tid=0x000001df891c28e0 nid=0x19788 runnable  
+
+"GC Thread#14" os_prio=2 cpu=1093.75ms elapsed=65.73s tid=0x000001df88b85d00 nid=0x12928 runnable  
+
+"GC Thread#13" os_prio=2 cpu=1140.62ms elapsed=65.73s tid=0x000001df88b85a40 nid=0x12d98 runnable  
+
+"GC Thread#12" os_prio=2 cpu=1140.62ms elapsed=65.73s tid=0x000001df88e68090 nid=0x19108 runnable  
+
+"GC Thread#11" os_prio=2 cpu=1109.38ms elapsed=65.73s tid=0x000001df88a09030 nid=0x17cfc runnable  
+
+"GC Thread#10" os_prio=2 cpu=1125.00ms elapsed=65.73s tid=0x000001df88e67dd0 nid=0x16574 runnable  
+
+"GC Thread#9" os_prio=2 cpu=1140.62ms elapsed=65.73s tid=0x000001df888a08e0 nid=0x17e74 runnable  
+
+"GC Thread#8" os_prio=2 cpu=1140.62ms elapsed=65.73s tid=0x000001df888a0620 nid=0x18cc8 runnable  
+
+"GC Thread#7" os_prio=2 cpu=1140.62ms elapsed=65.73s tid=0x000001df88887d00 nid=0x15a80 runnable  
+
+"GC Thread#6" os_prio=2 cpu=1109.38ms elapsed=65.73s tid=0x000001df88887a40 nid=0x17a14 runnable  
+
+"GC Thread#5" os_prio=2 cpu=1125.00ms elapsed=65.73s tid=0x000001df88787540 nid=0x1735c runnable  
+
+"GC Thread#4" os_prio=2 cpu=1062.50ms elapsed=65.73s tid=0x000001df8815aff0 nid=0x199e8 runnable  
+
+"GC Thread#3" os_prio=2 cpu=1109.38ms elapsed=65.73s tid=0x000001df884a3690 nid=0x18d34 runnable  
+
+"GC Thread#2" os_prio=2 cpu=1093.75ms elapsed=65.73s tid=0x000001df88ab1b40 nid=0x19104 runnable  
+
+"GC Thread#1" os_prio=2 cpu=1156.25ms elapsed=65.73s tid=0x000001df41ac0b30 nid=0x15978 runnable  
+
+"VM Thread" os_prio=2 cpu=2093.75ms elapsed=66.03s tid=0x000001df41261020 nid=0x181dc runnable  
+
+"G1 Service" os_prio=2 cpu=0.00ms elapsed=66.04s tid=0x000001df3e096930 nid=0x18ecc runnable  
+
+"G1 Refine#0" os_prio=2 cpu=1578.12ms elapsed=66.04s tid=0x000001df3e096060 nid=0x14e80 runnable  
+
+"G1 Conc#0" os_prio=2 cpu=750.00ms elapsed=66.05s tid=0x000001df21bf0af0 nid=0x16c50 runnable  
+
+"G1 Main Marker" os_prio=2 cpu=15.62ms elapsed=66.05s tid=0x000001df21bf01c0 nid=0x16cf0 runnable  
+
+"GC Thread#0" os_prio=2 cpu=1093.75ms elapsed=66.05s tid=0x000001df1f8ce870 nid=0x181c4 runnable  
+
+JNI global refs: 70, weak refs: 2362
+
+
+Found one Java-level deadlock:
+=============================
+"main":
+  waiting to lock monitor 0x000001df3e092a30 (object 0x000000008002ca48, a java.util.HashMap),
+  which is held by "pool-2-thread-1"
+
+"pool-2-thread-1":
+  waiting for ownable synchronizer 0x0000000083d9a5e0, (a java.util.concurrent.locks.ReentrantLock$NonfairSync),
+  which is held by "Ronova external code continuation"
+
+"Ronova external code continuation":
+  waiting to lock monitor 0x000001df3e092a30 (object 0x000000008002ca48, a java.util.HashMap),
+  which is held by "pool-2-thread-1"
+
+Java stack information for the threads listed above:
+===================================================
+"main":
+	at dev.ronova.pro.bootstrap.ResourceBridge.bufferOperation(ResourceBridge.java:1088)
+	- waiting to lock <0x000000008002ca48> (a java.util.HashMap)
+	at java.nio.CharBuffer.position(java.base@17.0.19/CharBuffer.java)
+	at java.nio.CharBuffer.position(java.base@17.0.19/CharBuffer.java:267)
+	at sun.nio.cs.UTF_8.updatePositions(java.base@17.0.19/UTF_8.java:82)
+	at sun.nio.cs.UTF_8$Encoder.encodeArrayLoopSlow(java.base@17.0.19/UTF_8.java:509)
+	at sun.nio.cs.UTF_8$Encoder.encodeArrayLoop(java.base@17.0.19/UTF_8.java:461)
+	at sun.nio.cs.UTF_8$Encoder.encodeLoop(java.base@17.0.19/UTF_8.java:564)
+	at java.nio.charset.CharsetEncoder.encode(java.base@17.0.19/CharsetEncoder.java:585)
+	at org.apache.logging.log4j.core.layout.TextEncoderHelper.encodeText(org.apache.logging.log4j.core@2.19.0/TextEncoderHelper.java:62)
+	at org.apache.logging.log4j.core.layout.StringBuilderEncoder.encode(org.apache.logging.log4j.core@2.19.0/StringBuilderEncoder.java:67)
+	at org.apache.logging.log4j.core.layout.StringBuilderEncoder.encode(org.apache.logging.log4j.core@2.19.0/StringBuilderEncoder.java:32)
+	at org.apache.logging.log4j.core.layout.PatternLayout.encode(org.apache.logging.log4j.core@2.19.0/PatternLayout.java:227)
+	at org.apache.logging.log4j.core.layout.PatternLayout.encode(org.apache.logging.log4j.core@2.19.0/PatternLayout.java:59)
+	at org.apache.logging.log4j.core.appender.AbstractOutputStreamAppender.directEncodeEvent(org.apache.logging.log4j.core@2.19.0/AbstractOutputStreamAppender.java:215)
+	at org.apache.logging.log4j.core.appender.AbstractOutputStreamAppender.tryAppend(org.apache.logging.log4j.core@2.19.0/AbstractOutputStreamAppender.java:208)
+	at org.apache.logging.log4j.core.appender.AbstractOutputStreamAppender.append(org.apache.logging.log4j.core@2.19.0/AbstractOutputStreamAppender.java:199)
+	at org.apache.logging.log4j.core.appender.RollingRandomAccessFileAppender.append(org.apache.logging.log4j.core@2.19.0/RollingRandomAccessFileAppender.java:243)
+	at org.apache.logging.log4j.core.config.AppenderControl.tryCallAppender(org.apache.logging.log4j.core@2.19.0/AppenderControl.java:161)
+	at org.apache.logging.log4j.core.config.AppenderControl.callAppender0(org.apache.logging.log4j.core@2.19.0/AppenderControl.java:134)
+	at org.apache.logging.log4j.core.config.AppenderControl.callAppenderPreventRecursion(org.apache.logging.log4j.core@2.19.0/AppenderControl.java:125)
+	at org.apache.logging.log4j.core.config.AppenderControl.callAppender(org.apache.logging.log4j.core@2.19.0/AppenderControl.java:89)
+	at org.apache.logging.log4j.core.config.LoggerConfig.callAppenders(org.apache.logging.log4j.core@2.19.0/LoggerConfig.java:683)
+	at org.apache.logging.log4j.core.config.LoggerConfig.processLogEvent(org.apache.logging.log4j.core@2.19.0/LoggerConfig.java:641)
+	at org.apache.logging.log4j.core.config.LoggerConfig.log(org.apache.logging.log4j.core@2.19.0/LoggerConfig.java:624)
+	at org.apache.logging.log4j.core.config.LoggerConfig.log(org.apache.logging.log4j.core@2.19.0/LoggerConfig.java:560)
+	at org.apache.logging.log4j.core.config.AwaitCompletionReliabilityStrategy.log(org.apache.logging.log4j.core@2.19.0/AwaitCompletionReliabilityStrategy.java:82)
+	at org.apache.logging.log4j.core.Logger.log(org.apache.logging.log4j.core@2.19.0/Logger.java:162)
+	at org.apache.logging.log4j.spi.AbstractLogger.tryLogMessage(org.apache.logging.log4j@2.19.0/AbstractLogger.java:2205)
+	at org.apache.logging.log4j.spi.AbstractLogger.logMessageTrackRecursion(org.apache.logging.log4j@2.19.0/AbstractLogger.java:2159)
+	at org.apache.logging.log4j.spi.AbstractLogger.logMessageSafely(org.apache.logging.log4j@2.19.0/AbstractLogger.java:2142)
+	at org.apache.logging.log4j.spi.AbstractLogger.logMessage(org.apache.logging.log4j@2.19.0/AbstractLogger.java:2017)
+	at org.apache.logging.log4j.spi.AbstractLogger.logIfEnabled(org.apache.logging.log4j@2.19.0/AbstractLogger.java:1983)
+	at org.apache.logging.log4j.spi.AbstractLogger.debug(org.apache.logging.log4j@2.19.0/AbstractLogger.java:282)
+	at cpw.mods.modlauncher.TransformationServicesHandler.initialiseServiceTransformers(cpw.mods.modlauncher@10.0.9/TransformationServicesHandler.java:84)
+	at cpw.mods.modlauncher.Launcher.run(cpw.mods.modlauncher@10.0.9/Launcher.java:102)
+	at cpw.mods.modlauncher.Launcher.main(cpw.mods.modlauncher@10.0.9/Launcher.java:78)
+	at cpw.mods.modlauncher.BootstrapLaunchConsumer.accept(cpw.mods.modlauncher@10.0.9/BootstrapLaunchConsumer.java:26)
+	at cpw.mods.modlauncher.BootstrapLaunchConsumer.accept(cpw.mods.modlauncher@10.0.9/BootstrapLaunchConsumer.java:23)
+	at cpw.mods.bootstraplauncher.BootstrapLauncher.main(cpw.mods.bootstraplauncher@1.1.2/BootstrapLauncher.java:141)
+"pool-2-thread-1":
+	at jdk.internal.misc.Unsafe.park(java.base@17.0.19/Native Method)
+	- parking to wait for  <0x0000000083d9a5e0> (a java.util.concurrent.locks.ReentrantLock$NonfairSync)
+	at java.util.concurrent.locks.LockSupport.park(java.base@17.0.19/LockSupport.java:211)
+	at java.util.concurrent.locks.AbstractQueuedSynchronizer.acquire(java.base@17.0.19/AbstractQueuedSynchronizer.java:715)
+	at java.util.concurrent.locks.AbstractQueuedSynchronizer.acquire(java.base@17.0.19/AbstractQueuedSynchronizer.java:938)
+	at java.util.concurrent.locks.ReentrantLock$Sync.lock(java.base@17.0.19/ReentrantLock.java:153)
+	at java.util.concurrent.locks.ReentrantLock.lock(java.base@17.0.19/ReentrantLock.java:322)
+	at dev.ronova.pro.bootstrap.TaskBridge.beginNativeUnsafeMutation(TaskBridge.java:1856)
+	at jdk.internal.misc.Unsafe.compareAndSetLong(java.base@17.0.19/Native Method)
+	at java.util.concurrent.ConcurrentHashMap.addCount(java.base@17.0.19/ConcurrentHashMap.java:2333)
+	at java.util.concurrent.ConcurrentHashMap.computeIfAbsent(java.base@17.0.19/ConcurrentHashMap.java:1776)
+	at dev.ronova.pro.bootstrap.SourceMapBridge.scope(SourceMapBridge.java:157)
+	at dev.ronova.pro.bootstrap.SourceMapBridge.node(SourceMapBridge.java:218)
+	at java.util.HashMap.newNode(java.base@17.0.19/HashMap.java:1901)
+	at java.util.HashMap.putVal(java.base@17.0.19/HashMap.java:629)
+	at java.util.HashMap.put(java.base@17.0.19/HashMap.java:610)
+	at dev.ronova.pro.bootstrap.ResourceBridge.bufferCleaner(ResourceBridge.java:771)
+	- locked <0x000000008002ca48> (a java.util.HashMap)
+	at java.nio.DirectByteBuffer.<init>(java.base@17.0.19/DirectByteBuffer.java:138)
+	at java.nio.ByteBuffer.allocateDirect(java.base@17.0.19/ByteBuffer.java:332)
+	at sun.nio.ch.Util.getTemporaryDirectBuffer(java.base@17.0.19/Util.java:243)
+	at sun.nio.ch.IOUtil.read(java.base@17.0.19/IOUtil.java:293)
+	at sun.nio.ch.IOUtil.read(java.base@17.0.19/IOUtil.java:273)
+	at sun.nio.ch.FileChannelImpl.readInternal(java.base@17.0.19/FileChannelImpl.java:839)
+	at sun.nio.ch.FileChannelImpl.read(java.base@17.0.19/FileChannelImpl.java:821)
+	- locked <0x0000000092d7ed50> (a java.lang.Object)
+	at jdk.nio.zipfs.ZipFileSystem.readFullyAt(jdk.zipfs@17.0.19/ZipFileSystem.java:1241)
+	at jdk.nio.zipfs.ZipFileSystem$EntryInputStream.read(jdk.zipfs@17.0.19/ZipFileSystem.java:2334)
+	at jdk.nio.zipfs.ZipFileSystem$2.fill(jdk.zipfs@17.0.19/ZipFileSystem.java:2271)
+	at java.util.zip.InflaterInputStream.read(java.base@17.0.19/InflaterInputStream.java:158)
+	at java.io.InputStream.readNBytes(java.base@17.0.19/InputStream.java:409)
+	at java.io.InputStream.readAllBytes(java.base@17.0.19/InputStream.java:346)
+	at jdk.nio.zipfs.ZipFileSystem.newByteChannel(jdk.zipfs@17.0.19/ZipFileSystem.java:977)
+	at jdk.nio.zipfs.ZipPath.newByteChannel(jdk.zipfs@17.0.19/ZipPath.java:864)
+	at jdk.nio.zipfs.ZipFileSystemProvider.newByteChannel(jdk.zipfs@17.0.19/ZipFileSystemProvider.java:238)
+	at java.nio.file.Files.newByteChannel(java.base@17.0.19/Files.java:380)
+	at java.nio.file.Files.newByteChannel(java.base@17.0.19/Files.java:432)
+	at cpw.mods.niofs.union.UnionFileSystem.byteChannel(cpw.mods.securejarhandler/UnionFileSystem.java:348)
+	at cpw.mods.niofs.union.UnionFileSystem$$Lambda$275/0x000001df4314e628.apply(cpw.mods.securejarhandler/Unknown Source)
+	at java.util.Optional.map(java.base@17.0.19/Optional.java:260)
+	at cpw.mods.niofs.union.UnionFileSystem.newReadByteChannel(cpw.mods.securejarhandler/UnionFileSystem.java:339)
+	at cpw.mods.niofs.union.UnionFileSystemProvider.newByteChannel(cpw.mods.securejarhandler/UnionFileSystemProvider.java:149)
+	at java.nio.file.Files.newByteChannel(java.base@17.0.19/Files.java:380)
+	at java.nio.file.Files.newByteChannel(java.base@17.0.19/Files.java:432)
+	at java.nio.file.spi.FileSystemProvider.newInputStream(java.base@17.0.19/FileSystemProvider.java:422)
+	at java.nio.file.Files.newInputStream(java.base@17.0.19/Files.java:160)
+	at cpw.mods.jarhandling.impl.Jar$JarModuleDataProvider.lambda$open$0(cpw.mods.securejarhandler/Jar.java:291)
+	at cpw.mods.jarhandling.impl.Jar$JarModuleDataProvider$$Lambda$369/0x000001df43158f68.apply(cpw.mods.securejarhandler/Unknown Source)
+	at cpw.mods.util.LambdaExceptionUtils.lambda$rethrowFunction$2(cpw.mods.securejarhandler/LambdaExceptionUtils.java:42)
+	at cpw.mods.util.LambdaExceptionUtils$$Lambda$367/0x000001df43158af0.apply(cpw.mods.securejarhandler/Unknown Source)
+	at java.util.Optional.map(java.base@17.0.19/Optional.java:260)
+	at cpw.mods.jarhandling.impl.Jar$JarModuleDataProvider.open(cpw.mods.securejarhandler/Jar.java:291)
+	at cpw.mods.cl.JarModuleFinder$JarModuleReader.open(cpw.mods.securejarhandler/JarModuleFinder.java:76)
+	at cpw.mods.cl.ModuleClassLoader.lambda$getClassBytes$10(cpw.mods.securejarhandler/ModuleClassLoader.java:105)
+	at cpw.mods.cl.ModuleClassLoader$$Lambda$366/0x000001df431586d0.apply(cpw.mods.securejarhandler/Unknown Source)
+	at cpw.mods.util.LambdaExceptionUtils.lambda$rethrowFunction$2(cpw.mods.securejarhandler/LambdaExceptionUtils.java:42)
+	at cpw.mods.util.LambdaExceptionUtils$$Lambda$367/0x000001df43158af0.apply(cpw.mods.securejarhandler/Unknown Source)
+	at java.util.Optional.flatMap(java.base@17.0.19/Optional.java:289)
+	at cpw.mods.cl.ModuleClassLoader.getClassBytes(cpw.mods.securejarhandler/ModuleClassLoader.java:105)
+	at cpw.mods.cl.ModuleClassLoader.readerToClass(cpw.mods.securejarhandler/ModuleClassLoader.java:113)
+	at cpw.mods.cl.ModuleClassLoader.lambda$findClass$15(cpw.mods.securejarhandler/ModuleClassLoader.java:219)
+	at cpw.mods.cl.ModuleClassLoader$$Lambda$365/0x000001df431582a8.apply(cpw.mods.securejarhandler/Unknown Source)
+	at cpw.mods.cl.ModuleClassLoader.loadFromModule(cpw.mods.securejarhandler/ModuleClassLoader.java:229)
+	at cpw.mods.cl.ModuleClassLoader.findClass(cpw.mods.securejarhandler/ModuleClassLoader.java:219)
+	at cpw.mods.cl.ModuleClassLoader.loadClass(cpw.mods.securejarhandler/ModuleClassLoader.java:135)
+	- locked <0x00000000b7be7800> (a java.lang.Object)
+	at java.lang.ClassLoader.loadClass(java.base@17.0.19/ClassLoader.java:525)
+	at net.minecraftforge.fml.loading.moddiscovery.ModFile.compileContent(fmlloader@1.20.1-47.4.23/ModFile.java:156)
+	at net.minecraftforge.fml.loading.moddiscovery.BackgroundScanHandler$$Lambda$958/0x000001df43422440.get(fmlloader@1.20.1-47.4.23/Unknown Source)
+	at java.util.concurrent.CompletableFuture$AsyncSupply.run(java.base@17.0.19/CompletableFuture.java:1768)
+	at java.util.concurrent.ThreadPoolExecutor.runWorker(java.base@17.0.19/ThreadPoolExecutor.java:1136)
+	at java.util.concurrent.ThreadPoolExecutor$Worker.run(java.base@17.0.19/ThreadPoolExecutor.java:635)
+	at java.lang.Thread.run(java.base@17.0.19/Thread.java:840)
+"Ronova external code continuation":
+	at dev.ronova.pro.bootstrap.ResourceBridge.critical(ResourceBridge.java:1301)
+	- waiting to lock <0x000000008002ca48> (a java.util.HashMap)
+	at dev.ronova.pro.bootstrap.ResourceBridge.unsafeMutationAllowed(ResourceBridge.java:1331)
+	at dev.ronova.pro.bootstrap.TaskBridge.unsafeWriteAllowed(TaskBridge.java:1565)
+	at dev.ronova.pro.bootstrap.TaskBridge.unsafeWriteAllowed(TaskBridge.java:1561)
+	at dev.ronova.pro.bootstrap.TaskBridge.beginNativeUnsafeMutation(TaskBridge.java:1858)
+	at jdk.internal.misc.Unsafe.compareAndSetLong(java.base@17.0.19/Native Method)
+	at java.util.concurrent.ConcurrentHashMap.fullAddCount(java.base@17.0.19/ConcurrentHashMap.java:2619)
+	at java.util.concurrent.ConcurrentHashMap.addCount(java.base@17.0.19/ConcurrentHashMap.java:2334)
+	at java.util.concurrent.ConcurrentHashMap.computeIfAbsent(java.base@17.0.19/ConcurrentHashMap.java:1776)
+	at dev.ronova.pro.bootstrap.SourceMapBridge.scope(SourceMapBridge.java:157)
+	at dev.ronova.pro.bootstrap.SourceMapBridge.born(SourceMapBridge.java:164)
+	at java.util.HashMap.<init>(java.base@17.0.19/HashMap.java:471)
+	at dev.ronova.pro.agent.ExternalCodeDefinitions.lambda$lookup$19(ExternalCodeDefinitions.java:631)
+	at dev.ronova.pro.agent.ExternalCodeDefinitions$$Lambda$139/0x000001df430e7aa0.apply(Unknown Source)
+	at java.util.Map.computeIfAbsent(java.base@17.0.19/Map.java:1054)
+	at dev.ronova.pro.agent.ExternalCodeDefinitions.lookup(ExternalCodeDefinitions.java:631)
+	at dev.ronova.pro.agent.ExternalCodeDefinitions.resolveCall(ExternalCodeDefinitions.java:512)
+	at dev.ronova.pro.agent.ExternalCodeDefinitions.resolve(ExternalCodeDefinitions.java:489)
+	at dev.ronova.pro.agent.ExternalCodeDefinitions.expandGraph(ExternalCodeDefinitions.java:422)
+	at dev.ronova.pro.agent.ExternalCodeDefinitions.expand(ExternalCodeDefinitions.java:376)
+	at dev.ronova.pro.agent.ExternalCodeDefinitions.refreshes(ExternalCodeDefinitions.java:309)
+	at dev.ronova.pro.agent.ExternalCodeDefinitions.refreshes(ExternalCodeDefinitions.java:275)
+	at dev.ronova.pro.agent.ExternalCodeDefinitions.run(Unknown Source)
+	at dev.ronova.pro.agent.ExternalCodeDefinitions.lambda$start$4(Unknown Source)
+	at dev.ronova.pro.agent.ExternalCodeDefinitions$$Lambda$129/0x000001df430ca868.run(Unknown Source)
+	at java.lang.Thread.run(java.base@17.0.19/Thread.java:840)
+
+Found 1 deadlock.
+

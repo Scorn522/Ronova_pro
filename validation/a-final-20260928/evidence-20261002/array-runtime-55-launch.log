@@ -1,0 +1,141 @@
+OpenJDK 64-Bit Server VM warning: Sharing is only supported for boot loader classes because bootstrap classpath has been appended
+RONOVA_PRO_TASK_AGENT NATIVE_BIND_AND_JNI_FIELD_READY
+RONOVA_PRO_TASK_AGENT NATIVE_THREAD_CURRENT_BINDINGS_READY
+RONOVA_NATIVE_FILE_BINDING_PENDING:Ljava/io/FileInputStream;#read0()I:UNRESOLVED_ENTRY
+RONOVA_NATIVE_FILE_BINDING_PENDING:Ljava/io/FileInputStream;#length0()J:UNRESOLVED_ENTRY
+RONOVA_NATIVE_FILE_BINDING_PENDING:Ljava/io/FileInputStream;#position0()J:UNRESOLVED_ENTRY
+RONOVA_NATIVE_FILE_BINDING_PENDING:Ljava/io/FileInputStream;#skip0(J)J:UNRESOLVED_ENTRY
+RONOVA_NATIVE_FILE_BINDING_PENDING:Ljava/io/FileInputStream;#available0()I:UNRESOLVED_ENTRY
+RONOVA_NATIVE_FILE_BINDING_PENDING:Ljava/io/FileOutputStream;#write(IZ)V:UNRESOLVED_ENTRY
+RONOVA_NATIVE_FILE_BINDING_PENDING:Ljava/io/FileOutputStream;#open0(Ljava/lang/String;Z)V:UNRESOLVED_ENTRY
+RONOVA_NATIVE_FILE_BINDING_PENDING:Ljava/io/RandomAccessFile;#setLength(J)V:UNRESOLVED_ENTRY
+RONOVA_NATIVE_FILE_BINDING_PENDING:Ljava/io/RandomAccessFile;#read0()I:UNRESOLVED_ENTRY
+RONOVA_NATIVE_FILE_BINDING_PENDING:Ljava/io/RandomAccessFile;#writeBytes([BII)V:UNRESOLVED_ENTRY
+RONOVA_NATIVE_FILE_BINDING_PENDING:Ljava/io/RandomAccessFile;#getFilePointer()J:UNRESOLVED_ENTRY
+RONOVA_NATIVE_FILE_BINDING_PENDING:Ljava/io/RandomAccessFile;#write0(I)V:UNRESOLVED_ENTRY
+RONOVA_NATIVE_FILE_BINDING_PENDING:Lsun/nio/ch/FileDispatcherImpl;#readv0(Ljava/io/FileDescriptor;JI)J:UNRESOLVED_ENTRY
+RONOVA_NATIVE_FILE_BINDING_PENDING:Lsun/nio/ch/FileDispatcherImpl;#writev0(Ljava/io/FileDescriptor;JIZ)J:UNRESOLVED_ENTRY
+RONOVA_NATIVE_FILE_BINDING_PENDING:Lsun/nio/ch/FileDispatcherImpl;#pread0(Ljava/io/FileDescriptor;JIJ)I:UNRESOLVED_ENTRY
+RONOVA_NATIVE_FILE_BINDING_PENDING:Lsun/nio/ch/FileDispatcherImpl;#pwrite0(Ljava/io/FileDescriptor;JIJ)I:UNRESOLVED_ENTRY
+RONOVA_NATIVE_FILE_BINDING_PENDING:Lsun/nio/ch/FileDispatcherImpl;#force0(Ljava/io/FileDescriptor;Z)I:UNRESOLVED_ENTRY
+RONOVA_NATIVE_FILE_BINDING_PENDING:Lsun/nio/ch/FileDispatcherImpl;#truncate0(Ljava/io/FileDescriptor;J)I:UNRESOLVED_ENTRY
+RONOVA_NATIVE_FILE_BINDING_PENDING:Lsun/nio/ch/FileDispatcherImpl;#size0(Ljava/io/FileDescriptor;)J:UNRESOLVED_ENTRY
+RONOVA_NATIVE_FILE_BINDING_PENDING:Lsun/nio/ch/FileDispatcherImpl;#lock0(Ljava/io/FileDescriptor;ZJJZ)I:UNRESOLVED_ENTRY
+RONOVA_NATIVE_FILE_BINDING_PENDING:Lsun/nio/ch/FileDispatcherImpl;#release0(Ljava/io/FileDescriptor;JJ)V:UNRESOLVED_ENTRY
+RONOVA_NATIVE_FILE_BINDING_PENDING:Lsun/nio/ch/FileDispatcherImpl;#setDirect0(Ljava/io/FileDescriptor;Ljava/nio/CharBuffer;)I:UNRESOLVED_ENTRY
+RONOVA_NATIVE_FILE_BINDING_PENDING:Lsun/nio/ch/FileDispatcherImpl;#read0(Ljava/io/FileDescriptor;JI)I:UNRESOLVED_ENTRY
+RONOVA_NATIVE_FILE_BINDING_PENDING:Lsun/nio/ch/FileDispatcherImpl;#close0(Ljava/io/FileDescriptor;)V:UNRESOLVED_ENTRY
+RONOVA_NATIVE_FILE_BINDING_PENDING:Lsun/nio/ch/FileDispatcherImpl;#seek0(Ljava/io/FileDescriptor;J)J:UNRESOLVED_ENTRY
+RONOVA_NATIVE_FILE_BINDING_PENDING:Ljava/io/FileDescriptor;#sync()V:UNRESOLVED_ENTRY
+RONOVA_NATIVE_FILE_BINDING_PENDING:Lsun/nio/ch/FileChannelImpl;#transferTo0(Ljava/io/FileDescriptor;JJLjava/io/FileDescriptor;)J:UNRESOLVED_ENTRY
+RONOVA_NATIVE_FILE_BINDING_PENDING:Lsun/nio/ch/FileChannelImpl;#map0(IJJZ)J:UNRESOLVED_ENTRY
+RONOVA_NATIVE_FILE_BINDING_PENDING:Lsun/nio/ch/FileChannelImpl;#unmap0(JJ)I:UNRESOLVED_ENTRY
+RONOVA_NATIVE_FILE_BINDING_PENDING:Lsun/nio/ch/SocketDispatcher;#readv0(Ljava/io/FileDescriptor;JI)J:UNRESOLVED_ENTRY
+RONOVA_NATIVE_FILE_BINDING_PENDING:Lsun/nio/ch/SocketDispatcher;#writev0(Ljava/io/FileDescriptor;JI)J:UNRESOLVED_ENTRY
+RONOVA_NATIVE_FILE_BINDING_PENDING:Lsun/nio/ch/SocketDispatcher;#read0(Ljava/io/FileDescriptor;JI)I:UNRESOLVED_ENTRY
+RONOVA_NATIVE_FILE_BINDING_PENDING:Lsun/nio/ch/SocketDispatcher;#close0(I)V:UNRESOLVED_ENTRY
+RONOVA_NATIVE_FILE_BINDING_PENDING:Lsun/nio/ch/SocketDispatcher;#write0(Ljava/io/FileDescriptor;JI)I:UNRESOLVED_ENTRY
+RONOVA_NATIVE_FILE_BINDING_PENDING:Lsun/nio/ch/DatagramDispatcher;#readv0(Ljava/io/FileDescriptor;JI)J:UNRESOLVED_ENTRY
+RONOVA_NATIVE_FILE_BINDING_PENDING:Lsun/nio/ch/DatagramDispatcher;#writev0(Ljava/io/FileDescriptor;JI)J:UNRESOLVED_ENTRY
+RONOVA_NATIVE_FILE_BINDING_PENDING:Lsun/nio/ch/DatagramDispatcher;#read0(Ljava/io/FileDescriptor;JI)I:UNRESOLVED_ENTRY
+RONOVA_NATIVE_FILE_BINDING_PENDING:Lsun/nio/ch/DatagramDispatcher;#write0(Ljava/io/FileDescriptor;JI)I:UNRESOLVED_ENTRY
+RONOVA_NATIVE_FILE_BINDING_PENDING:Lsun/nio/ch/Net;#sendOOB(Ljava/io/FileDescriptor;B)I:UNRESOLVED_ENTRY
+RONOVA_NATIVE_FILE_BINDING_PENDING:Lsun/nio/ch/Net;#setInterface6(Ljava/io/FileDescriptor;I)V:UNRESOLVED_ENTRY
+RONOVA_NATIVE_FILE_BINDING_PENDING:Lsun/nio/ch/Net;#setInterface4(Ljava/io/FileDescriptor;I)V:UNRESOLVED_ENTRY
+RONOVA_NATIVE_FILE_BINDING_PENDING:Lsun/nio/ch/Net;#getInterface4(Ljava/io/FileDescriptor;)I:UNRESOLVED_ENTRY
+RONOVA_NATIVE_FILE_BINDING_PENDING:Lsun/nio/ch/Net;#getInterface6(Ljava/io/FileDescriptor;)I:UNRESOLVED_ENTRY
+RONOVA_NATIVE_FILE_BINDING_PENDING:Lsun/nio/ch/Net;#connect0(ZLjava/io/FileDescriptor;Ljava/net/InetAddress;I)I:UNRESOLVED_ENTRY
+RONOVA_NATIVE_FILE_BINDING_PENDING:Lsun/nio/ch/Net;#localPort(Ljava/io/FileDescriptor;)I:UNRESOLVED_ENTRY
+RONOVA_NATIVE_FILE_BINDING_PENDING:Lsun/nio/ch/Net;#shutdown(Ljava/io/FileDescriptor;I)V:UNRESOLVED_ENTRY
+RONOVA_NATIVE_FILE_BINDING_PENDING:Lsun/nio/ch/Net;#listen(Ljava/io/FileDescriptor;I)V:UNRESOLVED_ENTRY
+RONOVA_NATIVE_FILE_BINDING_PENDING:Lsun/nio/ch/Net;#accept(Ljava/io/FileDescriptor;Ljava/io/FileDescriptor;[Ljava/net/InetSocketAddress;)I:UNRESOLVED_ENTRY
+RONOVA_NATIVE_FILE_BINDING_PENDING:Lsun/nio/ch/Net;#poll(Ljava/io/FileDescriptor;IJ)I:UNRESOLVED_ENTRY
+RONOVA_NATIVE_FILE_BINDING_PENDING:Lsun/nio/ch/Net;#available(Ljava/io/FileDescriptor;)I:UNRESOLVED_ENTRY
+RONOVA_NATIVE_FILE_BINDING_PENDING:Lsun/nio/ch/Net;#setIntOption0(Ljava/io/FileDescriptor;ZIIIZ)V:UNRESOLVED_ENTRY
+RONOVA_NATIVE_FILE_BINDING_PENDING:Lsun/nio/ch/Net;#getIntOption0(Ljava/io/FileDescriptor;ZII)I:UNRESOLVED_ENTRY
+RONOVA_NATIVE_FILE_BINDING_PENDING:Lsun/nio/ch/Net;#bind0(Ljava/io/FileDescriptor;ZZLjava/net/InetAddress;I)V:UNRESOLVED_ENTRY
+RONOVA_NATIVE_FILE_BINDING_PENDING:Lsun/nio/ch/Net;#localInetAddress(Ljava/io/FileDescriptor;)Ljava/net/InetAddress;:UNRESOLVED_ENTRY
+RONOVA_NATIVE_FILE_BINDING_PENDING:Lsun/nio/ch/Net;#remoteInetAddress(Ljava/io/FileDescriptor;)Ljava/net/InetAddress;:UNRESOLVED_ENTRY
+RONOVA_NATIVE_FILE_BINDING_PENDING:Lsun/nio/ch/Net;#remotePort(Ljava/io/FileDescriptor;)I:UNRESOLVED_ENTRY
+RONOVA_NATIVE_FILE_BINDING_PENDING:Lsun/nio/ch/Net;#pollConnect(Ljava/io/FileDescriptor;J)Z:UNRESOLVED_ENTRY
+RONOVA_NATIVE_FILE_BINDING_PENDING:Lsun/nio/ch/Net;#joinOrDrop4(ZLjava/io/FileDescriptor;III)I:UNRESOLVED_ENTRY
+RONOVA_NATIVE_FILE_BINDING_PENDING:Lsun/nio/ch/Net;#blockOrUnblock4(ZLjava/io/FileDescriptor;III)I:UNRESOLVED_ENTRY
+RONOVA_NATIVE_FILE_BINDING_PENDING:Lsun/nio/ch/Net;#joinOrDrop6(ZLjava/io/FileDescriptor;[BI[B)I:UNRESOLVED_ENTRY
+RONOVA_NATIVE_FILE_BINDING_PENDING:Lsun/nio/ch/Net;#blockOrUnblock6(ZLjava/io/FileDescriptor;[BI[B)I:UNRESOLVED_ENTRY
+RONOVA_NATIVE_FILE_BINDING_PENDING:Lsun/nio/ch/Net;#discardOOB(Ljava/io/FileDescriptor;)Z:UNRESOLVED_ENTRY
+RONOVA_NATIVE_FILE_BINDING_PENDING:Lsun/nio/ch/DatagramChannelImpl;#receive0(Ljava/io/FileDescriptor;JIJZ)I:UNRESOLVED_ENTRY
+RONOVA_NATIVE_FILE_BINDING_PENDING:Lsun/nio/ch/DatagramChannelImpl;#send0(Ljava/io/FileDescriptor;JIJI)I:UNRESOLVED_ENTRY
+RONOVA_NATIVE_FILE_BINDING_PENDING:Lsun/nio/ch/DatagramChannelImpl;#disconnect0(Ljava/io/FileDescriptor;Z)V:UNRESOLVED_ENTRY
+RONOVA_NATIVE_FILE_BINDING_PENDING:Lsun/nio/ch/WindowsAsynchronousSocketChannelImpl;#closesocket0(J)V:UNRESOLVED_ENTRY
+RONOVA_NATIVE_FILE_BINDING_PENDING:Lsun/nio/ch/WindowsAsynchronousSocketChannelImpl;#connect0(JZLjava/net/InetAddress;IJ)I:UNRESOLVED_ENTRY
+RONOVA_NATIVE_FILE_BINDING_PENDING:Lsun/nio/ch/WindowsAsynchronousSocketChannelImpl;#updateConnectContext(J)V:UNRESOLVED_ENTRY
+RONOVA_NATIVE_FILE_BINDING_PENDING:Lsun/nio/ch/WindowsAsynchronousSocketChannelImpl;#shutdown0(JI)V:UNRESOLVED_ENTRY
+RONOVA_NATIVE_FILE_BINDING_PENDING:Lsun/nio/ch/WindowsAsynchronousSocketChannelImpl;#read0(JIJJ)I:UNRESOLVED_ENTRY
+RONOVA_NATIVE_FILE_BINDING_PENDING:Lsun/nio/ch/WindowsAsynchronousSocketChannelImpl;#write0(JIJJ)I:UNRESOLVED_ENTRY
+RONOVA_NATIVE_FILE_BINDING_PENDING:Lsun/nio/ch/WindowsAsynchronousServerSocketChannelImpl;#closesocket0(J)V:UNRESOLVED_ENTRY
+RONOVA_NATIVE_FILE_BINDING_PENDING:Lsun/nio/ch/WindowsAsynchronousServerSocketChannelImpl;#accept0(JJJJ)I:UNRESOLVED_ENTRY
+RONOVA_NATIVE_FILE_BINDING_PENDING:Lsun/nio/ch/WindowsAsynchronousServerSocketChannelImpl;#updateAcceptContext(JJ)V:UNRESOLVED_ENTRY
+RONOVA_NATIVE_FILE_BINDING_PENDING:Lsun/nio/ch/WindowsAsynchronousFileChannelImpl;#readFile(JJIJJ)I:UNRESOLVED_ENTRY
+RONOVA_NATIVE_FILE_BINDING_PENDING:Lsun/nio/ch/WindowsAsynchronousFileChannelImpl;#writeFile(JJIJJ)I:UNRESOLVED_ENTRY
+RONOVA_NATIVE_FILE_BINDING_PENDING:Lsun/nio/ch/WindowsAsynchronousFileChannelImpl;#lockFile(JJJZJ)I:UNRESOLVED_ENTRY
+RONOVA_PRO_TASK_AGENT NATIVE_FILE_CURRENT_BINDINGS_PENDING:77
+RONOVA_PRO_TASK_AGENT INSTRUMENTATION_REMOVAL_AND_PUBLICATION_GUARD:true
+RONOVA_PRO_TASK_AGENT INSTALLED:TRANSFORMED_JDK17_HASHMAP_RESOLVED_NODE_CLEAR_VALUE;NODE=TRANSFORMED_NODE_SET_VALUE;DEFAULT=TRANSFORMED_DEFAULT_MAP_MUTATIONS;FASTUTIL={}
+RONOVA_PRO_TASK_AGENT CONSOLE_BOUNDARY:NOT_SEEN
+RONOVA_PRO_TASK_AGENT REFLECTION_FIELD_GUARD_INSTALLED:9
+RONOVA_PRO_TASK_AGENT UNSAFE_OBJECT_PUT_CAS_ATOMIC_OBJECT_BULK:true:UNOBSERVED_RAW_NATIVE_AND_UNWOVEN_COMPILER_INTRINSIC_WRITERS_UNSUPPORTED
+RONOVA_PRO_TASK_AGENT BACKING_JDK:true:HANDLE_FACTORIES:30/30
+RONOVA_PRO_TASK_AGENT CLIENT_FAULT_DISPATCH:false
+RONOVA_PRO_TASK_AGENT JDK_FUTURE_WORKER_SCHEDULED_FORKJOIN_CF_DEFERRED_AND_STAGE_INVOCATIONS
+2026-10-03 15:14:08,287 main WARN Advanced terminal features are not available in this environment
+[15:14:13] [main/INFO] [cp.mo.mo.Launcher/MODLAUNCHER]: ModLauncher running: args [--launchTarget, forgeserver, --fml.forgeVersion, 47.4.23, --fml.mcVersion, 1.20.1, --fml.forgeGroup, net.minecraftforge, --fml.mcpVersion, 20230612.114412, nogui]
+[15:14:13] [main/INFO] [cp.mo.mo.Launcher/MODLAUNCHER]: ModLauncher 10.0.9+10.0.9+main.dcd20f30 starting: java version 17.0.19 by Eclipse Adoptium; OS Windows 11 arch amd64 version 10.0
+[15:14:18] [main/WARN] [ne.mi.fm.lo.FMLConfig/CORE]: Configuration file C:\Users\Scorn\Desktop\MOD\Ronova-Pro-接续\MOD\.work\pro-a-final-20260928\runtime\array-bc-20261003-55\server\config\fml.toml is not correct. Correcting
+[15:14:18] [main/INFO] [ne.mi.fm.lo.FMLConfig/CORE]: Incorrect key [earlyWindowSkipGLVersions] was corrected from null to []
+[15:14:18] [main/INFO] [ne.mi.fm.lo.FMLConfig/CORE]: Incorrect key [earlyWindowLogHelpMessage] was corrected from null to true
+[15:14:18] [main/INFO] [ne.mi.fm.lo.FMLConfig/CORE]: Incorrect key [earlyWindowSquir] was corrected from null to false
+[15:14:18] [main/INFO] [ne.mi.fm.lo.FMLConfig/CORE]: Incorrect key [earlyWindowShowCPU] was corrected from null to false
+[15:14:19] [main/INFO] [ne.mi.fm.lo.ImmediateWindowHandler/]: ImmediateWindowProvider not loading because launch target is forgeserver
+[15:14:21] [main/INFO] [mixin/]: SpongePowered MIXIN Subsystem Version=0.8.5 Source=union:/C:/Users/Scorn/Desktop/MOD/Ronova-Pro-接续/MOD/.work/pro-a-final-20260928/runtime/array-bc-20261003-55/server/libraries/org/spongepowered/mixin/0.8.5/mixin-0.8.5.jar%2365!/ Service=ModLauncher Env=SERVER
+[15:14:30] [main/WARN] [ne.mi.fm.lo.mo.ModFileParser/LOADING]: Mod file C:\Users\Scorn\Desktop\MOD\Ronova-Pro-接续\MOD\.work\pro-a-final-20260928\runtime\array-bc-20261003-55\server\libraries\net\minecraftforge\fmlcore\1.20.1-47.4.23\fmlcore-1.20.1-47.4.23.jar is missing mods.toml file
+[15:14:30] [main/WARN] [ne.mi.fm.lo.mo.ModFileParser/LOADING]: Mod file C:\Users\Scorn\Desktop\MOD\Ronova-Pro-接续\MOD\.work\pro-a-final-20260928\runtime\array-bc-20261003-55\server\libraries\net\minecraftforge\javafmllanguage\1.20.1-47.4.23\javafmllanguage-1.20.1-47.4.23.jar is missing mods.toml file
+[15:14:30] [main/WARN] [ne.mi.fm.lo.mo.ModFileParser/LOADING]: Mod file C:\Users\Scorn\Desktop\MOD\Ronova-Pro-接续\MOD\.work\pro-a-final-20260928\runtime\array-bc-20261003-55\server\libraries\net\minecraftforge\lowcodelanguage\1.20.1-47.4.23\lowcodelanguage-1.20.1-47.4.23.jar is missing mods.toml file
+[15:14:30] [main/WARN] [ne.mi.fm.lo.mo.ModFileParser/LOADING]: Mod file C:\Users\Scorn\Desktop\MOD\Ronova-Pro-接续\MOD\.work\pro-a-final-20260928\runtime\array-bc-20261003-55\server\libraries\net\minecraftforge\mclanguage\1.20.1-47.4.23\mclanguage-1.20.1-47.4.23.jar is missing mods.toml file
+[15:14:32] [main/INFO] [ne.mi.fm.lo.mo.JarInJarDependencyLocator/]: No dependencies to load found. Skipping!
+[15:15:10] [main/INFO] [mixin/]: Compatibility level set to JAVA_17
+[15:15:10] [main/INFO] [cp.mo.mo.LaunchServiceHandler/MODLAUNCHER]: Launching target 'forgeserver' with arguments [nogui]
+RONOVA_CONTROL_TRANSFORM_FAILED:net/minecraft/world/level/block/Blocks:MethodTooLargeException
+jdk.internal.org.objectweb.asm.MethodTooLargeException: Method too large: net/minecraft/world/level/block/Blocks.<clinit> ()V
+	at java.base/jdk.internal.org.objectweb.asm.MethodWriter.computeMethodInfoSize(MethodWriter.java:2118)
+	at java.base/jdk.internal.org.objectweb.asm.ClassWriter.toByteArray(ClassWriter.java:527)
+	at dev.ronova.pro.agent.FieldWriteBoundary.transform(FieldWriteBoundary.java:97)
+	at dev.ronova.pro.agent.RecoveryAgent$2.apply(RecoveryAgent.java:259)
+	at dev.ronova.pro.agent.RecoveryAgent$2.transform(RecoveryAgent.java:126)
+	at java.instrument/sun.instrument.TransformerManager.transform(TransformerManager.java:188)
+	at java.instrument/sun.instrument.InstrumentationImpl.transform(InstrumentationImpl.java:541)
+	at java.base/java.lang.ClassLoader.defineClass1(Native Method)
+	at java.base/java.lang.ClassLoader.defineClass(ClassLoader.java:1017)
+	at cpw.mods.securejarhandler/cpw.mods.cl.ModuleClassLoader.readerToClass(ModuleClassLoader.java:119)
+	at cpw.mods.securejarhandler/cpw.mods.cl.ModuleClassLoader.lambda$findClass$15(ModuleClassLoader.java:219)
+	at cpw.mods.securejarhandler/cpw.mods.cl.ModuleClassLoader.loadFromModule(ModuleClassLoader.java:229)
+	at cpw.mods.securejarhandler/cpw.mods.cl.ModuleClassLoader.findClass(ModuleClassLoader.java:219)
+	at cpw.mods.securejarhandler/cpw.mods.cl.ModuleClassLoader.loadClass(ModuleClassLoader.java:135)
+	at java.base/java.lang.ClassLoader.loadClass(ClassLoader.java:525)
+	at TRANSFORMER/minecraft@1.20.1/net.minecraft.world.level.block.FireBlock.m_53484_(FireBlock.java:301)
+	at TRANSFORMER/minecraft@1.20.1/net.minecraft.server.Bootstrap.m_135870_(Bootstrap.java:46)
+	at TRANSFORMER/minecraft@1.20.1/net.minecraft.server.Main.main(Main.java:121)
+	at java.base/jdk.internal.reflect.NativeMethodAccessorImpl.invoke0(Native Method)
+	at java.base/jdk.internal.reflect.NativeMethodAccessorImpl.invoke(NativeMethodAccessorImpl.java:77)
+	at java.base/jdk.internal.reflect.DelegatingMethodAccessorImpl.invoke(DelegatingMethodAccessorImpl.java:43)
+	at java.base/java.lang.reflect.Method.invoke(Method.java:569)
+	at MC-BOOTSTRAP/fmlloader@1.20.1-47.4.23/net.minecraftforge.fml.loading.targets.CommonLaunchHandler.runTarget(CommonLaunchHandler.java:111)
+	at MC-BOOTSTRAP/fmlloader@1.20.1-47.4.23/net.minecraftforge.fml.loading.targets.CommonLaunchHandler.serverService(CommonLaunchHandler.java:103)
+	at MC-BOOTSTRAP/fmlloader@1.20.1-47.4.23/net.minecraftforge.fml.loading.targets.CommonServerLaunchHandler.lambda$makeService$0(CommonServerLaunchHandler.java:27)
+	at MC-BOOTSTRAP/cpw.mods.modlauncher@10.0.9/cpw.mods.modlauncher.LaunchServiceHandlerDecorator.launch(LaunchServiceHandlerDecorator.java:30)
+	at MC-BOOTSTRAP/cpw.mods.modlauncher@10.0.9/cpw.mods.modlauncher.LaunchServiceHandler.launch(LaunchServiceHandler.java:53)
+	at MC-BOOTSTRAP/cpw.mods.modlauncher@10.0.9/cpw.mods.modlauncher.LaunchServiceHandler.launch(LaunchServiceHandler.java:71)
+	at MC-BOOTSTRAP/cpw.mods.modlauncher@10.0.9/cpw.mods.modlauncher.Launcher.run(Launcher.java:108)
+	at MC-BOOTSTRAP/cpw.mods.modlauncher@10.0.9/cpw.mods.modlauncher.Launcher.main(Launcher.java:78)
+	at MC-BOOTSTRAP/cpw.mods.modlauncher@10.0.9/cpw.mods.modlauncher.BootstrapLaunchConsumer.accept(BootstrapLaunchConsumer.java:26)
+	at MC-BOOTSTRAP/cpw.mods.modlauncher@10.0.9/cpw.mods.modlauncher.BootstrapLaunchConsumer.accept(BootstrapLaunchConsumer.java:23)
+	at cpw.mods.bootstraplauncher@1.1.2/cpw.mods.bootstraplauncher.BootstrapLauncher.main(BootstrapLauncher.java:141)

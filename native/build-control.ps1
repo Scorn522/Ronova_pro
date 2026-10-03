@@ -1,6 +1,11 @@
-﻿param([string]$JdkHome=$env:JAVA_HOME,[string]$Zig='D:/桌面/MOD/.build-tools/zig-windows-x86_64-0.13.0/zig.exe')
+﻿param([string]$JdkHome=$env:JAVA_HOME,[string]$Zig=$env:RONOVA_CONTROL_ZIG)
 $ErrorActionPreference='Stop'
 $projectRoot=[IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
+$zigCommand=$null
+if(-not $Zig) {
+    $zigCommand=Get-Command zig -ErrorAction SilentlyContinue
+    $Zig=if($zigCommand) { $zigCommand.Source } else { Join-Path $projectRoot '.work/tools/zig-windows-x86_64-0.13.0/zig.exe' }
+}
 $includeRoot=Join-Path $JdkHome 'include'
 if(-not(Test-Path -LiteralPath (Join-Path $includeRoot 'jni.h'))) { throw 'JNI headers required' }
 if(-not $env:ZIG_GLOBAL_CACHE_DIR) { $env:ZIG_GLOBAL_CACHE_DIR=Join-Path $projectRoot 'build/zig-global' }

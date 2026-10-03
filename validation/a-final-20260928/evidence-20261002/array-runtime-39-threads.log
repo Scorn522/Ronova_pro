@@ -1,0 +1,303 @@
+2026-10-03 11:46:23
+Full thread dump OpenJDK 64-Bit Server VM (17.0.19+10 mixed mode, sharing):
+
+Threads class SMR info:
+_java_thread_list=0x000001efd9c28f90, length=13, elements={
+0x000001efee8b0b00, 0x000001effef70ed0, 0x000001effef71a90, 0x000001effef94430,
+0x000001effef94df0, 0x000001effef957b0, 0x000001effef98180, 0x000001effef99d90,
+0x000001effef9a750, 0x000001effefa88c0, 0x000001efff0ce6b0, 0x000001efd7c2abc0,
+0x000001efdc511980
+}
+
+"main" #1 prio=5 os_prio=0 cpu=21140.62ms elapsed=101.90s tid=0x000001efee8b0b00 nid=0x12688 waiting on condition  [0x00000060afaf9000]
+   java.lang.Thread.State: WAITING (parking)
+	at jdk.internal.misc.Unsafe.park(java.base@17.0.19/Native Method)
+	- parking to wait for  <0x0000000081124968> (a java.util.concurrent.locks.ReentrantLock$NonfairSync)
+	at java.util.concurrent.locks.LockSupport.park(java.base@17.0.19/LockSupport.java:211)
+	at java.util.concurrent.locks.AbstractQueuedSynchronizer.acquire(java.base@17.0.19/AbstractQueuedSynchronizer.java:715)
+	at java.util.concurrent.locks.AbstractQueuedSynchronizer.acquire(java.base@17.0.19/AbstractQueuedSynchronizer.java:938)
+	at java.util.concurrent.locks.ReentrantLock$Sync.lock(java.base@17.0.19/ReentrantLock.java:153)
+	at java.util.concurrent.locks.ReentrantLock.lock(java.base@17.0.19/ReentrantLock.java:322)
+	at dev.ronova.pro.bootstrap.TaskBridge.beginNativeUnsafeMutation(TaskBridge.java:1765)
+	at jdk.internal.misc.Unsafe.compareAndSetInt(java.base@17.0.19/Native Method)
+	at java.util.concurrent.ConcurrentHashMap.fullAddCount(java.base@17.0.19/ConcurrentHashMap.java:2639)
+	at java.util.concurrent.ConcurrentHashMap.addCount(java.base@17.0.19/ConcurrentHashMap.java:2334)
+	at java.util.concurrent.ConcurrentHashMap.computeIfAbsent(java.base@17.0.19/ConcurrentHashMap.java:1776)
+	at dev.ronova.pro.bootstrap.SourceMapBridge.scope(SourceMapBridge.java:145)
+	at dev.ronova.pro.bootstrap.SourceMapBridge.born(SourceMapBridge.java:152)
+	at java.util.HashMap.<init>(java.base@17.0.19/HashMap.java:471)
+	at dev.ronova.pro.bootstrap.ExecutionFlow$Heap.<init>(ExecutionFlow.java:72)
+	at dev.ronova.pro.bootstrap.ExecutionFlow.arrayMemoryBefore(ExecutionFlow.java:438)
+	- locked <0x0000000080c09090> (a java.util.HashMap)
+	at dev.ronova.pro.bootstrap.ExecutionFlow.arrayMemoryBefore(ExecutionFlow.java:433)
+	at dev.ronova.pro.bootstrap.ExecutionFlow.arrayMemoryBefore(ExecutionFlow.java:427)
+	at dev.ronova.pro.bootstrap.CodeSourceBridge.executionArrayMemoryBefore(CodeSourceBridge.java:367)
+	at dev.ronova.pro.bootstrap.TaskBridge.beginNativeArrayMutation(TaskBridge.java:1752)
+	at java.io.RandomAccessFile.readBytes(java.base@17.0.19/Native Method)
+	at java.io.RandomAccessFile.read(java.base@17.0.19/RandomAccessFile.java:405)
+	at java.io.RandomAccessFile.readFully(java.base@17.0.19/RandomAccessFile.java:469)
+	at java.util.zip.ZipFile$Source.readFullyAt(java.base@17.0.19/ZipFile.java:1516)
+	- locked <0x00000000806e13a0> (a java.io.RandomAccessFile)
+	at java.util.zip.ZipFile$ZipFileInputStream.initDataOffset(java.base@17.0.19/ZipFile.java:923)
+	at java.util.zip.ZipFile$ZipFileInputStream.read(java.base@17.0.19/ZipFile.java:939)
+	- locked <0x00000000806d9758> (a java.util.jar.JarFile)
+	at java.util.zip.ZipFile$ZipFileInflaterInputStream.fill(java.base@17.0.19/ZipFile.java:456)
+	at java.util.zip.InflaterInputStream.read(java.base@17.0.19/InflaterInputStream.java:158)
+	at java.io.InputStream.readNBytes(java.base@17.0.19/InputStream.java:409)
+	at java.io.InputStream.readAllBytes(java.base@17.0.19/InputStream.java:346)
+	at java.lang.module.ModuleReader.read(java.base@17.0.19/ModuleReader.java:177)
+	at jdk.internal.loader.BuiltinClassLoader.defineClass(java.base@17.0.19/BuiltinClassLoader.java:809)
+	at jdk.internal.loader.BuiltinClassLoader.findClassInModuleOrNull(java.base@17.0.19/BuiltinClassLoader.java:741)
+	at jdk.internal.loader.BuiltinClassLoader.loadClassOrNull(java.base@17.0.19/BuiltinClassLoader.java:665)
+	- locked <0x00000000a52961a8> (a java.lang.Object)
+	at jdk.internal.loader.BuiltinClassLoader.loadClass(java.base@17.0.19/BuiltinClassLoader.java:639)
+	at jdk.internal.loader.ClassLoaders$AppClassLoader.loadClass(java.base@17.0.19/ClassLoaders.java:188)
+	at java.lang.ClassLoader.loadClass(java.base@17.0.19/ClassLoader.java:525)
+	at cpw.mods.jarhandling.SecureJar.from(cpw.mods.securejarhandler/SecureJar.java:50)
+	at cpw.mods.bootstraplauncher.BootstrapLauncher.main(cpw.mods.bootstraplauncher@1.1.2/BootstrapLauncher.java:84)
+
+"Reference Handler" #2 daemon prio=10 os_prio=2 cpu=46.88ms elapsed=101.89s tid=0x000001effef70ed0 nid=0x13784 waiting on condition  [0x00000060b01ff000]
+   java.lang.Thread.State: RUNNABLE
+	at java.lang.ref.Reference.waitForReferencePendingList(java.base@17.0.19/Native Method)
+	at java.lang.ref.Reference.processPendingReferences(java.base@17.0.19/Reference.java:253)
+	at java.lang.ref.Reference$ReferenceHandler.run(java.base@17.0.19/Reference.java:215)
+
+"Finalizer" #3 daemon prio=8 os_prio=1 cpu=0.00ms elapsed=101.89s tid=0x000001effef71a90 nid=0x13ec8 in Object.wait()  [0x00000060b02fe000]
+   java.lang.Thread.State: WAITING (on object monitor)
+	at java.lang.Object.wait(java.base@17.0.19/Native Method)
+	- waiting on <0x0000000080601c88> (a java.lang.ref.ReferenceQueue$Lock)
+	at java.lang.ref.ReferenceQueue.remove(java.base@17.0.19/ReferenceQueue.java:155)
+	- locked <0x0000000080601c88> (a java.lang.ref.ReferenceQueue$Lock)
+	at java.lang.ref.ReferenceQueue.remove(java.base@17.0.19/ReferenceQueue.java:176)
+	at java.lang.ref.Finalizer$FinalizerThread.run(java.base@17.0.19/Finalizer.java:172)
+
+"Signal Dispatcher" #4 daemon prio=9 os_prio=2 cpu=0.00ms elapsed=101.88s tid=0x000001effef94430 nid=0x13b90 waiting on condition  [0x0000000000000000]
+   java.lang.Thread.State: RUNNABLE
+
+"Attach Listener" #5 daemon prio=5 os_prio=2 cpu=0.00ms elapsed=101.88s tid=0x000001effef94df0 nid=0x12d5c waiting on condition  [0x0000000000000000]
+   java.lang.Thread.State: RUNNABLE
+
+"Service Thread" #6 daemon prio=9 os_prio=0 cpu=0.00ms elapsed=101.88s tid=0x000001effef957b0 nid=0x14c14 runnable  [0x0000000000000000]
+   java.lang.Thread.State: RUNNABLE
+
+"Monitor Deflation Thread" #7 daemon prio=9 os_prio=0 cpu=0.00ms elapsed=101.88s tid=0x000001effef98180 nid=0x12c58 runnable  [0x0000000000000000]
+   java.lang.Thread.State: RUNNABLE
+
+"C2 CompilerThread0" #8 daemon prio=9 os_prio=2 cpu=17843.75ms elapsed=101.88s tid=0x000001effef99d90 nid=0x13e70 waiting on condition  [0x0000000000000000]
+   java.lang.Thread.State: RUNNABLE
+   No compile task
+
+"C1 CompilerThread0" #16 daemon prio=9 os_prio=2 cpu=625.00ms elapsed=101.88s tid=0x000001effef9a750 nid=0x130c0 waiting on condition  [0x0000000000000000]
+   java.lang.Thread.State: RUNNABLE
+   No compile task
+
+"Sweeper thread" #20 daemon prio=9 os_prio=2 cpu=31.25ms elapsed=101.88s tid=0x000001effefa88c0 nid=0x13a6c runnable  [0x0000000000000000]
+   java.lang.Thread.State: RUNNABLE
+
+"Common-Cleaner" #21 daemon prio=8 os_prio=1 cpu=140.62ms elapsed=101.87s tid=0x000001efff0ce6b0 nid=0x10b5c waiting for monitor entry  [0x00000060b0cfd000]
+   java.lang.Thread.State: BLOCKED (on object monitor)
+	at dev.ronova.pro.bootstrap.ExecutionFlow.fieldMemoryBefore(ExecutionFlow.java:413)
+	- waiting to lock <0x0000000080c09090> (a java.util.HashMap)
+	at dev.ronova.pro.bootstrap.ExecutionFlow.byteMemoryBefore(ExecutionFlow.java:642)
+	at dev.ronova.pro.bootstrap.CodeSourceBridge.executionByteMemoryBefore(CodeSourceBridge.java:375)
+	at dev.ronova.pro.bootstrap.TaskBridge.beginNativeUnsafeMutation(TaskBridge.java:1773)
+	at jdk.internal.misc.Unsafe.putReference(java.base@17.0.19/Native Method)
+	at jdk.internal.misc.InnocuousThread.eraseThreadLocals(java.base@17.0.19/InnocuousThread.java:151)
+	at jdk.internal.ref.CleanerImpl.run(java.base@17.0.19/CleanerImpl.java:135)
+	at java.lang.Thread.run(java.base@17.0.19/Unknown Source)
+	at jdk.internal.misc.InnocuousThread.run(java.base@17.0.19/InnocuousThread.java:162)
+
+"Ronova external code continuation" #22 daemon prio=5 os_prio=0 cpu=93.75ms elapsed=93.53s tid=0x000001efd7c2abc0 nid=0x1303c waiting for monitor entry  [0x00000060b0dfd000]
+   java.lang.Thread.State: BLOCKED (on object monitor)
+	at dev.ronova.pro.bootstrap.ExecutionFlow.fieldMemoryBefore(ExecutionFlow.java:413)
+	- waiting to lock <0x0000000080c09090> (a java.util.HashMap)
+	at dev.ronova.pro.bootstrap.ExecutionFlow.byteMemoryBefore(ExecutionFlow.java:642)
+	at dev.ronova.pro.bootstrap.CodeSourceBridge.executionByteMemoryBefore(CodeSourceBridge.java:375)
+	at dev.ronova.pro.bootstrap.TaskBridge.beginNativeUnsafeMutation(TaskBridge.java:1773)
+	at jdk.internal.misc.Unsafe.compareAndSetLong(java.base@17.0.19/Native Method)
+	at java.util.concurrent.ConcurrentHashMap.addCount(java.base@17.0.19/ConcurrentHashMap.java:2327)
+	at java.util.concurrent.ConcurrentHashMap.computeIfAbsent(java.base@17.0.19/ConcurrentHashMap.java:1776)
+	at dev.ronova.pro.bootstrap.SourceMapBridge.scope(SourceMapBridge.java:145)
+	at dev.ronova.pro.bootstrap.SourceMapBridge.born(SourceMapBridge.java:152)
+	at java.util.HashMap.<init>(java.base@17.0.19/HashMap.java:452)
+	at java.util.HashMap.<init>(java.base@17.0.19/HashMap.java:462)
+	at java.util.HashSet.<init>(java.base@17.0.19/HashSet.java:120)
+	at dev.ronova.pro.agent.ExternalReceiverFlow$ExactTypes.merge(ExternalReceiverFlow.java:105)
+	at dev.ronova.pro.agent.ExternalReceiverFlow$ExactTypes.merge(ExternalReceiverFlow.java:19)
+	at jdk.internal.org.objectweb.asm.tree.analysis.Frame.merge(java.base@17.0.19/Frame.java:699)
+	at jdk.internal.org.objectweb.asm.tree.analysis.Analyzer.merge(java.base@17.0.19/Analyzer.java:572)
+	at jdk.internal.org.objectweb.asm.tree.analysis.Analyzer.analyze(java.base@17.0.19/Analyzer.java:298)
+	at dev.ronova.pro.agent.ExternalReceiverFlow.calls(ExternalReceiverFlow.java:121)
+	at dev.ronova.pro.agent.ExternalCodeDefinitions.expandGraph(ExternalCodeDefinitions.java:361)
+	at dev.ronova.pro.agent.ExternalCodeDefinitions.expand(ExternalCodeDefinitions.java:345)
+	at dev.ronova.pro.agent.ExternalCodeDefinitions.refreshes(ExternalCodeDefinitions.java:280)
+	at dev.ronova.pro.agent.ExternalCodeDefinitions.refreshes(ExternalCodeDefinitions.java:246)
+	at dev.ronova.pro.agent.ExternalCodeDefinitions.run(Unknown Source)
+	at dev.ronova.pro.agent.ExternalCodeDefinitions.lambda$start$4(Unknown Source)
+	at dev.ronova.pro.agent.ExternalCodeDefinitions$$Lambda$142/0x000001ef90098918.run(Unknown Source)
+	at java.lang.Thread.run(java.base@17.0.19/Thread.java:840)
+
+"Notification Thread" #23 daemon prio=9 os_prio=0 cpu=0.00ms elapsed=76.12s tid=0x000001efdc511980 nid=0x13258 runnable  [0x0000000000000000]
+   java.lang.Thread.State: RUNNABLE
+
+"VM Periodic Task Thread" os_prio=2 cpu=46.88ms elapsed=76.12s tid=0x000001efdd8cbfc0 nid=0x14714 waiting on condition  
+
+"G1 Refine#14" os_prio=2 cpu=0.00ms elapsed=79.85s tid=0x000001efdce1f070 nid=0x13fd4 runnable  
+
+"G1 Refine#13" os_prio=2 cpu=0.00ms elapsed=81.27s tid=0x000001efd99e7420 nid=0x14d3c runnable  
+
+"G1 Refine#12" os_prio=2 cpu=0.00ms elapsed=82.64s tid=0x000001efdb2d6b20 nid=0x14d44 runnable  
+
+"G1 Refine#11" os_prio=2 cpu=31.25ms elapsed=89.75s tid=0x000001efdb2d6e10 nid=0x13e40 runnable  
+
+"G1 Refine#10" os_prio=2 cpu=15.62ms elapsed=91.19s tid=0x000001efdb2d50b0 nid=0x12f68 runnable  
+
+"G1 Refine#9" os_prio=2 cpu=31.25ms elapsed=91.19s tid=0x000001efdb2d4ad0 nid=0x14420 runnable  
+
+"G1 Refine#8" os_prio=2 cpu=31.25ms elapsed=92.31s tid=0x000001efd99e59b0 nid=0x150d4 runnable  
+
+"G1 Refine#7" os_prio=2 cpu=31.25ms elapsed=98.58s tid=0x000001efd6e960a0 nid=0x152c0 runnable  
+
+"G1 Refine#6" os_prio=2 cpu=31.25ms elapsed=98.58s tid=0x000001efdbb88ee0 nid=0x124c0 runnable  
+
+"G1 Refine#5" os_prio=2 cpu=31.25ms elapsed=98.77s tid=0x000001efff4fcf50 nid=0x140f8 runnable  
+
+"G1 Refine#4" os_prio=2 cpu=31.25ms elapsed=98.77s tid=0x000001efd4051850 nid=0x13c64 runnable  
+
+"G1 Refine#3" os_prio=2 cpu=31.25ms elapsed=98.77s tid=0x000001efd9e17e60 nid=0x14620 runnable  
+
+"G1 Refine#2" os_prio=2 cpu=31.25ms elapsed=98.79s tid=0x000001efd6dd15b0 nid=0x8740 runnable  
+
+"G1 Refine#1" os_prio=2 cpu=109.38ms elapsed=100.14s tid=0x000001efd925cf30 nid=0x1510c runnable  
+
+"GC Thread#13" os_prio=2 cpu=218.75ms elapsed=101.56s tid=0x000001efff8b7c10 nid=0x129b0 runnable  
+
+"GC Thread#10" os_prio=2 cpu=203.12ms elapsed=101.56s tid=0x000001efff559fc0 nid=0x128fc runnable  
+
+"GC Thread#9" os_prio=2 cpu=218.75ms elapsed=101.56s tid=0x000001efff559d00 nid=0x11d6c runnable  
+
+"GC Thread#8" os_prio=2 cpu=203.12ms elapsed=101.56s tid=0x000001efff559a40 nid=0x14a34 runnable  
+
+"GC Thread#7" os_prio=2 cpu=203.12ms elapsed=101.56s tid=0x000001efff559780 nid=0x12184 runnable  
+
+"GC Thread#6" os_prio=2 cpu=203.12ms elapsed=101.56s tid=0x000001efff5594c0 nid=0x12b30 runnable  
+
+"GC Thread#14" os_prio=2 cpu=218.75ms elapsed=101.56s tid=0x000001efff8b6e50 nid=0x12054 runnable  
+
+"GC Thread#5" os_prio=2 cpu=203.12ms elapsed=101.56s tid=0x000001efff558f40 nid=0x14ff0 runnable  
+
+"GC Thread#12" os_prio=2 cpu=218.75ms elapsed=101.56s tid=0x000001efff8b6b90 nid=0x14b90 runnable  
+
+"GC Thread#4" os_prio=2 cpu=218.75ms elapsed=101.56s tid=0x000001efff55a800 nid=0x122f4 runnable  
+
+"GC Thread#11" os_prio=2 cpu=203.12ms elapsed=101.56s tid=0x000001efff8b7950 nid=0x13ba8 runnable  
+
+"GC Thread#3" os_prio=2 cpu=218.75ms elapsed=101.56s tid=0x000001efff55a540 nid=0x13690 runnable  
+
+"GC Thread#2" os_prio=2 cpu=218.75ms elapsed=101.56s tid=0x000001efff559200 nid=0x12bcc runnable  
+
+"GC Thread#1" os_prio=2 cpu=218.75ms elapsed=101.56s tid=0x000001efff55a280 nid=0x1272c runnable  
+
+"VM Thread" os_prio=2 cpu=2671.88ms elapsed=101.89s tid=0x000001effef69990 nid=0x14a6c runnable  
+
+"G1 Service" os_prio=2 cpu=15.62ms elapsed=101.90s tid=0x000001effee33510 nid=0x14638 runnable  
+
+"G1 Refine#0" os_prio=2 cpu=671.88ms elapsed=101.90s tid=0x000001efee95eb00 nid=0x15330 runnable  
+
+"G1 Conc#0" os_prio=2 cpu=0.00ms elapsed=101.90s tid=0x000001efee923690 nid=0x132d8 runnable  
+
+"G1 Main Marker" os_prio=2 cpu=0.00ms elapsed=101.90s tid=0x000001efee922c70 nid=0x14ce8 runnable  
+
+"GC Thread#0" os_prio=2 cpu=218.75ms elapsed=101.90s tid=0x000001efee911050 nid=0x12fc0 runnable  
+
+JNI global refs: 66, weak refs: 249
+
+
+Found one Java-level deadlock:
+=============================
+"main":
+  waiting for ownable synchronizer 0x0000000081124968, (a java.util.concurrent.locks.ReentrantLock$NonfairSync),
+  which is held by "Ronova external code continuation"
+
+"Ronova external code continuation":
+  waiting to lock monitor 0x000001effdfe1ee0 (object 0x0000000080c09090, a java.util.HashMap),
+  which is held by "main"
+
+Java stack information for the threads listed above:
+===================================================
+"main":
+	at jdk.internal.misc.Unsafe.park(java.base@17.0.19/Native Method)
+	- parking to wait for  <0x0000000081124968> (a java.util.concurrent.locks.ReentrantLock$NonfairSync)
+	at java.util.concurrent.locks.LockSupport.park(java.base@17.0.19/LockSupport.java:211)
+	at java.util.concurrent.locks.AbstractQueuedSynchronizer.acquire(java.base@17.0.19/AbstractQueuedSynchronizer.java:715)
+	at java.util.concurrent.locks.AbstractQueuedSynchronizer.acquire(java.base@17.0.19/AbstractQueuedSynchronizer.java:938)
+	at java.util.concurrent.locks.ReentrantLock$Sync.lock(java.base@17.0.19/ReentrantLock.java:153)
+	at java.util.concurrent.locks.ReentrantLock.lock(java.base@17.0.19/ReentrantLock.java:322)
+	at dev.ronova.pro.bootstrap.TaskBridge.beginNativeUnsafeMutation(TaskBridge.java:1765)
+	at jdk.internal.misc.Unsafe.compareAndSetInt(java.base@17.0.19/Native Method)
+	at java.util.concurrent.ConcurrentHashMap.fullAddCount(java.base@17.0.19/ConcurrentHashMap.java:2639)
+	at java.util.concurrent.ConcurrentHashMap.addCount(java.base@17.0.19/ConcurrentHashMap.java:2334)
+	at java.util.concurrent.ConcurrentHashMap.computeIfAbsent(java.base@17.0.19/ConcurrentHashMap.java:1776)
+	at dev.ronova.pro.bootstrap.SourceMapBridge.scope(SourceMapBridge.java:145)
+	at dev.ronova.pro.bootstrap.SourceMapBridge.born(SourceMapBridge.java:152)
+	at java.util.HashMap.<init>(java.base@17.0.19/HashMap.java:471)
+	at dev.ronova.pro.bootstrap.ExecutionFlow$Heap.<init>(ExecutionFlow.java:72)
+	at dev.ronova.pro.bootstrap.ExecutionFlow.arrayMemoryBefore(ExecutionFlow.java:438)
+	- locked <0x0000000080c09090> (a java.util.HashMap)
+	at dev.ronova.pro.bootstrap.ExecutionFlow.arrayMemoryBefore(ExecutionFlow.java:433)
+	at dev.ronova.pro.bootstrap.ExecutionFlow.arrayMemoryBefore(ExecutionFlow.java:427)
+	at dev.ronova.pro.bootstrap.CodeSourceBridge.executionArrayMemoryBefore(CodeSourceBridge.java:367)
+	at dev.ronova.pro.bootstrap.TaskBridge.beginNativeArrayMutation(TaskBridge.java:1752)
+	at java.io.RandomAccessFile.readBytes(java.base@17.0.19/Native Method)
+	at java.io.RandomAccessFile.read(java.base@17.0.19/RandomAccessFile.java:405)
+	at java.io.RandomAccessFile.readFully(java.base@17.0.19/RandomAccessFile.java:469)
+	at java.util.zip.ZipFile$Source.readFullyAt(java.base@17.0.19/ZipFile.java:1516)
+	- locked <0x00000000806e13a0> (a java.io.RandomAccessFile)
+	at java.util.zip.ZipFile$ZipFileInputStream.initDataOffset(java.base@17.0.19/ZipFile.java:923)
+	at java.util.zip.ZipFile$ZipFileInputStream.read(java.base@17.0.19/ZipFile.java:939)
+	- locked <0x00000000806d9758> (a java.util.jar.JarFile)
+	at java.util.zip.ZipFile$ZipFileInflaterInputStream.fill(java.base@17.0.19/ZipFile.java:456)
+	at java.util.zip.InflaterInputStream.read(java.base@17.0.19/InflaterInputStream.java:158)
+	at java.io.InputStream.readNBytes(java.base@17.0.19/InputStream.java:409)
+	at java.io.InputStream.readAllBytes(java.base@17.0.19/InputStream.java:346)
+	at java.lang.module.ModuleReader.read(java.base@17.0.19/ModuleReader.java:177)
+	at jdk.internal.loader.BuiltinClassLoader.defineClass(java.base@17.0.19/BuiltinClassLoader.java:809)
+	at jdk.internal.loader.BuiltinClassLoader.findClassInModuleOrNull(java.base@17.0.19/BuiltinClassLoader.java:741)
+	at jdk.internal.loader.BuiltinClassLoader.loadClassOrNull(java.base@17.0.19/BuiltinClassLoader.java:665)
+	- locked <0x00000000a52961a8> (a java.lang.Object)
+	at jdk.internal.loader.BuiltinClassLoader.loadClass(java.base@17.0.19/BuiltinClassLoader.java:639)
+	at jdk.internal.loader.ClassLoaders$AppClassLoader.loadClass(java.base@17.0.19/ClassLoaders.java:188)
+	at java.lang.ClassLoader.loadClass(java.base@17.0.19/ClassLoader.java:525)
+	at cpw.mods.jarhandling.SecureJar.from(cpw.mods.securejarhandler/SecureJar.java:50)
+	at cpw.mods.bootstraplauncher.BootstrapLauncher.main(cpw.mods.bootstraplauncher@1.1.2/BootstrapLauncher.java:84)
+"Ronova external code continuation":
+	at dev.ronova.pro.bootstrap.ExecutionFlow.fieldMemoryBefore(ExecutionFlow.java:413)
+	- waiting to lock <0x0000000080c09090> (a java.util.HashMap)
+	at dev.ronova.pro.bootstrap.ExecutionFlow.byteMemoryBefore(ExecutionFlow.java:642)
+	at dev.ronova.pro.bootstrap.CodeSourceBridge.executionByteMemoryBefore(CodeSourceBridge.java:375)
+	at dev.ronova.pro.bootstrap.TaskBridge.beginNativeUnsafeMutation(TaskBridge.java:1773)
+	at jdk.internal.misc.Unsafe.compareAndSetLong(java.base@17.0.19/Native Method)
+	at java.util.concurrent.ConcurrentHashMap.addCount(java.base@17.0.19/ConcurrentHashMap.java:2327)
+	at java.util.concurrent.ConcurrentHashMap.computeIfAbsent(java.base@17.0.19/ConcurrentHashMap.java:1776)
+	at dev.ronova.pro.bootstrap.SourceMapBridge.scope(SourceMapBridge.java:145)
+	at dev.ronova.pro.bootstrap.SourceMapBridge.born(SourceMapBridge.java:152)
+	at java.util.HashMap.<init>(java.base@17.0.19/HashMap.java:452)
+	at java.util.HashMap.<init>(java.base@17.0.19/HashMap.java:462)
+	at java.util.HashSet.<init>(java.base@17.0.19/HashSet.java:120)
+	at dev.ronova.pro.agent.ExternalReceiverFlow$ExactTypes.merge(ExternalReceiverFlow.java:105)
+	at dev.ronova.pro.agent.ExternalReceiverFlow$ExactTypes.merge(ExternalReceiverFlow.java:19)
+	at jdk.internal.org.objectweb.asm.tree.analysis.Frame.merge(java.base@17.0.19/Frame.java:699)
+	at jdk.internal.org.objectweb.asm.tree.analysis.Analyzer.merge(java.base@17.0.19/Analyzer.java:572)
+	at jdk.internal.org.objectweb.asm.tree.analysis.Analyzer.analyze(java.base@17.0.19/Analyzer.java:298)
+	at dev.ronova.pro.agent.ExternalReceiverFlow.calls(ExternalReceiverFlow.java:121)
+	at dev.ronova.pro.agent.ExternalCodeDefinitions.expandGraph(ExternalCodeDefinitions.java:361)
+	at dev.ronova.pro.agent.ExternalCodeDefinitions.expand(ExternalCodeDefinitions.java:345)
+	at dev.ronova.pro.agent.ExternalCodeDefinitions.refreshes(ExternalCodeDefinitions.java:280)
+	at dev.ronova.pro.agent.ExternalCodeDefinitions.refreshes(ExternalCodeDefinitions.java:246)
+	at dev.ronova.pro.agent.ExternalCodeDefinitions.run(Unknown Source)
+	at dev.ronova.pro.agent.ExternalCodeDefinitions.lambda$start$4(Unknown Source)
+	at dev.ronova.pro.agent.ExternalCodeDefinitions$$Lambda$142/0x000001ef90098918.run(Unknown Source)
+	at java.lang.Thread.run(java.base@17.0.19/Thread.java:840)
+
+Found 1 deadlock.
+

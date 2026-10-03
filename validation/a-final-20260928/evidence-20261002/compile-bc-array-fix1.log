@@ -1,0 +1,168 @@
+To honour the JVM settings for this build a single-use Daemon process will be forked. For more on this, please refer to https://docs.gradle.org/8.8/userguide/gradle_daemon.html#sec:disabling_the_daemon in the Gradle documentation.
+Daemon will be stopped at the end of the build 
+
+> Configure project :
+MixinGradle is skipping eclipse integration, extension not found
+Neither the 'eclipse' nor the 'idea' plugins were found, but IDE resource copy has been enabled.
+
+> Task :compileBootstrapJava
+C:\Users\Scorn\Desktop\MOD\Ronova-Pro-����\ronova_GPT\bootstrap\src\main\java\dev\ronova\pro\bootstrap\CodeSourceBridge.java:520: ����: ���һ������ʹ���˲�׼ȷ�ı������͵� varargs �����ķ� varargs ����; 
+    private static void resourceSource(Object object,Module[] sources){if(object==null||sources.length==0)return;Module[] copy=sources.clone();protect(copy);synchronized(MODULES){RESOURCE_SOURCES.put(new Key(object,true),copy);}}
+                                                                                                                                                       ^
+  ���� varargs ����, Ӧʹ�� Object
+  ���ڷ� varargs ����, Ӧʹ�� Object[], ����Ҳ�������ƴ˾���
+C:\Users\Scorn\Desktop\MOD\Ronova-Pro-����\ronova_GPT\bootstrap\src\main\java\dev\ronova\pro\bootstrap\CodeSourceBridge.java:545: ����: ���һ������ʹ���˲�׼ȷ�ı������͵� varargs �����ķ� varargs ����; 
+    private static void configurationSource(Object config,Module[] sources){if(config==null||sources.length==0)return;Module[] copy=sources.clone();protect(copy);synchronized(MODULES){CONFIGURATIONS.put(new Key(config,true),copy);}}
+                                                                                                                                                            ^
+  ���� varargs ����, Ӧʹ�� Object
+  ���ڷ� varargs ����, Ӧʹ�� Object[], ����Ҳ�������ƴ˾���
+C:\Users\Scorn\Desktop\MOD\Ronova-Pro-����\ronova_GPT\bootstrap\src\main\java\dev\ronova\pro\bootstrap\CodeSourceBridge.java:606: ����: ���һ������ʹ���˲�׼ȷ�ı������͵� varargs �����ķ� varargs ����; 
+        if(source!=null){Module[] sources=merge(source.sources(),configurationSources(field(mixin,"parent")));protect(sources);
+                                                                                                                      ^
+  ���� varargs ����, Ӧʹ�� Object
+  ���ڷ� varargs ����, Ӧʹ�� Object[], ����Ҳ�������ƴ˾���
+C:\Users\Scorn\Desktop\MOD\Ronova-Pro-����\ronova_GPT\bootstrap\src\main\java\dev\ronova\pro\bootstrap\CodeSourceBridge.java:612: ����: ���һ������ʹ���˲�׼ȷ�ı������͵� varargs �����ķ� varargs ����; 
+        Object replacement=replay[0];Module[] sources=((Module[])replay[1]).clone();protect(sources);byte[] digest=hash(image(replacement));
+                                                                                            ^
+  ���� varargs ����, Ӧʹ�� Object
+  ���ڷ� varargs ����, Ӧʹ�� Object[], ����Ҳ�������ƴ˾���
+C:\Users\Scorn\Desktop\MOD\Ronova-Pro-����\ronova_GPT\bootstrap\src\main\java\dev\ronova\pro\bootstrap\CodeSourceBridge.java:725: ����: ���һ������ʹ���˲�׼ȷ�ı������͵� varargs �����ķ� varargs ����; 
+                Module[] sources=merge(restored.sources(),configurationSources(field(mixin,"parent")));protect(sources);
+                                                                                                               ^
+  ���� varargs ����, Ӧʹ�� Object
+  ���ڷ� varargs ����, Ӧʹ�� Object[], ����Ҳ�������ƴ˾���
+C:\Users\Scorn\Desktop\MOD\Ronova-Pro-����\ronova_GPT\bootstrap\src\main\java\dev\ronova\pro\bootstrap\CodeSourceBridge.java:851: ����: ���һ������ʹ���˲�׼ȷ�ı������͵� varargs �����ķ� varargs ����; 
+        Module[] sources=source.sources().clone();protect(sources);
+                                                          ^
+  ���� varargs ����, Ӧʹ�� Object
+  ���ڷ� varargs ����, Ӧʹ�� Object[], ����Ҳ�������ƴ˾���
+C:\Users\Scorn\Desktop\MOD\Ronova-Pro-����\ronova_GPT\bootstrap\src\main\java\dev\ronova\pro\bootstrap\CodeSourceBridge.java:853: ����: ���һ������ʹ���˲�׼ȷ�ı������͵� varargs �����ķ� varargs ����; 
+        Map<String,Image> rows=new HashMap<>();for(var entry:raw.entrySet()){Module[] owners=entry.getValue().clone();protect(owners);rows.put(entry.getKey(),new Image(source.module(),source.digest(),owners));}rows=Map.copyOf(rows);protect(rows);
+                                                                                                                              ^
+  ���� varargs ����, Ӧʹ�� Object
+  ���ڷ� varargs ����, Ӧʹ�� Object[], ����Ҳ�������ƴ˾���
+C:\Users\Scorn\Desktop\MOD\Ronova-Pro-����\ronova_GPT\bootstrap\src\main\java\dev\ronova\pro\bootstrap\CodeSourceBridge.java:890: ����: ���һ������ʹ���˲�׼ȷ�ı������͵� varargs �����ķ� varargs ����; 
+        Module[] sources=merge(source.sources(),writers);protect(sources);Image created=new Image(source.module(),source.digest(),sources);
+                                                                 ^
+  ���� varargs ����, Ӧʹ�� Object
+  ���ڷ� varargs ����, Ӧʹ�� Object[], ����Ҳ�������ƴ˾���
+C:\Users\Scorn\Desktop\MOD\Ronova-Pro-����\ronova_GPT\bootstrap\src\main\java\dev\ronova\pro\bootstrap\CodeSourceBridge.java:898: ����: ���һ������ʹ���˲�׼ȷ�ı������͵� varargs �����ķ� varargs ����; 
+            Module[] sources=merge(original.sources(),writers);protect(sources);Map<String,Image> next=new HashMap<>(rows);next.put("H",new Image(original.module(),original.digest(),sources));next=Map.copyOf(next);protect(next);METADATA_ROWS.put(new Key(info,true),next);
+                                                                       ^
+  ���� varargs ����, Ӧʹ�� Object
+  ���ڷ� varargs ����, Ӧʹ�� Object[], ����Ҳ�������ƴ˾���
+C:\Users\Scorn\Desktop\MOD\Ronova-Pro-����\ronova_GPT\bootstrap\src\main\java\dev\ronova\pro\bootstrap\CodeSourceBridge.java:935: ����: ���һ������ʹ���˲�׼ȷ�ı������͵� varargs �����ķ� varargs ����; 
+            Image current=MEMBER_IMAGES.get(new Key(member,false));if(current==null)current=change.original();Module[] sources=merge(current.sources(),change.sources());protect(sources);
+                                                                                                                                                                                 ^
+  ���� varargs ����, Ӧʹ�� Object
+  ���ڷ� varargs ����, Ӧʹ�� Object[], ����Ҳ�������ƴ˾���
+C:\Users\Scorn\Desktop\MOD\Ronova-Pro-����\ronova_GPT\bootstrap\src\main\java\dev\ronova\pro\bootstrap\CodeSourceBridge.java:945: ����: ���һ������ʹ���˲�׼ȷ�ı������͵� varargs �����ķ� varargs ����; 
+                        Module[] owners=previous==null?sources:merge(previous.sources(),sources);protect(owners);next.put(key,new Image(changed.module(),changed.digest(),owners));
+                                                                                                         ^
+  ���� varargs ����, Ӧʹ�� Object
+  ���ڷ� varargs ����, Ӧʹ�� Object[], ����Ҳ�������ƴ˾���
+C:\Users\Scorn\Desktop\MOD\Ronova-Pro-����\ronova_GPT\bootstrap\src\main\java\dev\ronova\pro\bootstrap\CodeSourceBridge.java:964: ����: ���һ������ʹ���˲�׼ȷ�ı������͵� varargs �����ķ� varargs ����; 
+            Module[] previous=reads.get(new Key(consumer,false));sources=merge(previous==null?new Module[0]:previous,source.sources());protect(sources);reads.put(new Key(consumer,true),sources);
+                                                                                                                                               ^
+  ���� varargs ����, Ӧʹ�� Object
+  ���ڷ� varargs ����, Ӧʹ�� Object[], ����Ҳ�������ƴ˾���
+C:\Users\Scorn\Desktop\MOD\Ronova-Pro-����\ronova_GPT\bootstrap\src\main\java\dev\ronova\pro\bootstrap\CodeSourceBridge.java:965: ����: ���һ������ʹ���˲�׼ȷ�ı������͵� varargs �����ķ� varargs ����; 
+            Image context=scope.context()==null?null:CONTEXTS.get(new Key(scope.context(),false));if(context!=null){Module[] merged=merge(context.sources(),sources);protect(merged);CONTEXTS.put(new Key(scope.context(),true),new Image(context.module(),context.digest(),merged));}
+                                                                                                                                                                             ^
+  ���� varargs ����, Ӧʹ�� Object
+  ���ڷ� varargs ����, Ӧʹ�� Object[], ����Ҳ�������ƴ˾���
+C:\Users\Scorn\Desktop\MOD\Ronova-Pro-����\ronova_GPT\bootstrap\src\main\java\dev\ronova\pro\bootstrap\CodeSourceBridge.java:981: ����: ���һ������ʹ���˲�׼ȷ�ı������͵� varargs �����ķ� varargs ����; 
+            Module[] sources=merge(contributors,configurationSources(field(mixin,"parent")));protect(sources);
+                                                                                                     ^
+  ���� varargs ����, Ӧʹ�� Object
+  ���ڷ� varargs ����, Ӧʹ�� Object[], ����Ҳ�������ƴ˾���
+C:\Users\Scorn\Desktop\MOD\Ronova-Pro-����\ronova_GPT\bootstrap\src\main\java\dev\ronova\pro\bootstrap\CodeSourceBridge.java:1025: ����: ���һ������ʹ���˲�׼ȷ�ı������͵� varargs �����ķ� varargs ����; 
+            protect(sources);
+                    ^
+  ���� varargs ����, Ӧʹ�� Object
+  ���ڷ� varargs ����, Ӧʹ�� Object[], ����Ҳ�������ƴ˾���
+C:\Users\Scorn\Desktop\MOD\Ronova-Pro-����\ronova_GPT\bootstrap\src\main\java\dev\ronova\pro\bootstrap\CodeSourceBridge.java:1074: ����: ���һ������ʹ���˲�׼ȷ�ı������͵� varargs �����ķ� varargs ����; 
+        Module[] sources=merge(source.sources(),used);protect(sources);
+                                                              ^
+  ���� varargs ����, Ӧʹ�� Object
+  ���ڷ� varargs ����, Ӧʹ�� Object[], ����Ҳ�������ƴ˾���
+C:\Users\Scorn\Desktop\MOD\Ronova-Pro-����\ronova_GPT\bootstrap\src\main\java\dev\ronova\pro\bootstrap\CodeSourceBridge.java:1078: ����: ���һ������ʹ���˲�׼ȷ�ı������͵� varargs �����ķ� varargs ����; 
+                Image previous=METADATA.get(entry.getKey());if(previous!=null){Module[] merged=merge(previous.sources(),record.sources());protect(merged);METADATA.put(entry.getKey(),new Image(previous.module(),digest,merged));}
+                                                                                                                                                  ^
+  ���� varargs ����, Ӧʹ�� Object
+  ���ڷ� varargs ����, Ӧʹ�� Object[], ����Ҳ�������ƴ˾���
+C:\Users\Scorn\Desktop\MOD\Ronova-Pro-����\ronova_GPT\bootstrap\src\main\java\dev\ronova\pro\bootstrap\ExecutionFlow.java:148: ����: ���һ������ʹ���˲�׼ȷ�ı������͵� varargs �����ķ� varargs ����; 
+            CodeSourceBridge.executionControls(this,arguments,operations,sources,fields,sites);for(int[] operation:operations)CodeSourceBridge.executionControls(operation);for(Module[] source:sources)CodeSourceBridge.executionControls(source);for(String[] field:fields)if(field!=null)CodeSourceBridge.executionControls(field);
+                                                                                                                                                                                                                                           ^
+  ���� varargs ����, Ӧʹ�� Object
+  ���ڷ� varargs ����, Ӧʹ�� Object[], ����Ҳ�������ƴ˾���
+C:\Users\Scorn\Desktop\MOD\Ronova-Pro-����\ronova_GPT\bootstrap\src\main\java\dev\ronova\pro\bootstrap\ExecutionFlow.java:148: ����: ���һ������ʹ���˲�׼ȷ�ı������͵� varargs �����ķ� varargs ����; 
+            CodeSourceBridge.executionControls(this,arguments,operations,sources,fields,sites);for(int[] operation:operations)CodeSourceBridge.executionControls(operation);for(Module[] source:sources)CodeSourceBridge.executionControls(source);for(String[] field:fields)if(field!=null)CodeSourceBridge.executionControls(field);
+                                                                                                                                                                                                                                                                                                                               ^
+  ���� varargs ����, Ӧʹ�� Object
+  ���ڷ� varargs ����, Ӧʹ�� Object[], ����Ҳ�������ƴ˾���
+19 ������
+
+> Task :compileAgentJava
+C:\Users\Scorn\Desktop\MOD\Ronova-Pro-����\ronova_GPT\agent\src\main\java\dev\ronova\pro\agent\ExternalCodeDefinitions.java:44: ����: ���һ������ʹ���˲�׼ȷ�ı������͵� varargs �����ķ� varargs ����; 
+            for(Module[] owners:this.fields.values())ControlImages.protect(owners);for(Object[] row:this.values)ControlImages.protect(row,row[3]);
+                                                                           ^
+  ���� varargs ����, Ӧʹ�� Object
+  ���ڷ� varargs ����, Ӧʹ�� Object[], ����Ҳ�������ƴ˾���
+C:\Users\Scorn\Desktop\MOD\Ronova-Pro-����\ronova_GPT\agent\src\main\java\dev\ronova\pro\agent\ExternalCodeImages.java:130: ����: ���һ������ʹ���˲�׼ȷ�ı������͵� varargs �����ķ� varargs ����; 
+        Module[] owners=join(capture.owners,consumers);ControlImages.protect(owners);
+                                                                             ^
+  ���� varargs ����, Ӧʹ�� Object
+  ���ڷ� varargs ����, Ӧʹ�� Object[], ����Ҳ�������ƴ˾���
+2 ������
+
+> Task :downloadMcpConfig
+> Task :extractSrg UP-TO-DATE
+> Task :createMcpToSrg UP-TO-DATE
+
+> Task :compileJava
+C:\Users\Scorn\Desktop\MOD\Ronova-Pro-����\ronova_GPT\src\main\java\dev\ronova\pro\mixin\Access.java:55: ����: ���ڽӿ� EntityState�ж����˷��� pro$vehicle()
+        @Accessor("vehicle") Entity pro$vehicle();
+                                    ^
+C:\Users\Scorn\Desktop\MOD\Ronova-Pro-����\ronova_GPT\src\main\java\dev\ronova\pro\WorldArchive.java:75: ����: [removal] ResourceLocation �е� ResourceLocation(String) �ѹ�ʱ, �ұ��Ϊ��ɾ��
+            Job job=new Job(tag.getUUID("Id"),tag.hasUUID("Source")?tag.getUUID("Source"):null,Kind.valueOf(tag.getString("Kind")),ResourceKey.create(Registries.DIMENSION,new ResourceLocation(tag.getString("Dimension"))),
+                                                                                                                                                                           ^
+C:\Users\Scorn\Desktop\MOD\Ronova-Pro-����\ronova_GPT\src\main\java\dev\ronova\pro\WorldArchive.java:191: ����: [removal] ResourceLocation �е� ResourceLocation(String) �ѹ�ʱ, �ұ��Ϊ��ɾ��
+        for(Tag value:saved){CompoundTag tag=(CompoundTag)value;BlockPos pos=NbtUtils.readBlockPos(tag.getCompound("Position"));T type=registry.getOptional(new ResourceLocation(tag.getString("Type"))).orElseThrow(()->new IllegalStateException("WORLD_TICK_TYPE_UNAVAILABLE"));
+                                                                                                                                                            ^
+C:\Users\Scorn\Desktop\MOD\Ronova-Pro-����\ronova_GPT\src\main\java\dev\ronova\pro\WorldArchive.java:196: ����: [removal] ResourceLocation �е� ResourceLocation(String) �ѹ�ʱ, �ұ��Ϊ��ɾ��
+        for(Tag value:saved.getList("Starts",Tag.TAG_COMPOUND)){CompoundTag tag=(CompoundTag)value;var type=structures.getOptional(new ResourceLocation(tag.getString("RonovaStructure"))).orElseThrow();StructureStart start=StructureStart.loadStatic(StructurePieceSerializationContext.fromLevel(level),tag,level.getSeed());if(start!=null)starts.put(type,start);}
+                                                                                                                                   ^
+C:\Users\Scorn\Desktop\MOD\Ronova-Pro-����\ronova_GPT\src\main\java\dev\ronova\pro\WorldArchive.java:196: ����: �Ҳ�������
+        for(Tag value:saved.getList("Starts",Tag.TAG_COMPOUND)){CompoundTag tag=(CompoundTag)value;var type=structures.getOptional(new ResourceLocation(tag.getString("RonovaStructure"))).orElseThrow();StructureStart start=StructureStart.loadStatic(StructurePieceSerializationContext.fromLevel(level),tag,level.getSeed());if(start!=null)starts.put(type,start);}
+                                                                                                                                                                                                                                            ^
+  ����:   ���� loadStatic(StructurePieceSerializationContext,CompoundTag,long)
+  λ��: �� StructureStart
+C:\Users\Scorn\Desktop\MOD\Ronova-Pro-����\ronova_GPT\src\main\java\dev\ronova\pro\WorldArchive.java:198: ����: [removal] ResourceLocation �е� ResourceLocation(String) �ѹ�ʱ, �ұ��Ϊ��ɾ��
+        for(Tag value:saved.getList("References",Tag.TAG_COMPOUND)){CompoundTag tag=(CompoundTag)value;references.put(structures.getOptional(new ResourceLocation(tag.getString("Type"))).orElseThrow(),new it.unimi.dsi.fastutil.longs.LongOpenHashSet(tag.getLongArray("References")));}chunk.setAllReferences(references);level.onStructureStartsAvailable(chunk);
+                                                                                                                                             ^
+C:\Users\Scorn\Desktop\MOD\Ronova-Pro-����\ronova_GPT\src\main\java\dev\ronova\pro\WorldArchive.java:201: ����: [removal] ResourceLocation �е� ResourceLocation(String) �ѹ�ʱ, �ұ��Ϊ��ɾ��
+        chunk.fillBiomesFromNoise((x,y,z,sampler)->biomes.getHolderOrThrow(ResourceKey.create(Registries.BIOME,new ResourceLocation(encoded.getString((y-minimum)*16+Math.floorMod(z,4)*4+Math.floorMod(x,4))))),level.getChunkSource().randomState().sampler());
+                                                                                                               ^
+C:\Users\Scorn\Desktop\MOD\Ronova-Pro-����\ronova_GPT\src\main\java\dev\ronova\pro\ProNetwork.java:14: ����: [removal] ResourceLocation �е� ResourceLocation(String,String) �ѹ�ʱ, �ұ��Ϊ��ɾ��
+    static final SimpleChannel CHANNEL=NetworkRegistry.newSimpleChannel(new ResourceLocation("ronova_pro","presence"),
+                                                                        ^
+ע: ĳЩ�����ļ�ʹ�û򸲸����ѹ�ʱ�� API��
+ע: �й���ϸ��Ϣ, ��ʹ�� -Xlint:deprecation ���±��롣
+2 ������
+6 ������
+
+> Task :compileJava FAILED
+
+FAILURE: Build failed with an exception.
+
+* What went wrong:
+Execution failed for task ':compileJava'.
+> Compilation failed; see the compiler error output for details.
+
+* Try:
+> Run with --info option to get more log output.
+> Run with --scan to get full insights.
+
+BUILD FAILED in 15s
+6 actionable tasks: 4 executed, 2 up-to-date

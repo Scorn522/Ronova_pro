@@ -4,6 +4,7 @@
 #include <memory>
 #include <limits>
 #include <map>
+#include <algorithm>
 
 namespace recovery_storage {
 // Validation can only manufacture failure, never return a successful native receipt.
@@ -60,10 +61,15 @@ struct Hash {
         static const char hex[]="0123456789abcdef";out.clear();for(auto b:digest){out+=hex[b>>4];out+=hex[b&15];}return true;}
 };
 struct Transaction {
+    enum Phase { CandidateHash, Open, BaselineHash, Write, Flush, ExpectedHash, ClosePrepared, Ready } phase=CandidateHash;
     Hash hashing;
     HANDLE handle=INVALID_HANDLE_VALUE,file=INVALID_HANDLE_VALUE;
     jobject request=nullptr;jlong token=0;
     ULONGLONG expires=0;bool finalized=false;jlong outcome=0,error=0;
+    std::wstring requested;
+    std::string expected_id,baseline,expected;
+    jlong image_size=0;
+    ULONGLONG offset=0;
     // Exceptional process/JNI unwind only. Normal paths use explicit close receipts below.
     ~Transaction(){if(file!=INVALID_HANDLE_VALUE)CloseHandle(file);
         if(handle!=INVALID_HANDLE_VALUE){if(!finalized)api().rollback(handle);CloseHandle(handle);}}
@@ -89,12 +95,17 @@ static void release(JNIEnv* env,std::unique_ptr<Transaction>& tx) {
 }
 // Closing a handle and committing a transaction are independent observations. Neither JNI
 // return success nor a missing registry slot is substituted for a resource-close receipt.
-static void remember_retirement(JNIEnv* env,Transaction& tx) {
-    if(!tx.request||env->ExceptionCheck())return;
+static bool remember_retirement(JNIEnv* env,Transaction& tx) {
+    if(!tx.request)return false;
+    // The original Java failure must not suppress the actual close receipt.
+    jthrowable pending=env->ExceptionOccurred();if(pending)env->ExceptionClear();
     auto type=env->GetObjectClass(tx.request);
     auto method=type?env->GetMethodID(type,"nativeRetired","(JJZJ)V"):nullptr;
     if(type)env->DeleteLocalRef(type);
     if(method)env->CallVoidMethod(tx.request,method,tx.token,tx.outcome,JNI_TRUE,tx.error);
+    bool recorded=method&&!env->ExceptionCheck();
+    if(pending){if(env->ExceptionCheck())env->ExceptionClear();env->Throw(pending);env->DeleteLocalRef(pending);}
+    return recorded;
 }
 static void retain_for_retirement(std::unique_ptr<Transaction>& tx) {
     tx->expires=GetTickCount64()+1000;
@@ -113,7 +124,7 @@ static bool finish_handles(JNIEnv* env,std::unique_ptr<Transaction>& tx) {
     if(!tx->hashing.close()) {tx->error=tx->hashing.error;retain_for_retirement(tx);return false;}
     if(tx->file==INVALID_HANDLE_VALUE&&(tx->handle==INVALID_HANDLE_VALUE||CloseHandle(tx->handle))) {
         tx->handle=INVALID_HANDLE_VALUE;
-        remember_retirement(env,*tx);
+        if(!remember_retirement(env,*tx)){retain_for_retirement(tx);return false;}
         release(env,tx);return true;
     }
     tx->error=GetLastError();
@@ -130,10 +141,22 @@ static bool rollback_and_retire(JNIEnv* env,std::unique_ptr<Transaction>& tx) {
     }
     return finish_handles(env,tx);
 }
+static bool live_owner(JNIEnv* env,Transaction& tx) {
+    auto type=env->GetObjectClass(tx.request);
+    auto method=type?env->GetMethodID(type,"nativeKeepAlive","()Z"):nullptr;
+    if(type)env->DeleteLocalRef(type);
+    return method&&env->CallBooleanMethod(tx.request,method)==JNI_TRUE&&!env->ExceptionCheck();
+}
 static jlong reap_expired(JNIEnv* env) {
     std::unique_ptr<Transaction> expired[2];ULONGLONG now=GetTickCount64();jlong reaped=0;
     AcquireSRWLockExclusive(&slots_lock);
-    for(int i=0;i<2;i++)if(slots[i]&&now>=slots[i]->expires)expired[i]=std::move(slots[i]);
+    for(int i=0;i<2;i++)if(slots[i]&&now>=slots[i]->expires) {
+        // This exact private callback reads ownership fields only. Keep an active
+        // token visible to its next advance/finish while another owner maintains.
+        if(!slots[i]->finalized&&live_owner(env,*slots[i]))slots[i]->expires=now+1000;
+        else expired[i]=std::move(slots[i]);
+        if(env->ExceptionCheck())break;
+    }
     ReleaseSRWLockExclusive(&slots_lock);
     // No Root permit is involved in rollback; no registry lock spans OS I/O.
     for(auto& tx:expired)if(tx&&rollback_and_retire(env,tx))reaped++;
@@ -162,14 +185,6 @@ static bool path(JNIEnv* env,jobject request,std::wstring& value) {
     env->ReleaseStringChars(text,chars);env->DeleteLocalRef(text);
     return ok&&((value[0]>=L'A'&&value[0]<=L'Z')||(value[0]>=L'a'&&value[0]<=L'z'))&&value[1]==L':'&&value[2]==L'\\';
 }
-static bool hash_file(Transaction& tx,std::string& hash,ULONGLONG deadline) {
-    HANDLE file=tx.file;
-    LARGE_INTEGER zero{};if(!SetFilePointerEx(file,zero,nullptr,FILE_BEGIN))return false;
-    Hash& digest=tx.hashing;if(!digest.open())return false;unsigned char buffer[16384];size_t total=0;
-    for(;;){if(GetTickCount64()>=deadline)return false;DWORD count=0;if(!ReadFile(file,buffer,sizeof(buffer),&count,nullptr))return false;
-        if(!count)break;total+=count;if(total>16*1024*1024||!digest.add(buffer,count))return false;}
-    return digest.finish(hash);
-}
 static bool identity(HANDLE file,const std::wstring& requested,std::string& out) {
     BY_HANDLE_FILE_INFORMATION info{};FILE_ID_INFO id{};wchar_t fs[32],final_path[4104];
     if(GetFileType(file)!=FILE_TYPE_DISK||!GetFileInformationByHandle(file,&info)||info.nNumberOfLinks!=1
@@ -184,83 +199,166 @@ static bool identity(HANDLE file,const std::wstring& requested,std::string& out)
 }
 }
 
-// Result: status, opaque token, Win32 error. Token is also bound to the exact private-created request object.
+namespace recovery_storage {
+struct StageCleanup {
+    JNIEnv* env;std::unique_ptr<Transaction>& tx;bool& retained;
+    ~StageCleanup(){if(!retained&&tx){retained=true;rollback_and_retire(env,tx);}}
+};
+static bool start_file_hash(Transaction& tx) {
+    LARGE_INTEGER zero{};
+    tx.offset=0;
+    return SetFilePointerEx(tx.file,zero,nullptr,FILE_BEGIN)&&tx.hashing.open();
+}
+// The time/byte allowance belongs to one call. Phase, file position and digest belong
+// to the original token and are never reset merely because that allowance is spent.
+static jlong drive(JNIEnv* env,Transaction& tx) {
+    if(tx.phase==Transaction::Ready)return 1;
+    constexpr DWORD chunk_size=16384;
+    unsigned char buffer[chunk_size];
+    auto type=env->GetObjectClass(tx.request);
+    auto read=type?env->GetMethodID(type,"readImage","(J[B)I"):nullptr;
+    if(type)env->DeleteLocalRef(type);
+    if(!read)return 0;
+    auto chunk=env->NewByteArray(chunk_size);if(!chunk)return 0;
+    struct Local {JNIEnv* env;jobject value;~Local(){env->DeleteLocalRef(value);}} local{env,chunk};
+    ULONGLONG deadline=GetTickCount64()+20;DWORD consumed=0;bool first=true;
+    auto failure=[&](jlong code)->jlong{tx.error=code?code:GetLastError();return 6;};
+    auto candidate=[&](DWORD want)->bool {
+        jint count=env->CallIntMethod(tx.request,read,static_cast<jlong>(tx.offset),chunk);
+        if(env->ExceptionCheck()||count!=static_cast<jint>(want))return false;
+        env->GetByteArrayRegion(chunk,0,count,reinterpret_cast<jbyte*>(buffer));
+        return !env->ExceptionCheck();
+    };
+    while(first||(GetTickCount64()<deadline&&consumed<1024*1024)) {
+        first=false;
+        switch(tx.phase) {
+            case Transaction::CandidateHash: {
+                DWORD want=static_cast<DWORD>(std::min<ULONGLONG>(chunk_size,static_cast<ULONGLONG>(tx.image_size)-tx.offset));
+                if(want) {
+                    if(!candidate(want))return 0;
+                    if(!tx.hashing.add(buffer,want))return failure(tx.hashing.error);
+                    tx.offset+=want;consumed+=want;break;
+                }
+                std::string hash;
+                if(!tx.hashing.finish(hash))return failure(tx.hashing.error);
+                if(hash!=tx.expected)return 0;
+                tx.phase=Transaction::Open;break;
+            }
+            case Transaction::Open: {
+                // Capacity is not an elapsed-time permission. The exact Java owner
+                // retains this private transaction; stop/cancel still rolls it back.
+                tx.handle=api().create(nullptr,nullptr,0,0,0,0,const_cast<wchar_t*>(L"Ronova registered recovery storage"));
+                if(tx.handle==INVALID_HANDLE_VALUE){tx.error=GetLastError();return 4;}
+                GUID guid{};if(!api().id(tx.handle,&guid))return failure(0);
+                char transaction_id[33];static const char hex[]="0123456789abcdef";
+                const auto raw=reinterpret_cast<const unsigned char*>(&guid);
+                for(int i=0;i<16;i++){transaction_id[2*i]=hex[raw[i]>>4];transaction_id[2*i+1]=hex[raw[i]&15];}transaction_id[32]=0;
+                auto request_type=env->GetObjectClass(tx.request);
+                auto identify=request_type?env->GetMethodID(request_type,"nativeTransaction","(Ljava/lang/String;)V"):nullptr;
+                if(request_type)env->DeleteLocalRef(request_type);
+                if(!identify)return 0;
+                auto text=env->NewStringUTF(transaction_id);if(!text)return 0;
+                env->CallVoidMethod(tx.request,identify,text);env->DeleteLocalRef(text);
+                if(env->ExceptionCheck())return 0;
+                tx.file=api().open(tx.requested.c_str(),GENERIC_READ|GENERIC_WRITE,0,nullptr,OPEN_EXISTING,FILE_FLAG_OPEN_REPARSE_POINT,nullptr,tx.handle,nullptr,nullptr);
+                if(tx.file==INVALID_HANDLE_VALUE)return failure(0);
+                std::string file_id;if(!identity(tx.file,tx.requested,file_id)||file_id!=tx.expected_id)return 5;
+                if(!start_file_hash(tx))return failure(tx.hashing.error);
+                tx.phase=Transaction::BaselineHash;break;
+            }
+            case Transaction::BaselineHash:
+            case Transaction::ExpectedHash: {
+                DWORD count=0;if(!ReadFile(tx.file,buffer,chunk_size,&count,nullptr))return failure(0);
+                if(count) {
+                    if(tx.offset>static_cast<ULONGLONG>(std::numeric_limits<jlong>::max())-count)return failure(ERROR_ARITHMETIC_OVERFLOW);
+                    if(!tx.hashing.add(buffer,count))return failure(tx.hashing.error);
+                    tx.offset+=count;consumed+=count;break;
+                }
+                std::string hash;if(!tx.hashing.finish(hash))return failure(tx.hashing.error);
+                if(hash!=(tx.phase==Transaction::BaselineHash?tx.baseline:tx.expected))return 5;
+                if(tx.phase==Transaction::ExpectedHash) { tx.phase=Transaction::ClosePrepared;break; }
+                LARGE_INTEGER zero{};if(!SetFilePointerEx(tx.file,zero,nullptr,FILE_BEGIN))return failure(0);
+                tx.offset=0;tx.phase=Transaction::Write;break;
+            }
+            case Transaction::Write: {
+                DWORD want=static_cast<DWORD>(std::min<ULONGLONG>(chunk_size,static_cast<ULONGLONG>(tx.image_size)-tx.offset));
+                if(!want){tx.phase=Transaction::Flush;break;}
+                if(!candidate(want))return 0;
+                DWORD count=0;
+                if(injected_failure(env,tx.request,"NATIVE_WRITE")||!WriteFile(tx.file,buffer,want,&count,nullptr))return failure(0);
+                if(!count||count>want)return failure(ERROR_WRITE_FAULT);
+                tx.offset+=count;consumed+=count;break;
+            }
+            case Transaction::Flush:
+                if(!SetEndOfFile(tx.file)||injected_failure(env,tx.request,"NATIVE_FLUSH")||!FlushFileBuffers(tx.file))return failure(0);
+                if(!start_file_hash(tx))return failure(tx.hashing.error);
+                tx.phase=Transaction::ExpectedHash;break;
+            case Transaction::ClosePrepared: {
+                std::string file_id;if(!identity(tx.file,tx.requested,file_id)||file_id!=tx.expected_id)return 5;
+                if(!close_file(tx))return failure(tx.error);
+                tx.phase=Transaction::Ready;return 1;
+            }
+            case Transaction::Ready:return 1;
+        }
+    }
+    return 7;
+}
+static jlongArray advance_owned(JNIEnv* env,std::unique_ptr<Transaction>& tx,bool& retained) {
+    jlong status=drive(env,*tx),token=tx->token,error=tx->error;
+    auto response=result(env,status,token,error);if(!response)return nullptr;
+    if(status==1||status==7){retain_for_retirement(tx);retained=true;}
+    return response;
+}
+}
+
+// Result: status, the original opaque token, Win32 error. 7 retains preparation progress.
 extern "C" JNIEXPORT jlongArray JNICALL
 Java_dev_ronova_pro_StorageNative_prepare0(JNIEnv* env,jclass,jobject request) try {
     using namespace recovery_storage;
     if(!api().supported())return result(env,4);
     if(!exact(env,request,"dev/ronova/pro/RecoveryStorage$Ticket"))return result(env,0);
     reap_expired(env);
-    int previous=admitted.fetch_add(1);if(previous>=2){admitted.fetch_sub(1);return result(env,6,0,ERROR_BUSY);}
+    int previous=admitted.fetch_add(1);if(previous>=2){admitted.fetch_sub(1);return result(env,7,0,ERROR_BUSY);}
     bool retained=false;struct Admission{bool& retained;~Admission(){if(!retained)admitted.fetch_sub(1);}} admission{retained};
     std::wstring requested;std::string expected_id,baseline,expected;
     if(!path(env,request,requested)||!string(env,request,"fileIdentity",expected_id)
         ||!string(env,request,"baselineHash",baseline)||!string(env,request,"expectedHash",expected))return result(env,0);
-    auto type=env->GetObjectClass(request);auto getter=env->GetMethodID(type,"encoded","()[B");env->DeleteLocalRef(type);
-    if(!getter)return result(env,0);auto bytes=static_cast<jbyteArray>(env->CallObjectMethod(request,getter));
-    if(env->ExceptionCheck()||!bytes)return result(env,0);jsize size=env->GetArrayLength(bytes);
-    if(size<1||size>16*1024*1024){env->DeleteLocalRef(bytes);return result(env,0);}
-    std::vector<unsigned char> image(size);env->GetByteArrayRegion(bytes,0,size,reinterpret_cast<jbyte*>(image.data()));env->DeleteLocalRef(bytes);
-    if(env->ExceptionCheck())return nullptr;
+    auto type=env->GetObjectClass(request);auto getter=type?env->GetMethodID(type,"imageSize","()J"):nullptr;
+    if(type)env->DeleteLocalRef(type);
+    if(!getter)return nullptr;jlong size=env->CallLongMethod(request,getter);
+    if(env->ExceptionCheck()||size<1)return result(env,0);
     auto tx=std::make_unique<Transaction>();
     tx->token=next_token.fetch_add(1);
     if(tx->token<=0||tx->token==std::numeric_limits<jlong>::max())return result(env,6);
     tx->request=env->NewGlobalRef(request);if(!tx->request)return nullptr;
-    // Every return after allocation retires under the same original token. Admission is
-    // transferred either to the retained slot or to release(); never decremented twice.
-    struct StageCleanup {
-        JNIEnv* env;std::unique_ptr<Transaction>& tx;bool& retained;
-        ~StageCleanup(){if(!retained&&tx){retained=true;rollback_and_retire(env,tx);}}
-    } cleanup{env,tx,retained};
-    // Publish allocation to the exact private ticket before any fallible staging I/O.
+    StageCleanup cleanup{env,tx,retained};
+    tx->requested=std::move(requested);tx->expected_id=std::move(expected_id);
+    tx->baseline=std::move(baseline);tx->expected=std::move(expected);tx->image_size=size;
     auto request_type=env->GetObjectClass(request);
     auto allocated=request_type?env->GetMethodID(request_type,"nativeAllocated","(J)V"):nullptr;
     if(request_type)env->DeleteLocalRef(request_type);
-    if(!allocated)return nullptr;
-    env->CallVoidMethod(request,allocated,tx->token);
+    if(!allocated)return nullptr;env->CallVoidMethod(request,allocated,tx->token);
     if(env->ExceptionCheck())return nullptr;
-    Hash& encoded=tx->hashing;std::string actual;
-    if(!encoded.open()||!encoded.add(image.data(),size)||!encoded.finish(actual)||actual!=expected)return result(env,0,tx->token);
-    tx->expires=GetTickCount64()+5000;
-    tx->handle=api().create(nullptr,nullptr,0,0,0,5000,const_cast<wchar_t*>(L"Ronova registered recovery storage"));
-    if(tx->handle==INVALID_HANDLE_VALUE)return result(env,4,tx->token,GetLastError());
-    GUID guid{};if(!api().id(tx->handle,&guid))return result(env,6,tx->token,GetLastError());
-    char transaction_id[33];static const char hex[]="0123456789abcdef";
-    const auto raw=reinterpret_cast<const unsigned char*>(&guid);
-    for(int i=0;i<16;i++){transaction_id[2*i]=hex[raw[i]>>4];transaction_id[2*i+1]=hex[raw[i]&15];}transaction_id[32]=0;
-    request_type=env->GetObjectClass(request);
-    auto identify=env->GetMethodID(request_type,"nativeTransaction","(Ljava/lang/String;)V");env->DeleteLocalRef(request_type);
-    if(!identify)return nullptr;
-    auto identity_text=env->NewStringUTF(transaction_id);if(!identity_text)return nullptr;
-    env->CallVoidMethod(request,identify,identity_text);env->DeleteLocalRef(identity_text);
-    if(env->ExceptionCheck())return nullptr;
-    tx->file=api().open(requested.c_str(),GENERIC_READ|GENERIC_WRITE,0,nullptr,OPEN_EXISTING,FILE_FLAG_OPEN_REPARSE_POINT,nullptr,tx->handle,nullptr,nullptr);
-    if(tx->file==INVALID_HANDLE_VALUE)return result(env,6,tx->token,GetLastError());
-    ULONGLONG deadline=GetTickCount64()+4000;std::string file_id;
-    if(!identity(tx->file,requested,file_id)||file_id!=expected_id)return result(env,5,tx->token);
-    if(!hash_file(*tx,actual,deadline))return result(env,6,tx->token,GetLastError());
-    if(actual!=baseline)return result(env,5,tx->token);
-    LARGE_INTEGER zero{};if(!SetFilePointerEx(tx->file,zero,nullptr,FILE_BEGIN))return result(env,6,tx->token,GetLastError());
-    for(size_t offset=0;offset<image.size();) {
-        if(GetTickCount64()>=deadline)return result(env,6,tx->token,WAIT_TIMEOUT);
-        DWORD count=0,want=static_cast<DWORD>((image.size()-offset)>16384?16384:(image.size()-offset));
-        if(injected_failure(env,request,"NATIVE_WRITE")||!WriteFile(tx->file,image.data()+offset,want,&count,nullptr)||count!=want)return result(env,6,tx->token,GetLastError());offset+=count;
-    }
-    if(!SetEndOfFile(tx->file)||injected_failure(env,request,"NATIVE_FLUSH")||!FlushFileBuffers(tx->file)||!hash_file(*tx,actual,deadline))return result(env,6,tx->token,GetLastError());
-    if(actual!=expected||!identity(tx->file,requested,file_id)||file_id!=expected_id)return result(env,5,tx->token);
-    // Windows requires transaction file handles to be closed before commit/rollback.
-    if(!close_file(*tx))return result(env,6,tx->token,tx->error);
-    jlong token=tx->token;auto response=result(env,1,token);if(!response)return nullptr;
-    AcquireSRWLockExclusive(&slots_lock);
-    for(auto& slot:slots)if(!slot){slot=std::move(tx);retained=true;break;}
-    ReleaseSRWLockExclusive(&slots_lock);
-    if(!retained)return result(env,6,token,ERROR_BUSY);
-    return response;
+    if(!tx->hashing.open())return result(env,6,tx->token,tx->hashing.error);
+    return advance_owned(env,tx,retained);
 } catch(...) {
     if(!env->ExceptionCheck()){auto error=env->FindClass("java/lang/IllegalStateException");if(error){env->ThrowNew(error,"Native transaction preparation unavailable");env->DeleteLocalRef(error);}}
     return nullptr;
 }
 
+extern "C" JNIEXPORT jlongArray JNICALL
+Java_dev_ronova_pro_StorageNative_advance0(JNIEnv* env,jclass,jobject request,jlong token) try {
+    using namespace recovery_storage;
+    if(!exact(env,request,"dev/ronova/pro/RecoveryStorage$Ticket"))return result(env,0,token);
+    auto tx=take(env,request,token);
+    if(!tx)return result(env,0,token,ERROR_NOT_FOUND);
+    bool retained=false;StageCleanup cleanup{env,tx,retained};
+    if(tx->finalized||!live_owner(env,*tx))return result(env,0,token);
+    return advance_owned(env,tx,retained);
+} catch(...) {
+    if(!env->ExceptionCheck()){auto error=env->FindClass("java/lang/IllegalStateException");if(error){env->ThrowNew(error,"Native transaction continuation unavailable");env->DeleteLocalRef(error);}}
+    return nullptr;
+}
 extern "C" JNIEXPORT jlongArray JNICALL
 Java_dev_ronova_pro_StorageNative_finish0(JNIEnv* env,jclass,jobject request,jlong token,jobject permit) {
     using namespace recovery_storage;
@@ -276,14 +374,15 @@ Java_dev_ronova_pro_StorageNative_finish0(JNIEnv* env,jclass,jobject request,jlo
         jlong error=tx->error;retain_for_retirement(tx);return result(env,0,0,error);
     }
     bool allowed=false;
-    if(!tx->finalized&&GetTickCount64()<tx->expires&&permit
+    if(!tx->finalized&&tx->phase==Transaction::Ready&&permit
         &&exact(env,permit,"dev/ronova/pro/RecoveryStorage$Permit")) {
         auto type=env->GetObjectClass(permit);auto valid=env->GetMethodID(type,"beginCommitFor","(Ldev/ronova/pro/RecoveryStorage$Ticket;)Z");env->DeleteLocalRef(type);
         if(valid)allowed=env->CallBooleanMethod(permit,valid,request)==JNI_TRUE&&!env->ExceptionCheck();
     }
     if(!tx->finalized) {
         tx->finalized=true;
-        if(allowed) {if(!injected_failure(env,request,"NATIVE_COMMIT")&&api().commit(tx->handle))tx->outcome=1;else{tx->outcome=3;tx->error=GetLastError();}}
+        if(tx->handle==INVALID_HANDLE_VALUE)tx->outcome=0;
+        else if(allowed) {if(!injected_failure(env,request,"NATIVE_COMMIT")&&api().commit(tx->handle))tx->outcome=1;else{tx->outcome=3;tx->error=GetLastError();}}
         else {if(api().rollback(tx->handle))tx->outcome=2;else{tx->outcome=3;tx->error=GetLastError();}}
     }
     jlong status=tx->outcome,error=tx->error;

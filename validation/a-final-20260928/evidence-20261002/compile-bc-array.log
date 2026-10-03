@@ -1,0 +1,34 @@
+To honour the JVM settings for this build a single-use Daemon process will be forked. For more on this, please refer to https://docs.gradle.org/8.8/userguide/gradle_daemon.html#sec:disabling_the_daemon in the Gradle documentation.
+Daemon will be stopped at the end of the build 
+
+> Configure project :
+MixinGradle is skipping eclipse integration, extension not found
+Neither the 'eclipse' nor the 'idea' plugins were found, but IDE resource copy has been enabled.
+
+> Task :compileBootstrapJava FAILED
+C:\Users\Scorn\Desktop\MOD\Ronova-Pro-����\ronova_GPT\bootstrap\src\main\java\dev\ronova\pro\bootstrap\TaskBridge.java:492: ����: 'var' �������ڸ���������ʹ��
+        Class<?> type=queue.getClass();var tableField=type.getDeclaredField("queue"),sizeField=type.getDeclaredField("size");tableField.setAccessible(true);sizeField.setAccessible(true);
+                                       ^
+C:\Users\Scorn\Desktop\MOD\Ronova-Pro-����\ronova_GPT\bootstrap\src\main\java\dev\ronova\pro\bootstrap\TaskBridge.java:493: ����: 'var' �������ڸ���������ʹ��
+        var remove=type.getDeclaredMethod("quickRemove",int.class),heap=type.getDeclaredMethod("heapify");remove.setAccessible(true);heap.setAccessible(true);
+        ^
+C:\Users\Scorn\Desktop\MOD\Ronova-Pro-����\ronova_GPT\bootstrap\src\main\java\dev\ronova\pro\bootstrap\TaskBridge.java:494: ����: 'var' �������ڸ���������ʹ��
+        var stateField=java.util.TimerTask.class.getDeclaredField("state"),lockField=java.util.TimerTask.class.getDeclaredField("lock");stateField.setAccessible(true);lockField.setAccessible(true);
+        ^
+C:\Users\Scorn\Desktop\MOD\Ronova-Pro-����\ronova_GPT\bootstrap\src\main\java\dev\ronova\pro\bootstrap\TaskBridge.java:544: ����: 'var' �������ڸ���������ʹ��
+        var stateField=java.util.TimerTask.class.getDeclaredField("state"),lockField=java.util.TimerTask.class.getDeclaredField("lock");stateField.setAccessible(true);lockField.setAccessible(true);
+        ^
+4 ������
+
+FAILURE: Build failed with an exception.
+
+* What went wrong:
+Execution failed for task ':compileBootstrapJava'.
+> Compilation failed; see the compiler error output for details.
+
+* Try:
+> Run with --info option to get more log output.
+> Run with --scan to get full insights.
+
+BUILD FAILED in 11s
+1 actionable task: 1 executed

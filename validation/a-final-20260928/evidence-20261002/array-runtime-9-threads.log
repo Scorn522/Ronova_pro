@@ -1,0 +1,47 @@
+2026-10-02 21:36:45
+Full thread dump OpenJDK 64-Bit Server VM (17.0.19+10 mixed mode, sharing):
+
+Threads class SMR info:
+_java_thread_list=0x000001d208b3f7f0, length=11, elements={
+0x000001d19f0b1d90, 0x000001d1be769150, 0x000001d1be769d10, 0x000001d1be78c430,
+0x000001d1be78cdf0, 0x000001d1be78d7b0, 0x000001d1be790180, 0x000001d1be790e70,
+0x000001d1be792da0, 0x000001d1be79b6c0, 0x000001d1be756600
+}
+
+"main" #1 prio=5 os_prio=0 cpu=107656.25ms elapsed=110.79s tid=0x000001d19f0b1d90 nid=0xab1c runnable  [0x00000094341fb000]
+   java.lang.Thread.State: RUNNABLE
+	at java.lang.StackStreamFactory$AbstractStackWalker.callStackWalk(java.base@17.0.19/Native Method)
+	at java.lang.StackStreamFactory$AbstractStackWalker.beginStackWalk(java.base@17.0.19/StackStreamFactory.java:370)
+	at java.lang.StackStreamFactory$AbstractStackWalker.walk(java.base@17.0.19/StackStreamFactory.java:243)
+	at java.lang.StackStreamFactory$CallerClassFinder.findCaller(java.base@17.0.19/StackStreamFactory.java:670)
+	at java.lang.StackWalker.getCallerClass(java.base@17.0.19/StackWalker.java:601)
+	at dev.ronova.pro.bootstrap.CodeSourceBridge.executionControls(CodeSourceBridge.java:396)
+	at dev.ronova.pro.bootstrap.ExecutionFlow$ArrayRevision.<init>(ExecutionFlow.java:78)
+	at dev.ronova.pro.bootstrap.ExecutionFlow$ArrayRevision.<init>(ExecutionFlow.java:77)
+	at dev.ronova.pro.bootstrap.ExecutionFlow.finishArrayChange(ExecutionFlow.java:530)
+	at dev.ronova.pro.bootstrap.ExecutionFlow.finishRegion(ExecutionFlow.java:550)
+	at dev.ronova.pro.bootstrap.ExecutionFlow.memoryAfter(ExecutionFlow.java:716)
+	- locked <0x000000008010f628> (a java.util.HashMap)
+	at dev.ronova.pro.bootstrap.CodeSourceBridge.executionMemoryAfter(CodeSourceBridge.java:309)
+	at dev.ronova.pro.bootstrap.TaskBridge.finishFieldMutation(TaskBridge.java:1708)
+	at sun.instrument.InstrumentationImpl.getAllLoadedClasses0(java.instrument@17.0.19/Native Method)
+	at sun.instrument.InstrumentationImpl.getAllLoadedClasses(java.instrument@17.0.19/InstrumentationImpl.java:201)
+	at dev.ronova.pro.agent.RecoveryAgent.loadedClasses(RecoveryAgent.java:756)
+	at dev.ronova.pro.agent.ExternalCodeDefinitions$BootstrapLookup.find(ExternalCodeDefinitions.java:22)
+	at dev.ronova.pro.agent.ExternalCodeDefinitions.initiated(ExternalCodeDefinitions.java:473)
+	at dev.ronova.pro.agent.ExternalReceiverFlow$ExactTypes.type(ExternalReceiverFlow.java:27)
+	at dev.ronova.pro.agent.ExternalReceiverFlow$ExactTypes.reference(ExternalReceiverFlow.java:41)
+	at dev.ronova.pro.agent.ExternalReceiverFlow$ExactTypes.newValue(ExternalReceiverFlow.java:46)
+	at dev.ronova.pro.agent.ExternalReceiverFlow$ExactTypes.newValue(ExternalReceiverFlow.java:19)
+	at jdk.internal.org.objectweb.asm.tree.analysis.Interpreter.newReturnTypeValue(java.base@17.0.19/Interpreter.java:142)
+	at jdk.internal.org.objectweb.asm.tree.analysis.Analyzer.computeInitialFrame(java.base@17.0.19/Analyzer.java:447)
+	at jdk.internal.org.objectweb.asm.tree.analysis.Analyzer.analyze(java.base@17.0.19/Analyzer.java:193)
+	at dev.ronova.pro.agent.ExternalReceiverFlow.calls(ExternalReceiverFlow.java:113)
+	at dev.ronova.pro.agent.ExternalCodeDefinitions.expandGraph(ExternalCodeDefinitions.java:238)
+	at dev.ronova.pro.agent.ExternalCodeDefinitions.expand(ExternalCodeDefinitions.java:226)
+	- locked <0x00000000803cbc00> (a java.lang.Class for dev.ronova.pro.agent.ExternalCodeDefinitions)
+	at dev.ronova.pro.agent.ExternalCodeRuntime.prepare(ExternalCodeRuntime.java:19)
+	at dev.ronova.pro.agent.ExternalCodeRuntime.prepare(ExternalCodeRuntime.java:15)
+	at dev.ronova.pro.agent.RecoveryAgent$2.transform(RecoveryAgent.java:118)
+	at sun.instrument.TransformerManager.transform(java.instrument@17.0.19/TransformerManager.java:188)
+	at sun.instrument.InstrumentationImpl.transform(java.instrument@17.0.19/InstrumentationImpl.java:541)

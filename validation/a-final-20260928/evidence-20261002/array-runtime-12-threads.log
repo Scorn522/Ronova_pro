@@ -1,0 +1,49 @@
+2026-10-02 22:08:17
+Full thread dump OpenJDK 64-Bit Server VM (17.0.19+10 mixed mode, sharing):
+
+Threads class SMR info:
+_java_thread_list=0x00000220aa1b18f0, length=12, elements={
+0x000002203fbe76f0, 0x000002205f2c50f0, 0x000002205f2c6820, 0x000002205f2e81a0,
+0x000002205f2e8b60, 0x000002205f2ea090, 0x000002205f2ed5d0, 0x000002205f2f08c0,
+0x000002205f2f11d0, 0x000002205f2f5b50, 0x000002205f4497f0, 0x000002205f4492e0
+}
+
+"main" #1 prio=5 os_prio=0 cpu=140546.88ms elapsed=153.47s tid=0x000002203fbe76f0 nid=0xfe64 runnable  [0x0000004a1f3fe000]
+   java.lang.Thread.State: RUNNABLE
+	at sun.instrument.InstrumentationImpl.retransformClasses0(java.instrument@17.0.19/Native Method)
+	at sun.instrument.InstrumentationImpl.retransformClasses(java.instrument@17.0.19/InstrumentationImpl.java:169)
+	at dev.ronova.pro.agent.RecoveryAgent.install(RecoveryAgent.java:324)
+	- locked <0x0000000080029be0> (a java.lang.Class for dev.ronova.pro.agent.RecoveryAgent)
+	at dev.ronova.pro.agent.RecoveryAgent.start(RecoveryAgent.java:45)
+	- locked <0x0000000080029be0> (a java.lang.Class for dev.ronova.pro.agent.RecoveryAgent)
+	at dev.ronova.pro.agent.RecoveryAgent.premain(RecoveryAgent.java:29)
+	at jdk.internal.reflect.NativeMethodAccessorImpl.invoke0(java.base@17.0.19/Native Method)
+	at jdk.internal.reflect.NativeMethodAccessorImpl.invoke(java.base@17.0.19/NativeMethodAccessorImpl.java:77)
+	at jdk.internal.reflect.DelegatingMethodAccessorImpl.invoke(java.base@17.0.19/DelegatingMethodAccessorImpl.java:43)
+	at java.lang.reflect.Method.invoke(java.base@17.0.19/Method.java:569)
+	at sun.instrument.InstrumentationImpl.loadClassAndStartAgent(java.instrument@17.0.19/Unknown Source)
+	at sun.instrument.InstrumentationImpl.loadClassAndCallPremain(java.instrument@17.0.19/Unknown Source)
+
+   Locked ownable synchronizers:
+	- <0x00000000a1ba8728> (a java.util.concurrent.locks.ReentrantLock$NonfairSync)
+
+"Reference Handler" #2 daemon prio=10 os_prio=2 cpu=15.62ms elapsed=153.46s tid=0x000002205f2c50f0 nid=0x345c waiting on condition  [0x0000004a1faff000]
+   java.lang.Thread.State: RUNNABLE
+	at java.lang.ref.Reference.waitForReferencePendingList(java.base@17.0.19/Native Method)
+	at java.lang.ref.Reference.processPendingReferences(java.base@17.0.19/Reference.java:253)
+	at java.lang.ref.Reference$ReferenceHandler.run(java.base@17.0.19/Reference.java:215)
+
+   Locked ownable synchronizers:
+	- None
+
+"Finalizer" #3 daemon prio=8 os_prio=1 cpu=0.00ms elapsed=153.46s tid=0x000002205f2c6820 nid=0xaa04 in Object.wait()  [0x0000004a1fbff000]
+   java.lang.Thread.State: WAITING (on object monitor)
+	at java.lang.Object.wait(java.base@17.0.19/Native Method)
+	- waiting on <0x0000000080001c90> (a java.lang.ref.ReferenceQueue$Lock)
+	at java.lang.ref.ReferenceQueue.remove(java.base@17.0.19/ReferenceQueue.java:155)
+	- locked <0x0000000080001c90> (a java.lang.ref.ReferenceQueue$Lock)
+	at java.lang.ref.ReferenceQueue.remove(java.base@17.0.19/ReferenceQueue.java:176)
+	at java.lang.ref.Finalizer$FinalizerThread.run(java.base@17.0.19/Finalizer.java:172)
+
+   Locked ownable synchronizers:
+	- None

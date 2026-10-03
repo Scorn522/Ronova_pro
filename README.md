@@ -12,10 +12,18 @@ GitHub 同步仓库：[Scorn522/Ronova_pro](https://github.com/Scorn522/Ronova_p
 
 | 位置 | 内容 |
 | --- | --- |
-| `src/`、`agent/`、`bootstrap/`、`prelaunch/`、`native/` | 生产代码与游戏进程前置入口 |
+| `src/core/` | 主程序源码，Mixin 放在其中的 `mixin/` |
+| `src/agent/`、`src/bootstrap/` | Agent 与 Bootstrap 源码 |
+| `src/prelaunch/`、`src/journal/` | 前置启动器与共用持久日志源码 |
+| `src/resources/` | Mod 元数据、Mixin 配置与资源 |
+| `native/` | Native 源码与构建入口 |
 | [docs/](docs/README.md) | 当前状态、R3 设计、研究资料与历史记录 |
 | `validation/` | 独立检查、隔离夹具及已有运行记录 |
 | `validation/history/takeover-20260921/` | 一次性接手脚本与原始基线 |
+
+Java 源码按组件直接存放，目录不再重复 `src/main/java/dev/ronova/pro/...`。源码内的包名保持原样，Gradle 已显式配置各组件的源码位置；编译后的类路径、Mixin 类名和 JAR 入口保持原有结构。
+
+现有验证源码分为 `validation/fixture/`、`validation/checks/`、`validation/agent-check/`、`validation/agent-policy/`，夹具资源位于 `validation/resources/`。历史报告中的旧源码路径按当时记录保留，可按上述组件目录查找同名文件。
 
 完整工作包写齐后，有直接攻防执行需求时使用的编译命令（不是日常固定检查）：
 
@@ -28,7 +36,7 @@ Native 构建需要 Zig，可用 Gradle `-PcontrolZig=编译器路径` 指定。
 
 `distribution/package-stage-b.py` 是早期 Stage B 的打包脚本，依赖当时候选与证据；不能用来宣称当前源码已完成验收。
 
-最新候选：`distribution/candidate-modwide-a-complete-20261001/`；当前效果和限制见 A 批状态。
+最新候选：distribution/candidate-b-source-20261004/（ABI 48）；B 的已知剩余来源适配代码已补齐，游戏内清理与保存重启效果仍待验证，详见当前状态。
 
 ## 整 Mod A 候选的使用
 

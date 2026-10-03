@@ -1,0 +1,14 @@
+{
+  "pid": 61136,
+  "command": [
+    "C:\\Program Files\\Eclipse Adoptium\\jdk-17.0.19.10-hotspot\\bin\\java.exe",
+    "-Xmx2G",
+    "-Dfile.encoding=UTF-8",
+    "-Dronova.pro.validation=true",
+    "-Dronova.pro.fixture=raw-backing",
+    "-Dronova.pro.fixture.variant=direct-fields",
+    "-javaagent:C:\\Users\\Scorn\\Desktop\\MOD\\Ronova-Pro-\u63a5\u7eed\\ronova_GPT\\build\\libs\\ronova-pro-agent.jar=base64:QzpcVXNlcnNcU2Nvcm5cRGVza3RvcFxNT0RcUm9ub3ZhLVByby3mjqXnu61ccm9ub3ZhX0dQVFxidWlsZFxsaWJzXHJvbm92YS1wcm8tYm9vdHN0cmFwLmphcg",
+    "@libraries/net/minecraftforge/forge/1.20.1-47.4.23/win_args.txt",
+    "nogui"
+  ]
+}

@@ -1,0 +1,60 @@
+To honour the JVM settings for this build a single-use Daemon process will be forked. For more on this, please refer to https://docs.gradle.org/8.8/userguide/gradle_daemon.html#sec:disabling_the_daemon in the Gradle documentation.
+Daemon will be stopped at the end of the build 
+
+> Configure project :
+MixinGradle is skipping eclipse integration, extension not found
+Neither the 'eclipse' nor the 'idea' plugins were found, but IDE resource copy has been enabled.
+
+> Task :downloadMcpConfig
+> Task :extractSrg UP-TO-DATE
+> Task :createMcpToSrg UP-TO-DATE
+> Task :compileJava UP-TO-DATE
+> Task :addMixinsToJar
+> Task :processResources
+> Task :classes
+> Task :addMixinsToRecoveryAgentJar
+> Task :compileAgentJava UP-TO-DATE
+> Task :processAgentResources NO-SOURCE
+> Task :agentClasses UP-TO-DATE
+> Task :recoveryAgentJar
+> Task :addMixinsToRecoveryBootstrapJar
+> Task :compileBootstrapJava UP-TO-DATE
+> Task :processBootstrapResources NO-SOURCE
+> Task :bootstrapClasses UP-TO-DATE
+> Task :recoveryBootstrapJar
+> Task :jar
+> Task :configureReobfTaskForReobfJar
+> Task :reobfJar
+> Task :addMixinsToFixtureJar
+
+> Task :compileFixtureJava
+C:\Users\Scorn\Desktop\MOD\Ronova-Pro-����\ronova_GPT\validation\src\main\java\dev\ronova\pro\validation\SourceAdmissionFixture.java:51: ����: [removal] FMLJavaModLoadingContext �е� get() �ѹ�ʱ, �ұ��Ϊ��ɾ��
+        TYPES.register(FMLJavaModLoadingContext.get().getModEventBus());
+                                               ^
+C:\Users\Scorn\Desktop\MOD\Ronova-Pro-����\ronova_GPT\validation\src\main\java\dev\ronova\pro\validation\SourceAdmissionFixture.java:52: ����: [removal] FMLJavaModLoadingContext �е� get() �ѹ�ʱ, �ұ��Ϊ��ɾ��
+        FMLJavaModLoadingContext.get().getModEventBus().addListener((net.minecraftforge.event.entity.EntityAttributeCreationEvent event)->
+                                ^
+C:\Users\Scorn\Desktop\MOD\Ronova-Pro-����\ronova_GPT\validation\src\main\java\dev\ronova\pro\validation\WorldFixture.java:70: ����: [removal] FMLJavaModLoadingContext �е� get() �ѹ�ʱ, �ұ��Ϊ��ɾ��
+            var bus=net.minecraftforge.fml.javafmlmod.FMLJavaModLoadingContext.get().getModEventBus();
+                                                                              ^
+C:\Users\Scorn\Desktop\MOD\Ronova-Pro-����\ronova_GPT\validation\src\main\java\dev\ronova\pro\validation\WorldFixture.java:78: ����: [removal] FMLJavaModLoadingContext �е� get() �ѹ�ʱ, �ұ��Ϊ��ɾ��
+        if(Boolean.getBoolean("ronova.pro.validation")&&"audit-r6".equals(System.getProperty("ronova.pro.fixture"))) {AuditR6Fixture.BLOCKS.register(net.minecraftforge.fml.javafmlmod.FMLJavaModLoadingContext.get().getModEventBus());new AuditR6Fixture();return;}
+                                                                                                                                                                                                               ^
+C:\Users\Scorn\Desktop\MOD\Ronova-Pro-����\ronova_GPT\validation\src\main\java\dev\ronova\pro\validation\WorldFixture.java:110: ����: [removal] FMLJavaModLoadingContext �е� get() �ѹ�ʱ, �ұ��Ϊ��ɾ��
+            var bus=net.minecraftforge.fml.javafmlmod.FMLJavaModLoadingContext.get().getModEventBus();
+                                                                              ^
+5 ������
+
+> Task :processFixtureResources UP-TO-DATE
+> Task :fixtureClasses
+> Task :fixtureJar
+> Task :configureReobfTaskForReobfFixtureJar
+> Task :reobfFixtureJar
+> Task :addMixinsToPrelaunchJar
+> Task :compilePrelaunchJava
+> Task :processPrelaunchResources NO-SOURCE
+> Task :prelaunchClasses
+> Task :prelaunchJar
+
+BUILD SUCCESSFUL in 16s
+24 actionable tasks: 18 executed, 6 up-to-date

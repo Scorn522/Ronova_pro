@@ -1,0 +1,353 @@
+Initialized native services in: C:\Users\Scorn\.gradle\native
+Initialized jansi services in: C:\Users\Scorn\.gradle\native
+Received JVM installation metadata from 'C:\Program Files\Eclipse Adoptium\jdk-17.0.19.10-hotspot': {JAVA_HOME=C:\Program Files\Eclipse Adoptium\jdk-17.0.19.10-hotspot, JAVA_VERSION=17.0.19, JAVA_VENDOR=Eclipse Adoptium, RUNTIME_NAME=OpenJDK Runtime Environment, RUNTIME_VERSION=17.0.19+10, VM_NAME=OpenJDK 64-Bit Server VM, VM_VERSION=17.0.19+10, VM_VENDOR=Eclipse Adoptium, OS_ARCH=amd64}
+To honour the JVM settings for this build a single-use Daemon process will be forked. For more on this, please refer to https://docs.gradle.org/8.8/userguide/gradle_daemon.html#sec:disabling_the_daemon in the Gradle documentation.
+Starting process 'Gradle build daemon'. Working directory: C:\Users\Scorn\.gradle\daemon\8.8 Command: C:\Program Files\Eclipse Adoptium\jdk-17.0.19.10-hotspot\bin\java.exe --add-opens=java.base/java.util=ALL-UNNAMED --add-opens=java.base/java.lang=ALL-UNNAMED --add-opens=java.base/java.lang.invoke=ALL-UNNAMED --add-opens=java.prefs/java.util.prefs=ALL-UNNAMED --add-opens=java.base/java.nio.charset=ALL-UNNAMED --add-opens=java.base/java.net=ALL-UNNAMED --add-opens=java.base/java.util.concurrent.atomic=ALL-UNNAMED -Xmx2G -Dfile.encoding=UTF-8 -Duser.country=CN -Duser.language=zh -Duser.variant -cp C:\Users\Scorn\.gradle\wrapper\dists\gradle-8.8-bin\dl7vupf4psengwqhwktix4v1\gradle-8.8\lib\gradle-launcher-8.8.jar -javaagent:C:\Users\Scorn\.gradle\wrapper\dists\gradle-8.8-bin\dl7vupf4psengwqhwktix4v1\gradle-8.8\lib\agents\gradle-instrumentation-agent-8.8.jar org.gradle.launcher.daemon.bootstrap.GradleDaemon 8.8
+Successfully started process 'Gradle build daemon'
+An attempt to start the daemon took 1.384 secs.
+The client will now receive all logging from the daemon (pid: 100380). The daemon log file: C:\Users\Scorn\.gradle\daemon\8.8\daemon-100380.out.log
+Daemon will be stopped at the end of the build 
+Using 20 worker leases.
+Received JVM installation metadata from 'C:\Program Files\Eclipse Adoptium\jdk-17.0.19.10-hotspot': {JAVA_HOME=C:\Program Files\Eclipse Adoptium\jdk-17.0.19.10-hotspot, JAVA_VERSION=17.0.19, JAVA_VENDOR=Eclipse Adoptium, RUNTIME_NAME=OpenJDK Runtime Environment, RUNTIME_VERSION=17.0.19+10, VM_NAME=OpenJDK 64-Bit Server VM, VM_VERSION=17.0.19+10, VM_VENDOR=Eclipse Adoptium, OS_ARCH=amd64}
+Watching the file system is configured to be enabled if available
+Now considering [C:\Users\Scorn\Desktop\MOD\Ronova-Pro-����\ronova_GPT] as hierarchies to watch
+File system watching is active
+Starting Build
+Settings evaluated using settings file 'C:\Users\Scorn\Desktop\MOD\Ronova-Pro-����\ronova_GPT\settings.gradle'.
+Projects loaded. Root project using build file 'C:\Users\Scorn\Desktop\MOD\Ronova-Pro-����\ronova_GPT\build.gradle'.
+Included projects: [root project 'ronova-pro']
+
+> Configure project :
+Evaluating root project 'ronova-pro' using build file 'C:\Users\Scorn\Desktop\MOD\Ronova-Pro-����\ronova_GPT\build.gradle'.
+Caching disabled for Groovy DSL script compilation (cp_proj) because:
+  Build cache is disabled
+  Not worth caching.
+Compiling build file 'C:\Users\Scorn\Desktop\MOD\Ronova-Pro-����\ronova_GPT\build.gradle' using SubsetScriptTransformer.
+Cached resource https://repo.spongepowered.org/repository/maven-public/org/spongepowered/mixingradle/0.7-SNAPSHOT/maven-metadata.xml is up-to-date (lastModified: Sun Jul 26 12:48:12 CST 2026).
+Downloading https://repo.spongepowered.org/repository/maven-public/org/spongepowered/mixingradle/0.7-SNAPSHOT/mixingradle-0.7-20230803.124500-15.pom to C:\Users\Scorn\.gradle\.tmp\gradle_download3218443902638851662bin
+Downloading https://repo.spongepowered.org/repository/maven-public/org/spongepowered/mixingradle/0.7-SNAPSHOT/mixingradle-0.7-20230803.124500-15.module to C:\Users\Scorn\.gradle\.tmp\gradle_download1478103589195932270bin
+Cached resource https://repo.spongepowered.org/repository/maven-public/org/spongepowered/mixingradle/0.7-SNAPSHOT/mixingradle-0.7-20230803.124500-15.jar is up-to-date (lastModified: Thu Aug 03 20:45:53 CST 2023).
+Transforming ForgeGradle-6.0.54.jar (net.minecraftforge.gradle:ForgeGradle:6.0.54) with InstrumentationAnalysisTransform
+Transforming mixingradle-0.7-SNAPSHOT.jar (org.spongepowered:mixingradle:0.7-SNAPSHOT:20230803.124500-15) with InstrumentationAnalysisTransform
+Transforming commons-io-2.11.0.jar (commons-io:commons-io:2.11.0) with InstrumentationAnalysisTransform
+Transforming JarJarSelector-0.3.19.jar (net.minecraftforge:JarJarSelector:0.3.19) with InstrumentationAnalysisTransform
+Transforming JarJarMetadata-0.3.19.jar (net.minecraftforge:JarJarMetadata:0.3.19) with InstrumentationAnalysisTransform
+Transforming gson-2.10.1.jar (com.google.code.gson:gson:2.10.1) with InstrumentationAnalysisTransform
+Transforming guava-31.1-jre.jar (com.google.guava:guava:31.1-jre) with InstrumentationAnalysisTransform
+Transforming fastcsv-2.2.1.jar (de.siegmar:fastcsv:2.2.1) with InstrumentationAnalysisTransform
+Transforming artifactural-3.0.21.jar (net.minecraftforge:artifactural:3.0.21) with InstrumentationAnalysisTransform
+Transforming unsafe-0.2.0.jar (net.minecraftforge:unsafe:0.2.0) with InstrumentationAnalysisTransform
+Transforming maven-artifact-3.9.1.jar (org.apache.maven:maven-artifact:3.9.1) with InstrumentationAnalysisTransform
+Transforming httpclient-4.5.14.jar (org.apache.httpcomponents:httpclient:4.5.14) with InstrumentationAnalysisTransform
+Transforming srgutils-0.6.2.jar (net.minecraftforge:srgutils:0.6.2) with InstrumentationAnalysisTransform
+Transforming DiffPatch-2.0.12-all.jar (net.minecraftforge:DiffPatch:2.0.12) with InstrumentationAnalysisTransform
+Transforming asm-tree-9.2.jar (org.ow2.asm:asm-tree:9.2) with InstrumentationAnalysisTransform
+Transforming failureaccess-1.0.1.jar (com.google.guava:failureaccess:1.0.1) with InstrumentationAnalysisTransform
+Transforming listenablefuture-9999.0-empty-to-avoid-conflict-with-guava.jar (com.google.guava:listenablefuture:9999.0-empty-to-avoid-conflict-with-guava) with InstrumentationAnalysisTransform
+Transforming jsr305-3.0.2.jar (com.google.code.findbugs:jsr305:3.0.2) with InstrumentationAnalysisTransform
+Transforming checker-qual-3.12.0.jar (org.checkerframework:checker-qual:3.12.0) with InstrumentationAnalysisTransform
+Transforming error_prone_annotations-2.11.0.jar (com.google.errorprone:error_prone_annotations:2.11.0) with InstrumentationAnalysisTransform
+Transforming j2objc-annotations-1.3.jar (com.google.j2objc:j2objc-annotations:1.3) with InstrumentationAnalysisTransform
+Transforming plexus-utils-3.5.1.jar (org.codehaus.plexus:plexus-utils:3.5.1) with InstrumentationAnalysisTransform
+Transforming commons-lang3-3.9.jar (org.apache.commons:commons-lang3:3.9) with InstrumentationAnalysisTransform
+Transforming httpcore-4.4.16.jar (org.apache.httpcomponents:httpcore:4.4.16) with InstrumentationAnalysisTransform
+Transforming commons-logging-1.2.jar (commons-logging:commons-logging:1.2) with InstrumentationAnalysisTransform
+Transforming commons-codec-1.11.jar (commons-codec:commons-codec:1.11) with InstrumentationAnalysisTransform
+Transforming fastutil-8.3.1.jar (it.unimi.dsi:fastutil:8.3.1) with InstrumentationAnalysisTransform
+Transforming commons-compress-1.18.jar (org.apache.commons:commons-compress:1.18) with InstrumentationAnalysisTransform
+Transforming xz-1.8.jar (org.tukaani:xz:1.8) with InstrumentationAnalysisTransform
+Transforming jopt-simple-5.0.4.jar (net.sf.jopt-simple:jopt-simple:5.0.4) with InstrumentationAnalysisTransform
+Transforming noexception-1.7.1.jar (com.machinezoo.noexception:noexception:1.7.1) with InstrumentationAnalysisTransform
+Transforming slf4j-simple-1.7.30.jar (org.slf4j:slf4j-simple:1.7.30) with InstrumentationAnalysisTransform
+Transforming slf4j-api-1.7.30.jar (org.slf4j:slf4j-api:1.7.30) with InstrumentationAnalysisTransform
+Transforming asm-9.2.jar (org.ow2.asm:asm:9.2) with InstrumentationAnalysisTransform
+Transforming ForgeGradle-6.0.54.jar (net.minecraftforge.gradle:ForgeGradle:6.0.54) with InstrumentationAnalysisTransform
+Transforming ForgeGradle-6.0.54.jar (net.minecraftforge.gradle:ForgeGradle:6.0.54) with MergeInstrumentationAnalysisTransform
+Transforming mixingradle-0.7-SNAPSHOT.jar (org.spongepowered:mixingradle:0.7-SNAPSHOT:20230803.124500-15) with InstrumentationAnalysisTransform
+Transforming mixingradle-0.7-SNAPSHOT.jar (org.spongepowered:mixingradle:0.7-SNAPSHOT:20230803.124500-15) with MergeInstrumentationAnalysisTransform
+Transforming commons-io-2.11.0.jar (commons-io:commons-io:2.11.0) with InstrumentationAnalysisTransform
+Transforming commons-io-2.11.0.jar (commons-io:commons-io:2.11.0) with MergeInstrumentationAnalysisTransform
+Transforming JarJarSelector-0.3.19.jar (net.minecraftforge:JarJarSelector:0.3.19) with InstrumentationAnalysisTransform
+Transforming JarJarSelector-0.3.19.jar (net.minecraftforge:JarJarSelector:0.3.19) with MergeInstrumentationAnalysisTransform
+Transforming JarJarMetadata-0.3.19.jar (net.minecraftforge:JarJarMetadata:0.3.19) with InstrumentationAnalysisTransform
+Transforming JarJarMetadata-0.3.19.jar (net.minecraftforge:JarJarMetadata:0.3.19) with MergeInstrumentationAnalysisTransform
+Transforming gson-2.10.1.jar (com.google.code.gson:gson:2.10.1) with InstrumentationAnalysisTransform
+Transforming gson-2.10.1.jar (com.google.code.gson:gson:2.10.1) with MergeInstrumentationAnalysisTransform
+Transforming guava-31.1-jre.jar (com.google.guava:guava:31.1-jre) with InstrumentationAnalysisTransform
+Transforming guava-31.1-jre.jar (com.google.guava:guava:31.1-jre) with MergeInstrumentationAnalysisTransform
+Transforming fastcsv-2.2.1.jar (de.siegmar:fastcsv:2.2.1) with InstrumentationAnalysisTransform
+Transforming fastcsv-2.2.1.jar (de.siegmar:fastcsv:2.2.1) with MergeInstrumentationAnalysisTransform
+Transforming artifactural-3.0.21.jar (net.minecraftforge:artifactural:3.0.21) with InstrumentationAnalysisTransform
+Transforming artifactural-3.0.21.jar (net.minecraftforge:artifactural:3.0.21) with MergeInstrumentationAnalysisTransform
+Transforming unsafe-0.2.0.jar (net.minecraftforge:unsafe:0.2.0) with InstrumentationAnalysisTransform
+Transforming unsafe-0.2.0.jar (net.minecraftforge:unsafe:0.2.0) with MergeInstrumentationAnalysisTransform
+Transforming maven-artifact-3.9.1.jar (org.apache.maven:maven-artifact:3.9.1) with InstrumentationAnalysisTransform
+Transforming maven-artifact-3.9.1.jar (org.apache.maven:maven-artifact:3.9.1) with MergeInstrumentationAnalysisTransform
+Transforming httpclient-4.5.14.jar (org.apache.httpcomponents:httpclient:4.5.14) with InstrumentationAnalysisTransform
+Transforming httpclient-4.5.14.jar (org.apache.httpcomponents:httpclient:4.5.14) with MergeInstrumentationAnalysisTransform
+Transforming srgutils-0.6.2.jar (net.minecraftforge:srgutils:0.6.2) with InstrumentationAnalysisTransform
+Transforming srgutils-0.6.2.jar (net.minecraftforge:srgutils:0.6.2) with MergeInstrumentationAnalysisTransform
+Transforming DiffPatch-2.0.12-all.jar (net.minecraftforge:DiffPatch:2.0.12) with InstrumentationAnalysisTransform
+Transforming DiffPatch-2.0.12-all.jar (net.minecraftforge:DiffPatch:2.0.12) with MergeInstrumentationAnalysisTransform
+Transforming asm-tree-9.2.jar (org.ow2.asm:asm-tree:9.2) with InstrumentationAnalysisTransform
+Transforming asm-tree-9.2.jar (org.ow2.asm:asm-tree:9.2) with MergeInstrumentationAnalysisTransform
+Transforming JarJarMetadata-0.3.19.jar (net.minecraftforge:JarJarMetadata:0.3.19) with ExternalDependencyInstrumentingArtifactTransform
+Transforming gson-2.10.1.jar (com.google.code.gson:gson:2.10.1) with ExternalDependencyInstrumentingArtifactTransform
+Transforming JarJarSelector-0.3.19.jar (net.minecraftforge:JarJarSelector:0.3.19) with ExternalDependencyInstrumentingArtifactTransform
+Transforming failureaccess-1.0.1.jar (com.google.guava:failureaccess:1.0.1) with InstrumentationAnalysisTransform
+Transforming commons-io-2.11.0.jar (commons-io:commons-io:2.11.0) with ExternalDependencyInstrumentingArtifactTransform
+Transforming artifactural-3.0.21.jar (net.minecraftforge:artifactural:3.0.21) with ExternalDependencyInstrumentingArtifactTransform
+Transforming failureaccess-1.0.1.jar (com.google.guava:failureaccess:1.0.1) with MergeInstrumentationAnalysisTransform
+Transforming listenablefuture-9999.0-empty-to-avoid-conflict-with-guava.jar (com.google.guava:listenablefuture:9999.0-empty-to-avoid-conflict-with-guava) with InstrumentationAnalysisTransform
+Transforming listenablefuture-9999.0-empty-to-avoid-conflict-with-guava.jar (com.google.guava:listenablefuture:9999.0-empty-to-avoid-conflict-with-guava) with MergeInstrumentationAnalysisTransform
+Transforming unsafe-0.2.0.jar (net.minecraftforge:unsafe:0.2.0) with ExternalDependencyInstrumentingArtifactTransform
+Transforming maven-artifact-3.9.1.jar (org.apache.maven:maven-artifact:3.9.1) with ExternalDependencyInstrumentingArtifactTransform
+Transforming httpclient-4.5.14.jar (org.apache.httpcomponents:httpclient:4.5.14) with ExternalDependencyInstrumentingArtifactTransform
+Transforming guava-31.1-jre.jar (com.google.guava:guava:31.1-jre) with ExternalDependencyInstrumentingArtifactTransform
+Transforming mixingradle-0.7-SNAPSHOT.jar (org.spongepowered:mixingradle:0.7-SNAPSHOT:20230803.124500-15) with ExternalDependencyInstrumentingArtifactTransform
+Transforming jsr305-3.0.2.jar (com.google.code.findbugs:jsr305:3.0.2) with InstrumentationAnalysisTransform
+Transforming jsr305-3.0.2.jar (com.google.code.findbugs:jsr305:3.0.2) with MergeInstrumentationAnalysisTransform
+Transforming srgutils-0.6.2.jar (net.minecraftforge:srgutils:0.6.2) with ExternalDependencyInstrumentingArtifactTransform
+Transforming ForgeGradle-6.0.54.jar (net.minecraftforge.gradle:ForgeGradle:6.0.54) with ExternalDependencyInstrumentingArtifactTransform
+Transforming checker-qual-3.12.0.jar (org.checkerframework:checker-qual:3.12.0) with InstrumentationAnalysisTransform
+Transforming checker-qual-3.12.0.jar (org.checkerframework:checker-qual:3.12.0) with MergeInstrumentationAnalysisTransform
+Transforming DiffPatch-2.0.12-all.jar (net.minecraftforge:DiffPatch:2.0.12) with ExternalDependencyInstrumentingArtifactTransform
+Transforming error_prone_annotations-2.11.0.jar (com.google.errorprone:error_prone_annotations:2.11.0) with InstrumentationAnalysisTransform
+Transforming fastcsv-2.2.1.jar (de.siegmar:fastcsv:2.2.1) with ExternalDependencyInstrumentingArtifactTransform
+Transforming error_prone_annotations-2.11.0.jar (com.google.errorprone:error_prone_annotations:2.11.0) with MergeInstrumentationAnalysisTransform
+Transforming j2objc-annotations-1.3.jar (com.google.j2objc:j2objc-annotations:1.3) with InstrumentationAnalysisTransform
+Transforming j2objc-annotations-1.3.jar (com.google.j2objc:j2objc-annotations:1.3) with MergeInstrumentationAnalysisTransform
+Transforming plexus-utils-3.5.1.jar (org.codehaus.plexus:plexus-utils:3.5.1) with InstrumentationAnalysisTransform
+Transforming plexus-utils-3.5.1.jar (org.codehaus.plexus:plexus-utils:3.5.1) with MergeInstrumentationAnalysisTransform
+Transforming asm-tree-9.2.jar (org.ow2.asm:asm-tree:9.2) with ExternalDependencyInstrumentingArtifactTransform
+Transforming listenablefuture-9999.0-empty-to-avoid-conflict-with-guava.jar (com.google.guava:listenablefuture:9999.0-empty-to-avoid-conflict-with-guava) with ExternalDependencyInstrumentingArtifactTransform
+Transforming failureaccess-1.0.1.jar (com.google.guava:failureaccess:1.0.1) with ExternalDependencyInstrumentingArtifactTransform
+Transforming commons-lang3-3.9.jar (org.apache.commons:commons-lang3:3.9) with InstrumentationAnalysisTransform
+Transforming checker-qual-3.12.0.jar (org.checkerframework:checker-qual:3.12.0) with ExternalDependencyInstrumentingArtifactTransform
+Transforming commons-lang3-3.9.jar (org.apache.commons:commons-lang3:3.9) with MergeInstrumentationAnalysisTransform
+Transforming httpcore-4.4.16.jar (org.apache.httpcomponents:httpcore:4.4.16) with InstrumentationAnalysisTransform
+Transforming httpcore-4.4.16.jar (org.apache.httpcomponents:httpcore:4.4.16) with MergeInstrumentationAnalysisTransform
+Transforming commons-logging-1.2.jar (commons-logging:commons-logging:1.2) with InstrumentationAnalysisTransform
+Transforming error_prone_annotations-2.11.0.jar (com.google.errorprone:error_prone_annotations:2.11.0) with ExternalDependencyInstrumentingArtifactTransform
+Transforming commons-logging-1.2.jar (commons-logging:commons-logging:1.2) with MergeInstrumentationAnalysisTransform
+Transforming commons-codec-1.11.jar (commons-codec:commons-codec:1.11) with InstrumentationAnalysisTransform
+Transforming commons-codec-1.11.jar (commons-codec:commons-codec:1.11) with MergeInstrumentationAnalysisTransform
+Transforming fastutil-8.3.1.jar (it.unimi.dsi:fastutil:8.3.1) with InstrumentationAnalysisTransform
+Transforming fastutil-8.3.1.jar (it.unimi.dsi:fastutil:8.3.1) with MergeInstrumentationAnalysisTransform
+Transforming commons-compress-1.18.jar (org.apache.commons:commons-compress:1.18) with InstrumentationAnalysisTransform
+Transforming commons-compress-1.18.jar (org.apache.commons:commons-compress:1.18) with MergeInstrumentationAnalysisTransform
+Transforming xz-1.8.jar (org.tukaani:xz:1.8) with InstrumentationAnalysisTransform
+Transforming xz-1.8.jar (org.tukaani:xz:1.8) with MergeInstrumentationAnalysisTransform
+Transforming jopt-simple-5.0.4.jar (net.sf.jopt-simple:jopt-simple:5.0.4) with InstrumentationAnalysisTransform
+Transforming jopt-simple-5.0.4.jar (net.sf.jopt-simple:jopt-simple:5.0.4) with MergeInstrumentationAnalysisTransform
+Transforming noexception-1.7.1.jar (com.machinezoo.noexception:noexception:1.7.1) with InstrumentationAnalysisTransform
+Transforming noexception-1.7.1.jar (com.machinezoo.noexception:noexception:1.7.1) with MergeInstrumentationAnalysisTransform
+Transforming slf4j-simple-1.7.30.jar (org.slf4j:slf4j-simple:1.7.30) with InstrumentationAnalysisTransform
+Transforming slf4j-simple-1.7.30.jar (org.slf4j:slf4j-simple:1.7.30) with MergeInstrumentationAnalysisTransform
+Transforming slf4j-api-1.7.30.jar (org.slf4j:slf4j-api:1.7.30) with InstrumentationAnalysisTransform
+Transforming slf4j-api-1.7.30.jar (org.slf4j:slf4j-api:1.7.30) with MergeInstrumentationAnalysisTransform
+Transforming asm-9.2.jar (org.ow2.asm:asm:9.2) with InstrumentationAnalysisTransform
+Transforming asm-9.2.jar (org.ow2.asm:asm:9.2) with MergeInstrumentationAnalysisTransform
+Transforming plexus-utils-3.5.1.jar (org.codehaus.plexus:plexus-utils:3.5.1) with ExternalDependencyInstrumentingArtifactTransform
+Transforming jsr305-3.0.2.jar (com.google.code.findbugs:jsr305:3.0.2) with ExternalDependencyInstrumentingArtifactTransform
+Transforming commons-logging-1.2.jar (commons-logging:commons-logging:1.2) with ExternalDependencyInstrumentingArtifactTransform
+Transforming commons-compress-1.18.jar (org.apache.commons:commons-compress:1.18) with ExternalDependencyInstrumentingArtifactTransform
+Transforming commons-codec-1.11.jar (commons-codec:commons-codec:1.11) with ExternalDependencyInstrumentingArtifactTransform
+Transforming xz-1.8.jar (org.tukaani:xz:1.8) with ExternalDependencyInstrumentingArtifactTransform
+Transforming fastutil-8.3.1.jar (it.unimi.dsi:fastutil:8.3.1) with ExternalDependencyInstrumentingArtifactTransform
+Transforming noexception-1.7.1.jar (com.machinezoo.noexception:noexception:1.7.1) with ExternalDependencyInstrumentingArtifactTransform
+Transforming j2objc-annotations-1.3.jar (com.google.j2objc:j2objc-annotations:1.3) with ExternalDependencyInstrumentingArtifactTransform
+Transforming httpcore-4.4.16.jar (org.apache.httpcomponents:httpcore:4.4.16) with ExternalDependencyInstrumentingArtifactTransform
+Transforming slf4j-api-1.7.30.jar (org.slf4j:slf4j-api:1.7.30) with ExternalDependencyInstrumentingArtifactTransform
+Transforming slf4j-simple-1.7.30.jar (org.slf4j:slf4j-simple:1.7.30) with ExternalDependencyInstrumentingArtifactTransform
+Transforming jopt-simple-5.0.4.jar (net.sf.jopt-simple:jopt-simple:5.0.4) with ExternalDependencyInstrumentingArtifactTransform
+Transforming commons-lang3-3.9.jar (org.apache.commons:commons-lang3:3.9) with ExternalDependencyInstrumentingArtifactTransform
+Transforming asm-9.2.jar (org.ow2.asm:asm:9.2) with ExternalDependencyInstrumentingArtifactTransform
+MixinGradle is skipping eclipse integration, extension not found
+Caching disabled for Groovy DSL script compilation (proj) because:
+  Build cache is disabled
+  Not worth caching.
+Compiling build file 'C:\Users\Scorn\Desktop\MOD\Ronova-Pro-����\ronova_GPT\build.gradle' using BuildScriptTransformer.
+Downloading net.minecraftforge:forge:1.20.1-47.4.22:userdev
+Downloading net.minecraftforge:forge:1.20.1-47.4.22:universal@jar
+Downloading net.minecraftforge:forge:1.20.1-47.4.22:sources@jar
+Downloading de.oceanlabs.mcp:mcp_config:1.20.1-20230612.114412@zip
+Downloading de.oceanlabs.mcp:mcp_config:1.20.1@zip
+Downloading de.oceanlabs.mcp:mcp_config:1.20.1@zip
+Creating reobfuscation task for JarJar task: jarJar
+Neither the 'eclipse' nor the 'idea' plugins were found, but IDE resource copy has been enabled.
+Adding source set 'main' to mixin processor
+Not adding source set 'main' to mixin processor, sourceSet already added
+All projects evaluated.
+Task name matched 'compileJava'
+Task name matched 'compileAgentJava'
+Task name matched 'compileBootstrapJava'
+Task name matched 'compilePrelaunchJava'
+Selected primary task 'compileJava' from project :
+Starting process 'command 'C:\Users\Scorn\.gradle\jdks\eclipse_adoptium-17-amd64-windows\jdk-17.0.19+10\bin\java.exe''. Working directory: C:\Users\Scorn\.gradle\.tmp\tmp-jvm17959490965289824113probe Command: C:\Users\Scorn\.gradle\jdks\eclipse_adoptium-17-amd64-windows\jdk-17.0.19+10\bin\java.exe -Xmx32m -Xms32m -cp . JavaProbe
+Successfully started process 'command 'C:\Users\Scorn\.gradle\jdks\eclipse_adoptium-17-amd64-windows\jdk-17.0.19+10\bin\java.exe''
+Received JVM installation metadata from 'C:\Users\Scorn\.gradle\jdks\eclipse_adoptium-17-amd64-windows\jdk-17.0.19+10': {JAVA_HOME=C:\Users\Scorn\.gradle\jdks\eclipse_adoptium-17-amd64-windows\jdk-17.0.19+10, JAVA_VERSION=17.0.19, JAVA_VENDOR=Eclipse Adoptium, RUNTIME_NAME=OpenJDK Runtime Environment, RUNTIME_VERSION=17.0.19+10, VM_NAME=OpenJDK 64-Bit Server VM, VM_VERSION=17.0.19+10, VM_VENDOR=Eclipse Adoptium, OS_ARCH=amd64}
+Selected primary task 'compileAgentJava' from project :
+Selected primary task 'compileBootstrapJava' from project :
+Selected primary task 'compilePrelaunchJava' from project :
+Tasks to be executed: [task ':downloadMcpConfig', task ':extractSrg', task ':createMcpToSrg', task ':compileJava', task ':compileAgentJava', task ':compileBootstrapJava', task ':compilePrelaunchJava']
+Tasks that were excluded: []
+Resolve mutations for :downloadMcpConfig (Thread[Execution worker Thread 2,5,main]) started.
+destroyer locations for task group 0 (Thread[Execution worker Thread 15,5,main]) started.
+destroyer locations for task group 1 (Thread[Execution worker Thread 15,5,main]) started.
+destroyer locations for task group 2 (Thread[Execution worker Thread 15,5,main]) started.
+:downloadMcpConfig (Thread[Execution worker Thread 2,5,main]) started.
+
+> Task :downloadMcpConfig
+Caching disabled for task ':downloadMcpConfig' because:
+  Build cache is disabled
+  Caching has not been enabled for the task
+Task ':downloadMcpConfig' is not up-to-date because:
+  Task.upToDateWhen is false.
+Not watching anything anymore
+Downloading de.oceanlabs.mcp:mcp_config:1.20.1-20230612.114412@zip
+Resolve mutations for :extractSrg (Thread[Execution worker Thread 2,5,main]) started.
+:extractSrg (Thread[Execution worker Thread 2,5,main]) started.
+
+> Task :extractSrg UP-TO-DATE
+Caching disabled for task ':extractSrg' because:
+  Build cache is disabled
+  Caching has not been enabled for the task
+Skipping task ':extractSrg' as it is up-to-date.
+Resolve mutations for :createMcpToSrg (Thread[Execution worker Thread 2,5,main]) started.
+:createMcpToSrg (Thread[Execution worker Thread 2,5,main]) started.
+
+> Task :createMcpToSrg UP-TO-DATE
+Caching disabled for task ':createMcpToSrg' because:
+  Build cache is disabled
+  Caching has not been enabled for the task
+Skipping task ':createMcpToSrg' as it is up-to-date.
+Resolve mutations for :compileJava (Thread[Execution worker Thread 15,5,main]) started.
+:compileJava (Thread[Execution worker Thread 15,5,main]) started.
+
+> Task :compileJava
+Downloading net.minecraft:mappings_official:1.20.1@zip
+Downloading net.minecraft:client:1.20.1:mappings@txt
+Downloading net.minecraft:server:1.20.1:mappings@txt
+Downloading de.oceanlabs.mcp:mcp_config:1.20.1@zip
+Downloading de.oceanlabs.mcp:mcp_config:1.20.1@zip
+Downloading net.minecraft:mappings_official:1.20.1@zip
+Downloading net.minecraft:mappings_official:1.20.1@zip
+Downloading net.minecraft:mappings_official:1.20.1@zip
+Downloading net.minecraft:mappings_official:1.20.1@zip
+Downloading net.minecraft:mappings_official:1.20.1@zip
+Custom actions are attached to task ':compileJava'.
+Caching disabled for task ':compileJava' because:
+  Build cache is disabled
+Task ':compileJava' is not up-to-date because:
+  Input property 'stableSources' file C:\Users\Scorn\Desktop\MOD\Ronova-Pro-����\ronova_GPT\src\main\java\dev\ronova\pro\BackingPolicy.java has been removed.
+  Input property 'stableSources' file C:\Users\Scorn\Desktop\MOD\Ronova-Pro-����\ronova_GPT\src\main\java\dev\ronova\pro\BlockGroupPolicy.java has been removed.
+  Input property 'stableSources' file C:\Users\Scorn\Desktop\MOD\Ronova-Pro-����\ronova_GPT\src\main\java\dev\ronova\pro\BlockRecords.java has been removed.
+Created classpath snapshot for incremental compilation in 0.222 secs.
+Full recompilation is required because org.spongepowered.tools.obfuscation.MixinObfuscationProcessorTargets is not incremental. Analysis took 0.346 secs.
+Compiling with toolchain 'C:\Program Files\Eclipse Adoptium\jdk-17.0.19.10-hotspot'.
+Compiling with JDK Java compiler API.
+ע: SpongePowered MIXIN Annotation Processor Version=0.8.5 (MixinGradle Version=0.7)
+ע: Supported obfuscation types: ObfuscationServiceMCP supports [notch] ObfuscationServiceFG3 supports [searge]
+ע: Loading searge mappings from C:\Users\Scorn\Desktop\MOD\Ronova-Pro-����\ronova_GPT\build\createMcpToSrg\output.tsrg
+C:\Users\Scorn\Desktop\MOD\Ronova-Pro-����\ronova_GPT\src\core\mixin\ClientWorldHooks.java:119: ����: Cannot find target method "render(Lnet/minecraft/world/level/block/entity/BlockEntity;FLcom/mojang/blaze3d/vertex/PoseStack;Lnet/minecraft/client/renderer/MultiBufferSource;II)V" for @Redirect.method="render(Lnet/minecraft/world/level/block/entity/BlockEntity;FLcom/mojang/blaze3d/vertex/PoseStack;Lnet/minecraft/client/renderer/MultiBufferSource;II)V" in net.minecraft.client.renderer.blockentity.ChestRenderer
+        @Redirect(method="render(Lnet/minecraft/world/level/block/entity/BlockEntity;FLcom/mojang/blaze3d/vertex/PoseStack;Lnet/minecraft/client/renderer/MultiBufferSource;II)V",at=@At(value="INVOKE",target="Lit/unimi/dsi/fastutil/floats/Float2FloatFunction;get(F)F",remap=false),require=1,allow=1)
+        ^
+C:\Users\Scorn\Desktop\MOD\Ronova-Pro-����\ronova_GPT\src\core\mixin\NbtOperationsHooks.java:23: ����: Unable to locate method mapping for @At(INVOKE.<target>) 'Lcom/mojang/serialization/DataResult;success(Ljava/lang/Object;)Lcom/mojang/serialization/DataResult;'
+        @Redirect(method="mergeToMap(Lnet/minecraft/nbt/Tag;Lnet/minecraft/nbt/Tag;Lnet/minecraft/nbt/Tag;)Lcom/mojang/serialization/DataResult;",
+        ^
+C:\Users\Scorn\Desktop\MOD\Ronova-Pro-����\ronova_GPT\src\core\mixin\NbtOperationsHooks.java:28: ����: Unable to locate method mapping for @At(INVOKE.<target>) 'Lcom/mojang/serialization/DataResult;success(Ljava/lang/Object;)Lcom/mojang/serialization/DataResult;'
+        @Redirect(method="mergeToMap(Lnet/minecraft/nbt/Tag;Lcom/mojang/serialization/MapLike;)Lcom/mojang/serialization/DataResult;",
+        ^
+C:\Users\Scorn\Desktop\MOD\Ronova-Pro-����\ronova_GPT\src\core\mixin\NbtOperationsHooks.java:33: ����: Unable to locate method mapping for @At(INVOKE.<target>) 'Lcom/mojang/serialization/DataResult;error(Ljava/util/function/Supplier;Ljava/lang/Object;)Lcom/mojang/serialization/DataResult;'
+        @Redirect(method="mergeToMap(Lnet/minecraft/nbt/Tag;Lcom/mojang/serialization/MapLike;)Lcom/mojang/serialization/DataResult;",
+        ^
+C:\Users\Scorn\Desktop\MOD\Ronova-Pro-����\ronova_GPT\src\core\mixin\NbtOperationsHooks.java:45: ����: Unable to locate method mapping for @At(INVOKE.<target>) 'Lcom/mojang/serialization/DataResult;success(Ljava/lang/Object;)Lcom/mojang/serialization/DataResult;'
+        @Redirect(method="build(Lnet/minecraft/nbt/CompoundTag;Lnet/minecraft/nbt/Tag;)Lcom/mojang/serialization/DataResult;",
+        ^
+ע: Writing refmap to C:\Users\Scorn\Desktop\MOD\Ronova-Pro-����\ronova_GPT\build\tmp\compileJava\compileJava-refmap.json
+C:\Users\Scorn\Desktop\MOD\Ronova-Pro-����\ronova_GPT\src\core\mixin\Access.java:49: ����: Unable to locate obfuscation mapping for @Accessor target canUpdate
+        @Accessor("canUpdate") boolean pro$canUpdate();
+        ^
+C:\Users\Scorn\Desktop\MOD\Ronova-Pro-����\ronova_GPT\src\core\mixin\Access.java:50: ����: Unable to locate obfuscation mapping for @Accessor target canUpdate
+        @Accessor("canUpdate") void pro$canUpdate(boolean value);
+        ^
+C:\Users\Scorn\Desktop\MOD\Ronova-Pro-����\ronova_GPT\src\core\mixin\Access.java:53: ����: Unable to locate obfuscation mapping for @Accessor target isAddedToWorld
+        @Accessor("isAddedToWorld") void pro$added(boolean value);
+        ^
+ע: Writing refmap to C:\Users\Scorn\Desktop\MOD\Ronova-Pro-����\ronova_GPT\build\tmp\compileJava\compileJava-refmap.json
+ע: Writing searge composite mappings to C:\Users\Scorn\Desktop\MOD\Ronova-Pro-����\ronova_GPT\build\tmp\compileJava\compileJava-mappings.tsrg
+ע: Writing refmap to C:\Users\Scorn\Desktop\MOD\Ronova-Pro-����\ronova_GPT\build\tmp\compileJava\compileJava-refmap.json
+ע: Writing refmap to C:\Users\Scorn\Desktop\MOD\Ronova-Pro-����\ronova_GPT\build\tmp\compileJava\compileJava-refmap.json
+ע: Writing searge composite mappings to C:\Users\Scorn\Desktop\MOD\Ronova-Pro-����\ronova_GPT\build\tmp\compileJava\compileJava-mappings.tsrg
+C:\Users\Scorn\Desktop\MOD\Ronova-Pro-����\ronova_GPT\src\core\WorldArchive.java:75: ����: [removal] ResourceLocation �е� ResourceLocation(String) �ѹ�ʱ, �ұ��Ϊ��ɾ��
+            Job job=new Job(tag.getUUID("Id"),tag.hasUUID("Source")?tag.getUUID("Source"):null,Kind.valueOf(tag.getString("Kind")),ResourceKey.create(Registries.DIMENSION,new ResourceLocation(tag.getString("Dimension"))),
+                                                                                                                                                                           ^
+C:\Users\Scorn\Desktop\MOD\Ronova-Pro-����\ronova_GPT\src\core\WorldArchive.java:191: ����: [removal] ResourceLocation �е� ResourceLocation(String) �ѹ�ʱ, �ұ��Ϊ��ɾ��
+        for(Tag value:saved){CompoundTag tag=(CompoundTag)value;BlockPos pos=NbtUtils.readBlockPos(tag.getCompound("Position"));T type=registry.getOptional(new ResourceLocation(tag.getString("Type"))).orElseThrow(()->new IllegalStateException("WORLD_TICK_TYPE_UNAVAILABLE"));
+                                                                                                                                                            ^
+C:\Users\Scorn\Desktop\MOD\Ronova-Pro-����\ronova_GPT\src\core\WorldArchive.java:196: ����: [removal] ResourceLocation �е� ResourceLocation(String) �ѹ�ʱ, �ұ��Ϊ��ɾ��
+        for(Tag value:saved.getList("Starts",Tag.TAG_COMPOUND)){CompoundTag tag=(CompoundTag)value;var type=structures.getOptional(new ResourceLocation(tag.getString("RonovaStructure"))).orElseThrow();StructureStart start=StructureStart.loadStaticStart(StructurePieceSerializationContext.fromLevel(level),tag,level.getSeed());if(start!=null)starts.put(type,start);}
+                                                                                                                                   ^
+C:\Users\Scorn\Desktop\MOD\Ronova-Pro-����\ronova_GPT\src\core\WorldArchive.java:198: ����: [removal] ResourceLocation �е� ResourceLocation(String) �ѹ�ʱ, �ұ��Ϊ��ɾ��
+        for(Tag value:saved.getList("References",Tag.TAG_COMPOUND)){CompoundTag tag=(CompoundTag)value;references.put(structures.getOptional(new ResourceLocation(tag.getString("Type"))).orElseThrow(),new it.unimi.dsi.fastutil.longs.LongOpenHashSet(tag.getLongArray("References")));}chunk.setAllReferences(references);level.onStructureStartsAvailable(chunk);
+                                                                                                                                             ^
+C:\Users\Scorn\Desktop\MOD\Ronova-Pro-����\ronova_GPT\src\core\WorldArchive.java:201: ����: [removal] ResourceLocation �е� ResourceLocation(String) �ѹ�ʱ, �ұ��Ϊ��ɾ��
+        chunk.fillBiomesFromNoise((x,y,z,sampler)->biomes.getHolderOrThrow(ResourceKey.create(Registries.BIOME,new ResourceLocation(encoded.getString((y-minimum)*16+Math.floorMod(z,4)*4+Math.floorMod(x,4))))),level.getChunkSource().randomState().sampler());
+                                                                                                               ^
+C:\Users\Scorn\Desktop\MOD\Ronova-Pro-����\ronova_GPT\src\core\ProNetwork.java:16: ����: [removal] ResourceLocation �е� ResourceLocation(String,String) �ѹ�ʱ, �ұ��Ϊ��ɾ��
+    static final SimpleChannel CHANNEL=NetworkRegistry.newSimpleChannel(new ResourceLocation("ronova_pro","presence"),
+                                                                        ^
+ע: ĳЩ�����ļ�ʹ�û򸲸����ѹ�ʱ�� API��
+ע: �й���ϸ��Ϣ, ��ʹ�� -Xlint:deprecation ���±��롣
+14 ������
+Class dependency analysis for incremental compilation took 0.231 secs.
+Resolve mutations for :compileAgentJava (Thread[Execution worker Thread 15,5,main]) started.
+:compileAgentJava (Thread[Execution worker Thread 15,5,main]) started.
+
+> Task :compileAgentJava
+Caching disabled for task ':compileAgentJava' because:
+  Build cache is disabled
+Task ':compileAgentJava' is not up-to-date because:
+  Input property 'stableSources' file C:\Users\Scorn\Desktop\MOD\Ronova-Pro-����\ronova_GPT\agent\src\main\java\dev\ronova\pro\agent\AttachMain.java has been removed.
+  Input property 'stableSources' file C:\Users\Scorn\Desktop\MOD\Ronova-Pro-����\ronova_GPT\agent\src\main\java\dev\ronova\pro\agent\BackingBoundary.java has been removed.
+  Input property 'stableSources' file C:\Users\Scorn\Desktop\MOD\Ronova-Pro-����\ronova_GPT\agent\src\main\java\dev\ronova\pro\agent\BufferBoundary.java has been removed.
+Created classpath snapshot for incremental compilation in 0.0 secs.
+Compiling with toolchain 'C:\Program Files\Eclipse Adoptium\jdk-17.0.19.10-hotspot'.
+Compiling with JDK Java compiler API.
+Incremental compilation of 172 classes completed in 2.15 secs.
+Class dependency analysis for incremental compilation took 0.082 secs.
+Resolve mutations for :compileBootstrapJava (Thread[Execution worker Thread 19,5,main]) started.
+:compileBootstrapJava (Thread[Execution worker Thread 19,5,main]) started.
+
+> Task :compileBootstrapJava
+Caching disabled for task ':compileBootstrapJava' because:
+  Build cache is disabled
+Task ':compileBootstrapJava' is not up-to-date because:
+  Input property 'stableSources' file C:\Users\Scorn\Desktop\MOD\Ronova-Pro-����\ronova_GPT\bootstrap\src\main\java\dev\ronova\pro\bootstrap\BackingBridge.java has been removed.
+  Input property 'stableSources' file C:\Users\Scorn\Desktop\MOD\Ronova-Pro-����\ronova_GPT\bootstrap\src\main\java\dev\ronova\pro\bootstrap\ClientBridge.java has been removed.
+  Input property 'stableSources' file C:\Users\Scorn\Desktop\MOD\Ronova-Pro-����\ronova_GPT\bootstrap\src\main\java\dev\ronova\pro\bootstrap\CodeSourceBridge.java has been removed.
+Created classpath snapshot for incremental compilation in 0.0 secs.
+Compiling with toolchain 'C:\Program Files\Eclipse Adoptium\jdk-17.0.19.10-hotspot'.
+Compiling with JDK Java compiler API.
+Incremental compilation of 225 classes completed in 1.806 secs.
+Class dependency analysis for incremental compilation took 0.111 secs.
+Resolve mutations for :compilePrelaunchJava (Thread[Execution worker Thread 19,5,main]) started.
+:compilePrelaunchJava (Thread[Execution worker Thread 19,5,main]) started.
+
+> Task :compilePrelaunchJava
+Caching disabled for task ':compilePrelaunchJava' because:
+  Build cache is disabled
+Task ':compilePrelaunchJava' is not up-to-date because:
+  Input property 'stableSources' file C:\Users\Scorn\Desktop\MOD\Ronova-Pro-����\ronova_GPT\journal\src\main\java\dev\ronova\pro\persistence\JournalLineage.java has been removed.
+  Input property 'stableSources' file C:\Users\Scorn\Desktop\MOD\Ronova-Pro-����\ronova_GPT\prelaunch\src\main\java\dev\ronova\pro\prelaunch\PrelaunchMain.java has been removed.
+  Input property 'stableSources' file C:\Users\Scorn\Desktop\MOD\Ronova-Pro-����\ronova_GPT\prelaunch\src\main\java\dev\ronova\pro\prelaunch\RestartTargets.java has been removed.
+Created classpath snapshot for incremental compilation in 0.0 secs.
+Compiling with toolchain 'C:\Program Files\Eclipse Adoptium\jdk-17.0.19.10-hotspot'.
+Compiling with JDK Java compiler API.
+Incremental compilation of 8 classes completed in 0.098 secs.
+Class dependency analysis for incremental compilation took 0.005 secs.
+
+BUILD SUCCESSFUL in 30s
+7 actionable tasks: 5 executed, 2 up-to-date
+Watched directory hierarchies: [C:\Users\Scorn\Desktop\MOD\Ronova-Pro-����\ronova_GPT]
