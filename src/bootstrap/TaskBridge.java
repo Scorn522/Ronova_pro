@@ -36,6 +36,7 @@ public final class TaskBridge {
     private static final java.util.function.Function<java.util.stream.Stream<StackWalker.StackFrame>,Module[]> INVOKING_SOURCES=new InvokingSources();
     private static final java.util.function.Function<java.util.stream.Stream<StackWalker.StackFrame>,Class<?>> CONTROL_WRITER_CALLER=new ControlWriterCaller();
     private static final java.util.function.Function<java.util.stream.Stream<StackWalker.StackFrame>,Boolean> CLASS_REFLECTION_WRITER=new ClassReflectionWriter();
+    private static final java.util.function.Function<java.util.stream.Stream<StackWalker.StackFrame>,Boolean> FIELD_GATE_WRITER=new FieldGateWriter();
     // These queries run from Unsafe guards. Linking a lambda here can itself
     // enter the same guard through MethodType's ConcurrentHashMap lookup.
     private static final class MemoryCaller implements java.util.function.Function<java.util.stream.Stream<StackWalker.StackFrame>,Class<?>> {
@@ -64,6 +65,25 @@ public final class TaskBridge {
             if(!cursor.hasNext())return false;frame=cursor.next();
             return frame.getDeclaringClass()==Class.class&&frame.getMethodName().equals("reflectionData")
                     &&frame.getDescriptor().equals("()Ljava/lang/Class$ReflectionData;");
+        }
+    }
+    private static final class FieldGateWriter implements java.util.function.Function<java.util.stream.Stream<StackWalker.StackFrame>,Boolean>{
+        public Boolean apply(java.util.stream.Stream<StackWalker.StackFrame> frames){
+            var cursor=frames.iterator();boolean locking=false;
+            while(cursor.hasNext()){
+                Class<?> type=cursor.next().getDeclaringClass(),host=type.getNestHost();
+                if(!locking&&host==TaskBridge.class)continue;
+                if(type.getClassLoader()==null&&type.getModule()==Object.class.getModule()){
+                    if(host==java.util.concurrent.locks.ReentrantLock.class)locking=true;
+                    String name=type.getName();
+                    if(name.startsWith("java.")||name.startsWith("jdk.")||name.startsWith("sun."))continue;
+                }
+                // Native memory callbacks may have no application frame below
+                // the bridge. Authenticate the actual JDK lock operation and
+                // its immediate controller caller, not the callback wrapper.
+                return locking&&(host==TaskBridge.class||host==ExecutionFlow.class);
+            }
+            return false;
         }
     }
     private static final class RawMemoryCaller implements java.util.function.Function<java.util.stream.Stream<StackWalker.StackFrame>,Class<?>> {
@@ -1192,6 +1212,7 @@ public final class TaskBridge {
     private static final Set<String> EXTERNAL_GUARD_ENTRIES=Set.of(
             "controlCaller","controlled","criticalEntry","referenceRetirementAllowed","controlMutationAllowed","inheritControl","controlBackingPublished",
             "fieldWriteAllowed","staticFieldWriteAllowed","reflectFieldWrite",
+            "beginNativeUnsafeMutation","beginExecutedUnsafeMutation","beginNativeUnsafeCopy","beginNativeFieldMutation","beginNativeArrayMutation",
             "indexDenied","indexRemovalAllowed","indexWriteAllowed","beginIndexWrite","beginIndexNodeWrite","beginIndexArrayWrite","beginIndexRemoval","beginIndexNodeRemoval","beginIndexArrayRemoval","beginIndexStructure","endIndexMutation","deniedIndexCurrent",
             "registerConsoleInput","beginConsoleCommand","endConsoleCommand","consoleDispatchTrusted",
             "clearProtectedMap","unsafeWriteAllowed","unsafeMemoryAllowed",
@@ -1231,6 +1252,7 @@ public final class TaskBridge {
     }
     public static boolean controlMutationAllowed(Object value) {
         if(!controlled(value))return true;
+        if(CodeSourceBridge.fieldGateMetadata(value)&&ORIGIN_WALKER.walk(FIELD_GATE_WRITER))return true;
         if(SourceMapBridge.internal())return true;
         if((value==ADMISSIONS||value==SUBMISSIONS||value==HELD_TASKS||value==HELD_ARRAYS)
                 &&OWN_LEDGER_MUTATION.get()!=null)return true;
@@ -1437,6 +1459,9 @@ public final class TaskBridge {
     }
     /** Hold the receiver's short gate from the final index decision through its actual value store. */
     public static Object beginIndexWrite(Object map,Object key,Object current,Object proposed) {
+        // Constructor-registered ledgers already hold their own monitor. Keep
+        // the writer check without nesting a business gate under that monitor.
+        if(CodeSourceBridge.executionMap(map))return controlMutationAllowed(map)?null:Boolean.FALSE;
         java.util.concurrent.locks.ReentrantLock gate=fieldGate(map);
         gate.lock();
         Object token=indexMutation(map,gate);
@@ -1447,6 +1472,7 @@ public final class TaskBridge {
         return token;
     }
     public static Object beginIndexNodeWrite(Object map,Object node,Object proposed) {
+        if(CodeSourceBridge.executionMap(map))return controlMutationAllowed(map)?null:Boolean.FALSE;
         Object owner=SourceMapBridge.ownerOf(node);
         java.util.concurrent.locks.ReentrantLock gate=fieldGate(owner==null?map:owner);
         gate.lock();
@@ -1460,6 +1486,7 @@ public final class TaskBridge {
         return token;
     }
     public static Object beginIndexArrayWrite(Object map,Object key,Object[] values,int index,Object proposed) {
+        if(CodeSourceBridge.executionMap(map))return controlMutationAllowed(map)?null:Boolean.FALSE;
         java.util.concurrent.locks.ReentrantLock gate=fieldGate(map);
         gate.lock();
         Object token=indexMutation(map,gate);
@@ -1470,6 +1497,7 @@ public final class TaskBridge {
         return token;
     }
     public static Object beginIndexRemoval(Object map,Object key,Object current) {
+        if(CodeSourceBridge.executionMap(map))return controlMutationAllowed(map)?null:Boolean.FALSE;
         java.util.concurrent.locks.ReentrantLock gate=fieldGate(map);
         gate.lock();
         boolean allowed;
@@ -1479,6 +1507,7 @@ public final class TaskBridge {
         return indexMutation(map,gate);
     }
     public static Object beginIndexNodeRemoval(Object map,Object node) {
+        if(CodeSourceBridge.executionMap(map))return controlMutationAllowed(map)?null:Boolean.FALSE;
         java.util.concurrent.locks.ReentrantLock gate=fieldGate(map);
         gate.lock();
         boolean allowed;
@@ -1490,6 +1519,7 @@ public final class TaskBridge {
         return indexMutation(map,gate);
     }
     public static Object beginIndexArrayRemoval(Object map,Object key,Object[] values,int index) {
+        if(CodeSourceBridge.executionMap(map))return controlMutationAllowed(map)?null:Boolean.FALSE;
         java.util.concurrent.locks.ReentrantLock gate=fieldGate(map);
         gate.lock();
         boolean allowed;
@@ -1757,7 +1787,7 @@ public final class TaskBridge {
     // re-enter it while SourceMapBridge decides whether that Map may publish.
     private static final class FieldGateNode extends java.lang.ref.WeakReference<Object> {
         final int hash;
-        final java.util.concurrent.locks.ReentrantLock gate=new java.util.concurrent.locks.ReentrantLock();
+        final java.util.concurrent.locks.ReentrantLock gate=newFieldGate();
         FieldGateNode previous,next;
         FieldGateNode(Object receiver,int hash,java.lang.ref.ReferenceQueue<Object> queue,FieldGateNode next) {
             super(receiver,queue);this.hash=hash;this.next=next;if(next!=null)next.previous=this;
@@ -1826,6 +1856,10 @@ public final class TaskBridge {
             FieldGateNode added=new FieldGateNode(receiver,hash,retired,table[at]);
             table[at]=added;size++;return added.gate;
         }
+    }
+    private static java.util.concurrent.locks.ReentrantLock newFieldGate(){
+        if(WALKER.getCallerClass()!=FieldGateNode.class)throw new SecurityException("ACTUAL_FIELD_GATE_OWNER_REQUIRED");
+        var gate=new java.util.concurrent.locks.ReentrantLock();CodeSourceBridge.fieldGateControls(gate);return gate;
     }
     private static final FieldGateBucket[] FIELD_GATES=new FieldGateBucket[1024];
     static {for(int i=0;i<FIELD_GATES.length;i++)FIELD_GATES[i]=new FieldGateBucket();}
@@ -2157,6 +2191,7 @@ public final class TaskBridge {
     private static boolean referenceKind(String kind){return "Object".equals(kind)||"Reference".equals(kind);}
     private static Object unsafeReceipt(Object receiver,long offset,long length,Module[] contributors,boolean reference){
         if(receiver==null)return rawReceipt(offset,length,contributors);
+        if(CodeSourceBridge.fieldGateMetadata(receiver))return null;
         UnsafeMutation previous=unsafeMutation();
         if(sameUnsafeSpan(previous,receiver,offset,length)){
             UnsafeMutation use=new UnsafeMutation(receiver,offset,length,previous.receipt,previous,previous.root,contributors);
@@ -2195,6 +2230,7 @@ public final class TaskBridge {
     }
     private static Object readReceipt(Object receiver,long offset,long bytes,Module[] contributors){
         if(receiver==null)return rawReceipt(offset,bytes,contributors,true);
+        if(CodeSourceBridge.fieldGateMetadata(receiver))return null;
         for(MemoryCopy copy=memoryCopy();copy!=null;copy=copy.previous)
             if(!copy.closed&&copy.source==receiver&&offset>=copy.offset&&bytes<=copy.length&&offset-copy.offset<=copy.length-bytes)
                 return new HeapMemoryRead(null,CodeSourceBridge.executionByteMemoryReadBefore(receiver,offset,bytes));

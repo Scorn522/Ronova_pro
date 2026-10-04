@@ -507,10 +507,28 @@ public final class BoundaryCheck {
             Object bucket=Array.get(gateRoots,i);Field entries=bucket.getClass().getDeclaredField("table");entries.setAccessible(true);
             Object nodes=entries.get(bucket);
             for(int j=0;j<Array.getLength(nodes);j++)if(Array.get(nodes,j)!=null){
-                controlArrayWriteRefused(nodes,"actual field gate bucket");liveGate=true;break;
+                controlArrayWriteRefused(nodes,"actual field gate bucket");
+                Object node=Array.get(nodes,j);Field gateField=node.getClass().getDeclaredField("gate");gateField.setAccessible(true);
+                Object gate=gateField.get(node);Field syncField=java.util.concurrent.locks.ReentrantLock.class.getDeclaredField("sync");syncField.setAccessible(true);
+                Object sync=syncField.get(gate);Field state=java.util.concurrent.locks.AbstractQueuedSynchronizer.class.getDeclaredField("state");state.setAccessible(true);
+                int before=state.getInt(sync),proposed=before==37?38:37;
+                try{state.setInt(sync,proposed);}catch(SecurityException|IllegalAccessException refused){}
+                require(state.getInt(sync)==before,"foreign reflective field gate state overwrite refused");
+                Class<?> unsafeType=Class.forName("sun.misc.Unsafe");Field singleton=unsafeType.getDeclaredField("theUnsafe");singleton.setAccessible(true);Object unsafe=singleton.get(null);
+                long offset=(long)unsafeType.getMethod("objectFieldOffset",Field.class).invoke(unsafe,state);
+                unsafeType.getMethod("putInt",Object.class,long.class,int.class).invoke(unsafe,sync,offset,proposed);
+                require(state.getInt(sync)==before,"foreign Unsafe field gate state overwrite refused");
+                liveGate=true;break;
             }
         }
         require(liveGate,"actual installed field gate has a protected receiver");
+        Class<?> execution=Class.forName("dev.ronova.pro.bootstrap.ExecutionFlow",false,null);
+        Field heapField=execution.getDeclaredField("HEAP");heapField.setAccessible(true);Map<Object,Object> heap=(Map<Object,Object>)heapField.get(null);
+        synchronized(heap){
+            require(!heap.isEmpty(),"actual installed source heap has live entries");
+            var entry=heap.entrySet().iterator().next();Object key=entry.getKey(),value=entry.getValue();heap.remove(key);
+            require(heap.get(key)==value,"foreign removal of exact execution metadata map entry refused");
+        }
         String listType="it.unimi.dsi.fastutil.objects.ObjectArrayList",setType="it.unimi.dsi.fastutil.objects.ObjectOpenHashSet";
         List<Object> list=(List<Object>)Class.forName(listType).getConstructor().newInstance();Object first=new Object(),second=new Object();
         list.add(first);list.add(second);list.subList(0,1).addAll(List.of(second));list.listIterator().add(first);list.subList(0,1).listIterator().add(second);list.remove(0);list.remove(0);

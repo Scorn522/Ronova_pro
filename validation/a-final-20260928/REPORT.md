@@ -1,5 +1,9 @@
 # Ronova Pro V1.5 A 批收口报告
 
+本轮原始日志和线程现场保留在本地 .work。公开仓库仅同步源码、对应候选及检查结果摘要；自动审批未允许公开同步原始运行元数据。
+
+2026-10-04 23:38：b-group-48-byte-installed-threads.log 记录实际来源堆表与字段门锁等待。内部构造登记 Map 的准确 writer 判定不再嵌套业务字段门；实际字段门和同步器在发布前保护，排除这两个控制身份的业务来源观察。真实 native 回调中的 JDK 加锁按当前物理调用链认证，外部反射／Unsafe 改写仍拒绝。b-gates-build-48.log（24 秒）及 b-gates-build-final-48.log（22 秒）构建通过；b-gates-controls-pass-48.log 为同一既有 B 适配器检查通过，包含同步器状态改写拒绝及来源堆表防删。初次回调拒绝、修正前检查拒绝异常及现场均保留。候选为 gates 包，整组与来源场景仍在实际运行，尚无新 B 游戏内 PASS。
+
 2026-10-04 22:52：b-group-48-query-threads.log 的 289 秒现场确认内部映像比较通过 ArraysSupport.vectorizedMismatch 再次触发 Unsafe 来源观察。当前 Agent 内部 byte[] 映像比较统一使用 ControlImages.sameBytes；恢复用内部字节快照也逐字节比较，保留 null／长度／全部内容与实际快照范围要求。package-b-byte-48.log 与 package-b-byte-48-final.log 均构建通过（24 秒）。候选为 byte 包，整组和来源场景使用该包继续真实 prelaunch；203 秒现场已经走准确原生字段读取，未取得任何新 B 游戏内 PASS。
 
 2026-10-04 22:43：b-group-48-frame-late-threads.log 的 307 秒现场确认内部 CallQuery.hashCode 经 Record ObjectMethods 的字段句柄进入 Unsafe 来源观察。CallQuery／MemberQuery／SelectionQuery、嵌套 Member 和 Receiver 的等价及哈希改用相同组件的直接字段读取。package-b-query-48.log 构建通过（22 秒），候选更新；原整组与来源场景切至 query 包继续运行，尚未取得游戏效果结果。没有据此增加 B 通过项。

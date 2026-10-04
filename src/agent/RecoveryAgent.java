@@ -95,10 +95,10 @@ public final class RecoveryAgent {
             api.redefineModule(base,Set.of(bridge.getModule()),Map.of(
                     "jdk.internal.org.objectweb.asm",Set.of(ours),"jdk.internal.org.objectweb.asm.commons",Set.of(ours),
                     "jdk.internal.org.objectweb.asm.tree",Set.of(ours),"jdk.internal.org.objectweb.asm.tree.analysis",Set.of(ours)),
-                    Map.of("java.util.concurrent",Set.of(bridge.getModule()),"java.lang",Set.of(bridge.getModule(),ours),
-                            "java.util",Set.of(bridge.getModule()),"java.io",Set.of(bridge.getModule()),"java.net",Set.of(bridge.getModule()),
-                            "java.nio",Set.of(bridge.getModule()),"jdk.internal.ref",Set.of(bridge.getModule()),
-                            "sun.nio.cs",Set.of(bridge.getModule()),"sun.nio.ch",Set.of(bridge.getModule()),"jdk.internal.loader",Set.of(bridge.getModule())),Set.of(),Map.of());
+                    Map.ofEntries(Map.entry("java.util.concurrent",Set.of(bridge.getModule())),Map.entry("java.lang",Set.of(bridge.getModule(),ours)),
+                            Map.entry("java.util",Set.of(bridge.getModule())),Map.entry("java.util.concurrent.locks",Set.of(bridge.getModule(),ours)),Map.entry("java.io",Set.of(bridge.getModule())),Map.entry("java.net",Set.of(bridge.getModule())),
+                            Map.entry("java.nio",Set.of(bridge.getModule())),Map.entry("jdk.internal.ref",Set.of(bridge.getModule())),
+                            Map.entry("sun.nio.cs",Set.of(bridge.getModule())),Map.entry("sun.nio.ch",Set.of(bridge.getModule())),Map.entry("jdk.internal.loader",Set.of(bridge.getModule()))),Set.of(),Map.of());
             // A Forge scanning thread may run newly transformed code immediately after addTransformer.
             // Finish the bootstrap helper's access and initialization before publishing any such call site.
             Class.forName("dev.ronova.pro.bootstrap.SourceMapBridge$HashNodes",true,null);

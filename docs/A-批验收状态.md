@@ -1,5 +1,11 @@
 # Ronova Pro 当前进度与 A 批状态
 
+本轮原始构建／运行日志及线程现场仅保留在本地 .work；仓库同步源码、对应候选及下述结果摘要。自动审批未允许公开同步原始运行元数据。
+
+2026-10-04 23:38 B 内部锁等待修复：byte 实例的 1474 秒现场确认来源堆表清理嵌套字段门，而字段门 AQS.state 写入回调再次等待堆表。构造登记的准确内部 Map 现在保留实际 writer 权限检查、使用自身既有锁，不进入业务字段门；字段门及其真实 JDK 同步器在发布前登记保护，只有这两个准确身份不进入业务堆来源记录。Native 回调的真实内部加锁按当前 JDK ReentrantLock 调用及直接控制者认证，不以回调包装器授予外部写权限。
+
+完整构建通过（24 秒、最终 22 秒）。既有 B 适配器检查通过：实际 Agent／Netty 安装、外部反射和 Unsafe 改写真实同步器状态拒绝、外部删除内部来源堆表条目拒绝、原 fastutil 对象及字符包装入口正常。最初的回调拒绝与夹具拒绝异常现场保留；这些不计为游戏效果。候选更新为 gates 包。mod-group-dynamic-b48-gates 与 b-source-abi48-gates 正在真实 prelaunch 下运行，B 仍未完成。
+
 2026-10-04 22:52 B 内部字节比较补修：query 实例 289 秒现场已越过查询键卡点，进入内部映像 Arrays.equals → Unsafe.getLong 自我观察。映像发布／隐藏定义／创建映像／JDK 任务映像及恢复快照的字节比较统一改用原字节逐项比较，仍要求完整内容相等。两次构建均通过（24 秒），当前候选为 byte 包。mod-group-dynamic-b48-byte 与 b-source-abi48-byte 正在运行；203 秒现场为准确原生字段读取，尚无游戏效果结果。B 仍未完成。
 
 2026-10-04 22:43 B 查询键补修：前置安装 307 秒现场位于 CallQuery 自动 hashCode → MethodHandle 字段读取 → Unsafe 来源观察。解析查询键及其嵌套 Member／Receiver 改为直接字段 equals／hashCode，保留全部组件、null 与集合等价语义；不缓存来源结论。完整构建通过（22 秒），候选更新为 query 包。mod-group-dynamic-b48-query 与 b-source-abi48-query 正在真实 prelaunch 下运行，仍未到游戏效果 PASS；B 尚未完成。

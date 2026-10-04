@@ -401,6 +401,7 @@ final class ExecutionFlow {
             String[] member=frame.method.fields[instruction];if(member==null)return;
             Class<?> actual=CodeSourceBridge.executionFieldOwner(symbolic,member[0],member[1]);if(actual==null)return;
             holder=opcode==178||opcode==179?actual:receiver;if(holder==null)return;
+            if(CodeSourceBridge.fieldGateMetadata(holder))return;
             Map<String,FieldSlot> fields=FIELDS.get(actual);String key=member[0]+'\u0000'+member[1];
             synchronized(fields){location=fields.computeIfAbsent(key,ignored->new FieldSlot(actual,member[0],member[1]));}
         }else{
@@ -428,7 +429,7 @@ final class ExecutionFlow {
         }
     }
     static void fieldModified(Object holder,Class<?> declaring,String name,String descriptor,Class<?> writer,String method,String methodDescriptor,int instruction,Object supplied,Module[] contributors){
-        bridge();FieldSlot field;Map<String,FieldSlot> fields=FIELDS.get(declaring);
+        bridge();if(CodeSourceBridge.fieldGateMetadata(holder))return;FieldSlot field;Map<String,FieldSlot> fields=FIELDS.get(declaring);
         synchronized(fields){field=fields.get(name+'\u0000'+descriptor);}if(field==null)return;
         synchronized(HEAP){
             reapHeap();Heap heap=HEAP.get(new Carrier(holder,false));if(heap==null)return;Slot slot=heap.slots.get(field);if(slot==null)return;
@@ -456,6 +457,7 @@ final class ExecutionFlow {
     }
     static Object memoryBefore(Object holder,Module[] contributors){
         bridge();if(holder==null)return null;
+        if(CodeSourceBridge.fieldGateMetadata(holder))return null;
         if(holder.getClass().isArray())return arrayMemoryBefore(holder,0,java.lang.reflect.Array.getLength(holder),true,contributors);
         synchronized(HEAP){
             reapHeap();Heap heap=HEAP.get(new Carrier(holder,false));if(heap==null)return null;
@@ -468,6 +470,7 @@ final class ExecutionFlow {
     }
     static Object fieldMemoryBefore(Object holder,Class<?> declaring,String name,String descriptor,Module[] contributors,boolean instruction){
         bridge();if(holder==null||declaring==null||name==null||descriptor==null)return null;
+        if(CodeSourceBridge.fieldGateMetadata(holder))return null;
         Map<String,FieldSlot> fields=FIELDS.get(declaring);FieldSlot field;
         synchronized(fields){field=fields.computeIfAbsent(name+'\u0000'+descriptor,ignored->new FieldSlot(declaring,name,descriptor));}
         boolean watched=CodeSourceBridge.executionWatchField(holder,declaring,name,descriptor);
@@ -845,6 +848,7 @@ final class ExecutionFlow {
     }
     static Object byteMemoryReadBefore(Object carrier,long offset,long length){
         bridge();if(carrier==null||length<=0)return null;
+        if(CodeSourceBridge.fieldGateMetadata(carrier))return null;
         synchronized(HEAP){
             reapHeap();Heap heap=heapFor(carrier);
             MemoryRead read=new MemoryRead(carrier,heap,offset,length,byteMemorySources(carrier,heap,offset,length));heap.reads.add(read);return read;

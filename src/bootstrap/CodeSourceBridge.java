@@ -121,7 +121,7 @@ public final class CodeSourceBridge {
         public boolean enqueue(){return writer(WALKER.getCallerClass())&&super.enqueue();}
     }
     private static final class ControlKey extends WeakReference<Object>{
-        final int hash;ControlKey previous,next;boolean executionList,executionMap;
+        final int hash;ControlKey previous,next;boolean executionList,executionMap,fieldGate;
         ControlKey(Object value,ControlKey next){super(value,DEAD_CONTROLS);hash=System.identityHashCode(value);this.next=next;if(next!=null)next.previous=this;}
         public void clear(){if(Key.writer(WALKER.getCallerClass()))super.clear();}
         public boolean enqueue(){return Key.writer(WALKER.getCallerClass())&&super.enqueue();}
@@ -147,6 +147,7 @@ public final class CodeSourceBridge {
         boolean contains(Object value){return find(value)!=null;}
         boolean executionList(Object value){ControlKey key=find(value);return key!=null&&key.executionList;}
         boolean executionMap(Object value){ControlKey key=find(value);return key!=null&&key.executionMap;}
+        boolean fieldGate(Object value){ControlKey key=find(value);return key!=null&&key.fieldGate;}
         ControlKey add(Object value){
             writer(AUTHORITY.getCallerClass());
             ControlKey known=find(value);if(known!=null)return known;
@@ -538,6 +539,27 @@ public final class CodeSourceBridge {
     static boolean executionMap(Object object){
         if(!(object instanceof HashMap<?,?>))return false;
         synchronized(CONTROLS){return CONTROLS.executionMap(object);}
+    }
+    static void fieldGateControls(java.util.concurrent.locks.ReentrantLock gate){
+        if(AUTHORITY.getCallerClass()!=TaskBridge.class||gate.getClass()!=java.util.concurrent.locks.ReentrantLock.class)
+            throw new SecurityException("ACTUAL_FIELD_GATE_OWNER_REQUIRED");
+        Object sync;
+        if(NativeControl.available()){
+            Object[] read=NativeControl.heapReadField(gate,java.util.concurrent.locks.ReentrantLock.class,"sync",
+                    "Ljava/util/concurrent/locks/ReentrantLock$Sync;");
+            if(read==null||read.length!=1)throw new IllegalStateException("FIELD_GATE_SYNC_UNAVAILABLE");
+            sync=read[0];
+        }else try{
+            var field=java.util.concurrent.locks.ReentrantLock.class.getDeclaredField("sync");field.setAccessible(true);sync=field.get(gate);
+        }catch(ReflectiveOperationException unavailable){throw new IllegalStateException("FIELD_GATE_SYNC_UNAVAILABLE",unavailable);}
+        if(!(sync instanceof java.util.concurrent.locks.AbstractQueuedSynchronizer))throw new IllegalStateException("FIELD_GATE_SYNC_UNAVAILABLE");
+        // Bind both exact identities before the gate is published. Its JDK
+        // synchronizer is controller state, never a business heap carrier.
+        synchronized(CONTROLS){reapControls();CONTROLS.add(gate).fieldGate=true;CONTROLS.add(sync).fieldGate=true;}
+    }
+    static boolean fieldGateMetadata(Object object){
+        if(!(object instanceof java.util.concurrent.locks.ReentrantLock||object instanceof java.util.concurrent.locks.AbstractQueuedSynchronizer))return false;
+        synchronized(CONTROLS){return CONTROLS.fieldGate(object);}
     }
     static void mutationControls(Object... objects){
         if(AUTHORITY.getCallerClass().getNestHost()!=TaskBridge.class)throw new SecurityException("ACTUAL_MUTATION_SOURCE_STATE_REQUIRED");
