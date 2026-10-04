@@ -103,7 +103,7 @@ public final class ClientBridge {
         for(Scope scope=CURRENT.get();scope!=null;scope=scope.parent)if(scope.sources.length!=0){
             if(sources==null)sources=Collections.newSetFromMap(new IdentityHashMap<>());Collections.addAll(sources,scope.sources);
         }
-        return sources==null?new Module[0]:sources.toArray(Module[]::new);
+        return sources==null?new Module[0]:sources.toArray(new Module[0]);
     }
     static boolean stoppedSource(){return stopped(currentSources());}
     public static boolean particleAdmitted(Object particle){

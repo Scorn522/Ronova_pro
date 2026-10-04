@@ -131,7 +131,7 @@ public final class NetworkBridge {
         for(Scope scope=CURRENT.get();scope!=null;scope=scope.parent)for(Module module:scope.modules)if(module!=null){
             if(sources==null)sources=Collections.newSetFromMap(new IdentityHashMap<>());sources.add(module);
         }
-        return sources==null?new Module[0]:sources.toArray(Module[]::new);
+        return sources==null?new Module[0]:sources.toArray(new Module[0]);
     }
     static boolean stoppedSource(){if(CURRENT==null)return false;for(Scope scope=CURRENT.get();scope!=null;scope=scope.parent)if(stopped(scope.modules))return true;return false;}
     public static void skippedDecode(Object context){

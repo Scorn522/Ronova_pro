@@ -12,6 +12,31 @@ final class ExternalReceiverFlow {
         public boolean equals(Object other){return other instanceof Receiver receiver&&actual==receiver.actual&&self==receiver.self;}
         public int hashCode(){return Objects.hashCode(actual)*31+Boolean.hashCode(self);}
     }
+    /** Reuses only the ASM layout within the current graph batch, never a source verdict. */
+    static final class Layout {
+        final ClassLoader loader;final Class<?> actual;final Object image;
+        final Map<String,Class<?>> types;final Map<Class<?>,Integer> modifiers;
+        final Map<MethodInsnNode,Set<Receiver>> receivers;
+        Layout(ExactTypes interpreter,ExternalCodeFlow.Image image,Map<MethodInsnNode,Set<Receiver>> receivers){
+            this.loader=interpreter.loader;this.actual=interpreter.actual;this.image=image.identity();
+            this.types=Collections.unmodifiableMap(new HashMap<>(interpreter.loaded));
+            Map<Class<?>,Integer> modifiers=new IdentityHashMap<>();
+            if(actual!=null)modifiers.put(actual,actual.getModifiers());
+            for(Class<?> type:types.values())if(type!=null)modifiers.put(type,type.getModifiers());
+            this.modifiers=Collections.unmodifiableMap(modifiers);this.receivers=Map.copyOf(receivers);
+            List<Object> controls=new ArrayList<>(Arrays.asList(this,this.types,this.modifiers,this.receivers));
+            for(Set<Receiver> values:this.receivers.values()){controls.add(values);controls.addAll(values);}
+            ControlImages.protect(controls.toArray());
+        }
+        boolean matches(ClassLoader loader,Class<?> actual,ExternalCodeFlow.Image image){
+            if(this.loader!=loader||this.actual!=actual||this.image!=image.identity())return false;
+            // Include unresolved names: loading a formerly absent class can
+            // turn an unknown receiver into an exact one in this very batch.
+            for(var type:types.entrySet())if(ExternalCodeDefinitions.initiated(loader,type.getKey())!=type.getValue())return false;
+            for(var type:modifiers.entrySet())if(type.getKey().getModifiers()!=type.getValue())return false;
+            return true;
+        }
+    }
     private static final class ExactValue implements Value {
         final BasicValue value;final Set<Receiver> receivers;final boolean unknown;
         ExactValue(BasicValue value,Set<Receiver> receivers,boolean unknown){this.value=value;this.receivers=Set.copyOf(receivers);this.unknown=unknown;}
@@ -117,20 +142,23 @@ final class ExternalReceiverFlow {
         }
     }
     private ExternalReceiverFlow(){}
-    static Map<MethodInsnNode,Set<Receiver>> calls(ClassLoader loader,Class<?> actual,ExternalCodeFlow.Image image,MethodNode method){
+    static Map<MethodInsnNode,Set<Receiver>> calls(ClassLoader loader,Class<?> actual,ExternalCodeFlow.Image image,MethodNode method,Map<MethodNode,Layout> layouts){
         if(!image.rows().containsKey(method.name+method.desc)||(method.access&(Opcodes.ACC_NATIVE|Opcodes.ACC_ABSTRACT))!=0)return Map.of();
+        Layout prior=layouts.get(method);if(prior!=null&&prior.matches(loader,actual,image))return prior.receivers;
         AbstractInsnNode[] code=method.instructions.toArray();boolean needsReceiver=false;
         for(AbstractInsnNode instruction:code)if(instruction instanceof MethodInsnNode call&&ExternalCodeFlow.returnsValue(call)
                 &&(call.getOpcode()==Opcodes.INVOKEVIRTUAL||call.getOpcode()==Opcodes.INVOKEINTERFACE)){needsReceiver=true;break;}
         if(!needsReceiver)return Map.of();
         Map<MethodInsnNode,Set<Receiver>> receivers=new IdentityHashMap<>();
         try{
-            Frame<ExactValue>[] frames=new Analyzer<>(new ExactTypes(loader,actual,image.node())).analyze(image.node().name,method);
+            ExactTypes interpreter=new ExactTypes(loader,actual,image.node());
+            Frame<ExactValue>[] frames=new Analyzer<>(interpreter).analyze(image.node().name,method);
             for(int i=0;i<code.length;i++)if(code[i] instanceof MethodInsnNode call&&frames[i]!=null&&ExternalCodeFlow.returnsValue(call)
                     &&(call.getOpcode()==Opcodes.INVOKEVIRTUAL||call.getOpcode()==Opcodes.INVOKEINTERFACE)){
                 Frame<ExactValue> frame=frames[i];int receiver=frame.getStackSize()-Type.getArgumentTypes(call.desc).length-1;
                 ExactValue value=frame.getStack(receiver);if(!value.unknown&&!value.receivers.isEmpty())receivers.put(call,value.receivers);
             }
+            Layout layout=new Layout(interpreter,image,receivers);layouts.put(method,layout);return layout.receivers;
         }catch(AnalyzerException|RuntimeException unavailable){
             Set<Module> affected=Collections.newSetFromMap(new IdentityHashMap<>());for(Module[] row:image.rows().get(method.name+method.desc))Collections.addAll(affected,row);
             if(actual!=null){Module owner=RecoveryAgent.logicalModule(actual);if(RecoveryAgent.producerModule(owner))affected.add(owner);}

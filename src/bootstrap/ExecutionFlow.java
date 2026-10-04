@@ -264,7 +264,12 @@ final class ExecutionFlow {
         if(single)return first.unknown()==unknown?first:new Sources(first.modules(),unknown);
         Set<Module> modules=Collections.newSetFromMap(new IdentityHashMap<>());
         for(Sources value:values)if(value!=null)Collections.addAll(modules,value.modules());
-        return new Sources(modules.toArray(Module[]::new),unknown);
+        return new Sources(modules.toArray(new Module[0]),unknown);
+    }
+    private static Module[] nonNullModules(Module[] modules){
+        Module[] selected=new Module[modules.length];int count=0;
+        for(Module module:modules)if(module!=null)selected[count++]=module;
+        return count==selected.length?selected:Arrays.copyOf(selected,count);
     }
     private static Sources source(Cell value){return value==null?UNKNOWN:join(value.sources(),value.alias()==null?NONE:value.alias().effects);}
     private static void bind(Alias alias,Object actual){
@@ -390,7 +395,7 @@ final class ExecutionFlow {
         bridge(CALLER.getCallerClass());if(!(token instanceof PlatformCall use)||use.frame.closed||use.frame.thread!=Thread.currentThread()||use.frame.call!=use.call)return;
         // The source belongs to this exact suspended invoke instruction, never
         // to another call that happens to return an equal primitive value.
-        Sources observed=new Sources(Arrays.stream(modules).filter(Objects::nonNull).toArray(Module[]::new),true);
+        Sources observed=new Sources(nonNullModules(modules),true);
         use.call.observed=join(use.call.observed,observed);use.frame.thrown=join(use.frame.thrown,observed);
     }
     static void heapBefore(Object token,int instruction,Class<?> symbolic,Object receiver,int index,StackWalker.StackFrame caller,int depth){
@@ -445,15 +450,15 @@ final class ExecutionFlow {
                         &&(current==null||!current.closed&&use.instruction==current.instruction))return;
             }
             Module actual=writer==null?null:DefinitionBridge.module(writer);
-            Sources written=new Sources(Arrays.stream(contributors).filter(Objects::nonNull).toArray(Module[]::new),true);if(TaskBridge.producer(actual))written=join(written,new Sources(new Module[]{actual},false));
+            Sources written=new Sources(nonNullModules(contributors),true);if(TaskBridge.producer(actual))written=join(written,new Sources(new Module[]{actual},false));
             slot.sources=join(slot.sources,written,UNKNOWN);slot.revision=null;slot.version++;if(slot.writers!=0)slot.overlap=true;
             observeFieldReads(heap,field,written);
         }
     }
     private static Sources memorySources(Module[] contributors){
         Frame frame=CURRENT.get();if(contributors.length==0)return join(frame==null?NONE:frame.active,UNKNOWN);
-        boolean unknown=Arrays.stream(contributors).anyMatch(Objects::isNull);
-        return join(frame==null?NONE:frame.active,new Sources(Arrays.stream(contributors).filter(Objects::nonNull).toArray(Module[]::new),unknown));
+        boolean unknown=false;for(Module contributor:contributors)if(contributor==null){unknown=true;break;}
+        return join(frame==null?NONE:frame.active,new Sources(nonNullModules(contributors),unknown));
     }
     static Object memoryBefore(Object holder,Module[] contributors){
         bridge(CALLER.getCallerClass());if(holder==null)return null;
@@ -471,8 +476,8 @@ final class ExecutionFlow {
     static Object fieldMemoryBefore(Object holder,Class<?> declaring,String name,String descriptor,Module[] contributors,boolean instruction){
         bridge(CALLER.getCallerClass());if(holder==null||declaring==null||name==null||descriptor==null)return null;
         if(CodeSourceBridge.fieldGateMetadata(holder))return null;
-        Map<String,FieldSlot> fields=FIELDS.get(declaring);FieldSlot field;
-        synchronized(fields){field=fields.computeIfAbsent(name+'\u0000'+descriptor,ignored->new FieldSlot(declaring,name,descriptor));}
+        Map<String,FieldSlot> fields=FIELDS.get(declaring);FieldSlot field;String key=name+'\u0000'+descriptor;
+        synchronized(fields){field=fields.get(key);if(field==null){field=new FieldSlot(declaring,name,descriptor);fields.put(key,field);}}
         Sources attempted=memorySources(contributors);boolean watch=!attempted.unknown()||attempted.modules().length!=0;
         if(!watch)synchronized(HEAP){
             Heap existing=HEAP.get(new Carrier(holder,false));Slot known=existing==null?null:existing.slots.get(field);
@@ -484,7 +489,7 @@ final class ExecutionFlow {
         boolean watched=watch&&CodeSourceBridge.executionWatchField(holder,declaring,name,descriptor);
         synchronized(HEAP){
             reapHeap();Heap heap=heapFor(holder);
-            Slot slot=heap.slots.computeIfAbsent(field,ignored->new Slot());
+            Slot slot=heap.slots.get(field);if(slot==null){slot=new Slot();heap.slots.put(field,slot);}
             slot.vmWatched|=watched;
             Frame frame=CURRENT.get();HeapUse pending=frame==null?null:frame.heap;
             if(instruction&&pending!=null&&!pending.closed&&pending.write&&pending.holder==heap&&pending.slot==slot){

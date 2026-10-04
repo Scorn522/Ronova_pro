@@ -2,8 +2,14 @@
 typedef struct HeapWatch {
     jweak holder,declaring;jfieldID field;char *name,*descriptor;struct HeapWatch *next;
 } HeapWatch;
+/* Positive field-location hints only; no holder, value or authorization is retained. */
+typedef struct HeapField {
+    jweak declaring;jfieldID field;char *name,*descriptor;struct HeapField *next;
+} HeapField;
+enum { HEAP_FIELD_BUCKETS=64 };
 static SRWLOCK heap_records=SRWLOCK_INIT;
 static HeapWatch *heap_watches;
+static HeapField *heap_fields[HEAP_FIELD_BUCKETS];
 static volatile LONG heap_available,heap_failures;
 static jmethodID heap_modified_callback;
 static int heap_initialize(void){
@@ -17,6 +23,84 @@ static void heap_watch_free(JNIEnv *env,HeapWatch *watch){
     if(watch->declaring)native_original.DeleteWeakGlobalRef(env,watch->declaring);
     free(watch->name);free(watch->descriptor);free(watch);
 }
+static unsigned heap_field_bucket(const char *name,const char *descriptor){
+    uint32_t hash=2166136261u;
+    for(const unsigned char *at=(const unsigned char*)name;*at;at++)hash=(hash^*at)*16777619u;
+    hash=(hash^0xffu)*16777619u;
+    for(const unsigned char *at=(const unsigned char*)descriptor;*at;at++)hash=(hash^*at)*16777619u;
+    return hash&(HEAP_FIELD_BUCKETS-1);
+}
+static void heap_fields_free(JNIEnv *env,HeapField *fields){
+    while(fields){HeapField *next=fields->next;
+        if(fields->declaring)native_original.DeleteWeakGlobalRef(env,fields->declaring);
+        free(fields->name);free(fields->descriptor);free(fields);fields=next;
+    }
+}
+static jfieldID heap_field_candidate(JNIEnv *env,unsigned bucket,jclass declaring,const char *name,const char *descriptor){
+    jfieldID field=NULL;AcquireSRWLockShared(&heap_records);
+    for(HeapField *entry=heap_fields[bucket];entry;entry=entry->next)if(!strcmp(entry->name,name)&&!strcmp(entry->descriptor,descriptor)
+            &&native_original.IsSameObject(env,entry->declaring,declaring)){field=entry->field;break;}
+    ReleaseSRWLockShared(&heap_records);
+    /* No record escapes the lock; the incoming declaring Class keeps its field ID alive. */
+    return field;
+}
+static void heap_field_forget(JNIEnv *env,unsigned bucket,jclass declaring,jfieldID field,const char *name,const char *descriptor){
+    HeapField *retired=NULL;AcquireSRWLockExclusive(&heap_records);HeapField **at=&heap_fields[bucket];
+    while(*at){HeapField *entry=*at;
+        if(native_original.IsSameObject(env,entry->declaring,NULL)||(entry->field==field&&!strcmp(entry->name,name)
+                &&!strcmp(entry->descriptor,descriptor)&&native_original.IsSameObject(env,entry->declaring,declaring))){
+            *at=entry->next;entry->next=retired;retired=entry;continue;
+        }
+        at=&entry->next;
+    }
+    ReleaseSRWLockExclusive(&heap_records);heap_fields_free(env,retired);
+}
+static void heap_field_remember(JNIEnv *env,unsigned bucket,jclass declaring,jfieldID field,const char *name,const char *descriptor){
+    HeapField *entry=(HeapField*)calloc(1,sizeof(*entry));if(!entry)return;
+    entry->field=field;entry->name=_strdup(name);entry->descriptor=_strdup(descriptor);
+    if(entry->name&&entry->descriptor)entry->declaring=native_original.NewWeakGlobalRef(env,declaring);
+    if(!entry->declaring||native_original.ExceptionCheck(env)){heap_fields_free(env,entry);return;}
+    HeapField *retired=NULL;AcquireSRWLockExclusive(&heap_records);HeapField **at=&heap_fields[bucket];
+    while(*at){HeapField *prior=*at;
+        if(native_original.IsSameObject(env,prior->declaring,NULL)||(!strcmp(prior->name,name)&&!strcmp(prior->descriptor,descriptor)
+                &&native_original.IsSameObject(env,prior->declaring,declaring))){
+            *at=prior->next;prior->next=retired;retired=prior;continue;
+        }
+        at=&prior->next;
+    }
+    entry->next=heap_fields[bucket];heap_fields[bucket]=entry;
+    ReleaseSRWLockExclusive(&heap_records);heap_fields_free(env,retired);
+}
+static int heap_field_named(jclass declaring,jfieldID field,const char *name,const char *descriptor){
+    char *actual=NULL,*signature=NULL;
+    int same=(*native_ti)->GetFieldName(native_ti,declaring,field,&actual,&signature,NULL)==JVMTI_ERROR_NONE
+            &&actual&&signature&&!strcmp(actual,name)&&!strcmp(signature,descriptor);
+    if(actual)(*native_ti)->Deallocate(native_ti,(unsigned char*)actual);
+    if(signature)(*native_ti)->Deallocate(native_ti,(unsigned char*)signature);return same;
+}
+static jfieldID heap_read_field(JNIEnv *env,jclass declaring,const char *name,const char *descriptor,jint *access){
+    unsigned bucket=heap_field_bucket(name,descriptor);jfieldID field=heap_field_candidate(env,bucket,declaring,name,descriptor);
+    if(field){
+        jclass actual=NULL;
+        int same=(*native_ti)->GetFieldDeclaringClass(native_ti,declaring,field,&actual)==JVMTI_ERROR_NONE
+                &&actual&&native_original.IsSameObject(env,actual,declaring);
+        if(actual)native_original.DeleteLocalRef(env,actual);
+        if(same&&heap_field_named(declaring,field,name,descriptor)
+                &&(*native_ti)->GetFieldModifiers(native_ti,declaring,field,access)==JVMTI_ERROR_NONE
+                &&!native_original.ExceptionCheck(env))return field;
+        if(native_original.ExceptionCheck(env))return NULL;
+        heap_field_forget(env,bucket,declaring,field,name,descriptor);field=NULL;
+    }
+    jfieldID *fields=NULL;jint count=0;
+    if((*native_ti)->GetClassFields(native_ti,declaring,&count,&fields)==JVMTI_ERROR_NONE)for(jint i=0;i<count;i++){
+        if(heap_field_named(declaring,fields[i],name,descriptor)){field=fields[i];break;}
+    }
+    if(fields)(*native_ti)->Deallocate(native_ti,(unsigned char*)fields);
+    if(!field||(*native_ti)->GetFieldModifiers(native_ti,declaring,field,access)!=JVMTI_ERROR_NONE
+            ||native_original.ExceptionCheck(env))return NULL;
+    heap_field_remember(env,bucket,declaring,field,name,descriptor);
+    return native_original.ExceptionCheck(env)?NULL:field;
+}
 JNIEXPORT jlongArray JNICALL Java_dev_ronova_pro_bootstrap_NativeControl_heapState0(JNIEnv *env,jclass controller){
     (void)controller;
     if(!native_jni_ready||!native_control_gate||!native_original.CallStaticBooleanMethod(env,native_controller,native_control_gate)){
@@ -27,21 +111,14 @@ JNIEXPORT jlongArray JNICALL Java_dev_ronova_pro_bootstrap_NativeControl_heapSta
 }
 JNIEXPORT jobjectArray JNICALL Java_dev_ronova_pro_bootstrap_NativeControl_heapReadField0(JNIEnv *env,jclass controller,jobject holder,jclass declaring,jstring name,jstring descriptor){
     (void)controller;
-    if(!native_jni_ready||!code_caller_gate||!native_original.CallStaticBooleanMethod(env,native_controller,code_caller_gate)){
+    if(!code_caller(env)){
         native_refuse(env,"ACTUAL_CODE_FIELD_BRIDGE_REQUIRED");return NULL;
     }
     if(!holder||!declaring||!name||!descriptor)return NULL;
     const char *key=native_original.GetStringUTFChars(env,name,NULL),*desc=key?native_original.GetStringUTFChars(env,descriptor,NULL):NULL;
-    jfieldID *fields=NULL,field=NULL;jint count=0,access=0,status=0;jobject value=NULL;jobjectArray result=NULL;
-    if(key&&desc&&(*native_ti)->GetClassFields(native_ti,declaring,&count,&fields)==JVMTI_ERROR_NONE)for(jint i=0;i<count;i++){
-        char *actual=NULL,*signature=NULL;
-        int same=(*native_ti)->GetFieldName(native_ti,declaring,fields[i],&actual,&signature,NULL)==JVMTI_ERROR_NONE
-                &&!strcmp(actual,key)&&!strcmp(signature,desc);
-        if(actual)(*native_ti)->Deallocate(native_ti,(unsigned char*)actual);if(signature)(*native_ti)->Deallocate(native_ti,(unsigned char*)signature);
-        if(same){field=fields[i];break;}
-    }
-    if(fields)(*native_ti)->Deallocate(native_ti,(unsigned char*)fields);
-    if(!field||(*native_ti)->GetFieldModifiers(native_ti,declaring,field,&access)!=JVMTI_ERROR_NONE)goto read_done;
+    jint access=0,status=0;jobject value=NULL;jobjectArray result=NULL;
+    jfieldID field=key&&desc?heap_read_field(env,declaring,key,desc,&access):NULL;
+    if(!field)goto read_done;
     int statik=(access&0x0008)!=0;
     if(statik){
         if(!native_original.IsSameObject(env,holder,declaring)||(*native_ti)->GetClassStatus(native_ti,declaring,&status)!=JVMTI_ERROR_NONE
@@ -76,7 +153,7 @@ read_done:
     if(key)native_original.ReleaseStringUTFChars(env,name,key);if(desc)native_original.ReleaseStringUTFChars(env,descriptor,desc);return result;
 }
 JNIEXPORT jboolean JNICALL Java_dev_ronova_pro_bootstrap_NativeControl_heapWatch0(JNIEnv *env,jclass controller,jobject holder,jclass declaring,jstring name,jstring descriptor){
-    (void)controller;if(!native_jni_ready||!code_caller_gate||!native_original.CallStaticBooleanMethod(env,native_controller,code_caller_gate)){
+    (void)controller;if(!code_caller(env)){
         native_refuse(env,"ACTUAL_CODE_FIELD_BRIDGE_REQUIRED");return JNI_FALSE;
     }
     if(!heap_available||!holder||!declaring||!name||!descriptor)return JNI_FALSE;
@@ -162,8 +239,7 @@ done:
 }
 JNIEXPORT jboolean JNICALL Java_dev_ronova_pro_bootstrap_NativeControl_heapEventPermit0(JNIEnv *env,jclass controller,jobject holder,jclass declaring){
     (void)controller;NativeThread *state=native_thread();
-    return state&&state->changedHolder&&state->changedClass&&code_caller_gate
-            &&native_original.CallStaticBooleanMethod(env,native_controller,code_caller_gate)
+    return state&&state->changedHolder&&state->changedClass&&code_caller(env)
             &&native_original.IsSameObject(env,state->changedHolder,holder)&&native_original.IsSameObject(env,state->changedClass,declaring)?JNI_TRUE:JNI_FALSE;
 }
 static int heap_array_span(JNIEnv *env,jobject array,jlong offset,jint count){
@@ -186,7 +262,7 @@ static void heap_image_unavailable(JNIEnv *env){
 }
 JNIEXPORT jlong JNICALL Java_dev_ronova_pro_bootstrap_NativeControl_heapArrayBits0(JNIEnv *env,jclass controller,jobject array,jlong offset,jint count){
     (void)controller;
-    if(!native_jni_ready||!code_caller_gate||!native_original.CallStaticBooleanMethod(env,native_controller,code_caller_gate)){
+    if(!code_caller(env)){
         native_refuse(env,"ACTUAL_CODE_ARRAY_BRIDGE_REQUIRED");return 0;
     }
     if(count<=0||count>8||!heap_array_span(env,array,offset,count)){heap_image_unavailable(env);return 0;}
@@ -202,7 +278,7 @@ JNIEXPORT jlong JNICALL Java_dev_ronova_pro_bootstrap_NativeControl_heapArrayBit
 }
 JNIEXPORT jbyteArray JNICALL Java_dev_ronova_pro_bootstrap_NativeControl_heapArrayImage0(JNIEnv *env,jclass controller,jobject array,jlong offset,jint count){
     (void)controller;
-    if(!native_jni_ready||!code_caller_gate||!native_original.CallStaticBooleanMethod(env,native_controller,code_caller_gate)){
+    if(!code_caller(env)){
         native_refuse(env,"ACTUAL_CODE_ARRAY_BRIDGE_REQUIRED");return NULL;
     }
     if(!heap_array_span(env,array,offset,count))return NULL;

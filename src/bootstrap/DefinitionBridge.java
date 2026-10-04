@@ -111,6 +111,11 @@ public final class DefinitionBridge {
     public static String acceptedImage(Class<?> actual){requireAgent(WALKER.getCallerClass());synchronized(ORIGINS){return ACCEPTED_IMAGES.get(new ClassKey(actual,false));}}
     /** The final transformer may consult only an actual recorded class or this exact definition scope. */
     public static Module origin(Class<?> type) {requireAgent(WALKER.getCallerClass());synchronized(ORIGINS){return ORIGINS.get(new ClassKey(type,false));}}
+    public static Module[] origins(Class<?>[] types) {
+        requireAgent(WALKER.getCallerClass());Module[] origins=new Module[types.length];
+        synchronized(ORIGINS){for(int i=0;i<types.length;i++)origins[i]=ORIGINS.get(new ClassKey(types[i],false));}
+        return origins;
+    }
     public static Module definingModule(ClassLoader loader,String name) {
         requireAgent(WALKER.getCallerClass());synchronized(CURRENT){Scope scope=CURRENT.get(Thread.currentThread());return scope!=null&&scope.loader==loader&&Objects.equals(scope.name,name)?scope.module:null;}
     }

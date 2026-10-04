@@ -67,12 +67,22 @@ final class ExternalCodeDefinitions {
     }
     private static final class BootstrapLookup {
         final List<Definition> definitions;
+        final Map<MethodNode,ExternalReceiverFlow.Layout> receivers;
+        final BootstrapLookup indexOwner;
         BootstrapClassIndex classes;
         DefinitionIndex index;
-        BootstrapLookup(List<Definition> definitions){this.definitions=definitions;}
+        BootstrapLookup(List<Definition> definitions){this(definitions,null);}
+        BootstrapLookup(List<Definition> definitions,BootstrapLookup previous){
+            this.definitions=definitions;
+            this.receivers=previous==null?new IdentityHashMap<>():previous.receivers;
+            this.indexOwner=previous==null?this:previous.indexOwner;
+            ControlImages.protect(this,this.receivers);
+        }
         Candidate candidates(Class<?> actual){
-            if(index==null)index=new DefinitionIndex(definitions);
-            return index.candidates(actual);
+            // This index describes the same immutable definition list across
+            // the batch. Actual class/bytecode bindings remain live per graph.
+            if(indexOwner.index==null)indexOwner.index=new DefinitionIndex(definitions);
+            return indexOwner.index.candidates(actual);
         }
         Class<?> find(String name){
             if(classes==null)classes=new BootstrapClassIndex(RecoveryAgent.bootstrapClasses());
@@ -416,7 +426,7 @@ final class ExternalCodeDefinitions {
         // gets a fresh snapshot, including classes loaded since this analysis.
         BootstrapLookup previous=BOOTSTRAP_LOOKUP.get();
         Resolution outer=RESOLUTION.get(),resolution=new Resolution();
-        BootstrapLookup lookup=new BootstrapLookup(previous==null?definitions():previous.definitions);BOOTSTRAP_LOOKUP.set(lookup);
+        BootstrapLookup lookup=new BootstrapLookup(previous==null?definitions():previous.definitions,previous);BOOTSTRAP_LOOKUP.set(lookup);
         RESOLUTION.set(resolution);
         try{return possibleContributors(root,lookup.definitions)?expandGraph(loader,actual,root,resolution):Map.of();}
         finally{
@@ -445,10 +455,16 @@ final class ExternalCodeDefinitions {
                 }
                 continue;
             }
-            if(observed.add(actual)){
-                Module declaration=RecoveryAgent.logicalModule(actual);
-                if(RecoveryAgent.producerModule(declaration)&&!ModGroupBoundary.stopped(declaration))return true;
-            }
+            observed.add(actual);
+        }
+        if(!observed.isEmpty()){
+            // Read every actual Class origin afresh for this expand, through one
+            // authenticated bridge call. Only this query's Module identities are
+            // de-duplicated; no origin, producer or stopped verdict survives it.
+            Module[] declarations=RecoveryAgent.logicalModules(observed.toArray(new Class<?>[0]));
+            Set<Module> checked=Collections.newSetFromMap(new IdentityHashMap<>());
+            for(Module declaration:declarations)if(checked.add(declaration)
+                    &&RecoveryAgent.producerModule(declaration)&&!ModGroupBoundary.stopped(declaration))return true;
         }
         // Every possible bound image was considered, irrespective of loader,
         // inheritance, dispatch or bootstrap status. Without any direct/control
@@ -476,7 +492,7 @@ final class ExternalCodeDefinitions {
                     // Static, special and final dispatch already have an exact
                     // target. Compute frames only when an actual receiver can
                     // resolve a remaining value-producing virtual call.
-                    if(receivers==null)receivers=ExternalReceiverFlow.calls(loaders.get(caller.identity()),classes.get(caller.identity()),caller,method);
+                    if(receivers==null)receivers=ExternalReceiverFlow.calls(loaders.get(caller.identity()),classes.get(caller.identity()),caller,method,BOOTSTRAP_LOOKUP.get().receivers);
                     Set<ExternalReceiverFlow.Receiver> exact=receivers.get(call);
                     if(exact!=null)target=resolve(caller,call,root,loaders,classes,bound,unavailable,declarations,exact);
                 }

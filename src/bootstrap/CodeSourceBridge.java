@@ -218,6 +218,9 @@ public final class CodeSourceBridge {
     }
     private static void codeMethods(ClassLoader loader,String name,String[] methods,Class<?> actual){
         Set<String> selected=Set.copyOf(Arrays.asList(methods));
+        // Empty rows cannot identify a frame. Keeping an empty entry for every
+        // loaded class both grows this index and hides its actual empty state.
+        if(selected.isEmpty())return;
         synchronized(CODE_METHODS){
             for(var buckets=CODE_METHODS.values().iterator();buckets.hasNext();){
                 List<CodeMethods> entries=buckets.next();
@@ -246,6 +249,10 @@ public final class CodeSourceBridge {
         }
         if(!tracked||frame.getByteCodeIndex()<0)return NO_FRAME_SOURCES;
         Module[] actual=NativeControl.codeFrame(frame);return actual==null?NO_FRAME_SOURCES:actual;
+    }
+    static boolean hasFrameSources(){
+        if(ExecutionFlow.hasFrame())return true;
+        synchronized(CODE_METHODS){return !CODE_METHODS.isEmpty();}
     }
     public static Object executionPlan(Object[][] rows){requireAgent();return ExecutionFlow.plan(rows);}
     private static List<StackWalker.StackFrame> executionStack(){
@@ -550,7 +557,8 @@ public final class CodeSourceBridge {
         synchronized(CONTROLS){return CONTROLS.executionMap(object);}
     }
     static void fieldGateControls(java.util.concurrent.locks.ReentrantLock gate){
-        if(AUTHORITY.getCallerClass()!=TaskBridge.class||gate.getClass()!=java.util.concurrent.locks.ReentrantLock.class)
+        Class<?> caller=AUTHORITY.getCallerClass();
+        if(caller!=TaskBridge.class&&!SourceMapBridge.gateConstructor(caller)||gate.getClass()!=java.util.concurrent.locks.ReentrantLock.class)
             throw new SecurityException("ACTUAL_FIELD_GATE_OWNER_REQUIRED");
         Object sync;
         if(NativeControl.available()){

@@ -496,6 +496,14 @@ public final class BoundaryCheck {
         Field roots=sources.getDeclaredField("scopes");roots.setAccessible(true);
         controlArrayWriteRefused(roots.get(null),"source directory roots");
         Class<?> code=Class.forName("dev.ronova.pro.bootstrap.CodeSourceBridge",false,null);
+        Class<?> definitions=Class.forName("dev.ronova.pro.bootstrap.DefinitionBridge",false,null);
+        Method originBatch=definitions.getMethod("origins",Class[].class);
+        try{originBatch.invoke(null,(Object)new Class<?>[]{BoundaryCheck.class});throw new AssertionError("foreign origin batch entry admitted");}
+        catch(InvocationTargetException expected){require(expected.getCause() instanceof SecurityException,"foreign reflective origin batch entry refused");}
+        var foreignOrigins=MethodHandles.lookup().unreflect(originBatch);
+        try{Module[] ignored=(Module[])foreignOrigins.invokeExact(new Class<?>[]{BoundaryCheck.class});throw new AssertionError("foreign handle origin batch entry admitted");}
+        catch(SecurityException expected){require(true,"foreign handle origin batch entry refused");}
+        catch(Throwable failure){throw new AssertionError("foreign handle origin batch entry failed for another reason",failure);}
         Method imageBatch=code.getMethod("imageControlFields",Object[].class,Field[][].class);
         try{imageBatch.invoke(null,new Object[0],new Field[0][]);throw new AssertionError("foreign image batch entry admitted");}
         catch(InvocationTargetException expected){require(expected.getCause() instanceof SecurityException,"foreign reflective image batch entry refused");}
@@ -536,6 +544,20 @@ public final class BoundaryCheck {
             }
         }
         require(liveGate,"actual installed field gate has a protected receiver");
+        Method gateRegistration=code.getDeclaredMethod("fieldGateControls",java.util.concurrent.locks.ReentrantLock.class);gateRegistration.setAccessible(true);
+        try{gateRegistration.invoke(null,new java.util.concurrent.locks.ReentrantLock());throw new AssertionError("foreign lock registration admitted");}
+        catch(InvocationTargetException expected){require(expected.getCause() instanceof SecurityException,"foreign control lock registration refused");}
+        Class<?> nativeControl=Class.forName("dev.ronova.pro.bootstrap.NativeControl",false,null);
+        Method nativeBits=nativeControl.getDeclaredMethod("heapArrayBits0",Object.class,long.class,int.class);nativeBits.setAccessible(true);
+        try{nativeBits.invoke(null,new float[]{1F,2F},0L,4);throw new AssertionError("foreign native array image entry admitted");}
+        catch(InvocationTargetException expected){
+            Throwable refused=expected.getCause();
+            if(!(refused instanceof IllegalStateException)||!"ACTUAL_CODE_ARRAY_BRIDGE_REQUIRED".equals(refused.getMessage()))
+                throw new AssertionError("foreign native array image entry failed for another reason",refused);
+            require(true,"foreign native array image entry refused");
+        }
+        float[] scalarArray={1F,2F};Array.setFloat(scalarArray,0,3F);
+        require(scalarArray[0]==3F&&scalarArray[1]==2F,"actual scalar array write keeps its adjacent value through native image capture");
         Class<?> execution=Class.forName("dev.ronova.pro.bootstrap.ExecutionFlow",false,null);
         Method memoryEnd=execution.getDeclaredMethod("memoryAfter",Object.class,boolean.class);memoryEnd.setAccessible(true);
         try{memoryEnd.invoke(null,new Object(),true);throw new AssertionError("foreign execution memory entry admitted");}

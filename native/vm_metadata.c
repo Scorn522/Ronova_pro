@@ -10,7 +10,7 @@ typedef struct CodeVMLayout {
 } CodeVMLayout;
 /* Scratch bytes have no authority or retained VM identity. One version query
  * reuses them while each actual method still supplies a fresh complete image. */
-typedef struct CodeVMBuffer {unsigned char *header,*table;size_t headerSize,tableSize;} CodeVMBuffer;
+typedef struct CodeVMBuffer {unsigned char *header,*table;size_t headerSize,tableSize;int wholeClass;} CodeVMBuffer;
 static int code_vm_buffer(unsigned char **bytes,size_t *capacity,size_t size){
     if(size<=*capacity)return 1;
     unsigned char *next=(unsigned char*)realloc(*bytes,size);if(!next)return 0;*bytes=next;*capacity=size;return 1;
@@ -195,6 +195,45 @@ static void code_exception_frames(JNIEnv *env,jthrowable failure,unsigned cause)
 }
 static int code_vm_tag(CodePool *pool,unsigned index,unsigned char *tag){return index<pool->count&&code_vm_read(pool->tags+index,tag,1);}
 static int code_vm_slot(CodePool *pool,unsigned index,void *value,size_t size){return index<pool->count&&code_vm_read(pool->slots+(uintptr_t)index*sizeof(uintptr_t),value,size);}
+static int code_vm_scan_slot(CodePool *pool,unsigned index,unsigned char *tag,uintptr_t *slot){
+    unsigned char afterTag=0;uintptr_t afterSlot=0;
+    return code_vm_tag(pool,index,tag)&&code_vm_slot(pool,index,slot,sizeof(*slot))
+            &&code_vm_tag(pool,index,&afterTag)&&afterTag==*tag
+            &&code_vm_slot(pool,index,&afterSlot,sizeof(afterSlot))&&afterSlot==*slot;
+}
+/* These are raw bytes for this one pool query, not a retained VM match.
+ * Reuse the UTF index buffers. Tags and slots are separate VM allocations;
+ * verify both after the bulk copy and reread only entries that changed during
+ * resolution. An unstable entry remains unavailable until its own live retry. */
+static int code_vm_scan(CodePool *pool,int verified){
+    // Invalidate before overwriting either buffer. A failed refresh must make
+    // subsequent entries use live reads, never a partly copied bulk snapshot.
+    pool->utfIndexed=0;pool->vmSnapshot=0;
+    if(!pool->scanTags)pool->scanTags=(unsigned char*)malloc(pool->count);
+    if(!pool->scanSlots)pool->scanSlots=(uintptr_t*)malloc((size_t)pool->count*sizeof(*pool->scanSlots));
+    if(!pool->scanTags||!pool->scanSlots)return 0;
+    if(!code_vm_read(pool->tags,pool->scanTags,pool->count)
+            ||!code_vm_read(pool->slots,pool->scanSlots,(size_t)pool->count*sizeof(*pool->scanSlots)))return 0;
+    if(!verified)return 1;
+    unsigned char tags[256];uintptr_t slots[256];
+    for(unsigned first=0;first<pool->count;){
+        unsigned count=pool->count-first;if(count>256)count=256;
+        int copied=code_vm_read(pool->slots+(uintptr_t)first*sizeof(uintptr_t),slots,(size_t)count*sizeof(*slots))
+                &&code_vm_read(pool->tags+first,tags,count);
+        for(unsigned i=0;i<count;i++)if(!copied||pool->scanTags[first+i]!=tags[i]||pool->scanSlots[first+i]!=slots[i]){
+            unsigned char tag=0;uintptr_t slot=0;
+            if(code_vm_scan_slot(pool,first+i,&tag,&slot)){pool->scanTags[first+i]=tag;pool->scanSlots[first+i]=slot;}
+            else pool->scanTags[first+i]=255;
+        }
+        first+=count;
+    }
+    pool->vmSnapshot=1;return 1;
+}
+static int code_vm_entry_slot(CodePool *pool,unsigned index,void *value,size_t size){
+    if(!pool->vmSnapshot)return code_vm_slot(pool,index,value,size);
+    if(index>=pool->count||size>(size_t)(pool->count-index)*sizeof(*pool->scanSlots))return 0;
+    memcpy(value,pool->scanSlots+index,size);return 1;
+}
 static int code_vm_self(CodePool *pool,unsigned index){
     unsigned char tag=0;uint32_t slot=0;uintptr_t klass=0,symbol=0;
     if(!pool->vm||!pool->holder||!pool->holderName||!pool->resolved||!code_vm_tag(pool,index,&tag)||tag!=7||!code_vm_slot(pool,index,&slot,4))return 0;
@@ -203,17 +242,13 @@ static int code_vm_self(CodePool *pool,unsigned index){
             &&code_vm_tag(pool,name,&tag)&&tag==1&&code_vm_slot(pool,name,&symbol,sizeof(symbol))&&symbol==pool->holderName;
 }
 static size_t code_vm_utf_hash(uintptr_t symbol,size_t count){return code_pair_hash((unsigned)((uint64_t)symbol>>32),(unsigned)symbol)&(count-1);}
-static int code_vm_utf_index(CodePool *pool){
+static int code_vm_utf_index(CodePool *pool,int refresh){
     pool->utfIndexed=0;
-    if(!pool->scanTags)pool->scanTags=(unsigned char*)malloc(pool->count);
-    if(!pool->scanSlots)pool->scanSlots=(uintptr_t*)malloc((size_t)pool->count*sizeof(*pool->scanSlots));
-    if(!pool->scanTags||!pool->scanSlots)return 0;
+    if((!pool->vmSnapshot||refresh)&&!code_vm_scan(pool,pool->vmSnapshot))return 0;
     if(!pool->utfBuckets){
         size_t count=32;while(count<(size_t)pool->count*2)count*=2;
         pool->utfBuckets=(unsigned*)calloc(count,sizeof(*pool->utfBuckets));if(!pool->utfBuckets)return 0;pool->utfBucketCount=count;
     }else memset(pool->utfBuckets,0,pool->utfBucketCount*sizeof(*pool->utfBuckets));
-    if(!code_vm_read(pool->tags,pool->scanTags,pool->count)
-            ||!code_vm_read(pool->slots,pool->scanSlots,(size_t)pool->count*sizeof(*pool->scanSlots)))return 0;
     for(unsigned i=1;i<pool->count;i++)if(pool->scanTags[i]==1){
         uintptr_t symbol=pool->scanSlots[i];size_t at=code_vm_utf_hash(symbol,pool->utfBucketCount);
         while(pool->utfBuckets[at]&&pool->scanSlots[pool->utfBuckets[at]]!=symbol)at=(at+1)&(pool->utfBucketCount-1);
@@ -223,7 +258,7 @@ static int code_vm_utf_index(CodePool *pool){
 }
 static unsigned code_vm_string_utf(CodePool *pool,uintptr_t symbol){
     int refreshed=0;
-    if(!pool->utfIndexed){if(!code_vm_utf_index(pool))return 0;refreshed=1;}
+    if(!pool->utfIndexed){if(!code_vm_utf_index(pool,0))return 0;refreshed=!pool->vmSnapshot;}
     for(;;){
         size_t at=code_vm_utf_hash(symbol,pool->utfBucketCount);
         while(pool->utfBuckets[at]){
@@ -239,30 +274,36 @@ static unsigned code_vm_string_utf(CodePool *pool,uintptr_t symbol){
         }
         // A miss or changed slot is never a cached negative result. Refresh
         // the live pool once, then apply the same selected-slot check again.
-        if(refreshed||!code_vm_utf_index(pool))return 0;refreshed=1;
+        if(refreshed||!code_vm_utf_index(pool,1))return 0;refreshed=1;
     }
 }
 static int code_vm_entry(CodePool *pool,unsigned index){
     if(index>=pool->count||!pool->entries||!pool->sizes)return 0;
     if(pool->entries[index])return 1;if(!pool->vm)return 0;
     CodeVMLayout *layout=&code_vm_layout;unsigned char tag=0;uint32_t value=0;uint64_t wide=0;uintptr_t symbol=0;
-    if(!code_vm_tag(pool,index,&tag))return 0;
+    if(pool->vmSnapshot){
+        if(pool->scanTags[index]==255){
+            uintptr_t slot=0;if(!code_vm_scan_slot(pool,index,&tag,&slot))return 0;
+            pool->scanTags[index]=tag;pool->scanSlots[index]=slot;pool->utfIndexed=0;
+        }
+        tag=pool->scanTags[index];
+    }else if(!code_vm_tag(pool,index,&tag))return 0;
     if(tag==layout->unresolvedClass||tag==layout->classError)tag=7;
     else if(tag==layout->handleError)tag=15;else if(tag==layout->typeError)tag=16;else if(tag==layout->dynamicError)tag=17;
     unsigned size=0;unsigned char small[9]={tag};
     if(tag==1){
-        uint16_t length=0;if(!code_vm_slot(pool,index,&symbol,sizeof(symbol))||!symbol||!code_vm_read(symbol+(uintptr_t)layout->symbolLength,&length,sizeof(length)))return 0;
+        uint16_t length=0;if(!code_vm_entry_slot(pool,index,&symbol,sizeof(symbol))||!symbol||!code_vm_read(symbol+(uintptr_t)layout->symbolLength,&length,sizeof(length)))return 0;
         size=(unsigned)length+3;unsigned char *entry=(unsigned char*)malloc(size);if(!entry)return 0;entry[0]=1;code_vm_put(entry+1,length,2);
         if(!code_vm_read(symbol+(uintptr_t)layout->symbolData,entry+3,length)){free(entry);return 0;}
         pool->entries[index]=entry;pool->sizes[index]=size;return 1;
     }
     if(tag==8){
-        if(!code_vm_slot(pool,index,&symbol,sizeof(symbol))||!symbol||(symbol&1))return 0;
+        if(!code_vm_entry_slot(pool,index,&symbol,sizeof(symbol))||!symbol||(symbol&1))return 0;
         unsigned utf=code_vm_string_utf(pool,symbol);
         if(!utf)return 0;size=3;code_vm_put(small+1,utf,2);
-    }else if(tag==5||tag==6){if(!code_vm_slot(pool,index,&wide,sizeof(wide)))return 0;size=9;code_vm_put(small+1,wide,8);}
+    }else if(tag==5||tag==6){if(!code_vm_entry_slot(pool,index,&wide,sizeof(wide)))return 0;size=9;code_vm_put(small+1,wide,8);}
     else {
-        if(!code_vm_slot(pool,index,&value,sizeof(value)))return 0;
+        if(!code_vm_entry_slot(pool,index,&value,sizeof(value)))return 0;
         switch(tag){
             case 3:case 4:size=5;code_vm_put(small+1,value,4);break;
             case 7:size=3;code_vm_put(small+1,value>>16,2);break;
@@ -276,7 +317,11 @@ static int code_vm_entry(CodePool *pool,unsigned index){
     }
     unsigned char *entry=(unsigned char*)malloc(size);if(!entry)return 0;memcpy(entry,small,size);pool->entries[index]=entry;pool->sizes[index]=size;return 1;
 }
-static int code_vm_operand(CodePool *pool,unsigned index,uint16_t *value){return index<pool->operandLength&&code_vm_read(pool->operands+(uintptr_t)index*2,value,2);}
+static int code_vm_operand(CodePool *pool,unsigned index,uint16_t *value){
+    if(index>=pool->operandLength)return 0;
+    if(pool->scanOperands){*value=pool->scanOperands[index];return 1;}
+    return code_vm_read(pool->operands+(uintptr_t)index*2,value,2);
+}
 static int code_vm_operand_offset(CodePool *pool,unsigned index,unsigned *offset){
     uint16_t low=0,high=0;if(index>UINT32_MAX/2||!code_vm_operand(pool,index*2,&low)||!code_vm_operand(pool,index*2+1,&high))return 0;
     *offset=(unsigned)low|((unsigned)high<<16);return *offset<=pool->operandLength;
@@ -290,7 +335,7 @@ static int code_vm_bootstrap(CodePool *pool,unsigned index){
     for(unsigned i=0;i<count;i++){uint16_t argument=0;if(!code_vm_operand(pool,offset+2+i,&argument)){free(arguments);return 0;}arguments[i]=argument;}
     bootstrap->handle=handle;bootstrap->count=count;bootstrap->arguments=arguments;bootstrap->loaded=1;return 1;
 }
-static int code_vm_pool(CodePool *pool,uintptr_t actual){
+static int code_vm_pool(CodePool *pool,uintptr_t actual,int wholeClass){
     if(pool->vm==actual&&pool->vmReady)return 1;
     code_pool_free(pool);
     CodeVMLayout *layout=&code_vm_layout;uintptr_t tags=0,operands=0,holder=0,resolved=0,name=0;int32_t length=0,tagLength=0,operandLength=0,resolvedLength=0;
@@ -314,9 +359,18 @@ static int code_vm_pool(CodePool *pool,uintptr_t actual){
         if(pool->resolved<resolved||pool->resolvedCount>(UINTPTR_MAX-pool->resolved)/sizeof(uintptr_t))goto failed;}
     if(pool->slots<actual||pool->count>(UINTPTR_MAX-pool->slots)/sizeof(uintptr_t))goto failed;
     pool->entries=(const unsigned char**)calloc(pool->count,sizeof(*pool->entries));pool->sizes=(uint32_t*)calloc(pool->count,sizeof(*pool->sizes));if(!pool->entries||!pool->sizes)goto failed;
+    // A failed bulk allocation/read falls back to the original live entry
+    // reads. It never supplies a positive constant or version result.
+    if(wholeClass&&sizeof(uintptr_t)==8)code_vm_scan(pool,1);
     if(operands){
         if(!code_vm_read(operands+(uintptr_t)layout->arrayLength,&operandLength,4)||operandLength<0)goto failed;
         pool->operandLength=(unsigned)operandLength;pool->operands=operands+(uintptr_t)layout->shortData;
+        if(pool->operands<operands||pool->operandLength>(UINTPTR_MAX-pool->operands)/sizeof(uint16_t))goto failed;
+        if(wholeClass&&operandLength){
+            size_t size=(size_t)pool->operandLength*sizeof(*pool->scanOperands);
+            pool->scanOperands=(uint16_t*)malloc(size);
+            if(pool->scanOperands&&!code_vm_read(pool->operands,pool->scanOperands,size)){free(pool->scanOperands);pool->scanOperands=NULL;}
+        }
         if(operandLength){unsigned first=0;if(!code_vm_operand_offset(pool,0,&first)||first%2||first/2>65535)goto failed;pool->bootstrapCount=first/2;
             pool->bootstraps=(CodeBootstrap*)calloc((size_t)pool->bootstrapCount+1,sizeof(*pool->bootstraps));if(!pool->bootstraps)goto failed;}
     }
@@ -354,7 +408,7 @@ static int code_vm_snapshot_checked(JNIEnv *env,jmethodID method,CodeVMMethod *v
         memcpy(&nameIndex,header+(size_t)layout->constantName,2);memcpy(&signatureIndex,header+(size_t)layout->constantSignature,2);
     }
     if(!copied||words<=0||(uintptr_t)words>(UINTPTR_MAX-constant)/sizeof(uintptr_t))return code_failed(failure,"snapshot_header",JVMTI_ERROR_NONE);
-    if(!code_vm_pool(pool,version->constants))return code_failed(failure,"snapshot_pool",JVMTI_ERROR_NONE);
+    if(!code_vm_pool(pool,version->constants,scratch->wholeClass))return code_failed(failure,"snapshot_pool",JVMTI_ERROR_NONE);
     unsigned recognized=layout->line|layout->locals|layout->exceptions|layout->checked|layout->generic|layout->parameters|0x0040;
     for(unsigned i=0;i<4;i++)recognized|=layout->annotations[i];if(flags&~recognized)return code_failed(failure,"snapshot_flags",JVMTI_ERROR_NONE);
     if(!code_vm_entry(pool,nameIndex)||!code_vm_entry(pool,signatureIndex)||pool->entries[nameIndex][0]!=1||pool->entries[signatureIndex][0]!=1)return code_failed(failure,"snapshot_selector_constants",JVMTI_ERROR_NONE);

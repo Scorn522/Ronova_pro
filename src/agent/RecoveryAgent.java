@@ -797,6 +797,15 @@ public final class RecoveryAgent {
     static Module logicalModule(Class<?> type){
         Module origin=definitionOrigin(type,type.getClassLoader(),type.getName().replace('.','/'));return origin==null?type.getModule():origin;
     }
+    static Module[] logicalModules(Class<?>[] types){
+        if(CALLER.getCallerClass()!=ExternalCodeDefinitions.class)throw new SecurityException("ACTUAL_CODE_DEFINITION_REGISTRY_REQUIRED");
+        Class<?> bridge=definitionBridge;Module[] origins;
+        if(bridge==null)origins=new Module[types.length];
+        else try{origins=(Module[])bridge.getMethod("origins",Class[].class).invoke(null,(Object)types);}
+        catch(ReflectiveOperationException failure){throw new IllegalStateException("ACTUAL_DEFINITION_ORIGIN_UNAVAILABLE",failure);}
+        for(int i=0;i<types.length;i++)if(origins[i]==null)origins[i]=types[i].getModule();
+        return origins;
+    }
     static Class<?>[] loadedClasses(){
         Instrumentation api=instrumentation;if(api==null)return new Class<?>[0];
         try{

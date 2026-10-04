@@ -57,8 +57,12 @@ public final class SourceMapBridge {
         long bindingRevision=-1;
         int bindingBucket;
         final List<Scope> draining=new ArrayList<>();
-        Gate(Object owner) { this.owner=new OwnerRef(owner); }
+        Gate(Object owner) {
+            this.owner=new OwnerRef(owner);
+            CodeSourceBridge.fieldGateControls(lock);
+        }
     }
+    static boolean gateConstructor(Class<?> caller) { return caller==Gate.class; }
     private static final class HashNodes {
         static final java.lang.reflect.Field TABLE=field(HashMap.class,"table"),NEXT=field(nodeType(),"next");
         static final java.lang.reflect.Field ACCESS_ORDER=field(LinkedHashMap.class,"accessOrder"),TAIL=field(LinkedHashMap.class,"tail");

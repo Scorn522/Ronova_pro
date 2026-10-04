@@ -66,10 +66,6 @@ public final class NativeControl {
         @SuppressWarnings("unchecked") var reference=(java.util.concurrent.atomic.AtomicReference<Object>)slot;
         return reference.compareAndSet(expected,next);
     }
-    private static boolean codeCaller(){
-        Class<?> caller=CALLER.walk(frames->frames.map(StackWalker.StackFrame::getDeclaringClass).filter(type->type!=NativeControl.class).findFirst().orElse(null));
-        return caller==CodeSourceBridge.class;
-    }
     static Object controlTable(){
         if(CALLER.getCallerClass()!=CodeSourceBridge.class)throw new SecurityException("ACTUAL_CONTROL_TABLE_READER_REQUIRED");
         if(!available)throw new IllegalStateException("ACTUAL_CONTROL_TABLE_NATIVE_UNAVAILABLE");

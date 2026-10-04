@@ -958,7 +958,14 @@ public final class TaskBridge {
     }
     static Module[] invokingSources(){
         Module[] scoped=scopedSources();if(scoped.length!=0)return scoped;
-        return ORIGIN_WALKER.walk(INVOKING_SOURCES);
+        return frameSources();
+    }
+    private static Module[] frameSources(){
+        // Inspect the live registries on every operation. Before any producer,
+        // external instruction row or execution frame exists, walking all of
+        // Minecraft's construction frames can only return this same empty set.
+        boolean producers;synchronized(PRODUCER_MODULES){producers=!PRODUCER_MODULES.isEmpty();}
+        return producers||CodeSourceBridge.hasFrameSources()?ORIGIN_WALKER.walk(INVOKING_SOURCES):NO_SOURCES;
     }
     static boolean stoppedEffects(){return stoppedInvocation();}
     private static Set<Module> addModuleSources(Set<Module> sources,Module[] modules,boolean producersOnly){
@@ -976,7 +983,9 @@ public final class TaskBridge {
         return modules;
     }
     private static Module[] scopedSources(){
-        Set<Module> modules=scopedSourceSet();return modules==null?NO_SOURCES:modules.toArray(Module[]::new);
+        // This query also runs while LambdaMetafactory updates its own counters.
+        // An array factory here would link through the same guarded Unsafe path.
+        Set<Module> modules=scopedSourceSet();return modules==null?NO_SOURCES:modules.toArray(new Module[0]);
     }
     private static Module[] nativeNetworkSources(){
         if(!NativeControl.sourceCapture())throw new SecurityException("ACTUAL_NATIVE_SOURCE_CAPTURE_REQUIRED");return scopedSources();
@@ -986,7 +995,7 @@ public final class TaskBridge {
     }
     public static Module[] creationSources(Object object){
         synchronized(CREATION_OWNERS){
-            Set<Module> sources=CREATION_SOURCES.get(new EventKey(object,null));if(sources!=null)return sources.toArray(Module[]::new);
+            Set<Module> sources=CREATION_SOURCES.get(new EventKey(object,null));if(sources!=null)return sources.toArray(new Module[0]);
             Module single=CREATION_OWNERS.get(new EventKey(object,null));return single==null?new Module[0]:new Module[]{single};
         }
     }
@@ -1017,10 +1026,10 @@ public final class TaskBridge {
             if(thread!=null){
                 Set<Module> sources=Collections.newSetFromMap(new IdentityHashMap<>());sources.addAll(thread.sources);
                 Set<Module> creation=CREATION_SOURCES.get(key),tasks=TASK_OWNERS.get(key);
-                if(creation!=null)sources.addAll(creation);if(tasks!=null)sources.addAll(tasks);return sources.toArray(Module[]::new);
+                if(creation!=null)sources.addAll(creation);if(tasks!=null)sources.addAll(tasks);return sources.toArray(new Module[0]);
             }
-            Set<Module> tasks=TASK_OWNERS.get(key);if(tasks!=null)return tasks.toArray(Module[]::new);
-            Set<Module> sources=CREATION_SOURCES.get(key);if(sources!=null)return sources.toArray(Module[]::new);
+            Set<Module> tasks=TASK_OWNERS.get(key);if(tasks!=null)return tasks.toArray(new Module[0]);
+            Set<Module> sources=CREATION_SOURCES.get(key);if(sources!=null)return sources.toArray(new Module[0]);
         }
         Module module=objectModule(object,key);return module==null?new Module[0]:new Module[]{module};
     }
@@ -1146,18 +1155,18 @@ public final class TaskBridge {
         // inserting it into a second map. Io sources are already included in
         // full by scopedSourceSet; filtering and adding them again adds nothing.
         Set<Module> sources=scopedSourceSet();
-        if(sources==null)sources=addModuleSources(null,ORIGIN_WALKER.walk(INVOKING_SOURCES),false);
+        if(sources==null)sources=addModuleSources(null,frameSources(),false);
         sources=addModuleSources(sources,nativeSources,true);
         if(CodeSourceBridge.executionUnknown()){
             if(sources==null)sources=Collections.newSetFromMap(new IdentityHashMap<>());sources.add(null);
         }
-        return sources==null?NO_SOURCES:sources.toArray(Module[]::new);
+        return sources==null?NO_SOURCES:sources.toArray(new Module[0]);
     }
     private static boolean resourceExposedFrom(Object object,Module[] sources){
         if(sources.length==0)return false;
         synchronized(CREATION_OWNERS){
             reapCreationOwners();Set<Module> merged=java.util.Collections.newSetFromMap(new java.util.IdentityHashMap<>());
-            merged.addAll(java.util.Arrays.asList(objectSources(object)));merged.addAll(java.util.Arrays.asList(sources));createdBy(object,merged.toArray(Module[]::new),false);
+            merged.addAll(java.util.Arrays.asList(objectSources(object)));merged.addAll(java.util.Arrays.asList(sources));createdBy(object,merged.toArray(new Module[0]),false);
         }
         return true;
     }
@@ -2123,7 +2132,7 @@ public final class TaskBridge {
     private static Module[] mutationSources(Module[] nativeSources){
         Set<Module> sources=addModuleSources(null,invokingSources(),false);
         sources=addModuleSources(sources,Objects.requireNonNull(nativeSources),false);
-        return sources==null?new Module[0]:sources.toArray(Module[]::new);
+        return sources==null?new Module[0]:sources.toArray(new Module[0]);
     }
     public static Object beginNativeArrayMutation(Object receiver,int start,int length,Module[] contributors){
         if(!NativeControl.memoryMutationBoundary(receiver))throw new SecurityException("ACTUAL_NATIVE_ARRAY_MUTATION_REQUIRED");
@@ -2274,7 +2283,7 @@ public final class TaskBridge {
             }else if(source!=null)read=new HeapMemoryRead(null,CodeSourceBridge.executionByteMemoryReadBefore(source,sourceOffset,sourceBytes));
             Module[] existing=readSources(read);
             Set<Module> combined=Collections.newSetFromMap(new IdentityHashMap<>());Collections.addAll(combined,contributors);Collections.addAll(combined,existing);
-            destination=unsafeReceipt(receiver,offset,bytes,combined.toArray(Module[]::new));
+            destination=unsafeReceipt(receiver,offset,bytes,combined.toArray(new Module[0]));
             if(!unsafeMemoryAllowed(receiver,offset,bytes)){
                 Object deniedDestination=destination,deniedRead=read;destination=null;read=null;
                 Throwable failure=finishMutationRetaining(deniedDestination,false,null);failure=finishMutationRetaining(deniedRead,false,failure);
@@ -2288,7 +2297,7 @@ public final class TaskBridge {
         if(copy.closed||copy.thread!=Thread.currentThread())throw new IllegalMonitorStateException("MEMORY_COPY_THREAD_REQUIRED");
         Set<Module> sources=Collections.newSetFromMap(new IdentityHashMap<>());Collections.addAll(sources,copy.before);
         Collections.addAll(sources,readSources(copy.read));
-        return sources.toArray(Module[]::new);
+        return sources.toArray(new Module[0]);
     }
     private static boolean rawMemoryCaller(){
         Class<?> caller=WALKER.walk(RAW_MEMORY_CALLER);

@@ -1,6 +1,6 @@
 /* VM method versions and real frame locations, independent of class/module names as ownership. */
 typedef struct CodeBootstrap {unsigned handle,count;unsigned *arguments;int loaded;} CodeBootstrap;
-typedef struct CodePool {const unsigned char **entries;uint32_t *sizes;unsigned count,self;CodeBootstrap *bootstraps;unsigned bootstrapCount;uintptr_t vm,slots,tags,operands,holder,holderName,resolved;unsigned operandLength,resolvedCount;unsigned char *scanTags;uintptr_t *scanSlots;unsigned *utfBuckets;size_t utfBucketCount;int utfIndexed,allocated,hidden,vmReady;} CodePool;
+typedef struct CodePool {const unsigned char **entries;uint32_t *sizes;unsigned count,self;CodeBootstrap *bootstraps;unsigned bootstrapCount;uintptr_t vm,slots,tags,operands,holder,holderName,resolved;unsigned operandLength,resolvedCount;unsigned char *scanTags;uintptr_t *scanSlots;uint16_t *scanOperands;unsigned *utfBuckets;size_t utfBucketCount;int utfIndexed,allocated,hidden,vmReady,vmSnapshot;} CodePool;
 typedef struct CodeHandler {unsigned start,end,target,type;} CodeHandler;
 typedef struct CodeMethod {char *key;size_t nameLength;const unsigned char *bytes;uint32_t length;unsigned *offsets;CodeHandler *handlers;unsigned handlerCount;OwnerLink **owners;unsigned instructions,access;int sourced;struct CodeMethod *next;} CodeMethod;
 typedef struct CodeVMMethod {uintptr_t method,constantMethod,constants;CodeHandler *handlers;unsigned handlerCount,codeLength;} CodeVMMethod;
@@ -29,7 +29,8 @@ static CodeImage *code_hidden_images;
 static size_t code_image_bucket_count,code_image_count;
 static CodeClass *code_classes;
 static volatile LONG code_available,code_pop_available,code_pop_failures,code_sourced;
-static jmethodID code_caller_gate,code_prepared_callback,code_pop_callback,code_root_gate;
+static jmethodID code_prepared_callback,code_pop_callback,code_root_gate;
+static jclass code_bridge;
 static jobject code_control_registry;
 static jfieldID code_control_backing;
 static int code_class_matches(JNIEnv*,CodeImage*,jclass,jobject,const char*);
@@ -252,7 +253,7 @@ static int code_equivalent(CodeImage *image,CodeMethod *method,const unsigned ch
 static void code_pool_free(CodePool *pool){
     if(pool->allocated&&pool->entries)for(unsigned i=0;i<pool->count;i++)free((void*)pool->entries[i]);
     if(pool->bootstraps)for(unsigned i=0;i<pool->bootstrapCount;i++)free(pool->bootstraps[i].arguments);
-    free(pool->bootstraps);free(pool->entries);free(pool->sizes);free(pool->scanTags);free(pool->scanSlots);free(pool->utfBuckets);memset(pool,0,sizeof(*pool));
+    free(pool->bootstraps);free(pool->entries);free(pool->sizes);free(pool->scanTags);free(pool->scanSlots);free(pool->scanOperands);free(pool->utfBuckets);memset(pool,0,sizeof(*pool));
 }
 #include "vm_metadata.c"
 static void code_links_free(OwnerLink *links){while(links){OwnerLink *next=links->next;free(links);links=next;}}
@@ -341,33 +342,57 @@ static int code_initialize(void){
 static int code_prepare(JNIEnv *env){
     // Heap/JNI observers can run as soon as their hooks are published, before
     // the first producer class supplies a code image.
-    if(!code_caller_gate)code_caller_gate=native_original.GetStaticMethodID(env,native_controller,"codeCaller","()Z");
     if(!code_prepared_callback)code_prepared_callback=native_original.GetStaticMethodID(env,native_controller,"codePrepared","(Ljava/lang/Class;)V");
     if(!code_pop_callback)code_pop_callback=native_original.GetStaticMethodID(env,native_controller,"executionPopped","(Ljava/lang/Object;Z)Z");
     if(!code_root_gate)code_root_gate=native_original.GetStaticMethodID(env,native_controller,"executionRootCaller","()Z");
-    if(!code_control_registry){
+    if(!code_bridge||!code_control_registry){
         jclass bridge=native_original.FindClass(env,"dev/ronova/pro/bootstrap/CodeSourceBridge");
         jclass map=native_original.FindClass(env,"dev/ronova/pro/bootstrap/CodeSourceBridge$ControlRegistry");jobject registry=NULL;jclass actual=NULL;
         if(bridge&&map&&native_bootstrap_class(env,bridge,"Ldev/ronova/pro/bootstrap/CodeSourceBridge;")
                 &&native_bootstrap_class(env,map,"Ldev/ronova/pro/bootstrap/CodeSourceBridge$ControlRegistry;")){
-            jfieldID field=native_original.GetStaticFieldID(env,bridge,"CONTROLS","Ldev/ronova/pro/bootstrap/CodeSourceBridge$ControlRegistry;");
-            registry=field?native_original.GetStaticObjectField(env,bridge,field):NULL;
-            actual=registry?native_original.GetObjectClass(env,registry):NULL;
-            if(actual&&native_original.IsSameObject(env,actual,map)){
-                code_control_backing=native_original.GetFieldID(env,map,"table","[Ldev/ronova/pro/bootstrap/CodeSourceBridge$ControlKey;");
-                if(code_control_backing)code_control_registry=native_original.NewGlobalRef(env,registry);
+            if(!code_bridge)code_bridge=(jclass)native_original.NewGlobalRef(env,bridge);
+            if(code_bridge&&!code_control_registry){
+                jfieldID field=native_original.GetStaticFieldID(env,bridge,"CONTROLS","Ldev/ronova/pro/bootstrap/CodeSourceBridge$ControlRegistry;");
+                registry=field?native_original.GetStaticObjectField(env,bridge,field):NULL;
+                actual=registry?native_original.GetObjectClass(env,registry):NULL;
+                if(actual&&native_original.IsSameObject(env,actual,map)){
+                    code_control_backing=native_original.GetFieldID(env,map,"table","[Ldev/ronova/pro/bootstrap/CodeSourceBridge$ControlKey;");
+                    if(code_control_backing)code_control_registry=native_original.NewGlobalRef(env,registry);
+                }
             }
         }
         if(actual)native_original.DeleteLocalRef(env,actual);if(registry)native_original.DeleteLocalRef(env,registry);
         if(bridge)native_original.DeleteLocalRef(env,bridge);if(map)native_original.DeleteLocalRef(env,map);
     }
-    return code_caller_gate&&code_prepared_callback&&code_pop_callback&&code_root_gate
+    return code_bridge&&code_prepared_callback&&code_pop_callback&&code_root_gate
             &&code_control_registry&&code_control_backing&&!native_original.ExceptionCheck(env);
+}
+/* Inspect this invocation's actual Java/native method frames without a Java
+ * callback. Only NativeControl itself is transparent; reflection, method-handle
+ * adapters and hidden callers must not borrow a deeper bridge frame's access. */
+static int code_caller(JNIEnv *env){
+    if(!native_jni_ready||!native_ti||!native_controller||!code_bridge||native_original.ExceptionCheck(env))return 0;
+    jvmtiFrameInfo frames[8];jint depth=0;
+    for(;;){
+        jint count=0;
+        if((*native_ti)->GetStackTrace(native_ti,NULL,depth,8,frames,&count)!=JVMTI_ERROR_NONE||count<=0||count>8)return 0;
+        for(jint i=0;i<count;i++){
+            jclass actual=NULL;
+            if((*native_ti)->GetMethodDeclaringClass(native_ti,frames[i].method,&actual)!=JVMTI_ERROR_NONE||!actual){
+                if(actual)native_original.DeleteLocalRef(env,actual);return 0;
+            }
+            int controller=native_original.IsSameObject(env,actual,native_controller);
+            int allowed=!controller&&native_original.IsSameObject(env,actual,code_bridge);
+            native_original.DeleteLocalRef(env,actual);
+            if(native_original.ExceptionCheck(env))return 0;
+            if(!controller)return allowed;
+        }
+        if(count<8||depth>INT32_MAX-count)return 0;depth+=count;
+    }
 }
 JNIEXPORT jobject JNICALL Java_dev_ronova_pro_bootstrap_NativeControl_controlTable0(JNIEnv *env,jclass type){
     if(!native_jni_ready||!native_original.IsSameObject(env,type,native_controller)
-            ||!code_control_registry||!code_control_backing||!code_caller_gate
-            ||!native_original.CallStaticBooleanMethod(env,native_controller,code_caller_gate)){
+            ||!code_control_registry||!code_control_backing||!code_caller(env)){
         native_refuse(env,"ACTUAL_CONTROL_TABLE_READER_REQUIRED");return NULL;
     }
     // Read only this actual control registry's current table. The original JNI
@@ -589,6 +614,9 @@ JNIEXPORT jobjectArray JNICALL Java_dev_ronova_pro_bootstrap_NativeControl_codeV
     (void)controller;if(!native_jni_ready||!native_original.CallStaticBooleanMethod(env,native_controller,native_control_gate)){native_refuse(env,"ACTUAL_CODE_VERSION_AGENT_REQUIRED");return NULL;}
     if(!code_available||!type||!expected)return NULL;
     jobject loader=NULL;char *signature=NULL;CodeDeclarations query={0};CodeVMBuffer scratch={0};CodePool pool={0};CodeImage *selected=NULL;
+    // This call inspects every declared body. Batch only its raw pool reads;
+    // frame queries keep their lazy reads, and no match survives this call.
+    scratch.wholeClass=1;
     jbyte *bytes=NULL;jobjectArray result=NULL;jclass string=NULL;int ready=(*native_ti)->GetClassLoader(native_ti,type,&loader)==JVMTI_ERROR_NONE
             &&(*native_ti)->GetClassSignature(native_ti,type,&signature,NULL)==JVMTI_ERROR_NONE;
     if(!ready)goto done;
@@ -636,8 +664,8 @@ static void JNICALL code_class_prepared(jvmtiEnv *ti,JNIEnv *env,jthread thread,
     if(native_original.ExceptionCheck(env)){native_original.ExceptionClear(env);InterlockedIncrement(&native_failures);}
 }
 JNIEXPORT jboolean JNICALL Java_dev_ronova_pro_bootstrap_NativeControl_preparedClass0(JNIEnv *env,jclass controller,jclass type){
-    (void)controller;NativeThread *state=native_thread();return state&&state->prepared&&code_caller_gate
-            &&native_original.CallStaticBooleanMethod(env,native_controller,code_caller_gate)&&native_original.IsSameObject(env,type,state->prepared);
+    (void)controller;NativeThread *state=native_thread();return state&&state->prepared
+            &&code_caller(env)&&native_original.IsSameObject(env,type,state->prepared);
 }
 /* A result is used only after actual frame bytecodes and referenced constants match this version. */
 static int code_frame_sources_checked(JNIEnv *env,jmethodID method,jlocation location,OwnerLink **owners,int *known,CodeFailure *failure){
@@ -745,7 +773,7 @@ static jclass code_field_owner(JNIEnv *env,jclass type,const char *name,const ch
     return result;
 }
 JNIEXPORT jclass JNICALL Java_dev_ronova_pro_bootstrap_NativeControl_codeFieldOwner0(JNIEnv *env,jclass controller,jclass symbolic,jstring name,jstring descriptor){
-    (void)controller;if(!native_jni_ready||!code_caller_gate||!native_original.CallStaticBooleanMethod(env,native_controller,code_caller_gate)){
+    (void)controller;if(!code_caller(env)){
         native_refuse(env,"ACTUAL_CODE_FIELD_BRIDGE_REQUIRED");return NULL;
     }
     if(!native_ti||!symbolic||!name||!descriptor)return NULL;
@@ -764,7 +792,7 @@ JNIEXPORT jboolean JNICALL Java_dev_ronova_pro_bootstrap_NativeControl_execution
     state->control--;return native_original.ExceptionCheck(env)?JNI_FALSE:result;
 }
 JNIEXPORT jobject JNICALL Java_dev_ronova_pro_bootstrap_NativeControl_executionPlan0(JNIEnv *env,jclass type,jclass declaring,jstring name,jstring descriptor,jint location){
-    (void)type;if(!native_jni_ready||!code_caller_gate||!native_original.CallStaticBooleanMethod(env,native_controller,code_caller_gate)){
+    (void)type;if(!code_caller(env)){
         native_refuse(env,"ACTUAL_CODE_FRAME_BRIDGE_REQUIRED");return NULL;
     }
     if(!code_available||!declaring||!name||!descriptor||location<0)return NULL;
@@ -787,7 +815,7 @@ JNIEXPORT jobject JNICALL Java_dev_ronova_pro_bootstrap_NativeControl_executionP
     free(frames);if(thread)native_original.DeleteLocalRef(env,thread);return result;
 }
 JNIEXPORT jboolean JNICALL Java_dev_ronova_pro_bootstrap_NativeControl_executionWatch0(JNIEnv *env,jclass controller,jclass declaring,jstring name,jstring descriptor,jint location,jobject plan,jobject token){
-    (void)controller;if(!native_jni_ready||!code_caller_gate||!native_original.CallStaticBooleanMethod(env,native_controller,code_caller_gate)){
+    (void)controller;if(!code_caller(env)){
         native_refuse(env,"ACTUAL_CODE_FRAME_BRIDGE_REQUIRED");return JNI_FALSE;
     }
     NativeThread *state=native_thread();jboolean result=JNI_FALSE;
@@ -842,7 +870,7 @@ static void code_thread_end(JNIEnv *env,NativeThread *state){
 }
 JNIEXPORT jboolean JNICALL Java_dev_ronova_pro_bootstrap_NativeControl_executionPopPermit0(JNIEnv *env,jclass controller,jobject token){
     (void)controller;NativeThread *state=native_thread();
-    return state&&state->popped&&code_caller_gate&&native_original.CallStaticBooleanMethod(env,native_controller,code_caller_gate)
+    return state&&state->popped&&code_caller(env)
             &&native_original.IsSameObject(env,state->popped,token)?JNI_TRUE:JNI_FALSE;
 }
 static void code_source_failure(JNIEnv *env,CodeFailure *failure,jmethodID method,jlocation location,int known){
@@ -907,7 +935,7 @@ static int code_current_stopped(JNIEnv *env){
     code_links_free(owners);if(!observed){native_refuse(env,"EXTERNAL_NATIVE_CALL_SOURCE_UNOBSERVED");return 1;}return stopped;
 }
 JNIEXPORT jobjectArray JNICALL Java_dev_ronova_pro_bootstrap_NativeControl_codeFrame0(JNIEnv *env,jclass type,jclass declaring,jstring name,jstring descriptor,jint location){
-    (void)type;if(!native_jni_ready||!code_caller_gate||!native_original.CallStaticBooleanMethod(env,native_controller,code_caller_gate)){native_refuse(env,"ACTUAL_CODE_FRAME_BRIDGE_REQUIRED");return NULL;}
+    (void)type;if(!code_caller(env)){native_refuse(env,"ACTUAL_CODE_FRAME_BRIDGE_REQUIRED");return NULL;}
     OwnerLink *owners=NULL;jthread thread=NULL;jvmtiFrameInfo *frames=NULL;jint count=0;const char *key=native_original.GetStringUTFChars(env,name,NULL),*desc=native_original.GetStringUTFChars(env,descriptor,NULL);
     if(code_available&&key&&desc&&(*native_ti)->GetCurrentThread(native_ti,&thread)==JVMTI_ERROR_NONE&&code_trace(thread,&frames,&count))for(jint i=0;i<count;i++){
         if(frames[i].location!=location)continue;jclass actual=NULL;char *method=NULL,*signature=NULL;
