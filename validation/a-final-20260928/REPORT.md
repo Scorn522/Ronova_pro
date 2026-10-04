@@ -1,5 +1,11 @@
 # Ronova Pro V1.5 A 批收口报告
 
+2026-10-04 晚间 B 收尾（未通过）：此前 indexed 引用、保存链及来源场景最终均因 Netty void write 方法插入 ARETURN 而触发 VerifyError；没有夹具效果结果，SERVER_EXIT=0 不表示通过。本批已修正 RETURN，统一构建通过（23 秒），实际 Agent 下以 -Xverify:all 加载 Netty 类通过。既有 b-adapter-linkage 同时确认真实字段门根／桶数组拒绝外部写入，原来源目录／控制表和对象适配器、字符流入口保持通过，见 evidence-20261002/b-startup-netty-controls-48.log。
+
+安装现场确认并修补两处前置入口问题：控制类镜像上的合法 Class.reflectionData CAS 被拒导致 JDK 重试；内部字节快照的 Arrays.equals 优化读取再次进入 Unsafe 观察。现仅放行真实 JDK 调用链及准确 reflectionData 槽，并改用内部逐字节比较。控制表直接摘除队列节点、字段门分桶弱身份查找、资源布局及 ASM 字段缓存一并编入，保留实际身份、锁和来源判断。隐藏类仅因声明模块重复项发生的来源差异不再要求重转换，真正外部来源改变仍保留未决。
+
+候选已更新，真实 prelaunch 的 mod-group-dynamic-b48-startup-final 与 b-source-abi48-startup-final 正在运行，当前不计 B 效果通过。保存链生产／原意图重启、引用清理及任务完整结清仍待实际结果。旧失败与线程现场保留，不重复已通过且未受影响的 Journal 检查。
+
 2026-10-04 后续启动热点修补：b-record-48-unknown 实际越过原 SensorType 失败点、Forge 初始化和方块缓存阶段，进入世界资源加载。为保留进度曾仅终止限时启动器，游戏保持运行；随后取得真实热点采样并完成针对性修补，停止旧游戏切换新包。此轮未到达夹具效果，不记通过。保留日志 b-record-48-unknown-startup.log 及 after-source-fix／config 两份线程现场。采样 112 个主线程样本中，executionPlan0 为 63，ControlRegistry.reap 为 33。隐藏类映像改为各自真实绑定链，堆目录只登记实际插入的弱键，短原型数组快照按实际 bits 相等复用；原来源、UNKNOWN、并发和 VM 验证保持。统一编译 15 秒、打包 11 秒通过，日志 build-b-hotspots-48.log、package-b-hotspots-48.log。原 SourceModuleFixture 的释放动作改用已清除身体的原操作编号，并检查实际撤销状态；该场景仅编译打包，尚未执行。当前 b-record-abi48-indexed 与 b-chain-abi48-indexed-production 分别运行，B 尚未完成。
 
 启动失败定位补充：第三轮（b-record-48-memory-source-failure.log）确认实际加载的是新构建 DLL，仍以不含逐帧诊断的同一来源捕获错误退出。源码复核发现真实 Io scope 的 null 未知来源标记被 native_capture_network_sources 当作 Owner 分配失败；已修补已知来源与未知状态的独立传递，并沿现有资源／内存路径保留未知状态，未将未知归属放宽为独占。修补及最终失败阶段定位已统一构建通过（14 秒，package-b-native-unknown-48.log），当前候选同步更新；原引用场景正在运行，游戏效果尚未通过。

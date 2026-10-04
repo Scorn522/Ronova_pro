@@ -1,0 +1,15 @@
+
+> C:\Users\Scorn\Desktop\MOD\Ronova-Pro-接续\MOD\.work\pro-a-final-20260928\runtime\b-chain-abi48-indexed-production\server\launch.log:210:java.lang.VerifyError: Method does not expect a return value
+  C:\Users\Scorn\Desktop\MOD\Ronova-Pro-接续\MOD\.work\pro-a-final-20260928\runtime\b-chain-abi48-indexed-production\server\launch.log:211:Exception Details:
+  C:\Users\Scorn\Desktop\MOD\Ronova-Pro-接续\MOD\.work\pro-a-final-20260928\runtime\b-chain-abi48-indexed-production\server\launch.log:212:  Location:
+  C:\Users\Scorn\Desktop\MOD\Ronova-Pro-接续\MOD\.work\pro-a-final-20260928\runtime\b-chain-abi48-indexed-production\server\launch.log:213:    io/netty/channel/AbstractChannelHandlerContext.write(Ljava/lang/Object;ZLio/netty/channel/ChannelPromise;)V @20: areturn
+  C:\Users\Scorn\Desktop\MOD\Ronova-Pro-接续\MOD\.work\pro-a-final-20260928\runtime\b-chain-abi48-indexed-production\server\launch.log:214:  Reason:
+  C:\Users\Scorn\Desktop\MOD\Ronova-Pro-接续\MOD\.work\pro-a-final-20260928\runtime\b-chain-abi48-indexed-production\server\launch.log:215:    Type 'io/netty/channel/ChannelPromise' (current frame, stack[0]) is not assignable to top (from method signature)
+  C:\Users\Scorn\Desktop\MOD\Ronova-Pro-接续\MOD\.work\pro-a-final-20260928\runtime\b-chain-abi48-indexed-production\server\launch.log:216:  Current Frame:
+  C:\Users\Scorn\Desktop\MOD\Ronova-Pro-接续\MOD\.work\pro-a-final-20260928\runtime\b-chain-abi48-indexed-production\server\launch.log:217:    bci: @20
+  C:\Users\Scorn\Desktop\MOD\Ronova-Pro-接续\MOD\.work\pro-a-final-20260928\runtime\b-chain-abi48-indexed-production\server\launch.log:218:    flags: { }
+  C:\Users\Scorn\Desktop\MOD\Ronova-Pro-接续\MOD\.work\pro-a-final-20260928\runtime\b-chain-abi48-indexed-production\server\launch.log:219:    locals: { 'io/netty/channel/AbstractChannelHandlerContext', 'java/lang/Object', integer, 'io/netty/channel/ChannelPromise' }
+  C:\Users\Scorn\Desktop\MOD\Ronova-Pro-接续\MOD\.work\pro-a-final-20260928\runtime\b-chain-abi48-indexed-production\server\launch.log:220:    stack: { 'io/netty/channel/ChannelPromise' }
+  C:\Users\Scorn\Desktop\MOD\Ronova-Pro-接续\MOD\.work\pro-a-final-20260928\runtime\b-chain-abi48-indexed-production\server\launch.log:221:  Bytecode:
+  C:\Users\Scorn\Desktop\MOD\Ronova-Pro-接续\MOD\.work\pro-a-final-20260928\runtime\b-chain-abi48-indexed-production\server\launch.log:222:    0000000: 2bb8 01e2 9a00 112b b801 e757 2db9 01ec
+

@@ -35,6 +35,7 @@ public final class TaskBridge {
     private static final java.util.function.Function<java.util.stream.Stream<StackWalker.StackFrame>,Class<?>> CORE_CALLER=new CoreCaller();
     private static final java.util.function.Function<java.util.stream.Stream<StackWalker.StackFrame>,Module[]> INVOKING_SOURCES=new InvokingSources();
     private static final java.util.function.Function<java.util.stream.Stream<StackWalker.StackFrame>,Class<?>> CONTROL_WRITER_CALLER=new ControlWriterCaller();
+    private static final java.util.function.Function<java.util.stream.Stream<StackWalker.StackFrame>,Boolean> CLASS_REFLECTION_WRITER=new ClassReflectionWriter();
     // These queries run from Unsafe guards. Linking a lambda here can itself
     // enter the same guard through MethodType's ConcurrentHashMap lookup.
     private static final class MemoryCaller implements java.util.function.Function<java.util.stream.Stream<StackWalker.StackFrame>,Class<?>> {
@@ -42,6 +43,27 @@ public final class TaskBridge {
             var cursor=frames.iterator();while(cursor.hasNext()){
                 Class<?> type=cursor.next().getDeclaringClass();if(type!=TaskBridge.class)return type;
             }return null;
+        }
+    }
+    private static final class ClassReflectionWriter implements java.util.function.Function<java.util.stream.Stream<StackWalker.StackFrame>,Boolean> {
+        public Boolean apply(java.util.stream.Stream<StackWalker.StackFrame> frames){
+            var cursor=frames.iterator();StackWalker.StackFrame frame=null;
+            while(cursor.hasNext()){frame=cursor.next();if(frame.getDeclaringClass()!=TaskBridge.class)break;frame=null;}
+            if(frame==null||!frame.isNativeMethod()||frame.getDeclaringClass().getClassLoader()!=null
+                    ||frame.getDeclaringClass().getModule()!=Class.class.getModule()
+                    ||!frame.getDeclaringClass().getName().equals("jdk.internal.misc.Unsafe")
+                    ||!frame.getMethodName().equals("compareAndSetReference")
+                    ||!frame.getDescriptor().equals("(Ljava/lang/Object;JLjava/lang/Object;Ljava/lang/Object;)Z"))return false;
+            if(!cursor.hasNext())return false;frame=cursor.next();Class<?> atomic=frame.getDeclaringClass();
+            if(atomic.getClassLoader()!=null||atomic.getNestHost()!=Class.class||!atomic.getName().equals("java.lang.Class$Atomic")
+                    ||!frame.getMethodName().equals("casReflectionData")
+                    ||!frame.getDescriptor().equals("(Ljava/lang/Class;Ljava/lang/ref/SoftReference;Ljava/lang/ref/SoftReference;)Z"))return false;
+            if(!cursor.hasNext())return false;frame=cursor.next();
+            if(frame.getDeclaringClass()!=Class.class||!frame.getMethodName().equals("newReflectionData")
+                    ||!frame.getDescriptor().equals("(Ljava/lang/ref/SoftReference;I)Ljava/lang/Class$ReflectionData;"))return false;
+            if(!cursor.hasNext())return false;frame=cursor.next();
+            return frame.getDeclaringClass()==Class.class&&frame.getMethodName().equals("reflectionData")
+                    &&frame.getDescriptor().equals("()Ljava/lang/Class$ReflectionData;");
         }
     }
     private static final class RawMemoryCaller implements java.util.function.Function<java.util.stream.Stream<StackWalker.StackFrame>,Class<?>> {
@@ -1194,7 +1216,7 @@ public final class TaskBridge {
         return false;
     }
     static boolean controlled(Object value) {
-        if(value==null)return false;if(SourceMapBridge.controlled(value)||DefinitionBridge.controlled(value)||CodeSourceBridge.controlled(value)||NetworkBridge.controlled(value)||ClientBridge.controlled(value)||criticalEntry(value))return true;ControlRef[] controls=controlObjects;
+        if(value==null)return false;if(fieldGateControl(value)||SourceMapBridge.controlled(value)||DefinitionBridge.controlled(value)||CodeSourceBridge.controlled(value)||NetworkBridge.controlled(value)||ClientBridge.controlled(value)||criticalEntry(value))return true;ControlRef[] controls=controlObjects;
         if(value==controls||value==controlBits)return true;
         int hash=System.identityHashCode(value)&65535;
         if((controlBits[hash>>>6]&(1L<<(hash&63)))==0)return false;
@@ -1660,11 +1682,20 @@ public final class TaskBridge {
     public static boolean unsafeWriteAllowed(Object receiver,long offset,Object value,String kind) {
         return unsafeWriteAllowed(receiver,offset,value,ResourceBridge.unsafeWidth(kind));
     }
+    private static boolean classReflectionWrite(Object receiver,long offset,int width){
+        // A controller's Class mirror also holds Class's own instance cache.
+        // Admit only its real JDK CAS, never an arbitrary write to that mirror.
+        if(!ORIGIN_WALKER.walk(CLASS_REFLECTION_WRITER))return false;
+        var field=ResourceBridge.exactField(receiver,offset,width);
+        return field!=null&&field.getDeclaringClass()==Class.class&&!java.lang.reflect.Modifier.isStatic(field.getModifiers())
+                &&field.getName().equals("reflectionData")&&field.getType()==java.lang.ref.SoftReference.class;
+    }
     private static boolean unsafeWriteAllowed(Object receiver,long offset,Object value,int resourceWidth) {
         if(!CodeSourceBridge.fieldRangeAllowed(receiver,offset,resourceWidth)&&!coreWriter())return false;
         if(!ResourceBridge.unsafeMutationAllowed(receiver,offset,resourceWidth))return false;
         if((modStopped(objectModule(receiver))||stoppedInvocation())&&!coreWriter())return false;
-        if(receiver instanceof Class<?> owner&&ownState(owner)||receiver!=null&&ownState(receiver.getClass()))return false;
+        if(receiver instanceof Class<?> owner&&ownState(owner)&&!classReflectionWrite(receiver,offset,resourceWidth)
+                ||receiver!=null&&ownState(receiver.getClass()))return false;
         if(receiver==null)return true; // Raw-address writes have no exact object binding here.
         if(receiver instanceof java.util.Map.Entry<?,?>&&controlled(SourceMapBridge.ownerOf(receiver))&&!controlCaller())return false;
         if(!controlMutationAllowed(receiver)||!BackingBridge.offsetAllowed(receiver,offset,value))return false;
@@ -1727,9 +1758,9 @@ public final class TaskBridge {
     private static final class FieldGateNode extends java.lang.ref.WeakReference<Object> {
         final int hash;
         final java.util.concurrent.locks.ReentrantLock gate=new java.util.concurrent.locks.ReentrantLock();
-        FieldGateNode next;
+        FieldGateNode previous,next;
         FieldGateNode(Object receiver,int hash,java.lang.ref.ReferenceQueue<Object> queue,FieldGateNode next) {
-            super(receiver,queue);this.hash=hash;this.next=next;
+            super(receiver,queue);this.hash=hash;this.next=next;if(next!=null)next.previous=this;
         }
     }
     public static boolean nativeArrayElementAllowed(Object array,int index,Object value){
@@ -1768,28 +1799,42 @@ public final class TaskBridge {
     }
     private static final class FieldGateBucket {
         final java.lang.ref.ReferenceQueue<Object> retired=new java.lang.ref.ReferenceQueue<>();
-        // TreeMap is not a monitored HashMap/ConcurrentHashMap source. The exact
-        // identity hash gives logarithmic lookup; rare collisions use a short chain.
-        final java.util.TreeMap<Integer,FieldGateNode> byHash=new java.util.TreeMap<>();
+        // This directory cannot invoke monitored JDK maps. The outer stripe
+        // uses the low ten hash bits; its local table uses the remaining bits.
+        volatile FieldGateNode[] table=new FieldGateNode[16];int size;
+        private static int bucket(int hash,int length){return ((hash>>>10)^(hash>>>20))&(length-1);}
         synchronized java.util.concurrent.locks.ReentrantLock get(Object receiver) {
             for(int i=0;i<16;i++) {
                 FieldGateNode dead=(FieldGateNode)retired.poll();if(dead==null)break;
-                FieldGateNode previous=null,node=byHash.get(dead.hash);
-                while(node!=null&&node!=dead){previous=node;node=node.next;}
-                if(node==null)continue;
-                if(previous!=null)previous.next=node.next;
-                else if(node.next==null)byHash.remove(dead.hash);
-                else byHash.put(dead.hash,node.next);
+                int at=bucket(dead.hash,table.length);FieldGateNode previous=dead.previous,next=dead.next;
+                if(previous==null){if(table[at]!=dead)continue;table[at]=next;}
+                else {if(previous.next!=dead)continue;previous.next=next;}
+                if(next!=null)next.previous=previous;
+                dead.previous=null;dead.next=null;size--;
             }
             int hash=System.identityHashCode(receiver);
-            FieldGateNode first=byHash.get(hash);
-            for(FieldGateNode node=first;node!=null;node=node.next)if(node.get()==receiver)return node.gate;
-            FieldGateNode added=new FieldGateNode(receiver,hash,retired,first);
-            byHash.put(hash,added);return added.gate;
+            int at=bucket(hash,table.length);
+            for(FieldGateNode node=table[at];node!=null;node=node.next)if(node.hash==hash&&node.get()==receiver)return node.gate;
+            if(size>=table.length-(table.length>>>2)&&table.length<(1<<30)){
+                FieldGateNode[] next=new FieldGateNode[table.length*2];
+                for(FieldGateNode first:table)for(FieldGateNode node=first;node!=null;){
+                    FieldGateNode following=node.next;int slot=bucket(node.hash,next.length);
+                    node.previous=null;node.next=next[slot];if(node.next!=null)node.next.previous=node;next[slot]=node;node=following;
+                }
+                table=next;at=bucket(hash,table.length);
+            }
+            FieldGateNode added=new FieldGateNode(receiver,hash,retired,table[at]);
+            table[at]=added;size++;return added.gate;
         }
     }
     private static final FieldGateBucket[] FIELD_GATES=new FieldGateBucket[1024];
     static {for(int i=0;i<FIELD_GATES.length;i++)FIELD_GATES[i]=new FieldGateBucket();}
+    private static boolean fieldGateControl(Object value){
+        FieldGateBucket[] buckets=FIELD_GATES;if(buckets==null)return false;
+        if(value==buckets)return true;
+        if(value instanceof FieldGateNode[])for(FieldGateBucket bucket:buckets)if(bucket!=null&&bucket.table==value)return true;
+        return false;
+    }
     private static java.util.concurrent.locks.ReentrantLock fieldGate(Object receiver) {
         if(receiver==null)throw new IllegalArgumentException("INDEX_GATE_RECEIVER_REQUIRED");
         return FIELD_GATES[System.identityHashCode(receiver)&(FIELD_GATES.length-1)].get(receiver);

@@ -64,9 +64,10 @@ final class NetworkBoundary {
                 returns(method,code->{code.add(new VarInsnNode(Opcodes.ALOAD,vars[1]));code.add(new VarInsnNode(Opcodes.ALOAD,vars[2]));call(code,"packetEncoded","(Ljava/lang/Object;Ljava/lang/Object;)V");});changed=true;
             }
             if(name.equals(NETTY)&&method.name.equals("write")&&args.length==3&&args[0].getDescriptor().equals("Ljava/lang/Object;")&&args[1].getSort()==Type.BOOLEAN&&args[2].getDescriptor().equals("Lio/netty/channel/ChannelPromise;")){
+                if(result.getSort()!=Type.VOID)throw new IllegalStateException("NETTY_WRITE_RETURN_LAYOUT_UNAVAILABLE:"+method.desc);
                 InsnList guard=gate(vars[0],"outboundAllowed");guard.add(new VarInsnNode(Opcodes.ALOAD,vars[0]));guard.add(new MethodInsnNode(Opcodes.INVOKESTATIC,"io/netty/util/ReferenceCountUtil","release","(Ljava/lang/Object;)Z",false));guard.add(new InsnNode(Opcodes.POP));
                 guard.add(new VarInsnNode(Opcodes.ALOAD,vars[2]));guard.add(new MethodInsnNode(Opcodes.INVOKEINTERFACE,"io/netty/channel/ChannelPromise","trySuccess","()Z",true));guard.add(new InsnNode(Opcodes.POP));
-                guard.add(new VarInsnNode(Opcodes.ALOAD,vars[2]));guard.add(new InsnNode(Opcodes.ARETURN));endGate(guard);method.instructions.insert(guard);changed=true;
+                guard.add(new InsnNode(Opcodes.RETURN));endGate(guard);method.instructions.insert(guard);changed=true;
             }
             if(name.equals(NETTY)&&Set.of("invokeWrite","invokeWriteAndFlush").contains(method.name)&&args.length==2&&args[0].getDescriptor().equals("Ljava/lang/Object;")&&args[1].getDescriptor().equals("Lio/netty/channel/ChannelPromise;")&&(method.access&Opcodes.ACC_STATIC)==0){
                 InsnList guard=gate(vars[0],"outboundAllowed");guard.add(new VarInsnNode(Opcodes.ALOAD,vars[0]));guard.add(new MethodInsnNode(Opcodes.INVOKESTATIC,"io/netty/util/ReferenceCountUtil","release","(Ljava/lang/Object;)Z",false));guard.add(new InsnNode(Opcodes.POP));

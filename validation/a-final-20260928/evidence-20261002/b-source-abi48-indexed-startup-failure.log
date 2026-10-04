@@ -1,0 +1,31 @@
+
+> C:\Users\Scorn\Desktop\MOD\Ronova-Pro-接续\MOD\.work\pro-a-final-20260928\runtime\b-source-abi48-indexed\server\launch.log:216:RONOVA_EXTERNAL_CALLER_REFRESH_FAILED:dev.ronova.pro.validation.SourceModuleFixture$$Lambda$4516/0x0000024229bb5658:UnmodifiableClassException
+> C:\Users\Scorn\Desktop\MOD\Ronova-Pro-接续\MOD\.work\pro-a-final-20260928\runtime\b-source-abi48-indexed\server\launch.log:217:RONOVA_EXTERNAL_CALLER_REFRESH_FAILED:dev.ronova.pro.validation.SourceModuleFixture$$Lambda$4516/0x0000024229bb5658:UnmodifiableClassException
+> C:\Users\Scorn\Desktop\MOD\Ronova-Pro-接续\MOD\.work\pro-a-final-20260928\runtime\b-source-abi48-indexed\server\launch.log:218:RONOVA_EXTERNAL_CALLER_REFRESH_FAILED:dev.ronova.pro.validation.SourceModuleFixture$$Lambda$4516/0x0000024229bb5658:UnmodifiableClassException
+  C:\Users\Scorn\Desktop\MOD\Ronova-Pro-接续\MOD\.work\pro-a-final-20260928\runtime\b-source-abi48-indexed\server\launch.log:219:[10:43:31] [main/INFO] [minecraft/RecipeManager]: Loaded 7 recipes
+> C:\Users\Scorn\Desktop\MOD\Ronova-Pro-接续\MOD\.work\pro-a-final-20260928\runtime\b-source-abi48-indexed\server\launch.log:220:RONOVA_EXTERNAL_CALLER_REFRESH_FAILED:dev.ronova.pro.validation.SourceModuleFixture$$Lambda$4516/0x0000024229bb5658:UnmodifiableClassException
+  C:\Users\Scorn\Desktop\MOD\Ronova-Pro-接续\MOD\.work\pro-a-final-20260928\runtime\b-source-abi48-indexed\server\launch.log:221:[10:44:46] [main/INFO] [minecraft/AdvancementList]: Loaded 1271 advancements
+> C:\Users\Scorn\Desktop\MOD\Ronova-Pro-接续\MOD\.work\pro-a-final-20260928\runtime\b-source-abi48-indexed\server\launch.log:222:RONOVA_EXTERNAL_CALLER_REFRESH_FAILED:dev.ronova.pro.validation.SourceModuleFixture$$Lambda$4516/0x0000024229bb5658:UnmodifiableClassException
+> C:\Users\Scorn\Desktop\MOD\Ronova-Pro-接续\MOD\.work\pro-a-final-20260928\runtime\b-source-abi48-indexed\server\launch.log:223:RONOVA_EXTERNAL_CALLER_REFRESH_FAILED:dev.ronova.pro.validation.SourceModuleFixture$$Lambda$4516/0x0000024229bb5658:UnmodifiableClassException
+  C:\Users\Scorn\Desktop\MOD\Ronova-Pro-接续\MOD\.work\pro-a-final-20260928\runtime\b-source-abi48-indexed\server\launch.log:224:[10:58:48] [Server thread/INFO] [minecraft/DedicatedServer]: Starting minecraft server version 1.20.1
+  C:\Users\Scorn\Desktop\MOD\Ronova-Pro-接续\MOD\.work\pro-a-final-20260928\runtime\b-source-abi48-indexed\server\launch.log:225:[10:58:48] [Server thread/INFO] [minecraft/DedicatedServer]: Loading properties
+  C:\Users\Scorn\Desktop\MOD\Ronova-Pro-接续\MOD\.work\pro-a-final-20260928\runtime\b-source-abi48-indexed\server\launch.log:226:[10:58:48] [Server thread/INFO] [minecraft/DedicatedServer]: Default game type: SURVIVAL
+  C:\Users\Scorn\Desktop\MOD\Ronova-Pro-接续\MOD\.work\pro-a-final-20260928\runtime\b-source-abi48-indexed\server\launch.log:227:[10:58:48] [Server thread/INFO] [minecraft/MinecraftServer]: Generating keypair
+  C:\Users\Scorn\Desktop\MOD\Ronova-Pro-接续\MOD\.work\pro-a-final-20260928\runtime\b-source-abi48-indexed\server\launch.log:228:[10:58:49] [Server thread/INFO] [minecraft/DedicatedServer]: Starting Minecraft server on 127.0.0.1:25900
+  C:\Users\Scorn\Desktop\MOD\Ronova-Pro-接续\MOD\.work\pro-a-final-20260928\runtime\b-source-abi48-indexed\server\launch.log:229:[10:58:54] [Server thread/INFO] [minecraft/ServerConnectionListener]: Using default channel type
+> C:\Users\Scorn\Desktop\MOD\Ronova-Pro-接续\MOD\.work\pro-a-final-20260928\runtime\b-source-abi48-indexed\server\launch.log:230:RONOVA_EXTERNAL_CALLER_REFRESH_FAILED:dev.ronova.pro.validation.SourceModuleFixture$$Lambda$4516/0x0000024229bb5658:UnmodifiableClassException
+  C:\Users\Scorn\Desktop\MOD\Ronova-Pro-接续\MOD\.work\pro-a-final-20260928\runtime\b-source-abi48-indexed\server\launch.log:231:[10:59:36] [Server thread/ERROR] [minecraft/MinecraftServer]: Encountered an unexpected exception
+> C:\Users\Scorn\Desktop\MOD\Ronova-Pro-接续\MOD\.work\pro-a-final-20260928\runtime\b-source-abi48-indexed\server\launch.log:232:java.lang.VerifyError: Method does not expect a return value
+  C:\Users\Scorn\Desktop\MOD\Ronova-Pro-接续\MOD\.work\pro-a-final-20260928\runtime\b-source-abi48-indexed\server\launch.log:233:Exception Details:
+  C:\Users\Scorn\Desktop\MOD\Ronova-Pro-接续\MOD\.work\pro-a-final-20260928\runtime\b-source-abi48-indexed\server\launch.log:234:  Location:
+  C:\Users\Scorn\Desktop\MOD\Ronova-Pro-接续\MOD\.work\pro-a-final-20260928\runtime\b-source-abi48-indexed\server\launch.log:235:    io/netty/channel/AbstractChannelHandlerContext.write(Ljava/lang/Object;ZLio/netty/channel/ChannelPromise;)V @20: areturn
+  C:\Users\Scorn\Desktop\MOD\Ronova-Pro-接续\MOD\.work\pro-a-final-20260928\runtime\b-source-abi48-indexed\server\launch.log:236:  Reason:
+  C:\Users\Scorn\Desktop\MOD\Ronova-Pro-接续\MOD\.work\pro-a-final-20260928\runtime\b-source-abi48-indexed\server\launch.log:237:    Type 'io/netty/channel/ChannelPromise' (current frame, stack[0]) is not assignable to top (from method signature)
+  C:\Users\Scorn\Desktop\MOD\Ronova-Pro-接续\MOD\.work\pro-a-final-20260928\runtime\b-source-abi48-indexed\server\launch.log:238:  Current Frame:
+  C:\Users\Scorn\Desktop\MOD\Ronova-Pro-接续\MOD\.work\pro-a-final-20260928\runtime\b-source-abi48-indexed\server\launch.log:239:    bci: @20
+  C:\Users\Scorn\Desktop\MOD\Ronova-Pro-接续\MOD\.work\pro-a-final-20260928\runtime\b-source-abi48-indexed\server\launch.log:240:    flags: { }
+  C:\Users\Scorn\Desktop\MOD\Ronova-Pro-接续\MOD\.work\pro-a-final-20260928\runtime\b-source-abi48-indexed\server\launch.log:241:    locals: { 'io/netty/channel/AbstractChannelHandlerContext', 'java/lang/Object', integer, 'io/netty/channel/ChannelPromise' }
+  C:\Users\Scorn\Desktop\MOD\Ronova-Pro-接续\MOD\.work\pro-a-final-20260928\runtime\b-source-abi48-indexed\server\launch.log:242:    stack: { 'io/netty/channel/ChannelPromise' }
+  C:\Users\Scorn\Desktop\MOD\Ronova-Pro-接续\MOD\.work\pro-a-final-20260928\runtime\b-source-abi48-indexed\server\launch.log:243:  Bytecode:
+  C:\Users\Scorn\Desktop\MOD\Ronova-Pro-接续\MOD\.work\pro-a-final-20260928\runtime\b-source-abi48-indexed\server\launch.log:244:    0000000: 2bb8 01e2 9a00 112b b801 e757 2db9 01ec
+

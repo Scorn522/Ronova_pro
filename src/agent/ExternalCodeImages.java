@@ -10,6 +10,21 @@ import jdk.internal.org.objectweb.asm.tree.*;
 /** Actual transformer transactions, retaining instruction identities across subsequent edits. */
 final class ExternalCodeImages {
     private static final Module[] NO_MODULES=new Module[0];
+    private static final ClassValue<Field[]> IMAGE_FIELDS=new ClassValue<>(){
+        @Override protected Field[] computeValue(Class<?> type){
+            List<Field> selected=new ArrayList<>();
+            for(Field field:type.getFields())if(!Modifier.isStatic(field.getModifiers())&&!field.getType().isPrimitive()){
+                if(!field.trySetAccessible())throw new IllegalStateException("EXTERNAL_IMAGE_CONTROL_FIELD_UNAVAILABLE:"+field.getName());
+                selected.add(field);
+            }
+            Field[] fields=selected.toArray(Field[]::new);
+            // The lookup is class-identity based; each traversal still reads the
+            // current field on its actual node and protects all reachable values.
+            Object[] controls=new Object[fields.length+2];controls[0]=this;controls[1]=fields;
+            System.arraycopy(fields,0,controls,2,fields.length);ControlImages.protect(controls);
+            return fields;
+        }
+    };
     private static final ReferenceQueue<Object> DEAD=new ReferenceQueue<>();
     private static final Map<Key,Long> IDS=new HashMap<>();
     private static final Map<Key,History> TREES=new HashMap<>();
@@ -699,7 +714,7 @@ final class ExternalCodeImages {
             else if(value instanceof Collection<?> collection){for(Object entry:collection)if(entry!=null)pending.add(entry);}
             else if(value instanceof Object[] array){for(Object entry:array)if(entry!=null)pending.add(entry);}
             else if(value instanceof ExternalCodeFlow.ControlChange change){pending.add(change.alternatives());pending.add(change.owners());}
-            else if(value.getClass().getName().startsWith("jdk.internal.org.objectweb.asm."))for(Field field:value.getClass().getFields())if(!Modifier.isStatic(field.getModifiers())&&!field.getType().isPrimitive())
+            else if(value.getClass().getName().startsWith("jdk.internal.org.objectweb.asm."))for(Field field:IMAGE_FIELDS.get(value.getClass()))
                 try{Object child=field.get(value);if(child!=null)pending.add(child);}catch(IllegalAccessException failure){throw new IllegalStateException("EXTERNAL_IMAGE_CONTROL_CAPTURE_FAILED",failure);}
             if(value instanceof AbstractInsnNode instruction){if(instruction.getNext()!=null)pending.add(instruction.getNext());if(instruction.getPrevious()!=null)pending.add(instruction.getPrevious());}
             if(value instanceof InsnList instructions)for(AbstractInsnNode instruction:instructions.toArray())pending.add(instruction);

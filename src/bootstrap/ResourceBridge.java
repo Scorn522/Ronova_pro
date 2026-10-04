@@ -3,6 +3,7 @@ package dev.ronova.pro.bootstrap;
 import java.io.*;
 import java.lang.ref.*;
 import java.lang.reflect.Field;
+import java.lang.reflect.Method;
 import java.nio.*;
 import java.nio.channels.Channel;
 import java.nio.channels.ClosedChannelException;
@@ -86,6 +87,9 @@ public final class ResourceBridge {
     }
     private record Span(Field field,long offset,int bytes) { }
     private static final Object UNSAFE=unsafe();
+    private static final Method ARRAY_BASE=layoutMethod("arrayBaseOffset",Class.class),ARRAY_SCALE=layoutMethod("arrayIndexScale",Class.class),
+            INSTANCE_OFFSET=layoutMethod("objectFieldOffset",Field.class),STATIC_OFFSET=layoutMethod("staticFieldOffset",Field.class),
+            STATIC_BASE=layoutMethod("staticFieldBase",Field.class);
     private static final ClassValue<List<Span>> INSTANCE_SPANS=new ClassValue<>() {
         protected List<Span> computeValue(Class<?> type){return spans(type,false);}
     };
@@ -1400,10 +1404,18 @@ public final class ResourceBridge {
             Field singleton=type.getDeclaredField("theUnsafe");singleton.setAccessible(true);return singleton.get(null);
         }catch(ReflectiveOperationException failed){throw new ExceptionInInitializerError(failed);}
     }
+    private static Method layoutMethod(String name,Class<?> parameter){
+        try{
+            Method method=UNSAFE.getClass().getMethod(name,parameter);
+            if(!method.trySetAccessible())throw new IllegalStateException("RESOURCE_LAYOUT_METHOD_UNAVAILABLE:"+name);
+            CodeSourceBridge.resourceLayoutControls(method);
+            return method;
+        }catch(ReflectiveOperationException failed){throw new ExceptionInInitializerError(failed);}
+    }
     private static List<Span> spans(Class<?> actual,boolean statik){
         try{
-            var offset=UNSAFE.getClass().getMethod(statik?"staticFieldOffset":"objectFieldOffset",Field.class);
-            int referenceBytes=((Number)UNSAFE.getClass().getMethod("arrayIndexScale",Class.class).invoke(UNSAFE,Object[].class)).intValue();
+            var offset=statik?STATIC_OFFSET:INSTANCE_OFFSET;
+            int referenceBytes=((Number)ARRAY_SCALE.invoke(UNSAFE,Object[].class)).intValue();
             List<Span> result=new ArrayList<>();
             for(Class<?> type=actual;type!=null;type=type.getSuperclass())if(platformLayout(type))for(Field field:type.getDeclaredFields()){
                 if(java.lang.reflect.Modifier.isStatic(field.getModifiers())!=statik)continue;
@@ -1433,21 +1445,21 @@ public final class ResourceBridge {
     }
     static int unsafeWidth(String kind){
         return switch(kind){case "Boolean","Byte"->1;case "Short","Char"->2;case "Int","Float"->4;case "Long","Double"->8;
-            case "Object","Reference"->{try{yield ((Number)UNSAFE.getClass().getMethod("arrayIndexScale",Class.class).invoke(UNSAFE,Object[].class)).intValue();}
+            case "Object","Reference"->{try{yield ((Number)ARRAY_SCALE.invoke(UNSAFE,Object[].class)).intValue();}
                 catch(ReflectiveOperationException failed){throw new IllegalStateException("RESOURCE_REFERENCE_LAYOUT_UNOBSERVED",failed);}}
             default->8;};
     }
     static long[] arrayLayout(Class<?> actual){
         if(actual==null||!actual.isArray())return null;
         try{
-            int base=((Number)UNSAFE.getClass().getMethod("arrayBaseOffset",Class.class).invoke(UNSAFE,actual)).intValue();
-            int scale=((Number)UNSAFE.getClass().getMethod("arrayIndexScale",Class.class).invoke(UNSAFE,actual)).intValue();
+            int base=((Number)ARRAY_BASE.invoke(UNSAFE,actual)).intValue();
+            int scale=((Number)ARRAY_SCALE.invoke(UNSAFE,actual)).intValue();
             return base>=0&&scale>0?new long[]{base,scale}:null;
         }catch(ReflectiveOperationException unavailable){throw new IllegalStateException("EXTERNAL_ARRAY_LAYOUT_UNAVAILABLE",unavailable);}
     }
     private static boolean fieldHolder(Field field,Object receiver)throws ReflectiveOperationException{
         return java.lang.reflect.Modifier.isStatic(field.getModifiers())
-                ?UNSAFE.getClass().getMethod("staticFieldBase",Field.class).invoke(UNSAFE,field)==receiver
+                ?STATIC_BASE.invoke(UNSAFE,field)==receiver
                 :receiver!=null&&field.getDeclaringClass().isInstance(receiver);
     }
     /** Resolve storage on the actual receiver before considering a Class mirror's static storage. */
@@ -1475,7 +1487,7 @@ public final class ResourceBridge {
         try{
             boolean statik=java.lang.reflect.Modifier.isStatic(field.getModifiers());
             if(!fieldHolder(field,receiver))return null;
-            long at=((Number)UNSAFE.getClass().getMethod(statik?"staticFieldOffset":"objectFieldOffset",Field.class).invoke(UNSAFE,field)).longValue();
+            long at=((Number)(statik?STATIC_OFFSET:INSTANCE_OFFSET).invoke(UNSAFE,field)).longValue();
             Class<?> type=field.getType();int width=type.isPrimitive()?type==long.class||type==double.class?8:type==int.class||type==float.class?4:type==short.class||type==char.class?2:1:unsafeWidth("Reference");
             return new long[]{at,width};
         }catch(ReflectiveOperationException unavailable){throw new IllegalStateException("EXTERNAL_FIELD_LAYOUT_UNAVAILABLE",unavailable);}

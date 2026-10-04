@@ -552,8 +552,12 @@ final class ExecutionFlow {
         int from=(int)relative;
         if(left.values==null||left.values instanceof byte[]){
             if(right.values!=null&&!(right.values instanceof byte[]))return false;
-            if(left.values instanceof byte[] bytes&&right.values instanceof byte[] other)
-                return Arrays.equals(bytes,left.offset,left.offset+length,other,right.offset+from,right.offset+from+length);
+            if(left.values instanceof byte[] bytes&&right.values instanceof byte[] other){
+                // These are protected snapshots. Arrays.equals uses Unsafe reads,
+                // which would recursively observe the controller's own comparison.
+                for(int i=0;i<length;i++)if(bytes[left.offset+i]!=other[right.offset+from+i])return false;
+                return true;
+            }
             return imageBits(left)==imageBits(right,from,length);
         }
         if(!(right.values instanceof Value[] other))return false;Value[] values=(Value[])left.values;

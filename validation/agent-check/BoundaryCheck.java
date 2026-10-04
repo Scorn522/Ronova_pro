@@ -490,6 +490,8 @@ public final class BoundaryCheck {
     @SuppressWarnings("unchecked") private static void bAdapterLinkage()throws Exception{
         Class<?> agent=Class.forName("dev.ronova.pro.agent.RecoveryAgent",false,ClassLoader.getSystemClassLoader());
         require(String.valueOf(agent.getMethod("installState").invoke(null)).startsWith("INSTALLED"),"actual agent installation for B adapters");
+        Class.forName("io.netty.channel.AbstractChannelHandlerContext",true,ClassLoader.getSystemClassLoader());
+        System.out.println("PASS: actual Netty write boundary verifies with its void return");
         Class<?> sources=Class.forName("dev.ronova.pro.bootstrap.SourceMapBridge",false,null);
         Field roots=sources.getDeclaredField("scopes");roots.setAccessible(true);
         controlArrayWriteRefused(roots.get(null),"source directory roots");
@@ -497,6 +499,18 @@ public final class BoundaryCheck {
         Field controls=code.getDeclaredField("CONTROLS");controls.setAccessible(true);Object registry=controls.get(null);
         Field table=registry.getClass().getDeclaredField("table");table.setAccessible(true);
         controlArrayWriteRefused(table.get(registry),"actual control table");
+        Class<?> tasks=Class.forName("dev.ronova.pro.bootstrap.TaskBridge",false,null);
+        Field gates=tasks.getDeclaredField("FIELD_GATES");gates.setAccessible(true);Object gateRoots=gates.get(null);
+        controlArrayWriteRefused(gateRoots,"actual field gate roots");
+        boolean liveGate=false;
+        for(int i=0;i<Array.getLength(gateRoots)&&!liveGate;i++){
+            Object bucket=Array.get(gateRoots,i);Field entries=bucket.getClass().getDeclaredField("table");entries.setAccessible(true);
+            Object nodes=entries.get(bucket);
+            for(int j=0;j<Array.getLength(nodes);j++)if(Array.get(nodes,j)!=null){
+                controlArrayWriteRefused(nodes,"actual field gate bucket");liveGate=true;break;
+            }
+        }
+        require(liveGate,"actual installed field gate has a protected receiver");
         String listType="it.unimi.dsi.fastutil.objects.ObjectArrayList",setType="it.unimi.dsi.fastutil.objects.ObjectOpenHashSet";
         List<Object> list=(List<Object>)Class.forName(listType).getConstructor().newInstance();Object first=new Object(),second=new Object();
         list.add(first);list.add(second);list.subList(0,1).addAll(List.of(second));list.listIterator().add(first);list.subList(0,1).listIterator().add(second);list.remove(0);list.remove(0);

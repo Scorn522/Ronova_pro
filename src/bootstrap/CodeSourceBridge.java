@@ -121,8 +121,8 @@ public final class CodeSourceBridge {
         public boolean enqueue(){return writer(WALKER.getCallerClass())&&super.enqueue();}
     }
     private static final class ControlKey extends WeakReference<Object>{
-        final int hash;ControlKey next;boolean executionList,executionMap;
-        ControlKey(Object value,ControlKey next){super(value,DEAD_CONTROLS);hash=System.identityHashCode(value);this.next=next;}
+        final int hash;ControlKey previous,next;boolean executionList,executionMap;
+        ControlKey(Object value,ControlKey next){super(value,DEAD_CONTROLS);hash=System.identityHashCode(value);this.next=next;if(next!=null)next.previous=this;}
         public void clear(){if(Key.writer(WALKER.getCallerClass()))super.clear();}
         public boolean enqueue(){return Key.writer(WALKER.getCallerClass())&&super.enqueue();}
     }
@@ -154,7 +154,7 @@ public final class CodeSourceBridge {
                 ControlKey[] prior=table,next=new ControlKey[prior.length*2];
                 for(ControlKey first:prior)for(ControlKey key=first;key!=null;){
                     ControlKey following=key.next;int at=bucket(key.hash,next.length);
-                    key.next=next[at];next[at]=key;key=following;
+                    key.previous=null;key.next=next[at];if(key.next!=null)key.next.previous=key;next[at]=key;key=following;
                 }
                 table=next;
                 // Every new backing keeps its own weak protection entry; old
@@ -168,11 +168,14 @@ public final class CodeSourceBridge {
         void reap(ControlKey first){
             writer(AUTHORITY.getCallerClass());
             for(ControlKey retired=first;retired!=null;retired=(ControlKey)DEAD_CONTROLS.poll()){
-                int at=bucket(retired.hash,table.length);ControlKey previous=null;
-                for(ControlKey key=table[at];key!=null;key=key.next){
-                    if(key==retired){if(previous==null)table[at]=key.next;else previous.next=key.next;key.next=null;size--;break;}
-                    previous=key;
-                }
+                int at=bucket(retired.hash,table.length);ControlKey previous=retired.previous,next=retired.next;
+                // The queued key is the actual registered node. Unlink it under
+                // this monitor without rescanning the same bucket for every
+                // object collected in a large metadata batch.
+                if(previous==null){if(table[at]!=retired)continue;table[at]=next;}
+                else {if(previous.next!=retired)continue;previous.next=next;}
+                if(next!=null)next.previous=previous;
+                retired.previous=null;retired.next=null;size--;
             }
         }
     }
@@ -1229,6 +1232,10 @@ public final class CodeSourceBridge {
         }
     }
     public static void codeControls(Object[] objects){requireAgent();protectControls(objects);}
+    static void resourceLayoutControls(Object method){
+        if(AUTHORITY.getCallerClass()!=ResourceBridge.class)throw new SecurityException("CONTROL_REGISTRATION_OWNER");
+        protectOne(method);
+    }
     static void agentControls(Object[] objects){
         if(AUTHORITY.getCallerClass()!=TaskBridge.class)throw new SecurityException("CONTROL_REGISTRATION_OWNER");
         protectControls(objects);

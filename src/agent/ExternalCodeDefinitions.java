@@ -317,7 +317,7 @@ final class ExternalCodeDefinitions {
             }
             ModGroupBoundary.externalResolved(RecoveryAgent.logicalModule(actual),actual.getName()+":EXTERNAL_FLOW_DEFINITION_UNRESOLVED");
             Map<String,Module[][]> rows=expand(actual.getClassLoader(),actual,current.graph());
-            if(sameRows(current.definition().applied,rows))continue;
+            if(sameRows(current.definition().applied,rows,actual))continue;
             Set<Module> owners=Collections.newSetFromMap(new IdentityHashMap<>());
             addOwners(owners,current.definition().applied);addOwners(owners,rows);
             Refresh job=new Refresh(actual,owners.toArray(Module[]::new));ControlImages.protect(job,job.owners());jobs.add(job);
@@ -337,21 +337,38 @@ final class ExternalCodeDefinitions {
         BootstrapLookup previous=BOOTSTRAP_LOOKUP.get();BOOTSTRAP_LOOKUP.set(new BootstrapLookup(definitions()));
         try{
             Bound current=bind(actual,new IdentityHashMap<>(),Collections.newSetFromMap(new IdentityHashMap<>()));
-            return current!=null&&sameRows(current.definition().applied,expand(actual.getClassLoader(),actual,current.graph()));
+            return current!=null&&sameRows(current.definition().applied,expand(actual.getClassLoader(),actual,current.graph()),actual);
         }finally{if(previous==null)BOOTSTRAP_LOOKUP.remove();else BOOTSTRAP_LOOKUP.set(previous);}
     }
     private static void addOwners(Set<Module> owners,Map<String,Module[][]> rows){for(Module[][] method:rows.values())for(Module[] site:method)owners.addAll(Arrays.asList(site));}
-    private static boolean sameRows(Map<String,Module[][]> first,Map<String,Module[][]> second){
+    private static boolean sameRows(Map<String,Module[][]> first,Map<String,Module[][]> second,Class<?> actual){
+        // Before a hidden class is defined, expansion cannot subtract its own
+        // declaration. After binding, expandGraph does. That same Module is
+        // already supplied by the live VM frame and ExecutionFlow.declaration;
+        // its redundant recorded row does not require rewriting the class.
+        Module declaration=RecoveryAgent.logicalModule(actual);
+        if(!RecoveryAgent.producerModule(declaration))declaration=null;
         Set<String> methods=new LinkedHashSet<>();methods.addAll(first.keySet());methods.addAll(second.keySet());
         for(String method:methods){
             Module[][] left=first.get(method),right=second.get(method);
-            boolean leftEmpty=left==null||Arrays.stream(left).allMatch(row->row.length==0),rightEmpty=right==null||Arrays.stream(right).allMatch(row->row.length==0);
+            boolean leftEmpty=externalRowsEmpty(left,declaration),rightEmpty=externalRowsEmpty(right,declaration);
             if(leftEmpty||rightEmpty){if(leftEmpty!=rightEmpty)return false;continue;}
             if(left.length!=right.length)return false;
             for(int i=0;i<left.length;i++){
-                if(left[i].length!=right[i].length)return false;
-                for(Module owner:left[i]){boolean present=false;for(Module candidate:right[i])if(candidate==owner){present=true;break;}if(!present)return false;}
+                if(!sameExternalRow(left[i],right[i],declaration)||!sameExternalRow(right[i],left[i],declaration))return false;
             }
+        }
+        return true;
+    }
+    private static boolean externalRowsEmpty(Module[][] rows,Module declaration){
+        if(rows!=null)for(Module[] row:rows)for(Module owner:row)if(declaration==null||owner!=declaration)return false;
+        return true;
+    }
+    private static boolean sameExternalRow(Module[] first,Module[] second,Module declaration){
+        for(Module owner:first){
+            if(declaration!=null&&owner==declaration)continue;
+            boolean present=false;for(Module candidate:second)if(candidate==owner){present=true;break;}
+            if(!present)return false;
         }
         return true;
     }
