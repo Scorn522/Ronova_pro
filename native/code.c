@@ -896,6 +896,13 @@ static int code_current_sources(JNIEnv *env,OwnerLink **owners){return code_curr
 static int code_current_stopped(JNIEnv *env){
     // Unknown contributors are retained by provenance captures. This predicate
     // asks only whether any of the actual known contributors has been stopped.
+    int anyStopped=0;AcquireSRWLockShared(&native_records);
+    for(Owner *owner=native_owners;owner;owner=owner->next)if(InterlockedCompareExchange(&owner->stopped,0,0)){anyStopped=1;break;}
+    ReleaseSRWLockShared(&native_records);
+    // Read the actual owner state on every call, without retaining a verdict.
+    // Until any owner is stopped there is no stopped contributor to find;
+    // provenance capture still follows its full independent observation path.
+    if(!anyStopped)return 0;
     OwnerLink *owners=NULL;int unknown=0,observed=code_current_sources_query(env,&owners,&unknown),stopped=native_owner_stopped(owners)!=NULL;
     code_links_free(owners);if(!observed){native_refuse(env,"EXTERNAL_NATIVE_CALL_SOURCE_UNOBSERVED");return 1;}return stopped;
 }

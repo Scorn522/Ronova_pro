@@ -1,5 +1,9 @@
 # Ronova Pro V1.5 A 批收口报告
 
+2026-10-05 B 停用查询：真实 nativeindex 来源实例的 Unsafe getter 仍在进入 native 前置门时扫描完整调用链。现每次先在原锁下读取实际 Owner.stopped；当前没有任何停用来源时直接返回未停用，出现停用来源后仍沿完整原查询。没有缓存停用判定，来源捕获与 UNKNOWN 保持原规则。
+
+stopquery 完整构建通过（17 秒），现有实际 Agent 下 B 适配、外部反射／MethodHandle 内存入口拒绝、控制对象防改写和直接缓冲传输检查通过。分发候选更新为 stopquery（Java 48／Native 42），b-source-abi48-stopquery 已使用真实 prelaunch 启动。此前 B 场景尚未获得游戏效果 PASS；B 未完成，原始日志仅保留本地 .work。
+
 2026-10-05 B Native 查询：b-imagefields-live-0230.log 的 881 秒现场为读租约内重复 Java 来源扫描。已认证、已传入当前 Java 来源的读租约省去这次重复扫描，VM／原生库来源、UNKNOWN、读租约和写入／分配／I/O／追加来源原规则保持。原执行映像及来源查询的全映像扫描改为准确名字桶与隐藏映像链合并；保持发布顺序和原查询范围，仍逐项验证真实 Class／加载器、完整字节码／常量和 VM 版本。没有缓存来源结论。
 
 b-nativeindex-build-48.log 完整构建通过（23 秒），b-nativeindex-controls-48.log 的原实际 Agent 适配、外部反射／MethodHandle 内存入口拒绝、控制对象防改写与实际直接缓冲读取通过。分发为 nativeindex（Java 48／Native 42），b-source-abi48-nativeindex 已使用同版真实 prelaunch 启动。gatepolicy／bufferlayout 旧来源实例已核对进程后停止，现场保留；其他原场景继续。尚无 B 游戏效果 PASS，B 未完成。仅公开同步代码、候选与摘要，原始日志在本地 .work。
