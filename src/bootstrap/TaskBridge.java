@@ -1251,8 +1251,9 @@ public final class TaskBridge {
         return reference==null||!ownState(reference.getClass())||controlCaller();
     }
     public static boolean controlMutationAllowed(Object value) {
+        if(CodeSourceBridge.fieldGateMetadata(value))
+            return ORIGIN_WALKER.walk(FIELD_GATE_WRITER)||controlCaller()||NativeControl.libraryImplementationCaller();
         if(!controlled(value))return true;
-        if(CodeSourceBridge.fieldGateMetadata(value)&&ORIGIN_WALKER.walk(FIELD_GATE_WRITER))return true;
         if(SourceMapBridge.internal())return true;
         if((value==ADMISSIONS||value==SUBMISSIONS||value==HELD_TASKS||value==HELD_ARRAYS)
                 &&OWN_LEDGER_MUTATION.get()!=null)return true;
@@ -1721,6 +1722,10 @@ public final class TaskBridge {
                 &&field.getName().equals("reflectionData")&&field.getType()==java.lang.ref.SoftReference.class;
     }
     private static boolean unsafeWriteAllowed(Object receiver,long offset,Object value,int resourceWidth) {
+        // The exact controller gate must also operate while its caller's
+        // business module is stopping. Its existing control-writer check is
+        // authoritative; it is not a business field or backing-policy target.
+        if(CodeSourceBridge.fieldGateMetadata(receiver))return controlMutationAllowed(receiver);
         if(!CodeSourceBridge.fieldRangeAllowed(receiver,offset,resourceWidth)&&!coreWriter())return false;
         if(!ResourceBridge.unsafeMutationAllowed(receiver,offset,resourceWidth))return false;
         if((modStopped(objectModule(receiver))||stoppedInvocation())&&!coreWriter())return false;
@@ -2447,6 +2452,7 @@ public final class TaskBridge {
         return staticFieldWriteAllowed(actual,name,value);
     }
     public static boolean fieldWriteAllowed(Object receiver,Class<?> declaring,String name,Object value) {
+        if(CodeSourceBridge.fieldGateMetadata(receiver))return controlMutationAllowed(receiver);
         if(!CodeSourceBridge.fieldAllowed(receiver,declaring,name)&&!coreWriter())return false;
         if(!ResourceBridge.fieldMutationAllowed(receiver,declaring))return false;
         if((modStopped(objectModule(receiver==null?declaring:receiver))||stoppedInvocation())&&!coreWriter()&&!ClientBridge.cleanupField(receiver,declaring,name))return false;
@@ -2471,6 +2477,7 @@ public final class TaskBridge {
     }
     public static boolean reflectFieldWrite(java.lang.reflect.Field field,Object receiver,Object value) {
         if(java.lang.reflect.Modifier.isStatic(field.getModifiers()))receiver=field.getDeclaringClass();
+        if(CodeSourceBridge.fieldGateMetadata(receiver))return controlMutationAllowed(receiver);
         if(!CodeSourceBridge.fieldAllowed(receiver,field.getDeclaringClass(),field.getName())&&!coreWriter())return false;
         if(!ResourceBridge.fieldMutationAllowed(receiver,field.getDeclaringClass()))return false;
         if((modStopped(objectModule(receiver==null?field.getDeclaringClass():receiver))||stoppedInvocation())&&!coreWriter()&&!ClientBridge.cleanupField(receiver,field.getDeclaringClass(),field.getName()))return false;
