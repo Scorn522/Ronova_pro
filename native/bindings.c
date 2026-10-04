@@ -48,7 +48,7 @@ static jmethodID native_network_sources;
 static jmethodID native_process_sources;
 static jclass native_unsafe_class,native_unsafe_backing;
 static jobject native_unsafe_denied;
-static jmethodID native_unsafe_begin_query,native_unsafe_read_begin_query,native_unsafe_copy_begin_query,native_unsafe_read_query,native_unsafe_register;
+static jmethodID native_unsafe_begin_query,native_unsafe_read_begin_query,native_unsafe_copy_begin_query,native_unsafe_read_query,native_unsafe_register,native_unsafe_metadata_query;
 static jmethodID native_memory_gate;
 static struct JNINativeInterface_ native_original;
 static int native_library_install(JNIEnv *env);

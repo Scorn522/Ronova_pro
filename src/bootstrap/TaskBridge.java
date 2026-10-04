@@ -2136,6 +2136,10 @@ public final class TaskBridge {
         if(!NativeControl.unsafeMutationBoundary(receiver,offset,length,kind,bulk))throw new SecurityException("ACTUAL_NATIVE_UNSAFE_MUTATION_REQUIRED");
         long bytes=bulk?length:ResourceBridge.unsafeWidth(kind);
         if(receiver==null)return (bulk?unsafeMemoryAllowed(null,offset,bytes):unsafeWriteAllowed(null,offset,proposed,kind))?rawReceipt(offset,bytes,mutationSources(contributors)):Boolean.FALSE;
+        // Exact gate metadata has no business receipt. Still evaluate the
+        // actual write policy before admitting it; avoid collecting sources
+        // merely to discard them inside unsafeReceipt.
+        if(CodeSourceBridge.fieldGateMetadata(receiver))return (bulk?unsafeMemoryAllowed(receiver,offset,bytes):unsafeWriteAllowed(receiver,offset,proposed,kind))?null:Boolean.FALSE;
         Object token=unsafeReceipt(receiver,offset,bytes,mutationSources(contributors),!bulk&&referenceKind(kind));
         try{
             if(bulk?unsafeMemoryAllowed(receiver,offset,bytes):unsafeWriteAllowed(receiver,offset,proposed,kind))return token;
@@ -2144,7 +2148,8 @@ public final class TaskBridge {
     }
     public static Object beginNativeUnsafeRead(Object receiver,long offset,String kind,Module[] contributors){
         if(!NativeControl.unsafeReadBoundary(receiver,offset,kind))throw new SecurityException("ACTUAL_NATIVE_UNSAFE_READ_REQUIRED");
-        return readReceipt(receiver,offset,ResourceBridge.unsafeWidth(kind),mutationSources(contributors));
+        if(CodeSourceBridge.fieldGateMetadata(receiver))return null;
+        return readReceipt(receiver,offset,ResourceBridge.unsafeWidth(kind),receiver==null?mutationSources(contributors):null);
     }
     public static Object beginNativeUnsafeCopy(Object source,long sourceOffset,Object receiver,long offset,long length,Module[] contributors){
         if(!NativeControl.unsafeCopyBoundary(source,sourceOffset,receiver,offset,length))throw new SecurityException("ACTUAL_NATIVE_UNSAFE_COPY_REQUIRED");
@@ -2159,7 +2164,7 @@ public final class TaskBridge {
         if(accessor.getClass()!=actual)throw new SecurityException("ACTUAL_UNSAFE_RECEIVER_REQUIRED");
         long bytes=bulk?length:ResourceBridge.unsafeWidth(kind);
         if(operation.equals("copyMemory")||operation.equals("copySwapMemory"))return copyReceipt(source,sourceOffset,receiver,offset,bytes,mutationSources(contributors));
-        if(operation.startsWith("get")&&!operation.startsWith("getAnd"))return readReceipt(receiver,offset,bytes,mutationSources(contributors));
+        if(operation.startsWith("get")&&!operation.startsWith("getAnd"))return readReceipt(receiver,offset,bytes,receiver==null?mutationSources(contributors):null);
         if(receiver==null)return (bulk?unsafeMemoryAllowed(null,offset,bytes):BackingBridge.nativeWriteAllowed(null,offset,proposed,operation,kind))?rawReceipt(offset,bytes,mutationSources(contributors)):Boolean.FALSE;
         Object token=unsafeReceipt(receiver,offset,bytes,mutationSources(contributors),!bulk&&referenceKind(kind));
         try{
@@ -2182,7 +2187,7 @@ public final class TaskBridge {
         if(caller!=actual&&caller!=internal)throw new SecurityException("ACTUAL_UNSAFE_WRITE_REQUIRED");
     }
     private static Object unsafeReceipt(Object receiver,long offset,long length){
-        if(NativeControl.unsafeControlScope())return null;
+        if(NativeControl.unsafeControlScope()||CodeSourceBridge.fieldGateMetadata(receiver))return null;
         return unsafeReceipt(receiver,offset,length,invokingSources());
     }
     private static Object unsafeReceipt(Object receiver,long offset,long length,Module[] contributors){
@@ -2227,6 +2232,11 @@ public final class TaskBridge {
     private static Object rawReceipt(long address,long bytes,Module[] contributors,boolean reading){
         if(bytes<=0||!NativeControl.available())return null;
         long token=NativeControl.memoryWriteBegin(address,bytes,contributors,reading);return token==0?null:new RawMemoryMutation(token,reading);
+    }
+    private static Object readReceipt(Object receiver,long offset,long bytes){
+        // Heap source observations use the existing interval and concurrent
+        // writers below. Caller contributors are used only by raw reads.
+        return readReceipt(receiver,offset,bytes,receiver==null?invokingSources():null);
     }
     private static Object readReceipt(Object receiver,long offset,long bytes,Module[] contributors){
         if(receiver==null)return rawReceipt(offset,bytes,contributors,true);
@@ -2304,10 +2314,10 @@ public final class TaskBridge {
         requireUnsafeWriter();return unsafeReceipt(receiver,offset,length);
     }
     public static Object beginUnsafeMutation(Object receiver,long offset,String kind){
-        requireUnsafeWriter();return NativeControl.unsafeControlScope()?null:unsafeReceipt(receiver,offset,ResourceBridge.unsafeWidth(kind),invokingSources(),referenceKind(kind));
+        requireUnsafeWriter();return NativeControl.unsafeControlScope()||CodeSourceBridge.fieldGateMetadata(receiver)?null:unsafeReceipt(receiver,offset,ResourceBridge.unsafeWidth(kind),invokingSources(),referenceKind(kind));
     }
     public static Object beginUnsafeRead(Object receiver,long offset,String kind){
-        requireUnsafeWriter();return NativeControl.unsafeControlScope()?null:readReceipt(receiver,offset,ResourceBridge.unsafeWidth(kind),invokingSources());
+        requireUnsafeWriter();return NativeControl.unsafeControlScope()||CodeSourceBridge.fieldGateMetadata(receiver)?null:readReceipt(receiver,offset,ResourceBridge.unsafeWidth(kind));
     }
     public static Object beginUnsafeCopy(Object source,long sourceOffset,Object receiver,long offset,long length){
         requireUnsafeWriter();return NativeControl.unsafeControlScope()?null:copyReceipt(source,sourceOffset,receiver,offset,length,invokingSources());
@@ -2323,10 +2333,10 @@ public final class TaskBridge {
         }
     }
     public static Object beginHandleMutation(Object receiver,long offset,String kind){
-        requireHandleWriter(actualMemoryCaller());return NativeControl.unsafeControlScope()?null:unsafeReceipt(receiver,offset,ResourceBridge.unsafeWidth(kind),invokingSources(),referenceKind(kind));
+        requireHandleWriter(actualMemoryCaller());return NativeControl.unsafeControlScope()||CodeSourceBridge.fieldGateMetadata(receiver)?null:unsafeReceipt(receiver,offset,ResourceBridge.unsafeWidth(kind),invokingSources(),referenceKind(kind));
     }
     public static Object beginHandleRead(Object receiver,long offset,String kind){
-        requireHandleWriter(actualMemoryCaller());return NativeControl.unsafeControlScope()?null:readReceipt(receiver,offset,ResourceBridge.unsafeWidth(kind),invokingSources());
+        requireHandleWriter(actualMemoryCaller());return NativeControl.unsafeControlScope()||CodeSourceBridge.fieldGateMetadata(receiver)?null:readReceipt(receiver,offset,ResourceBridge.unsafeWidth(kind));
     }
     private static Class<?> actualMemoryCaller(){
         // getCallerClass always hides MethodHandle/VarHandle frames, including

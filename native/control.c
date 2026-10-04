@@ -2,7 +2,7 @@
 #include "bindings.c"
 // Preserve Object.clone itself, including Cloneable checks; never substitute a Java ancestor body.
 JNIEXPORT jint JNICALL Java_dev_ronova_pro_bootstrap_NativeControl_abi(JNIEnv *env, jclass type) {
-    (void)env; (void)type; return 41;
+    (void)env; (void)type; return 42;
 }
 JNIEXPORT jobject JNICALL Java_dev_ronova_pro_bootstrap_NativeControl_clone0(JNIEnv *env, jclass type, jobject source) {
     (void)type;

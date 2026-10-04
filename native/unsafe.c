@@ -85,7 +85,20 @@ static int native_unsafe_begin(JNIEnv *env,NativeThread *state,Binding *binding,
         unsigned argument=binding->unsafeOperation==UNSAFE_PUT?4:5;
         proposed=native_unsafe_box(env,binding->unsafeKind,native_unsafe_argument(binding,frame,argument));
     }
-    if(!native_original.ExceptionCheck(env))sources=native_mutation_sources(env,state);
+    if(!native_original.ExceptionCheck(env)){
+        // Heap reads observe the destination's recorded source interval, not
+        // caller contributors. Exact controller gates likewise have no heap
+        // receipt; their normal Java write policy still runs below.
+        jboolean noContributors=mutation.reading&&mutation.receiver?JNI_TRUE:JNI_FALSE;
+        if(!mutation.bulk&&mutation.receiver&&!mutation.reading)
+            noContributors=native_original.CallStaticBooleanMethod(env,native_controller,native_unsafe_metadata_query,mutation.receiver);
+        if(!native_original.ExceptionCheck(env)){
+            if(noContributors){
+                jclass module=native_original.FindClass(env,"java/lang/Module");
+                if(module){sources=native_original.NewObjectArray(env,0,module,NULL);native_original.DeleteLocalRef(env,module);}
+            }else sources=native_mutation_sources(env,state);
+        }
+    }
     if(mutation.kind&&sources&&!native_original.ExceptionCheck(env)){
         mutation.previous=state->unsafeMutation;state->unsafeMutation=&mutation;
         jobject token=mutation.reading?native_original.CallStaticObjectMethod(env,native_tasks,native_unsafe_read_begin_query,mutation.receiver,mutation.offset,mutation.kind,sources)
@@ -162,13 +175,14 @@ static int native_unsafe_prepare(JNIEnv *env){
     if(!native_original.ExceptionCheck(env))native_unsafe_begin_query=native_original.GetStaticMethodID(env,native_tasks,"beginNativeUnsafeMutation","(Ljava/lang/Object;JJLjava/lang/Object;Ljava/lang/String;Z[Ljava/lang/Module;)Ljava/lang/Object;");
     if(!native_original.ExceptionCheck(env))native_unsafe_read_begin_query=native_original.GetStaticMethodID(env,native_tasks,"beginNativeUnsafeRead","(Ljava/lang/Object;JLjava/lang/String;[Ljava/lang/Module;)Ljava/lang/Object;");
     if(!native_original.ExceptionCheck(env))native_unsafe_copy_begin_query=native_original.GetStaticMethodID(env,native_tasks,"beginNativeUnsafeCopy","(Ljava/lang/Object;JLjava/lang/Object;JJ[Ljava/lang/Module;)Ljava/lang/Object;");
+    if(!native_original.ExceptionCheck(env))native_unsafe_metadata_query=native_original.GetStaticMethodID(env,native_controller,"unsafeMetadata","(Ljava/lang/Object;)Z");
     if(!native_original.ExceptionCheck(env))native_memory_gate=native_original.GetStaticMethodID(env,native_tasks,"rawMemoryCaller","()Z");
     if(!native_original.ExceptionCheck(env))booleanType=native_original.FindClass(env,"java/lang/Boolean");
     jfieldID no=booleanType?native_original.GetStaticFieldID(env,booleanType,"FALSE","Ljava/lang/Boolean;"):NULL;
     jobject denied=no?native_original.GetStaticObjectField(env,booleanType,no):NULL;
     if(denied){native_unsafe_denied=native_original.NewGlobalRef(env,denied);native_original.DeleteLocalRef(env,denied);}
     if(unsafe)native_original.DeleteLocalRef(env,unsafe);if(backing)native_original.DeleteLocalRef(env,backing);if(booleanType)native_original.DeleteLocalRef(env,booleanType);
-    int ready=native_unsafe_class&&native_unsafe_backing&&native_unsafe_register&&native_unsafe_read_query&&native_unsafe_begin_query&&native_unsafe_read_begin_query&&native_unsafe_copy_begin_query&&native_memory_gate&&native_unsafe_denied&&!native_original.ExceptionCheck(env);
+    int ready=native_unsafe_class&&native_unsafe_backing&&native_unsafe_register&&native_unsafe_read_query&&native_unsafe_begin_query&&native_unsafe_read_begin_query&&native_unsafe_copy_begin_query&&native_unsafe_metadata_query&&native_memory_gate&&native_unsafe_denied&&!native_original.ExceptionCheck(env);
     state->control--;return ready;
 }
 static int native_unsafe_install(JNIEnv *env){

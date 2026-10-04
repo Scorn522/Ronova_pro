@@ -43,7 +43,7 @@ public final class NativeControl {
             if(!early.isEmpty()) {
                 Path actual=Path.of(early).toAbsolutePath();if(!hash(Files.readAllBytes(actual)).equals(digest))throw new IOException("EARLY_NATIVE_IMAGE_MISMATCH");dll=actual;
             }
-            System.load(dll.toString());if(abi()!=41)throw new UnsatisfiedLinkError("NATIVE_CONTROL_ABI");
+            System.load(dll.toString());if(abi()!=42)throw new UnsatisfiedLinkError("NATIVE_CONTROL_ABI");
             if(!initialize0(TaskBridge.class,DefinitionBridge.class))throw new UnsatisfiedLinkError("ACTUAL_NATIVE_BOUNDARY_INSTALL_FAILED");
             if(!initializeDefinitionDirectory0(definitionDirectoryOwner))throw new UnsatisfiedLinkError("ACTUAL_DEFINITION_DIRECTORY_CAS_UNAVAILABLE");
             libraryBoundaryPresent=libraryPresent0();available=true;return state="NATIVE_BIND_AND_JNI_FIELD_READY";
@@ -495,6 +495,7 @@ public final class NativeControl {
         if(CALLER.getCallerClass()!=TaskBridge.class)return false;
         return unsafeMutationBoundary0(receiver,offset,length,kind,bulk,false);
     }
+    private static boolean unsafeMetadata(Object receiver){return CodeSourceBridge.fieldGateMetadata(receiver);}
     static boolean unsafeReadBoundary(Object receiver,long offset,String kind){
         return CALLER.getCallerClass()==TaskBridge.class&&unsafeMutationBoundary0(receiver,offset,0,kind,false,true);
     }
