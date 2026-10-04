@@ -1,5 +1,9 @@
 # Ronova Pro V1.5 A 批收口报告
 
+2026-10-05 B Native 查询：b-imagefields-live-0230.log 的 881 秒现场为读租约内重复 Java 来源扫描。已认证、已传入当前 Java 来源的读租约省去这次重复扫描，VM／原生库来源、UNKNOWN、读租约和写入／分配／I/O／追加来源原规则保持。原执行映像及来源查询的全映像扫描改为准确名字桶与隐藏映像链合并；保持发布顺序和原查询范围，仍逐项验证真实 Class／加载器、完整字节码／常量和 VM 版本。没有缓存来源结论。
+
+b-nativeindex-build-48.log 完整构建通过（23 秒），b-nativeindex-controls-48.log 的原实际 Agent 适配、外部反射／MethodHandle 内存入口拒绝、控制对象防改写与实际直接缓冲读取通过。分发为 nativeindex（Java 48／Native 42），b-source-abi48-nativeindex 已使用同版真实 prelaunch 启动。gatepolicy／bufferlayout 旧来源实例已核对进程后停止，现场保留；其他原场景继续。尚无 B 游戏效果 PASS，B 未完成。仅公开同步代码、候选与摘要，原始日志在本地 .work。
+
 2026-10-05 B 执行入口：b-readleaf-live-0217.log 的 1040 秒现场为 ZIP 属性扫描中的内存写入收尾。执行来源各入口统一使用已有直接调用者核对；自身 nest 的内部委托保留原扫描并认证实际 CodeSourceBridge。b-entrycaller-build-48.log 完整构建通过（24 秒），原夹具新增的外部反射／MethodHandle 内存入口拒绝与既有控制保护、适配和实际缓冲传输在 b-entrycaller-controls-48.log 中通过。
 
 分发候选为 entrycaller（Java 48／Native 42），b-source-abi48-entrycaller 已使用同版真实 prelaunch 启动。原运行保留继续，尚无 B 游戏效果 PASS，B 未完成。原始现场仅在本地 .work，公开同步代码、候选及结果摘要。

@@ -31,8 +31,14 @@ static NativeMemoryAllocation *native_memory_find(uint64_t address,uint64_t leng
         if(base?entry->address==address:address>=entry->address&&length<=entry->bytes&&address-entry->address<=entry->bytes-length)return entry;
     }return NULL;
 }
-static int native_memory_sources(JNIEnv *env,NativeThread *state,jobjectArray supplied,OwnerLink **sources,int *unknown){
-    if(!host_capture_query(env,state,NULL,sources,unknown))return 0;
+static int native_memory_sources(JNIEnv *env,NativeThread *state,jobjectArray supplied,OwnerLink **sources,int *unknown,int capturedJava){
+    if(capturedJava){
+        // The authenticated Java memory boundary has already captured its
+        // current Java contributors. Reobserve VM/native scopes, but do not
+        // walk the same Java invocation again while establishing its lease.
+        if(!native_capture_scope_sources(env,state,sources,unknown))return 0;
+        host_producers(sources);
+    }else if(!host_capture_query(env,state,NULL,sources,unknown))return 0;
     if(!supplied){if(!*sources)*unknown=1;return 1;}jsize count=native_original.GetArrayLength(env,supplied);int ready=1;
     AcquireSRWLockExclusive(&native_records);
     for(jsize i=0;i<count&&ready&&!native_original.ExceptionCheck(env);i++){
@@ -167,7 +173,7 @@ static int native_memory_allocator(JNIEnv *env,NativeThread *state,Binding *bind
 }
 static int native_memory_call_begin(JNIEnv *env,NativeThread *state,Binding *binding,unsigned char *frame,NativeUnsafeFrame *use){
     NativeMemoryCall *call=(NativeMemoryCall*)calloc(1,sizeof(*call));if(!call){native_refuse(env,"NATIVE_MEMORY_SCOPE_CAPACITY");return 0;}
-    state->control++;int ready=native_memory_sources(env,state,NULL,&call->sources,&call->unknown);state->control--;
+    state->control++;int ready=native_memory_sources(env,state,NULL,&call->sources,&call->unknown,0);state->control--;
     if(!ready){native_owner_links_free(call->sources);free(call);native_refuse(env,"NATIVE_MEMORY_SOURCES_UNAVAILABLE");return 0;}
     if(!native_memory_allocator(env,state,binding,frame,call))goto refused;
     if(binding->unsafeOperation!=UNSAFE_FREE){
@@ -296,7 +302,7 @@ JNIEXPORT jlong JNICALL Java_dev_ronova_pro_bootstrap_NativeControl_memoryWriteB
     if(!native_memory_authority(env,type)){native_refuse(env,"ACTUAL_NATIVE_MEMORY_WRITER_REQUIRED");return 0;}
     NativeThread *state=native_thread();if(!state||length<0){native_refuse(env,"NATIVE_MEMORY_SCOPE_UNAVAILABLE");return 0;}
     NativeMemoryWrite *write=(NativeMemoryWrite*)calloc(1,sizeof(*write));if(!write){native_refuse(env,"NATIVE_MEMORY_SCOPE_CAPACITY");return 0;}
-    state->control++;int ready=native_memory_sources(env,state,contributors,&write->sources,&write->unknown);state->control--;
+    state->control++;int ready=native_memory_sources(env,state,contributors,&write->sources,&write->unknown,reading==JNI_TRUE&&contributors!=NULL);state->control--;
     if(!ready){native_owner_links_free(write->sources);free(write);native_refuse(env,"NATIVE_MEMORY_SOURCES_UNAVAILABLE");return 0;}
     write->address=(uint64_t)address;write->length=(uint64_t)length;write->reading=reading==JNI_TRUE;write->detached=write->reading&&snapshot==JNI_TRUE;
     AcquireSRWLockShared(&native_memory_records);write->allocation=native_memory_find(write->address,write->length,0);
@@ -425,7 +431,7 @@ JNIEXPORT void JNICALL Java_dev_ronova_pro_bootstrap_NativeControl_memoryWriteCo
     if(!native_memory_authority(env,type)){native_refuse(env,"ACTUAL_NATIVE_MEMORY_WRITER_REQUIRED");return;}
     NativeThread *state=native_thread();NativeMemoryWrite *write=state?state->memoryWrite:NULL;
     if(!write||write->reading||(jlong)(uintptr_t)write!=token){native_refuse(env,"ACTUAL_NATIVE_MEMORY_WRITE_SCOPE_REQUIRED");return;}
-    state->control++;int ready=native_memory_sources(env,state,contributors,&write->sources,&write->unknown);state->control--;
+    state->control++;int ready=native_memory_sources(env,state,contributors,&write->sources,&write->unknown,0);state->control--;
     if(!ready)native_refuse(env,"NATIVE_MEMORY_WRITE_SOURCE_CAPACITY");
 }
 static void native_memory_thread_end(JNIEnv *env,NativeThread *state){
@@ -553,7 +559,7 @@ JNIEXPORT jlong JNICALL Java_dev_ronova_pro_bootstrap_NativeControl_ioBufferWrit
         jmethodID groupQuery=native_original.GetStaticMethodID(env,native_controller,"ioBufferWriteGroup","(Ljava/lang/Object;)Ljava/lang/Object;");
         jobject group=groupQuery?native_original.CallStaticObjectMethod(env,native_controller,groupQuery,receipt):NULL;
         if(group){entry->group=native_original.NewGlobalRef(env,group);native_original.DeleteLocalRef(env,group);}
-        entry->receipt=native_original.NewGlobalRef(env,receipt);ready=entry->receipt&&entry->group&&native_memory_sources(env,state,sources,&entry->write.sources,&entry->write.unknown);
+        entry->receipt=native_original.NewGlobalRef(env,receipt);ready=entry->receipt&&entry->group&&native_memory_sources(env,state,sources,&entry->write.sources,&entry->write.unknown,0);
     }
     NativeMemoryAllocation *allocation=NULL;
     if(ready){AcquireSRWLockShared(&native_memory_records);

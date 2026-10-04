@@ -4,7 +4,7 @@ typedef struct CodePool {const unsigned char **entries;uint32_t *sizes;unsigned 
 typedef struct CodeHandler {unsigned start,end,target,type;} CodeHandler;
 typedef struct CodeMethod {char *key;size_t nameLength;const unsigned char *bytes;uint32_t length;unsigned *offsets;CodeHandler *handlers;unsigned handlerCount;OwnerLink **owners;unsigned instructions,access;int sourced;struct CodeMethod *next;} CodeMethod;
 typedef struct CodeVMMethod {uintptr_t method,constantMethod,constants;CodeHandler *handlers;unsigned handlerCount,codeLength;} CodeVMMethod;
-typedef struct CodeImage {jweak loader,emitted,execution;int bootstrap,hidden,sourced;char *name;unsigned char *bytes;uint32_t length;uint64_t hash;CodePool pool;CodeMethod *methods;CodeMethod **methodIndex;unsigned methodCount;struct CodeClass *classes;struct CodeImage *next,*hashNext;} CodeImage;
+typedef struct CodeImage {jweak loader,emitted,execution;int bootstrap,hidden,sourced;char *name;unsigned char *bytes;uint32_t length;uint64_t hash,nameHash;size_t order;CodePool pool;CodeMethod *methods;CodeMethod **methodIndex;unsigned methodCount;struct CodeClass *classes;struct CodeImage *next,*hashNext,*nameNext,*hiddenNext;} CodeImage;
 typedef struct CodeClass {jweak actual;CodeImage *image;struct CodeClass *next,*imageNext;} CodeClass;
 typedef struct CodeCursor {const unsigned char *at,*end;int valid;} CodeCursor;
 /* One failed query's evidence only; never retained as a source or permission. */
@@ -24,6 +24,8 @@ static int code_failed(CodeFailure *failure,const char *stage,jvmtiError error){
 static SRWLOCK code_records=SRWLOCK_INIT;
 static CodeImage *code_images;
 static CodeImage **code_image_buckets;
+static CodeImage **code_name_buckets;
+static CodeImage *code_hidden_images;
 static size_t code_image_bucket_count,code_image_count;
 static CodeClass *code_classes;
 static volatile LONG code_available,code_pop_available,code_pop_failures,code_sourced;
@@ -51,23 +53,57 @@ static uint64_t code_image_hash(const unsigned char *bytes,size_t length){
 /* Only immutable registered bytes are indexed. Call with code_records exclusive;
  * selection still checks the complete bytes and the actual class/loader binding. */
 static void code_image_publish(CodeImage *image){
+    image->nameHash=code_image_hash((const unsigned char*)image->name,strlen(image->name));
     if(!code_image_bucket_count||code_image_count>=code_image_bucket_count/2){
         size_t count=code_image_bucket_count?code_image_bucket_count*2:64;
         CodeImage **buckets=count>code_image_bucket_count&&count<=SIZE_MAX/sizeof(*buckets)
                 ?(CodeImage**)calloc(count,sizeof(*buckets)):NULL;
-        if(buckets){
-            for(CodeImage *entry=code_images;entry;entry=entry->next){size_t at=(size_t)entry->hash&(count-1);entry->hashNext=buckets[at];buckets[at]=entry;}
+        CodeImage **names=buckets?(CodeImage**)calloc(count,sizeof(*names)):NULL;
+        if(buckets&&names){
+            for(CodeImage *entry=code_images;entry;entry=entry->next){
+                size_t at=(size_t)entry->hash&(count-1);entry->hashNext=buckets[at];buckets[at]=entry;
+                if(!entry->hidden){at=(size_t)entry->nameHash&(count-1);entry->nameNext=names[at];names[at]=entry;}
+            }
             // Rebuilding from the newest-first list reverses each bucket once.
             // Restore that order so identical registrations select as before.
             for(size_t i=0;i<count;i++){
                 CodeImage *entry=buckets[i],*head=NULL;
                 while(entry){CodeImage *next=entry->hashNext;entry->hashNext=head;head=entry;entry=next;}buckets[i]=head;
+                entry=names[i];head=NULL;
+                while(entry){CodeImage *next=entry->nameNext;entry->nameNext=head;head=entry;entry=next;}names[i]=head;
             }
-            free(code_image_buckets);code_image_buckets=buckets;code_image_bucket_count=count;
-        }
+            free(code_image_buckets);free(code_name_buckets);code_image_buckets=buckets;code_name_buckets=names;code_image_bucket_count=count;
+        }else{free(buckets);free(names);}
     }
-    image->next=code_images;code_images=image;code_image_count++;
-    if(code_image_bucket_count){size_t at=(size_t)image->hash&(code_image_bucket_count-1);image->hashNext=code_image_buckets[at];code_image_buckets[at]=image;}
+    image->next=code_images;code_images=image;image->order=++code_image_count;
+    if(image->hidden){image->hiddenNext=code_hidden_images;code_hidden_images=image;}
+    if(code_image_bucket_count){
+        size_t at=(size_t)image->hash&(code_image_bucket_count-1);image->hashNext=code_image_buckets[at];code_image_buckets[at]=image;
+        if(!image->hidden){at=(size_t)image->nameHash&(code_image_bucket_count-1);image->nameNext=code_name_buckets[at];code_name_buckets[at]=image;}
+    }
+}
+/* Narrow immutable names only. Hidden definitions still need their actual
+ * Class binding. Merge both chains in the original publication order and keep
+ * the query's publication frontier while VM snapshots are taken outside locks.
+ * Call and iterate with code_records shared; all actual comparisons stay below. */
+typedef struct CodeCandidates {CodeImage *named,*hidden,*all;size_t ceiling;} CodeCandidates;
+static CodeCandidates code_candidates(const char *signature){
+    CodeCandidates candidates={0};candidates.ceiling=code_image_count;
+    if(!code_name_buckets){candidates.all=code_images;return candidates;}
+    size_t length=signature?strlen(signature):0;
+    if(length>2&&signature[0]=='L'&&signature[length-1]==';'){
+        uint64_t hash=code_image_hash((const unsigned char*)signature+1,length-2);
+        candidates.named=code_name_buckets[(size_t)hash&(code_image_bucket_count-1)];
+    }
+    candidates.hidden=code_hidden_images;return candidates;
+}
+static CodeImage *code_candidate_next(CodeCandidates *candidates){
+    while(candidates->all&&candidates->all->order>candidates->ceiling)candidates->all=candidates->all->next;
+    if(candidates->all){CodeImage *image=candidates->all;candidates->all=image->next;return image;}
+    while(candidates->named&&candidates->named->order>candidates->ceiling)candidates->named=candidates->named->nameNext;
+    while(candidates->hidden&&candidates->hidden->order>candidates->ceiling)candidates->hidden=candidates->hidden->hiddenNext;
+    CodeImage *image=!candidates->hidden||(candidates->named&&candidates->named->order>candidates->hidden->order)?candidates->named:candidates->hidden;
+    if(image){if(image==candidates->named)candidates->named=image->nameNext;else candidates->hidden=image->hiddenNext;}return image;
 }
 static int code_pool(CodeCursor *cursor,unsigned count,CodePool *pool){
     if(count<1||count>65535)return 0;pool->entries=(const unsigned char**)calloc(count,sizeof(*pool->entries));pool->sizes=(uint32_t*)calloc(count,sizeof(*pool->sizes));pool->count=count;if(!pool->entries||!pool->sizes)return 0;
@@ -380,7 +416,8 @@ static int code_method_relevant(JNIEnv *env,jmethodID method,jobject module){
         // Published instruction-owner arrays are immutable. Empty images and
         // methods cannot satisfy the existing owner predicate; positive rows
         // still use actual class matching, live owner checks and VM validation.
-        AcquireSRWLockShared(&code_records);for(CodeImage *image=code_images;image&&!relevant;image=image->next)if(image->sourced&&code_class_matches(env,image,declaring,loader,signature)){
+        AcquireSRWLockShared(&code_records);CodeCandidates candidates=code_candidates(signature);
+        for(CodeImage *image=code_candidate_next(&candidates);image&&!relevant;image=code_candidate_next(&candidates))if(image->sourced&&code_class_matches(env,image,declaring,loader,signature)){
             CodeMethod *entry=code_method(image,name,descriptor);if(!entry||!entry->sourced||!entry->owners)continue;
             for(unsigned i=0;i<entry->instructions&&!relevant;i++)if(native_owner_matches(env,entry->owners[i],module)&&entry->owners[i])relevant=1;
         }ReleaseSRWLockShared(&code_records);
@@ -418,7 +455,7 @@ JNIEXPORT jboolean JNICALL Java_dev_ronova_pro_bootstrap_NativeControl_codeDefin
     int valid=hidden&&native_original.CallBooleanMethod(env,actual,hidden)&&!native_original.ExceptionCheck(env);if(classType)native_original.DeleteLocalRef(env,classType);if(!valid)return JNI_FALSE;
     jobject loader=NULL;if((*native_ti)->GetClassLoader(native_ti,actual,&loader)!=JVMTI_ERROR_NONE)return JNI_FALSE;
     jsize length=native_original.GetArrayLength(env,expected);jbyte *bytes=native_original.GetByteArrayElements(env,expected,NULL);CodeImage *selected=NULL;
-    if(bytes){AcquireSRWLockShared(&code_records);for(CodeImage *image=code_images;image;image=image->next)
+    if(bytes){AcquireSRWLockShared(&code_records);for(CodeImage *image=code_hidden_images;image;image=image->hiddenNext)
         if(image->hidden&&native_original.IsSameObject(env,image->emitted,expected)&&image->bootstrap==(loader==NULL)&&(!loader||native_original.IsSameObject(env,image->loader,loader))
                 &&image->length==(uint32_t)length&&!memcmp(image->bytes,bytes,length)){selected=image;break;}
         ReleaseSRWLockShared(&code_records);native_original.ReleaseByteArrayElements(env,expected,bytes,JNI_ABORT);}
@@ -590,7 +627,8 @@ done:
 static void JNICALL code_class_prepared(jvmtiEnv *ti,JNIEnv *env,jthread thread,jclass type){
     (void)thread;if(!native_jni_ready||!code_prepared_callback)return;jobject loader=NULL;char *signature=NULL;int candidate=0;
     if((*ti)->GetClassLoader(ti,type,&loader)==JVMTI_ERROR_NONE&&(*ti)->GetClassSignature(ti,type,&signature,NULL)==JVMTI_ERROR_NONE){
-        AcquireSRWLockShared(&code_records);for(CodeImage *image=code_images;image;image=image->next)if(code_class_matches(env,image,type,loader,signature)){candidate=1;break;}ReleaseSRWLockShared(&code_records);
+        AcquireSRWLockShared(&code_records);CodeCandidates candidates=code_candidates(signature);
+        for(CodeImage *image=code_candidate_next(&candidates);image;image=code_candidate_next(&candidates))if(code_class_matches(env,image,type,loader,signature)){candidate=1;break;}ReleaseSRWLockShared(&code_records);
     }
     if(signature)(*ti)->Deallocate(ti,(unsigned char*)signature);if(loader)native_original.DeleteLocalRef(env,loader);
     NativeThread *state=candidate?native_thread():NULL;if(!state)return;jclass previous=state->prepared;state->prepared=type;state->control++;
@@ -612,8 +650,8 @@ static int code_frame_sources_checked(JNIEnv *env,jmethodID method,jlocation loc
     if(error!=JVMTI_ERROR_NONE){valid=code_failed(failure,"class_signature",error);goto done;}
     error=(*native_ti)->GetMethodName(native_ti,method,&name,&descriptor,NULL);
     if(error!=JVMTI_ERROR_NONE){valid=code_failed(failure,"method_name",error);goto done;}
-    AcquireSRWLockShared(&code_records);CodeImage *images=code_images;int candidate=0;
-    for(CodeImage *image=images;image&&!candidate;image=image->next)if(code_class_matches(env,image,declaring,loader,signature)){
+    AcquireSRWLockShared(&code_records);CodeCandidates images=code_candidates(signature),scan=images;int candidate=0;
+    for(CodeImage *image=code_candidate_next(&scan);image&&!candidate;image=code_candidate_next(&scan))if(code_class_matches(env,image,declaring,loader,signature)){
         CodeMethod *entry=code_method(image,name,descriptor);if(entry&&entry->owners)candidate=1;
     }ReleaseSRWLockShared(&code_records);
     if(!candidate)goto done;*known=1;
@@ -621,8 +659,9 @@ static int code_frame_sources_checked(JNIEnv *env,jmethodID method,jlocation loc
     error=(*native_ti)->GetBytecodes(native_ti,method,&length,&bytes);
     if(error!=JVMTI_ERROR_NONE){valid=code_failed(failure,"get_bytecodes",error);goto done;}
     valid=0;AcquireSRWLockShared(&code_records);
+    scan=code_candidates(signature);scan.ceiling=images.ceiling;
     unsigned candidates=0,ownerless=0;
-    for(CodeImage *image=images;image&&!valid;image=image->next)if(code_class_matches(env,image,declaring,loader,signature)){
+    for(CodeImage *image=code_candidate_next(&scan);image&&!valid;image=code_candidate_next(&scan))if(code_class_matches(env,image,declaring,loader,signature)){
         CodeMethod *entry=code_method(image,name,descriptor);if(!entry)continue;if(!entry->owners){ownerless++;continue;}candidates++;
         CodeFailure attempted;if(failure)code_failure_init(&attempted);CodeFailure *detail=failure?&attempted:NULL;
         unsigned ordinal=0;
@@ -661,13 +700,14 @@ static jobject code_frame_plan(JNIEnv *env,jmethodID method,jlocation location){
             ||(*native_ti)->GetClassSignature(native_ti,declaring,&signature,NULL)!=JVMTI_ERROR_NONE
             ||(*native_ti)->GetMethodName(native_ti,method,&name,&descriptor,NULL)!=JVMTI_ERROR_NONE
             ||(*native_ti)->GetMethodModifiers(native_ti,method,&access)!=JVMTI_ERROR_NONE)goto done;
-    int candidate=0;AcquireSRWLockShared(&code_records);
-    for(CodeImage *image=code_images;image&&!candidate;image=image->next)
+    int candidate=0;AcquireSRWLockShared(&code_records);CodeCandidates scan=code_candidates(signature);
+    for(CodeImage *image=code_candidate_next(&scan);image&&!candidate;image=code_candidate_next(&scan))
         if(image->execution&&!native_original.IsSameObject(env,image->execution,NULL)&&code_class_matches(env,image,declaring,loader,signature))candidate=1;
     ReleaseSRWLockShared(&code_records);if(!candidate)goto done;
     if(!code_vm_snapshot(env,method,&version,&pool,name,descriptor)||(*native_ti)->GetBytecodes(native_ti,method,&length,&bytes)!=JVMTI_ERROR_NONE)goto done;
     AcquireSRWLockShared(&code_records);
-    for(CodeImage *image=code_images;image&&!result;image=image->next){
+    scan=code_candidates(signature);
+    for(CodeImage *image=code_candidate_next(&scan);image&&!result;image=code_candidate_next(&scan)){
         if(!image->execution||!code_class_matches(env,image,declaring,loader,signature))continue;
         CodeMethod *entry=code_method(image,name,descriptor);if(!entry||entry->access!=(unsigned)access)continue;
         unsigned ordinal=0;

@@ -1,5 +1,9 @@
 # Ronova Pro 当前进度与 A 批状态
 
+2026-10-05 B Native 查询工作包：imagefields 来源实例 881 秒现场确认原始地址读租约重复扫描 Java 调用链。已认证的读租约复用这次操作传入的 Java 来源；VM／原生库来源仍重新观察，UNKNOWN 与全部原租约规则保留，写入／分配／I/O／追加来源仍用原捕获。源码同时确认执行映像与来源查询每次扫描全部已发布映像；现增加准确名字候选桶和隐藏映像链，合并后保持原发布顺序。完整类名、真实加载器／隐藏 Class 绑定、全部字节码与常量及 VM 当前版本仍逐项核对，原来源查询的发布范围保持，未缓存来源判定。
+
+nativeindex 完整构建通过（23 秒），原实际 Agent 下 B 适配、外部反射／MethodHandle 内存入口拒绝、控制数组／同步器防改写及直接缓冲传输检查通过。分发候选更新为 nativeindex（Java 48／Native 42），b-source-abi48-nativeindex 已用同版真实 prelaunch 启动。两份已被接替的 gatepolicy／bufferlayout 来源实例停止并保留现场，其他场景继续；仍无 B 游戏效果 PASS，B 未完成。原始日志仅在本地 .work。
+
 2026-10-05 B 执行来源调用者接续：readleaf 来源实例 1040 秒现场进入 ZIP 文件属性遍历，主线程在内存写入收尾的 ExecutionFlow 调用者扫描。统一将执行来源入口接到已有直接调用者核对；只有自身 nest 内部委托仍沿原外层调用链扫描，仍要求实际 CodeSourceBridge，不扩大控制权限。完整工作包构建通过（24 秒），原 B 夹具中的外部反射／MethodHandle 内存入口拒绝、控制对象防改写及实际缓冲传输通过。
 
 当前分发为 entrycaller，Java ABI 48／Native 42，b-source-abi48-entrycaller 使用同版真实 prelaunch 启动。先前场景仍运行，尚无 B 游戏效果 PASS，B 未完成。公开同步代码、候选及摘要，原始现场仅保留本地 .work。
