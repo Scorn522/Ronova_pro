@@ -90,13 +90,20 @@ final class ExternalCodeDefinitions {
     }
     private static final class Definition {
         final Ref<ClassLoader> loader;final boolean bootstrap,hidden,boundHidden;final String name;
-        final ExternalCodeFlow.Image image,analysis;final Map<String,Module[][]> applied;final Set<String> references;final byte[] bytes;final Ref<byte[]> emitted;volatile Ref<Class<?>> actual;
+        final ExternalCodeFlow.Image analysis;final Map<String,Integer> declarations;final int declarationCount;
+        final Map<String,Module[][]> applied;final Set<String> references;final byte[] bytes;final Ref<byte[]> emitted;volatile Ref<Class<?>> actual;
         final Map<String,Module[]> fields;final Object[][] values;
         final String[] creationSites;
         final Object execution;
         final int concreteMethods;final boolean contributors;
         Definition(ClassLoader loader,String name,Class<?> actual,ExternalCodeFlow.Image image,ExternalCodeFlow.Image analysis,Map<String,Module[][]> applied,byte[] bytes,Map<String,Module[]> fields,Object[][] values,boolean hidden,String[] creationSites,Object execution){
-            this.loader=new Ref<>(loader);this.bootstrap=loader==null;this.hidden=hidden;this.boundHidden=hidden&&actual!=null;this.name=name;this.actual=new Ref<>(actual);this.image=image;this.analysis=analysis;this.applied=applied;this.emitted=new Ref<>(bytes);this.bytes=bytes.clone();
+            this.loader=new Ref<>(loader);this.bootstrap=loader==null;this.hidden=hidden;this.boundHidden=hidden&&actual!=null;this.name=name;this.actual=new Ref<>(actual);this.analysis=analysis;this.applied=applied;this.emitted=new Ref<>(bytes);this.bytes=bytes.clone();
+            // The emitted tree is used only for method declarations. Retain
+            // those exact headers, not a second complete protected instruction
+            // graph beside the semantic graph used for source propagation.
+            Map<String,Integer> headers=new LinkedHashMap<>();
+            for(MethodNode method:image.node().methods)headers.put(method.name+method.desc,method.access&0xffff);
+            this.declarations=Map.copyOf(headers);this.declarationCount=image.node().methods.size();
             Map<String,Module[]> declared=new LinkedHashMap<>();for(var field:fields.entrySet())declared.put(field.getKey(),field.getValue().clone());this.fields=Map.copyOf(declared);
             this.values=new Object[values.length][];for(int i=0;i<values.length;i++){this.values[i]=values[i].clone();this.values[i][3]=((Module[])values[i][3]).clone();}
             this.creationSites=creationSites.clone();
@@ -106,10 +113,10 @@ final class ExternalCodeDefinitions {
             Set<String> referenced=new LinkedHashSet<>();
             for(MethodNode method:analysis.node().methods)for(AbstractInsnNode instruction:method.instructions.toArray())if(instruction instanceof MethodInsnNode call)referenced.add(call.owner);
             this.references=Set.copyOf(referenced);
-            List<Object> controls=new ArrayList<>(Arrays.asList(DIRECTORY,WORKER,LOADED,COMPARE,this,this.loader,this.actual,this.bytes,this.emitted,this.applied,this.references,this.fields,this.values,this.creationSites));
+            List<Object> controls=new ArrayList<>(Arrays.asList(DIRECTORY,WORKER,LOADED,COMPARE,this,this.loader,this.actual,this.bytes,this.emitted,this.applied,this.references,this.fields,this.values,this.creationSites,this.declarations));
             for(Module[][] rows:this.applied.values()){controls.add(rows);Collections.addAll(controls,rows);}
             for(Module[] owners:this.fields.values())controls.add(owners);for(Object[] row:this.values){controls.add(row);controls.add(row[3]);}
-            ControlImages.protect(controls.toArray());ExternalCodeImages.protectExecution(image,analysis);
+            ControlImages.protect(controls.toArray());ExternalCodeImages.protectExecution(analysis,this.declarations);
         }
         boolean loader(ClassLoader candidate){return bootstrap==(candidate==null)&&loader.get()==candidate;}
     }
@@ -185,7 +192,10 @@ final class ExternalCodeDefinitions {
         }
         if(emitted==null){ModGroupBoundary.externalGap(RecoveryAgent.logicalModule(actual),actual.getName()+":EXTERNAL_HIDDEN_DEFINITION_UNRESOLVED");return;}
         // One emitted image may define several distinct hidden classes. Give each class its own graph identity.
-        ExternalCodeFlow.Image image=new ExternalCodeFlow.Image(new Object(),emitted.image.node(),emitted.image.rows(),emitted.image.comparisons());
+        ClassNode header=new ClassNode();
+        new jdk.internal.org.objectweb.asm.ClassReader(emitted.bytes).accept(header,
+                jdk.internal.org.objectweb.asm.ClassReader.SKIP_CODE|jdk.internal.org.objectweb.asm.ClassReader.SKIP_DEBUG|jdk.internal.org.objectweb.asm.ClassReader.SKIP_FRAMES);
+        ExternalCodeFlow.Image image=new ExternalCodeFlow.Image(new Object(),header,Map.of(),Map.of());
         ExternalCodeFlow.Image analysis=new ExternalCodeFlow.Image(new Object(),emitted.analysis.node(),emitted.analysis.rows(),emitted.analysis.comparisons());
         Definition accepted=new Definition(actual.getClassLoader(),emitted.name,actual,image,analysis,emitted.applied,emitted.bytes,emitted.fields,emitted.values,true,emitted.creationSites,emitted.execution);
         RecoveryAgent.bindExternalDefinition(actual,bytes,accepted.applied.keySet().toArray(String[]::new),accepted.fields,accepted.values,accepted.creationSites);
@@ -668,7 +678,8 @@ final class ExternalCodeDefinitions {
         if(!method.unique()||(method.access()&(Opcodes.ACC_ABSTRACT|Opcodes.ACC_NATIVE))!=0)return null;
         if(method.actual()==classes.get(root.identity()))return concrete(declared(root,key))?new Target(root,key):null;
         Bound selected=bind(method.actual(),bound,unavailable);
-        return selected!=null&&selected.methods().contains(key)&&concrete(declared(selected.definition().image,key))?include(selected,key,loaders,classes):null;
+        Integer access=selected==null?null:selected.definition().declarations.get(key);
+        return selected!=null&&selected.methods().contains(key)&&access!=null&&(access&(Opcodes.ACC_ABSTRACT|Opcodes.ACC_NATIVE))==0?include(selected,key,loaders,classes):null;
     }
     private static Target include(Bound selected,String key,Map<Object,ClassLoader> loaders,Map<Object,Class<?>> classes){
         ExternalCodeFlow.Image image=selected.graph();loaders.put(image.identity(),selected.actual().getClassLoader());classes.put(image.identity(),selected.actual());return new Target(image,key);
@@ -699,7 +710,7 @@ final class ExternalCodeDefinitions {
             // any selectors. Reuse headers already read for this graph's member
             // lookup to omit those impossible candidates; a possible match still
             // requires the original native bytecode/constant/handler comparison.
-            if(headers!=null&&!sameDeclarations(candidate.image,headers))continue;
+            if(headers!=null&&!sameDeclarations(candidate,headers))continue;
             String[] selectors=RecoveryAgent.externalCodeVersion(actual,candidate.bytes);if(selectors==null)continue;
             if(definition==null||selectors.length>matched.length){definition=candidate;matched=selectors;}
             // A full current-class match includes the declaration shape. No
@@ -724,13 +735,13 @@ final class ExternalCodeDefinitions {
         ExternalCodeFlow.Image graph=new ExternalCodeFlow.Image(definition.analysis.identity(),definition.analysis.node(),Map.copyOf(rows),definition.analysis.comparisons());
         Bound result=new Bound(definition,actual,methods,graph);bound.put(actual,result);return result;
     }
-    private static boolean sameDeclarations(ExternalCodeFlow.Image image,Map<String,Integer> actual){
-        if(image.node().methods.size()!=actual.size())return false;
-        for(MethodNode method:image.node().methods){
-            Integer access=actual.get(method.name+method.desc);
+    private static boolean sameDeclarations(Definition definition,Map<String,Integer> actual){
+        if(definition.declarationCount!=actual.size())return false;
+        for(var method:definition.declarations.entrySet()){
+            Integer access=actual.get(method.getKey());
             // ASM's pseudo access bits describe attributes, not the u2 method
             // flags used by the native image parser and GetMethodModifiers.
-            if(access==null||access!=(method.access&0xffff))return false;
+            if(!Objects.equals(access,method.getValue()))return false;
         }
         return true;
     }

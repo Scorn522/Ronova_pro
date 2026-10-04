@@ -1,5 +1,15 @@
 # Ronova Pro V1.5 A 批收口报告
 
+2026-10-04 后续启动热点修补：b-record-48-unknown 实际越过原 SensorType 失败点、Forge 初始化和方块缓存阶段，进入世界资源加载。为保留进度曾仅终止限时启动器，游戏保持运行；随后取得真实热点采样并完成针对性修补，停止旧游戏切换新包。此轮未到达夹具效果，不记通过。保留日志 b-record-48-unknown-startup.log 及 after-source-fix／config 两份线程现场。采样 112 个主线程样本中，executionPlan0 为 63，ControlRegistry.reap 为 33。隐藏类映像改为各自真实绑定链，堆目录只登记实际插入的弱键，短原型数组快照按实际 bits 相等复用；原来源、UNKNOWN、并发和 VM 验证保持。统一编译 15 秒、打包 11 秒通过，日志 build-b-hotspots-48.log、package-b-hotspots-48.log。原 SourceModuleFixture 的释放动作改用已清除身体的原操作编号，并检查实际撤销状态；该场景仅编译打包，尚未执行。当前 b-record-abi48-indexed 与 b-chain-abi48-indexed-production 分别运行，B 尚未完成。
+
+启动失败定位补充：第三轮（b-record-48-memory-source-failure.log）确认实际加载的是新构建 DLL，仍以不含逐帧诊断的同一来源捕获错误退出。源码复核发现真实 Io scope 的 null 未知来源标记被 native_capture_network_sources 当作 Owner 分配失败；已修补已知来源与未知状态的独立传递，并沿现有资源／内存路径保留未知状态，未将未知归属放宽为独占。修补及最终失败阶段定位已统一构建通过（14 秒，package-b-native-unknown-48.log），当前候选同步更新；原引用场景正在运行，游戏效果尚未通过。
+
+2026-10-04 B 实际运行收口（进行中）：Journal V5 → V6 迁移、大于 1 MB 的逻辑记录持久 ACK／重新打开／前置读取器读回、UTF-16 保真及截断尾帧拒绝确认已在真实日志文件上通过，记录为 evidence-20261002/b-journal-6.log。真实 Agent 下来源目录根数组与控制表根数组外部改写被拒绝，原对象适配器和字符流调用检查通过，记录为 b-control-arrays-48.log。
+
+启动实际失败仍保留：2 GB JVM 的存活堆约 20.85 亿字节；改用 6 GB 后，引用与保存链两轮均在原版 SensorType 初始化期间因 EXTERNAL_NATIVE_CALL_SOURCE_UNOBSERVED 退出，未进入游戏效果阶段。原日志为 b-record-48-native-source-failure.log、b-chain-48-native-source-failure.log。启动包已修复文件委托字段重复查找、缓冲操作临时列表、来源目录树与控制数组查询开销；后续去除执行定义的重复完整指令树，改存精确声明表，保留完整字节、原语义图和实际版本核对。统一打包通过（15 秒，package-b-startup-memory-48.log），新一轮正在定位具体来源帧，B 未通过。
+
+既有 ChainFixture 同时修正了成功防御的误判：原型已清掉时不再对 null 执行克隆；克隆入口或加入世界被拒绝时记录实际结果；确实加入世界的克隆必须消失，稳定阶段再次核对。仍要求真实内存清理、邻居保留、磁盘读回和原意图重启；未执行的克隆路径不再宣称 UUID 变更复活已验证。此修改仅编译通过（10 秒），尚未运行。没有新增独立探针或无关测试。
+
 2026-10-04 B 标准来源剩余代码收口：Core／Agent／Bootstrap ABI 48，NativeControl 41、Storage 3、Journal 物理版本 6。上轮明确剩下的 fastutil 对象列表／对象集合、HashMap 空键、字符流包装器三项代码已经一并接通；这里的完成范围是这三项已确认的源码缺口，不代替 B 的游戏内效果验收。
 
 ObjectArrayList 和 ObjectOpenHashSet 已接入实际来源登记、底层数组别名、限额接续扫描、准确身份删除、写后登记与历史缺席查询；Set 的空槽与其他成员保留。列表的单项、批量、数组段、子列表和迭代器写入在实际 receiver 门内判定，防回填判断覆盖可变共享包装的子字段。拒绝写入后，子列表长度按实际根列表变化更新，迭代器在推进游标前检查；保留邻居引用。发布另一 fastutil 容器时，同时保持真实 key/value/link 数组的门，避免检查与实际发布之间由旧数组别名改写。来源实际写入完成后再通知，不在半完成的结构修改中登记子来源。

@@ -1275,7 +1275,9 @@ public final class CodeSourceBridge {
         if(object==null)return false;
         synchronized(CONTROLS){
             if(object==CONTROLS)return true;
-            if(object.getClass().isArray())try{
+            // Only this exact component type can be the registry's backing.
+            // Other arrays still undergo the ordinary control-identity lookup.
+            if(object instanceof ControlKey[])try{
                 Object backing=NativeControl.available()?NativeControl.controlTable():CONTROLS.table;
                 if(backing==object)return true;
             }

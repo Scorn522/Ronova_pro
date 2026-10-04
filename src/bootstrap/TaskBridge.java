@@ -1194,7 +1194,7 @@ public final class TaskBridge {
         return false;
     }
     static boolean controlled(Object value) {
-        if(value==null)return false;if(DefinitionBridge.controlled(value)||CodeSourceBridge.controlled(value)||NetworkBridge.controlled(value)||ClientBridge.controlled(value)||criticalEntry(value))return true;ControlRef[] controls=controlObjects;
+        if(value==null)return false;if(SourceMapBridge.controlled(value)||DefinitionBridge.controlled(value)||CodeSourceBridge.controlled(value)||NetworkBridge.controlled(value)||ClientBridge.controlled(value)||criticalEntry(value))return true;ControlRef[] controls=controlObjects;
         if(value==controls||value==controlBits)return true;
         int hash=System.identityHashCode(value)&65535;
         if((controlBits[hash>>>6]&(1L<<(hash&63)))==0)return false;
@@ -2320,7 +2320,9 @@ public final class TaskBridge {
     private static Class<?> actualFieldOwner(Class<?> symbolic,String name,String descriptor) {
         if(symbolic==null||name==null||descriptor==null)return null;
         String key=name+'\u0000'+descriptor;
-        return FIELD_DECLARING.get(symbolic).computeIfAbsent(key,ignored->{
+        var fields=FIELD_DECLARING.get(symbolic);Class<?> known=fields.get(key);
+        if(known!=null)return known;
+        return fields.computeIfAbsent(key,ignored->{
             Class<?> declaring=findFieldOwner(symbolic,name,descriptor);
             return declaring==null?Void.class:declaring;
         });

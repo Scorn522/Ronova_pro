@@ -490,6 +490,13 @@ public final class BoundaryCheck {
     @SuppressWarnings("unchecked") private static void bAdapterLinkage()throws Exception{
         Class<?> agent=Class.forName("dev.ronova.pro.agent.RecoveryAgent",false,ClassLoader.getSystemClassLoader());
         require(String.valueOf(agent.getMethod("installState").invoke(null)).startsWith("INSTALLED"),"actual agent installation for B adapters");
+        Class<?> sources=Class.forName("dev.ronova.pro.bootstrap.SourceMapBridge",false,null);
+        Field roots=sources.getDeclaredField("scopes");roots.setAccessible(true);
+        controlArrayWriteRefused(roots.get(null),"source directory roots");
+        Class<?> code=Class.forName("dev.ronova.pro.bootstrap.CodeSourceBridge",false,null);
+        Field controls=code.getDeclaredField("CONTROLS");controls.setAccessible(true);Object registry=controls.get(null);
+        Field table=registry.getClass().getDeclaredField("table");table.setAccessible(true);
+        controlArrayWriteRefused(table.get(registry),"actual control table");
         String listType="it.unimi.dsi.fastutil.objects.ObjectArrayList",setType="it.unimi.dsi.fastutil.objects.ObjectOpenHashSet";
         List<Object> list=(List<Object>)Class.forName(listType).getConstructor().newInstance();Object first=new Object(),second=new Object();
         list.add(first);list.add(second);list.subList(0,1).addAll(List.of(second));list.listIterator().add(first);list.subList(0,1).listIterator().add(second);list.remove(0);list.remove(0);
@@ -506,6 +513,14 @@ public final class BoundaryCheck {
         try(var writer=new java.io.BufferedWriter(new java.io.OutputStreamWriter(bytes,java.nio.charset.StandardCharsets.UTF_8))){writer.write("delegate-linkage");}
         try(var reader=new java.io.BufferedReader(new java.io.InputStreamReader(new java.io.ByteArrayInputStream(bytes.toByteArray()),java.nio.charset.StandardCharsets.UTF_8))){require(reader.readLine().equals("delegate-linkage"),"character wrapper constructors and operations link without altering a live delegate");}
         System.out.println("B_ADAPTER_LINKAGE_PASS");
+    }
+    private static void controlArrayWriteRefused(Object array,String name)throws Exception{
+        for(int index=0;index<Array.getLength(array);index++){
+            Object original=Array.get(array,index);if(original==null)continue;
+            try{Array.set(array,index,null);}catch(SecurityException refused){}
+            require(Array.get(array,index)==original,name+" refuses a foreign reflective array store");return;
+        }
+        throw new AssertionError(name+" has no live entry to exercise");
     }
     private static void fastutilIndex()throws Exception {
         Class<?> agent=Class.forName("dev.ronova.pro.agent.RecoveryAgent",false,ClassLoader.getSystemClassLoader());

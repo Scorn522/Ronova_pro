@@ -67,6 +67,13 @@ final class ExecutionFlow {
         public int hashCode(){return hash;}
         public boolean equals(Object other){return this==other||other instanceof Carrier key&&get()!=null&&get()==key.get();}
     }
+    // Call under HEAP's monitor. Only a key actually inserted in the directory
+    // needs queue registration and control protection; lookups retain identity.
+    private static Heap heapFor(Object actual){
+        Heap heap=HEAP.get(new Carrier(actual,false));
+        if(heap==null){heap=new Heap();HEAP.put(new Carrier(actual,true),heap);}
+        return heap;
+    }
     private static final class FieldSlot {
         final WeakReference<Class<?>> declaring;final String name,descriptor;
         FieldSlot(Class<?> declaring,String name,String descriptor){this.declaring=new WeakReference<>(declaring);this.name=name;this.descriptor=descriptor;CodeSourceBridge.executionControls(this,this.declaring);}
@@ -307,7 +314,7 @@ final class ExecutionFlow {
             Map<String,FieldSlot> fields=FIELDS.get(actual);String key=write.name()+'\u0000'+write.descriptor();FieldSlot field;
             synchronized(fields){field=fields.computeIfAbsent(key,ignored->new FieldSlot(actual,write.name(),write.descriptor()));}
             synchronized(HEAP){
-                reapHeap();Heap heap=HEAP.computeIfAbsent(new Carrier(receiver,true),ignored->new Heap());Slot slot=heap.slots.computeIfAbsent(field,ignored->new Slot());
+                reapHeap();Heap heap=heapFor(receiver);Slot slot=heap.slots.computeIfAbsent(field,ignored->new Slot());
                 slot.sources=written;slot.version++;if(slot.writers!=0)slot.overlap=true;
             }
         }
@@ -402,7 +409,7 @@ final class ExecutionFlow {
         }
         if(receiver!=null&&frame.operands.length!=0)bind(frame.operands[0].alias(),receiver);
         synchronized(HEAP){
-            reapHeap();Heap heap=HEAP.computeIfAbsent(new Carrier(holder,true),ignored->new Heap());
+            reapHeap();Heap heap=heapFor(holder);
             Slot slot=location instanceof Integer at?arraySlot(heap,at):heap.slots.computeIfAbsent(location,ignored->new Slot());
             frame.heap=new HeapUse(holder,heap,slot,location,write,frame.active);
             if(location instanceof Integer at){
@@ -465,7 +472,7 @@ final class ExecutionFlow {
         synchronized(fields){field=fields.computeIfAbsent(name+'\u0000'+descriptor,ignored->new FieldSlot(declaring,name,descriptor));}
         boolean watched=CodeSourceBridge.executionWatchField(holder,declaring,name,descriptor);
         synchronized(HEAP){
-            reapHeap();Heap heap=HEAP.computeIfAbsent(new Carrier(holder,true),ignored->new Heap());
+            reapHeap();Heap heap=heapFor(holder);
             Slot slot=heap.slots.computeIfAbsent(field,ignored->new Slot());
             slot.vmWatched|=watched;
             Frame frame=CURRENT.get();HeapUse pending=frame==null?null:frame.heap;
@@ -493,8 +500,7 @@ final class ExecutionFlow {
     }
     private static Object arrayMemoryBefore(Object holder,int start,int length,boolean broad,Module[] contributors,long position,long count,boolean typed){
         synchronized(HEAP){
-            reapHeap();Heap heap=HEAP.get(new Carrier(holder,false));
-            if(heap==null){heap=new Heap();HEAP.put(new Carrier(holder,true),heap);}
+            reapHeap();Heap heap=heapFor(holder);
             // Create the single slot before entering this window so every older
             // overlapping window includes it. The locked heap is then selected
             // directly into the same Prior records, without a temporary list.
@@ -624,7 +630,14 @@ final class ExecutionFlow {
             // the receipt; larger windows retain every exact original chunk.
             if(length>65536){change.parts=new ArrayImage[(int)((length-1)/65536+1)];CodeSourceBridge.executionControls((Object)change.parts);}
             int part=0;for(long at=start;at<end;){int count=(int)Math.min(65536,end-at);
-                ArrayImage image=change.images?arrayImage(carrier,at,count):null;
+                ArrayImage previous=null;
+                if(change.images&&count<=8&&carrier.getClass().getComponentType().isPrimitive()){
+                    ArrayRange range=heap.arrayRanges.get(at);
+                    if(range!=null&&range.start==at&&range.length==count&&range.head.after()!=null
+                            &&range.head.after().start==at&&range.head.after().length==count)previous=range.head.after();
+                }
+                // Reuse only after arrayImage reads and compares the actual bits.
+                ArrayImage image=change.images?arrayImage(carrier,at,count,previous):null;
                 if(change.parts==null)change.before=image;else change.parts[part++]=image;
                 if(image==null)change.complete=false;at+=count;
             }
@@ -826,7 +839,7 @@ final class ExecutionFlow {
     static Object byteMemoryReadBefore(Object carrier,long offset,long length){
         bridge();if(carrier==null||length<=0)return null;
         synchronized(HEAP){
-            reapHeap();Heap heap=HEAP.computeIfAbsent(new Carrier(carrier,true),ignored->new Heap());
+            reapHeap();Heap heap=heapFor(carrier);
             MemoryRead read=new MemoryRead(carrier,heap,offset,length,byteMemorySources(carrier,heap,offset,length));heap.reads.add(read);return read;
         }
     }

@@ -46,6 +46,8 @@ public final class ChainFixture {
     private UUID operation;
     private Data data;
     private WeakReference<Target> original;
+    private UUID cloneId;
+    private String cloneOutcome="CLONE_NOT_ATTEMPTED";
     private int tick,phase,stableAt=-1;
     private boolean finished;
     private final boolean restart="chain-restart".equals(System.getProperty("ronova.pro.fixture"));
@@ -94,19 +96,28 @@ public final class ChainFixture {
             if(phase==1) {
                 var body=runtime.query(operation);
                 if(body!=null&&body.complete()&&body.receiptDurable()) {
-                    // A real no-NBT clone, with a different UUID, after the first body's clear.
-                    Target clone=Target.PROTOTYPE.get().copy();clone.revive();clone.setUUID(UUID.randomUUID());clone.setId(clone.getId()+100000);
-                    clone.setPos(5,80,5);require(level.addFreshEntity(clone),"CLONE_SPAWN");phase=2;
+                    // Clearing the source or refusing its clone is already a
+                    // valid defense. Only an admitted clone needs a new body clear.
+                    Target prototype=Target.PROTOTYPE.get();
+                    if(prototype==null)cloneOutcome="PROTOTYPE_CLEARED_BEFORE_CLONE";
+                    else try {
+                        Target clone=prototype.copy();clone.revive();clone.setUUID(UUID.randomUUID());clone.setId(clone.getId()+100000);
+                        cloneId=clone.getUUID();clone.setPos(5,80,5);
+                        cloneOutcome=level.addFreshEntity(clone)?"CLONE_UUID_CHANGED_AND_ADMITTED":"CLONE_ADMISSION_REFUSED";
+                    } catch(CloneNotSupportedException refused) { cloneOutcome="TERMINAL_CLONE_REFUSED"; }
+                    phase=2;
                 }
             } else if(phase==2&&Target.PROTOTYPE.get()==null&&!data.records.containsKey("target")
-                    &&data.retained.get()==null&&data.copies.size()==1&&!STATIC_RECORDS.containsKey("target")) {
+                    &&data.retained.get()==null&&data.copies.size()==1&&!STATIC_RECORDS.containsKey("target")
+                    &&(cloneId==null||level.getEntity(cloneId)==null)) {
                 require(data.records.get("unrelated").getString("foreign").equals("untouched"),"UNRELATED_MEMORY");phase=3;
             } else if(phase==3&&settled(runtime)) {
                 checkDisk(level);
                 // Normal GC request tests continued metadata settlement; it supplies no release fact.
                 System.gc();phase=4;stableAt=tick;
             } else if(phase==4&&tick-stableAt>=40&&original.get()==null&&settled(runtime)) {
-                checkDisk(level);finish(event,"CHAIN_PRODUCTION_PASS\nSTATIC_SAVED_DATA_ATOMIC_LIST_NATIVE_CLONE_UUID_CHANGE_GC_STABLE\n",runtime);
+                require(cloneId==null||level.getEntity(cloneId)==null,"CLONE_REAPPEARED");
+                checkDisk(level);finish(event,"CHAIN_PRODUCTION_PASS\nSTATIC_SAVED_DATA_ATOMIC_LIST_GC_STABLE\n"+cloneOutcome+"\n",runtime);
             } else if(phase==5&&settled(runtime)) {
                 checkDisk(level);finish(event,"CHAIN_ORIGINAL_INTENT_RESTART_PASS\n",runtime);
             }

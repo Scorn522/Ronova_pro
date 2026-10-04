@@ -228,28 +228,31 @@ static int host_capture_caller(NativeThread *state,void *caller,OwnerLink **owne
             ready=ready&&native_owner_merge(owners,library->owners);
     ReleaseSRWLockShared(&native_records);return ready;
 }
-static int host_capture_all(JNIEnv *env,NativeThread *state,void *caller,OwnerLink **owners){
-    if(!native_capture_scope_owners(env,state,owners)
+static int host_capture_all_query(JNIEnv *env,NativeThread *state,void *caller,OwnerLink **owners,int *unknown){
+    if(!native_capture_scope_sources(env,state,owners,unknown)
             ||!host_capture_caller(state,caller,owners))return 0;
     state->control++;state->sourceCapture++;
     jobjectArray sources=(jobjectArray)native_original.CallStaticObjectMethod(env,native_tasks,native_process_sources);
     state->sourceCapture--;int ready=sources&&!native_original.ExceptionCheck(env);
     if(ready){
         jsize count=native_original.GetArrayLength(env,sources);AcquireSRWLockExclusive(&native_records);
-        for(jsize i=0;i<count&&ready;i++){
-            jobject module=native_original.GetObjectArrayElement(env,sources,i);Owner *owner=native_owner(env,module);
-            ready=owner&&native_owner_add(owners,owner);if(module)native_original.DeleteLocalRef(env,module);
+        for(jsize i=0;i<count&&ready&&!native_original.ExceptionCheck(env);i++){
+            jobject module=native_original.GetObjectArrayElement(env,sources,i);
+            if(!module){if(unknown)*unknown=1;else ready=0;}
+            else {Owner *owner=native_owner(env,module);ready=owner&&native_owner_add(owners,owner);native_original.DeleteLocalRef(env,module);}
         }
         ReleaseSRWLockExclusive(&native_records);
     }
     if(sources)native_original.DeleteLocalRef(env,sources);state->control--;
-    return ready;
+    return ready&&!native_original.ExceptionCheck(env);
 }
-static int host_capture(JNIEnv *env,NativeThread *state,void *caller,OwnerLink **owners){
-    int ready=host_capture_all(env,state,caller,owners);
+static int host_capture_all(JNIEnv *env,NativeThread *state,void *caller,OwnerLink **owners){return host_capture_all_query(env,state,caller,owners,NULL);}
+static int host_capture_query(JNIEnv *env,NativeThread *state,void *caller,OwnerLink **owners,int *unknown){
+    int ready=host_capture_all_query(env,state,caller,owners,unknown);
     /* Runtime carriers do not become producers of every process they implement. */
     host_producers(owners);return ready;
 }
+static int host_capture(JNIEnv *env,NativeThread *state,void *caller,OwnerLink **owners){return host_capture_query(env,state,caller,owners,NULL);}
 static int host_library_current(NativeLibrary *library,HMODULE image){
     return library->handle==image&&library->jni&&!library->builtin
             &&InterlockedCompareExchange(&library->alive,0,0)

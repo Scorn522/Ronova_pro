@@ -32,7 +32,7 @@ static NativeMemoryAllocation *native_memory_find(uint64_t address,uint64_t leng
     }return NULL;
 }
 static int native_memory_sources(JNIEnv *env,NativeThread *state,jobjectArray supplied,OwnerLink **sources,int *unknown){
-    if(!host_capture(env,state,NULL,sources))return 0;
+    if(!host_capture_query(env,state,NULL,sources,unknown))return 0;
     if(!supplied){if(!*sources)*unknown=1;return 1;}jsize count=native_original.GetArrayLength(env,supplied);int ready=1;
     AcquireSRWLockExclusive(&native_records);
     for(jsize i=0;i<count&&ready&&!native_original.ExceptionCheck(env);i++){

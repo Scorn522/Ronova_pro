@@ -287,7 +287,10 @@ final class SourceModuleFixture {
                 require(runtime.recoveryStatus(operation).stream().anyMatch(row->row.contains("MIXED_TASK_CONSTRUCTOR_OUTPUT")),"ambiguous producer was not reported");
                 require(level.getEntity(neighbor.getUUID())==neighbor,"neighbor body lost");
                 facts.add("MIXED_TASK_REMAINS_EXPLICITLY_UNRESOLVED_WITHOUT_COLLATERAL_REMOVAL");
-                FixtureCommands.revoke(runtime,target);
+                // The cleared body is no longer resolvable by an entity selector.
+                // Cancel its original operation through the real command instead.
+                FixtureCommands.cancel(runtime,operation);
+                require(runtime.query(operation)!=null&&"OPERATION_CANCELLED".equals(runtime.query(operation).reason()),"original source qualification was not revoked");
                 require(!data.recipes.containsValue(removed)&&!StaticData.snapshots.containsKey("target"),"disposition was only a temporary read filter");
                 data.recipes.put("after-revoke",removed);data.snapshots.put("after-revoke",original);
                 require(data.recipes.get("after-revoke")==removed&&data.snapshots.get("after-revoke")==original,"source guard retained stale qualification");

@@ -12,10 +12,10 @@ public final class SourceMapBridge {
     // Registration is called while resource/source gates can already be held.
     // A monitored concurrent map would issue a guarded Unsafe counter CAS here,
     // taking a receiver gate whose permission check can acquire the resource lock.
-    // This private tree uses only immutable identity hashes; equal hashes have an
-    // exact weak-identity chain. Its nodes are protected SourceMap state, with no
-    // JDK Map mutation API, backing array, CAS or application key callback.
-    private static Bucket scopes;
+    // Fixed roots keep unrelated temporary containers out of the same long tree.
+    // Each tree still uses immutable identity hashes and exact weak identities.
+    // The root array is control state; no JDK map, CAS or key callback is used.
+    private static final Bucket[] scopes=new Bucket[4096];
     private static final StackWalker CALLER=StackWalker.getInstance(StackWalker.Option.RETAIN_CLASS_REFERENCE);
     private static volatile boolean enabled;
     private static volatile String failure="";
@@ -90,6 +90,7 @@ public final class SourceMapBridge {
     // Every INTERNAL region uses only our identity keys and exact JDK bookkeeping;
     // it must end before invoking any Core observer or application callback.
     static boolean internal() { return INTERNAL.get()!=null; }
+    static boolean controlled(Object value) { return value==scopes; }
     static void install(java.lang.invoke.MethodHandle guard,java.lang.invoke.MethodHandle changed) {
         writeGuard=guard.asType(java.lang.invoke.MethodType.methodType(boolean.class,Object.class,Object.class,Object.class));
         changeObserver=changed.asType(java.lang.invoke.MethodType.methodType(void.class,Object.class));
@@ -270,8 +271,9 @@ public final class SourceMapBridge {
     private static void indexWriter(Class<?> caller) {
         if(caller!=SourceMapBridge.class||!Thread.holdsLock(MONITOR))throw new SecurityException("SOURCE_SCOPE_INDEX_WRITER_REQUIRED");
     }
+    private static int rootIndex(int hash) { return (hash^(hash>>>16))&(scopes.length-1); }
     private static Bucket bucket(int hash) {
-        Bucket bucket=scopes;
+        Bucket bucket=scopes[rootIndex(hash)];
         while(bucket!=null&&hash!=bucket.hash)bucket=hash<bucket.hash?bucket.left:bucket.right;
         return bucket;
     }
@@ -279,7 +281,7 @@ public final class SourceMapBridge {
     private static void replaceBucket(Bucket previous,Bucket next) {
         indexWriter(CALLER.getCallerClass());
         Bucket parent=previous.parent;
-        if(parent==null)scopes=next;else if(parent.left==previous)parent.left=next;else parent.right=next;
+        if(parent==null)scopes[rootIndex(previous.hash)]=next;else if(parent.left==previous)parent.left=next;else parent.right=next;
         if(next!=null)next.parent=parent;
     }
     private static Bucket rotateLeft(Bucket bucket) {
@@ -340,7 +342,7 @@ public final class SourceMapBridge {
     }
     private static Scope scope(Object receiver,boolean create) {
         synchronized(MONITOR) {
-            int hash=System.identityHashCode(receiver);Bucket parent=null,bucket=scopes;
+            int hash=System.identityHashCode(receiver);Bucket parent=null,bucket=scopes[rootIndex(hash)];
             while(bucket!=null&&hash!=bucket.hash){parent=bucket;bucket=hash<bucket.hash?bucket.left:bucket.right;}
             if(bucket!=null)for(Key entry=bucket.first;entry!=null;entry=entry.next)if(entry.get()==receiver)return entry.scope;
             if(!create)return null;
@@ -348,7 +350,7 @@ public final class SourceMapBridge {
             if(bucket!=null){added.next=bucket.first;bucket.first=added;}
             else {
                 Bucket next=new Bucket(added,parent);
-                if(parent==null)scopes=next;else if(hash<parent.hash)parent.left=next;else parent.right=next;
+                if(parent==null)scopes[rootIndex(hash)]=next;else if(hash<parent.hash)parent.left=next;else parent.right=next;
                 balance(parent);
             }
             // Charge retirement to every actual insertion, including node scopes.

@@ -50,12 +50,13 @@ public final class IoBridge {
             NOTIFY_FAILURE=method(INVOKER,"invoke",PENDING),ENABLE_READ=method(ASYNC_SOCKET,"enableReading"),ENABLE_WRITE=method(ASYNC_SOCKET,"enableWriting");
     private static final ClassValue<Layout> LAYOUTS=new ClassValue<>() {
         protected Layout computeValue(Class<?> actual){
-            if(ROOTS.contains(actual))return new Layout(find(actual,"fdObj","fd"),null,null,null,null,null);
-            if(TASKS.contains(actual))return new Layout(null,find(actual,"this$0"),find(actual,"result"),find(actual,"bufs","dst","src"),find(actual,"buf","shadow"),find(actual,"channel"));
-            return new Layout(null,null,null,null,null,null);
+            if(ROOTS.contains(actual))return new Layout(find(actual,"fdObj","fd"),null,null,null,null,null,null);
+            Field delegate=TYPES.contains(actual)?find(actual,"sc","dc","ssc"):null;
+            if(TASKS.contains(actual))return new Layout(null,find(actual,"this$0"),find(actual,"result"),find(actual,"bufs","dst","src"),find(actual,"buf","shadow"),find(actual,"channel"),delegate);
+            return new Layout(null,null,null,null,null,null,delegate);
         }
     };
-    private record Layout(Field fd,Field outer,Field result,Field buffers,Field temporary,Field child){}
+    private record Layout(Field fd,Field outer,Field result,Field buffers,Field temporary,Field child,Field delegate){}
     private static final class Key extends WeakReference<Object> {
         final int hash;
         Key(Object value,boolean queued){super(value,queued?DEAD:null);hash=System.identityHashCode(value);}
@@ -137,7 +138,7 @@ public final class IoBridge {
     }
     private static Field field(Class<?> owner,String name){try{Field field=owner.getDeclaredField(name);field.setAccessible(true);return field;}catch(ReflectiveOperationException failure){throw new ExceptionInInitializerError(failure);}}
     private static Field find(Class<?> actual,String...names){for(Class<?> owner=actual;owner!=null;owner=owner.getSuperclass())for(String name:names)
-        try{return field(owner,name);}catch(ExceptionInInitializerError missing){if(!(missing.getCause() instanceof NoSuchFieldException))throw missing;}return null;}
+        try{Field found=owner.getDeclaredField(name);found.setAccessible(true);return found;}catch(NoSuchFieldException missing){}return null;}
     private static Method method(Class<?> owner,String name,Class<?>...parameters){try{Method value=owner.getDeclaredMethod(name,parameters);value.setAccessible(true);return value;}catch(ReflectiveOperationException failure){throw new ExceptionInInitializerError(failure);}}
     private static void platform(Class<?> declaring,String name){
         var caller=WALKER.walk(PLATFORM_BOUNDARY);
@@ -287,7 +288,10 @@ public final class IoBridge {
             else if(actual==DatagramSocket.class||actual==MulticastSocket.class)current=DATAGRAM_DELEGATE.get(current);
             else if(DELEGATING.isInstance(current)&&actual.getClassLoader()==null)current=IMPL_DELEGATE.get(current);
             else if(TYPES.contains(actual)&&!ROOTS.contains(actual)){
-                Field channel=find(actual,"sc","dc","ssc");current=channel==null?null:channel.get(current);
+                // The field layout belongs to the actual platform Class; its delegate
+                // is still read from this receiver on every operation.
+                Field channel=LAYOUTS.get(actual).delegate;
+                current=channel==null?null:channel.get(current);
             }else return null;
         }
         return null;

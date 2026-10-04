@@ -545,12 +545,10 @@ final class ExternalCodeImages {
         }
         return new ExternalCodeFlow.Image(new Object(),node,Map.copyOf(rows),Map.of());
     }
-    static void protectExecution(ExternalCodeFlow.Image image,ExternalCodeFlow.Image analysis){
-        // Both immutable images become reachable through the same Definition.
-        // Traverse their full union once; shared actual nodes and containers
-        // are de-duplicated only within this publication, never across actions.
-        protect(image,image.identity(),image.node(),image.rows(),image.comparisons(),
-                analysis,analysis.identity(),analysis.node(),analysis.rows(),analysis.comparisons());
+    static void protectExecution(ExternalCodeFlow.Image analysis,Map<String,Integer> declarations){
+        // The retained semantic image supplies all instruction/source queries.
+        // Emitted bytes and their compact declarations are protected separately.
+        protect(analysis,analysis.identity(),analysis.node(),analysis.rows(),analysis.comparisons(),declarations);
     }
     private static List<Long> destinations(Instruction instruction,Long following){
         AbstractInsnNode code=instruction.code();List<Long> result=new ArrayList<>();

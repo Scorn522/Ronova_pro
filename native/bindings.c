@@ -57,6 +57,7 @@ static int native_bind_controller(JNIEnv *env,jclass controller);
 static int code_initialize(void);
 static int code_prepare(JNIEnv*);
 static int code_current_sources(JNIEnv *env,OwnerLink **owners);
+static int code_current_sources_query(JNIEnv *env,OwnerLink **owners,int *unknown);
 static int code_current_stopped(JNIEnv *env);
 static void JNICALL code_class_prepared(jvmtiEnv *ti,JNIEnv *env,jthread thread,jclass type);
 static void JNICALL code_frame_popped(jvmtiEnv *ti,JNIEnv *env,jthread thread,jmethodID method,jboolean exceptional);
@@ -143,16 +144,21 @@ static int native_caller_stopped(void *address){
 }
 static int native_stopped(JNIEnv *env){NativeThread *state=native_thread();if(!state)return 0;for(unsigned i=0;i<state->depth;i++)if(native_owner_stopped(state->stack[i]->owners))return 1;for(NativeLibraryScope *scope=state->library;scope;scope=scope->previous)if(native_owner_stopped(scope->library->owners))return 1;return code_current_stopped(env);}
 static jweak native_origin(NativeThread *state){return state&&state->depth?state->stack[state->depth-1]->origin:state&&state->library?state->library->library->origin:NULL;}
-static int native_capture_scope_owners(JNIEnv *env,NativeThread *state,OwnerLink **owners){
+static int native_capture_scope_sources(JNIEnv *env,NativeThread *state,OwnerLink **owners,int *unknown){
     if(!state)return 1;for(unsigned i=0;i<state->depth;i++)if(!native_owner_merge(owners,state->stack[i]->owners))return 0;
-    for(NativeLibraryScope *scope=state->library;scope;scope=scope->previous)if(!native_owner_merge(owners,scope->library->owners))return 0;return code_current_sources(env,owners);
+    for(NativeLibraryScope *scope=state->library;scope;scope=scope->previous)if(!native_owner_merge(owners,scope->library->owners))return 0;return code_current_sources_query(env,owners,unknown);
 }
-static int native_capture_network_sources(JNIEnv *env,NativeThread *state,OwnerLink **owners){
+static int native_capture_scope_owners(JNIEnv *env,NativeThread *state,OwnerLink **owners){return native_capture_scope_sources(env,state,owners,NULL);}
+static int native_capture_network_sources(JNIEnv *env,NativeThread *state,OwnerLink **owners,int *unknown){
     if(!native_jni_ready||!state||state->control||!native_network_sources)return 1;
     state->control++;state->sourceCapture++;jobjectArray sources=(jobjectArray)native_original.CallStaticObjectMethod(env,native_tasks,native_network_sources);state->sourceCapture--;int valid=sources&&!native_original.ExceptionCheck(env);
     if(valid){jsize count=native_original.GetArrayLength(env,sources);AcquireSRWLockExclusive(&native_records);
-        for(jsize i=0;i<count&&valid;i++){jobject module=native_original.GetObjectArrayElement(env,sources,i);Owner *owner=native_owner(env,module);valid=owner&&native_owner_add(owners,owner);if(module)native_original.DeleteLocalRef(env,module);}ReleaseSRWLockExclusive(&native_records);
-    }if(sources)native_original.DeleteLocalRef(env,sources);state->control--;return valid;
+        for(jsize i=0;i<count&&valid&&!native_original.ExceptionCheck(env);i++){
+            jobject module=native_original.GetObjectArrayElement(env,sources,i);
+            if(!module){if(unknown)*unknown=1;else valid=0;}
+            else {Owner *owner=native_owner(env,module);valid=owner&&native_owner_add(owners,owner);native_original.DeleteLocalRef(env,module);}
+        }ReleaseSRWLockExclusive(&native_records);
+    }if(sources)native_original.DeleteLocalRef(env,sources);state->control--;return valid&&!native_original.ExceptionCheck(env);
 }
 JNIEXPORT jboolean JNICALL Java_dev_ronova_pro_bootstrap_NativeControl_sourceCapture0(JNIEnv *env,jclass type){
     (void)env;(void)type;NativeThread *state=native_thread();return state&&state->sourceCapture!=0;
@@ -318,13 +324,15 @@ static int native_field_allowed(JNIEnv *env,jobject object,jclass type,jfieldID 
 }
 static jobject native_box(JNIEnv *env,const char *name,const char *signature,jvalue value){NativeThread *state=native_thread();if(!state)return NULL;state->control++;jclass type=native_original.FindClass(env,name);jmethodID method=type?native_original.GetStaticMethodID(env,type,"valueOf",signature):NULL;jobject result=method?native_original.CallStaticObjectMethodA(env,type,method,&value):NULL;if(type)native_original.DeleteLocalRef(env,type);state->control--;return result;}
 static jobjectArray native_mutation_sources(JNIEnv *env,NativeThread *state){
-    OwnerLink *owners=NULL;
-    if(!native_capture_scope_owners(env,state,&owners)){
+    OwnerLink *owners=NULL;int unknown=0;
+    if(!native_capture_scope_sources(env,state,&owners,&unknown)){
         native_owner_links_free(owners);if(!native_original.ExceptionCheck(env))native_refuse(env,"NATIVE_MUTATION_SOURCES_UNAVAILABLE");return NULL;
     }
-    state->control++;jclass module=native_original.FindClass(env,"java/lang/Module");jsize count=0;
+    state->control++;jclass module=native_original.FindClass(env,"java/lang/Module");jsize count=unknown?1:0;
     for(OwnerLink *entry=owners;entry;entry=entry->next)if(InterlockedCompareExchange(&entry->owner->producer,0,0)&&!native_original.IsSameObject(env,entry->owner->module,NULL))count++;
-    jobjectArray sources=module?native_original.NewObjectArray(env,count,module,NULL):NULL;jsize at=0;
+    // A null slot is the Java resource/memory protocol's unknown-source marker.
+    // Keep it separate from actual owners, whose stop checks still all apply.
+    jobjectArray sources=module?native_original.NewObjectArray(env,count,module,NULL):NULL;jsize at=unknown?1:0;
     for(OwnerLink *entry=owners;sources&&entry&&!native_original.ExceptionCheck(env);entry=entry->next){
         if(!InterlockedCompareExchange(&entry->owner->producer,0,0))continue;
         jobject actual=native_original.NewLocalRef(env,entry->owner->module);if(!actual)continue;

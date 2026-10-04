@@ -1163,19 +1163,26 @@ public final class ResourceBridge {
         }
         return sources==null?new Module[0]:sources.toArray(Module[]::new);
     }
+    /** Called under STREAMS; only live storage uses need an entry in the operation. */
+    private static void observeBufferUse(List<BufferUse> uses,Object value){
+        if(value instanceof Buffer buffer){
+            for(BufferUse use:uses)if(use.buffer==buffer)return;
+            BufferView view=BUFFERS.get(new Key(buffer,false));if(view==null)return;
+            awaitBufferRestore(view.storage);
+            if(view.sealed||view.storage.sealed||view.storage.cleaned)throw new IllegalStateException("RONOVA_RETIRED_BUFFER");
+            uses.add(new BufferUse(buffer,view));view.observing++;view.storage.observing++;
+        }else if(value instanceof Buffer[] buffers)for(Buffer buffer:buffers)if(buffer!=null)observeBufferUse(uses,buffer);
+    }
     public static Object bufferOperation(Object receiver,Object[] arguments,Class<?> declaring,String method){
         platform(declaring,method);if(declaring!=FILE_CHANNEL&&!BufferPlatform.TYPES.contains(declaring))throw new SecurityException("ACTUAL_BUFFER_OPERATION_REQUIRED");
-        if(FILE_OBSERVING.get()!=null)return null;FILE_OBSERVING.set(Boolean.TRUE);List<BufferUse> uses=new ArrayList<>();
+        if(FILE_OBSERVING.get()!=null)return null;FILE_OBSERVING.set(Boolean.TRUE);
+        // This private per-call list is never a business source. Avoid registering
+        // two temporary ArrayLists in the global source directory for every read.
+        List<BufferUse> uses=new LinkedList<>();
         try{
             if(TaskBridge.recoveryWriter())return null;
-            List<Buffer> values=new ArrayList<>();addBuffer(values,receiver);for(Object argument:arguments)addBuffer(values,argument);
             synchronized(STREAMS){
-                for(Buffer buffer:values){
-                    BufferView view=BUFFERS.get(new Key(buffer,false));if(view==null)continue;
-                    awaitBufferRestore(view.storage);
-                    if(view.sealed||view.storage.sealed||view.storage.cleaned)throw new IllegalStateException("RONOVA_RETIRED_BUFFER");
-                    uses.add(new BufferUse(buffer,view));view.observing++;view.storage.observing++;
-                }
+                observeBufferUse(uses,receiver);for(Object argument:arguments)observeBufferUse(uses,argument);
             }
             if(uses.isEmpty()&&!(receiver instanceof Buffer))return null;
             if(!TaskBridge.recoveryWriter()&&!(receiver instanceof Buffer buffer&&IoBridge.finishingBuffer(buffer))&&!TaskBridge.taskEffectAllowed(receiver,"buffer-io"))throw new IllegalStateException("RONOVA_TERMINAL_BUFFER_IO");

@@ -4,9 +4,23 @@ typedef struct CodePool {const unsigned char **entries;uint32_t *sizes;unsigned 
 typedef struct CodeHandler {unsigned start,end,target,type;} CodeHandler;
 typedef struct CodeMethod {char *key;size_t nameLength;const unsigned char *bytes;uint32_t length;unsigned *offsets;CodeHandler *handlers;unsigned handlerCount;OwnerLink **owners;unsigned instructions,access;int sourced;struct CodeMethod *next;} CodeMethod;
 typedef struct CodeVMMethod {uintptr_t method,constantMethod,constants;CodeHandler *handlers;unsigned handlerCount,codeLength;} CodeVMMethod;
-typedef struct CodeImage {jweak loader,emitted,execution;int bootstrap,hidden,sourced;char *name;unsigned char *bytes;uint32_t length;uint64_t hash;CodePool pool;CodeMethod *methods;CodeMethod **methodIndex;unsigned methodCount;struct CodeImage *next,*hashNext;} CodeImage;
-typedef struct CodeClass {jweak actual;CodeImage *image;struct CodeClass *next;} CodeClass;
+typedef struct CodeImage {jweak loader,emitted,execution;int bootstrap,hidden,sourced;char *name;unsigned char *bytes;uint32_t length;uint64_t hash;CodePool pool;CodeMethod *methods;CodeMethod **methodIndex;unsigned methodCount;struct CodeClass *classes;struct CodeImage *next,*hashNext;} CodeImage;
+typedef struct CodeClass {jweak actual;CodeImage *image;struct CodeClass *next,*imageNext;} CodeClass;
 typedef struct CodeCursor {const unsigned char *at,*end;int valid;} CodeCursor;
+/* One failed query's evidence only; never retained as a source or permission. */
+typedef struct CodeFailure {
+    const char *stage;jvmtiError error;uint64_t image;
+    unsigned candidates,ownerless,expectedLength,actualLength,expectedInstructions,actualInstructions;
+    int instruction,expectedOffset,actualOffset,expectedOpcode,actualOpcode,expectedIndex,actualIndex,expectedTag,actualTag;
+} CodeFailure;
+static void code_failure_init(CodeFailure *failure){
+    memset(failure,0,sizeof(*failure));
+    failure->instruction=failure->expectedOffset=failure->actualOffset=failure->expectedOpcode=failure->actualOpcode=-1;
+    failure->expectedIndex=failure->actualIndex=failure->expectedTag=failure->actualTag=-1;
+}
+static int code_failed(CodeFailure *failure,const char *stage,jvmtiError error){
+    if(failure&&!failure->stage){failure->stage=stage;failure->error=error;}return 0;
+}
 static SRWLOCK code_records=SRWLOCK_INIT;
 static CodeImage *code_images;
 static CodeImage **code_image_buckets;
@@ -20,6 +34,7 @@ static int code_class_matches(JNIEnv*,CodeImage*,jclass,jobject,const char*);
 static int code_frame_sources(JNIEnv*,jmethodID,jlocation,OwnerLink**,int*);
 static int code_trace(jthread,jvmtiFrameInfo**,jint*);
 static int code_vm_entry(CodePool*,unsigned);
+static int code_vm_tag(CodePool*,unsigned,unsigned char*);
 static int code_vm_self(CodePool*,unsigned);
 static int code_vm_bootstrap(CodePool*,unsigned);
 static int code_vm_snapshot(JNIEnv*,jmethodID,CodeVMMethod*,CodePool*,const char*,const char*);
@@ -67,27 +82,38 @@ static char *code_utf(CodePool *pool,unsigned index){
     if(index>=pool->count||!pool->entries[index]||pool->entries[index][0]!=1)return NULL;const unsigned char *entry=pool->entries[index];unsigned size=code_be(entry+1,2);char *value=(char*)calloc(size+1,1);if(value)memcpy(value,entry+3,size);return value;
 }
 typedef struct CodePair {unsigned first,second;} CodePair;
-typedef struct CodeComparison {CodePool *first,*second;CodePair *pairs;size_t count,capacity,*buckets,bucketCount;} CodeComparison;
+typedef struct CodeComparison {CodePool *first,*second;CodePair *pairs;size_t count,capacity,*buckets,bucketCount;CodeFailure *failure;} CodeComparison;
+static int code_constant_failed(CodeComparison *comparison,const char *stage,unsigned first,unsigned second){
+    CodeFailure *failure=comparison->failure;if(!failure||failure->stage)return 0;
+    CodePool *pools[2]={comparison->first,comparison->second};unsigned indices[2]={first,second};int tags[2]={-1,-1};
+    for(unsigned i=0;i<2;i++)if(indices[i]<pools[i]->count){
+        unsigned char tag=0;
+        if(pools[i]->vm){if(code_vm_tag(pools[i],indices[i],&tag))tags[i]=tag;}
+        else if(pools[i]->entries[indices[i]])tags[i]=pools[i]->entries[indices[i]][0];
+    }
+    failure->expectedIndex=(int)first;failure->actualIndex=(int)second;failure->expectedTag=tags[0];failure->actualTag=tags[1];
+    return code_failed(failure,stage,JVMTI_ERROR_NONE);
+}
 static size_t code_pair_hash(unsigned first,unsigned second){
     uint64_t value=((uint64_t)first<<32)|second;value^=value>>33;value*=UINT64_C(0xff51afd7ed558ccd);value^=value>>33;return (size_t)value;
 }
 static int code_compare_pair(CodeComparison *comparison,unsigned a,unsigned b){
-    if(a>=comparison->first->count||b>=comparison->second->count)return 0;
+    if(a>=comparison->first->count||b>=comparison->second->count)return code_constant_failed(comparison,"constant_index",a,b);
     size_t bucket=0;
     if(comparison->bucketCount){
         bucket=code_pair_hash(a,b)&(comparison->bucketCount-1);
         while(comparison->buckets[bucket]){CodePair *pair=&comparison->pairs[comparison->buckets[bucket]-1];if(pair->first==a&&pair->second==b)return 1;bucket=(bucket+1)&(comparison->bucketCount-1);}
     }
     if(!comparison->bucketCount||comparison->count>=comparison->bucketCount/2){
-        size_t count=comparison->bucketCount?comparison->bucketCount*2:32;if(count<comparison->bucketCount||count>SIZE_MAX/sizeof(size_t))return 0;
-        size_t *buckets=(size_t*)calloc(count,sizeof(*buckets));if(!buckets)return 0;
+        size_t count=comparison->bucketCount?comparison->bucketCount*2:32;if(count<comparison->bucketCount||count>SIZE_MAX/sizeof(size_t))return code_constant_failed(comparison,"constant_allocation",a,b);
+        size_t *buckets=(size_t*)calloc(count,sizeof(*buckets));if(!buckets)return code_constant_failed(comparison,"constant_allocation",a,b);
         for(size_t i=0;i<comparison->count;i++){CodePair *pair=&comparison->pairs[i];size_t at=code_pair_hash(pair->first,pair->second)&(count-1);while(buckets[at])at=(at+1)&(count-1);buckets[at]=i+1;}
         free(comparison->buckets);comparison->buckets=buckets;comparison->bucketCount=count;
         bucket=code_pair_hash(a,b)&(count-1);while(buckets[bucket])bucket=(bucket+1)&(count-1);
     }
     if(comparison->count==comparison->capacity){
-        size_t capacity=comparison->capacity?comparison->capacity*2:16;if(capacity<comparison->capacity||capacity>SIZE_MAX/sizeof(CodePair))return 0;
-        CodePair *pairs=(CodePair*)realloc(comparison->pairs,capacity*sizeof(*pairs));if(!pairs)return 0;comparison->pairs=pairs;comparison->capacity=capacity;
+        size_t capacity=comparison->capacity?comparison->capacity*2:16;if(capacity<comparison->capacity||capacity>SIZE_MAX/sizeof(CodePair))return code_constant_failed(comparison,"constant_allocation",a,b);
+        CodePair *pairs=(CodePair*)realloc(comparison->pairs,capacity*sizeof(*pairs));if(!pairs)return code_constant_failed(comparison,"constant_allocation",a,b);comparison->pairs=pairs;comparison->capacity=capacity;
     }
     comparison->pairs[comparison->count++]=(CodePair){a,b};comparison->buckets[bucket]=comparison->count;return 1;
 }
@@ -101,8 +127,8 @@ static int code_constant(CodeComparison *comparison,unsigned a,unsigned b){
     int equal=code_compare_pair(comparison,a,b);
     for(size_t at=start;equal&&at<comparison->count;at++){
         CodePair pair=comparison->pairs[at];
-        if(!code_vm_entry(first,pair.first)||!code_vm_entry(second,pair.second)){equal=0;break;}
-        const unsigned char *x=first->entries[pair.first],*y=second->entries[pair.second];if(!x||!y||x[0]!=y[0]){equal=0;break;}
+        if(!code_vm_entry(first,pair.first)||!code_vm_entry(second,pair.second)){equal=code_constant_failed(comparison,"constant_read",pair.first,pair.second);break;}
+        const unsigned char *x=first->entries[pair.first],*y=second->entries[pair.second];if(!x||!y||x[0]!=y[0]){equal=code_constant_failed(comparison,"constant_tag",pair.first,pair.second);break;}
         switch(x[0]){
             case 7:equal=first->hidden&&pair.first==first->self?code_vm_self(second,pair.second)
                     :code_compare_pair(comparison,code_be(x+1,2),code_be(y+1,2));break;
@@ -111,13 +137,14 @@ static int code_constant(CodeComparison *comparison,unsigned a,unsigned b){
             case 15:equal=x[1]==y[1]&&code_compare_pair(comparison,code_be(x+2,2),code_be(y+2,2));break;
             case 17:case 18:{
                 unsigned left=code_be(x+1,2),right=code_be(y+1,2);
-                if(left>=first->bootstrapCount||right>=second->bootstrapCount||!code_vm_bootstrap(first,left)||!code_vm_bootstrap(second,right)){equal=0;break;}
+                if(left>=first->bootstrapCount||right>=second->bootstrapCount||!code_vm_bootstrap(first,left)||!code_vm_bootstrap(second,right)){equal=code_constant_failed(comparison,"bootstrap_read",pair.first,pair.second);break;}
                 CodeBootstrap *xb=&first->bootstraps[left],*yb=&second->bootstraps[right];
                 equal=xb->count==yb->count&&code_compare_pair(comparison,code_be(x+3,2),code_be(y+3,2))&&code_compare_pair(comparison,xb->handle,yb->handle);
                 for(unsigned i=0;equal&&i<xb->count;i++)equal=code_compare_pair(comparison,xb->arguments[i],yb->arguments[i]);break;
             }
             default:equal=first->sizes[pair.first]==second->sizes[pair.second]&&!memcmp(x,y,first->sizes[pair.first]);break;
         }
+        if(!equal)code_constant_failed(comparison,"constant_value",pair.first,pair.second);
     }
     if(!equal){comparison->count=0;if(comparison->buckets)memset(comparison->buckets,0,comparison->bucketCount*sizeof(*comparison->buckets));}return equal;
 }
@@ -145,36 +172,46 @@ static int code_target(const unsigned char *x,unsigned xo,const unsigned char *y
     int64_t b=(int64_t)yo+(width==2?(int16_t)code_be(y+yo+ydelta,2):(int32_t)code_be(y+yo+ydelta,4));
     int first=code_index(xoffsets,count,a),second=code_index(yoffsets,count,b);return first>=0&&first==second;
 }
-static int code_equivalent(CodeImage *image,CodeMethod *method,const unsigned char *actual,unsigned length,CodePool *pool,CodeVMMethod *version,jlocation location,unsigned *ordinal){
-    CodeComparison comparison={&image->pool,pool,NULL,0,0,NULL,0};
+static int code_equivalent_query(CodeImage *image,CodeMethod *method,const unsigned char *actual,unsigned length,CodePool *pool,CodeVMMethod *version,jlocation location,unsigned *ordinal,CodeFailure *failure){
+    CodeComparison comparison={&image->pool,pool,NULL,0,0,NULL,0,failure};
     unsigned aCount=method->instructions,bCount=0;const unsigned *a=method->offsets;unsigned *b=code_offsets(actual,length,&bCount);int equal=a&&b&&aCount==bCount;
+    if(failure){failure->image=image->hash;failure->expectedLength=method->length;failure->actualLength=length;failure->expectedInstructions=aCount;failure->actualInstructions=bCount;}
+    if(!equal)code_failed(failure,a&&b?"instruction_count":"bytecode_decode",JVMTI_ERROR_NONE);
     for(unsigned i=0;equal&&i<aCount;i++){
         unsigned x=a[i],y=b[i],xo=method->bytes[x],yo=actual[y],xs=a[i+1]-x,ys=b[i+1]-y;unsigned xn=xo==19?18:xo,yn=yo==19?18:yo;
-        if(xn!=yn){equal=0;break;}
-        if((xo>=153&&xo<=168)||xo==198||xo==199||xo==200||xo==201){equal=code_target(method->bytes,x,actual,y,1,1,xo>=200?4:2,a,b,aCount);continue;}
+        if(failure){failure->instruction=(int)i;failure->expectedOffset=(int)x;failure->actualOffset=(int)y;failure->expectedOpcode=(int)xo;failure->actualOpcode=(int)yo;}
+        if(xn!=yn){equal=code_failed(failure,"opcode",JVMTI_ERROR_NONE);break;}
+        if((xo>=153&&xo<=168)||xo==198||xo==199||xo==200||xo==201){equal=code_target(method->bytes,x,actual,y,1,1,xo>=200?4:2,a,b,aCount);if(!equal)code_failed(failure,"branch_target",JVMTI_ERROR_NONE);continue;}
         if(xo==170||xo==171){
             unsigned xb=(x+4)&~3u,yb=(y+4)&~3u;equal=code_target(method->bytes,x,actual,y,xb-x,yb-y,4,a,b,aCount);
             unsigned header=xo==170?12:8;if(equal&&memcmp(method->bytes+xb+4,actual+yb+4,header-4))equal=0;
             unsigned entries=xo==170?(xs-(xb-x)-12)/4:(xs-(xb-x)-8)/8;
             if(equal&&(ys-(yb-y)-header)!=(xs-(xb-x)-header))equal=0;
-            for(unsigned j=0;equal&&j<entries;j++){unsigned step=xo==170?4:8,delta=header+j*step;if(xo==171&&memcmp(method->bytes+xb+delta,actual+yb+delta,4))equal=0;equal=equal&&code_target(method->bytes,x,actual,y,xb-x+delta+(xo==171?4:0),yb-y+delta+(xo==171?4:0),4,a,b,aCount);}continue;
+            for(unsigned j=0;equal&&j<entries;j++){unsigned step=xo==170?4:8,delta=header+j*step;if(xo==171&&memcmp(method->bytes+xb+delta,actual+yb+delta,4))equal=0;equal=equal&&code_target(method->bytes,x,actual,y,xb-x+delta+(xo==171?4:0),yb-y+delta+(xo==171?4:0),4,a,b,aCount);}if(!equal)code_failed(failure,"switch",JVMTI_ERROR_NONE);continue;
         }
         int constant=xo==18||xo==19||xo==20||(xo>=178&&xo<=187)||xo==189||xo==192||xo==193||xo==197;
         if(constant){
             unsigned xi=code_be(method->bytes+x+1,xo==18?1:2),yi=code_be(actual+y+1,yo==18?1:2);equal=code_constant(&comparison,xi,yi);
             unsigned xhead=xo==18?2:3,yhead=yo==18?2:3;if(xs-xhead!=ys-yhead||memcmp(method->bytes+x+xhead,actual+y+yhead,xs-xhead))equal=0;
         }else if(xs!=ys||memcmp(method->bytes+x,actual+y,xs))equal=0;
+        if(!equal)code_failed(failure,"instruction_operand",JVMTI_ERROR_NONE);
     }
+    if(equal&&failure)failure->instruction=(int)aCount;
     equal=equal&&version&&version->codeLength==length&&version->handlerCount==method->handlerCount;
+    if(!equal)code_failed(failure,"method_shape",JVMTI_ERROR_NONE);
     for(unsigned i=0;equal&&i<method->handlerCount;i++){
         CodeHandler *expected=&method->handlers[i],*observed=&version->handlers[i];
         int start=code_index(a,aCount,expected->start),end=code_index(a,aCount,expected->end),target=code_index(a,aCount,expected->target);
         equal=start>=0&&end>start&&target>=0&&(unsigned)target<aCount
                 &&start==code_index(b,bCount,observed->start)&&end==code_index(b,bCount,observed->end)&&target==code_index(b,bCount,observed->target);
         if(equal)equal=expected->type==0?observed->type==0:observed->type!=0&&code_constant(&comparison,expected->type,observed->type);
+        if(!equal)code_failed(failure,"exception_handler",JVMTI_ERROR_NONE);
     }
-    if(location>=0){int at=equal?code_index(b,bCount,location):-1;if(at<0||(unsigned)at>=bCount)equal=0;else *ordinal=(unsigned)at;}
+    if(location>=0){int at=equal?code_index(b,bCount,location):-1;if(at<0||(unsigned)at>=bCount)equal=code_failed(failure,"frame_bci",JVMTI_ERROR_NONE);else *ordinal=(unsigned)at;}
     free(comparison.pairs);free(comparison.buckets);free(b);return equal;
+}
+static int code_equivalent(CodeImage *image,CodeMethod *method,const unsigned char *actual,unsigned length,CodePool *pool,CodeVMMethod *version,jlocation location,unsigned *ordinal){
+    return code_equivalent_query(image,method,actual,length,pool,version,location,ordinal,NULL);
 }
 static void code_pool_free(CodePool *pool){
     if(pool->allocated&&pool->entries)for(unsigned i=0;i<pool->count;i++)free((void*)pool->entries[i]);
@@ -368,7 +405,9 @@ JNIEXPORT jlongArray JNICALL Java_dev_ronova_pro_bootstrap_NativeControl_codeSta
     jlongArray result=native_original.NewLongArray(env,5);if(result)native_original.SetLongArrayRegion(env,result,0,5,values);return result;
 }
 static int code_class_matches(JNIEnv *env,CodeImage *image,jclass actual,jobject loader,const char *signature){
-    if(image->hidden){for(CodeClass *entry=code_classes;entry;entry=entry->next)if(entry->image==image&&native_original.IsSameObject(env,entry->actual,actual))return 1;return 0;}
+    // The caller holds code_records shared. This image's chain only narrows
+    // candidates; every match still compares the actual live Class identity.
+    if(image->hidden){for(CodeClass *entry=image->classes;entry;entry=entry->imageNext)if(entry->image==image&&native_original.IsSameObject(env,entry->actual,actual))return 1;return 0;}
     return signature[0]=='L'&&strlen(signature)==strlen(image->name)+2&&!memcmp(signature+1,image->name,strlen(image->name))
             &&image->bootstrap==(loader==NULL)&&(!loader||native_original.IsSameObject(env,image->loader,loader));
 }
@@ -388,11 +427,19 @@ JNIEXPORT jboolean JNICALL Java_dev_ronova_pro_bootstrap_NativeControl_codeDefin
     if(!bound->actual){free(bound);return JNI_FALSE;}
     AcquireSRWLockExclusive(&code_records);CodeClass **at=&code_classes;
     while(*at){CodeClass *entry=*at;
-        if(native_original.IsSameObject(env,entry->actual,NULL)){*at=entry->next;native_original.DeleteWeakGlobalRef(env,entry->actual);free(entry);continue;}
+        if(native_original.IsSameObject(env,entry->actual,NULL)){
+            CodeClass **imageAt=&entry->image->classes;
+            while(*imageAt&&*imageAt!=entry)imageAt=&(*imageAt)->imageNext;
+            if(*imageAt)*imageAt=entry->imageNext;
+            *at=entry->next;native_original.DeleteWeakGlobalRef(env,entry->actual);free(entry);continue;
+        }
         if(native_original.IsSameObject(env,entry->actual,actual)){valid=entry->image==selected;ReleaseSRWLockExclusive(&code_records);native_original.DeleteWeakGlobalRef(env,bound->actual);free(bound);return valid?JNI_TRUE:JNI_FALSE;}
         at=&entry->next;
     }
-    bound->next=code_classes;code_classes=bound;ReleaseSRWLockExclusive(&code_records);return JNI_TRUE;
+    // Publish both views together. Only unpublished images are freed, so the
+    // image head stays valid throughout a binding's weak-reference lifetime.
+    bound->next=code_classes;bound->imageNext=selected->classes;
+    code_classes=bound;selected->classes=bound;ReleaseSRWLockExclusive(&code_records);return JNI_TRUE;
 }
 /* An authenticated controller query builds only its fresh result array. Application
  * JNI writes keep using the installed mutation boundaries. No class is loaded here. */
@@ -555,27 +602,55 @@ JNIEXPORT jboolean JNICALL Java_dev_ronova_pro_bootstrap_NativeControl_preparedC
             &&native_original.CallStaticBooleanMethod(env,native_controller,code_caller_gate)&&native_original.IsSameObject(env,type,state->prepared);
 }
 /* A result is used only after actual frame bytecodes and referenced constants match this version. */
-static int code_frame_sources(JNIEnv *env,jmethodID method,jlocation location,OwnerLink **owners,int *known){
+static int code_frame_sources_checked(JNIEnv *env,jmethodID method,jlocation location,OwnerLink **owners,int *known,CodeFailure *failure){
     if(!code_available||location<0)return 1;jclass declaring=NULL;jobject loader=NULL;char *signature=NULL,*name=NULL,*descriptor=NULL;unsigned char *bytes=NULL;jint length=0;CodePool pool={0};CodeVMMethod version={0};int valid=1;
-    if((*native_ti)->GetMethodDeclaringClass(native_ti,method,&declaring)!=JVMTI_ERROR_NONE||(*native_ti)->GetClassLoader(native_ti,declaring,&loader)!=JVMTI_ERROR_NONE||(*native_ti)->GetClassSignature(native_ti,declaring,&signature,NULL)!=JVMTI_ERROR_NONE||(*native_ti)->GetMethodName(native_ti,method,&name,&descriptor,NULL)!=JVMTI_ERROR_NONE){valid=0;goto done;}
+    jvmtiError error=(*native_ti)->GetMethodDeclaringClass(native_ti,method,&declaring);
+    if(error!=JVMTI_ERROR_NONE){valid=code_failed(failure,"declaring_class",error);goto done;}
+    error=(*native_ti)->GetClassLoader(native_ti,declaring,&loader);
+    if(error!=JVMTI_ERROR_NONE){valid=code_failed(failure,"class_loader",error);goto done;}
+    error=(*native_ti)->GetClassSignature(native_ti,declaring,&signature,NULL);
+    if(error!=JVMTI_ERROR_NONE){valid=code_failed(failure,"class_signature",error);goto done;}
+    error=(*native_ti)->GetMethodName(native_ti,method,&name,&descriptor,NULL);
+    if(error!=JVMTI_ERROR_NONE){valid=code_failed(failure,"method_name",error);goto done;}
     AcquireSRWLockShared(&code_records);CodeImage *images=code_images;int candidate=0;
     for(CodeImage *image=images;image&&!candidate;image=image->next)if(code_class_matches(env,image,declaring,loader,signature)){
         CodeMethod *entry=code_method(image,name,descriptor);if(entry&&entry->owners)candidate=1;
     }ReleaseSRWLockShared(&code_records);
     if(!candidate)goto done;*known=1;
-    if(!code_vm_snapshot(env,method,&version,&pool,name,descriptor)||(*native_ti)->GetBytecodes(native_ti,method,&length,&bytes)!=JVMTI_ERROR_NONE){valid=0;goto done;}
+    if(!code_vm_snapshot_diagnostic(env,method,&version,&pool,name,descriptor,failure)){valid=0;goto done;}
+    error=(*native_ti)->GetBytecodes(native_ti,method,&length,&bytes);
+    if(error!=JVMTI_ERROR_NONE){valid=code_failed(failure,"get_bytecodes",error);goto done;}
     valid=0;AcquireSRWLockShared(&code_records);
+    unsigned candidates=0,ownerless=0;
     for(CodeImage *image=images;image&&!valid;image=image->next)if(code_class_matches(env,image,declaring,loader,signature)){
-        CodeMethod *entry=code_method(image,name,descriptor);if(!entry||!entry->owners)continue;
-        unsigned ordinal=0;if(code_equivalent(image,entry,bytes,length,&pool,&version,location,&ordinal)&&code_vm_unchanged(method,&version))valid=native_owner_merge(owners,entry->owners[ordinal]);
+        CodeMethod *entry=code_method(image,name,descriptor);if(!entry)continue;if(!entry->owners){ownerless++;continue;}candidates++;
+        CodeFailure attempted;if(failure)code_failure_init(&attempted);CodeFailure *detail=failure?&attempted:NULL;
+        unsigned ordinal=0;
+        if(code_equivalent_query(image,entry,bytes,length,&pool,&version,location,&ordinal,detail)){
+            if(!code_vm_unchanged(method,&version))code_failed(detail,"frame_version_changed",JVMTI_ERROR_NONE);
+            else if(!(valid=native_owner_merge(owners,entry->owners[ordinal])))code_failed(detail,"owner_merge",JVMTI_ERROR_NONE);
+        }
+        // Historical candidates normally differ. Report only the final failure,
+        // choosing the candidate that matched the longest instruction prefix.
+        if(!valid&&failure&&(!failure->stage||attempted.instruction>failure->instruction))*failure=attempted;
     }ReleaseSRWLockShared(&code_records);
+    if(!valid&&failure){failure->candidates=candidates;failure->ownerless=ownerless;code_failed(failure,"no_owned_image",JVMTI_ERROR_NONE);}
 done:
     free(version.handlers);code_pool_free(&pool);if(bytes)(*native_ti)->Deallocate(native_ti,bytes);
     if(signature)(*native_ti)->Deallocate(native_ti,(unsigned char*)signature);if(name)(*native_ti)->Deallocate(native_ti,(unsigned char*)name);if(descriptor)(*native_ti)->Deallocate(native_ti,(unsigned char*)descriptor);if(loader)native_original.DeleteLocalRef(env,loader);if(declaring)native_original.DeleteLocalRef(env,declaring);return valid;
 }
+static int code_frame_sources(JNIEnv *env,jmethodID method,jlocation location,OwnerLink **owners,int *known){
+    return code_frame_sources_checked(env,method,location,owners,known,NULL);
+}
+static int code_trace_query(jthread thread,jvmtiFrameInfo **frames,jint *count,CodeFailure *failure){
+    jint depth=0;jvmtiError error=(*native_ti)->GetFrameCount(native_ti,thread,&depth);
+    if(error!=JVMTI_ERROR_NONE)return code_failed(failure,"frame_count",error);
+    *frames=(jvmtiFrameInfo*)calloc((size_t)depth+1,sizeof(**frames));if(!*frames)return code_failed(failure,"stack_allocation",JVMTI_ERROR_NONE);
+    error=(*native_ti)->GetStackTrace(native_ti,thread,0,depth,*frames,count);
+    return error==JVMTI_ERROR_NONE?1:code_failed(failure,"stack_trace",error);
+}
 static int code_trace(jthread thread,jvmtiFrameInfo **frames,jint *count){
-    jint depth=0;if((*native_ti)->GetFrameCount(native_ti,thread,&depth)!=JVMTI_ERROR_NONE)return 0;
-    *frames=(jvmtiFrameInfo*)calloc((size_t)depth+1,sizeof(**frames));return *frames&&(*native_ti)->GetStackTrace(native_ti,thread,0,depth,*frames,count)==JVMTI_ERROR_NONE;
+    return code_trace_query(thread,frames,count,NULL);
 }
 static jobject code_frame_plan(JNIEnv *env,jmethodID method,jlocation location){
     if(!code_available||location<0)return NULL;
@@ -730,24 +805,58 @@ JNIEXPORT jboolean JNICALL Java_dev_ronova_pro_bootstrap_NativeControl_execution
     return state&&state->popped&&code_caller_gate&&native_original.CallStaticBooleanMethod(env,native_controller,code_caller_gate)
             &&native_original.IsSameObject(env,state->popped,token)?JNI_TRUE:JNI_FALSE;
 }
-static int code_current_sources(JNIEnv *env,OwnerLink **owners){
+static void code_source_failure(JNIEnv *env,CodeFailure *failure,jmethodID method,jlocation location,int known){
+    jclass declaring=NULL;char *signature=NULL,*name=NULL,*descriptor=NULL;jboolean obsolete=JNI_FALSE;jvmtiError obsoleteError=JVMTI_ERROR_NONE;
+    if(method){
+        (*native_ti)->GetMethodDeclaringClass(native_ti,method,&declaring);
+        if(declaring)(*native_ti)->GetClassSignature(native_ti,declaring,&signature,NULL);
+        (*native_ti)->GetMethodName(native_ti,method,&name,&descriptor,NULL);
+        obsoleteError=(*native_ti)->IsMethodObsolete(native_ti,method,&obsolete);
+    }
+    char message[2048];snprintf(message,sizeof(message),
+            "EXTERNAL_NATIVE_CALL_SOURCE_UNOBSERVED:%s#%s%s@%lld:known=%d:stage=%s:jvmti=%d:obsolete=%d/%d:candidates=%u:ownerless=%u:image=%016llx:length=%u/%u:instructions=%u/%u:first=%d:bci=%d/%d:opcode=%d/%d:cp=%d/%d:raw_tags=%d/%d",
+            signature?signature:"?",name?name:"?",descriptor?descriptor:"?",(long long)location,known,failure->stage?failure->stage:"unspecified",(int)failure->error,
+            method?(obsolete==JNI_TRUE):-1,(int)obsoleteError,failure->candidates,failure->ownerless,(unsigned long long)failure->image,
+            failure->expectedLength,failure->actualLength,failure->expectedInstructions,failure->actualInstructions,
+            failure->instruction,failure->expectedOffset,failure->actualOffset,failure->expectedOpcode,failure->actualOpcode,
+            failure->expectedIndex,failure->actualIndex,failure->expectedTag,failure->actualTag);
+    // Preserve an already pending exception. One final-failure line still makes
+    // this path distinguishable from a missing diagnostic in an older binary.
+    if(native_original.ExceptionCheck(env))fprintf(stderr,"RONOVA_NATIVE_SOURCE_FAILURE:%s:pending=1\n",message);
+    else native_refuse(env,message);
+    if(signature)(*native_ti)->Deallocate(native_ti,(unsigned char*)signature);
+    if(name)(*native_ti)->Deallocate(native_ti,(unsigned char*)name);
+    if(descriptor)(*native_ti)->Deallocate(native_ti,(unsigned char*)descriptor);
+    if(declaring)native_original.DeleteLocalRef(env,declaring);
+}
+static int code_current_sources_query(JNIEnv *env,OwnerLink **owners,int *unknown){
     NativeThread *state=native_thread();if(!native_jni_ready||!state||state->control)return 1;
-    if(!native_capture_network_sources(env,state,owners))return 0;
+    CodeFailure failure;code_failure_init(&failure);
+    if(!native_capture_network_sources(env,state,owners,unknown)){
+        code_failed(&failure,"scoped_sources",JVMTI_ERROR_NONE);code_source_failure(env,&failure,NULL,-1,0);return 0;
+    }
     if(!code_available)return 1;
     // With no published instruction owner, every frame relevance predicate
     // is false. Actual Java scope/native binding/library capture still runs;
     // plans, bytecode validation and heap observations do not use this shortcut.
     if(!InterlockedCompareExchange(&code_sourced,0,0))return 1;
     state->control++;jthread thread=NULL;jvmtiFrameInfo *frames=NULL;jint depth=0;int valid=1;
-    if((*native_ti)->GetCurrentThread(native_ti,&thread)!=JVMTI_ERROR_NONE||!code_trace(thread,&frames,&depth))valid=0;
+    jvmtiError error=(*native_ti)->GetCurrentThread(native_ti,&thread);
+    if(error!=JVMTI_ERROR_NONE)valid=code_failed(&failure,"current_thread",error);
+    else valid=code_trace_query(thread,&frames,&depth,&failure);
+    if(!valid)code_source_failure(env,&failure,NULL,-1,0);
     else for(jint i=0;i<depth&&valid;i++){
         if(frames[i].location<0||!code_method_relevant(env,frames[i].method,NULL))continue;
-        int known=0;valid=code_frame_sources(env,frames[i].method,frames[i].location,owners,&known);
+        code_failure_init(&failure);int known=0;valid=code_frame_sources_checked(env,frames[i].method,frames[i].location,owners,&known,&failure);
+        if(!valid)code_source_failure(env,&failure,frames[i].method,frames[i].location,known);
     }
     free(frames);if(thread)native_original.DeleteLocalRef(env,thread);state->control--;return valid;
 }
+static int code_current_sources(JNIEnv *env,OwnerLink **owners){return code_current_sources_query(env,owners,NULL);}
 static int code_current_stopped(JNIEnv *env){
-    OwnerLink *owners=NULL;int observed=code_current_sources(env,&owners),stopped=native_owner_stopped(owners)!=NULL;
+    // Unknown contributors are retained by provenance captures. This predicate
+    // asks only whether any of the actual known contributors has been stopped.
+    OwnerLink *owners=NULL;int unknown=0,observed=code_current_sources_query(env,&owners,&unknown),stopped=native_owner_stopped(owners)!=NULL;
     code_links_free(owners);if(!observed){native_refuse(env,"EXTERNAL_NATIVE_CALL_SOURCE_UNOBSERVED");return 1;}return stopped;
 }
 JNIEXPORT jobjectArray JNICALL Java_dev_ronova_pro_bootstrap_NativeControl_codeFrame0(JNIEnv *env,jclass type,jclass declaring,jstring name,jstring descriptor,jint location){

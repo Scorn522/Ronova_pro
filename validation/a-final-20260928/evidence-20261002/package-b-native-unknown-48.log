@@ -1,0 +1,47 @@
+To honour the JVM settings for this build a single-use Daemon process will be forked. For more on this, please refer to https://docs.gradle.org/8.8/userguide/gradle_daemon.html#sec:disabling_the_daemon in the Gradle documentation.
+Daemon will be stopped at the end of the build 
+
+> Configure project :
+MixinGradle is skipping eclipse integration, extension not found
+Neither the 'eclipse' nor the 'idea' plugins were found, but IDE resource copy has been enabled.
+
+> Task :downloadMcpConfig
+> Task :extractSrg UP-TO-DATE
+> Task :createMcpToSrg UP-TO-DATE
+> Task :compileJava UP-TO-DATE
+> Task :addMixinsToJar
+> Task :processResources UP-TO-DATE
+> Task :classes UP-TO-DATE
+> Task :compileStorageNative UP-TO-DATE
+> Task :addMixinsToPrelaunchJar
+> Task :compilePrelaunchJava UP-TO-DATE
+> Task :processPrelaunchResources NO-SOURCE
+> Task :prelaunchClasses UP-TO-DATE
+> Task :prelaunchJar UP-TO-DATE
+> Task :addMixinsToRecoveryAgentJar
+> Task :compileAgentJava UP-TO-DATE
+> Task :processAgentResources NO-SOURCE
+> Task :agentClasses UP-TO-DATE
+> Task :recoveryAgentJar UP-TO-DATE
+> Task :addMixinsToRecoveryBootstrapJar
+> Task :compileBootstrapJava UP-TO-DATE
+> Task :processBootstrapResources NO-SOURCE
+> Task :bootstrapClasses UP-TO-DATE
+
+> Task :compileControlNative
+DD4F85EB5433C6417B9A5D7D898ADE97F9F0230A2DCB74CA318C18642A89CC07
+
+> Task :recoveryBootstrapJar
+> Task :jar
+> Task :configureReobfTaskForReobfJar
+> Task :reobfJar
+> Task :addMixinsToFixtureJar
+> Task :compileFixtureJava UP-TO-DATE
+> Task :processFixtureResources UP-TO-DATE
+> Task :fixtureClasses UP-TO-DATE
+> Task :fixtureJar
+> Task :configureReobfTaskForReobfFixtureJar
+> Task :reobfFixtureJar
+
+BUILD SUCCESSFUL in 14s
+26 actionable tasks: 14 executed, 12 up-to-date

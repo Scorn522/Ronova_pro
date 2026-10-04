@@ -336,15 +336,15 @@ static int code_vm_unchanged(jmethodID method,CodeVMMethod *version){
             &&code_vm_read(actual+(uintptr_t)layout->methodConstant,&constant,sizeof(constant))&&constant==version->constantMethod
             &&code_vm_read(constant+(uintptr_t)layout->constantPool,&pool,sizeof(pool))&&pool==version->constants;
 }
-static int code_vm_snapshot_query(JNIEnv *env,jmethodID method,CodeVMMethod *version,CodePool *pool,const char *name,const char *signature,CodeVMBuffer *scratch){
-    if(!InitOnceExecuteOnce(&code_vm_once,code_vm_initialize,env,NULL)||!code_vm_layout.ready)return 0;
+static int code_vm_snapshot_checked(JNIEnv *env,jmethodID method,CodeVMMethod *version,CodePool *pool,const char *name,const char *signature,CodeVMBuffer *scratch,CodeFailure *failure){
+    if(!InitOnceExecuteOnce(&code_vm_once,code_vm_initialize,env,NULL)||!code_vm_layout.ready)return code_failed(failure,"snapshot_layout",JVMTI_ERROR_NONE);
     CodeVMLayout *layout=&code_vm_layout;int32_t words=0;uint16_t flags=0,length=0,nameIndex=0,signatureIndex=0;
     if(!code_vm_read((uintptr_t)method,&version->method,sizeof(version->method))||!version->method
-            ||!code_vm_read(version->method+(uintptr_t)layout->methodConstant,&version->constantMethod,sizeof(version->constantMethod))||!version->constantMethod)return 0;
+            ||!code_vm_read(version->method+(uintptr_t)layout->methodConstant,&version->constantMethod,sizeof(version->constantMethod))||!version->constantMethod)return code_failed(failure,"snapshot_method",JVMTI_ERROR_NONE);
     uintptr_t constant=version->constantMethod;
     // Copy this actual ConstMethod header once. Field offsets and bounds come
     // from the loaded VM; every call still obtains a fresh live snapshot.
-    if(!code_vm_buffer(&scratch->header,&scratch->headerSize,(size_t)layout->headerSize))return 0;
+    if(!code_vm_buffer(&scratch->header,&scratch->headerSize,(size_t)layout->headerSize))return code_failed(failure,"snapshot_header_allocation",JVMTI_ERROR_NONE);
     unsigned char *header=scratch->header;
     int copied=code_vm_read(constant,header,(size_t)layout->headerSize);
     if(copied){
@@ -353,34 +353,36 @@ static int code_vm_snapshot_query(JNIEnv *env,jmethodID method,CodeVMMethod *ver
         memcpy(&flags,header+(size_t)layout->constantFlags,2);memcpy(&length,header+(size_t)layout->constantCode,2);
         memcpy(&nameIndex,header+(size_t)layout->constantName,2);memcpy(&signatureIndex,header+(size_t)layout->constantSignature,2);
     }
-    if(!copied||words<=0||(uintptr_t)words>(UINTPTR_MAX-constant)/sizeof(uintptr_t)||!code_vm_pool(pool,version->constants))return 0;
+    if(!copied||words<=0||(uintptr_t)words>(UINTPTR_MAX-constant)/sizeof(uintptr_t))return code_failed(failure,"snapshot_header",JVMTI_ERROR_NONE);
+    if(!code_vm_pool(pool,version->constants))return code_failed(failure,"snapshot_pool",JVMTI_ERROR_NONE);
     unsigned recognized=layout->line|layout->locals|layout->exceptions|layout->checked|layout->generic|layout->parameters|0x0040;
-    for(unsigned i=0;i<4;i++)recognized|=layout->annotations[i];if(flags&~recognized)return 0;
-    if(!code_vm_entry(pool,nameIndex)||!code_vm_entry(pool,signatureIndex)||pool->entries[nameIndex][0]!=1||pool->entries[signatureIndex][0]!=1)return 0;
+    for(unsigned i=0;i<4;i++)recognized|=layout->annotations[i];if(flags&~recognized)return code_failed(failure,"snapshot_flags",JVMTI_ERROR_NONE);
+    if(!code_vm_entry(pool,nameIndex)||!code_vm_entry(pool,signatureIndex)||pool->entries[nameIndex][0]!=1||pool->entries[signatureIndex][0]!=1)return code_failed(failure,"snapshot_selector_constants",JVMTI_ERROR_NONE);
     // Version and frame queries already hold this actual method's JVMTI
     // selector. Borrow it only for this snapshot; compare both UTF entries as
     // before, and retain the final live Method/ConstMethod/pool identity check.
     char *queriedName=NULL,*queriedSignature=NULL;int matching=1;
     if(!name||!signature){
-        matching=(*native_ti)->GetMethodName(native_ti,method,&queriedName,&queriedSignature,NULL)==JVMTI_ERROR_NONE;
+        jvmtiError error=(*native_ti)->GetMethodName(native_ti,method,&queriedName,&queriedSignature,NULL);matching=error==JVMTI_ERROR_NONE;
+        if(!matching)code_failed(failure,"snapshot_method_name",error);
         name=queriedName;signature=queriedSignature;
     }
     if(matching)matching=strlen(name)==pool->sizes[nameIndex]-3&&!memcmp(name,pool->entries[nameIndex]+3,pool->sizes[nameIndex]-3)
             &&strlen(signature)==pool->sizes[signatureIndex]-3&&!memcmp(signature,pool->entries[signatureIndex]+3,pool->sizes[signatureIndex]-3);
-    if(queriedName)(*native_ti)->Deallocate(native_ti,(unsigned char*)queriedName);if(queriedSignature)(*native_ti)->Deallocate(native_ti,(unsigned char*)queriedSignature);if(!matching)return 0;
+    if(queriedName)(*native_ti)->Deallocate(native_ti,(unsigned char*)queriedName);if(queriedSignature)(*native_ti)->Deallocate(native_ti,(unsigned char*)queriedSignature);if(!matching)return code_failed(failure,"snapshot_selector",JVMTI_ERROR_NONE);
     uintptr_t cursor=constant+(uintptr_t)words*sizeof(uintptr_t),lower=constant+(uintptr_t)layout->headerSize+length;
-    if(lower<constant||lower>cursor)return 0;
-    for(unsigned i=0;i<4;i++)if(flags&layout->annotations[i])if(!code_vm_back(&cursor,lower,sizeof(uintptr_t)))return 0;
-    if(flags&layout->generic)if(!code_vm_back(&cursor,lower,2))return 0;
-    if(flags&layout->parameters)if(!code_vm_skip_table(&cursor,lower,layout->parameterSize))return 0;
-    if(flags&layout->checked)if(!code_vm_skip_table(&cursor,lower,layout->checkedSize))return 0;
+    if(lower<constant||lower>cursor)return code_failed(failure,"snapshot_bounds",JVMTI_ERROR_NONE);
+    for(unsigned i=0;i<4;i++)if(flags&layout->annotations[i])if(!code_vm_back(&cursor,lower,sizeof(uintptr_t)))return code_failed(failure,"snapshot_annotations",JVMTI_ERROR_NONE);
+    if(flags&layout->generic)if(!code_vm_back(&cursor,lower,2))return code_failed(failure,"snapshot_generic",JVMTI_ERROR_NONE);
+    if(flags&layout->parameters)if(!code_vm_skip_table(&cursor,lower,layout->parameterSize))return code_failed(failure,"snapshot_parameters",JVMTI_ERROR_NONE);
+    if(flags&layout->checked)if(!code_vm_skip_table(&cursor,lower,layout->checkedSize))return code_failed(failure,"snapshot_checked_exceptions",JVMTI_ERROR_NONE);
     version->codeLength=length;
     if(flags&layout->exceptions){
         uint16_t count=0;if(!code_vm_back(&cursor,lower,2)||!code_vm_read(cursor,&count,2)||!count||count>SIZE_MAX/(size_t)layout->exceptionSize
-                ||!code_vm_back(&cursor,lower,(size_t)count*(size_t)layout->exceptionSize))return 0;
-        version->handlerCount=count;version->handlers=(CodeHandler*)calloc(count,sizeof(*version->handlers));if(!version->handlers)return 0;
+                ||!code_vm_back(&cursor,lower,(size_t)count*(size_t)layout->exceptionSize))return code_failed(failure,"snapshot_handler_table",JVMTI_ERROR_NONE);
+        version->handlerCount=count;version->handlers=(CodeHandler*)calloc(count,sizeof(*version->handlers));if(!version->handlers)return code_failed(failure,"snapshot_handler_allocation",JVMTI_ERROR_NONE);
         size_t size=(size_t)count*(size_t)layout->exceptionSize;
-        if(!code_vm_buffer(&scratch->table,&scratch->tableSize,size))return 0;
+        if(!code_vm_buffer(&scratch->table,&scratch->tableSize,size))return code_failed(failure,"snapshot_handler_allocation",JVMTI_ERROR_NONE);
         unsigned char *table=scratch->table;
         int valid=code_vm_read(cursor,table,size);
         for(unsigned i=0;valid&&i<count;i++){
@@ -390,9 +392,16 @@ static int code_vm_snapshot_query(JNIEnv *env,jmethodID method,CodeVMMethod *ver
             if(start>=end||end>length||target>=length||type>=pool->count){valid=0;break;}
             version->handlers[i]=(CodeHandler){start,end,target,type};
         }
-        if(!valid)return 0;
+        if(!valid)return code_failed(failure,"snapshot_handler_contents",JVMTI_ERROR_NONE);
     }
-    return code_vm_unchanged(method,version);
+    return code_vm_unchanged(method,version)?1:code_failed(failure,"snapshot_version_changed",JVMTI_ERROR_NONE);
+}
+static int code_vm_snapshot_query(JNIEnv *env,jmethodID method,CodeVMMethod *version,CodePool *pool,const char *name,const char *signature,CodeVMBuffer *scratch){
+    return code_vm_snapshot_checked(env,method,version,pool,name,signature,scratch,NULL);
+}
+static int code_vm_snapshot_diagnostic(JNIEnv *env,jmethodID method,CodeVMMethod *version,CodePool *pool,const char *name,const char *signature,CodeFailure *failure){
+    CodeVMBuffer scratch={0};int ready=code_vm_snapshot_checked(env,method,version,pool,name,signature,&scratch,failure);
+    code_vm_buffer_free(&scratch);return ready;
 }
 static int code_vm_snapshot(JNIEnv *env,jmethodID method,CodeVMMethod *version,CodePool *pool,const char *name,const char *signature){
     CodeVMBuffer scratch={0};int ready=code_vm_snapshot_query(env,method,version,pool,name,signature,&scratch);

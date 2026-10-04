@@ -1,0 +1,20 @@
+B startup block-state baking; actual JVM PID 89820; 30-second JFR sample.
+MAIN_EXECUTION_SAMPLES=112
+63 dev/ronova/pro/bootstrap/NativeControl.executionPlan0
+33 dev/ronova/pro/bootstrap/CodeSourceBridge$ControlRegistry.reap
+4 java/util/TreeMap.getEntry
+2 java/lang/Class.getNestHost0
+2 dev/ronova/pro/bootstrap/NativeControl.heapArrayBits0
+2 java/util/TreeMap.get
+1 java/lang/StackStreamFactory$AbstractStackWalker.callStackWalk
+1 java/lang/System.identityHashCode
+1 dev/ronova/pro/bootstrap/NativeControl.codeFieldOwner0
+1 java/lang/StackStreamFactory$CallerClassFinder.consumeFrames
+1 java/util/TreeMap.fixAfterInsertion
+1 java/lang/Class.forName0
+Previous native UNKNOWN marker startup failure did not recur; game reached world-resource loading.
+Old runtime was stopped after source fixes were compiled; no B gameplay pass is claimed.
+Native matching now traverses only the selected image hidden bindings, retaining actual Class and VM checks.
+Heap directory now protects/enqueues only inserted weak keys; lookup hits do not register disposable keys.
+Short primitive before-images reuse an existing image only after actual bits comparison.
+Compilation: build-b-hotspots-48.log; complete package: package-b-hotspots-48.log.
