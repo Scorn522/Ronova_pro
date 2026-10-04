@@ -434,13 +434,13 @@ final class ExternalCodeDefinitions {
             Class<?> actual=definition.actual.get();
             if(actual==null){
                 // Unbound hidden images are not candidates in DefinitionIndex.
-                // A bootstrap image already has the actual Module observed by
-                // the transformer, even before its ClassPrepare callback. Only
-                // boot-layer declarations can supply this empty-seed proof;
-                // other loaders and unknown/logical origins stay conservative.
+                // The transformer already observed the actual declaration
+                // Module before ClassPrepare. Boot-layer images may use that
+                // empty-seed proof only when its real loader matches the image;
+                // unknown, other-layer and foreign logical origins stay conservative.
                 if(!definition.hidden){
                     Module declaration=definition.declaration.get();
-                    if(!definition.bootstrap||declaration==null||declaration.getLayer()!=ModuleLayer.boot()
+                    if(declaration==null||declaration.getLayer()!=ModuleLayer.boot()||!definition.loader(declaration.getClassLoader())
                             ||RecoveryAgent.producerModule(declaration)&&!ModGroupBoundary.stopped(declaration))return true;
                 }
                 continue;

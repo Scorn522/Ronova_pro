@@ -709,21 +709,22 @@ final class ExternalCodeImages {
     private static void protect(Object... roots){
         Set<Object> found=Collections.newSetFromMap(new IdentityHashMap<>());ArrayDeque<Object> pending=new ArrayDeque<>();for(Object root:roots)if(root!=null)pending.add(root);
         while(!pending.isEmpty()){
-            List<Object> holders=new ArrayList<>(256);List<Field[]> fields=new ArrayList<>(256);
-            while(!pending.isEmpty()&&holders.size()<256){
+            Object[] holders=new Object[256];Field[][] fields=new Field[256][];int count=0;
+            while(!pending.isEmpty()&&count<holders.length){
                 Object value=pending.removeFirst();if(!found.add(value))continue;
                 if(value instanceof Map<?,?> map){for(var entry:map.entrySet()){if(entry.getKey()!=null)pending.add(entry.getKey());if(entry.getValue()!=null)pending.add(entry.getValue());}}
                 else if(value instanceof Collection<?> collection){for(Object entry:collection)if(entry!=null)pending.add(entry);}
                 else if(value instanceof Object[] array){for(Object entry:array)if(entry!=null)pending.add(entry);}
                 else if(value instanceof ExternalCodeFlow.ControlChange change){pending.add(change.alternatives());pending.add(change.owners());}
                 else if(value.getClass().getName().startsWith("jdk.internal.org.objectweb.asm.")){
-                    holders.add(value);fields.add(IMAGE_FIELDS.get(value.getClass()));
+                    holders[count]=value;fields[count++]=IMAGE_FIELDS.get(value.getClass());
                 }
                 if(value instanceof AbstractInsnNode instruction){if(instruction.getNext()!=null)pending.add(instruction.getNext());if(instruction.getPrevious()!=null)pending.add(instruction.getPrevious());}
                 if(value instanceof InsnList instructions)for(AbstractInsnNode instruction:instructions.toArray())pending.add(instruction);
             }
-            if(!holders.isEmpty())
-                for(Object[] row:RecoveryAgent.imageControlFields(holders.toArray(),fields.toArray(Field[][]::new)))
+            if(count!=0)
+                for(Object[] row:RecoveryAgent.imageControlFields(count==holders.length?holders:Arrays.copyOf(holders,count),
+                        count==fields.length?fields:Arrays.copyOf(fields,count)))
                     for(Object child:row)if(child!=null)pending.add(child);
         }
         RecoveryAgent.protectExternalCode(found.toArray());
