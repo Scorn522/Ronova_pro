@@ -2,7 +2,9 @@
 
 2026-10-05 B 叶级堆读取接续：Java Unsafe／句柄和 Native 的独立堆 getter 包装没有来源结果消费方，现去掉这层空读门和回调。实际执行读取、复制及缓冲区读取仍保留完整观察，原始地址读取租约、写入策略和原操作异常保留。完整工作包构建通过（26 秒），既有实际 Agent 下 B 适配、控制对象外部改写拒绝及缓冲传输检查通过。
 
-分发候选更新为 readleaf，Java ABI 48／Native 42。b-source-abi48-readleaf 使用独立端口真实 prelaunch 启动；原场景保留继续，尚无 B 游戏效果 PASS。B 未完成，原始日志仅保留本地 .work。
+随后真实启动的 6 次采样中，3 次落在内部 ASM 图的字段捕获。叶级读取修补后，已受保护且可访问的原 Field 列表恢复直接读取实际节点字段，省去每字段重复原生字段扫描；Agent 入口认证、准确声明类／字段类型／holder 核对和控制闭包保护保持。imagefields 完整构建通过（24 秒），原 B 适配及外部改写拒绝检查通过。
+
+分发候选更新为 imagefields，Java ABI 48／Native 42。b-source-abi48-imagefields 使用独立端口真实 prelaunch 启动；readleaf 和原场景保留继续，尚无 B 游戏效果 PASS。B 未完成，原始日志仅保留本地 .work。
 
 2026-10-05 B 缓冲布局读回接续：gatepolicy 来源实例 455 秒现场已到 ZIP 中央目录读取，ResourceBridge 的跨度计算通过 Field.getInt 再次进入 Unsafe 读取门。缓冲的 position／limit／capacity／address、实际 backing／父视图及原 cleanup 地址读回改用已有准确 Native 字段读取；只开放给真实 ResourceBridge 及其 nest，仍读取当前 holder／真实声明字段／完整类型，native 不可用时保留反射后备，不缓存布局值。实际数据读取、复制来源窗口、共享视图及原资源退役边界保持。
 

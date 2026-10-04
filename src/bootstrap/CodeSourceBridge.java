@@ -1261,9 +1261,11 @@ public final class CodeSourceBridge {
             if(owner.getClassLoader()!=null||!owner.getName().startsWith("jdk.internal.org.objectweb.asm.")
                     ||java.lang.reflect.Modifier.isStatic(field.getModifiers())||field.getType().isPrimitive()||!owner.isInstance(holder))
                 throw new IllegalArgumentException("ACTUAL_ASM_REFERENCE_FIELD_REQUIRED");
-            // Read our metadata through the existing exact native field reader.
-            // A reflective Unsafe getter would observe this traversal itself.
-            values[i]=controlField(field,holder);
+            // The Agent's protected field list reads the current ASM node.
+            // Standalone heap getters no longer observe this traversal, so an
+            // internal metadata read does not need another native field scan.
+            try{values[i]=field.get(holder);}
+            catch(IllegalAccessException failure){throw new IllegalStateException("CONTROL_FIELD_UNAVAILABLE:"+field.getName(),failure);}
         }
         return values;
     }
