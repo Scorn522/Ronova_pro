@@ -1,5 +1,7 @@
 # Ronova Pro V1.5 A 批收口报告
 
+2026-10-05 B 内部读门：read 来源实例 691 秒现场确认内部 Unsafe 包装仍为签名读取建立未使用的来源窗口。包装回执仅用于关闭，现保留真实 receiver 读门，嵌套同线程读取沿已持有的同一门；完整来源窗口仍由实际代码执行、复制和缓冲区读取消费，原始地址读租约保留。Buffer.scope 独立资源边界未改。b-readlease-build-48.log 完整构建通过（24 秒），b-readlease-controls-48.log 的原实际 Agent 适配及控制对象外部反射／Unsafe 改写拒绝检查通过。候选更新为 readlease，Java ABI 48／Native 42 保持。来源场景 b-source-abi48-readlease 使用同版真实 prelaunch 运行，其他 read 场景继续；尚无 B 游戏效果 PASS。原始日志保留本地 .work，仅公开同步源码、候选及摘要。
+
 2026-10-05 00:44：B access 来源／引用实例的 2444／2202 秒实际现场在 JAR 扫描及签名的 Unsafe 读取观察中持续运行，未进入游戏效果。已完整修复准确内部同步器的多余来源捕获，以及堆读取回执不使用的 Java／Native 调用栈来源捕获；内存读取窗口、区间来源、并发写入观察及原外部写入拒绝保留，原始地址读取仍捕获调用来源。NativeControl ABI 42 对应同版 JNI 回调，Java ABI 48 保持。
 
 b-read-build-48.log 完整构建通过（31 秒）；b-read-controls-48.log 的既有实际 Agent 适配／外部反射及 Unsafe 改写拒绝检查通过。候选更新为 read 包，来源场景 b-source-abi48-read 使用真实 prelaunch 运行；旧来源实例停止，其他四个 access 场景仍无效果结果。原始日志／线程现场在本地 .work，公开仓库仅同步代码、候选与本摘要。尚无 B 游戏内 PASS，B 未完成。
