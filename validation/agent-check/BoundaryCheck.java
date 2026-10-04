@@ -544,6 +544,15 @@ public final class BoundaryCheck {
         var bytes=new java.io.ByteArrayOutputStream();
         try(var writer=new java.io.BufferedWriter(new java.io.OutputStreamWriter(bytes,java.nio.charset.StandardCharsets.UTF_8))){writer.write("delegate-linkage");}
         try(var reader=new java.io.BufferedReader(new java.io.InputStreamReader(new java.io.ByteArrayInputStream(bytes.toByteArray()),java.nio.charset.StandardCharsets.UTF_8))){require(reader.readLine().equals("delegate-linkage"),"character wrapper constructors and operations link without altering a live delegate");}
+        // The layout reader is used while real buffer data receipts are open.
+        // Exercise the actual bootstrap heap/direct views after Agent install.
+        var heapBuffer=java.nio.ByteBuffer.wrap(new byte[]{11,22,33});
+        var directBuffer=java.nio.ByteBuffer.allocateDirect(3);
+        directBuffer.put(heapBuffer).flip();
+        var readView=directBuffer.asReadOnlyBuffer();
+        require(readView.get()==11&&readView.get()==22&&readView.get()==33,
+                "actual buffer layout reads keep heap-to-direct data and the shared read-only view");
+        require(heapBuffer.get(0)==11&&heapBuffer.get(2)==33,"actual buffer transfer leaves its source bytes unchanged");
         System.out.println("B_ADAPTER_LINKAGE_PASS");
     }
     private static void controlArrayWriteRefused(Object array,String name)throws Exception{

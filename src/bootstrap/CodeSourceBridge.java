@@ -1269,7 +1269,8 @@ public final class CodeSourceBridge {
     }
     static Object controlField(java.lang.reflect.Field field,Object holder){
         Class<?> caller=AUTHORITY.getCallerClass();
-        if(caller!=CodeSourceBridge.class&&caller!=TaskBridge.class)throw new SecurityException("ACTUAL_CONTROL_FIELD_READER_REQUIRED");
+        if(caller!=CodeSourceBridge.class&&caller!=TaskBridge.class&&caller.getNestHost()!=ResourceBridge.class)
+            throw new SecurityException("ACTUAL_CONTROL_FIELD_READER_REQUIRED");
         if(NativeControl.available()){
             Object receiver=java.lang.reflect.Modifier.isStatic(field.getModifiers())?field.getDeclaringClass():holder;
             Object[] read=NativeControl.heapReadField(receiver,field.getDeclaringClass(),field.getName(),field.getType().descriptorString());

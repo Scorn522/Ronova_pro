@@ -217,8 +217,8 @@ public final class ResourceBridge {
         BufferStorage(Runnable action,boolean created)throws IllegalAccessException {
             original=action;this.created=created;
             addressField=action==null?null:action.getClass()==BufferPlatform.DEALLOCATOR?BufferPlatform.DEALLOC_ADDRESS:BufferPlatform.MAP_ADDRESS;
-            address=action==null?0:addressField.getLong(action);
-            bytes=action==null?0:(addressField==BufferPlatform.DEALLOC_ADDRESS?BufferPlatform.DEALLOC_SIZE:BufferPlatform.MAP_SIZE).getLong(action);
+            address=action==null?0:(Long)CodeSourceBridge.controlField(addressField,action);
+            bytes=action==null?0:(Long)CodeSourceBridge.controlField(addressField==BufferPlatform.DEALLOC_ADDRESS?BufferPlatform.DEALLOC_SIZE:BufferPlatform.MAP_SIZE,action);
             descriptor=addressField==BufferPlatform.MAP_ADDRESS?(FileDescriptor)BufferPlatform.MAP_FD.get(action):null;
         }
     }
@@ -228,10 +228,10 @@ public final class ResourceBridge {
         final long address,bytes;
         boolean constructed;
         BufferView(Buffer buffer,BufferStorage storage,Object parent)throws IllegalAccessException {
-            this.storage=storage;this.parent=new WeakReference<>(parent);address=BufferPlatform.ADDRESS.getLong(buffer);
+            this.storage=storage;this.parent=new WeakReference<>(parent);address=(Long)CodeSourceBridge.controlField(BufferPlatform.ADDRESS,buffer);
             int shift=buffer instanceof ByteBuffer?0:buffer instanceof CharBuffer||buffer instanceof ShortBuffer?1:
                     buffer instanceof IntBuffer||buffer instanceof FloatBuffer?2:3;
-            bytes=((long)BufferPlatform.CAPACITY.getInt(buffer))<<shift;
+            bytes=((long)(Integer)CodeSourceBridge.controlField(BufferPlatform.CAPACITY,buffer))<<shift;
         }
     }
     private static final class BufferUse {
@@ -863,22 +863,22 @@ public final class ResourceBridge {
         if(FILE_OBSERVING.get()!=null)return;FILE_OBSERVING.set(Boolean.TRUE);
         try{
             if(!buffer.isDirect())return;
-            Field parentField=BufferPlatform.PARENT.get(buffer.getClass());Object parent=parentField==null?null:parentField.get(buffer);
+            Field parentField=BufferPlatform.PARENT.get(buffer.getClass());Object parent=parentField==null?null:CodeSourceBridge.controlField(parentField,buffer);
             Module[] sources=TaskBridge.resourceOperationSources(null);
             synchronized(STREAMS){
                 reap();BufferView view=BUFFERS.get(new Key(buffer,false));
                 if(view==null){
                     BufferView owner=parent instanceof Buffer?BUFFERS.get(new Key(parent,false)):null;
-                    BufferStorage storage=owner==null?new BufferStorage(null,BufferPlatform.CAPACITY.getInt(buffer)==0&&BufferPlatform.ADDRESS.getLong(buffer)==0):owner.storage;
+                    BufferStorage storage=owner==null?new BufferStorage(null,(Integer)CodeSourceBridge.controlField(BufferPlatform.CAPACITY,buffer)==0&&(Long)CodeSourceBridge.controlField(BufferPlatform.ADDRESS,buffer)==0):owner.storage;
                     awaitBufferRestore(storage);
                     if(storage.sealed||storage.cleaned)throw new IllegalStateException("BUFFER_PARENT_RETIRED");
                     view=new BufferView(buffer,storage,parent);BUFFERS.put(new Key(buffer,true),view);storage.views.add(new WeakReference<>(buffer));storage.viewsVersion++;
                 }
                 BufferStorage storage=view.storage;
-                if(view.address!=BufferPlatform.ADDRESS.getLong(buffer)||view.parent.get()!=parent)throw new IllegalStateException("BUFFER_VIEW_ASSOCIATION_CHANGED");
+                if(view.address!=(Long)CodeSourceBridge.controlField(BufferPlatform.ADDRESS,buffer)||view.parent.get()!=parent)throw new IllegalStateException("BUFFER_VIEW_ASSOCIATION_CHANGED");
                 if(storage.original!=null&&(view.address<storage.address||view.bytes<0||view.bytes>storage.bytes||view.address-storage.address>storage.bytes-view.bytes))
                     throw new IllegalStateException("BUFFER_VIEW_OUTSIDE_ORIGINAL_STORAGE");
-                if(parent==null&&storage.original!=null&&BufferPlatform.CLEANUP.get(buffer)!=storage.cleaner.get())throw new IllegalStateException("BUFFER_CLEANER_ASSOCIATION_CHANGED");
+                if(parent==null&&storage.original!=null&&CodeSourceBridge.controlField(BufferPlatform.CLEANUP,buffer)!=storage.cleaner.get())throw new IllegalStateException("BUFFER_CLEANER_ASSOCIATION_CHANGED");
                 view.constructed=true;bufferSources(storage,sources);
                 storage.gap=storage.created?"":"BUFFER_ORIGINAL_STORAGE_UNOBSERVED";
             }
@@ -923,17 +923,17 @@ public final class ResourceBridge {
         return buffer instanceof ByteBuffer?1:buffer instanceof CharBuffer||buffer instanceof ShortBuffer?2:buffer instanceof IntBuffer||buffer instanceof FloatBuffer?4:8;
     }
     private static Object bufferArray(Buffer buffer)throws IllegalAccessException {
-        for(Field field:BufferPlatform.ARRAYS.get(buffer.getClass())){Object array=field.get(buffer);if(array!=null)return array;}
-        Field parent=BufferPlatform.PARENT.get(buffer.getClass());Object value=parent==null?null:parent.get(buffer);
+        for(Field field:BufferPlatform.ARRAYS.get(buffer.getClass())){Object array=CodeSourceBridge.controlField(field,buffer);if(array!=null)return array;}
+        Field parent=BufferPlatform.PARENT.get(buffer.getClass());Object value=parent==null?null:CodeSourceBridge.controlField(parent,buffer);
         return value instanceof Buffer owner&&owner!=buffer?bufferArray(owner):null;
     }
     private static BufferSpan bufferSpan(Buffer buffer,long index,long bytes)throws IllegalAccessException {
-        int width=elementBytes(buffer);long limit=BufferPlatform.LIMIT.getInt(buffer);
+        int width=elementBytes(buffer);long limit=(Integer)CodeSourceBridge.controlField(BufferPlatform.LIMIT,buffer);
         if(index<0||index>limit||bytes<=0||bytes>(limit-index)*width)return null;
         BufferView view;synchronized(STREAMS){view=BUFFERS.get(new Key(buffer,false));}
         if(view!=null){long offset=index*width;if(bytes>view.bytes||offset>view.bytes-bytes)return null;return new BufferSpan(null,view.storage,view.address+offset,bytes);}
         Object array=bufferArray(buffer);if(array==null)return null;long[] layout=arrayLayout(array.getClass());
-        long address=BufferPlatform.ADDRESS.getLong(buffer)+index*width,available=(long)java.lang.reflect.Array.getLength(array)*layout[1];
+        long address=(Long)CodeSourceBridge.controlField(BufferPlatform.ADDRESS,buffer)+index*width,available=(long)java.lang.reflect.Array.getLength(array)*layout[1];
         if(address<layout[0]||bytes>available||address-layout[0]>available-bytes)return null;
         return new BufferSpan(array,null,address,bytes);
     }
@@ -955,9 +955,9 @@ public final class ResourceBridge {
     private static BufferRead bufferRead(Buffer buffer,Object[] arguments,String method,BufferOperation operation){
         if(!BufferPlatform.READS.contains(method))return null;
         try{
-            long position=BufferPlatform.POSITION.getInt(buffer),index=position,bytes=valueBytes(buffer,method);int width=elementBytes(buffer);
+            long position=(Integer)CodeSourceBridge.controlField(BufferPlatform.POSITION,buffer),index=position,bytes=valueBytes(buffer,method);int width=elementBytes(buffer);
             if(arguments.length>0&&arguments[0] instanceof Integer absolute)index=method.equals("charAt")?position+absolute:absolute;
-            else if(arguments.length>0&&arguments[0] instanceof Long address&&buffer instanceof ByteBuffer)index=address-BufferPlatform.ADDRESS.getLong(buffer);
+            else if(arguments.length>0&&arguments[0] instanceof Long address&&buffer instanceof ByteBuffer)index=address-(Long)CodeSourceBridge.controlField(BufferPlatform.ADDRESS,buffer);
             Object destination=null;long destinationOffset=0;
             for(int at=0;at<arguments.length;at++)if(arguments[at]!=null&&arguments[at].getClass().isArray()){
                 Object array=arguments[at];long count=java.lang.reflect.Array.getLength(array),offset=0;
@@ -977,7 +977,7 @@ public final class ResourceBridge {
     private static BufferWrite bufferWrite(Buffer buffer,Object[] arguments,String method,BufferOperation operation){
         if(!method.startsWith("put")&&!method.equals("_put")&&!method.equals("compact"))return null;
         try{
-            int width=elementBytes(buffer);long index=BufferPlatform.POSITION.getInt(buffer),limit=BufferPlatform.LIMIT.getInt(buffer),count=1;
+            int width=elementBytes(buffer);long index=(Integer)CodeSourceBridge.controlField(BufferPlatform.POSITION,buffer),limit=(Integer)CodeSourceBridge.controlField(BufferPlatform.LIMIT,buffer),count=1;
             Object source=null;long sourceOffset=0,sourceBytes=0;boolean copy=false,unknownSource=false;Module[] valueSources=null;
             if(method.equals("compact")){
                 count=limit-index;BufferSpan input=bufferSpan(buffer,index,count*width);if(input==null)return null;
@@ -986,8 +986,8 @@ public final class ResourceBridge {
             else{
                 if(arguments.length>1&&arguments[0] instanceof Integer absolute)index=absolute;
                 else if(arguments.length>1&&arguments[0] instanceof Long address&&buffer instanceof ByteBuffer){
-                    index=address-BufferPlatform.ADDRESS.getLong(buffer);
-                    if(index<0||index>BufferPlatform.CAPACITY.getInt(buffer))throw new IllegalStateException("BUFFER_WRITE_OUTSIDE_ACTUAL_STORAGE");
+                    index=address-(Long)CodeSourceBridge.controlField(BufferPlatform.ADDRESS,buffer);
+                    if(index<0||index>(Integer)CodeSourceBridge.controlField(BufferPlatform.CAPACITY,buffer))throw new IllegalStateException("BUFFER_WRITE_OUTSIDE_ACTUAL_STORAGE");
                 }
                 for(int at=0;at<arguments.length;at++){
                     Object value=arguments[at];
@@ -1002,8 +1002,8 @@ public final class ResourceBridge {
                     long from=0;boolean explicit=arguments.length>at+2&&arguments[at+1] instanceof Integer&&arguments[at+2] instanceof Integer;
                     if(explicit){from=(Integer)arguments[at+1];count=(Integer)arguments[at+2];}
                     if(value instanceof Buffer input){
-                        int inputWidth=elementBytes(input);long inputLimit=BufferPlatform.LIMIT.getInt(input);
-                        if(!explicit){from=BufferPlatform.POSITION.getInt(input);count=inputLimit-from;}
+                        int inputWidth=elementBytes(input);long inputLimit=(Integer)CodeSourceBridge.controlField(BufferPlatform.LIMIT,input);
+                        if(!explicit){from=(Integer)CodeSourceBridge.controlField(BufferPlatform.POSITION,input);count=inputLimit-from;}
                         if(inputWidth!=width||from<0||count<0||from>inputLimit-count)return null;
                         BufferSpan span=bufferSpan(input,from,count*width);
                         if(span!=null){source=span.holder;sourceOffset=span.address;sourceBytes=span.bytes;copy=true;}
@@ -1043,7 +1043,7 @@ public final class ResourceBridge {
     private static BufferView borrowedBufferView(Buffer buffer){
         BufferView view=BUFFERS.get(new Key(buffer,false));if(view!=null||!buffer.isDirect())return view;
         try{
-            Field field=BufferPlatform.PARENT.get(buffer.getClass());Object parent=field==null?null:field.get(buffer);
+            Field field=BufferPlatform.PARENT.get(buffer.getClass());Object parent=field==null?null:CodeSourceBridge.controlField(field,buffer);
             BufferView owner=parent instanceof Buffer?BUFFERS.get(new Key(parent,false)):null;
             BufferStorage storage=owner==null?new BufferStorage(null,false):owner.storage;
             view=new BufferView(buffer,storage,parent);view.unknownUse=true;
@@ -1291,11 +1291,11 @@ public final class ResourceBridge {
         synchronized(STREAMS){
             try{
                 if(!completed){storage.failed=true;storage.gap="BUFFER_ORIGINAL_CLEANUP_INCOMPLETE";return;}
-                if(storage.original!=null&&storage.addressField.getLong(storage.original)!=0){storage.gap="BUFFER_ORIGINAL_RELEASE_PENDING";return;}
+                if(storage.original!=null&&(Long)CodeSourceBridge.controlField(storage.addressField,storage.original)!=0){storage.gap="BUFFER_ORIGINAL_RELEASE_PENDING";return;}
                 if(storage.descriptor!=null&&storage.descriptor.valid()){storage.gap="BUFFER_MAPPING_DESCRIPTOR_RETAINED";return;}
                 storage.cleaned=true;storage.retired=true;storage.gap="";
                 storage.original=null;
-            }catch(IllegalAccessException unavailable){storage.failed=true;storage.gap="BUFFER_RELEASE_RESULT_UNOBSERVED";}
+            }catch(IllegalStateException unavailable){storage.failed=true;storage.gap="BUFFER_RELEASE_RESULT_UNOBSERVED";}
         }
     }
     public static boolean bufferResource(Object value){
@@ -1352,7 +1352,7 @@ public final class ResourceBridge {
         }
         if(preserve)return preserveBuffer(storage,requested,selection,version);
         if(storage.original==null){bufferCleanupResult(storage,true);return storage.gap;}
-        if(storage.addressField.getLong(storage.original)==0&&storage.descriptor!=null&&storage.descriptor.valid()){
+        if((Long)CodeSourceBridge.controlField(storage.addressField,storage.original)==0&&storage.descriptor!=null&&storage.descriptor.valid()){
             var close=FileDescriptor.class.getDeclaredMethod("close");close.setAccessible(true);close.invoke(storage.descriptor);bufferCleanupResult(storage,true);return storage.gap;
         }
         Object cleaner=storage.cleaner.get();

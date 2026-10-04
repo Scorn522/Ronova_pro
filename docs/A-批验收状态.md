@@ -1,5 +1,9 @@
 # Ronova Pro 当前进度与 A 批状态
 
+2026-10-05 B 缓冲布局读回接续：gatepolicy 来源实例 455 秒现场已到 ZIP 中央目录读取，ResourceBridge 的跨度计算通过 Field.getInt 再次进入 Unsafe 读取门。缓冲的 position／limit／capacity／address、实际 backing／父视图及原 cleanup 地址读回改用已有准确 Native 字段读取；只开放给真实 ResourceBridge 及其 nest，仍读取当前 holder／真实声明字段／完整类型，native 不可用时保留反射后备，不缓存布局值。实际数据读取、复制来源窗口、共享视图及原资源退役边界保持。
+
+首次构建保留 IllegalAccessException 异常类型接续失败；释放读回失败仍报告 BUFFER_RELEASE_RESULT_UNOBSERVED，修正后完整构建通过（25 秒）。既有 B 适配检查通过，新增的实际已安装 Agent 下堆→直接缓冲传输、共享只读视图及源字节保留检查通过，原外部改写拒绝保持。候选更新为 bufferlayout，ABI 保持 Java 48／Native 42。b-source-abi48-bufferlayout 用独立端口真实 prelaunch 运行；其他五个 gatepolicy 场景保留继续，尚无游戏效果 PASS，B 未完成。原始日志仅在本地 .work。
+
 2026-10-05 B 停用期间的内部锁策略：readlease 来源实例 471 秒现场仍在准确字段门 CAS 的控制权限查询。源码确认 gate／真实同步器还先经过业务字段、来源停用及 backing 策略，可能在已停用模块的退场调用上拒绝控制器自己的锁状态操作。现在仅这两个构造登记的准确身份先采用原实际 JDK 锁调用／直接控制者认证及原控制 writer 权限；其他 receiver、批量内存写及业务写策略不变。反射、字段和标量 Unsafe 路径已一并接续。
 
 gatepolicy 完整工作包构建通过（25 秒）；原 B 适配检查通过，真实同步器外部反射和 Unsafe 改写仍被拒绝，内部堆表外部删除也被拒绝。分发候选更新为 gatepolicy，ABI 保持 Java 48／Native 42。五个既有 B 游戏场景已使用同版真实 prelaunch 启动：整组清理、来源模块、准确引用、保存生产链、完整任务后继。旧 read／readlease 实例在无游戏效果时停止并保留现场。B 尚无游戏效果 PASS，仍未完成；原始日志仅保留本地 .work。

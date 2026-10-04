@@ -1,5 +1,9 @@
 # Ronova Pro V1.5 A 批收口报告
 
+2026-10-05 B 缓冲布局：gatepolicy 来源实例 455 秒现场为 ZIP 中央目录读入，内部缓冲跨度的 Field.getInt 重入 Unsafe 读取门。当前缓冲位置／限额／地址／容量、backing／父视图及 cleanup 地址读回已接到现有准确 Native 字段读取，认证真实 ResourceBridge nest、核对实际 holder／声明字段／类型、保留原反射后备。未缓存读取值，数据来源与资源退役边界保持。首次构建的异常类型编译失败保留，释放读回未观察仍报告具体 gap；b-bufferlayout-build-final-48.log 完整构建通过（25 秒）。
+
+b-bufferlayout-controls-48.log 原实际 Agent 适配及外部改写拒绝检查通过，既有分支内的实际堆→直接缓冲传输、共享只读视图及源字节保留检查通过。候选更新为 bufferlayout（Java 48／Native 42），b-source-abi48-bufferlayout 用独立端口真实 prelaunch 运行，其他五个 gatepolicy 游戏场景继续保留，尚无 B 游戏效果结果。公开同步源码／候选／摘要，原始日志仅在本地 .work。B 未完成。
+
 2026-10-05 B 停用锁策略：readlease 来源实例 471 秒现场为准确字段门 CAS 的控制查询。gate／真实同步器的业务来源、停用和 backing 检查可能拒绝已停用模块退场过程中的控制器锁操作；现只对这两个已登记准确身份提前使用原 JDK 锁调用／直接控制者认证及控制 writer 权限，字段、反射和标量 Unsafe 路径一并接续，其他对象与批量写策略保留。b-gatepolicy-build-48.log 完整构建通过（25 秒）；b-gatepolicy-controls-48.log 的既有实际 Agent 安装、同步器外部反射／Unsafe 改写拒绝、内部堆表删除拒绝与适配检查通过。
 
 候选更新为 gatepolicy（Java ABI 48／Native 42）。mod-group-dynamic-b48-gatepolicy、b-source-abi48-gatepolicy、b-record-abi48-gatepolicy、b-chain-abi48-gatepolicy、b-task-abi48-gatepolicy 已用同版真实 prelaunch 启动，尚无游戏效果结果。原 read／readlease 实例停止并保留本地 .work 现场；公开仓库仅同步源码、候选和摘要。保存链需先有生产 PASS，再用同一存档／夹具验证原意图重启，不能预先计为通过。B 未完成。
