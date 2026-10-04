@@ -1,5 +1,9 @@
 # Ronova Pro V1.5 A 批收口报告
 
+2026-10-05 B 叶级读取：独立堆 getter 包装的来源回执没有消费方，已完整去掉 Java Unsafe／句柄和 Native 的这层空读门／回调。实际执行、复制和缓冲读取的观察、原始地址租约及所有写入拒绝保持。b-readleaf-build-final-48.log 完整构建通过（26 秒）；b-readleaf-controls-48.log 的既有实际 Agent、适配、控制对象外部改写拒绝及堆到直接缓冲传输检查通过。
+
+当前分发候选为 readleaf（Java 48／Native 42）。b-source-abi48-readleaf 已用真实 prelaunch 启动，旧场景继续，无游戏效果 PASS，B 未完成。公开同步源码、候选与摘要，原始日志保留本地 .work。
+
 2026-10-05 B 缓冲布局：gatepolicy 来源实例 455 秒现场为 ZIP 中央目录读入，内部缓冲跨度的 Field.getInt 重入 Unsafe 读取门。当前缓冲位置／限额／地址／容量、backing／父视图及 cleanup 地址读回已接到现有准确 Native 字段读取，认证真实 ResourceBridge nest、核对实际 holder／声明字段／类型、保留原反射后备。未缓存读取值，数据来源与资源退役边界保持。首次构建的异常类型编译失败保留，释放读回未观察仍报告具体 gap；b-bufferlayout-build-final-48.log 完整构建通过（25 秒）。
 
 b-bufferlayout-controls-48.log 原实际 Agent 适配及外部改写拒绝检查通过，既有分支内的实际堆→直接缓冲传输、共享只读视图及源字节保留检查通过。候选更新为 bufferlayout（Java 48／Native 42），b-source-abi48-bufferlayout 用独立端口真实 prelaunch 运行，其他五个 gatepolicy 游戏场景继续保留，尚无 B 游戏效果结果。公开同步源码／候选／摘要，原始日志仅在本地 .work。B 未完成。

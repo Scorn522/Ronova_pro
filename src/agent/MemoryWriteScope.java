@@ -3,7 +3,7 @@ package dev.ronova.pro.agent;
 import jdk.internal.org.objectweb.asm.*;
 import jdk.internal.org.objectweb.asm.tree.*;
 
-/** Keeps an admitted Java Unsafe operation open until its actual return or exception. */
+/** Keeps admitted Unsafe writes and raw reads open until return or exception. */
 final class MemoryWriteScope {
     private static final String BRIDGE="dev/ronova/pro/bootstrap/TaskBridge";
     private MemoryWriteScope(){}
@@ -19,6 +19,12 @@ final class MemoryWriteScope {
     private static void nativeCall(MethodNode method,MethodInsnNode call,Type[] arguments,int[] slots,String kind,boolean reading,AbstractInsnNode guard){
         Type result=Type.getReturnType(call.desc);int ticket=method.maxLocals++,error=method.maxLocals++,returned=method.maxLocals;method.maxLocals+=result.getSize();
         LabelNode start=new LabelNode(),end=new LabelNode(),handler=new LabelNode(),resume=new LabelNode();InsnList enter=new InsnList();
+        if(reading){
+            // Heap source consumers own their observation outside this leaf.
+            // Only the null-receiver/raw path needs this allocation lease.
+            enter.add(new InsnNode(Opcodes.ACONST_NULL));enter.add(new VarInsnNode(Opcodes.ASTORE,ticket));
+            enter.add(new VarInsnNode(Opcodes.ALOAD,slots[0]));enter.add(new JumpInsnNode(Opcodes.IFNONNULL,start));
+        }
         enter.add(new VarInsnNode(Opcodes.ALOAD,slots[0]));enter.add(new VarInsnNode(Opcodes.LLOAD,slots[1]));enter.add(new LdcInsnNode(kind));
         enter.add(new MethodInsnNode(Opcodes.INVOKESTATIC,BRIDGE,reading?"beginHandleRead":"beginHandleMutation","(Ljava/lang/Object;JLjava/lang/String;)Ljava/lang/Object;",false));
         // The policy and every refusal return belong to the same actual write scope.
@@ -65,6 +71,10 @@ final class MemoryWriteScope {
         int accepted=method.maxLocals++;
         LabelNode start=new LabelNode(),end=new LabelNode(),handler=new LabelNode();InsnList enter=new InsnList();
         boolean copy=method.name.equals("copyMemory")||method.name.equals("copySwapMemory");
+        if(reading&&receiver>=0){
+            enter.add(new InsnNode(Opcodes.ACONST_NULL));enter.add(new VarInsnNode(Opcodes.ASTORE,ticket));
+            enter.add(new VarInsnNode(Opcodes.ALOAD,receiver));enter.add(new JumpInsnNode(Opcodes.IFNONNULL,start));
+        }
         if(copy){enter.add(receiver<0?new InsnNode(Opcodes.ACONST_NULL):new VarInsnNode(Opcodes.ALOAD,slots[0]));enter.add(new VarInsnNode(Opcodes.LLOAD,slots[receiver<0?0:1]));}
         enter.add(receiver<0?new InsnNode(Opcodes.ACONST_NULL):new VarInsnNode(Opcodes.ALOAD,receiver));enter.add(new VarInsnNode(Opcodes.LLOAD,offset));
         enter.add(length>=0?new VarInsnNode(Opcodes.LLOAD,length):new LdcInsnNode(kind));

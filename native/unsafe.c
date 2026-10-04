@@ -73,6 +73,10 @@ static int native_unsafe_begin(JNIEnv *env,NativeThread *state,Binding *binding,
     if(binding->unsafeOperation>=UNSAFE_ALLOCATE&&binding->unsafeOperation<=UNSAFE_FREE)return native_memory_call_begin(env,state,binding,frame,use);
     NativeUnsafeMutation mutation;memset(&mutation,0,sizeof(mutation));
     native_unsafe_destination(binding,frame,&mutation.receiver,&mutation.offset,&mutation.length);
+    // Standalone heap getters have no source-result consumer. Executed reads,
+    // buffer reads and copies own their actual observation outside this leaf.
+    // Raw reads still need the allocation lease below; no writer skips it.
+    if(binding->unsafeOperation==UNSAFE_READ&&mutation.receiver)return 1;
     mutation.bulk=binding->unsafeOperation>=UNSAFE_SET&&binding->unsafeOperation<=UNSAFE_SWAP?JNI_TRUE:JNI_FALSE;
     mutation.reading=binding->unsafeOperation==UNSAFE_READ?JNI_TRUE:JNI_FALSE;
     mutation.copy=binding->unsafeOperation==UNSAFE_COPY||binding->unsafeOperation==UNSAFE_SWAP?JNI_TRUE:JNI_FALSE;
@@ -86,9 +90,8 @@ static int native_unsafe_begin(JNIEnv *env,NativeThread *state,Binding *binding,
         proposed=native_unsafe_box(env,binding->unsafeKind,native_unsafe_argument(binding,frame,argument));
     }
     if(!native_original.ExceptionCheck(env)){
-        // Heap reads observe the destination's recorded source interval, not
-        // caller contributors. Exact controller gates likewise have no heap
-        // receipt; their normal Java write policy still runs below.
+        // Exact controller gates have no heap receipt; their normal Java write
+        // policy still runs below. Raw reads keep their caller contributors.
         jboolean noContributors=mutation.reading&&mutation.receiver?JNI_TRUE:JNI_FALSE;
         if(!mutation.bulk&&mutation.receiver&&!mutation.reading)
             noContributors=native_original.CallStaticBooleanMethod(env,native_controller,native_unsafe_metadata_query,mutation.receiver);
