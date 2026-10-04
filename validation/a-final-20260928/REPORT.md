@@ -1,5 +1,9 @@
 # Ronova Pro V1.5 A 批收口报告
 
+2026-10-05 B 执行入口：b-readleaf-live-0217.log 的 1040 秒现场为 ZIP 属性扫描中的内存写入收尾。执行来源各入口统一使用已有直接调用者核对；自身 nest 的内部委托保留原扫描并认证实际 CodeSourceBridge。b-entrycaller-build-48.log 完整构建通过（24 秒），原夹具新增的外部反射／MethodHandle 内存入口拒绝与既有控制保护、适配和实际缓冲传输在 b-entrycaller-controls-48.log 中通过。
+
+分发候选为 entrycaller（Java 48／Native 42），b-source-abi48-entrycaller 已使用同版真实 prelaunch 启动。原运行保留继续，尚无 B 游戏效果 PASS，B 未完成。原始现场仅在本地 .work，公开同步代码、候选及结果摘要。
+
 2026-10-05 B 叶级读取：独立堆 getter 包装的来源回执没有消费方，已完整去掉 Java Unsafe／句柄和 Native 的这层空读门／回调。实际执行、复制和缓冲读取的观察、原始地址租约及所有写入拒绝保持。b-readleaf-build-final-48.log 完整构建通过（26 秒）；b-readleaf-controls-48.log 的既有实际 Agent、适配、控制对象外部改写拒绝及堆到直接缓冲传输检查通过。
 
 随后 b-readleaf-live-0 至 5 的真实启动现场中，3 次落在 ASM 控制图字段捕获。原生扫描是旧堆读取自我观察的接续措施；该卡点修补后，已受保护的原 Field 列表恢复直接读取实际 ASM 节点，保留入口认证、声明类／类型／实际 holder 核对和完整控制闭包。b-imagefields-build-48.log 完整构建通过（24 秒），b-imagefields-controls-48.log 原实际 Agent 适配、缓冲传输与控制对象外部改写拒绝检查通过。

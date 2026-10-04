@@ -523,6 +523,13 @@ public final class BoundaryCheck {
         }
         require(liveGate,"actual installed field gate has a protected receiver");
         Class<?> execution=Class.forName("dev.ronova.pro.bootstrap.ExecutionFlow",false,null);
+        Method memoryEnd=execution.getDeclaredMethod("memoryAfter",Object.class,boolean.class);memoryEnd.setAccessible(true);
+        try{memoryEnd.invoke(null,new Object(),true);throw new AssertionError("foreign execution memory entry admitted");}
+        catch(InvocationTargetException expected){require(expected.getCause() instanceof SecurityException,"foreign reflective memory entry refused");}
+        var foreignEnd=MethodHandles.lookup().unreflect(memoryEnd);
+        try{foreignEnd.invokeExact((Object)new Object(),true);throw new AssertionError("foreign handle memory entry admitted");}
+        catch(SecurityException expected){require(true,"foreign handle memory entry refused");}
+        catch(Throwable failure){throw new AssertionError("foreign handle memory entry failed for another reason",failure);}
         Field heapField=execution.getDeclaredField("HEAP");heapField.setAccessible(true);Map<Object,Object> heap=(Map<Object,Object>)heapField.get(null);
         synchronized(heap){
             require(!heap.isEmpty(),"actual installed source heap has live entries");

@@ -245,10 +245,10 @@ final class ExecutionFlow {
         }
     }
     private ExecutionFlow(){}
-    private static void bridge(){
-        bridge(CALLER.walk(BRIDGE_CALLER));
-    }
     private static void bridge(Class<?> caller){
+        // Direct bridge entries already know their physical caller. Delegation
+        // from our own nest retains the original outer-caller walk and policy.
+        if(caller!=null&&caller.getNestHost()==ExecutionFlow.class)caller=CALLER.walk(BRIDGE_CALLER);
         if(caller!=CodeSourceBridge.class)throw new SecurityException("ACTUAL_EXECUTION_SOURCE_BRIDGE_REQUIRED");
     }
     private static Sources join(Sources... values){
@@ -271,9 +271,9 @@ final class ExecutionFlow {
         if(alias==null)return;if(alias.actual!=null&&alias.actual.get()!=actual){alias.effects=join(alias.effects,UNKNOWN);return;}
         if(alias.actual==null){alias.actual=new WeakReference<>(actual);CodeSourceBridge.executionControls(alias.actual);}
     }
-    static Object plan(Object[][] rows){bridge();return new Plan(rows);}
+    static Object plan(Object[][] rows){bridge(CALLER.getCallerClass());return new Plan(rows);}
     static Object enter(Object supplied,StackWalker.StackFrame caller,int depth,StackWalker.StackFrame parent){
-        bridge();if(!(supplied instanceof Plan plan))return null;
+        bridge(CALLER.getCallerClass());if(!(supplied instanceof Plan plan))return null;
         Method method=plan.methods.get(caller.getMethodName()+caller.getDescriptor());if(method==null||!Objects.equals(method.sites.get(caller.getByteCodeIndex()),-1))return null;
         Frame current=CURRENT.get();Call incoming=null;
         if(current!=null&&current.call!=null&&parent!=null&&parent.getDeclaringClass()==current.declaring
@@ -302,11 +302,11 @@ final class ExecutionFlow {
         Frame frame=frame(token,caller,depth);return frame!=null&&Objects.equals(frame.method.sites.get(caller.getByteCodeIndex()),instruction)?frame:null;
     }
     static void argument(Object token,int slot,Object actual,StackWalker.StackFrame caller,int depth){
-        bridge();Frame frame=site(token,-2-slot,caller,depth);if(frame==null||slot<0||slot>=frame.locals.length||frame.locals[slot]==null)return;
+        bridge(CALLER.getCallerClass());Frame frame=site(token,-2-slot,caller,depth);if(frame==null||slot<0||slot>=frame.locals.length||frame.locals[slot]==null)return;
         Cell previous=frame.locals[slot];Alias alias=previous.alias()==null?new Alias():previous.alias();bind(alias,actual);frame.locals[slot]=new Cell(previous.sources(),previous.width(),alias);
     }
     static void constructor(Object token,Object receiver,StackWalker.StackFrame caller,int depth){
-        bridge();Frame frame=site(token,CONSTRUCTOR_SITE,caller,depth);if(frame==null)return;bind(frame.initializedReceiver,receiver);
+        bridge(CALLER.getCallerClass());Frame frame=site(token,CONSTRUCTOR_SITE,caller,depth);if(frame==null)return;bind(frame.initializedReceiver,receiver);
         for(Deferred write:frame.deferred){
             Class<?> actual=CodeSourceBridge.executionFieldOwner(frame.declaring,write.name(),write.descriptor());
             Sources written=join(write.sources(),UNKNOWN);frame.initializedReceiver.effects=join(frame.initializedReceiver.effects,written);
@@ -321,33 +321,33 @@ final class ExecutionFlow {
         frame.deferred.clear();
     }
     static void uninitializedWrite(Object token,int instruction,StackWalker.StackFrame caller,int depth){
-        bridge();Frame frame=site(token,instruction,caller,depth);if(frame==null||!frame.method.constructor||frame.instruction!=instruction)return;
+        bridge(CALLER.getCallerClass());Frame frame=site(token,instruction,caller,depth);if(frame==null||!frame.method.constructor||frame.instruction!=instruction)return;
         String[] field=frame.method.fields[instruction];if(field!=null)frame.deferred.add(new Deferred(field[0],field[1],frame.active));
         if(frame.initializedReceiver!=null)frame.initializedReceiver.effects=join(frame.initializedReceiver.effects,frame.active,UNKNOWN);
     }
-    static boolean nativeExitRequired(Object token){bridge();return token instanceof Frame frame&&!frame.closed&&CURRENT.get()==frame&&frame.method.constructor;}
+    static boolean nativeExitRequired(Object token){bridge(CALLER.getCallerClass());return token instanceof Frame frame&&!frame.closed&&CURRENT.get()==frame&&frame.method.constructor;}
     static void watchFailed(Object token){
-        bridge();if(!(token instanceof Frame frame)||frame.closed||CURRENT.get()!=frame)return;
+        bridge(CALLER.getCallerClass());if(!(token instanceof Frame frame)||frame.closed||CURRENT.get()!=frame)return;
         frame.thrown=join(frame.thrown,UNKNOWN);if(frame.initializedReceiver!=null)frame.initializedReceiver.effects=join(frame.initializedReceiver.effects,UNKNOWN);close(frame,false);
     }
     static boolean popped(Object token,boolean normal){
-        bridge();if(!(token instanceof Frame frame)||frame.thread!=Thread.currentThread())return false;
+        bridge(CALLER.getCallerClass());if(!(token instanceof Frame frame)||frame.thread!=Thread.currentThread())return false;
         if(frame.closed)return true;if(CURRENT.get()!=frame)return false;
         close(frame,normal);return true;
     }
     static void reference(Object token,int instruction,Object actual,StackWalker.StackFrame caller,int depth){
-        bridge();Frame frame=site(token,instruction,caller,depth);if(frame==null)return;
+        bridge(CALLER.getCallerClass());Frame frame=site(token,instruction,caller,depth);if(frame==null)return;
         if(frame.returned!=null){bind(frame.returned.alias(),actual);return;}
         if(!frame.stack.isEmpty())bind(frame.stack.get(frame.stack.size()-1).alias(),actual);
     }
     static void initialized(Object token,int instruction,Object actual,Class<?> declaring,StackWalker.StackFrame caller,int depth){
-        bridge();Frame frame=site(token,instruction,caller,depth);if(frame==null||frame.call==null||frame.call.instruction!=instruction||frame.call.arguments.length==0)return;
+        bridge(CALLER.getCallerClass());Frame frame=site(token,instruction,caller,depth);if(frame==null||frame.call==null||frame.call.instruction!=instruction||frame.call.arguments.length==0)return;
         Alias alias=frame.call.arguments[0].alias();if(alias==null)return;bind(alias,actual);
         Module producer=DefinitionBridge.module(declaring);Sources declaration=TaskBridge.producer(producer)?new Sources(new Module[]{producer},false):NONE;
         alias.effects=join(alias.effects,frame.call.direct,declaration,frame.call.normal&&!frame.call.partial?NONE:UNKNOWN);
     }
     static Object unsafeBefore(Object token,int instruction,Object accessor,Object receiver,long offset,long length,Object proposed,Object source,long sourceOffset,StackWalker.StackFrame caller,int depth){
-        bridge();Frame frame=site(token,instruction,caller,depth);
+        bridge(CALLER.getCallerClass());Frame frame=site(token,instruction,caller,depth);
         if(frame==null||frame.instruction!=instruction||frame.call==null||frame.call.instruction!=instruction)throw new IllegalStateException("ACTUAL_UNSAFE_CALL_SITE_REQUIRED");
         String[] member=frame.method.fields[instruction];
         if(member==null||member.length!=7)throw new IllegalStateException("ACTUAL_UNSAFE_CALL_DECLARATION_REQUIRED");
@@ -360,7 +360,7 @@ final class ExecutionFlow {
         return receipt==Boolean.FALSE?Boolean.FALSE:new UnsafeUse(frame,instruction,receipt,member[1].startsWith("get")&&!member[1].startsWith("getAnd"));
     }
     static void unsafeAfter(Object token,int instruction,Object supplied,boolean written,StackWalker.StackFrame caller,int depth){
-        bridge();if(supplied==null||supplied==Boolean.FALSE)return;
+        bridge(CALLER.getCallerClass());if(supplied==null||supplied==Boolean.FALSE)return;
         if(!(supplied instanceof UnsafeUse use)||use.frame()!=token||use.instruction()!=instruction||use.frame().thread!=Thread.currentThread())throw new SecurityException("ACTUAL_UNSAFE_CALL_RECEIPT_REQUIRED");
         Frame frame=site(token,instruction,caller,depth);
         if(frame==null){use.frame().thrown=join(use.frame().thrown,UNKNOWN);CodeSourceBridge.executionUnsafeMutationEnd(use.receipt(),written);return;}
@@ -374,7 +374,7 @@ final class ExecutionFlow {
         }finally{CodeSourceBridge.executionUnsafeMutationEnd(use.receipt(),written);}
     }
     static Object platformCall(Object receiver,StackWalker.StackFrame callee,StackWalker.StackFrame caller,int depth){
-        bridge();if(receiver==null||callee==null||caller==null)return null;
+        bridge(CALLER.getCallerClass());if(receiver==null||callee==null||caller==null)return null;
         Frame frame=CURRENT.get();while(frame!=null&&(frame.declaring!=caller.getDeclaringClass()||frame.depth!=depth))frame=frame.parent;
         if(frame==null||frame.closed||frame.thread!=Thread.currentThread()||frame.call==null
                 ||!frame.method.selector.equals(caller.getMethodName()+caller.getDescriptor())
@@ -387,14 +387,14 @@ final class ExecutionFlow {
         bind(receiverAlias,receiver);return new PlatformCall(frame,call);
     }
     static void platformObserved(Object token,Module[] modules){
-        bridge();if(!(token instanceof PlatformCall use)||use.frame.closed||use.frame.thread!=Thread.currentThread()||use.frame.call!=use.call)return;
+        bridge(CALLER.getCallerClass());if(!(token instanceof PlatformCall use)||use.frame.closed||use.frame.thread!=Thread.currentThread()||use.frame.call!=use.call)return;
         // The source belongs to this exact suspended invoke instruction, never
         // to another call that happens to return an equal primitive value.
         Sources observed=new Sources(Arrays.stream(modules).filter(Objects::nonNull).toArray(Module[]::new),true);
         use.call.observed=join(use.call.observed,observed);use.frame.thrown=join(use.frame.thrown,observed);
     }
     static void heapBefore(Object token,int instruction,Class<?> symbolic,Object receiver,int index,StackWalker.StackFrame caller,int depth){
-        bridge();Frame frame=site(token,instruction,caller,depth);if(frame==null||frame.instruction!=instruction||frame.operands==null)return;
+        bridge(CALLER.getCallerClass());Frame frame=site(token,instruction,caller,depth);if(frame==null||frame.instruction!=instruction||frame.operands==null)return;
         int opcode=frame.method.operations[instruction][0];boolean field=opcode>=178&&opcode<=181;
         boolean write=field?opcode==179||opcode==181:opcode>=79&&opcode<=86;Object holder,location;
         if(field){
@@ -429,7 +429,7 @@ final class ExecutionFlow {
         }
     }
     static void fieldModified(Object holder,Class<?> declaring,String name,String descriptor,Class<?> writer,String method,String methodDescriptor,int instruction,Object supplied,Module[] contributors){
-        bridge();if(CodeSourceBridge.fieldGateMetadata(holder))return;FieldSlot field;Map<String,FieldSlot> fields=FIELDS.get(declaring);
+        bridge(CALLER.getCallerClass());if(CodeSourceBridge.fieldGateMetadata(holder))return;FieldSlot field;Map<String,FieldSlot> fields=FIELDS.get(declaring);
         synchronized(fields){field=fields.get(name+'\u0000'+descriptor);}if(field==null)return;
         synchronized(HEAP){
             reapHeap();Heap heap=HEAP.get(new Carrier(holder,false));if(heap==null)return;Slot slot=heap.slots.get(field);if(slot==null)return;
@@ -456,7 +456,7 @@ final class ExecutionFlow {
         return join(frame==null?NONE:frame.active,new Sources(Arrays.stream(contributors).filter(Objects::nonNull).toArray(Module[]::new),unknown));
     }
     static Object memoryBefore(Object holder,Module[] contributors){
-        bridge();if(holder==null)return null;
+        bridge(CALLER.getCallerClass());if(holder==null)return null;
         if(CodeSourceBridge.fieldGateMetadata(holder))return null;
         if(holder.getClass().isArray())return arrayMemoryBefore(holder,0,java.lang.reflect.Array.getLength(holder),true,contributors);
         synchronized(HEAP){
@@ -466,10 +466,10 @@ final class ExecutionFlow {
         }
     }
     static long arrayRevision(Object holder){
-        bridge();synchronized(HEAP){Heap heap=HEAP.get(new Carrier(holder,false));return heap==null?0:heap.arrayRevision;}
+        bridge(CALLER.getCallerClass());synchronized(HEAP){Heap heap=HEAP.get(new Carrier(holder,false));return heap==null?0:heap.arrayRevision;}
     }
     static Object fieldMemoryBefore(Object holder,Class<?> declaring,String name,String descriptor,Module[] contributors,boolean instruction){
-        bridge();if(holder==null||declaring==null||name==null||descriptor==null)return null;
+        bridge(CALLER.getCallerClass());if(holder==null||declaring==null||name==null||descriptor==null)return null;
         if(CodeSourceBridge.fieldGateMetadata(holder))return null;
         Map<String,FieldSlot> fields=FIELDS.get(declaring);FieldSlot field;
         synchronized(fields){field=fields.computeIfAbsent(name+'\u0000'+descriptor,ignored->new FieldSlot(declaring,name,descriptor));}
@@ -493,7 +493,7 @@ final class ExecutionFlow {
         }
     }
     static Object arrayMemoryBefore(Object holder,int start,int length,Module[] contributors){
-        bridge();return arrayMemoryBefore(holder,start,length,false,contributors);
+        bridge(CALLER.getCallerClass());return arrayMemoryBefore(holder,start,length,false,contributors);
     }
     private static Object arrayMemoryBefore(Object holder,int start,int length,boolean broad,Module[] contributors){
         if(holder==null||!holder.getClass().isArray())return null;
@@ -778,7 +778,7 @@ final class ExecutionFlow {
         return byteMemoryBefore(holder,offset,length,contributors,false);
     }
     static Object byteMemoryBefore(Object holder,long offset,long length,Module[] contributors,boolean reference){
-        bridge();if(holder==null||length==0)return null;
+        bridge(CALLER.getCallerClass());if(holder==null||length==0)return null;
         if(offset<0||length<0||length>Long.MAX_VALUE-offset)return memoryBefore(holder,contributors);
         long end=offset+length;
         if(holder.getClass().isArray()){
@@ -813,7 +813,7 @@ final class ExecutionFlow {
         }
     }
     static Module[] byteMemorySources(Object holder,long offset,long length){
-        bridge();if(holder==null||length<=0)return new Module[0];
+        bridge(CALLER.getCallerClass());if(holder==null||length<=0)return new Module[0];
         synchronized(HEAP){
             reapHeap();Heap heap=HEAP.get(new Carrier(holder,false));if(heap==null)return new Module[0];
             return byteMemorySources(holder,heap,offset,length).modules().clone();
@@ -847,7 +847,7 @@ final class ExecutionFlow {
         return sources;
     }
     static Object byteMemoryReadBefore(Object carrier,long offset,long length){
-        bridge();if(carrier==null||length<=0)return null;
+        bridge(CALLER.getCallerClass());if(carrier==null||length<=0)return null;
         if(CodeSourceBridge.fieldGateMetadata(carrier))return null;
         synchronized(HEAP){
             reapHeap();Heap heap=heapFor(carrier);
@@ -855,11 +855,11 @@ final class ExecutionFlow {
         }
     }
     static Module[] byteMemoryReadSources(Object token){
-        bridge();if(!(token instanceof MemoryRead read)||read.closed||read.thread!=Thread.currentThread())throw new SecurityException("ACTUAL_HEAP_READ_WINDOW_REQUIRED");
+        bridge(CALLER.getCallerClass());if(!(token instanceof MemoryRead read)||read.closed||read.thread!=Thread.currentThread())throw new SecurityException("ACTUAL_HEAP_READ_WINDOW_REQUIRED");
         synchronized(HEAP){reapHeap();read.observed=join(read.observed,byteMemorySources(read.carrier,read.holder,read.offset,read.length));return read.observed.modules().clone();}
     }
     static void byteMemoryReadEnd(Object token){
-        bridge();if(token==null)return;if(!(token instanceof MemoryRead read)||read.thread!=Thread.currentThread())throw new SecurityException("ACTUAL_HEAP_READ_WINDOW_REQUIRED");
+        bridge(CALLER.getCallerClass());if(token==null)return;if(!(token instanceof MemoryRead read)||read.thread!=Thread.currentThread())throw new SecurityException("ACTUAL_HEAP_READ_WINDOW_REQUIRED");
         synchronized(HEAP){if(read.closed)return;read.closed=true;read.holder.reads.remove(read);}
     }
     private static boolean readOverlaps(MemoryRead read,long offset,long length){
@@ -882,7 +882,7 @@ final class ExecutionFlow {
         }
     }
     static void memoryContributors(Object token,Module[] contributors){
-        bridge();if(!(token instanceof MemoryUse use)||use.closed||use.thread!=Thread.currentThread())return;
+        bridge(CALLER.getCallerClass());if(!(token instanceof MemoryUse use)||use.closed||use.thread!=Thread.currentThread())return;
         synchronized(HEAP){
             Sources added=memorySources(contributors);use.written=join(use.written,added);
             if(use.arrayChange!=null){use.arrayChange.written=join(use.arrayChange.written,added);use.arrayChange.root.written=join(use.arrayChange.root.written,added);}
@@ -890,7 +890,7 @@ final class ExecutionFlow {
         }
     }
     static void memoryAfter(Object token,boolean written){
-        bridge();if(!(token instanceof MemoryUse use)||use.closed||use.thread!=Thread.currentThread())return;
+        bridge(CALLER.getCallerClass());if(!(token instanceof MemoryUse use)||use.closed||use.thread!=Thread.currentThread())return;
         synchronized(HEAP){
             if(use.delegated!=null){use.closed=true;if(!written)use.delegated.before=null;return;}
             use.closed=true;Heap heap=use.holder;
@@ -925,7 +925,7 @@ final class ExecutionFlow {
         }
     }
     static String retirementGap(Module module){
-        bridge();int fields=0,arrays=0,spans=0,active=0;
+        bridge(CALLER.getCallerClass());int fields=0,arrays=0,spans=0,active=0;
         synchronized(HEAP){
             reapHeap();for(var entry:HEAP.entrySet()){
                 if(entry.getKey().get()==null)continue;Heap heap=entry.getValue();boolean related=false;
@@ -983,7 +983,7 @@ final class ExecutionFlow {
         return new RevisionPlan(value,previous,rebuilt,changed);
     }
     static Object[][] groupValues(Module[] modules){
-        bridge();Set<Module> selected=Collections.newSetFromMap(new IdentityHashMap<>());Collections.addAll(selected,modules);List<Object[]> rows=new TraceList<>();
+        bridge(CALLER.getCallerClass());Set<Module> selected=Collections.newSetFromMap(new IdentityHashMap<>());Collections.addAll(selected,modules);List<Object[]> rows=new TraceList<>();
         synchronized(HEAP){
             reapHeap();for(var entry:HEAP.entrySet()){
                 Object carrier=entry.getKey().get();Heap heap=entry.getValue();if(carrier==null||heap.writers!=0)continue;
@@ -1003,7 +1003,7 @@ final class ExecutionFlow {
         return rows.toArray(Object[][]::new);
     }
     static boolean restoreValue(Object token){
-        bridge();if(token instanceof ArrayRecovery array)return restoreArray(array);
+        bridge(CALLER.getCallerClass());if(token instanceof ArrayRecovery array)return restoreArray(array);
         if(!(token instanceof Recovery recovery))throw new SecurityException("ACTUAL_HEAP_RECOVERY_RECEIPT_REQUIRED");
         Object carrier=recovery.carrier.get();if(carrier==null)return true;
         java.util.concurrent.locks.ReentrantLock gate=CodeSourceBridge.executionRecoveryGate(carrier);if(gate==null)return false;
@@ -1145,14 +1145,14 @@ final class ExecutionFlow {
         }
     }
     static void heapAfter(Object token,int instruction,Object reference,StackWalker.StackFrame caller,int depth){
-        bridge();Frame frame=site(token,instruction,caller,depth);if(frame==null||frame.instruction!=instruction)return;
+        bridge(CALLER.getCallerClass());Frame frame=site(token,instruction,caller,depth);if(frame==null||frame.instruction!=instruction)return;
         int opcode=frame.method.operations[instruction][0];
         if(frame.heap==null&&(opcode==178||opcode==180||opcode>=46&&opcode<=53)&&!frame.stack.isEmpty()){
             int top=frame.stack.size()-1;Cell previous=frame.stack.get(top);Cell value=new Cell(join(previous.sources(),UNKNOWN),previous.width(),previous.alias());frame.stack.set(top,value);bind(value.alias(),reference);frame.active=source(value);
         }else finishHeap(frame,true,reference);
     }
     static void before(Object token,int instruction,StackWalker.StackFrame caller,int depth){
-        bridge();Frame frame=frame(token,caller,depth);if(frame==null)return;
+        bridge(CALLER.getCallerClass());Frame frame=frame(token,caller,depth);if(frame==null)return;
         if(instruction<0||instruction>=frame.method.operations.length||!Objects.equals(frame.method.sites.get(caller.getByteCodeIndex()),instruction))return;
         int[] operation=frame.method.operations[instruction];int opcode=operation[0],operand=operation[1],consumed=operation[2],width=operation[3],end=operation[4];
         Sources direct=join(frame.method.sources[instruction],controls(frame,instruction),frame.entry,frame.declaration);
@@ -1195,7 +1195,7 @@ final class ExecutionFlow {
         frame.active=direct;for(Cell value:values){Sources source=join(direct,source(value));frame.stack.add(new Cell(source,value.width(),value.alias()));frame.active=join(frame.active,source);}
     }
     static void afterCall(Object token,int instruction,StackWalker.StackFrame caller,int depth){
-        bridge();Frame frame=frame(token,caller,depth);if(frame==null||frame.call==null||frame.call.instruction!=instruction
+        bridge(CALLER.getCallerClass());Frame frame=frame(token,caller,depth);if(frame==null||frame.call==null||frame.call.instruction!=instruction
                 ||!Objects.equals(frame.method.sites.get(caller.getByteCodeIndex()),instruction))return;
         Call call=frame.call;frame.call=null;
         if(call.width!=0){
@@ -1205,11 +1205,11 @@ final class ExecutionFlow {
         }else frame.active=call.direct;
     }
     static void caught(Object token,int instruction,StackWalker.StackFrame caller,int depth){
-        bridge();Frame frame=frame(token,caller,depth);if(frame==null||!Objects.equals(frame.method.sites.get(caller.getByteCodeIndex()),instruction))return;
+        bridge(CALLER.getCallerClass());Frame frame=frame(token,caller,depth);if(frame==null||!Objects.equals(frame.method.sites.get(caller.getByteCodeIndex()),instruction))return;
         finishHeap(frame,false,null);frame.stack.clear();frame.call=null;frame.operands=null;frame.stack.add(new Cell(frame.thrown,1,new Alias()));frame.active=frame.thrown;frame.returned=null;
     }
     static void exit(Object token,boolean normal,StackWalker.StackFrame caller,int depth){
-        bridge();Frame frame=frame(token,caller,depth);if(frame==null||!frame.method.sites.containsKey(caller.getByteCodeIndex()))return;
+        bridge(CALLER.getCallerClass());Frame frame=frame(token,caller,depth);if(frame==null||!frame.method.sites.containsKey(caller.getByteCodeIndex()))return;
         close(frame,normal);
     }
     private static void close(Frame frame,boolean normal){
