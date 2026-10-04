@@ -1,5 +1,9 @@
 # Ronova Pro V1.5 A 批收口报告
 
+2026-10-05 B 字段布局接续：stopquery 来源实例的 ZIP 读锁 CAS 现场确认每次重扫全部声明字段并重复调用 Unsafe 布局方法。现按实际声明 Class 分开复用实例／静态字段的 VM 布局，保留真实 receiver／静态 base、准确 offset／width、重叠拒绝及原未观察后备；布局数组、Span 和 Field 登记原控制保护，字段值及来源结论不缓存。Agent 的实际调用者检查复用同一 StackWalker，原身份与权限核对保持。
+
+fieldlayout 完整构建通过（23 秒），原实际 Agent 下 B 适配、外部反射／MethodHandle 内存入口拒绝、控制对象改写拒绝及实际直接缓冲传输通过。当前分发候选为 fieldlayout（Java 48／Native 42），b-record-abi48-fieldlayout 使用真实 prelaunch 运行引用清理／防回填，stopquery 来源及原整组／保存链／任务场景继续。四份已替代的 readleaf／imagefields／entrycaller／nativeindex 来源实例核对身份后停止，现场保留。尚无 B 游戏效果 PASS，B 未完成；原始日志只保留本地 .work。
+
 2026-10-05 B 停用查询：真实 nativeindex 来源实例的 Unsafe getter 仍在进入 native 前置门时扫描完整调用链。现每次先在原锁下读取实际 Owner.stopped；当前没有任何停用来源时直接返回未停用，出现停用来源后仍沿完整原查询。没有缓存停用判定，来源捕获与 UNKNOWN 保持原规则。
 
 stopquery 完整构建通过（17 秒），现有实际 Agent 下 B 适配、外部反射／MethodHandle 内存入口拒绝、控制对象防改写和直接缓冲传输检查通过。分发候选更新为 stopquery（Java 48／Native 42），b-source-abi48-stopquery 已使用真实 prelaunch 启动。此前 B 场景尚未获得游戏效果 PASS；B 未完成，原始日志仅保留本地 .work。

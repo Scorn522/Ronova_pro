@@ -96,6 +96,14 @@ public final class ResourceBridge {
     private static final ClassValue<List<Span>> STATIC_SPANS=new ClassValue<>() {
         protected List<Span> computeValue(Class<?> type){return spans(type,true);}
     };
+    // JVM retransformation preserves the field schema and offsets. Cache only
+    // each actual declaring Class's layout; source/value/holder decisions stay live.
+    private static final ClassValue<Span[]> INSTANCE_FIELDS=new ClassValue<>() {
+        protected Span[] computeValue(Class<?> type){return declaredSpans(type,false);}
+    };
+    private static final ClassValue<Span[]> STATIC_FIELDS=new ClassValue<>() {
+        protected Span[] computeValue(Class<?> type){return declaredSpans(type,true);}
+    };
     private static final Field FD_NUMBER=field(FileDescriptor.class,"fd"),FD_HANDLE=field(FileDescriptor.class,"handle");
     private static final Field FD_CLOSED=field(FileDescriptor.class,"closed"),FD_PARENT=field(FileDescriptor.class,"parent"),FD_PEERS=field(FileDescriptor.class,"otherParents");
     private static final ThreadPoolExecutor CLOSER=new ThreadPoolExecutor(0,2,10,TimeUnit.SECONDS,
@@ -1473,23 +1481,37 @@ public final class ResourceBridge {
     }
     private static Field exactField(Object receiver,Class<?> actual,boolean statik,long offset,long length){
         Field exact=null;
-        for(Class<?> type=actual;type!=null;type=statik?null:type.getSuperclass())for(Field field:type.getDeclaredFields()){
-            if(java.lang.reflect.Modifier.isStatic(field.getModifiers())!=statik)continue;
-            long[] span=fieldSpan(field,receiver);
-            if(span!=null&&span[0]==offset&&span[1]==length){
-                if(exact!=null)throw new IllegalStateException("OVERLAPPING_FIELD_LAYOUT");exact=field;
-            }
-        }
+        try{
+            for(Class<?> type=actual;type!=null;type=statik?null:type.getSuperclass())
+                for(Span span:(statik?STATIC_FIELDS:INSTANCE_FIELDS).get(type))
+                    if(span.offset==offset&&span.bytes==length&&fieldHolder(span.field,receiver)){
+                        if(exact!=null)throw new IllegalStateException("OVERLAPPING_FIELD_LAYOUT");exact=span.field;
+                    }
+        }catch(ReflectiveOperationException unavailable){throw new IllegalStateException("EXTERNAL_FIELD_LAYOUT_UNAVAILABLE",unavailable);}
         return exact;
+    }
+    private static Span[] declaredSpans(Class<?> actual,boolean statik){
+        try{
+            List<Span> result=new ArrayList<>();
+            Method offset=statik?STATIC_OFFSET:INSTANCE_OFFSET;
+            for(Field field:actual.getDeclaredFields()){
+                if(java.lang.reflect.Modifier.isStatic(field.getModifiers())!=statik)continue;
+                Class<?> kind=field.getType();int bytes=kind.isPrimitive()?kind==long.class||kind==double.class?8:
+                        kind==int.class||kind==float.class?4:kind==short.class||kind==char.class?2:1:unsafeWidth("Reference");
+                Span span=new Span(field,((Number)offset.invoke(UNSAFE,field)).longValue(),bytes);
+                CodeSourceBridge.resourceLayoutControls(field);CodeSourceBridge.resourceLayoutControls(span);result.add(span);
+            }
+            Span[] layout=result.toArray(Span[]::new);CodeSourceBridge.resourceLayoutControls(layout);return layout;
+        }catch(ReflectiveOperationException unavailable){throw new IllegalStateException("EXTERNAL_FIELD_LAYOUT_UNAVAILABLE",unavailable);}
     }
     /** Arbitrary JNI/reflection/Unsafe setters may not forge the platform resource associations. */
     static long[] fieldSpan(java.lang.reflect.Field field,Object receiver){
         try{
             boolean statik=java.lang.reflect.Modifier.isStatic(field.getModifiers());
             if(!fieldHolder(field,receiver))return null;
-            long at=((Number)(statik?STATIC_OFFSET:INSTANCE_OFFSET).invoke(UNSAFE,field)).longValue();
-            Class<?> type=field.getType();int width=type.isPrimitive()?type==long.class||type==double.class?8:type==int.class||type==float.class?4:type==short.class||type==char.class?2:1:unsafeWidth("Reference");
-            return new long[]{at,width};
+            for(Span span:(statik?STATIC_FIELDS:INSTANCE_FIELDS).get(field.getDeclaringClass()))
+                if(span.field.equals(field))return new long[]{span.offset,span.bytes};
+            throw new IllegalStateException("EXTERNAL_FIELD_LAYOUT_UNAVAILABLE:"+field.getName());
         }catch(ReflectiveOperationException unavailable){throw new IllegalStateException("EXTERNAL_FIELD_LAYOUT_UNAVAILABLE",unavailable);}
     }
     static boolean mutationAllowed(Object value){

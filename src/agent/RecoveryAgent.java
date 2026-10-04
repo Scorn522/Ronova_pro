@@ -9,6 +9,7 @@ import java.util.jar.JarFile;
 
 /** Installs control inside this JVM; Forge's bundled bootstrap supports ordinary no-argument installation. */
 public final class RecoveryAgent {
+    private static final StackWalker CALLER=StackWalker.getInstance(StackWalker.Option.RETAIN_CLASS_REFERENCE);
     private static JarFile bootstrap;
     private static final Set<String> installed=ConcurrentHashMap.newKeySet();
     /** True once the reflection field-write entry points carry the policy guard. */
@@ -464,7 +465,7 @@ public final class RecoveryAgent {
     private static volatile Class<?> modGroupRuntime;
     /** Binds control entry points to the exact classes loaded by Forge for this Ronova instance. */
     public static synchronized void bindModGroupCallers(Class<?> mod,Class<?> runtime) {
-        Class<?> caller=StackWalker.getInstance(StackWalker.Option.RETAIN_CLASS_REFERENCE).getCallerClass();
+        Class<?> caller=CALLER.getCallerClass();
         if(caller!=mod||mod==null||runtime==null||!mod.getName().equals("dev.ronova.pro.ProMod")
                 ||!runtime.getName().equals("dev.ronova.pro.ProRuntime")
                 ||mod.getClassLoader()!=runtime.getClassLoader()||mod.getModule()!=runtime.getModule()
@@ -523,7 +524,7 @@ public final class RecoveryAgent {
     public static String modGroupState() { return ModGroupBoundary.state()+";"+EventBusBoundary.state()
             +";COMMAND_GATE="+(CommandBoundary.installed()?"INSTALLED":"NOT_INSTALLED"); }
     private static void requireModGroupCaller(String expected) {
-        Class<?> caller=StackWalker.getInstance(StackWalker.Option.RETAIN_CLASS_REFERENCE)
+        Class<?> caller=CALLER
                 .walk(frames->frames.skip(2).findFirst().map(StackWalker.StackFrame::getDeclaringClass).orElse(null));
         Class<?> runtime=modGroupRuntime;
         if(runtime==null||caller==null)throw new SecurityException("MOD_GROUP_CONTROL_UNBOUND");
@@ -544,7 +545,7 @@ public final class RecoveryAgent {
         catch(ReflectiveOperationException failure) {throw new IllegalStateException("MOD_TASK_GATE_PUBLICATION_FAILED",failure);}
     }
     public static byte[] transformDefined(Module module,ClassLoader loader,byte[] bytes,boolean hidden) {
-        Class<?> caller=StackWalker.getInstance(StackWalker.Option.RETAIN_CLASS_REFERENCE).getCallerClass();
+        Class<?> caller=CALLER.getCallerClass();
         try {if(caller!=Class.forName("dev.ronova.pro.bootstrap.DefinitionBridge",false,null))throw new SecurityException("ACTUAL_DEFINITION_BRIDGE_REQUIRED");}
         catch(ClassNotFoundException unavailable){throw new IllegalStateException(unavailable);}
         if(!producerModule(module))return bytes;
@@ -559,7 +560,7 @@ public final class RecoveryAgent {
         return ExternalCodeRuntime.finish(loader,name,null,source,current);
     }
     public static void externalDefinitionAccepted(Class<?> actual,byte[] bytes){
-        Class<?> caller=StackWalker.getInstance(StackWalker.Option.RETAIN_CLASS_REFERENCE).getCallerClass();
+        Class<?> caller=CALLER.getCallerClass();
         try{if(caller!=Class.forName("dev.ronova.pro.bootstrap.DefinitionBridge",false,null))throw new SecurityException("ACTUAL_DEFINITION_RESULT_REQUIRED");}
         catch(ClassNotFoundException unavailable){throw new IllegalStateException(unavailable);}
         if(actual!=null&&producerModule(logicalModule(actual)))ExternalCodeDefinitions.defined(actual,bytes);
@@ -568,12 +569,12 @@ public final class RecoveryAgent {
     private static volatile Class<?> codeSourceBridge;
     /** Called only when the real module layer or reader was observed by the bootstrap bridge. */
     public static void sourceModuleRead(Module module) {
-        Class<?> caller=StackWalker.getInstance(StackWalker.Option.RETAIN_CLASS_REFERENCE).getCallerClass();
+        Class<?> caller=CALLER.getCallerClass();
         if(caller!=codeSourceBridge)throw new SecurityException("ACTUAL_CODE_SOURCE_BRIDGE_REQUIRED");
         if(producerModule(module)) {registerProducer(module);if(ModGroupBoundary.stopped(module))publishStoppedModule(module);}
     }
     private static void requireCodeSourceCaller(){
-        Class<?> caller=StackWalker.getInstance(StackWalker.Option.RETAIN_CLASS_REFERENCE).walk(frames->frames.skip(2).findFirst().map(StackWalker.StackFrame::getDeclaringClass).orElse(null));
+        Class<?> caller=CALLER.walk(frames->frames.skip(2).findFirst().map(StackWalker.StackFrame::getDeclaringClass).orElse(null));
         if(caller!=codeSourceBridge)throw new SecurityException("ACTUAL_CODE_SOURCE_BRIDGE_REQUIRED");
     }
     public static byte[] externalTreeImage(Object tree){requireCodeSourceCaller();return ExternalCodeImages.image(tree);}
@@ -589,35 +590,35 @@ public final class RecoveryAgent {
     public static Object[] externalMemberMetadata(Object member){requireCodeSourceCaller();return ExternalCodeImages.memberMetadata(member);}
     public static void externalClassPrepared(Class<?> actual){requireCodeSourceCaller();ExternalCodeDefinitions.prepared(actual);}
     public static void externalDefinitionsChanged(Class<?>[] actuals){
-        Class<?> caller=StackWalker.getInstance(StackWalker.Option.RETAIN_CLASS_REFERENCE).getCallerClass();
+        Class<?> caller=CALLER.getCallerClass();
         try{if(caller!=Class.forName("dev.ronova.pro.bootstrap.ControlBridge",false,null))throw new SecurityException("ACTUAL_INSTRUMENTATION_COMPLETION_REQUIRED");}
         catch(ClassNotFoundException unavailable){throw new IllegalStateException(unavailable);}
         for(Class<?> actual:actuals)ExternalCodeDefinitions.changed(actual);
     }
     static String[] externalCodeVersion(Class<?> actual,byte[] bytes){
-        if(StackWalker.getInstance(StackWalker.Option.RETAIN_CLASS_REFERENCE).getCallerClass()!=ExternalCodeDefinitions.class)throw new SecurityException("ACTUAL_CODE_DEFINITION_REGISTRY_REQUIRED");
+        if(CALLER.getCallerClass()!=ExternalCodeDefinitions.class)throw new SecurityException("ACTUAL_CODE_DEFINITION_REGISTRY_REQUIRED");
         try{return (String[])Class.forName("dev.ronova.pro.bootstrap.NativeControl",false,null).getMethod("codeVersion",Class.class,byte[].class).invoke(null,actual,bytes);}
         catch(ReflectiveOperationException failure){throw new IllegalStateException("ACTUAL_CODE_VERSION_UNAVAILABLE",failure);}
     }
     static String[] externalCodeDeclarations(Class<?> actual){
-        if(StackWalker.getInstance(StackWalker.Option.RETAIN_CLASS_REFERENCE).getCallerClass()!=ExternalCodeDefinitions.class)throw new SecurityException("ACTUAL_CODE_DEFINITION_REGISTRY_REQUIRED");
+        if(CALLER.getCallerClass()!=ExternalCodeDefinitions.class)throw new SecurityException("ACTUAL_CODE_DEFINITION_REGISTRY_REQUIRED");
         try{return (String[])Class.forName("dev.ronova.pro.bootstrap.NativeControl",false,null).getMethod("codeDeclarations",Class.class).invoke(null,actual);}
         catch(ReflectiveOperationException failure){throw new IllegalStateException("ACTUAL_CODE_DECLARATIONS_UNAVAILABLE",failure);}
     }
     static void publishExternalDefinition(ClassLoader loader,String name,byte[] bytes,boolean hidden){
-        if(StackWalker.getInstance(StackWalker.Option.RETAIN_CLASS_REFERENCE).getCallerClass()!=ExternalCodeRuntime.class)throw new SecurityException("ACTUAL_EXTERNAL_CODE_WEAVER_REQUIRED");
+        if(CALLER.getCallerClass()!=ExternalCodeRuntime.class)throw new SecurityException("ACTUAL_EXTERNAL_CODE_WEAVER_REQUIRED");
         try{Class.forName("dev.ronova.pro.bootstrap.NativeControl",false,null).getMethod("codeLayout",ClassLoader.class,String.class,byte[].class,String[].class,Module[][][].class,boolean.class)
                 .invoke(null,loader,name,bytes,new String[0],new Module[0][][],hidden);}
         catch(ReflectiveOperationException failure){throw new IllegalStateException("EXTERNAL_DEFINITION_VM_PUBLICATION_FAILED",failure);}
     }
     static void protectExternalCode(Object[] objects){
-        Class<?> caller=StackWalker.getInstance(StackWalker.Option.RETAIN_CLASS_REFERENCE).getCallerClass();
+        Class<?> caller=CALLER.getCallerClass();
         if(caller.getNestHost()!=ExternalCodeImages.class)throw new SecurityException("ACTUAL_EXTERNAL_CODE_LEDGER_REQUIRED");
         try{codeSourceBridge.getMethod("codeControls",Object[].class).invoke(null,(Object)objects);}
         catch(ReflectiveOperationException failure){throw new IllegalStateException("EXTERNAL_CODE_LEDGER_PROTECTION_FAILED",failure);}
     }
     static Object[] imageControlFields(Object holder,java.lang.reflect.Field[] fields){
-        if(StackWalker.getInstance(StackWalker.Option.RETAIN_CLASS_REFERENCE).getCallerClass()!=ExternalCodeImages.class)
+        if(CALLER.getCallerClass()!=ExternalCodeImages.class)
             throw new SecurityException("ACTUAL_EXTERNAL_CODE_LEDGER_REQUIRED");
         try{return (Object[])imageControlReader.invoke(null,holder,fields);}
         catch(java.lang.reflect.InvocationTargetException failure){
@@ -626,12 +627,12 @@ public final class RecoveryAgent {
         }catch(ReflectiveOperationException failure){throw new IllegalStateException("EXTERNAL_IMAGE_CONTROL_CAPTURE_FAILED",failure);}
     }
     static Object externalExecutionPlan(Object[][] rows){
-        if(StackWalker.getInstance(StackWalker.Option.RETAIN_CLASS_REFERENCE).getCallerClass()!=ExternalCodeRuntime.class)throw new SecurityException("ACTUAL_EXTERNAL_CODE_WEAVER_REQUIRED");
+        if(CALLER.getCallerClass()!=ExternalCodeRuntime.class)throw new SecurityException("ACTUAL_EXTERNAL_CODE_WEAVER_REQUIRED");
         try{return codeSourceBridge.getMethod("executionPlan",Object[][].class).invoke(null,(Object)rows);}
         catch(ReflectiveOperationException failure){throw new IllegalStateException("EXTERNAL_EXECUTION_LAYOUT_PUBLICATION_FAILED",failure);}
     }
     static void publishExternalCode(ClassLoader loader,String name,Class<?> actual,byte[] bytes,String[] methods,Module[][][] owners,Map<String,Module[]> fields,Object[][] values,boolean hidden,Object execution,Module declaration){
-        Class<?> caller=StackWalker.getInstance(StackWalker.Option.RETAIN_CLASS_REFERENCE).getCallerClass();
+        Class<?> caller=CALLER.getCallerClass();
         if(caller!=ExternalCodeRuntime.class)throw new SecurityException("ACTUAL_EXTERNAL_CODE_WEAVER_REQUIRED");
         try{
             Class<?> nativeControl=Class.forName("dev.ronova.pro.bootstrap.NativeControl",false,null);
@@ -647,7 +648,7 @@ public final class RecoveryAgent {
         }catch(ReflectiveOperationException failure){throw new IllegalStateException("EXTERNAL_CODE_VM_LAYOUT_PUBLICATION_FAILED",failure);}
     }
     static void bindExternalDefinition(Class<?> actual,byte[] bytes,String[] methods,Map<String,Module[]> fields,Object[][] values,String[] creationSites){
-        if(StackWalker.getInstance(StackWalker.Option.RETAIN_CLASS_REFERENCE).getCallerClass()!=ExternalCodeDefinitions.class)throw new SecurityException("ACTUAL_CODE_DEFINITION_REGISTRY_REQUIRED");
+        if(CALLER.getCallerClass()!=ExternalCodeDefinitions.class)throw new SecurityException("ACTUAL_CODE_DEFINITION_REGISTRY_REQUIRED");
         try{
             boolean installed=Boolean.TRUE.equals(Class.forName("dev.ronova.pro.bootstrap.NativeControl",false,null).getMethod("codeDefinition",Class.class,byte[].class).invoke(null,actual,bytes));
             codeSourceBridge.getMethod("codeMethods",Class.class,String[].class).invoke(null,actual,methods);
@@ -796,7 +797,7 @@ public final class RecoveryAgent {
         }catch(ReflectiveOperationException unavailable){throw new IllegalStateException("ACTUAL_LOADED_CLASS_QUERY_UNAVAILABLE",unavailable);}
     }
     static Class<?>[] bootstrapClasses(){
-        if(StackWalker.getInstance(StackWalker.Option.RETAIN_CLASS_REFERENCE).getCallerClass().getNestHost()!=ExternalCodeDefinitions.class)
+        if(CALLER.getCallerClass().getNestHost()!=ExternalCodeDefinitions.class)
             throw new SecurityException("ACTUAL_BOOTSTRAP_CLASS_QUERY_REQUIRED");
         try{return (Class<?>[])Class.forName("dev.ronova.pro.bootstrap.NativeControl",false,null).getMethod("bootstrapLookupClasses").invoke(null);}
         catch(ReflectiveOperationException unavailable){throw new IllegalStateException("ACTUAL_BOOTSTRAP_CLASS_QUERY_UNAVAILABLE",unavailable);}
