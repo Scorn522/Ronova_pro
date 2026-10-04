@@ -1255,17 +1255,25 @@ public final class CodeSourceBridge {
     }
     public static void codeControls(Object[] objects){requireAgent();protectControls(objects);}
     public static Object[] imageControlFields(Object holder,java.lang.reflect.Field[] fields){
-        requireAgent();Object[] values=new Object[fields.length];
-        for(int i=0;i<fields.length;i++){
-            var field=fields[i];Class<?> owner=field.getDeclaringClass();
-            if(owner.getClassLoader()!=null||!owner.getName().startsWith("jdk.internal.org.objectweb.asm.")
-                    ||java.lang.reflect.Modifier.isStatic(field.getModifiers())||field.getType().isPrimitive()||!owner.isInstance(holder))
-                throw new IllegalArgumentException("ACTUAL_ASM_REFERENCE_FIELD_REQUIRED");
-            // The Agent's protected field list reads the current ASM node.
-            // Standalone heap getters no longer observe this traversal, so an
-            // internal metadata read does not need another native field scan.
-            try{values[i]=field.get(holder);}
-            catch(IllegalAccessException failure){throw new IllegalStateException("CONTROL_FIELD_UNAVAILABLE:"+field.getName(),failure);}
+        return imageControlFields(new Object[]{holder},new java.lang.reflect.Field[][]{fields})[0];
+    }
+    public static Object[][] imageControlFields(Object[] holders,java.lang.reflect.Field[][] fields){
+        requireAgent();
+        if(holders.length!=fields.length)throw new IllegalArgumentException("ACTUAL_ASM_FIELD_BATCH_REQUIRED");
+        Object[][] values=new Object[holders.length][];
+        for(int row=0;row<holders.length;row++){
+            Object holder=holders[row];java.lang.reflect.Field[] selected=fields[row];
+            Object[] current=new Object[selected.length];values[row]=current;
+            for(int i=0;i<selected.length;i++){
+                var field=selected[i];Class<?> owner=field.getDeclaringClass();
+                if(owner.getClassLoader()!=null||!owner.getName().startsWith("jdk.internal.org.objectweb.asm.")
+                        ||java.lang.reflect.Modifier.isStatic(field.getModifiers())||field.getType().isPrimitive()||!owner.isInstance(holder))
+                    throw new IllegalArgumentException("ACTUAL_ASM_REFERENCE_FIELD_REQUIRED");
+                // Authenticate the actual Agent once per batch; every field
+                // still reads its current value from the actual ASM node.
+                try{current[i]=field.get(holder);}
+                catch(IllegalAccessException failure){throw new IllegalStateException("CONTROL_FIELD_UNAVAILABLE:"+field.getName(),failure);}
+            }
         }
         return values;
     }

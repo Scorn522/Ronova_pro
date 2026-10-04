@@ -496,6 +496,13 @@ public final class BoundaryCheck {
         Field roots=sources.getDeclaredField("scopes");roots.setAccessible(true);
         controlArrayWriteRefused(roots.get(null),"source directory roots");
         Class<?> code=Class.forName("dev.ronova.pro.bootstrap.CodeSourceBridge",false,null);
+        Method imageBatch=code.getMethod("imageControlFields",Object[].class,Field[][].class);
+        try{imageBatch.invoke(null,new Object[0],new Field[0][]);throw new AssertionError("foreign image batch entry admitted");}
+        catch(InvocationTargetException expected){require(expected.getCause() instanceof SecurityException,"foreign reflective image batch entry refused");}
+        var foreignBatch=MethodHandles.lookup().unreflect(imageBatch);
+        try{Object[][] ignored=(Object[][])foreignBatch.invokeExact(new Object[0],new Field[0][]);throw new AssertionError("foreign handle image batch entry admitted");}
+        catch(SecurityException expected){require(true,"foreign handle image batch entry refused");}
+        catch(Throwable failure){throw new AssertionError("foreign handle image batch entry failed for another reason",failure);}
         Field controls=code.getDeclaredField("CONTROLS");controls.setAccessible(true);Object registry=controls.get(null);
         Field table=registry.getClass().getDeclaredField("table");table.setAccessible(true);
         controlArrayWriteRefused(table.get(registry),"actual control table");

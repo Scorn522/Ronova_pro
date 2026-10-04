@@ -307,7 +307,7 @@ public final class RecoveryAgent {
             bridge.getMethod("registerAgentControls",Object[].class).invoke(null,(Object)clientControls);
             codeSourceBridge=Class.forName("dev.ronova.pro.bootstrap.CodeSourceBridge",true,null);
             codeSourceBridge.getMethod("install",Class.class).invoke(null,RecoveryAgent.class);
-            imageControlReader=codeSourceBridge.getMethod("imageControlFields",Object.class,java.lang.reflect.Field[].class);
+            imageControlReader=codeSourceBridge.getMethod("imageControlFields",Object[].class,java.lang.reflect.Field[][].class);
             ControlImages.protect(imageControlReader);
             Set<ModuleLayer> sourceLayers=Collections.newSetFromMap(new IdentityHashMap<>());
             for(Class<?> loaded:loadedClasses())if(loaded.getModule().getLayer()!=null)sourceLayers.add(loaded.getModule().getLayer());
@@ -617,10 +617,10 @@ public final class RecoveryAgent {
         try{codeSourceBridge.getMethod("codeControls",Object[].class).invoke(null,(Object)objects);}
         catch(ReflectiveOperationException failure){throw new IllegalStateException("EXTERNAL_CODE_LEDGER_PROTECTION_FAILED",failure);}
     }
-    static Object[] imageControlFields(Object holder,java.lang.reflect.Field[] fields){
+    static Object[][] imageControlFields(Object[] holders,java.lang.reflect.Field[][] fields){
         if(CALLER.getCallerClass()!=ExternalCodeImages.class)
             throw new SecurityException("ACTUAL_EXTERNAL_CODE_LEDGER_REQUIRED");
-        try{return (Object[])imageControlReader.invoke(null,holder,fields);}
+        try{return (Object[][])imageControlReader.invoke(null,holders,fields);}
         catch(java.lang.reflect.InvocationTargetException failure){
             Throwable cause=failure.getCause();if(cause instanceof RuntimeException error)throw error;if(cause instanceof Error error)throw error;
             throw new IllegalStateException("EXTERNAL_IMAGE_CONTROL_CAPTURE_FAILED",cause);

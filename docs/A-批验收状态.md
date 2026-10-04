@@ -1,5 +1,10 @@
 # Ronova Pro 当前进度与 A 批状态
 
+2026-10-05 B 实机测试接续：此前五份后台游戏、启动器和夹具已按用户要求全部关闭。用户明确要求继续实际测试后，仅启动现有客户端／服务端整组夹具。fieldlayout 的现场仍停在 Agent 安装，内部 ASM 节点逐个跨反射入口并重复检查实际调用者；现将每批最多 256 个节点的读取合并，逐字段保留实际 bootstrap ASM 声明 Class、非静态引用类型、holder 身份核对和当前值读取，完整追踪容器、指令前后链接及 InsnList，不缓存来源结论。
+
+imagebatch 完整构建通过（23 秒），原实际 Agent 下 B 适配、外部反射／MethodHandle 批量读取入口拒绝、控制对象改写拒绝及直接缓冲传输通过。当前分发候选为 imagebatch（Java 48／Native 42）。旧 fieldlayout 双端测试进程已关闭；mod-group-client-b48-imagebatch-20261005 正在实际 prelaunch 下运行，目前服务端仍在安装阶段，尚无 B 游戏效果 PASS，B 未完成。原始日志只保留本地 .work。
+
+
 2026-10-05 B 字段布局接续：stopquery 来源实例的 ZIP 读锁 CAS 现场确认每次重扫全部声明字段并重复调用 Unsafe 布局方法。现按实际声明 Class 分开复用实例／静态字段的 VM 布局，保留真实 receiver／静态 base、准确 offset／width、重叠拒绝及原未观察后备；布局数组、Span 和 Field 登记原控制保护，字段值及来源结论不缓存。Agent 的实际调用者检查复用同一 StackWalker，原身份与权限核对保持。
 
 fieldlayout 完整构建通过（23 秒），原实际 Agent 下 B 适配、外部反射／MethodHandle 内存入口拒绝、控制对象改写拒绝及实际直接缓冲传输通过。当前分发候选为 fieldlayout（Java 48／Native 42），b-record-abi48-fieldlayout 使用真实 prelaunch 运行引用清理／防回填，stopquery 来源及原整组／保存链／任务场景继续。四份已替代的 readleaf／imagefields／entrycaller／nativeindex 来源实例核对身份后停止，现场保留。尚无 B 游戏效果 PASS，B 未完成；原始日志只保留本地 .work。
