@@ -1302,7 +1302,7 @@ public final class CodeSourceBridge {
             Object value=pending.removeFirst();if(!found.add(value)||!(value instanceof Map<?,?>||value instanceof Collection<?>))continue;
             for(Class<?> type=value.getClass();type!=null&&type!=Object.class;type=type.getSuperclass())for(var field:type.getDeclaredFields())
                 if(!java.lang.reflect.Modifier.isStatic(field.getModifiers())&&(field.getType().isArray()||Map.class.isAssignableFrom(field.getType())||Collection.class.isAssignableFrom(field.getType()))){
-                    if(!field.trySetAccessible())throw new IllegalStateException("CONTROL_BACKING_FIELD_UNAVAILABLE:"+field.getName());
+                    if(!NativeControl.available()&&!field.trySetAccessible())throw new IllegalStateException("CONTROL_BACKING_FIELD_UNAVAILABLE:"+field.getName());
                     Object child=controlField(field,value);if(child!=null)pending.add(child);
                 }
         }

@@ -1348,7 +1348,7 @@ public final class TaskBridge {
         java.util.ArrayDeque<Object> queue=new java.util.ArrayDeque<>();
         for(ControlRef old:controlObjects){Object value=old.get();if(value!=null)queue.add(value);}for(Object root:roots)if(root!=null)queue.add(root);
         for(Class<?> type:java.util.List.of(TaskBridge.class,SourceMapBridge.class,BackingBridge.class,DefinitionBridge.class,ResourceBridge.class,IoBridge.class,CodeSourceBridge.class))for(var field:type.getDeclaredFields())
-            if(java.lang.reflect.Modifier.isStatic(field.getModifiers())&&(java.util.Map.class.isAssignableFrom(field.getType())||java.util.Collection.class.isAssignableFrom(field.getType()))&&field.trySetAccessible())
+            if(java.lang.reflect.Modifier.isStatic(field.getModifiers())&&(java.util.Map.class.isAssignableFrom(field.getType())||java.util.Collection.class.isAssignableFrom(field.getType()))&&(NativeControl.available()||field.trySetAccessible()))
                 {Object value=CodeSourceBridge.controlField(field,null);if(value!=null)queue.add(value);}
         // The authenticated controller's real image/source records can exceed
         // a fixed object count. Visit each actual container once and retain the
@@ -1357,7 +1357,7 @@ public final class TaskBridge {
             Object value=queue.removeFirst();if(!found.add(value)||value.getClass().isArray())continue;
             if(!(value instanceof java.util.Map<?,?>||value instanceof java.util.Collection<?>))continue;
             for(Class<?> type=value.getClass();type!=null&&type!=Object.class;type=type.getSuperclass())for(var field:type.getDeclaredFields())
-                if(!java.lang.reflect.Modifier.isStatic(field.getModifiers())&&(field.getType().isArray()||java.util.Map.class.isAssignableFrom(field.getType())||java.util.Collection.class.isAssignableFrom(field.getType()))&&field.trySetAccessible())
+                if(!java.lang.reflect.Modifier.isStatic(field.getModifiers())&&(field.getType().isArray()||java.util.Map.class.isAssignableFrom(field.getType())||java.util.Collection.class.isAssignableFrom(field.getType()))&&(NativeControl.available()||field.trySetAccessible()))
                     {Object child=CodeSourceBridge.controlField(field,value);if(child!=null)queue.add(child);}
         }
         Object[] published=found.toArray();
