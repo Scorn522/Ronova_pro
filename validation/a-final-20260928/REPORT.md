@@ -1,5 +1,12 @@
 # Ronova Pro V1.5 A 批收口报告
 
+2026-10-05 B UNKNOWN 字段观察接续：bootmodules 的真实 JAR 扫描现场仍大量进入实际文件／缓冲区来源路径。字段低层写入现仅在本次贡献为 UNKNOWN 且没有任何已知 Module、既有字段也全未知且没有有效 revision／已安装 VM 观察时延后首次 VM watch；原写入回执、并发计数、UNKNOWN 传播和实际 holder／FieldSlot 对齐保留。有已知贡献、已知字段状态、有效 revision 或已安装观察时仍在写入前执行原观察安装，实际指令读写路径的观察保持。
+
+unknownwatch 完整构建通过（19 秒）。本次沿用原 BoundaryCheck 的 b-adapter-linkage，通过与游戏相同的 prelaunch 提前加载原生 JVMTI：反射 9 项、Unsafe、句柄 30 项、外部反射／MethodHandle 批量入口拒绝、原控制对象改写拒绝、B 适配与真实堆→直接缓冲／只读视图传输均通过。原始现场仅在本地 .work。
+
+当前分发候选为 unknownwatch（Java 48／Native 42）。已核对并关闭 bootmodules 游戏／启动器／夹具，只复跑 mod-group-client-b48-unknownwatch-20261005 这一份原真实双端游戏效果测试。服务端已完成 Agent 安装并出现 Forge 初始化日志，尚未完成世界加载／停用动作，没有 B 游戏效果 PASS，B 未完成。
+
+
 2026-10-05 B 实际 boot Module 接续：bootdeclaration 的真实服务端完成 Agent 安装后，JAR 扫描现场仍因未绑定的 JDK 平台加载器映像重复进入完整 receiver 分析。空来源判断现核对实际声明 Module 属于 boot layer 且映像记录的加载器与该 Module 的实际加载器一致；直接／控制来源及当前生产声明判断保留，未知声明、其他 layer、不同加载器／逻辑来源仍走原完整路径，Class 绑定后仍读取实际逻辑 Module。内部 ASM 批次使用限长 256 的局部数组，避免为这些临时工作列表进入来源容器守卫，完整闭包和逐字段检查保持。
 
 bootmodules 完整构建通过（17 秒）；原实际 Agent 的反射 9 项、Unsafe、句柄 30 项、批量读取／登记外部反射与 MethodHandle 拒绝、控制对象改写拒绝、B 适配及直接缓冲传输检查通过。当前分发候选为 bootmodules（Java 48／Native 42）。已核对并关闭 bootdeclaration 的游戏／启动器／夹具，只复跑 mod-group-client-b48-bootmodules-20261005 的原真实双端效果测试。尚未进入世界或获得 B 游戏效果 PASS，B 未完成。原始现场只保留本地 .work。

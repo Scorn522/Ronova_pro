@@ -473,7 +473,15 @@ final class ExecutionFlow {
         if(CodeSourceBridge.fieldGateMetadata(holder))return null;
         Map<String,FieldSlot> fields=FIELDS.get(declaring);FieldSlot field;
         synchronized(fields){field=fields.computeIfAbsent(name+'\u0000'+descriptor,ignored->new FieldSlot(declaring,name,descriptor));}
-        boolean watched=CodeSourceBridge.executionWatchField(holder,declaring,name,descriptor);
+        Sources attempted=memorySources(contributors);boolean watch=!attempted.unknown()||attempted.modules().length!=0;
+        if(!watch)synchronized(HEAP){
+            Heap existing=HEAP.get(new Carrier(holder,false));Slot known=existing==null?null:existing.slots.get(field);
+            watch=known!=null&&(known.vmWatched||!known.sources.unknown()||known.sources.modules().length!=0||known.revision!=null);
+        }
+        // An unobserved write to an already wholly unknown field cannot lose a
+        // source or a confirmed revision. Keep its normal receipt and UNKNOWN;
+        // arm the VM watch before any observed source or known state can change.
+        boolean watched=watch&&CodeSourceBridge.executionWatchField(holder,declaring,name,descriptor);
         synchronized(HEAP){
             reapHeap();Heap heap=heapFor(holder);
             Slot slot=heap.slots.computeIfAbsent(field,ignored->new Slot());
