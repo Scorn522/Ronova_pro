@@ -1,5 +1,7 @@
 # Ronova Pro 当前进度与 A 批状态
 
+2026-10-04 22:52 B 内部字节比较补修：query 实例 289 秒现场已越过查询键卡点，进入内部映像 Arrays.equals → Unsafe.getLong 自我观察。映像发布／隐藏定义／创建映像／JDK 任务映像及恢复快照的字节比较统一改用原字节逐项比较，仍要求完整内容相等。两次构建均通过（24 秒），当前候选为 byte 包。mod-group-dynamic-b48-byte 与 b-source-abi48-byte 正在运行；203 秒现场为准确原生字段读取，尚无游戏效果结果。B 仍未完成。
+
 2026-10-04 22:43 B 查询键补修：前置安装 307 秒现场位于 CallQuery 自动 hashCode → MethodHandle 字段读取 → Unsafe 来源观察。解析查询键及其嵌套 Member／Receiver 改为直接字段 equals／hashCode，保留全部组件、null 与集合等价语义；不缓存来源结论。完整构建通过（22 秒），候选更新为 query 包。mod-group-dynamic-b48-query 与 b-source-abi48-query 正在真实 prelaunch 下运行，仍未到游戏效果 PASS；B 尚未完成。
 
 2026-10-04 22:36 B 启动继续修补：真实前置入口的 ASM 控制映像反射读取会再次进入 Unsafe 来源观察，旧来源场景运行到 800 秒仍在这一捕获链内，未到游戏。仅缓存 MethodHandle 的尝试仍触发同一路径，已撤回。最终复用已有 native heapReadField，供认证 Agent 的 ASM 引用字段及内部控制容器 backing 捕获使用，保留实际 holder／声明类／字段名／类型核对与完整保护遍历；没有给业务代码新增观察豁免。bootstrap 类层级解析也接上已有的已加载类查询，未命中仍保留原资源路径。

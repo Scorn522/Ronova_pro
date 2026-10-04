@@ -192,7 +192,7 @@ final class ExternalCodeDefinitions {
             if(!emitted&&definitions.stream().anyMatch(entry->entry.boundHidden&&entry.actual.get()==replacement.actual.get()))return false;
             // An emitted replacement is not yet a VM acceptance. Retain the last matching version.
             definitions.removeIf(entry->emitted&&entry.loader(replacement.loader.get())&&entry.name.equals(replacement.name)&&entry.hidden==replacement.hidden
-                    &&(replacement.hidden?!entry.boundHidden&&entry.emitted.get()==replacement.emitted.get():Arrays.equals(entry.bytes,replacement.bytes))
+                    &&(replacement.hidden?!entry.boundHidden&&entry.emitted.get()==replacement.emitted.get():ControlImages.sameBytes(entry.bytes,replacement.bytes))
                     ||!entry.bootstrap&&entry.loader.get()==null||entry.boundHidden&&entry.actual.get()==null
                     ||entry.hidden&&!entry.boundHidden&&entry.emitted.get()==null);
             definitions.add(replacement);
@@ -206,7 +206,7 @@ final class ExternalCodeDefinitions {
         for(Definition definition:definitions)if(definition.boundHidden&&definition.actual.get()==actual)return;
         Definition emitted=null;
         for(int i=definitions.size()-1;i>=0;i--){Definition candidate=definitions.get(i);
-            if(candidate.hidden&&!candidate.boundHidden&&candidate.emitted.get()==bytes&&candidate.loader(actual.getClassLoader())&&Arrays.equals(candidate.bytes,bytes)){emitted=candidate;break;}
+            if(candidate.hidden&&!candidate.boundHidden&&candidate.emitted.get()==bytes&&candidate.loader(actual.getClassLoader())&&ControlImages.sameBytes(candidate.bytes,bytes)){emitted=candidate;break;}
         }
         if(emitted==null){ModGroupBoundary.externalGap(RecoveryAgent.logicalModule(actual),actual.getName()+":EXTERNAL_HIDDEN_DEFINITION_UNRESOLVED");return;}
         // One emitted image may define several distinct hidden classes. Give each class its own graph identity.

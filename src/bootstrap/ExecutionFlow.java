@@ -584,7 +584,10 @@ final class ExecutionFlow {
             }catch(NativeControl.HeapImageUnavailable unavailable){return false;}
             byte[] bytes=CodeSourceBridge.executionArrayImage(array,start,length);if(bytes==null)return false;
             CodeSourceBridge.executionControls((Object)bytes);
-            if(expected.values instanceof byte[] wanted)return Arrays.equals(bytes,0,length,wanted,expected.offset,expected.offset+length);
+            if(expected.values instanceof byte[] wanted){
+                for(int i=0;i<length;i++)if(bytes[i]!=wanted[expected.offset+i])return false;
+                return true;
+            }
             return length==0&&expected.values==null&&expected.bits==0;
         }
         Value[] values=new Value[length];Object[] references=(Object[])array;

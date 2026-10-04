@@ -6,6 +6,13 @@ import java.util.*;
 
 /** Keeps the real pre-control image for the small set of control carriers. Our current hooks are reapplied after it. */
 final class ControlImages implements ClassFileTransformer {
+    /** Internal images must not observe their own vectorized Unsafe reads. */
+    static boolean sameBytes(byte[] left,byte[] right){
+        if(left==right)return true;
+        if(left==null||right==null||left.length!=right.length)return false;
+        for(int i=0;i<left.length;i++)if(left[i]!=right[i])return false;
+        return true;
+    }
     private static final class Ref<T> extends java.lang.ref.WeakReference<T> {
         private static final StackWalker CALLER=StackWalker.getInstance(StackWalker.Option.RETAIN_CLASS_REFERENCE);
         Ref(T value){super(value);}

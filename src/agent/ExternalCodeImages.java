@@ -139,7 +139,7 @@ final class ExternalCodeImages {
             for(Module owner:owners)gap(owner,"TRANSFORM_INPUT_SOURCE_UNOBSERVED");return null;
         }
         Snapshot before=snapshot(root);
-        if(!Arrays.equals(canonical(history.current.bytes()),canonical(before.bytes())))history.patches.add(new Patch(new Module[0],history.current,before));
+        if(!ControlImages.sameBytes(canonical(history.current.bytes()),canonical(before.bytes())))history.patches.add(new Patch(new Module[0],history.current,before));
         Capture capture=new Capture(input,root,history,before,owners.clone(),writers.clone());ControlImages.protect(capture,capture.owners,capture.writers);return capture;
     }
     static synchronized void end(Object token,Object output,Module[] consumers){
@@ -150,7 +150,7 @@ final class ExternalCodeImages {
         if(wholeTree){after=snapshot(output);TREES.put(new Key(output,true),capture.history);parents(output);}
         else after=memberResult(capture,output);
         Module[] owners=join(capture.owners,consumers);ControlImages.protect((Object)owners);
-        if(!Arrays.equals(canonical(capture.before.bytes()),canonical(after.bytes())))capture.history.patches.add(new Patch(owners,capture.before,after,capture.writers));
+        if(!ControlImages.sameBytes(canonical(capture.before.bytes()),canonical(after.bytes())))capture.history.patches.add(new Patch(owners,capture.before,after,capture.writers));
         capture.history.current=after;parents(capture.root);
         if(output!=capture.input&&!wholeTree)PARENTS.put(new Key(output,true),new Key(capture.root,true));
     }
@@ -196,7 +196,7 @@ final class ExternalCodeImages {
     static synchronized Module[] encoded(Object writer,byte[] bytes){
         History history=WRITERS.get(new Key(writer,false));if(history==null||history.patches.isEmpty())return new Module[0];
         Module module=history.module.get();if(module==null)return new Module[0];
-        if(!Arrays.equals(canonical(history.current.bytes()),canonical(bytes))){for(Patch patch:history.patches)for(Module owner:patch.owners())gap(owner,"POST_TRANSFORM_CODE_CHANGED_UNOBSERVED");return new Module[0];}
+        if(!ControlImages.sameBytes(canonical(history.current.bytes()),canonical(bytes))){for(Patch patch:history.patches)for(Module owner:patch.owners())gap(owner,"POST_TRANSFORM_CODE_CHANGED_UNOBSERVED");return new Module[0];}
         ENCODED.removeIf(image->!image.bootstrap()&&image.loader().get()==null);
         Encoded image=new Encoded(new Ref<>(module.getClassLoader()),module.getClassLoader()==null,history.current.node().name,hash(canonical(bytes)),history.current,List.copyOf(history.patches));
         ENCODED.add(image);protect(image.digest());
@@ -275,8 +275,8 @@ final class ExternalCodeImages {
                 gap(owner,name+":FOREIGN_DEPENDENT_TRANSFORM_REPLAY_PENDING");continue;
             }
             ClassNode priorClass=patch.before().node(),appliedClass=patch.after().node();
-            if(!Arrays.equals(classMetadata(priorClass),classMetadata(appliedClass))){
-                if(!Arrays.equals(classMetadata(node),classMetadata(appliedClass)))gap(owner,name+":OVERLAPPING_EXTERNAL_CLASS_METADATA");
+            if(!ControlImages.sameBytes(classMetadata(priorClass),classMetadata(appliedClass))){
+                if(!ControlImages.sameBytes(classMetadata(node),classMetadata(appliedClass)))gap(owner,name+":OVERLAPPING_EXTERNAL_CLASS_METADATA");
                 else if(type!=null){gap(owner,name+":EXTERNAL_LIVE_CLASS_METADATA_LAYOUT_PENDING");}
                 else {classMetadataFrom(priorClass,node);changed=true;}
             }
@@ -285,8 +285,8 @@ final class ExternalCodeImages {
                 if(current==null){gap(owner,name+"#"+key+":CURRENT_MEMBER_UNOBSERVED");continue;}
                 MethodNode destination=node.methods.stream().filter(method->(method.name+method.desc).equals(key)).findFirst().orElse(null);
                 if(destination==null){gap(owner,name+"#"+key+":CURRENT_MEMBER_UNOBSERVED");continue;}
-                if(before!=null&&!Arrays.equals(methodMetadata(before.method()),methodMetadata(after.method()))){
-                    if(!Arrays.equals(methodMetadata(destination),methodMetadata(after.method())))gap(owner,name+"#"+key+":OVERLAPPING_EXTERNAL_METHOD_METADATA");
+                if(before!=null&&!ControlImages.sameBytes(methodMetadata(before.method()),methodMetadata(after.method()))){
+                    if(!ControlImages.sameBytes(methodMetadata(destination),methodMetadata(after.method())))gap(owner,name+"#"+key+":OVERLAPPING_EXTERNAL_METHOD_METADATA");
                     else {
                         int access=destination.access;methodMetadataFrom(before.method(),destination);
                         if(type!=null&&access!=destination.access){destination.access=access;gap(owner,name+"#"+key+":EXTERNAL_LIVE_METHOD_MODIFIERS_PENDING");}
@@ -377,7 +377,7 @@ final class ExternalCodeImages {
     /** The caller supplies the real payload origins, so an unrecorded foreign edit never disappears from provenance. */
     static synchronized Object[] mixinPayload(Object tree,Module origin,Module[] contributors,boolean bodyOnly){
         History history=TREES.get(new Key(tree,false));if(history==null||history.module.get()!=origin)return null;
-        Snapshot original=snapshot(tree);if(!Arrays.equals(canonical(original.bytes()),canonical(history.current.bytes())))return null;
+        Snapshot original=snapshot(tree);if(!ControlImages.sameBytes(canonical(original.bytes()),canonical(history.current.bytes())))return null;
         Set<Module> stopped=Collections.newSetFromMap(new IdentityHashMap<>());
         for(Module module:contributors)if(module!=origin&&ModGroupBoundary.stopped(module))stopped.add(module);
         if(stopped.isEmpty())return new Object[]{tree,contributors.clone(),Boolean.FALSE,Boolean.FALSE,Boolean.FALSE};
@@ -387,7 +387,7 @@ final class ExternalCodeImages {
         try{
             byte[] restored=transform(loader,original.node().name,null,original.bytes(),true);
             if(restored==null||!failures.isEmpty())return null;
-            boolean metadataChanged=!Arrays.equals(metadata(original.bytes()),metadata(restored));
+            boolean metadataChanged=!ControlImages.sameBytes(metadata(original.bytes()),metadata(restored));
             if(bodyOnly&&metadataChanged){for(Module module:stopped)gap(module,original.node().name+":MIXIN_PREPARED_METADATA_REPLAY_PENDING");return null;}
             Encoded image=ENCODED.get(ENCODED.size()-1);Object replacement=parseTree(tree.getClass().getClassLoader(),restored);identities(replacement,image.snapshot().methods());
             Snapshot current=snapshot(replacement);History replayed=new History(origin,current);
@@ -397,7 +397,7 @@ final class ExternalCodeImages {
             for(Module module:contributors)if(!stopped.contains(module))remaining.add(module);
             ENCODED.add(new Encoded(new Ref<>(loader),loader==null,current.node().name,hash(canonical(current.bytes())),current,List.copyOf(replayed.patches)));
             return new Object[]{replacement,remaining.toArray(Module[]::new),Boolean.TRUE,metadataChanged,
-                    !Arrays.equals(mixinSchedule(original.bytes()),mixinSchedule(restored))};
+                    !ControlImages.sameBytes(mixinSchedule(original.bytes()),mixinSchedule(restored))};
         }catch(ReflectiveOperationException|RuntimeException unavailable){for(Module module:stopped)gap(module,original.node().name+":FOREIGN_MIXIN_REPLAY_FAILED:"+unavailable.getClass().getSimpleName());return null;}
         finally{if(previous==null)DISPOSITION_FAILURES.remove();else DISPOSITION_FAILURES.set(previous);}
     }
@@ -417,12 +417,12 @@ final class ExternalCodeImages {
     }
     static synchronized Module[] mixinSelection(Object tree,Module origin,Module[] contributors){
         History history=TREES.get(new Key(tree,false));if(history==null||history.module.get()!=origin)return contributors.clone();
-        Snapshot actual=snapshot(tree);if(!Arrays.equals(canonical(actual.bytes()),canonical(history.current.bytes())))return contributors.clone();
+        Snapshot actual=snapshot(tree);if(!ControlImages.sameBytes(canonical(actual.bytes()),canonical(history.current.bytes())))return contributors.clone();
         Set<Module> selected=Collections.newSetFromMap(new IdentityHashMap<>());selected.add(origin);
         for(Module contributor:contributors){
             if(contributor==origin)continue;boolean observed=false;
             for(Patch patch:history.patches)if(Arrays.asList(patch.owners()).contains(contributor)){
-                observed=true;if(!Arrays.equals(mixinSchedule(patch.before().bytes()),mixinSchedule(patch.after().bytes())))selected.add(contributor);
+                observed=true;if(!ControlImages.sameBytes(mixinSchedule(patch.before().bytes()),mixinSchedule(patch.after().bytes())))selected.add(contributor);
             }
             if(!observed)selected.add(contributor);
         }
@@ -434,7 +434,7 @@ final class ExternalCodeImages {
         if(history==null||history.module.get()!=origin)return Map.of("*",contributors.clone());
         byte[] bytes=image(tree);protect(bytes);
         Map<String,String> recorded=history.current.metadata(),current;
-        if(Arrays.equals(bytes,history.current.bytes())){
+        if(ControlImages.sameBytes(bytes,history.current.bytes())){
             validateMetadataLayout(tree,history.current.node());current=recorded;
         }else current=metadataRows(metadataNode(tree,bytes));
         if(!current.equals(recorded))return Map.of("*",contributors.clone());
@@ -608,7 +608,7 @@ final class ExternalCodeImages {
         ClassNode node=new ClassNode();node.version=Opcodes.V17;node.access=Opcodes.ACC_PUBLIC;node.name="dev/ronova/pro/FieldImage";node.superName="java/lang/Object";field.accept(node);
         ClassWriter writer=new ClassWriter(0);node.accept(writer);return writer.toByteArray();
     }
-    private static boolean sameField(FieldNode a,FieldNode b){return a!=null&&b!=null&&Arrays.equals(fieldImage(a),fieldImage(b));}
+    private static boolean sameField(FieldNode a,FieldNode b){return a!=null&&b!=null&&ControlImages.sameBytes(fieldImage(a),fieldImage(b));}
     private static Module[] join(Module[] first,Module[] second){Set<Module> result=Collections.newSetFromMap(new IdentityHashMap<>());result.addAll(Arrays.asList(first));result.addAll(Arrays.asList(second));return result.toArray(Module[]::new);}
     private static Map<String,Module[]> fieldReadOwners(Encoded image){
         Map<String,FieldNode> current=fields(image.snapshot().node());Map<String,Module[]> result=new HashMap<>();

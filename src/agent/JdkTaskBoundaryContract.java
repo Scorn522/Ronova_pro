@@ -105,15 +105,15 @@ public final class JdkTaskBoundaryContract {
     }
     public static boolean verify(String name,byte[] bytes) {
         if(!registered(name)||bytes==null)return false;
-        try {return Arrays.equals(images(name).instrumentedCanonical,canonical(bytes));}
+        try {return ControlImages.sameBytes(images(name).instrumentedCanonical,canonical(bytes));}
         catch(RuntimeException|LinkageError unavailable){return false;}
     }
     public static byte[] transform(String name,byte[] bytes) {
         if(!registered(name)||bytes==null)return null;
         try {
             Images images=images(name);byte[] observed=canonical(bytes);
-            if(Arrays.equals(images.instrumentedCanonical,observed))return null;
-            if(Arrays.equals(images.originalCanonical,observed))return images.instrumented.clone();
+            if(ControlImages.sameBytes(images.instrumentedCanonical,observed))return null;
+            if(ControlImages.sameBytes(images.originalCanonical,observed))return images.instrumented.clone();
             if(Boolean.getBoolean("ronova.pro.validation.jdkTasks")&&DIAGNOSED.add(name)) {
                 try {
                     var directory=java.nio.file.Path.of("ronova","diagnostics");java.nio.file.Files.createDirectories(directory);

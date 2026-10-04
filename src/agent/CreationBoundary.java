@@ -31,7 +31,7 @@ final class CreationBoundary {
     static Weaving recorded(byte[] bytes,ClassNode node){
         List<Observed> observed=null;synchronized(EMISSIONS){
             EMISSIONS.removeIf(entry->entry.bytes.get()==null);
-            for(int i=EMISSIONS.size()-1;i>=0;i--){Emission entry=EMISSIONS.get(i);if(entry.bytes.get()==bytes&&Arrays.equals(entry.image,bytes)){observed=entry.sites;break;}}
+            for(int i=EMISSIONS.size()-1;i>=0;i--){Emission entry=EMISSIONS.get(i);if(entry.bytes.get()==bytes&&ControlImages.sameBytes(entry.image,bytes)){observed=entry.sites;break;}}
         }
         if(observed==null)return null;List<Site> sites=new ArrayList<>();
         for(Observed position:observed){
