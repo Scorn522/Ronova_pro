@@ -122,10 +122,28 @@ final class ExternalCodeDefinitions {
     }
     private record Bound(Definition definition,Class<?> actual,Set<String> methods,ExternalCodeFlow.Image graph){}
     private record Target(ExternalCodeFlow.Image image,String method){}
-    private record Member(Class<?> actual,int access,boolean unique){}
-    private record MemberQuery(String method,boolean selection){}
-    private record SelectionQuery(String method,Member resolved){}
-    private record CallQuery(String owner,String name,String descriptor,int opcode,boolean contract,Set<ExternalReceiverFlow.Receiver> receivers){}
+    // These keys run during native Unsafe installation. Record's generated
+    // ObjectMethods uses handle getters, which would observe our own key reads.
+    private record Member(Class<?> actual,int access,boolean unique){
+        public boolean equals(Object other){return other instanceof Member key&&actual==key.actual&&access==key.access&&unique==key.unique;}
+        public int hashCode(){return (Objects.hashCode(actual)*31+access)*31+Boolean.hashCode(unique);}
+    }
+    private record MemberQuery(String method,boolean selection){
+        public boolean equals(Object other){return other instanceof MemberQuery key&&selection==key.selection&&Objects.equals(method,key.method);}
+        public int hashCode(){return Objects.hashCode(method)*31+Boolean.hashCode(selection);}
+    }
+    private record SelectionQuery(String method,Member resolved){
+        public boolean equals(Object other){return other instanceof SelectionQuery key&&Objects.equals(method,key.method)&&Objects.equals(resolved,key.resolved);}
+        public int hashCode(){return Objects.hashCode(method)*31+Objects.hashCode(resolved);}
+    }
+    private record CallQuery(String owner,String name,String descriptor,int opcode,boolean contract,Set<ExternalReceiverFlow.Receiver> receivers){
+        public boolean equals(Object other){return other instanceof CallQuery key&&opcode==key.opcode&&contract==key.contract
+                &&Objects.equals(owner,key.owner)&&Objects.equals(name,key.name)&&Objects.equals(descriptor,key.descriptor)&&Objects.equals(receivers,key.receivers);}
+        public int hashCode(){
+            int hash=Objects.hashCode(owner);hash=hash*31+Objects.hashCode(name);hash=hash*31+Objects.hashCode(descriptor);
+            hash=hash*31+opcode;hash=hash*31+Boolean.hashCode(contract);return hash*31+Objects.hashCode(receivers);
+        }
+    }
     /** Read indices live for exactly one expand call, including nested calls. */
     private static final class Resolution {
         final Map<ClassLoader,Map<String,Class<?>>> initiated=new IdentityHashMap<>();

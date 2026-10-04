@@ -1,5 +1,7 @@
 # Ronova Pro V1.5 A 批收口报告
 
+2026-10-04 22:43：b-group-48-frame-late-threads.log 的 307 秒现场确认内部 CallQuery.hashCode 经 Record ObjectMethods 的字段句柄进入 Unsafe 来源观察。CallQuery／MemberQuery／SelectionQuery、嵌套 Member 和 Receiver 的等价及哈希改用相同组件的直接字段读取。package-b-query-48.log 构建通过（22 秒），候选更新；原整组与来源场景切至 query 包继续运行，尚未取得游戏效果结果。没有据此增加 B 通过项。
+
 2026-10-04 22:36 B 前置入口后续：旧来源实例 800 秒现场仍为 ASM Field.get → Unsafe → 来源读取登记；缓存 MethodHandle 后的实际线程同样经过 Unsafe，因此撤回该尝试。最终将 ASM 引用字段与内部控制容器 backing 捕获接到已有 native heapReadField，保留 Agent／控制调用者核对及实际字段读取，未取消业务来源观察。补包第一次因局部括号编译失败，修正后统一构建通过（23 秒）；b-control-read-48.log 的实际 Agent、Netty、来源根／控制表／字段门数组拒绝外部写入及原适配器检查通过。
 
 随后实际现场推进至 JRT 层级读取；ControlClassWriter 的 bootstrap 分支补用现有 initiated 查询，命中真实 Class 后直接读层级，未命中仍走原资源路径。最终 package-b-frame-48.log 构建通过（23 秒），候选对应该包；整组和来源两份 frame 实例正在运行，没有游戏效果 PASS。所有较旧实例均为定位到具体热点后切包停止，不记作通过。保存链生产／同存档重启、引用清理及完整任务结清仍待运行结果。

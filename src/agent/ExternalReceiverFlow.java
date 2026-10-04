@@ -8,7 +8,10 @@ import jdk.internal.org.objectweb.asm.tree.analysis.*;
 
 /** Keeps exact construction types separate from declared reference types in the original business graph. */
 final class ExternalReceiverFlow {
-    record Receiver(Class<?> actual,boolean self){}
+    record Receiver(Class<?> actual,boolean self){
+        public boolean equals(Object other){return other instanceof Receiver receiver&&actual==receiver.actual&&self==receiver.self;}
+        public int hashCode(){return Objects.hashCode(actual)*31+Boolean.hashCode(self);}
+    }
     private static final class ExactValue implements Value {
         final BasicValue value;final Set<Receiver> receivers;final boolean unknown;
         ExactValue(BasicValue value,Set<Receiver> receivers,boolean unknown){this.value=value;this.receivers=Set.copyOf(receivers);this.unknown=unknown;}

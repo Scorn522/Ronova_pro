@@ -1,5 +1,7 @@
 # Ronova Pro 当前进度与 A 批状态
 
+2026-10-04 22:43 B 查询键补修：前置安装 307 秒现场位于 CallQuery 自动 hashCode → MethodHandle 字段读取 → Unsafe 来源观察。解析查询键及其嵌套 Member／Receiver 改为直接字段 equals／hashCode，保留全部组件、null 与集合等价语义；不缓存来源结论。完整构建通过（22 秒），候选更新为 query 包。mod-group-dynamic-b48-query 与 b-source-abi48-query 正在真实 prelaunch 下运行，仍未到游戏效果 PASS；B 尚未完成。
+
 2026-10-04 22:36 B 启动继续修补：真实前置入口的 ASM 控制映像反射读取会再次进入 Unsafe 来源观察，旧来源场景运行到 800 秒仍在这一捕获链内，未到游戏。仅缓存 MethodHandle 的尝试仍触发同一路径，已撤回。最终复用已有 native heapReadField，供认证 Agent 的 ASM 引用字段及内部控制容器 backing 捕获使用，保留实际 holder／声明类／字段名／类型核对与完整保护遍历；没有给业务代码新增观察豁免。bootstrap 类层级解析也接上已有的已加载类查询，未命中仍保留原资源路径。
 
 上述完整补包构建通过（23 秒），控制读取修改后的既有 B 适配器检查通过；最终类层级解析修改构建通过（23 秒）。原实例现场和一次括号编译失败保留在既有 evidence-20261002。候选更新为 frame 包。当前 mod-group-dynamic-b48-frame、b-source-abi48-frame 使用真实 prelaunch 运行，已跨过内部 ASM 反射读取阶段，仍未获得 B 游戏内效果结果；B 完成状态不变。
