@@ -714,8 +714,8 @@ final class ExternalCodeImages {
             else if(value instanceof Collection<?> collection){for(Object entry:collection)if(entry!=null)pending.add(entry);}
             else if(value instanceof Object[] array){for(Object entry:array)if(entry!=null)pending.add(entry);}
             else if(value instanceof ExternalCodeFlow.ControlChange change){pending.add(change.alternatives());pending.add(change.owners());}
-            else if(value.getClass().getName().startsWith("jdk.internal.org.objectweb.asm."))for(Field field:IMAGE_FIELDS.get(value.getClass()))
-                try{Object child=field.get(value);if(child!=null)pending.add(child);}catch(IllegalAccessException failure){throw new IllegalStateException("EXTERNAL_IMAGE_CONTROL_CAPTURE_FAILED",failure);}
+            else if(value.getClass().getName().startsWith("jdk.internal.org.objectweb.asm."))
+                for(Object child:RecoveryAgent.imageControlFields(value,IMAGE_FIELDS.get(value.getClass())))if(child!=null)pending.add(child);
             if(value instanceof AbstractInsnNode instruction){if(instruction.getNext()!=null)pending.add(instruction.getNext());if(instruction.getPrevious()!=null)pending.add(instruction.getPrevious());}
             if(value instanceof InsnList instructions)for(AbstractInsnNode instruction:instructions.toArray())pending.add(instruction);
         }

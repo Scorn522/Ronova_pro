@@ -1,5 +1,9 @@
 # Ronova Pro 当前进度与 A 批状态
 
+2026-10-04 22:36 B 启动继续修补：真实前置入口的 ASM 控制映像反射读取会再次进入 Unsafe 来源观察，旧来源场景运行到 800 秒仍在这一捕获链内，未到游戏。仅缓存 MethodHandle 的尝试仍触发同一路径，已撤回。最终复用已有 native heapReadField，供认证 Agent 的 ASM 引用字段及内部控制容器 backing 捕获使用，保留实际 holder／声明类／字段名／类型核对与完整保护遍历；没有给业务代码新增观察豁免。bootstrap 类层级解析也接上已有的已加载类查询，未命中仍保留原资源路径。
+
+上述完整补包构建通过（23 秒），控制读取修改后的既有 B 适配器检查通过；最终类层级解析修改构建通过（23 秒）。原实例现场和一次括号编译失败保留在既有 evidence-20261002。候选更新为 frame 包。当前 mod-group-dynamic-b48-frame、b-source-abi48-frame 使用真实 prelaunch 运行，已跨过内部 ASM 反射读取阶段，仍未获得 B 游戏内效果结果；B 完成状态不变。
+
 2026-10-04 晚间 B 收尾：B 尚未通过。早前引用、保存链和来源三个场景最终都在启动网络时遇到 Netty `write(Object, boolean, ChannelPromise): void` 的 `VerifyError`，没有进入效果验证；进程返回 0 不能计为通过。现已将拒绝分支的错误 ARETURN 改为 RETURN，实际 Netty 类在已安装 Agent 下以 `-Xverify:all` 加载通过。
 
 同批补完：控制弱表回收按实际节点直接摘链；字段门改为分桶弱身份表并保护真实根数组／桶数组；Class.reflectionData 只允许实际 JDK 缓存 CAS，其他控制镜像写入仍拒绝；内部字节快照按字节比较以消除 Unsafe 读回重入；资源布局方法与 ASM 引用字段查找按实际类缓存，仍读取实际字段／VM 布局。隐藏类来源比较只剔除实际声明模块的重复项，外部来源及 UNKNOWN 差异仍要求刷新，不能据此宣称任意隐藏类重转换已支持。

@@ -14,7 +14,7 @@ final class ControlClassWriter extends ClassWriter {
     }
     private Shape shape(String name) {
         return shapes.computeIfAbsent(name,key->{
-            Class<?> actual=loader==null?null:ExternalCodeDefinitions.initiated(loader,key);
+            Class<?> actual=ExternalCodeDefinitions.initiated(loader,key);
             if(actual!=null)return shape(actual);
             try(InputStream in=loader==null?ClassLoader.getSystemResourceAsStream(key+".class"):loader.getResourceAsStream(key+".class")) {
                 if(in==null){

@@ -1,5 +1,9 @@
 # Ronova Pro V1.5 A 批收口报告
 
+2026-10-04 22:36 B 前置入口后续：旧来源实例 800 秒现场仍为 ASM Field.get → Unsafe → 来源读取登记；缓存 MethodHandle 后的实际线程同样经过 Unsafe，因此撤回该尝试。最终将 ASM 引用字段与内部控制容器 backing 捕获接到已有 native heapReadField，保留 Agent／控制调用者核对及实际字段读取，未取消业务来源观察。补包第一次因局部括号编译失败，修正后统一构建通过（23 秒）；b-control-read-48.log 的实际 Agent、Netty、来源根／控制表／字段门数组拒绝外部写入及原适配器检查通过。
+
+随后实际现场推进至 JRT 层级读取；ControlClassWriter 的 bootstrap 分支补用现有 initiated 查询，命中真实 Class 后直接读层级，未命中仍走原资源路径。最终 package-b-frame-48.log 构建通过（23 秒），候选对应该包；整组和来源两份 frame 实例正在运行，没有游戏效果 PASS。所有较旧实例均为定位到具体热点后切包停止，不记作通过。保存链生产／同存档重启、引用清理及完整任务结清仍待运行结果。
+
 2026-10-04 晚间 B 收尾（未通过）：此前 indexed 引用、保存链及来源场景最终均因 Netty void write 方法插入 ARETURN 而触发 VerifyError；没有夹具效果结果，SERVER_EXIT=0 不表示通过。本批已修正 RETURN，统一构建通过（23 秒），实际 Agent 下以 -Xverify:all 加载 Netty 类通过。既有 b-adapter-linkage 同时确认真实字段门根／桶数组拒绝外部写入，原来源目录／控制表和对象适配器、字符流入口保持通过，见 evidence-20261002/b-startup-netty-controls-48.log。
 
 安装现场确认并修补两处前置入口问题：控制类镜像上的合法 Class.reflectionData CAS 被拒导致 JDK 重试；内部字节快照的 Arrays.equals 优化读取再次进入 Unsafe 观察。现仅放行真实 JDK 调用链及准确 reflectionData 槽，并改用内部逐字节比较。控制表直接摘除队列节点、字段门分桶弱身份查找、资源布局及 ASM 字段缓存一并编入，保留实际身份、锁和来源判断。隐藏类仅因声明模块重复项发生的来源差异不再要求重转换，真正外部来源改变仍保留未决。

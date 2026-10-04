@@ -1232,6 +1232,31 @@ public final class CodeSourceBridge {
         }
     }
     public static void codeControls(Object[] objects){requireAgent();protectControls(objects);}
+    public static Object[] imageControlFields(Object holder,java.lang.reflect.Field[] fields){
+        requireAgent();Object[] values=new Object[fields.length];
+        for(int i=0;i<fields.length;i++){
+            var field=fields[i];Class<?> owner=field.getDeclaringClass();
+            if(owner.getClassLoader()!=null||!owner.getName().startsWith("jdk.internal.org.objectweb.asm.")
+                    ||java.lang.reflect.Modifier.isStatic(field.getModifiers())||field.getType().isPrimitive()||!owner.isInstance(holder))
+                throw new IllegalArgumentException("ACTUAL_ASM_REFERENCE_FIELD_REQUIRED");
+            // Read our metadata through the existing exact native field reader.
+            // A reflective Unsafe getter would observe this traversal itself.
+            values[i]=controlField(field,holder);
+        }
+        return values;
+    }
+    static Object controlField(java.lang.reflect.Field field,Object holder){
+        Class<?> caller=AUTHORITY.getCallerClass();
+        if(caller!=CodeSourceBridge.class&&caller!=TaskBridge.class)throw new SecurityException("ACTUAL_CONTROL_FIELD_READER_REQUIRED");
+        if(NativeControl.available()){
+            Object receiver=java.lang.reflect.Modifier.isStatic(field.getModifiers())?field.getDeclaringClass():holder;
+            Object[] read=NativeControl.heapReadField(receiver,field.getDeclaringClass(),field.getName(),field.getType().descriptorString());
+            if(read==null||read.length!=1)throw new IllegalStateException("CONTROL_FIELD_UNAVAILABLE:"+field.getName());
+            return read[0];
+        }
+        try{return field.get(holder);}
+        catch(IllegalAccessException failure){throw new IllegalStateException("CONTROL_FIELD_UNAVAILABLE:"+field.getName(),failure);}
+    }
     static void resourceLayoutControls(Object method){
         if(AUTHORITY.getCallerClass()!=ResourceBridge.class)throw new SecurityException("CONTROL_REGISTRATION_OWNER");
         protectOne(method);
@@ -1256,7 +1281,7 @@ public final class CodeSourceBridge {
             for(Class<?> type=value.getClass();type!=null&&type!=Object.class;type=type.getSuperclass())for(var field:type.getDeclaredFields())
                 if(!java.lang.reflect.Modifier.isStatic(field.getModifiers())&&(field.getType().isArray()||Map.class.isAssignableFrom(field.getType())||Collection.class.isAssignableFrom(field.getType()))){
                     if(!field.trySetAccessible())throw new IllegalStateException("CONTROL_BACKING_FIELD_UNAVAILABLE:"+field.getName());
-                    try{Object child=field.get(value);if(child!=null)pending.add(child);}catch(IllegalAccessException unavailable){throw new IllegalStateException("CONTROL_BACKING_UNAVAILABLE",unavailable);}
+                    Object child=controlField(field,value);if(child!=null)pending.add(child);
                 }
         }
         // Keep registration after successful discovery. The registry already

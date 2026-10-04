@@ -18,6 +18,7 @@ public final class RecoveryAgent {
 
     private static volatile Instrumentation instrumentation;
     private static Class<?> bridge;
+    private static java.lang.reflect.Method imageControlReader;
     private static Class<?> networkBridge;
     private static Class<?> clientBridge;
     private static final ControlImages controlImages=new ControlImages();
@@ -305,6 +306,8 @@ public final class RecoveryAgent {
             bridge.getMethod("registerAgentControls",Object[].class).invoke(null,(Object)clientControls);
             codeSourceBridge=Class.forName("dev.ronova.pro.bootstrap.CodeSourceBridge",true,null);
             codeSourceBridge.getMethod("install",Class.class).invoke(null,RecoveryAgent.class);
+            imageControlReader=codeSourceBridge.getMethod("imageControlFields",Object.class,java.lang.reflect.Field[].class);
+            ControlImages.protect(imageControlReader);
             Set<ModuleLayer> sourceLayers=Collections.newSetFromMap(new IdentityHashMap<>());
             for(Class<?> loaded:loadedClasses())if(loaded.getModule().getLayer()!=null)sourceLayers.add(loaded.getModule().getLayer());
             for(ModuleLayer layer:sourceLayers)codeSourceBridge.getMethod("seedLayer",ModuleLayer.class).invoke(null,layer);
@@ -612,6 +615,15 @@ public final class RecoveryAgent {
         if(caller.getNestHost()!=ExternalCodeImages.class)throw new SecurityException("ACTUAL_EXTERNAL_CODE_LEDGER_REQUIRED");
         try{codeSourceBridge.getMethod("codeControls",Object[].class).invoke(null,(Object)objects);}
         catch(ReflectiveOperationException failure){throw new IllegalStateException("EXTERNAL_CODE_LEDGER_PROTECTION_FAILED",failure);}
+    }
+    static Object[] imageControlFields(Object holder,java.lang.reflect.Field[] fields){
+        if(StackWalker.getInstance(StackWalker.Option.RETAIN_CLASS_REFERENCE).getCallerClass()!=ExternalCodeImages.class)
+            throw new SecurityException("ACTUAL_EXTERNAL_CODE_LEDGER_REQUIRED");
+        try{return (Object[])imageControlReader.invoke(null,holder,fields);}
+        catch(java.lang.reflect.InvocationTargetException failure){
+            Throwable cause=failure.getCause();if(cause instanceof RuntimeException error)throw error;if(cause instanceof Error error)throw error;
+            throw new IllegalStateException("EXTERNAL_IMAGE_CONTROL_CAPTURE_FAILED",cause);
+        }catch(ReflectiveOperationException failure){throw new IllegalStateException("EXTERNAL_IMAGE_CONTROL_CAPTURE_FAILED",failure);}
     }
     static Object externalExecutionPlan(Object[][] rows){
         if(StackWalker.getInstance(StackWalker.Option.RETAIN_CLASS_REFERENCE).getCallerClass()!=ExternalCodeRuntime.class)throw new SecurityException("ACTUAL_EXTERNAL_CODE_WEAVER_REQUIRED");
