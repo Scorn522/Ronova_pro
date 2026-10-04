@@ -98,6 +98,6 @@ final class ExternalCodeRuntime {
         // Suppression replaced the original business body; it cannot retain that body's returns.
         boolean suppressed=ModGroupBoundary.stopped(source.declaration());
         ExternalCodeFlow.Image semantic=suppressed?ExternalCodeImages.acceptedExecution(result,rows):source.image();
-        ExternalCodeDefinitions.accepted(loader,name,actual,result,rows,semantic,suppressed?rows:source.owners(),source.fields(),source.values(),source.hidden(),creationSites,execution);
+        ExternalCodeDefinitions.accepted(loader,name,actual,source.declaration(),result,rows,semantic,suppressed?rows:source.owners(),source.fields(),source.values(),source.hidden(),creationSites,execution);
     }
 }

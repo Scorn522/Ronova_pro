@@ -80,6 +80,9 @@ public final class RecoveryAgent {
             bridge=Class.forName("dev.ronova.pro.bootstrap.TaskBridge",true,null);
             if(!Integer.valueOf(48).equals(bridge.getMethod("abiVersion").invoke(null)))throw new IllegalStateException("TASK_BRIDGE_ABI_MISMATCH");
             Class.forName("dev.ronova.pro.bootstrap.SourceMapBridge",true,null);
+            // Default-Map guards test UUID keys while class-loading maps are
+            // active. Resolve that type before publishing the guarded methods.
+            Class.forName("java.util.UUID",false,null);
             // A guarded Map operation must not first define its own frame while
             // libinstrument is filling that frame's class bytes through JNI.
             for(String helper:List.of("Key","Bucket","OwnerRef","Gate","Scope","Frame","ConcurrentFrame","Refused"))
@@ -141,6 +144,11 @@ public final class RecoveryAgent {
                     if(source.present()||source.image()!=null)result=ExternalCodeRuntime.finish(loader,name,type,source,result);
                     recordDefinition(type,result==null?bytes:result);return result;
                     }catch(RuntimeException|LinkageError failure){
+                        if(controlFailure==null){
+                            controlFailure=String.valueOf(name)+":"+failure.getClass().getSimpleName();
+                            System.err.println("RONOVA_CONTROL_TRANSFORM_FAILED:"+controlFailure);
+                            if(Boolean.getBoolean("ronova.pro.validation"))failure.printStackTrace(System.err);
+                        }
                         if(origin!=null){ModGroupBoundary.failed(origin,String.valueOf(name),failure);return new byte[]{0,0,0,0};}
                         throw failure;
                     }

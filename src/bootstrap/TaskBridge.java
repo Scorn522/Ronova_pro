@@ -1642,7 +1642,7 @@ public final class TaskBridge {
     }
     /** Only registered exact index maps and callback-free UUID/int keys can take this default-Map path. */
     public static Object deniedIndexCurrent(Object container,Object key,Object proposed) {
-        Guards snapshot=guards;
+        Guards snapshot=guards;if(snapshot==null)return null;
         if(!(key instanceof Integer||key instanceof Long||key instanceof java.util.UUID)||!indexDenied(snapshot,container,null,null))return null;
         if(!(container instanceof java.util.Map<?,?> map))return null;
         Object current=map.get(key);

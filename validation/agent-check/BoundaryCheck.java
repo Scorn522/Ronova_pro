@@ -504,6 +504,13 @@ public final class BoundaryCheck {
         catch(SecurityException expected){require(true,"foreign handle image batch entry refused");}
         catch(Throwable failure){throw new AssertionError("foreign handle image batch entry failed for another reason",failure);}
         Field controls=code.getDeclaredField("CONTROLS");controls.setAccessible(true);Object registry=controls.get(null);
+        Method registerBatch=registry.getClass().getDeclaredMethod("addAll",Object[].class);registerBatch.setAccessible(true);
+        try{registerBatch.invoke(registry,(Object)new Object[]{new Object()});throw new AssertionError("foreign control registration admitted");}
+        catch(InvocationTargetException expected){require(expected.getCause() instanceof SecurityException,"foreign reflective control registration refused");}
+        var foreignRegister=MethodHandles.lookup().unreflect(registerBatch).asType(java.lang.invoke.MethodType.methodType(Object.class,Object.class,Object[].class));
+        try{Object ignored=(Object)foreignRegister.invokeExact(registry,new Object[]{new Object()});throw new AssertionError("foreign handle control registration admitted");}
+        catch(SecurityException expected){require(true,"foreign handle control registration refused");}
+        catch(Throwable failure){throw new AssertionError("foreign handle control registration failed for another reason",failure);}
         Field table=registry.getClass().getDeclaredField("table");table.setAccessible(true);
         controlArrayWriteRefused(table.get(registry),"actual control table");
         Class<?> tasks=Class.forName("dev.ronova.pro.bootstrap.TaskBridge",false,null);

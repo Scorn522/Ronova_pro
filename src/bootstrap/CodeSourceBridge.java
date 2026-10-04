@@ -149,22 +149,31 @@ public final class CodeSourceBridge {
         boolean executionMap(Object value){ControlKey key=find(value);return key!=null&&key.executionMap;}
         boolean fieldGate(Object value){ControlKey key=find(value);return key!=null&&key.fieldGate;}
         ControlKey add(Object value){
-            writer(AUTHORITY.getCallerClass());
-            ControlKey known=find(value);if(known!=null)return known;
-            if(size>=table.length-(table.length>>>2)&&table.length<(1<<30)){
-                ControlKey[] prior=table,next=new ControlKey[prior.length*2];
-                for(ControlKey first:prior)for(ControlKey key=first;key!=null;){
-                    ControlKey following=key.next;int at=bucket(key.hash,next.length);
-                    key.previous=null;key.next=next[at];if(key.next!=null)key.next.previous=key;next[at]=key;key=following;
+            // Authenticate before delegating: a foreign reflective call must
+            // not acquire the registry's own caller identity through this wrapper.
+            writer(AUTHORITY.getCallerClass());return addAll(new Object[]{value});
+        }
+        ControlKey addAll(Object[] values){
+            writer(AUTHORITY.getCallerClass());ControlKey result=null;
+            for(Object value:values){
+                if(value==null)continue;
+                ControlKey known=find(value);if(known!=null){result=known;continue;}
+                if(size>=table.length-(table.length>>>2)&&table.length<(1<<30)){
+                    ControlKey[] prior=table,next=new ControlKey[prior.length*2];
+                    for(ControlKey first:prior)for(ControlKey key=first;key!=null;){
+                        ControlKey following=key.next;int at=bucket(key.hash,next.length);
+                        key.previous=null;key.next=next[at];if(key.next!=null)key.next.previous=key;next[at]=key;key=following;
+                    }
+                    table=next;
+                    // Every new backing keeps its own weak protection entry;
+                    // old tables stay protected while held, without retention.
+                    int at=bucket(System.identityHashCode(next),next.length);
+                    next[at]=new ControlKey(next,next[at]);size++;
                 }
-                table=next;
-                // Every new backing keeps its own weak protection entry; old
-                // tables remain protected while held and do not stay alive here.
-                int at=bucket(System.identityHashCode(next),next.length);
-                next[at]=new ControlKey(next,next[at]);size++;
+                int at=bucket(System.identityHashCode(value),table.length);
+                result=new ControlKey(value,table[at]);table[at]=result;size++;
             }
-            int at=bucket(System.identityHashCode(value),table.length);
-            ControlKey added=new ControlKey(value,table[at]);table[at]=added;size++;return added;
+            return result;
         }
         void reap(ControlKey first){
             writer(AUTHORITY.getCallerClass());
@@ -498,7 +507,7 @@ public final class CodeSourceBridge {
     private static void protect(Object... objects){
         synchronized(CONTROLS){
             reapControls();
-            for(Object value:objects)if(value!=null)CONTROLS.add(value);
+            CONTROLS.addAll(objects);
         }
     }
     private static void protectOne(Object object){
@@ -1322,8 +1331,9 @@ public final class CodeSourceBridge {
         // needed, and every actual discovered backing is still registered.
         synchronized(CONTROLS){
             reapControls();
-            for(Object object:roots)if(object!=null&&!(object instanceof Map<?,?>||object instanceof Collection<?>))CONTROLS.add(object);
-            if(found!=null)for(Object value:found)CONTROLS.add(value);
+            for(int i=0;i<roots.length;i++)if(roots[i] instanceof Map<?,?>||roots[i] instanceof Collection<?>)roots[i]=null;
+            CONTROLS.addAll(roots);
+            if(found!=null)CONTROLS.addAll(found.toArray());
         }
     }
     static void controlBacking(Object parent,Object next){

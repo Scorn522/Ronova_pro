@@ -1,5 +1,12 @@
 # Ronova Pro V1.5 A 批收口报告
 
+2026-10-05 B 启动声明与控制登记修复：真实 imagebatch 服务端完成 Agent 安装后，Forge JAR 扫描仍反复分析尚未绑定 Class 的 JDK 映像。现保存变换时已观察到的实际声明 Module；仅对 bootstrap 且声明确属 boot layer、没有直接／控制来源、当前没有活动生产声明的未绑定映像沿用空来源判断。其他加载器、未知声明、逻辑来源、隐藏映像和已有来源仍保留原完整查询；Class 绑定后仍读取实际逻辑 Module，不缓存许可或来源结论。控制登记改为按批核对实际写入者，每个对象继续用原弱身份索引、扩容及回收算法。
+
+初次实际 Agent 检查失败：默认 Map 守卫首次解析 UUID 时循环加载，导致反射／Unsafe／句柄保护没有装上。现于发布守卫前解析 UUID 类型，尚无策略时直接返回原空结果；变换准备／发布阶段异常也写入已有失败状态，防止 Instrumentation 忽略异常而漏报。修复后完整构建通过（19 秒），同一实际 Agent 检查通过：反射保护 9 项、Unsafe、句柄 30 项、批量读取／登记反射与 MethodHandle 越权拒绝、原控制对象改写拒绝、B 适配与直接缓冲传输均有实际结果。初次失败原始现场保留本地。
+
+当前分发候选为 bootdeclaration（Java 48／Native 42）。imagebatch 游戏／启动器／夹具已核对并关闭；只复跑 mod-group-client-b48-bootdeclaration-20261005 这一份原有真实 Forge 双端效果测试。尚未进入世界或获得 B 游戏效果 PASS，B 未完成。原始日志和存档仅保留本地 .work。
+
+
 2026-10-05 B 实机测试接续：此前五份后台游戏、启动器和夹具已按用户要求全部关闭。用户明确要求继续实际测试后，仅启动现有客户端／服务端整组夹具。fieldlayout 的现场仍停在 Agent 安装，内部 ASM 节点逐个跨反射入口并重复检查实际调用者；现将每批最多 256 个节点的读取合并，逐字段保留实际 bootstrap ASM 声明 Class、非静态引用类型、holder 身份核对和当前值读取，完整追踪容器、指令前后链接及 InsnList，不缓存来源结论。
 
 imagebatch 完整构建通过（23 秒），原实际 Agent 下 B 适配、外部反射／MethodHandle 批量读取入口拒绝、控制对象改写拒绝及直接缓冲传输通过。当前分发候选为 imagebatch（Java 48／Native 42）。旧 fieldlayout 双端测试进程已关闭；mod-group-client-b48-imagebatch-20261005 正在实际 prelaunch 下运行，目前服务端仍在安装阶段，尚无 B 游戏效果 PASS，B 未完成。原始日志只保留本地 .work。

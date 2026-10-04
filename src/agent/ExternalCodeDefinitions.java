@@ -89,15 +89,15 @@ final class ExternalCodeDefinitions {
         public boolean enqueue(){return writer()&&super.enqueue();}
     }
     private static final class Definition {
-        final Ref<ClassLoader> loader;final boolean bootstrap,hidden,boundHidden;final String name;
+        final Ref<ClassLoader> loader;final Ref<Module> declaration;final boolean bootstrap,hidden,boundHidden;final String name;
         final ExternalCodeFlow.Image analysis;final Map<String,Integer> declarations;final int declarationCount;
         final Map<String,Module[][]> applied;final Set<String> references;final byte[] bytes;final Ref<byte[]> emitted;volatile Ref<Class<?>> actual;
         final Map<String,Module[]> fields;final Object[][] values;
         final String[] creationSites;
         final Object execution;
         final int concreteMethods;final boolean contributors;
-        Definition(ClassLoader loader,String name,Class<?> actual,ExternalCodeFlow.Image image,ExternalCodeFlow.Image analysis,Map<String,Module[][]> applied,byte[] bytes,Map<String,Module[]> fields,Object[][] values,boolean hidden,String[] creationSites,Object execution){
-            this.loader=new Ref<>(loader);this.bootstrap=loader==null;this.hidden=hidden;this.boundHidden=hidden&&actual!=null;this.name=name;this.actual=new Ref<>(actual);this.analysis=analysis;this.applied=applied;this.emitted=new Ref<>(bytes);this.bytes=bytes.clone();
+        Definition(ClassLoader loader,String name,Class<?> actual,Module declaration,ExternalCodeFlow.Image image,ExternalCodeFlow.Image analysis,Map<String,Module[][]> applied,byte[] bytes,Map<String,Module[]> fields,Object[][] values,boolean hidden,String[] creationSites,Object execution){
+            this.loader=new Ref<>(loader);this.declaration=new Ref<>(declaration);this.bootstrap=loader==null;this.hidden=hidden;this.boundHidden=hidden&&actual!=null;this.name=name;this.actual=new Ref<>(actual);this.analysis=analysis;this.applied=applied;this.emitted=new Ref<>(bytes);this.bytes=bytes.clone();
             // The emitted tree is used only for method declarations. Retain
             // those exact headers, not a second complete protected instruction
             // graph beside the semantic graph used for source propagation.
@@ -113,7 +113,7 @@ final class ExternalCodeDefinitions {
             Set<String> referenced=new LinkedHashSet<>();
             for(MethodNode method:analysis.node().methods)for(AbstractInsnNode instruction:method.instructions.toArray())if(instruction instanceof MethodInsnNode call)referenced.add(call.owner);
             this.references=Set.copyOf(referenced);
-            List<Object> controls=new ArrayList<>(Arrays.asList(DIRECTORY,WORKER,LOADED,COMPARE,this,this.loader,this.actual,this.bytes,this.emitted,this.applied,this.references,this.fields,this.values,this.creationSites,this.declarations));
+            List<Object> controls=new ArrayList<>(Arrays.asList(DIRECTORY,WORKER,LOADED,COMPARE,this,this.loader,this.declaration,this.actual,this.bytes,this.emitted,this.applied,this.references,this.fields,this.values,this.creationSites,this.declarations));
             for(Module[][] rows:this.applied.values()){controls.add(rows);Collections.addAll(controls,rows);}
             for(Module[] owners:this.fields.values())controls.add(owners);for(Object[] row:this.values){controls.add(row);controls.add(row[3]);}
             ControlImages.protect(controls.toArray());ExternalCodeImages.protectExecution(analysis,this.declarations);
@@ -172,12 +172,12 @@ final class ExternalCodeDefinitions {
             throw new IllegalStateException("EXTERNAL_DEFINITION_DIRECTORY_CAS",cause);
         }catch(ReflectiveOperationException failure){throw new IllegalStateException("EXTERNAL_DEFINITION_DIRECTORY_CAS",failure);}
     }
-    static void accepted(ClassLoader loader,String name,Class<?> actual,byte[] bytes,Map<String,Module[][]> rows,ExternalCodeFlow.Image semantic,Map<String,Module[][]> applied,Map<String,Module[]> fields,Object[][] values,boolean hidden,String[] creationSites,Object execution){
+    static void accepted(ClassLoader loader,String name,Class<?> actual,Module declaration,byte[] bytes,Map<String,Module[][]> rows,ExternalCodeFlow.Image semantic,Map<String,Module[][]> applied,Map<String,Module[]> fields,Object[][] values,boolean hidden,String[] creationSites,Object execution){
         if(name==null)return;
         ExternalCodeFlow.Image image=ExternalCodeImages.acceptedExecution(bytes,rows);
         if(!image.node().name.equals(name))throw new IllegalStateException("EXTERNAL_DEFINITION_IMAGE_NAME_CHANGED");
         if(semantic==null||!semantic.node().name.equals(name))throw new IllegalStateException("EXTERNAL_DEFINITION_SEMANTIC_IMAGE_CHANGED");
-        Definition replacement=new Definition(loader,name,actual,image,semantic,applied,bytes,fields,values,hidden,creationSites,execution);
+        Definition replacement=new Definition(loader,name,actual,declaration,image,semantic,applied,bytes,fields,values,hidden,creationSites,execution);
         publish(replacement,true);
     }
     private static Directory directory(List<Definition> definitions,List<Ref<Class<?>>> changes,List<Ref<Class<?>>> continuing,List<Refresh> active){
@@ -215,7 +215,7 @@ final class ExternalCodeDefinitions {
                 jdk.internal.org.objectweb.asm.ClassReader.SKIP_CODE|jdk.internal.org.objectweb.asm.ClassReader.SKIP_DEBUG|jdk.internal.org.objectweb.asm.ClassReader.SKIP_FRAMES);
         ExternalCodeFlow.Image image=new ExternalCodeFlow.Image(new Object(),header,Map.of(),Map.of());
         ExternalCodeFlow.Image analysis=new ExternalCodeFlow.Image(new Object(),emitted.analysis.node(),emitted.analysis.rows(),emitted.analysis.comparisons());
-        Definition accepted=new Definition(actual.getClassLoader(),emitted.name,actual,image,analysis,emitted.applied,emitted.bytes,emitted.fields,emitted.values,true,emitted.creationSites,emitted.execution);
+        Definition accepted=new Definition(actual.getClassLoader(),emitted.name,actual,RecoveryAgent.logicalModule(actual),image,analysis,emitted.applied,emitted.bytes,emitted.fields,emitted.values,true,emitted.creationSites,emitted.execution);
         RecoveryAgent.bindExternalDefinition(actual,bytes,accepted.applied.keySet().toArray(String[]::new),accepted.fields,accepted.values,accepted.creationSites);
         if(publish(accepted,false))changed(actual);
     }
@@ -434,8 +434,15 @@ final class ExternalCodeDefinitions {
             Class<?> actual=definition.actual.get();
             if(actual==null){
                 // Unbound hidden images are not candidates in DefinitionIndex.
-                // An ordinary image may acquire its real Class during expansion.
-                if(!definition.hidden)return true;
+                // A bootstrap image already has the actual Module observed by
+                // the transformer, even before its ClassPrepare callback. Only
+                // boot-layer declarations can supply this empty-seed proof;
+                // other loaders and unknown/logical origins stay conservative.
+                if(!definition.hidden){
+                    Module declaration=definition.declaration.get();
+                    if(!definition.bootstrap||declaration==null||declaration.getLayer()!=ModuleLayer.boot()
+                            ||RecoveryAgent.producerModule(declaration)&&!ModGroupBoundary.stopped(declaration))return true;
+                }
                 continue;
             }
             if(observed.add(actual)){
