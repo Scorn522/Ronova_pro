@@ -17,6 +17,16 @@ public final class ControlBridge {
     private static volatile Field transformerField;
     private static volatile Method definitionsChanged;
     private static volatile boolean installed;
+    // Only immutable Class loader/name/ProtectionDomain facts are cached.
+    // Every operation still selects its actual current writer from the stack.
+    private static final ClassValue<Boolean> AGENT_WRITERS=new ClassValue<>(){
+        @Override protected Boolean computeValue(Class<?> caller){
+            try{
+                Class<?> agent=Class.forName("dev.ronova.pro.agent.RecoveryAgent",false,ClassLoader.getSystemClassLoader());
+                return Objects.equals(caller.getProtectionDomain().getCodeSource(),agent.getProtectionDomain().getCodeSource());
+            }catch(ClassNotFoundException missing){return false;}
+        }
+    };
     private ControlBridge() { }
     public static int abiVersion(){return 49;}
     public static long arrayRevision(Object value){if(!recoveryWriter())throw new SecurityException("RECOVERY_ARRAY_READER_REQUIRED");return CodeSourceBridge.executionArrayRevision(value);}
@@ -199,21 +209,22 @@ public final class ControlBridge {
     static final class ControlWriterCaller implements java.util.function.Function<java.util.stream.Stream<StackWalker.StackFrame>,Class<?>> {
         public Class<?> apply(java.util.stream.Stream<StackWalker.StackFrame> frames){
             var cursor=frames.iterator();while(cursor.hasNext()){
-                var frame=cursor.next();Class<?> type=frame.getDeclaringClass();String name=type.getName();boolean selected;
-                if(type==TaskBridge.class||type==ControlBridge.class||name.startsWith("dev.ronova.pro.bootstrap.TaskBridge$")||name.startsWith("dev.ronova.pro.bootstrap.ControlBridge$")){
-                    String method=frame.getMethodName();
-                    selected=!EXTERNAL_GUARD_ENTRIES.contains(method)
-                            &&!(name.equals("dev.ronova.pro.bootstrap.ControlBridge$ControlRef")&&(method.equals("clear")||method.equals("enqueue")));
-                }else if(type==BackingBridge.class)selected=frame.getMethodName().equals("readUnsafe");
-                else if(type==ResourceBridge.class){
-                    String method=frame.getMethodName();selected=!(method.equals("mutationAllowed")||method.equals("critical")||method.equals("fieldMutationAllowed")||method.equals("unsafeMutationAllowed"));
-                }else if(type==SourceMapBridge.class){
-                    String method=frame.getMethodName();selected=!(method.equals("valueAllowed")||method.equals("checkIncoming")||method.equals("internal")||method.equals("changed"));
-                }
-                else selected=!name.startsWith("java.")&&!name.startsWith("jdk.")&&!name.startsWith("sun.");
-                if(selected)return type;
+                var frame=cursor.next();Class<?> type=frame.getDeclaringClass();
+                if(controlWriterFrame(type,frame.getMethodName()))return type;
             }return null;
         }
+    }
+    // Shared by the Java fallback and the live JVMTI frame reader.
+    static boolean controlWriterFrame(Class<?> type,String method){
+        String name=type.getName();
+        if(type==NativeControl.class&&(method.equals("controlWriterCaller")||method.equals("controlWriter0")))return false;
+        if(type==TaskBridge.class||type==ControlBridge.class||name.startsWith("dev.ronova.pro.bootstrap.TaskBridge$")||name.startsWith("dev.ronova.pro.bootstrap.ControlBridge$"))
+            return !EXTERNAL_GUARD_ENTRIES.contains(method)
+                    &&!(name.equals("dev.ronova.pro.bootstrap.ControlBridge$ControlRef")&&(method.equals("clear")||method.equals("enqueue")));
+        if(type==BackingBridge.class)return method.equals("readUnsafe");
+        if(type==ResourceBridge.class)return !(method.equals("mutationAllowed")||method.equals("critical")||method.equals("fieldMutationAllowed")||method.equals("unsafeMutationAllowed"));
+        if(type==SourceMapBridge.class)return !(method.equals("valueAllowed")||method.equals("checkIncoming")||method.equals("internal")||method.equals("changed"));
+        return !name.startsWith("java.")&&!name.startsWith("jdk.")&&!name.startsWith("sun.");
     }
     static final class StoppedCall implements java.util.function.Function<java.util.stream.Stream<StackWalker.StackFrame>,Boolean> {
         public Boolean apply(java.util.stream.Stream<StackWalker.StackFrame> frames){
@@ -498,6 +509,7 @@ public final class ControlBridge {
         Set<Module> modules=addModuleSources(null,NetworkBridge.currentSources(),false);
         modules=addModuleSources(modules,ClientBridge.currentSources(),false);
         modules=addModuleSources(modules,IoBridge.currentSources(),false);
+        modules=addModuleSources(modules,ResourceBridge.currentFileSources(),false);
         modules=addModuleSources(modules,ResourceBridge.currentBufferSources(),false);
         modules=addModuleSources(modules,CodeSourceBridge.executionSources(),false);
         return modules;
@@ -664,18 +676,22 @@ public final class ControlBridge {
     }
     static Module[] resourceOperationSources(Module[] nativeSources){
         Class<?> caller=WALKER.getCallerClass();if(caller!=ResourceBridge.class&&caller!=IoBridge.class)throw new SecurityException("ACTUAL_RESOURCE_OPERATION_REQUIRED");
-        return resourceSources(nativeSources);
+        // Empty is also a captured result, but only this actual live scope can
+        // supply it. New execution contributors and unknown state remain live.
+        boolean captured=nativeSources!=null&&(nativeSources==IoBridge.currentSources()||nativeSources==ResourceBridge.currentFileSources());
+        return resourceSources(nativeSources,captured);
     }
     static boolean resourceExposedByOperation(Object object,Module[] sources){
         Class<?> caller=WALKER.getCallerClass();if(caller!=ResourceBridge.class&&caller!=IoBridge.class)throw new SecurityException("ACTUAL_RESOURCE_OPERATION_REQUIRED");
         return resourceExposedFrom(object,sources);
     }
-    static Module[] resourceSources(Module[] nativeSources){
+    static Module[] resourceSources(Module[] nativeSources){return resourceSources(nativeSources,false);}
+    private static Module[] resourceSources(Module[] nativeSources,boolean captured){
         // Keep the one current-scope union instead of materializing it and
         // inserting it into a second map. Io sources are already included in
         // full by scopedSourceSet; filtering and adding them again adds nothing.
         Set<Module> sources=scopedSourceSet();
-        if(sources==null)sources=addModuleSources(null,frameSources(),false);
+        if(sources==null&&!captured)sources=addModuleSources(null,frameSources(),false);
         sources=addModuleSources(sources,nativeSources,true);
         if(sourceUnknown()){
             if(sources==null)sources=Collections.newSetFromMap(new IdentityHashMap<>());sources.add(null);
@@ -752,7 +768,7 @@ public final class ControlBridge {
             "resultPublicationAllowed");
     static boolean controlCaller() {
         // The query omits guard entry points, preserving the real ledger writer.
-        Class<?> caller=WALKER.walk(CONTROL_WRITER_CALLER);
+        Class<?> caller=NativeControl.available()?NativeControl.controlWriterCaller():WALKER.walk(CONTROL_WRITER_CALLER);
         if(caller==null)return false;
         // These exact classes were already admitted below. Avoid native nest-host
         // lookup for the frequent direct ledger writers; every call still walks
@@ -763,17 +779,17 @@ public final class ControlBridge {
         if((caller==DefinitionBridge.class||caller==ResourceBridge.class||caller==IoBridge.class
                 ||caller==CodeSourceBridge.class||caller==NetworkBridge.class||caller==ClientBridge.class)
                 &&caller.getModule()==DefinitionBridge.class.getModule())return true;
-        if((caller.getNestHost()==TaskBridge.class||caller.getNestHost()==ControlBridge.class)&&caller.getModule()==TaskBridge.class.getModule())return true;
+        if(caller.getClassLoader()==ClassLoader.getSystemClassLoader()&&caller.getName().startsWith("dev.ronova.pro.agent.")&&AGENT_WRITERS.get(caller))return true;
+        Class<?> nest=caller.getNestHost();
+        if((nest==TaskBridge.class||nest==ControlBridge.class)&&caller.getModule()==TaskBridge.class.getModule())return true;
         if(caller==policyInstaller||caller==BackingBridge.class)return true;
-        if(caller==SourceMapBridge.class||caller==NativeControl.class||caller==ControlBridge.class||caller.getNestHost()==ExecutionFlow.class)return true;
-        if((caller.getNestHost()==DefinitionBridge.class||caller.getNestHost()==ResourceBridge.class||caller.getNestHost()==IoBridge.class||caller.getNestHost()==CodeSourceBridge.class||caller.getNestHost()==NetworkBridge.class||caller.getNestHost()==ClientBridge.class)
+        if(caller==SourceMapBridge.class||caller==NativeControl.class||caller==ControlBridge.class||nest==ExecutionFlow.class)return true;
+        if((nest==DefinitionBridge.class||nest==ResourceBridge.class||nest==IoBridge.class||nest==CodeSourceBridge.class||nest==NetworkBridge.class||nest==ClientBridge.class)
                 &&caller.getModule()==DefinitionBridge.class.getModule())return true;
         Guards current=guards;
         if(current!=null&&DefinitionBridge.module(caller)==current.owner().getModule()&&caller.getClassLoader()==current.owner().getClassLoader()&&caller.getName().startsWith("dev.ronova.pro."))return true;
-        if(caller.getClassLoader()==ClassLoader.getSystemClassLoader()&&caller.getName().startsWith("dev.ronova.pro.agent."))try {
-            Class<?> agent=Class.forName("dev.ronova.pro.agent.RecoveryAgent",false,ClassLoader.getSystemClassLoader());
-            return Objects.equals(caller.getProtectionDomain().getCodeSource(),agent.getProtectionDomain().getCodeSource());
-        }catch(ClassNotFoundException missing){return false;}
+        if(caller.getClassLoader()==ClassLoader.getSystemClassLoader()&&caller.getName().startsWith("dev.ronova.pro.agent."))
+            return AGENT_WRITERS.get(caller);
         return false;
     }
     static boolean controlled(Object value) {

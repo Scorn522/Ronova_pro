@@ -32,6 +32,7 @@ public final class ResourceBridge {
     private static final HashMap<Key,BufferView> BUFFERS=new HashMap<>();
     private static final HashMap<Key,BufferStorage> BUFFER_ACTIONS=new HashMap<>(),BUFFER_CLEANERS=new HashMap<>();
     private static final ThreadLocal<BufferOperation> BUFFER_OPERATIONS=new ThreadLocal<>();
+    private static final ThreadLocal<FileOperation> FILE_OPERATIONS=new ThreadLocal<>();
     private static final ThreadLocal<BufferStorage> BUFFER_CLEANING=new ThreadLocal<>();
     private static final ThreadLocal<BufferAllocation> BUFFER_ALLOCATING=new ThreadLocal<>();
     private static final ThreadLocal<BufferRegistration> BUFFER_REGISTERING=new ThreadLocal<>();
@@ -342,10 +343,14 @@ public final class ResourceBridge {
     private static final class FileOperation {
         final FileRecord record;
         final Thread caller=Thread.currentThread();
+        final FileOperation previous=FILE_OPERATIONS.get();
         final Class<?> declaring;
         final String method;
+        final Module[] sources;
         boolean closed;
-        FileOperation(FileRecord record,Class<?> declaring,String method){this.record=record;this.declaring=declaring;this.method=method;}
+        FileOperation(FileRecord record,Class<?> declaring,String method,Module[] sources){
+            this.record=record;this.declaring=declaring;this.method=method;this.sources=sources;
+        }
     }
     private record DescriptorView(FileDescriptor descriptor,List<Object> streams,List<Object> channels,boolean allocated) { }
     static {
@@ -695,32 +700,44 @@ public final class ResourceBridge {
                 record=fileRecord(value);
                 if(record==null&&nativeSources!=null&&value instanceof FileDescriptor)
                     record=ATTACHMENTS.computeIfAbsent(new Key(value,true),ignored->new DescriptorRecord());
-                if(record==null)return null; // Pre-install resources retain ordinary behaviour and remain unobserved for release.
-                if(record.sealed)throw new ClosedChannelException();
-                record.observing++;
+                // An unobserved endpoint still has this real call's source scope;
+                // it gains no release record or authority from that scope.
+                if(record!=null){if(record.sealed)throw new ClosedChannelException();record.observing++;}
             }
             try{
-                boolean known;
+                Module[] sources=ControlBridge.resourceOperationSources(nativeSources);
+                boolean known=sources.length!=0;
                 if(record instanceof DescriptorRecord descriptor){
-                    Module[] sources=ControlBridge.resourceOperationSources(nativeSources);
-                    known=sources.length!=0;
                     synchronized(STREAMS){for(Module source:sources){if(source==null)known=false;else descriptor.nativeSources.add(source);}}
-                }else known=nativeSources==null?ControlBridge.resourceExposed(value):ControlBridge.resourceExposed(value,nativeSources);
-                FileOperation token=new FileOperation(record,declaring,method);
-                synchronized(STREAMS){if(!known)record.unknownUse=true;record.active++;return token;}
-            }finally{synchronized(STREAMS){record.observing--;}}
+                }else if(record!=null)known=ControlBridge.resourceExposedByOperation(value,sources);
+                FileOperation token=new FileOperation(record,declaring,method,sources);
+                synchronized(STREAMS){if(record!=null){if(!known)record.unknownUse=true;record.active++;}}
+                FILE_OPERATIONS.set(token);return token;
+            }finally{synchronized(STREAMS){if(record!=null)record.observing--;}}
         }finally{FILE_OBSERVING.remove();}
     }
     public static void fileOperationFinished(Object value){
         if(value==null)return;
         if(!(value instanceof FileOperation token)||token.caller!=Thread.currentThread())throw new SecurityException("ACTUAL_FILE_OPERATION_SCOPE_REQUIRED");
-        platform(token.declaring,token.method);
-        synchronized(STREAMS){if(!token.closed){token.closed=true;token.record.active--;if(token.record instanceof ChannelRecord record)releaseChannelAlias(record);}}
+        platform(token.declaring,token.method);finishFileOperation(token);
     }
     public static void nativeFileOperationFinished(Object value){
         if(!NativeControl.fileOperationFinishing(value)||!(value instanceof FileOperation token)||token.caller!=Thread.currentThread())
             throw new SecurityException("ACTUAL_NATIVE_FILE_OPERATION_SCOPE_REQUIRED");
-        synchronized(STREAMS){if(!token.closed){token.closed=true;token.record.active--;if(token.record instanceof ChannelRecord record)releaseChannelAlias(record);}}
+        finishFileOperation(token);
+    }
+    private static void finishFileOperation(FileOperation token){
+        if(token.closed)return;
+        if(FILE_OPERATIONS.get()!=token)throw new SecurityException("ACTUAL_FILE_OPERATION_ORDER_REQUIRED");
+        try{
+            synchronized(STREAMS){
+                token.closed=true;
+                if(token.record!=null){token.record.active--;if(token.record instanceof ChannelRecord record)releaseChannelAlias(record);}
+            }
+        }finally{if(token.previous==null)FILE_OPERATIONS.remove();else FILE_OPERATIONS.set(token.previous);}
+    }
+    static Module[] currentFileSources(){
+        FileOperation token=FILE_OPERATIONS.get();return token==null||token.closed?null:token.sources;
     }
     public static void fileClosing(Object value,Class<?> declaring,String method)throws IOException {
         platform(declaring,method);
@@ -960,7 +977,10 @@ public final class ResourceBridge {
         // This snapshot belongs only to this entering operation. Storage use
         // consumes it immediately; a data-only path asks only after finding a
         // real span that will have a receipt. No later operation inherits it.
-        if(operation.sources==null)operation.sources=ControlBridge.resourceOperationSources(IoBridge.currentSources());
+        if(operation.sources==null){
+            Module[] captured=IoBridge.currentSources();if(captured==null)captured=currentFileSources();
+            operation.sources=ControlBridge.resourceOperationSources(captured);
+        }
         return operation.sources;
     }
     private static BufferRead bufferRead(Buffer buffer,Object[] arguments,String method,BufferOperation operation){

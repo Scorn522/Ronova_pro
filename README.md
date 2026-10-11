@@ -1,4 +1,4 @@
-> **2026-10-11 当前主工程：`D:\桌面\ronova_GPT`。** 当前源码为 Java 49 / Native 45 / Journal 6，已接入 B 收口源码并补修 Core 字段回调、来源桥接线和重复列表引用处置。完整 Forge/Mixin 编译及实际来源辅助方法定点回归通过；Minecraft、客户端、保存重启组合尚未运行，B 未完成。详见 [当前状态](docs/A-批验收状态.md)。
+> **2026-10-12 当前主工程：`D:\桌面\ronova_GPT`。** Java 49 / Native 46 / Journal 6。当前完整主包已构建，实际 premain、Bootstrap、Windows Native 控制写门及密封类克隆检查通过；Forge 仍未进入世界，最新完成运行达到原 1200 秒期限，B 未完成。详见 [当前状态](docs/A-批验收状态.md) 和 [实际报告](validation/b-final-20261007/REPORT.md)。 候选：[当前 B WIP 主包](distribution/candidate-b-wip-20261012/README.md)。
 
 以下 R1/R2、候选 43、旧主包与旧环境结果保留其原日期和证据范围。已有发行目录不是本轮源码对应的新游戏安装包。
 

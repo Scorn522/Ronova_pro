@@ -15,7 +15,7 @@ final class ExternalCodeRuntime {
         return prepare(declaration,loader,name,actual,bytes,false);
     }
     static Source prepare(Module declaration,ClassLoader loader,String name,Class<?> actual,byte[] bytes,boolean hidden){
-        ExternalCodeImages.ExecutionSources observed=ExternalCodeImages.executionSources(loader,name,bytes);
+        ExternalCodeImages.ExecutionSources observed=ExternalCodeImages.executionSources(loader,name,bytes,RecoveryAgent.producerModule(declaration));
         ExternalCodeFlow.Image image=observed.image();
         Map<String,Module[][]> owners=ExternalCodeDefinitions.expand(loader,actual,image);
         Map<String,Module[]> fields=observed.fields();

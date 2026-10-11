@@ -491,6 +491,10 @@ final class ExternalCodeDefinitions {
         for(Module[][] method:rows.values())for(Module[] site:method)for(Module owner:site)if(owner==module)return true;
         return false;
     }
+    // A live source-bearing declaration/patch is retained eagerly. Ordinary
+    // zero-seed definitions still retain their original bytes and references;
+    // Definition.analysis() resolves their body when a later producer binds.
+    static boolean executionSourcesObserved(){return sourceObserved;}
     static Map<String,Module[][]> expand(ClassLoader loader,Class<?> actual,ExternalCodeFlow.Image root){
         if(root==null)return Map.of();
         // Before any producer or contributing instruction exists, walking every

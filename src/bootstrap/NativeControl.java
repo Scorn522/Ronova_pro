@@ -43,7 +43,7 @@ public final class NativeControl {
             if(!early.isEmpty()) {
                 Path actual=Path.of(early).toAbsolutePath();if(!hash(Files.readAllBytes(actual)).equals(digest))throw new IOException("EARLY_NATIVE_IMAGE_MISMATCH");dll=actual;
             }
-            System.load(dll.toString());if(abi()!=45)throw new UnsatisfiedLinkError("NATIVE_CONTROL_ABI");
+            System.load(dll.toString());if(abi()!=46)throw new UnsatisfiedLinkError("NATIVE_CONTROL_ABI");
             if(!initialize0(ControlBridge.class,DefinitionBridge.class))throw new UnsatisfiedLinkError("ACTUAL_NATIVE_BOUNDARY_INSTALL_FAILED");
             if(!initializeDefinitionDirectory0(definitionDirectoryOwner))throw new UnsatisfiedLinkError("ACTUAL_DEFINITION_DIRECTORY_CAS_UNAVAILABLE");
             libraryBoundaryPresent=libraryPresent0();available=true;return state="NATIVE_BIND_AND_JNI_FIELD_READY";
@@ -54,6 +54,10 @@ public final class NativeControl {
         catch(NoSuchAlgorithmException impossible) { throw new AssertionError(impossible); }
     }
     public static boolean available() { return available; }
+    static Class<?> controlWriterCaller(){
+        if(CALLER.getCallerClass()!=ControlBridge.class)throw new SecurityException("ACTUAL_CONTROL_WRITER_READER_REQUIRED");
+        return controlWriter0();
+    }
     private static Class<?> definitionDirectoryCaller(){
         Class<?> caller=CALLER.walk(frames->frames.map(StackWalker.StackFrame::getDeclaringClass)
                 .filter(type->type!=NativeControl.class).findFirst().orElse(null));
@@ -570,6 +574,7 @@ public final class NativeControl {
         return clone0(source);
     }
     private static native int abi();
+    private static native Class<?> controlWriter0();
     private static native boolean initialize0(Class<?> tasks,Class<?> definitions);
     private static native boolean initializeDefinitionDirectory0(Class<?> owner);
     private static native boolean compareDefinitionReference0(Object slot,Object expected,Object next);

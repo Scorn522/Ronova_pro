@@ -13,6 +13,8 @@ public final class AuditFixCheck {
     private static Object invoke(Object receiver,String name)throws Exception {var m=receiver.getClass().getDeclaredMethod(name);m.setAccessible(true);try{return m.invoke(receiver);}catch(InvocationTargetException e){if(e.getCause() instanceof Exception x)throw x;throw e;}}
     public static void main(String[] args)throws Exception {
         if(args.length==1&&args[0].equals("source-list-fixes")){sourceListFixes();return;}
+        if(args.length==1&&args[0].equals("live-control-writer")){liveControlWriter();return;}
+        if(args.length==1&&args[0].equals("clone-boundary")){cloneBoundary();return;}
         ProRuntime runtime=(ProRuntime)U.allocateInstance(ProRuntime.class);
         Map<UUID,Object> work=new LinkedHashMap<>();put(runtime,"work",work);
         var subject=new ProRuntime.Subject(UUID.randomUUID());var records=(EntityRecords)U.allocateInstance(EntityRecords.class);put(records,"originalPassengers",List.of());
@@ -60,5 +62,41 @@ public final class AuditFixCheck {
             require(!SourceMaps.removeListIdentity(carrier,target)&&carrier.get(0)==neighbor,"absent target changed neighbor: "+carrier.getClass().getName());
         }
         System.out.println("SOURCE_LIST_FIXES_PASS bridge_owner array_list copy_on_write fastutil duplicate_identity preserved_equal_neighbor exact_nbt_projection");
+    }
+    private static void liveControlWriter()throws Exception {
+        Class<?> nativeControl=Class.forName("dev.ronova.pro.bootstrap.NativeControl",true,null);
+        require(Boolean.TRUE.equals(nativeControl.getMethod("available").invoke(null)),"actual Windows native backend absent");
+        Class<?> bridge=Class.forName("dev.ronova.pro.bootstrap.ControlBridge",true,null);
+        Method writer=bridge.getDeclaredMethod("controlCaller");writer.setAccessible(true);
+        require(Boolean.FALSE.equals(writer.invoke(null)),"foreign system-loader caller gained controller identity");
+        Field registered=bridge.getDeclaredField("protectedTransformers");registered.setAccessible(true);
+        Object[] actual=(Object[])registered.get(null);require(actual.length>0,"actual installed transformer array absent");
+        Method mutation=bridge.getDeclaredMethod("controlMutationAllowed",Object.class);mutation.setAccessible(true);
+        require(Boolean.FALSE.equals(mutation.invoke(null,(Object)actual)),"foreign control array mutation admitted");
+        Object original=actual[0];
+        try{Array.set(actual,0,null);}catch(SecurityException refused){ }
+        require(actual[0]==original,"actual protected transformer array changed");
+        System.out.println("LIVE_CONTROL_WRITER_PASS actual_native foreign_caller_refused protected_array_preserved");
+    }
+    private static class CloneBase implements Cloneable { int value=17; }
+    private static final class InheritedClone extends CloneBase {
+        Object duplicate()throws CloneNotSupportedException{return super.clone();}
+    }
+    private static final class PlainClone { Object duplicate()throws CloneNotSupportedException{return super.clone();} }
+    private static class BusinessClone { public Object clone(){return "business-override";} }
+    private static final class OverriddenClone extends BusinessClone { Object duplicate(){return super.clone();} }
+    private enum SealedClone {
+        LEFT {int marker(){return 1;}},RIGHT {int marker(){return 2;}};
+        abstract int marker();
+    }
+    private static void cloneBoundary()throws Exception {
+        SealedClone[] first=SealedClone.values(),second=SealedClone.values();
+        require(SealedClone.class.isSealed()&&SealedClone.class.getPermittedSubclasses().length==2,"sealed enum permits lost during clone scan");
+        require(first!=second&&first.length==2&&first[0].marker()==1&&first[1].marker()==2,"sealed enum values clone contract changed");
+        InheritedClone original=new InheritedClone();Object result=original.duplicate();
+        require(result instanceof InheritedClone&&result!=original&&((InheritedClone)result).value==17,"native inherited clone contract changed");
+        try{new PlainClone().duplicate();throw new AssertionError("non-Cloneable accepted");}catch(CloneNotSupportedException expected){ }
+        require("business-override".equals(new OverriddenClone().duplicate()),"business clone override rewritten");
+        System.out.println("CLONE_BOUNDARY_PASS actual_agent_native sealed_enum_permits values_clone inherited_owner distinct_identity payload non_cloneable_exception business_override");
     }
 }

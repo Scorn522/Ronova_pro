@@ -54,3 +54,13 @@ validation/a-takeover-tasks-01/server/Pro-A-Tasks/
 !/validation/b-final-20261007/build-source-list-payload-20261011.log
 !/validation/b-final-20261007/compile-source-list-fixes-20261011.log
 !/validation/b-final-20261007/source-list-fixes-20261011.log
+
+# Current matching B WIP package and direct failure-related evidence.
+!/distribution/candidate-b-wip-20261012/
+!/validation/b-final-20261007/build-b-sealed-frame-cache-20261011.log
+!/validation/b-final-20261007/build-b-lazy-zero-source-20261012.log
+!/validation/b-final-20261007/build-b-writer-nest-20261011.log
+!/validation/b-final-20261007/build-b-writer-nest-fixed-20261011.log
+!/validation/b-final-20261007/compile-writer-sealed-frame-cache-20261011.log
+!/validation/b-final-20261007/live-control-writer-frame-cache-20261011.log
+!/validation/b-final-20261007/clone-boundary-sealed-20261011.log

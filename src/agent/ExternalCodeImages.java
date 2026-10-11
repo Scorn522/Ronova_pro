@@ -635,9 +635,18 @@ final class ExternalCodeImages {
         byte[] bytes=(byte[])writer.getMethod("toByteArray").invoke(output);ClassNode node=new ClassNode();new ClassReader(bytes).accept(node,0);
         if(method?node.methods.size()!=1:node.fields.size()!=1)throw new IllegalStateException("ACTUAL_SINGLE_MEMBER_IMAGE_REQUIRED");return node;
     }
-    static synchronized ExecutionSources executionSources(ClassLoader loader,String name,byte[] bytes){
+    static synchronized ExecutionSources executionSources(ClassLoader loader,String name,byte[] bytes,boolean declaredProducer){
         if(name==null)return new ExecutionSources(null,Map.of(),new Object[0][]);
         Encoded selected=selected(loader,name,bytes);
+        if(selected==null&&!declaredProducer&&!ExternalCodeDefinitions.executionSourcesObserved()){
+            // There is no source row to propagate yet. accepted() already keeps
+            // these exact semantic bytes and constant-pool caller references,
+            // and prepared/changed refreshes later real producer bindings.
+            ClassNode header=new ClassNode();new ClassReader(bytes).accept(header,
+                    ClassReader.SKIP_CODE|ClassReader.SKIP_DEBUG|ClassReader.SKIP_FRAMES);
+            if(!ExternalCodeDefinitions.executionSourcesObserved())
+                return new ExecutionSources(new ExternalCodeFlow.Image(new Object(),header,Map.of(),Map.of()),Map.of(),new Object[0][]);
+        }
         Map<String,Module[]> fields=new LinkedHashMap<>();
         for(var entry:fieldOwners(selected).entrySet()){
             Module[] owners=executionOwners(entry.getValue());if(owners.length!=0)fields.put(entry.getKey(),owners);
@@ -687,7 +696,10 @@ final class ExternalCodeImages {
     }
     /** Rows refer to the final emitted instructions, including the agent's inserted instructions. */
     static ExternalCodeFlow.Image acceptedExecution(byte[] bytes,Map<String,Module[][]> observed){
-        ClassNode node=new ClassNode();new ClassReader(bytes).accept(node,0);Map<String,Module[][]> rows=new LinkedHashMap<>();
+        // This is a semantic analysis image, never the emitted definition.
+        // Keep opcodes, labels, handlers and descriptors; line/local tables and
+        // stored frames are unnecessary because both analyzers compute frames.
+        ClassNode node=new ClassNode();new ClassReader(bytes).accept(node,ClassReader.SKIP_DEBUG|ClassReader.SKIP_FRAMES);Map<String,Module[][]> rows=new LinkedHashMap<>();
         for(MethodNode method:node.methods){
             String key=method.name+method.desc;int count=0;for(AbstractInsnNode instruction:method.instructions.toArray())if(instruction.getOpcode()>=0)count++;
             Module[][] source=observed.get(key),result=new Module[count][];

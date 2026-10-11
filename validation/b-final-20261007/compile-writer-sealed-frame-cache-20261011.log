@@ -1,0 +1,18 @@
+ע: SpongePowered MIXIN Annotation Processor Version=0.8.5
+ע: Supported obfuscation types: ObfuscationServiceMCP supports [searge,notch]
+D:\����\ronova_GPT\validation\checks\AuditFixCheck.java:9: ����: Unsafe���ڲ�ר�� API, ���ܻ���δ�����а���ɾ��
+    private static final sun.misc.Unsafe U;
+                                 ^
+D:\����\ronova_GPT\validation\checks\AuditFixCheck.java:9: ����: Unsafe���ڲ�ר�� API, ���ܻ���δ�����а���ɾ��
+    private static final sun.misc.Unsafe U;
+                                 ^
+D:\����\ronova_GPT\validation\checks\AuditFixCheck.java:9: ����: Unsafe���ڲ�ר�� API, ���ܻ���δ�����а���ɾ��
+    private static final sun.misc.Unsafe U;
+                                 ^
+D:\����\ronova_GPT\validation\checks\AuditFixCheck.java:10: ����: Unsafe���ڲ�ר�� API, ���ܻ���δ�����а���ɾ��
+    static {try {var field=sun.misc.Unsafe.class.getDeclaredField("theUnsafe");field.setAccessible(true);U=(sun.misc.Unsafe)field.get(null);}catch(Exception e){throw new ExceptionInInitializerError(e);}}
+                                   ^
+D:\����\ronova_GPT\validation\checks\AuditFixCheck.java:10: ����: Unsafe���ڲ�ר�� API, ���ܻ���δ�����а���ɾ��
+    static {try {var field=sun.misc.Unsafe.class.getDeclaredField("theUnsafe");field.setAccessible(true);U=(sun.misc.Unsafe)field.get(null);}catch(Exception e){throw new ExceptionInInitializerError(e);}}
+                                                                                                                    ^
+5 ������

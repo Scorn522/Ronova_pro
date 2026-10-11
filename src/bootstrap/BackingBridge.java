@@ -478,9 +478,14 @@ public final class BackingBridge {
         if(LIST_INTERNAL.get()!=null||POLICY_CALLBACK.get()!=null)return UNHANDLED;
         if(receiver==null||receiver.getClass()!=ArrayList.class||!known(receiver))return UNHANDLED;
         ArrayList list=(ArrayList)receiver;
-        if(ControlBridge.controlled(receiver)&&!ControlBridge.controlCaller())return switch(method) {
+        boolean controlled=ControlBridge.controlled(receiver);
+        if(controlled&&!ControlBridge.controlCaller())return switch(method) {
             case "set","removeIndex"->list.get((Integer)args[0]);case "add","addAll","removeObject","removeIf","batchRemove"->Boolean.FALSE;default->null;
         };
+        // The real writer was just authenticated. Before a business element
+        // policy exists, plain add has no second decision or callback to make.
+        // Its actual JDK backing store and publication guards still execute.
+        if(controlled&&policy==null&&method.equals("add"))return UNHANDLED;
         switch(method) {
             case "add" -> {
                 Object proposed=args.length==2?args[1]:args[0];
