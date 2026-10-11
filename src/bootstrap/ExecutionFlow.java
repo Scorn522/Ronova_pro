@@ -24,7 +24,7 @@ final class ExecutionFlow {
             Class<?> caller=CALLER.getCallerClass();
             if(caller!=ExecutionFlow.class&&caller!=Heap.class&&caller!=ArrayChange.class&&caller!=MemoryUse.class&&caller!=Frame.class)
                 throw new SecurityException("ACTUAL_EXECUTION_METADATA_OWNER_REQUIRED");
-            CodeSourceBridge.executionMetadataList(this);
+            if(caller!=Heap.class)CodeSourceBridge.executionMetadataList(this);
         }
         void removeSpan(int from,int to){
             if(CALLER.getCallerClass()!=ExecutionFlow.class)throw new SecurityException("ACTUAL_EXECUTION_METADATA_OWNER_REQUIRED");
@@ -37,12 +37,20 @@ final class ExecutionFlow {
             if(creator!=ExecutionFlow.class&&creator!=Heap.class&&creator!=Method.class&&creator!=Plan.class
                     &&(FIELDS==null||creator!=FIELDS.getClass()))
                 throw new SecurityException("ACTUAL_EXECUTION_METADATA_OWNER_REQUIRED");
-            CodeSourceBridge.executionMetadataMap(this);
+            if(creator!=Heap.class)CodeSourceBridge.executionMetadataMap(this);
         }
     }
     static Class<?> metadataMapType(){
         if(CALLER.getCallerClass()!=CodeSourceBridge.class)throw new SecurityException("ACTUAL_EXECUTION_SOURCE_STATE_REQUIRED");
         return TraceMap.class;
+    }
+    static Class<?> metadataHeapType(){
+        if(CALLER.getCallerClass()!=CodeSourceBridge.class)throw new SecurityException("ACTUAL_EXECUTION_SOURCE_STATE_REQUIRED");
+        return Heap.class;
+    }
+    static Class<?> metadataListType(){
+        if(CALLER.getCallerClass()!=CodeSourceBridge.class)throw new SecurityException("ACTUAL_EXECUTION_SOURCE_STATE_REQUIRED");
+        return TraceList.class;
     }
     private static final ReferenceQueue<Object> DEAD_HEAP=new ReferenceQueue<>();
     private static final Map<Carrier,Heap> HEAP=new TraceMap<>();
@@ -106,9 +114,12 @@ final class ExecutionFlow {
         final TraceList<Region> regions=new TraceList<>();final List<MemoryUse> arrayWrites=new TraceList<>(),fieldWrites=new TraceList<>();
         final List<MemoryRead> reads=new TraceList<>();
         final NavigableMap<Long,ArrayRange> arrayRanges=new TreeMap<>();final List<ArrayChange> arrayChanges=new TraceList<>();
+        // Monotonic: once an attributable writer reaches this carrier, every
+        // subsequent image/overlap is retained, including unattributed writes.
+        boolean arrayOrigins;
         Sources arrayBaseline=UNKNOWN;int arrayReaders;
         long version,arrayRevision;int writers;boolean overlap;
-        Heap(){CodeSourceBridge.executionControls(this,slots,regions,arrayWrites,fieldWrites,reads,arrayRanges,arrayChanges);}
+        Heap(){CodeSourceBridge.executionHeapMetadata(this,slots,fieldWrites,regions,arrayWrites,reads,arrayChanges,arrayRanges);}
     }
     private static final class ArrayImage {
         final long start,bits;final int length,offset;final Object values;
@@ -133,7 +144,7 @@ final class ExecutionFlow {
     private static final class ArrayChange {
         final Object carrier;final Heap heap;final long start,length;final Thread thread=Thread.currentThread();final ArrayChange root;
         ArrayImage before;ArrayImage[] parts;Sources written;boolean closed,overlap,changed,complete=true,images=true;
-        ArrayChange(Object carrier,Heap heap,long start,long length,Sources written,ArrayChange root){this.carrier=carrier;this.heap=heap;this.start=start;this.length=length;this.written=written;this.root=root==null?this:root;CodeSourceBridge.executionControls(this);}
+        ArrayChange(Object carrier,Heap heap,long start,long length,Sources written,ArrayChange root){this.carrier=carrier;this.heap=heap;this.start=start;this.length=length;this.written=written;this.root=root==null?this:root;}
     }
     private static final class ArrayRecovery {
         final WeakReference<Object> carrier;final Heap heap;final ArrayRange range;final ArrayRevision head;final Set<Module> selected;
@@ -143,7 +154,7 @@ final class ExecutionFlow {
         final Object carrier;final Heap holder;final long offset,length;final Thread thread=Thread.currentThread();Sources observed;boolean closed;
         MemoryRead(Object carrier,Heap holder,long offset,long length,Sources observed){this.carrier=carrier;this.holder=holder;this.offset=offset;this.length=length;this.observed=observed;CodeSourceBridge.executionControls(this);}
     }
-    private record Region(int start,int length,Sources sources){Region{CodeSourceBridge.executionControls(this);}}
+    private record Region(int start,int length,Sources sources){}
     private static final class HeapUse {
         final Heap holder;final Slot slot;final Object location;final WeakReference<Object> carrier;final long version,carrierVersion;final Sources prior,written;final boolean write,readable;
         Value before;
@@ -164,6 +175,10 @@ final class ExecutionFlow {
         FieldCapture{CodeSourceBridge.executionControls(this,carrier);}
     }
     private static final class MemoryUse {
+        // Fields of this exact private ExecutionFlow class are already denied
+        // to foreign Java/reflection/Unsafe/JNI writers by ownState. Its child
+        // arrays, collections and plain weak references keep their registrations.
+        // Do not enqueue a redundant weak control key for every byte-store receipt.
         final Heap holder;final long version;final boolean broad;Sources written;final Thread thread=Thread.currentThread();Prior prior,last;boolean closed;
         int arrayStart=-1,arrayLength;boolean rangeOverlap;
         Slot capturedSlot;FieldCapture capture;
@@ -175,7 +190,6 @@ final class ExecutionFlow {
             boolean carrierBusy=holder.writers!=0;
             if(broad){if(carrierBusy)holder.overlap=true;holder.writers++;holder.version++;}version=holder.version;
             for(Slot slot:selected)select(slot,carrierBusy);
-            CodeSourceBridge.executionControls(this);
         }
         MemoryUse(Heap holder,int start,int length,Slot single,boolean broad,Sources written){
             this.holder=holder;this.broad=broad;this.written=written;
@@ -187,13 +201,12 @@ final class ExecutionFlow {
             }
             else for(var entry:holder.slots.entrySet())if(entry.getKey() instanceof Integer index&&index>=start&&index-start<length)
                 select(entry.getValue(),carrierBusy);
-            CodeSourceBridge.executionControls(this);
         }
         MemoryUse(Heap holder,Slot slot,Sources written,FieldCapture capture){
             this.holder=holder;version=holder.version;broad=false;this.written=written;capturedSlot=slot;this.capture=capture;
-            select(slot,holder.writers!=0);CodeSourceBridge.executionControls(this);
+            select(slot,holder.writers!=0);
         }
-        MemoryUse(HeapUse delegated){holder=delegated.holder;version=holder.version;broad=false;written=delegated.written;this.delegated=delegated;CodeSourceBridge.executionControls(this);}
+        MemoryUse(HeapUse delegated){holder=delegated.holder;version=holder.version;broad=false;written=delegated.written;this.delegated=delegated;}
         private void select(Slot slot,boolean carrierBusy){
             Sources previous=slot.sources;if(slot.writers!=0||carrierBusy)slot.overlap=true;slot.writers++;
             slot.sources=join(previous,written);slot.version++;
@@ -288,7 +301,7 @@ final class ExecutionFlow {
             boolean shape=true;for(int i=0;i<method.arguments.length;i++)if(current.call.arguments[i].width()!=method.arguments[i])shape=false;
             if(shape)incoming=current.call;
         }
-        Module declaration=DefinitionBridge.module(caller.getDeclaringClass());if(!TaskBridge.producer(declaration))declaration=null;
+        Module declaration=DefinitionBridge.module(caller.getDeclaringClass());if(!ControlBridge.producer(declaration))declaration=null;
         Frame next=new Frame(caller.getDeclaringClass(),method,depth,declaration,incoming);CURRENT.set(next);return next;
     }
     private static Frame frame(Object token,StackWalker.StackFrame caller,int depth){
@@ -348,7 +361,7 @@ final class ExecutionFlow {
     static void initialized(Object token,int instruction,Object actual,Class<?> declaring,StackWalker.StackFrame caller,int depth){
         bridge(CALLER.getCallerClass());Frame frame=site(token,instruction,caller,depth);if(frame==null||frame.call==null||frame.call.instruction!=instruction||frame.call.arguments.length==0)return;
         Alias alias=frame.call.arguments[0].alias();if(alias==null)return;bind(alias,actual);
-        Module producer=DefinitionBridge.module(declaring);Sources declaration=TaskBridge.producer(producer)?new Sources(new Module[]{producer},false):NONE;
+        Module producer=DefinitionBridge.module(declaring);Sources declaration=ControlBridge.producer(producer)?new Sources(new Module[]{producer},false):NONE;
         alias.effects=join(alias.effects,frame.call.direct,declaration,frame.call.normal&&!frame.call.partial?NONE:UNKNOWN);
     }
     static Object unsafeBefore(Object token,int instruction,Object accessor,Object receiver,long offset,long length,Object proposed,Object source,long sourceOffset,StackWalker.StackFrame caller,int depth){
@@ -450,7 +463,7 @@ final class ExecutionFlow {
                         &&(current==null||!current.closed&&use.instruction==current.instruction))return;
             }
             Module actual=writer==null?null:DefinitionBridge.module(writer);
-            Sources written=new Sources(nonNullModules(contributors),true);if(TaskBridge.producer(actual))written=join(written,new Sources(new Module[]{actual},false));
+            Sources written=new Sources(nonNullModules(contributors),true);if(ControlBridge.producer(actual))written=join(written,new Sources(new Module[]{actual},false));
             slot.sources=join(slot.sources,written,UNKNOWN);slot.revision=null;slot.version++;if(slot.writers!=0)slot.overlap=true;
             observeFieldReads(heap,field,written);
         }
@@ -475,6 +488,15 @@ final class ExecutionFlow {
     }
     static Object fieldMemoryBefore(Object holder,Class<?> declaring,String name,String descriptor,Module[] contributors,boolean instruction){
         bridge(CALLER.getCallerClass());if(holder==null||declaring==null||name==null||descriptor==null)return null;
+        // A holder never observed by execution/source tracking has no known
+        // baseline or revision to invalidate. Keep it UNKNOWN without creating
+        // a Heap, field directory and write receipt for every vanilla object
+        // initializer. The actual receiver gate and field policy still run;
+        // observed holders and current/source-bearing executions retain their
+        // full capture, watch and overlapping-write path below.
+        if(contributors.length==0&&CURRENT.get()==null)synchronized(HEAP){
+            if(!HEAP.containsKey(new Carrier(holder,false)))return null;
+        }
         if(CodeSourceBridge.fieldGateMetadata(holder))return null;
         Map<String,FieldSlot> fields=FIELDS.get(declaring);FieldSlot field;String key=name+'\u0000'+descriptor;
         synchronized(fields){field=fields.get(key);if(field==null){field=new FieldSlot(declaring,name,descriptor);fields.put(key,field);}}
@@ -508,6 +530,19 @@ final class ExecutionFlow {
     static Object arrayMemoryBefore(Object holder,int start,int length,Module[] contributors){
         bridge(CALLER.getCallerClass());return arrayMemoryBefore(holder,start,length,false,contributors);
     }
+    // Pure lookup: no source, version or permission is manufactured here.
+    // Before its first observation an array's baseline is already UNKNOWN.
+    // The receiver write gate still serializes a later observation with writes.
+    static boolean untrackedArray(Object holder) {
+        if(CURRENT.get()!=null||holder==null||!holder.getClass().isArray())return false;
+        synchronized(HEAP){return !HEAP.containsKey(new Carrier(holder,false));}
+    }
+    /** A negative lookup supplies no ownership, permission or known baseline. */
+    static boolean trackedMutation(Object holder){
+        if(CURRENT.get()!=null)return true;
+        if(holder==null)return false;
+        synchronized(HEAP){return HEAP.containsKey(new Carrier(holder,false));}
+    }
     private static Object arrayMemoryBefore(Object holder,int start,int length,boolean broad,Module[] contributors){
         if(holder==null||!holder.getClass().isArray())return null;
         int size=java.lang.reflect.Array.getLength(holder);if(start<0||length<=0||start>size-length)return null;
@@ -517,10 +552,13 @@ final class ExecutionFlow {
     private static Object arrayMemoryBefore(Object holder,int start,int length,boolean broad,Module[] contributors,long position,long count,boolean typed){
         synchronized(HEAP){
             reapHeap();Heap heap=heapFor(holder);
-            // Create the single slot before entering this window so every older
-            // overlapping window includes it. The locked heap is then selected
-            // directly into the same Prior records, without a temporary list.
-            Slot single=length==1?arraySlot(heap,start):null;
+            // Primitive writes already retain their exact images, source ranges
+            // and overlap history in ArrayChange. Allocate a per-element Slot
+            // only when an instruction/read actually needs it. Existing slots
+            // still enter this window, and arraySlot includes any active window
+            // when a later read creates the slot. Reference stores keep theirs.
+            Slot single=length==1?(holder.getClass().getComponentType().isPrimitive()
+                    ?heap.slots.get(start):arraySlot(heap,start)):null;
             MemoryUse use=new MemoryUse(heap,start,length,single,broad,memorySources(contributors));
             use.arrayStart=start;use.arrayLength=length;
             for(MemoryUse pending:heap.arrayWrites)if(overlaps(start,length,pending.arrayStart,pending.arrayLength)){pending.rangeOverlap=true;use.rangeOverlap=true;}
@@ -643,7 +681,11 @@ final class ExecutionFlow {
         for(int i=heap.arrayChanges.size()-1;i>=0;i--){ArrayChange pending=heap.arrayChanges.get(i);
             if(pending.thread==Thread.currentThread()&&start>=pending.start&&end<=pending.start+pending.length){root=pending.root;break;}
         }
-        ArrayChange change=new ArrayChange(carrier,heap,start,length,written,root);change.complete=typed;change.images=typed||carrier.getClass().getComponentType().isPrimitive();
+        if(written.modules().length!=0)heap.arrayOrigins=true;
+        ArrayChange change=new ArrayChange(carrier,heap,start,length,written,root);
+        change.images=(typed||carrier.getClass().getComponentType().isPrimitive())
+                &&(heap.arrayOrigins||!written.unknown());
+        change.complete=typed&&change.images;
         if(root!=null){root.written=join(root.written,written);root.complete&=typed;root.images&=change.images;}
         for(ArrayChange pending:heap.arrayChanges)if(pending.root!=change.root&&start<pending.start+pending.length&&pending.start<end){
             pending.root.overlap=true;change.root.overlap=true;
@@ -704,6 +746,16 @@ final class ExecutionFlow {
         if(change!=root){root.written=join(root.written,change.written);return;}
         heap.arrayRevision++;
         for(ArrayChange pending:heap.arrayChanges)if(pending.root==root)root.overlap=true;
+        if(!root.images&&!heap.arrayOrigins){
+            // No owned revision has ever existed. Preserve UNKNOWN and all
+            // live read/write windows without copying every inflater/file byte.
+            // The first attributable writer captures the then-current baseline.
+            int unit=arrayUnit(root.carrier),first=(int)(root.start/unit);
+            int count=(int)((root.start+root.length+unit-1)/unit-first);
+            replaceRegion(heap,first,count,join(root.written,UNKNOWN),false);
+            observeArrayReads(heap,first,count,join(root.written,UNKNOWN));
+            root.before=null;root.parts=null;return;
+        }
         long end=root.start+root.length;int part=0;
         for(long at=root.start;at<end;){int length=(int)Math.min(65536,end-at);ArrayImage before=root.parts==null?root.before:root.parts[part++],after=root.images?arrayImage(root.carrier,at,length,before):null;
             boolean same=sameImage(before,after);
@@ -792,6 +844,12 @@ final class ExecutionFlow {
     }
     static Object byteMemoryBefore(Object holder,long offset,long length,Module[] contributors,boolean reference){
         bridge(CALLER.getCallerClass());if(holder==null||length==0)return null;
+        // Match the direct field/array boundary before querying an actual field
+        // layout: a wholly unobserved holder has no baseline to invalidate.
+        // TaskBridge still holds this receiver's write gate and runs its policy.
+        if(contributors.length==0&&CURRENT.get()==null)synchronized(HEAP){
+            if(!HEAP.containsKey(new Carrier(holder,false)))return null;
+        }
         if(offset<0||length<0||length>Long.MAX_VALUE-offset)return memoryBefore(holder,contributors);
         long end=offset+length;
         if(holder.getClass().isArray()){
@@ -898,7 +956,10 @@ final class ExecutionFlow {
         bridge(CALLER.getCallerClass());if(!(token instanceof MemoryUse use)||use.closed||use.thread!=Thread.currentThread())return;
         synchronized(HEAP){
             Sources added=memorySources(contributors);use.written=join(use.written,added);
-            if(use.arrayChange!=null){use.arrayChange.written=join(use.arrayChange.written,added);use.arrayChange.root.written=join(use.arrayChange.root.written,added);}
+            if(use.arrayChange!=null){
+                if(added.modules().length!=0)use.holder.arrayOrigins=true;
+                use.arrayChange.written=join(use.arrayChange.written,added);use.arrayChange.root.written=join(use.arrayChange.root.written,added);
+            }
             for(Prior prior=use.prior;prior!=null;prior=prior.next)prior.slot().sources=join(prior.slot().sources,added);
         }
     }
@@ -967,10 +1028,10 @@ final class ExecutionFlow {
     }
     private static boolean stoppedSources(Sources sources){
         if(sources.unknown()||sources.modules().length==0)return false;
-        for(Module source:sources.modules())if(!TaskBridge.modStopped(source))return false;return true;
+        for(Module source:sources.modules())if(!ControlBridge.modStopped(source))return false;return true;
     }
     private static boolean containsStopped(Sources sources){
-        for(Module source:sources.modules())if(TaskBridge.modStopped(source))return true;return false;
+        for(Module source:sources.modules())if(ControlBridge.modStopped(source))return true;return false;
     }
     private static boolean selectedRevision(Sources sources,Revision revision,Set<Module> modules){
         for(Revision current=revision;current!=null;current=current.parent()){
@@ -1024,7 +1085,7 @@ final class ExecutionFlow {
             Slot slot=recovery.slot;Heap heap=recovery.holder;Revision revision=recovery.revision;
             if(slot.version!=recovery.version||heap.version!=recovery.carrierVersion||slot.sources!=recovery.sources||slot.revision!=revision
                     ||!slot.watched||slot.writers!=0||heap.writers!=0||slot.overlap||slot.sources.unknown()||!revision.after().live())return false;
-            for(Module source:recovery.selected)if(!TaskBridge.modStopped(source))return false;
+            for(Module source:recovery.selected)if(!ControlBridge.modStopped(source))return false;
             RevisionPlan remaining=withoutSelected(slot.sources,revision,recovery.selected);
             if(!remaining.changed()||!remaining.value().live())return false;
             if(!sameValue(revision.after(),remaining.value())&&containsStopped(remaining.sources()))return false;
@@ -1081,7 +1142,7 @@ final class ExecutionFlow {
         try{synchronized(HEAP){
             Heap heap=recovery.heap;ArrayRange range=recovery.range;ArrayRevision head=recovery.head;
             if(heap.arrayRanges.get(range.start)!=range||range.head!=head||heap.writers!=0||!heap.arrayChanges.isEmpty()||heap.arrayReaders!=0||!heap.reads.isEmpty())return false;
-            for(Module source:recovery.selected)if(!TaskBridge.modStopped(source))return false;
+            for(Module source:recovery.selected)if(!ControlBridge.modStopped(source))return false;
             List<ArrayRevision> history=new TraceList<>();for(ArrayRevision revision=head;revision!=null;revision=revision.previous()){
                 if(!revision.complete()||revision.before()==null||revision.after()==null)break;history.add(revision);
             }

@@ -20,7 +20,10 @@ final class RestartTargets {
             if(Files.isRegularFile(configuration))try(var stream=Files.newInputStream(configuration)){properties.load(stream);}
             name=properties.getProperty("level-name","world");
         }
-        Path root=universe==null?directory:directory.resolve(universe).normalize();Path world=root.resolve(name).toAbsolutePath().normalize();
+        if(name.isEmpty())throw new IOException("INVALID_WORLD_LAUNCH_NAME");
+        Path root=(universe==null?directory:directory.resolve(universe)).toAbsolutePath().normalize();
+        Path world=root.resolve(name).toAbsolutePath().normalize();
+        if(world.equals(root))throw new IOException("WORLD_LAUNCH_EQUALS_UNIVERSE");
         JournalLineage.History history=JournalLineage.read(world.resolve("ronova-pro"));
         Map<UUID,Set<String>> groups=new LinkedHashMap<>();Map<UUID,String> policies=new LinkedHashMap<>();Map<UUID,String> roots=new HashMap<>();
         for(String line:history.records())if(line.startsWith("GROUP/"))try{
@@ -44,13 +47,24 @@ final class RestartTargets {
         return new Selection(world,history.realm(),Map.copyOf(modes));
     }
     static String mode(String value)throws IOException {
-        if(!Set.of("default","null","empty","uuid-fixed","uuid-each","invalid-id").contains(value))throw new IOException("INVALID_RETURN_POLICY:"+value);return value;
+        if(!Set.of("default","null","empty","uuid-fixed","uuid-each","invalid-id").contains(value))throw new IOException("INVALID_RETURN_POLICY:"+value);return "default";
     }
     private static void validId(String id){if(!id.matches("[a-z0-9_.-]{2,64}")||Set.of("ronova_pro","minecraft","forge","java").contains(id))throw new IllegalArgumentException("INVALID_OR_OWN_MOD_ID:"+id);}
     private static String option(List<String> args,String name)throws IOException {
-        String value=null;for(int i=0;i<args.size();i++)if(args.get(i).equals(name)){
-            if(i+1==args.size()||value!=null)throw new IOException("AMBIGUOUS_WORLD_LAUNCH_OPTION:"+name);value=args.get(++i);
-        }return value;
+        String value=null;
+        for(int i=0;i<args.size();i++){
+            String argument=args.get(i);if(argument.equals("--"))break;
+            String next;
+            if(argument.equals(name)){
+                if(i+1==args.size()||args.get(i+1).startsWith("--"))throw new IOException("MISSING_WORLD_LAUNCH_OPTION:"+name);
+                next=args.get(++i);
+            }else if(argument.startsWith(name+"="))next=argument.substring(name.length()+1);
+            else continue;
+            if(value!=null)throw new IOException("AMBIGUOUS_WORLD_LAUNCH_OPTION:"+name);
+            if(next.isEmpty())throw new IOException("EMPTY_WORLD_LAUNCH_OPTION:"+name);
+            value=next;
+        }
+        return "default";
     }
     private static List<String> expand(Path directory,List<String> args)throws IOException {
         List<String> result=new ArrayList<>();boolean enabled=true;

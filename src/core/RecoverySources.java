@@ -48,6 +48,7 @@ public final class RecoverySources implements AutoCloseable {
     private final Map<Source,Map<UUID,GroupWalk>> groupWalks=Collections.synchronizedMap(new IdentityHashMap<>());
     private final Map<UUID,Long> groupWalkCursors=new HashMap<>();
     private final java.util.concurrent.ConcurrentLinkedQueue<LoadRoot> groupRoots=new java.util.concurrent.ConcurrentLinkedQueue<>();
+    private final Map<Object,Set<UUID>> queuedGroupRoots=Collections.synchronizedMap(new WeakIdentityMap<>());
     private record LoadRoot(Object value,UUID subject) { }
     private volatile LoadRoot pendingGroupRoot;
     private static final class HolderWalk {
@@ -338,6 +339,7 @@ public final class RecoverySources implements AutoCloseable {
                 groupRoots.add(root);pendingGroupRoot=null;continue;
             }
             runtime.recoveryTasks.observed(root.value,root.subject);
+            synchronized(queuedGroupRoots){Set<UUID> queued=queuedGroupRoots.get(root.value);if(queued!=null){queued.remove(root.subject);if(queued.isEmpty())queuedGroupRoots.remove(root.value);}}
             pendingGroupRoot=null;epoch.incrementAndGet();
         }
     }
@@ -363,6 +365,7 @@ public final class RecoverySources implements AutoCloseable {
         if(value==null)return;
         synchronized(loads) {
             if(closed)return;
+            synchronized(queuedGroupRoots){if(!queuedGroupRoots.computeIfAbsent(value,key->new HashSet<>()).add(subject))return;}
             groupRoots.add(new LoadRoot(value,subject));epoch.incrementAndGet();
         }
     }
@@ -514,7 +517,7 @@ public final class RecoverySources implements AutoCloseable {
     }
     private static void restoreExternalConstant(java.lang.reflect.Field field,Object[] row)throws ReflectiveOperationException {
         Class<?> bridge=Class.forName("dev.ronova.pro.bootstrap.TaskBridge",false,null);
-        Object gate=bridge.getMethod("beginRecoveryMutation",Object.class).invoke(null,field.getDeclaringClass());
+        Object gate=Class.forName("dev.ronova.pro.bootstrap.ControlBridge",false,null).getMethod("beginRecoveryMutation",Object.class).invoke(null,field.getDeclaringClass());
         if(Boolean.FALSE.equals(gate))throw new IllegalStateException("EXTERNAL_FIELD_WRITE_IN_FLIGHT");
         try{
             Object current=field.get(null),expected=row[3],baseline=row[4];
@@ -525,7 +528,7 @@ public final class RecoverySources implements AutoCloseable {
                 if(!restored||!sameConstantValue(field.get(null),baseline))throw new IllegalStateException("EXTERNAL_FIELD_CONSTANT_RESTORE_PENDING");
             }
             Class.forName("dev.ronova.pro.bootstrap.CodeSourceBridge",false,null).getMethod("constantRestored",Object.class,java.lang.reflect.Field.class).invoke(null,row[5],field);
-        }finally{bridge.getMethod("endFieldMutation",Object.class).invoke(null,gate);}
+        }finally{Class.forName("dev.ronova.pro.bootstrap.ControlBridge",false,null).getMethod("endFieldMutation",Object.class).invoke(null,gate);}
     }
     private void retireExternalHeapValues(ProRuntime.Subject authority){
         try{
@@ -671,11 +674,11 @@ public final class RecoverySources implements AutoCloseable {
         if(!component.isPrimitive())count=Math.min(count,4096-walk.pending.size());
         if(count==0)return 0;
         Class<?> bridge=Class.forName("dev.ronova.pro.bootstrap.TaskBridge",false,null);
-        Object gate=bridge.getMethod("beginRecoveryArrayMutation",Object.class,int.class,int.class,long.class).invoke(null,value,cursor.element,count,cursor.arrayRevision);
+        Object gate=Class.forName("dev.ronova.pro.bootstrap.ControlBridge",false,null).getMethod("beginRecoveryArrayMutation",Object.class,int.class,int.class,long.class).invoke(null,value,cursor.element,count,cursor.arrayRevision);
         if(Boolean.FALSE.equals(gate))throw new IOException("GROUP_ARRAY_WRITE_IN_FLIGHT");
         int processed=0;boolean written=false;
         try {
-            cursor.element=(Integer)bridge.getMethod("recoveryArrayStart",Object.class).invoke(null,gate);
+            cursor.element=(Integer)Class.forName("dev.ronova.pro.bootstrap.ControlBridge",false,null).getMethod("recoveryArrayStart",Object.class).invoke(null,gate);
             var elements=component.isPrimitive()?null:java.lang.invoke.MethodHandles.arrayElementVarHandle(value.getClass());
             while(processed<count){
                 int index=cursor.element;Object child=java.lang.reflect.Array.get(value,index);
@@ -691,7 +694,7 @@ public final class RecoverySources implements AutoCloseable {
             }
             written=true;
         }finally {
-            try{cursor.arrayRevision=(Long)bridge.getMethod("finishRecoveryArrayMutation",Object.class,boolean.class).invoke(null,gate,written);}
+            try{cursor.arrayRevision=(Long)Class.forName("dev.ronova.pro.bootstrap.ControlBridge",false,null).getMethod("finishRecoveryArrayMutation",Object.class,boolean.class).invoke(null,gate,written);}
             catch(ReflectiveOperationException|RuntimeException unavailable){cursor.element=0;throw unavailable;}
         }
         if(cursor.element==length)walk.current=null;
@@ -707,7 +710,7 @@ public final class RecoverySources implements AutoCloseable {
             try {
                 List<?> list=(List<?>)value;
                 Object stamp=copyOnWrite?array.get(value):null;
-                long currentRevision=copyOnWrite?0:RecoveryReferences.arrayListRevision(value);
+                long currentRevision=copyOnWrite?0:RecoveryRecords.arrayListRevision(value);
                 if(!copyOnWrite&&currentRevision<0)throw new IOException("ARRAY_LIST_REVISION_UNOBSERVED");
                 if(copyOnWrite?cursor.listStamp!=stamp:cursor.listRevision!=currentRevision)cursor.element=list.size()-1;
                 while(cursor.element>=0&&processed[0]<limit) {
@@ -720,7 +723,7 @@ public final class RecoverySources implements AutoCloseable {
                     cursor.element--;processed[0]++;
                 }
                 if(copyOnWrite)cursor.listStamp=array.get(value);
-                else cursor.listRevision=RecoveryReferences.arrayListRevision(value)+(SourceMaps.fastList(value)?0:1); // withList publishes its own revision on return.
+                else cursor.listRevision=RecoveryRecords.arrayListRevision(value)+(SourceMaps.fastList(value)?0:1); // withList publishes its own revision on return.
                 if(cursor.element<0)walk.current=null;
             }catch(IOException unavailable){failure[0]=unavailable;}
             catch(ReflectiveOperationException unavailable){failure[0]=new IOException("GROUP_LIST_VERSION_UNAVAILABLE",unavailable);}
@@ -729,7 +732,7 @@ public final class RecoverySources implements AutoCloseable {
             var lock=java.util.concurrent.CopyOnWriteArrayList.class.getDeclaredField("lock");lock.setAccessible(true);
             synchronized(lock.get(value)) {action.run();}
         }else {
-            if(!RecoveryReferences.withArrayList(value,true,action))throw new IOException("ARRAY_LIST_SCOPE_BUSY_OR_UNOBSERVED");
+            if(!RecoveryRecords.withArrayList(value,true,action))throw new IOException("ARRAY_LIST_SCOPE_BUSY_OR_UNOBSERVED");
         }
         if(failure[0]!=null)throw failure[0];
         return processed[0];
@@ -740,16 +743,16 @@ public final class RecoverySources implements AutoCloseable {
     }
     static void clearField(java.lang.reflect.Field field,Object receiver,Object expected)throws ReflectiveOperationException {
         Class<?> bridge=Class.forName("dev.ronova.pro.bootstrap.TaskBridge",false,null);
-        Object gate=bridge.getMethod("beginRecoveryMutation",Object.class).invoke(null,receiver==null?field.getDeclaringClass():receiver);
+        Object gate=Class.forName("dev.ronova.pro.bootstrap.ControlBridge",false,null).getMethod("beginRecoveryMutation",Object.class).invoke(null,receiver==null?field.getDeclaringClass():receiver);
         if(Boolean.FALSE.equals(gate))throw new IllegalStateException("GROUP_FIELD_WRITE_IN_FLIGHT");
-        try {clearFieldLocked(field,receiver,expected);}finally {bridge.getMethod("endFieldMutation",Object.class).invoke(null,gate);}
+        try {clearFieldLocked(field,receiver,expected);}finally {Class.forName("dev.ronova.pro.bootstrap.ControlBridge",false,null).getMethod("endFieldMutation",Object.class).invoke(null,gate);}
     }
     static boolean clearReferenceField(java.lang.reflect.Field field,Object receiver,Object expected,Runnable attempted)throws ReflectiveOperationException{
         Class<?> bridge=Class.forName("dev.ronova.pro.bootstrap.TaskBridge",false,null);
-        Object gate=bridge.getMethod("beginRecoveryMutation",Object.class).invoke(null,receiver==null?field.getDeclaringClass():receiver);
+        Object gate=Class.forName("dev.ronova.pro.bootstrap.ControlBridge",false,null).getMethod("beginRecoveryMutation",Object.class).invoke(null,receiver==null?field.getDeclaringClass():receiver);
         if(Boolean.FALSE.equals(gate))return false;
         try{attempted.run();clearFieldLocked(field,receiver,expected);return field.get(receiver)==null;}
-        finally{bridge.getMethod("endFieldMutation",Object.class).invoke(null,gate);}
+        finally{Class.forName("dev.ronova.pro.bootstrap.ControlBridge",false,null).getMethod("endFieldMutation",Object.class).invoke(null,gate);}
     }
     private static void clearFieldLocked(java.lang.reflect.Field field,Object receiver,Object expected)throws ReflectiveOperationException {
         if(field.getDeclaringClass().isHidden()){
@@ -1178,7 +1181,7 @@ public final class RecoverySources implements AutoCloseable {
         return nestedSource(parent,field,kind,key,value,field.get(holder instanceof Class<?>?null:holder));
     }
     Source nestedSource(Source parent,java.lang.reflect.Field field,String kind,Object key,Object value,Object carrier)throws ReflectiveOperationException{
-        if(!RecoveryReferences.nestedHolder(value)||!current(parent))return null;
+        if(!RecoveryRecords.nestedHolder(value)||!current(parent))return null;
         for(Source ancestor=parent;ancestor!=null;ancestor=ancestor.nestedParent)if(ancestor.holder()==value)return ancestor;
         String code=code(value.getClass());if(code==null)return null;
         try(var gate=registrationGate.enter()){
@@ -1215,7 +1218,7 @@ public final class RecoverySources implements AutoCloseable {
         if(kind.equals("LIST")&&(SourceMaps.supportedList(carrier))){
             int index=(Integer)key;
             if(carrier.getClass()==java.util.concurrent.CopyOnWriteArrayList.class){Object[] values=((List<?>)carrier).toArray();return index<values.length?values[index]:null;}
-            Object[] result={null};boolean ran=RecoveryReferences.withArrayList(carrier,false,()->{List<?> values=(List<?>)carrier;result[0]=index<values.size()?values.get(index):null;});
+            Object[] result={null};boolean ran=RecoveryRecords.withArrayList(carrier,false,()->{List<?> values=(List<?>)carrier;result[0]=index<values.size()?values.get(index):null;});
             if(!ran)throw new IllegalAccessException("NESTED_LIST_BUSY");return result[0];
         }
         throw new IllegalAccessException("NESTED_CONTAINER_CHANGED");
@@ -1244,7 +1247,7 @@ public final class RecoverySources implements AutoCloseable {
             }else if(!parent.disposed())return;
             String encoded=dev.ronova.pro.persistence.JournalLineage.decodeText(parts[5]);Object key=encoded.isEmpty()?null:SourceMaps.decodeKey(encoded);
             Object value=holder==null?null:nestedValue(parent,field,parts[4],key);
-            if(value!=null&&(!RecoveryReferences.nestedHolder(value)||!code.equals(code(value.getClass()))))return;
+            if(value!=null&&(!RecoveryRecords.nestedHolder(value)||!code.equals(code(value.getClass()))))return;
             Source source=new Source(this,locator,code,null,value);source.nestedRetained=value;source.nestedParent=parent;source.nestedField=field;source.nestedKind=parts[4];source.nestedKey=key;source.nestedAbsent=value==null;
             source.subjects.addAll(expectedSubjects.getOrDefault(locator,Set.of()));source.gap="";
             try(var gate=registrationGate.enter()){
@@ -1291,7 +1294,7 @@ public final class RecoverySources implements AutoCloseable {
         });
     }
     private boolean queryNestedCandidate(Source original,Source parent,java.lang.reflect.Field field,Object value,SourceQuery query)throws ReflectiveOperationException{
-        if(!RecoveryReferences.nestedHolder(value)||!original.code.equals(code(value.getClass())))throw new IllegalAccessException("NESTED_DEFINITION_CHANGED");
+        if(!RecoveryRecords.nestedHolder(value)||!original.code.equals(code(value.getClass())))throw new IllegalAccessException("NESTED_DEFINITION_CHANGED");
         Source actual=nestedSource(parent,field,original.nestedKind,original.nestedKey,value);
         if(actual==null)throw new IllegalAccessException("NESTED_SOURCE_BINDING_PENDING");
         actual.subjects.addAll(original.subjects);
@@ -1364,7 +1367,7 @@ public final class RecoverySources implements AutoCloseable {
         ReflectiveOperationException[] reflection={null};IOException[] failure={null};
         Runnable read=()->{
             try{
-                Object stamp=SourceMaps.listBacking(value);long revision=copy?0:RecoveryReferences.arrayListRevision(value);
+                Object stamp=SourceMaps.listBacking(value);long revision=copy?0:RecoveryRecords.arrayListRevision(value);
                 if(!copy&&revision<0)throw new IOException("HOLDER_LIST_REVISION_UNAVAILABLE");
                 if(cursor.stamp!=stamp||cursor.revision!=revision){cursor.stamp=stamp;cursor.revision=revision;cursor.position=0;}
                 List<?> list=(List<?>)value;int processed=0;
@@ -1375,7 +1378,7 @@ public final class RecoverySources implements AutoCloseable {
             }catch(ReflectiveOperationException unavailable){reflection[0]=unavailable;}catch(IOException unavailable){failure[0]=unavailable;}
         };
         if(copy){var lock=value.getClass().getDeclaredField("lock");lock.setAccessible(true);synchronized(lock.get(value)){read.run();}}
-        else if(!RecoveryReferences.withArrayList(value,false,read))throw new IOException("HOLDER_LIST_BUSY");
+        else if(!RecoveryRecords.withArrayList(value,false,read))throw new IOException("HOLDER_LIST_BUSY");
         if(reflection[0]!=null)throw reflection[0];if(failure[0]!=null)throw failure[0];
     }
     /** Keep actual record identities through the original DataFixer invocation. */

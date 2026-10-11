@@ -12,11 +12,28 @@ public final class SourceMapBridge {
     // Registration is called while resource/source gates can already be held.
     // A monitored concurrent map would issue a guarded Unsafe counter CAS here,
     // taking a receiver gate whose permission check can acquire the resource lock.
-    // Fixed roots keep unrelated temporary containers out of the same long tree.
-    // Each tree still uses immutable identity hashes and exact weak identities.
-    // The root array is control state; no JDK map, CAS or key callback is used.
-    private static final Bucket[] scopes=new Bucket[4096];
+    // Exact weak identities in fixed chains. Birth and retirement only link one
+    // entry: no tree rotations, JDK map callbacks or index growth during startup.
+    // The root array remains protected control state.
+    private static final Key[] scopes=new Key[65536];
     private static final StackWalker CALLER=StackWalker.getInstance(StackWalker.Option.RETAIN_CLASS_REFERENCE);
+    private static final StackWalker ANALYSIS_CALLER=StackWalker.getInstance(Set.of(StackWalker.Option.RETAIN_CLASS_REFERENCE,StackWalker.Option.SHOW_HIDDEN_FRAMES));
+    private static final java.util.function.Function<java.util.stream.Stream<StackWalker.StackFrame>,Boolean> ANALYSIS=new AnalysisCaller();
+    private static final class AnalysisCaller implements java.util.function.Function<java.util.stream.Stream<StackWalker.StackFrame>,Boolean>{
+        public Boolean apply(java.util.stream.Stream<StackWalker.StackFrame> frames){
+            var cursor=frames.iterator();while(cursor.hasNext()){
+                Class<?> type=cursor.next().getDeclaringClass();
+                if(type.getNestHost()==SourceMapBridge.class)continue;
+                String name=type.getName();
+                if(type.getClassLoader()==null&&(name.startsWith("java.")||name.startsWith("jdk.")||name.startsWith("sun.")))continue;
+                // The first actual application caller must be our admitted
+                // agent. A foreign callback (including hidden code) stops here;
+                // an agent farther down the stack supplies no such authority.
+                return ControlBridge.owns(type);
+            }
+            return false;
+        }
+    }
     private static volatile boolean enabled;
     private static volatile String failure="";
     private static volatile java.lang.invoke.MethodHandle writeGuard;
@@ -24,9 +41,9 @@ public final class SourceMapBridge {
     private static final ThreadLocal<Boolean> QUERY=new ThreadLocal<>();
     private static final class Key extends WeakReference<Object> {
         final int hash;
-        final Scope scope;Key next;
+        volatile Scope scope;volatile boolean born;int active;Key next;
         Key(Object object) {
-            super(object,DEAD);hash=System.identityHashCode(object);scope=new Scope();
+            super(object,DEAD);hash=System.identityHashCode(object);
         }
         @Override public int hashCode() { return hash; }
         @Override public boolean equals(Object other) {
@@ -35,12 +52,6 @@ public final class SourceMapBridge {
         }
         @Override public void clear(){if(CALLER.getCallerClass().getNestHost()==SourceMapBridge.class)super.clear();}
         @Override public boolean enqueue(){return CALLER.getCallerClass().getNestHost()==SourceMapBridge.class&&super.enqueue();}
-    }
-    private static final class Bucket {
-        final int hash;Key first;Bucket parent,left,right;int height=1;
-        Bucket(Key first,Bucket parent) {
-            indexWriter(CALLER.getCallerClass());hash=first.hash;this.first=first;this.parent=parent;
-        }
     }
     private static final class OwnerRef extends WeakReference<Object> {
         OwnerRef(Object owner){super(owner);}
@@ -56,7 +67,7 @@ public final class SourceMapBridge {
         OwnerRef bindingTable,bindingNext;
         long bindingRevision=-1;
         int bindingBucket;
-        final List<Scope> draining=new ArrayList<>();
+        final List<Key> draining=new ArrayList<>();
         Gate(Object owner) {
             this.owner=new OwnerRef(owner);
             CodeSourceBridge.fieldGateControls(lock);
@@ -64,6 +75,7 @@ public final class SourceMapBridge {
     }
     static boolean gateConstructor(Class<?> caller) { return caller==Gate.class; }
     private static final class HashNodes {
+        static final Class<?> NODE=nodeType();
         static final java.lang.reflect.Field TABLE=field(HashMap.class,"table"),NEXT=field(nodeType(),"next");
         static final java.lang.reflect.Field ACCESS_ORDER=field(LinkedHashMap.class,"accessOrder"),TAIL=field(LinkedHashMap.class,"tail");
         static final java.lang.reflect.Method GET=getNode();
@@ -80,14 +92,29 @@ public final class SourceMapBridge {
     /** Per receiver: publishing a gate and entering an unguarded writer share this monitor. */
     private static final class Scope {
         volatile Gate gate;
-        volatile boolean born,concurrent,holder,carrier;
+        volatile boolean concurrent,holder,carrier;
         java.util.concurrent.locks.ReentrantReadWriteLock concurrentGate;
-        int active;
     }
     private static final class Frame {
-        final Object receiver;final Scope scope;final Gate gate;final Thread thread=Thread.currentThread();
-        boolean active=true,affects=true;Object publication;
-        Frame(Object receiver,Scope scope,Gate gate) { this.receiver=receiver;this.scope=scope;this.gate=gate; }
+        Object receiver;Key key;Gate gate;final Thread thread=Thread.currentThread();
+        boolean active,affects,pooled;Object publication;Class<?> caller;Frame next;
+        Frame(Object receiver,Key key,Gate gate) { reset(receiver,key,gate); }
+        void reset(Object receiver,Key key,Gate gate){this.receiver=receiver;this.key=key;this.gate=gate;active=true;affects=true;}
+    }
+    private static final ThreadLocal<Frame> FREE_FRAMES=new ThreadLocal<>();
+    private static final ThreadLocal<ConcurrentFrame> FREE_CONCURRENT=new ThreadLocal<>();
+    // Only an actual woven JDK caller can borrow and return an ordinary-operation
+    // frame. Controller/public carrier tokens remain unique for their lifetime.
+    private static Frame operationFrame(Object receiver,Key key,Gate gate,Class<?> caller){
+        boolean pooled=gate==null&&(caller==HashMap.class||caller==LinkedHashMap.class||caller==ArrayList.class||caller==HashNodes.NODE);
+        Frame frame=pooled?FREE_FRAMES.get():null;
+        if(frame==null)frame=new Frame(receiver,key,gate);
+        else {FREE_FRAMES.set(frame.next);frame.next=null;frame.reset(receiver,key,gate);}
+        frame.pooled=pooled;frame.caller=caller;return frame;
+    }
+    private static void releaseFrame(Frame frame){
+        frame.receiver=null;frame.key=null;frame.gate=null;frame.publication=null;frame.caller=null;
+        if(frame.pooled){frame.next=FREE_FRAMES.get();FREE_FRAMES.set(frame);}
     }
     private SourceMapBridge() { }
     public static int version() { return 1; }
@@ -132,19 +159,20 @@ public final class SourceMapBridge {
         finally { QUERY.remove(); }
     }
     private static final class ConcurrentFrame {
-        final Scope scope;final java.util.concurrent.locks.Lock gate;final Object map;
-        final Thread thread=Thread.currentThread();boolean closed;Object publication;
-        ConcurrentFrame(Object map,Scope scope,java.util.concurrent.locks.Lock gate){this.map=map;this.scope=scope;this.gate=gate;}
+        Key key;java.util.concurrent.locks.Lock gate;Object map;
+        final Thread thread=Thread.currentThread();boolean closed,pooled;Object publication;ConcurrentFrame next;
+        ConcurrentFrame(Object map,Key key,java.util.concurrent.locks.Lock gate){reset(map,key,gate);}
+        void reset(Object map,Key key,java.util.concurrent.locks.Lock gate){this.map=map;this.key=key;this.gate=gate;closed=false;}
     }
     static void registerHolder(Object holder){
-        if(CALLER.getCallerClass()!=TaskBridge.class)throw new SecurityException("SOURCE_HOLDER_WRITER_REQUIRED");
-        INTERNAL.set(true);try{scope(holder).holder=true;}finally{INTERNAL.remove();}
+        if(CALLER.getCallerClass()!=ControlBridge.class)throw new SecurityException("SOURCE_HOLDER_WRITER_REQUIRED");
+        INTERNAL.set(true);try{Key key=key(holder,true);synchronized(key){controlScope(key).holder=true;if(CodeSourceBridge.analysisContainer(holder))key.born=true;}}finally{INTERNAL.remove();}
     }
     static void registerCarrier(Object carrier){
-        if(CALLER.getCallerClass()!=TaskBridge.class)throw new SecurityException("SOURCE_CARRIER_WRITER_REQUIRED");
+        if(CALLER.getCallerClass()!=ControlBridge.class)throw new SecurityException("SOURCE_CARRIER_WRITER_REQUIRED");
         INTERNAL.set(true);try{
-            Scope scope=scope(carrier);scope.carrier=true;
-            synchronized(scope){if(scope.gate==null)scope.gate=new Gate(carrier);scope.gate.source=true;}
+            Key key=key(carrier,true);synchronized(key){Scope scope=controlScope(key);scope.carrier=true;if(CodeSourceBridge.analysisContainer(carrier))key.born=true;
+                if(scope.gate==null)scope.gate=new Gate(carrier);scope.gate.source=true;}
         }finally{INTERNAL.remove();}
     }
     public static boolean carrierRegistered(Object carrier){
@@ -152,7 +180,7 @@ public final class SourceMapBridge {
         INTERNAL.set(true);try{Scope scope=scope(carrier,false);return scope!=null&&scope.carrier;}finally{INTERNAL.remove();}
     }
     static void recoveredChange(Object map){
-        if(CALLER.getCallerClass()!=TaskBridge.class)throw new SecurityException("SOURCE_RECOVERY_WRITER_REQUIRED");
+        if(CALLER.getCallerClass()!=ControlBridge.class)throw new SecurityException("SOURCE_RECOVERY_WRITER_REQUIRED");
         Scope scope=scope(map,false);Gate gate=scope==null?null:scope.gate;
         if(gate==null||!gate.lock.isHeldByCurrentThread())throw new IllegalMonitorStateException("SOURCE_RECOVERY_GATE_REQUIRED");
         gate.revision++;changed(map);
@@ -162,58 +190,80 @@ public final class SourceMapBridge {
         if(!enabled||holder==null||INTERNAL.get()!=null)return false;
         INTERNAL.set(true);try{Scope scope=scope(holder,false);return scope!=null&&scope.holder;}finally{INTERNAL.remove();}
     }
+    private static boolean analysisContainer(Object receiver){
+        // Only the exact constructor-observed private collection has this
+        // role. It is protected control state, so a foreign callback cannot
+        // mutate it by borrowing the compiler's deeper stack frame. A later
+        // business holder/carrier registration keeps its ordinary observation.
+        if(!CodeSourceBridge.analysisContainer(receiver))return false;
+        Scope scope=scope(receiver,false);
+        return scope==null||!scope.holder&&!scope.carrier&&scope.gate==null&&!scope.concurrent;
+    }
     /** Concurrent writers keep their original parallel bin semantics. Only publication takes a write lock. */
     public static Object enterConcurrent(Object map){
         if(!enabled||INTERNAL.get()!=null)return null;
         if(CALLER.getCallerClass()!=java.util.concurrent.ConcurrentHashMap.class)throw new SecurityException("ACTUAL_CONCURRENT_WRITER_REQUIRED");
-        Scope scope;java.util.concurrent.locks.Lock gate;
+        if(analysisContainer(map))return null;
+        Key key;Scope scope;java.util.concurrent.locks.Lock gate;
         INTERNAL.set(true);
-        try{scope=scope(map);synchronized(scope){gate=scope.concurrentGate==null?null:scope.concurrentGate.readLock();if(gate==null)scope.active++;}}
+        try{key=key(map,true);synchronized(key){scope=key.scope;gate=scope==null||scope.concurrentGate==null?null:scope.concurrentGate.readLock();if(gate==null)key.active++;}}
         finally{INTERNAL.remove();}
         if(gate!=null)gate.lock();
-        ConcurrentFrame frame=new ConcurrentFrame(map,scope,gate);
-        try{if(scope.concurrent)frame.publication=TaskBridge.beginSourcePublication(map);return frame;}
-        catch(RuntimeException|Error failure){if(gate!=null)gate.unlock();else synchronized(scope){scope.active--;}throw failure;}
+        boolean pooled=gate==null&&(scope==null||!scope.concurrent);ConcurrentFrame frame=pooled?FREE_CONCURRENT.get():null;
+        if(frame==null)frame=new ConcurrentFrame(map,key,gate);
+        else{FREE_CONCURRENT.set(frame.next);frame.next=null;frame.reset(map,key,gate);}
+        frame.pooled=pooled;
+        try{if(scope!=null&&scope.concurrent)frame.publication=ControlBridge.beginSourcePublication(map);return frame;}
+        catch(RuntimeException|Error failure){if(gate!=null)gate.unlock();else synchronized(key){key.active--;}releaseConcurrent(frame);throw failure;}
     }
     public static void exitConcurrent(Object token){
         if(token==null)return;
         if(!(token instanceof ConcurrentFrame frame)||frame.thread!=Thread.currentThread())throw new IllegalMonitorStateException("CONCURRENT_WRITER_THREAD_REQUIRED");
+        if(frame.pooled&&CALLER.getCallerClass()!=java.util.concurrent.ConcurrentHashMap.class)throw new SecurityException("ACTUAL_CONCURRENT_WRITER_REQUIRED");
         if(frame.closed)return;frame.closed=true;
         try{changed(frame.map);}finally{
-            try{if(frame.publication!=null)TaskBridge.endSourcePublication(frame.publication);}
-            finally{if(frame.gate!=null)frame.gate.unlock();else synchronized(frame.scope){frame.scope.active--;}}
+            try{if(frame.publication!=null)ControlBridge.endSourcePublication(frame.publication);}
+            finally{try{if(frame.gate!=null)frame.gate.unlock();else synchronized(frame.key){frame.key.active--;}}finally{releaseConcurrent(frame);}}
         }
     }
+    private static void releaseConcurrent(ConcurrentFrame frame){
+        frame.map=null;frame.key=null;frame.gate=null;frame.publication=null;
+        if(frame.pooled){frame.next=FREE_CONCURRENT.get();FREE_CONCURRENT.set(frame);}
+    }
     static java.util.concurrent.locks.Lock publicationGate(Object incoming){
-        if(CALLER.getCallerClass()!=TaskBridge.class)throw new SecurityException("SOURCE_PUBLICATION_WRITER_REQUIRED");
+        if(CALLER.getCallerClass()!=ControlBridge.class)throw new SecurityException("SOURCE_PUBLICATION_WRITER_REQUIRED");
         if(!enabled||!failure.isEmpty()||incoming==null)return null;
         if(hashMap(incoming)){
             Gate gate=ready(incoming);if(gate==null||!gate.lock.tryLock())return null;
             if(gate.readers!=0){gate.lock.unlock();return null;}return gate.lock;
         }
-        Scope scope=scope(incoming,false);if(scope==null||!scope.born)return null;
+        Key key=key(incoming,false);if(key==null||!key.born)return null;
+        Scope scope;synchronized(key){scope=controlScope(key);}
         if(incoming.getClass()==ArrayList.class||scalarCarrier(incoming)){
-            Gate gate;synchronized(scope){gate=scope.gate;if(gate==null)scope.gate=gate=new Gate(incoming);}
+            Gate gate;synchronized(key){gate=scope.gate;if(gate==null)scope.gate=gate=new Gate(incoming);}
             if(!gate.lock.tryLock())return null;
-            synchronized(scope){if(scope.active!=0||gate.readers!=0){gate.lock.unlock();return null;}}
+            synchronized(key){if(key.active!=0||gate.readers!=0){gate.lock.unlock();return null;}}
             gate.ready=true;return gate.lock;
         }
         if(incoming.getClass()==java.util.concurrent.ConcurrentHashMap.class){
             java.util.concurrent.locks.Lock gate;
-            synchronized(scope){if(scope.concurrentGate==null)scope.concurrentGate=new java.util.concurrent.locks.ReentrantReadWriteLock();gate=scope.concurrentGate.writeLock();}
+            synchronized(key){if(scope.concurrentGate==null)scope.concurrentGate=new java.util.concurrent.locks.ReentrantReadWriteLock();gate=scope.concurrentGate.writeLock();}
             if(!gate.tryLock())return null;
-            synchronized(scope){if(scope.active!=0){gate.unlock();return null;}}
+            synchronized(key){if(key.active!=0){gate.unlock();return null;}}
             return gate;
         }
         return null;
     }
     /** A completed field/Unsafe scope reports the real holder while its receiver gate is held. */
     static void holderChanged(Object holder) {
-        if(CALLER.getCallerClass()!=TaskBridge.class)throw new SecurityException("ACTUAL_HOLDER_WRITE_REQUIRED");
         var observer=changeObserver;
         if(!enabled||observer==null||holder==null||INTERNAL.get()!=null||QUERY.get()!=null)return;
-        if(TaskBridge.primitiveSourceIndex(holder)){
-            if(TaskBridge.sourceIndexWriting(holder))return;
+        // Before the real observer is installed this is an effect-free no-op.
+        // Do not walk every vanilla array-store stack merely to return. Actual
+        // revision updates/callbacks below still require the exact writer.
+        if(CALLER.getCallerClass()!=ControlBridge.class)throw new SecurityException("ACTUAL_HOLDER_WRITE_REQUIRED");
+        if(ControlBridge.primitiveSourceIndex(holder)){
+            if(ControlBridge.sourceIndexWriting(holder))return;
             Scope scope=scope(holder,false);if(scope!=null&&scope.gate!=null)scope.gate.revision++;
         }
         QUERY.set(true);
@@ -222,7 +272,7 @@ public final class SourceMapBridge {
         finally {QUERY.remove();}
     }
     static long indexRevision(Object map){
-        if(CALLER.getCallerClass()!=TaskBridge.class)throw new SecurityException("SOURCE_INDEX_WRITER_REQUIRED");
+        if(CALLER.getCallerClass()!=ControlBridge.class)throw new SecurityException("SOURCE_INDEX_WRITER_REQUIRED");
         Scope scope=scope(map,false);return scope==null||scope.gate==null?-1:scope.gate.revision;
     }
     public static boolean valueAllowed(Object receiver,Object key,Object value) {
@@ -232,7 +282,7 @@ public final class SourceMapBridge {
         if(INTERNAL.get()!=null)return true;
         if(!enabled)return true;
         // The backing entry checks this receiver's control guard before its element policy.
-        if(!BackingBridge.incomingAllowed(receiver,value)||key!=value&&!BackingBridge.incomingAllowed(receiver,key))return false;
+        if(!BackingBridge.incomingPairAllowed(receiver,key,value))return false;
         if(executionMetadata(receiver))return true;
         var guard=writeGuard;
         if(!enabled||guard==null||receiver==null||value==null||INTERNAL.get()!=null||QUERY.get()!=null)return true;
@@ -262,75 +312,19 @@ public final class SourceMapBridge {
         // remove the exact queued Key without disturbing a live hash collision.
         for(int remaining=budget;remaining>0;remaining--) {
             Key dead=(Key)DEAD.poll();if(dead==null)break;
-            Bucket bucket=bucket(dead.hash);if(bucket==null)continue;
-            Key previous=null,entry=bucket.first;
+            int bucket=rootIndex(dead.hash);
+            Key previous=null,entry=scopes[bucket];
             while(entry!=null&&entry!=dead){previous=entry;entry=entry.next;}
             if(entry==null)continue;
             if(previous!=null)previous.next=entry.next;
-            else bucket.first=entry.next;
+            else scopes[bucket]=entry.next;
             entry.next=null;
-            if(bucket.first==null)removeBucket(bucket);
         }
     }
     private static void indexWriter(Class<?> caller) {
         if(caller!=SourceMapBridge.class||!Thread.holdsLock(MONITOR))throw new SecurityException("SOURCE_SCOPE_INDEX_WRITER_REQUIRED");
     }
     private static int rootIndex(int hash) { return (hash^(hash>>>16))&(scopes.length-1); }
-    private static Bucket bucket(int hash) {
-        Bucket bucket=scopes[rootIndex(hash)];
-        while(bucket!=null&&hash!=bucket.hash)bucket=hash<bucket.hash?bucket.left:bucket.right;
-        return bucket;
-    }
-    private static int height(Bucket bucket) { return bucket==null?0:bucket.height; }
-    private static void replaceBucket(Bucket previous,Bucket next) {
-        indexWriter(CALLER.getCallerClass());
-        Bucket parent=previous.parent;
-        if(parent==null)scopes[rootIndex(previous.hash)]=next;else if(parent.left==previous)parent.left=next;else parent.right=next;
-        if(next!=null)next.parent=parent;
-    }
-    private static Bucket rotateLeft(Bucket bucket) {
-        indexWriter(CALLER.getCallerClass());
-        Bucket next=bucket.right;replaceBucket(bucket,next);bucket.right=next.left;
-        if(bucket.right!=null)bucket.right.parent=bucket;
-        next.left=bucket;bucket.parent=next;
-        bucket.height=1+Math.max(height(bucket.left),height(bucket.right));next.height=1+Math.max(height(next.left),height(next.right));return next;
-    }
-    private static Bucket rotateRight(Bucket bucket) {
-        indexWriter(CALLER.getCallerClass());
-        Bucket next=bucket.left;replaceBucket(bucket,next);bucket.left=next.right;
-        if(bucket.left!=null)bucket.left.parent=bucket;
-        next.right=bucket;bucket.parent=next;
-        bucket.height=1+Math.max(height(bucket.left),height(bucket.right));next.height=1+Math.max(height(next.left),height(next.right));return next;
-    }
-    private static void balance(Bucket bucket) {
-        indexWriter(CALLER.getCallerClass());
-        while(bucket!=null) {
-            bucket.height=1+Math.max(height(bucket.left),height(bucket.right));int difference=height(bucket.left)-height(bucket.right);
-            if(difference>1) {
-                if(height(bucket.left.left)<height(bucket.left.right))rotateLeft(bucket.left);
-                bucket=rotateRight(bucket);
-            } else if(difference< -1) {
-                if(height(bucket.right.right)<height(bucket.right.left))rotateRight(bucket.right);
-                bucket=rotateLeft(bucket);
-            }
-            bucket=bucket.parent;
-        }
-    }
-    private static void removeBucket(Bucket bucket) {
-        indexWriter(CALLER.getCallerClass());Bucket changed;
-        if(bucket.left==null||bucket.right==null) {
-            changed=bucket.parent;replaceBucket(bucket,bucket.left==null?bucket.right:bucket.left);
-        } else {
-            Bucket next=bucket.right;while(next.left!=null)next=next.left;
-            if(next.parent==bucket)changed=next;
-            else {
-                changed=next.parent;replaceBucket(next,next.right);
-                next.right=bucket.right;next.right.parent=next;
-            }
-            replaceBucket(bucket,next);next.left=bucket.left;next.left.parent=next;
-        }
-        bucket.parent=null;bucket.left=null;bucket.right=null;balance(changed);
-    }
     /** Exact current scope owner for a HashMap node; the policy and node store use one gate. */
     public static Object ownerOf(Object node) {
         if(!enabled||node==null||INTERNAL.get()!=null)return null;
@@ -345,22 +339,26 @@ public final class SourceMapBridge {
         return scope(receiver,true);
     }
     private static Scope scope(Object receiver,boolean create) {
+        Key key=key(receiver,create);if(key==null)return null;
+        if(!create)return key.scope;
+        synchronized(key){return controlScope(key);}
+    }
+    /** Only a selected holder/carrier or an actual snapshot allocates control state. */
+    private static Scope controlScope(Key key){
+        Scope scope=key.scope;if(scope==null)key.scope=scope=new Scope();return scope;
+    }
+    private static Key key(Object receiver,boolean create) {
         synchronized(MONITOR) {
-            int hash=System.identityHashCode(receiver);Bucket parent=null,bucket=scopes[rootIndex(hash)];
-            while(bucket!=null&&hash!=bucket.hash){parent=bucket;bucket=hash<bucket.hash?bucket.left:bucket.right;}
-            if(bucket!=null)for(Key entry=bucket.first;entry!=null;entry=entry.next)if(entry.get()==receiver)return entry.scope;
+            int hash=System.identityHashCode(receiver),bucket=rootIndex(hash);
+            for(Key entry=scopes[bucket];entry!=null;entry=entry.next)
+                if(entry.hash==hash&&entry.get()==receiver)return entry;
             if(!create)return null;
             indexWriter(CALLER.getCallerClass());Key added=new Key(receiver);
-            if(bucket!=null){added.next=bucket.first;bucket.first=added;}
-            else {
-                Bucket next=new Bucket(added,parent);
-                if(parent==null)scopes[rootIndex(hash)]=next;else if(hash<parent.hash)parent.left=next;else parent.right=next;
-                balance(parent);
-            }
+            added.next=scopes[bucket];scopes[bucket]=added;
             // Charge retirement to every actual insertion, including node scopes.
             // A cleared key cannot match a live receiver while it awaits this work.
             sweep(2);
-            return added.scope;
+            return added;
         }
     }
     private static boolean hashMap(Object map){return map!=null&&(map.getClass()==HashMap.class||map.getClass()==java.util.LinkedHashMap.class);}
@@ -368,9 +366,11 @@ public final class SourceMapBridge {
         if(!enabled||!hashMap(map)&&map.getClass()!=ArrayList.class&&!scalarCarrier(map)&&map.getClass()!=java.util.concurrent.ConcurrentHashMap.class||INTERNAL.get()!=null)return;
         Class<?> caller=CALLER.getCallerClass();
         if(caller!=map.getClass()&&!(map.getClass()==java.util.LinkedHashMap.class&&caller==HashMap.class))return;
+        boolean analysis=ANALYSIS_CALLER.walk(ANALYSIS);
         INTERNAL.set(true);
         try {
-            scope(map).born=true;
+            if(analysis){CodeSourceBridge.analysisContainerControl(map);return;}
+            key(map,true).born=true;
         }
         finally { INTERNAL.remove(); }
     }
@@ -382,13 +382,17 @@ public final class SourceMapBridge {
     }
     public static Object enter(Object receiver,boolean mutation) {
         if(!enabled||executionMetadata(receiver)||INTERNAL.get()!=null)return null;
-        Scope scope;Gate gate;
+        // Compiler work tables are private even before an image is published
+        // to the control directory. Existing business holders/carriers retain
+        // their observation; this never bypasses a field/index/array write gate.
+        if(analysisContainer(receiver))return null;
+        Key key;Gate gate;
         INTERNAL.set(true);
         try {
-            scope=scope(receiver);
-            synchronized(scope) { gate=scope.gate;if(gate==null)scope.active++; }
+            key=key(receiver,true);
+            synchronized(key) { Scope scope=key.scope;gate=scope==null?null:scope.gate;if(gate==null)key.active++; }
         } finally { INTERNAL.remove(); }
-        Frame frame=new Frame(receiver,scope,gate);frame.affects=mutation;
+        Frame frame=operationFrame(receiver,key,gate,CALLER.getCallerClass());frame.affects=mutation;
         if(gate!=null) {
             gate.lock.lock();
             try {
@@ -398,8 +402,8 @@ public final class SourceMapBridge {
                     Object map=gate.owner.get();
                     if(map!=null)for(Object node:((HashMap<?,?>)map).entrySet())if(node==receiver) { frame.affects=true;break; }
                 }
-                if(frame.affects&&gate.source)frame.publication=TaskBridge.beginSourcePublication(gate.owner.get());
-            } catch(RuntimeException|Error unavailable) { if(!mutation)gate.readers--;gate.lock.unlock();throw unavailable; }
+                if(frame.affects&&gate.source)frame.publication=ControlBridge.beginSourcePublication(gate.owner.get());
+            } catch(RuntimeException|Error unavailable) { if(!mutation)gate.readers--;gate.lock.unlock();frame.active=false;releaseFrame(frame);throw unavailable; }
         }
         return frame;
     }
@@ -408,12 +412,13 @@ public final class SourceMapBridge {
         if(!(token instanceof Frame frame)||frame.thread!=Thread.currentThread()||!frame.active) {
             failure="HASHMAP_SCOPE_MISMATCH";return;
         }
+        if(frame.pooled&&CALLER.getCallerClass()!=frame.caller)throw new SecurityException("ACTUAL_SCOPE_WRITER_REQUIRED");
         frame.active=false;
-        if(frame.gate!=null) {
+        try{if(frame.gate!=null) {
             if(frame.affects)frame.gate.revision++;else if(hashMap(frame.receiver)||frame.receiver.getClass()==ArrayList.class||scalarCarrier(frame.receiver))frame.gate.readers--;
             try { if(frame.affects) { Object map=frame.gate.owner.get();if(map!=null)changed(map); } }
-            finally {try{if(frame.publication!=null)TaskBridge.endSourcePublication(frame.publication);}finally{frame.gate.lock.unlock();}}
-        } else synchronized(frame.scope) { frame.scope.active--; }
+            finally {try{if(frame.publication!=null)ControlBridge.endSourcePublication(frame.publication);}finally{frame.gate.lock.unlock();}}
+        } else synchronized(frame.key) { frame.key.active--; }}finally{releaseFrame(frame);}
     }
     public static Object enterNodeAccess(Object map,Object node) {
         if(CALLER.getCallerClass()!=LinkedHashMap.class)throw new SecurityException("ACTUAL_LINKED_MAP_ACCESS_REQUIRED");
@@ -422,7 +427,7 @@ public final class SourceMapBridge {
         if(!(token instanceof Frame frame)||frame.gate==null)return token;
         try {
             if(HashNodes.ACCESS_ORDER.getBoolean(map)&&HashNodes.TAIL.get(map)!=node) {
-                if(frame.gate.source)frame.publication=TaskBridge.beginSourcePublication(map);
+                if(frame.gate.source)frame.publication=ControlBridge.beginSourcePublication(map);
                 frame.gate.readers--;frame.affects=true;
             }
             return token;
@@ -431,28 +436,42 @@ public final class SourceMapBridge {
     }
     public static void node(Object map,Object node) {
         if(!enabled||node==null||executionMetadata(map)||INTERNAL.get()!=null)return;
+        if(analysisContainer(map)){
+            Class<?> caller=CALLER.getCallerClass();
+            if(caller!=HashMap.class&&caller!=java.util.LinkedHashMap.class)return;
+            // The exact node still becomes protected control state. It needs
+            // no business source Gate/Scope until the actual parent is later
+            // registered as a holder/carrier; ready() then binds all live nodes.
+            INTERNAL.set(true);
+            try{CodeSourceBridge.analysisNodeControl(map,node);}finally{INTERNAL.remove();}
+            return;
+        }
         INTERNAL.set(true);
         try {
             Scope owner=scope(map,false);Gate gate=owner==null?null:owner.gate;
+            // No registration or authorization happens for an unrelated map.
+            // Late source registration still walks and binds its existing nodes in ready().
+            boolean controlled=gate==null&&ControlBridge.controlled(map);
+            if(gate==null&&!controlled)return;
             Class<?> caller=CALLER.getCallerClass();
             boolean actualFactory=caller==HashMap.class||caller==java.util.LinkedHashMap.class;
-            if(actualFactory&&TaskBridge.controlled(map)&&gate==null) {
-                owner=scope(map);synchronized(owner){if(owner.gate==null)owner.gate=new Gate(map);gate=owner.gate;}
+            if(actualFactory&&controlled) {
+                Key key=key(map,true);synchronized(key){owner=controlScope(key);if(owner.gate==null)owner.gate=new Gate(map);gate=owner.gate;}
             }
             if(gate!=null&&actualFactory) {
-                Scope entry=scope(node);synchronized(entry) {entry.gate=gate;}
+                Key entry=key(node,true);synchronized(entry) {controlScope(entry).gate=gate;}
             }
         } finally { INTERNAL.remove(); }
     }
     /** Late registration first drains operations which entered before the map was registered. */
     private static Gate ready(Object object) {
         if(!enabled||!failure.isEmpty()||!hashMap(object))return null;
-        Scope owner=scope(object,false);if(owner==null||!owner.born)return null;
-        Gate gate=owner.gate;if(gate!=null&&gate.ready)return gate;
+        Key owner=key(object,false);if(owner==null||!owner.born)return null;
+        Scope scope=owner.scope;Gate gate=scope==null?null:scope.gate;if(gate!=null&&gate.ready)return gate;
         INTERNAL.set(true);
         try {
             synchronized(owner) {
-                gate=owner.gate;if(gate==null)owner.gate=gate=new Gate(object);
+                scope=controlScope(owner);gate=scope.gate;if(gate==null)scope.gate=gate=new Gate(object);
             }
             if(!gate.lock.tryLock())return null;
             try {
@@ -468,13 +487,13 @@ public final class SourceMapBridge {
                 while(gate.bindingBucket<table.length&&budget-->0){
                     Object entry=gate.bindingNext==null?table[gate.bindingBucket]:gate.bindingNext.get();
                     if(entry==null){gate.bindingBucket++;gate.bindingNext=null;continue;}
-                    Object next=HashNodes.NEXT.get(entry);Scope node=scope(entry);
-                    synchronized(node){node.gate=gate;if(node.active!=0)gate.draining.add(node);}
+                    Object next=HashNodes.NEXT.get(entry);Key node=key(entry,true);
+                    synchronized(node){controlScope(node).gate=gate;if(node.active!=0)gate.draining.add(node);}
                     gate.bindingNext=next==null?null:new OwnerRef(next);
                     if(next==null)gate.bindingBucket++;
                 }
                 if(gate.bindingBucket<table.length)return null;
-                for(var cursor=gate.draining.iterator();cursor.hasNext();){Scope node=cursor.next();synchronized(node){if(node.active==0)cursor.remove();}}
+                for(var cursor=gate.draining.iterator();cursor.hasNext();){Key node=cursor.next();synchronized(node){if(node.active==0)cursor.remove();}}
                 if(!gate.draining.isEmpty())return null;
                 gate.ready=true;return gate;
             } catch(IllegalAccessException unavailable){throw new IllegalStateException("SOURCE_MAP_ACTUAL_NODES_UNAVAILABLE",unavailable);
@@ -516,12 +535,12 @@ public final class SourceMapBridge {
     }
     private static boolean withList(Object list,Runnable action,boolean mutation) {
         if(!enabled||!failure.isEmpty()||list==null||list.getClass()!=ArrayList.class)return false;
-        Scope scope=scope(list,false);if(scope==null||!scope.born)return false;
+        Key key=key(list,false);if(key==null||!key.born)return false;Scope scope;
         Gate gate;
-        synchronized(scope) {gate=scope.gate;if(gate==null)scope.gate=gate=new Gate(list);}
+        synchronized(key) {scope=controlScope(key);gate=scope.gate;if(gate==null)scope.gate=gate=new Gate(list);}
         if(!gate.lock.tryLock())return false;
         try {
-            synchronized(scope) {if(scope.active!=0)return false;}
+            synchronized(key) {if(key.active!=0)return false;}
             gate.ready=true;action.run();if(mutation)gate.revision++;return true;
         }finally {gate.lock.unlock();}
     }

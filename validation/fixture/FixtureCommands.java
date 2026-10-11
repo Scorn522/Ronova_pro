@@ -11,6 +11,13 @@ import java.util.UUID;
 /** Scenario trigger: use the installed player command instead of calling the protected runtime API. */
 final class FixtureCommands {
     private FixtureCommands() { }
+    static void requestConsole(String command)throws java.io.IOException {
+        java.nio.file.Files.writeString(java.nio.file.Path.of("fixture-console-commands.txt"),"ronova_pro "+command+"\n",
+                java.nio.file.StandardOpenOption.CREATE,java.nio.file.StandardOpenOption.APPEND);
+    }
+    static UUID newOperation(ProRuntime runtime,java.util.Set<UUID> before) {
+        for(UUID id:runtime.operations())if(!before.contains(id))return id;return null;
+    }
     static UUID clear(ProRuntime runtime, Entity target) { return entityAction(runtime,"clear",target); }
     static UUID protect(ProRuntime runtime, Entity target) { return entityAction(runtime,"protect",target); }
     static void revoke(ProRuntime runtime, Entity target) {

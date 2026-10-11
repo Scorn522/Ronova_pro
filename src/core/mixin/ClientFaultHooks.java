@@ -50,7 +50,7 @@ public final class ClientFaultHooks {
         private static void shaderClosed(int id,CallbackInfo ci) { ClientFaults.closedShaderId(id); }
     }
     @Mixin(ShaderInstance.class)
-    public static abstract class Shader implements ClientFaults.ShaderState,dev.ronova.pro.ClientItemFaults.ShaderCache {
+    public static abstract class Shader implements ClientFaults.ShaderState,dev.ronova.pro.ClientDrawFaults.ShaderCache {
         @Unique private boolean ronova$faulted,ronova$disposed;
         @Shadow @Final private String name;
         @Shadow private static int lastProgramId;

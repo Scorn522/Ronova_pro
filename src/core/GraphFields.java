@@ -41,7 +41,7 @@ final class GraphFields {
         if(!field.getType().isPrimitive()&&value!=null&&!field.getType().isInstance(value))throw new IllegalArgumentException("FIELD_GRAPH_VALUE_TYPE_MISMATCH");
         if(!same(field,read(field,receiver),expected))return false;
         Class<?> bridge=Class.forName("dev.ronova.pro.bootstrap.TaskBridge",false,null);Object target=Modifier.isStatic(field.getModifiers())?field.getDeclaringClass():receiver;
-        Object gate=bridge.getMethod("beginRecoveryMutation",Object.class).invoke(null,target);if(Boolean.FALSE.equals(gate))return false;
+        Object gate=Class.forName("dev.ronova.pro.bootstrap.ControlBridge",false,null).getMethod("beginRecoveryMutation",Object.class).invoke(null,target);if(Boolean.FALSE.equals(gate))return false;
         try{
             if(!same(field,read(field,receiver),expected))return false;
             if(!field.getDeclaringClass().isHidden()&&!field.getDeclaringClass().isRecord()){
@@ -51,12 +51,12 @@ final class GraphFields {
                 }else{String suffix=field.getType().getName();suffix=Character.toUpperCase(suffix.charAt(0))+suffix.substring(1);UNSAFE_TYPE.getMethod("put"+suffix+"Volatile",Object.class,long.class,field.getType()).invoke(UNSAFE,base,offset,value);}
             }else if(!Boolean.TRUE.equals(NATIVE_WRITE.invoke(null,field,receiver,expected,value)))return false;
             return same(field,read(field,receiver),value);
-        }finally{bridge.getMethod("endFieldMutation",Object.class).invoke(null,gate);}
+        }finally{Class.forName("dev.ronova.pro.bootstrap.ControlBridge",false,null).getMethod("endFieldMutation",Object.class).invoke(null,gate);}
     }
     static boolean writeArray(Object array,int index,Object expected,Object value)throws ReflectiveOperationException{
         Class<?> type=array.getClass().getComponentType();if(type==null||index<0||index>=Array.getLength(array))throw new IllegalArgumentException("FIELD_GRAPH_ARRAY_POSITION_CHANGED");
         if(!type.isPrimitive()&&value!=null&&!type.isInstance(value))throw new IllegalArgumentException("FIELD_GRAPH_ARRAY_VALUE_TYPE_MISMATCH");
-        Class<?> bridge=Class.forName("dev.ronova.pro.bootstrap.TaskBridge",false,null);Object gate=bridge.getMethod("beginRecoveryMutation",Object.class).invoke(null,array);if(Boolean.FALSE.equals(gate))return false;
+        Class<?> bridge=Class.forName("dev.ronova.pro.bootstrap.TaskBridge",false,null);Object gate=Class.forName("dev.ronova.pro.bootstrap.ControlBridge",false,null).getMethod("beginRecoveryMutation",Object.class).invoke(null,array);if(Boolean.FALSE.equals(gate))return false;
         try{
             Object current=Array.get(array,index);if(type.isPrimitive()?!bitsEqual(type,current,expected):current!=expected)return false;
             int base=((Number)UNSAFE_TYPE.getMethod("arrayBaseOffset",Class.class).invoke(UNSAFE,array.getClass())).intValue();
@@ -65,6 +65,6 @@ final class GraphFields {
             if(!type.isPrimitive()){if(!Boolean.TRUE.equals(UNSAFE_TYPE.getMethod("compareAndSwapObject",Object.class,long.class,Object.class,Object.class).invoke(UNSAFE,array,offset,expected,value)))return false;}
             else{String suffix=type.getName();suffix=Character.toUpperCase(suffix.charAt(0))+suffix.substring(1);UNSAFE_TYPE.getMethod("put"+suffix+"Volatile",Object.class,long.class,type).invoke(UNSAFE,array,offset,value);}
             Object readback=Array.get(array,index);return type.isPrimitive()?bitsEqual(type,readback,value):readback==value;
-        }finally{bridge.getMethod("endFieldMutation",Object.class).invoke(null,gate);}
+        }finally{Class.forName("dev.ronova.pro.bootstrap.ControlBridge",false,null).getMethod("endFieldMutation",Object.class).invoke(null,gate);}
     }
 }

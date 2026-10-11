@@ -59,10 +59,7 @@ minecraft {
                 jvmArgs "-javaagent:${project.file(project.property('recoveryAgent')).absolutePath}=base64:${encodedPath}"
             }
             if (project.hasProperty('storageNative')) property 'ronova.pro.storage.native', project.file(project.property('storageNative')).absolutePath
-            if (project.hasProperty('validation') && project.hasProperty('faultPoint')) {
-                property 'ronova.pro.fault.point', project.property('faultPoint')
-                property 'ronova.pro.fault.action', project.findProperty('faultAction') ?: 'throw'
-            }
+
             property 'forge.logging.console.level', 'info'
             property 'mixin.env.remapRefMap', 'true'
             mods {
@@ -132,7 +129,11 @@ tasks.register('prelaunchJar',Jar) {
 }
 tasks.named('jar').configure {
     dependsOn 'recoveryAgentJar','recoveryBootstrapJar','prelaunchJar','compileStorageNative'
-    manifest { attributes('MixinConfigs': 'ronova_pro.mixins.json') }
+    manifest { attributes('MixinConfigs': 'ronova_pro.mixins.json',
+            'Main-Class':'dev.ronova.pro.prelaunch.PrelaunchMain') }
+    // The same core candidate is the early launcher and the installed mod.
+    // JournalLineage is already in main; do not package a second copy.
+    from(sourceSets.prelaunch.output) { include 'dev/ronova/pro/prelaunch/**' }
     // Nested payloads keep their own manifests, which is how the mod recognises them at runtime.
     from(tasks.named('recoveryAgentJar').flatMap { it.archiveFile }) { into 'ronova-payload' }
     from(tasks.named('recoveryBootstrapJar').flatMap { it.archiveFile }) { into 'ronova-payload' }

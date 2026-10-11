@@ -93,8 +93,8 @@ public final class IoBridge {
     static final class TemporaryLease {
         // next is assigned only when appending. Captured endpoints remain valid
         // after a return clears its ticket or a later borrow extends the chain.
-        Object lease;TemporaryLease next;
-        TemporaryLease(){}
+        Buffer buffer;Object lease;TemporaryLease next;
+        TemporaryLease(Buffer buffer,Object lease){this.buffer=buffer;this.lease=lease;}
     }
     /** One borrow boundary snapshots chain endpoints, not a second list of its tickets. */
     static final class BufferLeases {
@@ -127,8 +127,13 @@ public final class IoBridge {
         final Thread caller=Thread.currentThread();final Class<?> declaring;final String method;Object writes;boolean closed;
         DataRead(Class<?> declaring,String method){this.declaring=declaring;this.method=method;}
     }
-    private static Class<?> type(String name){try{return Class.forName(name,false,null);}catch(ClassNotFoundException failure){throw new ExceptionInInitializerError(failure);}}
-    private static Set<Class<?>> types(String...names){Set<Class<?>> values=Collections.newSetFromMap(new IdentityHashMap<>());for(String name:names)values.add(type(name));return values;}
+    private static Class<?> type(String name){
+        try{return Class.forName(name,false,null);}catch(ClassNotFoundException failure){
+            if(name.startsWith("sun.nio.ch.Windows")||name.equals("sun.nio.ch.Iocp")||name.equals("sun.nio.ch.PendingIoCache"))return null;
+            throw new ExceptionInInitializerError(failure);
+        }
+    }
+    private static Set<Class<?>> types(String...names){Set<Class<?>> values=Collections.newSetFromMap(new IdentityHashMap<>());for(String name:names){Class<?> actual=type(name);if(actual!=null)values.add(actual);}return values;}
     private static Set<Class<?>> allTypes(){
         Set<Class<?>> values=types("java.net.Socket","java.net.ServerSocket","java.net.DatagramSocket","java.net.SocketImpl","java.net.DelegatingSocketImpl",
                 "sun.nio.ch.SocketAdaptor","sun.nio.ch.ServerSocketAdaptor","sun.nio.ch.DatagramSocketAdaptor","sun.nio.ch.IOUtil","sun.nio.ch.Util","sun.nio.ch.SocketDispatcher","sun.nio.ch.FileDispatcherImpl",
@@ -191,7 +196,7 @@ public final class IoBridge {
     }
     public static Object dataReadOpen(FileDescriptor descriptor,long address,int length,boolean vector,Class<?> declaring,String where){
         platform(declaring,where);if(declaring!=IO_UTIL)throw new SecurityException("ACTUAL_IO_DISPATCHER_CALL_REQUIRED");
-        Scope scope=CURRENT.get();if(scope==null||TaskBridge.recoveryWriter()||!NativeControl.available())return null;
+        Scope scope=CURRENT.get();if(scope==null||ControlBridge.recoveryWriter()||!NativeControl.available())return null;
         if(scope.connection!=null&&scope.connection.descriptor!=descriptor)throw new SecurityException("ACTUAL_IO_READ_DESCRIPTOR_REQUIRED");
         DataRead read=new DataRead(declaring,where);long[] spans=vector?readVector(read,address,length,false):new long[]{address,length};
         read.writes=ResourceBridge.ioBufferWriting(currentBufferLeases(),spans,scope.sources);return read;
@@ -206,7 +211,8 @@ public final class IoBridge {
     public static void temporaryAcquired(Buffer buffer,Class<?> declaring,String where){
         platform(declaring,where);if(buffer==null)return;
         Scope scope=CURRENT.get();if(scope==null||scope.closed)return;
-        TemporaryLease entry=new TemporaryLease();entry.lease=ResourceBridge.borrowIoTemporary(buffer,scope.sources);if(entry.lease==null)return;
+        Object lease=ResourceBridge.borrowIoTemporary(buffer,scope.sources);if(lease==null)return;
+        TemporaryLease entry=new TemporaryLease(buffer,lease);
         synchronized(LOCK){
             Request request=scope.request;
             if(request!=null&&!request.finished){
@@ -230,8 +236,10 @@ public final class IoBridge {
     }
     private static void returnTemporaryBuffers(TemporaryLease first,TemporaryLease last,Buffer buffer){
         for(TemporaryLease entry=first;entry!=null;entry=entry.next){
-            Object lease;synchronized(LOCK){lease=entry.lease;}
-            if(lease!=null&&ResourceBridge.releaseIoBuffer(lease,buffer))synchronized(LOCK){entry.lease=null;}
+            Object lease;synchronized(LOCK){lease=entry.buffer==buffer?entry.lease:null;}
+            // A temporary ticket contains exactly this one buffer. Ordinary
+            // vector/request leases retain their own lifetime until completion.
+            if(lease!=null){ResourceBridge.releaseIoBuffers(lease);synchronized(LOCK){entry.lease=null;entry.buffer=null;}}
             if(entry==last)break;
         }
     }
@@ -239,7 +247,7 @@ public final class IoBridge {
         Throwable failure=null;
         for(TemporaryLease entry=first;entry!=null;entry=entry.next){
             Object lease;synchronized(LOCK){lease=entry.lease;}
-            if(lease!=null)try{ResourceBridge.releaseIoBuffers(lease);synchronized(LOCK){entry.lease=null;}}
+            if(lease!=null)try{ResourceBridge.releaseIoBuffers(lease);synchronized(LOCK){entry.lease=null;entry.buffer=null;}}
             catch(RuntimeException|Error cleanup){if(failure==null)failure=cleanup;else if(cleanup!=failure)failure.addSuppressed(cleanup);}
             if(entry==last)break;
         }
@@ -301,40 +309,40 @@ public final class IoBridge {
         OBSERVING.set(Boolean.TRUE);
         try{
             Layout layout=LAYOUTS.get(value.getClass());FileDescriptor fd=(FileDescriptor)layout.fd.get(value);if(fd==null)return;
-            Module[] sources=TaskBridge.resourceOperationSources(currentSources());
+            Module[] sources=ControlBridge.resourceOperationSources(currentSources());
             synchronized(LOCK){reap();Connection record=CONNECTIONS.get(new Key(value,false));
                 if(record==null){record=new Connection(value,fd,layout.fd);alias(record,value);}
                 else if(record.descriptor!=fd)throw new IllegalStateException("IO_DESCRIPTOR_ASSOCIATION_CHANGED");
                 addSources(record,sources);
             }
-            TaskBridge.resourceCreated(value,sources);
+            ControlBridge.resourceCreated(value,sources);
         }catch(IllegalAccessException failure){throw new IllegalStateException("IO_CONSTRUCTION_UNAVAILABLE",failure);}finally{OBSERVING.remove();}
     }
     public static void exposed(Object owner,Object value,Class<?> declaring,String where){
         platform(declaring,where);if(value==null||OBSERVING.get()!=null)return;OBSERVING.set(Boolean.TRUE);
         try{
             Connection connection=resolve(owner);if(connection==null)connection=resolve(value);if(connection==null)return;
-            Module[] sources=TaskBridge.resourceOperationSources(currentSources());
+            Module[] sources=ControlBridge.resourceOperationSources(currentSources());
             synchronized(LOCK){alias(connection,owner);alias(connection,value);addSources(connection,sources);}
-            TaskBridge.resourceCreated(owner,sources);TaskBridge.resourceCreated(value,sources);
+            ControlBridge.resourceCreated(owner,sources);ControlBridge.resourceCreated(value,sources);
         }catch(IllegalAccessException failure){throw new IllegalStateException("IO_DELEGATION_UNAVAILABLE",failure);}finally{OBSERVING.remove();}
     }
     public static Object enter(Object receiver,Object[] arguments,Class<?> declaring,String where)throws IOException {
-        platform(declaring,where);if(OBSERVING.get()!=null||TaskBridge.recoveryWriter())return null;
+        platform(declaring,where);if(OBSERVING.get()!=null||ControlBridge.recoveryWriter())return null;
         OBSERVING.set(Boolean.TRUE);Connection connection=null;boolean admitted=false;
         try{
-            if(!TaskBridge.taskEffectAllowed(receiver,"connection-io"))throw new ClosedChannelException();
+            if(!ControlBridge.taskEffectAllowed(receiver,"connection-io"))throw new ClosedChannelException();
             connection=resolve(receiver);
             if(connection==null)for(Object argument:arguments){
                 if(argument instanceof FileDescriptor descriptor){synchronized(LOCK){for(Connection candidate:CONNECTIONS.values())if(candidate.descriptor==descriptor){connection=candidate;break;}}}
                 if(connection!=null)break;
             }
-            Module[] sources=TaskBridge.resourceOperationSources(currentSources());
+            Module[] sources=ControlBridge.resourceOperationSources(currentSources());
             if(connection!=null)synchronized(LOCK){
                 if(connection.sealed||connection.closed)throw new ClosedChannelException();
                 connection.active++;admitted=true;addSources(connection,sources);
             }
-            if(connection!=null&&receiver!=null&&!TaskBridge.resourceExposedByOperation(receiver,sources))synchronized(LOCK){connection.unknownUse=true;}
+            if(connection!=null&&receiver!=null&&!ControlBridge.resourceExposedByOperation(receiver,sources))synchronized(LOCK){connection.unknownUse=true;}
             Scope scope=new Scope(receiver,declaring,where,connection,null,sources);
             scope.lease=ResourceBridge.borrowIoBuffers(arguments,sources);CURRENT.set(scope);return scope;
         }catch(IllegalAccessException failure){throw new IOException("IO_DESCRIPTOR_ASSOCIATION_UNAVAILABLE",failure);}
@@ -363,19 +371,19 @@ public final class IoBridge {
         if(failure instanceof RuntimeException exception)throw exception;if(failure instanceof Error error)throw error;
     }
     public static void closing(Object value,Class<?> declaring,String where)throws IOException {
-        platform(declaring,where);if(OBSERVING.get()!=null||TaskBridge.recoveryWriter())return;OBSERVING.set(Boolean.TRUE);
+        platform(declaring,where);if(OBSERVING.get()!=null||ControlBridge.recoveryWriter())return;OBSERVING.set(Boolean.TRUE);
         try{
             Connection connection=resolve(value);if(connection==null)return;
-            if(!TaskBridge.taskEffectAllowed(value,"connection-close")||!TaskBridge.resourceReleaseAllowed(value))throw new IOException("RONOVA_CONNECTION_CLOSE_REFUSED");
-            for(Object alias:aliases(connection))if(!TaskBridge.resourceReleaseAllowed(alias))throw new IOException("RONOVA_SHARED_CONNECTION_CLOSE_REFUSED");
+            if(!ControlBridge.taskEffectAllowed(value,"connection-close")||!ControlBridge.resourceReleaseAllowed(value))throw new IOException("RONOVA_CONNECTION_CLOSE_REFUSED");
+            for(Object alias:aliases(connection))if(!ControlBridge.resourceReleaseAllowed(alias))throw new IOException("RONOVA_SHARED_CONNECTION_CLOSE_REFUSED");
         }catch(IllegalAccessException failure){throw new IOException("IO_CLOSE_ASSOCIATION_UNAVAILABLE",failure);}finally{OBSERVING.remove();}
     }
     public static void descriptorClosed(FileDescriptor descriptor,Class<?> declaring,String where){
         platform(declaring,where);closedDescriptor(descriptor);
     }
     public static void descriptorClosing(FileDescriptor descriptor,Class<?> declaring,String where)throws IOException {
-        platform(declaring,where);if(TaskBridge.recoveryWriter()||closingDescriptor(descriptor))return;
-        if(!TaskBridge.taskEffectAllowed(descriptor,"connection-close")||!ResourceBridge.ioDescriptorCloseAllowed(descriptor))throw new IOException("RONOVA_CONNECTION_DESCRIPTOR_CLOSE_REFUSED");
+        platform(declaring,where);if(ControlBridge.recoveryWriter()||closingDescriptor(descriptor))return;
+        if(!ControlBridge.taskEffectAllowed(descriptor,"connection-close")||!ResourceBridge.ioDescriptorCloseAllowed(descriptor))throw new IOException("RONOVA_CONNECTION_DESCRIPTOR_CLOSE_REFUSED");
     }
     public static Object descriptorCloseEnter(FileDescriptor descriptor,Class<?> declaring,String where)throws IOException {
         platform(declaring,where);descriptorClosing(descriptor,declaring,where);
@@ -394,9 +402,9 @@ public final class IoBridge {
         DescriptorClose scope=DESCRIPTOR_CLOSE.get();
         if(scope==null||scope.closed||scope.declaring!=declaring||!method.equals("close0")||scope.number!=number)
             throw new IOException("IO_ORIGINAL_DESCRIPTOR_CLOSE_UNOBSERVED");
-        if(closingDescriptor(scope.descriptor)||TaskBridge.recoveryWriter())return;
-        for(Module source:sources)if(source!=null&&TaskBridge.modStopped(source))throw new IOException("RONOVA_TERMINAL_CONNECTION_CLOSE");
-        if(!TaskBridge.taskEffectAllowed(scope.descriptor,"connection-close")||!ResourceBridge.ioDescriptorCloseAllowed(scope.descriptor))throw new IOException("RONOVA_CONNECTION_DESCRIPTOR_CLOSE_REFUSED");
+        if(closingDescriptor(scope.descriptor)||ControlBridge.recoveryWriter())return;
+        for(Module source:sources)if(source!=null&&ControlBridge.modStopped(source))throw new IOException("RONOVA_TERMINAL_CONNECTION_CLOSE");
+        if(!ControlBridge.taskEffectAllowed(scope.descriptor,"connection-close")||!ResourceBridge.ioDescriptorCloseAllowed(scope.descriptor))throw new IOException("RONOVA_CONNECTION_DESCRIPTOR_CLOSE_REFUSED");
     }
     static void nativeDescriptorClosed(FileDescriptor descriptor){
         if(WALKER.getCallerClass()!=ResourceBridge.class)throw new SecurityException("ACTUAL_NATIVE_IO_COMPLETION_REQUIRED");closedDescriptor(descriptor);
@@ -429,12 +437,12 @@ public final class IoBridge {
             if(arguments[0]!=actual)throw new IOException("ASYNC_NATIVE_HANDLE_ASSOCIATION_CHANGED");
             Connection connection=resolve(owner);boolean cleanup=method.equals("closesocket0");
             if(cleanup){
-                if(!TaskBridge.recoveryWriter()&&!closingDescriptor(descriptor)&&(!TaskBridge.taskEffectAllowed(owner,"connection-close")||!ResourceBridge.ioDescriptorCloseAllowed(descriptor)))
+                if(!ControlBridge.recoveryWriter()&&!closingDescriptor(descriptor)&&(!ControlBridge.taskEffectAllowed(owner,"connection-close")||!ResourceBridge.ioDescriptorCloseAllowed(descriptor)))
                     throw new IOException("RONOVA_ASYNC_CLOSE_REFUSED");
             }else{
-                if(!TaskBridge.recoveryWriter()){
-                    if(!TaskBridge.taskEffectAllowed(owner,"async-io"))throw new ClosedChannelException();
-                    Module[] sources=TaskBridge.resourceOperationSources(currentSources());for(Module source:sources)if(source!=null&&TaskBridge.modStopped(source))throw new ClosedChannelException();
+                if(!ControlBridge.recoveryWriter()){
+                    if(!ControlBridge.taskEffectAllowed(owner,"async-io"))throw new ClosedChannelException();
+                    Module[] sources=ControlBridge.resourceOperationSources(currentSources());for(Module source:sources)if(source!=null&&ControlBridge.modStopped(source))throw new ClosedChannelException();
                 }
                 if(connection!=null)synchronized(LOCK){if(connection.sealed||connection.closed)throw new ClosedChannelException();}
             }
@@ -455,15 +463,15 @@ public final class IoBridge {
         for(int i=0;i<references.length;i++)if(references[i]!=call.references[i])throw new IOException("ASYNC_NATIVE_REFERENCE_CHANGED");
         boolean retirement=call.cleanup&&closingDescriptor(call.descriptor);
         Module[] actualSources=null;
-        if(!retirement&&!TaskBridge.recoveryWriter()){
-            actualSources=TaskBridge.resourceOperationSources(sources);
-            for(Module source:actualSources)if(source!=null&&TaskBridge.modStopped(source))throw new ClosedChannelException();
+        if(!retirement&&!ControlBridge.recoveryWriter()){
+            actualSources=ControlBridge.resourceOperationSources(sources);
+            for(Module source:actualSources)if(source!=null&&ControlBridge.modStopped(source))throw new ClosedChannelException();
         }
         synchronized(LOCK){
             if(call.connection!=null){
                 if(!call.cleanup&&(call.connection.sealed||call.connection.closed))throw new ClosedChannelException();
                 if(!retirement){
-                    if(actualSources==null)actualSources=TaskBridge.resourceOperationSources(sources);
+                    if(actualSources==null)actualSources=ControlBridge.resourceOperationSources(sources);
                     addSources(call.connection,actualSources);
                 }
             }
@@ -482,7 +490,7 @@ public final class IoBridge {
         if(NATIVE_CALL.get()!=call)throw new SecurityException("ACTUAL_ASYNC_NATIVE_ORDER_REQUIRED");
         synchronized(LOCK){call.closed=true;if(call.connection!=null)call.connection.active--;}
         if(call.previous==null)NATIVE_CALL.remove();else NATIVE_CALL.set(call.previous);
-        if(failure==null&&call.cleanup&&TaskBridge.recoveryWriter())closedDescriptor(call.descriptor);
+        if(failure==null&&call.cleanup&&ControlBridge.recoveryWriter())closedDescriptor(call.descriptor);
     }
     public static void socketClosed(Object owner,Class<?> declaring,String where){
         platform(declaring,where);synchronized(LOCK){Connection connection=CONNECTIONS.get(new Key(owner,false));if(connection!=null)connection.closed=true;}
@@ -521,13 +529,13 @@ public final class IoBridge {
         if(OBSERVING.get()!=null)return;OBSERVING.set(Boolean.TRUE);
         try{
             Layout layout=LAYOUTS.get(task.getClass());Object owner=layout.outer.get(task);Connection connection=resolve(owner);
-            Module[] sources=TaskBridge.resourceOperationSources(currentSources());Object buffers=layout.buffers==null?null:layout.buffers.get(task);
+            Module[] sources=ControlBridge.resourceOperationSources(currentSources());Object buffers=layout.buffers==null?null:layout.buffers.get(task);
             Field count=find(task.getClass(),"numBufs");if(buffers instanceof Buffer[] array&&count!=null)buffers=bufferRange(array,0,count.getInt(task));
             synchronized(LOCK){reap();Key key=new Key(task,true);if(REQUESTS.containsKey(key))return;
                 REQUESTS.put(key,new Request(connection,layout,sources,buffers));
                 if(connection!=null){connection.requests++;addSources(connection,sources);}
             }
-            TaskBridge.resourceCreated(task,sources);
+            ControlBridge.resourceCreated(task,sources);
         }catch(IllegalAccessException failure){throw new IllegalStateException("ASYNC_REQUEST_ASSOCIATION_UNAVAILABLE",failure);}finally{OBSERVING.remove();}
     }
     public static Object taskEnter(Object task,Class<?> declaring,String where){
@@ -541,7 +549,7 @@ public final class IoBridge {
             Object buffers;
             synchronized(LOCK){if(request.started)throw new IOException("ASYNC_REQUEST_ALREADY_STARTED");request.started=true;scope.ownsLaunch=true;
                 if(request.finished||request.connection!=null&&(request.connection.sealed||request.connection.closed))throw new ClosedChannelException();buffers=request.buffers;}
-            for(Module source:request.sources)if(source!=null&&TaskBridge.modStopped(source))throw new ClosedChannelException();
+            for(Module source:request.sources)if(source!=null&&ControlBridge.modStopped(source))throw new ClosedChannelException();
             // Until publication succeeds, the actual submitting scope owns the
             // borrow. Completion cannot detach it before this assignment.
             scope.lease=ResourceBridge.borrowIoBuffers(new Object[]{buffers},request.sources);

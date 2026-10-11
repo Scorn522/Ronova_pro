@@ -71,6 +71,8 @@ final class SeedChunks {
                     ignored->{throw new IllegalStateException("PRIVATE_GENERATION_CANNOT_PUBLISH_FULL_CHUNK");},neighborhood(frame.stage));
         }
     }
+    /** Never discard queued continuations, even when the stage future is already terminal. */
+    boolean canRestart(){return execution.isEmpty()&&(generation==null||generation.isDone());}
     boolean ready(){return pending.isEmpty()&&generation==null&&spawned;}
     ProtoChunk result(){if(!ready())throw new IllegalStateException("SEED_GENERATION_PENDING");return (ProtoChunk)chunk(target.toLong());}
     Object[] controlObjects(){return new Object[]{this,chunks,pending,execution,executor};}

@@ -68,6 +68,7 @@ public final class PrelaunchMain {
         if(!selected.isEmpty())launch.environment().put("RONOVA_PRO_BOOT_STOP",selected);
         if(!protectedIds.isEmpty())launch.environment().put("RONOVA_PRO_BOOT_PROTECT",protectedIds);
         Process child=launch.start();
+        System.out.println("RONOVA_GAME_PID="+child.pid());
         int code=child.waitFor();
         if(code!=0)System.err.println("RONOVA_GAME_EXIT="+code);
         System.exit(code);

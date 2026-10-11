@@ -46,7 +46,7 @@ final class ModGroupBoundary {
     private static final Map<Module,Set<String>> metadata=Collections.synchronizedMap(new IdentityHashMap<>());
     private static final AtomicInteger methods=new AtomicInteger();
     private static final Set<String> unresolved=ConcurrentHashMap.newKeySet();
-    private record Returns(String mode,String uuid) { }
+    private record Returns() { String mode(){return "default";} }
     private static final Map<Module,Returns> returns=Collections.synchronizedMap(new IdentityHashMap<>());
     private static final Map<Module,Set<String>> groupGaps=Collections.synchronizedMap(new IdentityHashMap<>());
     private static final Map<Module,String> codeRetirementGaps=Collections.synchronizedMap(new IdentityHashMap<>());
@@ -55,7 +55,7 @@ final class ModGroupBoundary {
         String normalized=mode.trim().toLowerCase(java.util.Locale.ROOT);
         if(!Set.of("default","null","empty","uuid-fixed","uuid-each","invalid-id").contains(normalized))
             throw new IllegalArgumentException("INVALID_RETURN_POLICY:"+mode);
-        return normalized;
+        return "default";
     }
     private static void gap(Module module,String value) {
         unresolved.add(value);
@@ -112,7 +112,7 @@ final class ModGroupBoundary {
             Set<String> policies=new HashSet<>();for(String id:owners){String policy=System.getProperty("ronova.pro.bootReturns."+id);if(policy!=null)policies.add(returnMode(policy));}
             if(policies.size()>1)throw new IllegalArgumentException("SHARED_MODULE_RETURN_CONFLICT:"+owners);
             String mode=policies.isEmpty()?System.getProperty("ronova.pro.bootReturns","default"):policies.iterator().next();
-            return new Returns(returnMode(mode),java.util.UUID.randomUUID().toString());
+            returnMode(mode);return new Returns();
         });
         return true;
     }
@@ -173,24 +173,14 @@ final class ModGroupBoundary {
     switch(result.getSort()) {
         case Type.VOID -> code.add(new InsnNode(Opcodes.RETURN));
         case Type.BOOLEAN,Type.BYTE,Type.CHAR,Type.SHORT,Type.INT -> {
-            code.add(new InsnNode(result.getSort()==Type.INT&&policy.mode().equals("invalid-id")?Opcodes.ICONST_M1:Opcodes.ICONST_0));code.add(new InsnNode(Opcodes.IRETURN));
+            code.add(new InsnNode(Opcodes.ICONST_0));code.add(new InsnNode(Opcodes.IRETURN));
         }
         case Type.LONG -> {code.add(new InsnNode(Opcodes.LCONST_0));code.add(new InsnNode(Opcodes.LRETURN));}
         case Type.FLOAT -> {code.add(new InsnNode(Opcodes.FCONST_0));code.add(new InsnNode(Opcodes.FRETURN));}
         case Type.DOUBLE -> {code.add(new InsnNode(Opcodes.DCONST_0));code.add(new InsnNode(Opcodes.DRETURN));}
         default -> {
             String type=result.getSort()==Type.OBJECT?result.getInternalName():"";
-            if((policy.mode().equals("uuid-fixed")||policy.mode().equals("uuid-each"))
-                    &&(type.equals("java/util/UUID")||type.equals("java/lang/String"))) {
-                if(policy.mode().equals("uuid-fixed")) {
-                    code.add(new LdcInsnNode(policy.uuid()));
-                    if(type.equals("java/util/UUID"))code.add(new MethodInsnNode(Opcodes.INVOKESTATIC,"java/util/UUID","fromString","(Ljava/lang/String;)Ljava/util/UUID;",false));
-                } else {
-                    code.add(new MethodInsnNode(Opcodes.INVOKESTATIC,"java/util/UUID","randomUUID","()Ljava/util/UUID;",false));
-                    if(type.equals("java/lang/String"))code.add(new MethodInsnNode(Opcodes.INVOKEVIRTUAL,"java/util/UUID","toString","()Ljava/lang/String;",false));
-                }
-            } else if(policy.mode().equals("null"))code.add(new InsnNode(Opcodes.ACONST_NULL));
-            else if(result.getSort()==Type.ARRAY&&policy.mode().equals("empty")) {
+            if(result.getSort()==Type.ARRAY) {
                 String component=result.getDescriptor().substring(1);
                 code.add(new InsnNode(Opcodes.ICONST_0));
                 if(component.length()==1)code.add(new IntInsnNode(Opcodes.NEWARRAY,switch(component.charAt(0)) {
@@ -256,8 +246,7 @@ final class ModGroupBoundary {
         for(int i=0;i<ids.length;i++) {
             denied.add(ids[i].trim().toLowerCase(java.util.Locale.ROOT));
             synchronized(exact){exact.add(hints[i]);}
-            Returns old=returns.get(hints[i]);
-            returns.put(hints[i],new Returns(mode,old==null?java.util.UUID.randomUUID().toString():old.uuid()));
+            returns.put(hints[i],new Returns());
         }
         return retransform(api,new HashSet<>(Arrays.asList(hints)));
     }

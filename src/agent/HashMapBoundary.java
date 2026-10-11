@@ -15,7 +15,7 @@ final class HashMapBoundary {
     private static final String REMOVE_NODE_DESC="(ILjava/lang/Object;Ljava/lang/Object;ZZ)Ljava/util/HashMap$Node;";
     private static final String ALLOW_DESC="(Ljava/lang/Object;Ljava/lang/Object;Ljava/lang/Object;)Z";
     private static final String CLEAR_DESC="(Ljava/lang/Object;)Z";
-    private static final String BRIDGE="dev/ronova/pro/bootstrap/TaskBridge";
+    private static final String BRIDGE="dev/ronova/pro/bootstrap/ControlBridge";
     private static volatile String status="NOT_SEEN";
     private static volatile boolean installed;
 
@@ -113,7 +113,7 @@ final class HashMapBoundary {
         InsnList guard=new InsnList();LabelNode proceed=new LabelNode();
         guard.add(new VarInsnNode(Opcodes.ALOAD,0));
         guard.add(new VarInsnNode(Opcodes.ALOAD,10));
-        guard.add(new MethodInsnNode(Opcodes.INVOKESTATIC,BRIDGE,"beginIndexNodeRemoval",
+        guard.add(new MethodInsnNode(Opcodes.INVOKESTATIC,"dev/ronova/pro/bootstrap/ControlBridge","beginIndexNodeRemoval",
                 "(Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;",false));
         guard.add(new VarInsnNode(Opcodes.ASTORE,token));
         guard.add(new VarInsnNode(Opcodes.ALOAD,token));
@@ -124,13 +124,13 @@ final class HashMapBoundary {
         method.instructions.insertBefore(resolvedEntrySites.get(0),guard);
         for(AbstractInsnNode instruction:original)if(instruction.getOpcode()==Opcodes.ARETURN) {
             InsnList release=new InsnList();release.add(new VarInsnNode(Opcodes.ALOAD,token));
-            release.add(new MethodInsnNode(Opcodes.INVOKESTATIC,BRIDGE,"endIndexMutation","(Ljava/lang/Object;)V",false));
+            release.add(new MethodInsnNode(Opcodes.INVOKESTATIC,"dev/ronova/pro/bootstrap/ControlBridge","endIndexMutation","(Ljava/lang/Object;)V",false));
             method.instructions.insertBefore(instruction,release);
         }
         method.instructions.add(end);method.instructions.add(handler);
         method.instructions.add(new VarInsnNode(Opcodes.ASTORE,error));
         method.instructions.add(new VarInsnNode(Opcodes.ALOAD,token));
-        method.instructions.add(new MethodInsnNode(Opcodes.INVOKESTATIC,BRIDGE,"endIndexMutation","(Ljava/lang/Object;)V",false));
+        method.instructions.add(new MethodInsnNode(Opcodes.INVOKESTATIC,"dev/ronova/pro/bootstrap/ControlBridge","endIndexMutation","(Ljava/lang/Object;)V",false));
         method.instructions.add(new VarInsnNode(Opcodes.ALOAD,error));method.instructions.add(new InsnNode(Opcodes.ATHROW));
         method.tryCatchBlocks.add(new TryCatchBlockNode(start,end,handler,null));
     }
@@ -141,7 +141,7 @@ final class HashMapBoundary {
         LabelNode original=new LabelNode();
         InsnList guard=new InsnList();
         guard.add(new VarInsnNode(Opcodes.ALOAD,0));
-        guard.add(new MethodInsnNode(Opcodes.INVOKESTATIC,BRIDGE,"clearProtectedMap",CLEAR_DESC,false));
+        guard.add(new MethodInsnNode(Opcodes.INVOKESTATIC,"dev/ronova/pro/bootstrap/ControlBridge","clearProtectedMap",CLEAR_DESC,false));
         guard.add(new JumpInsnNode(Opcodes.IFEQ,original));
         guard.add(new InsnNode(Opcodes.RETURN));
         guard.add(original);

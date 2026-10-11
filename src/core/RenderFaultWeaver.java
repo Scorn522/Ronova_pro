@@ -7,7 +7,7 @@ import org.objectweb.asm.tree.*;
 
 /** Exact vanilla/Forge entries and exact virtual call sites; foreign same-signature helpers remain untouched. */
 public final class RenderFaultWeaver {
-    private static final String DRAW="dev/ronova/pro/ClientDrawFaults",STATE="dev/ronova/pro/ClientItemFaults";
+    private static final String DRAW="dev/ronova/pro/ClientDrawFaults",STATE="dev/ronova/pro/ClientDrawFaults";
     private record Entry(String owner,String srg,String named,String descriptor,String phase) { }
     private static final Entry[] ENTRIES={
         new Entry("net/minecraft/client/gui/Font","m_168645_","drawInBatch8xOutline","(Lnet/minecraft/util/FormattedCharSequence;FFIILorg/joml/Matrix4f;Lnet/minecraft/client/renderer/MultiBufferSource;I)V","font"),

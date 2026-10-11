@@ -6,7 +6,7 @@ import jdk.internal.org.objectweb.asm.tree.*;
 
 /** Store-site guards retain original callback evaluation and the writer's real return contract. */
 final class IndexValueBoundary implements Opcodes {
-    static final String BRIDGE="dev/ronova/pro/bootstrap/TaskBridge";
+    static final String BRIDGE="dev/ronova/pro/bootstrap/ControlBridge";
     private static final String NODE="java/util/HashMap$Node";
     private static final String ALLOW="(Ljava/lang/Object;Ljava/lang/Object;Ljava/lang/Object;Ljava/lang/Object;)Z";
     private IndexValueBoundary() { }
@@ -29,7 +29,7 @@ final class IndexValueBoundary implements Opcodes {
                     guard.add(new VarInsnNode(ASTORE,proposed));guard.add(new VarInsnNode(ASTORE,target));
                     guard.add(new VarInsnNode(ALOAD,0));guard.add(new VarInsnNode(ALOAD,target));
                     guard.add(new VarInsnNode(ALOAD,proposed));
-                    guard.add(new MethodInsnNode(INVOKESTATIC,BRIDGE,"beginIndexNodeWrite",
+                    guard.add(new MethodInsnNode(INVOKESTATIC,"dev/ronova/pro/bootstrap/ControlBridge","beginIndexNodeWrite",
                             "(Ljava/lang/Object;Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;",false));
                     guard.add(new VarInsnNode(ASTORE,token));
                     guard.add(new VarInsnNode(ALOAD,token));
@@ -41,13 +41,13 @@ final class IndexValueBoundary implements Opcodes {
                     else { nodeValue(guard,target);guard.add(new InsnNode(ARETURN)); }
                     guard.add(allowed);guard.add(new VarInsnNode(ALOAD,target));guard.add(new VarInsnNode(ALOAD,proposed));
                     InsnList tail=new InsnList();tail.add(end);tail.add(new VarInsnNode(ALOAD,token));
-                    tail.add(new MethodInsnNode(INVOKESTATIC,BRIDGE,"endIndexMutation","(Ljava/lang/Object;)V",false));
+                    tail.add(new MethodInsnNode(INVOKESTATIC,"dev/ronova/pro/bootstrap/ControlBridge","endIndexMutation","(Ljava/lang/Object;)V",false));
                     tail.add(skip);
                     method.instructions.insertBefore(instruction,guard);method.instructions.insertBefore(instruction,start);
                     method.instructions.insert(instruction,tail);
                     method.instructions.add(handler);method.instructions.add(new VarInsnNode(ASTORE,error));
                     method.instructions.add(new VarInsnNode(ALOAD,token));
-                    method.instructions.add(new MethodInsnNode(INVOKESTATIC,BRIDGE,"endIndexMutation","(Ljava/lang/Object;)V",false));
+                    method.instructions.add(new MethodInsnNode(INVOKESTATIC,"dev/ronova/pro/bootstrap/ControlBridge","endIndexMutation","(Ljava/lang/Object;)V",false));
                     method.instructions.add(new VarInsnNode(ALOAD,error));method.instructions.add(new InsnNode(ATHROW));
                     method.tryCatchBlocks.add(new TryCatchBlockNode(start,end,handler,null));count++;
                 }
@@ -68,7 +68,7 @@ final class IndexValueBoundary implements Opcodes {
         code.add(new VarInsnNode(ALOAD,0));code.add(new VarInsnNode(ALOAD,node));
         code.add(new FieldInsnNode(GETFIELD,NODE,"key","Ljava/lang/Object;"));nodeValue(code,node);
         code.add(proposed<0?new InsnNode(ACONST_NULL):new VarInsnNode(ALOAD,proposed));
-        code.add(new MethodInsnNode(INVOKESTATIC,BRIDGE,"indexWriteAllowed",ALLOW,false));
+        code.add(new MethodInsnNode(INVOKESTATIC,"dev/ronova/pro/bootstrap/ControlBridge","indexWriteAllowed",ALLOW,false));
     }
     private static void nodeValue(InsnList code,int slot) {
         code.add(new VarInsnNode(ALOAD,slot));code.add(new FieldInsnNode(GETFIELD,NODE,"value","Ljava/lang/Object;"));
@@ -85,7 +85,7 @@ final class IndexValueBoundary implements Opcodes {
                 code.add(new VarInsnNode(ASTORE,key));code.add(new VarInsnNode(ASTORE,map));
                 code.add(new VarInsnNode(ALOAD,map));code.add(new VarInsnNode(ALOAD,key));
                 code.add(put?new VarInsnNode(ALOAD,value):new InsnNode(ACONST_NULL));
-                code.add(new MethodInsnNode(INVOKESTATIC,BRIDGE,"deniedIndexCurrent","(Ljava/lang/Object;Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;",false));
+                code.add(new MethodInsnNode(INVOKESTATIC,"dev/ronova/pro/bootstrap/ControlBridge","deniedIndexCurrent","(Ljava/lang/Object;Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;",false));
                 code.add(new VarInsnNode(ASTORE,retained));code.add(new VarInsnNode(ALOAD,retained));code.add(new JumpInsnNode(IFNULL,allow));
                 if(Type.getReturnType(method.desc).getSort()==Type.BOOLEAN) {code.add(new InsnNode(ICONST_0));code.add(new InsnNode(IRETURN));}
                 else {code.add(new VarInsnNode(ALOAD,retained));code.add(new InsnNode(ARETURN));}
@@ -117,12 +117,12 @@ final class IndexValueBoundary implements Opcodes {
                     deniedFastReturn(code,method,mapOwner,map,index);
                     code.add(allow);code.add(new VarInsnNode(ALOAD,array));code.add(new VarInsnNode(ILOAD,index));code.add(new VarInsnNode(ALOAD,value));
                     InsnList tail=new InsnList();tail.add(end);tail.add(new VarInsnNode(ALOAD,token));
-                    tail.add(new MethodInsnNode(INVOKESTATIC,BRIDGE,"endIndexMutation","(Ljava/lang/Object;)V",false));
+                    tail.add(new MethodInsnNode(INVOKESTATIC,"dev/ronova/pro/bootstrap/ControlBridge","endIndexMutation","(Ljava/lang/Object;)V",false));
                     method.instructions.insertBefore(instruction,code);method.instructions.insertBefore(instruction,start);
                     method.instructions.insert(instruction,tail);
                     method.instructions.add(handler);method.instructions.add(new VarInsnNode(ASTORE,error));
                     method.instructions.add(new VarInsnNode(ALOAD,token));
-                    method.instructions.add(new MethodInsnNode(INVOKESTATIC,BRIDGE,"endIndexMutation","(Ljava/lang/Object;)V",false));
+                    method.instructions.add(new MethodInsnNode(INVOKESTATIC,"dev/ronova/pro/bootstrap/ControlBridge","endIndexMutation","(Ljava/lang/Object;)V",false));
                     method.instructions.add(new VarInsnNode(ALOAD,error));method.instructions.add(new InsnNode(ATHROW));
                     method.tryCatchBlocks.add(new TryCatchBlockNode(start,end,handler,null));count++;
                 } else if((method.name.equals("compute")||method.name.equals("computeIfPresent")||method.name.equals("merge")||method.name.equals("remove")&&Type.getReturnType(method.desc).getSort()==Type.BOOLEAN)
@@ -140,12 +140,12 @@ final class IndexValueBoundary implements Opcodes {
                     deniedFastReturn(code,method,mapOwner,map,index);
                     code.add(allow);code.add(new VarInsnNode(ALOAD,map));if(!zero)code.add(new VarInsnNode(ILOAD,index));
                     InsnList tail=new InsnList();tail.add(end);tail.add(new VarInsnNode(ALOAD,token));
-                    tail.add(new MethodInsnNode(INVOKESTATIC,BRIDGE,"endIndexMutation","(Ljava/lang/Object;)V",false));
+                    tail.add(new MethodInsnNode(INVOKESTATIC,"dev/ronova/pro/bootstrap/ControlBridge","endIndexMutation","(Ljava/lang/Object;)V",false));
                     method.instructions.insertBefore(instruction,code);method.instructions.insertBefore(instruction,start);
                     method.instructions.insert(instruction,tail);
                     method.instructions.add(handler);method.instructions.add(new VarInsnNode(ASTORE,error));
                     method.instructions.add(new VarInsnNode(ALOAD,token));
-                    method.instructions.add(new MethodInsnNode(INVOKESTATIC,BRIDGE,"endIndexMutation","(Ljava/lang/Object;)V",false));
+                    method.instructions.add(new MethodInsnNode(INVOKESTATIC,"dev/ronova/pro/bootstrap/ControlBridge","endIndexMutation","(Ljava/lang/Object;)V",false));
                     method.instructions.add(new VarInsnNode(ALOAD,error));method.instructions.add(new InsnNode(ATHROW));
                     method.tryCatchBlocks.add(new TryCatchBlockNode(start,end,handler,null));
                 }
@@ -160,7 +160,7 @@ final class IndexValueBoundary implements Opcodes {
         code.add(new MethodInsnNode(INVOKESTATIC,wide?"java/lang/Long":"java/lang/Integer","valueOf",wide?"(J)Ljava/lang/Long;":"(I)Ljava/lang/Integer;",false));
         fastValue(code,owner,map,index);
         code.add(value<0?new InsnNode(ACONST_NULL):new VarInsnNode(ALOAD,value));
-        code.add(new MethodInsnNode(INVOKESTATIC,BRIDGE,"indexWriteAllowed",ALLOW,false));
+        code.add(new MethodInsnNode(INVOKESTATIC,"dev/ronova/pro/bootstrap/ControlBridge","indexWriteAllowed",ALLOW,false));
     }
     private static void fastBegin(InsnList code,String owner,int map,int index,int array,int value) {
         boolean wide=owner.contains("/longs/");
@@ -170,7 +170,7 @@ final class IndexValueBoundary implements Opcodes {
         code.add(new MethodInsnNode(INVOKESTATIC,wide?"java/lang/Long":"java/lang/Integer","valueOf",
                 wide?"(J)Ljava/lang/Long;":"(I)Ljava/lang/Integer;",false));
         code.add(new VarInsnNode(ALOAD,array));code.add(new VarInsnNode(ILOAD,index));code.add(new VarInsnNode(ALOAD,value));
-        code.add(new MethodInsnNode(INVOKESTATIC,BRIDGE,"beginIndexArrayWrite",
+        code.add(new MethodInsnNode(INVOKESTATIC,"dev/ronova/pro/bootstrap/ControlBridge","beginIndexArrayWrite",
                 "(Ljava/lang/Object;Ljava/lang/Object;[Ljava/lang/Object;ILjava/lang/Object;)Ljava/lang/Object;",false));
     }
     private static void fastBeginRemoval(InsnList code,String owner,int map,int index) {
@@ -182,7 +182,7 @@ final class IndexValueBoundary implements Opcodes {
                 wide?"(J)Ljava/lang/Long;":"(I)Ljava/lang/Integer;",false));
         code.add(new VarInsnNode(ALOAD,map));code.add(new FieldInsnNode(GETFIELD,owner,"value","[Ljava/lang/Object;"));
         code.add(new VarInsnNode(ILOAD,index));
-        code.add(new MethodInsnNode(INVOKESTATIC,BRIDGE,"beginIndexArrayRemoval",
+        code.add(new MethodInsnNode(INVOKESTATIC,"dev/ronova/pro/bootstrap/ControlBridge","beginIndexArrayRemoval",
                 "(Ljava/lang/Object;Ljava/lang/Object;[Ljava/lang/Object;I)Ljava/lang/Object;",false));
     }
     private static void fastValue(InsnList code,String owner,int map,int index) {

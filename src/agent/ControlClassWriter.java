@@ -5,7 +5,7 @@ import jdk.internal.org.objectweb.asm.*;
 import jdk.internal.org.objectweb.asm.tree.*;
 /** Frame joins use actual loaded types or resources without initializing the target. */
 final class ControlClassWriter extends ClassWriter {
-    private record Shape(String parent,String[] interfaces,boolean contract) {}
+    record Shape(String parent,String[] interfaces,boolean contract) {}
     private final ClassLoader loader;
     private final Map<String,Shape> shapes=new HashMap<>();
     ControlClassWriter(ClassLoader loader,ClassNode node) {
@@ -18,13 +18,16 @@ final class ControlClassWriter extends ClassWriter {
             if(actual!=null)return shape(actual);
             try(InputStream in=loader==null?ClassLoader.getSystemResourceAsStream(key+".class"):loader.getResourceAsStream(key+".class")) {
                 if(in==null){
-                    // Named module loaders can resolve a type while exposing no
-                    // resource stream to this writer. Resolve with the same
-                    // actual loader and keep class initialization disabled.
-                    try{return shape(Class.forName(key.replace('/','.'),false,loader));}
-                    catch(ClassNotFoundException unavailable){throw new IllegalStateException("MISSING_FRAME_TYPE:"+key,unavailable);}
+                    // Loading a header re-enters the transforming loader and
+                    // can duplicate an in-progress definition. Recorded headers
+                    // are input only; missing/ambiguous ones remain unresolved.
+                    Shape recorded=ExternalCodeDefinitions.frameShape(loader,key);
+                    if(recorded!=null)return recorded;
+                    throw new IllegalStateException("MISSING_FRAME_TYPE:"+key);
                 }
-                ClassReader r=new ClassReader(in);return new Shape(r.getSuperName(),r.getInterfaces(),(r.getAccess()&Opcodes.ACC_INTERFACE)!=0);
+                ClassReader r=new ClassReader(in);
+                if(!r.getClassName().equals(key))throw new IllegalStateException("FRAME_TYPE_RESOURCE_NAME_CHANGED:"+key);
+                return new Shape(r.getSuperName(),r.getInterfaces(),(r.getAccess()&Opcodes.ACC_INTERFACE)!=0);
             } catch(java.io.IOException e) { throw new IllegalStateException("FRAME_TYPE_READ:"+key,e); }
         });
     }

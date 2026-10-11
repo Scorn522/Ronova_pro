@@ -59,8 +59,7 @@ final class CreationBoundary {
     }
     private static void sites(ClassLoader loader,String name,Class<?> actual,List<String> sites) {
         try {
-            Class.forName("dev.ronova.pro.bootstrap.TaskBridge",false,null)
-                .getMethod("registerCreationSites",ClassLoader.class,String.class,String[].class,Class.class)
+            Class.forName("dev.ronova.pro.bootstrap.ControlBridge",false,null).getMethod("registerCreationSites",ClassLoader.class,String.class,String[].class,Class.class)
                 .invoke(null,loader,name.replace('/','.'),sites.toArray(String[]::new),actual);
         } catch(ReflectiveOperationException failure) { throw new IllegalStateException("CREATION_SITE_REGISTRY",failure); }
     }
@@ -82,7 +81,7 @@ final class CreationBoundary {
         Set<String> current=definedTasks;if(current!=null)return current;
         synchronized(CreationBoundary.class){
             if(definedTasks!=null)return definedTasks;
-            try{String[] selectors=(String[])Class.forName("dev.ronova.pro.bootstrap.TaskBridge",false,null).getMethod("definedTaskMethods").invoke(null);
+            try{String[] selectors=(String[])Class.forName("dev.ronova.pro.bootstrap.ControlBridge",false,null).getMethod("definedTaskMethods").invoke(null);
                 Set<String> next=Set.copyOf(Arrays.asList(selectors));ControlImages.protect(next);definedTasks=next;return next;
             }catch(ReflectiveOperationException failure){throw new IllegalStateException("ACTUAL_DEFINED_TASK_CONTRACTS_UNAVAILABLE",failure);}
         }
@@ -92,7 +91,7 @@ final class CreationBoundary {
         Map<MethodNode,List<IdentitySite>> identities=new IdentityHashMap<>();
         // An original call cannot masquerade as the observer inserted below, even in a mixed method.
                 for(MethodNode m:node.methods)for(AbstractInsnNode i:m.instructions.toArray())
-            if(i instanceof MethodInsnNode call&&call.owner.equals(BRIDGE)&&(call.name.equals("creationObserved")||call.name.equals("creationFailed")||call.name.startsWith("producer")
+            if(i instanceof MethodInsnNode call&&(call.owner.equals(BRIDGE)||call.owner.equals("dev/ronova/pro/bootstrap/ControlBridge"))&&(call.name.equals("creationObserved")||call.name.equals("creationFailed")||call.name.startsWith("producer")
                     ||call.name.equals("definedTaskEnter")||call.name.equals("definedTaskExit"))) {
                 return null;
             }
@@ -133,10 +132,10 @@ final class CreationBoundary {
                     LabelNode begin=new LabelNode(),end=new LabelNode(),failed=new LabelNode(),done=new LabelNode();before.add(begin);
                     method.instructions.insertBefore(call,before);
                     LabelNode site=new LabelNode();InsnList after=new InsnList();after.add(end);after.add(new VarInsnNode(Opcodes.ALOAD,object));after.add(site);
-                    after.add(new MethodInsnNode(Opcodes.INVOKESTATIC,BRIDGE,"creationObserved","(Ljava/lang/Object;)V",false));
+                    after.add(new MethodInsnNode(Opcodes.INVOKESTATIC,"dev/ronova/pro/bootstrap/ControlBridge","creationObserved","(Ljava/lang/Object;)V",false));
                     after.add(new JumpInsnNode(Opcodes.GOTO,done));after.add(failed);after.add(new InsnNode(Opcodes.DUP));
                     LabelNode failureSite=new LabelNode();after.add(failureSite);
-                    after.add(new MethodInsnNode(Opcodes.INVOKESTATIC,BRIDGE,"creationFailed","(Ljava/lang/Throwable;)V",false));after.add(new InsnNode(Opcodes.ATHROW));after.add(done);
+                    after.add(new MethodInsnNode(Opcodes.INVOKESTATIC,"dev/ronova/pro/bootstrap/ControlBridge","creationFailed","(Ljava/lang/Throwable;)V",false));after.add(new InsnNode(Opcodes.ATHROW));after.add(done);
                     method.instructions.insert(call,after);method.tryCatchBlocks.add(0,new TryCatchBlockNode(begin,end,failed,null));
                     pending.add(new Site(method.name+method.desc,site));pending.add(new Site(method.name+method.desc,failureSite));
                 }
@@ -146,15 +145,15 @@ final class CreationBoundary {
                     for(AbstractInsnNode instruction:method.instructions.toArray()) {
                         if(instruction instanceof MethodInsnNode call&&resourceFactory(call)) {
                             LabelNode site=new LabelNode();InsnList after=new InsnList();after.add(new InsnNode(Opcodes.DUP));after.add(site);
-                            after.add(new MethodInsnNode(Opcodes.INVOKESTATIC,BRIDGE,"creationObserved","(Ljava/lang/Object;)V",false));
+                            after.add(new MethodInsnNode(Opcodes.INVOKESTATIC,"dev/ronova/pro/bootstrap/ControlBridge","creationObserved","(Ljava/lang/Object;)V",false));
                             method.instructions.insert(call,after);pending.add(new Site(method.name+method.desc,site));
                         } else if(instruction.getOpcode()==Opcodes.NEWARRAY||instruction.getOpcode()==Opcodes.ANEWARRAY||instruction.getOpcode()==Opcodes.MULTIANEWARRAY) {
                             LabelNode site=new LabelNode();InsnList after=new InsnList();after.add(new InsnNode(Opcodes.DUP));after.add(site);
-                            after.add(new MethodInsnNode(Opcodes.INVOKESTATIC,BRIDGE,"creationObserved","(Ljava/lang/Object;)V",false));
+                            after.add(new MethodInsnNode(Opcodes.INVOKESTATIC,"dev/ronova/pro/bootstrap/ControlBridge","creationObserved","(Ljava/lang/Object;)V",false));
                             method.instructions.insert(instruction,after);pending.add(new Site(method.name+method.desc,site));
                         } else if(method.name.equals("<clinit>")&&instruction.getOpcode()==Opcodes.RETURN) {
                             LabelNode site=new LabelNode();InsnList before=new InsnList();before.add(new LdcInsnNode(Type.getObjectType(node.name)));before.add(site);
-                            before.add(new MethodInsnNode(Opcodes.INVOKESTATIC,BRIDGE,"creationObserved","(Ljava/lang/Object;)V",false));
+                            before.add(new MethodInsnNode(Opcodes.INVOKESTATIC,"dev/ronova/pro/bootstrap/ControlBridge","creationObserved","(Ljava/lang/Object;)V",false));
                             method.instructions.insertBefore(instruction,before);pending.add(new Site(method.name+method.desc,site));
                         }
                     }
@@ -232,7 +231,7 @@ final class CreationBoundary {
             }
             after.add(new VarInsnNode(readType.getOpcode(Opcodes.ILOAD),result));ControlClassWriter.box(after,readType);
             LabelNode site=new LabelNode();after.add(site);
-            after.add(new MethodInsnNode(Opcodes.INVOKESTATIC,BRIDGE,read instanceof FieldInsnNode?"producerFieldInput":"producerInput",
+            after.add(new MethodInsnNode(Opcodes.INVOKESTATIC,"dev/ronova/pro/bootstrap/ControlBridge",read instanceof FieldInsnNode?"producerFieldInput":"producerInput",
                     read instanceof FieldInsnNode?"(Ljava/lang/Object;Ljava/lang/Class;Ljava/lang/String;Ljava/lang/String;Ljava/lang/Object;)V":"(Ljava/lang/Object;Ljava/lang/Object;)V",false));
             after.add(new VarInsnNode(readType.getOpcode(Opcodes.ILOAD),result));
             method.instructions.insert(read,after);sites.add(new Site(method.name+method.desc,site));
@@ -244,17 +243,17 @@ final class CreationBoundary {
             InsnList after=new InsnList();after.add(new VarInsnNode(Opcodes.ALOAD,object));after.add(new VarInsnNode(Opcodes.ALOAD,fieldReceivers.get(identity.field)));
             after.add(new LdcInsnNode(Type.getObjectType(identity.field.owner)));after.add(new LdcInsnNode(identity.field.name));
             after.add(new VarInsnNode(Opcodes.ALOAD,uuid));after.add(new InsnNode(identity.nullable?Opcodes.ICONST_1:Opcodes.ICONST_0));
-            LabelNode site=new LabelNode();after.add(site);after.add(new MethodInsnNode(Opcodes.INVOKESTATIC,BRIDGE,"producerIdentityAssigned",
+            LabelNode site=new LabelNode();after.add(site);after.add(new MethodInsnNode(Opcodes.INVOKESTATIC,"dev/ronova/pro/bootstrap/ControlBridge","producerIdentityAssigned",
                     "(Ljava/lang/Object;Ljava/lang/Object;Ljava/lang/Class;Ljava/lang/String;Ljava/lang/Object;Z)V",false));
             method.instructions.insert(identity.call,after);sites.add(new Site(method.name+method.desc,site));
         }
         int token=method.maxLocals++,error=method.maxLocals++;
         LabelNode enterSite=new LabelNode(),start=new LabelNode(),end=new LabelNode(),handler=new LabelNode();
-        InsnList enter=new InsnList();enter.add(enterSite);enter.add(new MethodInsnNode(Opcodes.INVOKESTATIC,BRIDGE,"producerEnter","()Ljava/lang/Object;",false));
+        InsnList enter=new InsnList();enter.add(enterSite);enter.add(new MethodInsnNode(Opcodes.INVOKESTATIC,"dev/ronova/pro/bootstrap/ControlBridge","producerEnter","()Ljava/lang/Object;",false));
         enter.add(new VarInsnNode(Opcodes.ASTORE,token));enter.add(start);
         if((method.access&Opcodes.ACC_STATIC)==0) {
             enter.add(new VarInsnNode(Opcodes.ALOAD,0));LabelNode receiverSite=new LabelNode();enter.add(receiverSite);
-            enter.add(new MethodInsnNode(Opcodes.INVOKESTATIC,BRIDGE,"producerReceiver","(Ljava/lang/Object;)V",false));
+            enter.add(new MethodInsnNode(Opcodes.INVOKESTATIC,"dev/ronova/pro/bootstrap/ControlBridge","producerReceiver","(Ljava/lang/Object;)V",false));
             sites.add(new Site(method.name+method.desc,receiverSite));
         }
         if(factory) {
@@ -262,13 +261,13 @@ final class CreationBoundary {
             for(Type argument:Type.getArgumentTypes(method.desc)) {
                 if((argument.getSort()==Type.OBJECT||argument.getSort()==Type.ARRAY)&&!factoryContext(argument.getDescriptor())) {
                     enter.add(new VarInsnNode(Opcodes.ALOAD,local));LabelNode argumentSite=new LabelNode();enter.add(argumentSite);
-                    enter.add(new MethodInsnNode(Opcodes.INVOKESTATIC,BRIDGE,"producerArgument","(Ljava/lang/Object;)V",false));
+                    enter.add(new MethodInsnNode(Opcodes.INVOKESTATIC,"dev/ronova/pro/bootstrap/ControlBridge","producerArgument","(Ljava/lang/Object;)V",false));
                     sites.add(new Site(method.name+method.desc,argumentSite));
                 }
                 local+=argument.getSize();
             }
             LabelNode gateSite=new LabelNode(),allowed=new LabelNode();enter.add(gateSite);
-            enter.add(new MethodInsnNode(Opcodes.INVOKESTATIC,BRIDGE,"producerExecutionAllowed","()Z",false));
+            enter.add(new MethodInsnNode(Opcodes.INVOKESTATIC,"dev/ronova/pro/bootstrap/ControlBridge","producerExecutionAllowed","()Z",false));
             enter.add(new JumpInsnNode(Opcodes.IFNE,allowed));enter.add(new InsnNode(Opcodes.ACONST_NULL));enter.add(new InsnNode(Opcodes.ARETURN));enter.add(allowed);
             sites.add(new Site(method.name+method.desc,gateSite));
         }
@@ -276,7 +275,7 @@ final class CreationBoundary {
         for(AbstractInsnNode at:method.instructions.toArray())if(at.getOpcode()>=Opcodes.IRETURN&&at.getOpcode()<=Opcodes.RETURN) {
             if(factory&&at.getOpcode()==Opcodes.ARETURN) {
                 InsnList filter=new InsnList();LabelNode site=new LabelNode();filter.add(site);
-                filter.add(new MethodInsnNode(Opcodes.INVOKESTATIC,BRIDGE,"producerResult","(Ljava/lang/Object;)Ljava/lang/Object;",false));
+                filter.add(new MethodInsnNode(Opcodes.INVOKESTATIC,"dev/ronova/pro/bootstrap/ControlBridge","producerResult","(Ljava/lang/Object;)Ljava/lang/Object;",false));
                 filter.add(new TypeInsnNode(Opcodes.CHECKCAST,Type.getReturnType(method.desc).getInternalName()));method.instructions.insertBefore(at,filter);
                 sites.add(new Site(method.name+method.desc,site));
             }
@@ -340,7 +339,7 @@ final class CreationBoundary {
     }
     private static InsnList producerExit(int token) {
         InsnList code=new InsnList();code.add(new VarInsnNode(Opcodes.ALOAD,token));
-        code.add(new MethodInsnNode(Opcodes.INVOKESTATIC,BRIDGE,"producerExit","(Ljava/lang/Object;)V",false));return code;
+        code.add(new MethodInsnNode(Opcodes.INVOKESTATIC,"dev/ronova/pro/bootstrap/ControlBridge","producerExit","(Ljava/lang/Object;)V",false));return code;
     }
     private static boolean entity(String type,ClassLoader loader,ClassNode current,Map<String,Boolean> cache) {
         if(type.equals("net/minecraft/world/entity/Entity"))return true;

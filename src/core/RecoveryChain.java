@@ -18,10 +18,10 @@ final class RecoveryChain {
         final UUID id,subject,session,entity,incarnation;
         final long generation;
         final String dimension,rootHash,intent;
-        CompletableFuture<Void> ack,receiptAck;
-        String receipt,state="WAIT_ORIGINAL_INTENT_ACK",fingerprint="";
+        CompletableFuture<Void> ack;
+        String state="WAIT_ORIGINAL_INTENT_ACK";
         List<String> remaining=List.of("INITIAL_QUERY_PENDING");
-        long stable=-1,last=-1;
+        long last=-1;
         boolean restarted,bodyRetired;
         Work(UUID id,UUID subject,long generation,UUID session,String dimension,UUID entity,UUID incarnation,String hash) {
             this.id=id;this.subject=subject;this.generation=generation;this.session=session;
@@ -78,7 +78,9 @@ final class RecoveryChain {
         accept(operation,subject,"",absent,absent,root);
     }
     UUID operationFor(UUID subject) {
-        for(Work item:work.values())if(item.subject.equals(subject))return item.id;
+        var authority=runtime.subjects.get(subject);
+        if(authority!=null&&authority.terminal)for(Work item:bySubject.getOrDefault(subject,List.of()))
+            if(item.generation==authority.generation)return item.id;
         return null;
     }
     void tick(long tick) {
@@ -98,25 +100,14 @@ final class RecoveryChain {
     static int sampleBudget(int active) {return active==0?0:Math.max(1,(active+4)/5);}
     private void sample(Work item,long tick) {
         item.ack=runtime.journal.retryRejected(item.intent,item.ack);
-        List<String> remaining=remaining(item,true);
-        String current=fingerprint(item);
-        if(!remaining.isEmpty()||!current.equals(item.fingerprint)||item.last<0||tick<item.last||tick-item.last>10) {
-            invalidateObservation(item,tick);
-        }
-        item.fingerprint=current;item.last=tick;item.remaining=List.copyOf(remaining);
-        if(!remaining.isEmpty()) { item.state="RECOVERY_SOURCE_PENDING";return; }
-        if(item.stable<0)item.stable=tick;
-        if(tick-item.stable<20) { item.state="STABLE_WINDOW_PENDING";return; }
-        if(item.receipt==null)item.receipt=PREFIX+"\tRECEIPT\t"+item.id+"\t"+runtime.session+"\t"+tick+"\tO02-KNOWN-v1+O05-DURABLE-v1:"+hash(current);
-        item.receiptAck=item.receiptAck==null?runtime.journal.append(item.receipt):runtime.journal.retryRejected(item.receipt,item.receiptAck);
-        item.state=confirmed(item.receiptAck)?"KNOWN_RECOVERY_CHAIN_SETTLED":"WAIT_CHAIN_RECEIPT_ACK";
+        List<String> remaining=remaining(item);
+        item.last=tick;
+        item.remaining=List.copyOf(remaining);
+        item.state=remaining.isEmpty()?"KNOWN_RECOVERY_CHAIN_SETTLED":"RECOVERY_SOURCE_PENDING";
     }
-    private void invalidateObservation(Work item,long tick) {
-        if(item.state.equals("KNOWN_RECOVERY_CHAIN_SETTLED"))runtime.journal.append(PREFIX+"\tINVALIDATED\t"+item.id+"\t"+runtime.session+"\t"+tick+"\tDEPENDENCIES_CHANGED");
-        item.stable=-1;item.receiptAck=null;item.receipt=null;
-    }
+    // Live aggregator only: no stability window, success receipt, or invalidation receipt.
     // Queries retain live readback, but never qualify/discover work or create chain receipts.
-    private List<String> remaining(Work item,boolean advance) {
+    private List<String> remaining(Work item) {
         List<String> remaining=new ArrayList<>();
         var authority=runtime.subjects.get(item.subject);
         if(!confirmed(item.ack))remaining.add("ORIGINAL_CHAIN_INTENT_ACK_PENDING");
@@ -137,11 +128,6 @@ final class RecoveryChain {
         }
         remaining.addAll(runtime.recoveryBodyGaps(item.id,item.subject));
         remaining.addAll(runtime.groupCodeGaps(item.subject));
-        if(advance&&authority!=null&&authority.terminal&&authority.generation==item.generation&&confirmed(item.ack)) {
-            runtime.recoveryTasks.qualify(authority,item.id);
-            runtime.recoveryRecords.qualify(authority,item.id);
-            runtime.recoveryStorage.discover(authority,item.id);
-        }
         remaining.addAll(runtime.recoverySources.remaining(item.subject));
         for(UUID operation:operations(item)) {
             remaining.addAll(runtime.recoveryTasks.remaining(operation,item.subject));
@@ -151,39 +137,20 @@ final class RecoveryChain {
         if(!runtime.journal.healthy())remaining.add("DURABLE_WRITER_UNAVAILABLE");
         return remaining;
     }
-    private String fingerprint(Work item) {
-        var authority=runtime.subjects.get(item.subject);
-        StringBuilder key=new StringBuilder(authority==null?"missing":authority.generation+":"+authority.sourceRevision.get());
-        key.append('|').append(runtime.recoverySources.dependencies(item.subject));
-        key.append('|').append(runtime.groupDurable(item.subject));
-        for(UUID operation:operations(item)) {
-            key.append('|').append(operation).append(':').append(runtime.recoveryTasks.dependencies(operation,item.subject))
-                .append(':').append(runtime.recoveryRecords.dependencies(operation,item.subject))
-                .append(':').append(runtime.recoveryStorage.dependencies(operation));
-        }
-        return key.toString();
-    }
     private Set<UUID> operations(Work item) {
         Set<UUID> result=new LinkedHashSet<>();result.add(runtime.groupOperation(item.subject,item.id));
         Set<UUID> members=runtime.groupTargets(item.subject);
-        for(Work related:work.values())if(members.contains(related.subject)&&(members.size()>1||related.generation==item.generation))result.add(related.id);
+        for(UUID member:members)for(Work related:bySubject.getOrDefault(member,List.of()))
+            if(members.size()>1||related.generation==item.generation)result.add(related.id);
         return result;
     }
     List<String> status(UUID operation) {
         Work item=work.get(operation);if(item==null)return List.of("NO_VERSIONED_KNOWN_RECOVERY_CHAIN");
-        long now=Integer.toUnsignedLong(runtime.server.getTickCount());
-        List<String> remaining=remaining(item,false);
-        boolean current=remaining.isEmpty()&&now>=item.last&&item.last>=0&&now-item.last<=10
-                &&fingerprint(item).equals(item.fingerprint);
-        // A query may revoke evidence it actually sees fail, but it never creates or extends evidence.
-        if(!current) {
-            invalidateObservation(item,now);item.state="RECOVERY_SOURCE_PENDING";
-        }
-        String visible=item.state;
-        if(visible.equals("KNOWN_RECOVERY_CHAIN_SETTLED")&&!confirmed(item.receiptAck))visible="WAIT_CHAIN_RECEIPT_ACK";
+        List<String> remaining=remaining(item);
+        String visible=remaining.isEmpty()?"KNOWN_RECOVERY_CHAIN_SETTLED":"RECOVERY_SOURCE_PENDING";
         List<String> result=new ArrayList<>();
         result.add(visible.equals("KNOWN_RECOVERY_CHAIN_SETTLED")?"已知恢复链已处置":"恢复源仍待处理");
-        result.add("CHAIN:"+visible+":operation="+item.id+":stableSince="+item.stable+":lastSample="+item.last);
+        result.add("CHAIN:"+visible+":operation="+item.id+":lastSample="+item.last);
         result.addAll(remaining);result.add("SCOPE:KNOWN_REGISTERED_RECOVERY;OPAQUE_LIFECYCLE_EFFECTS_UNCHANGED;O01_CONTRACT_UNCHANGED");
         return List.copyOf(result);
     }

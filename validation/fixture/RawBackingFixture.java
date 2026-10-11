@@ -193,12 +193,15 @@ public final class RawBackingFixture {
         controlEntries(unsafe);
     }
     private void controlEntries(Unsafe unsafe)throws Exception {
-        Class<?> boot=Class.forName("dev.ronova.pro.bootstrap.TaskBridge",false,null);
-        Field refs=boot.getDeclaredField("controlObjects");
-        Object[] captured=(Object[])unsafe.getObject(unsafe.staticFieldBase(refs),unsafe.staticFieldOffset(refs));int checked=0;
-        for(Object value:captured) {
-            var reference=(java.lang.ref.Reference<?>)value;Object before=reference.get();if(before==null)continue;
-            reference.clear();reference.enqueue();require(reference.get()==before,"critical weak registration retained");checked++;
+        Class<?> boot=Class.forName("dev.ronova.pro.bootstrap.CodeSourceBridge",false,null);
+        Field refs=boot.getDeclaredField("CONTROLS");
+        Object registry=unsafe.getObject(unsafe.staticFieldBase(refs),unsafe.staticFieldOffset(refs));
+        Object[] captured=(Object[])field(registry,"table",unsafe);int checked=0;
+        for(Object value:captured)while(value!=null) {
+            Object next=field(value,"next",unsafe);
+            var reference=(java.lang.ref.Reference<?>)value;Object before=reference.get();
+            if(before!=null){reference.clear();reference.enqueue();require(reference.get()==before,"critical weak registration retained");checked++;}
+            value=next;
         }
         require(checked>0,"actual critical registrations attempted");
         facts.add("CRITICAL_REGISTRATION_CLEAR_AND_ENQUEUE_REFUSED");

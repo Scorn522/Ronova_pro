@@ -26,7 +26,7 @@ final class FieldGraph {
         final Map<Object,Node> nodes=new IdentityHashMap<>();final Set<Class<?>> statics=Collections.newSetFromMap(new IdentityHashMap<>());
         final Deque<Node> scanning=new ArrayDeque<>();final Map<Entity,UUID> removals=new IdentityHashMap<>();
         final Map<Entity,Body> bodies=new IdentityHashMap<>();
-        Mode mode;String state="CAPTURING";List<Node> writing;int nodeCursor,slotCursor;boolean stopped;
+        Mode mode;String state="CAPTURING",failure="";List<Node> writing;int nodeCursor,slotCursor;boolean stopped;
         Image(Collection<? extends Entity> roots,Mode mode){this.roots.addAll(roots);this.mode=mode;}
     }
     private final ProRuntime runtime;
@@ -47,21 +47,37 @@ final class FieldGraph {
         images.remove(id);image.stopped=true;image.scanning.clear();image.nodes.clear();image.roots.clear();image.removals.clear();image.bodies.clear();image.writing=null;return true;}
     boolean retired(Entity entity){return retired.contains(entity);}
     private void add(Image image,Object value){
-        if(value==null||RecoveryReferences.immutableScalar(value)||value instanceof Class<?>||value instanceof Enum<?>||image.nodes.containsKey(value))return;
+        if(value==null||RecoveryRecords.immutableScalar(value)||value instanceof Class<?>||value instanceof Enum<?>||image.nodes.containsKey(value))return;
         if(!runtime.graphOwns(this,image.roots,value))return;Node node=new Node(value,false);runtime.graphControls(this,node,node.slots);image.nodes.put(value,node);image.scanning.add(node);
     }
     void tick(){
         if(images.isEmpty())return;List<Image> order=new ArrayList<>(images.values());
         for(int i=0;i<order.size();i++){Image image=order.get(next++%order.size());if(next<0)next=0;if(image.stopped||Set.of("CAPTURED","CLEARED","RESTORED","SOURCE_RETIRED","CAPTURE_INCOMPLETE").contains(image.state))continue;
-            try{if(image.state.equals("CAPTURING"))scan(image);else if(image.state.equals("BODY_RETIREMENT"))removeBodies(image);else if(image.state.equals("BODY_PUBLICATION"))publishBodies(image);else write(image);}
-            catch(ReflectiveOperationException|RuntimeException unavailable){image.state="PENDING";if(image.writing!=null&&image.nodeCursor<image.writing.size())image.writing.get(image.nodeCursor).pending=unavailable.getClass().getSimpleName()+":"+String.valueOf(unavailable.getMessage());}
+            try{
+                switch(image.state){
+                    case "CAPTURING" -> scan(image);
+                    case "BODY_RETIREMENT" -> removeBodies(image);
+                    case "BODY_PUBLICATION" -> publishBodies(image);
+                    case "CLEARING","RESTORING" -> write(image);
+                    default -> throw new IllegalStateException("FIELD_GRAPH_UNKNOWN_PHASE:"+image.state);
+                }
+                image.failure="";
+            }catch(ReflectiveOperationException|RuntimeException unavailable){
+                image.failure=unavailable.getClass().getSimpleName()+":"+String.valueOf(unavailable.getMessage());
+            }
             break;
         }
     }
     private void prepare(Node node){
-        if(node.prepared)return;node.prepared=true;
-        if(!node.statics&&node.receiver.getClass().isArray()){for(int i=0;i<Array.getLength(node.receiver);i++)node.slots.add(new Slot(null,i));return;}
-        Class<?> type=node.statics?(Class<?>)node.receiver:node.receiver.getClass();for(Field field:GraphFields.fields(type,node.statics))node.slots.add(new Slot(field,-1));
+        if(node.prepared)return;
+        List<Slot> slots=new ArrayList<>();
+        if(!node.statics&&node.receiver.getClass().isArray()){
+            for(int i=0;i<Array.getLength(node.receiver);i++)slots.add(new Slot(null,i));
+        }else{
+            Class<?> type=node.statics?(Class<?>)node.receiver:node.receiver.getClass();
+            for(Field field:GraphFields.fields(type,node.statics))slots.add(new Slot(field,-1));
+        }
+        node.slots.addAll(slots);node.prepared=true;
     }
     private void scan(Image image)throws ReflectiveOperationException{
         int budget=256;while(budget>0&&!image.scanning.isEmpty()){
@@ -94,7 +110,7 @@ final class FieldGraph {
             while(budget-->0&&image.slotCursor<node.slots.size()){
                 Slot slot=node.slots.get(image.slotCursor++);Object desired=image.mode==Mode.CLEAR?GraphFields.zero(slot.field==null?node.receiver.getClass().getComponentType():slot.field.getType()):slot.value;
                 if(desired==UNREAD){slot.pending="FIELD_GRAPH_VALUE_UNREAD";incomplete=true;continue;}
-                if(desired!=null&&!RecoveryReferences.immutableScalar(desired)&&runtime.graphStopped(this,desired)){slot.pending="FIELD_GRAPH_STOPPED_SOURCE";incomplete=true;continue;}
+                if(desired!=null&&!RecoveryRecords.immutableScalar(desired)&&runtime.graphStopped(this,desired)){slot.pending="FIELD_GRAPH_STOPPED_SOURCE";incomplete=true;continue;}
                 try{
                     Object prior=slot.field==null?Array.get(node.receiver,slot.element):GraphFields.read(slot.field,node.statics?null:node.receiver);
                     boolean done=slot.field==null?GraphFields.writeArray(node.receiver,slot.element,prior,desired):GraphFields.same(slot.field,prior,desired)||GraphFields.write(slot.field,node.statics?null:node.receiver,prior,desired);
@@ -105,7 +121,7 @@ final class FieldGraph {
         }
         if(image.nodeCursor<image.writing.size())return;
         incomplete|=image.writing.stream().anyMatch(node->!node.pending.isEmpty()||node.slots.stream().anyMatch(slot->!slot.pending.isEmpty()));
-        if(incomplete){image.state="PENDING";image.nodeCursor=0;image.slotCursor=0;return;}
+        if(incomplete){image.nodeCursor=0;image.slotCursor=0;return;}
         image.state=image.mode==Mode.CLEAR?"CLEARED":"BODY_PUBLICATION";
         if(image.mode==Mode.CLEAR)for(Node node:image.writing)for(Slot slot:node.slots)slot.value=null;
     }
@@ -129,7 +145,7 @@ final class FieldGraph {
         }
     }
     String state(UUID id){Image image=images.get(id);if(image==null)return "未找到字段图。";long slots=image.writing==null?image.nodes.values().stream().mapToLong(node->node.slots.size()).sum():image.writing.stream().mapToLong(node->node.slots.size()).sum();
-        List<String> pending=new ArrayList<>();Collection<Node> nodes=image.writing==null?image.nodes.values():image.writing;
+        List<String> pending=new ArrayList<>();if(!image.failure.isEmpty())pending.add(image.failure);Collection<Node> nodes=image.writing==null?image.nodes.values():image.writing;
         for(Node node:nodes){if(!node.pending.isEmpty())pending.add(node.pending);for(Slot slot:node.slots)if(!slot.pending.isEmpty())pending.add(slot.pending);}
         return "FIELD_GRAPH="+id+";STATE="+image.state+";NODES="+image.nodes.size()+";SLOTS="+slots+";SHARED_REFERENCES=EDGES_ONLY;HISTORY=LIVE_REFERENCE_IMAGE;PENDING="+String.join(",",new LinkedHashSet<>(pending));
     }

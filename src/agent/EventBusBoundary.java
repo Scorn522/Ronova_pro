@@ -8,7 +8,7 @@ import jdk.internal.org.objectweb.asm.tree.*;
 /** Keeps a mod-owned listener from executing through Forge's shared dispatcher. */
 final class EventBusBoundary {
     static final String TARGET="net/minecraftforge/eventbus/EventBus";
-    private static final String BRIDGE="dev/ronova/pro/bootstrap/TaskBridge";
+    private static final String BRIDGE="dev/ronova/pro/bootstrap/ControlBridge";
     private static volatile boolean installed;
     private EventBusBoundary() {}
     static String state() {return installed?"EVENT_REGISTRATION_AND_DISPATCH_INSTALLED":"EVENT_GATE_NOT_INSTALLED";}
@@ -23,7 +23,7 @@ final class EventBusBoundary {
             if(method.name.equals("addToListeners")&&method.desc.equals("(Ljava/lang/Object;Ljava/lang/Class;Lnet/minecraftforge/eventbus/api/IEventListener;Lnet/minecraftforge/eventbus/api/EventPriority;)V")) {
                 LabelNode allowed=new LabelNode();InsnList code=new InsnList();
                 code.add(new VarInsnNode(Opcodes.ALOAD,1));
-                code.add(new MethodInsnNode(Opcodes.INVOKESTATIC,BRIDGE,"modOwnerAllowed","(Ljava/lang/Object;)Z",false));
+                code.add(new MethodInsnNode(Opcodes.INVOKESTATIC,"dev/ronova/pro/bootstrap/ControlBridge","modOwnerAllowed","(Ljava/lang/Object;)Z",false));
                 code.add(new JumpInsnNode(Opcodes.IFNE,allowed));code.add(new InsnNode(Opcodes.RETURN));
                 code.add(allowed);code.add(new FrameNode(Opcodes.F_SAME,0,null,0,null));
                 code.add(new VarInsnNode(Opcodes.ALOAD,1));code.add(new VarInsnNode(Opcodes.ALOAD,3));

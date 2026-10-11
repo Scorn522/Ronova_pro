@@ -6,7 +6,7 @@ import jdk.internal.org.objectweb.asm.tree.*;
 
 /** Guards actual native write calls inside the bootstrap Unsafe's Java implementations. */
 final class InternalUnsafeBoundary {
-    private static final String TARGET="jdk/internal/misc/Unsafe",TASKS="dev/ronova/pro/bootstrap/TaskBridge",BACKING="dev/ronova/pro/bootstrap/BackingBridge";
+    private static final String TARGET="jdk/internal/misc/Unsafe",TASKS="dev/ronova/pro/bootstrap/ControlBridge",BACKING="dev/ronova/pro/bootstrap/BackingBridge";
     private InternalUnsafeBoundary(){}
     static byte[] transform(ClassLoader loader,String name,byte[] bytes){
         if(loader!=null||!TARGET.equals(name))return null;
@@ -34,11 +34,11 @@ final class InternalUnsafeBoundary {
                     method.instructions.insertBefore(call,guard);MemoryWriteScope.nativeReadCall(method,call,arguments,slots,kind(Type.getReturnType(call.desc)));changed=true;continue;
                 }
                 LabelNode guardStart=new LabelNode();guard.add(guardStart);
-                guard.add(new MethodInsnNode(Opcodes.INVOKESTATIC,TASKS,"unsafeControlScope","()Z",false));guard.add(new JumpInsnNode(Opcodes.IFNE,admitted));
+                guard.add(new MethodInsnNode(Opcodes.INVOKESTATIC,"dev/ronova/pro/bootstrap/ControlBridge","unsafeControlScope","()Z",false));guard.add(new JumpInsnNode(Opcodes.IFNE,admitted));
                 Type proposed=arguments[arguments.length-1];
                 if(destination>=0){
                     guard.add(new VarInsnNode(Opcodes.ALOAD,slots[destination]));guard.add(new VarInsnNode(Opcodes.LLOAD,slots[offset]));guard.add(new VarInsnNode(Opcodes.LLOAD,slots[length]));
-                    guard.add(new MethodInsnNode(Opcodes.INVOKESTATIC,TASKS,"unsafeMemoryAllowed","(Ljava/lang/Object;JJ)Z",false));
+                    guard.add(new MethodInsnNode(Opcodes.INVOKESTATIC,"dev/ronova/pro/bootstrap/ControlBridge","unsafeMemoryAllowed","(Ljava/lang/Object;JJ)Z",false));
                 }else{
                     guard.add(new VarInsnNode(Opcodes.ALOAD,slots[0]));guard.add(new VarInsnNode(Opcodes.LLOAD,slots[1]));guard.add(new VarInsnNode(proposed.getOpcode(Opcodes.ILOAD),slots[slots.length-1]));ControlClassWriter.box(guard,proposed);
                     guard.add(new LdcInsnNode(call.name));guard.add(new LdcInsnNode(kind(proposed)));guard.add(new MethodInsnNode(Opcodes.INVOKESTATIC,BACKING,"nativeWriteAllowed","(Ljava/lang/Object;JLjava/lang/Object;Ljava/lang/String;Ljava/lang/String;)Z",false));

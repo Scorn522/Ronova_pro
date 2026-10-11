@@ -43,8 +43,8 @@ public final class NativeControl {
             if(!early.isEmpty()) {
                 Path actual=Path.of(early).toAbsolutePath();if(!hash(Files.readAllBytes(actual)).equals(digest))throw new IOException("EARLY_NATIVE_IMAGE_MISMATCH");dll=actual;
             }
-            System.load(dll.toString());if(abi()!=42)throw new UnsatisfiedLinkError("NATIVE_CONTROL_ABI");
-            if(!initialize0(TaskBridge.class,DefinitionBridge.class))throw new UnsatisfiedLinkError("ACTUAL_NATIVE_BOUNDARY_INSTALL_FAILED");
+            System.load(dll.toString());if(abi()!=45)throw new UnsatisfiedLinkError("NATIVE_CONTROL_ABI");
+            if(!initialize0(ControlBridge.class,DefinitionBridge.class))throw new UnsatisfiedLinkError("ACTUAL_NATIVE_BOUNDARY_INSTALL_FAILED");
             if(!initializeDefinitionDirectory0(definitionDirectoryOwner))throw new UnsatisfiedLinkError("ACTUAL_DEFINITION_DIRECTORY_CAS_UNAVAILABLE");
             libraryBoundaryPresent=libraryPresent0();available=true;return state="NATIVE_BIND_AND_JNI_FIELD_READY";
         } catch(IOException|RuntimeException|LinkageError failure) { return state="OBJECT_CLONE_JNI_UNAVAILABLE:"+failure.getClass().getSimpleName(); }
@@ -90,6 +90,11 @@ public final class NativeControl {
     public static String[] codeVersion(Class<?> actual,byte[] bytes){
         if(!controlCaller())throw new SecurityException("ACTUAL_CODE_VERSION_AGENT_REQUIRED");
         return available?codeVersion0(actual,bytes):null;
+    }
+    public static String[] codeMethodVersion(Class<?> actual,byte[] bytes,String method){
+        if(!controlCaller())throw new SecurityException("ACTUAL_CODE_VERSION_AGENT_REQUIRED");
+        if(method==null)throw new NullPointerException("method");
+        return available?codeMethodVersion0(actual,bytes,method):null;
     }
     public static String[] codeDeclarations(Class<?> actual){
         if(!controlCaller())throw new SecurityException("ACTUAL_CODE_DECLARATIONS_AGENT_REQUIRED");
@@ -153,6 +158,26 @@ public final class NativeControl {
         if(CALLER.getCallerClass()!=CodeSourceBridge.class)throw new SecurityException("ACTUAL_CODE_FIELD_BRIDGE_REQUIRED");
         return available?heapReadField0(holder,declaring,name,descriptor):null;
     }
+    static byte[] codeDigest(byte[] bytes){
+        if(CALLER.getCallerClass()!=CodeSourceBridge.class)throw new SecurityException("ACTUAL_CODE_IMAGE_BRIDGE_REQUIRED");
+        if(available){
+            byte[] digest=codeDigest0(bytes);
+            if(digest==null||digest.length!=32)throw new IllegalStateException("ACTUAL_CODE_IMAGE_DIGEST_UNAVAILABLE");
+            return digest;
+        }
+        try{return MessageDigest.getInstance("SHA-256").digest(bytes);}
+        catch(NoSuchAlgorithmException impossible){throw new AssertionError(impossible);}
+    }
+    public static byte[] agentCodeDigest(byte[] bytes){
+        if(!controlCaller())throw new SecurityException("ACTUAL_CODE_IMAGE_AGENT_REQUIRED");
+        if(available){
+            byte[] digest=codeDigest0(bytes);
+            if(digest==null||digest.length!=32)throw new IllegalStateException("ACTUAL_CODE_IMAGE_DIGEST_UNAVAILABLE");
+            return digest;
+        }
+        try{return MessageDigest.getInstance("SHA-256").digest(bytes);}
+        catch(NoSuchAlgorithmException impossible){throw new AssertionError(impossible);}
+    }
     static byte[] heapArrayImage(Object array,long start,int length){
         if(CALLER.getCallerClass()!=CodeSourceBridge.class)throw new SecurityException("ACTUAL_CODE_ARRAY_BRIDGE_REQUIRED");
         return available?heapArrayImage0(array,start,length):null;
@@ -171,7 +196,7 @@ public final class NativeControl {
     static boolean heapEventPermit(Object holder,Class<?> declaring){return CALLER.getCallerClass()==CodeSourceBridge.class&&available&&heapEventPermit0(holder,declaring);}
     private static void codePrepared(Class<?> actual){CodeSourceBridge.classPrepared(actual);}
     static boolean preparedClass(Class<?> actual){return CALLER.getCallerClass()==CodeSourceBridge.class&&available&&preparedClass0(actual);}
-    static boolean sourceCapture(){return CALLER.getCallerClass()==TaskBridge.class&&sourceCapture0();}
+    static boolean sourceCapture(){return CALLER.getCallerClass()==ControlBridge.class&&sourceCapture0();}
     static boolean fileOperationBoundary(Object receiver,Class<?> declaring,String method,Module[] sources,int operation,long address,long length){
         return CALLER.getCallerClass()==ResourceBridge.class&&fileOperationBoundary0(receiver,declaring,method,sources,operation,address,length);
     }
@@ -220,10 +245,10 @@ public final class NativeControl {
         return remaining==0?"NATIVE_FILE_CURRENT_BINDINGS_READY":"NATIVE_FILE_CURRENT_BINDINGS_PENDING:"+remaining;
     }
     static boolean threadOperationBoundary(Thread thread,Module[] sources,int operation){
-        return CALLER.getCallerClass()==TaskBridge.class&&available&&threadOperationBoundary0(thread,sources,operation);
+        return CALLER.getCallerClass()==ControlBridge.class&&available&&threadOperationBoundary0(thread,sources,operation);
     }
     static boolean threadOperationFinishing(Object token,boolean completed){
-        return CALLER.getCallerClass()==TaskBridge.class&&available&&threadOperationFinishing0(token,completed);
+        return CALLER.getCallerClass()==ControlBridge.class&&available&&threadOperationFinishing0(token,completed);
     }
     public static String threadBoundaryInstalled(){
         if(!controlCaller())throw new SecurityException("NATIVE_THREAD_INSTALL_AGENT_REQUIRED");
@@ -233,7 +258,7 @@ public final class NativeControl {
     }
     public static String codeRetirementGap(Module module){
         if(!controlCaller())throw new SecurityException("ACTUAL_CODE_STATE_AGENT_REQUIRED");
-        String creation=TaskBridge.creationSourceGap(module);if(!creation.isEmpty())return creation;
+        String creation=ControlBridge.creationSourceGap(module);if(!creation.isEmpty())return creation;
         String heap=CodeSourceBridge.executionRetirementGap(module);if(!heap.isEmpty())return heap;
         if(!available)return "EXTERNAL_CODE_VM_BACKEND_UNAVAILABLE";long[] frames=codeState0(module);
         long[] memory=memoryState0(module);
@@ -264,7 +289,7 @@ public final class NativeControl {
             while(cursor.hasNext()){
                 var frame=cursor.next();Class<?> type=frame.getDeclaringClass();String name=type.getName();
                 if(DefinitionBridge.module(type)!=type.getModule())return false;
-                if(type.getNestHost()==NativeControl.class||type.getNestHost()==TaskBridge.class||type.getNestHost()==ResourceBridge.class
+                if(type.getNestHost()==NativeControl.class||type.getNestHost()==TaskBridge.class||type.getNestHost()==ControlBridge.class||type.getNestHost()==ResourceBridge.class
                         ||type.getNestHost()==SourceMapBridge.class||type.getNestHost()==BackingBridge.class)continue;
                 if(proxy&&java.lang.reflect.Proxy.isProxyClass(type)){proxy=false;continue;}
                 if(type.getClassLoader()==null&&(name.startsWith("java.util.")||name.startsWith("java.lang.invoke.")
@@ -283,7 +308,7 @@ public final class NativeControl {
         try{
             var context=LIBRARIES.getDeclaredField("nativeLibraryContext");context.setAccessible(true);
             var names=LIBRARIES.getDeclaredField("loadedLibraryNames");names.setAccessible(true);
-            TaskBridge.controlPublication(LIBRARIES,new Object[]{context.get(null),names.get(null)});
+            ControlBridge.controlPublication(LIBRARIES,new Object[]{context.get(null),names.get(null)});
         }catch(ReflectiveOperationException failure){throw new IllegalStateException("NATIVE_LIBRARY_REGISTRY_UNAVAILABLE",failure);}
         libraryBoundaryReady=available&&libraryBoundaryPresent&&libraryActivate0();
     }
@@ -331,7 +356,7 @@ public final class NativeControl {
     }
     public static long libraryUnloadBegin(Object unloader,long handle){
         LibraryConsumer consumer=unloadConsumer();
-        return available&&libraryBoundaryPresent?libraryUnloadBegin0(unloader,handle,consumer.type(),consumer.automatic(),TaskBridge.recoveryWriter()):0;
+        return available&&libraryBoundaryPresent?libraryUnloadBegin0(unloader,handle,consumer.type(),consumer.automatic(),ControlBridge.recoveryWriter()):0;
     }
     private record LibraryConsumer(Class<?> type,boolean automatic){}
     private static LibraryConsumer unloadConsumer(){
@@ -408,7 +433,7 @@ public final class NativeControl {
             case "end"->caller.getMethodName().equals("processCreateEnd");
             case "construct"->caller.getMethodName().equals("processCleanupAction");
             case "expose"->caller.getMethodName().equals("processPipeExposed");
-            case "retire"->caller.getMethodName().equals("releaseProcess")&&TaskBridge.recoveryWriter();
+            case "retire"->caller.getMethodName().equals("releaseProcess")&&ControlBridge.recoveryWriter();
             default->false;
         };
     }
@@ -475,7 +500,7 @@ public final class NativeControl {
         return available&&bindingControlled0(method);
     }
     public static boolean clearRecoveredField(java.lang.reflect.Field field,Object receiver,Object expected){
-        if(!TaskBridge.recoveryWriter())throw new SecurityException("RECOVERY_FIELD_WRITER_REQUIRED");
+        if(!ControlBridge.recoveryWriter())throw new SecurityException("RECOVERY_FIELD_WRITER_REQUIRED");
         return available&&clearField0(field,receiver,expected);
     }
     static Class<?> activeClass() {return available?activeClass0():null;}
@@ -484,60 +509,60 @@ public final class NativeControl {
     static boolean endDefinition(Class<?> declaring){return available&&definitionEnd0(declaring);}
     static boolean createdObject(Class<?> declaring,Object actual){return available&&createdObject0(declaring,actual);}
     static boolean memoryMutationBoundary(Object receiver){
-        if(CALLER.getCallerClass()!=TaskBridge.class)return false;
+        if(CALLER.getCallerClass()!=ControlBridge.class)return false;
         return memoryMutationBoundary0(receiver);
     }
     static boolean unsafeMutationBoundary(Object receiver,long offset,long length,String kind,boolean bulk){
-        if(CALLER.getCallerClass()!=TaskBridge.class)return false;
+        if(CALLER.getCallerClass()!=ControlBridge.class)return false;
         return unsafeMutationBoundary0(receiver,offset,length,kind,bulk,false);
     }
     private static boolean unsafeMetadata(Object receiver){return CodeSourceBridge.fieldGateMetadata(receiver);}
     static boolean unsafeReadBoundary(Object receiver,long offset,String kind){
-        return CALLER.getCallerClass()==TaskBridge.class&&unsafeMutationBoundary0(receiver,offset,0,kind,false,true);
+        return CALLER.getCallerClass()==ControlBridge.class&&unsafeMutationBoundary0(receiver,offset,0,kind,false,true);
     }
     static boolean unsafeCopyBoundary(Object source,long sourceOffset,Object receiver,long offset,long length){
-        return CALLER.getCallerClass()==TaskBridge.class&&unsafeCopyBoundary0(source,sourceOffset,receiver,offset,length);
+        return CALLER.getCallerClass()==ControlBridge.class&&unsafeCopyBoundary0(source,sourceOffset,receiver,offset,length);
     }
-    static boolean unsafeControlScope(){return CALLER.getCallerClass()==TaskBridge.class&&available&&unsafeControlScope0();}
+    static boolean unsafeControlScope(){return CALLER.getCallerClass()==ControlBridge.class&&available&&unsafeControlScope0();}
     static long memoryWriteBegin(long address,long bytes,Module[] contributors,boolean reading){
-        if(CALLER.getCallerClass()!=TaskBridge.class)throw new SecurityException("ACTUAL_MEMORY_MUTATION_BOUNDARY_REQUIRED");
+        if(CALLER.getCallerClass()!=ControlBridge.class)throw new SecurityException("ACTUAL_MEMORY_MUTATION_BOUNDARY_REQUIRED");
         return available?memoryWriteBegin0(address,bytes,contributors,reading,false):0;
     }
     static long memoryCopyReadBegin(long address,long bytes,Module[] contributors){
-        if(CALLER.getCallerClass()!=TaskBridge.class)throw new SecurityException("ACTUAL_MEMORY_READ_BOUNDARY_REQUIRED");
+        if(CALLER.getCallerClass()!=ControlBridge.class)throw new SecurityException("ACTUAL_MEMORY_READ_BOUNDARY_REQUIRED");
         return available?memoryWriteBegin0(address,bytes,contributors,true,true):0;
     }
     static void memoryWriteContributors(long token,Module[] contributors){
-        if(CALLER.getCallerClass()!=TaskBridge.class)throw new SecurityException("ACTUAL_MEMORY_MUTATION_BOUNDARY_REQUIRED");
+        if(CALLER.getCallerClass()!=ControlBridge.class)throw new SecurityException("ACTUAL_MEMORY_MUTATION_BOUNDARY_REQUIRED");
         memoryWriteContributors0(token,contributors);
     }
     static void memoryWriteEnd(long token,boolean written){
-        if(CALLER.getCallerClass()!=TaskBridge.class)throw new SecurityException("ACTUAL_MEMORY_MUTATION_BOUNDARY_REQUIRED");
+        if(CALLER.getCallerClass()!=ControlBridge.class)throw new SecurityException("ACTUAL_MEMORY_MUTATION_BOUNDARY_REQUIRED");
         memoryWriteEnd0(token,written);
     }
     static Module[] memoryReadSources(long token){
-        if(CALLER.getCallerClass()!=TaskBridge.class)throw new SecurityException("ACTUAL_MEMORY_READ_BOUNDARY_REQUIRED");
+        if(CALLER.getCallerClass()!=ControlBridge.class)throw new SecurityException("ACTUAL_MEMORY_READ_BOUNDARY_REQUIRED");
         return memoryReadSources0(token);
     }
-    private static boolean memoryRecoveryCaller(){return TaskBridge.recoveryWriter();}
+    private static boolean memoryRecoveryCaller(){return ControlBridge.recoveryWriter();}
     public static long[] restoreMemory(Module[] modules,long cursor,long offset,int budget){
-        if(!TaskBridge.recoveryWriter())throw new SecurityException("NATIVE_MEMORY_RECOVERY_CORE_REQUIRED");
+        if(!ControlBridge.recoveryWriter())throw new SecurityException("NATIVE_MEMORY_RECOVERY_CORE_REQUIRED");
         if(modules==null||offset<0||budget<=0)throw new IllegalArgumentException("NATIVE_MEMORY_RECOVERY_SCOPE_REQUIRED");
-        for(Module module:modules)if(module==null||!TaskBridge.modStopped(module))throw new SecurityException("ACTUAL_STOPPED_MEMORY_SOURCES_REQUIRED");
+        for(Module module:modules)if(module==null||!ControlBridge.modStopped(module))throw new SecurityException("ACTUAL_STOPPED_MEMORY_SOURCES_REQUIRED");
         if(modules.length==0)return new long[]{0,0,0,0,1};
         if(!available)throw new IllegalStateException("NATIVE_MEMORY_RECOVERY_UNAVAILABLE");
         return restoreMemory0(modules,cursor,offset,budget);
     }
     public static boolean restoreRecoveredField(java.lang.reflect.Field field,Object receiver,Object expected,Object incoming){
-        if(!TaskBridge.recoveryWriter())throw new SecurityException("RECOVERY_FIELD_WRITER_REQUIRED");
+        if(!ControlBridge.recoveryWriter())throw new SecurityException("RECOVERY_FIELD_WRITER_REQUIRED");
         return available&&restoreField0(field,receiver,expected,incoming);
     }
     static boolean restoreHeapArray(Object array,int index,Object expected,Object incoming){
-        if(CALLER.getCallerClass()!=CodeSourceBridge.class||!TaskBridge.recoveryWriter())throw new SecurityException("HEAP_RECOVERY_CORE_REQUIRED");
+        if(CALLER.getCallerClass()!=CodeSourceBridge.class||!ControlBridge.recoveryWriter())throw new SecurityException("HEAP_RECOVERY_CORE_REQUIRED");
         return available&&restoreArray0(array,index,expected,incoming);
     }
     static boolean restoreHeapArrayBytes(Object array,long start,byte[] expected,byte[] incoming){
-        if(CALLER.getCallerClass()!=CodeSourceBridge.class||!TaskBridge.recoveryWriter())throw new SecurityException("HEAP_RECOVERY_CORE_REQUIRED");
+        if(CALLER.getCallerClass()!=CodeSourceBridge.class||!ControlBridge.recoveryWriter())throw new SecurityException("HEAP_RECOVERY_CORE_REQUIRED");
         return available&&restoreHeapArrayBytes0(array,start,expected,incoming);
     }
     static Object cloneExact(Object source)throws CloneNotSupportedException {
@@ -551,6 +576,7 @@ public final class NativeControl {
     private static native boolean codeLayout0(ClassLoader loader,String name,byte[] bytes,String[] methods,Module[][][] owners,boolean hidden,Object execution);
     private static native boolean codeDefinition0(Class<?> actual,byte[] bytes);
     private static native String[] codeVersion0(Class<?> actual,byte[] bytes);
+    private static native String[] codeMethodVersion0(Class<?> actual,byte[] bytes,String method);
     private static native String[] codeDeclarations0(Class<?> actual);
     private static native Class<?>[] loadedClasses0(boolean bootstrapOnly);
     private static native Class<?>[] bootstrapLookupClasses0();
@@ -563,6 +589,7 @@ public final class NativeControl {
     private static native Class<?> codeFieldOwner0(Class<?> symbolic,String name,String descriptor);
     private static native boolean heapWatch0(Object holder,Class<?> declaring,String name,String descriptor);
     private static native Object[] heapReadField0(Object holder,Class<?> declaring,String name,String descriptor);
+    private static native byte[] codeDigest0(byte[] bytes);
     private static native byte[] heapArrayImage0(Object array,long start,int length);
     private static native long heapArrayBits0(Object array,long start,int length);
     private static native boolean restoreHeapArrayBytes0(Object array,long start,byte[] expected,byte[] incoming);

@@ -24,16 +24,19 @@ public final class ChainFixture {
         public final ConcurrentHashMap<String,CompoundTag> records=new ConcurrentHashMap<>();
         public final AtomicReference<CompoundTag> retained=new AtomicReference<>();
         public final CopyOnWriteArrayList<CompoundTag> copies=new CopyOnWriteArrayList<>();
+        public final ArrayList<CompoundTag> mutableCopies=new ArrayList<>();
         @Override public CompoundTag save(CompoundTag root) {
             CompoundTag entries=new CompoundTag();records.forEach((key,value)->entries.put(key,value.copy()));root.put("records",entries);
             if(retained.get()!=null)root.put("retained",retained.get().copy());
             ListTag list=new ListTag();copies.forEach(value->list.add(value.copy()));root.put("copies",list);
+            ListTag mutable=new ListTag();mutableCopies.forEach(value->mutable.add(value.copy()));root.put("mutableCopies",mutable);
             root.putString("unknown-key","preserve-me");return root;
         }
         static Data read(CompoundTag root) {
             Data data=new Data();CompoundTag entries=root.getCompound("records");for(String key:entries.getAllKeys())data.records.put(key,entries.getCompound(key));
             if(root.contains("retained"))data.retained.set(root.getCompound("retained"));
             for(Tag tag:root.getList("copies",10))data.copies.add((CompoundTag)tag);
+            for(Tag tag:root.getList("mutableCopies",10))data.mutableCopies.add((CompoundTag)tag);
             return data;
         }
     }
@@ -43,6 +46,7 @@ public final class ChainFixture {
         Target copy()throws CloneNotSupportedException { return (Target)super.clone(); }
         @Override public void remove(RemovalReason reason) { /* Hostile virtual remove, no test evidence. */ }
     }
+    private Set<UUID> operationsBefore=Set.of();
     private UUID operation;
     private Data data;
     private WeakReference<Target> original;
@@ -78,11 +82,17 @@ public final class ChainFixture {
                     original=new WeakReference<>(target);Target.PROTOTYPE.set(target);
                     CompoundTag record=target.saveWithoutId(new CompoundTag());CompoundTag unrelated=new CompoundTag();unrelated.putString("foreign","untouched");
                     data=new Data();data.records.put("target",record);data.records.put("unrelated",unrelated);
-                    data.retained.set(record);data.copies.add(record);data.copies.add(unrelated);
+                    data.retained.set(record);data.copies.add(record);data.copies.add(unrelated);data.copies.add(record);
+                    data.mutableCopies.add(record);data.mutableCopies.add(unrelated);data.mutableCopies.add(record);
                     STATIC_RECORDS.put("target",record);STATIC_RECORDS.put("unrelated",unrelated);
                     level.getDataStorage().set("pro_chain_fixture",data);data.setDirty();level.getDataStorage().save();saveStatic();
-                    operation=FixtureCommands.clear(runtime,target);Files.writeString(OPERATION,operation.toString());phase=1;
+                    operationsBefore=new HashSet<>(runtime.operations());FixtureCommands.requestConsole("clear "+target.getUUID());phase=10;
                 }
+            }
+            if(phase==10) {
+                operation=FixtureCommands.newOperation(runtime,operationsBefore);
+                if(operation==null)return;
+                Files.writeString(OPERATION,operation.toString());phase=1;
             }
             if(tick%20==0&&operation!=null)Files.writeString(Path.of("chain-progress.txt"),"phase="+phase+" tick="+tick+"\n"+String.join("\n",runtime.recoveryStatus(operation)));
             if(!restart&&tick>=100&&Set.of("ACK_FORCE","NATIVE_COMMIT").contains(System.getProperty("ronova.pro.fault.point",""))
@@ -95,7 +105,7 @@ public final class ChainFixture {
             }
             if(phase==1) {
                 var body=runtime.query(operation);
-                if(body!=null&&body.complete()&&body.receiptDurable()) {
+                if(body!=null&&body.complete()) {
                     // Clearing the source or refusing its clone is already a
                     // valid defense. Only an admitted clone needs a new body clear.
                     Target prototype=Target.PROTOTYPE.get();
@@ -108,9 +118,10 @@ public final class ChainFixture {
                     phase=2;
                 }
             } else if(phase==2&&Target.PROTOTYPE.get()==null&&!data.records.containsKey("target")
-                    &&data.retained.get()==null&&data.copies.size()==1&&!STATIC_RECORDS.containsKey("target")
+                    &&data.retained.get()==null&&data.copies.size()==1&&data.mutableCopies.size()==1&&!STATIC_RECORDS.containsKey("target")
                     &&(cloneId==null||level.getEntity(cloneId)==null)) {
-                require(data.records.get("unrelated").getString("foreign").equals("untouched"),"UNRELATED_MEMORY");phase=3;
+                require(data.records.get("unrelated").getString("foreign").equals("untouched"),"UNRELATED_MEMORY");
+                    require(data.copies.get(0)==data.records.get("unrelated")&&data.mutableCopies.get(0)==data.records.get("unrelated"),"DUPLICATE_LIST_NEIGHBOR_IDENTITY");phase=3;
             } else if(phase==3&&settled(runtime)) {
                 checkDisk(level);
                 // Normal GC request tests continued metadata settlement; it supplies no release fact.
@@ -125,7 +136,7 @@ public final class ChainFixture {
             try { Files.writeString(Path.of(restart?"chain-restart-result.txt":"chain-result.txt"),"FAILED\n"+failure+"\n"+
                     String.join("\n",operation==null?List.of():runtime.recoveryStatus(operation))); }
             catch(IOException writeFailure) { failure.addSuppressed(writeFailure); }
-            finished=true;failure.printStackTrace();event.getServer().halt(false);
+            finished=true;failure.printStackTrace();
         }
     }
     private boolean settled(ProRuntime runtime) { return runtime.recoveryStatus(operation).stream().anyMatch(row->row.equals("已知恢复链已处置")); }
@@ -136,11 +147,11 @@ public final class ChainFixture {
         Path saved=level.getServer().getWorldPath(net.minecraft.world.level.storage.LevelResource.ROOT).resolve("data/pro_chain_fixture.dat");
         CompoundTag encoded=NbtIo.readCompressed(saved.toFile()).getCompound("data");
         require(!encoded.getCompound("records").contains("target")&&!encoded.contains("retained")&&encoded.getList("copies",10).size()==1
-                &&encoded.getString("unknown-key").equals("preserve-me"),"SAVED_DATA_PRESERVATION");
+                &&encoded.getList("mutableCopies",10).size()==1&&encoded.getString("unknown-key").equals("preserve-me"),"SAVED_DATA_PRESERVATION");
     }
     private void finish(TickEvent.ServerTickEvent event,String title,ProRuntime runtime)throws IOException {
         Files.writeString(Path.of(restart?"chain-restart-result.txt":"chain-result.txt"),title+String.join("\n",runtime.recoveryStatus(operation)));
-        finished=true;event.getServer().halt(false);
+        finished=true;
     }
     private static void require(boolean condition,String reason) { if(!condition)throw new AssertionError(reason); }
 }

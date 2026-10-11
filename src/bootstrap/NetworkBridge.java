@@ -14,7 +14,6 @@ public final class NetworkBridge {
     private static final Map<Key,Write> WRITES=new HashMap<>();
     private static final List<Role> ROLES=new ArrayList<>();
     private static final List<Registry> REGISTRIES=new ArrayList<>();
-    private static final Map<Key,Boolean> CONTROLS=new HashMap<>();
     private static final ThreadLocal<Scope> CURRENT=new ThreadLocal<>();
     private static final Set<Scope> ACTIVE=Collections.newSetFromMap(new IdentityHashMap<>());
     private static final class Scope{
@@ -69,15 +68,15 @@ public final class NetworkBridge {
         }
         return result==null?new Module[0]:result.toArray(Module[]::new);
     }
-    private static Module[] origins(Object object){if(object==null)return new Module[0];return Arrays.stream(TaskBridge.objectSources(object)).filter(Objects::nonNull).filter(TaskBridge::producer).distinct().toArray(Module[]::new);}
-    private static boolean stopped(Module[] modules){if(modules!=null)for(Module module:modules)if(TaskBridge.modStopped(module))return true;return false;}
-    private static void record(Map<Key,Module[]> map,Object object,Module[] modules){if(object==null)return;if(modules.length==0){map.remove(new Key(object,false));return;}Module[] copy=modules.clone();map.put(new Key(object,true),copy);CONTROLS.put(new Key(copy,true),Boolean.TRUE);}
+    private static Module[] origins(Object object){if(object==null)return new Module[0];return Arrays.stream(ControlBridge.objectSources(object)).filter(Objects::nonNull).filter(ControlBridge::producer).distinct().toArray(Module[]::new);}
+    private static boolean stopped(Module[] modules){if(modules!=null)for(Module module:modules)if(ControlBridge.modStopped(module))return true;return false;}
+    private static void record(Map<Key,Module[]> map,Object object,Module[] modules){if(object==null)return;if(modules.length==0){map.remove(new Key(object,false));return;}Module[] copy=modules.clone();map.put(new Key(object,true),copy);CodeSourceBridge.contributionControl(copy);}
     private static Module[] channel(Object object){
         Module[] direct=CHANNELS.get(new Key(object,false));if(direct!=null)return direct;Ref<Object> parent=WRAPPERS.get(new Key(object,false));return parent==null?new Module[0]:CHANNELS.getOrDefault(new Key(parent.get(),false),new Module[0]);
     }
     public static void channelCreated(Object channel,Object address){
         var frame=boundary();if(!frame.getMethodName().equals("<init>"))throw new SecurityException("ACTUAL_CHANNEL_CREATION_REQUIRED");
-        Module[] owners=TaskBridge.invokingSources();synchronized(CHANNELS){reap();record(CHANNELS,channel,owners);}
+        Module[] owners=ControlBridge.invokingSources();synchronized(CHANNELS){reap();record(CHANNELS,channel,owners);}
     }
     public static void routePublished(Object instance){
         var frame=boundary();if(!frame.getMethodName().equals("createInstance"))throw new SecurityException("ACTUAL_CHANNEL_REGISTRATION_REQUIRED");
@@ -90,7 +89,7 @@ public final class NetworkBridge {
     }
     public static void handlerCreated(Object handler,Object codec,Object messageClass,Object encoder,Object decoder,Object consumer){
         if(!boundary().getMethodName().equals("<init>"))throw new SecurityException("ACTUAL_MESSAGE_REGISTRATION_REQUIRED");
-        Module[] owners=union(TaskBridge.invokingSources(),origins(messageClass),origins(encoder),origins(decoder),origins(consumer));
+        Module[] owners=union(ControlBridge.invokingSources(),origins(messageClass),origins(encoder),origins(decoder),origins(consumer));
         synchronized(CHANNELS){reap();record(HANDLERS,handler,owners);WRAPPERS.put(new Key(handler,true),new Ref<>(codec));}
     }
     private static Module[] handler(Object object){return HANDLERS.getOrDefault(new Key(object,false),new Module[0]);}
@@ -100,19 +99,19 @@ public final class NetworkBridge {
     }
     private static Module[] message(Object wrapper,Object handler,Module[] origins){return union(channel(wrapper),handler(handler),origins);}
     public static boolean channelAllowed(Object instance){boundary();synchronized(CHANNELS){return !stopped(channel(instance));}}
-    public static boolean messageAllowed(Object wrapper,Object message){boundary();Module[] origins=origins(message);Object handler=messageHandler(wrapper,message);boolean stopped;synchronized(CHANNELS){stopped=stopped(message(wrapper,handler,origins));}return !stopped&&!TaskBridge.stoppedEffects();}
-    public static boolean codecAllowed(Object handler){boundary();boolean stopped;synchronized(CHANNELS){Ref<Object> codec=WRAPPERS.get(new Key(handler,false));stopped=stopped(handler(handler))||stopped(codec==null?null:channel(codec.get()));}return !stopped&&!TaskBridge.stoppedEffects();}
+    public static boolean messageAllowed(Object wrapper,Object message){boundary();Module[] origins=origins(message);Object handler=messageHandler(wrapper,message);boolean stopped;synchronized(CHANNELS){stopped=stopped(message(wrapper,handler,origins));}return !stopped&&!ControlBridge.stoppedEffects();}
+    public static boolean codecAllowed(Object handler){boundary();boolean stopped;synchronized(CHANNELS){Ref<Object> codec=WRAPPERS.get(new Key(handler,false));stopped=stopped(handler(handler))||stopped(codec==null?null:channel(codec.get()));}return !stopped&&!ControlBridge.stoppedEffects();}
     public static Object enter(Object owner){
         var frame=boundary();Module[] modules;synchronized(CHANNELS){Ref<Object> parent=WRAPPERS.get(new Key(owner,false));modules=union(channel(owner),handler(owner),parent==null?null:channel(parent.get()));}
         return scope(frame,modules);
     }
-    private static Scope scope(StackWalker.StackFrame frame,Module[] modules){Scope scope=new Scope(CURRENT.get(),modules,frame.getDeclaringClass(),frame.getMethodName());synchronized(CHANNELS){ACTIVE.add(scope);CONTROLS.put(new Key(modules,true),Boolean.TRUE);}CURRENT.set(scope);return scope;}
+    private static Scope scope(StackWalker.StackFrame frame,Module[] modules){Scope scope=new Scope(CURRENT.get(),modules,frame.getDeclaringClass(),frame.getMethodName());synchronized(CHANNELS){ACTIVE.add(scope);CodeSourceBridge.contributionControl(modules);}CURRENT.set(scope);return scope;}
     private static Module[] packetSources(Object message){Module[] origins=origins(message),sources;synchronized(CHANNELS){reap();sources=union(PACKETS.get(new Key(message,false)),BUFFERS.get(new Key(message,false)),origins);}return union(sources,routed(message));}
     public static Object encoderEnter(Object message){return scope(boundary(),packetSources(message));}
     public static void encodedBuffer(Object buffer){boundary();synchronized(CHANNELS){record(BUFFERS,buffer,currentSources());}}
     public static void writeCreated(Object task,Object context,Object message,Object promise){
         if(!boundary().getMethodName().equals("init"))throw new SecurityException("ACTUAL_NETTY_WRITE_ITEM_REQUIRED");
-        Module[] modules=union(currentSources(),packetSources(message));synchronized(CHANNELS){reap();WRITES.put(new Key(task,true),new Write(modules,new Ref<>(context),new Ref<>(message),new Ref<>(promise)));CONTROLS.put(new Key(modules,true),Boolean.TRUE);}
+        Module[] modules=union(currentSources(),packetSources(message));synchronized(CHANNELS){reap();WRITES.put(new Key(task,true),new Write(modules,new Ref<>(context),new Ref<>(message),new Ref<>(promise)));CodeSourceBridge.contributionControl(modules);}
     }
     public static Object writeEnter(Object task){
         var frame=boundary();Write write;synchronized(CHANNELS){write=WRITES.get(new Key(task,false));}
@@ -166,8 +165,8 @@ public final class NetworkBridge {
     private static boolean packet(Object message){
         return !stopped(packetSources(message));
     }
-    public static boolean packetAllowed(Object message){boundary();return packet(message)&&!TaskBridge.stoppedEffects();}
-    public static boolean outboundAllowed(Object message){boundary();boolean allowed=packet(message)&&!TaskBridge.stoppedEffects();if(!allowed)synchronized(CHANNELS){dropped++;}return allowed;}
+    public static boolean packetAllowed(Object message){boundary();return packet(message)&&!ControlBridge.stoppedEffects();}
+    public static boolean outboundAllowed(Object message){boundary();boolean allowed=packet(message)&&!ControlBridge.stoppedEffects();if(!allowed)synchronized(CHANNELS){dropped++;}return allowed;}
     public static void packetEncoded(Object packet,Object buffer){
         boundary();Module[] origins=origins(packet),owners;synchronized(CHANNELS){owners=union(PACKETS.get(new Key(packet,false)),origins);}
         owners=union(owners,routed(packet));synchronized(CHANNELS){record(BUFFERS,buffer,owners);}
@@ -196,7 +195,6 @@ public final class NetworkBridge {
         long writes=WRITES.values().stream().filter(write->Arrays.stream(write.modules()).anyMatch(source->source==module)).count();
         return active!=0||writes!=0||unobservedQueues!=0?"NETWORK_RETIREMENT_PENDING:active="+active+":writes="+writes+":queueUnobserved="+unobservedQueues:"";
     }}
-    static boolean controlled(Object value){if(CONTROLS==null)return false;synchronized(CHANNELS){return CONTROLS.containsKey(new Key(value,false));}}
-    public static Object[] controlObjects(){agent();return new Object[]{CHANNELS,HANDLERS,PACKETS,BUFFERS,WRAPPERS,HOLDERS,QUEUES,WRITES,ROLES,REGISTRIES,CONTROLS,DEAD,CURRENT,ACTIVE};}
-    private static void reap(){for(Key key;(key=(Key)DEAD.poll())!=null;){CHANNELS.remove(key);HANDLERS.remove(key);PACKETS.remove(key);BUFFERS.remove(key);WRAPPERS.remove(key);HOLDERS.remove(key);QUEUES.remove(key);WRITES.remove(key);CONTROLS.remove(key);}}
+    public static Object[] controlObjects(){agent();return new Object[]{CHANNELS,HANDLERS,PACKETS,BUFFERS,WRAPPERS,HOLDERS,QUEUES,WRITES,ROLES,REGISTRIES,DEAD,CURRENT,ACTIVE};}
+    private static void reap(){for(Key key;(key=(Key)DEAD.poll())!=null;){CHANNELS.remove(key);HANDLERS.remove(key);PACKETS.remove(key);BUFFERS.remove(key);WRAPPERS.remove(key);HOLDERS.remove(key);QUEUES.remove(key);WRITES.remove(key);}}
 }

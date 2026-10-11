@@ -10,7 +10,6 @@ public final class ClientBridge {
     private static final ReferenceQueue<Object> DEAD=new ReferenceQueue<>();
     private static final Map<Key,Module[]> SOURCES=new HashMap<>();
     private static final Map<Key,TextureRegistry> TEXTURES=new HashMap<>();
-    private static final Map<Key,Boolean> CONTROLS=new HashMap<>();
     private static final Map<Key,ImageRecord> IMAGES=new HashMap<>();
     private static final Map<Key,Ref<Object>> PIXELS=new HashMap<>();
     private static final Map<Key,TextureRetirement> RETIREMENTS=new HashMap<>();
@@ -84,15 +83,15 @@ public final class ClientBridge {
         }
         return result==null?new Module[0]:result.toArray(Module[]::new);
     }
-    private static Module[] origins(Object object){return object==null?new Module[0]:Arrays.stream(TaskBridge.objectSources(object)).filter(TaskBridge::producer).toArray(Module[]::new);}
-    private static boolean stopped(Module[] sources){for(Module module:sources)if(TaskBridge.modStopped(module))return true;return false;}
-    private static boolean exclusive(Module[] sources){if(sources.length==0)return false;for(Module module:sources)if(!TaskBridge.modStopped(module))return false;return true;}
+    private static Module[] origins(Object object){return object==null?new Module[0]:Arrays.stream(ControlBridge.objectSources(object)).filter(ControlBridge::producer).toArray(Module[]::new);}
+    private static boolean stopped(Module[] sources){for(Module module:sources)if(ControlBridge.modStopped(module))return true;return false;}
+    private static boolean exclusive(Module[] sources){if(sources.length==0)return false;for(Module module:sources)if(!ControlBridge.modStopped(module))return false;return true;}
     private static Module[] sources(Object object){Module[] real=origins(object);synchronized(SOURCES){return union(real,SOURCES.get(new Key(object,false)));}}
-    private static void record(Object object,Module[] modules){if(object==null)return;synchronized(SOURCES){reap();Module[] sources=union(SOURCES.get(new Key(object,false)),modules);if(sources.length!=0){SOURCES.put(new Key(object,true),sources);CONTROLS.put(new Key(sources,true),true);}}}
-    public static boolean allowed(Object contribution){boundary();return !stopped(sources(contribution))&&!TaskBridge.stoppedEffects();}
+    private static void record(Object object,Module[] modules){if(object==null)return;synchronized(SOURCES){reap();Module[] sources=union(SOURCES.get(new Key(object,false)),modules);if(sources.length!=0){SOURCES.put(new Key(object,true),sources);CodeSourceBridge.contributionControl(sources);}}}
+    public static boolean allowed(Object contribution){boundary();return !stopped(sources(contribution))&&!ControlBridge.stoppedEffects();}
     public static Object enter(Object contribution){
         var frame=boundary();Module[] owners=union(sources(contribution),currentSources());Scope scope=new Scope(CURRENT.get(),owners,frame);
-        synchronized(SOURCES){ACTIVE.add(scope);CONTROLS.put(new Key(owners,true),true);}CURRENT.set(scope);return scope;
+        synchronized(SOURCES){ACTIVE.add(scope);CodeSourceBridge.contributionControl(owners);}CURRENT.set(scope);return scope;
     }
     public static void exit(Object token){
         var frame=boundary();if(!(token instanceof Scope scope)||scope.type!=frame.getDeclaringClass()||!scope.method.equals(frame.getMethodName())||scope.thread!=Thread.currentThread())throw new SecurityException("ACTUAL_CLIENT_INVOCATION_REQUIRED");
@@ -108,12 +107,12 @@ public final class ClientBridge {
     static boolean stoppedSource(){return stopped(currentSources());}
     public static boolean particleAdmitted(Object particle){
         var frame=boundary();if(!frame.getMethodName().equals("add"))throw new SecurityException("ACTUAL_PARTICLE_ADMISSION_REQUIRED");
-        record(particle,union(origins(particle),TaskBridge.invokingSources()));if(stopped(sources(particle))||TaskBridge.stoppedEffects()){removeParticle(particle);return false;}return true;
+        record(particle,union(origins(particle),ControlBridge.invokingSources()));if(stopped(sources(particle))||ControlBridge.stoppedEffects()){removeParticle(particle);return false;}return true;
     }
     public static boolean particleTick(Object particle){boundary();if(stopped(sources(particle))){removeParticle(particle);return false;}return true;}
     public static void reloadListenerRegistered(Object manager,Object listener){
         var frame=boundary();if(!frame.getDeclaringClass().getName().equals("net.minecraft.server.packs.resources.ReloadableResourceManager")||!frame.getMethodName().equals("registerReloadListener"))throw new SecurityException("ACTUAL_RELOAD_REGISTRATION_REQUIRED");
-        record(listener,union(origins(listener),TaskBridge.invokingSources()));try{Collection<?> listeners=(Collection<?>)field(manager,frame.getDeclaringClass(),"listeners");synchronized(SOURCES){RELOAD_LISTENERS.put(new Key(manager,true),new Ref<>(listeners));}}
+        record(listener,union(origins(listener),ControlBridge.invokingSources()));try{Collection<?> listeners=(Collection<?>)field(manager,frame.getDeclaringClass(),"listeners");synchronized(SOURCES){RELOAD_LISTENERS.put(new Key(manager,true),new Ref<>(listeners));}}
         catch(ReflectiveOperationException unavailable){throw new IllegalStateException("ACTUAL_RELOAD_LIST_UNAVAILABLE",unavailable);}
     }
     public static void reloadStarting(Object manager){
@@ -131,7 +130,7 @@ public final class ClientBridge {
     }
     public static void reloadReturned(Object listener,Object result){
         boundary();if(!(result instanceof java.util.concurrent.CompletableFuture<?> future))throw new IllegalStateException("ACTUAL_RELOAD_RESULT_UNAVAILABLE");
-        Module[] owners=union(sources(listener),currentSources());synchronized(SOURCES){RELOAD_WORK.entrySet().removeIf(entry->entry.getValue().future().isDone());RELOAD_WORK.put(new Key(future,true),new ReloadWork(future,owners));CONTROLS.put(new Key(owners,true),true);}
+        Module[] owners=union(sources(listener),currentSources());synchronized(SOURCES){RELOAD_WORK.entrySet().removeIf(entry->entry.getValue().future().isDone());RELOAD_WORK.put(new Key(future,true),new ReloadWork(future,owners));CodeSourceBridge.contributionControl(owners);}
     }
     private static void retireReloadListeners(){
         List<Collection<?>> lists=new ArrayList<>();synchronized(SOURCES){for(Ref<Collection<?>> reference:RELOAD_LISTENERS.values()){Collection<?> list=reference.get();if(list!=null)lists.add(list);}}
@@ -174,9 +173,9 @@ public final class ClientBridge {
         private final Map<Long,Context> contexts=new HashMap<>();
         private void require(StackWalker.StackFrame frame,String type,String... methods){if(!frame.getDeclaringClass().getName().equals(type)||!Set.of(methods).contains(frame.getMethodName()))throw new SecurityException("ACTUAL_GPU_BOUNDARY_REQUIRED");}
         private int number(Object receiver,Class<?> type,String name)throws ReflectiveOperationException{return ((Number)field(receiver,type,name)).intValue();}
-        private void protect(Object value){synchronized(SOURCES){CONTROLS.put(new Key(value,true),true);}}
+        private void protect(Object value){synchronized(SOURCES){CodeSourceBridge.contributionControl(value);}}
         void begin(Object builder,StackWalker.StackFrame frame){require(frame,"com.mojang.blaze3d.vertex.BufferBuilder","begin");try{Build build=new Build();build.mode=field(builder,frame.getDeclaringClass(),"mode");build.format=field(builder,frame.getDeclaringClass(),"format");if(number(builder,frame.getDeclaringClass(),"vertices")!=0)build.pending="GPU_BEGIN_VERTEX_STATE_UNOBSERVED";protect(build.vertices);synchronized(this){builds.put(new Key(builder,true),build);}}catch(ReflectiveOperationException failure){throw new IllegalStateException("GPU_BEGIN_UNAVAILABLE",failure);}}
-        Object enter(Object builder,Object bulk,StackWalker.StackFrame frame){require(frame,"com.mojang.blaze3d.vertex.BufferBuilder","endVertex","putBulkData");try{Build build;synchronized(this){build=builds.get(new Key(builder,false));}if(build==null)return null;Module[] owners=union(TaskBridge.invokingSources(),currentSources(),origins(bulk));protect(owners);return new VertexEntry(builder,build,number(builder,frame.getDeclaringClass(),"vertices"),owners,frame.getDeclaringClass(),frame.getMethodName(),Thread.currentThread());}catch(ReflectiveOperationException failure){throw new IllegalStateException("GPU_VERTEX_ENTRY_UNAVAILABLE",failure);}}
+        Object enter(Object builder,Object bulk,StackWalker.StackFrame frame){require(frame,"com.mojang.blaze3d.vertex.BufferBuilder","endVertex","putBulkData");try{Build build;synchronized(this){build=builds.get(new Key(builder,false));}if(build==null)return null;Module[] owners=union(ControlBridge.invokingSources(),currentSources(),origins(bulk));protect(owners);return new VertexEntry(builder,build,number(builder,frame.getDeclaringClass(),"vertices"),owners,frame.getDeclaringClass(),frame.getMethodName(),Thread.currentThread());}catch(ReflectiveOperationException failure){throw new IllegalStateException("GPU_VERTEX_ENTRY_UNAVAILABLE",failure);}}
         void complete(Object builder,Object token,StackWalker.StackFrame frame){require(frame,"com.mojang.blaze3d.vertex.BufferBuilder","endVertex","putBulkData");if(token==null)return;if(!(token instanceof VertexEntry entry)||entry.builder()!=builder||entry.type()!=frame.getDeclaringClass()||!entry.method().equals(frame.getMethodName())||entry.thread()!=Thread.currentThread())throw new SecurityException("ACTUAL_VERTEX_WRITE_REQUIRED");
             try{synchronized(this){Build current=builds.get(new Key(builder,false));if(current!=entry.build())throw new IllegalStateException("GPU_VERTEX_BATCH_CHANGED");int count=number(builder,entry.type(),"vertices");if(entry.prior()!=current.vertices.size()||count<entry.prior()){current.pending="GPU_VERTEX_WRITE_SEQUENCE_UNOBSERVED";return;}while(current.vertices.size()<count)current.vertices.add(entry.sources());}}catch(ReflectiveOperationException failure){throw new IllegalStateException("GPU_VERTEX_COMPLETION_UNAVAILABLE",failure);}}
         private VertexImage image(Object builder,Object result)throws ReflectiveOperationException{
@@ -218,7 +217,7 @@ public final class ClientBridge {
         void compiled(int shader,StackWalker.StackFrame frame){require(frame,"com.mojang.blaze3d.platform.GlStateManager","glCompileShader");try{synchronized(this){Context context=context(frame.getDeclaringClass());Fragment applied=context.shaders.get(shader);if(applied!=null&&applied.supported()&&((Number)gl(context,"GL20","glGetShaderi",new Class<?>[]{I,I},shader,35713)).intValue()==0)restoreFragment(context,shader,applied);}}catch(ReflectiveOperationException failure){throw new IllegalStateException("GPU_MASK_COMPILE_FALLBACK_UNAVAILABLE",failure);}}
         private void restoreFragment(Context context,int shader,Fragment fragment)throws ReflectiveOperationException{gl(context,"GL20","glShaderSource",new Class<?>[]{I,CharSequence.class},shader,fragment.original());gl(context,"GL20","glCompileShader",new Class<?>[]{I},shader);context.shaders.put(shader,new Fragment(fragment.sampler(),fragment.enabled(),false,fragment.original()));}
         private int[] primitive(int mode,int n,int[] indices){return switch(mode){case 0->n<indices.length?new int[]{indices[n]}:null;case 1->n*2+1<indices.length?new int[]{indices[n*2],indices[n*2+1]}:null;case 3->n+1<indices.length?new int[]{indices[n],indices[n+1]}:null;case 4->n*3+2<indices.length?new int[]{indices[n*3],indices[n*3+1],indices[n*3+2]}:null;case 5->n+2<indices.length?new int[]{indices[n],indices[n+1],indices[n+2]}:null;case 6->n+2<indices.length?new int[]{indices[0],indices[n+1],indices[n+2]}:null;default->null;};}
-        private boolean retiredSources(Module[] modules){if(modules.length==0)return false;synchronized(SOURCES){for(Module module:modules)if(!REQUESTED.contains(module)&&!TaskBridge.modStopped(module))return false;}return true;}
+        private boolean retiredSources(Module[] modules){if(modules.length==0)return false;synchronized(SOURCES){for(Module module:modules)if(!REQUESTED.contains(module)&&!ControlBridge.modStopped(module))return false;}return true;}
         private BitSet privateVertices(Uploaded gpu)throws ReflectiveOperationException{
             VertexImage image=gpu.image;BitSet selected=new BitSet(image.count()),outside=new BitSet(image.count());for(int n=0;n<image.count();n++)if(retiredSources(image.vertices().get(n)))selected.set(n);
             Class<?> modeType=actualBase(image.mode(),"com.mojang.blaze3d.vertex.VertexFormat$Mode");if(modeType==null)throw new SecurityException("ACTUAL_VERTEX_MODE_REQUIRED");int mode=number(image.mode(),modeType,"asGLMode");
@@ -294,7 +293,7 @@ public final class ClientBridge {
     }
     public static boolean soundAdmitted(Object sound){
         var frame=boundary();if(!frame.getDeclaringClass().getName().equals("net.minecraft.client.sounds.SoundEngine")||!Set.of("play","playDelayed","queueTickingSound").contains(frame.getMethodName()))throw new SecurityException("ACTUAL_SOUND_ADMISSION_REQUIRED");
-        record(sound,union(origins(sound),TaskBridge.invokingSources()));return !stopped(sources(sound))&&!TaskBridge.stoppedEffects();
+        record(sound,union(origins(sound),ControlBridge.invokingSources()));return !stopped(sources(sound))&&!ControlBridge.stoppedEffects();
     }
     private static void removeSoundRows(Object engine,Class<?> type,Object sound)throws ReflectiveOperationException{
         for(String name:List.of("queuedSounds","soundDeleteTime")){Map<?,?> rows=(Map<?,?>)field(engine,type,name);rows.keySet().removeIf(key->key==sound);}
@@ -318,7 +317,7 @@ public final class ClientBridge {
                 if(channel!=null&&(channelType==null||channel.getClass()!=channelType))throw new IllegalStateException("ACTUAL_SOUND_CHANNEL_CHANGED");
                 // A shared original handle keeps its outside sound; only the selected registration is detached.
                 boolean sharedHandle=instances.entrySet().stream().anyMatch(peer->peer.getValue()==handle&&peer.getKey()!=sound&&!stopped(sources(peer.getKey())));
-                if(!sharedHandle){SoundStop stop;synchronized(SOURCES){stop=SOUND_STOPS.computeIfAbsent(new Key(handle,true),ignored->new SoundStop(handle,channel,access,handleType,channelType,accessType,owners));CONTROLS.put(new Key(stop.modules,true),true);}
+                if(!sharedHandle){SoundStop stop;synchronized(SOURCES){stop=SOUND_STOPS.computeIfAbsent(new Key(handle,true),ignored->new SoundStop(handle,channel,access,handleType,channelType,accessType,owners));CodeSourceBridge.contributionControl(stop.modules);}
                     requestSoundStop(stop);
                 }
                 if(instances.get(sound)==handle)instances.remove(sound);removeSoundRows(engine,type,sound);
@@ -328,7 +327,7 @@ public final class ClientBridge {
                 Object current=field(stop.handle,stop.handleType,"channel");boolean released=(Boolean)field(stop.handle,stop.handleType,"stopped");Collection<?> handles=(Collection<?>)field(stop.access,stop.accessType,"channels");
                 if(current==null&&released&&!handles.contains(stop.handle))synchronized(SOURCES){SOUND_STOPS.remove(new Key(stop.handle,false));}
             }
-        }catch(ReflectiveOperationException|RuntimeException unavailable){synchronized(SOURCES){FAILURES.put(new Key(engine,true),TaskBridge.invokingSources());}throw new IllegalStateException("CLIENT_SOUND_RETIREMENT_UNAVAILABLE",unavailable);}
+        }catch(ReflectiveOperationException|RuntimeException unavailable){synchronized(SOURCES){FAILURES.put(new Key(engine,true),ControlBridge.invokingSources());}throw new IllegalStateException("CLIENT_SOUND_RETIREMENT_UNAVAILABLE",unavailable);}
     }
     private static void requestSoundStop(SoundStop stop)throws ReflectiveOperationException{
         if(stop.requested)return;if(stop.channel==null){stop.stopped.set(true);stop.requested=true;return;}
@@ -366,7 +365,7 @@ public final class ClientBridge {
     }
     public static void pixelsExposed(Object texture,Object image){
         var frame=boundary();if(!frame.getMethodName().equals("getPixels")||!frame.getDeclaringClass().getName().equals("net.minecraft.client.renderer.texture.DynamicTexture"))throw new SecurityException("ACTUAL_PIXEL_ACCESS_REQUIRED");
-        if(image==null)return;Module[] exposed=TaskBridge.invokingSources();synchronized(SOURCES){ImageRecord record=IMAGES.get(new Key(image,false));if(record==null)return;
+        if(image==null)return;Module[] exposed=ControlBridge.invokingSources();synchronized(SOURCES){ImageRecord record=IMAGES.get(new Key(image,false));if(record==null)return;
             if(exposed.length==0)record.unknownExposure=true;else record.exposures=union(record.exposures,exposed);}
     }
     public static Object imageCloseEnter(Object image){
@@ -432,10 +431,10 @@ public final class ClientBridge {
         var frame=boundary();if(!frame.getMethodName().equals("register"))throw new SecurityException("ACTUAL_TEXTURE_REGISTRATION_REQUIRED");
         try{
             Map<?,?> map=(Map<?,?>)field(manager,frame.getDeclaringClass(),"byPath");Object published=map.get(key);
-            Module[] owners=published==input?union(TaskBridge.invokingSources(),origins(input)):new Module[0];
+            Module[] owners=published==input?union(ControlBridge.invokingSources(),origins(input)):new Module[0];
             synchronized(SOURCES){reap();TextureRegistry registry=TEXTURES.get(new Key(manager,false));
-                if(registry==null||registry.map().get()!=map){registry=new TextureRegistry(frame.getDeclaringClass(),new Ref<>(map),new HashMap<>());TEXTURES.put(new Key(manager,true),registry);CONTROLS.put(new Key(registry.entries(),true),true);}
-                Module[] protectedOwners=owners.clone();CONTROLS.put(new Key(protectedOwners,true),true);registry.entries().put(key,new Texture(new Ref<>(published),protectedOwners));
+                if(registry==null||registry.map().get()!=map){registry=new TextureRegistry(frame.getDeclaringClass(),new Ref<>(map),new HashMap<>());TEXTURES.put(new Key(manager,true),registry);CodeSourceBridge.contributionControl(registry.entries());}
+                Module[] protectedOwners=owners.clone();CodeSourceBridge.contributionControl(protectedOwners);registry.entries().put(key,new Texture(new Ref<>(published),protectedOwners));
             }
         }catch(ReflectiveOperationException unavailable){throw new IllegalStateException("ACTUAL_TEXTURE_REGISTRY_UNAVAILABLE",unavailable);}
     }
@@ -479,7 +478,6 @@ public final class ClientBridge {
         for(Ref<Collection<?>> reference:RELOAD_LISTENERS.values()){Collection<?> listeners=reference.get();if(listeners!=null)for(Object listener:listeners)if(Arrays.stream(sources(listener)).anyMatch(source->source==module))reloads++;}
         return active!=0||textures!=0||resources!=0||sounds!=0||reloads!=0||gpu!=0||failures!=0?"CLIENT_RETIREMENT_PENDING:active="+active+":textures="+textures+":resources="+resources+":sounds="+sounds+":reloads="+reloads+":gpu="+gpu+":shared="+shared+":releaseFailures="+failures:"";
     }}
-    static boolean controlled(Object value){if(CONTROLS==null)return false;synchronized(SOURCES){return CONTROLS.containsKey(new Key(value,false));}}
-    public static Object[] controlObjects(){agent();List<Object> roots=new ArrayList<>(Arrays.asList(SOURCES,TEXTURES,CONTROLS,ROLES,REQUESTED,CURRENT,RELEASING,ACTIVE,DEAD,IMAGES,PIXELS,RETIREMENTS,FAILURES,SOUNDS,SOUND_STOPS,RELOAD_LISTENERS,RELOAD_WORK));Collections.addAll(roots,GPU.controls());return roots.toArray();}
-    private static void reap(){for(Key key;(key=(Key)DEAD.poll())!=null;){SOURCES.remove(key);TEXTURES.remove(key);CONTROLS.remove(key);IMAGES.remove(key);PIXELS.remove(key);FAILURES.remove(key);SOUNDS.remove(key);RELOAD_LISTENERS.remove(key);}}
+    public static Object[] controlObjects(){agent();List<Object> roots=new ArrayList<>(Arrays.asList(SOURCES,TEXTURES,ROLES,REQUESTED,CURRENT,RELEASING,ACTIVE,DEAD,IMAGES,PIXELS,RETIREMENTS,FAILURES,SOUNDS,SOUND_STOPS,RELOAD_LISTENERS,RELOAD_WORK));Collections.addAll(roots,GPU.controls());return roots.toArray();}
+    private static void reap(){for(Key key;(key=(Key)DEAD.poll())!=null;){SOURCES.remove(key);TEXTURES.remove(key);IMAGES.remove(key);PIXELS.remove(key);FAILURES.remove(key);SOUNDS.remove(key);RELOAD_LISTENERS.remove(key);}}
 }

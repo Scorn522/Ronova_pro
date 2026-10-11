@@ -7,17 +7,7 @@
 #include <algorithm>
 
 namespace recovery_storage {
-// Validation can only manufacture failure, never return a successful native receipt.
-static bool injected_failure(JNIEnv* env,jobject request,const char* point) {
-    auto type=env->GetObjectClass(request);
-    auto method=env->GetMethodID(type,"validationFault","(Ljava/lang/String;)Z");env->DeleteLocalRef(type);
-    if(!method){env->ExceptionClear();return false;} // Optional fault hook; existing production ABI remains valid.
-    auto name=env->NewStringUTF(point);if(!name)return true;
-    bool failed=env->CallBooleanMethod(request,method,name)==JNI_TRUE;env->DeleteLocalRef(name);
-    if(env->ExceptionCheck()){env->ExceptionClear();failed=true;}
-    if(failed)SetLastError(ERROR_WRITE_FAULT);
-    return failed;
-}
+
 struct Api {
     HMODULE module=nullptr;
     decltype(&CreateTransaction) create=nullptr;
@@ -285,12 +275,12 @@ static jlong drive(JNIEnv* env,Transaction& tx) {
                 if(!want){tx.phase=Transaction::Flush;break;}
                 if(!candidate(want))return 0;
                 DWORD count=0;
-                if(injected_failure(env,tx.request,"NATIVE_WRITE")||!WriteFile(tx.file,buffer,want,&count,nullptr))return failure(0);
+                if(!WriteFile(tx.file,buffer,want,&count,nullptr))return failure(0);
                 if(!count||count>want)return failure(ERROR_WRITE_FAULT);
                 tx.offset+=count;consumed+=count;break;
             }
             case Transaction::Flush:
-                if(!SetEndOfFile(tx.file)||injected_failure(env,tx.request,"NATIVE_FLUSH")||!FlushFileBuffers(tx.file))return failure(0);
+                if(!SetEndOfFile(tx.file)||!FlushFileBuffers(tx.file))return failure(0);
                 if(!start_file_hash(tx))return failure(tx.hashing.error);
                 tx.phase=Transaction::ExpectedHash;break;
             case Transaction::ClosePrepared: {
@@ -382,7 +372,7 @@ Java_dev_ronova_pro_StorageNative_finish0(JNIEnv* env,jclass,jobject request,jlo
     if(!tx->finalized) {
         tx->finalized=true;
         if(tx->handle==INVALID_HANDLE_VALUE)tx->outcome=0;
-        else if(allowed) {if(!injected_failure(env,request,"NATIVE_COMMIT")&&api().commit(tx->handle))tx->outcome=1;else{tx->outcome=3;tx->error=GetLastError();}}
+        else if(allowed) {if(api().commit(tx->handle))tx->outcome=1;else{tx->outcome=3;tx->error=GetLastError();}}
         else {if(api().rollback(tx->handle))tx->outcome=2;else{tx->outcome=3;tx->error=GetLastError();}}
     }
     jlong status=tx->outcome,error=tx->error;

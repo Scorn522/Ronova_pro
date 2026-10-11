@@ -43,6 +43,17 @@ public final class RecoveryAgent {
     }
     private static synchronized void start(String argument,Instrumentation api,String mode) {
         if(instrumentation!=null) { report("AGENT_EXISTING_STATE:"+installState);return; }
+        if(Boolean.getBoolean("ronova.pro.startupTrace")){
+            Thread starting=Thread.currentThread();
+            Thread trace=new Thread(()->{
+                for(int sample=0;sample<3;sample++){
+                    try{Thread.sleep(90000);}catch(InterruptedException done){return;}
+                    System.err.println("RONOVA_STARTUP_THREAD_SAMPLE "+sample);
+                    for(StackTraceElement frame:starting.getStackTrace())System.err.println("  at "+frame);
+                }
+            },"Ronova startup failure trace");
+            trace.setDaemon(true);trace.start();
+        }
         try {
             install(argument,api);
             installState=installed.containsAll(JdkTaskBoundaryContract.targets())&&indexGuarded&&reflectionGuarded&&unsafeGuarded
@@ -78,23 +89,27 @@ public final class RecoveryAgent {
             bootstrap=new JarFile(Path.of(argument).toAbsolutePath().normalize().toFile());
             api.appendToBootstrapClassLoaderSearch(bootstrap);
             bridge=Class.forName("dev.ronova.pro.bootstrap.TaskBridge",true,null);
-            if(!Integer.valueOf(48).equals(bridge.getMethod("abiVersion").invoke(null)))throw new IllegalStateException("TASK_BRIDGE_ABI_MISMATCH");
+            if(!Integer.valueOf(49).equals(bridge.getMethod("abiVersion").invoke(null)))throw new IllegalStateException("TASK_BRIDGE_ABI_MISMATCH");
             Class.forName("dev.ronova.pro.bootstrap.SourceMapBridge",true,null);
             // Default-Map guards test UUID keys while class-loading maps are
             // active. Resolve that type before publishing the guarded methods.
             Class.forName("java.util.UUID",false,null);
             // A guarded Map operation must not first define its own frame while
             // libinstrument is filling that frame's class bytes through JNI.
-            for(String helper:List.of("Key","Bucket","OwnerRef","Gate","Scope","Frame","ConcurrentFrame","Refused"))
+            for(String helper:List.of("Key","OwnerRef","Gate","Scope","Frame","ConcurrentFrame","Refused"))
                 Class.forName("dev.ronova.pro.bootstrap.SourceMapBridge$"+helper,true,null);
             for(String helper:List.of("SourcePublication","SourceIndexMutation","FastListView","FieldMutation"))
-                Class.forName("dev.ronova.pro.bootstrap.TaskBridge$"+helper,true,null);
+                Class.forName("dev.ronova.pro.bootstrap.ControlBridge$"+helper,true,null);
             // This new map is used from a JNI array-observation upcall. Define
             // it before that upcall can itself fill class bytes through JNI.
             Class.forName("dev.ronova.pro.bootstrap.ExecutionFlow$TraceMap",false,null);
             Class.forName("dev.ronova.pro.bootstrap.CodeSourceBridge$LedgerMap",false,null);
+            Class.forName("dev.ronova.pro.bootstrap.CodeSourceBridge$FrameMethods",false,null);
+            Class.forName("dev.ronova.pro.bootstrap.CodeSourceBridge$MethodBucket",false,null);
+            Class.forName("dev.ronova.pro.bootstrap.ControlBridge$ProducerFrame",false,null);
             Class.forName("dev.ronova.pro.bootstrap.EventFaultBridge",true,null);
             Class<?> control=Class.forName("dev.ronova.pro.bootstrap.ControlBridge",true,null);
+            if(!Integer.valueOf(49).equals(control.getMethod("abiVersion").invoke(null)))throw new IllegalStateException("CONTROL_BRIDGE_ABI_MISMATCH");
             Module base=Object.class.getModule(),ours=RecoveryAgent.class.getModule();
             api.redefineModule(base,Set.of(bridge.getModule()),Map.of(
                     "jdk.internal.org.objectweb.asm",Set.of(ours),"jdk.internal.org.objectweb.asm.commons",Set.of(ours),
@@ -132,6 +147,11 @@ public final class RecoveryAgent {
             ClassFileTransformer objectTransformer=new ClassFileTransformer() {
                 @Override public byte[] transform(Module module,ClassLoader loader,String name,Class<?> type,
                         ProtectionDomain domain,byte[] bytes) {
+                    // The same exact Agent image was already excluded by apply().
+                    // Exclude it before building an external graph as well: our private
+                    // implementation is not an external definition to be taken over.
+                    if(module==ours&&loader==RecoveryAgent.class.getClassLoader()&&domain!=null
+                            &&java.util.Objects.equals(domain.getCodeSource(),RecoveryAgent.class.getProtectionDomain().getCodeSource()))return null;
                     Module origin=definitionOrigin(type,loader,name);
                     try {
                     if(origin!=null&&module!=null&&!module.canRead(bridge.getModule()))
@@ -145,9 +165,8 @@ public final class RecoveryAgent {
                     recordDefinition(type,result==null?bytes:result);return result;
                     }catch(RuntimeException|LinkageError failure){
                         if(controlFailure==null){
-                            controlFailure=String.valueOf(name)+":"+failure.getClass().getSimpleName();
+                            controlFailure=String.valueOf(name)+":"+failure.getClass().getSimpleName()+":"+String.valueOf(failure.getMessage());
                             System.err.println("RONOVA_CONTROL_TRANSFORM_FAILED:"+controlFailure);
-                            if(Boolean.getBoolean("ronova.pro.validation"))failure.printStackTrace(System.err);
                         }
                         if(origin!=null){ModGroupBoundary.failed(origin,String.valueOf(name),failure);return new byte[]{0,0,0,0};}
                         throw failure;
@@ -265,8 +284,8 @@ public final class RecoveryAgent {
                     if(nativeClone!=null)current=nativeClone;
                     boolean declaredSource=type!=null&&watching.contains(type);
                     boolean application=name.startsWith("net/minecraft/")
-                            ||name.startsWith("dev/ronova/pro/validation/")||producerModule(module)
-                            ||declaredSource||externalSources||directEntityReference(bytes);
+                            ||producerModule(module)
+                            ||declaredSource||externalSources||directEntityReference(bytes)||directMutationReference(bytes);
                     if(!application) {
                         if(current!=bytes&&module!=null&&module.isNamed()&&!module.canRead(bridge.getModule()))
                             api.redefineModule(module,Set.of(bridge.getModule()),Map.of(),Map.of(),Set.of(),Map.of());
@@ -290,9 +309,8 @@ public final class RecoveryAgent {
                     }catch(ReflectiveOperationException failure) {
                         throw new IllegalStateException("CODE_SOURCE_BOUNDARY_BINDING_FAILED:"+name,failure);
                     }catch(RuntimeException|LinkageError failure) {
-                        if(controlFailure==null)controlFailure=String.valueOf(name)+":"+failure.getClass().getSimpleName();
+                        if(controlFailure==null)controlFailure=String.valueOf(name)+":"+failure.getClass().getSimpleName()+":"+String.valueOf(failure.getMessage());
                         System.err.println("RONOVA_CONTROL_TRANSFORM_FAILED:"+controlFailure);
-                        if(Boolean.getBoolean("ronova.pro.validation"))failure.printStackTrace(System.err);
                         if(ModGroupBoundary.stopped(module)) {
                             ModGroupBoundary.failed(module,String.valueOf(name),failure);
                             // Transformer exceptions alone are ignored by Instrumentation. Invalid bytes refuse
@@ -309,10 +327,10 @@ public final class RecoveryAgent {
             definitionBridge.getMethod("install",Class.class).invoke(null,RecoveryAgent.class);
             networkBridge=Class.forName("dev.ronova.pro.bootstrap.NetworkBridge",true,null);
             Object[] networkControls=(Object[])networkBridge.getMethod("controlObjects").invoke(null);
-            bridge.getMethod("registerAgentControls",Object[].class).invoke(null,(Object)networkControls);
+            Class.forName("dev.ronova.pro.bootstrap.ControlBridge",false,null).getMethod("registerAgentControls",Object[].class).invoke(null,(Object)networkControls);
             clientBridge=Class.forName("dev.ronova.pro.bootstrap.ClientBridge",true,null);
             Object[] clientControls=(Object[])clientBridge.getMethod("controlObjects").invoke(null);
-            bridge.getMethod("registerAgentControls",Object[].class).invoke(null,(Object)clientControls);
+            Class.forName("dev.ronova.pro.bootstrap.ControlBridge",false,null).getMethod("registerAgentControls",Object[].class).invoke(null,(Object)clientControls);
             codeSourceBridge=Class.forName("dev.ronova.pro.bootstrap.CodeSourceBridge",true,null);
             codeSourceBridge.getMethod("install",Class.class).invoke(null,RecoveryAgent.class);
             imageControlReader=codeSourceBridge.getMethod("imageControlFields",Object[].class,java.lang.reflect.Field[][].class);
@@ -330,10 +348,11 @@ public final class RecoveryAgent {
                     java.util.Timer.class,Class.forName("java.util.TimerThread",false,null),java.io.FileDescriptor.class,
                     java.io.FileInputStream.class,java.io.FileOutputStream.class,java.io.RandomAccessFile.class,
                     java.nio.channels.spi.AbstractInterruptibleChannel.class,Class.forName("sun.nio.ch.FileChannelImpl",false,null),
-                    Class.forName("sun.nio.fs.WindowsChannelFactory",false,null),
                     Class.forName("java.lang.ProcessImpl",false,null),java.net.URL.class,java.io.InputStreamReader.class,
                     Class.forName("jdk.internal.loader.NativeLibraries$NativeLibraryImpl",false,null),
                     Class.forName("jdk.internal.loader.NativeLibraries$Unloader",false,null));
+            try{api.retransformClasses(Class.forName("sun.nio.fs.WindowsChannelFactory",false,null));}
+            catch(ClassNotFoundException absent){report("WINDOWS_FILE_FACTORY_UNAVAILABLE_ON_CURRENT_JDK");}
             Class.forName("dev.ronova.pro.bootstrap.NativeControl",false,null).getMethod("libraryBoundaryInstalled").invoke(null);
             Class.forName("dev.ronova.pro.bootstrap.NativeControl",false,null).getMethod("processBoundaryInstalled").invoke(null);
             report(String.valueOf(Class.forName("dev.ronova.pro.bootstrap.NativeControl",false,null).getMethod("threadBoundaryInstalled").invoke(null)));
@@ -420,7 +439,7 @@ public final class RecoveryAgent {
             DispatchBoundary.retransformDeclared(api);
             for(Class<?> type:loadedClasses())if(type.getName().replace('.','/').equals(EventFaultBoundary.TARGET)) {
                 try {
-                    bridge.getMethod("installEventBoundary",Class.class).invoke(null,type);
+                    Class.forName("dev.ronova.pro.bootstrap.ControlBridge",false,null).getMethod("installEventBoundary",Class.class).invoke(null,type);
                     eventFaultGuarded=false;api.retransformClasses(type);
                 }
                 catch(ReflectiveOperationException failure){throw new IllegalStateException("EVENT_CONTROL_BINDING",failure);}
@@ -546,7 +565,7 @@ public final class RecoveryAgent {
     }
     private static void publishStoppedModule(Module module) {
         try {
-            bridge.getMethod("stopModules",Module[].class).invoke(null,(Object)new Module[]{module});
+            Class.forName("dev.ronova.pro.bootstrap.ControlBridge",false,null).getMethod("stopModules",Module[].class).invoke(null,(Object)new Module[]{module});
             Class.forName("dev.ronova.pro.bootstrap.DefinitionBridge",false,null).getMethod("policy",Module.class,String.class).invoke(null,module,ModGroupBoundary.mode(module));
             Class.forName("dev.ronova.pro.bootstrap.NativeControl",false,null).getMethod("module",Module.class,boolean.class).invoke(null,module,true);
         }
@@ -608,6 +627,17 @@ public final class RecoveryAgent {
         try{return (String[])Class.forName("dev.ronova.pro.bootstrap.NativeControl",false,null).getMethod("codeVersion",Class.class,byte[].class).invoke(null,actual,bytes);}
         catch(ReflectiveOperationException failure){throw new IllegalStateException("ACTUAL_CODE_VERSION_UNAVAILABLE",failure);}
     }
+    static String[] externalCodeMethodVersion(Class<?> actual,byte[] bytes,String method){
+        if(CALLER.getCallerClass()!=ExternalCodeDefinitions.class)throw new SecurityException("ACTUAL_CODE_DEFINITION_REGISTRY_REQUIRED");
+        try{return (String[])Class.forName("dev.ronova.pro.bootstrap.NativeControl",false,null).getMethod("codeMethodVersion",Class.class,byte[].class,String.class).invoke(null,actual,bytes,method);}
+        catch(ReflectiveOperationException failure){throw new IllegalStateException("ACTUAL_CODE_VERSION_UNAVAILABLE",failure);}
+    }
+    static byte[] externalCodeDigest(byte[] bytes){
+        Class<?> caller=CALLER.getCallerClass();
+        if(caller!=ExternalCodeImages.class&&caller!=RecoveryAgent.class)throw new SecurityException("ACTUAL_CODE_IMAGE_REGISTRY_REQUIRED");
+        try{return (byte[])Class.forName("dev.ronova.pro.bootstrap.NativeControl",false,null).getMethod("agentCodeDigest",byte[].class).invoke(null,(Object)bytes);}
+        catch(ReflectiveOperationException failure){throw new IllegalStateException("ACTUAL_CODE_IMAGE_DIGEST_UNAVAILABLE",failure);}
+    }
     static String[] externalCodeDeclarations(Class<?> actual){
         if(CALLER.getCallerClass()!=ExternalCodeDefinitions.class)throw new SecurityException("ACTUAL_CODE_DEFINITION_REGISTRY_REQUIRED");
         try{return (String[])Class.forName("dev.ronova.pro.bootstrap.NativeControl",false,null).getMethod("codeDeclarations",Class.class).invoke(null,actual);}
@@ -662,7 +692,7 @@ public final class RecoveryAgent {
             codeSourceBridge.getMethod("codeMethods",Class.class,String[].class).invoke(null,actual,methods);
             codeSourceBridge.getMethod("codeFields",Class.class,String[].class,Module[][].class).invoke(null,actual,fields.keySet().toArray(String[]::new),fields.values().toArray(Module[][]::new));
             codeSourceBridge.getMethod("codeValues",Class.class,Object[][].class).invoke(null,actual,(Object)values);
-            bridge.getMethod("registerDefinitionCreationSites",Class.class,String[].class).invoke(null,actual,(Object)creationSites);
+            Class.forName("dev.ronova.pro.bootstrap.ControlBridge",false,null).getMethod("registerDefinitionCreationSites",Class.class,String[].class).invoke(null,actual,(Object)creationSites);
             controlImages.declare(actual);if(!fields.isEmpty()||values.length!=0)codeSourceBridge.getMethod("codeClass",Class.class).invoke(null,actual);
             if(!installed)ModGroupBoundary.externalGap(logicalModule(actual),actual.getName()+":EXTERNAL_HIDDEN_CODE_VM_BACKEND_UNAVAILABLE");
         }catch(ReflectiveOperationException failure){throw new IllegalStateException("EXTERNAL_HIDDEN_DEFINITION_PUBLICATION_FAILED",failure);}
@@ -723,6 +753,20 @@ public final class RecoveryAgent {
                 ||containsAscii(bytes,"net/minecraft/network/syncher/SynchedEntityData")
                 ||containsAscii(bytes,"net/minecraft/server/level/ServerLevel");
     }
+    /** Auxiliary writers need their real write boundary even when their module
+     * has no mod metadata and their arguments are declared only as Object. This
+     * is an eligibility screen, never evidence of ownership or a new policy. */
+    private static boolean directMutationReference(byte[] bytes) {
+        boolean candidate=containsAscii(bytes,"java/lang/reflect/Array")
+                ||containsAscii(bytes,"java/lang/reflect/Field")
+                ||containsAscii(bytes,"java/lang/reflect/Method")
+                ||containsAscii(bytes,"sun/misc/Unsafe")
+                ||containsAscii(bytes,"jdk/internal/misc/Unsafe");
+        if(!candidate)return false;
+        // Load the ASM visitor only after install has exported its package.
+        // Premain's own declared-method lookup must remain free of ASM parents.
+        return BackingBoundary.actualMutationCalls(bytes);
+    }
     private static boolean containsAscii(byte[] bytes,String value) {
         byte[] needle=value.getBytes(java.nio.charset.StandardCharsets.US_ASCII);
         outer:for(int i=0;i<=bytes.length-needle.length;i++) {
@@ -767,16 +811,13 @@ public final class RecoveryAgent {
         if(type==null)return;
         synchronized(definitions) {
             if(!watching.contains(type))return;
-            try {
-                String hash=HexFormat.of().formatHex(java.security.MessageDigest.getInstance("SHA-256")
-                        .digest(JdkTaskBoundaryContract.canonical(image)));
-                definitions.put(type,hash+":"+(++definitionEpoch));
-            } catch(java.security.NoSuchAlgorithmException impossible) {throw new AssertionError(impossible);}
+            String hash=HexFormat.of().formatHex(externalCodeDigest(JdkTaskBoundaryContract.canonical(image)));
+            definitions.put(type,hash+":"+(++definitionEpoch));
         }
     }
     private static void registerProducer(Module module) {
         try {
-            bridge.getMethod("registerProducerModule",Module.class).invoke(null,module);
+            Class.forName("dev.ronova.pro.bootstrap.ControlBridge",false,null).getMethod("registerProducerModule",Module.class).invoke(null,module);
             Class.forName("dev.ronova.pro.bootstrap.NativeControl",false,null).getMethod("module",Module.class,boolean.class).invoke(null,module,false);
         }
         catch(ReflectiveOperationException unavailable) {throw new IllegalStateException("PRODUCER_MODULE_REGISTRY",unavailable);}
@@ -796,15 +837,6 @@ public final class RecoveryAgent {
     }
     static Module logicalModule(Class<?> type){
         Module origin=definitionOrigin(type,type.getClassLoader(),type.getName().replace('.','/'));return origin==null?type.getModule():origin;
-    }
-    static Module[] logicalModules(Class<?>[] types){
-        if(CALLER.getCallerClass()!=ExternalCodeDefinitions.class)throw new SecurityException("ACTUAL_CODE_DEFINITION_REGISTRY_REQUIRED");
-        Class<?> bridge=definitionBridge;Module[] origins;
-        if(bridge==null)origins=new Module[types.length];
-        else try{origins=(Module[])bridge.getMethod("origins",Class[].class).invoke(null,(Object)types);}
-        catch(ReflectiveOperationException failure){throw new IllegalStateException("ACTUAL_DEFINITION_ORIGIN_UNAVAILABLE",failure);}
-        for(int i=0;i<types.length;i++)if(origins[i]==null)origins[i]=types[i].getModule();
-        return origins;
     }
     static Class<?>[] loadedClasses(){
         Instrumentation api=instrumentation;if(api==null)return new Class<?>[0];
@@ -850,8 +882,7 @@ public final class RecoveryAgent {
     public static boolean controlReady() {
         try{return controlFailure==null&&controlImages.healthy()
                 &&Boolean.TRUE.equals(Class.forName("dev.ronova.pro.bootstrap.ControlBridge",false,null).getMethod("ready").invoke(null))
-                &&Boolean.TRUE.equals(Class.forName("dev.ronova.pro.bootstrap.TaskBridge",false,null)
-                        .getMethod("controlCaptureHealthy").invoke(null));}
+                &&Boolean.TRUE.equals(Class.forName("dev.ronova.pro.bootstrap.ControlBridge",false,null).getMethod("controlCaptureHealthy").invoke(null));}
         catch(ReflectiveOperationException unavailable){return false;}
     }
     private static void protectInstrumentation(Instrumentation api)throws ReflectiveOperationException {
@@ -868,6 +899,6 @@ public final class RecoveryAgent {
             }
             if(owned){roots.add(manager);roots.add(entries);}
         }
-        bridge.getMethod("registerAgentControls",Object[].class).invoke(null,(Object)roots.toArray());
+        Class.forName("dev.ronova.pro.bootstrap.ControlBridge",false,null).getMethod("registerAgentControls",Object[].class).invoke(null,(Object)roots.toArray());
     }
 }

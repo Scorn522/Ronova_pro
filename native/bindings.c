@@ -39,7 +39,7 @@ static jclass native_library_class,native_impl_class,native_unloader_class;
 static jfieldID native_library_context,native_impl_handle,native_impl_version,native_impl_name,native_impl_builtin,native_impl_jni;
 static HMODULE native_java_image;
 static volatile LONG native_library_present,native_library_ready;
-static jclass native_tasks,native_definitions;
+static jclass native_controls,native_definitions;
 static jmethodID native_owner_gate,native_field_gate,native_module_query,native_return_query;
 static jmethodID native_image_query,native_defined_query,native_after_query,native_created_query;
 static jmethodID native_array_query,native_array_policy,native_pin_query,native_registration_query,native_registration_target,native_object_module;
@@ -151,7 +151,7 @@ static int native_capture_scope_sources(JNIEnv *env,NativeThread *state,OwnerLin
 static int native_capture_scope_owners(JNIEnv *env,NativeThread *state,OwnerLink **owners){return native_capture_scope_sources(env,state,owners,NULL);}
 static int native_capture_network_sources(JNIEnv *env,NativeThread *state,OwnerLink **owners,int *unknown){
     if(!native_jni_ready||!state||state->control||!native_network_sources)return 1;
-    state->control++;state->sourceCapture++;jobjectArray sources=(jobjectArray)native_original.CallStaticObjectMethod(env,native_tasks,native_network_sources);state->sourceCapture--;int valid=sources&&!native_original.ExceptionCheck(env);
+    state->control++;state->sourceCapture++;jobjectArray sources=(jobjectArray)native_original.CallStaticObjectMethod(env,native_controls,native_network_sources);state->sourceCapture--;int valid=sources&&!native_original.ExceptionCheck(env);
     if(valid){jsize count=native_original.GetArrayLength(env,sources);AcquireSRWLockExclusive(&native_records);
         for(jsize i=0;i<count&&valid&&!native_original.ExceptionCheck(env);i++){
             jobject module=native_original.GetObjectArrayElement(env,sources,i);
@@ -179,7 +179,7 @@ static uint64_t native_enter(JNIEnv *env,jobject receiver,Binding *binding,unsig
             ||effective->library&&(!InterlockedCompareExchange(&effective->library->alive,0,0)||InterlockedCompareExchange(&effective->library->closing,0,0))))effective=effective->previous;
     if(!effective)return 0;
     state->control++;jobject type=native_original.NewLocalRef(env,effective->origin);
-    jboolean allowed=type&&native_tasks?native_original.CallStaticBooleanMethod(env,native_tasks,native_owner_gate,type):JNI_FALSE;
+    jboolean allowed=type&&native_controls?native_original.CallStaticBooleanMethod(env,native_controls,native_owner_gate,type):JNI_FALSE;
     if(type)native_original.DeleteLocalRef(env,type);state->control--;if(native_original.ExceptionCheck(env)||!allowed)return 0;
     state->entries[state->depth]=binding;state->stack[state->depth++]=effective;InterlockedIncrement(&effective->active);
     if(binding->unsafeOperation&&!native_unsafe_begin(env,state,binding,frame)){
@@ -316,10 +316,10 @@ static void JNICALL native_binding(jvmtiEnv *api,JNIEnv *env,jthread thread,jmet
     if(name)(*api)->Deallocate(api,(unsigned char*)name);if(signature)(*api)->Deallocate(api,(unsigned char*)signature);ReleaseSRWLockExclusive(&native_records);native_original.DeleteLocalRef(env,module);native_original.DeleteLocalRef(env,type);state->control--;
 }
 static int native_field_allowed(JNIEnv *env,jobject object,jclass type,jfieldID field,jobject value,int statik) {
-    if(native_stopped(env)){native_refuse(env,"RONOVA_STOPPED_NATIVE_FIELD_WRITE");return 0;}NativeThread *state=native_thread();if(!native_tasks||!state)return 1;
+    if(native_stopped(env)){native_refuse(env,"RONOVA_STOPPED_NATIVE_FIELD_WRITE");return 0;}NativeThread *state=native_thread();if(!native_controls||!state)return 1;
     state->control++;jclass declaring=NULL;jvmtiError result=(*native_ti)->GetFieldDeclaringClass(native_ti,type,field,&declaring);
     jobject reflected=result==JVMTI_ERROR_NONE?native_original.ToReflectedField(env,declaring,field,statik?JNI_TRUE:JNI_FALSE):NULL;
-    jboolean allowed=reflected?native_original.CallStaticBooleanMethod(env,native_tasks,native_field_gate,reflected,statik?NULL:object,value):JNI_FALSE;
+    jboolean allowed=reflected?native_original.CallStaticBooleanMethod(env,native_controls,native_field_gate,reflected,statik?NULL:object,value):JNI_FALSE;
     if(reflected)native_original.DeleteLocalRef(env,reflected);if(declaring)native_original.DeleteLocalRef(env,declaring);state->control--;return allowed&&!native_original.ExceptionCheck(env);
 }
 static jobject native_box(JNIEnv *env,const char *name,const char *signature,jvalue value){NativeThread *state=native_thread();if(!state)return NULL;state->control++;jclass type=native_original.FindClass(env,name);jmethodID method=type?native_original.GetStaticMethodID(env,type,"valueOf",signature):NULL;jobject result=method?native_original.CallStaticObjectMethodA(env,type,method,&value):NULL;if(type)native_original.DeleteLocalRef(env,type);state->control--;return result;}
@@ -358,7 +358,7 @@ static jobject native_begin_field_mutation(JNIEnv *env,jobject receiver,jclass t
         contributors=native_mutation_sources(env,state);
         if(contributors&&!native_original.ExceptionCheck(env)){
             jobject previous=state->mutation;state->mutation=receiver;
-            token=native_original.CallStaticObjectMethod(env,native_tasks,native_mutation_field,receiver,declaring,fieldName,fieldDescriptor,contributors);
+            token=native_original.CallStaticObjectMethod(env,native_controls,native_mutation_field,receiver,declaring,fieldName,fieldDescriptor,contributors);
             state->mutation=previous;
         }
     }
@@ -371,7 +371,7 @@ static jobject native_begin_array_mutation(JNIEnv *env,jarray receiver,jsize sta
     NativeThread *state=native_thread();if(!state){native_refuse(env,"NATIVE_MUTATION_SCOPE_UNAVAILABLE");return NULL;}
     jobjectArray contributors=native_mutation_sources(env,state);if(!contributors||native_original.ExceptionCheck(env)){if(contributors)native_original.DeleteLocalRef(env,contributors);return NULL;}
     jobject previous=state->mutation;state->mutation=receiver;
-    jobject token=native_original.CallStaticObjectMethod(env,native_tasks,native_mutation_array,receiver,start,length,contributors);
+    jobject token=native_original.CallStaticObjectMethod(env,native_controls,native_mutation_array,receiver,start,length,contributors);
     state->mutation=previous;native_original.DeleteLocalRef(env,contributors);return token;
 }
 JNIEXPORT jboolean JNICALL Java_dev_ronova_pro_bootstrap_NativeControl_memoryMutationBoundary0(JNIEnv *env,jclass type,jobject receiver){
@@ -381,7 +381,7 @@ JNIEXPORT jboolean JNICALL Java_dev_ronova_pro_bootstrap_NativeControl_memoryMut
 static void native_end_mutation(JNIEnv *env,jobject token,int applied){
     if(!token)return;jthrowable failure=native_original.ExceptionOccurred(env);
     if(failure)native_original.ExceptionClear(env);
-    native_original.CallStaticVoidMethod(env,native_tasks,native_mutation_end,token,applied&&!failure?JNI_TRUE:JNI_FALSE);
+    native_original.CallStaticVoidMethod(env,native_controls,native_mutation_end,token,applied&&!failure?JNI_TRUE:JNI_FALSE);
     if(failure){if(native_original.ExceptionCheck(env)){native_original.ExceptionClear(env);InterlockedIncrement(&native_failures);}native_original.Throw(env,failure);native_original.DeleteLocalRef(env,failure);}
     native_original.DeleteLocalRef(env,token);
 }
@@ -419,13 +419,13 @@ static void JNICALL native_static_Object(JNIEnv *env,jclass type,jfieldID field,
 static int native_array_allowed(JNIEnv *env,jarray array,jsize index,jobject value){
     if(native_original.ExceptionCheck(env))return 0;
     if(native_stopped(env)){native_refuse(env,"RONOVA_STOPPED_NATIVE_ARRAY_WRITE");return 0;}
-    jboolean allowed=native_original.CallStaticBooleanMethod(env,native_tasks,native_array_query,array,index,value);
+    jboolean allowed=native_original.CallStaticBooleanMethod(env,native_controls,native_array_query,array,index,value);
     if(!allowed&&!native_original.ExceptionCheck(env))native_refuse(env,"RONOVA_PROTECTED_NATIVE_ARRAY_WRITE");return allowed&&!native_original.ExceptionCheck(env);
 }
 static int native_primitive_array_policy(JNIEnv *env,jarray array){
     if(native_original.ExceptionCheck(env))return 0;
     if(native_stopped(env)){native_refuse(env,"RONOVA_STOPPED_NATIVE_ARRAY_WRITE");return 0;}
-    jint policy=native_original.CallStaticIntMethod(env,native_tasks,native_array_policy,array);
+    jint policy=native_original.CallStaticIntMethod(env,native_controls,native_array_policy,array);
     if(native_original.ExceptionCheck(env))return 0;
     if(policy==1||policy==2)return policy;
     native_refuse(env,"RONOVA_PROTECTED_NATIVE_ARRAY_WRITE");return 0;
@@ -523,7 +523,7 @@ static void native_array_failure(JNIEnv *env,const char *phase,char kind,jsize s
 static int native_pin_allowed(JNIEnv *env,jarray array){
     if(native_original.ExceptionCheck(env))return 0;
     if(native_stopped(env)){native_refuse(env,"RONOVA_STOPPED_NATIVE_ARRAY_POINTER");return 0;}
-    jboolean allowed=native_original.CallStaticBooleanMethod(env,native_tasks,native_pin_query,array);
+    jboolean allowed=native_original.CallStaticBooleanMethod(env,native_controls,native_pin_query,array);
     if(!allowed&&!native_original.ExceptionCheck(env))native_refuse(env,"RONOVA_PROTECTED_NATIVE_ARRAY_POINTER");return allowed&&!native_original.ExceptionCheck(env);
 }
 static void JNICALL native_set_array_Object(JNIEnv *env,jobjectArray array,jsize index,jobject value){jobject gate=native_begin_array_mutation(env,array,index,1);int applied=gate&&native_array_allowed(env,array,index,value);if(applied)native_original.SetObjectArrayElement(env,array,index,value);native_end_mutation(env,gate,applied);}
@@ -573,7 +573,7 @@ static int native_registration_allowed(JNIEnv *env,jclass type,void *implementat
     if(native_original.ExceptionCheck(env))return 0;
     if(native_stopped(env)){native_refuse(env,"RONOVA_STOPPED_NATIVE_REGISTRATION");return 0;}
     jobjectArray sources=native_registration_sources(env,implementation,caller);
-    jboolean allowed=sources&&!native_original.ExceptionCheck(env)?native_original.CallStaticBooleanMethod(env,native_tasks,native_registration_query,type,sources):JNI_FALSE;
+    jboolean allowed=sources&&!native_original.ExceptionCheck(env)?native_original.CallStaticBooleanMethod(env,native_controls,native_registration_query,type,sources):JNI_FALSE;
     if(sources)native_original.DeleteLocalRef(env,sources);
     if(!allowed&&!native_original.ExceptionCheck(env))native_refuse(env,"RONOVA_NATIVE_REGISTRATION_REFUSED");return allowed&&!native_original.ExceptionCheck(env);
 }
@@ -618,7 +618,7 @@ static jclass native_registration_declaring(JNIEnv *env,jclass type,const JNINat
 static jint JNICALL native_register(JNIEnv *env,jclass type,const JNINativeMethod *methods,jint count){
     void *caller=__builtin_return_address(0);
     if(native_original.ExceptionCheck(env)||native_stopped(env)
-            ||!native_original.CallStaticBooleanMethod(env,native_tasks,native_registration_target,type)){
+            ||!native_original.CallStaticBooleanMethod(env,native_controls,native_registration_target,type)){
         native_refuse(env,"RONOVA_NATIVE_REGISTRATION_REFUSED");return JNI_ERR;
     }
     if(count<0||(count>0&&!methods)){native_refuse(env,"RONOVA_NATIVE_METHOD_TABLE_REQUIRED");return JNI_ERR;}
@@ -669,8 +669,8 @@ static jint JNICALL native_unregister(JNIEnv *env,jclass type){
 }
 JNIEXPORT jboolean JNICALL Java_dev_ronova_pro_bootstrap_NativeControl_clearField0(JNIEnv *env,jclass controller,jobject field,jobject receiver,jobject expected){
     (void)controller;
-    jmethodID writer=native_original.GetStaticMethodID(env,native_tasks,"recoveryWriter","()Z");
-    if(!writer||!native_original.CallStaticBooleanMethod(env,native_tasks,writer)){native_refuse(env,"RECOVERY_FIELD_WRITER_REQUIRED");return JNI_FALSE;}
+    jmethodID writer=native_original.GetStaticMethodID(env,native_controls,"recoveryWriter","()Z");
+    if(!writer||!native_original.CallStaticBooleanMethod(env,native_controls,writer)){native_refuse(env,"RECOVERY_FIELD_WRITER_REQUIRED");return JNI_FALSE;}
     jclass reflection=native_original.GetObjectClass(env,field);
     jmethodID declaration=reflection?native_original.GetMethodID(env,reflection,"getDeclaringClass","()Ljava/lang/Class;"):NULL;
     jclass type=declaration?(jclass)native_original.CallObjectMethod(env,field,declaration):NULL;
@@ -714,8 +714,8 @@ finished:
 }
 JNIEXPORT jboolean JNICALL Java_dev_ronova_pro_bootstrap_NativeControl_restoreField0(JNIEnv *env,jclass controller,jobject field,jobject receiver,jobject expected,jobject incoming){
     (void)controller;
-    jmethodID writer=native_original.GetStaticMethodID(env,native_tasks,"recoveryWriter","()Z");
-    if(!writer||!native_original.CallStaticBooleanMethod(env,native_tasks,writer)){native_refuse(env,"RECOVERY_FIELD_WRITER_REQUIRED");return JNI_FALSE;}
+    jmethodID writer=native_original.GetStaticMethodID(env,native_controls,"recoveryWriter","()Z");
+    if(!writer||!native_original.CallStaticBooleanMethod(env,native_controls,writer)){native_refuse(env,"RECOVERY_FIELD_WRITER_REQUIRED");return JNI_FALSE;}
     if(!field||!native_ti)return JNI_FALSE;
     jclass reflection=native_original.GetObjectClass(env,field);
     jmethodID declaration=reflection?native_original.GetMethodID(env,reflection,"getDeclaringClass","()Ljava/lang/Class;"):NULL;
@@ -787,7 +787,7 @@ static jclass JNICALL native_define(JNIEnv *env,const char *name,jobject loader,
 static jobject native_created(JNIEnv *env,jobject actual){
     NativeThread *state=native_thread();jweak origin=native_origin(state);if(!actual||!origin||native_original.ExceptionCheck(env))return actual;
     jclass declaring=(jclass)native_original.NewLocalRef(env,origin);jobject previous=state->created;state->created=actual;
-    if(declaring)native_original.CallStaticVoidMethod(env,native_tasks,native_created_query,declaring,actual);
+    if(declaring)native_original.CallStaticVoidMethod(env,native_controls,native_created_query,declaring,actual);
     state->created=previous;if(declaring)native_original.DeleteLocalRef(env,declaring);return actual;
 }
 static jobject JNICALL native_new(JNIEnv *env,jclass type,jmethodID method,...){if(native_stopped(env)){native_refuse(env,"RONOVA_STOPPED_NATIVE_ALLOCATION");return NULL;}va_list args;va_start(args,method);jobject result=native_original.NewObjectV(env,type,method,args);va_end(args);return native_created(env,result);}
@@ -863,7 +863,7 @@ JNIEXPORT jint JNICALL Agent_OnLoad(JavaVM *vm,char *options,void *reserved){(vo
 JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM *vm,void *reserved){(void)reserved;return native_initialize(vm)==JNI_OK?JNI_VERSION_1_8:JNI_ERR;}
 JNIEXPORT jboolean JNICALL Java_dev_ronova_pro_bootstrap_NativeControl_initialize0(JNIEnv *env,jclass type,jclass tasks,jclass definitions){
     if(!native_bootstrap_class(env,type,"Ldev/ronova/pro/bootstrap/NativeControl;")
-            ||!native_bootstrap_class(env,tasks,"Ldev/ronova/pro/bootstrap/TaskBridge;")
+            ||!native_bootstrap_class(env,tasks,"Ldev/ronova/pro/bootstrap/ControlBridge;")
             ||!native_bootstrap_class(env,definitions,"Ldev/ronova/pro/bootstrap/DefinitionBridge;")
             ||native_controller&&!(*env)->IsSameObject(env,native_controller,type)){native_refuse(env,"ACTUAL_NATIVE_CONTROLLER_REQUIRED");return JNI_FALSE;}
     jmethodID control=(*env)->GetStaticMethodID(env,type,"controlCaller","()Z");if(!control||!(*env)->CallStaticBooleanMethod(env,type,control)){native_refuse(env,"NATIVE_CONTROL_AGENT_REQUIRED");return JNI_FALSE;}
@@ -887,7 +887,7 @@ JNIEXPORT jboolean JNICALL Java_dev_ronova_pro_bootstrap_NativeControl_initializ
     native_mutation_field=(*env)->GetStaticMethodID(env,tasks,"beginNativeFieldMutation","(Ljava/lang/Object;Ljava/lang/Class;Ljava/lang/String;Ljava/lang/String;[Ljava/lang/Module;)Ljava/lang/Object;");
     native_mutation_array=(*env)->GetStaticMethodID(env,tasks,"beginNativeArrayMutation","(Ljava/lang/Object;II[Ljava/lang/Module;)Ljava/lang/Object;");
     native_mutation_end=(*env)->GetStaticMethodID(env,tasks,"finishFieldMutation","(Ljava/lang/Object;Z)V");
-    if(!task||!definition||!native_library_gate||!native_owner_gate||!native_field_gate||!native_module_query||!native_return_query||!native_image_query||!native_defined_query||!native_after_query||!native_created_query||!native_array_query||!native_array_policy||!native_pin_query||!native_registration_query||!native_registration_target||!native_object_module||!native_network_sources||!native_process_sources||!native_mutation_field||!native_mutation_array||!native_mutation_end){(*native_ti)->Deallocate(native_ti,(unsigned char*)table);return JNI_FALSE;}native_tasks=task;native_definitions=definition;
+    if(!task||!definition||!native_library_gate||!native_owner_gate||!native_field_gate||!native_module_query||!native_return_query||!native_image_query||!native_defined_query||!native_after_query||!native_created_query||!native_array_query||!native_array_policy||!native_pin_query||!native_registration_query||!native_registration_target||!native_object_module||!native_network_sources||!native_process_sources||!native_mutation_field||!native_mutation_array||!native_mutation_end){(*native_ti)->Deallocate(native_ti,(unsigned char*)table);return JNI_FALSE;}native_controls=task;native_definitions=definition;
     if(!code_prepare(env)||!native_unsafe_prepare(env)||!native_file_prepare(env)||!native_thread_prepare(env)||!native_buffer_prepare(env)){(*native_ti)->Deallocate(native_ti,(unsigned char*)table);return JNI_FALSE;}
     if(!native_bind_controller(env,type)){(*native_ti)->Deallocate(native_ti,(unsigned char*)table);return JNI_FALSE;}
 #define INSTALL_NATIVE_FIELD(NAME) table->Set##NAME##Field=native_set_##NAME;table->SetStatic##NAME##Field=native_static_##NAME;

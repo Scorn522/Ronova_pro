@@ -67,7 +67,7 @@ static void *native_array_copy(JNIEnv *env,jarray array,jboolean *copy,char expe
     if(!native_capture_scope_owners(env,state,&lease->owners)||!native_capture_image_owners(caller,&lease->owners)){
         native_owner_links_free(lease->owners);native_original.DeleteGlobalRef(env,lease->array);SecureZeroMemory(lease->contents,lease->bytes);free(lease->contents);free(lease);native_refuse(env,"NATIVE_POINTER_SOURCE_CAPACITY");return NULL;
     }
-    jobject target=native_original.CallStaticObjectMethod(env,native_tasks,native_object_module,array);
+    jobject target=native_original.CallStaticObjectMethod(env,native_controls,native_object_module,array);
     if(target){lease->targetModule=native_original.NewWeakGlobalRef(env,target);native_original.DeleteLocalRef(env,target);}
     if(native_original.ExceptionCheck(env)){
         if(lease->targetModule)native_original.DeleteWeakGlobalRef(env,lease->targetModule);

@@ -1,4 +1,5 @@
 /* VM method versions and real frame locations, independent of class/module names as ownership. */
+#include <bcrypt.h>
 typedef struct CodeBootstrap {unsigned handle,count;unsigned *arguments;int loaded;} CodeBootstrap;
 typedef struct CodePool {const unsigned char **entries;uint32_t *sizes;unsigned count,self;CodeBootstrap *bootstraps;unsigned bootstrapCount;uintptr_t vm,slots,tags,operands,holder,holderName,resolved;unsigned operandLength,resolvedCount;unsigned char *scanTags;uintptr_t *scanSlots;uint16_t *scanOperands;unsigned *utfBuckets;size_t utfBucketCount;int utfIndexed,allocated,hidden,vmReady,vmSnapshot;} CodePool;
 typedef struct CodeHandler {unsigned start,end,target,type;} CodeHandler;
@@ -390,6 +391,27 @@ static int code_caller(JNIEnv *env){
         if(count<8||depth>INT32_MAX-count)return 0;depth+=count;
     }
 }
+/* Keep the same SHA-256 input identity checks without sending every SHA word
+ * load through the installed Java Unsafe policies. This grants no write gate. */
+JNIEXPORT jbyteArray JNICALL Java_dev_ronova_pro_bootstrap_NativeControl_codeDigest0(JNIEnv *env,jclass type,jbyteArray input){
+    (void)type;if(!code_caller(env)&&(!native_jni_ready||!native_control_gate
+            ||!native_original.CallStaticBooleanMethod(env,native_controller,native_control_gate))){native_refuse(env,"ACTUAL_CODE_IMAGE_BRIDGE_REQUIRED");return NULL;}
+    if(!input)return NULL;
+    BCRYPT_ALG_HANDLE algorithm=NULL;BCRYPT_HASH_HANDLE hash=NULL;
+    unsigned char *object=NULL,*bytes=NULL,digest[32];ULONG objectLength=0,returned=0;jbyteArray result=NULL;
+    jsize length=native_original.GetArrayLength(env,input);
+    if(length<0||BCryptOpenAlgorithmProvider(&algorithm,BCRYPT_SHA256_ALGORITHM,NULL,0)<0)goto done;
+    if(BCryptGetProperty(algorithm,BCRYPT_OBJECT_LENGTH,(PUCHAR)&objectLength,sizeof(objectLength),&returned,0)<0
+            ||returned!=sizeof(objectLength)||!objectLength)goto done;
+    object=(unsigned char*)malloc(objectLength);bytes=(unsigned char*)malloc(length?length:1);if(!object||!bytes)goto done;
+    if(length)native_original.GetByteArrayRegion(env,input,0,length,(jbyte*)bytes);
+    if(native_original.ExceptionCheck(env)||BCryptCreateHash(algorithm,&hash,object,objectLength,NULL,0,0)<0)goto done;
+    if(BCryptHashData(hash,bytes,(ULONG)length,0)<0||BCryptFinishHash(hash,digest,sizeof(digest),0)<0)goto done;
+    result=native_original.NewByteArray(env,sizeof(digest));
+    if(result)native_original.SetByteArrayRegion(env,result,0,sizeof(digest),(jbyte*)digest);
+done:
+    if(hash)BCryptDestroyHash(hash);if(algorithm)BCryptCloseAlgorithmProvider(algorithm,0);free(object);free(bytes);return result;
+}
 JNIEXPORT jobject JNICALL Java_dev_ronova_pro_bootstrap_NativeControl_controlTable0(JNIEnv *env,jclass type){
     if(!native_jni_ready||!native_original.IsSameObject(env,type,native_controller)
             ||!code_control_registry||!code_control_backing||!code_caller(env)){
@@ -578,6 +600,25 @@ static int code_declarations(jclass type,CodeImage *image,CodeDeclarations *quer
     }
     return 1;
 }
+/* A reached callee needs its own live declaration. Java resolution has already
+ * read the class headers; do not repeat every unrelated method's modifiers for
+ * each callee. The actual class inventory, selector, flags and body still match. */
+static int code_selected_declaration(jclass type,CodeImage *image,const char *selector,CodeDeclarations *query){
+    CodeMethod *wanted=NULL;for(CodeMethod *entry=image->methods;entry;entry=entry->next)if(!strcmp(entry->key,selector)){wanted=entry;break;}
+    if(!wanted||(*native_ti)->GetClassMethods(native_ti,type,&query->count,&query->methods)!=JVMTI_ERROR_NONE||query->count<0
+            ||image->methodCount!=(unsigned)query->count||(size_t)query->count>SIZE_MAX/sizeof(*query->entries))return 0;
+    query->entries=(CodeDeclaration*)calloc(query->count?query->count:1,sizeof(*query->entries));if(!query->entries)return 0;
+    for(jint i=0;i<query->count;i++){
+        CodeDeclaration *entry=&query->entries[i];
+        if((*native_ti)->GetMethodName(native_ti,query->methods[i],&entry->name,&entry->descriptor,NULL)!=JVMTI_ERROR_NONE)return 0;
+        if(strlen(entry->name)!=wanted->nameLength||memcmp(entry->name,wanted->key,wanted->nameLength)
+                ||strcmp(entry->descriptor,wanted->key+wanted->nameLength))continue;
+        if((*native_ti)->GetMethodModifiers(native_ti,query->methods[i],&entry->access)!=JVMTI_ERROR_NONE
+                ||wanted->access!=(unsigned)entry->access)return 0;
+        entry->imageMethod=wanted;return 1;
+    }
+    return 0;
+}
 /* JVMTI headers distinguish an absent declaration from an unavailable body without resolving parameter classes. */
 JNIEXPORT jobjectArray JNICALL Java_dev_ronova_pro_bootstrap_NativeControl_codeDeclarations0(JNIEnv *env,jclass controller,jclass type){
     (void)controller;if(!native_jni_ready||!native_original.CallStaticBooleanMethod(env,native_controller,native_control_gate)){native_refuse(env,"ACTUAL_CODE_DECLARATIONS_AGENT_REQUIRED");return NULL;}
@@ -610,27 +651,31 @@ done:
     code_declarations_free(&query);return result;
 }
 /* The returned selectors belong to this actual class and this emitted bytecode version. */
-JNIEXPORT jobjectArray JNICALL Java_dev_ronova_pro_bootstrap_NativeControl_codeVersion0(JNIEnv *env,jclass controller,jclass type,jbyteArray expected){
-    (void)controller;if(!native_jni_ready||!native_original.CallStaticBooleanMethod(env,native_controller,native_control_gate)){native_refuse(env,"ACTUAL_CODE_VERSION_AGENT_REQUIRED");return NULL;}
+static jobjectArray code_version(JNIEnv *env,jclass type,jbyteArray expected,jstring method){
+    if(!native_jni_ready||!native_original.CallStaticBooleanMethod(env,native_controller,native_control_gate)){native_refuse(env,"ACTUAL_CODE_VERSION_AGENT_REQUIRED");return NULL;}
     if(!code_available||!type||!expected)return NULL;
     jobject loader=NULL;char *signature=NULL;CodeDeclarations query={0};CodeVMBuffer scratch={0};CodePool pool={0};CodeImage *selected=NULL;
-    // This call inspects every declared body. Batch only its raw pool reads;
-    // frame queries keep their lazy reads, and no match survives this call.
-    scratch.wholeClass=1;
+    // Graph resolution needs one actual callee, not all unrelated class bodies.
+    // Both modes retain class shape, constants, handlers and live version checks.
+    scratch.wholeClass=method==NULL;
+    const char *selector=NULL;
     jbyte *bytes=NULL;jobjectArray result=NULL;jclass string=NULL;int ready=(*native_ti)->GetClassLoader(native_ti,type,&loader)==JVMTI_ERROR_NONE
             &&(*native_ti)->GetClassSignature(native_ti,type,&signature,NULL)==JVMTI_ERROR_NONE;
     if(!ready)goto done;
+    if(method){selector=native_original.GetStringUTFChars(env,method,NULL);if(!selector)goto done;}
     jsize length=native_original.GetArrayLength(env,expected);bytes=native_original.GetByteArrayElements(env,expected,NULL);if(!bytes)goto done;
     uint64_t hash=code_image_hash((const unsigned char*)bytes,(size_t)length);
     AcquireSRWLockShared(&code_records);
     for(CodeImage *image=code_image_bucket_count?code_image_buckets[(size_t)hash&(code_image_bucket_count-1)]:code_images;image;image=code_image_bucket_count?image->hashNext:image->next)
         if(image->hash==hash&&image->length==(uint32_t)length&&!memcmp(image->bytes,bytes,length)&&code_class_matches(env,image,type,loader,signature)){selected=image;break;}
     ReleaseSRWLockShared(&code_records);native_original.ReleaseByteArrayElements(env,expected,bytes,JNI_ABORT);bytes=NULL;
-    if(!selected||!code_declarations(type,selected,&query))goto done;
+    if(!selected||!(selector?code_selected_declaration(type,selected,selector,&query):code_declarations(type,selected,&query)))goto done;
     string=native_original.FindClass(env,"java/lang/String");if(!string)goto done;
     jsize matched=0;
     for(jint i=0;i<query.count&&!native_original.ExceptionCheck(env);i++){
         CodeDeclaration *declaration=&query.entries[i];CodeMethod *entry=declaration->imageMethod;
+        if(!entry)continue;
+        if(selector&&strcmp(entry->key,selector))continue;
         unsigned char *actual=NULL;jint size=0;CodeVMMethod version={0};
         ready=(declaration->access&(0x0100|0x0400))==0;
         if(ready)ready=code_vm_snapshot_query(env,query.methods[i],&version,&pool,declaration->name,declaration->descriptor,&scratch);
@@ -648,9 +693,16 @@ JNIEXPORT jobjectArray JNICALL Java_dev_ronova_pro_bootstrap_NativeControl_codeV
         }
     }
 done:
+    if(selector)native_original.ReleaseStringUTFChars(env,method,selector);
     if(bytes)native_original.ReleaseByteArrayElements(env,expected,bytes,JNI_ABORT);code_pool_free(&pool);code_vm_buffer_free(&scratch);code_declarations_free(&query);
     if(signature)(*native_ti)->Deallocate(native_ti,(unsigned char*)signature);
     if(loader)native_original.DeleteLocalRef(env,loader);if(string)native_original.DeleteLocalRef(env,string);return result;
+}
+JNIEXPORT jobjectArray JNICALL Java_dev_ronova_pro_bootstrap_NativeControl_codeVersion0(JNIEnv *env,jclass controller,jclass type,jbyteArray expected){
+    (void)controller;return code_version(env,type,expected,NULL);
+}
+JNIEXPORT jobjectArray JNICALL Java_dev_ronova_pro_bootstrap_NativeControl_codeMethodVersion0(JNIEnv *env,jclass controller,jclass type,jbyteArray expected,jstring method){
+    (void)controller;if(!method)return NULL;return code_version(env,type,expected,method);
 }
 static void JNICALL code_class_prepared(jvmtiEnv *ti,JNIEnv *env,jthread thread,jclass type){
     (void)thread;if(!native_jni_ready||!code_prepared_callback)return;jobject loader=NULL;char *signature=NULL;int candidate=0;

@@ -30,14 +30,14 @@ final class ClientPolicyState {
         this.session=session;this.scope=scope;this.dimension=dimension;overflow=false;entries.clear();revisions.clear();return true;
     }
     synchronized boolean accept(Object source,UUID session,long scope,String dimension,long revision,int id,UUID uuid,boolean protect) {
-        if(source==null||source!=connection||overflow||this.session==null||!this.session.equals(session)
+        if(source==null||source!=connection||this.session==null||!this.session.equals(session)
                 ||this.scope!=scope||!Objects.equals(this.dimension,dimension)||revision<=0||uuid==null)return false;
         Entry old=entries.get(id);
         // A false entry is a revocation tombstone; never delete it within the active scope.
         if(revision<=revisions.getOrDefault(id,0L))return false;
         if(old==null&&entries.size()>=CAPACITY) {
-            // Keep no partial authority after losing tombstone capacity. A newer scope is required to recover.
-            overflow=true;entries.clear();revisions.clear();return false;
+            // Keep known active decisions and tombstones; a new scope recovers capacity.
+            overflow=true;return false;
         }
         revisions.put(id,revision);
         // Revoking an older UUID cannot remove a newer protected body which reused the id.
@@ -45,12 +45,12 @@ final class ClientPolicyState {
         return true;
     }
     synchronized boolean denies(Object active,String dimension,int id,UUID uuid) {
-        if(active==null||active!=connection||overflow||!Objects.equals(this.dimension,dimension)||uuid==null)return false;
+        if(active==null||active!=connection||!Objects.equals(this.dimension,dimension)||uuid==null)return false;
         Entry current=entries.get(id);
         return current!=null&&current.protectedNow()&&uuid.equals(current.identity());
     }
     synchronized boolean overflowed() { return overflow; }
-    synchronized String diagnostic() { return overflow?"POLICY_TOMBSTONE_CAPACITY_REACHED_SCOPE_ROTATION_REQUIRED":"POLICY_STATE_TRACKED"; }
+    synchronized String diagnostic() { return overflow?"POLICY_CAPACITY_REACHED_KNOWN_DECISIONS_RETAINED_SCOPE_ROTATION_REQUIRED":"POLICY_STATE_TRACKED"; }
     synchronized UUID session() { return session; }
     synchronized long scope() { return scope; }
     synchronized String dimension() { return dimension; }

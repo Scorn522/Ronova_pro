@@ -35,7 +35,7 @@ final class BackingPolicy {
         fieldOffset=type.getMethod("objectFieldOffset",Field.class);staticOffset=type.getMethod("staticFieldOffset",Field.class);
         arrayBase=type.getMethod("arrayBaseOffset",Class.class);arrayScale=type.getMethod("arrayIndexScale",Class.class);
         var lookup=java.lang.invoke.MethodHandles.lookup();
-        bridge.getMethod("installBackingPolicy",Class.class,java.lang.invoke.MethodHandle.class,java.lang.invoke.MethodHandle.class,java.lang.invoke.MethodHandle.class,java.lang.invoke.MethodHandle.class,java.lang.invoke.MethodHandle.class)
+        Class.forName("dev.ronova.pro.bootstrap.ControlBridge",false,null).getMethod("installBackingPolicy",Class.class,java.lang.invoke.MethodHandle.class,java.lang.invoke.MethodHandle.class,java.lang.invoke.MethodHandle.class,java.lang.invoke.MethodHandle.class,java.lang.invoke.MethodHandle.class)
             .invoke(null,ProRuntime.class,lookup.findStatic(BackingPolicy.class,"known",java.lang.invoke.MethodType.methodType(boolean.class,Object.class)),
                 lookup.findStatic(BackingPolicy.class,"elementDenied",java.lang.invoke.MethodType.methodType(boolean.class,Object.class,Object.class,Object.class)),
                 lookup.findStatic(BackingPolicy.class,"arrayDenied",java.lang.invoke.MethodType.methodType(boolean.class,Object.class,int.class,Object.class)),
@@ -339,7 +339,7 @@ final class BackingPolicy {
                 }
             }
         }
-        bridge.getMethod("registerControlObjects",Class.class,Object[].class).invoke(null,ProRuntime.class,roots.toArray());
+        Class.forName("dev.ronova.pro.bootstrap.ControlBridge",false,null).getMethod("registerControlObjects",Class.class,Object[].class).invoke(null,ProRuntime.class,roots.toArray());
     }
     static void runtimeControllers(ProRuntime runtime,Object... owners) {
         var roots=new ArrayList<Object>();
@@ -348,7 +348,7 @@ final class BackingPolicy {
             if(Map.class.isAssignableFrom(field.getType())||Collection.class.isAssignableFrom(field.getType())||java.util.concurrent.ExecutorService.class.isAssignableFrom(field.getType()))
                 try {Object value=field.get(owner);if(value!=null)roots.add(value);}catch(IllegalAccessException unavailable){throw new IllegalStateException(unavailable);}
         }
-        try {Class.forName("dev.ronova.pro.bootstrap.TaskBridge",false,null).getMethod("registerControlObjects",Class.class,Object[].class).invoke(null,ProRuntime.class,roots.toArray());}
+        try {Class.forName("dev.ronova.pro.bootstrap.ControlBridge",false,null).getMethod("registerControlObjects",Class.class,Object[].class).invoke(null,ProRuntime.class,roots.toArray());}
         catch(ReflectiveOperationException unavailable){throw new IllegalStateException("RUNTIME_CONTROL_UNAVAILABLE",unavailable);}
     }
     static void resources(ProRuntime runtime,Object... owners) {
@@ -384,7 +384,7 @@ final class BackingPolicy {
         Class<?> caller=CALLER.walk(frames->frames.map(StackWalker.StackFrame::getDeclaringClass)
                 .filter(type->type!=BackingPolicy.class&&!type.getName().startsWith("dev.ronova.pro.bootstrap.")
                     &&!type.getName().startsWith("java.util.concurrent.")).findFirst().orElse(null));
-        return caller==null||!Set.of(ProRuntime.class,IntentJournal.class,RecoveryTasks.class,RecoveryStorage.class,RecoveryRecords.class,RecoveryReferences.class).contains(caller.getNestHost());
+        return caller==null||!Set.of(ProRuntime.class,IntentJournal.class,RecoveryTasks.class,RecoveryStorage.class,RecoveryRecords.class).contains(caller.getNestHost());
     }
     static boolean offsetDenied(Object receiver,long offset,Object next) {
         if(receiver instanceof Class<?> holder)return SourceMaps.staticHolderOffsetDenied(holder,offset,next,unsafe,staticOffset);

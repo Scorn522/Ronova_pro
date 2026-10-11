@@ -12,7 +12,7 @@ final class DefinitionBoundary {
             ClassNode reference=new ClassNode();new ClassReader(bytes).accept(reference,0);
             for(MethodNode method:reference.methods)if(method.name.equals("clear")&&method.desc.equals("()V")||method.name.equals("enqueue")&&method.desc.equals("()Z")) {
                 InsnList guard=new InsnList();LabelNode allowed=new LabelNode();guard.add(new VarInsnNode(Opcodes.ALOAD,0));
-                guard.add(new MethodInsnNode(Opcodes.INVOKESTATIC,"dev/ronova/pro/bootstrap/TaskBridge","referenceRetirementAllowed","(Ljava/lang/Object;)Z",false));guard.add(new JumpInsnNode(Opcodes.IFNE,allowed));
+                guard.add(new MethodInsnNode(Opcodes.INVOKESTATIC,"dev/ronova/pro/bootstrap/ControlBridge","referenceRetirementAllowed","(Ljava/lang/Object;)Z",false));guard.add(new JumpInsnNode(Opcodes.IFNE,allowed));
                 if(method.desc.equals("()Z"))guard.add(new InsnNode(Opcodes.ICONST_0));guard.add(new InsnNode(method.desc.equals("()Z")?Opcodes.IRETURN:Opcodes.RETURN));guard.add(allowed);method.instructions.insert(guard);
             }
             ControlClassWriter writer=new ControlClassWriter(loader,reference);reference.accept(writer);return writer.toByteArray();
@@ -28,7 +28,7 @@ final class DefinitionBoundary {
             if(derived||privateLookup) {
                 for(AbstractInsnNode at:method.instructions.toArray())if(at.getOpcode()==Opcodes.ARETURN) {
                     InsnList observe=new InsnList();observe.add(new VarInsnNode(Opcodes.ALOAD,privateLookup?1:0));
-                    observe.add(new MethodInsnNode(Opcodes.INVOKESTATIC,BRIDGE,"lookupDerived",
+                    observe.add(new MethodInsnNode(Opcodes.INVOKESTATIC,"dev/ronova/pro/bootstrap/DefinitionBridge","lookupDerived",
                             "(Ljava/lang/invoke/MethodHandles$Lookup;Ljava/lang/invoke/MethodHandles$Lookup;)Ljava/lang/invoke/MethodHandles$Lookup;",false));
                     method.instructions.insertBefore(at,observe);
                 }

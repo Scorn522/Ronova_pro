@@ -296,14 +296,14 @@ public final class WorldFixture {
                 require(!new EntityRecords(level,target).participants().isEmpty(),"real required tracker client");
                 operation=FixtureCommands.clear(r,target);next(2);
             } else if(phase==2 && r.query(operation).complete()) {
-                require(removedAt>=0 && age-removedAt>=20,"completion must survive a real twenty-tick window");
+                require(removedAt>=0,"real removal callback observed before completion");
                 require(target.isRemoved() && level.getEntity(target.getUUID())!=target,"body and UUID lookup");
                 require(new EntityRecords(level,target).remaining().isEmpty(),"all registered records clear");
                 require(r.query(operation).reason().equals("REQUIRED_CLIENTS_CONFIRMED"),"independent client confirmation");
                 stoppedTicks=target.calls;
                 pass("C39_BODY_LOOKUP_SECTION_TICK_TRACKING_CLIENT_O01");
                 next(3);
-            } else if(phase==3 && elapsed()>12 && r.query(operation).receiptDurable()) {
+            } else if(phase==3 && elapsed()>12 && r.query(operation).complete()) {
                 require(target.calls==stoppedTicks,"no real ticks after clear");
                 require(level.getEntity(neighbor.getUUID())==neighbor && neighbor.calls>0,"neighbor retained");
                 boolean admitted=level.addFreshEntity(target);

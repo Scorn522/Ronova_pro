@@ -38,5 +38,5 @@ final class DefinedTaskContracts {
         List<Class<?>> contracts=METHODS.get(selector);if(contracts==null)return false;
         for(Class<?> contract:contracts)if(contract.isInstance(receiver))return true;return false;
     }
-    static void publish(){TaskBridge.controlPublication(METHODS,new Object[]{TYPES,METHODS});}
+    static void publish(){ControlBridge.controlPublication(METHODS,new Object[]{TYPES,METHODS});}
 }

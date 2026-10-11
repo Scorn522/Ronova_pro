@@ -7,7 +7,7 @@ import jdk.internal.org.objectweb.asm.tree.*;
 
 /** Carries the actual instruction owner through our write/creation/task weaving. */
 final class ExternalCodeRuntime {
-    record Source(byte[] bytes,Module declaration,boolean hidden,ExternalCodeFlow.Image image,Map<String,Module[][]> owners,Map<String,Module[][]> direct,Map<String,List<int[]>> lines,Map<String,Module[]> fields,Object[][] values) {
+    record Source(byte[] bytes,Module declaration,boolean hidden,ExternalCodeFlow.Image image,Map<String,Module[][]> owners,Map<String,Module[][]> direct,Map<String,List<int[]>> lines,Map<String,Module[]> fields,Object[][] values,ClassNode draft) {
         boolean present(){return !owners.isEmpty()||!fields.isEmpty()||values.length!=0;}
     }
     private ExternalCodeRuntime(){}
@@ -24,7 +24,7 @@ final class ExternalCodeRuntime {
         Map<String,Module[][]> direct=execution&&image!=null?ExternalCodeFlow.runtimeDirect(image):Map.of();
         ClassReader reader=new ClassReader(bytes);
         if(owners.isEmpty()&&direct.isEmpty()&&reader.readUnsignedShort(6)>Opcodes.V1_6)
-            return new Source(bytes,declaration,hidden,image,Map.of(),Map.of(),Map.of(),fields,values);
+            return new Source(bytes,declaration,hidden,image,Map.of(),Map.of(),Map.of(),fields,values,null);
         ClassNode node=new ClassNode();reader.accept(node,0);Map<String,List<int[]>> sourceLines=new LinkedHashMap<>();
         for(MethodNode method:node.methods){
             String key=method.name+method.desc;Module[][] source=owners.get(key);if(source==null)source=direct.get(key);if(source==null)continue;
@@ -51,8 +51,8 @@ final class ExternalCodeRuntime {
             for(AbstractInsnNode at:expanded.instructions.toArray())if(at instanceof FrameNode)expanded.instructions.remove(at);
             node.methods.set(i,expanded);inlined=true;
         }
-        if(sourceLines.isEmpty()&&!inlined)return new Source(bytes,declaration,hidden,image,owners,direct,Map.of(),fields,values);
-        ClassWriter writer=new ClassWriter(0);node.accept(writer);return new Source(writer.toByteArray(),declaration,hidden,image,owners,direct,Map.copyOf(sourceLines),fields,values);
+        if(sourceLines.isEmpty()&&!inlined)return new Source(bytes,declaration,hidden,image,owners,direct,Map.of(),fields,values,null);
+        ClassWriter writer=new ClassWriter(0);node.accept(writer);return new Source(writer.toByteArray(),declaration,hidden,image,owners,direct,Map.copyOf(sourceLines),fields,values,node);
     }
     static boolean legacy(MethodNode method){
         for(AbstractInsnNode at:method.instructions.toArray())if(at.getOpcode()==Opcodes.JSR||at.getOpcode()==Opcodes.RET)return true;
@@ -67,7 +67,7 @@ final class ExternalCodeRuntime {
             }
             return bytes;
         }
-        ClassNode node;if(creations!=null)node=creations.node;else{node=new ClassNode();new ClassReader(bytes).accept(node,0);}
+        ClassNode node;if(creations!=null)node=creations.node;else if(bytes==source.bytes()&&source.draft()!=null)node=source.draft();else{node=new ClassNode();new ClassReader(bytes).accept(node,0);}
         CreationBoundary.Weaving recorded=creations==null?CreationBoundary.recorded(bytes,node):creations;
         Map<String,Module[][]> observed=new LinkedHashMap<>(),direct=new LinkedHashMap<>();
         for(MethodNode method:node.methods){
@@ -98,6 +98,6 @@ final class ExternalCodeRuntime {
         // Suppression replaced the original business body; it cannot retain that body's returns.
         boolean suppressed=ModGroupBoundary.stopped(source.declaration());
         ExternalCodeFlow.Image semantic=suppressed?ExternalCodeImages.acceptedExecution(result,rows):source.image();
-        ExternalCodeDefinitions.accepted(loader,name,actual,source.declaration(),result,rows,semantic,suppressed?rows:source.owners(),source.fields(),source.values(),source.hidden(),creationSites,execution);
+        ExternalCodeDefinitions.accepted(loader,name,actual,source.declaration(),result,suppressed?result:source.bytes(),rows,semantic,suppressed?rows:source.owners(),source.fields(),source.values(),source.hidden(),creationSites,execution);
     }
 }

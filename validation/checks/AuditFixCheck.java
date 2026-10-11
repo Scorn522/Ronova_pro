@@ -4,7 +4,7 @@ import java.lang.reflect.*;
 import java.util.*;
 import java.util.concurrent.*;
 
-/** Internal budget/resource regression; does not produce gameplay or durable settlement evidence. */
+/** Focused source-list regression and historical metadata checks; neither certifies gameplay. */
 public final class AuditFixCheck {
     private static final sun.misc.Unsafe U;
     static {try {var field=sun.misc.Unsafe.class.getDeclaredField("theUnsafe");field.setAccessible(true);U=(sun.misc.Unsafe)field.get(null);}catch(Exception e){throw new ExceptionInInitializerError(e);}}
@@ -12,9 +12,10 @@ public final class AuditFixCheck {
     private static void require(boolean yes,String message) {if(!yes)throw new AssertionError(message);}
     private static Object invoke(Object receiver,String name)throws Exception {var m=receiver.getClass().getDeclaredMethod(name);m.setAccessible(true);try{return m.invoke(receiver);}catch(InvocationTargetException e){if(e.getCause() instanceof Exception x)throw x;throw e;}}
     public static void main(String[] args)throws Exception {
+        if(args.length==1&&args[0].equals("source-list-fixes")){sourceListFixes();return;}
         ProRuntime runtime=(ProRuntime)U.allocateInstance(ProRuntime.class);
         Map<UUID,Object> work=new LinkedHashMap<>();put(runtime,"work",work);
-        var subject=new ProRuntime.Subject();var records=(EntityRecords)U.allocateInstance(EntityRecords.class);put(records,"originalPassengers",List.of());
+        var subject=new ProRuntime.Subject(UUID.randomUUID());var records=(EntityRecords)U.allocateInstance(EntityRecords.class);put(records,"originalPassengers",List.of());
         var binding=(ProRuntime.Binding)U.allocateInstance(ProRuntime.Binding.class);put(binding,"subject",subject);put(binding,"records",records);
         Class<?> rootWork=Class.forName("dev.ronova.pro.ProRuntime$Work");var rootConstructor=rootWork.getDeclaredConstructor(ProRuntime.Binding.class,BlockRecords.class,long.class,String.class);rootConstructor.setAccessible(true);Object retired=rootConstructor.newInstance(binding,null,0L,"PROTECT");put(retired,"referencesReleased",true);put(retired,"cancelled",true);put(retired,"state","FENCED");put(retired,"ack",CompletableFuture.completedFuture(null));
         for(int i=0;i<65536;i++)work.put(new UUID(1,i),retired);
@@ -34,5 +35,30 @@ public final class AuditFixCheck {
         storage.close();var nativeReleased=storageWork.getDeclaredField("nativeReleased");nativeReleased.setAccessible(true);var resourcesConfirmed=storageWork.getDeclaredField("resourcesConfirmed");resourcesConfirmed.setAccessible(true);
         require(worker.isTerminated()&&!nativeReleased.getBoolean(restored)&&!resourcesConfirmed.getBoolean(restored),"shutdown fabricated a historic transaction settlement");
         System.out.println("STORAGE_SHUTDOWN_METADATA_PASS no_current_handle historic_unknown_preserved worker_closed");
+    }
+    private static void sourceListFixes()throws Exception {
+        Class<?> publications=Class.forName("dev.ronova.pro.SourceMaps$Publications");
+        Class<?> controls=Class.forName("dev.ronova.pro.bootstrap.ControlBridge",false,null);
+        for(String name:List.of("OBSERVE","CARRIER","HOLD","CHANGED")){
+            Field field=publications.getDeclaredField(name);field.setAccessible(true);
+            require(((Method)field.get(null)).getDeclaringClass()==controls,"source method resolved to wrong bridge: "+name);
+        }
+        net.minecraft.nbt.CompoundTag target=new net.minecraft.nbt.CompoundTag();target.putString("marker","equal-value");
+        net.minecraft.nbt.CompoundTag neighbor=target.copy();
+        require(target!=neighbor&&target.equals(neighbor),"fixture must distinguish identity from equal NBT");
+        Method image=RecoveryRecords.class.getDeclaredMethod("listImage",Object.class,Object.class);image.setAccessible(true);
+        List<List<net.minecraft.nbt.CompoundTag>> carriers=List.of(
+                new ArrayList<>(List.of(target,neighbor,target)),
+                new CopyOnWriteArrayList<>(List.of(target,neighbor,target)),
+                new it.unimi.dsi.fastutil.objects.ObjectArrayList<>(List.of(target,neighbor,target)));
+        for(List<net.minecraft.nbt.CompoundTag> carrier:carriers){
+            String projected=(String)image.invoke(null,carrier,target);
+            require(!projected.isEmpty(),"NBT projection unavailable: "+carrier.getClass().getName());
+            require(SourceMaps.removeListIdentity(carrier,target),"duplicate removal not applied: "+carrier.getClass().getName());
+            require(carrier.size()==1&&carrier.get(0)==neighbor,"duplicate target retained or equal neighbor damaged: "+carrier.getClass().getName());
+            require(projected.equals(image.invoke(null,carrier,null)),"projection does not match all removed aliases: "+carrier.getClass().getName());
+            require(!SourceMaps.removeListIdentity(carrier,target)&&carrier.get(0)==neighbor,"absent target changed neighbor: "+carrier.getClass().getName());
+        }
+        System.out.println("SOURCE_LIST_FIXES_PASS bridge_owner array_list copy_on_write fastutil duplicate_identity preserved_equal_neighbor exact_nbt_projection");
     }
 }

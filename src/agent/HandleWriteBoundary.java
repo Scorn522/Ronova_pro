@@ -65,7 +65,7 @@ final class HandleWriteBoundary {
                 int access=method.maxLocals++;InsnList code=new InsnList();LabelNode allow=new LabelNode();
                 for(int i=slots.length-1;i>=0;i--)code.add(new VarInsnNode(arguments[i].getOpcode(Opcodes.ISTORE),slots[i]));
                 code.add(new VarInsnNode(Opcodes.ASTORE,access));LabelNode guardStart=new LabelNode();code.add(guardStart);
-                code.add(new MethodInsnNode(Opcodes.INVOKESTATIC,"dev/ronova/pro/bootstrap/TaskBridge","unsafeControlScope","()Z",false));code.add(new JumpInsnNode(Opcodes.IFNE,allow));
+                code.add(new MethodInsnNode(Opcodes.INVOKESTATIC,"dev/ronova/pro/bootstrap/ControlBridge","unsafeControlScope","()Z",false));code.add(new JumpInsnNode(Opcodes.IFNE,allow));
                 code.add(new VarInsnNode(Opcodes.ALOAD,slots[0]));code.add(new VarInsnNode(Opcodes.LLOAD,slots[1]));
                 Type proposed=arguments[arguments.length-1];code.add(new VarInsnNode(proposed.getOpcode(Opcodes.ILOAD),slots[slots.length-1]));
                 if(name.contains("VarHandleFloats$")&&proposed.getSort()==Type.INT) {code.add(new MethodInsnNode(Opcodes.INVOKESTATIC,"java/lang/Float","intBitsToFloat","(I)F",false));proposed=Type.FLOAT_TYPE;}

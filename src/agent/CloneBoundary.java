@@ -10,7 +10,7 @@ final class CloneBoundary {
         for(MethodNode method:node.methods)for(AbstractInsnNode instruction:method.instructions.toArray())
             if(instruction instanceof MethodInsnNode call&&call.getOpcode()==Opcodes.INVOKESPECIAL
                     &&call.name.equals("clone")&&call.desc.equals("()Ljava/lang/Object;")&&nativeObjectClone(loader,call.owner)) {
-                call.setOpcode(Opcodes.INVOKESTATIC);call.owner="dev/ronova/pro/bootstrap/TaskBridge";
+                call.setOpcode(Opcodes.INVOKESTATIC);call.owner="dev/ronova/pro/bootstrap/ControlBridge";
                 call.name="cloneObject";call.desc="(Ljava/lang/Object;)Ljava/lang/Object;";call.itf=false;changed=true;
             }
         if(!changed)return null;ClassWriter writer=new ClassWriter(0);node.accept(writer);return writer.toByteArray();

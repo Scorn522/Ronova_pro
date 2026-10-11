@@ -26,10 +26,10 @@ final class ExternalCodeImages {
         }
     };
     private static final ReferenceQueue<Object> DEAD=new ReferenceQueue<>();
-    private static final Map<Key,Long> IDS=new HashMap<>();
-    private static final Map<Key,History> TREES=new HashMap<>();
-    private static final Map<Key,Key> PARENTS=new HashMap<>();
-    private static final Map<Key,History> WRITERS=new HashMap<>();
+    private static final KeyIndex<Long> IDS=new KeyIndex<>();
+    private static final KeyIndex<History> TREES=new KeyIndex<>();
+    private static final KeyIndex<Key> PARENTS=new KeyIndex<>();
+    private static final KeyIndex<History> WRITERS=new KeyIndex<>();
     private static final List<Encoded> ENCODED=new ArrayList<>();
     private static final Map<Module,Set<String>> GAPS=new IdentityHashMap<>();
     private static final List<Library> LIBRARIES=new ArrayList<>();
@@ -42,6 +42,47 @@ final class ExternalCodeImages {
         public boolean equals(Object other){return this==other||other instanceof Key key&&get()!=null&&get()==key.get();}
         public void clear(){if(ControlCaller.allowed())super.clear();}
         public boolean enqueue(){return ControlCaller.allowed()&&super.enqueue();}
+    }
+    /** Private identity bookkeeping, not a public mutable Map or a source holder. */
+    private static final class KeyIndex<V> {
+        private static final StackWalker CALLER=StackWalker.getInstance(StackWalker.Option.RETAIN_CLASS_REFERENCE);
+        private static final class Entry<V> {
+            final Key key;V value;Entry<V> next;
+            Entry(Key key,V value,Entry<V> next){this.key=key;this.value=value;this.next=next;}
+        }
+        @SuppressWarnings("unchecked") private Entry<V>[] table=(Entry<V>[])new Entry<?>[16];
+        private int size;
+        private static int bucket(int hash,int length){return (hash^(hash>>>16))&(length-1);}
+        private static void writer(Class<?> caller){if(caller!=ExternalCodeImages.class)throw new SecurityException("ACTUAL_CODE_IMAGE_INDEX_WRITER_REQUIRED");}
+        V get(Key key){
+            for(Entry<V> entry=table[bucket(key.hash,table.length)];entry!=null;entry=entry.next)
+                if(entry.key.hash==key.hash&&key.equals(entry.key))return entry.value;
+            return null;
+        }
+        void put(Key key,V value){
+            writer(CALLER.getCallerClass());int at=bucket(key.hash,table.length);
+            for(Entry<V> entry=table[at];entry!=null;entry=entry.next)if(entry.key.hash==key.hash&&key.equals(entry.key)){entry.value=value;return;}
+            if(size>=table.length-(table.length>>>2)&&table.length<1<<30){
+                @SuppressWarnings("unchecked") Entry<V>[] next=(Entry<V>[])new Entry<?>[table.length*2];
+                ControlImages.protect((Object)next);
+                for(Entry<V> first:table)for(Entry<V> entry=first;entry!=null;){
+                    Entry<V> following=entry.next;int slot=bucket(entry.key.hash,next.length);entry.next=next[slot];next[slot]=entry;entry=following;
+                }
+                table=next;at=bucket(key.hash,table.length);
+            }
+            // Entry fields also have the Agent's exact class/image ownership.
+            // Protect the object before publishing it through the backing array.
+            Entry<V> entry=new Entry<>(key,value,table[at]);ControlImages.protect(entry,key);table[at]=entry;size++;
+        }
+        void remove(Key key){
+            writer(CALLER.getCallerClass());int at=bucket(key.hash,table.length);Entry<V> previous=null;
+            for(Entry<V> entry=table[at];entry!=null;entry=entry.next){
+                if(entry.key==key||entry.key.hash==key.hash&&key.equals(entry.key)){
+                    if(previous==null)table[at]=entry.next;else previous.next=entry.next;size--;return;
+                }
+                previous=entry;
+            }
+        }
     }
     private static final class ControlCaller {
         static boolean allowed(){return StackWalker.getInstance(StackWalker.Option.RETAIN_CLASS_REFERENCE).walk(frames->frames
@@ -82,7 +123,7 @@ final class ExternalCodeImages {
     private ExternalCodeImages(){}
     static synchronized void expect(String name,ClassLoader loader,Module module){
         for(Library library:LIBRARIES)if(library.name().equals(name)&&library.bootstrap()==(loader==null)&&library.loader().get()==loader){if(library.module().get()!=module)throw new IllegalStateException("ASM_LIBRARY_MODULE_CHANGED");return;}
-        LIBRARIES.add(new Library(name,new Ref<>(loader),loader==null,new Ref<>(module)));ControlImages.protect(LIBRARIES,IDS,TREES,PARENTS,WRITERS,ENCODED,GAPS);
+        LIBRARIES.add(new Library(name,new Ref<>(loader),loader==null,new Ref<>(module)));ControlImages.protect(LIBRARIES,IDS,IDS.table,TREES,TREES.table,PARENTS,PARENTS.table,WRITERS,WRITERS.table,ENCODED,GAPS);
     }
     private static synchronized long id(Object object){reap();Key key=new Key(object,false);Long known=IDS.get(key);if(known!=null)return known;long next=++sequence;IDS.put(new Key(object,true),next);return next;}
     private static void reap(){for(Key key;(key=(Key)DEAD.poll())!=null;){IDS.remove(key);TREES.remove(key);PARENTS.remove(key);WRITERS.remove(key);}}
@@ -96,7 +137,33 @@ final class ExternalCodeImages {
     private static Object[] instructions(Object method)throws ReflectiveOperationException{
         Object list=get(method,"instructions");return (Object[])list.getClass().getMethod("toArray").invoke(list);
     }
-    private static int opcode(Object instruction)throws ReflectiveOperationException{return (Integer)instruction.getClass().getMethod("getOpcode").invoke(instruction);}
+    private static Object[] actualInstructions(Object method,OpcodeReader opcodes)throws ReflectiveOperationException{
+        Object[] all=instructions(method),actual=new Object[all.length];int count=0;
+        // InsnList.toArray may return its own cache. Never compact that external
+        // array in place; this private buffer contains the same live identities.
+        for(Object instruction:all)if(opcodes.read(instruction)>=0)actual[count++]=instruction;
+        return count==actual.length?actual:Arrays.copyOf(actual,count);
+    }
+    /** Reflection discovery is local to one tree operation; every opcode is still read live. */
+    private static final class OpcodeReader {
+        private static final class Entry {
+            final Class<?> type;final java.lang.invoke.MethodHandle method;final Entry next;
+            Entry(Class<?> type,java.lang.invoke.MethodHandle method,Entry next){this.type=type;this.method=method;this.next=next;}
+        }
+        private Entry entries;
+        int read(Object instruction)throws ReflectiveOperationException{
+            Class<?> type=instruction.getClass();
+            java.lang.invoke.MethodHandle method=null;
+            for(Entry entry=entries;entry!=null;entry=entry.next)if(entry.type==type){method=entry.method;break;}
+            if(method==null){
+                method=java.lang.invoke.MethodHandles.lookup().unreflect(type.getMethod("getOpcode"))
+                        .asType(java.lang.invoke.MethodType.methodType(int.class,Object.class));
+                entries=new Entry(type,method,entries);
+            }
+            try{return (int)method.invokeExact(instruction);}
+            catch(Throwable failure){throw new InvocationTargetException(failure);}
+        }
+    }
     /** Serializes through the actual library; never initializes an application class to infer an owner. */
     static byte[] image(Object tree){
         try{return serialize(tree);}catch(ReflectiveOperationException failure){throw new IllegalStateException("EXTERNAL_TREE_IMAGE_UNAVAILABLE",failure);}
@@ -118,11 +185,12 @@ final class ExternalCodeImages {
     }
     private static void identities(Object tree,Map<String,Body> bodies){
         try{
+            OpcodeReader opcodes=new OpcodeReader();
             for(Object method:list(tree,"methods")){
                 Body original=bodies.get(get(method,"name")+String.valueOf(get(method,"desc")));if(original==null)throw new IllegalStateException("OBSERVED_TREE_METHOD_IDENTITY_CHANGED");
-                List<Object> code=new ArrayList<>();for(Object instruction:instructions(method))if(opcode(instruction)>=0)code.add(instruction);
-                if(code.size()!=original.instructions().size())throw new IllegalStateException("OBSERVED_TREE_INSTRUCTION_IDENTITY_CHANGED");
-                for(int i=0;i<code.size();i++)IDS.put(new Key(code.get(i),true),original.instructions().get(i).id());
+                Object[] code=actualInstructions(method,opcodes);
+                if(code.length!=original.instructions().size())throw new IllegalStateException("OBSERVED_TREE_INSTRUCTION_IDENTITY_CHANGED");
+                for(int i=0;i<code.length;i++)IDS.put(new Key(code[i],true),original.instructions().get(i).id());
                 List<?> handlers=list(method,"tryCatchBlocks");if(handlers.size()!=original.handlers().size())throw new IllegalStateException("OBSERVED_TREE_HANDLER_IDENTITY_CHANGED");
                 for(int i=0;i<handlers.size();i++)IDS.put(new Key(handlers.get(i),true),original.handlers().get(i).id());
             }
@@ -181,13 +249,13 @@ final class ExternalCodeImages {
     }
     private static void transfer(Object source,Object destination){
         try{
+            OpcodeReader opcodes=new OpcodeReader();
             List<?> oldMethods=list(source,"methods"),newMethods=list(destination,"methods");
             if(oldMethods.size()!=newMethods.size())throw new IllegalStateException("ACTUAL_TREE_COPY_MEMBER_LAYOUT_CHANGED");
             for(int i=0;i<oldMethods.size();i++){
-                Object oldMethod=oldMethods.get(i),newMethod=newMethods.get(i);Object[] oldCode=instructions(oldMethod),newCode=instructions(newMethod);List<Object> originals=new ArrayList<>(),copies=new ArrayList<>();
-                for(Object instruction:oldCode)if(opcode(instruction)>=0)originals.add(instruction);for(Object instruction:newCode)if(opcode(instruction)>=0)copies.add(instruction);
-                if(originals.size()!=copies.size())throw new IllegalStateException("ACTUAL_TREE_COPY_INSTRUCTION_LAYOUT_CHANGED");
-                for(int j=0;j<originals.size();j++)IDS.put(new Key(copies.get(j),true),id(originals.get(j)));
+                Object oldMethod=oldMethods.get(i),newMethod=newMethods.get(i);Object[] originals=actualInstructions(oldMethod,opcodes),copies=actualInstructions(newMethod,opcodes);
+                if(originals.length!=copies.length)throw new IllegalStateException("ACTUAL_TREE_COPY_INSTRUCTION_LAYOUT_CHANGED");
+                for(int j=0;j<originals.length;j++)IDS.put(new Key(copies[j],true),id(originals[j]));
                 List<?> oldHandlers=list(oldMethod,"tryCatchBlocks"),newHandlers=list(newMethod,"tryCatchBlocks");if(oldHandlers.size()!=newHandlers.size())throw new IllegalStateException("ACTUAL_TREE_COPY_HANDLER_LAYOUT_CHANGED");
                 for(int j=0;j<oldHandlers.size();j++)IDS.put(new Key(newHandlers.get(j),true),id(oldHandlers.get(j)));
             }
@@ -205,24 +273,29 @@ final class ExternalCodeImages {
     private static Snapshot snapshot(Object tree){
         byte[] bytes=image(tree);ClassNode node=new ClassNode();new ClassReader(bytes).accept(node,0);
         try{
-            Map<String,Body> bodies=new LinkedHashMap<>();List<?> externalMethods=list(tree,"methods");
+            OpcodeReader opcodes=new OpcodeReader();
+            Map<String,Body> bodies=new TreeMap<>();List<?> externalMethods=list(tree,"methods");
             for(int m=0;m<node.methods.size();m++){
-                MethodNode method=node.methods.get(m);Object external=externalMethods.get(m);List<Object> actual=new ArrayList<>();Object[] all=instructions(external);
-                for(Object instruction:all)if(opcode(instruction)>=0)actual.add(instruction);
-                List<AbstractInsnNode> parsed=new ArrayList<>();for(AbstractInsnNode instruction:method.instructions.toArray())if(instruction.getOpcode()>=0)parsed.add(instruction);
-                if(actual.size()!=parsed.size())throw new IllegalStateException("ASM_INSTRUCTION_LAYOUT_CHANGED");
-                IdentityHashMap<Object,Long> actualLabels=new IdentityHashMap<>();long next=0;
-                for(int i=all.length-1;i>=0;i--){Object instruction=all[i];if(opcode(instruction)>=0)next=id(instruction);else if(instruction.getClass().getSimpleName().equals("LabelNode"))actualLabels.put(instruction,next);}
-                IdentityHashMap<LabelNode,Long> parsedLabels=new IdentityHashMap<>();next=0;int index=actual.size();
-                for(AbstractInsnNode instruction=method.instructions.getLast();instruction!=null;instruction=instruction.getPrevious())if(instruction.getOpcode()>=0)next=id(actual.get(--index));else if(instruction instanceof LabelNode label)parsedLabels.put(label,next);
-                List<Instruction> code=new ArrayList<>();for(int i=0;i<parsed.size();i++){
-                    AbstractInsnNode instruction=parsed.get(i);long identity=id(actual.get(i));String content=content(instruction,parsedLabels);
-                    code.add(new Instruction(identity,instruction,content,parsedLabels));
+                MethodNode method=node.methods.get(m);Object external=externalMethods.get(m);Object[] actual=actualInstructions(external,opcodes);
+                AbstractInsnNode[] parsed=method.instructions.toArray();int parsedCount=0;
+                for(AbstractInsnNode instruction:parsed)if(instruction.getOpcode()>=0)parsedCount++;
+                if(actual.length!=parsedCount)throw new IllegalStateException("ASM_INSTRUCTION_LAYOUT_CHANGED");
+                // External labels were never consumed. The parsed labels below
+                // determine jump/handler destinations using the same actual
+                // instruction identities, assigned once in reverse order.
+                long[] instructionIds=new long[actual.length];
+                for(int i=actual.length-1;i>=0;i--)instructionIds[i]=id(actual[i]);
+                IdentityHashMap<LabelNode,Long> parsedLabels=new IdentityHashMap<>();long next=0;int index=actual.length;
+                for(AbstractInsnNode instruction=method.instructions.getLast();instruction!=null;instruction=instruction.getPrevious())if(instruction.getOpcode()>=0)next=instructionIds[--index];else if(instruction instanceof LabelNode label)parsedLabels.put(label,next);
+                Instruction[] code=new Instruction[actual.length];int atCode=0;
+                for(AbstractInsnNode instruction:parsed)if(instruction.getOpcode()>=0){
+                    long identity=instructionIds[atCode];String content=content(instruction,parsedLabels);
+                    code[atCode++]=new Instruction(identity,instruction,content,parsedLabels);
                 }
-                List<Handler> handlers=new ArrayList<>();List<?> actualHandlers=list(external,"tryCatchBlocks");
+                Handler[] handlers=new Handler[method.tryCatchBlocks.size()];List<?> actualHandlers=list(external,"tryCatchBlocks");
                 if(actualHandlers.size()!=method.tryCatchBlocks.size())throw new IllegalStateException("ASM_HANDLER_LAYOUT_CHANGED");
-                for(int i=0;i<method.tryCatchBlocks.size();i++){TryCatchBlockNode handler=method.tryCatchBlocks.get(i);handlers.add(new Handler(id(actualHandlers.get(i)),parsedLabels.get(handler.start),parsedLabels.get(handler.end),parsedLabels.get(handler.handler),handler.type));}
-                bodies.put(method.name+method.desc,new Body(method,List.copyOf(code),List.copyOf(handlers)));
+                for(int i=0;i<handlers.length;i++){TryCatchBlockNode handler=method.tryCatchBlocks.get(i);handlers[i]=new Handler(id(actualHandlers.get(i)),parsedLabels.get(handler.start),parsedLabels.get(handler.end),parsedLabels.get(handler.handler),handler.type);}
+                bodies.put(method.name+method.desc,new Body(method,List.of(code),List.of(handlers)));
             }
             Snapshot snapshot=new Snapshot(bytes,node,Map.copyOf(bodies));
             Object[] roots=new Object[bodies.size()+3];roots[0]=bytes;roots[1]=node;roots[2]=snapshot.methods();int at=3;
@@ -270,6 +343,7 @@ final class ExternalCodeImages {
         if(selected==null)return null;
         boolean stopped=selected.patches().stream().anyMatch(patch->Arrays.stream(patch.owners()).anyMatch(ModGroupBoundary::stopped));if(!stopped)return null;
         ClassNode node=new ClassNode();new ClassReader(selected.snapshot().bytes()).accept(node,0);Map<String,Body> bodies=new HashMap<>(selected.snapshot().methods());boolean changed=false;
+        Map<String,Set<Integer>> replayedBodies=new HashMap<>();
         List<Patch> patches=selected.patches();for(int i=patches.size()-1;i>=0;i--){Patch patch=patches.get(i);Module owner=Arrays.stream(patch.owners()).filter(ModGroupBoundary::stopped).findFirst().orElse(null);if(owner==null)continue;
             if(patch.writers().length==0||Arrays.stream(patch.writers()).anyMatch(writer->!ModGroupBoundary.stopped(writer))){
                 gap(owner,name+":FOREIGN_DEPENDENT_TRANSFORM_REPLAY_PENDING");continue;
@@ -303,8 +377,10 @@ final class ExternalCodeImages {
                     if(!same(current,after)){gap(owner,name+"#"+key+":OUTSIDE_EDIT_ON_ADDED_MEMBER");continue;}
                     ModGroupBoundary.suppressExternal(owner,destination);bodies.remove(key);changed=true;continue;
                 }
+                if(laterInstructionEdit(patches,i,key,before,after,replayedBodies.getOrDefault(key,Set.of()))){gap(owner,name+"#"+key+":OVERLAPPING_EXTERNAL_INSTRUCTION_EDIT");continue;}
+                if(laterHandlerEdit(patches,i,key,before,after,replayedBodies.getOrDefault(key,Set.of()))){gap(owner,name+"#"+key+":OVERLAPPING_EXTERNAL_HANDLER_EDIT");continue;}
                 Body restored=undo(current,before,after);if(restored==null){gap(owner,name+"#"+key+":OVERLAPPING_EXTERNAL_EDIT");continue;}
-                if(!install(destination,restored)){gap(owner,name+"#"+key+":EXTERNAL_BRANCH_DEPENDENCY");continue;}bodies.put(key,restored);changed=true;
+                if(!install(destination,restored)){gap(owner,name+"#"+key+":EXTERNAL_BRANCH_DEPENDENCY");continue;}bodies.put(key,restored);replayedBodies.computeIfAbsent(key,ignored->new HashSet<>()).add(i);changed=true;
             }
             for(String key:patch.before().methods().keySet())if(!patch.after().methods().containsKey(key)){
                 if(payload&&!bodies.containsKey(key)){
@@ -460,18 +536,22 @@ final class ExternalCodeImages {
     }
     private static void validateMetadataLayout(Object tree,ClassNode node){
         try{
+            OpcodeReader opcodes=new OpcodeReader();
             // Metadata consumes the fresh class/frame image, not instruction history.
             // Keep the same actual method/instruction/handler layout checks without
             // registering identities or constructing unused Body/Instruction graphs.
             List<?> externalMethods=list(tree,"methods");
             for(int m=0;m<node.methods.size();m++){
-                MethodNode method=node.methods.get(m);Object external=externalMethods.get(m);int actual=0,parsed=0;
-                for(Object instruction:instructions(external))if(opcode(instruction)>=0)actual++;
-                for(AbstractInsnNode instruction:method.instructions.toArray())if(instruction.getOpcode()>=0)parsed++;
-                if(actual!=parsed)throw new IllegalStateException("ASM_INSTRUCTION_LAYOUT_CHANGED");
-                if(list(external,"tryCatchBlocks").size()!=method.tryCatchBlocks.size())throw new IllegalStateException("ASM_HANDLER_LAYOUT_CHANGED");
+                validateMemberLayout(externalMethods.get(m),node.methods.get(m),opcodes);
             }
         }catch(ReflectiveOperationException failure){throw new IllegalStateException("ASM_INSTRUCTION_IDENTITY_UNOBSERVED",failure);}
+    }
+    private static void validateMemberLayout(Object external,MethodNode method,OpcodeReader opcodes)throws ReflectiveOperationException{
+        int actual=0,parsed=0;
+        for(Object instruction:instructions(external))if(opcodes.read(instruction)>=0)actual++;
+        for(AbstractInsnNode instruction:method.instructions.toArray())if(instruction.getOpcode()>=0)parsed++;
+        if(actual!=parsed)throw new IllegalStateException("ASM_INSTRUCTION_LAYOUT_CHANGED");
+        if(list(external,"tryCatchBlocks").size()!=method.tryCatchBlocks.size())throw new IllegalStateException("ASM_HANDLER_LAYOUT_CHANGED");
     }
     private static Map<String,String> metadataRows(ClassNode node){
         Map<String,String> rows=new LinkedHashMap<>();ClassNode header=new ClassNode();
@@ -483,15 +563,16 @@ final class ExternalCodeImages {
             header.fields.add(new FieldNode(field.access,field.name,field.desc,null,null));
         ClassWriter writer=new ClassWriter(0);header.accept(writer);rows.put("H",Base64.getEncoder().encodeToString(writer.toByteArray()));
         for(FieldNode field:node.fields)rows.put("F"+field.name+'\u0000'+field.desc,Base64.getEncoder().encodeToString(fieldImage(field)));
-        for(MethodNode method:node.methods){
-            StringBuilder image=new StringBuilder(Base64.getEncoder().encodeToString(methodMetadata(method)));
-            AbstractInsnNode[] instructions=method.instructions.toArray();
-            for(int i=0;i<instructions.length;i++)if(instructions[i] instanceof FrameNode frame){
-                image.append('|').append(i).append(':').append(frame.type);frameValues(image,method,frame.local);frameValues(image,method,frame.stack);
-            }
-            rows.put("M"+method.name+'\u0000'+method.desc,image.toString());
-        }
+        for(MethodNode method:node.methods)rows.put("M"+method.name+'\u0000'+method.desc,methodMetadataRow(method));
         return rows;
+    }
+    private static String methodMetadataRow(MethodNode method){
+        StringBuilder image=new StringBuilder(Base64.getEncoder().encodeToString(methodMetadata(method)));
+        AbstractInsnNode[] instructions=method.instructions.toArray();
+        for(int i=0;i<instructions.length;i++)if(instructions[i] instanceof FrameNode frame){
+            image.append('|').append(i).append(':').append(frame.type);frameValues(image,method,frame.local);frameValues(image,method,frame.stack);
+        }
+        return image.toString();
     }
     private static void frameValues(StringBuilder image,MethodNode method,List<Object> values){
         if(values==null){image.append(":null");return;}image.append(':').append(values.size());
@@ -512,14 +593,67 @@ final class ExternalCodeImages {
             }
             Module origin=history.module.get();Set<Module> contributors=Collections.newSetFromMap(new IdentityHashMap<>());contributors.add(origin);
             for(Patch patch:history.patches)contributors.addAll(Arrays.asList(patch.owners()));
-            Map<String,Module[]> rows=mixinMetadata(tree,origin,contributors.toArray(Module[]::new));
-            String key=(method?"M":"F")+get(member,"name")+'\u0000'+get(member,"desc");return new Object[]{origin,rows.getOrDefault(key,rows.get("*"))};
+            // A member constructor consumes one actual member's metadata and
+            // frames. Serialize and validate that member once; ClassInfo's
+            // completed header/tree observation remains the independent full
+            // tree entry. Unrelated members cannot alter this selected row.
+            ClassNode projection=memberImage(tree,member,method);
+            String key=(method?"M":"F")+get(member,"name")+'\u0000'+get(member,"desc"),current;
+            if(method){
+                MethodNode parsed=projection.methods.get(0);validateMemberLayout(member,parsed,new OpcodeReader());
+                current=methodMetadataRow(parsed);
+            }else current=Base64.getEncoder().encodeToString(fieldImage(projection.fields.get(0)));
+            if(!Objects.equals(current,history.current.metadata().get(key)))return new Object[]{origin,contributors.toArray(Module[]::new)};
+            Set<Module> selected=Collections.newSetFromMap(new IdentityHashMap<>());selected.add(origin);
+            Set<Module> observed=Collections.newSetFromMap(new IdentityHashMap<>());
+            for(Patch patch:history.patches){
+                observed.addAll(Arrays.asList(patch.owners()));
+                if(!Objects.equals(patch.before().metadata().get(key),patch.after().metadata().get(key)))selected.addAll(Arrays.asList(patch.owners()));
+            }
+            for(Module contributor:contributors)if(!observed.contains(contributor))selected.add(contributor);
+            return new Object[]{origin,selected.toArray(Module[]::new)};
         }catch(ReflectiveOperationException failure){throw new IllegalStateException("ACTUAL_MIXIN_MEMBER_SOURCE_UNAVAILABLE",failure);}
+    }
+    private static ClassNode memberImage(Object tree,Object member,boolean method)throws ReflectiveOperationException{
+        ClassLoader loader=member.getClass().getClassLoader();Class<?> parent=library("org.objectweb.asm.tree.ClassNode",loader);
+        Class<?> role=Class.forName("org.objectweb.asm.tree."+(method?"MethodNode":"FieldNode"),false,loader);
+        // Membership in the observed parent supplies the real library role.
+        // FieldNode has no independent boundary registration; do not invent one.
+        if(role.getModule()!=parent.getModule())throw new IllegalStateException("ACTUAL_MEMBER_LIBRARY_MODULE_CHANGED");
+        if(!role.isInstance(member))throw new IllegalStateException("ACTUAL_ASM_MEMBER_REQUIRED");
+        Class<?> visitor=Class.forName("org.objectweb.asm.ClassVisitor",false,loader),writer=library("org.objectweb.asm.ClassWriter",loader);
+        Method accept=member.getClass().getMethod("accept",visitor);
+        if(accept.getDeclaringClass()!=role)throw new IllegalStateException("CUSTOM_MEMBER_SERIALIZATION_UNOBSERVED");
+        Object output=writer.getConstructor(int.class).newInstance(0);
+        // Preserve the method's real owner/version: initial frame locals and
+        // uninitialized-this values belong to this class, not a dummy owner.
+        writer.getMethod("visit",int.class,int.class,String.class,String.class,String.class,String[].class)
+                .invoke(output,method?get(tree,"version"):Opcodes.V17,method?get(tree,"access"):Opcodes.ACC_PUBLIC,
+                        method?get(tree,"name"):"dev/ronova/pro/FieldImage",method?get(tree,"signature"):null,
+                        method?get(tree,"superName"):"java/lang/Object",method?list(tree,"interfaces").toArray(String[]::new):null);
+        accept.invoke(member,output);writer.getMethod("visitEnd").invoke(output);
+        byte[] bytes=(byte[])writer.getMethod("toByteArray").invoke(output);ClassNode node=new ClassNode();new ClassReader(bytes).accept(node,0);
+        if(method?node.methods.size()!=1:node.fields.size()!=1)throw new IllegalStateException("ACTUAL_SINGLE_MEMBER_IMAGE_REQUIRED");return node;
     }
     static synchronized ExecutionSources executionSources(ClassLoader loader,String name,byte[] bytes){
         if(name==null)return new ExecutionSources(null,Map.of(),new Object[0][]);
         Encoded selected=selected(loader,name,bytes);
-        return new ExecutionSources(executionImage(bytes,selected),fieldOwners(selected),fieldValues(name,selected));
+        Map<String,Module[]> fields=new LinkedHashMap<>();
+        for(var entry:fieldOwners(selected).entrySet()){
+            Module[] owners=executionOwners(entry.getValue());if(owners.length!=0)fields.put(entry.getKey(),owners);
+        }
+        List<Object[]> values=new ArrayList<>();
+        for(Object[] entry:fieldValues(name,selected)){
+            Module[] owners=executionOwners((Module[])entry[3]);
+            if(owners.length!=0){Object[] row=entry.clone();row[3]=owners;values.add(row);}
+        }
+        return new ExecutionSources(executionImage(bytes,selected),Map.copyOf(fields),values.toArray(Object[][]::new));
+    }
+    // Execution propagation carries stoppable producers, just as makeBound does
+    // for an actual declaring Module. Retain every patch (including framework
+    // and our own edits) in History for overlapping-edit/replay decisions.
+    private static Module[] executionOwners(Module[] owners){
+        return Arrays.stream(owners).filter(RecoveryAgent::producerModule).toArray(Module[]::new);
     }
     private static ExternalCodeFlow.Image executionImage(byte[] bytes,Encoded selected){
         if(selected==null)return acceptedExecution(bytes,Map.of());Map<String,Module[][]> methods=new LinkedHashMap<>();Map<String,List<ExternalCodeFlow.ControlChange>> comparisons=new LinkedHashMap<>();
@@ -537,12 +671,17 @@ final class ExternalCodeImages {
                     Instruction applied=patch.after().get(instruction.id()),previous=patch.before().get(instruction.id());
                     if(applied!=null&&(previous==null||!previous.content().equals(applied.content()))&&instruction.content().equals(applied.content()))source=patch.owners();
                 }
-                owners[ordinal]=source.length==0?NO_MODULES:source.clone();
+                owners[ordinal]=source.length==0?NO_MODULES:executionOwners(source);
             }
             for(int ordinal=0;ordinal<owners.length;ordinal++)if(current.instructions().get(ordinal).code() instanceof FieldInsnNode access&&access.owner.equals(selected.snapshot().node().name)&&(access.getOpcode()==Opcodes.GETFIELD||access.getOpcode()==Opcodes.GETSTATIC)){
-                Module[] origin=fieldReads.get(access.name+'\u0000'+access.desc);if(origin!=null)owners[ordinal]=join(owners[ordinal],origin);
+                Module[] origin=fieldReads.get(access.name+'\u0000'+access.desc);if(origin!=null)owners[ordinal]=join(owners[ordinal],executionOwners(origin));
             }
-            methods.put(key,owners);comparisons.put(key,controlChanges(selected,key,current));
+            List<ExternalCodeFlow.ControlChange> changes=new ArrayList<>();
+            for(ExternalCodeFlow.ControlChange change:controlChanges(selected,key,current)){
+                Module[] producers=executionOwners(change.owners());
+                if(producers.length!=0)changes.add(new ExternalCodeFlow.ControlChange(change.at(),change.alternatives(),producers));
+            }
+            methods.put(key,owners);if(!changes.isEmpty())comparisons.put(key,List.copyOf(changes));
         }
         return new ExternalCodeFlow.Image(new Object(),selected.snapshot().node(),Map.copyOf(methods),Map.copyOf(comparisons));
     }
@@ -565,6 +704,11 @@ final class ExternalCodeImages {
         // Emitted bytes and their compact declarations are protected separately.
         protect(analysis,analysis.identity(),analysis.node(),analysis.rows(),analysis.comparisons(),declarations);
     }
+    static void protectDefinitionMetadata(Object... roots){
+        if(StackWalker.getInstance(StackWalker.Option.RETAIN_CLASS_REFERENCE).getCallerClass().getNestHost()!=ExternalCodeDefinitions.class)
+            throw new SecurityException("ACTUAL_DEFINITION_METADATA_REQUIRED");
+        protect(roots);
+    }
     private static List<Long> destinations(Instruction instruction,Long following){
         AbstractInsnNode code=instruction.code();List<Long> result=new ArrayList<>();
         if(code instanceof JumpInsnNode jump){result.add(instruction.labels().get(jump.label));if(code.getOpcode()!=Opcodes.GOTO&&code.getOpcode()!=Opcodes.JSR)result.add(following);}
@@ -578,10 +722,14 @@ final class ExternalCodeImages {
         for(Patch patch:image.patches()){
             if(patch.owners().length==0)continue;Body before=patch.before().methods().get(key),after=patch.after().methods().get(key);if(before==null||after==null)continue;
             Map<Long,Instruction> applied=index(after.instructions()),original=index(before.instructions());
+            Map<Long,Long> beforeNext=following(before),afterNext=following(after);
             for(int i=0;i<before.instructions().size();i++){
                 Instruction previous=before.instructions().get(i),next=applied.get(previous.id());
-                if(next!=null&&next.content().equals(previous.content()))continue;
-                List<Long> oldDestinations=destinations(previous,i+1<before.instructions().size()?before.instructions().get(i+1).id():0L);if(oldDestinations.isEmpty())continue;
+                boolean sameContent=next!=null&&next.content().equals(previous.content());
+                if(sameContent&&Objects.equals(beforeNext.get(previous.id()),afterNext.get(previous.id())))continue;
+                List<Long> oldDestinations=destinations(previous,beforeNext.get(previous.id()));
+                if(oldDestinations.isEmpty()&&sameContent)oldDestinations=List.of(beforeNext.get(previous.id()));
+                if(oldDestinations.isEmpty())continue;
                 Integer at=positions.get(previous.id());
                 if(at==null)for(int j=i+1;j<before.instructions().size();j++){at=positions.get(before.instructions().get(j).id());if(at!=null)break;}
                 if(at==null){for(Module module:patch.owners())gap(module,image.name()+'#'+key+":REMOVED_CONTROL_CONTINUATION_UNOBSERVED");continue;}
@@ -594,6 +742,29 @@ final class ExternalCodeImages {
                 int continuation=-1;for(int j=i+1;j<after.instructions().size();j++)if(original.containsKey(after.instructions().get(j).id())){continuation=positions.getOrDefault(after.instructions().get(j).id(),-1);break;}
                 result.add(new ExternalCodeFlow.ControlChange(at,new int[]{continuation},patch.owners().clone()));
             }
+            // Catch-table changes alter execution even when no opcode changes.
+            // Preserve the observed old routes as alternatives to the live CFG.
+            if(!before.handlers().equals(after.handlers()))for(Instruction instruction:current.instructions()) {
+                List<Handler> oldRoutes=routes(before,instruction.id()),newRoutes=routes(after,instruction.id());
+                if(oldRoutes.equals(newRoutes))continue;
+                int[] alternatives=new int[oldRoutes.size()+1];alternatives[oldRoutes.size()]=-1;
+                for(int j=0;j<oldRoutes.size();j++)alternatives[j]=positions.getOrDefault(oldRoutes.get(j).handler(),-1);
+                result.add(new ExternalCodeFlow.ControlChange(positions.get(instruction.id()),alternatives,patch.owners().clone()));
+            }
+        }
+        return result;
+    }
+    private static Map<Long,Long> following(Body body) {
+        Map<Long,Long> result=new HashMap<>();List<Instruction> code=body.instructions();
+        for(int i=0;i<code.size();i++)result.put(code.get(i).id(),i+1<code.size()?code.get(i+1).id():0L);
+        return result;
+    }
+    private static List<Handler> routes(Body body,long instruction) {
+        int position=find(body.instructions(),instruction);if(position<0)return List.of();
+        List<Handler> result=new ArrayList<>();
+        for(Handler handler:body.handlers()) {
+            int start=find(body.instructions(),handler.start()),end=handler.end()==0?body.instructions().size():find(body.instructions(),handler.end());
+            if(start>=0&&position>=start&&position<end)result.add(handler);
         }
         return result;
     }
@@ -652,6 +823,53 @@ final class ExternalCodeImages {
         return before.fields.stream().map(field->field.name+field.desc+":"+field.access+":"+field.value).toList().equals(after.fields.stream().map(field->field.name+field.desc+":"+field.access+":"+field.value).toList());
     }
     private static boolean same(Body first,Body second){return first.instructions().stream().map(code->code.id()+":"+code.content()).toList().equals(second.instructions().stream().map(code->code.id()+":"+code.content()).toList())&&first.handlers().equals(second.handlers());}
+    private static boolean reordered(Body before,Body after){
+        return retainedOrderChanged(before.instructions().stream().map(Instruction::id).toList(),after.instructions().stream().map(Instruction::id).toList())
+                ||retainedOrderChanged(before.handlers().stream().map(Handler::id).toList(),after.handlers().stream().map(Handler::id).toList());
+    }
+    private static boolean retainedOrderChanged(List<Long> before,List<Long> after){
+        Set<Long> common=new HashSet<>(before);common.retainAll(after);
+        return !before.stream().filter(common::contains).toList().equals(after.stream().filter(common::contains).toList());
+    }
+    /** Current equality is not ownership: retain later writes, including ABA and deletions. */
+    private static boolean laterInstructionEdit(List<Patch> patches,int at,String key,Body before,Body after,Set<Integer> replayed){
+        Map<Long,Instruction> original=index(before.instructions()),applied=index(after.instructions());
+        Set<Long> touched=new HashSet<>(original.keySet());touched.addAll(applied.keySet());
+        touched.removeIf(id->sameInstruction(original.get(id),applied.get(id)));
+        if(retainedOrderChanged(before.instructions().stream().map(Instruction::id).toList(),after.instructions().stream().map(Instruction::id).toList()))
+            touched.addAll(original.keySet());
+        if(touched.isEmpty())return false;
+        for(int i=at+1;i<patches.size();i++)if(!replayed.contains(i)){
+            Patch later=patches.get(i);Body priorBody=later.before().methods().get(key),nextBody=later.after().methods().get(key);
+            Map<Long,Instruction> prior=priorBody==null?Map.of():index(priorBody.instructions());
+            Map<Long,Instruction> next=nextBody==null?Map.of():index(nextBody.instructions());
+            for(long id:touched)if(!sameInstruction(prior.get(id),next.get(id)))return true;
+            if(priorBody!=null&&nextBody!=null&&retainedOrderChanged(
+                    priorBody.instructions().stream().map(Instruction::id).filter(touched::contains).toList(),
+                    nextBody.instructions().stream().map(Instruction::id).filter(touched::contains).toList()))return true;
+        }
+        return false;
+    }
+    private static boolean sameInstruction(Instruction first,Instruction second){
+        return first==null?second==null:second!=null&&first.content().equals(second.content());
+    }
+    /** A later observed rewrite owns its handler even if it reapplied the same payload. */
+    private static boolean laterHandlerEdit(List<Patch> patches,int at,String key,Body before,Body after,Set<Integer> replayed){
+        Map<Long,Handler> original=handlerIndex(before),applied=handlerIndex(after);Set<Long> touched=new HashSet<>(original.keySet());touched.addAll(applied.keySet());
+        touched.removeIf(id->Objects.equals(original.get(id),applied.get(id)));
+        if(retainedOrderChanged(before.handlers().stream().map(Handler::id).toList(),after.handlers().stream().map(Handler::id).toList()))touched.addAll(original.keySet());
+        if(touched.isEmpty())return false;
+        for(int i=at+1;i<patches.size();i++)if(!replayed.contains(i)){
+            Patch later=patches.get(i);Map<Long,Handler> prior=handlerIndex(later.before().methods().get(key)),next=handlerIndex(later.after().methods().get(key));
+            for(long id:touched)if(!Objects.equals(prior.get(id),next.get(id)))return true;
+            Body priorBody=later.before().methods().get(key),nextBody=later.after().methods().get(key);
+            if(priorBody!=null&&nextBody!=null&&retainedOrderChanged(
+                    priorBody.handlers().stream().map(Handler::id).filter(touched::contains).toList(),
+                    nextBody.handlers().stream().map(Handler::id).filter(touched::contains).toList()))return true;
+        }
+        return false;
+    }
+    private static Map<Long,Handler> handlerIndex(Body body){Map<Long,Handler> result=new HashMap<>();if(body!=null)for(Handler handler:body.handlers())result.put(handler.id(),handler);return result;}
     private static Body undo(Body current,Body before,Body after){
         List<Instruction> draft=new ArrayList<>(current.instructions());Map<Long,Instruction> old=index(before.instructions()),applied=index(after.instructions());
         for(Instruction code:after.instructions())if(!old.containsKey(code.id())){int at=find(draft,code.id());if(at>=0){if(!draft.get(at).content().equals(code.content()))return null;draft.remove(at);}}
@@ -668,9 +886,51 @@ final class ExternalCodeImages {
         }
         List<Handler> handlers=new ArrayList<>(current.handlers());Map<Long,Handler> oldHandlers=new HashMap<>();for(Handler handler:before.handlers())oldHandlers.put(handler.id(),handler);
         for(Handler handler:after.handlers())if(!oldHandlers.containsKey(handler.id())){Handler found=handlers.stream().filter(value->value.id()==handler.id()).findFirst().orElse(null);if(found!=null&&!found.equals(handler))return null;handlers.remove(found);}
+        List<Long> beforeHandlers=before.handlers().stream().map(Handler::id).toList();
         Map<Long,Handler> newHandlers=new HashMap<>();for(Handler handler:after.handlers())newHandlers.put(handler.id(),handler);
-        for(Handler handler:before.handlers()){Handler appliedHandler=newHandlers.get(handler.id()),found=handlers.stream().filter(value->value.id()==handler.id()).findFirst().orElse(null);if(Objects.equals(handler,appliedHandler))continue;if(found!=null&&!found.equals(appliedHandler)&&!found.equals(handler))return null;handlers.remove(found);handlers.add(handler);}
+        for(Handler handler:before.handlers()){
+            Handler appliedHandler=newHandlers.get(handler.id());if(Objects.equals(handler,appliedHandler))continue;
+            int at=-1;for(int i=0;i<handlers.size();i++)if(handlers.get(i).id()==handler.id()){at=i;break;}
+            if(at>=0){
+                Handler found=handlers.get(at);if(!found.equals(appliedHandler)&&!found.equals(handler))return null;
+                // Exception-table order chooses the first applicable catch.
+                // Replacing a changed target/type must retain its actual slot.
+                handlers.set(at,handler);
+            }else{
+                // A retained handler removed by a later writer is an overlap,
+                // not permission to resurrect that writer's deleted entry.
+                if(appliedHandler!=null)return null;
+                int insertion=restorePosition(handlers.stream().map(Handler::id).toList(),beforeHandlers,handler.id());
+                if(insertion<0)return null;handlers.add(insertion,handler);
+            }
+        }
+        if(!restoreOrder(draft,before.instructions().stream().map(Instruction::id).toList(),after.instructions().stream().map(Instruction::id).toList(),Instruction::id)
+                ||!restoreOrder(handlers,beforeHandlers,after.handlers().stream().map(Handler::id).toList(),Handler::id))return null;
         return new Body(current.method(),List.copyOf(draft),List.copyOf(handlers));
+    }
+    /** Reverse only the observed permutation. Foreign insertions in its span
+     * remain an overlap; no neighbor's placement is guessed or overwritten. */
+    private static <T> boolean restoreOrder(List<T> values,List<Long> before,List<Long> after,java.util.function.ToLongFunction<T> identity) {
+        Set<Long> retained=new HashSet<>(before);retained.retainAll(after);
+        List<Long> original=before.stream().filter(retained::contains).toList(),applied=after.stream().filter(retained::contains).toList();
+        if(original.equals(applied))return true;
+        List<Long> live=new ArrayList<>();Map<Long,T> entries=new HashMap<>();List<Integer> slots=new ArrayList<>();
+        for(int i=0;i<values.size();i++){T value=values.get(i);long id=identity.applyAsLong(value);if(retained.contains(id)){live.add(id);entries.put(id,value);slots.add(i);}}
+        if(live.equals(original))return true;
+        if(!live.equals(applied))return false;
+        int first=0,last=original.size()-1;
+        while(first<original.size()&&original.get(first).equals(applied.get(first)))first++;
+        while(last>first&&original.get(last).equals(applied.get(last)))last--;
+        if(slots.get(last)-slots.get(first)!=last-first)return false;
+        for(int i=first;i<=last;i++)values.set(slots.get(i),entries.get(original.get(i)));
+        return true;
+    }
+    /** The original neighboring identities must identify one unambiguous insertion gap. */
+    private static int restorePosition(List<Long> current,List<Long> before,long identity){
+        int original=before.indexOf(identity),left=-1,right=current.size();
+        for(int i=original-1;i>=0;i--){int at=current.indexOf(before.get(i));if(at>=0){left=at;break;}}
+        for(int i=original+1;i<before.size();i++){int at=current.indexOf(before.get(i));if(at>=0){right=at;break;}}
+        return right==left+1?right:-1;
     }
     private static Map<Long,Instruction> index(List<Instruction> values){Map<Long,Instruction> result=new HashMap<>();for(Instruction value:values)result.put(value.id(),value);return result;}
     private static int find(List<Instruction> values,long id){for(int i=0;i<values.size();i++)if(values.get(i).id()==id)return i;return -1;}
@@ -705,7 +965,70 @@ final class ExternalCodeImages {
     }
     private static void gap(Module module,String detail){List<String> failures=DISPOSITION_FAILURES.get();if(failures!=null)failures.add(detail);if(module==null)return;GAPS.computeIfAbsent(module,ignored->new LinkedHashSet<>()).add(detail);ModGroupBoundary.externalGap(module,detail);}
     private static byte[] canonical(byte[] bytes){ClassNode node=new ClassNode();new ClassReader(bytes).accept(node,ClassReader.SKIP_DEBUG|ClassReader.SKIP_FRAMES);ClassWriter writer=new ClassWriter(0);node.accept(writer);return writer.toByteArray();}
-    private static byte[] hash(byte[] bytes){try{return MessageDigest.getInstance("SHA-256").digest(bytes);}catch(java.security.NoSuchAlgorithmException impossible){throw new AssertionError(impossible);}}
+    private static byte[] hash(byte[] bytes){return RecoveryAgent.externalCodeDigest(bytes);}
+    private static void addChildren(ArrayDeque<Object> pending,Object... values){for(Object value:values)if(value!=null)pending.add(value);}
+    /** Same public reference fields as IMAGE_FIELDS, for the supported JDK17 ASM tree. */
+    private static boolean asmChildren(Object value,ArrayDeque<Object> pending){
+        // These are the Agent's private parsed images, never the foreign ASM
+        // trees used as transform inputs. Direct field loads avoid reflective
+        // JNI/Unsafe observation for each edge; every visited object is still
+        // protected below before the completed image is published.
+        Class<?> type=value.getClass();
+        if(type!=ClassNode.class&&type!=MethodNode.class&&type!=FieldNode.class&&type!=RecordComponentNode.class
+                &&type!=LocalVariableAnnotationNode.class&&type!=TypeAnnotationNode.class&&type!=AnnotationNode.class
+                &&type!=FieldInsnNode.class&&type!=MethodInsnNode.class&&type!=InvokeDynamicInsnNode.class&&type!=LdcInsnNode.class
+                &&type!=TypeInsnNode.class&&type!=MultiANewArrayInsnNode.class&&type!=JumpInsnNode.class
+                &&type!=LookupSwitchInsnNode.class&&type!=TableSwitchInsnNode.class&&type!=FrameNode.class&&type!=LineNumberNode.class
+                &&type!=LocalVariableNode.class&&type!=TryCatchBlockNode.class&&type!=InnerClassNode.class&&type!=ParameterNode.class
+                &&type!=ModuleNode.class&&type!=ModuleRequireNode.class&&type!=ModuleExportNode.class&&type!=ModuleOpenNode.class
+                &&type!=ModuleProvideNode.class&&type!=Attribute.class&&type!=InsnNode.class&&type!=IntInsnNode.class
+                &&type!=VarInsnNode.class&&type!=IincInsnNode.class&&type!=LabelNode.class)return false;
+        if(value instanceof AbstractInsnNode node)addChildren(pending,node.visibleTypeAnnotations,node.invisibleTypeAnnotations);
+        if(value instanceof ClassNode node){
+            addChildren(pending,node.name,node.signature,node.superName,node.interfaces,node.sourceFile,node.sourceDebug,node.module,
+                    node.outerClass,node.outerMethod,node.outerMethodDesc,node.visibleAnnotations,node.invisibleAnnotations,
+                    node.visibleTypeAnnotations,node.invisibleTypeAnnotations,node.attrs,node.innerClasses,node.nestHostClass,
+                    node.nestMembers,node.permittedSubclassesExperimental,node.recordComponents,node.fields,node.methods);
+        }else if(value instanceof MethodNode node){
+            addChildren(pending,node.name,node.desc,node.signature,node.exceptions,node.parameters,node.visibleAnnotations,node.invisibleAnnotations,
+                    node.visibleTypeAnnotations,node.invisibleTypeAnnotations,node.attrs,node.annotationDefault,node.visibleParameterAnnotations,
+                    node.invisibleParameterAnnotations,node.instructions,node.tryCatchBlocks,node.localVariables,
+                    node.visibleLocalVariableAnnotations,node.invisibleLocalVariableAnnotations);
+        }else if(value instanceof FieldNode node){
+            addChildren(pending,node.name,node.desc,node.signature,node.value,node.visibleAnnotations,node.invisibleAnnotations,
+                    node.visibleTypeAnnotations,node.invisibleTypeAnnotations,node.attrs);
+        }else if(value instanceof RecordComponentNode node){
+            addChildren(pending,node.name,node.descriptor,node.signature,node.visibleAnnotations,node.invisibleAnnotations,
+                    node.visibleTypeAnnotations,node.invisibleTypeAnnotations,node.attrs);
+        }else if(value instanceof LocalVariableAnnotationNode node){
+            addChildren(pending,node.desc,node.values,node.typePath,node.start,node.end,node.index);
+        }else if(value instanceof TypeAnnotationNode node)addChildren(pending,node.desc,node.values,node.typePath);
+        else if(value instanceof AnnotationNode node)addChildren(pending,node.desc,node.values);
+        else if(value instanceof FieldInsnNode node)addChildren(pending,node.owner,node.name,node.desc);
+        else if(value instanceof MethodInsnNode node)addChildren(pending,node.owner,node.name,node.desc);
+        else if(value instanceof InvokeDynamicInsnNode node)addChildren(pending,node.name,node.desc,node.bsm,node.bsmArgs);
+        else if(value instanceof LdcInsnNode node)addChildren(pending,node.cst);
+        else if(value instanceof TypeInsnNode node)addChildren(pending,node.desc);
+        else if(value instanceof MultiANewArrayInsnNode node)addChildren(pending,node.desc);
+        else if(value instanceof JumpInsnNode node)addChildren(pending,node.label);
+        else if(value instanceof LookupSwitchInsnNode node)addChildren(pending,node.dflt,node.keys,node.labels);
+        else if(value instanceof TableSwitchInsnNode node)addChildren(pending,node.dflt,node.labels);
+        else if(value instanceof FrameNode node)addChildren(pending,node.local,node.stack);
+        else if(value instanceof LineNumberNode node)addChildren(pending,node.start);
+        else if(value instanceof LocalVariableNode node)addChildren(pending,node.name,node.desc,node.signature,node.start,node.end);
+        else if(value instanceof TryCatchBlockNode node)addChildren(pending,node.start,node.end,node.handler,node.type,node.visibleTypeAnnotations,node.invisibleTypeAnnotations);
+        else if(value instanceof InnerClassNode node)addChildren(pending,node.name,node.outerName,node.innerName);
+        else if(value instanceof ParameterNode node)addChildren(pending,node.name);
+        else if(value instanceof ModuleNode node)addChildren(pending,node.name,node.version,node.mainClass,node.packages,node.requires,node.exports,node.opens,node.uses,node.provides);
+        else if(value instanceof ModuleRequireNode node)addChildren(pending,node.module,node.version);
+        else if(value instanceof ModuleExportNode node)addChildren(pending,node.packaze,node.modules);
+        else if(value instanceof ModuleOpenNode node)addChildren(pending,node.packaze,node.modules);
+        else if(value instanceof ModuleProvideNode node)addChildren(pending,node.service,node.providers);
+        else if(value instanceof Attribute attribute)addChildren(pending,attribute.type);
+        else if(!(value instanceof InsnNode||value instanceof IntInsnNode||value instanceof VarInsnNode
+                ||value instanceof IincInsnNode||value instanceof LabelNode))return false;
+        return true;
+    }
     private static void protect(Object... roots){
         Set<Object> found=Collections.newSetFromMap(new IdentityHashMap<>());ArrayDeque<Object> pending=new ArrayDeque<>();for(Object root:roots)if(root!=null)pending.add(root);
         while(!pending.isEmpty()){
@@ -716,7 +1039,7 @@ final class ExternalCodeImages {
                 else if(value instanceof Collection<?> collection){for(Object entry:collection)if(entry!=null)pending.add(entry);}
                 else if(value instanceof Object[] array){for(Object entry:array)if(entry!=null)pending.add(entry);}
                 else if(value instanceof ExternalCodeFlow.ControlChange change){pending.add(change.alternatives());pending.add(change.owners());}
-                else if(value.getClass().getName().startsWith("jdk.internal.org.objectweb.asm.")){
+                else if(value.getClass().getName().startsWith("jdk.internal.org.objectweb.asm.")&&!asmChildren(value,pending)){
                     holders[count]=value;fields[count++]=IMAGE_FIELDS.get(value.getClass());
                 }
                 if(value instanceof AbstractInsnNode instruction){if(instruction.getNext()!=null)pending.add(instruction.getNext());if(instruction.getPrevious()!=null)pending.add(instruction.getPrevious());}

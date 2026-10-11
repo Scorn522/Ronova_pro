@@ -31,6 +31,11 @@ static NativeMemoryAllocation *native_memory_find(uint64_t address,uint64_t leng
         if(base?entry->address==address:address>=entry->address&&length<=entry->bytes&&address-entry->address<=entry->bytes-length)return entry;
     }return NULL;
 }
+static int native_memory_observed(uint64_t address,uint64_t length){
+    AcquireSRWLockShared(&native_memory_records);
+    int observed=native_memory_find(address,length,0)!=NULL;
+    ReleaseSRWLockShared(&native_memory_records);return observed;
+}
 static int native_memory_sources(JNIEnv *env,NativeThread *state,jobjectArray supplied,OwnerLink **sources,int *unknown,int capturedJava){
     if(capturedJava){
         // The authenticated Java memory boundary has already captured its
@@ -288,7 +293,7 @@ JNIEXPORT jlongArray JNICALL Java_dev_ronova_pro_bootstrap_NativeControl_bindBuf
 }
 static int native_memory_authority(JNIEnv *env,jclass type){
     return native_controller&&native_original.IsSameObject(env,type,native_controller)&&native_memory_gate
-            &&native_original.CallStaticBooleanMethod(env,native_tasks,native_memory_gate)&&!native_original.ExceptionCheck(env);
+            &&native_original.CallStaticBooleanMethod(env,native_controls,native_memory_gate)&&!native_original.ExceptionCheck(env);
 }
 static int native_memory_read_sources(NativeMemoryWrite *read,OwnerLink **sources){
     NativeMemoryAllocation *allocation=read->allocation;

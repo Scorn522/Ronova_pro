@@ -74,7 +74,6 @@ public final class JdkTaskBoundaryContract {
             new Boundary("rejectedExecution","(Ljava/lang/Runnable;Ljava/util/concurrent/ThreadPoolExecutor;)V",true,-1)));
     private record Images(byte[] original,byte[] instrumented,byte[] originalCanonical,byte[] instrumentedCanonical) {}
     private static final Map<String,Images> IMAGES=new ConcurrentHashMap<>();
-    private static final Set<String> DIAGNOSED=ConcurrentHashMap.newKeySet();
     private static volatile boolean enabled;
     private JdkTaskBoundaryContract() {}
     public static Set<String> targets(){
@@ -114,15 +113,7 @@ public final class JdkTaskBoundaryContract {
             Images images=images(name);byte[] observed=canonical(bytes);
             if(ControlImages.sameBytes(images.instrumentedCanonical,observed))return null;
             if(ControlImages.sameBytes(images.originalCanonical,observed))return images.instrumented.clone();
-            if(Boolean.getBoolean("ronova.pro.validation.jdkTasks")&&DIAGNOSED.add(name)) {
-                try {
-                    var directory=java.nio.file.Path.of("ronova","diagnostics");java.nio.file.Files.createDirectories(directory);
-                    String prefix=name.replace('/','_');
-                    java.nio.file.Files.write(directory.resolve(prefix+"-observed.class"),bytes);
-                    java.nio.file.Files.write(directory.resolve(prefix+"-platform.class"),images.original);
-                    java.nio.file.Files.write(directory.resolve(prefix+"-expected.class"),images.instrumented);
-                } catch(java.io.IOException unavailable){System.err.println("RONOVA_TASK_IMAGE_DIAGNOSTIC_UNAVAILABLE "+unavailable);}
-            }
+
             return null;
         } catch(RuntimeException|LinkageError unavailable){return null;}
     }

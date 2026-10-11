@@ -17,7 +17,7 @@ public final class FastutilIndexBoundary implements Opcodes {
     private static final String OBJECT_ITERATOR="it/unimi/dsi/fastutil/objects/ObjectIterators$AbstractIndexBasedListIterator";
     private static final String OBJECT_VIEW="it/unimi/dsi/fastutil/objects/AbstractObjectList$ObjectSubList";
     private static final String OBJECT_LIST="it/unimi/dsi/fastutil/objects/ObjectArrayList",OBJECT_SET="it/unimi/dsi/fastutil/objects/ObjectOpenHashSet";
-    private static final String BRIDGE="dev/ronova/pro/bootstrap/TaskBridge";
+    private static final String BRIDGE="dev/ronova/pro/bootstrap/ControlBridge";
     private static final String INDEX_DESC="(Ljava/lang/Object;Ljava/lang/Object;Ljava/lang/Object;)Z";
     private static final String CLEAR_DESC="(Ljava/lang/Object;)Z";
     private static final String OBJECT="Ljava/lang/Object;";
@@ -50,7 +50,7 @@ public final class FastutilIndexBoundary implements Opcodes {
             if(changed==0){STATES.put(name,"UNSUPPORTED: no expected method transformed");return bytes;}
             // Reading the class hierarchy must not load an iterator inside this
             // transformer: recursive class loads bypass its installation hook.
-            ClassWriter writer=kind.startsWith("object")?new ControlClassWriter(loader,node):new SafeWriter(ClassWriter.COMPUTE_FRAMES|ClassWriter.COMPUTE_MAXS,loader);
+            ClassWriter writer=new ControlClassWriter(loader,node);
             node.accept(writer);byte[] result=writer.toByteArray();STATES.put(name,"INSTALLED");return result;
         } catch(Throwable failure) {
             STATES.put(name,"UNSUPPORTED: "+failure.getClass().getSimpleName()+":"+failure.getMessage());return bytes;
@@ -150,24 +150,24 @@ public final class FastutilIndexBoundary implements Opcodes {
     private static int instrumentObjectIterator(ClassNode node){
         MethodNode method=find(node,"add","(Ljava/lang/Object;)V");if(method==null)return 0;
         int token=method.maxLocals++,error=method.maxLocals++;LabelNode start=new LabelNode(),end=new LabelNode(),handler=new LabelNode(),allow=new LabelNode();
-        InsnList head=new InsnList();head.add(new VarInsnNode(ALOAD,0));head.add(new MethodInsnNode(INVOKESTATIC,BRIDGE,"beginFastListIterator","(Ljava/lang/Object;)Ljava/lang/Object;",false));head.add(new VarInsnNode(ASTORE,token));head.add(start);
-        head.add(new VarInsnNode(ALOAD,token));head.add(new VarInsnNode(ALOAD,1));head.add(new MethodInsnNode(INVOKESTATIC,BRIDGE,"fastListIteratorIncoming","(Ljava/lang/Object;Ljava/lang/Object;)Z",false));head.add(new JumpInsnNode(IFNE,allow));head.add(new InsnNode(RETURN));head.add(allow);method.instructions.insert(head);
-        for(AbstractInsnNode at:method.instructions.toArray())if(at.getOpcode()==RETURN){InsnList exit=new InsnList();exit.add(new VarInsnNode(ALOAD,token));exit.add(new MethodInsnNode(INVOKESTATIC,BRIDGE,"endFastListView","(Ljava/lang/Object;)V",false));method.instructions.insertBefore(at,exit);}
-        method.instructions.add(end);method.instructions.add(handler);method.instructions.add(new VarInsnNode(ASTORE,error));method.instructions.add(new VarInsnNode(ALOAD,token));method.instructions.add(new MethodInsnNode(INVOKESTATIC,BRIDGE,"endFastListView","(Ljava/lang/Object;)V",false));method.instructions.add(new VarInsnNode(ALOAD,error));method.instructions.add(new InsnNode(ATHROW));method.tryCatchBlocks.add(new TryCatchBlockNode(start,end,handler,null));return 1;
+        InsnList head=new InsnList();head.add(new VarInsnNode(ALOAD,0));head.add(new MethodInsnNode(INVOKESTATIC,"dev/ronova/pro/bootstrap/ControlBridge","beginFastListIterator","(Ljava/lang/Object;)Ljava/lang/Object;",false));head.add(new VarInsnNode(ASTORE,token));head.add(start);
+        head.add(new VarInsnNode(ALOAD,token));head.add(new VarInsnNode(ALOAD,1));head.add(new MethodInsnNode(INVOKESTATIC,"dev/ronova/pro/bootstrap/ControlBridge","fastListIteratorIncoming","(Ljava/lang/Object;Ljava/lang/Object;)Z",false));head.add(new JumpInsnNode(IFNE,allow));head.add(new InsnNode(RETURN));head.add(allow);method.instructions.insert(head);
+        for(AbstractInsnNode at:method.instructions.toArray())if(at.getOpcode()==RETURN){InsnList exit=new InsnList();exit.add(new VarInsnNode(ALOAD,token));exit.add(new MethodInsnNode(INVOKESTATIC,"dev/ronova/pro/bootstrap/ControlBridge","endFastListView","(Ljava/lang/Object;)V",false));method.instructions.insertBefore(at,exit);}
+        method.instructions.add(end);method.instructions.add(handler);method.instructions.add(new VarInsnNode(ASTORE,error));method.instructions.add(new VarInsnNode(ALOAD,token));method.instructions.add(new MethodInsnNode(INVOKESTATIC,"dev/ronova/pro/bootstrap/ControlBridge","endFastListView","(Ljava/lang/Object;)V",false));method.instructions.add(new VarInsnNode(ALOAD,error));method.instructions.add(new InsnNode(ATHROW));method.tryCatchBlocks.add(new TryCatchBlockNode(start,end,handler,null));return 1;
     }
     private static int instrumentObjectView(ClassNode node){
         int count=0;
         for(MethodNode method:node.methods){
             if((method.access&(ACC_STATIC|ACC_ABSTRACT|ACC_NATIVE))!=0||!java.util.Set.of("add","addAll","remove","removeElements","addElements","setElements","set").contains(method.name))continue;
             int token=method.maxLocals++,error=method.maxLocals++;LabelNode start=new LabelNode(),end=new LabelNode(),handler=new LabelNode();
-            var original=method.instructions.toArray();InsnList head=new InsnList();head.add(new VarInsnNode(ALOAD,0));head.add(new MethodInsnNode(INVOKESTATIC,BRIDGE,"beginFastListView","(Ljava/lang/Object;)Ljava/lang/Object;",false));head.add(new VarInsnNode(ASTORE,token));head.add(start);method.instructions.insert(head);
+            var original=method.instructions.toArray();InsnList head=new InsnList();head.add(new VarInsnNode(ALOAD,0));head.add(new MethodInsnNode(INVOKESTATIC,"dev/ronova/pro/bootstrap/ControlBridge","beginFastListView","(Ljava/lang/Object;)Ljava/lang/Object;",false));head.add(new VarInsnNode(ASTORE,token));head.add(start);method.instructions.insert(head);
             for(AbstractInsnNode at:original){
                 if(at instanceof FieldInsnNode field&&field.getOpcode()==PUTFIELD&&field.name.equals("to")&&field.desc.equals("I")){
-                    InsnList actual=new InsnList();actual.add(new VarInsnNode(ALOAD,token));actual.add(new InsnNode(SWAP));actual.add(new MethodInsnNode(INVOKESTATIC,BRIDGE,"fastListViewExtent","(Ljava/lang/Object;I)I",false));method.instructions.insertBefore(at,actual);
+                    InsnList actual=new InsnList();actual.add(new VarInsnNode(ALOAD,token));actual.add(new InsnNode(SWAP));actual.add(new MethodInsnNode(INVOKESTATIC,"dev/ronova/pro/bootstrap/ControlBridge","fastListViewExtent","(Ljava/lang/Object;I)I",false));method.instructions.insertBefore(at,actual);
                 }
-                if(at.getOpcode()>=IRETURN&&at.getOpcode()<=RETURN){InsnList exit=new InsnList();exit.add(new VarInsnNode(ALOAD,token));exit.add(new MethodInsnNode(INVOKESTATIC,BRIDGE,"endFastListView","(Ljava/lang/Object;)V",false));method.instructions.insertBefore(at,exit);}
+                if(at.getOpcode()>=IRETURN&&at.getOpcode()<=RETURN){InsnList exit=new InsnList();exit.add(new VarInsnNode(ALOAD,token));exit.add(new MethodInsnNode(INVOKESTATIC,"dev/ronova/pro/bootstrap/ControlBridge","endFastListView","(Ljava/lang/Object;)V",false));method.instructions.insertBefore(at,exit);}
             }
-            method.instructions.add(end);method.instructions.add(handler);method.instructions.add(new VarInsnNode(ASTORE,error));method.instructions.add(new VarInsnNode(ALOAD,token));method.instructions.add(new MethodInsnNode(INVOKESTATIC,BRIDGE,"endFastListView","(Ljava/lang/Object;)V",false));method.instructions.add(new VarInsnNode(ALOAD,error));method.instructions.add(new InsnNode(ATHROW));method.tryCatchBlocks.add(new TryCatchBlockNode(start,end,handler,null));count++;
+            method.instructions.add(end);method.instructions.add(handler);method.instructions.add(new VarInsnNode(ASTORE,error));method.instructions.add(new VarInsnNode(ALOAD,token));method.instructions.add(new MethodInsnNode(INVOKESTATIC,"dev/ronova/pro/bootstrap/ControlBridge","endFastListView","(Ljava/lang/Object;)V",false));method.instructions.add(new VarInsnNode(ALOAD,error));method.instructions.add(new InsnNode(ATHROW));method.tryCatchBlocks.add(new TryCatchBlockNode(start,end,handler,null));count++;
         }
         return count;
     }
@@ -209,16 +209,16 @@ public final class FastutilIndexBoundary implements Opcodes {
             InsnList head=new InsnList();head.add(new VarInsnNode(ALOAD,0));
             if(iterator||entry)head.add(new FieldInsnNode(GETFIELD,node.name,"this$0","L"+
                     (kind.equals("objectSetIterator")?OBJECT_SET:kind.startsWith("linked")?LINK:openOwner(node.name))+";"));
-            head.add(new MethodInsnNode(INVOKESTATIC,BRIDGE,"beginIndexStructure","(Ljava/lang/Object;)Ljava/lang/Object;",false));
+            head.add(new MethodInsnNode(INVOKESTATIC,"dev/ronova/pro/bootstrap/ControlBridge","beginIndexStructure","(Ljava/lang/Object;)Ljava/lang/Object;",false));
             head.add(new VarInsnNode(ASTORE,token));head.add(start);method.instructions.insert(head);
             for(AbstractInsnNode at:original)if(at.getOpcode()>=IRETURN&&at.getOpcode()<=RETURN) {
                 InsnList release=new InsnList();release.add(new VarInsnNode(ALOAD,token));
-                release.add(new MethodInsnNode(INVOKESTATIC,BRIDGE,"endIndexMutation","(Ljava/lang/Object;)V",false));
+                release.add(new MethodInsnNode(INVOKESTATIC,"dev/ronova/pro/bootstrap/ControlBridge","endIndexMutation","(Ljava/lang/Object;)V",false));
                 method.instructions.insertBefore(at,release);
             }
             method.instructions.add(end);method.instructions.add(handler);
             method.instructions.add(new VarInsnNode(ASTORE,error));method.instructions.add(new VarInsnNode(ALOAD,token));
-            method.instructions.add(new MethodInsnNode(INVOKESTATIC,BRIDGE,"endIndexMutation","(Ljava/lang/Object;)V",false));
+            method.instructions.add(new MethodInsnNode(INVOKESTATIC,"dev/ronova/pro/bootstrap/ControlBridge","endIndexMutation","(Ljava/lang/Object;)V",false));
             method.instructions.add(new VarInsnNode(ALOAD,error));method.instructions.add(new InsnNode(ATHROW));
             method.tryCatchBlocks.add(new TryCatchBlockNode(start,end,handler,null));count++;
         }
@@ -274,7 +274,7 @@ public final class FastutilIndexBoundary implements Opcodes {
     private static int instrumentClear(ClassNode n) {
         MethodNode m=find(n,"clear","()V");if(m==null)return 0;
         InsnList code=new InsnList();LabelNode proceed=new LabelNode();
-        pushMap(code);code.add(new MethodInsnNode(INVOKESTATIC,BRIDGE,"clearProtectedMap",CLEAR_DESC,false));
+        pushMap(code);code.add(new MethodInsnNode(INVOKESTATIC,"dev/ronova/pro/bootstrap/ControlBridge","clearProtectedMap",CLEAR_DESC,false));
         code.add(new JumpInsnNode(IFEQ,proceed));code.add(new InsnNode(RETURN));addContinuation(code,proceed);
         m.instructions.insert(code);return 1;
     }
@@ -332,7 +332,7 @@ public final class FastutilIndexBoundary implements Opcodes {
         code.add(new MethodInsnNode(INVOKEVIRTUAL,wrappedOwner(owner),wide(owner)?"getLong":"getInt",wide(owner)?"(I)J":"(I)I",false));boxKey(code,owner);
         // Restore bridge argument order (map,key,value) after computing the map's current value.
         code.add(new InsnNode(SWAP));
-        code.add(new MethodInsnNode(INVOKESTATIC,BRIDGE,"indexRemovalAllowed",INDEX_DESC,false));
+        code.add(new MethodInsnNode(INVOKESTATIC,"dev/ronova/pro/bootstrap/ControlBridge","indexRemovalAllowed",INDEX_DESC,false));
         code.add(new JumpInsnNode(IFEQ,deny));code.add(new JumpInsnNode(GOTO,allow));
         code.add(deny);code.add(new FrameNode(F_SAME,0,null,0,null));
         code.add(new VarInsnNode(ALOAD,0));code.add(new InsnNode(ICONST_M1));code.add(new FieldInsnNode(PUTFIELD,n.name,"last","I"));
@@ -372,25 +372,10 @@ public final class FastutilIndexBoundary implements Opcodes {
     private static void boxKey(InsnList code,String owner){code.add(new MethodInsnNode(INVOKESTATIC,wide(owner)?"java/lang/Long":"java/lang/Integer","valueOf",wide(owner)?"(J)Ljava/lang/Long;":"(I)Ljava/lang/Integer;",false));}
     private static void pushMap(InsnList code){code.add(new VarInsnNode(ALOAD,0));}
     private static void boxInt(InsnList code){code.add(new MethodInsnNode(INVOKESTATIC,"java/lang/Integer","valueOf","(I)Ljava/lang/Integer;",false));}
-    private static void callIndex(InsnList code){code.add(new MethodInsnNode(INVOKESTATIC,BRIDGE,"indexRemovalAllowed",INDEX_DESC,false));}
+    private static void callIndex(InsnList code){code.add(new MethodInsnNode(INVOKESTATIC,"dev/ronova/pro/bootstrap/ControlBridge","indexRemovalAllowed",INDEX_DESC,false));}
     private static void addContinuation(InsnList code,LabelNode label){code.add(label);code.add(new FrameNode(F_SAME,0,null,0,null));}
     private static boolean field(ClassNode n,String name,String desc){return n.fields.stream().anyMatch(f->f.name.equals(name)&&f.desc.equals(desc));}
     private static boolean method(ClassNode n,String name,String desc){return find(n,name,desc)!=null;}
     private static MethodNode find(ClassNode n,String name,String desc){return n.methods.stream().filter(m->m.name.equals(name)&&m.desc.equals(desc)).findFirst().orElse(null);}
 
-    /** Recompute every frame after inserting branches, using the actual defining loader. */
-    private static final class SafeWriter extends ClassWriter {
-        private final ClassLoader loader;
-        SafeWriter(int flags,ClassLoader loader){super(flags);this.loader=loader;}
-        @Override protected String getCommonSuperClass(String left,String right) {
-            try {
-                Class<?> a=Class.forName(left.replace('/','.'),false,loader),b=Class.forName(right.replace('/','.'),false,loader);
-                if(a.isAssignableFrom(b))return left;
-                if(b.isAssignableFrom(a))return right;
-                if(a.isInterface()||b.isInterface())return "java/lang/Object";
-                do { a=a.getSuperclass(); } while(!a.isAssignableFrom(b));
-                return a.getName().replace('.','/');
-            } catch(ClassNotFoundException failure) { throw new IllegalStateException("FRAME_TYPE_UNAVAILABLE",failure); }
-        }
-    }
 }

@@ -43,7 +43,7 @@ final class DispatchBoundary {
             if(lifeGetter&&args.length==0&&(result.getSort()==Type.FLOAT||result.getSort()==Type.BOOLEAN)) {
                 InsnList c=new InsnList();LabelNode original=new LabelNode();
                 c.add(new VarInsnNode(Opcodes.ALOAD,0));c.add(new LdcInsnNode(m.name));
-                c.add(new MethodInsnNode(Opcodes.INVOKESTATIC,"dev/ronova/pro/bootstrap/TaskBridge","lifeResult","(Ljava/lang/Object;Ljava/lang/String;)Ljava/lang/Object;",false));
+                c.add(new MethodInsnNode(Opcodes.INVOKESTATIC,"dev/ronova/pro/bootstrap/ControlBridge","lifeResult","(Ljava/lang/Object;Ljava/lang/String;)Ljava/lang/Object;",false));
                 c.add(new InsnNode(Opcodes.DUP));c.add(new JumpInsnNode(Opcodes.IFNULL,original));
                 String boxed=result.getSort()==Type.FLOAT?"java/lang/Float":"java/lang/Boolean";
                 c.add(new TypeInsnNode(Opcodes.CHECKCAST,boxed));
@@ -58,7 +58,7 @@ final class DispatchBoundary {
             c.add(new VarInsnNode(Opcodes.ALOAD,0));c.add(new LdcInsnNode(m.name));
             if(args.length==0)c.add(new InsnNode(Opcodes.ACONST_NULL));
             else { c.add(new VarInsnNode(args[0].getOpcode(Opcodes.ILOAD),1));ControlClassWriter.box(c,args[0]); }
-            c.add(new MethodInsnNode(Opcodes.INVOKESTATIC,"dev/ronova/pro/bootstrap/TaskBridge","dispatchAllowed","(Ljava/lang/Object;Ljava/lang/String;Ljava/lang/Object;)Z",false));
+            c.add(new MethodInsnNode(Opcodes.INVOKESTATIC,"dev/ronova/pro/bootstrap/ControlBridge","dispatchAllowed","(Ljava/lang/Object;Ljava/lang/String;Ljava/lang/Object;)Z",false));
             c.add(new JumpInsnNode(Opcodes.IFNE,allowed));
             if(result.getSort()==Type.BOOLEAN) {c.add(new InsnNode(Opcodes.ICONST_0));c.add(new InsnNode(Opcodes.IRETURN));}
             else c.add(new InsnNode(Opcodes.RETURN));

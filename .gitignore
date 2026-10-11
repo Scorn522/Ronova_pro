@@ -31,3 +31,26 @@ validation/a-takeover-tasks-01/server/Pro-A-Tasks/
 !/validation/a-final-20260928/REPORT.md
 !/validation/a-final-20260928/evidence-20261001/
 !/validation/a-final-20260928/evidence-20261002/
+
+# Preserve pre-import source trees locally; active source sets use src/<component>.
+/src/main/
+/src/test/
+/agent/
+/bootstrap/
+/prelaunch/
+/validation/src/
+# Current B report summary only; game runs and raw historical logs remain local.
+!/validation/b-final-20261007/
+/validation/b-final-20261007/*
+!/validation/b-final-20261007/REPORT.md
+
+# Input incremental patches remain reference files; committed source includes the fixes.
+/B-SOURCE-COMPLETE.patch
+/CONTROL-PLANE-R1.patch
+/FAST-EXEC-R2.patch
+
+# Direct evidence for the current source fixes; old runs remain local.
+!/validation/b-final-20261007/build-final-source-fixes-20261011.log
+!/validation/b-final-20261007/build-source-list-payload-20261011.log
+!/validation/b-final-20261007/compile-source-list-fixes-20261011.log
+!/validation/b-final-20261007/source-list-fixes-20261011.log

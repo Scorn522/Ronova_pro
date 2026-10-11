@@ -38,6 +38,9 @@ public final class ProBootstrap {
                 Class<?> active=Class.forName("dev.ronova.pro.agent.RecoveryAgent",false,ClassLoader.getSystemClassLoader());
                 String actual=String.valueOf(active.getMethod("installState").invoke(null));
                 if(actual.equals("INSTALLED_FULL")) { state="ALREADY_INSTALLED";detail=actual;return; }
+                // An attempted installation owns this JVM's Instrumentation.
+                // Reattaching the same agent cannot repair its failed start.
+                if(!actual.equals("NOT_ATTEMPTED")){state="UNAVAILABLE";detail=actual;return;}
             } catch(ClassNotFoundException absent) { }
             // Read our own module resource: Forge UnionFileSystem code sources are not ordinary JarFile paths.
             Path cache=Path.of(System.getProperty("user.dir",".")).resolve(CACHE_DIRECTORY).toAbsolutePath().normalize();

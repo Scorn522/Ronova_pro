@@ -19,6 +19,7 @@ final class TaskBurstFixture {
     private final CountDownLatch started=new CountDownLatch(1),release=new CountDownLatch(1);
     private final AtomicInteger queuedBodies=new AtomicInteger(),controlBodies=new AtomicInteger(),interrupts=new AtomicInteger();
     private final Set<String> receipts=new HashSet<>();
+    private Set<UUID> operationsBefore=Set.of();
     private UUID operation;
     private Cow target;
     private int tick,phase;
@@ -61,7 +62,9 @@ final class TaskBurstFixture {
                 AtomicInteger unrelated=controlBodies;pool.submit((Runnable)unrelated::incrementAndGet);
                 phase=1;
             } else if(phase==1&&started.getCount()==0) {
-                operation=FixtureCommands.clear(runtime,target);phase=2;
+                operationsBefore=new HashSet<>(runtime.operations());FixtureCommands.requestConsole("clear "+target.getUUID());phase=10;
+            } else if(phase==10) {
+                operation=FixtureCommands.newOperation(runtime,operationsBefore);if(operation!=null)phase=2;
             } else if(phase==2) {
                 if(pool.isShutdown()||interrupts.get()!=0)throw new AssertionError("shared fixture pool/worker was affected");
                 for(String row:runtime.recoveryStatus(operation))if(row.contains(":currentScope=true:factDurable=true"))receipts.add(row.substring(0,row.indexOf(':')));
@@ -71,14 +74,14 @@ final class TaskBurstFixture {
                 finished=true;pool.shutdown();
                 Files.writeString(Path.of("task-burst-result.txt"),"LOCAL_TASK_BURST_SCOPES_OBSERVED="+receipts.size()+
                         "\nQUEUED_BODIES=0\nUNRELATED_BODY=1\nWORKER_INTERRUPTS=0\nTASK_BURST_KNOWN_CHAIN_SETTLED\n"+String.join("\n",runtime.recoveryStatus(operation)));
-                event.getServer().halt(false);
+
             }
         } catch(Throwable failure) {
             finished=true;release.countDown();pool.shutdown();
             try { Files.writeString(Path.of("task-burst-result.txt"),"FAILED\n"+failure+"\n"+String.join("\n",operation==null?List.of():runtime.recoveryStatus(operation))); }
             catch(java.io.IOException writeFailure) { failure.addSuppressed(writeFailure); }
             failure.printStackTrace();
-            event.getServer().halt(false);
+
         }
     }
 }

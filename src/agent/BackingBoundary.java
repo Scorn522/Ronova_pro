@@ -8,6 +8,24 @@ import jdk.internal.org.objectweb.asm.tree.*;
 final class BackingBoundary {
     private static final String BRIDGE="dev/ronova/pro/bootstrap/BackingBridge";
     private static final Set<String> CORE_INSTALLED=java.util.concurrent.ConcurrentHashMap.newKeySet();
+    static boolean actualMutationCalls(byte[] bytes){
+        boolean[] writes={false};
+        new ClassReader(bytes).accept(new ClassVisitor(Opcodes.ASM8){
+            @Override public void visitPermittedSubclassExperimental(String name){}
+            @Override public MethodVisitor visitMethod(int access,String name,String descriptor,String signature,String[] exceptions){
+                return new MethodVisitor(Opcodes.ASM8){
+                    @Override public void visitMethodInsn(int opcode,String owner,String name,String descriptor,boolean itf){
+                        if((owner.equals("java/lang/reflect/Array")||owner.equals("java/lang/reflect/Field"))
+                                &&Set.of("set","setBoolean","setByte","setChar","setShort","setInt","setLong","setFloat","setDouble").contains(name)
+                                ||owner.equals("java/lang/reflect/Method")&&name.equals("invoke")
+                                ||(owner.equals("sun/misc/Unsafe")||owner.equals("jdk/internal/misc/Unsafe"))
+                                &&(name.startsWith("put")||name.startsWith("compareAnd")||name.startsWith("getAnd")||name.equals("copyMemory")||name.equals("copySwapMemory")||name.equals("setMemory")))writes[0]=true;
+                    }
+                };
+            }
+        },ClassReader.SKIP_DEBUG|ClassReader.SKIP_FRAMES);
+        return writes[0];
+    }
     static boolean coreInstalled() {return CORE_INSTALLED.containsAll(Set.of("java/util/AbstractCollection","java/util/ArrayList","java/util/ArrayList$Itr","java/util/ArrayList$ListItr","java/util/ArrayList$SubList","java/util/ArrayList$SubList$1","java/util/IdentityHashMap",
         "java/util/IdentityHashMap$IdentityHashMapIterator","java/util/IdentityHashMap$EntryIterator$Entry",
         "java/util/concurrent/ThreadPoolExecutor","java/util/concurrent/ScheduledThreadPoolExecutor"));}
@@ -19,7 +37,7 @@ final class BackingBoundary {
         if(loader==null&&(name.equals("java/util/concurrent/ThreadPoolExecutor")||name.equals("java/util/concurrent/ScheduledThreadPoolExecutor"))) {
             for(MethodNode method:node.methods)if(method.name.equals("shutdown")||method.name.equals("shutdownNow")) {
                 InsnList code=new InsnList();LabelNode allowed=new LabelNode();code.add(new VarInsnNode(Opcodes.ALOAD,0));
-                code.add(new MethodInsnNode(Opcodes.INVOKESTATIC,"dev/ronova/pro/bootstrap/TaskBridge","resourceReleaseAllowed","(Ljava/lang/Object;)Z",false));
+                code.add(new MethodInsnNode(Opcodes.INVOKESTATIC,"dev/ronova/pro/bootstrap/ControlBridge","resourceReleaseAllowed","(Ljava/lang/Object;)Z",false));
                 code.add(new JumpInsnNode(Opcodes.IFNE,allowed));
                 if(method.name.equals("shutdownNow")) {code.add(new MethodInsnNode(Opcodes.INVOKESTATIC,"java/util/Collections","emptyList","()Ljava/util/List;",false));code.add(new InsnNode(Opcodes.ARETURN));}
                 else code.add(new InsnNode(Opcodes.RETURN));
@@ -44,7 +62,7 @@ final class BackingBoundary {
                 InsnList code=new InsnList();LabelNode allowed=new LabelNode();code.add(new VarInsnNode(Opcodes.ALOAD,0));
                 if(method.name.equals("setValue"))code.add(new FieldInsnNode(Opcodes.GETFIELD,name,"this$1","Ljava/util/IdentityHashMap$EntryIterator;"));
                 code.add(new FieldInsnNode(Opcodes.GETFIELD,"java/util/IdentityHashMap$IdentityHashMapIterator","this$0","Ljava/util/IdentityHashMap;"));
-                code.add(new MethodInsnNode(Opcodes.INVOKESTATIC,"dev/ronova/pro/bootstrap/TaskBridge","controlMutationAllowed","(Ljava/lang/Object;)Z",false));code.add(new JumpInsnNode(Opcodes.IFNE,allowed));
+                code.add(new MethodInsnNode(Opcodes.INVOKESTATIC,"dev/ronova/pro/bootstrap/ControlBridge","controlMutationAllowed","(Ljava/lang/Object;)Z",false));code.add(new JumpInsnNode(Opcodes.IFNE,allowed));
                 if(method.name.equals("setValue")){code.add(new VarInsnNode(Opcodes.ALOAD,0));code.add(new MethodInsnNode(Opcodes.INVOKEVIRTUAL,name,"getValue","()Ljava/lang/Object;",false));code.add(new InsnNode(Opcodes.ARETURN));}
                 else {code.add(new VarInsnNode(Opcodes.ALOAD,0));code.add(new InsnNode(Opcodes.ICONST_M1));code.add(new FieldInsnNode(Opcodes.PUTFIELD,name,"lastReturnedIndex","I"));code.add(new InsnNode(Opcodes.RETURN));}
                 code.add(allowed);method.instructions.insert(code);changed=true;
@@ -145,7 +163,7 @@ final class BackingBoundary {
             if(at instanceof FieldInsnNode store&&store.getOpcode()==Opcodes.PUTFIELD&&store.owner.equals(node.name)&&store.name.equals(field)&&store.desc.startsWith("[")){
                 if(at.getPrevious() instanceof MethodInsnNode prior&&prior.owner.equals("dev/ronova/pro/bootstrap/TaskBridge")&&prior.name.equals("controlBackingPublished"))continue;
                 InsnList guard=new InsnList();guard.add(new InsnNode(Opcodes.DUP2));
-                guard.add(new MethodInsnNode(Opcodes.INVOKESTATIC,"dev/ronova/pro/bootstrap/TaskBridge","controlBackingPublished","(Ljava/lang/Object;Ljava/lang/Object;)V",false));
+                guard.add(new MethodInsnNode(Opcodes.INVOKESTATIC,"dev/ronova/pro/bootstrap/ControlBridge","controlBackingPublished","(Ljava/lang/Object;Ljava/lang/Object;)V",false));
                 method.instructions.insertBefore(at,guard);changed=true;
             }
         return changed;

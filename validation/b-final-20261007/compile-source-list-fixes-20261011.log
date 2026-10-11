@@ -1,0 +1,10 @@
+validation\checks\AuditFixCheck.java:9: ����: Unsafe���ڲ�ר�� API, ���ܻ���δ�����а���ɾ��
+    private static final sun.misc.Unsafe U;
+                                 ^
+validation\checks\AuditFixCheck.java:10: ����: Unsafe���ڲ�ר�� API, ���ܻ���δ�����а���ɾ��
+    static {try {var field=sun.misc.Unsafe.class.getDeclaredField("theUnsafe");field.setAccessible(true);U=(sun.misc.Unsafe)field.get(null);}catch(Exception e){throw new ExceptionInInitializerError(e);}}
+                                   ^
+validation\checks\AuditFixCheck.java:10: ����: Unsafe���ڲ�ר�� API, ���ܻ���δ�����а���ɾ��
+    static {try {var field=sun.misc.Unsafe.class.getDeclaredField("theUnsafe");field.setAccessible(true);U=(sun.misc.Unsafe)field.get(null);}catch(Exception e){throw new ExceptionInInitializerError(e);}}
+                                                                                                                    ^
+3 ������

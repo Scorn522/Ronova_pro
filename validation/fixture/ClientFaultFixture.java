@@ -127,12 +127,12 @@ public final class ClientFaultFixture {
         check(failedItems==1 && guiBefore.equals(gui.pose().last().pose()),"GUI injected item failure did not leave clean caller pose");
         PoseStack poses=new PoseStack();poses.translate(1,2,3);var before=new org.joml.Matrix4f(poses.last().pose());
         float[] color=RenderSystem.getShaderColor().clone();boolean depth=GL11.glIsEnabled(GL11.GL_DEPTH_TEST),blend=GL11.glIsEnabled(GL11.GL_BLEND),cull=GL11.glIsEnabled(GL11.GL_CULL_FACE);
-        int modelViewDepth=((dev.ronova.pro.ClientItemFaults.PoseAccess)RenderSystem.getModelViewStack()).ronova$poses().size();
+        int modelViewDepth=((dev.ronova.pro.ClientDrawFaults.PoseAccess)RenderSystem.getModelViewStack()).ronova$poses().size();
         mc.getItemRenderer().renderStatic(new ItemStack(Items.BONE),ItemDisplayContext.FIRST_PERSON_RIGHT_HAND,15728880,OverlayTexture.NO_OVERLAY,poses,buffers,mc.level,0);
         check(failedItems==2 && poses.clear() && before.equals(poses.last().pose()),"held item failure corrupted caller pose");
         check(Arrays.equals(color,RenderSystem.getShaderColor()) && depth==GL11.glIsEnabled(GL11.GL_DEPTH_TEST)
                 && blend==GL11.glIsEnabled(GL11.GL_BLEND) && cull==GL11.glIsEnabled(GL11.GL_CULL_FACE),"item GL state was not restored");
-        check(((dev.ronova.pro.ClientItemFaults.PoseAccess)RenderSystem.getModelViewStack()).ronova$poses().size()==modelViewDepth,"global model-view stack leaked");
+        check(((dev.ronova.pro.ClientDrawFaults.PoseAccess)RenderSystem.getModelViewStack()).ronova$poses().size()==modelViewDepth,"global model-view stack leaked");
         for(int i=0;i<20;i++) {
             gui.renderItem(new ItemStack(Items.STICK),10,10);
             mc.getItemRenderer().renderStatic(new ItemStack(Items.BONE),ItemDisplayContext.GROUND,15728880,OverlayTexture.NO_OVERLAY,poses,buffers,mc.level,0);

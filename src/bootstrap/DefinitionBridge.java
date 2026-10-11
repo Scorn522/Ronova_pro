@@ -78,11 +78,11 @@ public final class DefinitionBridge {
         requireAgent(WALKER.getCallerClass());if(!ControlBridge.owns(agent))throw new SecurityException("DEFINITION_AGENT_REQUIRED");
         transformer=agent.getMethod("transformDefined",Module.class,ClassLoader.class,byte[].class,boolean.class);
         acceptedDefinition=agent.getMethod("externalDefinitionAccepted",Class.class,byte[].class);
-        directCaller();TaskBridge.prepareDefinitionCalls();
+        directCaller();ControlBridge.prepareDefinitionCalls();
         publish();
     }
     private static void requireAgent(Class<?> caller){if(!ControlBridge.owns(caller))throw new SecurityException("DEFINITION_AGENT_REQUIRED");}
-    private static void publish(){TaskBridge.controlPublication(CURRENT,new Object[]{ORIGINS,ACCEPTED_IMAGES,RETURNS,FIXED,transformer,acceptedDefinition});}
+    private static void publish(){ControlBridge.controlPublication(CURRENT,new Object[]{ORIGINS,ACCEPTED_IMAGES,RETURNS,FIXED,transformer,acceptedDefinition});}
     public static Module module(Class<?> type) {
         synchronized(ORIGINS){Module owner=ORIGINS.get(new ClassKey(type,false));return owner==null?type.getModule():owner;}
     }
@@ -113,7 +113,7 @@ public final class DefinitionBridge {
     public static Module origin(Class<?> type) {requireAgent(WALKER.getCallerClass());synchronized(ORIGINS){return ORIGINS.get(new ClassKey(type,false));}}
     public static Module[] origins(Class<?>[] types) {
         requireAgent(WALKER.getCallerClass());Module[] origins=new Module[types.length];
-        synchronized(ORIGINS){for(int i=0;i<types.length;i++)origins[i]=ORIGINS.get(new ClassKey(types[i],false));}
+        synchronized(ORIGINS){for(int i=0;i<types.length;i++)if(types[i]!=null)origins[i]=ORIGINS.get(new ClassKey(types[i],false));}
         return origins;
     }
     public static Module definingModule(ClassLoader loader,String name) {
@@ -130,17 +130,17 @@ public final class DefinitionBridge {
         // A Lookup defines for its real lookup class, including JDK-generated helpers. A shared
         // platform lookup first reached by a Mod does not turn a platform helper into that Mod.
         Class<?> lookupClass=host instanceof MethodHandles.Lookup lookup?lookup.lookupClass():null;
-        Module owner=TaskBridge.creationModule(host);
+        Module owner=ControlBridge.creationModule(host);
         // A borrowed platform Lookup does not turn a Mod's explicit definition
         // into trusted platform code. Use this actual API consumer, not an older
         // Mod frame underneath unrelated library execution.
-        if(lookupClass!=null&&(owner==null||!TaskBridge.producer(owner))) {
+        if(lookupClass!=null&&(owner==null||!ControlBridge.producer(owner))) {
             Class<?> consumer=WALKER.walk(LOOKUP_CONSUMER);
-            if(consumer!=null&&TaskBridge.producer(module(consumer)))owner=module(consumer);
+            if(consumer!=null&&ControlBridge.producer(module(consumer)))owner=module(consumer);
         }
         if(owner==null&&lookupClass!=null)owner=module(lookupClass);
         if(owner==null&&host instanceof ClassLoader)owner=module(host.getClass());
-        if(owner!=null&&!TaskBridge.producer(owner))owner=null;
+        if(owner!=null&&!ControlBridge.producer(owner))owner=null;
         ClassLoader loader=lookupClass!=null?lookupClass.getClassLoader():host instanceof ClassLoader actual?actual:null;
         byte[] image=Arrays.copyOfRange(bytes,offset,offset+length);Scope parent;
         synchronized(CURRENT){parent=CURRENT.get(Thread.currentThread());}
@@ -160,7 +160,7 @@ public final class DefinitionBridge {
                 &&(frame.getMethodName().equals("in")||frame.getMethodName().equals("dropLookupMode"))
                 ||frame.getDeclaringClass()==MethodHandles.class&&frame.getMethodName().equals("privateLookupIn")))
             throw new SecurityException("ACTUAL_LOOKUP_DERIVATION_REQUIRED");
-        TaskBridge.lookupDerived(source,result,WALKER.walk(LOOKUP_CONSUMER));return result;
+        ControlBridge.lookupDerived(source,result,WALKER.walk(LOOKUP_CONSUMER));return result;
     }
     private static String className(byte[] bytes) {
         try(var input=new java.io.DataInputStream(new java.io.ByteArrayInputStream(bytes))) {
@@ -207,7 +207,7 @@ public final class DefinitionBridge {
         synchronized(CURRENT){if(CURRENT.get(scope.thread)!=scope)throw new IllegalStateException("DEFINITION_SCOPE_CHANGED");}
         Class<?> caller=directCaller();if(caller!=MethodHandles.Lookup.class&&caller!=ClassLoader.class)throw new SecurityException("DEFINITION_PLATFORM_REQUIRED");return scope;
     }
-    public static boolean allowed(Class<?> type) {return !TaskBridge.modStopped(module(type));}
+    public static boolean allowed(Class<?> type) {return !ControlBridge.modStopped(module(type));}
     public static Object nativeReturn(Module owner,Class<?> type,String descriptor) {
         return stoppedReturn(owner==null?module(type):owner,java.lang.invoke.MethodType.fromMethodDescriptorString(descriptor,type.getClassLoader()).returnType());
     }

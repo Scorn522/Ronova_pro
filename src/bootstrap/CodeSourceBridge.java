@@ -68,7 +68,26 @@ public final class CodeSourceBridge {
     private static final ThreadLocal<Registration> REGISTRATIONS=new ThreadLocal<>();
     private static final ThreadLocal<MetadataUse> METADATA_USE=new ThreadLocal<>();
     private static final List<Role> ROLES=new ArrayList<>();
-    private static final Map<String,List<CodeMethods>> CODE_METHODS=new LedgerMap<>();
+    private static final Map<String,MethodBucket> CODE_METHODS=new LedgerMap<>();
+    private static volatile boolean codeMethodsPresent;
+    private static final class MethodBucket {
+        final List<CodeMethods> entries=new ArrayList<>();volatile long revision;
+        MethodBucket(){protect(this,entries);}
+    }
+    private record FrameMethods(MethodBucket bucket,long revision,Set<String> selectors){}
+    private static final ClassValue<FrameMethods> FRAME_METHODS=new ClassValue<>(){
+        @Override protected FrameMethods computeValue(Class<?> type){
+            synchronized(CODE_METHODS){
+                MethodBucket bucket=methodBucket(type.getName());Set<String> selected=new HashSet<>();
+                for(CodeMethods entry:bucket.entries)
+                    if(codeMatches(entry.name(),entry.loader(),entry.bootstrap(),entry.actual(),type))selected.addAll(entry.methods());
+                FrameMethods methods=new FrameMethods(bucket,bucket.revision,Set.copyOf(selected));protect(methods,methods.selectors());return methods;
+            }
+        }
+    };
+    private static MethodBucket methodBucket(String name){
+        MethodBucket bucket=CODE_METHODS.get(name);if(bucket==null){bucket=new MethodBucket();CODE_METHODS.put(name,bucket);}return bucket;
+    }
     private static final List<CodeFields> CODE_FIELDS=new ArrayList<>();
     private static final List<CodeValues> CODE_VALUES=new ArrayList<>();
     private static final Map<Key,Set<FieldHold>> FIELD_HOLDERS=new LedgerMap<>();
@@ -121,7 +140,7 @@ public final class CodeSourceBridge {
         public boolean enqueue(){return writer(WALKER.getCallerClass())&&super.enqueue();}
     }
     private static final class ControlKey extends WeakReference<Object>{
-        final int hash;ControlKey previous,next;boolean executionList,executionMap,fieldGate;
+        final int hash;ControlKey previous,next;boolean executionList,executionMap,fieldGate,analysisContainer;
         ControlKey(Object value,ControlKey next){super(value,DEAD_CONTROLS);hash=System.identityHashCode(value);this.next=next;if(next!=null)next.previous=this;}
         public void clear(){if(Key.writer(WALKER.getCallerClass()))super.clear();}
         public boolean enqueue(){return Key.writer(WALKER.getCallerClass())&&super.enqueue();}
@@ -148,6 +167,7 @@ public final class CodeSourceBridge {
         boolean executionList(Object value){ControlKey key=find(value);return key!=null&&key.executionList;}
         boolean executionMap(Object value){ControlKey key=find(value);return key!=null&&key.executionMap;}
         boolean fieldGate(Object value){ControlKey key=find(value);return key!=null&&key.fieldGate;}
+        boolean analysisContainer(Object value){ControlKey key=find(value);return key!=null&&key.analysisContainer;}
         ControlKey add(Object value){
             // Authenticate before delegating: a foreign reflective call must
             // not acquire the registry's own caller identity through this wrapper.
@@ -155,7 +175,13 @@ public final class CodeSourceBridge {
         }
         ControlKey addAll(Object[] values){
             writer(AUTHORITY.getCallerClass());ControlKey result=null;
-            for(Object value:values){
+            for(int index=0;index<values.length;index++){
+                // A class image can publish thousands of identities at once.
+                // Retiring only 64 keys per whole publication lets temporary
+                // image history outgrow every later GC. Charge at most one
+                // bounded retirement batch per 64 supplied identities instead.
+                if((index&63)==0){ControlKey retired=(ControlKey)DEAD_CONTROLS.poll();if(retired!=null)reap(retired);}
+                Object value=values[index];
                 if(value==null)continue;
                 ControlKey known=find(value);if(known!=null){result=known;continue;}
                 if(size>=table.length-(table.length>>>2)&&table.length<(1<<30)){
@@ -177,7 +203,11 @@ public final class CodeSourceBridge {
         }
         void reap(ControlKey first){
             writer(AUTHORITY.getCallerClass());
-            for(ControlKey retired=first;retired!=null;retired=(ControlKey)DEAD_CONTROLS.poll()){
+            // Cleared identities cannot match a live receiver even before
+            // unlinking. Charge bounded retirement to each publication, rather
+            // than hold the controller monitor through an entire GC batch.
+            int remaining=64;
+            for(ControlKey retired=first;retired!=null;retired=--remaining>0?(ControlKey)DEAD_CONTROLS.poll():null){
                 int at=bucket(retired.hash,table.length);ControlKey previous=retired.previous,next=retired.next;
                 // The queued key is the actual registered node. Unlink it under
                 // this monitor without rescanning the same bucket for every
@@ -194,7 +224,7 @@ public final class CodeSourceBridge {
     private static void requireAgent(){Class<?> caller=caller();if(agent==null||caller==null||caller.getNestHost()!=agent||!ControlBridge.owns(caller))throw new SecurityException("CODE_SOURCE_AGENT_REQUIRED");}
     public static void install(Class<?> actualAgent)throws ReflectiveOperationException{
         Class<?> caller=caller();if(!ControlBridge.owns(caller)||caller!=actualAgent||agent!=null&&agent!=actualAgent)throw new SecurityException("CODE_SOURCE_AGENT_REQUIRED");
-        TaskBridge.controlPublication(DEAD_CONTROLS,new Object[]{DEAD_CONTROLS});
+        ControlBridge.controlPublication(DEAD_CONTROLS,new Object[]{DEAD_CONTROLS});
         agent=actualAgent;producer=actualAgent.getMethod("sourceModuleRead",Module.class);seed(ModuleLayer.boot());
         encoder=actualAgent.getMethod("externalTreeImage",Object.class);
         begin=actualAgent.getMethod("externalCodeBegin",Object.class,Module[].class,Module[].class);
@@ -208,7 +238,7 @@ public final class CodeSourceBridge {
         metadataImages=actualAgent.getMethod("externalMixinMetadata",Object.class,Module.class,Module[].class);
         memberImage=actualAgent.getMethod("externalMemberMetadata",Object.class);
         prepared=actualAgent.getMethod("externalClassPrepared",Class.class);
-        TaskBridge.controlPublication(MODULES,new Object[]{IMAGES,BYTE_CONTRIBUTORS,READERS,TREES,TREE_IMAGES,MIXINS,MIXIN_TREES,MIXIN_OPTIONS,MIXIN_RESTRICTIONS,TRACKER_RESTRICTIONS,METADATA,METADATA_TREES,METADATA_ROWS,MEMBER_IMAGES,CONTEXT_READS,STATE_READS,SELECTIONS,RESOURCE_SOURCES,CONFIGURATIONS,CONTEXTS,HOLDERS,WRITERS,COPYING,PREPARING_CONFIGS,REGISTRATIONS,METADATA_USE,CONTROLS,ROLES,CODE_METHODS,CODE_FIELDS,CODE_VALUES,FIELD_HOLDERS,FIELD_CLASSES,agent,producer,encoder,begin,end,copied,encoded,observed,dependency,payload,selection,metadataImages,memberImage,prepared});
+        ControlBridge.controlPublication(MODULES,new Object[]{IMAGES,BYTE_CONTRIBUTORS,READERS,TREES,TREE_IMAGES,MIXINS,MIXIN_TREES,MIXIN_OPTIONS,MIXIN_RESTRICTIONS,TRACKER_RESTRICTIONS,METADATA,METADATA_TREES,METADATA_ROWS,MEMBER_IMAGES,CONTEXT_READS,STATE_READS,SELECTIONS,RESOURCE_SOURCES,CONFIGURATIONS,CONTEXTS,HOLDERS,WRITERS,COPYING,PREPARING_CONFIGS,REGISTRATIONS,METADATA_USE,CONTROLS,ROLES,CODE_METHODS,FRAME_METHODS,CODE_FIELDS,CODE_VALUES,FIELD_HOLDERS,FIELD_CLASSES,agent,producer,encoder,begin,end,copied,encoded,observed,dependency,payload,selection,metadataImages,memberImage,prepared});
     }
     public static void codeMethods(ClassLoader loader,String name,String[] methods){
         requireAgent();codeMethods(loader,name,methods,null);
@@ -222,13 +252,12 @@ public final class CodeSourceBridge {
         // loaded class both grows this index and hides its actual empty state.
         if(selected.isEmpty())return;
         synchronized(CODE_METHODS){
-            for(var buckets=CODE_METHODS.values().iterator();buckets.hasNext();){
-                List<CodeMethods> entries=buckets.next();
-                entries.removeIf(entry->!entry.bootstrap()&&entry.loader().get()==null||entry.actual()!=null&&entry.actual().get()==null);
-                if(entries.isEmpty())buckets.remove();
-            }
-            List<CodeMethods> entries=CODE_METHODS.get(name);
-            if(entries==null){entries=new ArrayList<>();protect(entries);CODE_METHODS.put(name,entries);}
+            // Only this actual definition registration invalidates the lazy
+            // selector index. NativeControl still resolves the current BCI and
+            // definition generation whenever the selected method is queried.
+            MethodBucket bucket=methodBucket(name);bucket.revision=Math.addExact(bucket.revision,1);codeMethodsPresent=true;
+            List<CodeMethods> entries=bucket.entries;
+            entries.removeIf(entry->!entry.bootstrap()&&entry.loader().get()==null||entry.actual()!=null&&entry.actual().get()==null);
             for(int i=0;i<entries.size();i++){
                 CodeMethods prior=entries.get(i);
                 if(codeSelector(prior.name(),prior.loader(),prior.bootstrap(),prior.actual(),loader,name,actual)){
@@ -241,18 +270,14 @@ public final class CodeSourceBridge {
     }
     static Module[] frameSources(StackWalker.StackFrame frame){
         Module[] execution=ExecutionFlow.frameSources(frame);if(execution!=null)return execution;
-        Class<?> type=frame.getDeclaringClass();boolean tracked=false;
-        synchronized(CODE_METHODS){
-            List<CodeMethods> entries=CODE_METHODS.get(type.getName());
-            if(entries!=null)for(CodeMethods entry:entries)if(codeMatches(entry.name(),entry.loader(),entry.bootstrap(),entry.actual(),type)
-                    &&entry.methods().contains(frame.getMethodName()+frame.getDescriptor())){tracked=true;break;}
-        }
-        if(!tracked||frame.getByteCodeIndex()<0)return NO_FRAME_SOURCES;
+        Class<?> type=frame.getDeclaringClass();FrameMethods methods=FRAME_METHODS.get(type);
+        if(methods.revision()!=methods.bucket().revision){FRAME_METHODS.remove(type);methods=FRAME_METHODS.get(type);}
+        if(!methods.selectors().contains(frame.getMethodName()+frame.getDescriptor())||frame.getByteCodeIndex()<0)return NO_FRAME_SOURCES;
         Module[] actual=NativeControl.codeFrame(frame);return actual==null?NO_FRAME_SOURCES:actual;
     }
     static boolean hasFrameSources(){
         if(ExecutionFlow.hasFrame())return true;
-        synchronized(CODE_METHODS){return !CODE_METHODS.isEmpty();}
+        return codeMethodsPresent;
     }
     public static Object executionPlan(Object[][] rows){requireAgent();return ExecutionFlow.plan(rows);}
     private static List<StackWalker.StackFrame> executionStack(){
@@ -315,18 +340,18 @@ public final class CodeSourceBridge {
     }
     static Object executionUnsafeMutation(Object accessor,Object receiver,long offset,long length,Object proposed,Object source,long sourceOffset,String owner,String operation,String kind,boolean bulk,Module[] contributors){
         if(AUTHORITY.getCallerClass().getNestHost()!=ExecutionFlow.class)throw new SecurityException("ACTUAL_EXECUTION_SOURCE_STATE_REQUIRED");
-        return TaskBridge.beginExecutedUnsafeMutation(accessor,receiver,offset,length,proposed,source,sourceOffset,owner,operation,kind,bulk,contributors);
+        return ControlBridge.beginExecutedUnsafeMutation(accessor,receiver,offset,length,proposed,source,sourceOffset,owner,operation,kind,bulk,contributors);
     }
     static void executionUnsafeMutationEnd(Object receipt,boolean written){
         if(AUTHORITY.getCallerClass().getNestHost()!=ExecutionFlow.class)throw new SecurityException("ACTUAL_EXECUTION_SOURCE_STATE_REQUIRED");
-        TaskBridge.finishFieldMutation(receipt,written);
+        ControlBridge.finishFieldMutation(receipt,written);
     }
     static Module[] executionUnsafeReadSources(Object receipt){
         if(AUTHORITY.getCallerClass().getNestHost()!=ExecutionFlow.class)throw new SecurityException("ACTUAL_EXECUTION_SOURCE_STATE_REQUIRED");
-        return TaskBridge.executedUnsafeReadSources(receipt);
+        return ControlBridge.executedUnsafeReadSources(receipt);
     }
     static Module[] executionByteMemorySources(Object holder,long offset,long length){
-        if(AUTHORITY.getCallerClass()!=TaskBridge.class)throw new SecurityException("ACTUAL_MEMORY_READ_BOUNDARY_REQUIRED");
+        if(AUTHORITY.getCallerClass()!=ControlBridge.class)throw new SecurityException("ACTUAL_MEMORY_READ_BOUNDARY_REQUIRED");
         return ExecutionFlow.byteMemorySources(holder,offset,length);
     }
     static Object executionBufferCall(Object receiver,Class<?> declaring,String method){
@@ -337,15 +362,15 @@ public final class CodeSourceBridge {
         return ExecutionFlow.platformCall(receiver,frames.callee(),frames.caller(),frames.depth());
     }
     static Object executionByteMemoryReadBefore(Object carrier,long offset,long length){
-        if(AUTHORITY.getCallerClass()!=TaskBridge.class)throw new SecurityException("ACTUAL_MEMORY_READ_BOUNDARY_REQUIRED");
+        if(AUTHORITY.getCallerClass()!=ControlBridge.class)throw new SecurityException("ACTUAL_MEMORY_READ_BOUNDARY_REQUIRED");
         return ExecutionFlow.byteMemoryReadBefore(carrier,offset,length);
     }
     static Module[] executionByteMemoryReadSources(Object token){
-        if(AUTHORITY.getCallerClass()!=TaskBridge.class)throw new SecurityException("ACTUAL_MEMORY_READ_RESULT_REQUIRED");
+        if(AUTHORITY.getCallerClass()!=ControlBridge.class)throw new SecurityException("ACTUAL_MEMORY_READ_RESULT_REQUIRED");
         return ExecutionFlow.byteMemoryReadSources(token);
     }
     static void executionByteMemoryReadEnd(Object token){
-        if(AUTHORITY.getCallerClass()!=TaskBridge.class)throw new SecurityException("ACTUAL_MEMORY_READ_COMPLETION_REQUIRED");
+        if(AUTHORITY.getCallerClass()!=ControlBridge.class)throw new SecurityException("ACTUAL_MEMORY_READ_COMPLETION_REQUIRED");
         ExecutionFlow.byteMemoryReadEnd(token);
     }
     static void executionBufferObserved(Object token,Module[] sources){
@@ -368,11 +393,12 @@ public final class CodeSourceBridge {
         ExecutionFlow.fieldModified(holder,declaring,name,descriptor,writer,method,methodDescriptor,instruction,plan,contributors);
     }
     static Object executionMemoryBefore(Object holder,Module[] contributors){
-        if(AUTHORITY.getCallerClass()!=TaskBridge.class)throw new SecurityException("ACTUAL_MEMORY_MUTATION_BOUNDARY_REQUIRED");
+        if(AUTHORITY.getCallerClass()!=ControlBridge.class)throw new SecurityException("ACTUAL_MEMORY_MUTATION_BOUNDARY_REQUIRED");
         return ExecutionFlow.memoryBefore(holder,contributors);
     }
+    static boolean executionMutationTracked(Object holder){return ExecutionFlow.trackedMutation(holder);}
     static Object executionFieldMemoryBefore(Object holder,Class<?> declaring,String name,String descriptor,Module[] contributors,boolean instruction){
-        if(AUTHORITY.getCallerClass()!=TaskBridge.class)throw new SecurityException("ACTUAL_MEMORY_MUTATION_BOUNDARY_REQUIRED");
+        if(AUTHORITY.getCallerClass()!=ControlBridge.class)throw new SecurityException("ACTUAL_MEMORY_MUTATION_BOUNDARY_REQUIRED");
         return ExecutionFlow.fieldMemoryBefore(holder,declaring,name,descriptor,contributors,instruction);
     }
     static Object[] executionReadField(Object holder,Class<?> declaring,String name,String descriptor){
@@ -393,11 +419,11 @@ public final class CodeSourceBridge {
     }
     public static Object[][] groupHeapValues(Module[] selected){requireAgent();return ExecutionFlow.groupValues(selected);}
     public static boolean restoreHeapValue(Object token){
-        if(!TaskBridge.recoveryWriter())throw new SecurityException("HEAP_RECOVERY_CORE_REQUIRED");return ExecutionFlow.restoreValue(token);
+        if(!ControlBridge.recoveryWriter())throw new SecurityException("HEAP_RECOVERY_CORE_REQUIRED");return ExecutionFlow.restoreValue(token);
     }
     static java.util.concurrent.locks.ReentrantLock executionRecoveryGate(Object holder){
         if(AUTHORITY.getCallerClass().getNestHost()!=ExecutionFlow.class)throw new SecurityException("ACTUAL_EXECUTION_SOURCE_STATE_REQUIRED");
-        return TaskBridge.heapRecoveryGate(holder);
+        return ControlBridge.heapRecoveryGate(holder);
     }
     static boolean executionRestoreField(java.lang.reflect.Field field,Object receiver,Object expected,Object incoming){
         if(AUTHORITY.getCallerClass().getNestHost()!=ExecutionFlow.class)throw new SecurityException("ACTUAL_EXECUTION_SOURCE_STATE_REQUIRED");
@@ -408,27 +434,32 @@ public final class CodeSourceBridge {
         return NativeControl.restoreHeapArray(array,index,expected,incoming);
     }
     static Object executionArrayMemoryBefore(Object holder,int start,int length,Module[] contributors){
-        if(AUTHORITY.getCallerClass()!=TaskBridge.class)throw new SecurityException("ACTUAL_MEMORY_MUTATION_BOUNDARY_REQUIRED");
+        // No attributed execution or retained history exists to update.
+        // Ordinary Minecraft geometry stores must not build one heap receipt
+        // per byte merely to replace UNKNOWN with UNKNOWN.
+        if(contributors.length==0&&ExecutionFlow.untrackedArray(holder))return null;
+        if(AUTHORITY.getCallerClass()!=ControlBridge.class)throw new SecurityException("ACTUAL_MEMORY_MUTATION_BOUNDARY_REQUIRED");
         return ExecutionFlow.arrayMemoryBefore(holder,start,length,contributors);
     }
     static long executionArrayRevision(Object holder){
-        if(AUTHORITY.getCallerClass()!=TaskBridge.class)throw new SecurityException("ACTUAL_MEMORY_MUTATION_BOUNDARY_REQUIRED");
+        if(AUTHORITY.getCallerClass()!=ControlBridge.class)throw new SecurityException("ACTUAL_MEMORY_MUTATION_BOUNDARY_REQUIRED");
         return ExecutionFlow.arrayRevision(holder);
     }
     static Object executionByteMemoryBefore(Object holder,long offset,long length,Module[] contributors){
-        if(AUTHORITY.getCallerClass()!=TaskBridge.class)throw new SecurityException("ACTUAL_MEMORY_MUTATION_BOUNDARY_REQUIRED");
+        if(AUTHORITY.getCallerClass()!=ControlBridge.class)throw new SecurityException("ACTUAL_MEMORY_MUTATION_BOUNDARY_REQUIRED");
         return ExecutionFlow.byteMemoryBefore(holder,offset,length,contributors);
     }
     static Object executionByteMemoryBefore(Object holder,long offset,long length,Module[] contributors,boolean reference){
-        if(AUTHORITY.getCallerClass()!=TaskBridge.class)throw new SecurityException("ACTUAL_MEMORY_MUTATION_BOUNDARY_REQUIRED");
+        if(AUTHORITY.getCallerClass()!=ControlBridge.class)throw new SecurityException("ACTUAL_MEMORY_MUTATION_BOUNDARY_REQUIRED");
         return ExecutionFlow.byteMemoryBefore(holder,offset,length,contributors,reference);
     }
     static void executionMemoryAfter(Object token,boolean written){
-        if(AUTHORITY.getCallerClass()!=TaskBridge.class)throw new SecurityException("ACTUAL_MEMORY_MUTATION_BOUNDARY_REQUIRED");
+        if(token==null)return;
+        if(AUTHORITY.getCallerClass()!=ControlBridge.class)throw new SecurityException("ACTUAL_MEMORY_MUTATION_BOUNDARY_REQUIRED");
         ExecutionFlow.memoryAfter(token,written);
     }
     static void executionMemoryContributors(Object token,Module[] contributors){
-        if(AUTHORITY.getCallerClass()!=TaskBridge.class)throw new SecurityException("ACTUAL_MEMORY_MUTATION_BOUNDARY_REQUIRED");
+        if(AUTHORITY.getCallerClass()!=ControlBridge.class)throw new SecurityException("ACTUAL_MEMORY_MUTATION_BOUNDARY_REQUIRED");
         ExecutionFlow.memoryContributors(token,contributors);
     }
     static String executionRetirementGap(Module module){
@@ -501,7 +532,7 @@ public final class CodeSourceBridge {
         return first instanceof String||second instanceof String?first==second:Objects.equals(first,second);
     }
     public static void constantRestored(Object token,java.lang.reflect.Field field)throws IllegalAccessException {
-        if(!TaskBridge.recoveryWriter())throw new SecurityException("FIELD_CONSTANT_RECOVERY_CORE_REQUIRED");
+        if(!ControlBridge.recoveryWriter())throw new SecurityException("FIELD_CONSTANT_RECOVERY_CORE_REQUIRED");
         synchronized(CODE_VALUES){
             for(CodeValues entry:CODE_VALUES)if(codeMatches(entry.name(),entry.loader(),entry.bootstrap(),entry.actual(),field.getDeclaringClass()))
                 for(CodeValue value:entry.fields())if(value==token&&value.name.equals(field.getName())&&value.descriptor.equals(field.getType().descriptorString())&&java.lang.reflect.Modifier.isStatic(field.getModifiers())){
@@ -534,6 +565,19 @@ public final class CodeSourceBridge {
             throw new SecurityException("ACTUAL_EXECUTION_METADATA_LIST_REQUIRED");
         synchronized(CONTROLS){reapControls();CONTROLS.add(object).executionList=true;}
     }
+    static void executionHeapMetadata(Object heap,Object slots,Object fields,Object regions,Object writes,Object reads,Object changes,Object ranges){
+        if(AUTHORITY.getCallerClass()!=ExecutionFlow.metadataHeapType())throw new SecurityException("ACTUAL_EXECUTION_HEAP_CONSTRUCTOR_REQUIRED");
+        Class<?> map=ExecutionFlow.metadataMapType(),list=ExecutionFlow.metadataListType();
+        if(heap.getClass()!=ExecutionFlow.metadataHeapType()||slots.getClass()!=map||fields.getClass()!=list
+                ||regions.getClass()!=list||writes.getClass()!=list||reads.getClass()!=list||changes.getClass()!=list)
+            throw new SecurityException("ACTUAL_EXECUTION_HEAP_METADATA_REQUIRED");
+        synchronized(CONTROLS){
+            reapControls();CONTROLS.addAll(new Object[]{heap,slots,fields,regions,writes,reads,changes,ranges});
+            CONTROLS.find(slots).executionMap=true;CONTROLS.find(fields).executionList=true;
+            CONTROLS.find(regions).executionList=true;CONTROLS.find(writes).executionList=true;
+            CONTROLS.find(reads).executionList=true;CONTROLS.find(changes).executionList=true;
+        }
+    }
     static boolean executionList(Object object){
         if(!(object instanceof ArrayList<?>))return false;
         // The role belongs to this exact constructor-registered object. A clone
@@ -558,15 +602,13 @@ public final class CodeSourceBridge {
     }
     static void fieldGateControls(java.util.concurrent.locks.ReentrantLock gate){
         Class<?> caller=AUTHORITY.getCallerClass();
-        if(caller!=TaskBridge.class&&!SourceMapBridge.gateConstructor(caller)||gate.getClass()!=java.util.concurrent.locks.ReentrantLock.class)
+        if(caller!=ControlBridge.class&&!SourceMapBridge.gateConstructor(caller)||gate.getClass()!=java.util.concurrent.locks.ReentrantLock.class)
             throw new SecurityException("ACTUAL_FIELD_GATE_OWNER_REQUIRED");
         Object sync;
-        if(NativeControl.available()){
-            Object[] read=NativeControl.heapReadField(gate,java.util.concurrent.locks.ReentrantLock.class,"sync",
-                    "Ljava/util/concurrent/locks/ReentrantLock$Sync;");
-            if(read==null||read.length!=1)throw new IllegalStateException("FIELD_GATE_SYNC_UNAVAILABLE");
-            sync=read[0];
-        }else try{
+        // This exact JDK package was opened before writer boundaries were
+        // installed. Read the real synchronizer without repeating a JVMTI
+        // class-field enumeration for every ordinary receiver gate.
+        try{
             var field=java.util.concurrent.locks.ReentrantLock.class.getDeclaredField("sync");field.setAccessible(true);sync=field.get(gate);
         }catch(ReflectiveOperationException unavailable){throw new IllegalStateException("FIELD_GATE_SYNC_UNAVAILABLE",unavailable);}
         if(!(sync instanceof java.util.concurrent.locks.AbstractQueuedSynchronizer))throw new IllegalStateException("FIELD_GATE_SYNC_UNAVAILABLE");
@@ -579,8 +621,22 @@ public final class CodeSourceBridge {
         synchronized(CONTROLS){return CONTROLS.fieldGate(object);}
     }
     static void mutationControls(Object... objects){
-        if(AUTHORITY.getCallerClass().getNestHost()!=TaskBridge.class)throw new SecurityException("ACTUAL_MUTATION_SOURCE_STATE_REQUIRED");
+        if(AUTHORITY.getCallerClass().getNestHost()!=TaskBridge.class&&AUTHORITY.getCallerClass().getNestHost()!=ControlBridge.class)throw new SecurityException("ACTUAL_MUTATION_SOURCE_STATE_REQUIRED");
         protect(objects);
+    }
+    static void analysisContainerControl(Object object){
+        if(AUTHORITY.getCallerClass()!=SourceMapBridge.class)throw new SecurityException("ACTUAL_ANALYSIS_CONTAINER_BIRTH_REQUIRED");
+        synchronized(CONTROLS){reapControls();CONTROLS.add(object).analysisContainer=true;}
+    }
+    static boolean analysisContainer(Object object){
+        synchronized(CONTROLS){return CONTROLS.analysisContainer(object);}
+    }
+    static void analysisNodeControl(Object parent,Object node){
+        if(AUTHORITY.getCallerClass()!=SourceMapBridge.class)throw new SecurityException("ACTUAL_ANALYSIS_NODE_FACTORY_REQUIRED");
+        synchronized(CONTROLS){
+            if(!CONTROLS.analysisContainer(parent))throw new SecurityException("ACTUAL_ANALYSIS_PARENT_REQUIRED");
+            reapControls();CONTROLS.add(node).analysisContainer=true;
+        }
     }
     private static CodeField codeField(Class<?> declaring,String name){
         synchronized(CODE_FIELDS){for(CodeFields entry:CODE_FIELDS)if(codeMatches(entry.name(),entry.loader(),entry.bootstrap(),entry.actual(),declaring))return entry.fields().get(name);}return null;
@@ -595,7 +651,7 @@ public final class CodeSourceBridge {
                 else FIELD_HOLDERS.computeIfAbsent(new Key(holder,true),ignored->new HashSet<>()).add(new FieldHold(declaring,name,source.descriptor()));
             }
         }catch(NoSuchFieldException absent){return true;}
-        for(Module module:source.owners())if(TaskBridge.modStopped(module))return false;return true;
+        for(Module module:source.owners())if(ControlBridge.modStopped(module))return false;return true;
     }
     public static Object[][] groupFields(Module[] selected,Class<?>[] initialized){
         
@@ -736,7 +792,7 @@ public final class CodeSourceBridge {
     private static void configurationSource(Object config,Module[] sources){if(config==null||sources.length==0)return;Module[] copy=sources.clone();protect((Object)copy);synchronized(MODULES){CONFIGURATIONS.put(new Key(config,true),copy);}}
     public static void configurationParsed(Object config,Object reader){
         Class<?> type=boundary("create");if(config==null||config.getClass()!=type)return;
-        configurationSource(config,merge(resourceSources(reader),TaskBridge.invokingSources()));
+        configurationSource(config,merge(resourceSources(reader),ControlBridge.invokingSources()));
     }
     public static void configurationHandle(Object config,Object handle){
         boundary("getHandle");if(handle!=null&&field(handle,"config")==config)configurationSource(handle,configurationSources(config));
@@ -746,13 +802,13 @@ public final class CodeSourceBridge {
     }
     public static boolean configurationInstalling(Object handle){
         boundary("registerConfiguration");if(handle==null)return true;
-        Object config=field(handle,"config");Module[] sources=merge(merge(configurationSources(config),configurationSources(handle)),TaskBridge.invokingSources());
+        Object config=field(handle,"config");Module[] sources=merge(merge(configurationSources(config),configurationSources(handle)),ControlBridge.invokingSources());
         if(sources.length!=0){configurationSource(config,sources);configurationSource(handle,sources);}
-        return Arrays.stream(sources).noneMatch(TaskBridge::modStopped);
+        return Arrays.stream(sources).noneMatch(ControlBridge::modStopped);
     }
     public static boolean configurationAllowed(Object config){
         String method=callerMethod();if(!Set.of("onLoad","prepare","postInitialise","select").contains(method))throw new SecurityException("ACTUAL_CONFIG_CONSUMER_REQUIRED");boundary(method);
-        return Arrays.stream(configurationSources(config)).noneMatch(TaskBridge::modStopped);
+        return Arrays.stream(configurationSources(config)).noneMatch(ControlBridge::modStopped);
     }
     public static void classReader(Object reader,byte[] bytes){
         Class<?> declaring=boundary("<init>");Image image;
@@ -798,7 +854,7 @@ public final class CodeSourceBridge {
             synchronized(MODULES){MIXINS.put(new Key(mixin,true),new Image(source.module(),source.digest(),sources));MIXIN_TREES.put(new Key(mixin,true),new Ref<>(tree));}}
     }
     private static Replayed replayedTree(Object tree,Image source,boolean bodyOnly){
-        if(source==null||TaskBridge.modStopped(source.module())||Arrays.stream(source.sources()).noneMatch(module->module!=source.module()&&TaskBridge.modStopped(module)))return new Replayed(tree,false,false);
+        if(source==null||ControlBridge.modStopped(source.module())||Arrays.stream(source.sources()).noneMatch(module->module!=source.module()&&ControlBridge.modStopped(module)))return new Replayed(tree,false,false);
         Object[] replay=(Object[])call(payload,tree,source.module(),source.sources(),bodyOnly);if(replay==null)return new Replayed(tree,false,false);
         Object replacement=replay[0];Module[] sources=((Module[])replay[1]).clone();protect((Object)sources);byte[] digest=hash(image(replacement));
         Image restored=new Image(source.module(),digest,sources);synchronized(MODULES){TREES.put(new Key(replacement,true),restored);TREE_IMAGES.put(new Key(replacement,true),digest);}
@@ -890,7 +946,11 @@ public final class CodeSourceBridge {
     public static void configurationPrepare(Object configuration){
         String method=callerMethod();if(!Set.of("hasMixinsFor","getMixinsFor","getTargetsSet","getTargets","getUnhandledTargets").contains(method))
             throw new SecurityException("ACTUAL_MIXIN_CONFIGURATION_USE_REQUIRED");
-        Class<?> type=boundary(method);if(configuration==null||configuration.getClass()!=type||!Boolean.TRUE.equals(field(configuration,"prepared")))return;
+        Class<?> type=boundary(method);
+        // This entry only replays already prepared mixins after a contributor is stopped.
+        // Class reads/definitions are still observed by their own original entries.
+        if(!ControlBridge.hasStoppedModules())return;
+        if(configuration==null||configuration.getClass()!=type||!Boolean.TRUE.equals(field(configuration,"prepared")))return;
         Set<Object> active=PREPARING_CONFIGS.get();if(!active.add(configuration))return;
         try{
             synchronized(configuration){
@@ -901,11 +961,19 @@ public final class CodeSourceBridge {
         }catch(ClassNotFoundException unavailable){throw new IllegalStateException("MIXIN_CONFIGURATION_LAYOUT_UNAVAILABLE",unavailable);}
         finally{active.remove(configuration);if(active.isEmpty())PREPARING_CONFIGS.remove();}
     }
+    private static boolean needsReplay(Image source){
+        if(source==null||ControlBridge.modStopped(source.module()))return false;
+        for(Module module:source.sources())if(module!=source.module()&&ControlBridge.modStopped(module))return true;
+        return false;
+    }
     private static void prepareMixin(Class<?> type,Object mixin){
         synchronized(mixin){
             WeakReference<Object> reference;synchronized(MODULES){reference=MIXIN_TREES.get(new Key(mixin,false));}
-            Object tree=reference==null?null:reference.get();if(tree==null)return;Image source=unchangedTree(tree);
-            if(source==null||TaskBridge.modStopped(source.module())||Arrays.stream(source.sources()).noneMatch(module->module!=source.module()&&TaskBridge.modStopped(module)))return;
+            Object tree=reference==null?null:reference.get();if(tree==null)return;
+            Image recorded;synchronized(MODULES){recorded=TREES.get(new Key(tree,false));}
+            if(!needsReplay(recorded))return;
+            Image source=unchangedTree(tree);
+            if(!needsReplay(source))return;
             Object state=field(mixin,"state");if(state==null||field(mixin,"pendingState")!=null||field(state,"classNode")!=tree)return;
             Replayed replay=replayedTree(tree,source,false);Object replacement=replay.tree();if(replacement==tree)return;
             try{
@@ -1041,7 +1109,8 @@ public final class CodeSourceBridge {
         Image source=unchangedTree(tree);if(source==null)return;
         Module[] sources=source.sources().clone();protect((Object)sources);
         @SuppressWarnings("unchecked") Map<String,Module[]> raw=(Map<String,Module[]>)call(metadataImages,tree,source.module(),sources);
-        Map<String,Image> rows=new LedgerMap<>();for(var entry:raw.entrySet()){Module[] owners=entry.getValue().clone();protect((Object)owners);rows.put(entry.getKey(),new Image(source.module(),source.digest(),owners));}rows=Map.copyOf(rows);protect(rows);
+        // This private String-key draft is frozen and protected before publication.
+        Map<String,Image> rows=new TreeMap<>();for(var entry:raw.entrySet()){Module[] owners=entry.getValue().clone();protect((Object)owners);rows.put(entry.getKey(),new Image(source.module(),source.digest(),owners));}rows=Map.copyOf(rows);protect(rows);
         synchronized(MODULES){
             METADATA.put(new Key(info,true),new Image(source.module(),source.digest(),sources));METADATA_TREES.put(new Key(info,true),new Ref<>(tree));METADATA_ROWS.put(new Key(info,true),rows);
             for(String set:List.of("methods","initialisers","fields"))for(Object member:(Set<?>)field(info,set)){
@@ -1053,7 +1122,7 @@ public final class CodeSourceBridge {
     public static Object metadataContextBegin(Object context){
         Class<?> type=boundary(callerMethod());if(context==null||context.getClass()!=type)throw new SecurityException("ACTUAL_MIXIN_CONTEXT_REQUIRED");
         Image source;synchronized(MODULES){source=CONTEXTS.get(new Key(context,false));}
-        if(source!=null&&Arrays.stream(source.sources()).anyMatch(TaskBridge::modStopped))throw new IllegalStateException("MIXIN_PRIOR_CONTEXT_SOURCE_STOPPED");
+        if(source!=null&&Arrays.stream(source.sources()).anyMatch(ControlBridge::modStopped))throw new IllegalStateException("MIXIN_PRIOR_CONTEXT_SOURCE_STOPPED");
         MetadataUse scope=new MetadataUse(context,null,null,METADATA_USE.get());protect(scope);METADATA_USE.set(scope);return scope;
     }
     public static Object metadataMixinBegin(Object mixin){
@@ -1077,16 +1146,16 @@ public final class CodeSourceBridge {
             Object mixin=scope.context()==null?scope.mixin():field(scope.context(),"mixin");synchronized(MODULES){context=scope.context()==null?null:CONTEXTS.get(new Key(scope.context(),false));if(context==null&&mixin!=null)context=MIXINS.get(new Key(mixin,false));}
         }
         if(source==null){if(context==null)return;source=context;}
-        Module[] writers=TaskBridge.invokingSources();if(context!=null)writers=merge(writers,context.sources());
+        Module[] writers=ControlBridge.invokingSources();if(context!=null)writers=merge(writers,context.sources());
         Module[] sources=merge(source.sources(),writers);protect((Object)sources);Image created=new Image(source.module(),source.digest(),sources);
         synchronized(MODULES){MEMBER_IMAGES.put(new Key(member,true),created);}
     }
     public static void metadataHeaderChanged(Object info){
-        boundary("addInterface");Module[] writers=TaskBridge.invokingSources();MetadataUse scope=METADATA_USE.get();
+        boundary("addInterface");Module[] writers=ControlBridge.invokingSources();MetadataUse scope=METADATA_USE.get();
         synchronized(MODULES){
             Map<String,Image> rows=METADATA_ROWS.get(new Key(info,false));if(rows==null)return;Image original=rows.getOrDefault("H",rows.get("*"));if(original==null)return;
             if(scope!=null){Image context=scope.context()==null?MIXINS.get(new Key(scope.mixin(),false)):CONTEXTS.get(new Key(scope.context(),false));if(context!=null)writers=merge(writers,context.sources());}
-            Module[] sources=merge(original.sources(),writers);protect((Object)sources);Map<String,Image> next=new LedgerMap<>(rows);next.put("H",new Image(original.module(),original.digest(),sources));next=Map.copyOf(next);protect(next);METADATA_ROWS.put(new Key(info,true),next);
+            Module[] sources=merge(original.sources(),writers);protect((Object)sources);Map<String,Image> next=new TreeMap<>(rows);next.put("H",new Image(original.module(),original.digest(),sources));next=Map.copyOf(next);protect(next);METADATA_ROWS.put(new Key(info,true),next);
         }
     }
     public static void metadataMemberRead(Object info,String name,String descriptor,Object kind,Object member){
@@ -1110,7 +1179,7 @@ public final class CodeSourceBridge {
     public static Object metadataMemberChangeBegin(Object member){
         Class<?> type=boundary(callerMethod());if(!type.isInstance(member))throw new SecurityException("ACTUAL_MIXIN_MEMBER_MUTATION_REQUIRED");Image original;
         synchronized(MODULES){original=MEMBER_IMAGES.get(new Key(member,false));}if(original==null)return null;
-        Module[] sources=TaskBridge.invokingSources();MetadataUse scope=METADATA_USE.get();
+        Module[] sources=ControlBridge.invokingSources();MetadataUse scope=METADATA_USE.get();
         if(scope!=null){
             Object mixin=scope.context()==null?scope.mixin():field(scope.context(),"mixin");Image context;
             synchronized(MODULES){context=scope.context()==null?null:CONTEXTS.get(new Key(scope.context(),false));if(context==null&&mixin!=null)context=MIXINS.get(new Key(mixin,false));}
@@ -1130,7 +1199,7 @@ public final class CodeSourceBridge {
                 Class<?> declaration=method.isInstance(member)?method:Class.forName("org.spongepowered.asm.mixin.transformer.ClassInfo$Field",false,type.getClassLoader());
                 var outer=declaration.getDeclaredField("this$0");outer.setAccessible(true);Object info=outer.get(member);Map<String,Image> rows=METADATA_ROWS.get(new Key(info,false));
                 if(rows!=null){
-                    String kind=method.isInstance(member)?"M":"F";Map<String,Image> next=new LedgerMap<>(rows);
+                    String kind=method.isInstance(member)?"M":"F";Map<String,Image> next=new TreeMap<>(rows);
                     for(Object[] values:List.of(change.values(),currentValues)){
                         String key=kind+values[0]+'\u0000'+values[1];Image previous=rows.getOrDefault(key,rows.get("*"));
                         Module[] owners=previous==null?sources:merge(previous.sources(),sources);protect((Object)owners);next.put(key,new Image(changed.module(),changed.digest(),owners));
@@ -1155,7 +1224,7 @@ public final class CodeSourceBridge {
             Module[] previous=reads.get(new Key(consumer,false));sources=merge(previous==null?new Module[0]:previous,source.sources());protect((Object)sources);reads.put(new Key(consumer,true),sources);
             Image context=scope.context()==null?null:CONTEXTS.get(new Key(scope.context(),false));if(context!=null){Module[] merged=merge(context.sources(),sources);protect((Object)merged);CONTEXTS.put(new Key(scope.context(),true),new Image(context.module(),context.digest(),merged));}
         }
-        if(Arrays.stream(source.sources()).anyMatch(TaskBridge::modStopped)){
+        if(Arrays.stream(source.sources()).anyMatch(ControlBridge::modStopped)){
             WeakReference<Object> raw;synchronized(MODULES){raw=info==null?null:METADATA_TREES.get(new Key(info,false));}
             Object tree=raw==null?null:raw.get();if(tree!=null)call(dependency,tree,source.module(),source.sources());
             throw new IllegalStateException("MIXIN_SELECTED_METADATA_SOURCE_STOPPED");
@@ -1217,7 +1286,7 @@ public final class CodeSourceBridge {
             synchronized(MODULES){CONTEXTS.put(new Key(context,true),new Image(expected.module(),actual.digest(),sources));}
         }
     }
-    public static boolean mixinAllowed(Object context){boundary("applyMixin");Image source;synchronized(MODULES){source=CONTEXTS.get(new Key(context,false));}return source==null||Arrays.stream(source.sources()).noneMatch(TaskBridge::modStopped);}
+    public static boolean mixinAllowed(Object context){boundary("applyMixin");Image source;synchronized(MODULES){source=CONTEXTS.get(new Key(context,false));}return source==null||Arrays.stream(source.sources()).noneMatch(ControlBridge::modStopped);}
     public static Object mixinBegin(Object tree,Object context){
         boundary("applyMixin");Image source;synchronized(MODULES){reap();source=CONTEXTS.get(new Key(context,false));}
         if(source!=null)call(dependency,tree,source.module(),source.sources());
@@ -1231,7 +1300,7 @@ public final class CodeSourceBridge {
     }
     public static Object transformerBegin(Object holder,Object tree){
         boundary("transform");Holder source;synchronized(MODULES){source=HOLDERS.get(new Key(holder,false));}
-        Object implementation=source==null?null:source.implementation().get();Module[] writers=implementation==null?new Module[0]:TaskBridge.objectSources(implementation);
+        Object implementation=source==null?null:source.implementation().get();Module[] writers=implementation==null?new Module[0]:ControlBridge.objectSources(implementation);
         if(writers.length==0&&implementation!=null)writers=new Module[]{DefinitionBridge.module(implementation.getClass())};
         return capture(tree,source==null?new Module[0]:source.sources(),writers,null);
     }
@@ -1242,9 +1311,9 @@ public final class CodeSourceBridge {
     public static void transformerContext(Object holder,Object implementation,Object service){
         boundary("<init>");
         Set<Module> owners=Collections.newSetFromMap(new IdentityHashMap<>());
-        if(implementation!=null)owners.addAll(Arrays.asList(TaskBridge.objectSources(implementation)));
-        if(service!=null)owners.addAll(Arrays.asList(TaskBridge.objectSources(service)));
-        owners.addAll(Arrays.asList(TaskBridge.invokingSources()));
+        if(implementation!=null)owners.addAll(Arrays.asList(ControlBridge.objectSources(implementation)));
+        if(service!=null)owners.addAll(Arrays.asList(ControlBridge.objectSources(service)));
+        owners.addAll(Arrays.asList(ControlBridge.invokingSources()));
         Holder record=new Holder(new Ref<>(implementation),new Ref<>(service),owners.toArray(Module[]::new));
         protect(record.implementation(),record.service(),record.sources());
         synchronized(MODULES){HOLDERS.put(new Key(holder,true),record);}
@@ -1252,7 +1321,7 @@ public final class CodeSourceBridge {
     public static boolean transformerAllowed(Object holder){
         String method=callerMethod();if(!Set.of("transform","castVote").contains(method))throw new SecurityException("ACTUAL_TRANSFORMER_DISPATCH_REQUIRED");boundary(method);
         Holder record;synchronized(MODULES){record=HOLDERS.get(new Key(holder,false));}
-        return record==null||record.implementation().get()==field(holder,"wrapped")&&record.service().get()==field(holder,"owner")&&Arrays.stream(record.sources()).noneMatch(TaskBridge::modStopped);
+        return record==null||record.implementation().get()==field(holder,"wrapped")&&record.service().get()==field(holder,"owner")&&Arrays.stream(record.sources()).noneMatch(ControlBridge::modStopped);
     }
     public static void codeEnd(Object token,Object tree){
         String method=callerMethod();if(!Set.of("applyMixin","preApply","postApply","transform").contains(method))throw new SecurityException("ACTUAL_EXTERNAL_APPLY_REQUIRED");
@@ -1296,23 +1365,30 @@ public final class CodeSourceBridge {
     }
     static Object controlField(java.lang.reflect.Field field,Object holder){
         Class<?> caller=AUTHORITY.getCallerClass();
-        if(caller!=CodeSourceBridge.class&&caller!=TaskBridge.class&&caller.getNestHost()!=ResourceBridge.class)
+        if(caller!=CodeSourceBridge.class&&caller!=ControlBridge.class&&caller.getNestHost()!=ResourceBridge.class)
             throw new SecurityException("ACTUAL_CONTROL_FIELD_READER_REQUIRED");
+        // The bootstrap module already has access to the JDK containers used
+        // by our control images. Read their actual backing directly; calling
+        // JVMTI for every ArrayList/immutable-list field repeats class layout
+        // discovery for every instruction snapshot during Forge startup.
+        if(field.trySetAccessible()){
+            try{return field.get(holder);}
+            catch(IllegalAccessException failure){throw new IllegalStateException("CONTROL_FIELD_UNAVAILABLE:"+field.getName(),failure);}
+        }
         if(NativeControl.available()){
             Object receiver=java.lang.reflect.Modifier.isStatic(field.getModifiers())?field.getDeclaringClass():holder;
             Object[] read=NativeControl.heapReadField(receiver,field.getDeclaringClass(),field.getName(),field.getType().descriptorString());
             if(read==null||read.length!=1)throw new IllegalStateException("CONTROL_FIELD_UNAVAILABLE:"+field.getName());
             return read[0];
         }
-        try{return field.get(holder);}
-        catch(IllegalAccessException failure){throw new IllegalStateException("CONTROL_FIELD_UNAVAILABLE:"+field.getName(),failure);}
+        throw new IllegalStateException("CONTROL_FIELD_UNAVAILABLE:"+field.getName());
     }
     static void resourceLayoutControls(Object method){
         if(AUTHORITY.getCallerClass()!=ResourceBridge.class)throw new SecurityException("CONTROL_REGISTRATION_OWNER");
         protectOne(method);
     }
     static void agentControls(Object[] objects){
-        if(AUTHORITY.getCallerClass()!=TaskBridge.class)throw new SecurityException("CONTROL_REGISTRATION_OWNER");
+        if(AUTHORITY.getCallerClass()!=ControlBridge.class)throw new SecurityException("CONTROL_REGISTRATION_OWNER");
         protectControls(objects);
     }
     private static void protectControls(Object[] objects){
@@ -1345,7 +1421,7 @@ public final class CodeSourceBridge {
         }
     }
     static void controlBacking(Object parent,Object next){
-        if(AUTHORITY.getCallerClass()!=TaskBridge.class)throw new SecurityException("CONTROL_BACKING_OWNER");
+        if(AUTHORITY.getCallerClass()!=ControlBridge.class)throw new SecurityException("CONTROL_BACKING_OWNER");
         if(parent!=CONTROLS){
             // protectControls treats an array as a leaf; its elements are not
             // control objects. Publish that same exact backing without making
@@ -1353,6 +1429,12 @@ public final class CodeSourceBridge {
             if(next!=null&&next.getClass().isArray())protectOne(next);
             else protectControls(new Object[]{next});
         }
+    }
+    static void contributionControl(Object value){
+        Class<?> caller=AUTHORITY.getCallerClass().getNestHost();
+        if(caller!=ClientBridge.class&&caller!=NetworkBridge.class)throw new SecurityException("ACTUAL_CONTRIBUTION_CONTROL_WRITER_REQUIRED");
+        if(value==null)return;
+        synchronized(CONTROLS){CONTROLS.add(value);}
     }
     static boolean controlled(Object object){
         if(object==null)return false;
@@ -1378,6 +1460,6 @@ public final class CodeSourceBridge {
         for(Class<?> current=type;current!=null;current=current.getSuperclass())try{var field=current.getDeclaredField(name);field.setAccessible(true);return field;}catch(NoSuchFieldException absent){}
         throw new NoSuchFieldException(type.getName()+":"+name);
     }
-    private static byte[] hash(byte[] bytes){try{byte[] digest=MessageDigest.getInstance("SHA-256").digest(bytes);protect((Object)digest);return digest;}catch(java.security.NoSuchAlgorithmException impossible){throw new AssertionError(impossible);}}
+    private static byte[] hash(byte[] bytes){byte[] digest=NativeControl.codeDigest(bytes);protect((Object)digest);return digest;}
     private static void reap(){for(Key key;(key=(Key)DEAD.poll())!=null;){MODULES.remove(key);IMAGES.remove(key);BYTE_CONTRIBUTORS.remove(key);READERS.remove(key);TREES.remove(key);TREE_IMAGES.remove(key);MIXINS.remove(key);MIXIN_TREES.remove(key);MIXIN_OPTIONS.remove(key);MIXIN_RESTRICTIONS.remove(key);TRACKER_RESTRICTIONS.remove(key);METADATA.remove(key);METADATA_TREES.remove(key);METADATA_ROWS.remove(key);MEMBER_IMAGES.remove(key);CONTEXT_READS.remove(key);STATE_READS.remove(key);SELECTIONS.remove(key);RESOURCE_SOURCES.remove(key);CONFIGURATIONS.remove(key);CONTEXTS.remove(key);HOLDERS.remove(key);WRITERS.remove(key);FIELD_HOLDERS.remove(key);}}
 }

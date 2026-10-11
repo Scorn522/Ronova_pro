@@ -54,6 +54,7 @@ public final class ClientPresence {
     }
     private static long worldRevision=-1,worldMirrorScope=-1;
     private static ProNetwork.WorldPolicy pendingWorld;
+    private static final Map<String,ProNetwork.ModGroup> pendingModGroups=new HashMap<>();
     private static final Map<Integer,ProNetwork.WorldPolicy> worldPages=new HashMap<>();
     private static long gatheringWorldRevision=-1;
     private static Float rendererClock;
@@ -88,6 +89,10 @@ public final class ClientPresence {
                 accepted.add(id);
         }
         if(accepted.isEmpty())return;
+        if(known==null){
+            for(String id:accepted)pendingModGroups.put(id,new ProNetwork.ModGroup(message.session(),id,message.returns()));
+            return;
+        }
         try {
             Class<?> agent=Class.forName("dev.ronova.pro.agent.RecoveryAgent",false,ClassLoader.getSystemClassLoader());
             String result=String.valueOf(agent.getMethod("stopModIds",String[].class,String.class).invoke(null,
@@ -105,7 +110,7 @@ public final class ClientPresence {
         Object active=mc.getConnection()==null?null:mc.getConnection().getConnection();
         if(connection!=active) {
             connection=active;hudPolicies.clear();localBodies.clear();watchSession=null;watches.clear();retiredChallenges.clear();challengeOverflow=false;
-            policy.connection(active);terminalPolicy.connection(active);policyOverflowReported=false;awaitingScope=false;awaitingAfterScope=-1;
+            policy.connection(active);terminalPolicy.connection(active);pendingModGroups.clear();policyOverflowReported=false;awaitingScope=false;awaitingAfterScope=-1;
             worldAppliedScope=-1;lastResetScope=-1;lastResetDimension=null;
             clearWorldPolicy();pendingWorld=null;worldRevision=-1;clearWorldPages();
         }
@@ -179,6 +184,8 @@ public final class ClientPresence {
                 worldAppliedScope=p.scope();
                 if(awaitingScope&&p.scope()>awaitingAfterScope) { awaitingScope=false;awaitingAfterScope=-1; }
             }
+            for(ProNetwork.ModGroup pending:List.copyOf(pendingModGroups.values()))if(p.session().equals(pending.session()))modGroup(pending,source);
+            pendingModGroups.clear();
             policyOverflowReported=false;
             applyPendingWorld(Minecraft.getInstance());
         }

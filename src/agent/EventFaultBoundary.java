@@ -13,7 +13,7 @@ final class EventFaultBoundary {
         for(MethodNode method:node.methods) {
             if(method.name.equals("unregister")&&method.desc.equals("(Ljava/lang/Object;)V")) {
                 InsnList code=new InsnList();LabelNode allowed=new LabelNode();code.add(new VarInsnNode(Opcodes.ALOAD,1));
-                code.add(new MethodInsnNode(Opcodes.INVOKESTATIC,"dev/ronova/pro/bootstrap/TaskBridge","listenerRemovalAllowed","(Ljava/lang/Object;)Z",false));
+                code.add(new MethodInsnNode(Opcodes.INVOKESTATIC,"dev/ronova/pro/bootstrap/ControlBridge","listenerRemovalAllowed","(Ljava/lang/Object;)Z",false));
                 code.add(new JumpInsnNode(Opcodes.IFNE,allowed));code.add(new InsnNode(Opcodes.RETURN));code.add(allowed);
                 method.instructions.insert(code);removal++;
             }

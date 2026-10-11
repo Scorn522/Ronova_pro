@@ -17,13 +17,13 @@ final class SectionKeyBoundary {
                     code.add(new VarInsnNode(Opcodes.LLOAD,1));
                     code.add(new MethodInsnNode(Opcodes.INVOKESTATIC,"java/lang/Long","valueOf","(J)Ljava/lang/Long;",false));
                     code.add(new InsnNode(Opcodes.ACONST_NULL));
-                    code.add(new MethodInsnNode(Opcodes.INVOKESTATIC,"dev/ronova/pro/bootstrap/TaskBridge","indexRemovalAllowed","(Ljava/lang/Object;Ljava/lang/Object;Ljava/lang/Object;)Z",false));
+                    code.add(new MethodInsnNode(Opcodes.INVOKESTATIC,"dev/ronova/pro/bootstrap/ControlBridge","indexRemovalAllowed","(Ljava/lang/Object;Ljava/lang/Object;Ljava/lang/Object;)Z",false));
                     code.add(new JumpInsnNode(Opcodes.IFNE,allowed));code.add(new InsnNode(Opcodes.ICONST_0));code.add(new InsnNode(Opcodes.IRETURN));
                     code.add(allowed);method.instructions.insert(code);count++;
                 }
                 if(method.name.equals("clear")&&method.desc.equals("()V")) {
                     InsnList code=new InsnList();LabelNode proceed=new LabelNode();code.add(new VarInsnNode(Opcodes.ALOAD,0));
-                    code.add(new MethodInsnNode(Opcodes.INVOKESTATIC,"dev/ronova/pro/bootstrap/TaskBridge","clearProtectedMap","(Ljava/lang/Object;)Z",false));
+                    code.add(new MethodInsnNode(Opcodes.INVOKESTATIC,"dev/ronova/pro/bootstrap/ControlBridge","clearProtectedMap","(Ljava/lang/Object;)Z",false));
                     code.add(new JumpInsnNode(Opcodes.IFEQ,proceed));code.add(new InsnNode(Opcodes.RETURN));code.add(proceed);
                     method.instructions.insert(code);count++;
                 }

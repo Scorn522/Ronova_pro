@@ -7,7 +7,7 @@ import jdk.internal.org.objectweb.asm.tree.*;
 /** Refuses a stopped module's registered Brigadier callback at its shared invocation. */
 final class CommandBoundary {
     static final String TARGET="com/mojang/brigadier/CommandDispatcher";
-    private static final String BRIDGE="dev/ronova/pro/bootstrap/TaskBridge";
+    private static final String BRIDGE="dev/ronova/pro/bootstrap/ControlBridge";
     private static volatile boolean installed;
     private CommandBoundary() { }
     static boolean installed() { return installed; }
@@ -24,7 +24,7 @@ final class CommandBoundary {
                     &&call.owner.equals("com/mojang/brigadier/Command")&&call.name.equals("run")) {
                 InsnList gate=new InsnList();LabelNode allowed=new LabelNode(),done=new LabelNode();
                 gate.add(new InsnNode(Opcodes.DUP2));gate.add(new InsnNode(Opcodes.POP));
-                gate.add(new MethodInsnNode(Opcodes.INVOKESTATIC,BRIDGE,"modOwnerAllowed","(Ljava/lang/Object;)Z",false));
+                gate.add(new MethodInsnNode(Opcodes.INVOKESTATIC,"dev/ronova/pro/bootstrap/ControlBridge","modOwnerAllowed","(Ljava/lang/Object;)Z",false));
                 gate.add(new JumpInsnNode(Opcodes.IFNE,allowed));
                 gate.add(new InsnNode(Opcodes.POP2));gate.add(new InsnNode(Opcodes.ICONST_0));
                 gate.add(new JumpInsnNode(Opcodes.GOTO,done));

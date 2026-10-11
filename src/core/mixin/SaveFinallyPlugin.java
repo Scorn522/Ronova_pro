@@ -92,7 +92,7 @@ public final class SaveFinallyPlugin implements IMixinConfigPlugin {
             // different renderer backend has removed the supported entry. Do not claim coverage.
             System.err.println("RONOVA_ITEM_FAULT_BOUNDARY_UNAVAILABLE:"+node.name+":matches="+matches.size());return;
         }
-        MethodNode method=matches.get(0);int token=method.maxLocals++;String helper="dev/ronova/pro/ClientItemFaults";
+        MethodNode method=matches.get(0);int token=method.maxLocals++;String helper="dev/ronova/pro/ClientDrawFaults";
         extendFramesWithLease(node,method,token);
         for(AbstractInsnNode instruction:method.instructions.toArray())if(instruction.getOpcode()==Opcodes.RETURN) {
             InsnList finish=new InsnList();finish.add(new VarInsnNode(Opcodes.ALOAD,token));

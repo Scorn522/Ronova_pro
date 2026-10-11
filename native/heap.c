@@ -294,8 +294,8 @@ JNIEXPORT jbyteArray JNICALL Java_dev_ronova_pro_bootstrap_NativeControl_heapArr
     if(!actual||native_original.ExceptionCheck(env)){native_original.DeleteLocalRef(env,result);return NULL;}return result;
 }
 JNIEXPORT jboolean JNICALL Java_dev_ronova_pro_bootstrap_NativeControl_restoreHeapArrayBytes0(JNIEnv *env,jclass controller,jobject array,jlong offset,jbyteArray expected,jbyteArray incoming){
-    (void)controller;jmethodID writer=native_original.GetStaticMethodID(env,native_tasks,"recoveryWriter","()Z");
-    if(!writer||!native_original.CallStaticBooleanMethod(env,native_tasks,writer)){native_refuse(env,"HEAP_RECOVERY_CORE_REQUIRED");return JNI_FALSE;}
+    (void)controller;jmethodID writer=native_original.GetStaticMethodID(env,native_controls,"recoveryWriter","()Z");
+    if(!writer||!native_original.CallStaticBooleanMethod(env,native_controls,writer)){native_refuse(env,"HEAP_RECOVERY_CORE_REQUIRED");return JNI_FALSE;}
     if(!expected||!incoming)return JNI_FALSE;
     jsize count=native_original.GetArrayLength(env,expected);
     if(native_original.ExceptionCheck(env)||native_original.GetArrayLength(env,incoming)!=count||!heap_array_span(env,array,offset,count))return JNI_FALSE;
@@ -318,8 +318,8 @@ bytes_done:
     free(before);free(after);state->control--;return native_original.ExceptionCheck(env)?JNI_FALSE:restored;
 }
 JNIEXPORT jboolean JNICALL Java_dev_ronova_pro_bootstrap_NativeControl_restoreArray0(JNIEnv *env,jclass controller,jobject array,jint index,jobject expected,jobject incoming){
-    (void)controller;jmethodID writer=native_original.GetStaticMethodID(env,native_tasks,"recoveryWriter","()Z");
-    if(!writer||!native_original.CallStaticBooleanMethod(env,native_tasks,writer)){native_refuse(env,"HEAP_RECOVERY_CORE_REQUIRED");return JNI_FALSE;}
+    (void)controller;jmethodID writer=native_original.GetStaticMethodID(env,native_controls,"recoveryWriter","()Z");
+    if(!writer||!native_original.CallStaticBooleanMethod(env,native_controls,writer)){native_refuse(env,"HEAP_RECOVERY_CORE_REQUIRED");return JNI_FALSE;}
     if(!array||!native_ti)return JNI_FALSE;
     jclass type=native_original.GetObjectClass(env,array);char *signature=NULL;jboolean restored=JNI_FALSE;
     if(!type||(*native_ti)->GetClassSignature(native_ti,type,&signature,NULL)!=JVMTI_ERROR_NONE||!signature||signature[0]!='[')goto array_finished;

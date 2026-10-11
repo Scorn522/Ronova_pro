@@ -27,9 +27,9 @@ final class UnsafeWriteBoundary {
             if((m.name.equals("setMemory")&&m.desc.equals("(Ljava/lang/Object;JJB)V"))
                     ||(m.name.equals("copyMemory")&&m.desc.equals("(Ljava/lang/Object;JLjava/lang/Object;JJ)V"))) {
                 InsnList code=new InsnList();LabelNode allow=new LabelNode();boolean copy=m.name.equals("copyMemory");
-                code.add(new MethodInsnNode(Opcodes.INVOKESTATIC,"dev/ronova/pro/bootstrap/TaskBridge","unsafeControlScope","()Z",false));code.add(new JumpInsnNode(Opcodes.IFNE,allow));
+                code.add(new MethodInsnNode(Opcodes.INVOKESTATIC,"dev/ronova/pro/bootstrap/ControlBridge","unsafeControlScope","()Z",false));code.add(new JumpInsnNode(Opcodes.IFNE,allow));
                 code.add(new VarInsnNode(Opcodes.ALOAD,copy?4:1));code.add(new VarInsnNode(Opcodes.LLOAD,copy?5:2));code.add(new VarInsnNode(Opcodes.LLOAD,copy?7:4));
-                code.add(new MethodInsnNode(Opcodes.INVOKESTATIC,"dev/ronova/pro/bootstrap/TaskBridge","unsafeMemoryAllowed","(Ljava/lang/Object;JJ)Z",false));
+                code.add(new MethodInsnNode(Opcodes.INVOKESTATIC,"dev/ronova/pro/bootstrap/ControlBridge","unsafeMemoryAllowed","(Ljava/lang/Object;JJ)Z",false));
                 code.add(new JumpInsnNode(Opcodes.IFNE,allow));code.add(new InsnNode(Opcodes.RETURN));code.add(allow);m.instructions.insert(code);
                 MemoryWriteScope.unsafe(m,copy?4:1,copy?5:2,copy?7:4,null,allow);installed++;continue;
             }
@@ -39,14 +39,14 @@ final class UnsafeWriteBoundary {
             String kind=switch(written.getSort()){case Type.OBJECT,Type.ARRAY->"Object";case Type.BOOLEAN->"Boolean";case Type.BYTE->"Byte";
                 case Type.CHAR->"Char";case Type.SHORT->"Short";case Type.INT->"Int";case Type.LONG->"Long";case Type.FLOAT->"Float";case Type.DOUBLE->"Double";default->throw new IllegalStateException("UNSAFE_VALUE_KIND");};
             InsnList c=new InsnList();LabelNode allow=new LabelNode();
-            c.add(new MethodInsnNode(Opcodes.INVOKESTATIC,"dev/ronova/pro/bootstrap/TaskBridge","unsafeControlScope","()Z",false));c.add(new JumpInsnNode(Opcodes.IFNE,allow));
+            c.add(new MethodInsnNode(Opcodes.INVOKESTATIC,"dev/ronova/pro/bootstrap/ControlBridge","unsafeControlScope","()Z",false));c.add(new JumpInsnNode(Opcodes.IFNE,allow));
             c.add(new VarInsnNode(Opcodes.ALOAD,1));c.add(new VarInsnNode(Opcodes.LLOAD,2));c.add(new VarInsnNode(written.getOpcode(Opcodes.ILOAD),value));ControlClassWriter.box(c,written);
             if(ATOMICS.contains(m.name)) {
                 c.add(new LdcInsnNode(m.name));c.add(new LdcInsnNode(written.getSort()==Type.OBJECT?"Object":written.getSort()==Type.LONG?"Long":"Int"));
                 c.add(new MethodInsnNode(Opcodes.INVOKESTATIC,"dev/ronova/pro/bootstrap/BackingBridge","nativeWriteAllowed","(Ljava/lang/Object;JLjava/lang/Object;Ljava/lang/String;Ljava/lang/String;)Z",false));
             } else {
                 c.add(new LdcInsnNode(kind));
-                c.add(new MethodInsnNode(Opcodes.INVOKESTATIC,"dev/ronova/pro/bootstrap/TaskBridge","unsafeWriteAllowed","(Ljava/lang/Object;JLjava/lang/Object;Ljava/lang/String;)Z",false));
+                c.add(new MethodInsnNode(Opcodes.INVOKESTATIC,"dev/ronova/pro/bootstrap/ControlBridge","unsafeWriteAllowed","(Ljava/lang/Object;JLjava/lang/Object;Ljava/lang/String;)Z",false));
             }
             c.add(new JumpInsnNode(Opcodes.IFNE,allow));
             if(Type.getReturnType(m.desc).getSort()==Type.BOOLEAN) { c.add(new InsnNode(Opcodes.ICONST_0));c.add(new InsnNode(Opcodes.IRETURN)); }

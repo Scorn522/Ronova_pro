@@ -42,7 +42,7 @@ final class ControlImages implements ClassFileTransformer {
         if(type!=null)for(var entry:declared)if(entry.get()==type)return true;
         if(name.startsWith("dev/ronova/pro/agent/")||name.startsWith("dev/ronova/pro/bootstrap/"))
             return loader==null||loader==RecoveryAgent.class.getClassLoader();
-        if(name.startsWith("dev/ronova/pro/")&&!name.startsWith("dev/ronova/pro/validation/")
+        if(name.startsWith("dev/ronova/pro/")
                 &&module!=null&&"ronova_pro".equals(module.getName()))return true;
         if(loader==null)return InstrumentationBoundary.MANAGER.equals(name)||InstrumentationBoundary.API.equals(name)||JdkTaskBoundaryContract.registered(name)
                 ||CodeSourceBoundary.TARGETS.contains(name)||name.equals("java/lang/ModuleLayer")||name.equals("java/lang/ClassLoader")||name.equals("java/lang/invoke/MethodHandles$Lookup")||name.equals("java/lang/ref/Reference")
@@ -80,8 +80,7 @@ final class ControlImages implements ClassFileTransformer {
         }
     }
     static void protect(Object... objects) {
-        try {Class.forName("dev.ronova.pro.bootstrap.TaskBridge",false,null)
-                .getMethod("registerAgentControls",Object[].class).invoke(null,(Object)objects);}
+        try {Class.forName("dev.ronova.pro.bootstrap.ControlBridge",false,null).getMethod("registerAgentControls",Object[].class).invoke(null,(Object)objects);}
         catch(java.lang.reflect.InvocationTargetException unavailable){
             Throwable cause=unavailable.getCause();
             if(cause instanceof RuntimeException failure)throw failure;

@@ -103,19 +103,27 @@ public final class ProRuntime implements AutoCloseable {
     private final Set<Module> protectedModules=Collections.newSetFromMap(new IdentityHashMap<>());
     private final Map<Module,Subject> moduleSubjects=Collections.synchronizedMap(new IdentityHashMap<>());
     private final Map<UUID,UUID> groupMembers=new java.util.concurrent.ConcurrentHashMap<>();
-    private final Map<UUID,UUID> groupOperations=new java.util.concurrent.ConcurrentHashMap<>();
-    private final Map<UUID,String> groupAliases=new java.util.concurrent.ConcurrentHashMap<>();
-    private final Map<UUID,String> groupModes=new java.util.concurrent.ConcurrentHashMap<>();
-    private final Map<UUID,String> groupRoots=new java.util.concurrent.ConcurrentHashMap<>();
+    private static final class Group {
+        final UUID operation;
+        volatile String aliases="",mode="default",root;
+        volatile Module[] modules=new Module[0];
+        final Map<String,CompletableFuture<Void>> facts=new java.util.concurrent.ConcurrentHashMap<>();
+        Group(UUID operation){this.operation=operation;}
+    }
+    private final Map<UUID,Group> groups=new java.util.concurrent.ConcurrentHashMap<>();
     private final Map<UUID,UUID> groupBlocks=new java.util.concurrent.ConcurrentHashMap<>();
-    private final Map<String,CompletableFuture<Void>> groupFacts=new java.util.concurrent.ConcurrentHashMap<>();
     private boolean groupsRestored;
-    private void groupFact(String record) {groupFacts.computeIfAbsent(record,journal::append);}
+    private void groupFact(UUID root,String record) {groups.get(root).facts.computeIfAbsent(record,journal::append);}
+    private String groupMode(UUID root,String initial){Group group=groups.get(root);return group==null?initial:group.mode;}
+    private void bindGroupModule(UUID root,Module module){
+        Subject subject=subjects.get(root);moduleSubjects.put(module,subject);Group group=groups.get(root);
+        for(Module present:group.modules)if(present==module)return;
+        Module[] next=Arrays.copyOf(group.modules,group.modules.length+1);next[next.length-1]=module;group.modules=next;
+    }
     boolean groupDurable(UUID id) {
-        UUID root=groupMembers.getOrDefault(id,id);
-        for(var fact:groupFacts.entrySet())if(fact.getKey().contains("\t"+root+"\t")) {
-            var ack=fact.getValue();if(ack==null||!ack.isDone()||ack.isCompletedExceptionally()||ack.isCancelled())return false;
-        }
+        Group group=groups.get(groupMembers.getOrDefault(id,id));if(group==null)return true;
+        if(group.root==null)return false;
+        for(var ack:group.facts.values())if(ack==null||!ack.isDone()||ack.isCompletedExceptionally()||ack.isCancelled())return false;
         return true;
     }
     Subject canonicalSubject(UUID id) {return id==null?null:subjects.get(groupMembers.getOrDefault(id,id));}
@@ -129,13 +137,13 @@ public final class ProRuntime implements AutoCloseable {
         return found;
     }
     Set<UUID> groupTargets(UUID id) {
-        UUID root=groupMembers.getOrDefault(id,id);Set<UUID> result=new HashSet<>();result.add(root);
-        groupMembers.forEach((member,owner)->{if(owner.equals(root))result.add(member);});return Set.copyOf(result);
+        Subject authority=canonicalSubject(id);
+        return authority==null?Set.of(id):authority.targets;
     }
-    UUID groupOperation(UUID subject,UUID fallback) {return groupOperations.getOrDefault(groupMembers.getOrDefault(subject,subject),fallback);}
+    UUID groupOperation(UUID subject,UUID original) {Group group=groups.get(groupMembers.getOrDefault(subject,subject));return group==null?original:group.operation;}
     List<String> groupCodeGaps(UUID id) {
         UUID root=groupMembers.getOrDefault(id,id);Subject subject=subjects.get(root);
-        if(!groupOperations.containsKey(root))return List.of();
+        if(!groups.containsKey(root))return List.of();
         List<String> gaps=new ArrayList<>();if(subject!=null)gaps.addAll(subject.unresolvedSources);
         try {
             Class<?> agent=Class.forName("dev.ronova.pro.agent.RecoveryAgent",false,ClassLoader.getSystemClassLoader());
@@ -151,8 +159,8 @@ public final class ProRuntime implements AutoCloseable {
         if(value==null)return null;
         try {
             Class<?> bridge=Class.forName("dev.ronova.pro.bootstrap.TaskBridge",false,null);
-            if(Boolean.TRUE.equals(bridge.getMethod("objectSourceUnknown",Object.class).invoke(null,value)))return null;
-            Module[] origins=(Module[])bridge.getMethod("objectSources",Object.class).invoke(null,value);
+            if(Boolean.TRUE.equals(Class.forName("dev.ronova.pro.bootstrap.ControlBridge",false,null).getMethod("objectSourceUnknown",Object.class).invoke(null,value)))return null;
+            Module[] origins=(Module[])Class.forName("dev.ronova.pro.bootstrap.ControlBridge",false,null).getMethod("objectSources",Object.class).invoke(null,value);
             Subject selected=null;for(Module origin:origins){
                 Subject next=origin==null?null:moduleSubjects.get(origin);if(next==null||selected!=null&&next!=selected)return null;selected=next;
             }return selected;
@@ -161,31 +169,31 @@ public final class ProRuntime implements AutoCloseable {
     private Subject prepareGroup(LinkedHashMap<String,Module> targets) {
         String id=targets.keySet().iterator().next();
         String aliases=String.join(",",new TreeSet<>(targets.keySet()));UUID key=UUID.nameUUIDFromBytes(("ronova-mod-group/1|"+aliases).getBytes(java.nio.charset.StandardCharsets.UTF_8));
-        return prepareGroup(targets,groupModes.getOrDefault(key,stoppedReturns.getOrDefault(id,System.getProperty("ronova.pro.bootReturns."+id,System.getProperty("ronova.pro.bootReturns","default")))));
+        return prepareGroup(targets,groupMode(key,stoppedReturns.getOrDefault(id,System.getProperty("ronova.pro.bootReturns."+id,System.getProperty("ronova.pro.bootReturns","default")))));
     }
     private Subject prepareGroup(LinkedHashMap<String,Module> targets,String mode) {
         String aliases=String.join(",",new TreeSet<>(targets.keySet()));
         UUID key=UUID.nameUUIDFromBytes(("ronova-mod-group/1|"+aliases).getBytes(java.nio.charset.StandardCharsets.UTF_8));
         Subject subject=subjects.computeIfAbsent(key,Subject::new);
         try(var gate=subject.commitGate.enter()) {if(!subject.terminal){subject.generation++;subject.terminal=true;}}
-        groupMembers.put(key,key);UUID operation=groupOperations.computeIfAbsent(key,ignored->UUID.randomUUID());
-        for(Module module:targets.values())moduleSubjects.put(module,subject);
-        groupAliases.put(key,aliases);
-        String root=groupRoots.computeIfAbsent(key,ignored->"GROUP/1\tSTOP\t"+key+"\t"+operation+"\t"+subject.generation+"\t"+aliases+"\t"+mode);
-        groupFact(root);
-        String previous=groupModes.put(key,mode);
-        if(previous!=null&&!previous.equals(mode))groupFact("GROUP/1\tRETURN\t"+key+"\t"+mode);
+        groupMembers.put(key,key);Group state=groups.computeIfAbsent(key,ignored->new Group(UUID.randomUUID()));UUID operation=state.operation;
+        for(Module module:targets.values())bindGroupModule(key,module);
+        state.aliases=aliases;
+        String root=state.root;if(root==null)state.root=root="GROUP/1\tSTOP\t"+key+"\t"+operation+"\t"+subject.generation+"\t"+aliases+"\t"+mode;
+        groupFact(key,root);
+        String previous=state.mode;state.mode=mode;
+        if(previous!=null&&!previous.equals(mode))groupFact(key,"GROUP/1\tRETURN\t"+key+"\t"+mode);
         return subject;
     }
     private void groupMember(Subject group,Subject member) {
         UUID previous=groupMembers.putIfAbsent(member.id,group.id);
         if(previous!=null&&!previous.equals(group.id))throw new IllegalStateException("CROSS_MODULE_SUBJECT");
-        group.members.add(member.id);
-        groupFact("GROUP/1\tMEMBER\t"+group.id+"\t"+member.id);
+        group.addMember(member.id);
+        groupFact(group.id,"GROUP/1\tMEMBER\t"+group.id+"\t"+member.id);
     }
     private void groupBlock(Subject group,UUID operation){
         UUID previous=groupBlocks.putIfAbsent(operation,group.id);if(previous!=null&&!previous.equals(group.id))throw new IllegalStateException("CROSS_MODULE_BLOCK_OPERATION");
-        groupFact("GROUP/1\tBLOCK\t"+group.id+"\t"+operation);
+        groupFact(group.id,"GROUP/1\tBLOCK\t"+group.id+"\t"+operation);
     }
     private void captureGroupRoots(Class<?> agent,Set<Module> modules,Subject subject)throws ReflectiveOperationException {
         Class<?>[] classes=(Class<?>[])agent.getMethod("initializedGroupClasses",Module[].class)
@@ -193,12 +201,11 @@ public final class ProRuntime implements AutoCloseable {
         agent.getMethod("openBackingAccess",Class.class,Class[].class).invoke(null,ProRuntime.class,(Object)classes);
         agent.getMethod("externalGroupFields",Class.class,Module[].class).invoke(null,ProRuntime.class,(Object)modules.toArray(Module[]::new));
         for(Class<?> type:classes)if(recoverySources.observedHolder(type,subject.id)==null)subject.unresolvedSources.add("GROUP_HOLDER_DEFINITION_UNOBSERVED:"+type.getName());
-        for(String alias:groupAliases.getOrDefault(subject.id,"").split(","))
+        for(String alias:groups.get(subject.id).aliases.split(","))
             net.minecraftforge.fml.ModList.get().getModContainerById(alias).ifPresent(container->{
                 Object instance=container.getMod();if(instance!=null&&modules.contains(instance.getClass().getModule()))recoverySources.groupCreated(instance,subject.id);
             });
-        Object[] objects=(Object[])Class.forName("dev.ronova.pro.bootstrap.TaskBridge",false,null)
-                .getMethod("createdGroupObjects",Module[].class).invoke(null,(Object)modules.toArray(Module[]::new));
+        Object[] objects=(Object[])Class.forName("dev.ronova.pro.bootstrap.ControlBridge",false,null).getMethod("createdGroupObjects",Module[].class).invoke(null,(Object)modules.toArray(Module[]::new));
         for(Object object:objects)if(!(object instanceof Entity))recoverySources.groupCreated(object,subject.id);
         Object[][] tasks=(Object[][])Class.forName("dev.ronova.pro.bootstrap.TaskBridge",false,null)
                 .getMethod("groupTaskSnapshot",Module[].class).invoke(null,(Object)modules.toArray(Module[]::new));
@@ -206,26 +213,23 @@ public final class ProRuntime implements AutoCloseable {
         recoveryTasks.retireGroupSchedulers(subject);
     }
     Object[][] externalGroupFields(Subject subject)throws ReflectiveOperationException{
-        List<Module> modules=new ArrayList<>();synchronized(moduleSubjects){for(var entry:moduleSubjects.entrySet())if(entry.getValue()==subject)modules.add(entry.getKey());}
+        Module[] modules=groupModules(subject);
         Class<?> agent=Class.forName("dev.ronova.pro.agent.RecoveryAgent",false,ClassLoader.getSystemClassLoader());
-        Object[][] rows=(Object[][])agent.getMethod("externalObservedGroupFields",Module[].class).invoke(null,(Object)modules.toArray(Module[]::new));
+        Object[][] rows=(Object[][])agent.getMethod("externalObservedGroupFields",Module[].class).invoke(null,(Object)modules);
         agent.getMethod("openBackingAccess",Class.class,Class[].class).invoke(null,ProRuntime.class,(Object)Arrays.stream(rows).map(row->((java.lang.reflect.Field)row[0]).getDeclaringClass()).distinct().toArray(Class[]::new));return rows;
     }
     Object[][] externalGroupHeapValues(Subject subject)throws ReflectiveOperationException{
-        List<Module> modules=new ArrayList<>();synchronized(moduleSubjects){for(var entry:moduleSubjects.entrySet())if(entry.getValue()==subject)modules.add(entry.getKey());}
+        Module[] modules=groupModules(subject);
         Class<?> agent=Class.forName("dev.ronova.pro.agent.RecoveryAgent",false,ClassLoader.getSystemClassLoader());
-        return (Object[][])agent.getMethod("externalObservedGroupHeapValues",Module[].class).invoke(null,(Object)modules.toArray(Module[]::new));
+        return (Object[][])agent.getMethod("externalObservedGroupHeapValues",Module[].class).invoke(null,(Object)modules);
     }
     long[] restoreExternalGroupMemory(Subject subject,long cursor,long offset,int budget)throws ReflectiveOperationException{
-        List<Module> modules=new ArrayList<>();synchronized(moduleSubjects){for(var entry:moduleSubjects.entrySet())if(entry.getValue()==subject)modules.add(entry.getKey());}
+        Module[] modules=groupModules(subject);
         return (long[])Class.forName("dev.ronova.pro.bootstrap.NativeControl",false,null)
                 .getMethod("restoreMemory",Module[].class,long.class,long.class,int.class)
-                .invoke(null,(Object)modules.toArray(Module[]::new),cursor,offset,budget);
+                .invoke(null,(Object)modules,cursor,offset,budget);
     }
-    Module[] groupModules(Subject subject){
-        List<Module> modules=new ArrayList<>();synchronized(moduleSubjects){for(var entry:moduleSubjects.entrySet())if(entry.getValue()==subject)modules.add(entry.getKey());}
-        return modules.toArray(Module[]::new);
-    }
+    Module[] groupModules(Subject subject){Group group=groups.get(subject.id);return group==null?new Module[0]:group.modules.clone();}
     boolean groupClosing() { return closing; }
     boolean modStopped(Module module) { return !closing&&stoppedModules.contains(module); }
     boolean modProtected(Module module) { return !closing&&protectedModules.contains(module); }
@@ -244,9 +248,9 @@ public final class ProRuntime implements AutoCloseable {
         Module direct=entity.getClass().getModule();if(selected.isEmpty()||selected.contains(direct))return direct;
         try {
             Class<?> bridge=Class.forName("dev.ronova.pro.bootstrap.TaskBridge",false,null);
-            if(Boolean.TRUE.equals(bridge.getMethod("objectSourceUnknown",Object.class).invoke(null,entity)))return direct;
+            if(Boolean.TRUE.equals(Class.forName("dev.ronova.pro.bootstrap.ControlBridge",false,null).getMethod("objectSourceUnknown",Object.class).invoke(null,entity)))return direct;
             var query=creationModuleQuery;
-            if(query==null)creationModuleQuery=query=bridge.getMethod("creationSources",Object.class);
+            if(query==null)creationModuleQuery=query=Class.forName("dev.ronova.pro.bootstrap.ControlBridge",false,null).getMethod("creationSources",Object.class);
             Module[] origins=(Module[])query.invoke(null,entity);if(origins.length!=0&&selected.containsAll(Arrays.asList(origins)))return origins[0];
         } catch(ReflectiveOperationException unavailable) { }
         if(entity instanceof net.minecraft.world.entity.item.ItemEntity item) {
@@ -293,8 +297,12 @@ public final class ProRuntime implements AutoCloseable {
         final java.util.concurrent.atomic.AtomicLong sourceRevision=new java.util.concurrent.atomic.AtomicLong();
         final Set<String> unresolvedSources=new java.util.concurrent.ConcurrentSkipListSet<>();
         final Set<UUID> members=java.util.concurrent.ConcurrentHashMap.newKeySet();
+        volatile Set<UUID> targets;
         Subject() { this(UUID.randomUUID()); }
-        Subject(UUID id) { this.id=id;members.add(id); }
+        Subject(UUID id) { this.id=id;members.add(id);targets=Set.of(id); }
+        synchronized void addMember(UUID member) {
+            if(members.add(member)){targets=Set.copyOf(members);sourceRevision.incrementAndGet();}
+        }
     }
     static final class Binding {
         private Entity ownedEntity;
@@ -327,7 +335,7 @@ public final class ProRuntime implements AutoCloseable {
         CompletableFuture<Void> ack;
         CompletableFuture<Void> factAck;
         CompletableFuture<Void> participantAck;
-        String intentRecord, participantRecord, factRecord, receiptRecord;
+        String intentRecord, participantRecord, factRecord;
         long retryAt;
         public String state="WAIT_ACK", reason="";
         UUID protectionSuccessor;
@@ -335,10 +343,9 @@ public final class ProRuntime implements AutoCloseable {
         public final String recoveryScope="SERVER_THREAD_SAVE_COPY_LOAD_ONLY;ASYNC_AND_NO_NBT_UNKNOWN";
         public String lifecycleEffects="NOT_EXECUTED";
         long observedSourceRevision=-1;
-        long stableSince=-1, lastSample=-1;
+        long lastSample=-1;
         boolean executed;
         boolean cancelled;
-        CompletableFuture<Void> receiptAck;
         boolean dispatching;
         String resourceRecord;
         CompletableFuture<Void> resourceAck;
@@ -349,6 +356,7 @@ public final class ProRuntime implements AutoCloseable {
         }
         public boolean complete() { return state.equals("BODY_CLEAR_STABLE"); }
     }
+    /** receiptDurable is retained for callers of the old O01 API; new work emits no success receipt. */
     public record Status(UUID id,String action,String state,String reason,boolean complete,
                          Map<String,String> obligations,String lifecycleEffects,String recoveryScope,boolean receiptDurable) {
         public Status { obligations=Map.copyOf(obligations); }
@@ -405,34 +413,34 @@ public final class ProRuntime implements AutoCloseable {
                 String aliases=String.join(",",new TreeSet<>(Arrays.asList(row[5].split(","))));
                 if(!aliases.equals(row[5])||!UUID.nameUUIDFromBytes(("ronova-mod-group/1|"+aliases).getBytes(java.nio.charset.StandardCharsets.UTF_8)).equals(UUID.fromString(row[2])))throw new IllegalArgumentException("GROUP_ROOT_IDENTITY");
                 UUID root=UUID.fromString(row[2]);Subject subject=subjects.computeIfAbsent(root,Subject::new);
-                String previous=groupRoots.putIfAbsent(root,line);if(previous!=null&&!previous.equals(line))throw new IllegalArgumentException("GROUP_ROOT_CHANGED");
+                Group state=groups.computeIfAbsent(root,ignored->new Group(UUID.fromString(row[3])));String previous=state.root;if(previous==null)state.root=line;if(previous!=null&&!previous.equals(line))throw new IllegalArgumentException("GROUP_ROOT_CHANGED");
                 subject.generation=Math.max(subject.generation,Long.parseLong(row[4]));subject.terminal=true;
-                groupMembers.put(root,root);groupOperations.put(root,UUID.fromString(row[3]));
-                groupAliases.put(root,row[5]);
-                if(previous==null)groupModes.put(root,row.length==7?row[6]:"default");
+                groupMembers.put(root,root);
+                state.aliases=row[5];
+                if(previous==null)state.mode=row.length==7?row[6]:"default";
             }else if(row[1].equals("MEMBER")&&row.length==4) {
-                UUID root=UUID.fromString(row[2]),member=UUID.fromString(row[3]);if(!groupRoots.containsKey(root))throw new IllegalArgumentException("GROUP_MEMBER_WITHOUT_ROOT");
+                UUID root=UUID.fromString(row[2]),member=UUID.fromString(row[3]);if(!groups.containsKey(root))throw new IllegalArgumentException("GROUP_MEMBER_WITHOUT_ROOT");
                 UUID previous=groupMembers.putIfAbsent(member,root);if(previous!=null&&!previous.equals(root))throw new IllegalArgumentException("CROSS_MODULE_SUBJECT");
-                subjects.computeIfAbsent(root,Subject::new).members.add(member);
+                subjects.computeIfAbsent(root,Subject::new).addMember(member);
             }else if(row[1].equals("BLOCK")&&row.length==4){
-                UUID root=UUID.fromString(row[2]),operation=UUID.fromString(row[3]);if(!groupRoots.containsKey(root))throw new IllegalArgumentException("GROUP_BLOCK_WITHOUT_ROOT");
+                UUID root=UUID.fromString(row[2]),operation=UUID.fromString(row[3]);if(!groups.containsKey(root))throw new IllegalArgumentException("GROUP_BLOCK_WITHOUT_ROOT");
                 UUID previous=groupBlocks.putIfAbsent(operation,root);if(previous!=null&&!previous.equals(root))throw new IllegalArgumentException("CROSS_MODULE_BLOCK_OPERATION");
             }else if(row[1].equals("RETURN")&&row.length==4) {
-                UUID root=UUID.fromString(row[2]);if(!groupRoots.containsKey(root))throw new IllegalArgumentException("GROUP_RETURN_WITHOUT_ROOT");
+                UUID root=UUID.fromString(row[2]);if(!groups.containsKey(root))throw new IllegalArgumentException("GROUP_RETURN_WITHOUT_ROOT");
                 if(!Set.of("default","null","empty","uuid-fixed","uuid-each","invalid-id").contains(row[3]))throw new IllegalArgumentException("GROUP_RETURN_POLICY");
-                groupModes.put(root,row[3]);
+                groups.get(root).mode=row[3];
             }
             else throw new IllegalArgumentException("GROUP_HISTORY_SHAPE");
-            groupFacts.put(line,CompletableFuture.completedFuture(null));
+            groups.get(UUID.fromString(row[2])).facts.put(line,CompletableFuture.completedFuture(null));
         }catch(RuntimeException invalid){journal.refuseWrites("GROUP_HISTORY_QUERY_ONLY");}
         recoverySources=new RecoverySources(this);
         recoveryStorage=new RecoveryStorage(this,recoverySources,s.getWorldPath(LevelResource.ROOT).resolve("ronova-pro"));
         recoveryTasks=new RecoveryTasks(this);
         recoveryRecords=new RecoveryRecords(this,recoverySources);
         recoveryChain=new RecoveryChain(this);
-        for(var entry:groupOperations.entrySet()) {
-            Subject subject=subjects.get(entry.getKey());String aliases=groupAliases.get(entry.getKey());
-            recoveryChain.acceptGroup(entry.getValue(),subject,groupRoots.get(subject.id));
+        for(var entry:groups.entrySet()) {
+            Subject subject=subjects.get(entry.getKey());
+            recoveryChain.acceptGroup(entry.getValue().operation,subject,entry.getValue().root);
         }
         // These are conservative location barriers, not inferred identity or fresh write permissions.
         for(String line:journal.history()) {
@@ -469,8 +477,8 @@ public final class ProRuntime implements AutoCloseable {
         static {
             try {
                 Class<?> bridge=Class.forName("dev.ronova.pro.bootstrap.TaskBridge",false,null);
-                ENTER=bridge.getMethod("beginPolicyMutation",Object.class);
-                EXIT=bridge.getMethod("endPolicyMutation",Object.class);
+                ENTER=Class.forName("dev.ronova.pro.bootstrap.ControlBridge",false,null).getMethod("beginPolicyMutation",Object.class);
+                EXIT=Class.forName("dev.ronova.pro.bootstrap.ControlBridge",false,null).getMethod("endPolicyMutation",Object.class);
             } catch(ReflectiveOperationException unavailable) {throw new ExceptionInInitializerError(unavailable);}
         }
         private final Object token;
@@ -509,7 +517,7 @@ public final class ProRuntime implements AutoCloseable {
             if(!console)return false;
             try {
                 Class<?> bridge=Class.forName("dev.ronova.pro.bootstrap.TaskBridge",false,null);
-                return Boolean.TRUE.equals(bridge.getMethod("consoleDispatchTrusted").invoke(null));
+                return Boolean.TRUE.equals(Class.forName("dev.ronova.pro.bootstrap.ControlBridge",false,null).getMethod("consoleDispatchTrusted").invoke(null));
             } catch(ReflectiveOperationException unavailable) {return false;}
         });
         if(!ownCommand)throw new SecurityException("RONOVA_COMMAND_AUTHORITY_REQUIRED");
@@ -533,8 +541,7 @@ public final class ProRuntime implements AutoCloseable {
                 }
                 old.clients.clear();iterator.remove();
             } else if(old.action.equals("BLOCK_CLEAR")&&((old.cancelled&&!old.executed)
-                    ||old.complete()&&old.receiptAck!=null&&old.receiptAck.isDone()&&!old.receiptAck.isCompletedExceptionally()
-                        &&old.referencesReleased&&old.block.remaining().isEmpty()&&!groupBlocks.containsKey(old.id))) {
+                    ||old.complete()&&old.referencesReleased&&old.block.remaining().isEmpty()&&!groupBlocks.containsKey(old.id))) {
                 // O01 observations have a live lease; eviction ends that lease. Its durable
                 // historic receipt remains queryable without claiming a current world result.
                 old.clients.clear();iterator.remove();
@@ -576,14 +583,14 @@ public final class ProRuntime implements AutoCloseable {
     public String fieldState(UUID id){thread();return fieldGraphs.state(id);}
     public boolean fieldForget(UUID id){commandAction();return fieldGraphs.forget(id);}
     private void registerFieldGraphs(){
-        try{Class.forName("dev.ronova.pro.bootstrap.TaskBridge",false,null).getMethod("registerControlObjects",Class.class,Object[].class).invoke(null,ProRuntime.class,fieldGraphs.controlObjects());}
+        try{Class.forName("dev.ronova.pro.bootstrap.ControlBridge",false,null).getMethod("registerControlObjects",Class.class,Object[].class).invoke(null,ProRuntime.class,fieldGraphs.controlObjects());}
         catch(ReflectiveOperationException unavailable){throw new IllegalStateException("FIELD_GRAPH_AUTHORITY_UNAVAILABLE",unavailable);}
     }
     private void requireGraph(FieldGraph owner){
         thread();Class<?> caller=ACTION_CALLER.walk(frames->frames.map(StackWalker.StackFrame::getDeclaringClass).filter(type->type!=ProRuntime.class).findFirst().orElse(null));
         if(owner!=fieldGraphs||caller==null||caller.getNestHost()!=FieldGraph.class)throw new SecurityException("ACTUAL_FIELD_GRAPH_REQUIRED");
     }
-    void graphControls(FieldGraph owner,Object... controls){requireGraph(owner);try{Class.forName("dev.ronova.pro.bootstrap.TaskBridge",false,null).getMethod("registerControlObjects",Class.class,Object[].class).invoke(null,ProRuntime.class,controls);}catch(ReflectiveOperationException unavailable){throw new IllegalStateException("FIELD_GRAPH_AUTHORITY_UNAVAILABLE",unavailable);}}
+    void graphControls(FieldGraph owner,Object... controls){requireGraph(owner);try{Class.forName("dev.ronova.pro.bootstrap.ControlBridge",false,null).getMethod("registerControlObjects",Class.class,Object[].class).invoke(null,ProRuntime.class,controls);}catch(ReflectiveOperationException unavailable){throw new IllegalStateException("FIELD_GRAPH_AUTHORITY_UNAVAILABLE",unavailable);}}
     Subject graphSubject(FieldGraph owner,Object value){requireGraph(owner);return value instanceof Class<?> type?moduleSubjects.get(type.getModule()):groupSubject(value);}
     boolean graphOwns(FieldGraph owner,Set<Entity> roots,Object value){
         requireGraph(owner);if(roots.contains(value))return true;
@@ -649,7 +656,7 @@ public final class ProRuntime implements AutoCloseable {
     public boolean worldHistoryCancel(UUID operation){commandAction();try{return worldArchive.cancel(operation);}catch(IOException unavailable){throw new IllegalStateException("WORLD_HISTORY_WRITE_FAILED",unavailable);}}
     public boolean worldHistoryRetry(UUID operation){commandAction();writable();try{return worldArchive.retry(operation);}catch(IOException unavailable){throw new IllegalStateException("WORLD_HISTORY_WRITE_FAILED",unavailable);}}
     void archiveControls(WorldArchive owner,Object[] roots){
-        requireArchive(owner);try{Class.forName("dev.ronova.pro.bootstrap.TaskBridge",false,null).getMethod("registerControlObjects",Class.class,Object[].class).invoke(null,ProRuntime.class,roots);}
+        requireArchive(owner);try{Class.forName("dev.ronova.pro.bootstrap.ControlBridge",false,null).getMethod("registerControlObjects",Class.class,Object[].class).invoke(null,ProRuntime.class,roots);}
         catch(ReflectiveOperationException unavailable){throw new IllegalStateException("WORLD_HISTORY_AUTHORITY_UNAVAILABLE",unavailable);}
     }
     private void requireArchive(WorldArchive owner){
@@ -712,7 +719,7 @@ public final class ProRuntime implements AutoCloseable {
         boolean moved=worldControl.teleport(entity,destination,position);if(moved)publishPolicy();return moved;
     }
     private void registerWorldControls(){
-        try{Class.forName("dev.ronova.pro.bootstrap.TaskBridge",false,null).getMethod("registerControlObjects",Class.class,Object[].class)
+        try{Class.forName("dev.ronova.pro.bootstrap.ControlBridge",false,null).getMethod("registerControlObjects",Class.class,Object[].class)
                 .invoke(null,ProRuntime.class,worldControl.controlObjects());}
         catch(ReflectiveOperationException unavailable){throw new IllegalStateException("WORLD_CONTROL_AUTHORITY_UNAVAILABLE",unavailable);}
     }
@@ -869,9 +876,9 @@ public final class ProRuntime implements AutoCloseable {
             for(ServerPlayer player:server.getPlayerList().getPlayers())sendModGroup(player);
         }
         recoverySources.refreshGroupDefinitions(group.id);
-        recoveryTasks.qualify(group,groupOperations.get(group.id));
-        recoveryRecords.qualify(group,groupOperations.get(group.id));
-        recoveryChain.acceptGroup(groupOperations.get(group.id),group,groupRoots.get(group.id));
+        recoveryTasks.qualify(group,groups.get(group.id).operation);
+        recoveryRecords.qualify(group,groups.get(group.id).operation);
+        recoveryChain.acceptGroup(groups.get(group.id).operation,group,groups.get(group.id).root);
         return "BODIES_CLEARED="+cleared+";BLOCKS_QUEUED="+blockQueued+";BODY_FAILURES="+failed+";"+result;
     }
     public String protectModGroup(String selection) {
@@ -977,7 +984,7 @@ public final class ProRuntime implements AutoCloseable {
                 states.add(group.targets().keySet()+":"+(protectedModules.contains(group.targets().values().iterator().next())?"PROTECTED;":"")
                         +agent.getMethod("modGroupState",Module.class).invoke(null,group.targets().values().iterator().next()));
                 Subject subject=moduleSubjects.get(group.targets().values().iterator().next());
-                if(subject!=null)states.add("RETURN_POLICY="+groupModes.get(subject.id)+";"+recoveryChain.status(groupOperations.get(subject.id)));
+                if(subject!=null)states.add("RETURN_POLICY="+groups.get(subject.id).mode+";"+recoveryChain.status(groups.get(subject.id).operation));
             } catch(ReflectiveOperationException unavailable) {states.add(group.targets().keySet()+":AGENT_UNAVAILABLE");}
         }
         return "GROUPS="+states+";"+modGroupState();
@@ -1272,19 +1279,10 @@ public final class ProRuntime implements AutoCloseable {
     }
     public Status query(UUID id) {
         thread(); Work w=work.get(id); if(w==null)return null;
-        refreshIntentStatus(w);
-        if(w.complete() && (Integer.toUnsignedLong(server.getTickCount())-w.lastSample>10 || !current(w)
-                || w.records!=null && (!w.records.bound() || !w.records.remaining().isEmpty()
-                    || w.observedSourceRevision!=w.binding.subject.sourceRevision.get())))
-            invalidate(w,"CURRENT_OBSERVATION_EXPIRED");
-        if(w.complete())for(var entry:w.clients.entrySet())if(entry.getValue().required) {
-            var player=server.getPlayerList().getPlayer(entry.getKey());
-            if(player==null || player.connection!=entry.getValue().connection || player.serverLevel()!=w.records.level) {
-                invalidate(w,"REQUIRED_PARTICIPANT_CHANGED");break;
-            }
-        }
-        return new Status(w.id,w.action,w.state,w.reason,w.complete(),w.obligations,w.lifecycleEffects,w.recoveryScope,
-                w.receiptAck!=null && w.receiptAck.isDone() && !w.receiptAck.isCompletedExceptionally());
+        // Queries project current ACK status without mutating work or runtime coverage.
+        Map<String,String> obligations=new LinkedHashMap<>(w.obligations);
+        obligations.put("DURABLE_INTENT",intentObligation(w));
+        return new Status(w.id,w.action,w.state,w.reason,w.complete(),obligations,w.lifecycleEffects,w.recoveryScope,false);
     }
     public void cancel(UUID id) {
         commandAction(); Work w=work.get(id); if(w==null)return;
@@ -1689,25 +1687,26 @@ public final class ProRuntime implements AutoCloseable {
         worldArchive.tick();
         fieldGraphs.tick();
         restoreGroups();
-        groupFacts.replaceAll((record,ack)->journal.retryRejected(record,ack));
+        for(Group group:groups.values())group.facts.replaceAll((record,ack)->journal.retryRejected(record,ack));
         for(Entity entity:List.copyOf(pendingGroupAdoptions))try {adoptGroupBody(entity);}
         catch(RuntimeException|LinkageError unavailable) {coverageGap=true;}
         publishPolicy();
         recoverySources.maintainResources();
-        for(var entry:groupOperations.entrySet()) {
+        for(var entry:groups.entrySet()) {
             Subject group=subjects.get(entry.getKey());if(group==null||!group.terminal)continue;
             recoverySources.retireGroup(group);
             fieldGraphs.retireGroup(group);
-            recoveryStorage.discover(group,entry.getValue());
-            recoveryTasks.qualify(group,entry.getValue());
             recoveryTasks.retireGroupSchedulers(group);
         }
         recoveryTasks.tick(tick);
-        for(Work pending:work.values())if(pending.binding!=null&&pending.action.equals("CLEAR")&&pending.executed&&current(pending)
-                &&!pending.state.equals("EFFECT_UNKNOWN")) {
-            recoveryStorage.discover(pending.binding.subject,pending.id);
-            recoveryTasks.qualify(pending.binding.subject,pending.id);
-            recoveryRecords.qualify(pending.binding.subject,pending.id);
+        // One qualification/discovery owner, including bodies retired in a
+        // previous process. RecoveryChain only observes these actual duties.
+        for(Subject subject:subjects.values())if(subject.terminal&&canonicalSubject(subject.id)==subject) {
+            UUID operation=recoveryChain.operationFor(subject.id);
+            if(operation==null)continue;
+            recoveryTasks.qualify(subject,operation);
+            recoveryRecords.qualify(subject,operation);
+            recoveryStorage.discover(subject,operation);
         }
         recoveryStorage.tick(tick);
         recoveryRecords.tick(tick);
@@ -1761,14 +1760,15 @@ public final class ProRuntime implements AutoCloseable {
             }
         }
     }
+    private String intentObligation(Work w) {
+        if(w.ack==null||!w.ack.isDone())return "DURABLE_ACK_PENDING";
+        if(!w.ack.isCompletedExceptionally())return "DURABLE_ACK_CONFIRMED";
+        return journal.backpressured(w.ack)?"DURABLE_ACK_PENDING_RETRY":"DURABLE_ACK_UNCONFIRMED";
+    }
     private void refreshIntentStatus(Work w) {
-        if(w.ack==null||!w.ack.isDone())w.obligations.put("DURABLE_INTENT","DURABLE_ACK_PENDING");
-        else if(!w.ack.isCompletedExceptionally())w.obligations.put("DURABLE_INTENT","DURABLE_ACK_CONFIRMED");
-        else {
-            boolean retryable=journal.backpressured(w.ack);
-            w.obligations.put("DURABLE_INTENT",retryable?"DURABLE_ACK_PENDING_RETRY":"DURABLE_ACK_UNCONFIRMED");
-            if(!retryable)coverageGap=true;
-        }
+        String obligation=intentObligation(w);
+        w.obligations.put("DURABLE_INTENT",obligation);
+        if(obligation.equals("DURABLE_ACK_UNCONFIRMED"))coverageGap=true;
     }
     /** One non-replaying path for command-time and tick-time memory actions. */
     private void executeMemoryAction(Work w) {
@@ -1934,15 +1934,13 @@ public final class ProRuntime implements AutoCloseable {
                     || key.equals("CLIENT_PRESENCE") && (g.contains("CLIENT") || g.contains("PARTICIPANT")));
             entry.setValue(unknown?"REQUIRED_UNKNOWN":pending?"REQUIRED_PENDING":"REQUIRED_CONFIRMED");
         }
-        if(w.lastSample>=0 && (tick<w.lastSample || tick-w.lastSample>10)) w.stableSince=-1;
         w.lastSample=tick;
         if(!remaining.isEmpty()) { invalidate(w,String.join(",",remaining)); return; }
-        if(w.stableSince<0) w.stableSince=tick;
-        if(tick-w.stableSince>=20 && !w.complete()) {
-            w.state="BODY_CLEAR_STABLE"; w.reason=w.clients.values().stream().noneMatch(f->f.required)
+        // Fast completion: current production facts are enough. No certification window/receipt.
+        if(!w.complete()) {
+            w.state="BODY_CLEAR_STABLE";
+            w.reason=w.clients.values().stream().noneMatch(f->f.required)
                     ?"SERVER_SCOPE_NO_REQUIRED_CLIENT":"REQUIRED_CLIENTS_CONFIRMED";
-            w.receiptRecord="RECEIPT\t"+w.id+"\tO01\t"+w.generation+"\t"+tick+"\t"+w.reason;
-            w.receiptAck=journal.append(w.receiptRecord);
         }
     }
     private void mergeTrackedParticipants(Work w) {
@@ -1975,10 +1973,8 @@ public final class ProRuntime implements AutoCloseable {
             w.ack=journal.retryRejected(w.intentRecord,w.ack);
         w.participantAck=journal.retryRejected(w.participantRecord,w.participantAck);
         w.factAck=journal.retryRejected(w.factRecord,w.factAck);
-        w.receiptAck=journal.retryRejected(w.receiptRecord,w.receiptAck);
     }
     private void fence(Work w,String reason) {
-        w.stableSince=-1;
         if(w.state.equals("EFFECT_UNKNOWN"))return;
         w.state="FENCED";w.reason=reason;
         if(!closing)for(var entry:w.clients.entrySet()) {
@@ -1987,7 +1983,6 @@ public final class ProRuntime implements AutoCloseable {
         }
     }
     private void invalidate(Work w,String reason) {
-        w.stableSince=-1;
         if(w.state.equals("EFFECT_UNKNOWN") || w.state.equals("ACK_FAILED") || w.state.equals("FENCED"))return;
         if(w.executed && !w.action.equals("PROTECT")) w.state="VERIFYING";
         w.reason=reason;
@@ -2231,7 +2226,7 @@ public final class ProRuntime implements AutoCloseable {
             var field=lookup.findStatic(ProRuntime.class,"preventFieldWrite",java.lang.invoke.MethodType.methodType(boolean.class,Object.class,Class.class,String.class,Object.class));
             var method=lookup.findStatic(ProRuntime.class,"preventDispatch",java.lang.invoke.MethodType.methodType(boolean.class,Object.class,String.class,Object.class));
             var task=lookup.findStatic(ProRuntime.class,"preventTaskEffect",java.lang.invoke.MethodType.methodType(boolean.class,Object.class,String.class));
-            bridge.getMethod("installGuards",Class.class,java.lang.invoke.MethodHandle.class,java.lang.invoke.MethodHandle.class,
+            Class.forName("dev.ronova.pro.bootstrap.ControlBridge",false,null).getMethod("installGuards",Class.class,java.lang.invoke.MethodHandle.class,java.lang.invoke.MethodHandle.class,
                     java.lang.invoke.MethodHandle.class).invoke(null,ProRuntime.class,field,method,task);
             installLifeResults(bridge,lookup);
             installEntityDispatch(Class.forName("dev.ronova.pro.agent.RecoveryAgent",false,ClassLoader.getSystemClassLoader()));
@@ -2242,8 +2237,7 @@ public final class ProRuntime implements AutoCloseable {
         Class<?> caller=LIFECYCLE_WALKER.getCallerClass();
         if(!caller.getName().equals("dev.ronova.pro.ClientPresence")||caller.getClassLoader()!=ProRuntime.class.getClassLoader())
             throw new SecurityException("CLIENT_CONTROL_OWNER");
-        try {Class.forName("dev.ronova.pro.bootstrap.TaskBridge",false,null)
-                .getMethod("registerControlObjects",Class.class,Object[].class).invoke(null,ProRuntime.class,roots);}
+        try {Class.forName("dev.ronova.pro.bootstrap.ControlBridge",false,null).getMethod("registerControlObjects",Class.class,Object[].class).invoke(null,ProRuntime.class,roots);}
         catch(ReflectiveOperationException unavailable){throw new IllegalStateException("CLIENT_CONTROL_REGISTRATION_UNAVAILABLE",unavailable);}
     }
     private static boolean clientFieldDenied(Object receiver,Class<?> declaring,String field,Object value) {
@@ -2417,7 +2411,7 @@ public final class ProRuntime implements AutoCloseable {
             Class.forName(SourceMaps.class.getName(),true,ProRuntime.class.getClassLoader());
             Class.forName(BackingPolicy.class.getName(),true,ProRuntime.class.getClassLoader());
             Class<?> bridge=Class.forName("dev.ronova.pro.bootstrap.TaskBridge",false,null);
-            if(!Integer.valueOf(48).equals(bridge.getMethod("abiVersion").invoke(null)))throw new IllegalStateException("INDEX_BRIDGE_ABI_MISMATCH");
+            if(!Integer.valueOf(49).equals(bridge.getMethod("abiVersion").invoke(null)))throw new IllegalStateException("INDEX_BRIDGE_ABI_MISMATCH");
             var lookup=java.lang.invoke.MethodHandles.lookup();
             var field=lookup.findStatic(ProRuntime.class,"preventFieldWrite",java.lang.invoke.MethodType.methodType(boolean.class,Object.class,Class.class,String.class,Object.class));
             var dispatch=lookup.findStatic(ProRuntime.class,"preventDispatch",java.lang.invoke.MethodType.methodType(boolean.class,Object.class,String.class,Object.class));
@@ -2426,7 +2420,7 @@ public final class ProRuntime implements AutoCloseable {
                     java.lang.invoke.MethodType.methodType(AutoCloseable.class,Object.class,Object.class));
             UnsafeMapping mapping=unsafeFields();
             var index=lookup.findStatic(ProRuntime.class,"preventIndexSlotRemoval",java.lang.invoke.MethodType.methodType(boolean.class,Object.class,Object.class,Object.class));
-            bridge.getMethod("installPolicy",Class.class,java.lang.invoke.MethodHandle.class,java.lang.invoke.MethodHandle.class,
+            Class.forName("dev.ronova.pro.bootstrap.ControlBridge",false,null).getMethod("installPolicy",Class.class,java.lang.invoke.MethodHandle.class,java.lang.invoke.MethodHandle.class,
                     java.lang.invoke.MethodHandle.class,java.lang.reflect.Field[].class,long[].class,java.lang.invoke.MethodHandle.class)
                 .invoke(null,ProRuntime.class,field,dispatch,task,mapping.fields(),mapping.offsets(),index);
             bridge.getMethod("installTaskPublicationGate",Class.class,java.lang.invoke.MethodHandle.class)
@@ -2434,20 +2428,20 @@ public final class ProRuntime implements AutoCloseable {
             installLifeResults(bridge,lookup);
             BackingPolicy.initialize(bridge);
             var release=lookup.findStatic(BackingPolicy.class,"resourceDenied",java.lang.invoke.MethodType.methodType(boolean.class,Object.class));
-            bridge.getMethod("installResourceGuard",Class.class,java.lang.invoke.MethodHandle.class).invoke(null,ProRuntime.class,release);
+            Class.forName("dev.ronova.pro.bootstrap.ControlBridge",false,null).getMethod("installResourceGuard",Class.class,java.lang.invoke.MethodHandle.class).invoke(null,ProRuntime.class,release);
             var nativeRegistration=lookup.findStatic(ProRuntime.class,"preventNativeRegistration",java.lang.invoke.MethodType.methodType(boolean.class,Class.class,Module[].class));
-            bridge.getMethod("installNativeRegistrationGuard",Class.class,java.lang.invoke.MethodHandle.class).invoke(null,ProRuntime.class,nativeRegistration);
+            Class.forName("dev.ronova.pro.bootstrap.ControlBridge",false,null).getMethod("installNativeRegistrationGuard",Class.class,java.lang.invoke.MethodHandle.class).invoke(null,ProRuntime.class,nativeRegistration);
             var creation=lookup.findStatic(ProRuntime.class,"constructed",java.lang.invoke.MethodType.methodType(void.class,Object.class));
             var constructionFailure=lookup.findStatic(ProRuntime.class,"constructionFailed",java.lang.invoke.MethodType.methodType(void.class,Object.class));
-            bridge.getMethod("installCreationObserver",Class.class,java.lang.invoke.MethodHandle.class,java.lang.invoke.MethodHandle.class).invoke(null,ProRuntime.class,creation,constructionFailure);
-            producerInputs=bridge.getMethod("producerInputs",boolean.class);producerDelivery=bridge.getMethod("deliveringProducerTo",Class.class);
-            producerFields=bridge.getMethod("producerFields");
-            producerReceiverDelivery=bridge.getMethod("deliveringProducerReceiverTo",Class.class);
+            Class.forName("dev.ronova.pro.bootstrap.ControlBridge",false,null).getMethod("installCreationObserver",Class.class,java.lang.invoke.MethodHandle.class,java.lang.invoke.MethodHandle.class).invoke(null,ProRuntime.class,creation,constructionFailure);
+            producerInputs=Class.forName("dev.ronova.pro.bootstrap.ControlBridge",false,null).getMethod("producerInputs",boolean.class);producerDelivery=Class.forName("dev.ronova.pro.bootstrap.ControlBridge",false,null).getMethod("deliveringProducerTo",Class.class);
+            producerFields=Class.forName("dev.ronova.pro.bootstrap.ControlBridge",false,null).getMethod("producerFields");
+            producerReceiverDelivery=Class.forName("dev.ronova.pro.bootstrap.ControlBridge",false,null).getMethod("deliveringProducerReceiverTo",Class.class);
             var producer=lookup.findStatic(ProRuntime.class,"producerInput",java.lang.invoke.MethodType.methodType(Object.class,Object.class,Object.class));
-            bridge.getMethod("installProducerObserver",Class.class,java.lang.invoke.MethodHandle.class).invoke(null,ProRuntime.class,producer);
+            Class.forName("dev.ronova.pro.bootstrap.ControlBridge",false,null).getMethod("installProducerObserver",Class.class,java.lang.invoke.MethodHandle.class).invoke(null,ProRuntime.class,producer);
             var sourceWrite=lookup.findStatic(SourceMaps.class,"denies",java.lang.invoke.MethodType.methodType(boolean.class,Object.class,Object.class,Object.class));
             var sourceChanged=lookup.findStatic(SourceMaps.class,"changed",java.lang.invoke.MethodType.methodType(void.class,Object.class));
-            bridge.getMethod("installSourceWriteObserver",Class.class,java.lang.invoke.MethodHandle.class,java.lang.invoke.MethodHandle.class).invoke(null,ProRuntime.class,sourceWrite,sourceChanged);
+            Class.forName("dev.ronova.pro.bootstrap.ControlBridge",false,null).getMethod("installSourceWriteObserver",Class.class,java.lang.invoke.MethodHandle.class,java.lang.invoke.MethodHandle.class).invoke(null,ProRuntime.class,sourceWrite,sourceChanged);
             BackingPolicy.controllers(bridge);
             for(ProRuntime runtime:sourceRuntimes())BackingPolicy.runtimeControllers(runtime,runtime,runtime.journal,
                     runtime.recoverySources,runtime.recoveryStorage,runtime.recoveryTasks,runtime.recoveryRecords,runtime.recoveryChain,runtime.fieldGraphs);
@@ -2471,7 +2465,7 @@ public final class ProRuntime implements AutoCloseable {
     /** The same method-entry protection is installed for a remote client, without starting server state. */
     private static void installLifeResults(Class<?> bridge,java.lang.invoke.MethodHandles.Lookup lookup)throws ReflectiveOperationException {
         var result=lookup.findStatic(ProRuntime.class,"protectedLifeResult",java.lang.invoke.MethodType.methodType(Object.class,Object.class,String.class));
-        bridge.getMethod("installLifeResults",Class.class,java.lang.invoke.MethodHandle.class).invoke(null,ProRuntime.class,result);
+        Class.forName("dev.ronova.pro.bootstrap.ControlBridge",false,null).getMethod("installLifeResults",Class.class,java.lang.invoke.MethodHandle.class).invoke(null,ProRuntime.class,result);
     }
     public static Object protectedLifeResult(Object receiver,String method) {
         if(receiver instanceof LivingEntity living) {
@@ -2595,10 +2589,10 @@ public final class ProRuntime implements AutoCloseable {
         catch(ReflectiveOperationException unavailable) {return null;}
         for(ProRuntime runtime:sourceRuntimes()) {
             if(runtime.closing)continue;
-            Object target=RecoveryReferences.wrapperTarget(value,runtime,true);
+            Object target=RecoveryRecords.wrapperTarget(value,runtime,true);
             if(target==null&&invocationInput&&(value instanceof Entity||value!=null&&value.getClass()==CompoundTag.class))target=value;
-            if(target==null&&RecoveryReferences.wrapperTarget(receiver,runtime,true)==value)target=value;
-            if(target==null&&(receiver instanceof Map<?,?>||receiver instanceof Class<?>))target=RecoveryReferences.ownedTarget(value,runtime,true);
+            if(target==null&&RecoveryRecords.wrapperTarget(receiver,runtime,true)==value)target=value;
+            if(target==null&&(receiver instanceof Map<?,?>||receiver instanceof Class<?>))target=RecoveryRecords.ownedTarget(value,runtime,true);
             UUID subject=target instanceof Entity?runtime.recoveryTasks.subjectOf(target):
                     target instanceof CompoundTag tag?RecoverySources.subject(runtime.recoverySources,tag):null;
             if(subject==null)continue;
@@ -2632,7 +2626,7 @@ public final class ProRuntime implements AutoCloseable {
         if(object==null)return;
         try {
             Class<?> bridge=Class.forName("dev.ronova.pro.bootstrap.TaskBridge",false,null);
-            if(!Boolean.TRUE.equals(bridge.getMethod("deliveringCreationTo",Class.class).invoke(null,ProRuntime.class)))return;
+            if(!Boolean.TRUE.equals(Class.forName("dev.ronova.pro.bootstrap.ControlBridge",false,null).getMethod("deliveringCreationTo",Class.class).invoke(null,ProRuntime.class)))return;
             for(ProRuntime runtime:sourceRuntimes())if(!runtime.closing) {
                 Subject group=runtime.groupSubject(object);
                 if(group!=null&&group.terminal&&!(object instanceof Entity))runtime.recoverySources.groupCreated(object,group.id);
@@ -2653,7 +2647,7 @@ public final class ProRuntime implements AutoCloseable {
     public static void constructionFailed(Object error) {
         try {
             Class<?> bridge=Class.forName("dev.ronova.pro.bootstrap.TaskBridge",false,null);
-            if(Boolean.TRUE.equals(bridge.getMethod("deliveringCreationTo",Class.class).invoke(null,ProRuntime.class)))RecoveryTasks.constructionFailed();
+            if(Boolean.TRUE.equals(Class.forName("dev.ronova.pro.bootstrap.ControlBridge",false,null).getMethod("deliveringCreationTo",Class.class).invoke(null,ProRuntime.class)))RecoveryTasks.constructionFailed();
         } catch(ReflectiveOperationException|LinkageError unavailable) { }
     }
     boolean resourcesClosing() {return closing;}
@@ -2670,15 +2664,15 @@ public final class ProRuntime implements AutoCloseable {
                 LinkedHashMap<String,Module> targets=new LinkedHashMap<>();for(String id:ids)targets.put(id,module);
                 if(!targets.isEmpty())prepareGroup(targets);
             }
-            for(var entry:groupAliases.entrySet()) {
+            for(var entry:groups.entrySet()) {
                 Subject subject=subjects.get(entry.getKey());LinkedHashMap<String,Module> targets=new LinkedHashMap<>();
-                for(String id:entry.getValue().split(","))net.minecraftforge.fml.ModList.get().getModContainerById(id).ifPresent(container->{
+                for(String id:entry.getValue().aliases.split(","))net.minecraftforge.fml.ModList.get().getModContainerById(id).ifPresent(container->{
                     Object instance=container.getMod();if(instance!=null)targets.put(id,instance.getClass().getModule());
                 });
                 Set<Module> modules=Collections.newSetFromMap(new IdentityHashMap<>());modules.addAll(targets.values());
                 TreeSet<String> actual=new TreeSet<>();for(Module module:modules)actual.addAll(Arrays.asList((String[])agent.getMethod("modGroupIds",Module.class).invoke(null,module)));
-                if(!String.join(",",actual).equals(entry.getValue())) {subject.unresolvedSources.add("GROUP_MODULE_OWNERSHIP_CHANGED");continue;}
-                stoppedModules.addAll(modules);for(Module module:modules)moduleSubjects.put(module,subject);
+                if(!String.join(",",actual).equals(entry.getValue().aliases)) {subject.unresolvedSources.add("GROUP_MODULE_OWNERSHIP_CHANGED");continue;}
+                stoppedModules.addAll(modules);for(Module module:modules)bindGroupModule(subject.id,module);
                 agent.getMethod("prepareModGroup",String[].class,Module[].class).invoke(null,(Object)targets.keySet().toArray(String[]::new),(Object)targets.values().toArray(Module[]::new));
                 captureGroupRoots(agent,modules,subject);
                 for(ServerLevel level:server.getAllLevels())for(Entity entity:level.getAllEntities())if(!(entity instanceof ServerPlayer)&&modules.contains(bodyModule(entity,modules))) {
@@ -2687,11 +2681,11 @@ public final class ProRuntime implements AutoCloseable {
                 for(ServerLevel level:server.getAllLevels())for(var block:BlockGroupPolicy.loaded(level))if(modules.contains(block.getClass().getModule())){
                     BlockGroupPolicy.release(block);groupBlock(subject,clearBlock(level,((Access.Block)block).pro$pos()));
                 }
-                String mode=groupModes.getOrDefault(subject.id,"default");
+                String mode=groupMode(subject.id,"default");
                 agent.getMethod("stopModGroup",String[].class,Module[].class,String.class).invoke(null,(Object)targets.keySet().toArray(String[]::new),(Object)targets.values().toArray(Module[]::new),mode);
                 for(String id:targets.keySet()){stoppedMods.add(id);stoppedReturns.put(id,mode);}for(ServerPlayer player:server.getPlayerList().getPlayers())sendModGroup(player);
-                recoverySources.refreshGroupDefinitions(subject.id);recoveryRecords.qualify(subject,groupOperations.get(subject.id));
-                recoveryChain.acceptGroup(groupOperations.get(subject.id),subject,groupRoots.get(subject.id));
+                recoverySources.refreshGroupDefinitions(subject.id);recoveryRecords.qualify(subject,groups.get(subject.id).operation);
+                recoveryChain.acceptGroup(groups.get(subject.id).operation,subject,groups.get(subject.id).root);
             }
         }catch(ReflectiveOperationException|RuntimeException unavailable) {
             for(Subject subject:moduleSubjects.values())subject.unresolvedSources.add("GROUP_RESTORE:"+unavailable.getClass().getSimpleName());
@@ -2765,14 +2759,14 @@ public final class ProRuntime implements AutoCloseable {
         for(Work item:work.values())if(item.binding!=null&&canonicalSubject(item.binding.subject.id)==canonicalSubject(subject)&&item.action.equals("CLEAR")) {
             if(item.state.equals("FENCED")&&item.reason.equals("INCARNATION_REVIVED"))continue;
             Status state=query(item.id);
-            if(!state.complete()||!state.receiptDurable())remaining.add("BODY:"+item.id+":"+state.state());
+            if(!state.complete())remaining.add("BODY:"+item.id+":"+state.state());
             if(!item.referencesReleased||item.resourceAck==null||!item.resourceAck.isDone()||item.resourceAck.isCompletedExceptionally())
                 remaining.add("BODY_OWNED_REFERENCES_PENDING:"+item.id);
         }
         UUID root=canonicalSubject(subject)==null?subject:canonicalSubject(subject).id;
         for(var block:groupBlocks.entrySet())if(block.getValue().equals(root)){
             Work item=work.get(block.getKey());
-            if(item!=null){Status state=query(item.id);if(!state.complete()||!state.receiptDurable())remaining.add("BLOCK:"+item.id+":"+state.state());
+            if(item!=null){Status state=query(item.id);if(!state.complete())remaining.add("BLOCK:"+item.id+":"+state.state());
                 if(!item.referencesReleased||item.resourceAck==null||!item.resourceAck.isDone()||item.resourceAck.isCompletedExceptionally())remaining.add("BLOCK_OWNED_REFERENCES_PENDING:"+item.id);
             }else remaining.addAll(priorGroupBlockGaps(block.getKey(),root));
         }
@@ -2808,19 +2802,15 @@ public final class ProRuntime implements AutoCloseable {
     private void releaseBodyReferences(Work item) {
         if(!item.action.equals("CLEAR")&&!item.action.equals("BLOCK_CLEAR"))return;
         if(item.referencesReleased) {
-            if(!item.resourceRecord.startsWith("ROOT_RESOURCE/1\tRELEASED")) {
+            if(item.resourceRecord==null||!item.resourceRecord.startsWith("ROOT_RESOURCE/1\tRELEASED")) {
                 item.resourceRecord="ROOT_RESOURCE/1\tRELEASED\t"+item.id+"\t"+session+"\t"+(item.block==null?"ENTITY_AND_RELATION_OWNED_FIELDS_CLEARED":"BLOCK_ENTITY_TICKER_AND_HOLDER_OWNED_FIELDS_CLEARED");
                 item.resourceAck=journal.append(item.resourceRecord);
             } else item.resourceAck=journal.retryRejected(item.resourceRecord,item.resourceAck);
             return;
         }
-        if(!item.complete()||item.receiptAck==null||!item.receiptAck.isDone()||item.receiptAck.isCompletedExceptionally())return;
-        if(item.resourceRecord==null) {
-            item.resourceRecord="ROOT_RESOURCE/1\tINTENT\t"+item.id+"\t"+session+"\t"+(item.block==null?"OWNED_ENTITY_AND_RELATION_REFERENCES":"OWNED_BLOCK_ENTITY_TICKER_AND_HOLDER_REFERENCES");
-            item.resourceAck=journal.append(item.resourceRecord);return;
-        }
-        item.resourceAck=journal.retryRejected(item.resourceRecord,item.resourceAck);
-        if(!item.resourceAck.isDone()||item.resourceAck.isCompletedExceptionally())return;
+        if(!item.complete())return;
+        // These are runtime-owned references. Release after the actual final checks,
+        // then persist RELEASED on the next tick; a pre-release certificate grants nothing.
         if(item.block!=null){if(current(item)&&item.complete())item.referencesReleased=item.block.releaseOwnedReferences();return;}
         try(var gate=item.binding.subject.commitGate.enter()) {
             if(!current(item)||!item.complete()||!item.records.bound()||!item.records.remaining().isEmpty())return;

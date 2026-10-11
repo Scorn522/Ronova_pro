@@ -19,6 +19,10 @@ final class ExternalCodeDefinitions {
     private static final Method COMPARE=compareMethod();
     private static final ThreadLocal<BootstrapLookup> BOOTSTRAP_LOOKUP=new ThreadLocal<>();
     private static final ThreadLocal<Resolution> RESOLUTION=new ThreadLocal<>();
+    // Monotonic for this runtime: once a real producer/contributor has been
+    // observed, later graphs always resolve their actual callers. This flag
+    // grants no ownership and never certifies an operation or cleared source.
+    private static volatile boolean sourceObserved;
     private static final class Candidate {
         final Definition definition;
         final Candidate next;
@@ -29,7 +33,8 @@ final class ExternalCodeDefinitions {
         DefinitionIndex(List<Definition> definitions){
             int capacity=16;while(capacity<definitions.size()&&capacity<1<<30)capacity<<=1;
             named=new Candidate[capacity];hidden=new Candidate[capacity];
-            for(Definition definition:definitions){
+            for(int position=0;position<definitions.size();position++){
+                Definition definition=definitions.get(position);
                 Class<?> actual=definition.hidden?definition.actual.get():null;
                 if(definition.hidden&&actual==null)continue;
                 Candidate[] table=definition.hidden?hidden:named;
@@ -100,18 +105,23 @@ final class ExternalCodeDefinitions {
     }
     private static final class Definition {
         final Ref<ClassLoader> loader;final Ref<Module> declaration;final boolean bootstrap,hidden,boundHidden;final String name;
-        final ExternalCodeFlow.Image analysis;final Map<String,Integer> declarations;final int declarationCount;
+        private volatile ExternalCodeFlow.Image analysis;
+        final byte[] semanticBytes;
+        final Map<String,Integer> declarations;final int declarationCount;
         final Map<String,Module[][]> applied;final Set<String> references;final byte[] bytes;final Ref<byte[]> emitted;volatile Ref<Class<?>> actual;
         final Map<String,Module[]> fields;final Object[][] values;
         final String[] creationSites;
         final Object execution;
         final int concreteMethods;final boolean contributors;
-        Definition(ClassLoader loader,String name,Class<?> actual,Module declaration,ExternalCodeFlow.Image image,ExternalCodeFlow.Image analysis,Map<String,Module[][]> applied,byte[] bytes,Map<String,Module[]> fields,Object[][] values,boolean hidden,String[] creationSites,Object execution){
+        Definition(ClassLoader loader,String name,Class<?> actual,Module declaration,ExternalCodeFlow.Image image,ExternalCodeFlow.Image analysis,byte[] semanticBytes,Map<String,Module[][]> applied,byte[] bytes,Map<String,Module[]> fields,Object[][] values,boolean hidden,String[] creationSites,Object execution){
             this.loader=new Ref<>(loader);this.declaration=new Ref<>(declaration);this.bootstrap=loader==null;this.hidden=hidden;this.boundHidden=hidden&&actual!=null;this.name=name;this.actual=new Ref<>(actual);this.analysis=analysis;this.applied=applied;this.emitted=new Ref<>(bytes);this.bytes=bytes.clone();
+            this.semanticBytes=analysis==null?semanticBytes.clone():null;
             // The emitted tree is used only for method declarations. Retain
             // those exact headers, not a second complete protected instruction
             // graph beside the semantic graph used for source propagation.
-            Map<String,Integer> headers=new LinkedHashMap<>();
+            // Temporary String-keyed declaration tables carry no recovery
+            // source. Do not route each header through the observed Map writer.
+            Map<String,Integer> headers=new TreeMap<>();
             for(MethodNode method:image.node().methods)headers.put(method.name+method.desc,method.access&0xffff);
             this.declarations=Map.copyOf(headers);this.declarationCount=image.node().methods.size();
             Map<String,Module[]> declared=new LinkedHashMap<>();for(var field:fields.entrySet())declared.put(field.getKey(),field.getValue().clone());this.fields=Map.copyOf(declared);
@@ -119,16 +129,39 @@ final class ExternalCodeDefinitions {
             this.creationSites=creationSites.clone();
             this.execution=execution;
             this.concreteMethods=(int)image.node().methods.stream().filter(method->(method.access&(Opcodes.ACC_ABSTRACT|Opcodes.ACC_NATIVE))==0).count();
-            this.contributors=ExternalCodeFlow.hasContributors(analysis);
+            this.contributors=analysis!=null&&ExternalCodeFlow.hasContributors(analysis);
             Set<String> referenced=new LinkedHashSet<>();
-            for(MethodNode method:analysis.node().methods)for(AbstractInsnNode instruction:method.instructions.toArray())if(instruction instanceof MethodInsnNode call)referenced.add(call.owner);
+            if(analysis!=null){
+                for(MethodNode method:analysis.node().methods)for(AbstractInsnNode instruction:method.instructions.toArray())if(instruction instanceof MethodInsnNode call){
+                    referenced.add(call.owner);
+                }
+            }else{
+                // Constant-pool method references are a conservative superset
+                // of the ordinary calls. No mutable ASM graph is retained for
+                // a zero-seed definition until a real binding needs its body.
+                var reader=new jdk.internal.org.objectweb.asm.ClassReader(this.semanticBytes);char[] buffer=new char[reader.getMaxStringLength()];
+                for(int i=1;i<reader.getItemCount();i++){
+                    int at=reader.getItem(i);if(at==0)continue;int tag=reader.readByte(at-1);if(tag!=10&&tag!=11)continue;
+                    referenced.add(reader.readClass(at,buffer));
+                }
+            }
             this.references=Set.copyOf(referenced);
-            List<Object> controls=new ArrayList<>(Arrays.asList(DIRECTORY,WORKER,LOADED,COMPARE,this,this.loader,this.declaration,this.actual,this.bytes,this.emitted,this.applied,this.references,this.fields,this.values,this.creationSites,this.declarations));
+            List<Object> controls=new ArrayList<>(Arrays.asList(DIRECTORY,WORKER,LOADED,COMPARE,this,this.loader,this.declaration,this.actual,this.bytes,this.semanticBytes,this.emitted,this.applied,this.references,this.fields,this.values,this.creationSites,this.declarations));
             for(Module[][] rows:this.applied.values()){controls.add(rows);Collections.addAll(controls,rows);}
             for(Module[] owners:this.fields.values())controls.add(owners);for(Object[] row:this.values){controls.add(row);controls.add(row[3]);}
-            ControlImages.protect(controls.toArray());ExternalCodeImages.protectExecution(analysis,this.declarations);
+            ControlImages.protect(controls.toArray());
+            ExternalCodeImages.protectDefinitionMetadata(this.declarations,this.references);
+            if(analysis!=null)ExternalCodeImages.protectExecution(analysis,this.declarations);
         }
         boolean loader(ClassLoader candidate){return bootstrap==(candidate==null)&&loader.get()==candidate;}
+        ExternalCodeFlow.Image analysis(){
+            ExternalCodeFlow.Image current=analysis;if(current!=null)return current;
+            // Parsing/protection may load helper classes. Never hold a definition
+            // monitor while doing it; only the completed immutable image is published.
+            ExternalCodeFlow.Image prepared=ExternalCodeImages.acceptedExecution(semanticBytes,Map.of());
+            ExternalCodeImages.protectExecution(prepared,declarations);
+            synchronized(this){if(analysis==null)analysis=prepared;return analysis;}
+        }
     }
     private record Bound(Definition definition,Class<?> actual,Set<String> methods,ExternalCodeFlow.Image graph){}
     private record Target(ExternalCodeFlow.Image image,String method){}
@@ -162,6 +195,7 @@ final class ExternalCodeDefinitions {
         final Map<Class<?>,Map<MemberQuery,Member>> members=new IdentityHashMap<>();
         final Map<Class<?>,Map<SelectionQuery,Member>> selections=new IdentityHashMap<>();
         final Map<Object,Map<CallQuery,Target>> calls=new IdentityHashMap<>();
+        final Map<Class<?>,Map<String,Bound>> bodies=new IdentityHashMap<>();
     }
     private ExternalCodeDefinitions(){}
     private static Method loadedMethod(){
@@ -182,12 +216,15 @@ final class ExternalCodeDefinitions {
             throw new IllegalStateException("EXTERNAL_DEFINITION_DIRECTORY_CAS",cause);
         }catch(ReflectiveOperationException failure){throw new IllegalStateException("EXTERNAL_DEFINITION_DIRECTORY_CAS",failure);}
     }
-    static void accepted(ClassLoader loader,String name,Class<?> actual,Module declaration,byte[] bytes,Map<String,Module[][]> rows,ExternalCodeFlow.Image semantic,Map<String,Module[][]> applied,Map<String,Module[]> fields,Object[][] values,boolean hidden,String[] creationSites,Object execution){
+    static void accepted(ClassLoader loader,String name,Class<?> actual,Module declaration,byte[] bytes,byte[] semanticBytes,Map<String,Module[][]> rows,ExternalCodeFlow.Image semantic,Map<String,Module[][]> applied,Map<String,Module[]> fields,Object[][] values,boolean hidden,String[] creationSites,Object execution){
         if(name==null)return;
-        ExternalCodeFlow.Image image=ExternalCodeImages.acceptedExecution(bytes,rows);
+        ClassNode header=new ClassNode();new jdk.internal.org.objectweb.asm.ClassReader(bytes).accept(header,
+                jdk.internal.org.objectweb.asm.ClassReader.SKIP_CODE|jdk.internal.org.objectweb.asm.ClassReader.SKIP_DEBUG|jdk.internal.org.objectweb.asm.ClassReader.SKIP_FRAMES);
+        ExternalCodeFlow.Image image=new ExternalCodeFlow.Image(new Object(),header,Map.of(),Map.of());
         if(!image.node().name.equals(name))throw new IllegalStateException("EXTERNAL_DEFINITION_IMAGE_NAME_CHANGED");
         if(semantic==null||!semantic.node().name.equals(name))throw new IllegalStateException("EXTERNAL_DEFINITION_SEMANTIC_IMAGE_CHANGED");
-        Definition replacement=new Definition(loader,name,actual,declaration,image,semantic,applied,bytes,fields,values,hidden,creationSites,execution);
+        ExternalCodeFlow.Image retained=ExternalCodeFlow.hasContributors(semantic)?semantic:null;
+        Definition replacement=new Definition(loader,name,actual,declaration,image,retained,semanticBytes,applied,bytes,fields,values,hidden,creationSites,execution);
         publish(replacement,true);
     }
     private static Directory directory(List<Definition> definitions,List<Ref<Class<?>>> changes,List<Ref<Class<?>>> continuing,List<Refresh> active){
@@ -197,6 +234,7 @@ final class ExternalCodeDefinitions {
         ControlImages.protect(DIRECTORY,WORKER,COMPARE,next,definitions,changes,continuing,active);return next;
     }
     private static boolean publish(Definition replacement,boolean emitted){
+        if(replacement.contributors||RecoveryAgent.producerModule(replacement.declaration.get()))sourceObserved=true;
         for(;;){
             Directory before=DIRECTORY.get();List<Definition> definitions=new ArrayList<>(before.definitions());
             if(!emitted&&definitions.stream().anyMatch(entry->entry.boundHidden&&entry.actual.get()==replacement.actual.get()))return false;
@@ -224,13 +262,15 @@ final class ExternalCodeDefinitions {
         new jdk.internal.org.objectweb.asm.ClassReader(emitted.bytes).accept(header,
                 jdk.internal.org.objectweb.asm.ClassReader.SKIP_CODE|jdk.internal.org.objectweb.asm.ClassReader.SKIP_DEBUG|jdk.internal.org.objectweb.asm.ClassReader.SKIP_FRAMES);
         ExternalCodeFlow.Image image=new ExternalCodeFlow.Image(new Object(),header,Map.of(),Map.of());
-        ExternalCodeFlow.Image analysis=new ExternalCodeFlow.Image(new Object(),emitted.analysis.node(),emitted.analysis.rows(),emitted.analysis.comparisons());
-        Definition accepted=new Definition(actual.getClassLoader(),emitted.name,actual,RecoveryAgent.logicalModule(actual),image,analysis,emitted.applied,emitted.bytes,emitted.fields,emitted.values,true,emitted.creationSites,emitted.execution);
+        ExternalCodeFlow.Image emittedAnalysis=emitted.analysis();
+        ExternalCodeFlow.Image analysis=new ExternalCodeFlow.Image(new Object(),emittedAnalysis.node(),emittedAnalysis.rows(),emittedAnalysis.comparisons());
+        Definition accepted=new Definition(actual.getClassLoader(),emitted.name,actual,RecoveryAgent.logicalModule(actual),image,analysis,null,emitted.applied,emitted.bytes,emitted.fields,emitted.values,true,emitted.creationSites,emitted.execution);
         RecoveryAgent.bindExternalDefinition(actual,bytes,accepted.applied.keySet().toArray(String[]::new),accepted.fields,accepted.values,accepted.creationSites);
         if(publish(accepted,false))changed(actual);
     }
     static void prepared(Class<?> actual){
         if(actual==null||actual.isHidden())return;
+        if(RecoveryAgent.producerModule(RecoveryAgent.logicalModule(actual)))sourceObserved=true;
         String name=actual.getName().replace('.','/');
         boolean observed=false;
         for(Definition entry:definitions())if(!entry.hidden&&entry.loader(actual.getClassLoader())&&entry.name.equals(name)){
@@ -307,25 +347,57 @@ final class ExternalCodeDefinitions {
         }
     }
     private static List<Definition> definitions(){return DIRECTORY.get().definitions();}
+    static ControlClassWriter.Shape frameShape(ClassLoader loader,String name){
+        if(StackWalker.getInstance(StackWalker.Option.RETAIN_CLASS_REFERENCE).getCallerClass()!=ControlClassWriter.class)
+            throw new SecurityException("ACTUAL_FRAME_WRITER_REQUIRED");
+        ControlClassWriter.Shape selected=null;
+        for(Definition definition:definitions())if(!definition.hidden&&definition.loader(loader)&&definition.name.equals(name)){
+            var reader=new jdk.internal.org.objectweb.asm.ClassReader(definition.bytes);
+            ControlClassWriter.Shape header=new ControlClassWriter.Shape(reader.getSuperName(),reader.getInterfaces(),(reader.getAccess()&Opcodes.ACC_INTERFACE)!=0);
+            if(selected!=null&&(!Objects.equals(selected.parent(),header.parent())||selected.contract()!=header.contract()
+                    ||!Arrays.equals(selected.interfaces(),header.interfaces())))return null;
+            selected=header;
+        }
+        return selected;
+    }
     private static List<Refresh> refreshes(Set<Class<?>> changes){
         List<Definition> definitions=definitions();
+        Resolution outer=RESOLUTION.get();RESOLUTION.set(new Resolution());
         BootstrapLookup previous=BOOTSTRAP_LOOKUP.get();BOOTSTRAP_LOOKUP.set(new BootstrapLookup(definitions));
         try{return refreshes(changes,definitions);}
-        finally{if(previous==null)BOOTSTRAP_LOOKUP.remove();else BOOTSTRAP_LOOKUP.set(previous);}
+        finally{
+            if(previous==null)BOOTSTRAP_LOOKUP.remove();else BOOTSTRAP_LOOKUP.set(previous);
+            if(outer==null)RESOLUTION.remove();else RESOLUTION.set(outer);
+        }
     }
     private static List<Refresh> refreshes(Set<Class<?>> changes,List<Definition> definitions){
         Set<Class<?>> candidates=Collections.newSetFromMap(new IdentityHashMap<>());candidates.addAll(changes);
-        boolean changed;
-        do{
-            changed=false;
-            for(Definition definition:definitions){
-                Class<?> actual=definition.actual.get();if(!eligible(actual)||candidates.contains(actual))continue;
-                for(String reference:definition.references){
-                    Class<?> owner=initiated(actual.getClassLoader(),reference);
-                    if(related(owner,candidates)){candidates.add(actual);changed=true;break;}
+        // Invert the same actual initiated-class/hierarchy edges once for this
+        // immutable batch. Repeated full directory scans made a long chain
+        // quadratic, and restarted private loader lookups at every iteration.
+        Map<Class<?>,Set<Class<?>>> readers=new IdentityHashMap<>();
+        Map<Class<?>,Set<Class<?>>> ancestors=new IdentityHashMap<>();
+        for(Definition definition:definitions){
+            Class<?> actual=definition.actual.get();if(!eligible(actual))continue;
+            for(String reference:definition.references){
+                Class<?> owner=initiated(actual.getClassLoader(),reference);if(owner==null)continue;
+                Set<Class<?>> hierarchy=ancestors.get(owner);
+                if(hierarchy==null){
+                    hierarchy=Collections.newSetFromMap(new IdentityHashMap<>());
+                    ArrayDeque<Class<?>> pending=new ArrayDeque<>();pending.add(owner);
+                    while(!pending.isEmpty()){
+                        Class<?> member=pending.removeFirst();if(!hierarchy.add(member))continue;
+                        Class<?> parent=member.getSuperclass();if(parent!=null)pending.add(parent);
+                        Collections.addAll(pending,member.getInterfaces());
+                    }
+                    ancestors.put(owner,hierarchy);
                 }
+                for(Class<?> member:hierarchy)readers.computeIfAbsent(member,ignored->Collections.newSetFromMap(new IdentityHashMap<>())).add(actual);
             }
-        }while(changed);
+        }
+        ArrayDeque<Class<?>> propagation=new ArrayDeque<>(changes);
+        while(!propagation.isEmpty())for(Class<?> actual:readers.getOrDefault(propagation.removeFirst(),Set.of()))
+            if(candidates.add(actual))propagation.addLast(actual);
         for(;;){
             Directory before=DIRECTORY.get();List<Ref<Class<?>>> pending=new ArrayList<>(before.continuing());
             for(Class<?> actual:candidates){
@@ -411,7 +483,7 @@ final class ExternalCodeDefinitions {
         if(actual==null)return "";
         if(RecoveryAgent.logicalModule(actual)==module)return "EXTERNAL_DEFINITION_CONTINUATION_PENDING:"+actual.getName();
         for(Definition definition:definitions)if(definition.actual.get()==actual
-                &&(containsOwner(definition.applied,module)||containsOwner(definition.analysis.rows(),module)))
+                &&(containsOwner(definition.applied,module)||definition.contributors&&containsOwner(definition.analysis().rows(),module)))
             return "EXTERNAL_CALLER_REFRESH_PENDING:"+actual.getName();
         return "";
     }
@@ -421,6 +493,11 @@ final class ExternalCodeDefinitions {
     }
     static Map<String,Module[][]> expand(ClassLoader loader,Class<?> actual,ExternalCodeFlow.Image root){
         if(root==null)return Map.of();
+        // Before any producer or contributing instruction exists, walking every
+        // vanilla return chain can only rediscover empty source rows. Preserve
+        // a source-bearing current image and all later real definition changes;
+        // prepared/changed still refresh callers when a producer is first bound.
+        if(!sourceObserved&&!ExternalCodeFlow.hasContributors(root))return Map.of();
         // A graph resolves against one real bootstrap class snapshot. Enumerating
         // the entire VM for every descriptor stalls installation; a later graph
         // gets a fresh snapshot, including classes loaded since this analysis.
@@ -428,49 +505,15 @@ final class ExternalCodeDefinitions {
         Resolution outer=RESOLUTION.get(),resolution=new Resolution();
         BootstrapLookup lookup=new BootstrapLookup(previous==null?definitions():previous.definitions,previous);BOOTSTRAP_LOOKUP.set(lookup);
         RESOLUTION.set(resolution);
-        try{return possibleContributors(root,lookup.definitions)?expandGraph(loader,actual,root,resolution):Map.of();}
+        // Resolve actual initiated classes, receiver contracts and accepted VM
+        // bodies once. A separate selector-only "possible source" graph neither
+        // establishes ownership nor supplies an effect, and made every ordinary
+        // class load traverse the same entire definition directory twice.
+        try{return expandGraph(loader,actual,root,resolution);}
         finally{
             if(outer==null)RESOLUTION.remove();else RESOLUTION.set(outer);
             if(previous==null)BOOTSTRAP_LOOKUP.remove();else BOOTSTRAP_LOOKUP.set(previous);
         }
-    }
-    private static boolean possibleContributors(ExternalCodeFlow.Image root,List<Definition> definitions){
-        if(ExternalCodeFlow.hasContributors(root))return true;
-        Set<Class<?>> observed=Collections.newSetFromMap(new IdentityHashMap<>());
-        for(Definition definition:definitions){
-            // This flag describes the immutable recorded rows/control changes,
-            // including mixed code. It is not a cached VM version or permission.
-            if(definition.contributors)return true;
-            Class<?> actual=definition.actual.get();
-            if(actual==null){
-                // Unbound hidden images are not candidates in DefinitionIndex.
-                // The transformer already observed the actual declaration
-                // Module before ClassPrepare. Boot-layer images may use that
-                // empty-seed proof only when its real loader matches the image;
-                // unknown, other-layer and foreign logical origins stay conservative.
-                if(!definition.hidden){
-                    Module declaration=definition.declaration.get();
-                    if(declaration==null||declaration.getLayer()!=ModuleLayer.boot()||!definition.loader(declaration.getClassLoader())
-                            ||RecoveryAgent.producerModule(declaration)&&!ModGroupBoundary.stopped(declaration))return true;
-                }
-                continue;
-            }
-            observed.add(actual);
-        }
-        if(!observed.isEmpty()){
-            // Read every actual Class origin afresh for this expand, through one
-            // authenticated bridge call. Only this query's Module identities are
-            // de-duplicated; no origin, producer or stopped verdict survives it.
-            Module[] declarations=RecoveryAgent.logicalModules(observed.toArray(new Class<?>[0]));
-            Set<Module> checked=Collections.newSetFromMap(new IdentityHashMap<>());
-            for(Module declaration:declarations)if(checked.add(declaration)
-                    &&RecoveryAgent.producerModule(declaration)&&!ModGroupBoundary.stopped(declaration))return true;
-        }
-        // Every possible bound image was considered, irrespective of loader,
-        // inheritance, dispatch or bootstrap status. Without any direct/control
-        // or actual declaration seed, return/parameter propagation cannot add a
-        // Module. The full graph's hasContributors check would return the same.
-        return false;
     }
     private static Map<String,Module[][]> expandGraph(ClassLoader loader,Class<?> actual,ExternalCodeFlow.Image root,Resolution resolution){
         Map<Object,ExternalCodeFlow.Image> images=new IdentityHashMap<>();images.put(root.identity(),root);
@@ -572,7 +615,10 @@ final class ExternalCodeDefinitions {
                     ||(call.getOpcode()==Opcodes.INVOKEVIRTUAL||call.getOpcode()==Opcodes.INVOKEINTERFACE)&&(method.access&Opcodes.ACC_STATIC)==0
                     &&((method.access&(Opcodes.ACC_FINAL|Opcodes.ACC_PRIVATE))!=0
                     ||exactReceiver||(calling==null?(caller.node().access&Opcodes.ACC_FINAL)!=0:Modifier.isFinal(calling.getModifiers()))));
-            if(exact&&concrete(method)&&(caller==root||calling!=null&&bound.get(calling)!=null&&bound.get(calling).methods().contains(key)))return new Target(caller,key);
+            if(exact&&concrete(method)){
+                if(caller==root)return new Target(caller,key);
+                if(calling!=null)return target(new Member(calling,method.access,true),key,root,loaders,classes,bound,unavailable);
+            }
         }
         // A hidden self reference cannot be replaced by an ordinary class with the same source name.
         if(self&&calling==null)return inherited(caller,call,root,loaders,classes,bound,unavailable,declarations,receivers!=null&&receivers.stream().allMatch(ExternalReceiverFlow.Receiver::self));
@@ -618,7 +664,9 @@ final class ExternalCodeDefinitions {
         String key=call.name+call.desc;MethodNode method=declared(caller,key);
         if(method!=null&&(method.access&(Opcodes.ACC_STATIC|Opcodes.ACC_PRIVATE))==0){
             if(call.getOpcode()==Opcodes.INVOKEINTERFACE&&(method.access&Opcodes.ACC_PUBLIC)==0)return null;
-            return concrete(method)?new Target(caller,key):null;
+            if(!concrete(method))return null;
+            Class<?> calling=classes.get(caller.identity());
+            return caller==root?new Target(caller,key):calling==null?null:target(new Member(calling,method.access,true),key,root,loaders,classes,bound,unavailable);
         }
         ArrayDeque<Class<?>> interfaces=new ArrayDeque<>();
         for(Class<?> actual=parent;actual!=null;actual=actual.getSuperclass()){
@@ -688,7 +736,7 @@ final class ExternalCodeDefinitions {
         if(actual==classes.get(root.identity())){MethodNode method=declared(root,key);return method==null?-1:method.access;}
         if(!declarations.containsKey(actual)){
             String[] headers=RecoveryAgent.externalCodeDeclarations(actual);Map<String,Integer> methods=null;
-            if(headers!=null){methods=new HashMap<>();for(int i=0;i<headers.length;i+=3)methods.put(headers[i]+headers[i+1],Integer.parseUnsignedInt(headers[i+2],16));}
+            if(headers!=null){methods=new TreeMap<>();for(int i=0;i<headers.length;i+=3)methods.put(headers[i]+headers[i+1],Integer.parseUnsignedInt(headers[i+2],16));}
             declarations.put(actual,methods);
         }
         Map<String,Integer> methods=declarations.get(actual);return methods==null?-2:methods.getOrDefault(key,-1);
@@ -735,7 +783,7 @@ final class ExternalCodeDefinitions {
     private static Target target(Member method,String key,ExternalCodeFlow.Image root,Map<Object,ClassLoader> loaders,Map<Object,Class<?>> classes,Map<Class<?>,Bound> bound,Set<Class<?>> unavailable){
         if(!method.unique()||(method.access()&(Opcodes.ACC_ABSTRACT|Opcodes.ACC_NATIVE))!=0)return null;
         if(method.actual()==classes.get(root.identity()))return concrete(declared(root,key))?new Target(root,key):null;
-        Bound selected=bind(method.actual(),bound,unavailable);
+        Bound selected=bindMethod(method.actual(),key,bound,unavailable);
         Integer access=selected==null?null:selected.definition().declarations.get(key);
         return selected!=null&&selected.methods().contains(key)&&access!=null&&(access&(Opcodes.ACC_ABSTRACT|Opcodes.ACC_NATIVE))==0?include(selected,key,loaders,classes):null;
     }
@@ -747,7 +795,9 @@ final class ExternalCodeDefinitions {
         if(resolution!=null){
             Map<String,MethodNode> methods=resolution.methods.get(image.node());
             if(methods==null){
-                methods=new HashMap<>();for(MethodNode method:image.node().methods)methods.put(method.name+method.desc,method);
+                // Keep this lookup within the current resolution. Its String
+                // keys need no observed HashMap mutation/source bookkeeping.
+                methods=new TreeMap<>();for(MethodNode method:image.node().methods)methods.put(method.name+method.desc,method);
                 resolution.methods.put(image.node(),methods);
             }
             return methods.get(key);
@@ -755,6 +805,27 @@ final class ExternalCodeDefinitions {
         for(MethodNode method:image.node().methods)if((method.name+method.desc).equals(key))return method;return null;
     }
     private static boolean concrete(MethodNode method){return method!=null&&(method.access&(Opcodes.ACC_ABSTRACT|Opcodes.ACC_NATIVE))==0;}
+    private static Bound bindMethod(Class<?> actual,String key,Map<Class<?>,Bound> bound,Set<Class<?>> unavailable){
+        Resolution resolution=RESOLUTION.get();if(resolution==null)return bind(actual,bound,unavailable);
+        Map<String,Bound> bodies=resolution.bodies.computeIfAbsent(actual,ignored->new TreeMap<>());
+        if(bodies.containsKey(key))return bodies.get(key);
+        BootstrapLookup lookup=BOOTSTRAP_LOOKUP.get();if(lookup==null)lookup=new BootstrapLookup(definitions());
+        String name=actual.getName().replace('.','/');Map<String,Integer> headers=resolution.declarations.get(actual);
+        Bound result=null;
+        for(Candidate selected=lookup.candidates(actual);selected!=null;selected=selected.next){
+            Definition candidate=selected.definition;
+            if(!candidate.loader(actual.getClassLoader())||candidate.hidden!=actual.isHidden()
+                    ||(candidate.hidden?candidate.actual.get()!=actual:!candidate.name.equals(name)))continue;
+            Class<?> prior=candidate.actual.get();if(prior!=null&&prior!=actual)continue;
+            if(!candidate.declarations.containsKey(key)||headers!=null&&!sameDeclarations(candidate,headers))continue;
+            String[] matched=RecoveryAgent.externalCodeMethodVersion(actual,candidate.bytes,key);
+            if(matched==null||matched.length!=1||!key.equals(matched[0]))continue;
+            // Rows are immutable candidate input. Only a reached and separately
+            // matched body is admitted; unrelated rows never become reachable.
+            result=makeBound(candidate,actual,Set.of(key),candidate.analysis().rows().keySet());break;
+        }
+        bodies.put(key,result);return result;
+    }
     private static Bound bind(Class<?> actual,Map<Class<?>,Bound> bound,Set<Class<?>> unavailable){
         if(bound.containsKey(actual))return bound.get(actual);if(unavailable.contains(actual))return null;
         Definition definition=null;String[] matched=null;String name=actual.getName().replace('.','/');
@@ -778,11 +849,16 @@ final class ExternalCodeDefinitions {
             if(selectors.length==candidate.concreteMethods)break;
         }
         if(definition==null){unavailable.add(actual);return null;}
-        Set<String> methods=Set.copyOf(Arrays.asList(matched));Map<String,Module[][]> rows=new LinkedHashMap<>();
+        Set<String> methods=Set.copyOf(Arrays.asList(matched));
+        Bound result=makeBound(definition,actual,methods,methods);bound.put(actual,result);return result;
+    }
+    private static Bound makeBound(Definition definition,Class<?> actual,Set<String> methods,Set<String> rowKeys){
+        Map<String,Module[][]> rows=new LinkedHashMap<>();
         Module declaration=RecoveryAgent.logicalModule(actual);
         boolean primary=RecoveryAgent.producerModule(declaration)&&!ModGroupBoundary.stopped(declaration);
-        for(String key:methods){
-            Module[][] source=definition.analysis.rows().get(key);if(source==null)continue;
+        ExternalCodeFlow.Image analysis=definition.analysis();
+        for(String key:rowKeys){
+            Module[][] source=analysis.rows().get(key);if(source==null)continue;
             if(!primary){rows.put(key,source);continue;}
             Module[][] owned=new Module[source.length][];
             for(int i=0;i<source.length;i++){
@@ -790,8 +866,8 @@ final class ExternalCodeDefinitions {
             }
             rows.put(key,owned);
         }
-        ExternalCodeFlow.Image graph=new ExternalCodeFlow.Image(definition.analysis.identity(),definition.analysis.node(),Map.copyOf(rows),definition.analysis.comparisons());
-        Bound result=new Bound(definition,actual,methods,graph);bound.put(actual,result);return result;
+        ExternalCodeFlow.Image graph=new ExternalCodeFlow.Image(analysis.identity(),analysis.node(),Map.copyOf(rows),analysis.comparisons());
+        return new Bound(definition,actual,methods,graph);
     }
     private static boolean sameDeclarations(Definition definition,Map<String,Integer> actual){
         if(definition.declarationCount!=actual.size())return false;

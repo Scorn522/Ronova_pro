@@ -99,13 +99,13 @@ public final class ClientFaults {
         net.minecraft.network.chat.Component name=object instanceof RenderNameTagEvent e?e.getContent():null;
         try {((IEventBusInvokeDispatcher)dispatcher).invoke((IEventListener)listener,event);}
         catch(Throwable failure) {
-            if(!ClientItemFaults.failed(token,failure))throw failure;
+            if(!ClientDrawFaults.failed(token,failure))throw failure;
             if(event.isCancelable())event.setCanceled(cancelled);
             if(event.hasResult())event.setResult(result);
             if(object instanceof RenderNameTagEvent e)e.setContent(name);
             return true;
         }
-        ClientItemFaults.leave(token);return true;
+        ClientDrawFaults.leave(token);return true;
     }
 
     private static void loaded(Object listener,Consumer<ShaderInstance> consumer,ShaderInstance shader) {

@@ -46,7 +46,7 @@ public final class ResourceBridge {
     private static final Class<?> PROCESS_TYPE=platformType("java.lang.ProcessImpl"),PIPE_INPUT=platformType("java.lang.Process$PipeInputStream");
     private static final Class<?> PIPE_REDIRECT=platformType("java.lang.ProcessBuilder$RedirectPipeImpl");
     private static final Class<?> FILE_CHANNEL=platformType("sun.nio.ch.FileChannelImpl"),FILE_CLOSER=platformType("sun.nio.ch.FileChannelImpl$Closer");
-    private static final Class<?> FILE_FACTORY=platformType("sun.nio.fs.WindowsChannelFactory");
+    private static final Class<?> FILE_FACTORY=optionalPlatformType("sun.nio.fs.WindowsChannelFactory");
     private static final Field CHANNEL_FD=field(FILE_CHANNEL,"fd"),CHANNEL_PARENT=field(FILE_CHANNEL,"parent"),CHANNEL_PATH=field(FILE_CHANNEL,"path"),CHANNEL_CLOSER=field(FILE_CHANNEL,"closer");
     private static final Field CLOSER_FD=field(FILE_CLOSER,"fd");
     private static final class BufferPlatform {
@@ -145,7 +145,7 @@ public final class ResourceBridge {
     private static boolean wrapperSlot(Field field){return Set.of("in","out","sd","se","ch","cb","buf","bb","lcb").contains(field.getName())&&!java.lang.reflect.Modifier.isStatic(field.getModifiers());}
     public static void wrapperConstructed(Object value,Class<?> declaring){
         platform(declaring,"<init>");if(!characterWrapper(value))return;
-        Module[] sources=TaskBridge.resourceOperationSources(null);if(sources.length==0)return;
+        Module[] sources=ControlBridge.resourceOperationSources(null);if(sources.length==0)return;
         try{
             Field lock=value instanceof Reader?CharacterWrappers.READER_LOCK:CharacterWrappers.WRITER_LOCK;
             WrapperRecord record=new WrapperRecord(lock.get(value));
@@ -153,18 +153,18 @@ public final class ResourceBridge {
                 member.setAccessible(true);Object child=member.get(value);record.delegates.put(member,new WeakReference<>(child));
             }
             synchronized(STREAMS){reap();WRAPPERS.putIfAbsent(new Key(value,true),record);}
-            TaskBridge.resourceCreated(value,sources);
+            ControlBridge.resourceCreated(value,sources);
             for(var entry:record.delegates.entrySet())if(Set.of("in","out","sd","se","ch").contains(entry.getKey().getName()))exposeWrapperGraph(entry.getValue().get(),sources);
             // These are freshly allocated private buffers, not caller-supplied encoders or delegates.
             for(var entry:record.delegates.entrySet())if(Set.of("cb","buf","bb").contains(entry.getKey().getName())){
-                Object child=entry.getValue().get();if(child!=null)TaskBridge.resourceCreated(child,sources);
+                Object child=entry.getValue().get();if(child!=null)ControlBridge.resourceCreated(child,sources);
             }
         }catch(ReflectiveOperationException failed){throw new IllegalStateException("CHARACTER_WRAPPER_CONSTRUCTOR_LAYOUT",failed);}
     }
     public static void wrapperOperation(Object value,Class<?> declaring,String method)throws IOException{
         platform(declaring,method);WrapperRecord record;
         synchronized(STREAMS){record=WRAPPERS.get(new Key(value,false));if(record==null)return;if(record.sealed)throw new IOException("CHARACTER_WRAPPER_RETIRED");record.observing++;record.exposureVersion++;}
-        try{exposeWrapperGraph(value,TaskBridge.resourceOperationSources(null));}
+        try{exposeWrapperGraph(value,ControlBridge.resourceOperationSources(null));}
         finally{synchronized(STREAMS){record.observing--;}}
     }
     private static void exposeWrapperGraph(Object value,Module[] sources){
@@ -172,7 +172,7 @@ public final class ResourceBridge {
         ArrayDeque<Object> pending=new ArrayDeque<>();Set<Object> seen=Collections.newSetFromMap(new IdentityHashMap<>());pending.add(value);
         while(!pending.isEmpty()){
             Object current=pending.removeFirst();if(!seen.add(current))continue;
-            TaskBridge.resourceExposed(current,sources);
+            ControlBridge.resourceExposed(current,sources);
             synchronized(STREAMS){WrapperRecord child=WRAPPERS.get(new Key(current,false));if(child!=null)for(var reference:child.delegates.values()){
                 Object next=reference.get();if(next!=null)pending.add(next);
             }}
@@ -180,7 +180,7 @@ public final class ResourceBridge {
     }
     /** The core consumes captured delegates only after the asynchronous detach is confirmed. */
     public static Object[] wrapperChildren(Object value){
-        if(!TaskBridge.recoveryWriter())throw new SecurityException("RESOURCE_RECOVERY_CORE_REQUIRED");
+        if(!ControlBridge.recoveryWriter())throw new SecurityException("RESOURCE_RECOVERY_CORE_REQUIRED");
         synchronized(STREAMS){WrapperRecord record=WRAPPERS.get(new Key(value,false));
             if(record==null||!record.retired)throw new IllegalStateException("CHARACTER_WRAPPER_DISPOSITION_PENDING");
             Object[] children=record.children;record.children=null;return children==null?new Object[0]:children;
@@ -256,8 +256,8 @@ public final class ResourceBridge {
     private record BufferRead(Object receipt,Module[] before){}
     private record BufferRestore(BufferStorage storage,Module[] modules,long cursor,int budget){}
     private static final class IoBufferLease {
-        final List<BufferUse> uses;int remaining;boolean released;
-        IoBufferLease(List<BufferUse> uses){this.uses=uses;remaining=uses.size();}
+        final List<BufferUse> uses;boolean released;
+        IoBufferLease(List<BufferUse> uses){this.uses=uses;}
     }
     private static final class IoBufferWrite {
         final BufferUse use;final long address,bytes;final Module[] sources;final Object group;
@@ -357,6 +357,9 @@ public final class ResourceBridge {
         try{Field field=type.getDeclaredField(name);field.setAccessible(true);return field;}
         catch(ReflectiveOperationException failure){throw new ExceptionInInitializerError(failure);}
     }
+    private static Class<?> optionalPlatformType(String name){
+        try{return Class.forName(name,false,null);}catch(ClassNotFoundException absent){return null;}
+    }
     private static Class<?> platformType(String name){
         try{return Class.forName(name,false,null);}catch(ClassNotFoundException absent){throw new ExceptionInInitializerError(absent);}
     }
@@ -377,7 +380,7 @@ public final class ResourceBridge {
     }
     public static void processStart()throws IOException {
         platform(PROCESS_TYPE,"start");
-        if(!TaskBridge.taskEffectAllowed(null,"process-start"))throw new IOException("RONOVA_TERMINAL_PROCESS_START_REFUSED");
+        if(!ControlBridge.taskEffectAllowed(null,"process-start"))throw new IOException("RONOVA_TERMINAL_PROCESS_START_REFUSED");
     }
     public static long processCreateBegin(long[] handles)throws IOException {
         platform(PROCESS_TYPE,"<init>");return NativeControl.processCreateBegin(handles);
@@ -431,9 +434,9 @@ public final class ResourceBridge {
                     if(descriptor==null||attachment==null||FD_HANDLE.getLong(descriptor)!=handles[i]){record.gap="PROCESS_ORIGINAL_PIPE_DESCRIPTOR_CHANGED";continue;}
                     attachment.allocated=true;PipeRecord pipe=new PipeRecord(view,stream,descriptor,buffer);record.pipes[i]=pipe;
                     PROCESS_VIEWS.put(new Key(view,true),new WeakReference<>(pipe));PROCESS_VIEWS.put(new Key(stream,true),new WeakReference<>(pipe));
-                    TaskBridge.resourceCreated(stream);if(view!=stream)TaskBridge.resourceCreated(view);TaskBridge.resourceCreated(descriptor);
+                    ControlBridge.resourceCreated(stream);if(view!=stream)ControlBridge.resourceCreated(view);ControlBridge.resourceCreated(descriptor);
                 }
-                TaskBridge.resourceCreated(process);TaskBridge.resourceCreated(record.processHandle);
+                ControlBridge.resourceCreated(process);ControlBridge.resourceCreated(record.processHandle);
             }catch(IllegalAccessException failure){record.gap="PROCESS_ORIGINAL_LAYOUT_UNOBSERVED";}
         }
     }
@@ -445,7 +448,7 @@ public final class ResourceBridge {
                 if(redirects==null||redirects.length!=3||redirects[1]==null||redirects[1].getClass()!=PIPE_REDIRECT){record.gap="PROCESS_PIPELINE_PUBLICATION_UNOBSERVED";return;}
                 FileDescriptor descriptor=(FileDescriptor)field(PIPE_REDIRECT,"fd").get(redirects[1]);
                 if(descriptor==null||FD_HANDLE.getLong(descriptor)!=record.pipelineHandle){record.gap="PROCESS_PIPELINE_DESCRIPTOR_CHANGED";return;}
-                record.pipelineDescriptor=descriptor;TaskBridge.resourceCreated(descriptor);
+                record.pipelineDescriptor=descriptor;ControlBridge.resourceCreated(descriptor);
             }catch(IllegalAccessException failed){record.gap="PROCESS_PIPELINE_PUBLICATION_UNOBSERVED";}
         }
     }
@@ -453,13 +456,13 @@ public final class ResourceBridge {
         platform(PROCESS_TYPE,method);PipeRecord pipe;ProcessRecord record;
         synchronized(STREAMS){record=PROCESSES.get(new Key(process,false));WeakReference<PipeRecord> link=PROCESS_VIEWS.get(new Key(view,false));pipe=link==null?null:link.get();}
         if(record!=null){
-            Module[] sources=TaskBridge.invokingSources();NativeControl.processExposed(process,record.hostToken,sources);
-            TaskBridge.resourceExposed(process);if(view==record.processHandle)TaskBridge.resourceExposed(view);
+            Module[] sources=ControlBridge.invokingSources();NativeControl.processExposed(process,record.hostToken,sources);
+            ControlBridge.resourceExposed(process);if(view==record.processHandle)ControlBridge.resourceExposed(view);
         }
-        if(pipe!=null&&!TaskBridge.resourceExposed(view))pipe.unknownExposure=true;
+        if(pipe!=null&&!ControlBridge.resourceExposed(view))pipe.unknownExposure=true;
     }
     public static boolean retireProcess(Process process,Callable<String> action)throws IOException {
-        if(!TaskBridge.recoveryWriter()||!TaskBridge.coreResourceCallback(action))throw new SecurityException("PROCESS_RECOVERY_CORE_REQUIRED");
+        if(!ControlBridge.recoveryWriter()||!ControlBridge.coreResourceCallback(action))throw new SecurityException("PROCESS_RECOVERY_CORE_REQUIRED");
         ProcessRecord record;synchronized(STREAMS){record=PROCESSES.get(new Key(process,false));}
         if(record==null)throw new IOException("PROCESS_CONSTRUCTOR_ASSOCIATION_UNOBSERVED");
         if(!record.observation.tryLock())return false;
@@ -478,7 +481,7 @@ public final class ResourceBridge {
         }finally{record.observation.unlock();}
     }
     public static String releaseProcess(Process process,Predicate<Object> selected){
-        if(!TaskBridge.recoveryWriter()||!TaskBridge.coreResourceCallback(selected))throw new SecurityException("PROCESS_RELEASE_CORE_REQUIRED");
+        if(!ControlBridge.recoveryWriter()||!ControlBridge.coreResourceCallback(selected))throw new SecurityException("PROCESS_RELEASE_CORE_REQUIRED");
         ProcessRecord record;synchronized(STREAMS){record=PROCESSES.get(new Key(process,false));}
         if(record==null)return "PROCESS_CONSTRUCTOR_ASSOCIATION_UNOBSERVED";
         try{
@@ -525,7 +528,7 @@ public final class ResourceBridge {
         platform(FileDescriptor.class,"close");
         if(FILE_OBSERVING.get()!=null)return;
         FILE_OBSERVING.set(Boolean.TRUE);
-        try{if(!TaskBridge.recoveryWriter()&&(!TaskBridge.taskEffectAllowed(null,"file-close")||!descriptorReleaseAllowed(descriptor)))throw new IOException("RONOVA_FILE_DESCRIPTOR_CLOSE_REFUSED");}
+        try{if(!ControlBridge.recoveryWriter()&&(!ControlBridge.taskEffectAllowed(null,"file-close")||!descriptorReleaseAllowed(descriptor)))throw new IOException("RONOVA_FILE_DESCRIPTOR_CLOSE_REFUSED");}
         finally{FILE_OBSERVING.remove();}
     }
     private static void platform(Class<?> expected,String method){
@@ -581,7 +584,7 @@ public final class ResourceBridge {
     private static void resourceCreated(Object value){
         if(FILE_OBSERVING.get()!=null)return;
         FILE_OBSERVING.set(Boolean.TRUE);
-        try{Module[] sources=IoBridge.currentSources();if(sources==null)TaskBridge.resourceCreated(value);else TaskBridge.resourceCreated(value,sources);}finally{FILE_OBSERVING.remove();}
+        try{Module[] sources=IoBridge.currentSources();if(sources==null)ControlBridge.resourceCreated(value);else ControlBridge.resourceCreated(value,sources);}finally{FILE_OBSERVING.remove();}
     }
     /** The Windows factory has completed CreateFile and installed this exact handle in the returned descriptor. */
     public static void descriptorOpened(FileDescriptor descriptor){
@@ -595,7 +598,7 @@ public final class ResourceBridge {
         if(declaring!=FILE_FACTORY&&!LAYOUTS.containsKey(declaring))throw new SecurityException("ACTUAL_FILE_OPEN_REQUIRED");
         if(FILE_OBSERVING.get()!=null)return;
         FILE_OBSERVING.set(Boolean.TRUE);
-        try{if(!TaskBridge.recoveryWriter()&&!TaskBridge.taskEffectAllowed(null,"file-open")){
+        try{if(!ControlBridge.recoveryWriter()&&!ControlBridge.taskEffectAllowed(null,"file-open")){
             if(LAYOUTS.containsKey(declaring))throw new FileNotFoundException("RONOVA_TERMINAL_FILE_OPEN_REFUSED");
             throw new IOException("RONOVA_TERMINAL_FILE_OPEN_REFUSED");
         }}
@@ -666,15 +669,15 @@ public final class ResourceBridge {
             return null;
         }
         if(operation==2){
-            if(!TaskBridge.recoveryWriter()){
-                if(!TaskBridge.taskEffectAllowed(null,"file-open"))throw new FileNotFoundException("RONOVA_TERMINAL_FILE_OPEN_REFUSED");
+            if(!ControlBridge.recoveryWriter()){
+                if(!ControlBridge.taskEffectAllowed(null,"file-open"))throw new FileNotFoundException("RONOVA_TERMINAL_FILE_OPEN_REFUSED");
                 synchronized(STREAMS){if(fileRecord(value)!=null)throw new FileNotFoundException("FILE_DESCRIPTOR_REOPEN_REFUSED");}
             }
             return null;
         }
         if(operation==4&&IoBridge.closingDescriptor((FileDescriptor)value))return null;
-        if(operation==4&&!TaskBridge.recoveryWriter())for(Module source:sources)if(source!=null&&TaskBridge.modStopped(source))throw new IOException("RONOVA_TERMINAL_FILE_CLOSE_REFUSED");
-        if(operation==4&&!TaskBridge.recoveryWriter()&&(!TaskBridge.taskEffectAllowed(value,"file-close")||!descriptorReleaseAllowed((FileDescriptor)value)))throw new IOException("RONOVA_FILE_DESCRIPTOR_CLOSE_REFUSED");
+        if(operation==4&&!ControlBridge.recoveryWriter())for(Module source:sources)if(source!=null&&ControlBridge.modStopped(source))throw new IOException("RONOVA_TERMINAL_FILE_CLOSE_REFUSED");
+        if(operation==4&&!ControlBridge.recoveryWriter()&&(!ControlBridge.taskEffectAllowed(value,"file-close")||!descriptorReleaseAllowed((FileDescriptor)value)))throw new IOException("RONOVA_FILE_DESCRIPTOR_CLOSE_REFUSED");
         try{return fileOperation(value,declaring,method,sources);}
         catch(IOException failure){
             if(operation!=5)throw failure;
@@ -685,8 +688,8 @@ public final class ResourceBridge {
         if(FILE_OBSERVING.get()!=null)return null;
         FILE_OBSERVING.set(Boolean.TRUE);
         try{
-            if(TaskBridge.recoveryWriter())return null;
-            if(!TaskBridge.taskEffectAllowed(null,"file-io"))throw new IOException("RONOVA_TERMINAL_FILE_IO_REFUSED");
+            if(ControlBridge.recoveryWriter())return null;
+            if(!ControlBridge.taskEffectAllowed(null,"file-io"))throw new IOException("RONOVA_TERMINAL_FILE_IO_REFUSED");
             FileRecord record;
             synchronized(STREAMS){
                 record=fileRecord(value);
@@ -699,10 +702,10 @@ public final class ResourceBridge {
             try{
                 boolean known;
                 if(record instanceof DescriptorRecord descriptor){
-                    Module[] sources=TaskBridge.resourceOperationSources(nativeSources);
+                    Module[] sources=ControlBridge.resourceOperationSources(nativeSources);
                     known=sources.length!=0;
                     synchronized(STREAMS){for(Module source:sources){if(source==null)known=false;else descriptor.nativeSources.add(source);}}
-                }else known=nativeSources==null?TaskBridge.resourceExposed(value):TaskBridge.resourceExposed(value,nativeSources);
+                }else known=nativeSources==null?ControlBridge.resourceExposed(value):ControlBridge.resourceExposed(value,nativeSources);
                 FileOperation token=new FileOperation(record,declaring,method);
                 synchronized(STREAMS){if(!known)record.unknownUse=true;record.active++;return token;}
             }finally{synchronized(STREAMS){record.observing--;}}
@@ -725,7 +728,7 @@ public final class ResourceBridge {
         else if(!LAYOUTS.containsKey(declaring))throw new SecurityException("ACTUAL_FILE_CLOSE_REQUIRED");
         if(FILE_OBSERVING.get()!=null)return;
         FILE_OBSERVING.set(Boolean.TRUE);
-        try{if(!TaskBridge.recoveryWriter()&&(!TaskBridge.taskEffectAllowed(null,"file-close")||!TaskBridge.resourceReleaseAllowed(value)))throw new IOException("RONOVA_FILE_CLOSE_REFUSED");}
+        try{if(!ControlBridge.recoveryWriter()&&(!ControlBridge.taskEffectAllowed(null,"file-close")||!ControlBridge.resourceReleaseAllowed(value)))throw new IOException("RONOVA_FILE_CLOSE_REFUSED");}
         finally{FILE_OBSERVING.remove();}
     }
     public static void fileChannelClosed(Object channel){
@@ -746,7 +749,7 @@ public final class ResourceBridge {
         return record!=null?record:value instanceof FileDescriptor?ATTACHMENTS.get(key):null;
     }
     private static boolean descriptorReleaseAllowed(FileDescriptor descriptor){
-        if(!TaskBridge.resourceReleaseAllowed(descriptor))return false;
+        if(!ControlBridge.resourceReleaseAllowed(descriptor))return false;
         List<Object> aliases=new ArrayList<>();
         synchronized(STREAMS){
             DescriptorRecord record=ATTACHMENTS.get(new Key(descriptor,false));
@@ -758,7 +761,7 @@ public final class ResourceBridge {
         synchronized(STREAMS){for(BufferStorage storage:BUFFER_ACTIONS.values())if(storage.descriptor==descriptor)
             for(var reference:storage.views){Buffer buffer=reference.get();if(buffer!=null)aliases.add(buffer);}}
         aliases.addAll(IoBridge.descriptorAliases(descriptor));
-        for(Object alias:aliases)if(!TaskBridge.resourceReleaseAllowed(alias))return false;return true;
+        for(Object alias:aliases)if(!ControlBridge.resourceReleaseAllowed(alias))return false;return true;
     }
     static Object ioLock(){return STREAMS;}
     static boolean ioDescriptorCloseAllowed(FileDescriptor descriptor){
@@ -796,8 +799,8 @@ public final class ResourceBridge {
     public static void mappingExposed(Object action,String method){
         platform(BufferPlatform.UNMAPPER,method);
         if(!method.equals("address")&&!method.equals("fileDescriptor"))throw new SecurityException("ACTUAL_MAPPING_ACCESSOR_REQUIRED");
-        if(FILE_OBSERVING.get()!=null||TaskBridge.recoveryWriter())return;
-        if(!TaskBridge.taskEffectAllowed(action,"mapping-address"))throw new IllegalStateException("RONOVA_TERMINAL_MAPPING_ADDRESS");
+        if(FILE_OBSERVING.get()!=null||ControlBridge.recoveryWriter())return;
+        if(!ControlBridge.taskEffectAllowed(action,"mapping-address"))throw new IllegalStateException("RONOVA_TERMINAL_MAPPING_ADDRESS");
         synchronized(STREAMS){BufferStorage storage=BUFFER_ACTIONS.get(new Key(action,false));if(storage==null)return;
             if(storage.sealed||storage.cleaned)throw new IllegalStateException("RONOVA_RETIRED_MAPPING_ADDRESS");
             storage.escaped=true;}
@@ -807,7 +810,7 @@ public final class ResourceBridge {
         if(!fileChannel(channel)||!(value instanceof Runnable action)||!BufferPlatform.UNMAPPER.isInstance(value))throw new SecurityException("ACTUAL_MAPPING_RESULT_REQUIRED");
         FILE_OBSERVING.set(Boolean.TRUE);
         try{
-            Module[] sources=TaskBridge.resourceOperationSources(null);
+            Module[] sources=ControlBridge.resourceOperationSources(null);
             synchronized(STREAMS){
                 Key key=new Key(action,true);BufferStorage storage=BUFFER_ACTIONS.get(key);
                 if(storage==null){storage=new BufferStorage(action,true);storage.gap="";BUFFER_ACTIONS.put(key,storage);}
@@ -823,7 +826,7 @@ public final class ResourceBridge {
         if(action.getClass()!=BufferPlatform.DEALLOCATOR&&!BufferPlatform.UNMAPPER.isInstance(action))return action;
         FILE_OBSERVING.set(Boolean.TRUE);BufferStorage storage;
         try{
-            Module[] sources=TaskBridge.resourceOperationSources(null);
+            Module[] sources=ControlBridge.resourceOperationSources(null);
             synchronized(STREAMS){
                 Key key=new Key(action,true);storage=BUFFER_ACTIONS.get(key);
                 if(storage==null){storage=new BufferStorage(action,action.getClass()==BufferPlatform.DEALLOCATOR);BUFFER_ACTIONS.put(key,storage);}
@@ -855,7 +858,7 @@ public final class ResourceBridge {
         return scope!=null&&scope.buffer==buffer&&scope.storage.original==action&&scope.storage.address==address&&scope.storage.bytes==bytes;
     }
     static boolean bufferRestoreActive(Object action,long token,long generation,Module[] modules,long cursor,int budget){
-        if(WALKER.getCallerClass()!=NativeControl.class||!TaskBridge.recoveryWriter())return false;BufferRestore scope=BUFFER_RESTORING.get();
+        if(WALKER.getCallerClass()!=NativeControl.class||!ControlBridge.recoveryWriter())return false;BufferRestore scope=BUFFER_RESTORING.get();
         return scope!=null&&scope.storage.restoring&&scope.storage.original==action&&scope.storage.memoryToken==token
                 &&scope.storage.memoryGeneration==generation&&scope.modules==modules&&scope.cursor==cursor&&scope.budget==budget;
     }
@@ -872,7 +875,7 @@ public final class ResourceBridge {
         try{
             if(!buffer.isDirect())return;
             Field parentField=BufferPlatform.PARENT.get(buffer.getClass());Object parent=parentField==null?null:CodeSourceBridge.controlField(parentField,buffer);
-            Module[] sources=TaskBridge.resourceOperationSources(null);
+            Module[] sources=ControlBridge.resourceOperationSources(null);
             synchronized(STREAMS){
                 reap();BufferView view=BUFFERS.get(new Key(buffer,false));
                 if(view==null){
@@ -957,7 +960,7 @@ public final class ResourceBridge {
         // This snapshot belongs only to this entering operation. Storage use
         // consumes it immediately; a data-only path asks only after finding a
         // real span that will have a receipt. No later operation inherits it.
-        if(operation.sources==null)operation.sources=TaskBridge.resourceOperationSources(IoBridge.currentSources());
+        if(operation.sources==null)operation.sources=ControlBridge.resourceOperationSources(IoBridge.currentSources());
         return operation.sources;
     }
     private static BufferRead bufferRead(Buffer buffer,Object[] arguments,String method,BufferOperation operation){
@@ -976,10 +979,10 @@ public final class ResourceBridge {
             }
             BufferSpan source=bufferSpan(buffer,index,bytes);if(source==null)return null;
             Module[] sources=bufferOperationSources(operation);
-            Object receipt=destination==null?TaskBridge.bufferReadBefore(source.holder,source.address,source.bytes,sources)
-                    :TaskBridge.bufferDataBefore(destination,destinationOffset,bytes,source.holder,source.address,source.bytes,true,sources);
-            try{return new BufferRead(receipt,TaskBridge.bufferReadSources(receipt));}
-            catch(RuntimeException|Error failure){try{TaskBridge.bufferDataFinished(receipt,false);}catch(Throwable cleanup){if(cleanup!=failure)failure.addSuppressed(cleanup);}throw failure;}
+            Object receipt=destination==null?ControlBridge.bufferReadBefore(source.holder,source.address,source.bytes,sources)
+                    :ControlBridge.bufferDataBefore(destination,destinationOffset,bytes,source.holder,source.address,source.bytes,true,sources);
+            try{return new BufferRead(receipt,ControlBridge.bufferReadSources(receipt));}
+            catch(RuntimeException|Error failure){try{ControlBridge.bufferDataFinished(receipt,false);}catch(Throwable cleanup){if(cleanup!=failure)failure.addSuppressed(cleanup);}throw failure;}
         }catch(IllegalAccessException failure){throw new IllegalStateException("BUFFER_READ_LAYOUT_UNAVAILABLE",failure);}
     }
     private static BufferWrite bufferWrite(Buffer buffer,Object[] arguments,String method,BufferOperation operation){
@@ -1004,7 +1007,7 @@ public final class ResourceBridge {
                         if(from<0||end<from||end>text.length())return null;count=end-from;
                         source=BufferPlatform.STRING_VALUE.get(text);int inputWidth=1<<BufferPlatform.STRING_CODER.getByte(text);long[] layout=arrayLayout(source.getClass());
                         sourceOffset=layout[0]+from*inputWidth;sourceBytes=count*inputWidth;copy=true;
-                        valueSources=TaskBridge.creationSources(text);break;
+                        valueSources=ControlBridge.creationSources(text);break;
                     }
                     if(!(value instanceof Buffer)&&!(value!=null&&value.getClass().isArray()))continue;
                     long from=0;boolean explicit=arguments.length>at+2&&arguments[at+1] instanceof Integer&&arguments[at+2] instanceof Integer;
@@ -1035,7 +1038,7 @@ public final class ResourceBridge {
                 Set<Module> combined=Collections.newSetFromMap(new IdentityHashMap<>());Collections.addAll(combined,sources);Collections.addAll(combined,valueSources);sources=combined.toArray(new Module[0]);
             }
             if(unknownSource)sources=Arrays.copyOf(sources,sources.length+1);
-            Object receipt=TaskBridge.bufferDataBefore(destination.holder,destination.address,bytes,source,sourceOffset,sourceBytes,copy,sources);
+            Object receipt=ControlBridge.bufferDataBefore(destination.holder,destination.address,bytes,source,sourceOffset,sourceBytes,copy,sources);
             return new BufferWrite(destination,receipt);
         }catch(IllegalAccessException failure){throw new IllegalStateException("BUFFER_WRITE_LAYOUT_UNAVAILABLE",failure);}
     }
@@ -1083,8 +1086,10 @@ public final class ResourceBridge {
             try{
                 // These views belong to this one borrow. Collect its actual
                 // current context once, then record every selected identity.
-                Module[] exposed=TaskBridge.resourceOperationSources(sources);
-                for(BufferUse use:uses){boolean known=TaskBridge.resourceExposedByOperation(use.buffer,exposed);
+                // IoBridge captured these sources at this actual synchronous
+                // entry or detached request. Rewalking here can attribute an
+                // async borrow to its completion worker instead of its request.
+                for(BufferUse use:uses){boolean known=ControlBridge.resourceExposedByOperation(use.buffer,sources);
                     synchronized(STREAMS){if(!known)use.view.unknownUse=true;bufferSources(use.view.storage,sources);}}
                 IoBufferLease lease=new IoBufferLease(uses);
                 synchronized(STREAMS){for(BufferUse use:uses){use.view.active++;use.view.storage.active++;}}
@@ -1097,21 +1102,13 @@ public final class ResourceBridge {
         if(value==null)return;if(!(value instanceof IoBufferLease lease))throw new SecurityException("ACTUAL_IO_BUFFER_LEASE_REQUIRED");
         synchronized(STREAMS){
             if(lease.released)return;
-            for(int index=0;index<lease.uses.size();index++)releaseIoUse(lease,lease.uses.get(index));
+            for(int index=0;index<lease.uses.size();index++)releaseIoUse(lease.uses.get(index));
             lease.released=true;lease.uses.clear();
         }
     }
-    static boolean releaseIoBuffer(Object value,Buffer buffer){
-        if(WALKER.getCallerClass()!=IoBridge.class||!(value instanceof IoBufferLease lease))throw new SecurityException("ACTUAL_IO_BUFFER_RETURN_REQUIRED");
-        synchronized(STREAMS){if(lease.released)return true;
-            for(int index=0;index<lease.uses.size();index++){BufferUse use=lease.uses.get(index);if(use.buffer==buffer)releaseIoUse(lease,use);}
-            if(lease.remaining==0){lease.released=true;lease.uses.clear();}
-            return lease.released;
-        }
-    }
-    private static void releaseIoUse(IoBufferLease lease,BufferUse use){
+    private static void releaseIoUse(BufferUse use){
         if(use.returned)return;
-        use.returned=true;use.view.active--;use.view.storage.active--;lease.remaining--;
+        use.returned=true;use.view.active--;use.view.storage.active--;
     }
     static Object ioBufferWriting(IoBridge.BufferLeases leases,long[] spans,Module[] sources){
         if(WALKER.getCallerClass()!=IoBridge.class)throw new SecurityException("ACTUAL_IO_BUFFER_WRITE_REQUIRED");
@@ -1168,7 +1165,7 @@ public final class ResourceBridge {
         return WALKER.getCallerClass()==NativeControl.class&&value instanceof IoBufferWrite write&&IO_BUFFER_WRITE.get()==write&&!write.ending?write.group:null;
     }
     static Module[] currentBufferSources(){
-        if(WALKER.getCallerClass()!=TaskBridge.class)throw new SecurityException("ACTUAL_BUFFER_READ_CONTEXT_REQUIRED");
+        if(WALKER.getCallerClass()!=ControlBridge.class)throw new SecurityException("ACTUAL_BUFFER_READ_CONTEXT_REQUIRED");
         Set<Module> sources=null;
         for(BufferOperation operation=BUFFER_OPERATIONS.get();operation!=null;operation=operation.previous)if(!operation.closed&&operation.observed!=null&&!operation.observed.isEmpty()){
             if(sources==null)sources=Collections.newSetFromMap(new IdentityHashMap<>());sources.addAll(operation.observed);
@@ -1192,17 +1189,17 @@ public final class ResourceBridge {
         // two temporary ArrayLists in the global source directory for every read.
         List<BufferUse> uses=new LinkedList<>();
         try{
-            if(TaskBridge.recoveryWriter())return null;
+            if(ControlBridge.recoveryWriter())return null;
             synchronized(STREAMS){
                 observeBufferUse(uses,receiver);for(Object argument:arguments)observeBufferUse(uses,argument);
             }
             if(uses.isEmpty()&&!(receiver instanceof Buffer))return null;
-            if(!TaskBridge.recoveryWriter()&&!(receiver instanceof Buffer buffer&&IoBridge.finishingBuffer(buffer))&&!TaskBridge.taskEffectAllowed(receiver,"buffer-io"))throw new IllegalStateException("RONOVA_TERMINAL_BUFFER_IO");
+            if(!ControlBridge.recoveryWriter()&&!(receiver instanceof Buffer buffer&&IoBridge.finishingBuffer(buffer))&&!ControlBridge.taskEffectAllowed(receiver,"buffer-io"))throw new IllegalStateException("RONOVA_TERMINAL_BUFFER_IO");
             boolean read=BufferPlatform.READS.contains(method),write=method.startsWith("put")||method.equals("_put")||method.equals("compact");
             BufferOperation operation=new BufferOperation(declaring,method,uses);
             Module[] sources=uses.isEmpty()?null:bufferOperationSources(operation);
             for(BufferUse use:uses){
-                boolean known=TaskBridge.resourceExposedByOperation(use.buffer,sources);
+                boolean known=ControlBridge.resourceExposedByOperation(use.buffer,sources);
                 synchronized(STREAMS){
                     if(!known)use.view.unknownUse=true;bufferSources(use.view.storage,sources);
                     if((method.equals("address")||method.equals("fileDescriptor"))&&receiver==use.buffer&&!bufferBorrowed(use.view.storage))use.view.storage.escaped=true;
@@ -1234,7 +1231,7 @@ public final class ResourceBridge {
         Throwable failed=null;
         try{
             if(operation.read!=null){
-                operation.observe(operation.read.before);operation.observe(TaskBridge.bufferReadSources(operation.read.receipt));
+                operation.observe(operation.read.before);operation.observe(ControlBridge.bufferReadSources(operation.read.receipt));
             }
             if(operation.observed!=null&&!operation.observed.isEmpty()){
                 CodeSourceBridge.executionBufferObserved(operation.execution,operation.observed.toArray(new Module[0]));
@@ -1242,9 +1239,9 @@ public final class ResourceBridge {
             }
         }catch(RuntimeException|Error failure){failed=failure;}
         finally{
-            try{if(operation.write!=null)TaskBridge.bufferDataFinished(operation.write.receipt,written);}
+            try{if(operation.write!=null)ControlBridge.bufferDataFinished(operation.write.receipt,written);}
             catch(RuntimeException|Error failure){if(failed==null)failed=failure;else if(failed!=failure)failed.addSuppressed(failure);}
-            try{if(operation.read!=null)TaskBridge.bufferDataFinished(operation.read.receipt,written);}
+            try{if(operation.read!=null)ControlBridge.bufferDataFinished(operation.read.receipt,written);}
             catch(RuntimeException|Error failure){if(failed==null)failed=failure;else if(failed!=failure)failed.addSuppressed(failure);}
             synchronized(STREAMS){operation.closed=true;operation.sources=null;for(BufferUse use:operation.uses){use.view.active--;use.view.storage.active--;}}
             if(operation.previous==null)BUFFER_OPERATIONS.remove();else BUFFER_OPERATIONS.set(operation.previous);
@@ -1263,9 +1260,9 @@ public final class ResourceBridge {
             version=storage.viewsVersion;
             for(var reference:storage.views){Buffer buffer=reference.get();if(buffer!=null)views.add(buffer);}
         }
-        if(!TaskBridge.recoveryWriter()){
-            if(!TaskBridge.taskEffectAllowed(null,"buffer-cleanup"))return false;
-            for(Buffer buffer:views)if(!TaskBridge.resourceReleaseAllowed(buffer))return false;
+        if(!ControlBridge.recoveryWriter()){
+            if(!ControlBridge.taskEffectAllowed(null,"buffer-cleanup"))return false;
+            for(Buffer buffer:views)if(!ControlBridge.resourceReleaseAllowed(buffer))return false;
         }
         synchronized(STREAMS){
             if(storage.restoring||storage.cleaning||storage.active!=0||storage.observing!=0||version!=storage.viewsVersion)return false;
@@ -1307,7 +1304,7 @@ public final class ResourceBridge {
         }
     }
     public static boolean bufferResource(Object value){
-        if(!TaskBridge.recoveryWriter())throw new SecurityException("BUFFER_RESOURCE_CORE_REQUIRED");
+        if(!ControlBridge.recoveryWriter())throw new SecurityException("BUFFER_RESOURCE_CORE_REQUIRED");
         synchronized(STREAMS){return BUFFERS.containsKey(new Key(value,false))||BUFFER_ACTIONS.containsKey(new Key(value,false));}
     }
     private static String preserveBuffer(BufferStorage storage,FileRecord requested,Set<Module> selection,long version){
@@ -1386,14 +1383,14 @@ public final class ResourceBridge {
         if(!NativeControl.bufferAllocationBoundary())throw new SecurityException("ACTUAL_BUFFER_INITIALIZATION_REQUIRED");
         BufferAllocation scope=BUFFER_ALLOCATING.get();if(scope==null||scope.closed||scope.buffer!=buffer)return false;
         return WALKER.walk(frames->frames.filter(frame->{Class<?> actual=frame.getDeclaringClass(),nest=actual.getNestHost();
-            return nest!=ResourceBridge.class&&nest!=NativeControl.class&&nest!=TaskBridge.class&&nest!=CodeSourceBridge.class&&nest!=BackingBridge.class&&nest!=ExecutionFlow.class&&actual!=BufferPlatform.UNSAFE;
+            return nest!=ResourceBridge.class&&nest!=NativeControl.class&&nest!=TaskBridge.class&&nest!=ControlBridge.class&&nest!=CodeSourceBridge.class&&nest!=BackingBridge.class&&nest!=ExecutionFlow.class&&actual!=BufferPlatform.UNSAFE;
         }).findFirst().map(frame->frame.getDeclaringClass()==BufferPlatform.DIRECT&&frame.getMethodName().equals("<init>")).orElse(false));
     }
     private static void nativeBufferAddress(Object value,Module[] sources){
         if(!NativeControl.bufferAddressBoundary(value,sources))throw new SecurityException("ACTUAL_BUFFER_NATIVE_ADDRESS_REQUIRED");
         if(!(value instanceof Buffer))return;
-        if(!TaskBridge.taskEffectAllowed(value,"buffer-native-address"))throw new IllegalStateException("RONOVA_TERMINAL_BUFFER_ADDRESS");
-        Module[] contributors=TaskBridge.resourceOperationSources(sources);
+        if(!ControlBridge.taskEffectAllowed(value,"buffer-native-address"))throw new IllegalStateException("RONOVA_TERMINAL_BUFFER_ADDRESS");
+        Module[] contributors=ControlBridge.resourceOperationSources(sources);
         synchronized(STREAMS){BufferView view=BUFFERS.get(new Key(value,false));if(view==null)return;
             if(view.storage.sealed||view.storage.cleaned)throw new IllegalStateException("RONOVA_RETIRED_BUFFER_ADDRESS");
             view.storage.escaped=true;bufferSources(view.storage,contributors);}
@@ -1435,7 +1432,7 @@ public final class ResourceBridge {
         }catch(ReflectiveOperationException failed){throw new IllegalStateException("RESOURCE_FIELD_LAYOUT_UNOBSERVED",failed);}
     }
     static boolean fieldMutationAllowed(Object receiver,Class<?> declaring){
-        if(NativeControl.libraryMetadataType(declaring))return TaskBridge.recoveryWriter()||NativeControl.libraryImplementationCaller();
+        if(NativeControl.libraryMetadataType(declaring))return ControlBridge.recoveryWriter()||NativeControl.libraryImplementationCaller();
         return !platformLayout(declaring)||mutationAllowed(receiver);
     }
     static boolean unsafeMutationAllowed(Object receiver,long offset,long length){
@@ -1515,14 +1512,14 @@ public final class ResourceBridge {
         }catch(ReflectiveOperationException unavailable){throw new IllegalStateException("EXTERNAL_FIELD_LAYOUT_UNAVAILABLE",unavailable);}
     }
     static boolean mutationAllowed(Object value){
-        if(NativeControl.libraryMetadataValue(value))return TaskBridge.recoveryWriter()||NativeControl.libraryImplementationCaller();
-        if(!critical(value)||TaskBridge.recoveryWriter())return true;
+        if(NativeControl.libraryMetadataValue(value))return ControlBridge.recoveryWriter()||NativeControl.libraryImplementationCaller();
+        if(!critical(value)||ControlBridge.recoveryWriter())return true;
         return WALKER.walk(frames->{
             var cursor=frames.iterator();
             while(cursor.hasNext()){
                 var frame=cursor.next();Class<?> type=frame.getDeclaringClass();String name=type.getName();
                 if(DefinitionBridge.module(type)!=type.getModule())return false;
-                if(type.getNestHost()==ResourceBridge.class||type.getNestHost()==IoBridge.class||type.getNestHost()==TaskBridge.class
+                if(type.getNestHost()==ResourceBridge.class||type.getNestHost()==IoBridge.class||type.getNestHost()==TaskBridge.class||type.getNestHost()==ControlBridge.class
                         ||type.getNestHost()==BackingBridge.class||type.getNestHost()==NativeControl.class)continue;
                 if(type.getClassLoader()==null&&(name.startsWith("java.lang.invoke.")||name.startsWith("java.lang.reflect.")
                         ||name.startsWith("jdk.internal.reflect.")||name.equals("jdk.internal.misc.Unsafe"))
@@ -1540,7 +1537,7 @@ public final class ResourceBridge {
     }
     /** The server only polls; a target holding a Java monitor cannot freeze its control loop. */
     public static boolean retire(Object stream,Callable<String> action)throws IOException {
-        if(!TaskBridge.recoveryWriter()||!TaskBridge.coreResourceCallback(action))throw new SecurityException("RESOURCE_RECOVERY_CORE_REQUIRED");
+        if(!ControlBridge.recoveryWriter()||!ControlBridge.coreResourceCallback(action))throw new SecurityException("RESOURCE_RECOVERY_CORE_REQUIRED");
         FileRecord record;
         synchronized(STREAMS){record=fileRecord(stream);}
         if(record==null)throw new IOException("FILE_RESOURCE_CONSTRUCTOR_ASSOCIATION_UNOBSERVED");
@@ -1564,24 +1561,24 @@ public final class ResourceBridge {
         }finally{record.observation.unlock();}
     }
     public static String releaseProcess(Process process,Predicate<Object> selected,Module[] modules){
-        if(!TaskBridge.recoveryWriter()||!TaskBridge.coreResourceCallback(selected))throw new SecurityException("RESOURCE_RELEASE_CORE_REQUIRED");
+        if(!ControlBridge.recoveryWriter()||!ControlBridge.coreResourceCallback(selected))throw new SecurityException("RESOURCE_RELEASE_CORE_REQUIRED");
         Set<Module> previous=selectFiles(modules);
         try{return releaseProcess(process,selected);}finally{restoreFileSelection(previous);}
     }
     public static String release(Object stream,Predicate<Object> selected,Module[] modules){
-        if(!TaskBridge.recoveryWriter()||!TaskBridge.coreResourceCallback(selected))throw new SecurityException("RESOURCE_RELEASE_CORE_REQUIRED");
+        if(!ControlBridge.recoveryWriter()||!ControlBridge.coreResourceCallback(selected))throw new SecurityException("RESOURCE_RELEASE_CORE_REQUIRED");
         Set<Module> previous=selectFiles(modules);
         try{return release(stream,selected);}finally{restoreFileSelection(previous);}
     }
     private static Set<Module> selectFiles(Module[] modules){
         Set<Module> selected=Collections.newSetFromMap(new IdentityHashMap<>());
-        for(Module module:modules){if(module==null||!TaskBridge.modStopped(module))throw new IllegalStateException("STOPPED_FILE_SOURCE_GROUP_REQUIRED");selected.add(module);}
+        for(Module module:modules){if(module==null||!ControlBridge.modStopped(module))throw new IllegalStateException("STOPPED_FILE_SOURCE_GROUP_REQUIRED");selected.add(module);}
         if(selected.isEmpty())throw new IllegalStateException("FILE_SOURCE_GROUP_REQUIRED");
         Set<Module> previous=FILE_SELECTION.get();FILE_SELECTION.set(selected);return previous;
     }
     private static void restoreFileSelection(Set<Module> previous){if(previous==null)FILE_SELECTION.remove();else FILE_SELECTION.set(previous);}
     public static String release(Object stream,Predicate<Object> selected){
-        if(!TaskBridge.recoveryWriter()||!TaskBridge.coreResourceCallback(selected))throw new SecurityException("RESOURCE_RELEASE_CORE_REQUIRED");
+        if(!ControlBridge.recoveryWriter()||!ControlBridge.coreResourceCallback(selected))throw new SecurityException("RESOURCE_RELEASE_CORE_REQUIRED");
         try{
             boolean buffer;synchronized(STREAMS){buffer=BUFFERS.containsKey(new Key(stream,false))||BUFFER_ACTIONS.containsKey(new Key(stream,false));}
             if(characterWrapper(stream))return releaseWrapper(stream,selected);

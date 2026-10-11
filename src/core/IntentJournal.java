@@ -24,6 +24,8 @@ public final class IntentJournal implements AutoCloseable {
     private final ThreadPoolExecutor writer;
     private volatile Throwable failed;
     private final List<String> history = Collections.synchronizedList(new ArrayList<>());
+    private List<String> historyView;
+    private final Set<String> committed=java.util.concurrent.ConcurrentHashMap.newKeySet();
     public final UUID realm;
 
     public IntentJournal(Path directory) throws IOException {
@@ -56,7 +58,7 @@ public final class IntentJournal implements AutoCloseable {
             List<String> migrations=new ArrayList<>();
             for(int version=1;version<VERSION;version++) {
                 var old=lineageFiles.get(version-1);List<String> records=new ArrayList<>();
-                try { readAll(old,records); } finally { history.addAll(records); }
+                try { readAll(old,records); } finally { history.addAll(records);committed.addAll(records); }
                 if(!records.isEmpty()) {
                     UUID observed=headerRealm(records.get(0),version);
                     if(parsedRealm!=null&&!parsedRealm.equals(observed))throw new IOException("MIGRATION_REALM_MISMATCH");
@@ -71,7 +73,7 @@ public final class IntentJournal implements AutoCloseable {
                 migrations.add("MIGRATED_V"+version+"\t"+hash(old)+"\t"+old.size());
             }
             List<String> fresh=new ArrayList<>();
-            try { readAll(file,fresh); } finally { history.addAll(fresh); }
+            try { readAll(file,fresh); } finally { history.addAll(fresh);committed.addAll(fresh); }
             if (fresh.isEmpty()) {
                 parsedRealm = parsedRealm==null?UUID.randomUUID():parsedRealm;
                 appendNow("HEADER\t" + VERSION + "\t" + parsedRealm);
@@ -104,9 +106,8 @@ public final class IntentJournal implements AutoCloseable {
     }
     private void appendNow(String record) throws IOException {
         writeRecord(file,record);
-        if(record.startsWith("STORAGE/2\tCOMMIT_ARMED\t"))ValidationFaults.hit("ACK_FORCE");
         file.force(true);
-        history.add(record);
+        synchronized(history){history.add(record);historyView=null;committed.add(record);}
     }
     public CompletableFuture<Void> append(String record) {
         CompletableFuture<Void> ack=new CompletableFuture<>();
@@ -138,7 +139,8 @@ public final class IntentJournal implements AutoCloseable {
         catch(CancellationException ignored) { }
         return false;
     }
-    public List<String> history() { synchronized(history) { return List.copyOf(history); } }
+    public List<String> history() { synchronized(history) { if(historyView==null)historyView=List.copyOf(history);return historyView; } }
+    boolean recorded(String record){return committed.contains(record);}
     CompletableFuture<Void> registerSession(UUID session) {
         var process=ProcessHandle.current();
         long start=process.info().startInstant().map(java.time.Instant::toEpochMilli).orElse(-1L);

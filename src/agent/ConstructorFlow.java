@@ -8,7 +8,8 @@ import jdk.internal.org.objectweb.asm.tree.analysis.*;
 
 /** Identifies initialization of the original receiver rather than a same-named constructor call. */
 final class ConstructorFlow {
-    record Entry(Set<MethodInsnNode> initialized,Set<FieldInsnNode> uninitializedWrites){}
+    record Entry(Set<MethodInsnNode> initialized,Set<FieldInsnNode> uninitializedWrites,
+            Set<AbstractInsnNode> uninitializedSites){}
     private ConstructorFlow(){}
     static Entry entry(ClassNode owner,MethodNode method)throws AnalyzerException{
         if(!method.name.equals("<init>")||owner.superName==null)return null;
@@ -46,6 +47,8 @@ final class ConstructorFlow {
             int receiver=origins[i].getStackSize()-2;
             if(receiver>=0&&origins[i].getStack(receiver).insns.contains(marker))writes.add(field);
         }
-        return new Entry(initialized,writes);
+        Set<AbstractInsnNode> sites=Collections.newSetFromMap(new IdentityHashMap<>());
+        for(int i=prefix.nextSetBit(0);i>=0;i=prefix.nextSetBit(i+1))sites.add(code[i]);
+        return new Entry(initialized,writes,sites);
     }
 }

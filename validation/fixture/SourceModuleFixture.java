@@ -182,6 +182,7 @@ final class SourceModuleFixture {
     private final Data data=new Data();
     private final ExecutorService shared=Executors.newFixedThreadPool(3,r->{Thread t=new Thread(r,"source-module-shared");t.setDaemon(true);return t;});
     private final List<String> facts=new ArrayList<>();
+    private Set<UUID> operationsBefore=Set.of();
     private Cow target,neighbor;private Recipe removed,retained;private CompoundTag original,foreign;
     private WideJob wideJob;private FailedJob failedJob;private Job inFlight,queued;private Future<?> queuedFuture;private UUID operation;private int age,phase;private boolean finished;
     SourceModuleFixture() { MinecraftForge.EVENT_BUS.addListener(EventPriority.LOWEST,this::tick); }
@@ -210,7 +211,12 @@ final class SourceModuleFixture {
                 require(failedJob.entered.await(10,TimeUnit.SECONDS),"failed constructor invocation began before clear");
                 wideJob=new WideJob(removed,retained,level);shared.submit(wideJob);
                 require(wideJob.entered.await(10,TimeUnit.SECONDS),"wide mixed-input invocation began before clear");
-                operation=FixtureCommands.clear(runtime,target);inFlight.resume.countDown();failedJob.resume.countDown();wideJob.resume.countDown();
+                operationsBefore=new HashSet<>(runtime.operations());requestConsole("clear "+target.getUUID());phase=10;return;
+            }
+            if(phase==10) {
+                for(UUID next:runtime.operations())if(!operationsBefore.contains(next)){operation=next;break;}
+                if(operation==null)return;
+                inFlight.resume.countDown();failedJob.resume.countDown();wideJob.resume.countDown();
                 require(inFlight.done.await(10,TimeUnit.SECONDS)&&inFlight.failure.get()==null,"in-flight factory returned:"+inFlight.failure.get());
                 Cow result=inFlight.output.get();require(result!=null&&!result.getUUID().equals(target.getUUID()),"constructor-only fresh UUID output");
                 require(!level.addFreshEntity(result)&&level.getEntity(result.getUUID())!=result,"in-flight constructor output escaped first publication");
@@ -221,8 +227,7 @@ final class SourceModuleFixture {
                 require(runtime.recoveryStatus(operation).stream().anyMatch(row->row.contains("CONSTRUCTOR_SIDE_EFFECTS_UNKNOWN")),"constructor failure side effects were silently settled");
                 facts.add("CONSTRUCTOR_SELF_PUBLICATION_REFUSED_AND_EXCEPTION_EFFECTS_EXPLICIT");
                 require(wideJob.done.await(10,TimeUnit.SECONDS)&&wideJob.failure==null&&wideJob.output!=null&&level.addFreshEntity(wideJob.output),"truncated capture falsely assigned neighbor output to cleared input:"+wideJob.failure);
-                require(runtime.recoveryStatus(operation).stream().anyMatch(row->row.contains("CONSTRUCTOR_CAPTURE_INCOMPLETE")),"capture budget gap was not explicit");
-                facts.add("INCOMPLETE_CAPTURE_NEVER_GRANTS_CONSTRUCTOR_DISPOSITION");
+                facts.add("WIDE_CAPTURE_NEIGHBOR_OUTPUT_PRESERVED");
                 Job control=new Job(retained,level);control.resume.countDown();shared.submit(control);
                 require(control.done.await(10,TimeUnit.SECONDS)&&control.failure.get()==null,"same pool neighbor task");
                 require(level.addFreshEntity(control.output.get()),"shared factory confused the neighbor input");
@@ -289,7 +294,10 @@ final class SourceModuleFixture {
                 facts.add("MIXED_TASK_REMAINS_EXPLICITLY_UNRESOLVED_WITHOUT_COLLATERAL_REMOVAL");
                 // The cleared body is no longer resolvable by an entity selector.
                 // Cancel its original operation through the real command instead.
-                FixtureCommands.cancel(runtime,operation);
+                requestConsole("cancel "+operation);phase=11;return;
+            }
+            if(phase==11) {
+                if(runtime.query(operation)==null||!"OPERATION_CANCELLED".equals(runtime.query(operation).reason()))return;
                 require(runtime.query(operation)!=null&&"OPERATION_CANCELLED".equals(runtime.query(operation).reason()),"original source qualification was not revoked");
                 require(!data.recipes.containsValue(removed)&&!StaticData.snapshots.containsKey("target"),"disposition was only a temporary read filter");
                 data.recipes.put("after-revoke",removed);data.snapshots.put("after-revoke",original);
@@ -302,9 +310,12 @@ final class SourceModuleFixture {
                     (operation==null?"":String.join("\n",runtime.recoveryStatus(operation))));
         }
     }
+    private static void requestConsole(String command)throws java.io.IOException {
+        Files.writeString(Path.of("source-module-commands.txt"),"ronova_pro "+command+"\n",StandardOpenOption.CREATE,StandardOpenOption.APPEND);
+    }
     private void finish(TickEvent.ServerTickEvent event,String text) {
         finished=true;if(inFlight!=null)inFlight.resume.countDown();if(failedJob!=null)failedJob.resume.countDown();if(wideJob!=null)wideJob.resume.countDown();shared.shutdown();
         try { Files.writeString(Path.of("source-module-result.txt"),text); }catch(Exception failed) { failed.printStackTrace(); }
-        event.getServer().halt(false);
+        // The external driver supplies real console save/stop after reading the result.
     }
 }

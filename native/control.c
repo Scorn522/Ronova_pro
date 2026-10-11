@@ -2,11 +2,11 @@
 #include "bindings.c"
 // Preserve Object.clone itself, including Cloneable checks; never substitute a Java ancestor body.
 JNIEXPORT jint JNICALL Java_dev_ronova_pro_bootstrap_NativeControl_abi(JNIEnv *env, jclass type) {
-    (void)env; (void)type; return 42;
+    (void)env; (void)type; return 45;
 }
 JNIEXPORT jobject JNICALL Java_dev_ronova_pro_bootstrap_NativeControl_clone0(JNIEnv *env, jclass type, jobject source) {
     (void)type;
-    jclass bridge=(*env)->FindClass(env,"dev/ronova/pro/bootstrap/TaskBridge");
+    jclass bridge=(*env)->FindClass(env,"dev/ronova/pro/bootstrap/ControlBridge");
     if(bridge==NULL)return NULL;
     jmethodID gate=(*env)->GetStaticMethodID(env,bridge,"taskEffectAllowed","(Ljava/lang/Object;Ljava/lang/String;)Z");
     if(gate==NULL)return NULL;
@@ -51,6 +51,8 @@ static int native_bind_controller(JNIEnv *env,jclass controller){
         {"codeLayout0","(Ljava/lang/ClassLoader;Ljava/lang/String;[B[Ljava/lang/String;[[[Ljava/lang/Module;ZLjava/lang/Object;)Z",(void*)Java_dev_ronova_pro_bootstrap_NativeControl_codeLayout0},
         {"codeDefinition0","(Ljava/lang/Class;[B)Z",(void*)Java_dev_ronova_pro_bootstrap_NativeControl_codeDefinition0},
         {"codeVersion0","(Ljava/lang/Class;[B)[Ljava/lang/String;",(void*)Java_dev_ronova_pro_bootstrap_NativeControl_codeVersion0},
+        {"codeDigest0","([B)[B",(void*)Java_dev_ronova_pro_bootstrap_NativeControl_codeDigest0},
+        {"codeMethodVersion0","(Ljava/lang/Class;[BLjava/lang/String;)[Ljava/lang/String;",(void*)Java_dev_ronova_pro_bootstrap_NativeControl_codeMethodVersion0},
         {"codeDeclarations0","(Ljava/lang/Class;)[Ljava/lang/String;",(void*)Java_dev_ronova_pro_bootstrap_NativeControl_codeDeclarations0},
         {"loadedClasses0","(Z)[Ljava/lang/Class;",(void*)Java_dev_ronova_pro_bootstrap_NativeControl_loadedClasses0},
         {"bootstrapLookupClasses0","()[Ljava/lang/Class;",(void*)Java_dev_ronova_pro_bootstrap_NativeControl_bootstrapLookupClasses0},

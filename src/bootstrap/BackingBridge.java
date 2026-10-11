@@ -28,8 +28,10 @@ public final class BackingBridge {
         finally {if(active==null)POLICY_CALLBACK.remove();else POLICY_CALLBACK.set(active);}
     }
     public static boolean arrayAllowed(Object array,int index,Object value) {
-        if(!TaskBridge.arrayWriteAllowed(array))return false;
-        if(!TaskBridge.controlMutationAllowed(array))return false;
+        // arrayWriteAllowed already checks this array's control identity and
+        // actual writer, as well as stopped-module effects. The generic
+        // container control query repeated that same check for every element.
+        if(!ControlBridge.arrayWriteAllowed(array))return false;
         Policy current=policy;if(current==null)return true;
         Boolean active=POLICY_CALLBACK.get();POLICY_CALLBACK.set(true);
         try {return !(boolean)current.array.invokeExact(array,index,value);}catch(Throwable e){throw new IllegalStateException("BACKING_ARRAY_GUARD",e);}
@@ -38,21 +40,21 @@ public final class BackingBridge {
     /** 0 denies the store, 1 requires the existing value checks, 2 permits this bulk store. */
     static int nativePrimitiveArrayPolicy(Object array) {
         if(array==null||!array.getClass().isArray()||!array.getClass().getComponentType().isPrimitive())return 0;
-        if(!TaskBridge.arrayWriteAllowed(array)||!TaskBridge.controlMutationAllowed(array))return 0;
+        if(!ControlBridge.arrayWriteAllowed(array))return 0;
         // As with copy/fill, an untracked carrier has no per-element backing policy.
         // The native caller still owns its exact receiver gate and write history.
         return policy==null||!known(array)?2:1;
     }
     private static boolean known(Object value) {
-        if(TaskBridge.controlled(value))return true;
-        if(value!=null&&value.getClass().isArray()&&!TaskBridge.arrayWriteAllowed(value))return true;
+        if(ControlBridge.controlled(value))return true;
+        if(value!=null&&value.getClass().isArray()&&!ControlBridge.arrayWriteAllowed(value))return true;
         Policy current=policy;if(current==null)return false;
         Boolean active=POLICY_CALLBACK.get();POLICY_CALLBACK.set(true);
         try {return (boolean)current.known.invokeExact(value);}catch(Throwable e){throw new IllegalStateException("BACKING_LOOKUP",e);}
         finally {if(active==null)POLICY_CALLBACK.remove();else POLICY_CALLBACK.set(active);}
     }
     static boolean nativePointerAllowed(Object array){
-        if(!TaskBridge.controlMutationAllowed(array))return false;
+        if(!ControlBridge.controlMutationAllowed(array))return false;
         if(!known(array))return true;
         try{
             Class<?> type=Class.forName("sun.misc.Unsafe");Field field=type.getDeclaredField("theUnsafe");field.setAccessible(true);Object unsafe=field.get(null);
@@ -62,56 +64,67 @@ public final class BackingBridge {
         }catch(ReflectiveOperationException unavailable){throw new IllegalStateException("ACTUAL_ARRAY_POINTER_POLICY_UNAVAILABLE",unavailable);}
     }
     private static boolean deny(Object container,Object prior,Object next) {
-        if(!TaskBridge.controlMutationAllowed(container))return true;
+        if(!ControlBridge.controlMutationAllowed(container))return true;
         Policy current=policy;if(current==null)return false;
         Boolean active=POLICY_CALLBACK.get();POLICY_CALLBACK.set(true);
         try {return (boolean)current.element.invokeExact(container,prior,next);}catch(Throwable e){throw new IllegalStateException("BACKING_ELEMENT_GUARD",e);}
         finally {if(active==null)POLICY_CALLBACK.remove();else POLICY_CALLBACK.set(active);}
     }
     public static boolean incomingAllowed(Object receiver,Object value) {return !deny(receiver,null,value);}
+    static boolean incomingPairAllowed(Object receiver,Object key,Object value){
+        // One actual Map publication has one writer. Keep both live element
+        // policy calls, but do not repeat the same control-writer stack query.
+        if(!ControlBridge.controlMutationAllowed(receiver))return false;
+        Policy current=policy;if(current==null)return true;
+        Boolean active=POLICY_CALLBACK.get();POLICY_CALLBACK.set(true);
+        try{return !(boolean)current.element.invokeExact(receiver,(Object)null,value)
+                &&(key==value||!(boolean)current.element.invokeExact(receiver,(Object)null,key));}
+        catch(Throwable failure){throw new IllegalStateException("BACKING_ELEMENT_GUARD",failure);}
+        finally{if(active==null)POLICY_CALLBACK.remove();else POLICY_CALLBACK.set(active);}
+    }
     /** Checks Java array type/range even when policy withholds a store. */
     public static void arrayStore(Object array,int index,Object value) {
         int length=Array.getLength(array);if(index<0||index>=length)throw new ArrayIndexOutOfBoundsException(index);
         Class<?> component=array.getClass().getComponentType();
         if(!component.isPrimitive()&&value!=null&&!component.isInstance(value))throw new ArrayStoreException(value.getClass().getName());
-        Object gate=TaskBridge.beginArrayMutation(array,index,1);
-        boolean written=false;try {if(arrayAllowed(array,index,value)){Array.set(array,index,value);written=true;}}finally {TaskBridge.finishFieldMutation(gate,written);}
+        Object gate=ControlBridge.beginArrayMutation(array,index,1);
+        boolean written=false;try {if(arrayAllowed(array,index,value)){Array.set(array,index,value);written=true;}}finally {ControlBridge.finishFieldMutation(gate,written);}
     }
     public static void intStore(Object array,int index,int value) {
         int[] values=(int[])array;int prior=values[index];int next=(int)value;
-        Object gate=TaskBridge.beginArrayMutation(array,index,1);
-        boolean written=false;try {if(arrayAllowed(array,index,Integer.valueOf(next))){values[index]=next;written=true;}}finally {TaskBridge.finishFieldMutation(gate,written);}
+        Object gate=ControlBridge.beginArrayMutation(array,index,1);
+        boolean written=false;try {if(arrayAllowed(array,index,Integer.valueOf(next))){values[index]=next;written=true;}}finally {ControlBridge.finishFieldMutation(gate,written);}
     }
     public static void longStore(Object array,int index,long value) {
         long[] values=(long[])array;long prior=values[index];long next=(long)value;
-        Object gate=TaskBridge.beginArrayMutation(array,index,1);
-        boolean written=false;try {if(arrayAllowed(array,index,Long.valueOf(next))){values[index]=next;written=true;}}finally {TaskBridge.finishFieldMutation(gate,written);}
+        Object gate=ControlBridge.beginArrayMutation(array,index,1);
+        boolean written=false;try {if(arrayAllowed(array,index,Long.valueOf(next))){values[index]=next;written=true;}}finally {ControlBridge.finishFieldMutation(gate,written);}
     }
     public static void floatStore(Object array,int index,float value) {
         float[] values=(float[])array;float prior=values[index];float next=(float)value;
-        Object gate=TaskBridge.beginArrayMutation(array,index,1);
-        boolean written=false;try {if(arrayAllowed(array,index,Float.valueOf(next))){values[index]=next;written=true;}}finally {TaskBridge.finishFieldMutation(gate,written);}
+        Object gate=ControlBridge.beginArrayMutation(array,index,1);
+        boolean written=false;try {if(arrayAllowed(array,index,Float.valueOf(next))){values[index]=next;written=true;}}finally {ControlBridge.finishFieldMutation(gate,written);}
     }
     public static void doubleStore(Object array,int index,double value) {
         double[] values=(double[])array;double prior=values[index];double next=(double)value;
-        Object gate=TaskBridge.beginArrayMutation(array,index,1);
-        boolean written=false;try {if(arrayAllowed(array,index,Double.valueOf(next))){values[index]=next;written=true;}}finally {TaskBridge.finishFieldMutation(gate,written);}
+        Object gate=ControlBridge.beginArrayMutation(array,index,1);
+        boolean written=false;try {if(arrayAllowed(array,index,Double.valueOf(next))){values[index]=next;written=true;}}finally {ControlBridge.finishFieldMutation(gate,written);}
     }
     public static void charStore(Object array,int index,int value) {
         char[] values=(char[])array;char prior=values[index];char next=(char)value;
-        Object gate=TaskBridge.beginArrayMutation(array,index,1);
-        boolean written=false;try {if(arrayAllowed(array,index,Character.valueOf(next))){values[index]=next;written=true;}}finally {TaskBridge.finishFieldMutation(gate,written);}
+        Object gate=ControlBridge.beginArrayMutation(array,index,1);
+        boolean written=false;try {if(arrayAllowed(array,index,Character.valueOf(next))){values[index]=next;written=true;}}finally {ControlBridge.finishFieldMutation(gate,written);}
     }
     public static void shortStore(Object array,int index,int value) {
         short[] values=(short[])array;short prior=values[index];short next=(short)value;
-        Object gate=TaskBridge.beginArrayMutation(array,index,1);
-        boolean written=false;try {if(arrayAllowed(array,index,Short.valueOf(next))){values[index]=next;written=true;}}finally {TaskBridge.finishFieldMutation(gate,written);}
+        Object gate=ControlBridge.beginArrayMutation(array,index,1);
+        boolean written=false;try {if(arrayAllowed(array,index,Short.valueOf(next))){values[index]=next;written=true;}}finally {ControlBridge.finishFieldMutation(gate,written);}
     }
     public static void byteStore(Object array,int index,int value) {
         if(array instanceof boolean[] values) {boolean prior=values[index],next=(value&1)!=0;
-            Object gate=TaskBridge.beginArrayMutation(array,index,1);boolean written=false;try {if(arrayAllowed(array,index,Boolean.valueOf(next))){values[index]=next;written=true;}}finally {TaskBridge.finishFieldMutation(gate,written);}}
+            Object gate=ControlBridge.beginArrayMutation(array,index,1);boolean written=false;try {if(arrayAllowed(array,index,Boolean.valueOf(next))){values[index]=next;written=true;}}finally {ControlBridge.finishFieldMutation(gate,written);}}
         else {byte[] values=(byte[])array;byte prior=values[index],next=(byte)value;
-            Object gate=TaskBridge.beginArrayMutation(array,index,1);boolean written=false;try {if(arrayAllowed(array,index,Byte.valueOf(next))){values[index]=next;written=true;}}finally {TaskBridge.finishFieldMutation(gate,written);}}
+            Object gate=ControlBridge.beginArrayMutation(array,index,1);boolean written=false;try {if(arrayAllowed(array,index,Byte.valueOf(next))){values[index]=next;written=true;}}finally {ControlBridge.finishFieldMutation(gate,written);}}
     }
     public static void copy(Object source,int from,Object target,int to,int count) {
         if(source==null||target==null)throw new NullPointerException();
@@ -242,12 +255,12 @@ public final class BackingBridge {
                 proposed=switch(kind) {case "Long"->Long.valueOf(result);case "Byte"->Byte.valueOf((byte)result);case "Short"->Short.valueOf((short)result);case "Float"->Float.valueOf(number.floatValue()+operand.floatValue());case "Double"->Double.valueOf(number.doubleValue()+operand.doubleValue());default->Integer.valueOf((int)result);};
             } else if(old instanceof Boolean a&&value instanceof Boolean z)proposed=operation.contains("Xor")?a^z:operation.contains("BitwiseOr")?a|z:a&z;
         }
-        return TaskBridge.unsafeWriteAllowed(receiver,offset,proposed,kind);
+        return ControlBridge.unsafeWriteAllowed(receiver,offset,proposed,kind);
     }
     private static boolean setterAllowed(Class<?> owner,String name,Object receiver,Object value) {
         Class<?> declaring=owner;
         while(declaring!=null)try {declaring.getDeclaredField(name);break;}catch(NoSuchFieldException absent){declaring=declaring.getSuperclass();}
-        return declaring==null||TaskBridge.fieldWriteAllowed(receiver,declaring,name,value);
+        return declaring==null||ControlBridge.fieldWriteAllowed(receiver,declaring,name,value);
     }
     private static boolean staticSetterAllowed(Class<?> owner,String name,Object value) {return setterAllowed(owner,name,owner,value);}
     public static MethodHandle wrapSetter(MethodHandle original,Class<?> owner,String name) {
@@ -269,7 +282,7 @@ public final class BackingBridge {
     }
     public static boolean memoryWriteAllowed(Object receiver,long offset,long length) {
         if(receiver==null||length<0||length==0)return true;
-        if(!TaskBridge.controlMutationAllowed(receiver))return false;
+        if(!ControlBridge.controlMutationAllowed(receiver))return false;
         Policy current=policy;if(current==null)return true;
         Boolean active=POLICY_CALLBACK.get();POLICY_CALLBACK.set(true);
         try {return !(boolean)current.memory.invokeExact(receiver,offset,length);}catch(Throwable e){throw new IllegalStateException("BACKING_MEMORY_GUARD",e);}
@@ -337,7 +350,7 @@ public final class BackingBridge {
         try {MOD_COUNT.setInt(list,value);}catch(IllegalAccessException e){throw new IllegalStateException(e);}
     }
     public static Object identityMutation(Object receiver,String method,Object[] args) {
-        if(TaskBridge.controlMutationAllowed(receiver))return UNHANDLED;
+        if(ControlBridge.controlMutationAllowed(receiver))return UNHANDLED;
         if(method.equals("put"))return ((Map<?,?>)receiver).get(args[0]);
         if(method.equals("remove")&&args.length==2)return Boolean.FALSE;
         return null;
@@ -465,7 +478,7 @@ public final class BackingBridge {
         if(LIST_INTERNAL.get()!=null||POLICY_CALLBACK.get()!=null)return UNHANDLED;
         if(receiver==null||receiver.getClass()!=ArrayList.class||!known(receiver))return UNHANDLED;
         ArrayList list=(ArrayList)receiver;
-        if(TaskBridge.controlled(receiver)&&!TaskBridge.controlCaller())return switch(method) {
+        if(ControlBridge.controlled(receiver)&&!ControlBridge.controlCaller())return switch(method) {
             case "set","removeIndex"->list.get((Integer)args[0]);case "add","addAll","removeObject","removeIf","batchRemove"->Boolean.FALSE;default->null;
         };
         switch(method) {

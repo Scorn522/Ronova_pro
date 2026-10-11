@@ -33,8 +33,8 @@ static int native_thread_prepare(JNIEnv *env){
         if(ready)native_thread_methods[i].method=method;
     }
     if(ready){
-        native_thread_begin_query=native_original.GetStaticMethodID(env,native_tasks,"nativeThreadOperation","(Ljava/lang/Thread;[Ljava/lang/Module;I)Ljava/lang/Object;");
-        native_thread_end_query=native_original.GetStaticMethodID(env,native_tasks,"nativeThreadOperationFinished","(Ljava/lang/Object;Z)V");
+        native_thread_begin_query=native_original.GetStaticMethodID(env,native_controls,"nativeThreadOperation","(Ljava/lang/Thread;[Ljava/lang/Module;I)Ljava/lang/Object;");
+        native_thread_end_query=native_original.GetStaticMethodID(env,native_controls,"nativeThreadOperationFinished","(Ljava/lang/Object;Z)V");
         jclass booleanType=native_original.FindClass(env,"java/lang/Boolean");
         jfieldID field=booleanType?native_original.GetStaticFieldID(env,booleanType,"FALSE","Ljava/lang/Boolean;"):NULL;
         if(field)native_thread_deferred=native_file_keep(env,native_original.GetStaticObjectField(env,booleanType,field));
@@ -75,7 +75,7 @@ static int native_thread_begin(JNIEnv *env,NativeThread *state,Binding *binding,
     int ready=use->receiver&&use->sources&&!native_original.ExceptionCheck(env);
     if(ready){
         NativeThreadFrame *previous=state->threadPermit;state->threadPermit=use;
-        use->token=native_original.CallStaticObjectMethod(env,native_tasks,native_thread_begin_query,receiver,use->sources,use->operation);
+        use->token=native_original.CallStaticObjectMethod(env,native_controls,native_thread_begin_query,receiver,use->sources,use->operation);
         state->threadPermit=previous;ready=!native_original.ExceptionCheck(env);
         if(ready&&use->token){
             use->skipped=native_original.IsSameObject(env,use->token,native_thread_deferred);
@@ -97,7 +97,7 @@ static void native_thread_finish(JNIEnv *env,NativeThread *state,NativeThreadFra
     if(use->token){
         jthrowable failure=native_original.ExceptionOccurred(env);if(failure)native_original.ExceptionClear(env);
         NativeThreadFrame *previous=state->threadPermit;state->threadPermit=use;use->finishing=1;use->completed=completed;
-        native_original.CallStaticVoidMethod(env,native_tasks,native_thread_end_query,use->token,completed?JNI_TRUE:JNI_FALSE);state->threadPermit=previous;
+        native_original.CallStaticVoidMethod(env,native_controls,native_thread_end_query,use->token,completed?JNI_TRUE:JNI_FALSE);state->threadPermit=previous;
         if(failure){
             if(native_original.ExceptionCheck(env)){native_original.ExceptionClear(env);InterlockedIncrement(&native_failures);}
             native_original.Throw(env,failure);native_original.DeleteLocalRef(env,failure);

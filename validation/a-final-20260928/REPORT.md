@@ -1,5 +1,26 @@
 # Ronova Pro V1.5 A 批收口报告
 
+> **2026-10-05 R3 补修**：策略围栏已接入既有 admission 释放/关闭流程；在途来源交付结束前不安装准确对象围栏，已完整发布但未合并的普通事件不额外等待空队列。完整 RecoveryTasks + 实际 Bootstrap/文件日志的独立定点回归通过；世界/来源依赖为替身，未跑 Forge/Java17/Windows 实机。删除 FixtureCommands 的生产特权控制台分支、Core/Native 人工故障注入和可选 dump/调试输出；旧依赖这些测试分支的夹具不能直接沿用历史成绩。R3 包含下方 R1/R2；下方记录均按原范围保留。详情见 `R3-补修说明.md`。
+
+
+> **2026-10-05 R2 补修**：已补截图三项：世界受理保存并消费原 append ACK，失败/取消不发布世界动作；生成失败重试接续同一未退役生成器及其队列；policyGate 通过原 withBoundaries 授权作用域安装真实围栏，不改旧任务资格或删 Bootstrap 权限。额外只改 WorldArchive/SeedChunks/RecoveryTasks 三个生产文件。Linux/JDK21 的定点世界控制流与真实 Bootstrap 授权检查通过；未进行完整 Forge/Java17/Windows 实机验证，仍为源码候选。R2 包含下方 R1 全部修改；下方“本轮”均为其历史记录，不混为 R2 结果。
+
+
+## 2026-10-05 c565e97 修订：源码已改，非新游戏安装候选
+
+直接基线为 `c565e975d78a3b32ba72f493c72c953d24698203` 的用户交接 ZIP。本轮修改 9 个生产文件：任务消费者 ABI 39→48；字段图异常保留真实工作阶段；启动世界参数支持等号形式并拒绝歧义；世界作业先提交受理再发布，重试接续失败步骤，实体等待不重建方块实体／计划 tick；历史任务轮转、释放事实恢复与旧策略日志兼容。启动部分减少无停组时的整批 Mixin 准备和无关树哈希，复用经当前 Class／加载器／映像身份及修饰符核对的弱 receiver 布局，真实来源及最终写权限不缓存。
+
+Linux／OpenJDK 21.0.11 下，Bootstrap 和 Prelaunch 全源集以 `--release 17` 编译通过；Agent 全源集使用 `-source 17 -target 17` 及所需内部 ASM 导出编译通过。实际桥 ABI 48 与原 `attach()` 消费入口接续、字段图 14 项、真实文件任务历史 20 项、前置世界选择 17 项、世界作业控制流 30 项及 receiver 布局 7 项通过。Mixin 私有准备入口原产物／修订对照为无停用贡献时 1000／0 次序列化，停用出现后仍读当前图像。这里使用明确的世界、光照、生成器和 NBT 传输替身；ABI 检查使用真实 VM Instrumentation 但未运行整套 Ronova 变换器安装。不能冒充实际游戏效果或 Windows Native 验收。
+
+完整 Gradle `jar fixtureJar` 已尝试，下载 Gradle 8.8 时因 `UnknownHostException: services.gradle.org` 中止，尚未进入完整 Forge 类型编译。本轮没有 Java 17 实际运行、Forge 世界加载、客户端／专服、Windows DLL 或同世界重启结果，**不能宣布原 635 秒启动问题已彻底解决，也不能改写 B 的完成状态**。Native 源码未修改（ABI 42），Java ABI 48、Journal 物理格式 6、网络协议未改。普通权限、来源、运行／资源退出检查保留；未新增游戏探针、Gradle 检查阶段或一般化证明框架。
+
+本次源码交付移出了输入的旧 `build/libs` 和 `distribution` 安装 JAR；原输入 ZIP 保留那些历史产物。增量补丁只改源码／文档，不会自动删除工作区旧产物；必须重新构建 Core、Agent、Bootstrap、Prelaunch 配套载荷，不能把旧 JAR 当成这轮修复。
+
+以下为原 c565e97 历史记录，原通过／失败及测试范围不变。
+
+---
+
+
 2026-10-05 startup-origins：空种子分析原先对每个已登记实际 Class 单独执行反射来源读取及 StackWalker 权限核对。现每次分析仍重新收集实际 Class，在原来源登记锁内批量读取当前记录，再按本次 Module 身份去重执行原 producer／stopped 判据；未知未绑定分支和实际 VM binding 保留，没有跨分析缓存。新桥入口沿用原准确 Agent 身份核对，RecoveryAgent 的批量 helper 只允许准确 ExternalCodeDefinitions 调用。
 
 同版完整构建通过（17 秒），原实际 prelaunch 的 B 适配／控制保护／缓冲传输检查通过，新增批量来源入口的外部反射和 MethodHandle 调用均被拒绝。当前分发候选为 startup-origins（Java 48／Native 42）。

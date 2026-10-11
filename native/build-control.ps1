@@ -13,7 +13,7 @@ if(-not $env:ZIG_LOCAL_CACHE_DIR) { $env:ZIG_LOCAL_CACHE_DIR=Join-Path $projectR
 $outputDirectory=Join-Path $projectRoot 'build/control-native/ronova-native/windows-x86_64'
 New-Item -ItemType Directory -Force -Path $outputDirectory | Out-Null
 $outputDll=Join-Path $outputDirectory 'ronova-pro-control.dll'
-& $Zig cc '-O2' '-shared' '-target' 'x86_64-windows-gnu' (Join-Path $PSScriptRoot 'control.c') '-I' $includeRoot '-I' (Join-Path $includeRoot 'win32') '-o' $outputDll
+& $Zig cc '-O2' '-shared' '-target' 'x86_64-windows-gnu' (Join-Path $PSScriptRoot 'control.c') '-I' $includeRoot '-I' (Join-Path $includeRoot 'win32') '-lbcrypt' '-o' $outputDll
 if($LASTEXITCODE -ne 0) { throw "Control Native compilation failed: $LASTEXITCODE" }
 $digest=[Security.Cryptography.SHA256]::Create()
 try { [BitConverter]::ToString($digest.ComputeHash([IO.File]::ReadAllBytes($outputDll))).Replace('-','') } finally { $digest.Dispose() }

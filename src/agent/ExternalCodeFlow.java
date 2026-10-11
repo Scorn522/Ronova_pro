@@ -261,15 +261,17 @@ final class ExternalCodeFlow {
         if(code.length==0)return new Result(rows,EMPTY);
         List<Set<Integer>> edges=new ArrayList<>(code.length+1);for(int i=0;i<=code.length;i++)edges.add(new HashSet<>());
         for(ControlChange change:comparisons)if(change.at()>=0&&change.at()<positions.size())for(int target:change.alternatives())edges.get(positions.get(change.at())).add(target<0||target>=positions.size()?code.length:positions.get(target));
+        BitSet[] postdominators=null;
         Set<Module> returned=null;BitSet parameters=new BitSet(),requiredParameters=null;
         try{
             boolean changed;
             do{
                 int before=size(sources)+size(conditions)+size(control)+bitSize(parameterControl)+bitSize(guaranteedParameterControl);
                 Origins interpreter=new Origins(sources,direct,conditions,control,calls,method,parameterControl,guaranteedParameterControl);
+                boolean collectEdges=postdominators==null;
                 Analyzer<OriginValue> analyzer=new Analyzer<>(interpreter){
-                    protected void newControlFlowEdge(int from,int to){edges.get(from).add(to);}
-                    protected boolean newControlFlowExceptionEdge(int from,int to){edges.get(from).add(to);return true;}
+                    protected void newControlFlowEdge(int from,int to){if(collectEdges)edges.get(from).add(to);}
+                    protected boolean newControlFlowExceptionEdge(int from,int to){if(collectEdges)edges.get(from).add(to);return true;}
                 };
                 Frame<OriginValue>[] frames=analyzer.analyze(owner,method);
                 returned=null;parameters=new BitSet();requiredParameters=null;
@@ -280,8 +282,15 @@ final class ExternalCodeFlow {
                     if(requiredParameters==null)requiredParameters=(BitSet)required.clone();else requiredParameters.and(required);
                 }
                 int exit=code.length;
-                for(int i=0;i<code.length;i++)if(frames[i]!=null&&(edges.get(i).isEmpty()||code[i].getOpcode()==Opcodes.ATHROW))edges.get(i).add(exit);
-                BitSet[] postdominators=postdominators(edges,frames);
+                if(postdominators==null){
+                    // This invocation never changes instructions, exception handlers or comparison
+                    // alternatives. BasicInterpreter determines types and reachability independently
+                    // of provenance, so the first complete pass observes the whole fixed CFG.
+                    // Reuse only its topology; every pass still recomputes operand/return provenance
+                    // and walks every active control region, including synthetic and exception edges.
+                    for(int i=0;i<code.length;i++)if(frames[i]!=null&&(edges.get(i).isEmpty()||code[i].getOpcode()==Opcodes.ATHROW))edges.get(i).add(exit);
+                    postdominators=postdominators(edges,frames);
+                }
                 for(int branch=0;branch<code.length;branch++){
                     if(frames[branch]==null||edges.get(branch).size()<2)continue;
                     Set<Module> condition=sources.getOrDefault(code[branch],Set.of());BitSet parameterCondition=interpreter.parameterUses.getOrDefault(code[branch],new BitSet());if(condition.isEmpty()&&parameterCondition.isEmpty())continue;

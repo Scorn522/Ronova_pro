@@ -8,11 +8,21 @@ import jdk.internal.org.objectweb.asm.tree.analysis.*;
 
 /** Keeps exact construction types separate from declared reference types in the original business graph. */
 final class ExternalReceiverFlow {
+    // Layouts describe immutable instruction images, not permission or module provenance.
+    // Weak keys AND values avoid keeping an obsolete image, class or loader alive.
+    private static final Map<MethodNode,LayoutRef> REUSABLE=new WeakHashMap<>();
+    private static final class LayoutRef extends java.lang.ref.WeakReference<Layout>{
+        private static final StackWalker CALLER=StackWalker.getInstance(StackWalker.Option.RETAIN_CLASS_REFERENCE);
+        LayoutRef(Layout layout){super(layout);}
+        @Override public void clear(){if(CALLER.getCallerClass().getNestHost()==ExternalReceiverFlow.class)super.clear();}
+        @Override public boolean enqueue(){return CALLER.getCallerClass().getNestHost()==ExternalReceiverFlow.class&&super.enqueue();}
+    }
+    static {ControlImages.protect(REUSABLE);}
     record Receiver(Class<?> actual,boolean self){
         public boolean equals(Object other){return other instanceof Receiver receiver&&actual==receiver.actual&&self==receiver.self;}
         public int hashCode(){return Objects.hashCode(actual)*31+Boolean.hashCode(self);}
     }
-    /** Reuses only the ASM layout within the current graph batch, never a source verdict. */
+    /** Reuses only an unchanged ASM layout with current type bindings, never a source verdict. */
     static final class Layout {
         final ClassLoader loader;final Class<?> actual;final Object image;
         final Map<String,Class<?>> types;final Map<Class<?>,Integer> modifiers;
@@ -145,6 +155,10 @@ final class ExternalReceiverFlow {
     static Map<MethodInsnNode,Set<Receiver>> calls(ClassLoader loader,Class<?> actual,ExternalCodeFlow.Image image,MethodNode method,Map<MethodNode,Layout> layouts){
         if(!image.rows().containsKey(method.name+method.desc)||(method.access&(Opcodes.ACC_NATIVE|Opcodes.ACC_ABSTRACT))!=0)return Map.of();
         Layout prior=layouts.get(method);if(prior!=null&&prior.matches(loader,actual,image))return prior.receivers;
+        synchronized(REUSABLE){LayoutRef reference=REUSABLE.get(method);prior=reference==null?null:reference.get();}
+        // Actual Class identities, previously unresolved names and modifiers are
+        // checked anew. VM code binding and source expansion remain in the caller.
+        if(prior!=null&&prior.matches(loader,actual,image)){layouts.put(method,prior);return prior.receivers;}
         AbstractInsnNode[] code=method.instructions.toArray();boolean needsReceiver=false;
         for(AbstractInsnNode instruction:code)if(instruction instanceof MethodInsnNode call&&ExternalCodeFlow.returnsValue(call)
                 &&(call.getOpcode()==Opcodes.INVOKEVIRTUAL||call.getOpcode()==Opcodes.INVOKEINTERFACE)){needsReceiver=true;break;}
@@ -158,7 +172,9 @@ final class ExternalReceiverFlow {
                 Frame<ExactValue> frame=frames[i];int receiver=frame.getStackSize()-Type.getArgumentTypes(call.desc).length-1;
                 ExactValue value=frame.getStack(receiver);if(!value.unknown&&!value.receivers.isEmpty())receivers.put(call,value.receivers);
             }
-            Layout layout=new Layout(interpreter,image,receivers);layouts.put(method,layout);return layout.receivers;
+            Layout layout=new Layout(interpreter,image,receivers);layouts.put(method,layout);
+            LayoutRef reference=new LayoutRef(layout);ControlImages.protect(reference);
+            synchronized(REUSABLE){REUSABLE.put(method,reference);}return layout.receivers;
         }catch(AnalyzerException|RuntimeException unavailable){
             Set<Module> affected=Collections.newSetFromMap(new IdentityHashMap<>());for(Module[] row:image.rows().get(method.name+method.desc))Collections.addAll(affected,row);
             if(actual!=null){Module owner=RecoveryAgent.logicalModule(actual);if(RecoveryAgent.producerModule(owner))affected.add(owner);}

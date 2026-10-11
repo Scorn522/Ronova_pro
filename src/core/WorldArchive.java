@@ -28,11 +28,16 @@ import net.minecraft.world.ticks.*;
 final class WorldArchive {
     private static final TicketType<UUID> TICKET=TicketType.create("ronova_world_archive",Comparator.comparing(UUID::toString));
     private enum Kind { CAPTURE, RESTORE, REGENERATE }
+    /** Live work position, not a completion certificate. World persistence is still Minecraft's own save. */
+    private enum ApplyStep { BLOCKS, TILES, TICKS, ENTITIES, METADATA, LIGHTING, PUBLISH }
     private static final class Job {
         final UUID id,source;final Kind kind;final ResourceKey<Level> dimension;final BlockPos low,high;final long seed;
         long cursor;int blockCursor;String state="QUEUED",reason="";boolean stopped;
+        ApplyStep applyStep=ApplyStep.BLOCKS;
+        int tileCursor,blockTickCursor,fluidTickCursor;boolean blockTicksCleared,fluidTicksCleared,captureWritten;
+        long tickBase=Long.MIN_VALUE;BlockEntity pendingTile;LevelChunk applyingChunk;
         ChunkPos ticket;CompletableFuture<Either<ChunkAccess,ChunkHolder.ChunkLoadingFailure>> loading;
-        CompoundTag image;SeedChunks generation;CompletableFuture<ChunkAccess> lighting;CompletableFuture<Void> receipt;
+        CompoundTag image;SeedChunks generation;CompletableFuture<ChunkAccess> lighting;CompletableFuture<Void> acceptance,receipt;
         Job(UUID id,UUID source,Kind kind,ResourceKey<Level> dimension,BlockPos low,BlockPos high,long seed){this.id=id;this.source=source;this.kind=kind;this.dimension=dimension;this.low=low;this.high=high;this.seed=seed;}
         int minX(){return Math.floorDiv(low.getX(),16);}int minZ(){return Math.floorDiv(low.getZ(),16);}
         long width(){return (long)Math.floorDiv(high.getX(),16)-minX()+1;}long depth(){return (long)Math.floorDiv(high.getZ(),16)-minZ()+1;}
@@ -63,7 +68,12 @@ final class WorldArchive {
         NbtIo.writeCompressed(image,temporary.toFile());try(FileChannel channel=FileChannel.open(temporary,StandardOpenOption.WRITE)){channel.force(true);}
         Files.move(temporary,path,StandardCopyOption.ATOMIC_MOVE,StandardCopyOption.REPLACE_EXISTING);
     }
-    private void index()throws IOException{CompoundTag tag=new CompoundTag();tag.putInt("Format",1);tag.putUUID("Realm",journal.realm);ListTag ids=new ListTag();for(UUID id:jobs.keySet())ids.add(NbtUtils.createUUID(id));tag.put("Jobs",ids);write(root.resolve("index.nbt"),tag);}
+    private void index(UUID additional)throws IOException{
+        CompoundTag tag=new CompoundTag();tag.putInt("Format",1);tag.putUUID("Realm",journal.realm);
+        ListTag ids=new ListTag();for(UUID id:jobs.keySet())ids.add(NbtUtils.createUUID(id));
+        if(additional!=null&&!jobs.containsKey(additional))ids.add(NbtUtils.createUUID(additional));
+        tag.put("Jobs",ids);write(root.resolve("index.nbt"),tag);
+    }
     private CompoundTag manifest(Job job){
         CompoundTag tag=new CompoundTag();tag.putInt("Format",1);tag.putUUID("Realm",journal.realm);tag.putUUID("Id",job.id);if(job.source!=null)tag.putUUID("Source",job.source);
         tag.putString("Kind",job.kind.name());tag.putString("Dimension",job.dimension.location().toString());tag.put("Low",NbtUtils.writeBlockPos(job.low));tag.put("High",NbtUtils.writeBlockPos(job.high));
@@ -75,7 +85,14 @@ final class WorldArchive {
             Job job=new Job(tag.getUUID("Id"),tag.hasUUID("Source")?tag.getUUID("Source"):null,Kind.valueOf(tag.getString("Kind")),ResourceKey.create(Registries.DIMENSION,new ResourceLocation(tag.getString("Dimension"))),
                     NbtUtils.readBlockPos(tag.getCompound("Low")),NbtUtils.readBlockPos(tag.getCompound("High")),tag.getLong("Seed"));
             job.cursor=tag.getLong("Cursor");job.blockCursor=tag.getInt("BlockCursor");job.state=tag.getString("State");job.reason=tag.getString("Reason");job.stopped=tag.getBoolean("Stopped");
-            if(job.low.getX()>job.high.getX()||job.low.getY()>job.high.getY()||job.low.getZ()>job.high.getZ()||job.cursor<0||job.cursor>job.count()||job.blockCursor<0)throw new IllegalArgumentException("bounds");return job;
+            if(job.state.equals("ACCEPTING")){job.state="FAILED";job.reason="ACCEPTANCE_NOT_PUBLISHED";job.stopped=true;}
+            if(journal.recorded(acceptanceRecord(job)))job.acceptance=CompletableFuture.completedFuture(null);
+            else {job.state="FAILED";job.reason="ACCEPTANCE_RECORD_UNCONFIRMED";job.stopped=true;}
+            if(job.low.getX()>job.high.getX()||job.low.getY()>job.high.getY()||job.low.getZ()>job.high.getZ()||job.cursor<0||job.cursor>job.count()||job.blockCursor<0)throw new IllegalArgumentException("bounds");
+            // A journal/manifest cursor is not an atomic commit of the corresponding world chunk.
+            // On a new JVM, reconcile the current chunk instead of skipping its possibly unsaved blocks.
+            if(job.kind!=Kind.CAPTURE&&job.cursor<job.count())job.blockCursor=0;
+            return job;
         }catch(RuntimeException invalid){throw new IOException("WORLD_HISTORY_MANIFEST_INVALID",invalid);}
     }
     private void persist(Job job)throws IOException{write(directory(job.id).resolve("manifest.nbt"),manifest(job));}
@@ -84,29 +101,87 @@ final class WorldArchive {
         BlockPos high=new BlockPos(Math.max(first.getX(),second.getX()),Math.max(first.getY(),second.getY()),Math.max(first.getZ(),second.getZ()));
         if(low.getY()<level.getMinBuildHeight()||high.getY()>=level.getMaxBuildHeight()||!Level.isInSpawnableBounds(low)||!Level.isInSpawnableBounds(high))throw new IllegalArgumentException("WORLD_HISTORY_BOUNDS_INVALID");
         Job job=new Job(UUID.randomUUID(),null,regenerate?Kind.REGENERATE:Kind.CAPTURE,level.dimension(),low,high,level.getSeed());job.count();
-        persist(job);jobs.put(job.id,job);index();runtime.archiveFreeze(this,job.id,level,low,high,true);journal.append("WORLD/1\tACCEPT\t"+job.id+"\t"+job.kind+"\t"+job.dimension.location());return job.id;
+        return accept(job,level,"WORLD/1\tACCEPT\t"+job.id+"\t"+job.kind+"\t"+job.dimension.location());
     }
     UUID restore(UUID source)throws IOException{
         Job snapshot=jobs.get(source);if(snapshot==null||snapshot.kind==Kind.RESTORE||!snapshot.state.equals("COMPLETE"))throw new IllegalArgumentException("WORLD_HISTORY_SNAPSHOT_NOT_COMPLETE");
-        Job job=new Job(UUID.randomUUID(),source,Kind.RESTORE,snapshot.dimension,snapshot.low,snapshot.high,snapshot.seed);persist(job);jobs.put(job.id,job);index();
-        ServerLevel level=server.getLevel(job.dimension);if(level==null)throw new IllegalStateException("WORLD_DIMENSION_UNAVAILABLE");runtime.archiveFreeze(this,job.id,level,job.low,job.high,true);
-        journal.append("WORLD/1\tACCEPT\t"+job.id+"\tRESTORE\t"+source);return job.id;
+        ServerLevel level=server.getLevel(snapshot.dimension);if(level==null)throw new IllegalStateException("WORLD_DIMENSION_UNAVAILABLE");
+        Job job=new Job(UUID.randomUUID(),source,Kind.RESTORE,snapshot.dimension,snapshot.low,snapshot.high,snapshot.seed);
+        return accept(job,level,"WORLD/1\tACCEPT\t"+job.id+"\tRESTORE\t"+source);
+    }
+    private UUID accept(Job job,ServerLevel level,String record)throws IOException{
+        // The index can name an ACCEPTING job, but it cannot execute before its actual writer ACK.
+        job.stopped=true;job.state="ACCEPTING";persist(job);
+        try{
+            index(job.id);
+            job.acceptance=journal.append(record);
+            publishAcceptance(job,level); // Pending ACK: retain only the stopped, queryable job.
+        }catch(IOException|RuntimeException failure){
+            job.stopped=true;job.state="FAILED";job.reason="ACCEPTANCE_NOT_PUBLISHED";
+            try{unfreeze(job);}catch(RuntimeException cleanup){failure.addSuppressed(cleanup);}
+            try{persist(job);}catch(IOException|RuntimeException cleanup){failure.addSuppressed(cleanup);}
+            try{index(null);}catch(IOException|RuntimeException cleanup){failure.addSuppressed(cleanup);}
+            throw failure;
+        }
+        jobs.put(job.id,job);return job.id;
+    }
+    private boolean publishAcceptance(Job job,ServerLevel level)throws IOException{
+        if(job.acceptance==null)throw new IOException("WORLD_ACCEPTANCE_ACK_MISSING");
+        if(!job.acceptance.isDone())return false;
+        job.acceptance.join(); // Nonblocking here; failed/cancelled admission must not publish world work.
+        runtime.archiveFreeze(this,job.id,level,job.low,job.high,true);
+        job.stopped=false;job.state="QUEUED";persist(job);return true;
+    }
+    private static String acceptanceRecord(Job job){
+        return "WORLD/1\tACCEPT\t"+job.id+"\t"+job.kind+"\t"+(job.kind==Kind.RESTORE?job.source:job.dimension.location());
     }
     boolean cancel(UUID id)throws IOException{Job job=jobs.get(id);if(job==null||job.state.equals("COMPLETE"))return false;job.stopped=true;job.state="CANCELLED";job.reason="ALREADY_APPLIED_EFFECTS_RETAINED";release(job);unfreeze(job);persist(job);return true;}
-    boolean retry(UUID id)throws IOException{Job job=jobs.get(id);if(job==null||!job.state.equals("FAILED"))return false;job.stopped=false;job.state="QUEUED";job.reason="";persist(job);return true;}
+    boolean retry(UUID id)throws IOException{
+        Job job=jobs.get(id);if(job==null||!job.state.equals("FAILED"))return false;
+        if(job.acceptance==null){
+            if(!journal.recorded(acceptanceRecord(job))){job.reason="ACCEPTANCE_RECORD_UNCONFIRMED";return false;}
+            job.acceptance=CompletableFuture.completedFuture(null);
+        }
+        job.acceptance=journal.retryRejected(acceptanceRecord(job),job.acceptance);
+        boolean accepting=!job.acceptance.isDone();
+        if(!accepting&&(job.acceptance.isCompletedExceptionally()||job.acceptance.isCancelled())){
+            job.reason="ACCEPTANCE_ACK_UNCONFIRMED";return false;
+        }
+        if(job.generation!=null&&job.image==null&&job.generation.canRestart())job.generation=null;
+        // Otherwise resume the SAME owner: its queued continuations may be needed to finish
+        // the outstanding future. Refusing to schedule it again would make that future permanent.
+        if(job.lighting!=null&&(job.lighting.isCompletedExceptionally()||job.lighting.isCancelled()))job.lighting=null;
+        if(job.receipt!=null&&(job.receipt.isCompletedExceptionally()||job.receipt.isCancelled())){
+            String record=completionRecord(job);
+            CompletableFuture<Void> retried=journal.retryRejected(record,job.receipt);
+            if(retried==job.receipt){job.reason="DURABLE_WRITER_OR_COMMIT_UNAVAILABLE";return false;}
+            job.receipt=retried;
+        }
+        String reason=job.reason;job.state=accepting?"ACCEPTING":"QUEUED";job.stopped=accepting;job.reason="";
+        try{persist(job);}catch(IOException|RuntimeException failure){job.state="FAILED";job.stopped=true;job.reason=reason;throw failure;}
+        return true;
+    }
     String state(UUID id){Job job=jobs.get(id);return job==null?"未找到世界工作。":"WORLD="+job.id+";ACTION="+job.kind+";STATE="+job.state+";CHUNKS="+job.cursor+"/"+job.count()+";BLOCK_CURSOR="+job.blockCursor+";WORLD_SAVE="+(job.kind==Kind.CAPTURE?"NOT_CHANGED":"NORMAL_WORLD_SAVE_UNCONFIRMED")+";REASON="+job.reason;}
     void tick(){
         if(jobs.isEmpty())return;List<Job> order=new ArrayList<>(jobs.values());
-        for(int i=0;i<order.size();i++){Job job=order.get(next++%order.size());if(next<0)next=0;if(job.stopped||job.state.equals("COMPLETE"))continue;
-            try{advance(job);}catch(IOException|RuntimeException failure){job.state="FAILED";job.reason=failure.getClass().getSimpleName()+":"+String.valueOf(failure.getMessage());job.stopped=true;release(job);unfreeze(job);try{persist(job);}catch(IOException failedPersistence){job.reason+=";MANIFEST_WRITE_FAILED";}}break;
+        for(int i=0;i<order.size();i++){Job job=order.get(next++%order.size());if(next<0)next=0;if(job.stopped&&!job.state.equals("ACCEPTING")||job.state.equals("COMPLETE"))continue;
+            try{advance(job);}catch(IOException|RuntimeException failure){
+                job.state="FAILED";job.reason=failure.getClass().getSimpleName()+":"+String.valueOf(failure.getMessage());job.stopped=true;
+                try{release(job);}catch(RuntimeException cleanup){job.reason+=";TICKET_RELEASE_PENDING";failure.addSuppressed(cleanup);}
+                try{unfreeze(job);}catch(RuntimeException cleanup){job.reason+=";AREA_RELEASE_PENDING";failure.addSuppressed(cleanup);}
+                try{persist(job);}catch(IOException|RuntimeException failedPersistence){job.reason+=";MANIFEST_WRITE_FAILED";}
+            }break;
         }
     }
     private void advance(Job job)throws IOException{
         ServerLevel level=server.getLevel(job.dimension);if(level==null)throw new IllegalStateException("WORLD_DIMENSION_UNAVAILABLE");
-        runtime.archiveFreeze(this,job.id,level,job.low,job.high,true);
+        if(job.state.equals("ACCEPTING")){if(!publishAcceptance(job,level))return;}
+        else runtime.archiveFreeze(this,job.id,level,job.low,job.high,true);
         if(job.cursor==job.count()){
-            if(job.receipt==null){String record="WORLD/1\tCOMPLETE\t"+job.id+"\t"+job.kind+"\t"+job.count();
-                job.receipt=journal.history().contains(record)?CompletableFuture.completedFuture(null):journal.append(record);job.state="COMMIT_PENDING";persist(job);}
+            String record=completionRecord(job);
+            if(job.receipt==null){
+                job.receipt=journal.recorded(record)?CompletableFuture.completedFuture(null):journal.append(record);job.state="COMMIT_PENDING";persist(job);
+            }else job.receipt=journal.retryRejected(record,job.receipt);
             if(job.receipt.isDone()){job.receipt.join();job.state="COMPLETE";persist(job);unfreeze(job);}return;
         }
         ChunkPos position=job.position();
@@ -114,15 +189,19 @@ final class WorldArchive {
         if(!job.loading.isDone())return;
         ChunkAccess loaded=job.loading.join().left().orElseThrow(()->new IllegalStateException("WORLD_SELECTED_CHUNK_LOAD_FAILED"));
         if(!(loaded instanceof LevelChunk live)||!live.getPos().equals(position))throw new IllegalStateException("WORLD_SELECTED_CHUNK_IDENTITY_MISMATCH");
-        if(job.kind==Kind.CAPTURE){write(image(job.id,position),capture(job,live));finishChunk(job);return;}
+        if(job.kind==Kind.CAPTURE){
+            if(!job.captureWritten){if(job.image==null)job.image=capture(job,live);write(image(job.id,position),job.image);job.captureWritten=true;}
+            finishChunk(job);return;
+        }
         if(job.kind==Kind.REGENERATE){
             if(level.getSeed()!=job.seed)throw new IllegalStateException("WORLD_HISTORY_SEED_CHANGED");
             if(!Files.exists(image(job.id,position)))write(image(job.id,position),capture(job,live));
-            if(job.generation==null){job.generation=new SeedChunks(level,position);runtime.archiveControls(this,job.generation.controlObjects());job.state="GENERATING";}
-            job.generation.advance();if(!job.generation.ready())return;
-            if(job.image==null)job.image=capture(job,job.generation.result());
+            if(job.image==null){
+                if(job.generation==null){job.generation=new SeedChunks(level,position);runtime.archiveControls(this,job.generation.controlObjects());job.state="GENERATING";}
+                job.generation.advance();if(!job.generation.ready())return;
+                job.image=capture(job,job.generation.result());
+            }
         }else if(job.image==null)job.image=read(image(job.source,position));
-        if(job.lighting!=null){if(!job.lighting.isDone())return;job.lighting.join();publish(level,live);finishChunk(job);return;}
         apply(job,level,live);
     }
     private static BlockPos lower(Job job,ChunkPos pos){return new BlockPos(Math.max(job.low.getX(),pos.getMinBlockX()),job.low.getY(),Math.max(job.low.getZ(),pos.getMinBlockZ()));}
@@ -155,41 +234,80 @@ final class WorldArchive {
     private static <T> ListTag ticks(TickContainerAccess<T> container,Job job,long now,Registry<T> registry){
         ListTag result=new ListTag();
         if(container instanceof LevelChunkTicks<T> live)live.getAll().filter(tick->job.contains(tick.pos())).forEach(tick->{CompoundTag saved=new CompoundTag();saved.putString("Type",registry.getKey(tick.type()).toString());saved.put("Position",NbtUtils.writeBlockPos(tick.pos()));saved.putLong("Delay",tick.triggerTick()-now);saved.putInt("Priority",tick.priority().getValue());saved.putLong("Order",tick.subTickOrder());result.add(saved);});
-        else if(container instanceof ProtoChunkTicks<T> proto)for(SavedTick<T> tick:proto.scheduledTicks())if(job.contains(tick.pos())){CompoundTag saved=new CompoundTag();saved.putString("Type",registry.getKey(tick.type()).toString());saved.put("Position",NbtUtils.writeBlockPos(tick.pos()));saved.putLong("Delay",tick.delay());saved.putInt("Priority",tick.priority().getValue());saved.putLong("Order",result.size());result.add(saved);}
-        else throw new IllegalStateException("WORLD_TICK_CONTAINER_UNAVAILABLE");return result;
+        else if(container instanceof ProtoChunkTicks<T> proto){
+            for(SavedTick<T> tick:proto.scheduledTicks())if(job.contains(tick.pos())){CompoundTag saved=new CompoundTag();saved.putString("Type",registry.getKey(tick.type()).toString());saved.put("Position",NbtUtils.writeBlockPos(tick.pos()));saved.putLong("Delay",tick.delay());saved.putInt("Priority",tick.priority().getValue());saved.putLong("Order",result.size());result.add(saved);}
+        }else throw new IllegalStateException("WORLD_TICK_CONTAINER_UNAVAILABLE");return result;
     }
     private static <T> void appendHeld(ListTag target,List<ScheduledTick<?>> held,long now,Registry<T> registry){
         for(ScheduledTick<?> tick:held){@SuppressWarnings("unchecked") T type=(T)tick.type();CompoundTag tag=new CompoundTag();tag.putString("Type",registry.getKey(type).toString());tag.put("Position",NbtUtils.writeBlockPos(tick.pos()));tag.putLong("Delay",tick.triggerTick()-now);tag.putInt("Priority",tick.priority().getValue());tag.putLong("Order",tick.subTickOrder());target.add(tag);}
     }
     private void apply(Job job,ServerLevel level,LevelChunk chunk)throws IOException{
+        if(job.applyingChunk!=chunk){
+            // A reloaded chunk is a different live owner. Do not reuse the old owner's progress.
+            if(job.applyingChunk!=null&&job.lighting!=null&&!job.lighting.isDone()){job.state="LIGHTING";return;}
+            resetApply(job);job.applyingChunk=chunk;
+        }
         CompoundTag frame=job.image;BlockPos low=lower(job,chunk.getPos()),high=upper(job,chunk.getPos());
         if(frame.getInt("Format")!=1||!frame.getUUID("Realm").equals(journal.realm)||frame.getLong("Chunk")!=chunk.getPos().toLong()||!NbtUtils.readBlockPos(frame.getCompound("Low")).equals(low)||!NbtUtils.readBlockPos(frame.getCompound("High")).equals(high))throw new IOException("WORLD_HISTORY_IMAGE_SCOPE_MISMATCH");
         int[] cells=frame.getIntArray("Cells");int width=high.getX()-low.getX()+1,depth=high.getZ()-low.getZ()+1,height=high.getY()-low.getY()+1;
         if(cells.length!=Math.multiplyExact(Math.multiplyExact(width,depth),height)||job.blockCursor>cells.length)throw new IOException("WORLD_HISTORY_IMAGE_CELLS_INVALID");
         List<BlockState> palette=new ArrayList<>();for(Tag value:frame.getList("Palette",Tag.TAG_COMPOUND))palette.add(NbtUtils.readBlockState(level.holderLookup(Registries.BLOCK),(CompoundTag)value));
-        job.state="APPLYING";for(int budget=0;job.blockCursor<cells.length&&budget<4096;budget++,job.blockCursor++){
-            int index=job.blockCursor,pal=cells[index];if(pal<0||pal>=palette.size())throw new IOException("WORLD_HISTORY_PALETTE_INDEX_INVALID");
-            BlockPos pos=new BlockPos(low.getX()+index%width,low.getY()+(index/width)%height,low.getZ()+index/(width*height));BlockState desired=palette.get(pal);
-            if(chunk.getBlockState(pos)!=desired){level.setBlock(pos,desired,Block.UPDATE_CLIENTS|Block.UPDATE_KNOWN_SHAPE|Block.UPDATE_SUPPRESS_DROPS);
-                if(chunk.getBlockState(pos)!=desired)throw new IllegalStateException("WORLD_BLOCK_RESTORE_REFUSED:"+pos);}
-        }persist(job);if(job.blockCursor!=cells.length)return;
-        Set<BlockPos> wantedTiles=new HashSet<>();for(Tag value:frame.getList("Tiles",Tag.TAG_COMPOUND)){CompoundTag saved=(CompoundTag)value;BlockPos pos=new BlockPos(saved.getInt("x"),saved.getInt("y"),saved.getInt("z"));
-            if(!job.contains(pos)||ChunkPos.asLong(pos)!=chunk.getPos().toLong())throw new IOException("WORLD_TILE_IMAGE_OUTSIDE_SCOPE");wantedTiles.add(pos);
-            BlockEntity restored=BlockEntity.loadStatic(pos,chunk.getBlockState(pos),saved.copy());if(restored==null)throw new IllegalStateException("WORLD_TILE_TYPE_UNAVAILABLE:"+pos);chunk.removeBlockEntity(pos);chunk.setBlockEntity(restored);restored.setChanged();
-            if(chunk.getBlockEntity(pos)!=restored)throw new IllegalStateException("WORLD_TILE_RESTORE_REFUSED:"+pos);
+        if(job.applyStep==ApplyStep.BLOCKS){
+            job.state="APPLYING";for(int budget=0;job.blockCursor<cells.length&&budget<4096;budget++,job.blockCursor++){
+                int index=job.blockCursor,pal=cells[index];if(pal<0||pal>=palette.size())throw new IOException("WORLD_HISTORY_PALETTE_INDEX_INVALID");
+                BlockPos pos=new BlockPos(low.getX()+index%width,low.getY()+(index/width)%height,low.getZ()+index/(width*height));BlockState desired=palette.get(pal);
+                if(chunk.getBlockState(pos)!=desired){level.setBlock(pos,desired,Block.UPDATE_CLIENTS|Block.UPDATE_KNOWN_SHAPE|Block.UPDATE_SUPPRESS_DROPS);
+                    if(chunk.getBlockState(pos)!=desired)throw new IllegalStateException("WORLD_BLOCK_RESTORE_REFUSED:"+pos);}
+            }
+            if(job.blockCursor==cells.length)job.applyStep=ApplyStep.TILES;
+            persist(job);if(job.applyStep==ApplyStep.BLOCKS)return;
         }
-        for(BlockPos pos:List.copyOf(chunk.getBlockEntitiesPos()))if(job.contains(pos)&&!wantedTiles.contains(pos))chunk.removeBlockEntity(pos);
-        BoundingBox selection=new BoundingBox(low.getX(),low.getY(),low.getZ(),high.getX(),high.getY(),high.getZ());level.getBlockTicks().clearArea(selection);level.getFluidTicks().clearArea(selection);
-        runtime.archiveHeldTicks(this,level,low,high,false,true);runtime.archiveHeldTicks(this,level,low,high,true,true);
-        restoreTicks(level.getBlockTicks(),frame.getList("BlockTicks",Tag.TAG_COMPOUND),BuiltInRegistries.BLOCK,level.getGameTime(),job);
-        restoreTicks(level.getFluidTicks(),frame.getList("FluidTicks",Tag.TAG_COMPOUND),BuiltInRegistries.FLUID,level.getGameTime(),job);
-        if(!runtime.archiveEntities(this,level,low,high,frame.getList("Entities",Tag.TAG_COMPOUND))){job.state="ENTITY_RESTORE_PENDING";persist(job);return;}
-        if(frame.getBoolean("FullChunk"))restoreMetadata(level,chunk,frame);
-        chunk.setUnsaved(true);job.state="LIGHTING";job.lighting=level.getChunkSource().getLightEngine().initializeLight(chunk,false).thenCompose(actual->level.getChunkSource().getLightEngine().lightChunk(actual,false));
+        if(job.applyStep==ApplyStep.TILES){
+            ListTag tiles=frame.getList("Tiles",Tag.TAG_COMPOUND);job.state="RESTORING_TILES";
+            while(job.tileCursor<tiles.size()){
+                CompoundTag saved=tiles.getCompound(job.tileCursor);BlockPos pos=new BlockPos(saved.getInt("x"),saved.getInt("y"),saved.getInt("z"));
+                if(!job.contains(pos)||ChunkPos.asLong(pos)!=chunk.getPos().toLong())throw new IOException("WORLD_TILE_IMAGE_OUTSIDE_SCOPE");
+                if(job.pendingTile==null)job.pendingTile=BlockEntity.loadStatic(pos,chunk.getBlockState(pos),saved.copy());
+                BlockEntity restored=job.pendingTile;if(restored==null)throw new IllegalStateException("WORLD_TILE_TYPE_UNAVAILABLE:"+pos);
+                if(restored.getBlockState()!=chunk.getBlockState(pos))throw new IllegalStateException("WORLD_TILE_STATE_CHANGED:"+pos);
+                if(chunk.getBlockEntity(pos)!=restored){chunk.removeBlockEntity(pos);chunk.setBlockEntity(restored);}
+                restored.setChanged();if(chunk.getBlockEntity(pos)!=restored)throw new IllegalStateException("WORLD_TILE_RESTORE_REFUSED:"+pos);
+                job.pendingTile=null;job.tileCursor++;
+            }
+            Set<BlockPos> wantedTiles=new HashSet<>();for(Tag value:tiles){CompoundTag saved=(CompoundTag)value;wantedTiles.add(new BlockPos(saved.getInt("x"),saved.getInt("y"),saved.getInt("z")));}
+            for(BlockPos pos:List.copyOf(chunk.getBlockEntitiesPos()))if(job.contains(pos)&&!wantedTiles.contains(pos))chunk.removeBlockEntity(pos);
+            job.applyStep=ApplyStep.TICKS;
+        }
+        if(job.applyStep==ApplyStep.TICKS){
+            job.state="RESTORING_TICKS";BoundingBox selection=new BoundingBox(low.getX(),low.getY(),low.getZ(),high.getX(),high.getY(),high.getZ());
+            if(job.tickBase==Long.MIN_VALUE)job.tickBase=level.getGameTime();
+            if(!job.blockTicksCleared){level.getBlockTicks().clearArea(selection);runtime.archiveHeldTicks(this,level,low,high,false,true);job.blockTicksCleared=true;}
+            if(!job.fluidTicksCleared){level.getFluidTicks().clearArea(selection);runtime.archiveHeldTicks(this,level,low,high,true,true);job.fluidTicksCleared=true;}
+            ListTag blockTicks=frame.getList("BlockTicks",Tag.TAG_COMPOUND),fluidTicks=frame.getList("FluidTicks",Tag.TAG_COMPOUND);
+            while(job.blockTickCursor<blockTicks.size()){restoreTick(level.getBlockTicks(),blockTicks.getCompound(job.blockTickCursor),BuiltInRegistries.BLOCK,job.tickBase,job);job.blockTickCursor++;}
+            while(job.fluidTickCursor<fluidTicks.size()){restoreTick(level.getFluidTicks(),fluidTicks.getCompound(job.fluidTickCursor),BuiltInRegistries.FLUID,job.tickBase,job);job.fluidTickCursor++;}
+            job.applyStep=ApplyStep.ENTITIES;
+        }
+        if(job.applyStep==ApplyStep.ENTITIES){
+            if(!runtime.archiveEntities(this,level,low,high,frame.getList("Entities",Tag.TAG_COMPOUND))){job.state="ENTITY_RESTORE_PENDING";persist(job);return;}
+            job.applyStep=ApplyStep.METADATA;
+        }
+        if(job.applyStep==ApplyStep.METADATA){
+            if(frame.getBoolean("FullChunk"))restoreMetadata(level,chunk,frame);
+            chunk.setUnsaved(true);job.applyStep=ApplyStep.LIGHTING;
+        }
+        if(job.applyStep==ApplyStep.LIGHTING){
+            job.state="LIGHTING";
+            if(job.lighting==null)job.lighting=level.getChunkSource().getLightEngine().initializeLight(chunk,false).thenCompose(actual->level.getChunkSource().getLightEngine().lightChunk(actual,false));
+            if(!job.lighting.isDone())return;
+            job.lighting.join();job.applyStep=ApplyStep.PUBLISH;
+        }
+        if(job.applyStep==ApplyStep.PUBLISH){publish(level,chunk);finishChunk(job);}
     }
-    private static <T> void restoreTicks(LevelTicks<T> container,ListTag saved,Registry<T> registry,long now,Job job)throws IOException{
-        for(Tag value:saved){CompoundTag tag=(CompoundTag)value;BlockPos pos=NbtUtils.readBlockPos(tag.getCompound("Position"));T type=registry.getOptional(new ResourceLocation(tag.getString("Type"))).orElseThrow(()->new IllegalStateException("WORLD_TICK_TYPE_UNAVAILABLE"));
-            if(!job.contains(pos))throw new IOException("WORLD_TICK_IMAGE_OUTSIDE_SCOPE");container.schedule(new ScheduledTick<>(type,pos,Math.addExact(now,tag.getLong("Delay")),TickPriority.byValue(tag.getInt("Priority")),tag.getLong("Order")));}
+    private static <T> void restoreTick(LevelTicks<T> container,CompoundTag tag,Registry<T> registry,long now,Job job)throws IOException{
+        BlockPos pos=NbtUtils.readBlockPos(tag.getCompound("Position"));T type=registry.getOptional(new ResourceLocation(tag.getString("Type"))).orElseThrow(()->new IllegalStateException("WORLD_TICK_TYPE_UNAVAILABLE"));
+        if(!job.contains(pos))throw new IOException("WORLD_TICK_IMAGE_OUTSIDE_SCOPE");
+        container.schedule(new ScheduledTick<>(type,pos,Math.addExact(now,tag.getLong("Delay")),TickPriority.byValue(tag.getInt("Priority")),tag.getLong("Order")));
     }
     private static void restoreMetadata(ServerLevel level,LevelChunk chunk,CompoundTag saved){
         var structures=level.registryAccess().registryOrThrow(Registries.STRUCTURE);Map<net.minecraft.world.level.levelgen.structure.Structure,StructureStart> starts=new HashMap<>();
@@ -204,7 +322,17 @@ final class WorldArchive {
         var packet=new net.minecraft.network.protocol.game.ClientboundLevelChunkWithLightPacket(chunk,level.getChunkSource().getLightEngine(),null,null);
         for(ServerPlayer player:level.getChunkSource().chunkMap.getPlayers(chunk.getPos(),false))player.connection.send(packet);
     }
-    private void finishChunk(Job job)throws IOException{release(job);job.cursor++;job.blockCursor=0;job.image=null;job.generation=null;job.lighting=null;job.state="QUEUED";persist(job);}
+    private static String completionRecord(Job job){return "WORLD/1\tCOMPLETE\t"+job.id+"\t"+job.kind+"\t"+job.count();}
+    private void finishChunk(Job job)throws IOException{
+        release(job);long cursor=job.cursor;int blockCursor=job.blockCursor;String state=job.state;
+        job.cursor++;job.blockCursor=0;job.state="QUEUED";
+        try{persist(job);}catch(IOException|RuntimeException failure){job.cursor=cursor;job.blockCursor=blockCursor;job.state=state;throw failure;}
+        job.image=null;job.generation=null;job.captureWritten=false;job.applyingChunk=null;resetApply(job);
+    }
+    private static void resetApply(Job job){
+        job.blockCursor=0;job.lighting=null;job.pendingTile=null;job.applyStep=ApplyStep.BLOCKS;
+        job.tileCursor=0;job.blockTickCursor=0;job.fluidTickCursor=0;job.blockTicksCleared=false;job.fluidTicksCleared=false;job.tickBase=Long.MIN_VALUE;
+    }
     private void release(Job job){ServerLevel level=server.getLevel(job.dimension);if(job.ticket!=null&&level!=null)level.getChunkSource().removeRegionTicket(TICKET,job.ticket,0,job.id);job.ticket=null;job.loading=null;}
     private void unfreeze(Job job){ServerLevel level=server.getLevel(job.dimension);if(level!=null)runtime.archiveFreeze(this,job.id,level,job.low,job.high,false);}
     void close(){for(Job job:jobs.values()){release(job);unfreeze(job);}}

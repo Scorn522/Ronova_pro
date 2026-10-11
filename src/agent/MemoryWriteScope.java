@@ -5,7 +5,7 @@ import jdk.internal.org.objectweb.asm.tree.*;
 
 /** Keeps admitted Unsafe writes and raw reads open until return or exception. */
 final class MemoryWriteScope {
-    private static final String BRIDGE="dev/ronova/pro/bootstrap/TaskBridge";
+    private static final String BRIDGE="dev/ronova/pro/bootstrap/ControlBridge";
     private MemoryWriteScope(){}
     static void nativeCall(MethodNode method,MethodInsnNode call,Type[] arguments,int[] slots,String kind){
         nativeCall(method,call,arguments,slots,kind,false,call);
@@ -30,17 +30,17 @@ final class MemoryWriteScope {
         // The policy and every refusal return belong to the same actual write scope.
         for(AbstractInsnNode at=guard;at!=call;at=at.getNext())if(at.getOpcode()>=Opcodes.IRETURN&&at.getOpcode()<=Opcodes.RETURN){
             InsnList refused=new InsnList();refused.add(new VarInsnNode(Opcodes.ALOAD,ticket));refused.add(new InsnNode(Opcodes.ICONST_0));
-            refused.add(new MethodInsnNode(Opcodes.INVOKESTATIC,BRIDGE,"finishFieldMutation","(Ljava/lang/Object;Z)V",false));method.instructions.insertBefore(at,refused);
+            refused.add(new MethodInsnNode(Opcodes.INVOKESTATIC,"dev/ronova/pro/bootstrap/ControlBridge","finishFieldMutation","(Ljava/lang/Object;Z)V",false));method.instructions.insertBefore(at,refused);
         }
         enter.add(new VarInsnNode(Opcodes.ASTORE,ticket));enter.add(start);method.instructions.insertBefore(guard,enter);
         InsnList finish=new InsnList();finish.add(end);
         if(result.getSort()!=Type.VOID)finish.add(new VarInsnNode(result.getOpcode(Opcodes.ISTORE),returned));
         finish.add(new VarInsnNode(Opcodes.ALOAD,ticket));applied(finish,call.name,result,returned,arguments,slots);
-        finish.add(new MethodInsnNode(Opcodes.INVOKESTATIC,BRIDGE,"finishFieldMutation","(Ljava/lang/Object;Z)V",false));
+        finish.add(new MethodInsnNode(Opcodes.INVOKESTATIC,"dev/ronova/pro/bootstrap/ControlBridge","finishFieldMutation","(Ljava/lang/Object;Z)V",false));
         if(result.getSort()!=Type.VOID)finish.add(new VarInsnNode(result.getOpcode(Opcodes.ILOAD),returned));
         finish.add(new JumpInsnNode(Opcodes.GOTO,resume));finish.add(handler);finish.add(new VarInsnNode(Opcodes.ASTORE,error));
         finish.add(new VarInsnNode(Opcodes.ALOAD,ticket));finish.add(new VarInsnNode(Opcodes.ALOAD,error));
-        finish.add(new MethodInsnNode(Opcodes.INVOKESTATIC,BRIDGE,"fieldMutationFailed","(Ljava/lang/Object;Ljava/lang/Throwable;)V",false));
+        finish.add(new MethodInsnNode(Opcodes.INVOKESTATIC,"dev/ronova/pro/bootstrap/ControlBridge","fieldMutationFailed","(Ljava/lang/Object;Ljava/lang/Throwable;)V",false));
         finish.add(new VarInsnNode(Opcodes.ALOAD,error));finish.add(new InsnNode(Opcodes.ATHROW));finish.add(resume);
         method.instructions.insert(call,finish);method.tryCatchBlocks.add(0,new TryCatchBlockNode(start,end,handler,"java/lang/Throwable"));
     }
@@ -95,12 +95,12 @@ final class MemoryWriteScope {
                 LabelNode refused=new LabelNode(),ready=new LabelNode();finish.add(new VarInsnNode(Opcodes.ILOAD,accepted));finish.add(new JumpInsnNode(Opcodes.IFEQ,refused));
                 applied(finish,method.name,result,returned,arguments,slots);finish.add(new JumpInsnNode(Opcodes.GOTO,ready));finish.add(refused);finish.add(new InsnNode(Opcodes.ICONST_0));finish.add(ready);
             }else applied(finish,method.name,result,returned,arguments,slots);
-            finish.add(new MethodInsnNode(Opcodes.INVOKESTATIC,BRIDGE,"finishFieldMutation","(Ljava/lang/Object;Z)V",false));
+            finish.add(new MethodInsnNode(Opcodes.INVOKESTATIC,"dev/ronova/pro/bootstrap/ControlBridge","finishFieldMutation","(Ljava/lang/Object;Z)V",false));
             if(result.getSort()!=Type.VOID)finish.add(new VarInsnNode(result.getOpcode(Opcodes.ILOAD),returned));method.instructions.insertBefore(at,finish);
         }
         method.instructions.add(end);method.instructions.add(handler);method.instructions.add(new VarInsnNode(Opcodes.ASTORE,error));
         method.instructions.add(new VarInsnNode(Opcodes.ALOAD,ticket));method.instructions.add(new VarInsnNode(Opcodes.ALOAD,error));
-        method.instructions.add(new MethodInsnNode(Opcodes.INVOKESTATIC,BRIDGE,"fieldMutationFailed","(Ljava/lang/Object;Ljava/lang/Throwable;)V",false));
+        method.instructions.add(new MethodInsnNode(Opcodes.INVOKESTATIC,"dev/ronova/pro/bootstrap/ControlBridge","fieldMutationFailed","(Ljava/lang/Object;Ljava/lang/Throwable;)V",false));
         method.instructions.add(new VarInsnNode(Opcodes.ALOAD,error));method.instructions.add(new InsnNode(Opcodes.ATHROW));
         method.tryCatchBlocks.add(new TryCatchBlockNode(start,end,handler,"java/lang/Throwable"));
     }
@@ -117,9 +117,9 @@ final class MemoryWriteScope {
         }
         enter.add(start);
         method.instructions.insertBefore(call,enter);InsnList finish=new InsnList();finish.add(end);
-        finish.add(new VarInsnNode(Opcodes.ALOAD,ticket));finish.add(new InsnNode(Opcodes.ICONST_1));finish.add(new MethodInsnNode(Opcodes.INVOKESTATIC,BRIDGE,"finishFieldMutation","(Ljava/lang/Object;Z)V",false));
+        finish.add(new VarInsnNode(Opcodes.ALOAD,ticket));finish.add(new InsnNode(Opcodes.ICONST_1));finish.add(new MethodInsnNode(Opcodes.INVOKESTATIC,"dev/ronova/pro/bootstrap/ControlBridge","finishFieldMutation","(Ljava/lang/Object;Z)V",false));
         finish.add(new JumpInsnNode(Opcodes.GOTO,resume));finish.add(handler);finish.add(new VarInsnNode(Opcodes.ASTORE,error));finish.add(new VarInsnNode(Opcodes.ALOAD,ticket));finish.add(new VarInsnNode(Opcodes.ALOAD,error));
-        finish.add(new MethodInsnNode(Opcodes.INVOKESTATIC,BRIDGE,"fieldMutationFailed","(Ljava/lang/Object;Ljava/lang/Throwable;)V",false));finish.add(new VarInsnNode(Opcodes.ALOAD,error));finish.add(new InsnNode(Opcodes.ATHROW));finish.add(resume);
+        finish.add(new MethodInsnNode(Opcodes.INVOKESTATIC,"dev/ronova/pro/bootstrap/ControlBridge","fieldMutationFailed","(Ljava/lang/Object;Ljava/lang/Throwable;)V",false));finish.add(new VarInsnNode(Opcodes.ALOAD,error));finish.add(new InsnNode(Opcodes.ATHROW));finish.add(resume);
         method.instructions.insert(call,finish);method.tryCatchBlocks.add(0,new TryCatchBlockNode(start,end,handler,"java/lang/Throwable"));
     }
 }

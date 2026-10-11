@@ -21,11 +21,18 @@ final class SourceMaps {
         RetiringList previous=RETIRING_LIST.get();RETIRING_LIST.set(new RetiringList(list,listBacking(list),list.toArray()));
         try{list.remove(index);}finally{if(previous==null)RETIRING_LIST.remove();else RETIRING_LIST.set(previous);}
     }
+    /** Remove every occurrence of this exact identity under the carrier's existing write scope. */
+    static boolean removeListIdentity(List<?> list,Object expected)throws ReflectiveOperationException{
+        if(!supportedList(list))throw new IllegalArgumentException("ACTUAL_SOURCE_LIST_REQUIRED");
+        RetiringList previous=RETIRING_LIST.get();RETIRING_LIST.set(new RetiringList(list,listBacking(list),list.toArray()));
+        try{return list.removeIf(value->value==expected);}
+        finally{if(previous==null)RETIRING_LIST.remove();else RETIRING_LIST.set(previous);}
+    }
     private static final Object RAW_RANGE=new Object();
     private static final class Publications {
         static final Method OBSERVE=method("observeSourceHolder",Object.class),CARRIER=method("observeSourceCarrier",Object.class),HOLD=method("holdSourcePublication",Object.class,Object.class),CHANGED=method("recoveredSourceChange",Object.class);
         private static Method method(String name,Class<?>... parameters){
-            try{return Class.forName("dev.ronova.pro.bootstrap.TaskBridge",false,null).getMethod(name,parameters);}
+            try{return Class.forName("dev.ronova.pro.bootstrap.ControlBridge",false,null).getMethod(name,parameters);}
             catch(ReflectiveOperationException unavailable){throw new ExceptionInInitializerError(unavailable);}
         }
     }
@@ -87,7 +94,7 @@ final class SourceMaps {
         for(Owner owner:HOLDERS.getOrDefault(source.holder(),List.of()))
             if(owner.source.get()==source&&owner.field.equals(field))return value==null||referenceContainer(value)
                     ||value instanceof net.minecraft.world.entity.Entity||value instanceof net.minecraft.nbt.CompoundTag
-                    ||RecoveryReferences.ownedTarget(value,source.owner.runtimeOwner(),true)!=null||RecoveryReferences.emptyWrapper(value,source.owner.runtimeOwner())||RecoveryReferences.immutableScalar(value)||RecoveryReferences.nestedHolder(value);
+                    ||RecoveryRecords.ownedTarget(value,source.owner.runtimeOwner(),true)!=null||RecoveryRecords.emptyWrapper(value,source.owner.runtimeOwner())||RecoveryRecords.immutableScalar(value)||RecoveryRecords.nestedHolder(value);
         return false;
     }
     static boolean disposedField(RecoverySources.Source source,Field field)throws IllegalAccessException {
@@ -158,7 +165,7 @@ final class SourceMaps {
         if(outer){seen=Collections.newSetFromMap(new IdentityHashMap<>());NESTED_OBSERVATIONS.set(seen);}
         if(!seen.add(carrier))return;
         try{
-            if(RecoveryReferences.nestedHolder(carrier))observeChild(source,field,carrier,"FIELD",null,carrier);
+            if(RecoveryRecords.nestedHolder(carrier))observeChild(source,field,carrier,"FIELD",null,carrier);
             else if(supported(carrier)){
                 List<Map.Entry<Object,Object>> rows=entries(carrier);if(rows==null)throw new IllegalAccessException("NESTED_MAP_BUSY");
                 for(var row:rows)if(supportedKey(row.getKey()))observeChild(source,field,carrier,"MAP",row.getKey(),row.getValue());
@@ -170,7 +177,7 @@ final class SourceMaps {
             else if(carrier instanceof Object[] values){for(int i=0;i<values.length;i++)observeChild(source,field,carrier,"ARRAY",i,values[i]);}
             else if(supportedList(carrier)){
                 Object[][] snapshot={null};
-                if(scopedList(carrier)){if(!RecoveryReferences.withArrayList(carrier,false,()->snapshot[0]=((List<?>)carrier).toArray()))throw new IllegalAccessException("NESTED_LIST_BUSY");}
+                if(scopedList(carrier)){if(!RecoveryRecords.withArrayList(carrier,false,()->snapshot[0]=((List<?>)carrier).toArray()))throw new IllegalAccessException("NESTED_LIST_BUSY");}
                 else snapshot[0]=((List<?>)carrier).toArray();
                 for(int i=0;i<snapshot[0].length;i++)observeChild(source,field,carrier,"LIST",i,snapshot[0][i]);
             }
@@ -179,7 +186,7 @@ final class SourceMaps {
         finally{if(outer)NESTED_OBSERVATIONS.remove();}
     }
     private static void observeChild(RecoverySources.Source parent,Field field,Object carrier,String kind,Object key,Object child)throws ReflectiveOperationException{
-        if(!RecoveryReferences.nestedHolder(child)||RecoveryReferences.ownedTarget(child,parent.owner.runtimeOwner(),true)!=null)return;
+        if(!RecoveryRecords.nestedHolder(child)||RecoveryRecords.ownedTarget(child,parent.owner.runtimeOwner(),true)!=null)return;
         RecoverySources.Source nested=parent.owner.nestedSource(parent,field,kind,key,child,carrier);
         if(nested==null)throw new IllegalAccessException("NESTED_SOURCE_BINDING_PENDING");
         if(nested==parent)return;
@@ -274,7 +281,7 @@ final class SourceMaps {
                 if(retiring!=null&&retiring.holder==holder&&retiring.field.equals(field)&&retiring.expected==actual&&next==null)continue;
                 if(next==RAW_RANGE)return true;
                 if(next==null){if(!holdPublication(holder,null))return true;continue;}
-                if(referenceContainer(next)||RecoveryReferences.nestedHolder(next)){
+                if(referenceContainer(next)||RecoveryRecords.nestedHolder(next)){
                     // Drain incoming writers before inspecting the full carrier. Ownership is
                     // attached only by changed() after successful readback, under the same gate.
                     if(primitiveMap(next)&&!primitiveReady(next))return true;
@@ -286,8 +293,8 @@ final class SourceMaps {
                     continue;
                 }
                 if(deniesValue(source,holder,next))return true;
-                if(RecoveryReferences.immutableScalar(next)||next instanceof net.minecraft.world.entity.Entity
-                        ||RecoveryReferences.ownedTarget(next,runtime,true)!=null||RecoveryReferences.emptyWrapper(next,runtime))continue;
+                if(RecoveryRecords.immutableScalar(next)||next instanceof net.minecraft.world.entity.Entity
+                        ||RecoveryRecords.ownedTarget(next,runtime,true)!=null||RecoveryRecords.emptyWrapper(next,runtime))continue;
                 return true;
             }
             catch(ReflectiveOperationException unavailable){source.gap="SOURCE_HOLDER_PUBLICATION_UNAVAILABLE";return true;}
@@ -302,9 +309,9 @@ final class SourceMaps {
         ArrayDeque<Object> pending=new ArrayDeque<>();Set<Object> seen=Collections.newSetFromMap(new IdentityHashMap<>());pending.add(incoming);
         while(!pending.isEmpty()){
             Object value=pending.removeFirst();if(!seen.add(value))continue;
-            boolean leaf=RecoveryReferences.immutableScalar(value)||value instanceof net.minecraft.world.entity.Entity||value instanceof net.minecraft.nbt.Tag;
+            boolean leaf=RecoveryRecords.immutableScalar(value)||value instanceof net.minecraft.world.entity.Entity||value instanceof net.minecraft.nbt.Tag;
             if(!leaf){
-                if(!referenceContainer(value)&&!RecoveryReferences.nestedHolder(value))return true;
+                if(!referenceContainer(value)&&!RecoveryRecords.nestedHolder(value))return true;
                 if(scopedFastutil(value)&&!primitiveReady(value)||!holdPublication(holder,value))return true;
                 if(supportedSet(value)&&!holdPublication(holder,setMap(value)))return true;
                 Object backing=listBacking(value);if(backing!=null&&!holdPublication(holder,backing))return true;
@@ -330,7 +337,7 @@ final class SourceMaps {
         if(value==null)return false;
         boolean terminal=false;for(UUID subject:source.subjects)if(source.owner.runtimeOwner().terminalSource(subject)){terminal=true;break;}
         if(!terminal)return false;
-        if(referenceContainer(value)||RecoveryReferences.nestedHolder(value)){
+        if(referenceContainer(value)||RecoveryRecords.nestedHolder(value)){
             try{return incomingDenied(source,receiver,value);}
             catch(ReflectiveOperationException unavailable){return true;}
         }
@@ -339,7 +346,7 @@ final class SourceMaps {
     private static boolean deniesTarget(RecoverySources.Source source,Object value){
         ProRuntime runtime=source.owner.runtimeOwner();ProRuntime.Subject group=runtime.groupSubject(value);
         if(group!=null&&group.terminal&&!Collections.disjoint(source.subjects,runtime.groupTargets(group.id)))return true;
-        Object target=RecoveryReferences.ownedTarget(value,runtime,true);
+        Object target=RecoveryRecords.ownedTarget(value,runtime,true);
         UUID subject=target instanceof net.minecraft.world.entity.Entity?runtime.recoveryTasks.subjectOf(target):
                 target instanceof net.minecraft.nbt.CompoundTag tag?RecoverySources.subject(source.owner,tag):null;
         return subject!=null&&!Collections.disjoint(source.subjects,runtime.groupTargets(subject))&&runtime.terminalSource(subject);
@@ -515,7 +522,7 @@ final class SourceMaps {
         try { return (Object[])peek.invoke(null,map,key); }catch(ReflectiveOperationException failure) { return null; }
     }
     static long revision(Object map) {
-        if(scopedFastutil(map))try{return (long)Class.forName("dev.ronova.pro.bootstrap.TaskBridge",false,null).getMethod("sourceIndexRevision",Object.class).invoke(null,map);}
+        if(scopedFastutil(map))try{return (long)Class.forName("dev.ronova.pro.bootstrap.ControlBridge",false,null).getMethod("sourceIndexRevision",Object.class).invoke(null,map);}
         catch(ReflectiveOperationException unavailable){return -1;}
         if(!hashBacked(map))return 0;
         if(!available())return -1;
@@ -840,7 +847,7 @@ final class SourceMaps {
             ReflectiveOperationException[] thrown={null};
             Runnable run=()->{try{action.run();}catch(ReflectiveOperationException failure){thrown[0]=failure;}};
             try{
-                boolean ran=Boolean.TRUE.equals(Class.forName("dev.ronova.pro.bootstrap.TaskBridge",false,null).getMethod("withSourceIndex",Object.class,Runnable.class).invoke(null,map,run));
+                boolean ran=Boolean.TRUE.equals(Class.forName("dev.ronova.pro.bootstrap.ControlBridge",false,null).getMethod("withSourceIndex",Object.class,Runnable.class).invoke(null,map,run));
                 if(thrown[0]!=null)throw thrown[0];return ran;
             }catch(InvocationTargetException failure){if(failure.getCause() instanceof RuntimeException error)throw error;if(failure.getCause() instanceof Error error)throw error;throw failure;}
         }

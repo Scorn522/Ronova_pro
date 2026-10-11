@@ -1,528 +1,1096 @@
 package dev.ronova.pro;
 
 import dev.ronova.pro.persistence.JournalLineage;
-import java.io.IOException;
 import java.lang.ref.WeakReference;
 import java.lang.reflect.*;
 import java.nio.charset.StandardCharsets;
 import java.util.*;
 import java.util.concurrent.*;
+import java.util.concurrent.atomic.*;
 import net.minecraft.nbt.CompoundTag;
 import net.minecraft.world.entity.Entity;
-import net.minecraft.world.level.saveddata.SavedData;
 
-/** Exact holder-edge disposal; never treats a matching UUID or equal NBT as object identity. */
+/** One memory-source work owner; carrier adapters share policies, scans, replay and retirement. */
 final class RecoveryRecords implements AutoCloseable {
-    private static final String PREFIX="RECORD/1";
-    private final ProRuntime runtime;
-    private final RecoverySources sources;
-    private final RecoveryReferences references;
-    private final Map<UUID,Policy> policies=new LinkedHashMap<>();
-    private final Map<RecoverySources.Source,Scan> scans=new IdentityHashMap<>();
-    private final Map<UUID,Work> work=new LinkedHashMap<>();
-    private final List<String> historical=new ArrayList<>();
-    private long cursor,priorCursor;
-    private volatile boolean closing;
-    private final ThreadPoolExecutor executor=new ThreadPoolExecutor(1,1,0,TimeUnit.MILLISECONDS,new ArrayBlockingQueue<>(32),task->{
-        Thread thread=new Thread(task,"ronova-pro-records");thread.setDaemon(true);return thread;
-    },new ThreadPoolExecutor.AbortPolicy());
-    private String gap="";
-    private final java.util.concurrent.atomic.AtomicLong changes=new java.util.concurrent.atomic.AtomicLong();
-    private final Map<UUID,Prior> prior=new LinkedHashMap<>();
-    private static final class Prior {
-        final UUID id,operation,subject,session;
-        final String source,code,field,key;
-        CompletableFuture<Void> ack;
-        String record,reason="ORIGINAL_REFERENCE_RESTART_QUERY_PENDING";
-        boolean current;
-        Prior(String[] row) {
-            id=UUID.fromString(row[2]);operation=UUID.fromString(row[3]);subject=UUID.fromString(row[4]);session=UUID.fromString(row[6]);
-            source=untext(row[7]);code=untext(row[8]);field=untext(row[9]);key=untext(row[10]);
+    private final CopyOnWriteArrayList<FieldRead> fieldReads=new CopyOnWriteArrayList<>();
+    private final Map<Object,Map<Class<?>,Map<String,FieldRead>>> writerFields=Collections.synchronizedMap(new WeakIdentityMap<>());
+    private final Map<Entity,List<FieldRead>> creationReads=Collections.synchronizedMap(new WeakIdentityMap<>());
+    private final CopyOnWriteArrayList<Selector> selectors=new CopyOnWriteArrayList<>();
+    private static final class Selector {
+        final FieldRead read;final WeakReference<Entity> output;final UUID value;final boolean nullable;final String site;
+        volatile UUID subject;
+        volatile RecoverySources.Source source;
+        Selector(FieldRead read,Entity output,UUID value,boolean nullable,String site) {
+            this.read=read;this.output=new WeakReference<>(output);this.value=value;this.nullable=nullable;this.site=site;
         }
     }
+    private static final class FieldRead {
+        final Field field;final WeakReference<Object> holder,value;
+        final Object scalar;
+        final Set<UUID> consumers=ConcurrentHashMap.newKeySet();
+        volatile boolean disposed;
+        CopyOnWriteArrayList<Selector> selectors=new CopyOnWriteArrayList<>();
+        FieldRead(Field field,Object holder,Object value) {
+            this.field=field;this.holder=new WeakReference<>(holder);this.value=new WeakReference<>(value);
+            scalar=field.getType().isPrimitive()||field.getType()==UUID.class?value:null;
+        }
+        Object value() {return scalar!=null?scalar:value.get();}
+    }
+    private static final ClassValue<Map<String,Field>> FIELDS=new ClassValue<>() {
+        @Override protected Map<String,Field> computeValue(Class<?> type) {
+            Map<String,Field> fields=new HashMap<>();
+            for(Class<?> owner=type;owner!=null&&owner!=Object.class;owner=owner.getSuperclass())for(Field field:owner.getDeclaredFields())
+                if(field.trySetAccessible())fields.putIfAbsent(field.getName()+":"+field.getType().descriptorString(),field);
+            return Map.copyOf(fields);
+        }
+    };
+    private static final ClassValue<Map<Field,java.lang.invoke.VarHandle>> HANDLES=new ClassValue<>() {
+        @Override protected Map<Field,java.lang.invoke.VarHandle> computeValue(Class<?> type) {
+            Map<Field,java.lang.invoke.VarHandle> handles=new HashMap<>();
+            try {
+                var lookup=java.lang.invoke.MethodHandles.privateLookupIn(type,java.lang.invoke.MethodHandles.lookup());
+                for(Field field:type.getDeclaredFields())if(!Modifier.isFinal(field.getModifiers()))
+                    try {handles.put(field,lookup.unreflectVarHandle(field));}catch(IllegalAccessException unavailable) { }
+            }catch(IllegalAccessException inaccessible) { }
+            return Map.copyOf(handles);
+        }
+    };
+    private final ProRuntime runtime;
+    private final Map<UUID,Policy> policies=new LinkedHashMap<>();
     private record Policy(ProRuntime.Subject subject,UUID operation,long generation) { }
-    private static final class Scan {
-        final RecoverySources.Source source;
-        final List<Field> fields;
-        int fieldIndex;
-        Field field;
-        Map<Object,Object> map;
-        SourceMaps.Cursor entries;
-        long passes;
-        long startedMutation=-1,completedMutation=-1;
-        final Map<Field,Long> revisions=new HashMap<>();
+    private final Map<UUID,Edge> edges=new LinkedHashMap<>();
+    private final List<Historical> historical=new ArrayList<>();
+    private long historyCursor;
+    private static final class Historical {
+        final UUID id,operation,subject,session;
+        final String source,code,field,kind,key,prefix;
+        String before,expected;
+        boolean imageApplied;
+        boolean current;
+        long sampled=-1;
+        String reason="REFERENCE_RESTART_PENDING",record;
+        CompletableFuture<Void> ack;
+        Historical(String[] row) {
+            id=UUID.fromString(row[2]);operation=UUID.fromString(row[3]);subject=UUID.fromString(row[4]);session=UUID.fromString(row[6]);
+            if(Long.parseLong(row[5])<1)throw new IllegalArgumentException("REFERENCE_QUALIFICATION");
+            source=untext(row[7]);code=untext(row[8]);field=untext(row[9]);kind=row[10];key=untext(row[11]);
+            prefix=row[0];
+            before=row.length==14?row[12]:"";
+            expected=row.length==14?row[13]:"";
+            if(row.length==14&&(!row[12].isEmpty()&&!row[12].matches("[a-f0-9]{64}")||!expected.isEmpty()&&!expected.matches("[a-f0-9]{64}")))throw new IllegalArgumentException("REFERENCE_IMAGE_HASH");
+            if(!(Set.of("ATOMIC","COPY_ON_WRITE_LIST","ENTITY_MAP").contains(kind)
+                    ||prefix.equals("RECORD/5")&&Set.of("ARRAY_LIST","OBJECT_ARRAY").contains(kind)
+                    ||prefix.equals("RECORD/6")&&kind.equals("HASH_SET")
+                    ||prefix.equals("RECORD/3")&&kind.equals("DIRECT_FIELD")
+                    ||prefix.equals("RECORD/4")&&kind.equals("UUID_SELECTOR"))||!code.matches("[a-f0-9]{64}"))throw new IllegalArgumentException("REFERENCE_ADAPTER");
+            for(int i:new int[]{7,8,9,11})if(!text(untext(row[i])).equals(row[i]))throw new IllegalArgumentException("REFERENCE_ENCODING");
+        }
+    }
+    private final Map<RecoverySources.Source,Set<String>> gaps=new IdentityHashMap<>();
+    private final Map<RecoverySources.Source,Long> scanned=new IdentityHashMap<>();
+    private final Map<RecoverySources.Source,ReferenceScan> scans=new IdentityHashMap<>();
+    private static final class ReferenceScan {
+        final WeakReference<Object> holder;
+        final List<Field> fields=new ArrayList<>();
+        final Set<String> issues=new TreeSet<>();
+        Set<String> completedIssues=Set.of();
         final Map<Field,WeakReference<Object>> containers=new HashMap<>();
-        String state="MEMORY_SCAN_PENDING";
-        final Set<String> gaps=new TreeSet<>();
-        final Set<String> fixedGaps=new TreeSet<>(),pendingGaps=new TreeSet<>();
-        final Map<Field,Map<Object,Work>> slots=new HashMap<>();
-        Scan(RecoverySources.Source source)throws IOException {
-            this.source=source;fields=new ArrayList<>();
-            Object holder=source.holder();
-            if(holder==null){if(source.disposed()){state="SOURCE_DISPOSED";return;}throw new IOException("HOLDER_RELEASE_UNOBSERVED");}
-            boolean extra=false;
-            boolean isStatic=holder instanceof Class<?>;
-            Class<?> type=isStatic?(Class<?>)holder:holder.getClass();
-            for(Class<?> owner=type;owner!=null&&owner!=Object.class&&owner!=SavedData.class;owner=isStatic?null:owner.getSuperclass()) {
-                for(Field field:owner.getDeclaredFields()) {
-                    if(Modifier.isStatic(field.getModifiers())==isStatic&&RecoveryReferences.supportedField(field))extra=true;
-                    if(Modifier.isStatic(field.getModifiers())!=isStatic||!Map.class.isAssignableFrom(field.getType()))continue;
-                    if(!field.trySetAccessible()) {
-                        state="INACCESSIBLE_HOLDER_FIELD";gaps.add(state+":"+field.getName());fixedGaps.add(state+":"+field.getName());continue;
-                    }
-                    // A mutable registered field can be queried and unlinked in this process:
-                    // observe the exact map, then re-read this field at the final gate. Its
-                    // full writer coverage and restart identity remain separate obligations.
-                    if(!Modifier.isFinal(field.getModifiers()))
-                        gaps.add("MUTABLE_HOLDER_REPLACEMENT_COVERAGE_UNPROVEN:"+field.getName());
-                    fields.add(field);
-                }
-            }
-            fields.sort(Comparator.comparing(f->f.getDeclaringClass().getName()+"#"+f.getName()));
-            if(fields.isEmpty()) {
-                if(extra) { state="ADDITIONAL_EXACT_REFERENCE_ADAPTER";passes=1;completedMutation=source.mutations.get(); }
-                else { state="MEMORY_OWNER_LAYOUT_UNSUPPORTED";gaps.add(state); }
-            }
+        final Map<Field,WeakReference<Object[]>> lists=new HashMap<>();
+        final Map<Field,Long> listRevisions=new HashMap<>();
+        final Map<Field,Long> mapRevisions=new HashMap<>(),arrayRevisions=new HashMap<>();
+        int fieldIndex,listIndex;
+        long startedMutation;
+        Field field;
+        Object container;
+        Object[] list;
+        SourceMaps.Cursor map;
+        ReferenceScan(Object actual) {
+            holder=new WeakReference<>(actual);
+            boolean statik=actual instanceof Class<?>;
+            for(Class<?> type=statik?(Class<?>)actual:actual.getClass();type!=null&&type!=Object.class;type=statik?null:type.getSuperclass())
+                for(Field candidate:type.getDeclaredFields())
+                    if(Modifier.isStatic(candidate.getModifiers())==statik&&!candidate.getType().isPrimitive()&&!scalarType(candidate.getType()))fields.add(candidate);
+        }
+        void finishField(){field=null;container=null;list=null;map=null;listIndex=0;fieldIndex++;}
+    }
+    private static final ClassValue<Field> LIST_ARRAY=new ClassValue<>() {
+        @Override protected Field computeValue(Class<?> type) {
+            try {Field field=type.getDeclaredField("array");field.setAccessible(true);return field;}
+            catch(ReflectiveOperationException unavailable){throw new IllegalStateException("REFERENCE_LIST_LAYOUT_UNAVAILABLE",unavailable);}
+        }
+    };
+    private final AtomicLong epoch=new AtomicLong();
+    private long cursor;
+    private long edgeCursor;
+    private boolean closing;
+    private String gap="";
+    private final ThreadPoolExecutor worker=new ThreadPoolExecutor(1,1,0,TimeUnit.MILLISECONDS,new ArrayBlockingQueue<>(32),r->{
+        Thread thread=new Thread(r,"ronova-pro-memory-sources");thread.setDaemon(true);return thread;
+    },new ThreadPoolExecutor.AbortPolicy());
+    private static final class Edge {
+        final UUID id=UUID.randomUUID();final Policy policy;final RecoverySources.Source source;final Field field;
+        final Object key;Object target;final String kind,intent,prefix;
+        String beforeImage,expectedImage,imageRecord;
+        final WeakReference<Object> objectIdentity,containerIdentity;
+        Object object,container;
+        SourceMaps.Cursor removalCursor;
+        volatile boolean running,attempted,applied,observed,released;
+        volatile String reason="",fact,release;
+        CompletableFuture<Void> ack,factAck,releaseAck,imageAck;
+        Edge(Policy policy,RecoverySources.Source source,Field field,Object key,Object container,Object object,Object target,String kind,UUID session) {
+            this.policy=policy;this.source=source;this.field=field;this.key=key;this.container=container;this.object=object;this.target=target;this.kind=kind;
+            prefix=kind.equals("HASH_SET")?"RECORD/6":Set.of("ARRAY_LIST","OBJECT_ARRAY").contains(kind)?"RECORD/5":kind.equals("UUID_SELECTOR")?"RECORD/4":kind.equals("DIRECT_FIELD")?"RECORD/3":"RECORD/2";
+            objectIdentity=new WeakReference<>(object);containerIdentity=new WeakReference<>(container);
+            beforeImage=Set.of("COPY_ON_WRITE_LIST","ARRAY_LIST","HASH_SET").contains(kind)?listImage(container,null):"";
+            expectedImage=Set.of("COPY_ON_WRITE_LIST","ARRAY_LIST","HASH_SET").contains(kind)?listImage(container,object):"";
+            intent=prefix+"\tEDGE_INTENT\t"+id+"\t"+policy.operation+"\t"+policy.subject.id+"\t"+policy.generation+"\t"+session+"\t"+
+                    text(source.locator)+"\t"+text(source.code)+"\t"+text(field.getDeclaringClass().getName()+"#"+field.getName())+"\t"+kind+"\t"+text(key==null&&!kind.equals("ENTITY_MAP")?"":SourceMaps.encodeKey(key))+"\t"+beforeImage+"\t"+expectedImage;
         }
         Object receiver()throws IllegalAccessException {Object holder=source.holder();if(holder==null)throw new IllegalAccessException("HOLDER_RELEASE_UNOBSERVED");return holder instanceof Class<?>?null:holder;}
     }
-    private static final class Work {
-        final UUID id=UUID.randomUUID();
-        final Policy policy;
-        final Scan scan;
-        final Field field;
-        final Object key;
-        final String intent;
-        final WeakReference<Object> recordIdentity;
-        final WeakReference<Object> mapIdentity;
-        Map<Object,Object> map;
-        Object record;
-        CompoundTag recordRoot;
-        volatile CompletableFuture<Void> ack,factAck,releaseAck;
-        volatile String fact,release,state="WAIT_ACK",reason="";
-        long retryAt;
-        boolean attempted,applied,dispositionConfirmed;
-        volatile boolean reinserted;
-        volatile boolean running;
-        Work(Policy policy,Scan scan,Field field,Object key,Map<Object,Object> map,Object record,CompoundTag recordRoot,UUID session) {
-            this.policy=policy;this.scan=scan;this.field=field;this.key=key;this.map=map;this.record=record;this.recordRoot=recordRoot;
-            recordIdentity=new WeakReference<>(record);mapIdentity=new WeakReference<>(map);
-            intent=PREFIX+"\tINTENT\t"+id+"\t"+policy.operation+"\t"+policy.subject.id+"\t"+policy.generation+
-                    "\t"+session+"\t"+text(scan.source.locator)+"\t"+text(scan.source.code)+"\t"+
-                    text(field.getDeclaringClass().getName()+"#"+field.getName())+"\t"+text(SourceMaps.encodeKey(key));
-            if(!IntentJournal.frameFits(intent))throw new IllegalArgumentException("MEMORY_DESCRIPTOR_LIMIT");
-        }
-    }
     RecoveryRecords(ProRuntime runtime,RecoverySources sources) {
-        this.runtime=runtime;this.sources=sources;
-        references=new RecoveryReferences(runtime);
-        for(String row:runtime.journal.history())if(row.startsWith("RECORD/")) {
-            String[] fields=row.split("\t",-1);
-            historical.add(row);
-            if((fields[0].equals("RECORD/2")||fields[0].equals("RECORD/3")||fields[0].equals("RECORD/4")||fields[0].equals("RECORD/5")||fields[0].equals("RECORD/6"))&&fields.length>1&&fields[1].startsWith("EDGE_"))continue;
-            if(fields[0].equals("RECORD/2")&&fields.length==5&&fields[1].equals("RESTART_QUERY"))continue;
-            if(!fields[0].equals(PREFIX)||fields.length<4||!Set.of("INTENT","FACT","RELEASED").contains(fields[1])) {
-                runtime.journal.refuseWrites("UNKNOWN_RECORD_PROTOCOL_QUERY_ONLY");gap="RECORD_HISTORY_UNKNOWN";
-                continue;
+        this.runtime=runtime;
+        Map<UUID,Historical> originals=new LinkedHashMap<>();
+        for(String record:runtime.journal.history())if(record.startsWith("RECORD/"))try {
+            String[] row=record.split("\t",-1);
+            if(row.length<3||!Set.of("RECORD/1","RECORD/2","RECORD/3","RECORD/4","RECORD/5","RECORD/6").contains(row[0]))
+                throw new IllegalArgumentException("MEMORY_HISTORY_VERSION");
+            boolean legacy=row[0].equals("RECORD/1");
+            if(legacy&&row[1].equals("INTENT")) {
+                if(row.length!=11)throw new IllegalArgumentException("MEMORY_INTENT_ARITY");
+                String[] normalized=Arrays.copyOf(row,14);
+                normalized[1]="EDGE_INTENT";normalized[10]="ENTITY_MAP";normalized[11]=row[10];normalized[12]="";normalized[13]="";
+                row=normalized;
             }
-            int length=fields.length;
-            if((fields[1].equals("INTENT")&&length!=11)||(fields[1].equals("FACT")&&length!=5)
-                    ||(fields[1].equals("RELEASED")&&length!=4)) {
-                runtime.journal.refuseWrites("INVALID_RECORD_DESCRIPTOR_ARITY");gap="RECORD_HISTORY_INVALID";
-                continue;
+            if(row[1].equals("EDGE_INTENT")) {
+                if(row.length!=12&&row.length!=14)throw new IllegalArgumentException("REFERENCE_INTENT_ARITY");
+                Historical item=new Historical(row);
+                Historical old=originals.putIfAbsent(item.id,item);
+                if(old!=null)throw new IllegalArgumentException("MEMORY_OPERATION_REDEFINED");
+                historical.add(item);sources.expect(item.source,item.code,item.subject,0);
+            } else if(row[1].equals("EDGE_IMAGE")) {
+                if(row.length!=6||!row[4].matches("[a-f0-9]{64}")||!row[5].matches("[a-f0-9]{64}"))throw new IllegalArgumentException("REFERENCE_IMAGE_RECORD");
+                Historical selected=originals.get(UUID.fromString(row[2]));
+                if(selected==null||!selected.operation.equals(UUID.fromString(row[3]))||!selected.prefix.equals(row[0])
+                        ||!Set.of("COPY_ON_WRITE_LIST","ARRAY_LIST","HASH_SET").contains(selected.kind))throw new IllegalArgumentException("REFERENCE_IMAGE_OWNER");
+                selected.before=row[4];selected.expected=row[5];selected.imageApplied=false;
+            } else if(legacy&&Set.of("FACT","RELEASED").contains(row[1])) {
+                if(row.length!=(row[1].equals("FACT")?5:4)||!originals.containsKey(UUID.fromString(row[2])))throw new IllegalArgumentException("MEMORY_LEGACY_FACT");
+            } else if(row[0].equals("RECORD/2")&&row[1].equals("RESTART_QUERY")) {
+                if(row.length!=5||!originals.containsKey(UUID.fromString(row[2])))throw new IllegalArgumentException("MEMORY_LEGACY_RESTART");
+                UUID.fromString(row[3]);
+            } else {
+                if(row.length!=5||!Set.of("EDGE_FACT","EDGE_RELEASED","EDGE_RESTART").contains(row[1]))throw new IllegalArgumentException("REFERENCE_FACT");
+                Historical selected=originals.get(UUID.fromString(row[2]));
+                if(selected==null||!selected.operation.equals(UUID.fromString(row[3]))||!selected.prefix.equals(row[0]))throw new IllegalArgumentException("REFERENCE_FACT_OWNER");
+                if(row[1].equals("EDGE_FACT"))selected.imageApplied=row[4].equals("EXACT_OWNED_EDGE_REMOVED_AND_ABSENT")||row[4].equals("EDGE_REMOVED_CURRENT_DUPLICATE_OR_REINSERTION_PENDING");
             }
-            try { UUID.fromString(fields[2]); }
-            catch(IllegalArgumentException malformed) {
-                runtime.journal.refuseWrites("INVALID_RECORD_OPERATION_ID");gap="RECORD_HISTORY_INVALID";continue;
-            }
-            if(fields[1].equals("INTENT")) {
-                try {
-                    for(int i:new int[]{2,3,4,6})UUID.fromString(fields[i]);
-                    if(Long.parseLong(fields[5])<0)throw new IllegalArgumentException("qualification");
-                    for(int i=7;i<11;i++)if(!text(untext(fields[i])).equals(fields[i]))throw new IllegalArgumentException("encoding");
-                    if(!untext(fields[8]).matches("[0-9a-f]{64}"))throw new IllegalArgumentException("code locator");
-                    sources.expect(untext(fields[7]),untext(fields[8]),UUID.fromString(fields[4]),0);
-                    Prior item=new Prior(fields);prior.put(item.id,item);
-                }
-                catch(IllegalArgumentException malformed) { runtime.journal.refuseWrites("INVALID_RECORD_DESCRIPTOR");gap="RECORD_HISTORY_INVALID"; }
-            }
-        }
+        } catch(RuntimeException malformed) { gap="MEMORY_HISTORY_QUERY_ONLY:"+malformed.getMessage();runtime.journal.refuseWrites(gap); }
     }
+
     void qualify(ProRuntime.Subject subject,UUID operation) {
         ProRuntime.Subject canonical=runtime.canonicalSubject(subject.id);
         if(canonical!=null&&canonical!=subject) {qualify(canonical,runtime.groupOperation(canonical.id,operation));return;}
         if(closing||!subject.terminal)return;
         Policy prior=policies.get(subject.id);
-        if(prior==null||prior.generation!=subject.generation)policies.put(subject.id,new Policy(subject,operation,subject.generation));
-        references.qualify(subject,operation);
-    }
-    Object observedField(Object receiver,Object[] field) {return references.observeField(receiver,field);}
-    void consumedFields(UUID subject,Object[][] fields) {references.consumedFields(subject,fields);}
-    void creationFields(Entity entity,Object[][] fields) {references.creationFields(entity,fields);}
-    void creationBound(Entity entity,UUID subject) {references.creationBound(entity,subject);}
-    void identityAssigned(Entity entity,Object[] packet) {references.identityAssigned(entity,packet);}
-    boolean fieldWriteDenied(Object receiver,Class<?> owner,String name,Object value) {return references.fieldWriteDenied(receiver,owner,name,value);}
-    void tick(long tick) {
-        if(closing)return;
-        references.tick(tick);
-        queryPrior();
-        List<RecoverySources.Source> registered=new ArrayList<>(sources.registered());
-        for(int budget=0;budget<Math.min(8,registered.size());budget++) {
-            RecoverySources.Source source=registered.get((int)Math.floorMod(cursor++,registered.size()));
-            if(source.subjects.stream().noneMatch(id->policies.containsKey(runtime.canonicalSubject(id)==null?id:runtime.canonicalSubject(id).id)))continue;
-            try {
-                Scan scan=scans.get(source);
-                if(scan==null) { scan=new Scan(source);scans.put(source,scan); }
-                scan(scan,tick);
-            } catch(ReflectiveOperationException|IOException|RuntimeException unavailable) {
-                gap="MEMORY_SOURCE_UNRESOLVED:"+unavailable.getClass().getSimpleName()+":"+unavailable.getMessage();
-            }
+        if(prior!=null&&prior.generation==subject.generation)return;
+        policies.put(subject.id,new Policy(subject,operation,subject.generation));
+        // Resolve actual earlier reads now that the body has a subject; no global class scan.
+        for(FieldRead read:fieldReads) {
+            Object holder=read.holder.get(),value=read.value();if(holder==null||value==null)continue;
+            if(subject(value)!=null&&subject(value).equals(subject.id))runtime.recoverySources.observedHolder(holder,subject.id);
         }
-        List<Work> active=new ArrayList<>(work.values());
-        for(int budget=0;budget<Math.min(32,active.size());budget++) {
-            Work item=active.get((int)Math.floorMod(workCursor++,active.size()));
-            if(item.running||tick<item.retryAt||item.state.equals("REFERENCE_DISPOSED")||item.state.equals("REINSERTION_OBSERVED")||item.state.equals("FENCED"))continue;
-            item.retryAt=tick+20;
-            item.running=true;
-            try { executor.execute(()->{
-                try { advance(item); }
-                catch(ReflectiveOperationException|RuntimeException failure) {
-                    item.state=item.attempted?"EFFECT_QUERY_REQUIRED":"MEMORY_SOURCE_UNRESOLVED";item.reason=failure.toString();
-                } finally { item.running=false; }
-            }); } catch(RejectedExecutionException busy) { item.running=false;item.reason="MEMORY_EXECUTOR_BUDGET_WAIT"; }
+        for(var source:runtime.recoverySources.registered())if(!Collections.disjoint(source.subjects,runtime.groupTargets(subject.id))) {
+            scanned.remove(source);ReferenceScan scan=scans.get(source);if(scan!=null){scan.fieldIndex=0;scan.field=null;scan.container=null;scan.list=null;scan.map=null;}
+            Set<String> issues=new TreeSet<>();
+            try {scan(source,issues);}catch(ReflectiveOperationException|java.io.IOException|RuntimeException unavailable) {issues.add("REFERENCE_SCAN_UNAVAILABLE");}
+            gaps.put(source,Set.copyOf(issues));
         }
     }
-    private long workCursor;
-    @SuppressWarnings("unchecked")
-    private void scan(Scan scan,long tick)throws ReflectiveOperationException,IOException {
-        if(!sources.current(scan.source)) { scan.state="SOURCE_OWNER_REPLACED";return; }
-        if(scan.source.disposed()&&scan.source.holder()==null){scan.entries=null;scan.map=null;scan.passes=Math.max(1,scan.passes);scan.completedMutation=scan.source.mutations.get();scan.state="SOURCE_DISPOSED";return;}
-        if(scan.fields.isEmpty())return;
-        for(int budget=0;budget<8;budget++) {
-            if(scan.entries==null) {
-                if(scan.fieldIndex==0){scan.startedMutation=scan.source.mutations.get();scan.pendingGaps.clear();scan.pendingGaps.addAll(scan.fixedGaps);}
-                scan.field=scan.fields.get(scan.fieldIndex);
-                Object value=scan.field.get(scan.receiver());
-                SourceMaps.observeField(scan.source,scan.field,value);
-                String replacementGap="MUTABLE_HOLDER_REPLACEMENT_COVERAGE_UNPROVEN:"+scan.field.getName();
-                if(SourceMaps.replacementCovered(scan.source,scan.field,value))scan.pendingGaps.remove(replacementGap);
-                else if(!Modifier.isFinal(scan.field.getModifiers()))scan.pendingGaps.add(replacementGap);
-                WeakReference<Object> previous=scan.containers.put(scan.field,new WeakReference<>(value));
-                if(previous!=null&&previous.get()!=value)scan.completedMutation=-1;
-                if(value==null&&SourceMaps.replacementCovered(scan.source,scan.field,value)){
-                    scan.pendingGaps.remove("MUTABLE_HOLDER_REPLACEMENT_COVERAGE_UNPROVEN:"+scan.field.getName());
-                    finishField(scan);continue;
+    /** Metadata comes from the bootstrap's actual woven read, not a caller-declared source. */
+    Object observedField(Object receiver,Object[] packet) {
+        if(packet.length!=5||packet[0]!=receiver||!(packet[1] instanceof Class<?> owner)
+                ||!(packet[2] instanceof String name)||!(packet[3] instanceof String descriptor)||receiver instanceof Entity)return null;
+        if(owner.getClassLoader()==null||owner.getName().startsWith("net.minecraft.")||owner.getName().startsWith("dev.ronova.pro."))return null;
+        Field field=FIELDS.get(owner).get(name+":"+descriptor);if(field==null)return null;
+        if(Modifier.isStatic(field.getModifiers())!=(receiver instanceof Class<?>))return null;
+        if(receiver instanceof Class<?>)receiver=field.getDeclaringClass();
+        Object value=packet[4];
+        try {if(!sameFieldValue(field,field.get(receiver instanceof Class<?>?null:receiver),value))return null;}
+        catch(IllegalAccessException unavailable){return null;}
+        FieldRead read=fieldRead(receiver,field.getDeclaringClass(),name);
+        FieldRead previous=read;
+        if(read!=null&&!sameFieldValue(field,read.value(),value))read=null;
+        if(read==null) {
+            synchronized(fieldReads) {
+                fieldReads.removeIf(old->old.holder.get()==null||old.value()==null&&old.consumers.isEmpty());
+                read=new FieldRead(field,receiver,value);fieldReads.add(read);
+                if(previous!=null)read.selectors=previous.selectors;
+                synchronized(writerFields) {
+                    writerFields.computeIfAbsent(receiver,key->new HashMap<>()).computeIfAbsent(field.getDeclaringClass(),key->new HashMap<>()).put(name,read);
                 }
-                if(!SourceMaps.supported(value)) {
-                    scan.pendingGaps.add("MEMORY_CONTAINER_BACKEND_UNSUPPORTED:"+scan.field.getName());finishField(scan);continue;
-                }
-                scan.map=(Map<Object,Object>)value;
-                SourceMaps.observe(value,scan.source,scan.field);
-                scan.entries=new SourceMaps.Cursor(value);
             }
-            if(scan.field.get(scan.receiver())!=scan.map) {
-                scan.entries=null;scan.map=null;scan.state="MEMORY_FIELD_OWNER_REPLACED";scan.pendingGaps.add(scan.state);return;
-            }
-            boolean ran=SourceMaps.visit(scan.map,scan.entries,64,(key,value,node,position)->captureRecord(scan,key,value));
-            if(!ran){scan.state="SOURCE_MAP_BUSY_OR_UNOBSERVED";return;}
-            if(!Objects.equals(scan.revisions.put(scan.field,scan.entries.revision),scan.entries.revision))changes.incrementAndGet();
-            if(scan.field.get(scan.receiver())!=scan.map){scan.entries=null;scan.map=null;scan.state="MEMORY_FIELD_OWNER_REPLACED";scan.pendingGaps.add(scan.state);return;}
-            if(scan.entries.complete)finishField(scan);
-            else scan.state="MEMORY_SCAN_BUDGET_PENDING";
-            return;
+        }
+        Object target=ownedTarget(value,runtime,true);UUID subject=target==null?null:subject(target);
+        if(subject!=null)runtime.recoverySources.observedHolder(receiver,subject);
+        return subject==null?null:new ProRuntime.ProducerOrigin(runtime,subject,false);
+    }
+    void consumedFields(UUID subject,Object[][] fields) {
+        for(FieldRead read:resolveFields(fields))consume(subject,read);
+    }
+    void creationFields(Entity entity,Object[][] fields) {
+        List<FieldRead> reads=resolveFields(fields);if(reads.isEmpty())return;
+        synchronized(creationReads) {
+            creationReads.put(entity,reads);
         }
     }
-    private void finishField(Scan scan) {
-        scan.entries=null;scan.map=null;scan.fieldIndex++;
-        if(scan.fieldIndex==scan.fields.size()) {
-            scan.fieldIndex=0;
-            long current=scan.source.mutations.get();
-            if(current==scan.startedMutation){scan.passes++;scan.completedMutation=current;scan.gaps.clear();scan.gaps.addAll(scan.pendingGaps);}
-            else scan.completedMutation=-1;
+    void creationBound(Entity entity,UUID subject) {
+        List<FieldRead> reads=creationReads.get(entity);
+        if(reads!=null)for(FieldRead read:reads)consume(subject,read);
+        for(Selector selector:selectors)if(selector.output.get()==entity&&selector.value.equals(((dev.ronova.pro.mixin.Access.EntityState)entity).pro$uuid())) {
+            selector.subject=subject;consume(subject,selector.read);
+            Object holder=selector.read.holder.get();if(holder!=null)selector.source=runtime.recoverySources.observedHolder(holder,subject);
         }
-        scan.state="REGISTERED_FIELDS_SCANNED";
     }
-    private boolean captureRecord(Scan scan,Object key,Object value) {
-            Object target=RecoveryReferences.ownedTarget(value,runtime,true);
-            if(!(target instanceof CompoundTag recordRoot)) {
-                if(value!=null&&value.getClass()!=CompoundTag.class&&!(value instanceof Entity)
-                        &&!(RecoveryReferences.wrapperTarget(value,runtime,false) instanceof Entity)
-                        &&!RecoveryReferences.immutableScalar(value)&&!RecoveryReferences.emptyWrapper(value,runtime))
-                    if(!RecoveryReferences.nestedHolder(value))scan.pendingGaps.add("MEMORY_WRAPPER_PROFILE_UNSUPPORTED:"+value.getClass().getName());
-                return true;
-            }
-            if(SourceMaps.supportedKey(key)) {
-                Object[] current=SourceMaps.peek(scan.map,key);
-                if(current==null) { scan.state="MEMORY_SOURCE_MAP_BUSY_OR_UNOBSERVED";return false; }
-                if(current[1]!=value)return true;
-            }
-            UUID subject=RecoverySources.subject(sources,recordRoot);
-            ProRuntime.Subject canonical=runtime.canonicalSubject(subject);
-            Policy policy=policies.get(canonical==null?subject:canonical.id);
-            if(policy==null||!policy.subject.terminal||policy.subject.generation!=policy.generation||!scan.source.subjects.contains(subject))return true;
-            if(!SourceMaps.supportedKey(key)) { scan.pendingGaps.add("MEMORY_KEY_SEMANTICS_UNSUPPORTED");return true; }
-            Map<Object,Work> slots=scan.slots.computeIfAbsent(scan.field,f->new HashMap<>());
-            Work prior=slots.get(key);
-            if(prior!=null&&prior.mapIdentity.get()==scan.map&&prior.recordIdentity.get()==value&&prior.recordRoot==recordRoot&&prior.policy==policy
-                    &&!prior.state.equals("REFERENCE_DISPOSED")&&!(prior.reinserted&&confirmed(prior.factAck)))return true;
-            Work item;
-            try {item=new Work(policy,scan,scan.field,key,scan.map,value,recordRoot,runtime.session);}
-            catch(IllegalArgumentException unavailable) {
-                if(!"MEMORY_DESCRIPTOR_LIMIT".equals(unavailable.getMessage()))throw unavailable;
-                // Keep this source unresolved, but continue to the actual later entries.
-                scan.pendingGaps.add("MEMORY_DESCRIPTOR_LIMIT:"+scan.field.getName());return true;
-            }
-            item.ack=runtime.journal.append(item.intent);work.put(item.id,item);slots.put(key,item);
-            changes.incrementAndGet();
-            scan.state="RECORD_REFERENCE_INTENT_PENDING";
-            return true;
-    }
-    private void advance(Work item)throws ReflectiveOperationException {
-        // The map scope is taken before graph/subject/source gates; its registration drains old writers.
-        // The entire original query/mutation sequence stays under this scope for HashMap.
-        if(SourceMaps.serialized(item.map)) {
-            if(!SourceMaps.with(item.map,()->advanceLocked(item))) {
-                item.state="MEMORY_SOURCE_MAP_BUSY_OR_UNOBSERVED";item.reason="SOURCE_MAP_SCOPE_NOT_READY";
-            }
-        } else advanceLocked(item);
-    }
-    private void advanceLocked(Work item)throws ReflectiveOperationException {
-        item.ack=runtime.journal.retryRejected(item.intent,item.ack);
-        if(item.fact!=null) {
-            if(!confirmed(item.ack)) { item.state="WAIT_INTENT_ACK_FOR_FACT";item.reason="DURABLE_INTENT_ACK_"+ackState(item.ack);return; }
-            item.state="WAIT_REFERENCE_FACT_ACK";item.reason="";
-            item.factAck=item.factAck==null?runtime.journal.append(item.fact):runtime.journal.retryRejected(item.fact,item.factAck);
-            if(!confirmed(item.factAck))return;
-            // Explicitly drop executor-owned strong references only after the disposition fact is durable.
-            item.record=null;item.recordRoot=null;item.map=null;
-            if(item.release==null) {
-                item.release=PREFIX+"\tRELEASED\t"+item.id+"\tWORK_DIRECT_FIELDS_CLEARED_OTHER_OWNERS_UNSETTLED";
-                item.releaseAck=runtime.journal.append(item.release);
-            } else item.releaseAck=runtime.journal.retryRejected(item.release,item.releaseAck);
-            if(confirmed(item.releaseAck)) {
-                item.state=item.dispositionConfirmed?"REFERENCE_DISPOSED":item.reinserted?"REINSERTION_OBSERVED":"NOT_EXECUTED_AT_STOP";
-                changes.incrementAndGet();
-            }
-            return;
+    void identityAssigned(Entity entity,Object[] packet) {
+        if(packet.length!=7||packet[0]!=entity||!(packet[2] instanceof Class<?> owner)||!(packet[3] instanceof String name)
+                ||!(packet[4] instanceof UUID value)||!(packet[5] instanceof Boolean nullable)||!(packet[6] instanceof String site)
+                ||!value.equals(((dev.ronova.pro.mixin.Access.EntityState)entity).pro$uuid()))return;
+        Object holder=packet[1];
+        observedField(holder,new Object[]{holder,owner,name,"Ljava/util/UUID;",value});
+        Field field=FIELDS.get(owner).get(name+":Ljava/util/UUID;");if(field==null)return;
+        if(holder instanceof Class<?>)holder=field.getDeclaringClass();
+        FieldRead read=fieldRead(holder,field.getDeclaringClass(),name);
+        if(read==null||read.value()!=value) {
+            read=null;for(FieldRead prior:fieldReads)if(prior.field.equals(field)&&prior.holder.get()==holder&&prior.value()==value) {read=prior;break;}
         }
-        // Durable intent is an obligation, not a permission gate for this exact CHM slot.
-        // Its post-effect FACT is delayed until the intent is confirmed so journal order stays valid.
-        if(item.attempted) { query(item);return; } // An uncertain attempt never grants another mutation.
-        if(!bound(item)) {item.state="FENCED";item.reason="SOURCE_FIELD_OR_CONTAINER_REPLACED";return;}
-        boolean[] locks={false,false,false};boolean[] decided={false};
-        try {
-            // CHM may wait on a business writer. No Root/source gate is held while waiting for its bin lock.
-            item.map.computeIfPresent(item.key,(key,value)->{
-                if(value!=item.record)return value;
-                if(!RecoverySources.tryRecordGraph())return value;locks[2]=true;
-                if(RecoveryReferences.ownedTarget(value,runtime,true)!=item.recordRoot) {
-                    item.reason="MEMORY_WRAPPER_TARGET_CHANGED";return value;
-                }
-                String graphGap=RecoverySources.recordGraphGap(sources,item.recordRoot,item.policy.subject.id);
-                if(!graphGap.isEmpty()) { item.reason=graphGap;return value; }
-                if(!item.policy.subject.commitGate.tryLock())return value;locks[0]=true;
-                if(!item.scan.source.gate.tryLock())return value;locks[1]=true;
-                if(closing||!item.policy.subject.terminal||item.policy.subject.generation!=item.policy.generation
-                        ||!sources.gap().isEmpty()||!sources.current(item.scan.source)||item.scan.source.writers!=0)return value;
-                if(RecoveryReferences.ownedTarget(value,runtime,true)!=item.recordRoot) {
-                    item.reason="MEMORY_WRAPPER_TARGET_CHANGED";return value;
-                }
-                item.attempted=true;item.reason="";decided[0]=true;
-                return null; // Both gates remain held until CHM has actually unlinked the exact entry.
-            });
-            item.applied=decided[0];
-        } finally {
-            if(locks[1])item.scan.source.gate.unlock();
-            if(locks[0])item.policy.subject.commitGate.unlock();
-            if(locks[2])RecoverySources.releaseRecordGraph();
+        if(read==null)return;
+        UUID related=null;
+        for(Selector old:read.selectors)if(old.subject!=null&&old.value.equals(value)) {
+            if(old.source==null||!runtime.recoverySources.current(old.source)) {gap="SELECTOR_SOURCE_BINDING_CHANGED";return;}
+            if(related!=null&&!related.equals(old.subject)) {gap="SELECTOR_MULTIPLE_SUBJECTS";return;}related=old.subject;
         }
-        if(!decided[0]&&item.map.get(item.key)==item.record) {
-            item.state="FINAL_GATE_OR_SAVE_BUSY";return;
+        if(related!=null) {
+            UUID existing=runtime.recoveryTasks.subjectOf(entity);
+            if(existing!=null&&!existing.equals(related)) {gap="SELECTOR_OUTPUT_ORIGIN_CONFLICT";return;}
+            runtime.recoverySources.produced(entity,related,null,"SELECTOR_OUTPUT_BINDING_CAPACITY");
+            consume(related,read);return;
         }
-        query(item);
+        Selector selector=new Selector(read,entity,value,nullable,site);selectors.add(selector);read.selectors.add(selector);
+        UUID bound=runtime.recoveryTasks.subjectOf(entity);if(bound!=null)creationBound(entity,bound);
     }
-    private boolean bound(Work item)throws IllegalAccessException {
-        // This obligation retains its original container and target. A later field
-        // replacement neither transfers it to the new map nor abandons the old alias.
-        return sources.current(item.scan.source)&&item.map!=null;
-    }
-    private void query(Work item)throws IllegalAccessException {
-        // Query the original bound container even after revocation/unloading; never resurrect a write permit.
-        if(item.map==null) { item.state="OWNER_UNRESOLVED_AFTER_ATTEMPT";return; }
-        Object[] observed=SourceMaps.peek(item.map,item.key);
-        if(observed==null){item.state="SOURCE_MAP_QUERY_PENDING";return;}
-        Object current=observed[1];
-        if(current==item.record) {
-            if(item.applied) {
-                // The atomic command returned after removal; a later presence is a new edge, not a retry permit.
-                item.reinserted=true;
-                item.fact=PREFIX+"\tFACT\t"+item.id+"\tREMOVAL_EXECUTED_REINSERTION_OBSERVED\tCURRENT_REFERENCE_UNRESOLVED";
-                if(confirmed(item.ack))item.factAck=runtime.journal.append(item.fact);
-                item.state=confirmed(item.ack)?"WAIT_REFERENCE_FACT_ACK":"WAIT_INTENT_ACK_FOR_FACT";
-                if(!confirmed(item.ack))item.reason="DURABLE_INTENT_ACK_"+ackState(item.ack);
-            } else item.state=item.attempted?"EFFECT_QUERY_REQUIRED":"REFERENCE_PRESENT";
-            return;
+    private List<FieldRead> resolveFields(Object[][] fields) {
+        List<FieldRead> reads=new ArrayList<>();
+        for(Object[] packet:fields)if(packet.length==5&&packet[1] instanceof Class<?> owner&&packet[2] instanceof String name) {
+            observedField(packet[0],packet);
+            Field field=FIELDS.get(owner).get(name+":"+packet[3]);if(field==null)continue;
+            Object receiver=packet[0] instanceof Class<?>?field.getDeclaringClass():packet[0];
+            FieldRead read=fieldRead(receiver,field.getDeclaringClass(),name);
+            if(read!=null&&sameFieldValue(field,read.value(),packet[4]))reads.add(read);
         }
-        item.fact=PREFIX+"\tFACT\t"+item.id+"\t"+(item.applied?"EXACT_REFERENCE_REMOVED":"EXACT_REFERENCE_ABSENCE_OBSERVED")+
-                "\tOTHER_KEYS_NOT_WRITTEN_BY_THIS_OPERATION";
-        item.reason="";
-        item.dispositionConfirmed=true;
-        if(confirmed(item.ack))item.factAck=runtime.journal.append(item.fact);
-        item.state=confirmed(item.ack)?"WAIT_REFERENCE_FACT_ACK":"WAIT_INTENT_ACK_FOR_FACT";
-        if(!confirmed(item.ack))item.reason="DURABLE_INTENT_ACK_"+ackState(item.ack);
+        return List.copyOf(reads);
     }
-    List<String> status(UUID operation) {
-        var rows=new ArrayList<String>();if(!gap.isEmpty())rows.add("MEMORY_RECORD_GAP:"+gap);
-        for(Work item:work.values())if(item.policy.operation.equals(operation)) {
-            String current=item.state;
-            if(current.equals("REFERENCE_DISPOSED")) {
-                Object record=item.recordIdentity.get();
-                try {
-                    Object map=item.mapIdentity.get();
-                    if(!sources.current(item.scan.source))current="HISTORICAL_FACT_SOURCE_OWNER_CHANGED";
-                    else if(map!=null) {
-                        Object[] observed=SourceMaps.peek(map,item.key);
-                        if(observed==null) { current="SOURCE_MAP_QUERY_PENDING";rows.add("MEMORY_RECORD:"+item.id+":"+current);continue; }
-                        Object slot=observed[1];
-                        if(record!=null&&slot==record)current="REFERENCE_REINSERTED";
-                        else if(item.policy.subject.id.equals(recordSubject(slot)))current="NEW_SUBJECT_REFERENCE_OBSERVED";
-                    }
-                } catch(RuntimeException failure) { current="HISTORICAL_FACT_CURRENT_REFERENCE_UNOBSERVED"; }
+    private void consume(UUID subject,FieldRead read) {
+        boolean added=read.consumers.add(subject);if(added)epoch.incrementAndGet();
+        fieldReads.addIfAbsent(read);
+        Object holder=read.holder.get();if(holder==null)return;
+        RecoverySources.Source source=runtime.recoverySources.observedHolder(holder,subject);
+        if(added&&source!=null)scanned.remove(source);
+    }
+    boolean fieldWriteDenied(Object receiver,Class<?> declaring,String name,Object incoming) {
+        FieldRead read=fieldRead(receiver,declaring,name);
+        if(read!=null) {
+            if(incoming instanceof UUID uuid)for(Selector selector:read.selectors)
+                if(selector.subject!=null&&selector.value.equals(uuid)&&runtime.terminalSource(selector.subject)
+                        &&selector.source!=null&&runtime.recoverySources.current(selector.source))return true;
+            for(Selector selector:read.selectors) {
+                Entity output=selector.output.get();
+                if(output==null||selector.subject==null||selector.source==null||!runtime.recoverySources.current(selector.source)
+                        ||!ProRuntime.preventIndexRemoval(output)||selector.value.equals(incoming))continue;
+                try {if(read.field.get(receiver instanceof Class<?>?null:receiver)==selector.read.value())return true;}
+                catch(IllegalAccessException unavailable) { }
             }
-            rows.add("MEMORY_RECORD:"+item.id+":"+current+":"+item.reason);
+            UUID incomingSubject=incoming==null?null:subject(incoming);
+            if(incomingSubject!=null&&runtime.terminalSource(incomingSubject)) {
+                if(!(incoming instanceof CompoundTag tag))return true;
+                if(RecoverySources.tryRecordGraph())try {
+                    if(RecoverySources.recordGraphGap(runtime.recoverySources,tag,incomingSubject).isEmpty())return true;
+                }finally {RecoverySources.releaseRecordGraph();}
+            }
+            Object prior=read.value();
+            try {if(read.field.get(receiver instanceof Class<?>?null:receiver)!=prior)return false;}
+            catch(IllegalAccessException unavailable) {return false;}
+            if(prior instanceof Entity entity&&incoming!=prior&&ProRuntime.preventIndexRemoval(entity))return true;
         }
-        for(Scan scan:scans.values())rows.add("MEMORY_SOURCE:"+scan.source.locator+":"+scan.state+":"+scan.gaps);
-        if(!historical.isEmpty())rows.add("MEMORY_RESTART:ORIGINAL_REFERENCE_IDENTITIES_QUERY_ONLY;NO_POINTER_REUSE");
-        rows.add("MEMORY_SCOPE:REGISTERED_EXACT_MAP_ATOMIC_AND_COPY_ON_WRITE_EDGES;UNSUPPORTED_EDGES_REPORTED_IN_REMAINING");
-        return List.copyOf(rows);
+        return false;
+    }
+    private FieldRead fieldRead(Object receiver,Class<?> owner,String name) {
+        synchronized(writerFields) {
+            var receiverFields=writerFields.get(receiver);if(receiverFields==null)return null;
+            var fields=receiverFields.get(owner);return fields==null?null:fields.get(name);
+        }
+    }
+    private static boolean sameFieldValue(Field field,Object left,Object right) {
+        return field.getType().isPrimitive()?Objects.equals(left,right):left==right;
+    }
+    private boolean ownerCurrent(Edge edge) throws IllegalAccessException {
+        return runtime.recoverySources.current(edge.source)&&(edge.kind.equals("DIRECT_FIELD")?
+                edge.source.holder()==edge.container:edge.kind.equals("UUID_SELECTOR")?edge.source.holder()==edge.container:
+                edge.container!=null);
     }
     String dependencies(UUID operation,UUID subject) {
         StringBuilder key=new StringBuilder(gap);
-        for(Work item:work.values())if(item.policy.operation.equals(operation))key.append('|').append(item.id).append(':')
-            .append(item.state).append(':').append(item.reinserted).append(':').append(item.dispositionConfirmed);
-        for(var source:sources.registered())if(!Collections.disjoint(source.subjects,runtime.groupTargets(subject))) {
-            Scan scan=scans.get(source);if(scan==null)continue;
-            for(Field field:scan.fields)try {key.append('|').append(source.locator).append(':').append(field.getName()).append(':').append(SourceMaps.revision(field.get(scan.receiver())));}
-            catch(ReflectiveOperationException unavailable){key.append("|UNREADABLE:").append(source.locator);}
-        }
-        return key.append('|').append(references.dependencies(operation)).toString();
+        for(Policy policy:policies.values())if(policy.operation.equals(operation))
+            for(FieldRead read:fieldReads)if(read.consumers.contains(policy.subject.id))
+                key.append("|CONSUMED:").append(read.field.getDeclaringClass().getName()).append('#').append(read.field.getName());
+        for(Edge edge:edges.values())if(edge.policy.operation.equals(operation))key.append('|').append(edge.id).append(':')
+            .append(edge.attempted).append(':').append(edge.applied).append(':').append(edge.observed).append(':').append(edge.released);
+        for(Historical item:historical)if(item.operation.equals(operation))key.append('|').append(item.id).append(':').append(item.current);
+        return key.toString();
     }
-    long epoch() { return changes.get()+references.epoch(); }
-    void groupFieldCleared(Field field,Object holder){references.groupFieldCleared(field,holder);}
-    private void queryPrior() {
-        List<Prior> pending=new ArrayList<>(prior.values());
-        for(int budget=0;budget<Math.min(32,pending.size());budget++) {
-            Prior item=pending.get((int)Math.floorMod(priorCursor++,pending.size()));
-            boolean before=item.current;item.current=false;
+    long epoch() { return epoch.get(); }
+    void groupFieldCleared(Field field,Object holder){
+        for(FieldRead read:fieldReads)if(read.field.equals(field)&&read.holder.get()==holder)read.disposed=true;
+    }
+    static boolean supportedField(Field field) {
+        Class<?> type=field.getType();
+        return AtomicReference.class.isAssignableFrom(type)||List.class.isAssignableFrom(type)||Set.class.isAssignableFrom(type)
+                ||type.isArray()&&!type.getComponentType().isPrimitive()
+                ||Entity.class.isAssignableFrom(type)||CompoundTag.class.isAssignableFrom(type)
+                ||!type.isPrimitive()&&!type.isArray()&&!scalarType(type);
+    }
+    void tick(long tick) {
+        if(closing)return;
+        queryHistorical(tick);
+        var sources=new ArrayList<>(runtime.recoverySources.registered());
+        for(int i=0;i<Math.min(32,sources.size());i++) {
+            var source=sources.get((int)Math.floorMod(cursor++,sources.size()));
+            if(source.subjects.stream().noneMatch(id->policy(id)!=null))continue;
+            Set<String> issues=new TreeSet<>();
+            try { scan(source,issues); }
+            catch(ReflectiveOperationException|java.io.IOException|RuntimeException error) { issues.add("REFERENCE_SCAN_UNAVAILABLE:"+error.getClass().getSimpleName()); }
+            Set<String> previous=gaps.put(source,Set.copyOf(issues));if(previous!=null&&!previous.equals(issues))epoch.incrementAndGet();
+        }
+        List<Edge> active=new ArrayList<>(edges.values());
+        for(Edge edge:active) {
+            edge.ack=runtime.journal.retryRejected(edge.intent,edge.ack);
+            if(confirmed(edge.ack)&&edge.imageRecord!=null)
+                edge.imageAck=edge.imageAck==null?runtime.journal.append(edge.imageRecord):runtime.journal.retryRejected(edge.imageRecord,edge.imageAck);
+            if(confirmed(edge.ack)&&(edge.imageRecord==null||confirmed(edge.imageAck))&&edge.fact!=null)
+                edge.factAck=edge.factAck==null?runtime.journal.append(edge.fact):runtime.journal.retryRejected(edge.fact,edge.factAck);
+            edge.releaseAck=runtime.journal.retryRejected(edge.release,edge.releaseAck);
+            if(edge.running)continue;
+            if(edge.released) {
+                if(edge.release==null) { edge.release=edge.prefix+"\tEDGE_RELEASED\t"+edge.id+"\t"+edge.policy.operation+"\tOWNED_FIELDS_CLEARED_AFTER_FRAME_EXIT";edge.releaseAck=runtime.journal.append(edge.release); }
+            }
+        }
+        int budget=32;
+        // Keep every durable obligation; a busy earlier edge must not monopolize the next tick.
+        for(int visited=0;visited<active.size()&&budget>0;visited++) {
+            Edge edge=active.get((int)Math.floorMod(edgeCursor++,active.size()));
+            if(edge.running||edge.released)continue;
+            budget--;
+            edge.running=true;
+            try { worker.execute(()->{try { advance(edge); }catch(ReflectiveOperationException|RuntimeException error) { edge.reason="REFERENCE_DISPOSITION_UNRESOLVED:"+error.getClass().getSimpleName(); }finally { edge.running=false; } }); }
+            catch(RejectedExecutionException pending) { edge.running=false;edge.reason="REFERENCE_WORKER_BUDGET_WAIT"; }
+        }
+    }
+    private Policy policy(UUID id) {
+        ProRuntime.Subject canonical=runtime.canonicalSubject(id);
+        return policies.get(canonical==null?id:canonical.id);
+    }
+    private UUID subject(Object object) {
+        Object target=ownedTarget(object,runtime,true);
+        return target instanceof CompoundTag tag?RecoverySources.subject(runtime.recoverySources,tag):
+                target instanceof Entity entity?runtime.recoveryTasks.subjectOf(entity):null;
+    }
+    private boolean scan(RecoverySources.Source source,Set<String> issues)throws ReflectiveOperationException,java.io.IOException {
+        Object actualHolder=source.holder();
+        if(actualHolder==null){scans.remove(source);if(!source.disposed()){scanned.remove(source);issues.add("HOLDER_RELEASE_UNOBSERVED");}else scanned.put(source,source.mutations.get());return source.disposed();}
+        ReferenceScan existing=scans.get(source);
+        if(existing!=null&&existing.fieldIndex==0&&existing.field==null&&existing.completedIssues.isEmpty()&&scanCurrent(source))return true;
+        boolean isStatic=actualHolder instanceof Class<?>;
+        ReferenceScan scan=existing;
+        if(scan==null||scan.holder.get()!=actualHolder){scan=new ReferenceScan(actualHolder);scans.put(source,scan);scanned.remove(source);}
+        if(scan.fieldIndex==0&&scan.field==null){scan.issues.clear();scan.startedMutation=source.mutations.get();}
+        boolean complete=false;
+        int remaining=64;
+        while(remaining>0&&scan.fieldIndex<scan.fields.size()) {
+            if(scan.field==null)scan.field=scan.fields.get(scan.fieldIndex);
+            Field field=scan.field;remaining--;
+            if(!field.trySetAccessible()) { scan.issues.add("REFERENCE_FIELD_INACCESSIBLE:"+field.getName());scan.finishField();continue; }
+            Object container=field.get(isStatic?null:actualHolder);
+            SourceMaps.observeField(source,field,container);
+            if(!Modifier.isFinal(field.getModifiers())&&!SourceMaps.replacementCovered(source,field,container))
+                scan.issues.add("REFERENCE_FIELD_MUTABLE_REPLACEMENT_COVERAGE_UNPROVEN:"+field.getName());
+            WeakReference<Object> previousContainer=scan.containers.get(field);
+            if(previousContainer==null||previousContainer.get()!=container) {
+                scan.containers.put(field,new WeakReference<>(container));scan.lists.remove(field);scan.listRevisions.remove(field);scan.mapRevisions.remove(field);scan.arrayRevisions.remove(field);scanned.remove(source);
+            }
+            if(container!=scan.container){
+                scan.container=container;scan.map=null;scan.list=null;scan.listIndex=0;
+            }
+            if(container==null){scan.finishField();continue;}
+            if(ownedTarget(container,runtime,true)!=null) {
+                capture(source,field,null,actualHolder,container,"DIRECT_FIELD",scan.issues);
+                scan.finishField();continue;
+            }
+            if(nestedHolder(container)){
+                nested(source,field,"FIELD",null,container,scan.issues);scan.finishField();continue;
+            }
+            if(container.getClass()==AtomicReference.class) {
+                Object value=((AtomicReference<?>)container).get();
+                if(nestedHolder(value)&&ownedTarget(value,runtime,true)==null)nested(source,field,"ATOMIC",null,value,scan.issues);
+                else if(unsupportedWrapper(value))scan.issues.add("REFERENCE_WRAPPER_PROFILE_UNSUPPORTED:"+value.getClass().getName());
+                else capture(source,field,null,container,value,"ATOMIC",scan.issues);
+                scan.finishField();
+            }
+            else if(container.getClass()==CopyOnWriteArrayList.class) {
+                Object[] values=(Object[])LIST_ARRAY.get(container.getClass()).get(container);
+                if(values!=scan.list){
+                    WeakReference<Object[]> previous=scan.lists.put(field,new WeakReference<>(values));
+                    if(previous==null||previous.get()!=values)scanned.remove(source);
+                    scan.list=values;scan.listIndex=0;
+                }
+                int limit=Math.min(32,remaining);
+                while(limit-->0&&scan.listIndex<values.length) {
+                    Object value=values[scan.listIndex];
+                    if(nestedHolder(value)&&ownedTarget(value,runtime,true)==null)nested(source,field,"LIST",scan.listIndex,value,scan.issues);
+                    else if(unsupportedWrapper(value))scan.issues.add("REFERENCE_WRAPPER_PROFILE_UNSUPPORTED:"+value.getClass().getName());
+                    else capture(source,field,null,container,value,"COPY_ON_WRITE_LIST",scan.issues);
+                    scan.listIndex++;remaining--;
+                }
+                if(field.get(isStatic?null:actualHolder)!=container||LIST_ARRAY.get(container.getClass()).get(container)!=values){scan.container=null;scan.list=null;scan.listIndex=0;scanned.remove(source);break;}
+                if(scan.listIndex==values.length)scan.finishField();else break;
+            } else if(container instanceof Object[] values) {
+                if(values.length==0){scan.finishField();continue;}
+                int limit=Math.min(Math.min(32,remaining),values.length-scan.listIndex);
+                Object ticket=ArrayAccess.READ.invoke(null,container);
+                if(Boolean.FALSE.equals(ticket)){issues.add("REFERENCE_ARRAY_BUSY:"+field.getName());break;}
+                long revision=(Long)ArrayAccess.REVISION.invoke(null,container);
+                if(!Objects.equals(scan.arrayRevisions.put(field,revision),revision)){scan.listIndex=0;scanned.remove(source);}
+                try {
+                    int end=Math.min(values.length,scan.listIndex+limit);
+                    while(scan.listIndex<end) {
+                        int index=scan.listIndex++;Object value=values[index];remaining--;
+                        if(nestedHolder(value)&&ownedTarget(value,runtime,true)==null)nested(source,field,"ARRAY",index,value,scan.issues);
+                        else if(unsupportedWrapper(value))scan.issues.add("REFERENCE_WRAPPER_PROFILE_UNSUPPORTED:"+value.getClass().getName());
+                        else capture(source,field,index,container,value,"OBJECT_ARRAY",scan.issues);
+                    }
+                } finally {ArrayAccess.END_READ.invoke(null,ticket);}
+                if(field.get(isStatic?null:actualHolder)!=container){scan.container=null;scanned.remove(source);break;}
+                if(scan.listIndex==values.length)scan.finishField();else break;
+            } else if(SourceMaps.scopedList(container)) {
+                ReferenceScan active=scan;int limit=Math.min(32,remaining);int[] used={0};boolean[] done={false};
+                boolean ran=withArrayList(container,false,()->{
+                    long revision=arrayListRevision(container);
+                    if(!Objects.equals(active.listRevisions.put(field,revision),revision)) {
+                        active.listIndex=0;scanned.remove(source);
+                    }
+                    List<?> list=(List<?>)container;
+                    while(used[0]<limit&&active.listIndex<list.size()) {
+                        Object value=list.get(active.listIndex++);used[0]++;
+                        if(nestedHolder(value)&&ownedTarget(value,runtime,true)==null)nested(source,field,"LIST",active.listIndex-1,value,active.issues);
+                        else if(unsupportedWrapper(value))active.issues.add("REFERENCE_WRAPPER_PROFILE_UNSUPPORTED:"+value.getClass().getName());
+                        else capture(source,field,null,container,value,"ARRAY_LIST",active.issues);
+                    }
+                    done[0]=active.listIndex==list.size();
+                });
+                remaining-=used[0];
+                if(!ran){issues.add("REFERENCE_ARRAY_LIST_BUSY_OR_UNOBSERVED:"+field.getName());break;}
+                if(field.get(isStatic?null:actualHolder)!=container){scan.container=null;scan.listRevisions.remove(field);scanned.remove(source);break;}
+                if(done[0])scan.finishField();else break;
+            } else if(SourceMaps.supportedSet(container)){
+                Object backend=SourceMaps.setMap(container);
+                if(scan.map==null||scan.map.map!=backend)scan.map=new SourceMaps.Cursor(backend);
+                ReferenceScan active=scan;int limit=Math.min(32,remaining);
+                boolean ran=SourceMaps.visit(backend,scan.map,limit,(key,value,node,position)->{
+                    if(nestedHolder(key)&&ownedTarget(key,runtime,true)==null)nested(source,field,"SET",key.getClass().getName(),key,active.issues);
+                    else if(unsupportedWrapper(key))active.issues.add("REFERENCE_WRAPPER_PROFILE_UNSUPPORTED:"+key.getClass().getName());
+                    else capture(source,field,null,container,key,"HASH_SET",active.issues);
+                    return true;
+                });remaining-=limit;
+                if(!ran){issues.add("REFERENCE_SET_SCOPE_BUSY_OR_UNOBSERVED:"+field.getName());break;}
+                if(field.get(isStatic?null:actualHolder)!=container){scan.container=null;scan.map=null;scanned.remove(source);break;}
+                scan.mapRevisions.put(field,scan.map.revision);
+                if(scan.map.complete)scan.finishField();else break;
+            } else if(container instanceof Map<?,?>) {
+                if(!SourceMaps.supported(container)) {
+                    scan.issues.add("ENTITY_MAP_BACKEND_UNSUPPORTED:"+container.getClass().getName());scan.finishField();continue;
+                }
+                SourceMaps.observe(container,source,field);
+                if(scan.map==null)scan.map=new SourceMaps.Cursor(container);
+                ReferenceScan active=scan;int limit=Math.min(32,remaining);
+                boolean ran=SourceMaps.visit(container,scan.map,limit,(key,value,node,position)->captureMap(source,active,field,container,key,value));remaining-=limit;
+                if(!ran){issues.add("SOURCE_MAP_BUSY_OR_UNOBSERVED:"+field.getName());break;}
+                if(field.get(isStatic?null:actualHolder)!=container){scan.container=null;scan.map=null;scanned.remove(source);break;}
+                scan.mapRevisions.put(field,scan.map.revision);
+                if(scan.map.complete)scan.finishField();else break;
+            } else {
+                if(supportedField(field)&&unsupportedWrapper(container))scan.issues.add("REFERENCE_CONTAINER_UNSUPPORTED:"+field.getName());
+                scan.finishField();
+            }
+        }
+        if(scan.fieldIndex==scan.fields.size()) {
+            complete=source.mutations.get()==scan.startedMutation;
+            scan.fieldIndex=0;
+            if(!complete)scanned.remove(source);
+            else scan.completedIssues=Set.copyOf(scan.issues);
+        }
+        issues.addAll(scan.completedIssues);
+        issues.addAll(scan.issues);
+        for(Selector selector:selectors)if(selector.subject!=null&&selector.read.holder.get()==source.holder()) {
+            Policy policy=policy(selector.subject);if(policy==null||!policy.subject.terminal||policy.generation!=policy.subject.generation)continue;
+            if(!selector.nullable) {issues.add("SELECTOR_RESULT_CONTROL_ONLY:"+selector.site);continue;}
+            Field field=selector.read.field;
+            if(field.get(isStatic?null:source.holder())!=selector.read.value())continue;
+            if(Modifier.isFinal(field.getModifiers())||!HANDLES.get(field.getDeclaringClass()).containsKey(field)) {
+                issues.add("SELECTOR_SLOT_CAS_UNAVAILABLE:"+field.getName());continue;
+            }
+            Entity output=selector.output.get();if(output==null) {issues.add("SELECTOR_OUTPUT_RELEASE_UNOBSERVED:"+field.getName());continue;}
+            captureSelector(policy,source,selector,output,issues);
+        }
+        if(complete&&source.mutations.get()==scan.startedMutation)scanned.put(source,scan.startedMutation);
+        if(!Objects.equals(scanned.get(source),source.mutations.get()))issues.add("REFERENCE_HOLDER_SCAN_PENDING");
+        return complete;
+    }
+    private boolean captureMap(RecoverySources.Source source,ReferenceScan scan,Field field,Object container,Object key,Object value)throws ReflectiveOperationException {
+        Object wrapped=ownedTarget(value,runtime,true);
+        if(!(wrapped instanceof Entity)&&!(wrapped instanceof CompoundTag)) {
+            if(nestedHolder(value)&&SourceMaps.supportedKey(key)){nested(source,field,"MAP",key,value,scan.issues);return true;}
+            if(value!=null&&!immutableScalar(value)&&!emptyWrapper(value,runtime))scan.issues.add("ENTITY_MAP_WRAPPER_PROFILE_UNSUPPORTED:"+value.getClass().getName());
+            return true;
+        }
+        if(!SourceMaps.supportedKey(key)) {scan.issues.add("ENTITY_MAP_KEY_UNSUPPORTED");return true;}
+        capture(source,field,key,container,value,"ENTITY_MAP",scan.issues);return true;
+    }
+    private boolean scanCurrent(RecoverySources.Source source)throws ReflectiveOperationException {
+        if(!Objects.equals(scanned.get(source),source.mutations.get()))return false;
+        ReferenceScan scan=scans.get(source);
+        Object holder=source.holder();
+        if(holder==null)return source.disposed();
+        if(scan==null||scan.holder.get()!=holder)return false;
+        Object receiver=holder instanceof Class<?>?null:holder;
+        for(var entry:scan.containers.entrySet()) {
+            Object actual=entry.getKey().get(receiver);
+            if(actual!=entry.getValue().get())return false;
+            WeakReference<Object[]> list=scan.lists.get(entry.getKey());
+            if(list!=null&&(actual==null||actual.getClass()!=CopyOnWriteArrayList.class||LIST_ARRAY.get(actual.getClass()).get(actual)!=list.get()))return false;
+            Long mapRevision=scan.mapRevisions.get(entry.getKey());
+            if(mapRevision!=null){Object map=SourceMaps.supportedSet(actual)?SourceMaps.setMap(actual):actual;if(mapRevision.longValue()!=SourceMaps.revision(map))return false;}
+            Long arrayRevision=scan.arrayRevisions.get(entry.getKey());
+            if(arrayRevision!=null){
+                Object ticket=ArrayAccess.READ.invoke(null,actual);if(Boolean.FALSE.equals(ticket))return false;
+                try{if(arrayRevision.longValue()!=(Long)ArrayAccess.REVISION.invoke(null,actual))return false;}
+                finally{ArrayAccess.END_READ.invoke(null,ticket);}
+            }
+            Long revision=scan.listRevisions.get(entry.getKey());
+            if(revision!=null) {
+                boolean[] same={false};
+                if(!withArrayList(actual,false,()->same[0]=revision.longValue()==arrayListRevision(actual))||!same[0])return false;
+            }
+        }
+        return true;
+    }
+    private void captureSelector(Policy policy,RecoverySources.Source source,Selector selector,Entity output,Set<String> issues)throws ReflectiveOperationException {
+        for(Edge edge:edges.values())if(edge.policy==policy&&!edge.released&&edge.target==output&&edge.source==source&&edge.kind.equals("UUID_SELECTOR")
+                &&edge.field.equals(selector.read.field)&&edge.objectIdentity.get()==selector.read.value())return;
+        Edge edge=new Edge(policy,source,selector.read.field,selector.value,source.holder(),selector.read.value(),output,"UUID_SELECTOR",runtime.session);
+        if(!IntentJournal.frameFits(edge.intent)) {issues.add("REFERENCE_DESCRIPTOR_LIMIT:"+selector.read.field.getName());return;}
+        edge.ack=runtime.journal.append(edge.intent);edges.put(edge.id,edge);epoch.incrementAndGet();
+        if(runtime.server.isSameThread())advance(edge);
+    }
+    private void capture(RecoverySources.Source source,Field field,Object key,Object container,Object value,String kind,Set<String> issues) {
+        Object target=ownedTarget(value,runtime,true);
+        UUID subject=subject(value);Policy policy=policy(subject);
+        if(policy==null||!source.subjects.contains(subject)||!policy.subject.terminal||policy.subject.generation!=policy.generation)return;
+        for(Edge old:edges.values())if(old.policy==policy&&old.target==target&&old.kind.equals(kind)&&old.source==source&&old.field.equals(field)&&old.containerIdentity.get()==container
+                &&old.objectIdentity.get()==value&&Objects.equals(old.key,key)&&!old.released)return;
+        Edge edge=new Edge(policy,source,field,key,container,value,target,kind,runtime.session);
+        if(!IntentJournal.frameFits(edge.intent)) {issues.add("REFERENCE_DESCRIPTOR_LIMIT:"+field.getName());return;}
+        edge.ack=runtime.journal.append(edge.intent);edges.put(edge.id,edge);epoch.incrementAndGet();
+        if(kind.equals("DIRECT_FIELD")&&runtime.server.isSameThread())try {advance(edge);}
+        catch(ReflectiveOperationException|RuntimeException pending) {edge.reason="DIRECT_FIELD_DISPOSITION_PENDING:"+pending.getClass().getSimpleName();}
+    }
+    static boolean nestedHolder(Object value){
+        if(value==null||value instanceof Entity||value instanceof net.minecraft.nbt.Tag||immutableScalar(value)||value instanceof Class<?>
+                ||value instanceof Map<?,?>||value instanceof Collection<?>||value.getClass().isArray()||value instanceof java.lang.ref.Reference<?>)return false;
+        Class<?> type=value.getClass();return type.getClassLoader()!=null&&!type.isEnum();
+    }
+    private void nested(RecoverySources.Source source,Field field,String kind,Object key,Object value,Set<String> issues){
+        try{if(runtime.recoverySources.nestedSource(source,field,kind,key,value)==null)issues.add("NESTED_SOURCE_BINDING_PENDING:"+field.getName());}
+        catch(ReflectiveOperationException unavailable){issues.add("NESTED_SOURCE_BINDING_PENDING:"+field.getName());}
+    }
+    private static final Field[] OPAQUE_WRAPPER=new Field[0];
+    private static final ClassValue<Field[]> WRAPPER_FIELDS=new ClassValue<>() {
+        @Override protected Field[] computeValue(Class<?> type) {
+            if(type.getClassLoader()==null||type.isArray())return OPAQUE_WRAPPER;
+            var fields=new ArrayList<Field>();
+            for(Class<?> owner=type;owner!=null&&owner!=Object.class;owner=owner.getSuperclass())for(Field field:owner.getDeclaredFields()) {
+                if(Modifier.isStatic(field.getModifiers()))continue;
+                if(!field.trySetAccessible()||!Modifier.isFinal(field.getModifiers())&&!scalarType(field.getType()))return OPAQUE_WRAPPER;
+                fields.add(field);
+            }
+            return fields.toArray(Field[]::new);
+        }
+    };
+    /** One immutable target edge; mutable primitive/immutable-scalar bookkeeping carries no extra object owner. */
+    static Object wrapperTarget(Object wrapper,ProRuntime runtime,boolean allowTag) {
+        Object target=wrapperProfile(wrapper,runtime,allowTag);return target==Boolean.TRUE?null:target;
+    }
+    /** Follow all immutable delegate layers; an empty wrapper is not an unsupported edge. */
+    private static Object wrapperProfile(Object wrapper,ProRuntime runtime,boolean allowTag){
+        if(wrapper==null||wrapper instanceof Entity||wrapper.getClass()==CompoundTag.class
+                ||wrapper.getClass().getClassLoader()==null||wrapper.getClass().isArray())return null;
+        Object target=null;ArrayDeque<Object> pending=new ArrayDeque<>();Set<Object> seen=Collections.newSetFromMap(new IdentityHashMap<>());pending.add(wrapper);
+        while(!pending.isEmpty()){
+            Object current=pending.removeLast();if(!seen.add(current))continue;
+            Field[] fields=WRAPPER_FIELDS.get(current.getClass());if(fields==OPAQUE_WRAPPER)return null;
+            for(Field field:fields){
+                Object value;try {value=field.get(current);}catch(IllegalAccessException unavailable){return null;}
+                if(value==null)continue;
+                boolean candidate=value instanceof Entity||allowTag&&value.getClass()==CompoundTag.class;
+                if(candidate){
+                    UUID owner=value instanceof Entity?runtime.recoveryTasks.subjectOf(value):RecoverySources.subject(runtime.recoverySources,(CompoundTag)value);
+                    if(owner==null||target!=null&&target!=value)return null;target=value;
+                }else if(!immutableScalar(value))pending.addLast(value);
+            }
+        }
+        return target==null?Boolean.TRUE:target;
+    }
+    private static boolean scalarType(Class<?> type) {
+        return type.isPrimitive()||type==String.class||type==UUID.class||type==Boolean.class||type==Byte.class
+                ||type==Short.class||type==Integer.class||type==Long.class||type==Float.class||type==Double.class||type==Character.class;
+    }
+    static Object ownedTarget(Object value,ProRuntime runtime,boolean allowTag) {
+        if(value instanceof Entity||value!=null&&value.getClass()==CompoundTag.class)return value;
+        return wrapperTarget(value,runtime,allowTag);
+    }
+    static boolean emptyWrapper(Object value,ProRuntime runtime){return wrapperProfile(value,runtime,true)==Boolean.TRUE;}
+    static boolean immutableScalar(Object value) {
+        Class<?> type=value.getClass();
+        return type==String.class||type==UUID.class||type==Boolean.class||type==Byte.class||type==Short.class
+                ||type==Integer.class||type==Long.class||type==Float.class||type==Double.class||type==Character.class;
+    }
+    private boolean unsupportedWrapper(Object value) {
+        if(value==null||value instanceof Entity||value.getClass()==CompoundTag.class||immutableScalar(value))return false;
+        return wrapperProfile(value,runtime,true)==null;
+    }
+    private void advance(Edge edge)throws ReflectiveOperationException {
+        if(edge.kind.equals("HASH_SET")&&SourceMaps.supportedSet(edge.container)){
+            if(!SourceMaps.with(SourceMaps.setMap(edge.container),()->advanceLocked(edge)))edge.reason="REFERENCE_SET_SCOPE_BUSY_OR_UNOBSERVED";
+        }else if(edge.kind.equals("OBJECT_ARRAY")&&edge.container instanceof Object[] values) {
+            int index=(Integer)edge.key;
+            if(index<0||index>=values.length){edge.reason="REFERENCE_ARRAY_INDEX_CHANGED";return;}
+            Object ticket=ArrayAccess.BEGIN.invoke(null,values,index,1);
+            if(Boolean.FALSE.equals(ticket)){edge.reason="REFERENCE_ARRAY_BUSY";return;}
+            boolean before=edge.applied;
             try {
-                var source=sources.resolve(item.source,item.code);
-                if(source==null) { item.reason="REGISTERED_MEMORY_SOURCE_NOT_LOADED";continue; }
-                if(!runtime.journal.processEnded(item.session)) { item.reason="PRIOR_PROCESS_REFERENCE_LIFETIME_UNPROVEN";continue; }
-                if(!sources.queryCurrent(source,actual->priorAbsent(item,actual)))continue;
-                item.record="RECORD/2\tRESTART_QUERY\t"+item.id+"\t"+item.operation+"\tCURRENT_REGISTERED_SLOT_ABSENT_AND_PRIOR_PROCESS_ENDED";
-                item.ack=item.ack==null?runtime.journal.append(item.record):runtime.journal.retryRejected(item.record,item.ack);
-                item.current=confirmed(item.ack);item.reason=item.current?"":"RESTART_REFERENCE_FACT_ACK_PENDING";
-            } catch(ReflectiveOperationException|RuntimeException unavailable) { item.reason="MEMORY_RESTART_QUERY_UNAVAILABLE:"+unavailable.getClass().getSimpleName(); }
-            finally { if(before!=item.current)changes.incrementAndGet(); }
+                advanceLocked(edge);
+            }finally {ArrayAccess.FINISH.invoke(null,ticket,!before&&edge.applied);}
+        }else if(edge.kind.equals("ARRAY_LIST")&&edge.container!=null) {
+            ReflectiveOperationException[] failure={null};
+            boolean ran=withArrayList(edge.container,true,()->{
+                try{advanceLocked(edge);}catch(ReflectiveOperationException unavailable){failure[0]=unavailable;}
+            });
+            if(failure[0]!=null)throw failure[0];
+            if(!ran)edge.reason="REFERENCE_ARRAY_LIST_BUSY_OR_UNOBSERVED";
+        }else if(SourceMaps.serialized(edge.container)) {
+            if(!SourceMaps.with(edge.container,()->advanceLocked(edge)))edge.reason="SOURCE_MAP_BUSY_OR_UNOBSERVED";
+        } else advanceLocked(edge);
+    }
+    private void advanceLocked(Edge edge)throws ReflectiveOperationException {
+        edge.ack=runtime.journal.retryRejected(edge.intent,edge.ack);
+        if(edge.fact!=null) {
+            if(!confirmed(edge.ack)) { edge.reason="DURABLE_INTENT_ACK_"+ackState(edge.ack);return; }
+            if(edge.imageRecord!=null){edge.imageAck=edge.imageAck==null?runtime.journal.append(edge.imageRecord):runtime.journal.retryRejected(edge.imageRecord,edge.imageAck);if(!confirmed(edge.imageAck)){edge.reason="REFERENCE_IMAGE_PUBLICATION_PENDING";return;}}
+            edge.reason="";
+            edge.factAck=edge.factAck==null?runtime.journal.append(edge.fact):runtime.journal.retryRejected(edge.fact,edge.factAck);
+            if(confirmed(edge.factAck)) { edge.released=true;epoch.incrementAndGet(); }
+            return;
+        }
+        if(SourceMaps.disposedField(edge.source,edge.field)) {
+            if(edge.kind.equals("DIRECT_FIELD")||edge.kind.equals("UUID_SELECTOR")||absent(edge,edge.container,edge.object)){recordFact(edge,true);return;}
+            // A cleared holder does not erase the old alias. Continue the captured
+            // exact-container obligation instead of waiting forever on detachment.
+        }
+        if(!ownerCurrent(edge)) {edge.reason="REFERENCE_OWNER_CHANGED";return;}
+        // ACK records the durable obligation; exact idempotent memory sources may be unlinked before it arrives.
+        // A FACT is held in memory until the INTENT ACK is confirmed, preserving the on-disk record order.
+        if(edge.attempted) {
+            boolean absent=absent(edge,edge.container,edge.object);
+            if(absent)recordFact(edge,true);else if(edge.applied)edge.reason="EXACT_EDGE_REINSERTED_QUERY_PENDING";
+            else edge.reason="EFFECT_QUERY_REQUIRED";
+            return;
+        }
+        if(edge.kind.equals("COPY_ON_WRITE_LIST")) {
+            Field lock=CopyOnWriteArrayList.class.getDeclaredField("lock");if(!lock.trySetAccessible()) { edge.reason="LIST_LOCK_UNAVAILABLE";return; }
+            synchronized(lock.get(edge.container)) { remove(edge); }
+        } else if(edge.kind.equals("ENTITY_MAP"))removeMap(edge);else remove(edge);
+        boolean absent=absent(edge,edge.container,edge.object);
+        if(edge.applied&&!edge.expectedImage.isEmpty()&&!edge.expectedImage.equals(listImage(edge.container,null))) {
+            edge.reason="REFERENCE_PROJECTED_IMAGE_CHANGED_QUERY_REQUIRED";return;
+        }
+        if(absent)recordFact(edge,true);else if(edge.applied)edge.reason="EXACT_EDGE_REINSERTED_QUERY_PENDING";
+    }
+    private void recordFact(Edge edge,boolean absent) {
+        edge.observed=absent;edge.reason="";
+        edge.fact=edge.prefix+"\tEDGE_FACT\t"+edge.id+"\t"+edge.policy.operation+"\t"+
+                (absent?(edge.applied?"EXACT_OWNED_EDGE_REMOVED_AND_ABSENT":"EXACT_EDGE_ABSENCE_OBSERVED"):"EDGE_REMOVED_CURRENT_DUPLICATE_OR_REINSERTION_PENDING");
+        if(confirmed(edge.ack)&&(edge.imageRecord==null||confirmed(edge.imageAck)))edge.factAck=runtime.journal.append(edge.fact);
+        else edge.reason="DURABLE_INTENT_ACK_"+ackState(edge.ack);
+        if(absent){edge.object=null;edge.target=null;edge.container=null;}
+        epoch.incrementAndGet();
+    }
+    /** Remove the captured identity under its actual supported map write scope. */
+    @SuppressWarnings("unchecked") private void removeMap(Edge edge)throws ReflectiveOperationException {
+        if(edge.applied)return;
+        boolean[] locks={false,false,false};
+        boolean[] removed={false};
+        try {
+            if(!SourceMaps.supported(edge.container))return;
+            // Enter the CHM bin first. Every higher-level gate below is nonblocking and is
+            // acquired only inside the mapping callback, so a bin wait cannot retain them.
+            ((Map<Object,Object>)edge.container).computeIfPresent(edge.key,(key,value)->{
+                if(value!=edge.object)return value;
+                if(ownedTarget(value,runtime,true)!=edge.target) { edge.reason="REFERENCE_WRAPPER_TARGET_CHANGED";return value; }
+                if(!RecoverySources.tryRecordGraph())return value;locks[0]=true;
+                if(edge.target instanceof CompoundTag tag) {
+                    String graphGap=RecoverySources.recordGraphGap(runtime.recoverySources,tag,RecoverySources.subject(runtime.recoverySources,tag));
+                    if(!graphGap.isEmpty()) { edge.reason=graphGap;return value; }
+                }
+                if(!edge.policy.subject.commitGate.tryLock())return value;locks[1]=true;
+                if(!edge.source.gate.tryLock())return value;locks[2]=true;
+                if(closing||!edge.policy.subject.terminal||edge.policy.subject.generation!=edge.policy.generation
+                        ||!runtime.recoverySources.current(edge.source)||edge.source.writers!=0)return value;
+                if(ownedTarget(value,runtime,true)!=edge.target) { edge.reason="REFERENCE_WRAPPER_TARGET_CHANGED";return value; }
+                edge.attempted=true;removed[0]=true;return null;
+            });
+            edge.applied=removed[0];
+        } finally {
+            // Keep graph/subject/source gates until compute returns, covering the actual unlink.
+            if(locks[2])edge.source.gate.unlock();
+            if(locks[1])edge.policy.subject.commitGate.unlock();
+            if(locks[0])RecoverySources.releaseRecordGraph();
         }
     }
-    private boolean priorAbsent(Prior item,RecoverySources.Source source)throws ReflectiveOperationException{
-                int split=item.field.lastIndexOf('#');if(split<0)throw new IllegalArgumentException("FIELD_DESCRIPTOR");
-                Object actualHolder=source.holder();
+    @SuppressWarnings("unchecked") private void remove(Edge edge)throws ReflectiveOperationException {
+        if(edge.applied)return; // Query an uncertain or already observed effect; do not replay it.
+        boolean graph=edge.target instanceof CompoundTag;
+        if(graph&&!RecoverySources.tryRecordGraph())return;
+        try {
+            if(edge.target instanceof CompoundTag tag) {
+                String gap=RecoverySources.recordGraphGap(runtime.recoverySources,tag,RecoverySources.subject(runtime.recoverySources,tag));
+                if(!gap.isEmpty()) { edge.reason=gap;return; }
+            }
+            if(!edge.kind.equals("UUID_SELECTOR")&&ownedTarget(edge.object,runtime,true)!=edge.target) { edge.reason="REFERENCE_WRAPPER_TARGET_CHANGED";return; }
+            if(!edge.policy.subject.commitGate.tryLock())return;
+            try {
+                if(!edge.source.gate.tryLock())return;
+                try {
+                    if(closing||!edge.policy.subject.terminal||edge.policy.subject.generation!=edge.policy.generation
+                            ||!ownerCurrent(edge)||edge.source.writers!=0)return;
+                    switch(edge.kind) {
+                        case "DIRECT_FIELD", "UUID_SELECTOR" -> {
+                            var handle=HANDLES.get(edge.field.getDeclaringClass()).get(edge.field);
+                            if(handle==null&&Modifier.isFinal(edge.field.getModifiers())&&edge.kind.equals("DIRECT_FIELD")){
+                                edge.applied=RecoverySources.clearReferenceField(edge.field,edge.receiver(),edge.object,()->edge.attempted=true);break;
+                            }
+                            if(handle==null)return;
+                            edge.attempted=true;
+                            edge.applied=Modifier.isStatic(edge.field.getModifiers())?handle.compareAndSet(edge.object,null):
+                                    handle.compareAndSet(edge.receiver(),edge.object,null);
+                        }
+                        case "ATOMIC" -> {
+                            if(ownedTarget(edge.object,runtime,true)!=edge.target) { edge.reason="REFERENCE_WRAPPER_TARGET_CHANGED";return; }
+                            edge.attempted=true;
+                            edge.applied=((AtomicReference<Object>)edge.container).compareAndSet(edge.object,null);
+                        }
+                        case "OBJECT_ARRAY" -> {
+                            var elements=java.lang.invoke.MethodHandles.arrayElementVarHandle(edge.container.getClass());
+                            edge.attempted=true;
+                            edge.applied=elements.compareAndSet(edge.container,(Integer)edge.key,edge.object,null);
+                        }
+                        case "HASH_SET" -> {
+                            if(!prepareListImage(edge,(Collection<?>)edge.container))return;
+                            Object backend=SourceMaps.setMap(edge.container);
+                            if(edge.removalCursor==null||edge.removalCursor.map!=backend)edge.removalCursor=new SourceMaps.Cursor(backend);
+                            try{SourceMaps.visit(backend,edge.removalCursor,32,(key,value,node,position)->{
+                                if(key!=edge.object)return true;
+                                edge.attempted=true;edge.applied=SourceMaps.removeIdentityVisited(position,edge.object);return false;
+                            });}catch(java.io.IOException unavailable){edge.reason="REFERENCE_SET_SCAN_UNAVAILABLE";}
+                        }
+                        case "COPY_ON_WRITE_LIST", "ARRAY_LIST" -> {
+                            var list=(List<Object>)edge.container;
+                            if(!prepareListImage(edge,list))return;
+                            if(ownedTarget(edge.object,runtime,true)!=edge.target) { edge.reason="REFERENCE_WRAPPER_TARGET_CHANGED";return; }
+                            edge.attempted=true;edge.applied=SourceMaps.removeListIdentity(list,edge.object);
+                        }
+                        default -> throw new IllegalStateException("UNKNOWN_REFERENCE_ADAPTER");
+                    }
+                } finally { edge.source.gate.unlock(); }
+            } finally { edge.policy.subject.commitGate.unlock(); }
+        } finally { if(graph)RecoverySources.releaseRecordGraph(); }
+    }
+    private boolean absent(Edge edge,Object container,Object object) {
+        return switch(edge.kind) {
+            case "DIRECT_FIELD", "UUID_SELECTOR" -> {
+                try {yield edge.field.get(edge.receiver())!=object;}
+                catch(IllegalAccessException unavailable) {edge.reason="DIRECT_FIELD_READ_UNAVAILABLE";yield false;}
+            }
+            case "ATOMIC" -> ((AtomicReference<?>)container).get()!=object;
+            case "OBJECT_ARRAY" -> ((Object[])container)[(Integer)edge.key]!=object;
+            case "COPY_ON_WRITE_LIST" -> Arrays.stream(((CopyOnWriteArrayList<?>)container).toArray()).noneMatch(value->value==object);
+            case "ARRAY_LIST" -> {
+                boolean found=false;for(Object value:(List<?>)container)if(value==object){found=true;break;}
+                yield !found;
+            }
+            case "HASH_SET" -> {
+                try{
+                    List<Map.Entry<Object,Object>> rows=SourceMaps.entries(SourceMaps.setMap(container));
+                    if(rows==null){edge.reason="REFERENCE_SET_QUERY_PENDING";yield false;}
+                    boolean found=false;for(var row:rows)if(row.getKey()==object){found=true;break;}yield !found;
+                }catch(ReflectiveOperationException unavailable){edge.reason="REFERENCE_SET_BACKING_UNAVAILABLE";yield false;}
+            }
+            case "ENTITY_MAP" -> {
+                Object[] observed=SourceMaps.peek(container,edge.key);
+                if(observed==null)edge.reason="SOURCE_MAP_QUERY_PENDING";
+                yield observed!=null&&observed[1]!=object;
+            }
+            default -> false;
+        };
+    }
+    private void queryHistorical(long tick) {
+        for(int i=0;i<Math.min(128,historical.size());i++) {
+            Historical item=historical.get((int)Math.floorMod(historyCursor++,historical.size()));
+            boolean prior=item.current;item.current=false;item.sampled=tick;
+            try {
+                var source=runtime.recoverySources.resolve(item.source,item.code);
+                if(source==null) { item.reason="REGISTERED_REFERENCE_SOURCE_NOT_LOADED";continue; }
+                if(!runtime.journal.processEnded(item.session)) { item.reason="PRIOR_PROCESS_REFERENCES_UNPROVEN";continue; }
+                if(!runtime.recoverySources.queryCurrent(source,actual->historicalAbsent(item,actual)))continue;
+                item.record=item.prefix+"\tEDGE_RESTART\t"+item.id+"\t"+item.operation+"\tCURRENT_LOCATION_ABSENT_PRIOR_PROCESS_ENDED";
+                item.ack=item.ack==null?runtime.journal.append(item.record):runtime.journal.retryRejected(item.record,item.ack);
+                item.current=confirmed(item.ack);item.reason=item.current?"":"REFERENCE_RESTART_ACK_PENDING";
+            } catch(ReflectiveOperationException|RuntimeException unavailable) { item.reason="REFERENCE_RESTART_QUERY_UNAVAILABLE:"+unavailable.getClass().getSimpleName(); }
+            finally { if(prior!=item.current)epoch.incrementAndGet(); }
+        }
+    }
+    private boolean historicalAbsent(Historical item,RecoverySources.Source source)throws ReflectiveOperationException{
+                int split=item.field.lastIndexOf('#');if(split<0)throw new IllegalArgumentException("FIELD");
+                Object actualHolder=source.holder();boolean absent=false;
                 if(actualHolder==null) {
                     if(!source.disposed()) { item.reason="HOLDER_RELEASE_UNOBSERVED";return false; }
+                    absent=true;
                 } else {
                     Class<?> holder=actualHolder instanceof Class<?> type?type:actualHolder.getClass(),declaring=null;
                     for(Class<?> type=holder;type!=null;type=type.getSuperclass())if(type.getName().equals(item.field.substring(0,split))) { declaring=type;break; }
-                    if(declaring==null) { item.reason="ORIGINAL_FIELD_DEFINITION_CHANGED";return false; }
+                    if(declaring==null) { item.reason="REFERENCE_DEFINITION_CHANGED";return false; }
                     Field field=declaring.getDeclaredField(item.field.substring(split+1));
-                    if(!field.trySetAccessible()) { item.reason="ORIGINAL_FIELD_UNSUPPORTED";return false; }
-                    Object map=field.get(actualHolder instanceof Class<?>?null:actualHolder);
-                    SourceMaps.observeField(source,field,map);
-                    // Only this registered source's actual disposition can establish an absent
-                    // container. An unobserved null or a replacement map retains the old checks.
-                    if(map!=null||!source.cleared(field)&&!SourceMaps.replacementCovered(source,field,map)) {
-                        if(!SourceMaps.replacementCovered(source,field,map)) { item.reason="ORIGINAL_FIELD_PUBLICATION_UNAVAILABLE";return false; }
-                        if(!SourceMaps.supported(map)) { item.reason="ORIGINAL_CONTAINER_UNSUPPORTED";return false; }
+                    boolean direct=item.kind.equals("DIRECT_FIELD")||item.kind.equals("UUID_SELECTOR");
+                    if(!field.trySetAccessible()) { item.reason="REFERENCE_FIELD_UNSUPPORTED";return false; }
+                    Object container=field.get(actualHolder instanceof Class<?>?null:actualHolder);
+                    SourceMaps.observeField(source,field,container);
+                    if(!direct&&!SourceMaps.replacementCovered(source,field,container)){item.reason="REFERENCE_FIELD_PUBLICATION_UNAVAILABLE";return false;}
+                    if(container==null&&(source.cleared(field)||SourceMaps.replacementCovered(source,field,container)))absent=true;
+                    else if(direct)absent=container==null;
+                    else if(item.kind.equals("ATOMIC")&&container!=null&&container.getClass()==AtomicReference.class)absent=((AtomicReference<?>)container).get()==null;
+                    else if(item.kind.equals("OBJECT_ARRAY")&&container instanceof Object[] values) {
+                        if(!item.key.startsWith("java.lang.Integer:"))throw new IllegalArgumentException("ARRAY_INDEX");
+                        int index=Integer.parseInt(item.key.substring("java.lang.Integer:".length()));
+                        if(index<0)throw new IllegalArgumentException("ARRAY_INDEX");
+                        if(index>=values.length)absent=true;
+                        else {
+                            Object ticket=ArrayAccess.READ.invoke(null,values);
+                            if(Boolean.FALSE.equals(ticket)){item.reason="REFERENCE_ARRAY_QUERY_PENDING";return false;}
+                            try{absent=values[index]==null;}finally{ArrayAccess.END_READ.invoke(null,ticket);}
+                        }
+                    }
+                    else if(item.kind.equals("COPY_ON_WRITE_LIST")&&container!=null&&container.getClass()==CopyOnWriteArrayList.class)
+                        absent=item.expected.isEmpty()?((CopyOnWriteArrayList<?>)container).isEmpty():listProjectionCurrent(item,listImage(container,null));
+                    else if(item.kind.equals("ARRAY_LIST")&&container!=null&&SourceMaps.scopedList(container)) {
+                        boolean[] result={false};
+                        if(!withArrayList(container,false,()->result[0]=item.expected.isEmpty()?((List<?>)container).isEmpty():listProjectionCurrent(item,listImage(container,null)))) {
+                            item.reason="REFERENCE_ARRAY_LIST_QUERY_PENDING";return false;
+                        }
+                        absent=result[0];
+                    }
+                    else if(item.kind.equals("HASH_SET")&&SourceMaps.supportedSet(container)){
+                        boolean[] result={false};Object current=container;
+                        if(!SourceMaps.with(SourceMaps.setMap(container),()->result[0]=item.expected.isEmpty()?((Set<?>)current).isEmpty():listProjectionCurrent(item,listImage(current,null)))){
+                            item.reason="REFERENCE_SET_QUERY_PENDING";return false;
+                        }
+                        absent=result[0];
+                    }
+                    else if(item.kind.equals("ENTITY_MAP")&&container instanceof Map<?,?>) {
                         Object key=SourceMaps.decodeKey(item.key);
-                        Object[] observed=SourceMaps.peek(map,key);
+                        Object[] observed=SourceMaps.peek(container,key);
                         if(observed==null) { item.reason="SOURCE_MAP_QUERY_PENDING";return false; }
-                        if(Boolean.TRUE.equals(observed[0])) { item.reason="ORIGINAL_SLOT_PRESENT_NEW_IDENTITY_REQUIRES_FRESH_PROVENANCE";return false; }
+                        absent=!Boolean.TRUE.equals(observed[0]);
                     }
                 }
+                if(!absent) { item.reason="ORIGINAL_REFERENCE_LOCATION_PRESENT_FRESH_PROVENANCE_REQUIRED";return false; }
                 return true;
     }
     List<String> remaining(UUID operation,UUID subject) {
-        List<String> out=new ArrayList<>();if(!gap.isEmpty())out.add(gap);
-        for(Prior item:prior.values())if(item.operation.equals(operation)&&!item.current)out.add("MEMORY_RESTART:"+item.id+":"+item.reason);
-        for(var source:sources.registered())if(!Collections.disjoint(source.subjects,runtime.groupTargets(subject))) {
-            Scan scan=scans.get(source);
-            if(scan==null||scan.passes==0||scan.completedMutation!=source.mutations.get())out.add("MEMORY_SOURCE_SCAN_PENDING:"+source.locator);
-            else { out.addAll(scan.gaps);if(!sources.current(source))out.add("MEMORY_SOURCE_OWNER_CHANGED");
-                if((scan.state.equals("MEMORY_SOURCE_MAP_BUSY_OR_UNOBSERVED")||scan.state.equals("SOURCE_MAP_BUSY_OR_UNOBSERVED")||scan.state.equals("SOURCE_MAP_SNAPSHOT_CAPACITY")))out.add(scan.state+":"+source.locator);
-            }
-            if(scan!=null)for(var binding:scan.containers.entrySet())try {
-                Object actual=binding.getKey().get(scan.receiver());
-                if(actual!=binding.getValue().get())out.add("MEMORY_FIELD_OWNER_REPLACED:"+binding.getKey().getName());
-                else if(SourceMaps.serialized(actual)
-                        &&!Objects.equals(scan.revisions.get(binding.getKey()),SourceMaps.revision(actual)))out.add("MEMORY_SOURCE_SCAN_PENDING:"+source.locator);
-            }catch(ReflectiveOperationException|RuntimeException unavailable){out.add("MEMORY_FIELD_QUERY_UNAVAILABLE:"+binding.getKey().getName());}
+        List<String> out=new ArrayList<>();
+        if(!gap.isEmpty())out.add(gap);
+        Set<UUID> targets=runtime.groupTargets(subject);
+        for(FieldRead read:fieldReads)if(!Collections.disjoint(read.consumers,targets)) {
+            if(read.disposed)continue;
+            if(read.holder.get()==null)out.add("CONSUMED_FIELD_HOLDER_RELEASE_UNOBSERVED:"+read.field.getDeclaringClass().getName()+"#"+read.field.getName());
+            else if(scalarType(read.field.getType()))
+                out.add("SCALAR_PRODUCER_CONSUMPTION_REQUIRES_DISPOSITION:"+read.field.getDeclaringClass().getName()+"#"+read.field.getName());
         }
-        for(Work item:work.values())if(item.policy.operation.equals(operation)) {
-            if(!confirmed(item.ack))out.add("MEMORY_RECORD_DURABLE_INTENT_ACK:"+item.id+":"+ackState(item.ack));
-            if(!item.state.equals("REFERENCE_DISPOSED")||!confirmed(item.releaseAck)||!confirmed(item.factAck))out.add("MEMORY_RECORD:"+item.id+":"+item.state+":"+item.reason);
+        long now=Integer.toUnsignedLong(runtime.server.getTickCount());
+        for(Historical item:historical)if(item.operation.equals(operation)&&(!item.current||item.sampled<0||now-item.sampled>10))
+            out.add("REFERENCE_RESTART:"+item.id+":"+item.reason);
+        for(var source:runtime.recoverySources.registered())if(!Collections.disjoint(source.subjects,runtime.groupTargets(subject))) {
+            try {if(!scanCurrent(source))out.add("REFERENCE_HOLDER_SCAN_PENDING");}
+            catch(ReflectiveOperationException|RuntimeException unavailable){out.add("REFERENCE_HOLDER_SCAN_UNAVAILABLE");}
+            out.addAll(gaps.getOrDefault(source,Set.of()));
+        }
+        for(Edge edge:edges.values())if(edge.policy.operation.equals(operation)) {
+            if(!confirmed(edge.ack))out.add("REFERENCE_EDGE_DURABLE_INTENT_ACK:"+edge.id+":"+ackState(edge.ack));
+            if(!edge.released||!edge.observed||!confirmed(edge.releaseAck)||!confirmed(edge.factAck))out.add("REFERENCE_EDGE:"+edge.id+":"+edge.reason);
             else try {
-                if(item.scan.source.disposed()&&item.scan.source.holder()==null)continue;
-                Object map=item.mapIdentity.get();
-                if(map==null)continue; // Durable removal/release, not weak collection, established the fact.
-                if(!sources.current(item.scan.source))out.add("MEMORY_RECORD_OWNER_CHANGED:"+item.id);
-                else {
-                    Object[] observed=SourceMaps.peek(map,item.key);
-                    if(observed==null) { out.add("SOURCE_MAP_QUERY_PENDING:"+item.id);continue; }
-                    Object current=observed[1],original=item.recordIdentity.get();
-                    if(original!=null&&current==original)out.add("MEMORY_RECORD_REINSERTED:"+item.id);
-                    // A collected weak identity is irrelevant: the durable unlink and fresh exact slot query are the evidence.
-                    if(subject.equals(recordSubject(current)))out.add("MEMORY_RECORD_NEW_SUBJECT_BINDING:"+item.id);
-                }
-            } catch(RuntimeException failure) { out.add("MEMORY_RECORD_QUERY_UNAVAILABLE:"+item.id); }
+                if(edge.source.disposed()&&edge.source.holder()==null)continue;
+                Object container=edge.containerIdentity.get(),object=edge.objectIdentity.get();
+                // The acknowledged FACT already established absence in this original
+                // container. New field contents have their own scan and obligations.
+                if(container==null)continue;
+                if(!runtime.recoverySources.current(edge.source))out.add("REFERENCE_OWNER_CHANGED:"+edge.id);
+                else if(object!=null&&!queryAbsent(edge,container,object))out.add("REFERENCE_REINSERTED_OR_QUERY_PENDING:"+edge.id);
+            } catch(ReflectiveOperationException unavailable) { out.add("REFERENCE_QUERY_UNAVAILABLE:"+edge.id); }
         }
-        out.addAll(references.remaining(operation,subject));return List.copyOf(out);
+        return List.copyOf(out);
     }
-    private UUID recordSubject(Object value) {
-        Object root=RecoveryReferences.ownedTarget(value,runtime,true);
-        return root instanceof CompoundTag tag?RecoverySources.subject(sources,tag):null;
+    List<String> status(UUID operation) {
+        List<String> rows=new ArrayList<>();
+        for(Edge edge:edges.values())if(edge.policy.operation.equals(operation))
+            rows.add("MEMORY_EDGE:"+edge.id+":"+edge.kind+":"+(edge.released?"RELEASED":edge.applied?"APPLIED":edge.attempted?"EFFECT_QUERY_REQUIRED":"PENDING")+":"+edge.reason);
+        for(Historical item:historical)if(item.operation.equals(operation))rows.add("MEMORY_RESTART:"+item.id+":"+item.current+":"+item.reason);
+        return List.copyOf(rows);
     }
+    private boolean queryAbsent(Edge edge,Object container,Object object)throws ReflectiveOperationException {
+        if(edge.kind.equals("HASH_SET")){
+            boolean[] absent={false};return SourceMaps.with(SourceMaps.setMap(container),()->absent[0]=absent(edge,container,object))&&absent[0];
+        }
+        if(edge.kind.equals("ARRAY_LIST")) {
+            boolean[] absent={false};
+            return withArrayList(container,false,()->absent[0]=absent(edge,container,object))&&absent[0];
+        }
+        if(edge.kind.equals("OBJECT_ARRAY")) {
+            Object ticket=ArrayAccess.READ.invoke(null,container);
+            if(Boolean.FALSE.equals(ticket))return false;
+            try{return absent(edge,container,object);}finally{ArrayAccess.END_READ.invoke(null,ticket);}
+        }
+        return absent(edge,container,object);
+    }
+    private static boolean confirmed(CompletableFuture<Void> ack) { return ack!=null&&ack.isDone()&&!ack.isCompletedExceptionally()&&!ack.isCancelled(); }
     private static String ackState(CompletableFuture<Void> ack) {
         if(ack==null||!ack.isDone())return "PENDING";
         return ack.isCompletedExceptionally()||ack.isCancelled()?"UNCONFIRMED":"CONFIRMED";
     }
-    private static boolean confirmed(CompletableFuture<Void> ack) { return ack!=null&&ack.isDone()&&!ack.isCompletedExceptionally()&&!ack.isCancelled(); }
     private static String text(String value) { return JournalLineage.encodeText(value); }
     private static String untext(String value) { return JournalLineage.decodeText(value); }
-    @Override public void close()throws IOException {
-        closing=true;
-        references.close();
-        executor.shutdown();
-        if(!executor.isTerminated())throw new IOException("MEMORY_EXECUTOR_EXIT_PENDING");
-        boolean pending=false;
-        for(Work item:work.values()) {
-            // Stop does not convert an unexecuted intent or unknown effect to a successful release.
-            if(item.attempted&&item.fact==null) {
-                try { query(item); } catch(ReflectiveOperationException failure) { throw new IOException("MEMORY_RECORD_QUERY_UNRESOLVED",failure); }
-                if(item.fact==null)throw new IOException("MEMORY_RECORD_EFFECT_UNKNOWN_AT_STOP");
+    /** Later durable removals from this same registered list may extend an earlier preserved image. */
+    private boolean listProjectionCurrent(Historical item,String actual) {
+        if(actual.isEmpty()||item.expected.isEmpty())return false;
+        if(item.expected.equals(actual))return true;
+        ArrayDeque<String> pending=new ArrayDeque<>();Set<String> seen=new HashSet<>();
+        pending.add(item.expected);
+        while(!pending.isEmpty()) {
+            String step=pending.removeFirst();if(!seen.add(step))continue;
+            for(Historical next:historical) {
+                if(!next.imageApplied||!next.kind.equals(item.kind)
+                        ||!next.source.equals(item.source)||!next.code.equals(item.code)||!next.field.equals(item.field)
+                        ||!next.before.equals(step)||next.expected.isEmpty())continue;
+                if(next.expected.equals(actual))return true;
+                pending.addLast(next.expected);
             }
-            item.ack=runtime.journal.retryRejected(item.intent,item.ack);
-            if(!confirmed(item.ack)) { pending=true;continue; }
-            if(item.fact==null) {
-                item.fact=PREFIX+"\tFACT\t"+item.id+"\tNOT_EXECUTED_AT_STOP\tNO_DISPOSITION_CLAIM";
-                item.factAck=runtime.journal.append(item.fact);
-            }
-            try { advance(item); }
-            catch(ReflectiveOperationException failure) { throw new IOException("MEMORY_RECORD_RETIREMENT_UNRESOLVED",failure); }
-            if(!confirmed(item.releaseAck))pending=true;
         }
-        if(pending)throw new IOException("MEMORY_RECORD_RETIREMENT_ACK_PENDING");
-        for(Scan scan:scans.values()) { scan.entries=null;scan.map=null; }
-        scans.clear();policies.clear();work.clear();
+        return false;
+    }
+    /** Full ordered NBT image; omit every occurrence of the captured identity in its intended projection. */
+    private static String listImage(Object container,Object removed) {
+        boolean set=SourceMaps.supportedSet(container);
+        if(container==null||!set&&container.getClass()!=CopyOnWriteArrayList.class&&!SourceMaps.scopedList(container))return "";
+        Object[] values=((Collection<?>)container).toArray();
+        StringBuilder canonical=new StringBuilder(set?"NBT-SET/1\n":"NBT-LIST/1\n");boolean skipped=false;
+        List<String> hashes=set?new ArrayList<>():null;
+        for(Object value:values) {
+            if(removed!=null&&value==removed) { skipped=true;continue; }
+            if(!(value instanceof CompoundTag tag)||value.getClass()!=CompoundTag.class)return "";
+            try {String hash=RecoveryImage.semanticHash(tag);if(set)hashes.add(hash);else canonical.append(hash).append('\n');}
+            catch(java.io.IOException unsupported) { return ""; }
+        }
+        if(removed!=null&&!skipped)return "";
+        if(set){Collections.sort(hashes);for(String hash:hashes)canonical.append(hash).append('\n');}
+        return RecoveryImage.hash(canonical.toString().getBytes(StandardCharsets.UTF_8));
+    }
+    /** Capture the current preserved projection under the carrier's real write scope. */
+    private boolean prepareListImage(Edge edge,Collection<?> list) {
+        if(edge.beforeImage.isEmpty())return true;
+        boolean present=false;for(Object value:list)if(value==edge.object){present=true;break;}
+        if(!present)return true;
+        String actual=listImage(list,null);
+        if(edge.beforeImage.equals(actual))return true;
+        String projected=listImage(list,edge.object);
+        // An opaque neighbor prevents image-based restart closure; it does not
+        // prevent unlinking this exact observed identity from memory.
+        if(actual.isEmpty()||projected.isEmpty()){edge.beforeImage="";edge.expectedImage="";return true;}
+        edge.beforeImage=actual;edge.expectedImage=projected;
+        edge.imageRecord=edge.prefix+"\tEDGE_IMAGE\t"+edge.id+"\t"+edge.policy.operation+"\t"+actual+"\t"+projected;
+        edge.imageAck=null;epoch.incrementAndGet();return true;
+    }
+    private static final class ArrayListAccess {
+        static final Method READ=method("withListRead",Object.class,Runnable.class),WRITE=method("withList",Object.class,Runnable.class),REVISION=method("listRevision",Object.class);
+        private static Method method(String name,Class<?>... parameters){
+            try{return Class.forName("dev.ronova.pro.bootstrap.SourceMapBridge",false,null).getMethod(name,parameters);}
+            catch(ReflectiveOperationException unavailable){throw new ExceptionInInitializerError(unavailable);}
+        }
+    }
+    private static final class ArrayAccess {
+        static final java.lang.reflect.Method REVISION=arrayRevisionMethod();
+        private static java.lang.reflect.Method arrayRevisionMethod(){try{return Class.forName("dev.ronova.pro.bootstrap.ControlBridge",false,null).getMethod("arrayRevision",Object.class);}catch(ReflectiveOperationException failure){throw new ExceptionInInitializerError(failure);}}
+        static final Method BEGIN=method("beginRecoveryArrayMutation",Object.class,int.class,int.class),
+                READ=method("beginRecoveryArrayRead",Object.class),END_READ=method("endFieldMutation",Object.class),
+                FINISH=method("finishRecoveryArrayMutation",Object.class,boolean.class);
+        private static Method method(String name,Class<?>... parameters){
+            try{return Class.forName("dev.ronova.pro.bootstrap.ControlBridge",false,null).getMethod(name,parameters);}
+            catch(ReflectiveOperationException unavailable){throw new ExceptionInInitializerError(unavailable);}
+        }
+    }
+    static boolean withArrayList(Object list,boolean write,Runnable action)throws ReflectiveOperationException {
+        if(!SourceMaps.scopedList(list))return false;
+        if(SourceMaps.fastList(list))return SourceMaps.with(list,action::run);
+        return Boolean.TRUE.equals((write?ArrayListAccess.WRITE:ArrayListAccess.READ).invoke(null,list,action));
+    }
+    static long arrayListRevision(Object list) {
+        try {long revision=SourceMaps.fastList(list)?SourceMaps.revision(list):(Long)ArrayListAccess.REVISION.invoke(null,list);if(revision<0)throw new IllegalStateException("REFERENCE_ARRAY_LIST_UNOBSERVED");return revision;}
+        catch(ReflectiveOperationException unavailable){throw new IllegalStateException("REFERENCE_ARRAY_LIST_REVISION_UNAVAILABLE",unavailable);}
+    }
+    @Override public void close()throws java.io.IOException {
+        closing=true;worker.shutdown();if(!worker.isTerminated())throw new java.io.IOException("REFERENCE_WORKER_EXIT_PENDING");
+        for(Edge edge:edges.values())if(edge.running)throw new java.io.IOException("REFERENCE_WORKER_FRAME_PENDING");
+        boolean pending=false;
+        for(Edge edge:edges.values()) {
+            edge.ack=runtime.journal.retryRejected(edge.intent,edge.ack);
+            if(!confirmed(edge.ack)) { pending=true;continue; }
+            if(edge.imageRecord!=null){edge.imageAck=edge.imageAck==null?runtime.journal.append(edge.imageRecord):runtime.journal.retryRejected(edge.imageRecord,edge.imageAck);if(!confirmed(edge.imageAck)){pending=true;continue;}}
+            if(edge.fact==null) {
+                edge.fact=edge.prefix+"\tEDGE_FACT\t"+edge.id+"\t"+edge.policy.operation+"\t"+
+                        (edge.applied?"REMOVAL_EXECUTED_CURRENT_QUERY_RETAINED":"NOT_EXECUTED_AT_STOP");
+                edge.factAck=runtime.journal.append(edge.fact);
+            } else edge.factAck=edge.factAck==null?runtime.journal.append(edge.fact):runtime.journal.retryRejected(edge.fact,edge.factAck);
+            if(!confirmed(edge.factAck)) { pending=true;continue; }
+            edge.object=null;edge.target=null;edge.container=null;edge.released=true;
+            if(edge.release==null) { edge.release=edge.prefix+"\tEDGE_RELEASED\t"+edge.id+"\t"+edge.policy.operation+"\tOWNED_OBSERVER_FIELDS_CLEARED_AT_STOP";edge.releaseAck=runtime.journal.append(edge.release); }
+            else edge.releaseAck=runtime.journal.retryRejected(edge.release,edge.releaseAck);
+            if(!confirmed(edge.releaseAck))pending=true;
+        }
+        if(pending)throw new java.io.IOException("REFERENCE_RETIREMENT_ACK_PENDING");
+        edges.clear();policies.clear();gaps.clear();scanned.clear();scans.clear();fieldReads.clear();writerFields.clear();creationReads.clear();selectors.clear();
     }
 }

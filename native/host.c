@@ -232,7 +232,7 @@ static int host_capture_all_query(JNIEnv *env,NativeThread *state,void *caller,O
     if(!native_capture_scope_sources(env,state,owners,unknown)
             ||!host_capture_caller(state,caller,owners))return 0;
     state->control++;state->sourceCapture++;
-    jobjectArray sources=(jobjectArray)native_original.CallStaticObjectMethod(env,native_tasks,native_process_sources);
+    jobjectArray sources=(jobjectArray)native_original.CallStaticObjectMethod(env,native_controls,native_process_sources);
     state->sourceCapture--;int ready=sources&&!native_original.ExceptionCheck(env);
     if(ready){
         jsize count=native_original.GetArrayLength(env,sources);AcquireSRWLockExclusive(&native_records);

@@ -4,7 +4,7 @@ import jdk.internal.org.objectweb.asm.*;
 import jdk.internal.org.objectweb.asm.tree.*;
 /** Selected entity state writes; resolves the declaring field, including inherited symbolic owners. */
 final class FieldWriteBoundary {
-    private static final String BRIDGE="dev/ronova/pro/bootstrap/TaskBridge";
+    private static final String BRIDGE="dev/ronova/pro/bootstrap/ControlBridge";
     private record MutationContext(List<TryCatchBlockNode> catches,boolean initialized){}
     private static final Set<String> FIELDS=Set.of("id","f_19848_","remainingFireTicks","f_19831_","removalReason","f_146795_",
             "baseValue","cachedValue","isCanceled","canceled","hash","size","modCount","n","mask","first","last","containsNullKey",
@@ -26,7 +26,11 @@ final class FieldWriteBoundary {
         // third-party writer sites; instrumenting them re-enters partially initialized policy classes.
         if(module!=null&&ModGroupBoundary.ids(module).contains("ronova_pro"))return null;
         for(MethodNode method:node.methods) {
-            boolean initializing=method.name.equals("<init>"),initialized=!initializing;
+            ConstructorFlow.Entry constructor;
+            try{constructor=ConstructorFlow.entry(node,method);}
+            catch(jdk.internal.org.objectweb.asm.tree.analysis.AnalyzerException failure){
+                throw new IllegalStateException("FIELD_CONSTRUCTOR_RECEIVER_UNOBSERVED:"+node.name+"#"+method.desc,failure);
+            }
             AbstractInsnNode[] original=method.instructions.toArray();
             List<TryCatchBlockNode> catches=List.copyOf(method.tryCatchBlocks);
             int[] starts=null,ends=null;
@@ -36,14 +40,12 @@ final class FieldWriteBoundary {
             int value=method.maxLocals,receiver=value+2,ticket=value+3;
             for(int position=0;position<original.length;position++) {
                 AbstractInsnNode insn=original[position];
-                if(initializing&&insn instanceof MethodInsnNode call&&call.getOpcode()==Opcodes.INVOKESPECIAL
-                        &&call.name.equals("<init>")&&(call.owner.equals(node.name)||call.owner.equals(node.superName)))
-                    initialized=true;
                 if(!(insn instanceof FieldInsnNode field)||(field.getOpcode()!=Opcodes.PUTFIELD&&field.getOpcode()!=Opcodes.PUTSTATIC))continue;
                 if(carrier&&(!field.owner.equals(node.name)||!field.name.equals(node.name.endsWith("/AtomicReference")?"value":"array")))continue;
-                // A verifier-visible uninitialized this cannot be passed to a bridge. Ordinary Java constructors
-                // call super/this first; all later writes, including writes to other live objects, are guarded.
-                if(initializing&&!initialized&&field.getOpcode()==Opcodes.PUTFIELD)continue;
+                // Only the actual uninitialized receiver is ineligible for a bridge call.
+                // Writes to existing objects remain guarded even before this/super initialization.
+                if(constructor!=null&&constructor.uninitializedWrites().contains(field))continue;
+                boolean initialized=constructor==null||!constructor.uninitializedSites().contains(insn);
                 // JDK map view caches carry no entries or backing array. Instrumenting their lazy
                 // initialization can invert the SourceMaps ledger and TaskBridge helper locks.
                 if((field.owner.equals("java/util/HashMap")||field.owner.equals("java/util/IdentityHashMap"))
@@ -74,7 +76,7 @@ final class FieldWriteBoundary {
                     code.add(new JumpInsnNode(Opcodes.IFNULL,skip));code.add(start);
                     code.add(new FieldInsnNode(Opcodes.PUTSTATIC,field.owner,field.name,field.desc));code.add(end);
                     code.add(new VarInsnNode(Opcodes.ALOAD,ticket));code.add(new InsnNode(Opcodes.ICONST_1));
-                    code.add(new MethodInsnNode(Opcodes.INVOKESTATIC,BRIDGE,"finishFieldMutation","(Ljava/lang/Object;Z)V",false));
+                    code.add(new MethodInsnNode(Opcodes.INVOKESTATIC,"dev/ronova/pro/bootstrap/ControlBridge","finishFieldMutation","(Ljava/lang/Object;Z)V",false));
                     LabelNode done=new LabelNode();code.add(new JumpInsnNode(Opcodes.GOTO,done));code.add(skip);
                     code.add(new InsnNode(type.getSize()==2?Opcodes.POP2:Opcodes.POP));code.add(done);
                     method.instructions.insertBefore(field,code);method.instructions.remove(field);changed=true;
@@ -91,7 +93,7 @@ final class FieldWriteBoundary {
                 code.add(new LdcInsnNode(Type.getObjectType(field.owner)));code.add(new LdcInsnNode(field.name));
                 code.add(new LdcInsnNode(field.desc));
                 code.add(new VarInsnNode(type.getOpcode(Opcodes.ILOAD),value));ControlClassWriter.box(code,type);
-                code.add(new MethodInsnNode(Opcodes.INVOKESTATIC,BRIDGE,"beginFieldMutation",
+                code.add(new MethodInsnNode(Opcodes.INVOKESTATIC,"dev/ronova/pro/bootstrap/ControlBridge","beginFieldMutation",
                         "(Ljava/lang/Object;Ljava/lang/Class;Ljava/lang/String;Ljava/lang/String;Ljava/lang/Object;)Ljava/lang/Object;",false));
                 code.add(new VarInsnNode(Opcodes.ASTORE,ticket));
                 code.add(new VarInsnNode(Opcodes.ALOAD,ticket));
@@ -104,7 +106,7 @@ final class FieldWriteBoundary {
                 code.add(end);
                 code.add(new VarInsnNode(Opcodes.ALOAD,ticket));
                 code.add(new InsnNode(Opcodes.ICONST_1));
-                code.add(new MethodInsnNode(Opcodes.INVOKESTATIC,BRIDGE,"finishFieldMutation","(Ljava/lang/Object;Z)V",false));
+                code.add(new MethodInsnNode(Opcodes.INVOKESTATIC,"dev/ronova/pro/bootstrap/ControlBridge","finishFieldMutation","(Ljava/lang/Object;Z)V",false));
                 code.add(skip);
                 method.instructions.insertBefore(field,code);method.instructions.remove(field);changed=true;
                 method.tryCatchBlocks.add(0,new TryCatchBlockNode(start,end,handler,null));
@@ -114,7 +116,7 @@ final class FieldWriteBoundary {
                 method.instructions.add(handler);
                 method.instructions.add(new VarInsnNode(Opcodes.ALOAD,ticket));
                 method.instructions.add(new InsnNode(Opcodes.ICONST_0));
-                method.instructions.add(new MethodInsnNode(Opcodes.INVOKESTATIC,BRIDGE,"finishFieldMutation","(Ljava/lang/Object;Z)V",false));
+                method.instructions.add(new MethodInsnNode(Opcodes.INVOKESTATIC,"dev/ronova/pro/bootstrap/ControlBridge","finishFieldMutation","(Ljava/lang/Object;Z)V",false));
                 method.instructions.add(new InsnNode(Opcodes.ATHROW));method.instructions.add(end);
                 // A shared cleanup still rethrows through exactly the original
                 // ordered catch/finally regions that covered the failed write.
@@ -144,14 +146,14 @@ final class FieldWriteBoundary {
                 code.add(new InsnNode(Opcodes.ACONST_NULL));code.add(new VarInsnNode(Opcodes.ASTORE,ticket));code.add(new InsnNode(Opcodes.ICONST_0));code.add(new VarInsnNode(Opcodes.ISTORE,written));code.add(start);
                 code.add(new VarInsnNode(Opcodes.ALOAD,receiver));code.add(new MethodInsnNode(Opcodes.INVOKESTATIC,source,"carrierRegistered","(Ljava/lang/Object;)Z",false));code.add(new JumpInsnNode(Opcodes.IFEQ,write));
                 code.add(new VarInsnNode(Opcodes.ALOAD,receiver));code.add(new LdcInsnNode(Type.getObjectType(field.owner)));code.add(new LdcInsnNode(field.name));code.add(new LdcInsnNode(field.desc));code.add(new VarInsnNode(Opcodes.ALOAD,value));
-                code.add(new MethodInsnNode(Opcodes.INVOKESTATIC,BRIDGE,"beginFieldMutation","(Ljava/lang/Object;Ljava/lang/Class;Ljava/lang/String;Ljava/lang/String;Ljava/lang/Object;)Ljava/lang/Object;",false));code.add(new VarInsnNode(Opcodes.ASTORE,ticket));
+                code.add(new MethodInsnNode(Opcodes.INVOKESTATIC,"dev/ronova/pro/bootstrap/ControlBridge","beginFieldMutation","(Ljava/lang/Object;Ljava/lang/Class;Ljava/lang/String;Ljava/lang/String;Ljava/lang/Object;)Ljava/lang/Object;",false));code.add(new VarInsnNode(Opcodes.ASTORE,ticket));
                 code.add(new VarInsnNode(Opcodes.ALOAD,ticket));code.add(new FieldInsnNode(Opcodes.GETSTATIC,"java/lang/Boolean","FALSE","Ljava/lang/Boolean;"));code.add(new JumpInsnNode(Opcodes.IF_ACMPEQ,end));
                 code.add(write);code.add(new VarInsnNode(Opcodes.ALOAD,receiver));code.add(new VarInsnNode(Opcodes.ALOAD,value));code.add(new FieldInsnNode(Opcodes.PUTFIELD,field.owner,field.name,field.desc));
                 code.add(new InsnNode(Opcodes.ICONST_1));code.add(new VarInsnNode(Opcodes.ISTORE,written));code.add(end);
                 code.add(new VarInsnNode(Opcodes.ALOAD,scope));code.add(new VarInsnNode(Opcodes.ALOAD,ticket));code.add(new VarInsnNode(Opcodes.ILOAD,written));
-                code.add(new MethodInsnNode(Opcodes.INVOKESTATIC,BRIDGE,"finishSourceCarrier","(Ljava/lang/Object;Ljava/lang/Object;Z)V",false));code.add(new JumpInsnNode(Opcodes.GOTO,resume));
+                code.add(new MethodInsnNode(Opcodes.INVOKESTATIC,"dev/ronova/pro/bootstrap/ControlBridge","finishSourceCarrier","(Ljava/lang/Object;Ljava/lang/Object;Z)V",false));code.add(new JumpInsnNode(Opcodes.GOTO,resume));
                 code.add(failed);code.add(new VarInsnNode(Opcodes.ASTORE,error));code.add(new VarInsnNode(Opcodes.ALOAD,scope));code.add(new VarInsnNode(Opcodes.ALOAD,ticket));code.add(new VarInsnNode(Opcodes.ALOAD,error));
-                code.add(new MethodInsnNode(Opcodes.INVOKESTATIC,BRIDGE,"failedSourceCarrier","(Ljava/lang/Object;Ljava/lang/Object;Ljava/lang/Throwable;)V",false));code.add(new VarInsnNode(Opcodes.ALOAD,error));code.add(new InsnNode(Opcodes.ATHROW));code.add(resume);
+                code.add(new MethodInsnNode(Opcodes.INVOKESTATIC,"dev/ronova/pro/bootstrap/ControlBridge","failedSourceCarrier","(Ljava/lang/Object;Ljava/lang/Object;Ljava/lang/Throwable;)V",false));code.add(new VarInsnNode(Opcodes.ALOAD,error));code.add(new InsnNode(Opcodes.ATHROW));code.add(resume);
                 method.instructions.insertBefore(at,code);method.instructions.remove(at);method.tryCatchBlocks.add(0,new TryCatchBlockNode(start,end,failed,null));stores++;
             }
         }

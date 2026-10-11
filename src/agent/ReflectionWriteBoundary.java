@@ -17,7 +17,7 @@ final class ReflectionWriteBoundary {
             Type[] args=Type.getArgumentTypes(m.desc);
             if(args.length!=2||args[0].getSort()!=Type.OBJECT)continue;
             boolean exists=false;
-            for(AbstractInsnNode i:m.instructions.toArray())if(i instanceof MethodInsnNode c&&c.owner.equals("dev/ronova/pro/bootstrap/TaskBridge")&&c.name.equals("reflectFieldWrite"))exists=true;
+            for(AbstractInsnNode i:m.instructions.toArray())if(i instanceof MethodInsnNode c&&c.owner.equals("dev/ronova/pro/bootstrap/ControlBridge")&&c.name.equals("reflectFieldWrite"))exists=true;
             if(!exists) {
                 // Preserve CallerSensitive caller capture, access checks and accessor acquisition exactly.
                 // Guard the actual write call only after the JDK has established access to this field.
@@ -31,7 +31,7 @@ final class ReflectionWriteBoundary {
                 InsnList c=new InsnList();LabelNode allowed=new LabelNode();
                 c.add(new VarInsnNode(Opcodes.ALOAD,0));c.add(new VarInsnNode(Opcodes.ALOAD,1));
                 c.add(new VarInsnNode(args[1].getOpcode(Opcodes.ILOAD),2));ControlClassWriter.box(c,args[1]);
-                c.add(new MethodInsnNode(Opcodes.INVOKESTATIC,"dev/ronova/pro/bootstrap/TaskBridge","reflectFieldWrite","(Ljava/lang/reflect/Field;Ljava/lang/Object;Ljava/lang/Object;)Z",false));
+                c.add(new MethodInsnNode(Opcodes.INVOKESTATIC,"dev/ronova/pro/bootstrap/ControlBridge","reflectFieldWrite","(Ljava/lang/reflect/Field;Ljava/lang/Object;Ljava/lang/Object;)Z",false));
                 c.add(new JumpInsnNode(Opcodes.IFNE,allowed));
                 c.add(new TypeInsnNode(Opcodes.NEW,"java/lang/IllegalAccessException"));c.add(new InsnNode(Opcodes.DUP));
                 c.add(new LdcInsnNode("RONOVA_PROTECTED_FIELD_WRITE_REFUSED"));
@@ -39,12 +39,12 @@ final class ReflectionWriteBoundary {
                 c.add(new InsnNode(Opcodes.ATHROW));c.add(allowed);
                 int ticket=m.maxLocals++,error=m.maxLocals++;LabelNode start=new LabelNode(),end=new LabelNode(),handler=new LabelNode(),done=new LabelNode();
                 InsnList begin=new InsnList();begin.add(new VarInsnNode(Opcodes.ALOAD,0));begin.add(new VarInsnNode(Opcodes.ALOAD,1));
-                begin.add(new MethodInsnNode(Opcodes.INVOKESTATIC,"dev/ronova/pro/bootstrap/TaskBridge","beginReflectionMutation","(Ljava/lang/reflect/Field;Ljava/lang/Object;)Ljava/lang/Object;",false));
+                begin.add(new MethodInsnNode(Opcodes.INVOKESTATIC,"dev/ronova/pro/bootstrap/ControlBridge","beginReflectionMutation","(Ljava/lang/reflect/Field;Ljava/lang/Object;)Ljava/lang/Object;",false));
                 begin.add(new VarInsnNode(Opcodes.ASTORE,ticket));begin.add(start);begin.add(c);m.instructions.insertBefore(write,begin);
                 InsnList finish=new InsnList();finish.add(end);finish.add(new VarInsnNode(Opcodes.ALOAD,ticket));finish.add(new InsnNode(Opcodes.ICONST_1));
-                finish.add(new MethodInsnNode(Opcodes.INVOKESTATIC,"dev/ronova/pro/bootstrap/TaskBridge","finishFieldMutation","(Ljava/lang/Object;Z)V",false));finish.add(new JumpInsnNode(Opcodes.GOTO,done));
+                finish.add(new MethodInsnNode(Opcodes.INVOKESTATIC,"dev/ronova/pro/bootstrap/ControlBridge","finishFieldMutation","(Ljava/lang/Object;Z)V",false));finish.add(new JumpInsnNode(Opcodes.GOTO,done));
                 finish.add(handler);finish.add(new VarInsnNode(Opcodes.ASTORE,error));finish.add(new VarInsnNode(Opcodes.ALOAD,ticket));finish.add(new InsnNode(Opcodes.ICONST_0));
-                finish.add(new MethodInsnNode(Opcodes.INVOKESTATIC,"dev/ronova/pro/bootstrap/TaskBridge","finishFieldMutation","(Ljava/lang/Object;Z)V",false));
+                finish.add(new MethodInsnNode(Opcodes.INVOKESTATIC,"dev/ronova/pro/bootstrap/ControlBridge","finishFieldMutation","(Ljava/lang/Object;Z)V",false));
                 finish.add(new VarInsnNode(Opcodes.ALOAD,error));finish.add(new InsnNode(Opcodes.ATHROW));finish.add(done);m.instructions.insert(write,finish);
                 m.tryCatchBlocks.add(0,new TryCatchBlockNode(start,end,handler,"java/lang/Throwable"));
             }
