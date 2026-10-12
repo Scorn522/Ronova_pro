@@ -40,7 +40,7 @@ static jfieldID native_library_context,native_impl_handle,native_impl_version,na
 static HMODULE native_java_image;
 static volatile LONG native_library_present,native_library_ready;
 static jclass native_controls,native_definitions;
-static jmethodID native_writer_select;
+static jmethodID native_writer_select,native_writer_raw_select;
 static jmethodID native_owner_gate,native_field_gate,native_module_query,native_return_query;
 static jmethodID native_image_query,native_defined_query,native_after_query,native_created_query;
 static jmethodID native_array_query,native_array_policy,native_pin_query,native_registration_query,native_registration_target,native_object_module;
@@ -890,7 +890,8 @@ JNIEXPORT jboolean JNICALL Java_dev_ronova_pro_bootstrap_NativeControl_initializ
     native_mutation_end=(*env)->GetStaticMethodID(env,tasks,"finishFieldMutation","(Ljava/lang/Object;Z)V");
     if(!task||!definition||!native_library_gate||!native_owner_gate||!native_field_gate||!native_module_query||!native_return_query||!native_image_query||!native_defined_query||!native_after_query||!native_created_query||!native_array_query||!native_array_policy||!native_pin_query||!native_registration_query||!native_registration_target||!native_object_module||!native_network_sources||!native_process_sources||!native_mutation_field||!native_mutation_array||!native_mutation_end){(*native_ti)->Deallocate(native_ti,(unsigned char*)table);return JNI_FALSE;}native_controls=task;native_definitions=definition;
     native_writer_select=native_original.GetStaticMethodID(env,task,"controlWriterFrame","(Ljava/lang/Class;Ljava/lang/String;)Z");
-    if(!native_writer_select){(*native_ti)->Deallocate(native_ti,(unsigned char*)table);return JNI_FALSE;}
+    native_writer_raw_select=native_original.GetStaticMethodID(env,task,"rawMemoryWriterFrame","(Ljava/lang/Class;Ljava/lang/String;)Z");
+    if(!native_writer_select||!native_writer_raw_select){(*native_ti)->Deallocate(native_ti,(unsigned char*)table);return JNI_FALSE;}
     if(!code_prepare(env)||!native_unsafe_prepare(env)||!native_file_prepare(env)||!native_thread_prepare(env)||!native_buffer_prepare(env)){(*native_ti)->Deallocate(native_ti,(unsigned char*)table);return JNI_FALSE;}
     if(!native_bind_controller(env,type)){(*native_ti)->Deallocate(native_ti,(unsigned char*)table);return JNI_FALSE;}
 #define INSTALL_NATIVE_FIELD(NAME) table->Set##NAME##Field=native_set_##NAME;table->SetStatic##NAME##Field=native_static_##NAME;
@@ -957,16 +958,16 @@ JNIEXPORT jboolean JNICALL Java_dev_ronova_pro_bootstrap_NativeControl_createdOb
  * Each operation still reads its actual live stack and authorizes its writer
  * against the current Java policy. Weak classes permit ordinary unloading. */
 typedef struct ControlWriterRule {
-    jmethodID method;jweak declaring;jboolean selected;struct ControlWriterRule *next;
+    jmethodID method;jweak declaring;jboolean selected[2];struct ControlWriterRule *next;
 } ControlWriterRule;
 static SRWLOCK native_writer_rules_lock=SRWLOCK_INIT;
 static ControlWriterRule *native_writer_rules[257];
-static int native_writer_frame(JNIEnv *env,jmethodID actual,jclass declaring,jboolean *selected){
+static int native_writer_frame(JNIEnv *env,jmethodID actual,jclass declaring,int raw,jboolean *selected){
     unsigned bucket=(unsigned)(((uintptr_t)actual>>3)%257);
     AcquireSRWLockShared(&native_writer_rules_lock);
     for(ControlWriterRule *rule=native_writer_rules[bucket];rule;rule=rule->next)
         if(rule->method==actual&&native_original.IsSameObject(env,rule->declaring,declaring)){
-            *selected=rule->selected;ReleaseSRWLockShared(&native_writer_rules_lock);return 1;
+            *selected=rule->selected[raw];ReleaseSRWLockShared(&native_writer_rules_lock);return 1;
         }
     ReleaseSRWLockShared(&native_writer_rules_lock);
     char *signature=NULL,*name=NULL;
@@ -974,18 +975,21 @@ static int native_writer_frame(JNIEnv *env,jmethodID actual,jclass declaring,jbo
     if(error!=JVMTI_ERROR_NONE||!signature){if(signature)(*native_ti)->Deallocate(native_ti,(unsigned char*)signature);native_refuse(env,"ACTUAL_CONTROL_WRITER_FRAME_UNAVAILABLE");return 0;}
     int platform=!strncmp(signature,"Ljava/",6)||!strncmp(signature,"Ljdk/",5)||!strncmp(signature,"Lsun/",5);
     (*native_ti)->Deallocate(native_ti,(unsigned char*)signature);
-    *selected=JNI_FALSE;
+    jboolean controlSelected=JNI_FALSE;
     if(!platform){
         error=(*native_ti)->GetMethodName(native_ti,actual,&name,NULL,NULL);
         if(error!=JVMTI_ERROR_NONE||!name){if(name)(*native_ti)->Deallocate(native_ti,(unsigned char*)name);native_refuse(env,"ACTUAL_CONTROL_WRITER_FRAME_UNAVAILABLE");return 0;}
         jstring method=native_original.NewStringUTF(env,name);(*native_ti)->Deallocate(native_ti,(unsigned char*)name);
         if(!method)return 0;
-        *selected=native_original.CallStaticBooleanMethod(env,native_controls,native_writer_select,declaring,method);
+        controlSelected=native_original.CallStaticBooleanMethod(env,native_controls,native_writer_select,declaring,method);
         native_original.DeleteLocalRef(env,method);if(native_original.ExceptionCheck(env))return 0;
     }
+    jboolean rawSelected=native_original.CallStaticBooleanMethod(env,native_controls,native_writer_raw_select,declaring,NULL);
+    if(native_original.ExceptionCheck(env))return 0;
+    *selected=raw?rawSelected:controlSelected;
     ControlWriterRule *added=calloc(1,sizeof(ControlWriterRule));
     if(!added)return 1; // An unavailable cache does not change the live decision.
-    added->method=actual;added->selected=*selected;added->declaring=native_original.NewWeakGlobalRef(env,declaring);
+    added->method=actual;added->selected[0]=controlSelected;added->selected[1]=rawSelected;added->declaring=native_original.NewWeakGlobalRef(env,declaring);
     if(!added->declaring){free(added);return !native_original.ExceptionCheck(env);}
     AcquireSRWLockExclusive(&native_writer_rules_lock);
     ControlWriterRule **cursor=&native_writer_rules[bucket];
@@ -1003,9 +1007,9 @@ static int native_writer_frame(JNIEnv *env,jmethodID actual,jclass declaring,jbo
     ReleaseSRWLockExclusive(&native_writer_rules_lock);return 1;
 }
 /* Chunks preserve arbitrary depth and never skip a nearer foreign writer. */
-JNIEXPORT jclass JNICALL Java_dev_ronova_pro_bootstrap_NativeControl_controlWriter0(JNIEnv *env,jclass type){
+static jclass native_live_writer(JNIEnv *env,jclass type,int raw){
     (void)type;
-    if(!native_ti||!native_controls||!native_writer_select){native_refuse(env,"ACTUAL_CONTROL_WRITER_STACK_UNAVAILABLE");return NULL;}
+    if(!native_ti||!native_controls||!native_writer_select||!native_writer_raw_select){native_refuse(env,"ACTUAL_CONTROL_WRITER_STACK_UNAVAILABLE");return NULL;}
     jint depth=0;
     for(;;){
         jvmtiFrameInfo frames[16];jint count=0;
@@ -1015,7 +1019,7 @@ JNIEXPORT jclass JNICALL Java_dev_ronova_pro_bootstrap_NativeControl_controlWrit
         for(jint at=0;at<count;at++){
             jclass declaring=NULL;jboolean selected=JNI_FALSE;
             if((*native_ti)->GetMethodDeclaringClass(native_ti,frames[at].method,&declaring)!=JVMTI_ERROR_NONE||!declaring){native_refuse(env,"ACTUAL_CONTROL_WRITER_FRAME_UNAVAILABLE");return NULL;}
-            if(!native_writer_frame(env,frames[at].method,declaring,&selected)){native_original.DeleteLocalRef(env,declaring);return NULL;}
+            if(!native_writer_frame(env,frames[at].method,declaring,raw,&selected)){native_original.DeleteLocalRef(env,declaring);return NULL;}
             if(selected)return declaring;
             native_original.DeleteLocalRef(env,declaring);
         }
@@ -1023,3 +1027,5 @@ JNIEXPORT jclass JNICALL Java_dev_ronova_pro_bootstrap_NativeControl_controlWrit
         depth+=count;
     }
 }
+JNIEXPORT jclass JNICALL Java_dev_ronova_pro_bootstrap_NativeControl_controlWriter0(JNIEnv *env,jclass type){return native_live_writer(env,type,0);}
+JNIEXPORT jclass JNICALL Java_dev_ronova_pro_bootstrap_NativeControl_rawMemoryWriter0(JNIEnv *env,jclass type){return native_live_writer(env,type,1);}

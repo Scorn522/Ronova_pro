@@ -164,7 +164,7 @@ public final class ControlBridge {
         public Boolean apply(java.util.stream.Stream<StackWalker.StackFrame> frames){
             var cursor=frames.iterator();boolean locking=false;
             while(cursor.hasNext()){
-                Class<?> type=cursor.next().getDeclaringClass(),host=type.getNestHost();
+                Class<?> type=cursor.next().getDeclaringClass(),host=type.getClassLoader()==null?type.getNestHost():type;
                 if(!locking&&(host==TaskBridge.class||host==ControlBridge.class))continue;
                 if(type.getClassLoader()==null&&type.getModule()==Object.class.getModule()){
                     if(host==java.util.concurrent.locks.ReentrantLock.class)locking=true;
@@ -182,8 +182,8 @@ public final class ControlBridge {
     static final class RawMemoryCaller implements java.util.function.Function<java.util.stream.Stream<StackWalker.StackFrame>,Class<?>> {
         public Class<?> apply(java.util.stream.Stream<StackWalker.StackFrame> frames){
             var cursor=frames.iterator();while(cursor.hasNext()){
-                Class<?> type=cursor.next().getDeclaringClass(),host=type.getNestHost();
-                if(host!=TaskBridge.class&&host!=ControlBridge.class&&host!=NativeControl.class)return type;
+                Class<?> type=cursor.next().getDeclaringClass();
+                if(rawMemoryWriterFrame(type,null))return type;
             }return null;
         }
     }
@@ -769,6 +769,9 @@ public final class ControlBridge {
     static boolean controlCaller() {
         // The query omits guard entry points, preserving the real ledger writer.
         Class<?> caller=NativeControl.available()?NativeControl.controlWriterCaller():WALKER.walk(CONTROL_WRITER_CALLER);
+        // JVMTI includes hidden frames that the original walker omits.
+        // Preserve that original selection on the uncommon hidden path.
+        if(caller!=null&&caller.isHidden())caller=WALKER.walk(CONTROL_WRITER_CALLER);
         if(caller==null)return false;
         // These exact classes were already admitted below. Avoid native nest-host
         // lookup for the frequent direct ledger writers; every call still walks
@@ -780,7 +783,10 @@ public final class ControlBridge {
                 ||caller==CodeSourceBridge.class||caller==NetworkBridge.class||caller==ClientBridge.class)
                 &&caller.getModule()==DefinitionBridge.class.getModule())return true;
         if(caller.getClassLoader()==ClassLoader.getSystemClassLoader()&&caller.getName().startsWith("dev.ronova.pro.agent.")&&AGENT_WRITERS.get(caller))return true;
-        Class<?> nest=caller.getNestHost();
+        // All bridge nests below are defined by the bootstrap loader. A foreign
+        // nest cannot be one of them. Querying its host here can initiate an
+        // outer class while that same class is still being defined by Forge.
+        Class<?> nest=caller.getClassLoader()==null?caller.getNestHost():caller;
         if((nest==TaskBridge.class||nest==ControlBridge.class)&&caller.getModule()==TaskBridge.class.getModule())return true;
         if(caller==policyInstaller||caller==BackingBridge.class)return true;
         if(caller==SourceMapBridge.class||caller==NativeControl.class||caller==ControlBridge.class||nest==ExecutionFlow.class)return true;
@@ -1235,7 +1241,7 @@ public final class ControlBridge {
         BackingBridge.install(known,element,array,offset,memory);
     }
     static boolean ownState(Class<?> declaring) {
-        if(declaring==null)return false;Class<?> host=declaring.getNestHost();Guards current=guards;
+        if(declaring==null)return false;Class<?> host=declaring.getClassLoader()==null?declaring.getNestHost():declaring;Guards current=guards;
         if(host==TaskBridge.class||host==BackingBridge.class||host==SourceMapBridge.class||host==NativeControl.class||host==DefinitionBridge.class||host==ResourceBridge.class||host==IoBridge.class||host==CodeSourceBridge.class||host==NetworkBridge.class||host==ClientBridge.class
                 ||host==EventFaultBridge.class||host==ControlBridge.class||host==ExecutionFlow.class)return true;
         if(ControlBridge.owns(declaring))return true;
@@ -1844,9 +1850,19 @@ public final class ControlBridge {
         Collections.addAll(sources,readSources(copy.read));
         return sources.toArray(new Module[0]);
     }
+    static boolean rawMemoryWriterFrame(Class<?> type,String ignored){
+        Class<?> host=type.getClassLoader()==null?type.getNestHost():type;
+        return host!=TaskBridge.class&&host!=ControlBridge.class&&host!=NativeControl.class;
+    }
     static boolean rawMemoryCaller(){
-        Class<?> caller=WALKER.walk(RAW_MEMORY_CALLER);
-        if(caller==ResourceBridge.class||caller==CodeSourceBridge.class||caller!=null&&caller.getNestHost()==ExecutionFlow.class||ControlBridge.owns(caller))return true;
+        Class<?> caller=NativeControl.available()?NativeControl.rawMemoryWriterCaller():WALKER.walk(RAW_MEMORY_CALLER);
+        // Reflection and MethodHandle implementation frames are omitted by the
+        // original walker; use its exact selection when native sees one first.
+        if(caller!=null){String name=caller.getName();
+            if(caller.isHidden()||name.startsWith("java.lang.reflect.")||name.startsWith("jdk.internal.reflect.")||name.startsWith("java.lang.invoke."))
+                caller=WALKER.walk(RAW_MEMORY_CALLER);
+        }
+        if(caller==ResourceBridge.class||caller==CodeSourceBridge.class||caller!=null&&caller.getClassLoader()==null&&caller.getNestHost()==ExecutionFlow.class||ControlBridge.owns(caller))return true;
         try{
             if(caller==Class.forName("sun.misc.Unsafe",false,ClassLoader.getPlatformClassLoader())||caller==Class.forName("jdk.internal.misc.Unsafe",false,null))return true;
         }catch(ClassNotFoundException unavailable){return false;}

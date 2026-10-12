@@ -788,9 +788,22 @@ final class ExecutionFlow {
         root.before=null;root.parts=null;
     }
     private static boolean overlaps(int start,int length,int other,int count){return (long)start<other+(long)count&&(long)other<start+(long)length;}
+    // replaceRegion keeps this actual partition sorted and disjoint. Locate
+    // the first span whose end is beyond the queried element; gaps remain
+    // unobserved, and no source or revision is supplied by this lookup.
+    private static int firstArrayRegion(Heap heap,int index){
+        int low=0,high=heap.regions.size();
+        while(low<high){int middle=(low+high)>>>1;Region region=heap.regions.get(middle);
+            if(region.start()+region.length()<=index)low=middle+1;else high=middle;
+        }
+        return low;
+    }
     private static Slot arraySlot(Heap heap,int index){
         Slot slot=heap.slots.get(index);if(slot!=null)return slot;
-        slot=new Slot();for(Region region:heap.regions)if(index>=region.start()&&index-region.start()<region.length()){slot.sources=region.sources();slot.watched=true;break;}
+        slot=new Slot();int at=firstArrayRegion(heap,index);
+        if(at<heap.regions.size()){Region region=heap.regions.get(at);
+            if(index>=region.start()&&index-region.start()<region.length()){slot.sources=region.sources();slot.watched=true;}
+        }
         heap.slots.put(index,slot);
         for(MemoryUse pending:heap.arrayWrites)if(index>=pending.arrayStart&&index-pending.arrayStart<pending.arrayLength)pending.include(slot);
         return slot;
@@ -913,7 +926,13 @@ final class ExecutionFlow {
             }
             if(selected)sources=join(sources,entry.getValue().sources);
         }
-        for(Region region:heap.regions)if(broad||first>=0&&overlaps(first,count,region.start(),region.length()))sources=join(sources,region.sources());
+        if(broad){for(Region region:heap.regions)sources=join(sources,region.sources());}
+        else if(first>=0&&count>0){long limit=(long)first+count;
+            for(int at=firstArrayRegion(heap,first);at<heap.regions.size();at++){
+                Region region=heap.regions.get(at);if(region.start()>=limit)break;
+                if(overlaps(first,count,region.start(),region.length()))sources=join(sources,region.sources());
+            }
+        }
         for(MemoryUse pending:heap.arrayWrites)if(broad||first>=0&&overlaps(first,count,pending.arrayStart,pending.arrayLength))sources=join(sources,pending.written,UNKNOWN);
         return sources;
     }

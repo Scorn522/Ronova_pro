@@ -1,4 +1,4 @@
-> **2026-10-12 当前主工程：`D:\桌面\ronova_GPT`。** Java 49 / Native 46 / Journal 6。当前完整主包已构建，实际 premain、Bootstrap、Windows Native 控制写门及密封类克隆检查通过；Forge 仍未进入世界，最新完成运行达到原 1200 秒期限，B 未完成。详见 [当前状态](docs/A-批验收状态.md) 和 [实际报告](validation/b-final-20261007/REPORT.md)。 候选：[当前 B WIP 主包](distribution/candidate-b-wip-20261012/README.md)。
+> **2026-10-12 当前主工程：`D:\桌面\ronova_GPT`。** Java 49 / Native 47 / Journal 6。完整主包构建、实际安装、控制写者与原生读者拒绝、真实内存复制及密封类/克隆合同检查通过。Forge 世界、来源组合和保存重启仍待实际结果，B 未完成。详见 [当前状态](docs/A-批验收状态.md) 和 [实际报告](validation/b-final-20261007/REPORT.md)。Native 46 的旧 WIP 候选保留作回退。 Native 47 WIP 候选保存在本地 `distribution/candidate-b-native47-wip-20261012`；本轮公开同步源码和问题摘要，主包及原始日志留在本地。
 
 以下 R1/R2、候选 43、旧主包与旧环境结果保留其原日期和证据范围。已有发行目录不是本轮源码对应的新游戏安装包。
 

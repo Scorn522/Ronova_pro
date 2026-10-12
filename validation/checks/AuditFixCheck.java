@@ -76,7 +76,18 @@ public final class AuditFixCheck {
         Object original=actual[0];
         try{Array.set(actual,0,null);}catch(SecurityException refused){ }
         require(actual[0]==original,"actual protected transformer array changed");
-        System.out.println("LIVE_CONTROL_WRITER_PASS actual_native foreign_caller_refused protected_array_preserved");
+        Method raw=bridge.getDeclaredMethod("rawMemoryCaller");raw.setAccessible(true);
+        require(Boolean.FALSE.equals(raw.invoke(null)),"foreign raw memory caller admitted");
+        Method nativeRead=nativeControl.getDeclaredMethod("memoryReadSources0",long.class);nativeRead.setAccessible(true);
+        try{nativeRead.invoke(null,0L);throw new AssertionError("foreign private native memory read admitted");}
+        catch(InvocationTargetException refused){require(refused.getCause() instanceof IllegalStateException&&"ACTUAL_NATIVE_MEMORY_READER_REQUIRED".equals(refused.getCause().getMessage()),"native raw read was not refused at caller authority: "+refused.getCause());}
+        long address=U.allocateMemory(8);
+        try{
+            U.putLong(address,0x1020304050607080L);byte[] bytes=new byte[8];long base=U.arrayBaseOffset(byte[].class);
+            U.copyMemory(null,address,bytes,base,8);
+            require(U.getLong(bytes,base)==0x1020304050607080L,"actual Unsafe raw-to-heap copy changed bytes");
+        }finally{U.freeMemory(address);}
+        System.out.println("LIVE_CONTROL_WRITER_PASS actual_native foreign_caller_refused protected_array_preserved foreign_raw_reader_refused actual_unsafe_raw_copy");
     }
     private static class CloneBase implements Cloneable { int value=17; }
     private static final class InheritedClone extends CloneBase {
