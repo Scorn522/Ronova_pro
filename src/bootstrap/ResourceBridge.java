@@ -837,13 +837,21 @@ public final class ResourceBridge {
         finally{FILE_OBSERVING.remove();}
         resourceCreated(value);
     }
+    // Native already tracks the actual DirectByteBuffer allocation even when
+    // the constructor re-enters a file observation. Keep its cleanup binding
+    // in that case; only recursive policy delivery is suppressed. An absent
+    // captured I/O origin remains unknown, never a fabricated source receipt.
+    private static Module[] bufferConstructionSources(boolean nested){
+        if(!nested)return ControlBridge.resourceOperationSources(null);
+        Module[] captured=IoBridge.currentSources();return captured==null?new Module[0]:captured;
+    }
     public static Runnable bufferCleanup(Object value,Runnable action){
-        platform(BufferPlatform.DIRECT,"<init>");if(action==null||FILE_OBSERVING.get()!=null)return action;
+        platform(BufferPlatform.DIRECT,"<init>");if(action==null)return action;
         if(!(value instanceof Buffer buffer))throw new SecurityException("ACTUAL_BUFFER_REFERENT_REQUIRED");
         if(action.getClass()!=BufferPlatform.DEALLOCATOR&&!BufferPlatform.UNMAPPER.isInstance(action))return action;
-        FILE_OBSERVING.set(Boolean.TRUE);BufferStorage storage;
+        Boolean observing=FILE_OBSERVING.get();FILE_OBSERVING.set(Boolean.TRUE);BufferStorage storage;
         try{
-            Module[] sources=ControlBridge.resourceOperationSources(null);
+            Module[] sources=bufferConstructionSources(observing!=null);
             synchronized(STREAMS){
                 Key key=new Key(action,true);storage=BUFFER_ACTIONS.get(key);
                 if(storage==null){storage=new BufferStorage(action,action.getClass()==BufferPlatform.DEALLOCATOR);BUFFER_ACTIONS.put(key,storage);}
@@ -852,7 +860,7 @@ public final class ResourceBridge {
                 BUFFERS.put(new Key(buffer,true),view);storage.views.add(new WeakReference<>(buffer));storage.viewsVersion++;
             }
         }catch(IllegalAccessException failure){throw new IllegalStateException("BUFFER_ORIGINAL_CLEANUP_UNAVAILABLE",failure);}
-        finally{FILE_OBSERVING.remove();}
+        finally{if(observing==null)FILE_OBSERVING.remove();else FILE_OBSERVING.set(observing);}
         if(action.getClass()==BufferPlatform.DEALLOCATOR){
             BufferRegistration previous=BUFFER_REGISTERING.get();BUFFER_REGISTERING.set(new BufferRegistration(buffer,storage));
             try{long[] binding=NativeControl.bindBufferStorage(buffer,action,storage.address,storage.bytes);
@@ -888,11 +896,11 @@ public final class ResourceBridge {
     }
     public static void bufferConstructed(Buffer buffer,Class<?> declaring){
         platform(declaring,"<init>");if(!BufferPlatform.TYPES.contains(declaring))throw new SecurityException("ACTUAL_BUFFER_CONSTRUCTOR_REQUIRED");
-        if(FILE_OBSERVING.get()!=null)return;FILE_OBSERVING.set(Boolean.TRUE);
+        Boolean observing=FILE_OBSERVING.get();FILE_OBSERVING.set(Boolean.TRUE);
         try{
             if(!buffer.isDirect())return;
             Field parentField=BufferPlatform.PARENT.get(buffer.getClass());Object parent=parentField==null?null:CodeSourceBridge.controlField(parentField,buffer);
-            Module[] sources=ControlBridge.resourceOperationSources(null);
+            Module[] sources=bufferConstructionSources(observing!=null);
             synchronized(STREAMS){
                 reap();BufferView view=BUFFERS.get(new Key(buffer,false));
                 if(view==null){
@@ -911,7 +919,7 @@ public final class ResourceBridge {
                 storage.gap=storage.created?"":"BUFFER_ORIGINAL_STORAGE_UNOBSERVED";
             }
         }catch(IllegalAccessException failure){throw new IllegalStateException("BUFFER_VIEW_CAPTURE_FAILED",failure);}
-        finally{FILE_OBSERVING.remove();}
+        finally{if(observing==null)FILE_OBSERVING.remove();else FILE_OBSERVING.set(observing);}
         resourceCreated(buffer);
     }
     private static void addBuffer(List<Buffer> values,Object value){

@@ -15,6 +15,7 @@ public final class AuditFixCheck {
         if(args.length==1&&args[0].equals("source-list-fixes")){sourceListFixes();return;}
         if(args.length==1&&args[0].equals("live-control-writer")){liveControlWriter();return;}
         if(args.length==1&&args[0].equals("clone-boundary")){cloneBoundary();return;}
+        if(args.length==1&&args[0].equals("buffer-release")){bufferRelease();return;}
         ProRuntime runtime=(ProRuntime)U.allocateInstance(ProRuntime.class);
         Map<UUID,Object> work=new LinkedHashMap<>();put(runtime,"work",work);
         var subject=new ProRuntime.Subject(UUID.randomUUID());var records=(EntityRecords)U.allocateInstance(EntityRecords.class);put(records,"originalPassengers",List.of());
@@ -88,6 +89,30 @@ public final class AuditFixCheck {
             require(U.getLong(bytes,base)==0x1020304050607080L,"actual Unsafe raw-to-heap copy changed bytes");
         }finally{U.freeMemory(address);}
         System.out.println("LIVE_CONTROL_WRITER_PASS actual_native foreign_caller_refused protected_array_preserved foreign_raw_reader_refused actual_unsafe_raw_copy");
+    }
+    private static void bufferRelease()throws Exception {
+        java.nio.ByteBuffer direct=java.nio.ByteBuffer.allocateDirect(32);
+        direct.putLong(0,0x1020304050607080L);
+        var addressField=java.nio.Buffer.class.getDeclaredField("address");
+        long address=U.getLong(direct,U.objectFieldOffset(addressField));
+        try{U.freeMemory(address);throw new AssertionError("foreign direct-buffer release admitted");}
+        catch(IllegalStateException refused){require("MANAGED_BUFFER_ORIGINAL_RELEASE_REQUIRED".equals(refused.getMessage()),"managed release was not refused at original action");}
+        require(direct.getLong(0)==0x1020304050607080L,"refused free changed live buffer");
+        U.invokeCleaner(direct);
+        var file=java.nio.file.Files.createTempFile("ronova-buffer-release-",".bin");
+        try{
+            byte[] payload=new byte[131072];payload[0]=17;payload[payload.length-1]=29;
+            java.nio.file.Files.write(file,payload);
+            try(var channel=java.nio.channels.FileChannel.open(file,java.nio.file.StandardOpenOption.READ)){
+                for(int size:new int[]{8,4096,131072}){
+                    java.nio.ByteBuffer target=java.nio.ByteBuffer.allocate(size);channel.position(0);
+                    while(target.hasRemaining()&&channel.read(target)>=0){}
+                    require(target.position()==size&&target.get(0)==17,"actual temporary-buffer read changed bytes");
+                    if(size==payload.length)require(target.get(size-1)==29,"actual larger read changed tail");
+                }
+            }
+        }finally{java.nio.file.Files.deleteIfExists(file);}
+        System.out.println("BUFFER_RELEASE_PASS actual_native foreign_release_refused live_buffer_preserved original_cleaner temporary_file_reads");
     }
     private static class CloneBase implements Cloneable { int value=17; }
     private static final class InheritedClone extends CloneBase {
