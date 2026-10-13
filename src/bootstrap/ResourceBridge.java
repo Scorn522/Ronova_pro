@@ -47,7 +47,7 @@ public final class ResourceBridge {
     private static final Class<?> PROCESS_TYPE=platformType("java.lang.ProcessImpl"),PIPE_INPUT=platformType("java.lang.Process$PipeInputStream");
     private static final Class<?> PIPE_REDIRECT=platformType("java.lang.ProcessBuilder$RedirectPipeImpl");
     private static final Class<?> FILE_CHANNEL=platformType("sun.nio.ch.FileChannelImpl"),FILE_CLOSER=platformType("sun.nio.ch.FileChannelImpl$Closer");
-    private static final Class<?> FILE_FACTORY=optionalPlatformType("sun.nio.fs.WindowsChannelFactory");
+    private static final Class<?> FILE_FACTORY=optionalPlatformType("sun.nio.fs.WindowsChannelFactory"),SOCKET_NET=platformType("sun.nio.ch.Net");
     private static final Field CHANNEL_FD=field(FILE_CHANNEL,"fd"),CHANNEL_PARENT=field(FILE_CHANNEL,"parent"),CHANNEL_PATH=field(FILE_CHANNEL,"path"),CHANNEL_CLOSER=field(FILE_CHANNEL,"closer");
     private static final Field CLOSER_FD=field(FILE_CLOSER,"fd");
     private static final class BufferPlatform {
@@ -352,10 +352,10 @@ public final class ResourceBridge {
             this.record=record;this.declaring=declaring;this.method=method;this.sources=sources;
         }
     }
-    private static final class NativeFileTransfer {
+    private static final class NativeFilePair {
         final Thread caller=Thread.currentThread();
         final FileOperation source,target;
-        NativeFileTransfer(FileOperation source,FileOperation target){this.source=source;this.target=target;}
+        NativeFilePair(FileOperation source,FileOperation target){this.source=source;this.target=target;}
     }
     private record DescriptorView(FileDescriptor descriptor,List<Object> streams,List<Object> channels,boolean allocated) { }
     static {
@@ -668,21 +668,32 @@ public final class ResourceBridge {
     }
     private static Object nativeIoOperation(Class<?> declaring,String method,long[] arguments,Object[] references,Module[] sources)throws IOException {
         if(!NativeControl.ioOperationBoundary(declaring,method,arguments,references,sources))throw new SecurityException("ACTUAL_NATIVE_IO_OPERATION_REQUIRED");
-        if(declaring==FILE_CHANNEL&&method.equals("transferTo0"))return nativeFileTransfer(arguments,references,sources);
+        if(declaring==FILE_CHANNEL&&method.equals("transferTo0"))return nativeFileTransfer(declaring,method,arguments,references,sources);
+        if(declaring==SOCKET_NET&&method.equals("accept"))return nativeSocketAccept(declaring,method,arguments,references,sources);
         return IoBridge.nativeInvoking(declaring,method,arguments,references,sources);
     }
     /** Direct transfer consumes both captured descriptors without calling the target's write method. */
-    private static Object nativeFileTransfer(long[] arguments,Object[] references,Module[] sources)throws IOException {
+    private static Object nativeFileTransfer(Class<?> declaring,String method,long[] arguments,Object[] references,Module[] sources)throws IOException {
         if(arguments.length!=4||references.length!=4||!(references[0] instanceof FileDescriptor source)
                 ||!(references[3] instanceof FileDescriptor target)||references[1]!=null||references[2]!=null)
             throw new IOException("NATIVE_FILE_TRANSFER_DESCRIPTORS_REQUIRED");
+        return nativeFilePair(source,target,declaring,method,sources);
+    }
+    /** The accepted descriptor is an output endpoint; observation grants no allocation or close authority. */
+    private static Object nativeSocketAccept(Class<?> declaring,String method,long[] arguments,Object[] references,Module[] sources)throws IOException {
+        if(arguments.length!=3||references.length!=3||!(references[0] instanceof FileDescriptor source)
+                ||!(references[1] instanceof FileDescriptor target)||!(references[2] instanceof java.net.InetSocketAddress[]))
+            throw new IOException("NATIVE_SOCKET_ACCEPT_DESCRIPTORS_REQUIRED");
+        return nativeFilePair(source,target,declaring,method,sources);
+    }
+    private static Object nativeFilePair(FileDescriptor source,FileDescriptor target,Class<?> declaring,String method,Module[] sources)throws IOException {
         if(ControlBridge.recoveryWriter())return null;
         for(Module module:sources)if(module!=null&&ControlBridge.modStopped(module))throw new ClosedChannelException();
         FileOperation sourceScope=null,targetScope=null;
         try{
-            sourceScope=(FileOperation)fileOperation(source,FILE_CHANNEL,"transferTo0",sources);
-            if(target!=source)targetScope=(FileOperation)fileOperation(target,FILE_CHANNEL,"transferTo0",sources);
-            return new NativeFileTransfer(sourceScope,targetScope);
+            sourceScope=(FileOperation)fileOperation(source,declaring,method,sources);
+            if(target!=source)targetScope=(FileOperation)fileOperation(target,declaring,method,sources);
+            return new NativeFilePair(sourceScope,targetScope);
         }catch(IOException|RuntimeException|Error failure){
             try{if(targetScope!=null)finishFileOperation(targetScope);}catch(RuntimeException|Error cleanup){if(cleanup!=failure)failure.addSuppressed(cleanup);}
             try{if(sourceScope!=null)finishFileOperation(sourceScope);}catch(RuntimeException|Error cleanup){if(cleanup!=failure)failure.addSuppressed(cleanup);}
@@ -691,10 +702,10 @@ public final class ResourceBridge {
     }
     private static void nativeIoFinished(Object token,boolean completed){
         if(!NativeControl.fileOperationFinishing(token))throw new SecurityException("ACTUAL_NATIVE_IO_RETURN_REQUIRED");
-        if(token instanceof NativeFileTransfer transfer){
-            if(transfer.caller!=Thread.currentThread())throw new SecurityException("ACTUAL_NATIVE_FILE_TRANSFER_SCOPE_REQUIRED");
-            if(transfer.target!=null)finishFileOperation(transfer.target);
-            if(transfer.source!=null)finishFileOperation(transfer.source);
+        if(token instanceof NativeFilePair pair){
+            if(pair.caller!=Thread.currentThread())throw new SecurityException("ACTUAL_NATIVE_FILE_PAIR_SCOPE_REQUIRED");
+            if(pair.target!=null)finishFileOperation(pair.target);
+            if(pair.source!=null)finishFileOperation(pair.source);
             return;
         }
         IoBridge.nativeReturned(token,completed);

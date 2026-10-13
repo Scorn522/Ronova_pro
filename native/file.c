@@ -56,6 +56,8 @@ static void native_file_classify(JNIEnv *env,jclass type,Binding *binding,const 
     binding->fileOperation=matched==NATIVE_FILE_DISPATCHER?(strcmp(name,"close0")==0?4:3)
             :matched==NATIVE_SOCKET_DISPATCHER&&strcmp(name,"close0")==0?7
             :matched>=NATIVE_ASYNC_SOCKET?8
+            :matched==NATIVE_SOCKET_NET&&strcmp(name,"accept")==0
+                    &&strcmp(binding->signature,"(Ljava/io/FileDescriptor;Ljava/io/FileDescriptor;[Ljava/net/InetSocketAddress;)I")==0?8
             :matched>=NATIVE_SOCKET_DISPATCHER?3
             :matched==NATIVE_FILE_DESCRIPTOR?(strcmp(name,"close0")==0?4:strcmp(name,"sync")==0?5:3)
             :matched==NATIVE_FILE_CHANNEL&&strcmp(name,"unmap0")==0?6

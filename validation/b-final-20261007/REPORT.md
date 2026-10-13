@@ -1,5 +1,27 @@
 # B 批实际报告：2026-10-09 代码收敛接续
 
+## 2026-10-13：C 接续——JNI_OnLoad 前接入、接收描述符与存量界面
+
+本工作包基线 `f527867`；Java ABI 49 / Native ABI 49 / Storage ABI 3 / Journal 6。Host 接入真实 JDK OS 加载返回与卸载导入；Native.accept 接入双描述符；客户端增加存量 Screen/Overlay 真实生命周期。没有修改旧调用者资格、分配/释放许可或未知/共享来源规则。
+
+Host 只信任实际 NativeLibraryScope、真实 JVM_LoadLibrary 返回的 HMODULE 及实际函数地址匹配的导入槽。当前作用域的一次性 OS 返回关联防止回调重用加载导出替换外层身份。失败 JNI_OnLoad 的 JDK 内部卸载提前使最后映像失活，libraryEnd 兜底不读已卸载 IAT；仍有实际共享登记则保留映像。就绪查询检查 load/unload 两个实际槽，ABI 49 拒绝混用旧控制 DLL。没有实现 DllMain/TLS 首窗口、未观察句柄转交或任意 Native/JVMTI 控制。
+
+| 实际检查 | 结果与范围 |
+| --- | --- |
+| 主包、Agent、Bootstrap、控制 DLL 与既有夹具 | PASS；`build-c-native49-ui-accept-onload-fixed-20261013.log`，22 秒 |
+| 真正 System.load / JNI_OnLoad | PASS；`c-host-load-native49-20261013.log`；A/W 普通导入与动态入口均在真实 OnLoad 内受控并实际创建/读回子进程；真实嵌套加载；JNI_ERR 卸载；原 IllegalStateException 保留；失败映像缓存入口由独立支持 DLL 再调用时拒绝；无关存活映像仍可调用 |
+| 实际 Net.accept | PASS；`c-socket-accept-native49-20261013.log`；已关闭监听 FD 拒绝且不发布输出，真实异常后作用域恢复；公共与直接 native 接入均用实际输出通道完成双向回环数据 |
+| 共用 pair helper 的 FileChannel.transferTo0 | PASS；`c-file-transfer-native49-20261013.log`；实际数据/长度、只读/关闭端保留、异常作用域恢复及后续传输；仅因同一生产辅助方法变化而复查 |
+| sealed 目标与 UI 停组组合 | NOT_RUN；两项 I/O 输出均明确 SCOPE_UNCHECKED，不把 OS 拒绝当作生产封口许可验收；当前真实菜单运行不具备合法停组组合场景 |
+
+三项原生检查进程退出码均为 0，没有重复原 Host-process、旧写者/克隆或元数据矩阵。首次 C 编译失败是两处 load/unload 并列指针声明导致第二变量少一层指针，已拆成完整独立声明；`build-c-native49-ui-accept-onload-20261013.log` 保留。启动时仍有 74/75 项文件入口未决，不声称全平台覆盖。
+
+客户端新截点同时支持实际官方/SRG 名称，校验真实单例及主线程，经原版 setter 关闭专属存量界面；提交前重新比对准确根，保留关闭回调重入发布的新合法界面。普通关闭失败加入既有 FAILURES，不逐帧重试已部分释放对象；按现有 ClientFaults 规则保留 fatal 原对象及上下文恢复。运行路径为本地 `.work/c-client-20261013`，只读既有 Forge 47.4.23 的库/assets，在独立 mods/options/payload/logs 中使用本候选。首次实际启动于13:09:35进入ModLauncher，13:09:42加载早期窗口，13:09:46在 GLFW/WindowsLibrary 初始化失败，13:09:48 main退出。具体异常为 `Number of remaining elements is 0, must be at least 2`，发生在 WinBase.GetModuleHandle 的 UTF16 参数检查，尚未调用该 Windows API，也没有到本轮 Minecraft/UI截点。真实LWJGL字节码核对显示 MemoryUtil.wrap 经 allocateInstance 后写 address/mark/limit/capacity 被既有资源元数据保护拒绝，视图保留默认零容量。正在补正确初始化路径，不关闭既有保护。原 launch.log 保留；仅一次 Thread.print 因进程已退出返回 no such process，保存在 thread-print-ui.txt，不是死锁结果。菜单、UI停组和游戏世界均未计 PASS。
+
+本地候选目录为 `distribution/candidate-c-native49-wip-20261013`。本轮同步源码、直接相关既有检查与简要结果；不上传候选、线程栈或运行原始日志。
+
+---
+
 ## 2026-10-13：C 接续——Host A/W、直接传输与客户端镜像
 
 主工程仍为 `D:\桌面\ronova_GPT`；B-r10 ZIP 只作对照。Java ABI 49 / Native ABI 48 / Storage ABI 3 / Journal 6；GNU C23 / GNU C++23、Java 17。代码范围为 Host 的 CreateProcessA/W 接线、直接文件传输的双描述符作用域，以及客户端准确镜像清除与重新发布限制。完整 C 和 B 的游戏业务收口没有完成。

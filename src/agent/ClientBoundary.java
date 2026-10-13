@@ -82,7 +82,14 @@ final class ClientBoundary {
                 for(AbstractInsnNode at:method.instructions.toArray())if(at.getOpcode()==Opcodes.RETURN){InsnList hook=new InsnList();hook.add(new VarInsnNode(Opcodes.ALOAD,0));hook.add(new VarInsnNode(Opcodes.ALOAD,vars[0]));hook.add(new VarInsnNode(Opcodes.ALOAD,original));call(hook,"textureRegistered","(Ljava/lang/Object;Ljava/lang/Object;Ljava/lang/Object;)V");method.instructions.insertBefore(at,hook);}changed=true;
             }
             if(name.equals(TEXTURES)&&method.name.equals("tick")&&method.desc.equals("()V")){InsnList hook=new InsnList();hook.add(new VarInsnNode(Opcodes.ALOAD,0));call(hook,"textureTick","(Ljava/lang/Object;)V");method.instructions.insert(hook);changed=true;}
-            if(name.equals("net/minecraft/client/Minecraft")&&method.name.equals("setScreen")&&args.length==1){guard(method,vars[0],"allowed");changed=true;}
+            if(name.equals("net/minecraft/client/Minecraft")&&args.length==1&&Type.getReturnType(method.desc).getSort()==Type.VOID
+                    &&(Set.of("setScreen","m_91152_").contains(method.name)&&args[0].getDescriptor().equals("Lnet/minecraft/client/gui/screens/Screen;")
+                    ||Set.of("setOverlay","m_91150_").contains(method.name)&&args[0].getDescriptor().equals("Lnet/minecraft/client/gui/screens/Overlay;"))){
+                presentation(method,vars[0],args[0].getDescriptor().endsWith("/Screen;"));changed=true;
+            }
+            if(name.equals("net/minecraft/client/Minecraft")&&Set.of("runTick","m_91383_").contains(method.name)){
+                InsnList hook=new InsnList();hook.add(new VarInsnNode(Opcodes.ALOAD,0));call(hook,"presentationMaintenance","(Ljava/lang/Object;)V");method.instructions.insert(hook);changed=true;
+            }
             if(name.equals("net/minecraft/client/Minecraft")&&method.name.equals("runTick")){InsnList hook=new InsnList();call(hook,"gpuMaintenance","()V");method.instructions.insert(hook);changed=true;}
             if(name.equals("net/minecraft/client/Minecraft")&&method.name.equals("close"))for(AbstractInsnNode at:method.instructions.toArray())if(at instanceof MethodInsnNode invoke&&invoke.owner.equals("com/mojang/blaze3d/platform/Window")&&invoke.name.equals("close")&&invoke.desc.equals("()V")){InsnList hook=new InsnList();call(hook,"gpuContextClosing","()V");method.instructions.insertBefore(at,hook);changed=true;}
             if(name.equals("net/minecraft/client/sounds/SoundEngine")&&Set.of("play","playDelayed","queueTickingSound").contains(method.name)&&args.length>=1){guard(method,vars[0],"soundAdmitted");changed=true;}
@@ -97,6 +104,27 @@ final class ClientBoundary {
             }
         }
         if(!changed)return null;ControlClassWriter writer=new ControlClassWriter(loader,node);node.accept(writer);return writer.toByteArray();
+    }
+    /** Gates the actual slot after opening/closing callbacks, with one finally for every real setter outcome. */
+    private static void presentation(MethodNode method,int incoming,boolean screen){
+        int token=method.maxLocals++,error=method.maxLocals++;
+        LabelNode allowed=new LabelNode(),start=new LabelNode(),end=new LabelNode(),complete=new LabelNode(),failed=new LabelNode();
+        for(AbstractInsnNode at:method.instructions.toArray()){
+            if(at.getOpcode()==Opcodes.RETURN)method.instructions.set(at,new JumpInsnNode(Opcodes.GOTO,complete));
+            else if(at instanceof FieldInsnNode slot&&slot.getOpcode()==Opcodes.PUTFIELD&&slot.owner.equals("net/minecraft/client/Minecraft")
+                    &&(screen?Set.of("screen","f_91080_"):Set.of("overlay","f_91081_")).contains(slot.name)){
+                LabelNode write=new LabelNode();InsnList gate=new InsnList();gate.add(new InsnNode(Opcodes.DUP2));gate.add(new VarInsnNode(Opcodes.ALOAD,token));
+                call(gate,"presentationWriting","(Ljava/lang/Object;Ljava/lang/Object;Ljava/lang/Object;)Z");gate.add(new JumpInsnNode(Opcodes.IFNE,write));
+                gate.add(new InsnNode(Opcodes.POP2));gate.add(new JumpInsnNode(Opcodes.GOTO,complete));gate.add(write);method.instructions.insertBefore(slot,gate);
+            }
+        }
+        InsnList entry=new InsnList();entry.add(new VarInsnNode(Opcodes.ALOAD,0));entry.add(new VarInsnNode(Opcodes.ALOAD,incoming));
+        call(entry,"presentationEntering","(Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;");entry.add(new VarInsnNode(Opcodes.ASTORE,token));
+        entry.add(new VarInsnNode(Opcodes.ALOAD,token));entry.add(new FieldInsnNode(Opcodes.GETSTATIC,"java/lang/Boolean","FALSE","Ljava/lang/Boolean;"));
+        entry.add(new JumpInsnNode(Opcodes.IF_ACMPNE,allowed));entry.add(new InsnNode(Opcodes.RETURN));entry.add(allowed);entry.add(start);method.instructions.insert(entry);
+        InsnList exit=new InsnList();exit.add(end);exit.add(complete);exit.add(new VarInsnNode(Opcodes.ALOAD,token));call(exit,"presentationExiting","(Ljava/lang/Object;)V");exit.add(new InsnNode(Opcodes.RETURN));
+        exit.add(failed);exit.add(new VarInsnNode(Opcodes.ASTORE,error));exit.add(new VarInsnNode(Opcodes.ALOAD,token));call(exit,"presentationExiting","(Ljava/lang/Object;)V");
+        exit.add(new VarInsnNode(Opcodes.ALOAD,error));exit.add(new InsnNode(Opcodes.ATHROW));method.instructions.add(exit);method.tryCatchBlocks.add(new TryCatchBlockNode(start,end,failed,null));
     }
     private static int[] locals(MethodNode method,Type[] args){int[] vars=new int[args.length];int next=(method.access&Opcodes.ACC_STATIC)==0?1:0;for(int i=0;i<args.length;i++){vars[i]=next;next+=args[i].getSize();}return vars;}
     private static void call(InsnList code,String name,String descriptor){code.add(new MethodInsnNode(Opcodes.INVOKESTATIC,BRIDGE,name,descriptor,false));}

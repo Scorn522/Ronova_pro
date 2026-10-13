@@ -2,7 +2,10 @@
 #include "bindings.c"
 // Preserve Object.clone itself, including Cloneable checks; never substitute a Java ancestor body.
 JNIEXPORT jint JNICALL Java_dev_ronova_pro_bootstrap_NativeControl_abi(JNIEnv *env, jclass type) {
-    (void)env; (void)type; return 48;
+    (void)env; (void)type; return 49;
+}
+JNIEXPORT jboolean JNICALL Java_dev_ronova_pro_bootstrap_NativeControl_hostLibraryLoadReady0(JNIEnv *env,jclass type) {
+    (void)env; (void)type; return host_library_load_ready()?JNI_TRUE:JNI_FALSE;
 }
 JNIEXPORT jobject JNICALL Java_dev_ronova_pro_bootstrap_NativeControl_clone0(JNIEnv *env, jclass type, jobject source) {
     (void)type;
@@ -103,6 +106,7 @@ static int native_bind_controller(JNIEnv *env,jclass controller){
         {"processExposed0","(Ljava/lang/Process;J[Ljava/lang/Module;)V",(void*)Java_dev_ronova_pro_bootstrap_NativeControl_processExposed0},
         {"processRetire0","(Ljava/lang/Process;J)Ljava/lang/String;",(void*)Java_dev_ronova_pro_bootstrap_NativeControl_processRetire0},
         {"hostReady0","()Z",(void*)Java_dev_ronova_pro_bootstrap_NativeControl_hostReady0},
+        {"hostLibraryLoadReady0","()Z",(void*)Java_dev_ronova_pro_bootstrap_NativeControl_hostLibraryLoadReady0},
         {"hostState0","(Ljava/lang/Module;)[J",(void*)Java_dev_ronova_pro_bootstrap_NativeControl_hostState0},
         {"status0","(Ljava/lang/Module;)[J",(void*)Java_dev_ronova_pro_bootstrap_NativeControl_status0},
         {"bindingControlled0","(Ljava/lang/reflect/Method;)Z",(void*)Java_dev_ronova_pro_bootstrap_NativeControl_bindingControlled0},

@@ -3,6 +3,97 @@ typedef jboolean (JNICALL *NativeLoad)(JNIEnv*,jclass,jobject,jstring,jboolean,j
 typedef void (JNICALL *NativeUnload)(JNIEnv*,jclass,jstring,jboolean,jboolean,jlong);
 static NativeLoad native_load_original;
 static NativeUnload native_unload_original;
+/* Bind only actual VM function addresses in the real JDK load export's image. */
+typedef void *(JNICALL *HostJvmLoad)(const char*,jboolean);
+typedef void (JNICALL *HostJvmUnload)(void*);
+static HostJvmLoad host_jvm_load_original;
+static HostJvmUnload host_jvm_unload_original;
+static HMODULE host_loader_image;
+static void *volatile *host_jvm_load_slot;
+static void *volatile *host_jvm_unload_slot;
+static volatile LONG host_loader_installed;
+static void *JNICALL host_jvm_load(const char *name,jboolean throwing);
+static void JNICALL host_jvm_unload(void *handle);
+static int host_library_load_ready(void){
+    return InterlockedCompareExchange(&host_loader_installed,0,0)&&host_loader_image==native_java_image
+            &&host_jvm_load_original&&host_jvm_unload_original&&host_jvm_load_slot&&host_jvm_unload_slot
+            &&__atomic_load_n(host_jvm_load_slot,__ATOMIC_ACQUIRE)==(void*)host_jvm_load
+            &&__atomic_load_n(host_jvm_unload_slot,__ATOMIC_ACQUIRE)==(void*)host_jvm_unload;
+}
+static void *JNICALL host_jvm_load(const char *name,jboolean throwing){
+    DWORD incoming=GetLastError();
+    NativeThread *state=native_tls==TLS_OUT_OF_INDEXES?NULL:(NativeThread*)TlsGetValue(native_tls);
+    NativeLibraryScope *scope=state?state->library:NULL;
+    int selected=host_library_load_ready()&&scope&&!scope->unloading&&scope->phase==1&&!scope->osLoadStarted
+            &&scope->library->jni&&!scope->library->builtin&&native_image(__builtin_return_address(0))==host_loader_image;
+    if(selected)scope->osLoadStarted=1;
+    SetLastError(incoming);void *handle=host_jvm_load_original(name,throwing);DWORD error=GetLastError();
+    if(selected&&handle){
+        /* The same verified invocation owns this first actual OS return.
+         * Cached/reentrant calls cannot replace its association a second time. */
+        AcquireSRWLockExclusive(&native_records);
+        scope->osHandle=(HMODULE)handle;scope->library->handle=(HMODULE)handle;
+        ReleaseSRWLockExclusive(&native_records);
+        if(!host_observe_loading(scope))InterlockedIncrement(&native_failures);
+    }
+    SetLastError(error);return handle;
+}
+static void JNICALL host_jvm_unload(void *handle){
+    DWORD incoming=GetLastError();
+    NativeThread *state=native_tls==TLS_OUT_OF_INDEXES?NULL:(NativeThread*)TlsGetValue(native_tls);
+    NativeLibraryScope *scope=state?state->library:NULL;
+    int current=scope&&scope->phase==1&&scope->library->jni&&!scope->library->builtin
+            &&native_image(__builtin_return_address(0))==host_loader_image
+            &&host_jvm_unload_slot&&__atomic_load_n(host_jvm_unload_slot,__ATOMIC_ACQUIRE)==(void*)host_jvm_unload;
+    int selected=current&&(scope->unloading?scope->library->handle==(HMODULE)handle:
+            scope->osLoadStarted&&scope->osHandle==(HMODULE)handle);
+    if(selected){
+        /* Failed JNI_OnLoad unloads inside the original JDK call, before its
+         * Java return. Disable the last image before its IAT becomes unmapped. */
+        InterlockedExchange(&scope->library->closing,1);host_library_releasing(scope->library);
+    }
+    SetLastError(incoming);host_jvm_unload_original(handle);
+}
+static int host_loader_imports(HMODULE image,void *load,void *unload,void *volatile **loadSlot,void *volatile **unloadSlot){
+    unsigned char *base=(unsigned char*)image;IMAGE_DOS_HEADER *dos=(IMAGE_DOS_HEADER*)base;
+    if(dos->e_magic!=IMAGE_DOS_SIGNATURE||dos->e_lfanew<=0)return 0;
+    IMAGE_NT_HEADERS64 *nt=(IMAGE_NT_HEADERS64*)(base+dos->e_lfanew);
+    if(nt->Signature!=IMAGE_NT_SIGNATURE||nt->OptionalHeader.Magic!=IMAGE_NT_OPTIONAL_HDR64_MAGIC
+            ||nt->OptionalHeader.NumberOfRvaAndSizes<=IMAGE_DIRECTORY_ENTRY_IMPORT)return 0;
+    DWORD size=nt->OptionalHeader.SizeOfImage;IMAGE_DATA_DIRECTORY directory=nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_IMPORT];
+    if(!directory.VirtualAddress||directory.VirtualAddress>=size||directory.Size>size-directory.VirtualAddress)return 0;
+    IMAGE_IMPORT_DESCRIPTOR *descriptors=(IMAGE_IMPORT_DESCRIPTOR*)(base+directory.VirtualAddress);
+    for(DWORD i=0;(i+1)*sizeof(*descriptors)<=directory.Size&&descriptors[i].Name;i++){
+        DWORD addresses=descriptors[i].FirstThunk;if(!addresses||addresses>=size)continue;
+        IMAGE_THUNK_DATA64 *table=(IMAGE_THUNK_DATA64*)(base+addresses);
+        for(DWORD j=0;(j+1)*sizeof(*table)<=size-addresses&&table[j].u1.Function;j++){
+            void *volatile *slot=(void *volatile*)&table[j].u1.Function;void *actual=__atomic_load_n(slot,__ATOMIC_ACQUIRE);
+            if(actual==load){if(*loadSlot&&*loadSlot!=slot)return 0;*loadSlot=slot;}
+            if(actual==unload){if(*unloadSlot&&*unloadSlot!=slot)return 0;*unloadSlot=slot;}
+        }
+    }
+    return *loadSlot&&*unloadSlot;
+}
+static int host_loader_exchange(void *volatile *slot,void *expected,void *replacement){
+    HostImport entry={0};entry.slot=slot;return host_exchange_import(&entry,expected,replacement);
+}
+static int host_library_load_install(void){
+    if(host_library_load_ready())return 1;
+    if(!native_vm||!native_load_original||!native_unload_original)return 0;
+    HMODULE image=native_image((void*)native_load_original),jvm=native_image((void*)(*native_vm)->GetEnv);
+    if(!image||image!=native_java_image||native_image((void*)native_unload_original)!=image||!jvm)return 0;
+    void *load=(void*)GetProcAddress(jvm,"JVM_LoadLibrary"),*unload=(void*)GetProcAddress(jvm,"JVM_UnloadLibrary");
+    void *volatile *loadSlot=NULL;
+    void *volatile *unloadSlot=NULL;
+    if(!load||!unload||!host_loader_imports(image,load,unload,&loadSlot,&unloadSlot))return 0;
+    host_jvm_load_original=(HostJvmLoad)load;host_jvm_unload_original=(HostJvmUnload)unload;
+    host_loader_image=image;host_jvm_load_slot=loadSlot;host_jvm_unload_slot=unloadSlot;
+    if(!host_loader_exchange(unloadSlot,unload,(void*)host_jvm_unload))return 0;
+    if(!host_loader_exchange(loadSlot,load,(void*)host_jvm_load)){
+        (void)host_loader_exchange(unloadSlot,(void*)host_jvm_unload,unload);return 0;
+    }
+    InterlockedExchange(&host_loader_installed,1);return host_library_load_ready();
+}
 static int native_library_parameters(JNIEnv *env,NativeLibrary *library,jstring name,jboolean builtin,jboolean jni){
     return library->builtin==builtin&&library->jni==jni&&native_original.IsSameObject(env,library->name,name);
 }
@@ -66,6 +157,7 @@ static int native_library_install(JNIEnv *env){
         {"unload","(Ljava/lang/String;ZZJ)V",(void*)native_library_unload}};
         ready=native_original.RegisterNatives(env,libraries,entries,2)==JNI_OK;
     }
+    if(ready&&!host_library_load_install())InterlockedIncrement(&native_failures);
     native_original.DeleteLocalRef(env,implementation);native_original.DeleteLocalRef(env,libraries);
     if(native_original.ExceptionCheck(env)){native_original.ExceptionClear(env);ready=0;}return ready;
 }
@@ -152,8 +244,9 @@ JNIEXPORT void JNICALL Java_dev_ronova_pro_bootstrap_NativeControl_libraryEnd0(J
         else if(scope->library->handle!=(HMODULE)(uintptr_t)handle||!success)InterlockedIncrement(&native_failures);
     }
     ReleaseSRWLockExclusive(&native_records);
+    if(!scope->unloading&&scope->osHandle&&!scope->success)host_library_load_failed(scope->library);
     /* The real load has returned and the exact JDK library record is complete.
-     * This does not claim to intercept JNI_OnLoad's first native side effects. */
+     * The early same-thread hook does not cover DllMain/TLS before OS return. */
     if(!scope->unloading&&scope->phase==2&&scope->success)host_observe_image(scope->library->handle);
     state->library=scope->previous;SecureZeroMemory(scope,sizeof(*scope));free(scope);
 }

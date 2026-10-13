@@ -18,6 +18,12 @@ public final class ClientBridge {
     private static final Map<Key,SoundStop> SOUND_STOPS=new HashMap<>();
     private static final Map<Key,Ref<Collection<?>>> RELOAD_LISTENERS=new HashMap<>();
     private static final Map<Key,ReloadWork> RELOAD_WORK=new HashMap<>();
+    private static final Map<Key,UiFields> UI_OWNERS=new HashMap<>();
+    private static final ThreadLocal<UiRetirement> UI_RETIRING=new ThreadLocal<>();
+    private static final System.Logger UI_LOG=System.getLogger("ronova_pro.client.lifecycle");
+    private static final ClassValue<UiFields> UI_FIELDS=new ClassValue<>(){
+        protected UiFields computeValue(Class<?> type){try{return new UiFields(type);}catch(ReflectiveOperationException unavailable){throw new IllegalStateException("CLIENT_UI_FIELDS_UNAVAILABLE",unavailable);}}
+    };
     private static final GpuImages GPU=new GpuImages();
     private static final List<Role> ROLES=new ArrayList<>();
     private static final Set<Module> REQUESTED=Collections.newSetFromMap(new IdentityHashMap<>());
@@ -30,6 +36,27 @@ public final class ClientBridge {
     private record Texture(Ref<Object> object,Module[] modules){}
     private record SoundRegistry(Ref<Map<?,?>> instances){}
     private record ReloadWork(java.util.concurrent.CompletableFuture<?> future,Module[] modules){}
+    private static final class UiFields {
+        final Class<?> type;final Field instance,thread,screen,overlay;final Method setScreen,setOverlay;
+        UiFields(Class<?> type)throws ReflectiveOperationException{
+            this.type=type;instance=uiField(type,"instance","f_90981_");thread=uiField(type,"gameThread","f_91018_");
+            screen=uiField(type,"screen","f_91080_");overlay=uiField(type,"overlay","f_91081_");
+            if(instance.getType()!=type||!Modifier.isStatic(instance.getModifiers())||thread.getType()!=Thread.class
+                    ||!screen.getType().getName().equals("net.minecraft.client.gui.screens.Screen")
+                    ||!overlay.getType().getName().equals("net.minecraft.client.gui.screens.Overlay"))throw new IllegalStateException("CLIENT_UI_FIELD_TYPES_CHANGED");
+            setScreen=uiSetter(type,"setScreen","m_91152_",screen.getType());setOverlay=uiSetter(type,"setOverlay","m_91150_",overlay.getType());
+        }
+        Object current(Object owner,boolean screens)throws IllegalAccessException{return (screens?screen:overlay).get(owner);}
+    }
+    private static final class UiRetirement {
+        final Object owner,target;final boolean screen;UiCall call;
+        UiRetirement(Object owner,Object target,boolean screen){this.owner=owner;this.target=target;this.screen=screen;}
+    }
+    private static final class UiCall {
+        final Object owner,input,before;final UiFields fields;final boolean screen,retirement;final String method;final Thread thread;
+        boolean ended;
+        UiCall(Object owner,Object input,Object before,UiFields fields,boolean screen,boolean retirement,String method){this.owner=owner;this.input=input;this.before=before;this.fields=fields;this.screen=screen;this.retirement=retirement;this.method=method;thread=Thread.currentThread();}
+    }
     private static final class SoundStop {
         final Object handle,channel,access;final Class<?> handleType,channelType,accessType;final Module[] modules;
         final java.util.concurrent.atomic.AtomicBoolean stopped=new java.util.concurrent.atomic.AtomicBoolean();boolean requested;volatile String pending="";
@@ -89,6 +116,96 @@ public final class ClientBridge {
     private static Module[] sources(Object object){Module[] real=origins(object);synchronized(SOURCES){return union(real,SOURCES.get(new Key(object,false)));}}
     private static void record(Object object,Module[] modules){if(object==null)return;synchronized(SOURCES){reap();Module[] sources=union(SOURCES.get(new Key(object,false)),modules);if(sources.length!=0){SOURCES.put(new Key(object,true),sources);CodeSourceBridge.contributionControl(sources);}}}
     public static boolean allowed(Object contribution){boundary();return !stopped(sources(contribution))&&!ControlBridge.stoppedEffects();}
+    private static Field uiField(Class<?> type,String named,String installed)throws ReflectiveOperationException{
+        Field result;try{result=type.getDeclaredField(named);}catch(NoSuchFieldException production){result=type.getDeclaredField(installed);}result.setAccessible(true);return result;
+    }
+    private static Method uiSetter(Class<?> type,String named,String installed,Class<?> parameter)throws ReflectiveOperationException{
+        Method result;try{result=type.getDeclaredMethod(named,parameter);}catch(NoSuchMethodException production){result=type.getDeclaredMethod(installed,parameter);}
+        if(Modifier.isStatic(result.getModifiers())||result.getReturnType()!=void.class)throw new IllegalStateException("CLIENT_UI_SETTER_CHANGED");return result;
+    }
+    private static boolean screenSetter(StackWalker.StackFrame frame){return Set.of("setScreen","m_91152_").contains(frame.getMethodName());}
+    private static UiFields uiOwner(Object owner,StackWalker.StackFrame frame)throws ReflectiveOperationException{
+        Class<?> type=frame.getDeclaringClass();
+        if(!type.getName().equals("net.minecraft.client.Minecraft")||owner==null||owner.getClass()!=type)throw new SecurityException("ACTUAL_MINECRAFT_UI_OWNER_REQUIRED");
+        UiFields fields=UI_FIELDS.get(type);if(fields.instance.get(null)!=owner)throw new SecurityException("ACTUAL_MINECRAFT_SINGLETON_REQUIRED");
+        synchronized(SOURCES){UI_OWNERS.put(new Key(owner,true),fields);}return fields;
+    }
+    private static void uiFailure(Object value,Module[] modules,Throwable failure){
+        synchronized(SOURCES){FAILURES.put(new Key(value,true),union(FAILURES.get(new Key(value,false)),modules));}
+        UI_LOG.log(System.Logger.Level.WARNING,"CLIENT_PRESENTATION_LIFECYCLE_PENDING",failure);
+    }
+    public static Object presentationEntering(Object owner,Object input){
+        var frame=boundary();if(!screenSetter(frame)&&!Set.of("setOverlay","m_91150_").contains(frame.getMethodName()))throw new SecurityException("ACTUAL_UI_SETTER_REQUIRED");
+        Module[] modules=union(origins(input),ControlBridge.invokingSources(),currentSources());record(input,modules);
+        if(stopped(sources(input))||ControlBridge.stoppedEffects())return Boolean.FALSE;
+        try{
+            UiFields fields=uiOwner(owner,frame);boolean screen=screenSetter(frame);Object before=fields.current(owner,screen);
+            UiRetirement requested=UI_RETIRING.get();boolean retirement=requested!=null&&requested.owner==owner&&requested.screen==screen&&requested.target==before&&input==null&&requested.call==null;
+            UiCall call=new UiCall(owner,input,before,fields,screen,retirement,frame.getMethodName());
+            if(retirement)requested.call=call;CodeSourceBridge.contributionControl(call);return call;
+        }catch(ReflectiveOperationException|IllegalStateException unavailable){uiFailure(owner,modules,unavailable);return null;}
+    }
+    private static UiCall uiCall(Object token,StackWalker.StackFrame frame){
+        if(!(token instanceof UiCall call)||call.fields.type!=frame.getDeclaringClass()||!call.method.equals(frame.getMethodName())||call.thread!=Thread.currentThread())throw new SecurityException("ACTUAL_UI_INVOCATION_REQUIRED");return call;
+    }
+    public static boolean presentationWriting(Object owner,Object next,Object token){
+        var frame=boundary();
+        if(token==null)return !stopped(sources(next))&&!ControlBridge.stoppedEffects();
+        UiCall call=uiCall(token,frame);if(call.owner!=owner||call.ended)throw new SecurityException("ACTUAL_UI_SLOT_REQUIRED");
+        record(next,union(origins(next),next==call.input?ControlBridge.invokingSources():new Module[0],currentSources()));
+        if(stopped(sources(next))||ControlBridge.stoppedEffects())return false;
+        try{
+            // Closing callbacks can publish a new legitimate UI. The old retirement cannot overwrite it.
+            return !call.retirement||call.fields.current(owner,call.screen)==call.before;
+        }catch(ReflectiveOperationException unavailable){uiFailure(owner,union(sources(call.before),sources(next)),unavailable);return false;}
+    }
+    public static void presentationExiting(Object token){
+        var frame=boundary();if(token==null)return;UiCall call=uiCall(token,frame);if(call.ended)return;call.ended=true;
+    }
+    public static void presentationMaintenance(Object owner){
+        var frame=boundary();if(!Set.of("runTick","m_91383_").contains(frame.getMethodName()))throw new SecurityException("ACTUAL_CLIENT_FRAME_REQUIRED");
+        UiFields fields;
+        try{
+            fields=uiOwner(owner,frame);if(fields.thread.get(owner)!=Thread.currentThread())throw new IllegalStateException("CLIENT_UI_MAIN_THREAD_REQUIRED");
+        }catch(ReflectiveOperationException|IllegalStateException unavailable){uiFailure(owner,new Module[0],unavailable);return;}
+        UiRetirement active=UI_RETIRING.get();if(active!=null&&active.owner==owner)return;
+        retirePresentation(owner,fields,false);retirePresentation(owner,fields,true);
+    }
+    /** Same recoverable cause/suppressed contract as Core ClientFaults, at this bootstrap-only boundary. */
+    private static boolean uiRecoverable(Throwable failure){
+        if(!(failure instanceof RuntimeException||failure instanceof java.io.IOException))return false;
+        Set<Throwable> seen=Collections.newSetFromMap(new IdentityHashMap<>());Deque<Throwable> pending=new ArrayDeque<>();pending.add(failure);
+        while(!pending.isEmpty()){
+            Throwable next=pending.removeFirst();if(!seen.add(next))continue;
+            if(!(next instanceof RuntimeException||next instanceof java.io.IOException))return false;
+            if(next.getCause()!=null)pending.add(next.getCause());Collections.addAll(pending,next.getSuppressed());
+        }
+        return true;
+    }
+    @SuppressWarnings("unchecked")
+    private static <E extends Throwable> void uiRaise(Throwable failure)throws E{throw (E)failure;}
+    private static void retirePresentation(Object owner,UiFields fields,boolean screen){
+        Object target=null;Module[] modules=new Module[0];UiRetirement prior=UI_RETIRING.get();
+        try{
+            target=fields.current(owner,screen);if(target==null)return;modules=sources(target);
+            if(!exclusive(modules))return;
+            // A throwing close may already have released resources; do not replay it every frame.
+            synchronized(SOURCES){if(FAILURES.containsKey(new Key(target,false)))return;}
+            // Re-read the actual slot before calling its original lifecycle; unknown and shared objects stay.
+            if(fields.current(owner,screen)!=target)return;
+            UI_RETIRING.set(new UiRetirement(owner,target,screen));(screen?fields.setScreen:fields.setOverlay).invoke(owner,new Object[]{null});
+            if(fields.current(owner,screen)==target)uiFailure(target,modules,new IllegalStateException("CLIENT_UI_ROOT_RETAINED_AFTER_SETTER"));
+            else synchronized(SOURCES){retired++;}
+        }catch(InvocationTargetException wrapped){
+            Throwable failure=wrapped.getCause()==null?wrapped:wrapped.getCause();
+            if(!uiRecoverable(failure))ClientBridge.<RuntimeException>uiRaise(failure);
+            uiFailure(target==null?owner:target,modules,failure);
+        }catch(ReflectiveOperationException unavailable){uiFailure(target==null?owner:target,modules,unavailable);}
+        catch(RuntimeException failure){
+            if(!uiRecoverable(failure))ClientBridge.<RuntimeException>uiRaise(failure);
+            uiFailure(target==null?owner:target,modules,failure);
+        }finally{if(prior==null)UI_RETIRING.remove();else UI_RETIRING.set(prior);}
+    }
     public static Object enter(Object contribution){
         var frame=boundary();Module[] owners=union(sources(contribution),currentSources());Scope scope=new Scope(CURRENT.get(),owners,frame);
         synchronized(SOURCES){ACTIVE.add(scope);CodeSourceBridge.contributionControl(owners);}CURRENT.set(scope);return scope;
@@ -476,8 +593,12 @@ public final class ClientBridge {
         long sounds=SOUND_STOPS.values().stream().filter(row->Arrays.stream(row.modules).anyMatch(source->source==module)).count();
         RELOAD_WORK.entrySet().removeIf(entry->entry.getValue().future().isDone());long reloads=RELOAD_WORK.values().stream().filter(row->Arrays.stream(row.modules()).anyMatch(source->source==module)).count();
         for(Ref<Collection<?>> reference:RELOAD_LISTENERS.values()){Collection<?> listeners=reference.get();if(listeners!=null)for(Object listener:listeners)if(Arrays.stream(sources(listener)).anyMatch(source->source==module))reloads++;}
-        return active!=0||textures!=0||resources!=0||sounds!=0||reloads!=0||gpu!=0||failures!=0?"CLIENT_RETIREMENT_PENDING:active="+active+":textures="+textures+":resources="+resources+":sounds="+sounds+":reloads="+reloads+":gpu="+gpu+":shared="+shared+":releaseFailures="+failures:"";
+        long ui=0;for(var entry:UI_OWNERS.entrySet()){Object owner=entry.getKey().get();if(owner==null)continue;
+            try{for(boolean screen:new boolean[]{true,false}){Object current=entry.getValue().current(owner,screen);if(current!=null&&Arrays.stream(sources(current)).anyMatch(source->source==module))ui++;}}
+            catch(ReflectiveOperationException unavailable){ui++;}
+        }
+        return active!=0||textures!=0||resources!=0||sounds!=0||reloads!=0||gpu!=0||failures!=0||ui!=0?"CLIENT_RETIREMENT_PENDING:active="+active+":textures="+textures+":resources="+resources+":sounds="+sounds+":reloads="+reloads+":gpu="+gpu+":ui="+ui+":shared="+shared+":releaseFailures="+failures:"";
     }}
-    public static Object[] controlObjects(){agent();List<Object> roots=new ArrayList<>(Arrays.asList(SOURCES,TEXTURES,ROLES,REQUESTED,CURRENT,RELEASING,ACTIVE,DEAD,IMAGES,PIXELS,RETIREMENTS,FAILURES,SOUNDS,SOUND_STOPS,RELOAD_LISTENERS,RELOAD_WORK));Collections.addAll(roots,GPU.controls());return roots.toArray();}
-    private static void reap(){for(Key key;(key=(Key)DEAD.poll())!=null;){SOURCES.remove(key);TEXTURES.remove(key);IMAGES.remove(key);PIXELS.remove(key);FAILURES.remove(key);SOUNDS.remove(key);RELOAD_LISTENERS.remove(key);}}
+    public static Object[] controlObjects(){agent();List<Object> roots=new ArrayList<>(Arrays.asList(SOURCES,TEXTURES,ROLES,REQUESTED,CURRENT,RELEASING,ACTIVE,DEAD,IMAGES,PIXELS,RETIREMENTS,FAILURES,SOUNDS,SOUND_STOPS,RELOAD_LISTENERS,RELOAD_WORK,UI_OWNERS,UI_RETIRING,UI_FIELDS));Collections.addAll(roots,GPU.controls());return roots.toArray();}
+    private static void reap(){for(Key key;(key=(Key)DEAD.poll())!=null;){SOURCES.remove(key);TEXTURES.remove(key);IMAGES.remove(key);PIXELS.remove(key);FAILURES.remove(key);SOUNDS.remove(key);RELOAD_LISTENERS.remove(key);UI_OWNERS.remove(key);}}
 }

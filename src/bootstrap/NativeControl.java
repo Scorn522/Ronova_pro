@@ -43,7 +43,7 @@ public final class NativeControl {
             if(!early.isEmpty()) {
                 Path actual=Path.of(early).toAbsolutePath();if(!hash(Files.readAllBytes(actual)).equals(digest))throw new IOException("EARLY_NATIVE_IMAGE_MISMATCH");dll=actual;
             }
-            System.load(dll.toString());if(abi()!=48)throw new UnsatisfiedLinkError("NATIVE_CONTROL_ABI");
+            System.load(dll.toString());if(abi()!=49)throw new UnsatisfiedLinkError("NATIVE_CONTROL_ABI");
             if(!initialize0(ControlBridge.class,DefinitionBridge.class))throw new UnsatisfiedLinkError("ACTUAL_NATIVE_BOUNDARY_INSTALL_FAILED");
             if(!initializeDefinitionDirectory0(definitionDirectoryOwner))throw new UnsatisfiedLinkError("ACTUAL_DEFINITION_DIRECTORY_CAS_UNAVAILABLE");
             libraryBoundaryPresent=libraryPresent0();available=true;return state="NATIVE_BIND_AND_JNI_FIELD_READY";
@@ -472,9 +472,10 @@ public final class NativeControl {
     }
     public static String state() { return state+":NATIVE_LIBRARY_BOUNDARY="+(libraryBoundaryReady?"READY":"UNAVAILABLE")
             +":HOST_PROCESS_BOUNDARY="+(available&&hostReady0()?"JDK_PROCESSIMPL_CREATEPROCESSW_BOUND":"AWAITING_ACTUAL_JDK_PROCESSIMPL_CREATEPROCESSW_BIND")
-            +":HOST_NATIVE_CREATE_SCOPE=REGISTERED_EXACT_CREATEPROCESSA_W_NORMAL_OR_RESOLVED_DELAY_IMPORTS_AND_OBSERVED_GETPROCADDRESS_RESULTS_POST_LOAD_ONLY"
+            +":HOST_NATIVE_CREATE_SCOPE=REGISTERED_EXACT_CREATEPROCESSA_W_NORMAL_OR_RESOLVED_DELAY_IMPORTS_AND_OBSERVED_GETPROCADDRESS_RESULTS_AFTER_OS_LOAD_RETURN"
             +":VERIFIED_RIP_RELATIVE_DELAY_IAT_CALLS_USE_CURRENT_BINDING_DYNAMIC_POINTERS_RETAIN_RESOLUTION_SOURCES"
-            +":JNI_ONLOAD_FIRST_WINDOW_UNOBSERVED"
+            +":HOST_JNI_ONLOAD_BOUNDARY="+(available&&hostLibraryLoadReady0()?"EXACT_JDK_OS_LOAD_RETURN_BEFORE_SAME_THREAD_JNI_ONLOAD":"AWAITING_ACTUAL_JDK_LOAD_UNLOAD_IMPORT_BIND")
+            +":DLLMAIN_AND_TLS_CALLBACKS_BEFORE_OS_LOAD_RETURN_UNOBSERVED"
             +":UNRESOLVED_DELAY_IMPORTS_AND_RESOLUTION_OUTSIDE_REGISTERED_GETPROCADDRESS_ENTRIES_UNOBSERVED"
             +":OTHER_HOST_CREATION_ENTRIES_UNOBSERVED"
             +":NATIVE_PROCESS_HANDLE_TRANSFER_AND_CLOSE_UNOBSERVED"
@@ -636,6 +637,7 @@ public final class NativeControl {
     private static native void processExposed0(Process process,long token,Module[] sources);
     private static native String processRetire0(Process process,long token);
     private static native boolean hostReady0();
+    private static native boolean hostLibraryLoadReady0();
     private static native long[] hostState0(Module module);
     private static native long[] status0(Module module);
     private static native boolean bindingControlled0(java.lang.reflect.Method method);

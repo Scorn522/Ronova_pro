@@ -10,7 +10,7 @@ typedef struct Owner { jweak module; volatile LONG stopped,producer; struct Owne
 typedef struct OwnerLink {Owner *owner;struct OwnerLink *next;} OwnerLink;
 typedef struct NativeUnloader {jweak identity;struct NativeUnloader *next;} NativeUnloader;
 typedef struct NativeLibrary {jweak identity,origin,name;wchar_t *path;jsize nameLength;Owner *carrier,*consumer;OwnerLink *owners;NativeUnloader *unloaders;HMODULE handle;struct HostImage *hostImage;jboolean builtin,jni;volatile LONG alive,complete,closing;struct NativeLibrary *next;} NativeLibrary;
-typedef struct NativeLibraryScope {NativeLibrary *library;int unloading,phase,success;struct NativeLibraryScope *previous;} NativeLibraryScope;
+typedef struct NativeLibraryScope {NativeLibrary *library;int unloading,phase,success,osLoadStarted;HMODULE osHandle;struct NativeLibraryScope *previous;} NativeLibraryScope;
 typedef struct NativeRegistration {jmethodID *methods;jint count;OwnerLink *owners;jweak origin;NativeLibrary *loading;struct NativeRegistration *previous;} NativeRegistration;
 typedef struct Binding {jmethodID method;jweak type,origin;Owner *owner,*declared;OwnerLink *owners;NativeLibrary *library,*loading;void *original,*entry;char *signature,*fileMethod;char result;unsigned unsafeOperation,fileOperation,fileArgument,threadOperation;const char *unsafeKind;volatile LONG active,current,valid;RUNTIME_FUNCTION unwind;struct Binding *previous,*next;} Binding;
 typedef struct NativeDefinition {jclass declaring;jobject loader;jbyteArray bytes;unsigned phase;struct NativeDefinition *previous;} NativeDefinition;

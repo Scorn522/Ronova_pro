@@ -293,6 +293,19 @@ static int host_entry_association(HostImport *entry,NativeThread *state,OwnerLin
             if(owners)ready=ready&&native_owner_merge(owners,library->owners);
         }
     }
+    /* Only this thread's genuine JDK load scope may use a not-yet-complete
+     * image. osHandle comes from the actual JVM_LoadLibrary return, not a path
+     * match or a cached export called later by the DLL itself. */
+    if(entry->image->live&&state)for(NativeLibraryScope *scope=state->library;scope;scope=scope->previous){
+        NativeLibrary *library=scope->library;
+        if(!scope->unloading&&scope->phase==1&&scope->osLoadStarted&&scope->osHandle==entry->image->handle
+                &&library->hostImage==entry->image&&(!entry->library||entry->library==library)
+                &&library->handle==scope->osHandle&&library->jni&&!library->builtin
+                &&InterlockedCompareExchange(&library->alive,0,0)&&!InterlockedCompareExchange(&library->closing,0,0)){
+            associated=1;if(chosen&&chosen!=library)mixed=1;else chosen=library;
+            if(owners)ready=ready&&native_owner_merge(owners,library->owners);
+        }
+    }
     if(entry->image->live){
         if(entry->slot&&__atomic_load_n(entry->slot,__ATOMIC_ACQUIRE)!=entry->entry)ready=0;
         /* An active real binding selects its actual library registration. A
@@ -779,39 +792,66 @@ static void host_image_imports(HostImage *image){
     }
     host_delay_imports(image,base,nt,size);
 }
-static void host_observe_image(HMODULE handle){
-    if(!handle)return;
-    /* Query the OS loader before either ledger lock: an image initializer can
-     * itself enter the JNI source observer while the loader lock is held. */
+static int host_observe_image_scope(HMODULE handle,NativeLibraryScope *loading){
+    if(!handle)return 0;
+    /* Resolve outside the ledgers. JVM_LoadLibrary has returned before an early
+     * observation; no DLL loader notification or guessed file owner is used. */
     HMODULE kernel=GetModuleHandleW(L"kernel32.dll");
     void *createTarget=kernel?(void*)GetProcAddress(kernel,"CreateProcessW"):NULL;
     void *createATarget=kernel?(void*)GetProcAddress(kernel,"CreateProcessA"):NULL;
     void *resolveTarget=kernel?(void*)GetProcAddress(kernel,"GetProcAddress"):NULL;
+    NativeThread *state=native_tls==TLS_OUT_OF_INDEXES?NULL:(NativeThread*)TlsGetValue(native_tls);
     AcquireSRWLockExclusive(&host_imports);AcquireSRWLockShared(&native_records);
-    int registered=0;
-    for(NativeLibrary *library=native_libraries;library;library=library->next)
-        if(host_library_current(library,handle)){registered=1;break;}
-    if(!registered){ReleaseSRWLockShared(&native_records);ReleaseSRWLockExclusive(&host_imports);return;}
+    int early=loading&&state&&state->library==loading&&!loading->unloading&&loading->phase==1
+            &&loading->osLoadStarted&&loading->osHandle==handle&&loading->library->handle==handle
+            &&loading->library->jni&&!loading->library->builtin
+            &&InterlockedCompareExchange(&loading->library->alive,0,0)
+            &&!InterlockedCompareExchange(&loading->library->closing,0,0);
+    int registered=early;
+    for(NativeLibrary *library=native_libraries;library&&!registered;library=library->next)
+        if(host_library_current(library,handle))registered=1;
+    if(!registered){ReleaseSRWLockShared(&native_records);ReleaseSRWLockExclusive(&host_imports);return 0;}
     HostImage *image=host_images;while(image&&(!image->live||image->handle!=handle))image=image->next;
     if(!image){image=(HostImage*)calloc(1,sizeof(*image));if(image){
         image->handle=handle;image->createTarget=createTarget;image->createATarget=createATarget;image->resolveTarget=resolveTarget;
         image->live=1;image->next=host_images;host_images=image;
     }}
-    if(image)for(NativeLibrary *library=native_libraries;library;library=library->next)
-        if(host_library_current(library,handle))library->hostImage=image;
+    if(image){
+        if(early)loading->library->hostImage=image;
+        for(NativeLibrary *library=native_libraries;library;library=library->next)
+            if(host_library_current(library,handle))library->hostImage=image;
+    }
     ReleaseSRWLockShared(&native_records);
-    /* Loading/unloading callers invoke this outside native_records. The import
-     * lock orders installation against the real library's pre-unload handoff. */
     if(image&&!image->checked)host_image_imports(image);
     if(!image)InterlockedIncrement(&native_failures);
-    ReleaseSRWLockExclusive(&host_imports);
+    int ready=image&&image->checked&&!image->failed;
+    ReleaseSRWLockExclusive(&host_imports);return ready;
+}
+static void host_observe_image(HMODULE handle){(void)host_observe_image_scope(handle,NULL);}
+static int host_observe_loading(NativeLibraryScope *scope){return host_observe_image_scope(scope->osHandle,scope);}
+static int host_image_other_live(HostImage *image,NativeLibrary *excluding){
+    /* A pending registration counts only after this exact HostImage was bound
+     * at its real OS return. Path-only NativeLibrary.handle observations do not. */
+    for(NativeLibrary *other=native_libraries;other;other=other->next)
+        if(other!=excluding&&other->hostImage==image&&other->handle==image->handle&&other->jni&&!other->builtin
+                &&InterlockedCompareExchange(&other->alive,0,0)&&!InterlockedCompareExchange(&other->closing,0,0))return 1;
+    return 0;
+}
+static void host_library_load_failed(NativeLibrary *library){
+    /* A replaced/cached JVM_UnloadLibrary entry may bypass the pre-unmap hook.
+     * The failed genuine JDK load still invalidates this source. Never inspect
+     * its potentially unmapped IAT while disabling its remaining entries. */
+    AcquireSRWLockExclusive(&host_imports);AcquireSRWLockShared(&native_records);
+    HostImage *image=library->hostImage;
+    if(image&&image->live&&!host_image_other_live(image,library)){
+        image->failed=1;image->delayImports=1;image->live=0;
+    }
+    ReleaseSRWLockShared(&native_records);ReleaseSRWLockExclusive(&host_imports);
 }
 static void host_library_releasing(NativeLibrary *library){
     AcquireSRWLockExclusive(&host_imports);HostImage *image=library->hostImage;
     if(!image){ReleaseSRWLockExclusive(&host_imports);return;}
-    AcquireSRWLockShared(&native_records);int shared=0;
-    for(NativeLibrary *other=native_libraries;other;other=other->next)
-        if(other!=library&&host_library_current(other,image->handle)){other->hostImage=image;shared=1;}
+    AcquireSRWLockShared(&native_records);int shared=host_image_other_live(image,library);
     ReleaseSRWLockShared(&native_records);
     host_promote_delays(image,NULL,NULL);
     /* JNI_OnUnload runs inside the real unload call. Restoring the bare API

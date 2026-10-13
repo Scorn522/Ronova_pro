@@ -1,5 +1,21 @@
 # Ronova Pro 当前进度
 
+## 2026-10-13：C 接续——JNI_OnLoad 前接入、接收描述符与存量界面
+
+接续已同步的 `f527867`。Java ABI 49 / Native ABI 49 / Storage ABI 3 / Journal 6，GNU C23 / GNU C++23、Java 17。当前整组代码已写齐；主包和夹具构建通过，三项实际原生检查通过。完整 C 及 B 的游戏收口仍未完成。
+
+- Host 通过真实 java.dll 中指向实际 VM 导出的 JVM_LoadLibrary/JVM_UnloadLibrary 导入，接入同一次真实加载作用域，在 OS 加载返回后、同线程 JNI_OnLoad 前安装 A/W 与动态解析控制。嵌套加载、失败后的提前卸载及共享映像保留已接线；DllMain/TLS 的 OS 返回前窗口仍未覆盖。
+- Net.accept 的监听和输出描述符复用真实双端作用域；输出观察不授予分配/释放权限。同一 FD 去重，开始失败和原生异常仍逆序结束。
+- 客户端接入实际 Minecraft 单例的官方/SRG setScreen/setOverlay 与 runTick：拒绝目标新界面，按既有来源退场专属存量 Screen/Overlay。共享/未知来源保留；关闭重入产生的新合法界面保留；普通关闭失败留待处理，fatal 原样传播。空 UUID 纯绘制接口未提升能力。
+
+集中构建 `build-c-native49-ui-accept-onload-fixed-20261013.log` 为 22 秒 PASS。实际 `host-load`、`socket-accept`、因共用辅助方法变化而复查的 `file-transfer` 均退出 0。前者是真正 System.load/JNI_OnLoad 内创建子进程、嵌套加载、失败卸载和缓存入口拒绝；两项 I/O 检查是真实回环数据及失败后的作用域恢复。内部合法 sealed 目标仍未验证。最初 C 指针声明编译失败已修复，原日志保留。
+
+隔离客户端首次运行 `.work/c-client-20261013` 于 13:09:46 在 GLFW/WindowsLibrary 初始化失败，并于 13:09:48 退出：UTF16 参数缓冲区 remaining=0。实际 LWJGL wrap 通过 Unsafe.allocateInstance 后初始化 address/mark/limit/capacity，现有资源字段保护拒绝这组外部初始化；正在修复真实新视图的初始化路径。尚未到 Minecraft 实例、菜单或 UI 停组，不计通过。原 launch.log 和单次进程已退出的线程读取结果保留，详情见 [原报告](../validation/b-final-20261007/REPORT.md)。
+
+本地候选：`distribution/candidate-c-native49-wip-20261013/ronova-pro-core-0.1.0-stage-b-dev.jar`；源码与摘要同步，主包和原始日志留在本地，Native 48 候选保留。
+
+---
+
 ## 2026-10-13：C 接续——Host A/W、直接传输与客户端镜像
 
 继续当前主工程；用户提供的 `ronova-c565e97-b-r10-20261006-source.zip` 只作对照。GNU C23 / GNU C++23、Java 17 保持；Java ABI 49 / Native ABI 48 / Storage ABI 3 / Journal 6。**本工作包代码已写齐并构建通过，C 整体与 B 的实际游戏收口仍未完成。**

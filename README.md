@@ -1,4 +1,4 @@
-> **2026-10-13 当前主工程：`D:\桌面\ronova_GPT`。** C 接续已补 Host CreateProcessA/W、文件直接传输双描述符作用域和客户端准确镜像清除/重新发布限制。GNU C23 / GNU C++23、Java 17；Java ABI 49 / Native ABI 48 / Storage ABI 3 / Journal 6。完整主包构建、Windows 子进程和实际文件传输检查通过；客户端实机与内部 sealed 目标尚未验收，完整 C 和 B 的游戏收口仍未完成。详见 [当前状态](docs/A-批验收状态.md) 和 [实际报告](validation/b-final-20261007/REPORT.md)。本地 WIP 主包位于 `distribution/candidate-c-native48-wip-20261013`；源码与摘要同步，主包及原始日志留在本地。
+> **2026-10-13 当前主工程：`D:\桌面\ronova_GPT`。** C 已接入真正 JNI_OnLoad 前的 Host 路径、Net.accept 双描述符及客户端存量 Screen/Overlay 生命周期。GNU C23 / GNU C++23、Java 17；Java ABI 49 / Native ABI 49 / Storage ABI 3 / Journal 6。主包构建、真实首次加载/失败卸载、网络接入与文件传输检查通过。首次隔离客户端在 GLFW 缓冲区初始化退出，正在修复；菜单/UI 停组/内部 sealed 目标及完整 C/B 游戏收口尚未验收。详见 [当前状态](docs/A-批验收状态.md) 和 [实际报告](validation/b-final-20261007/REPORT.md)。本地候选在 `distribution/candidate-c-native49-wip-20261013`；主包与原始日志留在本地。
 
 以下 R1/R2、候选 43、旧主包与旧环境结果保留其原日期和证据范围。已有发行目录不是本轮源码对应的新游戏安装包。
 

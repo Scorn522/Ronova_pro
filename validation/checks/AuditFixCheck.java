@@ -17,6 +17,8 @@ public final class AuditFixCheck {
         if(args.length==1&&args[0].equals("clone-boundary")){cloneBoundary();return;}
         if(args.length==1&&args[0].equals("buffer-release")){bufferRelease();return;}
         if(args.length==1&&args[0].equals("file-transfer")){fileTransfer();return;}
+        if(args.length==1&&args[0].equals("socket-accept")){socketAccept();return;}
+        if(args.length==1&&args[0].equals("host-load")){hostLoad();return;}
         if(args.length==1&&args[0].equals("storage-native")){storageNative();return;}
         if(args.length==1&&args[0].equals("host-process")){System.load(java.nio.file.Path.of(System.getProperty("ronova.pro.audit.native")).toAbsolutePath().toString());hostProcess0();System.out.println("HOST_PROCESS_PASS actual_windows_children A_W_imports A_W_dynamic suspended_preserved stopped_source_refused cached_result_refused unrelated_original_preserved retired_image_refused handles_retired");return;}
         ProRuntime runtime=(ProRuntime)U.allocateInstance(ProRuntime.class);
@@ -175,6 +177,125 @@ public final class AuditFixCheck {
                 require(transferred==length&&bytes.length==length&&Arrays.equals(bytes,Arrays.copyOfRange(payload,position,position+length)),"actual file/socket transfer changed bytes or length");
             }
         }finally{require(scopes.get()==previous,"public file/socket transfer left a file operation scope live");}
+    }
+    private record HostLoadObservation(long ansi,long wide,int flags) { }
+    private static final List<HostLoadObservation> HOST_LOAD_OBSERVATIONS=new ArrayList<>();
+    private static java.nio.file.Path hostLoadDirectory;
+    private static native long hostLoadCachedCreate0(long pointer,boolean ansi);
+    public static void hostLoadObserved(long ansi,long wide,int flags){HOST_LOAD_OBSERVATIONS.add(new HostLoadObservation(ansi,wide,flags));}
+    public static void hostLoadNested(){System.load(hostLoadDirectory.resolve("audit-host-load-inner.dll").toString());}
+    private static void hostLoad()throws Exception {
+        Class<?> controls=Class.forName("dev.ronova.pro.bootstrap.NativeControl",true,null);
+        require(Boolean.TRUE.equals(controls.getMethod("available").invoke(null)),"actual Windows native backend absent");
+        hostLoadDirectory=java.nio.file.Path.of(System.getProperty("ronova.pro.audit.host.directory")).toAbsolutePath();
+        System.load(hostLoadDirectory.resolve("audit-host-load-support.dll").toString());HOST_LOAD_OBSERVATIONS.clear();
+        System.load(hostLoadDirectory.resolve("audit-host-load-normal.dll").toString());
+        require(HOST_LOAD_OBSERVATIONS.size()==1,"normal JNI_OnLoad observation missing");
+        HostLoadObservation retained=hostLoadObservation(0);
+        HOST_LOAD_OBSERVATIONS.clear();
+        System.load(hostLoadDirectory.resolve("audit-host-load-outer.dll").toString());
+        require(HOST_LOAD_OBSERVATIONS.size()==2,"nested JNI_OnLoad scopes were not both observed");
+        hostLoadObservation(0);hostLoadObservation(1);
+        HOST_LOAD_OBSERVATIONS.clear();
+        try{System.load(hostLoadDirectory.resolve("audit-host-load-fail.dll").toString());throw new AssertionError("invalid JNI_OnLoad version accepted");}
+        catch(UnsatisfiedLinkError expected){ }
+        require(HOST_LOAD_OBSERVATIONS.size()==1,"failed JNI_OnLoad observation missing");
+        retiredHostLoad(hostLoadObservation(0));
+        HOST_LOAD_OBSERVATIONS.clear();
+        try{System.load(hostLoadDirectory.resolve("audit-host-load-throw.dll").toString());throw new AssertionError("throwing JNI_OnLoad accepted");}
+        catch(IllegalStateException expected){require("AUDIT_HOST_LOAD_THROW".equals(expected.getMessage()),"JNI_OnLoad exception was replaced");}
+        require(HOST_LOAD_OBSERVATIONS.size()==1,"throwing JNI_OnLoad observation missing");
+        retiredHostLoad(hostLoadObservation(0));
+        require(hostLoadCachedCreate0(retained.ansi(),true)>>>32!=0,"unrelated live ANSI entry was retired");
+        require(hostLoadCachedCreate0(retained.wide(),false)>>>32!=0,"unrelated live Unicode entry was retired");
+        System.out.println("HOST_LOAD_PASS actual_jdk_system_load JNI_OnLoad_A_W_imports_dynamic_children nested_load_scopes invalid_version_unloaded original_exception_preserved cached_unloaded_entries_refused unrelated_live_entries_preserved");
+        System.out.println("HOST_LOAD_SCOPE_UNCHECKED DllMain_TLS_before_OS_load_return");
+    }
+    private static HostLoadObservation hostLoadObservation(int index){
+        HostLoadObservation observation=HOST_LOAD_OBSERVATIONS.get(index);
+        require(observation.ansi()!=0&&observation.wide()!=0&&observation.flags()==63,"JNI_OnLoad did not consume controlled A/W entries: "+observation.flags());return observation;
+    }
+    private static void retiredHostLoad(HostLoadObservation observation){
+        long ansi=hostLoadCachedCreate0(observation.ansi(),true),wide=hostLoadCachedCreate0(observation.wide(),false);
+        require(ansi>>>32==0&&(ansi&0xffffffffL)==126,"unloaded ANSI entry was reusable or lost its original error");
+        require(wide>>>32==0&&(wide&0xffffffffL)==126,"unloaded Unicode entry was reusable or lost its original error");
+    }
+    private static void socketAccept()throws Exception {
+        Class<?> controls=Class.forName("dev.ronova.pro.bootstrap.NativeControl",true,null);
+        require(Boolean.TRUE.equals(controls.getMethod("available").invoke(null)),"actual Windows native backend absent");
+        Class<?> net=Class.forName("sun.nio.ch.Net",true,null);
+        Method accept=net.getDeclaredMethod("accept",java.io.FileDescriptor.class,java.io.FileDescriptor.class,java.net.InetSocketAddress[].class);
+        require(Modifier.isNative(accept.getModifiers()),"actual Net.accept native entry absent");accept.setAccessible(true);
+        Field operations=Class.forName("dev.ronova.pro.bootstrap.ResourceBridge",true,null).getDeclaredField("FILE_OPERATIONS");
+        operations.setAccessible(true);ThreadLocal<?> scopes=(ThreadLocal<?>)operations.get(null);
+        java.io.FileDescriptor closedListener;
+        try(var closed=java.nio.channels.ServerSocketChannel.open(java.net.StandardProtocolFamily.INET)){
+            closed.bind(new java.net.InetSocketAddress("127.0.0.1",0));closedListener=socketDescriptor(closed);
+        }
+        var untouched=new java.io.FileDescriptor();
+        try{nativeAccept(accept,closedListener,untouched,new java.net.InetSocketAddress[1],scopes);throw new AssertionError("closed native listener accepted");}
+        catch(java.io.IOException expected){ }
+        require(!untouched.valid(),"failed accept published a target handle");
+        try(var listener=java.nio.channels.ServerSocketChannel.open(java.net.StandardProtocolFamily.INET)){
+            listener.bind(new java.net.InetSocketAddress("127.0.0.1",0));listener.configureBlocking(false);
+            Object previous=scopes.get();
+            try(var peer=java.nio.channels.SocketChannel.open(listener.getLocalAddress())){
+                java.nio.channels.SocketChannel accepted=null;long deadline=System.nanoTime()+TimeUnit.SECONDS.toNanos(10);
+                while(accepted==null){accepted=listener.accept();if(accepted==null){require(System.nanoTime()<deadline,"public accept did not complete");Thread.sleep(1);}}
+                try(var actual=accepted){socketExchange(peer,actual);}
+            }
+            require(scopes.get()==previous,"public accept left a file operation scope live");
+            var output=new java.io.FileDescriptor();var addresses=new java.net.InetSocketAddress[1];
+            try(var peer=java.nio.channels.SocketChannel.open(listener.getLocalAddress())){
+                java.nio.channels.SocketChannel accepted=null;Throwable failure=null;
+                try{
+                    long deadline=System.nanoTime()+TimeUnit.SECONDS.toNanos(10);int count;
+                    do{count=nativeAccept(accept,socketDescriptor(listener),output,addresses,scopes);require(System.nanoTime()<deadline,"native accept did not complete");if(count<=0)Thread.sleep(1);}while(count<=0);
+                    require(output.valid()&&addresses[0]!=null,"native accept omitted its actual descriptor/address");
+                    var type=Class.forName("sun.nio.ch.SocketChannelImpl",true,null);
+                    var constructor=type.getDeclaredConstructor(java.nio.channels.spi.SelectorProvider.class,java.net.ProtocolFamily.class,
+                            java.io.FileDescriptor.class,java.net.SocketAddress.class);constructor.setAccessible(true);
+                    accepted=(java.nio.channels.SocketChannel)constructor.newInstance(listener.provider(),java.net.StandardProtocolFamily.INET,output,addresses[0]);
+                    try(var actual=accepted){socketExchange(peer,actual);}
+                }catch(Exception|Error thrown){failure=thrown;throw thrown;}
+                finally{
+                    if(accepted==null&&output.valid())try{
+                        Class<?> dispatcher=Class.forName("sun.nio.ch.SocketDispatcher",true,null);var make=dispatcher.getDeclaredConstructor();make.setAccessible(true);
+                        Method close=dispatcher.getDeclaredMethod("close",java.io.FileDescriptor.class);close.setAccessible(true);close.invoke(make.newInstance(),output);
+                    }catch(Exception|Error cleanup){if(failure==null)throw cleanup;failure.addSuppressed(cleanup);}
+                }
+            }
+            require(scopes.get()==previous,"native accept/data exchange left a file operation scope live");
+        }
+        System.out.println("SOCKET_ACCEPT_PASS actual_native closed_listener_refused output_preserved native_failure_scope_restored public_accept_duplex_bytes native_accept_actual_output_duplex_bytes");
+        System.out.println("SOCKET_ACCEPT_SCOPE_UNCHECKED sealed_output_requires_actual_retirement_writer");
+    }
+    private static java.io.FileDescriptor socketDescriptor(Object socket)throws Exception {
+        Field fd=socket.getClass().getDeclaredField("fd");fd.setAccessible(true);return (java.io.FileDescriptor)fd.get(socket);
+    }
+    private static int nativeAccept(Method entry,java.io.FileDescriptor listener,java.io.FileDescriptor target,
+            java.net.InetSocketAddress[] address,ThreadLocal<?> scopes)throws Exception {
+        Object previous=scopes.get();
+        try{return (Integer)entry.invoke(null,listener,target,address);}
+        catch(InvocationTargetException failure){
+            if(failure.getCause() instanceof Exception cause)throw cause;
+            if(failure.getCause() instanceof Error cause)throw cause;throw failure;
+        }finally{require(scopes.get()==previous,"native accept left a file operation scope live");}
+    }
+    private static void socketExchange(java.nio.channels.SocketChannel left,java.nio.channels.SocketChannel right)throws Exception {
+        left.configureBlocking(false);right.configureBlocking(false);
+        byte[] request={2,5,9,17,31},response={7,11,19,37};
+        socketMessage(left,right,request);socketMessage(right,left,response);
+    }
+    private static void socketMessage(java.nio.channels.SocketChannel source,java.nio.channels.SocketChannel target,byte[] bytes)throws Exception {
+        var output=java.nio.ByteBuffer.wrap(bytes);var input=java.nio.ByteBuffer.allocate(bytes.length);
+        long deadline=System.nanoTime()+TimeUnit.SECONDS.toNanos(10);
+        while(output.hasRemaining()||input.hasRemaining()){
+            if(output.hasRemaining())source.write(output);
+            int received=input.hasRemaining()?target.read(input):0;require(received>=0,"accepted socket ended before its actual message");
+            require(System.nanoTime()<deadline,"accepted socket data did not complete");if(received==0)Thread.sleep(1);
+        }
+        require(Arrays.equals(bytes,input.array()),"accepted socket changed actual message bytes");
     }
     private static void sourceListFixes()throws Exception {
         Class<?> publications=Class.forName("dev.ronova.pro.SourceMaps$Publications");
