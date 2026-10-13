@@ -20,6 +20,17 @@ public final class ClientBridge {
     private static final Map<Key,ReloadWork> RELOAD_WORK=new HashMap<>();
     private static final Map<Key,UiFields> UI_OWNERS=new HashMap<>();
     private static final ThreadLocal<UiRetirement> UI_RETIRING=new ThreadLocal<>();
+    private static final String OVERLAY_MANAGER="net.minecraftforge.client.gui.overlay.GuiOverlayManager",OVERLAY_EVENT="net.minecraftforge.client.event.RegisterGuiOverlaysEvent";
+    private static final String OVERLAY_NAMED="net.minecraftforge.client.gui.overlay.NamedGuiOverlay",OVERLAY_CALLBACK="net.minecraftforge.client.gui.overlay.IGuiOverlay";
+    private static final String OVERLAY_REGISTER="(Lnet/minecraftforge/client/event/RegisterGuiOverlaysEvent$Ordering;Lnet/minecraft/resources/ResourceLocation;Ljava/lang/String;Lnet/minecraftforge/client/gui/overlay/IGuiOverlay;)V";
+    private static final String OVERLAY_RENDER="(Lnet/minecraft/client/gui/GuiGraphics;FLnet/minecraftforge/client/gui/overlay/NamedGuiOverlay;)V";
+    private static final Map<Key,OverlayEvent> OVERLAY_EVENTS=new HashMap<>();
+    private static final Map<Key,OverlayRegistry> OVERLAY_REGISTRIES=new HashMap<>();
+    private static final Map<Key,OverlaySlot> OVERLAY_NAMES=new HashMap<>();
+    private static final ThreadLocal<OverlayInit> OVERLAY_INITIALIZING=new ThreadLocal<>();
+    private static final ClassValue<OverlayFields> OVERLAY_FIELDS=new ClassValue<>(){
+        protected OverlayFields computeValue(Class<?> type){try{return new OverlayFields(type);}catch(ReflectiveOperationException unavailable){throw new IllegalStateException("CLIENT_OVERLAY_FIELDS_UNAVAILABLE",unavailable);}}
+    };
     private static final System.Logger UI_LOG=System.getLogger("ronova_pro.client.lifecycle");
     private static final ClassValue<UiFields> UI_FIELDS=new ClassValue<>(){
         protected UiFields computeValue(Class<?> type){try{return new UiFields(type);}catch(ReflectiveOperationException unavailable){throw new IllegalStateException("CLIENT_UI_FIELDS_UNAVAILABLE",unavailable);}}
@@ -36,6 +47,46 @@ public final class ClientBridge {
     private record Texture(Ref<Object> object,Module[] modules){}
     private record SoundRegistry(Ref<Map<?,?>> instances){}
     private record ReloadWork(java.util.concurrent.CompletableFuture<?> future,Module[] modules){}
+    private static final class OverlayFields {
+        final Class<?> type,named,event;final Field list,map,id,callback,eventMap,eventOrder;final Method listCopy,mapCopy;
+        final java.util.concurrent.locks.ReentrantLock gate=new java.util.concurrent.locks.ReentrantLock();long generation;int initializing;String pending="";
+        OverlayFields(Class<?> type)throws ReflectiveOperationException{
+            this.type=type;list=type.getDeclaredField("OVERLAYS");map=type.getDeclaredField("OVERLAYS_BY_NAME");list.setAccessible(true);map.setAccessible(true);
+            named=Class.forName(OVERLAY_NAMED,false,type.getClassLoader());event=Class.forName(OVERLAY_EVENT,false,type.getClassLoader());
+            id=named.getDeclaredField("id");callback=named.getDeclaredField("overlay");eventMap=event.getDeclaredField("overlays");eventOrder=event.getDeclaredField("orderedOverlays");
+            for(Field member:new Field[]{id,callback,eventMap,eventOrder})member.setAccessible(true);
+            if(!Modifier.isStatic(list.getModifiers())||!Modifier.isStatic(map.getModifiers())||!list.getType().getName().equals("com.google.common.collect.ImmutableList")
+                    ||!map.getType().getName().equals("com.google.common.collect.ImmutableMap")||!named.isRecord()||!Modifier.isFinal(named.getModifiers())
+                    ||!id.getType().getName().equals("net.minecraft.resources.ResourceLocation")||!callback.getType().getName().equals(OVERLAY_CALLBACK)
+                    ||eventMap.getType()!=Map.class||eventOrder.getType()!=List.class||named.getModule()!=type.getModule()||event.getModule()!=type.getModule())throw new IllegalStateException("CLIENT_OVERLAY_FIELD_TYPES_CHANGED");
+            listCopy=list.getType().getMethod("copyOf",Collection.class);mapCopy=map.getType().getMethod("copyOf",Map.class);
+            overlayProtect(this,gate,list,map,id,callback,eventMap,eventOrder,listCopy,mapCopy);
+        }
+    }
+    private static final class OverlayInit {
+        final OverlayFields fields;final long generation;final Thread thread=Thread.currentThread();final OverlayInit previous=OVERLAY_INITIALIZING.get();
+        OverlayEvent event;boolean ended,published;
+        OverlayInit(OverlayFields fields,long generation){this.fields=fields;this.generation=generation;}
+    }
+    private static final class OverlayEvent {
+        final OverlayInit init;final Ref<Map<?,?>> map;final Ref<List<?>> order;final Map<Object,OverlayRegistration> registrations=new IdentityHashMap<>();
+        OverlayEvent(OverlayInit init,Map<?,?> map,List<?> order){this.init=init;this.map=new Ref<>(map);this.order=new Ref<>(order);overlayProtect(this,this.map,this.order,registrations);}
+    }
+    private record OverlayRegistration(Ref<Object> callback,Module[] modules){}
+    private static final class OverlaySlot {
+        final OverlayFields fields;final long generation;final Object key;final Ref<Object> named,callback;final Module[] modules;final boolean observed;boolean retired;
+        OverlaySlot(OverlayFields fields,long generation,Object key,Object named,Object callback,Module[] modules,boolean observed){
+            this.fields=fields;this.generation=generation;this.key=key;this.named=new Ref<>(named);this.callback=new Ref<>(callback);this.modules=modules;this.observed=observed;overlayProtect(this,this.named,this.callback,modules);
+        }
+    }
+    private static final class OverlayRegistry {
+        final OverlayFields fields;final long generation;final Object list,map;final List<OverlaySlot> slots;OverlayRetirement retirement;
+        OverlayRegistry(OverlayFields fields,long generation,Object list,Object map,List<OverlaySlot> slots){this.fields=fields;this.generation=generation;this.list=list;this.map=map;this.slots=slots;overlayProtect(this,slots);}
+    }
+    private static final class OverlayRetirement {
+        final OverlayRegistry before;final Object list,map;final List<OverlaySlot> kept,removed;String pending="CLIENT_OVERLAY_PAIR_PUBLICATION_PENDING";
+        OverlayRetirement(OverlayRegistry before,Object list,Object map,List<OverlaySlot> kept,List<OverlaySlot> removed){this.before=before;this.list=list;this.map=map;this.kept=kept;this.removed=removed;overlayProtect(this,kept,removed);}
+    }
     private static final class UiFields {
         final Class<?> type;final Field instance,thread,screen,overlay;final Method setScreen,setOverlay;
         UiFields(Class<?> type)throws ReflectiveOperationException{
@@ -73,8 +124,9 @@ public final class ClientBridge {
     }
     private static final class Scope {
         final Scope parent;final Module[] sources;final Class<?> type;final String method;final Thread thread;
-        boolean ended;
-        Scope(Scope parent,Module[] sources,StackWalker.StackFrame frame){this.parent=parent;this.sources=sources;type=frame.getDeclaringClass();method=frame.getMethodName();thread=Thread.currentThread();}
+        final OverlaySlot overlay;boolean ended;
+        Scope(Scope parent,Module[] sources,StackWalker.StackFrame frame){this(parent,sources,frame,null);}
+        Scope(Scope parent,Module[] sources,StackWalker.StackFrame frame,OverlaySlot overlay){this.parent=parent;this.sources=sources;type=frame.getDeclaringClass();method=frame.getMethodName();thread=Thread.currentThread();this.overlay=overlay;}
     }
     private static final class Ref<T> extends WeakReference<T>{
         Ref(T object){super(object);}
@@ -169,7 +221,140 @@ public final class ClientBridge {
             fields=uiOwner(owner,frame);if(fields.thread.get(owner)!=Thread.currentThread())throw new IllegalStateException("CLIENT_UI_MAIN_THREAD_REQUIRED");
         }catch(ReflectiveOperationException|IllegalStateException unavailable){uiFailure(owner,new Module[0],unavailable);return;}
         UiRetirement active=UI_RETIRING.get();if(active!=null&&active.owner==owner)return;
-        retirePresentation(owner,fields,false);retirePresentation(owner,fields,true);
+        retireOverlays();retirePresentation(owner,fields,false);retirePresentation(owner,fields,true);
+    }
+    private static void overlayProtect(Object... objects){for(Object object:objects)CodeSourceBridge.contributionControl(object);}
+    private static void overlayBoundary(StackWalker.StackFrame frame,String type,String method,String descriptor){
+        if(!frame.getDeclaringClass().getName().equals(type)||!frame.getMethodName().equals(method)||!frame.getDescriptor().equals(descriptor))throw new SecurityException("ACTUAL_CLIENT_OVERLAY_BOUNDARY_REQUIRED");
+    }
+    public static Object overlayInitEntering(Class<?> manager){
+        var frame=boundary();overlayBoundary(frame,OVERLAY_MANAGER,"init","()V");if(frame.getDeclaringClass()!=manager)throw new SecurityException("ACTUAL_OVERLAY_MANAGER_REQUIRED");
+        OverlayFields fields=OVERLAY_FIELDS.get(manager);fields.gate.lock();
+        try{synchronized(SOURCES){OverlayInit init=new OverlayInit(fields,++fields.generation);fields.initializing++;overlayProtect(init);OVERLAY_INITIALIZING.set(init);return init;}}
+        finally{fields.gate.unlock();} // The original event post runs without this metadata lock.
+    }
+    public static void overlayInitExiting(Object token){
+        var frame=boundary();overlayBoundary(frame,OVERLAY_MANAGER,"init","()V");
+        if(!(token instanceof OverlayInit init)||init.thread!=Thread.currentThread()||init.fields.type!=frame.getDeclaringClass())throw new SecurityException("ACTUAL_OVERLAY_INIT_SCOPE_REQUIRED");
+        if(init.ended)return;if(OVERLAY_INITIALIZING.get()!=init)throw new IllegalStateException("CLIENT_OVERLAY_INIT_ORDER_CHANGED");
+        init.fields.gate.lock();try{synchronized(SOURCES){init.ended=true;init.fields.initializing--;if(!init.published)init.fields.pending="CLIENT_OVERLAY_INIT_PUBLICATION_UNOBSERVED";}}
+        finally{if(init.previous==null)OVERLAY_INITIALIZING.remove();else OVERLAY_INITIALIZING.set(init.previous);init.fields.gate.unlock();}
+    }
+    public static void overlayEventConstructed(Object event,Map<?,?> registrations,List<?> order){
+        var frame=boundary();overlayBoundary(frame,OVERLAY_EVENT,"<init>","(Ljava/util/Map;Ljava/util/List;)V");OverlayInit init=OVERLAY_INITIALIZING.get();
+        if(init==null||init.ended||init.thread!=Thread.currentThread())return;
+        if(init.event!=null)return;
+        if(frame.getDeclaringClass()!=init.fields.event||event==null||event.getClass()!=init.fields.event||registrations.getClass()!=HashMap.class||order.getClass()!=ArrayList.class)
+            throw new SecurityException("ACTUAL_OVERLAY_EVENT_PAIR_REQUIRED");
+        try{
+            if(init.fields.eventMap.get(event)!=registrations||init.fields.eventOrder.get(event)!=order)throw new IllegalStateException("CLIENT_OVERLAY_EVENT_PAIR_CHANGED");
+            synchronized(SOURCES){OverlayEvent observed=new OverlayEvent(init,registrations,order);init.event=observed;OVERLAY_EVENTS.put(new Key(event,true),observed);}
+        }catch(ReflectiveOperationException unavailable){throw new IllegalStateException("CLIENT_OVERLAY_EVENT_CAPTURE_FAILED",unavailable);}
+    }
+    public static void overlayRegistered(Object event,Map<?,?> registrations,List<?> order,Object key,Object callback){
+        var frame=boundary();overlayBoundary(frame,OVERLAY_EVENT,"register",OVERLAY_REGISTER);OverlayEvent observed;
+        synchronized(SOURCES){observed=OVERLAY_EVENTS.get(new Key(event,false));}if(observed==null||observed.init.ended)return;
+        if(observed.init.thread!=Thread.currentThread()||event.getClass()!=observed.init.fields.event||observed.map.get()!=registrations||observed.order.get()!=order)
+            throw new SecurityException("ACTUAL_OVERLAY_REGISTRATION_PAIR_REQUIRED");
+        try{
+            if(observed.init.fields.eventMap.get(event)!=registrations||observed.init.fields.eventOrder.get(event)!=order||key==null||key.getClass()!=observed.init.fields.id.getType()
+                    ||callback==null||!observed.init.fields.callback.getType().isInstance(callback)||registrations.get(key)!=callback)throw new IllegalStateException("CLIENT_OVERLAY_REGISTRATION_CHANGED");
+            int matches=0;for(Object entry:order)if(entry==key)matches++;if(matches!=1)throw new IllegalStateException("CLIENT_OVERLAY_ORDER_REGISTRATION_CHANGED");
+            Module[] modules=union(ControlBridge.invokingSources(),currentSources(),origins(callback));
+            OverlayRegistration slot=new OverlayRegistration(new Ref<>(callback),modules);overlayProtect(slot,slot.callback(),modules);
+            synchronized(SOURCES){observed.registrations.put(key,slot);}
+        }catch(ReflectiveOperationException unavailable){throw new IllegalStateException("CLIENT_OVERLAY_REGISTRATION_CAPTURE_FAILED",unavailable);}
+    }
+    public static void overlayPublished(Class<?> manager,Map<?,?> registrations,List<?> order){
+        var frame=boundary();overlayBoundary(frame,OVERLAY_MANAGER,"init","()V");OverlayInit init=OVERLAY_INITIALIZING.get();
+        if(init==null||init.ended||init.thread!=Thread.currentThread()||init.fields.type!=manager||frame.getDeclaringClass()!=manager||init.event==null
+                ||init.event.map.get()!=registrations||init.event.order.get()!=order)throw new SecurityException("ACTUAL_OVERLAY_PUBLICATION_PAIR_REQUIRED");
+        try{
+            Object list=init.fields.list.get(null),map=init.fields.map.get(null);
+            if(!init.fields.list.getType().isInstance(list)||!init.fields.map.getType().isInstance(map))throw new IllegalStateException("CLIENT_OVERLAY_PUBLICATION_TYPES_CHANGED");
+            List<?> named=(List<?>)list;Map<?,?> byName=(Map<?,?>)map;if(named.size()!=order.size()||byName.size()!=named.size()||registrations.size()!=named.size())throw new IllegalStateException("CLIENT_OVERLAY_PUBLICATION_SIZE_CHANGED");
+            List<OverlaySlot> slots=new ArrayList<>(named.size());
+            for(int index=0;index<named.size();index++){
+                Object value=named.get(index);if(value==null||value.getClass()!=init.fields.named||!role(value.getClass()))throw new IllegalStateException("CLIENT_NAMED_OVERLAY_TYPE_CHANGED");
+                Object key=init.fields.id.get(value),callback=init.fields.callback.get(value);
+                if(key!=order.get(index)||registrations.get(key)!=callback||byName.get(key)!=value)throw new IllegalStateException("CLIENT_OVERLAY_PUBLICATION_ASSOCIATION_CHANGED");
+                OverlayRegistration observed; synchronized(SOURCES){observed=init.event.registrations.get(key);}
+                if(observed!=null&&observed.callback().get()!=callback)throw new IllegalStateException("CLIENT_OVERLAY_CALLBACK_CHANGED_AFTER_REGISTRATION");
+                Module[] modules=observed==null?origins(callback):union(observed.modules(),origins(callback));
+                slots.add(new OverlaySlot(init.fields,init.generation,key,value,callback,modules,observed!=null));
+            }
+            init.fields.gate.lock();try{synchronized(SOURCES){
+                if(init.fields.generation!=init.generation||init.fields.list.get(null)!=list||init.fields.map.get(null)!=map)throw new IllegalStateException("CLIENT_OVERLAY_PUBLICATION_GENERATION_CHANGED");
+                OverlayRegistry registry=new OverlayRegistry(init.fields,init.generation,list,map,slots);OVERLAY_REGISTRIES.put(new Key(manager,true),registry);
+                for(OverlaySlot slot:slots)OVERLAY_NAMES.put(new Key(slot.named.get(),true),slot);init.published=true;init.fields.pending="";
+            }}finally{init.fields.gate.unlock();}
+        }catch(ReflectiveOperationException|RuntimeException unavailable){synchronized(SOURCES){init.fields.pending="CLIENT_OVERLAY_PUBLICATION_CAPTURE_FAILED";}throw new IllegalStateException("CLIENT_OVERLAY_PUBLICATION_CAPTURE_FAILED",unavailable);}
+    }
+    private static Module[] overlaySources(OverlaySlot slot){return union(slot.modules,origins(slot.callback.get()));}
+    private static boolean overlayMatches(OverlaySlot slot,Object named)throws ReflectiveOperationException{
+        Object callback=slot.callback.get();return named!=null&&named==slot.named.get()&&named.getClass()==slot.fields.named&&slot.fields.id.get(named)==slot.key&&callback!=null&&slot.fields.callback.get(named)==callback;
+    }
+    public static Object overlayEntering(Object named){
+        var frame=boundary();overlayBoundary(frame,"net.minecraftforge.client.gui.overlay.ForgeGui","lambda$render$0",OVERLAY_RENDER);OverlaySlot slot;
+        synchronized(SOURCES){slot=OVERLAY_NAMES.get(new Key(named,false));}
+        Module[] modules=new Module[0];
+        if(slot!=null)try{
+            if(!overlayMatches(slot,named)){synchronized(SOURCES){slot.fields.pending="CLIENT_OVERLAY_NAMED_ASSOCIATION_CHANGED";}slot=null;}
+            else{modules=overlaySources(slot);if(slot.retired||slot.observed&&exclusive(modules))return Boolean.FALSE;}
+        }catch(ReflectiveOperationException unavailable){throw new IllegalStateException("CLIENT_OVERLAY_CALLBACK_CAPTURE_FAILED",unavailable);}
+        Scope scope=new Scope(CURRENT.get(),union(modules,currentSources()),frame,slot);synchronized(SOURCES){ACTIVE.add(scope);overlayProtect(scope,scope.sources);}CURRENT.set(scope);return scope;
+    }
+    public static void overlayExiting(Object token){exit(token);}
+    private static boolean overlayActive(OverlaySlot slot){synchronized(SOURCES){for(Scope scope:ACTIVE)if(!scope.ended&&scope.overlay==slot)return true;return false;}}
+    private static void retireOverlays(){
+        List<OverlayRegistry> registries;synchronized(SOURCES){if(REQUESTED.isEmpty())return;registries=new ArrayList<>(OVERLAY_REGISTRIES.values());}
+        for(OverlayRegistry registry:registries)try{
+            OverlayFields fields=registry.fields;OverlayRetirement retirement=registry.retirement;
+            if(retirement==null){
+                synchronized(SOURCES){if(fields.initializing!=0||fields.generation!=registry.generation)continue;}
+                if(fields.list.get(null)!=registry.list||fields.map.get(null)!=registry.map){fields.pending="CLIENT_OVERLAY_CURRENT_PAIR_CHANGED";continue;}
+                List<Object> retained=new ArrayList<>();Map<Object,Object> names=new LinkedHashMap<>();List<OverlaySlot> kept=new ArrayList<>(),removed=new ArrayList<>();
+                for(OverlaySlot slot:registry.slots){Object named=slot.named.get();if(!overlayMatches(slot,named)){fields.pending="CLIENT_OVERLAY_NAMED_ASSOCIATION_CHANGED";removed.clear();break;}
+                    if(slot.observed&&exclusive(overlaySources(slot))&&!overlayActive(slot))removed.add(slot);else{retained.add(named);names.put(slot.key,named);kept.add(slot);}}
+                if(removed.isEmpty())continue;
+                Object nextList=fields.listCopy.invoke(null,retained),nextMap=fields.mapCopy.invoke(null,names);
+                retirement=new OverlayRetirement(registry,nextList,nextMap,kept,removed);
+            }
+            if(!fields.gate.tryLock())continue;
+            try{synchronized(SOURCES){
+                if(fields.initializing!=0||fields.generation!=registry.generation||OVERLAY_REGISTRIES.get(new Key(fields.type,false))!=registry)continue;
+                for(OverlaySlot slot:retirement.removed)if(!exclusive(overlaySources(slot))||overlayActive(slot))throw new IllegalStateException("CLIENT_OVERLAY_RETIREMENT_SOURCES_CHANGED");
+                Object currentList=fields.list.get(null),currentMap=fields.map.get(null);
+                if((currentList!=registry.list&&currentList!=retirement.list)||(currentMap!=registry.map&&currentMap!=retirement.map)){fields.pending="CLIENT_OVERLAY_CURRENT_PAIR_CHANGED";continue;}
+                registry.retirement=retirement;
+                if(currentList==registry.list){fields.list.set(null,retirement.list);if(fields.list.get(null)!=retirement.list)throw new IllegalStateException("CLIENT_OVERLAY_LIST_PUBLICATION_PENDING");}
+                if(fields.generation!=registry.generation||OVERLAY_REGISTRIES.get(new Key(fields.type,false))!=registry||fields.list.get(null)!=retirement.list
+                        ||fields.map.get(null)!=currentMap)throw new IllegalStateException("CLIENT_OVERLAY_REENTRANT_PUBLICATION_CHANGED");
+                if(currentMap==registry.map)fields.map.set(null,retirement.map);
+                if(fields.generation!=registry.generation||fields.list.get(null)!=retirement.list||fields.map.get(null)!=retirement.map)throw new IllegalStateException("CLIENT_OVERLAY_PAIR_READBACK_PENDING");
+                for(OverlaySlot slot:retirement.removed){slot.retired=true;retired++;}
+                OVERLAY_REGISTRIES.put(new Key(fields.type,true),new OverlayRegistry(fields,registry.generation,retirement.list,retirement.map,retirement.kept));fields.pending="";
+            }}finally{fields.gate.unlock();}
+        }catch(ReflectiveOperationException|RuntimeException unavailable){synchronized(SOURCES){registry.fields.pending="CLIENT_OVERLAY_RETIREMENT_PENDING:"+unavailable.getClass().getSimpleName();if(registry.retirement!=null)registry.retirement.pending=registry.fields.pending;}}
+    }
+    private static long overlayPending(Module module){
+        long count=0;
+        for(OverlayRegistry registry:OVERLAY_REGISTRIES.values()){
+            Set<Object> actual=Collections.newSetFromMap(new IdentityHashMap<>());boolean readable=true;
+            try{
+                Object list=registry.fields.list.get(null),map=registry.fields.map.get(null);
+                if(list instanceof List<?> entries)actual.addAll(entries);
+                if(map instanceof Map<?,?> entries)actual.addAll(entries.values());
+            }catch(ReflectiveOperationException unavailable){readable=false;}
+            for(OverlaySlot slot:registry.slots)if(Arrays.stream(overlaySources(slot)).anyMatch(source->source==module)){
+                if(!readable){registry.fields.pending="CLIENT_OVERLAY_ACTUAL_PAIR_READ_FAILED";return -1;}
+                Object named=slot.named.get();if(!actual.contains(named))continue;
+                try{if(!overlayMatches(slot,named)){registry.fields.pending="CLIENT_OVERLAY_NAMED_ASSOCIATION_CHANGED";return -2;}}
+                catch(ReflectiveOperationException unavailable){registry.fields.pending="CLIENT_OVERLAY_ACTUAL_PAIR_READ_FAILED";return -1;}
+                count++;
+            }
+        }
+        return count;
     }
     /** Same recoverable cause/suppressed contract as Core ClientFaults, at this bootstrap-only boundary. */
     private static boolean uiRecoverable(Throwable failure){
@@ -465,11 +650,27 @@ public final class ClientBridge {
         }
         synchronized(SOURCES){FAILURES.put(new Key(particle,true),sources(particle));failed++;}
     }
-    private static Object field(Object object,Class<?> type,String name)throws ReflectiveOperationException{Field field=type.getDeclaredField(name);field.setAccessible(true);return field.get(object);}
+    /** Exact official/SRG fields for the same real image allocation and release path. */
+    private static Field resourceField(Class<?> type,String name)throws ReflectiveOperationException{
+        String alternate=null,descriptor=null;
+        if(type.getName().equals("com.mojang.blaze3d.platform.NativeImage")){
+            if(name.equals("pixels")){alternate="f_84964_";descriptor="J";}
+            else if(name.equals("size")){alternate="f_84965_";descriptor="J";}
+        }else if(type.getName().equals("net.minecraft.client.renderer.texture.DynamicTexture")&&name.equals("pixels")){
+            alternate="f_117977_";descriptor="Lcom/mojang/blaze3d/platform/NativeImage;";
+        }
+        Field member;
+        try{member=type.getDeclaredField(name);}
+        catch(NoSuchFieldException original){if(alternate==null)throw original;member=type.getDeclaredField(alternate);}
+        if(descriptor!=null&&(Modifier.isStatic(member.getModifiers())||!member.getType().descriptorString().equals(descriptor)))
+            throw new IllegalStateException("CLIENT_IMAGE_FIELD_LAYOUT_CHANGED:"+type.getName()+"#"+name);
+        member.setAccessible(true);return member;
+    }
+    private static Object field(Object object,Class<?> type,String name)throws ReflectiveOperationException{return resourceField(type,name).get(object);}
     private static Class<?> actualBase(Object object,String name){for(Class<?> type=object.getClass();type!=null;type=type.getSuperclass())if(type.getName().equals(name)&&role(type))return type;return null;}
     public static void resourceConstructed(Object object){
         var frame=boundary();Class<?> type=frame.getDeclaringClass();
-        if(!frame.getMethodName().equals("<init>")&&!(type.getName().equals("net.minecraft.client.renderer.texture.DynamicTexture")&&frame.getMethodName().equals("setPixels")))throw new SecurityException("ACTUAL_CLIENT_RESOURCE_PUBLICATION_REQUIRED");
+        if(!frame.getMethodName().equals("<init>")&&!(type.getName().equals("net.minecraft.client.renderer.texture.DynamicTexture")&&Set.of("setPixels","m_117988_").contains(frame.getMethodName())))throw new SecurityException("ACTUAL_CLIENT_RESOURCE_PUBLICATION_REQUIRED");
         try{synchronized(SOURCES){
             if(type.getName().equals("com.mojang.blaze3d.platform.NativeImage")){
                 long pointer=((Number)field(object,type,"pixels")).longValue(),size=((Number)field(object,type,"size")).longValue();ImageRecord prior=IMAGES.get(new Key(object,false));
@@ -481,7 +682,7 @@ public final class ClientBridge {
         }}catch(ReflectiveOperationException unavailable){throw new IllegalStateException("CLIENT_RESOURCE_ASSOCIATION_UNAVAILABLE",unavailable);}
     }
     public static void pixelsExposed(Object texture,Object image){
-        var frame=boundary();if(!frame.getMethodName().equals("getPixels")||!frame.getDeclaringClass().getName().equals("net.minecraft.client.renderer.texture.DynamicTexture"))throw new SecurityException("ACTUAL_PIXEL_ACCESS_REQUIRED");
+        var frame=boundary();if(!Set.of("getPixels","m_117991_").contains(frame.getMethodName())||!frame.getDeclaringClass().getName().equals("net.minecraft.client.renderer.texture.DynamicTexture"))throw new SecurityException("ACTUAL_PIXEL_ACCESS_REQUIRED");
         if(image==null)return;Module[] exposed=ControlBridge.invokingSources();synchronized(SOURCES){ImageRecord record=IMAGES.get(new Key(image,false));if(record==null)return;
             if(exposed.length==0)record.unknownExposure=true;else record.exposures=union(record.exposures,exposed);}
     }
@@ -518,7 +719,7 @@ public final class ClientBridge {
             Object previous=RELEASING.get();RELEASING.set(image);try{platformVoid(image,imageType,"close");}finally{if(previous==null)RELEASING.remove();else RELEASING.set(previous);}
             synchronized(SOURCES){if(!record.closed)return "CLIENT_PIXEL_RELEASE_RECEIPT_PENDING";}
         }
-        Field pixels=dynamic.getDeclaredField("pixels");pixels.setAccessible(true);if(pixels.get(texture)!=image)return "CLIENT_TEXTURE_PIXELS_CHANGED_DURING_RELEASE";pixels.set(texture,null);
+        Field pixels=resourceField(dynamic,"pixels");if(pixels.get(texture)!=image)return "CLIENT_TEXTURE_PIXELS_CHANGED_DURING_RELEASE";pixels.set(texture,null);
         if(pixels.get(texture)!=null)return "CLIENT_TEXTURE_PIXEL_DETACH_PENDING";synchronized(SOURCES){PIXELS.remove(new Key(texture,false));}return "";
     }
     private static String releaseTexture(TextureRetirement retirement)throws Throwable{
@@ -581,8 +782,8 @@ public final class ClientBridge {
         if(RELEASING==null||RELEASING.get()!=receiver||!role(declaring))return false;
         return declaring.getName().equals("net.minecraft.client.particle.Particle")&&name.equals("removed")
                 ||declaring.getName().equals("net.minecraft.client.renderer.texture.AbstractTexture")&&name.equals("id")
-                ||declaring.getName().equals("net.minecraft.client.renderer.texture.DynamicTexture")&&name.equals("pixels")
-                ||declaring.getName().equals("com.mojang.blaze3d.platform.NativeImage")&&name.equals("pixels")
+                ||declaring.getName().equals("net.minecraft.client.renderer.texture.DynamicTexture")&&Set.of("pixels","f_117977_").contains(name)
+                ||declaring.getName().equals("com.mojang.blaze3d.platform.NativeImage")&&Set.of("pixels","f_84964_").contains(name)
                 ||declaring.getName().equals("com.mojang.blaze3d.vertex.VertexBuffer")&&Set.of("vertexBufferId","indexBufferId","arrayObjectId").contains(name);
     }
     public static void retire(Module[] modules){agent();synchronized(SOURCES){Collections.addAll(REQUESTED,modules);}retireReloadListeners();}
@@ -597,8 +798,10 @@ public final class ClientBridge {
             try{for(boolean screen:new boolean[]{true,false}){Object current=entry.getValue().current(owner,screen);if(current!=null&&Arrays.stream(sources(current)).anyMatch(source->source==module))ui++;}}
             catch(ReflectiveOperationException unavailable){ui++;}
         }
-        return active!=0||textures!=0||resources!=0||sounds!=0||reloads!=0||gpu!=0||failures!=0||ui!=0?"CLIENT_RETIREMENT_PENDING:active="+active+":textures="+textures+":resources="+resources+":sounds="+sounds+":reloads="+reloads+":gpu="+gpu+":ui="+ui+":shared="+shared+":releaseFailures="+failures:"";
+        long overlays=overlayPending(module);
+        String overlayState=overlays==-1?"CLIENT_OVERLAY_ACTUAL_PAIR_READ_FAILED":overlays==-2?"CLIENT_OVERLAY_NAMED_ASSOCIATION_CHANGED":"";
+        return active!=0||textures!=0||resources!=0||sounds!=0||reloads!=0||gpu!=0||failures!=0||ui!=0||overlays!=0?"CLIENT_RETIREMENT_PENDING:active="+active+":textures="+textures+":resources="+resources+":sounds="+sounds+":reloads="+reloads+":gpu="+gpu+":ui="+ui+":overlays="+(overlays<0?"unknown":Long.toString(overlays))+":overlayState="+overlayState+":shared="+shared+":releaseFailures="+failures:"";
     }}
-    public static Object[] controlObjects(){agent();List<Object> roots=new ArrayList<>(Arrays.asList(SOURCES,TEXTURES,ROLES,REQUESTED,CURRENT,RELEASING,ACTIVE,DEAD,IMAGES,PIXELS,RETIREMENTS,FAILURES,SOUNDS,SOUND_STOPS,RELOAD_LISTENERS,RELOAD_WORK,UI_OWNERS,UI_RETIRING,UI_FIELDS));Collections.addAll(roots,GPU.controls());return roots.toArray();}
-    private static void reap(){for(Key key;(key=(Key)DEAD.poll())!=null;){SOURCES.remove(key);TEXTURES.remove(key);IMAGES.remove(key);PIXELS.remove(key);FAILURES.remove(key);SOUNDS.remove(key);RELOAD_LISTENERS.remove(key);UI_OWNERS.remove(key);}}
+    public static Object[] controlObjects(){agent();List<Object> roots=new ArrayList<>(Arrays.asList(SOURCES,TEXTURES,ROLES,REQUESTED,CURRENT,RELEASING,ACTIVE,DEAD,IMAGES,PIXELS,RETIREMENTS,FAILURES,SOUNDS,SOUND_STOPS,RELOAD_LISTENERS,RELOAD_WORK,UI_OWNERS,UI_RETIRING,UI_FIELDS,OVERLAY_EVENTS,OVERLAY_REGISTRIES,OVERLAY_NAMES,OVERLAY_INITIALIZING,OVERLAY_FIELDS));Collections.addAll(roots,GPU.controls());return roots.toArray();}
+    private static void reap(){for(Key key;(key=(Key)DEAD.poll())!=null;){SOURCES.remove(key);TEXTURES.remove(key);IMAGES.remove(key);PIXELS.remove(key);FAILURES.remove(key);SOUNDS.remove(key);RELOAD_LISTENERS.remove(key);UI_OWNERS.remove(key);OVERLAY_EVENTS.remove(key);OVERLAY_REGISTRIES.remove(key);OVERLAY_NAMES.remove(key);}}
 }

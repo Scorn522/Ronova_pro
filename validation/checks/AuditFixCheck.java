@@ -18,6 +18,7 @@ public final class AuditFixCheck {
         if(args.length==1&&args[0].equals("buffer-release")){bufferRelease();return;}
         if(args.length==1&&args[0].equals("buffer-wrap")){bufferWrap();return;}
         if(args.length==1&&args[0].equals("buffer-font")){bufferFont();return;}
+        if(args.length==1&&args[0].equals("native-image-srg")){nativeImageSrg();return;}
         if(args.length==1&&args[0].equals("file-transfer")){fileTransfer();return;}
         if(args.length==1&&args[0].equals("socket-accept")){socketAccept();return;}
         if(args.length==1&&args[0].equals("host-load")){hostLoad();return;}
@@ -468,6 +469,38 @@ public final class AuditFixCheck {
         java.lang.ref.Reference.reachabilityFence(info);java.lang.ref.Reference.reachabilityFence(font);
         require(initialized,"actual STB did not initialize the original FML font");
         System.out.println("BUFFER_FONT_PASS actual_fml_STBHelper resized_Monocraft_original_bytes memSlice_nonzero_exact_address MemoryStack_font_offsets_pointer STBTTFontinfo_create_actual_container public_STB_init");
+    }
+    // Actual SRG constructors that publish the image allocation used during Window icon loading.
+    private static void nativeImageSrg()throws Exception {
+        Class<?> nativeControl=Class.forName("dev.ronova.pro.bootstrap.NativeControl",true,null);
+        require(Boolean.TRUE.equals(nativeControl.getMethod("available").invoke(null)),"actual Windows native backend absent");
+        Class<?> imageType=Class.forName("com.mojang.blaze3d.platform.NativeImage");
+        Class<?> formatType=Class.forName("com.mojang.blaze3d.platform.NativeImage$Format");
+        Field pixels=imageType.getDeclaredField("f_84964_"),size=imageType.getDeclaredField("f_84965_");
+        require(pixels.getType()==long.class&&size.getType()==long.class&&!Modifier.isStatic(pixels.getModifiers())&&!Modifier.isStatic(size.getModifiers()),
+                "actual SRG NativeImage pixel allocation fields changed");
+        long pixelsOffset=U.objectFieldOffset(pixels),sizeOffset=U.objectFieldOffset(size);
+        Method set=imageType.getMethod("m_84988_",int.class,int.class,int.class);
+        Method get=imageType.getMethod("m_84985_",int.class,int.class);
+        Method width=imageType.getMethod("m_84982_"),height=imageType.getMethod("m_85084_");
+        Object rgba=formatType.getField("RGBA").get(null);
+        int[] colors={0xff0000ff,0xff00ff00,0xffff0000,0xffffffff};
+        for(boolean explicitFormat:new boolean[]{false,true}){
+            Object image=explicitFormat?imageType.getConstructor(formatType,int.class,int.class,boolean.class).newInstance(rgba,2,2,true)
+                    :imageType.getConstructor(int.class,int.class,boolean.class).newInstance(2,2,true);
+            try(AutoCloseable original=(AutoCloseable)image){
+                require((Integer)width.invoke(image)==2&&(Integer)height.invoke(image)==2,
+                        "actual SRG NativeImage dimensions changed");
+                require(U.getLong(image,pixelsOffset)!=0&&U.getLong(image,sizeOffset)==16,
+                        "actual SRG NativeImage allocation absent or incorrect; pixel methods not called");
+                for(int i=0;i<colors.length;i++)set.invoke(image,i&1,i>>>1,colors[i]);
+                for(int i=0;i<colors.length;i++)require((Integer)get.invoke(image,i&1,i>>>1)==colors[i],
+                        "actual SRG NativeImage pixel readback changed at "+i);
+            }
+            require(U.getLong(image,pixelsOffset)==0,"actual SRG NativeImage close retained its pixel allocation");
+        }
+        System.out.println("NATIVE_IMAGE_SRG_PASS actual_cached_srg public_default_and_format_constructors exact_pixel_pointer_and_size rgba_2x2_public_write_read original_close_zero_pointer");
+        System.out.println("DYNAMIC_TEXTURE_NOTRUN requires_actual_RenderSystem_and_GL_context");
     }
     private static void bufferWrapContent(java.nio.Buffer view,long address,int last){
         if(view instanceof java.nio.ByteBuffer buffer){

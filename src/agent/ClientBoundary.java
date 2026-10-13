@@ -9,6 +9,9 @@ final class ClientBoundary {
     private static final String BRIDGE="dev/ronova/pro/bootstrap/ClientBridge";
     private static final String PARTICLES="net/minecraft/client/particle/ParticleEngine",TEXTURES="net/minecraft/client/renderer/texture/TextureManager";
     private static final String DYNAMIC="net/minecraft/client/renderer/texture/DynamicTexture",IMAGE="com/mojang/blaze3d/platform/NativeImage";
+    private static final String OVERLAY_MANAGER="net/minecraftforge/client/gui/overlay/GuiOverlayManager",OVERLAY_EVENT="net/minecraftforge/client/event/RegisterGuiOverlaysEvent";
+    private static final String OVERLAY_REGISTER="(Lnet/minecraftforge/client/event/RegisterGuiOverlaysEvent$Ordering;Lnet/minecraft/resources/ResourceLocation;Ljava/lang/String;Lnet/minecraftforge/client/gui/overlay/IGuiOverlay;)V";
+    private static final String OVERLAY_RENDER="(Lnet/minecraft/client/gui/GuiGraphics;FLnet/minecraftforge/client/gui/overlay/NamedGuiOverlay;)V";
     static final Set<String> TARGETS=Set.of(
             "net/minecraft/client/Minecraft","net/minecraft/client/KeyboardHandler","net/minecraft/client/MouseHandler",
             "net/minecraft/client/renderer/GameRenderer","net/minecraft/client/renderer/entity/EntityRenderDispatcher",
@@ -16,7 +19,8 @@ final class ClientBoundary {
             "net/minecraft/client/particle/Particle","net/minecraft/client/renderer/texture/AbstractTexture",
             DYNAMIC,IMAGE,"net/minecraft/client/renderer/texture/SimpleTexture","net/minecraft/client/renderer/texture/HttpTexture",
             "net/minecraft/client/gui/screens/Screen","net/minecraft/client/gui/components/events/AbstractContainerEventHandler",
-            "net/minecraftforge/client/gui/overlay/ForgeGui","net/minecraft/client/gui/components/toasts/ToastComponent",
+            "net/minecraftforge/client/gui/overlay/ForgeGui",OVERLAY_MANAGER,OVERLAY_EVENT,"net/minecraftforge/client/gui/overlay/NamedGuiOverlay",
+            "net/minecraft/client/gui/components/toasts/ToastComponent",
             "net/minecraft/client/sounds/SoundEngine","com/mojang/blaze3d/systems/RenderSystem",
             "net/minecraft/client/sounds/ChannelAccess","net/minecraft/client/sounds/ChannelAccess$ChannelHandle","com/mojang/blaze3d/audio/Channel",
             "net/minecraft/server/packs/resources/ReloadableResourceManager","net/minecraft/server/packs/resources/SimpleReloadInstance",
@@ -48,14 +52,20 @@ final class ClientBoundary {
         if(!TARGETS.contains(name))return null;ClassNode node=new ClassNode();new ClassReader(bytes).accept(node,0);boolean changed=false;
         for(MethodNode method:node.methods){
             if((method.access&(Opcodes.ACC_ABSTRACT|Opcodes.ACC_NATIVE))!=0)continue;
-            if((name.equals(DYNAMIC)||name.equals(IMAGE))&&(method.name.equals("<init>")||name.equals(DYNAMIC)&&method.name.equals("setPixels"))){
+            if((name.equals(DYNAMIC)||name.equals(IMAGE))&&(method.name.equals("<init>")||name.equals(DYNAMIC)&&Set.of("setPixels","m_117988_").contains(method.name)&&method.desc.equals("(Lcom/mojang/blaze3d/platform/NativeImage;)V"))){
                 for(AbstractInsnNode at:method.instructions.toArray())if(at.getOpcode()==Opcodes.RETURN){InsnList hook=new InsnList();hook.add(new VarInsnNode(Opcodes.ALOAD,0));call(hook,"resourceConstructed","(Ljava/lang/Object;)V");method.instructions.insertBefore(at,hook);}changed=true;
             }
-            if(name.equals(DYNAMIC)&&method.name.equals("getPixels")&&Type.getReturnType(method.desc).getDescriptor().equals("Lcom/mojang/blaze3d/platform/NativeImage;")){
+            if(name.equals(DYNAMIC)&&Set.of("getPixels","m_117991_").contains(method.name)&&method.desc.equals("()Lcom/mojang/blaze3d/platform/NativeImage;")){
                 for(AbstractInsnNode at:method.instructions.toArray())if(at.getOpcode()==Opcodes.ARETURN){InsnList hook=new InsnList();hook.add(new InsnNode(Opcodes.DUP));hook.add(new VarInsnNode(Opcodes.ALOAD,0));hook.add(new InsnNode(Opcodes.SWAP));call(hook,"pixelsExposed","(Ljava/lang/Object;Ljava/lang/Object;)V");method.instructions.insertBefore(at,hook);}changed=true;
             }
             if(name.equals(IMAGE)&&method.name.equals("close")&&method.desc.equals("()V")){imageClose(method);changed=true;}
+            if(name.equals(OVERLAY_EVENT)&&method.name.equals("<init>")&&method.desc.equals("(Ljava/util/Map;Ljava/util/List;)V")){
+                for(AbstractInsnNode at:method.instructions.toArray())if(at.getOpcode()==Opcodes.RETURN){InsnList hook=new InsnList();hook.add(new VarInsnNode(Opcodes.ALOAD,0));hook.add(new VarInsnNode(Opcodes.ALOAD,1));hook.add(new VarInsnNode(Opcodes.ALOAD,2));call(hook,"overlayEventConstructed","(Ljava/lang/Object;Ljava/util/Map;Ljava/util/List;)V");method.instructions.insertBefore(at,hook);}changed=true;
+            }
             if(method.name.startsWith("<"))continue;
+            if(name.equals(OVERLAY_EVENT)&&method.name.equals("register")&&method.desc.equals(OVERLAY_REGISTER)){overlayRegister(node,method);changed=true;}
+            if(name.equals(OVERLAY_MANAGER)&&method.name.equals("init")&&method.desc.equals("()V")){overlayInit(node,method);changed=true;}
+            if(name.equals("net/minecraftforge/client/gui/overlay/ForgeGui")&&method.name.equals("lambda$render$0")&&method.desc.equals(OVERLAY_RENDER)){overlayRender(method);changed=true;}
             Type[] args=Type.getArgumentTypes(method.desc);int[] vars=locals(method,args);
             if(name.equals("com/mojang/blaze3d/vertex/BufferBuilder")){
                 if(method.name.equals("begin")){afterVoid(method,"verticesBegin");changed=true;}
@@ -104,6 +114,53 @@ final class ClientBoundary {
             }
         }
         if(!changed)return null;ControlClassWriter writer=new ControlClassWriter(loader,node);node.accept(writer);return writer.toByteArray();
+    }
+    private static boolean overlayVar(AbstractInsnNode at,int opcode,int slot){return at instanceof VarInsnNode value&&value.getOpcode()==opcode&&value.var==slot;}
+    private static boolean overlayField(AbstractInsnNode at,String owner,String name,String descriptor){return at instanceof FieldInsnNode value&&value.getOpcode()==Opcodes.GETFIELD&&value.owner.equals(owner)&&value.name.equals(name)&&value.desc.equals(descriptor);}
+    private static boolean overlayCall(AbstractInsnNode at,int opcode,String owner,String name,String descriptor){return at instanceof MethodInsnNode value&&value.getOpcode()==opcode&&value.owner.equals(owner)&&value.name.equals(name)&&value.desc.equals(descriptor);}
+    /** Observe only the actual completed Map.put and indexed List.add tail of Forge's private register. */
+    private static void overlayRegister(ClassNode node,MethodNode method){
+        List<AbstractInsnNode> code=new ArrayList<>();for(AbstractInsnNode at:method.instructions.toArray())if(at.getOpcode()>=0)code.add(at);
+        int begin=code.size()-12;
+        if(begin<0||(method.access&Opcodes.ACC_PRIVATE)==0
+                ||!overlayVar(code.get(begin),Opcodes.ALOAD,0)||!overlayField(code.get(begin+1),node.name,"overlays","Ljava/util/Map;")
+                ||!overlayVar(code.get(begin+2),Opcodes.ALOAD,5)||!overlayVar(code.get(begin+3),Opcodes.ALOAD,4)
+                ||!overlayCall(code.get(begin+4),Opcodes.INVOKEINTERFACE,"java/util/Map","put","(Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;")
+                ||code.get(begin+5).getOpcode()!=Opcodes.POP||!overlayVar(code.get(begin+6),Opcodes.ALOAD,0)
+                ||!overlayField(code.get(begin+7),node.name,"orderedOverlays","Ljava/util/List;")||!overlayVar(code.get(begin+8),Opcodes.ILOAD,6)
+                ||!overlayVar(code.get(begin+9),Opcodes.ALOAD,5)||!overlayCall(code.get(begin+10),Opcodes.INVOKEINTERFACE,"java/util/List","add","(ILjava/lang/Object;)V")
+                ||code.get(begin+11).getOpcode()!=Opcodes.RETURN)throw new IllegalStateException("CLIENT_OVERLAY_REGISTER_LAYOUT_CHANGED");
+        InsnList hook=new InsnList();hook.add(new VarInsnNode(Opcodes.ALOAD,0));hook.add(new VarInsnNode(Opcodes.ALOAD,0));hook.add(new FieldInsnNode(Opcodes.GETFIELD,node.name,"overlays","Ljava/util/Map;"));
+        hook.add(new VarInsnNode(Opcodes.ALOAD,0));hook.add(new FieldInsnNode(Opcodes.GETFIELD,node.name,"orderedOverlays","Ljava/util/List;"));hook.add(new VarInsnNode(Opcodes.ALOAD,5));hook.add(new VarInsnNode(Opcodes.ALOAD,4));
+        call(hook,"overlayRegistered","(Ljava/lang/Object;Ljava/util/Map;Ljava/util/List;Ljava/lang/Object;Ljava/lang/Object;)V");method.instructions.insertBefore(code.get(begin+11),hook);
+    }
+    private static void overlayInit(ClassNode node,MethodNode method){
+        if((method.access&Opcodes.ACC_STATIC)==0)throw new IllegalStateException("CLIENT_OVERLAY_INIT_LAYOUT_CHANGED");
+        int listWrites=0,mapWrites=0,events=0;
+        for(AbstractInsnNode at:method.instructions.toArray()){
+            if(at instanceof FieldInsnNode slot&&slot.getOpcode()==Opcodes.PUTSTATIC&&slot.owner.equals(node.name)){
+                if(slot.name.equals("OVERLAYS")&&slot.desc.equals("Lcom/google/common/collect/ImmutableList;"))listWrites++;
+                if(slot.name.equals("OVERLAYS_BY_NAME")&&slot.desc.equals("Lcom/google/common/collect/ImmutableMap;"))mapWrites++;
+            }else if(overlayCall(at,Opcodes.INVOKESPECIAL,OVERLAY_EVENT,"<init>","(Ljava/util/Map;Ljava/util/List;)V"))events++;
+        }
+        if(listWrites!=1||mapWrites!=1||events!=1)throw new IllegalStateException("CLIENT_OVERLAY_INIT_PUBLICATION_CHANGED");
+        int token=method.maxLocals++,failure=method.maxLocals++;LabelNode start=new LabelNode(),end=new LabelNode(),handler=new LabelNode();
+        InsnList enter=new InsnList();enter.add(new LdcInsnNode(Type.getObjectType(node.name)));call(enter,"overlayInitEntering","(Ljava/lang/Class;)Ljava/lang/Object;");enter.add(new VarInsnNode(Opcodes.ASTORE,token));enter.add(start);
+        for(AbstractInsnNode at:method.instructions.toArray())if(at.getOpcode()==Opcodes.RETURN){
+            InsnList exit=new InsnList();exit.add(new LdcInsnNode(Type.getObjectType(node.name)));exit.add(new VarInsnNode(Opcodes.ALOAD,0));exit.add(new VarInsnNode(Opcodes.ALOAD,1));
+            call(exit,"overlayPublished","(Ljava/lang/Class;Ljava/util/Map;Ljava/util/List;)V");exit.add(new VarInsnNode(Opcodes.ALOAD,token));call(exit,"overlayInitExiting","(Ljava/lang/Object;)V");method.instructions.insertBefore(at,exit);
+        }
+        method.instructions.insert(enter);method.instructions.add(end);method.instructions.add(handler);method.instructions.add(new VarInsnNode(Opcodes.ASTORE,failure));method.instructions.add(new VarInsnNode(Opcodes.ALOAD,token));
+        call(method.instructions,"overlayInitExiting","(Ljava/lang/Object;)V");method.instructions.add(new VarInsnNode(Opcodes.ALOAD,failure));method.instructions.add(new InsnNode(Opcodes.ATHROW));method.tryCatchBlocks.add(new TryCatchBlockNode(start,end,handler,null));
+    }
+    /** A cached old immutable iteration still crosses the actual Named slot boundary. */
+    private static void overlayRender(MethodNode method){
+        int token=method.maxLocals++,failure=method.maxLocals++;LabelNode start=new LabelNode(),end=new LabelNode(),handler=new LabelNode();
+        InsnList enter=new InsnList();enter.add(new VarInsnNode(Opcodes.ALOAD,3));call(enter,"overlayEntering","(Ljava/lang/Object;)Ljava/lang/Object;");enter.add(new VarInsnNode(Opcodes.ASTORE,token));
+        enter.add(new VarInsnNode(Opcodes.ALOAD,token));enter.add(new FieldInsnNode(Opcodes.GETSTATIC,"java/lang/Boolean","FALSE","Ljava/lang/Boolean;"));enter.add(new JumpInsnNode(Opcodes.IF_ACMPNE,start));enter.add(new InsnNode(Opcodes.RETURN));enter.add(start);
+        for(AbstractInsnNode at:method.instructions.toArray())if(at.getOpcode()==Opcodes.RETURN){InsnList exit=new InsnList();exit.add(new VarInsnNode(Opcodes.ALOAD,token));call(exit,"overlayExiting","(Ljava/lang/Object;)V");method.instructions.insertBefore(at,exit);}
+        method.instructions.insert(enter);method.instructions.add(end);method.instructions.add(handler);method.instructions.add(new VarInsnNode(Opcodes.ASTORE,failure));method.instructions.add(new VarInsnNode(Opcodes.ALOAD,token));
+        call(method.instructions,"overlayExiting","(Ljava/lang/Object;)V");method.instructions.add(new VarInsnNode(Opcodes.ALOAD,failure));method.instructions.add(new InsnNode(Opcodes.ATHROW));method.tryCatchBlocks.add(new TryCatchBlockNode(start,end,handler,null));
     }
     /** Gates the actual slot after opening/closing callbacks, with one finally for every real setter outcome. */
     private static void presentation(MethodNode method,int incoming,boolean screen){

@@ -1,6 +1,6 @@
 # 文档入口
 
-当前主工程：`D:\桌面\ronova_GPT`。更新日期：2026-10-13。C 已接入 JNI_OnLoad 前 Host、Net.accept、存量 UI，并修复真实 LWJGL 新视图与字体切片。GNU C23 / GNU C++23、Java 17；Java ABI 51 / Native ABI 49 / Storage ABI 3 / Journal 6。本包构建及真实缓冲区/字体STB检查通过；第三次客户端仍在加载，菜单/UI停组及完整 C/B 游戏收口待实际结果。旧候选和旧运行保留原范围。
+当前主工程：`D:\桌面\ronova_GPT`。更新日期：2026-10-13。C接入实际HUD注册条目，并修复图像SRG兼容。GNU C23 / GNU C++23、Java17；Java ABI52 / Native ABI49 / Storage ABI3 / Journal6。本包构建及真实SRG图像构造/原关闭检查通过；第四次客户端正在加载，HUD退役与完整C/B游戏收口待实际结果。所有旧候选/原运行保留其范围。
 
 先看 [当前进度与 A 批状态](A-批验收状态.md)。所有已写、已验证与待办以该页为准。
 

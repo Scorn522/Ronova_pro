@@ -1,18 +1,18 @@
 # Ronova Pro 当前进度
 
-## 2026-10-13：C 接续——字体扩容后的真实切片
+## 2026-10-13：C 接续——HUD 实际注册条目与图像 SRG 兼容
 
-接续已同步的 `4fc9e49`；Java ABI 51 / Native ABI 49 / Storage ABI 3 / Journal 6，GNU C23 / GNU C++23、Java 17。当前切片启动修复工作包已写齐并统一构建通过；完整 C 和 B 的游戏收口仍未完成。
+接续已同步的 `01548b5`；Java ABI 52 / Native ABI 49 / Storage ABI 3 / Journal 6，GNU C23 / GNU C++23、Java 17。当前工作包代码已写齐并统一构建通过。完整 C、B 的实际游戏收口仍未完成。
 
-第二次客户端已实际完成 GLFW 初始化、创建 OpenGL 4.6 窗口，随后于14:25:13在 `lwjgl_stb.dll` 的 stbtt_InitFont 读取0x4而退出。真实原因是 STBHelper 读取202764字节 Monocraft.ttf，经200000→300000扩容后调用 MemoryUtil.memSlice；独立 slice 工厂的字段初始化此前未接入，返回零地址视图。原 `.work/c-client-20261013-02/launch.log` 与 `hs_err_pid78896.log` 保留；不是菜单或世界通过。
+HUD 接入真实 Forge 47.4.23 GuiOverlayManager.init 与 RegisterGuiOverlaysEvent 的实际 event/map/order、private register 完成点和 ForgeGui 的准确 Named 回调。来源绑定到实际注册条目，不按命名空间推断归属，也不向共享 callback 全局回填注册者来源。主线程维护只退役全部来源已停止的已观察条目，保留其他 Named 身份及顺序，同步更新实际 ImmutableList/ImmutableMap；重新核对当前代次与两个实际字段，部分发布按当前身份继续处理。旧迭代中的已退役 Named 仍经过原作用域拒绝。当前待处理数量来自实际两个容器的 Named 身份并核对 key/callback；读失败明确为 unknown。混合来源条目保留，但既有停止效果规则仍可能拒绝其绘制，没有改变旧效果策略。纯呈现 UUID 接口仍为 UNSUPPORTED。
 
-Agent 保留真实 LWJGL 3.3.1 ByteBuffer slice 原代码及父引用/字节序语义。新入口绑定实际 allocateInstance 结果、原 source 和实际登记视图/存储，限准确方法、类、加载器、模块、线程及字段和值，额外只允许实际 att 字段写入原 attachment-or-source。退出核对真实关联，JDK order 的提前观察复用同一存储；没有新建原存储、Cleaner、native绑定或释放许可。原 wrap 协议继续保留；ABI 51防止混用旧Agent/Bootstrap/Core。
+第三次 Java51 客户端完成 DataFixer、进入 Minecraft Render thread 和 LWJGL 后端；于15:42:45生成 Initializing game 崩溃报告，原因是 ClientBridge 使用官方字段pixels读取实际SRG NativeImage。原 `.work/c-client-20261013-03/launch.log`、两份实际线程栈与 `crash-reports/crash-2026-10-13_15.42.45-client.txt` 保留；没有菜单结果。修复按精确类和字段类型接入 NativeImage.pixels/size 与同一资源桥的 DynamicTexture.pixels 的准确SRG别名，并对齐真实getter/setter、关闭读回、解绑与原cleanup字段；未用类型搜索猜字段。
 
-统一构建 `build-c-java51-buffer-font-20261013.log` 59秒 PASS。共用初始化代码改变，因此直接复查 buffer-wrap；七类真实视图/零容量/双向内容/外来字段改写拒绝/原释放/UTF16模块查询退出0。新增 buffer-font 退出0：实际 STBHelper 完成字体扩容、切片和原资源全量内容读回，真实 Buffer/MemoryStack/STBTTFontinfo 与其实际容器地址非零且一致，最后 public stbtt_InitFont 成功。两项日志为 `c-buffer-wrap-java51-native49-20261013.log`、`c-buffer-font-java51-native49-20261013.log`。没有重跑旧Host/网络/传输矩阵。
+统一构建 `build-c-java52-overlay-registry-20261013.log` 37秒 PASS。复用 AuditFixCheck 的 `native-image-srg` 实际检查退出0：真实SRG类两个公开构造，各2×2图像、准确非零原指针/16字节、公开SRG像素写读四色，以及原close后实际指针归零；日志 `c-native-image-srg-java52-native49-20261013.log`。DynamicTexture要求真实RenderSystem/GL，检查明确NOTRUN。HUD登记/退役/共享来源效果只完成源码接线与构建，尚无本候选实机结果；现有夹具与目标同模块，停组后不能充当独立存活观察者，没有伪造单例、来源或临时控制资格。没有重跑已通过字体/Host/网络矩阵。
 
-第三次客户端 `.work/c-client-20261013-03`（实际 PID 52272）已用本包启动，尚在加载；菜单/UI停组、合法 sealed 目标与同世界保存重启仍待实际结果，不沿用旧候选 WORLD_LOADED。
+第四次隔离客户端 `.work/c-client-20261013-04`（实际 PID 80596）已用本包启动，正在加载；不把前三次或旧WORLD_LOADED计入本候选菜单/世界结果。
 
-本地候选：`distribution/candidate-c-java51-native49-wip-20261013/ronova-pro-core-0.1.0-stage-b-dev.jar`。本轮同步源码和摘要；候选、崩溃文件及原运行日志继续留在本地，Java50与更早候选保留。详情见 [实际报告](../validation/b-final-20261007/REPORT.md)。
+本地候选：`distribution/candidate-c-java52-native49-wip-20261013/ronova-pro-core-0.1.0-stage-b-dev.jar`。源码、直接相关既有检查与简要结果同步Git；候选及原始日志/崩溃文件留在本地，所有旧候选保留。详情见 [实际报告](../validation/b-final-20261007/REPORT.md)。
 
 ---
 
