@@ -1,7 +1,7 @@
-/* Included by host.c after host_entry_association. Restricted heap callbacks
- * already have an actual native scope; discovering Java/loader provenance here
- * would enter JNI or wait on a VM/loader thread during the heap walk. Capture
- * only the existing exact image/library records and the executing C scopes.
+/* Included by host.c after host_entry_association. Heap callbacks and actual
+ * ThreadEnd/Detach windows already have native scopes. Java stack discovery
+ * can enter the VM during a heap walk or after the Java thread stopped being
+ * queryable. Capture only existing image/library records and executing C scopes.
  */
 static int host_callback_library_current_locked(NativeThread *state,NativeLibrary *library,HostImage *image){
     if(!library||library->hostImage!=image||library->handle!=image->handle)return 0;
@@ -45,6 +45,11 @@ static int host_callback_caller_locked(NativeThread *state,void *caller,OwnerLin
         if(host_callback_library_current_locked(state,scope->library,actual)){
             selected=1;ready=ready&&native_owner_merge(owners,scope->library->owners);
         }
+    if(!selected){NativeLibrary *workerLibrary=host_thread_worker_library(state,actual->handle);
+        if(workerLibrary&&workerLibrary->hostImage==actual){
+            selected=1;ready=ready&&native_owner_merge(owners,workerLibrary->owners);
+        }
+    }
     if(!selected)for(NativeLibrary *library=native_libraries;library;library=library->next)
         if(actual->live&&library->hostImage==actual&&host_library_current(library,actual->handle)){
             selected=1;ready=ready&&native_owner_merge(owners,library->owners);
@@ -69,22 +74,26 @@ static int host_callback_scopes_locked(NativeThread *state,OwnerLink **owners,in
     return 1;
 }
 static int host_callback_entry_sources(HostImport *entry,NativeThread *state,void *caller,
-        OwnerLink **owners,NativeLibrary **selected,int retainSources,int threadAdmissionOnly){
+        OwnerLink **owners,NativeLibrary **selected,int retainSources,int threadAdmissionOnly,int *unobserved){
     if(selected)*selected=NULL;
-    if(!state||!state->heapCallback){SetLastError(ERROR_INVALID_STATE);return 0;}
+    if(!state||(!state->heapCallback&&!state->vmDetaching&&!state->vmThreadEnding)){
+        SetLastError(ERROR_INVALID_STATE);return 0;
+    }
     if(!TryAcquireSRWLockShared(&host_imports)){SetLastError(ERROR_BUSY);return 0;}
     if(!TryAcquireSRWLockShared(&native_records)){
         ReleaseSRWLockShared(&host_imports);SetLastError(ERROR_BUSY);return 0;
     }
-    int associated=host_entry_association(entry,state,owners,selected),ready=associated==1,unknown=0;
+    int associated=host_entry_association(entry,state,owners,selected),ready=associated==1,unknown=entry->unknown;
     DWORD error=associated?ERROR_INVALID_DATA:ERROR_MOD_NOT_FOUND;
     if(ready)ready=host_callback_caller_locked(state,caller,owners,&error);
     if(ready)ready=host_callback_scopes_locked(state,owners,&unknown,&error);
+    if(unobserved)*unobserved|=unknown;
     /* A normal profiler may lack Java attribution while its actual image and
      * current library are known. New thread creation only checks stopped
      * sources; it records no private worker or disposal permission. Retaining
      * sources or admitting a producer still requires the full known scope. */
-    if(ready&&unknown&&(!threadAdmissionOnly||retainSources||native_has_producer(*owners))){
+    if(ready&&unknown&&!unobserved&&(retainSources||native_has_producer(*owners)
+            ||state->heapCallback&&!threadAdmissionOnly)){
         error=ERROR_INVALID_DATA;ready=0;
     }
     if(ready&&!retainSources)host_producers(owners);

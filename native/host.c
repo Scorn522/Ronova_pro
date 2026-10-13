@@ -96,7 +96,7 @@ typedef struct HostImport {
     void *entry;
     NativeLibrary *library;
     OwnerLink *sources;
-    int kind,delayed,returned,slotOwned;
+    int kind,delayed,returned,slotOwned,unknown;
     RUNTIME_FUNCTION unwind;
     struct HostImport *next;
 } HostImport;
@@ -458,6 +458,7 @@ static void host_producers(OwnerLink **owners){
         }else link=&(*link)->next;
     }
 }
+static NativeLibrary *host_thread_worker_library(NativeThread *state,HMODULE image);
 static int host_capture_caller(NativeThread *state,void *caller,OwnerLink **owners){
     HMODULE image=native_observe_image(caller);if(!image)return 1;
     int selected=0,ready=1;AcquireSRWLockShared(&native_records);
@@ -475,6 +476,8 @@ static int host_capture_caller(NativeThread *state,void *caller,OwnerLink **owne
                 selected=1;ready=ready&&native_owner_merge(owners,scope->library->owners);
             }
     }
+    if(!selected){NativeLibrary *workerLibrary=host_thread_worker_library(state,image);
+        if(workerLibrary){selected=1;ready=ready&&native_owner_merge(owners,workerLibrary->owners);}}
     if(!selected)for(NativeLibrary *library=native_libraries;library;library=library->next)
         if(library->handle==image&&InterlockedCompareExchange(&library->alive,0,0)
                 &&InterlockedCompareExchange(&library->complete,0,0)&&!InterlockedCompareExchange(&library->closing,0,0))
@@ -561,6 +564,11 @@ static int host_entry_association(HostImport *entry,NativeThread *state,OwnerLin
                 if(owners)ready=ready&&native_owner_merge(owners,library->owners);
             }
         }
+        if(!associated&&!entry->library){
+            NativeLibrary *workerLibrary=host_thread_worker_library(state,entry->image->handle);
+            if(workerLibrary&&workerLibrary->hostImage==entry->image){associated=1;chosen=workerLibrary;
+                if(owners)ready=ready&&native_owner_merge(owners,workerLibrary->owners);}
+        }
         if(!associated&&!entry->library)for(NativeLibrary *library=native_libraries;library;library=library->next)
             if(library->hostImage==entry->image&&host_library_current(library,entry->image->handle)){
                 associated=1;if(chosen&&chosen!=library)mixed=1;else chosen=library;
@@ -571,8 +579,10 @@ static int host_entry_association(HostImport *entry,NativeThread *state,OwnerLin
     return !associated?0:ready?1:-1;
 }
 #include "host_callback_sources.c"
-static int host_entry_sources(HostImport *entry,NativeThread *state,void *caller,OwnerLink **owners,NativeLibrary **selected,int retainSources){
-    if(state&&state->heapCallback)return host_callback_entry_sources(entry,state,caller,owners,selected,retainSources,host_is_thread_admission(entry->kind));
+static int host_entry_sources_query(HostImport *entry,NativeThread *state,void *caller,OwnerLink **owners,NativeLibrary **selected,int retainSources,int *unknown){
+    int unobserved=entry->unknown;
+    if(state&&(state->heapCallback||state->vmDetaching||state->vmThreadEnding))
+        return host_callback_entry_sources(entry,state,caller,owners,selected,retainSources,host_is_thread_admission(entry->kind),unknown);
     AcquireSRWLockShared(&host_imports);AcquireSRWLockShared(&native_records);
     int associated=host_entry_association(entry,state,owners,selected),ready=associated==1;
     ReleaseSRWLockShared(&native_records);
@@ -580,7 +590,7 @@ static int host_entry_sources(HostImport *entry,NativeThread *state,void *caller
     JNIEnv *env=NULL;
     if(ready&&native_vm&&(*native_vm)->GetEnv(native_vm,(void**)&env,JNI_VERSION_1_8)==JNI_OK){
         if(!state)state=native_thread();
-        ready=state&&host_capture_all(env,state,caller,owners);
+        ready=state&&host_capture_all_query(env,state,caller,owners,&unobserved);
     }else if(ready){
         /* A detached OS thread has no JNIEnv. Its actual library and active C
          * scopes remain usable; never manufacture Java execution provenance. */
@@ -589,11 +599,22 @@ static int host_entry_sources(HostImport *entry,NativeThread *state,void *caller
             for(unsigned i=0;i<state->depth&&ready;i++)ready=native_owner_merge(owners,state->stack[i]->owners);
             for(NativeLibraryScope *scope=state->library;scope&&ready;scope=scope->previous)
                 ready=native_owner_merge(owners,scope->library->owners);
+            for(NativeToolingScope *scope=state->tooling;scope&&ready;scope=scope->previous){
+                ready=native_owner_merge(owners,scope->owners);unobserved|=scope->unknown;
+            }
         }
     }
+    if(unknown)*unknown|=unobserved;
+    /* A captured unknown contributor is metadata, never a private worker or
+     * resource permission. Keep ordinary profiler calls usable while refusing
+     * a producer's default consumption until its complete scope is known. */
+    if(!unknown&&unobserved&&native_has_producer(*owners))ready=0;
     if(!retainSources)host_producers(owners);
     if(!ready){SetLastError(associated?ERROR_INVALID_DATA:ERROR_MOD_NOT_FOUND);return 0;}
     return 1;
+}
+static int host_entry_sources(HostImport *entry,NativeThread *state,void *caller,OwnerLink **owners,NativeLibrary **selected,int retainSources){
+    return host_entry_sources_query(entry,state,caller,owners,selected,retainSources,NULL);
 }
 static HostImport *host_consumed_entry(HostImport *entry,NativeThread *state,void *caller);
 static BOOL host_native_create(HostImport *entry,void *caller,uintptr_t *arguments){
@@ -638,13 +659,13 @@ static FARPROC WINAPI host_native_resolve(HMODULE module,LPCSTR name,HostImport 
     if(!actual||!kind){SetLastError(error);return actual;}
     /* Names, ordinals and requested DLL handles do not authorize this result.
      * Only the actual returned Windows API address selects a controlled entry. */
-    OwnerLink *owners=NULL;NativeLibrary *library=NULL;
-    if(!host_entry_sources(entry,state,caller,&owners,&library,1)){native_owner_links_free(owners);return NULL;}
+    OwnerLink *owners=NULL;NativeLibrary *library=NULL;int unknown=0;
+    if(!host_entry_sources_query(entry,state,caller,&owners,&library,1,&unknown)){native_owner_links_free(owners);return NULL;}
     if(native_owner_stopped(owners)){native_owner_links_free(owners);SetLastError(ERROR_ACCESS_DENIED);return NULL;}
     HostImport *resolved=(HostImport*)calloc(1,sizeof(*resolved));
     if(resolved){
         resolved->image=entry->image;resolved->original=(void*)actual;resolved->kind=kind;
-        resolved->library=library;resolved->sources=owners;resolved->returned=1;
+        resolved->library=library;resolved->sources=owners;resolved->returned=1;resolved->unknown=unknown;
         if(!host_is_create(kind)||host_worker_ready())resolved->entry=host_import_entry(resolved);
     }
     if(!resolved||!resolved->entry){
@@ -692,8 +713,9 @@ static HostProcess *host_object_record(HANDLE value,int *role){
     }
     return NULL;
 }
+static int host_thread_worker_internal_handle(HANDLE value);
 static int host_internal_handle(HANDLE value){
-    if(!value)return 0;if(value==host_worker_handle)return 1;
+    if(!value)return 0;if(value==host_worker_handle||host_thread_worker_internal_handle(value))return 1;
     for(HostProcess *process=host_processes;process;process=process->next)
         if(value==process->monitor||value==process->threadMonitor||value==process->job
                 ||value==process->failedProcess||value==process->failedThread)return 1;
@@ -788,9 +810,11 @@ static uint64_t host_native_handle(HostImport *entry,void *caller,uintptr_t *arg
 }
 #include "host_thread_creation.c"
 #include "host_crt_thread_creation.c"
+#include "host_thread_workers.c"
 static uint64_t host_native_call(HostImport *entry,void *caller,uintptr_t *arguments){
     if(entry->kind==HOST_RESOLVE)return (uintptr_t)host_native_resolve((HMODULE)arguments[0],(LPCSTR)arguments[1],entry,caller);
     if(host_is_create(entry->kind))return host_native_create(entry,caller,arguments);
+    if(host_is_local_worker_create(entry->kind))return host_native_local_worker_create(entry,caller,arguments);
     if(host_is_thread_create(entry->kind))return host_native_thread_create(entry,caller,arguments);
     if(host_is_crt_thread_create(entry->kind))return host_native_crt_thread_create(entry,caller,arguments);
     if(host_is_handle(entry->kind))return host_native_handle(entry,caller,arguments);
@@ -1100,7 +1124,7 @@ static void *volatile *host_delay_call_slot(HostImage *image,void *caller){
     free(marks);free(queue);return proven?address:NULL;
 }
 static HostImport *host_consumed_entry(HostImport *entry,NativeThread *state,void *caller){
-    if(state&&state->heapCallback)return entry;
+    if(state&&(state->heapCallback||state->vmDetaching||state->vmThreadEnding))return entry;
     if(!entry->returned)return entry;
     HostImport *consumed=entry;HostImage *image=entry->image;
     AcquireSRWLockExclusive(&host_imports);int mapped=image->live;
@@ -1624,7 +1648,7 @@ JNIEXPORT jlongArray JNICALL Java_dev_ronova_pro_bootstrap_NativeControl_hostSta
     (void)type;if(!native_controller||!native_original.CallStaticBooleanMethod(env,native_controller,native_control_gate)){
         native_refuse(env,"NATIVE_CONTROL_AGENT_REQUIRED");return NULL;
     }
-    jlong values[21]={0};values[18]=__atomic_load_n(&host_compare_handles,__ATOMIC_ACQUIRE)!=NULL;
+    jlong values[24]={0};values[18]=__atomic_load_n(&host_compare_handles,__ATOMIC_ACQUIRE)!=NULL;
     AcquireSRWLockExclusive(&host_records);host_prune(env);
     for(HostProcess *record=host_processes;record;record=record->next){
         if(!native_owner_matches(env,record->owners,module))continue;host_collect(record);
@@ -1646,5 +1670,6 @@ JNIEXPORT jlongArray JNICALL Java_dev_ronova_pro_bootstrap_NativeControl_hostSta
     }
     ReleaseSRWLockExclusive(&host_records);
     host_import_state(env,module,values);
-    jlongArray result=native_original.NewLongArray(env,21);if(result)native_original.SetLongArrayRegion(env,result,0,21,values);return result;
+    host_thread_workers_state(env,module,values);
+    jlongArray result=native_original.NewLongArray(env,24);if(result)native_original.SetLongArrayRegion(env,result,0,24,values);return result;
 }

@@ -53,12 +53,20 @@ public final class AuditFixCheck {
     // Actual isolated TxF preparation; no commit permit is constructed or granted.
     private static native void hostProcess0();
 
-    // One AUDIT_HOST_THREAD_CREATE_CHECK DLL; the native start routines use no
-    // JVM attachment. The heap callback only creates a suspended native thread.
+    // One AUDIT_HOST_THREAD_CREATE_CHECK DLL. thread-create uses unattached
+    // starts; thread-end checks actual attachment/detachment without rerunning it.
     private static native void hostThreadCreate0(Class<?> type,Object payload);
+    private static native void hostThreadEnd0();
     private static final class HostThreadCreatePayload { }
     private static void hostThreadCreate(){
         System.load(java.nio.file.Path.of(System.getProperty("ronova.pro.audit.thread.native")).toAbsolutePath().toString());
+        String phase=System.getProperty("ronova.pro.audit.thread.phase","thread-create");
+        if(phase.equals("thread-end")){
+            hostThreadEnd0();
+            System.out.println("HOST_THREAD_END_PASS actual_CRT_start_userdata actual_AttachCurrentThread actual_ThreadEnd_callback actual_DetachCurrentThread GetEnv_JNI_EDETACHED native_continuation callback_child_and_detached_successor suspended_until_outer_resume actual_OS_exit handles_closed");
+            return;
+        }
+        require(phase.equals("thread-create"),"unknown actual thread check phase: "+phase);
         var payload=new HostThreadCreatePayload();
         try {hostThreadCreate0(HostThreadCreatePayload.class,payload);}
         finally {java.lang.ref.Reference.reachabilityFence(payload);}
@@ -67,7 +75,7 @@ public final class AuditFixCheck {
 
     // This command loads one AUDIT_JVMTI_DISPATCH_CHECK fixture; it does not run
     // the previously completed Host import/process/token or class-hook checks.
-    private static native int jvmtiDispatch0(Class<?> type,Object first,Object second,Object decoy);
+    private static native int jvmtiDispatch0(Class<?> type,Object first,Object second,Object decoy,boolean heapOnly);
     private static native Class<?> jvmtiDispatchDefine0(ClassLoader loader,char suffix);
     private static native void jvmtiDispatchPhase0(int phase);
     private static native void jvmtiDispatchCollect0();
@@ -103,7 +111,8 @@ public final class AuditFixCheck {
         System.load(java.nio.file.Path.of(System.getProperty("ronova.pro.audit.jvmti.native")).toAbsolutePath().toString());
         var first=new JvmtiDispatchPayload();var second=new JvmtiDispatchPayload();Object decoy=new Object();
         first.child=second;first.decoy=decoy;
-        int extension=jvmtiDispatch0(JvmtiDispatchPayload.class,first,second,decoy);
+        boolean heapOnly=System.getProperty("ronova.pro.audit.jvmti.phase","").equals("heap-only");
+        int extension=jvmtiDispatch0(JvmtiDispatchPayload.class,first,second,decoy,heapOnly);
         long[] completed=null;
         try {
             if(extension==0)return;

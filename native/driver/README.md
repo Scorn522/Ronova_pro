@@ -1,6 +1,6 @@
 # Ronova Host Windows 驱动源码
 
-此目录交付 Windows x64 内核源码、共享 IOCTL 头、集中 WDK 构建入口和显式开发部署工具。本轮用户态接线已集成主工程源码：Java ABI 56 / Native ABI 54。驱动与部署工具（含正常 Windows UAC 请求、共用 manifest 资源和新文件 open 准入）已用官方 WDK/SDK NuGet 10.0.26100.6584 头库及 Zig/LLD 实际编译链接，生成 36352 字节 SYS 与 188928 字节 EXE，正式 VS/WDK MSBuild 工程尚未执行。未安装、加载或签名，没有生成证书或修改 TestSigning；下面的部署命令未执行，模板两 altitude 仍待真实配置。
+此目录交付 Windows x64 内核源码、共享 IOCTL 头、集中 WDK 构建入口和显式开发部署工具。本轮用户态接线已集成主工程源码：Java ABI 56 / Native ABI 55。驱动与部署工具（含正常 Windows UAC 请求、共用 manifest 资源和新文件 open 准入）已用官方 WDK/SDK NuGet 10.0.26100.6584 头库及 Zig/LLD 实际编译链接，生成 36352 字节 SYS 与 188928 字节 EXE，正式 VS/WDK MSBuild 工程尚未执行。未安装、加载或签名，没有生成证书或修改 TestSigning；下面的部署命令未执行，模板两 altitude 仍待真实配置。
 
 `RonovaHost.vcxproj` 使用 Visual Studio 2022 C++ 工具、匹配的 Windows SDK/WDK 与 VS WDK 扩展、`WindowsKernelModeDriver10.0`；目标 Windows 10 2004（19041）及以后，内核 C17，链接 FltMgr/Wdmsec/NtosKrnl，设置 `/INTEGRITYCHECK`。`RonovaHostManage.vcxproj` 是 x64 C17 Win32 控制台工具，链接 Newdev/Setupapi/FltLib/Advapi32/Shell32/Ole32。启动按 `asInvoker` 使用调用者当前权限，只有用户选择修改命令后才按实际 token 决定是否请求 UAC。`RonovaHost.proj` 将两者放在同一次集中构建中。
 

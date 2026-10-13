@@ -19,6 +19,7 @@ typedef struct NativeToolingHeapSlot {
 typedef struct NativeToolingHeapInvocation {
     NativeThread *thread,*previousThread;NativeToolingScope scope;
     NativeToolingEnv *previousEnvironment;
+    NativeToolingSlot *previousWorkerAnchor;
     NativeToolingHeapSlot *slot;DWORD lastError;int installed;
 } NativeToolingHeapInvocation;
 
@@ -198,8 +199,10 @@ static int native_tooling_heap_callback_begin(NativeToolingHeapCall *call,unsign
         invocation->installed=1;
     }
     NativeThread *state=invocation->thread;
+    native_thread_callback_enter(state);
     invocation->scope=(NativeToolingScope){slot->owners,slot->origin,slot->unknown,state->depth,state->tooling};
     invocation->previousEnvironment=state->toolingCallbackEnvironment;state->toolingCallbackEnvironment=record;
+    invocation->previousWorkerAnchor=state->heapWorkerAnchor;state->heapWorkerAnchor=slot->published?slot->retirement:NULL;
     state->tooling=&invocation->scope;state->heapCallback++;invocation->slot=slot;InterlockedIncrement(&slot->active);
     SetLastError(invocation->lastError);return 1;
 }
@@ -207,10 +210,12 @@ static int native_tooling_heap_callback_begin(NativeToolingHeapCall *call,unsign
 static void native_tooling_heap_callback_end(NativeToolingHeapInvocation *invocation){
     if(!invocation->slot)return;DWORD lastError=GetLastError();
     invocation->thread->toolingCallbackEnvironment=invocation->previousEnvironment;
+    invocation->thread->heapWorkerAnchor=invocation->previousWorkerAnchor;
     invocation->thread->heapCallback--;invocation->thread->tooling=invocation->scope.previous;
     InterlockedDecrement(&invocation->slot->active);
     if(invocation->installed)TlsSetValue(native_tls,invocation->previousThread);
-    invocation->slot=NULL;SetLastError(lastError);
+    NativeThread *state=invocation->thread;invocation->slot=NULL;invocation->thread=NULL;
+    native_thread_callback_leave(state);SetLastError(lastError);
 }
 
 static void native_tooling_heap_release(JNIEnv *env,NativeToolingHeapCall *call){
@@ -233,36 +238,49 @@ static void native_tooling_heap_release(JNIEnv *env,NativeToolingHeapCall *call)
             /* Closing admission cannot release a synchronous call's image or
              * provenance while active=1 still covers its exit code below.
              */
-            AcquireSRWLockExclusive(&native_tooling_records);InterlockedExchange(&anchor->admitted,0);ReleaseSRWLockExclusive(&native_tooling_records);
+            AcquireSRWLockExclusive(&native_tooling_records);InterlockedExchange(&anchor->admitted,0);
+            if(InterlockedCompareExchange(&anchor->active,0,0)>1){
+                /* A real local worker borrowed this already retained image
+                 * and provenance. End only this synchronous call's hold. */
+                InterlockedDecrement(&anchor->active);native_tooling_slot_queue_locked(anchor);
+                native_tooling_environment_queue_locked(call->environment);
+                ReleaseSRWLockExclusive(&native_tooling_records);memset(slot,0,sizeof(*slot));continue;
+            }
+            ReleaseSRWLockExclusive(&native_tooling_records);
         }
         int released=1;
         if(slot->pin){
             NativeThread *state=native_thread();NativeToolingScope scope;
-            if(state){scope=(NativeToolingScope){slot->owners,slot->origin,slot->unknown,state->depth,state->tooling};state->tooling=&scope;}
+            if(state){native_thread_callback_enter(state);scope=(NativeToolingScope){slot->owners,slot->origin,slot->unknown,state->depth,state->tooling};state->tooling=&scope;}
             released=FreeLibrary(slot->pin);
-            if(state)state->tooling=scope.previous;
-            if(!released){
-                /* Reuse the existing delayed-release worker on an actual
-                 * unload failure. Retain its exact sources and image lease.
-                 */
-                NativeToolingSlot *retirement=slot->retirement;
-                if(retirement&&!anchor){
-                    retirement->environment=call->environment;retirement->callback=slot->callback;retirement->owners=slot->owners;
-                    retirement->origin=slot->origin;retirement->sourceLease=slot->sourceLease;retirement->pin=slot->pin;retirement->unknown=slot->unknown;
-                    AcquireSRWLockExclusive(&native_tooling_records);retirement->next=native_tooling_slots;native_tooling_slots=retirement;
-                    native_tooling_slot_queue_locked(retirement);ReleaseSRWLockExclusive(&native_tooling_records);
-                    slot->published=1;anchor=retirement;
-                }
-                InterlockedIncrement(&native_tooling_failures);
-            }
+            if(state){state->tooling=scope.previous;native_thread_callback_leave(state);}
+            /* A real DLL callback can end this caller's Java attachment. Use
+             * its current environment; never reattach an external caller or
+             * reuse the JNIEnv captured before FreeLibrary. */
+            JNIEnv *current=NULL;
+            env=native_vm_original.GetEnv&&native_vm_original.GetEnv(native_vm,(void**)&current,JNI_VERSION_1_8)==JNI_OK?current:NULL;
+            if(!released)InterlockedIncrement(&native_tooling_failures);
         }
-        if(released){
+        int referencesReleased=!slot->sourceLease&&!slot->origin;
+        if(released&&(env||referencesReleased)){
             if(slot->sourceLease)native_original.DeleteGlobalRef(env,slot->sourceLease);
             if(slot->origin)native_original.DeleteWeakGlobalRef(env,slot->origin);
+            referencesReleased=1;
+        }
+        if((!released||!referencesReleased)&&!anchor&&slot->retirement){
+            /* Both an actual unload failure and a detached caller transfer
+             * their remaining global references to the existing daemon. */
+            NativeToolingSlot *retirement=slot->retirement;
+            retirement->environment=call->environment;retirement->callback=slot->callback;retirement->owners=slot->owners;
+            retirement->origin=slot->origin;retirement->sourceLease=slot->sourceLease;
+            retirement->pin=released?NULL:slot->pin;retirement->unknown=slot->unknown;
+            AcquireSRWLockExclusive(&native_tooling_records);retirement->next=native_tooling_slots;native_tooling_slots=retirement;
+            ReleaseSRWLockExclusive(&native_tooling_records);slot->published=1;anchor=retirement;
         }
         if(anchor){
             AcquireSRWLockExclusive(&native_tooling_records);
-            if(released){anchor->pin=NULL;anchor->sourceLease=NULL;anchor->origin=NULL;}
+            if(released)anchor->pin=NULL;
+            if(referencesReleased){anchor->sourceLease=NULL;anchor->origin=NULL;}
             InterlockedExchange(&anchor->admitted,0);
             if(InterlockedCompareExchange(&anchor->active,0,0))InterlockedDecrement(&anchor->active);
             native_tooling_slot_queue_locked(anchor);native_tooling_environment_queue_locked(call->environment);
@@ -294,6 +312,26 @@ static jvmtiError native_tooling_heap_slot(JNIEnv *env,NativeToolingHeapCall *ca
     NativeToolingSlot *anchor=slot->retirement;
     anchor->environment=call->environment;anchor->callback=callback;anchor->owners=slot->owners;
     anchor->origin=slot->origin;anchor->sourceLease=slot->sourceLease;anchor->pin=slot->pin;anchor->image=image;anchor->unknown=slot->unknown;
+    /* Record this actual strong preparation while JNI/loader queries are
+     * permitted. A later heap worker can only borrow these retained facts. */
+    if(slot->sourceLease){
+        jsize expected=0;for(OwnerLink *p=slot->owners;p;p=p->next)expected++;
+        jsize count=native_original.GetArrayLength(env,slot->sourceLease);
+        int complete=count==expected&&!native_original.ExceptionCheck(env);
+        for(jsize i=0;i<count&&complete;i++){
+            jobject module=native_original.GetObjectArrayElement(env,slot->sourceLease,i);
+            complete=module&&!native_original.ExceptionCheck(env);
+            if(module)native_original.DeleteLocalRef(env,module);
+        }
+        anchor->heapSourceLeaseComplete=complete;
+    }
+    if(native_original.ExceptionCheck(env))return JVMTI_ERROR_OUT_OF_MEMORY;
+    if(image&&slot->pin){
+        AcquireSRWLockShared(&host_imports);
+        for(HostImage *actual=host_images;actual;actual=actual->next)
+            if(actual->live&&actual->handle==image){anchor->heapImageSize=actual->size;break;}
+        ReleaseSRWLockShared(&host_imports);
+    }
     int allowed=0;AcquireSRWLockExclusive(&native_tooling_records);
     if(!native_tooling_shutdown&&!call->environment->closing&&!call->environment->disposed&&!native_owner_stopped(slot->owners)){
         /* No thunk is installed for a synchronous heap callback. This exact

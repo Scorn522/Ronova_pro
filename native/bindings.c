@@ -23,7 +23,21 @@ typedef struct NativeFileFrame {jobject receiver,token;jclass declaring;jstring 
 typedef struct NativeBindingSeed {jmethodID method;jclass declaring;uintptr_t version[3];int captured;struct NativeBindingSeed *previous;} NativeBindingSeed;
 typedef struct NativeThreadFrame {jobject receiver,token;jobjectArray sources;jint operation;int finishing,completed,skipped,tokenGlobal;} NativeThreadFrame;
 typedef struct NativeUnsafeMutation {jobject receiver,source;jstring kind;jlong offset,length,sourceOffset;jboolean bulk,reading,copy;struct NativeUnsafeMutation *previous;} NativeUnsafeMutation;
-typedef struct NativeThread {Binding *stack[128],*entries[128];NativeUnsafeFrame unsafeFrames[128];NativeFileFrame fileFrames[128],*filePermit;NativeThreadFrame threadFrames[128],*threadPermit;NativeBindingSeed *bindingSeed;NativeUnsafeMutation *unsafeMutation;struct NativeMemoryWrite *memoryWrite;unsigned depth,control,sourceCapture,unsafeInstalling,bufferAllocation,heapCallback;jclass defined,prepared,changedClass;jobject created,mutation,popped,changedHolder,bufferAddress,unobservedLibrary;jobjectArray bufferSources;CodeExit *execution;NativeDefinition *definition;NativeLibraryScope *library;NativeRegistration *registration;NativeToolingScope *tooling;struct NativeToolingEnv *toolingCallbackEnvironment;NativeToolingImage *toolingImage;struct HostCreation *processScope;struct HostProcess *processCreated;} NativeThread;
+typedef struct NativeThread {
+    Binding *stack[128],*entries[128];NativeUnsafeFrame unsafeFrames[128];
+    NativeFileFrame fileFrames[128],*filePermit;NativeThreadFrame threadFrames[128],*threadPermit;
+    NativeBindingSeed *bindingSeed;NativeUnsafeMutation *unsafeMutation;struct NativeMemoryWrite *memoryWrite;
+    unsigned depth,control,sourceCapture,unsafeInstalling,bufferAllocation,heapCallback;
+    jclass defined,prepared,changedClass;jobject created,mutation,popped,changedHolder,bufferAddress,unobservedLibrary;
+    jobjectArray bufferSources;CodeExit *execution;NativeDefinition *definition;NativeLibraryScope *library;
+    NativeRegistration *registration;NativeToolingScope *tooling;struct NativeToolingEnv *toolingCallbackEnvironment;
+    NativeToolingImage *toolingImage;struct HostCreation *processScope;struct HostProcess *processCreated;
+    struct NativeToolingSlot *heapWorkerAnchor;
+    /* VM detach ends Java attachments, not a C callback or an OS worker. */
+    struct HostThreadWorker *hostWorker;
+    unsigned callbackHolds,vmDetaching,vmThreadEnding;
+    int storageOwned,vmAttached,javaEnded,javaCleaning;
+} NativeThread;
 static jvmtiEnv *native_ti;
 static JavaVM *native_vm;
 static SRWLOCK native_records=SRWLOCK_INIT;
@@ -101,10 +115,18 @@ static int native_memory_call_begin(JNIEnv*,NativeThread*,Binding*,unsigned char
 static void native_memory_call_end(JNIEnv*,NativeThread*,Binding*,unsigned char*,NativeUnsafeFrame*);
 static void native_memory_thread_end(JNIEnv*,NativeThread*);
 static void code_exception_frames(JNIEnv*,jthrowable,unsigned);
+static void native_thread_try_release(NativeThread*);
+static void native_thread_callback_leave(NativeThread*);
+static int native_thread_worker_os_end(JNIEnv*,NativeThread*);
+static int host_thread_worker_scope_idle(const NativeThread*);
 static NativeThread *native_thread(void) {
     if(native_tls==TLS_OUT_OF_INDEXES)return NULL;NativeThread *state=(NativeThread*)TlsGetValue(native_tls);
-    if(!state){state=(NativeThread*)calloc(1,sizeof(*state));if(state&&!TlsSetValue(native_tls,state)){free(state);return NULL;}}return state;
+    if(!state){state=(NativeThread*)calloc(1,sizeof(*state));if(state){state->storageOwned=1;if(!TlsSetValue(native_tls,state)){free(state);return NULL;}}}return state;
 }
+static void native_thread_java_observed(NativeThread *state){
+    if(state&&!state->javaCleaning&&!state->vmDetaching&&!state->vmThreadEnding){state->vmAttached=1;state->javaEnded=0;}
+}
+static void native_thread_callback_enter(NativeThread *state){state->callbackHolds++;}
 static void native_refuse(JNIEnv *env,const char *message){
     const struct JNINativeInterface_ *api=native_original.FindClass?&native_original:*env;
     if(api->ExceptionCheck(env))return;
@@ -148,10 +170,10 @@ static int native_caller_stopped(void *address){
     for(NativeLibrary *library=native_libraries;library;library=library->next)if(image&&library->handle==image&&InterlockedCompareExchange(&library->alive,0,0)&&native_owner_stopped(library->owners)){stopped=1;break;}
     ReleaseSRWLockShared(&native_records);return stopped;
 }
-static int native_stopped(JNIEnv *env){NativeThread *state=native_thread();if(!state)return 0;for(unsigned i=0;i<state->depth;i++)if(native_owner_stopped(state->stack[i]->owners))return 1;for(NativeLibraryScope *scope=state->library;scope;scope=scope->previous)if(native_owner_stopped(scope->library->owners))return 1;for(NativeToolingScope *scope=state->tooling;scope;scope=scope->previous)if(native_owner_stopped(scope->owners))return 1;return code_current_stopped(env);}
+static int native_stopped(JNIEnv *env){NativeThread *state=native_thread();if(!state)return 0;if(env)native_thread_java_observed(state);for(unsigned i=0;i<state->depth;i++)if(native_owner_stopped(state->stack[i]->owners))return 1;for(NativeLibraryScope *scope=state->library;scope;scope=scope->previous)if(native_owner_stopped(scope->library->owners))return 1;for(NativeToolingScope *scope=state->tooling;scope;scope=scope->previous)if(native_owner_stopped(scope->owners))return 1;return code_current_stopped(env);}
 static jweak native_origin(NativeThread *state){if(!state)return NULL;if(state->tooling&&state->depth<=state->tooling->depth&&state->tooling->origin)return state->tooling->origin;return state->depth?state->stack[state->depth-1]->origin:state->library?state->library->library->origin:NULL;}
 static int native_capture_scope_sources(JNIEnv *env,NativeThread *state,OwnerLink **owners,int *unknown){
-    if(!state)return 1;for(unsigned i=0;i<state->depth;i++)if(!native_owner_merge(owners,state->stack[i]->owners))return 0;
+    if(!state)return 1;if(env)native_thread_java_observed(state);for(unsigned i=0;i<state->depth;i++)if(!native_owner_merge(owners,state->stack[i]->owners))return 0;
     for(NativeLibraryScope *scope=state->library;scope;scope=scope->previous)if(!native_owner_merge(owners,scope->library->owners))return 0;for(NativeToolingScope *scope=state->tooling;scope;scope=scope->previous){if(!native_owner_merge(owners,scope->owners))return 0;if(scope->unknown&&unknown)*unknown=1;}return code_current_sources_query(env,owners,unknown);
 }
 static int native_capture_scope_owners(JNIEnv *env,NativeThread *state,OwnerLink **owners){return native_capture_scope_sources(env,state,owners,NULL);}
@@ -171,6 +193,7 @@ JNIEXPORT jboolean JNICALL Java_dev_ronova_pro_bootstrap_NativeControl_sourceCap
 }
 static uint64_t native_enter(JNIEnv *env,jobject receiver,Binding *binding,unsigned char *frame) {
     NativeThread *state=native_thread();if(!state||state->depth==128){native_refuse(env,"RONOVA_NATIVE_SCOPE_CAPACITY");return 0;}
+    native_thread_java_observed(state);
     if(binding->fileOperation)memset(&state->fileFrames[state->depth],0,sizeof(NativeFileFrame));
     if(binding->threadOperation)memset(&state->threadFrames[state->depth],0,sizeof(NativeThreadFrame));
     // Controller JNI work already has its exact native control scope. Its own
@@ -211,6 +234,7 @@ static void native_leave(Binding *binding,unsigned char *frame){
         if(binding->threadOperation)native_thread_finish(env,state,&state->threadFrames[state->depth-1],!native_original.ExceptionCheck(env));
     }
     state->depth--;InterlockedDecrement(&state->stack[state->depth]->active);state->stack[state->depth]=state->entries[state->depth]=NULL;
+    native_thread_try_release(state);
 }
 static uint64_t native_result(JNIEnv *env,Binding *binding,unsigned char *frame) {
     if(native_original.ExceptionCheck(env))return 0;
@@ -826,26 +850,94 @@ NATIVE_VOID(Static,jclass type,type,0)
 static void JNICALL native_nonvirtualVoid(JNIEnv *env,jobject object,jclass type,jmethodID method,...){if(native_stopped(env)){native_refuse(env,"RONOVA_STOPPED_NATIVE_CALLBACK");return;}va_list args;va_start(args,method);native_original.CallNonvirtualVoidMethodV(env,object,type,method,args);va_end(args);}
 static void JNICALL native_nonvirtualVoidV(JNIEnv *env,jobject object,jclass type,jmethodID method,va_list args){if(native_stopped(env)){native_refuse(env,"RONOVA_STOPPED_NATIVE_CALLBACK");return;}native_original.CallNonvirtualVoidMethodV(env,object,type,method,args);}
 static void JNICALL native_nonvirtualVoidA(JNIEnv *env,jobject object,jclass type,jmethodID method,const jvalue *args){if(native_stopped(env)){native_refuse(env,"RONOVA_STOPPED_NATIVE_CALLBACK");return;}native_original.CallNonvirtualVoidMethodA(env,object,type,method,args);}
-static void JNICALL native_thread_end(jvmtiEnv *api,JNIEnv *env,jthread thread){
-    (void)api;(void)env;(void)thread;
-    if(native_tls==TLS_OUT_OF_INDEXES)return;
-    NativeThread *state=(NativeThread*)TlsGetValue(native_tls);if(!state)return;
+static int native_thread_java_pending(const NativeThread *state){
+    if(state->vmAttached||state->javaCleaning||state->vmDetaching||state->vmThreadEnding
+            ||state->depth||state->execution||state->memoryWrite||state->filePermit||state->threadPermit
+            ||state->defined||state->prepared||state->changedClass||state->created||state->mutation
+            ||state->popped||state->changedHolder||state->bufferAddress||state->bufferSources||state->unobservedLibrary
+            ||state->definition||state->registration||state->bindingSeed||state->unsafeMutation
+            ||state->processScope||state->processCreated)return 1;
+    for(unsigned i=0;i<128;i++){
+        const NativeUnsafeFrame *unsafe=&state->unsafeFrames[i];
+        const NativeFileFrame *file=&state->fileFrames[i];
+        const NativeThreadFrame *thread=&state->threadFrames[i];
+        if(state->stack[i]||state->entries[i]||unsafe->token||unsafe->memoryCall
+                ||file->receiver||file->token||file->declaring||file->method||file->sources||file->references||file->arguments
+                ||thread->receiver||thread->token||thread->sources||thread->operation)return 1;
+    }
+    return 0;
+}
+static void native_thread_java_end(JNIEnv *env,NativeThread *state){
+    if(state->javaCleaning)return;state->javaCleaning=1;state->javaEnded=1;
     host_thread_end(env,state);
     code_thread_end(env,state);
     native_file_thread_end(env,state);
     for(unsigned i=state->depth;i>0;i--){
         native_thread_finish(env,state,&state->threadFrames[i-1],0);
         if(state->unsafeFrames[i-1].memoryCall)native_memory_call_end(env,state,state->entries[i-1],NULL,&state->unsafeFrames[i-1]);
-        if(state->unsafeFrames[i-1].token){state->control++;native_end_mutation(env,state->unsafeFrames[i-1].token,0);state->control--;InterlockedIncrement(&native_failures);}
-        InterlockedDecrement(&state->stack[i-1]->active);
+        if(state->unsafeFrames[i-1].token){jobject token=state->unsafeFrames[i-1].token;state->unsafeFrames[i-1].token=NULL;
+            state->control++;native_end_mutation(env,token,0);state->control--;InterlockedIncrement(&native_failures);}
+        Binding *active=state->stack[i-1];state->stack[i-1]=state->entries[i-1]=NULL;
+        if(active)InterlockedDecrement(&active->active);
+        SecureZeroMemory(&state->unsafeFrames[i-1],sizeof(state->unsafeFrames[i-1]));
+        state->depth=i-1;
     }
+    /* A second environment's ThreadEnd must not decrement the same binding.
+     * Later ThreadEnd callbacks can create new Java attachments; those are
+     * drained on their own callback exit using the same cleared records. */
+    state->depth=0;state->filePermit=NULL;state->threadPermit=NULL;
     native_memory_thread_end(env,state);
+    state->defined=state->prepared=state->changedClass=NULL;
+    state->created=state->mutation=state->popped=state->changedHolder=state->bufferAddress=state->unobservedLibrary=NULL;
+    state->bufferSources=NULL;state->vmAttached=0;state->javaCleaning=0;
+}
+static void native_thread_native_end(NativeThread *state){
     while(state->library){NativeLibraryScope *scope=state->library;state->library=scope->previous;
         // An interrupted load has not demonstrated image retirement.
         InterlockedIncrement(&native_failures);SecureZeroMemory(scope,sizeof(*scope));free(scope);}
+}
+static void native_thread_try_release(NativeThread *state){
+    if(!state||!state->storageOwned||!state->javaEnded||state->callbackHolds||state->hostWorker
+            ||state->tooling||state->heapCallback||state->heapWorkerAnchor
+            ||state->control||state->sourceCapture||state->unsafeInstalling||state->bufferAllocation
+            ||native_thread_java_pending(state))return;
+    if(native_tls!=TLS_OUT_OF_INDEXES&&(NativeThread*)TlsGetValue(native_tls)==state&&!TlsSetValue(native_tls,NULL)){
+        InterlockedIncrement(&native_failures);return;
+    }
+    native_thread_native_end(state);SecureZeroMemory(state,sizeof(*state));free(state);
+}
+static void native_thread_callback_leave(NativeThread *state){
+    if(!state||!state->callbackHolds){InterlockedIncrement(&native_failures);return;}
+    state->callbackHolds--;native_thread_try_release(state);
+}
+/* Called only by the Host reaper after this exact OS thread has signaled and
+ * its creator publication has drained. A daemon JNIEnv cannot close another
+ * thread's local JNI references or manufacture a missing VM ThreadEnd.
+ * Fresh pure-C states need no Java cleanup; detached states already ran it on
+ * the actual event thread. An omitted detach or abandoned callback stays open. */
+static int native_thread_worker_os_end(JNIEnv *env,NativeThread *state){
+    (void)env;
+    if(!state||!state->hostWorker||state->callbackHolds||state->heapCallback||state->heapWorkerAnchor||state->library
+            ||state->toolingCallbackEnvironment||state->toolingImage||!host_thread_worker_scope_idle(state)
+            ||state->control||state->sourceCapture||state->unsafeInstalling||state->bufferAllocation
+            ||native_thread_java_pending(state))return 0;
+    state->hostWorker=NULL;SecureZeroMemory(state,sizeof(*state));free(state);return 1;
+}
+static void JNICALL native_thread_start(jvmtiEnv *api,JNIEnv *env,jthread thread){
+    (void)api;(void)env;(void)thread;
+    /* Observe only an existing current-thread state. In particular, an actual
+     * worker Attach made through a saved VM function still emits ThreadStart.
+     * This does not enumerate environments or intercept that saved function. */
+    if(native_tls!=TLS_OUT_OF_INDEXES)native_thread_java_observed((NativeThread*)TlsGetValue(native_tls));
+}
+static void JNICALL native_thread_end(jvmtiEnv *api,JNIEnv *env,jthread thread){
+    (void)api;(void)thread;
+    if(native_tls==TLS_OUT_OF_INDEXES)return;
+    NativeThread *state=(NativeThread*)TlsGetValue(native_tls);if(!state)return;
+    state->vmThreadEnding++;native_thread_java_end(env,state);state->vmThreadEnding--;
     // Array copies may have been handed to another native worker. Their actual
     // matching release, rather than creator-thread exit, closes those leases.
-    TlsSetValue(native_tls,NULL);SecureZeroMemory(state,sizeof(*state));free(state);
+    native_thread_try_release(state);
 }
 /* Only environments actually delivered by this VM are intercepted. The public
  * ABI supplies the first function-table pointer, not an environment enumerator
@@ -872,6 +964,7 @@ typedef struct NativeToolingEnv NativeToolingEnv;
 typedef struct NativeToolingSlot {
     NativeToolingEnv *environment;void *callback,*entry;OwnerLink *owners;
     jweak origin;jobjectArray sourceLease;HMODULE image,pin;volatile LONG admitted,active;int unknown,agent;
+    int heapSourceLeaseComplete;DWORD heapImageSize;
     const void *argument;RUNTIME_FUNCTION unwind;int queued,releasing;struct NativeToolingSlot *next,*retireNext;
 } NativeToolingSlot;
 typedef struct NativeToolingVersion {
@@ -914,6 +1007,13 @@ static HANDLE native_tooling_retirement_event;
 static NativeToolingSlot *native_tooling_retired_slots;
 static NativeToolingEnv *native_tooling_retired_environments;
 static volatile LONG native_tooling_shutdown;
+static void native_thread_worker_wake(void){
+    if(native_tooling_retirement_event)SetEvent(native_tooling_retirement_event);
+}
+static int native_thread_worker_backend_ready(void){
+    return native_tooling_retirement_event&&InterlockedCompareExchange(&native_tooling_ready,0,0)
+            &&native_jni_ready&&!InterlockedCompareExchange(&native_tooling_shutdown,0,0);
+}
 static void native_tooling_version_retire(NativeToolingVersion *version);
 static int native_tooling_extensions_unresolved_locked(const NativeToolingEnv *record);
 static int native_tooling_heap_environment_pending(NativeToolingEnv *record);
@@ -926,7 +1026,8 @@ static int native_tooling_restricted(void){
 static JNIEnv *native_tooling_jni(void){
     if(native_tooling_restricted())return NULL;
     JNIEnv *env=NULL;
-    if(native_vm&&native_vm_original.GetEnv)native_vm_original.GetEnv(native_vm,(void**)&env,JNI_VERSION_1_8);
+    if(native_vm&&native_vm_original.GetEnv&&native_vm_original.GetEnv(native_vm,(void**)&env,JNI_VERSION_1_8)==JNI_OK&&env)
+        native_thread_java_observed(native_tls==TLS_OUT_OF_INDEXES?NULL:(NativeThread*)TlsGetValue(native_tls));
     return env;
 }
 static NativeToolingEnv *native_tooling_environment(jvmtiEnv *api){
@@ -1021,7 +1122,7 @@ static int native_tooling_callback_begin(NativeToolingSlot *slot,jvmtiEnv *api,N
         native_tooling_slot_queue_locked(slot);native_tooling_environment_queue_locked(slot->environment);ReleaseSRWLockExclusive(&native_tooling_records);invocation->slot=NULL;return 0;}
     invocation->thread=state;
     invocation->scope=(NativeToolingScope){slot->owners,slot->origin,slot->unknown,state->depth,state->tooling};
-    state->tooling=&invocation->scope;return 1;
+    native_thread_callback_enter(state);state->tooling=&invocation->scope;return 1;
 }
 static void native_tooling_slot_retire(NativeToolingSlot *slot){
     if(!slot)return;
@@ -1029,11 +1130,12 @@ static void native_tooling_slot_retire(NativeToolingSlot *slot){
     native_tooling_slot_queue_locked(slot);ReleaseSRWLockExclusive(&native_tooling_records);
 }
 static void native_tooling_callback_end(NativeToolingInvocation *invocation){
-    if(!invocation->slot)return;invocation->thread->tooling=invocation->scope.previous;
+    if(!invocation->slot)return;DWORD error=GetLastError();NativeThread *state=invocation->thread;state->tooling=invocation->scope.previous;
     AcquireSRWLockExclusive(&native_tooling_records);NativeToolingSlot *slot=invocation->slot;
     InterlockedDecrement(&slot->active);slot->environment->active--;if(slot->agent)InterlockedExchange(&slot->admitted,0);
     native_tooling_slot_queue_locked(slot);native_tooling_environment_queue_locked(slot->environment);
     ReleaseSRWLockExclusive(&native_tooling_records);
+    invocation->slot=NULL;invocation->thread=NULL;native_thread_callback_leave(state);SetLastError(error);
 }
 #define COMMA ,
 #define TOOLING_CALLBACK(NAME,ARGS,CALL) \
@@ -1043,12 +1145,19 @@ static void JNICALL native_tooling_##NAME(NativeToolingSlot *slot,jvmtiEnv *api,
 }
 TOOLING_CALLBACK(VMInit,JNIEnv *env COMMA jthread thread,env COMMA thread)
 TOOLING_CALLBACK(VMDeath,JNIEnv *env,env)
-TOOLING_CALLBACK(ThreadStart,JNIEnv *env COMMA jthread thread,env COMMA thread)
+static void JNICALL native_tooling_ThreadStart(NativeToolingSlot *slot,jvmtiEnv *api,JNIEnv *env,jthread thread){
+    NativeToolingInvocation invocation;if(!native_tooling_callback_begin(slot,api,&invocation))return;
+    native_thread_java_observed(invocation.thread);
+    ((jvmtiEventThreadStart)slot->callback)(api,env,thread);native_tooling_callback_end(&invocation);
+}
 static void JNICALL native_tooling_ThreadEnd(NativeToolingSlot *slot,jvmtiEnv *api,JNIEnv *env,jthread thread){
     NativeToolingInvocation invocation;if(!native_tooling_callback_begin(slot,api,&invocation))return;
-    ((jvmtiEventThreadEnd)slot->callback)(api,env,thread);native_tooling_callback_end(&invocation);
-    /* Our environment may precede this one in the VM's ThreadEnd pass. */
-    native_thread_end(native_ti,env,thread);
+    NativeThread *state=invocation.thread;state->vmThreadEnding++;
+    ((jvmtiEventThreadEnd)slot->callback)(api,env,thread);
+    /* Our own environment may have already drained the earlier Java records.
+     * Clear any actual records created by this callback before releasing its
+     * C hold, while the real event thread's JNIEnv is still valid. */
+    native_thread_java_end(env,state);state->vmThreadEnding--;native_tooling_callback_end(&invocation);
 }
 TOOLING_CALLBACK(ClassLoad,JNIEnv *env COMMA jthread thread COMMA jclass type,env COMMA thread COMMA type)
 TOOLING_CALLBACK(ClassPrepare,JNIEnv *env COMMA jthread thread COMMA jclass type,env COMMA thread COMMA type)
@@ -1219,16 +1328,29 @@ static jvmtiError native_tooling_dispose_idle(NativeToolingEnv *record,int retir
         native_tooling_heap_environment_release(native_tooling_jni(),record);
     }return result;
 }
+static int native_tooling_retirement_jni(JNIEnv **env){
+    *env=NULL;if(InterlockedCompareExchange(&native_tooling_shutdown,0,0))return 0;
+    if(!native_vm_original.GetEnv)return 0;
+    jint status=native_vm_original.GetEnv(native_vm,(void**)env,JNI_VERSION_1_8);
+    if(status==JNI_EDETACHED){JavaVMAttachArgs arguments={JNI_VERSION_1_8,"Ronova JVMTI retirement",NULL};
+        if(!native_vm_original.AttachCurrentThreadAsDaemon)return 0;
+        status=native_vm_original.AttachCurrentThreadAsDaemon(native_vm,(void**)env,&arguments);
+    }
+    if(status!=JNI_OK||!*env){*env=NULL;return 0;}
+    native_thread_java_observed(native_tls==TLS_OUT_OF_INDEXES?NULL:(NativeThread*)TlsGetValue(native_tls));return 1;
+}
 static DWORD WINAPI native_tooling_retirement_worker(void *argument){
     (void)argument;JNIEnv *env=NULL;
     for(;;){
-        if(WaitForSingleObject(native_tooling_retirement_event,INFINITE)!=WAIT_OBJECT_0)break;
+        DWORD workerWait=WaitForSingleObject(native_tooling_retirement_event,host_thread_workers_pending()?1000:INFINITE);
+        if(workerWait!=WAIT_OBJECT_0&&workerWait!=WAIT_TIMEOUT)break;
         if(InterlockedCompareExchange(&native_tooling_shutdown,0,0))break;
-        if(!env){JavaVMAttachArgs arguments={JNI_VERSION_1_8,"Ronova JVMTI retirement",NULL};
-            if(!native_vm_original.AttachCurrentThreadAsDaemon||native_vm_original.AttachCurrentThreadAsDaemon(native_vm,(void**)&env,&arguments)!=JNI_OK){
-                InterlockedIncrement(&native_tooling_failures);continue;}}
         for(;;){
             if(InterlockedCompareExchange(&native_tooling_shutdown,0,0))break;
+            /* A previous DLL's actual unload callback may have detached this
+             * daemon. Never carry its old JNIEnv into another cleanup. */
+            if(!native_tooling_retirement_jni(&env)){InterlockedIncrement(&native_tooling_failures);break;}
+            host_thread_workers_reap(&env);if(!env)break;
             AcquireSRWLockExclusive(&native_tooling_records);
             NativeToolingSlot *slot=native_tooling_retired_slots;NativeToolingEnv *record=NULL;
             if(slot){native_tooling_retired_slots=slot->retireNext;slot->retireNext=NULL;slot->queued=0;}
@@ -1239,12 +1361,19 @@ static DWORD WINAPI native_tooling_retirement_worker(void *argument){
                 AcquireSRWLockExclusive(&native_tooling_records);
                 if(!slot->admitted&&!slot->active&&!slot->releasing){slot->releasing=1;pin=slot->pin;slot->pin=NULL;lease=slot->sourceLease;slot->sourceLease=NULL;origin=slot->origin;slot->origin=NULL;}
                 ReleaseSRWLockExclusive(&native_tooling_records);
-                NativeToolingScope scope={slot->owners,origin,slot->unknown,state->depth,state->tooling};state->tooling=&scope;
-                int released=!pin||FreeLibrary(pin);state->tooling=scope.previous;
-                if(!released){AcquireSRWLockExclusive(&native_tooling_records);slot->pin=pin;slot->sourceLease=lease;slot->origin=origin;slot->releasing=0;ReleaseSRWLockExclusive(&native_tooling_records);
-                    InterlockedIncrement(&native_tooling_failures);continue;}
+                NativeToolingScope scope={slot->owners,origin,slot->unknown,state->depth,state->tooling};
+                native_thread_callback_enter(state);state->tooling=&scope;
+                int released=!pin||FreeLibrary(pin);
+                if(!released){state->tooling=scope.previous;
+                    AcquireSRWLockExclusive(&native_tooling_records);slot->pin=pin;slot->sourceLease=lease;slot->origin=origin;slot->releasing=0;ReleaseSRWLockExclusive(&native_tooling_records);
+                    native_thread_callback_leave(state);InterlockedIncrement(&native_tooling_failures);continue;}
+                if(!native_tooling_retirement_jni(&env)){state->tooling=scope.previous;
+                    AcquireSRWLockExclusive(&native_tooling_records);slot->sourceLease=lease;slot->origin=origin;slot->releasing=0;ReleaseSRWLockExclusive(&native_tooling_records);
+                    native_thread_callback_leave(state);InterlockedIncrement(&native_tooling_failures);break;}
+                state->tooling=scope.previous;
                 if(lease)native_original.DeleteGlobalRef(env,lease);if(origin)native_original.DeleteWeakGlobalRef(env,origin);
                 AcquireSRWLockExclusive(&native_tooling_records);slot->releasing=0;ReleaseSRWLockExclusive(&native_tooling_records);
+                native_thread_callback_leave(state);
             }else {
                 AcquireSRWLockExclusive(&record->mutation);
                 if(!record->disposed){jvmtiError result=native_tooling_dispose_idle(record,1);
@@ -1563,6 +1692,7 @@ static jvmtiError native_tooling_thread_list(jvmtiEnv *api,jint count,const jthr
 static jvmtiError JNICALL native_tooling_SuspendThreadList(jvmtiEnv *api,jint count,const jthread *threads,jvmtiError *results){return native_tooling_thread_list(api,count,threads,results,0,__builtin_return_address(0));}
 static jvmtiError JNICALL native_tooling_ResumeThreadList(jvmtiEnv *api,jint count,const jthread *threads,jvmtiError *results){return native_tooling_thread_list(api,count,threads,results,1,__builtin_return_address(0));}
 #include "tooling_heap.c"
+#include "tooling_worker_lease.c"
 static jvmtiError JNICALL native_tooling_run_agent(jvmtiEnv *api,jthread thread,jvmtiStartFunction callback,const void *argument,jint priority){
     NativeToolingEnv *record=native_tooling_environment(api);if(!record)return native_tooling_restricted()?JVMTI_ERROR_NOT_AVAILABLE:JVMTI_ERROR_INVALID_ENVIRONMENT;
     TOOLING_USE(record);
@@ -1616,12 +1746,50 @@ static int native_tooling_observe(jvmtiEnv *api,JNIEnv *env,void *caller,int own
     AcquireSRWLockExclusive(&native_tooling_records);record->next=native_tooling_environments;native_tooling_environments=record;ReleaseSRWLockExclusive(&native_tooling_records);
     if(!native_tooling_exchange((void *volatile*)api,(void*)original,shadow)){InterlockedExchange(&record->closing,1);InterlockedIncrement(&native_tooling_failures);return 0;}return 1;
 }
+/* JNI 17 Attach is a no-op for an attached thread; Detach may send ThreadEnd
+ * while the originating native routine and its OS worker are still running.
+ * Preserve the original result/output and only reopen the Java cleanup cycle
+ * on a successful Attach outside the real end/detach dispatch.
+ * https://docs.oracle.com/en/java/javase/17/docs/specs/jni/invocation.html
+ */
+static jint JNICALL native_vm_attach(JavaVM *vm,void **result,void *arguments){
+    if(vm!=native_vm||!native_vm_original.AttachCurrentThread)return JNI_ERR;
+    DWORD incoming=GetLastError();
+    NativeThread *state=native_tls==TLS_OUT_OF_INDEXES?NULL:(NativeThread*)TlsGetValue(native_tls);
+    if(state&&state->heapCallback){if(result)*result=NULL;SetLastError(incoming);return JNI_ERR;}
+    SetLastError(incoming);
+    jint status=native_vm_original.AttachCurrentThread(vm,result,arguments);DWORD error=GetLastError();
+    if(status==JNI_OK)native_thread_java_observed(native_tls==TLS_OUT_OF_INDEXES?NULL:(NativeThread*)TlsGetValue(native_tls));
+    SetLastError(error);return status;
+}
+static jint JNICALL native_vm_attach_daemon(JavaVM *vm,void **result,void *arguments){
+    if(vm!=native_vm||!native_vm_original.AttachCurrentThreadAsDaemon)return JNI_ERR;
+    DWORD incoming=GetLastError();
+    NativeThread *state=native_tls==TLS_OUT_OF_INDEXES?NULL:(NativeThread*)TlsGetValue(native_tls);
+    if(state&&state->heapCallback){if(result)*result=NULL;SetLastError(incoming);return JNI_ERR;}
+    SetLastError(incoming);
+    jint status=native_vm_original.AttachCurrentThreadAsDaemon(vm,result,arguments);DWORD error=GetLastError();
+    if(status==JNI_OK)native_thread_java_observed(native_tls==TLS_OUT_OF_INDEXES?NULL:(NativeThread*)TlsGetValue(native_tls));
+    SetLastError(error);return status;
+}
+static jint JNICALL native_vm_detach(JavaVM *vm){
+    if(vm!=native_vm||!native_vm_original.DetachCurrentThread)return JNI_ERR;
+    DWORD incoming=GetLastError();
+    NativeThread *state=native_tls==TLS_OUT_OF_INDEXES?NULL:(NativeThread*)TlsGetValue(native_tls);
+    if(state&&state->heapCallback){SetLastError(incoming);return JNI_ERR;}
+    if(state)state->vmDetaching++;SetLastError(incoming);
+    jint status=native_vm_original.DetachCurrentThread(vm);DWORD error=GetLastError();
+    if(state){state->vmDetaching--;native_thread_try_release(state);}
+    SetLastError(error);return status;
+}
 static jint JNICALL native_tooling_getenv(JavaVM *vm,void **result,jint version){
     if(vm!=native_vm||!native_vm_original.GetEnv)return JNI_ERR;
+    if(native_tooling_restricted()){if(result)*result=NULL;InterlockedIncrement(&native_tooling_failures);return JNI_ERR;}
     void *caller=__builtin_return_address(0);int tooling=(version&JVMTI_VERSION_MASK_INTERFACE_TYPE)==JVMTI_VERSION_INTERFACE_JVMTI;
-    if(tooling&&native_tooling_restricted()){if(result)*result=NULL;InterlockedIncrement(&native_tooling_failures);return JNI_ERR;}
     if(tooling&&native_tooling_stopped(native_tooling_jni(),caller)){if(result)*result=NULL;InterlockedIncrement(&native_tooling_failures);return JNI_ERR;}
     jint status=native_vm_original.GetEnv(vm,result,version);
+    if(status==JNI_OK&&!tooling&&result&&*result){DWORD error=GetLastError();
+        native_thread_java_observed(native_tls==TLS_OUT_OF_INDEXES?NULL:(NativeThread*)TlsGetValue(native_tls));SetLastError(error);}
     if(status==JNI_OK&&tooling&&result&&*result){jvmtiEnv *api=(jvmtiEnv*)*result;
         if(!native_tooling_observe(api,native_tooling_jni(),caller,0)){NativeToolingEnv *record=native_tooling_environment(api);const struct jvmtiInterface_1_ *original=record?record->original:*api;
             if(record){AcquireSRWLockExclusive(&record->mutation);native_tooling_dispose_idle(record,0);ReleaseSRWLockExclusive(&record->mutation);}
@@ -1636,7 +1804,9 @@ static HMODULE native_vm_getenv_image(JavaVM *vm){
 static int native_tooling_install(JavaVM *vm,jvmtiEnv *api){
     if(native_tooling_ready)return 1;const struct JNIInvokeInterface_ *original=*vm;native_vm_original=*original;
     struct JNIInvokeInterface_ *shadow=(struct JNIInvokeInterface_*)VirtualAlloc(NULL,sizeof(*shadow),MEM_COMMIT|MEM_RESERVE,PAGE_READWRITE);if(!shadow)return 0;
-    *shadow=*original;shadow->GetEnv=native_tooling_getenv;DWORD previous;
+    *shadow=*original;shadow->GetEnv=native_tooling_getenv;
+    shadow->AttachCurrentThread=native_vm_attach;shadow->AttachCurrentThreadAsDaemon=native_vm_attach_daemon;
+    shadow->DetachCurrentThread=native_vm_detach;DWORD previous;
     if(!VirtualProtect(shadow,sizeof(*shadow),PAGE_READONLY,&previous)){VirtualFree(shadow,0,MEM_RELEASE);return 0;}
     if(!GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS,(LPCSTR)native_tooling_getenv,&native_tooling_pin)){VirtualFree(shadow,0,MEM_RELEASE);return 0;}
     native_tooling_image_begin=(uintptr_t)native_tooling_pin;
@@ -1723,9 +1893,11 @@ static jint native_initialize(JavaVM *vm){
     jvmtiCapabilities caps;memset(&caps,0,sizeof(caps));caps.can_generate_native_method_bind_events=1;caps.can_generate_all_class_hook_events=1;caps.can_retransform_classes=1;
     if((*native_ti)->AddCapabilities(native_ti,&caps)!=JVMTI_ERROR_NONE||!native_tooling_install(vm,native_ti))return JNI_ERR;
     jvmtiEventCallbacks callbacks;memset(&callbacks,0,sizeof(callbacks));callbacks.NativeMethodBind=native_binding;
-    callbacks.ThreadEnd=native_thread_end;callbacks.ClassFileLoadHook=native_tooling_own_image;callbacks.ClassPrepare=code_class_prepared;callbacks.FramePop=code_frame_popped;callbacks.FieldModification=heap_field_modified;
+    callbacks.ThreadStart=native_thread_start;callbacks.ThreadEnd=native_thread_end;
+    callbacks.ClassFileLoadHook=native_tooling_own_image;callbacks.ClassPrepare=code_class_prepared;callbacks.FramePop=code_frame_popped;callbacks.FieldModification=heap_field_modified;
     if((*native_ti)->SetEventCallbacks(native_ti,&callbacks,sizeof(callbacks))!=JVMTI_ERROR_NONE
             ||(*native_ti)->SetEventNotificationMode(native_ti,JVMTI_ENABLE,JVMTI_EVENT_NATIVE_METHOD_BIND,NULL)!=JVMTI_ERROR_NONE
+            ||(*native_ti)->SetEventNotificationMode(native_ti,JVMTI_ENABLE,JVMTI_EVENT_THREAD_START,NULL)!=JVMTI_ERROR_NONE
             ||(*native_ti)->SetEventNotificationMode(native_ti,JVMTI_ENABLE,JVMTI_EVENT_THREAD_END,NULL)!=JVMTI_ERROR_NONE
             ||(*native_ti)->SetEventNotificationMode(native_ti,JVMTI_ENABLE,JVMTI_EVENT_CLASS_PREPARE,NULL)!=JVMTI_ERROR_NONE)return JNI_ERR;
     if(native_tls==TLS_OUT_OF_INDEXES)native_tls=TlsAlloc();if(native_tls==TLS_OUT_OF_INDEXES)return JNI_ERR;

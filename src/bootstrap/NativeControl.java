@@ -43,7 +43,7 @@ public final class NativeControl {
             if(!early.isEmpty()) {
                 Path actual=Path.of(early).toAbsolutePath();if(!hash(Files.readAllBytes(actual)).equals(digest))throw new IOException("EARLY_NATIVE_IMAGE_MISMATCH");dll=actual;
             }
-            System.load(dll.toString());if(abi()!=54)throw new UnsatisfiedLinkError("NATIVE_CONTROL_ABI");
+            System.load(dll.toString());if(abi()!=55)throw new UnsatisfiedLinkError("NATIVE_CONTROL_ABI");
             if(!initialize0(ControlBridge.class,DefinitionBridge.class))throw new UnsatisfiedLinkError("ACTUAL_NATIVE_BOUNDARY_INSTALL_FAILED");
             if(!initializeDefinitionDirectory0(definitionDirectoryOwner))throw new UnsatisfiedLinkError("ACTUAL_DEFINITION_DIRECTORY_CAS_UNAVAILABLE");
             libraryBoundaryPresent=libraryPresent0();available=true;return state="NATIVE_BIND_AND_JNI_FIELD_READY";
@@ -533,6 +533,7 @@ public final class NativeControl {
                 +";HOST_NATIVE_GETPROCADDRESS_IMPORTS="+host[10]+";HOST_NATIVE_CREATEPROCESS_RESOLVED_ENTRIES="+host[11]+";HOST_NATIVE_GETPROCADDRESS_RESOLVED_ENTRIES="+host[12]
                 +";HOST_PROCESS_ALIASES="+host[13]+";HOST_PRIMARY_THREAD_ALIASES="+host[14]+";HOST_EXTERNAL_DUPLICATE_TRANSFERS="+host[15]+";HOST_INHERITED_EXPOSURES="+host[16]
                 +";HOST_LOST_HANDLE_EVIDENCE="+host[17]+";HOST_OBJECT_IDENTITY_BACKEND="+host[18]+";HOST_HANDLE_IMPORTS="+host[19]+";HOST_HANDLE_RESOLVED_ENTRIES="+host[20]
+                +";HOST_NATIVE_WORKER_HOLDS="+host[21]+";HOST_NATIVE_WORKER_EXIT_PENDING="+host[22]+";HOST_NATIVE_WORKER_LIFECYCLE_GAPS="+host[23]
                 +";JVMTI_GETENV="+jvmti[0]+";JVMTI_OBSERVED_ENVIRONMENTS="+jvmti[1]+";JVMTI_CALLBACK_SLOTS="+jvmti[2]+";JVMTI_ACTIVE_CALLBACKS="+jvmti[3]
                 +";JVMTI_DISPOSED_ENVIRONMENTS="+jvmti[4]+";JVMTI_REFUSALS="+jvmti[5]+";JVMTI_OWN_TABLE="+jvmti[6]+";JVMTI_UNATTRIBUTED_CALLBACKS="+jvmti[7]+";"+hostKernelSummary(module);
     }
@@ -540,6 +541,7 @@ public final class NativeControl {
         if(!controlCaller())throw new SecurityException("NATIVE_CONTROL_AGENT_REQUIRED");
         if(!available)return "";
         long[] host=hostState0(module);long[] jvmti=jvmtiState0(module);
+        if(host[21]!=0)return "HOST_NATIVE_WORKER_RETIREMENT_PENDING:holds="+host[21]+":exitPending="+host[22]+":lifecycleGaps="+host[23];
         if(jvmti[2]!=0||jvmti[3]!=0)return "JVMTI_CALLBACK_RETIREMENT_PENDING:slots="+jvmti[2]+":active="+jvmti[3]+":environments="+jvmti[1];
         if(jvmti[1]!=0||jvmti[7]!=0)return "JVMTI_ENVIRONMENT_DISPOSITION_PENDING:environments="+jvmti[1]+":unattributedCallbacks="+jvmti[7];
         long[] kernel=hostKernelState0(module);

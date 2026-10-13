@@ -1,4 +1,4 @@
-> **2026-10-14 当前主工程：`D:\桌面\ronova_GPT`。** Java ABI56 / Native ABI54 / Storage3 / Journal6；用户态 GNU C23/C++23、Java17，独立驱动/工具 C17。受支持 JVMTI 扩展/heap 回调、五个线程创建入口、UAC 工具和准确新文件 open 准入已接线；主包与相关实际 JVM 入口检查通过，SYS/EXE 编译链接通过。原生 worker 全生命周期、缓存原表/旧环境等源码边界仍待接续，驱动尚未签名或加载，游戏/保存重启尚未验收，C/B 未完成。详见 [当前状态](docs/A-批验收状态.md) 与 [实际报告](validation/b-final-20261007/REPORT.md)。本地 WIP `distribution/candidate-c-java56-native54-wip-20261014`；产物和原始日志留本地。
+> **2026-10-14 当前主工程：`D:\桌面\ronova_GPT`。** Java ABI56 / Native ABI55 / Storage3 / Journal6；GNU C23/C++23、Java17，独立驱动/工具 C17。已补受支持 JVMTI 扩展/heap、五个线程创建入口、确认来源的本地 worker DLL/强来源持有及真实 OS 退出收尾、UAC 和准确新文件 open 准入。整包构建、实际 ThreadEnd/Attach/Detach 后续行及 heap 入口通过；真实 Mod 的 worker 租约/借用仍未实机执行。SYS/EXE 编译链接通过但未签名/加载，缓存原表/旧环境/未观察写者等边界及游戏/保存重启尚未收口，C/B 未完成。详见 [当前状态](docs/A-批验收状态.md) 与 [实际报告](validation/b-final-20261007/REPORT.md)。本地 WIP `distribution/candidate-c-java56-native55-wip-20261014`；产物和原始日志留本地。
 
 以下 R1/R2、候选 43、旧主包与旧环境结果保留其原日期和证据范围。已有发行目录不是本轮源码对应的新游戏安装包。
 

@@ -507,7 +507,7 @@ static void load_dispatch_unload_observe(jvmtiEnv *api,JNIEnv *env,const char *n
 }
 static void JNICALL load_dispatch_unload_callback_first(jvmtiEnv *api,JNIEnv *env,const char *name){load_dispatch_unload_observe(api,env,name,0);}
 static void JNICALL load_dispatch_unload_callback_second(jvmtiEnv *api,JNIEnv *env,const char *name){load_dispatch_unload_observe(api,env,name,1);}
-JNIEXPORT jint JNICALL Java_dev_ronova_pro_AuditFixCheck_jvmtiDispatch0(JNIEnv *env,jclass check,jclass type,jobject first,jobject second,jobject decoy){
+JNIEXPORT jint JNICALL Java_dev_ronova_pro_AuditFixCheck_jvmtiDispatch0(JNIEnv *env,jclass check,jclass type,jobject first,jobject second,jobject decoy,jboolean heapOnly){
     (void)check;JavaVM *vm=NULL;jvmtiEnv *api=NULL;jvmtiCapabilities potential={0},requested={0},actual={0};
     if((*env)->GetJavaVM(env,&vm)!=JNI_OK||!vm||(*vm)->GetEnv(vm,(void**)&api,JVMTI_VERSION_1_2)!=JNI_OK||!api){load_dispatch_fail(env,"real_JVMTI_GetEnv",JVMTI_ERROR_INVALID_ENVIRONMENT);return 0;}
     jvmtiError error=(*api)->GetPotentialCapabilities(api,&potential);requested.can_tag_objects=1;
@@ -516,6 +516,11 @@ JNIEXPORT jint JNICALL Java_dev_ronova_pro_AuditFixCheck_jvmtiDispatch0(JNIEnv *
     if(error==JVMTI_ERROR_NONE)error=(*api)->GetCapabilities(api,&actual);
     if(error!=JVMTI_ERROR_NONE||!actual.can_tag_objects){load_dispatch_fail(env,"real_tag_capability",error);(*api)->DisposeEnvironment(api);return 0;}
     if(!load_dispatch_heap(env,api,type,first,second,decoy)){(*api)->DisposeEnvironment(api);return 0;}
+    if(heapOnly){
+        error=(*api)->DisposeEnvironment(api);
+        if(error!=JVMTI_ERROR_NONE)load_dispatch_fail(env,"heap_only_actual_DisposeEnvironment",error);
+        return 0;
+    }
     jint count=0,index=-1;jvmtiExtensionEventInfo *events=NULL;
     error=(*api)->GetExtensionEvents(api,&count,&events);
     if(error!=JVMTI_ERROR_NONE){load_dispatch_fail(env,"real_GetExtensionEvents",error);(*api)->DisposeEnvironment(api);return 0;}
@@ -734,6 +739,138 @@ static int load_crt_thread_check(JNIEnv *env){
         if(!created||!sameStorage||!settled){load_thread_fail(env,kind?"HOST_CRT_BEGINTHREADEX_ACTUAL_RESULT":"HOST_CRT_BEGINTHREAD_ACTUAL_RESULT");ready=0;break;}
     }
     *callerError=savedError;*callerDosError=savedDosError;SetLastError(savedWindowsError);return ready;
+}
+/* Native55 selects only this phase. No producer registration is manufactured:
+ * an ordinary observed profiler tests ThreadEnd dispatch and Host sources, not
+ * the producer-only start wrapper, source lease or image retirement. */
+typedef struct LoadThreadEndCase {
+    LoadThreadCase parent,during,after;
+    JavaVM *vm;jvmtiEnv *api;JNIEnv *attached,*afterEnv,*eventEnv;
+    uintptr_t continuedData;uint64_t continuedCookie;
+    DWORD continuedId,eventId;
+    jint attachResult,detachResult,afterEnvResult;
+    volatile LONG callbacks,callbackError,continued;
+    int tlsSet,tlsCleared,eventThreadPresent;
+} LoadThreadEndCase;
+static volatile LONG load_thread_end_tls=-1;
+static LoadThreadEndCase *volatile load_thread_end_active;
+static void JNICALL load_thread_end_callback(jvmtiEnv *api,JNIEnv *env,jthread thread){
+    DWORD index=(DWORD)InterlockedCompareExchange(&load_thread_end_tls,0,0);
+    if(index==TLS_OUT_OF_INDEXES)return;
+    LoadThreadEndCase *state=(LoadThreadEndCase*)TlsGetValue(index);
+    if(!state||state!=InterlockedCompareExchangePointer((void *volatile*)&load_thread_end_active,NULL,NULL))return;
+    LONG count=InterlockedIncrement(&state->callbacks);
+    state->eventEnv=env;state->eventId=GetCurrentThreadId();state->eventThreadPresent=thread!=NULL;
+    if(count!=1||api!=state->api||env!=state->attached||!thread||state->eventId!=state->parent.id){
+        InterlockedOr(&state->callbackError,1);return;
+    }
+    /* Correlation uses this actual native thread's fixture TLS, not a Mod or
+     * producer identity. No JNI/GetEnv/JVMTI call, output, wait or lock here. */
+    SetLastError(0x524e0055);
+    state->during.handle=CreateThread(NULL,0,load_thread_start,&state->during,CREATE_SUSPENDED,&state->during.id);
+    state->during.createError=GetLastError();
+}
+static unsigned __stdcall load_thread_end_start(void *data){
+    LoadThreadEndCase *state=(LoadThreadEndCase*)InterlockedCompareExchangePointer((void *volatile*)&load_thread_end_active,NULL,NULL);
+    if(!state||data!=&state->parent)return (unsigned)LOAD_THREAD_EXIT;
+    load_thread_start(data);
+    DWORD index=(DWORD)InterlockedCompareExchange(&load_thread_end_tls,0,0);
+    state->tlsSet=index!=TLS_OUT_OF_INDEXES&&TlsSetValue(index,state);
+    if(!state->tlsSet){InterlockedOr(&state->parent.error,4);return (unsigned)LOAD_THREAD_EXIT;}
+    JavaVMAttachArgs arguments={JNI_VERSION_1_8,"RonovaAuditNativeDetach",NULL};
+    state->attachResult=(*state->vm)->AttachCurrentThread(state->vm,(void**)&state->attached,&arguments);
+    if(state->attachResult==JNI_OK&&state->attached){
+        state->detachResult=(*state->vm)->DetachCurrentThread(state->vm);
+        state->afterEnvResult=(*state->vm)->GetEnv(state->vm,(void**)&state->afterEnv,JNI_VERSION_1_8);
+        /* This is the same OS start routine after its Java ThreadEnd. It uses
+         * only its original C userdata; the detached JNIEnv is never called. */
+        state->continuedData=(uintptr_t)data;state->continuedCookie=state->parent.cookie;state->continuedId=GetCurrentThreadId();
+        InterlockedExchange(&state->continued,1);SetLastError(0x524e0055);
+        state->after.handle=CreateThread(NULL,0,load_thread_start,&state->after,CREATE_SUSPENDED,&state->after.id);
+        state->after.createError=GetLastError();
+    }
+    state->tlsCleared=TlsSetValue(index,NULL);return (unsigned)LOAD_THREAD_EXIT;
+}
+JNIEXPORT void JNICALL Java_dev_ronova_pro_AuditFixCheck_hostThreadEnd0(JNIEnv *env,jclass check){
+    (void)check;JavaVM *vm=NULL;jvmtiEnv *api=NULL;jvmtiError error=JVMTI_ERROR_NONE;
+    const char *stage="HOST_THREAD_END_REAL_VM";int ready=0,registered=0;
+    LoadThreadEndCase *state=NULL;DWORD index=TLS_OUT_OF_INDEXES;
+    LoadCrtErrno crtError=NULL;LoadCrtDosErrno crtDosError=NULL;int *callerError=NULL;unsigned long *callerDosError=NULL;
+    int savedError=0;unsigned long savedDosError=0;DWORD savedWindowsError=0;int saved=0;
+    if((*env)->GetJavaVM(env,&vm)!=JNI_OK||!vm){load_thread_fail(env,stage);return;}
+    stage="HOST_THREAD_END_REAL_JVMTI_GETENV";
+    jint status=(*vm)->GetEnv(vm,(void**)&api,JVMTI_VERSION_1_2);
+    if(status!=JNI_OK||!api){fprintf(stderr,"HOST_THREAD_END_GETENV_RESULT jni=%d actualEnv=%p\n",status,(void*)api);load_thread_fail(env,stage);return;}
+    stage="HOST_THREAD_END_ACTUAL_CONTROLLED_ENTRIES";
+    if(!load_private_entry((void*)__imp_CreateThread))goto done;
+    const wchar_t *modules[]={L"ucrtbase.dll",L"msvcrt.dll"};const char *names[]={"ucrtbase.dll","msvcrt.dll"};
+    HMODULE image=NULL;unsigned selected=0;
+    for(;selected<sizeof(modules)/sizeof(modules[0]);selected++)if((image=GetModuleHandleW(modules[selected]))!=NULL)break;
+    if(!image)goto done;
+    LoadCrtBeginEx beginEx=(LoadCrtBeginEx)GetProcAddress(image,"_beginthreadex");
+    crtError=(LoadCrtErrno)GetProcAddress(image,"_errno");crtDosError=(LoadCrtDosErrno)GetProcAddress(image,"__doserrno");
+    HMODULE errorImage=NULL,dosImage=NULL;
+    if(!beginEx||!load_private_entry((void*)beginEx)||!crtError||!crtDosError
+            ||!GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS|GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,(LPCSTR)crtError,&errorImage)
+            ||!GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS|GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,(LPCSTR)crtDosError,&dosImage)
+            ||errorImage!=image||dosImage!=image)goto done;
+    callerError=crtError();callerDosError=crtDosError();if(!callerError||!callerDosError)goto done;
+    savedError=*callerError;savedDosError=*callerDosError;savedWindowsError=GetLastError();saved=1;
+    stage="HOST_THREAD_END_NATIVE_USERDATA";
+    state=(LoadThreadEndCase*)HeapAlloc(GetProcessHeap(),HEAP_ZERO_MEMORY,sizeof(*state));if(!state)goto done;
+    state->vm=vm;state->api=api;state->parent.cookie=state->during.cookie=state->after.cookie=LOAD_THREAD_COOKIE;
+    state->attachResult=state->detachResult=state->afterEnvResult=JNI_ERR;
+    index=TlsAlloc();if(index==TLS_OUT_OF_INDEXES)goto done;
+    InterlockedExchange(&load_thread_end_tls,(LONG)index);
+    InterlockedExchangePointer((void *volatile*)&load_thread_end_active,state);load_thread_active=&state->parent;
+    jvmtiEventCallbacks callbacks={0};callbacks.ThreadEnd=load_thread_end_callback;
+    stage="HOST_THREAD_END_REAL_EVENT_CALLBACK";
+    error=(*api)->SetEventCallbacks(api,&callbacks,(jint)sizeof(callbacks));if(error!=JVMTI_ERROR_NONE)goto done;registered=1;
+    error=(*api)->SetEventNotificationMode(api,JVMTI_ENABLE,JVMTI_EVENT_THREAD_END,NULL);if(error!=JVMTI_ERROR_NONE)goto done;
+    stage="HOST_THREAD_END_ACTUAL_CRT_START";unsigned id=0;
+    *callerError=0x5555;*callerDosError=0x524e0056;SetLastError(0x524e0055);
+    uintptr_t returned=beginEx(NULL,0,load_thread_end_start,&state->parent,CREATE_SUSPENDED,&id);
+    state->parent.createError=GetLastError();state->parent.handle=(HANDLE)returned;state->parent.id=(DWORD)id;
+    int *actualError=crtError();unsigned long *actualDosError=crtDosError();
+    int sameStorage=actualError==callerError&&actualDosError==callerDosError;
+    fprintf(returned?stdout:stderr,"HOST_THREAD_END_CRT_RESULT runtime=%s returned=%llx lastError=%lu errno=%d doserrno=%lu callerErrorStorage=%d\n",
+            names[selected],(unsigned long long)returned,(unsigned long)state->parent.createError,actualError?*actualError:0,actualDosError?*actualDosError:0,sameStorage);
+    stage="HOST_THREAD_END_ATTACH_DETACH_NATIVE_CONTINUATION";
+    int parentReady=load_thread_finish(&state->parent,"CRT_attach_detach_original_start");
+    if(!state->parent.completed)goto done;
+    fprintf(parentReady?stdout:stderr,"HOST_THREAD_END_RESULT attach=%d attachedEnv=%p detach=%d afterGetEnv=%d afterEnv=%p callbacks=%ld callbackError=%ld eventEnv=%p eventThreadId=%lu eventThreadPresent=%d nativeContinued=%ld continuedThreadId=%lu continuedUserdata=%d tlsSet=%d tlsCleared=%d\n",
+            state->attachResult,(void*)state->attached,state->detachResult,state->afterEnvResult,(void*)state->afterEnv,
+            (long)InterlockedCompareExchange(&state->callbacks,0,0),(long)InterlockedCompareExchange(&state->callbackError,0,0),
+            (void*)state->eventEnv,(unsigned long)state->eventId,state->eventThreadPresent,(long)InterlockedCompareExchange(&state->continued,0,0),
+            (unsigned long)state->continuedId,state->continuedData==(uintptr_t)&state->parent&&state->continuedCookie==LOAD_THREAD_COOKIE,state->tlsSet,state->tlsCleared);
+    /* Both children were suspended throughout the actual callback/detach.
+     * Resume/wait/close only here, after the original OS thread has exited. */
+    load_thread_active=&state->during;int duringReady=load_thread_finish(&state->during,"actual_ThreadEnd_callback_CreateThread");
+    load_thread_active=&state->after;int afterReady=load_thread_finish(&state->after,"after_actual_detach_CreateThread");
+    ready=parentReady&&sameStorage&&duringReady&&afterReady&&state->attachResult==JNI_OK&&state->attached
+            &&state->detachResult==JNI_OK&&state->afterEnvResult==JNI_EDETACHED&&state->afterEnv==NULL
+            &&InterlockedCompareExchange(&state->callbacks,0,0)==1&&!InterlockedCompareExchange(&state->callbackError,0,0)
+            &&state->eventEnv==state->attached&&state->eventId==state->parent.id&&state->eventThreadPresent
+            &&InterlockedCompareExchange(&state->continued,0,0)==1&&state->continuedId==state->parent.id
+            &&state->continuedData==(uintptr_t)&state->parent&&state->continuedCookie==LOAD_THREAD_COOKIE&&state->tlsSet&&state->tlsCleared;
+done:
+    if(registered){
+        jvmtiError disabled=(*api)->SetEventNotificationMode(api,JVMTI_DISABLE,JVMTI_EVENT_THREAD_END,NULL);
+        jvmtiEventCallbacks empty={0};jvmtiError cleared=(*api)->SetEventCallbacks(api,&empty,(jint)sizeof(empty));
+        if(disabled!=JVMTI_ERROR_NONE||cleared!=JVMTI_ERROR_NONE){ready=0;stage="HOST_THREAD_END_REAL_DISABLE_CLEAR";error=disabled!=JVMTI_ERROR_NONE?disabled:cleared;}
+    }
+    jvmtiError disposed=(*api)->DisposeEnvironment(api);if(disposed!=JVMTI_ERROR_NONE){ready=0;stage="HOST_THREAD_END_REAL_DISPOSE";error=disposed;}
+    if(state&&((!state->parent.handle||state->parent.completed)&&(!state->during.handle||state->during.completed)&&(!state->after.handle||state->after.completed))){
+        InterlockedExchangePointer((void *volatile*)&load_thread_end_active,NULL);InterlockedExchange(&load_thread_end_tls,-1);
+        if(index!=TLS_OUT_OF_INDEXES&&!TlsFree(index)){ready=0;stage="HOST_THREAD_END_NATIVE_TLS_CLOSE";}
+        load_thread_active=NULL;HeapFree(GetProcessHeap(),0,state);
+    }
+    /* If any real OS thread has not exited, its original userdata remains
+     * allocated for the failing process; detach alone cannot free it. */
+    if(saved){*callerError=savedError;*callerDosError=savedDosError;SetLastError(savedWindowsError);}
+    if(!ready){fprintf(stderr,"HOST_THREAD_END_FAILED stage=%s jvmti=%d\n",stage,error);load_thread_fail(env,stage);return;}
+    fprintf(stdout,"HOST_PRODUCER_WORKER_NOTRUN sourceLease start_DLL_pin real_OS_exit_lease creator_return_publication_race no_actual_producer_registration_for_this_profiler\n");
+    fprintf(stdout,"HOST_CALLBACK_DETACH_INFLIGHT_NOTRUN no_public_legal_outer_callback_detach_trigger no_VM_internal_thread_detach\n");fflush(stdout);
 }
 static jint JNICALL load_thread_heap_iteration(jlong classTag,jlong size,jlong *tag,jint length,void *data){
     (void)length;LoadThreadHeap *state=load_thread_heap_active;
