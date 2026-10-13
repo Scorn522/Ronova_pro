@@ -374,7 +374,7 @@ static VOID RvhFileGap(PEPROCESS Actor,PFLT_VOLUME Volume,PFLT_INSTANCE Instance
     }
     KeReleaseSpinLock(&RvhLock,irql);
 }
-static BOOLEAN RvhFileDecision(PEPROCESS Actor,PFILE_OBJECT File,PFLT_VOLUME Volume,PFLT_INSTANCE Instance,const FILE_ID_INFORMATION *Identity,ULONG Effect,BOOLEAN Section){
+static BOOLEAN RvhFileDecision(PEPROCESS Actor,PFILE_OBJECT File,PFLT_VOLUME Volume,PFLT_INSTANCE Instance,const FILE_ID_INFORMATION *Identity,ULONG Effect,BOOLEAN Section,ULONGLONG Gap){
     LIST_ENTRY *link;KIRQL irql;ULONG i;BOOLEAN denied=FALSE;
     KeAcquireSpinLock(&RvhLock,&irql);
     for(link=RvhSessions.Flink;link!=&RvhSessions;link=link->Flink){
@@ -383,6 +383,7 @@ static BOOLEAN RvhFileDecision(PEPROCESS Actor,PFILE_OBJECT File,PFLT_VOLUME Vol
             RVH_FILE_RECORD *record=&session->Files[i];
             if(record->Id==0||record->Detached||record->ActorExited||record->Actor!=Actor||record->Volume!=Volume||record->Instance!=Instance)continue;
             if(record->FileObject!=File&&(Identity==NULL||!RvhFileIdEqual(&record->Identity,Identity)))continue;
+            if(Gap!=0){record->Unserved++;session->Unserved|=Gap;}
             if(Section){record->Sections++;record->Unserved++;session->Unserved|=RVH_GAP_EXISTING_SECTIONS|RVH_GAP_MAPPED_IO;}
             else if((record->Effects&Effect)!=0){denied=TRUE;record->Denied++;}
         }
@@ -404,6 +405,30 @@ static VOID RvhRememberFileId(PFLT_INSTANCE Instance,PFILE_OBJECT File,const FIL
     (VOID)FltSetStreamContext(Instance,File,FLT_SET_CONTEXT_KEEP_IF_EXISTS,context,&previous);
     if(previous!=NULL)FltReleaseContext(previous);FltReleaseContext(context);
 }
+static BOOLEAN RvhCompletedOpenAccess(PIO_SECURITY_CONTEXT Security,ACCESS_MASK *Access){
+    ACCESS_MASK requested;PACCESS_STATE state;
+    if(Security==NULL)return FALSE;
+    requested=Security->DesiredAccess;state=Security->AccessState;
+    if(((requested|(state!=NULL?state->OriginalDesiredAccess:0))&MAXIMUM_ALLOWED)!=0){
+        /* MAXIMUM_ALLOWED is a request, never FILE_ALL_ACCESS. Consume only a
+         * completed public access state with a concrete actual grant. Do not
+         * modify that state or infer rights from file names/ReadAccess booleans. */
+        if(state==NULL||state->RemainingDesiredAccess!=0||state->PreviouslyGrantedAccess==0
+                ||(state->PreviouslyGrantedAccess&MAXIMUM_ALLOWED)!=0)return FALSE;
+        *Access=state->PreviouslyGrantedAccess;
+    }else *Access=requested;
+    /* Post-create runs at PASSIVE_LEVEL. Map generic file rights through the
+     * I/O manager's public mapping instead of assuming GENERIC_* bit values. */
+    RtlMapGenericMask(Access,IoGetFileObjectGenericMapping());
+    return (*Access&(GENERIC_READ|GENERIC_WRITE|GENERIC_EXECUTE|GENERIC_ALL|MAXIMUM_ALLOWED))==0;
+}
+static ULONG RvhOpenEffects(ACCESS_MASK Access){
+    ULONG effects=0;
+    if((Access&FILE_READ_DATA)!=0)effects|=RVH_FILE_DENY_READ;
+    if((Access&(FILE_WRITE_DATA|FILE_APPEND_DATA))!=0)effects|=RVH_FILE_DENY_WRITE;
+    if((Access&FILE_EXECUTE)!=0)effects|=RVH_FILE_DENY_NEW_EXECUTE_OPEN;
+    return effects;
+}
 
 static FLT_PREOP_CALLBACK_STATUS RvhPreCreate(PFLT_CALLBACK_DATA Data,PCFLT_RELATED_OBJECTS Objects,PVOID *Completion){
     PEPROCESS actor;UNREFERENCED_PARAMETER(Completion);
@@ -415,7 +440,7 @@ static FLT_PREOP_CALLBACK_STATUS RvhPreCreate(PFLT_CALLBACK_DATA Data,PCFLT_RELA
     ExReleaseRundownProtection(&RvhCalls);return FLT_PREOP_SUCCESS_WITH_CALLBACK;
 }
 static FLT_POSTOP_CALLBACK_STATUS RvhPostCreate(PFLT_CALLBACK_DATA Data,PCFLT_RELATED_OBJECTS Objects,PVOID Completion,FLT_POST_OPERATION_FLAGS Flags){
-    PEPROCESS actor;FILE_ID_INFORMATION identity;NTSTATUS status;ACCESS_MASK access;UNREFERENCED_PARAMETER(Completion);
+    PEPROCESS actor;FILE_ID_INFORMATION identity;NTSTATUS status;ACCESS_MASK access;ULONG effects;UNREFERENCED_PARAMETER(Completion);
     if((Flags&FLTFL_POST_OPERATION_DRAINING)!=0||!NT_SUCCESS(Data->IoStatus.Status)||Data->IoStatus.Status==STATUS_REPARSE||Data->RequestorMode!=UserMode)return FLT_POSTOP_FINISHED_PROCESSING;
     if(!ExAcquireRundownProtection(&RvhCalls))return FLT_POSTOP_FINISHED_PROCESSING;
     actor=FltGetRequestorProcess(Data);
@@ -423,11 +448,23 @@ static FLT_POSTOP_CALLBACK_STATUS RvhPostCreate(PFLT_CALLBACK_DATA Data,PCFLT_RE
         status=RvhQueryFileId(Objects->Instance,Objects->FileObject,&identity);
         if(!NT_SUCCESS(status))RvhFileGap(actor,Objects->Volume,Objects->Instance,RVH_GAP_FILE_ID_UNAVAILABLE);
         else{
-            access=Data->Iopb->Parameters.Create.SecurityContext->DesiredAccess;
-            if((access&FILE_EXECUTE)!=0&&RvhFileDecision(actor,Objects->FileObject,Objects->Volume,Objects->Instance,&identity,RVH_FILE_DENY_NEW_EXECUTE_OPEN,FALSE)){
-                if((Objects->FileObject->Flags&FO_HANDLE_CREATED)==0){FltCancelFileOpen(Objects->Instance,Objects->FileObject);Data->IoStatus.Status=STATUS_ACCESS_DENIED;Data->IoStatus.Information=0;}
-                else RvhFileGap(actor,Objects->Volume,Objects->Instance,RVH_GAP_EXISTING_SECTIONS);
-            }else RvhRememberFileId(Objects->Instance,Objects->FileObject,&identity);
+            effects=0;
+            if(!RvhCompletedOpenAccess(Data->Iopb->Parameters.Create.SecurityContext,&access)
+                    ||(Objects->FileObject->Flags&FO_HANDLE_CREATED)!=0){
+                /* A grant we cannot resolve, or a handle created by another
+                 * filter, is not permission to cancel/deny every open. Keep
+                 * this exact object's gap and retain its later I/O identity. */
+                (VOID)RvhFileDecision(actor,Objects->FileObject,Objects->Volume,Objects->Instance,&identity,0,FALSE,RVH_GAP_OPEN_ADMISSION_UNAVAILABLE);
+                RvhRememberFileId(Objects->Instance,Objects->FileObject,&identity);
+            }else{
+                effects=RvhOpenEffects(access);
+                if(effects!=0&&RvhFileDecision(actor,Objects->FileObject,Objects->Volume,Objects->Instance,&identity,effects,FALSE,0)){
+                    /* Refuse the new backing-file handle before it can create
+                     * a read/write/execute section. Already-held file/section
+                     * handles and existing views are not revoked by this call. */
+                    FltCancelFileOpen(Objects->Instance,Objects->FileObject);Data->IoStatus.Status=STATUS_ACCESS_DENIED;Data->IoStatus.Information=0;
+                }else RvhRememberFileId(Objects->Instance,Objects->FileObject,&identity);
+            }
         }
     }
     ExReleaseRundownProtection(&RvhCalls);return FLT_POSTOP_FINISHED_PROCESSING;
@@ -459,7 +496,7 @@ static FLT_PREOP_CALLBACK_STATUS RvhPreFileOperation(PFLT_CALLBACK_DATA Data,PCF
         status=RvhQueryFileId(Objects->Instance,Objects->FileObject,&identity);
         if(NT_SUCCESS(status)){known=&identity;RvhRememberFileId(Objects->Instance,Objects->FileObject,&identity);}
     }
-    denied=RvhFileDecision(actor,Objects->FileObject,Objects->Volume,Objects->Instance,known,effect,section);
+    denied=RvhFileDecision(actor,Objects->FileObject,Objects->Volume,Objects->Instance,known,effect,section,0);
     if(known==NULL)RvhFileGap(actor,Objects->Volume,Objects->Instance,RVH_GAP_OLD_FILE_OBJECT_ALIASES);
     if(context!=NULL)FltReleaseContext(context);
     /* Microsoft permits no policy ACCESS_DENIED in section synchronization.

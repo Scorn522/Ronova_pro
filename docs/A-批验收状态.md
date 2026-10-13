@@ -1,19 +1,20 @@
 # Ronova Pro 当前进度
 
-## 2026-10-13：C 接续——回调退役、世界接续与可编译驱动
+## 2026-10-14：C 接续——扩展/堆回调、线程创建与驱动准入
 
-接续 `8948f3b`，当前 Java ABI 55 / Native ABI 52 / Storage ABI 3 / Journal 6；用户态 GNU C23 / GNU C++23、Java17，独立 Windows 驱动与部署工具 C17。本轮工作包代码写齐并统一构建；不把源码或构建写成完整 C/B 已通过。
+接续 `591c71c`，当前 Java ABI 56 / Native ABI 54 / Storage ABI 3 / Journal 6；用户态 GNU C23 / GNU C++23、Java17，独立 Windows 驱动及部署工具 C17。两个完整工作包分别写齐后集中构建，C/B 整体仍未完成。
 
-JVMTI：真实回调与已包裹操作计入同一在途生命周期，关闭后拒绝新进入，在途 Dispose 返回实际 NOT_AVAILABLE；最后回调退出后由正常 daemon 工作线程归还映像 pin/来源租约。只有全部来源已停且无未拦截扩展生命周期的实际环境自动 Dispose；共享/未知环境保留。危险线程动作再核对真实帧与方法位置，方法/ConstMethod/常量池版本在真实交接前保留；实际 Native 写者的 null=unknown 贯通指令与 Java 来源。未知/非 Mod 回调改动控制载体也回到原控制图像与 Task/Object 守卫，普通组外图像不全量重入；新增守卫的过早登记错误已在实际启动检查后修正。
+JVMTI：按真实 GetExtensionEvents 元数据接入受支持扩展事件，保留原环境、JNIEnv、参数和独立回调来源；替换/清空/关闭沿用在途计数和实际退役队列。同步 heap 六入口、现代与旧式九种回调保持原 userdata、tag_ptr/referrer_ptr 与控制结果。producer 写入只在正常上下文准备已观察真实 jobject 的唯一 tag 身份和当前对象来源资格，来源/控制角色变化会撤销准备中的权限；tag 值本身不授予资格，未标记、重复 tag 或无法重新确认的新 tag 写入仍保留明确未决。callback 内不进入 JNI/Java 或阻塞目录锁；可在实际环境调用 callback-safe SetEnvironmentLocalStorage 并在返回后准确读回。
 
-字段与世界：恢复请求固定原槽值，已经完成的槽不反复覆盖，后来合法变化保留；继承/接口静态字段完整读取，但未显式选择的共享声明类只保留引用，输出 PARTIAL。世界工作持久保存当前原基线 `.apply.nbt`、锁定真实生成条件 `generation.nbt` 和生成结果 `.seed.nbt`，实体只在准确原世界/区域/身份与 NBT 基线上恢复，跨区/跨维度/换身不会按 UUID 拉回。实际 normal chunk/entity/player writer 保存及 flush 后才推进区块游标；重启仍未验收。HUD 策略绑定原 LerpingBossEvent 身份，原 UUID 策略不阻止后来 ADD 创建的新载体；发送来源在实际 channel 写入前登记，仍以当前 scoped 客户端缺席回复判断结果。
+Host：已观察映像的真实导入、延迟槽及新 GetProcAddress 返回接入 CreateThread、CreateRemoteThread、CreateRemoteThreadEx、_beginthread、_beginthreadex。每次消费重新核对当前映像/库/来源，停止来源拒绝新建；完整参数、真实返回和 Windows LastError 保留。UCRT/MSVCRT 分别保存自己的实际入口和 errno/doserrno 访问器，不用一个 canonical 指针替代另一运行库。heap callback 只读已观察原生来源，锁忙明确返回 ERROR_BUSY，不调用 GetEnv/Winloader。该包完成创建准入，原生 worker 创建后的来源传播、应用 DLL pin、租约与真实退出结清仍待接续；不能把调用返回写成线程已退役。
 
-Windows：源内补正确 kernel access 常量，Flt 配置/注册/启动失败返回原状态并回滚。集中 WDK 工程与显式安装/查询/加载/非强制卸载/升级/移除工具已写齐；只管理准确 RonovaHost 包，安装不自动加载，活跃会话拒绝卸载，原权限和系统失败保留。使用[微软提供的 WDK/SDK NuGet](https://learn.microsoft.com/en-us/windows-hardware/drivers/install-the-wdk-using-nuget) 10.0.26100.6584 头库及现有 Zig/LLD，实际编译链接出 35840 字节 `RonovaHost.sys` 与 182784 字节 `RonovaHostManage.exe`；这是源码编译结果，正式 VS/WDK MSBuild 工程未执行。未生成 CAT/证书、未签名、未安装或加载，模板两 altitude 仍待真实配置。
+Windows 驱动：部署工具按真实 token 为明确修改命令请求正常 UAC，查询保持普通权限；只转交自身真实 EXE 和已解析参数，等待实际子进程结果。manifest 资源已纳入 MSVC/Zig 入口。准确 actor/volume/file ID 的新 open 在句柄产生前按实际读/写/追加/执行权限拒绝；MAXIMUM_ALLOWED 只使用完成的具体 grant，无法解析或句柄已产生返回准确 OPEN_ADMISSION_UNAVAILABLE gap。现存 handle/view、继承、paging/kernel I/O、完整映像准入仍未服务。官方 WDK/SDK NuGet 10.0.26100.6584 + Zig/LLD 实际生成 36352 字节 SYS 和 188928 字节管理 EXE；正式 MSBuild、CAT/签名、altitude 配置、安装/加载和 UAC 实机动作未执行。
 
-实际结果：最终主包/既有夹具 build PASS 18秒，`build-c-java55-native52-agent-order-fixed-20261013.log`；原 Native 前置声明失败与 premain 登记顺序失败日志保留。既有实际 Host/JVMTI 入口复查退出0，`c-host-jvmti-native52-fixed-20261013.log`（创建/句柄、GetEnv、回调替换/关闭/Dispose、JNI表保护）；独立 JVM 无真实目标 Mod 登记，不算整组退役或游戏结果。内核编译/链接记录 `build-c-driver52-wdk-rights-20261013.log`，部署工具修正后 PASS `build-c-driver52-manager-fixed-20261013.log`，没有执行部署命令。HUD/世界历史与重启尚无本候选实际结果；可变参数扩展事件、同步堆 producer dispatch、缓存原表/旧环境、未观察内部写者、既有映射/句柄等仍是明确后端缺口，C 整体未完成。旧53/50 run5不计入本候选菜单/世界；最后记录仍为资源/字体与网络信息。本地 WIP 在 `distribution/candidate-c-java55-native52-wip-20261013`，其 unsigned-driver 产物不能视作已部署的驱动包。源码与简要状态同步 Git，产物、依赖和原始日志留本地。
+实际结果：56/53 主包/既有夹具构建 PASS 70秒（`build-c-java56-native53-dispatch-cached-20261013.log`），56/54 整包 PASS 40秒（`build-c-java56-native54-thread-cached-20261014.log`）。53 实际 heap/ClassUnload 检查退出0（`c-jvmti-dispatch53-follow-fixed-20261013.log`），正确的额外 FollowReferences 边观察导致的夹具误判已修正，原失败和诊断日志保留；生产资格未放宽。ClassUnload 初次/替换回调实际执行，清空后的当前观察不是公开队列已排空的证明。54 实际线程入口检查退出0（`c-host-thread54-20261014.log`）：Windows 三入口在当前进程内创建、暂停/恢复、真实退出码、userdata/ThreadID 与关闭；实际选中 ucrtbase 的两 CRT private 动态入口、errno/doserrno 和各自句柄寿命；tagged heap callback 创建后在 walk 返回外恢复/等待。驱动/工具编译链接 PASS（`build-c-driver53-dispatch-20261013.log`），没有重复构建未改的内核源码。
+
+这些独立 JVM 没有真实目标 Mod producer 登记，不代表整组停用、游戏/世界或保存重启通过。缓存原表/旧未观察环境、内部未观察写者、DllMain/TLS 首窗口、未观察入口/转交和其他呈现 adapter 仍是明确源码边界；驱动部署与本候选游戏运行另有外部缺口。本地 WIP 为 `distribution/candidate-c-java56-native54-wip-20261014`；源码和简要状态同步 Git，产物、依赖和原始日志留本地。
 
 ---
-
 ## 2026-10-13：C 接续——54/51 用户态接线与自编 Windows 驱动源码
 
 当前主源 Java ABI 54 / Native ABI 51 / Storage ABI 3 / Journal 6；用户态仍为 GNU C23 / GNU C++23、Java 17，新增内核项目使用 WDK C17。尚未取得最新 54/51 游戏收口，C 整体与 B 仍未完成。

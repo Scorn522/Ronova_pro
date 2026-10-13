@@ -1,10 +1,13 @@
 /* Explicit, x64 developer deployment entry for the fixed RonovaHost package.
  * Nothing invokes this tool from the game. No target process/file commands,
- * service-stop fallback, certificate creation, TestSigning or elevation UI.
+ * service-stop fallback, certificate creation or TestSigning. Only a selected
+ * modifying command may request normal Windows UAC consent for this same EXE.
  * Primitive package changes use DiInstallDriver/DiUninstallDriver; unload uses
  * FilterUnload, the user-mode equivalent of nonmandatory FltUnloadFilter.
  */
 #include <windows.h>
+#include <shellapi.h>
+#include <objbase.h>
 #include <setupapi.h>
 #include <newdev.h>
 #include <fltuser.h>
@@ -41,6 +44,8 @@ __declspec(dllimport) BOOL WINAPI DiUninstallDriverW(
 #define RVH_SERVICES_SECTION L"DefaultInstall.NTamd64.10.0...19041.Services"
 #define RVH_SERVICE_SECTION L"RonovaHost.Service"
 #define RVH_ALTITUDE_CHARS 256
+#define RVH_COMMAND_LINE_CHARS 32767
+#define RVH_ELEVATED_CHILD L"--elevated-child"
 
 typedef struct RVH_PACKAGE_INFO {
     WCHAR Inf[MAX_PATH];
@@ -275,7 +280,7 @@ static int RvhInstalledArgument(PCWSTR Argument,const RVH_SERVICE_INFO *Service)
     if(!RvhSameFile(store,Service->StoreInf)||!RvhSameFile(published,Service->PublishedInf))return 0;
     return 1;
 }
-static int RvhPrintPrivilege(void){
+static int RvhPrintPrivilege(BOOL *IsElevated){
     HANDLE token;TOKEN_ELEVATION elevation;DWORD needed;LUID id;BOOL present=FALSE,enabled=FALSE;PTOKEN_PRIVILEGES privileges=NULL;ULONG i;
     if(!OpenProcessToken(GetCurrentProcess(),TOKEN_QUERY,&token))return RvhWin32Error(L"current-token",GetLastError());
     if(!GetTokenInformation(token,TokenElevation,&elevation,sizeof(elevation),&needed)){DWORD error=GetLastError();CloseHandle(token);return RvhWin32Error(L"current-elevation",error);}
@@ -289,7 +294,81 @@ static int RvhPrintPrivilege(void){
         present=TRUE;enabled=(privileges->Privileges[i].Attributes&SE_PRIVILEGE_ENABLED)!=0;break;
     }
     wprintf(L"Elevated=%lu LoadDriverPrivilegePresent=%lu LoadDriverPrivilegeEnabled=%lu\n",(ULONG)elevation.TokenIsElevated,(ULONG)present,(ULONG)enabled);
+    *IsElevated=elevation.TokenIsElevated!=0;
     HeapFree(GetProcessHeap(),0,privileges);CloseHandle(token);return 1;
+}
+static int RvhCommandCharacter(PWSTR Out,size_t Count,size_t *Used,WCHAR Value){
+    if(*Used+1>=Count)return RvhWin32Error(L"UAC-command-line-length",ERROR_FILENAME_EXCED_RANGE);
+    Out[(*Used)++]=Value;Out[*Used]=L'\0';return 1;
+}
+static int RvhCommandArgument(PWSTR Out,size_t Count,size_t *Used,PCWSTR Argument){
+    size_t slashes=0;
+    if(*Used!=0&&!RvhCommandCharacter(Out,Count,Used,L' '))return 0;
+    if(!RvhCommandCharacter(Out,Count,Used,L'"'))return 0;
+    for(;;){
+        if(*Argument==L'\\'){slashes++;Argument++;continue;}
+        /* Windows CRT argv parsing consumes pairs of backslashes immediately
+         * before a quote. Double trailing backslashes before our closing quote
+         * too, and escape every literal quote; spaces/unicode stay in one argv. */
+        if(*Argument==L'"'||*Argument==L'\0')slashes*=2;
+        while(slashes!=0){if(!RvhCommandCharacter(Out,Count,Used,L'\\'))return 0;slashes--;}
+        if(*Argument==L'\0')break;
+        if(*Argument==L'"'&&!RvhCommandCharacter(Out,Count,Used,L'\\'))return 0;
+        if(!RvhCommandCharacter(Out,Count,Used,*Argument++))return 0;
+    }
+    return RvhCommandCharacter(Out,Count,Used,L'"');
+}
+static int RvhRequestElevation(int Argc,wchar_t **Argv){
+    SHELLEXECUTEINFOW execute={0};PWSTR executable=NULL,directory=NULL,parameters=NULL,slash;
+    DWORD length,wait,error,exitCode=1;size_t used=0,capacity;HRESULT result;BOOL comReady=FALSE;int i;
+    executable=HeapAlloc(GetProcessHeap(),0,RVH_COMMAND_LINE_CHARS*sizeof(WCHAR));
+    parameters=HeapAlloc(GetProcessHeap(),HEAP_ZERO_MEMORY,RVH_COMMAND_LINE_CHARS*sizeof(WCHAR));
+    if(executable==NULL||parameters==NULL){RvhWin32Error(L"UAC-command-allocation",ERROR_NOT_ENOUGH_MEMORY);goto Finished;}
+    /* argv[0], PATH, a shell command and any caller-selected executable are
+     * deliberately excluded. Only the image of this already-running tool is
+     * launched, with the previously parsed fixed command and its exact argv. */
+    length=GetModuleFileNameW(NULL,executable,RVH_COMMAND_LINE_CHARS);
+    if(length==0){RvhWin32Error(L"UAC-current-executable",GetLastError());goto Finished;}
+    if(length>=RVH_COMMAND_LINE_CHARS-3){RvhWin32Error(L"UAC-current-executable-length",ERROR_FILENAME_EXCED_RANGE);goto Finished;}
+    directory=HeapAlloc(GetProcessHeap(),0,(length+1)*sizeof(WCHAR));
+    if(directory==NULL){RvhWin32Error(L"UAC-directory-allocation",ERROR_NOT_ENOUGH_MEMORY);goto Finished;}
+    CopyMemory(directory,executable,(length+1)*sizeof(WCHAR));slash=wcsrchr(directory,L'\\');
+    if(slash==NULL){RvhWin32Error(L"UAC-current-executable-path",ERROR_BAD_PATHNAME);goto Finished;}
+    slash[1]=L'\0';
+    /* Reserve the quoted executable, separating space and final terminator in
+     * the real Windows command line, although lpParameters excludes argv[0]. */
+    capacity=RVH_COMMAND_LINE_CHARS-length-3;
+    for(i=1;i<Argc;i++)if(!RvhCommandArgument(parameters,capacity,&used,Argv[i]))goto Finished;
+    if(!RvhCommandArgument(parameters,capacity,&used,RVH_ELEVATED_CHILD))goto Finished;
+    result=CoInitializeEx(NULL,COINIT_APARTMENTTHREADED|COINIT_DISABLE_OLE1DDE);
+    if(FAILED(result)){RvhHresultError(L"UAC-shell-COM",result);goto Finished;}
+    comReady=TRUE;
+    execute.cbSize=sizeof(execute);
+    execute.fMask=SEE_MASK_NOCLOSEPROCESS|SEE_MASK_NOASYNC|SEE_MASK_NO_CONSOLE|SEE_MASK_FLAG_NO_UI;
+    execute.lpVerb=L"runas";execute.lpFile=executable;execute.lpParameters=parameters;
+    execute.lpDirectory=directory;execute.nShow=SW_SHOWNORMAL;
+    wprintf(L"Stage=UAC-request Command=%ls Executable=%ls\n",Argv[1],executable);fflush(stdout);fflush(stderr);
+    /* FLAG_NO_UI suppresses shell error dialogs, never the Windows UAC consent
+     * prompt. NO_CONSOLE requests the existing console for the child's output. */
+    if(!ShellExecuteExW(&execute)){
+        error=GetLastError();RvhWin32Error(error==ERROR_CANCELLED?L"UAC-cancelled":L"UAC-request",error);
+        exitCode=error!=ERROR_SUCCESS?error:ERROR_GEN_FAILURE;goto Finished;
+    }
+    /* The synchronous shell launch is finished. Release its STA before the
+     * kernel wait; the child process handle has no COM/message-pump dependency. */
+    CoUninitialize();comReady=FALSE;
+    if(execute.hProcess==NULL){RvhWin32Error(L"UAC-child-process-required",ERROR_INVALID_HANDLE);goto Finished;}
+    wait=WaitForSingleObject(execute.hProcess,INFINITE);
+    if(wait!=WAIT_OBJECT_0){RvhWin32Error(L"UAC-child-wait",wait==WAIT_FAILED?GetLastError():ERROR_GEN_FAILURE);goto Finished;}
+    if(!GetExitCodeProcess(execute.hProcess,&exitCode)){RvhWin32Error(L"UAC-child-exit-code",GetLastError());exitCode=1;goto Finished;}
+    wprintf(L"Stage=UAC-child-complete ChildExitCode=%lu\n",exitCode);
+Finished:
+    if(execute.hProcess!=NULL)CloseHandle(execute.hProcess);
+    if(comReady)CoUninitialize();
+    if(directory!=NULL)HeapFree(GetProcessHeap(),0,directory);
+    if(parameters!=NULL)HeapFree(GetProcessHeap(),0,parameters);
+    if(executable!=NULL)HeapFree(GetProcessHeap(),0,executable);
+    return (int)exitCode;
 }
 static int RvhEnablePrivilege(RVH_PRIVILEGE *Privilege){
     TOKEN_PRIVILEGES desired;DWORD length=sizeof(Privilege->Previous),error;
@@ -387,20 +466,22 @@ static void RvhUsage(void){
         L"RonovaHostManage upgrade --package C:\\path\\RonovaHost.inf --installed-inf C:\\Windows\\INF\\oemN.inf [--reload] [--timeout-ms 10000]\n"
         L"RonovaHostManage remove --installed-inf C:\\Windows\\INF\\oemN.inf [--timeout-ms 10000]\n"
         L"Install never loads. Upgrade reloads only with --reload. Unload/remove/upgrade never call service stop.\n"
-        L"Run modifying actions from an explicitly elevated x64 terminal. No elevation or reboot is requested by the tool.\n"
-        L"Exit 0: completed; 1: failure; 3010: Windows reported reboot required, do not load before restarting.\n");
+        L"Selected modifying actions reuse an elevated token or request Windows UAC consent for this same tool. Query never requests elevation.\n"
+        L"Exit 0: completed; 1: action failure; 1223: UAC cancelled; other UAC launch errors retain Win32 codes; 3010: reboot required. No reboot is requested.\n");
 }
 
 int wmain(int Argc,wchar_t **Argv){
-    PCWSTR command,packagePath=NULL,installedPath=NULL;BOOL reload=FALSE,reboot=FALSE,upgrade,install,remove;
+    PCWSTR command,packagePath=NULL,installedPath=NULL;BOOL reload=FALSE,reboot=FALSE,upgrade,install,remove,query,elevated=FALSE,elevatedChild=FALSE;
     DWORD timeout=10000;int i,exitCode=1;RVH_PACKAGE_INFO package;RVH_SERVICE_INFO service={0},after={0};
     RVH_PRIVILEGE privilege={0};HANDLE pinned[3]={0};BOOL haveTimeout=FALSE;
     if(Argc<2){RvhUsage();return 1;}
     command=Argv[1];
     if(wcscmp(command,L"--help")==0){RvhUsage();return 0;}
     upgrade=wcscmp(command,L"upgrade")==0;install=wcscmp(command,L"install")==0;remove=wcscmp(command,L"remove")==0;
-    if(!upgrade&&!install&&!remove&&wcscmp(command,L"query")!=0&&wcscmp(command,L"load")!=0&&wcscmp(command,L"unload")!=0){RvhUsage();return 1;}
+    query=wcscmp(command,L"query")==0;
+    if(!upgrade&&!install&&!remove&&!query&&wcscmp(command,L"load")!=0&&wcscmp(command,L"unload")!=0){RvhUsage();return 1;}
     for(i=2;i<Argc;i++){
+        if(wcscmp(Argv[i],RVH_ELEVATED_CHILD)==0&&!elevatedChild){elevatedChild=TRUE;continue;}
         if(wcscmp(Argv[i],L"--reload")==0&&!reload){reload=TRUE;continue;}
         if(wcscmp(Argv[i],L"--package")==0&&packagePath==NULL&&i+1<Argc){packagePath=Argv[++i];continue;}
         if(wcscmp(Argv[i],L"--installed-inf")==0&&installedPath==NULL&&i+1<Argc){installedPath=Argv[++i];continue;}
@@ -411,8 +492,17 @@ int wmain(int Argc,wchar_t **Argv){
         RvhUsage();return 1;
     }
     if((install||upgrade)!=(packagePath!=NULL)||(remove||upgrade)!=(installedPath!=NULL)||(reload&&!upgrade)
-            ||(haveTimeout&&!remove&&!upgrade&&wcscmp(command,L"unload")!=0)){RvhUsage();return 1;}
-    if(!RvhSupportedOS()||!RvhPrintPrivilege())goto Finished;
+            ||(haveTimeout&&!remove&&!upgrade&&wcscmp(command,L"unload")!=0)||(query&&elevatedChild)){RvhUsage();return 1;}
+    if(!RvhSupportedOS()||!RvhPrintPrivilege(&elevated))goto Finished;
+    if(!query){
+        if(!elevated){
+            /* The marker only prevents a request loop; actual TokenElevation,
+             * never an argv flag, grants access to the existing action code. */
+            if(elevatedChild){RvhWin32Error(L"UAC-child-not-elevated",ERROR_ELEVATION_REQUIRED);goto Finished;}
+            exitCode=RvhRequestElevation(Argc,Argv);goto Finished;
+        }
+        wprintf(L"ElevationReused=1 ElevatedChild=%lu\n",(ULONG)elevatedChild);
+    }
     /* Pin all source package files before reading metadata or draining the old
      * driver. A staged/signed package cannot be rewritten during this action. */
     if(install||upgrade){
@@ -425,7 +515,7 @@ int wmain(int Argc,wchar_t **Argv){
     }
     if(!RvhReadService(&service))goto Finished;
     RvhPrintService(&service);
-    if(wcscmp(command,L"query")==0){exitCode=!service.Present||service.Status.dwCurrentState==SERVICE_STOPPED?0:RvhDeviceQuery()?0:1;goto Finished;}
+    if(query){exitCode=!service.Present||service.Status.dwCurrentState==SERVICE_STOPPED?0:RvhDeviceQuery()?0:1;goto Finished;}
     if(install){
         if(service.Present){RvhWin32Error(L"install-requires-absent-service-use-upgrade",ERROR_SERVICE_EXISTS);goto Finished;}
     }else if(!service.Present){RvhWin32Error(L"installed-service-required",ERROR_SERVICE_DOES_NOT_EXIST);goto Finished;}

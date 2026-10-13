@@ -184,13 +184,14 @@ public final class CodeSourceBridge {
                 Object value=values[index];
                 if(value==null)continue;
                 ControlKey known=find(value);if(known!=null){result=known;continue;}
+                NativeControl.heapPolicyChanged(value);
                 if(size>=table.length-(table.length>>>2)&&table.length<(1<<30)){
                     ControlKey[] prior=table,next=new ControlKey[prior.length*2];
                     for(ControlKey first:prior)for(ControlKey key=first;key!=null;){
                         ControlKey following=key.next;int at=bucket(key.hash,next.length);
                         key.previous=null;key.next=next[at];if(key.next!=null)key.next.previous=key;next[at]=key;key=following;
                     }
-                    table=next;
+                    NativeControl.heapPolicyChanged(next);table=next;
                     // Every new backing keeps its own weak protection entry;
                     // old tables stay protected while held, without retention.
                     int at=bucket(System.identityHashCode(next),next.length);

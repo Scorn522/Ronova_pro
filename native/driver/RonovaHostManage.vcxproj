@@ -24,6 +24,7 @@
     <RonovaHostOutputRoot Condition="'$(RonovaHostOutputRoot)'==''">$(ProjectDir)out\</RonovaHostOutputRoot>
     <OutDir>$(RonovaHostOutputRoot)$(Platform)\$(Configuration)\tools\</OutDir>
     <IntDir>$(RonovaHostOutputRoot)obj\manage\$(Platform)\$(Configuration)\</IntDir>
+    <EmbedManifest>false</EmbedManifest>
   </PropertyGroup>
   <ItemDefinitionGroup>
     <ClCompile>
@@ -35,13 +36,15 @@
     </ClCompile>
     <Link>
       <SubSystem>Console</SubSystem>
-      <AdditionalDependencies>Advapi32.lib;Newdev.lib;Setupapi.lib;FltLib.lib;%(AdditionalDependencies)</AdditionalDependencies>
-      <UACExecutionLevel>AsInvoker</UACExecutionLevel>
+      <AdditionalDependencies>Advapi32.lib;Newdev.lib;Setupapi.lib;FltLib.lib;Shell32.lib;Ole32.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <GenerateManifest>false</GenerateManifest>
+      <EnableUAC>false</EnableUAC>
     </Link>
-    <Manifest><AdditionalManifestFiles>$(ProjectDir)RonovaHostManage.manifest;%(AdditionalManifestFiles)</AdditionalManifestFiles></Manifest>
+    <ResourceCompile><AdditionalIncludeDirectories>$(ProjectDir);%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories></ResourceCompile>
   </ItemDefinitionGroup>
   <ItemGroup><ClCompile Include="ronova_host_manage.c" /></ItemGroup>
   <ItemGroup><ClInclude Include="ronova_host_protocol.h" /></ItemGroup>
+  <ItemGroup><ResourceCompile Include="RonovaHostManage.rc" /></ItemGroup>
   <ItemGroup><None Include="RonovaHostManage.manifest" /></ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
 </Project>

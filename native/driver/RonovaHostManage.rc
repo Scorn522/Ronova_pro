@@ -1,0 +1,4 @@
+/* CREATEPROCESS_MANIFEST_RESOURCE_ID = 1; RT_MANIFEST = 24.
+ * Keep the same explicit asInvoker and supportedOS resource in MSVC and Zig/
+ * LLD builds; the linker must not generate a second manifest at this ID. */
+1 24 "RonovaHostManage.manifest"

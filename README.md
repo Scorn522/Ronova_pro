@@ -1,4 +1,4 @@
-> **2026-10-13 当前主工程：`D:\桌面\ronova_GPT`。** Java ABI55 / Native ABI52 / Storage3 / Journal6；用户态 GNU C23/C++23、Java17，独立 Windows 驱动/工具 C17。本轮补回调在途退役与来源、字段/世界固定基线及正常保存接续、HUD载体身份和驱动构建/生命周期入口。主包构建及真实 Host/JVMTI 入口检查通过，驱动 SYS 与部署工具 EXE 已实际编译链接（官方 WDK/SDK 头库+Zig/LLD，未执行正式 MSBuild）；未签名、安装、加载，本候选游戏/世界重启仍未验收，C/B未完成。详见 [当前状态](docs/A-批验收状态.md) 与 [实际报告](validation/b-final-20261007/REPORT.md)。本地 WIP `distribution/candidate-c-java55-native52-wip-20261013`；产物和原始日志留本地。
+> **2026-10-14 当前主工程：`D:\桌面\ronova_GPT`。** Java ABI56 / Native ABI54 / Storage3 / Journal6；用户态 GNU C23/C++23、Java17，独立驱动/工具 C17。受支持 JVMTI 扩展/heap 回调、五个线程创建入口、UAC 工具和准确新文件 open 准入已接线；主包与相关实际 JVM 入口检查通过，SYS/EXE 编译链接通过。原生 worker 全生命周期、缓存原表/旧环境等源码边界仍待接续，驱动尚未签名或加载，游戏/保存重启尚未验收，C/B 未完成。详见 [当前状态](docs/A-批验收状态.md) 与 [实际报告](validation/b-final-20261007/REPORT.md)。本地 WIP `distribution/candidate-c-java56-native54-wip-20261014`；产物和原始日志留本地。
 
 以下 R1/R2、候选 43、旧主包与旧环境结果保留其原日期和证据范围。已有发行目录不是本轮源码对应的新游戏安装包。
 

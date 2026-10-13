@@ -62,6 +62,13 @@ public final class TaskBridge {
         SchedulerRetired(){super("RONOVA_PRIVATE_SCHEDULER_RETIRED");}
     }
     static final java.util.Map<EventKey,Thread> TIMER_RUNNING=new java.util.HashMap<>();
+    // Source registration already holds CREATION_OWNERS. Notify only a real
+    // addition, before publishing it, so repeated observations keep a heap
+    // callback's unchanged target permission.
+    static void taskSource(Object object,Set<Module> sources,Module source){
+        if(sources.contains(source))return;
+        NativeControl.heapPolicyChanged(object);sources.add(source);
+    }
     static void taskRelation(Object task,Object scheduler,Object parent) {
         if(task==null)return;
         Module[] actual=invokingSources();Module direct=actual.length==1?actual[0]:actual.length==0?invokingModule():null;if(direct==null&&actual.length==0&&parent!=null)direct=objectModule(parent);
@@ -70,10 +77,10 @@ public final class TaskBridge {
             reapCreationOwners();EventKey key=new EventKey(task,CREATION_QUEUE);
             Set<Module> owners=TASK_OWNERS.computeIfAbsent(key,ignored->java.util.Collections.newSetFromMap(new java.util.IdentityHashMap<Module,Boolean>()));
             // A null entry represents an actual submission with no selected producer, not an inferred owner.
-            if(actual.length==0)owners.add(direct);else owners.addAll(java.util.Arrays.asList(actual));
-            Set<Module> creation=CREATION_SOURCES.get(new EventKey(task,null));if(creation!=null)owners.addAll(creation);
-            Module creator=CREATION_OWNERS.get(new EventKey(task,null));if(creator!=null)owners.add(creator);
-            Module definition=DefinitionBridge.module(task.getClass());if(producer(definition))owners.add(definition);
+            if(actual.length==0)taskSource(task,owners,direct);else for(Module source:actual)taskSource(task,owners,source);
+            Set<Module> creation=CREATION_SOURCES.get(new EventKey(task,null));if(creation!=null)for(Module source:creation)taskSource(task,owners,source);
+            Module creator=CREATION_OWNERS.get(new EventKey(task,null));if(creator!=null)taskSource(task,owners,creator);
+            Module definition=DefinitionBridge.module(task.getClass());if(producer(definition))taskSource(task,owners,definition);
             if(scheduler!=null) {
                 TASK_SCHEDULERS.put(key,new java.lang.ref.WeakReference<>(scheduler));
                 schedulerSources(scheduler,owners,CREATION_UNKNOWN.contains(key));
@@ -260,19 +267,31 @@ public final class TaskBridge {
                 THREAD_TIMERS.put(new EventKey(thread,CREATION_QUEUE),new java.lang.ref.WeakReference<>(timer));
         }catch(IllegalAccessException unavailable){throw new IllegalStateException("TIMER_THREAD_UNOBSERVED",unavailable);}
     }
-    static void threadSources(ThreadOrigin origin,Object object){
+    static ThreadOrigin observedThreadOrigin(Thread thread){
+        EventKey key=new EventKey(thread,null);ThreadOrigin origin=THREAD_ORIGINS.get(key);
+        if(origin!=null)return origin;
+        NativeControl.heapPolicyChanged(thread);origin=new ThreadOrigin();
+        THREAD_ORIGINS.put(new EventKey(thread,CREATION_QUEUE),origin);return origin;
+    }
+    static void threadSources(Thread thread,ThreadOrigin origin,Object object){
         if(object==null)return;EventKey key=new EventKey(object,null);
         Set<Module> creation=CREATION_SOURCES.get(key),tasks=TASK_OWNERS.get(key);
-        if(creation!=null)origin.sources.addAll(creation);if(tasks!=null)origin.sources.addAll(tasks);
-        if(origin.sources.remove(null)||CREATION_UNKNOWN.contains(key))origin.unknown=true;
-        Module definition=DefinitionBridge.module(object.getClass());if(producer(definition))origin.sources.add(definition);
+        if(creation!=null)for(Module source:creation)taskSource(thread,origin.sources,source);
+        if(tasks!=null)for(Module source:tasks)taskSource(thread,origin.sources,source);
+        if(origin.sources.contains(null)||CREATION_UNKNOWN.contains(key)){
+            if(!origin.unknown)NativeControl.heapPolicyChanged(thread);
+            origin.sources.remove(null);origin.unknown=true;
+        }
+        Module definition=DefinitionBridge.module(object.getClass());if(producer(definition))taskSource(thread,origin.sources,definition);
     }
     static ThreadOrigin threadOrigin(Thread thread,Object target)throws NoSuchMethodException {
-        ThreadOrigin origin=THREAD_ORIGINS.computeIfAbsent(new EventKey(thread,CREATION_QUEUE),ignored->new ThreadOrigin());
-        threadSources(origin,thread);threadSources(origin,target);
+        ThreadOrigin origin=observedThreadOrigin(thread);
+        threadSources(thread,origin,thread);threadSources(thread,origin,target);
         Class<?> implementation=thread.getClass().getMethod("run").getDeclaringClass();Module declaration=DefinitionBridge.module(implementation);
-        if(producer(declaration))origin.sources.add(declaration);
-        else if(implementation!=Thread.class&&!threadWorker(thread,target))origin.unknown=true;
+        if(producer(declaration))taskSource(thread,origin.sources,declaration);
+        else if(implementation!=Thread.class&&!threadWorker(thread,target)){
+            if(!origin.unknown)NativeControl.heapPolicyChanged(thread);origin.unknown=true;
+        }
         return origin;
     }
     static boolean allThreadSourcesStopped(ThreadOrigin origin){
@@ -292,10 +311,11 @@ public final class TaskBridge {
             reapCreationOwners();ThreadOrigin origin=threadOrigin(thread,target);
             if(!worker&&nativeSources!=null)for(Module source:nativeSources){
                 if(source==null)unknown=true;
-                else {stopped|=modStopped(source);if(producer(source))origin.sources.add(source);}
+                else {stopped|=modStopped(source);if(producer(source))taskSource(thread,origin.sources,source);}
             }
             if(!worker&&(RETIRED_THREADS.contains(new EventKey(thread,null))||stopped))throw new IllegalThreadStateException("RONOVA_RETIRED_THREAD_START");
-            Collections.addAll(origin.sources,sources);origin.unknown|=unknown;
+            for(Module source:sources)taskSource(thread,origin.sources,source);
+            if(unknown&&!origin.unknown)NativeControl.heapPolicyChanged(thread);origin.unknown|=unknown;
             if(!worker&&allThreadSourcesStopped(origin))throw new IllegalThreadStateException("RONOVA_STOPPED_THREAD_START");
             ThreadStart token=new ThreadStart(thread,origin);origin.starting++;return token;
         }
@@ -327,7 +347,7 @@ public final class TaskBridge {
         if(request!=null&&!requestedThread(request,thread))return Boolean.FALSE;
         requireThreadControl(thread,2,nativeSources);
         if(request==null)return null;
-        ThreadOrigin origin;synchronized(CREATION_OWNERS){origin=THREAD_ORIGINS.computeIfAbsent(new EventKey(thread,CREATION_QUEUE),ignored->new ThreadOrigin());}
+        ThreadOrigin origin;synchronized(CREATION_OWNERS){origin=observedThreadOrigin(thread);}
         boolean locked=origin.io.tryLock();
         if(!locked)synchronized(CREATION_OWNERS){
             // A blocker-removal callback unlocks under this same monitor. Retry
@@ -372,7 +392,7 @@ public final class TaskBridge {
     public static Object threadBlocking(Object blocker)throws ReflectiveOperationException,java.io.InterruptedIOException {
         if(WALKER.getCallerClass()!=Thread.class)throw new SecurityException("ACTUAL_THREAD_BLOCKER_REQUIRED");
         Thread thread=Thread.currentThread();ThreadOrigin origin;
-        synchronized(CREATION_OWNERS){origin=THREAD_ORIGINS.computeIfAbsent(new EventKey(thread,CREATION_QUEUE),ignored->new ThreadOrigin());}
+        synchronized(CREATION_OWNERS){origin=observedThreadOrigin(thread);}
         origin.io.lock();
         try{
             if(blocker!=null){
@@ -600,7 +620,7 @@ public final class TaskBridge {
         finally { if(prior==null)AUTHORITY.remove();else AUTHORITY.set(prior); }
     }
     private TaskBridge() {}
-    public static int abiVersion(){return 55;}
+    public static int abiVersion(){return 56;}
     public static synchronized void installTaskPublicationGate(Class<?> owner,java.lang.invoke.MethodHandle callback) {
         requirePolicyInstaller();
         if(guards==null||guards.owner()!=owner)throw new SecurityException("TASK_PUBLICATION_OWNER");

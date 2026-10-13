@@ -28,7 +28,7 @@ public final class ControlBridge {
         }
     };
     private ControlBridge() { }
-    public static int abiVersion(){return 55;}
+    public static int abiVersion(){return 56;}
     public static long arrayRevision(Object value){if(!recoveryWriter())throw new SecurityException("RECOVERY_ARRAY_READER_REQUIRED");return CodeSourceBridge.executionArrayRevision(value);}
 
     public static synchronized void install(Class<?> agent,ClassFileTransformer[] transformers) throws ReflectiveOperationException {
@@ -40,6 +40,7 @@ public final class ControlBridge {
         Field field=info.getDeclaredField("mTransformer");
         if(!field.trySetAccessible())throw new IllegalAccessException("TRANSFORMER_INFO_ACCESS");
         Method changed=agent.getMethod("externalDefinitionsChanged",Class[].class);
+        if(instrumentationOwner==null)NativeControl.heapPolicyChanged(null);
         instrumentationOwner=agent;transformerField=field;definitionsChanged=changed;ClassFileTransformer[] next=transformers.clone();
         ControlBridge.controlPublication(next,new Object[]{next,changed});ControlBridge.controlPublication(next,next);protectedTransformers=next;
     }
@@ -217,7 +218,8 @@ public final class ControlBridge {
     // Shared by the Java fallback and the live JVMTI frame reader.
     static boolean controlWriterFrame(Class<?> type,String method){
         String name=type.getName();
-        if(type==NativeControl.class&&(method.equals("controlWriterCaller")||method.equals("controlWriter0")))return false;
+        if(type==NativeControl.class&&(method.equals("controlWriterCaller")||method.equals("controlWriter0")
+                ||method.equals("heapPolicyChanged")||method.equals("heapPolicyChanged0")))return false;
         if(type==TaskBridge.class||type==ControlBridge.class||name.startsWith("dev.ronova.pro.bootstrap.TaskBridge$")||name.startsWith("dev.ronova.pro.bootstrap.ControlBridge$"))
             return !EXTERNAL_GUARD_ENTRIES.contains(method)
                     &&!(name.equals("dev.ronova.pro.bootstrap.ControlBridge$ControlRef")&&(method.equals("clear")||method.equals("enqueue")));
@@ -255,7 +257,9 @@ public final class ControlBridge {
     static final java.util.Set<Module> PRODUCER_MODULES=java.util.Collections.newSetFromMap(new java.util.WeakHashMap<Module,Boolean>());
     public static void registerProducerModule(Module module) {
         if(!ControlBridge.owns(WALKER.getCallerClass()))throw new SecurityException("PRODUCER_AGENT_REQUIRED");
-        synchronized(PRODUCER_MODULES) {PRODUCER_MODULES.add(module);}
+        synchronized(PRODUCER_MODULES) {
+            if(!PRODUCER_MODULES.contains(module)){NativeControl.heapPolicyChanged(null);PRODUCER_MODULES.add(module);}
+        }
     }
     static Module invokingModule() {
         return ORIGIN_WALKER.walk(INVOKING);
@@ -293,7 +297,7 @@ public final class ControlBridge {
         Module[] existing=stoppedModules;
         java.util.ArrayList<Module> next=new java.util.ArrayList<>(java.util.Arrays.asList(existing));
         for(Module module:modules)if(module!=null&&!next.contains(module))next.add(module);
-        stoppedModules=next.toArray(Module[]::new);
+        if(next.size()!=existing.length){NativeControl.heapPolicyChanged(null);stoppedModules=next.toArray(Module[]::new);}
     }
     static boolean hasStoppedModules(){return stoppedModules.length!=0;}
     static boolean modStopped(Module module) {
@@ -570,6 +574,22 @@ public final class ControlBridge {
         EventKey key=new EventKey(object,null);ThreadOrigin thread=THREAD_ORIGINS.get(key);
         return CREATION_UNKNOWN.contains(key)||thread!=null&&thread.unknown;
     }}
+    /** Native heap mutations use this actual object's current observed sources. */
+    public static synchronized boolean nativeHeapTargetAllowed(Object object,Module[] actualSources){
+        if(object==null||actualSources==null||actualSources.length==0
+                ||controlled(object)||ownState(object instanceof Class<?> type?type:object.getClass()))return false;
+        for(Module source:actualSources)if(source==null||modStopped(source))return false;
+        synchronized(CREATION_OWNERS){
+            if(objectSourceUnknown(object))return false;
+            Module[] sources=objectSources(object);if(sources.length==0)return false;
+            for(Module source:sources){
+                if(source==null||!producer(source)||modStopped(source))return false;
+                boolean observed=false;for(Module actual:actualSources)if(actual==source){observed=true;break;}
+                if(!observed)return false;
+            }
+            return true;
+        }
+    }
     static String creationSourceGap(Module module){
         if(WALKER.getCallerClass()!=NativeControl.class)throw new SecurityException("ACTUAL_NATIVE_SOURCE_STATE_REQUIRED");
         Set<Object> unresolved=Collections.newSetFromMap(new IdentityHashMap<>());
@@ -583,10 +603,15 @@ public final class ControlBridge {
     }
     static void createdBy(Object object,Module[] sources,boolean onlyAbsent){
         EventKey lookup=new EventKey(object,null);
-        if(sourceUnknown()){CREATION_UNKNOWN.add(new EventKey(object,CREATION_QUEUE));CREATION_OWNERS.remove(lookup);}
+        if(sourceUnknown()){
+            if(!CREATION_UNKNOWN.contains(lookup))NativeControl.heapPolicyChanged(object);
+            CREATION_UNKNOWN.add(new EventKey(object,CREATION_QUEUE));CREATION_OWNERS.remove(lookup);
+        }
         if(onlyAbsent&&(CREATION_OWNERS.containsKey(lookup)||CREATION_SOURCES.containsKey(lookup)))return;
         EventKey key=new EventKey(object,CREATION_QUEUE);CREATION_OWNERS.remove(lookup);
         Set<Module> actual=java.util.Collections.newSetFromMap(new java.util.IdentityHashMap<Module,Boolean>());actual.addAll(java.util.Arrays.asList(sources));actual.remove(null);
+        Set<Module> previous=CREATION_SOURCES.get(lookup);
+        if(previous==null||!previous.equals(actual))NativeControl.heapPolicyChanged(object);
         if(actual.size()==1&&!CREATION_UNKNOWN.contains(key))CREATION_OWNERS.put(key,actual.iterator().next());
         CREATION_SOURCES.put(key,actual);
         if(object instanceof java.util.concurrent.ExecutorService)schedulerSources(object,actual,CREATION_UNKNOWN.contains(key));
@@ -786,7 +811,7 @@ public final class ControlBridge {
             "indexDenied","indexRemovalAllowed","indexWriteAllowed","beginIndexWrite","beginIndexNodeWrite","beginIndexArrayWrite","beginIndexRemoval","beginIndexNodeRemoval","beginIndexArrayRemoval","beginIndexStructure","endIndexMutation","deniedIndexCurrent",
             "registerConsoleInput","beginConsoleCommand","endConsoleCommand","consoleDispatchTrusted",
             "clearProtectedMap","unsafeWriteAllowed","unsafeMemoryAllowed",
-            "nativeArrayElementAllowed","nativePrimitiveArrayPolicy","nativeArrayPointerAllowed","nativeRegistrationAllowed","nativeRegistrationTargetAllowed","arrayWriteAllowed",
+            "nativeArrayElementAllowed","nativePrimitiveArrayPolicy","nativeArrayPointerAllowed","nativeRegistrationAllowed","nativeRegistrationTargetAllowed","nativeHeapTargetAllowed","arrayWriteAllowed",
             "resourceReleaseAllowed","lifeResult","dispatchAllowed","taskEffectAllowed",
             "resultPublicationAllowed");
     static boolean controlCaller() {
@@ -974,7 +999,9 @@ public final class ControlBridge {
         requirePolicyInstaller();
         Guards current=guards;
         if(current!=null&&current.owner()!=owner)throw new IllegalStateException("OTHER_CORE_GUARD_OWNER");
-        guards=policy(owner,field,dispatch,task,java.util.List.of());
+        Guards next=policy(owner,field,dispatch,task,java.util.List.of());
+        if(current==null)NativeControl.heapPolicyChanged(null);
+        guards=next;
     }
     static java.util.List<UnsafeField> fields(java.lang.reflect.Field[] fields,long[] offsets) {
         Objects.requireNonNull(fields);Objects.requireNonNull(offsets);
@@ -1006,7 +1033,9 @@ public final class ControlBridge {
         requirePolicyInstaller();
         Guards current=guards;
         if(current!=null&&current.owner()!=owner)throw new IllegalStateException("OTHER_CORE_GUARD_OWNER");
-        guards=policy(owner,field,dispatch,task,fields(fields,offsets));
+        Guards next=policy(owner,field,dispatch,task,fields(fields,offsets));
+        if(current==null)NativeControl.heapPolicyChanged(null);
+        guards=next;
     }
     /** All active callbacks, index provenance and Unsafe mappings publish in one snapshot. */
     public static synchronized void installPolicy(Class<?> owner,java.lang.invoke.MethodHandle field,
@@ -1017,6 +1046,7 @@ public final class ControlBridge {
         if(current!=null&&current.owner()!=owner)throw new IllegalStateException("OTHER_CORE_GUARD_OWNER");
         Guards next=policy(owner,field,dispatch,task,fields(fields,offsets));
         var callback=Objects.requireNonNull(index).asType(java.lang.invoke.MethodType.methodType(boolean.class,Object.class,Object.class,Object.class));
+        if(current==null)NativeControl.heapPolicyChanged(null);
         guards=new Guards(next.owner(),next.field(),next.dispatch(),next.task(),next.unsafeFields(),callback);
     }
     static final ThreadLocal<Boolean> INDEX_QUERY=new ThreadLocal<>();

@@ -43,7 +43,7 @@ public final class NativeControl {
             if(!early.isEmpty()) {
                 Path actual=Path.of(early).toAbsolutePath();if(!hash(Files.readAllBytes(actual)).equals(digest))throw new IOException("EARLY_NATIVE_IMAGE_MISMATCH");dll=actual;
             }
-            System.load(dll.toString());if(abi()!=52)throw new UnsatisfiedLinkError("NATIVE_CONTROL_ABI");
+            System.load(dll.toString());if(abi()!=54)throw new UnsatisfiedLinkError("NATIVE_CONTROL_ABI");
             if(!initialize0(ControlBridge.class,DefinitionBridge.class))throw new UnsatisfiedLinkError("ACTUAL_NATIVE_BOUNDARY_INSTALL_FAILED");
             if(!initializeDefinitionDirectory0(definitionDirectoryOwner))throw new UnsatisfiedLinkError("ACTUAL_DEFINITION_DIRECTORY_CAS_UNAVAILABLE");
             libraryBoundaryPresent=libraryPresent0();available=true;return state="NATIVE_BIND_AND_JNI_FIELD_READY";
@@ -54,6 +54,15 @@ public final class NativeControl {
         catch(NoSuchAlgorithmException impossible) { throw new AssertionError(impossible); }
     }
     public static boolean available() { return available; }
+    /** Revoke only a current native heap callback's saved target permission. */
+    static void heapPolicyChanged(Object object){
+        if(!available)return;
+        Class<?> caller=CALLER.getCallerClass();
+        if(caller!=ControlBridge.class&&caller!=TaskBridge.class&&caller!=DefinitionBridge.class
+                &&(caller.getClassLoader()!=null||caller.getNestHost()!=CodeSourceBridge.class))
+            throw new SecurityException("ACTUAL_HEAP_POLICY_PUBLICATION_REQUIRED");
+        heapPolicyChanged0(object);
+    }
     static Class<?> rawMemoryWriterCaller(){
         if(CALLER.getCallerClass()!=ControlBridge.class)throw new SecurityException("ACTUAL_RAW_MEMORY_WRITER_QUERY_REQUIRED");
         return rawMemoryWriter0();
@@ -637,6 +646,7 @@ public final class NativeControl {
     private static native boolean executionPopPermit0(Object token);
     private static native Class<?> codeFieldOwner0(Class<?> symbolic,String name,String descriptor);
     private static native boolean heapWatch0(Object holder,Class<?> declaring,String name,String descriptor);
+    private static native void heapPolicyChanged0(Object object);
     private static native Object[] heapReadField0(Object holder,Class<?> declaring,String name,String descriptor);
     private static native byte[] codeDigest0(byte[] bytes);
     private static native byte[] heapArrayImage0(Object array,long start,int length);

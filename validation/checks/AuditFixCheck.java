@@ -22,6 +22,8 @@ public final class AuditFixCheck {
         if(args.length==1&&args[0].equals("file-transfer")){fileTransfer();return;}
         if(args.length==1&&args[0].equals("socket-accept")){socketAccept();return;}
         if(args.length==1&&args[0].equals("host-load")){hostLoad();return;}
+        if(args.length==1&&args[0].equals("jvmti-dispatch")){jvmtiDispatch();return;}
+        if(args.length==1&&args[0].equals("host-thread-create")){hostThreadCreate();return;}
         if(args.length==1&&args[0].equals("storage-native")){storageNative();return;}
         if(args.length==1&&args[0].equals("host-process")){System.load(java.nio.file.Path.of(System.getProperty("ronova.pro.audit.native")).toAbsolutePath().toString());hostProcess0();System.out.println("HOST_PROCESS_PASS actual_windows_children A_W_imports A_W_dynamic suspended_preserved stopped_source_refused cached_result_refused unrelated_original_preserved retired_image_refused handles_retired");return;}
         ProRuntime runtime=(ProRuntime)U.allocateInstance(ProRuntime.class);
@@ -50,6 +52,77 @@ public final class AuditFixCheck {
 
     // Actual isolated TxF preparation; no commit permit is constructed or granted.
     private static native void hostProcess0();
+
+    // One AUDIT_HOST_THREAD_CREATE_CHECK DLL; the native start routines use no
+    // JVM attachment. The heap callback only creates a suspended native thread.
+    private static native void hostThreadCreate0(Class<?> type,Object payload);
+    private static final class HostThreadCreatePayload { }
+    private static void hostThreadCreate(){
+        System.load(java.nio.file.Path.of(System.getProperty("ronova.pro.audit.thread.native")).toAbsolutePath().toString());
+        var payload=new HostThreadCreatePayload();
+        try {hostThreadCreate0(HostThreadCreatePayload.class,payload);}
+        finally {java.lang.ref.Reference.reachabilityFence(payload);}
+        System.out.println("HOST_THREAD_CREATE_PASS actual_CreateThread current_process_CreateRemoteThread current_process_CreateRemoteThreadEx actual_loaded_CRT_beginthread_beginthreadex private_dynamic_hooks native_userdata_cookie thread_id suspended_until_resume actual_thread_exit CRT_auto_close_beginthread owned_observation_handle_closed beginthreadex_handle_closed actual_CRT_errno_doserrno native_userdata_retired tagged_heap_callback_create resume_and_wait_after_walk");
+    }
+
+    // This command loads one AUDIT_JVMTI_DISPATCH_CHECK fixture; it does not run
+    // the previously completed Host import/process/token or class-hook checks.
+    private static native int jvmtiDispatch0(Class<?> type,Object first,Object second,Object decoy);
+    private static native Class<?> jvmtiDispatchDefine0(ClassLoader loader,char suffix);
+    private static native void jvmtiDispatchPhase0(int phase);
+    private static native void jvmtiDispatchCollect0();
+    private static native long[] jvmtiDispatchState0();
+    private static native void jvmtiDispatchFinish0();
+    private static final class JvmtiDispatchPayload {Object child,decoy;}
+    private record JvmtiUnloadWitness(java.lang.ref.WeakReference<ClassLoader> loader,java.lang.ref.WeakReference<Class<?>> type) {
+        boolean cleared(){return loader.get()==null&&type.get()==null;}
+    }
+    private static JvmtiUnloadWitness jvmtiDisposableLoader(char suffix){
+        ClassLoader loader=new ClassLoader(null) { };
+        Class<?> type=jvmtiDispatchDefine0(loader,suffix);
+        require(type!=null&&type.getClassLoader()==loader&&type.getName().equals("dev.ronova.pro.JvmtiPayload"+suffix),
+                "actual JNI DefineClass did not use the requested disposable loader and class");
+        return new JvmtiUnloadWitness(new java.lang.ref.WeakReference<>(loader),new java.lang.ref.WeakReference<>(type));
+    }
+    private static boolean jvmtiAwaitUnload(JvmtiUnloadWitness witness,int phase,long deadline)throws InterruptedException {
+        // Force GC only after DefineClass's JNI locals and this helper's strong
+        // loader/class references have actually left their frames.
+        jvmtiDispatchCollect0();
+        while(System.nanoTime()<deadline){
+            long[] state=jvmtiDispatchState0();
+            require(state!=null&&state.length==5&&state[2]==0,"real ClassUnload env/JNIEnv/name dispatch mismatch: "+Arrays.toString(state));
+            require(state[0]<=1&&state[1]<=1,"real ClassUnload callback dispatched more than once for one fixture class: "+Arrays.toString(state));
+            long expectedSecond=phase==0?0:1;
+            if(state[0]==1&&state[1]==expectedSecond&&witness.cleared())return true;
+            Thread.sleep(20);
+        }
+        System.out.println("JVMTI_CLASS_UNLOAD_NOTRUN phase="+phase+" loaderAndClassCleared="+witness.cleared()+" actualState="+Arrays.toString(jvmtiDispatchState0()));
+        return false;
+    }
+    private static void jvmtiDispatch()throws Exception {
+        System.load(java.nio.file.Path.of(System.getProperty("ronova.pro.audit.jvmti.native")).toAbsolutePath().toString());
+        var first=new JvmtiDispatchPayload();var second=new JvmtiDispatchPayload();Object decoy=new Object();
+        first.child=second;first.decoy=decoy;
+        int extension=jvmtiDispatch0(JvmtiDispatchPayload.class,first,second,decoy);
+        long[] completed=null;
+        try {
+            if(extension==0)return;
+            long deadline=System.nanoTime()+TimeUnit.SECONDS.toNanos(4);
+            if(!jvmtiAwaitUnload(jvmtiDisposableLoader('U'),0,deadline))return;
+            jvmtiDispatchPhase0(1);
+            if(!jvmtiAwaitUnload(jvmtiDisposableLoader('V'),1,deadline))return;
+            jvmtiDispatchPhase0(2);
+            if(!jvmtiAwaitUnload(jvmtiDisposableLoader('W'),2,deadline))return;
+            completed=jvmtiDispatchState0();
+        } finally {
+            jvmtiDispatchFinish0();
+            java.lang.ref.Reference.reachabilityFence(first);java.lang.ref.Reference.reachabilityFence(second);java.lang.ref.Reference.reachabilityFence(decoy);
+        }
+        if(completed!=null){
+            System.out.println("JVMTI_CLASS_UNLOAD_DISPATCH_PASS actual_GetExtensionEvents actual_ShortLivedLoader_DefineClass actual_ForceGarbageCollection actual_ServiceThread_env_JNIEnv_name first_callback replaced_callback actual_DisposeEnvironment actualThread="+completed[3]+" actualJNIEnv="+Long.toUnsignedString(completed[4],16));
+            System.out.println("JVMTI_CLASS_UNLOAD_CLEAR_OBSERVED actual_SetExtensionEventCallback_success cleared_class_weak_refs current_callback_counts_unchanged public_deferred_queue_drain_not_exposed");
+        }
+    }
 
     private static void storageNative()throws Exception {
         require(StorageNative.available()&&StorageNative.abi0()==3,"actual storage DLL unavailable: "+StorageNative.reason());

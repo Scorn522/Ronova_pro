@@ -197,8 +197,8 @@ static int load_os_check(JNIEnv *env){
     return 1;
 }
 
-/* Include beside the real HostLoadNative.c payload, never an embedded second
- * production controller. Run only in the normal DLL with AUDIT_HOST_JVMTI_CHECK. */
+/* Reuse the real class-image payload for the old AUDIT_HOST_JVMTI_CHECK and the
+ * independent AUDIT_JVMTI_DISPATCH_CHECK; no production controller is embedded. */
 #include <jvmti.h>
 #include <string.h>
 #ifdef AUDIT_HOST_JVMTI_CHECK
@@ -226,12 +226,14 @@ static void JNICALL load_ti_callback_second(jvmtiEnv *api,JNIEnv *env,jclass act
     if(api!=load_ti_identity){load_ti_fail(env,"JVMTI_CALLBACK_REPLACEMENT_WRONG_ENVIRONMENT");return;}
     InterlockedIncrement(&load_ti_second);
 }
+#endif
+#if defined(AUDIT_HOST_JVMTI_CHECK) || defined(AUDIT_JVMTI_DISPATCH_CHECK)
 typedef struct LoadClassBytes {unsigned char bytes[256];unsigned length;} LoadClassBytes;
 static void load_ti_u1(LoadClassBytes *image,unsigned value){image->bytes[image->length++]=(unsigned char)value;}
 static void load_ti_u2(LoadClassBytes *image,unsigned value){load_ti_u1(image,value>>8);load_ti_u1(image,value);}
 static void load_ti_u4(LoadClassBytes *image,unsigned value){load_ti_u2(image,value>>16);load_ti_u2(image,value);}
 static void load_ti_utf8(LoadClassBytes *image,const char *value){unsigned length=(unsigned)strlen(value);load_ti_u1(image,1);load_ti_u2(image,length);memcpy(image->bytes+image->length,value,length);image->length+=length;}
-static int load_ti_define(JNIEnv *env,jobject loader,char suffix){
+static jclass load_ti_define_class(JNIEnv *env,jobject loader,char suffix){
     char name[]="dev/ronova/pro/JvmtiPayloadA";name[sizeof(name)-2]=suffix;LoadClassBytes image={0};
     load_ti_u4(&image,0xcafebabe);load_ti_u2(&image,0);load_ti_u2(&image,61);load_ti_u2(&image,8);
     load_ti_utf8(&image,name);load_ti_u1(&image,7);load_ti_u2(&image,1);
@@ -241,7 +243,12 @@ static int load_ti_define(JNIEnv *env,jobject loader,char suffix){
     load_ti_u2(&image,0x9);load_ti_u2(&image,5);load_ti_u2(&image,6);load_ti_u2(&image,1);load_ti_u2(&image,7);load_ti_u4(&image,15);
     load_ti_u2(&image,1);load_ti_u2(&image,0);load_ti_u4(&image,3);load_ti_u1(&image,0x10);load_ti_u1(&image,7);load_ti_u1(&image,0xac);
     load_ti_u2(&image,0);load_ti_u2(&image,0);load_ti_u2(&image,0);
-    jclass actual=(*env)->DefineClass(env,name,loader,(const jbyte*)image.bytes,(jsize)image.length);
+    return (*env)->DefineClass(env,name,loader,(const jbyte*)image.bytes,(jsize)image.length);
+}
+#endif
+#ifdef AUDIT_HOST_JVMTI_CHECK
+static int load_ti_define(JNIEnv *env,jobject loader,char suffix){
+    jclass actual=load_ti_define_class(env,loader,suffix);
     jmethodID method=actual?(*env)->GetStaticMethodID(env,actual,"value","()I"):NULL;
     int result=method?(*env)->CallStaticIntMethod(env,actual,method):-1;if(actual)(*env)->DeleteLocalRef(env,actual);return result;
 }
@@ -281,9 +288,529 @@ static int load_jvmti_environment(JavaVM *vm,JNIEnv *env,jclass check){
 }
 #endif
 
+#ifdef AUDIT_JVMTI_DISPATCH_CHECK
+/* This entry exercises only current heap/extension dispatch. It creates no
+ * Host/Mod registration. Callbacks use no JNI/Java or locks; the modern heap
+ * callback also exercises only callback-safe SetEnvironmentLocalStorage. */
+typedef struct LoadDispatchReferenceTrace {
+    jint kind,length,fieldIndex,result,branch;
+    int infoPresent,tagPresent,referrerPresent,sameTagPointer,userdataMatches;
+    jlong classTag,referrerClassTag,size,tagBefore,referrerBefore,tagAfter,referrerAfter;
+    uintptr_t dataPointer,tagPointer,referrerPointer;
+} LoadDispatchReferenceTrace;
+typedef struct LoadDispatchHeap {
+    jvmtiEnv *api;
+    jlong classTag,firstBefore,secondBefore,firstAfter,secondAfter,decoyTag;
+    unsigned firstSeen,secondSeen;int error,storageCalled;jvmtiError storageResult;
+    unsigned referenceCalls,referenceCount,referenceDropped;
+    int childEdge,decoyEdge;
+    LoadDispatchReferenceTrace references[16];
+} LoadDispatchHeap;
+static LoadDispatchHeap *load_dispatch_heap_active;
+static int load_dispatch_heap_wrong_data;
+static jvmtiEnv *load_dispatch_api;
+static JNIEnv *load_dispatch_caller_jni,*load_dispatch_event_jni;
+static DWORD load_dispatch_caller_thread,load_dispatch_event_thread;
+static jint load_dispatch_extension_index;
+static volatile LONG load_dispatch_first,load_dispatch_second,load_dispatch_event_error;
+static const char load_dispatch_unload_first[]="dev/ronova/pro/JvmtiPayloadU";
+static const char load_dispatch_unload_second[]="dev/ronova/pro/JvmtiPayloadV";
+static const char load_dispatch_unload_cleared[]="dev/ronova/pro/JvmtiPayloadW";
+static void load_dispatch_fail(JNIEnv *env,const char *stage,jvmtiError error){
+    fprintf(stderr,"JVMTI_DISPATCH_FAILED stage=%s jvmti=%d\n",stage,(int)error);fflush(stderr);
+    if((*env)->ExceptionCheck(env))return;
+    jclass failure=(*env)->FindClass(env,"java/lang/AssertionError");
+    if(failure){(*env)->ThrowNew(env,failure,stage);(*env)->DeleteLocalRef(env,failure);}
+}
+static LoadDispatchHeap *load_dispatch_heap_data(void *data){
+    if(data!=load_dispatch_heap_active||data==NULL){load_dispatch_heap_wrong_data=1;return NULL;}
+    return (LoadDispatchHeap*)data;
+}
+static int load_dispatch_heap_object(LoadDispatchHeap *state,jlong classTag,jlong size,jlong *tag){
+    if(!tag||size<=0||classTag!=state->classTag){state->error=1;return 0;}
+    if(*tag==state->firstBefore){state->firstSeen++;*tag=state->firstAfter;}
+    else if(*tag==state->secondBefore){state->secondSeen++;*tag=state->secondAfter;}
+    else{state->error=1;return 0;}
+    return 1;
+}
+static jint JNICALL load_dispatch_heap_iteration(jlong classTag,jlong size,jlong *tag,jint length,void *data){
+    LoadDispatchHeap *state=load_dispatch_heap_data(data);(void)length;
+    if(state&&!state->storageCalled){
+        state->storageCalled=1;state->storageResult=(*state->api)->SetEnvironmentLocalStorage(state->api,data);
+        if(state->storageResult!=JVMTI_ERROR_NONE){state->error=1;return JVMTI_VISIT_ABORT;}
+    }
+    return state&&load_dispatch_heap_object(state,classTag,size,tag)?JVMTI_VISIT_OBJECTS:JVMTI_VISIT_ABORT;
+}
+static jvmtiIterationControl JNICALL load_dispatch_legacy_object(jlong classTag,jlong size,jlong *tag,void *data){
+    LoadDispatchHeap *state=load_dispatch_heap_data(data);
+    return state&&load_dispatch_heap_object(state,classTag,size,tag)?JVMTI_ITERATION_CONTINUE:JVMTI_ITERATION_ABORT;
+}
+static jint JNICALL load_dispatch_heap_reference(jvmtiHeapReferenceKind kind,const jvmtiHeapReferenceInfo *info,
+        jlong classTag,jlong referrerClassTag,jlong size,jlong *tag,jlong *referrerTag,jint length,void *data){
+    LoadDispatchHeap *expected=load_dispatch_heap_active;LoadDispatchReferenceTrace *trace=NULL;jint result=JVMTI_VISIT_ABORT,branch=1;
+    /* Only write this fixed caller-owned buffer while the synchronous heap
+     * call runs. Formatting, JNI readback and output happen after it returns. */
+    if(expected){
+        expected->referenceCalls++;
+        if(expected->referenceCount<sizeof(expected->references)/sizeof(expected->references[0])){
+            trace=&expected->references[expected->referenceCount++];
+            trace->kind=kind;trace->length=length;trace->fieldIndex=kind==JVMTI_HEAP_REFERENCE_FIELD&&info?info->field.index:-1;
+            trace->infoPresent=info!=NULL;trace->tagPresent=tag!=NULL;trace->referrerPresent=referrerTag!=NULL;
+            trace->sameTagPointer=tag!=NULL&&tag==referrerTag;trace->userdataMatches=data==expected;
+            trace->classTag=classTag;trace->referrerClassTag=referrerClassTag;trace->size=size;
+            trace->tagBefore=tag?*tag:0;trace->referrerBefore=referrerTag?*referrerTag:0;
+            trace->dataPointer=(uintptr_t)data;trace->tagPointer=(uintptr_t)tag;trace->referrerPointer=(uintptr_t)referrerTag;
+        }else expected->referenceDropped++;
+    }
+    LoadDispatchHeap *state=load_dispatch_heap_data(data);
+    if(!state)goto observed;
+    if(!tag||classTag!=state->classTag||size<=0){state->error=1;branch=2;goto observed;}
+    /* Class/tag filters select reported referrees, not the traversed graph.
+     * After the exact child edge wrote both tags, another (possibly untagged)
+     * carrier may reference either object. Preserve that completed write and
+     * stop following this additional edge; do not write or count it again. */
+    if(state->secondSeen==1&&(*tag==state->firstAfter||*tag==state->secondAfter)){
+        result=0;branch=7;goto observed;
+    }
+    if(*tag==state->firstBefore){result=JVMTI_VISIT_OBJECTS;branch=3;goto observed;}
+    if(*tag==state->secondBefore){
+        if(kind!=JVMTI_HEAP_REFERENCE_FIELD||!info||!referrerTag||*referrerTag!=state->firstBefore
+                ||referrerClassTag!=state->classTag){state->error=1;branch=4;goto observed;}
+        state->secondSeen++;*tag=state->secondAfter;*referrerTag=state->firstAfter;result=0;branch=5;goto observed;
+    }
+    state->error=1;branch=6;
+observed:
+    if(trace){trace->result=result;trace->branch=branch;trace->tagAfter=tag?*tag:0;trace->referrerAfter=referrerTag?*referrerTag:0;}
+    return result;
+}
+static jvmtiIterationControl JNICALL load_dispatch_legacy_reference(jvmtiObjectReferenceKind kind,jlong classTag,
+        jlong size,jlong *tag,jlong referrerTag,jint index,void *data){
+    LoadDispatchHeap *state=load_dispatch_heap_data(data);(void)index;
+    if(!state)return JVMTI_ITERATION_ABORT;
+    if(tag&&*tag==state->secondBefore){
+        if(kind!=JVMTI_REFERENCE_FIELD||classTag!=state->classTag||size<=0||referrerTag!=state->firstBefore){state->error=1;return JVMTI_ITERATION_ABORT;}
+        state->secondSeen++;*tag=state->secondAfter;
+    }
+    /* Do not traverse unrelated class/loader graphs from this exact root. */
+    return JVMTI_ITERATION_IGNORE;
+}
+static int load_dispatch_tags(jvmtiEnv *api,jobject first,jobject second,jobject decoy,const LoadDispatchHeap *state){
+    jlong a=0,b=0,c=0;
+    return !load_dispatch_heap_wrong_data&&!state->error
+            &&(*api)->GetTag(api,first,&a)==JVMTI_ERROR_NONE&&a==state->firstAfter
+            &&(*api)->GetTag(api,second,&b)==JVMTI_ERROR_NONE&&b==state->secondAfter
+            &&(*api)->GetTag(api,decoy,&c)==JVMTI_ERROR_NONE&&c==state->decoyTag;
+}
+static int load_dispatch_reference_graph(JNIEnv *env,jclass type,jobject first,jobject second,jobject decoy,LoadDispatchHeap *state){
+    jfieldID child=(*env)->GetFieldID(env,type,"child","Ljava/lang/Object;");
+    jfieldID other=child?(*env)->GetFieldID(env,type,"decoy","Ljava/lang/Object;"):NULL;
+    if(!child||!other||(*env)->ExceptionCheck(env))return 0;
+    jobject actualChild=(*env)->GetObjectField(env,first,child),actualDecoy=(*env)->GetObjectField(env,first,other);
+    state->childEdge=(*env)->IsSameObject(env,actualChild,second);state->decoyEdge=(*env)->IsSameObject(env,actualDecoy,decoy);
+    if(actualChild)(*env)->DeleteLocalRef(env,actualChild);if(actualDecoy)(*env)->DeleteLocalRef(env,actualDecoy);
+    return !(*env)->ExceptionCheck(env);
+}
+static void load_dispatch_reference_report(jvmtiEnv *api,jclass type,jobject first,jobject second,jobject decoy,
+        const LoadDispatchHeap *state,jvmtiError result){
+    jobject objects[]={type,first,second,decoy};jlong values[4]={0};jvmtiError errors[4];
+    for(unsigned i=0;i<4;i++)errors[i]=(*api)->GetTag(api,objects[i],&values[i]);
+    fprintf(stderr,"JVMTI_FOLLOW_ACTUAL result=%d calls=%u stored=%u dropped=%u firstSeen=%u secondSeen=%u error=%d wrongUserdata=%d childEdge=%d decoyEdge=%d expectedData=%p\n",
+        result,state->referenceCalls,state->referenceCount,state->referenceDropped,state->firstSeen,state->secondSeen,state->error,load_dispatch_heap_wrong_data,state->childEdge,state->decoyEdge,(const void*)state);
+    fprintf(stderr,"JVMTI_FOLLOW_TAGS expectedClass=%lld beforeFirst=%lld beforeSecond=%lld expectedFirst=%lld expectedSecond=%lld expectedDecoy=%lld classError=%d classActual=%lld firstError=%d firstActual=%lld secondError=%d secondActual=%lld decoyError=%d decoyActual=%lld\n",
+        (long long)state->classTag,(long long)state->firstBefore,(long long)state->secondBefore,(long long)state->firstAfter,(long long)state->secondAfter,(long long)state->decoyTag,
+        errors[0],(long long)values[0],errors[1],(long long)values[1],errors[2],(long long)values[2],errors[3],(long long)values[3]);
+    for(unsigned i=0;i<state->referenceCount;i++){
+        const LoadDispatchReferenceTrace *trace=&state->references[i];
+        fprintf(stderr,"JVMTI_FOLLOW_TUPLE sample=%u kind=%d info=%d fieldIndex=%d classTag=%lld referrerClassTag=%lld size=%lld length=%d tagPresent=%d referrerPresent=%d alias=%d tagBefore=%lld referrerBefore=%lld tagAfter=%lld referrerAfter=%lld userdataMatch=%d userdata=%p tagPtr=%p referrerPtr=%p branch=%d returnedFlags=0x%X\n",
+            i,trace->kind,trace->infoPresent,trace->fieldIndex,(long long)trace->classTag,(long long)trace->referrerClassTag,(long long)trace->size,trace->length,
+            trace->tagPresent,trace->referrerPresent,trace->sameTagPointer,(long long)trace->tagBefore,(long long)trace->referrerBefore,(long long)trace->tagAfter,(long long)trace->referrerAfter,
+            trace->userdataMatches,(void*)trace->dataPointer,(void*)trace->tagPointer,(void*)trace->referrerPointer,trace->branch,(unsigned)trace->result);
+    }
+    fflush(stderr);
+}
+static int load_dispatch_heap(JNIEnv *env,jvmtiEnv *api,jclass type,jobject first,jobject second,jobject decoy){
+    jobject objects[]={type,first,second,decoy};jlong original[4]={0};unsigned saved=0;jvmtiError error=JVMTI_ERROR_NONE;
+    void *previousStorage=NULL,*actualStorage=NULL;int storageSaved=0;
+    jclass a=(*env)->GetObjectClass(env,first),b=(*env)->GetObjectClass(env,second),c=(*env)->GetObjectClass(env,decoy);
+    int actual=a&&b&&c&&(*env)->IsSameObject(env,a,type)&&(*env)->IsSameObject(env,b,type)&&!(*env)->IsSameObject(env,c,type)
+            &&!(*env)->IsSameObject(env,first,second)&&!(*env)->IsSameObject(env,first,decoy)&&!(*env)->IsSameObject(env,second,decoy);
+    if(a)(*env)->DeleteLocalRef(env,a);if(b)(*env)->DeleteLocalRef(env,b);if(c)(*env)->DeleteLocalRef(env,c);
+    const char *stage="actual_object_type_identity";int ready=0;
+    if(!actual||(*env)->ExceptionCheck(env))goto done;
+    stage="actual_GetEnvironmentLocalStorage_before_heap";
+    error=(*api)->GetEnvironmentLocalStorage(api,&previousStorage);if(error!=JVMTI_ERROR_NONE)goto done;storageSaved=1;
+    stage="actual_GetTag_before_heap";
+    for(;saved<4;saved++){error=(*api)->GetTag(api,objects[saved],&original[saved]);if(error!=JVMTI_ERROR_NONE)goto done;}
+    LoadDispatchHeap state={0};state.api=api;state.classTag=0x52444801;state.firstBefore=0x52444802;state.secondBefore=0x52444803;state.decoyTag=0x52444804;
+    jlong initial[]={state.classTag,state.firstBefore,state.secondBefore,state.decoyTag};
+    for(unsigned i=0;i<4;i++){error=(*api)->SetTag(api,objects[i],initial[i]);if(error!=JVMTI_ERROR_NONE){stage="actual_SetTag";goto done;}}
+    load_dispatch_heap_active=&state;load_dispatch_heap_wrong_data=0;
+    state.firstAfter=0x52444812;state.secondAfter=0x52444813;
+    jvmtiHeapCallbacks callbacks={0};callbacks.heap_iteration_callback=load_dispatch_heap_iteration;
+    stage="IterateThroughHeap_type_userdata_tag_ptr";
+    error=(*api)->IterateThroughHeap(api,JVMTI_HEAP_FILTER_UNTAGGED,type,&callbacks,&state);
+    if(state.storageCalled&&state.storageResult!=JVMTI_ERROR_NONE){stage="callback_safe_SetEnvironmentLocalStorage";error=state.storageResult;goto done;}
+    if(error!=JVMTI_ERROR_NONE||state.firstSeen!=1||state.secondSeen!=1||!load_dispatch_tags(api,first,second,decoy,&state))goto done;
+    stage="callback_safe_SetEnvironmentLocalStorage_actual_readback";
+    error=(*api)->GetEnvironmentLocalStorage(api,&actualStorage);
+    if(error!=JVMTI_ERROR_NONE||!state.storageCalled||state.storageResult!=JVMTI_ERROR_NONE||actualStorage!=&state)goto done;
+    state.firstBefore=state.firstAfter;state.secondBefore=state.secondAfter;state.firstAfter=0x52444822;state.secondAfter=0x52444823;
+    state.firstSeen=state.secondSeen=0;callbacks.heap_iteration_callback=NULL;callbacks.heap_reference_callback=load_dispatch_heap_reference;
+    stage="actual_FollowReferences_root_fields";
+    if(!load_dispatch_reference_graph(env,type,first,second,decoy,&state))goto done;
+    stage="FollowReferences_actual_root_type_referrer_tag_ptr";
+    error=(*api)->FollowReferences(api,JVMTI_HEAP_FILTER_UNTAGGED,type,first,&callbacks,&state);
+    if(error!=JVMTI_ERROR_NONE||state.secondSeen!=1||!load_dispatch_tags(api,first,second,decoy,&state)){
+        load_dispatch_reference_report(api,type,first,second,decoy,&state,error);goto done;
+    }
+    state.firstBefore=state.firstAfter;state.secondBefore=state.secondAfter;state.firstAfter=0x52444832;state.secondAfter=0x52444833;
+    state.firstSeen=state.secondSeen=0;
+    stage="IterateOverInstancesOfClass_type_userdata_tag_ptr";
+    error=(*api)->IterateOverInstancesOfClass(api,type,JVMTI_HEAP_OBJECT_TAGGED,load_dispatch_legacy_object,&state);
+    if(error!=JVMTI_ERROR_NONE||state.firstSeen!=1||state.secondSeen!=1||!load_dispatch_tags(api,first,second,decoy,&state))goto done;
+    state.firstBefore=state.firstAfter;state.secondBefore=state.secondAfter;state.secondAfter=0x52444843;state.firstSeen=state.secondSeen=0;
+    stage="IterateOverObjectsReachableFromObject_actual_root_userdata_tag_ptr";
+    error=(*api)->IterateOverObjectsReachableFromObject(api,first,load_dispatch_legacy_reference,&state);
+    if(error!=JVMTI_ERROR_NONE||state.secondSeen!=1||!load_dispatch_tags(api,first,second,decoy,&state))goto done;
+    ready=1;
+done:
+    load_dispatch_heap_active=NULL;
+    for(unsigned i=0;i<saved;i++){jvmtiError restored=(*api)->SetTag(api,objects[i],original[i]);if(restored!=JVMTI_ERROR_NONE){ready=0;stage="restore_actual_object_tags";error=restored;}}
+    if(storageSaved){jvmtiError restored=(*api)->SetEnvironmentLocalStorage(api,previousStorage);if(restored!=JVMTI_ERROR_NONE){ready=0;stage="restore_actual_environment_storage";error=restored;}}
+    if(!ready){load_dispatch_fail(env,stage,error);return 0;}
+    fprintf(stdout,"JVMTI_HEAP_DISPATCH_PASS real_GetEnv real_tag_capability actual_class_filter actual_jobject_root modern_and_legacy_userdata tag_ptr_and_referrer_writeback unrelated_object_preserved original_tags_restored callback_safe_environment_storage_actual_readback original_storage_restored callbacks_without_JNI_Java_or_locks\n");fflush(stdout);return 1;
+}
+static void load_dispatch_extension_free(jvmtiEnv *api,jint count,jvmtiExtensionEventInfo *events){
+    if(!events)return;
+    for(jint i=0;i<count;i++){
+        jvmtiExtensionEventInfo *event=&events[i];
+        if(event->params){for(jint p=0;p<event->param_count;p++)if(event->params[p].name)(*api)->Deallocate(api,(unsigned char*)event->params[p].name);(*api)->Deallocate(api,(unsigned char*)event->params);}
+        if(event->id)(*api)->Deallocate(api,(unsigned char*)event->id);
+        if(event->short_description)(*api)->Deallocate(api,(unsigned char*)event->short_description);
+    }
+    (*api)->Deallocate(api,(unsigned char*)events);
+}
+static int load_dispatch_unload_name(const char *name){
+    return name&&(strcmp(name,load_dispatch_unload_first)==0||strcmp(name,load_dispatch_unload_second)==0||strcmp(name,load_dispatch_unload_cleared)==0);
+}
+static void load_dispatch_unload_observe(jvmtiEnv *api,JNIEnv *env,const char *name,int replacement){
+    DWORD thread=GetCurrentThreadId();
+    if(api!=load_dispatch_api||env==NULL||env==load_dispatch_caller_jni||thread==load_dispatch_caller_thread
+            ||(load_dispatch_event_jni&&load_dispatch_event_jni!=env)||(load_dispatch_event_thread&&load_dispatch_event_thread!=thread)){
+        InterlockedOr(&load_dispatch_event_error,1);return;
+    }
+    if(name==NULL){InterlockedOr(&load_dispatch_event_error,2);return;}
+    if(!load_dispatch_unload_name(name))return;
+    if(strcmp(name,replacement?load_dispatch_unload_second:load_dispatch_unload_first)!=0)InterlockedOr(&load_dispatch_event_error,2);
+    load_dispatch_event_jni=env;load_dispatch_event_thread=thread;
+    InterlockedIncrement(replacement?&load_dispatch_second:&load_dispatch_first);
+}
+static void JNICALL load_dispatch_unload_callback_first(jvmtiEnv *api,JNIEnv *env,const char *name){load_dispatch_unload_observe(api,env,name,0);}
+static void JNICALL load_dispatch_unload_callback_second(jvmtiEnv *api,JNIEnv *env,const char *name){load_dispatch_unload_observe(api,env,name,1);}
+JNIEXPORT jint JNICALL Java_dev_ronova_pro_AuditFixCheck_jvmtiDispatch0(JNIEnv *env,jclass check,jclass type,jobject first,jobject second,jobject decoy){
+    (void)check;JavaVM *vm=NULL;jvmtiEnv *api=NULL;jvmtiCapabilities potential={0},requested={0},actual={0};
+    if((*env)->GetJavaVM(env,&vm)!=JNI_OK||!vm||(*vm)->GetEnv(vm,(void**)&api,JVMTI_VERSION_1_2)!=JNI_OK||!api){load_dispatch_fail(env,"real_JVMTI_GetEnv",JVMTI_ERROR_INVALID_ENVIRONMENT);return 0;}
+    jvmtiError error=(*api)->GetPotentialCapabilities(api,&potential);requested.can_tag_objects=1;
+    if(error==JVMTI_ERROR_NONE&&potential.can_tag_objects)error=(*api)->AddCapabilities(api,&requested);
+    else if(error==JVMTI_ERROR_NONE)error=JVMTI_ERROR_NOT_AVAILABLE;
+    if(error==JVMTI_ERROR_NONE)error=(*api)->GetCapabilities(api,&actual);
+    if(error!=JVMTI_ERROR_NONE||!actual.can_tag_objects){load_dispatch_fail(env,"real_tag_capability",error);(*api)->DisposeEnvironment(api);return 0;}
+    if(!load_dispatch_heap(env,api,type,first,second,decoy)){(*api)->DisposeEnvironment(api);return 0;}
+    jint count=0,index=-1;jvmtiExtensionEventInfo *events=NULL;
+    error=(*api)->GetExtensionEvents(api,&count,&events);
+    if(error!=JVMTI_ERROR_NONE){load_dispatch_fail(env,"real_GetExtensionEvents",error);(*api)->DisposeEnvironment(api);return 0;}
+    if(count<0||(count!=0&&events==NULL)){load_dispatch_fail(env,"real_extension_metadata_result",JVMTI_ERROR_INTERNAL);(*api)->DisposeEnvironment(api);return 0;}
+    for(jint i=0;i<count;i++){
+        jvmtiExtensionEventInfo *event=&events[i];
+        if(event->id&&strcmp(event->id,"com.sun.hotspot.events.ClassUnload")==0){
+            fprintf(stdout,"JVMTI_CLASS_UNLOAD_METADATA index=%d params=%d\n",event->extension_event_index,event->param_count);
+            if(event->param_count==2&&event->params)fprintf(stdout,"JVMTI_CLASS_UNLOAD_PARAMETER_TYPES firstKind=%d firstType=%d secondKind=%d secondType=%d\n",event->params[0].kind,event->params[0].base_type,event->params[1].kind,event->params[1].base_type);
+            if(event->param_count==2&&event->params&&event->params[0].base_type==JVMTI_TYPE_JNIENV
+                    &&event->params[0].kind==JVMTI_KIND_IN_PTR&&event->params[1].base_type==JVMTI_TYPE_CCHAR
+                    &&(event->params[1].kind==JVMTI_KIND_IN_PTR||event->params[1].kind==JVMTI_KIND_IN_BUF))index=event->extension_event_index;
+            break;
+        }
+    }
+    load_dispatch_extension_free(api,count,events);
+    if(index<0){fprintf(stdout,"JVMTI_CLASS_UNLOAD_NOTRUN actual_extension_signature_unavailable\n");fflush(stdout);(*api)->DisposeEnvironment(api);return 0;}
+    load_dispatch_api=api;load_dispatch_extension_index=index;load_dispatch_caller_jni=env;load_dispatch_caller_thread=GetCurrentThreadId();
+    load_dispatch_event_jni=NULL;load_dispatch_event_thread=0;InterlockedExchange(&load_dispatch_first,0);InterlockedExchange(&load_dispatch_second,0);InterlockedExchange(&load_dispatch_event_error,0);
+    error=(*api)->SetExtensionEventCallback(api,index,(jvmtiExtensionEvent)load_dispatch_unload_callback_first);
+    if(error!=JVMTI_ERROR_NONE){load_dispatch_fail(env,"real_ClassUnload_registration",error);load_dispatch_api=NULL;(*api)->DisposeEnvironment(api);return 0;}
+    return 1;
+}
+JNIEXPORT jclass JNICALL Java_dev_ronova_pro_AuditFixCheck_jvmtiDispatchDefine0(JNIEnv *env,jclass check,jobject loader,jchar suffix){
+    (void)check;
+    if(!load_dispatch_api||!loader||(suffix!='U'&&suffix!='V'&&suffix!='W')){load_dispatch_fail(env,"actual_disposable_loader_request",JVMTI_ERROR_ILLEGAL_ARGUMENT);return NULL;}
+    return load_ti_define_class(env,loader,(char)suffix);
+}
+JNIEXPORT void JNICALL Java_dev_ronova_pro_AuditFixCheck_jvmtiDispatchPhase0(JNIEnv *env,jclass check,jint phase){
+    (void)check;
+    if(!load_dispatch_api||(phase!=1&&phase!=2)){load_dispatch_fail(env,"actual_ClassUnload_phase",JVMTI_ERROR_ILLEGAL_ARGUMENT);return;}
+    jvmtiError error=(*load_dispatch_api)->SetExtensionEventCallback(load_dispatch_api,load_dispatch_extension_index,
+            phase==1?(jvmtiExtensionEvent)load_dispatch_unload_callback_second:NULL);
+    if(error!=JVMTI_ERROR_NONE)load_dispatch_fail(env,phase==1?"real_ClassUnload_replacement":"real_ClassUnload_clear",error);
+}
+JNIEXPORT void JNICALL Java_dev_ronova_pro_AuditFixCheck_jvmtiDispatchCollect0(JNIEnv *env,jclass check){
+    (void)check;
+    if(!load_dispatch_api){load_dispatch_fail(env,"actual_GC_environment",JVMTI_ERROR_INVALID_ENVIRONMENT);return;}
+    jvmtiError error=(*load_dispatch_api)->ForceGarbageCollection(load_dispatch_api);
+    if(error!=JVMTI_ERROR_NONE)load_dispatch_fail(env,"real_ForceGarbageCollection",error);
+}
+JNIEXPORT jlongArray JNICALL Java_dev_ronova_pro_AuditFixCheck_jvmtiDispatchState0(JNIEnv *env,jclass check){
+    (void)check;jlong values[5]={InterlockedCompareExchange(&load_dispatch_first,0,0),InterlockedCompareExchange(&load_dispatch_second,0,0),
+        InterlockedCompareExchange(&load_dispatch_event_error,0,0),(jlong)load_dispatch_event_thread,(jlong)(uintptr_t)load_dispatch_event_jni};
+    jlongArray result=(*env)->NewLongArray(env,5);if(result)(*env)->SetLongArrayRegion(env,result,0,5,values);return result;
+}
+JNIEXPORT void JNICALL Java_dev_ronova_pro_AuditFixCheck_jvmtiDispatchFinish0(JNIEnv *env,jclass check){
+    (void)check;if(!load_dispatch_api)return;jvmtiEnv *api=load_dispatch_api;
+    jvmtiError cleared=(*api)->SetExtensionEventCallback(api,load_dispatch_extension_index,NULL),disposed=(*api)->DisposeEnvironment(api);
+    load_dispatch_api=NULL;
+    if(cleared!=JVMTI_ERROR_NONE||disposed!=JVMTI_ERROR_NONE)load_dispatch_fail(env,"actual_ClassUnload_clear_and_DisposeEnvironment",cleared!=JVMTI_ERROR_NONE?cleared:disposed);
+}
+#endif
+
+#ifdef AUDIT_HOST_THREAD_CREATE_CHECK
+typedef HANDLE (WINAPI *LoadThreadCreate)(LPSECURITY_ATTRIBUTES,SIZE_T,LPTHREAD_START_ROUTINE,LPVOID,DWORD,LPDWORD);
+typedef HANDLE (WINAPI *LoadRemoteCreate)(HANDLE,LPSECURITY_ATTRIBUTES,SIZE_T,LPTHREAD_START_ROUTINE,LPVOID,DWORD,LPDWORD);
+typedef HANDLE (WINAPI *LoadRemoteCreateEx)(HANDLE,LPSECURITY_ATTRIBUTES,SIZE_T,LPTHREAD_START_ROUTINE,LPVOID,DWORD,LPPROC_THREAD_ATTRIBUTE_LIST,LPDWORD);
+extern LoadThreadCreate __imp_CreateThread;
+extern LoadRemoteCreate __imp_CreateRemoteThread;
+extern LoadRemoteCreateEx __imp_CreateRemoteThreadEx;
+#define LOAD_THREAD_COOKIE UINT64_C(0x524f4e4f56415454)
+#define LOAD_THREAD_EXIT ((DWORD)61)
+typedef struct LoadThreadCase {
+    uint64_t cookie,observedCookie;
+    uintptr_t observedData;
+    volatile LONG calls,error;
+    HANDLE handle;DWORD id,observedId,createError;
+    HANDLE ready,release;DWORD readyError,releaseWait,releaseError;
+    int completed,mustComplete;
+} LoadThreadCase;
+typedef struct LoadThreadHeap {
+    LoadThreadCase *thread;
+    jlong classTag,objectTag;
+    unsigned seen;int error;
+} LoadThreadHeap;
+static LoadThreadCase *load_thread_active;
+static LoadThreadHeap *load_thread_heap_active;
+static DWORD WINAPI load_thread_start(LPVOID data){
+    LoadThreadCase *state=load_thread_active;
+    if(!state)return LOAD_THREAD_EXIT;
+    if(data!=state){InterlockedOr(&state->error,1);return LOAD_THREAD_EXIT;}
+    state->observedData=(uintptr_t)data;state->observedCookie=state->cookie;state->observedId=GetCurrentThreadId();
+    if(state->observedCookie!=LOAD_THREAD_COOKIE)InterlockedOr(&state->error,2);
+    InterlockedIncrement(&state->calls);return LOAD_THREAD_EXIT;
+}
+static LoadThreadCase *load_thread_case_new(void){
+    LoadThreadCase *state=(LoadThreadCase*)HeapAlloc(GetProcessHeap(),HEAP_ZERO_MEMORY,sizeof(*state));
+    if(state){state->cookie=LOAD_THREAD_COOKIE;load_thread_active=state;}return state;
+}
+static void load_thread_case_free(LoadThreadCase *state){
+    if(!state)return;
+    /* A failed wait does not prove the native start routine stopped reading
+     * its userdata. Keep that allocation alive for the failing process. */
+    if((!state->handle&&!state->mustComplete)||state->completed){load_thread_active=NULL;HeapFree(GetProcessHeap(),0,state);}
+}
+static int load_thread_fail(JNIEnv *env,const char *stage){
+    fprintf(stderr,"HOST_THREAD_CREATE_FAILED stage=%s\n",stage);fflush(stderr);
+    return load_os_fail(env,stage);
+}
+static int load_thread_finish(LoadThreadCase *state,const char *name){
+    if(!state->handle){
+        fprintf(stderr,"HOST_THREAD_CREATE_RESULT api=%s created=0 lastError=%lu threadId=%lu\n",name,(unsigned long)state->createError,(unsigned long)state->id);
+        return 0;
+    }
+    DWORD actualId=GetThreadId(state->handle),idError=GetLastError(),beforeCode=0;
+    BOOL beforeQueried=GetExitCodeThread(state->handle,&beforeCode);DWORD beforeError=GetLastError();
+    DWORD beforeWait=WaitForSingleObject(state->handle,0),beforeWaitError=GetLastError();
+    LONG beforeCalls=InterlockedCompareExchange(&state->calls,0,0);
+    DWORD resumed=ResumeThread(state->handle),resumeError=GetLastError();
+    DWORD waited=WaitForSingleObject(state->handle,5000),waitError=GetLastError(),exitCode=0;
+    BOOL queried=GetExitCodeThread(state->handle,&exitCode);DWORD exitError=GetLastError();
+    state->completed=waited==WAIT_OBJECT_0;
+    int observed=state->completed&&InterlockedCompareExchange(&state->calls,0,0)==1
+            &&!InterlockedCompareExchange(&state->error,0,0)&&state->observedData==(uintptr_t)state
+            &&state->observedCookie==LOAD_THREAD_COOKIE&&state->observedId==state->id;
+    BOOL closed=CloseHandle(state->handle);DWORD closeError=GetLastError();
+    int ok=state->id!=0&&actualId==state->id&&state->id!=GetCurrentThreadId()
+            &&beforeQueried&&beforeCode==STILL_ACTIVE&&beforeWait==WAIT_TIMEOUT&&beforeCalls==0
+            &&resumed==1&&state->completed&&queried&&exitCode==LOAD_THREAD_EXIT&&observed&&closed;
+    /* Successful creation does not define GetLastError. Record the actual
+     * immediate result instead of assuming Windows leaves our sentinel intact. */
+    fprintf(ok?stdout:stderr,"HOST_THREAD_CREATE_RESULT api=%s created=1 lastError=%lu threadId=%lu actualThreadId=%lu idError=%lu beforeExit=%lu beforeError=%lu beforeWait=%lu beforeWaitError=%lu beforeCalls=%ld resumeCount=%lu resumeError=%lu wait=%lu waitError=%lu exit=%lu exitError=%lu userdataCookie=%d closed=%d closeError=%lu\n",
+            name,(unsigned long)state->createError,(unsigned long)state->id,(unsigned long)actualId,(unsigned long)idError,
+            (unsigned long)beforeCode,(unsigned long)beforeError,(unsigned long)beforeWait,(unsigned long)beforeWaitError,(long)beforeCalls,
+            (unsigned long)resumed,(unsigned long)resumeError,(unsigned long)waited,(unsigned long)waitError,
+            (unsigned long)exitCode,(unsigned long)exitError,observed,(int)closed,(unsigned long)closeError);
+    fflush(ok?stdout:stderr);return ok;
+}
+typedef void (__cdecl *LoadCrtStart)(void*);
+typedef unsigned (__stdcall *LoadCrtStartEx)(void*);
+typedef uintptr_t (__cdecl *LoadCrtBegin)(LoadCrtStart,unsigned,void*);
+typedef uintptr_t (__cdecl *LoadCrtBeginEx)(void*,unsigned,LoadCrtStartEx,void*,unsigned,unsigned*);
+typedef int *(__cdecl *LoadCrtErrno)(void);
+typedef unsigned long *(__cdecl *LoadCrtDosErrno)(void);
+static void __cdecl load_crt_start(void *data){
+    LoadThreadCase *state=load_thread_active;if(!state)return;
+    load_thread_start(data);state->observedId=GetCurrentThreadId();
+    if(!SetEvent(state->ready))InterlockedOr(&state->error,4);state->readyError=GetLastError();
+    state->releaseWait=WaitForSingleObject(state->release,5000);state->releaseError=GetLastError();
+    if(state->releaseWait!=WAIT_OBJECT_0)InterlockedOr(&state->error,8);
+    /* Returning lets this exact CRT run _endthread and close its own handle. */
+}
+static unsigned __stdcall load_crt_start_ex(void *data){return (unsigned)load_thread_start(data);}
+static int load_crt_begin_finish(LoadThreadCase *state,uintptr_t returned){
+    /* Never synchronize on, inspect, or close returned: _beginthread owns
+     * that handle and can close it as soon as its start routine returns. */
+    DWORD readyWait=WaitForSingleObject(state->ready,5000),readyWaitError=GetLastError();
+    state->id=readyWait==WAIT_OBJECT_0?state->observedId:0;
+    if(state->id)state->handle=OpenThread(SYNCHRONIZE|THREAD_QUERY_LIMITED_INFORMATION,FALSE,state->id);
+    DWORD openError=GetLastError(),actualId=state->handle?GetThreadId(state->handle):0;
+    BOOL released=SetEvent(state->release);DWORD releaseError=GetLastError();
+    DWORD waited=state->handle?WaitForSingleObject(state->handle,5000):WAIT_FAILED,waitError=GetLastError(),exitCode=0;
+    BOOL queried=state->handle?GetExitCodeThread(state->handle,&exitCode):FALSE;DWORD exitError=GetLastError();
+    state->completed=state->handle&&waited==WAIT_OBJECT_0;
+    int observed=state->completed&&InterlockedCompareExchange(&state->calls,0,0)==1
+            &&!InterlockedCompareExchange(&state->error,0,0)&&state->observedData==(uintptr_t)state
+            &&state->observedCookie==LOAD_THREAD_COOKIE&&state->releaseWait==WAIT_OBJECT_0;
+    BOOL closed=state->handle?CloseHandle(state->handle):FALSE;DWORD closeError=GetLastError();
+    DWORD callbackReleaseWait=state->completed?state->releaseWait:0;
+    int ok=readyWait==WAIT_OBJECT_0&&state->id&&state->id!=GetCurrentThreadId()&&actualId==state->id
+            &&released&&state->completed&&queried&&observed&&closed;
+    fprintf(ok?stdout:stderr,"HOST_CRT_BEGIN_RESULT returned=%llx original_handle_owned_by_CRT readyWait=%lu readyWaitError=%lu threadId=%lu actualThreadId=%lu openError=%lu released=%d releaseError=%lu callbackReleaseObserved=%d callbackReleaseWait=%lu wait=%lu waitError=%lu exit=%lu exitError=%lu userdataCookie=%d ownedHandleClosed=%d closeError=%lu\n",
+            (unsigned long long)returned,(unsigned long)readyWait,(unsigned long)readyWaitError,(unsigned long)state->id,(unsigned long)actualId,
+            (unsigned long)openError,(int)released,(unsigned long)releaseError,state->completed,(unsigned long)callbackReleaseWait,
+            (unsigned long)waited,(unsigned long)waitError,(unsigned long)exitCode,(unsigned long)exitError,observed,(int)closed,(unsigned long)closeError);
+    fflush(ok?stdout:stderr);return ok;
+}
+static int load_crt_thread_check(JNIEnv *env){
+    const wchar_t *modules[]={L"ucrtbase.dll",L"msvcrt.dll"};const char *names[]={"ucrtbase.dll","msvcrt.dll"};
+    HMODULE image=NULL;unsigned selected=0;
+    for(;selected<sizeof(modules)/sizeof(modules[0]);selected++)if((image=GetModuleHandleW(modules[selected]))!=NULL)break;
+    if(!image)return load_thread_fail(env,"HOST_CRT_ACTUAL_LOADED_RUNTIME_ABSENT");
+    LoadCrtBegin begin=(LoadCrtBegin)GetProcAddress(image,"_beginthread");
+    LoadCrtBeginEx beginEx=(LoadCrtBeginEx)GetProcAddress(image,"_beginthreadex");
+    LoadCrtErrno error=(LoadCrtErrno)GetProcAddress(image,"_errno");
+    LoadCrtDosErrno dosError=(LoadCrtDosErrno)GetProcAddress(image,"__doserrno");
+    HMODULE errorImage=NULL,dosImage=NULL;
+    if(!begin||!beginEx||!load_private_entry((void*)begin)||!load_private_entry((void*)beginEx))
+        return load_thread_fail(env,"HOST_CRT_ACTUAL_DYNAMIC_ENTRIES_NOT_CONTROLLED");
+    if(!error||!dosError
+            ||!GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS|GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,(LPCSTR)error,&errorImage)
+            ||!GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS|GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,(LPCSTR)dosError,&dosImage)
+            ||errorImage!=image||dosImage!=image)return load_thread_fail(env,"HOST_CRT_ACTUAL_RUNTIME_ERROR_ACCESSORS");
+    int *callerError=error();unsigned long *callerDosError=dosError();
+    if(!callerError||!callerDosError)return load_thread_fail(env,"HOST_CRT_ACTUAL_CALLER_ERROR_STORAGE");
+    int savedError=*callerError;unsigned long savedDosError=*callerDosError;DWORD savedWindowsError=GetLastError();int ready=1;
+    for(unsigned kind=0;kind<2;kind++){
+        LoadThreadCase *state=load_thread_case_new();
+        if(!state){load_thread_fail(env,"HOST_CRT_NATIVE_USERDATA_ALLOCATION");ready=0;break;}
+        if(kind==0){
+            state->ready=CreateEventW(NULL,TRUE,FALSE,NULL);state->release=CreateEventW(NULL,TRUE,FALSE,NULL);
+            if(!state->ready||!state->release){
+                if(state->ready)CloseHandle(state->ready);if(state->release)CloseHandle(state->release);load_thread_case_free(state);
+                load_thread_fail(env,"HOST_CRT_NATIVE_START_EVENTS");ready=0;break;
+            }
+        }
+        *callerError=0x5454;*callerDosError=0x524e0055;SetLastError(0x524e0054);unsigned id=0;
+        uintptr_t returned=kind?beginEx(NULL,0,load_crt_start_ex,state,CREATE_SUSPENDED,&id):begin(load_crt_start,0,state);
+        state->createError=GetLastError();int *actualError=error();unsigned long *actualDosError=dosError();
+        int observedError=actualError?*actualError:0;unsigned long observedDosError=actualDosError?*actualDosError:0;
+        int sameStorage=actualError==callerError&&actualDosError==callerDosError;
+        int created=kind?returned!=0:returned!=(uintptr_t)-1;
+        fprintf(created?stdout:stderr,"HOST_CRT_THREAD_RESULT runtime=%s api=%s returned=%llx lastError=%lu errno=%d doserrno=%lu callerErrorStorage=%d\n",
+                names[selected],kind?"_beginthreadex":"_beginthread",(unsigned long long)returned,(unsigned long)state->createError,observedError,observedDosError,sameStorage);
+        int settled=0;
+        if(created){
+            if(kind){state->handle=(HANDLE)returned;state->id=(DWORD)id;settled=load_thread_finish(state,"actual_CRT_beginthreadex");}
+            else {state->mustComplete=1;settled=load_crt_begin_finish(state,returned);}
+        }
+        if(kind==0&&(!created||state->completed)){
+            BOOL closedReady=CloseHandle(state->ready),closedRelease=CloseHandle(state->release);
+            if(!closedReady||!closedRelease)settled=0;
+        }
+        load_thread_case_free(state);
+        if(!created||!sameStorage||!settled){load_thread_fail(env,kind?"HOST_CRT_BEGINTHREADEX_ACTUAL_RESULT":"HOST_CRT_BEGINTHREAD_ACTUAL_RESULT");ready=0;break;}
+    }
+    *callerError=savedError;*callerDosError=savedDosError;SetLastError(savedWindowsError);return ready;
+}
+static jint JNICALL load_thread_heap_iteration(jlong classTag,jlong size,jlong *tag,jint length,void *data){
+    (void)length;LoadThreadHeap *state=load_thread_heap_active;
+    if(!state)return JVMTI_VISIT_ABORT;
+    if(data!=state||classTag!=state->classTag||size<=0||!tag||*tag!=state->objectTag||state->seen!=0){state->error=1;return JVMTI_VISIT_ABORT;}
+    state->seen++;
+    /* No JNI/GetEnv, JVMTI call, wait, output or lock in this callback. The
+     * public Host-consumed CreateThread is the path under test. */
+    SetLastError(0x524e0054);
+    state->thread->handle=CreateThread(NULL,0,load_thread_start,state->thread,CREATE_SUSPENDED,&state->thread->id);
+    state->thread->createError=GetLastError();return 0;
+}
+static int load_thread_heap_check(JNIEnv *env,JavaVM *vm,jclass type,jobject payload){
+    jvmtiEnv *api=NULL;jvmtiError error=JVMTI_ERROR_NONE;const char *stage="HOST_THREAD_HEAP_REAL_GETENV";
+    jlong savedClass=0,savedObject=0;int haveClass=0,haveObject=0,ready=0;
+    LoadThreadCase *thread=NULL;LoadThreadHeap state={0};
+    jint status=(*vm)->GetEnv(vm,(void**)&api,JVMTI_VERSION_1_2);
+    if(status!=JNI_OK||!api){fprintf(stderr,"HOST_THREAD_HEAP_GETENV_RESULT jni=%d actualEnv=%p\n",status,(void*)api);return load_thread_fail(env,stage);}
+    jvmtiCapabilities potential={0},request={0},actual={0};
+    stage="HOST_THREAD_HEAP_REAL_TAG_CAPABILITY";error=(*api)->GetPotentialCapabilities(api,&potential);
+    if(error!=JVMTI_ERROR_NONE||!potential.can_tag_objects)goto done;
+    request.can_tag_objects=1;error=(*api)->AddCapabilities(api,&request);if(error!=JVMTI_ERROR_NONE)goto done;
+    error=(*api)->GetCapabilities(api,&actual);if(error!=JVMTI_ERROR_NONE||!actual.can_tag_objects)goto done;
+    stage="HOST_THREAD_HEAP_SAVE_REAL_TAGS";error=(*api)->GetTag(api,type,&savedClass);if(error!=JVMTI_ERROR_NONE)goto done;haveClass=1;
+    error=(*api)->GetTag(api,payload,&savedObject);if(error!=JVMTI_ERROR_NONE)goto done;haveObject=1;
+    state.classTag=0x524e5401;state.objectTag=0x524e5402;
+    stage="HOST_THREAD_HEAP_SET_ACTUAL_TAGS";error=(*api)->SetTag(api,type,state.classTag);if(error!=JVMTI_ERROR_NONE)goto done;
+    error=(*api)->SetTag(api,payload,state.objectTag);if(error!=JVMTI_ERROR_NONE)goto done;
+    stage="HOST_THREAD_HEAP_NATIVE_USERDATA_ALLOCATION";thread=load_thread_case_new();if(!thread)goto done;
+    state.thread=thread;load_thread_heap_active=&state;
+    jvmtiHeapCallbacks callbacks={0};callbacks.heap_iteration_callback=load_thread_heap_iteration;
+    stage="HOST_THREAD_HEAP_ACTUAL_CALLBACK_CREATE";
+    error=(*api)->IterateThroughHeap(api,JVMTI_HEAP_FILTER_UNTAGGED,type,&callbacks,&state);
+    load_thread_heap_active=NULL;
+    /* Always settle a created thread after the synchronous walk returned,
+     * including when a later callback/dispatch result reported failure. */
+    int settled=load_thread_finish(thread,"tagged_heap_CreateThread");
+    if(error!=JVMTI_ERROR_NONE||state.error||state.seen!=1||!settled)goto done;
+    ready=1;
+done:
+    load_thread_heap_active=NULL;
+    if(haveObject){jvmtiError restored=(*api)->SetTag(api,payload,savedObject);if(restored!=JVMTI_ERROR_NONE){ready=0;stage="HOST_THREAD_HEAP_RESTORE_OBJECT_TAG";error=restored;}}
+    if(haveClass){jvmtiError restored=(*api)->SetTag(api,type,savedClass);if(restored!=JVMTI_ERROR_NONE){ready=0;stage="HOST_THREAD_HEAP_RESTORE_CLASS_TAG";error=restored;}}
+    jvmtiError disposed=(*api)->DisposeEnvironment(api);if(disposed!=JVMTI_ERROR_NONE){ready=0;stage="HOST_THREAD_HEAP_DISPOSE_REAL_ENV";error=disposed;}
+    load_thread_case_free(thread);
+    if(!ready){fprintf(stderr,"HOST_THREAD_HEAP_RESULT stage=%s jvmti=%d seen=%u callbackError=%d\n",stage,error,state.seen,state.error);return load_thread_fail(env,stage);}
+    return 1;
+}
+JNIEXPORT void JNICALL Java_dev_ronova_pro_AuditFixCheck_hostThreadCreate0(JNIEnv *env,jclass check,jclass type,jobject payload){
+    (void)check;JavaVM *vm=NULL;jclass actual=payload?(*env)->GetObjectClass(env,payload):NULL;
+    int correct=actual&&type&&(*env)->IsSameObject(env,actual,type);if(actual)(*env)->DeleteLocalRef(env,actual);
+    if(!correct||(*env)->ExceptionCheck(env)){load_thread_fail(env,"HOST_THREAD_ACTUAL_PAYLOAD_TYPE");return;}
+    if((*env)->GetJavaVM(env,&vm)!=JNI_OK||!vm){load_thread_fail(env,"HOST_THREAD_ACTUAL_JAVA_VM");return;}
+    void *imports[]={(void*)__imp_CreateThread,(void*)__imp_CreateRemoteThread,(void*)__imp_CreateRemoteThreadEx};
+    for(unsigned i=0;i<sizeof(imports)/sizeof(imports[0]);i++)if(!load_private_entry(imports[i])){load_thread_fail(env,"HOST_THREAD_REAL_IMPORT_NOT_CONTROLLED");return;}
+    const char *names[]={"CreateThread","current_process_CreateRemoteThread","current_process_CreateRemoteThreadEx"};
+    HANDLE currentProcess=GetCurrentProcess();
+    for(unsigned kind=0;kind<3;kind++){
+        LoadThreadCase *state=load_thread_case_new();if(!state){load_thread_fail(env,"HOST_THREAD_NATIVE_USERDATA_ALLOCATION");return;}
+        SetLastError(0x524e0054);
+        if(kind==0)state->handle=CreateThread(NULL,0,load_thread_start,state,CREATE_SUSPENDED,&state->id);
+        else if(kind==1)state->handle=CreateRemoteThread(currentProcess,NULL,0,load_thread_start,state,CREATE_SUSPENDED,&state->id);
+        else state->handle=CreateRemoteThreadEx(currentProcess,NULL,0,load_thread_start,state,CREATE_SUSPENDED,NULL,&state->id);
+        state->createError=GetLastError();int ready=load_thread_finish(state,names[kind]);
+        load_thread_case_free(state);if(!ready){load_thread_fail(env,names[kind]);return;}
+    }
+    if(!load_crt_thread_check(env))return;
+    load_thread_heap_check(env,vm,type,payload);
+}
+#endif
+
 JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM *vm,void *reserved){
     (void)reserved;
-#ifdef AUDIT_HOST_LOAD_SUPPORT
+#if defined(AUDIT_JVMTI_DISPATCH_CHECK) || defined(AUDIT_HOST_THREAD_CREATE_CHECK)
+    /* Each independent command starts from its native method. */
+    (void)vm;return JNI_VERSION_1_8;
+#elif defined(AUDIT_HOST_LOAD_SUPPORT)
     (void)vm;return JNI_VERSION_1_8;
 #else
     JNIEnv *env=NULL;if((*vm)->GetEnv(vm,(void**)&env,JNI_VERSION_1_8)!=JNI_OK)return JNI_ERR;

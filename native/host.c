@@ -20,11 +20,14 @@ enum {
     HOST_CREATE_W=1,HOST_RESOLVE=2,HOST_CREATE_A=3,HOST_CREATE_USER_W=4,HOST_CREATE_USER_A=5,
     HOST_CREATE_TOKEN_W=6,HOST_CREATE_LOGON_W=7,HOST_CLOSE=8,HOST_DUPLICATE=9,HOST_HANDLE_FLAGS=10,
     HOST_OPEN_PROCESS=11,HOST_OPEN_THREAD=12,HOST_RESUME_THREAD=13,HOST_SUSPEND_THREAD=14,
-    HOST_TERMINATE_PROCESS=15,HOST_TERMINATE_THREAD=16,HOST_KIND_COUNT=17
+    HOST_TERMINATE_PROCESS=15,HOST_TERMINATE_THREAD=16,
+    HOST_CREATE_THREAD=17,HOST_CREATE_REMOTE_THREAD=18,HOST_CREATE_REMOTE_THREAD_EX=19,
+    HOST_BEGIN_THREAD=20,HOST_BEGIN_THREAD_EX=21,HOST_KIND_COUNT=22
 };
 static int host_is_create(int kind){return kind==HOST_CREATE_W||kind==HOST_CREATE_A
         ||kind>=HOST_CREATE_USER_W&&kind<=HOST_CREATE_LOGON_W;}
-static int host_is_handle(int kind){return kind>=HOST_CLOSE&&kind<HOST_KIND_COUNT;}
+static int host_is_handle(int kind){return kind>=HOST_CLOSE&&kind<=HOST_TERMINATE_THREAD;}
+static int host_is_thread_admission(int kind){return kind>=HOST_CREATE_THREAD&&kind<=HOST_BEGIN_THREAD_EX;}
 static HostCompareHandles host_compare_handles;
 static HostGetProcAddress host_windows_resolver;
 static void *host_windows_api[HOST_KIND_COUNT];
@@ -567,7 +570,9 @@ static int host_entry_association(HostImport *entry,NativeThread *state,OwnerLin
     if(selected)*selected=mixed?NULL:chosen;
     return !associated?0:ready?1:-1;
 }
+#include "host_callback_sources.c"
 static int host_entry_sources(HostImport *entry,NativeThread *state,void *caller,OwnerLink **owners,NativeLibrary **selected,int retainSources){
+    if(state&&state->heapCallback)return host_callback_entry_sources(entry,state,caller,owners,selected,retainSources,host_is_thread_admission(entry->kind));
     AcquireSRWLockShared(&host_imports);AcquireSRWLockShared(&native_records);
     int associated=host_entry_association(entry,state,owners,selected),ready=associated==1;
     ReleaseSRWLockShared(&native_records);
@@ -620,6 +625,7 @@ static void host_refresh_targets(HostImage *image);
 static FARPROC WINAPI host_native_resolve(HMODULE module,LPCSTR name,HostImport *entry,void *caller){
     DWORD incoming=GetLastError();
     NativeThread *state=native_tls==TLS_OUT_OF_INDEXES?NULL:(NativeThread*)TlsGetValue(native_tls);
+    if(state&&state->heapCallback){SetLastError(ERROR_BUSY);return NULL;}
     entry=host_consumed_entry(entry,state,caller);
     AcquireSRWLockShared(&host_imports);AcquireSRWLockShared(&native_records);
     int associated=host_entry_association(entry,state,NULL,NULL);
@@ -780,9 +786,13 @@ static uint64_t host_native_handle(HostImport *entry,void *caller,uintptr_t *arg
     WakeAllConditionVariable(&host_changed);ReleaseSRWLockExclusive(&host_records);
     native_owner_links_free(owners);SetLastError(error);return result;
 }
+#include "host_thread_creation.c"
+#include "host_crt_thread_creation.c"
 static uint64_t host_native_call(HostImport *entry,void *caller,uintptr_t *arguments){
     if(entry->kind==HOST_RESOLVE)return (uintptr_t)host_native_resolve((HMODULE)arguments[0],(LPCSTR)arguments[1],entry,caller);
     if(host_is_create(entry->kind))return host_native_create(entry,caller,arguments);
+    if(host_is_thread_create(entry->kind))return host_native_thread_create(entry,caller,arguments);
+    if(host_is_crt_thread_create(entry->kind))return host_native_crt_thread_create(entry,caller,arguments);
     if(host_is_handle(entry->kind))return host_native_handle(entry,caller,arguments);
     SetLastError(ERROR_INVALID_FUNCTION);return 0;
 }
@@ -791,6 +801,11 @@ static unsigned host_import_arguments(int kind){
         case HOST_CREATE_W:case HOST_CREATE_A:return 10;
         case HOST_CREATE_USER_W:case HOST_CREATE_USER_A:case HOST_CREATE_LOGON_W:return 11;
         case HOST_CREATE_TOKEN_W:return 9;
+        case HOST_CREATE_THREAD:return 6;
+        case HOST_CREATE_REMOTE_THREAD:return 7;
+        case HOST_CREATE_REMOTE_THREAD_EX:return 8;
+        case HOST_BEGIN_THREAD:return 3;
+        case HOST_BEGIN_THREAD_EX:return 6;
         case HOST_DUPLICATE:return 7;
         case HOST_HANDLE_FLAGS:case HOST_OPEN_PROCESS:case HOST_OPEN_THREAD:return 3;
         case HOST_CLOSE:case HOST_RESUME_THREAD:case HOST_SUSPEND_THREAD:return 1;
@@ -829,7 +844,8 @@ static int host_exchange_import(HostImport *entry,void *expected,void *replaceme
 static const char *host_api_names[HOST_KIND_COUNT]={NULL,"CreateProcessW","GetProcAddress","CreateProcessA",
         "CreateProcessAsUserW","CreateProcessAsUserA","CreateProcessWithTokenW","CreateProcessWithLogonW",
         "CloseHandle","DuplicateHandle","SetHandleInformation","OpenProcess","OpenThread",
-        "ResumeThread","SuspendThread","TerminateProcess","TerminateThread"};
+        "ResumeThread","SuspendThread","TerminateProcess","TerminateThread",
+        "CreateThread","CreateRemoteThread","CreateRemoteThreadEx","_beginthread","_beginthreadex"};
 static void host_windows_targets(void **targets){
     HMODULE kernel=GetModuleHandleW(L"kernel32.dll"),advapi=GetModuleHandleW(L"advapi32.dll");
     HostGetProcAddress resolve=__atomic_load_n(&host_windows_resolver,__ATOMIC_ACQUIRE);
@@ -838,10 +854,12 @@ static void host_windows_targets(void **targets){
         if(resolve)__atomic_store_n(&host_windows_resolver,resolve,__ATOMIC_RELEASE);
     }
     for(int kind=1;kind<HOST_KIND_COUNT;kind++){
+        if(host_is_crt_thread_create(kind)){targets[kind]=NULL;continue;}
         HMODULE module=kind>=HOST_CREATE_USER_W&&kind<=HOST_CREATE_LOGON_W?advapi:kernel;
         targets[kind]=module&&resolve?(void*)resolve(module,host_api_names[kind]):NULL;
         if(targets[kind])__atomic_store_n(&host_windows_api[kind],targets[kind],__ATOMIC_RELEASE);
     }
+    host_crt_thread_targets(resolve);
 }
 static void host_refresh_targets(HostImage *image){
     /* A genuine later LoadLibrary may make an alternate-token API available.
@@ -852,6 +870,7 @@ static void host_refresh_targets(HostImage *image){
         __atomic_store_n(&image->targets[kind],targets[kind],__ATOMIC_RELEASE);
 }
 static int host_target_kind(HostImage *image,void *actual){
+    int crtKind=host_crt_thread_target_kind(actual);if(crtKind)return crtKind;
     if(actual)for(int kind=1;kind<HOST_KIND_COUNT;kind++)
         if(actual==__atomic_load_n(&image->targets[kind],__ATOMIC_ACQUIRE))return kind;
     return 0;
@@ -873,10 +892,10 @@ static int host_declared_kind(unsigned char *base,ULONGLONG name,DWORD size,int 
     return 0;
 }
 static void host_install_slot(HostImage *image,void *volatile *slot,int declared,int delayed){
-    void *actual=__atomic_load_n(slot,__ATOMIC_ACQUIRE);int kind=host_target_kind(image,actual);
+    void *actual=__atomic_load_n(slot,__ATOMIC_ACQUIRE),*original=actual;int kind=host_target_kind(image,actual);
     HostImport *known=NULL;
     for(int candidate=1;candidate<HOST_KIND_COUNT&&!known;candidate++)known=host_controlled_entry(image,actual,candidate);
-    if(known)kind=known->kind;
+    if(known){kind=known->kind;original=known->original;}
     /* The exact JDK slot already belongs to its ProcessImpl creation scope. It
      * is recognized by its actual installed entry, never by an image name. */
     if(slot==host_import_slot&&actual==(void*)host_create_process
@@ -885,7 +904,7 @@ static void host_install_slot(HostImage *image,void *volatile *slot,int declared
         if(!old->live&&old->handle==image->handle)
             for(HostImport *prior=old->imports;prior;prior=prior->next)
                 if(prior->entry==actual&&(prior->slot==slot||prior->returned)){
-                    kind=host_target_kind(image,prior->original);if(kind)break;
+                    kind=host_target_kind(image,prior->original);if(kind){original=prior->original;break;}
                 }
     if(!kind){
         if(!declared)return;
@@ -898,7 +917,7 @@ static void host_install_slot(HostImage *image,void *volatile *slot,int declared
     entry->next=image->imports;image->imports=entry;
     image->loadWindow=1;
     if(!kind)return; /* A declared unresolved delay entry is not an API result. */
-    entry->original=__atomic_load_n(&image->targets[entry->kind],__ATOMIC_ACQUIRE);
+    entry->original=original;
     if(known){entry->entry=known->entry;return;}
     if(host_is_create(kind)&&!host_worker_ready()){image->failed=1;return;}
     entry->entry=host_import_entry(entry);
@@ -1081,6 +1100,7 @@ static void *volatile *host_delay_call_slot(HostImage *image,void *caller){
     free(marks);free(queue);return proven?address:NULL;
 }
 static HostImport *host_consumed_entry(HostImport *entry,NativeThread *state,void *caller){
+    if(state&&state->heapCallback)return entry;
     if(!entry->returned)return entry;
     HostImport *consumed=entry;HostImage *image=entry->image;
     AcquireSRWLockExclusive(&host_imports);int mapped=image->live;

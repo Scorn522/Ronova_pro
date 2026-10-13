@@ -152,7 +152,7 @@ public final class DefinitionBridge {
         if(!delegated&&owner!=null&&transformer!=null)try {image=(byte[])transformer.invoke(null,owner,loader,image,hidden);}
         catch(ReflectiveOperationException failure){throw new IllegalStateException("ACTUAL_DEFINITION_CONTROL_FAILED",failure);}
         Scope scope=new Scope(parent,owner,loader,name,image);
-        synchronized(CURRENT){CURRENT.put(scope.thread,scope);liveScopes=CURRENT.values().toArray(new Scope[0]);}return scope;
+        synchronized(CURRENT){NativeControl.heapPolicyChanged(scope.bytes);CURRENT.put(scope.thread,scope);liveScopes=CURRENT.values().toArray(new Scope[0]);}return scope;
     }
     public static MethodHandles.Lookup lookupDerived(MethodHandles.Lookup result,MethodHandles.Lookup source) {
         var frame=WALKER.walk(FRAME);
@@ -216,7 +216,7 @@ public final class DefinitionBridge {
         try{
             Module owner=module(declaring);String name=className(bytes);
             byte[] image=transformer==null?bytes:(byte[])transformer.invoke(null,owner,loader,bytes,false);
-            synchronized(CURRENT){Scope scope=new Scope(CURRENT.get(Thread.currentThread()),owner,loader,name,image);CURRENT.put(scope.thread,scope);liveScopes=CURRENT.values().toArray(new Scope[0]);}
+            synchronized(CURRENT){Scope scope=new Scope(CURRENT.get(Thread.currentThread()),owner,loader,name,image);NativeControl.heapPolicyChanged(scope.bytes);CURRENT.put(scope.thread,scope);liveScopes=CURRENT.values().toArray(new Scope[0]);}
             return image;
         }
         catch(ReflectiveOperationException failure){throw new IllegalStateException("NATIVE_DEFINITION_CONTROL_FAILED",failure);}
