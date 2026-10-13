@@ -1,4 +1,4 @@
-> **2026-10-13 当前主工程：`D:\桌面\ronova_GPT`。** C 已接入 JNI_OnLoad 前 Host、Net.accept、存量 Screen/Overlay，并修复真实 LWJGL 新视图初始化。GNU C23 / GNU C++23、Java 17；Java ABI 50 / Native ABI 49 / Storage ABI 3 / Journal 6。本包构建和实际缓冲区/UTF16模块查询检查通过；第二次隔离客户端正在加载，菜单/UI停组/内部 sealed 目标及完整 C/B 游戏收口尚未验收。详见 [当前状态](docs/A-批验收状态.md) 和 [实际报告](validation/b-final-20261007/REPORT.md)。本地候选在 `distribution/candidate-c-java50-native49-wip-20261013`；主包与原始日志留在本地。
+> **2026-10-13 当前主工程：`D:\桌面\ronova_GPT`。** C 已接入 JNI_OnLoad 前 Host、Net.accept、存量 UI，并修复真实 LWJGL 新视图及字体切片初始化。GNU C23 / GNU C++23、Java 17；Java ABI 51 / Native ABI 49 / Storage ABI 3 / Journal 6。本包构建和实际缓冲区/字体STB初始化检查通过；第三次隔离客户端正在加载，菜单/UI停组/内部 sealed 目标及完整 C/B 游戏收口尚未验收。详见 [当前状态](docs/A-批验收状态.md) 和 [实际报告](validation/b-final-20261007/REPORT.md)。本地候选在 `distribution/candidate-c-java51-native49-wip-20261013`；主包与原始日志留在本地。
 
 以下 R1/R2、候选 43、旧主包与旧环境结果保留其原日期和证据范围。已有发行目录不是本轮源码对应的新游戏安装包。
 

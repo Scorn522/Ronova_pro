@@ -1,5 +1,21 @@
 # B 批实际报告：2026-10-09 代码收敛接续
 
+## 2026-10-13：C 接续——字体扩容后的真实切片
+
+接续已同步的 `4fc9e49`；Java ABI 51 / Native ABI 49 / Storage ABI 3 / Journal 6，GNU C23 / GNU C++23、Java 17。当前切片启动修复工作包已写齐并统一构建通过；完整 C 和 B 的游戏收口仍未完成。
+
+第二次客户端已实际完成 GLFW 初始化、创建 OpenGL 4.6 窗口，随后于14:25:13在 `lwjgl_stb.dll` 的 stbtt_InitFont 读取0x4而退出。真实原因是 STBHelper 读取202764字节 Monocraft.ttf，经200000→300000扩容后调用 MemoryUtil.memSlice；独立 slice 工厂的字段初始化此前未接入，返回零地址视图。原 `.work/c-client-20261013-02/launch.log` 与 `hs_err_pid78896.log` 保留；不是菜单或世界通过。
+
+Agent 保留真实 LWJGL 3.3.1 ByteBuffer slice 原代码及父引用/字节序语义。新入口绑定实际 allocateInstance 结果、原 source 和实际登记视图/存储，限准确方法、类、加载器、模块、线程及字段和值，额外只允许实际 att 字段写入原 attachment-or-source。退出核对真实关联，JDK order 的提前观察复用同一存储；没有新建原存储、Cleaner、native绑定或释放许可。原 wrap 协议继续保留；ABI 51防止混用旧Agent/Bootstrap/Core。
+
+统一构建 `build-c-java51-buffer-font-20261013.log` 59秒 PASS。共用初始化代码改变，因此直接复查 buffer-wrap；七类真实视图/零容量/双向内容/外来字段改写拒绝/原释放/UTF16模块查询退出0。新增 buffer-font 退出0：实际 STBHelper 完成字体扩容、切片和原资源全量内容读回，真实 Buffer/MemoryStack/STBTTFontinfo 与其实际容器地址非零且一致，最后 public stbtt_InitFont 成功。两项日志为 `c-buffer-wrap-java51-native49-20261013.log`、`c-buffer-font-java51-native49-20261013.log`。没有重跑旧Host/网络/传输矩阵。
+
+第三次客户端 `.work/c-client-20261013-03`（实际 PID 52272）已用本包启动，尚在加载；菜单/UI停组、合法 sealed 目标与同世界保存重启仍待实际结果，不沿用旧候选 WORLD_LOADED。
+
+本地候选：`distribution/candidate-c-java51-native49-wip-20261013/ronova-pro-core-0.1.0-stage-b-dev.jar`。本轮同步源码和摘要；候选、崩溃文件及原运行日志继续留在本地，Java50与更早候选保留。详情见 下方原记录。
+
+---
+
 ## 2026-10-13：C 接续——真实 LWJGL 缓冲区初始化
 
 接续已同步的 `36cd18a`；Java ABI 50 / Native ABI 49 / Storage ABI 3 / Journal 6。GNU C23 / GNU C++23、Java 17 保持。当前启动修复工作包已写齐，主包与既有夹具统一构建通过；完整 C 和 B 的游戏收口仍未完成。
@@ -8,7 +24,7 @@
 
 集中构建 `build-c-java50-buffer-wrap-fixed-20261013.log` 39 秒 PASS。复用 AuditFixCheck 的实际 `buffer-wrap` 检查退出 0：七类真实 public MemoryUtil 视图（含零容量）、准确地址/标记/边界、实际双向读写、旧视图元数据改写拒绝、原 raw 分配释放，以及 WinBase.GetModuleHandle 的 UTF16 路径全部通过。首次构建的冗余 checked-exception 捕获错误已修复，原日志保留。没有重跑此前已通过的 Host/网络/传输检查，其原结果仍只代表当时候选。
 
-第二次隔离客户端 `.work/c-client-20261013-02` 使用本包于14:22:57启动，实际 PID 78896。14:24:13线程读取显示 main 在 Log4j 注解/代理类加载中运行，未发现死锁；尚未到菜单，不计通过。第一次 GLFW remaining=0 的失败及原 launch.log 保留；这次对应底层路径的直接检查已经通过。后续菜单/UI停组、合法 sealed 目标与世界保存重启仍待实际结果。
+第二次隔离客户端 `.work/c-client-20261013-02` 使用本包于14:22:57启动，实际 PID 78896。14:24:13线程读取显示 main 在 Log4j 注解/代理类加载中运行；随后 GLFW/GL4.6成功，但14:25:13于字体STB初始化空地址崩溃，具体后续修复见上节。没有菜单结果。第一次 GLFW remaining=0 的失败及原 launch.log 保留；这次对应底层路径的直接检查已经通过。后续菜单/UI停组、合法 sealed 目标与世界保存重启仍待实际结果。
 
 本地候选：`distribution/candidate-c-java50-native49-wip-20261013/ronova-pro-core-0.1.0-stage-b-dev.jar`；源码与摘要同步，主包和原始日志留在本地，Java49/Native49及其他旧候选保留。详情见 下方原记录。
 

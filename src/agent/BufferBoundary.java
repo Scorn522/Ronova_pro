@@ -8,52 +8,63 @@ import jdk.internal.org.objectweb.asm.tree.*;
 final class BufferBoundary {
     private static final String BRIDGE="dev/ronova/pro/bootstrap/ResourceBridge";
     static final String WRAP_TARGET="org/lwjgl/system/MemoryUtil";
-    private static final String WRAP_DESCRIPTOR="(Ljava/lang/Class;JI)Ljava/nio/Buffer;",UNSAFE="sun/misc/Unsafe";
+    private static final String WRAP_DESCRIPTOR="(Ljava/lang/Class;JI)Ljava/nio/Buffer;",
+            SLICE_DESCRIPTOR="(Ljava/nio/ByteBuffer;JI)Ljava/nio/ByteBuffer;",UNSAFE="sun/misc/Unsafe";
     static final Set<String> TARGETS=targets();
     static boolean wrapTarget(String name){return WRAP_TARGET.equals(name);}
     static byte[] transformWrap(ClassLoader loader,String name,byte[] bytes){
         if(!wrapTarget(name))return null;
         ClassNode node=new ClassNode();new ClassReader(bytes).accept(node,0);
         if(!node.name.equals(name))throw new IllegalStateException("BUFFER_WRAP_CLASS_CHANGED");
-        MethodNode wrap=null;
-        for(MethodNode method:node.methods)if(method.name.equals("wrap")&&method.desc.equals(WRAP_DESCRIPTOR)){
-            if(wrap!=null)throw new IllegalStateException("BUFFER_WRAP_METHOD_AMBIGUOUS");wrap=method;
+        MethodNode wrap=null,slice=null;
+        for(MethodNode method:node.methods){
+            if(method.name.equals("wrap")&&method.desc.equals(WRAP_DESCRIPTOR)){
+                if(wrap!=null)throw new IllegalStateException("BUFFER_WRAP_METHOD_AMBIGUOUS");wrap=method;
+            }else if(method.name.equals("slice")&&method.desc.equals(SLICE_DESCRIPTOR)){
+                if(slice!=null)throw new IllegalStateException("BUFFER_SLICE_METHOD_AMBIGUOUS");slice=method;
+            }
         }
-        if(wrap==null)throw new IllegalStateException("BUFFER_WRAP_METHOD_UNAVAILABLE");
-        MethodInsnNode allocation=wrapLayout(node,wrap);
-        int requested=wrap.maxLocals++,token=wrap.maxLocals++,failure=wrap.maxLocals++;
-        InsnList capture=new InsnList();capture.add(new InsnNode(Opcodes.DUP));capture.add(new VarInsnNode(Opcodes.ASTORE,requested));
-        wrap.instructions.insertBefore(allocation,capture);
-        LabelNode start=new LabelNode(),end=new LabelNode(),handler=new LabelNode();
-        InsnList enter=new InsnList();enter.add(new InsnNode(Opcodes.DUP));enter.add(new VarInsnNode(Opcodes.ALOAD,requested));
-        enter.add(new VarInsnNode(Opcodes.LLOAD,1));enter.add(new VarInsnNode(Opcodes.ILOAD,3));enter.add(new LdcInsnNode(Type.getObjectType(node.name)));
-        enter.add(new MethodInsnNode(Opcodes.INVOKESTATIC,BRIDGE,"bufferWrapEnter","(Ljava/lang/Object;Ljava/lang/Class;JILjava/lang/Class;)Ljava/lang/Object;",false));
-        enter.add(new VarInsnNode(Opcodes.ASTORE,token));enter.add(start);wrap.instructions.insert(allocation,enter);
-        // The original allocation-failure handler lies inside the later scope's code range.
-        // Its path has no scope, so retain a null token for its translated exception.
-        InsnList initial=new InsnList();initial.add(new InsnNode(Opcodes.ACONST_NULL));initial.add(new VarInsnNode(Opcodes.ASTORE,token));wrap.instructions.insert(initial);
-        for(AbstractInsnNode at:wrap.instructions.toArray())if(at.getOpcode()==Opcodes.ARETURN)wrap.instructions.insertBefore(at,wrapFinish(token,-1));
-        wrap.instructions.add(end);wrap.instructions.add(handler);wrap.instructions.add(new VarInsnNode(Opcodes.ASTORE,failure));
-        wrap.instructions.add(wrapFinish(token,failure));wrap.instructions.add(new VarInsnNode(Opcodes.ALOAD,failure));wrap.instructions.add(new InsnNode(Opcodes.ATHROW));
-        wrap.tryCatchBlocks.add(new TryCatchBlockNode(start,end,handler,"java/lang/Throwable"));
+        if(wrap==null||slice==null)throw new IllegalStateException("BUFFER_FACTORY_METHOD_UNAVAILABLE");
+        MethodInsnNode wrapAllocation=wrapLayout(node,wrap,false),sliceAllocation=wrapLayout(node,slice,true);
+        factoryScope(node,wrap,wrapAllocation,false);factoryScope(node,slice,sliceAllocation,true);
         ControlClassWriter writer=new ControlClassWriter(loader,node);node.accept(writer);return writer.toByteArray();
     }
-    /** Pin this known factory's real allocation and four writes, preserving all original instructions. */
-    private static MethodInsnNode wrapLayout(ClassNode node,MethodNode method){
+    private static void factoryScope(ClassNode node,MethodNode method,MethodInsnNode allocation,boolean slice){
+        int requested=method.maxLocals++,token=method.maxLocals++,failure=method.maxLocals++;
+        InsnList capture=new InsnList();capture.add(new InsnNode(Opcodes.DUP));capture.add(new VarInsnNode(Opcodes.ASTORE,requested));
+        method.instructions.insertBefore(allocation,capture);
+        LabelNode start=new LabelNode(),end=new LabelNode(),handler=new LabelNode();
+        InsnList enter=new InsnList();enter.add(new InsnNode(Opcodes.DUP));enter.add(new VarInsnNode(Opcodes.ALOAD,requested));
+        if(slice)enter.add(new VarInsnNode(Opcodes.ALOAD,0));
+        enter.add(new VarInsnNode(Opcodes.LLOAD,1));enter.add(new VarInsnNode(Opcodes.ILOAD,3));enter.add(new LdcInsnNode(Type.getObjectType(node.name)));
+        enter.add(new MethodInsnNode(Opcodes.INVOKESTATIC,BRIDGE,slice?"bufferSliceEnter":"bufferWrapEnter",
+                slice?"(Ljava/lang/Object;Ljava/lang/Class;Ljava/nio/ByteBuffer;JILjava/lang/Class;)Ljava/lang/Object;":"(Ljava/lang/Object;Ljava/lang/Class;JILjava/lang/Class;)Ljava/lang/Object;",false));
+        enter.add(new VarInsnNode(Opcodes.ASTORE,token));enter.add(start);method.instructions.insert(allocation,enter);
+        // The original allocation-failure handler lies inside the later scope's code range.
+        // Its path has no scope, so retain a null token for its translated exception.
+        InsnList initial=new InsnList();initial.add(new InsnNode(Opcodes.ACONST_NULL));initial.add(new VarInsnNode(Opcodes.ASTORE,token));method.instructions.insert(initial);
+        for(AbstractInsnNode at:method.instructions.toArray())if(at.getOpcode()==Opcodes.ARETURN)method.instructions.insertBefore(at,wrapFinish(token,-1));
+        method.instructions.add(end);method.instructions.add(handler);method.instructions.add(new VarInsnNode(Opcodes.ASTORE,failure));
+        method.instructions.add(wrapFinish(token,failure));method.instructions.add(new VarInsnNode(Opcodes.ALOAD,failure));method.instructions.add(new InsnNode(Opcodes.ATHROW));
+        method.tryCatchBlocks.add(new TryCatchBlockNode(start,end,handler,"java/lang/Throwable"));
+    }
+    /** Pin these actual factory bodies, including the ByteBuffer slice's parent and order semantics. */
+    private static MethodInsnNode wrapLayout(ClassNode node,MethodNode method,boolean slice){
         List<AbstractInsnNode> code=new ArrayList<>();for(AbstractInsnNode at:method.instructions.toArray())if(at.getOpcode()>=0)code.add(at);
-        boolean valid=(method.access&(Opcodes.ACC_STATIC|Opcodes.ACC_NATIVE|Opcodes.ACC_ABSTRACT))==Opcodes.ACC_STATIC&&code.size()==34&&method.tryCatchBlocks.size()==1;
+        boolean valid=(method.access&(Opcodes.ACC_STATIC|Opcodes.ACC_NATIVE|Opcodes.ACC_ABSTRACT))==Opcodes.ACC_STATIC
+                &&code.size()==(slice?51:34)&&method.tryCatchBlocks.size()==1;
         if(valid){
             TryCatchBlockNode trap=method.tryCatchBlocks.get(0);
-            valid=wrapField(code.get(0),node.name,"UNSAFE","Lsun/misc/Unsafe;")&&wrapVar(code.get(1),Opcodes.ALOAD,0)
+            valid=wrapField(code.get(0),node.name,"UNSAFE","Lsun/misc/Unsafe;")
+                    &&(slice?wrapField(code.get(1),node.name,"BUFFER_BYTE","Ljava/lang/Class;"):wrapVar(code.get(1),Opcodes.ALOAD,0))
                     &&wrapCall(code.get(2),Opcodes.INVOKEVIRTUAL,UNSAFE,"allocateInstance","(Ljava/lang/Class;)Ljava/lang/Object;")
-                    &&wrapType(code.get(3),Opcodes.CHECKCAST,"java/nio/Buffer")&&wrapVar(code.get(4),Opcodes.ASTORE,4)
+                    &&wrapType(code.get(3),Opcodes.CHECKCAST,slice?"java/nio/ByteBuffer":"java/nio/Buffer")&&wrapVar(code.get(4),Opcodes.ASTORE,4)
                     &&code.get(5) instanceof JumpInsnNode jump&&jump.getOpcode()==Opcodes.GOTO&&wrapNext(jump.label)==code.get(12)
                     &&wrapVar(code.get(6),Opcodes.ASTORE,5)&&wrapType(code.get(7),Opcodes.NEW,"java/lang/UnsupportedOperationException")
                     &&code.get(8).getOpcode()==Opcodes.DUP&&wrapVar(code.get(9),Opcodes.ALOAD,5)
                     &&wrapCall(code.get(10),Opcodes.INVOKESPECIAL,"java/lang/UnsupportedOperationException","<init>","(Ljava/lang/Throwable;)V")
                     &&code.get(11).getOpcode()==Opcodes.ATHROW&&"java/lang/InstantiationException".equals(trap.type)
-                    &&wrapNext(trap.start)==code.get(0)&&wrapNext(trap.end)==code.get(5)&&wrapNext(trap.handler)==code.get(6)
-                    &&wrapVar(code.get(32),Opcodes.ALOAD,4)&&code.get(33).getOpcode()==Opcodes.ARETURN;
+                    &&wrapNext(trap.start)==code.get(0)&&wrapNext(trap.end)==code.get(5)&&wrapNext(trap.handler)==code.get(6);
             String[] fields={"ADDRESS","MARK","LIMIT","CAPACITY"};
             for(int i=0;valid&&i<fields.length;i++){
                 int at=12+i*5;boolean address=i==0;
@@ -62,8 +73,20 @@ final class BufferBoundary {
                         &&(address?wrapVar(code.get(at+3),Opcodes.LLOAD,1):i==1?code.get(at+3).getOpcode()==Opcodes.ICONST_M1:wrapVar(code.get(at+3),Opcodes.ILOAD,3))
                         &&wrapCall(code.get(at+4),Opcodes.INVOKEVIRTUAL,UNSAFE,address?"putLong":"putInt",address?"(Ljava/lang/Object;JJ)V":"(Ljava/lang/Object;JI)V");
             }
+            if(slice&&valid){
+                valid=wrapField(code.get(32),node.name,"UNSAFE","Lsun/misc/Unsafe;")&&wrapVar(code.get(33),Opcodes.ALOAD,0)
+                        &&wrapField(code.get(34),node.name,"PARENT_BYTE","J")&&wrapCall(code.get(35),Opcodes.INVOKEVIRTUAL,UNSAFE,"getObject","(Ljava/lang/Object;J)Ljava/lang/Object;")
+                        &&wrapVar(code.get(36),Opcodes.ASTORE,5)&&wrapField(code.get(37),node.name,"UNSAFE","Lsun/misc/Unsafe;")
+                        &&wrapVar(code.get(38),Opcodes.ALOAD,4)&&wrapField(code.get(39),node.name,"PARENT_BYTE","J")&&wrapVar(code.get(40),Opcodes.ALOAD,5)
+                        &&code.get(41) instanceof JumpInsnNode present&&present.getOpcode()==Opcodes.IFNONNULL&&wrapNext(present.label)==code.get(44)
+                        &&wrapVar(code.get(42),Opcodes.ALOAD,0)&&code.get(43) instanceof JumpInsnNode parent&&parent.getOpcode()==Opcodes.GOTO&&wrapNext(parent.label)==code.get(45)
+                        &&wrapVar(code.get(44),Opcodes.ALOAD,5)&&wrapCall(code.get(45),Opcodes.INVOKEVIRTUAL,UNSAFE,"putObject","(Ljava/lang/Object;JLjava/lang/Object;)V")
+                        &&wrapVar(code.get(46),Opcodes.ALOAD,4)&&wrapVar(code.get(47),Opcodes.ALOAD,0)
+                        &&wrapCall(code.get(48),Opcodes.INVOKEVIRTUAL,"java/nio/ByteBuffer","order","()Ljava/nio/ByteOrder;")
+                        &&wrapCall(code.get(49),Opcodes.INVOKEVIRTUAL,"java/nio/ByteBuffer","order","(Ljava/nio/ByteOrder;)Ljava/nio/ByteBuffer;")&&code.get(50).getOpcode()==Opcodes.ARETURN;
+            }else if(valid)valid=wrapVar(code.get(32),Opcodes.ALOAD,4)&&code.get(33).getOpcode()==Opcodes.ARETURN;
         }
-        if(!valid)throw new IllegalStateException("BUFFER_WRAP_ORIGINAL_LAYOUT_CHANGED");return (MethodInsnNode)code.get(2);
+        if(!valid)throw new IllegalStateException(slice?"BUFFER_SLICE_ORIGINAL_LAYOUT_CHANGED":"BUFFER_WRAP_ORIGINAL_LAYOUT_CHANGED");return (MethodInsnNode)code.get(2);
     }
     private static AbstractInsnNode wrapNext(AbstractInsnNode at){while(at!=null&&at.getOpcode()<0)at=at.getNext();return at;}
     private static boolean wrapField(AbstractInsnNode at,String owner,String name,String descriptor){return at instanceof FieldInsnNode field&&field.getOpcode()==Opcodes.GETSTATIC&&field.owner.equals(owner)&&field.name.equals(name)&&field.desc.equals(descriptor);}

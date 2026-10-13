@@ -17,6 +17,7 @@ public final class AuditFixCheck {
         if(args.length==1&&args[0].equals("clone-boundary")){cloneBoundary();return;}
         if(args.length==1&&args[0].equals("buffer-release")){bufferRelease();return;}
         if(args.length==1&&args[0].equals("buffer-wrap")){bufferWrap();return;}
+        if(args.length==1&&args[0].equals("buffer-font")){bufferFont();return;}
         if(args.length==1&&args[0].equals("file-transfer")){fileTransfer();return;}
         if(args.length==1&&args[0].equals("socket-accept")){socketAccept();return;}
         if(args.length==1&&args[0].equals("host-load")){hostLoad();return;}
@@ -414,6 +415,59 @@ public final class AuditFixCheck {
         long module=(Long)winBase.getMethod("GetModuleHandle",CharSequence.class).invoke(null,"kernel32.dll");
         require(module!=0,"actual WinBase UTF16 module query did not find loaded kernel32.dll");
         System.out.println("BUFFER_WRAP_PASS actual_lwjgl_3_3_1 public_byte_and_six_typed_views exact_address_mark_bounds raw_buffer_duplex zero_capacity_initialized foreign_metadata_rewrite_refused WinBase_GetModuleHandle_UTF16");
+    }
+    // The actual FML reader resizes Monocraft before returning MemoryUtil.memSlice to SimpleFont.
+    private static void bufferFont()throws Exception {
+        Class<?> nativeControl=Class.forName("dev.ronova.pro.bootstrap.NativeControl",true,null);
+        require(Boolean.TRUE.equals(nativeControl.getMethod("available").invoke(null)),"actual Windows native backend absent");
+        Class<?> memory=Class.forName("org.lwjgl.system.MemoryUtil");
+        Method byteAddress=memory.getMethod("memAddress",java.nio.ByteBuffer.class);
+        long addressOffset=U.objectFieldOffset(java.nio.Buffer.class.getDeclaredField("address"));
+        Class<?> helper=Class.forName("net.minecraftforge.fml.earlydisplay.STBHelper");
+        byte[] original;
+        try(var resource=helper.getClassLoader().getResourceAsStream("Monocraft.ttf")){
+            require(resource!=null,"actual FML Monocraft.ttf resource absent");original=resource.readAllBytes();
+        }
+        require(original.length>200000,"actual FML font did not exercise its resize path");
+        java.nio.ByteBuffer font=(java.nio.ByteBuffer)helper.getMethod("readFromClasspath",String.class,int.class).invoke(null,"Monocraft.ttf",200000);
+        require(font.isDirect()&&font.position()==0&&font.remaining()==original.length&&font.capacity()==original.length,
+                "actual FML font slice bounds differ from its resource");
+        long fontAddress=U.getLong(font,addressOffset);
+        require(fontAddress!=0,"actual FML font buffer address is zero; STB native init not called");
+        require((Long)byteAddress.invoke(null,font)==fontAddress,"actual FML public font address differs from its Buffer address");
+        byte[] loaded=new byte[original.length];font.get(0,loaded);
+        require(Arrays.equals(original,loaded),"actual FML font bytes differ from its original resource");
+        Class<?> stackType=Class.forName("org.lwjgl.system.MemoryStack");
+        try(AutoCloseable stack=(AutoCloseable)stackType.getMethod("stackPush").invoke(null)){
+            java.nio.IntBuffer offsets=(java.nio.IntBuffer)stackType.getMethod("mallocInt",int.class).invoke(stack,1);
+            long offsetsAddress=U.getLong(offsets,addressOffset);
+            require(offsetsAddress!=0,"actual font-init MemoryStack offsets address is zero; STB info not loaded");
+            require(offsets.remaining()==1&&(Long)memory.getMethod("memAddress",java.nio.IntBuffer.class).invoke(null,offsets)==offsetsAddress,
+                    "actual font-init MemoryStack offsets address or bounds differ");
+        }
+        Class<?> infoType=Class.forName("org.lwjgl.stb.STBTTFontinfo");
+        int infoBytes=(Integer)infoType.getField("SIZEOF").get(null);
+        require(infoBytes>0,"actual STBTTFontinfo native size is zero");
+        Object info=infoType.getMethod("create").invoke(null);
+        Class<?> structType=Class.forName("org.lwjgl.system.Struct");
+        Class<?> pointerType=Class.forName("org.lwjgl.system.Pointer$Default");
+        Object captured=U.getObject(info,U.objectFieldOffset(structType.getDeclaredField("container")));
+        require(captured instanceof java.nio.ByteBuffer,"actual STBTTFontinfo.create container absent; STB native init not called");
+        java.nio.ByteBuffer container=(java.nio.ByteBuffer)captured;
+        long infoAddress=(Long)infoType.getMethod("address").invoke(info);
+        long actualInfoAddress=U.getLong(info,U.objectFieldOffset(pointerType.getDeclaredField("address")));
+        long containerAddress=U.getLong(container,addressOffset);
+        require(infoAddress!=0&&actualInfoAddress!=0&&containerAddress!=0,
+                "actual STBTTFontinfo address is zero; STB native init not called");
+        require(infoAddress==actualInfoAddress&&infoAddress==containerAddress&&(Long)byteAddress.invoke(null,container)==containerAddress,
+                "actual STBTTFontinfo address differs from its real container");
+        require(container.isDirect()&&container.position()==0&&container.remaining()==infoBytes,
+                "actual STBTTFontinfo container bounds differ from its native size");
+        Class<?> truetype=Class.forName("org.lwjgl.stb.STBTruetype");
+        boolean initialized=(Boolean)truetype.getMethod("stbtt_InitFont",infoType,java.nio.ByteBuffer.class).invoke(null,info,font);
+        java.lang.ref.Reference.reachabilityFence(info);java.lang.ref.Reference.reachabilityFence(font);
+        require(initialized,"actual STB did not initialize the original FML font");
+        System.out.println("BUFFER_FONT_PASS actual_fml_STBHelper resized_Monocraft_original_bytes memSlice_nonzero_exact_address MemoryStack_font_offsets_pointer STBTTFontinfo_create_actual_container public_STB_init");
     }
     private static void bufferWrapContent(java.nio.Buffer view,long address,int last){
         if(view instanceof java.nio.ByteBuffer buffer){

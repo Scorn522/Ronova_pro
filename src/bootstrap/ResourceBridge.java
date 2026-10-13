@@ -37,7 +37,8 @@ public final class ResourceBridge {
     private static final ThreadLocal<BufferAllocation> BUFFER_ALLOCATING=new ThreadLocal<>();
     private static final ThreadLocal<BufferWrapScope> BUFFER_WRAPPING=new ThreadLocal<>();
     private static final StackWalker WRAP_AUTHORITY=StackWalker.getInstance(StackWalker.Option.RETAIN_CLASS_REFERENCE);
-    private static final String BUFFER_WRAP_NAME="org.lwjgl.system.MemoryUtil",BUFFER_WRAP_DESCRIPTOR="(Ljava/lang/Class;JI)Ljava/nio/Buffer;";
+    private static final String BUFFER_WRAP_NAME="org.lwjgl.system.MemoryUtil",BUFFER_WRAP_DESCRIPTOR="(Ljava/lang/Class;JI)Ljava/nio/Buffer;",
+            BUFFER_SLICE_DESCRIPTOR="(Ljava/nio/ByteBuffer;JI)Ljava/nio/ByteBuffer;";
     private static final List<BufferWrapRole> BUFFER_WRAP_ROLES=new ArrayList<>();
     private static volatile Class<?> bufferWrapAgent;
     private static final ThreadLocal<BufferRegistration> BUFFER_REGISTERING=new ThreadLocal<>();
@@ -261,10 +262,19 @@ public final class ResourceBridge {
         BufferWrapRole(ClassLoader loader,Module module){this.loader=new Key(loader,false);this.module=new Key(module,false);bootstrap=loader==null;}
     }
     private static final class BufferWrapScope {
-        final Buffer buffer;final Class<?> requested,declaring;final BufferWrapRole role;final long address;final int capacity;
+        final Buffer buffer;final Class<?> requested,declaring;final BufferWrapRole role;final long address;final int capacity;final String method,descriptor;
+        final ByteBuffer source;final Object sourceParent,parent;final long sourceAddress;final int sourceCapacity;
+        final BufferView sourceView;final BufferStorage storage;final Span parentSpan;
         final Thread caller=Thread.currentThread();final BufferWrapScope previous=BUFFER_WRAPPING.get();boolean closed;
         BufferWrapScope(Buffer buffer,Class<?> requested,long address,int capacity,Class<?> declaring,BufferWrapRole role){
             this.buffer=buffer;this.requested=requested;this.address=address;this.capacity=capacity;this.declaring=declaring;this.role=role;
+            method="wrap";descriptor=BUFFER_WRAP_DESCRIPTOR;source=null;sourceParent=null;parent=null;sourceAddress=0;sourceCapacity=0;sourceView=null;storage=null;parentSpan=null;
+        }
+        BufferWrapScope(Buffer buffer,Class<?> requested,long address,int capacity,Class<?> declaring,BufferWrapRole role,ByteBuffer source,
+                Object sourceParent,long sourceAddress,int sourceCapacity,BufferView sourceView,BufferStorage storage,Span parentSpan){
+            this.buffer=buffer;this.requested=requested;this.address=address;this.capacity=capacity;this.declaring=declaring;this.role=role;
+            method="slice";descriptor=BUFFER_SLICE_DESCRIPTOR;this.source=source;this.sourceParent=sourceParent;parent=sourceParent==null?source:sourceParent;
+            this.sourceAddress=sourceAddress;this.sourceCapacity=sourceCapacity;this.sourceView=sourceView;this.storage=storage;this.parentSpan=parentSpan;
         }
     }
     private static final class BufferWrapLayout {
@@ -971,10 +981,11 @@ public final class ResourceBridge {
             BUFFER_WRAP_ROLES.add(role);
         }
     }
-    private static BufferWrapRole bufferWrapBoundary(Class<?> declaring){
+    private static BufferWrapRole bufferWrapBoundary(Class<?> declaring,String method,String descriptor){
         var frame=WRAP_AUTHORITY.walk(PLATFORM_BOUNDARY);Class<?> type=frame.getDeclaringClass();Module module=DefinitionBridge.module(type);
-        if(type!=declaring||!type.getName().equals(BUFFER_WRAP_NAME)||!frame.getMethodName().equals("wrap")
-                ||!frame.getDescriptor().equals(BUFFER_WRAP_DESCRIPTOR)||module!=type.getModule())throw new SecurityException("ACTUAL_BUFFER_WRAP_REQUIRED");
+        boolean factory=method.equals("wrap")&&descriptor.equals(BUFFER_WRAP_DESCRIPTOR)||method.equals("slice")&&descriptor.equals(BUFFER_SLICE_DESCRIPTOR);
+        if(!factory||type!=declaring||!type.getName().equals(BUFFER_WRAP_NAME)||!frame.getMethodName().equals(method)
+                ||!frame.getDescriptor().equals(descriptor)||module!=type.getModule())throw new SecurityException("ACTUAL_BUFFER_FACTORY_REQUIRED");
         synchronized(BUFFER_WRAP_ROLES){
             for(BufferWrapRole role:BUFFER_WRAP_ROLES)if(role.bootstrap==(type.getClassLoader()==null)&&role.loader.get()==type.getClassLoader()&&role.module.get()==module){
                 if(role.actual==null){role.actual=new Key(type,false);CodeSourceBridge.resourceLayoutControls(role.actual);}
@@ -989,7 +1000,7 @@ public final class ResourceBridge {
     }
     /** The factory hook receives only the actual allocateInstance result, before its original checkcast. */
     public static Object bufferWrapEnter(Object fresh,Class<?> requested,long address,int capacity,Class<?> declaring){
-        BufferWrapRole role=bufferWrapBoundary(declaring);
+        BufferWrapRole role=bufferWrapBoundary(declaring,"wrap",BUFFER_WRAP_DESCRIPTOR);
         if(!(fresh instanceof Buffer buffer)||buffer.getClass()!=requested||!BufferPlatform.TYPES.contains(requested)
                 ||requested.getClassLoader()!=null||DefinitionBridge.module(requested)!=Object.class.getModule())
             throw new SecurityException("ACTUAL_ALLOCATED_PLATFORM_BUFFER_REQUIRED");
@@ -1000,6 +1011,37 @@ public final class ResourceBridge {
         BufferWrapScope scope=new BufferWrapScope(buffer,requested,address,capacity,declaring,role);
         CodeSourceBridge.resourceLayoutControls(scope);BUFFER_WRAPPING.set(scope);return scope;
     }
+    /** This second real factory also retains the original source attachment and byte order. */
+    public static Object bufferSliceEnter(Object fresh,Class<?> requested,ByteBuffer source,long address,int capacity,Class<?> declaring){
+        BufferWrapRole role=bufferWrapBoundary(declaring,"slice",BUFFER_SLICE_DESCRIPTOR);
+        if(!(fresh instanceof ByteBuffer buffer)||buffer.getClass()!=requested||requested!=BufferPlatform.DIRECT||source==null
+                ||source.getClass().getClassLoader()!=null||!BufferPlatform.TYPES.contains(source.getClass()))throw new SecurityException("ACTUAL_ALLOCATED_BYTE_BUFFER_SLICE_REQUIRED");
+        if((Long)CodeSourceBridge.controlField(BufferPlatform.ADDRESS,buffer)!=0L||(Integer)CodeSourceBridge.controlField(BufferPlatform.MARK,buffer)!=0
+                ||(Integer)CodeSourceBridge.controlField(BufferPlatform.POSITION,buffer)!=0||(Integer)CodeSourceBridge.controlField(BufferPlatform.LIMIT,buffer)!=0
+                ||(Integer)CodeSourceBridge.controlField(BufferPlatform.CAPACITY,buffer)!=0)throw new SecurityException("FRESH_ALLOCATED_BUFFER_REQUIRED");
+        Field parentField=BufferPlatform.PARENT.get(requested),sourceParentField=BufferPlatform.PARENT.get(source.getClass());
+        if(parentField==null||sourceParentField==null||!parentField.equals(sourceParentField)||parentField.getDeclaringClass()!=BufferPlatform.DIRECT
+                ||parentField.getType()!=Object.class||!parentField.getName().equals("att"))throw new SecurityException("ACTUAL_BYTE_BUFFER_PARENT_LAYOUT_REQUIRED");
+        Span parentSpan=null;
+        for(Span span:INSTANCE_FIELDS.get(parentField.getDeclaringClass()))if(span.field.equals(parentField)&&span.bytes==unsafeWidth("Object")){parentSpan=span;break;}
+        if(parentSpan==null||CodeSourceBridge.controlField(parentField,buffer)!=null)throw new SecurityException("FRESH_BYTE_BUFFER_PARENT_REQUIRED");
+        Object sourceParent=CodeSourceBridge.controlField(sourceParentField,source);
+        long sourceAddress=(Long)CodeSourceBridge.controlField(BufferPlatform.ADDRESS,source);int sourceCapacity=(Integer)CodeSourceBridge.controlField(BufferPlatform.CAPACITY,source);
+        if(capacity<0||sourceCapacity<0||address<sourceAddress||capacity>sourceCapacity||address-sourceAddress>sourceCapacity-capacity)
+            throw new SecurityException("BUFFER_SLICE_OUTSIDE_SOURCE_VIEW");
+        BufferView sourceView;BufferStorage storage;
+        synchronized(STREAMS){
+            reap();if(BUFFERS.containsKey(new Key(buffer,false)))throw new SecurityException("FRESH_UNREGISTERED_BUFFER_REQUIRED");
+            sourceView=BUFFERS.get(new Key(source,false));
+            if(sourceView==null)throw new SecurityException("BUFFER_SLICE_SOURCE_VIEW_UNOBSERVED");
+            if(sourceView.address!=sourceAddress||sourceView.bytes!=sourceCapacity||sourceView.parent.get()!=sourceParent)
+                throw new SecurityException("BUFFER_SLICE_SOURCE_ASSOCIATION_CHANGED");
+            storage=sourceView.storage;
+            if(storage.sealed||storage.cleaned)throw new IllegalStateException("BUFFER_SLICE_SOURCE_RETIRED");
+        }
+        BufferWrapScope scope=new BufferWrapScope(buffer,requested,address,capacity,declaring,role,source,sourceParent,sourceAddress,sourceCapacity,sourceView,storage,parentSpan);
+        CodeSourceBridge.resourceLayoutControls(scope);BUFFER_WRAPPING.set(scope);return scope;
+    }
     /** Repeated Java/native guard queries do not consume or broaden this allowance. */
     static boolean bufferWrapMutationAllowed(Object receiver,long offset,Object value,int width){
         if(WALKER.getCallerClass()!=ControlBridge.class)return false;
@@ -1008,7 +1050,8 @@ public final class ResourceBridge {
         var frame=WALKER.walk(BUFFER_WRAP_WRITER);if(frame==null)return false;Class<?> type=frame.getDeclaringClass();
         if(type!=scope.declaring||scope.role.actual==null||scope.role.actual.get()!=type||scope.role.loader.get()!=type.getClassLoader()
                 ||scope.role.bootstrap!=(type.getClassLoader()==null)||scope.role.module.get()!=DefinitionBridge.module(type)
-                ||type.getModule()!=scope.role.module.get()||!frame.getMethodName().equals("wrap")||!frame.getDescriptor().equals(BUFFER_WRAP_DESCRIPTOR))return false;
+                ||type.getModule()!=scope.role.module.get()||!frame.getMethodName().equals(scope.method)||!frame.getDescriptor().equals(scope.descriptor))return false;
+        if(scope.parentSpan!=null&&offset==scope.parentSpan.offset&&width==scope.parentSpan.bytes)return value==scope.parent;
         if(offset==BufferWrapLayout.ADDRESS.offset&&width==BufferWrapLayout.ADDRESS.bytes)return value instanceof Long actual&&actual.longValue()==scope.address;
         if(!(value instanceof Integer actual)||width!=4)return false;
         return offset==BufferWrapLayout.MARK.offset&&width==BufferWrapLayout.MARK.bytes&&actual.intValue()==-1
@@ -1018,7 +1061,7 @@ public final class ResourceBridge {
     public static void bufferWrapExit(Object value,Throwable failure){
         if(value==null)return;
         if(!(value instanceof BufferWrapScope scope)||scope.caller!=Thread.currentThread())throw new SecurityException("ACTUAL_BUFFER_WRAP_SCOPE_REQUIRED");
-        if(bufferWrapBoundary(scope.declaring)!=scope.role)throw new SecurityException("ACTUAL_BUFFER_WRAP_ROLE_REQUIRED");
+        if(bufferWrapBoundary(scope.declaring,scope.method,scope.descriptor)!=scope.role)throw new SecurityException("ACTUAL_BUFFER_WRAP_ROLE_REQUIRED");
         if(scope.closed)return;
         if(BUFFER_WRAPPING.get()!=scope)throw new SecurityException("ACTUAL_BUFFER_WRAP_ORDER_REQUIRED");scope.closed=true;
         if(scope.previous==null)BUFFER_WRAPPING.remove();else BUFFER_WRAPPING.set(scope.previous);
@@ -1031,11 +1074,31 @@ public final class ResourceBridge {
                     ||(Integer)CodeSourceBridge.controlField(BufferPlatform.CAPACITY,buffer)!=scope.capacity)throw new IllegalStateException("BUFFER_WRAP_INITIALIZATION_INCOMPLETE");
             Module[] sources=bufferConstructionSources(observing!=null);
             synchronized(STREAMS){
-                reap();if(BUFFERS.containsKey(new Key(buffer,false)))throw new IllegalStateException("BUFFER_WRAP_VIEW_ALREADY_REGISTERED");
-                BufferStorage storage=new BufferStorage(null,false);storage.unknownUse=true;storage.escaped=true;
-                storage.gap="BUFFER_BORROWED_NATIVE_ORIGINAL_AND_CLEANUP_UNOBSERVED";bufferSources(storage,sources);
-                BufferView view=new BufferView(buffer,storage,null);view.constructed=true;view.unknownUse=true;
-                BUFFERS.put(new Key(buffer,true),view);storage.views.add(new WeakReference<>(buffer));storage.viewsVersion++;
+                reap();BufferStorage storage;Object parent;
+                if(scope.source==null){
+                    if(BUFFERS.containsKey(new Key(buffer,false)))throw new IllegalStateException("BUFFER_WRAP_VIEW_ALREADY_REGISTERED");
+                    storage=new BufferStorage(null,false);storage.unknownUse=true;storage.escaped=true;
+                    storage.gap="BUFFER_BORROWED_NATIVE_ORIGINAL_AND_CLEANUP_UNOBSERVED";parent=null;
+                }else{
+                    Field sourceParentField=BufferPlatform.PARENT.get(scope.source.getClass());
+                    if(CodeSourceBridge.controlField(scope.parentSpan.field,buffer)!=scope.parent
+                            ||CodeSourceBridge.controlField(sourceParentField,scope.source)!=scope.sourceParent
+                            ||(Long)CodeSourceBridge.controlField(BufferPlatform.ADDRESS,scope.source)!=scope.sourceAddress
+                            ||(Integer)CodeSourceBridge.controlField(BufferPlatform.CAPACITY,scope.source)!=scope.sourceCapacity
+                            ||BUFFERS.get(new Key(scope.source,false))!=scope.sourceView)throw new IllegalStateException("BUFFER_SLICE_PARENT_ASSOCIATION_CHANGED");
+                    storage=scope.storage;parent=scope.parent;
+                    if(storage.sealed||storage.cleaned)throw new IllegalStateException("BUFFER_SLICE_SOURCE_RETIRED");
+                }
+                BufferView view=BUFFERS.get(new Key(buffer,false));
+                // The original order(source.order()) observes this view through the real JDK operation.
+                if(view!=null){
+                    if(scope.source==null||view.storage!=storage||view.parent.get()!=parent||view.address!=scope.address||view.bytes!=scope.capacity)
+                        throw new IllegalStateException("BUFFER_SLICE_PROVISIONAL_VIEW_CHANGED");
+                }else{
+                    view=new BufferView(buffer,storage,parent);view.unknownUse=true;
+                    BUFFERS.put(new Key(buffer,true),view);storage.views.add(new WeakReference<>(buffer));storage.viewsVersion++;
+                }
+                view.constructed=true;bufferSources(storage,sources);
             }
             // Observing this borrowed view creates neither storage ownership nor native release rights.
             ControlBridge.resourceExposedByOperation(buffer,sources);
@@ -1257,9 +1320,11 @@ public final class ResourceBridge {
         try{
             Field field=BufferPlatform.PARENT.get(buffer.getClass());Object parent=field==null?null:CodeSourceBridge.controlField(field,buffer);
             BufferView owner=parent instanceof Buffer?BUFFERS.get(new Key(parent,false)):null;
-            BufferStorage storage=owner==null?new BufferStorage(null,false):owner.storage;
+            BufferWrapScope factory=BUFFER_WRAPPING.get();
+            BufferStorage captured=factory!=null&&!factory.closed&&factory.source!=null&&factory.buffer==buffer?factory.storage:null;
+            BufferStorage storage=captured!=null?captured:owner==null?new BufferStorage(null,false):owner.storage;
             view=new BufferView(buffer,storage,parent);view.unknownUse=true;
-            if(owner==null){storage.unknownUse=true;storage.gap="BUFFER_ORIGINAL_STORAGE_UNOBSERVED";}
+            if(owner==null&&captured==null){storage.unknownUse=true;storage.gap="BUFFER_ORIGINAL_STORAGE_UNOBSERVED";}
             BUFFERS.put(new Key(buffer,true),view);storage.views.add(new WeakReference<>(buffer));storage.viewsVersion++;return view;
         }catch(IllegalAccessException failure){throw new IllegalStateException("IO_BUFFER_VIEW_UNAVAILABLE",failure);}
     }
