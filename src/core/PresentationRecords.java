@@ -92,6 +92,7 @@ final class PresentationRecords {
     }
     boolean denied(ServerBossEvent event){Slot slot=identities.get(event);return slot!=null&&slot.event.get()==event&&slot.entry.equals(runtime.presentationId(event))&&runtime.presentationPlayers(event)==slot.players&&(!slot.cancelled||slot.owner.terminal)&&runtime.presentationSubject(event)==slot.owner;}
     void policies(ServerPlayer player,Map<UUID,Integer> desired){
+        if(runtime.presentationPublicationPending())return;
         for(Slot slot:slots.values()){
             ServerBossEvent event=slot.event.get();
             if(!slot.publicationUnknown&&(!slot.cancelled||slot.owner.terminal)&&event!=null&&slot.entry.equals(runtime.presentationId(event))

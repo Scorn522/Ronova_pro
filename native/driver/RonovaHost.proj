@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Project DefaultTargets="Build" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <PropertyGroup>
+    <Configuration Condition="'$(Configuration)'==''">Release</Configuration>
+    <Platform>x64</Platform>
+    <RonovaHostOutputRoot Condition="'$(RonovaHostOutputRoot)'==''">$(MSBuildThisFileDirectory)out\</RonovaHostOutputRoot>
+    <RonovaHostBuildProperties>Configuration=$(Configuration);Platform=$(Platform);RonovaHostOutputRoot=$(RonovaHostOutputRoot)</RonovaHostBuildProperties>
+    <RonovaHostBuildProperties Condition="'$(WindowsTargetPlatformVersion)'!=''">$(RonovaHostBuildProperties);WindowsTargetPlatformVersion=$(WindowsTargetPlatformVersion)</RonovaHostBuildProperties>
+    <RonovaHostBuildProperties Condition="'$(WindowsSdkDir)'!=''">$(RonovaHostBuildProperties);WindowsSdkDir=$(WindowsSdkDir)</RonovaHostBuildProperties>
+  </PropertyGroup>
+  <ItemGroup>
+    <RonovaHostProject Include="$(MSBuildThisFileDirectory)RonovaHost.vcxproj" />
+    <RonovaHostProject Include="$(MSBuildThisFileDirectory)RonovaHostManage.vcxproj" />
+  </ItemGroup>
+  <Target Name="Build">
+    <MSBuild Projects="@(RonovaHostProject)" Targets="Build" BuildInParallel="false"
+      Properties="$(RonovaHostBuildProperties)" />
+  </Target>
+</Project>

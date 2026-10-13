@@ -37,7 +37,7 @@ final class ControlImages implements ClassFileTransformer {
         var next=Arrays.copyOf(declared,declared.length+1);next[next.length-1]=new Ref<>(type);
         protect(next,next[next.length-1]);declared=next;
     }
-    private boolean critical(Module module,ClassLoader loader,String name,Class<?> type) {
+    boolean critical(Module module,ClassLoader loader,String name,Class<?> type) {
         if(name==null)return false;
         if(type!=null)for(var entry:declared)if(entry.get()==type)return true;
         if(name.startsWith("dev/ronova/pro/agent/")||name.startsWith("dev/ronova/pro/bootstrap/"))

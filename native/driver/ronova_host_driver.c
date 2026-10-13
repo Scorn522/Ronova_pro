@@ -9,8 +9,29 @@
 #include "ronova_host_protocol.h"
 
 #define RVH_TAG 'HvoR'
-#define RVH_PROCESS_RIGHTS (PROCESS_CREATE_PROCESS|PROCESS_CREATE_THREAD|PROCESS_DUP_HANDLE|PROCESS_SET_QUOTA|PROCESS_SET_INFORMATION|PROCESS_SUSPEND_RESUME|PROCESS_TERMINATE|PROCESS_VM_OPERATION|PROCESS_VM_WRITE)
-#define RVH_THREAD_RIGHTS (THREAD_DIRECT_IMPERSONATION|THREAD_IMPERSONATE|THREAD_SET_CONTEXT|THREAD_SET_INFORMATION|THREAD_SET_LIMITED_INFORMATION|THREAD_SET_THREAD_TOKEN|THREAD_SUSPEND_RESUME|THREAD_TERMINATE)
+/* Windows SDK 10.0.26100.0 winnt.h process/thread access-mask values. The WDK
+ * kernel headers do not expose the complete user-mode set; retain the exact
+ * existing masks without importing windows.h into the kernel translation unit. */
+#define RVH_ACCESS_PROCESS_TERMINATE                 0x0001UL
+#define RVH_ACCESS_PROCESS_CREATE_THREAD             0x0002UL
+#define RVH_ACCESS_PROCESS_VM_OPERATION              0x0008UL
+#define RVH_ACCESS_PROCESS_VM_WRITE                  0x0020UL
+#define RVH_ACCESS_PROCESS_DUP_HANDLE                0x0040UL
+#define RVH_ACCESS_PROCESS_CREATE_PROCESS            0x0080UL
+#define RVH_ACCESS_PROCESS_SET_QUOTA                 0x0100UL
+#define RVH_ACCESS_PROCESS_SET_INFORMATION           0x0200UL
+#define RVH_ACCESS_PROCESS_SUSPEND_RESUME             0x0800UL
+#define RVH_ACCESS_PROCESS_QUERY_LIMITED_INFORMATION  0x1000UL
+#define RVH_ACCESS_THREAD_TERMINATE                  0x0001UL
+#define RVH_ACCESS_THREAD_SUSPEND_RESUME              0x0002UL
+#define RVH_ACCESS_THREAD_SET_CONTEXT                 0x0010UL
+#define RVH_ACCESS_THREAD_SET_INFORMATION             0x0020UL
+#define RVH_ACCESS_THREAD_SET_THREAD_TOKEN            0x0080UL
+#define RVH_ACCESS_THREAD_IMPERSONATE                 0x0100UL
+#define RVH_ACCESS_THREAD_DIRECT_IMPERSONATION        0x0200UL
+#define RVH_ACCESS_THREAD_SET_LIMITED_INFORMATION     0x0400UL
+#define RVH_PROCESS_RIGHTS (RVH_ACCESS_PROCESS_CREATE_PROCESS|RVH_ACCESS_PROCESS_CREATE_THREAD|RVH_ACCESS_PROCESS_DUP_HANDLE|RVH_ACCESS_PROCESS_SET_QUOTA|RVH_ACCESS_PROCESS_SET_INFORMATION|RVH_ACCESS_PROCESS_SUSPEND_RESUME|RVH_ACCESS_PROCESS_TERMINATE|RVH_ACCESS_PROCESS_VM_OPERATION|RVH_ACCESS_PROCESS_VM_WRITE)
+#define RVH_THREAD_RIGHTS (RVH_ACCESS_THREAD_DIRECT_IMPERSONATION|RVH_ACCESS_THREAD_IMPERSONATE|RVH_ACCESS_THREAD_SET_CONTEXT|RVH_ACCESS_THREAD_SET_INFORMATION|RVH_ACCESS_THREAD_SET_LIMITED_INFORMATION|RVH_ACCESS_THREAD_SET_THREAD_TOKEN|RVH_ACCESS_THREAD_SUSPEND_RESUME|RVH_ACCESS_THREAD_TERMINATE)
 
 typedef struct RVH_PROCESS_RECORD {
     ULONGLONG Id;
@@ -178,7 +199,7 @@ static NTSTATUS RvhAddProcess(RVH_SESSION *Session,const RVH_PROCESS_ADD_REQUEST
     if((In->Effects&RVH_PROCESS_PROTECT_OUTSIDE_HANDLES)!=0&&!NT_SUCCESS(RvhObStatus))return RvhObStatus;
     if((In->Effects&RVH_PROCESS_DENY_CHILD_CREATION)!=0&&!NT_SUCCESS(RvhNotifyStatus))return RvhNotifyStatus;
     /* Resolves in the actual original client process, with user access checks. */
-    status=ObReferenceObjectByHandle((HANDLE)(ULONG_PTR)In->ProcessHandle,PROCESS_QUERY_LIMITED_INFORMATION|PROCESS_SET_INFORMATION,*PsProcessType,UserMode,(PVOID *)&process,NULL);
+    status=ObReferenceObjectByHandle((HANDLE)(ULONG_PTR)In->ProcessHandle,RVH_ACCESS_PROCESS_QUERY_LIMITED_INFORMATION|RVH_ACCESS_PROCESS_SET_INFORMATION,*PsProcessType,UserMode,(PVOID *)&process,NULL);
     if(!NT_SUCCESS(status))return status;
     if(process==Session->Owner||process==PsInitialSystemProcess){ObDereferenceObject(process);return STATUS_ACCESS_DENIED;}
     if(PsGetProcessExitStatus(process)!=STATUS_PENDING){ObDereferenceObject(process);return STATUS_PROCESS_IS_TERMINATING;}
@@ -628,14 +649,15 @@ NTSTATUS DriverEntry(PDRIVER_OBJECT Driver,PUNICODE_STRING RegistryPath){
     }
     RvhNotifyStatus=PsSetCreateProcessNotifyRoutineEx(RvhProcessNotify,FALSE);RvhNotifyRegistered=NT_SUCCESS(RvhNotifyStatus);
     RvhFilterStatus=RvhReadAltitude(RegistryPath,L"\\Parameters\\Instances\\RonovaHost Instance",L"Altitude",&filterAltitude);
-    if(NT_SUCCESS(RvhFilterStatus)){
-        ExFreePoolWithTag(filterAltitude.Buffer,RVH_TAG);
-        RvhFilterStatus=FltRegisterFilter(Driver,&RvhRegistration,&RvhFilter);
-        if(NT_SUCCESS(RvhFilterStatus)){
-            RvhFilterStartStatus=FltStartFiltering(RvhFilter);
-            if(!NT_SUCCESS(RvhFilterStartStatus)){FltUnregisterFilter(RvhFilter);RvhFilter=NULL;Driver->DriverUnload=RvhDriverUnload;}
-        }
-    }
+    /* A registered minifilter is also the supported, nonmandatory unload
+     * endpoint. Do not publish a control device that can only be stopped
+     * through the forced SCM path after an altitude/register/start failure. */
+    if(!NT_SUCCESS(RvhFilterStatus)){RvhShutdown();return RvhFilterStatus;}
+    ExFreePoolWithTag(filterAltitude.Buffer,RVH_TAG);
+    RvhFilterStatus=FltRegisterFilter(Driver,&RvhRegistration,&RvhFilter);
+    if(!NT_SUCCESS(RvhFilterStatus)){RvhShutdown();return RvhFilterStatus;}
+    RvhFilterStartStatus=FltStartFiltering(RvhFilter);
+    if(!NT_SUCCESS(RvhFilterStartStatus)){RvhShutdown();return RvhFilterStartStatus;}
     RtlInitUnicodeString(&deviceName,RVH_NT_DEVICE);RtlInitUnicodeString(&sddl,L"D:P(A;;GA;;;SY)(A;;GA;;;BA)");
     status=IoCreateDeviceSecure(Driver,0,&deviceName,RVH_DEVICE_TYPE,FILE_DEVICE_SECURE_OPEN,FALSE,&sddl,&RvhDeviceClass,&RvhDevice);
     if(!NT_SUCCESS(status)){RvhShutdown();return status;}

@@ -3,7 +3,7 @@
 typedef struct CodeBootstrap {unsigned handle,count;unsigned *arguments;int loaded;} CodeBootstrap;
 typedef struct CodePool {const unsigned char **entries;uint32_t *sizes;unsigned count,self;CodeBootstrap *bootstraps;unsigned bootstrapCount;uintptr_t vm,slots,tags,operands,holder,holderName,resolved;unsigned operandLength,resolvedCount;unsigned char *scanTags;uintptr_t *scanSlots;uint16_t *scanOperands;unsigned *utfBuckets;size_t utfBucketCount;int utfIndexed,allocated,hidden,vmReady,vmSnapshot;} CodePool;
 typedef struct CodeHandler {unsigned start,end,target,type;} CodeHandler;
-typedef struct CodeMethod {char *key;size_t nameLength;const unsigned char *bytes;uint32_t length;unsigned *offsets;CodeHandler *handlers;unsigned handlerCount;OwnerLink **owners;unsigned instructions,access;int sourced;struct CodeMethod *next;} CodeMethod;
+typedef struct CodeMethod {char *key;size_t nameLength;const unsigned char *bytes;uint32_t length;unsigned *offsets;CodeHandler *handlers;unsigned handlerCount;OwnerLink **owners;unsigned char *unknown;unsigned instructions,access;int sourced;struct CodeMethod *next;} CodeMethod;
 typedef struct CodeVMMethod {uintptr_t method,constantMethod,constants;CodeHandler *handlers;unsigned handlerCount,codeLength;} CodeVMMethod;
 typedef struct CodeImage {jweak loader,emitted,execution;int bootstrap,hidden,sourced;char *name;unsigned char *bytes;uint32_t length;uint64_t hash,nameHash;size_t order;CodePool pool;CodeMethod *methods;CodeMethod **methodIndex;unsigned methodCount;struct CodeClass *classes;struct CodeImage *next,*hashNext,*nameNext,*hiddenNext;} CodeImage;
 typedef struct CodeClass {jweak actual;CodeImage *image;struct CodeClass *next,*imageNext;} CodeClass;
@@ -36,6 +36,7 @@ static jobject code_control_registry;
 static jfieldID code_control_backing;
 static int code_class_matches(JNIEnv*,CodeImage*,jclass,jobject,const char*);
 static int code_frame_sources(JNIEnv*,jmethodID,jlocation,OwnerLink**,int*);
+static int code_frame_sources_query(JNIEnv*,jmethodID,jlocation,OwnerLink**,int*,int*);
 static int code_trace(jthread,jvmtiFrameInfo**,jint*);
 static int code_vm_entry(CodePool*,unsigned);
 static int code_vm_tag(CodePool*,unsigned,unsigned char*);
@@ -260,7 +261,7 @@ static void code_pool_free(CodePool *pool){
 static void code_links_free(OwnerLink *links){while(links){OwnerLink *next=links->next;free(links);links=next;}}
 static void code_image_free(JNIEnv *env,CodeImage *image){
     if(image->loader)native_original.DeleteWeakGlobalRef(env,image->loader);if(image->emitted)native_original.DeleteWeakGlobalRef(env,image->emitted);if(image->execution)native_original.DeleteWeakGlobalRef(env,image->execution);CodeMethod *method=image->methods;
-    while(method){CodeMethod *next=method->next;if(method->owners)for(unsigned i=0;i<method->instructions;i++)code_links_free(method->owners[i]);free(method->owners);free(method->offsets);free(method->handlers);free(method->key);free(method);method=next;}
+    while(method){CodeMethod *next=method->next;if(method->owners)for(unsigned i=0;i<method->instructions;i++)code_links_free(method->owners[i]);free(method->owners);free(method->unknown);free(method->offsets);free(method->handlers);free(method->key);free(method);method=next;}
     code_pool_free(&image->pool);free(image->methodIndex);free(image->bytes);free(image->name);free(image);
 }
 static int code_attributes(CodeCursor *cursor,CodePool *pool,CodeMethod *method){
@@ -439,10 +440,12 @@ JNIEXPORT jboolean JNICALL Java_dev_ronova_pro_bootstrap_NativeControl_codeLayou
         jstring key=(jstring)native_original.GetObjectArrayElement(env,keys,i);const char *value=key?native_original.GetStringUTFChars(env,key,NULL):NULL;CodeMethod *method=image->methods;while(method&&(!value||strcmp(method->key,value)))method=method->next;
         if(value)native_original.ReleaseStringUTFChars(env,key,value);if(key)native_original.DeleteLocalRef(env,key);jobjectArray owners=(jobjectArray)native_original.GetObjectArrayElement(env,rows,i);
         unsigned instructions=method?method->instructions:0;valid=method&&method->offsets&&owners&&instructions==(unsigned)native_original.GetArrayLength(env,owners)&&!method->owners;
-        if(valid){method->owners=(OwnerLink**)calloc(instructions,sizeof(*method->owners));valid=method->owners!=NULL;}
+        if(valid){method->owners=(OwnerLink**)calloc(instructions,sizeof(*method->owners));method->unknown=(unsigned char*)calloc(instructions,sizeof(*method->unknown));valid=method->owners&&method->unknown;}
         for(unsigned j=0;valid&&j<instructions;j++){jobjectArray source=(jobjectArray)native_original.GetObjectArrayElement(env,owners,j);valid=source!=NULL;jsize n=source?native_original.GetArrayLength(env,source):0;
-            for(jsize k=0;valid&&k<n;k++){jobject module=native_original.GetObjectArrayElement(env,source,k);Owner *owner=native_owner(env,module);valid=owner&&native_owner_add(&method->owners[j],owner);if(module)native_original.DeleteLocalRef(env,module);}
-            if(method->owners[j]){method->sourced=1;image->sourced=1;}
+            for(jsize k=0;valid&&k<n;k++){jobject module=native_original.GetObjectArrayElement(env,source,k);
+                if(!module)method->unknown[j]=1;
+                else {Owner *owner=native_owner(env,module);valid=owner&&native_owner_add(&method->owners[j],owner);native_original.DeleteLocalRef(env,module);}}
+            if(method->owners[j]||method->unknown[j]){method->sourced=1;image->sourced=1;}
             if(source)native_original.DeleteLocalRef(env,source);
         }if(owners)native_original.DeleteLocalRef(env,owners);
     }
@@ -466,7 +469,8 @@ static int code_method_relevant(JNIEnv *env,jmethodID method,jobject module){
         AcquireSRWLockShared(&code_records);CodeCandidates candidates=code_candidates(signature);
         for(CodeImage *image=code_candidate_next(&candidates);image&&!relevant;image=code_candidate_next(&candidates))if(image->sourced&&code_class_matches(env,image,declaring,loader,signature)){
             CodeMethod *entry=code_method(image,name,descriptor);if(!entry||!entry->sourced||!entry->owners)continue;
-            for(unsigned i=0;i<entry->instructions&&!relevant;i++)if(native_owner_matches(env,entry->owners[i],module)&&entry->owners[i])relevant=1;
+            for(unsigned i=0;i<entry->instructions&&!relevant;i++)if((native_owner_matches(env,entry->owners[i],module)&&entry->owners[i])
+                    ||!module&&entry->unknown&&entry->unknown[i])relevant=1;
         }ReleaseSRWLockShared(&code_records);
     }
     if(signature)(*native_ti)->Deallocate(native_ti,(unsigned char*)signature);if(name)(*native_ti)->Deallocate(native_ti,(unsigned char*)name);if(descriptor)(*native_ti)->Deallocate(native_ti,(unsigned char*)descriptor);if(loader)native_original.DeleteLocalRef(env,loader);if(declaring)native_original.DeleteLocalRef(env,declaring);return relevant;
@@ -478,9 +482,9 @@ JNIEXPORT jlongArray JNICALL Java_dev_ronova_pro_bootstrap_NativeControl_codeSta
         for(jint i=0;i<count;i++){
             jvmtiFrameInfo *frames=NULL;jint depth=0;
             if(code_trace(threads[i],&frames,&depth))for(jint j=0;j<depth;j++){
-                if(frames[j].location<0||!code_method_relevant(env,frames[j].method,module))continue;OwnerLink *owners=NULL;int known=0;
-                if(!code_frame_sources(env,frames[j].method,frames[j].location,&owners,&known))values[2]++;
-                else if(owners&&native_owner_matches(env,owners,module))values[1]++;code_links_free(owners);
+                if(frames[j].location<0||!code_method_relevant(env,frames[j].method,module))continue;OwnerLink *owners=NULL;int known=0,unknown=0;
+                if(!code_frame_sources_query(env,frames[j].method,frames[j].location,&owners,&known,&unknown))values[2]++;
+                else {if(owners&&native_owner_matches(env,owners,module))values[1]++;if(unknown)values[2]++;}code_links_free(owners);
             }
             else {jint state=0;if((*native_ti)->GetThreadState(native_ti,threads[i],&state)!=JVMTI_ERROR_NONE||(state&JVMTI_THREAD_STATE_ALIVE))values[2]++;}
             free(frames);native_original.DeleteLocalRef(env,threads[i]);
@@ -575,7 +579,7 @@ done:
     if(!ready){if(result)native_original.DeleteLocalRef(env,result);native_refuse(env,"ACTUAL_LOADED_CLASS_QUERY_UNAVAILABLE");return NULL;}
     return result;
 }
-typedef struct CodeDeclaration {char *name,*descriptor;jint access;CodeMethod *imageMethod;int matched;} CodeDeclaration;
+typedef struct CodeDeclaration {char *name,*descriptor;jint access;CodeMethod *imageMethod;CodeVMMethod version;int accessRead,matched;} CodeDeclaration;
 typedef struct CodeDeclarations {jmethodID *methods;CodeDeclaration *entries;jint count;} CodeDeclarations;
 static void code_declarations_free(CodeDeclarations *query){
     if(query->entries)for(jint i=0;i<query->count;i++){
@@ -595,6 +599,7 @@ static int code_declarations(jclass type,CodeImage *image,CodeDeclarations *quer
         CodeDeclaration *entry=&query->entries[i];
         if((*native_ti)->GetMethodName(native_ti,query->methods[i],&entry->name,&entry->descriptor,NULL)!=JVMTI_ERROR_NONE
                 ||(*native_ti)->GetMethodModifiers(native_ti,query->methods[i],&entry->access)!=JVMTI_ERROR_NONE)return 0;
+        entry->accessRead=1;
         if(image){entry->imageMethod=code_method(image,entry->name,entry->descriptor);
             if(!entry->imageMethod||entry->imageMethod->access!=(unsigned)entry->access)return 0;}
     }
@@ -615,9 +620,31 @@ static int code_selected_declaration(jclass type,CodeImage *image,const char *se
                 ||strcmp(entry->descriptor,wanted->key+wanted->nameLength))continue;
         if((*native_ti)->GetMethodModifiers(native_ti,query->methods[i],&entry->access)!=JVMTI_ERROR_NONE
                 ||wanted->access!=(unsigned)entry->access)return 0;
-        entry->imageMethod=wanted;return 1;
+        entry->accessRead=1;entry->imageMethod=wanted;return 1;
     }
     return 0;
+}
+static int code_method_identity_order(const void *first,const void *second){
+    uintptr_t a=(uintptr_t)*(const jmethodID*)first,b=(uintptr_t)*(const jmethodID*)second;return a<b?-1:a>b?1:0;
+}
+/* Retain the Method/ConstMethod/pool identities of every matched declaration
+ * until the result is ready. A redefine during an earlier body's comparison
+ * cannot make this query publish a mixture of replaced and current methods. */
+static int code_declarations_current(jclass type,CodeDeclarations *query){
+    jint count=0;jmethodID *actual=NULL,*captured=NULL;int ready=(*native_ti)->GetClassMethods(native_ti,type,&count,&actual)==JVMTI_ERROR_NONE&&count==query->count;
+    if(ready&&count){
+        captured=(jmethodID*)malloc((size_t)count*sizeof(*captured));ready=captured!=NULL;
+        if(ready){memcpy(captured,query->methods,(size_t)count*sizeof(*captured));
+            qsort(captured,(size_t)count,sizeof(*captured),code_method_identity_order);
+            qsort(actual,(size_t)count,sizeof(*actual),code_method_identity_order);
+            ready=!memcmp(captured,actual,(size_t)count*sizeof(*captured));}
+    }
+    for(jint i=0;ready&&i<query->count;i++){
+        CodeDeclaration *entry=&query->entries[i];jint modifiers=0;
+        if(entry->accessRead)ready=(*native_ti)->GetMethodModifiers(native_ti,query->methods[i],&modifiers)==JVMTI_ERROR_NONE&&modifiers==entry->access;
+        if(ready&&entry->matched)ready=code_vm_unchanged(query->methods[i],&entry->version);
+    }
+    free(captured);if(actual)(*native_ti)->Deallocate(native_ti,(unsigned char*)actual);return ready;
 }
 /* JVMTI headers distinguish an absent declaration from an unavailable body without resolving parameter classes. */
 JNIEXPORT jobjectArray JNICALL Java_dev_ronova_pro_bootstrap_NativeControl_codeDeclarations0(JNIEnv *env,jclass controller,jclass type){
@@ -645,7 +672,7 @@ JNIEXPORT jobjectArray JNICALL Java_dev_ronova_pro_bootstrap_NativeControl_codeD
         if(method)native_original.DeleteLocalRef(env,method);if(signature)native_original.DeleteLocalRef(env,signature);
         if(!ready||native_original.ExceptionCheck(env))goto done;
     }
-    result=values;values=NULL;
+    if(code_declarations_current(type,&query)){result=values;values=NULL;}
 done:
     if(values)native_original.DeleteLocalRef(env,values);if(string)native_original.DeleteLocalRef(env,string);if(modifiers)native_original.DeleteLocalRef(env,modifiers);
     code_declarations_free(&query);return result;
@@ -681,7 +708,7 @@ static jobjectArray code_version(JNIEnv *env,jclass type,jbyteArray expected,jst
         if(ready)ready=code_vm_snapshot_query(env,query.methods[i],&version,&pool,declaration->name,declaration->descriptor,&scratch);
         if(ready)ready=(*native_ti)->GetBytecodes(native_ti,query.methods[i],&size,&actual)==JVMTI_ERROR_NONE;
         unsigned ordinal=0;if(ready)ready=code_equivalent(selected,entry,actual,size,&pool,&version,-1,&ordinal)&&code_vm_unchanged(query.methods[i],&version);
-        if(ready){declaration->matched=1;matched++;}
+        if(ready){declaration->matched=1;declaration->version=version;declaration->version.handlers=NULL;matched++;}
         free(version.handlers);if(actual)(*native_ti)->Deallocate(native_ti,actual);
     }
     if(!native_original.ExceptionCheck(env)){
@@ -691,6 +718,7 @@ static jobjectArray code_version(JNIEnv *env,jclass type,jbyteArray expected,jst
             if(key){native_original.SetObjectArrayElement(env,result,at++,key);native_original.DeleteLocalRef(env,key);}
             else {native_original.DeleteLocalRef(env,result);result=NULL;}
         }
+        if(result&&!code_declarations_current(type,&query)){native_original.DeleteLocalRef(env,result);result=NULL;}
     }
 done:
     if(selector)native_original.ReleaseStringUTFChars(env,method,selector);
@@ -720,7 +748,7 @@ JNIEXPORT jboolean JNICALL Java_dev_ronova_pro_bootstrap_NativeControl_preparedC
             &&code_caller(env)&&native_original.IsSameObject(env,type,state->prepared);
 }
 /* A result is used only after actual frame bytecodes and referenced constants match this version. */
-static int code_frame_sources_checked(JNIEnv *env,jmethodID method,jlocation location,OwnerLink **owners,int *known,CodeFailure *failure){
+static int code_frame_sources_checked(JNIEnv *env,jmethodID method,jlocation location,OwnerLink **owners,int *known,int *unknown,CodeFailure *failure){
     if(!code_available||location<0)return 1;jclass declaring=NULL;jobject loader=NULL;char *signature=NULL,*name=NULL,*descriptor=NULL;unsigned char *bytes=NULL;jint length=0;CodePool pool={0};CodeVMMethod version={0};int valid=1;
     jvmtiError error=(*native_ti)->GetMethodDeclaringClass(native_ti,method,&declaring);
     if(error!=JVMTI_ERROR_NONE){valid=code_failed(failure,"declaring_class",error);goto done;}
@@ -748,6 +776,7 @@ static int code_frame_sources_checked(JNIEnv *env,jmethodID method,jlocation loc
         if(code_equivalent_query(image,entry,bytes,length,&pool,&version,location,&ordinal,detail)){
             if(!code_vm_unchanged(method,&version))code_failed(detail,"frame_version_changed",JVMTI_ERROR_NONE);
             else if(!(valid=native_owner_merge(owners,entry->owners[ordinal])))code_failed(detail,"owner_merge",JVMTI_ERROR_NONE);
+            else if(entry->unknown&&entry->unknown[ordinal]&&unknown)*unknown=1;
         }
         // Historical candidates normally differ. Report only the final failure,
         // choosing the candidate that matched the longest instruction prefix.
@@ -759,7 +788,10 @@ done:
     if(signature)(*native_ti)->Deallocate(native_ti,(unsigned char*)signature);if(name)(*native_ti)->Deallocate(native_ti,(unsigned char*)name);if(descriptor)(*native_ti)->Deallocate(native_ti,(unsigned char*)descriptor);if(loader)native_original.DeleteLocalRef(env,loader);if(declaring)native_original.DeleteLocalRef(env,declaring);return valid;
 }
 static int code_frame_sources(JNIEnv *env,jmethodID method,jlocation location,OwnerLink **owners,int *known){
-    return code_frame_sources_checked(env,method,location,owners,known,NULL);
+    return code_frame_sources_checked(env,method,location,owners,known,NULL,NULL);
+}
+static int code_frame_sources_query(JNIEnv *env,jmethodID method,jlocation location,OwnerLink **owners,int *known,int *unknown){
+    return code_frame_sources_checked(env,method,location,owners,known,unknown,NULL);
 }
 static int code_trace_query(jthread thread,jvmtiFrameInfo **frames,jint *count,CodeFailure *failure){
     jint depth=0;jvmtiError error=(*native_ti)->GetFrameCount(native_ti,thread,&depth);
@@ -967,7 +999,7 @@ static int code_current_sources_query(JNIEnv *env,OwnerLink **owners,int *unknow
     if(!valid)code_source_failure(env,&failure,NULL,-1,0);
     else for(jint i=0;i<depth&&valid;i++){
         if(frames[i].location<0||!code_method_relevant(env,frames[i].method,NULL))continue;
-        code_failure_init(&failure);int known=0;valid=code_frame_sources_checked(env,frames[i].method,frames[i].location,owners,&known,&failure);
+        code_failure_init(&failure);int known=0;valid=code_frame_sources_checked(env,frames[i].method,frames[i].location,owners,&known,unknown,&failure);
         if(!valid)code_source_failure(env,&failure,frames[i].method,frames[i].location,known);
     }
     free(frames);if(thread)native_original.DeleteLocalRef(env,thread);state->control--;return valid;
@@ -988,16 +1020,16 @@ static int code_current_stopped(JNIEnv *env){
 }
 JNIEXPORT jobjectArray JNICALL Java_dev_ronova_pro_bootstrap_NativeControl_codeFrame0(JNIEnv *env,jclass type,jclass declaring,jstring name,jstring descriptor,jint location){
     (void)type;if(!code_caller(env)){native_refuse(env,"ACTUAL_CODE_FRAME_BRIDGE_REQUIRED");return NULL;}
-    OwnerLink *owners=NULL;jthread thread=NULL;jvmtiFrameInfo *frames=NULL;jint count=0;const char *key=native_original.GetStringUTFChars(env,name,NULL),*desc=native_original.GetStringUTFChars(env,descriptor,NULL);
+    OwnerLink *owners=NULL;jthread thread=NULL;jvmtiFrameInfo *frames=NULL;jint count=0;int unknown=0;const char *key=native_original.GetStringUTFChars(env,name,NULL),*desc=native_original.GetStringUTFChars(env,descriptor,NULL);
     if(code_available&&key&&desc&&(*native_ti)->GetCurrentThread(native_ti,&thread)==JVMTI_ERROR_NONE&&code_trace(thread,&frames,&count))for(jint i=0;i<count;i++){
         if(frames[i].location!=location)continue;jclass actual=NULL;char *method=NULL,*signature=NULL;
         int matches=(*native_ti)->GetMethodDeclaringClass(native_ti,frames[i].method,&actual)==JVMTI_ERROR_NONE&&native_original.IsSameObject(env,actual,declaring)
                 &&(*native_ti)->GetMethodName(native_ti,frames[i].method,&method,&signature,NULL)==JVMTI_ERROR_NONE&&!strcmp(method,key)&&!strcmp(signature,desc);
         if(method)(*native_ti)->Deallocate(native_ti,(unsigned char*)method);if(signature)(*native_ti)->Deallocate(native_ti,(unsigned char*)signature);if(actual)native_original.DeleteLocalRef(env,actual);
-        if(matches){int known=0;if(!code_frame_sources(env,frames[i].method,frames[i].location,&owners,&known)){code_links_free(owners);owners=NULL;}break;}
+        if(matches){int known=0;if(!code_frame_sources_query(env,frames[i].method,frames[i].location,&owners,&known,&unknown)){code_links_free(owners);owners=NULL;unknown=1;}break;}
     }
     if(key)native_original.ReleaseStringUTFChars(env,name,key);if(desc)native_original.ReleaseStringUTFChars(env,descriptor,desc);free(frames);if(thread)native_original.DeleteLocalRef(env,thread);
-    jclass module=native_original.FindClass(env,"java/lang/Module");unsigned size=0;for(OwnerLink *entry=owners;entry;entry=entry->next)if(!native_original.IsSameObject(env,entry->owner->module,NULL))size++;
-    jobjectArray result=module?native_original.NewObjectArray(env,size,module,NULL):NULL;unsigned at=0;for(OwnerLink *entry=owners;result&&entry;entry=entry->next)if(!native_original.IsSameObject(env,entry->owner->module,NULL))native_original.SetObjectArrayElement(env,result,at++,entry->owner->module);
+    jclass module=native_original.FindClass(env,"java/lang/Module");unsigned size=unknown?1:0;for(OwnerLink *entry=owners;entry;entry=entry->next)if(!native_original.IsSameObject(env,entry->owner->module,NULL))size++;
+    jobjectArray result=module?native_original.NewObjectArray(env,size,module,NULL):NULL;unsigned at=unknown?1:0;for(OwnerLink *entry=owners;result&&entry;entry=entry->next)if(!native_original.IsSameObject(env,entry->owner->module,NULL))native_original.SetObjectArrayElement(env,result,at++,entry->owner->module);
     if(module)native_original.DeleteLocalRef(env,module);code_links_free(owners);return result;
 }

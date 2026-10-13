@@ -34,7 +34,7 @@ public final class ClientPresence {
     private static final Set<Challenge> retiredChallenges=new HashSet<>();
     private static final ClientPolicyState policy=new ClientPolicyState(),terminalPolicy=new ClientPolicyState();
     private static final System.Logger LOG=System.getLogger("ronova_pro.client");
-    private record Hud(long revision,boolean protect,boolean terminal) { }
+    private record Hud(long revision,boolean protect,boolean terminal,java.lang.ref.WeakReference<net.minecraft.client.gui.components.LerpingBossEvent> carrier) { }
     private static final Map<UUID,Hud> hudPolicies=new HashMap<>();
     private record LocalBody(java.lang.ref.WeakReference<net.minecraft.world.entity.LivingEntity> entity,float floor,int id,UUID uuid) { }
     private static final Map<Object,LocalBody> localBodies=Collections.synchronizedMap(new WeakIdentityMap<>());
@@ -334,11 +334,24 @@ public final class ClientPresence {
         Minecraft mc=context();if(!current(source)||!Objects.equals(policy.session(),p.session())||policy.scope()!=p.scope()||!Objects.equals(policy.dimension(),p.dimension()))return;
         Hud prior=hudPolicies.get(p.hud());if(p.revision()<=0||prior!=null&&p.revision()<=prior.revision())return;
         if(prior==null&&hudPolicies.size()>=131072) {LOG.log(System.Logger.Level.WARNING,"HUD_POLICY_CAPACITY");return;}
-        hudPolicies.put(p.hud(),new Hud(p.revision(),p.protectedNow(),p.terminal()));
-        if(p.terminal()&&!awaitingScope&&Objects.equals(levelDimension(mc),p.dimension()))((dev.ronova.pro.mixin.ClientPresentation.BossAccess)mc.gui.getBossOverlay()).pro$events().remove(p.hud());
+        var events=((dev.ronova.pro.mixin.ClientPresentation.BossAccess)mc.gui.getBossOverlay()).pro$events();
+        var original=events.get(p.hud());
+        Hud next=new Hud(p.revision(),p.protectedNow(),p.terminal(),new java.lang.ref.WeakReference<>(original));
+        hudPolicies.put(p.hud(),next);ProRuntime.registerClientControlObjects(next,next.carrier());
+        if(p.terminal()&&!awaitingScope&&Objects.equals(levelDimension(mc),p.dimension())&&original!=null)events.remove(p.hud(),original);
     }
-    public static boolean hudRemovalDenied(UUID id) {context();Hud policy=hudPolicies.get(id);return !awaitingScope&&Objects.equals(ClientPresence.policy.dimension(),levelDimension(Minecraft.getInstance()))&&policy!=null&&policy.protect();}
-    public static boolean hudDrawDenied(UUID id) {context();Hud policy=hudPolicies.get(id);return !awaitingScope&&Objects.equals(ClientPresence.policy.dimension(),levelDimension(Minecraft.getInstance()))&&policy!=null&&policy.terminal();}
+    private static boolean hudCurrent(Hud hud,Object carrier){return hud!=null&&carrier!=null&&hud.carrier().get()==carrier&&!awaitingScope&&Objects.equals(policy.dimension(),levelDimension(Minecraft.getInstance()));}
+    public static boolean hudRemovalDenied(UUID id) {Minecraft mc=context();Hud hud=hudPolicies.get(id);return hudCurrent(hud,((dev.ronova.pro.mixin.ClientPresentation.BossAccess)mc.gui.getBossOverlay()).pro$events().get(id))&&hud.protect();}
+    public static boolean hudDrawDenied(UUID id) {Minecraft mc=context();return hudDrawDenied(id,((dev.ronova.pro.mixin.ClientPresentation.BossAccess)mc.gui.getBossOverlay()).pro$events().get(id));}
+    public static boolean hudDrawDenied(UUID id,Object carrier) {context();Hud hud=hudPolicies.get(id);return hudCurrent(hud,carrier)&&hud.terminal();}
+    public static boolean hudPacketDenied(net.minecraft.network.protocol.game.ClientboundBossEventPacket packet) {
+        context();boolean[] addition={false};
+        packet.dispatch(new net.minecraft.network.protocol.game.ClientboundBossEventPacket.Handler(){
+            @Override public void add(UUID id,net.minecraft.network.chat.Component name,float progress,net.minecraft.world.BossEvent.BossBarColor color,net.minecraft.world.BossEvent.BossBarOverlay overlay,boolean darken,boolean music,boolean fog){addition[0]=true;}
+        });
+        // ADD creates a new carrier. A previous UUID policy has no authority over that object.
+        return !addition[0]&&hudDrawDenied(((dev.ronova.pro.mixin.ClientPresentation.BossPacket)packet).pro$id());
+    }
     static void terminal(ProNetwork.Terminal p,Object source) {
         if(p==null||!current(source))return;
         if(terminalPolicy.accept(source,p.session(),p.scope(),p.dimension(),p.revision(),p.entityId(),p.entityUuid(),p.terminal())) {

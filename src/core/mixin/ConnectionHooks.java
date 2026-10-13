@@ -18,9 +18,6 @@ public abstract class ConnectionHooks {
     /** Mapped 1.20.1/Forge 47.4.22 target: sendPacket(Packet, PacketSendListener), SRG m_129520_. */
     @Shadow private void sendPacket(Packet<?> packet,PacketSendListener listener) { throw new AssertionError(); }
 
-    @Inject(method="sendPacket(Lnet/minecraft/network/protocol/Packet;Lnet/minecraft/network/PacketSendListener;)V",at=@At("RETURN"))
-    private void ronova$presentationRecipient(Packet<?> packet,PacketSendListener listener,CallbackInfo callback){dev.ronova.pro.ProRuntime.presentationPacketObserved((Connection)(Object)this,packet);}
-
     @Inject(method="sendPacket(Lnet/minecraft/network/protocol/Packet;Lnet/minecraft/network/PacketSendListener;)V",
             at=@At("HEAD"),cancellable=true)
     private void ronova$serializeProtocolSend(Packet<?> packet,PacketSendListener listener,CallbackInfo callback) {
@@ -28,6 +25,10 @@ public abstract class ConnectionHooks {
         if(current!=null&&!current.eventLoop().inEventLoop()) {
             current.eventLoop().execute(()->sendPacket(packet,listener));
             callback.cancel();
+            return;
         }
+        // Capture source/recipient before this write can overtake an old UUID policy.
+        // A requested write is not a delivery receipt; the scoped client reply still decides absence.
+        dev.ronova.pro.ProRuntime.presentationPacketObserved((Connection)(Object)this,packet);
     }
 }

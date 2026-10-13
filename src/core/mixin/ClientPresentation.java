@@ -30,9 +30,9 @@ public final class ClientPresentation {
     }
     @Mixin(net.minecraft.client.gui.components.BossHealthOverlay.class) public abstract static class BossDraw {
         @Inject(method="drawBar(Lnet/minecraft/client/gui/GuiGraphics;IILnet/minecraft/world/BossEvent;)V",at=@At("HEAD"),cancellable=true)
-        private void draw(net.minecraft.client.gui.GuiGraphics gui,int x,int y,net.minecraft.world.BossEvent boss,CallbackInfo ci) {if(ClientPresence.hudDrawDenied(boss.getId()))ci.cancel();}
+        private void draw(net.minecraft.client.gui.GuiGraphics gui,int x,int y,net.minecraft.world.BossEvent boss,CallbackInfo ci) {if(ClientPresence.hudDrawDenied(boss.getId(),boss))ci.cancel();}
         @Inject(method="update",at=@At("HEAD"),cancellable=true)
-        private void update(net.minecraft.network.protocol.game.ClientboundBossEventPacket packet,CallbackInfo ci) {if(ClientPresence.hudDrawDenied(((BossPacket)packet).pro$id()))ci.cancel();}
+        private void update(net.minecraft.network.protocol.game.ClientboundBossEventPacket packet,CallbackInfo ci) {if(ClientPresence.hudPacketDenied(packet))ci.cancel();}
         @Inject(method="reset",at=@At("HEAD"),cancellable=true)
         private void reset(CallbackInfo ci) {
             var events=((BossAccess)this).pro$events();boolean retained=false;

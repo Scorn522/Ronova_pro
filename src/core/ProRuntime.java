@@ -715,21 +715,61 @@ public final class ProRuntime implements AutoCloseable {
     List<net.minecraft.world.ticks.ScheduledTick<?>> archiveHeldTicks(WorldArchive owner,ServerLevel level,BlockPos low,BlockPos high,boolean fluid,boolean remove){
         requireArchive(owner);return worldControl.heldTicks(fluid?level.getFluidTicks():level.getBlockTicks(),low,high,remove);
     }
-    boolean archiveEntities(WorldArchive owner,ServerLevel level,BlockPos low,BlockPos high,net.minecraft.nbt.ListTag saved){
-        requireArchive(owner);Map<UUID,CompoundTag> wanted=new LinkedHashMap<>();
-        for(net.minecraft.nbt.Tag value:saved){CompoundTag data=((CompoundTag)value).copy();if(!data.hasUUID("UUID"))throw new IllegalStateException("WORLD_ENTITY_UUID_MISSING");
-            data.remove("Passengers");UUID uuid=data.getUUID("UUID");if(wanted.put(uuid,data)!=null)throw new IllegalStateException("WORLD_ENTITY_UUID_DUPLICATE");}
+    private static Map<UUID,CompoundTag> archiveEntityRows(net.minecraft.nbt.ListTag saved){
+        Map<UUID,CompoundTag> rows=new LinkedHashMap<>();
+        for(net.minecraft.nbt.Tag value:saved){
+            if(!(value instanceof CompoundTag original)||!original.hasUUID("UUID"))throw new IllegalStateException("WORLD_ENTITY_UUID_MISSING");
+            CompoundTag data=original.copy();data.remove("Passengers");
+            if(rows.put(data.getUUID("UUID"),data)!=null)throw new IllegalStateException("WORLD_ENTITY_UUID_DUPLICATE");
+        }
+        return rows;
+    }
+    private static CompoundTag archiveEntityFrame(Entity entity){
+        Access.EntityState actual=(Access.EntityState)entity;CompoundTag data=new CompoundTag();entity.saveWithoutId(data);
+        data.putString("id",net.minecraft.core.registries.BuiltInRegistries.ENTITY_TYPE.getKey(actual.pro$type()).toString());data.putUUID("UUID",actual.pro$uuid());data.remove("Passengers");
+        if(actual.pro$vehicle()!=null)data.putUUID("RonovaVehicle",((Access.EntityState)actual.pro$vehicle()).pro$uuid());return data;
+    }
+    private static boolean archiveInside(Entity entity,ServerLevel level,BlockPos low,BlockPos high){
+        Access.EntityState actual=(Access.EntityState)entity;BlockPos pos=actual.pro$blockPosition();
+        return actual.pro$level()==level&&actual.pro$removal()==null&&level.getEntity(actual.pro$uuid())==entity&&level.getEntity(actual.pro$id())==entity
+                &&pos.getX()>=low.getX()&&pos.getX()<=high.getX()&&pos.getY()>=low.getY()&&pos.getY()<=high.getY()&&pos.getZ()>=low.getZ()&&pos.getZ()<=high.getZ();
+    }
+    private static UUID archiveVehicle(CompoundTag data){return data!=null&&data.hasUUID("RonovaVehicle")?data.getUUID("RonovaVehicle"):null;}
+    private static boolean archivePosition(CompoundTag data,BlockPos low,BlockPos high){
+        var pos=data.getList("Pos",net.minecraft.nbt.Tag.TAG_DOUBLE);if(pos.size()!=3)return false;
+        double x=pos.getDouble(0),y=pos.getDouble(1),z=pos.getDouble(2);if(!Double.isFinite(x)||!Double.isFinite(y)||!Double.isFinite(z))return false;
+        BlockPos point=BlockPos.containing(x,y,z);return point.getX()>=low.getX()&&point.getX()<=high.getX()&&point.getY()>=low.getY()&&point.getY()<=high.getY()&&point.getZ()>=low.getZ()&&point.getZ()<=high.getZ();
+    }
+    private static boolean archiveBodyEquals(CompoundTag actual,CompoundTag desired){
+        if(desired==null)return false;CompoundTag body=actual.copy(),target=desired.copy();body.remove("RonovaVehicle");target.remove("RonovaVehicle");return body.equals(target);
+    }
+    boolean archiveEntities(WorldArchive owner,ServerLevel level,BlockPos low,BlockPos high,net.minecraft.nbt.ListTag saved,net.minecraft.nbt.ListTag expected){
+        requireArchive(owner);Map<UUID,CompoundTag> wanted=archiveEntityRows(saved),baseline=archiveEntityRows(expected);
+        for(CompoundTag desired:wanted.values())if(!archivePosition(desired,low,high))return false;
+        Map<UUID,Entity> current=new LinkedHashMap<>();Map<UUID,CompoundTag> observed=new HashMap<>();
+        for(Entity entity:level.getAllEntities())if(archiveInside(entity,level,low,high)){
+            UUID uuid=((Access.EntityState)entity).pro$uuid();if(current.put(uuid,entity)!=null)return false;
+            CompoundTag actual=archiveEntityFrame(entity),before=baseline.get(uuid),desired=wanted.get(uuid);observed.put(uuid,actual);
+            if(!actual.equals(before)&&(!archiveBodyEquals(actual,desired)
+                    ||!Objects.equals(archiveVehicle(actual),archiveVehicle(before))&&!Objects.equals(archiveVehicle(actual),archiveVehicle(desired))))return false;
+        }
+        // Looking elsewhere only detects a conflicting identity. It never grants authority to pull it back.
+        for(UUID uuid:wanted.keySet())if(!current.containsKey(uuid)){
+            for(ServerLevel candidate:server.getAllLevels())if(candidate.getEntity(uuid)!=null)return false;
+            if(baseline.containsKey(uuid)||wanted.get(uuid).getString("id").equals("minecraft:player"))return false;
+        }
         boolean settled=true;
-        for(Entity entity:List.copyOf(java.util.stream.StreamSupport.stream(level.getAllEntities().spliterator(),false).toList())){
-            Access.EntityState actual=(Access.EntityState)entity;BlockPos pos=actual.pro$blockPosition();
-            if(pos.getX()<low.getX()||pos.getX()>high.getX()||pos.getY()<low.getY()||pos.getY()>high.getY()||pos.getZ()<low.getZ()||pos.getZ()>high.getZ()||wanted.containsKey(actual.pro$uuid())||entity instanceof ServerPlayer)continue;
-            clearBody(entity);if(actual.pro$removal()==null||level.getEntity(actual.pro$uuid())==entity)settled=false;
+        for(var entry:current.entrySet())if(!wanted.containsKey(entry.getKey())&&!(entry.getValue() instanceof ServerPlayer)){
+            Entity entity=entry.getValue();
+            if(!archiveInside(entity,level,low,high)||!archiveEntityFrame(entity).equals(observed.get(entry.getKey())))return false;
+            clearBody(entity);Access.EntityState actual=(Access.EntityState)entity;
+            if(actual.pro$removal()==null||level.getEntity(actual.pro$uuid())==entity)settled=false;
         }
         if(!settled)return false;
         for(var entry:wanted.entrySet()){
-            UUID uuid=entry.getKey();CompoundTag data=entry.getValue();Entity entity=null;
-            for(ServerLevel candidate:server.getAllLevels()){entity=candidate.getEntity(uuid);if(entity!=null)break;}
-            if(entity==null&&data.getString("id").equals("minecraft:player")){settled=false;continue;}
+            UUID uuid=entry.getKey();CompoundTag data=entry.getValue();Entity entity=current.get(uuid);
+            if(entity!=null&&(!archiveInside(entity,level,low,high)||!archiveEntityFrame(entity).equals(observed.get(uuid)))){settled=false;continue;}
+            boolean alreadyDesired=entity!=null&&archiveBodyEquals(observed.get(uuid),data);
             boolean permitted=true;
             for(Binding binding:bindings.values())if(binding.records!=null&&binding.records.uuid.equals(uuid)&&binding.records.level==level&&binding.subject.terminal){
                 UUID groupId=groupMembers.get(binding.subject.id);Subject group=groupId==null?null:canonicalSubject(groupId);if(group!=null&&group.terminal){settled=false;permitted=false;break;}
@@ -738,18 +778,35 @@ public final class ProRuntime implements AutoCloseable {
                 for(Work previous:work.values())if(previous.binding!=null&&previous.binding.subject==binding.subject)fence(previous,"AUTHORIZED_WORLD_ROLLBACK");
             }
             if(!permitted)continue;
-            if(entity==null){entity=EntityType.loadEntityRecursive(data.copy(),level,created->created);if(entity==null||preventAdmission(entity)||!level.addWithUUID(entity)){settled=false;continue;}}
+            if(entity==null){
+                boolean collision=false;for(ServerLevel candidate:server.getAllLevels())collision|=candidate.getEntity(uuid)!=null;
+                if(collision||baseline.containsKey(uuid)||data.getString("id").equals("minecraft:player")){settled=false;continue;}
+                entity=EntityType.loadEntityRecursive(data.copy(),level,created->created);
+                if(entity==null){settled=false;continue;}
+                Access.EntityState created=(Access.EntityState)entity;
+                if(created.pro$level()!=level||created.pro$removal()!=null||!created.pro$uuid().equals(uuid)
+                        ||!net.minecraft.core.registries.BuiltInRegistries.ENTITY_TYPE.getKey(created.pro$type()).toString().equals(data.getString("id"))
+                        ||!archivePosition(archiveEntityFrame(entity),low,high)||preventAdmission(entity)||!level.addWithUUID(entity)){settled=false;continue;}
+                current.put(uuid,entity);
+            }
             Access.EntityState actual=(Access.EntityState)entity;
             String actualType=net.minecraft.core.registries.BuiltInRegistries.ENTITY_TYPE.getKey(actual.pro$type()).toString();if(!actualType.equals(data.getString("id"))||!actual.pro$uuid().equals(uuid)){settled=false;continue;}
             if(stoppedBody(entity)){settled=false;continue;}
-            if(actual.pro$level()!=level&&!worldControl.teleport(entity,level,actual.pro$position())){settled=false;continue;}
+            if(!archiveInside(entity,level,low,high)){settled=false;continue;}
             // The request owns this exact history record; normal foreign calls never get this field gate.
-            try(var gate=FieldPolicyGate.enter(entity)){worldControl.loadHistory(entity,data);}
-            if(entity instanceof ServerPlayer player){player.connection.teleport(player.getX(),player.getY(),player.getZ(),player.getYRot(),player.getXRot());player.inventoryMenu.broadcastFullState();}
+            if(!alreadyDesired)try(var gate=FieldPolicyGate.enter(entity)){worldControl.loadHistory(entity,data);}
+            if(!archiveInside(entity,level,low,high)||!archiveBodyEquals(archiveEntityFrame(entity),data))settled=false;
+            if(!alreadyDesired&&entity instanceof ServerPlayer player){player.connection.teleport(player.getX(),player.getY(),player.getZ(),player.getYRot(),player.getXRot());player.inventoryMenu.broadcastFullState();}
         }
-        if(settled)for(var entry:wanted.entrySet())if(entry.getValue().hasUUID("RonovaVehicle")){
-            Entity entity=level.getEntity(entry.getKey()),vehicle=level.getEntity(entry.getValue().getUUID("RonovaVehicle"));
-            if(entity!=null&&vehicle!=null&&entity!=vehicle&&!entity.startRiding(vehicle,true))settled=false;
+        if(settled)for(var entry:wanted.entrySet()){
+            Entity entity=current.get(entry.getKey());if(entity==null||!archiveInside(entity,level,low,high)){settled=false;continue;}
+            UUID vehicleId=archiveVehicle(entry.getValue());Entity previous=((Access.EntityState)entity).pro$vehicle();
+            if(vehicleId==null){if(previous!=null)try(var gate=FieldPolicyGate.enter(entity);var vehicleGate=FieldPolicyGate.enter(previous)){entity.stopRiding();}if(((Access.EntityState)entity).pro$vehicle()!=null)settled=false;continue;}
+            Entity vehicle=level.getEntity(vehicleId);
+            if(vehicle==previous&&vehicle!=null)continue;
+            if(vehicle==null||entity==vehicle||!wanted.containsKey(vehicleId)||!archiveInside(vehicle,level,low,high)){settled=false;continue;}
+            try(var gate=FieldPolicyGate.enter(entity);var vehicleGate=FieldPolicyGate.enter(vehicle)){if(!entity.startRiding(vehicle,true))settled=false;}
+            if(((Access.EntityState)entity).pro$vehicle()!=vehicle)settled=false;
         }
         publishPolicy();return settled;
     }
@@ -2567,7 +2624,7 @@ public final class ProRuntime implements AutoCloseable {
             Class.forName(SourceMaps.class.getName(),true,ProRuntime.class.getClassLoader());
             Class.forName(BackingPolicy.class.getName(),true,ProRuntime.class.getClassLoader());
             Class<?> bridge=Class.forName("dev.ronova.pro.bootstrap.TaskBridge",false,null);
-            if(!Integer.valueOf(54).equals(bridge.getMethod("abiVersion").invoke(null)))throw new IllegalStateException("INDEX_BRIDGE_ABI_MISMATCH");
+            if(!Integer.valueOf(55).equals(bridge.getMethod("abiVersion").invoke(null)))throw new IllegalStateException("INDEX_BRIDGE_ABI_MISMATCH");
             var lookup=java.lang.invoke.MethodHandles.lookup();
             var field=lookup.findStatic(ProRuntime.class,"preventFieldWrite",java.lang.invoke.MethodType.methodType(boolean.class,Object.class,Class.class,String.class,Object.class));
             var dispatch=lookup.findStatic(ProRuntime.class,"preventDispatch",java.lang.invoke.MethodType.methodType(boolean.class,Object.class,String.class,Object.class));

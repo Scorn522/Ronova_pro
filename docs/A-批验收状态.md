@@ -1,5 +1,19 @@
 # Ronova Pro 当前进度
 
+## 2026-10-13：C 接续——回调退役、世界接续与可编译驱动
+
+接续 `8948f3b`，当前 Java ABI 55 / Native ABI 52 / Storage ABI 3 / Journal 6；用户态 GNU C23 / GNU C++23、Java17，独立 Windows 驱动与部署工具 C17。本轮工作包代码写齐并统一构建；不把源码或构建写成完整 C/B 已通过。
+
+JVMTI：真实回调与已包裹操作计入同一在途生命周期，关闭后拒绝新进入，在途 Dispose 返回实际 NOT_AVAILABLE；最后回调退出后由正常 daemon 工作线程归还映像 pin/来源租约。只有全部来源已停且无未拦截扩展生命周期的实际环境自动 Dispose；共享/未知环境保留。危险线程动作再核对真实帧与方法位置，方法/ConstMethod/常量池版本在真实交接前保留；实际 Native 写者的 null=unknown 贯通指令与 Java 来源。未知/非 Mod 回调改动控制载体也回到原控制图像与 Task/Object 守卫，普通组外图像不全量重入；新增守卫的过早登记错误已在实际启动检查后修正。
+
+字段与世界：恢复请求固定原槽值，已经完成的槽不反复覆盖，后来合法变化保留；继承/接口静态字段完整读取，但未显式选择的共享声明类只保留引用，输出 PARTIAL。世界工作持久保存当前原基线 `.apply.nbt`、锁定真实生成条件 `generation.nbt` 和生成结果 `.seed.nbt`，实体只在准确原世界/区域/身份与 NBT 基线上恢复，跨区/跨维度/换身不会按 UUID 拉回。实际 normal chunk/entity/player writer 保存及 flush 后才推进区块游标；重启仍未验收。HUD 策略绑定原 LerpingBossEvent 身份，原 UUID 策略不阻止后来 ADD 创建的新载体；发送来源在实际 channel 写入前登记，仍以当前 scoped 客户端缺席回复判断结果。
+
+Windows：源内补正确 kernel access 常量，Flt 配置/注册/启动失败返回原状态并回滚。集中 WDK 工程与显式安装/查询/加载/非强制卸载/升级/移除工具已写齐；只管理准确 RonovaHost 包，安装不自动加载，活跃会话拒绝卸载，原权限和系统失败保留。使用[微软提供的 WDK/SDK NuGet](https://learn.microsoft.com/en-us/windows-hardware/drivers/install-the-wdk-using-nuget) 10.0.26100.6584 头库及现有 Zig/LLD，实际编译链接出 35840 字节 `RonovaHost.sys` 与 182784 字节 `RonovaHostManage.exe`；这是源码编译结果，正式 VS/WDK MSBuild 工程未执行。未生成 CAT/证书、未签名、未安装或加载，模板两 altitude 仍待真实配置。
+
+实际结果：最终主包/既有夹具 build PASS 18秒，`build-c-java55-native52-agent-order-fixed-20261013.log`；原 Native 前置声明失败与 premain 登记顺序失败日志保留。既有实际 Host/JVMTI 入口复查退出0，`c-host-jvmti-native52-fixed-20261013.log`（创建/句柄、GetEnv、回调替换/关闭/Dispose、JNI表保护）；独立 JVM 无真实目标 Mod 登记，不算整组退役或游戏结果。内核编译/链接记录 `build-c-driver52-wdk-rights-20261013.log`，部署工具修正后 PASS `build-c-driver52-manager-fixed-20261013.log`，没有执行部署命令。HUD/世界历史与重启尚无本候选实际结果；可变参数扩展事件、同步堆 producer dispatch、缓存原表/旧环境、未观察内部写者、既有映射/句柄等仍是明确后端缺口，C 整体未完成。旧53/50 run5不计入本候选菜单/世界；最后记录仍为资源/字体与网络信息。本地 WIP 在 `distribution/candidate-c-java55-native52-wip-20261013`，其 unsigned-driver 产物不能视作已部署的驱动包。源码与简要状态同步 Git，产物、依赖和原始日志留本地。
+
+---
+
 ## 2026-10-13：C 接续——54/51 用户态接线与自编 Windows 驱动源码
 
 当前主源 Java ABI 54 / Native ABI 51 / Storage ABI 3 / Journal 6；用户态仍为 GNU C23 / GNU C++23、Java 17，新增内核项目使用 WDK C17。尚未取得最新 54/51 游戏收口，C 整体与 B 仍未完成。

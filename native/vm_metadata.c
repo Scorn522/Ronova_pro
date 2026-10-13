@@ -463,7 +463,7 @@ static int code_vm_snapshot(JNIEnv *env,jmethodID method,CodeVMMethod *version,C
 }
 /* OpenJDK 17 Method::native_function_offset is sizeof(Method). The size and
  * ConstMethod layout below come from this loaded VM's exported metadata. */
-static int code_vm_native_function(JNIEnv *env,jmethodID method,void **function){
+static int code_vm_native_binding(JNIEnv *env,jmethodID method,void **function,uintptr_t identity[3]){
     jint modifiers=0;CodeVMMethod version;CodePool pool;memset(&version,0,sizeof(version));memset(&pool,0,sizeof(pool));
     uintptr_t first=0,last=0;int ready=(*native_ti)->GetMethodModifiers(native_ti,method,&modifiers)==JVMTI_ERROR_NONE&&(modifiers&0x0100)!=0;
     if(ready)ready=code_vm_snapshot(env,method,&version,&pool,NULL,NULL)&&version.codeLength==0
@@ -475,6 +475,7 @@ static int code_vm_native_function(JNIEnv *env,jmethodID method,void **function)
         ready=code_vm_read(at,&first,sizeof(first))&&code_vm_unchanged(method,&version)
                 &&code_vm_read(at,&last,sizeof(last))&&first==last;
     }
-    free(version.handlers);code_pool_free(&pool);
-    if(ready)*function=(void*)first;return ready;
+    if(ready){*function=(void*)first;if(identity){identity[0]=version.method;identity[1]=version.constantMethod;identity[2]=version.constants;}}
+    free(version.handlers);code_pool_free(&pool);return ready;
 }
+static int code_vm_native_function(JNIEnv *env,jmethodID method,void **function){return code_vm_native_binding(env,method,function,NULL);}

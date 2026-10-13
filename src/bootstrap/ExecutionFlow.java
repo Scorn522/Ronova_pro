@@ -224,7 +224,7 @@ final class ExecutionFlow {
             selector=(String)row[0];locals=(Integer)row[1];arguments=((int[])row[2]).clone();
             int[][] original=(int[][])row[3];operations=new int[original.length][];for(int i=0;i<original.length;i++)operations[i]=original[i].clone();
             Module[][] supplied=(Module[][])row[4];sources=new Sources[supplied.length];
-            for(int i=0;i<supplied.length;i++)sources[i]=supplied[i].length==0?NONE:join(new Sources(supplied[i],false));
+            for(int i=0;i<supplied.length;i++)sources[i]=supplied[i].length==0?NONE:moduleSources(supplied[i]);
             String[][] suppliedFields=(String[][])row[6];fields=new String[suppliedFields.length][];for(int i=0;i<fields.length;i++)fields[i]=suppliedFields[i]==null?null:suppliedFields[i].clone();
             constructor=(Boolean)row[7];
             int[][] positions=(int[][])row[5];Map<Integer,Integer> selected=new TraceMap<>();for(int[] position:positions)selected.put(position[0],position[1]);sites=Map.copyOf(selected);
@@ -283,6 +283,10 @@ final class ExecutionFlow {
         Module[] selected=new Module[modules.length];int count=0;
         for(Module module:modules)if(module!=null)selected[count++]=module;
         return count==selected.length?selected:Arrays.copyOf(selected,count);
+    }
+    private static Sources moduleSources(Module[] modules){
+        boolean unknown=false;for(Module module:modules)if(module==null){unknown=true;break;}
+        return join(new Sources(nonNullModules(modules),unknown));
     }
     private static Sources source(Cell value){return value==null?UNKNOWN:join(value.sources(),value.alias()==null?NONE:value.alias().effects);}
     private static void bind(Alias alias,Object actual){

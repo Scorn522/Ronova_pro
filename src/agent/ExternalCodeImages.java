@@ -690,11 +690,12 @@ final class ExternalCodeImages {
         }
         return new ExecutionSources(executionImage(bytes,selected),Map.copyOf(fields),values.toArray(Object[][]::new));
     }
-    // Execution propagation carries stoppable producers, just as makeBound does
-    // for an actual declaring Module. Retain every patch (including framework
-    // and our own edits) in History for overlapping-edit/replay decisions.
+    // Execution propagation carries actual producers and the existing null
+    // unknown marker. An opaque Native writer does not become a known sole
+    // producer when its changed body is later woven into Java execution.
+    // Framework and our own edits remain in History for replay decisions.
     private static Module[] executionOwners(Module[] owners){
-        return Arrays.stream(owners).filter(RecoveryAgent::producerModule).toArray(Module[]::new);
+        return Arrays.stream(owners).filter(owner->owner==null||RecoveryAgent.producerModule(owner)).toArray(Module[]::new);
     }
     private static ExternalCodeFlow.Image executionImage(byte[] bytes,Encoded selected){
         if(selected==null)return acceptedExecution(bytes,Map.of());Map<String,Module[][]> methods=new LinkedHashMap<>();Map<String,List<ExternalCodeFlow.ControlChange>> comparisons=new LinkedHashMap<>();

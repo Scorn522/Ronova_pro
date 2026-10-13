@@ -91,7 +91,7 @@ public final class RecoveryAgent {
             bootstrap=new JarFile(Path.of(argument).toAbsolutePath().normalize().toFile());
             api.appendToBootstrapClassLoaderSearch(bootstrap);
             bridge=Class.forName("dev.ronova.pro.bootstrap.TaskBridge",true,null);
-            if(!Integer.valueOf(54).equals(bridge.getMethod("abiVersion").invoke(null)))throw new IllegalStateException("TASK_BRIDGE_ABI_MISMATCH");
+            if(!Integer.valueOf(55).equals(bridge.getMethod("abiVersion").invoke(null)))throw new IllegalStateException("TASK_BRIDGE_ABI_MISMATCH");
             Class.forName("dev.ronova.pro.bootstrap.SourceMapBridge",true,null);
             // Default-Map guards test UUID keys while class-loading maps are
             // active. Resolve that type before publishing the guarded methods.
@@ -111,7 +111,7 @@ public final class RecoveryAgent {
             Class.forName("dev.ronova.pro.bootstrap.ControlBridge$ProducerFrame",false,null);
             Class.forName("dev.ronova.pro.bootstrap.EventFaultBridge",true,null);
             Class<?> control=Class.forName("dev.ronova.pro.bootstrap.ControlBridge",true,null);
-            if(!Integer.valueOf(54).equals(control.getMethod("abiVersion").invoke(null)))throw new IllegalStateException("CONTROL_BRIDGE_ABI_MISMATCH");
+            if(!Integer.valueOf(55).equals(control.getMethod("abiVersion").invoke(null)))throw new IllegalStateException("CONTROL_BRIDGE_ABI_MISMATCH");
             Module base=Object.class.getModule(),ours=RecoveryAgent.class.getModule();
             api.redefineModule(base,Set.of(bridge.getModule()),Map.of(
                     "jdk.internal.org.objectweb.asm",Set.of(ours),"jdk.internal.org.objectweb.asm.commons",Set.of(ours),
@@ -331,9 +331,16 @@ public final class RecoveryAgent {
                     }
                 }
             };
-            nativeFinalTransformer=objectTransformer;
+            nativeFinalTransformer=new ClassFileTransformer(){
+                @Override public byte[] transform(Module module,ClassLoader loader,String name,Class<?> actual,ProtectionDomain domain,byte[] bytes)throws java.lang.instrument.IllegalClassFormatException{
+                    byte[] tasks=taskTransformer.transform(module,loader,name,actual,domain,bytes);
+                    byte[] objects=objectTransformer.transform(module,loader,name,actual,domain,tasks==null?bytes:tasks);
+                    return objects==null?tasks:objects;
+                }
+            };
             control.getMethod("install",Class.class,ClassFileTransformer[].class).invoke(null,RecoveryAgent.class,
                     new ClassFileTransformer[]{controlImages,taskTransformer,objectTransformer});
+            ControlImages.protect(nativeFinalTransformer);
             resourceBridge=Class.forName("dev.ronova.pro.bootstrap.ResourceBridge",true,null);
             resourceBridge.getMethod("installBufferWrap",Class.class).invoke(null,RecoveryAgent.class);
             definitionBridge=Class.forName("dev.ronova.pro.bootstrap.DefinitionBridge",true,null);
@@ -595,10 +602,12 @@ public final class RecoveryAgent {
         if(original==null||bytes==null||writers==null)throw new SecurityException("ACTUAL_NATIVE_IMAGE_PAIR_REQUIRED");
         if(name==null)name=new jdk.internal.org.objectweb.asm.ClassReader(bytes).getClassName();
         if(!name.equals(new jdk.internal.org.objectweb.asm.ClassReader(original).getClassName())||!name.equals(new jdk.internal.org.objectweb.asm.ClassReader(bytes).getClassName()))return new byte[]{0,0,0,0};
-        // JPLIS has already run our Java chain. Re-enter only for a separately attributed producer callback.
-        if(Arrays.stream(writers).noneMatch(RecoveryAgent::producerModule))return bytes;
+        // Ordinary group-external images keep the original chain. Control carriers must
+        // retain their actual guards even when a changed callback has unknown/non-Mod writers.
+        boolean producer=Arrays.stream(writers).anyMatch(RecoveryAgent::producerModule);
+        if(!producer&&!controlImages.critical(module,loader,name,actual))return bytes;
         try{
-            ExternalCodeImages.nativeEncoded(loader,name,original,bytes,writers);
+            if(producer)ExternalCodeImages.nativeEncoded(loader,name,original,bytes,writers);
             byte[] baseline=controlImages.transform(module,loader,name,actual,domain,original);
             if(baseline==null)baseline=controlImages.transform(module,loader,name,actual,domain,bytes);
             byte[] current=baseline==null?bytes:baseline;

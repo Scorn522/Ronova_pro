@@ -1,6 +1,7 @@
-; Driver-source package. Altitudes are intentionally unassigned below: replace
-; them with the actual allocated deployment values before signing/installing.
-; No setup script runs this INF, starts this service or changes TestSigning.
+; Driver-source template. Altitudes stay unassigned here. Build-RonovaHost.ps1
+; stages a separate configured INF only with explicit actual deployment values.
+; The developer management tool runs only by explicit command; it never changes
+; TestSigning, generates certificates or automatically starts this service.
 [Version]
 Signature="$WINDOWS NT$"
 Class=SecurityEnhancer
