@@ -21,6 +21,12 @@ public final class ClientBridge {
     private static final Map<Key,ReloadWork> RELOAD_WORK=new HashMap<>();
     private static final Map<Key,UiFields> UI_OWNERS=new HashMap<>();
     private static final ThreadLocal<UiRetirement> UI_RETIRING=new ThreadLocal<>();
+    private static final String TOAST_COMPONENT="net.minecraft.client.gui.components.toasts.ToastComponent",TOAST_INSTANCE=TOAST_COMPONENT+"$ToastInstance";
+    private static final String TOAST="Lnet/minecraft/client/gui/components/toasts/Toast;";
+    private static final Map<Key,ToastRegistry> TOASTS=new HashMap<>();
+    private static final ClassValue<ToastFields> TOAST_FIELDS=new ClassValue<>(){
+        protected ToastFields computeValue(Class<?> type){try{return new ToastFields(type);}catch(ReflectiveOperationException unavailable){throw new IllegalStateException("CLIENT_TOAST_FIELDS_UNAVAILABLE",unavailable);}}
+    };
     private static final String OVERLAY_MANAGER="net.minecraftforge.client.gui.overlay.GuiOverlayManager",OVERLAY_EVENT="net.minecraftforge.client.event.RegisterGuiOverlaysEvent";
     private static final String OVERLAY_NAMED="net.minecraftforge.client.gui.overlay.NamedGuiOverlay",OVERLAY_CALLBACK="net.minecraftforge.client.gui.overlay.IGuiOverlay";
     private static final String OVERLAY_REGISTER="(Lnet/minecraftforge/client/event/RegisterGuiOverlaysEvent$Ordering;Lnet/minecraft/resources/ResourceLocation;Ljava/lang/String;Lnet/minecraftforge/client/gui/overlay/IGuiOverlay;)V";
@@ -129,9 +135,12 @@ public final class ClientBridge {
     }
     private static final class Scope {
         final Scope parent;final Module[] sources;final Class<?> type;final String method;final Thread thread;
-        final OverlaySlot overlay;boolean ended;
+        final OverlaySlot overlay;final Object toast,toastInstance;final boolean sourcesUnknown;boolean ended;
         Scope(Scope parent,Module[] sources,StackWalker.StackFrame frame){this(parent,sources,frame,null);}
-        Scope(Scope parent,Module[] sources,StackWalker.StackFrame frame,OverlaySlot overlay){this.parent=parent;this.sources=sources;type=frame.getDeclaringClass();method=frame.getMethodName();thread=Thread.currentThread();this.overlay=overlay;}
+        Scope(Scope parent,Module[] sources,StackWalker.StackFrame frame,OverlaySlot overlay){this(parent,sources,frame,overlay,null);}
+        Scope(Scope parent,Module[] sources,StackWalker.StackFrame frame,OverlaySlot overlay,Object toast){this(parent,sources,frame,overlay,toast,null);}
+        Scope(Scope parent,Module[] sources,StackWalker.StackFrame frame,OverlaySlot overlay,Object toast,Object toastInstance){this(parent,sources,frame,overlay,toast,toastInstance,false);}
+        Scope(Scope parent,Module[] sources,StackWalker.StackFrame frame,OverlaySlot overlay,Object toast,Object toastInstance,boolean sourcesUnknown){this.parent=parent;this.sources=sources;type=frame.getDeclaringClass();method=frame.getMethodName();thread=Thread.currentThread();this.overlay=overlay;this.toast=toast;this.toastInstance=toastInstance;this.sourcesUnknown=sourcesUnknown;}
     }
     private static final class Ref<T> extends WeakReference<T>{
         Ref(T object){super(object);}
@@ -154,6 +163,43 @@ public final class ClientBridge {
         agent();synchronized(SOURCES){
             for(Role role:ROLES)if(role.name().equals(name)&&role.loader().get()==loader){if(role.module().get()!=module)throw new IllegalStateException("CLIENT_ROLE_MODULE_CHANGED");return;}
             ROLES.add(new Role(name,new Ref<>(loader),new Ref<>(module)));
+        }
+    }
+    private static final class ToastFields {
+        final Class<?> type,instanceType;final Field minecraft,queued,visible,occupied,instanceOwner,toast,index,count,visibility,hidden,minecraftToasts;final UiFields ui;
+        ToastFields(Class<?> type)throws ReflectiveOperationException{
+            this.type=type;minecraft=uiField(type,"minecraft","f_94914_","Lnet/minecraft/client/Minecraft;",false);
+            queued=uiField(type,"queued","f_94916_","Ljava/util/Deque;",false);visible=uiField(type,"visible","f_94915_","Ljava/util/List;",false);
+            occupied=uiField(type,"occupiedSlots","f_242998_","Ljava/util/BitSet;",false);
+            instanceType=Class.forName(TOAST_INSTANCE,false,type.getClassLoader());
+            instanceOwner=uiField(instanceType,"this$0","f_94930_","Lnet/minecraft/client/gui/components/toasts/ToastComponent;",false);
+            toast=uiField(instanceType,"toast","f_94931_",TOAST,false);index=uiField(instanceType,"index","f_242993_","I",false);count=uiField(instanceType,"slotCount","f_243000_","I",false);
+            visibility=uiField(instanceType,"visibility","f_94934_","Lnet/minecraft/client/gui/components/toasts/Toast$Visibility;",false);hidden=uiField(visibility.getType(),"HIDE","HIDE",visibility.getType().descriptorString(),true);
+            Class<?> client=minecraft.getType();ui=UI_FIELDS.get(client);minecraftToasts=uiField(client,"toast","f_91003_","Lnet/minecraft/client/gui/components/toasts/ToastComponent;",false);
+            if(!role(type)||!role(instanceType)||!role(client)||instanceType.getModule()!=type.getModule()||instanceOwner.getType()!=type||minecraftToasts.getType()!=type
+                    ||!Modifier.isFinal(queued.getModifiers())||!Modifier.isFinal(visible.getModifiers())||!Modifier.isFinal(occupied.getModifiers())
+                    ||!Modifier.isFinal(toast.getModifiers())||!Modifier.isFinal(index.getModifiers())||!Modifier.isFinal(count.getModifiers()))throw new IllegalStateException("CLIENT_TOAST_LAYOUT_CHANGED");
+            overlayProtect(this,minecraft,queued,visible,occupied,instanceOwner,toast,index,count,visibility,hidden,minecraftToasts);
+        }
+    }
+    private static final class ToastRegistry {
+        final ToastFields fields;final Ref<Object> owner,client;final Ref<Deque<?>> queued;final Ref<List<?>> visible;final Ref<BitSet> occupied;
+        final Map<Key,ToastSlot> slots=new HashMap<>();int frames;String pending="";
+        ToastRegistry(ToastFields fields,Object owner,Object client,Deque<?> queued,List<?> visible,BitSet occupied){
+            this.fields=fields;this.owner=new Ref<>(owner);this.client=new Ref<>(client);this.queued=new Ref<>(queued);this.visible=new Ref<>(visible);this.occupied=new Ref<>(occupied);
+            overlayProtect(this,this.owner,this.client,this.queued,this.visible,this.occupied,slots);
+        }
+    }
+    private static final class ToastSlot {
+        final Ref<Object> toast;Module[] modules;boolean unknown,queued,visible;
+        ToastSlot(Object toast,Module[] modules,boolean unknown){this.toast=new Ref<>(toast);this.modules=modules;this.unknown=unknown;overlayProtect(this,this.toast,modules);}
+    }
+    private static final class ToastCall {
+        final ToastRegistry registry;final Object owner,toast;final Module[] modules;final boolean unknown,frame;final Scope scope;
+        final Class<?> type;final String method,descriptor;final Thread thread=Thread.currentThread();boolean ended;
+        ToastCall(ToastRegistry registry,Object owner,Object toast,Module[] modules,boolean unknown,boolean frame,Scope scope,StackWalker.StackFrame at){
+            this.registry=registry;this.owner=owner;this.toast=toast;this.modules=modules;this.unknown=unknown;this.frame=frame;this.scope=scope;
+            type=at.getDeclaringClass();method=at.getMethodName();descriptor=at.getDescriptor();overlayProtect(this,modules);
         }
     }
     private static boolean role(Class<?> type){synchronized(SOURCES){for(Role role:ROLES)if(role.name().equals(type.getName())&&role.loader().get()==type.getClassLoader()&&role.module().get()==DefinitionBridge.module(type))return true;return false;}}
@@ -238,7 +284,168 @@ public final class ClientBridge {
             fields=uiOwner(owner,frame);if(fields.thread.get(owner)!=Thread.currentThread())throw new IllegalStateException("CLIENT_UI_MAIN_THREAD_REQUIRED");
         }catch(ReflectiveOperationException|IllegalStateException unavailable){uiFailure(owner,new Module[0],unavailable);return;}
         UiRetirement active=UI_RETIRING.get();if(active!=null&&active.owner==owner)return;
-        retireOverlays();retirePresentation(owner,fields,false);retirePresentation(owner,fields,true);
+        retireOverlays();retirePresentation(owner,fields,false);retirePresentation(owner,fields,true);retireToasts(owner);
+    }
+    private static boolean toastNullSource(Module[] sources){for(Module source:sources)if(source==null)return true;return false;}
+    private static Module[] toastSources(ToastSlot slot){
+        Object toast=slot.toast.get();Module[] actual=ControlBridge.objectSources(toast);
+        slot.unknown|=toast==null||ControlBridge.objectSourceUnknown(toast)||toastNullSource(actual);
+        slot.modules=union(slot.modules,actual);overlayProtect(slot.modules);return slot.modules;
+    }
+    private static ToastRegistry toastRegistry(Object owner,Class<?> type)throws ReflectiveOperationException{
+        if(owner==null||owner.getClass()!=type||!type.getName().equals(TOAST_COMPONENT)||!role(type))throw new SecurityException("ACTUAL_TOAST_COMPONENT_REQUIRED");
+        synchronized(SOURCES){ToastRegistry prior=TOASTS.get(new Key(owner,false));if(prior!=null)return prior;}
+        ToastFields fields=TOAST_FIELDS.get(type);Object client=fields.minecraft.get(owner),queued=fields.queued.get(owner),visible=fields.visible.get(owner),occupied=fields.occupied.get(owner);
+        if(client==null||client.getClass()!=fields.ui.type||queued==null||queued.getClass()!=ArrayDeque.class||visible==null||visible.getClass()!=ArrayList.class
+                ||occupied==null||occupied.getClass()!=BitSet.class)throw new IllegalStateException("CLIENT_TOAST_ACTUAL_CONTAINERS_REQUIRED");
+        ToastRegistry registry=new ToastRegistry(fields,owner,client,(Deque<?>)queued,(List<?>)visible,(BitSet)occupied);
+        synchronized(SOURCES){ToastRegistry prior=TOASTS.get(new Key(owner,false));if(prior!=null)return prior;TOASTS.put(new Key(owner,true),registry);FAILURES.remove(new Key(owner,false));}return registry;
+    }
+    private static boolean toastActual(ToastRegistry registry,boolean ownerThread)throws ReflectiveOperationException{
+        Object owner=registry.owner.get(),client=registry.client.get();ToastFields fields=registry.fields;
+        if(owner==null||client==null||fields.minecraft.get(owner)!=client||fields.ui.instance.get(null)!=client||fields.minecraftToasts.get(client)!=owner){registry.pending="CLIENT_TOAST_ACTUAL_OWNER_CHANGED";return false;}
+        if(fields.queued.get(owner)!=registry.queued.get()||fields.visible.get(owner)!=registry.visible.get()||fields.occupied.get(owner)!=registry.occupied.get()){
+            registry.pending="CLIENT_TOAST_ACTUAL_CONTAINERS_CHANGED";return false;
+        }
+        if(ownerThread&&fields.ui.thread.get(client)!=Thread.currentThread()){registry.pending="CLIENT_TOAST_OWNER_THREAD_PENDING";return false;}return true;
+    }
+    private static ToastSlot toastSlot(ToastRegistry registry,Object toast,Module[] modules,boolean unknown){
+        Key lookup=new Key(toast,false);ToastSlot slot=registry.slots.get(lookup);
+        if(slot==null){slot=new ToastSlot(toast,modules,unknown);registry.slots.put(new Key(toast,true),slot);}
+        else{slot.modules=union(slot.modules,modules);slot.unknown|=unknown;overlayProtect(slot.modules);}return slot;
+    }
+    private static ToastCall toastCall(ToastRegistry registry,Object owner,Object toast,Module[] modules,boolean unknown,boolean frame,StackWalker.StackFrame at){return toastCall(registry,owner,toast,modules,unknown,frame,null,at);}
+    private static ToastCall toastCall(ToastRegistry registry,Object owner,Object toast,Module[] modules,boolean unknown,boolean frame,Object instance,StackWalker.StackFrame at){
+        Scope scope=null;
+        if(!frame){scope=new Scope(CURRENT.get(),union(modules,currentSources()),at,null,toast,instance,unknown);synchronized(SOURCES){ACTIVE.add(scope);overlayProtect(scope,scope.sources);}CURRENT.set(scope);}
+        else if(registry!=null)synchronized(SOURCES){registry.frames++;}
+        return new ToastCall(registry,owner,toast,modules,unknown,frame,scope,at);
+    }
+    private static ToastCall actualToastCall(Object token,StackWalker.StackFrame at){
+        if(!(token instanceof ToastCall call)||call.thread!=Thread.currentThread()||call.type!=at.getDeclaringClass()||!call.method.equals(at.getMethodName())||!call.descriptor.equals(at.getDescriptor()))throw new SecurityException("ACTUAL_TOAST_INVOCATION_REQUIRED");return call;
+    }
+    public static Object toastAdding(Object owner,Object toast){
+        var at=boundary();if(!clientMember(at,TOAST_COMPONENT,"addToast","m_94922_","("+TOAST+")V"))throw new SecurityException("ACTUAL_TOAST_PUBLICATION_REQUIRED");
+        Module[] actual=ControlBridge.objectSources(toast),invoking=ControlBridge.invokingSources(),modules=union(actual,invoking,currentSources());
+        boolean unknown=ControlBridge.objectSourceUnknown(toast)||ControlBridge.sourceUnknown()||toastNullSource(actual)||toastNullSource(invoking);
+        if(stopped(modules)||ControlBridge.stoppedEffects())return Boolean.FALSE;ToastRegistry registry=null;
+        try{registry=toastRegistry(owner,at.getDeclaringClass());}catch(ReflectiveOperationException|IllegalStateException unavailable){uiFailure(owner,modules,unavailable);}
+        return toastCall(registry,owner,toast,modules,unknown,false,at);
+    }
+    public static boolean toastWriting(Object queued,Object toast,Object token){
+        var at=boundary();ToastCall call=actualToastCall(token,at);
+        if(call.ended||toast!=call.toast||!clientMember(at,TOAST_COMPONENT,"addToast","m_94922_","("+TOAST+")V"))throw new SecurityException("ACTUAL_TOAST_QUEUE_WRITE_REQUIRED");
+        if(call.registry!=null&&queued!=call.registry.queued.get()){call.registry.pending="CLIENT_TOAST_ACTUAL_CONTAINERS_CHANGED";return false;}
+        return !stopped(union(call.modules,ControlBridge.objectSources(toast)))&&!ControlBridge.stoppedEffects();
+    }
+    public static void toastAdded(Object queued,Object toast,Object token,boolean published){
+        var at=boundary();ToastCall call=actualToastCall(token,at);if(call.ended||toast!=call.toast)throw new SecurityException("ACTUAL_TOAST_PUBLICATION_TAIL_REQUIRED");
+        if(!published)return;Module[] actual=ControlBridge.objectSources(toast),modules=union(call.modules,actual);record(toast,modules);
+        if(call.registry==null)return;
+        synchronized(SOURCES){
+            if(queued!=call.registry.queued.get()){call.registry.pending="CLIENT_TOAST_ACTUAL_CONTAINERS_CHANGED";return;}
+            ToastSlot slot=toastSlot(call.registry,toast,modules,call.unknown||ControlBridge.objectSourceUnknown(toast)||toastNullSource(actual));slot.queued=true;
+        }
+    }
+    private static boolean toastActive(Object toast){for(Scope scope:ACTIVE)if(!scope.ended&&scope.toast==toast)return true;return false;}
+    private static boolean toastRetirable(ToastSlot slot){return exclusive(toastSources(slot))&&!slot.unknown&&!toastActive(slot.toast.get());}
+    public static Object toastFrameEntering(Object owner){
+        var at=boundary();if(!clientMember(at,TOAST_COMPONENT,"render","m_94920_","(Lnet/minecraft/client/gui/GuiGraphics;)V"))throw new SecurityException("ACTUAL_TOAST_FRAME_REQUIRED");ToastRegistry registry=null;
+        try{registry=toastRegistry(owner,at.getDeclaringClass());synchronized(SOURCES){if(registry.frames==0)toastMaintain(registry,true);}}
+        catch(ReflectiveOperationException|IllegalStateException|ConcurrentModificationException unavailable){uiFailure(owner,new Module[0],unavailable);}
+        return toastCall(registry,owner,null,new Module[0],false,true,at);
+    }
+    public static Object toastQueued(Object owner,Object toast){
+        var at=boundary();if(!clientMember(at,TOAST_COMPONENT,"lambda$render$1","m_243085_","("+TOAST+")Z"))throw new SecurityException("ACTUAL_TOAST_PROMOTION_REQUIRED");
+        ToastRegistry registry=null;Module[] modules=ControlBridge.objectSources(toast);boolean unknown=ControlBridge.objectSourceUnknown(toast)||toastNullSource(modules);
+        try{registry=toastRegistry(owner,at.getDeclaringClass());synchronized(SOURCES){
+            ToastSlot slot=toastSlot(registry,toast,modules,unknown);modules=toastSources(slot);unknown=slot.unknown;
+            // TRUE removes just this queued entry through the original Deque.removeIf.
+            if(toastActual(registry,true)&&toastContains(registry.queued.get(),toast)){slot.queued=true;if(toastRetirable(slot))return Boolean.FALSE;}
+        }}catch(ReflectiveOperationException|IllegalStateException unavailable){uiFailure(owner,modules,unavailable);}
+        return toastCall(registry,owner,toast,modules,unknown,false,at);
+    }
+    public static Object toastDrawing(Object instance){
+        var at=boundary();if(!clientMember(at,TOAST_INSTANCE,"render","m_280442_","(ILnet/minecraft/client/gui/GuiGraphics;)Z")||instance==null||instance.getClass()!=at.getDeclaringClass())throw new SecurityException("ACTUAL_TOAST_INSTANCE_DRAW_REQUIRED");
+        ToastRegistry registry=null;Object owner=null,toast=null;Module[] modules=new Module[0];boolean unknown=false;
+        try{
+            Class<?> component=at.getDeclaringClass().getEnclosingClass();ToastFields fields=TOAST_FIELDS.get(component);owner=fields.instanceOwner.get(instance);toast=fields.toast.get(instance);
+            registry=toastRegistry(owner,component);synchronized(SOURCES){
+                ToastSlot slot=toastSlot(registry,toast,ControlBridge.objectSources(toast),ControlBridge.objectSourceUnknown(toast));modules=toastSources(slot);unknown=slot.unknown;
+                // Only a current, nonoverlapping instance can ask the original owner to release its slots.
+                if(toastActual(registry,true)&&toastContains(registry.visible.get(),instance)){slot.visible=true;if(toastRetirable(slot)&&toastRanges(registry))return Boolean.FALSE;}
+            }
+        }catch(ReflectiveOperationException|IllegalStateException unavailable){uiFailure(instance,modules,unavailable);}
+        return toastCall(registry,owner,toast,modules,unknown,false,instance,at);
+    }
+    /** A stopped execution may skip a shared Toast's callback without deleting its other owners' instance. */
+    public static Object toastRenderSkipped(Object toast){
+        var at=boundary();Scope scope=CURRENT.get();
+        if(!clientMember(at,TOAST_INSTANCE,"render","m_280442_","(ILnet/minecraft/client/gui/GuiGraphics;)Z")||scope==null||scope.type!=at.getDeclaringClass()
+                ||!scope.method.equals(at.getMethodName())||scope.toast!=toast||scope.toastInstance==null||scope.ended)throw new SecurityException("ACTUAL_TOAST_CALLBACK_RESULT_REQUIRED");
+        try{
+            ToastFields fields=TOAST_FIELDS.get(at.getDeclaringClass().getEnclosingClass());Object instance=scope.toastInstance;
+            if(fields.toast.get(instance)!=toast)throw new IllegalStateException("CLIENT_TOAST_INSTANCE_CHANGED");
+            ToastRegistry registry=toastRegistry(fields.instanceOwner.get(instance),fields.type);
+            synchronized(SOURCES){ToastSlot slot=registry.slots.get(new Key(toast,false));if(slot!=null){
+                Module[] modules=toastSources(slot);
+                if(!slot.unknown&&exclusive(modules)&&toastActual(registry,true)&&toastContains(registry.visible.get(),instance)&&toastRanges(registry))return fields.hidden.get(null);
+            }}
+            return fields.visibility.get(instance);
+        }catch(ReflectiveOperationException unavailable){throw new IllegalStateException("CLIENT_TOAST_CALLBACK_RESULT_UNAVAILABLE",unavailable);}
+    }
+    public static void toastExiting(Object token){
+        var at=boundary();ToastCall call=actualToastCall(token,at);if(call.ended)return;
+        if(call.scope!=null)exit(call.scope);call.ended=true;
+        ToastRegistry registry=call.registry;if(registry==null)return;
+        synchronized(SOURCES){
+            if(call.frame)registry.frames--;
+            if(registry.frames==0)try{toastMaintain(registry,true);}catch(ReflectiveOperationException|IllegalStateException|ConcurrentModificationException unavailable){registry.pending="CLIENT_TOAST_RETIREMENT_PENDING:"+unavailable.getClass().getSimpleName();}
+        }
+    }
+    public static void toastCleared(Object owner){
+        var at=boundary();if(!clientMember(at,TOAST_COMPONENT,"clear","m_94919_","()V"))throw new SecurityException("ACTUAL_TOAST_CLEAR_REQUIRED");
+        synchronized(SOURCES){ToastRegistry registry=TOASTS.get(new Key(owner,false));if(registry==null||registry.frames!=0)return;
+            try{toastMaintain(registry,false);}catch(ReflectiveOperationException|IllegalStateException|ConcurrentModificationException unavailable){registry.pending="CLIENT_TOAST_CLEAR_READBACK_PENDING";}
+        }
+    }
+    private static boolean toastContains(Collection<?> values,Object value){if(values==null)return false;for(Object actual:values)if(actual==value)return true;return false;}
+    private static boolean toastRanges(ToastRegistry registry)throws ReflectiveOperationException{
+        BitSet actual=registry.occupied.get(),expected=new BitSet(5);List<?> visible=registry.visible.get();if(actual==null||visible==null)return false;
+        for(Object instance:visible){if(instance==null)continue;ToastFields fields=registry.fields;
+            if(instance.getClass()!=fields.instanceType||fields.instanceOwner.get(instance)!=registry.owner.get()){registry.pending="CLIENT_TOAST_INSTANCE_OWNER_CHANGED";return false;}
+            int index=fields.index.getInt(instance),count=fields.count.getInt(instance);
+            if(index<0||count<=0||index>5-count||expected.nextSetBit(index)>=0&&expected.nextSetBit(index)<index+count){registry.pending="CLIENT_TOAST_OCCUPIED_RANGE_CHANGED";return false;}
+            expected.set(index,index+count);
+        }
+        if(!expected.equals(actual)){registry.pending="CLIENT_TOAST_OCCUPIED_RANGE_CHANGED";return false;}return true;
+    }
+    /** Called only outside the actual framework iteration on its real Minecraft owner thread. */
+    private static void toastMaintain(ToastRegistry registry,boolean retire)throws ReflectiveOperationException{
+        if(registry.frames!=0||!toastActual(registry,true))return;Deque<?> queued=registry.queued.get();List<?> visible=registry.visible.get();BitSet occupied=registry.occupied.get();
+        for(Object toast:queued){ToastSlot slot=toastSlot(registry,toast,ControlBridge.objectSources(toast),ControlBridge.objectSourceUnknown(toast));slot.queued=true;}
+        for(Object instance:visible){if(instance==null)continue;
+            if(instance.getClass()!=registry.fields.instanceType||registry.fields.instanceOwner.get(instance)!=registry.owner.get()){registry.pending="CLIENT_TOAST_INSTANCE_OWNER_CHANGED";return;}
+            Object toast=registry.fields.toast.get(instance);ToastSlot slot=toastSlot(registry,toast,ControlBridge.objectSources(toast),ControlBridge.objectSourceUnknown(toast));slot.visible=true;
+        }
+        if(retire){
+            for(var iterator=queued.iterator();iterator.hasNext();){Object toast=iterator.next();ToastSlot slot=registry.slots.get(new Key(toast,false));if(toastRetirable(slot)){iterator.remove();slot.queued=false;retired++;}}
+            if(toastRanges(registry))for(var iterator=visible.iterator();iterator.hasNext();){Object instance=iterator.next();if(instance==null)continue;Object toast=registry.fields.toast.get(instance);
+                ToastSlot slot=registry.slots.get(new Key(toast,false));if(!toastRetirable(slot))continue;
+                int index=registry.fields.index.getInt(instance),count=registry.fields.count.getInt(instance);iterator.remove();occupied.clear(index,index+count);retired++;
+            }
+        }
+        // Completion follows current backing rows, including naturally hidden/cleared Toasts.
+        Set<Object> currentQueued=Collections.newSetFromMap(new IdentityHashMap<>()),currentVisible=Collections.newSetFromMap(new IdentityHashMap<>());
+        for(Object toast:queued)currentQueued.add(toast);
+        for(Object instance:visible)if(instance!=null)currentVisible.add(registry.fields.toast.get(instance));
+        for(ToastSlot slot:registry.slots.values()){slot.queued=currentQueued.contains(slot.toast.get());slot.visible=currentVisible.contains(slot.toast.get());}
+        registry.slots.entrySet().removeIf(entry->{ToastSlot slot=entry.getValue();return !slot.queued&&!slot.visible&&!toastActive(slot.toast.get());});
+        if(toastRanges(registry))registry.pending="";
+    }
+    private static void retireToasts(Object client){
+        synchronized(SOURCES){for(ToastRegistry registry:TOASTS.values())if(registry.client.get()==client&&registry.frames==0)
+            try{toastMaintain(registry,true);}catch(ReflectiveOperationException|IllegalStateException|ConcurrentModificationException unavailable){registry.pending="CLIENT_TOAST_RETIREMENT_PENDING:"+unavailable.getClass().getSimpleName();}}
     }
     private static void overlayProtect(Object... objects){for(Object object:objects)CodeSourceBridge.contributionControl(object);}
     private static void overlayBoundary(StackWalker.StackFrame frame,String type,String method,String descriptor){
@@ -422,6 +629,9 @@ public final class ClientBridge {
             if(sources==null)sources=Collections.newSetFromMap(new IdentityHashMap<>());Collections.addAll(sources,scope.sources);
         }
         return sources==null?new Module[0]:sources.toArray(new Module[0]);
+    }
+    static boolean sourceUnknown(){
+        if(CURRENT==null)return false;for(Scope scope=CURRENT.get();scope!=null;scope=scope.parent)if(!scope.ended&&scope.sourcesUnknown)return true;return false;
     }
     static boolean stoppedSource(){return stopped(currentSources());}
     public static boolean particleAdmitted(Object particle){
@@ -1175,8 +1385,16 @@ public final class ClientBridge {
         }
         long overlays=overlayPending(module);
         String overlayState=overlays==-1?"CLIENT_OVERLAY_ACTUAL_PAIR_READ_FAILED":overlays==-2?"CLIENT_OVERLAY_NAMED_ASSOCIATION_CHANGED":"";
-        return active!=0||textures!=0||resources!=0||sounds!=0||reloads!=0||gpu!=0||failures!=0||ui!=0||overlays!=0?"CLIENT_RETIREMENT_PENDING:active="+active+":textures="+textures+":resources="+resources+":sounds="+sounds+":reloads="+reloads+":gpu="+gpu+":gpuState="+gpuState+":ui="+ui+":overlays="+(overlays<0?"unknown":Long.toString(overlays))+":overlayState="+overlayState+":shared="+shared+":releaseFailures="+failures:"";
+        long toastQueued=0,toastVisible=0,toastShared=0,toastUnknown=0;String toastState="";
+        for(ToastRegistry registry:TOASTS.values())for(ToastSlot slot:registry.slots.values()){
+            Module[] modules=toastSources(slot);if(!slot.queued&&!slot.visible||Arrays.stream(modules).noneMatch(source->source==module))continue;
+            if(slot.queued)toastQueued++;if(slot.visible)toastVisible++;
+            if(slot.unknown){toastUnknown++;if(toastState.isEmpty())toastState="CLIENT_TOAST_SOURCE_UNKNOWN";}
+            else if(!exclusive(modules)){toastShared++;if(toastState.isEmpty())toastState="CLIENT_TOAST_OTHER_SOURCES_REMAIN_LIVE";}
+            if(!registry.pending.isEmpty())toastState=registry.pending;
+        }
+        return active!=0||textures!=0||resources!=0||sounds!=0||reloads!=0||gpu!=0||failures!=0||ui!=0||overlays!=0||toastQueued!=0||toastVisible!=0?"CLIENT_RETIREMENT_PENDING:active="+active+":textures="+textures+":resources="+resources+":sounds="+sounds+":reloads="+reloads+":gpu="+gpu+":gpuState="+gpuState+":ui="+ui+":overlays="+(overlays<0?"unknown":Long.toString(overlays))+":overlayState="+overlayState+":toastQueued="+toastQueued+":toastVisible="+toastVisible+":toastShared="+toastShared+":toastUnknown="+toastUnknown+":toastState="+toastState+":shared="+shared+":releaseFailures="+failures:"";
     }}
-    public static Object[] controlObjects(){agent();List<Object> roots=new ArrayList<>(Arrays.asList(SOURCES,TEXTURES,ROLES,REQUESTED,CURRENT,RELEASING,ACTIVE,DEAD,IMAGES,PIXELS,RETIREMENTS,FAILURES,SOUNDS,SOUND_STOPS,SOUND_RELEASING,RELOAD_LISTENERS,RELOAD_WORK,UI_OWNERS,UI_RETIRING,UI_FIELDS,OVERLAY_EVENTS,OVERLAY_REGISTRIES,OVERLAY_NAMES,OVERLAY_INITIALIZING,OVERLAY_FIELDS));Collections.addAll(roots,GPU.controls());return roots.toArray();}
-    private static void reap(){for(Key key;(key=(Key)DEAD.poll())!=null;){SOURCES.remove(key);TEXTURES.remove(key);IMAGES.remove(key);PIXELS.remove(key);FAILURES.remove(key);SOUNDS.remove(key);RELOAD_LISTENERS.remove(key);UI_OWNERS.remove(key);OVERLAY_EVENTS.remove(key);OVERLAY_REGISTRIES.remove(key);OVERLAY_NAMES.remove(key);}}
+    public static Object[] controlObjects(){agent();List<Object> roots=new ArrayList<>(Arrays.asList(SOURCES,TEXTURES,ROLES,REQUESTED,CURRENT,RELEASING,ACTIVE,DEAD,IMAGES,PIXELS,RETIREMENTS,FAILURES,SOUNDS,SOUND_STOPS,SOUND_RELEASING,RELOAD_LISTENERS,RELOAD_WORK,UI_OWNERS,UI_RETIRING,UI_FIELDS,TOASTS,TOAST_FIELDS,OVERLAY_EVENTS,OVERLAY_REGISTRIES,OVERLAY_NAMES,OVERLAY_INITIALIZING,OVERLAY_FIELDS));Collections.addAll(roots,GPU.controls());return roots.toArray();}
+    private static void reap(){for(Key key;(key=(Key)DEAD.poll())!=null;){SOURCES.remove(key);TEXTURES.remove(key);IMAGES.remove(key);PIXELS.remove(key);FAILURES.remove(key);SOUNDS.remove(key);RELOAD_LISTENERS.remove(key);UI_OWNERS.remove(key);TOASTS.remove(key);OVERLAY_EVENTS.remove(key);OVERLAY_REGISTRIES.remove(key);OVERLAY_NAMES.remove(key);}}
 }

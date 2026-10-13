@@ -116,6 +116,7 @@ static const FLT_OPERATION_REGISTRATION RvhOperations[]={
     {IRP_MJ_WRITE,0,RvhPreFileOperation,NULL},
     {IRP_MJ_SET_INFORMATION,0,RvhPreFileOperation,NULL},
     {IRP_MJ_SET_SECURITY,0,RvhPreFileOperation,NULL},
+    {IRP_MJ_FILE_SYSTEM_CONTROL,0,RvhPreFileOperation,NULL},
     {IRP_MJ_ACQUIRE_FOR_SECTION_SYNCHRONIZATION,0,RvhPreFileOperation,NULL},
     {IRP_MJ_OPERATION_END}
 };
@@ -405,6 +406,104 @@ static VOID RvhRememberFileId(PFLT_INSTANCE Instance,PFILE_OBJECT File,const FIL
     (VOID)FltSetStreamContext(Instance,File,FLT_SET_CONTEXT_KEEP_IF_EXISTS,context,&previous);
     if(previous!=NULL)FltReleaseContext(previous);FltReleaseContext(context);
 }
+static VOID RvhFileControlSourceGap(PEPROCESS Actor,PFLT_VOLUME Volume,PFLT_INSTANCE Instance){
+    LIST_ENTRY *link;KIRQL irql;ULONG i;
+    /* We observed this actor's actual clone request but cannot resolve its
+     * source operand. Do not attribute that operand to a guessed file target. */
+    KeAcquireSpinLock(&RvhLock,&irql);
+    for(link=RvhSessions.Flink;link!=&RvhSessions;link=link->Flink){
+        RVH_SESSION *session=CONTAINING_RECORD(link,RVH_SESSION,Link);if(session->Closed||session->OwnerExited)continue;
+        for(i=0;i<RVH_MAX_FILES;i++){RVH_FILE_RECORD *record=&session->Files[i];
+            if(record->Id!=0&&!record->Detached&&!record->ActorExited&&record->Actor==Actor&&record->Volume==Volume&&record->Instance==Instance){
+                session->Unserved|=RVH_GAP_FILE_CONTROL_SOURCE_UNAVAILABLE;break;
+            }
+        }
+    }
+    KeReleaseSpinLock(&RvhLock,irql);
+}
+static BOOLEAN RvhCloneControl(ULONG Code){
+    if(Code==FSCTL_DUPLICATE_EXTENTS_TO_FILE)return TRUE;
+#ifdef FSCTL_DUPLICATE_EXTENTS_TO_FILE_EX
+    if(Code==FSCTL_DUPLICATE_EXTENTS_TO_FILE_EX)return TRUE;
+#endif
+    return FALSE;
+}
+static ULONG RvhFileControlEffects(ULONG Code){
+    if(RvhCloneControl(Code))return RVH_FILE_DENY_WRITE;
+    switch(Code){
+        case FSCTL_OFFLOAD_READ:case FSCTL_READ_RAW_ENCRYPTED:return RVH_FILE_DENY_READ;
+        case FSCTL_OFFLOAD_WRITE:case FSCTL_SET_ZERO_DATA:case FSCTL_FILE_LEVEL_TRIM:
+        case FSCTL_SET_SPARSE:case FSCTL_SET_COMPRESSION:case FSCTL_SET_ZERO_ON_DEALLOCATION:
+        case FSCTL_SET_ENCRYPTION:case FSCTL_WRITE_RAW_ENCRYPTED:
+        case FSCTL_SET_REPARSE_POINT:case FSCTL_DELETE_REPARSE_POINT:
+        case FSCTL_SET_OBJECT_ID:case FSCTL_SET_OBJECT_ID_EXTENDED:case FSCTL_DELETE_OBJECT_ID:
+        case FSCTL_SET_INTEGRITY_INFORMATION:
+#ifdef FSCTL_SET_INTEGRITY_INFORMATION_EX
+        case FSCTL_SET_INTEGRITY_INFORMATION_EX:
+#endif
+#ifdef FSCTL_SET_REPARSE_POINT_EX
+        case FSCTL_SET_REPARSE_POINT_EX:
+#endif
+            return RVH_FILE_DENY_WRITE;
+        default:return 0; /* Query/oplock/volume/vendor controls keep original semantics. */
+    }
+}
+static BOOLEAN RvhCloneSourceHandle(PFLT_CALLBACK_DATA Data,ULONG Code,HANDLE *Handle){
+    PVOID buffer=Data->Iopb->Parameters.FileSystemControl.Buffered.SystemBuffer;
+    ULONG length=Data->Iopb->Parameters.FileSystemControl.Buffered.InputBufferLength;
+    if(!FLT_IS_IRP_OPERATION(Data)||(Code&3)!=METHOD_BUFFERED||buffer==NULL)return FALSE;
+    if(Code==FSCTL_DUPLICATE_EXTENTS_TO_FILE){
+        if(FltIs32bitProcess(Data)){
+            DUPLICATE_EXTENTS_DATA32 input;
+            if(length<sizeof(input))return FALSE;RtlCopyMemory(&input,buffer,sizeof(input));
+            *Handle=LongToHandle((LONG)input.FileHandle);
+        }else{
+            DUPLICATE_EXTENTS_DATA input;
+            if(length<sizeof(input))return FALSE;RtlCopyMemory(&input,buffer,sizeof(input));*Handle=input.FileHandle;
+        }
+        return TRUE;
+    }
+#ifdef FSCTL_DUPLICATE_EXTENTS_TO_FILE_EX
+    if(Code==FSCTL_DUPLICATE_EXTENTS_TO_FILE_EX){
+        if(FltIs32bitProcess(Data)){
+            DUPLICATE_EXTENTS_DATA_EX32 input;
+            if(length<sizeof(input))return FALSE;RtlCopyMemory(&input,buffer,sizeof(input));
+            if(input.Size<sizeof(input)||input.Size>length)return FALSE;*Handle=LongToHandle((LONG)input.FileHandle);
+        }else{
+            DUPLICATE_EXTENTS_DATA_EX input;
+            if(length<sizeof(input))return FALSE;RtlCopyMemory(&input,buffer,sizeof(input));
+            if(input.Size<sizeof(input)||input.Size>length)return FALSE;*Handle=input.FileHandle;
+        }
+        return TRUE;
+    }
+#endif
+    return FALSE;
+}
+static BOOLEAN RvhCloneSourceDenied(PFLT_CALLBACK_DATA Data,PCFLT_RELATED_OBJECTS Objects,PEPROCESS Actor,ULONG Code){
+    PFILE_OBJECT source=NULL;PFLT_VOLUME volume=NULL;RVH_STREAM_ID *context=NULL;
+    FILE_ID_INFORMATION identity;const FILE_ID_INFORMATION *known=NULL;HANDLE handle;NTSTATUS status;BOOLEAN denied=FALSE;
+    /* The numeric source HANDLE belongs to the real requestor's table. Never
+     * interpret it in another process's context or attach to a guessed actor. */
+    if(KeGetCurrentIrql()!=PASSIVE_LEVEL||PsGetCurrentProcess()!=Actor||!RvhCloneSourceHandle(Data,Code,&handle)){
+        RvhFileControlSourceGap(Actor,Objects->Volume,Objects->Instance);return FALSE;
+    }
+    /* This holds the object observed now, not the user's handle-table entry.
+     * No public preoperation contract makes the filesystem's later source
+     * handle capture atomic with ours; concurrent close/reuse remains a gap. */
+    status=ObReferenceObjectByHandle(handle,0,*IoFileObjectType,UserMode,(PVOID *)&source,NULL);
+    if(!NT_SUCCESS(status)){RvhFileControlSourceGap(Actor,Objects->Volume,Objects->Instance);return FALSE;}
+    status=FltGetVolumeFromFileObject(RvhFilter,source,&volume);
+    if(!NT_SUCCESS(status)||volume!=Objects->Volume){RvhFileControlSourceGap(Actor,Objects->Volume,Objects->Instance);goto Finished;}
+    /* Public block cloning requires source and destination on the same
+     * volume. Only that exact instance can supply this source's stream ID. */
+    if(NT_SUCCESS(FltGetStreamContext(Objects->Instance,source,(PFLT_CONTEXT *)&context)))known=&context->Identity;
+    else if(NT_SUCCESS(RvhQueryFileId(Objects->Instance,source,&identity))){known=&identity;RvhRememberFileId(Objects->Instance,source,&identity);}
+    denied=RvhFileDecision(Actor,source,volume,Objects->Instance,known,RVH_FILE_DENY_READ,FALSE,
+            known==NULL?RVH_GAP_OLD_FILE_OBJECT_ALIASES:0);
+    if(known==NULL)RvhFileControlSourceGap(Actor,volume,Objects->Instance);
+Finished:
+    if(context!=NULL)FltReleaseContext(context);if(volume!=NULL)FltObjectDereference(volume);ObDereferenceObject(source);return denied;
+}
 static BOOLEAN RvhCompletedOpenAccess(PIO_SECURITY_CONTEXT Security,ACCESS_MASK *Access){
     ACCESS_MASK requested;PACCESS_STATE state;
     if(Security==NULL)return FALSE;
@@ -480,7 +579,7 @@ static BOOLEAN RvhMutatesFile(FILE_INFORMATION_CLASS Class){
 }
 static FLT_PREOP_CALLBACK_STATUS RvhPreFileOperation(PFLT_CALLBACK_DATA Data,PCFLT_RELATED_OBJECTS Objects,PVOID *Completion){
     PEPROCESS actor;RVH_STREAM_ID *context=NULL;FILE_ID_INFORMATION identity;const FILE_ID_INFORMATION *known=NULL;
-    NTSTATUS status;ULONG effect=0;BOOLEAN section,denied;UNREFERENCED_PARAMETER(Completion);
+    NTSTATUS status;ULONG effect=0,control=0;BOOLEAN section,denied,clone=FALSE;UNREFERENCED_PARAMETER(Completion);
     if(!ExAcquireRundownProtection(&RvhCalls))return FLT_PREOP_SUCCESS_NO_CALLBACK;
     actor=FltGetRequestorProcess(Data);
     if(actor==NULL||!RvhRelevantFiles(actor,Objects->Volume,Objects->Instance)){ExReleaseRundownProtection(&RvhCalls);return FLT_PREOP_SUCCESS_NO_CALLBACK;}
@@ -490,6 +589,11 @@ static FLT_PREOP_CALLBACK_STATUS RvhPreFileOperation(PFLT_CALLBACK_DATA Data,PCF
     if(Data->Iopb->MajorFunction==IRP_MJ_READ)effect=RVH_FILE_DENY_READ;
     else if(Data->Iopb->MajorFunction==IRP_MJ_WRITE||Data->Iopb->MajorFunction==IRP_MJ_SET_SECURITY)effect=RVH_FILE_DENY_WRITE;
     else if(Data->Iopb->MajorFunction==IRP_MJ_SET_INFORMATION&&RvhMutatesFile(Data->Iopb->Parameters.SetFileInformation.FileInformationClass))effect=RVH_FILE_DENY_WRITE;
+    else if(Data->Iopb->MajorFunction==IRP_MJ_FILE_SYSTEM_CONTROL){
+        if(Data->Iopb->MinorFunction!=IRP_MN_USER_FS_REQUEST){ExReleaseRundownProtection(&RvhCalls);return FLT_PREOP_SUCCESS_NO_CALLBACK;}
+        control=Data->Iopb->Parameters.FileSystemControl.Common.FsControlCode;
+        effect=RvhFileControlEffects(control);clone=RvhCloneControl(control);
+    }
     if(!section&&effect==0){ExReleaseRundownProtection(&RvhCalls);return FLT_PREOP_SUCCESS_NO_CALLBACK;}
     if(KeGetCurrentIrql()<=APC_LEVEL&&NT_SUCCESS(FltGetStreamContext(Objects->Instance,Objects->FileObject,(PFLT_CONTEXT *)&context)))known=&context->Identity;
     else if(!section&&KeGetCurrentIrql()==PASSIVE_LEVEL&&!KeAreAllApcsDisabled()&&IoGetTopLevelIrp()==NULL){
@@ -499,12 +603,17 @@ static FLT_PREOP_CALLBACK_STATUS RvhPreFileOperation(PFLT_CALLBACK_DATA Data,PCF
     denied=RvhFileDecision(actor,Objects->FileObject,Objects->Volume,Objects->Instance,known,effect,section,0);
     if(known==NULL)RvhFileGap(actor,Objects->Volume,Objects->Instance,RVH_GAP_OLD_FILE_OBJECT_ALIASES);
     if(context!=NULL)FltReleaseContext(context);
+    if(!denied&&clone)denied=RvhCloneSourceDenied(Data,Objects,actor,control);
     /* Microsoft permits no policy ACCESS_DENIED in section synchronization.
      * This branch records the actual attempt and deliberately leaves it open:
      * https://learn.microsoft.com/en-us/windows-hardware/drivers/ifs/flt-parameters-for-irp-mj-acquire-for-section-synchronization */
     if(denied&&!section){
         if(FLT_IS_FASTIO_OPERATION(Data)){ExReleaseRundownProtection(&RvhCalls);return FLT_PREOP_DISALLOW_FASTIO;}
-        Data->IoStatus.Status=STATUS_ACCESS_DENIED;Data->IoStatus.Information=0;
+        /* Microsoft requires an explicit NOT_SUPPORTED offload result so
+         * copy engines fall back to ordinary I/O, which reaches these same
+         * per-actor/per-file READ/WRITE rules. Other actors/files pass through. */
+        Data->IoStatus.Status=(control==FSCTL_OFFLOAD_READ||control==FSCTL_OFFLOAD_WRITE)?STATUS_NOT_SUPPORTED:STATUS_ACCESS_DENIED;
+        Data->IoStatus.Information=0;
         ExReleaseRundownProtection(&RvhCalls);return FLT_PREOP_COMPLETE;
     }
     ExReleaseRundownProtection(&RvhCalls);return FLT_PREOP_SUCCESS_NO_CALLBACK;

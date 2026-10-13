@@ -22,7 +22,9 @@ enum {
     HOST_OPEN_PROCESS=11,HOST_OPEN_THREAD=12,HOST_RESUME_THREAD=13,HOST_SUSPEND_THREAD=14,
     HOST_TERMINATE_PROCESS=15,HOST_TERMINATE_THREAD=16,
     HOST_CREATE_THREAD=17,HOST_CREATE_REMOTE_THREAD=18,HOST_CREATE_REMOTE_THREAD_EX=19,
-    HOST_BEGIN_THREAD=20,HOST_BEGIN_THREAD_EX=21,HOST_KIND_COUNT=22
+    HOST_BEGIN_THREAD=20,HOST_BEGIN_THREAD_EX=21,
+    HOST_LOAD_LIBRARY_A=22,HOST_LOAD_LIBRARY_W=23,HOST_LOAD_LIBRARY_EX_A=24,HOST_LOAD_LIBRARY_EX_W=25,
+    HOST_KIND_COUNT=26
 };
 static int host_is_create(int kind){return kind==HOST_CREATE_W||kind==HOST_CREATE_A
         ||kind>=HOST_CREATE_USER_W&&kind<=HOST_CREATE_LOGON_W;}
@@ -811,6 +813,7 @@ static uint64_t host_native_handle(HostImport *entry,void *caller,uintptr_t *arg
 #include "host_thread_creation.c"
 #include "host_crt_thread_creation.c"
 #include "host_thread_workers.c"
+#include "host_module_admission.c"
 static uint64_t host_native_call(HostImport *entry,void *caller,uintptr_t *arguments){
     if(entry->kind==HOST_RESOLVE)return (uintptr_t)host_native_resolve((HMODULE)arguments[0],(LPCSTR)arguments[1],entry,caller);
     if(host_is_create(entry->kind))return host_native_create(entry,caller,arguments);
@@ -818,6 +821,7 @@ static uint64_t host_native_call(HostImport *entry,void *caller,uintptr_t *argum
     if(host_is_thread_create(entry->kind))return host_native_thread_create(entry,caller,arguments);
     if(host_is_crt_thread_create(entry->kind))return host_native_crt_thread_create(entry,caller,arguments);
     if(host_is_handle(entry->kind))return host_native_handle(entry,caller,arguments);
+    if(host_is_module_load(entry->kind))return host_native_module_load(entry,caller,arguments);
     SetLastError(ERROR_INVALID_FUNCTION);return 0;
 }
 static unsigned host_import_arguments(int kind){
@@ -830,6 +834,8 @@ static unsigned host_import_arguments(int kind){
         case HOST_CREATE_REMOTE_THREAD_EX:return 8;
         case HOST_BEGIN_THREAD:return 3;
         case HOST_BEGIN_THREAD_EX:return 6;
+        case HOST_LOAD_LIBRARY_A:case HOST_LOAD_LIBRARY_W:return 1;
+        case HOST_LOAD_LIBRARY_EX_A:case HOST_LOAD_LIBRARY_EX_W:return 3;
         case HOST_DUPLICATE:return 7;
         case HOST_HANDLE_FLAGS:case HOST_OPEN_PROCESS:case HOST_OPEN_THREAD:return 3;
         case HOST_CLOSE:case HOST_RESUME_THREAD:case HOST_SUSPEND_THREAD:return 1;
@@ -869,7 +875,8 @@ static const char *host_api_names[HOST_KIND_COUNT]={NULL,"CreateProcessW","GetPr
         "CreateProcessAsUserW","CreateProcessAsUserA","CreateProcessWithTokenW","CreateProcessWithLogonW",
         "CloseHandle","DuplicateHandle","SetHandleInformation","OpenProcess","OpenThread",
         "ResumeThread","SuspendThread","TerminateProcess","TerminateThread",
-        "CreateThread","CreateRemoteThread","CreateRemoteThreadEx","_beginthread","_beginthreadex"};
+        "CreateThread","CreateRemoteThread","CreateRemoteThreadEx","_beginthread","_beginthreadex",
+        "LoadLibraryA","LoadLibraryW","LoadLibraryExA","LoadLibraryExW"};
 static void host_windows_targets(void **targets){
     HMODULE kernel=GetModuleHandleW(L"kernel32.dll"),advapi=GetModuleHandleW(L"advapi32.dll");
     HostGetProcAddress resolve=__atomic_load_n(&host_windows_resolver,__ATOMIC_ACQUIRE);

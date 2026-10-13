@@ -2,7 +2,7 @@
 #include "bindings.c"
 // Preserve Object.clone itself, including Cloneable checks; never substitute a Java ancestor body.
 JNIEXPORT jint JNICALL Java_dev_ronova_pro_bootstrap_NativeControl_abi(JNIEnv *env, jclass type) {
-    (void)env; (void)type; return 55;
+    (void)env; (void)type; return 56;
 }
 JNIEXPORT jboolean JNICALL Java_dev_ronova_pro_bootstrap_NativeControl_hostLibraryLoadReady0(JNIEnv *env,jclass type) {
     (void)env; (void)type; return host_library_load_ready()?JNI_TRUE:JNI_FALSE;
@@ -76,6 +76,8 @@ static int native_bind_controller(JNIEnv *env,jclass controller){
         {"restoreHeapArrayBytes0","(Ljava/lang/Object;J[B[B)Z",(void*)Java_dev_ronova_pro_bootstrap_NativeControl_restoreHeapArrayBytes0},
         {"heapState0","()[J",(void*)Java_dev_ronova_pro_bootstrap_NativeControl_heapState0},
         {"heapPolicyChanged0","(Ljava/lang/Object;)V",(void*)Java_dev_ronova_pro_bootstrap_NativeControl_heapPolicyChanged0},
+        {"jvmtiDefinitionCompletion0","([Ljava/lang/Class;)Z",(void*)Java_dev_ronova_pro_bootstrap_NativeControl_jvmtiDefinitionCompletion0},
+        {"jvmtiDefinitionsPending0","(Ljava/lang/Module;)Z",(void*)Java_dev_ronova_pro_bootstrap_NativeControl_jvmtiDefinitionsPending0},
         {"heapEventPermit0","(Ljava/lang/Object;Ljava/lang/Class;)Z",(void*)Java_dev_ronova_pro_bootstrap_NativeControl_heapEventPermit0},
         {"codeState0","(Ljava/lang/Module;)[J",(void*)Java_dev_ronova_pro_bootstrap_NativeControl_codeState0},
         {"preparedClass0","(Ljava/lang/Class;)Z",(void*)Java_dev_ronova_pro_bootstrap_NativeControl_preparedClass0},

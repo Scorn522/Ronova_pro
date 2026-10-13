@@ -17,6 +17,7 @@ validation/a-takeover-tasks-01/server/Pro-A-Tasks/
 /docs/history/
 /docs/research/
 /distribution/*
+!/distribution/package-current.ps1
 !/distribution/candidate-modwide-a-20261001/
 !/distribution/candidate-modwide-a-complete-20261001/
 !/distribution/candidate-b-source-20261004/
@@ -32,13 +33,8 @@ validation/a-takeover-tasks-01/server/Pro-A-Tasks/
 !/validation/a-final-20260928/evidence-20261001/
 !/validation/a-final-20260928/evidence-20261002/
 
-# Preserve pre-import source trees locally; active source sets use src/<component>.
-/src/main/
-/src/test/
-/agent/
-/bootstrap/
-/prelaunch/
-/validation/src/
+# Old source layouts and input patches live in .work/archive/; active source
+# sets use only src/<component> and validation/{checks,fixture,resources}.
 # Current B report summary only; game runs and raw historical logs remain local.
 !/validation/b-final-20261007/
 /validation/b-final-20261007/*

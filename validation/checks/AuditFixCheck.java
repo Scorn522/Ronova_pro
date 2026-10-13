@@ -57,10 +57,22 @@ public final class AuditFixCheck {
     // starts; thread-end checks actual attachment/detachment without rerunning it.
     private static native void hostThreadCreate0(Class<?> type,Object payload);
     private static native void hostThreadEnd0();
+    private static native void hostModuleLoad0();
+    private static native void hostDefinitionsChanged0(ClassLoader loader);
     private static final class HostThreadCreatePayload { }
     private static void hostThreadCreate(){
         System.load(java.nio.file.Path.of(System.getProperty("ronova.pro.audit.thread.native")).toAbsolutePath().toString());
         String phase=System.getProperty("ronova.pro.audit.thread.phase","thread-create");
+        if(phase.equals("module-load")||phase.equals("admission")){
+            hostModuleLoad0();
+            System.out.println("HOST_MODULE_LOAD_PASS actual_A_W_ExA_ExW_imports_and_dynamic_results original_parameters_flags_actual_HMODULE actual_invalid_image_error balanced_FreeLibrary no_manufactured_producer_authority");
+            if(phase.equals("admission")){
+                ClassLoader loader=new ClassLoader(null) { };
+                try {hostDefinitionsChanged0(loader);}finally {java.lang.ref.Reference.reachabilityFence(loader);}
+                System.out.println("DEFINITIONS_REAL_APIS_PASS actual_original_RetransformClasses_RedefineClasses changed_method_execution invalid_count_preserved actual_Dispose");
+            }
+            return;
+        }
         if(phase.equals("thread-end")){
             hostThreadEnd0();
             System.out.println("HOST_THREAD_END_PASS actual_CRT_start_userdata actual_AttachCurrentThread actual_ThreadEnd_callback actual_DetachCurrentThread GetEnv_JNI_EDETACHED native_continuation callback_child_and_detached_successor suspended_until_outer_resume actual_OS_exit handles_closed");

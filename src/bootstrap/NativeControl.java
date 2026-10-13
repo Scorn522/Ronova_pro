@@ -43,7 +43,7 @@ public final class NativeControl {
             if(!early.isEmpty()) {
                 Path actual=Path.of(early).toAbsolutePath();if(!hash(Files.readAllBytes(actual)).equals(digest))throw new IOException("EARLY_NATIVE_IMAGE_MISMATCH");dll=actual;
             }
-            System.load(dll.toString());if(abi()!=55)throw new UnsatisfiedLinkError("NATIVE_CONTROL_ABI");
+            System.load(dll.toString());if(abi()!=56)throw new UnsatisfiedLinkError("NATIVE_CONTROL_ABI");
             if(!initialize0(ControlBridge.class,DefinitionBridge.class))throw new UnsatisfiedLinkError("ACTUAL_NATIVE_BOUNDARY_INSTALL_FAILED");
             if(!initializeDefinitionDirectory0(definitionDirectoryOwner))throw new UnsatisfiedLinkError("ACTUAL_DEFINITION_DIRECTORY_CAS_UNAVAILABLE");
             libraryBoundaryPresent=libraryPresent0();available=true;return state="NATIVE_BIND_AND_JNI_FIELD_READY";
@@ -515,6 +515,11 @@ public final class NativeControl {
         if(!controlCaller())throw new SecurityException("NATIVE_CONTROL_AGENT_REQUIRED");
         if(available)module0(module,stopped);
     }
+    /** Invoked by the native wrapper only after the actual VM API returned NONE. */
+    private static boolean jvmtiDefinitionsChanged(Class<?>[] actuals){
+        if(!jvmtiDefinitionCompletion0(actuals))throw new SecurityException("ACTUAL_JVMTI_DEFINITION_COMPLETION_SCOPE_REQUIRED");
+        return ControlBridge.nativeDefinitionsChanged(actuals);
+    }
     private static byte[] jvmtiImage(Module module,ClassLoader loader,String name,Class<?> actual,ProtectionDomain domain,byte[] original,byte[] bytes,Module[] writers,boolean changed){
         if(!jvmtiBoundary0(module,loader,name,actual,domain,original,bytes,writers,changed))throw new SecurityException("ACTUAL_NATIVE_CLASS_FILE_CALLBACK_SCOPE_REQUIRED");
         try{
@@ -540,6 +545,7 @@ public final class NativeControl {
     public static String retirementGap(Module module){
         if(!controlCaller())throw new SecurityException("NATIVE_CONTROL_AGENT_REQUIRED");
         if(!available)return "";
+        if(jvmtiDefinitionsPending0(module))return "JVMTI_DEFINITION_CONTINUATION_PENDING";
         long[] host=hostState0(module);long[] jvmti=jvmtiState0(module);
         if(host[21]!=0)return "HOST_NATIVE_WORKER_RETIREMENT_PENDING:holds="+host[21]+":exitPending="+host[22]+":lifecycleGaps="+host[23];
         if(jvmti[2]!=0||jvmti[3]!=0)return "JVMTI_CALLBACK_RETIREMENT_PENDING:slots="+jvmti[2]+":active="+jvmti[3]+":environments="+jvmti[1];
@@ -694,6 +700,8 @@ public final class NativeControl {
     private static native long[] hostState0(Module module);
     private static native long[] status0(Module module);
     private static native boolean jvmtiBoundary0(Module module,ClassLoader loader,String name,Class<?> actual,ProtectionDomain domain,byte[] original,byte[] bytes,Module[] writers,boolean changed);
+    private static native boolean jvmtiDefinitionCompletion0(Class<?>[] actuals);
+    private static native boolean jvmtiDefinitionsPending0(Module module);
     private static native long[] jvmtiState0(Module module);
     private static native boolean bindingControlled0(java.lang.reflect.Method method);
     private static native boolean clearField0(java.lang.reflect.Field field,Object receiver,Object expected);

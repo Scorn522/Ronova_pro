@@ -1,5 +1,24 @@
 # B 批实际报告：2026-10-09 代码收敛接续
 
+## 2026-10-14：C 接续——定义通知、模块加载、Toast／FSCTL 与目录收口
+
+接续 `2bc5f7f`，当前 Java ABI57 / Native ABI56 / Storage3 / Journal6；GNU C23/C++23、Java17，独立驱动和管理工具 C17。本包源码写齐后集中构建；C/B 整体仍未完成。
+
+- JVMTI：真实 RedefineClasses/RetransformClasses 成功后，沿实际 Class[] 与原成功 scope 接入已有定义更新队列；失败不通知。合法 JNI 预先取得的强引用保留到接续接受，通知失败由既有 daemon 重试，失败操作和部分引用准确清理。ThreadEnd/非法 JNI 上下文不伪造通知，原返回、异常和 LastError 保留；此入口不授予一般控制写者资格。
+- 模块：已观察原生映像的 LoadLibraryA/W/ExA/ExW 导入、延迟消费及真实 GetProcAddress 结果接入准确来源准入，停止来源在实际 loader 调用前拒绝，原参数、标志、HMODULE 和失败返回保留。未登记子 DLL 不冒充 JNI library，预观察加载窗口和旧缓存指针仍未控。
+- 客户端：真实 Toast 提交、queued/visible、实例与占位退役已接线；在实际 Minecraft 所属线程维护，原来源与 unknown 贯穿回调和派生资源，共享/未知保留未决。没有扩大纯呈现 UUID 接口。
+- Windows 驱动：按实际 actor/文件身份接 ODX、EFS、置零、trim、块克隆及列明的元数据修改 FSCTL；ODX 对准确拒绝目标使用 NOT_SUPPORTED，让正常复制回落原 I/O。新包 INF 的 SupportedFeatures=3 与管理器固定包读取同步；source 无法解析、并发句柄复用和旧 offload token 保留边界，协议结构仍为1。
+
+目录已收口：有效源码只有 `src/{core,agent,bootstrap,prelaunch,journal,resources}`。旧根目录 agent/bootstrap/prelaunch、src/main/test/fixture/stateChecks、validation/src 及输入补丁保存在 `.work/archive/source-layout-20261014/`；原完整 README 保存在 docs/history。Java 包名和现有构建 sourceSets 没有改变，历史候选、失败和存档未删除。当前打包入口为 distribution/package-current.ps1，只取有效源码和指定候选。
+
+实际结果：主包构建 PASS 20秒，`build-c-java57-native56-admission-cached-20261014.log`；最初旧 PowerShell 将编译提示误作异常而退出1，保留 `build-c-java57-native56-admission-ps5-wrapper-failed-20261014.log` 及本节失败说明，随后用原正常环境构建。驱动/管理器官方 WDK/SDK+Zig/LLD 编译链接 PASS，`build-c-driver56-fsctl-20261014.log`，SYS 37888字节、EXE 190464字节；最初旧 PowerShell 包装同样被 stderr 提示截断，退出1，不计通过。未运行正式 VS/MSBuild、签名、CAT、altitude 配置或安装/加载。
+
+现有夹具新 admission 分支实际退出0，`c-host-module56-admission-20261014.log`：四个实际导入和四个真实动态入口，原 HMODULE、SEARCH_SYSTEM32、有效调用原 LastError、空图像的193错误、实际 FreeLibrary与临时文件删除通过；真实初始方法9→重转换7→重定义11，非法 count 保留103且方法仍11，真实 Dispose 通过。未重跑旧 ClassUnload/heap/thread/Host 矩阵。独立 JVM 无实际 Mod producer：停止组加载拒绝、共享 Mod caller 的定义传播与通知失败补收均 NOTRUN；Toast与内核 I/O只有源码和编译结果，未取得该候选实机客户端/内核运行。
+
+本地候选 `distribution/candidate-c-java57-native56-wip-20261014`，Core JAR 2380374字节，附匹配 prelaunch 与 unsigned-driver。整理包 `distribution/Ronova-Pro-C-WIP-Java57-Native56-20261014.zip` 含有效源码和本次产物，不带旧布局、缓存、存档、旧候选或原始运行日志。源码和简要结果同步 Git，产物留本地。缓存原表/旧环境/内部未观察写者、loader 首窗口、现有映射/section、未知呈现 carrier 及本候选游戏/保存重启仍未收口；此前结果保留原范围。
+
+---
+
 ## 2026-10-14：C 接续——原生 worker 来源与真实退出持有
 
 接续 `c3b1db1`，当前 Java ABI 56 / Native ABI 55 / Storage ABI 3 / Journal 6；GNU C23 / GNU C++23、Java17，独立驱动/部署工具仍为 C17。该完整工作包写齐后集中构建，C/B 整体尚未完成。

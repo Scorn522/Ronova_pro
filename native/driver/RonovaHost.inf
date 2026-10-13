@@ -32,6 +32,9 @@ Dependencies=FltMgr
 AddReg=RonovaHost.Registry
 
 [RonovaHost.Registry]
+; Pass unrelated ODX requests; selected file policies refuse offload explicitly.
+HKR,"","SupportedFeatures",0x00010001,0x00000003
+HKR,"Parameters","SupportedFeatures",0x00010001,0x00000003
 HKR,"Parameters","ObAltitude",0x00000000,%ObAltitude%
 ; Windows 11 24H2+ minifilter configuration.
 HKR,"Parameters\Instances","DefaultInstance",0x00000000,%InstanceName%

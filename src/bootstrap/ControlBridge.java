@@ -28,7 +28,7 @@ public final class ControlBridge {
         }
     };
     private ControlBridge() { }
-    public static int abiVersion(){return 56;}
+    public static int abiVersion(){return 57;}
     public static long arrayRevision(Object value){if(!recoveryWriter())throw new SecurityException("RECOVERY_ARRAY_READER_REQUIRED");return CodeSourceBridge.executionArrayRevision(value);}
 
     public static synchronized void install(Class<?> agent,ClassFileTransformer[] transformers) throws ReflectiveOperationException {
@@ -55,6 +55,16 @@ public final class ControlBridge {
             classes=new Class<?>[definitions.length];for(int i=0;i<classes.length;i++)classes[i]=definitions[i].getDefinitionClass();
         }else throw new IllegalArgumentException("ACTUAL_DEFINITION_ARRAY_REQUIRED");
         Method callback=definitionsChanged;if(callback==null)return;
+        deliverDefinitionsChanged(callback,classes);
+    }
+    /** NativeControl has consumed this thread's exact successful JVMTI scope. */
+    static boolean nativeDefinitionsChanged(Class<?>[] classes){
+        if(INSTRUMENTATION_CALLER.getCallerClass()!=NativeControl.class)
+            throw new SecurityException("ACTUAL_JVMTI_COMPLETION_REQUIRED");
+        Method callback=definitionsChanged;if(callback==null)return false;
+        deliverDefinitionsChanged(callback,classes);return true;
+    }
+    private static void deliverDefinitionsChanged(Method callback,Class<?>[] classes){
         try{callback.invoke(null,(Object)classes);}
         catch(InvocationTargetException failure){
             Throwable cause=failure.getCause();if(cause instanceof RuntimeException runtime)throw runtime;if(cause instanceof Error error)throw error;throw new IllegalStateException(cause);
@@ -219,7 +229,9 @@ public final class ControlBridge {
     static boolean controlWriterFrame(Class<?> type,String method){
         String name=type.getName();
         if(type==NativeControl.class&&(method.equals("controlWriterCaller")||method.equals("controlWriter0")
-                ||method.equals("heapPolicyChanged")||method.equals("heapPolicyChanged0")))return false;
+                ||method.equals("heapPolicyChanged")||method.equals("heapPolicyChanged0")
+                ||method.equals("jvmtiDefinitionsChanged")||method.equals("jvmtiDefinitionCompletion0")
+                ||method.equals("jvmtiDefinitionsPending0")))return false;
         if(type==TaskBridge.class||type==ControlBridge.class||name.startsWith("dev.ronova.pro.bootstrap.TaskBridge$")||name.startsWith("dev.ronova.pro.bootstrap.ControlBridge$"))
             return !EXTERNAL_GUARD_ENTRIES.contains(method)
                     &&!(name.equals("dev.ronova.pro.bootstrap.ControlBridge$ControlRef")&&(method.equals("clear")||method.equals("enqueue")));
@@ -482,6 +494,7 @@ public final class ControlBridge {
         return frameSources();
     }
     static boolean sourceUnknown(){
+        if(ClientBridge.sourceUnknown())return true;
         if(CodeSourceBridge.executionUnknown())return true;
         ProducerFrame producer=PRODUCERS.get();if(producer!=null&&producer.overflow)return true;
         Frame task=CURRENT.get();return task!=null&&!task.exited&&task.sourcesUnknown;
@@ -802,6 +815,7 @@ public final class ControlBridge {
     public static boolean controlCaptureHealthy(){return controlCaptureHealthy;}
     static final ThreadLocal<Boolean> OWN_LEDGER_MUTATION=new ThreadLocal<>();
     static final Set<String> EXTERNAL_GUARD_ENTRIES=Set.of(
+            "nativeDefinitionsChanged","deliverDefinitionsChanged",
             "controlCaller","controlled","criticalEntry","referenceRetirementAllowed","controlMutationAllowed","fieldGateMutationAllowed","inheritControl","controlBackingPublished",
             "fieldWriteAllowed","staticFieldWriteAllowed","reflectFieldWrite",
             // Field-write entry wrappers are still live at the policy query;

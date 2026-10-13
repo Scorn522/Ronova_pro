@@ -149,6 +149,36 @@ static int RvhInfInteger(HINF Inf,PCWSTR Section,PCWSTR Key,int Expected){
         return RvhWin32Error(L"package-inf-number",GetLastError());
     return value==Expected?1:RvhWin32Error(L"RonovaHost-package-identity",ERROR_INVALID_DATA);
 }
+static int RvhInfFileControls(HINF Inf){
+    INFCONTEXT context;WCHAR root[16],subkey[MAX_PATH],name[MAX_PATH];ULONG seen=0,index;LONG lines;
+    lines=SetupGetLineCountW(Inf,L"RonovaHost.Registry");
+    if(lines<0)return RvhWin32Error(L"package-file-controls",GetLastError());
+    /* AddReg entries are unkeyed lists: HKR is field 1, not an INF key. */
+    for(index=0;index<(ULONG)lines;index++){
+        ULONG location=0;int flags,value;
+        if(!SetupGetLineByIndexW(Inf,L"RonovaHost.Registry",index,&context)
+                ||!SetupGetStringFieldW(&context,1,root,ARRAYSIZE(root),NULL))
+            return RvhWin32Error(L"package-file-controls",GetLastError());
+        if(_wcsicmp(root,L"HKR")!=0)continue;
+        if(!SetupGetStringFieldW(&context,2,subkey,ARRAYSIZE(subkey),NULL)
+                ||!SetupGetStringFieldW(&context,3,name,ARRAYSIZE(name),NULL))
+            return RvhWin32Error(L"package-file-controls",GetLastError());
+        if(_wcsicmp(name,L"SupportedFeatures")==0){
+            if(subkey[0]==L'\0')location=1;
+            else if(_wcsicmp(subkey,L"Parameters")==0)location=2;
+            if(location!=0){
+                if(SetupGetFieldCount(&context)!=5)
+                    return RvhWin32Error(L"package-file-controls",ERROR_INVALID_DATA);
+                if(!SetupGetIntField(&context,4,&flags)||!SetupGetIntField(&context,5,&value))
+                    return RvhWin32Error(L"package-file-controls",GetLastError());
+                if((seen&location)!=0||flags!=FLG_ADDREG_TYPE_DWORD||value!=3)
+                    return RvhWin32Error(L"package-file-controls",ERROR_INVALID_DATA);
+                seen|=location;
+            }
+        }
+    }
+    return seen==3?1:RvhWin32Error(L"package-file-controls",ERROR_INVALID_DATA);
+}
 static int RvhVersion(RVH_PACKAGE_INFO *Package){
     WCHAR *next,*cursor=Package->DriverVersion;ULONG i;ULONGLONG version=0;unsigned month,day,year;WCHAR extra;
     SYSTEMTIME date={0};FILETIME fileTime;
@@ -166,7 +196,7 @@ static int RvhVersion(RVH_PACKAGE_INFO *Package){
     if(!SystemTimeToFileTime(&date,&fileTime))return RvhWin32Error(L"DriverVer-date",GetLastError());
     Package->Version=version;Package->Date=((ULONGLONG)fileTime.dwHighDateTime<<32)|fileTime.dwLowDateTime;return 1;
 }
-static int RvhReadPackage(PCWSTR Path,RVH_PACKAGE_INFO *Out){
+static int RvhReadPackage(PCWSTR Path,RVH_PACKAGE_INFO *Out,BOOL RequireFileControls){
     HINF inf;UINT line;WCHAR raw[MAX_PATH];int ready=0;
     ZeroMemory(Out,sizeof(*Out));if(!RvhAbsoluteFile(Path,Out->Inf))return 0;
     inf=SetupOpenInfFileW(Out->Inf,NULL,INF_STYLE_WIN4,&line);
@@ -189,6 +219,9 @@ static int RvhReadPackage(PCWSTR Path,RVH_PACKAGE_INFO *Out){
             ||!RvhInfExpect(inf,RVH_SERVICE_SECTION,L"LoadOrderGroup",1,L"FSFilter Security Enhancer")
             ||!RvhInfExpect(inf,RVH_SERVICE_SECTION,L"AddReg",1,L"RonovaHost.Registry")
             ||!RvhInfInteger(inf,L"DestinationDirs",L"RonovaHost.DriverFiles",13))goto Finished;
+    /* Newly selected packages opt into both ODX operations. Installed older
+     * packages remain queryable/removable through their original identity. */
+    if(RequireFileControls&&!RvhInfFileControls(inf))goto Finished;
     /* Read the literal dirid before SetupAPI expands it to an install path. */
     if(GetPrivateProfileStringW(RVH_SERVICE_SECTION,L"ServiceBinary",L"",raw,ARRAYSIZE(raw),Out->Inf)==0
             ||_wcsicmp(raw,L"%13%\\RonovaHost.sys")!=0){RvhWin32Error(L"DriverStore-service-binary-required",ERROR_INVALID_DATA);goto Finished;}
@@ -256,7 +289,7 @@ static int RvhReadService(RVH_SERVICE_INFO *Out){
         return RvhWin32Error(L"installed-DriverStore-package",GetLastError());
     if(!SetupGetInfPublishedNameW(Out->StoreInf,Out->PublishedInf,ARRAYSIZE(Out->PublishedInf),NULL))
         return RvhWin32Error(L"installed-published-inf",GetLastError());
-    if(!RvhSibling(Out->StoreInf,RVH_SYS_NAME,storeBinary)||!RvhSameFile(Out->Image,storeBinary)||!RvhReadPackage(Out->StoreInf,&Out->Package))return 0;
+    if(!RvhSibling(Out->StoreInf,RVH_SYS_NAME,storeBinary)||!RvhSameFile(Out->Image,storeBinary)||!RvhReadPackage(Out->StoreInf,&Out->Package,FALSE))return 0;
     if(!RvhRegistryAltitude(L"SYSTEM\\CurrentControlSet\\Services\\RonovaHost\\Parameters",L"ObAltitude",Out->Package.ObAltitude)
             ||!RvhRegistryAltitude(L"SYSTEM\\CurrentControlSet\\Services\\RonovaHost\\Parameters\\Instances\\RonovaHost Instance",L"Altitude",Out->Package.FilterAltitude)
             ||!RvhRegistryAltitude(L"SYSTEM\\CurrentControlSet\\Services\\RonovaHost\\Instances\\RonovaHost Instance",L"Altitude",Out->Package.FilterAltitude))return 0;
@@ -511,7 +544,7 @@ int wmain(int Argc,wchar_t **Argv){
         name=wcsrchr(absolute,L'\\');
         if(name==NULL||_wcsicmp(name+1,RVH_INF_NAME)!=0){RvhWin32Error(L"original-RonovaHost-inf-name-required",ERROR_INVALID_NAME);goto Finished;}
         ZeroMemory(&package,sizeof(package));if(!RvhPathCopy(package.Inf,ARRAYSIZE(package.Inf),absolute))goto Finished;
-        if(!RvhPinPackage(&package,pinned)||!RvhReadPackage(absolute,&package))goto Finished;
+        if(!RvhPinPackage(&package,pinned)||!RvhReadPackage(absolute,&package,TRUE))goto Finished;
     }
     if(!RvhReadService(&service))goto Finished;
     RvhPrintService(&service);

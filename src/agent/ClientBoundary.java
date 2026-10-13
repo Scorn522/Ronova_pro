@@ -9,6 +9,8 @@ final class ClientBoundary {
     private static final String BRIDGE="dev/ronova/pro/bootstrap/ClientBridge";
     private static final String PARTICLES="net/minecraft/client/particle/ParticleEngine",TEXTURES="net/minecraft/client/renderer/texture/TextureManager";
     private static final String DYNAMIC="net/minecraft/client/renderer/texture/DynamicTexture",IMAGE="com/mojang/blaze3d/platform/NativeImage";
+    private static final String TOAST_COMPONENT="net/minecraft/client/gui/components/toasts/ToastComponent",TOAST_INSTANCE=TOAST_COMPONENT+"$ToastInstance";
+    private static final String TOAST="Lnet/minecraft/client/gui/components/toasts/Toast;";
     private static final String OVERLAY_MANAGER="net/minecraftforge/client/gui/overlay/GuiOverlayManager",OVERLAY_EVENT="net/minecraftforge/client/event/RegisterGuiOverlaysEvent";
     private static final String OVERLAY_REGISTER="(Lnet/minecraftforge/client/event/RegisterGuiOverlaysEvent$Ordering;Lnet/minecraft/resources/ResourceLocation;Ljava/lang/String;Lnet/minecraftforge/client/gui/overlay/IGuiOverlay;)V";
     private static final String OVERLAY_RENDER="(Lnet/minecraft/client/gui/GuiGraphics;FLnet/minecraftforge/client/gui/overlay/NamedGuiOverlay;)V";
@@ -82,6 +84,13 @@ final class ClientBoundary {
             if(name.equals(OVERLAY_MANAGER)&&method.name.equals("init")&&method.desc.equals("()V")){overlayInit(node,method);changed=true;}
             if(name.equals("net/minecraftforge/client/gui/overlay/ForgeGui")&&method.name.equals("lambda$render$0")&&method.desc.equals(OVERLAY_RENDER)){overlayRender(method);changed=true;}
             Type[] args=Type.getArgumentTypes(method.desc);int[] vars=locals(method,args);
+            if(name.equals(TOAST_COMPONENT)){
+                if(member(method,"addToast","m_94922_","("+TOAST+")V")){toastLifecycle(method,"toastAdding",vars[0],true);changed=true;}
+                if(member(method,"render","m_94920_","(Lnet/minecraft/client/gui/GuiGraphics;)V")){toastLifecycle(method,"toastFrameEntering",-1,false);changed=true;}
+                if(member(method,"lambda$render$1","m_243085_","("+TOAST+")Z")){toastLifecycle(method,"toastQueued",vars[0],false);changed=true;}
+                if(member(method,"clear","m_94919_","()V")){afterVoid(method,"toastCleared");changed=true;}
+            }
+            if(name.equals(TOAST_INSTANCE)&&member(method,"render","m_280442_","(ILnet/minecraft/client/gui/GuiGraphics;)Z")){toastLifecycle(method,"toastDrawing",-1,false);changed=true;}
             if(name.equals(BUILDER)){
                 if(member(method,"begin","m_166779_",BEGIN)){afterVoid(method,"verticesBegin");changed=true;}
                 if(member(method,"ensureCapacity","m_85722_","(I)V")){afterVoid(method,"verticesCapacityChanged");changed=true;}
@@ -132,10 +141,41 @@ final class ClientBoundary {
                 InsnList gate=new InsnList();LabelNode allowed=new LabelNode();gate.add(new InsnNode(Opcodes.ACONST_NULL));call(gate,"allowed","(Ljava/lang/Object;)Z");gate.add(new JumpInsnNode(Opcodes.IFNE,allowed));gate.add(new InsnNode(Opcodes.RETURN));gate.add(allowed);method.instructions.insert(gate);changed=true;
             }
             for(AbstractInsnNode at:method.instructions.toArray())if(at instanceof MethodInsnNode invoke&&invoke.getOpcode()!=Opcodes.INVOKESTATIC&&invoke.getOpcode()!=Opcodes.INVOKESPECIAL){
-                ClientCallback callback=clientCallback(invoke);if(callback!=null){callback(method,invoke,callback.named());changed=true;}
+                ClientCallback callback=clientCallback(invoke);if(callback!=null){callback(method,invoke,callback.named(),name);changed=true;}
             }
         }
         if(!changed)return null;ControlClassWriter writer=new ControlClassWriter(loader,node);node.accept(writer);return writer.toByteArray();
+    }
+    /** One scope covers the original callbacks, exact publication and every normal/throwing return. */
+    private static void toastLifecycle(MethodNode method,String entering,int incoming,boolean publication){
+        if((method.access&Opcodes.ACC_STATIC)!=0)throw new IllegalStateException("CLIENT_TOAST_INSTANCE_METHOD_REQUIRED");
+        Type result=Type.getReturnType(method.desc);if(result.getSort()!=Type.VOID&&result.getSort()!=Type.BOOLEAN)throw new IllegalStateException("CLIENT_TOAST_RETURN_LAYOUT_CHANGED");
+        int token=method.maxLocals++,failure=method.maxLocals++,output=method.maxLocals++;
+        LabelNode start=new LabelNode(),end=new LabelNode(),handler=new LabelNode(),complete=new LabelNode();
+        MethodInsnNode publish=null;
+        for(AbstractInsnNode at:method.instructions.toArray()){
+            if(at.getOpcode()==Opcodes.RETURN||at.getOpcode()==Opcodes.IRETURN){InsnList finish=new InsnList();if(result.getSort()!=Type.VOID)finish.add(new VarInsnNode(Opcodes.ISTORE,output));finish.add(new JumpInsnNode(Opcodes.GOTO,complete));method.instructions.insertBefore(at,finish);method.instructions.remove(at);}
+            else if(publication&&at instanceof MethodInsnNode invoke&&invoke.getOpcode()==Opcodes.INVOKEINTERFACE&&invoke.owner.equals("java/util/Deque")&&invoke.name.equals("add")&&invoke.desc.equals("(Ljava/lang/Object;)Z")){
+                if(publish!=null)throw new IllegalStateException("CLIENT_TOAST_QUEUE_PUBLICATION_CHANGED");publish=invoke;
+            }
+        }
+        if(publication){
+            if(publish==null)throw new IllegalStateException("CLIENT_TOAST_QUEUE_PUBLICATION_UNAVAILABLE");
+            int queued=method.maxLocals++,toast=method.maxLocals++,accepted=method.maxLocals++;LabelNode write=new LabelNode();
+            InsnList gate=new InsnList();gate.add(new InsnNode(Opcodes.DUP2));gate.add(new VarInsnNode(Opcodes.ASTORE,toast));gate.add(new VarInsnNode(Opcodes.ASTORE,queued));
+            gate.add(new VarInsnNode(Opcodes.ALOAD,queued));gate.add(new VarInsnNode(Opcodes.ALOAD,toast));gate.add(new VarInsnNode(Opcodes.ALOAD,token));call(gate,"toastWriting","(Ljava/lang/Object;Ljava/lang/Object;Ljava/lang/Object;)Z");
+            gate.add(new JumpInsnNode(Opcodes.IFNE,write));gate.add(new InsnNode(Opcodes.POP2));gate.add(new JumpInsnNode(Opcodes.GOTO,complete));gate.add(write);method.instructions.insertBefore(publish,gate);
+            InsnList observed=new InsnList();observed.add(new InsnNode(Opcodes.DUP));observed.add(new VarInsnNode(Opcodes.ISTORE,accepted));observed.add(new VarInsnNode(Opcodes.ALOAD,queued));observed.add(new VarInsnNode(Opcodes.ALOAD,toast));
+            observed.add(new VarInsnNode(Opcodes.ALOAD,token));observed.add(new VarInsnNode(Opcodes.ILOAD,accepted));call(observed,"toastAdded","(Ljava/lang/Object;Ljava/lang/Object;Ljava/lang/Object;Z)V");method.instructions.insert(publish,observed);
+        }
+        InsnList entry=new InsnList();entry.add(new VarInsnNode(Opcodes.ALOAD,0));if(incoming>=0)entry.add(new VarInsnNode(Opcodes.ALOAD,incoming));
+        call(entry,entering,incoming>=0?"(Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;":"(Ljava/lang/Object;)Ljava/lang/Object;");entry.add(new VarInsnNode(Opcodes.ASTORE,token));
+        entry.add(new VarInsnNode(Opcodes.ALOAD,token));entry.add(new FieldInsnNode(Opcodes.GETSTATIC,"java/lang/Boolean","FALSE","Ljava/lang/Boolean;"));entry.add(new JumpInsnNode(Opcodes.IF_ACMPNE,start));
+        if(result.getSort()!=Type.VOID)entry.add(new InsnNode(Opcodes.ICONST_1));entry.add(new InsnNode(result.getSort()==Type.VOID?Opcodes.RETURN:Opcodes.IRETURN));entry.add(start);method.instructions.insert(entry);
+        method.instructions.add(end);method.instructions.add(complete);method.instructions.add(new VarInsnNode(Opcodes.ALOAD,token));call(method.instructions,"toastExiting","(Ljava/lang/Object;)V");
+        if(result.getSort()!=Type.VOID)method.instructions.add(new VarInsnNode(Opcodes.ILOAD,output));method.instructions.add(new InsnNode(result.getSort()==Type.VOID?Opcodes.RETURN:Opcodes.IRETURN));
+        method.instructions.add(handler);method.instructions.add(new VarInsnNode(Opcodes.ASTORE,failure));method.instructions.add(new VarInsnNode(Opcodes.ALOAD,token));call(method.instructions,"toastExiting","(Ljava/lang/Object;)V");
+        method.instructions.add(new VarInsnNode(Opcodes.ALOAD,failure));method.instructions.add(new InsnNode(Opcodes.ATHROW));method.tryCatchBlocks.add(new TryCatchBlockNode(start,end,handler,null));
     }
     private static boolean overlayVar(AbstractInsnNode at,int opcode,int slot){return at instanceof VarInsnNode value&&value.getOpcode()==opcode&&value.var==slot;}
     private static boolean overlayField(AbstractInsnNode at,String owner,String name,String descriptor){return at instanceof FieldInsnNode value&&value.getOpcode()==Opcodes.GETFIELD&&value.owner.equals(owner)&&value.name.equals(name)&&value.desc.equals(descriptor);}
@@ -238,7 +278,7 @@ final class ClientBoundary {
     private static void guard(MethodNode method,int object,String operation){InsnList code=new InsnList();LabelNode allowed=new LabelNode();code.add(new VarInsnNode(Opcodes.ALOAD,object));call(code,operation,"(Ljava/lang/Object;)Z");code.add(new JumpInsnNode(Opcodes.IFNE,allowed));defaultValue(code,Type.getReturnType(method.desc));code.add(new InsnNode(Type.getReturnType(method.desc).getOpcode(Opcodes.IRETURN)));code.add(allowed);method.instructions.insert(code);}
     private static void defaultValue(InsnList code,Type result){switch(result.getSort()){
         case Type.VOID->{}case Type.LONG->code.add(new InsnNode(Opcodes.LCONST_0));case Type.FLOAT->code.add(new InsnNode(Opcodes.FCONST_0));case Type.DOUBLE->code.add(new InsnNode(Opcodes.DCONST_0));case Type.OBJECT,Type.ARRAY->code.add(new InsnNode(Opcodes.ACONST_NULL));default->code.add(new InsnNode(Opcodes.ICONST_0));}}
-    private static void callback(MethodNode method,MethodInsnNode invoke,String named){
+    private static void callback(MethodNode method,MethodInsnNode invoke,String named,String caller){
         Type[] args=Type.getArgumentTypes(invoke.desc);Type result=Type.getReturnType(invoke.desc);int[] vars=new int[args.length];for(int i=0;i<args.length;i++){vars[i]=method.maxLocals;method.maxLocals+=args[i].getSize();}
         int receiver=method.maxLocals++,token=method.maxLocals++,error=method.maxLocals++,output=method.maxLocals;method.maxLocals+=result.getSize();
         LabelNode allowed=new LabelNode(),start=new LabelNode(),end=new LabelNode(),failed=new LabelNode(),done=new LabelNode();InsnList code=new InsnList();
@@ -246,7 +286,11 @@ final class ClientBoundary {
         code.add(new VarInsnNode(Opcodes.ALOAD,receiver));call(code,"allowed","(Ljava/lang/Object;)Z");code.add(new JumpInsnNode(Opcodes.IFNE,allowed));
         boolean reload=invoke.owner.equals("net/minecraft/server/packs/resources/PreparableReloadListener")&&named.equals("reload");
         if(reload){code.add(new VarInsnNode(Opcodes.ALOAD,vars[0]));call(code,"skipReload","(Ljava/lang/Object;)Ljava/util/concurrent/CompletableFuture;");}
-        else if(invoke.owner.equals("net/minecraft/client/gui/components/toasts/Toast")&&named.equals("render"))code.add(new FieldInsnNode(Opcodes.GETSTATIC,"net/minecraft/client/gui/components/toasts/Toast$Visibility","HIDE",result.getDescriptor()));else defaultValue(code,result);
+        else if(invoke.owner.equals("net/minecraft/client/gui/components/toasts/Toast")&&named.equals("render")){
+            if(caller.equals(TOAST_INSTANCE)&&member(method,"render","m_280442_","(ILnet/minecraft/client/gui/GuiGraphics;)Z")){
+                code.add(new VarInsnNode(Opcodes.ALOAD,receiver));call(code,"toastRenderSkipped","(Ljava/lang/Object;)Ljava/lang/Object;");code.add(new TypeInsnNode(Opcodes.CHECKCAST,result.getInternalName()));
+            }else code.add(new FieldInsnNode(Opcodes.GETSTATIC,"net/minecraft/client/gui/components/toasts/Toast$Visibility","HIDE",result.getDescriptor()));
+        }else defaultValue(code,result);
         code.add(new JumpInsnNode(Opcodes.GOTO,done));
         code.add(allowed);code.add(new VarInsnNode(Opcodes.ALOAD,receiver));call(code,"enter","(Ljava/lang/Object;)Ljava/lang/Object;");code.add(new VarInsnNode(Opcodes.ASTORE,token));code.add(start);
         code.add(new VarInsnNode(Opcodes.ALOAD,receiver));for(int i=0;i<args.length;i++)code.add(new VarInsnNode(args[i].getOpcode(Opcodes.ILOAD),vars[i]));

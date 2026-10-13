@@ -1,20 +1,21 @@
 # Ronova Pro 当前进度
 
-## 2026-10-14：C 接续——原生 worker 来源与真实退出持有
+## 2026-10-14：C 接续——定义通知、模块加载、Toast／FSCTL 与目录收口
 
-接续 `c3b1db1`，当前 Java ABI 56 / Native ABI 55 / Storage ABI 3 / Journal 6；GNU C23 / GNU C++23、Java17，独立驱动/部署工具仍为 C17。该完整工作包写齐后集中构建，C/B 整体尚未完成。
+接续 `2bc5f7f`，当前 Java ABI57 / Native ABI56 / Storage3 / Journal6；GNU C23/C++23、Java17，独立驱动和管理工具 C17。本包源码写齐后集中构建；C/B 整体仍未完成。
 
-已确认 producer 的本地 CreateThread、_beginthread、_beginthreadex 使用三个准确 start adapter，原 userdata、调用约定、stack/flags/thread-id 和真实返回值保留。创建前完整准备来源、持久 C scope 和实际 start DLL pin；正常 JNI 保存全量真实强来源，分离后的后继只借完整覆盖其实际来源的父 holder。Heap callback 只借自己实际 published anchor 的完整强来源及已经 pin 的同一映像，使用正常准备时捕获的范围；不调用 JNI/GetEnv/loader，也不从 tag、weak Module 或名称授予资格。借用结束前保留原 pin/global refs，准确 OS 退出或实际创建失败后才在既有 daemon 归还。共享环境的原创建者和当前独立回调来源分开，不因旧 profiler/其他创建来源误拒当前已确认回调。
+- JVMTI：真实 RedefineClasses/RetransformClasses 成功后，沿实际 Class[] 与原成功 scope 接入已有定义更新队列；失败不通知。合法 JNI 预先取得的强引用保留到接续接受，通知失败由既有 daemon 重试，失败操作和部分引用准确清理。ThreadEnd/非法 JNI 上下文不伪造通知，原返回、异常和 LastError 保留；此入口不授予一般控制写者资格。
+- 模块：已观察原生映像的 LoadLibraryA/W/ExA/ExW 导入、延迟消费及真实 GetProcAddress 结果接入准确来源准入，停止来源在实际 loader 调用前拒绝，原参数、标志、HMODULE 和失败返回保留。未登记子 DLL 不冒充 JNI library，预观察加载窗口和旧缓存指针仍未控。
+- 客户端：真实 Toast 提交、queued/visible、实例与占位退役已接线；在实际 Minecraft 所属线程维护，原来源与 unknown 贯穿回调和派生资源，共享/未知保留未决。没有扩大纯呈现 UUID 接口。
+- Windows 驱动：按实际 actor/文件身份接 ODX、EFS、置零、trim、块克隆及列明的元数据修改 FSCTL；ODX 对准确拒绝目标使用 NOT_SUPPORTED，让正常复制回落原 I/O。新包 INF 的 SupportedFeatures=3 与管理器固定包读取同步；source 无法解析、并发句柄复用和旧 offload token 保留边界，协议结构仍为1。
 
-真实 worker 在 start 入口复制当前 kernel thread handle，Win32/ex 暂停创建另保留准确返回对象的私有 witness；_beginthread 的自动关闭返回句柄不被消费。处理真实 start 早于创建调用返回的发布竞争，实际 OS signaled 后才释放 DLL/来源。JNI ThreadEnd 只幂等收尾原线程的 Java 附件，C callback、worker、heap anchor 与临时 DLL scope 继续持有 TLS；真实 Attach 可开启新周期，Detach 返回后仍保留原生来源。多个环境的 ThreadEnd 不重复减同一 binding，在正常 daemon 不用自己的 JNIEnv 收死线程的局部引用。未 Detach、未返回 callback 或不准确 scope 保持未决。当前来源登记在 worker 上继续使用原实际 library registration，避免共享 HMODULE 将 A 误混成 B；缓存 GPA 同样保留真实 unknown，不把缺失来源变成私有权限。Heap 内 Attach/Detach/GetEnv 沿既有禁止 JNI 的范围拒绝。
+目录已收口：有效源码只有 `src/{core,agent,bootstrap,prelaunch,journal,resources}`。旧根目录 agent/bootstrap/prelaunch、src/main/test/fixture/stateChecks、validation/src 及输入补丁保存在 `.work/archive/source-layout-20261014/`；原完整 README 保存在 docs/history。Java 包名和现有构建 sourceSets 没有改变，历史候选、失败和存档未删除。当前打包入口为 distribution/package-current.ps1，只取有效源码和指定候选。
 
-回收仍用原 JVMTI daemon；DLL 回调后重新取得该 daemon 的真实当前环境，必要时只重新附着本方 daemon，外部 heap 调用者被分离则把剩余 global refs 交原 anchor。私有监视句柄的 CloseHandle 与字段更新同一目录锁内完成，避免编号复用误拦无关对象。HostState 只追加实际 worker hold/exit/gap 三项，Core 退役不能在这些实际持有未结时返回完成。该实现不强杀、暂停或替用户恢复原生循环；仍在执行的旧栈保持未结。
+实际结果：主包构建 PASS 20秒，`build-c-java57-native56-admission-cached-20261014.log`；最初旧 PowerShell 将编译提示误作异常而退出1，保留 `build-c-java57-native56-admission-ps5-wrapper-failed-20261014.log` 及本节失败说明，随后用原正常环境构建。驱动/管理器官方 WDK/SDK+Zig/LLD 编译链接 PASS，`build-c-driver56-fsctl-20261014.log`，SYS 37888字节、EXE 190464字节；最初旧 PowerShell 包装同样被 stderr 提示截断，退出1，不计通过。未运行正式 VS/MSBuild、签名、CAT、altitude 配置或安装/加载。
 
-实际结果：整包构建 PASS 26秒，`build-c-java56-native55-worker-cached-20261014.log`。原夹具同一 DLL：`phase=thread-end` 实际退出0，`c-host-thread55-thread-end-20261014.log`；UCRT 原 start/userdata、真实 Attach=0、同步 ThreadEnd 回调、Detach=0、GetEnv=-2且NULL、同一 OS 线程继续执行、回调创建与分离后的两个暂停后继在外层恢复/真实退出61/关闭通过。`phase=heap-only` 实际退出0，`c-heap55-lifetime-20261014.log`；现代/旧式原 userdata、tag/referrer 写回、无关对象保留、tag/storage 还原及真实 Dispose 通过，没有重跑 ClassUnload 或旧 Host 矩阵。53/54 的原记录及失败日志保留在后续历史节。
+现有夹具新 admission 分支实际退出0，`c-host-module56-admission-20261014.log`：四个实际导入和四个真实动态入口，原 HMODULE、SEARCH_SYSTEM32、有效调用原 LastError、空图像的193错误、实际 FreeLibrary与临时文件删除通过；真实初始方法9→重转换7→重定义11，非法 count 保留103且方法仍11，真实 Dispose 通过。未重跑旧 ClassUnload/heap/thread/Host 矩阵。独立 JVM 无实际 Mod producer：停止组加载拒绝、共享 Mod caller 的定义传播与通知失败补收均 NOTRUN；Toast与内核 I/O只有源码和编译结果，未取得该候选实机客户端/内核运行。
 
-该独立 JVM 无真实 Mod producer 登记：producer sourceLease/start DLL pin/借用/发布竞争/真实退出租约与外层其它 callback 中 Detach 均明确 NOTRUN，不把普通 profiler 结果写成这些已通过。代码可完整持有的来源才包装；不同来源/不可 pin start/未观察入口/远程线程仍准确报告边界。驱动源码/工具未改，沿用本轮 36352 字节 SYS 与 188928 字节 EXE 的同源码官方 WDK/SDK+Zig/LLD编译结果；未执行签名、CAT、真实 altitude 配置、安装/加载。缓存原表、旧未观察 JVMTI 环境、内部 raw native 写者、DllMain/TLS 首窗口、既有句柄/映射与其他呈现 adapter 等仍存在源码边界；本候选游戏/世界与保存重启仍未验收。
-
-本地 WIP `distribution/candidate-c-java56-native55-wip-20261014`，源码和简要结果同步 Git，产物/依赖/原始日志留本地。
+本地候选 `distribution/candidate-c-java57-native56-wip-20261014`，Core JAR 2380374字节，附匹配 prelaunch 与 unsigned-driver。整理包 `distribution/Ronova-Pro-C-WIP-Java57-Native56-20261014.zip` 含有效源码和本次产物，不带旧布局、缓存、存档、旧候选或原始运行日志。源码和简要结果同步 Git，产物留本地。缓存原表/旧环境/内部未观察写者、loader 首窗口、现有映射/section、未知呈现 carrier 及本候选游戏/保存重启仍未收口；此前结果保留原范围。
 
 ---
 ## 2026-10-13：C 接续——54/51 用户态接线与自编 Windows 驱动源码

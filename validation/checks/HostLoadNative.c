@@ -233,7 +233,7 @@ static void load_ti_u1(LoadClassBytes *image,unsigned value){image->bytes[image-
 static void load_ti_u2(LoadClassBytes *image,unsigned value){load_ti_u1(image,value>>8);load_ti_u1(image,value);}
 static void load_ti_u4(LoadClassBytes *image,unsigned value){load_ti_u2(image,value>>16);load_ti_u2(image,value);}
 static void load_ti_utf8(LoadClassBytes *image,const char *value){unsigned length=(unsigned)strlen(value);load_ti_u1(image,1);load_ti_u2(image,length);memcpy(image->bytes+image->length,value,length);image->length+=length;}
-static jclass load_ti_define_class(JNIEnv *env,jobject loader,char suffix){
+static jclass load_ti_define_image(JNIEnv *env,jobject loader,char suffix,LoadClassBytes *saved){
     char name[]="dev/ronova/pro/JvmtiPayloadA";name[sizeof(name)-2]=suffix;LoadClassBytes image={0};
     load_ti_u4(&image,0xcafebabe);load_ti_u2(&image,0);load_ti_u2(&image,61);load_ti_u2(&image,8);
     load_ti_utf8(&image,name);load_ti_u1(&image,7);load_ti_u2(&image,1);
@@ -243,8 +243,10 @@ static jclass load_ti_define_class(JNIEnv *env,jobject loader,char suffix){
     load_ti_u2(&image,0x9);load_ti_u2(&image,5);load_ti_u2(&image,6);load_ti_u2(&image,1);load_ti_u2(&image,7);load_ti_u4(&image,15);
     load_ti_u2(&image,1);load_ti_u2(&image,0);load_ti_u4(&image,3);load_ti_u1(&image,0x10);load_ti_u1(&image,7);load_ti_u1(&image,0xac);
     load_ti_u2(&image,0);load_ti_u2(&image,0);load_ti_u2(&image,0);
+    if(saved)*saved=image;
     return (*env)->DefineClass(env,name,loader,(const jbyte*)image.bytes,(jsize)image.length);
 }
+static jclass load_ti_define_class(JNIEnv *env,jobject loader,char suffix){return load_ti_define_image(env,loader,suffix,NULL);}
 #endif
 #ifdef AUDIT_HOST_JVMTI_CHECK
 static int load_ti_define(JNIEnv *env,jobject loader,char suffix){
@@ -918,6 +920,90 @@ done:
     load_thread_case_free(thread);
     if(!ready){fprintf(stderr,"HOST_THREAD_HEAP_RESULT stage=%s jvmti=%d seen=%u callbackError=%d\n",stage,error,state.seen,state.error);return load_thread_fail(env,stage);}
     return 1;
+}
+typedef HMODULE (WINAPI *LoadModuleA)(LPCSTR);
+typedef HMODULE (WINAPI *LoadModuleW)(LPCWSTR);
+typedef HMODULE (WINAPI *LoadModuleExA)(LPCSTR,HANDLE,DWORD);
+typedef HMODULE (WINAPI *LoadModuleExW)(LPCWSTR,HANDLE,DWORD);
+extern LoadModuleA __imp_LoadLibraryA;
+extern LoadModuleW __imp_LoadLibraryW;
+extern LoadModuleExA __imp_LoadLibraryExA;
+extern LoadModuleExW __imp_LoadLibraryExW;
+#ifdef AUDIT_HOST_JVMTI_CHECK
+JNIEXPORT void JNICALL Java_dev_ronova_pro_AuditFixCheck_hostDefinitionsChanged0(JNIEnv *env,jclass check,jobject loader){
+    (void)check;JavaVM *vm=NULL;jvmtiEnv *api=NULL;jclass actual=NULL;const char *failure=NULL;
+    if((*env)->GetJavaVM(env,&vm)!=JNI_OK||!vm||(*vm)->GetEnv(vm,(void**)&api,JVMTI_VERSION_1_2)!=JNI_OK||!api){load_thread_fail(env,"DEFINITIONS_REAL_ENVIRONMENT");return;}
+    load_ti_identity=api;InterlockedExchange(&load_ti_first,0);InterlockedExchange(&load_ti_second,0);
+    jvmtiCapabilities caps={0};caps.can_generate_all_class_hook_events=1;caps.can_retransform_classes=1;caps.can_redefine_classes=1;
+    jvmtiError error=(*api)->AddCapabilities(api,&caps);LoadClassBytes image={0};jmethodID method=NULL;
+    jvmtiEventCallbacks callbacks={0};callbacks.ClassFileLoadHook=load_ti_callback_first;
+    if(error!=JVMTI_ERROR_NONE){failure="DEFINITIONS_REAL_CAPABILITIES";goto done;}
+    error=(*api)->SetEventCallbacks(api,&callbacks,sizeof(callbacks));if(error!=JVMTI_ERROR_NONE){failure="DEFINITIONS_REAL_FIRST_CALLBACK";goto done;}
+    error=(*api)->SetEventNotificationMode(api,JVMTI_ENABLE,JVMTI_EVENT_CLASS_FILE_LOAD_HOOK,NULL);if(error!=JVMTI_ERROR_NONE){failure="DEFINITIONS_REAL_EVENT_ENABLE";goto done;}
+    actual=load_ti_define_image(env,loader,'A',&image);method=actual?(*env)->GetStaticMethodID(env,actual,"value","()I"):NULL;
+    if(!method||(*env)->ExceptionCheck(env)||(*env)->CallStaticIntMethod(env,actual,method)!=9||load_ti_first!=1){failure="DEFINITIONS_REAL_INITIAL_METHOD";goto done;}
+    callbacks.ClassFileLoadHook=load_ti_callback_second;error=(*api)->SetEventCallbacks(api,&callbacks,sizeof(callbacks));
+    if(error!=JVMTI_ERROR_NONE){failure="DEFINITIONS_REAL_REPLACEMENT_CALLBACK";goto done;}
+    error=(*api)->RetransformClasses(api,1,&actual);
+    if(error!=JVMTI_ERROR_NONE||(*env)->ExceptionCheck(env)||(*env)->CallStaticIntMethod(env,actual,method)!=7||load_ti_second!=1){failure="DEFINITIONS_ACTUAL_RETRANSFORM";goto done;}
+    int changed=0;for(unsigned i=0;i+2<image.length;i++)if(image.bytes[i]==0x10&&image.bytes[i+1]==7&&image.bytes[i+2]==0xac){image.bytes[i+1]=11;changed++;}
+    if(changed!=1){failure="DEFINITIONS_ACTUAL_REDEFINE_IMAGE";goto done;}
+    jvmtiClassDefinition definition={actual,(jint)image.length,image.bytes};error=(*api)->RedefineClasses(api,1,&definition);
+    if(error!=JVMTI_ERROR_NONE||(*env)->ExceptionCheck(env)||(*env)->CallStaticIntMethod(env,actual,method)!=11||load_ti_second!=2){failure="DEFINITIONS_ACTUAL_REDEFINE";goto done;}
+    error=(*api)->RetransformClasses(api,-1,&actual);
+    if(error!=JVMTI_ERROR_ILLEGAL_ARGUMENT||(*env)->ExceptionCheck(env)||(*env)->CallStaticIntMethod(env,actual,method)!=11){failure="DEFINITIONS_ORIGINAL_INVALID_ARGUMENT";goto done;}
+    fprintf(stderr,"DEFINITIONS_REAL_APIS_PASS initial=9 retransform=7 redefine=11 invalid_count=%d unchanged_after_failure=11\n",error);
+done:
+    {jvmtiError disposed=(*api)->DisposeEnvironment(api);if(disposed!=JVMTI_ERROR_NONE&&!failure){failure="DEFINITIONS_ACTUAL_DISPOSE";error=disposed;}}
+    load_ti_identity=NULL;if(actual)(*env)->DeleteLocalRef(env,actual);
+    if(failure){fprintf(stderr,"DEFINITIONS_REAL_FAILURE stage=%s jvmti=%d\n",failure,error);load_thread_fail(env,failure);return;}
+    fprintf(stderr,"DEFINITIONS_MOD_PROPAGATION_AND_FAILED_NOTIFY_REAPER_NOTRUN no_actual_Mod_producer no_private_queue_reflection no_manufactured_authority\n");
+}
+#endif
+static HMODULE load_module_call(void *entry,unsigned kind,const char *a,const wchar_t *w,DWORD flags){
+    switch(kind){
+        case 0:return ((LoadModuleA)entry)(a);
+        case 1:return ((LoadModuleW)entry)(w);
+        case 2:return ((LoadModuleExA)entry)(a,NULL,flags);
+        default:return ((LoadModuleExW)entry)(w,NULL,flags);
+    }
+}
+JNIEXPORT void JNICALL Java_dev_ronova_pro_AuditFixCheck_hostModuleLoad0(JNIEnv *env,jclass check){
+    (void)check;HMODULE kernel=GetModuleHandleW(L"kernel32.dll");
+    const char *names[]={"LoadLibraryA","LoadLibraryW","LoadLibraryExA","LoadLibraryExW"};
+    void *entries[]={(void*)__imp_LoadLibraryA,(void*)__imp_LoadLibraryW,(void*)__imp_LoadLibraryExA,(void*)__imp_LoadLibraryExW};
+    if(!kernel){load_thread_fail(env,"HOST_MODULE_ACTUAL_KERNEL_IMAGE");return;}
+    wchar_t directory[MAX_PATH],invalidW[MAX_PATH];char invalidA[MAX_PATH*3];
+    DWORD count=GetTempPathW(MAX_PATH,directory);
+    if(!count||count>=MAX_PATH||!GetTempFileNameW(directory,L"rvh",0,invalidW)){
+        load_thread_fail(env,"HOST_MODULE_INVALID_IMAGE_CREATE");return;
+    }
+    int encoded=WideCharToMultiByte(CP_ACP,WC_NO_BEST_FIT_CHARS,invalidW,-1,invalidA,sizeof(invalidA),NULL,NULL);
+    if(!encoded){DeleteFileW(invalidW);load_thread_fail(env,"HOST_MODULE_INVALID_IMAGE_ANSI_PATH");return;}
+    const char *failure=NULL;
+    for(unsigned kind=0;kind<4&&!failure;kind++){
+        void *dynamic=(void*)GetProcAddress(kernel,names[kind]);
+        if(!load_private_entry(entries[kind])||!load_private_entry(dynamic)){
+            failure="HOST_MODULE_ACTUAL_IMPORT_OR_RESULT_UNCONTROLLED";break;
+        }
+        for(unsigned mode=0;mode<2&&!failure;mode++){
+            void *entry=mode?dynamic:entries[kind];DWORD flags=kind>=2?LOAD_LIBRARY_SEARCH_SYSTEM32:0;
+            SetLastError(0x524e0056);
+            HMODULE actual=load_module_call(entry,kind,"kernel32.dll",L"kernel32.dll",flags);DWORD error=GetLastError();
+            if(!actual){failure="HOST_MODULE_VALID_LOAD_REFUSED";break;}
+            if(actual!=kernel)failure="HOST_MODULE_ORIGINAL_RETURN_CHANGED";
+            if(!FreeLibrary(actual)&&!failure)failure="HOST_MODULE_ACTUAL_REFERENCE_RELEASE";
+            if(failure)break;
+            SetLastError(0x524e0056);actual=load_module_call(entry,kind,invalidA,invalidW,0);DWORD invalid=GetLastError();
+            if(actual){FreeLibrary(actual);failure="HOST_MODULE_INVALID_IMAGE_ACCEPTED";break;}
+            if(invalid!=ERROR_BAD_EXE_FORMAT){failure="HOST_MODULE_REAL_INVALID_IMAGE_ERROR_CHANGED";break;}
+            fprintf(stderr,"HOST_MODULE_ACTUAL api=%s mode=%s module=%p validLastError=%lu invalidImageError=%lu flags=%lu\n",
+                    names[kind],mode?"dynamic":"import",(void*)kernel,(unsigned long)error,(unsigned long)invalid,(unsigned long)flags);
+        }
+    }
+    if(!DeleteFileW(invalidW)&&!failure)failure="HOST_MODULE_INVALID_IMAGE_REMOVE";
+    if(failure){load_thread_fail(env,failure);return;}
+    fprintf(stderr,"HOST_MODULE_PRODUCER_ADMISSION_NOTRUN no_actual_Mod_producer no_fabricated_sources; child_DLL_sources_and_preobservation_loader_window_remain_uncontrolled\n");
 }
 JNIEXPORT void JNICALL Java_dev_ronova_pro_AuditFixCheck_hostThreadCreate0(JNIEnv *env,jclass check,jclass type,jobject payload){
     (void)check;JavaVM *vm=NULL;jclass actual=payload?(*env)->GetObjectClass(env,payload):NULL;
