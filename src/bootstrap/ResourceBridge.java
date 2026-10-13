@@ -35,6 +35,11 @@ public final class ResourceBridge {
     private static final ThreadLocal<FileOperation> FILE_OPERATIONS=new ThreadLocal<>();
     private static final ThreadLocal<BufferStorage> BUFFER_CLEANING=new ThreadLocal<>();
     private static final ThreadLocal<BufferAllocation> BUFFER_ALLOCATING=new ThreadLocal<>();
+    private static final ThreadLocal<BufferWrapScope> BUFFER_WRAPPING=new ThreadLocal<>();
+    private static final StackWalker WRAP_AUTHORITY=StackWalker.getInstance(StackWalker.Option.RETAIN_CLASS_REFERENCE);
+    private static final String BUFFER_WRAP_NAME="org.lwjgl.system.MemoryUtil",BUFFER_WRAP_DESCRIPTOR="(Ljava/lang/Class;JI)Ljava/nio/Buffer;";
+    private static final List<BufferWrapRole> BUFFER_WRAP_ROLES=new ArrayList<>();
+    private static volatile Class<?> bufferWrapAgent;
     private static final ThreadLocal<BufferRegistration> BUFFER_REGISTERING=new ThreadLocal<>();
     private static final ThreadLocal<BufferRestore> BUFFER_RESTORING=new ThreadLocal<>();
     private static final ThreadLocal<IoBufferWrite> IO_BUFFER_WRITE=new ThreadLocal<>();
@@ -53,7 +58,7 @@ public final class ResourceBridge {
     private static final class BufferPlatform {
         static final Class<?> DIRECT=platformType("java.nio.DirectByteBuffer"),DEALLOCATOR=platformType("java.nio.DirectByteBuffer$Deallocator"),
                 UNMAPPER=platformType("sun.nio.ch.FileChannelImpl$Unmapper"),CLEANER=platformType("jdk.internal.ref.Cleaner"),UNSAFE=platformType("jdk.internal.misc.Unsafe");
-        static final Field ADDRESS=field(Buffer.class,"address"),CAPACITY=field(Buffer.class,"capacity"),POSITION=field(Buffer.class,"position"),LIMIT=field(Buffer.class,"limit"),CLEANUP=field(DIRECT,"cleaner"),
+        static final Field ADDRESS=field(Buffer.class,"address"),MARK=field(Buffer.class,"mark"),CAPACITY=field(Buffer.class,"capacity"),POSITION=field(Buffer.class,"position"),LIMIT=field(Buffer.class,"limit"),CLEANUP=field(DIRECT,"cleaner"),
                 DEALLOC_ADDRESS=field(DEALLOCATOR,"address"),DEALLOC_SIZE=field(DEALLOCATOR,"size"),
                 MAP_ADDRESS=field(UNMAPPER,"address"),MAP_SIZE=field(UNMAPPER,"size"),MAP_FD=field(UNMAPPER,"fd");
         static final Field STRING_VALUE=field(String.class,"value"),STRING_CODER=field(String.class,"coder");
@@ -251,6 +256,33 @@ public final class ResourceBridge {
         final Buffer buffer;final BufferAllocation previous=BUFFER_ALLOCATING.get();final Thread caller=Thread.currentThread();boolean closed;
         BufferAllocation(Buffer buffer){this.buffer=buffer;}
     }
+    private static final class BufferWrapRole {
+        final Key loader,module;final boolean bootstrap;Key actual;
+        BufferWrapRole(ClassLoader loader,Module module){this.loader=new Key(loader,false);this.module=new Key(module,false);bootstrap=loader==null;}
+    }
+    private static final class BufferWrapScope {
+        final Buffer buffer;final Class<?> requested,declaring;final BufferWrapRole role;final long address;final int capacity;
+        final Thread caller=Thread.currentThread();final BufferWrapScope previous=BUFFER_WRAPPING.get();boolean closed;
+        BufferWrapScope(Buffer buffer,Class<?> requested,long address,int capacity,Class<?> declaring,BufferWrapRole role){
+            this.buffer=buffer;this.requested=requested;this.address=address;this.capacity=capacity;this.declaring=declaring;this.role=role;
+        }
+    }
+    private static final class BufferWrapLayout {
+        static final Span ADDRESS=bufferWrapSpan(BufferPlatform.ADDRESS,8),MARK=bufferWrapSpan(BufferPlatform.MARK,4),
+                LIMIT=bufferWrapSpan(BufferPlatform.LIMIT,4),CAPACITY=bufferWrapSpan(BufferPlatform.CAPACITY,4);
+    }
+    private static final class BufferWrapWriter implements java.util.function.Function<java.util.stream.Stream<StackWalker.StackFrame>,StackWalker.StackFrame> {
+        public StackWalker.StackFrame apply(java.util.stream.Stream<StackWalker.StackFrame> frames){
+            var cursor=frames.iterator();while(cursor.hasNext()){
+                var frame=cursor.next();Class<?> type=frame.getDeclaringClass(),nest=type.getNestHost();
+                if(nest==ResourceBridge.class||nest==TaskBridge.class||nest==ControlBridge.class||nest==BackingBridge.class
+                        ||nest==NativeControl.class||nest==CodeSourceBridge.class||nest==ExecutionFlow.class
+                        ||type==BufferPlatform.UNSAFE||type==UNSAFE.getClass())continue;
+                return frame;
+            }return null;
+        }
+    }
+    private static final BufferWrapWriter BUFFER_WRAP_WRITER=new BufferWrapWriter();
     private record BufferRegistration(Buffer buffer,BufferStorage storage){}
     private record BufferSpan(Object holder,BufferStorage storage,long address,long bytes){}
     private record BufferWrite(BufferSpan span,Object receipt){}
@@ -915,6 +947,100 @@ public final class ResourceBridge {
             finally{if(previous==null)BUFFER_REGISTERING.remove();else BUFFER_REGISTERING.set(previous);}
         }
         resourceCreated(action);return new BufferCleanup(storage);
+    }
+    public static void installBufferWrap(Class<?> actualAgent){
+        Class<?> caller=WRAP_AUTHORITY.getCallerClass();
+        if(caller!=actualAgent||!ControlBridge.owns(caller)||!caller.getName().equals("dev.ronova.pro.agent.RecoveryAgent"))
+            throw new SecurityException("BUFFER_WRAP_AGENT_REQUIRED");
+        synchronized(BUFFER_WRAP_ROLES){
+            if(bufferWrapAgent!=null&&bufferWrapAgent!=actualAgent)throw new SecurityException("BUFFER_WRAP_AGENT_CHANGED");
+            bufferWrapAgent=actualAgent;CodeSourceBridge.resourceLayoutControls(BUFFER_WRAP_ROLES);
+            CodeSourceBridge.resourceLayoutControls(BUFFER_WRAPPING);CodeSourceBridge.resourceLayoutControls(BUFFER_WRAP_WRITER);
+        }
+    }
+    public static void expectBufferWrap(String name,ClassLoader loader,Module module){
+        Class<?> caller=WRAP_AUTHORITY.walk(PLATFORM_BOUNDARY).getDeclaringClass(),agent=bufferWrapAgent;
+        if(agent==null||caller.getNestHost()!=agent||!ControlBridge.owns(caller))throw new SecurityException("BUFFER_WRAP_AGENT_REQUIRED");
+        if(!BUFFER_WRAP_NAME.equals(name)||module==null)throw new IllegalArgumentException("BUFFER_WRAP_ROLE_REQUIRED");
+        synchronized(BUFFER_WRAP_ROLES){
+            for(BufferWrapRole role:BUFFER_WRAP_ROLES)if(role.bootstrap==(loader==null)&&role.loader.get()==loader){
+                if(role.module.get()!=module)throw new IllegalStateException("BUFFER_WRAP_ROLE_MODULE_CHANGED");return;
+            }
+            BufferWrapRole role=new BufferWrapRole(loader,module);
+            CodeSourceBridge.resourceLayoutControls(role);CodeSourceBridge.resourceLayoutControls(role.loader);CodeSourceBridge.resourceLayoutControls(role.module);
+            BUFFER_WRAP_ROLES.add(role);
+        }
+    }
+    private static BufferWrapRole bufferWrapBoundary(Class<?> declaring){
+        var frame=WRAP_AUTHORITY.walk(PLATFORM_BOUNDARY);Class<?> type=frame.getDeclaringClass();Module module=DefinitionBridge.module(type);
+        if(type!=declaring||!type.getName().equals(BUFFER_WRAP_NAME)||!frame.getMethodName().equals("wrap")
+                ||!frame.getDescriptor().equals(BUFFER_WRAP_DESCRIPTOR)||module!=type.getModule())throw new SecurityException("ACTUAL_BUFFER_WRAP_REQUIRED");
+        synchronized(BUFFER_WRAP_ROLES){
+            for(BufferWrapRole role:BUFFER_WRAP_ROLES)if(role.bootstrap==(type.getClassLoader()==null)&&role.loader.get()==type.getClassLoader()&&role.module.get()==module){
+                if(role.actual==null){role.actual=new Key(type,false);CodeSourceBridge.resourceLayoutControls(role.actual);}
+                if(role.actual.get()!=type)throw new SecurityException("BUFFER_WRAP_ACTUAL_CLASS_CHANGED");return role;
+            }
+        }
+        throw new SecurityException("BUFFER_WRAP_ROLE_UNREGISTERED");
+    }
+    private static Span bufferWrapSpan(Field field,int bytes){
+        for(Span span:INSTANCE_FIELDS.get(Buffer.class))if(span.field.equals(field)&&span.bytes==bytes)return span;
+        throw new IllegalStateException("BUFFER_WRAP_FIELD_LAYOUT_UNAVAILABLE:"+field.getName());
+    }
+    /** The factory hook receives only the actual allocateInstance result, before its original checkcast. */
+    public static Object bufferWrapEnter(Object fresh,Class<?> requested,long address,int capacity,Class<?> declaring){
+        BufferWrapRole role=bufferWrapBoundary(declaring);
+        if(!(fresh instanceof Buffer buffer)||buffer.getClass()!=requested||!BufferPlatform.TYPES.contains(requested)
+                ||requested.getClassLoader()!=null||DefinitionBridge.module(requested)!=Object.class.getModule())
+            throw new SecurityException("ACTUAL_ALLOCATED_PLATFORM_BUFFER_REQUIRED");
+        if((Long)CodeSourceBridge.controlField(BufferPlatform.ADDRESS,buffer)!=0L||(Integer)CodeSourceBridge.controlField(BufferPlatform.MARK,buffer)!=0
+                ||(Integer)CodeSourceBridge.controlField(BufferPlatform.POSITION,buffer)!=0||(Integer)CodeSourceBridge.controlField(BufferPlatform.LIMIT,buffer)!=0
+                ||(Integer)CodeSourceBridge.controlField(BufferPlatform.CAPACITY,buffer)!=0)throw new SecurityException("FRESH_ALLOCATED_BUFFER_REQUIRED");
+        synchronized(STREAMS){if(BUFFERS.containsKey(new Key(buffer,false)))throw new SecurityException("FRESH_UNREGISTERED_BUFFER_REQUIRED");}
+        BufferWrapScope scope=new BufferWrapScope(buffer,requested,address,capacity,declaring,role);
+        CodeSourceBridge.resourceLayoutControls(scope);BUFFER_WRAPPING.set(scope);return scope;
+    }
+    /** Repeated Java/native guard queries do not consume or broaden this allowance. */
+    static boolean bufferWrapMutationAllowed(Object receiver,long offset,Object value,int width){
+        if(WALKER.getCallerClass()!=ControlBridge.class)return false;
+        BufferWrapScope scope=BUFFER_WRAPPING.get();
+        if(scope==null||scope.closed||scope.caller!=Thread.currentThread()||receiver!=scope.buffer||scope.buffer.getClass()!=scope.requested)return false;
+        var frame=WALKER.walk(BUFFER_WRAP_WRITER);if(frame==null)return false;Class<?> type=frame.getDeclaringClass();
+        if(type!=scope.declaring||scope.role.actual==null||scope.role.actual.get()!=type||scope.role.loader.get()!=type.getClassLoader()
+                ||scope.role.bootstrap!=(type.getClassLoader()==null)||scope.role.module.get()!=DefinitionBridge.module(type)
+                ||type.getModule()!=scope.role.module.get()||!frame.getMethodName().equals("wrap")||!frame.getDescriptor().equals(BUFFER_WRAP_DESCRIPTOR))return false;
+        if(offset==BufferWrapLayout.ADDRESS.offset&&width==BufferWrapLayout.ADDRESS.bytes)return value instanceof Long actual&&actual.longValue()==scope.address;
+        if(!(value instanceof Integer actual)||width!=4)return false;
+        return offset==BufferWrapLayout.MARK.offset&&width==BufferWrapLayout.MARK.bytes&&actual.intValue()==-1
+                ||offset==BufferWrapLayout.LIMIT.offset&&width==BufferWrapLayout.LIMIT.bytes&&actual.intValue()==scope.capacity
+                ||offset==BufferWrapLayout.CAPACITY.offset&&width==BufferWrapLayout.CAPACITY.bytes&&actual.intValue()==scope.capacity;
+    }
+    public static void bufferWrapExit(Object value,Throwable failure){
+        if(value==null)return;
+        if(!(value instanceof BufferWrapScope scope)||scope.caller!=Thread.currentThread())throw new SecurityException("ACTUAL_BUFFER_WRAP_SCOPE_REQUIRED");
+        if(bufferWrapBoundary(scope.declaring)!=scope.role)throw new SecurityException("ACTUAL_BUFFER_WRAP_ROLE_REQUIRED");
+        if(scope.closed)return;
+        if(BUFFER_WRAPPING.get()!=scope)throw new SecurityException("ACTUAL_BUFFER_WRAP_ORDER_REQUIRED");scope.closed=true;
+        if(scope.previous==null)BUFFER_WRAPPING.remove();else BUFFER_WRAPPING.set(scope.previous);
+        if(failure!=null)return;
+        Boolean observing=FILE_OBSERVING.get();FILE_OBSERVING.set(Boolean.TRUE);
+        try{
+            Buffer buffer=scope.buffer;
+            if((Long)CodeSourceBridge.controlField(BufferPlatform.ADDRESS,buffer)!=scope.address||(Integer)CodeSourceBridge.controlField(BufferPlatform.MARK,buffer)!=-1
+                    ||(Integer)CodeSourceBridge.controlField(BufferPlatform.POSITION,buffer)!=0||(Integer)CodeSourceBridge.controlField(BufferPlatform.LIMIT,buffer)!=scope.capacity
+                    ||(Integer)CodeSourceBridge.controlField(BufferPlatform.CAPACITY,buffer)!=scope.capacity)throw new IllegalStateException("BUFFER_WRAP_INITIALIZATION_INCOMPLETE");
+            Module[] sources=bufferConstructionSources(observing!=null);
+            synchronized(STREAMS){
+                reap();if(BUFFERS.containsKey(new Key(buffer,false)))throw new IllegalStateException("BUFFER_WRAP_VIEW_ALREADY_REGISTERED");
+                BufferStorage storage=new BufferStorage(null,false);storage.unknownUse=true;storage.escaped=true;
+                storage.gap="BUFFER_BORROWED_NATIVE_ORIGINAL_AND_CLEANUP_UNOBSERVED";bufferSources(storage,sources);
+                BufferView view=new BufferView(buffer,storage,null);view.constructed=true;view.unknownUse=true;
+                BUFFERS.put(new Key(buffer,true),view);storage.views.add(new WeakReference<>(buffer));storage.viewsVersion++;
+            }
+            // Observing this borrowed view creates neither storage ownership nor native release rights.
+            ControlBridge.resourceExposedByOperation(buffer,sources);
+        }catch(IllegalAccessException thrown){throw new IllegalStateException("BUFFER_WRAP_VIEW_CAPTURE_FAILED",thrown);}
+        finally{if(observing==null)FILE_OBSERVING.remove();else FILE_OBSERVING.set(observing);}
     }
     public static Object bufferAllocationEnter(Buffer buffer){
         platform(BufferPlatform.DIRECT,"<init>");BufferAllocation scope=new BufferAllocation(buffer);BUFFER_ALLOCATING.set(scope);return scope;

@@ -28,7 +28,7 @@ public final class ControlBridge {
         }
     };
     private ControlBridge() { }
-    public static int abiVersion(){return 49;}
+    public static int abiVersion(){return 50;}
     public static long arrayRevision(Object value){if(!recoveryWriter())throw new SecurityException("RECOVERY_ARRAY_READER_REQUIRED");return CodeSourceBridge.executionArrayRevision(value);}
 
     public static synchronized void install(Class<?> agent,ClassFileTransformer[] transformers) throws ReflectiveOperationException {
@@ -221,8 +221,9 @@ public final class ControlBridge {
         if(type==TaskBridge.class||type==ControlBridge.class||name.startsWith("dev.ronova.pro.bootstrap.TaskBridge$")||name.startsWith("dev.ronova.pro.bootstrap.ControlBridge$"))
             return !EXTERNAL_GUARD_ENTRIES.contains(method)
                     &&!(name.equals("dev.ronova.pro.bootstrap.ControlBridge$ControlRef")&&(method.equals("clear")||method.equals("enqueue")));
+        if(name.equals("dev.ronova.pro.bootstrap.ResourceBridge$BufferWrapWriter"))return false;
         if(type==BackingBridge.class)return method.equals("readUnsafe");
-        if(type==ResourceBridge.class)return !(method.equals("mutationAllowed")||method.equals("critical")||method.equals("fieldMutationAllowed")||method.equals("unsafeMutationAllowed"));
+        if(type==ResourceBridge.class)return !(method.equals("mutationAllowed")||method.equals("critical")||method.equals("fieldMutationAllowed")||method.equals("unsafeMutationAllowed")||method.equals("bufferWrapMutationAllowed"));
         if(type==SourceMapBridge.class)return !(method.equals("valueAllowed")||method.equals("checkIncoming")||method.equals("internal")||method.equals("changed"));
         return !name.startsWith("java.")&&!name.startsWith("jdk.")&&!name.startsWith("sun.");
     }
@@ -1280,7 +1281,8 @@ public final class ControlBridge {
         // authoritative; it is not a business field or backing-policy target.
         if(CodeSourceBridge.fieldGateMetadata(receiver))return fieldGateMutationAllowed();
         if(!CodeSourceBridge.fieldRangeAllowed(receiver,offset,resourceWidth)&&!coreWriter())return false;
-        if(!ResourceBridge.unsafeMutationAllowed(receiver,offset,resourceWidth))return false;
+        if(!ResourceBridge.bufferWrapMutationAllowed(receiver,offset,value,resourceWidth)
+                &&!ResourceBridge.unsafeMutationAllowed(receiver,offset,resourceWidth))return false;
         if((modStopped(objectModule(receiver))||stoppedInvocation())&&!coreWriter())return false;
         if(receiver instanceof Class<?> owner&&ownState(owner)&&!classReflectionWrite(receiver,offset,resourceWidth)
                 ||receiver!=null&&ownState(receiver.getClass()))return false;

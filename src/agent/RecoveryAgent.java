@@ -22,6 +22,7 @@ public final class RecoveryAgent {
     private static java.lang.reflect.Method imageControlReader;
     private static Class<?> networkBridge;
     private static Class<?> clientBridge;
+    private static Class<?> resourceBridge;
     private static final ControlImages controlImages=new ControlImages();
     private static volatile String controlFailure;
     private static final Map<Class<?>,String> definitions=Collections.synchronizedMap(new WeakHashMap<>());
@@ -89,7 +90,7 @@ public final class RecoveryAgent {
             bootstrap=new JarFile(Path.of(argument).toAbsolutePath().normalize().toFile());
             api.appendToBootstrapClassLoaderSearch(bootstrap);
             bridge=Class.forName("dev.ronova.pro.bootstrap.TaskBridge",true,null);
-            if(!Integer.valueOf(49).equals(bridge.getMethod("abiVersion").invoke(null)))throw new IllegalStateException("TASK_BRIDGE_ABI_MISMATCH");
+            if(!Integer.valueOf(50).equals(bridge.getMethod("abiVersion").invoke(null)))throw new IllegalStateException("TASK_BRIDGE_ABI_MISMATCH");
             Class.forName("dev.ronova.pro.bootstrap.SourceMapBridge",true,null);
             // Default-Map guards test UUID keys while class-loading maps are
             // active. Resolve that type before publishing the guarded methods.
@@ -109,7 +110,7 @@ public final class RecoveryAgent {
             Class.forName("dev.ronova.pro.bootstrap.ControlBridge$ProducerFrame",false,null);
             Class.forName("dev.ronova.pro.bootstrap.EventFaultBridge",true,null);
             Class<?> control=Class.forName("dev.ronova.pro.bootstrap.ControlBridge",true,null);
-            if(!Integer.valueOf(49).equals(control.getMethod("abiVersion").invoke(null)))throw new IllegalStateException("CONTROL_BRIDGE_ABI_MISMATCH");
+            if(!Integer.valueOf(50).equals(control.getMethod("abiVersion").invoke(null)))throw new IllegalStateException("CONTROL_BRIDGE_ABI_MISMATCH");
             Module base=Object.class.getModule(),ours=RecoveryAgent.class.getModule();
             api.redefineModule(base,Set.of(bridge.getModule()),Map.of(
                     "jdk.internal.org.objectweb.asm",Set.of(ours),"jdk.internal.org.objectweb.asm.commons",Set.of(ours),
@@ -178,6 +179,14 @@ public final class RecoveryAgent {
                     // It does not own world effects; touching it here creates a false partial install.
                     byte[] stopped=ModGroupBoundary.transform(loader,module,name,type,bytes);
                     if(stopped!=null) {registerProducer(module);publishStoppedModule(module);return stopped;}
+                    if(BufferBoundary.wrapTarget(name)&&loader!=null&&!producerModule(module)){
+                        if(module!=null&&!module.canRead(bridge.getModule()))
+                            api.redefineModule(module,Set.of(bridge.getModule()),Map.of(),Map.of(),Set.of(),Map.of());
+                        resourceBridge.getMethod("expectBufferWrap",String.class,ClassLoader.class,Module.class)
+                                .invoke(null,name.replace('/','.'),loader,module);
+                        byte[] wrapped=BufferBoundary.transformWrap(loader,name,bytes);
+                        if(wrapped!=null)return wrapped;
+                    }
                     if(name!=null&&ClientBoundary.TARGETS.contains(name)&&!producerModule(module)){
                         if(module!=null){int slash=name.lastIndexOf('/');String targetPackage=name.substring(0,slash).replace('/','.');
                             api.redefineModule(module,Set.of(bridge.getModule()),Map.of(),Map.of(targetPackage,Set.of(bridge.getModule())),Set.of(),Map.of());}
@@ -323,6 +332,8 @@ public final class RecoveryAgent {
             };
             control.getMethod("install",Class.class,ClassFileTransformer[].class).invoke(null,RecoveryAgent.class,
                     new ClassFileTransformer[]{controlImages,taskTransformer,objectTransformer});
+            resourceBridge=Class.forName("dev.ronova.pro.bootstrap.ResourceBridge",true,null);
+            resourceBridge.getMethod("installBufferWrap",Class.class).invoke(null,RecoveryAgent.class);
             definitionBridge=Class.forName("dev.ronova.pro.bootstrap.DefinitionBridge",true,null);
             definitionBridge.getMethod("install",Class.class).invoke(null,RecoveryAgent.class);
             networkBridge=Class.forName("dev.ronova.pro.bootstrap.NetworkBridge",true,null);
@@ -363,7 +374,7 @@ public final class RecoveryAgent {
             for(String timer:List.of("java/util/Timer","java/util/TimerThread"))if(TimerBoundary.installed(timer))boundary(timer,true);
             for(Class<?> loaded:loadedClasses())
                 if((loaded.getName().replace('.','/').equals(CommandBoundary.TARGET)
-                        ||loaded.getClassLoader()!=null&&(CodeSourceBoundary.TARGETS.contains(loaded.getName().replace('.','/'))||NetworkBoundary.TARGETS.contains(loaded.getName().replace('.','/'))||ClientBoundary.TARGETS.contains(loaded.getName().replace('.','/')))&&!producerModule(loaded.getModule()))
+                        ||loaded.getClassLoader()!=null&&(CodeSourceBoundary.TARGETS.contains(loaded.getName().replace('.','/'))||NetworkBoundary.TARGETS.contains(loaded.getName().replace('.','/'))||ClientBoundary.TARGETS.contains(loaded.getName().replace('.','/'))||BufferBoundary.wrapTarget(loaded.getName().replace('.','/')))&&!producerModule(loaded.getModule()))
                         &&api.isModifiableClass(loaded))
                     api.retransformClasses(loaded);
             Class<?> manager=Class.forName("sun.instrument.TransformerManager",false,null);

@@ -16,6 +16,7 @@ public final class AuditFixCheck {
         if(args.length==1&&args[0].equals("live-control-writer")){liveControlWriter();return;}
         if(args.length==1&&args[0].equals("clone-boundary")){cloneBoundary();return;}
         if(args.length==1&&args[0].equals("buffer-release")){bufferRelease();return;}
+        if(args.length==1&&args[0].equals("buffer-wrap")){bufferWrap();return;}
         if(args.length==1&&args[0].equals("file-transfer")){fileTransfer();return;}
         if(args.length==1&&args[0].equals("socket-accept")){socketAccept();return;}
         if(args.length==1&&args[0].equals("host-load")){hostLoad();return;}
@@ -371,6 +372,72 @@ public final class AuditFixCheck {
             }
         }finally{java.nio.file.Files.deleteIfExists(file);}
         System.out.println("BUFFER_RELEASE_PASS actual_native foreign_release_refused live_buffer_preserved original_cleaner temporary_file_reads");
+    }
+    // Actual LWJGL allocateInstance views and the UTF16 module query that blocked client startup.
+    private static void bufferWrap()throws Exception {
+        Class<?> nativeControl=Class.forName("dev.ronova.pro.bootstrap.NativeControl",true,null);
+        require(Boolean.TRUE.equals(nativeControl.getMethod("available").invoke(null)),"actual Windows native backend absent");
+        Class<?> memory=Class.forName("org.lwjgl.system.MemoryUtil");
+        Method publicAddress=memory.getMethod("memAddress",java.nio.Buffer.class);
+        long addressOffset=U.objectFieldOffset(java.nio.Buffer.class.getDeclaredField("address"));
+        long markOffset=U.objectFieldOffset(java.nio.Buffer.class.getDeclaredField("mark"));
+        long limitOffset=U.objectFieldOffset(java.nio.Buffer.class.getDeclaredField("limit"));
+        long capacityOffset=U.objectFieldOffset(java.nio.Buffer.class.getDeclaredField("capacity"));
+        long address=U.allocateMemory(64);
+        require(address!=0,"actual raw memory allocation absent");
+        try {
+            for(String kind:List.of("Byte","Short","Char","Int","Long","Float","Double")){
+                Method wrap=memory.getMethod("mem"+kind+"Buffer",long.class,int.class);
+                for(int capacity:new int[]{5,0}){
+                    java.nio.Buffer view=(java.nio.Buffer)wrap.invoke(null,address,capacity);
+                    String label=kind+" capacity="+capacity;
+                    require(view.isDirect()&&!view.isReadOnly(),"actual LWJGL view is not writable direct: "+label);
+                    require(view.capacity()==capacity&&view.limit()==capacity&&view.position()==0&&view.remaining()==capacity,
+                            "actual LWJGL view retained incorrect bounds: "+label);
+                    require(U.getLong(view,addressOffset)==address&&(Long)publicAddress.invoke(null,view)==address,
+                            "actual LWJGL view retained an incorrect address: "+label);
+                    require(U.getInt(view,markOffset)==-1,"actual LWJGL view retained its default mark: "+label);
+                    if(capacity>0)bufferWrapContent(view,address,capacity-1);
+                    try{U.putLong(view,addressOffset,address+8);}catch(SecurityException refused){ }
+                    require(U.getLong(view,addressOffset)==address,"foreign initialized-view address rewrite admitted: "+label);
+                    for(long offset:new long[]{markOffset,limitOffset,capacityOffset}){
+                        int original=U.getInt(view,offset);
+                        try{U.putInt(view,offset,original+1);}catch(SecurityException refused){ }
+                        require(U.getInt(view,offset)==original,"foreign initialized-view metadata rewrite admitted: "+label+" offset="+offset);
+                    }
+                    require(view.capacity()==capacity&&view.limit()==capacity&&view.position()==0,
+                            "refused metadata rewrite changed actual view bounds: "+label);
+                }
+            }
+        }finally{U.freeMemory(address);}
+        Class<?> winBase=Class.forName("org.lwjgl.system.windows.WinBase");
+        long module=(Long)winBase.getMethod("GetModuleHandle",CharSequence.class).invoke(null,"kernel32.dll");
+        require(module!=0,"actual WinBase UTF16 module query did not find loaded kernel32.dll");
+        System.out.println("BUFFER_WRAP_PASS actual_lwjgl_3_3_1 public_byte_and_six_typed_views exact_address_mark_bounds raw_buffer_duplex zero_capacity_initialized foreign_metadata_rewrite_refused WinBase_GetModuleHandle_UTF16");
+    }
+    private static void bufferWrapContent(java.nio.Buffer view,long address,int last){
+        if(view instanceof java.nio.ByteBuffer buffer){
+            buffer.put(0,(byte)0x31);require(U.getByte(address)==0x31,"LWJGL ByteBuffer did not write actual memory");
+            U.putByte(address+last,(byte)0x52);require(buffer.get(last)==0x52,"LWJGL ByteBuffer did not read actual memory");
+        }else if(view instanceof java.nio.ShortBuffer buffer){
+            buffer.put(0,(short)0x1357);require(U.getShort(address)==(short)0x1357,"LWJGL ShortBuffer did not write actual memory");
+            U.putShort(address+last*2L,(short)0x2468);require(buffer.get(last)==(short)0x2468,"LWJGL ShortBuffer did not read actual memory");
+        }else if(view instanceof java.nio.CharBuffer buffer){
+            buffer.put(0,'中');require(U.getChar(address)=='中',"LWJGL CharBuffer did not write actual memory");
+            U.putChar(address+last*2L,'文');require(buffer.get(last)=='文',"LWJGL CharBuffer did not read actual memory");
+        }else if(view instanceof java.nio.IntBuffer buffer){
+            buffer.put(0,0x13572468);require(U.getInt(address)==0x13572468,"LWJGL IntBuffer did not write actual memory");
+            U.putInt(address+last*4L,0x23456789);require(buffer.get(last)==0x23456789,"LWJGL IntBuffer did not read actual memory");
+        }else if(view instanceof java.nio.LongBuffer buffer){
+            buffer.put(0,0x1020304050607080L);require(U.getLong(address)==0x1020304050607080L,"LWJGL LongBuffer did not write actual memory");
+            U.putLong(address+last*8L,0x1122334455667788L);require(buffer.get(last)==0x1122334455667788L,"LWJGL LongBuffer did not read actual memory");
+        }else if(view instanceof java.nio.FloatBuffer buffer){
+            buffer.put(0,17.25F);require(U.getFloat(address)==17.25F,"LWJGL FloatBuffer did not write actual memory");
+            U.putFloat(address+last*4L,31.5F);require(buffer.get(last)==31.5F,"LWJGL FloatBuffer did not read actual memory");
+        }else if(view instanceof java.nio.DoubleBuffer buffer){
+            buffer.put(0,19.125);require(U.getDouble(address)==19.125,"LWJGL DoubleBuffer did not write actual memory");
+            U.putDouble(address+last*8L,27.5);require(buffer.get(last)==27.5,"LWJGL DoubleBuffer did not read actual memory");
+        }else throw new AssertionError("unexpected actual LWJGL view: "+view.getClass().getName());
     }
     private static class CloneBase implements Cloneable { int value=17; }
     private static final class InheritedClone extends CloneBase {

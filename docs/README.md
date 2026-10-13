@@ -1,6 +1,6 @@
 # 文档入口
 
-当前主工程：`D:\桌面\ronova_GPT`。更新日期：2026-10-13。C 已接入 JNI_OnLoad 前 Host、Net.accept 双描述符和存量 Screen/Overlay 生命周期。GNU C23 / GNU C++23、Java 17；Java ABI 49 / Native ABI 49 / Storage ABI 3 / Journal 6。主包与三项直接相关原生检查通过，首次隔离客户端在 GLFW 缓冲区初始化退出并正在修复；菜单/UI 停组/合法 sealed 目标及完整 C/B 游戏收口仍待实际结果。旧候选和旧运行保留原范围。
+当前主工程：`D:\桌面\ronova_GPT`。更新日期：2026-10-13。C 已接入 JNI_OnLoad 前 Host、Net.accept 与存量 UI，并修复真实 LWJGL 初始化。GNU C23 / GNU C++23、Java 17；Java ABI 50 / Native ABI 49 / Storage ABI 3 / Journal 6。本包构建及实际缓冲区/UTF16检查通过；隔离客户端仍在加载，菜单/UI停组及完整 C/B 游戏收口待实际结果。旧候选和旧运行保留原范围。
 
 先看 [当前进度与 A 批状态](A-批验收状态.md)。所有已写、已验证与待办以该页为准。
 

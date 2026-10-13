@@ -54,7 +54,7 @@ final class ControlImages implements ClassFileTransformer {
                 ||name.equals("java/util/Map")||name.startsWith("java/util/ArrayList")
                 ||name.startsWith("java/util/IdentityHashMap")||name.equals("java/util/AbstractCollection")
                 ||name.equals("java/util/concurrent/ConcurrentHashMap")||HandleWriteBoundary.targets().contains(name);
-        return CodeSourceBoundary.TARGETS.contains(name)||NetworkBoundary.TARGETS.contains(name)||ClientBoundary.TARGETS.contains(name)||EventFaultBoundary.TARGET.equals(name)||name.equals("sun/misc/Unsafe")||FastutilIndexBoundary.targets().contains(name)||SectionKeyBoundary.targets().contains(name)
+        return CodeSourceBoundary.TARGETS.contains(name)||NetworkBoundary.TARGETS.contains(name)||ClientBoundary.TARGETS.contains(name)||BufferBoundary.wrapTarget(name)||EventFaultBoundary.TARGET.equals(name)||name.equals("sun/misc/Unsafe")||FastutilIndexBoundary.targets().contains(name)||SectionKeyBoundary.targets().contains(name)
                 ||name.startsWith("net/minecraft/world/level/entity/")||name.startsWith("net/minecraft/server/level/ChunkMap")
                 ||Set.of("net/minecraft/world/entity/Entity","net/minecraft/world/entity/LivingEntity",
                     "net/minecraft/server/level/ServerLevel","net/minecraft/server/level/ServerPlayer",

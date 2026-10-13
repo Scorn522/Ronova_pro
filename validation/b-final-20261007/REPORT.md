@@ -1,5 +1,19 @@
 # B 批实际报告：2026-10-09 代码收敛接续
 
+## 2026-10-13：C 接续——真实 LWJGL 缓冲区初始化
+
+接续已同步的 `36cd18a`；Java ABI 50 / Native ABI 49 / Storage ABI 3 / Journal 6。GNU C23 / GNU C++23、Java 17 保持。当前启动修复工作包已写齐，主包与既有夹具统一构建通过；完整 C 和 B 的游戏收口仍未完成。
+
+真实 LWJGL 3.3.1 `MemoryUtil.wrap` 在 Unsafe.allocateInstance 返回后，按原字段布局初始化新 Buffer；Agent 绑定这次实际分配结果、准确 Class/模块/加载器/线程及四个字段和值。标量写入仅在原 wrap 内允许 address、mark=-1、limit、capacity；异常和正常出口结束作用域。来源、停组、字段策略与批量写保护继续生效。初始化完成只记录借用视图，不取得原存储/Cleaner/释放权限，原生来源和清理缺口继续保留。
+
+集中构建 `build-c-java50-buffer-wrap-fixed-20261013.log` 39 秒 PASS。复用 AuditFixCheck 的实际 `buffer-wrap` 检查退出 0：七类真实 public MemoryUtil 视图（含零容量）、准确地址/标记/边界、实际双向读写、旧视图元数据改写拒绝、原 raw 分配释放，以及 WinBase.GetModuleHandle 的 UTF16 路径全部通过。首次构建的冗余 checked-exception 捕获错误已修复，原日志保留。没有重跑此前已通过的 Host/网络/传输检查，其原结果仍只代表当时候选。
+
+第二次隔离客户端 `.work/c-client-20261013-02` 使用本包于14:22:57启动，实际 PID 78896。14:24:13线程读取显示 main 在 Log4j 注解/代理类加载中运行，未发现死锁；尚未到菜单，不计通过。第一次 GLFW remaining=0 的失败及原 launch.log 保留；这次对应底层路径的直接检查已经通过。后续菜单/UI停组、合法 sealed 目标与世界保存重启仍待实际结果。
+
+本地候选：`distribution/candidate-c-java50-native49-wip-20261013/ronova-pro-core-0.1.0-stage-b-dev.jar`；源码与摘要同步，主包和原始日志留在本地，Java49/Native49及其他旧候选保留。详情见 下方原记录。
+
+---
+
 ## 2026-10-13：C 接续——JNI_OnLoad 前接入、接收描述符与存量界面
 
 本工作包基线 `f527867`；Java ABI 49 / Native ABI 49 / Storage ABI 3 / Journal 6。Host 接入真实 JDK OS 加载返回与卸载导入；Native.accept 接入双描述符；客户端增加存量 Screen/Overlay 真实生命周期。没有修改旧调用者资格、分配/释放许可或未知/共享来源规则。
