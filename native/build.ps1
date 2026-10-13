@@ -18,7 +18,7 @@ if (-not (Test-Path -LiteralPath $Zig)) { throw 'Zig compiler not found.' }
 $outputDirectory = Join-Path $projectRoot 'build/native'
 New-Item -ItemType Directory -Force -Path $outputDirectory | Out-Null
 $outputDll = Join-Path $outputDirectory 'ronova-pro-storage.dll'
-& $Zig c++ '-std=c++17' '-O2' '-shared' '-target' 'x86_64-windows-gnu' `
+& $Zig c++ '-std=gnu++23' '-O2' '-shared' '-target' 'x86_64-windows-gnu' `
     (Join-Path $PSScriptRoot 'storage.cpp') '-I' $includeRoot '-I' (Join-Path $includeRoot 'win32') `
     '-lbcrypt' '-lkernel32' '-o' $outputDll
 if ($LASTEXITCODE -ne 0) { throw "Native backend build failed: $LASTEXITCODE" }

@@ -5,6 +5,9 @@
 #include <limits>
 #include <map>
 #include <algorithm>
+#include <array>
+#include <expected>
+#include <span>
 
 namespace recovery_storage {
 
@@ -34,21 +37,42 @@ struct Api {
 static Api& api(){static Api value;return value;}
 struct Hash {
     BCRYPT_ALG_HANDLE algorithm=nullptr;BCRYPT_HASH_HANDLE handle=nullptr;
-    jlong error=0;
-    bool close() {
-        if(handle) {auto status=BCryptDestroyHash(handle);if(status<0){error=status;return false;}handle=nullptr;}
-        if(algorithm) {auto status=BCryptCloseAlgorithmProvider(algorithm,0);if(status<0){error=status;return false;}algorithm=nullptr;}
-        return true;
+    [[nodiscard]] std::expected<void,jlong> close() {
+        if(handle) {
+            auto status=BCryptDestroyHash(handle);
+            if(status<0)return std::unexpected(static_cast<jlong>(status));
+            handle=nullptr;
+        }
+        if(algorithm) {
+            auto status=BCryptCloseAlgorithmProvider(algorithm,0);
+            if(status<0)return std::unexpected(static_cast<jlong>(status));
+            algorithm=nullptr;
+        }
+        return {};
     }
-    ~Hash(){close();} // Exceptional unwind only; normal retirement preserves failed handles.
-    bool open(){if(!close())return false;
+    ~Hash(){(void)close();} // Exceptional unwind only; normal retirement preserves failed handles.
+    [[nodiscard]] std::expected<void,jlong> open() {
+        if(auto closed=close();!closed)return closed;
         auto status=BCryptOpenAlgorithmProvider(&algorithm,BCRYPT_SHA256_ALGORITHM,nullptr,0);
-        if(status<0){error=status;return false;}
-        status=BCryptCreateHash(algorithm,&handle,nullptr,0,nullptr,0,0);if(status<0){error=status;return false;}return true;}
-    bool add(const unsigned char* bytes,ULONG size){auto status=BCryptHashData(handle,const_cast<PUCHAR>(bytes),size,0);if(status<0)error=status;return status>=0;}
-    bool finish(std::string& out){unsigned char digest[32];auto status=BCryptFinishHash(handle,digest,32,0);
-        if(status<0){error=status;return false;}
-        static const char hex[]="0123456789abcdef";out.clear();for(auto b:digest){out+=hex[b>>4];out+=hex[b&15];}return true;}
+        if(status<0)return std::unexpected(static_cast<jlong>(status));
+        status=BCryptCreateHash(algorithm,&handle,nullptr,0,nullptr,0,0);
+        if(status<0)return std::unexpected(static_cast<jlong>(status));
+        return {};
+    }
+    [[nodiscard]] std::expected<void,jlong> add(std::span<const unsigned char> bytes) {
+        auto status=BCryptHashData(handle,const_cast<PUCHAR>(bytes.data()),static_cast<ULONG>(bytes.size()),0);
+        if(status<0)return std::unexpected(static_cast<jlong>(status));
+        return {};
+    }
+    [[nodiscard]] std::expected<std::string,jlong> finish() {
+        std::array<unsigned char,32> digest;
+        auto status=BCryptFinishHash(handle,digest.data(),static_cast<ULONG>(digest.size()),0);
+        if(status<0)return std::unexpected(static_cast<jlong>(status));
+        static constexpr char hex[]="0123456789abcdef";
+        std::string out;
+        for(auto b:digest){out+=hex[b>>4];out+=hex[b&15];}
+        return out;
+    }
 };
 struct Transaction {
     enum Phase { CandidateHash, Open, BaselineHash, Write, Flush, ExpectedHash, ClosePrepared, Ready } phase=CandidateHash;
@@ -65,7 +89,7 @@ struct Transaction {
         if(handle!=INVALID_HANDLE_VALUE){if(!finalized)api().rollback(handle);CloseHandle(handle);}}
 };
 static SRWLOCK slots_lock=SRWLOCK_INIT;
-static std::unique_ptr<Transaction> slots[2];
+static std::array<std::unique_ptr<Transaction>,2> slots;
 static std::atomic<int> admitted{0};
 static std::atomic<jlong> next_token{1};
 static jlongArray result(JNIEnv* env,jlong status,jlong token=0,jlong error=0) {
@@ -111,7 +135,7 @@ static bool close_file(Transaction& tx) {
     tx.file=INVALID_HANDLE_VALUE;return true;
 }
 static bool finish_handles(JNIEnv* env,std::unique_ptr<Transaction>& tx) {
-    if(!tx->hashing.close()) {tx->error=tx->hashing.error;retain_for_retirement(tx);return false;}
+    if(auto closed=tx->hashing.close();!closed) {tx->error=closed.error();retain_for_retirement(tx);return false;}
     if(tx->file==INVALID_HANDLE_VALUE&&(tx->handle==INVALID_HANDLE_VALUE||CloseHandle(tx->handle))) {
         tx->handle=INVALID_HANDLE_VALUE;
         if(!remember_retirement(env,*tx)){retain_for_retirement(tx);return false;}
@@ -138,9 +162,9 @@ static bool live_owner(JNIEnv* env,Transaction& tx) {
     return method&&env->CallBooleanMethod(tx.request,method)==JNI_TRUE&&!env->ExceptionCheck();
 }
 static jlong reap_expired(JNIEnv* env) {
-    std::unique_ptr<Transaction> expired[2];ULONGLONG now=GetTickCount64();jlong reaped=0;
+    std::array<std::unique_ptr<Transaction>,2> expired;ULONGLONG now=GetTickCount64();jlong reaped=0;
     AcquireSRWLockExclusive(&slots_lock);
-    for(int i=0;i<2;i++)if(slots[i]&&now>=slots[i]->expires) {
+    for(std::size_t i=0;i<slots.size();i++)if(slots[i]&&now>=slots[i]->expires) {
         // This exact private callback reads ownership fields only. Keep an active
         // token visible to its next advance/finish while another owner maintains.
         if(!slots[i]->finalized&&live_owner(env,*slots[i]))slots[i]->expires=now+1000;
@@ -194,17 +218,18 @@ struct StageCleanup {
     JNIEnv* env;std::unique_ptr<Transaction>& tx;bool& retained;
     ~StageCleanup(){if(!retained&&tx){retained=true;rollback_and_retire(env,tx);}}
 };
-static bool start_file_hash(Transaction& tx) {
+[[nodiscard]] static std::expected<void,jlong> start_file_hash(Transaction& tx) {
     LARGE_INTEGER zero{};
     tx.offset=0;
-    return SetFilePointerEx(tx.file,zero,nullptr,FILE_BEGIN)&&tx.hashing.open();
+    if(!SetFilePointerEx(tx.file,zero,nullptr,FILE_BEGIN))return std::unexpected(static_cast<jlong>(GetLastError()));
+    return tx.hashing.open();
 }
 // The time/byte allowance belongs to one call. Phase, file position and digest belong
 // to the original token and are never reset merely because that allowance is spent.
 static jlong drive(JNIEnv* env,Transaction& tx) {
     if(tx.phase==Transaction::Ready)return 1;
     constexpr DWORD chunk_size=16384;
-    unsigned char buffer[chunk_size];
+    std::array<unsigned char,chunk_size> buffer;
     auto type=env->GetObjectClass(tx.request);
     auto read=type?env->GetMethodID(type,"readImage","(J[B)I"):nullptr;
     if(type)env->DeleteLocalRef(type);
@@ -216,7 +241,7 @@ static jlong drive(JNIEnv* env,Transaction& tx) {
     auto candidate=[&](DWORD want)->bool {
         jint count=env->CallIntMethod(tx.request,read,static_cast<jlong>(tx.offset),chunk);
         if(env->ExceptionCheck()||count!=static_cast<jint>(want))return false;
-        env->GetByteArrayRegion(chunk,0,count,reinterpret_cast<jbyte*>(buffer));
+        env->GetByteArrayRegion(chunk,0,count,reinterpret_cast<jbyte*>(buffer.data()));
         return !env->ExceptionCheck();
     };
     while(first||(GetTickCount64()<deadline&&consumed<1024*1024)) {
@@ -226,12 +251,12 @@ static jlong drive(JNIEnv* env,Transaction& tx) {
                 DWORD want=static_cast<DWORD>(std::min<ULONGLONG>(chunk_size,static_cast<ULONGLONG>(tx.image_size)-tx.offset));
                 if(want) {
                     if(!candidate(want))return 0;
-                    if(!tx.hashing.add(buffer,want))return failure(tx.hashing.error);
+                    if(auto hashed=tx.hashing.add(std::span<const unsigned char>(buffer).first(want));!hashed)return failure(hashed.error());
                     tx.offset+=want;consumed+=want;break;
                 }
-                std::string hash;
-                if(!tx.hashing.finish(hash))return failure(tx.hashing.error);
-                if(hash!=tx.expected)return 0;
+                auto hash=tx.hashing.finish();
+                if(!hash)return failure(hash.error());
+                if(*hash!=tx.expected)return 0;
                 tx.phase=Transaction::Open;break;
             }
             case Transaction::Open: {
@@ -253,19 +278,19 @@ static jlong drive(JNIEnv* env,Transaction& tx) {
                 tx.file=api().open(tx.requested.c_str(),GENERIC_READ|GENERIC_WRITE,0,nullptr,OPEN_EXISTING,FILE_FLAG_OPEN_REPARSE_POINT,nullptr,tx.handle,nullptr,nullptr);
                 if(tx.file==INVALID_HANDLE_VALUE)return failure(0);
                 std::string file_id;if(!identity(tx.file,tx.requested,file_id)||file_id!=tx.expected_id)return 5;
-                if(!start_file_hash(tx))return failure(tx.hashing.error);
+                if(auto started=start_file_hash(tx);!started)return failure(started.error());
                 tx.phase=Transaction::BaselineHash;break;
             }
             case Transaction::BaselineHash:
             case Transaction::ExpectedHash: {
-                DWORD count=0;if(!ReadFile(tx.file,buffer,chunk_size,&count,nullptr))return failure(0);
+                DWORD count=0;if(!ReadFile(tx.file,buffer.data(),static_cast<DWORD>(buffer.size()),&count,nullptr))return failure(0);
                 if(count) {
                     if(tx.offset>static_cast<ULONGLONG>(std::numeric_limits<jlong>::max())-count)return failure(ERROR_ARITHMETIC_OVERFLOW);
-                    if(!tx.hashing.add(buffer,count))return failure(tx.hashing.error);
+                    if(auto hashed=tx.hashing.add(std::span<const unsigned char>(buffer).first(count));!hashed)return failure(hashed.error());
                     tx.offset+=count;consumed+=count;break;
                 }
-                std::string hash;if(!tx.hashing.finish(hash))return failure(tx.hashing.error);
-                if(hash!=(tx.phase==Transaction::BaselineHash?tx.baseline:tx.expected))return 5;
+                auto hash=tx.hashing.finish();if(!hash)return failure(hash.error());
+                if(*hash!=(tx.phase==Transaction::BaselineHash?tx.baseline:tx.expected))return 5;
                 if(tx.phase==Transaction::ExpectedHash) { tx.phase=Transaction::ClosePrepared;break; }
                 LARGE_INTEGER zero{};if(!SetFilePointerEx(tx.file,zero,nullptr,FILE_BEGIN))return failure(0);
                 tx.offset=0;tx.phase=Transaction::Write;break;
@@ -275,13 +300,13 @@ static jlong drive(JNIEnv* env,Transaction& tx) {
                 if(!want){tx.phase=Transaction::Flush;break;}
                 if(!candidate(want))return 0;
                 DWORD count=0;
-                if(!WriteFile(tx.file,buffer,want,&count,nullptr))return failure(0);
+                if(!WriteFile(tx.file,buffer.data(),want,&count,nullptr))return failure(0);
                 if(!count||count>want)return failure(ERROR_WRITE_FAULT);
                 tx.offset+=count;consumed+=count;break;
             }
             case Transaction::Flush:
                 if(!SetEndOfFile(tx.file)||!FlushFileBuffers(tx.file))return failure(0);
-                if(!start_file_hash(tx))return failure(tx.hashing.error);
+                if(auto started=start_file_hash(tx);!started)return failure(started.error());
                 tx.phase=Transaction::ExpectedHash;break;
             case Transaction::ClosePrepared: {
                 std::string file_id;if(!identity(tx.file,tx.requested,file_id)||file_id!=tx.expected_id)return 5;
@@ -308,7 +333,7 @@ Java_dev_ronova_pro_StorageNative_prepare0(JNIEnv* env,jclass,jobject request) t
     if(!api().supported())return result(env,4);
     if(!exact(env,request,"dev/ronova/pro/RecoveryStorage$Ticket"))return result(env,0);
     reap_expired(env);
-    int previous=admitted.fetch_add(1);if(previous>=2){admitted.fetch_sub(1);return result(env,7,0,ERROR_BUSY);}
+    int previous=admitted.fetch_add(1);if(previous>=static_cast<int>(slots.size())){admitted.fetch_sub(1);return result(env,7,0,ERROR_BUSY);}
     bool retained=false;struct Admission{bool& retained;~Admission(){if(!retained)admitted.fetch_sub(1);}} admission{retained};
     std::wstring requested;std::string expected_id,baseline,expected;
     if(!path(env,request,requested)||!string(env,request,"fileIdentity",expected_id)
@@ -329,7 +354,7 @@ Java_dev_ronova_pro_StorageNative_prepare0(JNIEnv* env,jclass,jobject request) t
     if(request_type)env->DeleteLocalRef(request_type);
     if(!allocated)return nullptr;env->CallVoidMethod(request,allocated,tx->token);
     if(env->ExceptionCheck())return nullptr;
-    if(!tx->hashing.open())return result(env,6,tx->token,tx->hashing.error);
+    if(auto opened=tx->hashing.open();!opened)return result(env,6,tx->token,opened.error());
     return advance_owned(env,tx,retained);
 } catch(...) {
     if(!env->ExceptionCheck()){auto error=env->FindClass("java/lang/IllegalStateException");if(error){env->ThrowNew(error,"Native transaction preparation unavailable");env->DeleteLocalRef(error);}}

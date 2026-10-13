@@ -16,6 +16,7 @@ public final class AuditFixCheck {
         if(args.length==1&&args[0].equals("live-control-writer")){liveControlWriter();return;}
         if(args.length==1&&args[0].equals("clone-boundary")){cloneBoundary();return;}
         if(args.length==1&&args[0].equals("buffer-release")){bufferRelease();return;}
+        if(args.length==1&&args[0].equals("storage-native")){storageNative();return;}
         ProRuntime runtime=(ProRuntime)U.allocateInstance(ProRuntime.class);
         Map<UUID,Object> work=new LinkedHashMap<>();put(runtime,"work",work);
         var subject=new ProRuntime.Subject(UUID.randomUUID());var records=(EntityRecords)U.allocateInstance(EntityRecords.class);put(records,"originalPassengers",List.of());
@@ -39,6 +40,54 @@ public final class AuditFixCheck {
         require(worker.isTerminated()&&!nativeReleased.getBoolean(restored)&&!resourcesConfirmed.getBoolean(restored),"shutdown fabricated a historic transaction settlement");
         System.out.println("STORAGE_SHUTDOWN_METADATA_PASS no_current_handle historic_unknown_preserved worker_closed");
     }
+
+    // Actual isolated TxF preparation; no commit permit is constructed or granted.
+    private static void storageNative()throws Exception {
+        require(StorageNative.available()&&StorageNative.abi0()==3,"actual storage DLL unavailable: "+StorageNative.reason());
+        byte[] original=new byte[33001],candidate=new byte[65537];
+        for(int i=0;i<original.length;i++)original[i]=(byte)(i*13);
+        for(int i=0;i<candidate.length;i++)candidate[i]=(byte)(i*31+7);
+        var file=java.nio.file.Files.createTempFile(java.nio.file.Path.of(".").toAbsolutePath().normalize(),"storage-2023-",".bin");
+        try {
+            java.nio.file.Files.write(file,original);
+            String identity;
+            try(var stream=new java.io.FileInputStream(file.toFile())){identity=StorageNative.identity(stream.getFD(),file.toString());}
+            require(identity!=null,"actual isolated NTFS identity unavailable");
+            var digest=java.security.MessageDigest.getInstance("SHA-256");
+            String baseline=HexFormat.of().formatHex(digest.digest(original)),expected=HexFormat.of().formatHex(digest.digest(candidate));
+            var runtime=(ProRuntime)U.allocateInstance(ProRuntime.class);put(runtime,"session",UUID.randomUUID());
+            var sources=new RecoverySources(runtime);
+            var source=(RecoverySources.Source)U.allocateInstance(RecoverySources.Source.class);put(source,"owner",sources);put(source,"path",file);
+            var owner=(RecoveryStorage)U.allocateInstance(RecoveryStorage.class);
+            var descriptor=Class.forName("dev.ronova.pro.RecoveryStorage$Descriptor");var descriptorConstructor=descriptor.getDeclaredConstructors()[0];descriptorConstructor.setAccessible(true);
+            var workType=Class.forName("dev.ronova.pro.RecoveryStorage$Work");var workConstructor=workType.getDeclaredConstructor(descriptor);workConstructor.setAccessible(true);
+            var ticketConstructor=RecoveryStorage.Ticket.class.getDeclaredConstructor(RecoveryStorage.class,workType,RecoverySources.Source.class,RecoveryImage.Encoded.class);ticketConstructor.setAccessible(true);
+            require(StorageNative.prepare0(null)[0]==0,"foreign storage request admitted");
+            for(boolean valid:new boolean[]{false,true}) {
+                Object description=descriptorConstructor.newInstance("STORAGE/2",UUID.randomUUID(),UUID.randomUUID(),UUID.randomUUID(),1L,"source","code",1L,identity,baseline,valid?expected:"0".repeat(64),baseline,UUID.randomUUID(),"win32-ntfs-txf/2",null);
+                Object work=workConstructor.newInstance(description);
+                try(var builder=new RecoveryImage.Builder()) {
+                    builder.write(candidate);
+                    try(var image=builder.finish()) {
+                        var ticket=(RecoveryStorage.Ticket)ticketConstructor.newInstance(owner,work,source,image);
+                        put(work,"ticket",ticket);put(work,"preparing",true);
+                        long[] state=StorageNative.prepare0(ticket);
+                        try {
+                            long deadline=System.nanoTime()+TimeUnit.SECONDS.toNanos(10);
+                            while(state[0]==7&&state[1]>0&&System.nanoTime()<deadline)state=StorageNative.advance0(ticket,state[1]);
+                            require(state[0]==(valid?1:0),"candidate preparation returned "+Arrays.toString(state));
+                        } finally {
+                            if(ticket.token>0){long[] retired=StorageNative.finish0(ticket,ticket.token,null);require(retired[0]==(valid?2:0)&&retired[1]==1,"unpermitted transaction did not retire: "+Arrays.toString(retired));}
+                        }
+                    }
+                }
+                require(Arrays.equals(original,java.nio.file.Files.readAllBytes(file)),"unpermitted candidate changed the real file");
+            }
+            long[] maintenance=StorageNative.maintain0();require(maintenance[0]==1&&maintenance[2]==0,"native storage handles retained: "+Arrays.toString(maintenance));
+            System.out.println("STORAGE_NATIVE_PASS actual_dll foreign_request_refused candidate_hash_refused multi_chunk_hash staged_readback no_permit_rollback original_preserved handles_retired");
+        } finally {java.nio.file.Files.deleteIfExists(file);}
+    }
+
     private static void sourceListFixes()throws Exception {
         Class<?> publications=Class.forName("dev.ronova.pro.SourceMaps$Publications");
         Class<?> controls=Class.forName("dev.ronova.pro.bootstrap.ControlBridge",false,null);
