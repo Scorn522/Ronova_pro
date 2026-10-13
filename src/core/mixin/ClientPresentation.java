@@ -44,10 +44,12 @@ public final class ClientPresentation {
         @Inject(method="remove",at=@At("HEAD"),cancellable=true)
         private void remove(java.util.UUID id,CallbackInfo ci) {if(ClientPresence.hudRemovalDenied(id))ci.cancel();}
     }
-    @Mixin(net.minecraft.client.multiplayer.ClientLevel.class) public abstract static class BodyPublication {
+    @Mixin(net.minecraft.client.multiplayer.ClientLevel.class) public abstract static class BodyPublication implements ClientPresence.ClientStorage {
+        @org.spongepowered.asm.mixin.gen.Accessor("entityStorage")
+        public abstract net.minecraft.world.level.entity.TransientEntitySectionManager<Entity> pro$clientEntityStorage();
         @Inject(method="addEntity",at=@At("HEAD"),cancellable=true)
         private void replacing(int id,Entity entity,CallbackInfo ci) {
-            if(ClientPresence.replacementDenied(this,id,entity))ci.cancel();
+            if(ClientPresence.publicationDenied(this,id,entity)||ClientPresence.replacementDenied(this,id,entity))ci.cancel();
         }
         @Inject(method="removeEntity",at=@At("HEAD"),cancellable=true)
         private void removing(int id,Entity.RemovalReason reason,CallbackInfo ci) {
@@ -57,6 +59,12 @@ public final class ClientPresentation {
         private void published(int id,Entity entity,CallbackInfo ci) {ClientPresence.bindLocal(entity);}
         @Inject(method="addPlayer",at=@At("RETURN"))
         private void player(int id,net.minecraft.client.player.AbstractClientPlayer entity,CallbackInfo ci) {ClientPresence.bindLocal(entity);}
+    }
+    @Mixin(net.minecraft.world.level.entity.TransientEntitySectionManager.class) public abstract static class StoragePublication {
+        @Inject(method="addEntity",at=@At("HEAD"),cancellable=true)
+        private void admission(net.minecraft.world.level.entity.EntityAccess entity,CallbackInfo ci) {
+            if(ClientPresence.storagePublicationDenied(this,entity))ci.cancel();
+        }
     }
     @Mixin(EntityRenderDispatcher.class) public abstract static class Draw {
         @Inject(method="render",at=@At("HEAD"),cancellable=true)

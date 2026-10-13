@@ -1,6 +1,8 @@
 package dev.ronova.pro;
 
+import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.UUID;
@@ -17,6 +19,7 @@ final class ClientPolicyState {
     private long scope=-1;
     private boolean overflow;
     private record Entry(UUID identity,long revision,boolean protectedNow) { }
+    record Address(int id,UUID uuid) { }
 
     synchronized void connection(Object active) {
         if(connection==active)return;
@@ -48,6 +51,13 @@ final class ClientPolicyState {
         if(active==null||active!=connection||!Objects.equals(this.dimension,dimension)||uuid==null)return false;
         Entry current=entries.get(id);
         return current!=null&&current.protectedNow()&&uuid.equals(current.identity());
+    }
+    /** A scope activation applies retained terminal decisions once to the new world's actual mirrors. */
+    synchronized List<Address> activeAddresses(Object active,String dimension) {
+        if(active==null||active!=connection||!Objects.equals(this.dimension,dimension))return List.of();
+        List<Address> result=new ArrayList<>();
+        for(var entry:entries.entrySet())if(entry.getValue().protectedNow())result.add(new Address(entry.getKey(),entry.getValue().identity()));
+        return List.copyOf(result);
     }
     synchronized boolean overflowed() { return overflow; }
     synchronized String diagnostic() { return overflow?"POLICY_CAPACITY_REACHED_KNOWN_DECISIONS_RETAINED_SCOPE_ROTATION_REQUIRED":"POLICY_STATE_TRACKED"; }

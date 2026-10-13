@@ -43,7 +43,7 @@ public final class NativeControl {
             if(!early.isEmpty()) {
                 Path actual=Path.of(early).toAbsolutePath();if(!hash(Files.readAllBytes(actual)).equals(digest))throw new IOException("EARLY_NATIVE_IMAGE_MISMATCH");dll=actual;
             }
-            System.load(dll.toString());if(abi()!=47)throw new UnsatisfiedLinkError("NATIVE_CONTROL_ABI");
+            System.load(dll.toString());if(abi()!=48)throw new UnsatisfiedLinkError("NATIVE_CONTROL_ABI");
             if(!initialize0(ControlBridge.class,DefinitionBridge.class))throw new UnsatisfiedLinkError("ACTUAL_NATIVE_BOUNDARY_INSTALL_FAILED");
             if(!initializeDefinitionDirectory0(definitionDirectoryOwner))throw new UnsatisfiedLinkError("ACTUAL_DEFINITION_DIRECTORY_CAS_UNAVAILABLE");
             libraryBoundaryPresent=libraryPresent0();available=true;return state="NATIVE_BIND_AND_JNI_FIELD_READY";
@@ -472,11 +472,11 @@ public final class NativeControl {
     }
     public static String state() { return state+":NATIVE_LIBRARY_BOUNDARY="+(libraryBoundaryReady?"READY":"UNAVAILABLE")
             +":HOST_PROCESS_BOUNDARY="+(available&&hostReady0()?"JDK_PROCESSIMPL_CREATEPROCESSW_BOUND":"AWAITING_ACTUAL_JDK_PROCESSIMPL_CREATEPROCESSW_BIND")
-            +":HOST_NATIVE_CREATE_SCOPE=REGISTERED_EXACT_CREATEPROCESSW_NORMAL_OR_RESOLVED_DELAY_IMPORTS_AND_OBSERVED_GETPROCADDRESS_RESULTS_POST_LOAD_ONLY"
+            +":HOST_NATIVE_CREATE_SCOPE=REGISTERED_EXACT_CREATEPROCESSA_W_NORMAL_OR_RESOLVED_DELAY_IMPORTS_AND_OBSERVED_GETPROCADDRESS_RESULTS_POST_LOAD_ONLY"
             +":VERIFIED_RIP_RELATIVE_DELAY_IAT_CALLS_USE_CURRENT_BINDING_DYNAMIC_POINTERS_RETAIN_RESOLUTION_SOURCES"
             +":JNI_ONLOAD_FIRST_WINDOW_UNOBSERVED"
             +":UNRESOLVED_DELAY_IMPORTS_AND_RESOLUTION_OUTSIDE_REGISTERED_GETPROCADDRESS_ENTRIES_UNOBSERVED"
-            +":CREATEPROCESSA_AND_OTHER_HOST_ENTRIES_UNOBSERVED"
+            +":OTHER_HOST_CREATION_ENTRIES_UNOBSERVED"
             +":NATIVE_PROCESS_HANDLE_TRANSFER_AND_CLOSE_UNOBSERVED"
             +":RAW_NATIVE_MEMORY_AND_OTHER_JVMTI_ENVIRONMENTS_REQUIRE_HOST_BACKEND"; }
     public static void module(Module module,boolean stopped) {
@@ -488,9 +488,9 @@ public final class NativeControl {
         long[] host=hostState0(module);
         return "NATIVE_BIND_EVENTS="+actual[0]+";JNI_FIELD_TABLE="+actual[1]+";WRAPPED_BINDINGS="+actual[2]+";ACTIVE_NATIVE="+actual[3]+";BIND_FAILURES="+actual[4]+";NATIVE_POINTERS="+actual[5]+";LOADED_NATIVE_IMAGES="+actual[6]
                 +";HOST_PROCESS_FAMILIES="+host[0]+";HOST_SHARED_FAMILIES="+host[1]+";HOST_UNPUBLISHED_FAMILIES="+host[2]+";HOST_HANDLE_ERRORS="+host[3]+";HOST_ACTIVE_PROCESSES="+host[4]
-                +";HOST_NATIVE_HANDLE_PUBLICATIONS_UNOBSERVED="+host[5]+";HOST_NATIVE_CREATEPROCESSW_IMPORTS="+host[6]+";HOST_NATIVE_CREATEPROCESSW_COVERAGE_GAP_IMAGES="+host[7]
-                +";HOST_NATIVE_CREATEPROCESSW_LOAD_WINDOWS_UNOBSERVED="+host[8]+";HOST_NATIVE_CREATE_OR_RESOLVER_DELAY_IMPORT_IMAGES_UNOBSERVED="+host[9]
-                +";HOST_NATIVE_GETPROCADDRESS_IMPORTS="+host[10]+";HOST_NATIVE_CREATEPROCESSW_RESOLVED_ENTRIES="+host[11]+";HOST_NATIVE_GETPROCADDRESS_RESOLVED_ENTRIES="+host[12];
+                +";HOST_NATIVE_HANDLE_PUBLICATIONS_UNOBSERVED="+host[5]+";HOST_NATIVE_CREATEPROCESS_IMPORTS="+host[6]+";HOST_NATIVE_CREATEPROCESS_COVERAGE_GAP_IMAGES="+host[7]
+                +";HOST_NATIVE_CREATEPROCESS_LOAD_WINDOWS_UNOBSERVED="+host[8]+";HOST_NATIVE_CREATE_OR_RESOLVER_DELAY_IMPORT_IMAGES_UNOBSERVED="+host[9]
+                +";HOST_NATIVE_GETPROCADDRESS_IMPORTS="+host[10]+";HOST_NATIVE_CREATEPROCESS_RESOLVED_ENTRIES="+host[11]+";HOST_NATIVE_GETPROCADDRESS_RESOLVED_ENTRIES="+host[12];
     }
     public static String retirementGap(Module module){
         if(!controlCaller())throw new SecurityException("NATIVE_CONTROL_AGENT_REQUIRED");
@@ -498,7 +498,7 @@ public final class NativeControl {
         long[] host=hostState0(module);
         if(host[5]!=0)return "HOST_NATIVE_HANDLE_TRANSFER_OR_CLOSE_UNOBSERVED:records="+host[5]+":liveFamilies="+host[0]+":handleErrors="+host[3]+":active="+host[4];
         if(host[0]!=0)return "HOST_PROCESS_RETIREMENT_PENDING:families="+host[0]+":shared="+host[1]+":unpublished="+host[2]+":handleErrors="+host[3]+":active="+host[4];
-        if(host[7]!=0)return "HOST_NATIVE_CREATEPROCESSW_COVERAGE_GAP:images="+host[7]+":loadWindowsUnobserved="+host[8]+":createOrResolverDelayImagesUnobserved="+host[9];
+        if(host[7]!=0)return "HOST_NATIVE_CREATEPROCESS_COVERAGE_GAP:images="+host[7]+":loadWindowsUnobserved="+host[8]+":createOrResolverDelayImagesUnobserved="+host[9];
         if(!libraryBoundaryReady)return "NATIVE_LIBRARY_SCOPE_UNAVAILABLE";
         long[] actual=status0(module);
         return actual[3]!=0||actual[5]!=0||actual[6]!=0?"NATIVE_RETIREMENT_PENDING:active="+actual[3]+":nativePointers="+actual[5]+":loadedImages="+actual[6]:"";

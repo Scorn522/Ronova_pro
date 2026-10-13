@@ -1,5 +1,21 @@
 # Ronova Pro 当前进度
 
+## 2026-10-13：C 接续——Host A/W、直接传输与客户端镜像
+
+继续当前主工程；用户提供的 `ronova-c565e97-b-r10-20261006-source.zip` 只作对照。GNU C23 / GNU C++23、Java 17 保持；Java ABI 49 / Native ABI 48 / Storage ABI 3 / Journal 6。**本工作包代码已写齐并构建通过，C 整体与 B 的实际游戏收口仍未完成。**
+
+- Host：已登记原生映像的普通导入、已解析延迟导入和实际观察到的 GetProcAddress 结果同时接入 CreateProcessA/W，复用原来源、暂停创建、Job 与句柄退役路径。
+- 文件：真实 `FileChannelImpl.transferTo0` 同时接入源、目标描述符作用域，同一描述符只登记一次，失败与返回逆序结束。实际运行暴露的描述符登记死锁已修复，五个登记点改用原锁内直接登记，权限与来源条件保留。
+- 客户端：有效 Terminal 清当前准确 ID+UUID 镜像及其相机、命中引用；当前 ClientLevel 与其实际底层 manager 阻止同一身份重新发布。保护、作用域和真实换身条件继续生效；仍被 `Minecraft.player` 引用的目标保持未确认。
+
+已取得：完整主包/既有夹具构建通过；描述符修复后的主包重建 26 秒通过；Windows A/W 真实子进程检查、实际原生控制入口检查，以及实际文件到本机 Socket 的数据/长度、失败退出后作用域恢复和后续传输检查通过。相关失败日志保留在既有报告目录，详情见 [实际报告](../validation/b-final-20261007/REPORT.md)。没有重复旧矩阵或再次启动游戏。
+
+客户端本轮只有编译结果，尚无实机清除/低层回填/玩家交接结果；独立 JVM 未覆盖合法退役写者封口后的 transferTo0 拒绝。JNI_OnLoad 首次加载窗口、未观察到的 Host 入口/句柄交接及纯绘制 owner 接线仍未完成，不能据此称完整 C 可用。
+
+本地 WIP 主包：`distribution/candidate-c-native48-wip-20261013/ronova-pro-core-0.1.0-stage-b-dev.jar`。源码与简要结果同步 Git；主包及原始日志留在本地，原 Native 47 候选保留。
+
+---
+
 ## 2026-10-13：原生层统一 GNU C23 / GNU C++23
 
 本轮按用户要求统一原生语言版本与 GNU 模式。控制 DLL 明确使用 `-std=gnu23`；存储 DLL 从 C++17 改为 `-std=gnu++23`。保留用户现有 `.vscode/c_cpp_properties.json` 的 `gnu23 / gnu++23` 选择，并随源码同步。Java 仍为 17；Java ABI 49、Native ABI 47、Storage ABI 3、Journal 6 均未改变。

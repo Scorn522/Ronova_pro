@@ -1,5 +1,27 @@
 # B 批实际报告：2026-10-09 代码收敛接续
 
+## 2026-10-13：C 接续——Host A/W、直接传输与客户端镜像
+
+主工程仍为 `D:\桌面\ronova_GPT`；B-r10 ZIP 只作对照。Java ABI 49 / Native ABI 48 / Storage ABI 3 / Journal 6；GNU C23 / GNU C++23、Java 17。代码范围为 Host 的 CreateProcessA/W 接线、直接文件传输的双描述符作用域，以及客户端准确镜像清除与重新发布限制。完整 C 和 B 的游戏业务收口没有完成。
+
+Host 的 A/W 调用保留各自真实参数类型，复用来源受理、暂停创建、Job、原始失败及退役流程；常规导入、已解析延迟导入和实际观察的动态解析都能分类 A/W。客户端 Terminal 仅接受当前连接/session/scope/维度/修订，清理核对当前 raw level 与 ID+UUID；同 ID 新 UUID 不被清除。当前真实 manager 有独立发布截点。相机和命中引用按准确目标退役，实际玩家根仍由原版换身/断开接续，缺席回复会计入这些活动根。
+
+| 本轮实际结果 | 范围与本地日志 |
+| --- | --- |
+| Host 真实 Windows 子进程：PASS | `c-host-process-20261013.log`；A/W 导入与动态解析、暂停标志、停止来源/缓存入口拒绝、无关原入口保留、映像退役拒绝及句柄收回；使用隔离夹具登记的来源/映像，不代表游戏中的原生库发现已验收 |
+| 实际 premain / Bootstrap / Native 48：PASS | `live-control-writer-native48-20261013.log`；实际安装、外来写者/原生读者拒绝、保护数组保持与原生到堆复制 |
+| 整组合并构建：PASS | `build-c-native48-client-transfer-20261013.log`，主包与既有夹具 38 秒；描述符死锁修复后 `build-c-native48-descriptor-fixed-20261013.log`，主包 26 秒 |
+| 实际文件传输：PASS | `c-file-transfer-native48-descriptor-fixed-20261013.log`，退出 0；公共/raw native 文件到回环 Socket 的实际字节/长度、只读目标原样、关闭源/目标拒绝、同 FD 不被写入、真实异常后文件作用域恢复与后续传输 |
+| 客户端实机与合法 sealed 目标 | NOT_RUN；客户端仅完成源码/mapped 方法接线及编译，独立 JVM 没有合法退役写者封口场景，检查输出明确 `FILE_TRANSFER_SCOPE_UNCHECKED` |
+
+实际失败保留：首轮 Host 夹具因编译器缓存安装前的 GetProcAddress 导入而未观察包装结果，修正夹具调用边界后通过；原 `c-host-process-initial-20261013.log` 保留。文件传输首轮在创建临时文件时死锁，`c-file-transfer-wait-stack-20261013.log` 的 JVM 确认 main 持 STREAMS 等内存写锁，external code continuation 持内存写锁等 STREAMS，循环经首次 lambda 链接触发。仅将同描述符生命周期的五个 computeIfAbsent 改成原锁内直接 get/new/put，保留 sealed、来源、活动计数和 Unsafe 检查；停止这一个隔离 JVM 后重建并重跑同一项，未延长期限或重复其他已通过项。原启动日志保存在 `c-file-transfer-deadlock-initial-20261013.log`。最初的构建脚本中文编码错误发生在进入编译前，已修正脚本，未改生产源码。
+
+文件绑定在启动时仍报告 74/75 个未决入口，不能把 DLL 就绪当成全部入口受控。文件检查不代表内部封口策略、来源归属或整个平台覆盖已经验收；Host 检查不证明 JNI_OnLoad 首窗口、未观察的句柄转交/关闭或其他创建入口。纯绘制接口仍缺真实 owner 与资源接线，保持 UNSUPPORTED。客户端低层回填、活动引用清理、本地玩家交接及新候选的世界/保存重启尚无实机结果。
+
+本地主包位于 `distribution/candidate-c-native48-wip-20261013/ronova-pro-core-0.1.0-stage-b-dev.jar`，由最终 26 秒重建生成。只同步源码和简要结果；新主包、线程栈与原始日志保留本地，不替换原 Native 47 候选。
+
+---
+
 ## 2026-10-13：原生层统一 GNU C23 / GNU C++23
 
 本轮按用户要求统一原生语言版本与 GNU 模式。控制 DLL 明确使用 `-std=gnu23`；存储 DLL 从 C++17 改为 `-std=gnu++23`。保留用户现有 `.vscode/c_cpp_properties.json` 的 `gnu23 / gnu++23` 选择，并随源码同步。Java 仍为 17；Java ABI 49、Native ABI 47、Storage ABI 3、Journal 6 均未改变。

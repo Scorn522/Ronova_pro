@@ -16,7 +16,9 @@ public final class AuditFixCheck {
         if(args.length==1&&args[0].equals("live-control-writer")){liveControlWriter();return;}
         if(args.length==1&&args[0].equals("clone-boundary")){cloneBoundary();return;}
         if(args.length==1&&args[0].equals("buffer-release")){bufferRelease();return;}
+        if(args.length==1&&args[0].equals("file-transfer")){fileTransfer();return;}
         if(args.length==1&&args[0].equals("storage-native")){storageNative();return;}
+        if(args.length==1&&args[0].equals("host-process")){System.load(java.nio.file.Path.of(System.getProperty("ronova.pro.audit.native")).toAbsolutePath().toString());hostProcess0();System.out.println("HOST_PROCESS_PASS actual_windows_children A_W_imports A_W_dynamic suspended_preserved stopped_source_refused cached_result_refused unrelated_original_preserved retired_image_refused handles_retired");return;}
         ProRuntime runtime=(ProRuntime)U.allocateInstance(ProRuntime.class);
         Map<UUID,Object> work=new LinkedHashMap<>();put(runtime,"work",work);
         var subject=new ProRuntime.Subject(UUID.randomUUID());var records=(EntityRecords)U.allocateInstance(EntityRecords.class);put(records,"originalPassengers",List.of());
@@ -42,6 +44,8 @@ public final class AuditFixCheck {
     }
 
     // Actual isolated TxF preparation; no commit permit is constructed or granted.
+    private static native void hostProcess0();
+
     private static void storageNative()throws Exception {
         require(StorageNative.available()&&StorageNative.abi0()==3,"actual storage DLL unavailable: "+StorageNative.reason());
         byte[] original=new byte[33001],candidate=new byte[65537];
@@ -88,6 +92,90 @@ public final class AuditFixCheck {
         } finally {java.nio.file.Files.deleteIfExists(file);}
     }
 
+    // Actual JNI calls and OS permissions; no retirement/source permission is manufactured here.
+    private static void fileTransfer()throws Exception {
+        Class<?> nativeControl=Class.forName("dev.ronova.pro.bootstrap.NativeControl",true,null);
+        require(Boolean.TRUE.equals(nativeControl.getMethod("available").invoke(null)),"actual Windows native backend absent");
+        Class<?> channelType=Class.forName("sun.nio.ch.FileChannelImpl",true,null);
+        Method nativeTransfer=channelType.getDeclaredMethod("transferTo0",java.io.FileDescriptor.class,long.class,long.class,java.io.FileDescriptor.class);
+        require(Modifier.isNative(nativeTransfer.getModifiers()),"actual transferTo0 native entry absent");nativeTransfer.setAccessible(true);
+        Class<?> resources=Class.forName("dev.ronova.pro.bootstrap.ResourceBridge",true,null);
+        Field operations=resources.getDeclaredField("FILE_OPERATIONS");operations.setAccessible(true);
+        ThreadLocal<?> scopes=(ThreadLocal<?>)operations.get(null);
+        byte[] payload=new byte[65537],baseline=new byte[117];
+        for(int i=0;i<payload.length;i++)payload[i]=(byte)(i*31+7);
+        for(int i=0;i<baseline.length;i++)baseline[i]=(byte)(i*13+5);
+        var sourceFile=java.nio.file.Files.createTempFile("ronova-transfer-source-",".bin");
+        var targetFile=java.nio.file.Files.createTempFile("ronova-transfer-readonly-",".bin");
+        try {
+            java.nio.file.Files.write(sourceFile,payload);java.nio.file.Files.write(targetFile,baseline);
+            try(var source=new java.io.FileInputStream(sourceFile.toFile());var readOnly=new java.io.FileInputStream(targetFile.toFile())){
+                var channel=source.getChannel();channel.position(11);
+                transferToSocket(channel,source.getFD(),payload,19,33001,null,scopes);
+                require(channel.position()==11,"public transferTo changed source position");
+                try{channel.transferTo(0,17,readOnly.getChannel());throw new AssertionError("original read-only target accepted");}
+                catch(java.nio.channels.NonWritableChannelException expected){ }
+                require(nativeTransferRefused(nativeTransfer,channel,source.getFD(),readOnly.getFD(),scopes),"native transferTo0 bypassed the original read-only target");
+                require(java.nio.file.Files.size(targetFile)==baseline.length&&Arrays.equals(baseline,java.nio.file.Files.readAllBytes(targetFile)),"read-only target bytes or length changed");
+                java.io.FileDescriptor closedSource,closedTarget;
+                try(var closed=new java.io.FileInputStream(sourceFile.toFile())){closedSource=closed.getFD();}
+                try(var closed=new java.io.FileInputStream(targetFile.toFile())){closedTarget=closed.getFD();}
+                require(!closedSource.valid()&&!closedTarget.valid(),"closed descriptor fixture retained an OS handle");
+                try{nativeTransfer(nativeTransfer,channel,closedSource,0,17,source.getFD(),scopes);throw new AssertionError("closed native source accepted");}
+                catch(java.io.IOException expected){ }
+                require(nativeTransferRefused(nativeTransfer,channel,source.getFD(),closedTarget,scopes),"closed native target accepted");
+                require(nativeTransferRefused(nativeTransfer,channel,source.getFD(),source.getFD(),scopes),"same file descriptor accepted as a socket target");
+                transferToSocket(channel,source.getFD(),payload,17,32771,nativeTransfer,scopes);
+            }
+            require(java.nio.file.Files.size(sourceFile)==payload.length&&Arrays.equals(payload,java.nio.file.Files.readAllBytes(sourceFile)),"source bytes or length changed");
+            require(java.nio.file.Files.size(targetFile)==baseline.length&&Arrays.equals(baseline,java.nio.file.Files.readAllBytes(targetFile)),"rejected target changed after following transfer");
+            System.out.println("FILE_TRANSFER_PASS actual_native public_socket_bytes_and_length native_socket_bytes_and_length readonly_target_preserved closed_source_refused closed_target_refused same_descriptor_preserved native_failure_scope_restored following_transfer_preserved");
+            System.out.println("FILE_TRANSFER_SCOPE_UNCHECKED sealed_target_requires_actual_retirement_writer");
+        } finally {
+            try{java.nio.file.Files.deleteIfExists(targetFile);}finally{java.nio.file.Files.deleteIfExists(sourceFile);}
+        }
+    }
+    private static long nativeTransfer(Method entry,java.nio.channels.FileChannel channel,java.io.FileDescriptor source,
+            long position,long count,java.io.FileDescriptor target,ThreadLocal<?> scopes)throws Exception {
+        Object previous=scopes.get();
+        try{return (Long)entry.invoke(channel,source,position,count,target);}
+        catch(InvocationTargetException failure){
+            if(failure.getCause() instanceof Exception cause)throw cause;
+            if(failure.getCause() instanceof Error cause)throw cause;throw failure;
+        }finally{require(scopes.get()==previous,"native transferTo0 left a file operation scope live");}
+    }
+    private static boolean nativeTransferRefused(Method entry,java.nio.channels.FileChannel channel,
+            java.io.FileDescriptor source,java.io.FileDescriptor target,ThreadLocal<?> scopes)throws Exception {
+        try{return nativeTransfer(entry,channel,source,0,17,target,scopes)<=0;}
+        catch(java.io.IOException refused){return true;}
+    }
+    private static void transferToSocket(java.nio.channels.FileChannel source,java.io.FileDescriptor descriptor,byte[] payload,
+            int position,int length,Method nativeEntry,ThreadLocal<?> scopes)throws Exception {
+        Object previous=scopes.get();
+        try(var listener=java.nio.channels.ServerSocketChannel.open()){
+            listener.bind(new java.net.InetSocketAddress(java.net.InetAddress.getLoopbackAddress(),0));
+            try(var sender=java.nio.channels.SocketChannel.open(listener.getLocalAddress());var receiver=listener.accept()){
+                receiver.socket().setSoTimeout(10000);
+                Field fd=sender.getClass().getDeclaredField("fd");fd.setAccessible(true);
+                var target=(java.io.FileDescriptor)fd.get(sender);
+                var received=CompletableFuture.supplyAsync(()->{
+                    try(var input=receiver.socket().getInputStream()){return input.readNBytes(length+1);}
+                    catch(java.io.IOException failure){throw new CompletionException(failure);}
+                });
+                long transferred=0,deadline=System.nanoTime()+TimeUnit.SECONDS.toNanos(10);
+                while(transferred<length){
+                    long count=Math.min(4096,length-transferred);
+                    long written=nativeEntry==null?source.transferTo(position+transferred,count,sender)
+                            :nativeTransfer(nativeEntry,source,descriptor,position+transferred,count,target,scopes);
+                    require(written>=0&&written<=count,"actual transfer returned an invalid length: "+written);transferred+=written;
+                    require(System.nanoTime()<deadline,"actual file/socket transfer did not finish");
+                    if(written==0)Thread.sleep(1);
+                }
+                sender.shutdownOutput();byte[] bytes=received.get(10,TimeUnit.SECONDS);
+                require(transferred==length&&bytes.length==length&&Arrays.equals(bytes,Arrays.copyOfRange(payload,position,position+length)),"actual file/socket transfer changed bytes or length");
+            }
+        }finally{require(scopes.get()==previous,"public file/socket transfer left a file operation scope live");}
+    }
     private static void sourceListFixes()throws Exception {
         Class<?> publications=Class.forName("dev.ronova.pro.SourceMaps$Publications");
         Class<?> controls=Class.forName("dev.ronova.pro.bootstrap.ControlBridge",false,null);

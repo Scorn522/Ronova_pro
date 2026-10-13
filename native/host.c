@@ -1,8 +1,11 @@
 /* Included after the native source helpers. Each family owns an unnamed Job and
  * duplicates the actual returned process handle; PIDs never authorize disposal. */
 #include <stdio.h>
-typedef BOOL (WINAPI *HostCreateProcess)(LPCWSTR,LPWSTR,LPSECURITY_ATTRIBUTES,
+typedef BOOL (WINAPI *HostCreateProcessW)(LPCWSTR,LPWSTR,LPSECURITY_ATTRIBUTES,
         LPSECURITY_ATTRIBUTES,BOOL,DWORD,LPVOID,LPCWSTR,LPSTARTUPINFOW,LPPROCESS_INFORMATION);
+typedef BOOL (WINAPI *HostCreateProcessA)(LPCSTR,LPSTR,LPSECURITY_ATTRIBUTES,
+        LPSECURITY_ATTRIBUTES,BOOL,DWORD,LPVOID,LPCSTR,LPSTARTUPINFOA,LPPROCESS_INFORMATION);
+
 typedef FARPROC (WINAPI *HostGetProcAddress)(HMODULE,LPCSTR);
 typedef jlong (JNICALL *HostProcessCreate)(JNIEnv*,jclass,jstring,jstring,jstring,jlongArray,jboolean);
 typedef struct HostProcess {
@@ -19,7 +22,7 @@ static SRWLOCK host_records=SRWLOCK_INIT;
 static CONDITION_VARIABLE host_changed=CONDITION_VARIABLE_INIT;
 static HostProcess *host_processes;
 static uint64_t host_next_token;
-static HostCreateProcess host_original_create;
+static HostCreateProcessW host_original_create;
 static HostProcessCreate host_original_process;
 static void *volatile *host_import_slot;
 // The JDK import table is read-only outside host_import's VirtualProtect window.
@@ -34,7 +37,8 @@ static volatile LONG host_java_boundary;
 static volatile LONG64 host_next_creation;
 static jmethodID host_process_method;
 static HANDLE host_worker_handle;
-enum { HOST_CREATE=1,HOST_RESOLVE=2 };
+enum { HOST_CREATE_W=1,HOST_RESOLVE=2,HOST_CREATE_A=3 };
+static int host_is_create(int kind){return kind==HOST_CREATE_W||kind==HOST_CREATE_A;}
 typedef struct HostImport {
     struct HostImage *image;
     void *volatile *slot;
@@ -50,7 +54,7 @@ typedef struct HostImage {
     HMODULE handle;
     DWORD size,functionsRva,functionCount;
     HostImport *imports;
-    void *createTarget,*resolveTarget;
+    void *createTarget,*createATarget,*resolveTarget;
     int live,checked,failed,loadWindow,delayImports;
     struct HostImage *next;
 } HostImage;
@@ -141,12 +145,24 @@ static void host_prune(JNIEnv *env){
         }else link=&record->next;
     }
 }
-static BOOL host_create_owned(HostCreation *scope,HostCreateProcess original,int nativeDirect,
-        LPCWSTR application,LPWSTR command,
+/* Keep the selected API's ANSI/Unicode buffers and STARTUPINFO unchanged. Only
+ * this typed dispatch interprets the erased pointers shared by the job flow. */
+static BOOL host_call_create(void *original,int kind,const void *application,void *command,
         LPSECURITY_ATTRIBUTES processAttributes,LPSECURITY_ATTRIBUTES threadAttributes,
-        BOOL inherit,DWORD flags,LPVOID environment,LPCWSTR directory,
-        LPSTARTUPINFOW startup,LPPROCESS_INFORMATION information){
-    if(!scope||!scope->owners)return original(application,command,processAttributes,
+        BOOL inherit,DWORD flags,LPVOID environment,const void *directory,
+        void *startup,LPPROCESS_INFORMATION information){
+    if(kind==HOST_CREATE_A)return ((HostCreateProcessA)original)(application,command,processAttributes,
+            threadAttributes,inherit,flags,environment,directory,startup,information);
+    if(kind==HOST_CREATE_W)return ((HostCreateProcessW)original)(application,command,processAttributes,
+            threadAttributes,inherit,flags,environment,directory,startup,information);
+    SetLastError(ERROR_INVALID_FUNCTION);return FALSE;
+}
+static BOOL host_create_owned(HostCreation *scope,void *original,int kind,int nativeDirect,
+        const void *application,void *command,
+        LPSECURITY_ATTRIBUTES processAttributes,LPSECURITY_ATTRIBUTES threadAttributes,
+        BOOL inherit,DWORD flags,LPVOID environment,const void *directory,
+        void *startup,LPPROCESS_INFORMATION information){
+    if(!scope||!scope->owners)return host_call_create(original,kind,application,command,processAttributes,
             threadAttributes,inherit,flags,environment,directory,startup,information);
     if(scope->created||native_owner_stopped(scope->owners)){SetLastError(ERROR_ACCESS_DENIED);return FALSE;}
     HostProcess *process=(HostProcess*)calloc(1,sizeof(*process));
@@ -162,7 +178,7 @@ static BOOL host_create_owned(HostCreation *scope,HostCreateProcess original,int
     }
     process->nativeDirect=nativeDirect;process->unknown=nativeDirect;
     process->creating=1;process->borrowed=1;host_publish(process);scope->created=process;
-    BOOL created=original(application,command,processAttributes,threadAttributes,
+    BOOL created=host_call_create(original,kind,application,command,processAttributes,threadAttributes,
             inherit,flags|CREATE_SUSPENDED,environment,directory,startup,information);
     DWORD error=created?0:GetLastError();
     if(created){
@@ -194,7 +210,7 @@ static BOOL WINAPI host_create_process(LPCWSTR application,LPWSTR command,
         BOOL inherit,DWORD flags,LPVOID environment,LPCWSTR directory,
         LPSTARTUPINFOW startup,LPPROCESS_INFORMATION information){
     NativeThread *state=native_thread();
-    return host_create_owned(state?state->processScope:NULL,host_original_create,0,
+    return host_create_owned(state?state->processScope:NULL,(void*)host_original_create,HOST_CREATE_W,0,
             application,command,processAttributes,threadAttributes,inherit,flags,
             environment,directory,startup,information);
 }
@@ -328,19 +344,19 @@ static int host_entry_sources(HostImport *entry,NativeThread *state,void *caller
     return 1;
 }
 static HostImport *host_consumed_entry(HostImport *entry,NativeThread *state,void *caller);
-static BOOL WINAPI host_native_create(LPCWSTR application,LPWSTR command,
+static BOOL WINAPI host_native_create(const void *application,void *command,
         LPSECURITY_ATTRIBUTES processAttributes,LPSECURITY_ATTRIBUTES threadAttributes,
-        BOOL inherit,DWORD flags,LPVOID environment,LPCWSTR directory,
-        LPSTARTUPINFOW startup,LPPROCESS_INFORMATION information,HostImport *entry,void *caller){
+        BOOL inherit,DWORD flags,LPVOID environment,const void *directory,
+        void *startup,LPPROCESS_INFORMATION information,HostImport *entry,void *caller){
     DWORD incoming=GetLastError();OwnerLink *owners=NULL;
     NativeThread *state=native_tls==TLS_OUT_OF_INDEXES?NULL:(NativeThread*)TlsGetValue(native_tls);
     entry=host_consumed_entry(entry,state,caller);
     if(!host_entry_sources(entry,state,caller,&owners,NULL,0)){native_owner_links_free(owners);return FALSE;}
     if(native_owner_stopped(owners)){native_owner_links_free(owners);SetLastError(ERROR_ACCESS_DENIED);return FALSE;}
-    if(!owners){SetLastError(incoming);return ((HostCreateProcess)entry->original)(application,command,processAttributes,
+    if(!owners){SetLastError(incoming);return host_call_create(entry->original,entry->kind,application,command,processAttributes,
             threadAttributes,inherit,flags,environment,directory,startup,information);}
     HostCreation scope={0};scope.owners=owners;
-    BOOL result=host_create_owned(&scope,(HostCreateProcess)entry->original,1,application,command,processAttributes,
+    BOOL result=host_create_owned(&scope,entry->original,entry->kind,1,application,command,processAttributes,
             threadAttributes,inherit,flags,environment,directory,startup,information);
     DWORD error=GetLastError();
     if(scope.created){
@@ -355,6 +371,7 @@ static BOOL WINAPI host_native_create(LPCWSTR application,LPWSTR command,
     native_owner_links_free(owners);SetLastError(error);return result;
 }
 static void *host_import_entry(HostImport *entry);
+static int host_target_kind(HostImage *image,void *actual);
 static FARPROC WINAPI host_native_resolve(HMODULE module,LPCSTR name,HostImport *entry,void *caller){
     DWORD incoming=GetLastError();
     NativeThread *state=native_tls==TLS_OUT_OF_INDEXES?NULL:(NativeThread*)TlsGetValue(native_tls);
@@ -365,8 +382,7 @@ static FARPROC WINAPI host_native_resolve(HMODULE module,LPCSTR name,HostImport 
     if(associated!=1){SetLastError(associated?ERROR_INVALID_DATA:ERROR_MOD_NOT_FOUND);return NULL;}
     SetLastError(incoming);FARPROC actual=((HostGetProcAddress)entry->original)(module,name);
     DWORD error=GetLastError();
-    int kind=(void*)actual==entry->image->createTarget?HOST_CREATE:
-            (void*)actual==entry->image->resolveTarget?HOST_RESOLVE:0;
+    int kind=host_target_kind(entry->image,(void*)actual);
     if(!actual||!kind){SetLastError(error);return actual;}
     /* Names, ordinals and requested DLL handles do not authorize this result.
      * Only the actual returned Windows API address selects a controlled entry. */
@@ -377,7 +393,7 @@ static FARPROC WINAPI host_native_resolve(HMODULE module,LPCSTR name,HostImport 
     if(resolved){
         resolved->image=entry->image;resolved->original=(void*)actual;resolved->kind=kind;
         resolved->library=library;resolved->sources=owners;resolved->returned=1;
-        if(kind!=HOST_CREATE||host_worker_ready())resolved->entry=host_import_entry(resolved);
+        if(!host_is_create(kind)||host_worker_ready())resolved->entry=host_import_entry(resolved);
     }
     if(!resolved||!resolved->entry){
         AcquireSRWLockExclusive(&host_imports);entry->image->failed=1;ReleaseSRWLockExclusive(&host_imports);
@@ -388,7 +404,7 @@ static FARPROC WINAPI host_native_resolve(HMODULE module,LPCSTR name,HostImport 
     int stopped=native_owner_stopped(resolved->sources)!=NULL;
     if(associated==1&&!stopped){
         resolved->next=entry->image->imports;entry->image->imports=resolved;
-        if(kind==HOST_CREATE)entry->image->loadWindow=1;
+        if(host_is_create(kind))entry->image->loadWindow=1;
     }
     ReleaseSRWLockShared(&native_records);ReleaseSRWLockExclusive(&host_imports);
     if(associated!=1||stopped){
@@ -429,7 +445,8 @@ static int host_exchange_import(HostImport *entry,void *expected,void *replaceme
     return old==expected&&restored;
 }
 static int host_target_kind(HostImage *image,void *actual){
-    return actual&&actual==image->createTarget?HOST_CREATE:
+    return actual&&actual==image->createTarget?HOST_CREATE_W:
+            actual&&actual==image->createATarget?HOST_CREATE_A:
             actual&&actual==image->resolveTarget?HOST_RESOLVE:0;
 }
 static HostImport *host_controlled_entry(HostImage *image,void *actual,int kind){
@@ -442,14 +459,16 @@ static int host_declared_kind(unsigned char *base,ULONGLONG name,DWORD size,int 
     if(!rvaBased){if(name<(uintptr_t)base)return 0;name-=(uintptr_t)base;}
     if(name>=size||size-name<sizeof(WORD)+sizeof("CreateProcessW"))return 0;
     IMAGE_IMPORT_BY_NAME *symbol=(IMAGE_IMPORT_BY_NAME*)(base+name);
-    if(!memcmp(symbol->Name,"CreateProcessW",sizeof("CreateProcessW")))return HOST_CREATE;
+    if(!memcmp(symbol->Name,"CreateProcessW",sizeof("CreateProcessW")))return HOST_CREATE_W;
+    if(!memcmp(symbol->Name,"CreateProcessA",sizeof("CreateProcessA")))return HOST_CREATE_A;
     if(size-name>=sizeof(WORD)+sizeof("GetProcAddress")
             &&!memcmp(symbol->Name,"GetProcAddress",sizeof("GetProcAddress")))return HOST_RESOLVE;
     return 0;
 }
 static void host_install_slot(HostImage *image,void *volatile *slot,int declared,int delayed){
     void *actual=__atomic_load_n(slot,__ATOMIC_ACQUIRE);int kind=host_target_kind(image,actual);
-    HostImport *known=host_controlled_entry(image,actual,HOST_CREATE);
+    HostImport *known=host_controlled_entry(image,actual,HOST_CREATE_W);
+    if(!known)known=host_controlled_entry(image,actual,HOST_CREATE_A);
     if(!known)known=host_controlled_entry(image,actual,HOST_RESOLVE);
     if(known)kind=known->kind;
     /* The exact JDK slot already belongs to its ProcessImpl creation scope. It
@@ -464,18 +483,19 @@ static void host_install_slot(HostImage *image,void *volatile *slot,int declared
                 }
     if(!kind){
         if(!declared)return;
-        if(declared==HOST_CREATE)image->loadWindow=1;
+        if(host_is_create(declared))image->loadWindow=1;
         if(delayed!=1){image->failed=1;return;}
     }
     HostImport *entry=(HostImport*)calloc(1,sizeof(*entry));
     if(!entry){image->failed=1;return;}
     entry->image=image;entry->slot=slot;entry->kind=kind?kind:declared;entry->delayed=delayed;
     entry->next=image->imports;image->imports=entry;
-    if(entry->kind==HOST_CREATE)image->loadWindow=1;
+    if(host_is_create(entry->kind))image->loadWindow=1;
     if(!kind)return; /* A declared unresolved delay entry is not an API result. */
-    entry->original=kind==HOST_CREATE?image->createTarget:image->resolveTarget;
+    entry->original=kind==HOST_CREATE_W?image->createTarget:
+            kind==HOST_CREATE_A?image->createATarget:image->resolveTarget;
     if(known){entry->entry=known->entry;return;}
-    if(kind==HOST_CREATE&&!host_worker_ready()){image->failed=1;return;}
+    if(host_is_create(kind)&&!host_worker_ready()){image->failed=1;return;}
     entry->entry=host_import_entry(entry);
     if(!entry->entry){image->failed=1;return;}
     /* Retain code even after a failed replacement; a caller may have fetched it. */
@@ -765,6 +785,7 @@ static void host_observe_image(HMODULE handle){
      * itself enter the JNI source observer while the loader lock is held. */
     HMODULE kernel=GetModuleHandleW(L"kernel32.dll");
     void *createTarget=kernel?(void*)GetProcAddress(kernel,"CreateProcessW"):NULL;
+    void *createATarget=kernel?(void*)GetProcAddress(kernel,"CreateProcessA"):NULL;
     void *resolveTarget=kernel?(void*)GetProcAddress(kernel,"GetProcAddress"):NULL;
     AcquireSRWLockExclusive(&host_imports);AcquireSRWLockShared(&native_records);
     int registered=0;
@@ -773,7 +794,7 @@ static void host_observe_image(HMODULE handle){
     if(!registered){ReleaseSRWLockShared(&native_records);ReleaseSRWLockExclusive(&host_imports);return;}
     HostImage *image=host_images;while(image&&(!image->live||image->handle!=handle))image=image->next;
     if(!image){image=(HostImage*)calloc(1,sizeof(*image));if(image){
-        image->handle=handle;image->createTarget=createTarget;image->resolveTarget=resolveTarget;
+        image->handle=handle;image->createTarget=createTarget;image->createATarget=createATarget;image->resolveTarget=resolveTarget;
         image->live=1;image->next=host_images;host_images=image;
     }}
     if(image)for(NativeLibrary *library=native_libraries;library;library=library->next)
@@ -861,7 +882,7 @@ static int host_import(HMODULE image){
             if(__atomic_load_n(slot,__ATOMIC_ACQUIRE)!=expected)return 0;
             DWORD protection;
             if(!VirtualProtect((void*)slot,sizeof(*slot),PAGE_READWRITE,&protection))return 0;
-            host_original_create=(HostCreateProcess)expected;host_import_slot=slot;
+            host_original_create=(HostCreateProcessW)expected;host_import_slot=slot;
             void *old=InterlockedCompareExchangePointer(slot,(void*)host_create_process,expected);
             DWORD ignored;BOOL restored=VirtualProtect((void*)slot,sizeof(*slot),protection,&ignored);
             return old==expected&&restored;
@@ -1034,7 +1055,7 @@ static void host_import_state(JNIEnv *env,jobject module,jlong *values){
             if(entry->returned&&native_owner_matches(env,entry->sources,module)){
                 resolved=1;
                 if(image->live&&(!entry->library||host_library_current(entry->library,image->handle)))
-                    values[entry->kind==HOST_CREATE?11:12]++;
+                    values[host_is_create(entry->kind)?11:12]++;
             }
         ReleaseSRWLockShared(&native_records);
         if(!loaded&&!current&&!resolved)continue;
@@ -1043,7 +1064,7 @@ static void host_import_state(JNIEnv *env,jobject module,jlong *values){
         for(HostImport *entry=current?image->imports:NULL;entry;entry=entry->next){
             if(!entry->slot)continue;
             if(host_controlled_entry(image,__atomic_load_n(entry->slot,__ATOMIC_ACQUIRE),entry->kind))
-                values[entry->kind==HOST_CREATE?6:10]++;
+                values[host_is_create(entry->kind)?6:10]++;
             else failed=1;
         }
         /* Keep first-window and unconnected-entry coverage attached to the

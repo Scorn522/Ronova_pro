@@ -20,6 +20,10 @@ import net.minecraftforge.fml.common.Mod;
 /** Client-side presence observation and the scoped mirror of server protection policy. */
 @Mod.EventBusSubscriber(modid="ronova_pro",value=Dist.CLIENT)
 public final class ClientPresence {
+    /** Implemented by the current ClientLevel mixin, so a supplied manager cannot choose its own owner. */
+    public interface ClientStorage {
+        net.minecraft.world.level.entity.TransientEntitySectionManager<Entity> pro$clientEntityStorage();
+    }
     private static final int WATCH_LIMIT=256,CHALLENGE_TOMBSTONE_LIMIT=16384;
     private static final Map<UUID,Watch> watches=new LinkedHashMap<>();
     private static final Set<Challenge> retiredChallenges=new HashSet<>();
@@ -124,7 +128,7 @@ public final class ClientPresence {
                     worldAppliedScope=lastResetScope;awaitingScope=false;awaitingAfterScope=-1;
                 } else if(!awaitingScope) { hudPolicies.clear();awaitingScope=true;awaitingAfterScope=worldAppliedScope; }
             }
-            applyPendingWorld(mc);
+            applyPendingWorld(mc);applyTerminalMirrors(mc);
         }
         return mc;
     }
@@ -187,7 +191,7 @@ public final class ClientPresence {
             for(ProNetwork.ModGroup pending:List.copyOf(pendingModGroups.values()))if(p.session().equals(pending.session()))modGroup(pending,source);
             pendingModGroups.clear();
             policyOverflowReported=false;
-            applyPendingWorld(Minecraft.getInstance());
+            applyPendingWorld(Minecraft.getInstance());applyTerminalMirrors(Minecraft.getInstance());
         }
     }
     static void policy(ProNetwork.Protection p,Object source) {
@@ -197,6 +201,7 @@ public final class ClientPresence {
                 synchronized(localBodies) {localBodies.entrySet().removeIf(entry->entry.getValue().id()==p.entityId()&&entry.getValue().uuid().equals(p.entityUuid()));}
             }
             var mc=Minecraft.getInstance();
+            if(!p.protectedNow())retireTerminalMirror(mc,p.entityId(),p.entityUuid());
             if(mc.level!=null) {
                 var entity=mc.level.getEntity(p.entityId());
                 if(mc.player!=null&&mc.player.getId()==p.entityId()&&mc.player.getUUID().equals(p.entityUuid()))entity=mc.player;
@@ -317,7 +322,63 @@ public final class ClientPresence {
     public static boolean hudDrawDenied(UUID id) {context();Hud policy=hudPolicies.get(id);return !awaitingScope&&Objects.equals(ClientPresence.policy.dimension(),levelDimension(Minecraft.getInstance()))&&policy!=null&&policy.terminal();}
     static void terminal(ProNetwork.Terminal p,Object source) {
         if(p==null||!current(source))return;
-        terminalPolicy.accept(source,p.session(),p.scope(),p.dimension(),p.revision(),p.entityId(),p.entityUuid(),p.terminal());
+        if(terminalPolicy.accept(source,p.session(),p.scope(),p.dimension(),p.revision(),p.entityId(),p.entityUuid(),p.terminal())) {
+            installControls();
+            if(p.terminal())retireTerminalMirror(Minecraft.getInstance(),p.entityId(),p.entityUuid());
+        }
+    }
+    private static boolean terminalRemovalAllowed(String dimension,int id,UUID uuid) {
+        return !awaitingScope&&terminalPolicy.denies(connection,dimension,id,uuid)&&!policy.denies(connection,dimension,id,uuid);
+    }
+    private static boolean terminalRoot(Minecraft mc,Entity entity,int id,UUID uuid) {
+        if(entity==null)return false;
+        var raw=(Access.EntityState)entity;
+        return raw.pro$level()==mc.level&&raw.pro$id()==id&&Objects.equals(raw.pro$uuid(),uuid);
+    }
+    /** The current lookup supplies ownership; a reused id with another UUID never becomes the target. */
+    private static void retireTerminalMirror(Minecraft mc,int id,UUID uuid) {
+        if(mc.level==null||!terminalRemovalAllowed(levelDimension(mc),id,uuid))return;
+        var level=mc.level;Entity entity=level.getEntity(id);
+        if(terminalRoot(mc,entity,id,uuid)) {
+            removeLocal(entity);
+            // ClientLevel uses final setRemoved and its real callback to remove lookup, section and tick shares.
+            level.removeEntity(id,Entity.RemovalReason.DISCARDED);
+        }
+        if(mc.level!=level)return;
+        // Vanilla removal may have arrived first; these exact rendering/input roots still need retirement.
+        Entity camera=mc.getCameraEntity();
+        if(camera!=mc.player&&terminalRoot(mc,camera,id,uuid))mc.setCameraEntity(mc.player);
+        var view=mc.gameRenderer.getMainCamera();
+        if(view.getEntity()!=mc.player&&terminalRoot(mc,view.getEntity(),id,uuid))view.reset();
+        if(terminalRoot(mc,mc.crosshairPickEntity,id,uuid))mc.crosshairPickEntity=null;
+        var dispatcher=mc.getEntityRenderDispatcher();
+        if(terminalRoot(mc,dispatcher.crosshairPickEntity,id,uuid))dispatcher.crosshairPickEntity=null;
+        if(mc.hitResult instanceof net.minecraft.world.phys.EntityHitResult hit&&terminalRoot(mc,hit.getEntity(),id,uuid))
+            mc.hitResult=net.minecraft.world.phys.BlockHitResult.miss(hit.getLocation(),net.minecraft.core.Direction.UP,BlockPos.containing(hit.getLocation()));
+        // Minecraft.player remains owned by the actual respawn/disconnect handoff; presence includes that root.
+    }
+    private static void applyTerminalMirrors(Minecraft mc) {
+        if(awaitingScope||mc.level==null)return;
+        for(ClientPolicyState.Address address:terminalPolicy.activeAddresses(connection,levelDimension(mc)))
+            retireTerminalMirror(mc,address.id(),address.uuid());
+    }
+    public static boolean publicationDenied(Object level,int id,Entity entity) {
+        Minecraft mc=context();if(level!=mc.level||mc.level==null||entity==null)return false;
+        var raw=(Access.EntityState)entity;
+        String dimension=levelDimension(mc);UUID uuid=raw.pro$uuid();
+        // The API address and the actual storage address may differ after a damaged id write.
+        return terminalRemovalAllowed(dimension,id,uuid)||terminalRemovalAllowed(dimension,raw.pro$id(),uuid);
+    }
+    /** Stops direct manager re-publication before lookup, section and ticking callbacks acquire the body. */
+    public static boolean storagePublicationDenied(Object storage,net.minecraft.world.level.entity.EntityAccess incoming) {
+        if(!(incoming instanceof Entity entity))return false;
+        Minecraft mc=Minecraft.getInstance();if(mc.isSameThread())context();
+        Object active=world;
+        if(active!=mc.level||!(active instanceof net.minecraft.client.multiplayer.ClientLevel level)||awaitingScope
+                ||((ClientStorage)level).pro$clientEntityStorage()!=storage)return false;
+        var raw=(Access.EntityState)entity;
+        if(terminalRemovalAllowed(level.dimension().location().toString(),raw.pro$id(),raw.pro$uuid()))return true;
+        return mc.isSameThread()&&replacementDenied(level,raw.pro$id(),entity);
     }
     public static boolean renderDenied(net.minecraft.world.entity.Entity entity) {
         Minecraft mc=context();if(awaitingScope||mc.level==null||entity==null)return false;
@@ -567,6 +628,11 @@ public final class ClientPresence {
     public static String challengeDiagnostic() {
         context();return challengeOverflow?"CLIENT_CHALLENGE_TOMBSTONE_CAPACITY_REACHED_CONNECTION_RESET_REQUIRED":"CLIENT_CHALLENGES_TRACKED";
     }
+    private static boolean presenceRoot(Entity entity,ProNetwork.Probe probe) {
+        if(entity==null)return false;
+        var raw=(Access.EntityState)entity;
+        return raw.pro$id()==probe.entityId()||Objects.equals(raw.pro$uuid(),probe.entityUuid());
+    }
     @SubscribeEvent public static void tick(TickEvent.ClientTickEvent event) {
         if(event.phase!=TickEvent.Phase.END)return;
         Minecraft mc=context();tick++;
@@ -586,6 +652,10 @@ public final class ClientPresence {
         for(Watch w:watches.values()) {
             boolean absent=mc.level.dimension().location().toString().equals(w.p.dimension());
             if(absent&&mc.level.getEntity(w.p.entityId())!=null)absent=false;
+            if(absent&&(presenceRoot(mc.player,w.p)||presenceRoot(mc.getCameraEntity(),w.p)
+                    ||presenceRoot(mc.gameRenderer.getMainCamera().getEntity(),w.p)||presenceRoot(mc.crosshairPickEntity,w.p)
+                    ||presenceRoot(mc.getEntityRenderDispatcher().crosshairPickEntity,w.p)
+                    ||mc.hitResult instanceof net.minecraft.world.phys.EntityHitResult hit&&presenceRoot(hit.getEntity(),w.p)))absent=false;
             if(absent)for(var entity:mc.level.entitiesForRendering()) {
                 var state=(Access.EntityState)entity;
                 if(state.pro$id()==w.p.entityId()||state.pro$uuid().equals(w.p.entityUuid())) { absent=false;break; }

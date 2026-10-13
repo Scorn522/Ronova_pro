@@ -127,7 +127,8 @@
     "ClientPresentation$BossPacket",
     "ClientPresentation$BossDraw",
     "ClientPresentation$BossRemoval",
-    "ClientPresentation$BodyPublication"
+    "ClientPresentation$BodyPublication",
+    "ClientPresentation$StoragePublication"
   ],
   "injectors": {
     "defaultRequire": 1

@@ -1,4 +1,4 @@
-> **2026-10-13 当前主工程：`D:\桌面\ronova_GPT`。** 原生构建统一为 GNU C23 / GNU C++23，Java 17；Java ABI 49 / Native ABI 47 / Storage ABI 3 / Journal 6。C++ 存储结果与缓冲区表达已重构，完整主包构建、实际隔离事务拒绝/回滚/读回及原生控制入口检查通过。本主包尚未启动游戏世界，B 未完成。详见 [当前状态](docs/A-批验收状态.md) 和 [实际报告](validation/b-final-20261007/REPORT.md)。本地 WIP 主包位于 `distribution/candidate-b-native2023-wip-20261013`；公开同步源码和简要结果，主包与原始日志留在本地。
+> **2026-10-13 当前主工程：`D:\桌面\ronova_GPT`。** C 接续已补 Host CreateProcessA/W、文件直接传输双描述符作用域和客户端准确镜像清除/重新发布限制。GNU C23 / GNU C++23、Java 17；Java ABI 49 / Native ABI 48 / Storage ABI 3 / Journal 6。完整主包构建、Windows 子进程和实际文件传输检查通过；客户端实机与内部 sealed 目标尚未验收，完整 C 和 B 的游戏收口仍未完成。详见 [当前状态](docs/A-批验收状态.md) 和 [实际报告](validation/b-final-20261007/REPORT.md)。本地 WIP 主包位于 `distribution/candidate-c-native48-wip-20261013`；源码与摘要同步，主包及原始日志留在本地。
 
 以下 R1/R2、候选 43、旧主包与旧环境结果保留其原日期和证据范围。已有发行目录不是本轮源码对应的新游戏安装包。
 

@@ -352,6 +352,11 @@ public final class ResourceBridge {
             this.record=record;this.declaring=declaring;this.method=method;this.sources=sources;
         }
     }
+    private static final class NativeFileTransfer {
+        final Thread caller=Thread.currentThread();
+        final FileOperation source,target;
+        NativeFileTransfer(FileOperation source,FileOperation target){this.source=source;this.target=target;}
+    }
     private record DescriptorView(FileDescriptor descriptor,List<Object> streams,List<Object> channels,boolean allocated) { }
     static {
         for(Class<?> type:List.of(FileInputStream.class,FileOutputStream.class,RandomAccessFile.class))
@@ -524,6 +529,12 @@ public final class ResourceBridge {
     private static void reap(){
         for(int i=0;i<32;i++){Key key=(Key)RETIRED.poll();if(key==null)return;STREAMS.remove(key);WRAPPERS.remove(key);CHANNELS.remove(key);ATTACHMENTS.remove(key);PROCESSES.remove(key);PROCESS_VIEWS.remove(key);BUFFERS.remove(key);BUFFER_CLEANERS.remove(key);BUFFER_ACTIONS.remove(key);}
     }
+    /** STREAMS is held; descriptor publication must not link a callback under the resource lock. */
+    private static DescriptorRecord descriptorRecord(FileDescriptor descriptor){
+        Key key=new Key(descriptor,true);DescriptorRecord record=ATTACHMENTS.get(key);
+        if(record==null){record=new DescriptorRecord();ATTACHMENTS.put(key,record);}
+        return record;
+    }
     public static void descriptorAttaching(FileDescriptor descriptor)throws IOException {
         platform(FileDescriptor.class,"attach");
         synchronized(STREAMS){DescriptorRecord record=ATTACHMENTS.get(new Key(descriptor,false));
@@ -545,7 +556,7 @@ public final class ResourceBridge {
     public static void attached(FileDescriptor descriptor,Closeable stream){
         platform(FileDescriptor.class,"attach");
         synchronized(STREAMS){
-            reap();var aliases=ATTACHMENTS.computeIfAbsent(new Key(descriptor,true),ignored->new DescriptorRecord()).aliases;
+            reap();var aliases=descriptorRecord(descriptor).aliases;
             for(var alias:aliases)if(alias.get()==stream)return;
             aliases.add(new WeakReference<>(stream));
         }
@@ -595,7 +606,7 @@ public final class ResourceBridge {
     public static void descriptorOpened(FileDescriptor descriptor){
         platform(FILE_FACTORY,"open");
         synchronized(descriptor){synchronized(STREAMS){
-            reap();ATTACHMENTS.computeIfAbsent(new Key(descriptor,true),ignored->new DescriptorRecord()).allocated=true;
+            reap();descriptorRecord(descriptor).allocated=true;
         }}
     }
     public static void fileOpening(Class<?> declaring,String method)throws IOException {
@@ -614,7 +625,7 @@ public final class ResourceBridge {
         platform(FILE_CHANNEL,"<init>");
         if(!fileChannel(channel)||descriptor==null)throw new IOException("FILE_CHANNEL_ORIGINAL_DESCRIPTOR_REQUIRED");
         synchronized(descriptor){synchronized(STREAMS){
-            reap();DescriptorRecord attachment=ATTACHMENTS.computeIfAbsent(new Key(descriptor,true),ignored->new DescriptorRecord());
+            reap();DescriptorRecord attachment=descriptorRecord(descriptor);
             if(attachment.sealed)throw new IOException("RONOVA_RETIRED_FILE_DESCRIPTOR");
             Key key=new Key(channel,true);if(CHANNELS.containsKey(key))throw new IllegalStateException("FILE_CHANNEL_CONSTRUCTOR_REENTERED");
             try{ChannelRecord record=new ChannelRecord(channel,descriptor,path,parent);CHANNELS.put(key,record);attachment.channels.add(record.channel);}
@@ -657,10 +668,35 @@ public final class ResourceBridge {
     }
     private static Object nativeIoOperation(Class<?> declaring,String method,long[] arguments,Object[] references,Module[] sources)throws IOException {
         if(!NativeControl.ioOperationBoundary(declaring,method,arguments,references,sources))throw new SecurityException("ACTUAL_NATIVE_IO_OPERATION_REQUIRED");
+        if(declaring==FILE_CHANNEL&&method.equals("transferTo0"))return nativeFileTransfer(arguments,references,sources);
         return IoBridge.nativeInvoking(declaring,method,arguments,references,sources);
+    }
+    /** Direct transfer consumes both captured descriptors without calling the target's write method. */
+    private static Object nativeFileTransfer(long[] arguments,Object[] references,Module[] sources)throws IOException {
+        if(arguments.length!=4||references.length!=4||!(references[0] instanceof FileDescriptor source)
+                ||!(references[3] instanceof FileDescriptor target)||references[1]!=null||references[2]!=null)
+            throw new IOException("NATIVE_FILE_TRANSFER_DESCRIPTORS_REQUIRED");
+        if(ControlBridge.recoveryWriter())return null;
+        for(Module module:sources)if(module!=null&&ControlBridge.modStopped(module))throw new ClosedChannelException();
+        FileOperation sourceScope=null,targetScope=null;
+        try{
+            sourceScope=(FileOperation)fileOperation(source,FILE_CHANNEL,"transferTo0",sources);
+            if(target!=source)targetScope=(FileOperation)fileOperation(target,FILE_CHANNEL,"transferTo0",sources);
+            return new NativeFileTransfer(sourceScope,targetScope);
+        }catch(IOException|RuntimeException|Error failure){
+            try{if(targetScope!=null)finishFileOperation(targetScope);}catch(RuntimeException|Error cleanup){if(cleanup!=failure)failure.addSuppressed(cleanup);}
+            try{if(sourceScope!=null)finishFileOperation(sourceScope);}catch(RuntimeException|Error cleanup){if(cleanup!=failure)failure.addSuppressed(cleanup);}
+            throw failure;
+        }
     }
     private static void nativeIoFinished(Object token,boolean completed){
         if(!NativeControl.fileOperationFinishing(token))throw new SecurityException("ACTUAL_NATIVE_IO_RETURN_REQUIRED");
+        if(token instanceof NativeFileTransfer transfer){
+            if(transfer.caller!=Thread.currentThread())throw new SecurityException("ACTUAL_NATIVE_FILE_TRANSFER_SCOPE_REQUIRED");
+            if(transfer.target!=null)finishFileOperation(transfer.target);
+            if(transfer.source!=null)finishFileOperation(transfer.source);
+            return;
+        }
         IoBridge.nativeReturned(token,completed);
     }
     /** Entered only while the actual JNI binding keeps this receiver and source tuple live. */
@@ -699,7 +735,7 @@ public final class ResourceBridge {
             synchronized(STREAMS){
                 record=fileRecord(value);
                 if(record==null&&nativeSources!=null&&value instanceof FileDescriptor)
-                    record=ATTACHMENTS.computeIfAbsent(new Key(value,true),ignored->new DescriptorRecord());
+                    record=descriptorRecord((FileDescriptor)value);
                 // An unobserved endpoint still has this real call's source scope;
                 // it gains no release record or authority from that scope.
                 if(record!=null){if(record.sealed)throw new ClosedChannelException();record.observing++;}
@@ -787,7 +823,7 @@ public final class ResourceBridge {
     }
     static void sealIoDescriptor(FileDescriptor descriptor,Set<Module> modules){
         if(WALKER.getCallerClass()!=IoBridge.class)throw new SecurityException("ACTUAL_IO_RETIREMENT_REQUIRED");
-        synchronized(STREAMS){DescriptorRecord record=ATTACHMENTS.computeIfAbsent(new Key(descriptor,true),ignored->new DescriptorRecord());
+        synchronized(STREAMS){DescriptorRecord record=descriptorRecord(descriptor);
             if(record.active!=0||record.observing!=0)throw new IllegalStateException("IO_DESCRIPTOR_OPERATION_PENDING");
             if(record.unknownUse)throw new IllegalStateException("IO_DESCRIPTOR_SOURCE_UNOBSERVED");
             for(Module source:record.nativeSources)if(!modules.contains(source))throw new IllegalStateException("IO_DESCRIPTOR_SHARED");record.sealed=true;}

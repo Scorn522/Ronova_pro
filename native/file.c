@@ -59,6 +59,8 @@ static void native_file_classify(JNIEnv *env,jclass type,Binding *binding,const 
             :matched>=NATIVE_SOCKET_DISPATCHER?3
             :matched==NATIVE_FILE_DESCRIPTOR?(strcmp(name,"close0")==0?4:strcmp(name,"sync")==0?5:3)
             :matched==NATIVE_FILE_CHANNEL&&strcmp(name,"unmap0")==0?6
+            :matched==NATIVE_FILE_CHANNEL&&strcmp(name,"transferTo0")==0
+                    &&strcmp(binding->signature,"(Ljava/io/FileDescriptor;JJLjava/io/FileDescriptor;)J")==0?8
             :strcmp(name,"open0")==0?2:1;
 }
 static int native_file_prepare(JNIEnv *env){
