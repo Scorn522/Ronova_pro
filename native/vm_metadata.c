@@ -73,7 +73,7 @@ static BOOL CALLBACK code_vm_initialize(PINIT_ONCE once,PVOID parameter,PVOID *c
     (void)once;(void)context;JNIEnv *env=(JNIEnv*)parameter;JavaVM *vm=NULL;CodeVMLayout *layout=&code_vm_layout;
     if(!native_original.GetJavaVM||native_original.GetJavaVM(env,&vm)!=JNI_OK||!vm)return TRUE;
     HMODULE image=native_image((void*)native_original.GetJavaVM);
-    if(!image||native_image((void*)(*vm)->GetEnv)!=image||native_image((void*)(*native_ti)->GetBytecodes)!=image)return TRUE;
+    if(!image||native_vm_getenv_image(vm)!=image||native_image((void*)(*native_ti)->GetBytecodes)!=image)return TRUE;
     layout->image=image;
     if(!code_vm_table(&layout->fields,image,"gHotSpotVMStructs","gHotSpotVMStructEntryArrayStride","gHotSpotVMStructEntryTypeNameOffset")
             ||!code_vm_table(&layout->types,image,"gHotSpotVMTypes","gHotSpotVMTypeEntryArrayStride","gHotSpotVMTypeEntryTypeNameOffset")

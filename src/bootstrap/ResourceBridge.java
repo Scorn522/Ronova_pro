@@ -50,6 +50,8 @@ public final class ResourceBridge {
     private static final ThreadLocal<ProcessRecord> PROCESS_CLEANUP=new ThreadLocal<>();
     private static final ThreadLocal<Boolean> FILE_OBSERVING=new ThreadLocal<>();
     private static final ThreadLocal<Set<Module>> FILE_SELECTION=new ThreadLocal<>();
+    private static final ThreadLocal<FileKernelScope> FILE_KERNEL=new ThreadLocal<>();
+    private static final ThreadLocal<FileKernelCandidate> IO_KERNEL_SELECTION=new ThreadLocal<>();
     private static final Class<?> PROCESS_TYPE=platformType("java.lang.ProcessImpl"),PIPE_INPUT=platformType("java.lang.Process$PipeInputStream");
     private static final Class<?> PIPE_REDIRECT=platformType("java.lang.ProcessBuilder$RedirectPipeImpl");
     private static final Class<?> FILE_CHANNEL=platformType("sun.nio.ch.FileChannelImpl"),FILE_CLOSER=platformType("sun.nio.ch.FileChannelImpl$Closer");
@@ -129,6 +131,15 @@ public final class ResourceBridge {
         final List<WeakReference<Object>> channels=new ArrayList<>();
         final Set<Module> nativeSources=Collections.newSetFromMap(new IdentityHashMap<>());
         boolean allocated;
+        String kernelResult="HOST_KERNEL_FILE_UNSERVED";
+    }
+    private static final class FileKernelCandidate {
+        final FileDescriptor descriptor;final DescriptorRecord record;final Set<Module> selection;final Predicate<Object> selected;final List<Object> aliases;final Thread thread=Thread.currentThread();final int number;final long handle;
+        FileKernelCandidate(FileDescriptor descriptor,DescriptorRecord record,Set<Module> selection,Predicate<Object> selected,List<Object> aliases)throws IllegalAccessException{this.descriptor=descriptor;this.record=record;this.selection=selection;this.selected=selected;this.aliases=List.copyOf(aliases);this.number=FD_NUMBER.getInt(descriptor);this.handle=FD_HANDLE.getLong(descriptor);}
+    }
+    private static final class FileKernelScope {
+        final FileKernelCandidate candidate;final Module[] actualSelection;final Thread thread=Thread.currentThread();boolean closed;
+        FileKernelScope(FileKernelCandidate candidate){this.candidate=candidate;this.actualSelection=candidate.selection.toArray(Module[]::new);}
     }
     static class FileRecord {
         final java.util.concurrent.locks.ReentrantLock observation=new java.util.concurrent.locks.ReentrantLock();
@@ -874,15 +885,47 @@ public final class ResourceBridge {
         if(WALKER.getCallerClass()!=IoBridge.class)throw new SecurityException("ACTUAL_IO_DESCRIPTOR_CLOSE_REQUIRED");
         return IoBridge.closingDescriptor(descriptor)||descriptorReleaseAllowed(descriptor);
     }
+    /** STREAMS is held: the kernel sees only the same live aliases already admitted by Java retirement. */
+    private static List<Object> kernelFileAliases(DescriptorRecord record,FileDescriptor descriptor){
+        List<Object> aliases=new ArrayList<>();for(var reference:record.aliases){Object value=reference.get();if(value==null)return null;aliases.add(value);}for(var reference:record.channels){Object value=reference.get();if(value==null)return null;aliases.add(value);}
+        for(BufferStorage storage:BUFFER_ACTIONS.values())if(storage.descriptor==descriptor&&!storage.cleaned){if(storage.unknownUse||storage.active!=0||storage.observing!=0||storage.views.isEmpty())return null;for(var reference:storage.views){Buffer value=reference.get();if(value==null)return null;if(!identityContains(aliases,value))aliases.add(value);}}
+        for(Object value:IoBridge.descriptorAliases(descriptor))if(!identityContains(aliases,value))aliases.add(value);return aliases;
+    }
+    private static boolean kernelFileQualified(FileKernelCandidate candidate)throws ReflectiveOperationException,IOException{
+        if(candidate==null||candidate.thread!=Thread.currentThread()||FILE_SELECTION.get()!=candidate.selection||candidate.selection.isEmpty()||ATTACHMENTS.get(new Key(candidate.descriptor,false))!=candidate.record
+                ||candidate.record.unknownUse||candidate.record.active!=0||candidate.record.observing!=0||!candidate.descriptor.valid()||candidate.handle==0||candidate.handle==-1
+                ||FD_HANDLE.getLong(candidate.descriptor)!=candidate.handle||FD_NUMBER.getInt(candidate.descriptor)!=candidate.number)return false;
+        for(Module source:candidate.selection)if(source==null||!ControlBridge.modStopped(source))return false;for(Module source:candidate.record.nativeSources)if(source==null||!candidate.selection.contains(source))return false;
+        List<Object> aliases=kernelFileAliases(candidate.record,candidate.descriptor);if(aliases==null)return false;for(Object alias:aliases){if(!identityContains(candidate.aliases,alias)||!candidate.selected.test(alias))return false;FileRecord record=fileRecord(alias);if(record==null||record.unknownUse||record.active!=0||record.observing!=0)return false;
+            if(record instanceof StreamRecord stream&&(stream.descriptor.get()!=candidate.descriptor||stream.layout.descriptor.get(alias)!=candidate.descriptor||!Objects.equals(stream.layout.path.get(alias),stream.path)||stream.number!=candidate.number||stream.handle!=candidate.handle))return false;
+            if(record instanceof ChannelRecord channel)channelAssociation(alias,channel,candidate.descriptor);
+        }
+        for(Object alias:candidate.aliases)if(!identityContains(aliases,alias))return false;
+        Object parent=FD_PARENT.get(candidate.descriptor),peers=FD_PEERS.get(candidate.descriptor);if(parent!=null&&!identityContains(aliases,parent))return false;if(peers!=null){if(peers.getClass()!=ArrayList.class)return false;for(Object peer:(List<?>)peers)if(!identityContains(aliases,peer))return false;}
+        return true;
+    }
+    public static boolean kernelFileActive(FileDescriptor descriptor,Module[] actualSelection){
+        if(WALKER.getCallerClass()!=NativeControl.class)throw new SecurityException("ACTUAL_KERNEL_FILE_NATIVE_CALLBACK_REQUIRED");FileKernelScope scope=FILE_KERNEL.get();if(scope==null||scope.closed||scope.thread!=Thread.currentThread()||scope.candidate.descriptor!=descriptor||scope.actualSelection!=actualSelection)return false;
+        synchronized(STREAMS){try{if(actualSelection.length!=scope.candidate.selection.size()||!kernelFileQualified(scope.candidate))return false;Set<Module> distinct=Collections.newSetFromMap(new IdentityHashMap<>());for(Module source:actualSelection)if(source==null||!scope.candidate.selection.contains(source)||!distinct.add(source))return false;return true;}catch(ReflectiveOperationException|IOException|RuntimeException changed){return false;}}
+    }
+    private static void kernelFileBeforeSeal(FileKernelCandidate candidate){
+        try{if(!kernelFileQualified(candidate)){candidate.record.kernelResult="HOST_KERNEL_FILE_SCOPE_UNQUALIFIED";return;}FileKernelScope previous=FILE_KERNEL.get(),scope=new FileKernelScope(candidate);FILE_KERNEL.set(scope);
+            try{String result=NativeControl.hostKernelFile(candidate.descriptor,scope.actualSelection);candidate.record.kernelResult=result==null?"HOST_KERNEL_FILE_RESPONSE_UNAVAILABLE":result;}
+            catch(RuntimeException|LinkageError unavailable){candidate.record.kernelResult="HOST_KERNEL_FILE_UNAVAILABLE:"+unavailable.getClass().getSimpleName()+":"+String.valueOf(unavailable.getMessage());}
+            finally{scope.closed=true;if(previous==null)FILE_KERNEL.remove();else FILE_KERNEL.set(previous);}
+        }catch(ReflectiveOperationException|IOException|RuntimeException changed){candidate.record.kernelResult="HOST_KERNEL_FILE_SCOPE_UNAVAILABLE:"+changed.getClass().getSimpleName()+":"+String.valueOf(changed.getMessage());}
+    }
     static void sealIoDescriptor(FileDescriptor descriptor,Set<Module> modules){
         if(WALKER.getCallerClass()!=IoBridge.class)throw new SecurityException("ACTUAL_IO_RETIREMENT_REQUIRED");
         synchronized(STREAMS){DescriptorRecord record=descriptorRecord(descriptor);
             if(record.active!=0||record.observing!=0)throw new IllegalStateException("IO_DESCRIPTOR_OPERATION_PENDING");
             if(record.unknownUse)throw new IllegalStateException("IO_DESCRIPTOR_SOURCE_UNOBSERVED");
-            for(Module source:record.nativeSources)if(!modules.contains(source))throw new IllegalStateException("IO_DESCRIPTOR_SHARED");record.sealed=true;}
+            for(Module source:record.nativeSources)if(!modules.contains(source))throw new IllegalStateException("IO_DESCRIPTOR_SHARED");
+            FileKernelCandidate candidate=IO_KERNEL_SELECTION.get();IO_KERNEL_SELECTION.remove();if(candidate!=null&&candidate.descriptor==descriptor&&candidate.record==record&&candidate.selection==modules)kernelFileBeforeSeal(candidate);record.sealed=true;}
     }
     public static boolean ioResource(Object value){return IoBridge.resource(value);}
     static String ioDescriptorRetirement(FileDescriptor descriptor,Predicate<Object> selected,Set<Module> modules){
+        IO_KERNEL_SELECTION.remove();
         List<Object> views=new ArrayList<>();
         synchronized(STREAMS){
             DescriptorRecord record=ATTACHMENTS.get(new Key(descriptor,false));
@@ -896,6 +939,7 @@ public final class ResourceBridge {
             for(BufferStorage storage:BUFFER_ACTIONS.values())if(storage.descriptor==descriptor&&!storage.cleaned)return "IO_MAPPING_RELEASE_PENDING";
         }
         for(Object view:views)if(!selected.test(view))return "SHARED";
+        synchronized(STREAMS){DescriptorRecord record=ATTACHMENTS.get(new Key(descriptor,false));Set<Module> selection=FILE_SELECTION.get();if(record!=null&&selection==modules&&selection!=null&&ControlBridge.coreResourceCallback(selected))try{List<Object> aliases=kernelFileAliases(record,descriptor);if(aliases!=null){FileKernelCandidate candidate=new FileKernelCandidate(descriptor,record,selection,selected,aliases);if(kernelFileQualified(candidate))IO_KERNEL_SELECTION.set(candidate);}}catch(ReflectiveOperationException|IOException|RuntimeException unavailable){record.kernelResult="HOST_KERNEL_FILE_SCOPE_UNAVAILABLE:"+unavailable.getClass().getSimpleName();}}
         return "";
     }
     private static void bufferSources(BufferStorage storage,Module[] sources){
@@ -1448,6 +1492,36 @@ public final class ResourceBridge {
             uses.add(new BufferUse(buffer,view));view.observing++;view.storage.observing++;
         }else if(value instanceof Buffer[] buffers)for(Buffer buffer:buffers)if(buffer!=null)observeBufferUse(uses,buffer);
     }
+    private static final class ClientPayloadLease {
+        final BufferView view;final ByteBuffer buffer;final Thread thread=Thread.currentThread();boolean closed;
+        ClientPayloadLease(BufferView view,ByteBuffer buffer){this.view=view;this.buffer=buffer;}
+    }
+    private static void requireClientPayloadCore(){
+        Class<?> caller=WALKER.walk(ControlBridge.CORE_CALLER);
+        if(!ControlBridge.coreWriter()||!caller.getName().equals("dev.ronova.pro.ProRuntime"))throw new SecurityException("ACTUAL_CLIENT_PAYLOAD_CORE_REQUIRED");
+    }
+    /** Keep the actual observed storage alive while the core erases one recorded vertex. */
+    public static Object beginClientPayload(ByteBuffer buffer,int offset,int length){
+        requireClientPayloadCore();
+        if(buffer==null||!buffer.isDirect()||buffer.isReadOnly()||offset<0||length<=0||offset>buffer.limit()-length)
+            throw new SecurityException("ACTUAL_CLIENT_PAYLOAD_RANGE_REQUIRED");
+        synchronized(STREAMS){
+            BufferView view=BUFFERS.get(new Key(buffer,false));
+            if(view==null||!view.constructed)throw new IllegalStateException("CLIENT_PAYLOAD_STORAGE_UNOBSERVED");
+            BufferStorage storage=view.storage;
+            if(view.sealed||storage.sealed||storage.cleaned||storage.cleaning||storage.failed||storage.restoring)
+                throw new IllegalStateException("CLIENT_PAYLOAD_STORAGE_RETIRED");
+            if(offset>view.bytes-length)throw new SecurityException("ACTUAL_CLIENT_PAYLOAD_RANGE_REQUIRED");
+            ClientPayloadLease lease=new ClientPayloadLease(view,buffer);
+            view.active++;storage.active++;return lease;
+        }
+    }
+    public static void endClientPayload(Object token){
+        requireClientPayloadCore();
+        if(!(token instanceof ClientPayloadLease lease)||lease.thread!=Thread.currentThread())throw new SecurityException("ACTUAL_CLIENT_PAYLOAD_LEASE_REQUIRED");
+        synchronized(STREAMS){if(lease.closed)throw new SecurityException("CLIENT_PAYLOAD_LEASE_ALREADY_CLOSED");lease.closed=true;lease.view.active--;lease.view.storage.active--;STREAMS.notifyAll();}
+    }
+
     public static Object bufferOperation(Object receiver,Object[] arguments,Class<?> declaring,String method){
         platform(declaring,method);if(declaring!=FILE_CHANNEL&&!BufferPlatform.TYPES.contains(declaring))throw new SecurityException("ACTUAL_BUFFER_OPERATION_REQUIRED");
         if(FILE_OBSERVING.get()!=null)return null;FILE_OBSERVING.set(Boolean.TRUE);
@@ -1842,7 +1916,7 @@ public final class ResourceBridge {
         if(selected.isEmpty())throw new IllegalStateException("FILE_SOURCE_GROUP_REQUIRED");
         Set<Module> previous=FILE_SELECTION.get();FILE_SELECTION.set(selected);return previous;
     }
-    private static void restoreFileSelection(Set<Module> previous){if(previous==null)FILE_SELECTION.remove();else FILE_SELECTION.set(previous);}
+    private static void restoreFileSelection(Set<Module> previous){FileKernelCandidate candidate=IO_KERNEL_SELECTION.get();if(candidate!=null&&candidate.selection==FILE_SELECTION.get())IO_KERNEL_SELECTION.remove();if(previous==null)FILE_SELECTION.remove();else FILE_SELECTION.set(previous);}
     public static String release(Object stream,Predicate<Object> selected){
         if(!ControlBridge.recoveryWriter()||!ControlBridge.coreResourceCallback(selected))throw new SecurityException("RESOURCE_RELEASE_CORE_REQUIRED");
         try{
@@ -2003,6 +2077,8 @@ public final class ResourceBridge {
             }
             // Re-evaluate after any source publication which preceded the seal.
             for(Object value:views(view))if(!selected.test(value))return "FILE_RESOURCE_SHARED_DURING_RETIREMENT";
+            Set<Module> selection=FILE_SELECTION.get();if(selection!=null&&ControlBridge.coreResourceCallback(selected))try{List<Object> aliases=kernelFileAliases(descriptorRecord,descriptor);if(aliases!=null)kernelFileBeforeSeal(new FileKernelCandidate(descriptor,descriptorRecord,selection,selected,aliases));}
+            catch(IllegalAccessException|RuntimeException unavailable){descriptorRecord.kernelResult="HOST_KERNEL_FILE_SCOPE_UNAVAILABLE:"+unavailable.getClass().getSimpleName();}
             ATTACHMENTS.get(new Key(descriptor,false)).sealed=true;
             for(Object value:views(view)){FileRecord record=fileRecord(value);record.sealed=true;record.preserved=false;}
         }

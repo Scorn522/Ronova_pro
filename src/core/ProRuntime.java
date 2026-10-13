@@ -17,6 +17,12 @@ public final class ProRuntime implements AutoCloseable {
     private final WorldControl worldControl=new WorldControl();
     private final WorldArchive worldArchive;
     private final FieldGraph fieldGraphs=new FieldGraph(this);
+    private final PresentationRecords presentations=new PresentationRecords(this);
+    private final Queue<ServerBossEvent> pendingPresentations=new java.util.concurrent.ConcurrentLinkedQueue<>();
+    private record PresentationPublication(UUID entry,net.minecraft.network.Connection connection,Module[] sources){}
+    private volatile boolean presentationCaptureGap;
+    private final Queue<PresentationPublication> presentationPublications=new java.util.concurrent.ConcurrentLinkedQueue<>();
+    private final Map<Object,net.minecraft.network.Connection> presentationCleanupPackets=Collections.synchronizedMap(new WeakIdentityMap<>());
     private static final Map<net.minecraft.world.level.storage.DimensionDataStorage,ProRuntime> SOURCE_OWNERS=
             Collections.synchronizedMap(new IdentityHashMap<>());
     // Cross-thread policy snapshot: exact object -> published protection state. Readers never touch world state.
@@ -144,7 +150,7 @@ public final class ProRuntime implements AutoCloseable {
     List<String> groupCodeGaps(UUID id) {
         UUID root=groupMembers.getOrDefault(id,id);Subject subject=subjects.get(root);
         if(!groups.containsKey(root))return List.of();
-        List<String> gaps=new ArrayList<>();if(subject!=null)gaps.addAll(subject.unresolvedSources);
+        List<String> gaps=new ArrayList<>();if(subject!=null){gaps.addAll(subject.unresolvedSources);gaps.addAll(presentations.groupGaps(subject));}
         try {
             Class<?> agent=Class.forName("dev.ronova.pro.agent.RecoveryAgent",false,ClassLoader.getSystemClassLoader());
             synchronized(moduleSubjects) {for(var entry:moduleSubjects.entrySet())if(entry.getValue()==subject) {
@@ -206,7 +212,12 @@ public final class ProRuntime implements AutoCloseable {
                 Object instance=container.getMod();if(instance!=null&&modules.contains(instance.getClass().getModule()))recoverySources.groupCreated(instance,subject.id);
             });
         Object[] objects=(Object[])Class.forName("dev.ronova.pro.bootstrap.ControlBridge",false,null).getMethod("createdGroupObjects",Module[].class).invoke(null,(Object)modules.toArray(Module[]::new));
-        for(Object object:objects)if(!(object instanceof Entity))recoverySources.groupCreated(object,subject.id);
+        for(Object object:objects)if(!(object instanceof Entity)){
+            recoverySources.groupCreated(object,subject.id);
+            if(object instanceof ServerBossEvent event)observePresentation(event,subject);
+        }
+        Object[] hud=(Object[])Class.forName("dev.ronova.pro.bootstrap.ControlBridge",false,null).getMethod("createdPresentationObjects",Module[].class,Class.class).invoke(null,(Object)modules.toArray(Module[]::new),ServerBossEvent.class);
+        for(Object object:hud)observePresentation((ServerBossEvent)object,subject);
         Object[][] tasks=(Object[][])Class.forName("dev.ronova.pro.bootstrap.TaskBridge",false,null)
                 .getMethod("groupTaskSnapshot",Module[].class).invoke(null,(Object)modules.toArray(Module[]::new));
         for(Object[] row:tasks)recoveryTasks.groupObserved(row[0],row[1],subject.id);
@@ -268,6 +279,43 @@ public final class ProRuntime implements AutoCloseable {
     private long tick;
     private boolean coverageGap;
     private Entity removing;
+    /** Exact client retirement token; the original buffer and other vertices stay in place. */
+    public static void clearClientPayload(Object proof,java.nio.ByteBuffer storage,int offset,int length) {
+        try {
+            Class<?> bridge=Class.forName("dev.ronova.pro.bootstrap.ClientBridge",false,null);
+            if(LIFECYCLE_WALKER.getCallerClass()!=bridge)throw new SecurityException("ACTUAL_CLIENT_PAYLOAD_CALLER_REQUIRED");
+            java.lang.reflect.Method allowed=bridge.getMethod("clientPayloadAllowed",Object.class,Object.class,int.class,int.class,boolean.class);
+            Class<?> resources=Class.forName("dev.ronova.pro.bootstrap.ResourceBridge",false,null);
+            Object lease=resources.getMethod("beginClientPayload",java.nio.ByteBuffer.class,int.class,int.class).invoke(null,storage,offset,length);
+            try {
+                if(!Boolean.TRUE.equals(allowed.invoke(null,proof,storage,offset,length,false)))throw new SecurityException("ACTUAL_CLIENT_PAYLOAD_SCOPE_REQUIRED");
+                // Absolute writes preserve the original position, limit and storage identity.
+                for(int at=offset;at<offset+length;at++)storage.put(at,(byte)0);
+                if(!Boolean.TRUE.equals(allowed.invoke(null,proof,storage,offset,length,true)))throw new IllegalStateException("CLIENT_PAYLOAD_ERASE_READBACK_PENDING");
+            } finally { resources.getMethod("endClientPayload",Object.class).invoke(null,lease); }
+        } catch(ReflectiveOperationException unavailable) {throw new IllegalStateException("CLIENT_PAYLOAD_ERASE_UNAVAILABLE",unavailable);}
+    }
+    public static void clearClientSortPoint(Object proof,Object point) {
+        try {
+            Class<?> bridge=Class.forName("dev.ronova.pro.bootstrap.ClientBridge",false,null);
+            if(LIFECYCLE_WALKER.getCallerClass()!=bridge)throw new SecurityException("ACTUAL_CLIENT_SORT_CALLER_REQUIRED");
+            java.lang.reflect.Method allowed=bridge.getMethod("clientSortPointAllowed",Object.class,Object.class,boolean.class);
+            if(!Boolean.TRUE.equals(allowed.invoke(null,proof,point,false)))throw new SecurityException("ACTUAL_CLIENT_SORT_SCOPE_REQUIRED");
+            if(point==null)throw new SecurityException("ACTUAL_CLIENT_SORT_POINT_REQUIRED");
+            Class<?> type=point.getClass();
+            if(type!=Class.forName("org.joml.Vector3f",false,type.getClassLoader()))throw new SecurityException("ACTUAL_CLIENT_SORT_POINT_REQUIRED");
+            java.lang.reflect.Field[] coordinates=new java.lang.reflect.Field[3];String[] names={"x","y","z"};
+            for(int index=0;index<3;index++) {
+                java.lang.reflect.Field coordinate=type.getField(names[index]);
+                if(coordinate.getDeclaringClass()!=type||coordinate.getType()!=float.class||java.lang.reflect.Modifier.isStatic(coordinate.getModifiers())
+                        ||!java.lang.reflect.Modifier.isPublic(coordinate.getModifiers()))throw new SecurityException("ACTUAL_CLIENT_SORT_COORDINATES_REQUIRED");
+                coordinates[index]=coordinate;
+            }
+            for(java.lang.reflect.Field coordinate:coordinates)coordinate.setFloat(point,0.0f);
+            if(!Boolean.TRUE.equals(allowed.invoke(null,proof,point,true)))throw new IllegalStateException("CLIENT_SORT_ERASE_READBACK_PENDING");
+        } catch(ReflectiveOperationException unavailable) {throw new IllegalStateException("CLIENT_SORT_ERASE_UNAVAILABLE",unavailable);}
+    }
+
     private static final java.lang.StackWalker LIFECYCLE_WALKER=java.lang.StackWalker.getInstance(java.lang.StackWalker.Option.RETAIN_CLASS_REFERENCE);
     private static final class LifecyclePermit {
         final ProRuntime runtime;final Thread thread;final ServerLevel destination;final Set<Entity> entities=Collections.newSetFromMap(new IdentityHashMap<>());
@@ -899,11 +947,16 @@ public final class ProRuntime implements AutoCloseable {
         }
         return "GROUP_FAILURES="+failures+";GROUPS="+results;
     }
+    private static String hostProtection(Module module,boolean protect){
+        try{return (String)Class.forName("dev.ronova.pro.bootstrap.NativeControl",false,null).getMethod("hostKernelProtect",Module.class,boolean.class).invoke(null,module,protect);}
+        catch(ReflectiveOperationException unavailable){return "HOST_KERNEL_PROTECTION_UNAVAILABLE:"+String.valueOf(unavailable.getCause()==null?unavailable.getMessage():unavailable.getCause().getMessage());}
+    }
     private String protectResolved(LinkedHashMap<String,Module> targets) {
         Set<Module> modules=Collections.newSetFromMap(new IdentityHashMap<>());modules.addAll(targets.values());
         for(Module module:targets.values())if(stoppedModules.contains(module))
             throw new IllegalStateException("MOD_GROUP_ALREADY_STOPPED");
         protectedMods.addAll(targets.keySet());protectedModules.addAll(targets.values());
+        List<String> hostPolicies=new ArrayList<>();for(Module module:modules)hostPolicies.add(hostProtection(module,true));
         int protectedCount=0,failed=0;
         for(ServerLevel level:server.getAllLevels())for(Entity entity:level.getAllEntities())
             if(modules.contains(bodyModule(entity,modules))) {
@@ -916,7 +969,7 @@ public final class ProRuntime implements AutoCloseable {
                 if(BlockGroupPolicy.protect(this,block))blocks++;
                 else {failed++;coverageGap=true;}
             }
-        return "MODS="+protectedMods+";PROTECTED="+protectedCount+";BLOCKS="+blocks+";FAILED="+failed;
+        return "MODS="+protectedMods+";PROTECTED="+protectedCount+";BLOCKS="+blocks+";FAILED="+failed+";HOST="+hostPolicies;
     }
     private static LinkedHashMap<String,Module> selectedModules(String selection) {
         LinkedHashMap<String,Module> targets=new LinkedHashMap<>();
@@ -1278,14 +1331,16 @@ public final class ProRuntime implements AutoCloseable {
         return w.id;
     }
     public Status query(UUID id) {
-        thread(); Work w=work.get(id); if(w==null)return null;
+        thread(); Status presentation=presentations.query(id);if(presentation!=null)return presentation;
+        Work w=work.get(id); if(w==null)return null;
         // Queries project current ACK status without mutating work or runtime coverage.
         Map<String,String> obligations=new LinkedHashMap<>(w.obligations);
         obligations.put("DURABLE_INTENT",intentObligation(w));
         return new Status(w.id,w.action,w.state,w.reason,w.complete(),obligations,w.lifecycleEffects,w.recoveryScope,false);
     }
     public void cancel(UUID id) {
-        commandAction(); Work w=work.get(id); if(w==null)return;
+        commandAction();if(presentations.cancel(id)){publishPolicy();return;}
+        Work w=work.get(id); if(w==null)return;
         if(w.binding!=null && w.binding.latest==w && w.generation==w.binding.subject.generation) {
             if(w.binding.entity()!=null)revokeBound(w.binding.entity());
             else try(var gate=w.binding.subject.commitGate.enter()) {
@@ -1311,7 +1366,7 @@ public final class ProRuntime implements AutoCloseable {
         recordParticipants(w);
         if(w.executed)sendProbe(w,player);
     }
-    public List<UUID> operations() { thread(); return List.copyOf(work.keySet()); }
+    public List<UUID> operations() { thread();var ids=new ArrayList<>(work.keySet());ids.addAll(presentations.operations());return List.copyOf(ids); }
     public List<String> durableHistory() { return journal.history(); }
     public boolean recoverySettled(UUID operation) {
         thread();return recoveryChain.status(operation).contains("已知恢复链已处置");
@@ -1336,6 +1391,7 @@ public final class ProRuntime implements AutoCloseable {
     }
     public String operationSummary(UUID operation) {
         Status status=query(operation);if(status==null)return "未找到当前会话工作；历史记录可用 history 查询";
+        if(status.action().equals("PRESENTATION_CLEAR"))return status.complete()?"纯 HUD 条目已清除，当前客户端镜像已确认":"纯 HUD 条目处置中："+status.reason();
         Work w=work.get(operation);
         if(w.action.equals("PROTECT")) {
             // A real respawn/dimension handoff retires the old operation, not the player's continued policy.
@@ -1353,7 +1409,7 @@ public final class ProRuntime implements AutoCloseable {
         String recovery=w.action.equals("CLEAR")?(recoverySettled(operation)?"；已知恢复链已处置":"；恢复源仍待处理"):"";
         return body+recovery+(status.complete()?"":"；"+status.state()+(status.reason().isEmpty()?"":"："+status.reason()));
     }
-    public String presentationSupport() { return "UNSUPPORTED_PRODUCTION_PURE_PRESENTATION_OWNER_ADAPTER_REQUIRED"; }
+    public String presentationSupport() { return "ACTUAL_SERVER_BOSS_EVENT_GROUP_OWNER_AND_SCOPED_CLIENT_HUD;OTHER_PRESENTATION_OWNER_ADAPTER_REQUIRED"; }
     /** Reconcile the scoped client mirrors from immutable entity addresses. */
     private void publishPolicy() {
         if(closing)return;
@@ -1471,6 +1527,7 @@ public final class ProRuntime implements AutoCloseable {
         }
         for(var entry:retiredHudSubjects.entrySet())if(entry.getKey().dimension().equals(state.dimension)&&entry.getValue().terminal)
             desired.putIfAbsent(entry.getKey().id(),2);
+        presentations.policies(player,desired);
         Set<UUID> ids=new HashSet<>(state.hudSent.keySet());ids.addAll(desired.keySet());
         for(UUID id:ids) {
             int mode=desired.getOrDefault(id,0);if(Objects.equals(state.hudSent.get(id),mode))continue;
@@ -1647,11 +1704,101 @@ public final class ProRuntime implements AutoCloseable {
         }
         publishPolicy(player,true);
     }
-    /** Pure presentation without an installed owner adapter is reported, never fabricated into an Entity duty. */
+    /** A UUID selects only an actual previously observed owner/slot pair. */
     public UUID clearPresentation(UUID owner,UUID entry) {
         thread();Objects.requireNonNull(owner);Objects.requireNonNull(entry);
-        coverageGap=true;
-        return null;
+        Subject authority=canonicalSubject(owner);UUID actual=authority==null?owner:authority.id;
+        if(!presentations.bound(actual,entry))throw new UnsupportedOperationException("PRESENTATION_OWNER_ADAPTER_REQUIRED_FOR_ACTUAL_ENTRY");
+        commandAction();if(closing)throw new IllegalStateException("RUNTIME_CLOSING");
+        UUID operation=presentations.clear(actual,entry);publishPolicy();return operation;
+    }
+    private static final class PresentationFields {
+        static final java.lang.reflect.Field PLAYERS,VISIBLE,ID,PACKET_ID;
+        static{
+            try{
+                Class<?> agent=Class.forName("dev.ronova.pro.agent.RecoveryAgent",false,ClassLoader.getSystemClassLoader());
+                agent.getMethod("openBackingAccess",Class.class,Class[].class).invoke(null,ProRuntime.class,(Object)new Class<?>[]{ServerBossEvent.class,net.minecraft.world.BossEvent.class,net.minecraft.network.protocol.game.ClientboundBossEventPacket.class});
+                PLAYERS=field(ServerBossEvent.class,"players","f_8296_",Set.class);VISIBLE=field(ServerBossEvent.class,"visible","f_8298_",boolean.class);ID=field(net.minecraft.world.BossEvent.class,"id","f_18847_",UUID.class);PACKET_ID=field(net.minecraft.network.protocol.game.ClientboundBossEventPacket.class,"id","f_131750_",UUID.class);
+            }catch(ReflectiveOperationException unavailable){throw new ExceptionInInitializerError(unavailable);}
+        }
+        private static java.lang.reflect.Field field(Class<?> type,String official,String srg,Class<?> expected)throws ReflectiveOperationException{
+            java.lang.reflect.Field field;try{field=type.getDeclaredField(official);}catch(NoSuchFieldException missing){field=type.getDeclaredField(srg);}
+            if(field.getType()!=expected||java.lang.reflect.Modifier.isStatic(field.getModifiers())||!field.trySetAccessible())throw new IllegalStateException("ACTUAL_PRESENTATION_FIELD_CHANGED");return field;
+        }
+    }
+    UUID presentationId(ServerBossEvent event){try{return (UUID)PresentationFields.ID.get(event);}catch(IllegalAccessException unavailable){throw new IllegalStateException(unavailable);}}
+    @SuppressWarnings("unchecked") Set<ServerPlayer> presentationPlayers(ServerBossEvent event){
+        try{Object value=PresentationFields.PLAYERS.get(event);if(value==null||value.getClass()!=HashSet.class)throw new IllegalStateException("PRESENTATION_ORIGINAL_PLAYER_CONTAINER_CHANGED");return (Set<ServerPlayer>)value;}
+        catch(IllegalAccessException unavailable){throw new IllegalStateException(unavailable);}
+    }
+    boolean presentationVisible(ServerBossEvent event){try{return PresentationFields.VISIBLE.getBoolean(event);}catch(IllegalAccessException unavailable){throw new IllegalStateException(unavailable);}}
+    boolean presentationClear(ServerBossEvent event,Set<ServerPlayer> players,UUID entry,boolean publicationKnown){
+        if(LIFECYCLE_WALKER.getCallerClass()!=PresentationRecords.class)throw new SecurityException("ACTUAL_PRESENTATION_RECORDS_REQUIRED");thread();
+        if(presentationPlayers(event)!=players||!presentationId(event).equals(entry))throw new IllegalStateException("PRESENTATION_ACTUAL_SLOT_CHANGED");
+        for(ServerPlayer player:List.copyOf(players))if(player.server!=server)throw new IllegalStateException("PRESENTATION_SHARED_SERVER");
+        // Send only through each player's real current connection. Old disconnected viewers stay required and unknown.
+        if(publicationKnown)for(ServerPlayer player:List.copyOf(players))if(server.getPlayerList().getPlayer(player.getUUID())==player&&player.connection!=null&&player.connection.player==player&&player.connection.connection.isConnected()){
+            var packet=net.minecraft.network.protocol.game.ClientboundBossEventPacket.createRemovePacket(entry);presentationCleanupPackets.put(packet,player.connection.connection);
+            player.connection.send(packet);
+        }
+        try(var gate=FieldPolicyGate.enter(event)){
+            if(presentationPlayers(event)!=players||!presentationId(event).equals(entry))throw new IllegalStateException("PRESENTATION_ACTUAL_SLOT_CHANGED");
+            boolean visible=presentationVisible(event);
+            if(visible){Class<?> nativeControl=Class.forName("dev.ronova.pro.bootstrap.NativeControl",false,null);
+                if(!Boolean.TRUE.equals(nativeControl.getMethod("restoreRecoveredField",java.lang.reflect.Field.class,Object.class,Object.class,Object.class).invoke(null,PresentationFields.VISIBLE,event,Boolean.TRUE,Boolean.FALSE)))throw new IllegalStateException("PRESENTATION_VISIBILITY_WRITE_REFUSED");}
+            players.clear();return !presentationVisible(event)&&players.isEmpty();
+        }catch(ReflectiveOperationException unavailable){throw new IllegalStateException("PRESENTATION_ORIGINAL_SLOT_CLEAR_UNAVAILABLE",unavailable);}
+    }
+    Subject presentationSubject(ServerBossEvent event){
+        try{
+            Module[] sources=(Module[])Class.forName("dev.ronova.pro.bootstrap.ControlBridge",false,null).getMethod("presentationSources",Object.class,Class.class).invoke(null,event,ServerBossEvent.class);
+            if(sources==null||sources.length==0)return null;
+            Subject owner=null;for(Module source:sources){Subject next=moduleSubjects.get(source);if(next==null||owner!=null&&next!=owner)return null;owner=next;}
+            return owner;
+        }catch(ReflectiveOperationException unavailable){return null;}
+    }
+    private void observePresentation(ServerBossEvent event,Subject expected){
+        if(presentationSubject(event)!=expected){expected.unresolvedSources.add("PURE_PRESENTATION_OWNERSHIP_UNRESOLVED");return;}
+        try{presentations.observe(event,expected);}
+        catch(RuntimeException|LinkageError failure){expected.unresolvedSources.add("PURE_PRESENTATION:"+failure.getClass().getSimpleName());}
+    }
+    void presentationControls(Object... controls){
+        if(LIFECYCLE_WALKER.getCallerClass()!=PresentationRecords.class)throw new SecurityException("ACTUAL_PRESENTATION_RECORDS_REQUIRED");
+        try{Class.forName("dev.ronova.pro.bootstrap.ControlBridge",false,null).getMethod("registerControlObjects",Class.class,Object[].class).invoke(null,ProRuntime.class,controls);}
+        catch(ReflectiveOperationException unavailable){throw new IllegalStateException("PRESENTATION_CONTROL_UNAVAILABLE",unavailable);}
+    }
+    public static void presentationPacketObserved(net.minecraft.network.Connection connection,net.minecraft.network.protocol.Packet<?> packet){
+        if(LIFECYCLE_WALKER.getCallerClass()!=net.minecraft.network.Connection.class||!(packet instanceof net.minecraft.network.protocol.game.ClientboundBossEventPacket))return;
+        try{
+            UUID entry=(UUID)PresentationFields.PACKET_ID.get(packet);Module[] sources=null;
+            try{sources=(Module[])Class.forName("dev.ronova.pro.bootstrap.ControlBridge",false,null).getMethod("presentationSources",Object.class,Class.class).invoke(null,packet,net.minecraft.network.protocol.game.ClientboundBossEventPacket.class);}
+            catch(ReflectiveOperationException|RuntimeException unavailable){/* The actual entry is retained with unresolved sources. */}
+            for(ProRuntime runtime:sourceRuntimes())if(!runtime.closing&&runtime.presentationCleanupPackets.get(packet)!=connection)
+                runtime.presentationPublications.add(new PresentationPublication(entry,connection,sources==null?null:sources.clone()));
+        }catch(ReflectiveOperationException|RuntimeException unavailable){for(ProRuntime runtime:sourceRuntimes())if(!runtime.closing){runtime.presentationCaptureGap=true;runtime.coverageGap=true;}}
+    }
+    boolean presentationPublicationPending(){return presentationCaptureGap||!presentationPublications.isEmpty();}
+    boolean presentationPublicationOwned(Module[] sources,Subject owner){
+        if(sources==null||sources.length==0)return false;for(Module source:sources)if(moduleSubjects.get(source)!=owner)return false;return true;
+    }
+    boolean presentationTerminal(ServerPlayer player,UUID entry){ClientPolicy state=player==null||player.connection==null?null:clientPolicies.get(player.connection);return state!=null&&state.active&&Objects.equals(state.hudSent.get(entry),2);}
+    long presentationTick(){return Integer.toUnsignedLong(server.getTickCount());}
+    long presentationScope(ServerPlayer player){
+        if(player==null||player.server!=server||server.getPlayerList().getPlayer(player.getUUID())!=player||player.connection==null)return -1;
+        ClientPolicy state=clientPolicies.get(player.connection);
+        return state!=null&&state.active&&state.dimension.equals(player.serverLevel().dimension().location().toString())?state.scope:-1;
+    }
+    public void presentationReply(ServerPlayer player,ProNetwork.PresentationReply reply){
+        if(LIFECYCLE_WALKER.getCallerClass()!=ProNetwork.class)throw new SecurityException("ACTUAL_PRESENTATION_NETWORK_REPLY_REQUIRED");
+        thread();if(!closing&&player!=null&&player.server==server)presentations.reply(player,reply,tick);
+    }
+    public static boolean presentationPublicationDenied(ServerBossEvent event){
+        if(LIFECYCLE_WALKER.getCallerClass()!=ServerBossEvent.class)return false;
+        for(ProRuntime runtime:sourceRuntimes())if(!runtime.closing){
+            if(runtime.server.isSameThread()&&runtime.presentations.denied(event))return true;
+            Subject owner=runtime.presentationSubject(event);if(owner!=null&&owner.terminal)return true;
+        }
+        return false;
     }
     public List<String> historicalOperation(UUID id) {
         thread();String needle="\t"+id+"\t";
@@ -1690,7 +1837,16 @@ public final class ProRuntime implements AutoCloseable {
         for(Group group:groups.values())group.facts.replaceAll((record,ack)->journal.retryRejected(record,ack));
         for(Entity entity:List.copyOf(pendingGroupAdoptions))try {adoptGroupBody(entity);}
         catch(RuntimeException|LinkageError unavailable) {coverageGap=true;}
+        for(PresentationPublication publication;(publication=presentationPublications.poll())!=null;){
+            ServerPlayer recipient=null;boolean shared=false;
+            for(ServerPlayer player:server.getPlayerList().getPlayers())if(player.server==server&&player.connection!=null&&player.connection.player==player&&player.connection.connection==publication.connection()){
+                if(recipient!=null&&recipient!=player){shared=true;break;}recipient=player;
+            }
+            presentations.published(publication.entry(),publication.connection(),shared?null:recipient,publication.sources());
+        }
+        for(ServerBossEvent event;(event=pendingPresentations.poll())!=null;){Subject owner=presentationSubject(event);if(owner!=null&&owner.terminal)observePresentation(event,owner);}
         publishPolicy();
+        presentations.tick(tick);
         recoverySources.maintainResources();
         for(var entry:groups.entrySet()) {
             Subject group=subjects.get(entry.getKey());if(group==null||!group.terminal)continue;
@@ -2411,7 +2567,7 @@ public final class ProRuntime implements AutoCloseable {
             Class.forName(SourceMaps.class.getName(),true,ProRuntime.class.getClassLoader());
             Class.forName(BackingPolicy.class.getName(),true,ProRuntime.class.getClassLoader());
             Class<?> bridge=Class.forName("dev.ronova.pro.bootstrap.TaskBridge",false,null);
-            if(!Integer.valueOf(52).equals(bridge.getMethod("abiVersion").invoke(null)))throw new IllegalStateException("INDEX_BRIDGE_ABI_MISMATCH");
+            if(!Integer.valueOf(54).equals(bridge.getMethod("abiVersion").invoke(null)))throw new IllegalStateException("INDEX_BRIDGE_ABI_MISMATCH");
             var lookup=java.lang.invoke.MethodHandles.lookup();
             var field=lookup.findStatic(ProRuntime.class,"preventFieldWrite",java.lang.invoke.MethodType.methodType(boolean.class,Object.class,Class.class,String.class,Object.class));
             var dispatch=lookup.findStatic(ProRuntime.class,"preventDispatch",java.lang.invoke.MethodType.methodType(boolean.class,Object.class,String.class,Object.class));
@@ -2454,6 +2610,7 @@ public final class ProRuntime implements AutoCloseable {
             productionControlsInstalled=Boolean.TRUE.equals(agent.getMethod("dispatchReady").invoke(null))
                     &&indexGuardState.startsWith("INSTALLED")
                     &&Boolean.TRUE.equals(agent.getMethod("controlReady").invoke(null));
+            for(ProRuntime runtime:sourceRuntimes())for(Module module:runtime.protectedModules)hostProtection(module,true);
         } catch(ReflectiveOperationException|RuntimeException|LinkageError unavailable) {
             productionControlsInstalled=false;
             Throwable cause=unavailable;
@@ -2630,6 +2787,7 @@ public final class ProRuntime implements AutoCloseable {
             for(ProRuntime runtime:sourceRuntimes())if(!runtime.closing) {
                 Subject group=runtime.groupSubject(object);
                 if(group!=null&&group.terminal&&!(object instanceof Entity))runtime.recoverySources.groupCreated(object,group.id);
+                if(object instanceof ServerBossEvent event){Subject hud=runtime.presentationSubject(event);if(hud!=null&&hud.terminal)runtime.pendingPresentations.add(event);}
             }
             if(!(object instanceof Entity entity))return;
             RecoveryTasks.constructed(entity,((Access.EntityState)entity).pro$level());
@@ -2824,6 +2982,7 @@ public final class ProRuntime implements AutoCloseable {
     @Override public void close() throws IOException {
         lifecycleAction("stopped");
         closing=true;
+        for(Module module:protectedModules)if(sourceRuntimes().stream().noneMatch(runtime->runtime!=this&&runtime.modProtected(module)))hostProtection(module,false);
         worldArchive.close();
         fieldGraphs.close();
         recoverySources.beginStop();
@@ -2841,6 +3000,7 @@ public final class ProRuntime implements AutoCloseable {
         if(pending!=null)throw pending;
         journal.close();
         synchronized(SOURCE_OWNERS) { SOURCE_OWNERS.entrySet().removeIf(entry->entry.getValue()==this); }
+        presentations.close();pendingPresentations.clear();presentationPublications.clear();presentationCleanupPackets.clear();
         bindings.clear();saved.clear();work.clear();clientPolicies.clear();
     }
 }

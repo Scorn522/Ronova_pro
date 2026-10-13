@@ -261,6 +261,38 @@ final class ExternalCodeImages {
             }
         }catch(ReflectiveOperationException failure){throw new IllegalStateException("ACTUAL_TREE_COPY_IDENTITIES_UNAVAILABLE",failure);}
     }
+    /** Opaque native callbacks replace complete changed bodies; untouched bodies keep the exact input history. */
+    static synchronized void nativeEncoded(ClassLoader loader,String name,byte[] original,byte[] bytes,Module[] writers){
+        if(ControlImages.sameBytes(canonical(original),canonical(bytes)))return;
+        Encoded prior=selected(loader,name,original);
+        Snapshot before=prior==null?nativeSnapshot(original,null):prior.snapshot();
+        Snapshot after=nativeSnapshot(bytes,before);
+        List<Patch> patches=new ArrayList<>();if(prior!=null)patches.addAll(prior.patches());
+        Module[] actual=writers.clone();patches.add(new Patch(actual,before,after,actual));
+        Encoded image=new Encoded(new Ref<>(loader),loader==null,name,hash(canonical(bytes)),after,List.copyOf(patches));
+        ENCODED.removeIf(value->!value.bootstrap()&&value.loader().get()==null);ENCODED.add(image);
+        protect(image,image.digest(),actual,before,after,patches);
+    }
+    private static byte[] nativeMethodImage(MethodNode method){
+        ClassNode node=new ClassNode();node.version=Opcodes.V17;node.access=Opcodes.ACC_PUBLIC;node.name="NativeCallbackBody";node.superName="java/lang/Object";node.methods.add(copyMethod(method));
+        ClassWriter writer=new ClassWriter(0);node.accept(writer);return writer.toByteArray();
+    }
+    private static Snapshot nativeSnapshot(byte[] bytes,Snapshot previous){
+        ClassNode node=new ClassNode();new ClassReader(bytes).accept(node,ClassReader.SKIP_DEBUG|ClassReader.SKIP_FRAMES);
+        Map<String,Body> bodies=new TreeMap<>();
+        for(MethodNode method:node.methods){
+            String key=method.name+method.desc;Body prior=previous==null?null:previous.methods().get(key);
+            if(prior!=null&&ControlImages.sameBytes(canonical(nativeMethodImage(prior.method())),canonical(nativeMethodImage(method)))){bodies.put(key,prior);continue;}
+            IdentityHashMap<AbstractInsnNode,Long> identities=new IdentityHashMap<>();
+            for(AbstractInsnNode instruction:method.instructions.toArray())if(instruction.getOpcode()>=0)identities.put(instruction,++sequence);
+            IdentityHashMap<LabelNode,Long> labels=new IdentityHashMap<>();long next=0;
+            for(AbstractInsnNode instruction=method.instructions.getLast();instruction!=null;instruction=instruction.getPrevious())if(instruction.getOpcode()>=0)next=identities.get(instruction);else if(instruction instanceof LabelNode label)labels.put(label,next);
+            List<Instruction> instructions=new ArrayList<>();for(AbstractInsnNode instruction:method.instructions.toArray())if(instruction.getOpcode()>=0)instructions.add(new Instruction(identities.get(instruction),instruction,content(instruction,labels),labels));
+            List<Handler> handlers=new ArrayList<>();for(TryCatchBlockNode handler:method.tryCatchBlocks)handlers.add(new Handler(++sequence,labels.get(handler.start),labels.get(handler.end),labels.get(handler.handler),handler.type));
+            bodies.put(key,new Body(method,List.copyOf(instructions),List.copyOf(handlers)));
+        }
+        return new Snapshot(bytes.clone(),node,Map.copyOf(bodies));
+    }
     static synchronized Module[] encoded(Object writer,byte[] bytes){
         History history=WRITERS.get(new Key(writer,false));if(history==null||history.patches.isEmpty())return new Module[0];
         Module module=history.module.get();if(module==null)return new Module[0];

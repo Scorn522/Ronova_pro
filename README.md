@@ -1,4 +1,4 @@
-> **2026-10-13 当前主工程：`D:\桌面\ronova_GPT`。** C 已接入 JNI_OnLoad 前 Host、Net.accept、存量 UI、实际 HUD 注册条目，并修复 LWJGL 初始化/字体切片及图像 SRG 兼容。GNU C23 / GNU C++23、Java 17；Java ABI 52 / Native ABI 49 / Storage ABI 3 / Journal 6。本包构建和真实SRG图像构造/关闭检查通过；第四次隔离客户端正在加载，HUD退役/UI停组/内部 sealed 目标及完整 C/B 游戏收口尚未验收。详见 [当前状态](docs/A-批验收状态.md) 和 [实际报告](validation/b-final-20261007/REPORT.md)。本地候选在 `distribution/candidate-c-java52-native49-wip-20261013`；主包与原始日志留在本地。
+> **2026-10-13 当前主工程：`D:\桌面\ronova_GPT`。** 当前主源 Java ABI 54 / Native ABI 51 / Storage ABI 3 / Journal 6；用户态 GNU C23 / GNU C++23、Java 17，内核项目 WDK C17。JVMTI、Host、CPU/GPU、音频和纯 HUD 已接线；自编驱动源码及客户端已集成，本机无 WDK/MSVC，驱动未编译、加载或签名，签名与 altitude 待部署。用户态主包与既有夹具统一构建 PASS（39秒），真实 Native51 Host/JVMTI 入口检查退出0；第五次旧客户端仍在资源/字体加载，没有最新 54/51 菜单或世界结果。旧 53/50 Host/JVMTI PASS 与 run5 不替代最新 54/51 游戏收口，C/B 仍未完成。基础协议 `r3-client-7`。详见 [当前状态](docs/A-批验收状态.md) 和 [实际报告](validation/b-final-20261007/REPORT.md)。候选目标目录 `distribution/candidate-c-java54-native51-wip-20261013`；主包与原始日志留在本地。
 
 以下 R1/R2、候选 43、旧主包与旧环境结果保留其原日期和证据范围。已有发行目录不是本轮源码对应的新游戏安装包。
 
@@ -86,7 +86,7 @@ allow_remote_stop=target_mod_a,target_mod_b
 
 `stop` 在目标 Mod 类加载前建立整组方法、构造／静态入口及事件控制；`protect` 在当前和后续实体、方块实体上建立防护。`allow_remote_stop` 是多人游戏客户端允许当前服务器请求停用的本地 Mod 列表，不会在启动时直接停用它们。运行中可用 `/ronova_pro mod stop modid1,modid2 [returns=策略]`、`/ronova_pro mod protect modid` 和 `/ronova_pro mod status [modid1,modid2]`。实际覆盖和未决路径见 [A 批状态](docs/A-批验收状态.md)。单纯把 JAR 放进 `mods` 不能在游戏 JVM 创建前运行前置入口。
 
-选择同一实际 Module 内的一个 Mod 会纳入该模块的其他 `[[mods]]` 所有者，结果会列出完整作用组。多人客户端必须在本地 `allow_remote_stop` 中允许该组的每个 modid。客户端与服务端需使用本轮同版本主包，基础同步协议为 `r3-client-5`。
+选择同一实际 Module 内的一个 Mod 会纳入该模块的其他 `[[mods]]` 所有者，结果会列出完整作用组。多人客户端必须在本地 `allow_remote_stop` 中允许该组的每个 modid。客户端与服务端需使用本轮同版本主包，基础同步协议为 `r3-client-7`。
 
 `returns` 支持以下策略；启动配置与运行命令使用相同名称。所有策略都跳过目标普通业务方法，void 直接结束，基本类型默认返回零值。
 

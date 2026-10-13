@@ -16,6 +16,7 @@ public final class ClientBridge {
     private static final Map<Key,Module[]> FAILURES=new HashMap<>();
     private static final Map<Key,SoundRegistry> SOUNDS=new HashMap<>();
     private static final Map<Key,SoundStop> SOUND_STOPS=new HashMap<>();
+    private static final ThreadLocal<SoundRelease> SOUND_RELEASING=new ThreadLocal<>();
     private static final Map<Key,Ref<Collection<?>>> RELOAD_LISTENERS=new HashMap<>();
     private static final Map<Key,ReloadWork> RELOAD_WORK=new HashMap<>();
     private static final Map<Key,UiFields> UI_OWNERS=new HashMap<>();
@@ -45,7 +46,7 @@ public final class ClientBridge {
     private record Role(String name,Ref<ClassLoader> loader,Ref<Module> module){}
     private record TextureRegistry(Class<?> type,Ref<Map<?,?>> map,Map<Object,Texture> entries){}
     private record Texture(Ref<Object> object,Module[] modules){}
-    private record SoundRegistry(Ref<Map<?,?>> instances){}
+    private record SoundRegistry(Ref<Map<?,?>> instances,Ref<Collection<?>> listeners){}
     private record ReloadWork(java.util.concurrent.CompletableFuture<?> future,Module[] modules){}
     private static final class OverlayFields {
         final Class<?> type,named,event;final Field list,map,id,callback,eventMap,eventOrder;final Method listCopy,mapCopy;
@@ -90,8 +91,8 @@ public final class ClientBridge {
     private static final class UiFields {
         final Class<?> type;final Field instance,thread,screen,overlay;final Method setScreen,setOverlay;
         UiFields(Class<?> type)throws ReflectiveOperationException{
-            this.type=type;instance=uiField(type,"instance","f_90981_");thread=uiField(type,"gameThread","f_91018_");
-            screen=uiField(type,"screen","f_91080_");overlay=uiField(type,"overlay","f_91081_");
+            this.type=type;instance=uiField(type,"instance","f_90981_","Lnet/minecraft/client/Minecraft;",true);thread=uiField(type,"gameThread","f_91018_","Ljava/lang/Thread;",false);
+            screen=uiField(type,"screen","f_91080_","Lnet/minecraft/client/gui/screens/Screen;",false);overlay=uiField(type,"overlay","f_91081_","Lnet/minecraft/client/gui/screens/Overlay;",false);
             if(instance.getType()!=type||!Modifier.isStatic(instance.getModifiers())||thread.getType()!=Thread.class
                     ||!screen.getType().getName().equals("net.minecraft.client.gui.screens.Screen")
                     ||!overlay.getType().getName().equals("net.minecraft.client.gui.screens.Overlay"))throw new IllegalStateException("CLIENT_UI_FIELD_TYPES_CHANGED");
@@ -110,8 +111,12 @@ public final class ClientBridge {
     }
     private static final class SoundStop {
         final Object handle,channel,access;final Class<?> handleType,channelType,accessType;final Module[] modules;
-        final java.util.concurrent.atomic.AtomicBoolean stopped=new java.util.concurrent.atomic.AtomicBoolean();boolean requested;volatile String pending="";
-        SoundStop(Object handle,Object channel,Object access,Class<?> handleType,Class<?> channelType,Class<?> accessType,Module[] modules){this.handle=handle;this.channel=channel;this.access=access;this.handleType=handleType;this.channelType=channelType;this.accessType=accessType;this.modules=modules;}
+        final int source;final Object initialized,library;final Class<?> libraryType;final long context;final java.util.concurrent.atomic.AtomicBoolean stopped=new java.util.concurrent.atomic.AtomicBoolean(),deleted=new java.util.concurrent.atomic.AtomicBoolean(),requested=new java.util.concurrent.atomic.AtomicBoolean();volatile boolean shared;volatile String pending="";
+        SoundStop(Object handle,Object channel,Object access,Class<?> handleType,Class<?> channelType,Class<?> accessType,Module[] modules,int source,Object initialized,boolean shared,Object library,Class<?> libraryType,long context){this.handle=handle;this.channel=channel;this.access=access;this.handleType=handleType;this.channelType=channelType;this.accessType=accessType;this.modules=modules;this.source=source;this.initialized=initialized;this.shared=shared;this.library=library;this.libraryType=libraryType;this.context=context;}
+    }
+    private static final class SoundRelease {
+        final SoundStop stop;final SoundRelease previous=SOUND_RELEASING.get();final Thread thread=Thread.currentThread();boolean ended;
+        SoundRelease(SoundStop stop){this.stop=stop;}
     }
     private static final class ImageRecord {
         final long pointer,size;final java.util.concurrent.locks.ReentrantLock gate=new java.util.concurrent.locks.ReentrantLock();
@@ -168,14 +173,26 @@ public final class ClientBridge {
     private static Module[] sources(Object object){Module[] real=origins(object);synchronized(SOURCES){return union(real,SOURCES.get(new Key(object,false)));}}
     private static void record(Object object,Module[] modules){if(object==null)return;synchronized(SOURCES){reap();Module[] sources=union(SOURCES.get(new Key(object,false)),modules);if(sources.length!=0){SOURCES.put(new Key(object,true),sources);CodeSourceBridge.contributionControl(sources);}}}
     public static boolean allowed(Object contribution){boundary();return !stopped(sources(contribution))&&!ControlBridge.stoppedEffects();}
-    private static Field uiField(Class<?> type,String named,String installed)throws ReflectiveOperationException{
-        Field result;try{result=type.getDeclaredField(named);}catch(NoSuchFieldException production){result=type.getDeclaredField(installed);}result.setAccessible(true);return result;
+    private static Field uiField(Class<?> type,String named,String installed,String descriptor,boolean staticMember)throws ReflectiveOperationException{
+        Field result;try{result=type.getDeclaredField(named);}catch(NoSuchFieldException production){result=type.getDeclaredField(installed);}
+        if(Modifier.isStatic(result.getModifiers())!=staticMember||!result.getType().descriptorString().equals(descriptor))throw new IllegalStateException("CLIENT_UI_FIELD_TYPES_CHANGED");result.setAccessible(true);return result;
+    }
+    private static boolean clientMember(StackWalker.StackFrame frame,String type,String named,String installed,String descriptor){
+        return frame.getDeclaringClass().getName().equals(type)&&(frame.getMethodName().equals(named)||frame.getMethodName().equals(installed))&&frame.getDescriptor().equals(descriptor);
+    }
+    private static Method clientMethod(Class<?> type,String named,String installed,String descriptor)throws ReflectiveOperationException{
+        return clientMethod(type,named,installed,descriptor,new Class<?>[0]);
+    }
+    private static Method clientMethod(Class<?> type,String named,String installed,String descriptor,Class<?>...parameters)throws ReflectiveOperationException{
+        Method result;try{result=type.getDeclaredMethod(named,parameters);}catch(NoSuchMethodException production){result=type.getDeclaredMethod(installed,parameters);}
+        if(Modifier.isStatic(result.getModifiers())||!java.lang.invoke.MethodType.methodType(result.getReturnType(),result.getParameterTypes()).descriptorString().equals(descriptor))throw new IllegalStateException("CLIENT_METHOD_LAYOUT_CHANGED:"+type.getName()+"#"+named);
+        result.setAccessible(true);return result;
     }
     private static Method uiSetter(Class<?> type,String named,String installed,Class<?> parameter)throws ReflectiveOperationException{
         Method result;try{result=type.getDeclaredMethod(named,parameter);}catch(NoSuchMethodException production){result=type.getDeclaredMethod(installed,parameter);}
         if(Modifier.isStatic(result.getModifiers())||result.getReturnType()!=void.class)throw new IllegalStateException("CLIENT_UI_SETTER_CHANGED");return result;
     }
-    private static boolean screenSetter(StackWalker.StackFrame frame){return Set.of("setScreen","m_91152_").contains(frame.getMethodName());}
+    private static boolean screenSetter(StackWalker.StackFrame frame){return clientMember(frame,"net.minecraft.client.Minecraft","setScreen","m_91152_","(Lnet/minecraft/client/gui/screens/Screen;)V");}
     private static UiFields uiOwner(Object owner,StackWalker.StackFrame frame)throws ReflectiveOperationException{
         Class<?> type=frame.getDeclaringClass();
         if(!type.getName().equals("net.minecraft.client.Minecraft")||owner==null||owner.getClass()!=type)throw new SecurityException("ACTUAL_MINECRAFT_UI_OWNER_REQUIRED");
@@ -187,7 +204,7 @@ public final class ClientBridge {
         UI_LOG.log(System.Logger.Level.WARNING,"CLIENT_PRESENTATION_LIFECYCLE_PENDING",failure);
     }
     public static Object presentationEntering(Object owner,Object input){
-        var frame=boundary();if(!screenSetter(frame)&&!Set.of("setOverlay","m_91150_").contains(frame.getMethodName()))throw new SecurityException("ACTUAL_UI_SETTER_REQUIRED");
+        var frame=boundary();if(!screenSetter(frame)&&!clientMember(frame,"net.minecraft.client.Minecraft","setOverlay","m_91150_","(Lnet/minecraft/client/gui/screens/Overlay;)V"))throw new SecurityException("ACTUAL_UI_SETTER_REQUIRED");
         Module[] modules=union(origins(input),ControlBridge.invokingSources(),currentSources());record(input,modules);
         if(stopped(sources(input))||ControlBridge.stoppedEffects())return Boolean.FALSE;
         try{
@@ -215,7 +232,7 @@ public final class ClientBridge {
         var frame=boundary();if(token==null)return;UiCall call=uiCall(token,frame);if(call.ended)return;call.ended=true;
     }
     public static void presentationMaintenance(Object owner){
-        var frame=boundary();if(!Set.of("runTick","m_91383_").contains(frame.getMethodName()))throw new SecurityException("ACTUAL_CLIENT_FRAME_REQUIRED");
+        var frame=boundary();if(!clientMember(frame,"net.minecraft.client.Minecraft","runTick","m_91383_","(Z)V"))throw new SecurityException("ACTUAL_CLIENT_FRAME_REQUIRED");
         UiFields fields;
         try{
             fields=uiOwner(owner,frame);if(fields.thread.get(owner)!=Thread.currentThread())throw new IllegalStateException("CLIENT_UI_MAIN_THREAD_REQUIRED");
@@ -408,24 +425,24 @@ public final class ClientBridge {
     }
     static boolean stoppedSource(){return stopped(currentSources());}
     public static boolean particleAdmitted(Object particle){
-        var frame=boundary();if(!frame.getMethodName().equals("add"))throw new SecurityException("ACTUAL_PARTICLE_ADMISSION_REQUIRED");
+        var frame=boundary();if(!clientMember(frame,"net.minecraft.client.particle.ParticleEngine","add","m_107344_","(Lnet/minecraft/client/particle/Particle;)V"))throw new SecurityException("ACTUAL_PARTICLE_ADMISSION_REQUIRED");
         record(particle,union(origins(particle),ControlBridge.invokingSources()));if(stopped(sources(particle))||ControlBridge.stoppedEffects()){removeParticle(particle);return false;}return true;
     }
-    public static boolean particleTick(Object particle){boundary();if(stopped(sources(particle))){removeParticle(particle);return false;}return true;}
+    public static boolean particleTick(Object particle){var frame=boundary();if(!clientMember(frame,"net.minecraft.client.particle.ParticleEngine","tickParticle","m_107393_","(Lnet/minecraft/client/particle/Particle;)V"))throw new SecurityException("ACTUAL_PARTICLE_TICK_REQUIRED");if(stopped(sources(particle))){removeParticle(particle);return false;}return true;}
     public static void reloadListenerRegistered(Object manager,Object listener){
-        var frame=boundary();if(!frame.getDeclaringClass().getName().equals("net.minecraft.server.packs.resources.ReloadableResourceManager")||!frame.getMethodName().equals("registerReloadListener"))throw new SecurityException("ACTUAL_RELOAD_REGISTRATION_REQUIRED");
+        var frame=boundary();if(!clientMember(frame,"net.minecraft.server.packs.resources.ReloadableResourceManager","registerReloadListener","m_7217_","(Lnet/minecraft/server/packs/resources/PreparableReloadListener;)V"))throw new SecurityException("ACTUAL_RELOAD_REGISTRATION_REQUIRED");
         record(listener,union(origins(listener),ControlBridge.invokingSources()));try{Collection<?> listeners=(Collection<?>)field(manager,frame.getDeclaringClass(),"listeners");synchronized(SOURCES){RELOAD_LISTENERS.put(new Key(manager,true),new Ref<>(listeners));}}
         catch(ReflectiveOperationException unavailable){throw new IllegalStateException("ACTUAL_RELOAD_LIST_UNAVAILABLE",unavailable);}
     }
     public static void reloadStarting(Object manager){
-        var frame=boundary();if(!frame.getDeclaringClass().getName().equals("net.minecraft.server.packs.resources.ReloadableResourceManager")||!frame.getMethodName().equals("createReload"))throw new SecurityException("ACTUAL_RELOAD_START_REQUIRED");
+        var frame=boundary();if(!clientMember(frame,"net.minecraft.server.packs.resources.ReloadableResourceManager","createReload","m_142463_","(Ljava/util/concurrent/Executor;Ljava/util/concurrent/Executor;Ljava/util/concurrent/CompletableFuture;Ljava/util/List;)Lnet/minecraft/server/packs/resources/ReloadInstance;"))throw new SecurityException("ACTUAL_RELOAD_START_REQUIRED");
         try{Collection<?> listeners=(Collection<?>)field(manager,frame.getDeclaringClass(),"listeners");listeners.removeIf(listener->exclusive(sources(listener)));synchronized(SOURCES){RELOAD_LISTENERS.put(new Key(manager,true),new Ref<>(listeners));}}
         catch(ReflectiveOperationException unavailable){throw new IllegalStateException("ACTUAL_RELOAD_LIST_UNAVAILABLE",unavailable);}
     }
     public static java.util.concurrent.CompletableFuture<Void> skipReload(Object barrier){
         var frame=boundary();try{Class<?> api=Class.forName("net.minecraft.server.packs.resources.PreparableReloadListener$PreparationBarrier",false,frame.getDeclaringClass().getClassLoader());
             if(!role(api)||barrier==null||actualBase(barrier,"net.minecraft.server.packs.resources.SimpleReloadInstance$1")==null||!api.isInstance(barrier))throw new SecurityException("ACTUAL_RELOAD_BARRIER_REQUIRED");
-            Object result=api.getMethod("wait",Object.class).invoke(barrier,new Object[]{null});
+            Object result=clientMethod(api,"wait","m_6769_","(Ljava/lang/Object;)Ljava/util/concurrent/CompletableFuture;",Object.class).invoke(barrier,new Object[]{null});
             if(!(result instanceof java.util.concurrent.CompletableFuture<?> future))throw new IllegalStateException("ACTUAL_RELOAD_BARRIER_RESULT_CHANGED");
             return future.thenApply(ignored->null);
         }catch(ReflectiveOperationException unavailable){throw new IllegalStateException("ACTUAL_RELOAD_BARRIER_UNAVAILABLE",unavailable);}
@@ -442,7 +459,12 @@ public final class ClientBridge {
     public static Object verticesEntering(Object builder,Object bulk){return GPU.enter(builder,bulk,boundary());}
     public static void verticesCompleted(Object builder,Object token){GPU.complete(builder,token,boundary());}
     public static void verticesStored(Object builder,Object rendered){GPU.store(builder,rendered,boundary());}
+    public static void verticesCapacityChanged(Object builder){GPU.capacityChanged(builder,boundary());}
+    public static void verticesSortingChanged(Object builder){GPU.sortingChanged(builder,boundary());}
+    public static void verticesReleased(Object rendered){GPU.released(rendered,boundary());}
+    public static void verticesDiscarded(Object builder){GPU.discarded(builder,boundary());}
     public static void verticesSortState(Object builder,Object sorting){GPU.sortState(builder,sorting,boundary());}
+    public static boolean verticesSortAllowed(Object builder,Object sorting){return GPU.sortAllowed(builder,sorting,boundary());}
     public static void verticesSortRestored(Object builder,Object sorting){GPU.sortRestore(builder,sorting,boundary());}
     public static Object verticesUploading(Object buffer,Object rendered){return GPU.uploading(buffer,rendered,boundary());}
     public static void verticesUploaded(Object buffer,Object token){GPU.uploaded(buffer,token,boundary());}
@@ -457,66 +479,161 @@ public final class ClientBridge {
     public static void gpuContextClosing(){GPU.contextClosing(boundary());}
     public static void gpuMaintenance(){GPU.maintenance(boundary());}
 
+    private static void clientPayloadWriter(Class<?> caller){
+        if(!caller.getName().equals("dev.ronova.pro.ProRuntime")||!ControlBridge.coreWriter())throw new SecurityException("ACTUAL_CLIENT_PAYLOAD_CORE_REQUIRED");
+        try{if(caller!=Class.forName("dev.ronova.pro.ProRuntime",false,caller.getClassLoader()))throw new SecurityException("ACTUAL_CLIENT_PAYLOAD_CORE_REQUIRED");}
+        catch(ClassNotFoundException unavailable){throw new SecurityException("ACTUAL_CLIENT_PAYLOAD_CORE_REQUIRED",unavailable);}
+    }
+    public static boolean clientPayloadAllowed(Object proof,Object data,int offset,int length,boolean after){
+        clientPayloadWriter(WALKER.getCallerClass());return GPU.payloadAllowed(proof,data,offset,length,after);
+    }
+    public static boolean clientSortPointAllowed(Object proof,Object point,boolean after){
+        clientPayloadWriter(WALKER.getCallerClass());return GPU.sortPointAllowed(proof,point,after);
+    }
+    private static void clearClientPayload(Object proof,java.nio.ByteBuffer storage,int offset,int length,Class<?> game)throws ReflectiveOperationException{
+        Class<?> core=Class.forName("dev.ronova.pro.ProRuntime",false,game.getClassLoader());Method method=core.getMethod("clearClientPayload",Object.class,java.nio.ByteBuffer.class,int.class,int.class);
+        if(!Modifier.isStatic(method.getModifiers())||method.getReturnType()!=void.class)throw new SecurityException("ACTUAL_CLIENT_PAYLOAD_WRITER_REQUIRED");method.invoke(null,proof,storage,offset,length);
+    }
+    private static void clearClientSortPoint(Object proof,Object point,Class<?> game)throws ReflectiveOperationException{
+        Class<?> core=Class.forName("dev.ronova.pro.ProRuntime",false,game.getClassLoader());Method method=core.getMethod("clearClientSortPoint",Object.class,Object.class);
+        if(!Modifier.isStatic(method.getModifiers())||method.getReturnType()!=void.class)throw new SecurityException("ACTUAL_CLIENT_SORT_POINT_WRITER_REQUIRED");method.invoke(null,proof,point);
+    }
+
     /** Original CPU vertex/index identities and a fragment mask preserve the original draw and primitive IDs. */
     private static final class GpuImages {
         private static final Class<?> I=int.class;
-        private static final class Build {Object batch=new Object();final List<Module[]> vertices=new ArrayList<>();Object mode,format;String pending="";}
+        private static final class Build {
+            Object batch=new Object();final List<Module[]> vertices=new ArrayList<>();final BitSet erased=new BitSet();Object mode,format;Ref<Object> storage;int pointer,stride,capacity;long address;byte[] payload=new byte[0];boolean indexOnly;String pending="",retirementPending="";
+        }
         private record VertexEntry(Object builder,Build build,int prior,Module[] sources,Class<?> type,String method,Thread thread){}
         private record VertexImage(Object batch,List<Module[]> vertices,Object state,Object format,Object mode,int count,int[] indices,byte[] payload,int stride,boolean indexOnly,String pending){}
         private static final class Uploaded {VertexImage image;final BitSet hidden=new BitSet(),erased=new BitSet();String pending="GPU_UPLOAD_PENDING";int vao,vertexId,indexId;long fence;Context context;boolean uploadPending,storageReleased,commandsDrained;}
+        private static final class CpuImage {
+            final VertexImage image;final Ref<Object> builder;Ref<Object> storage;final int pointer;int capacity;long address;final byte[] retained;final BitSet erased=new BitSet();boolean finished;String pending="";
+            CpuImage(VertexImage image,Object builder,Object storage,int pointer,int capacity,long address,byte[] retained){this.image=image;this.builder=new Ref<>(builder);this.storage=new Ref<>(storage);this.pointer=pointer;this.capacity=capacity;this.address=address;this.retained=retained;}
+        }
+        private static final class SortImage {
+            final VertexImage image;final Ref<Object> builder,points;final Ref<Object>[] identities;final int[] coordinates;final BitSet erased=new BitSet();String pending="";
+            SortImage(VertexImage image,Object builder,Object points,Ref<Object>[] identities,int[] coordinates){this.image=image;this.builder=new Ref<>(builder);this.points=new Ref<>(points);this.identities=identities;this.coordinates=coordinates;}
+        }
+        private static final class CpuMaintenance {
+            final Class<?> type,renderSystem;final Object owner;final Thread thread=Thread.currentThread();
+            CpuMaintenance(Class<?> type,Class<?> renderSystem,Object owner){this.type=type;this.renderSystem=renderSystem;this.owner=owner;}
+        }
+        private static final class CpuWrite {
+            final CpuMaintenance maintenance;final Object carrier,builder;final Build build;final CpuImage cpu;final java.nio.ByteBuffer storage;final int offset,length,pointer,stride,count,position,limit,capacity;final long address;final byte[] expected;final BitSet selected;byte[] outside;boolean checked,afterVerified,ended;
+            CpuWrite(CpuMaintenance maintenance,Object carrier,Object builder,Build build,CpuImage cpu,java.nio.ByteBuffer storage,int offset,int length,int pointer,int stride,int count,int position,int limit,int capacity,long address,byte[] expected,BitSet selected){this.maintenance=maintenance;this.carrier=carrier;this.builder=builder;this.build=build;this.cpu=cpu;this.storage=storage;this.offset=offset;this.length=length;this.pointer=pointer;this.stride=stride;this.count=count;this.position=position;this.limit=limit;this.capacity=capacity;this.address=address;this.expected=expected;this.selected=selected;}
+        }
+        private static final class SortWrite {
+            final CpuMaintenance maintenance;final Object carrier,point;final SortImage image;final int index;final Object[] points;Object[] before;int[] coordinates;boolean checked,afterVerified,ended;
+            SortWrite(CpuMaintenance maintenance,Object carrier,SortImage image,int index,Object[] points,Object point){this.maintenance=maintenance;this.carrier=carrier;this.image=image;this.index=index;this.points=points;this.point=point;}
+        }
+        private static final class CpuRelease {
+            final Object rendered,builder,storage;final CpuImage image;final Class<?> renderedType,builderType;final int count;final Thread thread=Thread.currentThread();
+            CpuRelease(Object rendered,CpuImage image,Object builder,Object storage,Class<?> renderedType,Class<?> builderType,int count){this.rendered=rendered;this.image=image;this.builder=builder;this.storage=storage;this.renderedType=renderedType;this.builderType=builderType;this.count=count;}
+        }
         private record UploadEntry(Object buffer,Uploaded target,VertexImage image,Class<?> type){}
         private record Fragment(String sampler,String enabled,boolean supported,String original){}
         private record Linked(Fragment fragment,boolean supported){}
         private static final class Context {final Class<?> api;final Map<Integer,Fragment> shaders=new HashMap<>();final Map<Integer,Linked> programs=new HashMap<>();int texture,buffer;Context(Class<?> api){this.api=api;}}
         private record DrawEntry(Context context,Linked linked,int program,int sampler,int enabled,int oldSampler,int oldEnabled,int textureUnit,int oldTexture){}
         private final Map<Key,Build> builds=new HashMap<>();
-        private final Map<Key,VertexImage> rendered=new HashMap<>(),sorting=new HashMap<>();
+        private final Map<Key,CpuImage> rendered=new HashMap<>();
+        private final Map<Key,SortImage> sorting=new HashMap<>(),buildSorting=new HashMap<>();
+        private final ThreadLocal<CpuRelease> releasingCpu=new ThreadLocal<>();
+        private final ThreadLocal<CpuMaintenance> maintainingCpu=new ThreadLocal<>();
+        private final ThreadLocal<CpuWrite> clearingCpu=new ThreadLocal<>();
+        private final ThreadLocal<SortWrite> clearingSort=new ThreadLocal<>();
         private final Map<Key,Uploaded> uploaded=new HashMap<>();
         private final Map<Long,Context> contexts=new HashMap<>();
-        private void require(StackWalker.StackFrame frame,String type,String... methods){if(!frame.getDeclaringClass().getName().equals(type)||!Set.of(methods).contains(frame.getMethodName()))throw new SecurityException("ACTUAL_GPU_BOUNDARY_REQUIRED");}
+        private void require(StackWalker.StackFrame frame,String type,String named,String installed,String descriptor){if(!clientMember(frame,type,named,installed,descriptor))throw new SecurityException("ACTUAL_GPU_BOUNDARY_REQUIRED");}
+        private void requireVertexWrite(StackWalker.StackFrame frame){if(!clientMember(frame,"com.mojang.blaze3d.vertex.BufferBuilder","endVertex","m_5752_","()V")&&!clientMember(frame,"com.mojang.blaze3d.vertex.BufferBuilder","putBulkData","putBulkData","(Ljava/nio/ByteBuffer;)V"))throw new SecurityException("ACTUAL_GPU_BOUNDARY_REQUIRED");}
         private int number(Object receiver,Class<?> type,String name)throws ReflectiveOperationException{return ((Number)field(receiver,type,name)).intValue();}
+        private long bufferNumber(Object receiver,String name,String descriptor)throws ReflectiveOperationException{Field member=java.nio.Buffer.class.getDeclaredField(name);if(Modifier.isStatic(member.getModifiers())||!member.getType().descriptorString().equals(descriptor))throw new IllegalStateException("GPU_CPU_BUFFER_LAYOUT_CHANGED");member.setAccessible(true);return ((Number)member.get(receiver)).longValue();}
         private void protect(Object value){synchronized(SOURCES){CodeSourceBridge.contributionControl(value);}}
-        void begin(Object builder,StackWalker.StackFrame frame){require(frame,"com.mojang.blaze3d.vertex.BufferBuilder","begin");try{Build build=new Build();build.mode=field(builder,frame.getDeclaringClass(),"mode");build.format=field(builder,frame.getDeclaringClass(),"format");if(number(builder,frame.getDeclaringClass(),"vertices")!=0)build.pending="GPU_BEGIN_VERTEX_STATE_UNOBSERVED";protect(build.vertices);synchronized(this){builds.put(new Key(builder,true),build);}}catch(ReflectiveOperationException failure){throw new IllegalStateException("GPU_BEGIN_UNAVAILABLE",failure);}}
-        Object enter(Object builder,Object bulk,StackWalker.StackFrame frame){require(frame,"com.mojang.blaze3d.vertex.BufferBuilder","endVertex","putBulkData");try{Build build;synchronized(this){build=builds.get(new Key(builder,false));}if(build==null)return null;Module[] owners=union(ControlBridge.invokingSources(),currentSources(),origins(bulk));protect(owners);return new VertexEntry(builder,build,number(builder,frame.getDeclaringClass(),"vertices"),owners,frame.getDeclaringClass(),frame.getMethodName(),Thread.currentThread());}catch(ReflectiveOperationException failure){throw new IllegalStateException("GPU_VERTEX_ENTRY_UNAVAILABLE",failure);}}
-        void complete(Object builder,Object token,StackWalker.StackFrame frame){require(frame,"com.mojang.blaze3d.vertex.BufferBuilder","endVertex","putBulkData");if(token==null)return;if(!(token instanceof VertexEntry entry)||entry.builder()!=builder||entry.type()!=frame.getDeclaringClass()||!entry.method().equals(frame.getMethodName())||entry.thread()!=Thread.currentThread())throw new SecurityException("ACTUAL_VERTEX_WRITE_REQUIRED");
-            try{synchronized(this){Build current=builds.get(new Key(builder,false));if(current!=entry.build())throw new IllegalStateException("GPU_VERTEX_BATCH_CHANGED");int count=number(builder,entry.type(),"vertices");if(entry.prior()!=current.vertices.size()||count<entry.prior()){current.pending="GPU_VERTEX_WRITE_SEQUENCE_UNOBSERVED";return;}while(current.vertices.size()<count)current.vertices.add(entry.sources());}}catch(ReflectiveOperationException failure){throw new IllegalStateException("GPU_VERTEX_COMPLETION_UNAVAILABLE",failure);}}
+        private byte[] readBytes(java.nio.ByteBuffer storage,int pointer,int length){if(pointer<0||length<0||pointer>storage.limit()-length)throw new IllegalStateException("GPU_CPU_RETAINED_RANGE_CHANGED");byte[] bytes=new byte[length];for(int n=0;n<length;n++)bytes[n]=storage.get(pointer+n);protect(bytes);return bytes;}
+        private boolean cpuBytes(java.nio.ByteBuffer storage,int pointer,byte[] expected,int length){if(pointer<0||length<0||length>expected.length||pointer>storage.limit()-length)return false;for(int n=0;n<length;n++)if(storage.get(pointer+n)!=expected[n])return false;return true;}
+        private void buildStorage(Object builder,Class<?> type,Build build)throws ReflectiveOperationException{
+            Object storage=field(builder,type,"buffer");if(!(storage instanceof java.nio.ByteBuffer bytes)||storage.getClass().getClassLoader()!=null||!bytes.isDirect())throw new IllegalStateException("ACTUAL_CPU_VERTEX_STORAGE_REQUIRED");
+            build.pointer=number(builder,type,"renderedBufferPointer");build.storage=new Ref<>(storage);build.capacity=Math.toIntExact(bufferNumber(storage,"capacity","I"));build.address=bufferNumber(storage,"address","J");build.indexOnly=(Boolean)field(builder,type,"indexOnly");
+            Class<?> format=actualBase(build.format,"com.mojang.blaze3d.vertex.VertexFormat");if(format==null||build.format.getClass()!=format)throw new IllegalStateException("ACTUAL_VERTEX_FORMAT_REQUIRED");build.stride=((Number)clientMethod(format,"getVertexSize","m_86020_","()I").invoke(build.format)).intValue();if(build.stride<=0)throw new IllegalStateException("GPU_VERTEX_STRIDE_CHANGED");protect(build.storage);protect(build.erased);protect(build.payload);
+        }
+        void begin(Object builder,StackWalker.StackFrame frame){require(frame,"com.mojang.blaze3d.vertex.BufferBuilder","begin","m_166779_","(Lcom/mojang/blaze3d/vertex/VertexFormat$Mode;Lcom/mojang/blaze3d/vertex/VertexFormat;)V");try{Build build=new Build();build.mode=field(builder,frame.getDeclaringClass(),"mode");build.format=field(builder,frame.getDeclaringClass(),"format");buildStorage(builder,frame.getDeclaringClass(),build);if(number(builder,frame.getDeclaringClass(),"vertices")!=0)build.pending="GPU_BEGIN_VERTEX_STATE_UNOBSERVED";protect(build.vertices);synchronized(this){builds.put(new Key(builder,true),build);buildSorting.remove(new Key(builder,false));}}catch(ReflectiveOperationException failure){throw new IllegalStateException("GPU_BEGIN_UNAVAILABLE",failure);}}
+        Object enter(Object builder,Object bulk,StackWalker.StackFrame frame){requireVertexWrite(frame);try{Build build;synchronized(this){build=builds.get(new Key(builder,false));}if(build==null)return null;Module[] owners=union(ControlBridge.invokingSources(),currentSources(),origins(bulk));protect(owners);return new VertexEntry(builder,build,number(builder,frame.getDeclaringClass(),"vertices"),owners,frame.getDeclaringClass(),frame.getMethodName(),Thread.currentThread());}catch(ReflectiveOperationException failure){throw new IllegalStateException("GPU_VERTEX_ENTRY_UNAVAILABLE",failure);}}
+        void complete(Object builder,Object token,StackWalker.StackFrame frame){requireVertexWrite(frame);if(token==null)return;if(!(token instanceof VertexEntry entry)||entry.builder()!=builder||entry.type()!=frame.getDeclaringClass()||!entry.method().equals(frame.getMethodName())||entry.thread()!=Thread.currentThread())throw new SecurityException("ACTUAL_VERTEX_WRITE_REQUIRED");
+            try{synchronized(this){Build current=builds.get(new Key(builder,false));if(current!=entry.build())throw new IllegalStateException("GPU_VERTEX_BATCH_CHANGED");int count=number(builder,entry.type(),"vertices");if(entry.prior()!=current.vertices.size()||count<entry.prior()){current.pending="GPU_VERTEX_WRITE_SEQUENCE_UNOBSERVED";return;}while(current.vertices.size()<count)current.vertices.add(entry.sources());
+                if(!buildIdentity(builder,current)||current.indexOnly){current.pending="GPU_CPU_BUILD_STORAGE_CHANGED";return;}int length=Math.multiplyExact(count,current.stride),prior=Math.multiplyExact(entry.prior(),current.stride);if(current.pointer>current.capacity-length||number(builder,entry.type(),"nextElementByte")<current.pointer+length){current.pending="GPU_CPU_BUILD_RANGE_CHANGED";return;}
+                if(current.payload.length<length){current.payload=Arrays.copyOf(current.payload,Math.max(length,Math.max(64,current.payload.length*2)));protect(current.payload);}java.nio.ByteBuffer storage=(java.nio.ByteBuffer)current.storage.get();for(int n=prior;n<length;n++)current.payload[n]=storage.get(current.pointer+n);
+            }}catch(ReflectiveOperationException failure){throw new IllegalStateException("GPU_VERTEX_COMPLETION_UNAVAILABLE",failure);}}
+        private boolean buildIdentity(Object builder,Build build)throws ReflectiveOperationException{Class<?> type=builder==null?null:actualBase(builder,"com.mojang.blaze3d.vertex.BufferBuilder");Object storage=build.storage==null?null:build.storage.get();return type!=null&&builder.getClass()==type&&storage instanceof java.nio.ByteBuffer
+                &&field(builder,type,"buffer")==storage&&field(builder,type,"format")==build.format&&field(builder,type,"mode")==build.mode&&number(builder,type,"renderedBufferPointer")==build.pointer
+                &&bufferNumber(storage,"address","J")==build.address&&bufferNumber(storage,"capacity","I")==build.capacity&&(Boolean)field(builder,type,"indexOnly")==build.indexOnly;}
+        void capacityChanged(Object builder,StackWalker.StackFrame frame){require(frame,"com.mojang.blaze3d.vertex.BufferBuilder","ensureCapacity","m_85722_","(I)V");try{synchronized(this){Object data=field(builder,frame.getDeclaringClass(),"buffer");if(!(data instanceof java.nio.ByteBuffer storage)||data.getClass().getClassLoader()!=null||!storage.isDirect())throw new IllegalStateException("ACTUAL_CPU_VERTEX_STORAGE_REQUIRED");int capacity=Math.toIntExact(bufferNumber(data,"capacity","I"));long address=bufferNumber(data,"address","J");
+            Build build=builds.get(new Key(builder,false));if(build!=null&&build.storage!=null&&build.storage.get()!=data){int length=Math.multiplyExact(build.vertices.size(),build.stride);if(build.pointer==number(builder,frame.getDeclaringClass(),"renderedBufferPointer")&&(build.indexOnly||cpuBytes(storage,build.pointer,build.payload,length))&&capacity>=build.capacity){build.storage=new Ref<>(data);build.capacity=capacity;build.address=address;protect(build.storage);}else build.pending="GPU_CPU_BUILD_REALLOCATION_READBACK_CHANGED";}
+            for(var entry:rendered.entrySet()){Object result=entry.getKey().get();CpuImage cpu=entry.getValue();if(result==null||cpu.finished||cpu.builder.get()!=builder||cpu.storage.get()==data)continue;Class<?> type=actualBase(result,"com.mojang.blaze3d.vertex.BufferBuilder$RenderedBuffer");if(type!=null&&field(result,type,"this$0")==builder&&field(result,type,"drawState")==cpu.image.state()&&number(result,type,"pointer")==cpu.pointer&&capacity>=cpu.capacity&&cpuBytes(storage,cpu.pointer,cpu.retained,cpu.retained.length)){cpu.storage=new Ref<>(data);cpu.capacity=capacity;cpu.address=address;protect(cpu.storage);}else cpu.pending="GPU_CPU_REALLOCATION_READBACK_CHANGED";}
+        }}catch(ReflectiveOperationException failure){throw new IllegalStateException("GPU_CPU_REALLOCATION_UNAVAILABLE",failure);}}
         private VertexImage image(Object builder,Object result)throws ReflectiveOperationException{
             Class<?> type=actualBase(result,"com.mojang.blaze3d.vertex.BufferBuilder$RenderedBuffer");if(type==null||type!=result.getClass())throw new SecurityException("ACTUAL_RENDERED_BUFFER_REQUIRED");Object state=field(result,type,"drawState");Class<?> shape=actualBase(state,"com.mojang.blaze3d.vertex.BufferBuilder$DrawState");if(shape==null)throw new SecurityException("ACTUAL_DRAW_STATE_REQUIRED");
-            Object mode=shape.getMethod("mode").invoke(state),format=shape.getMethod("format").invoke(state);int count=((Number)shape.getMethod("vertexCount").invoke(state)).intValue(),indexCount=((Number)shape.getMethod("indexCount").invoke(state)).intValue();boolean indexOnly=(Boolean)shape.getMethod("indexOnly").invoke(state),sequential=(Boolean)shape.getMethod("sequentialIndex").invoke(state);
+            Object mode=clientMethod(shape,"mode","f_85735_","()Lcom/mojang/blaze3d/vertex/VertexFormat$Mode;").invoke(state),format=clientMethod(shape,"format","f_85733_","()Lcom/mojang/blaze3d/vertex/VertexFormat;").invoke(state);
+            int count=((Number)clientMethod(shape,"vertexCount","f_85734_","()I").invoke(state)).intValue(),indexCount=((Number)clientMethod(shape,"indexCount","f_166797_","()I").invoke(state)).intValue();
+            boolean indexOnly=(Boolean)clientMethod(shape,"indexOnly","f_166799_","()Z").invoke(state),sequential=(Boolean)clientMethod(shape,"sequentialIndex","f_166800_","()Z").invoke(state);
             Build build=builds.get(new Key(builder,false));List<Module[]> rows=build==null?List.of():List.copyOf(build.vertices);String pending=build==null?"GPU_VERTEX_BATCH_UNOBSERVED":build.pending;
             if(rows.size()!=count)pending="GPU_VERTEX_COUNT_UNOBSERVED";if(build!=null&&(build.mode!=mode||build.format!=format))pending="GPU_VERTEX_LAYOUT_CHANGED";
             int[] indices=new int[indexCount];Class<?> modeType=actualBase(mode,"com.mojang.blaze3d.vertex.VertexFormat$Mode");if(modeType==null)throw new SecurityException("ACTUAL_VERTEX_MODE_REQUIRED");
             if(sequential){String kind=((Enum<?>)mode).name();int[] offsets=kind.equals("QUADS")?new int[]{0,1,2,2,3,0}:kind.equals("LINES")?new int[]{0,1,2,3,2,1}:null;for(int n=0;n<indexCount;n++)indices[n]=offsets==null?n:n/6*4+offsets[n%6];}
-            else{Object indexType=shape.getMethod("indexType").invoke(state);Class<?> indexShape=actualBase(indexType,"com.mojang.blaze3d.vertex.VertexFormat$IndexType");if(indexShape==null)throw new SecurityException("ACTUAL_INDEX_TYPE_REQUIRED");int bytes=number(indexType,indexShape,"bytes");java.nio.ByteBuffer data=((java.nio.ByteBuffer)type.getMethod("indexBuffer").invoke(result)).duplicate().order(java.nio.ByteOrder.nativeOrder());for(int n=0;n<indexCount;n++)indices[n]=bytes==2?Short.toUnsignedInt(data.getShort(n*2)):bytes==4?data.getInt(n*4):-1;}
+            else{Object indexType=clientMethod(shape,"indexType","f_166798_","()Lcom/mojang/blaze3d/vertex/VertexFormat$IndexType;").invoke(state);Class<?> indexShape=actualBase(indexType,"com.mojang.blaze3d.vertex.VertexFormat$IndexType");if(indexShape==null)throw new SecurityException("ACTUAL_INDEX_TYPE_REQUIRED");int bytes=number(indexType,indexShape,"bytes");java.nio.ByteBuffer data=((java.nio.ByteBuffer)clientMethod(type,"indexBuffer","m_231197_","()Ljava/nio/ByteBuffer;").invoke(result)).duplicate().order(java.nio.ByteOrder.nativeOrder());for(int n=0;n<indexCount;n++)indices[n]=bytes==2?Short.toUnsignedInt(data.getShort(n*2)):bytes==4?data.getInt(n*4):-1;}
             for(int index:indices)if(index<0||index>=count){pending="GPU_INDEX_OUTSIDE_OBSERVED_VERTICES";break;}
-            Class<?> formatType=actualBase(format,"com.mojang.blaze3d.vertex.VertexFormat");if(formatType==null||format.getClass()!=formatType)throw new SecurityException("ACTUAL_VERTEX_FORMAT_REQUIRED");int stride=((Number)formatType.getMethod("getVertexSize").invoke(format)).intValue();byte[] payload=null;
-            if(!indexOnly){java.nio.ByteBuffer data=((java.nio.ByteBuffer)type.getMethod("vertexBuffer").invoke(result)).duplicate();int length=Math.multiplyExact(count,stride);if(length!=data.remaining())pending="GPU_VERTEX_PAYLOAD_LENGTH_CHANGED";else{payload=new byte[length];data.get(payload);protect(payload);}}
+            Class<?> formatType=actualBase(format,"com.mojang.blaze3d.vertex.VertexFormat");if(formatType==null||format.getClass()!=formatType)throw new SecurityException("ACTUAL_VERTEX_FORMAT_REQUIRED");int stride=((Number)clientMethod(formatType,"getVertexSize","m_86020_","()I").invoke(format)).intValue();byte[] payload=null;
+            if(!indexOnly){java.nio.ByteBuffer data=((java.nio.ByteBuffer)clientMethod(type,"vertexBuffer","m_231196_","()Ljava/nio/ByteBuffer;").invoke(result)).duplicate();int length=Math.multiplyExact(count,stride);if(length!=data.remaining())pending="GPU_VERTEX_PAYLOAD_LENGTH_CHANGED";else{payload=new byte[length];data.get(payload);protect(payload);}}
             protect(indices);VertexImage image=new VertexImage(build==null?null:build.batch,rows,state,format,mode,count,indices,payload,stride,indexOnly,pending);protect(rows);return image;
         }
-        void store(Object builder,Object result,StackWalker.StackFrame frame){require(frame,"com.mojang.blaze3d.vertex.BufferBuilder","storeRenderedBuffer");try{synchronized(this){rendered.put(new Key(result,true),image(builder,result));}}catch(ReflectiveOperationException failure){throw new IllegalStateException("GPU_RENDERED_IMAGE_UNAVAILABLE",failure);}}
-        void sortState(Object builder,Object state,StackWalker.StackFrame frame){require(frame,"com.mojang.blaze3d.vertex.BufferBuilder","getSortState");synchronized(this){Build build=builds.get(new Key(builder,false));if(build==null)return;List<Module[]> rows=List.copyOf(build.vertices);protect(rows);sorting.put(new Key(state,true),new VertexImage(build.batch,rows,null,build.format,build.mode,rows.size(),new int[0],null,0,true,build.pending));}}
-        void sortRestore(Object builder,Object state,StackWalker.StackFrame frame){require(frame,"com.mojang.blaze3d.vertex.BufferBuilder","restoreSortState");synchronized(this){VertexImage saved=sorting.get(new Key(state,false));Build build=builds.get(new Key(builder,false));if(build==null||saved==null){if(build!=null)build.pending="GPU_SORTING_ORIGIN_UNOBSERVED";return;}Build restored=new Build();restored.batch=saved.batch();restored.vertices.addAll(saved.vertices());restored.mode=saved.mode();restored.format=saved.format();restored.pending=saved.pending();protect(restored.vertices);builds.put(new Key(builder,true),restored);}}
-        Object uploading(Object buffer,Object result,StackWalker.StackFrame frame){require(frame,"com.mojang.blaze3d.vertex.VertexBuffer","upload");synchronized(this){Uploaded gpu=uploaded.computeIfAbsent(new Key(buffer,true),ignored->new Uploaded());VertexImage incoming=rendered.get(new Key(result,false));gpu.pending="GPU_UPLOAD_PENDING";gpu.uploadPending=true;return new UploadEntry(buffer,gpu,incoming,frame.getDeclaringClass());}}
-        void uploaded(Object buffer,Object token,StackWalker.StackFrame frame){require(frame,"com.mojang.blaze3d.vertex.VertexBuffer","upload");if(!(token instanceof UploadEntry entry)||entry.buffer()!=buffer||entry.type()!=frame.getDeclaringClass())throw new SecurityException("ACTUAL_GPU_UPLOAD_REQUIRED");try{synchronized(this){Uploaded gpu=uploaded.get(new Key(buffer,false));if(gpu!=entry.target())throw new IllegalStateException("GPU_UPLOAD_RECEIVER_CHANGED");VertexImage image=entry.image();if(image==null){gpu.image=null;gpu.pending="GPU_RENDERED_ORIGIN_UNOBSERVED";return;}
+        void store(Object builder,Object result,StackWalker.StackFrame frame){require(frame,"com.mojang.blaze3d.vertex.BufferBuilder","storeRenderedBuffer","m_231177_","()Lcom/mojang/blaze3d/vertex/BufferBuilder$RenderedBuffer;");try{synchronized(this){VertexImage image=image(builder,result);Class<?> shape=actualBase(result,"com.mojang.blaze3d.vertex.BufferBuilder$RenderedBuffer");Object storage=field(builder,frame.getDeclaringClass(),"buffer");
+            if(field(result,shape,"this$0")!=builder||!(storage instanceof java.nio.ByteBuffer))throw new IllegalStateException("GPU_CPU_CARRIER_ASSOCIATION_CHANGED");
+            int pointer=number(result,shape,"pointer"),length=((Number)clientMethod(image.state().getClass(),"bufferSize","m_166813_","()I").invoke(image.state())).intValue();byte[] retained=readBytes((java.nio.ByteBuffer)storage,pointer,length);
+            CpuImage cpu=new CpuImage(image,builder,storage,pointer,Math.toIntExact(bufferNumber(storage,"capacity","I")),bufferNumber(storage,"address","J"),retained);Build build=builds.get(new Key(builder,false));if(build!=null&&!image.indexOnly())cpu.erased.or(build.erased);protect(cpu);protect(cpu.builder);protect(cpu.storage);protect(cpu.erased);rendered.put(new Key(result,true),cpu);}}
+            catch(ReflectiveOperationException failure){throw new IllegalStateException("GPU_RENDERED_IMAGE_UNAVAILABLE",failure);}}
+        void released(Object result,StackWalker.StackFrame frame){require(frame,"com.mojang.blaze3d.vertex.BufferBuilder$RenderedBuffer","release","m_231200_","()V");try{synchronized(this){CpuImage cpu=rendered.get(new Key(result,false));if(cpu!=null){if(!(Boolean)field(result,frame.getDeclaringClass(),"released"))throw new IllegalStateException("GPU_CPU_RELEASE_READBACK_PENDING");cpu.finished=true;cpu.pending="";}}}catch(ReflectiveOperationException failure){throw new IllegalStateException("GPU_CPU_RELEASE_READBACK_UNAVAILABLE",failure);}}
+        void discarded(Object builder,StackWalker.StackFrame frame){require(frame,"com.mojang.blaze3d.vertex.BufferBuilder","discard","m_85730_","()V");try{synchronized(this){if(number(builder,frame.getDeclaringClass(),"renderedBufferCount")!=0||number(builder,frame.getDeclaringClass(),"renderedBufferPointer")!=0||number(builder,frame.getDeclaringClass(),"nextElementByte")!=0)throw new IllegalStateException("GPU_CPU_DISCARD_READBACK_PENDING");
+            for(CpuImage cpu:rendered.values())if(cpu.builder.get()==builder){cpu.finished=true;cpu.pending="";}}}catch(ReflectiveOperationException failure){throw new IllegalStateException("GPU_CPU_DISCARD_READBACK_UNAVAILABLE",failure);}}
+        private int[] pointBits(Object point,Class<?> vector)throws ReflectiveOperationException{
+            if(point==null||point.getClass()!=vector||!vector.getName().equals("org.joml.Vector3f"))throw new IllegalStateException("ACTUAL_QUAD_SORT_POINT_REQUIRED");int[] bits=new int[3];String[] names={"x","y","z"};for(int n=0;n<3;n++){Field value=vector.getDeclaredField(names[n]);if(value.getType()!=float.class||Modifier.isStatic(value.getModifiers())||!Modifier.isPublic(value.getModifiers()))throw new IllegalStateException("CLIENT_SORT_POINT_LAYOUT_CHANGED");bits[n]=Float.floatToRawIntBits(value.getFloat(point));}return bits;
+        }
+        @SuppressWarnings("unchecked") private SortImage sortImage(Object builder,Object carrier,Build build)throws ReflectiveOperationException{
+            Class<?> type=actualBase(carrier,carrier==builder?"com.mojang.blaze3d.vertex.BufferBuilder":"com.mojang.blaze3d.vertex.BufferBuilder$SortState");if(type==null||carrier.getClass()!=type)throw new IllegalStateException("ACTUAL_QUAD_SORT_CARRIER_REQUIRED");Object points=field(carrier,type,"sortingPoints");List<Module[]> rows=List.copyOf(build.vertices);protect(rows);VertexImage image=new VertexImage(build.batch,rows,null,build.format,build.mode,rows.size(),new int[0],null,0,true,build.pending);
+            if(points==null){SortImage result=new SortImage(image,builder,null,new Ref[0],new int[0]);protect(result);protect(result.builder);protect(result.points);protect(result.identities);protect(result.coordinates);protect(result.erased);return result;}if(!(points instanceof Object[] values)||!points.getClass().descriptorString().equals("[Lorg/joml/Vector3f;")||!(build.mode instanceof Enum<?> mode)||!mode.name().equals("QUADS")||rows.size()/4!=values.length||number(carrier,type,"vertices")!=rows.size()||field(carrier,type,"mode")!=build.mode)throw new IllegalStateException("GPU_QUAD_SORTING_LAYOUT_CHANGED");
+            Ref<Object>[] identities=new Ref[values.length];int[] coordinates=new int[Math.multiplyExact(values.length,3)];Class<?> vector=points.getClass().getComponentType();for(int n=0;n<values.length;n++){identities[n]=new Ref<>(values[n]);int[] bits=pointBits(values[n],vector);System.arraycopy(bits,0,coordinates,n*3,3);protect(identities[n]);}protect(identities);protect(coordinates);SortImage result=new SortImage(image,builder,points,identities,coordinates);protect(result);protect(result.builder);protect(result.points);protect(result.erased);return result;
+        }
+        private boolean sortIdentity(Object carrier,SortImage saved)throws ReflectiveOperationException{
+            if(carrier==null)return false;Class<?> type=actualBase(carrier,"com.mojang.blaze3d.vertex.BufferBuilder$SortState");if(type==null){type=actualBase(carrier,"com.mojang.blaze3d.vertex.BufferBuilder");Build build=builds.get(new Key(carrier,false));if(build==null||build.batch!=saved.image.batch())return false;}return type!=null&&carrier.getClass()==type&&field(carrier,type,"sortingPoints")==saved.points.get()&&field(carrier,type,"mode")==saved.image.mode()&&number(carrier,type,"vertices")==saved.image.count();
+        }
+        void sortingChanged(Object builder,StackWalker.StackFrame frame){require(frame,"com.mojang.blaze3d.vertex.BufferBuilder","setQuadSorting","m_277127_","(Lcom/mojang/blaze3d/vertex/VertexSorting;)V");try{synchronized(this){Build build=builds.get(new Key(builder,false));if(build!=null){SortImage previous=buildSorting.get(new Key(builder,false));if(previous==null||!sortIdentity(builder,previous))buildSorting.put(new Key(builder,true),sortImage(builder,builder,build));}}}catch(ReflectiveOperationException failure){throw new IllegalStateException("GPU_QUAD_SORTING_ORIGIN_UNAVAILABLE",failure);}}
+        void sortState(Object builder,Object state,StackWalker.StackFrame frame){require(frame,"com.mojang.blaze3d.vertex.BufferBuilder","getSortState","m_166770_","()Lcom/mojang/blaze3d/vertex/BufferBuilder$SortState;");try{synchronized(this){Build build=builds.get(new Key(builder,false));if(build==null)return;SortImage saved=sortImage(builder,state,build);copySortReceipts(saved);sorting.put(new Key(state,true),saved);}}catch(ReflectiveOperationException failure){throw new IllegalStateException("GPU_SORTING_ORIGIN_UNAVAILABLE",failure);}}
+        boolean sortAllowed(Object builder,Object state,StackWalker.StackFrame frame){require(frame,"com.mojang.blaze3d.vertex.BufferBuilder","restoreSortState","m_166775_","(Lcom/mojang/blaze3d/vertex/BufferBuilder$SortState;)V");if(stopped(sources(state))||ControlBridge.stoppedEffects())return false;synchronized(this){SortImage saved=sorting.get(new Key(state,false));return saved==null||saved.image.vertices().isEmpty()||!saved.image.vertices().stream().allMatch(this::retiredSources);}}
+        void sortRestore(Object builder,Object state,StackWalker.StackFrame frame){require(frame,"com.mojang.blaze3d.vertex.BufferBuilder","restoreSortState","m_166775_","(Lcom/mojang/blaze3d/vertex/BufferBuilder$SortState;)V");try{synchronized(this){SortImage saved=sorting.get(new Key(state,false));Build build=builds.get(new Key(builder,false));if(build==null||saved==null){if(build!=null)build.pending="GPU_SORTING_ORIGIN_UNOBSERVED";return;}Build restored=new Build();restored.batch=saved.image.batch();restored.vertices.addAll(saved.image.vertices());restored.mode=saved.image.mode();restored.format=saved.image.format();restored.pending=saved.image.pending();buildStorage(builder,frame.getDeclaringClass(),restored);protect(restored.vertices);builds.put(new Key(builder,true),restored);SortImage points=sortImage(builder,builder,restored);copySortReceipts(points);buildSorting.put(new Key(builder,true),points);}}catch(ReflectiveOperationException failure){throw new IllegalStateException("GPU_SORTING_RESTORE_UNAVAILABLE",failure);}}
+        Object uploading(Object buffer,Object result,StackWalker.StackFrame frame){require(frame,"com.mojang.blaze3d.vertex.VertexBuffer","upload","m_231221_","(Lcom/mojang/blaze3d/vertex/BufferBuilder$RenderedBuffer;)V");try{synchronized(this){CpuImage cpu=rendered.get(new Key(result,false));Class<?> type=actualBase(result,"com.mojang.blaze3d.vertex.BufferBuilder$RenderedBuffer");
+            if(type==null||type!=result.getClass())throw new SecurityException("ACTUAL_RENDERED_BUFFER_REQUIRED");if((Boolean)field(result,type,"released")||cpu!=null&&cpu.finished)return Boolean.FALSE;
+            Uploaded gpu=uploaded.computeIfAbsent(new Key(buffer,true),ignored->new Uploaded());VertexImage incoming=cpu==null?null:cpu.image;gpu.pending="GPU_UPLOAD_PENDING";gpu.uploadPending=true;return new UploadEntry(buffer,gpu,incoming,frame.getDeclaringClass());}}
+            catch(ReflectiveOperationException failure){throw new IllegalStateException("GPU_CPU_UPLOAD_STATE_UNAVAILABLE",failure);}}
+        void uploaded(Object buffer,Object token,StackWalker.StackFrame frame){require(frame,"com.mojang.blaze3d.vertex.VertexBuffer","upload","m_231221_","(Lcom/mojang/blaze3d/vertex/BufferBuilder$RenderedBuffer;)V");if(!(token instanceof UploadEntry entry)||entry.buffer()!=buffer||entry.type()!=frame.getDeclaringClass())throw new SecurityException("ACTUAL_GPU_UPLOAD_REQUIRED");try{synchronized(this){Uploaded gpu=uploaded.get(new Key(buffer,false));if(gpu!=entry.target())throw new IllegalStateException("GPU_UPLOAD_RECEIVER_CHANGED");VertexImage image=entry.image();if(image==null){gpu.image=null;gpu.pending="GPU_RENDERED_ORIGIN_UNOBSERVED";return;}
                 if(image.indexOnly()){VertexImage previous=gpu.image;if(previous==null||previous.batch()!=image.batch()||previous.count()!=image.count()||previous.format()!=image.format()){gpu.pending="GPU_SORTED_VERTEX_STORAGE_UNOBSERVED";return;}image=new VertexImage(previous.batch(),previous.vertices(),image.state(),image.format(),image.mode(),image.count(),image.indices(),previous.payload(),previous.stride(),true,image.pending());}
                 if(field(buffer,entry.type(),"format")!=image.format()||field(buffer,entry.type(),"mode")!=image.mode()||number(buffer,entry.type(),"indexCount")!=image.indices().length){gpu.pending="GPU_UPLOAD_STATE_CHANGED";return;}
-                gpu.image=image;gpu.vao=number(buffer,entry.type(),"arrayObjectId");gpu.vertexId=number(buffer,entry.type(),"vertexBufferId");gpu.indexId=number(buffer,entry.type(),"indexBufferId");gpu.pending=image.pending();gpu.context=context(entry.type());gpu.uploadPending=false;gpu.storageReleased=false;if(!image.indexOnly()){gpu.hidden.clear();gpu.erased.clear();gpu.commandsDrained=false;if(gpu.fence!=0){gl(gpu.context,"GL32","glDeleteSync",new Class<?>[]{long.class},gpu.fence);gpu.fence=0;}}
+                gpu.image=image;gpu.vao=number(buffer,entry.type(),"arrayObjectId");gpu.vertexId=number(buffer,entry.type(),"vertexBufferId");gpu.indexId=number(buffer,entry.type(),"indexBufferId");gpu.pending=image.pending();gpu.context=context(entry.type());gpu.uploadPending=false;gpu.storageReleased=false;gpu.hidden.clear();if(!image.indexOnly()){gpu.erased.clear();gpu.commandsDrained=false;if(gpu.fence!=0){gl(gpu.context,"GL32","glDeleteSync",new Class<?>[]{long.class},gpu.fence);gpu.fence=0;}}
             }}catch(ReflectiveOperationException failure){throw new IllegalStateException("GPU_UPLOAD_READBACK_UNAVAILABLE",failure);}}
         private Object gl(Context context,String api,String method,Class<?>[] parameters,Object...args)throws ReflectiveOperationException{return Class.forName("org.lwjgl.opengl."+api,false,context.api.getClassLoader()).getMethod(method,parameters).invoke(null,args);}
         private int integer(Context context,int property)throws ReflectiveOperationException{return ((Number)gl(context,"GL11","glGetInteger",new Class<?>[]{I},property)).intValue();}
         private Context context(Class<?> api)throws ReflectiveOperationException{long handle=((Number)Class.forName("org.lwjgl.glfw.GLFW",false,api.getClassLoader()).getMethod("glfwGetCurrentContext").invoke(null)).longValue();if(handle==0)throw new IllegalStateException("ACTUAL_GL_CONTEXT_REQUIRED");Context context=contexts.get(handle);if(context==null){context=new Context(api);contexts.put(handle,context);protect(context.shaders);protect(context.programs);}return context;}
-        List<String> shaderSource(int shader,List<String> source,StackWalker.StackFrame frame){require(frame,"com.mojang.blaze3d.platform.GlStateManager","glShaderSource");try{synchronized(this){Context context=context(frame.getDeclaringClass());int type=((Number)gl(context,"GL20","glGetShaderi",new Class<?>[]{I,I},shader,35663)).intValue();if(type!=35632)return source;
+        List<String> shaderSource(int shader,List<String> source,StackWalker.StackFrame frame){require(frame,"com.mojang.blaze3d.platform.GlStateManager","glShaderSource","glShaderSource","(ILjava/util/List;)V");try{synchronized(this){Context context=context(frame.getDeclaringClass());int type=((Number)gl(context,"GL20","glGetShaderi",new Class<?>[]{I,I},shader,35663)).intValue();if(type!=35632)return source;
                     String text=String.join("",source),visible=withoutComments(text);java.util.regex.Matcher version=java.util.regex.Pattern.compile("(?m)^\\s*#\\s*version\\s+(\\d+)").matcher(visible),main=java.util.regex.Pattern.compile("\\bvoid\\s+(main)\\s*\\(\\s*(?:void\\s*)?\\)\\s*\\{").matcher(visible);
                     boolean supported=version.find()&&Integer.parseInt(version.group(1))>=150&&main.find()&&!java.util.regex.Pattern.compile("(?m)^\\s*#\\s*define\\s+main\\b").matcher(visible).find();int start=supported?main.start(1):0,end=supported?main.end(1):0;if(supported&&main.find())supported=false;
                     String prefix="ronova_"+UUID.randomUUID().toString().replace("-","");Fragment fragment=new Fragment(prefix+"_mask",prefix+"_enabled",supported,text);context.shaders.put(shader,fragment);if(!supported)return source;
                     String replacement=text.substring(0,start)+prefix+"_original"+text.substring(end)+"\nuniform samplerBuffer "+fragment.sampler()+";\nuniform int "+fragment.enabled()+";\nvoid main(){if("+fragment.enabled()+" != 0 && gl_PrimitiveID >= 0 && texelFetch("+fragment.sampler()+", gl_PrimitiveID).r > 0.5) discard; "+prefix+"_original();}\n";return List.of(replacement);
                 }}catch(ReflectiveOperationException failure){throw new IllegalStateException("GPU_FRAGMENT_SOURCE_UNAVAILABLE",failure);}}
         private String withoutComments(String source){char[] chars=source.toCharArray();for(int n=0;n+1<chars.length;n++)if(chars[n]=='/'&&chars[n+1]=='/'){chars[n++]=chars[n]=' ';while(n+1<chars.length&&chars[n+1]!='\n')chars[++n]=' ';}else if(chars[n]=='/'&&chars[n+1]=='*'){chars[n++]=chars[n]=' ';while(n+1<chars.length){if(chars[n]=='*'&&chars[n+1]=='/'){chars[n++]=chars[n]=' ';break;}if(chars[n]!='\n')chars[n]=' ';n++;}}return new String(chars);}
-        void linked(int program,StackWalker.StackFrame frame){require(frame,"com.mojang.blaze3d.platform.GlStateManager","glLinkProgram");try{synchronized(this){Context context=context(frame.getDeclaringClass());int count=((Number)gl(context,"GL20","glGetProgrami",new Class<?>[]{I,I},program,35717)).intValue();int[] ids=new int[count],actual=new int[1];gl(context,"GL20","glGetAttachedShaders",new Class<?>[]{I,int[].class,int[].class},program,actual,ids);Fragment fragment=null;boolean supported=true;
+        void linked(int program,StackWalker.StackFrame frame){require(frame,"com.mojang.blaze3d.platform.GlStateManager","glLinkProgram","glLinkProgram","(I)V");try{synchronized(this){Context context=context(frame.getDeclaringClass());int count=((Number)gl(context,"GL20","glGetProgrami",new Class<?>[]{I,I},program,35717)).intValue();int[] ids=new int[count],actual=new int[1];gl(context,"GL20","glGetAttachedShaders",new Class<?>[]{I,int[].class,int[].class},program,actual,ids);Fragment fragment=null;boolean supported=true;
                     if(((Number)gl(context,"GL20","glGetProgrami",new Class<?>[]{I,I},program,35714)).intValue()==0){for(int id:ids){Fragment applied=context.shaders.get(id);if(applied!=null&&applied.supported())restoreFragment(context,id,applied);}gl(context,"GL20","glLinkProgram",new Class<?>[]{I},program);supported=false;}
                     for(int n=0;n<actual[0];n++){int type=((Number)gl(context,"GL20","glGetShaderi",new Class<?>[]{I,I},ids[n],35663)).intValue();if(type==35632)fragment=context.shaders.get(ids[n]);else if(type!=35633)supported=false;}context.programs.put(program,new Linked(fragment,supported&&fragment!=null&&fragment.supported()));
                 }}catch(ReflectiveOperationException failure){throw new IllegalStateException("GPU_LINK_IMAGE_UNAVAILABLE",failure);}}
-        void compiled(int shader,StackWalker.StackFrame frame){require(frame,"com.mojang.blaze3d.platform.GlStateManager","glCompileShader");try{synchronized(this){Context context=context(frame.getDeclaringClass());Fragment applied=context.shaders.get(shader);if(applied!=null&&applied.supported()&&((Number)gl(context,"GL20","glGetShaderi",new Class<?>[]{I,I},shader,35713)).intValue()==0)restoreFragment(context,shader,applied);}}catch(ReflectiveOperationException failure){throw new IllegalStateException("GPU_MASK_COMPILE_FALLBACK_UNAVAILABLE",failure);}}
+        void compiled(int shader,StackWalker.StackFrame frame){require(frame,"com.mojang.blaze3d.platform.GlStateManager","glCompileShader","glCompileShader","(I)V");try{synchronized(this){Context context=context(frame.getDeclaringClass());Fragment applied=context.shaders.get(shader);if(applied!=null&&applied.supported()&&((Number)gl(context,"GL20","glGetShaderi",new Class<?>[]{I,I},shader,35713)).intValue()==0)restoreFragment(context,shader,applied);}}catch(ReflectiveOperationException failure){throw new IllegalStateException("GPU_MASK_COMPILE_FALLBACK_UNAVAILABLE",failure);}}
         private void restoreFragment(Context context,int shader,Fragment fragment)throws ReflectiveOperationException{gl(context,"GL20","glShaderSource",new Class<?>[]{I,CharSequence.class},shader,fragment.original());gl(context,"GL20","glCompileShader",new Class<?>[]{I},shader);context.shaders.put(shader,new Fragment(fragment.sampler(),fragment.enabled(),false,fragment.original()));}
         private int[] primitive(int mode,int n,int[] indices){return switch(mode){case 0->n<indices.length?new int[]{indices[n]}:null;case 1->n*2+1<indices.length?new int[]{indices[n*2],indices[n*2+1]}:null;case 3->n+1<indices.length?new int[]{indices[n],indices[n+1]}:null;case 4->n*3+2<indices.length?new int[]{indices[n*3],indices[n*3+1],indices[n*3+2]}:null;case 5->n+2<indices.length?new int[]{indices[n],indices[n+1],indices[n+2]}:null;case 6->n+2<indices.length?new int[]{indices[0],indices[n+1],indices[n+2]}:null;default->null;};}
         private boolean retiredSources(Module[] modules){if(modules.length==0)return false;synchronized(SOURCES){for(Module module:modules)if(!REQUESTED.contains(module)&&!ControlBridge.modStopped(module))return false;}return true;}
@@ -532,8 +649,9 @@ public final class ClientBridge {
         private boolean eraseVertices(Uploaded gpu,BitSet selected)throws ReflectiveOperationException{
             VertexImage image=gpu.image;if(image.payload()==null||image.stride()<=0){gpu.pending="GPU_VERTEX_PAYLOAD_UNOBSERVED";return false;}Context context=gpu.context;int original=integer(context,36662);boolean complete=true;
             try{gl(context,"GL15","glBindBuffer",new Class<?>[]{I,I},36662,gpu.vertexId);long size=((Number)gl(context,"GL15","glGetBufferParameteri",new Class<?>[]{I,I},36662,34660)).longValue();if(size<image.payload().length){gpu.pending="GPU_VERTEX_STORAGE_SIZE_CHANGED";return false;}
-                for(int vertex=selected.nextSetBit(0);vertex>=0;vertex=selected.nextSetBit(vertex+1)){if(gpu.erased.get(vertex))continue;int offset=Math.multiplyExact(vertex,image.stride());java.nio.ByteBuffer current=java.nio.ByteBuffer.allocateDirect(image.stride());
+                for(int vertex=selected.nextSetBit(0);vertex>=0;vertex=selected.nextSetBit(vertex+1)){int offset=Math.multiplyExact(vertex,image.stride());java.nio.ByteBuffer current=java.nio.ByteBuffer.allocateDirect(image.stride());
                     gl(context,"GL15","glGetBufferSubData",new Class<?>[]{I,long.class,java.nio.ByteBuffer.class},36662,(long)offset,current);
+                    if(gpu.erased.get(vertex)){if(zeroBytes(current))continue;gpu.erased.clear(vertex);gpu.commandsDrained=false;gpu.pending="GPU_VERTEX_CONTENT_CHANGED";complete=false;continue;}
                     if(!sameBytes(current,image.payload(),offset,image.stride())&&!zeroBytes(current)){gpu.pending="GPU_VERTEX_CONTENT_CHANGED";complete=false;continue;}
                     if(!zeroBytes(current)){java.nio.ByteBuffer zero=java.nio.ByteBuffer.allocateDirect(image.stride());gl(context,"GL15","glBufferSubData",new Class<?>[]{I,long.class,java.nio.ByteBuffer.class},36662,(long)offset,zero);current.clear();gl(context,"GL15","glGetBufferSubData",new Class<?>[]{I,long.class,java.nio.ByteBuffer.class},36662,(long)offset,current);}
                     if(!zeroBytes(current)){gpu.pending="GPU_VERTEX_ERASE_READBACK_PENDING";complete=false;continue;}
@@ -542,13 +660,108 @@ public final class ClientBridge {
                 return complete;
             }finally{gl(context,"GL15","glBindBuffer",new Class<?>[]{I,I},36662,original);}
         }
+        private boolean cpuIdentity(Object result,CpuImage cpu)throws ReflectiveOperationException{
+            Class<?> type=actualBase(result,"com.mojang.blaze3d.vertex.BufferBuilder$RenderedBuffer");Object builder=cpu.builder.get(),storage=cpu.storage.get();Class<?> owner=builder==null?null:actualBase(builder,"com.mojang.blaze3d.vertex.BufferBuilder");
+            if(type==null||type!=result.getClass()||owner==null||builder.getClass()!=owner||storage==null)return false;Object state=cpu.image.state();Class<?> shape=actualBase(state,"com.mojang.blaze3d.vertex.BufferBuilder$DrawState");if(shape==null)return false;
+            return clientMethod(shape,"format","f_85733_","()Lcom/mojang/blaze3d/vertex/VertexFormat;").invoke(state)==cpu.image.format()&&clientMethod(shape,"mode","f_85735_","()Lcom/mojang/blaze3d/vertex/VertexFormat$Mode;").invoke(state)==cpu.image.mode()
+                    &&((Number)clientMethod(shape,"vertexCount","f_85734_","()I").invoke(state)).intValue()==cpu.image.count()&&(Boolean)clientMethod(shape,"indexOnly","f_166799_","()Z").invoke(state)==cpu.image.indexOnly()&&((Number)clientMethod(shape,"bufferSize","m_166813_","()I").invoke(state)).intValue()==cpu.retained.length
+                    &&field(result,type,"drawState")==cpu.image.state()&&field(result,type,"this$0")==builder&&number(result,type,"pointer")==cpu.pointer
+                    &&field(builder,owner,"buffer")==storage&&bufferNumber(storage,"address","J")==cpu.address&&bufferNumber(storage,"capacity","I")==cpu.capacity;
+        }
+        private boolean maintenanceIdentity(CpuMaintenance token)throws ReflectiveOperationException{
+            if(token==null||maintainingCpu.get()!=token||token.thread!=Thread.currentThread()||UI_FIELDS.get(token.type).instance.get(null)!=token.owner)return false;
+            Method render=token.renderSystem.getDeclaredMethod("isOnRenderThread");if(!Modifier.isStatic(render.getModifiers())||render.getReturnType()!=boolean.class||!(Boolean)render.invoke(null))return false;
+            return WALKER.walk(frames->frames.anyMatch(frame->frame.getDeclaringClass()==token.type&&clientMember(frame,"net.minecraft.client.Minecraft","runTick","m_91383_","(Z)V")));
+        }
+        private boolean stoppedCpuSources(Module[] modules){if(!retiredSources(modules))return false;for(Module module:modules)if(!ControlBridge.modStopped(module))return false;return true;}
+        private BitSet eligibleVertices(VertexImage image)throws ReflectiveOperationException{
+            BitSet selected=new BitSet(image.count()),outside=new BitSet(image.count());for(int n=0;n<image.count();n++)if(stoppedCpuSources(image.vertices().get(n)))selected.set(n);
+            Class<?> type=actualBase(image.mode(),"com.mojang.blaze3d.vertex.VertexFormat$Mode");if(type==null)throw new IllegalStateException("ACTUAL_VERTEX_MODE_REQUIRED");int mode=number(image.mode(),type,"asGLMode");
+            if(mode!=0&&mode!=1&&mode!=3&&mode!=4&&mode!=5&&mode!=6)throw new IllegalStateException("GPU_PRIMITIVE_LAYOUT_UNSUPPORTED");for(int n=0;;n++){int[] part=primitive(mode,n,image.indices());if(part==null)break;boolean owned=true;for(int vertex:part)owned&=selected.get(vertex);if(!owned)for(int vertex:part)outside.set(vertex);}selected.andNot(outside);return selected;
+        }
+        private VertexImage buildImage(Build build)throws ReflectiveOperationException{
+            Class<?> mode=actualBase(build.mode,"com.mojang.blaze3d.vertex.VertexFormat$Mode");if(mode==null)throw new IllegalStateException("ACTUAL_VERTEX_MODE_REQUIRED");int count=build.vertices.size(),indexCount=((Number)clientMethod(mode,"indexCount","m_166958_","(I)I",int.class).invoke(build.mode,count)).intValue();int[] indices=new int[indexCount];String kind=((Enum<?>)build.mode).name();int[] offsets=kind.equals("QUADS")?new int[]{0,1,2,2,3,0}:kind.equals("LINES")?new int[]{0,1,2,3,2,1}:null;for(int n=0;n<indices.length;n++){indices[n]=offsets==null?n:n/6*4+offsets[n%6];if(indices[n]>=count)throw new IllegalStateException("GPU_INDEX_OUTSIDE_OBSERVED_VERTICES");}return new VertexImage(build.batch,build.vertices,null,build.format,build.mode,count,indices,build.payload,build.stride,build.indexOnly,build.pending);
+        }
+        synchronized boolean payloadAllowed(Object proof,Object data,int offset,int length,boolean after){
+            if(!(proof instanceof CpuWrite token)||clearingCpu.get()!=token||token.ended||data!=token.storage||offset!=token.offset||length!=token.length)return false;
+            try{if(!maintenanceIdentity(token.maintenance)||token.storage.getClass().getClassLoader()!=null||!token.storage.isDirect()||token.storage.isReadOnly()||token.stride<=0||offset<token.pointer||length<=0||(offset-token.pointer)%token.stride!=0||length%token.stride!=0
+                    ||bufferNumber(data,"address","J")!=token.address||bufferNumber(data,"capacity","I")!=token.capacity||bufferNumber(data,"position","I")!=token.position||bufferNumber(data,"limit","I")!=token.limit||offset>token.limit-length)return false;
+                List<Module[]> rows;if(token.cpu!=null){if(rendered.get(new Key(token.carrier,false))!=token.cpu||token.cpu.finished||token.cpu.image.indexOnly()||!cpuIdentity(token.carrier,token.cpu))return false;Class<?> type=actualBase(token.carrier,"com.mojang.blaze3d.vertex.BufferBuilder$RenderedBuffer"),owner=actualBase(token.builder,"com.mojang.blaze3d.vertex.BufferBuilder");if((Boolean)field(token.carrier,type,"released")||token.pointer>number(token.builder,owner,"renderedBufferPointer")-token.expected.length)return false;rows=token.cpu.image.vertices();}
+                else{if(builds.get(new Key(token.builder,false))!=token.build||token.build.indexOnly||!buildIdentity(token.builder,token.build))return false;Class<?> type=actualBase(token.builder,"com.mojang.blaze3d.vertex.BufferBuilder");if(!(Boolean)field(token.builder,type,"building")||number(token.builder,type,"vertices")!=token.count||number(token.builder,type,"nextElementByte")<token.pointer+token.expected.length)return false;rows=token.build.vertices;}
+                int first=(offset-token.pointer)/token.stride,end=first+length/token.stride;if(end>rows.size())return false;for(int n=first;n<end;n++)if(!token.selected.get(n)||!stoppedCpuSources(rows.get(n)))return false;
+                if(!after){if(token.checked||!cpuBytes(token.storage,token.pointer,token.expected,token.expected.length))return false;token.outside=readBytes(token.storage,0,token.limit);token.checked=true;return true;}
+                if(!token.checked||token.afterVerified||token.outside==null)return false;for(int n=0;n<token.outside.length;n++){byte expected=n>=offset&&n-offset<length?0:token.outside[n];if(token.storage.get(n)!=expected)return false;}token.afterVerified=true;return true;
+            }catch(ReflectiveOperationException|RuntimeException changed){return false;}
+        }
+        private String cpuFailure(Throwable failure){while(failure.getCause()!=null&&failure.getCause()!=failure)failure=failure.getCause();return failure.getClass().getSimpleName()+":"+String.valueOf(failure.getMessage());}
+        private void clearRanges(Object carrier,Object builder,Build build,CpuImage cpu,VertexImage image)throws ReflectiveOperationException{
+            BitSet selected=eligibleVertices(image);if(selected.isEmpty())return;Object data=cpu==null?build.storage.get():cpu.storage.get();if(!(data instanceof java.nio.ByteBuffer storage))throw new IllegalStateException("GPU_CPU_STORAGE_UNAVAILABLE");int pointer=cpu==null?build.pointer:cpu.pointer,stride=image.stride(),count=image.count();if(stride<=0)throw new IllegalStateException("GPU_CPU_VERTEX_STRIDE_UNOBSERVED");
+            for(int first=selected.nextSetBit(0);first>=0;){int end=selected.nextClearBit(first),offset=Math.addExact(pointer,Math.multiplyExact(first,stride)),length=Math.multiplyExact(end-first,stride);byte[] expected=cpu==null?Arrays.copyOf(build.payload,Math.multiplyExact(count,stride)):cpu.retained.clone();protect(expected);CpuWrite token=new CpuWrite(maintainingCpu.get(),carrier,builder,build,cpu,storage,offset,length,pointer,stride,count,Math.toIntExact(bufferNumber(data,"position","I")),Math.toIntExact(bufferNumber(data,"limit","I")),Math.toIntExact(bufferNumber(data,"capacity","I")),bufferNumber(data,"address","J"),expected,(BitSet)selected.clone());protect(token);protect(token.selected);CpuWrite previous=clearingCpu.get();clearingCpu.set(token);
+                try{clearClientPayload(token,storage,offset,length,token.maintenance.type);if(!token.afterVerified)throw new IllegalStateException("GPU_CPU_VERTEX_ERASE_READBACK_PENDING");byte[] retained=cpu==null?build.payload:cpu.retained;Arrays.fill(retained,offset-pointer,offset-pointer+length,(byte)0);(cpu==null?build.erased:cpu.erased).set(first,end);if(cpu==null)build.retirementPending="";else cpu.pending="";}
+                catch(Throwable unavailable){if(cpu==null)build.retirementPending="GPU_CPU_PAYLOAD_ERASE:"+cpuFailure(unavailable);else cpu.pending="GPU_CPU_PAYLOAD_ERASE:"+cpuFailure(unavailable);break;}
+                finally{token.ended=true;if(previous==null)clearingCpu.remove();else clearingCpu.set(previous);}first=selected.nextSetBit(end);
+            }
+        }
+        private boolean quadStopped(SortImage image,int index){int first=index*4;if(first<0||first>image.image.vertices().size()-4)return false;for(int n=first;n<first+4;n++)if(!stoppedCpuSources(image.image.vertices().get(n)))return false;return true;}
+        private List<Map.Entry<Key,SortImage>> sortRecords(){List<Map.Entry<Key,SortImage>> records=new ArrayList<>(sorting.entrySet());records.addAll(buildSorting.entrySet());return records;}
+        private void copySortReceipts(SortImage target)throws ReflectiveOperationException{
+            Object data=target.points.get();if(!(data instanceof Object[] points))return;for(var entry:sortRecords()){SortImage prior=entry.getValue();if(prior==target||prior.points.get()!=data)continue;for(int n=0;n<points.length&&n<prior.identities.length;n++)if(prior.erased.get(n)&&target.identities[n].get()==prior.identities[n].get()&&Arrays.stream(pointBits(points[n],data.getClass().getComponentType())).allMatch(value->value==0))target.erased.set(n);}
+        }
+        private boolean privateSortPoint(Object point)throws ReflectiveOperationException{
+            Module[] outside=origins(point);if(outside.length!=0&&!stoppedCpuSources(outside))return false;boolean known=false;for(var entry:sortRecords()){Object carrier=entry.getKey().get();SortImage saved=entry.getValue();if(carrier==null)continue;Class<?> type=actualBase(carrier,"com.mojang.blaze3d.vertex.BufferBuilder$SortState");if(type==null)type=actualBase(carrier,"com.mojang.blaze3d.vertex.BufferBuilder");if(type==null)return false;Object current=field(carrier,type,"sortingPoints");if(!(current instanceof Object[] points))continue;for(int n=0;n<points.length;n++)if(points[n]==point){known=true;if(current!=saved.points.get()||!sortIdentity(carrier,saved)||n>=saved.identities.length||saved.identities[n].get()!=point||!quadStopped(saved,n))return false;}}
+            for(var entry:builds.entrySet()){Object builder=entry.getKey().get();if(builder==null)continue;Class<?> type=actualBase(builder,"com.mojang.blaze3d.vertex.BufferBuilder");if(type==null)return false;Object current=field(builder,type,"sortingPoints");if(current instanceof Object[] points&&Arrays.stream(points).anyMatch(value->value==point)){SortImage saved=buildSorting.get(new Key(builder,false));if(saved==null||saved.points.get()!=current||!sortIdentity(builder,saved))return false;}}
+            return known;
+        }
+        synchronized boolean sortPointAllowed(Object proof,Object point,boolean after){
+            if(!(proof instanceof SortWrite token)||clearingSort.get()!=token||token.ended||point!=token.point)return false;
+            try{if(!maintenanceIdentity(token.maintenance)||!sortIdentity(token.carrier,token.image)||token.image.points.get()!=token.points||token.index<0||token.index>=token.points.length||token.points[token.index]!=point||token.image.identities[token.index].get()!=point||!quadStopped(token.image,token.index)||!privateSortPoint(point))return false;Class<?> vector=token.points.getClass().getComponentType();
+                if(!after){if(token.checked)return false;token.before=token.points.clone();token.coordinates=new int[Math.multiplyExact(token.points.length,3)];protect(token.before);protect(token.coordinates);for(int n=0;n<token.points.length;n++){if(token.points[n]!=token.image.identities[n].get())return false;int[] bits=pointBits(token.points[n],vector);for(int axis=0;axis<3;axis++){if(bits[axis]!=token.image.coordinates[n*3+axis])return false;token.coordinates[n*3+axis]=bits[axis];}}token.checked=true;return true;}
+                if(!token.checked||token.afterVerified)return false;for(int n=0;n<token.points.length;n++){if(token.points[n]!=token.before[n])return false;int[] bits=pointBits(token.points[n],vector);for(int axis=0;axis<3;axis++)if(bits[axis]!=(token.points[n]==point?0:token.coordinates[n*3+axis]))return false;}token.afterVerified=true;return true;
+            }catch(ReflectiveOperationException|RuntimeException changed){return false;}
+        }
+        private void retireSortPoints(){
+            for(var entry:sortRecords()){Object carrier=entry.getKey().get();SortImage saved=entry.getValue();Object data=saved.points.get();if(carrier==null||!(data instanceof Object[] points)||!saved.image.pending().isEmpty())continue;
+                try{if(!sortIdentity(carrier,saved)){saved.pending="GPU_CPU_SORTING_IDENTITY_CHANGED";continue;}for(int n=0;n<points.length;n++){if(!quadStopped(saved,n)||!privateSortPoint(points[n]))continue;SortWrite token=new SortWrite(maintainingCpu.get(),carrier,saved,n,points,points[n]);protect(token);SortWrite previous=clearingSort.get();clearingSort.set(token);
+                        try{clearClientSortPoint(token,token.point,token.maintenance.type);if(!token.afterVerified)throw new IllegalStateException("GPU_CPU_SORT_POINT_READBACK_PENDING");for(var peer:sortRecords()){Object peerCarrier=peer.getKey().get();SortImage image=peer.getValue();Object peerData=image.points.get();if(peerCarrier==null||!(peerData instanceof Object[] values)||!sortIdentity(peerCarrier,image))continue;for(int index=0;index<values.length;index++)if(values[index]==token.point&&image.identities[index].get()==token.point){Arrays.fill(image.coordinates,index*3,index*3+3,0);image.erased.set(index);image.pending="";}}}
+                        catch(Throwable unavailable){saved.pending="GPU_CPU_SORT_POINT_ERASE:"+cpuFailure(unavailable);break;}
+                        finally{token.ended=true;if(previous==null)clearingSort.remove();else clearingSort.set(previous);}
+                    }
+                }catch(ReflectiveOperationException|RuntimeException unavailable){saved.pending="GPU_CPU_SORT_POINT_ERASE:"+cpuFailure(unavailable);}
+            }
+        }
+        private void retireBuilds(){for(var entry:builds.entrySet()){Object builder=entry.getKey().get();Build build=entry.getValue();if(builder==null||build.indexOnly||build.vertices.isEmpty()||!build.pending.isEmpty())continue;try{Class<?> type=actualBase(builder,"com.mojang.blaze3d.vertex.BufferBuilder");if(type==null||!(Boolean)field(builder,type,"building"))continue;if(!buildIdentity(builder,build)||number(builder,type,"vertices")!=build.vertices.size()){build.retirementPending="GPU_CPU_BUILD_IDENTITY_CHANGED";continue;}clearRanges(builder,builder,build,null,buildImage(build));}catch(ReflectiveOperationException|RuntimeException unavailable){build.retirementPending="GPU_CPU_PAYLOAD_ERASE:"+cpuFailure(unavailable);}}}
+        private void retireCpu(){
+            for(var entry:rendered.entrySet()){Object result=entry.getKey().get();CpuImage cpu=entry.getValue();if(result==null||cpu.finished||cpu.image.vertices().isEmpty()||!cpu.image.pending().isEmpty())continue;
+                try{if(!cpuIdentity(result,cpu)){cpu.pending="GPU_CPU_STORAGE_IDENTITY_CHANGED";continue;}Class<?> type=actualBase(result,"com.mojang.blaze3d.vertex.BufferBuilder$RenderedBuffer");
+                    if((Boolean)field(result,type,"released")){cpu.finished=true;cpu.pending="";continue;}Object builder=cpu.builder.get(),storage=cpu.storage.get();if(!cpu.image.indexOnly())clearRanges(result,builder,null,cpu,cpu.image);
+                    if(!cpu.image.vertices().stream().allMatch(this::retiredSources)||!retiredSources(sources(result)))continue;Class<?> owner=actualBase(builder,"com.mojang.blaze3d.vertex.BufferBuilder");int count=number(builder,owner,"renderedBufferCount");
+                    if(count<=0||count==1&&(Boolean)field(builder,owner,"building")){cpu.pending="GPU_CPU_ORIGINAL_RELEASE_NOT_SAFE";continue;}
+                    int bytes=((Number)clientMethod(cpu.image.state().getClass(),"bufferSize","m_166813_","()I").invoke(cpu.image.state())).intValue();
+                    if(cpu.pointer<0||bytes<0||cpu.pointer>cpu.capacity-bytes||cpu.pointer+bytes>number(builder,owner,"renderedBufferPointer")){cpu.pending="GPU_CPU_RETAINED_RANGE_CHANGED";continue;}
+                    CpuRelease token=new CpuRelease(result,cpu,builder,storage,type,owner,count),previous=releasingCpu.get();protect(token);releasingCpu.set(token);
+                    try{platformVoid(result,type,"release");if(!(Boolean)field(result,type,"released"))cpu.pending="GPU_CPU_ORIGINAL_RELEASE_PENDING";else{cpu.finished=true;cpu.pending="";}}
+                    finally{if(previous==null)releasingCpu.remove();else releasingCpu.set(previous);}
+                }catch(Throwable failure){cpu.pending="GPU_CPU_ORIGINAL_RELEASE:"+failure.getClass().getSimpleName()+":"+String.valueOf(failure.getMessage());}
+            }
+        }
+        boolean cleanupField(Object receiver,Class<?> declaring,String name){
+            CpuRelease token=releasingCpu.get();if(token==null||token.thread!=Thread.currentThread())return false;
+            try{if(!cpuIdentity(token.rendered,token.image)||field(token.builder,token.builderType,"buffer")!=token.storage)return false;
+                int count=number(token.builder,token.builderType,"renderedBufferCount");if(count<token.count-1||count>token.count)return false;
+            }catch(ReflectiveOperationException|RuntimeException changed){return false;}
+            boolean original=WALKER.walk(frames->frames.anyMatch(frame->frame.getDeclaringClass()==token.renderedType&&clientMember(frame,"com.mojang.blaze3d.vertex.BufferBuilder$RenderedBuffer","release","m_231200_","()V")));
+            if(!original)return false;
+            return receiver==token.rendered&&declaring==token.renderedType&&Set.of("released","f_231191_").contains(name)
+                    ||receiver==token.builder&&declaring==token.builderType&&Set.of("renderedBufferCount","f_231156_","renderedBufferPointer","f_231157_","nextElementByte","f_85652_").contains(name);
+        }
         private boolean drain(Uploaded gpu)throws ReflectiveOperationException{
             if(gpu.commandsDrained)return true;if(gpu.fence==0){gpu.fence=((Number)gl(gpu.context,"GL32","glFenceSync",new Class<?>[]{I,I},37143,0)).longValue();if(gpu.fence==0){gpu.pending="GPU_RETIREMENT_FENCE_UNAVAILABLE";return false;}gl(gpu.context,"GL11","glFlush",new Class<?>[0]);}
             int status=((Number)gl(gpu.context,"GL32","glClientWaitSync",new Class<?>[]{long.class,I,long.class},gpu.fence,0,0L)).intValue();if(status!=37146&&status!=37148){gpu.pending=status==37149?"GPU_RETIREMENT_WAIT_FAILED":"GPU_PRIOR_COMMANDS_EXIT_PENDING";return false;}
             gl(gpu.context,"GL32","glDeleteSync",new Class<?>[]{long.class},gpu.fence);gpu.fence=0;gpu.commandsDrained=true;return true;
         }
-        void maintenance(StackWalker.StackFrame frame){require(frame,"net.minecraft.client.Minecraft","runTick");synchronized(SOURCES){if(REQUESTED.isEmpty())return;}
-            try{synchronized(this){Context context=context(frame.getDeclaringClass());for(var entry:uploaded.entrySet()){
+        void maintenance(StackWalker.StackFrame frame){require(frame,"net.minecraft.client.Minecraft","runTick","m_91383_","(Z)V");synchronized(SOURCES){if(REQUESTED.isEmpty())return;}
+            CpuMaintenance maintenancePrior=maintainingCpu.get();try{Class<?> renderType=frame.getDeclaringClass(),renderSystem=Class.forName("com.mojang.blaze3d.systems.RenderSystem",false,renderType.getClassLoader());Object owner=UI_FIELDS.get(renderType).instance.get(null);if(owner==null||owner.getClass()!=renderType||!role(renderSystem))throw new SecurityException("ACTUAL_CLIENT_CPU_RENDER_OWNER_REQUIRED");CpuMaintenance scope=new CpuMaintenance(renderType,renderSystem,owner);protect(scope);maintainingCpu.set(scope);if(!maintenanceIdentity(scope))throw new SecurityException("ACTUAL_CLIENT_CPU_RENDER_THREAD_REQUIRED");
+                synchronized(this){retireBuilds();retireCpu();retireSortPoints();Context context=context(frame.getDeclaringClass());for(var entry:uploaded.entrySet()){
                     Uploaded gpu=entry.getValue();Object receiver=entry.getKey().get();if(gpu.context!=context||gpu.image==null||gpu.uploadPending||!gpu.image.pending().isEmpty())continue;
                     if(receiver==null){gpu.pending="GPU_ORIGINAL_CARRIER_RELEASE_UNOBSERVED";continue;}Class<?> type=actualBase(receiver,"com.mojang.blaze3d.vertex.VertexBuffer");if(type==null||number(receiver,type,"vertexBufferId")!=gpu.vertexId||number(receiver,type,"indexBufferId")!=gpu.indexId||number(receiver,type,"arrayObjectId")!=gpu.vao){gpu.pending="GPU_STORAGE_IDENTITY_CHANGED";continue;}
                     BitSet selected=privateVertices(gpu);if(selected.isEmpty())continue;if(!eraseVertices(gpu,selected)||!drain(gpu))continue;
@@ -558,8 +771,9 @@ public final class ClientBridge {
                     }else gpu.pending="GPU_SHARED_BUFFER_OTHER_SHARES_RETAINED";
                 }uploaded.entrySet().removeIf(entry->entry.getValue().storageReleased);}
             }catch(ReflectiveOperationException failure){throw new IllegalStateException("GPU_SOURCE_RETIREMENT_UNAVAILABLE",failure);}
+            finally{if(maintenancePrior==null)maintainingCpu.remove();else maintainingCpu.set(maintenancePrior);}
         }
-        Object drawing(Object buffer,StackWalker.StackFrame frame){require(frame,"com.mojang.blaze3d.vertex.VertexBuffer","draw");try{synchronized(this){Uploaded gpu=uploaded.get(new Key(buffer,false));if(gpu==null||gpu.image==null||gpu.uploadPending||!gpu.image.pending().isEmpty())return null;VertexImage image=gpu.image;Context context=context(frame.getDeclaringClass());if(context!=gpu.context||integer(context,34229)!=gpu.vao||number(buffer,frame.getDeclaringClass(),"vertexBufferId")!=gpu.vertexId||number(buffer,frame.getDeclaringClass(),"indexBufferId")!=gpu.indexId){gpu.pending="GPU_STORAGE_BINDING_CHANGED";return null;}
+        Object drawing(Object buffer,StackWalker.StackFrame frame){require(frame,"com.mojang.blaze3d.vertex.VertexBuffer","draw","m_166882_","()V");try{synchronized(this){Uploaded gpu=uploaded.get(new Key(buffer,false));if(gpu==null||gpu.image==null||gpu.uploadPending||!gpu.image.pending().isEmpty())return null;VertexImage image=gpu.image;Context context=context(frame.getDeclaringClass());if(context!=gpu.context||integer(context,34229)!=gpu.vao||number(buffer,frame.getDeclaringClass(),"vertexBufferId")!=gpu.vertexId||number(buffer,frame.getDeclaringClass(),"indexBufferId")!=gpu.indexId){gpu.pending="GPU_STORAGE_BINDING_CHANGED";return null;}
                     Class<?> modeType=actualBase(image.mode(),"com.mojang.blaze3d.vertex.VertexFormat$Mode");int mode=number(image.mode(),modeType,"asGLMode"),count=0;boolean shared=false;
                     for(int[] part;(part=primitive(mode,count,image.indices()))!=null;count++){boolean selected=true,any=false;for(int index:part){Module[] owners=image.vertices().get(index);selected&=exclusive(owners);any|=stopped(owners);}if(selected)gpu.hidden.set(count);else if(any)shared=true;}
                     if(count==0||gpu.hidden.isEmpty())return null;if(gpu.hidden.cardinality()==count){gpu.pending=shared?"GPU_SHARED_PRIMITIVE_PENDING":"GPU_PAYLOAD_RETIREMENT_PENDING";return Boolean.FALSE;}
@@ -584,17 +798,55 @@ public final class ClientBridge {
                 installed=true;
             }finally{gl(context,"GL15","glBindBuffer",new Class<?>[]{I,I},35882,buffer);if(!installed)gl(context,"GL11","glBindTexture",new Class<?>[]{I,I},35882,texture);gl(context,"GL13","glActiveTexture",new Class<?>[]{I},active);}return new int[]{unit,texture};
         }
-        void drawn(Object token,StackWalker.StackFrame frame){require(frame,"com.mojang.blaze3d.vertex.VertexBuffer","draw");if(token==null||token==Boolean.FALSE)return;if(!(token instanceof DrawEntry entry))throw new SecurityException("ACTUAL_GPU_DRAW_TOKEN_REQUIRED");try{synchronized(this){Context context=entry.context();int active=integer(context,34016);gl(context,"GL13","glActiveTexture",new Class<?>[]{I},33984+entry.textureUnit());try{gl(context,"GL11","glBindTexture",new Class<?>[]{I,I},35882,entry.oldTexture());}finally{gl(context,"GL13","glActiveTexture",new Class<?>[]{I},active);}if(context.programs.get(entry.program())!=entry.linked())return;int current=integer(context,35725);if(current!=entry.program())gl(context,"GL20","glUseProgram",new Class<?>[]{I},entry.program());try{gl(context,"GL20","glUniform1i",new Class<?>[]{I,I},entry.enabled(),entry.oldEnabled());gl(context,"GL20","glUniform1i",new Class<?>[]{I,I},entry.sampler(),entry.oldSampler());}finally{if(current!=entry.program())gl(context,"GL20","glUseProgram",new Class<?>[]{I},current);}}}catch(ReflectiveOperationException failure){throw new IllegalStateException("GPU_MASK_SCOPE_RELEASE_UNAVAILABLE",failure);}}
-        void closed(Object buffer,StackWalker.StackFrame frame){require(frame,"com.mojang.blaze3d.vertex.VertexBuffer","close");try{synchronized(this){if(number(buffer,frame.getDeclaringClass(),"vertexBufferId")==-1&&number(buffer,frame.getDeclaringClass(),"indexBufferId")==-1&&number(buffer,frame.getDeclaringClass(),"arrayObjectId")==-1){Uploaded gpu=uploaded.get(new Key(buffer,false));if(gpu!=null){gpu.storageReleased=true;gpu.pending="";if(gpu.fence!=0){gl(gpu.context,"GL32","glDeleteSync",new Class<?>[]{long.class},gpu.fence);gpu.fence=0;}}}}}catch(ReflectiveOperationException failure){throw new IllegalStateException("GPU_BUFFER_CLOSE_READBACK_UNAVAILABLE",failure);}}
-        void shaderClosed(int shader,StackWalker.StackFrame frame){require(frame,"com.mojang.blaze3d.platform.GlStateManager","glDeleteShader");try{synchronized(this){context(frame.getDeclaringClass()).shaders.remove(shader);}}catch(ReflectiveOperationException failure){throw new IllegalStateException("GPU_SHADER_CLOSE_UNAVAILABLE",failure);}}
-        void programClosed(int program,StackWalker.StackFrame frame){require(frame,"com.mojang.blaze3d.platform.GlStateManager","glDeleteProgram");try{synchronized(this){context(frame.getDeclaringClass()).programs.remove(program);}}catch(ReflectiveOperationException failure){throw new IllegalStateException("GPU_PROGRAM_CLOSE_UNAVAILABLE",failure);}}
-        void contextClosing(StackWalker.StackFrame frame){require(frame,"net.minecraft.client.Minecraft","close");try{synchronized(this){Context context=context(frame.getDeclaringClass());if(context.buffer!=0){gl(context,"GL15","glDeleteBuffers",new Class<?>[]{I},context.buffer);if(Boolean.TRUE.equals(gl(context,"GL15","glIsBuffer",new Class<?>[]{I},context.buffer)))throw new IllegalStateException("GPU_MASK_BUFFER_RELEASE_PENDING");context.buffer=0;}if(context.texture!=0){gl(context,"GL11","glDeleteTextures",new Class<?>[]{I},context.texture);if(Boolean.TRUE.equals(gl(context,"GL11","glIsTexture",new Class<?>[]{I},context.texture)))throw new IllegalStateException("GPU_MASK_TEXTURE_RELEASE_PENDING");context.texture=0;}context.programs.clear();context.shaders.clear();contexts.values().removeIf(value->value==context);}}catch(ReflectiveOperationException failure){throw new IllegalStateException("GPU_CONTEXT_RESOURCE_RELEASE_UNAVAILABLE",failure);}}
-        synchronized long pending(Module module){builds.entrySet().removeIf(entry->entry.getKey().get()==null);rendered.entrySet().removeIf(entry->entry.getKey().get()==null);sorting.entrySet().removeIf(entry->entry.getKey().get()==null);long count=0;for(Uploaded gpu:uploaded.values())if(gpu.image!=null&&gpu.image.vertices().stream().anyMatch(row->Arrays.stream(row).anyMatch(source->source==module)))count++;return count;}
-        synchronized void reap(Key key){builds.remove(key);rendered.remove(key);sorting.remove(key);uploaded.remove(key);}
-        Object[] controls(){return new Object[]{this,builds,rendered,sorting,uploaded,contexts};}
+        void drawn(Object token,StackWalker.StackFrame frame){require(frame,"com.mojang.blaze3d.vertex.VertexBuffer","draw","m_166882_","()V");if(token==null||token==Boolean.FALSE)return;if(!(token instanceof DrawEntry entry))throw new SecurityException("ACTUAL_GPU_DRAW_TOKEN_REQUIRED");try{synchronized(this){Context context=entry.context();int active=integer(context,34016);gl(context,"GL13","glActiveTexture",new Class<?>[]{I},33984+entry.textureUnit());try{gl(context,"GL11","glBindTexture",new Class<?>[]{I,I},35882,entry.oldTexture());}finally{gl(context,"GL13","glActiveTexture",new Class<?>[]{I},active);}if(context.programs.get(entry.program())!=entry.linked())return;int current=integer(context,35725);if(current!=entry.program())gl(context,"GL20","glUseProgram",new Class<?>[]{I},entry.program());try{gl(context,"GL20","glUniform1i",new Class<?>[]{I,I},entry.enabled(),entry.oldEnabled());gl(context,"GL20","glUniform1i",new Class<?>[]{I,I},entry.sampler(),entry.oldSampler());}finally{if(current!=entry.program())gl(context,"GL20","glUseProgram",new Class<?>[]{I},current);}}}catch(ReflectiveOperationException failure){throw new IllegalStateException("GPU_MASK_SCOPE_RELEASE_UNAVAILABLE",failure);}}
+        void closed(Object buffer,StackWalker.StackFrame frame){require(frame,"com.mojang.blaze3d.vertex.VertexBuffer","close","close","()V");try{synchronized(this){if(number(buffer,frame.getDeclaringClass(),"vertexBufferId")==-1&&number(buffer,frame.getDeclaringClass(),"indexBufferId")==-1&&number(buffer,frame.getDeclaringClass(),"arrayObjectId")==-1){Uploaded gpu=uploaded.get(new Key(buffer,false));if(gpu!=null){gpu.storageReleased=true;gpu.pending="";if(gpu.fence!=0){gl(gpu.context,"GL32","glDeleteSync",new Class<?>[]{long.class},gpu.fence);gpu.fence=0;}}}}}catch(ReflectiveOperationException failure){throw new IllegalStateException("GPU_BUFFER_CLOSE_READBACK_UNAVAILABLE",failure);}}
+        void shaderClosed(int shader,StackWalker.StackFrame frame){require(frame,"com.mojang.blaze3d.platform.GlStateManager","glDeleteShader","glDeleteShader","(I)V");try{synchronized(this){context(frame.getDeclaringClass()).shaders.remove(shader);}}catch(ReflectiveOperationException failure){throw new IllegalStateException("GPU_SHADER_CLOSE_UNAVAILABLE",failure);}}
+        void programClosed(int program,StackWalker.StackFrame frame){require(frame,"com.mojang.blaze3d.platform.GlStateManager","glDeleteProgram","glDeleteProgram","(I)V");try{synchronized(this){context(frame.getDeclaringClass()).programs.remove(program);}}catch(ReflectiveOperationException failure){throw new IllegalStateException("GPU_PROGRAM_CLOSE_UNAVAILABLE",failure);}}
+        void contextClosing(StackWalker.StackFrame frame){require(frame,"net.minecraft.client.Minecraft","close","close","()V");try{synchronized(this){Context context=context(frame.getDeclaringClass());if(context.buffer!=0){gl(context,"GL15","glDeleteBuffers",new Class<?>[]{I},context.buffer);if(Boolean.TRUE.equals(gl(context,"GL15","glIsBuffer",new Class<?>[]{I},context.buffer)))throw new IllegalStateException("GPU_MASK_BUFFER_RELEASE_PENDING");context.buffer=0;}if(context.texture!=0){gl(context,"GL11","glDeleteTextures",new Class<?>[]{I},context.texture);if(Boolean.TRUE.equals(gl(context,"GL11","glIsTexture",new Class<?>[]{I},context.texture)))throw new IllegalStateException("GPU_MASK_TEXTURE_RELEASE_PENDING");context.texture=0;}context.programs.clear();context.shaders.clear();contexts.values().removeIf(value->value==context);}}catch(ReflectiveOperationException failure){throw new IllegalStateException("GPU_CONTEXT_RESOURCE_RELEASE_UNAVAILABLE",failure);}}
+        private long sourceVertices(List<Module[]> rows,Module module,BitSet erased,boolean completed){long count=0;for(int n=0;n<rows.size();n++)if(Arrays.stream(rows.get(n)).anyMatch(source->source==module)&&(!completed||erased==null||!erased.get(n)))count++;return count;}
+        private BitSet cpuReadback(Object carrier,Build build,CpuImage cpu)throws ReflectiveOperationException{
+            BitSet receipt=(BitSet)(cpu==null?build.erased:cpu.erased).clone();Object data=cpu==null?build.storage.get():cpu.storage.get();int pointer=cpu==null?build.pointer:cpu.pointer,stride=cpu==null?build.stride:cpu.image.stride();
+            if(!(data instanceof java.nio.ByteBuffer storage)||stride<=0||(cpu==null?!build.pending.isEmpty()||!buildIdentity(carrier,build):!cpu.image.pending().isEmpty()||!cpuIdentity(carrier,cpu)))return new BitSet();
+            for(int vertex=receipt.nextSetBit(0);vertex>=0;vertex=receipt.nextSetBit(vertex+1)){int offset=Math.addExact(pointer,Math.multiplyExact(vertex,stride));if(offset<0||offset>storage.limit()-stride){receipt.clear(vertex);continue;}for(int n=0;n<stride;n++)if(storage.get(offset+n)!=0){receipt.clear(vertex);break;}}
+            return receipt;
+        }
+        private long buildPending(Object receiver,Build build,Module module){
+            long known=sourceVertices(build.vertices,module,null,false);if(receiver==null||known==0||build.indexOnly)return 0;try{Class<?> type=actualBase(receiver,"com.mojang.blaze3d.vertex.BufferBuilder");if(type!=null&&(!(Boolean)field(receiver,type,"building")||number(receiver,type,"vertices")==0))return 0;return sourceVertices(build.vertices,module,cpuReadback(receiver,build,null),true);}catch(ReflectiveOperationException|RuntimeException unavailable){return known;}
+        }
+        private long cpuPending(Object receiver,CpuImage cpu,Module module){
+            long known=sourceVertices(cpu.image.vertices(),module,null,false);if(receiver==null||cpu.finished||known==0||cpu.image.indexOnly())return 0;try{Class<?> type=actualBase(receiver,"com.mojang.blaze3d.vertex.BufferBuilder$RenderedBuffer");if(type!=null&&(Boolean)field(receiver,type,"released")){cpu.finished=true;return 0;}return sourceVertices(cpu.image.vertices(),module,cpuReadback(receiver,null,cpu),true);}catch(ReflectiveOperationException|RuntimeException unavailable){return known;}
+        }
+        private long sortPending(Object receiver,SortImage saved,Module module){
+            long known=sourceVertices(saved.image.vertices(),module,null,false);if(receiver==null||known==0)return 0;try{Class<?> type=actualBase(receiver,"com.mojang.blaze3d.vertex.BufferBuilder$SortState");if(type==null)type=actualBase(receiver,"com.mojang.blaze3d.vertex.BufferBuilder");if(type==null)return known;Object data=field(receiver,type,"sortingPoints");if(data==null)return 0;if(!(data instanceof Object[] points)||!data.getClass().descriptorString().equals("[Lorg/joml/Vector3f;"))return known;List<Module[]> rows=saved.image.vertices().subList(0,Math.min(saved.image.vertices().size(),Math.multiplyExact(points.length,4)));known=sourceVertices(rows,module,null,false);if(data!=saved.points.get()||!sortIdentity(receiver,saved))return known;BitSet erased=new BitSet();for(int n=saved.erased.nextSetBit(0);n>=0;n=saved.erased.nextSetBit(n+1))if(n<points.length&&points[n]==saved.identities[n].get()&&Arrays.stream(pointBits(points[n],data.getClass().getComponentType())).allMatch(value->value==0))erased.set(n*4,n*4+4);return sourceVertices(rows,module,erased,true);}catch(ReflectiveOperationException|RuntimeException unavailable){return known;}
+        }
+        private boolean gpuIdentity(Object receiver,Uploaded gpu)throws ReflectiveOperationException{Class<?> type=receiver==null?null:actualBase(receiver,"com.mojang.blaze3d.vertex.VertexBuffer");return type!=null
+                &&number(receiver,type,"vertexBufferId")==gpu.vertexId&&number(receiver,type,"indexBufferId")==gpu.indexId&&number(receiver,type,"arrayObjectId")==gpu.vao
+                &&field(receiver,type,"format")==gpu.image.format()&&field(receiver,type,"mode")==gpu.image.mode()&&number(receiver,type,"indexCount")==gpu.image.indices().length;}
+        synchronized long pending(Module module){
+            builds.entrySet().removeIf(entry->entry.getKey().get()==null);rendered.entrySet().removeIf(entry->entry.getKey().get()==null);sorting.entrySet().removeIf(entry->entry.getKey().get()==null);buildSorting.entrySet().removeIf(entry->entry.getKey().get()==null);long count=0;
+            for(var entry:builds.entrySet())count+=buildPending(entry.getKey().get(),entry.getValue(),module);
+            for(var entry:rendered.entrySet())count+=cpuPending(entry.getKey().get(),entry.getValue(),module);
+            for(var entry:sortRecords())count+=sortPending(entry.getKey().get(),entry.getValue(),module);
+            for(var entry:uploaded.entrySet()){Uploaded gpu=entry.getValue();if(gpu.image==null||gpu.storageReleased)continue;boolean complete=false;
+                try{complete=!gpu.uploadPending&&gpu.image.pending().isEmpty()&&gpu.commandsDrained&&gpu.fence==0&&gpuIdentity(entry.getKey().get(),gpu)
+                        &&Set.of("","GPU_SHARED_BUFFER_OTHER_SHARES_RETAINED","GPU_PAYLOAD_RETIREMENT_PENDING").contains(gpu.pending);}
+                catch(ReflectiveOperationException|RuntimeException unavailable){complete=false;}
+                count+=sourceVertices(gpu.image.vertices(),module,gpu.erased,complete);
+            }
+            return count;
+        }
+        synchronized String gap(Module module){
+            for(var entry:rendered.entrySet()){CpuImage cpu=entry.getValue();if(cpuPending(entry.getKey().get(),cpu,module)!=0)return cpu.pending.isEmpty()?"GPU_CPU_LIVE_PAYLOAD_RETIREMENT_PENDING":cpu.pending;}
+            for(var entry:sortRecords()){SortImage image=entry.getValue();if(sortPending(entry.getKey().get(),image,module)!=0)return image.pending.isEmpty()?"GPU_CPU_SORTING_POINTS_RETIREMENT_PENDING":image.pending;}
+            for(var entry:builds.entrySet()){Build build=entry.getValue();if(buildPending(entry.getKey().get(),build,module)!=0)return !build.retirementPending.isEmpty()?build.retirementPending:build.pending.isEmpty()?"GPU_CPU_ACTIVE_BATCH_RETIREMENT_PENDING":build.pending;}
+            for(Uploaded gpu:uploaded.values())if(gpu.image!=null&&!gpu.storageReleased&&sourceVertices(gpu.image.vertices(),module,gpu.erased,gpu.commandsDrained&&gpu.fence==0)!=0)return gpu.pending.isEmpty()?"GPU_PAYLOAD_RETIREMENT_PENDING":gpu.pending;
+            return "GPU_SOURCE_RECEIPT_READBACK_PENDING";
+        }
+        synchronized void reap(Key key){builds.remove(key);rendered.remove(key);sorting.remove(key);buildSorting.remove(key);uploaded.remove(key);}
+        Object[] controls(){return new Object[]{this,builds,rendered,sorting,buildSorting,uploaded,contexts,releasingCpu,maintainingCpu,clearingCpu,clearingSort};}
     }
     public static boolean soundAdmitted(Object sound){
-        var frame=boundary();if(!frame.getDeclaringClass().getName().equals("net.minecraft.client.sounds.SoundEngine")||!Set.of("play","playDelayed","queueTickingSound").contains(frame.getMethodName()))throw new SecurityException("ACTUAL_SOUND_ADMISSION_REQUIRED");
+        var frame=boundary();if(!clientMember(frame,"net.minecraft.client.sounds.SoundEngine","play","m_120312_","(Lnet/minecraft/client/resources/sounds/SoundInstance;)V")&&!clientMember(frame,"net.minecraft.client.sounds.SoundEngine","playDelayed","m_120276_","(Lnet/minecraft/client/resources/sounds/SoundInstance;I)V")&&!clientMember(frame,"net.minecraft.client.sounds.SoundEngine","queueTickingSound","m_120282_","(Lnet/minecraft/client/resources/sounds/TickableSoundInstance;)V"))throw new SecurityException("ACTUAL_SOUND_ADMISSION_REQUIRED");
         record(sound,union(origins(sound),ControlBridge.invokingSources()));return !stopped(sources(sound))&&!ControlBridge.stoppedEffects();
     }
     private static void removeSoundRows(Object engine,Class<?> type,Object sound)throws ReflectiveOperationException{
@@ -603,13 +855,24 @@ public final class ClientBridge {
         Object bySource=field(engine,type,"instanceBySource");Class<?> multimap=Class.forName("com.google.common.collect.Multimap",false,type.getClassLoader());
         Collection<?> rows=(Collection<?>)multimap.getMethod("values").invoke(bySource);rows.removeIf(value->value==sound);
     }
+    public static void soundListenerRegistered(Object engine,Object listener){
+        var frame=boundary();if(!clientMember(frame,"net.minecraft.client.sounds.SoundEngine","addEventListener","m_120295_","(Lnet/minecraft/client/sounds/SoundEventListener;)V"))throw new SecurityException("ACTUAL_SOUND_LISTENER_REGISTRATION_REQUIRED");
+        try{Map<?,?> instances=(Map<?,?>)field(engine,frame.getDeclaringClass(),"instanceToChannel");Collection<?> listeners=(Collection<?>)field(engine,frame.getDeclaringClass(),"listeners");
+            if(listeners.stream().anyMatch(value->value==listener))record(listener,union(origins(listener),ControlBridge.invokingSources(),currentSources()));
+            synchronized(SOURCES){SOUNDS.put(new Key(engine,true),new SoundRegistry(new Ref<>(instances),new Ref<>(listeners)));}
+        }catch(ReflectiveOperationException unavailable){throw new IllegalStateException("ACTUAL_SOUND_LISTENER_REGISTRY_UNAVAILABLE",unavailable);}
+    }
+    private static boolean sameSoundChannel(Object handle,Object candidate,Object channel)throws ReflectiveOperationException{
+        if(handle==candidate)return true;if(channel==null||candidate==null)return false;Class<?> type=actualBase(candidate,"net.minecraft.client.sounds.ChannelAccess$ChannelHandle");return type!=null&&field(candidate,type,"channel")==channel;
+    }
     public static void soundTick(Object engine){
-        var frame=boundary();if(!frame.getDeclaringClass().getName().equals("net.minecraft.client.sounds.SoundEngine")||!frame.getMethodName().equals("tick"))throw new SecurityException("ACTUAL_SOUND_TICK_REQUIRED");
+        var frame=boundary();if(!clientMember(frame,"net.minecraft.client.sounds.SoundEngine","tick","m_120302_","(Z)V"))throw new SecurityException("ACTUAL_SOUND_TICK_REQUIRED");
         synchronized(SOURCES){if(REQUESTED.isEmpty())return;}
         try{
             Class<?> type=frame.getDeclaringClass();Map<?,?> instances=(Map<?,?>)field(engine,type,"instanceToChannel");Object access=field(engine,type,"channelAccess");
             Class<?> accessType=actualBase(access,"net.minecraft.client.sounds.ChannelAccess");if(accessType==null||access.getClass()!=accessType)throw new IllegalStateException("ACTUAL_SOUND_CHANNEL_ACCESS_CHANGED");
-            synchronized(SOURCES){SOUNDS.put(new Key(engine,true),new SoundRegistry(new Ref<>(instances)));}
+            Collection<?> listeners=(Collection<?>)field(engine,type,"listeners");SourceMapBridge.withList(listeners,()->listeners.removeIf(listener->exclusive(sources(listener))));
+            synchronized(SOURCES){SOUNDS.put(new Key(engine,true),new SoundRegistry(new Ref<>(instances),new Ref<>(listeners)));}
             Set<Object> queued=Collections.newSetFromMap(new IdentityHashMap<>());
             queued.addAll(((Map<?,?>)field(engine,type,"queuedSounds")).keySet());queued.addAll((Collection<?>)field(engine,type,"queuedTickableSounds"));
             for(Object sound:queued)if(stopped(sources(sound)))removeSoundRows(engine,type,sound);
@@ -617,40 +880,81 @@ public final class ClientBridge {
                 Object handle=entry.getValue();Class<?> handleType=actualBase(handle,"net.minecraft.client.sounds.ChannelAccess$ChannelHandle");if(handleType==null||handle.getClass()!=handleType)throw new IllegalStateException("ACTUAL_SOUND_HANDLE_CHANGED");
                 Object channel=field(handle,handleType,"channel");Class<?> channelType=channel==null?null:actualBase(channel,"com.mojang.blaze3d.audio.Channel");
                 if(channel!=null&&(channelType==null||channel.getClass()!=channelType))throw new IllegalStateException("ACTUAL_SOUND_CHANNEL_CHANGED");
-                // A shared original handle keeps its outside sound; only the selected registration is detached.
-                boolean sharedHandle=instances.entrySet().stream().anyMatch(peer->peer.getValue()==handle&&peer.getKey()!=sound&&!stopped(sources(peer.getKey())));
-                if(!sharedHandle){SoundStop stop;synchronized(SOURCES){stop=SOUND_STOPS.computeIfAbsent(new Key(handle,true),ignored->new SoundStop(handle,channel,access,handleType,channelType,accessType,owners));CodeSourceBridge.contributionControl(stop.modules);}
-                    requestSoundStop(stop);
-                }
+                if(field(handle,handleType,"this$0")!=access)throw new IllegalStateException("ACTUAL_SOUND_HANDLE_ACCESS_CHANGED");
+                // A physical channel shared by any live outside registration must survive the selected detach.
+                boolean sharedChannel=!retiredSoundSources(union(owners,origins(handle),origins(channel)));List<Module[]> shares=new ArrayList<>();shares.add(owners);shares.add(origins(handle));shares.add(origins(channel));
+                for(var peer:instances.entrySet())if(sameSoundChannel(handle,peer.getValue(),channel)){Module[] peerOwners=sources(peer.getKey());shares.add(peerOwners);if(peer.getKey()!=sound&&!stopped(peerOwners))sharedChannel=true;}
+                for(Object peer:(Collection<?>)field(access,accessType,"channels"))if(peer!=handle&&sameSoundChannel(handle,peer,channel)&&!retiredSoundSources(sources(peer)))sharedChannel=true;
+                int source=channel==null?-1:((Number)field(channel,channelType,"source")).intValue();Object initialized=channel==null?null:field(channel,channelType,"initialized"),library=field(access,accessType,"library");Class<?> libraryType=actualBase(library,"com.mojang.blaze3d.audio.Library");if(libraryType==null||library.getClass()!=libraryType)throw new IllegalStateException("ACTUAL_SOUND_LIBRARY_CHANGED");long context=((Number)field(library,libraryType,"context")).longValue();Module[] selected=union(shares.toArray(Module[][]::new));SoundStop stop;
+                synchronized(SOURCES){stop=SOUND_STOPS.get(new Key(handle,false));if(stop==null){stop=new SoundStop(handle,channel,access,handleType,channelType,accessType,selected,source,initialized,sharedChannel,library,libraryType,context);SOUND_STOPS.put(new Key(handle,true),stop);CodeSourceBridge.contributionControl(stop);CodeSourceBridge.contributionControl(stop.modules);}}
+                stop.shared=sharedChannel;if(sharedChannel)stop.pending="CLIENT_SHARED_SOUND_CHANNEL_RETAINED";requestSoundStop(stop);
                 if(instances.get(sound)==handle)instances.remove(sound);removeSoundRows(engine,type,sound);
             }
             List<SoundStop> pending;synchronized(SOURCES){pending=new ArrayList<>(SOUND_STOPS.values());}
             for(SoundStop stop:pending){requestSoundStop(stop);if(!stop.stopped.get())continue;
                 Object current=field(stop.handle,stop.handleType,"channel");boolean released=(Boolean)field(stop.handle,stop.handleType,"stopped");Collection<?> handles=(Collection<?>)field(stop.access,stop.accessType,"channels");
-                if(current==null&&released&&!handles.contains(stop.handle))synchronized(SOURCES){SOUND_STOPS.remove(new Key(stop.handle,false));}
+                if(current==null&&released&&!handles.contains(stop.handle)&&(stop.channel==null||stop.deleted.get()))synchronized(SOURCES){SOUND_STOPS.remove(new Key(stop.handle,false));}
             }
         }catch(ReflectiveOperationException|RuntimeException unavailable){synchronized(SOURCES){FAILURES.put(new Key(engine,true),ControlBridge.invokingSources());}throw new IllegalStateException("CLIENT_SOUND_RETIREMENT_UNAVAILABLE",unavailable);}
     }
+    private static boolean retiredSoundSources(Module[] modules){if(modules.length==0)return false;synchronized(SOURCES){for(Module module:modules)if(!REQUESTED.contains(module)&&!ControlBridge.modStopped(module))return false;}return true;}
+    private static boolean soundIdentity(SoundStop stop)throws ReflectiveOperationException{return field(stop.access,stop.accessType,"library")==stop.library&&((Number)field(stop.library,stop.libraryType,"context")).longValue()==stop.context
+            &&(stop.channel==null||((Number)field(stop.channel,stop.channelType,"source")).intValue()==stop.source&&field(stop.channel,stop.channelType,"initialized")==stop.initialized);}
+    private static boolean soundContext(SoundStop stop)throws ReflectiveOperationException{Class<?> type=Class.forName("org.lwjgl.openal.ALC10",false,stop.libraryType.getClassLoader());Method member=type.getMethod("alcGetCurrentContext");if(!Modifier.isStatic(member.getModifiers())||member.getReturnType()!=long.class)throw new IllegalStateException("ACTUAL_OPENAL_CONTEXT_QUERY_REQUIRED");return stop.context!=0&&((Number)member.invoke(null)).longValue()==stop.context;}
     private static void requestSoundStop(SoundStop stop)throws ReflectiveOperationException{
-        if(stop.requested)return;if(stop.channel==null){stop.stopped.set(true);stop.requested=true;return;}
+        if(stop.shared)return;if(stop.requested.get())return;if(stop.channel==null){if(field(stop.handle,stop.handleType,"channel")==null&&(Boolean)field(stop.handle,stop.handleType,"stopped")){stop.stopped.set(true);stop.requested.set(true);}return;}
+        if(!soundIdentity(stop)||field(stop.handle,stop.handleType,"channel")!=stop.channel){stop.pending="CLIENT_ORIGINAL_SOUND_CHANNEL_CHANGED";return;}
+        if(!stop.requested.compareAndSet(false,true))return;
         java.util.function.Consumer<Object> action=channel->{
             if(channel!=stop.channel){stop.pending="CLIENT_ORIGINAL_SOUND_CHANNEL_CHANGED";return;}
-            try{platformVoid(channel,stop.channelType,"stop");stop.stopped.set(true);}
-            catch(Throwable unavailable){stop.pending="CLIENT_SOUND_STOP:"+unavailable.getClass().getSimpleName();}
+            try{if(!soundIdentity(stop)||!soundContext(stop)){stop.pending="CLIENT_ORIGINAL_SOUND_CONTEXT_CHANGED";return;}if(!retiredSoundSources(union(stop.modules,origins(channel),origins(stop.handle)))){stop.shared=true;stop.pending="CLIENT_SHARED_SOUND_CHANNEL_RETAINED";return;}
+                platformVoid(channel,stop.channelType,"stop");int state=((Number)clientMethod(stop.channelType,"getState","m_83683_","()I").invoke(channel)).intValue();boolean stopped=state==4116||state==4113;stop.stopped.set(stopped);stop.pending=stopped?"CLIENT_SOUND_ORIGINAL_RELEASE_PENDING":"CLIENT_SOUND_STOP_READBACK_PENDING";
+                if(stopped&&field(stop.handle,stop.handleType,"channel")==channel){platformVoid(stop.handle,stop.handleType,"release");if(field(stop.handle,stop.handleType,"channel")==null&&(Boolean)field(stop.handle,stop.handleType,"stopped")&&stop.deleted.get()){Collection<?> handles=(Collection<?>)field(stop.access,stop.accessType,"channels");handles.remove(stop.handle);if(handles.contains(stop.handle))stop.pending="CLIENT_SOUND_HANDLE_DETACH_PENDING";}}
+            }catch(Throwable unavailable){stop.pending="CLIENT_SOUND_STOP:"+unavailable.getClass().getSimpleName();stop.requested.set(false);}
         };
-        stop.handleType.getMethod("execute",java.util.function.Consumer.class).invoke(stop.handle,action);stop.requested=true;
+        try{clientMethod(stop.handleType,"execute","m_120154_","(Ljava/util/function/Consumer;)V",java.util.function.Consumer.class).invoke(stop.handle,action);}
+        catch(ReflectiveOperationException|RuntimeException unavailable){stop.requested.set(false);throw unavailable;}
+    }
+    public static Object soundReleaseEntering(Object handle){
+        var frame=boundary();if(!clientMember(frame,"net.minecraft.client.sounds.ChannelAccess$ChannelHandle","release","m_120156_","()V"))throw new SecurityException("ACTUAL_SOUND_HANDLE_RELEASE_REQUIRED");SoundStop stop;synchronized(SOURCES){stop=SOUND_STOPS.get(new Key(handle,false));}if(stop==null)return null;
+        try{if(stop.handleType!=frame.getDeclaringClass()||field(handle,stop.handleType,"channel")!=stop.channel||field(handle,stop.handleType,"this$0")!=stop.access||!soundIdentity(stop)){stop.pending="CLIENT_SOUND_RELEASE_ASSOCIATION_CHANGED";return null;}
+            SoundRelease scope=new SoundRelease(stop);CodeSourceBridge.contributionControl(scope);SOUND_RELEASING.set(scope);return scope;
+        }catch(ReflectiveOperationException unavailable){stop.pending="CLIENT_SOUND_RELEASE_READBACK_UNAVAILABLE";return null;}
+    }
+    public static void soundReleaseExiting(Object token,boolean completed){
+        var frame=boundary();if(!clientMember(frame,"net.minecraft.client.sounds.ChannelAccess$ChannelHandle","release","m_120156_","()V"))throw new SecurityException("ACTUAL_SOUND_HANDLE_RELEASE_REQUIRED");if(token==null)return;
+        if(!(token instanceof SoundRelease scope)||scope.thread!=Thread.currentThread()||scope.ended||scope.stop.handleType!=frame.getDeclaringClass()||SOUND_RELEASING.get()!=scope)throw new SecurityException("ACTUAL_SOUND_RELEASE_TOKEN_REQUIRED");
+        try{if(completed&&field(scope.stop.handle,scope.stop.handleType,"channel")==null&&(Boolean)field(scope.stop.handle,scope.stop.handleType,"stopped"))scope.stop.pending=scope.stop.deleted.get()?"CLIENT_SOUND_HANDLE_DETACH_PENDING":"CLIENT_SOUND_NATIVE_DELETE_READBACK_PENDING";}
+        catch(ReflectiveOperationException unavailable){scope.stop.pending="CLIENT_SOUND_HANDLE_RELEASE_READBACK_UNAVAILABLE";}
+        finally{scope.ended=true;if(scope.previous==null)SOUND_RELEASING.remove();else SOUND_RELEASING.set(scope.previous);}
+    }
+    public static void soundChannelDestroyed(Object channel){
+        var frame=boundary();if(!clientMember(frame,"com.mojang.blaze3d.audio.Channel","destroy","m_83665_","()V"))throw new SecurityException("ACTUAL_SOUND_CHANNEL_DESTROY_REQUIRED");List<SoundStop> stops;synchronized(SOURCES){stops=new ArrayList<>(SOUND_STOPS.values());}
+        for(SoundStop stop:stops)if(stop.channel==channel)try{if(stop.channelType!=frame.getDeclaringClass()||!soundIdentity(stop)||!soundContext(stop)||((java.util.concurrent.atomic.AtomicBoolean)stop.initialized).get()||field(channel,stop.channelType,"stream")!=null){stop.pending="CLIENT_SOUND_NATIVE_DELETE_ASSOCIATION_CHANGED";continue;}
+            Class<?> api=Class.forName("org.lwjgl.openal.AL10",false,stop.channelType.getClassLoader());Method member=api.getMethod("alIsSource",int.class);if(!Modifier.isStatic(member.getModifiers())||member.getReturnType()!=boolean.class)throw new IllegalStateException("ACTUAL_OPENAL_SOURCE_QUERY_REQUIRED");
+            boolean exists=(Boolean)member.invoke(null,stop.source);stop.deleted.set(!exists);if(!exists)stop.stopped.set(true);stop.pending=exists?"CLIENT_SOUND_NATIVE_DELETE_READBACK_PENDING":"CLIENT_SOUND_HANDLE_DETACH_PENDING";
+        }catch(ReflectiveOperationException|RuntimeException unavailable){stop.pending="CLIENT_SOUND_NATIVE_DELETE_READBACK_UNAVAILABLE";}
+    }
+    private static boolean soundCleanupField(Object receiver,Class<?> declaring,String name){
+        SoundRelease scope=SOUND_RELEASING.get();if(scope==null||scope.ended||scope.thread!=Thread.currentThread())return false;SoundStop stop=scope.stop;
+        try{if(!soundIdentity(stop)||field(stop.handle,stop.handleType,"this$0")!=stop.access)return false;Object current=field(stop.handle,stop.handleType,"channel");if(current!=stop.channel&&current!=null)return false;}
+        catch(ReflectiveOperationException|RuntimeException changed){return false;}
+        boolean original=WALKER.walk(frames->frames.anyMatch(frame->frame.getDeclaringClass()==stop.handleType&&clientMember(frame,"net.minecraft.client.sounds.ChannelAccess$ChannelHandle","release","m_120156_","()V")));if(!original)return false;
+        if(receiver==stop.handle&&declaring==stop.handleType)return Set.of("stopped","f_120147_","channel","f_120146_").contains(name);
+        return receiver==stop.channel&&declaring==stop.channelType&&Set.of("stream","f_83645_").contains(name)
+                &&WALKER.walk(frames->frames.anyMatch(frame->frame.getDeclaringClass()==stop.channelType&&clientMember(frame,"com.mojang.blaze3d.audio.Channel","destroy","m_83665_","()V")));
     }
     private static void removeParticle(Object particle){
         if(particle==null)return;
         for(Class<?> type=particle.getClass();type!=null;type=type.getSuperclass())if(role(type)&&type.getName().equals("net.minecraft.client.particle.Particle")){
             Object prior=RELEASING.get();RELEASING.set(particle);
-            try{Field removed=type.getDeclaredField("removed");removed.setAccessible(true);removed.setBoolean(particle,true);}
+            try{resourceField(type,"removed").setBoolean(particle,true);}
             catch(ReflectiveOperationException unavailable){synchronized(SOURCES){FAILURES.put(new Key(particle,true),sources(particle));failed++;}}
             finally{if(prior==null)RELEASING.remove();else RELEASING.set(prior);}return;
         }
         synchronized(SOURCES){FAILURES.put(new Key(particle,true),sources(particle));failed++;}
     }
-    /** Exact official/SRG fields for the same real image allocation and release path. */
+    /** Exact official/SRG fields for the observed allocation, registry and vertex metadata. */
     private static Field resourceField(Class<?> type,String name)throws ReflectiveOperationException{
         String alternate=null,descriptor=null;
         if(type.getName().equals("com.mojang.blaze3d.platform.NativeImage")){
@@ -658,6 +962,71 @@ public final class ClientBridge {
             else if(name.equals("size")){alternate="f_84965_";descriptor="J";}
         }else if(type.getName().equals("net.minecraft.client.renderer.texture.DynamicTexture")&&name.equals("pixels")){
             alternate="f_117977_";descriptor="Lcom/mojang/blaze3d/platform/NativeImage;";
+        }else if(type.getName().equals("net.minecraft.client.particle.Particle")&&name.equals("removed")){
+            alternate="f_107220_";descriptor="Z";
+        }else if(type.getName().equals("net.minecraft.client.renderer.texture.TextureManager")){
+            if(name.equals("byPath")){alternate="f_118468_";descriptor="Ljava/util/Map;";}
+            else if(name.equals("tickableTextures")){alternate="f_118469_";descriptor="Ljava/util/Set;";}
+        }else if(type.getName().equals("net.minecraft.client.renderer.texture.AbstractTexture")&&name.equals("id")){
+            alternate="f_117950_";descriptor="I";
+        }else if(type.getName().equals("net.minecraft.client.renderer.texture.HttpTexture")&&name.equals("future")){
+            alternate="f_117998_";descriptor="Ljava/util/concurrent/CompletableFuture;";
+        }else if(type.getName().equals("com.mojang.blaze3d.vertex.BufferBuilder")){
+            if(name.equals("mode")){alternate="f_85657_";descriptor="Lcom/mojang/blaze3d/vertex/VertexFormat$Mode;";}
+            else if(name.equals("format")){alternate="f_85658_";descriptor="Lcom/mojang/blaze3d/vertex/VertexFormat;";}
+            else if(name.equals("vertices")){alternate="f_85654_";descriptor="I";}
+            else if(name.equals("buffer")){alternate="f_85648_";descriptor="Ljava/nio/ByteBuffer;";}
+            else if(name.equals("building")){alternate="f_85661_";descriptor="Z";}
+            else if(name.equals("renderedBufferCount")){alternate="f_231156_";descriptor="I";}
+            else if(name.equals("renderedBufferPointer")){alternate="f_231157_";descriptor="I";}
+            else if(name.equals("nextElementByte")){alternate="f_85652_";descriptor="I";}
+            else if(name.equals("indexOnly")){alternate="f_166762_";descriptor="Z";}
+            else if(name.equals("sortingPoints")){alternate="f_166766_";descriptor="[Lorg/joml/Vector3f;";}
+        }else if(type.getName().equals("com.mojang.blaze3d.vertex.BufferBuilder$RenderedBuffer")){
+            if(name.equals("drawState")){alternate="f_231190_";descriptor="Lcom/mojang/blaze3d/vertex/BufferBuilder$DrawState;";}
+            else if(name.equals("pointer")){alternate="f_231189_";descriptor="I";}
+            else if(name.equals("released")){alternate="f_231191_";descriptor="Z";}
+            else if(name.equals("this$0")){alternate="f_231188_";descriptor="Lcom/mojang/blaze3d/vertex/BufferBuilder;";}
+        }else if(type.getName().equals("com.mojang.blaze3d.vertex.BufferBuilder$SortState")){
+            if(name.equals("sortingPoints")){alternate="f_166819_";descriptor="[Lorg/joml/Vector3f;";}
+            else if(name.equals("vertices")){alternate="f_166818_";descriptor="I";}
+            else if(name.equals("mode")){alternate="f_166817_";descriptor="Lcom/mojang/blaze3d/vertex/VertexFormat$Mode;";}
+        }else if(type.getName().equals("com.mojang.blaze3d.vertex.VertexBuffer")){
+            if(name.equals("format")){alternate="f_85917_";descriptor="Lcom/mojang/blaze3d/vertex/VertexFormat;";}
+            else if(name.equals("mode")){alternate="f_166864_";descriptor="Lcom/mojang/blaze3d/vertex/VertexFormat$Mode;";}
+            else if(name.equals("indexCount")){alternate="f_166863_";descriptor="I";}
+            else if(name.equals("vertexBufferId")){alternate="f_231217_";descriptor="I";}
+            else if(name.equals("indexBufferId")){alternate="f_166860_";descriptor="I";}
+            else if(name.equals("arrayObjectId")){alternate="f_166862_";descriptor="I";}
+        }else if(type.getName().equals("com.mojang.blaze3d.vertex.VertexFormat$Mode")&&name.equals("asGLMode")){
+            alternate="f_166946_";descriptor="I";
+        }else if(type.getName().equals("com.mojang.blaze3d.vertex.VertexFormat$IndexType")&&name.equals("bytes")){
+            alternate="f_166924_";descriptor="I";
+        }else if(type.getName().equals("net.minecraft.client.sounds.SoundEngine")){
+            if(name.equals("instanceToChannel")){alternate="f_120226_";descriptor="Ljava/util/Map;";}
+            else if(name.equals("channelAccess")){alternate="f_120224_";descriptor="Lnet/minecraft/client/sounds/ChannelAccess;";}
+            else if(name.equals("queuedSounds")){alternate="f_120229_";descriptor="Ljava/util/Map;";}
+            else if(name.equals("soundDeleteTime")){alternate="f_120230_";descriptor="Ljava/util/Map;";}
+            else if(name.equals("tickingSounds")){alternate="f_120228_";descriptor="Ljava/util/List;";}
+            else if(name.equals("queuedTickableSounds")){alternate="f_120232_";descriptor="Ljava/util/List;";}
+            else if(name.equals("instanceBySource")){alternate="f_120227_";descriptor="Lcom/google/common/collect/Multimap;";}
+            else if(name.equals("listeners")){alternate="f_120231_";descriptor="Ljava/util/List;";}
+        }else if(type.getName().equals("net.minecraft.client.sounds.ChannelAccess")){
+            if(name.equals("channels")){alternate="f_120121_";descriptor="Ljava/util/Set;";}
+            else if(name.equals("executor")){alternate="f_120123_";descriptor="Ljava/util/concurrent/Executor;";}
+            else if(name.equals("library")){alternate="f_120122_";descriptor="Lcom/mojang/blaze3d/audio/Library;";}
+        }else if(type.getName().equals("net.minecraft.client.sounds.ChannelAccess$ChannelHandle")){
+            if(name.equals("channel")){alternate="f_120146_";descriptor="Lcom/mojang/blaze3d/audio/Channel;";}
+            else if(name.equals("stopped")){alternate="f_120147_";descriptor="Z";}
+            else if(name.equals("this$0")){alternate="f_120145_";descriptor="Lnet/minecraft/client/sounds/ChannelAccess;";}
+        }else if(type.getName().equals("com.mojang.blaze3d.audio.Channel")){
+            if(name.equals("source")){alternate="f_83642_";descriptor="I";}
+            else if(name.equals("initialized")){alternate="f_83643_";descriptor="Ljava/util/concurrent/atomic/AtomicBoolean;";}
+            else if(name.equals("stream")){alternate="f_83645_";descriptor="Lnet/minecraft/client/sounds/AudioStream;";}
+        }else if(type.getName().equals("com.mojang.blaze3d.audio.Library")&&name.equals("context")){
+            alternate="f_83687_";descriptor="J";
+        }else if(type.getName().equals("net.minecraft.server.packs.resources.ReloadableResourceManager")&&name.equals("listeners")){
+            alternate="f_203816_";descriptor="Ljava/util/List;";
         }
         Field member;
         try{member=type.getDeclaredField(name);}
@@ -702,7 +1071,11 @@ public final class ClientBridge {
     }
     private static void platformVoid(Object object,Class<?> declaring,String method)throws Throwable{
         java.lang.invoke.MethodHandles.Lookup access=java.lang.invoke.MethodHandles.privateLookupIn(declaring,java.lang.invoke.MethodHandles.lookup());
-        access.findSpecial(declaring,method,java.lang.invoke.MethodType.methodType(void.class),declaring).bindTo(object).invokeExact();
+        String installed=declaring.getName().equals("net.minecraft.client.renderer.texture.AbstractTexture")&&method.equals("releaseId")?"m_117964_":method;
+        if(declaring.getName().equals("com.mojang.blaze3d.vertex.BufferBuilder$RenderedBuffer")&&method.equals("release"))installed="m_231200_";
+        if(declaring.getName().equals("com.mojang.blaze3d.audio.Channel")&&method.equals("stop"))installed="m_83679_";
+        if(declaring.getName().equals("net.minecraft.client.sounds.ChannelAccess$ChannelHandle")&&method.equals("release"))installed="m_120156_";
+        access.findSpecial(declaring,clientMethod(declaring,method,installed,"()V").getName(),java.lang.invoke.MethodType.methodType(void.class),declaring).bindTo(object).invokeExact();
     }
     private static String releasePixels(TextureRetirement retirement,Class<?> dynamic)throws Throwable{
         Object texture=retirement.object,image=field(texture,dynamic,"pixels"),observed;ImageRecord record;boolean foreign=false;
@@ -746,7 +1119,7 @@ public final class ClientBridge {
         retirement.detached=true;return "";
     }
     public static void textureRegistered(Object manager,Object key,Object input){
-        var frame=boundary();if(!frame.getMethodName().equals("register"))throw new SecurityException("ACTUAL_TEXTURE_REGISTRATION_REQUIRED");
+        var frame=boundary();if(!clientMember(frame,"net.minecraft.client.renderer.texture.TextureManager","register","m_118495_","(Lnet/minecraft/resources/ResourceLocation;Lnet/minecraft/client/renderer/texture/AbstractTexture;)V"))throw new SecurityException("ACTUAL_TEXTURE_REGISTRATION_REQUIRED");
         try{
             Map<?,?> map=(Map<?,?>)field(manager,frame.getDeclaringClass(),"byPath");Object published=map.get(key);
             Module[] owners=published==input?union(ControlBridge.invokingSources(),origins(input)):new Module[0];
@@ -757,7 +1130,7 @@ public final class ClientBridge {
         }catch(ReflectiveOperationException unavailable){throw new IllegalStateException("ACTUAL_TEXTURE_REGISTRY_UNAVAILABLE",unavailable);}
     }
     public static void textureTick(Object manager){
-        var frame=boundary();if(!frame.getMethodName().equals("tick"))throw new SecurityException("ACTUAL_TEXTURE_TICK_REQUIRED");
+        var frame=boundary();if(!clientMember(frame,"net.minecraft.client.renderer.texture.TextureManager","tick","m_7673_","()V"))throw new SecurityException("ACTUAL_TEXTURE_TICK_REQUIRED");
         TextureRegistry registry;synchronized(SOURCES){if(REQUESTED.isEmpty())return;registry=TEXTURES.get(new Key(manager,false));}if(registry==null)return;
         Map<?,?> actual=registry.map().get();if(actual==null)return;
         List<Map.Entry<Object,Texture>> entries;synchronized(SOURCES){registry.entries().entrySet().removeIf(entry->entry.getValue().object().get()==null||actual.get(entry.getKey())!=entry.getValue().object().get());entries=new ArrayList<>(registry.entries().entrySet());}
@@ -779,19 +1152,21 @@ public final class ClientBridge {
     }
     /** Only framework lifecycle fields of the exact object captured by the real retirement boundary. */
     static boolean cleanupField(Object receiver,Class<?> declaring,String name){
-        if(RELEASING==null||RELEASING.get()!=receiver||!role(declaring))return false;
-        return declaring.getName().equals("net.minecraft.client.particle.Particle")&&name.equals("removed")
-                ||declaring.getName().equals("net.minecraft.client.renderer.texture.AbstractTexture")&&name.equals("id")
+        if(RELEASING==null||!role(declaring))return false;if(soundCleanupField(receiver,declaring,name)||GPU!=null&&GPU.cleanupField(receiver,declaring,name))return true;
+        if(RELEASING==null||RELEASING.get()!=receiver)return false;
+        return declaring.getName().equals("net.minecraft.client.particle.Particle")&&Set.of("removed","f_107220_").contains(name)
+                ||declaring.getName().equals("net.minecraft.client.renderer.texture.AbstractTexture")&&Set.of("id","f_117950_").contains(name)
                 ||declaring.getName().equals("net.minecraft.client.renderer.texture.DynamicTexture")&&Set.of("pixels","f_117977_").contains(name)
                 ||declaring.getName().equals("com.mojang.blaze3d.platform.NativeImage")&&Set.of("pixels","f_84964_").contains(name)
-                ||declaring.getName().equals("com.mojang.blaze3d.vertex.VertexBuffer")&&Set.of("vertexBufferId","indexBufferId","arrayObjectId").contains(name);
+                ||declaring.getName().equals("com.mojang.blaze3d.vertex.VertexBuffer")&&Set.of("vertexBufferId","f_231217_","indexBufferId","f_166860_","arrayObjectId","f_166862_").contains(name);
     }
     public static void retire(Module[] modules){agent();synchronized(SOURCES){Collections.addAll(REQUESTED,modules);}retireReloadListeners();}
-    public static String retirementGap(Module module){agent();long gpu=GPU.pending(module);synchronized(SOURCES){reap();long active=ACTIVE.stream().filter(scope->Arrays.stream(scope.sources).anyMatch(source->source==module)).count();
+    public static String retirementGap(Module module){agent();long gpu=GPU.pending(module);String gpuState=gpu==0?"":GPU.gap(module);synchronized(SOURCES){reap();long active=ACTIVE.stream().filter(scope->Arrays.stream(scope.sources).anyMatch(source->source==module)).count();
         long textures=0;for(TextureRegistry registry:TEXTURES.values())for(Texture texture:registry.entries().values())if(texture.object().get()!=null&&Arrays.stream(texture.modules()).anyMatch(source->source==module))textures++;
         long resources=RETIREMENTS.values().stream().filter(row->Arrays.stream(row.modules).anyMatch(source->source==module)).count();
         long failures=FAILURES.values().stream().filter(row->Arrays.stream(row).anyMatch(source->source==module)).count();
         long sounds=SOUND_STOPS.values().stream().filter(row->Arrays.stream(row.modules).anyMatch(source->source==module)).count();
+        for(SoundRegistry registry:SOUNDS.values()){Collection<?> listeners=registry.listeners().get();if(listeners!=null)for(Object listener:listeners)if(Arrays.stream(sources(listener)).anyMatch(source->source==module))sounds++;}
         RELOAD_WORK.entrySet().removeIf(entry->entry.getValue().future().isDone());long reloads=RELOAD_WORK.values().stream().filter(row->Arrays.stream(row.modules()).anyMatch(source->source==module)).count();
         for(Ref<Collection<?>> reference:RELOAD_LISTENERS.values()){Collection<?> listeners=reference.get();if(listeners!=null)for(Object listener:listeners)if(Arrays.stream(sources(listener)).anyMatch(source->source==module))reloads++;}
         long ui=0;for(var entry:UI_OWNERS.entrySet()){Object owner=entry.getKey().get();if(owner==null)continue;
@@ -800,8 +1175,8 @@ public final class ClientBridge {
         }
         long overlays=overlayPending(module);
         String overlayState=overlays==-1?"CLIENT_OVERLAY_ACTUAL_PAIR_READ_FAILED":overlays==-2?"CLIENT_OVERLAY_NAMED_ASSOCIATION_CHANGED":"";
-        return active!=0||textures!=0||resources!=0||sounds!=0||reloads!=0||gpu!=0||failures!=0||ui!=0||overlays!=0?"CLIENT_RETIREMENT_PENDING:active="+active+":textures="+textures+":resources="+resources+":sounds="+sounds+":reloads="+reloads+":gpu="+gpu+":ui="+ui+":overlays="+(overlays<0?"unknown":Long.toString(overlays))+":overlayState="+overlayState+":shared="+shared+":releaseFailures="+failures:"";
+        return active!=0||textures!=0||resources!=0||sounds!=0||reloads!=0||gpu!=0||failures!=0||ui!=0||overlays!=0?"CLIENT_RETIREMENT_PENDING:active="+active+":textures="+textures+":resources="+resources+":sounds="+sounds+":reloads="+reloads+":gpu="+gpu+":gpuState="+gpuState+":ui="+ui+":overlays="+(overlays<0?"unknown":Long.toString(overlays))+":overlayState="+overlayState+":shared="+shared+":releaseFailures="+failures:"";
     }}
-    public static Object[] controlObjects(){agent();List<Object> roots=new ArrayList<>(Arrays.asList(SOURCES,TEXTURES,ROLES,REQUESTED,CURRENT,RELEASING,ACTIVE,DEAD,IMAGES,PIXELS,RETIREMENTS,FAILURES,SOUNDS,SOUND_STOPS,RELOAD_LISTENERS,RELOAD_WORK,UI_OWNERS,UI_RETIRING,UI_FIELDS,OVERLAY_EVENTS,OVERLAY_REGISTRIES,OVERLAY_NAMES,OVERLAY_INITIALIZING,OVERLAY_FIELDS));Collections.addAll(roots,GPU.controls());return roots.toArray();}
+    public static Object[] controlObjects(){agent();List<Object> roots=new ArrayList<>(Arrays.asList(SOURCES,TEXTURES,ROLES,REQUESTED,CURRENT,RELEASING,ACTIVE,DEAD,IMAGES,PIXELS,RETIREMENTS,FAILURES,SOUNDS,SOUND_STOPS,SOUND_RELEASING,RELOAD_LISTENERS,RELOAD_WORK,UI_OWNERS,UI_RETIRING,UI_FIELDS,OVERLAY_EVENTS,OVERLAY_REGISTRIES,OVERLAY_NAMES,OVERLAY_INITIALIZING,OVERLAY_FIELDS));Collections.addAll(roots,GPU.controls());return roots.toArray();}
     private static void reap(){for(Key key;(key=(Key)DEAD.poll())!=null;){SOURCES.remove(key);TEXTURES.remove(key);IMAGES.remove(key);PIXELS.remove(key);FAILURES.remove(key);SOUNDS.remove(key);RELOAD_LISTENERS.remove(key);UI_OWNERS.remove(key);OVERLAY_EVENTS.remove(key);OVERLAY_REGISTRIES.remove(key);OVERLAY_NAMES.remove(key);}}
 }

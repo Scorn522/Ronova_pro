@@ -24,6 +24,7 @@ public final class RecoveryAgent {
     private static Class<?> clientBridge;
     private static Class<?> resourceBridge;
     private static final ControlImages controlImages=new ControlImages();
+    private static volatile ClassFileTransformer nativeFinalTransformer;
     private static volatile String controlFailure;
     private static final Map<Class<?>,String> definitions=Collections.synchronizedMap(new WeakHashMap<>());
     private static final Set<Class<?>> watching=Collections.newSetFromMap(new WeakHashMap<>());
@@ -90,7 +91,7 @@ public final class RecoveryAgent {
             bootstrap=new JarFile(Path.of(argument).toAbsolutePath().normalize().toFile());
             api.appendToBootstrapClassLoaderSearch(bootstrap);
             bridge=Class.forName("dev.ronova.pro.bootstrap.TaskBridge",true,null);
-            if(!Integer.valueOf(52).equals(bridge.getMethod("abiVersion").invoke(null)))throw new IllegalStateException("TASK_BRIDGE_ABI_MISMATCH");
+            if(!Integer.valueOf(54).equals(bridge.getMethod("abiVersion").invoke(null)))throw new IllegalStateException("TASK_BRIDGE_ABI_MISMATCH");
             Class.forName("dev.ronova.pro.bootstrap.SourceMapBridge",true,null);
             // Default-Map guards test UUID keys while class-loading maps are
             // active. Resolve that type before publishing the guarded methods.
@@ -110,7 +111,7 @@ public final class RecoveryAgent {
             Class.forName("dev.ronova.pro.bootstrap.ControlBridge$ProducerFrame",false,null);
             Class.forName("dev.ronova.pro.bootstrap.EventFaultBridge",true,null);
             Class<?> control=Class.forName("dev.ronova.pro.bootstrap.ControlBridge",true,null);
-            if(!Integer.valueOf(52).equals(control.getMethod("abiVersion").invoke(null)))throw new IllegalStateException("CONTROL_BRIDGE_ABI_MISMATCH");
+            if(!Integer.valueOf(54).equals(control.getMethod("abiVersion").invoke(null)))throw new IllegalStateException("CONTROL_BRIDGE_ABI_MISMATCH");
             Module base=Object.class.getModule(),ours=RecoveryAgent.class.getModule();
             api.redefineModule(base,Set.of(bridge.getModule()),Map.of(
                     "jdk.internal.org.objectweb.asm",Set.of(ours),"jdk.internal.org.objectweb.asm.commons",Set.of(ours),
@@ -330,6 +331,7 @@ public final class RecoveryAgent {
                     }
                 }
             };
+            nativeFinalTransformer=objectTransformer;
             control.getMethod("install",Class.class,ClassFileTransformer[].class).invoke(null,RecoveryAgent.class,
                     new ClassFileTransformer[]{controlImages,taskTransformer,objectTransformer});
             resourceBridge=Class.forName("dev.ronova.pro.bootstrap.ResourceBridge",true,null);
@@ -581,6 +583,31 @@ public final class RecoveryAgent {
             Class.forName("dev.ronova.pro.bootstrap.NativeControl",false,null).getMethod("module",Module.class,boolean.class).invoke(null,module,true);
         }
         catch(ReflectiveOperationException failure) {throw new IllegalStateException("MOD_TASK_GATE_PUBLICATION_FAILED",failure);}
+    }
+    /** Called only through the private bootstrap callback after its exact native TLS proof. */
+    public static byte[] nativeFinalImage(Module module,ClassLoader loader,String name,Class<?> actual,ProtectionDomain domain,byte[] original,byte[] bytes,Module[] writers,boolean changed){
+        Class<?> nativeControl;
+        try{nativeControl=Class.forName("dev.ronova.pro.bootstrap.NativeControl",false,null);}
+        catch(ClassNotFoundException unavailable){throw new IllegalStateException(unavailable);}
+        var caller=CALLER.walk(frames->frames.filter(frame->frame.getDeclaringClass()!=RecoveryAgent.class).findFirst().orElse(null));
+        if(caller==null||caller.getDeclaringClass()!=nativeControl||!caller.getMethodName().equals("jvmtiImage"))throw new SecurityException("ACTUAL_NATIVE_FINAL_IMAGE_CALLBACK_REQUIRED");
+        ClassFileTransformer transformer=nativeFinalTransformer;if(transformer==null||!changed)return bytes;
+        if(original==null||bytes==null||writers==null)throw new SecurityException("ACTUAL_NATIVE_IMAGE_PAIR_REQUIRED");
+        if(name==null)name=new jdk.internal.org.objectweb.asm.ClassReader(bytes).getClassName();
+        if(!name.equals(new jdk.internal.org.objectweb.asm.ClassReader(original).getClassName())||!name.equals(new jdk.internal.org.objectweb.asm.ClassReader(bytes).getClassName()))return new byte[]{0,0,0,0};
+        // JPLIS has already run our Java chain. Re-enter only for a separately attributed producer callback.
+        if(Arrays.stream(writers).noneMatch(RecoveryAgent::producerModule))return bytes;
+        try{
+            ExternalCodeImages.nativeEncoded(loader,name,original,bytes,writers);
+            byte[] baseline=controlImages.transform(module,loader,name,actual,domain,original);
+            if(baseline==null)baseline=controlImages.transform(module,loader,name,actual,domain,bytes);
+            byte[] current=baseline==null?bytes:baseline;
+            byte[] result=transformer.transform(module,loader,name,actual,domain,current);
+            return result==null?current:result;
+        }catch(Throwable failure){
+            ExternalCodeImages.failed(writers,name+":NATIVE_FINAL_IMAGE:"+failure.getClass().getSimpleName());
+            return new byte[]{0,0,0,0};
+        }
     }
     public static byte[] transformDefined(Module module,ClassLoader loader,byte[] bytes,boolean hidden) {
         Class<?> caller=CALLER.getCallerClass();

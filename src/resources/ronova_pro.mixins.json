@@ -25,6 +25,7 @@
     "Access$World",
     "Access$Packet",
     "EntityHooks",
+    "PresentationHooks",
     "WorldControlHooks$World",
     "WorldControlHooks$Block",
     "WorldControlHooks$Scheduled",

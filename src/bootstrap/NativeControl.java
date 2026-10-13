@@ -43,7 +43,7 @@ public final class NativeControl {
             if(!early.isEmpty()) {
                 Path actual=Path.of(early).toAbsolutePath();if(!hash(Files.readAllBytes(actual)).equals(digest))throw new IOException("EARLY_NATIVE_IMAGE_MISMATCH");dll=actual;
             }
-            System.load(dll.toString());if(abi()!=49)throw new UnsatisfiedLinkError("NATIVE_CONTROL_ABI");
+            System.load(dll.toString());if(abi()!=51)throw new UnsatisfiedLinkError("NATIVE_CONTROL_ABI");
             if(!initialize0(ControlBridge.class,DefinitionBridge.class))throw new UnsatisfiedLinkError("ACTUAL_NATIVE_BOUNDARY_INSTALL_FAILED");
             if(!initializeDefinitionDirectory0(definitionDirectoryOwner))throw new UnsatisfiedLinkError("ACTUAL_DEFINITION_DIRECTORY_CAS_UNAVAILABLE");
             libraryBoundaryPresent=libraryPresent0();available=true;return state="NATIVE_BIND_AND_JNI_FIELD_READY";
@@ -477,26 +477,64 @@ public final class NativeControl {
             +":HOST_JNI_ONLOAD_BOUNDARY="+(available&&hostLibraryLoadReady0()?"EXACT_JDK_OS_LOAD_RETURN_BEFORE_SAME_THREAD_JNI_ONLOAD":"AWAITING_ACTUAL_JDK_LOAD_UNLOAD_IMPORT_BIND")
             +":DLLMAIN_AND_TLS_CALLBACKS_BEFORE_OS_LOAD_RETURN_UNOBSERVED"
             +":UNRESOLVED_DELAY_IMPORTS_AND_RESOLUTION_OUTSIDE_REGISTERED_GETPROCADDRESS_ENTRIES_UNOBSERVED"
-            +":OTHER_HOST_CREATION_ENTRIES_UNOBSERVED"
-            +":NATIVE_PROCESS_HANDLE_TRANSFER_AND_CLOSE_UNOBSERVED"
-            +":RAW_NATIVE_MEMORY_AND_OTHER_JVMTI_ENVIRONMENTS_REQUIRE_HOST_BACKEND"; }
+            +":HOST_CREATION=OBSERVED_CREATEPROCESS_A_W_ASUSER_A_W_WITHTOKEN_W_WITHLOGON_W"
+            +":HOST_HANDLES=OBSERVED_OPEN_DUPLICATE_CLOSE_AND_INHERITANCE;EXTERNAL_TRANSFERS_AND_SAVED_ORIGINAL_POINTERS_REMAIN_GAPS"
+            +":JVMTI=ACTUAL_GETENV_ENVIRONMENT_CALLBACK_AND_DISPOSAL_CONTROL;PREEXISTING_ENVIRONMENTS_AND_SAVED_ORIGINAL_POINTERS_UNOBSERVED"
+            +":RAW_NATIVE_MEMORY_AND_LOADER_PRE_RETURN_CONTROL_REQUIRE_SELECTED_LOWER_BACKEND:"+hostKernelSummary(null); }
+    private static boolean hostKernelCoreCaller(){
+        Class<?> caller=CALLER.walk(frames->frames.map(StackWalker.StackFrame::getDeclaringClass).filter(type->type!=NativeControl.class).findFirst().orElse(null));
+        return caller!=null&&caller.getName().equals("dev.ronova.pro.ProRuntime")&&ControlBridge.coreWriter();
+    }
+    public static String hostKernelProtect(Module module,boolean protect){
+        Class<?> caller=CALLER.getCallerClass();
+        if(!ControlBridge.coreWriter()||!caller.getName().equals("dev.ronova.pro.ProRuntime"))throw new SecurityException("HOST_KERNEL_ACTUAL_CORE_REQUIRED");
+        if(!available)return "HOST_KERNEL_NATIVE_UNAVAILABLE";
+        hostKernelProtect0(module,protect);long[] actual=hostKernelState0(module);
+        return "HOST_KERNEL_SESSION="+actual[0]+";WIN32="+actual[4]+";NTSTATUS="+actual[5]+";CAPABILITIES="+actual[6]+";UNSERVED="+actual[7]+";POLICY_PENDING="+actual[19]+";SHARED_UNSERVED="+actual[20];
+    }
+    static String hostKernelFile(FileDescriptor descriptor,Module[] selected){
+        if(CALLER.getCallerClass()!=ResourceBridge.class||!ResourceBridge.kernelFileActive(descriptor,selected))throw new SecurityException("HOST_KERNEL_ACTUAL_FILE_SCOPE_REQUIRED");
+        return available?hostKernelFile0(descriptor,selected):"HOST_KERNEL_NATIVE_UNAVAILABLE";
+    }
+    private static boolean hostKernelFileCaller(FileDescriptor descriptor,Module[] selected){return ResourceBridge.kernelFileActive(descriptor,selected);}
+    private static String hostKernelSummary(Module module){
+        if(!available)return "HOST_KERNEL_NATIVE_UNAVAILABLE";long[] actual=hostKernelState0(module);
+        return "HOST_KERNEL_SESSION="+actual[0]+";HOST_KERNEL_WIN32="+actual[4]+";HOST_KERNEL_NTSTATUS="+actual[5]+";HOST_KERNEL_CAPABILITIES="+actual[6]+";HOST_KERNEL_UNSERVED="+actual[7]
+                +";HOST_KERNEL_PROCESS_RECEIPTS="+actual[17]+";HOST_KERNEL_FILE_RECEIPTS="+actual[18]+";HOST_KERNEL_POLICY_PENDING="+actual[19]+";HOST_KERNEL_SHARED_UNSERVED="+actual[20];
+    }
     public static void module(Module module,boolean stopped) {
         if(!controlCaller())throw new SecurityException("NATIVE_CONTROL_AGENT_REQUIRED");
         if(available)module0(module,stopped);
     }
+    private static byte[] jvmtiImage(Module module,ClassLoader loader,String name,Class<?> actual,ProtectionDomain domain,byte[] original,byte[] bytes,Module[] writers,boolean changed){
+        if(!jvmtiBoundary0(module,loader,name,actual,domain,original,bytes,writers,changed))throw new SecurityException("ACTUAL_NATIVE_CLASS_FILE_CALLBACK_SCOPE_REQUIRED");
+        try{
+            Class<?> agent=Class.forName("dev.ronova.pro.agent.RecoveryAgent",false,ClassLoader.getSystemClassLoader());
+            return (byte[])agent.getMethod("nativeFinalImage",Module.class,ClassLoader.class,String.class,Class.class,ProtectionDomain.class,byte[].class,byte[].class,Module[].class,boolean.class)
+                    .invoke(null,module,loader,name,actual,domain,original,bytes,writers,changed);
+        }catch(ReflectiveOperationException failure){throw new IllegalStateException("NATIVE_FINAL_IMAGE_UNAVAILABLE",failure);}
+    }
     public static String moduleState(Module module) {
         if(!available)return state();long[] actual=status0(module);
-        long[] host=hostState0(module);
+        long[] host=hostState0(module);long[] jvmti=jvmtiState0(module);
         return "NATIVE_BIND_EVENTS="+actual[0]+";JNI_FIELD_TABLE="+actual[1]+";WRAPPED_BINDINGS="+actual[2]+";ACTIVE_NATIVE="+actual[3]+";BIND_FAILURES="+actual[4]+";NATIVE_POINTERS="+actual[5]+";LOADED_NATIVE_IMAGES="+actual[6]
                 +";HOST_PROCESS_FAMILIES="+host[0]+";HOST_SHARED_FAMILIES="+host[1]+";HOST_UNPUBLISHED_FAMILIES="+host[2]+";HOST_HANDLE_ERRORS="+host[3]+";HOST_ACTIVE_PROCESSES="+host[4]
                 +";HOST_NATIVE_HANDLE_PUBLICATIONS_UNOBSERVED="+host[5]+";HOST_NATIVE_CREATEPROCESS_IMPORTS="+host[6]+";HOST_NATIVE_CREATEPROCESS_COVERAGE_GAP_IMAGES="+host[7]
                 +";HOST_NATIVE_CREATEPROCESS_LOAD_WINDOWS_UNOBSERVED="+host[8]+";HOST_NATIVE_CREATE_OR_RESOLVER_DELAY_IMPORT_IMAGES_UNOBSERVED="+host[9]
-                +";HOST_NATIVE_GETPROCADDRESS_IMPORTS="+host[10]+";HOST_NATIVE_CREATEPROCESS_RESOLVED_ENTRIES="+host[11]+";HOST_NATIVE_GETPROCADDRESS_RESOLVED_ENTRIES="+host[12];
+                +";HOST_NATIVE_GETPROCADDRESS_IMPORTS="+host[10]+";HOST_NATIVE_CREATEPROCESS_RESOLVED_ENTRIES="+host[11]+";HOST_NATIVE_GETPROCADDRESS_RESOLVED_ENTRIES="+host[12]
+                +";HOST_PROCESS_ALIASES="+host[13]+";HOST_PRIMARY_THREAD_ALIASES="+host[14]+";HOST_EXTERNAL_DUPLICATE_TRANSFERS="+host[15]+";HOST_INHERITED_EXPOSURES="+host[16]
+                +";HOST_LOST_HANDLE_EVIDENCE="+host[17]+";HOST_OBJECT_IDENTITY_BACKEND="+host[18]+";HOST_HANDLE_IMPORTS="+host[19]+";HOST_HANDLE_RESOLVED_ENTRIES="+host[20]
+                +";JVMTI_GETENV="+jvmti[0]+";JVMTI_OBSERVED_ENVIRONMENTS="+jvmti[1]+";JVMTI_CALLBACK_SLOTS="+jvmti[2]+";JVMTI_ACTIVE_CALLBACKS="+jvmti[3]
+                +";JVMTI_DISPOSED_ENVIRONMENTS="+jvmti[4]+";JVMTI_REFUSALS="+jvmti[5]+";JVMTI_OWN_TABLE="+jvmti[6]+";JVMTI_UNATTRIBUTED_CALLBACKS="+jvmti[7]+";"+hostKernelSummary(module);
     }
     public static String retirementGap(Module module){
         if(!controlCaller())throw new SecurityException("NATIVE_CONTROL_AGENT_REQUIRED");
         if(!available)return "";
-        long[] host=hostState0(module);
+        long[] host=hostState0(module);long[] jvmti=jvmtiState0(module);
+        if(jvmti[2]!=0||jvmti[3]!=0)return "JVMTI_CALLBACK_RETIREMENT_PENDING:slots="+jvmti[2]+":active="+jvmti[3]+":environments="+jvmti[1];
+        if(jvmti[1]!=0||jvmti[7]!=0)return "JVMTI_ENVIRONMENT_DISPOSITION_PENDING:environments="+jvmti[1]+":unattributedCallbacks="+jvmti[7];
+        long[] kernel=hostKernelState0(module);
+        if(kernel[17]!=0||kernel[18]!=0||kernel[19]!=0)return "HOST_KERNEL_DISPOSITION_PENDING:processReceipts="+kernel[17]+":fileReceipts="+kernel[18]+":policyPending="+kernel[19]+":win32="+kernel[4]+":ntstatus="+kernel[5];
         if(host[5]!=0)return "HOST_NATIVE_HANDLE_TRANSFER_OR_CLOSE_UNOBSERVED:records="+host[5]+":liveFamilies="+host[0]+":handleErrors="+host[3]+":active="+host[4];
         if(host[0]!=0)return "HOST_PROCESS_RETIREMENT_PENDING:families="+host[0]+":shared="+host[1]+":unpublished="+host[2]+":handleErrors="+host[3]+":active="+host[4];
         if(host[7]!=0)return "HOST_NATIVE_CREATEPROCESS_COVERAGE_GAP:images="+host[7]+":loadWindowsUnobserved="+host[8]+":createOrResolverDelayImagesUnobserved="+host[9];
@@ -638,8 +676,13 @@ public final class NativeControl {
     private static native String processRetire0(Process process,long token);
     private static native boolean hostReady0();
     private static native boolean hostLibraryLoadReady0();
+    private static native void hostKernelProtect0(Module module,boolean protect);
+    private static native String hostKernelFile0(FileDescriptor descriptor,Module[] selected);
+    private static native long[] hostKernelState0(Module module);
     private static native long[] hostState0(Module module);
     private static native long[] status0(Module module);
+    private static native boolean jvmtiBoundary0(Module module,ClassLoader loader,String name,Class<?> actual,ProtectionDomain domain,byte[] original,byte[] bytes,Module[] writers,boolean changed);
+    private static native long[] jvmtiState0(Module module);
     private static native boolean bindingControlled0(java.lang.reflect.Method method);
     private static native boolean clearField0(java.lang.reflect.Field field,Object receiver,Object expected);
     private static native boolean restoreField0(java.lang.reflect.Field field,Object receiver,Object expected,Object incoming);

@@ -28,7 +28,7 @@ public final class ControlBridge {
         }
     };
     private ControlBridge() { }
-    public static int abiVersion(){return 52;}
+    public static int abiVersion(){return 54;}
     public static long arrayRevision(Object value){if(!recoveryWriter())throw new SecurityException("RECOVERY_ARRAY_READER_REQUIRED");return CodeSourceBridge.executionArrayRevision(value);}
 
     public static synchronized void install(Class<?> agent,ClassFileTransformer[] transformers) throws ReflectiveOperationException {
@@ -628,6 +628,28 @@ public final class ControlBridge {
             for(Module source:sources){if(source==null)return null;if(selected==null)selected=source;else if(selected!=source)return null;}
         }
         return selected;
+    }
+    /** Keep only the actual carrier declaration out of this slot's business origins. */
+    public static Module[] presentationSources(Object value,Class<?> carrier){
+        Guards current=guards;Class<?> caller=WALKER.getCallerClass();
+        if(current==null||caller!=current.owner()||!carrier.isInstance(value))throw new SecurityException("ACTUAL_PRESENTATION_CORE_AND_CARRIER_REQUIRED");
+        if(objectSourceUnknown(value))return null;
+        Module declaration=DefinitionBridge.module(carrier);if(producer(declaration))return null;
+        Set<Module> actual=Collections.newSetFromMap(new IdentityHashMap<>());
+        for(Module source:objectSources(value)){if(source==null)return null;if(source!=declaration)actual.add(source);}
+        return actual.isEmpty()?null:actual.toArray(Module[]::new);
+    }
+    public static Object[] createdPresentationObjects(Module[] modules,Class<?> carrier){
+        Guards current=guards;Class<?> caller=WALKER.getCallerClass();
+        if(current==null||caller!=current.owner())throw new SecurityException("ACTUAL_PRESENTATION_CORE_REQUIRED");
+        Set<Module> selected=Collections.newSetFromMap(new IdentityHashMap<>());selected.addAll(Arrays.asList(modules));
+        Set<Object> found=Collections.newSetFromMap(new IdentityHashMap<>());
+        synchronized(CREATION_OWNERS){
+            reapCreationOwners();
+            for(var entry:CREATION_OWNERS.entrySet())if(selected.contains(entry.getValue())){Object value=entry.getKey().get();if(value!=null&&carrier.isInstance(value))found.add(value);}
+            for(var entry:CREATION_SOURCES.entrySet())if(entry.getValue().stream().anyMatch(selected::contains)){Object value=entry.getKey().get();if(value!=null&&carrier.isInstance(value))found.add(value);}
+        }
+        return found.toArray();
     }
     public static Object[] createdGroupObjects(Module[] modules) {
         Guards current=guards;Class<?> caller=WALKER.getCallerClass();

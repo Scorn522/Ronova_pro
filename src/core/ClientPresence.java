@@ -26,6 +26,11 @@ public final class ClientPresence {
     }
     private static final int WATCH_LIMIT=256,CHALLENGE_TOMBSTONE_LIMIT=16384;
     private static final Map<UUID,Watch> watches=new LinkedHashMap<>();
+    private static final Map<UUID,PresentationWatch> presentationWatches=new LinkedHashMap<>();
+    private static final class PresentationWatch {
+        final ProNetwork.PresentationProbe probe;long sequence,lastRequest;
+        PresentationWatch(ProNetwork.PresentationProbe probe){this.probe=probe;lastRequest=tick;}
+    }
     private static final Set<Challenge> retiredChallenges=new HashSet<>();
     private static final ClientPolicyState policy=new ClientPolicyState(),terminalPolicy=new ClientPolicyState();
     private static final System.Logger LOG=System.getLogger("ronova_pro.client");
@@ -113,7 +118,7 @@ public final class ClientPresence {
         if(!mc.isSameThread())throw new IllegalStateException("CLIENT_THREAD_REQUIRED");
         Object active=mc.getConnection()==null?null:mc.getConnection().getConnection();
         if(connection!=active) {
-            connection=active;hudPolicies.clear();localBodies.clear();watchSession=null;watches.clear();retiredChallenges.clear();challengeOverflow=false;
+            connection=active;hudPolicies.clear();localBodies.clear();watchSession=null;watches.clear();presentationWatches.clear();retiredChallenges.clear();challengeOverflow=false;
             policy.connection(active);terminalPolicy.connection(active);pendingModGroups.clear();policyOverflowReported=false;awaitingScope=false;awaitingAfterScope=-1;
             worldAppliedScope=-1;lastResetScope=-1;lastResetDimension=null;
             clearWorldPolicy();pendingWorld=null;worldRevision=-1;clearWorldPages();
@@ -134,7 +139,8 @@ public final class ClientPresence {
     }
     private static void clearWatches() {
         for(Watch watch:new ArrayList<>(watches.values()))retire(challenge(watch.p));
-        watches.clear();
+        for(PresentationWatch watch:new ArrayList<>(presentationWatches.values()))retire(new Challenge(watch.probe.session(),watch.probe.operation(),watch.probe.challenge()));
+        presentationWatches.clear();watches.clear();
     }
     private static boolean current(Object source) { context();return source!=null&&source==connection; }
     private static Challenge challenge(ProNetwork.Probe p) { return new Challenge(p.session(),p.operation(),p.challenge()); }
@@ -142,7 +148,7 @@ public final class ClientPresence {
         if(retiredChallenges.contains(old))return true;
         if(retiredChallenges.size()>=CHALLENGE_TOMBSTONE_LIMIT) {
             boolean first=!challengeOverflow;
-            challengeOverflow=true;watches.clear();
+            challengeOverflow=true;watches.clear();presentationWatches.clear();
             if(first)LOG.log(System.Logger.Level.WARNING,"CLIENT_CHALLENGE_TOMBSTONE_CAPACITY_REACHED; rejecting new probes until connection changes");
             return false;
         }
@@ -162,9 +168,20 @@ public final class ClientPresence {
         if(found!=null&&found.p.session().equals(p.session())&&found.p.challenge().equals(p.challenge())) {
             found.lastRequest=tick;return;
         }
-        if(found==null&&watches.size()>=WATCH_LIMIT)return; // Coverage failure never produces a positive reply.
+        if(found==null&&watches.size()+presentationWatches.size()>=WATCH_LIMIT)return; // Coverage failure never produces a positive reply.
         if(found!=null&&!retire(challenge(found.p)))return;
         watches.put(p.operation(),new Watch(p));
+    }
+    static void presentationWatch(ProNetwork.PresentationProbe p,Object source){
+        if(p==null||!current(source)||challengeOverflow||awaitingScope||policy.scope()!=p.scope()||!Objects.equals(policy.session(),p.session())
+                ||!Objects.equals(policy.dimension(),p.dimension())||!Objects.equals(levelDimension(Minecraft.getInstance()),p.dimension()))return;
+        Hud hud=hudPolicies.get(p.entry());if(hud==null||!hud.terminal())return;
+        Challenge incoming=new Challenge(p.session(),p.operation(),p.challenge());if(retiredChallenges.contains(incoming))return;
+        PresentationWatch prior=presentationWatches.get(p.operation());
+        if(prior!=null&&prior.probe.equals(p)){prior.lastRequest=tick;return;}
+        if(prior==null&&watches.size()+presentationWatches.size()>=WATCH_LIMIT)return;
+        if(prior!=null&&!retire(new Challenge(prior.probe.session(),prior.probe.operation(),prior.probe.challenge())))return;
+        installControls();PresentationWatch watch=new PresentationWatch(p);presentationWatches.put(p.operation(),watch);ProRuntime.registerClientControlObjects(watch);
     }
     static void forget(ProNetwork.Forget p,Object source) {
         if(p==null||!current(source)||challengeOverflow)return;
@@ -172,6 +189,8 @@ public final class ClientPresence {
         Watch w=watches.get(p.operation());
         Challenge forgotten=new Challenge(p.session(),p.operation(),p.challenge());
         retire(forgotten); // Also covers a Forget that reaches the client before its queued Probe.
+        PresentationWatch presentation=presentationWatches.get(p.operation());
+        if(presentation!=null&&presentation.probe.session().equals(p.session())&&presentation.probe.challenge().equals(p.challenge()))presentationWatches.remove(p.operation());
         if(w!=null&&w.p.session().equals(p.session())&&w.p.challenge().equals(p.challenge()))
             watches.remove(p.operation());
     }
@@ -221,7 +240,7 @@ public final class ClientPresence {
             ProRuntime.installClientControls(lookup.findStatic(ClientPresence.class,"clientField",java.lang.invoke.MethodType.methodType(boolean.class,Object.class,Class.class,String.class,Object.class)),
                     lookup.findStatic(ClientPresence.class,"clientDispatch",java.lang.invoke.MethodType.methodType(boolean.class,Object.class,String.class,Object.class)),
                     lookup.findStatic(ClientPresence.class,"clientLifeResult",java.lang.invoke.MethodType.methodType(Object.class,Object.class,String.class)));
-            ProRuntime.registerClientControlObjects(watches,retiredChallenges,hudPolicies,localBodies,
+            ProRuntime.registerClientControlObjects(watches,presentationWatches,retiredChallenges,hudPolicies,localBodies,
                     policy.controlObjects()[0],policy.controlObjects()[1],terminalPolicy.controlObjects()[0],terminalPolicy.controlObjects()[1],worldBodies,worldFrames,terrainFrames,weatherFrames,worldPages,worldRuleClocks);
             ProRuntime.registerClientControlObjects(ClientWorldVisuals.controlObjects());
             controlsInstalled=true;
@@ -648,6 +667,14 @@ public final class ClientPresence {
         for(UUID operation:expired) {
             Watch old=watches.remove(operation);
             if(old!=null&&!retire(challenge(old.p)))break;
+        }
+        for(var iterator=presentationWatches.entrySet().iterator();iterator.hasNext();){
+            PresentationWatch watch=iterator.next().getValue();var probe=watch.probe;
+            if(tick-watch.lastRequest>1200){iterator.remove();retire(new Challenge(probe.session(),probe.operation(),probe.challenge()));continue;}
+            if(awaitingScope||!Objects.equals(policy.session(),probe.session())||policy.scope()!=probe.scope()||!Objects.equals(levelDimension(mc),probe.dimension()))continue;
+            Hud hud=hudPolicies.get(probe.entry());if(hud==null||!hud.terminal())continue;
+            boolean absent=!((dev.ronova.pro.mixin.ClientPresentation.BossAccess)mc.gui.getBossOverlay()).pro$events().containsKey(probe.entry());
+            ProNetwork.presentationReply(probe,++watch.sequence,absent);
         }
         for(Watch w:watches.values()) {
             boolean absent=mc.level.dimension().location().toString().equals(w.p.dimension());

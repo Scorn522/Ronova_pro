@@ -2,7 +2,7 @@
 #include "bindings.c"
 // Preserve Object.clone itself, including Cloneable checks; never substitute a Java ancestor body.
 JNIEXPORT jint JNICALL Java_dev_ronova_pro_bootstrap_NativeControl_abi(JNIEnv *env, jclass type) {
-    (void)env; (void)type; return 49;
+    (void)env; (void)type; return 51;
 }
 JNIEXPORT jboolean JNICALL Java_dev_ronova_pro_bootstrap_NativeControl_hostLibraryLoadReady0(JNIEnv *env,jclass type) {
     (void)env; (void)type; return host_library_load_ready()?JNI_TRUE:JNI_FALSE;
@@ -44,6 +44,7 @@ static void JNICALL host_module0(JNIEnv *env,jclass type,jobject module,jboolean
     /* Rebind observed slots before stopping their resolver. A call that already
      * fetched the old result is classified at its exact original IAT call site. */
     host_module_update(env,module,stopped);
+    if(stopped&&!native_original.ExceptionCheck(env))native_tooling_retire(env,module);
 }
 static int native_bind_controller(JNIEnv *env,jclass controller){
     static const JNINativeMethod methods[]={
@@ -107,8 +108,13 @@ static int native_bind_controller(JNIEnv *env,jclass controller){
         {"processRetire0","(Ljava/lang/Process;J)Ljava/lang/String;",(void*)Java_dev_ronova_pro_bootstrap_NativeControl_processRetire0},
         {"hostReady0","()Z",(void*)Java_dev_ronova_pro_bootstrap_NativeControl_hostReady0},
         {"hostLibraryLoadReady0","()Z",(void*)Java_dev_ronova_pro_bootstrap_NativeControl_hostLibraryLoadReady0},
+        {"hostKernelProtect0","(Ljava/lang/Module;Z)V",(void*)host_kernel_protect0},
+        {"hostKernelFile0","(Ljava/io/FileDescriptor;[Ljava/lang/Module;)Ljava/lang/String;",(void*)host_kernel_file0},
+        {"hostKernelState0","(Ljava/lang/Module;)[J",(void*)host_kernel_state0},
         {"hostState0","(Ljava/lang/Module;)[J",(void*)Java_dev_ronova_pro_bootstrap_NativeControl_hostState0},
         {"status0","(Ljava/lang/Module;)[J",(void*)Java_dev_ronova_pro_bootstrap_NativeControl_status0},
+        {"jvmtiBoundary0","(Ljava/lang/Module;Ljava/lang/ClassLoader;Ljava/lang/String;Ljava/lang/Class;Ljava/security/ProtectionDomain;[B[B[Ljava/lang/Module;Z)Z",(void*)Java_dev_ronova_pro_bootstrap_NativeControl_jvmtiBoundary0},
+        {"jvmtiState0","(Ljava/lang/Module;)[J",(void*)Java_dev_ronova_pro_bootstrap_NativeControl_jvmtiState0},
         {"bindingControlled0","(Ljava/lang/reflect/Method;)Z",(void*)Java_dev_ronova_pro_bootstrap_NativeControl_bindingControlled0},
         {"clearField0","(Ljava/lang/reflect/Field;Ljava/lang/Object;Ljava/lang/Object;)Z",(void*)Java_dev_ronova_pro_bootstrap_NativeControl_clearField0},
         {"restoreField0","(Ljava/lang/reflect/Field;Ljava/lang/Object;Ljava/lang/Object;Ljava/lang/Object;)Z",(void*)Java_dev_ronova_pro_bootstrap_NativeControl_restoreField0},

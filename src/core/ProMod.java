@@ -207,6 +207,10 @@ public final class ProMod {
                 UUID id=ProRuntime.get(c.getSource().getServer()).clearBlock(c.getSource().getLevel(),BlockPosArgument.getLoadedBlockPos(c,"position"));
                 c.getSource().sendSuccess(()->Component.literal("方块实体处置已受理："+id),false);return 1;
             })))
+            .then(Commands.literal("presentation").then(Commands.argument("owner",StringArgumentType.word()).then(Commands.argument("entry",StringArgumentType.word()).executes(c->{
+                var runtime=ProRuntime.get(c.getSource().getServer());UUID operation=runtime.clearPresentation(UUID.fromString(StringArgumentType.getString(c,"owner")),UUID.fromString(StringArgumentType.getString(c,"entry")));
+                c.getSource().sendSuccess(()->Component.literal(runtime.operationSummary(operation)+"；操作："+operation),false);return 1;
+            }))))
             .then(Commands.literal("status").then(Commands.argument("operation",StringArgumentType.word()).executes(c-> {
                 var runtime=ProRuntime.get(c.getSource().getServer());
                 UUID operation=UUID.fromString(StringArgumentType.getString(c,"operation"));

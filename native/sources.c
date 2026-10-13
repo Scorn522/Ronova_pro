@@ -80,7 +80,7 @@ static int host_loader_exchange(void *volatile *slot,void *expected,void *replac
 static int host_library_load_install(void){
     if(host_library_load_ready())return 1;
     if(!native_vm||!native_load_original||!native_unload_original)return 0;
-    HMODULE image=native_image((void*)native_load_original),jvm=native_image((void*)(*native_vm)->GetEnv);
+    HMODULE image=native_image((void*)native_load_original),jvm=native_vm_getenv_image(native_vm);
     if(!image||image!=native_java_image||native_image((void*)native_unload_original)!=image||!jvm)return 0;
     void *load=(void*)GetProcAddress(jvm,"JVM_LoadLibrary"),*unload=(void*)GetProcAddress(jvm,"JVM_UnloadLibrary");
     void *volatile *loadSlot=NULL;

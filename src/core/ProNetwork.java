@@ -12,11 +12,13 @@ import net.minecraftforge.network.*;
 import net.minecraftforge.network.simple.SimpleChannel;
 
 public final class ProNetwork {
-    static final String WIRE_VERSION="r3-client-6";
+    static final String WIRE_VERSION="r3-client-7";
     static final SimpleChannel CHANNEL=NetworkRegistry.newSimpleChannel(new ResourceLocation("ronova_pro","presence"),
             ()->WIRE_VERSION,v->v.equals(WIRE_VERSION)||v.equals(NetworkRegistry.ABSENT),v->v.equals(WIRE_VERSION)||v.equals(NetworkRegistry.ABSENT));
     public record Probe(UUID session,UUID operation,UUID challenge,String dimension,int entityId,UUID entityUuid) {}
     record Reply(UUID session,UUID operation,UUID challenge,long sequence,boolean absent) {}
+    record PresentationProbe(UUID session,UUID operation,UUID challenge,long scope,String dimension,UUID owner,UUID entry) {}
+    record PresentationReply(UUID session,UUID operation,UUID challenge,long scope,String dimension,UUID owner,UUID entry,long sequence,boolean absent) {}
     record Forget(UUID session,UUID operation,UUID challenge) {}
     /**
      * The actual protection policy as the server applies it, for one exact object. This is not a presence
@@ -85,6 +87,21 @@ public final class ProNetwork {
                 b.readList(buffer->new WorldBody(buffer.readVarInt(),buffer.readUUID()))))
             .consumerMainThread((p,c)->DistExecutor.unsafeRunWhenOn(Dist.CLIENT,()->()->ClientPresence.worldPolicy(p,c.get().getNetworkManager()))).add();
 
+        CHANNEL.messageBuilder(PresentationProbe.class,9,NetworkDirection.PLAY_TO_CLIENT)
+            .encoder((p,b)->{b.writeUUID(p.session);b.writeUUID(p.operation);b.writeUUID(p.challenge);b.writeLong(p.scope);b.writeUtf(p.dimension,256);b.writeUUID(p.owner);b.writeUUID(p.entry);})
+            .decoder(b->new PresentationProbe(b.readUUID(),b.readUUID(),b.readUUID(),b.readLong(),b.readUtf(256),b.readUUID(),b.readUUID()))
+            .consumerMainThread((p,c)->DistExecutor.unsafeRunWhenOn(Dist.CLIENT,()->()->ClientPresence.presentationWatch(p,c.get().getNetworkManager()))).add();
+        CHANNEL.messageBuilder(PresentationReply.class,10,NetworkDirection.PLAY_TO_SERVER)
+            .encoder((p,b)->{b.writeUUID(p.session);b.writeUUID(p.operation);b.writeUUID(p.challenge);b.writeLong(p.scope);b.writeUtf(p.dimension,256);b.writeUUID(p.owner);b.writeUUID(p.entry);b.writeLong(p.sequence);b.writeBoolean(p.absent);})
+            .decoder(b->new PresentationReply(b.readUUID(),b.readUUID(),b.readUUID(),b.readLong(),b.readUtf(256),b.readUUID(),b.readUUID(),b.readLong(),b.readBoolean()))
+            .consumerMainThread((p,c)->{ServerPlayer player=c.get().getSender();if(player!=null){ProRuntime runtime=ProRuntime.get(player.server);if(runtime!=null)runtime.presentationReply(player,p);}}).add();
+    }
+    static boolean presentationProbe(ServerPlayer player,UUID session,UUID operation,UUID challenge,long scope,String dimension,UUID owner,UUID entry){
+        if(!present(player)||scope<=0)return false;
+        CHANNEL.send(PacketDistributor.PLAYER.with(()->player),new PresentationProbe(session,operation,challenge,scope,dimension,owner,entry));return true;
+    }
+    static void presentationReply(PresentationProbe p,long sequence,boolean absent){
+        CHANNEL.sendToServer(new PresentationReply(p.session,p.operation,p.challenge,p.scope,p.dimension,p.owner,p.entry,sequence,absent));
     }
     static void probe(ServerPlayer p,UUID session,UUID op,UUID challenge,String dim,int id,UUID uuid) {
         if(CHANNEL.isRemotePresent(p.connection.connection))

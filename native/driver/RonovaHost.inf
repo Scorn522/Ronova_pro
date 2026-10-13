@@ -1,0 +1,60 @@
+; Driver-source package. Altitudes are intentionally unassigned below: replace
+; them with the actual allocated deployment values before signing/installing.
+; No setup script runs this INF, starts this service or changes TestSigning.
+[Version]
+Signature="$WINDOWS NT$"
+Class=SecurityEnhancer
+ClassGuid={d02bc3da-0c8e-4945-9bd5-f1883c226c8c}
+Provider=%Provider%
+DriverVer=10/13/2026,1.0.0.0
+CatalogFile=RonovaHost.cat
+PnpLockdown=1
+
+[DestinationDirs]
+RonovaHost.DriverFiles=13
+
+[DefaultInstall.NTamd64.10.0...19041]
+CopyFiles=RonovaHost.DriverFiles
+
+[DefaultInstall.NTamd64.10.0...19041.Services]
+AddService=RonovaHost,,RonovaHost.Service
+
+[RonovaHost.Service]
+DisplayName=%ServiceName%
+Description=%ServiceDescription%
+ServiceBinary=%13%\RonovaHost.sys
+ServiceType=2
+StartType=3
+ErrorControl=1
+LoadOrderGroup="FSFilter Security Enhancer"
+Dependencies=FltMgr
+AddReg=RonovaHost.Registry
+
+[RonovaHost.Registry]
+HKR,"Parameters","ObAltitude",0x00000000,%ObAltitude%
+; Windows 11 24H2+ minifilter configuration.
+HKR,"Parameters\Instances","DefaultInstance",0x00000000,%InstanceName%
+HKR,"Parameters\Instances\RonovaHost Instance","Altitude",0x00000000,%FilterAltitude%
+HKR,"Parameters\Instances\RonovaHost Instance","Flags",0x00010001,0
+; The same configured identity for earlier supported Windows 10/11.
+HKR,"Instances","DefaultInstance",0x00000000,%InstanceName%
+HKR,"Instances\RonovaHost Instance","Altitude",0x00000000,%FilterAltitude%
+HKR,"Instances\RonovaHost Instance","Flags",0x00010001,0
+
+[RonovaHost.DriverFiles]
+RonovaHost.sys
+
+[SourceDisksFiles]
+RonovaHost.sys=1
+
+[SourceDisksNames]
+1=%DiskName%
+
+[Strings]
+Provider="Ronova Pro"
+ServiceName="Ronova Host"
+ServiceDescription="Exact authorized process-object and file-object policies"
+DiskName="Ronova Host source build"
+InstanceName="RonovaHost Instance"
+ObAltitude=""
+FilterAltitude=""

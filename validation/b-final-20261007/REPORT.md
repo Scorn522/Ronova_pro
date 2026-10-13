@@ -1,5 +1,19 @@
 # B 批实际报告：2026-10-09 代码收敛接续
 
+## 2026-10-13：C 接续——54/51 用户态接线与自编 Windows 驱动源码
+
+当前主源 Java ABI 54 / Native ABI 51 / Storage ABI 3 / Journal 6；用户态仍为 GNU C23 / GNU C++23、Java 17，新增内核项目使用 WDK C17。尚未取得最新 54/51 游戏收口，C 整体与 B 仍未完成。
+
+已接线：真实 JVMTI GetEnv 环境、独立回调来源与退役、最终定义守卫；Host 实际创建 API、进程/线程句柄身份及 Job 处置；CPU/GPU 停止来源份额和原存储租约、音频原执行器及实际 OpenAL 删除；纯 HUD 原 ID/players 与连接/scope 缺席回复（`r3-client-7`）。缓存原表、旧环境、内部调度屏障及未观察的原生写入仍有缺口。
+
+用户已选择自行编写 Windows 内核驱动；`native/driver/` 的 5 个文件及用户态 `native/host_kernel.c` 已实际集成，按保留的真实对象句柄接线，不给共享游戏 JVM 设置按 Mod 猜测的规则。包含选定进程/线程新句柄权限削减、子进程创建拒绝和实际文件对象规则；旧句柄、继承、映射/section、paging/kernel I/O 及完整映像准入未服务。本机无 WDK/MSVC，内核驱动未编译、加载或签名；真实签名与 minifilter altitude 待部署。
+
+本轮统一构建：PASS，39 秒，`build-c-java54-native51-driver-source-fixed-20261013.log`（Java/用户态 Native 主包与既有夹具，未包含 WDK 驱动编译）；直接相关检查：Native51 真实 Host/JVMTI 入口 PASS、退出 0，`c-host-jvmti-native51-20261013.log`；实际创建、句柄操作、GetEnv/回调替换/关闭/Dispose 与 JNI 表入口保护通过，该独立 JVM 未登记真实目标 Mod，不代表整组游戏退役或内核运行通过。此前 53/50 Host/JVMTI 公开入口检查实际 PASS；WithTokenW 返回 1314、WithLogonW 返回 87 是准确失败，未算创建成功。旧检查及原失败记录保留，未据此提升 54/51 游戏结果。
+
+最新客户端结果：旧 53/50 客户端 20:41:48 到实际 unifont 字体加载，PID 63500 仍在运行；没有最新 54/51 菜单或世界结果。run5（PID 63500）使用旧 53/50 第一构建，仍在资源加载阶段，尚无菜单或世界结果。HUD/UI、音频、CPU/GPU 与目标组游戏处置尚无最新 54/51 收口；候选目标目录为 `distribution/candidate-c-java54-native51-wip-20261013`（WIP）。
+
+---
+
 ## 2026-10-13：C 接续——HUD 实际注册条目与图像 SRG 兼容
 
 接续已同步的 `01548b5`；Java ABI 52 / Native ABI 49 / Storage ABI 3 / Journal 6，GNU C23 / GNU C++23、Java 17。当前工作包代码已写齐并统一构建通过。完整 C、B 的实际游戏收口仍未完成。
