@@ -8,14 +8,25 @@
 typedef BOOL (WINAPI *HostWriteProcessMemory)(HANDLE,LPVOID,LPCVOID,SIZE_T,SIZE_T*);
 typedef BOOL (WINAPI *HostVirtualProtect)(LPVOID,SIZE_T,DWORD,PDWORD);
 typedef BOOL (WINAPI *HostVirtualProtectEx)(HANDLE,LPVOID,SIZE_T,DWORD,PDWORD);
+typedef BOOL (WINAPI *HostVirtualFree)(LPVOID,SIZE_T,DWORD);
+typedef BOOL (WINAPI *HostVirtualFreeEx)(HANDLE,LPVOID,SIZE_T,DWORD);
+typedef BOOL (WINAPI *HostUnmapView)(LPCVOID);
+typedef BOOL (WINAPI *HostUnmapViewEx)(PVOID,ULONG);
 static DWORD host_memory_page_size;
+static uintptr_t host_memory_maximum;
 static void host_memory_prepare(void){
     if(__atomic_load_n(&host_memory_page_size,__ATOMIC_ACQUIRE))return;
     SYSTEM_INFO system;GetSystemInfo(&system);
-    if(system.dwPageSize)__atomic_store_n(&host_memory_page_size,system.dwPageSize,__ATOMIC_RELEASE);
+    if(system.dwPageSize){
+        __atomic_store_n(&host_memory_maximum,(uintptr_t)system.lpMaximumApplicationAddress,__ATOMIC_RELEASE);
+        __atomic_store_n(&host_memory_page_size,system.dwPageSize,__ATOMIC_RELEASE);
+    }
 }
 static int host_is_memory_write(int kind){
     return kind>=HOST_WRITE_PROCESS_MEMORY&&kind<=HOST_VIRTUAL_PROTECT_EX;
+}
+static int host_is_memory_release(int kind){
+    return kind>=HOST_VIRTUAL_FREE&&kind<=HOST_UNMAP_VIEW_EX;
 }
 static int host_memory_overlaps(uintptr_t first,uintptr_t last,const void *allocation,SIZE_T size){
     if(!allocation||!size)return 0;uintptr_t base=(uintptr_t)allocation;
@@ -119,6 +130,95 @@ static uint64_t host_native_memory(HostImport *entry,void *caller,uintptr_t *arg
     if(!error){SetLastError(incoming);result=host_memory_original(entry,process,arguments);error=GetLastError();}
     /* Capture the original API's error before releasing only our alias. No
      * caller-owned handle is closed, and no output is synthesized on refusal. */
+    if(process&&!host_real_close(process))InterlockedIncrement(&native_failures);
+    native_owner_links_free(owners);SetLastError(error);return (uint64_t)result;
+}
+
+/* RegionSize covers one attribute segment, not the whole reservation/view.
+ * Starting from the actual AllocationBase, walk only that current allocation.
+ * No path, module name, allocation directory, or caller-supplied length defines
+ * its boundary. A free page has no defined AllocationBase and is not traversed.
+ * https://learn.microsoft.com/en-us/windows/win32/api/memoryapi/nf-memoryapi-virtualquery
+ * https://learn.microsoft.com/en-us/windows/win32/api/winnt/ns-winnt-memory_basic_information
+ */
+static int host_memory_allocation_range(const void *address,int restricted){
+    MEMORY_BASIC_INFORMATION initial;
+    if(VirtualQuery(address,&initial,sizeof(initial))!=sizeof(initial))return -1;
+    if(initial.State==MEM_FREE)return host_memory_range(address,1,1,restricted);
+    uintptr_t requested=(uintptr_t)address,segment=(uintptr_t)initial.BaseAddress,base=(uintptr_t)initial.AllocationBase;
+    if(!base||base>segment||segment>requested||!initial.RegionSize||requested-segment>=initial.RegionSize)return -1;
+    uintptr_t maximum=__atomic_load_n(&host_memory_maximum,__ATOMIC_ACQUIRE),cursor=base;
+    if(!maximum||requested>maximum)return -1;
+    for(;;){
+        if(cursor>maximum)break;
+        MEMORY_BASIC_INFORMATION current;
+        if(VirtualQuery((const void*)cursor,&current,sizeof(current))!=sizeof(current))return -1;
+        if(current.State==MEM_FREE||(uintptr_t)current.AllocationBase!=base)break;
+        if((current.State!=MEM_COMMIT&&current.State!=MEM_RESERVE)||(uintptr_t)current.BaseAddress!=cursor
+                ||!current.RegionSize||current.RegionSize>UINTPTR_MAX-cursor)return -1;
+        cursor+=(uintptr_t)current.RegionSize;
+    }
+    if(cursor<=requested||cursor<=base)return -1;
+    return host_memory_range((const void*)base,(SIZE_T)(cursor-base),0,restricted);
+}
+static int host_memory_release_range(HostImport *entry,const uintptr_t *arguments,int restricted){
+    const void *address=(const void*)arguments[entry->kind==HOST_VIRTUAL_FREE_EX?1:0];
+    if(entry->kind==HOST_UNMAP_VIEW||entry->kind==HOST_UNMAP_VIEW_EX)
+        return host_memory_allocation_range(address,restricted);
+    SIZE_T size=(SIZE_T)arguments[entry->kind==HOST_VIRTUAL_FREE_EX?2:1];
+    DWORD type=(DWORD)arguments[entry->kind==HOST_VIRTUAL_FREE_EX?3:2];
+    if(type==MEM_DECOMMIT&&size)return host_memory_range(address,size,1,restricted);
+    /* RELEASE(base,0), DECOMMIT(base,0), and unmapping can remove an entire
+     * reservation/view containing differently protected segments. Never infer
+     * that a non-base or zero-sized request must fail and so needs no guard.
+     * Placeholder coalesce/split flags have real nonzero-size contracts: check
+     * that complete explicit interval as well, retaining every original flag.
+     * https://learn.microsoft.com/en-us/windows/win32/api/memoryapi/nf-memoryapi-virtualfree
+     * https://learn.microsoft.com/en-us/windows/win32/api/memoryapi/nf-memoryapi-unmapviewoffileex
+     */
+    int hit=host_memory_allocation_range(address,restricted);
+    return hit||!size?hit:host_memory_range(address,size,1,restricted);
+}
+static BOOL host_memory_release_original(HostImport *entry,HANDLE process,const uintptr_t *a){
+    switch(entry->kind){
+        case HOST_VIRTUAL_FREE:return ((HostVirtualFree)entry->original)((LPVOID)a[0],(SIZE_T)a[1],(DWORD)a[2]);
+        case HOST_VIRTUAL_FREE_EX:return ((HostVirtualFreeEx)entry->original)(process,(LPVOID)a[1],(SIZE_T)a[2],(DWORD)a[3]);
+        case HOST_UNMAP_VIEW:return ((HostUnmapView)entry->original)((LPCVOID)a[0]);
+        case HOST_UNMAP_VIEW_EX:return ((HostUnmapViewEx)entry->original)((PVOID)a[0],(ULONG)a[1]);
+        default:SetLastError(ERROR_INVALID_FUNCTION);return FALSE;
+    }
+}
+static uint64_t host_native_memory_release(HostImport *entry,void *caller,uintptr_t *arguments){
+    DWORD incoming=GetLastError();OwnerLink *owners=NULL;int unknown=0;
+    NativeThread *state=native_tls==TLS_OUT_OF_INDEXES?NULL:(NativeThread*)TlsGetValue(native_tls);
+    int restricted=state&&(state->heapCallback||state->vmDetaching||state->vmThreadEnding||state->hostUnloadImage||state->hostRelease
+            ||state->hostLoad&&state->hostLoad->calling);
+    if(!restricted)entry=host_consumed_entry(entry,state,caller);
+    if(!host_entry_sources_query(entry,state,caller,&owners,NULL,1,&unknown)){
+        DWORD error=GetLastError();native_owner_links_free(owners);SetLastError(error);return FALSE;
+    }
+    DWORD error=0;HANDLE process=NULL;BOOL result=FALSE;
+    if(native_owner_stopped(owners))error=ERROR_ACCESS_DENIED;
+    else if(unknown&&(restricted||native_has_producer(owners)))error=ERROR_INVALID_DATA;
+    int local=entry->kind!=HOST_VIRTUAL_FREE_EX;
+    if(!error&&!local){
+        HostCompareHandles compare=__atomic_load_n(&host_compare_handles,__ATOMIC_ACQUIRE);
+        if(!compare&&!restricted&&host_handle_identity_ready())compare=__atomic_load_n(&host_compare_handles,__ATOMIC_ACQUIRE);
+        if(!compare)error=ERROR_NOT_SUPPORTED;
+        else if(!host_real_duplicate(GetCurrentProcess(),(HANDLE)arguments[0],GetCurrentProcess(),&process,0,FALSE,DUPLICATE_SAME_ACCESS))error=GetLastError();
+        else local=compare(process,GetCurrentProcess())!=0;
+    }
+    /* A confirmed current-process alias needs only VirtualQuery. Requiring
+     * VirtualQueryEx on that same-access handle would wrongly require QUERY
+     * access that VirtualFreeEx itself does not need. Remote addresses never
+     * acquire local ownership merely because their numeric values coincide. */
+    int hit=!error&&local?host_memory_release_range(entry,arguments,restricted):0;
+    if(!error&&hit)error=hit>0?ERROR_ACCESS_DENIED:restricted?ERROR_BUSY:ERROR_INVALID_DATA;
+    if(!error&&native_owner_stopped(owners))error=ERROR_ACCESS_DENIED;
+    /* Win32 exposes no allocation-incarnation pin or atomic query-and-free.
+     * A concurrent mapping replacement after observation is unresolved, even
+     * though the process object is fixed. This guard does not claim otherwise. */
+    if(!error){SetLastError(incoming);result=host_memory_release_original(entry,process,arguments);error=GetLastError();}
     if(process&&!host_real_close(process))InterlockedIncrement(&native_failures);
     native_owner_links_free(owners);SetLastError(error);return (uint64_t)result;
 }

@@ -113,7 +113,7 @@ static void *native_tooling_extension_entry(NativeToolingSlot *slot,const Native
     unsigned short scaled=(unsigned short)(frame/8);memcpy(unwind+6,&scaled,2);
     DWORD previous;
     if(!host_real_virtual_protect(page,4096,PAGE_EXECUTE_READ,&previous)||!RtlAddFunctionTable(&slot->unwind,1,(DWORD64)(uintptr_t)page)){
-        VirtualFree(page,0,MEM_RELEASE);return NULL;
+        host_real_virtual_free(page,0,MEM_RELEASE);return NULL;
     }
     FlushInstructionCache(GetCurrentProcess(),page,4096);return page;
 }

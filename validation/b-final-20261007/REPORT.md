@@ -1,5 +1,20 @@
 # B 批实际报告：2026-10-09 代码收敛接续
 
+## 2026-10-14：C 强度接续——原生释放与取消映射防拆
+
+接续 `ba89fbb`，Java ABI61 / Native ABI60 / Storage3 / Journal6。自身外观和武器注册继续暂缓，目标 Mod 的绘制/UI 等强度路径继续；完整 C/B 尚未完成。
+
+- VirtualFree、VirtualFreeEx、UnmapViewOfFile、UnmapViewOfFileEx 已观察 IAT/GPA 接入实际当前来源、停止准入与准确控制范围。MEM_RELEASE 及零长度 MEM_DECOMMIT 按真实完整 allocation，Unmap 按真实完整 view 检查；从 AllocationBase 逐属性段推进，不把首个 RegionSize 当整块。非零 decommit 按整页，placeholder 的非零 split/coalesce 请求保留原 flags 并检查完整显式范围；查询缺失、矛盾或锁忙保持未知并拒绝，不建新的分配器目录。
+- FreeEx 沿既有 SAME_ACCESS 私有 alias 和 CompareObjectHandles 固定真实进程对象，确认当前进程后用 VirtualQuery，不额外索要 QUERY 权限；真实原 API 仍用相同权限的对象、原地址/长度/flags，仅调用一次，保留 BOOL 和即时 LastError。受限回调保持 Try 与原来源守卫。自有未发布表/跳板的失败清理改走私有原 VirtualFree，没有赋予外部回调通用 bypass。
+
+实际结果：集中主包 `build-c-java61-native60-host-release-20261014.log` PASS 27秒；既有夹具增量编译 PASS，`compile-c-host-release60-20261014.log`。独立 release-memory phase 实际 JVM 退出0，`c-host-release60-20261014.log`：四入口真实 IAT/GPA 正常调用通过；自有页 decommit 后为 MEM_RESERVE，同址重新 commit 后零读/写正常，release 后为 MEM_FREE；FreeEx 的仅 VM_OPERATION 当前进程真实句柄正常。新临时文件的四个真实 view 在 Unmap/Ex 的 IAT/GPA 正常解除，Ex 的0及 transient-boost=1原 flags 通过，映射/文件句柄关闭、临时文件删除。真实 VM shadow 的零长度整块 decommit 和 release、真实 GPA thunk 的整块 release/整页 decommit，以及准确控制 DLL 的 Unmap/Ex 均返回 BOOL0/5，原 mapping、字节与权限保留；释放后只查询页面，不读已释放字节。
+
+没有重跑旧写入/权限、thread、heap、定义等矩阵，也没有伪造 Mod producer。真实目标 Mod stopped/共享来源、受限回调并发和 placeholder 实机效果仍 NOTRUN；公共 Win32 查询与释放之间没有原子 allocation 身份 pin，映射并发替换仍未闭合。CPU stores、原始系统调用、未观察入口/旧缓存、未登记 JNI/特殊 VM IAT 等旧范围仍保留；本候选游戏、保存重启和内核运行未执行。驱动/管理器本轮未改、未重建，沿用此前未签名 SYS 37888字节及管理器190464字节，未安装/加载。
+
+本地候选 `distribution/candidate-c-java61-native60-release-wip-20261014`，Core JAR 2410813字节，prelaunch 22440字节。匹配源码/产物包 `distribution/Ronova-Pro-C-Release-WIP-Java61-Native60-20261014.zip`；旧候选和日志保留。同步当前源码和简要实际结果到 Git，二进制留本地，强度收口目标继续执行。
+
+---
+
 ## 2026-10-14：C 强度接续——Windows 原生内存防拆入口
 
 接续 `96faf3e`，Java ABI60 / Native ABI59 / Storage3 / Journal6。自身外观继续暂缓，武器不注册，目标 Mod 的渲染/UI 控制仍在强度范围；完整 C/B 尚未收口。

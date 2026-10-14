@@ -1234,6 +1234,177 @@ done:
         if(failure){fprintf(stderr,"HOST_MEMORY_FAILED stage=%s win32=%lu\n",failure,(unsigned long)failureError);load_thread_fail(env,failure);}
     }
 }
+/* Independent release-memory phase. A released/decommitted address is only
+ * queried; data is read again only after a successful commit at the same base. */
+typedef BOOL (WINAPI *LoadMemoryFree)(LPVOID,SIZE_T,DWORD);
+typedef BOOL (WINAPI *LoadMemoryFreeEx)(HANDLE,LPVOID,SIZE_T,DWORD);
+typedef BOOL (WINAPI *LoadMemoryUnmap)(LPCVOID);
+typedef BOOL (WINAPI *LoadMemoryUnmapEx)(PVOID,ULONG);
+extern LoadMemoryFree __imp_VirtualFree;
+extern LoadMemoryFreeEx __imp_VirtualFreeEx;
+extern LoadMemoryUnmap __imp_UnmapViewOfFile;
+extern LoadMemoryUnmapEx __imp_UnmapViewOfFileEx;
+typedef struct LoadMemoryReleaseEntries {
+    LoadMemoryFree release[2];LoadMemoryFreeEx releaseEx[2];
+    LoadMemoryUnmap unmap[2];LoadMemoryUnmapEx unmapEx[2];
+} LoadMemoryReleaseEntries;
+typedef struct LoadMemoryReleaseTarget {
+    LoadMemoryTarget data;MEMORY_BASIC_INFORMATION region;
+} LoadMemoryReleaseTarget;
+/* The documented UnmapViewOfFileEx transient boost flag; no placeholder is
+ * reserved or replaced by this fixture. */
+enum {LOAD_MEMORY_UNMAP_TRANSIENT_BOOST=0x00000001UL};
+static int load_memory_release_target(LoadMemoryReleaseTarget *target,void *address,SIZE_T bytes,DWORD type,void *allocation){
+    return load_memory_target(&target->data,address,bytes,type,allocation)
+            &&VirtualQuery(address,&target->region,sizeof(target->region))==sizeof(target->region)
+            &&target->region.AllocationBase;
+}
+static int load_memory_release_kept(const LoadMemoryReleaseTarget *target){
+    MEMORY_BASIC_INFORMATION region={0};
+    return VirtualQuery(target->data.address,&region,sizeof(region))==sizeof(region)&&region.State==MEM_COMMIT
+            &&region.BaseAddress==target->region.BaseAddress&&region.RegionSize==target->region.RegionSize
+            &&region.AllocationBase==target->region.AllocationBase&&region.Type==target->region.Type
+            &&region.Protect==target->data.protect&&!memcmp(target->data.address,target->data.before,target->data.bytes);
+}
+static int load_memory_release_state(void *address,DWORD state,void *allocation){
+    MEMORY_BASIC_INFORMATION region={0};
+    if(VirtualQuery(address,&region,sizeof(region))!=sizeof(region)||region.State!=state)return 0;
+    /* AllocationBase, Protect and Type are undefined for MEM_FREE. */
+    return state==MEM_FREE||region.AllocationBase==allocation;
+}
+static const char *load_memory_release_normal(const LoadMemoryReleaseEntries *entries,HANDLE actual,DWORD pageSize){
+    const char *failure=NULL;DWORD error=0;BYTE *scratch=NULL;
+    for(unsigned extended=0;extended<2;extended++)for(unsigned mode=0;mode<2;mode++){
+        HANDLE process=mode?actual:GetCurrentProcess();
+        scratch=VirtualAlloc(NULL,pageSize,MEM_COMMIT|MEM_RESERVE,PAGE_READWRITE);
+        if(!scratch){failure="HOST_MEMORY_RELEASE_PRIVATE_ALLOCATION";error=GetLastError();goto done;}
+        if(!load_memory_scratch_protect(scratch,PAGE_READWRITE)){failure="HOST_MEMORY_RELEASE_PRIVATE_REGION";error=ERROR_INVALID_DATA;goto done;}
+        ((volatile BYTE*)scratch)[1]=0x5a;
+        BOOL result=extended?entries->releaseEx[mode](process,scratch+1,1,MEM_DECOMMIT):entries->release[mode](scratch+1,1,MEM_DECOMMIT);
+        if(!result){failure="HOST_MEMORY_RELEASE_ORIGINAL_DECOMMIT";error=GetLastError();goto done;}
+        if(!load_memory_release_state(scratch,MEM_RESERVE,scratch)){failure="HOST_MEMORY_RELEASE_DECOMMIT_NOT_RESERVED";error=ERROR_INVALID_DATA;goto done;}
+        void *committed=VirtualAlloc(scratch,pageSize,MEM_COMMIT,PAGE_READWRITE);
+        if(!committed){failure="HOST_MEMORY_RELEASE_ORIGINAL_RECOMMIT";error=GetLastError();goto done;}
+        if(committed!=scratch||!load_memory_scratch_protect(scratch,PAGE_READWRITE)||((volatile BYTE*)scratch)[1]!=0){
+            failure="HOST_MEMORY_RELEASE_RECOMMIT_DATA_OR_REGION";error=ERROR_INVALID_DATA;goto done;
+        }
+        ((volatile BYTE*)scratch)[1]=0xa5;if(((volatile BYTE*)scratch)[1]!=0xa5){failure="HOST_MEMORY_RELEASE_RECOMMIT_WRITE";error=ERROR_INVALID_DATA;goto done;}
+        void *released=scratch;
+        result=extended?entries->releaseEx[mode](process,scratch,0,MEM_RELEASE):entries->release[mode](scratch,0,MEM_RELEASE);
+        if(!result){failure="HOST_MEMORY_RELEASE_ORIGINAL_RELEASE";error=GetLastError();goto done;}
+        scratch=NULL;
+        if(!load_memory_release_state(released,MEM_FREE,NULL)){failure="HOST_MEMORY_RELEASE_RELEASE_NOT_FREE";error=ERROR_INVALID_DATA;goto done;}
+        fprintf(stderr,"HOST_MEMORY_RELEASE_SCRATCH_ACTUAL route=%s extended=%u decommit_recommit_release=1\n",mode?"GPA":"IAT",extended);
+    }
+done:
+    if(scratch&&!VirtualFree(scratch,0,MEM_RELEASE)&&!failure){failure="HOST_MEMORY_RELEASE_PRIVATE_CLEANUP";error=GetLastError();}
+    if(failure)SetLastError(error);return failure;
+}
+static const char *load_memory_release_mapped(const LoadMemoryReleaseEntries *entries,DWORD pageSize){
+    wchar_t directory[MAX_PATH]={0},path[MAX_PATH]={0};HANDLE file=INVALID_HANDLE_VALUE,mapping=NULL;BYTE *view=NULL;
+    const char *failure=NULL;int temporary=0;DWORD error=0,count=GetTempPathW(MAX_PATH,directory);
+    if(!count||count>=MAX_PATH){failure="HOST_MEMORY_RELEASE_TEMP_DIRECTORY";error=GetLastError();goto done;}
+    if(!GetTempFileNameW(directory,L"rvm",0,path)){failure="HOST_MEMORY_RELEASE_TEMP_FILE";error=GetLastError();goto done;}
+    temporary=1;
+    file=CreateFileW(path,GENERIC_READ|GENERIC_WRITE,FILE_SHARE_READ|FILE_SHARE_WRITE|FILE_SHARE_DELETE,NULL,OPEN_EXISTING,FILE_ATTRIBUTE_TEMPORARY,NULL);
+    if(file==INVALID_HANDLE_VALUE){failure="HOST_MEMORY_RELEASE_TEMP_FILE_OPEN";error=GetLastError();goto done;}
+    mapping=CreateFileMappingW(file,NULL,PAGE_READWRITE,0,pageSize,NULL);
+    if(!mapping){failure="HOST_MEMORY_RELEASE_REAL_FILE_MAPPING";error=GetLastError();goto done;}
+    for(unsigned extended=0;extended<2;extended++)for(unsigned mode=0;mode<2;mode++){
+        view=MapViewOfFile(mapping,FILE_MAP_READ|FILE_MAP_WRITE,0,0,pageSize);
+        if(!view){failure="HOST_MEMORY_RELEASE_REAL_FILE_VIEW";error=GetLastError();goto done;}
+        MEMORY_BASIC_INFORMATION region={0};
+        if(VirtualQuery(view,&region,sizeof(region))!=sizeof(region)||region.State!=MEM_COMMIT
+                ||region.Type!=MEM_MAPPED||region.AllocationBase!=view||region.Protect!=PAGE_READWRITE){
+            failure="HOST_MEMORY_RELEASE_REAL_MAPPED_REGION";error=ERROR_INVALID_DATA;goto done;
+        }
+        ((volatile BYTE*)view)[0]=(BYTE)(0x31+extended*2+mode);
+        if(((volatile BYTE*)view)[0]!=(BYTE)(0x31+extended*2+mode)){failure="HOST_MEMORY_RELEASE_REAL_MAPPED_WRITE";error=ERROR_INVALID_DATA;goto done;}
+        void *unmapped=view;ULONG flags=mode?LOAD_MEMORY_UNMAP_TRANSIENT_BOOST:0;
+        BOOL result=extended?entries->unmapEx[mode](view,flags):entries->unmap[mode](view);
+        if(!result){failure="HOST_MEMORY_RELEASE_ORIGINAL_UNMAP";error=GetLastError();goto done;}
+        view=NULL;
+        if(!load_memory_release_state(unmapped,MEM_FREE,NULL)){failure="HOST_MEMORY_RELEASE_UNMAP_NOT_FREE";error=ERROR_INVALID_DATA;goto done;}
+        fprintf(stderr,"HOST_MEMORY_RELEASE_MAPPING_ACTUAL route=%s extended=%u flags=%lu unmap=1\n",mode?"GPA":"IAT",extended,(unsigned long)(extended?flags:0));
+    }
+done:
+    if(view&&!UnmapViewOfFile(view)&&!failure){failure="HOST_MEMORY_RELEASE_VIEW_CLEANUP";error=GetLastError();}
+    if(mapping&&!CloseHandle(mapping)&&!failure){failure="HOST_MEMORY_RELEASE_MAPPING_CLOSE";error=GetLastError();}
+    if(file!=INVALID_HANDLE_VALUE&&!CloseHandle(file)&&!failure){failure="HOST_MEMORY_RELEASE_TEMP_FILE_CLOSE";error=GetLastError();}
+    if(temporary&&!DeleteFileW(path)&&!failure){failure="HOST_MEMORY_RELEASE_TEMP_FILE_REMOVE";error=GetLastError();}
+    if(failure)SetLastError(error);return failure;
+}
+static const char *load_memory_release_refused(const LoadMemoryReleaseEntries *entries,unsigned mode,HANDLE process,int extended,
+        void *address,SIZE_T size,DWORD kind,const LoadMemoryReleaseTarget *target,const char *stage){
+    SetLastError(0x524e0052);
+    BOOL result=extended?entries->releaseEx[mode](process,address,size,kind):entries->release[mode](address,size,kind);
+    DWORD error=GetLastError();fprintf(stderr,"HOST_MEMORY_RELEASE_REFUSED_ACTUAL target=%s route=%s extended=%d kind=%lu size=%llu result=%d win32=%lu\n",
+            stage,mode?"GPA":"IAT",extended,(unsigned long)kind,(unsigned long long)size,result!=FALSE,(unsigned long)error);
+    /* Short circuit on acceptance: never read memory the OS may have freed. */
+    int denied=!result&&error==ERROR_ACCESS_DENIED&&load_memory_release_kept(target);SetLastError(error);
+    return denied?NULL:stage;
+}
+static const char *load_memory_unmap_refused(const LoadMemoryReleaseEntries *entries,unsigned mode,int extended,ULONG flags,
+        HMODULE control,const LoadMemoryReleaseTarget *target,const char *stage){
+    SetLastError(0x524e0052);
+    BOOL result=extended?entries->unmapEx[mode]((void*)control,flags):entries->unmap[mode]((void*)control);
+    DWORD error=GetLastError();fprintf(stderr,"HOST_MEMORY_UNMAP_REFUSED_ACTUAL target=%s route=%s extended=%d flags=%lu result=%d win32=%lu\n",
+            stage,mode?"GPA":"IAT",extended,(unsigned long)flags,result!=FALSE,(unsigned long)error);
+    int denied=!result&&error==ERROR_ACCESS_DENIED&&load_memory_release_kept(target);SetLastError(error);
+    return denied?NULL:stage;
+}
+JNIEXPORT void JNICALL Java_dev_ronova_pro_AuditFixCheck_hostMemoryRelease0(JNIEnv *env,jclass check,jstring controlPath){
+    (void)check;const char *failure=NULL;HANDLE actual=NULL;wchar_t *path=NULL;JavaVM *vm=NULL;
+    HMODULE kernel=GetModuleHandleW(L"kernel32.dll"),base=GetModuleHandleW(L"kernelbase.dll"),control=NULL,observed=NULL;
+    SYSTEM_INFO system={0};GetSystemInfo(&system);
+    LoadMemoryReleaseEntries entries={{__imp_VirtualFree,kernel?(LoadMemoryFree)GetProcAddress(kernel,"VirtualFree"):NULL},
+        {__imp_VirtualFreeEx,kernel?(LoadMemoryFreeEx)GetProcAddress(kernel,"VirtualFreeEx"):NULL},
+        {__imp_UnmapViewOfFile,kernel?(LoadMemoryUnmap)GetProcAddress(kernel,"UnmapViewOfFile"):NULL},
+        {__imp_UnmapViewOfFileEx,kernel?(LoadMemoryUnmapEx)GetProcAddress(kernel,"UnmapViewOfFileEx"):NULL}};
+    LoadSame same=base?(LoadSame)GetProcAddress(base,"CompareObjectHandles"):NULL;
+    for(unsigned mode=0;mode<2;mode++)if(!load_private_entry((void*)entries.release[mode])||!load_private_entry((void*)entries.releaseEx[mode])
+            ||!load_private_entry((void*)entries.unmap[mode])||!load_private_entry((void*)entries.unmapEx[mode])){
+        failure="HOST_MEMORY_RELEASE_ACTUAL_IMPORT_OR_GPA_NOT_CONTROLLED";goto done;
+    }
+    if(!same||!DuplicateHandle(GetCurrentProcess(),GetCurrentProcess(),GetCurrentProcess(),&actual,PROCESS_VM_OPERATION,FALSE,0)
+            ||!same(GetCurrentProcess(),actual)){failure="HOST_MEMORY_RELEASE_VM_OPERATION_ONLY_CURRENT_ALIAS";goto done;}
+    if(system.dwPageSize<64){failure="HOST_MEMORY_RELEASE_ACTUAL_PAGE_SIZE";goto done;}
+    failure=load_memory_release_normal(&entries,actual,system.dwPageSize);if(failure)goto done;
+    failure=load_memory_release_mapped(&entries,system.dwPageSize);if(failure)goto done;
+    if(!controlPath){failure="HOST_MEMORY_RELEASE_ACTUAL_CONTROL_PATH";goto done;}
+    jsize length=(*env)->GetStringLength(env,controlPath);path=calloc((size_t)length+1,sizeof(*path));
+    if(!path){failure="HOST_MEMORY_RELEASE_CONTROL_PATH_ALLOCATION";goto done;}
+    (*env)->GetStringRegion(env,controlPath,0,length,(jchar*)path);if((*env)->ExceptionCheck(env))goto done;
+    control=GetModuleHandleW(path);free(path);path=NULL;
+    void *code=control?(void*)GetProcAddress(control,"Java_dev_ronova_pro_bootstrap_NativeControl_abi"):NULL;
+    LoadMemoryReleaseTarget codeTarget={0},vmTarget={0},thunkTarget={0};
+    if(!code||!GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS|GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,(LPCSTR)code,&observed)
+            ||observed!=control||!load_memory_release_target(&codeTarget,code,1,MEM_IMAGE,control)){
+        failure="HOST_MEMORY_RELEASE_EXACT_CONTROL_DLL_IMAGE";goto done;
+    }
+    if((*env)->GetJavaVM(env,&vm)!=JNI_OK||!vm||!*vm||!(*vm)->GetEnv
+            ||!load_memory_release_target(&vmTarget,(void*)&(*vm)->GetEnv,sizeof((*vm)->GetEnv),MEM_PRIVATE,(void*)*vm)){
+        failure="HOST_MEMORY_RELEASE_ACTUAL_VM_SHADOW_GETENV";goto done;
+    }
+    /* This is an actual, private GPA thunk for a different API; the requested
+     * MEM_RELEASE base is its real allocation, not the export's interior byte. */
+    if(!load_memory_release_target(&thunkTarget,(void*)entries.unmapEx[1],1,MEM_PRIVATE,NULL)){
+        failure="HOST_MEMORY_RELEASE_ACTUAL_GPA_HOOK_THUNK";goto done;
+    }
+    failure=load_memory_release_refused(&entries,0,GetCurrentProcess(),0,vmTarget.region.AllocationBase,0,MEM_DECOMMIT,&vmTarget,"HOST_MEMORY_RELEASE_VM_SHADOW_ZERO_DECOMMIT");if(failure)goto done;
+    failure=load_memory_release_refused(&entries,1,actual,1,vmTarget.region.AllocationBase,0,MEM_RELEASE,&vmTarget,"HOST_MEMORY_RELEASE_VM_SHADOW_WHOLE_RELEASE");if(failure)goto done;
+    failure=load_memory_release_refused(&entries,1,GetCurrentProcess(),0,thunkTarget.region.AllocationBase,0,MEM_RELEASE,&thunkTarget,"HOST_MEMORY_RELEASE_THUNK_WHOLE_RELEASE");if(failure)goto done;
+    failure=load_memory_release_refused(&entries,0,GetCurrentProcess(),1,thunkTarget.data.address,1,MEM_DECOMMIT,&thunkTarget,"HOST_MEMORY_RELEASE_THUNK_PAGE_DECOMMIT");if(failure)goto done;
+    /* Only Unmap is requested for the exact loaded controller image. */
+    failure=load_memory_unmap_refused(&entries,0,0,0,control,&codeTarget,"HOST_MEMORY_RELEASE_CONTROL_IMAGE_UNMAP");if(failure)goto done;
+    failure=load_memory_unmap_refused(&entries,1,1,LOAD_MEMORY_UNMAP_TRANSIENT_BOOST,control,&codeTarget,"HOST_MEMORY_RELEASE_CONTROL_IMAGE_UNMAP_EX");
+done:
+    {
+        DWORD error=GetLastError();free(path);
+        if(actual&&!CloseHandle(actual)&&!failure){failure="HOST_MEMORY_RELEASE_CURRENT_ALIAS_CLOSE";error=GetLastError();}
+        if(failure){fprintf(stderr,"HOST_MEMORY_RELEASE_FAILED stage=%s win32=%lu\n",failure,(unsigned long)error);load_thread_fail(env,failure);}
+    }
+}
 JNIEXPORT void JNICALL Java_dev_ronova_pro_AuditFixCheck_hostThreadCreate0(JNIEnv *env,jclass check,jclass type,jobject payload){
     (void)check;JavaVM *vm=NULL;jclass actual=payload?(*env)->GetObjectClass(env,payload):NULL;
     int correct=actual&&type&&(*env)->IsSameObject(env,actual,type);if(actual)(*env)->DeleteLocalRef(env,actual);

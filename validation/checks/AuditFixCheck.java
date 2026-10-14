@@ -61,11 +61,17 @@ public final class AuditFixCheck {
     private static native void hostJniTable0();
     private static native void hostModuleRelease0(String controlDll);
     private static native void hostMemory0(String controlDll);
+    private static native void hostMemoryRelease0(String controlDll);
     private static native void hostDefinitionsChanged0(ClassLoader loader);
     private static final class HostThreadCreatePayload { }
     private static void hostThreadCreate(){
         System.load(java.nio.file.Path.of(System.getProperty("ronova.pro.audit.thread.native")).toAbsolutePath().toString());
         String phase=System.getProperty("ronova.pro.audit.thread.phase","thread-create");
+        if(phase.equals("release-memory")){
+            hostMemoryRelease0(System.getProperty("ronova.pro.control.native"));
+            System.out.println("HOST_MEMORY_RELEASE_PASS actual_VirtualFree_Ex_UnmapViewOfFile_Ex_IAT_GPA current_process_pseudo_and_VM_OPERATION_only_real_alias private_decommit_reserve_recommit_zero_read_write_release_free actual_temporary_file_views_unmapped_closed_removed original_unmap_zero_transient_boost_flags VM_shadow_zero_decommit_whole_release_refused hook_thunk_whole_release_page_decommit_refused exact_control_DLL_unmap_refused mappings_bytes_protection_preserved no_control_instruction_change no_fabricated_authority");
+            return;
+        }
         if(phase.equals("memory")){
             hostMemory0(System.getProperty("ronova.pro.control.native"));
             System.out.println("HOST_MEMORY_PASS actual_IAT_GPA current_process_pseudo_and_VM_rights_only_real_alias private_VirtualAlloc_write_read_protection_restored exact_control_DLL_VM_shadow_hook_thunk_same_value_write_refused page_rounded_shadow_tail_protect_refused protected_local_output_aliases_refused no_control_instruction_change no_fabricated_authority");

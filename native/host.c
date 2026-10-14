@@ -25,7 +25,8 @@ enum {
     HOST_BEGIN_THREAD=20,HOST_BEGIN_THREAD_EX=21,
     HOST_LOAD_LIBRARY_A=22,HOST_LOAD_LIBRARY_W=23,HOST_LOAD_LIBRARY_EX_A=24,HOST_LOAD_LIBRARY_EX_W=25,
     HOST_FREE_LIBRARY=26,HOST_WRITE_PROCESS_MEMORY=27,HOST_VIRTUAL_PROTECT=28,HOST_VIRTUAL_PROTECT_EX=29,
-    HOST_KIND_COUNT=30
+    HOST_VIRTUAL_FREE=30,HOST_VIRTUAL_FREE_EX=31,HOST_UNMAP_VIEW=32,HOST_UNMAP_VIEW_EX=33,
+    HOST_KIND_COUNT=34
 };
 static int host_is_create(int kind){return kind==HOST_CREATE_W||kind==HOST_CREATE_A
         ||kind>=HOST_CREATE_USER_W&&kind<=HOST_CREATE_LOGON_W;}
@@ -61,6 +62,11 @@ static BOOL host_real_virtual_protect(LPVOID address,SIZE_T size,DWORD protectio
     DWORD incoming=GetLastError();void *actual=host_real_memory_target(HOST_VIRTUAL_PROTECT,"VirtualProtect");
     if(!actual){SetLastError(ERROR_PROC_NOT_FOUND);return FALSE;}
     SetLastError(incoming);return ((BOOL (WINAPI*)(LPVOID,SIZE_T,DWORD,PDWORD))actual)(address,size,protection,oldProtection);
+}
+static BOOL host_real_virtual_free(LPVOID address,SIZE_T size,DWORD type){
+    DWORD incoming=GetLastError();void *actual=host_real_memory_target(HOST_VIRTUAL_FREE,"VirtualFree");
+    if(!actual){SetLastError(ERROR_PROC_NOT_FOUND);return FALSE;}
+    SetLastError(incoming);return ((BOOL (WINAPI*)(LPVOID,SIZE_T,DWORD))actual)(address,size,type);
 }
 static BOOL host_real_write_process_memory(HANDLE process,LPVOID address,LPCVOID buffer,SIZE_T size,SIZE_T *written){
     DWORD incoming=GetLastError();void *actual=host_real_memory_target(HOST_WRITE_PROCESS_MEMORY,"WriteProcessMemory");
@@ -751,7 +757,7 @@ static FARPROC WINAPI host_native_resolve(HMODULE module,LPCSTR name,HostImport 
     }
     ReleaseSRWLockShared(&native_records);ReleaseSRWLockExclusive(&host_imports);
     if(associated!=1||stopped){
-        RtlDeleteFunctionTable(&resolved->unwind);VirtualFree(resolved->entry,0,MEM_RELEASE);
+        RtlDeleteFunctionTable(&resolved->unwind);host_real_virtual_free(resolved->entry,0,MEM_RELEASE);
         native_owner_links_free(owners);free(resolved);
         SetLastError(stopped?ERROR_ACCESS_DENIED:ERROR_MOD_NOT_FOUND);return NULL;
     }
@@ -893,6 +899,7 @@ static uint64_t host_native_dispatch(HostImport *entry,void *caller,uintptr_t *a
     if(host_is_module_load(entry->kind))return host_native_module_load(entry,caller,arguments);
     if(entry->kind==HOST_FREE_LIBRARY)return host_native_module_release(entry,caller,arguments);
     if(host_is_memory_write(entry->kind))return host_native_memory(entry,caller,arguments);
+    if(host_is_memory_release(entry->kind))return host_native_memory_release(entry,caller,arguments);
     SetLastError(ERROR_INVALID_FUNCTION);return 0;
 }
 static uint64_t host_native_call(HostImport *entry,void *caller,uintptr_t *arguments){
@@ -927,6 +934,10 @@ static unsigned host_import_arguments(int kind){
         case HOST_LOAD_LIBRARY_EX_A:case HOST_LOAD_LIBRARY_EX_W:return 3;
         case HOST_WRITE_PROCESS_MEMORY:case HOST_VIRTUAL_PROTECT_EX:return 5;
         case HOST_VIRTUAL_PROTECT:return 4;
+        case HOST_VIRTUAL_FREE:return 3;
+        case HOST_VIRTUAL_FREE_EX:return 4;
+        case HOST_UNMAP_VIEW:return 1;
+        case HOST_UNMAP_VIEW_EX:return 2;
         case HOST_DUPLICATE:return 7;
         case HOST_HANDLE_FLAGS:case HOST_OPEN_PROCESS:case HOST_OPEN_THREAD:return 3;
         case HOST_CLOSE:case HOST_RESUME_THREAD:case HOST_SUSPEND_THREAD:case HOST_FREE_LIBRARY:return 1;
@@ -952,7 +963,7 @@ static void *host_import_entry(HostImport *entry){
     unsigned short scaled=(unsigned short)(frame/8);memcpy(unwind+6,&scaled,2);
     DWORD protection;
     if(!host_real_virtual_protect(page,capacity,PAGE_EXECUTE_READ,&protection)||!RtlAddFunctionTable(&entry->unwind,1,(DWORD64)(uintptr_t)page)){
-        VirtualFree(page,0,MEM_RELEASE);return NULL;
+        host_real_virtual_free(page,0,MEM_RELEASE);return NULL;
     }
     FlushInstructionCache(GetCurrentProcess(),page,capacity);entry->slotOwned=entry->slot!=NULL;return page;
 }
@@ -968,7 +979,8 @@ static const char *host_api_names[HOST_KIND_COUNT]={NULL,"CreateProcessW","GetPr
         "ResumeThread","SuspendThread","TerminateProcess","TerminateThread",
         "CreateThread","CreateRemoteThread","CreateRemoteThreadEx","_beginthread","_beginthreadex",
         "LoadLibraryA","LoadLibraryW","LoadLibraryExA","LoadLibraryExW","FreeLibrary",
-        "WriteProcessMemory","VirtualProtect","VirtualProtectEx"};
+        "WriteProcessMemory","VirtualProtect","VirtualProtectEx",
+        "VirtualFree","VirtualFreeEx","UnmapViewOfFile","UnmapViewOfFileEx"};
 static void host_windows_targets(void **targets){
     host_memory_prepare();
     HMODULE kernel=GetModuleHandleW(L"kernel32.dll"),advapi=GetModuleHandleW(L"advapi32.dll");
