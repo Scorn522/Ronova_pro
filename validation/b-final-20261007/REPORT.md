@@ -1,5 +1,19 @@
 # B 批实际报告：2026-10-09 代码收敛接续
 
+## 2026-10-14：C 接续——非返回卸库入口
+
+接续 `21dd6bc`，Java ABI66 / Native ABI62 / Storage3 / Journal6。已观察 IAT/GPA 的 FreeLibraryAndExitThread 现接入实际来源、停组及准确控制 DLL 原始 HMODULE 检查；允许时原参数调用真实 API 一次，拒绝仅抑制卸库，仍以原退出码调用真实 ExitThread，保持 non-return。没有把它拆成普通 FreeLibrary 后再退出。接口合同见 [微软文档](https://learn.microsoft.com/en-us/windows/win32/api/libloaderapi/nf-libloaderapi-freelibraryandexitthread)。
+
+本次来源、image active 和 callback hold 由原 HostModuleRelease 堆记录及准确当前线程的私有 SYNCHRONIZE witness 保留，真实线程 signaled 后才在原 reaper 归还；同一 worker 的本次待回收 scope 暂缓旧 gap 判定。未附加线程来补造租约，旧 JNI/加载器/回调遗留状态继续 pending。私有 witness 的准确查询与实际句柄操作处于同一目录快照，受限入口锁忙明确 ERROR_BUSY，普通句柄不因目录忙冒认为私有。
+
+初次集中构建 PASS30秒，`build-c-java66-native62-free-exit-20261014.log`；首次入口检查在 ResumeThread 返回 -1、worker 尚未进入入口时失败，原日志 `c-host-free-exit62-20261014.log` 保留。修正上述私有句柄误判后，最终集中构建 `build-c-java66-native62-free-exit-final-20261014.log` PASS19秒，现有夹具增量编译 PASS。独立 `free-exit` phase 实际退出0，`c-host-free-exit62-final-20261014.log`：IAT/GPA 各一资源视图和一准确控制目标，四个未附加 JVM 的真实 worker 保留退出码61/62/63/64、entered1/returned0、准确 userdata，均真实 signaled 且句柄关闭；资源视图实际消失、临时文件删除；控制映像、权限和原字节保留。
+
+控制目标使用借用的准确句柄作为应拒绝攻击请求；映像存活不证明内部引用计数未减。普通可执行 DLL 的应用引用及最终 unmap、真实 producer 的 stopped/共享来源、受限回调和完整内部退出回收仍未实跑，不记为通过。未重跑旧矩阵，没有新证明目录；驱动/管理器未改、未重建、未加载，沿用未签名 SYS 37888字节及管理器190464字节。原 Java63/Native61 run03 仍由原实例运行，尚无世界加载或冻结保存结果，不能算本包游戏通过。
+
+本地候选 `distribution/candidate-c-java66-native62-free-exit-wip-20261014`，Core JAR 2420867字节、prelaunch 22440字节；匹配包 `distribution/Ronova-Pro-C-Free-Exit-WIP-Java66-Native62-20261014.zip`。自身外观与武器注册继续暂缓，完整 C/B 继续收口。
+
+---
+
 ## 2026-10-14：C 接续——Screen/Overlay 根来源与退役
 
 接续 `26c9cfc`，Java ABI65 / Native ABI61 / Storage3 / Journal6。ClientBridge 原根对象记录只保留已知 module，丢失 setter 及后续实际 Scope 的 unknown；已知停组来源混有未知来源时仍可能关闭整个根。现于原 SOURCES 记录内合并模块与不可回退的 unknown，真实 setter 入口、槽位写入和 Scope 继续传递；私有退役在关闭回调前与写入前复核实际单例、客户端线程、准确根及独占来源。普通合法关闭和原停止效果策略保留，未扩展自身外观或武器注册。

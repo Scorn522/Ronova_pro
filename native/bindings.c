@@ -133,6 +133,7 @@ static void code_exception_frames(JNIEnv*,jthrowable,unsigned);
 static void native_thread_try_release(NativeThread*);
 static void native_thread_callback_leave(NativeThread*);
 static int native_thread_worker_os_end(JNIEnv*,NativeThread*);
+static int native_thread_module_exit_reaped(NativeThread*);
 static int host_thread_worker_scope_idle(const NativeThread*);
 static int host_module_capture(NativeThread*,void*,OwnerLink**,struct HostImage**,HostLibraryLoad**,int*);
 static int host_module_binding_enter(Binding*);
@@ -954,6 +955,18 @@ static int native_thread_java_pending(const NativeThread *state){
     }
     return 0;
 }
+/* The exact OS thread has terminated. Only its terminal Host call's own hold
+ * and heap scope have been removed by the caller. Never operate on this
+ * daemon's TLS, synthesize ThreadEnd, or close another thread's local refs. */
+static int native_thread_module_exit_reaped(NativeThread *state){
+    if(!state)return 1;
+    if(state->hostWorker)return 1; /* the existing worker still owns this state */
+    if(!state->storageOwned||state->callbackHolds||state->tooling||state->library||state->hostLoad||state->hostRelease
+            ||state->heapCallback||state->heapWorkerAnchor||state->toolingCallbackEnvironment||state->toolingImage
+            ||state->control||state->sourceCapture||state->unsafeInstalling||state->unsafeInstall||state->bufferAllocation
+            ||native_thread_java_pending(state))return 0;
+    SecureZeroMemory(state,sizeof(*state));free(state);return 1;
+}
 static void native_thread_java_end(JNIEnv *env,NativeThread *state){
     if(state->javaCleaning)return;state->javaCleaning=1;state->javaEnded=1;
     native_tooling_definitions_thread_end(state);
@@ -1456,7 +1469,7 @@ static DWORD WINAPI native_tooling_retirement_worker(void *argument){
     (void)argument;JNIEnv *env=NULL;
     for(;;){
         DWORD workerWait=WaitForSingleObject(native_tooling_retirement_event,
-                host_thread_workers_pending()||native_tooling_definitions_pending_any()?1000:INFINITE);
+                host_thread_workers_pending()||host_module_exits_pending()||native_tooling_definitions_pending_any()?1000:INFINITE);
         if(workerWait!=WAIT_OBJECT_0&&workerWait!=WAIT_TIMEOUT)break;
         if(InterlockedCompareExchange(&native_tooling_shutdown,0,0))break;
         int definitionsReaped=0;
@@ -1465,9 +1478,9 @@ static DWORD WINAPI native_tooling_retirement_worker(void *argument){
             /* A previous DLL's actual unload callback may have detached this
              * daemon. Never carry its old JNIEnv into another cleanup. */
             if(!native_tooling_retirement_jni(&env)){InterlockedIncrement(&native_tooling_failures);break;}
+            host_module_releases_reap(&env);if(!env)break;
             host_thread_workers_reap(&env);if(!env)break;
             host_module_loads_reap(&env);if(!env)break;
-            host_module_releases_reap(&env);if(!env)break;
             if(!definitionsReaped){native_tooling_definitions_reap(env);definitionsReaped=1;
                 if(!native_tooling_retirement_jni(&env)){InterlockedIncrement(&native_tooling_failures);break;}}
             AcquireSRWLockExclusive(&native_tooling_records);

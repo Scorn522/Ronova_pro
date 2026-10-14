@@ -26,7 +26,7 @@ enum {
     HOST_LOAD_LIBRARY_A=22,HOST_LOAD_LIBRARY_W=23,HOST_LOAD_LIBRARY_EX_A=24,HOST_LOAD_LIBRARY_EX_W=25,
     HOST_FREE_LIBRARY=26,HOST_WRITE_PROCESS_MEMORY=27,HOST_VIRTUAL_PROTECT=28,HOST_VIRTUAL_PROTECT_EX=29,
     HOST_VIRTUAL_FREE=30,HOST_VIRTUAL_FREE_EX=31,HOST_UNMAP_VIEW=32,HOST_UNMAP_VIEW_EX=33,
-    HOST_KIND_COUNT=34
+    HOST_FREE_LIBRARY_EXIT_THREAD=34,HOST_KIND_COUNT=35
 };
 static int host_is_create(int kind){return kind==HOST_CREATE_W||kind==HOST_CREATE_A
         ||kind>=HOST_CREATE_USER_W&&kind<=HOST_CREATE_LOGON_W;}
@@ -35,6 +35,14 @@ static int host_is_thread_admission(int kind){return kind>=HOST_CREATE_THREAD&&k
 static HostCompareHandles host_compare_handles;
 static HostGetProcAddress host_windows_resolver;
 static void *host_windows_api[HOST_KIND_COUNT];
+static void *host_exit_thread_original;
+static void __attribute__((noreturn)) host_real_exit_thread(DWORD code){
+    void *actual=__atomic_load_n(&host_exit_thread_original,__ATOMIC_ACQUIRE);
+    if(actual)((void (WINAPI*)(DWORD))actual)(code);
+    /* ExitThread itself is not interposed. Its control-DLL import is the
+     * already resolved fallback, including a restricted callback's refusal. */
+    ExitThread(code);__builtin_unreachable();
+}
 static BOOL host_real_free_library(HMODULE module){
     /* Backend pins own an independently acquired reference. Resolving the
      * original export avoids consuming a producer's newly controlled IAT. */
@@ -172,6 +180,9 @@ static jobjectArray native_tooling_sources(JNIEnv*,OwnerLink*,int);
 static HostLibraryLoad *host_module_release_sources(NativeThread*);
 static void host_module_releases_reap(JNIEnv**);
 static void host_module_releases_state(JNIEnv*,jobject,jlong*);
+static int host_module_exits_pending(void);
+static int host_module_exit_pending(const NativeThread*);
+static int host_module_exit_internal_handle(HANDLE);
 static int host_handle_identity_ready(void){
     if(__atomic_load_n(&host_compare_handles,__ATOMIC_ACQUIRE))return 1;
     HMODULE kernel=GetModuleHandleW(L"kernelbase.dll");
@@ -791,7 +802,7 @@ static HostProcess *host_object_record(HANDLE value,int *role){
 }
 static int host_thread_worker_internal_handle(HANDLE value);
 static int host_internal_handle(HANDLE value){
-    if(!value)return 0;if(value==host_worker_handle||host_thread_worker_internal_handle(value))return 1;
+    if(!value)return 0;if(value==host_worker_handle||host_thread_worker_internal_handle(value)||host_module_exit_internal_handle(value))return 1;
     for(HostProcess *process=host_processes;process;process=process->next)
         if(value==process->monitor||value==process->threadMonitor||value==process->job
                 ||value==process->failedProcess||value==process->failedThread)return 1;
@@ -830,13 +841,32 @@ static uint64_t host_handle_refused(int kind,DWORD error){SetLastError(error);
 static uint64_t host_native_handle(HostImport *entry,void *caller,uintptr_t *arguments){
     DWORD incoming=GetLastError();OwnerLink *owners=NULL;
     NativeThread *state=native_tls==TLS_OUT_OF_INDEXES?NULL:(NativeThread*)TlsGetValue(native_tls);
-    entry=host_consumed_entry(entry,state,caller);
+    int restricted=state&&(state->heapCallback||state->vmDetaching||state->vmThreadEnding||state->hostUnloadImage||state->hostRelease
+            ||state->hostLoad&&state->hostLoad->calling);
+    if(!restricted)entry=host_consumed_entry(entry,state,caller);
     if(!host_entry_sources(entry,state,caller,&owners,NULL,0)){
         DWORD error=GetLastError();native_owner_links_free(owners);return host_handle_refused(entry->kind,error);
     }
     int kind=entry->kind,opening=kind==HOST_OPEN_PROCESS||kind==HOST_OPEN_THREAD;
     int closeOnly=kind==HOST_CLOSE||kind==HOST_DUPLICATE&&!arguments[2]&&((DWORD)arguments[6]&DUPLICATE_CLOSE_SOURCE);
-    AcquireSRWLockExclusive(&host_records);AcquireSRWLockShared(&native_records);
+    /* Pin the exit-witness directory before the handle records. A busy
+     * directory is never evidence that an ordinary handle is private, and
+     * the witness must not close/reuse between lookup and the actual call. */
+    if(restricted){
+        if(!TryAcquireSRWLockShared(&host_imports)){
+            native_owner_links_free(owners);return host_handle_refused(kind,ERROR_BUSY);
+        }
+        if(!TryAcquireSRWLockExclusive(&host_records)){
+            ReleaseSRWLockShared(&host_imports);
+            native_owner_links_free(owners);return host_handle_refused(kind,ERROR_BUSY);
+        }
+        if(!TryAcquireSRWLockShared(&native_records)){
+            ReleaseSRWLockExclusive(&host_records);ReleaseSRWLockShared(&host_imports);
+            native_owner_links_free(owners);return host_handle_refused(kind,ERROR_BUSY);
+        }
+    }else {
+        AcquireSRWLockShared(&host_imports);AcquireSRWLockExclusive(&host_records);AcquireSRWLockShared(&native_records);
+    }
     HANDLE value=(HANDLE)arguments[kind==HOST_DUPLICATE?1:0];
     int local=kind!=HOST_DUPLICATE||host_local_process((HANDLE)arguments[0]);
     HostProcess *process=NULL;HostHandle *alias=!opening&&local?host_alias(value,&process):NULL;
@@ -847,7 +877,7 @@ static uint64_t host_native_handle(HostImport *entry,void *caller,uintptr_t *arg
     int stopped=native_owner_stopped(owners)!=NULL;
     if((!opening&&local&&host_internal_handle(value))
             ||stopped&&(!closeOnly||!alias||!host_handle_private(alias)||!host_owners_contain(alias->owners,owners))){
-        ReleaseSRWLockShared(&native_records);ReleaseSRWLockExclusive(&host_records);
+        ReleaseSRWLockShared(&native_records);ReleaseSRWLockExclusive(&host_records);ReleaseSRWLockShared(&host_imports);
         native_owner_links_free(owners);return host_handle_refused(kind,ERROR_ACCESS_DENIED);
     }
     if(alias&&!closeOnly&&(!owners||!native_owner_merge(&alias->owners,owners)||!native_owner_merge(&process->owners,owners)))
@@ -879,7 +909,7 @@ static uint64_t host_native_handle(HostImport *entry,void *caller,uintptr_t *arg
         DWORD flags;if(GetHandleInformation(value,&flags))alias->inheritable=(flags&HANDLE_FLAG_INHERIT)!=0;
         else process->lifetimeGap=process->unknown=1;
     }
-    ReleaseSRWLockShared(&native_records);
+    ReleaseSRWLockShared(&native_records);ReleaseSRWLockShared(&host_imports);
     if(process)host_collect(process);
     WakeAllConditionVariable(&host_changed);ReleaseSRWLockExclusive(&host_records);
     native_owner_links_free(owners);SetLastError(error);return result;
@@ -890,6 +920,7 @@ static uint64_t host_native_handle(HostImport *entry,void *caller,uintptr_t *arg
 #include "host_module_admission.c"
 #include "host_memory.c"
 static uint64_t host_native_dispatch(HostImport *entry,void *caller,uintptr_t *arguments){
+    if(entry->kind==HOST_FREE_LIBRARY_EXIT_THREAD)host_native_module_exit(entry,caller,arguments);
     if(entry->kind==HOST_RESOLVE)return (uintptr_t)host_native_resolve((HMODULE)arguments[0],(LPCSTR)arguments[1],entry,caller);
     if(host_is_create(entry->kind))return host_native_create(entry,caller,arguments);
     if(host_is_local_worker_create(entry->kind))return host_native_local_worker_create(entry,caller,arguments);
@@ -903,6 +934,9 @@ static uint64_t host_native_dispatch(HostImport *entry,void *caller,uintptr_t *a
     SetLastError(ERROR_INVALID_FUNCTION);return 0;
 }
 static uint64_t host_native_call(HostImport *entry,void *caller,uintptr_t *arguments){
+    /* A terminal entry owns a heap-resident call hold until OS termination;
+     * none of this returning dispatcher's epilogue can run for that call. */
+    if(entry->kind==HOST_FREE_LIBRARY_EXIT_THREAD)host_native_module_exit(entry,caller,arguments);
     DWORD incoming=GetLastError();
     NativeThread *state=native_tls==TLS_OUT_OF_INDEXES?NULL:(NativeThread*)TlsGetValue(native_tls);
     int restricted=state&&(state->heapCallback||state->vmDetaching||state->vmThreadEnding||state->hostUnloadImage||state->hostRelease
@@ -938,6 +972,7 @@ static unsigned host_import_arguments(int kind){
         case HOST_VIRTUAL_FREE_EX:return 4;
         case HOST_UNMAP_VIEW:return 1;
         case HOST_UNMAP_VIEW_EX:return 2;
+        case HOST_FREE_LIBRARY_EXIT_THREAD:return 2;
         case HOST_DUPLICATE:return 7;
         case HOST_HANDLE_FLAGS:case HOST_OPEN_PROCESS:case HOST_OPEN_THREAD:return 3;
         case HOST_CLOSE:case HOST_RESUME_THREAD:case HOST_SUSPEND_THREAD:case HOST_FREE_LIBRARY:return 1;
@@ -980,7 +1015,7 @@ static const char *host_api_names[HOST_KIND_COUNT]={NULL,"CreateProcessW","GetPr
         "CreateThread","CreateRemoteThread","CreateRemoteThreadEx","_beginthread","_beginthreadex",
         "LoadLibraryA","LoadLibraryW","LoadLibraryExA","LoadLibraryExW","FreeLibrary",
         "WriteProcessMemory","VirtualProtect","VirtualProtectEx",
-        "VirtualFree","VirtualFreeEx","UnmapViewOfFile","UnmapViewOfFileEx"};
+        "VirtualFree","VirtualFreeEx","UnmapViewOfFile","UnmapViewOfFileEx","FreeLibraryAndExitThread"};
 static void host_windows_targets(void **targets){
     host_memory_prepare();
     HMODULE kernel=GetModuleHandleW(L"kernel32.dll"),advapi=GetModuleHandleW(L"advapi32.dll");
@@ -989,6 +1024,8 @@ static void host_windows_targets(void **targets){
         resolve=(HostGetProcAddress)GetProcAddress(kernel,"GetProcAddress");
         if(resolve)__atomic_store_n(&host_windows_resolver,resolve,__ATOMIC_RELEASE);
     }
+    if(resolve&&kernel){void *exit=(void*)resolve(kernel,"ExitThread");
+        if(exit)__atomic_store_n(&host_exit_thread_original,exit,__ATOMIC_RELEASE);}
     for(int kind=1;kind<HOST_KIND_COUNT;kind++){
         if(host_is_crt_thread_create(kind)){targets[kind]=NULL;continue;}
         HMODULE module=kind>=HOST_CREATE_USER_W&&kind<=HOST_CREATE_LOGON_W?advapi:kernel;

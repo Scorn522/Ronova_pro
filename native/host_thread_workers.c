@@ -328,6 +328,13 @@ static void host_thread_workers_reap(JNIEnv **environment){
         }
         ReleaseSRWLockExclusive(&host_records);if(!worker)break;
         if(worker->thread){
+            /* A signaled terminal loader call still owns this exact thread's
+             * heap scope until its release reaper returns that call's holds.
+             * It can become signaled after the preceding release-reap pass. */
+            if(host_module_exit_pending(worker->thread)){
+                AcquireSRWLockExclusive(&host_records);worker->releasing=0;
+                ReleaseSRWLockExclusive(&host_records);break;
+            }
             int released=1;
             if(worker->created){
                 /* OS exit invalidates any abandoned stack scopes. The worker

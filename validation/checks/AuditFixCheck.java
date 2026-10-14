@@ -61,6 +61,7 @@ public final class AuditFixCheck {
     private static native void hostModuleLoad0();
     private static native void hostJniTable0();
     private static native void hostModuleRelease0(String controlDll);
+    private static native void hostModuleReleaseThread0(String controlDll);
     private static native void hostMemory0(String controlDll);
     private static native void hostMemoryRelease0(String controlDll);
     private static native void hostDefinitionsChanged0(ClassLoader loader);
@@ -68,6 +69,11 @@ public final class AuditFixCheck {
     private static void hostThreadCreate(){
         System.load(java.nio.file.Path.of(System.getProperty("ronova.pro.audit.thread.native")).toAbsolutePath().toString());
         String phase=System.getProperty("ronova.pro.audit.thread.phase","thread-create");
+        if(phase.equals("free-exit")){
+            hostModuleReleaseThread0(System.getProperty("ronova.pro.control.native"));
+            System.out.println("HOST_FREE_EXIT_PASS actual_FreeLibraryAndExitThread_IAT_GPA unattached_native_workers original_exit_codes signaled_nonreturn actual_resource_view_unmapped exact_control_borrowed_attack_mapping_preserved handles_closed temporary_files_removed no_fabricated_authority");
+            return;
+        }
         if(phase.equals("release-memory")){
             hostMemoryRelease0(System.getProperty("ronova.pro.control.native"));
             System.out.println("HOST_MEMORY_RELEASE_PASS actual_VirtualFree_Ex_UnmapViewOfFile_Ex_IAT_GPA current_process_pseudo_and_VM_OPERATION_only_real_alias private_decommit_reserve_recommit_zero_read_write_release_free actual_temporary_file_views_unmapped_closed_removed original_unmap_zero_transient_boost_flags VM_shadow_zero_decommit_whole_release_refused hook_thunk_whole_release_page_decommit_refused exact_control_DLL_unmap_refused mappings_bytes_protection_preserved no_control_instruction_change no_fabricated_authority");

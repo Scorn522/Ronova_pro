@@ -954,7 +954,12 @@ typedef HMODULE (WINAPI *LoadModuleW)(LPCWSTR);
 typedef HMODULE (WINAPI *LoadModuleExA)(LPCSTR,HANDLE,DWORD);
 typedef HMODULE (WINAPI *LoadModuleExW)(LPCWSTR,HANDLE,DWORD);
 typedef BOOL (WINAPI *LoadModuleFree)(HMODULE);
+/* Keep the call through an ordinary function pointer: a noreturn declaration
+ * would let the compiler remove the returned marker we need to observe. */
+typedef VOID (WINAPI *LoadModuleFreeExit)(HMODULE,DWORD);
+typedef DWORD (WINAPI *LoadMappedNameW)(HANDLE,LPVOID,LPWSTR,DWORD);
 extern LoadModuleFree __imp_FreeLibrary;
+extern LoadModuleFreeExit __imp_FreeLibraryAndExitThread;
 extern LoadModuleA __imp_LoadLibraryA;
 extern LoadModuleW __imp_LoadLibraryW;
 extern LoadModuleExA __imp_LoadLibraryExA;
@@ -1038,6 +1043,148 @@ JNIEXPORT void JNICALL Java_dev_ronova_pro_AuditFixCheck_hostModuleRelease0(JNIE
         fprintf(stderr,"HOST_RELEASE_CONTROL_REFUSED mode=%s module=%p actualLastError=%lu\n",mode?"dynamic":"import",(void*)control,(unsigned long)error);
     }
     fprintf(stderr,"HOST_RELEASE_STOPPED_CACHE_AND_DETACH_CHILD_SOURCES_NOTRUN no_actual_Mod_producer no_manufactured_sources; FreeLibraryAndExitThread_application_ref_ownership_and_final_unmap_not_covered\n");
+}
+
+typedef struct LoadModuleReleaseThread {
+    LoadModuleFreeExit entry;HMODULE module;
+    uint64_t cookie,observedCookie;uintptr_t observedData;
+    DWORD requestedExit,observedId;volatile LONG entered,returned;
+    HANDLE handle;
+} LoadModuleReleaseThread;
+static DWORD WINAPI load_module_release_thread_start(LPVOID data){
+    LoadModuleReleaseThread *state=(LoadModuleReleaseThread*)data;
+    state->observedData=(uintptr_t)data;state->observedCookie=state->cookie;
+    state->observedId=GetCurrentThreadId();InterlockedIncrement(&state->entered);
+    /* This CreateThread worker never attaches to the JVM or calls JNI/CRT. */
+    state->entry(state->module,state->requestedExit);
+    InterlockedIncrement(&state->returned);return LOAD_THREAD_EXIT+20;
+}
+static const char *load_module_release_thread_run(LoadModuleFreeExit entry,HMODULE module,DWORD requestedExit,
+        unsigned mode,int control,int *started,int *completed){
+    *started=0;*completed=0;
+    LoadModuleReleaseThread *state=HeapAlloc(GetProcessHeap(),HEAP_ZERO_MEMORY,sizeof(*state));
+    if(!state)return "HOST_FREE_EXIT_WORKER_STATE";
+    state->entry=entry;state->module=module;state->requestedExit=requestedExit;state->cookie=LOAD_THREAD_COOKIE;
+    DWORD id=0;state->handle=CreateThread(NULL,0,load_module_release_thread_start,state,CREATE_SUSPENDED,&id);
+    DWORD createError=GetLastError();
+    if(!state->handle){
+        HeapFree(GetProcessHeap(),0,state);
+        fprintf(stderr,"HOST_FREE_EXIT_WORKER_CREATE_FAILED mode=%s control=%d lastError=%lu\n",mode?"dynamic":"import",control,(unsigned long)createError);
+        return "HOST_FREE_EXIT_WORKER_CREATE";
+    }
+    *started=1;
+    DWORD actualId=GetThreadId(state->handle),beforeCode=0,exitCode=0;
+    BOOL beforeQueried=GetExitCodeThread(state->handle,&beforeCode);
+    DWORD beforeWait=WaitForSingleObject(state->handle,0);
+    LONG beforeEntered=InterlockedCompareExchange(&state->entered,0,0);
+    DWORD resumed=ResumeThread(state->handle),resumeError=GetLastError();
+    DWORD waited=WaitForSingleObject(state->handle,5000);
+    *completed=waited==WAIT_OBJECT_0;
+    if(!*completed){
+        /* Neither a timeout nor a failed resume proves the start routine has
+         * left its userdata/module. Retain its actual handle and allocation. */
+        fprintf(stderr,"HOST_FREE_EXIT_WORKER_UNSETTLED mode=%s control=%d threadId=%lu resume=%lu resumeError=%lu wait=%lu state=%p handle=%p retained=1\n",
+                mode?"dynamic":"import",control,(unsigned long)id,(unsigned long)resumed,(unsigned long)resumeError,(unsigned long)waited,(void*)state,(void*)state->handle);
+        return "HOST_FREE_EXIT_WORKER_NOT_EXITED";
+    }
+    BOOL queried=GetExitCodeThread(state->handle,&exitCode);
+    LONG entered=InterlockedCompareExchange(&state->entered,0,0),returned=InterlockedCompareExchange(&state->returned,0,0);
+    int observed=state->observedData==(uintptr_t)state&&state->observedCookie==LOAD_THREAD_COOKIE&&state->observedId==id;
+    BOOL closed=CloseHandle(state->handle);
+    int ok=id&&actualId==id&&id!=GetCurrentThreadId()&&beforeQueried&&beforeCode==STILL_ACTIVE
+            &&beforeWait==WAIT_TIMEOUT&&beforeEntered==0&&resumed==1&&queried&&exitCode==requestedExit
+            &&entered==1&&returned==0&&observed&&closed;
+    fprintf(ok?stdout:stderr,"HOST_FREE_EXIT_WORKER mode=%s control=%d threadId=%lu actualThreadId=%lu requestedExit=%lu actualExit=%lu signaled=%d entered=%ld returned=%ld userdata=%d closed=%d\n",
+            mode?"dynamic":"import",control,(unsigned long)id,(unsigned long)actualId,(unsigned long)requestedExit,
+            (unsigned long)exitCode,*completed,(long)entered,(long)returned,observed,(int)closed);
+    HeapFree(GetProcessHeap(),0,state);
+    return ok?NULL:"HOST_FREE_EXIT_ORIGINAL_THREAD_CONTRACT";
+}
+JNIEXPORT void JNICALL Java_dev_ronova_pro_AuditFixCheck_hostModuleReleaseThread0(JNIEnv *env,jclass check,jstring controlPath){
+    (void)check;const char *failure=NULL;wchar_t *controlW=NULL;
+    HMODULE kernel=GetModuleHandleW(L"kernel32.dll"),control=NULL,observed=NULL,fixture=NULL;
+    LoadModuleFreeExit entries[]={__imp_FreeLibraryAndExitThread,
+            kernel?(LoadModuleFreeExit)GetProcAddress(kernel,"FreeLibraryAndExitThread"):NULL};
+    LoadMappedNameW mappedName=kernel?(LoadMappedNameW)GetProcAddress(kernel,"K32GetMappedFileNameW"):NULL;
+    if(!controlPath||!mappedName||!load_private_entry((void*)entries[0])||!load_private_entry((void*)entries[1])){
+        load_thread_fail(env,"HOST_FREE_EXIT_ACTUAL_ENTRIES_OR_CONTROL_PATH");return;
+    }
+    jsize length=(*env)->GetStringLength(env,controlPath);controlW=calloc((size_t)length+1,sizeof(*controlW));
+    if(!controlW){load_thread_fail(env,"HOST_FREE_EXIT_CONTROL_PATH_MEMORY");return;}
+    (*env)->GetStringRegion(env,controlPath,0,length,(jchar*)controlW);
+    if((*env)->ExceptionCheck(env)){free(controlW);return;}
+    control=GetModuleHandleW(controlW);
+    void *code=control?(void*)GetProcAddress(control,"Java_dev_ronova_pro_bootstrap_NativeControl_abi"):NULL;
+    MEMORY_BASIC_INFORMATION before={0};unsigned char originalByte=0;
+    if(!code||!GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS|GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,(LPCSTR)code,&observed)
+            ||observed!=control||VirtualQuery(code,&before,sizeof(before))!=sizeof(before)
+            ||before.State!=MEM_COMMIT||before.Type!=MEM_IMAGE||before.AllocationBase!=control){
+        failure="HOST_FREE_EXIT_EXACT_CONTROL_IMAGE";goto done;
+    }
+    originalByte=*(unsigned char*)code;
+    wchar_t fixturePath[MAX_PATH],directory[MAX_PATH];
+    if(!GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS|GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+            (LPCSTR)(uintptr_t)load_module_release_thread_start,&fixture)){
+        failure="HOST_FREE_EXIT_ACTUAL_FIXTURE_IMAGE";goto done;
+    }
+    DWORD count=GetModuleFileNameW(fixture,fixturePath,MAX_PATH);
+    if(!count||count>=MAX_PATH||(count=GetTempPathW(MAX_PATH,directory))==0||count>=MAX_PATH){
+        failure="HOST_FREE_EXIT_ACTUAL_FIXTURE_OR_TEMP_PATH";goto done;
+    }
+    for(unsigned mode=0;mode<2&&!failure;mode++){
+        wchar_t path[MAX_PATH]={0},mappedBefore[MAX_PATH]={0};HMODULE resource=NULL;int started=0,completed=0;
+        MEMORY_BASIC_INFORMATION resourceBefore={0};DWORD mappedLength=0;
+        if(!GetTempFileNameW(directory,L"rve",0,path)){failure="HOST_FREE_EXIT_TEMP_DLL_CREATE";break;}
+        /* DATAFILE executes no code and acquires no observed executable-image
+         * pin. Keep its actual tagged handle for the API, and query only the
+         * real mapped file; ordinary DLL application-ref/final-unmap is separate. */
+        if(GetModuleHandleW(path)||!CopyFileW(fixturePath,path,FALSE))failure="HOST_FREE_EXIT_TEMP_DLL_COPY";
+        if(!failure&&(resource=LoadLibraryExW(path,NULL,LOAD_LIBRARY_AS_DATAFILE))==NULL)failure="HOST_FREE_EXIT_RESOURCE_LOAD";
+        if(!failure&&(VirtualQuery(resource,&resourceBefore,sizeof(resourceBefore))!=sizeof(resourceBefore)
+                ||resourceBefore.State!=MEM_COMMIT||resourceBefore.Type!=MEM_MAPPED
+                ||(mappedLength=mappedName(GetCurrentProcess(),resourceBefore.AllocationBase,mappedBefore,MAX_PATH))==0
+                ||mappedLength>=MAX_PATH))failure="HOST_FREE_EXIT_RESOURCE_MAPPING";
+        if(!failure)failure=load_module_release_thread_run(entries[mode],resource,LOAD_THREAD_EXIT+mode*2,mode,0,&started,&completed);
+        if(started&&!completed){
+            fprintf(stderr,"HOST_FREE_EXIT_ACTIVE_DLL_RETAINED mode=%s path=%ls module=%p\n",mode?"dynamic":"import",path,(void*)resource);
+            break;
+        }
+        if(!started){
+            if(resource&&!FreeLibrary(resource)&&!failure)failure="HOST_FREE_EXIT_RESOURCE_CLEANUP";
+        }else{
+            /* The former address can be reused. Query the backing identity,
+             * without reading freed bytes or requiring MEM_FREE. */
+            wchar_t mappedAfter[MAX_PATH]={0};
+            DWORD afterLength=mappedName(GetCurrentProcess(),resourceBefore.AllocationBase,mappedAfter,MAX_PATH);
+            MEMORY_BASIC_INFORMATION remaining={0};
+            if(!afterLength&&VirtualQuery(resourceBefore.AllocationBase,&remaining,sizeof(remaining))==sizeof(remaining)
+                    &&remaining.State==MEM_COMMIT&&remaining.Type==MEM_MAPPED&&remaining.AllocationBase==resourceBefore.AllocationBase
+                    &&!failure)failure="HOST_FREE_EXIT_RESOURCE_IDENTITY_QUERY";
+            int same=afterLength==mappedLength&&afterLength<MAX_PATH
+                    &&memcmp(mappedBefore,mappedAfter,(size_t)mappedLength*sizeof(wchar_t))==0;
+            fprintf(same?stderr:stdout,"HOST_FREE_EXIT_RESOURCE mode=%s module=%p original_view_gone=%d\n",
+                    mode?"dynamic":"import",(void*)resource,!same);
+            if(same){
+                if(!failure)failure="HOST_FREE_EXIT_RESOURCE_VIEW_RETAINED";
+                fprintf(stderr,"HOST_FREE_EXIT_RESOURCE_RETAINED path=%ls\n",path);break;
+            }
+        }
+        if(!DeleteFileW(path)&&!failure)failure="HOST_FREE_EXIT_TEMP_DLL_REMOVE";
+        if(failure)break;
+        /* The existing controller handle is only an exact attack target. It is
+         * deliberately not presented as a caller-owned normal library ref. */
+        failure=load_module_release_thread_run(entries[mode],control,LOAD_THREAD_EXIT+mode*2+1,mode,1,&started,&completed);
+        if(!completed)break;
+        MEMORY_BASIC_INFORMATION after={0};
+        int preserved=GetModuleHandleW(controlW)==control&&VirtualQuery(code,&after,sizeof(after))==sizeof(after)
+                &&after.State==MEM_COMMIT&&after.Type==MEM_IMAGE&&after.AllocationBase==control
+                &&after.Protect==before.Protect&&*(unsigned char*)code==originalByte;
+        if(!preserved&&!failure)failure="HOST_FREE_EXIT_CONTROL_MAPPING_CHANGED";
+        fprintf(preserved?stdout:stderr,"HOST_FREE_EXIT_CONTROL mode=%s borrowed_attack_target=1 mapping_preserved=%d\n",mode?"dynamic":"import",preserved);
+    }
+    if(!failure)fprintf(stderr,"HOST_FREE_EXIT_PRODUCER_STOPPED_SHARED_RESTRICTED_CALLBACKS_AND_EXECUTABLE_APP_REF_FINAL_UNMAP_NOTRUN control_mapping_is_not_internal_refcount_proof\n");
+done:
+    free(controlW);if(failure)load_thread_fail(env,failure);
 }
 JNIEXPORT void JNICALL Java_dev_ronova_pro_AuditFixCheck_hostModuleLoad0(JNIEnv *env,jclass check){
     (void)check;HMODULE kernel=GetModuleHandleW(L"kernel32.dll");
