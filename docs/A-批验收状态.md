@@ -1,5 +1,19 @@
 # Ronova Pro 当前进度
 
+## 2026-10-14：C 接续——启动期写入内联与真实数组复制入口
+
+接续 `80ac1a8`，Java ABI76 / Native ABI71 / Storage3 / Journal6；协议保持 `r3-client-8`。prelaunch 为新 HotSpot JDK17 游戏 JVM 禁用对应的 Unsafe 写入及 System.arraycopy 编译器内联，涵盖 plain/volatile/opaque/release、非对齐、CAS/exchange/weak CAS、getAndAdd/getAndSet 与 copyMemory；保留用户参数原序，原有 DisableIntrinsic 清单继续累积。读、fence、分配及无关数学内联不在本包范围。仅直接加载 Mod 的晚挂载方式没有这项启动期约束。
+
+真实 System.arraycopy 从独立、准确的 bootstrap System 方法身份接入原生绑定，不当作 Unsafe 分类。原已发布入口沿既有 seed 重读和版本核对；参数/类型/范围/零长交原实现，重叠复制使用本次私有同类型快照。目标使用既有数组策略与写入记录，受控数组不因反射或 MethodHandle 原入口而放行。源读取窗口在快照前建立，保留获取时和窗口内已有来源，目的只记录实际兼容前缀；引用数组 ArrayStoreException 保留原异常及已写前缀。源请求后缀来源会保守并入该前缀，未声称逐元素来源精确拆分。读端、写端与嵌套 MemoryCopy 均按原 finally 结束。
+
+内部复制不能仅凭 control 计数放行：要求准确当前绑定、未停 owner 及实际最近 controller writer，新查询/写入桥不能借自身身份。安装期间使用已准备的原生 writer 查询，避开 available 尚未发布时的 StackWalker 递归。首次真实启动仍退出1，记录到 ResourceBridge.arrayLayout→反射注解解析→System.arraycopy 的128层递归；原日志保留。一次地址诊断确认本机实际入口为 java.dll 的 FF25 跳板，精确导入 jvm.dll!JVM_ArrayCopy。现只接受对应方法及这个实际导入项，核对名称与当前 IAT 值后直接调用真实 VM 导出，避免核对后再执行可变跳板。临时诊断已移除；另补上新 arraycopy.c 的 Gradle 输入，防止增量构建打包旧 DLL。
+
+首次统一构建37秒 PASS；最终 `build-c-java76-native71-intrinsics-final-20261014.log` **PASS22秒**，Core2586557、prelaunch23309字节。AuditFixCheck 新 system-arraycopy 分支编译通过。最终通过真实 prelaunch 重跑，`c-system-arraycopy-java76-native71-final-20261014.log` **实际退出0、SYSTEM_ARRAYCOPY_PASS**：Method.invoke/MethodHandle 原入口均不能修改真实受控 transformer 数组；普通 primitive/reference 复制、双向 overlap、零长、原参数异常、类型不匹配兼容前缀及异常后继续操作通过。此检查不代称逐元素来源回收、停组或真实游戏检查通过。未重跑旧矩阵或新增游戏实例。
+
+上一包 `c-network-java75-native70-equipment-actions-20261014.log` 现已实际退出0、NETWORK_PRECONNECT_PASS，首次发送及逐次队列来源/原 scope 收尾通过；NETWORK_PRECONNECT_STOP_NOTRUN，不能代称停组效果已运行。候选 `distribution/candidate-c-java76-native71-intrinsics-wip-20261014`，源码包 `distribution/Ronova-Pro-C-Intrinsics-WIP-Java76-Native71-20261014.zip`。旧运行帧自动强退、未观察原生机器码写入及直接 syscall 等边界仍保留；驱动未部署，实际游戏攻防未由本检查代称。自身外观及武器注册继续暂缓，完整 C/B 未完成。
+
+---
+
 ## 2026-10-14：C 接续——真实攻击、延后挖掘与 JNI 数组来源
 
 接续 `fea56f9`，Java ABI75 / Native ABI70 / Storage3 / Journal6；协议仍为 `r3-client-8`。标准连接玩家的实际 handleInteract packet→Player.attack 接入本次主手与准确目标委托。挖掘从真实 START/有效 STOP 建立续接，ServerPlayer.tick 的实际调用同时传入玩家和 GameMode；只允许当前同一世界、目标坐标、选择槽、主手栈和代次。无挖掘续接的普通 tick 只有原状态推进，没有装备修改权。实际 removeBlock 前复查目标；外部 Forge 回调、嵌套 tick、另一方块、旧 hasDelayed 残值不能借权。GameMode 关键字段与 ServerPlayer.gameMode 引用接入原字段/Unsafe/内存路径；当前 Item 的委托不授予 GameMode 写权，方法名与实际 descriptor 同时匹配。换工具、状态变化、ABORT、世界交接、release 或异常均撤销续接。既有生命周期许可可供准确策略查询，不扩大来源或授权。

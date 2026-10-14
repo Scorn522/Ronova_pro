@@ -43,7 +43,7 @@ public final class NativeControl {
             if(!early.isEmpty()) {
                 Path actual=Path.of(early).toAbsolutePath();if(!hash(Files.readAllBytes(actual)).equals(digest))throw new IOException("EARLY_NATIVE_IMAGE_MISMATCH");dll=actual;
             }
-            System.load(dll.toString());if(abi()!=70)throw new UnsatisfiedLinkError("NATIVE_CONTROL_ABI");
+            System.load(dll.toString());if(abi()!=71)throw new UnsatisfiedLinkError("NATIVE_CONTROL_ABI");
             if(!initialize0(ControlBridge.class,DefinitionBridge.class))throw new UnsatisfiedLinkError("ACTUAL_NATIVE_BOUNDARY_INSTALL_FAILED");
             if(!initializeDefinitionDirectory0(definitionDirectoryOwner))throw new UnsatisfiedLinkError("ACTUAL_DEFINITION_DIRECTORY_CAS_UNAVAILABLE");
             libraryBoundaryPresent=libraryPresent0();available=true;return state="NATIVE_BIND_AND_JNI_FIELD_READY";
@@ -224,6 +224,9 @@ public final class NativeControl {
     private static void codePrepared(Class<?> actual){CodeSourceBridge.classPrepared(actual);}
     static boolean preparedClass(Class<?> actual){return CALLER.getCallerClass()==CodeSourceBridge.class&&available&&preparedClass0(actual);}
     static boolean sourceCapture(){return CALLER.getCallerClass()==ControlBridge.class&&sourceCapture0();}
+    static boolean arrayCopyInternalBoundary(){return CALLER.getCallerClass()==ControlBridge.class&&arrayCopyInternalBoundary0();}
+    static boolean arrayCopyReadBoundary(Object source,int from,int length){return CALLER.getCallerClass()==ControlBridge.class&&arrayCopyReadBoundary0(source,from,length);}
+    static boolean arrayCopyBoundary(Object source,int from,int length,Object target,int to,int prefix,Object read){return CALLER.getCallerClass()==ControlBridge.class&&arrayCopyBoundary0(source,from,length,target,to,prefix,read);}
     static boolean fileOperationBoundary(Object receiver,Class<?> declaring,String method,Module[] sources,int operation,long address,long length){
         return CALLER.getCallerClass()==ResourceBridge.class&&fileOperationBoundary0(receiver,declaring,method,sources,operation,address,length);
     }
@@ -686,6 +689,9 @@ public final class NativeControl {
     private static native long[] codeState0(Module module);
     private static native boolean preparedClass0(Class<?> actual);
     private static native boolean sourceCapture0();
+    private static native boolean arrayCopyInternalBoundary0();
+    private static native boolean arrayCopyReadBoundary0(Object source,int from,int length);
+    private static native boolean arrayCopyBoundary0(Object source,int from,int length,Object target,int to,int prefix,Object read);
     private static native boolean fileOperationBoundary0(Object receiver,Class<?> declaring,String method,Module[] sources,int operation,long address,long length);
     private static native boolean fileOperationFinishing0(Object token);
     private static native boolean ioOperationBoundary0(Class<?> declaring,String method,long[] arguments,Object[] references,Module[] sources);

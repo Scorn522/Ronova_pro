@@ -2743,7 +2743,7 @@ public final class ProRuntime implements AutoCloseable {
             LiveStatePolicy.initialize();
             EquipmentPolicy.initialize();
             Class<?> bridge=Class.forName("dev.ronova.pro.bootstrap.TaskBridge",false,null);
-            if(!Integer.valueOf(75).equals(bridge.getMethod("abiVersion").invoke(null)))throw new IllegalStateException("INDEX_BRIDGE_ABI_MISMATCH");
+            if(!Integer.valueOf(76).equals(bridge.getMethod("abiVersion").invoke(null)))throw new IllegalStateException("INDEX_BRIDGE_ABI_MISMATCH");
             var lookup=java.lang.invoke.MethodHandles.lookup();
             var field=lookup.findStatic(ProRuntime.class,"preventFieldWrite",java.lang.invoke.MethodType.methodType(boolean.class,Object.class,Class.class,String.class,Object.class));
             var dispatch=lookup.findStatic(ProRuntime.class,"preventDispatch",java.lang.invoke.MethodType.methodType(boolean.class,Object.class,String.class,Object.class));

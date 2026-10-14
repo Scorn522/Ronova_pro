@@ -7,15 +7,15 @@ static int native_binding_current(jmethodID method,void *target,unsigned kind){
     int found=0;AcquireSRWLockShared(&native_records);
     for(Binding *binding=native_bindings;binding;binding=binding->next)
         if(binding->method==method&&binding->entry==target&&InterlockedCompareExchange(&binding->current,0,0)
-                &&(!kind||kind==1&&binding->fileOperation||kind==2&&binding->threadOperation||kind==3&&binding->unsafeOperation)){found=1;break;}
+                &&(!kind||kind==1&&binding->fileOperation||kind==2&&binding->threadOperation||kind==3&&binding->unsafeOperation||kind==4&&binding->arraycopyOperation)){found=1;break;}
     ReleaseSRWLockShared(&native_records);return found;
 }
 static int native_binding_resolved(jmethodID method,void *target){
     if(!target)return 0;if(native_binding_current(method,target,0))return 1;
     HMODULE image=native_image(target);
-    // Thread's registered native methods live in the VM image itself. Accept
-    // only a matching actual VM export, not its unresolved native-call stub.
-    return image&&(image!=code_vm_layout.image||native_thread_vm_target(method,target)||native_unsafe_vm_target(method,target));
+    // Registered VM natives need their matching actual export, including
+    // System.arraycopy, rather than an unresolved native-call stub.
+    return image&&(image!=code_vm_layout.image||native_thread_vm_target(method,target)||native_unsafe_vm_target(method,target)||native_arraycopy_vm_target(method,target));
 }
 static int native_binding_seed_target(JNIEnv *env,NativeThread *state,jclass declaring,jmethodID method,void **target,void **replacement){
     NativeBindingSeed *seed=state->bindingSeed;

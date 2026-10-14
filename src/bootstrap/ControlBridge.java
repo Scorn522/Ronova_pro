@@ -28,7 +28,7 @@ public final class ControlBridge {
         }
     };
     private ControlBridge() { }
-    public static int abiVersion(){return 75;}
+    public static int abiVersion(){return 76;}
     public static long arrayRevision(Object value){if(!recoveryWriter())throw new SecurityException("RECOVERY_ARRAY_READER_REQUIRED");return CodeSourceBridge.executionArrayRevision(value);}
 
     public static synchronized void install(Class<?> agent,ClassFileTransformer[] transformers) throws ReflectiveOperationException {
@@ -817,16 +817,16 @@ public final class ControlBridge {
     static final ThreadLocal<Boolean> OWN_LEDGER_MUTATION=new ThreadLocal<>();
     static final Set<String> EXTERNAL_GUARD_ENTRIES=Set.of(
             "nativeDefinitionsChanged","deliverDefinitionsChanged",
-            "controlCaller","controlled","criticalEntry","referenceRetirementAllowed","controlMutationAllowed","fieldGateMutationAllowed","inheritControl","controlBackingPublished",
+            "controlCaller","controlWriterAllowed","controlled","criticalEntry","referenceRetirementAllowed","controlMutationAllowed","fieldGateMutationAllowed","inheritControl","controlBackingPublished",
             "fieldWriteAllowed","staticFieldWriteAllowed","reflectFieldWrite",
             // Field-write entry wrappers are still live at the policy query;
             // they must not lend their own controller identity to that write.
             "beginFieldMutation","staticFieldMutation","beginOwnStaticFieldMutation","beginStaticFieldMutation",
-            "beginNativeUnsafeMutation","beginExecutedUnsafeMutation","beginNativeUnsafeCopy","beginNativeFieldMutation","beginNativeArrayMutation",
+            "beginNativeUnsafeMutation","beginExecutedUnsafeMutation","beginNativeUnsafeCopy","beginNativeFieldMutation","beginNativeArrayMutation","beginNativeArrayCopyRead","beginNativeArrayCopy",
             "indexDenied","indexRemovalAllowed","indexWriteAllowed","beginIndexWrite","beginIndexNodeWrite","beginIndexArrayWrite","beginIndexRemoval","beginIndexNodeRemoval","beginIndexArrayRemoval","beginIndexStructure","endIndexMutation","deniedIndexCurrent",
             "registerConsoleInput","beginConsoleCommand","endConsoleCommand","consoleDispatchTrusted",
             "clearProtectedMap","unsafeWriteAllowed","unsafeMemoryAllowed",
-            "nativeArrayElementAllowed","nativePrimitiveArrayPolicy","nativeArrayPointerAllowed","nativeRegistrationAllowed","nativeRegistrationTargetAllowed","nativeHeapTargetAllowed","arrayWriteAllowed",
+            "nativeArrayElementAllowed","nativePrimitiveArrayPolicy","nativeArrayPointerAllowed","nativeArrayCopyInternal","nativeRegistrationAllowed","nativeRegistrationTargetAllowed","nativeHeapTargetAllowed","arrayWriteAllowed",
             "resourceReleaseAllowed","lifeResult","dispatchAllowed","dispatchDeniedResult","equipmentActionSourceAllowed","taskEffectAllowed",
             "resultPublicationAllowed");
     static boolean controlCaller() {
@@ -835,6 +835,9 @@ public final class ControlBridge {
         // JVMTI includes hidden frames that the original walker omits.
         // Preserve that original selection on the uncommon hidden path.
         if(caller!=null&&caller.isHidden())caller=WALKER.walk(CONTROL_WRITER_CALLER);
+        return controlWriterAllowed(caller);
+    }
+    static boolean controlWriterAllowed(Class<?> caller){
         if(caller==null)return false;
         // These exact classes were already admitted below. Avoid native nest-host
         // lookup for the frequent direct ledger writers; every call still walks
@@ -1425,6 +1428,14 @@ public final class ControlBridge {
         // the control and exact value policy; no permission is carried forward.
         return BackingBridge.arrayAllowed(array,index,value);
     }
+    public static boolean nativeArrayCopyInternal(){
+        if(!NativeControl.arrayCopyInternalBoundary())throw new SecurityException("ACTUAL_NATIVE_ARRAYCOPY_QUERY_REQUIRED");
+        // Native installs this entry before available is published. The actual
+        // native writer reader is already prepared at that point; a StackWalker
+        // fallback here could copy its frame batch and recursively query itself.
+        Class<?> caller=NativeControl.controlWriterCaller();
+        return caller!=null&&!caller.isHidden()&&controlWriterAllowed(caller);
+    }
     public static int nativePrimitiveArrayPolicy(Object array){return BackingBridge.nativePrimitiveArrayPolicy(array);}
     public static boolean nativeArrayPointerAllowed(Object array){
         return arrayWriteAllowed(array)&&BackingBridge.nativePointerAllowed(array);
@@ -1753,6 +1764,35 @@ public final class ControlBridge {
         java.util.concurrent.locks.ReentrantLock gate=fieldGate(receiver);gate.lock();
         try{return new FieldMutation(gate,CodeSourceBridge.executionArrayMemoryBefore(receiver,start,length,mutationSources(contributors)),receiver);}
         catch(RuntimeException|Error failure){gate.unlock();throw failure;}
+    }
+    public static Object beginNativeArrayCopyRead(Object source,int from,int length){
+        if(!NativeControl.arrayCopyReadBoundary(source,from,length))throw new SecurityException("ACTUAL_NATIVE_ARRAYCOPY_READ_REQUIRED");
+        long[] layout=ResourceBridge.arrayLayout(source.getClass());
+        if(layout==null)throw new IllegalStateException("NATIVE_ARRAYCOPY_SOURCE_LAYOUT_UNAVAILABLE");
+        // Start before the native snapshot. Keep the existing read-window
+        // protocol without a source lock or a second source/destination order.
+        return new HeapMemoryRead(null,CodeSourceBridge.executionByteMemoryReadBefore(source,layout[0]+(long)from*layout[1],(long)length*layout[1]));
+    }
+    public static Object beginNativeArrayCopy(Object source,int from,int length,Object target,int to,int prefix,Object read,Module[] contributors){
+        if(!NativeControl.arrayCopyBoundary(source,from,length,target,to,prefix,read))throw new SecurityException("ACTUAL_NATIVE_ARRAYCOPY_REQUIRED");
+        if(!(read instanceof HeapMemoryRead))throw new IllegalStateException("NATIVE_ARRAYCOPY_SOURCE_READ_REQUIRED");
+        long[] layout=ResourceBridge.arrayLayout(source.getClass());
+        if(layout==null)throw new IllegalStateException("NATIVE_ARRAYCOPY_SOURCE_LAYOUT_UNAVAILABLE");
+        Module[] existing=readSources(read);
+        Set<Module> combined=Collections.newSetFromMap(new IdentityHashMap<>());
+        Collections.addAll(combined,mutationSources(contributors));Collections.addAll(combined,existing);
+        java.util.concurrent.locks.ReentrantLock gate=fieldGate(target);gate.lock();FieldMutation destination=null;
+        try{
+            destination=new FieldMutation(gate,CodeSourceBridge.executionArrayMemoryBefore(target,to,prefix,combined.toArray(new Module[0])),target);
+            // The source window is the exact requested range. On a partial
+            // reference copy its suffix sources are retained conservatively;
+            // only the compatible destination prefix receives write history.
+            return new MemoryCopy(source,layout[0]+(long)from*layout[1],(long)length*layout[1],read,destination,existing);
+        }catch(RuntimeException|Error failure){
+            if(destination==null)gate.unlock();else finishMutationRetaining(destination,false,failure);
+            // Native still owns and closes the read if this transfer fails.
+            throw failure;
+        }
     }
     public static Object beginNativeFieldMutation(Object receiver,Class<?> declaring,String name,String descriptor,Module[] contributors){
         if(!NativeControl.memoryMutationBoundary(receiver))throw new SecurityException("ACTUAL_NATIVE_FIELD_MUTATION_REQUIRED");

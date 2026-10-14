@@ -1,6 +1,6 @@
 # Ronova Pro
 
-主工程：`D:\桌面\ronova_GPT`。Java ABI75 / Native ABI70 / Storage3 / Journal6，客户端协议 `r3-client-8`。
+主工程：`D:\桌面\ronova_GPT`。Java ABI76 / Native ABI71 / Storage3 / Journal6，客户端协议 `r3-client-8`。
 Java 17；用户态 GNU C23 / GNU C++23；独立 Windows 驱动及管理工具 C17。
 当前源码包含连接前队列逐次发送来源及 EventLoop 接续、独立禁疗、已观察 Host 效果的短提交门，以及原生 Unsafe 写入/free/realloc 的准确控制范围拒绝。外部 JVMTI/堆回调暂时移除借来的内部计数，结束后恢复。活跃效果、FoodData、标准身体的当前六槽装备及其真实 ItemStack/NBT 接入实际写入防护；换装、物品使用、食用、真实攻击与延后挖掘按准确原业务动作交接，拒绝取出时返回 EMPTY，避免留下物品副本。挖掘续接绑定实际玩家、GameMode、世界、目标坐标与当前工具，普通回调不能借用；JNI 数组副本保留获取时的已知及未知来源，提交时并入原检查。FoodData 防写保留自然消耗，不等于免饿。区域禁生成接入底层管理器准入。自定义载体及尚未接入的正常动作仍保留缺口。实际构建、网络及游戏结果以
 [当前进度](docs/A-批验收状态.md) 和 [实际报告](validation/b-final-20261007/REPORT.md) 为准。自身外观及武器注册暂缓，完整 C/B 尚未完成。
@@ -52,7 +52,9 @@ Windows x64 上使用 JDK17 和 Zig。先写齐工作包，再按实际需要构
 java -jar ronova-pro-prelaunch.jar --java <游戏java.exe> --core <当前core.jar> <原有全部游戏参数>
 ```
 
-本地整理包：`distribution/Ronova-Pro-C-Equipment-WIP-Java74-Native69-20261014.zip`。包含当前源码、Core/prelaunch JAR 和未签名驱动；只打包指定候选，不带缓存、旧布局、游戏存档或历史分发包：
+在支持的 HotSpot JDK17 中，prelaunch 为新游戏 JVM 禁用对应 Unsafe 写入及 `System.arraycopy` 编译器内联，使其回到 Java／Native 写入守卫；用户原有的禁用清单继续累积。直接加载 Mod 的晚挂载方式不具备这项启动期约束，也不能据此声称已接管旧运行帧或任意原生机器指令写入。
+
+本地整理包：`distribution/Ronova-Pro-C-Intrinsics-WIP-Java76-Native71-20261014.zip`。包含当前源码、Core/prelaunch JAR 和未签名驱动；只打包指定候选，不带缓存、旧布局、游戏存档或历史分发包：
 
 ```powershell
 .\distribution\package-current.ps1 -CandidateDirectory <本次候选目录> -OutputPath <新ZIP路径>

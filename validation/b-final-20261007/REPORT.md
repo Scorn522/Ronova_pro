@@ -1,5 +1,17 @@
 # B 批实际报告：2026-10-09 代码收敛接续
 
+## 2026-10-14：C 接续——启动期写入内联与真实数组复制入口
+
+接续 `80ac1a8`，Java ABI76 / Native ABI71 / Storage3 / Journal6，协议 `r3-client-8`。prelaunch 对新的 HotSpot17 JVM 禁用对应 Unsafe writer 与 arraycopy 内联，保留原用户参数和累积清单；实际 System.arraycopy JNI 方法独立分类、seed 重读当前入口，准确目标接原数组策略。快照前建立原 source/from/length 读取窗口，目标只登记 to/兼容 prefix，MemoryCopy finally 保留来源、关闭两端并恢复前层。部分 ArrayStoreException 保留原兼容前缀及异常；源请求后缀贡献者保守并入前缀，未宣称逐元素来源精度。
+
+首次完整构建37秒 PASS，AuditFixCheck system-arraycopy 分支编译通过。首次真实 prelaunch 实跑退出1：RONOVA_NATIVE_SCOPE_CAPACITY，ResourceBridge.arrayLayout 反射初始化与复制守卫递归。一次最小诊断复现退出1，实际 System 入口位于 java.dll+0x14035；匹配 PE 的 FF25 指向 IAT+0x169b8，准确 jvm.dll!JVM_ArrayCopy。现核对该实际导入项及当前地址后直接调用真实 VM 导出，保留准确 writer/current/valid/stop 和目标策略，不按整个 DLL 或计数放行。诊断已移除，原日志保留。诊断首个增量 build 曾错误 UP-TO-DATE，未运行旧 DLL；已补 arraycopy.c 构建依赖，再实际重编译。
+
+最终 `build-c-java76-native71-intrinsics-final-20261014.log` **PASS22秒**，Core2586557、prelaunch23309字节。经真实 prelaunch 的 `c-system-arraycopy-java76-native71-final-20261014.log` **实际退出0、SYSTEM_ARRAYCOPY_PASS**：使用真实受控 transformer 数组，Method.invoke/MethodHandle 拒写、普通 primitive/reference 复制、双向重叠、零长、原异常、引用类型不匹配兼容前缀和异常后继续操作均通过，未注入假 owner/producer/token。此分支不代称逐元素来源回收、停组或游戏通过。未运行旧矩阵或游戏。
+
+上一包75/70网络日志现已实际退出0，NETWORK_PRECONNECT_PASS；停组仍为 NETWORK_PRECONNECT_STOP_NOTRUN，不混同为通过。候选 `distribution/candidate-c-java76-native71-intrinsics-wip-20261014`，源码 ZIP `distribution/Ronova-Pro-C-Intrinsics-WIP-Java76-Native71-20261014.zip`。晚挂载旧帧自动强退/未观察原生指令/direct syscall 等未覆盖边界保留，驱动未部署；自身外观、武器注册暂缓，C/B 未完成。
+
+---
+
 ## 2026-10-14：C 接续——真实攻击、延后挖掘与 JNI 数组来源
 
 接续 `fea56f9`，Java ABI75 / Native ABI70 / Storage3 / Journal6；协议 `r3-client-8`。实际 handleInteract→Player.attack 限本次主手和真实目标；START/有效 STOP→ServerPlayer.tick 的实际玩家/GameMode 调用续接延后挖掘，逐次复查世界、目标坐标、当前槽/栈及代次，removeBlock 前再次核对。普通 tick 只有状态推进，外部回调、嵌套 tick、另一目标及旧 delayed 残值不能借装备权。GameMode 关键字段/玩家引用进入原字段、Unsafe 和内存写检查，状态写不继承 Item 委托；委托匹配真实方法 descriptor。换工具/ABORT/世界交接/release/异常撤销续接。

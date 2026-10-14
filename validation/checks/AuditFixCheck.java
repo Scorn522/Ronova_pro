@@ -1,5 +1,6 @@
 package dev.ronova.pro;
 
+import java.lang.invoke.*;
 import java.lang.reflect.*;
 import java.util.*;
 import java.util.concurrent.*;
@@ -16,6 +17,7 @@ public final class AuditFixCheck {
         if(args.length==2&&args[0].equals("network-preconnect")){networkPreconnect(args[1]);return;}
         if(args.length==1&&args[0].equals("source-list-fixes")){sourceListFixes();return;}
         if(args.length==1&&args[0].equals("live-control-writer")){liveControlWriter();return;}
+        if(args.length==1&&args[0].equals("system-arraycopy")){systemArraycopy();return;}
         if(args.length==1&&args[0].equals("clone-boundary")){cloneBoundary();return;}
         if(args.length==1&&args[0].equals("buffer-release")){bufferRelease();return;}
         if(args.length==1&&args[0].equals("buffer-wrap")){bufferWrap();return;}
@@ -631,6 +633,73 @@ public final class AuditFixCheck {
             require(U.getLong(bytes,base)==0x1020304050607080L,"actual Unsafe raw-to-heap copy changed bytes");
         }finally{U.freeMemory(address);}
         System.out.println("LIVE_CONTROL_WRITER_PASS actual_native foreign_caller_refused protected_array_preserved foreign_raw_reader_refused actual_unsafe_raw_copy");
+    }
+    private static void systemArraycopy()throws Exception {
+        Class<?> nativeControl=Class.forName("dev.ronova.pro.bootstrap.NativeControl",true,null);
+        require(Boolean.TRUE.equals(nativeControl.getMethod("available").invoke(null)),"actual Windows native backend absent");
+        Class<?> bridge=Class.forName("dev.ronova.pro.bootstrap.ControlBridge",true,null);
+        Field registered=bridge.getDeclaredField("protectedTransformers");registered.setAccessible(true);
+        Object[] actual=(Object[])registered.get(null);
+        require(actual.length>0&&actual[0]!=null,"actual installed transformer array absent");
+        Object[] before=actual.clone();
+        Method reflected=System.class.getMethod("arraycopy",Object.class,int.class,Object.class,int.class,int.class);
+        MethodHandle direct=MethodHandles.publicLookup().findStatic(System.class,"arraycopy",
+                MethodType.methodType(void.class,Object.class,int.class,Object.class,int.class,int.class));
+        for(MethodHandle entry:new MethodHandle[]{null,direct}){
+            String path=entry==null?"Method.invoke":"MethodHandle.invokeExact";
+            arraycopyControlRefused(reflected,entry,actual,before,path);
+            int[] source={11,23,37,49},target={101,102,103,104,105};
+            arraycopyEntry(reflected,entry,source,1,target,2,2);
+            require(Arrays.equals(target,new int[]{101,102,23,37,105}),path+" ordinary primitive copy changed bytes or bounds");
+            Object first=new Object(),second=new Object(),neighbor=new Object();Object[] objects={neighbor,neighbor,neighbor};
+            arraycopyEntry(reflected,entry,new Object[]{first,second},0,objects,1,2);
+            require(objects[0]==neighbor&&objects[1]==first&&objects[2]==second,path+" ordinary reference copy changed identities");
+            int[] right={1,2,3,4,5};arraycopyEntry(reflected,entry,right,0,right,1,4);
+            require(Arrays.equals(right,new int[]{1,1,2,3,4}),path+" right overlap lost original source values");
+            int[] left={1,2,3,4,5};arraycopyEntry(reflected,entry,left,1,left,0,4);
+            require(Arrays.equals(left,new int[]{2,3,4,5,5}),path+" left overlap lost original source values");
+            arraycopyEntry(reflected,entry,source,source.length,target,target.length,0);
+            require(Arrays.equals(target,new int[]{101,102,23,37,105}),path+" zero-length copy changed destination");
+            arraycopyFailure(reflected,entry,NullPointerException.class,null,0,target,0,0,path+" null source");
+            arraycopyFailure(reflected,entry,NullPointerException.class,source,0,null,0,0,path+" null destination");
+            arraycopyFailure(reflected,entry,ArrayIndexOutOfBoundsException.class,source,-1,target,0,1,path+" invalid range");
+            require(Arrays.equals(target,new int[]{101,102,23,37,105}),path+" rejected parameters changed destination");
+            long[] wrongPrimitive={77};
+            arraycopyFailure(reflected,entry,ArrayStoreException.class,source,0,wrongPrimitive,0,1,path+" primitive type mismatch");
+            require(wrongPrimitive[0]==77,path+" primitive type mismatch changed destination");
+            String[] partial={"before-0","before-1","before-2"};
+            arraycopyFailure(reflected,entry,ArrayStoreException.class,new Object[]{"copied",Integer.valueOf(7),"not-copied"},0,partial,0,3,path+" reference type mismatch");
+            require(Arrays.equals(partial,new String[]{"copied","before-1","before-2"}),path+" reference mismatch lost original compatible-prefix behavior");
+            arraycopyEntry(reflected,entry,new String[]{"following"},0,partial,1,1);
+            require(Arrays.equals(partial,new String[]{"copied","following","before-2"}),path+" failed copy retained a destination mutation scope");
+            int[] following={0,0};arraycopyEntry(reflected,entry,new int[]{17,29},0,following,0,2);
+            require(Arrays.equals(following,new int[]{17,29}),path+" failed copy blocked a following ordinary copy");
+            arraycopyControlRefused(reflected,entry,actual,before,path+" after failures");
+        }
+        System.out.println("SYSTEM_ARRAYCOPY_PASS actual_native_Method_invoke_MethodHandle_invokeExact protected_transformer_array_refused ordinary_primitive_reference_copy overlap_both_directions zero_length original_null_range_type_exceptions reference_compatible_prefix following_copy_and_control_denial_preserved no_fabricated_authority");
+    }
+    private static void arraycopyEntry(Method reflected,MethodHandle entry,Object source,int from,Object target,int to,int count)throws Exception {
+        try{
+            if(entry==null)reflected.invoke(null,source,from,target,to,count);
+            else entry.invokeExact(source,from,target,to,count);
+        }catch(Throwable failure){
+            if(failure instanceof InvocationTargetException invocation)failure=invocation.getCause();
+            if(failure instanceof Exception exception)throw exception;
+            if(failure instanceof Error error)throw error;
+            throw new AssertionError("actual System.arraycopy invocation failed",failure);
+        }
+    }
+    private static void arraycopyControlRefused(Method reflected,MethodHandle entry,Object[] actual,Object[] before,String path)throws Exception {
+        try{arraycopyEntry(reflected,entry,new Object[]{null},0,actual,0,1);}
+        catch(SecurityException|IllegalStateException refused){ }
+        require(actual.length==before.length,path+" actual transformer array length changed");
+        for(int index=0;index<before.length;index++)require(actual[index]==before[index],path+" changed protected transformer identity at "+index);
+    }
+    private static void arraycopyFailure(Method reflected,MethodHandle entry,Class<? extends RuntimeException> expected,
+            Object source,int from,Object target,int to,int count,String path)throws Exception {
+        try{arraycopyEntry(reflected,entry,source,from,target,to,count);}
+        catch(RuntimeException failure){require(expected.isInstance(failure),path+" threw "+failure.getClass().getName()+" instead of "+expected.getName());return;}
+        throw new AssertionError(path+" returned without the original exception");
     }
     private static void bufferRelease()throws Exception {
         java.nio.ByteBuffer direct=java.nio.ByteBuffer.allocateDirect(32);

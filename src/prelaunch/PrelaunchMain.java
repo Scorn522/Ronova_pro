@@ -19,6 +19,7 @@ import java.util.jar.JarFile;
 
 /** Launches the game JVM only after its early Ronova agent and saved target set are ready. */
 public final class PrelaunchMain {
+    private static final String DISABLED_WRITER_INTRINSICS=writerIntrinsics();
     private PrelaunchMain() { }
 
     public static void main(String[] arguments) throws Exception {
@@ -49,6 +50,10 @@ public final class PrelaunchMain {
         String encoded=Base64.getUrlEncoder().withoutPadding()
                 .encodeToString(bootstrap.toString().getBytes(StandardCharsets.UTF_8));
         List<String> command=new ArrayList<>();command.add(java.toString());
+        // HotSpot's ccstrlist accumulates repeated DisableIntrinsic options, so
+        // the original game arguments below retain their own disabled entries.
+        command.add("-XX:+UnlockDiagnosticVMOptions");
+        command.add("-XX:DisableIntrinsic="+DISABLED_WRITER_INTRINSICS);
         if(!restartGap.isEmpty())command.add("-Dronova.pro.restartGap="+restartGap);
         if(!selected.isEmpty())command.add("-Dronova.pro.bootStop="+selected);
         if(!selected.isEmpty())command.add("-Dronova.pro.bootReturns="+returns);
@@ -72,6 +77,23 @@ public final class PrelaunchMain {
         int code=child.waitFor();
         if(code!=0)System.err.println("RONOVA_GAME_EXIT="+code);
         System.exit(code);
+    }
+
+    private static String writerIntrinsics(){
+        // Exact OpenJDK 17 writer IDs. Java fallbacks reach the existing Unsafe
+        // guards; System.arraycopy separately reaches its actual native guard.
+        List<String> names=new ArrayList<>(List.of("_arraycopy","_copyMemory"));
+        for(String kind:List.of("Reference","Boolean","Byte","Short","Char","Int","Long","Float","Double"))
+            for(String order:List.of("","Volatile","Opaque","Release"))names.add("_put"+kind+order);
+        for(String kind:List.of("Short","Char","Int","Long"))names.add("_put"+kind+"Unaligned");
+        for(String kind:List.of("Reference","Long","Int","Byte","Short")){
+            names.add("_compareAndSet"+kind);
+            for(String order:List.of("","Acquire","Release"))names.add("_compareAndExchange"+kind+order);
+            for(String order:List.of("","Plain","Acquire","Release"))names.add("_weakCompareAndSet"+kind+order);
+        }
+        for(String kind:List.of("Int","Long","Byte","Short"))names.add("_getAndAdd"+kind);
+        for(String kind:List.of("Int","Long","Byte","Short","Reference"))names.add("_getAndSet"+kind);
+        return String.join(",",names);
     }
 
     private static Properties targets(Path configuration) throws IOException {

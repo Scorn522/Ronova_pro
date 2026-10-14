@@ -28,7 +28,7 @@ typedef struct NativeUnsafeInstall {
     HMODULE image;jmethodID installer;jint frames;int consumed;
     JNINativeMethod *methods;jmethodID *actual;jint count;OwnerLink *owners;void *caller;
 } NativeUnsafeInstall;
-typedef struct Binding {jmethodID method;jweak type,origin;Owner *owner,*declared;OwnerLink *owners;NativeLibrary *library,*loading;struct HostImage *hostImage;HostLibraryLoad *hostLoad;int hostUnknown;void *original,*entry;char *signature,*fileMethod;char result;unsigned unsafeOperation,fileOperation,fileArgument,threadOperation;const char *unsafeKind;volatile LONG active,current,valid;RUNTIME_FUNCTION unwind;struct Binding *previous,*next;} Binding;
+typedef struct Binding {jmethodID method;jweak type,origin;Owner *owner,*declared;OwnerLink *owners;NativeLibrary *library,*loading;struct HostImage *hostImage;HostLibraryLoad *hostLoad;int hostUnknown;void *original,*entry;char *signature,*fileMethod;char result;unsigned unsafeOperation,fileOperation,fileArgument,threadOperation,arraycopyOperation;const char *unsafeKind;volatile LONG active,current,valid;RUNTIME_FUNCTION unwind;struct Binding *previous,*next;} Binding;
 typedef struct NativeDefinition {jclass declaring;jobject loader;jbyteArray bytes;unsigned phase;struct NativeDefinition *previous;} NativeDefinition;
 typedef struct CodeExit {jmethodID method;jobject token;struct CodeExit *previous;} CodeExit;
 typedef struct NativeUnsafeFrame {jobject token;uint64_t expected;struct NativeMemoryCall *memoryCall;} NativeUnsafeFrame;
@@ -42,7 +42,8 @@ typedef struct NativeThread {
     NativeFileFrame fileFrames[128],*filePermit;NativeThreadFrame threadFrames[128],*threadPermit;
     NativeBindingSeed *bindingSeed;NativeUnsafeMutation *unsafeMutation;struct NativeMemoryWrite *memoryWrite;
     NativeUnsafeInstall *unsafeInstall;
-    unsigned depth,control,sourceCapture,unsafeInstalling,bufferAllocation,heapCallback,toolingRestricted;
+    struct NativeArrayCopyContext *arraycopy;
+    unsigned depth,control,sourceCapture,unsafeInstalling,bufferAllocation,heapCallback,toolingRestricted,arraycopyQuery;
     jclass defined,prepared,changedClass;jobject created,mutation,popped,changedHolder,bufferAddress,unobservedLibrary;
     jobjectArray bufferSources;CodeExit *execution;NativeDefinition *definition;NativeLibraryScope *library;
     NativeRegistration *registration;NativeToolingScope *tooling;struct NativeToolingEnv *toolingCallbackEnvironment;
@@ -127,6 +128,13 @@ static int native_binding_seed_one(JNIEnv*,NativeThread*,jclass,jmethodID,const 
 static void native_thread_classify(JNIEnv*,jclass,Binding*);
 static int native_thread_prepare(JNIEnv*);
 static int native_thread_vm_target(jmethodID,void*);
+static int native_arraycopy_vm_target(jmethodID,void*);
+static void native_arraycopy_classify(JNIEnv*,jclass,Binding*);
+static int native_arraycopy_prepare(JNIEnv*);
+static int native_arraycopy_install(JNIEnv*);
+static int native_arraycopy_internal(JNIEnv*,NativeThread*,Binding*);
+static void *native_arraycopy_internal_target(void);
+static void JNICALL native_arraycopy_dispatch(JNIEnv*,jclass,jobject,jint,jobject,jint,jint);
 static int native_thread_begin(JNIEnv*,NativeThread*,Binding*,jobject);
 static void *native_thread_call(NativeThread*,Binding*);
 static void native_thread_finish(JNIEnv*,NativeThread*,NativeThreadFrame*,int);
@@ -235,7 +243,9 @@ static uint64_t native_enter(JNIEnv *env,jobject receiver,Binding *binding,unsig
     if(binding->threadOperation)memset(&state->threadFrames[state->depth],0,sizeof(NativeThreadFrame));
     // Controller JNI work already has its exact native control scope. Its own
     // JDK atomics must not recursively enter the Java memory bookkeeping.
-    if((binding->unsafeOperation||binding->fileOperation||binding->threadOperation)&&state->control){if(!host_module_binding_enter(binding))return 0;state->entries[state->depth]=binding;state->stack[state->depth++]=binding;InterlockedIncrement(&binding->active);return (uint64_t)(uintptr_t)binding->original;}
+    int internalArrayCopy=binding->arraycopyOperation&&native_arraycopy_internal(env,state,binding);
+    if(binding->arraycopyOperation&&native_original.ExceptionCheck(env))return 0;
+    if(((binding->unsafeOperation||binding->fileOperation||binding->threadOperation)&&state->control)||internalArrayCopy){if(!host_module_binding_enter(binding))return 0;state->entries[state->depth]=binding;state->stack[state->depth++]=binding;InterlockedIncrement(&binding->active);return (uint64_t)(uintptr_t)(internalArrayCopy?native_arraycopy_internal_target():binding->original);}
     if(binding->declared&&InterlockedCompareExchange(&binding->declared->stopped,0,0))return 0;
     // A stopped caller may finish an already sealed resource's original close.
     // The exact descriptor scope is checked by the file bridge before dispatch.
@@ -261,7 +271,7 @@ static uint64_t native_enter(JNIEnv *env,jobject receiver,Binding *binding,unsig
         }
         return (uint64_t)(uintptr_t)native_thread_call(state,effective);
     }
-    return (uint64_t)(uintptr_t)effective->original;
+    return (uint64_t)(uintptr_t)(binding->arraycopyOperation?(void*)native_arraycopy_dispatch:effective->original);
 }
 static void native_leave(Binding *binding,unsigned char *frame){
     NativeThread *state=native_thread();if(!state||!state->depth||state->entries[state->depth-1]!=binding){InterlockedIncrement(&native_failures);return;}
@@ -280,6 +290,7 @@ static uint64_t native_result(JNIEnv *env,Binding *binding,unsigned char *frame)
     if(binding->threadOperation){native_thread_refuse(env,binding);return 0;}
     if(binding->fileOperation){native_file_refuse(env,binding);return 0;}
     if(binding->unsafeOperation)return native_unsafe_result(env,binding,frame);
+    if(binding->arraycopyOperation){native_refuse(env,"RONOVA_STOPPED_NATIVE_ARRAYCOPY");return 0;}
     NativeThread *state=native_thread();if(!state||!native_definitions)return 0;state->control++;
     jobject type=native_original.NewLocalRef(env,binding->type);jstring descriptor=native_original.NewStringUTF(env,binding->signature);
     Owner *stopped=native_owner_stopped(binding->owners);jobject owner=stopped?native_original.NewLocalRef(env,stopped->module):NULL;
@@ -362,6 +373,7 @@ static void JNICALL native_binding(jvmtiEnv *api,JNIEnv *env,jthread thread,jmet
         native_unsafe_classify(env,type,binding,name,signature);
         native_file_classify(env,type,binding,name);
         native_thread_classify(env,type,binding);
+        native_arraycopy_classify(env,type,binding);
         ready=native_owner_add(&binding->owners,declared);
         ready=ready&&native_owner_merge(&binding->owners,imageSources);
         binding->hostImage=aliased?aliased->hostImage:childImage;binding->hostLoad=aliased?aliased->hostLoad:childLoad;
@@ -388,7 +400,7 @@ static void JNICALL native_binding(jvmtiEnv *api,JNIEnv *env,jthread thread,jmet
         // Preserve pre-existing outside implementations for an actual later overwrite.
         // Ordinary bindings are recorded without replacing their VM entry point.
         if(ready&&binding->type&&binding->origin&&binding->signature){
-            int wrapped=binding->unsafeOperation||binding->fileOperation||binding->threadOperation||binding->hostImage||binding->hostUnknown||native_has_producer(binding->owners);
+            int wrapped=binding->unsafeOperation||binding->fileOperation||binding->threadOperation||binding->arraycopyOperation||binding->hostImage||binding->hostUnknown||native_has_producer(binding->owners);
             if(wrapped)binding->entry=native_entry(binding);
             ready=!wrapped||binding->entry!=NULL;
         }else ready=0;
@@ -638,6 +650,7 @@ NATIVE_ARRAY(Double,jdouble,d,"java/lang/Double","(D)Ljava/lang/Double;")
 static int native_jni_output_context(JNIEnv*);
 static int native_jni_output_commit(JNIEnv*,void*,const void*,SIZE_T);
 #include "arrays.c"
+#include "arraycopy.c"
 static void *JNICALL native_get_critical(JNIEnv *env,jarray array,jboolean *copy){return native_array_copy(env,array,copy,0,1,__builtin_return_address(0));}
 static void JNICALL native_release_critical(JNIEnv *env,jarray array,void *contents,jint mode){native_array_release(env,array,contents,mode,0,1,__builtin_return_address(0));}
 /* Failure-only installation diagnostics. JVMTI metadata reads do not clear or
@@ -2171,7 +2184,7 @@ JNIEXPORT jboolean JNICALL Java_dev_ronova_pro_bootstrap_NativeControl_initializ
     native_writer_select=native_original.GetStaticMethodID(env,task,"controlWriterFrame","(Ljava/lang/Class;Ljava/lang/String;)Z");
     native_writer_raw_select=native_original.GetStaticMethodID(env,task,"rawMemoryWriterFrame","(Ljava/lang/Class;Ljava/lang/String;)Z");
     if(!native_writer_select||!native_writer_raw_select){(*native_ti)->Deallocate(native_ti,(unsigned char*)table);return JNI_FALSE;}
-    if(!code_prepare(env)||!native_unsafe_prepare(env)||!native_file_prepare(env)||!native_thread_prepare(env)||!native_buffer_prepare(env)){(*native_ti)->Deallocate(native_ti,(unsigned char*)table);return JNI_FALSE;}
+    if(!code_prepare(env)||!native_unsafe_prepare(env)||!native_file_prepare(env)||!native_thread_prepare(env)||!native_buffer_prepare(env)||!native_arraycopy_prepare(env)){(*native_ti)->Deallocate(native_ti,(unsigned char*)table);return JNI_FALSE;}
     native_tooling_thread_query=native_original.GetStaticMethodID(env,tasks,"nativeThreadOperation","(Ljava/lang/Thread;[Ljava/lang/Module;I)Ljava/lang/Object;");
     native_tooling_frame_query=native_original.GetStaticMethodID(env,tasks,"ownState","(Ljava/lang/Class;)Z");
     native_tooling_heap_target=native_original.GetStaticMethodID(env,tasks,"nativeHeapTargetAllowed","(Ljava/lang/Object;[Ljava/lang/Module;)Z");
@@ -2203,6 +2216,7 @@ JNIEXPORT jboolean JNICALL Java_dev_ronova_pro_bootstrap_NativeControl_initializ
     table->DefineClass=native_define;native_jni_outputs_install(table);native_guarded=*table;InterlockedExchange(&native_guarded_ready,1);jvmtiError result=(*native_ti)->SetJNIFunctionTable(native_ti,table);(*native_ti)->Deallocate(native_ti,(unsigned char*)table);InterlockedExchange(&native_jni_ready,result==JVMTI_ERROR_NONE);
     if(result==JVMTI_ERROR_NONE)InterlockedExchange(&native_library_present,native_library_install(env));
     if(result==JVMTI_ERROR_NONE&&!native_unsafe_install(env))return JNI_FALSE;
+    if(result==JVMTI_ERROR_NONE&&!native_arraycopy_install(env))return JNI_FALSE;
     return result==JVMTI_ERROR_NONE?JNI_TRUE:JNI_FALSE;
 }
 JNIEXPORT void JNICALL Java_dev_ronova_pro_bootstrap_NativeControl_module0(JNIEnv *env,jclass type,jobject module,jboolean stopped){(void)type;if(!native_controller||!native_original.CallStaticBooleanMethod(env,native_controller,native_control_gate)){native_refuse(env,"NATIVE_CONTROL_AGENT_REQUIRED");return;}AcquireSRWLockExclusive(&native_records);Owner *owner=native_owner(env,module);if(owner){InterlockedExchange(&owner->producer,1);if(stopped)InterlockedExchange(&owner->stopped,1);}if(!owner)InterlockedIncrement(&native_failures);ReleaseSRWLockExclusive(&native_records);if(stopped)native_tooling_retire(env,module);}
