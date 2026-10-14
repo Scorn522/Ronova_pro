@@ -7,7 +7,7 @@ typedef struct NativeArrayCopy {
     size_t bytes;
     jsize length;
     char kind;
-    int critical,releasing;
+    int critical,releasing,unknown;
     OwnerLink *owners;
     jweak targetModule;
     struct NativeArrayCopy *next;
@@ -73,7 +73,7 @@ static void *native_array_copy(JNIEnv *env,jarray array,jboolean *copy,char expe
     if(actual){memcpy(lease->contents,actual,lease->bytes);native_original.ReleasePrimitiveArrayCritical(env,array,actual,JNI_ABORT);}
     if(!actual||native_original.ExceptionCheck(env)){native_original.DeleteGlobalRef(env,lease->array);native_payload_free(lease->contents);free(lease);return NULL;}
     NativeThread *state=native_thread();
-    if(!native_capture_scope_owners(env,state,&lease->owners)||!native_capture_image_owners(caller,&lease->owners)){
+    if(!native_capture_scope_sources(env,state,&lease->owners,&lease->unknown)||!native_capture_image_owners(caller,&lease->owners)){
         native_owner_links_free(lease->owners);native_original.DeleteGlobalRef(env,lease->array);SecureZeroMemory(lease->contents,lease->bytes);native_payload_free(lease->contents);free(lease);native_refuse(env,"NATIVE_POINTER_SOURCE_CAPACITY");return NULL;
     }
     jobject target=native_original.CallStaticObjectMethod(env,native_controls,native_object_module,array);
@@ -94,15 +94,16 @@ static void *native_array_copy(JNIEnv *env,jarray array,jboolean *copy,char expe
 static void native_array_commit(JNIEnv *env,NativeArrayCopy *lease){
     // Each setter takes one private snapshot and checks the exact submitted
     // values. A held pointer cannot refill a newly stopped/protected target.
+    // Its captured contributors, including unknown, survive beyond the acquiring Java scope.
     switch(lease->kind){
-        case 'Z':native_set_array_Boolean(env,(jbooleanArray)lease->array,0,lease->length,(const jboolean*)lease->contents);break;
-        case 'B':native_set_array_Byte(env,(jbyteArray)lease->array,0,lease->length,(const jbyte*)lease->contents);break;
-        case 'C':native_set_array_Char(env,(jcharArray)lease->array,0,lease->length,(const jchar*)lease->contents);break;
-        case 'S':native_set_array_Short(env,(jshortArray)lease->array,0,lease->length,(const jshort*)lease->contents);break;
-        case 'I':native_set_array_Int(env,(jintArray)lease->array,0,lease->length,(const jint*)lease->contents);break;
-        case 'J':native_set_array_Long(env,(jlongArray)lease->array,0,lease->length,(const jlong*)lease->contents);break;
-        case 'F':native_set_array_Float(env,(jfloatArray)lease->array,0,lease->length,(const jfloat*)lease->contents);break;
-        case 'D':native_set_array_Double(env,(jdoubleArray)lease->array,0,lease->length,(const jdouble*)lease->contents);break;
+        case 'Z':native_set_array_from_Boolean(env,(jbooleanArray)lease->array,0,lease->length,(const jboolean*)lease->contents,lease->owners,lease->unknown);break;
+        case 'B':native_set_array_from_Byte(env,(jbyteArray)lease->array,0,lease->length,(const jbyte*)lease->contents,lease->owners,lease->unknown);break;
+        case 'C':native_set_array_from_Char(env,(jcharArray)lease->array,0,lease->length,(const jchar*)lease->contents,lease->owners,lease->unknown);break;
+        case 'S':native_set_array_from_Short(env,(jshortArray)lease->array,0,lease->length,(const jshort*)lease->contents,lease->owners,lease->unknown);break;
+        case 'I':native_set_array_from_Int(env,(jintArray)lease->array,0,lease->length,(const jint*)lease->contents,lease->owners,lease->unknown);break;
+        case 'J':native_set_array_from_Long(env,(jlongArray)lease->array,0,lease->length,(const jlong*)lease->contents,lease->owners,lease->unknown);break;
+        case 'F':native_set_array_from_Float(env,(jfloatArray)lease->array,0,lease->length,(const jfloat*)lease->contents,lease->owners,lease->unknown);break;
+        case 'D':native_set_array_from_Double(env,(jdoubleArray)lease->array,0,lease->length,(const jdouble*)lease->contents,lease->owners,lease->unknown);break;
     }
 }
 static void native_array_release(JNIEnv *env,jarray array,void *contents,jint mode,char expected,int critical,void *caller){

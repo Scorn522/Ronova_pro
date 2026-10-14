@@ -1,5 +1,17 @@
 # B 批实际报告：2026-10-09 代码收敛接续
 
+## 2026-10-14：C 接续——真实攻击、延后挖掘与 JNI 数组来源
+
+接续 `fea56f9`，Java ABI75 / Native ABI70 / Storage3 / Journal6；协议 `r3-client-8`。实际 handleInteract→Player.attack 限本次主手和真实目标；START/有效 STOP→ServerPlayer.tick 的实际玩家/GameMode 调用续接延后挖掘，逐次复查世界、目标坐标、当前槽/栈及代次，removeBlock 前再次核对。普通 tick 只有状态推进，外部回调、嵌套 tick、另一目标及旧 delayed 残值不能借装备权。GameMode 关键字段/玩家引用进入原字段、Unsafe 和内存写检查，状态写不继承 Item 委托；委托匹配真实方法 descriptor。换工具/ABORT/世界交接/release/异常撤销续接。
+
+旧 `c-network-java74-native69-equipment-20261014.log` 退出1，完整 cause 定位首次发送冷加载类文件时的 `Inflater.inflateBytesBytes`；`scoped_sources` 捕获把 retained unknown 当失败。Native 数组副本现保留 unknown 与原 owners，八种 primitive 提交合并获取时和当前来源，原准确目标、停组、提交快照和释放配对不变。未清来源、预热、改截止或放宽生产资格。
+
+统一构建 `build-c-java75-native70-equipment-actions-20261014.log` **PASS，1分14秒**，Core2580259、prelaunch22440字节；匹配 Agent/Bootstrap/Native70 与两个现有夹具编译完成。equipment-actions 分支含真实玩家攻击木镐耗损、提前 STOP 后实际 tick 挖掘耗损、外部事件中的字段篡改/嵌套 tick/另一目标拒绝及邻居/release；**游戏分支 NOTRUN**。AuditFixCheck 新类路径编译通过，75/70 原网络重跑 `c-network-java75-native70-equipment-actions-20261014.log` 当前运行，暂无通过结论。旧矩阵未重跑。
+
+Java72/Native68 原禁疗 PID112724 本次核对仍在，latest.log 仍停留19:39 forgeserver 启动行，尚无进世界/禁疗结论，未停重启。候选 `distribution/candidate-c-java75-native70-equipment-actions-wip-20261014`；源码 ZIP `distribution/Ronova-Pro-C-EquipmentActions-WIP-Java75-Native70-20261014.zip`。本包未改驱动/管理器，原未签名产物未部署。自定义装备/GameMode 覆写等未覆盖边界保留，自身外观/武器注册暂缓，C/B 未完成。
+
+---
+
 ## 2026-10-14：C 接续——装备、ItemStack 与 NBT
 
 接续 `24f5dc3`，Java ABI74 / Native ABI69 / Storage3 / Journal6；协议 `r3-client-8`。标准 Player/Mob/ArmorStand 的当前六槽、准确载体、ItemStack 与当前 NBT 图接入原方法/集合/字段/Unsafe 写入规则，按代次、当前实际成员和全部共享 owner 判断，旧槽/节点/release 失活。拒绝拆分/取出返回 EMPTY，直接 Arrays$ArrayList.set 返回旧元素，避免副本先发布。实际引用宽度来自当前 JVM，静态帮助方法用准确 Class 和全参；修正 bootstrap 转换回传与抽象 primary 安装阻塞，结果处理器先安装，匹配 Java 桥升74。

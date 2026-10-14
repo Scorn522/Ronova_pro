@@ -6,6 +6,10 @@ import net.minecraft.client.Minecraft;
 import net.minecraft.client.gui.screens.*;
 import net.minecraft.client.multiplayer.ServerData;
 import net.minecraft.client.multiplayer.resolver.ServerAddress;
+import net.minecraft.core.BlockPos;
+import net.minecraft.core.Direction;
+import net.minecraft.network.protocol.game.ServerboundInteractPacket;
+import net.minecraft.network.protocol.game.ServerboundPlayerActionPacket;
 import net.minecraft.world.entity.Entity;
 import net.minecraft.world.entity.animal.Cow;
 
@@ -13,6 +17,7 @@ import net.minecraft.world.entity.animal.Cow;
 final class ClientDefenseFixture {
     private static boolean connecting,done,checked,handoff;private static int ticks;
     private static Entity originalPlayer;private static Cow target;
+    private static String equipmentActionSent="";
     private static void require(boolean ok,String message) {if(!ok)throw new AssertionError(message);}
     static void tick() {
         if(done)return;Minecraft mc=Minecraft.getInstance();ticks++;
@@ -21,6 +26,7 @@ final class ClientDefenseFixture {
             if(!connecting&&mc.screen instanceof TitleScreen&&mc.getOverlay()==null) {
                 connecting=true;ConnectScreen.startConnecting(mc.screen,mc,new ServerAddress("127.0.0.1",25892),new ServerData("Own defense fixture","127.0.0.1:25892",false),false);
             }
+            if("equipment-actions".equals(System.getProperty("ronova.pro.fixture.variant"))){equipmentActions(mc);return;}
             Path address=Path.of("../server/defense-target.txt");
             if(!checked&&mc.level!=null&&Files.isRegularFile(address)) {
                 int id=Integer.parseInt(Files.readAllLines(address).get(0));
@@ -57,6 +63,37 @@ final class ClientDefenseFixture {
             Path result=Path.of("../server/defense-result.txt");
             if(Files.isRegularFile(result))finish(mc,Files.readString(result));
         } catch(Throwable failure) {failure.printStackTrace();finish(mc,"DEFENSE_FAILED "+failure);}
+    }
+    private static void equipmentActions(Minecraft mc)throws ReflectiveOperationException,java.io.IOException{
+        Path result=Path.of("../server/defense-result.txt");
+        if(Files.isRegularFile(result)){finish(mc,Files.readString(result));return;}
+        Path instruction=Path.of("../server/defense-equipment-actions.txt");
+        if(mc.player==null||mc.level==null||mc.getConnection()==null||!Files.isRegularFile(instruction))return;
+        var lines=Files.readAllLines(instruction);if(lines.size()<8)return;String stage=lines.get(0);
+        if(stage.equals(equipmentActionSent))return;
+        double px=Double.parseDouble(lines.get(5)),py=Double.parseDouble(lines.get(6)),pz=Double.parseDouble(lines.get(7));
+        if(mc.player.distanceToSqr(px,py,pz)>.25)return;
+        if(stage.equals("attack")){
+            Entity victim=mc.level.getEntity(Integer.parseInt(lines.get(1)));if(!(victim instanceof Cow))return;
+            mc.getConnection().send(ServerboundInteractPacket.createAttackPacket(victim,mc.player.isShiftKeyDown()));
+            equipmentActionSent=stage;
+        }else if(stage.equals("mine")){
+            BlockPos pos=new BlockPos(Integer.parseInt(lines.get(2)),Integer.parseInt(lines.get(3)),Integer.parseInt(lines.get(4)));
+            if(!mc.level.getBlockState(pos).is(net.minecraft.world.level.block.Blocks.STONE))return;
+            // Use the real client's prediction sequence; this getter is package-private in 1.20.1.
+            var singleton=sun.misc.Unsafe.class.getDeclaredField("theUnsafe");singleton.setAccessible(true);var unsafe=(sun.misc.Unsafe)singleton.get(null);
+            java.lang.reflect.Field field;
+            try{field=net.minecraft.client.multiplayer.ClientLevel.class.getDeclaredField("blockStatePredictionHandler");}
+            catch(NoSuchFieldException production){field=net.minecraft.client.multiplayer.ClientLevel.class.getDeclaredField("f_233599_");}
+            var actual=(net.minecraft.client.multiplayer.prediction.BlockStatePredictionHandler)unsafe.getObject(mc.level,unsafe.objectFieldOffset(field));
+            try(var prediction=actual.startPredicting()){
+                mc.getConnection().send(new ServerboundPlayerActionPacket(ServerboundPlayerActionPacket.Action.START_DESTROY_BLOCK,pos,Direction.UP,prediction.currentSequence()));
+            }
+            try(var prediction=actual.startPredicting()){
+                mc.getConnection().send(new ServerboundPlayerActionPacket(ServerboundPlayerActionPacket.Action.STOP_DESTROY_BLOCK,pos,Direction.UP,prediction.currentSequence()));
+            }
+            equipmentActionSent=stage;
+        }
     }
     private static void finish(Minecraft mc,String text) {
         done=true;try {Files.writeString(Path.of("fault-isolation-result.txt"),text);}catch(Exception ex){throw new IllegalStateException(ex);}

@@ -1,13 +1,17 @@
 package dev.ronova.pro.mixin;
 
 import net.minecraft.nbt.CompoundTag;
+import net.minecraft.core.BlockPos;
+import net.minecraft.core.Direction;
 import net.minecraft.network.protocol.game.ServerboundContainerClickPacket;
+import net.minecraft.network.protocol.game.ServerboundInteractPacket;
 import net.minecraft.network.protocol.game.ServerboundPlayerActionPacket;
 import net.minecraft.network.protocol.game.ServerboundSetCarriedItemPacket;
 import net.minecraft.network.protocol.game.ServerboundPickItemPacket;
 import net.minecraft.network.protocol.game.ServerboundSetCreativeModeSlotPacket;
 import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.server.level.ServerPlayerGameMode;
+import net.minecraft.server.level.ServerLevel;
 import net.minecraft.server.network.ServerGamePacketListenerImpl;
 import net.minecraft.world.InteractionHand;
 import net.minecraft.world.InteractionResult;
@@ -42,6 +46,8 @@ public final class EquipmentActionHooks {
         private void ronova$equipmentCreative(ServerboundSetCreativeModeSlotPacket packet,CallbackInfo callback) { }
         @Inject(method="handlePickItem",at=@At("HEAD"))
         private void ronova$equipmentPick(ServerboundPickItemPacket packet,CallbackInfo callback) { }
+        @Inject(method="handleInteract",at=@At("HEAD"))
+        private void ronova$equipmentInteract(ServerboundInteractPacket packet,CallbackInfo callback) { }
     }
 
     @Mixin(ServerPlayerGameMode.class)
@@ -52,6 +58,33 @@ public final class EquipmentActionHooks {
         @Inject(method="useItemOn",at=@At("HEAD"))
         private void ronova$equipmentUseOn(ServerPlayer player,Level level,ItemStack stack,InteractionHand hand,
                 BlockHitResult hit,CallbackInfoReturnable<InteractionResult> callback) { }
+    }
+
+    @Mixin(Player.class)
+    public abstract static class PlayerAttack {
+        @Inject(method="attack",at=@At("HEAD"))
+        private void ronova$equipmentAttack(Entity target,CallbackInfo callback) { }
+    }
+
+    @Mixin(ServerPlayer.class)
+    public abstract static class PlayerTick {
+        @Inject(method="tick",at=@At("HEAD"))
+        private void ronova$equipmentGameModeTick(CallbackInfo callback) { }
+    }
+
+    @Mixin(ServerPlayerGameMode.class)
+    public abstract static class Digging {
+        @Inject(method="handleBlockBreakAction",at=@At("HEAD"))
+        private void ronova$equipmentDigAction(BlockPos position,ServerboundPlayerActionPacket.Action action,
+                Direction direction,int height,int sequence,CallbackInfo callback) { }
+        @Inject(method="tick",at=@At("HEAD"))
+        private void ronova$equipmentDigTick(CallbackInfo callback) { }
+        @Inject(method="destroyBlock",at=@At("HEAD"))
+        private void ronova$equipmentDestroy(BlockPos position,CallbackInfoReturnable<Boolean> callback) { }
+        @Inject(method="removeBlock(Lnet/minecraft/core/BlockPos;Z)Z",at=@At("HEAD"),remap=false)
+        private void ronova$equipmentRemoveBlock(BlockPos position,boolean canHarvest,CallbackInfoReturnable<Boolean> callback) { }
+        @Inject(method="setLevel",at=@At("HEAD"))
+        private void ronova$equipmentDigLevel(ServerLevel level,CallbackInfo callback) { }
     }
 
     @Mixin(LivingEntity.class)

@@ -21,11 +21,23 @@ public final class SaveFinallyPlugin implements IMixinConfigPlugin {
             weaveEquipmentAction(node,"handleContainerClick","m_5914_","(Lnet/minecraft/network/protocol/game/ServerboundContainerClickPacket;)V","equipment-menu");
             weaveEquipmentAction(node,"handlePlayerAction","m_7502_","(Lnet/minecraft/network/protocol/game/ServerboundPlayerActionPacket;)V","equipment-player-action");
             weaveEquipmentAction(node,"handleSetCreativeModeSlot","m_5964_","(Lnet/minecraft/network/protocol/game/ServerboundSetCreativeModeSlotPacket;)V","equipment-creative");
-            weaveEquipmentAction(node,"handlePickItem","m_7965_","(Lnet/minecraft/network/protocol/game/ServerboundPickItemPacket;)V","equipment-pick");return;
+            weaveEquipmentAction(node,"handlePickItem","m_7965_","(Lnet/minecraft/network/protocol/game/ServerboundPickItemPacket;)V","equipment-pick");
+            weaveEquipmentAction(node,"handleInteract","m_6946_","(Lnet/minecraft/network/protocol/game/ServerboundInteractPacket;)V","equipment-interact");return;
         }
         if(mixin.endsWith(".EquipmentActionHooks$Use")) {
             weaveEquipmentAction(node,"useItem","m_6261_","(Lnet/minecraft/server/level/ServerPlayer;Lnet/minecraft/world/level/Level;Lnet/minecraft/world/item/ItemStack;Lnet/minecraft/world/InteractionHand;)Lnet/minecraft/world/InteractionResult;","equipment-use");
             weaveEquipmentAction(node,"useItemOn","m_7179_","(Lnet/minecraft/server/level/ServerPlayer;Lnet/minecraft/world/level/Level;Lnet/minecraft/world/item/ItemStack;Lnet/minecraft/world/InteractionHand;Lnet/minecraft/world/phys/BlockHitResult;)Lnet/minecraft/world/InteractionResult;","equipment-use");return;
+        }
+        if(mixin.endsWith(".EquipmentActionHooks$PlayerAttack")) {
+            weaveEquipmentAction(node,"attack","m_5706_","(Lnet/minecraft/world/entity/Entity;)V","equipment-attack");return;
+        }
+        if(mixin.endsWith(".EquipmentActionHooks$PlayerTick")) { weaveEquipmentDriver(node);return; }
+        if(mixin.endsWith(".EquipmentActionHooks$Digging")) {
+            weaveEquipmentAction(node,"handleBlockBreakAction","m_214168_","(Lnet/minecraft/core/BlockPos;Lnet/minecraft/network/protocol/game/ServerboundPlayerActionPacket$Action;Lnet/minecraft/core/Direction;II)V","equipment-dig-action");
+            weaveEquipmentAction(node,"tick","m_7712_","()V","equipment-dig-tick");
+            weaveEquipmentAction(node,"destroyBlock","m_9280_","(Lnet/minecraft/core/BlockPos;)Z","equipment-destroy");
+            weaveEquipmentAction(node,"removeBlock","removeBlock","(Lnet/minecraft/core/BlockPos;Z)Z","equipment-remove-block");
+            weaveEquipmentAction(node,"setLevel","m_9260_","(Lnet/minecraft/server/level/ServerLevel;)V","equipment-dig-level");return;
         }
         if(mixin.endsWith(".EquipmentActionHooks$Using")) {
             weaveEquipmentAction(node,"updateUsingItem","m_142106_","(Lnet/minecraft/world/item/ItemStack;)V","equipment-use-tick");
@@ -178,6 +190,22 @@ public final class SaveFinallyPlugin implements IMixinConfigPlugin {
         method.tryCatchBlocks.add(new TryCatchBlockNode(start,end,handler,"java/lang/RuntimeException"));
         method.maxStack=Math.max(method.maxStack,3);
     }
+    private static void weaveEquipmentDriver(ClassNode node) {
+        var methods=node.methods.stream().filter(method->(method.name.equals("tick")||method.name.equals("m_8119_"))
+                &&method.desc.equals("()V")&&(method.access&(Opcodes.ACC_STATIC|Opcodes.ACC_ABSTRACT|Opcodes.ACC_NATIVE))==0).toList();
+        if(methods.size()!=1)throw new IllegalStateException("EQUIPMENT_TICK_DRIVER_BOUNDARY:"+node.name);
+        MethodNode method=methods.get(0);int patched=0;
+        for(AbstractInsnNode instruction:method.instructions.toArray())if(instruction instanceof MethodInsnNode call
+                &&call.getOpcode()==Opcodes.INVOKEVIRTUAL&&call.owner.equals("net/minecraft/server/level/ServerPlayerGameMode")
+                &&(call.name.equals("tick")||call.name.equals("m_7712_"))&&call.desc.equals("()V")) {
+            // Pass the actual receiver already on the operand stack and this original caller's player.
+            method.instructions.insertBefore(call,new VarInsnNode(Opcodes.ALOAD,0));
+            method.instructions.set(call,new MethodInsnNode(Opcodes.INVOKESTATIC,"dev/ronova/pro/EquipmentPolicy","tickGameMode",
+                    "(Ljava/lang/Object;Ljava/lang/Object;)V",false));patched++;
+        }
+        if(patched!=1)throw new IllegalStateException("EQUIPMENT_TICK_DRIVER_CALL_UNAVAILABLE:"+node.name+":"+patched);
+        method.maxStack=Math.max(method.maxStack,2);
+    }
     private static void weaveEquipmentAction(ClassNode node,String name,String srg,String descriptor,String operation) {
         var matches=node.methods.stream().filter(method->(method.name.equals(name)||method.name.equals(srg))&&method.desc.equals(descriptor)
                 &&(method.access&(Opcodes.ACC_STATIC|Opcodes.ACC_ABSTRACT|Opcodes.ACC_NATIVE))==0).toList();
@@ -190,8 +218,11 @@ public final class SaveFinallyPlugin implements IMixinConfigPlugin {
         entry.add(new TypeInsnNode(Opcodes.ANEWARRAY,"java/lang/Object"));int local=1;
         for(int index=0;index<arguments.length;index++) {
             Type argument=arguments[index];
-            if(argument.getSort()!=Type.OBJECT&&argument.getSort()!=Type.ARRAY)throw new IllegalStateException("EQUIPMENT_ACTION_ARGUMENT:"+descriptor);
-            entry.add(new InsnNode(Opcodes.DUP));entry.add(new LdcInsnNode(index));entry.add(new VarInsnNode(Opcodes.ALOAD,local++));
+            if(argument.getSort()!=Type.OBJECT&&argument.getSort()!=Type.ARRAY&&argument.getSort()!=Type.INT&&argument.getSort()!=Type.BOOLEAN)throw new IllegalStateException("EQUIPMENT_ACTION_ARGUMENT:"+descriptor);
+            entry.add(new InsnNode(Opcodes.DUP));entry.add(new LdcInsnNode(index));
+            entry.add(new VarInsnNode(argument.getSort()==Type.INT||argument.getSort()==Type.BOOLEAN?Opcodes.ILOAD:Opcodes.ALOAD,local++));
+            if(argument.getSort()==Type.INT)entry.add(new MethodInsnNode(Opcodes.INVOKESTATIC,"java/lang/Integer","valueOf","(I)Ljava/lang/Integer;",false));
+            else if(argument.getSort()==Type.BOOLEAN)entry.add(new MethodInsnNode(Opcodes.INVOKESTATIC,"java/lang/Boolean","valueOf","(Z)Ljava/lang/Boolean;",false));
             entry.add(new InsnNode(Opcodes.AASTORE));
         }
         entry.add(new LdcInsnNode(operation));entry.add(new MethodInsnNode(Opcodes.INVOKESTATIC,policy,"beginAction",
@@ -203,6 +234,7 @@ public final class SaveFinallyPlugin implements IMixinConfigPlugin {
         entry.add(new JumpInsnNode(Opcodes.IFEQ,body));
         Type result=Type.getReturnType(descriptor);
         if(result.getSort()==Type.VOID)entry.add(new InsnNode(Opcodes.RETURN));
+        else if(result.getSort()==Type.BOOLEAN){entry.add(new InsnNode(Opcodes.ICONST_0));entry.add(new InsnNode(Opcodes.IRETURN));}
         else if(result.getDescriptor().equals("Lnet/minecraft/world/InteractionResult;")) {
             entry.add(new FieldInsnNode(Opcodes.GETSTATIC,"net/minecraft/world/InteractionResult","PASS","Lnet/minecraft/world/InteractionResult;"));
             entry.add(new InsnNode(Opcodes.ARETURN));
@@ -231,7 +263,7 @@ public final class SaveFinallyPlugin implements IMixinConfigPlugin {
             AbstractInsnNode stored=entry.getFirst();while(!(stored instanceof VarInsnNode variable&&variable.getOpcode()==Opcodes.ASTORE&&variable.var==lease))stored=stored.getNext();
             entry.insert(stored,start);method.instructions.insert(entry);
         }
-        for(AbstractInsnNode instruction:method.instructions.toArray())if(instruction.getOpcode()==Opcodes.RETURN||instruction.getOpcode()==Opcodes.ARETURN) {
+        for(AbstractInsnNode instruction:method.instructions.toArray())if(instruction.getOpcode()==Opcodes.RETURN||instruction.getOpcode()==Opcodes.ARETURN||instruction.getOpcode()==Opcodes.IRETURN) {
             InsnList finish=new InsnList();finish.add(new VarInsnNode(Opcodes.ALOAD,lease));
             finish.add(new MethodInsnNode(Opcodes.INVOKESTATIC,policy,"endAction","(Ljava/lang/Object;)V",false));method.instructions.insertBefore(instruction,finish);
         }

@@ -4,6 +4,7 @@ import dev.ronova.pro.*;
 import dev.ronova.pro.mixin.Access;
 import java.nio.file.*;
 import java.util.*;
+import net.minecraft.core.BlockPos;
 import net.minecraft.core.NonNullList;
 import net.minecraft.core.SectionPos;
 import net.minecraft.nbt.*;
@@ -11,6 +12,9 @@ import net.minecraft.server.level.*;
 import net.minecraft.world.entity.*;
 import net.minecraft.world.entity.animal.Cow;
 import net.minecraft.world.item.*;
+import net.minecraft.world.level.GameType;
+import net.minecraft.world.level.block.Blocks;
+import net.minecraft.world.level.levelgen.Heightmap;
 import net.minecraftforge.common.MinecraftForge;
 import net.minecraftforge.event.TickEvent;
 import net.minecraftforge.event.entity.EntityEvent;
@@ -21,12 +25,19 @@ public final class DefenseFixture {
     private int age,moves,entryAttacks;private boolean finished;
     private ServerPlayer player;private Cow cow,anchor,neighbour,target;private UUID clearing;
     private double x,y,z;private float health;private UUID protection;private int handedOff=-1;
+    private int actionPhase,actionAttackCalls;private boolean actionMiningProbe,actionProbing;
+    private ItemStack actionTool;private BlockPos actionMine,actionOther;private float actionVictimHealth;
+    private Throwable actionCallbackFailure;
     public DefenseFixture() {
         MinecraftForge.EVENT_BUS.addListener(EventPriority.HIGHEST,this::tick);
         MinecraftForge.EVENT_BUS.addListener(EventPriority.NORMAL,this::entered);
+        if("equipment-actions".equals(System.getProperty("ronova.pro.fixture.variant"))){
+            MinecraftForge.EVENT_BUS.addListener(EventPriority.NORMAL,this::actionAttack);
+            MinecraftForge.EVENT_BUS.addListener(EventPriority.NORMAL,this::actionBreakSpeed);
+        }
     }
     private void entered(EntityEvent.EnteringSection event) {
-        if(finished||"no-heal".equals(System.getProperty("ronova.pro.fixture.variant"))||"live-state".equals(System.getProperty("ronova.pro.fixture.variant"))||"equipment".equals(System.getProperty("ronova.pro.fixture.variant"))||event.getEntity()!=cow||age<20)return;
+        if(finished||"no-heal".equals(System.getProperty("ronova.pro.fixture.variant"))||"live-state".equals(System.getProperty("ronova.pro.fixture.variant"))||"equipment".equals(System.getProperty("ronova.pro.fixture.variant"))||"equipment-actions".equals(System.getProperty("ronova.pro.fixture.variant"))||event.getEntity()!=cow||age<20)return;
         var section=((Access.Callback)((Access.EntityState)cow).pro$callback()).pro$section();
         // This is an ordinary mod callback during the move, not the vanilla removal itself.
         section.remove(cow);entryAttacks++;
@@ -152,6 +163,78 @@ public final class DefenseFixture {
             server.halt(false);
         }catch(Throwable failure){failure.printStackTrace();try{finish("EQUIPMENT_FAILED "+failure);}finally{server.halt(false);}}
     }
+    private void actionAttack(net.minecraftforge.event.entity.player.AttackEntityEvent event){
+        if(finished||event.getEntity()!=player||event.getTarget()!=cow||actionTool==null)return;
+        try{
+            int before=actionTool.getDamageValue();actionTool.setDamageValue(before+11);
+            require(actionTool.getDamageValue()==before,"foreign AttackEntityEvent callback borrowed equipment action");actionAttackCalls++;
+        }catch(Throwable failure){if(actionCallbackFailure==null)actionCallbackFailure=failure;}
+    }
+    private static java.lang.reflect.Field actionField(String mapped,String srg)throws NoSuchFieldException{
+        try{return ServerPlayerGameMode.class.getDeclaredField(mapped);}catch(NoSuchFieldException production){return ServerPlayerGameMode.class.getDeclaredField(srg);}
+    }
+    private void actionBreakSpeed(net.minecraftforge.event.entity.player.PlayerEvent.BreakSpeed event){
+        if(finished||actionPhase!=2||event.getEntity()!=player||actionMiningProbe||actionProbing)return;
+        try{
+            var unsafe=equipmentUnsafe();var mode=player.gameMode;
+            long delayed=unsafe.objectFieldOffset(actionField("hasDelayedDestroy","f_9253_"));
+            if(!unsafe.getBoolean(mode,delayed))return;
+            actionProbing=true;
+            long pos=unsafe.objectFieldOffset(actionField("delayedDestroyPos","f_9254_"));
+            long start=unsafe.objectFieldOffset(actionField("delayedTickStart","f_9255_"));
+            long ticks=unsafe.objectFieldOffset(actionField("gameTicks","f_9252_"));
+            Object previousPos=unsafe.getObject(mode,pos);int previousStart=unsafe.getInt(mode,start),previousTicks=unsafe.getInt(mode,ticks),damage=actionTool.getDamageValue();
+            require(actionMine.equals(previousPos),"delayed mining did not retain actual target");
+            unsafe.putBoolean(mode,delayed,false);unsafe.putObject(mode,pos,actionOther);
+            unsafe.putInt(mode,start,previousStart-1000);unsafe.putInt(mode,ticks,previousTicks+1000);
+            require(unsafe.getBoolean(mode,delayed)&&unsafe.getObject(mode,pos)==previousPos&&unsafe.getInt(mode,start)==previousStart
+                    &&unsafe.getInt(mode,ticks)==previousTicks,"foreign BreakSpeed callback changed live GameMode mining fields");
+            mode.tick();require(unsafe.getInt(mode,ticks)==previousTicks,"foreign BreakSpeed callback recursively advanced GameMode tick");
+            require(!mode.destroyBlock(actionOther)&&player.serverLevel().getBlockState(actionOther).is(Blocks.STONE),
+                    "foreign BreakSpeed callback borrowed destroyBlock for another target");
+            require(actionTool.getDamageValue()==damage,"foreign BreakSpeed callback borrowed delayed tool lease");actionMiningProbe=true;
+        }catch(Throwable failure){if(actionCallbackFailure==null)actionCallbackFailure=failure;}finally{actionProbing=false;}
+    }
+    private void actionStage(String stage)throws java.io.IOException{
+        Files.writeString(Path.of("defense-equipment-actions.txt"),stage+"\n"+cow.getId()+"\n"+actionMine.getX()+"\n"+actionMine.getY()+"\n"+actionMine.getZ()
+                +"\n"+player.getX()+"\n"+player.getY()+"\n"+player.getZ()+"\n");
+    }
+    private void equipmentActionsTick(TickEvent.ServerTickEvent event){
+        var server=event.getServer();if(actionPhase==0&&server.getPlayerList().getPlayers().isEmpty())return;age++;
+        try{
+            if(actionCallbackFailure!=null)throw new AssertionError("equipment action callback failed",actionCallbackFailure);
+            require(age<=1200,"equipment-actions timeout phase="+actionPhase);var runtime=ProRuntime.get(server);var level=server.overworld();
+            if(actionPhase==0){
+                player=server.getPlayerList().getPlayers().get(0);require(player.connection!=null,"real connected player required");
+                var spawn=level.getSharedSpawnPos();int bx=spawn.getX()+160,bz=spawn.getZ()+160;level.getChunk(bx>>4,bz>>4);
+                BlockPos floor=new BlockPos(bx,level.getHeight(Heightmap.Types.MOTION_BLOCKING_NO_LEAVES,bx,bz)+2,bz);
+                for(int dx=-2;dx<=2;dx++)for(int dz=-2;dz<=2;dz++)level.setBlock(floor.offset(dx,0,dz),Blocks.STONE.defaultBlockState(),3);
+                actionMine=floor.offset(1,1,0);actionOther=floor.offset(-1,1,0);
+                level.setBlock(actionMine,Blocks.STONE.defaultBlockState(),3);level.setBlock(actionOther,Blocks.STONE.defaultBlockState(),3);
+                player.setGameMode(GameType.SURVIVAL);player.connection.teleport(bx+.5,floor.getY()+1,bz+.5,0,0);
+                cow=noHealCow(level,bx+.5,floor.getY()+1,bz+2.5);neighbour=noHealCow(level,bx+2.5,floor.getY()+1,bz+2.5);
+                actionVictimHealth=cow.getHealth();actionTool=new ItemStack(Items.WOODEN_PICKAXE);player.setItemSlot(EquipmentSlot.MAINHAND,actionTool);
+                ItemStack ordinary=new ItemStack(Items.WOODEN_PICKAXE);neighbour.setItemSlot(EquipmentSlot.MAINHAND,ordinary);
+                FixtureCommands.protect(runtime,player);ordinary.setDamageValue(1);require(ordinary.getDamageValue()==1,"player equipment action guard affected ordinary neighbour");
+                player.inventoryMenu.broadcastChanges();actionPhase=1;actionStage("attack");
+            }else if(actionPhase==1&&actionAttackCalls>0){
+                // Actual DiggerItem.hurtEnemy consumes exactly two durability, without enchantment randomness.
+                require(actionAttackCalls==1&&player.getMainHandItem()==actionTool&&actionTool.getDamageValue()==2&&cow.getHealth()<actionVictimHealth,
+                        "real client attack did not damage target and apply original pickaxe wear: calls="+actionAttackCalls+" damage="+actionTool.getDamageValue());
+                actionPhase=2;actionStage("mine");
+            }else if(actionPhase==2&&level.getBlockState(actionMine).isAir()){
+                // Actual DiggerItem.mineBlock consumes one durability for nonzero-hardness stone.
+                require(actionMiningProbe&&player.getMainHandItem()==actionTool&&actionTool.getDamageValue()==3,
+                        "real early STOP did not finish through delayed GameMode tick: probe="+actionMiningProbe+" damage="+actionTool.getDamageValue());
+                require(level.getBlockState(actionOther).is(Blocks.STONE),"callback changed neighbouring block");
+                FixtureCommands.revoke(runtime,player);actionTool.setDamageValue(0);require(actionTool.getDamageValue()==0,"release retained tool field guard");
+                require(player.gameMode.destroyBlock(actionOther)&&level.getBlockState(actionOther).isAir()&&actionTool.getDamageValue()==1,
+                        "release did not restore direct ordinary block destruction and original tool wear");
+                finish("EQUIPMENT_ACTIONS_PASS real_client_attack_pickaxe_two_durability_START_early_STOP_real_delayed_tick_one_durability_foreign_callbacks_fields_nested_tick_other_destroy_denied_neighbour_release");
+                server.halt(false);
+            }
+        }catch(Throwable failure){failure.printStackTrace();try{finish("EQUIPMENT_ACTIONS_FAILED "+failure);}finally{server.halt(false);}}
+    }
     private void noHealTick(TickEvent.ServerTickEvent event) {
         var server=event.getServer();
         try {
@@ -255,6 +338,7 @@ public final class DefenseFixture {
         if("no-heal".equals(System.getProperty("ronova.pro.fixture.variant"))){noHealTick(event);return;}
         if("live-state".equals(System.getProperty("ronova.pro.fixture.variant"))){liveStateTick(event);return;}
         if("equipment".equals(System.getProperty("ronova.pro.fixture.variant"))){equipmentTick(event);return;}
+        if("equipment-actions".equals(System.getProperty("ronova.pro.fixture.variant"))){equipmentActionsTick(event);return;}
         var server=event.getServer();if(server.getPlayerList().getPlayers().isEmpty())return;
         try {
             age++;var runtime=ProRuntime.get(server);var level=server.overworld();

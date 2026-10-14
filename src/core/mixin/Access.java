@@ -43,6 +43,16 @@ public final class Access {
     }
     @Mixin(net.minecraft.server.level.ServerPlayerGameMode.class) public interface EquipmentGameMode {
         @Accessor("player") net.minecraft.server.level.ServerPlayer pro$player();
+        @Accessor("level") net.minecraft.server.level.ServerLevel pro$level();
+        @Accessor("gameModeForPlayer") net.minecraft.world.level.GameType pro$gameType();
+        @Accessor("isDestroyingBlock") boolean pro$destroying();
+        @Accessor("destroyProgressStart") int pro$destroyStart();
+        @Accessor("destroyPos") net.minecraft.core.BlockPos pro$destroyPos();
+        @Accessor("gameTicks") int pro$gameTicks();
+        @Accessor("hasDelayedDestroy") boolean pro$delayed();
+        @Accessor("delayedDestroyPos") net.minecraft.core.BlockPos pro$delayedPos();
+        @Accessor("delayedTickStart") int pro$delayedStart();
+        @Accessor("lastSentState") int pro$lastDestroyState();
     }
     @Mixin(net.minecraft.world.entity.Mob.class) public interface MobEquipment {
         @Accessor("handItems") net.minecraft.core.NonNullList<net.minecraft.world.item.ItemStack> pro$hands();

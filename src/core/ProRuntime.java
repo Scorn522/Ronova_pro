@@ -2368,9 +2368,15 @@ public final class ProRuntime implements AutoCloseable {
         return LIFECYCLE_WALKER.walk(frames->{
             for(var frame:frames.toList()) {
                 Class<?> type=frame.getDeclaringClass();String name=type.getName(),method=frame.getMethodName();
-                if(type==ProRuntime.class||type==BackingPolicy.class||type==EntityRecords.class&&method.equals("registeredUuid")||name.startsWith("dev.ronova.pro.bootstrap.")
+                // These exact policies only query the existing lifecycle lease here.
+                // Their Minecraft callers and any foreign callbacks remain in the walk.
+                if(type==ProRuntime.class||type==BackingPolicy.class||type==EquipmentPolicy.class||type==LiveStatePolicy.class
+                        ||type==EntityRecords.class&&method.equals("registeredUuid")||name.startsWith("dev.ronova.pro.bootstrap.")
                         ||type.getClassLoader()==null||name.startsWith("it.unimi.dsi.fastutil."))continue;
                 if(validLifecycleCaller(frame,null)||validLifecycleCaller(frame,((LifecyclePermit)PLAYER_LIFECYCLE.get().peek()).destination))return true;
+                if(type==net.minecraft.server.level.ServerPlayerGameMode.class
+                        &&(method.equals("setLevel")||method.equals("m_9260_"))
+                        &&frame.getDescriptor().equals("(Lnet/minecraft/server/level/ServerLevel;)V"))continue;
                 if(type==Entity.class||type==LivingEntity.class||type==net.minecraft.world.entity.player.Player.class||type==ServerPlayer.class||type==ServerLevel.class
                         ||type==net.minecraft.server.level.ServerChunkCache.class||type==net.minecraft.server.level.DistanceManager.class
                         ||type==net.minecraft.world.level.entity.PersistentEntitySectionManager.class
@@ -2737,7 +2743,7 @@ public final class ProRuntime implements AutoCloseable {
             LiveStatePolicy.initialize();
             EquipmentPolicy.initialize();
             Class<?> bridge=Class.forName("dev.ronova.pro.bootstrap.TaskBridge",false,null);
-            if(!Integer.valueOf(74).equals(bridge.getMethod("abiVersion").invoke(null)))throw new IllegalStateException("INDEX_BRIDGE_ABI_MISMATCH");
+            if(!Integer.valueOf(75).equals(bridge.getMethod("abiVersion").invoke(null)))throw new IllegalStateException("INDEX_BRIDGE_ABI_MISMATCH");
             var lookup=java.lang.invoke.MethodHandles.lookup();
             var field=lookup.findStatic(ProRuntime.class,"preventFieldWrite",java.lang.invoke.MethodType.methodType(boolean.class,Object.class,Class.class,String.class,Object.class));
             var dispatch=lookup.findStatic(ProRuntime.class,"preventDispatch",java.lang.invoke.MethodType.methodType(boolean.class,Object.class,String.class,Object.class));

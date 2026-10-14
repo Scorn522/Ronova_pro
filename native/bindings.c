@@ -405,9 +405,9 @@ static int native_field_allowed(JNIEnv *env,jobject object,jclass type,jfieldID 
     if(reflected)native_original.DeleteLocalRef(env,reflected);if(declaring)native_original.DeleteLocalRef(env,declaring);state->control--;return allowed&&!native_original.ExceptionCheck(env);
 }
 static jobject native_box(JNIEnv *env,const char *name,const char *signature,jvalue value){NativeThread *state=native_thread();if(!state)return NULL;state->control++;jclass type=native_original.FindClass(env,name);jmethodID method=type?native_original.GetStaticMethodID(env,type,"valueOf",signature):NULL;jobject result=method?native_original.CallStaticObjectMethodA(env,type,method,&value):NULL;if(type)native_original.DeleteLocalRef(env,type);state->control--;return result;}
-static jobjectArray native_mutation_sources(JNIEnv *env,NativeThread *state){
-    OwnerLink *owners=NULL;int unknown=0;
-    if(!native_capture_scope_sources(env,state,&owners,&unknown)){
+static jobjectArray native_mutation_sources_from(JNIEnv *env,NativeThread *state,OwnerLink *retained,int retainedUnknown){
+    OwnerLink *owners=NULL;int unknown=retainedUnknown!=0;
+    if(!native_owner_merge(&owners,retained)||!native_capture_scope_sources(env,state,&owners,&unknown)){
         native_owner_links_free(owners);if(!native_original.ExceptionCheck(env))native_refuse(env,"NATIVE_MUTATION_SOURCES_UNAVAILABLE");return NULL;
     }
     state->control++;jclass module=native_original.FindClass(env,"java/lang/Module");jsize count=unknown?1:0;
@@ -422,6 +422,7 @@ static jobjectArray native_mutation_sources(JNIEnv *env,NativeThread *state){
     }
     if(module)native_original.DeleteLocalRef(env,module);state->control--;native_owner_links_free(owners);return sources;
 }
+static jobjectArray native_mutation_sources(JNIEnv *env,NativeThread *state){return native_mutation_sources_from(env,state,NULL,0);}
 static jobject native_begin_field_mutation(JNIEnv *env,jobject receiver,jclass type,jfieldID field){
     if(native_original.ExceptionCheck(env))return NULL;
     NativeThread *state=native_thread();if(!state){native_refuse(env,"NATIVE_MUTATION_SCOPE_UNAVAILABLE");return NULL;}
@@ -448,14 +449,15 @@ static jobject native_begin_field_mutation(JNIEnv *env,jobject receiver,jclass t
     if(fieldName)native_original.DeleteLocalRef(env,fieldName);if(fieldDescriptor)native_original.DeleteLocalRef(env,fieldDescriptor);
     native_original.DeleteLocalRef(env,declaring);return token;
 }
-static jobject native_begin_array_mutation(JNIEnv *env,jarray receiver,jsize start,jsize length){
+static jobject native_begin_array_mutation_from(JNIEnv *env,jarray receiver,jsize start,jsize length,OwnerLink *retained,int retainedUnknown){
     if(native_original.ExceptionCheck(env))return NULL;
     NativeThread *state=native_thread();if(!state){native_refuse(env,"NATIVE_MUTATION_SCOPE_UNAVAILABLE");return NULL;}
-    jobjectArray contributors=native_mutation_sources(env,state);if(!contributors||native_original.ExceptionCheck(env)){if(contributors)native_original.DeleteLocalRef(env,contributors);return NULL;}
+    jobjectArray contributors=native_mutation_sources_from(env,state,retained,retainedUnknown);if(!contributors||native_original.ExceptionCheck(env)){if(contributors)native_original.DeleteLocalRef(env,contributors);return NULL;}
     jobject previous=state->mutation;state->mutation=receiver;
     jobject token=native_original.CallStaticObjectMethod(env,native_controls,native_mutation_array,receiver,start,length,contributors);
     state->mutation=previous;native_original.DeleteLocalRef(env,contributors);return token;
 }
+static jobject native_begin_array_mutation(JNIEnv *env,jarray receiver,jsize start,jsize length){return native_begin_array_mutation_from(env,receiver,start,length,NULL,0);}
 JNIEXPORT jboolean JNICALL Java_dev_ronova_pro_bootstrap_NativeControl_memoryMutationBoundary0(JNIEnv *env,jclass type,jobject receiver){
     (void)type;NativeThread *state=native_thread();
     return state&&state->mutation&&native_original.IsSameObject(env,state->mutation,receiver)?JNI_TRUE:JNI_FALSE;
@@ -614,16 +616,17 @@ static void native_array_release(JNIEnv *env,jarray array,void *contents,jint mo
 #define NATIVE_ARRAY(NAME,TYPE,SLOT,BOX,SIG) \
 static TYPE *JNICALL native_get_array_##NAME(JNIEnv *env,TYPE##Array array,jboolean *copy){return (TYPE*)native_array_copy(env,array,copy,SIG[1],0,__builtin_return_address(0));} \
 static void JNICALL native_release_array_##NAME(JNIEnv *env,TYPE##Array array,TYPE *contents,jint mode){native_array_release(env,array,contents,mode,SIG[1],0,__builtin_return_address(0));} \
-static void JNICALL native_set_array_##NAME(JNIEnv *env,TYPE##Array array,jsize start,jsize length,const TYPE *contents){ \
+static void native_set_array_from_##NAME(JNIEnv *env,TYPE##Array array,jsize start,jsize length,const TYPE *contents,OwnerLink *retained,int retainedUnknown){ \
     jsize size=native_original.GetArrayLength(env,array);if(native_original.ExceptionCheck(env))return; \
     if(start<0||length<0||start>size-length){native_original.Set##NAME##ArrayRegion(env,array,start,length,contents);return;} \
     if(length==0){native_original.Set##NAME##ArrayRegion(env,array,start,length,contents);return;} \
     size_t bytes=(size_t)length*sizeof(TYPE);TYPE *snapshot=(TYPE*)malloc(bytes);if(!snapshot){native_refuse(env,"RONOVA_NATIVE_ARRAY_SNAPSHOT_ALLOCATION_FAILED");return;}memcpy(snapshot,contents,bytes); \
-    jobject gate=native_begin_array_mutation(env,array,start,length);if(!gate){native_array_failure(env,"BEGIN",SIG[1],start,length);free(snapshot);return;} \
+    jobject gate=native_begin_array_mutation_from(env,array,start,length,retained,retainedUnknown);if(!gate){native_array_failure(env,"BEGIN",SIG[1],start,length);free(snapshot);return;} \
     int policy=native_primitive_array_policy(env,array);if(!policy){native_end_mutation(env,gate,0);native_array_failure(env,"POLICY",SIG[1],start,length);free(snapshot);return;} \
     if(policy==1)for(jsize i=0;i<length;i++){jvalue value;memset(&value,0,sizeof(value));value.SLOT=snapshot[i];jobject boxed=native_box(env,BOX,SIG,value); \
         int allowed=boxed&&native_array_allowed(env,array,start+i,boxed);if(boxed)native_original.DeleteLocalRef(env,boxed);if(!allowed){native_end_mutation(env,gate,0);native_array_failure(env,"VALUE",SIG[1],start+i,1);free(snapshot);return;}} \
-    native_original.Set##NAME##ArrayRegion(env,array,start,length,snapshot);native_end_mutation(env,gate,1);native_array_failure(env,"COMMIT",SIG[1],start,length);free(snapshot);}
+    native_original.Set##NAME##ArrayRegion(env,array,start,length,snapshot);native_end_mutation(env,gate,1);native_array_failure(env,"COMMIT",SIG[1],start,length);free(snapshot);} \
+static void JNICALL native_set_array_##NAME(JNIEnv *env,TYPE##Array array,jsize start,jsize length,const TYPE *contents){native_set_array_from_##NAME(env,array,start,length,contents,NULL,0);}
 NATIVE_ARRAY(Boolean,jboolean,z,"java/lang/Boolean","(Z)Ljava/lang/Boolean;")
 NATIVE_ARRAY(Byte,jbyte,b,"java/lang/Byte","(B)Ljava/lang/Byte;")
 NATIVE_ARRAY(Char,jchar,c,"java/lang/Character","(C)Ljava/lang/Character;")

@@ -1,5 +1,17 @@
 # Ronova Pro 当前进度
 
+## 2026-10-14：C 接续——真实攻击、延后挖掘与 JNI 数组来源
+
+接续 `fea56f9`，Java ABI75 / Native ABI70 / Storage3 / Journal6；协议仍为 `r3-client-8`。标准连接玩家的实际 handleInteract packet→Player.attack 接入本次主手与准确目标委托。挖掘从真实 START/有效 STOP 建立续接，ServerPlayer.tick 的实际调用同时传入玩家和 GameMode；只允许当前同一世界、目标坐标、选择槽、主手栈和代次。无挖掘续接的普通 tick 只有原状态推进，没有装备修改权。实际 removeBlock 前复查目标；外部 Forge 回调、嵌套 tick、另一方块、旧 hasDelayed 残值不能借权。GameMode 关键字段与 ServerPlayer.gameMode 引用接入原字段/Unsafe/内存路径；当前 Item 的委托不授予 GameMode 写权，方法名与实际 descriptor 同时匹配。换工具、状态变化、ABORT、世界交接、release 或异常均撤销续接。既有生命周期许可可供准确策略查询，不扩大来源或授权。
+
+旧 `c-network-java74-native69-equipment-20261014.log` 已退出1：首次发送在 `Inflater.inflateBytesBytes` 读取类文件时失败，完整 cause 为 `EXTERNAL_NATIVE_CALL_SOURCE_UNOBSERVED`、`stage=scoped_sources`，其余两次发送成功。原 JNI 数组副本只请求 owner，误将网络中的未知贡献者当成捕获失败。现保留独立 unknown 标记和原 owner，并在八种 primitive 数组提交中合并获取时及提交时的来源。原准确目标、停组、私有提交快照及 COMMIT/ABORT 配对保持；未清空来源、预热类或放宽规则。Native 升70，配套 Java 桥升75，避免旧载荷混用。
+
+整包写齐后统一构建 `build-c-java75-native70-equipment-actions-20261014.log` **PASS，1分14秒**：Core2580259、prelaunch22440字节，匹配 Agent/Bootstrap/Native70 与现有夹具均已生成。复用 DefenseFixture/ClientDefenseFixture 的 equipment-actions 分支包含真实客户端攻击木镐耗损、START/提前 STOP/真实 tick 延后挖掘、外部回调字段篡改与借权拒绝、普通邻居和 release；**游戏分支 NOTRUN**。AuditFixCheck 对新运行类路径编译通过；原网络场景已用75/70启动，日志 `c-network-java75-native70-equipment-actions-20261014.log`，当前仍运行，未宣称通过。没有重复旧 Native/Host 矩阵。
+
+原 Java72/Native68 禁疗实例 PID112724 本次只读核对仍在，latest.log 最后仍为19:39的 forgeserver 启动行；未出现 WORLD_LOADED/Done/NO_HEAL_PASS，未停或重启。候选 `distribution/candidate-c-java75-native70-equipment-actions-wip-20261014`，源码包 `distribution/Ronova-Pro-C-EquipmentActions-WIP-Java75-Native70-20261014.zip`。驱动/管理器源码未改，原未签名产物沿用且未部署。未知自定义装备、GameMode 覆写及其它未接入动作仍保留缺口；自身外观、武器注册继续暂缓，完整 C/B 未完成。
+
+---
+
 ## 2026-10-14：C 接续——当前装备、ItemStack 与 NBT
 
 接续 `24f5dc3`，Java ABI74 / Native ABI69 / Storage3 / Journal6，客户端协议 `r3-client-8`。标准 Player、Mob、ArmorStand 的当前六槽、真实 NonNullList/Arrays$ArrayList/Object[]、ItemStack 与当前 NBT 图接入现有方法、集合、字段、反射、句柄、Unsafe/CAS/相对 bulk 写入规则。按准确身体、代次、当前实际成员和全部共享 owner 判断，旧槽/节点/release 即时失活。EMPTY、全局 Item/Holder 定义、Tag.TYPE 不纳入装备归属；未知自定义槽载体/NBT 实现明确保留 gap，原生命/索引保护继续。
