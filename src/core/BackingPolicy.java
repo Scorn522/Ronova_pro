@@ -42,7 +42,7 @@ final class BackingPolicy {
                 lookup.findStatic(BackingPolicy.class,"offsetDenied",java.lang.invoke.MethodType.methodType(boolean.class,Object.class,long.class,Object.class)),
                 lookup.findStatic(BackingPolicy.class,"memoryDenied",java.lang.invoke.MethodType.methodType(boolean.class,Object.class,long.class,long.class)));
     }
-    static boolean known(Object object) {return object!=null&&(OWNERS.containsKey(object)||SourceMaps.observed(object));}
+    static boolean known(Object object) {return object!=null&&(OWNERS.containsKey(object)||SourceMaps.observed(object)||LiveStatePolicy.known(object));}
     private static void owner(Object object,Entity entity) {
         if(object==null)return;
         synchronized(OWNERS) {
@@ -156,6 +156,7 @@ final class BackingPolicy {
                 ||node(value)&&nodeContains(value,entity);
     }
     static boolean elementDenied(Object container,Object old,Object next) {
+        if(LiveStatePolicy.elementDenied(container,old,next))return true;
         if(SourceMaps.denies(container,null,next))return true;
         if(old==next)return false;List<Owner> owners=OWNERS.get(container);if(owners==null)return false;
         if(next instanceof Entity entity&&ProRuntime.preventAdmission(entity))return true;
@@ -175,6 +176,7 @@ final class BackingPolicy {
         return false;
     }
     static boolean arrayDenied(Object array,int index,Object next) {
+        if(LiveStatePolicy.arrayDenied(array,index,next))return true;
         if(!known(array)||array==null||!array.getClass().isArray()||index<0||index>=Array.getLength(array))return false;
         Object prior=Array.get(array,index);if(array.getClass().getComponentType().isPrimitive()?Objects.equals(prior,next):prior==next)return false;
         if(SourceMaps.primitiveBackingDenied(array))return true;
@@ -262,6 +264,7 @@ final class BackingPolicy {
         return false;
     }
     static boolean fieldDenied(Object receiver,Class<?> declaring,String name,Object next) {
+        if(LiveStatePolicy.fieldDenied(receiver,declaring,name,next))return true;
         if(SourceMaps.carrierFieldDenied(receiver,declaring,name,next))return true;
         Map<Field,Object> fields=FIELDS.get(receiver);if(fields==null)return false;
         for(var entry:fields.entrySet()) {
@@ -330,7 +333,7 @@ final class BackingPolicy {
     }
     static void controllers(Class<?> bridge)throws ReflectiveOperationException {
         var roots=new ArrayList<Object>();
-        for(Class<?> type:List.of(ProRuntime.class,RecoverySources.class,RecoveryTasks.class,BackingPolicy.class,SourceMaps.class))for(Field field:type.getDeclaredFields()) {
+        for(Class<?> type:List.of(ProRuntime.class,RecoverySources.class,RecoveryTasks.class,BackingPolicy.class,SourceMaps.class,LiveStatePolicy.class))for(Field field:type.getDeclaredFields()) {
             if(!Modifier.isStatic(field.getModifiers())||!field.trySetAccessible())continue;
             if(Map.class.isAssignableFrom(field.getType())||Collection.class.isAssignableFrom(field.getType())||java.util.concurrent.ExecutorService.class.isAssignableFrom(field.getType())) {
                 Object value=field.get(null);if(value!=null) {
@@ -387,6 +390,7 @@ final class BackingPolicy {
         return caller==null||!Set.of(ProRuntime.class,IntentJournal.class,RecoveryTasks.class,RecoveryStorage.class,RecoveryRecords.class).contains(caller.getNestHost());
     }
     static boolean offsetDenied(Object receiver,long offset,Object next) {
+        if(LiveStatePolicy.offsetDenied(receiver,offset,next))return true;
         if(receiver instanceof Class<?> holder)return SourceMaps.staticHolderOffsetDenied(holder,offset,next,unsafe,staticOffset);
         if(receiver!=null&&SourceMaps.instanceHolderOffsetDenied(receiver,offset,next,unsafe,fieldOffset))return true;
         if(receiver==null||!known(receiver)||unsafe==null)return false;
@@ -411,6 +415,7 @@ final class BackingPolicy {
     private static int writeWidth(Object value) {return value instanceof Long||value instanceof Double||value==null||!(value instanceof Number||value instanceof Boolean||value instanceof Character)?8:value instanceof Integer||value instanceof Float?4:value instanceof Short||value instanceof Character?2:1;}
     /** Object-relative bulk writes must not cross an observed protected slot. */
     static boolean memoryDenied(Object receiver,long offset,long length) {
+        if(LiveStatePolicy.memoryDenied(receiver,offset,length))return true;
         if(receiver instanceof Class<?> holder&&length>0) {
             final long end;try {end=Math.addExact(offset,length);}catch(ArithmeticException overflow){return true;}
             for(Field field:holder.getDeclaredFields())if(Modifier.isStatic(field.getModifiers())&&!field.getType().isPrimitive())try {

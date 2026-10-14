@@ -852,7 +852,16 @@ public final class ProRuntime implements AutoCloseable {
     }
     public static boolean worldClockFrozen(ServerLevel level){ProRuntime runtime=get(level.getServer());return runtime!=null&&runtime.worldControl.clock(level);}
     public static boolean worldSpawnDenied(Entity entity){
-        if(!(((Access.EntityState)entity).pro$level() instanceof ServerLevel level))return false;ProRuntime runtime=get(level.getServer());return runtime!=null&&runtime.worldControl.spawnDenied(entity);
+        return ((Access.EntityState)entity).pro$level() instanceof ServerLevel level&&worldSpawnDenied(level,entity);
+    }
+    public static boolean worldSpawnDenied(ServerLevel level,Entity entity){
+        ProRuntime runtime=get(level.getServer());return runtime!=null&&!runtime.closing&&runtime.worldControl.spawnDenied(level,entity);
+    }
+    public static boolean worldSpawnDenied(Object manager,Entity entity){
+        // The publication destination owns admission; the body's mutable level is not its owner.
+        for(ProRuntime runtime:sourceRuntimes())if(!runtime.closing)for(ServerLevel level:runtime.server.getAllLevels())
+            if(((Access.Server)level).pro$manager()==manager)return runtime.worldControl.spawnDenied(level,entity);
+        return false;
     }
     public static boolean deferWorldTick(Object container,net.minecraft.world.ticks.ScheduledTick<?> scheduled){
         if(!(container instanceof net.minecraft.world.ticks.LevelTicks<?> ticks))return false;
@@ -1205,12 +1214,16 @@ public final class ProRuntime implements AutoCloseable {
         BackingPolicy.resources(this,journal,recoveryTasks,recoveryStorage,recoveryRecords);
         Entity entity=b.entity();
         if(entity==null)return;
+        String liveStateGap="";
+        try{LiveStatePolicy.publish(entity,b.subject.generation);}
+        catch(RuntimeException|LinkageError failure){liveStateGap="LIVE_STATE_CAPTURE_UNRESOLVED:"+failure.getMessage();coverageGap=true;}
         b.protection=true;
         b.protectionGeneration=b.subject.generation;
         publishProtection(this,b,entity);
         // Publish the policy before registering each exact slot. A writer already inside that
         // container's short gate finishes first; later writers see both the slot and policy.
-        b.protectionGap=publishIndexOwners(b,entity);
+        String indexGap=publishIndexOwners(b,entity);
+        b.protectionGap=liveStateGap.isEmpty()?indexGap:liveStateGap+(indexGap.isEmpty()?"":";"+indexGap);
         publishOwners(entity);
     }
     private String publishIndexOwners(Binding binding,Entity entity) {
@@ -1293,6 +1306,7 @@ public final class ProRuntime implements AutoCloseable {
     }
     /** Null key/value asks only whether this proven container currently has protection to preserve on clear. */
     public static boolean preventIndexSlotRemoval(Object container,Object key,Object value) {
+        if(LiveStatePolicy.elementDenied(container,value,null))return true;
         if(BlockGroupPolicy.containerMutationDenied(container,key,value))return true;
         // A detached HashMap Node can retain an old backing-owner association. Its actual
         // membership must win over that stale association, or a legal replacement keeps
@@ -1334,6 +1348,9 @@ public final class ProRuntime implements AutoCloseable {
         return false;
     }
     private static void publishProtection(ProRuntime runtime,Binding binding,Entity entity) {
+        try{LiveStatePolicy.publish(entity,binding.protection?binding.protectionGeneration:0);}
+        catch(RuntimeException|LinkageError failure){String gap="LIVE_STATE_CAPTURE_UNRESOLVED:"+failure.getMessage();
+            if(!binding.protectionGap.contains(gap))binding.protectionGap+=(binding.protectionGap.isEmpty()?"":";")+gap;runtime.coverageGap=true;}
         PROTECTION.put(entity,new ProtectionSnapshot(runtime,binding,binding.address.entityUuid(),
                 binding.protectionGeneration,binding.records));
     }
@@ -1343,7 +1360,9 @@ public final class ProRuntime implements AutoCloseable {
         return snapshot==null?runtime(e):snapshot.runtime();
     }
     private static boolean snapshotProtected(Entity e) { return protectedBinding(e)!=null; }
-    private static void clearProtection(Entity e) { PROTECTION.remove(e); }
+    static long liveStateGeneration(Entity entity){Binding binding=protectedBinding(entity);return binding==null?0:binding.protectionGeneration;}
+    static boolean liveStateLifecycleAllowed(Entity entity){return playerLifecycleAllows(entity);}
+    private static void clearProtection(Entity e) { PROTECTION.remove(e);LiveStatePolicy.publish(e,0); }
     /**
      * Captures the real-owner associations used by the write guards. Runs where the state is already walked:
      * the synchronized-data items of a body we just protected, and its maximum-health attribute instance.
@@ -2579,6 +2598,7 @@ public final class ProRuntime implements AutoCloseable {
     }
     public static boolean preventDispatch(Object receiver,String operation,Object value) {
         if(clientDispatchDenied(receiver,operation,value))return true;
+        if(LiveStatePolicy.dispatchDenied(receiver,operation,value))return true;
         if(!(receiver instanceof Entity entity))return false;
         if(entity instanceof LivingEntity living&&value instanceof Number number) {
             if((operation.equals("heal")||operation.equals("m_5634_"))&&preventHealing(living,number.floatValue()))return true;
@@ -2586,7 +2606,7 @@ public final class ProRuntime implements AutoCloseable {
         }
         ProRuntime groupRuntime=runtime(entity);
         if(groupRuntime!=null&&groupRuntime.stoppedBody(entity)&&switch(operation) {
-            case "tick","m_8119_","baseTick","m_6061_","aiStep","m_8107_",
+            case "tick","m_8119_","baseTick","m_6075_","aiStep","m_8107_",
                  "serverAiStep","customServerAiStep","onAddedToWorld","onRemovedFromWorld",
                  "hurt","m_6469_","actuallyHurt","m_6475_","die","m_6667_" -> true;
             default -> false;
@@ -2704,8 +2724,9 @@ public final class ProRuntime implements AutoCloseable {
             // Establish the policy's own data classes before a newly guarded world writer can call into them.
             Class.forName(SourceMaps.class.getName(),true,ProRuntime.class.getClassLoader());
             Class.forName(BackingPolicy.class.getName(),true,ProRuntime.class.getClassLoader());
+            LiveStatePolicy.initialize();
             Class<?> bridge=Class.forName("dev.ronova.pro.bootstrap.TaskBridge",false,null);
-            if(!Integer.valueOf(55).equals(bridge.getMethod("abiVersion").invoke(null)))throw new IllegalStateException("INDEX_BRIDGE_ABI_MISMATCH");
+            if(!Integer.valueOf(73).equals(bridge.getMethod("abiVersion").invoke(null)))throw new IllegalStateException("INDEX_BRIDGE_ABI_MISMATCH");
             var lookup=java.lang.invoke.MethodHandles.lookup();
             var field=lookup.findStatic(ProRuntime.class,"preventFieldWrite",java.lang.invoke.MethodType.methodType(boolean.class,Object.class,Class.class,String.class,Object.class));
             var dispatch=lookup.findStatic(ProRuntime.class,"preventDispatch",java.lang.invoke.MethodType.methodType(boolean.class,Object.class,String.class,Object.class));
@@ -2787,17 +2808,41 @@ public final class ProRuntime implements AutoCloseable {
             {"remove","m_142467_","(Lnet/minecraft/world/entity/Entity$RemovalReason;)V"},
             {"setRemoved","m_142687_","(Lnet/minecraft/world/entity/Entity$RemovalReason;)V"},
             {"discard","m_146870_","()V"},{"kill","m_6074_","()V"},
-            {"setHealth","m_21153_","(F)V"},{"tick","m_8119_","()V"},{"baseTick","m_6061_","()V"},
+            {"setHealth","m_21153_","(F)V"},{"tick","m_8119_","()V"},{"baseTick","m_6075_","()V"},
             {"heal","m_5634_","(F)V"},
             {"aiStep","m_8107_","()V"},{"serverAiStep","","()V"},{"customServerAiStep","","()V"},
             {"onAddedToWorld","","()V"},{"onRemovedFromWorld","","()V"},
             {"hurt","m_6469_","(Lnet/minecraft/world/damagesource/DamageSource;F)Z"},
             {"actuallyHurt","m_6475_","(Lnet/minecraft/world/damagesource/DamageSource;F)V"},
-            {"die","m_6667_","(Lnet/minecraft/world/damagesource/DamageSource;)V"}};
+            {"die","m_6667_","(Lnet/minecraft/world/damagesource/DamageSource;)V"},
+            {"addEffect","m_7292_","(Lnet/minecraft/world/effect/MobEffectInstance;)Z"},
+            {"addEffect","m_147207_","(Lnet/minecraft/world/effect/MobEffectInstance;Lnet/minecraft/world/entity/Entity;)Z"},
+            {"forceAddEffect","m_147215_","(Lnet/minecraft/world/effect/MobEffectInstance;Lnet/minecraft/world/entity/Entity;)V"},
+            {"removeEffect","m_21195_","(Lnet/minecraft/world/effect/MobEffect;)Z"},
+            {"removeEffectNoUpdate","m_6234_","(Lnet/minecraft/world/effect/MobEffect;)Lnet/minecraft/world/effect/MobEffectInstance;"},
+            {"removeAllEffects","m_21219_","()Z"},{"curePotionEffects","","(Lnet/minecraft/world/item/ItemStack;)Z"},
+            {"onEffectAdded","m_142540_","(Lnet/minecraft/world/effect/MobEffectInstance;Lnet/minecraft/world/entity/Entity;)V"},
+            {"onEffectUpdated","m_141973_","(Lnet/minecraft/world/effect/MobEffectInstance;ZLnet/minecraft/world/entity/Entity;)V"},
+            {"onEffectRemoved","m_7285_","(Lnet/minecraft/world/effect/MobEffectInstance;)V"}};
         for(Class<?> type:List.of(Entity.class,LivingEntity.class))for(String[] entry:entries)
             for(var method:type.getDeclaredMethods())
-                if(method.getName().equals(entry[0])||method.getName().equals(entry[1]))
+                if((method.getName().equals(entry[0])||method.getName().equals(entry[1]))&&java.lang.invoke.MethodType.methodType(method.getReturnType(),method.getParameterTypes()).descriptorString().equals(entry[2]))
                     declare.invoke(null,type,method.getName(),entry[2]);
+        String[][] foodEntries={
+            {"eat","m_38707_","(IF)V"},
+            {"eat","m_38712_","(Lnet/minecraft/world/item/Item;Lnet/minecraft/world/item/ItemStack;)V"},
+            {"eat","","(Lnet/minecraft/world/item/Item;Lnet/minecraft/world/item/ItemStack;Lnet/minecraft/world/entity/LivingEntity;)V"},
+            {"addExhaustion","m_38703_","(F)V"},{"setFoodLevel","m_38705_","(I)V"},
+            {"setSaturation","m_38717_","(F)V"},{"setExhaustion","m_150378_","(F)V"},
+            {"readAdditionalSaveData","m_38715_","(Lnet/minecraft/nbt/CompoundTag;)V"}};
+        for(String[] entry:foodEntries)for(var method:net.minecraft.world.food.FoodData.class.getDeclaredMethods())
+            if((method.getName().equals(entry[0])||method.getName().equals(entry[1]))&&java.lang.invoke.MethodType.methodType(method.getReturnType(),method.getParameterTypes()).descriptorString().equals(entry[2]))
+                declare.invoke(null,net.minecraft.world.food.FoodData.class,method.getName(),entry[2]);
+        String[][] effectEntries={{"update","m_19558_","(Lnet/minecraft/world/effect/MobEffectInstance;)Z"},
+                {"setDetailsFrom","m_19548_","(Lnet/minecraft/world/effect/MobEffectInstance;)V"}};
+        for(String[] entry:effectEntries)for(var method:net.minecraft.world.effect.MobEffectInstance.class.getDeclaredMethods())
+            if((method.getName().equals(entry[0])||method.getName().equals(entry[1]))&&java.lang.invoke.MethodType.methodType(method.getReturnType(),method.getParameterTypes()).descriptorString().equals(entry[2]))
+                declare.invoke(null,net.minecraft.world.effect.MobEffectInstance.class,method.getName(),entry[2]);
         declare.invoke(null,net.minecraftforge.eventbus.api.Event.class,"setCanceled","(Z)V");
         agent.getMethod("installDeclaredDispatch").invoke(null);
     }
@@ -2816,6 +2861,7 @@ public final class ProRuntime implements AutoCloseable {
                 for(var field:owner.getDeclaredFields())if((names.contains(field.getName())||owner==net.minecraft.world.entity.ai.attributes.AttributeInstance.class&&field.getType()==double.class)&&!java.lang.reflect.Modifier.isStatic(field.getModifiers())) {
                     fields.add(field);offsets.add((Long)offset.invoke(unsafe,field));
                 }
+            for(var field:LiveStatePolicy.unsafeFields())if(!fields.contains(field)){fields.add(field);offsets.add((Long)offset.invoke(unsafe,field));}
             long[] values=new long[offsets.size()];for(int i=0;i<values.length;i++)values[i]=offsets.get(i);
             return new UnsafeMapping(fields.toArray(java.lang.reflect.Field[]::new),values,"");
         } catch(ReflectiveOperationException|RuntimeException|LinkageError unavailable) {

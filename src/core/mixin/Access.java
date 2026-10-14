@@ -25,6 +25,14 @@ public final class Access {
         @Accessor("deathTime") void pro$deathTime(int value);
         @Accessor("DATA_HEALTH_ID") static net.minecraft.network.syncher.EntityDataAccessor<Float> pro$healthKey() { throw new AssertionError(); }
         @Accessor("attributes") net.minecraft.world.entity.ai.attributes.AttributeMap pro$attributes();
+        @Accessor("activeEffects") Map<net.minecraft.world.effect.MobEffect,net.minecraft.world.effect.MobEffectInstance> pro$effects();
+        @Accessor("useItem") net.minecraft.world.item.ItemStack pro$useItem();
+    }
+    @Mixin(net.minecraft.world.entity.player.Player.class) public interface PlayerState {
+        @Accessor("foodData") net.minecraft.world.food.FoodData pro$foodData();
+    }
+    @Mixin(net.minecraft.world.effect.MobEffectInstance.class) public interface EffectState {
+        @Accessor("hiddenEffect") net.minecraft.world.effect.MobEffectInstance pro$hiddenEffect();
     }
     @Mixin(net.minecraft.network.syncher.SynchedEntityData.class) public interface Data {
         @Invoker("getItem") <T> net.minecraft.network.syncher.SynchedEntityData.DataItem<T> pro$item(net.minecraft.network.syncher.EntityDataAccessor<T> key);

@@ -23,7 +23,7 @@ public final class DefenseFixture {
         MinecraftForge.EVENT_BUS.addListener(EventPriority.NORMAL,this::entered);
     }
     private void entered(EntityEvent.EnteringSection event) {
-        if(finished||"no-heal".equals(System.getProperty("ronova.pro.fixture.variant"))||event.getEntity()!=cow||age<20)return;
+        if(finished||"no-heal".equals(System.getProperty("ronova.pro.fixture.variant"))||"live-state".equals(System.getProperty("ronova.pro.fixture.variant"))||event.getEntity()!=cow||age<20)return;
         var section=((Access.Callback)((Access.EntityState)cow).pro$callback()).pro$section();
         // This is an ordinary mod callback during the move, not the vanilla removal itself.
         section.remove(cow);entryAttacks++;
@@ -74,6 +74,13 @@ public final class DefenseFixture {
         entity.getEntityData().set(Access.Living.pro$healthKey(),before+1);health(entity,before,"no-heal allowed synchronized health gain");
         healthItem(entity).setValue(before+1);health(entity,before,"no-heal allowed direct health item gain");
     }
+    private static void rawDuration(net.minecraft.world.effect.MobEffectInstance effect,int value)throws ReflectiveOperationException {
+        var singleton=sun.misc.Unsafe.class.getDeclaredField("theUnsafe");singleton.setAccessible(true);
+        var unsafe=(sun.misc.Unsafe)singleton.get(null);java.lang.reflect.Field duration;
+        try{duration=net.minecraft.world.effect.MobEffectInstance.class.getDeclaredField("duration");}
+        catch(NoSuchFieldException production){duration=net.minecraft.world.effect.MobEffectInstance.class.getDeclaredField("f_19503_");}
+        unsafe.putInt(effect,unsafe.objectFieldOffset(duration),value);
+    }
     private void noHealTick(TickEvent.ServerTickEvent event) {
         var server=event.getServer();
         try {
@@ -119,9 +126,63 @@ public final class DefenseFixture {
             try{finish("NO_HEAL_FAILED "+failure);}finally{server.halt(false);}
         }
     }
+    private void liveStateTick(TickEvent.ServerTickEvent event) {
+        var server=event.getServer();
+        try {
+            age++;var runtime=ProRuntime.get(server);var level=server.overworld();
+            if(age==10) {
+                var pos=level.getSharedSpawnPos();level.getChunk(pos.getX()>>4,pos.getZ()>>4);
+                cow=noHealCow(level,pos.getX()+0.5,pos.getY()+4,pos.getZ()+0.5);
+                neighbour=noHealCow(level,pos.getX()+2.5,pos.getY()+4,pos.getZ()+0.5);
+                var speed=new net.minecraft.world.effect.MobEffectInstance(net.minecraft.world.effect.MobEffects.MOVEMENT_SPEED,200);
+                var jump=new net.minecraft.world.effect.MobEffectInstance(net.minecraft.world.effect.MobEffects.JUMP,8);
+                require(cow.addEffect(speed)&&cow.addEffect(jump),"initial live effects were not installed");
+                MinecraftForge.EVENT_BUS.addListener(EventPriority.NORMAL,(net.minecraftforge.event.entity.living.MobEffectEvent.Expired expiry)->{
+                    if(expiry.getEntity()!=cow)return;
+                    cow.getActiveEffectsMap().clear();
+                    require(cow.getEffect(net.minecraft.world.effect.MobEffects.MOVEMENT_SPEED)==speed,
+                            "foreign expiry callback inherited vanilla map-removal permission");
+                    entryAttacks++;
+                });
+                FixtureCommands.protect(runtime,cow);
+                require(!cow.addEffect(new net.minecraft.world.effect.MobEffectInstance(net.minecraft.world.effect.MobEffects.POISON,100)),
+                        "protected body accepted adverse effect through public entry");
+                cow.getActiveEffectsMap().put(net.minecraft.world.effect.MobEffects.WITHER,
+                        new net.minecraft.world.effect.MobEffectInstance(net.minecraft.world.effect.MobEffects.WITHER,100));
+                require(!cow.hasEffect(net.minecraft.world.effect.MobEffects.WITHER),"raw map bypass installed adverse effect");
+                cow.getActiveEffectsMap().clear();cow.removeEffect(net.minecraft.world.effect.MobEffects.MOVEMENT_SPEED);
+                var values=cow.getActiveEffectsMap().values().iterator();while(values.hasNext()){values.next();values.remove();}
+                for(var entry:cow.getActiveEffectsMap().entrySet())if(entry.getKey()==net.minecraft.world.effect.MobEffects.MOVEMENT_SPEED)
+                    entry.setValue(new net.minecraft.world.effect.MobEffectInstance(net.minecraft.world.effect.MobEffects.POISON,100));
+                rawDuration(speed,0);require(speed.getDuration()==200,"raw effect field bypass ended protected effect");
+                require(cow.getEffect(net.minecraft.world.effect.MobEffects.MOVEMENT_SPEED)==speed&&cow.hasEffect(net.minecraft.world.effect.MobEffects.JUMP),
+                        "foreign clear/removal/entry replacement destroyed active protected effects");
+                require(neighbour.addEffect(new net.minecraft.world.effect.MobEffectInstance(net.minecraft.world.effect.MobEffects.POISON,100)),
+                        "live policy affected ordinary neighbour");
+                var poison=neighbour.getEffect(net.minecraft.world.effect.MobEffects.POISON);rawDuration(poison,60);
+                require(poison.getDuration()==60,"raw effect field guard affected ordinary neighbour");
+            }
+            if(age==30) {
+                require(entryAttacks>0,"real vanilla expiry callback did not run");
+                require(!cow.hasEffect(net.minecraft.world.effect.MobEffects.JUMP),"protection froze normal effect expiry");
+                var speed=cow.getEffect(net.minecraft.world.effect.MobEffects.MOVEMENT_SPEED);
+                require(speed!=null&&speed.getDuration()<200&&speed.getDuration()>0,"normal effect clock or neighbour survival was lost");
+                FixtureCommands.revoke(runtime,cow);
+                require(cow.addEffect(new net.minecraft.world.effect.MobEffectInstance(net.minecraft.world.effect.MobEffects.POISON,100)),
+                        "release retained effect immunity");
+                cow.removeAllEffects();require(cow.getActiveEffectsMap().isEmpty(),"release retained map-removal guard");
+                finish("LIVE_EFFECTS_PASS adverse_public_and_map_denied_foreign_clear_and_expiry_callback_denied_vanilla_expiry_clock_neighbour_release");
+                server.halt(false);
+            }
+        } catch(Throwable failure) {
+            failure.printStackTrace();
+            try{finish("LIVE_EFFECTS_FAILED "+failure);}finally{server.halt(false);}
+        }
+    }
     private void tick(TickEvent.ServerTickEvent event) {
         if(finished||event.phase!=TickEvent.Phase.START)return;
         if("no-heal".equals(System.getProperty("ronova.pro.fixture.variant"))){noHealTick(event);return;}
+        if("live-state".equals(System.getProperty("ronova.pro.fixture.variant"))){liveStateTick(event);return;}
         var server=event.getServer();if(server.getPlayerList().getPlayers().isEmpty())return;
         try {
             age++;var runtime=ProRuntime.get(server);var level=server.overworld();

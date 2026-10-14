@@ -1,5 +1,16 @@
 # B 批实际报告：2026-10-09 代码收敛接续
 
+## 2026-10-14：C 接续——活跃效果、饥饿数据与底层禁生成
+
+接续 `fd77b99`，Java ABI73 / Native ABI69 / Storage3 / Journal6，客户端协议 `r3-client-8`。effects/FoodData 准确载体与代次接入原方法、集合、字段及 Unsafe 写入路径；正常原版效果 tick、食用和 FoodData tick 保留，本次许可与异常退出成对，外部回调及嵌套新入口不能借上一层回执。单独禁疗不附带该策略。FoodData 外来篡改防护不等于免饿；未知 Map/损坏链保留缺口，继续原生命/索引保护，装备/ItemStack/NBT 仍未完成。三参数/对象返回分派需要匹配代理，Java桥统一升73；同时修正 Core 遗留的 ABI55 检查导致整组生产守卫安装被拒的问题，实际游戏安装结果仍待运行。
+
+禁生成从 addFreshEntity 继续接到真实 manager 的新准入入口；实际目的地决定区域，existing=true、玩家与原期限不变；只读查询使用原规则发布的区域快照。完整初版 ABI72 构建26秒 PASS；修正上述安装阻塞并统一 ABI73 后，独立输出的最终 `build-c-java73-native69-live-state-20261014.log` 30秒 PASS，Core/agent/载荷与现有 DefenseFixture live-state、WorldFixture world-spawn-admission 分支编译完成；更新的网络 AuditFixCheck 编译通过。上述游戏分支及 FoodData **NOTRUN**，没有新增游戏实例或重复旧 Native raw 检查。
+
+旧网络69实例已退出1，准确计数为三次到 outbound、对端两次收包，failure=null。新 `c-network-java72-native69-live-state-20261014.log` 保留原10秒等待与原发送流程，仅增真实 promise、flush、read/readComplete 和失败队列状态以定位原因，当前仍运行，没有生产修复或通过结论。原 Native68 禁疗实例仍初始化，未见 WORLD_LOADED/Done/NO_HEAL_PASS；旧失败原样保留。
+
+匹配候选 `distribution/candidate-c-java73-native69-live-state-wip-20261014`；源码 ZIP `distribution/Ronova-Pro-C-LiveState-WIP-Java73-Native69-20261014.zip`。自身外观及武器注册暂缓，C/B 仍未完成。
+
+---
 ## 2026-10-14：C 接续——Unsafe 裸地址写入、释放与回调借权
 
 接续 `732aeaa`，Java ABI72 / Native ABI69 / Storage3 / Journal6；客户端协议仍为 `r3-client-8`。上一包的发送来源、Host 效果定序和独立禁疗源码保持；自身外观和武器注册继续暂缓。

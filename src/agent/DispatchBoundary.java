@@ -52,7 +52,7 @@ final class DispatchBoundary {
                 c.add(original);c.add(new InsnNode(Opcodes.POP));m.instructions.insert(c);
                 transformed.add(System.identityHashCode(loader)+":"+name+"#"+m.name+m.desc);changed=true;continue;
             }
-            if(args.length>2||(result.getSort()!=Type.VOID&&result.getSort()!=Type.BOOLEAN))
+            if(result.getSort()!=Type.VOID&&result.getSort()!=Type.BOOLEAN&&result.getSort()!=Type.OBJECT&&result.getSort()!=Type.ARRAY)
                 throw new IllegalStateException("UNSUPPORTED_DISPATCH_CONTRACT:"+m.desc);
             InsnList c=new InsnList();LabelNode allowed=new LabelNode();
             c.add(new VarInsnNode(Opcodes.ALOAD,0));c.add(new LdcInsnNode(m.name));
@@ -61,6 +61,7 @@ final class DispatchBoundary {
             c.add(new MethodInsnNode(Opcodes.INVOKESTATIC,"dev/ronova/pro/bootstrap/ControlBridge","dispatchAllowed","(Ljava/lang/Object;Ljava/lang/String;Ljava/lang/Object;)Z",false));
             c.add(new JumpInsnNode(Opcodes.IFNE,allowed));
             if(result.getSort()==Type.BOOLEAN) {c.add(new InsnNode(Opcodes.ICONST_0));c.add(new InsnNode(Opcodes.IRETURN));}
+            else if(result.getSort()==Type.OBJECT||result.getSort()==Type.ARRAY) {c.add(new InsnNode(Opcodes.ACONST_NULL));c.add(new InsnNode(Opcodes.ARETURN));}
             else c.add(new InsnNode(Opcodes.RETURN));
             c.add(allowed);m.instructions.insert(c);
             transformed.add(System.identityHashCode(loader)+":"+name+"#"+m.name+m.desc);changed=true;

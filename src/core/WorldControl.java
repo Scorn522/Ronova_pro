@@ -35,6 +35,7 @@ final class WorldControl {
     }
     private record Held(LevelTicks<Object> container,ScheduledTick<Object> tick){}
     private final Map<UUID,Rule> rules=new LinkedHashMap<>();
+    private volatile List<Area> spawnAreas=List.of();
     private final Map<LevelTicks<?>,List<Held>> held=new IdentityHashMap<>();
     private final ThreadLocal<Entity> moving=new ThreadLocal<>();
     private long tick,revision=1;
@@ -59,9 +60,10 @@ final class WorldControl {
     UUID rule(ServerLevel level,BlockPos from,BlockPos to,int duration,boolean freeze,boolean clock){
         if(duration<1)throw new IllegalArgumentException("WORLD_RULE_DURATION_REQUIRED");Rule rule=new Rule(area(level,from,to),freeze,clock,tick+(long)duration);
         if(freeze)for(Entity entity:level.getAllEntities())if(rule.area.contains(((Access.EntityState)entity).pro$blockPosition()))rule.bodies.put(entity,true);
-        rules.put(rule.id,rule);revision++;return rule.id;
+        rules.put(rule.id,rule);if(!freeze)publishSpawnAreas();revision++;return rule.id;
     }
-    boolean resume(UUID id){Rule rule=rules.get(id);if(rule==null||rule.archive||rules.remove(id)==null)return false;revision++;return true;}
+    boolean resume(UUID id){Rule rule=rules.get(id);if(rule==null||rule.archive||rules.remove(id)==null)return false;if(!rule.freeze)publishSpawnAreas();revision++;return true;}
+    private void publishSpawnAreas(){spawnAreas=rules.values().stream().filter(rule->!rule.freeze).map(rule->rule.area).toList();}
     void archive(UUID id,ServerLevel level,BlockPos low,BlockPos high,boolean active){
         if(!active){Rule rule=rules.get(id);if(rule!=null&&rule.archive){rules.remove(id);revision++;}return;}
         if(rules.containsKey(id))return;Rule rule=new Rule(id,area(level,low,high),true,false,Long.MAX_VALUE,true);
@@ -120,10 +122,10 @@ final class WorldControl {
             if(rule.area.contains(state.pro$blockPosition())){rule.bodies.put(entity,true);revision++;return true;}
         }return false;
     }
-    boolean spawnDenied(Entity entity){
+    boolean spawnDenied(ServerLevel level,Entity entity){
         if(entity instanceof Player)return false;
         Access.EntityState state=(Access.EntityState)entity;
-        for(Rule rule:rules.values())if(!rule.freeze&&rule.area.level()==state.pro$level()&&rule.area.contains(state.pro$blockPosition()))return true;return false;
+        for(Area area:spawnAreas)if(area.level()==level&&area.contains(state.pro$blockPosition()))return true;return false;
     }
     boolean held(LevelTicks<?> container,BlockPos pos,Object type){
         List<Held> pending=held.get(container);if(pending==null)return false;
@@ -149,7 +151,7 @@ final class WorldControl {
         if(chunk!=null)chunk.setUnsaved(true);return true;
     }
     void tick(MinecraftServer server){
-        tick++;if(rules.values().removeIf(rule->tick>=rule.until))revision++;
+        tick++;if(rules.values().removeIf(rule->tick>=rule.until)){publishSpawnAreas();revision++;}
         for(Rule rule:rules.values())if(rule.freeze){
             for(var iterator=rule.bodies.entrySet().iterator();iterator.hasNext();){
                 var body=iterator.next();Entity entity=body.getKey();Access.EntityState state=(Access.EntityState)entity;

@@ -16,6 +16,16 @@ public final class SaveFinallyPlugin implements IMixinConfigPlugin {
     @Override public List<String> getMixins() { return null; }
     @Override public void preApply(String target,ClassNode node,String mixin,IMixinInfo info) { }
     @Override public void postApply(String target,ClassNode node,String mixin,IMixinInfo info) {
+        if(mixin.endsWith(".LiveStateHooks$Effects")) {
+            weaveLiveState(node,"tickEffects","()V",-1,"effects-tick");
+            weaveLiveState(node,"completeUsingItem","()V",-1,"consume");return;
+        }
+        if(mixin.endsWith(".LiveStateHooks$Food")) {
+            weaveLiveState(node,"tick","(Lnet/minecraft/world/entity/player/Player;)V",1,"food-tick");return;
+        }
+        if(mixin.endsWith(".LiveStateHooks$FoodAction")) {
+            weaveLiveState(node,"causeFoodExhaustion","(F)V",-1,"food-action");return;
+        }
         if(mixin.endsWith(".IndexHooks$Movement")) { weaveSectionMove(node);return; }
         if(mixin.endsWith(".ClientItemFaultHooks$Item")) { weaveItemDraw(node);RenderFaultWeaver.apply(node);return; }
         if(mixin.endsWith(".ClientItemFaultHooks$Tooltip") || mixin.contains(".ClientDrawFaultHooks$")) { RenderFaultWeaver.apply(node);return; }
@@ -141,6 +151,42 @@ public final class SaveFinallyPlugin implements IMixinConfigPlugin {
         method.instructions.add(new InsnNode(Opcodes.ATHROW));
         method.tryCatchBlocks.add(new TryCatchBlockNode(start,end,handler,"java/lang/RuntimeException"));
         method.maxStack=Math.max(method.maxStack,3);
+    }
+    private static void weaveLiveState(ClassNode node,String name,String descriptor,int argument,String operation) {
+        String srg=switch(name) {
+            case "tickEffects"->"m_21217_";
+            case "completeUsingItem"->"m_8095_";
+            case "tick"->"m_38710_";
+            case "causeFoodExhaustion"->"m_36399_";
+            default->throw new IllegalArgumentException(name);
+        };
+        var matches=node.methods.stream().filter(method->(method.name.equals(name)||method.name.equals(srg))&&method.desc.equals(descriptor)
+                &&(method.access&Opcodes.ACC_STATIC)==0).toList();
+        if(matches.size()!=1)throw new IllegalStateException("LIVE_STATE_SCOPE_BOUNDARY:"+node.name+":"+name+descriptor);
+        MethodNode method=matches.get(0);int lease=method.maxLocals++,failure=method.maxLocals++;
+        var enter=new InsnList();enter.add(new VarInsnNode(Opcodes.ALOAD,0));
+        enter.add(argument<0?new InsnNode(Opcodes.ACONST_NULL):new VarInsnNode(Opcodes.ALOAD,argument));enter.add(new LdcInsnNode(operation));
+        enter.add(new MethodInsnNode(Opcodes.INVOKESTATIC,"dev/ronova/pro/LiveStatePolicy","begin","(Ljava/lang/Object;Ljava/lang/Object;Ljava/lang/String;)Ljava/lang/Object;",false));
+        enter.add(new VarInsnNode(Opcodes.ASTORE,lease));
+        LabelNode body=new LabelNode(),start=new LabelNode(),end=new LabelNode(),handler=new LabelNode();
+        enter.add(new VarInsnNode(Opcodes.ALOAD,0));enter.add(new LdcInsnNode(operation));enter.add(new VarInsnNode(Opcodes.ALOAD,lease));
+        enter.add(new MethodInsnNode(Opcodes.INVOKESTATIC,"dev/ronova/pro/LiveStatePolicy","anchorDenied","(Ljava/lang/Object;Ljava/lang/String;Ljava/lang/Object;)Z",false));
+        enter.add(new JumpInsnNode(Opcodes.IFEQ,body));enter.add(new InsnNode(Opcodes.RETURN));enter.add(body);enter.add(start);method.instructions.insert(enter);
+        extendFramesWithLease(node,method,lease);
+        Object[] bodyLocals=lifecycleFrameLocals(node,method,lease);
+        method.instructions.insert(body,new FrameNode(Opcodes.F_NEW,bodyLocals.length,bodyLocals,0,new Object[0]));
+        for(AbstractInsnNode instruction:method.instructions.toArray())if(instruction.getOpcode()==Opcodes.RETURN) {
+            var leave=new InsnList();leave.add(new VarInsnNode(Opcodes.ALOAD,lease));
+            leave.add(new MethodInsnNode(Opcodes.INVOKESTATIC,"dev/ronova/pro/LiveStatePolicy","end","(Ljava/lang/Object;)V",false));method.instructions.insertBefore(instruction,leave);
+        }
+        method.instructions.add(end);method.instructions.add(handler);
+        Object[] locals=lifecycleFrameLocals(node,method,lease);
+        method.instructions.add(new FrameNode(Opcodes.F_NEW,locals.length,locals,1,new Object[]{"java/lang/Throwable"}));
+        method.instructions.add(new VarInsnNode(Opcodes.ASTORE,failure));method.instructions.add(new VarInsnNode(Opcodes.ALOAD,lease));
+        method.instructions.add(new VarInsnNode(Opcodes.ALOAD,failure));
+        method.instructions.add(new MethodInsnNode(Opcodes.INVOKESTATIC,"dev/ronova/pro/LiveStatePolicy","failed","(Ljava/lang/Object;Ljava/lang/Throwable;)V",false));
+        method.instructions.add(new VarInsnNode(Opcodes.ALOAD,failure));method.instructions.add(new InsnNode(Opcodes.ATHROW));
+        method.tryCatchBlocks.add(new TryCatchBlockNode(start,end,handler,"java/lang/Throwable"));method.maxStack=Math.max(method.maxStack,4);
     }
     private static void weaveLifecycle(ClassNode node,String name,String descriptor,int entityLocal,int destinationLocal) {
         var matches=node.methods.stream().filter(method->lifecycleName(method.name,name,descriptor)&&method.desc.equals(descriptor)

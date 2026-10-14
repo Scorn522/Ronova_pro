@@ -1,5 +1,22 @@
 # Ronova Pro 当前进度
 
+## 2026-10-14：C 接续——活跃效果、饥饿数据与底层禁生成
+
+接续 `fd77b99`，Java ABI73 / Native ABI69 / Storage3 / Journal6，客户端协议 `r3-client-8`。本包新增 `LiveStatePolicy`，按准确身体、保护代次及当前真实载体关联 activeEffects、实际效果实例和 FoodData；接入现有方法分派、集合节点/视图、字段、反射、句柄、Unsafe/CAS 及相对 bulk 写入判断。原状态引用不能偷换，旧代次与 release 即时失活，单独禁疗不启用这些保护。
+
+实际方法分派接收三参数入口与对象返回拒绝（null），保留原 void/boolean 和生命返回语义；该新 Core 需要匹配代理，所以 Java 桥统一升73。另修正 Core 安装处遗留的 ABI55 常量，否则即使前版实际桥已72仍会拒绝安装整组生产守卫；不把本次编译当作真实游戏安装已通过。
+
+正常效果 tick、完成食用、FoodData tick 及既有玩家消耗动作按实际原版入口建立许可；本次入口必须持有自己的回执，外部回调和嵌套新入口不能借旧许可，正常与异常退出均恢复。实际 SRG 名来自本地版本映射，保留正常效果减时/到期和原版食物、药水、牛奶、蜂蜜流程。FoodData 防护阻止外来篡改，保留自然消耗，**不等于免饿**。未知效果 Map、损坏链或超预算明确保留缺口，原有生命/索引保护继续；自定义物品流程及完整装备/ItemStack/NBT 防护仍未收口。
+
+区域禁生成接入 PersistentEntitySectionManager 的 addEntity 和 Forge addEntityWithoutEvent 两个真实新准入入口，并按实际目标 manager/ServerLevel 定位世界，避免实体自己的 level 字段把规则引向另一世界。保留 existing=true 存量加载、玩家例外与原截止；外线程查询读取现有规则发布的不可变区域快照，不迭代服务器的可变规则 Map。
+
+整包代码写齐后初次 ABI72 构建26秒 PASS；修正上述实际安装阻塞并统一 ABI73 后，以独立输出目录集中重建 `build-c-java73-native69-live-state-20261014.log`，30秒 PASS，Core/agent/生产载荷及两个现有夹具分支编译完成；网络故障记录的 AuditFixCheck 单独编译通过。effects 的真实到期、外部回调/集合/Unsafe 攻击及邻居/release 分支，底层真实 manager 准入分支均已放入原夹具，**本轮未起第三个游戏实例，实际效果与 FoodData 检查仍 NOTRUN**。未重跑已通过的 Native69 raw 内存或旧矩阵。
+
+上一网络实例 `c-network-java72-native69-20261014.log` 最终退出1：writtenRemaining=0、receivedRemaining=1、failure=null。当前保留原等待及原发送路径，只在同一场景观察真实 promise、flush、read/readComplete 与失败时的对端队列，重跑日志为 `c-network-java72-native69-live-state-20261014.log`；尚无新结果，不能认定丢包已修复。Native68 的原禁疗游戏实例继续运行，尚无进世界或禁疗结果，不由本包构建代称。
+
+匹配候选 `distribution/candidate-c-java73-native69-live-state-wip-20261014`，源码包 `distribution/Ronova-Pro-C-LiveState-WIP-Java73-Native69-20261014.zip`。本包源码、匹配候选与既有摘要同步原公开仓库；原始日志、ZIP 和存档留本地。自身外观、武器注册保持暂缓；完整 C/B 仍未完成。
+
+---
 ## 2026-10-14：C 接续——Unsafe 裸地址写入、释放与回调借权
 
 接续 `732aeaa`，Java ABI72 / Native ABI69 / Storage3 / Journal6；客户端协议仍为 `r3-client-8`。上一包的发送来源、Host 效果定序和独立禁疗源码保持；自身外观和武器注册继续暂缓。

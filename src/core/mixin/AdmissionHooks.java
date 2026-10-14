@@ -11,7 +11,7 @@ import org.spongepowered.asm.mixin.injection.callback.CallbackInfoReturnable;
 public abstract class AdmissionHooks {
     @Inject(method="addEntity",at=@At("HEAD"),cancellable=true)
     private void beforeJoinEvent(EntityAccess entity,boolean existing,CallbackInfoReturnable<Boolean> ci) {
-        if(entity instanceof Entity e&&ProRuntime.preventAdmission(e))ci.setReturnValue(false);
+        if(entity instanceof Entity e&&(ProRuntime.preventAdmission(e)||!existing&&ProRuntime.worldSpawnDenied(this,e)))ci.setReturnValue(false);
     }
     @Inject(method="addEntity",at=@At("RETURN"))
     private void afterRealPublication(EntityAccess entity,boolean existing,CallbackInfoReturnable<Boolean> ci) {
@@ -23,7 +23,7 @@ public abstract class AdmissionHooks {
     }
     @Inject(method="addEntityWithoutEvent",remap=false,at=@At("HEAD"),cancellable=true)
     private void admission(EntityAccess entity,boolean existing,CallbackInfoReturnable<Boolean> ci) {
-        if (entity instanceof Entity e && ProRuntime.preventAdmission(e)) ci.setReturnValue(false);
+        if(entity instanceof Entity e&&(ProRuntime.preventAdmission(e)||!existing&&ProRuntime.worldSpawnDenied(this,e)))ci.setReturnValue(false);
     }
 
     @Mixin(net.minecraft.world.entity.EntityType.class)

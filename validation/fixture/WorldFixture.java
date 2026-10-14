@@ -89,6 +89,9 @@ public final class WorldFixture {
     final List<String> passed=new ArrayList<>();
     boolean finished;
     public WorldFixture() {
+        if(Boolean.getBoolean("ronova.pro.validation")&&"world-spawn-admission".equals(System.getProperty("ronova.pro.fixture"))) {
+            new SpawnAdmission();return;
+        }
         if(Boolean.getBoolean("ronova.pro.validation")&&"world-held-save".equals(System.getProperty("ronova.pro.fixture"))) {
             new HeldSave();return;
         }
@@ -155,6 +158,82 @@ public final class WorldFixture {
         System.out.println("PRO_FIXTURE_ENABLED="+Boolean.getBoolean("ronova.pro.validation"));
         if(Boolean.getBoolean("ronova.pro.validation"))
             MinecraftForge.EVENT_BUS.addListener(EventPriority.LOWEST,this::tick);
+    }
+    /** The actual destination manager gates new publication without treating chunk loads as spawns. */
+    private final class SpawnAdmission {
+        private final ChunkPos chunk=new ChunkPos(12,12);
+        private final BlockPos low=new BlockPos(chunk.getMinBlockX()+6,90,chunk.getMinBlockZ()+6),high=low.offset(2,2,2);
+        private final List<Cow> admitted=new ArrayList<>();
+        private ServerLevel level,other;
+        SpawnAdmission(){MinecraftForge.EVENT_BUS.addListener(EventPriority.LOWEST,this::tick);}
+        private String coordinates(BlockPos pos){return pos.getX()+" "+pos.getY()+" "+pos.getZ();}
+        private Cow body(ServerLevel owner,BlockPos pos){
+            Cow cow=new Cow(EntityType.COW,owner);cow.setPos(pos.getX()+.5,pos.getY(),pos.getZ()+.5);
+            cow.setNoAi(true);cow.setNoGravity(true);return cow;
+        }
+        private void absent(ServerLevel owner,Cow cow,String context){
+            var manager=((Access.Server)owner).pro$manager();
+            require(owner.getEntity(cow.getUUID())!=cow&&owner.getEntity(cow.getId())!=cow,context+":published lookup");
+            require(!((Access.Manager)manager).pro$known().contains(cow.getUUID()),context+":known uuid");
+        }
+        private void present(ServerLevel owner,Cow cow,String context){
+            require(owner.getEntity(cow.getUUID())==cow&&owner.getEntity(cow.getId())==cow,context+":published lookup");
+            require(((Access.Manager)((Access.Server)owner).pro$manager()).pro$known().contains(cow.getUUID()),context+":known uuid");
+            admitted.add(cow);
+        }
+        private void player(net.minecraft.server.MinecraftServer server){
+            ServerPlayer player=server.getPlayerList().getPlayers().stream()
+                    .filter(candidate->candidate.connection!=null&&candidate.connection.connection.isConnected()).findFirst().orElse(null);
+            if(player==null){
+                System.out.println("PRO_CASE_NOTRUN WORLD_SPAWN_PLAYER_REAL_PUBLICATION:NO_CONNECTED_PLAYER");return;
+            }
+            ServerLevel previous=player.serverLevel();
+            double x=player.getX(),y=player.getY(),z=player.getZ();float yaw=player.getYRot(),pitch=player.getXRot();
+            try{
+                player.teleportTo(other,low.getX()+.5,low.getY()+1,low.getZ()+.5,yaw,pitch);
+                require(other.getEntity(player.getUUID())==player,"actual connected player first dimension publication");
+                player.teleportTo(level,low.getX()+.5,low.getY()+1,low.getZ()+.5,yaw,pitch);
+                require(player.serverLevel()==level&&level.getEntity(player.getUUID())==player,"spawn ban rejected actual connected player publication");
+                pass("WORLD_SPAWN_CONNECTED_PLAYER_PUBLICATION_EXEMPT");
+            }finally{player.teleportTo(previous,x,y,z,yaw,pitch);}
+        }
+        private void tick(TickEvent.ServerTickEvent event){
+            if(finished||event.phase!=TickEvent.Phase.END)return;
+            var server=event.getServer();var runtime=ProRuntime.get(server);if(runtime==null)return;age++;
+            try{
+                require(age<=240,"world-spawn-admission timeout phase="+phase+" state="+runtime.worldState());
+                if(phase==0){
+                    level=server.overworld();other=server.getLevel(net.minecraft.world.level.Level.NETHER);
+                    require(other!=null&&other!=level,"actual second server level required");
+                    require(runtime.worldState().equals("WORLD_RULES=0;DEFERRED_TICKS=0"),"isolated fixture starts without world rules");
+                    level.setChunkForced(chunk.x,chunk.z,true);other.setChunkForced(chunk.x,chunk.z,true);
+                    level.getChunk(chunk.x,chunk.z);other.getChunk(chunk.x,chunk.z);next(1);
+                }else if(phase==1&&level.shouldTickBlocksAt(chunk.toLong())&&other.shouldTickBlocksAt(chunk.toLong())){
+                    FixtureCommands.execute(server,"region spawn-ban "+coordinates(low)+" "+coordinates(high)+" 8");
+                    require(runtime.worldState().equals("WORLD_RULES=1;DEFERRED_TICKS=0"),"installed spawn-ban command did not install rule");
+                    var manager=((Access.Server)level).pro$manager();BlockPos inside=low.offset(1,1,1);
+                    Cow fresh=body(level,inside);require(!level.addFreshEntity(fresh),"ordinary addFreshEntity bypassed spawn ban");absent(level,fresh,"ordinary new");
+                    Cow normal=body(level,inside);require(!manager.addNewEntity(normal),"manager addNewEntity bypassed spawn ban");absent(level,normal,"manager new");
+                    Cow direct=body(level,inside);require(!manager.addNewEntityWithoutEvent(direct),"manager addNewEntityWithoutEvent bypassed spawn ban");absent(level,direct,"no-event new");
+                    Cow wrongLevel=body(other,inside);require(!manager.addNewEntityWithoutEvent(wrongLevel),"body level selected another world instead of actual manager");
+                    absent(level,wrongLevel,"wrong body level destination");absent(other,wrongLevel,"wrong body level source");
+                    pass("WORLD_SPAWN_FRESH_MANAGER_NO_EVENT_EXACT_DESTINATION_REFUSED");
+                    Cow loaded=body(level,inside);manager.addLegacyChunkEntities(java.util.stream.Stream.of(loaded));present(level,loaded,"existing legacy load");
+                    pass("WORLD_SPAWN_EXISTING_CHUNK_LOAD_ALLOWED");
+                    Cow neighbor=body(level,high.offset(1,0,0));require(level.addFreshEntity(neighbor),"out-of-region neighbor rejected");present(level,neighbor,"out-of-region neighbor");
+                    Cow otherBody=body(other,inside);require(other.addFreshEntity(otherBody),"same coordinates in unrelated real world rejected");present(other,otherBody,"other real world");
+                    Cow otherDestination=body(level,inside);require(other.addFreshEntity(otherDestination),"body level falsely selected banned world for another destination");present(other,otherDestination,"other destination with mismatched body level");
+                    pass("WORLD_SPAWN_NEIGHBOR_OTHER_WORLD_AND_DESTINATION_ALLOWED");
+                    player(server);next(2);
+                }else if(phase==2&&elapsed()>=8){
+                    Cow resumed=body(level,low.offset(1,1,1));require(level.addFreshEntity(resumed),"expired spawn ban still rejected ordinary new body");present(level,resumed,"expired rule");
+                    require(runtime.worldState().equals("WORLD_RULES=0;DEFERRED_TICKS=0"),"spawn ban did not end at original rule deadline");
+                    pass("WORLD_SPAWN_ORIGINAL_DEADLINE_RESTORES_PUBLICATION");
+                    for(Cow cow:admitted)cow.discard();level.setChunkForced(chunk.x,chunk.z,false);other.setChunkForced(chunk.x,chunk.z,false);
+                    finish(server,null);
+                }
+            }catch(Throwable failure){finish(server,failure);}
+        }
     }
     /** The installed command and actual server schedulers own every freeze/defer transition. */
     private final class HeldSave {

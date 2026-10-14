@@ -866,6 +866,11 @@ public final class AuditFixCheck {
         var writes=Collections.synchronizedList(new ArrayList<Module[]>());
         var writeThreads=Collections.synchronizedList(new ArrayList<Thread>());
         var writeInLoop=Collections.synchronizedList(new ArrayList<Boolean>());
+        var promises=Collections.synchronizedList(new ArrayList<io.netty.channel.ChannelPromise>());
+        var reads=Collections.synchronizedList(new ArrayList<String>());
+        var peer=new java.util.concurrent.atomic.AtomicReference<io.netty.channel.local.LocalChannel>();
+        var flushes=new java.util.concurrent.atomic.AtomicInteger();
+        var readCompletes=new java.util.concurrent.atomic.AtomicInteger();
         var failure=new java.util.concurrent.atomic.AtomicReference<Throwable>();
         var written=new CountDownLatch(3);var received=new CountDownLatch(3);
         Thread consumer=Thread.currentThread();
@@ -876,10 +881,15 @@ public final class AuditFixCheck {
             server=new io.netty.bootstrap.ServerBootstrap().group(serverLoops).channel(io.netty.channel.local.LocalServerChannel.class)
                     .childHandler(new io.netty.channel.ChannelInitializer<io.netty.channel.local.LocalChannel>() {
                         protected void initChannel(io.netty.channel.local.LocalChannel channel){
+                            peer.set(channel);
                             channel.pipeline().addLast(new io.netty.channel.ChannelInboundHandlerAdapter(){
                                 public void channelRead(io.netty.channel.ChannelHandlerContext context,Object message){
+                                    reads.add(message.getClass().getName()+"@"+System.identityHashCode(message));
                                     if(message!=packet)failure.compareAndSet(null,new AssertionError("local transport changed the submitted packet identity"));
                                     io.netty.util.ReferenceCountUtil.release(message);received.countDown();
+                                }
+                                public void channelReadComplete(io.netty.channel.ChannelHandlerContext context)throws Exception{
+                                    readCompletes.incrementAndGet();context.fireChannelReadComplete();
                                 }
                                 public void exceptionCaught(io.netty.channel.ChannelHandlerContext context,Throwable error){failure.compareAndSet(null,error);context.close();}
                             });
@@ -890,10 +900,15 @@ public final class AuditFixCheck {
                         protected void initChannel(io.netty.channel.local.LocalChannel channel){
                             channel.pipeline().addLast(new io.netty.channel.ChannelOutboundHandlerAdapter(){
                                 public void write(io.netty.channel.ChannelHandlerContext context,Object message,io.netty.channel.ChannelPromise promise)throws Exception {
-                                    if(message==packet){writes.add(networkSources(current));writeThreads.add(Thread.currentThread());writeInLoop.add(context.executor().inEventLoop());written.countDown();}
+                                    if(message==packet){
+                                        writes.add(networkSources(current));writeThreads.add(Thread.currentThread());writeInLoop.add(context.executor().inEventLoop());promises.add(promise);
+                                        promise.addListener(result->{if(!result.isSuccess())failure.compareAndSet(null,result.cause()!=null?result.cause():new AssertionError("actual local write was cancelled"));});
+                                        written.countDown();
+                                    }
                                     else failure.compareAndSet(null,new AssertionError("unexpected local outbound message"));
                                     context.write(message,promise);
                                 }
+                                public void flush(io.netty.channel.ChannelHandlerContext context)throws Exception{flushes.incrementAndGet();context.flush();}
                             });
                             channel.pipeline().addLast("packet_handler",connection);
                         }
@@ -909,9 +924,11 @@ public final class AuditFixCheck {
             // the sentinel. LocalChannel then schedules reads on the distinct peer
             // loop; the one-thread server group drains those submitted tasks first.
             serverLoops.submit(()->{}).sync();
-            require(written.await(10,TimeUnit.SECONDS)&&received.await(10,TimeUnit.SECONDS),
+            if(!(written.await(10,TimeUnit.SECONDS)&&received.await(10,TimeUnit.SECONDS)))throw new AssertionError(
                     "real local EventLoop did not deliver all queued packets: writtenRemaining="+written.getCount()
-                            +", receivedRemaining="+received.getCount()+", failure="+failure.get());
+                            +", receivedRemaining="+received.getCount()+", failure="+failure.get()
+                            +", promises="+networkPromises(promises)+", flushes="+flushes.get()+", reads="+reads+", readCompletes="+readCompletes.get()
+                            +", peer="+networkPeerState(peer.get())+", clientPending="+networkClientPending(client));
             require(cleared.get().length==0,"EventLoop receipt scope remained after its original Runnable returned");
             Object[] remaining;synchronized(channels){remaining=active.toArray();}
             for(Object scope:remaining){
@@ -919,6 +936,7 @@ public final class AuditFixCheck {
                 require(!Arrays.asList((Module[])sources.get(scope)).contains(module),"completed receipt still retained this fixture source in ACTIVE");
             }
             require(failure.get()==null,"actual local transport failed: "+failure.get());
+            require(promises.size()==3&&promises.stream().allMatch(io.netty.channel.ChannelPromise::isSuccess),"actual local write promises did not all succeed: "+networkPromises(promises));
             require(writes.size()==3&&Arrays.asList(writes.get(0)).contains(module)&&!Arrays.asList(writes.get(1)).contains(module)
                     &&Arrays.asList(writes.get(2)).contains(module),"shared packet lost a sender or inherited a different submission's source");
             for(int i=0;i<3;i++)require(writeThreads.get(i)!=consumer&&writeInLoop.get(i),"write did not execute on the actual separate EventLoop");
@@ -930,6 +948,20 @@ public final class AuditFixCheck {
             clientLoops.shutdownGracefully(0,5,TimeUnit.SECONDS).syncUninterruptibly();
             serverLoops.shutdownGracefully(0,5,TimeUnit.SECONDS).syncUninterruptibly();
         }
+    }
+    private static String networkPromises(List<io.netty.channel.ChannelPromise> promises){
+        synchronized(promises){return promises.stream().map(promise->"done="+promise.isDone()+"/success="+promise.isSuccess()+"/cause="+promise.cause()).toList().toString();}
+    }
+    private static String networkPeerState(io.netty.channel.local.LocalChannel peer){
+        if(peer==null)return "not-initialized";
+        try{
+            Field inbound=io.netty.channel.local.LocalChannel.class.getDeclaredField("inboundBuffer"),pending=io.netty.channel.local.LocalChannel.class.getDeclaredField("readInProgress");
+            inbound.setAccessible(true);pending.setAccessible(true);
+            return "active="+peer.isActive()+"/autoRead="+peer.config().isAutoRead()+"/queued="+((Queue<?>)inbound.get(peer)).size()+"/readInProgress="+pending.getBoolean(peer);
+        }catch(ReflectiveOperationException unavailable){return "unavailable:"+unavailable;}
+    }
+    private static String networkClientPending(io.netty.channel.Channel client){
+        io.netty.channel.ChannelOutboundBuffer buffer=client.unsafe().outboundBuffer();return buffer==null?"closed":Integer.toString(buffer.size());
     }
     private static Module[] networkSources(Method current)throws ReflectiveOperationException {return (Module[])current.invoke(null);}
     private static void modGroupReturns(String jar,String profile)throws Exception {
