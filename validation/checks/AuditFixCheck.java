@@ -65,7 +65,7 @@ public final class AuditFixCheck {
         String phase=System.getProperty("ronova.pro.audit.thread.phase","thread-create");
         if(phase.equals("module-load")||phase.equals("admission")){
             hostModuleLoad0();
-            System.out.println("HOST_MODULE_LOAD_PASS actual_A_W_ExA_ExW_imports_and_dynamic_results original_parameters_flags_actual_HMODULE actual_invalid_image_error balanced_FreeLibrary no_manufactured_producer_authority");
+            System.out.println("HOST_MODULE_LOAD_PASS actual_A_W_ExA_ExW_imports_and_dynamic_results original_parameters_flags_actual_HMODULE actual_invalid_image_error actual_DATAFILE_IMAGE_RESOURCE_tagged_HMODULE original_resource_flags actual_loader_LastError balanced_FreeLibrary temporary_input_removed no_manufactured_producer_authority");
             if(phase.equals("admission")){
                 ClassLoader loader=new ClassLoader(null) { };
                 try {hostDefinitionsChanged0(loader);}finally {java.lang.ref.Reference.reachabilityFence(loader);}

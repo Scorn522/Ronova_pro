@@ -60,18 +60,23 @@ final class NetworkBoundary {
                 int packet=-1;for(int i=0;i<args.length;i++)if(args[i].getDescriptor().equals("Lnet/minecraft/network/protocol/Packet;")){packet=vars[i];break;}
                 if(packet>=0){InsnList guard=gate(packet,"packetAllowed");guard.add(new InsnNode(Opcodes.RETURN));endGate(guard);method.instructions.insert(guard);changed=true;}
             }
+            if(name.equals(CONNECTION)&&method.name.equals("exceptionCaught")&&method.desc.equals("(Lio/netty/channel/ChannelHandlerContext;Ljava/lang/Throwable;)V")){
+                InsnList guard=gate(vars[1],"outboundFailureUnhandled");guard.add(new InsnNode(Opcodes.RETURN));endGate(guard);method.instructions.insert(guard);changed=true;
+            }
             if(name.equals(ENCODER)&&args.length==3&&args[1].getDescriptor().equals("Lnet/minecraft/network/protocol/Packet;")&&result.getSort()==Type.VOID){
                 returns(method,code->{code.add(new VarInsnNode(Opcodes.ALOAD,vars[1]));code.add(new VarInsnNode(Opcodes.ALOAD,vars[2]));call(code,"packetEncoded","(Ljava/lang/Object;Ljava/lang/Object;)V");});changed=true;
             }
             if(name.equals(NETTY)&&method.name.equals("write")&&args.length==3&&args[0].getDescriptor().equals("Ljava/lang/Object;")&&args[1].getSort()==Type.BOOLEAN&&args[2].getDescriptor().equals("Lio/netty/channel/ChannelPromise;")){
                 if(result.getSort()!=Type.VOID)throw new IllegalStateException("NETTY_WRITE_RETURN_LAYOUT_UNAVAILABLE:"+method.desc);
-                InsnList guard=gate(vars[0],"outboundAllowed");guard.add(new VarInsnNode(Opcodes.ALOAD,vars[0]));guard.add(new MethodInsnNode(Opcodes.INVOKESTATIC,"io/netty/util/ReferenceCountUtil","release","(Ljava/lang/Object;)Z",false));guard.add(new InsnNode(Opcodes.POP));
-                guard.add(new VarInsnNode(Opcodes.ALOAD,vars[2]));guard.add(new MethodInsnNode(Opcodes.INVOKEINTERFACE,"io/netty/channel/ChannelPromise","trySuccess","()Z",true));guard.add(new InsnNode(Opcodes.POP));
+                InsnList guard=gate(vars[0],"outboundAllowed");rejectOutbound(guard,vars[0],vars[2]);
+                // The flush request also belongs to previously accepted messages. Use the
+                // original context's outbound selection and executor rather than the rejected write.
+                LabelNode noFlush=new LabelNode();guard.add(new VarInsnNode(Opcodes.ILOAD,vars[1]));guard.add(new JumpInsnNode(Opcodes.IFEQ,noFlush));
+                guard.add(new VarInsnNode(Opcodes.ALOAD,0));guard.add(new MethodInsnNode(Opcodes.INVOKEVIRTUAL,name,"flush","()Lio/netty/channel/ChannelHandlerContext;",false));guard.add(new InsnNode(Opcodes.POP));guard.add(noFlush);
                 guard.add(new InsnNode(Opcodes.RETURN));endGate(guard);method.instructions.insert(guard);changed=true;
             }
             if(name.equals(NETTY)&&Set.of("invokeWrite","invokeWriteAndFlush").contains(method.name)&&args.length==2&&args[0].getDescriptor().equals("Ljava/lang/Object;")&&args[1].getDescriptor().equals("Lio/netty/channel/ChannelPromise;")&&(method.access&Opcodes.ACC_STATIC)==0){
-                InsnList guard=gate(vars[0],"outboundAllowed");guard.add(new VarInsnNode(Opcodes.ALOAD,vars[0]));guard.add(new MethodInsnNode(Opcodes.INVOKESTATIC,"io/netty/util/ReferenceCountUtil","release","(Ljava/lang/Object;)Z",false));guard.add(new InsnNode(Opcodes.POP));
-                guard.add(new VarInsnNode(Opcodes.ALOAD,vars[1]));guard.add(new MethodInsnNode(Opcodes.INVOKEINTERFACE,"io/netty/channel/ChannelPromise","trySuccess","()Z",true));guard.add(new InsnNode(Opcodes.POP));
+                InsnList guard=gate(vars[0],"outboundAllowed");rejectOutbound(guard,vars[0],vars[1]);
                 if(method.name.equals("invokeWriteAndFlush")){guard.add(new VarInsnNode(Opcodes.ALOAD,0));guard.add(new MethodInsnNode(Opcodes.INVOKEVIRTUAL,name,"invokeFlush","()V",false));}
                 guard.add(new InsnNode(Opcodes.RETURN));endGate(guard);method.instructions.insert(guard);changed=true;
             }
@@ -94,6 +99,11 @@ final class NetworkBoundary {
     }
     private static int[] locals(MethodNode method,Type[] args){int[] result=new int[args.length];int at=(method.access&Opcodes.ACC_STATIC)==0?1:0;for(int i=0;i<args.length;i++){result[i]=at;at+=args[i].getSize();}return result;}
     private static void call(InsnList code,String name,String desc){code.add(new MethodInsnNode(Opcodes.INVOKESTATIC,BRIDGE,name,desc,false));}
+    private static void rejectOutbound(InsnList code,int message,int promise){
+        code.add(new VarInsnNode(Opcodes.ALOAD,message));code.add(new MethodInsnNode(Opcodes.INVOKESTATIC,"io/netty/util/ReferenceCountUtil","release","(Ljava/lang/Object;)Z",false));code.add(new InsnNode(Opcodes.POP));
+        code.add(new VarInsnNode(Opcodes.ALOAD,promise));call(code,"outboundRejected","()Ljava/lang/Throwable;");
+        code.add(new MethodInsnNode(Opcodes.INVOKEINTERFACE,"io/netty/channel/ChannelPromise","tryFailure","(Ljava/lang/Throwable;)Z",true));code.add(new InsnNode(Opcodes.POP));
+    }
     private static InsnList gate(int value,String operation){InsnList code=new InsnList();code.add(new VarInsnNode(Opcodes.ALOAD,value));call(code,operation,"(Ljava/lang/Object;)Z");code.add(new JumpInsnNode(Opcodes.IFNE,new LabelNode()));return code;}
     private static void endGate(InsnList code){for(AbstractInsnNode at:code.toArray())if(at instanceof JumpInsnNode jump&&jump.getOpcode()==Opcodes.IFNE){code.add(jump.label);return;}}
     private static void returns(MethodNode method,java.util.function.Consumer<InsnList> callback){

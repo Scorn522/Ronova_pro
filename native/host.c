@@ -97,6 +97,7 @@ typedef struct HostImport {
     void *original;
     void *entry;
     NativeLibrary *library;
+    HostLibraryLoad *load;
     OwnerLink *sources;
     int kind,delayed,returned,slotOwned,unknown;
     RUNTIME_FUNCTION unwind;
@@ -104,11 +105,16 @@ typedef struct HostImport {
 } HostImport;
 typedef struct HostImage {
     HMODULE handle;
+    HMODULE pin;
     DWORD size,functionsRva,functionCount;
     HostImport *imports;
     void *createTarget,*createATarget,*resolveTarget;
     void *targets[HOST_KIND_COUNT];
     int live,checked,failed,loadWindow,delayImports;
+    int releasing,pinReleased,opaque;
+    volatile LONG retiring;
+    volatile LONG active;
+    HostLibraryLoad *loads;
     struct HostImage *next;
 } HostImage;
 /* This directory contains actual registered image incarnations. Disabled entries
@@ -116,6 +122,13 @@ typedef struct HostImage {
  * never reactivates an old import entry or carries its former sources forward. */
 static SRWLOCK host_imports=SRWLOCK_INIT;
 static HostImage *host_images;
+static void host_image_imports(HostImage*);
+static void host_windows_targets(void**);
+static HostLibraryLoad *host_thread_worker_child(NativeThread*,HMODULE);
+static int native_tooling_retirement_jni(JNIEnv**);
+static void native_thread_worker_wake(void);
+static int native_thread_worker_backend_ready(void);
+static jobjectArray native_tooling_sources(JNIEnv*,OwnerLink*,int);
 static int host_handle_identity_ready(void){
     if(__atomic_load_n(&host_compare_handles,__ATOMIC_ACQUIRE))return 1;
     HMODULE kernel=GetModuleHandleW(L"kernelbase.dll");
@@ -461,7 +474,10 @@ static void host_producers(OwnerLink **owners){
     }
 }
 static NativeLibrary *host_thread_worker_library(NativeThread *state,HMODULE image);
+#include "host_module_sources.c"
 static int host_capture_caller(NativeThread *state,void *caller,OwnerLink **owners){
+    HostImage *child=NULL;if(!host_module_capture(state,caller,owners,&child,NULL,NULL))return 0;
+    if(child&&state&&(state->depth||state->library||state->tooling||state->hostLoad||state->hostWorker))return 1;
     HMODULE image=native_observe_image(caller);if(!image)return 1;
     int selected=0,ready=1;AcquireSRWLockShared(&native_records);
     /* A dynamic pointer may cross libraries. Prefer the actual executing
@@ -566,6 +582,10 @@ static int host_entry_association(HostImport *entry,NativeThread *state,OwnerLin
                 if(owners)ready=ready&&native_owner_merge(owners,library->owners);
             }
         }
+        if(!associated&&!entry->library&&entry->image->loads){
+            int child=host_module_select_locked(entry->image,state,entry->load,owners,NULL,NULL);
+            if(child){associated=1;ready=ready&&child==1;}
+        }
         if(!associated&&!entry->library){
             NativeLibrary *workerLibrary=host_thread_worker_library(state,entry->image->handle);
             if(workerLibrary&&workerLibrary->hostImage==entry->image){associated=1;chosen=workerLibrary;
@@ -577,16 +597,23 @@ static int host_entry_association(HostImport *entry,NativeThread *state,OwnerLin
                 if(owners)ready=ready&&native_owner_merge(owners,library->owners);
             }
     }
+    if(!associated&&!entry->library){
+        int child=host_module_select_locked(entry->image,state,entry->load,owners,NULL,NULL);
+        if(child){associated=1;ready=ready&&child==1;}
+    }
     if(selected)*selected=mixed?NULL:chosen;
     return !associated?0:ready?1:-1;
 }
 #include "host_callback_sources.c"
 static int host_entry_sources_query(HostImport *entry,NativeThread *state,void *caller,OwnerLink **owners,NativeLibrary **selected,int retainSources,int *unknown){
     int unobserved=entry->unknown;
-    if(state&&(state->heapCallback||state->vmDetaching||state->vmThreadEnding))
+    if(state&&(state->heapCallback||state->vmDetaching||state->vmThreadEnding||state->hostUnloadImage
+            ||state->hostLoad&&state->hostLoad->calling))
         return host_callback_entry_sources(entry,state,caller,owners,selected,retainSources,host_is_thread_admission(entry->kind),unknown);
     AcquireSRWLockShared(&host_imports);AcquireSRWLockShared(&native_records);
     int associated=host_entry_association(entry,state,owners,selected),ready=associated==1;
+    if(ready&&!entry->library&&entry->image->loads)
+        ready=host_module_select_locked(entry->image,state,entry->load,NULL,NULL,&unobserved)==1;
     ReleaseSRWLockShared(&native_records);
     ReleaseSRWLockShared(&host_imports);
     JNIEnv *env=NULL;
@@ -658,7 +685,7 @@ static FARPROC WINAPI host_native_resolve(HMODULE module,LPCSTR name,HostImport 
     DWORD error=GetLastError();
     host_refresh_targets(entry->image);
     int kind=host_target_kind(entry->image,(void*)actual);
-    if(!actual||!kind){SetLastError(error);return actual;}
+    if(!actual||!kind){host_module_mark_export(module,(void*)actual);SetLastError(error);return actual;}
     /* Names, ordinals and requested DLL handles do not authorize this result.
      * Only the actual returned Windows API address selects a controlled entry. */
     OwnerLink *owners=NULL;NativeLibrary *library=NULL;int unknown=0;
@@ -668,6 +695,10 @@ static FARPROC WINAPI host_native_resolve(HMODULE module,LPCSTR name,HostImport 
     if(resolved){
         resolved->image=entry->image;resolved->original=(void*)actual;resolved->kind=kind;
         resolved->library=library;resolved->sources=owners;resolved->returned=1;resolved->unknown=unknown;
+        AcquireSRWLockShared(&host_imports);
+        (void)host_module_select_locked(entry->image,state,entry->load,&owners,&resolved->load,&unknown);
+        ReleaseSRWLockShared(&host_imports);
+        resolved->sources=owners;resolved->unknown=unknown;
         if(!host_is_create(kind)||host_worker_ready())resolved->entry=host_import_entry(resolved);
     }
     if(!resolved||!resolved->entry){
@@ -814,7 +845,7 @@ static uint64_t host_native_handle(HostImport *entry,void *caller,uintptr_t *arg
 #include "host_crt_thread_creation.c"
 #include "host_thread_workers.c"
 #include "host_module_admission.c"
-static uint64_t host_native_call(HostImport *entry,void *caller,uintptr_t *arguments){
+static uint64_t host_native_dispatch(HostImport *entry,void *caller,uintptr_t *arguments){
     if(entry->kind==HOST_RESOLVE)return (uintptr_t)host_native_resolve((HMODULE)arguments[0],(LPCSTR)arguments[1],entry,caller);
     if(host_is_create(entry->kind))return host_native_create(entry,caller,arguments);
     if(host_is_local_worker_create(entry->kind))return host_native_local_worker_create(entry,caller,arguments);
@@ -823,6 +854,24 @@ static uint64_t host_native_call(HostImport *entry,void *caller,uintptr_t *argum
     if(host_is_handle(entry->kind))return host_native_handle(entry,caller,arguments);
     if(host_is_module_load(entry->kind))return host_native_module_load(entry,caller,arguments);
     SetLastError(ERROR_INVALID_FUNCTION);return 0;
+}
+static uint64_t host_native_call(HostImport *entry,void *caller,uintptr_t *arguments){
+    DWORD incoming=GetLastError();
+    NativeThread *state=native_tls==TLS_OUT_OF_INDEXES?NULL:(NativeThread*)TlsGetValue(native_tls);
+    int restricted=state&&(state->heapCallback||state->vmDetaching||state->vmThreadEnding||state->hostUnloadImage
+            ||state->hostLoad&&state->hostLoad->calling);
+    if(restricted){
+        if(!TryAcquireSRWLockShared(&host_imports)){SetLastError(ERROR_BUSY);return 0;}
+        if(!TryAcquireSRWLockShared(&native_records)){ReleaseSRWLockShared(&host_imports);SetLastError(ERROR_BUSY);return 0;}
+    }else {AcquireSRWLockShared(&host_imports);AcquireSRWLockShared(&native_records);}
+    int associated=host_entry_association(entry,state,NULL,NULL);
+    if(associated==1)InterlockedIncrement(&entry->image->active);
+    ReleaseSRWLockShared(&native_records);ReleaseSRWLockShared(&host_imports);
+    if(associated!=1){SetLastError(associated?ERROR_INVALID_DATA:ERROR_MOD_NOT_FOUND);return 0;}
+    if(state)native_thread_callback_enter(state);
+    SetLastError(incoming);uint64_t result=host_native_dispatch(entry,caller,arguments);DWORD error=GetLastError();
+    if(InterlockedDecrement(&entry->image->active)==0&&InterlockedCompareExchange(&entry->image->retiring,0,0))native_thread_worker_wake();
+    if(state)native_thread_callback_leave(state);SetLastError(error);return result;
 }
 static unsigned host_import_arguments(int kind){
     switch(kind){
@@ -1167,8 +1216,11 @@ static void host_module_update(JNIEnv *env,jobject module,jboolean stopped){
         AcquireSRWLockExclusive(&native_records);
         InterlockedExchange(&owner->producer,1);if(stopped){InterlockedExchange(&owner->kernelProtected,0);InterlockedExchange(&owner->stopped,1);}
         ReleaseSRWLockExclusive(&native_records);
+        if(stopped)for(HostImage *image=host_images;image;image=image->next)
+            InterlockedExchange(&image->retiring,host_module_image_sources_retired_locked(image));
     }else InterlockedIncrement(&native_failures);
     ReleaseSRWLockExclusive(&host_imports);
+    native_thread_worker_wake();
     AcquireSRWLockExclusive(&host_records);for(HostProcess *process=host_processes;process;process=process->next)host_collect(process);host_kernel_close_idle();WakeConditionVariable(&host_changed);ReleaseSRWLockExclusive(&host_records);
 }
 static void host_delay_imports(HostImage *image,unsigned char *base,IMAGE_NT_HEADERS64 *nt,DWORD size){
@@ -1277,6 +1329,7 @@ static int host_image_other_live(HostImage *image,NativeLibrary *excluding){
     for(NativeLibrary *other=native_libraries;other;other=other->next)
         if(other!=excluding&&other->hostImage==image&&other->handle==image->handle&&other->jni&&!other->builtin
                 &&InterlockedCompareExchange(&other->alive,0,0)&&!InterlockedCompareExchange(&other->closing,0,0))return 1;
+    if(image->pin&&!image->releasing&&image->loads)return 1;
     return 0;
 }
 static void host_library_load_failed(NativeLibrary *library){
@@ -1531,6 +1584,10 @@ static void host_import_state(JNIEnv *env,jobject module,jlong *values){
                 loaded=1;
                 if(image->live&&host_library_current(library,image->handle))current=1;
             }
+        for(HostLibraryLoad *load=image->loads;load;load=load->imageNext)
+            if(load->actual&&native_owner_matches(env,load->owners,module)){
+                loaded=1;if(host_module_load_current(load,image))current=1;
+            }
         for(Binding *binding=native_bindings;binding&&!current;binding=binding->next)
             current=image->live&&binding->library&&binding->library->hostImage==image
                     &&host_library_current(binding->library,image->handle)
@@ -1655,7 +1712,7 @@ JNIEXPORT jlongArray JNICALL Java_dev_ronova_pro_bootstrap_NativeControl_hostSta
     (void)type;if(!native_controller||!native_original.CallStaticBooleanMethod(env,native_controller,native_control_gate)){
         native_refuse(env,"NATIVE_CONTROL_AGENT_REQUIRED");return NULL;
     }
-    jlong values[24]={0};values[18]=__atomic_load_n(&host_compare_handles,__ATOMIC_ACQUIRE)!=NULL;
+    jlong values[32]={0};values[18]=__atomic_load_n(&host_compare_handles,__ATOMIC_ACQUIRE)!=NULL;
     AcquireSRWLockExclusive(&host_records);host_prune(env);
     for(HostProcess *record=host_processes;record;record=record->next){
         if(!native_owner_matches(env,record->owners,module))continue;host_collect(record);
@@ -1678,5 +1735,6 @@ JNIEXPORT jlongArray JNICALL Java_dev_ronova_pro_bootstrap_NativeControl_hostSta
     ReleaseSRWLockExclusive(&host_records);
     host_import_state(env,module,values);
     host_thread_workers_state(env,module,values);
-    jlongArray result=native_original.NewLongArray(env,24);if(result)native_original.SetLongArrayRegion(env,result,0,24,values);return result;
+    host_module_loads_state(env,module,values);
+    jlongArray result=native_original.NewLongArray(env,32);if(result)native_original.SetLongArrayRegion(env,result,0,32,values);return result;
 }

@@ -43,7 +43,7 @@ public final class NativeControl {
             if(!early.isEmpty()) {
                 Path actual=Path.of(early).toAbsolutePath();if(!hash(Files.readAllBytes(actual)).equals(digest))throw new IOException("EARLY_NATIVE_IMAGE_MISMATCH");dll=actual;
             }
-            System.load(dll.toString());if(abi()!=56)throw new UnsatisfiedLinkError("NATIVE_CONTROL_ABI");
+            System.load(dll.toString());if(abi()!=57)throw new UnsatisfiedLinkError("NATIVE_CONTROL_ABI");
             if(!initialize0(ControlBridge.class,DefinitionBridge.class))throw new UnsatisfiedLinkError("ACTUAL_NATIVE_BOUNDARY_INSTALL_FAILED");
             if(!initializeDefinitionDirectory0(definitionDirectoryOwner))throw new UnsatisfiedLinkError("ACTUAL_DEFINITION_DIRECTORY_CAS_UNAVAILABLE");
             libraryBoundaryPresent=libraryPresent0();available=true;return state="NATIVE_BIND_AND_JNI_FIELD_READY";
@@ -484,6 +484,8 @@ public final class NativeControl {
             +":HOST_NATIVE_CREATE_SCOPE=REGISTERED_EXACT_CREATEPROCESSA_W_NORMAL_OR_RESOLVED_DELAY_IMPORTS_AND_OBSERVED_GETPROCADDRESS_RESULTS_AFTER_OS_LOAD_RETURN"
             +":VERIFIED_RIP_RELATIVE_DELAY_IAT_CALLS_USE_CURRENT_BINDING_DYNAMIC_POINTERS_RETAIN_RESOLUTION_SOURCES"
             +":HOST_JNI_ONLOAD_BOUNDARY="+(available&&hostLibraryLoadReady0()?"EXACT_JDK_OS_LOAD_RETURN_BEFORE_SAME_THREAD_JNI_ONLOAD":"AWAITING_ACTUAL_JDK_LOAD_UNLOAD_IMPORT_BIND")
+            +":HOST_CHILD_DLL=ACTUAL_LOADLIBRARY_RETURN_SOURCES_IMPORTS_RESOLVER_BINDINGS_AND_WORKER_LEASES;PUBLIC_WINDOWS_CARRIERS_RETAIN_SHARED_EXECUTION"
+            +":HOST_CHILD_PIN=OWN_EXTRA_REFERENCE_ONLY;APPLICATION_LOADER_REFERENCE_OWNERSHIP_AND_FINAL_UNMAP_UNOBSERVED"
             +":DLLMAIN_AND_TLS_CALLBACKS_BEFORE_OS_LOAD_RETURN_UNOBSERVED"
             +":UNRESOLVED_DELAY_IMPORTS_AND_RESOLUTION_OUTSIDE_REGISTERED_GETPROCADDRESS_ENTRIES_UNOBSERVED"
             +":HOST_CREATION=OBSERVED_CREATEPROCESS_A_W_ASUSER_A_W_WITHTOKEN_W_WITHLOGON_W"
@@ -539,6 +541,9 @@ public final class NativeControl {
                 +";HOST_PROCESS_ALIASES="+host[13]+";HOST_PRIMARY_THREAD_ALIASES="+host[14]+";HOST_EXTERNAL_DUPLICATE_TRANSFERS="+host[15]+";HOST_INHERITED_EXPOSURES="+host[16]
                 +";HOST_LOST_HANDLE_EVIDENCE="+host[17]+";HOST_OBJECT_IDENTITY_BACKEND="+host[18]+";HOST_HANDLE_IMPORTS="+host[19]+";HOST_HANDLE_RESOLVED_ENTRIES="+host[20]
                 +";HOST_NATIVE_WORKER_HOLDS="+host[21]+";HOST_NATIVE_WORKER_EXIT_PENDING="+host[22]+";HOST_NATIVE_WORKER_LIFECYCLE_GAPS="+host[23]
+                +";HOST_CHILD_LOAD_RECEIPTS="+host[24]+";HOST_CHILD_OWN_PINS="+host[25]+";HOST_CHILD_SOURCE_HOLDS="+host[26]
+                +";HOST_CHILD_SHARED_OR_UNKNOWN_PENDING="+host[27]+";HOST_CHILD_IMPORT_GAPS="+host[28]+";HOST_CHILD_RESOURCE_OR_NONEXEC_LOADS="+host[29]
+                +";HOST_CHILD_OWN_PIN_RELEASES="+host[30]+";HOST_CHILD_APPLICATION_LOADER_LIFETIMES_UNOBSERVED="+host[31]
                 +";JVMTI_GETENV="+jvmti[0]+";JVMTI_OBSERVED_ENVIRONMENTS="+jvmti[1]+";JVMTI_CALLBACK_SLOTS="+jvmti[2]+";JVMTI_ACTIVE_CALLBACKS="+jvmti[3]
                 +";JVMTI_DISPOSED_ENVIRONMENTS="+jvmti[4]+";JVMTI_REFUSALS="+jvmti[5]+";JVMTI_OWN_TABLE="+jvmti[6]+";JVMTI_UNATTRIBUTED_CALLBACKS="+jvmti[7]+";"+hostKernelSummary(module);
     }
@@ -548,6 +553,10 @@ public final class NativeControl {
         if(jvmtiDefinitionsPending0(module))return "JVMTI_DEFINITION_CONTINUATION_PENDING";
         long[] host=hostState0(module);long[] jvmti=jvmtiState0(module);
         if(host[21]!=0)return "HOST_NATIVE_WORKER_RETIREMENT_PENDING:holds="+host[21]+":exitPending="+host[22]+":lifecycleGaps="+host[23];
+        if(host[25]!=0||host[26]!=0)return "HOST_CHILD_OWN_RETIREMENT_PENDING:pins="+host[25]+":sourceHolds="+host[26]+":sharedOrUnknown="+host[27]+":importGaps="+host[28];
+        if(host[28]!=0)return "HOST_CHILD_IMPORT_CONTROL_UNAVAILABLE:images="+host[28];
+        if(host[27]!=0)return "HOST_CHILD_SHARED_OR_UNKNOWN_SOURCE_PENDING:records="+host[27];
+        if(host[31]!=0)return "HOST_CHILD_APPLICATION_LOADER_LIFETIME_UNOBSERVED:receipts="+host[31]+":ownPinReleases="+host[30]+":resourceOrNonexec="+host[29];
         if(jvmti[2]!=0||jvmti[3]!=0)return "JVMTI_CALLBACK_RETIREMENT_PENDING:slots="+jvmti[2]+":active="+jvmti[3]+":environments="+jvmti[1];
         if(jvmti[1]!=0||jvmti[7]!=0)return "JVMTI_ENVIRONMENT_DISPOSITION_PENDING:environments="+jvmti[1]+":unattributedCallbacks="+jvmti[7];
         long[] kernel=hostKernelState0(module);

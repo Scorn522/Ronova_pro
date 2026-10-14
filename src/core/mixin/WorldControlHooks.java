@@ -13,10 +13,17 @@ import org.spongepowered.asm.mixin.injection.callback.*;
 public final class WorldControlHooks {
     private WorldControlHooks(){}
     @Mixin(ServerLevel.class) public abstract static class World {
+        @Shadow private void tickPassenger(Entity vehicle,Entity passenger){throw new UnsupportedOperationException();}
         @Inject(method="tickNonPassenger",at=@At("HEAD"),cancellable=true)
-        private void entity(Entity entity,CallbackInfo callback){if(ProRuntime.worldFrozen(entity))callback.cancel();}
-        @Inject(method="tickPassenger",at=@At("HEAD"),cancellable=true)
-        private void passenger(Entity vehicle,Entity passenger,CallbackInfo callback){if(ProRuntime.worldFrozen(passenger))callback.cancel();}
+        private void entity(Entity entity,CallbackInfo callback){if(ProRuntime.worldFrozen(entity)){
+            for(Entity passenger:entity.getPassengers())tickPassenger(entity,passenger);callback.cancel();
+        }}
+        // Vanilla has already checked the actual vehicle relationship and player/ticking-list
+        // eligibility here. Only the selected body is paused; its other riders keep that path.
+        @Inject(method="tickPassenger",at=@At(value="INVOKE",target="Lnet/minecraft/world/entity/Entity;setOldPosAndRot()V"),cancellable=true)
+        private void passenger(Entity vehicle,Entity passenger,CallbackInfo callback){if(ProRuntime.worldFrozen(passenger)){
+            for(Entity nested:passenger.getPassengers())tickPassenger(passenger,nested);callback.cancel();
+        }}
         @Inject(method={"tickTime","advanceWeatherCycle"},at=@At("HEAD"),cancellable=true)
         private void clock(CallbackInfo callback){if(ProRuntime.worldClockFrozen((ServerLevel)(Object)this))callback.cancel();}
         @Inject(method="addFreshEntity",at=@At("HEAD"),cancellable=true)

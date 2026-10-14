@@ -8,13 +8,14 @@
 
 typedef struct Owner { jweak module; volatile LONG stopped,producer,kernelProtected; struct Owner *next; } Owner;
 typedef struct OwnerLink {Owner *owner;struct OwnerLink *next;} OwnerLink;
+typedef struct HostLibraryLoad HostLibraryLoad;
 typedef struct NativeToolingScope {OwnerLink *owners;jweak origin;int unknown;unsigned depth;struct NativeToolingScope *previous;} NativeToolingScope;
 typedef struct NativeToolingImage NativeToolingImage;
 typedef struct NativeUnloader {jweak identity;struct NativeUnloader *next;} NativeUnloader;
 typedef struct NativeLibrary {jweak identity,origin,name;wchar_t *path;jsize nameLength;Owner *carrier,*consumer;OwnerLink *owners;NativeUnloader *unloaders;HMODULE handle;struct HostImage *hostImage;jboolean builtin,jni;volatile LONG alive,complete,closing;struct NativeLibrary *next;} NativeLibrary;
 typedef struct NativeLibraryScope {NativeLibrary *library;int unloading,phase,success,osLoadStarted;HMODULE osHandle;struct NativeLibraryScope *previous;} NativeLibraryScope;
-typedef struct NativeRegistration {jmethodID *methods;jint count;OwnerLink *owners;jweak origin;NativeLibrary *loading;struct NativeRegistration *previous;} NativeRegistration;
-typedef struct Binding {jmethodID method;jweak type,origin;Owner *owner,*declared;OwnerLink *owners;NativeLibrary *library,*loading;void *original,*entry;char *signature,*fileMethod;char result;unsigned unsafeOperation,fileOperation,fileArgument,threadOperation;const char *unsafeKind;volatile LONG active,current,valid;RUNTIME_FUNCTION unwind;struct Binding *previous,*next;} Binding;
+typedef struct NativeRegistration {jmethodID *methods;jint count;OwnerLink *owners;jweak origin;NativeLibrary *loading;struct NativeRegistration *previous;int unknown;} NativeRegistration;
+typedef struct Binding {jmethodID method;jweak type,origin;Owner *owner,*declared;OwnerLink *owners;NativeLibrary *library,*loading;struct HostImage *hostImage;HostLibraryLoad *hostLoad;int hostUnknown;void *original,*entry;char *signature,*fileMethod;char result;unsigned unsafeOperation,fileOperation,fileArgument,threadOperation;const char *unsafeKind;volatile LONG active,current,valid;RUNTIME_FUNCTION unwind;struct Binding *previous,*next;} Binding;
 typedef struct NativeDefinition {jclass declaring;jobject loader;jbyteArray bytes;unsigned phase;struct NativeDefinition *previous;} NativeDefinition;
 typedef struct CodeExit {jmethodID method;jobject token;struct CodeExit *previous;} CodeExit;
 typedef struct NativeUnsafeFrame {jobject token;uint64_t expected;struct NativeMemoryCall *memoryCall;} NativeUnsafeFrame;
@@ -36,6 +37,7 @@ typedef struct NativeThread {
     struct NativeToolingSlot *heapWorkerAnchor;
     /* VM detach ends Java attachments, not a C callback or an OS worker. */
     struct HostThreadWorker *hostWorker;
+    HostLibraryLoad *hostLoad;struct HostImage *hostUnloadImage;
     unsigned callbackHolds,vmDetaching,vmThreadEnding;
     int storageOwned,vmAttached,javaEnded,javaCleaning;
 } NativeThread;
@@ -123,6 +125,10 @@ static void native_thread_try_release(NativeThread*);
 static void native_thread_callback_leave(NativeThread*);
 static int native_thread_worker_os_end(JNIEnv*,NativeThread*);
 static int host_thread_worker_scope_idle(const NativeThread*);
+static int host_module_capture(NativeThread*,void*,OwnerLink**,struct HostImage**,HostLibraryLoad**,int*);
+static int host_module_binding_enter(Binding*);
+static void host_module_binding_leave(Binding*);
+static int host_capture_caller(NativeThread*,void*,OwnerLink**);
 static NativeThread *native_thread(void) {
     if(native_tls==TLS_OUT_OF_INDEXES)return NULL;NativeThread *state=(NativeThread*)TlsGetValue(native_tls);
     if(!state){state=(NativeThread*)calloc(1,sizeof(*state));if(state){state->storageOwned=1;if(!TlsSetValue(native_tls,state)){free(state);return NULL;}}}return state;
@@ -154,30 +160,24 @@ static int native_owner_matches(JNIEnv *env,OwnerLink *head,jobject module){if(!
 static int native_has_producer(OwnerLink *head){for(;head;head=head->next)if(InterlockedCompareExchange(&head->owner->producer,0,0))return 1;return 0;}
 static HMODULE native_image(void *address){HMODULE image=NULL;if(address)GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS|GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,(LPCSTR)address,&image);return image;}
 static HMODULE native_observe_image(void *address){
-    HMODULE image=native_image(address);if(!image)return NULL;
-    DWORD capacity=512;wchar_t *path=NULL;
-    while(capacity<=32768){path=(wchar_t*)calloc(capacity,sizeof(wchar_t));if(!path)return image;
-        DWORD size=GetModuleFileNameW(image,path,capacity);if(size&&size<capacity)break;free(path);path=NULL;if(!size)break;capacity*=2;}
-    if(path){AcquireSRWLockExclusive(&native_records);
-        for(NativeLibrary *library=native_libraries;library;library=library->next)if(!library->handle&&!library->builtin
-                &&library->path&&InterlockedCompareExchange(&library->alive,0,0)&&_wcsicmp(path,library->path)==0)library->handle=image;
-        ReleaseSRWLockExclusive(&native_records);free(path);}
-    return image;
+    /* Registered JDK handles come only from their actual JVM_LoadLibrary
+     * return. A code address observes an image, never a path-derived owner. */
+    return native_image(address);
 }
 static int native_capture_image_owners(void *address,OwnerLink **owners){
-    HMODULE image=native_observe_image(address);int ready=1;AcquireSRWLockShared(&native_records);
-    for(NativeLibrary *library=native_libraries;library;library=library->next)if(image&&library->handle==image&&InterlockedCompareExchange(&library->alive,0,0))ready=ready&&native_owner_merge(owners,library->owners);
-    ReleaseSRWLockShared(&native_records);return ready;
+    NativeThread *state=native_tls==TLS_OUT_OF_INDEXES?NULL:(NativeThread*)TlsGetValue(native_tls);
+    return host_capture_caller(state,address,owners);
 }
 static int native_caller_stopped(void *address){
-    HMODULE image=native_observe_image(address);int stopped=0;AcquireSRWLockShared(&native_records);
-    for(NativeLibrary *library=native_libraries;library;library=library->next)if(image&&library->handle==image&&InterlockedCompareExchange(&library->alive,0,0)&&native_owner_stopped(library->owners)){stopped=1;break;}
-    ReleaseSRWLockShared(&native_records);return stopped;
+    OwnerLink *sources=NULL;int captured=native_capture_image_owners(address,&sources);
+    int stopped=!captured||native_owner_stopped(sources)!=NULL;native_owner_links_free(sources);
+    return stopped;
 }
 static int native_stopped(JNIEnv *env){NativeThread *state=native_thread();if(!state)return 0;if(env)native_thread_java_observed(state);for(unsigned i=0;i<state->depth;i++)if(native_owner_stopped(state->stack[i]->owners))return 1;for(NativeLibraryScope *scope=state->library;scope;scope=scope->previous)if(native_owner_stopped(scope->library->owners))return 1;for(NativeToolingScope *scope=state->tooling;scope;scope=scope->previous)if(native_owner_stopped(scope->owners))return 1;return code_current_stopped(env);}
 static jweak native_origin(NativeThread *state){if(!state)return NULL;if(state->tooling&&state->depth<=state->tooling->depth&&state->tooling->origin)return state->tooling->origin;return state->depth?state->stack[state->depth-1]->origin:state->library?state->library->library->origin:NULL;}
 static int native_capture_scope_sources(JNIEnv *env,NativeThread *state,OwnerLink **owners,int *unknown){
-    if(!state)return 1;if(env)native_thread_java_observed(state);for(unsigned i=0;i<state->depth;i++)if(!native_owner_merge(owners,state->stack[i]->owners))return 0;
+    if(!state)return 1;if(env)native_thread_java_observed(state);for(unsigned i=0;i<state->depth;i++){if(!native_owner_merge(owners,state->stack[i]->owners))return 0;if(unknown&&state->stack[i]->hostUnknown)*unknown=1;}
+    for(NativeRegistration *scope=state->registration;scope;scope=scope->previous){if(!native_owner_merge(owners,scope->owners))return 0;if(unknown&&scope->unknown)*unknown=1;}
     for(NativeLibraryScope *scope=state->library;scope;scope=scope->previous)if(!native_owner_merge(owners,scope->library->owners))return 0;for(NativeToolingScope *scope=state->tooling;scope;scope=scope->previous){if(!native_owner_merge(owners,scope->owners))return 0;if(scope->unknown&&unknown)*unknown=1;}return code_current_sources_query(env,owners,unknown);
 }
 static int native_capture_scope_owners(JNIEnv *env,NativeThread *state,OwnerLink **owners){return native_capture_scope_sources(env,state,owners,NULL);}
@@ -202,28 +202,29 @@ static uint64_t native_enter(JNIEnv *env,jobject receiver,Binding *binding,unsig
     if(binding->threadOperation)memset(&state->threadFrames[state->depth],0,sizeof(NativeThreadFrame));
     // Controller JNI work already has its exact native control scope. Its own
     // JDK atomics must not recursively enter the Java memory bookkeeping.
-    if((binding->unsafeOperation||binding->fileOperation||binding->threadOperation)&&state->control){state->entries[state->depth]=binding;state->stack[state->depth++]=binding;InterlockedIncrement(&binding->active);return (uint64_t)(uintptr_t)binding->original;}
+    if((binding->unsafeOperation||binding->fileOperation||binding->threadOperation)&&state->control){if(!host_module_binding_enter(binding))return 0;state->entries[state->depth]=binding;state->stack[state->depth++]=binding;InterlockedIncrement(&binding->active);return (uint64_t)(uintptr_t)binding->original;}
     if(binding->declared&&InterlockedCompareExchange(&binding->declared->stopped,0,0))return 0;
     // A stopped caller may finish an already sealed resource's original close.
     // The exact descriptor scope is checked by the file bridge before dispatch.
     if(code_current_stopped(env)&&binding->fileOperation!=4&&binding->fileOperation!=7&&binding->fileOperation!=8&&binding->unsafeOperation!=UNSAFE_FREE)return 0;
     Binding *effective=binding;
-    while(effective&&(!InterlockedCompareExchange(&effective->valid,0,0)||native_owner_stopped(effective->owners)
+    while(effective&&(!InterlockedCompareExchange(&effective->valid,0,0)||native_owner_stopped(effective->owners)||effective->hostUnknown
             ||effective->library&&(!InterlockedCompareExchange(&effective->library->alive,0,0)||InterlockedCompareExchange(&effective->library->closing,0,0))))effective=effective->previous;
     if(!effective)return 0;
     state->control++;jobject type=native_original.NewLocalRef(env,effective->origin);
     jboolean allowed=type&&native_controls?native_original.CallStaticBooleanMethod(env,native_controls,native_owner_gate,type):JNI_FALSE;
     if(type)native_original.DeleteLocalRef(env,type);state->control--;if(native_original.ExceptionCheck(env)||!allowed)return 0;
+    if(effective->hostUnknown||!host_module_binding_enter(effective))return 0;
     state->entries[state->depth]=binding;state->stack[state->depth++]=effective;InterlockedIncrement(&effective->active);
     if(binding->unsafeOperation&&!native_unsafe_begin(env,state,binding,frame)){
-        state->depth--;InterlockedDecrement(&effective->active);state->stack[state->depth]=state->entries[state->depth]=NULL;return 0;
+        state->depth--;InterlockedDecrement(&effective->active);host_module_binding_leave(effective);state->stack[state->depth]=state->entries[state->depth]=NULL;return 0;
     }
     if(binding->fileOperation&&!native_file_begin(env,state,binding,receiver,frame)){
-        state->depth--;InterlockedDecrement(&effective->active);state->stack[state->depth]=state->entries[state->depth]=NULL;return 0;
+        state->depth--;InterlockedDecrement(&effective->active);host_module_binding_leave(effective);state->stack[state->depth]=state->entries[state->depth]=NULL;return 0;
     }
     if(binding->threadOperation){
         if(!native_thread_begin(env,state,binding,receiver)){
-            state->depth--;InterlockedDecrement(&effective->active);state->stack[state->depth]=state->entries[state->depth]=NULL;return 0;
+            state->depth--;InterlockedDecrement(&effective->active);host_module_binding_leave(effective);state->stack[state->depth]=state->entries[state->depth]=NULL;return 0;
         }
         return (uint64_t)(uintptr_t)native_thread_call(state,effective);
     }
@@ -237,7 +238,8 @@ static void native_leave(Binding *binding,unsigned char *frame){
         if(binding->fileOperation)native_file_end(env,state);
         if(binding->threadOperation)native_thread_finish(env,state,&state->threadFrames[state->depth-1],!native_original.ExceptionCheck(env));
     }
-    state->depth--;InterlockedDecrement(&state->stack[state->depth]->active);state->stack[state->depth]=state->entries[state->depth]=NULL;
+    state->depth--;Binding *active=state->stack[state->depth];InterlockedDecrement(&active->active);
+    host_module_binding_leave(active);state->stack[state->depth]=state->entries[state->depth]=NULL;
     native_thread_try_release(state);
 }
 static uint64_t native_result(JNIEnv *env,Binding *binding,unsigned char *frame) {
@@ -301,15 +303,18 @@ static void JNICALL native_binding(jvmtiEnv *api,JNIEnv *env,jthread thread,jmet
     jobject module=native_original.CallStaticObjectMethod(env,native_definitions,native_module_query,type);
     if(!module||native_original.ExceptionCheck(env)){native_original.DeleteLocalRef(env,type);state->control--;return;}
     HMODULE image=native_observe_image(target);
+    OwnerLink *imageSources=NULL;HostImage *childImage=NULL;HostLibraryLoad *childLoad=NULL;int childUnknown=0;
+    int imageReady=host_module_capture(state,target,&imageSources,&childImage,&childLoad,&childUnknown)
+            &&native_capture_image_owners(target,&imageSources);
     AcquireSRWLockExclusive(&native_records);
     Binding *previous=NULL,*aliased=NULL;
     for(Binding *old=native_bindings;old;old=old->next){
         if(old->entry&&old->entry==target)aliased=old;
         if(old->method==method&&InterlockedCompareExchange(&old->current,0,0)){if(!previous)previous=old;InterlockedExchange(&old->current,0);}
     }
-    if(!target){ReleaseSRWLockExclusive(&native_records);native_original.DeleteLocalRef(env,module);native_original.DeleteLocalRef(env,type);state->control--;return;}
+    if(!target){ReleaseSRWLockExclusive(&native_records);native_owner_links_free(imageSources);native_original.DeleteLocalRef(env,module);native_original.DeleteLocalRef(env,type);state->control--;return;}
     Owner *declared=native_owner(env,module);char *name=NULL,*signature=NULL;Binding *binding=(Binding*)calloc(1,sizeof(*binding));
-    int ready=binding&&declared&&(*api)->GetMethodName(api,method,&name,&signature,NULL)==JVMTI_ERROR_NONE;
+    int ready=imageReady&&binding&&declared&&(*api)->GetMethodName(api,method,&name,&signature,NULL)==JVMTI_ERROR_NONE;
     if(ready){
         binding->method=method;binding->declared=declared;binding->previous=previous;binding->original=aliased?aliased->original:target;
         binding->type=native_original.NewWeakGlobalRef(env,type);binding->signature=_strdup(signature);binding->result=native_return_type(signature);
@@ -317,16 +322,20 @@ static void JNICALL native_binding(jvmtiEnv *api,JNIEnv *env,jthread thread,jmet
         native_file_classify(env,type,binding,name);
         native_thread_classify(env,type,binding);
         ready=native_owner_add(&binding->owners,declared);
+        ready=ready&&native_owner_merge(&binding->owners,imageSources);
+        binding->hostImage=aliased?aliased->hostImage:childImage;binding->hostLoad=aliased?aliased->hostLoad:childLoad;
+        binding->hostUnknown=childUnknown||(aliased&&aliased->hostUnknown);
         if(aliased)ready=ready&&native_owner_merge(&binding->owners,aliased->owners);
         NativeRegistration *registration=NULL;
         for(NativeRegistration *scope=state->registration;scope&&!registration;scope=scope->previous)
             for(jint i=0;i<scope->count;i++)if(scope->methods[i]==method){registration=scope;break;}
-        if(registration){ready=ready&&native_owner_merge(&binding->owners,registration->owners);binding->loading=registration->loading;}
+        if(registration){ready=ready&&native_owner_merge(&binding->owners,registration->owners);binding->loading=registration->loading;binding->hostUnknown|=registration->unknown;}
         // Query the OS loader before taking the ledger lock. JNI_OnLoad can
         // itself acquire this ledger while another thread is in the OS loader.
         if(aliased)image=aliased->library?aliased->library->handle:NULL;
         for(unsigned pass=0;pass<3&&!binding->library;pass++)for(NativeLibrary *library=native_libraries;library;library=library->next)
             if(image&&library->handle==image&&InterlockedCompareExchange(&library->alive,0,0)
+                    &&(pass!=2||!childImage)
                     &&(pass==0?library->carrier==declared&&library->consumer==declared:pass==1?library->carrier==declared:1)){
                 binding->library=library;break;
             }
@@ -335,20 +344,20 @@ static void JNICALL native_binding(jvmtiEnv *api,JNIEnv *env,jthread thread,jmet
         // has not installed code into this method. Only real RegisterNatives
         // submission carries installer provenance.
         if(!binding->library&&registration)binding->library=registration->loading;
-        jweak origin=aliased?aliased->origin:binding->library?binding->library->origin:registration?registration->origin:NULL;
+        jweak origin=aliased?aliased->origin:binding->library?binding->library->origin:registration?registration->origin:childLoad?childLoad->origin:NULL;
         jclass actual=origin?(jclass)native_original.NewLocalRef(env,origin):(jclass)native_original.NewLocalRef(env,type);
         if(actual){binding->origin=native_original.NewWeakGlobalRef(env,actual);native_original.DeleteLocalRef(env,actual);}
         // Preserve pre-existing outside implementations for an actual later overwrite.
         // Ordinary bindings are recorded without replacing their VM entry point.
         if(ready&&binding->type&&binding->origin&&binding->signature){
-            int wrapped=binding->unsafeOperation||binding->fileOperation||binding->threadOperation||native_has_producer(binding->owners);
+            int wrapped=binding->unsafeOperation||binding->fileOperation||binding->threadOperation||binding->hostImage||binding->hostUnknown||native_has_producer(binding->owners);
             if(wrapped)binding->entry=native_entry(binding);
             ready=!wrapped||binding->entry!=NULL;
         }else ready=0;
         if(ready){binding->valid=binding->current=1;binding->owner=binding->owners?binding->owners->owner:NULL;binding->next=native_bindings;native_bindings=binding;if(binding->entry)*replacement=binding->entry;}
     }
     if(!ready){if(binding){if(binding->type)native_original.DeleteWeakGlobalRef(env,binding->type);if(binding->origin)native_original.DeleteWeakGlobalRef(env,binding->origin);native_owner_links_free(binding->owners);free(binding->signature);free(binding->fileMethod);free(binding);}*replacement=(void*)native_rejected;InterlockedIncrement(&native_failures);}
-    if(name)(*api)->Deallocate(api,(unsigned char*)name);if(signature)(*api)->Deallocate(api,(unsigned char*)signature);ReleaseSRWLockExclusive(&native_records);native_original.DeleteLocalRef(env,module);native_original.DeleteLocalRef(env,type);state->control--;
+    if(name)(*api)->Deallocate(api,(unsigned char*)name);if(signature)(*api)->Deallocate(api,(unsigned char*)signature);ReleaseSRWLockExclusive(&native_records);native_owner_links_free(imageSources);native_original.DeleteLocalRef(env,module);native_original.DeleteLocalRef(env,type);state->control--;
 }
 static int native_field_allowed(JNIEnv *env,jobject object,jclass type,jfieldID field,jobject value,int statik) {
     if(native_stopped(env)){native_refuse(env,"RONOVA_STOPPED_NATIVE_FIELD_WRITE");return 0;}NativeThread *state=native_thread();if(!native_controls||!state)return 1;
@@ -589,20 +598,17 @@ NATIVE_ARRAY(Double,jdouble,d,"java/lang/Double","(D)Ljava/lang/Double;")
 static void *JNICALL native_get_critical(JNIEnv *env,jarray array,jboolean *copy){return native_array_copy(env,array,copy,0,1,__builtin_return_address(0));}
 static void JNICALL native_release_critical(JNIEnv *env,jarray array,void *contents,jint mode){native_array_release(env,array,contents,mode,0,1,__builtin_return_address(0));}
 static jobjectArray native_registration_sources(JNIEnv *env,void *implementation,void *caller){
-    NativeThread *state=native_thread();OwnerLink *sources=NULL;int ready=1;
-    HMODULE image=native_observe_image(implementation);
-    HMODULE callerImage=native_observe_image(caller);
+    NativeThread *state=native_thread();OwnerLink *sources=NULL;int unknown=0;
+    int ready=native_capture_scope_sources(env,state,&sources,&unknown)
+            &&host_module_capture(state,implementation,&sources,NULL,NULL,&unknown)
+            &&native_capture_image_owners(implementation,&sources)
+            &&host_module_capture(state,caller,&sources,NULL,NULL,&unknown)
+            &&native_capture_image_owners(caller,&sources);
     AcquireSRWLockShared(&native_records);
-    if(state){for(unsigned i=0;i<state->depth;i++)ready=ready&&native_owner_merge(&sources,state->stack[i]->owners);
-        for(NativeLibraryScope *scope=state->library;scope;scope=scope->previous)ready=ready&&native_owner_merge(&sources,scope->library->owners);for(NativeToolingScope *scope=state->tooling;scope;scope=scope->previous)ready=ready&&native_owner_merge(&sources,scope->owners);}
-    for(NativeLibrary *library=native_libraries;library;library=library->next)if((image&&library->handle==image||callerImage&&library->handle==callerImage)&&InterlockedCompareExchange(&library->alive,0,0))ready=ready&&native_owner_merge(&sources,library->owners);
     for(Binding *binding=native_bindings;binding;binding=binding->next)if(binding->entry&&binding->entry==implementation)ready=ready&&native_owner_merge(&sources,binding->owners);
     ReleaseSRWLockShared(&native_records);
     if(!ready){native_owner_links_free(sources);native_refuse(env,"NATIVE_REGISTRATION_SOURCE_CAPACITY");return NULL;}
-    jint count=0;for(OwnerLink *p=sources;p;p=p->next)count++;
-    jclass module=native_original.FindClass(env,"java/lang/Module");jobjectArray result=module?native_original.NewObjectArray(env,count,module,NULL):NULL;
-    jint index=0;for(OwnerLink *p=sources;result&&p;p=p->next){jobject owner=native_original.NewLocalRef(env,p->owner->module);if(!owner){native_refuse(env,"NATIVE_REGISTRATION_SOURCE_UNOBSERVED");break;}native_original.SetObjectArrayElement(env,result,index++,owner);native_original.DeleteLocalRef(env,owner);}
-    if(module)native_original.DeleteLocalRef(env,module);native_owner_links_free(sources);return result;
+    jobjectArray result=native_tooling_sources(env,sources,unknown);native_owner_links_free(sources);return result;
 }
 static int native_registration_allowed(JNIEnv *env,jclass type,void *implementation,void *caller){
     if(native_original.ExceptionCheck(env))return 0;
@@ -663,15 +669,12 @@ static jint JNICALL native_register(JNIEnv *env,jclass type,const JNINativeMetho
     if(!snapshot){native_refuse(env,"RONOVA_NATIVE_METHOD_TABLE_CAPACITY");return JNI_ERR;}
     jmethodID *actual=(jmethodID*)calloc((size_t)count,sizeof(*actual));OwnerLink *owners=NULL;NativeThread *state=native_thread();
     NativeRegistration registration={actual,count,NULL,NULL,state&&state->library?state->library->library:NULL,state?state->registration:NULL};
-    if(!actual||!state||!native_capture_scope_owners(env,state,&owners)){free(actual);native_owner_links_free(owners);native_registration_free(snapshot,count);native_refuse(env,"NATIVE_REGISTRATION_SOURCE_CAPACITY");return JNI_ERR;}
-    HMODULE callerImage=native_observe_image(caller);jweak origin=native_origin(state);
-    AcquireSRWLockShared(&native_records);
-    for(NativeLibrary *library=native_libraries;library;library=library->next)if(callerImage&&library->handle==callerImage&&InterlockedCompareExchange(&library->alive,0,0)){
-        if(!native_owner_merge(&owners,library->owners)){ReleaseSRWLockShared(&native_records);free(actual);native_owner_links_free(owners);native_registration_free(snapshot,count);native_refuse(env,"NATIVE_REGISTRATION_SOURCE_CAPACITY");return JNI_ERR;}
-        if(!origin)origin=library->origin;
-        if(!registration.loading&&!InterlockedCompareExchange(&library->complete,0,0))registration.loading=library;
-    }
-    registration.owners=owners;registration.origin=origin;ReleaseSRWLockShared(&native_records);
+    HostLibraryLoad *callerLoad=NULL;
+    if(!actual||!state||!native_capture_scope_sources(env,state,&owners,&registration.unknown)
+            ||!host_module_capture(state,caller,&owners,NULL,&callerLoad,&registration.unknown)
+            ||!native_capture_image_owners(caller,&owners)){free(actual);native_owner_links_free(owners);native_registration_free(snapshot,count);native_refuse(env,"NATIVE_REGISTRATION_SOURCE_CAPACITY");return JNI_ERR;}
+    jweak origin=native_origin(state);if(!origin&&callerLoad)origin=callerLoad->origin;
+    registration.owners=owners;registration.origin=origin;
     jint result=JNI_ERR;
     for(jint i=0;i<count;i++){
         // Copy both the table and its strings before authorizing any entry. The
@@ -680,6 +683,10 @@ static jint JNICALL native_register(JNIEnv *env,jclass type,const JNINativeMetho
         if(!entry.name||!entry.signature){native_refuse(env,"RONOVA_NATIVE_METHOD_TABLE_REQUIRED");goto finished;}
         snapshot[i].name=_strdup(entry.name);snapshot[i].signature=_strdup(entry.signature);snapshot[i].fnPtr=entry.fnPtr;
         if(!snapshot[i].name||!snapshot[i].signature){native_refuse(env,"RONOVA_NATIVE_METHOD_TABLE_CAPACITY");goto finished;}
+        if(!host_module_capture(state,snapshot[i].fnPtr,&owners,NULL,NULL,&registration.unknown)
+                ||!native_capture_image_owners(snapshot[i].fnPtr,&owners)){
+            native_refuse(env,"NATIVE_REGISTRATION_SOURCE_CAPACITY");goto finished;}
+        registration.owners=owners;
         if(snapshot[i].fnPtr&&native_image(snapshot[i].fnPtr)==native_image((void*)native_register)){
             native_refuse(env,"RONOVA_NATIVE_CONTROLLER_ALIAS_REFUSED");goto finished;
         }
@@ -883,7 +890,7 @@ static void native_thread_java_end(JNIEnv *env,NativeThread *state){
         if(state->unsafeFrames[i-1].token){jobject token=state->unsafeFrames[i-1].token;state->unsafeFrames[i-1].token=NULL;
             state->control++;native_end_mutation(env,token,0);state->control--;InterlockedIncrement(&native_failures);}
         Binding *active=state->stack[i-1];state->stack[i-1]=state->entries[i-1]=NULL;
-        if(active)InterlockedDecrement(&active->active);
+        if(active){InterlockedDecrement(&active->active);host_module_binding_leave(active);}
         SecureZeroMemory(&state->unsafeFrames[i-1],sizeof(state->unsafeFrames[i-1]));
         state->depth=i-1;
     }
@@ -969,7 +976,7 @@ typedef struct NativeToolingEnv NativeToolingEnv;
 typedef struct NativeToolingSlot {
     NativeToolingEnv *environment;void *callback,*entry;OwnerLink *owners;
     jweak origin;jobjectArray sourceLease;HMODULE image,pin;volatile LONG admitted,active;int unknown,agent;
-    int heapSourceLeaseComplete;DWORD heapImageSize;
+    int sourceLeaseComplete,heapSourceLeaseComplete;DWORD heapImageSize;
     const void *argument;RUNTIME_FUNCTION unwind;int queued,releasing;struct NativeToolingSlot *next,*retireNext;
 } NativeToolingSlot;
 typedef struct NativeToolingVersion {
@@ -1068,11 +1075,29 @@ static void native_tooling_use_end(NativeToolingUse *use){
     NativeToolingEnv *record=use->environment;record->uses--;native_tooling_environment_queue_locked(record);
     ReleaseSRWLockExclusive(&native_tooling_records);
 }
+/* A native-only LoadLibrary continuation may retain this actual executing
+ * callback's prepared strong source lease, without entering JNI or inventing
+ * an attachment. It returns the existing slot hold through the normal reaper. */
+static int native_tooling_load_borrow(NativeThread *state,OwnerLink *owners,void **token){
+    if(token)*token=NULL;if(!state||!state->tooling||!state->toolingCallbackEnvironment||!token)return 0;
+    if(!TryAcquireSRWLockExclusive(&native_tooling_records))return 0;
+    NativeToolingScope *scope=state->tooling;NativeToolingSlot *chosen=NULL;
+    for(NativeToolingSlot *slot=native_tooling_slots;slot;slot=slot->next)
+        if(slot->environment==state->toolingCallbackEnvironment&&scope->owners==slot->owners
+                &&scope->origin==slot->origin&&scope->depth==state->depth){chosen=slot;break;}
+    int ready=chosen&&!native_tooling_shutdown&&chosen->admitted&&chosen->active>0&&!chosen->releasing
+            &&!chosen->unknown&&!scope->unknown&&chosen->sourceLease&&chosen->sourceLeaseComplete
+            &&!chosen->environment->closing&&!chosen->environment->disposed
+            &&host_module_sources_cover(chosen->owners,owners)&&!native_owner_stopped(owners);
+    if(ready){InterlockedIncrement(&chosen->active);chosen->environment->active++;*token=chosen;}
+    ReleaseSRWLockExclusive(&native_tooling_records);return ready;
+}
 #define TOOLING_USE(record) NativeToolingUse toolingUse __attribute__((cleanup(native_tooling_use_end)))={NULL}; \
     if(native_tooling_restricted())return JVMTI_ERROR_NOT_AVAILABLE; \
     if(!native_tooling_use_begin(record,&toolingUse))return JVMTI_ERROR_INVALID_ENVIRONMENT
 static int native_tooling_capture(JNIEnv *env,void *caller,OwnerLink **owners,jweak *origin,int *unknown){
-    NativeThread *state=native_thread();int valid=native_capture_image_owners(caller,owners);
+    NativeThread *state=native_thread();int valid=host_module_capture(state,caller,owners,NULL,NULL,unknown)
+            &&native_capture_image_owners(caller,owners);
     if(state){
         if(native_jni_ready&&env)valid=valid&&native_capture_scope_sources(env,state,owners,unknown);
         else {
@@ -1299,7 +1324,8 @@ static NativeToolingSlot *native_tooling_slot(JNIEnv *env,NativeToolingEnv *reco
     int ready=native_owner_merge(&slot->owners,writers)&&native_capture_image_owners(callback,&slot->owners);
     if(origin&&env&&native_original.NewWeakGlobalRef)slot->origin=native_original.NewWeakGlobalRef(env,origin);
     if(slot->owners&&env&&native_original.NewGlobalRef){jobjectArray lease=native_tooling_writers(env,slot->owners);
-        if(lease){slot->sourceLease=(jobjectArray)native_original.NewGlobalRef(env,lease);native_original.DeleteLocalRef(env,lease);}ready=ready&&slot->sourceLease;}
+        if(lease){slot->sourceLeaseComplete=!unknown&&host_module_sources_complete(env,lease);
+            slot->sourceLease=(jobjectArray)native_original.NewGlobalRef(env,lease);native_original.DeleteLocalRef(env,lease);}ready=ready&&slot->sourceLease;}
     slot->image=native_image(callback);
     if(slot->image&&!GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS,(LPCSTR)callback,&slot->pin))ready=0;
     if(!slot->image)slot->unknown=1;
@@ -1361,6 +1387,7 @@ static DWORD WINAPI native_tooling_retirement_worker(void *argument){
              * daemon. Never carry its old JNIEnv into another cleanup. */
             if(!native_tooling_retirement_jni(&env)){InterlockedIncrement(&native_tooling_failures);break;}
             host_thread_workers_reap(&env);if(!env)break;
+            host_module_loads_reap(&env);if(!env)break;
             if(!definitionsReaped){native_tooling_definitions_reap(env);definitionsReaped=1;
                 if(!native_tooling_retirement_jni(&env)){InterlockedIncrement(&native_tooling_failures);break;}}
             AcquireSRWLockExclusive(&native_tooling_records);

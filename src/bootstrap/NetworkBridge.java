@@ -26,6 +26,10 @@ public final class NetworkBridge {
     private record Registry(Class<?> type,Ref<Map<?,?>> instances){}
     private record QueueRef(Class<?> type,String field,Ref<Queue<?>> queue){}
     private record Write(Module[] modules,Ref<Object> context,Ref<Object> message,Ref<Object> promise){}
+    private static final class OutboundRejected extends java.util.concurrent.CancellationException{
+        private static final long serialVersionUID=1L;
+        private OutboundRejected(){super("NETWORK_OUTBOUND_REJECTED");}
+    }
     private static final class Ref<T> extends WeakReference<T>{
         Ref(T value){super(value);}
         public void clear(){if(writer())super.clear();}
@@ -167,6 +171,20 @@ public final class NetworkBridge {
     }
     public static boolean packetAllowed(Object message){boundary();return packet(message)&&!ControlBridge.stoppedEffects();}
     public static boolean outboundAllowed(Object message){boundary();boolean allowed=packet(message)&&!ControlBridge.stoppedEffects();if(!allowed)synchronized(CHANNELS){dropped++;}return allowed;}
+    public static Throwable outboundRejected(){
+        var frame=boundary();String method=frame.getMethodName(),descriptor=frame.getDescriptor();
+        if(!frame.getDeclaringClass().getName().equals("io.netty.channel.AbstractChannelHandlerContext")
+                ||!(method.equals("write")&&descriptor.equals("(Ljava/lang/Object;ZLio/netty/channel/ChannelPromise;)V")
+                ||(method.equals("invokeWrite")||method.equals("invokeWriteAndFlush"))&&descriptor.equals("(Ljava/lang/Object;Lio/netty/channel/ChannelPromise;)V")))throw new SecurityException("ACTUAL_REJECTED_NETTY_WRITE_REQUIRED");
+        return new OutboundRejected();
+    }
+    /** The ordinary failure listener also delivers rejected writes to the shared game connection. */
+    public static boolean outboundFailureUnhandled(Object failure){
+        var frame=boundary();
+        if(!frame.getDeclaringClass().getName().equals("net.minecraft.network.Connection")||!frame.getMethodName().equals("exceptionCaught")
+                ||!frame.getDescriptor().equals("(Lio/netty/channel/ChannelHandlerContext;Ljava/lang/Throwable;)V"))throw new SecurityException("ACTUAL_CONNECTION_FAILURE_BOUNDARY_REQUIRED");
+        return !(failure instanceof OutboundRejected);
+    }
     public static void packetEncoded(Object packet,Object buffer){
         boundary();Module[] origins=origins(packet),owners;synchronized(CHANNELS){owners=union(PACKETS.get(new Key(packet,false)),origins);}
         owners=union(owners,routed(packet));synchronized(CHANNELS){record(BUFFERS,buffer,owners);}

@@ -968,6 +968,19 @@ static HMODULE load_module_call(void *entry,unsigned kind,const char *a,const wc
         default:return ((LoadModuleExW)entry)(w,NULL,flags);
     }
 }
+static const char *load_module_resource(void *entry,unsigned kind,const char *a,const wchar_t *w,DWORD flags,uintptr_t expectedTag){
+    SetLastError(0x524e0056);
+    HMODULE actual=load_module_call(entry,kind,a,w,flags);DWORD error=GetLastError();
+    uintptr_t tag=(uintptr_t)actual&3;
+    fprintf(stderr,"HOST_MODULE_RESOURCE_ACTUAL api=LoadLibraryEx%s mode=%s module=%p tag=%lu flags=%lu actualLastError=%lu\n",
+            kind==2?"A":"W",kind==2?"import":"dynamic",(void*)actual,(unsigned long)tag,(unsigned long)flags,(unsigned long)error);
+    if(!actual)return "HOST_MODULE_RESOURCE_LOAD_REFUSED";
+    /* Inspect the returned handle, not an assumed flag-to-code-image relation.
+     * Resource handles go only to their original FreeLibrary; no export runs. */
+    int tagged=(tag&expectedTag)!=0;
+    if(!FreeLibrary(actual))return "HOST_MODULE_RESOURCE_REFERENCE_RELEASE";
+    return tagged?NULL:"HOST_MODULE_RESOURCE_RETURN_TAG_CHANGED";
+}
 JNIEXPORT void JNICALL Java_dev_ronova_pro_AuditFixCheck_hostModuleLoad0(JNIEnv *env,jclass check){
     (void)check;HMODULE kernel=GetModuleHandleW(L"kernel32.dll");
     const char *names[]={"LoadLibraryA","LoadLibraryW","LoadLibraryExA","LoadLibraryExW"};
@@ -1001,9 +1014,25 @@ JNIEXPORT void JNICALL Java_dev_ronova_pro_AuditFixCheck_hostModuleLoad0(JNIEnv 
                     names[kind],mode?"dynamic":"import",(void*)kernel,(unsigned long)error,(unsigned long)invalid,(unsigned long)flags);
         }
     }
+    if(!failure){
+        HMODULE fixture=NULL;wchar_t fixturePath[MAX_PATH];
+        if(!GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS|GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                (LPCSTR)(uintptr_t)load_module_call,&fixture))failure="HOST_MODULE_RESOURCE_ACTUAL_FIXTURE_IMAGE";
+        DWORD length=failure?0:GetModuleFileNameW(fixture,fixturePath,MAX_PATH);
+        if(!failure&&(!length||length>=MAX_PATH))failure="HOST_MODULE_RESOURCE_ACTUAL_FIXTURE_PATH";
+        // Reuse the temporary input as a copy of this real PE, never as a new
+        // executable child or a manufactured JNI/source registration.
+        if(!failure&&!CopyFileW(fixturePath,invalidW,FALSE))failure="HOST_MODULE_RESOURCE_PE_COPY";
+        if(!failure)failure=load_module_resource(entries[2],2,invalidA,invalidW,LOAD_LIBRARY_AS_DATAFILE,1);
+        if(!failure){
+            void *dynamic=(void*)GetProcAddress(kernel,"LoadLibraryExW");
+            if(!load_private_entry(dynamic))failure="HOST_MODULE_RESOURCE_DYNAMIC_ENTRY_UNCONTROLLED";
+            else failure=load_module_resource(dynamic,3,invalidA,invalidW,LOAD_LIBRARY_AS_IMAGE_RESOURCE,2);
+        }
+    }
     if(!DeleteFileW(invalidW)&&!failure)failure="HOST_MODULE_INVALID_IMAGE_REMOVE";
     if(failure){load_thread_fail(env,failure);return;}
-    fprintf(stderr,"HOST_MODULE_PRODUCER_ADMISSION_NOTRUN no_actual_Mod_producer no_fabricated_sources; child_DLL_sources_and_preobservation_loader_window_remain_uncontrolled\n");
+    fprintf(stderr,"HOST_MODULE_PRODUCER_AND_NEW_CHILD_SOURCES_NOTRUN no_actual_Mod_producer no_new_executable_child_DLL no_fabricated_sources; preobservation_loader_window_not_covered\n");
 }
 JNIEXPORT void JNICALL Java_dev_ronova_pro_AuditFixCheck_hostThreadCreate0(JNIEnv *env,jclass check,jclass type,jobject payload){
     (void)check;JavaVM *vm=NULL;jclass actual=payload?(*env)->GetObjectClass(env,payload):NULL;

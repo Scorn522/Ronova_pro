@@ -11,6 +11,7 @@ typedef struct HostThreadWorker {
     void *start,*argument;int kind,unknown,wrapped;
     OwnerLink *owners;jobjectArray sourceLease;HMODULE image,pin;
     HostCrtThreadTarget *crt;NativeLibrary *library;void *sourceAnchor;struct HostThreadWorker *sourceParent;
+    HostLibraryLoad *sourceLoad;
     NativeThread *thread;NativeToolingScope scope;HANDLE monitor,monitorExtra;
     volatile LONG calling,created,started,returned,exited,closed,releasing;
     volatile LONG lifecycleGap,cleanupGap;LONG borrowers;DWORD error;
@@ -69,6 +70,33 @@ static NativeLibrary *host_thread_worker_library(NativeThread *state,HMODULE ima
     HostThreadWorker *worker=state?state->hostWorker:NULL;
     NativeLibrary *library=worker?worker->library:NULL;
     return library&&worker->wrapped&&worker->image==image&&host_library_current(library,image)?library:NULL;
+}
+static HostLibraryLoad *host_thread_worker_child(NativeThread *state,HMODULE image){
+    HostThreadWorker *worker=state?state->hostWorker:NULL;
+    HostLibraryLoad *load=worker&&worker->wrapped?worker->sourceLoad:NULL;
+    return load&&(!image||worker->image==image)?load:NULL;
+}
+static int host_thread_worker_load_borrow(NativeThread *state,OwnerLink *owners,HostThreadWorker **anchor){
+    if(anchor)*anchor=NULL;if(!state||!state->hostWorker||!anchor)return 0;
+    AcquireSRWLockExclusive(&host_records);HostThreadWorker *parent=state->hostWorker;
+    while(parent&&parent->sourceParent)parent=parent->sourceParent;
+    int ready=parent&&!parent->closed&&!parent->releasing&&!parent->unknown
+            &&(parent->sourceLease||parent->sourceAnchor||parent->sourceLoad)
+            &&host_module_sources_cover(parent->owners,owners);
+    if(ready){parent->borrowers++;*anchor=parent;}ReleaseSRWLockExclusive(&host_records);return ready;
+}
+static void host_thread_worker_load_drop(HostThreadWorker *anchor){
+    if(!anchor)return;AcquireSRWLockExclusive(&host_records);anchor->borrowers--;
+    ReleaseSRWLockExclusive(&host_records);native_thread_worker_wake();
+}
+static int host_thread_worker_borrow_child(NativeThread *state,HostThreadWorker *worker,void *start){
+    HostLibraryLoad *load=NULL;int unknown=0;
+    if(!host_module_capture(state,start,&worker->owners,NULL,&load,&unknown)||unknown||!load)return 0;
+    AcquireSRWLockExclusive(&host_imports);
+    int ready=!load->retired&&!load->releasing&&!load->unknown&&load->leaseComplete
+            &&host_module_sources_cover(load->owners,worker->owners);
+    if(ready){InterlockedIncrement(&load->borrowers);worker->sourceLoad=load;}
+    ReleaseSRWLockExclusive(&host_imports);return ready;
 }
 static int host_thread_worker_start_sources(NativeLibrary *selected,NativeThread *state,
         HMODULE image,void *start,OwnerLink **owners){
@@ -145,11 +173,14 @@ static HostThreadWorker *host_thread_worker_prepare(HostImport *entry,NativeThre
          */
         int nativeOnly=state&&(state->vmDetaching||state->vmThreadEnding);
         int attached=!nativeOnly&&native_vm&&(*native_vm)->GetEnv(native_vm,(void**)&env,JNI_VERSION_1_8)==JNI_OK;
+        /* An actual child receipt can carry the full already retained lease
+         * into a detached worker. The source token is distinct from heap slots. */
+        int child=host_thread_worker_borrow_child(state,worker,start);
         if(attached){
             if(!host_thread_worker_keep_sources(env,worker)){
                 worker->error=ERROR_NOT_ENOUGH_MEMORY;*refused=1;return worker;
             }
-        }else if(!host_thread_worker_borrow_sources(state,worker)){
+        }else if(!child&&!host_thread_worker_borrow_sources(state,worker)){
             worker->lifecycleGap=1;return worker;
         }
     }
@@ -269,7 +300,7 @@ static int host_thread_workers_pending(void){
     for(HostThreadWorker *worker=host_thread_worker_head();worker;worker=worker->next)
         if(!worker->closed&&!worker->cleanupGap
                 &&(worker->calling||worker->wrapped&&(worker->monitor||worker->exited||!worker->created)
-                ||!worker->created&&(worker->pin||worker->sourceLease||worker->sourceParent||worker->sourceAnchor))){pending=1;break;}
+                ||!worker->created&&(worker->pin||worker->sourceLease||worker->sourceParent||worker->sourceAnchor||worker->sourceLoad))){pending=1;break;}
     ReleaseSRWLockExclusive(&host_records);return pending;
 }
 /* Only the existing attached daemon calls this. It never waits for a worker,
@@ -339,6 +370,9 @@ static void host_thread_workers_reap(JNIEnv **environment){
         env=*environment;
         if(worker->sourceLease)native_original.DeleteGlobalRef(env,worker->sourceLease);
         if(worker->sourceAnchor)native_thread_worker_heap_drop(worker->sourceAnchor);
+        if(worker->sourceLoad){AcquireSRWLockExclusive(&host_imports);
+            InterlockedDecrement(&worker->sourceLoad->borrowers);worker->sourceLoad=NULL;
+            ReleaseSRWLockExclusive(&host_imports);native_thread_worker_wake();}
         AcquireSRWLockExclusive(&host_records);
         worker->pin=NULL;worker->monitor=NULL;worker->sourceLease=NULL;worker->sourceAnchor=NULL;
         if(worker->sourceParent){worker->sourceParent->borrowers--;worker->sourceParent=NULL;}

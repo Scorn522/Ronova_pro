@@ -57,7 +57,7 @@ public final class ClientWorldHooks {
         private void pro$time(CallbackInfo ci){if(ClientPresence.worldClockFrozen((ClientLevel)(Object)this))ci.cancel();}
         @Inject(method="tickNonPassenger",at=@At("HEAD"),cancellable=true)
         private void pro$entity(Entity entity,CallbackInfo ci){if(ClientPresence.worldFrozen(entity)){for(Entity passenger:entity.getPassengers())tickPassenger(entity,passenger);ci.cancel();}}
-        @Inject(method="tickPassenger",at=@At("HEAD"),cancellable=true)
+        @Inject(method="tickPassenger",at=@At(value="INVOKE",target="Lnet/minecraft/world/entity/Entity;setOldPosAndRot()V"),cancellable=true)
         private void pro$passenger(Entity vehicle,Entity passenger,CallbackInfo ci){if(ClientPresence.worldFrozen(passenger)){for(Entity nested:passenger.getPassengers())tickPassenger(passenger,nested);ci.cancel();}}
         @Inject(method="doAnimateTick",at=@At(value="INVOKE",target="Lnet/minecraft/core/BlockPos$MutableBlockPos;set(III)Lnet/minecraft/core/BlockPos$MutableBlockPos;",shift=At.Shift.AFTER),cancellable=true)
         private void pro$ambient(int x,int y,int z,int range,RandomSource random,Block marker,BlockPos.MutableBlockPos sampled,CallbackInfo ci){

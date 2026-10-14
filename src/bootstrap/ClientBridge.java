@@ -21,6 +21,14 @@ public final class ClientBridge {
     private static final Map<Key,ReloadWork> RELOAD_WORK=new HashMap<>();
     private static final Map<Key,UiFields> UI_OWNERS=new HashMap<>();
     private static final ThreadLocal<UiRetirement> UI_RETIRING=new ThreadLocal<>();
+    private static final String SCREEN="net.minecraft.client.gui.screens.Screen",CONTAINER="net.minecraft.client.gui.components.events.AbstractContainerEventHandler";
+    private static final String WIDGET="Lnet/minecraft/client/gui/components/events/GuiEventListener;",RENDERABLE="Lnet/minecraft/client/gui/components/Renderable;";
+    private static final Map<Key,ScreenRegistry> SCREEN_WIDGETS=new HashMap<>();
+    private static final ThreadLocal<ScreenCall> SCREEN_ADDING=new ThreadLocal<>();
+    private static final ThreadLocal<WidgetRetirement> WIDGET_RETIRING=new ThreadLocal<>();
+    private static final ClassValue<ScreenFields> SCREEN_FIELDS=new ClassValue<>(){
+        protected ScreenFields computeValue(Class<?> type){try{return new ScreenFields(type);}catch(ReflectiveOperationException unavailable){throw new IllegalStateException("CLIENT_SCREEN_FIELDS_UNAVAILABLE",unavailable);}}
+    };
     private static final String TOAST_COMPONENT="net.minecraft.client.gui.components.toasts.ToastComponent",TOAST_INSTANCE=TOAST_COMPONENT+"$ToastInstance";
     private static final String TOAST="Lnet/minecraft/client/gui/components/toasts/Toast;";
     private static final Map<Key,ToastRegistry> TOASTS=new HashMap<>();
@@ -115,6 +123,44 @@ public final class ClientBridge {
         boolean ended;
         UiCall(Object owner,Object input,Object before,UiFields fields,boolean screen,boolean retirement,String method){this.owner=owner;this.input=input;this.before=before;this.fields=fields;this.screen=screen;this.retirement=retirement;this.method=method;thread=Thread.currentThread();}
     }
+    private static final class ScreenFields {
+        final Class<?> type,container;final Field minecraft,children,renderables,narratables,focused,dragging,lastNarratable;final UiFields ui;
+        ScreenFields(Class<?> type)throws ReflectiveOperationException{
+            this.type=type;container=type.getSuperclass();
+            if(!type.getName().equals(SCREEN)||!role(type)||container==null||!container.getName().equals(CONTAINER)||!role(container))throw new IllegalStateException("CLIENT_SCREEN_ACTUAL_BASE_REQUIRED");
+            minecraft=uiField(type,"minecraft","f_96541_","Lnet/minecraft/client/Minecraft;",false);
+            children=uiField(type,"children","f_96540_","Ljava/util/List;",false);renderables=uiField(type,"renderables","f_169369_","Ljava/util/List;",false);
+            narratables=uiField(type,"narratables","f_169368_","Ljava/util/List;",false);lastNarratable=uiField(type,"lastNarratable","f_169365_","Lnet/minecraft/client/gui/narration/NarratableEntry;",false);
+            focused=uiField(container,"focused","f_94673_",WIDGET,false);dragging=uiField(container,"isDragging","f_94674_","Z",false);
+            if(!Modifier.isFinal(children.getModifiers())||!Modifier.isFinal(renderables.getModifiers())||!Modifier.isFinal(narratables.getModifiers())
+                    ||container.getModule()!=type.getModule()||!role(minecraft.getType()))throw new IllegalStateException("CLIENT_SCREEN_LAYOUT_CHANGED");
+            ui=UI_FIELDS.get(minecraft.getType());overlayProtect(this,minecraft,children,renderables,narratables,focused,dragging,lastNarratable);
+        }
+    }
+    private static final class ScreenRegistry {
+        final ScreenFields fields;final Ref<Object> owner;final Ref<List<?>> children,renderables,narratables;final Map<Key,WidgetSlot> widgets=new HashMap<>();
+        int publications;String pending="";
+        ScreenRegistry(ScreenFields fields,Object owner,List<?> children,List<?> renderables,List<?> narratables){
+            this.fields=fields;this.owner=new Ref<>(owner);this.children=new Ref<>(children);this.renderables=new Ref<>(renderables);this.narratables=new Ref<>(narratables);
+            overlayProtect(this,this.owner,this.children,this.renderables,this.narratables,widgets);
+        }
+    }
+    private static final class WidgetSlot {
+        final Ref<Object> widget;final int[] counts=new int[3];Module[] modules;boolean unknown,retired;String pending="";
+        WidgetSlot(Object widget,Module[] modules,boolean unknown){this.widget=new Ref<>(widget);this.modules=modules;this.unknown=unknown;overlayProtect(this,this.widget,counts,modules);}
+    }
+    private static final class ScreenCall {
+        final ScreenRegistry registry;final Object owner,widget;final int[] before;final boolean rootedBefore;final Scope scope;final ScreenCall previous=SCREEN_ADDING.get();
+        final Class<?> type;final String method,descriptor;final Thread thread=Thread.currentThread();Module[] modules;boolean unknown,ended;
+        ScreenCall(ScreenRegistry registry,Object owner,Object widget,int[] before,boolean rootedBefore,Module[] modules,boolean unknown,Scope scope,StackWalker.StackFrame at){
+            this.registry=registry;this.owner=owner;this.widget=widget;this.before=before;this.rootedBefore=rootedBefore;this.modules=modules;this.unknown=unknown;this.scope=scope;
+            type=at.getDeclaringClass();method=at.getMethodName();descriptor=at.getDescriptor();overlayProtect(this,before,modules);
+        }
+    }
+    private static final class WidgetRetirement {
+        final ScreenRegistry registry;final WidgetSlot slot;final Object owner,widget;final Thread thread=Thread.currentThread();boolean ended;
+        WidgetRetirement(ScreenRegistry registry,WidgetSlot slot,Object owner,Object widget){this.registry=registry;this.slot=slot;this.owner=owner;this.widget=widget;overlayProtect(this);}
+    }
     private static final class SoundStop {
         final Object handle,channel,access;final Class<?> handleType,channelType,accessType;final Module[] modules;
         final int source;final Object initialized,library;final Class<?> libraryType;final long context;final java.util.concurrent.atomic.AtomicBoolean stopped=new java.util.concurrent.atomic.AtomicBoolean(),deleted=new java.util.concurrent.atomic.AtomicBoolean(),requested=new java.util.concurrent.atomic.AtomicBoolean();volatile boolean shared;volatile String pending="";
@@ -134,13 +180,14 @@ public final class ClientBridge {
         TextureRetirement(Object object,Module[] modules,Object manager,TextureRegistry registry){this.object=object;this.modules=modules;this.manager=new Ref<>(manager);this.registry=registry;}
     }
     private static final class Scope {
-        final Scope parent;final Module[] sources;final Class<?> type;final String method;final Thread thread;
-        final OverlaySlot overlay;final Object toast,toastInstance;final boolean sourcesUnknown;boolean ended;
+        final Scope parent;Module[] sources;final Class<?> type;final String method;final Thread thread;
+        final OverlaySlot overlay;final Object toast,toastInstance;boolean sourcesUnknown;final ScreenRegistry screen;final WidgetSlot widget;boolean ended;
         Scope(Scope parent,Module[] sources,StackWalker.StackFrame frame){this(parent,sources,frame,null);}
         Scope(Scope parent,Module[] sources,StackWalker.StackFrame frame,OverlaySlot overlay){this(parent,sources,frame,overlay,null);}
         Scope(Scope parent,Module[] sources,StackWalker.StackFrame frame,OverlaySlot overlay,Object toast){this(parent,sources,frame,overlay,toast,null);}
         Scope(Scope parent,Module[] sources,StackWalker.StackFrame frame,OverlaySlot overlay,Object toast,Object toastInstance){this(parent,sources,frame,overlay,toast,toastInstance,false);}
-        Scope(Scope parent,Module[] sources,StackWalker.StackFrame frame,OverlaySlot overlay,Object toast,Object toastInstance,boolean sourcesUnknown){this.parent=parent;this.sources=sources;type=frame.getDeclaringClass();method=frame.getMethodName();thread=Thread.currentThread();this.overlay=overlay;this.toast=toast;this.toastInstance=toastInstance;this.sourcesUnknown=sourcesUnknown;}
+        Scope(Scope parent,Module[] sources,StackWalker.StackFrame frame,OverlaySlot overlay,Object toast,Object toastInstance,boolean sourcesUnknown){this(parent,sources,frame,overlay,toast,toastInstance,sourcesUnknown,null,null);}
+        Scope(Scope parent,Module[] sources,StackWalker.StackFrame frame,OverlaySlot overlay,Object toast,Object toastInstance,boolean sourcesUnknown,ScreenRegistry screen,WidgetSlot widget){this.parent=parent;this.sources=sources;type=frame.getDeclaringClass();method=frame.getMethodName();thread=Thread.currentThread();this.overlay=overlay;this.toast=toast;this.toastInstance=toastInstance;this.sourcesUnknown=sourcesUnknown;this.screen=screen;this.widget=widget;}
     }
     private static final class Ref<T> extends WeakReference<T>{
         Ref(T object){super(object);}
@@ -218,7 +265,11 @@ public final class ClientBridge {
     private static boolean exclusive(Module[] sources){if(sources.length==0)return false;for(Module module:sources)if(!ControlBridge.modStopped(module))return false;return true;}
     private static Module[] sources(Object object){Module[] real=origins(object);synchronized(SOURCES){return union(real,SOURCES.get(new Key(object,false)));}}
     private static void record(Object object,Module[] modules){if(object==null)return;synchronized(SOURCES){reap();Module[] sources=union(SOURCES.get(new Key(object,false)),modules);if(sources.length!=0){SOURCES.put(new Key(object,true),sources);CodeSourceBridge.contributionControl(sources);}}}
-    public static boolean allowed(Object contribution){boundary();return !stopped(sources(contribution))&&!ControlBridge.stoppedEffects();}
+    public static boolean allowed(Object contribution){
+        boundary();WidgetSlot slot=currentWidget(contribution);
+        if(slot!=null&&(slot.retired||exclusive(widgetSources(slot))&&!slot.unknown))return false;
+        return !stopped(sources(contribution))&&!ControlBridge.stoppedEffects();
+    }
     private static Field uiField(Class<?> type,String named,String installed,String descriptor,boolean staticMember)throws ReflectiveOperationException{
         Field result;try{result=type.getDeclaredField(named);}catch(NoSuchFieldException production){result=type.getDeclaredField(installed);}
         if(Modifier.isStatic(result.getModifiers())!=staticMember||!result.getType().descriptorString().equals(descriptor))throw new IllegalStateException("CLIENT_UI_FIELD_TYPES_CHANGED");result.setAccessible(true);return result;
@@ -284,13 +335,186 @@ public final class ClientBridge {
             fields=uiOwner(owner,frame);if(fields.thread.get(owner)!=Thread.currentThread())throw new IllegalStateException("CLIENT_UI_MAIN_THREAD_REQUIRED");
         }catch(ReflectiveOperationException|IllegalStateException unavailable){uiFailure(owner,new Module[0],unavailable);return;}
         UiRetirement active=UI_RETIRING.get();if(active!=null&&active.owner==owner)return;
-        retireOverlays();retirePresentation(owner,fields,false);retirePresentation(owner,fields,true);retireToasts(owner);
+        retireOverlays();retirePresentation(owner,fields,false);retirePresentation(owner,fields,true);retireToasts(owner);retireWidgets(owner);
+    }
+    private static ScreenRegistry screenRegistry(Object owner,Class<?> type)throws ReflectiveOperationException{
+        if(owner==null||actualBase(owner,SCREEN)!=type)throw new SecurityException("ACTUAL_SCREEN_OWNER_REQUIRED");
+        synchronized(SOURCES){ScreenRegistry prior=SCREEN_WIDGETS.get(new Key(owner,false));if(prior!=null)return prior;}
+        ScreenFields fields=SCREEN_FIELDS.get(type);Object children=fields.children.get(owner),renderables=fields.renderables.get(owner),narratables=fields.narratables.get(owner);
+        for(Object list:new Object[]{children,renderables,narratables})if(list==null||list.getClass()!=ArrayList.class)throw new IllegalStateException("CLIENT_SCREEN_ACTUAL_LISTS_REQUIRED");
+        ScreenRegistry registry=new ScreenRegistry(fields,owner,(List<?>)children,(List<?>)renderables,(List<?>)narratables);
+        synchronized(SOURCES){ScreenRegistry prior=SCREEN_WIDGETS.get(new Key(owner,false));if(prior!=null)return prior;SCREEN_WIDGETS.put(new Key(owner,true),registry);}return registry;
+    }
+    private static boolean screenLists(ScreenRegistry registry)throws ReflectiveOperationException{
+        Object owner=registry.owner.get();return owner!=null&&registry.fields.children.get(owner)==registry.children.get()
+                &&registry.fields.renderables.get(owner)==registry.renderables.get()&&registry.fields.narratables.get(owner)==registry.narratables.get();
+    }
+    private static int identityCount(List<?> list,Object value){int count=0;for(int index=0;index<list.size();index++)if(list.get(index)==value)count++;return count;}
+    private static int[] widgetCounts(ScreenRegistry registry,Object widget)throws ReflectiveOperationException{
+        if(!screenLists(registry))throw new IllegalStateException("CLIENT_SCREEN_ACTUAL_LISTS_CHANGED");
+        return new int[]{identityCount(registry.children.get(),widget),identityCount(registry.renderables.get(),widget),identityCount(registry.narratables.get(),widget)};
+    }
+    public static void screenConstructed(Object owner){
+        var at=boundary();if(!clientMember(at,SCREEN,"<init>","<init>","(Lnet/minecraft/network/chat/Component;)V"))throw new SecurityException("ACTUAL_SCREEN_CONSTRUCTION_REQUIRED");
+        try{screenRegistry(owner,at.getDeclaringClass());}catch(ReflectiveOperationException|IllegalStateException unavailable){uiFailure(owner,new Module[0],unavailable);}
+    }
+    private static boolean screenAddition(StackWalker.StackFrame at){
+        return clientMember(at,SCREEN,"addRenderableWidget","m_142416_","("+WIDGET+")"+WIDGET)
+                ||clientMember(at,SCREEN,"addWidget","m_7787_","("+WIDGET+")"+WIDGET)
+                ||clientMember(at,SCREEN,"addRenderableOnly","m_169394_","("+RENDERABLE+")"+RENDERABLE)
+                ||clientMember(at,SCREEN,"addEventWidget","addEventWidget","("+WIDGET+")V");
+    }
+    public static Object screenAdding(Object owner,Object widget){
+        var at=boundary();if(!screenAddition(at))throw new SecurityException("ACTUAL_SCREEN_REGISTRATION_REQUIRED");
+        Module[] actual=ControlBridge.objectSources(widget),invoking=ControlBridge.invokingSources(),modules=union(origins(widget),invoking,currentSources());
+        boolean unknown=ControlBridge.objectSourceUnknown(widget)||ControlBridge.sourceUnknown()||toastNullSource(actual)||toastNullSource(invoking);
+        if(stopped(modules)||ControlBridge.stoppedEffects())return Boolean.FALSE;ScreenRegistry registry=null;int[] before=null;boolean rootedBefore=false;
+        try{
+            registry=screenRegistry(owner,at.getDeclaringClass());before=widgetCounts(registry,widget);Object client=registry.fields.minecraft.get(owner);
+            rootedBefore=registry.fields.focused.get(owner)==widget||registry.fields.lastNarratable.get(owner)==widget;
+            if(client!=null&&(registry.fields.ui.instance.get(null)!=client||registry.fields.ui.thread.get(client)!=Thread.currentThread()))unknown=true;
+        }catch(ReflectiveOperationException|IllegalStateException unavailable){registry=null;before=null;unknown=true;uiFailure(owner,modules,unavailable);}
+        Scope scope=new Scope(CURRENT.get(),modules,at,null,null,null,unknown,registry,null);
+        synchronized(SOURCES){ACTIVE.add(scope);if(registry!=null)registry.publications++;overlayProtect(scope,scope.sources);}CURRENT.set(scope);
+        ScreenCall call=new ScreenCall(registry,owner,widget,before,rootedBefore,modules,unknown,scope,at);SCREEN_ADDING.set(call);return call;
+    }
+    private static ScreenCall screenCall(Object token,StackWalker.StackFrame at){
+        if(!(token instanceof ScreenCall call)||call.thread!=Thread.currentThread()||call.type!=at.getDeclaringClass()||!call.method.equals(at.getMethodName())
+                ||!call.descriptor.equals(at.getDescriptor())||call.ended||SCREEN_ADDING.get()!=call)throw new SecurityException("ACTUAL_SCREEN_PUBLICATION_CALL_REQUIRED");return call;
+    }
+    public static boolean screenWriting(Object list,Object widget,Object token){
+        var at=boundary();ScreenCall call=screenCall(token,at);if(widget!=call.widget)throw new SecurityException("ACTUAL_SCREEN_PUBLICATION_VALUE_REQUIRED");
+        if(call.registry!=null&&list!=call.registry.children.get()&&list!=call.registry.renderables.get()&&list!=call.registry.narratables.get()){
+            call.registry.pending="CLIENT_SCREEN_ACTUAL_LISTS_CHANGED";call.unknown=true;call.scope.sourcesUnknown=true;
+        }
+        return !stopped(union(call.modules,origins(widget)))&&!ControlBridge.stoppedEffects();
+    }
+    public static void screenAdded(Object token){
+        var at=boundary();ScreenCall call=screenCall(token,at);
+        try{if(call.registry!=null&&call.before!=null){
+            Module[] actual=ControlBridge.objectSources(call.widget);call.modules=union(call.modules,origins(call.widget));
+            call.unknown|=ControlBridge.objectSourceUnknown(call.widget)||toastNullSource(actual);int[] after=widgetCounts(call.registry,call.widget);
+            ScreenCall outer=call.previous;while(outer!=null&&(outer.registry!=call.registry||outer.widget!=call.widget))outer=outer.previous;
+            synchronized(SOURCES){
+                if(outer!=null){outer.modules=union(outer.modules,call.modules);outer.unknown|=call.unknown;outer.scope.sources=union(outer.scope.sources,call.modules);outer.scope.sourcesUnknown|=call.unknown;overlayProtect(outer.modules,outer.scope.sources);}
+                else{
+                    WidgetSlot slot=call.registry.widgets.get(new Key(call.widget,false));
+                    // A newly observed registration after every old row/root is gone begins its own association.
+                    if(slot!=null&&!call.rootedBefore&&Arrays.stream(call.before).noneMatch(count->count!=0)&&Arrays.stream(slot.counts).noneMatch(count->count!=0))slot=null;
+                    if(slot==null){slot=new WidgetSlot(call.widget,call.modules,call.unknown);call.registry.widgets.put(new Key(call.widget,true),slot);}
+                    else{slot.modules=union(slot.modules,call.modules);slot.unknown|=call.unknown;overlayProtect((Object)slot.modules);}
+                    // A preexisting, unobserved occurrence cannot be assigned to this publication's actor.
+                    if(!Arrays.equals(slot.counts,call.before))slot.unknown=true;
+                    for(int index=0;index<after.length;index++){if(after[index]<call.before[index])slot.unknown=true;slot.counts[index]=after[index];}
+                    if(Arrays.stream(after).anyMatch(count->count!=0))slot.retired=false;
+                }
+            }
+        }}catch(ReflectiveOperationException|RuntimeException unavailable){if(call.registry!=null)call.registry.pending="CLIENT_SCREEN_PUBLICATION_CAPTURE_PENDING";uiFailure(call.owner,call.modules,unavailable);}
+        finally{
+            call.ended=true;synchronized(SOURCES){if(call.registry!=null)call.registry.publications--;}
+            if(call.previous==null)SCREEN_ADDING.remove();else SCREEN_ADDING.set(call.previous);exit(call.scope);
+        }
+    }
+    public static void screenWidgetsRemoved(Object owner){
+        var at=boundary();if(!clientMember(at,SCREEN,"removeWidget","m_169411_","("+WIDGET+")V")&&!clientMember(at,SCREEN,"clearWidgets","m_169413_","()V"))throw new SecurityException("ACTUAL_SCREEN_REMOVAL_REQUIRED");
+        ScreenRegistry registry;synchronized(SOURCES){registry=SCREEN_WIDGETS.get(new Key(owner,false));}if(registry==null)return;
+        try{synchronized(SOURCES){for(WidgetSlot slot:registry.widgets.values()){
+            Object widget=slot.widget.get();if(widget==null)continue;int[] after=widgetCounts(registry,widget);
+            for(int index=0;index<after.length;index++){if(after[index]>slot.counts[index])slot.unknown=true;slot.counts[index]=after[index];}
+        }}}catch(ReflectiveOperationException|RuntimeException unavailable){registry.pending="CLIENT_SCREEN_REMOVAL_CAPTURE_PENDING";}
+    }
+    private static ScreenRegistry currentScreen(){if(CURRENT==null)return null;for(Scope scope=CURRENT.get();scope!=null;scope=scope.parent)if(!scope.ended&&scope.screen!=null)return scope.screen;return null;}
+    private static WidgetSlot currentWidget(Object widget){
+        if(widget==null)return null;ScreenRegistry registry=currentScreen();if(registry==null||registry.owner.get()==widget)return null;
+        synchronized(SOURCES){WidgetSlot slot=registry.widgets.get(new Key(widget,false));if(slot==null)return null;
+            try{
+                int[] rows=widgetCounts(registry,widget);Object owner=registry.owner.get();boolean rooted=registry.fields.focused.get(owner)==widget||registry.fields.lastNarratable.get(owner)==widget;
+                if(Arrays.stream(rows).noneMatch(count->count!=0)&&!rooted)return null;
+                if(!Arrays.equals(rows,slot.counts)||slot.retired){slot.unknown=true;slot.retired=false;slot.pending="CLIENT_SCREEN_UNOBSERVED_WIDGET_ROWS";}return slot;
+            }
+            catch(ReflectiveOperationException|RuntimeException unavailable){registry.pending="CLIENT_SCREEN_ACTUAL_LISTS_CHANGED";return null;}
+        }
+    }
+    private static Module[] widgetSources(WidgetSlot slot){
+        Object widget=slot.widget.get();Module[] actual=ControlBridge.objectSources(widget);
+        synchronized(SOURCES){slot.unknown|=widget==null||ControlBridge.objectSourceUnknown(widget)||toastNullSource(actual);slot.modules=union(slot.modules,origins(widget));overlayProtect((Object)slot.modules);return slot.modules;}
+    }
+    public static Object screenEntering(Object owner){
+        var at=boundary();if(!at.getDeclaringClass().getName().equals(SCREEN)||owner==null||actualBase(owner,SCREEN)!=at.getDeclaringClass())throw new SecurityException("ACTUAL_SCREEN_EXECUTION_REQUIRED");return enter(owner);
+    }
+    public static Object containerEntering(Object owner){
+        var at=boundary();if(!clientMember(at,CONTAINER,"setFocused","m_7522_","("+WIDGET+")V")||owner==null||actualBase(owner,CONTAINER)!=at.getDeclaringClass())throw new SecurityException("ACTUAL_CONTAINER_FOCUS_REQUIRED");return enter(owner);
+    }
+    public static boolean widgetReferenceWriting(Object owner,Object widget){
+        var at=boundary();if(!clientMember(at,CONTAINER,"setFocused","m_7522_","("+WIDGET+")V")
+                &&!clientMember(at,SCREEN,"updateNarratedWidget","m_142227_","(Lnet/minecraft/client/gui/narration/NarrationElementOutput;)V"))throw new SecurityException("ACTUAL_WIDGET_REFERENCE_WRITE_REQUIRED");
+        if(owner==null||actualBase(owner,at.getDeclaringClass().getName())!=at.getDeclaringClass())throw new SecurityException("ACTUAL_WIDGET_REFERENCE_OWNER_REQUIRED");
+        WidgetSlot slot=currentWidget(widget);if(slot!=null){Module[] modules=widgetSources(slot);if(slot.retired||!slot.unknown&&exclusive(modules))return false;}
+        return !stopped(sources(widget))&&!ControlBridge.stoppedEffects();
+    }
+    public static void widgetReferenceWritten(Object owner,Object widget){
+        var at=boundary();boolean focus=clientMember(at,CONTAINER,"setFocused","m_7522_","("+WIDGET+")V");
+        if(!focus&&!clientMember(at,SCREEN,"updateNarratedWidget","m_142227_","(Lnet/minecraft/client/gui/narration/NarrationElementOutput;)V"))throw new SecurityException("ACTUAL_WIDGET_REFERENCE_TAIL_REQUIRED");
+        if(owner==null||actualBase(owner,at.getDeclaringClass().getName())!=at.getDeclaringClass())throw new SecurityException("ACTUAL_WIDGET_REFERENCE_OWNER_REQUIRED");
+        if(widget==null)return;ScreenRegistry registry=currentScreen();if(registry==null||registry.owner.get()!=owner)return;
+        Module[] actual=ControlBridge.objectSources(widget),invoking=ControlBridge.invokingSources(),modules=union(origins(widget),invoking,currentSources());
+        boolean unknown=ControlBridge.objectSourceUnknown(widget)||ControlBridge.sourceUnknown()||toastNullSource(actual)||toastNullSource(invoking);
+        try{synchronized(SOURCES){
+            if((focus?registry.fields.focused:registry.fields.lastNarratable).get(owner)!=widget){registry.pending="CLIENT_SCREEN_WIDGET_REFERENCE_CHANGED";return;}
+            int[] rows=widgetCounts(registry,widget);WidgetSlot slot=registry.widgets.get(new Key(widget,false));
+            if(slot==null||slot.retired&&Arrays.stream(rows).noneMatch(count->count!=0)){slot=new WidgetSlot(widget,modules,unknown);registry.widgets.put(new Key(widget,true),slot);}
+            else{slot.modules=union(slot.modules,modules);slot.unknown|=unknown;overlayProtect((Object)slot.modules);}
+            if(!Arrays.equals(rows,slot.counts))slot.unknown=true;slot.retired=false;
+        }}catch(ReflectiveOperationException|RuntimeException unavailable){registry.pending="CLIENT_SCREEN_WIDGET_REFERENCE_CAPTURE_PENDING";uiFailure(owner,modules,unavailable);}
+    }
+    private static boolean widgetRetirable(ScreenRegistry registry,WidgetSlot slot)throws ReflectiveOperationException{
+        Object widget=slot.widget.get();if(widget==null)return false;widgetSources(slot);
+        if(!Arrays.equals(widgetCounts(registry,widget),slot.counts)){slot.unknown=true;slot.pending="CLIENT_SCREEN_UNOBSERVED_WIDGET_ROWS";}
+        return !slot.unknown&&exclusive(slot.modules);
+    }
+    private static boolean screenActive(ScreenRegistry registry){for(Scope scope:ACTIVE)if(!scope.ended&&scope.screen==registry)return true;return false;}
+    private static void removeWidgetIdentity(List<?> list,Object widget){for(int index=list.size()-1;index>=0;index--)if(list.get(index)==widget)list.remove(index);}
+    private static void retireWidgets(Object client){
+        List<ScreenRegistry> registries;synchronized(SOURCES){if(REQUESTED.isEmpty())return;registries=new ArrayList<>(SCREEN_WIDGETS.values());}
+        for(ScreenRegistry registry:registries){WidgetRetirement prior=WIDGET_RETIRING.get();
+            try{synchronized(SOURCES){
+                Object owner=registry.owner.get();ScreenFields fields=registry.fields;if(owner==null||fields.minecraft.get(owner)!=client)continue;
+                if(fields.ui.instance.get(null)!=client||fields.ui.thread.get(client)!=Thread.currentThread()||!screenLists(registry)){registry.pending="CLIENT_SCREEN_ACTUAL_OWNER_OR_LISTS_CHANGED";continue;}
+                if(registry.publications!=0||screenActive(registry))continue;Object current=fields.ui.screen.get(client);registry.pending="";
+                for(WidgetSlot slot:registry.widgets.values()){
+                    Object widget=slot.widget.get();if(widget==null||slot.retired||!widgetRetirable(registry,slot))continue;
+                    if(fields.ui.screen.get(client)!=current||fields.minecraft.get(owner)!=client||!screenLists(registry)){registry.pending="CLIENT_SCREEN_CURRENT_OWNER_CHANGED";break;}
+                    WidgetRetirement retiring=new WidgetRetirement(registry,slot,owner,widget);WIDGET_RETIRING.set(retiring);
+                    try{
+                        // These are the original ArrayLists; remove by identity, without invoking a widget's equals or lifecycle.
+                        removeWidgetIdentity(registry.renderables.get(),widget);removeWidgetIdentity(registry.narratables.get(),widget);removeWidgetIdentity(registry.children.get(),widget);
+                        if(fields.focused.get(owner)==widget){fields.focused.set(owner,null);fields.dragging.setBoolean(owner,false);}
+                        if(fields.lastNarratable.get(owner)==widget)fields.lastNarratable.set(owner,null);
+                        int[] after=widgetCounts(registry,widget);System.arraycopy(after,0,slot.counts,0,after.length);
+                        if(Arrays.stream(after).anyMatch(count->count!=0)||fields.focused.get(owner)==widget||fields.lastNarratable.get(owner)==widget){slot.pending="CLIENT_SCREEN_WIDGET_REFERENCES_REMAIN";continue;}
+                        slot.retired=true;slot.pending="";retired++;
+                    }finally{
+                        // Keep a partially completed removal at its actual remaining rows for the next frame.
+                        try{int[] remaining=widgetCounts(registry,widget);for(int index=0;index<remaining.length;index++){if(remaining[index]>slot.counts[index])slot.unknown=true;slot.counts[index]=remaining[index];}}
+                        catch(ReflectiveOperationException|RuntimeException unavailable){slot.pending="CLIENT_SCREEN_WIDGET_REMAINING_ROWS_UNREADABLE";}
+                        retiring.ended=true;if(prior==null)WIDGET_RETIRING.remove();else WIDGET_RETIRING.set(prior);
+                    }
+                }
+            }}catch(ReflectiveOperationException|RuntimeException unavailable){registry.pending="CLIENT_SCREEN_WIDGET_RETIREMENT_PENDING:"+unavailable.getClass().getSimpleName();}
+            finally{if(prior==null)WIDGET_RETIRING.remove();else WIDGET_RETIRING.set(prior);}
+        }
+    }
+    private static boolean widgetCleanupField(Object receiver,Class<?> declaring,String name){
+        WidgetRetirement token=WIDGET_RETIRING.get();if(token==null||token.ended||token.thread!=Thread.currentThread()||token.owner!=receiver)return false;
+        ScreenFields fields=token.registry.fields;
+        return declaring==fields.container&&(name.equals(fields.focused.getName())||name.equals(fields.dragging.getName()))
+                ||declaring==fields.type&&name.equals(fields.lastNarratable.getName());
     }
     private static boolean toastNullSource(Module[] sources){for(Module source:sources)if(source==null)return true;return false;}
     private static Module[] toastSources(ToastSlot slot){
         Object toast=slot.toast.get();Module[] actual=ControlBridge.objectSources(toast);
         slot.unknown|=toast==null||ControlBridge.objectSourceUnknown(toast)||toastNullSource(actual);
-        slot.modules=union(slot.modules,actual);overlayProtect(slot.modules);return slot.modules;
+        slot.modules=union(slot.modules,actual);overlayProtect((Object)slot.modules);return slot.modules;
     }
     private static ToastRegistry toastRegistry(Object owner,Class<?> type)throws ReflectiveOperationException{
         if(owner==null||owner.getClass()!=type||!type.getName().equals(TOAST_COMPONENT)||!role(type))throw new SecurityException("ACTUAL_TOAST_COMPONENT_REQUIRED");
@@ -312,7 +536,7 @@ public final class ClientBridge {
     private static ToastSlot toastSlot(ToastRegistry registry,Object toast,Module[] modules,boolean unknown){
         Key lookup=new Key(toast,false);ToastSlot slot=registry.slots.get(lookup);
         if(slot==null){slot=new ToastSlot(toast,modules,unknown);registry.slots.put(new Key(toast,true),slot);}
-        else{slot.modules=union(slot.modules,modules);slot.unknown|=unknown;overlayProtect(slot.modules);}return slot;
+        else{slot.modules=union(slot.modules,modules);slot.unknown|=unknown;overlayProtect((Object)slot.modules);}return slot;
     }
     private static ToastCall toastCall(ToastRegistry registry,Object owner,Object toast,Module[] modules,boolean unknown,boolean frame,StackWalker.StackFrame at){return toastCall(registry,owner,toast,modules,unknown,frame,null,at);}
     private static ToastCall toastCall(ToastRegistry registry,Object owner,Object toast,Module[] modules,boolean unknown,boolean frame,Object instance,StackWalker.StackFrame at){
@@ -616,8 +840,13 @@ public final class ClientBridge {
         }finally{if(prior==null)UI_RETIRING.remove();else UI_RETIRING.set(prior);}
     }
     public static Object enter(Object contribution){
-        var frame=boundary();Module[] owners=union(sources(contribution),currentSources());Scope scope=new Scope(CURRENT.get(),owners,frame);
-        synchronized(SOURCES){ACTIVE.add(scope);CodeSourceBridge.contributionControl(owners);}CURRENT.set(scope);return scope;
+        var frame=boundary();ScreenRegistry registry=currentScreen();WidgetSlot widget=currentWidget(contribution);
+        if(contribution!=null){Class<?> screen=actualBase(contribution,SCREEN);if(screen!=null)try{registry=screenRegistry(contribution,screen);widget=null;}
+            catch(ReflectiveOperationException|IllegalStateException unavailable){uiFailure(contribution,sources(contribution),unavailable);}}
+        Module[] owners=union(sources(contribution),widget==null?new Module[0]:widgetSources(widget),currentSources());
+        boolean unknown=ControlBridge.objectSourceUnknown(contribution)||toastNullSource(ControlBridge.objectSources(contribution))||ControlBridge.sourceUnknown()||widget!=null&&widget.unknown;
+        Scope scope=new Scope(CURRENT.get(),owners,frame,null,null,null,unknown,registry,widget);
+        synchronized(SOURCES){ACTIVE.add(scope);overlayProtect(scope,owners);}CURRENT.set(scope);return scope;
     }
     public static void exit(Object token){
         var frame=boundary();if(!(token instanceof Scope scope)||scope.type!=frame.getDeclaringClass()||!scope.method.equals(frame.getMethodName())||scope.thread!=Thread.currentThread())throw new SecurityException("ACTUAL_CLIENT_INVOCATION_REQUIRED");
@@ -1362,7 +1591,7 @@ public final class ClientBridge {
     }
     /** Only framework lifecycle fields of the exact object captured by the real retirement boundary. */
     static boolean cleanupField(Object receiver,Class<?> declaring,String name){
-        if(RELEASING==null||!role(declaring))return false;if(soundCleanupField(receiver,declaring,name)||GPU!=null&&GPU.cleanupField(receiver,declaring,name))return true;
+        if(RELEASING==null||!role(declaring))return false;if(widgetCleanupField(receiver,declaring,name)||soundCleanupField(receiver,declaring,name)||GPU!=null&&GPU.cleanupField(receiver,declaring,name))return true;
         if(RELEASING==null||RELEASING.get()!=receiver)return false;
         return declaring.getName().equals("net.minecraft.client.particle.Particle")&&Set.of("removed","f_107220_").contains(name)
                 ||declaring.getName().equals("net.minecraft.client.renderer.texture.AbstractTexture")&&Set.of("id","f_117950_").contains(name)
@@ -1385,6 +1614,19 @@ public final class ClientBridge {
         }
         long overlays=overlayPending(module);
         String overlayState=overlays==-1?"CLIENT_OVERLAY_ACTUAL_PAIR_READ_FAILED":overlays==-2?"CLIENT_OVERLAY_NAMED_ASSOCIATION_CHANGED":"";
+        long widgets=0,widgetShared=0,widgetUnknown=0;String widgetState="";
+        for(ScreenRegistry registry:SCREEN_WIDGETS.values())for(WidgetSlot slot:registry.widgets.values()){
+            Module[] modules=widgetSources(slot);if(Arrays.stream(modules).noneMatch(source->source==module))continue;Object owner=registry.owner.get(),widget=slot.widget.get();if(owner==null||widget==null)continue;
+            try{
+                int[] rows=widgetCounts(registry,widget);long retained=Arrays.stream(rows).asLongStream().sum();
+                if(registry.fields.focused.get(owner)==widget)retained++;if(registry.fields.lastNarratable.get(owner)==widget)retained++;
+                if(retained==0)continue;widgets+=retained;
+                if(!Arrays.equals(rows,slot.counts)){slot.unknown=true;slot.pending="CLIENT_SCREEN_UNOBSERVED_WIDGET_ROWS";}
+                if(slot.unknown){widgetUnknown++;if(widgetState.isEmpty())widgetState="CLIENT_SCREEN_WIDGET_SOURCE_UNKNOWN";}
+                else if(!exclusive(modules)){widgetShared++;if(widgetState.isEmpty())widgetState="CLIENT_SCREEN_WIDGET_OTHER_SOURCES_REMAIN_LIVE";}
+                if(!slot.pending.isEmpty())widgetState=slot.pending;if(!registry.pending.isEmpty())widgetState=registry.pending;
+            }catch(ReflectiveOperationException|RuntimeException unavailable){widgets++;widgetUnknown++;widgetState="CLIENT_SCREEN_ACTUAL_WIDGET_READ_FAILED";}
+        }
         long toastQueued=0,toastVisible=0,toastShared=0,toastUnknown=0;String toastState="";
         for(ToastRegistry registry:TOASTS.values())for(ToastSlot slot:registry.slots.values()){
             Module[] modules=toastSources(slot);if(!slot.queued&&!slot.visible||Arrays.stream(modules).noneMatch(source->source==module))continue;
@@ -1393,8 +1635,8 @@ public final class ClientBridge {
             else if(!exclusive(modules)){toastShared++;if(toastState.isEmpty())toastState="CLIENT_TOAST_OTHER_SOURCES_REMAIN_LIVE";}
             if(!registry.pending.isEmpty())toastState=registry.pending;
         }
-        return active!=0||textures!=0||resources!=0||sounds!=0||reloads!=0||gpu!=0||failures!=0||ui!=0||overlays!=0||toastQueued!=0||toastVisible!=0?"CLIENT_RETIREMENT_PENDING:active="+active+":textures="+textures+":resources="+resources+":sounds="+sounds+":reloads="+reloads+":gpu="+gpu+":gpuState="+gpuState+":ui="+ui+":overlays="+(overlays<0?"unknown":Long.toString(overlays))+":overlayState="+overlayState+":toastQueued="+toastQueued+":toastVisible="+toastVisible+":toastShared="+toastShared+":toastUnknown="+toastUnknown+":toastState="+toastState+":shared="+shared+":releaseFailures="+failures:"";
+        return active!=0||textures!=0||resources!=0||sounds!=0||reloads!=0||gpu!=0||failures!=0||ui!=0||overlays!=0||widgets!=0||toastQueued!=0||toastVisible!=0?"CLIENT_RETIREMENT_PENDING:active="+active+":textures="+textures+":resources="+resources+":sounds="+sounds+":reloads="+reloads+":gpu="+gpu+":gpuState="+gpuState+":ui="+ui+":overlays="+(overlays<0?"unknown":Long.toString(overlays))+":overlayState="+overlayState+":widgets="+widgets+":widgetShared="+widgetShared+":widgetUnknown="+widgetUnknown+":widgetState="+widgetState+":toastQueued="+toastQueued+":toastVisible="+toastVisible+":toastShared="+toastShared+":toastUnknown="+toastUnknown+":toastState="+toastState+":shared="+shared+":releaseFailures="+failures:"";
     }}
-    public static Object[] controlObjects(){agent();List<Object> roots=new ArrayList<>(Arrays.asList(SOURCES,TEXTURES,ROLES,REQUESTED,CURRENT,RELEASING,ACTIVE,DEAD,IMAGES,PIXELS,RETIREMENTS,FAILURES,SOUNDS,SOUND_STOPS,SOUND_RELEASING,RELOAD_LISTENERS,RELOAD_WORK,UI_OWNERS,UI_RETIRING,UI_FIELDS,TOASTS,TOAST_FIELDS,OVERLAY_EVENTS,OVERLAY_REGISTRIES,OVERLAY_NAMES,OVERLAY_INITIALIZING,OVERLAY_FIELDS));Collections.addAll(roots,GPU.controls());return roots.toArray();}
-    private static void reap(){for(Key key;(key=(Key)DEAD.poll())!=null;){SOURCES.remove(key);TEXTURES.remove(key);IMAGES.remove(key);PIXELS.remove(key);FAILURES.remove(key);SOUNDS.remove(key);RELOAD_LISTENERS.remove(key);UI_OWNERS.remove(key);TOASTS.remove(key);OVERLAY_EVENTS.remove(key);OVERLAY_REGISTRIES.remove(key);OVERLAY_NAMES.remove(key);}}
+    public static Object[] controlObjects(){agent();List<Object> roots=new ArrayList<>(Arrays.asList(SOURCES,TEXTURES,ROLES,REQUESTED,CURRENT,RELEASING,ACTIVE,DEAD,IMAGES,PIXELS,RETIREMENTS,FAILURES,SOUNDS,SOUND_STOPS,SOUND_RELEASING,RELOAD_LISTENERS,RELOAD_WORK,UI_OWNERS,UI_RETIRING,UI_FIELDS,SCREEN_WIDGETS,SCREEN_ADDING,WIDGET_RETIRING,SCREEN_FIELDS,TOASTS,TOAST_FIELDS,OVERLAY_EVENTS,OVERLAY_REGISTRIES,OVERLAY_NAMES,OVERLAY_INITIALIZING,OVERLAY_FIELDS));Collections.addAll(roots,GPU.controls());return roots.toArray();}
+    private static void reap(){for(Key key;(key=(Key)DEAD.poll())!=null;){SOURCES.remove(key);TEXTURES.remove(key);IMAGES.remove(key);PIXELS.remove(key);FAILURES.remove(key);SOUNDS.remove(key);RELOAD_LISTENERS.remove(key);UI_OWNERS.remove(key);SCREEN_WIDGETS.remove(key);TOASTS.remove(key);OVERLAY_EVENTS.remove(key);OVERLAY_REGISTRIES.remove(key);OVERLAY_NAMES.remove(key);}}
 }

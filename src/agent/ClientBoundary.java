@@ -11,6 +11,8 @@ final class ClientBoundary {
     private static final String DYNAMIC="net/minecraft/client/renderer/texture/DynamicTexture",IMAGE="com/mojang/blaze3d/platform/NativeImage";
     private static final String TOAST_COMPONENT="net/minecraft/client/gui/components/toasts/ToastComponent",TOAST_INSTANCE=TOAST_COMPONENT+"$ToastInstance";
     private static final String TOAST="Lnet/minecraft/client/gui/components/toasts/Toast;";
+    private static final String SCREEN="net/minecraft/client/gui/screens/Screen",WIDGET="Lnet/minecraft/client/gui/components/events/GuiEventListener;",RENDERABLE="Lnet/minecraft/client/gui/components/Renderable;";
+    private static final String NARRATABLE="net/minecraft/client/gui/narration/NarratableEntry",NARRATION="(Lnet/minecraft/client/gui/narration/NarrationElementOutput;)V";
     private static final String OVERLAY_MANAGER="net/minecraftforge/client/gui/overlay/GuiOverlayManager",OVERLAY_EVENT="net/minecraftforge/client/event/RegisterGuiOverlaysEvent";
     private static final String OVERLAY_REGISTER="(Lnet/minecraftforge/client/event/RegisterGuiOverlaysEvent$Ordering;Lnet/minecraft/resources/ResourceLocation;Ljava/lang/String;Lnet/minecraftforge/client/gui/overlay/IGuiOverlay;)V";
     private static final String OVERLAY_RENDER="(Lnet/minecraft/client/gui/GuiGraphics;FLnet/minecraftforge/client/gui/overlay/NamedGuiOverlay;)V";
@@ -24,7 +26,9 @@ final class ClientBoundary {
             new ClientCallback("keyPressed","m_7933_","(III)Z"),new ClientCallback("keyReleased","m_7920_","(III)Z"),
             new ClientCallback("charTyped","m_5534_","(CI)Z"),new ClientCallback("mouseClicked","m_6375_","(DDI)Z"),
             new ClientCallback("mouseReleased","m_6348_","(DDI)Z"),new ClientCallback("mouseDragged","m_7979_","(DDIDD)Z"),
-            new ClientCallback("mouseScrolled","m_6050_","(DDD)Z"),new ClientCallback("mouseMoved","m_94757_","(DD)V"));
+            new ClientCallback("mouseScrolled","m_6050_","(DDD)Z"),new ClientCallback("mouseMoved","m_94757_","(DD)V"),
+            new ClientCallback("isMouseOver","m_5953_","(DD)Z"),new ClientCallback("setFocused","m_93692_","(Z)V"),
+            new ClientCallback("nextFocusPath","m_264064_","(Lnet/minecraft/client/gui/navigation/FocusNavigationEvent;)Lnet/minecraft/client/gui/ComponentPath;"));
     static final Set<String> TARGETS=Set.of(
             "net/minecraft/client/Minecraft","net/minecraft/client/KeyboardHandler","net/minecraft/client/MouseHandler",
             "net/minecraft/client/renderer/GameRenderer","net/minecraft/client/renderer/entity/EntityRenderDispatcher",
@@ -57,6 +61,8 @@ final class ClientBoundary {
             Map.entry("net/minecraft/client/gui/screens/Overlay",List.of(new ClientCallback("render","m_88315_","(Lnet/minecraft/client/gui/GuiGraphics;IIF)V"))),
             Map.entry("net/minecraft/client/gui/components/Renderable",List.of(new ClientCallback("render","m_88315_","(Lnet/minecraft/client/gui/GuiGraphics;IIF)V"))),
             Map.entry("net/minecraft/client/gui/components/events/GuiEventListener",INPUT_CALLBACKS),
+            Map.entry(NARRATABLE,List.of(new ClientCallback("updateNarration","m_142291_",NARRATION),new ClientCallback("narrationPriority","m_142684_","()Lnet/minecraft/client/gui/narration/NarratableEntry$NarrationPriority;"))),
+            Map.entry("net/minecraft/client/gui/narration/NarrationSupplier",List.of(new ClientCallback("updateNarration","m_142291_",NARRATION))),
             Map.entry("net/minecraft/client/gui/components/toasts/Toast",List.of(new ClientCallback("render","m_7172_","(Lnet/minecraft/client/gui/GuiGraphics;Lnet/minecraft/client/gui/components/toasts/ToastComponent;J)Lnet/minecraft/client/gui/components/toasts/Toast$Visibility;"))),
             Map.entry("net/minecraft/client/resources/sounds/TickableSoundInstance",List.of(new ClientCallback("tick","m_7788_","()V"))),
             Map.entry("net/minecraft/client/sounds/SoundEventListener",List.of(new ClientCallback("onPlaySound","m_6985_","(Lnet/minecraft/client/resources/sounds/SoundInstance;Lnet/minecraft/client/sounds/WeighedSoundEvents;)V"))),
@@ -76,6 +82,7 @@ final class ClientBoundary {
                 for(AbstractInsnNode at:method.instructions.toArray())if(at.getOpcode()==Opcodes.ARETURN){InsnList hook=new InsnList();hook.add(new InsnNode(Opcodes.DUP));hook.add(new VarInsnNode(Opcodes.ALOAD,0));hook.add(new InsnNode(Opcodes.SWAP));call(hook,"pixelsExposed","(Ljava/lang/Object;Ljava/lang/Object;)V");method.instructions.insertBefore(at,hook);}changed=true;
             }
             if(name.equals(IMAGE)&&method.name.equals("close")&&method.desc.equals("()V")){imageClose(method);changed=true;}
+            if(name.equals(SCREEN)&&method.name.equals("<init>")&&method.desc.equals("(Lnet/minecraft/network/chat/Component;)V")){afterVoid(method,"screenConstructed");changed=true;}
             if(name.equals(OVERLAY_EVENT)&&method.name.equals("<init>")&&method.desc.equals("(Ljava/util/Map;Ljava/util/List;)V")){
                 for(AbstractInsnNode at:method.instructions.toArray())if(at.getOpcode()==Opcodes.RETURN){InsnList hook=new InsnList();hook.add(new VarInsnNode(Opcodes.ALOAD,0));hook.add(new VarInsnNode(Opcodes.ALOAD,1));hook.add(new VarInsnNode(Opcodes.ALOAD,2));call(hook,"overlayEventConstructed","(Ljava/lang/Object;Ljava/util/Map;Ljava/util/List;)V");method.instructions.insertBefore(at,hook);}changed=true;
             }
@@ -84,6 +91,20 @@ final class ClientBoundary {
             if(name.equals(OVERLAY_MANAGER)&&method.name.equals("init")&&method.desc.equals("()V")){overlayInit(node,method);changed=true;}
             if(name.equals("net/minecraftforge/client/gui/overlay/ForgeGui")&&method.name.equals("lambda$render$0")&&method.desc.equals(OVERLAY_RENDER)){overlayRender(method);changed=true;}
             Type[] args=Type.getArgumentTypes(method.desc);int[] vars=locals(method,args);
+            if(name.equals(SCREEN)){
+                if(member(method,"addRenderableWidget","m_142416_","("+WIDGET+")"+WIDGET)||member(method,"addWidget","m_7787_","("+WIDGET+")"+WIDGET)
+                        ||member(method,"addRenderableOnly","m_169394_","("+RENDERABLE+")"+RENDERABLE)||member(method,"addEventWidget","addEventWidget","("+WIDGET+")V")){
+                    screenPublication(method,vars[0]);changed=true;
+                }
+                if(member(method,"removeWidget","m_169411_","("+WIDGET+")V")||member(method,"clearWidgets","m_169413_","()V")){afterVoid(method,"screenWidgetsRemoved");changed=true;}
+                if(member(method,"render","m_88315_","(Lnet/minecraft/client/gui/GuiGraphics;IIF)V")||member(method,"renderWithTooltip","m_280264_","(Lnet/minecraft/client/gui/GuiGraphics;IIF)V")
+                        ||member(method,"keyPressed","m_7933_","(III)Z")||member(method,"setInitialFocus","m_264313_","("+WIDGET+")V")||member(method,"updateNarratedWidget","m_142227_",NARRATION)){
+                    screenExecution(method);changed=true;
+                }
+            }
+            if(name.equals("net/minecraft/client/gui/components/events/AbstractContainerEventHandler")&&member(method,"setFocused","m_7522_","("+WIDGET+")V")){
+                screenExecution(method,"containerEntering");changed=true;
+            }
             if(name.equals(TOAST_COMPONENT)){
                 if(member(method,"addToast","m_94922_","("+TOAST+")V")){toastLifecycle(method,"toastAdding",vars[0],true);changed=true;}
                 if(member(method,"render","m_94920_","(Lnet/minecraft/client/gui/GuiGraphics;)V")){toastLifecycle(method,"toastFrameEntering",-1,false);changed=true;}
@@ -145,6 +166,48 @@ final class ClientBoundary {
             }
         }
         if(!changed)return null;ControlClassWriter writer=new ControlClassWriter(loader,node);node.accept(writer);return writer.toByteArray();
+    }
+    /** Capture only this invocation's actual List.add publications, including a partially throwing registration. */
+    private static void screenPublication(MethodNode method,int incoming){
+        Type result=Type.getReturnType(method.desc);int token=method.maxLocals++,error=method.maxLocals++,output=method.maxLocals;method.maxLocals+=result.getSize();
+        LabelNode accepted=new LabelNode(),start=new LabelNode(),end=new LabelNode(),complete=new LabelNode(),failed=new LabelNode();
+        for(AbstractInsnNode at:method.instructions.toArray()){
+            if(at.getOpcode()==Opcodes.ARETURN){InsnList save=new InsnList();save.add(new VarInsnNode(Opcodes.ASTORE,output));save.add(new JumpInsnNode(Opcodes.GOTO,complete));method.instructions.insertBefore(at,save);method.instructions.remove(at);}
+            else if(at.getOpcode()==Opcodes.RETURN)method.instructions.set(at,new JumpInsnNode(Opcodes.GOTO,complete));
+            else if(at instanceof MethodInsnNode invoke&&invoke.getOpcode()==Opcodes.INVOKEINTERFACE&&invoke.owner.equals("java/util/List")&&invoke.name.equals("add")&&invoke.desc.equals("(Ljava/lang/Object;)Z")){
+                LabelNode write=new LabelNode(),done=new LabelNode();InsnList gate=new InsnList();gate.add(new InsnNode(Opcodes.DUP2));gate.add(new VarInsnNode(Opcodes.ALOAD,token));
+                call(gate,"screenWriting","(Ljava/lang/Object;Ljava/lang/Object;Ljava/lang/Object;)Z");gate.add(new JumpInsnNode(Opcodes.IFNE,write));gate.add(new InsnNode(Opcodes.POP2));gate.add(new InsnNode(Opcodes.ICONST_0));gate.add(new JumpInsnNode(Opcodes.GOTO,done));gate.add(write);
+                method.instructions.insertBefore(invoke,gate);method.instructions.insert(invoke,done);
+            }
+        }
+        InsnList entry=new InsnList();entry.add(new VarInsnNode(Opcodes.ALOAD,0));entry.add(new VarInsnNode(Opcodes.ALOAD,incoming));call(entry,"screenAdding","(Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;");entry.add(new VarInsnNode(Opcodes.ASTORE,token));
+        entry.add(new VarInsnNode(Opcodes.ALOAD,token));entry.add(new FieldInsnNode(Opcodes.GETSTATIC,"java/lang/Boolean","FALSE","Ljava/lang/Boolean;"));entry.add(new JumpInsnNode(Opcodes.IF_ACMPNE,accepted));
+        if(result.getSort()!=Type.VOID)entry.add(new VarInsnNode(Opcodes.ALOAD,incoming));entry.add(new InsnNode(result.getOpcode(Opcodes.IRETURN)));entry.add(accepted);entry.add(start);method.instructions.insert(entry);
+        InsnList tail=new InsnList();tail.add(end);tail.add(complete);tail.add(new VarInsnNode(Opcodes.ALOAD,token));call(tail,"screenAdded","(Ljava/lang/Object;)V");
+        if(result.getSort()!=Type.VOID)tail.add(new VarInsnNode(Opcodes.ALOAD,output));tail.add(new InsnNode(result.getOpcode(Opcodes.IRETURN)));
+        tail.add(failed);tail.add(new VarInsnNode(Opcodes.ASTORE,error));tail.add(new VarInsnNode(Opcodes.ALOAD,token));call(tail,"screenAdded","(Ljava/lang/Object;)V");tail.add(new VarInsnNode(Opcodes.ALOAD,error));tail.add(new InsnNode(Opcodes.ATHROW));
+        method.instructions.add(tail);method.tryCatchBlocks.add(new TryCatchBlockNode(start,end,failed,null));
+    }
+    private static void screenExecution(MethodNode method){screenExecution(method,"screenEntering");}
+    private static void screenExecution(MethodNode method,String entering){
+        Type result=Type.getReturnType(method.desc);int token=method.maxLocals++,error=method.maxLocals++,output=method.maxLocals;method.maxLocals+=result.getSize();
+        LabelNode start=new LabelNode(),end=new LabelNode(),complete=new LabelNode(),failed=new LabelNode();
+        for(AbstractInsnNode at:method.instructions.toArray()){
+            if(at.getOpcode()==result.getOpcode(Opcodes.IRETURN)){
+                InsnList save=new InsnList();if(result.getSort()!=Type.VOID)save.add(new VarInsnNode(result.getOpcode(Opcodes.ISTORE),output));save.add(new JumpInsnNode(Opcodes.GOTO,complete));method.instructions.insertBefore(at,save);method.instructions.remove(at);
+            }else if(at instanceof FieldInsnNode field&&field.getOpcode()==Opcodes.PUTFIELD
+                    &&(field.owner.equals("net/minecraft/client/gui/components/events/AbstractContainerEventHandler")&&Set.of("focused","f_94673_").contains(field.name)&&field.desc.equals(WIDGET)
+                    ||field.owner.equals(SCREEN)&&Set.of("lastNarratable","f_169365_").contains(field.name)&&field.desc.equals("Lnet/minecraft/client/gui/narration/NarratableEntry;"))){
+                LabelNode write=new LabelNode(),done=new LabelNode();InsnList gate=new InsnList();gate.add(new InsnNode(Opcodes.DUP2));call(gate,"widgetReferenceWriting","(Ljava/lang/Object;Ljava/lang/Object;)Z");gate.add(new JumpInsnNode(Opcodes.IFNE,write));gate.add(new InsnNode(Opcodes.POP2));gate.add(new JumpInsnNode(Opcodes.GOTO,done));gate.add(write);
+                int owner=method.maxLocals++,widget=method.maxLocals++;gate.add(new InsnNode(Opcodes.DUP2));gate.add(new VarInsnNode(Opcodes.ASTORE,widget));gate.add(new VarInsnNode(Opcodes.ASTORE,owner));
+                InsnList published=new InsnList();published.add(new VarInsnNode(Opcodes.ALOAD,owner));published.add(new VarInsnNode(Opcodes.ALOAD,widget));call(published,"widgetReferenceWritten","(Ljava/lang/Object;Ljava/lang/Object;)V");published.add(done);
+                method.instructions.insertBefore(field,gate);method.instructions.insert(field,published);
+            }
+        }
+        InsnList entry=new InsnList();entry.add(new VarInsnNode(Opcodes.ALOAD,0));call(entry,entering,"(Ljava/lang/Object;)Ljava/lang/Object;");entry.add(new VarInsnNode(Opcodes.ASTORE,token));entry.add(start);method.instructions.insert(entry);
+        InsnList tail=new InsnList();tail.add(end);tail.add(complete);tail.add(new VarInsnNode(Opcodes.ALOAD,token));call(tail,"exit","(Ljava/lang/Object;)V");if(result.getSort()!=Type.VOID)tail.add(new VarInsnNode(result.getOpcode(Opcodes.ILOAD),output));tail.add(new InsnNode(result.getOpcode(Opcodes.IRETURN)));
+        tail.add(failed);tail.add(new VarInsnNode(Opcodes.ASTORE,error));tail.add(new VarInsnNode(Opcodes.ALOAD,token));call(tail,"exit","(Ljava/lang/Object;)V");tail.add(new VarInsnNode(Opcodes.ALOAD,error));tail.add(new InsnNode(Opcodes.ATHROW));
+        method.instructions.add(tail);method.tryCatchBlocks.add(new TryCatchBlockNode(start,end,failed,null));
     }
     /** One scope covers the original callbacks, exact publication and every normal/throwing return. */
     private static void toastLifecycle(MethodNode method,String entering,int incoming,boolean publication){
@@ -290,7 +353,8 @@ final class ClientBoundary {
             if(caller.equals(TOAST_INSTANCE)&&member(method,"render","m_280442_","(ILnet/minecraft/client/gui/GuiGraphics;)Z")){
                 code.add(new VarInsnNode(Opcodes.ALOAD,receiver));call(code,"toastRenderSkipped","(Ljava/lang/Object;)Ljava/lang/Object;");code.add(new TypeInsnNode(Opcodes.CHECKCAST,result.getInternalName()));
             }else code.add(new FieldInsnNode(Opcodes.GETSTATIC,"net/minecraft/client/gui/components/toasts/Toast$Visibility","HIDE",result.getDescriptor()));
-        }else defaultValue(code,result);
+        }else if(invoke.owner.equals(NARRATABLE)&&named.equals("narrationPriority"))code.add(new FieldInsnNode(Opcodes.GETSTATIC,NARRATABLE+"$NarrationPriority","NONE",result.getDescriptor()));
+        else defaultValue(code,result);
         code.add(new JumpInsnNode(Opcodes.GOTO,done));
         code.add(allowed);code.add(new VarInsnNode(Opcodes.ALOAD,receiver));call(code,"enter","(Ljava/lang/Object;)Ljava/lang/Object;");code.add(new VarInsnNode(Opcodes.ASTORE,token));code.add(start);
         code.add(new VarInsnNode(Opcodes.ALOAD,receiver));for(int i=0;i<args.length;i++)code.add(new VarInsnNode(args[i].getOpcode(Opcodes.ILOAD),vars[i]));
