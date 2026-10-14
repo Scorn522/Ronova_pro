@@ -1,5 +1,17 @@
 # Ronova Pro 当前进度
 
+## 2026-10-14：C 接续——Screen/Overlay 根来源与退役
+
+接续 `26c9cfc`，Java ABI65 / Native ABI61 / Storage3 / Journal6。ClientBridge 原根对象记录只保留已知 module，丢失 setter 及后续实际 Scope 的 unknown；已知停组来源混有未知来源时仍可能关闭整个根。现于原 SOURCES 记录内合并模块与不可回退的 unknown，真实 setter 入口、槽位写入和 Scope 继续传递；私有退役在关闭回调前与写入前复核实际单例、客户端线程、准确根及独占来源。普通合法关闭和原停止效果策略保留，未扩展自身外观或武器注册。
+
+完整包集中构建 `build-c-java65-native61-screen-sources-20261014.log` PASS25秒。未新增夹具、状态计数或证明文件，未重跑旧矩阵；真实客户端混合来源及重入关闭场景尚未执行，不能记为实机通过。
+
+原 Java63/Native61 run03 继续运行，12:03:14 的一次真实线程现场仍在 Forge 方块注册烘焙，main RUNNABLE、CPU 继续增加；未到世界加载或冻结保存结果，也不能计作 Java65 通过。没有重启或停止该实例。Native 与驱动未改、未重建，沿用未签名 SYS 37888字节和管理器190464字节，未加载。
+
+本地候选 `distribution/candidate-c-java65-native61-screen-wip-20261014`，Core JAR 2418477字节、prelaunch 22440字节；匹配包 `distribution/Ronova-Pro-C-Screen-WIP-Java65-Native61-20261014.zip`。旧包与失败日志保留，完整 C/B 继续收口。
+
+---
+
 ## 2026-10-14：C 接续——重载 tick 的原键保留
 
 接续 `9c1e5c6`，Java ABI64 / Native ABI61 / Storage3 / Journal6。仅修正 WorldControl.defer 的顺序：准确 level-wide 调度器已有同类型身份、同位置 held 时，先取消重载副本；没有已有 held 才检查冻结规则并新增。原 held 在准确恢复前继续占有其逻辑键，避免解除冻结后，区块 NBT 副本先执行、END 阶段又恢复原 tick 的重复窗口。新建、标脏及原 tick 恢复入口保持原有职责，没有增加目录或持久格式。

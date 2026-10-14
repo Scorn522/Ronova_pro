@@ -8,7 +8,7 @@ import java.util.*;
 public final class ClientBridge {
     private static final StackWalker WALKER=StackWalker.getInstance(StackWalker.Option.RETAIN_CLASS_REFERENCE);
     private static final ReferenceQueue<Object> DEAD=new ReferenceQueue<>();
-    private static final Map<Key,Module[]> SOURCES=new HashMap<>();
+    private static final Map<Key,ContributionSources> SOURCES=new HashMap<>();
     private static final Map<Key,TextureRegistry> TEXTURES=new HashMap<>();
     private static final Map<Key,ImageRecord> IMAGES=new HashMap<>();
     private static final Map<Key,Ref<Object>> PIXELS=new HashMap<>();
@@ -57,6 +57,7 @@ public final class ClientBridge {
     private static final ThreadLocal<Object> RELEASING=new ThreadLocal<>();
     private static final Set<Scope> ACTIVE=Collections.newSetFromMap(new IdentityHashMap<>());
     private static long retired,shared,failed;
+    private record ContributionSources(Module[] modules,boolean unknown){}
     private record Role(String name,Ref<ClassLoader> loader,Ref<Module> module){}
     private record TextureRegistry(Class<?> type,Ref<Map<?,?>> map,Map<Object,Texture> entries){}
     private record Texture(Ref<Object> object,Module[] modules){}
@@ -263,8 +264,28 @@ public final class ClientBridge {
     private static Module[] origins(Object object){return object==null?new Module[0]:Arrays.stream(ControlBridge.objectSources(object)).filter(ControlBridge::producer).toArray(Module[]::new);}
     private static boolean stopped(Module[] sources){for(Module module:sources)if(ControlBridge.modStopped(module))return true;return false;}
     private static boolean exclusive(Module[] sources){if(sources.length==0)return false;for(Module module:sources)if(!ControlBridge.modStopped(module))return false;return true;}
-    private static Module[] sources(Object object){Module[] real=origins(object);synchronized(SOURCES){return union(real,SOURCES.get(new Key(object,false)));}}
-    private static void record(Object object,Module[] modules){if(object==null)return;synchronized(SOURCES){reap();Module[] sources=union(SOURCES.get(new Key(object,false)),modules);if(sources.length!=0){SOURCES.put(new Key(object,true),sources);CodeSourceBridge.contributionControl(sources);}}}
+    private static Module[] sources(Object object){Module[] real=origins(object);synchronized(SOURCES){ContributionSources prior=SOURCES.get(new Key(object,false));return union(real,prior==null?null:prior.modules());}}
+    private static void record(Object object,Module[] modules){record(object,modules,false,false);}
+    private static void record(Object object,Module[] modules,boolean unknown){record(object,modules,unknown,true);}
+    private static void record(Object object,Module[] modules,boolean unknown,boolean observed){
+        if(object==null)return;synchronized(SOURCES){
+            reap();ContributionSources prior=SOURCES.get(new Key(object,false));Module[] merged=union(prior==null?null:prior.modules(),modules);
+            unknown|=prior!=null&&prior.unknown();
+            if(merged.length!=0||unknown||observed||prior!=null){ContributionSources next=new ContributionSources(merged,unknown);SOURCES.put(new Key(object,true),next);overlayProtect(next,(Object)merged);}
+        }
+    }
+    private static boolean sourceUnknown(Object object){
+        if(object==null)return false;
+        boolean unknown=ControlBridge.objectSourceUnknown(object)||toastNullSource(ControlBridge.objectSources(object));
+        synchronized(SOURCES){
+            ContributionSources prior=SOURCES.get(new Key(object,false));
+            if(prior!=null){
+                if(unknown&&!prior.unknown()){ContributionSources next=new ContributionSources(prior.modules(),true);SOURCES.put(new Key(object,true),next);overlayProtect(next);}
+                unknown|=prior.unknown();
+            }
+        }
+        return unknown;
+    }
     public static boolean allowed(Object contribution){
         boundary();WidgetSlot slot=currentWidget(contribution);
         if(slot!=null&&(slot.retired||exclusive(widgetSources(slot))&&!slot.unknown))return false;
@@ -302,27 +323,35 @@ public final class ClientBridge {
     }
     public static Object presentationEntering(Object owner,Object input){
         var frame=boundary();if(!screenSetter(frame)&&!clientMember(frame,"net.minecraft.client.Minecraft","setOverlay","m_91150_","(Lnet/minecraft/client/gui/screens/Overlay;)V"))throw new SecurityException("ACTUAL_UI_SETTER_REQUIRED");
-        Module[] modules=union(origins(input),ControlBridge.invokingSources(),currentSources());record(input,modules);
+        Module[] actual=ControlBridge.objectSources(input),invoking=ControlBridge.invokingSources(),modules=union(origins(input),invoking,currentSources());
+        record(input,modules,ControlBridge.objectSourceUnknown(input)||ControlBridge.sourceUnknown()||toastNullSource(actual)||toastNullSource(invoking));
         if(stopped(sources(input))||ControlBridge.stoppedEffects())return Boolean.FALSE;
+        boolean screen=screenSetter(frame);UiRetirement requested=UI_RETIRING.get();
+        boolean retirement=requested!=null&&requested.owner==owner&&requested.screen==screen&&input==null&&requested.call==null;
         try{
-            UiFields fields=uiOwner(owner,frame);boolean screen=screenSetter(frame);Object before=fields.current(owner,screen);
-            UiRetirement requested=UI_RETIRING.get();boolean retirement=requested!=null&&requested.owner==owner&&requested.screen==screen&&requested.target==before&&input==null&&requested.call==null;
+            UiFields fields=uiOwner(owner,frame);Object before=fields.current(owner,screen);
+            // Refuse a stale/private retirement before the original closing callbacks run.
+            if(retirement&&(requested.target!=before||!presentationRetirable(owner,fields,screen,before)))return Boolean.FALSE;
             UiCall call=new UiCall(owner,input,before,fields,screen,retirement,frame.getMethodName());
             if(retirement)requested.call=call;CodeSourceBridge.contributionControl(call);return call;
-        }catch(ReflectiveOperationException|IllegalStateException unavailable){uiFailure(owner,modules,unavailable);return null;}
+        }catch(ReflectiveOperationException|IllegalStateException unavailable){uiFailure(owner,modules,unavailable);return retirement?Boolean.FALSE:null;}
     }
     private static UiCall uiCall(Object token,StackWalker.StackFrame frame){
         if(!(token instanceof UiCall call)||call.fields.type!=frame.getDeclaringClass()||!call.method.equals(frame.getMethodName())||call.thread!=Thread.currentThread())throw new SecurityException("ACTUAL_UI_INVOCATION_REQUIRED");return call;
     }
     public static boolean presentationWriting(Object owner,Object next,Object token){
         var frame=boundary();
-        if(token==null)return !stopped(sources(next))&&!ControlBridge.stoppedEffects();
+        if(token==null){record(next,new Module[0],true);return !stopped(sources(next))&&!ControlBridge.stoppedEffects();}
         UiCall call=uiCall(token,frame);if(call.owner!=owner||call.ended)throw new SecurityException("ACTUAL_UI_SLOT_REQUIRED");
-        record(next,union(origins(next),next==call.input?ControlBridge.invokingSources():new Module[0],currentSources()));
+        Module[] actual=ControlBridge.objectSources(next),invoking=ControlBridge.invokingSources();
+        record(next,union(origins(next),next==call.input?invoking:new Module[0],currentSources()),
+                ControlBridge.objectSourceUnknown(next)||ControlBridge.sourceUnknown()||toastNullSource(actual)||toastNullSource(invoking));
         if(stopped(sources(next))||ControlBridge.stoppedEffects())return false;
         try{
             // Closing callbacks can publish a new legitimate UI. The old retirement cannot overwrite it.
-            return !call.retirement||call.fields.current(owner,call.screen)==call.before;
+            if(!call.retirement)return true;UiRetirement requested=UI_RETIRING.get();
+            return requested!=null&&requested.call==call&&requested.owner==owner&&requested.screen==call.screen&&requested.target==call.before
+                    &&presentationRetirable(owner,call.fields,call.screen,call.before);
         }catch(ReflectiveOperationException unavailable){uiFailure(owner,union(sources(call.before),sources(next)),unavailable);return false;}
     }
     public static void presentationExiting(Object token){
@@ -830,17 +859,22 @@ public final class ClientBridge {
     }
     @SuppressWarnings("unchecked")
     private static <E extends Throwable> void uiRaise(Throwable failure)throws E{throw (E)failure;}
+    private static boolean presentationRetirable(Object owner,UiFields fields,boolean screen,Object target)throws ReflectiveOperationException{
+        if(target==null||fields.instance.get(null)!=owner||fields.thread.get(owner)!=Thread.currentThread()
+                ||fields.current(owner,screen)!=target||sourceUnknown(target))return false;
+        synchronized(SOURCES){ContributionSources observed=SOURCES.get(new Key(target,false));return observed!=null&&!observed.unknown()&&exclusive(sources(target));}
+    }
     private static void retirePresentation(Object owner,UiFields fields,boolean screen){
         Object target=null;Module[] modules=new Module[0];UiRetirement prior=UI_RETIRING.get();
         try{
             target=fields.current(owner,screen);if(target==null)return;modules=sources(target);
-            if(!exclusive(modules))return;
+            if(!presentationRetirable(owner,fields,screen,target))return;
             // A throwing close may already have released resources; do not replay it every frame.
             synchronized(SOURCES){if(FAILURES.containsKey(new Key(target,false)))return;}
             // Re-read the actual slot before calling its original lifecycle; unknown and shared objects stay.
-            if(fields.current(owner,screen)!=target)return;
+            if(!presentationRetirable(owner,fields,screen,target))return;
             UI_RETIRING.set(new UiRetirement(owner,target,screen));(screen?fields.setScreen:fields.setOverlay).invoke(owner,new Object[]{null});
-            if(fields.current(owner,screen)==target)uiFailure(target,modules,new IllegalStateException("CLIENT_UI_ROOT_RETAINED_AFTER_SETTER"));
+            if(fields.current(owner,screen)==target){if(presentationRetirable(owner,fields,screen,target))uiFailure(target,modules,new IllegalStateException("CLIENT_UI_ROOT_RETAINED_AFTER_SETTER"));}
             else synchronized(SOURCES){retired++;}
         }catch(InvocationTargetException wrapped){
             Throwable failure=wrapped.getCause()==null?wrapped:wrapped.getCause();
@@ -857,7 +891,7 @@ public final class ClientBridge {
         if(contribution!=null){Class<?> screen=actualBase(contribution,SCREEN);if(screen!=null)try{registry=screenRegistry(contribution,screen);widget=null;}
             catch(ReflectiveOperationException|IllegalStateException unavailable){uiFailure(contribution,sources(contribution),unavailable);}}
         Module[] owners=union(sources(contribution),widget==null?new Module[0]:widgetSources(widget),currentSources());
-        boolean unknown=ControlBridge.objectSourceUnknown(contribution)||toastNullSource(ControlBridge.objectSources(contribution))||ControlBridge.sourceUnknown()||widget!=null&&widget.unknown;
+        boolean unknown=sourceUnknown(contribution)||ControlBridge.sourceUnknown()||widget!=null&&widget.unknown;
         Scope scope=new Scope(CURRENT.get(),owners,frame,null,null,null,unknown,registry,widget);
         synchronized(SOURCES){ACTIVE.add(scope);overlayProtect(scope,owners);}CURRENT.set(scope);return scope;
     }
