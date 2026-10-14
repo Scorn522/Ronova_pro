@@ -17,6 +17,7 @@ typedef struct NativeStringCopy {jstring string;jchar *contents;size_t bytes;Own
 static NativeStringCopy *native_string_copies;
 static const jchar *JNICALL native_get_string_critical(JNIEnv *env,jstring string,jboolean *copy){
     void *caller=__builtin_return_address(0);
+    if(!native_jni_output_context(env))return NULL;
     if(native_original.ExceptionCheck(env))return NULL;
     if(native_stopped(env)||native_caller_stopped(caller)){native_refuse(env,"RONOVA_STOPPED_NATIVE_STRING_POINTER");return NULL;}
     jsize length=native_original.GetStringLength(env,string);if(native_original.ExceptionCheck(env))return NULL;
@@ -26,13 +27,20 @@ static const jchar *JNICALL native_get_string_critical(JNIEnv *env,jstring strin
     if(!lease->contents||!lease->string){if(lease->string)native_original.DeleteGlobalRef(env,lease->string);native_payload_free(lease->contents);free(lease);native_refuse(env,"NATIVE_STRING_COPY_ALLOCATION_FAILED");return NULL;}
     const jchar *actual=native_original.GetStringCritical(env,string,NULL);
     if(actual){memcpy(lease->contents,actual,lease->bytes);native_original.ReleaseStringCritical(env,string,actual);}
-    if(!actual){native_original.DeleteGlobalRef(env,lease->string);native_payload_free(lease->contents);free(lease);return NULL;}
+    if(!actual||native_original.ExceptionCheck(env)){native_original.DeleteGlobalRef(env,lease->string);native_payload_free(lease->contents);free(lease);return NULL;}
     NativeThread *state=native_thread();
     if(!native_capture_scope_owners(env,state,&lease->owners)||!native_capture_image_owners(caller,&lease->owners)){
         native_owner_links_free(lease->owners);native_original.DeleteGlobalRef(env,lease->string);SecureZeroMemory(lease->contents,lease->bytes);native_payload_free(lease->contents);free(lease);native_refuse(env,"NATIVE_POINTER_SOURCE_CAPACITY");return NULL;
     }
+    jboolean copied=JNI_TRUE;
+    if(native_original.ExceptionCheck(env)||(copy&&!native_jni_output_commit(env,copy,&copied,sizeof(copied)))){
+        native_owner_links_free(lease->owners);native_original.DeleteGlobalRef(env,lease->string);
+        SecureZeroMemory(lease->contents,lease->bytes);native_payload_free(lease->contents);free(lease);return NULL;
+    }
+    /* No outside pointer has been returned yet. A refused isCopy submission
+     * discards only this unpublished lease; existing leases remain untouched. */
     AcquireSRWLockExclusive(&native_records);lease->next=native_string_copies;native_string_copies=lease;ReleaseSRWLockExclusive(&native_records);
-    if(copy)*copy=JNI_TRUE;return lease->contents;
+    return lease->contents;
 }
 static void JNICALL native_release_string_critical(JNIEnv *env,jstring string,const jchar *contents){
     AcquireSRWLockExclusive(&native_records);NativeStringCopy *lease=native_string_copies,*previous=NULL;
@@ -46,6 +54,7 @@ static unsigned native_array_width(char kind){
         case 'I':return sizeof(jint);case 'J':return sizeof(jlong);case 'F':return sizeof(jfloat);case 'D':return sizeof(jdouble);default:return 0;}
 }
 static void *native_array_copy(JNIEnv *env,jarray array,jboolean *copy,char expected,int critical,void *caller){
+    if(!native_jni_output_context(env))return NULL;
     if(native_caller_stopped(caller)){native_refuse(env,"RONOVA_STOPPED_NATIVE_ARRAY_POINTER");return NULL;}
     if(!native_pin_allowed(env,array))return NULL;
     jclass type=native_original.GetObjectClass(env,array);char *signature=NULL;
@@ -62,7 +71,7 @@ static void *native_array_copy(JNIEnv *env,jarray array,jboolean *copy,char expe
     // No JVM call, allocation, lock or policy callback occurs between this pair.
     void *actual=native_original.GetPrimitiveArrayCritical(env,array,NULL);
     if(actual){memcpy(lease->contents,actual,lease->bytes);native_original.ReleasePrimitiveArrayCritical(env,array,actual,JNI_ABORT);}
-    if(!actual){native_original.DeleteGlobalRef(env,lease->array);native_payload_free(lease->contents);free(lease);return NULL;}
+    if(!actual||native_original.ExceptionCheck(env)){native_original.DeleteGlobalRef(env,lease->array);native_payload_free(lease->contents);free(lease);return NULL;}
     NativeThread *state=native_thread();
     if(!native_capture_scope_owners(env,state,&lease->owners)||!native_capture_image_owners(caller,&lease->owners)){
         native_owner_links_free(lease->owners);native_original.DeleteGlobalRef(env,lease->array);SecureZeroMemory(lease->contents,lease->bytes);native_payload_free(lease->contents);free(lease);native_refuse(env,"NATIVE_POINTER_SOURCE_CAPACITY");return NULL;
@@ -73,8 +82,14 @@ static void *native_array_copy(JNIEnv *env,jarray array,jboolean *copy,char expe
         if(lease->targetModule)native_original.DeleteWeakGlobalRef(env,lease->targetModule);
         native_original.DeleteGlobalRef(env,lease->array);native_owner_links_free(lease->owners);native_payload_free(lease->contents);free(lease);return NULL;
     }
+    jboolean copied=JNI_TRUE;
+    if(copy&&!native_jni_output_commit(env,copy,&copied,sizeof(copied))){
+        if(lease->targetModule)native_original.DeleteWeakGlobalRef(env,lease->targetModule);
+        native_original.DeleteGlobalRef(env,lease->array);native_owner_links_free(lease->owners);
+        SecureZeroMemory(lease->contents,lease->bytes);native_payload_free(lease->contents);free(lease);return NULL;
+    }
     AcquireSRWLockExclusive(&native_records);lease->next=native_array_copies;native_array_copies=lease;ReleaseSRWLockExclusive(&native_records);
-    if(copy)*copy=JNI_TRUE;return lease->contents;
+    return lease->contents;
 }
 static void native_array_commit(JNIEnv *env,NativeArrayCopy *lease){
     // Each setter takes one private snapshot and checks the exact submitted

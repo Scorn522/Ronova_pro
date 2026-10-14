@@ -631,6 +631,8 @@ NATIVE_ARRAY(Int,jint,i,"java/lang/Integer","(I)Ljava/lang/Integer;")
 NATIVE_ARRAY(Long,jlong,j,"java/lang/Long","(J)Ljava/lang/Long;")
 NATIVE_ARRAY(Float,jfloat,f,"java/lang/Float","(F)Ljava/lang/Float;")
 NATIVE_ARRAY(Double,jdouble,d,"java/lang/Double","(D)Ljava/lang/Double;")
+static int native_jni_output_context(JNIEnv*);
+static int native_jni_output_commit(JNIEnv*,void*,const void*,SIZE_T);
 #include "arrays.c"
 static void *JNICALL native_get_critical(JNIEnv *env,jarray array,jboolean *copy){return native_array_copy(env,array,copy,0,1,__builtin_return_address(0));}
 static void JNICALL native_release_critical(JNIEnv *env,jarray array,void *contents,jint mode){native_array_release(env,array,contents,mode,0,1,__builtin_return_address(0));}
@@ -1729,6 +1731,8 @@ static jvmtiError JNICALL native_tooling_SetEnvironmentLocalStorage(jvmtiEnv *ap
     return record->original->SetEnvironmentLocalStorage(api,data);
 }
 #include "tooling_output_gate.c"
+#include "jni_output_gate.c"
+#include "jni_outputs.c"
 /* Reuse the actual Thread/Runnable/scheduler policy. The same frame identity
  * that proves a JNI thread call proves this JVMTI call, without Java publication
  * of a fabricated producer or a borrowed deeper controller frame. */
@@ -2184,7 +2188,7 @@ JNIEXPORT jboolean JNICALL Java_dev_ronova_pro_bootstrap_NativeControl_initializ
     table->ExceptionDescribe=native_describe;
     table->RegisterNatives=native_register;table->UnregisterNatives=native_unregister;
     table->FindClass=native_find;table->GetMethodID=native_lookup_GetMethodID;table->GetStaticMethodID=native_lookup_GetStaticMethodID;table->GetFieldID=native_lookup_GetFieldID;table->GetStaticFieldID=native_lookup_GetStaticFieldID;
-    table->DefineClass=native_define;native_guarded=*table;InterlockedExchange(&native_guarded_ready,1);jvmtiError result=(*native_ti)->SetJNIFunctionTable(native_ti,table);(*native_ti)->Deallocate(native_ti,(unsigned char*)table);InterlockedExchange(&native_jni_ready,result==JVMTI_ERROR_NONE);
+    table->DefineClass=native_define;native_jni_outputs_install(table);native_guarded=*table;InterlockedExchange(&native_guarded_ready,1);jvmtiError result=(*native_ti)->SetJNIFunctionTable(native_ti,table);(*native_ti)->Deallocate(native_ti,(unsigned char*)table);InterlockedExchange(&native_jni_ready,result==JVMTI_ERROR_NONE);
     if(result==JVMTI_ERROR_NONE)InterlockedExchange(&native_library_present,native_library_install(env));
     if(result==JVMTI_ERROR_NONE&&!native_unsafe_install(env))return JNI_FALSE;
     return result==JVMTI_ERROR_NONE?JNI_TRUE:JNI_FALSE;

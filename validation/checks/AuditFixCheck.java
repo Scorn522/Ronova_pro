@@ -62,6 +62,7 @@ public final class AuditFixCheck {
     private static native void hostModuleLoad0();
     private static native void hostJniTable0();
     private static native void hostJvmtiOutput0();
+    private static native boolean hostJniOutput0();
     private static native void hostModuleRelease0(String controlDll);
     private static native void hostModuleReleaseThread0(String controlDll);
     private static native void hostMemory0(String controlDll);
@@ -84,6 +85,10 @@ public final class AuditFixCheck {
         if(phase.equals("memory")){
             hostMemory0(System.getProperty("ronova.pro.control.native"));
             System.out.println("HOST_MEMORY_PASS actual_IAT_GPA current_process_pseudo_and_VM_rights_only_real_alias private_VirtualAlloc_write_read_protection_restored exact_control_DLL_VM_shadow_hook_thunk_same_value_write_refused page_rounded_shadow_tail_protect_refused protected_local_output_aliases_refused no_control_instruction_change no_fabricated_authority");
+            return;
+        }
+        if(phase.equals("jni-output")){
+            require(hostJniOutput0(),"JNI caller output control failed");
             return;
         }
         if(phase.equals("jvmti-output")){

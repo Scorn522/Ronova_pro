@@ -404,6 +404,166 @@ done:
     if(failure){fprintf(stderr,"JVMTI_OUTPUT_FAILED stage=%s target=%p jni=%d jvmti=%d\n",failure,attackSlot,(int)jniResult,(int)error);fflush(stderr);load_ti_fail(env,failure);}
     else {fprintf(stdout,"JVMTI_OUTPUT_ACTUAL vmSlot=%p environmentSlot=%p jniEnvironmentSlot=%p version=0x%X jniCopyVersion=0x%X normalFrames=%d ordinaryGetEnvJNI18=%d attachedCurrent=%d daemonCurrent=%d vmJvmtiJniSlots_GetEnvJVMTI12_Attach_AttachDaemon=JNI_ERR\n",(void*)vm,(void*)api,(void*)env,(unsigned)version,(unsigned)copyVersion,(int)normalFrames,(int)ordinaryGetEnv,(int)ordinaryAttach,(int)ordinaryDaemon);fflush(stdout);}
 }
+static int load_jni_output_slots_unchanged(const LoadJvmtiOutputSlot *slots){
+    return load_ti_output_unchanged(&slots[0])&&load_ti_output_unchanged(&slots[1])&&load_ti_output_unchanged(&slots[2]);
+}
+/* Consume only the exception expected from this actual call. An unexpected
+ * exception (including a failed inspection) remains pending for the caller. */
+static int load_jni_output_exception(JNIEnv *env,jclass expected,jmethodID message,const char *text){
+    jthrowable failure=(*env)->ExceptionOccurred(env);if(!failure)return 0;
+    (*env)->ExceptionClear(env);int matched=(*env)->IsInstanceOf(env,failure,expected);
+    if(matched&&text){
+        jstring detail=(jstring)(*env)->CallObjectMethod(env,failure,message);
+        const char *characters=detail&&!(*env)->ExceptionCheck(env)?(*env)->GetStringUTFChars(env,detail,NULL):NULL;
+        matched=characters&&!strcmp(characters,text);
+        if(characters)(*env)->ReleaseStringUTFChars(env,detail,characters);
+        if(detail)(*env)->DeleteLocalRef(env,detail);
+    }
+    if((*env)->ExceptionCheck(env))matched=0;
+    else if(!matched)(*env)->Throw(env,failure);
+    (*env)->DeleteLocalRef(env,failure);return matched;
+}
+static int load_jni_output_refused(JNIEnv *env,const LoadJvmtiOutputSlot *slots,jclass protectedType,jmethodID message){
+    return load_jni_output_slots_unchanged(slots)
+            &&load_jni_output_exception(env,protectedType,message,"RONOVA_PROTECTED_NATIVE_OUTPUT");
+}
+/* Each destination is one real public table slot; no private address or
+ * fabricated controller identity is supplied by this fixture. */
+static int load_jni_output_control(JNIEnv *env,jintArray array,jstring string,const LoadJvmtiOutputSlot *slots,
+        jclass protectedType,jmethodID message,const char **stage,unsigned *target){
+    for(*target=0;*target<3;(*target)++){
+        void *slot=slots[*target].address;
+        *stage="JNI_OUTPUT_CONTROL_GET_JAVA_VM";jint result=(*env)->GetJavaVM(env,(JavaVM**)slot);
+        if(!load_jni_output_refused(env,slots,protectedType,message)||result!=JNI_ERR)return 0;
+        *stage="JNI_OUTPUT_CONTROL_INT_REGION";(*env)->GetIntArrayRegion(env,array,0,1,(jint*)slot);
+        if(!load_jni_output_refused(env,slots,protectedType,message))return 0;
+        *stage="JNI_OUTPUT_CONTROL_STRING_REGION";(*env)->GetStringRegion(env,string,0,1,(jchar*)slot);
+        if(!load_jni_output_refused(env,slots,protectedType,message))return 0;
+        *stage="JNI_OUTPUT_CONTROL_STRING_UTF_REGION";(*env)->GetStringUTFRegion(env,string,0,1,(char*)slot);
+        if(!load_jni_output_refused(env,slots,protectedType,message))return 0;
+        *stage="JNI_OUTPUT_CONTROL_STRING_CHARS_COPY";const jchar *characters=(*env)->GetStringChars(env,string,(jboolean*)slot);
+        if(!load_jni_output_slots_unchanged(slots))return 0;
+        if(characters)(*env)->ReleaseStringChars(env,string,characters);
+        if(!load_jni_output_refused(env,slots,protectedType,message)||characters)return 0;
+        *stage="JNI_OUTPUT_CONTROL_STRING_UTF_CHARS_COPY";const char *utf=(*env)->GetStringUTFChars(env,string,(jboolean*)slot);
+        if(!load_jni_output_slots_unchanged(slots))return 0;
+        if(utf)(*env)->ReleaseStringUTFChars(env,string,utf);
+        if(!load_jni_output_refused(env,slots,protectedType,message)||utf)return 0;
+        *stage="JNI_OUTPUT_CONTROL_ARRAY_ELEMENTS_COPY";jint *elements=(*env)->GetIntArrayElements(env,array,(jboolean*)slot);
+        if(!load_jni_output_slots_unchanged(slots))return 0;
+        if(elements)(*env)->ReleaseIntArrayElements(env,array,elements,JNI_ABORT);
+        if(!load_jni_output_refused(env,slots,protectedType,message)||elements)return 0;
+        *stage="JNI_OUTPUT_CONTROL_ARRAY_CRITICAL_COPY";void *critical=(*env)->GetPrimitiveArrayCritical(env,array,(jboolean*)slot);
+        if(critical)(*env)->ReleasePrimitiveArrayCritical(env,array,critical,JNI_ABORT);
+        if(!load_jni_output_refused(env,slots,protectedType,message)||critical)return 0;
+        *stage="JNI_OUTPUT_CONTROL_STRING_CRITICAL_COPY";characters=(*env)->GetStringCritical(env,string,(jboolean*)slot);
+        if(characters)(*env)->ReleaseStringCritical(env,string,characters);
+        if(!load_jni_output_refused(env,slots,protectedType,message)||characters)return 0;
+    }
+    return 1;
+}
+JNIEXPORT jboolean JNICALL Java_dev_ronova_pro_AuditFixCheck_hostJniOutput0(JNIEnv *env,jclass check){
+    (void)check;JavaVM *vm=NULL,*ordinaryVm=NULL;jvmtiEnv *api=NULL;LoadJvmtiOutputSlot slots[3]={0};int observed=0;
+    const char *failure=NULL,*stage="JNI_OUTPUT_INITIALIZATION";unsigned target=0;jint result=JNI_OK;jvmtiError disposed=JVMTI_ERROR_NONE;
+    jintArray array=NULL;jstring string=NULL;jclass protectedType=NULL,arrayBounds=NULL,stringBounds=NULL,throwable=NULL;
+    jmethodID message=NULL;const jchar *characters=NULL;const char *utf=NULL;jint *elements=NULL;
+    const jint values[3]={0x13579,-37,0x2468};const jchar text[3]={'R',0,0x4e2d};
+    const unsigned char encoded[6]={'R',0xc0,0x80,0xe4,0xb8,0xad};
+    if((*env)->ExceptionCheck(env))return JNI_FALSE;
+    result=(*env)->GetJavaVM(env,&vm);
+    if(result!=JNI_OK||!vm||(*env)->ExceptionCheck(env)){failure="JNI_OUTPUT_REAL_VM_REQUIRED";goto done;}
+    result=(*vm)->GetEnv(vm,(void**)&api,JVMTI_VERSION_1_2);
+    if(result!=JNI_OK||!api||(*env)->ExceptionCheck(env)){failure="JNI_OUTPUT_REAL_JVMTI_ENV_REQUIRED";goto done;}
+    if(!load_ti_output_slot(&slots[0],vm)||!load_ti_output_slot(&slots[1],api)||!load_ti_output_slot(&slots[2],env)){
+        failure="JNI_OUTPUT_REAL_PUBLIC_SLOTS_REQUIRED";goto done;
+    }
+    observed=1;
+    unsigned char source=0x31,destination=0x5a;SIZE_T written=0;
+    BOOL wrote=WriteProcessMemory(GetCurrentProcess(),&destination,&source,sizeof(source),&written);
+    if(!wrote||written!=sizeof(source)||destination!=source||(*env)->ExceptionCheck(env)){failure="JNI_OUTPUT_HOST_ORDINARY_WRITE";goto done;}
+    written=(SIZE_T)0x7e;SetLastError(0);
+    wrote=WriteProcessMemory(GetCurrentProcess(),slots[2].address,slots[2].bytes,sizeof(slots[2].bytes),&written);
+    DWORD writeError=GetLastError();
+    if(wrote||writeError!=ERROR_ACCESS_DENIED||written!=(SIZE_T)0x7e||!load_jni_output_slots_unchanged(slots)||(*env)->ExceptionCheck(env)){
+        failure="JNI_OUTPUT_HOST_CONTROL_ENV_SAME_VALUE_WRITE";goto done;
+    }
+    protectedType=(*env)->FindClass(env,"java/lang/IllegalStateException");
+    if(!protectedType||(*env)->ExceptionCheck(env)){failure="JNI_OUTPUT_INITIAL_PROTECTED_TYPE";goto done;}
+    arrayBounds=(*env)->FindClass(env,"java/lang/ArrayIndexOutOfBoundsException");
+    if(!arrayBounds||(*env)->ExceptionCheck(env)){failure="JNI_OUTPUT_INITIAL_ARRAY_BOUNDS_TYPE";goto done;}
+    stringBounds=(*env)->FindClass(env,"java/lang/StringIndexOutOfBoundsException");
+    if(!stringBounds||(*env)->ExceptionCheck(env)){failure="JNI_OUTPUT_INITIAL_STRING_BOUNDS_TYPE";goto done;}
+    throwable=(*env)->FindClass(env,"java/lang/Throwable");
+    if(!throwable||(*env)->ExceptionCheck(env)){failure="JNI_OUTPUT_INITIAL_THROWABLE_TYPE";goto done;}
+    message=(*env)->GetMethodID(env,throwable,"getMessage","()Ljava/lang/String;");
+    if(!message||(*env)->ExceptionCheck(env)){failure="JNI_OUTPUT_INITIAL_EXCEPTION_MESSAGE";goto done;}
+    array=(*env)->NewIntArray(env,3);
+    if(!array||(*env)->ExceptionCheck(env)){failure="JNI_OUTPUT_INITIAL_ARRAY";goto done;}
+    (*env)->SetIntArrayRegion(env,array,0,3,values);
+    if((*env)->ExceptionCheck(env)){failure="JNI_OUTPUT_INITIAL_ARRAY_VALUES";goto done;}
+    string=(*env)->NewString(env,text,3);
+    if(!string||(*env)->ExceptionCheck(env)){failure="JNI_OUTPUT_INITIAL_STRING";goto done;}
+    result=(*env)->GetJavaVM(env,&ordinaryVm);
+    if(result!=JNI_OK||ordinaryVm!=vm||(*env)->ExceptionCheck(env)){failure="JNI_OUTPUT_ORDINARY_GET_JAVA_VM";goto done;}
+    jint integers[3]={0};jchar wide[3]={0};unsigned char bytes[10];memset(bytes,0x5a,sizeof(bytes));
+    (*env)->GetIntArrayRegion(env,array,0,3,integers);
+    if((*env)->ExceptionCheck(env)||memcmp(integers,values,sizeof(values))){failure="JNI_OUTPUT_ORDINARY_INT_REGION";goto done;}
+    (*env)->GetStringRegion(env,string,0,3,wide);
+    if((*env)->ExceptionCheck(env)||memcmp(wide,text,sizeof(text))){failure="JNI_OUTPUT_ORDINARY_STRING_REGION";goto done;}
+    (*env)->GetStringUTFRegion(env,string,0,3,(char*)bytes);
+    if((*env)->ExceptionCheck(env)||memcmp(bytes,encoded,sizeof(encoded))||bytes[6]!=0||bytes[7]!=0x5a||bytes[8]!=0x5a||bytes[9]!=0x5a){failure="JNI_OUTPUT_ORDINARY_UTF_REGION";goto done;}
+    memset(bytes,0x5a,sizeof(bytes));(*env)->GetStringUTFRegion(env,string,3,0,(char*)bytes);
+    if((*env)->ExceptionCheck(env)||bytes[0]!=0){failure="JNI_OUTPUT_ORDINARY_EMPTY_UTF_REGION";goto done;}
+    for(unsigned i=1;i<sizeof(bytes);i++)if(bytes[i]!=0x5a){failure="JNI_OUTPUT_EMPTY_UTF_REGION_CHANGED_TAIL";goto done;}
+    jboolean copied=0x7e;characters=(*env)->GetStringChars(env,string,&copied);
+    if(!characters||(*env)->ExceptionCheck(env)||(copied!=JNI_TRUE&&copied!=JNI_FALSE)||memcmp(characters,text,sizeof(text))){failure="JNI_OUTPUT_ORDINARY_STRING_CHARS";goto done;}
+    (*env)->ReleaseStringChars(env,string,characters);characters=NULL;
+    if((*env)->ExceptionCheck(env)){failure="JNI_OUTPUT_ORDINARY_STRING_CHARS_RELEASE";goto done;}
+    copied=0x7e;utf=(*env)->GetStringUTFChars(env,string,&copied);
+    if(!utf||(*env)->ExceptionCheck(env)||(copied!=JNI_TRUE&&copied!=JNI_FALSE)||memcmp(utf,encoded,sizeof(encoded))||utf[sizeof(encoded)]!=0){failure="JNI_OUTPUT_ORDINARY_UTF_CHARS";goto done;}
+    (*env)->ReleaseStringUTFChars(env,string,utf);utf=NULL;
+    if((*env)->ExceptionCheck(env)){failure="JNI_OUTPUT_ORDINARY_UTF_CHARS_RELEASE";goto done;}
+    copied=0x7e;elements=(*env)->GetIntArrayElements(env,array,&copied);
+    if(!elements||(*env)->ExceptionCheck(env)||copied!=JNI_TRUE||memcmp(elements,values,sizeof(values))){failure="JNI_OUTPUT_ORDINARY_ARRAY_ELEMENTS";goto done;}
+    memset(elements,0x5a,sizeof(values));(*env)->GetIntArrayRegion(env,array,0,3,elements);
+    if((*env)->ExceptionCheck(env)||memcmp(elements,values,sizeof(values))){failure="JNI_OUTPUT_ORDINARY_ARRAY_COPY_PAYLOAD_REGION";goto done;}
+    (*env)->ReleaseIntArrayElements(env,array,elements,JNI_ABORT);elements=NULL;
+    if((*env)->ExceptionCheck(env)){failure="JNI_OUTPUT_ORDINARY_ARRAY_ELEMENTS_RELEASE";goto done;}
+    copied=0x7e;void *critical=(*env)->GetPrimitiveArrayCritical(env,array,&copied);
+    int valid=critical&&copied==JNI_TRUE&&!memcmp(critical,values,sizeof(values));
+    if(critical)(*env)->ReleasePrimitiveArrayCritical(env,array,critical,JNI_ABORT);
+    if(!valid||(*env)->ExceptionCheck(env)){failure="JNI_OUTPUT_ORDINARY_ARRAY_CRITICAL_RELEASE";goto done;}
+    copied=0x7e;const jchar *criticalText=(*env)->GetStringCritical(env,string,&copied);
+    valid=criticalText&&copied==JNI_TRUE&&!memcmp(criticalText,text,sizeof(text));
+    if(criticalText)(*env)->ReleaseStringCritical(env,string,criticalText);
+    if(!valid||(*env)->ExceptionCheck(env)){failure="JNI_OUTPUT_ORDINARY_STRING_CRITICAL_RELEASE";goto done;}
+    if(!load_jni_output_control(env,array,string,slots,protectedType,message,&stage,&target)){failure=stage;goto done;}
+    target=2;stage="JNI_OUTPUT_ARRAY_ORIGINAL_BOUNDS";
+    (*env)->GetIntArrayRegion(env,array,2,2,(jint*)slots[target].address);
+    if(!load_jni_output_slots_unchanged(slots)||!load_jni_output_exception(env,arrayBounds,message,NULL)){failure=stage;goto done;}
+    stage="JNI_OUTPUT_STRING_ORIGINAL_BOUNDS";
+    (*env)->GetStringRegion(env,string,2,2,(jchar*)slots[target].address);
+    if(!load_jni_output_slots_unchanged(slots)||!load_jni_output_exception(env,stringBounds,message,NULL)){failure=stage;goto done;}
+    stage="JNI_OUTPUT_UTF_ORIGINAL_BOUNDS";
+    (*env)->GetStringUTFRegion(env,string,2,2,(char*)slots[target].address);
+    if(!load_jni_output_slots_unchanged(slots)||!load_jni_output_exception(env,stringBounds,message,NULL)){failure=stage;goto done;}
+done:
+    /* A broken control slot is evidence, never an address to repair. Avoid
+     * further API dereferences in that failure branch. */
+    if(observed&&!load_jni_output_slots_unchanged(slots)){
+        fprintf(stderr,"JNI_OUTPUT_FAILED stage=%s target=%u control_slot_changed\n",failure?failure:stage,target);fflush(stderr);return JNI_FALSE;
+    }
+    if(elements)(*env)->ReleaseIntArrayElements(env,array,elements,JNI_ABORT);
+    if(utf)(*env)->ReleaseStringUTFChars(env,string,utf);
+    if(characters)(*env)->ReleaseStringChars(env,string,characters);
+    if(array)(*env)->DeleteLocalRef(env,array);if(string)(*env)->DeleteLocalRef(env,string);
+    if(throwable)(*env)->DeleteLocalRef(env,throwable);if(stringBounds)(*env)->DeleteLocalRef(env,stringBounds);
+    if(arrayBounds)(*env)->DeleteLocalRef(env,arrayBounds);if(protectedType)(*env)->DeleteLocalRef(env,protectedType);
+    if(api){disposed=(*api)->DisposeEnvironment(api);if(disposed!=JVMTI_ERROR_NONE&&!failure)failure="JNI_OUTPUT_REAL_DISPOSE";}
+    if((*env)->ExceptionCheck(env)&&!failure)failure="JNI_OUTPUT_UNEXPECTED_EXCEPTION";
+    if(failure){fprintf(stderr,"JNI_OUTPUT_FAILED stage=%s target=%u jni=%d dispose=%d\n",failure,target,(int)result,(int)disposed);fflush(stderr);load_ti_fail(env,failure);return JNI_FALSE;}
+    fprintf(stdout,"JNI_OUTPUT_PASS\n");fflush(stdout);return JNI_TRUE;
+}
 static int load_jvmti_environment(JavaVM *vm,JNIEnv *env,jclass check){
     jvmtiEnv *api=NULL;
     if((*vm)->GetEnv(vm,(void**)&api,JVMTI_VERSION_1_2)!=JNI_OK||!api){load_ti_fail(env,"REAL_JVMTI_GETENV_FAILED");return 0;}

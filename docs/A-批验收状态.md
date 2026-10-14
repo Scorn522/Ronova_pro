@@ -1,5 +1,20 @@
 # Ronova Pro 当前进度
 
+## 2026-10-14：C 接续——JNI 调用者输出保护
+
+接续 `2d6db6f`，Java ABI70 / Native ABI66 / Storage3 / Journal6。自身外观与武器物品注册继续暂缓，沿用现有命令和底层入口。
+
+GetJavaVM、8类 GetArrayRegion、GetStringRegion/GetStringUTFRegion、GetStringChars/UTFChars 的 isCopy，以及既有数组副本和 StringCritical 的 isCopy 输出，均先用本次临时值，再通过共用短 gate 检查准确控制范围并实际复制。入口只观察真实已附加当前 JNIEnv 首槽；heap/GC 受限上下文不进入 JNI、不 attach。原 VM 调用和配对 Release 均在 gate 外，原异常保留；UTF 仅提交实际 modified-UTF8 字节和 VM 写入的 NUL，空 UTF Region 仍保持实际单字节 NUL 行为。isCopy 拒绝时清理本次尚未发布的 lease/VM 指针，不误释放已有副本。JNI 数组和字符串副本业务 contents 仍可作为普通输出。
+
+既有 Host 控制范围查询接入同一准确私有分配目录，放开该叶锁后才查询其它域；查询命中 JNI 首槽已有实际检查。此接线不把 Host/Unsafe 原有“检查后调用原 API”升级为整个效果的原子保证。
+
+完整工作包写齐后集中构建：`build-c-java70-native66-jni-20261014.log` PASS39秒；复用既有夹具新增 jni-output 分支，编译通过，`c-jni-outputs66-20261014.log` 实际退出0、JNI_OUTPUT_PASS，Native/JNI 与线程绑定就绪。实跑 GetJavaVM、IntArrayRegion、两种 StringRegion、StringChars/UTFChars 与现有 Elements/Critical isCopy：普通输出、modified-UTF8/NUL/空 Region 尾部保持、业务数组副本作为 Region 目标与配对释放通过；真实 VM/JVMTI/JNI 三个首槽均拒绝，字节和映射保持；真实原越界异常保留。另只检查当前 DLL 的普通 WriteProcessMemory 成功与 JNI 首槽同值写拒绝，原 written canary 保持。未重跑旧矩阵，也不将 Int 实跑推广为8类数组均已实跑；文件绑定仍有74 pending。
+
+原 Java63/Native61 run03 会话仍存活，原日志已前进到15:09加载配方、15:15加载1271条进度；尚无 WORLD_LOADED/Done 或冻结保存结果，未重启，不能当作本包游戏通过。驱动/管理器源码未改、未重建或加载；沿用未签名 SYS37888字节、管理器190464字节。未观察缓存原表、扩展输出、任意 store/syscall、最终映像 unmap/复用等原边界保留，完整 C/B 仍未完成。
+
+候选 `distribution/candidate-c-java70-native66-jni-wip-20261014`，Core2457423字节、prelaunch22440字节；匹配源码及产物包 `distribution/Ronova-Pro-C-JNI-WIP-Java70-Native66-20261014.zip`。源码和既有报告摘要同步 Git，ZIP、候选、原始日志及存档留本地。
+
+---
 ## 2026-10-14：C 接续——JVMTI 与 JavaVM 输出保护
 
 接续 `4c8641a`，Java ABI69 / Native ABI65 / Storage3 / Journal6。完整当前工作包写齐后集中构建；自身外观和武器注册继续暂缓。

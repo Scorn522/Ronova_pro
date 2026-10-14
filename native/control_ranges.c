@@ -95,6 +95,12 @@ static int native_control_heap_range(uintptr_t first,uintptr_t last,int restrict
 }
 static int native_control_range(uintptr_t first,uintptr_t last,int restricted){
     if(first>last)return -1;
+    /* Consult the same exact allocation directory used by JNI/JVMTI result
+     * publication. Release its leaf lock before taking any domain lock below. */
+    if(!native_control_shared(&native_private_gate,restricted))return -1;
+    int privateHit=native_private_range_locked(first,last);
+    ReleaseSRWLockShared(&native_private_gate);
+    if(privateHit)return privateHit;
     int unknown=0;HMODULE image=native_control_image();
     uintptr_t begin=native_tooling_image_begin,end=native_tooling_image_end;
     if(image&&begin==(uintptr_t)image&&end>begin){
