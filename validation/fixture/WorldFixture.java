@@ -6,18 +6,34 @@ import java.nio.file.*;
 import java.util.*;
 import java.util.concurrent.*;
 import net.minecraft.core.BlockPos;
+import net.minecraft.core.registries.BuiltInRegistries;
 import net.minecraft.nbt.CompoundTag;
 import net.minecraft.network.chat.Component;
+import net.minecraft.resources.ResourceLocation;
 import net.minecraft.server.level.*;
 import net.minecraft.world.entity.EntityType;
 import net.minecraft.world.entity.animal.Cow;
 import net.minecraft.world.item.*;
+import net.minecraft.world.level.ChunkPos;
+import net.minecraft.world.level.block.Block;
 import net.minecraft.world.level.block.Blocks;
 import net.minecraft.world.level.block.entity.*;
+import net.minecraft.world.level.block.state.properties.BlockStateProperties;
+import net.minecraft.world.level.chunk.LevelChunk;
+import net.minecraft.world.level.chunk.storage.ChunkSerializer;
+import net.minecraft.world.level.chunk.storage.ChunkStorage;
 import net.minecraft.world.level.levelgen.Heightmap;
+import net.minecraft.world.level.material.Fluid;
+import net.minecraft.world.level.material.Fluids;
+import net.minecraft.world.level.storage.LevelResource;
+import net.minecraft.world.ticks.LevelChunkTicks;
+import net.minecraft.world.ticks.SavedTick;
+import net.minecraft.world.ticks.ScheduledTick;
+import net.minecraft.world.ticks.TickPriority;
 import net.minecraftforge.common.MinecraftForge;
 import net.minecraftforge.event.TickEvent;
 import net.minecraftforge.event.RegisterCommandsEvent;
+import net.minecraftforge.event.server.ServerStoppedEvent;
 import net.minecraftforge.eventbus.api.EventPriority;
 import net.minecraftforge.fml.common.Mod;
 
@@ -66,6 +82,9 @@ public final class WorldFixture {
     final List<String> passed=new ArrayList<>();
     boolean finished;
     public WorldFixture() {
+        if(Boolean.getBoolean("ronova.pro.validation")&&"world-held-save".equals(System.getProperty("ronova.pro.fixture"))) {
+            new HeldSave();return;
+        }
         if(Boolean.getBoolean("ronova.pro.validation")&&"mod-group".equals(System.getProperty("ronova.pro.fixture"))) {
             var bus=net.minecraftforge.fml.javafmlmod.FMLJavaModLoadingContext.get().getModEventBus();
             ModGroupBlockFixture.BLOCKS.register(bus);ModGroupBlockFixture.TYPES.register(bus);
@@ -129,6 +148,138 @@ public final class WorldFixture {
         System.out.println("PRO_FIXTURE_ENABLED="+Boolean.getBoolean("ronova.pro.validation"));
         if(Boolean.getBoolean("ronova.pro.validation"))
             MinecraftForge.EVENT_BUS.addListener(EventPriority.LOWEST,this::tick);
+    }
+    /** The installed command and actual server schedulers own every freeze/defer transition. */
+    private final class HeldSave {
+        private final ChunkPos location=new ChunkPos(80,80);
+        private ServerLevel level;
+        private LevelChunk chunk;
+        private LevelChunkTicks<Block> blocks;
+        private LevelChunkTicks<Fluid> fluids;
+        private BlockPos pos;
+        private ScheduledTick<Block> heldBlock,pendingBlock,otherBlock;
+        private ScheduledTick<Fluid> heldFluid;
+        private Path worldRoot;
+        private long savedAt;
+        private boolean stopping;
+        HeldSave(){
+            MinecraftForge.EVENT_BUS.addListener(EventPriority.LOWEST,this::tick);
+            MinecraftForge.EVENT_BUS.addListener(EventPriority.LOWEST,this::stopped);
+        }
+        private void tick(TickEvent.ServerTickEvent event){
+            if(finished||stopping||event.phase!=TickEvent.Phase.END)return;
+            var server=event.getServer();var runtime=ProRuntime.get(server);if(runtime==null)return;
+            age++;
+            try{
+                require(age<=600,"world-held-save timeout phase="+phase+" state="+runtime.worldState());
+                if(phase==0){
+                    level=server.overworld();worldRoot=server.getWorldPath(LevelResource.ROOT);
+                    require(level.getChunkSource().chunkMap.read(location).get(20,TimeUnit.SECONDS).isEmpty(),"fixture chunk already exists; a new isolated world is required");
+                    require(runtime.worldState().equals("WORLD_RULES=0;DEFERRED_TICKS=0"),"isolated fixture starts with no world rules or held ticks");
+                    level.setChunkForced(location.x,location.z,true);chunk=level.getChunk(location.x,location.z);
+                    pos=new BlockPos(location.getMinBlockX()+8,level.getMaxBuildHeight()-4,location.getMinBlockZ()+8);
+                    next(1);
+                }else if(phase==1&&level.shouldTickBlocksAt(location.toLong())){
+                    require(level.getChunkSource().getChunkNow(location.x,location.z)==chunk,"actual loaded chunk identity changed");
+                    require(level.setBlock(pos,Blocks.OAK_SLAB.defaultBlockState().setValue(BlockStateProperties.WATERLOGGED,true),2),"place the real block/fluid carrier");
+                    require(level.getBlockState(pos).is(Blocks.OAK_SLAB)&&level.getFluidState(pos).getType()==Fluids.WATER,"real block and water states at the scheduled position");
+                    blocks=(LevelChunkTicks<Block>)chunk.getTicksForSerialization().blocks();
+                    fluids=(LevelChunkTicks<Fluid>)chunk.getTicksForSerialization().fluids();
+                    require(!blocks.hasScheduledTick(pos,Blocks.OAK_SLAB)&&!fluids.hasScheduledTick(pos,Fluids.WATER),"fixture position already has a scheduled tick");
+                    level.getChunkSource().save(true);
+                    require(!chunk.isUnsaved(),"ordinary initial save did not clean the new chunk");
+                    FixtureCommands.execute(server,"region freeze "+coordinates(pos)+" "+coordinates(pos)+" 1200");
+                    require(ProRuntime.worldFrozen(level,pos),"installed region freeze command did not freeze the selected position");
+                    long due=level.getGameTime()+3;
+                    heldBlock=new ScheduledTick<>(Blocks.OAK_SLAB,pos,due,TickPriority.HIGH,level.nextSubTickCount());
+                    heldFluid=new ScheduledTick<>(Fluids.WATER,pos,due,TickPriority.VERY_HIGH,level.nextSubTickCount());
+                    level.getBlockTicks().schedule(heldBlock);level.getFluidTicks().schedule(heldFluid);
+                    require(blocks.getAll().anyMatch(tick->tick==heldBlock)&&fluids.getAll().anyMatch(tick->tick==heldFluid),"actual level schedulers did not populate the owning chunk queues");
+                    require(!chunk.isUnsaved(),"scheduling alone changed the baseline chunk dirty flag");
+                    next(2);
+                }else if(phase==2&&level.getGameTime()>heldBlock.triggerTick()
+                        &&blocks.getAll().noneMatch(tick->tick==heldBlock)&&fluids.getAll().noneMatch(tick->tick==heldFluid)){
+                    active(runtime);
+                    require(!blocks.hasScheduledTick(pos,heldBlock.type())&&!fluids.hasScheduledTick(pos,heldFluid.type()),"polled held ticks remain in the original chunk queues");
+                    require(chunk.isUnsaved(),"first real defer did not mark the loaded chunk dirty");
+                    pass("WORLD_HELD_REAL_BLOCK_FLUID_POLL_DEFER_DIRTY");
+                    pendingBlock=new ScheduledTick<>(heldBlock.type(),pos,level.getGameTime()+600,TickPriority.LOW,level.nextSubTickCount());
+                    otherBlock=new ScheduledTick<>(Blocks.DIRT,pos,level.getGameTime()+600,TickPriority.VERY_LOW,level.nextSubTickCount());
+                    // This is the public, live chunk container path that can introduce a later same-key competitor.
+                    blocks.schedule(pendingBlock);blocks.schedule(otherBlock);
+                    List<ScheduledTick<Block>> originalBlocks=blocks.getAll().toList();
+                    List<ScheduledTick<Fluid>> originalFluids=fluids.getAll().toList();
+                    require(originalBlocks.stream().anyMatch(tick->tick==pendingBlock)&&originalBlocks.stream().anyMatch(tick->tick==otherBlock),"actual chunk queue did not retain the pending competitors");
+                    saved(ChunkSerializer.write(level,chunk));
+                    unchanged(originalBlocks,originalFluids,runtime);
+                    pass("WORLD_HELD_ACTUAL_CHUNK_SERIALIZER_NBT_PRIORITY_DELAY_NO_RESUME");
+                    level.getChunkSource().save(true);
+                    require(!chunk.isUnsaved(),"ordinary chunk save did not consume the actual dirty flag");
+                    CompoundTag persisted=level.getChunkSource().chunkMap.read(location).get(20,TimeUnit.SECONDS)
+                            .orElseThrow(()->new AssertionError("ordinary chunk save did not reach chunk storage"));
+                    saved(persisted);savedAt=persisted.getLong("LastUpdate");
+                    unchanged(originalBlocks,originalFluids,runtime);
+                    pass("WORLD_HELD_ORDINARY_CHUNK_SAVE_STORAGE_NBT_NO_RESUME");
+                    require(level.setBlock(pos.offset(3,0,3),Blocks.GLASS.defaultBlockState(),2),"real out-of-region marker change for the final save");
+                    require(chunk.isUnsaved(),"real marker change did not require a final chunk save");
+                    next(3);
+                }else if(phase==3&&level.getGameTime()>savedAt){
+                    active(runtime);
+                    require(chunk.isUnsaved(),"final dirty chunk was saved before normal shutdown");
+                    require(blocks.getAll().anyMatch(tick->tick==pendingBlock)&&blocks.getAll().anyMatch(tick->tick==otherBlock)
+                            &&blocks.getAll().noneMatch(tick->tick==heldBlock)&&fluids.getAll().noneMatch(tick->tick==heldFluid),"held save resumed or consumed the actual runtime entries");
+                    stopping=true;server.halt(false);
+                }
+            }catch(Throwable failure){finish(server,failure);}
+        }
+        private void active(ProRuntime runtime){
+            require(ProRuntime.worldFrozen(level,pos),"saving ended the actual freeze rule");
+            require(runtime.worldState().equals("WORLD_RULES=1;DEFERRED_TICKS=2"),"saving changed the actual held entries: "+runtime.worldState());
+            require(level.getBlockTicks().hasScheduledTick(pos,heldBlock.type())&&level.getFluidTicks().hasScheduledTick(pos,heldFluid.type()),"actual level tick queries lost the held reservations");
+        }
+        private void unchanged(List<ScheduledTick<Block>> originalBlocks,List<ScheduledTick<Fluid>> originalFluids,ProRuntime runtime){
+            active(runtime);sameQueue(blocks,originalBlocks);sameQueue(fluids,originalFluids);
+        }
+        private <T> void sameQueue(LevelChunkTicks<T> queue,List<ScheduledTick<T>> original){
+            require(queue.count()==original.size()&&original.stream().allMatch(tick->queue.getAll().anyMatch(current->current==tick)),"saving mutated or consumed a live chunk tick queue");
+        }
+        private void saved(CompoundTag data){
+            require(data.getInt("xPos")==location.x&&data.getInt("zPos")==location.z&&data.contains("LastUpdate",net.minecraft.nbt.Tag.TAG_LONG),"storage returned another chunk or no save time");
+            rows(data,"block_ticks",id->BuiltInRegistries.BLOCK.getOptional(new ResourceLocation(id)),List.of(heldBlock,otherBlock));
+            rows(data,"fluid_ticks",id->BuiltInRegistries.FLUID.getOptional(new ResourceLocation(id)),List.of(heldFluid));
+        }
+        private <T> void rows(CompoundTag data,String key,java.util.function.Function<String,Optional<T>> lookup,List<ScheduledTick<T>> expected){
+            require(data.contains(key,net.minecraft.nbt.Tag.TAG_LIST),"actual chunk save has no "+key);
+            var encoded=data.getList(key,net.minecraft.nbt.Tag.TAG_COMPOUND);List<SavedTick<T>> selected=new ArrayList<>();
+            for(int index=0;index<encoded.size();index++){
+                SavedTick<T> tick=SavedTick.loadTick(encoded.getCompound(index),lookup)
+                        .orElseThrow(()->new AssertionError("vanilla SavedTick could not decode "+key));
+                if(tick.pos().equals(pos))selected.add(tick);
+            }
+            require(selected.size()==expected.size(),"saved same-position "+key+" entries were lost or duplicated");
+            for(ScheduledTick<T> original:expected){
+                List<SavedTick<T>> same=selected.stream().filter(tick->tick.type()==original.type()).toList();
+                require(same.size()==1&&same.get(0).priority()==original.priority()
+                        &&same.get(0).delay()==(int)(original.triggerTick()-data.getLong("LastUpdate")),"saved "+key+" changed the exact type/position, priority or relative delay");
+            }
+        }
+        private void stopped(ServerStoppedEvent event){
+            if(finished)return;
+            try{
+                require(stopping,"server stopped before the held-save phase completed");
+                // Forge fires ServerStopped after stopServer closes the original chunk storage.
+                try(ChunkStorage storage=new ChunkStorage(worldRoot.resolve("region"),event.getServer().getFixerUpper(),false)){
+                    CompoundTag persisted=storage.read(location).get(20,TimeUnit.SECONDS)
+                            .orElseThrow(()->new AssertionError("normal shutdown did not retain the actual chunk file"));
+                    saved(persisted);
+                    require(persisted.getLong("LastUpdate")>savedAt,"normal shutdown did not save the final dirty chunk");
+                }
+                pass("WORLD_HELD_NORMAL_SHUTDOWN_CLOSED_STORAGE_NBT");
+                System.out.println("WORLD_HELD_SAVE_GAME_PASS actual_ServerLevel_poll_defer_ChunkSerializer_ordinary_save_normal_shutdown_disk_read no_resume_or_consume");
+                finish(event.getServer(),null);
+            }catch(Throwable failure){finish(event.getServer(),failure);}
+        }
+        private String coordinates(BlockPos at){return at.getX()+" "+at.getY()+" "+at.getZ();}
     }
     private void groupCommands(RegisterCommandsEvent event) {
         event.getDispatcher().register(net.minecraft.commands.Commands.literal("pro_fixture_ping").executes(context->{

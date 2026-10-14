@@ -1,5 +1,23 @@
 # B 批实际报告：2026-10-09 代码收敛接续
 
+## 2026-10-14：C 接续——Unsafe 原表安装与真实冻结保存场景
+
+接续 `5017751`，Java ABI63 / Native ABI61 / Storage3 / Journal6。自身外观和武器注册继续暂缓，完整 C/B 尚未完成。
+
+真实新空白 Forge 启动发现 Native60 在私有 Unsafe 原表安装时，把 JVM 的实际注册标成 unknown；原目标和原生帧均为 `jdk.internal.misc.Unsafe.registerNatives`，逐项来源检查拒绝，HotSpot 在 `unsafe.cpp:976` fatal。两次失败与原始 hs_err 保留在 `.work/c-world-held-save62-20261014-01/server/` 和 `-02/server/`，未进入 Forge 或世界。
+
+本包把私有安装限定为当前控制器的真实 initialize0 帧、准确 bootstrap Unsafe 与原 registrar、单次调用深度，以及真实 VM 内的原表、字符串和全表函数地址。来源取实际 Unsafe 所属 module，method/fn 配对快照贯穿 MethodBind；外部 unknown、stopped、原目标和 Java 注册守卫保留。真实 RegisterNatives 结果原样交回 HotSpot；后置绑定捕获/seed 在私有安装返回前处理，失败按普通安装失败报告。
+
+既有 WorldFixture 增加独立 world-held-save 分支：仅新空白世界，使用真实 force-loaded 区块、已安装 region freeze 命令和 block/fluid 调度器，等待实际 poll/defer，再检查实际 ChunkSerializer、普通保存及正常退出后关闭存储的磁盘 NBT；不直接调用控制 setter 或伪造 ServerLevel/producer。
+
+统一构建：`build-c-java62-native60-world-held-live-20261014.log` PASS14秒；定位实际拒绝的诊断构建 `build-c-java62-native60-unsafe-diagnostic-20261014.log` PASS15秒；完整修复包 `build-c-java63-native61-unsafe-startup-20261014.log` PASS29秒。未重跑旧 Native/thread/heap/客户端矩阵，驱动及管理器未改、未重建、未加载。
+
+本次实际运行 `.work/c-world-held-save63-20261014-03/server/` 使用新空白世界、6G 堆和原120秒 watchdog，已报告 NATIVE_BIND_AND_JNI_FIELD_READY、NATIVE_THREAD_CURRENT_BINDINGS_READY，进入 Forge 并完成 Forge 初始化；文件绑定初始仍报告74 pending，不作全覆盖声明。当前仍在加载世界之前的模组阶段，冻结保存案例尚未取得结果。此前数据 codec PASS 不代替本次真实存档结果。
+
+本地候选 `distribution/candidate-c-java63-native61-startup-wip-20261014`，Core JAR 2416869字节，prelaunch 22440字节；匹配包 `distribution/Ronova-Pro-C-Startup-WIP-Java63-Native61-20261014.zip`。沿用未签名 SYS 37888字节及管理器190464字节；旧包、失败日志及运行目录保留本地。同步本包源码与简要报告，实际游戏结果后续接续同一实例。
+
+---
+
 ## 2026-10-14：C 强度接续——HUD 未知份额、发送者来源与时停 tick 保存
 
 接续 `3eb5c5b`，Java ABI62 / Native ABI60 / Storage3 / Journal6。自身外观与武器注册继续暂缓；本包修复的是目标 Mod 绘制/通信及实际世界 tick 数据路径，完整 C/B 尚未完成。

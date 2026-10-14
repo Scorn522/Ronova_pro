@@ -200,14 +200,53 @@ static int native_unsafe_prepare(JNIEnv *env){
     int ready=native_unsafe_class&&native_unsafe_backing&&native_unsafe_register&&native_unsafe_read_query&&native_unsafe_begin_query&&native_unsafe_read_begin_query&&native_unsafe_copy_begin_query&&native_unsafe_metadata_query&&native_memory_gate&&native_unsafe_denied&&!native_original.ExceptionCheck(env);
     state->control--;return ready;
 }
+static NativeUnsafeInstall *native_unsafe_registration(JNIEnv *env,NativeThread *state,jclass type,const JNINativeMethod *methods,jint count,void *caller){
+    NativeUnsafeInstall *install=state?state->unsafeInstall:NULL;
+    if(!install||install->consumed||state->unsafeInstalling!=1||count<=0
+            ||!native_original.IsSameObject(env,type,native_unsafe_class)
+            ||native_image(caller)!=install->image)return NULL;
+    size_t bytes=(size_t)count*sizeof(*methods);uintptr_t table=(uintptr_t)methods;
+    if(!table||bytes-1>UINTPTR_MAX-table||native_image((void*)table)!=install->image
+            ||native_image((void*)(table+bytes-1))!=install->image)return NULL;
+    jvmtiFrameInfo frames[2];jint found=0,depth=0;
+    if((*native_ti)->GetFrameCount(native_ti,NULL,&depth)!=JVMTI_ERROR_NONE||depth!=install->frames+1
+            ||(*native_ti)->GetStackTrace(native_ti,NULL,0,2,frames,&found)!=JVMTI_ERROR_NONE||found!=2
+            ||frames[0].method!=native_unsafe_register||frames[1].method!=install->installer)return NULL;
+    install->consumed=1;return install;
+}
 static int native_unsafe_install(JNIEnv *env){
     NativeThread *state=native_thread();if(!state||native_original.ExceptionCheck(env))return 0;
-    // The actual boot class's own registrar submits its original native table;
-    // MethodBind captures each original address before publishing its wrapper.
-    state->control++;state->unsafeInstalling++;
+    if(state->unsafeInstall||state->unsafeInstalling||native_stopped(env))return 0;
+    /* Resolve the loaded VM's real metadata before invoking the fatal-on-error
+     * registrar. This initialization does not depend on an Unsafe binding. */
+    if(!InitOnceExecuteOnce(&code_vm_once,code_vm_initialize,env,NULL)||!code_vm_layout.ready){
+        native_refuse(env,"NATIVE_UNSAFE_VM_LAYOUT_REQUIRED");return 0;
+    }
+    NativeUnsafeInstall install={0};jvmtiFrameInfo frame;jint found=0;JavaVM *vm=NULL;
+    install.image=code_vm_layout.image;
+    install.installer=native_original.GetStaticMethodID(env,native_controller,"initialize0","(Ljava/lang/Class;Ljava/lang/Class;)Z");
+    if(!install.installer||native_original.ExceptionCheck(env)
+            ||native_original.GetJavaVM(env,&vm)!=JNI_OK||vm!=native_vm
+            ||native_image((void*)native_original.RegisterNatives)!=install.image
+            ||native_vm_getenv_image(vm)!=install.image
+            ||(*native_ti)->GetFrameCount(native_ti,NULL,&install.frames)!=JVMTI_ERROR_NONE||install.frames==INT32_MAX
+            ||(*native_ti)->GetStackTrace(native_ti,NULL,0,1,&frame,&found)!=JVMTI_ERROR_NONE||found!=1
+            ||frame.method!=install.installer){native_refuse(env,"ACTUAL_UNSAFE_INSTALLER_REQUIRED");return 0;}
+    // Only this direct invocation may submit the bootstrap registrar's VM table.
+    state->control++;state->unsafeInstalling++;state->unsafeInstall=&install;
     native_original.CallStaticVoidMethod(env,native_unsafe_class,native_unsafe_register);
-    state->unsafeInstalling--;state->control--;
-    return !native_original.ExceptionCheck(env);
+    int ready=install.methods&&!native_original.ExceptionCheck(env);
+    if(ready){
+        NativeRegistration registration={.methods=install.actual,.count=install.count,.owners=install.owners,
+                .origin=native_unsafe_class,.previous=state->registration,.unsafeTable=install.methods,.unsafeVM=install.image};
+        state->registration=&registration;
+        ready=native_unsafe_registered(env,state,native_unsafe_class,install.methods,install.actual,install.count,install.caller);
+        state->registration=registration.previous;
+    }
+    state->unsafeInstall=NULL;state->unsafeInstalling--;state->control--;
+    free(install.actual);native_owner_links_free(install.owners);native_registration_free(install.methods,install.count);
+    if(!ready)native_refuse(env,"NATIVE_UNSAFE_CURRENT_BINDINGS_PENDING");
+    return ready&&!native_original.ExceptionCheck(env);
 }
 static int native_unsafe_vm_target(jmethodID method,void *target){
     int matched=0;AcquireSRWLockShared(&native_records);
