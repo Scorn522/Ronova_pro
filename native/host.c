@@ -848,6 +848,10 @@ static uint64_t host_native_handle(HostImport *entry,void *caller,uintptr_t *arg
         DWORD error=GetLastError();native_owner_links_free(owners);return host_handle_refused(entry->kind,error);
     }
     int kind=entry->kind,opening=kind==HOST_OPEN_PROCESS||kind==HOST_OPEN_THREAD;
+    int threadEffect=kind==HOST_RESUME_THREAD||kind==HOST_SUSPEND_THREAD||kind==HOST_TERMINATE_THREAD;
+    HostCompareHandles compare=threadEffect?__atomic_load_n(&host_compare_handles,__ATOMIC_ACQUIRE):NULL;
+    if(threadEffect&&!compare&&!restricted&&host_handle_identity_ready())
+        compare=__atomic_load_n(&host_compare_handles,__ATOMIC_ACQUIRE);
     int closeOnly=kind==HOST_CLOSE||kind==HOST_DUPLICATE&&!arguments[2]&&((DWORD)arguments[6]&DUPLICATE_CLOSE_SOURCE);
     /* Pin the exit-witness directory before the handle records. A busy
      * directory is never evidence that an ordinary handle is private, and
@@ -868,21 +872,55 @@ static uint64_t host_native_handle(HostImport *entry,void *caller,uintptr_t *arg
         AcquireSRWLockShared(&host_imports);AcquireSRWLockExclusive(&host_records);AcquireSRWLockShared(&native_records);
     }
     HANDLE value=(HANDLE)arguments[kind==HOST_DUPLICATE?1:0];
+    HANDLE thread=NULL;DWORD refusal=0;
+    if(threadEffect){
+        /* Fix this invocation's actual object and original access before the
+         * comparison. Caller-side close/reuse cannot redirect the OS effect. */
+        if(native_owner_stopped(owners))refusal=ERROR_ACCESS_DENIED;
+        else if(!host_real_duplicate(GetCurrentProcess(),value,GetCurrentProcess(),&thread,0,FALSE,DUPLICATE_SAME_ACCESS)){
+            DWORD error=GetLastError();refusal=error?error:ERROR_INVALID_HANDLE;
+        }
+        else if(host_worker_handle){
+            if(!compare)refusal=ERROR_NOT_SUPPORTED;
+            else{
+                SetLastError(ERROR_SUCCESS);
+                if(compare(thread,host_worker_handle))refusal=ERROR_ACCESS_DENIED;
+                else{
+                    DWORD error=GetLastError();
+                    if(error!=ERROR_NOT_SAME_OBJECT)refusal=error?error:ERROR_INVALID_DATA;
+                }
+            }
+        }
+        if(!thread&&!refusal)refusal=ERROR_INVALID_HANDLE;
+    }
+    if(refusal){
+        if(thread&&!host_real_close(thread))InterlockedIncrement(&native_failures);
+        ReleaseSRWLockShared(&native_records);ReleaseSRWLockExclusive(&host_records);ReleaseSRWLockShared(&host_imports);
+        native_owner_links_free(owners);return host_handle_refused(kind,refusal);
+    }
     int local=kind!=HOST_DUPLICATE||host_local_process((HANDLE)arguments[0]);
     HostProcess *process=NULL;HostHandle *alias=!opening&&local?host_alias(value,&process):NULL;
+    if(thread&&alias&&!host_same_handle(thread,host_handle_witness(process,alias->role))){alias=NULL;process=NULL;}
     if(!opening&&local&&!alias&&!host_internal_handle(value)){
-        int role=0;process=host_object_record(value,&role);
-        if(process){alias=host_add_alias(process,value,role,owners);process->lifetimeGap=process->unknown=1;}
+        int role=0;process=host_object_record(thread?thread:value,&role);
+        if(process){
+            /* The temporary alias belongs only to this call. A changed caller
+             * slot cannot be published as an alias for its former object. */
+            if(!thread||host_same_handle(value,thread))alias=host_add_alias(process,value,role,owners);
+            process->lifetimeGap=process->unknown=1;
+        }
     }
     int stopped=native_owner_stopped(owners)!=NULL;
     if((!opening&&local&&host_internal_handle(value))
             ||stopped&&(!closeOnly||!alias||!host_handle_private(alias)||!host_owners_contain(alias->owners,owners))){
+        if(thread&&!host_real_close(thread))InterlockedIncrement(&native_failures);
         ReleaseSRWLockShared(&native_records);ReleaseSRWLockExclusive(&host_records);ReleaseSRWLockShared(&host_imports);
         native_owner_links_free(owners);return host_handle_refused(kind,ERROR_ACCESS_DENIED);
     }
     if(alias&&!closeOnly&&(!owners||!native_owner_merge(&alias->owners,owners)||!native_owner_merge(&process->owners,owners)))
         process->lifetimeGap=process->unknown=1;
-    SetLastError(incoming);uint64_t result=host_call_handle(entry,arguments);DWORD error=GetLastError();
+    uintptr_t threadArguments[2]={(uintptr_t)thread,kind==HOST_TERMINATE_THREAD?arguments[1]:0};
+    SetLastError(incoming);uint64_t result=host_call_handle(entry,thread?threadArguments:arguments);DWORD error=GetLastError();
     if(kind==HOST_CLOSE){if(result&&alias)alias->live=0;}
     else if(kind==HOST_DUPLICATE){
         int targetLocal=arguments[2]&&host_local_process((HANDLE)arguments[2]);
@@ -909,6 +947,7 @@ static uint64_t host_native_handle(HostImport *entry,void *caller,uintptr_t *arg
         DWORD flags;if(GetHandleInformation(value,&flags))alias->inheritable=(flags&HANDLE_FLAG_INHERIT)!=0;
         else process->lifetimeGap=process->unknown=1;
     }
+    if(thread&&!host_real_close(thread))InterlockedIncrement(&native_failures);
     ReleaseSRWLockShared(&native_records);ReleaseSRWLockShared(&host_imports);
     if(process)host_collect(process);
     WakeAllConditionVariable(&host_changed);ReleaseSRWLockExclusive(&host_records);

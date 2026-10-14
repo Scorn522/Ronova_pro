@@ -17,6 +17,7 @@ final class ClientBoundary {
     private static final String OVERLAY_REGISTER="(Lnet/minecraftforge/client/event/RegisterGuiOverlaysEvent$Ordering;Lnet/minecraft/resources/ResourceLocation;Ljava/lang/String;Lnet/minecraftforge/client/gui/overlay/IGuiOverlay;)V";
     private static final String OVERLAY_RENDER="(Lnet/minecraft/client/gui/GuiGraphics;FLnet/minecraftforge/client/gui/overlay/NamedGuiOverlay;)V";
     private static final String BUILDER="com/mojang/blaze3d/vertex/BufferBuilder",VERTEX_BUFFER="com/mojang/blaze3d/vertex/VertexBuffer";
+    private static final String RENDER_SYSTEM="com/mojang/blaze3d/systems/RenderSystem",RENDER_CALL="com/mojang/blaze3d/pipeline/RenderCall";
     private static final String RENDERED="Lcom/mojang/blaze3d/vertex/BufferBuilder$RenderedBuffer;",SORTING="Lcom/mojang/blaze3d/vertex/BufferBuilder$SortState;";
     private static final String BEGIN="(Lcom/mojang/blaze3d/vertex/VertexFormat$Mode;Lcom/mojang/blaze3d/vertex/VertexFormat;)V";
     private record ClientCallback(String named,String installed,String descriptor){
@@ -157,8 +158,14 @@ final class ClientBoundary {
             }
             if(name.equals("net/minecraft/client/sounds/ChannelAccess$ChannelHandle")&&member(method,"release","m_120156_","()V")){soundRelease(method);changed=true;}
             if(name.equals("com/mojang/blaze3d/audio/Channel")&&member(method,"destroy","m_83665_","()V")){afterVoid(method,"soundChannelDestroyed");changed=true;}
+            if(name.equals(RENDER_SYSTEM)&&member(method,"recordRenderCall","recordRenderCall","(L"+RENDER_CALL+";)V")){
+                renderPublication(node,method,vars[0]);changed=true;
+            }
+            if(name.equals(RENDER_SYSTEM)&&member(method,"replayQueue","replayQueue","()V")){
+                renderReplay(node,method);changed=true;
+            }
             if(name.equals("com/mojang/blaze3d/vertex/BufferUploader")&&(member(method,"drawWithShader","m_231202_","("+RENDERED+")V")||member(method,"draw","m_231209_","("+RENDERED+")V"))
-                    ||name.equals("com/mojang/blaze3d/systems/RenderSystem")&&(member(method,"drawElements","drawElements","(III)V")||member(method,"recordRenderCall","recordRenderCall","(Lcom/mojang/blaze3d/pipeline/RenderCall;)V"))){
+                    ||name.equals(RENDER_SYSTEM)&&member(method,"drawElements","drawElements","(III)V")){
                 InsnList gate=new InsnList();LabelNode allowed=new LabelNode();gate.add(new InsnNode(Opcodes.ACONST_NULL));call(gate,"allowed","(Ljava/lang/Object;)Z");gate.add(new JumpInsnNode(Opcodes.IFNE,allowed));gate.add(new InsnNode(Opcodes.RETURN));gate.add(allowed);method.instructions.insert(gate);changed=true;
             }
             for(AbstractInsnNode at:method.instructions.toArray())if(at instanceof MethodInsnNode invoke&&invoke.getOpcode()!=Opcodes.INVOKESTATIC&&invoke.getOpcode()!=Opcodes.INVOKESPECIAL){
@@ -166,6 +173,65 @@ final class ClientBoundary {
             }
         }
         if(!changed)return null;ControlClassWriter writer=new ControlClassWriter(loader,node);node.accept(writer);return writer.toByteArray();
+    }
+    private static boolean renderQueueField(AbstractInsnNode at,String owner){
+        return at instanceof FieldInsnNode field&&field.getOpcode()==Opcodes.GETSTATIC&&field.owner.equals(owner)
+                &&field.name.equals("recordingQueue")&&field.desc.equals("Ljava/util/concurrent/ConcurrentLinkedQueue;");
+    }
+    private static void renderPublication(ClassNode node,MethodNode method,int incoming){
+        List<AbstractInsnNode> code=new ArrayList<>();for(AbstractInsnNode at:method.instructions.toArray())if(at.getOpcode()>=0)code.add(at);
+        MethodInsnNode addition=null;
+        for(int index=0;index<code.size();index++)if(code.get(index) instanceof MethodInsnNode invoke
+                &&invoke.owner.equals("java/util/concurrent/ConcurrentLinkedQueue")&&invoke.name.equals("add")&&invoke.desc.equals("(Ljava/lang/Object;)Z")){
+            if(addition!=null||index<2||invoke.getOpcode()!=Opcodes.INVOKEVIRTUAL||!renderQueueField(code.get(index-2),node.name)
+                    ||!(code.get(index-1) instanceof VarInsnNode value)||value.getOpcode()!=Opcodes.ALOAD||value.var!=incoming)
+                throw new IllegalStateException("CLIENT_RENDER_QUEUE_PUBLICATION_LAYOUT");
+            addition=invoke;
+        }
+        if(addition==null||(method.access&Opcodes.ACC_STATIC)==0)throw new IllegalStateException("CLIENT_RENDER_QUEUE_PUBLICATION_MISSING");
+        int token=method.maxLocals++,wrapped=method.maxLocals++,error=method.maxLocals++;
+        LabelNode accepted=new LabelNode(),start=new LabelNode(),end=new LabelNode(),complete=new LabelNode(),failed=new LabelNode(),write=new LabelNode(),written=new LabelNode();
+        for(AbstractInsnNode at:method.instructions.toArray())if(at.getOpcode()==Opcodes.RETURN)method.instructions.set(at,new JumpInsnNode(Opcodes.GOTO,complete));
+        InsnList gate=new InsnList();gate.add(new InsnNode(Opcodes.DUP2));gate.add(new VarInsnNode(Opcodes.ALOAD,token));
+        call(gate,"renderCallValue","(Ljava/lang/Object;Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;");
+        gate.add(new VarInsnNode(Opcodes.ASTORE,wrapped));gate.add(new InsnNode(Opcodes.POP));
+        gate.add(new VarInsnNode(Opcodes.ALOAD,wrapped));gate.add(new FieldInsnNode(Opcodes.GETSTATIC,"java/lang/Boolean","FALSE","Ljava/lang/Boolean;"));
+        gate.add(new JumpInsnNode(Opcodes.IF_ACMPNE,write));gate.add(new InsnNode(Opcodes.POP));gate.add(new InsnNode(Opcodes.ICONST_0));gate.add(new JumpInsnNode(Opcodes.GOTO,written));
+        gate.add(write);gate.add(new VarInsnNode(Opcodes.ALOAD,wrapped));method.instructions.insertBefore(addition,gate);method.instructions.insert(addition,written);
+        InsnList entry=new InsnList();entry.add(new FieldInsnNode(Opcodes.GETSTATIC,node.name,"recordingQueue","Ljava/util/concurrent/ConcurrentLinkedQueue;"));
+        entry.add(new VarInsnNode(Opcodes.ALOAD,incoming));call(entry,"renderCallEntering","(Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;");entry.add(new VarInsnNode(Opcodes.ASTORE,token));
+        entry.add(new VarInsnNode(Opcodes.ALOAD,token));entry.add(new FieldInsnNode(Opcodes.GETSTATIC,"java/lang/Boolean","FALSE","Ljava/lang/Boolean;"));entry.add(new JumpInsnNode(Opcodes.IF_ACMPNE,accepted));
+        entry.add(new InsnNode(Opcodes.RETURN));entry.add(accepted);entry.add(start);method.instructions.insert(entry);
+        InsnList tail=new InsnList();tail.add(end);tail.add(complete);tail.add(new VarInsnNode(Opcodes.ALOAD,token));call(tail,"renderCallSubmitted","(Ljava/lang/Object;)V");tail.add(new InsnNode(Opcodes.RETURN));
+        tail.add(failed);tail.add(new VarInsnNode(Opcodes.ASTORE,error));tail.add(new VarInsnNode(Opcodes.ALOAD,token));call(tail,"renderCallSubmitted","(Ljava/lang/Object;)V");tail.add(new VarInsnNode(Opcodes.ALOAD,error));tail.add(new InsnNode(Opcodes.ATHROW));
+        method.instructions.add(tail);method.tryCatchBlocks.add(new TryCatchBlockNode(start,end,failed,null));
+    }
+    private static void renderReplay(ClassNode node,MethodNode method){
+        List<AbstractInsnNode> code=new ArrayList<>();for(AbstractInsnNode at:method.instructions.toArray())if(at.getOpcode()>=0)code.add(at);
+        MethodInsnNode poll=null,execute=null;
+        for(int index=0;index<code.size();index++)if(code.get(index) instanceof MethodInsnNode invoke
+                &&invoke.owner.equals("java/util/concurrent/ConcurrentLinkedQueue")&&invoke.name.equals("poll")&&invoke.desc.equals("()Ljava/lang/Object;")){
+            if(poll!=null||index<1||index+4>=code.size()||!renderQueueField(code.get(index-1),node.name)||invoke.getOpcode()!=Opcodes.INVOKEVIRTUAL
+                    ||!(code.get(index+1) instanceof TypeInsnNode cast)||cast.getOpcode()!=Opcodes.CHECKCAST||!cast.desc.equals(RENDER_CALL)
+                    ||!(code.get(index+2) instanceof VarInsnNode stored)||stored.getOpcode()!=Opcodes.ASTORE
+                    ||!(code.get(index+3) instanceof VarInsnNode loaded)||loaded.getOpcode()!=Opcodes.ALOAD||loaded.var!=stored.var
+                    ||!(code.get(index+4) instanceof MethodInsnNode call)||call.getOpcode()!=Opcodes.INVOKEINTERFACE
+                    ||!call.owner.equals(RENDER_CALL)||!call.name.equals("execute")||!call.desc.equals("()V"))
+                throw new IllegalStateException("CLIENT_RENDER_QUEUE_CONSUMPTION_LAYOUT");
+            poll=invoke;execute=call;
+        }
+        if(poll==null||(method.access&Opcodes.ACC_STATIC)==0)throw new IllegalStateException("CLIENT_RENDER_QUEUE_CONSUMPTION_MISSING");
+        method.instructions.set(poll,new MethodInsnNode(Opcodes.INVOKESTATIC,BRIDGE,"renderCallPoll","(Ljava/lang/Object;)Ljava/lang/Object;",false));
+        method.instructions.set(execute,new MethodInsnNode(Opcodes.INVOKESTATIC,BRIDGE,"renderCallExecute","(Ljava/lang/Object;)V",false));
+        int token=method.maxLocals++,error=method.maxLocals++;
+        LabelNode accepted=new LabelNode(),start=new LabelNode(),end=new LabelNode(),complete=new LabelNode(),failed=new LabelNode();
+        for(AbstractInsnNode at:method.instructions.toArray())if(at.getOpcode()==Opcodes.RETURN)method.instructions.set(at,new JumpInsnNode(Opcodes.GOTO,complete));
+        InsnList entry=new InsnList();entry.add(new FieldInsnNode(Opcodes.GETSTATIC,node.name,"recordingQueue","Ljava/util/concurrent/ConcurrentLinkedQueue;"));call(entry,"renderQueueEntering","(Ljava/lang/Object;)Ljava/lang/Object;");entry.add(new VarInsnNode(Opcodes.ASTORE,token));
+        entry.add(new VarInsnNode(Opcodes.ALOAD,token));entry.add(new FieldInsnNode(Opcodes.GETSTATIC,"java/lang/Boolean","FALSE","Ljava/lang/Boolean;"));entry.add(new JumpInsnNode(Opcodes.IF_ACMPNE,accepted));
+        entry.add(new InsnNode(Opcodes.RETURN));entry.add(accepted);entry.add(start);method.instructions.insert(entry);
+        InsnList tail=new InsnList();tail.add(end);tail.add(complete);tail.add(new VarInsnNode(Opcodes.ALOAD,token));call(tail,"renderQueueExiting","(Ljava/lang/Object;)V");tail.add(new InsnNode(Opcodes.RETURN));
+        tail.add(failed);tail.add(new VarInsnNode(Opcodes.ASTORE,error));tail.add(new VarInsnNode(Opcodes.ALOAD,token));call(tail,"renderQueueExiting","(Ljava/lang/Object;)V");tail.add(new VarInsnNode(Opcodes.ALOAD,error));tail.add(new InsnNode(Opcodes.ATHROW));
+        method.instructions.add(tail);method.tryCatchBlocks.add(new TryCatchBlockNode(start,end,failed,null));
     }
     /** Capture only this invocation's actual List.add publications, including a partially throwing registration. */
     private static void screenPublication(MethodNode method,int incoming){

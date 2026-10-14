@@ -28,6 +28,9 @@ public final class WorldControlHooks {
         private void clock(CallbackInfo callback){if(ProRuntime.worldClockFrozen((ServerLevel)(Object)this))callback.cancel();}
         @Inject(method="addFreshEntity",at=@At("HEAD"),cancellable=true)
         private void spawn(Entity entity,CallbackInfoReturnable<Boolean> callback){if(ProRuntime.worldSpawnDenied(entity))callback.setReturnValue(false);}
+        // Keep frozen events on vanilla's reschedule path until this position can tick again.
+        @Redirect(method="runBlockEvents()V",at=@At(value="INVOKE",target="Lnet/minecraft/server/level/ServerLevel;shouldTickBlocksAt(Lnet/minecraft/core/BlockPos;)Z"),require=1,allow=1)
+        private boolean blockEvent(ServerLevel level,BlockPos pos){return level.shouldTickBlocksAt(pos)&&!ProRuntime.worldFrozen(level,pos);}
         // The resolved lightning target can be in another chunk; do not gate the whole input chunk.
         @Redirect(method="tickChunk",at=@At(value="INVOKE",target="Lnet/minecraft/server/level/ServerLevel;isRainingAt(Lnet/minecraft/core/BlockPos;)Z"))
         private boolean lightning(ServerLevel level,BlockPos pos){return !ProRuntime.worldFrozen(level,pos)&&level.isRainingAt(pos);}

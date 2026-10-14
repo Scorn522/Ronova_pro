@@ -1,5 +1,22 @@
 # Ronova Pro 当前进度
 
+## 2026-10-14：C 接续——队列消费、控制线程与方块事件
+
+接续 `9afb934`，Java ABI68 / Native ABI64 / Storage3 / Journal6。本包三项生产入口已完整写齐后统一构建；自身外观与武器注册继续暂缓。
+
+- 绘制：实际 RenderSystem.recordRenderCall 的 recordingQueue.add 每次发布独立 RenderCall Proxy 条目，保存本次来源和不可回退的 unknown，不把共享 delegate 的所有提交来源混为一体。真实 replayQueue.poll 在同一 SOURCES 锁内移交 ACTIVE/CURRENT，再经 bootstrap 执行和 finally 结清；发布中、原队列中及已取出尚未执行的条目接入原 retirementGap。准确类、模块、接口、队列和执行配对继续核对，停组后丢弃业务效果，组外提交沿原队列执行。异常保留，迟到的发布尾不复活已完成条目；只精确预定义五个本方回执元数据类型。
+- Host：已观察的 SuspendThread/ResumeThread/TerminateThread 先以真实 DuplicateHandle 固定本次实际对象和原访问权，再用 CompareObjectHandles 与控制收集线程的实际稳定句柄比较。相同对象的外部别名也拒绝，比较不可用或失败明确返回；允许时只对固定的临时句柄执行原 API 一次，原参数、结果与 LastError 保留，所有路径关闭临时句柄。普通外部别名的 CloseHandle/flags 不因同对象被当作私有槽位。
+- 世界：真实 ServerLevel.runBlockEvents 的唯一 shouldTickBlocksAt 处叠加准确位置冻结判断。冻结事件沿 vanilla 原有重排路径等待，恢复后继续原类型/状态检查及触发，不增加持有目录、存档格式或区块加载。
+
+集中构建 `build-c-java68-native64-effects-20261014.log` PASS35秒。仅复用既有 Host free-exit 分支，`c-host-thread-effects64-20261014.log` 实际退出0：IAT/GPA 四个真实未附加 JVM 的 worker 均经改后的普通 ResumeThread 正常进入，原退出码61/62/63/64、entered1/returned0、userdata、signaled 和句柄关闭均保留；两种资源视图实际消失，准确控制目标映像保留。此结果是受影响的普通线程路径检查，不是私有收集线程别名攻击案例，也不证明内部应用引用/final unmap。
+
+真实客户端“入队→停组→重放”、私有收集线程别名的三种线程操作、实际活塞冻结/恢复仍 NOTRUN；没有伪造客户端/ServerLevel/producer、添加控制见证出口或重跑旧矩阵。此前停组返回策略的真实 Native 早退与动态代次切换仍未实跑。已观察 JVMTI 表中仍直通原表的查询输出与 Deallocate，及其控制块分配/发布到实际提交定序，是后续原生收口范围；本包未宣称处理这些入口。
+
+原 Java63/Native61 run03 仍由原实例运行，日志已推进至13:46的 vanilla 资源阶段；认证公钥请求报 SSL 错误，其后仍有资源日志。尚无 WORLD_LOADED、Done 或冻结保存结果，不能算作本包游戏通过，未重启或停止。驱动/管理器未改、未重建、未加载，沿用未签名 SYS 37888字节及管理器190464字节。
+
+本地候选 `distribution/candidate-c-java68-native64-effects-wip-20261014`，Core JAR 2437401字节、prelaunch 22440字节；匹配包 `distribution/Ronova-Pro-C-Effects-WIP-Java68-Native64-20261014.zip`。同步本包源码和既有报告摘要，旧包、存档与原始日志保留本地。完整 C/B 继续收口。
+
+---
 ## 2026-10-14：C 接续——实际停组返回策略
 
 接续 `d6c1152`，Java ABI67 / Native ABI63 / Storage3 / Journal6。原命令接受的六种 returns 策略此前在 Java 停组表被统一丢为 default；现保留 default/null/empty/uuid-fixed/uuid-each/invalid-id 的实际选择，并在关停 Native module gate 前发布同一策略。固定 UUID 由准确 module 的策略代次生成并供 Java/Native 共用，同模式重复发布复用，切换后重新选择；没有新增返回语法或业务资格。

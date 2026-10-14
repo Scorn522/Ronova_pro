@@ -46,6 +46,12 @@ public final class ClientBridge {
     private static final ClassValue<OverlayFields> OVERLAY_FIELDS=new ClassValue<>(){
         protected OverlayFields computeValue(Class<?> type){try{return new OverlayFields(type);}catch(ReflectiveOperationException unavailable){throw new IllegalStateException("CLIENT_OVERLAY_FIELDS_UNAVAILABLE",unavailable);}}
     };
+    private static final String RENDER_SYSTEM="com.mojang.blaze3d.systems.RenderSystem",RENDER_CALL="com.mojang.blaze3d.pipeline.RenderCall";
+    private static final Map<Key,Ref<RenderQueueFields>> RENDER_QUEUES=new HashMap<>();
+    private static final ThreadLocal<RenderReplay> RENDER_REPLAY=new ThreadLocal<>();
+    private static final ClassValue<RenderQueueFields> RENDER_FIELDS=new ClassValue<>(){
+        protected RenderQueueFields computeValue(Class<?> type){try{return new RenderQueueFields(type);}catch(ReflectiveOperationException unavailable){throw new IllegalStateException("CLIENT_RENDER_QUEUE_FIELDS_UNAVAILABLE",unavailable);}}
+    };
     private static final System.Logger UI_LOG=System.getLogger("ronova_pro.client.lifecycle");
     private static final ClassValue<UiFields> UI_FIELDS=new ClassValue<>(){
         protected UiFields computeValue(Class<?> type){try{return new UiFields(type);}catch(ReflectiveOperationException unavailable){throw new IllegalStateException("CLIENT_UI_FIELDS_UNAVAILABLE",unavailable);}}
@@ -63,6 +69,55 @@ public final class ClientBridge {
     private record Texture(Ref<Object> object,Module[] modules){}
     private record SoundRegistry(Ref<Map<?,?>> instances,Ref<Collection<?>> listeners){}
     private record ReloadWork(java.util.concurrent.CompletableFuture<?> future,Module[] modules){}
+    private static final class RenderQueueFields {
+        final Class<?> type,call;final Field queue;final Method execute;
+        RenderQueueFields(Class<?> type)throws ReflectiveOperationException{
+            this.type=type;if(!type.getName().equals(RENDER_SYSTEM)||!role(type))throw new SecurityException("ACTUAL_RENDER_SYSTEM_REQUIRED");
+            queue=uiField(type,"recordingQueue","recordingQueue","Ljava/util/concurrent/ConcurrentLinkedQueue;",true);
+            call=Class.forName(RENDER_CALL,false,type.getClassLoader());execute=call.getMethod("execute");
+            if(!Modifier.isFinal(queue.getModifiers())||!call.isInterface()||!Modifier.isPublic(call.getModifiers())
+                    ||call.getClassLoader()!=type.getClassLoader()||call.getModule()!=type.getModule()
+                    ||execute.getDeclaringClass()!=call||Modifier.isStatic(execute.getModifiers())||execute.getReturnType()!=void.class
+                    ||execute.getParameterCount()!=0||call.getDeclaredMethods().length!=1)throw new IllegalStateException("CLIENT_RENDER_CALL_CONTRACT_CHANGED");
+            overlayProtect(this,queue,execute);
+        }
+        boolean current(Object actual)throws IllegalAccessException{return actual!=null&&actual.getClass()==java.util.concurrent.ConcurrentLinkedQueue.class&&queue.get(null)==actual;}
+    }
+    /** A value in the real recordingQueue, with sources belonging only to this publication. */
+    private static final class RenderCallEntry implements InvocationHandler {
+        final RenderQueueFields fields;final Ref<Object> queue;Object delegate,value;Module[] modules;boolean unknown,claimed,closed;
+        RenderCallEntry(RenderQueueFields fields,Object queue,Object delegate,Module[] modules,boolean unknown){
+            this.fields=fields;this.queue=new Ref<>(queue);this.delegate=delegate;this.modules=modules;this.unknown=unknown;overlayProtect(this,this.queue,modules);
+        }
+        public Object invoke(Object proxy,Method method,Object[] arguments)throws Throwable{
+            if(method.getDeclaringClass()==Object.class){
+                if(method.getName().equals("equals"))return proxy==arguments[0];
+                if(method.getName().equals("hashCode"))return System.identityHashCode(proxy);
+                if(method.getName().equals("toString"))return "Ronova RenderCall entry@"+Integer.toHexString(System.identityHashCode(proxy));
+            }
+            RenderReplay replay=RENDER_REPLAY.get();RenderConsumption work=replay==null?null:replay.work;
+            if(!method.equals(fields.execute)||proxy!=value||work==null||work.entry!=this||work.value!=proxy
+                    ||!claimed||closed||replay.fields!=fields||replay.queue!=queue.get()
+                    ||!work.executing||work.dispatched||work.closed||replay.ended||replay.thread!=Thread.currentThread()
+                    ||CURRENT.get()!=work.scope||work.scope.ended)throw new SecurityException("ACTUAL_RENDER_CALL_CONSUMPTION_REQUIRED");
+            work.dispatched=true;
+            try{renderInvoke(fields,delegate);return null;}catch(Throwable failure){work.failure=failure;throw failure;}
+        }
+    }
+    private static final class RenderSubmission {
+        final RenderQueueFields fields;final Object queue;Object input;RenderCallEntry entry;final Scope scope;
+        final Thread thread=Thread.currentThread();boolean ended;
+        RenderSubmission(RenderQueueFields fields,Object queue,Object input,RenderCallEntry entry,Scope scope){this.fields=fields;this.queue=queue;this.input=input;this.entry=entry;this.scope=scope;overlayProtect(this);}
+    }
+    private static final class RenderReplay {
+        final RenderQueueFields fields;final Object queue;final Thread thread=Thread.currentThread();final RenderReplay previous=RENDER_REPLAY.get();
+        RenderConsumption work;boolean ended;
+        RenderReplay(RenderQueueFields fields,Object queue){this.fields=fields;this.queue=queue;overlayProtect(this);}
+    }
+    private static final class RenderConsumption {
+        final Scope scope;Object value;RenderCallEntry entry;boolean executing,dispatched,closed;Throwable failure;
+        RenderConsumption(Object value,RenderCallEntry entry,Scope scope){this.value=value;this.entry=entry;this.scope=scope;overlayProtect(this);}
+    }
     private static final class OverlayFields {
         final Class<?> type,named,event;final Field list,map,id,callback,eventMap,eventOrder;final Method listCopy,mapCopy;
         final java.util.concurrent.locks.ReentrantLock gate=new java.util.concurrent.locks.ReentrantLock();long generation;int initializing;String pending="";
@@ -305,6 +360,136 @@ public final class ClientBridge {
         Method result;try{result=type.getDeclaredMethod(named,parameters);}catch(NoSuchMethodException production){result=type.getDeclaredMethod(installed,parameters);}
         if(Modifier.isStatic(result.getModifiers())||!java.lang.invoke.MethodType.methodType(result.getReturnType(),result.getParameterTypes()).descriptorString().equals(descriptor))throw new IllegalStateException("CLIENT_METHOD_LAYOUT_CHANGED:"+type.getName()+"#"+named);
         result.setAccessible(true);return result;
+    }
+    private static boolean renderMember(StackWalker.StackFrame at,boolean publication){
+        return clientMember(at,RENDER_SYSTEM,publication?"recordRenderCall":"replayQueue",publication?"recordRenderCall":"replayQueue",publication?"(Lcom/mojang/blaze3d/pipeline/RenderCall;)V":"()V");
+    }
+    private static RenderQueueFields renderFields(StackWalker.StackFrame at,Object queue){
+        RenderQueueFields fields=RENDER_FIELDS.get(at.getDeclaringClass());
+        try{if(!fields.current(queue))throw new SecurityException("ACTUAL_RENDER_RECORDING_QUEUE_REQUIRED");}
+        catch(IllegalAccessException unavailable){throw new IllegalStateException("CLIENT_RENDER_RECORDING_QUEUE_UNAVAILABLE",unavailable);}
+        synchronized(SOURCES){
+            Ref<RenderQueueFields> previous=RENDER_QUEUES.get(new Key(queue,false));
+            if(previous==null||previous.get()==null){Ref<RenderQueueFields> reference=new Ref<>(fields);RENDER_QUEUES.put(new Key(queue,true),reference);overlayProtect(reference);}
+            else if(previous.get()!=fields)throw new SecurityException("ACTUAL_RENDER_QUEUE_OWNER_CHANGED");
+        }
+        return fields;
+    }
+    private static Module[] renderOrigins(Module[] actual){return Arrays.stream(actual).filter(ControlBridge::producer).toArray(Module[]::new);}
+    private static Module[] renderEntrySources(RenderCallEntry entry){
+        if(entry.closed)return entry.modules;
+        Module[] actual=ControlBridge.objectSources(entry.delegate);
+        entry.modules=union(entry.modules,renderOrigins(actual));entry.unknown|=ControlBridge.objectSourceUnknown(entry.delegate)||toastNullSource(actual);
+        overlayProtect((Object)entry.modules);return entry.modules;
+    }
+    private static RenderCallEntry renderEntry(RenderQueueFields fields,Object queue,Object value){
+        if(value==null||!Proxy.isProxyClass(value.getClass()))return null;
+        InvocationHandler handler=Proxy.getInvocationHandler(value);if(!(handler instanceof RenderCallEntry entry))return null;
+        if(entry.fields!=fields||entry.queue.get()!=queue||entry.value!=value)throw new SecurityException("ACTUAL_RENDER_QUEUE_ENTRY_REQUIRED");return entry;
+    }
+    public static Object renderCallEntering(Object queue,Object callback){
+        var at=boundary();if(!renderMember(at,true))throw new SecurityException("ACTUAL_RENDER_CALL_PUBLICATION_REQUIRED");RenderQueueFields fields=renderFields(at,queue);
+        if(callback!=null&&!fields.call.isInstance(callback))throw new SecurityException("ACTUAL_RENDER_CALL_REQUIRED");
+        Module[] actual=ControlBridge.objectSources(callback),invoking=ControlBridge.invokingSources(),modules=union(renderOrigins(actual),invoking,currentSources());
+        boolean unknown=ControlBridge.objectSourceUnknown(callback)||ControlBridge.sourceUnknown()||toastNullSource(actual)||toastNullSource(invoking);
+        if(stopped(modules)||ControlBridge.stoppedEffects())return Boolean.FALSE;
+        Scope scope=new Scope(CURRENT.get(),modules,at,null,null,null,unknown);
+        synchronized(SOURCES){ACTIVE.add(scope);overlayProtect(scope,modules);}CURRENT.set(scope);
+        try{
+            RenderCallEntry entry=callback==null?null:new RenderCallEntry(fields,queue,callback,modules,unknown);
+            if(entry!=null){entry.value=Proxy.newProxyInstance(fields.call.getClassLoader(),new Class<?>[]{fields.call},entry);overlayProtect(entry.value);}
+            return new RenderSubmission(fields,queue,callback,entry,scope);
+        }catch(Throwable failure){exit(scope);ClientBridge.<RuntimeException>uiRaise(failure);return null;}
+    }
+    public static Object renderCallValue(Object queue,Object callback,Object token){
+        var at=boundary();if(!renderMember(at,true)||!(token instanceof RenderSubmission submission)||submission.ended
+                ||submission.thread!=Thread.currentThread()||submission.queue!=queue||submission.input!=callback
+                ||submission.fields!=renderFields(at,queue)||CURRENT.get()!=submission.scope||submission.scope.ended)
+            throw new SecurityException("ACTUAL_RENDER_CALL_QUEUE_WRITE_REQUIRED");
+        Module[] actual=ControlBridge.objectSources(callback),invoking=ControlBridge.invokingSources();
+        synchronized(SOURCES){
+            Module[] modules=union(submission.scope.sources,renderOrigins(actual),invoking,currentSources());
+            boolean unknown=submission.scope.sourcesUnknown||ControlBridge.objectSourceUnknown(callback)||ControlBridge.sourceUnknown()||toastNullSource(actual)||toastNullSource(invoking);
+            submission.scope.sources=modules;submission.scope.sourcesUnknown=unknown;overlayProtect((Object)modules);
+            RenderCallEntry entry=submission.entry;
+            if(entry!=null){if(entry.claimed||entry.closed)throw new SecurityException("RENDER_CALL_ENTRY_ALREADY_CONSUMED");entry.modules=modules;entry.unknown|=unknown;}
+            if(stopped(modules)||ControlBridge.stoppedEffects())return Boolean.FALSE;
+            // A null argument still reaches the original CLQ.add(null) contract.
+            return entry==null?null:entry.value;
+        }
+    }
+    public static void renderCallSubmitted(Object token){
+        var at=boundary();if(!renderMember(at,true)||!(token instanceof RenderSubmission submission)
+                ||submission.thread!=Thread.currentThread()||submission.fields.type!=at.getDeclaringClass())throw new SecurityException("ACTUAL_RENDER_CALL_PUBLICATION_TAIL_REQUIRED");
+        if(submission.ended)return;exit(submission.scope);submission.ended=true;submission.input=null;submission.entry=null;
+        // The consumer can finish before add returns; this tail never revives or
+        // clears a receipt merely because the publishing method threw.
+    }
+    public static Object renderQueueEntering(Object queue){
+        var at=boundary();if(!renderMember(at,false))throw new SecurityException("ACTUAL_RENDER_QUEUE_REPLAY_REQUIRED");RenderQueueFields fields=renderFields(at,queue);
+        if(ControlBridge.stoppedEffects())return Boolean.FALSE;RenderReplay replay=new RenderReplay(fields,queue);RENDER_REPLAY.set(replay);return replay;
+    }
+    private static RenderReplay renderReplay(StackWalker.StackFrame at){
+        RenderReplay replay=RENDER_REPLAY.get();
+        if(!renderMember(at,false)||replay==null||replay.ended||replay.thread!=Thread.currentThread()||replay.fields.type!=at.getDeclaringClass()
+                ||replay.fields!=renderFields(at,replay.queue))throw new SecurityException("ACTUAL_RENDER_QUEUE_REPLAY_REQUIRED");return replay;
+    }
+    /** Remove the actual queue node and publish its active scope under one retirement lock. */
+    public static Object renderCallPoll(Object queue){
+        var at=boundary();RenderReplay replay=renderReplay(at);if(replay.queue!=queue||replay.work!=null)throw new SecurityException("ACTUAL_RENDER_QUEUE_POLL_REQUIRED");
+        synchronized(SOURCES){
+            Object value=((java.util.concurrent.ConcurrentLinkedQueue<?>)queue).poll();RenderCallEntry entry=renderEntry(replay.fields,queue,value);
+            if(entry!=null&&(entry.claimed||entry.closed))throw new SecurityException("RENDER_CALL_ENTRY_ALREADY_CONSUMED");
+            Module[] actual=ControlBridge.objectSources(value),invoking=ControlBridge.invokingSources();
+            Module[] modules=union(entry==null?renderOrigins(actual):renderEntrySources(entry),invoking,currentSources());
+            boolean unknown=entry==null||entry.unknown||ControlBridge.objectSourceUnknown(value)||ControlBridge.sourceUnknown()||toastNullSource(actual)||toastNullSource(invoking);
+            Scope scope=new Scope(CURRENT.get(),modules,at,null,null,null,unknown);RenderConsumption work=new RenderConsumption(value,entry,scope);
+            ACTIVE.add(scope);overlayProtect(scope,modules);CURRENT.set(scope);replay.work=work;if(entry!=null)entry.claimed=true;return value;
+        }
+    }
+    private static void renderInvoke(RenderQueueFields fields,Object callback)throws Throwable{
+        try{fields.execute.invoke(callback);}catch(InvocationTargetException failure){throw failure.getCause();}
+    }
+    private static void renderConsumed(RenderReplay replay,RenderConsumption work){
+        if(work.closed)return;exit(work.scope);
+        synchronized(SOURCES){
+            work.closed=true;RenderCallEntry entry=work.entry;
+            if(entry!=null){entry.closed=true;entry.delegate=null;entry.value=null;entry.modules=new Module[0];overlayProtect((Object)entry.modules);}
+            work.value=null;work.entry=null;work.failure=null;work.executing=false;replay.work=null;
+        }
+    }
+    public static void renderCallExecute(Object value){
+        var at=boundary();RenderReplay replay=renderReplay(at);RenderConsumption work=replay.work;
+        if(work==null||work.closed||work.value!=value||CURRENT.get()!=work.scope||work.scope.ended||work.executing)throw new SecurityException("ACTUAL_RENDER_CALL_EXECUTE_REQUIRED");
+        try{
+            synchronized(SOURCES){
+                if(work.entry!=null){work.scope.sources=union(work.scope.sources,renderEntrySources(work.entry));work.scope.sourcesUnknown|=work.entry.unknown;overlayProtect((Object)work.scope.sources);}
+            }
+            if(stopped(work.scope.sources)||ControlBridge.stoppedEffects())return;
+            work.executing=true;
+            try{renderInvoke(replay.fields,value);}catch(Throwable failure){ClientBridge.<RuntimeException>uiRaise(work.failure==null?failure:work.failure);}
+        }finally{renderConsumed(replay,work);}
+    }
+    public static void renderQueueExiting(Object token){
+        var at=boundary();if(!(token instanceof RenderReplay replay)||!renderMember(at,false)||replay.fields.type!=at.getDeclaringClass()
+                ||replay.thread!=Thread.currentThread())throw new SecurityException("ACTUAL_RENDER_QUEUE_REPLAY_TAIL_REQUIRED");
+        if(replay.ended)return;if(RENDER_REPLAY.get()!=replay)throw new IllegalStateException("CLIENT_RENDER_REPLAY_ORDER_CHANGED");
+        if(replay.work!=null)renderConsumed(replay,replay.work);replay.ended=true;
+        if(replay.previous==null)RENDER_REPLAY.remove();else RENDER_REPLAY.set(replay.previous);
+    }
+    private static long renderPending(Module module){
+        long pending=0;
+        for(var row:RENDER_QUEUES.entrySet()){
+            Object queue=row.getKey().get();RenderQueueFields fields=row.getValue().get();if(queue==null||fields==null)continue;
+            try{
+                if(!fields.current(queue))return -1;
+                for(Object value:((java.util.concurrent.ConcurrentLinkedQueue<?>)queue).toArray()){
+                    RenderCallEntry entry=renderEntry(fields,queue,value);Module[] modules=entry==null?origins(value):renderEntrySources(entry);
+                    if(entry!=null&&entry.closed)continue;for(Module source:modules)if(source==module){pending++;break;}
+                }
+            }catch(IllegalAccessException unavailable){return -1;}
+        }
+        return pending;
     }
     private static Method uiSetter(Class<?> type,String named,String installed,Class<?> parameter)throws ReflectiveOperationException{
         Method result;try{result=type.getDeclaredMethod(named,parameter);}catch(NoSuchMethodException production){result=type.getDeclaredMethod(installed,parameter);}
@@ -1659,7 +1844,7 @@ public final class ClientBridge {
             try{for(boolean screen:new boolean[]{true,false}){Object current=entry.getValue().current(owner,screen);if(current!=null&&Arrays.stream(sources(current)).anyMatch(source->source==module))ui++;}}
             catch(ReflectiveOperationException unavailable){ui++;}
         }
-        long overlays=overlayPending(module);
+        long renderCalls=renderPending(module),overlays=overlayPending(module);
         String overlayState=overlays==-1?"CLIENT_OVERLAY_ACTUAL_PAIR_READ_FAILED":overlays==-2?"CLIENT_OVERLAY_NAMED_ASSOCIATION_CHANGED":overlays==-3?"CLIENT_OVERLAY_SOURCE_UNKNOWN":"";
         long widgets=0,widgetShared=0,widgetUnknown=0;String widgetState="";
         for(ScreenRegistry registry:SCREEN_WIDGETS.values())for(WidgetSlot slot:registry.widgets.values()){
@@ -1682,8 +1867,8 @@ public final class ClientBridge {
             else if(!exclusive(modules)){toastShared++;if(toastState.isEmpty())toastState="CLIENT_TOAST_OTHER_SOURCES_REMAIN_LIVE";}
             if(!registry.pending.isEmpty())toastState=registry.pending;
         }
-        return active!=0||textures!=0||resources!=0||sounds!=0||reloads!=0||gpu!=0||failures!=0||ui!=0||overlays!=0||widgets!=0||toastQueued!=0||toastVisible!=0?"CLIENT_RETIREMENT_PENDING:active="+active+":textures="+textures+":resources="+resources+":sounds="+sounds+":reloads="+reloads+":gpu="+gpu+":gpuState="+gpuState+":ui="+ui+":overlays="+(overlays<0?"unknown":Long.toString(overlays))+":overlayState="+overlayState+":widgets="+widgets+":widgetShared="+widgetShared+":widgetUnknown="+widgetUnknown+":widgetState="+widgetState+":toastQueued="+toastQueued+":toastVisible="+toastVisible+":toastShared="+toastShared+":toastUnknown="+toastUnknown+":toastState="+toastState+":shared="+shared+":releaseFailures="+failures:"";
+        return active!=0||textures!=0||resources!=0||sounds!=0||reloads!=0||gpu!=0||failures!=0||ui!=0||renderCalls!=0||overlays!=0||widgets!=0||toastQueued!=0||toastVisible!=0?"CLIENT_RETIREMENT_PENDING:active="+active+":textures="+textures+":resources="+resources+":sounds="+sounds+":reloads="+reloads+":gpu="+gpu+":gpuState="+gpuState+":ui="+ui+":renderCalls="+(renderCalls<0?"unknown":Long.toString(renderCalls))+":overlays="+(overlays<0?"unknown":Long.toString(overlays))+":overlayState="+overlayState+":widgets="+widgets+":widgetShared="+widgetShared+":widgetUnknown="+widgetUnknown+":widgetState="+widgetState+":toastQueued="+toastQueued+":toastVisible="+toastVisible+":toastShared="+toastShared+":toastUnknown="+toastUnknown+":toastState="+toastState+":shared="+shared+":releaseFailures="+failures:"";
     }}
-    public static Object[] controlObjects(){agent();List<Object> roots=new ArrayList<>(Arrays.asList(SOURCES,TEXTURES,ROLES,REQUESTED,CURRENT,RELEASING,ACTIVE,DEAD,IMAGES,PIXELS,RETIREMENTS,FAILURES,SOUNDS,SOUND_STOPS,SOUND_RELEASING,RELOAD_LISTENERS,RELOAD_WORK,UI_OWNERS,UI_RETIRING,UI_FIELDS,SCREEN_WIDGETS,SCREEN_ADDING,WIDGET_RETIRING,SCREEN_FIELDS,TOASTS,TOAST_FIELDS,OVERLAY_EVENTS,OVERLAY_REGISTRIES,OVERLAY_NAMES,OVERLAY_INITIALIZING,OVERLAY_FIELDS));Collections.addAll(roots,GPU.controls());return roots.toArray();}
-    private static void reap(){for(Key key;(key=(Key)DEAD.poll())!=null;){SOURCES.remove(key);TEXTURES.remove(key);IMAGES.remove(key);PIXELS.remove(key);FAILURES.remove(key);SOUNDS.remove(key);RELOAD_LISTENERS.remove(key);UI_OWNERS.remove(key);SCREEN_WIDGETS.remove(key);TOASTS.remove(key);OVERLAY_EVENTS.remove(key);OVERLAY_REGISTRIES.remove(key);OVERLAY_NAMES.remove(key);}}
+    public static Object[] controlObjects(){agent();List<Object> roots=new ArrayList<>(Arrays.asList(SOURCES,TEXTURES,ROLES,REQUESTED,CURRENT,RELEASING,ACTIVE,DEAD,IMAGES,PIXELS,RETIREMENTS,FAILURES,SOUNDS,SOUND_STOPS,SOUND_RELEASING,RELOAD_LISTENERS,RELOAD_WORK,UI_OWNERS,UI_RETIRING,UI_FIELDS,SCREEN_WIDGETS,SCREEN_ADDING,WIDGET_RETIRING,SCREEN_FIELDS,TOASTS,TOAST_FIELDS,OVERLAY_EVENTS,OVERLAY_REGISTRIES,OVERLAY_NAMES,OVERLAY_INITIALIZING,OVERLAY_FIELDS,RENDER_QUEUES,RENDER_REPLAY,RENDER_FIELDS));Collections.addAll(roots,GPU.controls());return roots.toArray();}
+    private static void reap(){for(Key key;(key=(Key)DEAD.poll())!=null;){SOURCES.remove(key);TEXTURES.remove(key);IMAGES.remove(key);PIXELS.remove(key);FAILURES.remove(key);SOUNDS.remove(key);RELOAD_LISTENERS.remove(key);UI_OWNERS.remove(key);SCREEN_WIDGETS.remove(key);TOASTS.remove(key);OVERLAY_EVENTS.remove(key);OVERLAY_REGISTRIES.remove(key);OVERLAY_NAMES.remove(key);RENDER_QUEUES.remove(key);}}
 }
