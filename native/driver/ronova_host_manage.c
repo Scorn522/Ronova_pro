@@ -436,6 +436,9 @@ static int RvhDeviceQuery(void){
     if(error!=ERROR_SUCCESS)return RvhWin32Error(L"driver-device-query",error);
     wprintf(L"Protocol=%lu Session=%llu DriverState=%lu NTSTATUS=0x%08lX\n",reply.Header.Version,reply.Header.SessionId,reply.DriverState,(ULONG)reply.Header.Status);
     wprintf(L"Capabilities=0x%016llX Unserved=0x%016llX\n",reply.Capabilities,reply.Unserved);
+    wprintf(L"OwnerProcessHandleCapability=%u PreexistingProcessThreadHandlesUnserved=%u HandleInheritanceUnserved=%u KernelHandlesUnserved=%u\n",
+            (reply.Capabilities&RVH_CAP_OWNER_PROCESS_HANDLES)!=0,(reply.Unserved&RVH_GAP_PREEXISTING_PROCESS_THREAD_HANDLES)!=0,
+            (reply.Unserved&RVH_GAP_HANDLE_INHERITANCE)!=0,(reply.Unserved&RVH_GAP_KERNEL_HANDLES)!=0);
     wprintf(L"ObRegister=0x%08lX ProcessNotify=0x%08lX FilterRegister=0x%08lX FilterStart=0x%08lX\n",(ULONG)reply.ObRegisterStatus,(ULONG)reply.ProcessNotifyStatus,(ULONG)reply.FilterRegisterStatus,(ULONG)reply.FilterStartStatus);
     /* These counts belong only to the tool's temporary, already-closed session. */
     wprintf(L"QuerySessionProcesses=%lu QuerySessionFiles=%lu GlobalSessionCount=not-exposed\n",reply.ProcessCount,reply.FileCount);

@@ -229,14 +229,14 @@ public final class LiveStatePolicy {
                 ||name.equals("java.lang.reflect.Field")||name.equals("java.lang.reflect.Method")||name.equals("sun.misc.Unsafe")||name.equals("jdk.internal.misc.Unsafe")
                 ||name.equals("jdk.internal.reflect.NativeMethodAccessorImpl")||name.equals("jdk.internal.reflect.DelegatingMethodAccessorImpl");
     }
-    private static boolean gameFrame(StackWalker.StackFrame frame) {
+    private static boolean gameFrame(StackWalker.StackFrame frame,Scope scope) {
         Class<?> type=frame.getDeclaringClass(),host=type.getNestHost();String name=frame.getMethodName();
         if(host==MobEffectInstance.class)return Set.of("tick","m_19552_","tickDownDuration","m_19579_","mapDuration","m_267696_","update","m_19558_","setDetailsFrom","m_19548_","getCurativeItems","lambda$tickDownDuration$1","lambda$tick$0","m_267553_","m_267554_","applyAsInt").contains(name);
         if(type==FoodData.class)return Set.of("tick","m_38710_","eat","m_38707_","m_38712_","addExhaustion","m_38703_","setFoodLevel","m_38705_","setSaturation","m_38717_","setExhaustion","m_150378_").contains(name);
         if(type==LivingEntity.class||type==Player.class)return Set.of("tickEffects","m_21217_","addEffect","m_7292_","m_147207_","forceAddEffect","m_147215_","removeEffect","m_21195_","removeEffectNoUpdate","m_6234_","removeAllEffects","m_21219_","curePotionEffects","onEffectAdded","m_142540_","onEffectUpdated","m_141973_","onEffectRemoved","m_7285_","eat","m_5584_","addEatEffect","m_21063_","completeUsingItem","m_8095_","causeFoodExhaustion","m_36399_","lambda$tickEffects$3","lambda$tickEffects$4","m_21264_").contains(name);
         if(type==ItemStack.class)return name.equals("finishUsingItem")||name.equals("m_41671_");
-        return (type==Item.class||type==PotionItem.class||type==MilkBucketItem.class||type==HoneyBottleItem.class)
-                &&(name.equals("finishUsingItem")||name.equals("m_5922_"));
+        return Item.class.isAssignableFrom(type)&&scope.operation.equals("consume")&&scope.used.get() instanceof ItemStack stack
+                &&EquipmentPolicy.consumptionFrame(frame,scope.owner.entity.get(),stack);
     }
     private static boolean permitted(Owner owner,boolean effects){return permitted(owner,effects,false);}
     private static boolean permitted(Owner owner,boolean effects,boolean entryQuery) {
@@ -257,7 +257,7 @@ public final class LiveStatePolicy {
                 if(first&&entryQuery&&(type==LivingEntity.class||type==Player.class||type==FoodData.class||type==MobEffectInstance.class)
                         &&frame.getMethodName().contains("$ronova$live")){first=false;continue;}
                 first=false;
-                if(!gameFrame(frame))return false;
+                if(!gameFrame(frame,selected))return false;
             }return false;});
             if(path)return true;
         }

@@ -1,5 +1,15 @@
 # B 批实际报告：2026-10-09 代码收敛接续
 
+## 2026-10-14：C 强度接续——旧帧、实际覆写、区域加载与 JVM 外部保护
+
+接续 `aeb7e34`，Java77 / Native72 / Storage3 / Journal6、协议 `r3-client-8`。本包三路子代理及主代理整合：旧帧停止入口→真实线程事件→准确方法/来源/token 再核验→可退出子集强退→FramePop 配对收尾；GameMode/Item 实际覆写与原参数动作接续；手动区域标准写入/破坏/替换、直接时间天气与睡眠重置；原 PostProcessing/UpgradeData 保留、存盘与解除后续跑；独立 Windows session-owner 句柄规则及有原命令资格的显式 JVM 保护入口。没有通用 scope/counter 写权，未注册物品或制作自身外观。
+
+首次沙箱构建被工具链原生加载限制阻断，日志保留。现有本机工具链集中构建 `build-c-java77-native72-strength-final-20261014.log` **PASS，1分7秒**，Core2625378、prelaunch23309字节，包含匹配 Agent/Bootstrap/Native72；现有装备/世界夹具分支编译通过。`build-c-driver72-owner-final-20261014.log` **PASS**，SYS38912、管理器190464字节，使用已有官方 WDK/SDK NuGet 与 Zig/LLD，未签名、安装、加载或修改系统签名设置；不是 VS/WDK MSBuild 验收。AuditFixCheck 已针对匹配类路径编译。一次真实 prelaunch 的 `c-system-arraycopy-java77-native72-strength-20261014.log` **实际退出0、SYSTEM_ARRAYCOPY_PASS**：新原生桥/绑定安装、真实受控 transformer 数组 Method.invoke/MethodHandle 拒写及原复制语义通过，没有伪造 owner/producer/token；不代称旧帧强退、装备或世界游戏分支通过。
+
+旧帧的未知 finally/锁、框架/共享帧与原生/未结来源作用域保持 pending；未知 capability、任意 helper、自定义区块/升级器、未观察 CPU 写入及 syscall，以及旧/继承/kernel 句柄等边界保留。旧帧、装备和世界游戏分支未运行，不把入口初始化、构建或夹具编译视为完整 C/B 通过。源码与候选收口后同步原授权公开仓库；原始日志、存档及 ZIP 留本地。
+
+---
+
 ## 2026-10-14：C 接续——启动期写入内联与真实数组复制入口
 
 接续 `80ac1a8`，Java ABI76 / Native ABI71 / Storage3 / Journal6，协议 `r3-client-8`。prelaunch 对新的 HotSpot17 JVM 禁用对应 Unsafe writer 与 arraycopy 内联，保留原用户参数和累积清单；实际 System.arraycopy JNI 方法独立分类、seed 重读当前入口，准确目标接原数组策略。快照前建立原 source/from/length 读取窗口，目标只登记 to/兼容 prefix，MemoryCopy finally 保留来源、关闭两端并恢复前层。部分 ArrayStoreException 保留原兼容前缀及异常；源请求后缀贡献者保守并入前缀，未宣称逐元素来源精度。

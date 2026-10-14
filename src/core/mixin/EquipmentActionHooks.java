@@ -30,7 +30,7 @@ import org.spongepowered.asm.mixin.injection.Inject;
 import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
 import org.spongepowered.asm.mixin.injection.callback.CallbackInfoReturnable;
 
-/** Exact original action bodies. SaveFinallyPlugin supplies their lease gate and outer finally. */
+/** Exact original anchors. GameMode uses the agent's shared override protocol; other bodies use SaveFinallyPlugin. */
 public final class EquipmentActionHooks {
     private EquipmentActionHooks() { }
 

@@ -1,6 +1,7 @@
 /* Included before host.c. Only the existing Host owner controller calls these
- * helpers. The driver receives exact observed objects, never Java modules,
- * executable names, file paths or a rule for the game JVM. */
+ * helpers. Child/file rules use exact observed objects. A separate optional
+ * owner rule binds the device session's JVM process, never a Java module,
+ * executable name, file path, caller-supplied PID or arbitrary process handle. */
 #include <stdint.h>
 #include <string.h>
 #include "driver/ronova_host_protocol.h"
@@ -29,6 +30,7 @@ typedef struct HostKernelSession {
     LONG status;
     int response;
     RVH_SESSION_REPLY observed;
+    RVH_TARGET_REPLY ownerProtection;
 } HostKernelSession;
 enum {HOST_KERNEL_STATE_COUNT=17};
 static SRWLOCK host_kernel_records=SRWLOCK_INIT;
@@ -78,7 +80,8 @@ static int host_kernel_drop(void){
     host_kernel_session.device=NULL;
     if(host_kernel_session.generation>host_kernel_session.closedGeneration)
         host_kernel_session.closedGeneration=host_kernel_session.generation;
-    memset(&host_kernel_session.observed,0,sizeof(host_kernel_session.observed));return 1;
+    memset(&host_kernel_session.observed,0,sizeof(host_kernel_session.observed));
+    memset(&host_kernel_session.ownerProtection,0,sizeof(host_kernel_session.ownerProtection));return 1;
 }
 static int host_kernel_invalid(HostKernelResult *result,DWORD error){
     /* A broken transport has no usable receipt. Closing our sole device handle
@@ -280,6 +283,70 @@ static int host_kernel_remove(HANDLE actual,uint64_t token,HostKernelTarget *tar
     target->removed=1;
     if(!host_kernel_forget_locked(target,result))goto finished;
     ready=host_kernel_report(result,ERROR_SUCCESS,reply.Status,1,1);
+finished:
+    ReleaseSRWLockExclusive(&host_kernel_records);return ready;
+}
+/* The owner receipt has no duplicated target handle or opaque Mod scope. The
+ * same original FILE_OBJECT/process binding authorizes both set and withdrawal. */
+static int host_kernel_owner_reply(const RVH_TARGET_REPLY *reply,ULONG effects,HostKernelResult *result){
+    UCHAR fileId=0;for(unsigned index=0;index<sizeof(reply->FileId);index++)fileId|=reply->FileId[index];
+    if(reply->Reserved||reply->Kind!=RVH_TARGET_OWNER_PROCESS||reply->Effects!=effects
+            ||(effects&&!reply->TargetId)||(host_kernel_session.ownerProtection.TargetId
+                &&reply->TargetId!=host_kernel_session.ownerProtection.TargetId)
+            ||reply->Scope.Low||reply->Scope.High||reply->ActorTargetId||reply->VolumeSerialNumber||fileId
+            ||reply->ObservedProcessId!=GetCurrentProcessId()||reply->ChildCreationsDenied
+            ||reply->FileOperationsDenied||reply->SectionAttemptsObserved||reply->UnservedObservations)
+        return host_kernel_invalid(result,ERROR_INVALID_DATA);
+    if(reply->State!=(effects?RVH_TARGET_ACTIVE:RVH_TARGET_DISABLED))
+        return host_kernel_report(result,ERROR_INVALID_STATE,reply->Header.Status,1,0);
+    return 1;
+}
+static int host_kernel_owner_apply(ULONG effects,RVH_TARGET_REPLY *observed,HostKernelResult *result){
+    AcquireSRWLockExclusive(&host_kernel_records);int ready=0;
+    if(observed)memset(observed,0,sizeof(*observed));
+    if(effects&~RVH_OWNER_ALLOWED_FLAGS){host_kernel_report(result,ERROR_INVALID_PARAMETER,0,0,0);goto finished;}
+    /* Turning off a never-opened or already-closed session must not open the
+     * backend. A prior failed close still owns its real cleanup obligation. */
+    if(!effects&&!host_kernel_session.live){
+        if(host_kernel_session.device&&!host_kernel_drop()){
+            DWORD error=GetLastError();host_kernel_report(result,error,0,0,0);goto finished;
+        }
+        ready=host_kernel_report(result,ERROR_SUCCESS,0,0,1);goto finished;
+    }
+    if(!host_kernel_open_locked(result))goto finished;
+    if(effects&&!(host_kernel_session.observed.Capabilities&RVH_CAP_OWNER_PROCESS_HANDLES)){
+        host_kernel_report(result,ERROR_NOT_SUPPORTED,0,1,0);goto finished;
+    }
+    RVH_OWNER_PROTECT_REQUEST request;memset(&request,0,sizeof(request));host_kernel_request(&request.Header,sizeof(request),0);
+    request.Effects=effects;RVH_TARGET_REPLY reply;
+    if(!host_kernel_io(IOCTL_RVH_OWNER_PROTECT,&request,sizeof(request),&reply,sizeof(reply),result)
+            ||!host_kernel_owner_reply(&reply,effects,result))goto finished;
+    host_kernel_session.ownerProtection=reply;if(observed)*observed=reply;
+    ready=host_kernel_report(result,ERROR_SUCCESS,reply.Header.Status,1,1);
+finished:
+    ReleaseSRWLockExclusive(&host_kernel_records);return ready;
+}
+static int host_kernel_owner_current(ULONG effects){
+    AcquireSRWLockShared(&host_kernel_records);
+    int current=host_kernel_session.live&&host_kernel_session.device&&host_kernel_session.ownerProtection.TargetId
+            &&host_kernel_session.ownerProtection.Effects==effects;
+    ReleaseSRWLockShared(&host_kernel_records);return current;
+}
+/* Observation never opens/reopens a device or reinstalls a policy. Only an
+ * explicit desired owner policy, maintained by the existing Host worker, does. */
+static int host_kernel_owner_observe(RVH_TARGET_REPLY *observed,HostKernelResult *result){
+    AcquireSRWLockExclusive(&host_kernel_records);int ready=0;
+    if(observed)memset(observed,0,sizeof(*observed));
+    if(!host_kernel_session.live||!host_kernel_session.device||!host_kernel_session.ownerProtection.TargetId){
+        host_kernel_report(result,ERROR_INVALID_HANDLE,0,0,0);goto finished;
+    }
+    RVH_TARGET_REQUEST request;memset(&request,0,sizeof(request));host_kernel_request(&request.Header,sizeof(request),0);
+    request.Kind=RVH_TARGET_OWNER_PROCESS;request.TargetId=host_kernel_session.ownerProtection.TargetId;
+    RVH_TARGET_REPLY reply;ULONG effects=host_kernel_session.ownerProtection.Effects;
+    if(!host_kernel_io(IOCTL_RVH_QUERY_TARGET,&request,sizeof(request),&reply,sizeof(reply),result)
+            ||!host_kernel_owner_reply(&reply,effects,result))goto finished;
+    host_kernel_session.ownerProtection=reply;if(observed)*observed=reply;
+    ready=host_kernel_report(result,ERROR_SUCCESS,reply.Header.Status,1,1);
 finished:
     ReleaseSRWLockExclusive(&host_kernel_records);return ready;
 }

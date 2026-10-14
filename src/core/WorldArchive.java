@@ -203,6 +203,9 @@ final class WorldArchive {
             if(!job.captureWritten){if(job.image==null)job.image=capture(job,live);write(image(job.id,position),job.image);job.captureWritten=true;}
             finishChunk(job);return;
         }
+        if(job.applyStep.ordinal()<ApplyStep.SAVING.ordinal()&&runtime.archiveMutationLocked(this,level,lower(job,position),upper(job,position))){
+            job.state="WORLD_REGION_WRITE_LOCKED";return;
+        }
         if(job.kind==Kind.REGENERATE){
             if(level.getSeed()!=job.seed)throw new IllegalStateException("WORLD_HISTORY_SEED_CHANGED");
             if(!Files.exists(image(job.id,position)))write(image(job.id,position),capture(job,live));

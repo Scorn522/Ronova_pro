@@ -1,8 +1,13 @@
 package dev.ronova.pro;
 
 import java.util.*;
+import it.unimi.dsi.fastutil.shorts.AbstractShortListIterator;
+import it.unimi.dsi.fastutil.shorts.ShortList;
+import it.unimi.dsi.fastutil.shorts.ShortListIterator;
 import dev.ronova.pro.mixin.Access;
 import net.minecraft.core.BlockPos;
+import net.minecraft.core.Direction;
+import net.minecraft.core.Direction8;
 import net.minecraft.nbt.CompoundTag;
 import net.minecraft.nbt.ListTag;
 import net.minecraft.nbt.Tag;
@@ -14,6 +19,14 @@ import net.minecraft.world.level.Level;
 import net.minecraft.world.level.ChunkPos;
 import net.minecraft.world.level.chunk.ChunkAccess;
 import net.minecraft.world.level.chunk.LevelChunk;
+import net.minecraft.world.level.chunk.ProtoChunk;
+import net.minecraft.world.level.chunk.UpgradeData;
+import net.minecraft.world.level.block.Block;
+import net.minecraft.world.level.block.Blocks;
+import net.minecraft.world.level.block.ChestBlock;
+import net.minecraft.world.level.block.LeavesBlock;
+import net.minecraft.world.level.block.LiquidBlock;
+import net.minecraft.world.level.block.state.properties.ChestType;
 import net.minecraft.world.phys.AABB;
 import net.minecraft.world.phys.Vec3;
 import net.minecraft.world.ticks.LevelTicks;
@@ -34,9 +47,19 @@ final class WorldControl {
         Rule(UUID id,Area area,boolean freeze,boolean clock,long until,boolean archive){this.id=id;this.area=area;this.freeze=freeze;this.clock=clock;this.until=until;this.archive=archive;this.gameTime=area.level().getGameTime();}
     }
     private record Held(LevelTicks<Object> container,ScheduledTick<Object> tick){}
+    private static final class PostProcess {
+        final LevelChunk chunk;final ShortList pending;final int section;
+        boolean finished,resuming;
+        PostProcess(LevelChunk chunk,ShortList pending,int section){this.chunk=chunk;this.pending=pending;this.section=section;}
+        BlockPos position(short packed){return ProtoChunk.unpackOffsetCoordinates(packed,chunk.getSectionYFromSectionIndex(section),chunk.getPos());}
+    }
     private final Map<UUID,Rule> rules=new LinkedHashMap<>();
     private volatile List<Area> spawnAreas=List.of();
+    private volatile List<Area> frozenAreas=List.of(),mutationAreas=List.of();
+    private volatile Set<ServerLevel> clockLevels=Set.of();
     private final Map<LevelTicks<?>,List<Held>> held=new IdentityHashMap<>();
+    private final Map<LevelChunk,Map<ShortList,PostProcess>> postProcessing=new IdentityHashMap<>();
+    private final Map<LevelChunk,UpgradeData> upgrades=new IdentityHashMap<>();
     private final ThreadLocal<Entity> moving=new ThreadLocal<>();
     private long tick,revision=1;
     long revision(){return revision;}
@@ -60,14 +83,23 @@ final class WorldControl {
     UUID rule(ServerLevel level,BlockPos from,BlockPos to,int duration,boolean freeze,boolean clock){
         if(duration<1)throw new IllegalArgumentException("WORLD_RULE_DURATION_REQUIRED");Rule rule=new Rule(area(level,from,to),freeze,clock,tick+(long)duration);
         if(freeze)for(Entity entity:level.getAllEntities())if(rule.area.contains(((Access.EntityState)entity).pro$blockPosition()))rule.bodies.put(entity,true);
-        rules.put(rule.id,rule);if(!freeze)publishSpawnAreas();revision++;return rule.id;
+        rules.put(rule.id,rule);publishAreas();revision++;return rule.id;
     }
-    boolean resume(UUID id){Rule rule=rules.get(id);if(rule==null||rule.archive||rules.remove(id)==null)return false;if(!rule.freeze)publishSpawnAreas();revision++;return true;}
-    private void publishSpawnAreas(){spawnAreas=rules.values().stream().filter(rule->!rule.freeze).map(rule->rule.area).toList();}
+    boolean resume(UUID id){Rule rule=rules.get(id);if(rule==null||rule.archive||rules.remove(id)==null)return false;publishAreas();revision++;return true;}
+    private void publishAreas(){
+        spawnAreas=rules.values().stream().filter(rule->!rule.freeze).map(rule->rule.area).toList();
+        frozenAreas=rules.values().stream().filter(rule->rule.freeze).map(rule->rule.area).toList();
+        // Archive's private pause holds simulation while its checked apply path writes
+        // history. It does not confer the user's separate region-write lock.
+        mutationAreas=rules.values().stream().filter(rule->rule.freeze&&!rule.archive).map(rule->rule.area).toList();
+        Set<ServerLevel> clocks=Collections.newSetFromMap(new IdentityHashMap<>());
+        for(Rule rule:rules.values())if(rule.freeze&&rule.clock)clocks.add(rule.area.level());
+        clockLevels=Collections.unmodifiableSet(clocks);
+    }
     void archive(UUID id,ServerLevel level,BlockPos low,BlockPos high,boolean active){
-        if(!active){Rule rule=rules.get(id);if(rule!=null&&rule.archive){rules.remove(id);revision++;}return;}
+        if(!active){Rule rule=rules.get(id);if(rule!=null&&rule.archive){rules.remove(id);publishAreas();revision++;}return;}
         if(rules.containsKey(id))return;Rule rule=new Rule(id,area(level,low,high),true,false,Long.MAX_VALUE,true);
-        for(Entity entity:level.getAllEntities())if(rule.area.contains(((Access.EntityState)entity).pro$blockPosition()))rule.bodies.put(entity,true);rules.put(id,rule);revision++;
+        for(Entity entity:level.getAllEntities())if(rule.area.contains(((Access.EntityState)entity).pro$blockPosition()))rule.bodies.put(entity,true);rules.put(id,rule);publishAreas();revision++;
     }
     List<ScheduledTick<?>> heldTicks(LevelTicks<?> container,BlockPos low,BlockPos high,boolean remove){
         List<Held> queue=held.get(container);if(queue==null)return List.of();List<ScheduledTick<?>> result=new ArrayList<>();
@@ -112,8 +144,142 @@ final class WorldControl {
             return result;
         };
     }
-    boolean clock(ServerLevel level){for(Rule rule:rules.values())if(rule.freeze&&rule.clock&&rule.area.level()==level)return true;return false;}
-    boolean frozen(Level level,BlockPos pos){for(Rule rule:rules.values())if(rule.freeze&&rule.area.level()==level&&rule.area.contains(pos))return true;return false;}
+    boolean clock(ServerLevel level){return clockLevels.contains(level);}
+    boolean frozen(Level level,BlockPos pos){for(Area area:frozenAreas)if(area.level()==level&&area.contains(pos))return true;return false;}
+    boolean mutationDenied(Level level,BlockPos pos){for(Area area:mutationAreas)if(area.level()==level&&area.contains(pos))return true;return false;}
+    boolean mutationLocked(Level level,BlockPos low,BlockPos high){
+        for(Area area:mutationAreas)if(area.level()==level&&area.low().getX()<=high.getX()&&area.high().getX()>=low.getX()
+                &&area.low().getY()<=high.getY()&&area.high().getY()>=low.getY()&&area.low().getZ()<=high.getZ()&&area.high().getZ()>=low.getZ())return true;
+        return false;
+    }
+    private static int postProcessingSection(LevelChunk chunk,ShortList pending){
+        // These are the vanilla field's actual slots, not a caller-supplied list
+        // or an assumption about an unknown chunk implementation.
+        if(chunk.getClass()!=LevelChunk.class)return -1;
+        ShortList[] sections=chunk.getPostProcessing();
+        for(int section=0;section<sections.length;section++)if(sections[section]==pending)return section;
+        return -1;
+    }
+    ShortListIterator postProcessingIterator(LevelChunk chunk,ShortList pending){
+        int section=postProcessingSection(chunk,pending);if(section<0)return pending.iterator();
+        Map<ShortList,PostProcess> parts=postProcessing.computeIfAbsent(chunk,ignored->new IdentityHashMap<>());
+        PostProcess part=parts.computeIfAbsent(pending,ignored->new PostProcess(chunk,pending,section));part.finished=false;
+        return postProcessingIterator(part);
+    }
+    private ShortListIterator postProcessingIterator(PostProcess part){
+        ShortListIterator original=part.pending.iterator();
+        return new AbstractShortListIterator(){
+            private short next;private boolean ready,delivered;
+            @Override public boolean hasNext(){
+                // Vanilla asks again only after this coordinate's fluid/shape body
+                // returned. A throwing body therefore leaves its own original item.
+                if(delivered){
+                    if(!mutationDenied(part.chunk.getLevel(),part.position(next))){original.remove();part.chunk.setUnsaved(true);}
+                    delivered=false;
+                }
+                if(ready)return true;
+                while(original.hasNext()){
+                    short candidate=original.nextShort();
+                    if(mutationDenied(part.chunk.getLevel(),part.position(candidate)))continue;
+                    next=candidate;ready=true;return true;
+                }
+                return false;
+            }
+            @Override public short nextShort(){if(!hasNext())throw new NoSuchElementException();ready=false;delivered=true;return next;}
+            @Override public boolean hasPrevious(){return false;}
+            @Override public short previousShort(){throw new NoSuchElementException();}
+            @Override public int nextIndex(){return original.nextIndex();}
+            @Override public int previousIndex(){return original.previousIndex();}
+        };
+    }
+    boolean postProcessingClear(LevelChunk chunk,ShortList pending){
+        Map<ShortList,PostProcess> parts=postProcessing.get(chunk);PostProcess part=parts==null?null:parts.get(pending);
+        if(part==null||postProcessingSection(chunk,pending)!=part.section)return false;
+        part.finished=true;
+        // Consumed items are already gone. Frozen items stay in vanilla's exact
+        // PostProcessing array and are saved/reloaded by ChunkSerializer itself.
+        if(!pending.isEmpty())chunk.setUnsaved(true);
+        if(pending.isEmpty()){parts.remove(pending);if(parts.isEmpty()&&postProcessing.get(chunk)==parts)postProcessing.remove(chunk);}
+        return true;
+    }
+    void postProcessingUnloaded(LevelChunk chunk){postProcessing.remove(chunk);upgrades.remove(chunk);}
+    boolean deferUpgrade(LevelChunk chunk,UpgradeData upgrade){
+        if(chunk.getClass()!=LevelChunk.class||upgrade.getClass()!=UpgradeData.class||chunk.getUpgradeData()!=upgrade)return false;
+        if(upgrade.isEmpty()||!upgradeLocked(chunk,upgrade)){upgrades.remove(chunk,upgrade);return false;}
+        // No part of this call has run. Its original indices/sides remain in
+        // chunk.getUpgradeData(), which vanilla serializes and reloads itself.
+        upgrades.put(chunk,upgrade);chunk.setUnsaved(true);return true;
+    }
+    private boolean upgradeLocked(LevelChunk chunk,UpgradeData upgrade){
+        if(mutationAreas.isEmpty())return false;
+        CompoundTag data=upgrade.write(),indices=data.getCompound("Indices");ChunkPos origin=chunk.getPos();
+        for(int section=0;section<chunk.getSectionsCount();section++)for(int packed:indices.getIntArray(Integer.toString(section))){
+            BlockPos pos=new BlockPos(origin.getMinBlockX()+(packed&15),(chunk.getSectionYFromSectionIndex(section)<<4)+((packed>>8)&15),origin.getMinBlockZ()+((packed>>4)&15));
+            if(upgradePositionLocked(chunk,pos))return true;
+        }
+        int sides=data.getByte("Sides")&255;
+        for(Direction8 side:Direction8.values())if((sides&(1<<side.ordinal()))!=0){
+            Set<Direction> directions=side.getDirections();boolean straight=directions.size()==1;
+            boolean east=directions.contains(Direction.EAST),west=directions.contains(Direction.WEST),north=directions.contains(Direction.NORTH),south=directions.contains(Direction.SOUTH);
+            int minX=origin.getMinBlockX()+(straight&&(north||south)?1:west?0:15),maxX=origin.getMinBlockX()+(straight&&(north||south)?14:west?0:15);
+            int minZ=origin.getMinBlockZ()+(straight&&(east||west)?1:north?0:15),maxZ=origin.getMinBlockZ()+(straight&&(east||west)?14:north?0:15);
+            for(BlockPos pos:BlockPos.betweenClosed(minX,chunk.getMinBuildHeight(),minZ,maxX,chunk.getMaxBuildHeight()-1,maxZ))if(upgradePositionLocked(chunk,pos))return true;
+        }
+        return false;
+    }
+    private boolean upgradePositionLocked(LevelChunk chunk,BlockPos pos){
+        Level level=chunk.getLevel();if(mutationDenied(level,pos))return true;
+        var state=chunk.getBlockState(pos);
+        // Vanilla's leaf fixer publishes its queued distance cascade after the
+        // direct indices/sides. Its bounded neighboring footprint also waits.
+        if(state.getBlock() instanceof LeavesBlock&&mutationLocked(level,pos.offset(-6,-6,-6),pos.offset(6,6,6)))return true;
+        if((state.is(Blocks.CHEST)||state.is(Blocks.TRAPPED_CHEST))&&state.getValue(ChestBlock.TYPE)==ChestType.SINGLE){
+            Direction facing=state.getValue(ChestBlock.FACING);
+            for(Direction direction:Direction.Plane.HORIZONTAL)if(direction.getAxis()!=facing.getAxis()){
+                BlockPos neighbor=pos.relative(direction);if(!mutationDenied(level,neighbor))continue;
+                if(!(level instanceof ServerLevel serverLevel))continue;
+                LevelChunk actual=serverLevel.getChunkSource().getChunkNow(neighbor.getX()>>4,neighbor.getZ()>>4);
+                if(actual==null)return true;
+                var adjacent=actual.getBlockState(neighbor);
+                if(adjacent.is(state.getBlock())&&adjacent.getValue(ChestBlock.TYPE)==ChestType.SINGLE&&adjacent.getValue(ChestBlock.FACING)==facing)return true;
+            }
+        }
+        return false;
+    }
+    private void resumePostProcessing(MinecraftServer server){
+        for(var parts:List.copyOf(postProcessing.values()))for(PostProcess part:List.copyOf(parts.values())){
+            LevelChunk chunk=part.chunk;
+            if(!part.finished||part.resuming||!(chunk.getLevel() instanceof ServerLevel level)||level.getServer()!=server
+                    ||level.getChunkSource().getChunkNow(chunk.getPos().x,chunk.getPos().z)!=chunk)continue;
+            if(postProcessingSection(chunk,part.pending)!=part.section){parts.remove(part.pending);if(parts.isEmpty()&&postProcessing.get(chunk)==parts)postProcessing.remove(chunk);continue;}
+            part.resuming=true;
+            try{
+                ShortListIterator pending=postProcessingIterator(part);
+                while(pending.hasNext()){
+                    BlockPos pos=part.position(pending.nextShort());
+                    // Only the saved coordinate body is resumed. One-time pending
+                    // block-entity publication and UpgradeData are not replayed here.
+                    var state=chunk.getBlockState(pos);var fluid=state.getFluidState();
+                    if(!fluid.isEmpty())fluid.tick(level,pos);
+                    if(!(state.getBlock() instanceof LiquidBlock)&&!mutationDenied(level,pos)){
+                        var changed=Block.updateFromNeighbourShapes(state,level,pos);
+                        level.setBlock(pos,changed,20);
+                    }
+                }
+            }finally{part.resuming=false;}
+            if(part.pending.isEmpty()){parts.remove(part.pending);if(parts.isEmpty()&&postProcessing.get(chunk)==parts)postProcessing.remove(chunk);}
+        }
+        for(LevelChunk chunk:List.copyOf(upgrades.keySet())){
+            UpgradeData upgrade=upgrades.get(chunk);if(upgrade==null)continue;
+            if(!(chunk.getLevel() instanceof ServerLevel level)||level.getServer()!=server
+                    ||level.getChunkSource().getChunkNow(chunk.getPos().x,chunk.getPos().z)!=chunk)continue;
+            if(chunk.getUpgradeData()!=upgrade){upgrades.remove(chunk,upgrade);continue;}
+            if(upgradeLocked(chunk,upgrade))continue;
+            // Remove before the one original upgrade call; an exception must not
+            // replay a partly consumed upgrade and its neighbor ticks/fixers.
+            upgrades.remove(chunk,upgrade);upgrade.upgrade(chunk);chunk.setUnsaved(true);
+        }
+    }
     boolean frozen(Entity entity){
         Access.EntityState state=(Access.EntityState)entity;
         if(moving.get()==entity||state.pro$level()==null||state.pro$level().isClientSide)return false;
@@ -151,7 +317,8 @@ final class WorldControl {
         if(chunk!=null)chunk.setUnsaved(true);return true;
     }
     void tick(MinecraftServer server){
-        tick++;if(rules.values().removeIf(rule->tick>=rule.until)){publishSpawnAreas();revision++;}
+        tick++;if(rules.values().removeIf(rule->tick>=rule.until)){publishAreas();revision++;}
+        resumePostProcessing(server);
         for(Rule rule:rules.values())if(rule.freeze){
             for(var iterator=rule.bodies.entrySet().iterator();iterator.hasNext();){
                 var body=iterator.next();Entity entity=body.getKey();Access.EntityState state=(Access.EntityState)entity;
@@ -199,5 +366,5 @@ final class WorldControl {
         }return selected;
     }
     String state(){return "WORLD_RULES="+rules.size()+";DEFERRED_TICKS="+held.values().stream().mapToLong(List::size).sum();}
-    Object[] controlObjects(){return new Object[]{this,rules,held,moving};}
+    Object[] controlObjects(){return new Object[]{this,rules,held,postProcessing,upgrades,moving,spawnAreas,frozenAreas,mutationAreas,clockLevels};}
 }

@@ -18,6 +18,9 @@ import net.minecraft.world.entity.decoration.ArmorStand;
 import net.minecraft.world.entity.player.*;
 import net.minecraft.world.inventory.AbstractContainerMenu;
 import net.minecraft.world.item.*;
+import net.minecraft.world.item.context.UseOnContext;
+import net.minecraft.world.item.context.BlockPlaceContext;
+import net.minecraft.world.level.Level;
 
 /** Current equipment shares, rather than a snapshot of items the body once held. */
 public final class EquipmentPolicy {
@@ -35,11 +38,24 @@ public final class EquipmentPolicy {
         final Owner owner;final String operation;final Class<?> anchor;final String method,descriptor;
         final WeakReference<Thread> thread=new WeakReference<>(Thread.currentThread());
         final WeakReference<ItemStack> used;final WeakReference<Object> menu;final Scope previous;final int mask,occurrences;final Class<?> itemType;
+        final WeakReference<ServerPlayerGameMode> game;
         boolean closed;
         Intent intent;DigFrame dig;WeakReference<Entity> attacked;
-        Scope(Owner owner,String operation,StackWalker.StackFrame frame,Scope previous,int mask,ItemStack used,Object menu,int occurrences){
+        Scope(Owner owner,String operation,StackWalker.StackFrame frame,Scope previous,int mask,ItemStack used,Object menu,int occurrences,ServerPlayerGameMode game){
             this.owner=owner;this.operation=operation;anchor=frame.getDeclaringClass();method=frame.getMethodName();descriptor=frame.getDescriptor();
             this.previous=previous;this.mask=mask;this.used=new WeakReference<>(used);this.menu=new WeakReference<>(menu);this.occurrences=occurrences;this.itemType=itemType(used);
+            this.game=new WeakReference<>(game);
+        }
+    }
+    private static final class Invocation {
+        final Scope action;final WeakReference<Object> receiver;final Object[] arguments;final String operation;
+        final Class<?> anchor;final String method,descriptor;final int occurrences;final Invocation previous;final boolean opensAction;
+        final WeakReference<Thread> thread=new WeakReference<>(Thread.currentThread());final WeakReference<ItemStack> stack;
+        final int mask;boolean closed;
+        Invocation(Scope action,Object receiver,Object[] arguments,String operation,StackWalker.StackFrame frame,int occurrences,Invocation previous,boolean opensAction,ItemStack stack,int mask){
+            this.action=action;this.receiver=new WeakReference<>(receiver);this.arguments=arguments.clone();this.operation=operation;
+            anchor=frame.getDeclaringClass();method=frame.getMethodName();descriptor=frame.getDescriptor();this.occurrences=occurrences;
+            this.previous=previous;this.opensAction=opensAction;this.stack=new WeakReference<>(stack);this.mask=mask;
         }
     }
     private record Visit(Object value,int limit) { }
@@ -98,11 +114,14 @@ public final class EquipmentPolicy {
     private static Map<Thread,Scope> SCOPES;
     private static Map<LivingEntity,Mining> MINING;
     private static Map<Thread,Driver> DRIVERS;
+    private static Map<Thread,Invocation> INVOCATIONS;
+    private static final Object INVOCATION_REFUSED=new Object();
     private static Map<Class<?>,List<Slot>> FIELDS;
     private static StackWalker WALKER;
     private static Class<?> ARRAY_LIST,NODE,IMMUTABLE_LIST;
     private static Field ARRAY_VALUES,LIST_VALUES,LIST_SIZE,MAP_TABLE,NODE_NEXT,NODE_VALUE;
     private static Field INTERACT_ID,INTERACT_ACTION;private static Object ATTACK_ACTION;
+    private static Field CONTEXT_PLAYER,CONTEXT_STACK;
     private static MethodHandle ACTION_SOURCE,ACTION_DELEGATE;
     private static volatile int REFERENCE_WIDTH=8;
     private EquipmentPolicy(){ }
@@ -113,7 +132,7 @@ public final class EquipmentPolicy {
         NODE=Class.forName("java.util.HashMap$Node",false,null);
         Class<?> tree=Class.forName("java.util.HashMap$TreeNode",false,null);
         IMMUTABLE_LIST=Class.forName("com.google.common.collect.RegularImmutableList",false,EquipmentPolicy.class.getClassLoader());
-        Class<?>[] carriers={Player.class,ServerPlayer.class,ServerPlayerGameMode.class,ServerboundInteractPacket.class,Inventory.class,Mob.class,ArmorStand.class,NonNullList.class,ItemStack.class,
+        Class<?>[] carriers={Player.class,ServerPlayer.class,ServerPlayerGameMode.class,ServerboundInteractPacket.class,UseOnContext.class,Inventory.class,Mob.class,ArmorStand.class,NonNullList.class,ItemStack.class,
                 CompoundTag.class,ListTag.class,ByteArrayTag.class,IntArrayTag.class,LongArrayTag.class,
                 ByteTag.class,ShortTag.class,IntTag.class,LongTag.class,FloatTag.class,DoubleTag.class,StringTag.class,
                 HashMap.class,LinkedHashMap.class,ArrayList.class,ARRAY_LIST,NODE,tree,IMMUTABLE_LIST};
@@ -138,12 +157,13 @@ public final class EquipmentPolicy {
         MAP_TABLE=access(HashMap.class,"table");NODE_NEXT=access(NODE,"next");NODE_VALUE=access(NODE,"value");
         INTERACT_ID=accessAny(ServerboundInteractPacket.class,"entityId","f_134030_");INTERACT_ACTION=accessAny(ServerboundInteractPacket.class,"action","f_134031_");
         ATTACK_ACTION=accessAny(ServerboundInteractPacket.class,"ATTACK_ACTION","f_179595_").get(null);
+        CONTEXT_PLAYER=accessAny(UseOnContext.class,"player","f_43703_");CONTEXT_STACK=accessAny(UseOnContext.class,"itemStack","f_43707_");
         Class<?> bridge=Class.forName("dev.ronova.pro.bootstrap.ControlBridge",false,null);
         ACTION_SOURCE=MethodHandles.publicLookup().findStatic(bridge,"equipmentActionSourceAllowed",MethodType.methodType(boolean.class));
-        ACTION_DELEGATE=MethodHandles.publicLookup().findStatic(bridge,"equipmentActionSourceAllowed",MethodType.methodType(boolean.class,Class.class));
+        ACTION_DELEGATE=MethodHandles.publicLookup().findStatic(bridge,"equipmentActionSourceAllowed",MethodType.methodType(boolean.class,Class.class,Class.class));
         OWNERS=Collections.synchronizedMap(new WeakIdentityMap<>());CARRIERS=Collections.synchronizedMap(new WeakIdentityMap<>());
         SCOPES=Collections.synchronizedMap(new WeakIdentityMap<>());FIELDS=Map.copyOf(fields);
-        MINING=Collections.synchronizedMap(new WeakIdentityMap<>());DRIVERS=Collections.synchronizedMap(new WeakIdentityMap<>());
+        MINING=Collections.synchronizedMap(new WeakIdentityMap<>());DRIVERS=Collections.synchronizedMap(new WeakIdentityMap<>());INVOCATIONS=Collections.synchronizedMap(new WeakIdentityMap<>());
         WALKER=StackWalker.getInstance(StackWalker.Option.RETAIN_CLASS_REFERENCE);initialized=true;
     }
     private static Field access(Class<?> type,String name)throws ReflectiveOperationException{Field field=type.getDeclaredField(name);field.setAccessible(true);return field;}
@@ -313,12 +333,14 @@ public final class EquipmentPolicy {
         return false;
     }
     private static boolean sourceAllowed(){try{return (boolean)ACTION_SOURCE.invokeExact();}catch(Throwable failure){throw new IllegalStateException("EQUIPMENT_ACTION_SOURCE_UNAVAILABLE",failure);}}
-    private static boolean sourceAllowed(Scope scope){try{return (boolean)ACTION_DELEGATE.invokeExact(scope.itemType);}catch(Throwable failure){throw new IllegalStateException("EQUIPMENT_DELEGATE_SOURCE_UNAVAILABLE",failure);}}
-    private static Class<?> itemType(ItemStack stack){
+    private static boolean sourceAllowed(Class<?> game,Class<?> item){try{return (boolean)ACTION_DELEGATE.invokeExact(game,item);}catch(Throwable failure){throw new IllegalStateException("EQUIPMENT_DELEGATE_SOURCE_UNAVAILABLE",failure);}}
+    private static boolean sourceAllowed(Scope scope){ServerPlayerGameMode game=scope.game.get();return sourceAllowed(game==null?null:game.getClass(),scope.itemType);}
+    private static Item item(ItemStack stack){
         if(stack==null||stack==ItemStack.EMPTY)return null;Access.StackState state=(Access.StackState)(Object)stack;
         Object delegate=state.pro$delegate();Item item=delegate instanceof net.minecraft.core.Holder<?> holder&&holder.value() instanceof Item actual?actual:state.pro$item();
-        return item==null?null:item.getClass();
+        return item;
     }
+    private static Class<?> itemType(ItemStack stack){Item item=item(stack);return item==null?null:item.getClass();}
     private static int selected(Owner owner){Inventory inventory=inventory(owner);return inventory==null?-1:((Access.InventoryState)inventory).pro$selected();}
     private static ItemStack main(Owner owner){return itemAt(owner,0,selected(owner));}
     private static ServerPlayerGameMode currentGame(Owner owner){return owner.entity.get() instanceof ServerPlayer player?player.gameMode:null;}
@@ -410,14 +432,16 @@ public final class EquipmentPolicy {
         }
         if(operation.equals("equipment-remove-block")){
             Scope parent=SCOPES.get(Thread.currentThread());
-            if(args.length!=2||!(args[0] instanceof BlockPos position)||!(args[1] instanceof Boolean)||caller==null||caller.getDeclaringClass()!=ServerPlayerGameMode.class||!named(caller,"destroyBlock","m_9280_")
+            if(args.length!=2||!(args[0] instanceof BlockPos position)||!(args[1] instanceof Boolean)||!gameParentCaller(caller,game,"equipment-destroy")
                     ||parent==null||parent.owner!=owner||parent.closed||!parent.operation.equals("equipment-destroy")||parent.dig==null||parent.dig.game.get()!=game||parent.dig.target==null||!parent.dig.target.matches(position)||!digContext(parent))return null;
             DigFrame prior=parent.dig;return new DigFrame(game,before,prior.target,prior.action,prior.tool.get(),prior.selected,prior.start,prior.continuation,prior.intent,null);
         }
         if(operation.equals("equipment-destroy")){
-            if(args.length!=1||!(args[0] instanceof BlockPos position)||caller==null||caller.getDeclaringClass()!=ServerPlayerGameMode.class||!named(caller,"tick","m_7712_","destroyAndAck","m_215116_"))return null;
+            if(args.length!=1||!(args[0] instanceof BlockPos position)||caller==null||!(gameParentCaller(caller,game,"equipment-dig-tick")||gameParentCaller(caller,game,"equipment-dig-action")
+                    ||caller.getDeclaringClass()==ServerPlayerGameMode.class&&named(caller,"destroyAndAck","m_215116_")))return null;
             Scope parent=SCOPES.get(Thread.currentThread());
             if(parent==null||parent.owner!=owner||parent.closed||parent.dig==null||parent.dig.game.get()!=game||parent.dig.consumed||parent.dig.target==null||!parent.dig.target.matches(position)||!digContext(parent))return null;
+            List<StackWalker.StackFrame> frames=invocationFrames();if(!scopePath(parent,frames.subList(1,frames.size())))return null;
             DigFrame prior=parent.dig;boolean authorized;
             if(parent.operation.equals("equipment-dig-tick"))authorized=prior.continuation!=null&&prior.continuation.delayed&&prior.before.delayed&&prior.target.matches(prior.before.delayedPos.get())&&prior.before.delayedStart==prior.start;
             else authorized=parent.operation.equals("equipment-dig-action")&&(prior.action==ServerboundPlayerActionPacket.Action.START_DESTROY_BLOCK
@@ -471,15 +495,183 @@ public final class EquipmentPolicy {
         Class<?> type=frame.getDeclaringClass();return type.getModule()==Entity.class.getModule()&&type.getClassLoader()==Entity.class.getClassLoader()
                 &&(!frame.getMethodName().contains("$")||frame.getMethodName().startsWith("lambda$")||frame.getMethodName().matches("m_[0-9]+_"));
     }
+    private static List<StackWalker.StackFrame> invocationFrames(){return WALKER.walk(stream->stream.filter(frame->frame.getDeclaringClass().getNestHost()!=EquipmentPolicy.class
+            &&!(frame.getDeclaringClass().getClassLoader()==null&&frame.getDeclaringClass().getName().equals("dev.ronova.pro.bootstrap.ControlBridge"))).toList());}
+    private static boolean gameParentCaller(StackWalker.StackFrame caller,ServerPlayerGameMode game,String operation){
+        Invocation invocation=INVOCATIONS.get(Thread.currentThread());
+        return caller!=null&&invocation!=null&&invocation.receiver.get()==game&&invocation.operation.equals(operation)
+                &&sameAnchor(caller,invocation.anchor,invocation.method,invocation.descriptor)&&invocationCurrent(invocation);
+    }
+    private static boolean sameArguments(Object[] first,Object[] second){
+        if(first.length!=second.length)return false;
+        for(int i=0;i<first.length;i++)if(first[i] instanceof Number||first[i] instanceof Boolean||first[i] instanceof Character){if(!Objects.equals(first[i],second[i]))return false;}else if(first[i]!=second[i])return false;
+        return true;
+    }
+    private static boolean actionCurrent(Scope scope,ItemStack stack,int mask){
+        if(scope==null||scope.closed||!active(scope.owner)||scope.thread.get()!=Thread.currentThread()||(scope.mask&mask)!=mask)return false;
+        if(scope.game.get()!=null&&!gameOwned(scope.owner,scope.game.get()))return false;
+        if(scope.used.get()!=null&&(scope.used.get()!=stack||itemType(stack)!=scope.itemType||(shares(scope.owner,stack)&mask)!=mask))return false;
+        if(scope.intent!=null&&!currentIntent(scope.owner,scope.intent,scope.operation.equals("equipment-attack"))||scope.dig!=null&&!digContext(scope))return false;
+        if(scope.operation.equals("equipment-attack")&&(scope.attacked.get()==null||scope.attacked.get()!=scope.intent.target.get()||main(scope.owner)!=stack))return false;
+        if(Set.of("equipment-consume","equipment-release","equipment-use-tick").contains(scope.operation)
+                &&(((Access.Living)scope.owner.entity.get()).pro$useItem()!=stack||useHand(scope.owner.entity.get())!=scope.mask))return false;
+        return scope.menu.get()==null||scope.owner.entity.get() instanceof Player player&&player.containerMenu==scope.menu.get();
+    }
+    private static boolean invocationCurrent(Invocation invocation){
+        if(invocation==null||invocation.closed||invocation.thread.get()!=Thread.currentThread())return false;
+        Scope scope=invocation.action;
+        if(invocation.receiver.get() instanceof ServerPlayerGameMode game){
+            if(scope.game.get()!=game||!gameOwned(scope.owner,game)||scope.closed||scope.thread.get()!=Thread.currentThread())return false;
+            if(actionCurrent(scope,scope.used.get(),scope.mask))return true;
+            // The real player driver may advance only its clock while a level handoff is pending.
+            if(!scope.operation.equals("equipment-dig-tick")||scope.dig==null||!driven(scope.owner,game))return false;
+            Access.EquipmentGameMode raw=(Access.EquipmentGameMode)game;
+            return raw.pro$gameType()==scope.dig.before.mode&&(raw.pro$gameTicks()==scope.dig.before.ticks||raw.pro$gameTicks()==scope.dig.before.ticks+1);
+        }
+        ItemStack stack=invocation.stack.get();
+        return stack!=null&&item(stack)==invocation.receiver.get()&&shares(scope.owner,stack)==invocation.mask&&actionCurrent(scope,stack,invocation.mask)&&itemArguments(scope,invocation.operation,invocation.arguments,stack);
+    }
+    private static boolean invocationFrame(StackWalker.StackFrame frame,Scope scope,boolean item){
+        for(Invocation invocation=INVOCATIONS.get(Thread.currentThread());invocation!=null;invocation=invocation.previous)
+            if(invocation.action==scope&&(invocation.receiver.get() instanceof Item)==item&&sameAnchor(frame,invocation.anchor,invocation.method,invocation.descriptor)&&invocationCurrent(invocation))return true;
+        return false;
+    }
+    private static boolean invocationDepths(Scope scope,List<StackWalker.StackFrame> frames){
+        for(Invocation invocation=INVOCATIONS.get(Thread.currentThread());invocation!=null;invocation=invocation.previous)if(invocation.action==scope&&!invocation.closed){
+            int count=0;for(var frame:frames)if(sameAnchor(frame,invocation.anchor,invocation.method,invocation.descriptor))count++;
+            if(count!=invocation.occurrences)return false;
+        }return true;
+    }
+    private static boolean scopePath(Scope scope,List<StackWalker.StackFrame> frames){
+        if(!invocationDepths(scope,frames))return false;
+        int occurrences=0;for(var frame:frames)if(sameAnchor(frame,scope.anchor,scope.method,scope.descriptor))occurrences++;
+        if(occurrences!=scope.occurrences)return false;
+        for(var frame:frames){
+            if(sameAnchor(frame,scope.anchor,scope.method,scope.descriptor))return true;
+            if(infrastructure(frame.getDeclaringClass()))continue;
+            if(!gameFrame(frame,scope))return false;
+        }return false;
+    }
+    /** No caller-supplied object can mint a lease: the first frame must be the actual mapped virtual body. */
+    public static Object beginInvocation(Object receiver,Object arguments,String operation){
+        if(!initialized||!(arguments instanceof Object[] args))return null;
+        List<StackWalker.StackFrame> frames=invocationFrames();if(frames.isEmpty())return INVOCATION_REFUSED;
+        StackWalker.StackFrame entry=frames.get(0),caller=frames.size()>1?frames.get(1):null;
+        Invocation previous=INVOCATIONS.get(Thread.currentThread());Scope scope;ItemStack stack=null;int mask=0;boolean opens=false;
+        if(receiver instanceof ServerPlayerGameMode game){
+            LivingEntity entity=actionEntity(receiver,args);Owner owner=entity==null?null:OWNERS.get(entity);if(!active(owner))return null;
+            if(!mappedGame(entry,operation)||!entry.getDeclaringClass().isInstance(receiver)||!gameOwned(owner,game))return INVOCATION_REFUSED;
+            // An override invoking its real super implementation continues the same action once.
+            if(previous!=null&&previous.receiver.get()==receiver&&previous.operation.equals(operation)&&sameArguments(previous.arguments,args)
+                    &&caller!=null&&sameAnchor(caller,previous.anchor,previous.method,previous.descriptor)&&entry.getDeclaringClass()!=previous.anchor
+                    &&entry.getDeclaringClass().isAssignableFrom(previous.anchor)&&invocationCurrent(previous))scope=previous.action;
+            else{Object token=beginAction(receiver,args,operation);if(!(token instanceof Scope accepted))return INVOCATION_REFUSED;scope=accepted;opens=true;}
+            try{if(!sourceAllowed(scope)){if(opens)closeAction(scope,false);return INVOCATION_REFUSED;}}
+            catch(RuntimeException|Error failure){if(opens)failedAction(scope,failure);throw failure;}
+        }else if(receiver instanceof Item actual){
+            if(!mappedItem(entry,operation)||!entry.getDeclaringClass().isInstance(receiver))return INVOCATION_REFUSED;
+            stack=itemStack(operation,args);LivingEntity actor=itemActor(operation,args);
+            Owner owner=actor==null?null:OWNERS.get(actor);
+            if(stack!=null)for(Link link:links(stack))if(link.kind==Kind.STACK&&current(link,stack)){
+                if(owner==null)owner=link.owner;else if(owner!=link.owner)return itemRead(operation)?null:INVOCATION_REFUSED;
+            }
+            if(!active(owner))return null;
+            if(stack==null&&operation.equals("item-use")&&args.length==3&&args[2] instanceof InteractionHand hand)stack=handStack(owner,hand);
+            scope=SCOPES.get(Thread.currentThread());mask=shares(owner,stack);
+            boolean valid=scope!=null&&scope.owner==owner&&stack!=null&&item(stack)==actual&&scope.itemType==actual.getClass()&&mask!=0
+                    &&actionCurrent(scope,stack,mask)&&itemArguments(scope,operation,args,stack)&&sourceAllowed(scope)&&scopePath(scope,frames.subList(1,frames.size()));
+            if(!valid)return itemRead(operation)?null:INVOCATION_REFUSED;
+        }else return null;
+        Invocation invocation=null;
+        try{
+            int occurrences=0;for(var frame:frames)if(sameAnchor(frame,entry.getDeclaringClass(),entry.getMethodName(),entry.getDescriptor()))occurrences++;
+            // Reentrant calls to the same body cannot consume a second dispatch using the outer receiver tuple.
+            for(Invocation prior=previous;prior!=null;prior=prior.previous)if(!prior.closed&&prior.receiver.get()==receiver&&sameAnchor(entry,prior.anchor,prior.method,prior.descriptor)){
+                if(opens)closeAction(scope,false);return itemRead(operation)?null:INVOCATION_REFUSED;
+            }
+            invocation=new Invocation(scope,receiver,args,operation,entry,occurrences,previous,opens,stack,mask);INVOCATIONS.put(Thread.currentThread(),invocation);return invocation;
+        }catch(RuntimeException|Error failure){
+            if(invocation!=null&&INVOCATIONS.get(Thread.currentThread())==invocation)failedInvocation(invocation,failure);
+            else if(opens)failedAction(scope,failure);
+            throw failure;
+        }
+    }
+    public static boolean invocationDenied(Object token){return token==INVOCATION_REFUSED;}
+    public static Object invocationResult(Object receiver,String operation,Object arguments){
+        Object[] args=arguments instanceof Object[] values?values:new Object[0];
+        if(operation.equals("item-finishUsingItem")||operation.equals("item-turnBottleIntoItem"))return args.length>0&&args[0] instanceof ItemStack?args[0]:ItemStack.EMPTY;
+        if(operation.equals("item-use")){
+            LivingEntity actor=itemActor(operation,args);Owner owner=actor==null?null:OWNERS.get(actor);
+            ItemStack stack=active(owner)&&args.length==3&&args[2] instanceof InteractionHand hand?handStack(owner,hand):ItemStack.EMPTY;
+            return InteractionResultHolder.pass(stack==null?ItemStack.EMPTY:stack);
+        }
+        return InteractionResult.PASS;
+    }
+    public static void endInvocation(Object token){closeInvocation(token,true);}
+    private static void closeInvocation(Object token,boolean success){
+        if(!(token instanceof Invocation invocation)||invocation.closed)return;
+        if(invocation.thread.get()!=Thread.currentThread()||INVOCATIONS.get(Thread.currentThread())!=invocation)throw new IllegalMonitorStateException("EQUIPMENT_INVOCATION_ORDER");
+        try{if(invocation.opensAction)closeAction(invocation.action,success);else if(!success)cancelMining(invocation.action.owner);}
+        finally{invocation.closed=true;if(invocation.previous==null)INVOCATIONS.remove(Thread.currentThread());else INVOCATIONS.put(Thread.currentThread(),invocation.previous);}
+    }
+    public static void failedInvocation(Object token,Throwable failure){try{closeInvocation(token,false);}catch(RuntimeException|Error cleanup){if(cleanup!=failure)failure.addSuppressed(cleanup);}}
+    private static ItemStack handStack(Owner owner,InteractionHand hand){return hand==InteractionHand.MAIN_HAND?main(owner):itemAt(owner,owner.entity.get() instanceof Player?2:0,owner.entity.get() instanceof Player?0:1);}
+    private static UseOnContext itemContext(String operation,Object[] args){
+        Object context=operation.equals("item-useOn")||operation.equals("item-place")?args.length==1?args[0]:null:operation.equals("item-onItemUseFirst")&&args.length==2?args[1]:null;
+        return context!=null&&(operation.equals("item-place")?context.getClass()==BlockPlaceContext.class:context.getClass()==UseOnContext.class)?(UseOnContext)context:null;
+    }
+    private static Object contextValue(String operation,Object[] args,Field field){
+        Object context=operation.equals("item-useOn")||operation.equals("item-place")?args.length==1?args[0]:null:operation.equals("item-onItemUseFirst")&&args.length==2?args[1]:null;
+        if(!(context instanceof UseOnContext))return null;
+        try{return field.get(context);}catch(IllegalAccessException failure){throw new IllegalStateException("EQUIPMENT_ACTION_CONTEXT_ACCESS",failure);}
+    }
+    private static ItemStack itemStack(String operation,Object[] args){
+        Object contextual=contextValue(operation,args,CONTEXT_STACK);if(contextual instanceof ItemStack stack)return stack;
+        if(operation.equals("item-onUseTick"))return args.length==4&&args[2] instanceof ItemStack stack?stack:null;
+        return args.length>0&&args[0] instanceof ItemStack stack?stack:null;
+    }
+    private static LivingEntity itemActor(String operation,Object[] args){
+        Object contextual=contextValue(operation,args,CONTEXT_PLAYER);if(contextual instanceof LivingEntity entity)return entity;
+        int index=operation.equals("item-use")||operation.equals("item-onUseTick")||operation.equals("item-turnBottleIntoItem")?1:operation.equals("item-mineBlock")?4:2;
+        return args.length>index&&args[index] instanceof LivingEntity entity?entity:null;
+    }
+    private static boolean itemRead(String operation){return operation.equals("item-getDamage")||operation.equals("item-getMaxDamage");}
+    private static boolean itemArguments(Scope scope,String operation,Object[] args,ItemStack stack){
+        LivingEntity entity=scope.owner.entity.get();if(entity==null)return false;
+        LivingEntity actor=itemActor(operation,args);if(actor!=null&&actor!=entity)return false;
+        Object level=((Access.EntityState)entity).pro$level();UseOnContext context=itemContext(operation,args);
+        if(operation.equals("item-use"))return scope.operation.equals("equipment-use")&&args.length==3&&args[0]==level&&args[1]==entity&&args[2] instanceof InteractionHand hand&&handStack(scope.owner,hand)==stack&&(hand==InteractionHand.MAIN_HAND?1:2)==scope.mask;
+        if(operation.equals("item-useOn")||operation.equals("item-onItemUseFirst")||operation.equals("item-place"))return scope.operation.equals("equipment-use")&&context!=null&&context.getHand()!=null&&(!operation.equals("item-onItemUseFirst")||args[0]==stack)&&context.getPlayer()==entity&&context.getLevel()==level&&context.getItemInHand()==stack&&handStack(scope.owner,context.getHand())==stack&&(context.getHand()==InteractionHand.MAIN_HAND?1:2)==scope.mask;
+        if(operation.equals("item-finishUsingItem"))return scope.operation.equals("equipment-consume")&&args.length==3&&args[0]==stack&&args[1]==level&&args[2]==entity;
+        if(operation.equals("item-releaseUsing"))return scope.operation.equals("equipment-release")&&args.length==4&&args[0]==stack&&args[1]==level&&args[2]==entity&&args[3] instanceof Integer remaining&&remaining==((Access.Living)entity).pro$useRemaining();
+        if(operation.equals("item-onUseTick"))return scope.operation.equals("equipment-use-tick")&&args.length==4&&args[0]==level&&args[1]==entity&&args[2]==stack&&args[3] instanceof Integer remaining&&remaining==((Access.Living)entity).pro$useRemaining();
+        if(operation.equals("item-turnBottleIntoItem"))return scope.operation.equals("equipment-use")&&args.length==3&&args[0]==stack&&args[1]==entity&&args[2] instanceof ItemStack;
+        if(operation.equals("item-hurtEnemy"))return scope.operation.equals("equipment-attack")&&args.length==3&&args[0]==stack&&args[1]==scope.attacked.get()&&args[2]==entity;
+        if(operation.equals("item-mineBlock"))return scope.operation.equals("equipment-destroy")&&args.length==5&&args[0]==stack&&args[1]==level&&args[3] instanceof BlockPos position&&scope.dig!=null&&scope.dig.target!=null&&scope.dig.target.matches(position)&&args[4]==entity;
+        if(operation.equals("item-onBlockStartBreak"))return scope.operation.equals("equipment-destroy")&&args.length==3&&args[0]==stack&&args[1] instanceof BlockPos position&&scope.dig!=null&&scope.dig.target!=null&&scope.dig.target.matches(position)&&args[2]==entity;
+        if(operation.equals("item-damageItem"))return args.length==4&&args[0]==stack&&args[1] instanceof Integer&&args[2]==entity&&args[3] instanceof java.util.function.Consumer<?>;
+        if(operation.equals("item-setDamage"))return args.length==2&&args[0]==stack&&args[1] instanceof Integer;
+        return itemRead(operation)&&args.length==1&&args[0]==stack;
+    }
+    /** Consumption delegates only the actual current Item invocation, never arbitrary effect callbacks. */
+    static boolean consumptionFrame(StackWalker.StackFrame frame,LivingEntity entity,ItemStack stack){
+        for(Invocation invocation=INVOCATIONS.get(Thread.currentThread());invocation!=null;invocation=invocation.previous)
+            if(invocation.action.owner.entity.get()==entity&&invocation.stack.get()==stack&&invocation.operation.equals("item-finishUsingItem")
+                    &&invocation.action.operation.equals("equipment-consume")&&sameAnchor(frame,invocation.anchor,invocation.method,invocation.descriptor)
+                    &&invocationCurrent(invocation)&&sourceAllowed(invocation.action))return true;
+        return false;
+    }
     /** Called by exact original action bodies, after packet thread handoff and before business publication. */
     public static Object beginAction(Object receiver,Object argument,String operation){
         if(!initialized)return null;Object[] args=argument instanceof Object[] values?values:new Object[0];
         LivingEntity entity=actionEntity(receiver,args);Owner owner=entity==null?null:OWNERS.get(entity);
-        if(!active(owner)||!serverThread(entity)||!sourceAllowed())return null;
+        if(!active(owner)||!serverThread(entity))return null;
         if(receiver instanceof ServerPlayerGameMode&&operation.equals("equipment-use")&&(args.length==0||args[0]!=entity))return null;
         if(receiver instanceof ServerGamePacketListenerImpl listener&&(!(entity instanceof ServerPlayer player)||player.connection!=listener||listener.player!=player))return null;
-        List<StackWalker.StackFrame> frames=WALKER.walk(stream->stream.filter(frame->frame.getDeclaringClass().getNestHost()!=EquipmentPolicy.class).toList());
+        List<StackWalker.StackFrame> frames=invocationFrames();
         if(frames.isEmpty())return null;StackWalker.StackFrame entry=frames.get(0),caller=frames.size()>1?frames.get(1):null;
+        boolean gameEntry=receiver instanceof ServerPlayerGameMode game&&mappedGame(entry,operation)&&entry.getDeclaringClass().isInstance(game);
+        if(gameEntry?!sourceAllowed(receiver.getClass(),null):!sourceAllowed())return null;
         int mask=ALL;ItemStack used=null;Object menu=null;boolean accepted=false;Intent actionIntent=null;DigFrame dig=null;Entity attacked=null;
         Class<?> anchor=entry.getDeclaringClass();
         if(operation.equals("equipment-select")){accepted=anchor==ServerGamePacketListenerImpl.class&&named(entry,"handleSetCarriedItem","m_7798_")&&packetCaller(caller);mask=0;}
@@ -498,12 +690,7 @@ public final class EquipmentPolicy {
                     &&parent!=null&&parent.intent.action==ATTACK_ACTION&&args.length==1&&args[0] instanceof Entity&&args[0]==parent.intent.target.get();
             if(accepted){actionIntent=parent.intent;attacked=(Entity)args[0];used=main(owner);}mask=1;
         }else if(operation.equals("equipment-dig-action")||operation.equals("equipment-dig-tick")||operation.equals("equipment-destroy")||operation.equals("equipment-remove-block")||operation.equals("equipment-dig-level")){
-            accepted=anchor==ServerPlayerGameMode.class&&receiver instanceof ServerPlayerGameMode
-                    &&(operation.equals("equipment-dig-action")&&named(entry,"handleBlockBreakAction","m_214168_")
-                    ||operation.equals("equipment-dig-tick")&&named(entry,"tick","m_7712_")
-                    ||operation.equals("equipment-destroy")&&named(entry,"destroyBlock","m_9280_")
-                    ||operation.equals("equipment-remove-block")&&named(entry,"removeBlock")
-                    ||operation.equals("equipment-dig-level")&&named(entry,"setLevel","m_9260_"));
+            accepted=gameEntry;
             if(accepted)dig=beginDig(owner,(ServerPlayerGameMode)receiver,args,operation,caller);
             accepted&=dig!=null;mask=operation.equals("equipment-destroy")?1:0;
             if(dig!=null){if(args.length>0&&args[0] instanceof BlockPos position)dig.position=new WeakReference<>(position);if(mask!=0)used=dig.tool.get();}
@@ -511,8 +698,8 @@ public final class EquipmentPolicy {
         else if(operation.equals("equipment-creative")||operation.equals("equipment-pick")){
             accepted=anchor==ServerGamePacketListenerImpl.class&&named(entry,operation.equals("equipment-pick")?"handlePickItem":"handleSetCreativeModeSlot",operation.equals("equipment-pick")?"m_7965_":"m_5964_")&&packetCaller(caller);
         }else if(operation.equals("equipment-use")){
-            accepted=anchor==ServerPlayerGameMode.class&&named(entry,"useItem","m_6261_","useItemOn","m_7179_")&&caller!=null&&caller.getDeclaringClass()==ServerGamePacketListenerImpl.class&&named(caller,"handleUseItem","m_5760_","handleUseItemOn","m_6371_");
-            if(args.length>3&&args[2] instanceof ItemStack stack&&args[3] instanceof InteractionHand hand){used=stack;mask=hand==InteractionHand.MAIN_HAND?1:2;accepted&=shares(owner,used)!=0&&(shares(owner,used)&mask)!=0;}else accepted=false;
+            accepted=gameEntry&&gameOwned(owner,(ServerPlayerGameMode)receiver)&&caller!=null&&caller.getDeclaringClass()==ServerGamePacketListenerImpl.class&&named(caller,"handleUseItem","m_5760_","handleUseItemOn","m_6371_");
+            if(args.length>3&&args[1]==((Access.EntityState)entity).pro$level()&&args[2] instanceof ItemStack stack&&args[3] instanceof InteractionHand hand){used=stack;mask=hand==InteractionHand.MAIN_HAND?1:2;accepted&=shares(owner,used)!=0&&(shares(owner,used)&mask)!=0;}else accepted=false;
         }else if(operation.equals("equipment-consume")||operation.equals("equipment-release")||operation.equals("equipment-use-tick")){
             accepted=anchor==LivingEntity.class&&caller!=null;
             if(operation.equals("equipment-consume"))accepted&=named(entry,"completeUsingItem","m_8095_")&&caller.getDeclaringClass()==LivingEntity.class&&named(caller,"updateUsingItem","m_142106_","updatingUsingItem","m_21329_");
@@ -526,11 +713,11 @@ public final class EquipmentPolicy {
             accepted=Set.of(Mob.class,Player.class,ArmorStand.class).contains(anchor)&&named(entry,"readAdditionalSaveData","m_7378_")
                     &&(ProRuntime.liveStateLifecycleAllowed(entity)||hasLoadRoot(owner));
         }
-        if(!accepted||!vanilla(entry))return null;
+        if(!accepted||!gameEntry&&!vanilla(entry))return null;
         Scope previous=SCOPES.get(Thread.currentThread());
         for(Scope prior=previous;prior!=null;prior=prior.previous)if(!prior.closed&&prior.owner==owner&&prior.anchor==anchor&&prior.method.equals(entry.getMethodName()))return null;
         int occurrences=0;for(var frame:frames)if(sameAnchor(frame,entry.getDeclaringClass(),entry.getMethodName(),entry.getDescriptor()))occurrences++;
-        Scope scope=new Scope(owner,operation,entry,previous,mask,used,menu,occurrences);scope.intent=actionIntent;scope.dig=dig;scope.attacked=new WeakReference<>(attacked);
+        Scope scope=new Scope(owner,operation,entry,previous,mask,used,menu,occurrences,receiver instanceof ServerPlayerGameMode game?game:null);scope.intent=actionIntent;scope.dig=dig;scope.attacked=new WeakReference<>(attacked);
         if(dig==null&&(!operation.equals("equipment-player-action")||actionIntent.action!=ServerboundPlayerActionPacket.Action.STOP_DESTROY_BLOCK))cancelMining(owner);
         SCOPES.put(Thread.currentThread(),scope);return scope;
     }
@@ -564,15 +751,20 @@ public final class EquipmentPolicy {
     private static boolean gameFrame(StackWalker.StackFrame frame,Scope scope){
         Class<?> type=frame.getDeclaringClass();String name=frame.getMethodName();
         if(Item.class.isAssignableFrom(type)){
-            return scope.itemType!=null&&type.isAssignableFrom(scope.itemType)&&itemActionMethod(frame);
+            return invocationFrame(frame,scope,true);
         }
+        if(ServerPlayerGameMode.class.isAssignableFrom(type))return invocationFrame(frame,scope,false)||type==ServerPlayerGameMode.class&&named(frame,"incrementDestroyProgress","m_9276_","destroyAndAck","m_215116_");
         if(ownedNbtRedirect(frame))return true;
         if(!vanilla(frame)){
-            if(type==net.minecraftforge.common.extensions.IForgeItem.class)return itemActionMethod(frame)||names(name,"getDamage","getMaxDamage")&&frame.getDescriptor().equals("(Lnet/minecraft/world/item/ItemStack;)I");
+            if(type==net.minecraftforge.common.extensions.IForgeItem.class)return invocationFrame(frame,scope,true);
             if(type==net.minecraftforge.common.extensions.IForgeItemStack.class)return names(name,"onBlockStartBreak")&&frame.getDescriptor().equals("(Lnet/minecraft/core/BlockPos;Lnet/minecraft/world/entity/player/Player;)Z");
+            if(type==net.minecraftforge.common.ForgeHooks.class)return name.equals("onPlaceItemIntoWorld")&&frame.getDescriptor().equals("(Lnet/minecraft/world/item/context/UseOnContext;)Lnet/minecraft/world/InteractionResult;")&&scope.operation.equals("equipment-use");
             return false;
         }
         if(type==NonNullList.class||type.getPackageName().equals("net.minecraft.nbt"))return true;
+        if(type==ItemUtils.class)return names(name,"createFilledResult","m_41813_","m_41817_")
+                &&(frame.getDescriptor().equals("(Lnet/minecraft/world/item/ItemStack;Lnet/minecraft/world/entity/player/Player;Lnet/minecraft/world/item/ItemStack;)Lnet/minecraft/world/item/ItemStack;")
+                        ||frame.getDescriptor().equals("(Lnet/minecraft/world/item/ItemStack;Lnet/minecraft/world/entity/player/Player;Lnet/minecraft/world/item/ItemStack;Z)Lnet/minecraft/world/item/ItemStack;"));
         if(type==ItemStack.class)return !name.contains("$")||name.startsWith("lambda$onItemUse")||name.startsWith("lambda$useOn");
         if(type==Inventory.class)return !name.contains("$")||name.startsWith("lambda$hurtArmor");
         if(type==ContainerHelper.class)return names(name,"takeItem","m_18966_","removeItem","m_18969_","clearOrCountMatchingItems","m_18961_","m_18956_");
@@ -584,22 +776,8 @@ public final class EquipmentPolicy {
         if(type==Entity.class)return names(name,"load","m_20258_","restoreFrom","m_20361_");
         if(type==ServerPlayer.class)return names(name,"restoreFrom","m_9015_","drop","m_7197_","m_182294_","readAdditionalSaveData","m_7378_","attack","m_5706_");
         if(type.getName().equals("net.minecraft.server.network.ServerGamePacketListenerImpl$1"))return named(frame,"onAttack","m_141994_");
-        if(type==ServerPlayerGameMode.class||type==ServerGamePacketListenerImpl.class)return !name.contains("$");
+        if(type==ServerGamePacketListenerImpl.class)return !name.contains("$");
         return false;
-    }
-    private static boolean itemActionMethod(StackWalker.StackFrame frame){
-        String name=frame.getMethodName(),descriptor=frame.getDescriptor();
-        if(names(name,"use","m_7203_"))return descriptor.equals("(Lnet/minecraft/world/level/Level;Lnet/minecraft/world/entity/player/Player;Lnet/minecraft/world/InteractionHand;)Lnet/minecraft/world/InteractionResultHolder;");
-        if(names(name,"useOn","m_6225_"))return descriptor.equals("(Lnet/minecraft/world/item/context/UseOnContext;)Lnet/minecraft/world/InteractionResult;");
-        if(names(name,"finishUsingItem","m_5922_"))return descriptor.equals("(Lnet/minecraft/world/item/ItemStack;Lnet/minecraft/world/level/Level;Lnet/minecraft/world/entity/LivingEntity;)Lnet/minecraft/world/item/ItemStack;");
-        if(names(name,"releaseUsing","m_5551_"))return descriptor.equals("(Lnet/minecraft/world/item/ItemStack;Lnet/minecraft/world/level/Level;Lnet/minecraft/world/entity/LivingEntity;I)V");
-        if(names(name,"onUseTick","m_5929_"))return descriptor.equals("(Lnet/minecraft/world/level/Level;Lnet/minecraft/world/entity/LivingEntity;Lnet/minecraft/world/item/ItemStack;I)V");
-        if(name.equals("onItemUseFirst"))return descriptor.equals("(Lnet/minecraft/world/item/ItemStack;Lnet/minecraft/world/item/context/UseOnContext;)Lnet/minecraft/world/InteractionResult;");
-        if(name.equals("onBlockStartBreak"))return descriptor.equals("(Lnet/minecraft/world/item/ItemStack;Lnet/minecraft/core/BlockPos;Lnet/minecraft/world/entity/player/Player;)Z");
-        if(name.equals("setDamage"))return descriptor.equals("(Lnet/minecraft/world/item/ItemStack;I)V");
-        if(name.equals("damageItem"))return descriptor.equals("(Lnet/minecraft/world/item/ItemStack;ILnet/minecraft/world/entity/LivingEntity;Ljava/util/function/Consumer;)I");
-        if(names(name,"mineBlock","m_6813_"))return descriptor.equals("(Lnet/minecraft/world/item/ItemStack;Lnet/minecraft/world/level/Level;Lnet/minecraft/world/level/block/state/BlockState;Lnet/minecraft/core/BlockPos;Lnet/minecraft/world/entity/LivingEntity;)Z");
-        return names(name,"hurtEnemy","m_7579_")&&descriptor.equals("(Lnet/minecraft/world/item/ItemStack;Lnet/minecraft/world/entity/LivingEntity;Lnet/minecraft/world/entity/LivingEntity;)Z");
     }
     private static boolean ownedNbtRedirect(StackWalker.StackFrame frame){
         String name=frame.getMethodName(),descriptor=frame.getDescriptor();Class<?> type=frame.getDeclaringClass();
@@ -612,6 +790,7 @@ public final class EquipmentPolicy {
         if(ProRuntime.liveStateLifecycleAllowed(entity))return true;
         for(Scope scope=SCOPES.get(Thread.currentThread());scope!=null;scope=scope.previous){
             if(scope.closed||scope.owner!=owner||scope.thread.get()!=Thread.currentThread()||(scope.mask&mask)!=mask)continue;
+            if(!actionCurrent(scope,stack,mask))continue;
             if(scope.intent!=null&&!currentIntent(owner,scope.intent,scope.operation.equals("equipment-attack"))||scope.dig!=null&&!digContext(scope))continue;
             if(scope.operation.equals("equipment-attack")&&(scope.attacked.get()==null||scope.attacked.get()!=scope.intent.target.get()||main(owner)!=scope.used.get()))continue;
             if(mask==0&&!Set.of("equipment-select","equipment-menu","equipment-pick","equipment-creative","equipment-load","equipment-load-root").contains(scope.operation))continue;
@@ -620,10 +799,10 @@ public final class EquipmentPolicy {
             if(!sourceAllowed(scope))continue;
             Scope selected=scope;
             boolean path=WALKER.walk(frames->{var actual=frames.toList();int occurrences=0;for(var frame:actual)if(sameAnchor(frame,selected.anchor,selected.method,selected.descriptor))occurrences++;
-                if(occurrences!=selected.occurrences)return false;boolean first=true;for(var frame:actual){
+                if(occurrences!=selected.occurrences||!invocationDepths(selected,actual))return false;boolean first=true;for(var frame:actual){
                 if(frame.getDeclaringClass()==selected.anchor&&frame.getMethodName().equals(selected.method)&&frame.getDescriptor().equals(selected.descriptor))return true;
                 if(infrastructure(frame.getDeclaringClass()))continue;
-                if(first&&entryQuery&&frame.getMethodName().contains("$ronova$equipment")){first=false;continue;}
+                if(first&&entryQuery&&Set.of(ItemStack.class,Inventory.class,NonNullList.class,LivingEntity.class,Player.class,Mob.class,ArmorStand.class,ContainerHelper.class).contains(frame.getDeclaringClass())&&frame.getMethodName().contains("$ronova$equipment")){first=false;continue;}
                 first=false;if(!gameFrame(frame,selected))return false;
             }return false;});
             if(path)return true;
@@ -756,9 +935,10 @@ public final class EquipmentPolicy {
     }
     /** GameMode state never inherits the current Item's equipment delegation. */
     private static Scope gameWriteScope(Owner owner,ServerPlayerGameMode game){
-        if(!gameOwned(owner,game)||!sourceAllowed())return null;
+        if(!gameOwned(owner,game))return null;
         for(Scope scope=SCOPES.get(Thread.currentThread());scope!=null;scope=scope.previous){
             if(scope.owner!=owner||scope.closed||scope.thread.get()!=Thread.currentThread()||scope.dig==null||scope.dig.game.get()!=game)continue;
+            if(!sourceAllowed(scope))continue;
             boolean context=digContext(scope);
             if(!context&&scope.operation.equals("equipment-dig-tick")){
                 Access.EquipmentGameMode raw=(Access.EquipmentGameMode)game;
@@ -767,10 +947,11 @@ public final class EquipmentPolicy {
             if(!context)continue;Scope selected=scope;
             boolean path=WALKER.walk(stream->{List<StackWalker.StackFrame> frames=stream.toList();int occurrences=0;
                 for(var frame:frames)if(sameAnchor(frame,selected.anchor,selected.method,selected.descriptor))occurrences++;
-                if(occurrences!=selected.occurrences)return false;
+                if(occurrences!=selected.occurrences||!invocationDepths(selected,frames))return false;
                 for(var frame:frames){
                     if(sameAnchor(frame,selected.anchor,selected.method,selected.descriptor))return true;
                     if(infrastructure(frame.getDeclaringClass()))continue;
+                    if(invocationFrame(frame,selected,false))continue;
                     if(frame.getDeclaringClass()!=ServerPlayerGameMode.class||!named(frame,"incrementDestroyProgress","m_9276_"))return false;
                 }return false;});
             if(path)return scope;
@@ -826,6 +1007,42 @@ public final class EquipmentPolicy {
         return false;
     }
     static List<Field> unsafeFields(){if(!initialized)return List.of();List<Field> result=new ArrayList<>();for(var slots:FIELDS.values())for(Slot slot:slots)if(!result.contains(slot.field))result.add(slot.field);return result;}
+    private static final String[][] GAME_ACTIONS={
+        {"useItem","m_6261_","(Lnet/minecraft/server/level/ServerPlayer;Lnet/minecraft/world/level/Level;Lnet/minecraft/world/item/ItemStack;Lnet/minecraft/world/InteractionHand;)Lnet/minecraft/world/InteractionResult;","equipment-use"},
+        {"useItemOn","m_7179_","(Lnet/minecraft/server/level/ServerPlayer;Lnet/minecraft/world/level/Level;Lnet/minecraft/world/item/ItemStack;Lnet/minecraft/world/InteractionHand;Lnet/minecraft/world/phys/BlockHitResult;)Lnet/minecraft/world/InteractionResult;","equipment-use"},
+        {"handleBlockBreakAction","m_214168_","(Lnet/minecraft/core/BlockPos;Lnet/minecraft/network/protocol/game/ServerboundPlayerActionPacket$Action;Lnet/minecraft/core/Direction;II)V","equipment-dig-action"},
+        {"tick","m_7712_","()V","equipment-dig-tick"},{"destroyBlock","m_9280_","(Lnet/minecraft/core/BlockPos;)Z","equipment-destroy"},
+        {"removeBlock","","(Lnet/minecraft/core/BlockPos;Z)Z","equipment-remove-block"},{"setLevel","m_9260_","(Lnet/minecraft/server/level/ServerLevel;)V","equipment-dig-level"}
+    };
+    private static final String[][] ITEM_ACTIONS={
+        {"use","m_7203_","(Lnet/minecraft/world/level/Level;Lnet/minecraft/world/entity/player/Player;Lnet/minecraft/world/InteractionHand;)Lnet/minecraft/world/InteractionResultHolder;","item-use"},
+        {"useOn","m_6225_","(Lnet/minecraft/world/item/context/UseOnContext;)Lnet/minecraft/world/InteractionResult;","item-useOn"},
+        {"finishUsingItem","m_5922_","(Lnet/minecraft/world/item/ItemStack;Lnet/minecraft/world/level/Level;Lnet/minecraft/world/entity/LivingEntity;)Lnet/minecraft/world/item/ItemStack;","item-finishUsingItem"},
+        {"releaseUsing","m_5551_","(Lnet/minecraft/world/item/ItemStack;Lnet/minecraft/world/level/Level;Lnet/minecraft/world/entity/LivingEntity;I)V","item-releaseUsing"},
+        {"onUseTick","m_5929_","(Lnet/minecraft/world/level/Level;Lnet/minecraft/world/entity/LivingEntity;Lnet/minecraft/world/item/ItemStack;I)V","item-onUseTick"},
+        {"onItemUseFirst","","(Lnet/minecraft/world/item/ItemStack;Lnet/minecraft/world/item/context/UseOnContext;)Lnet/minecraft/world/InteractionResult;","item-onItemUseFirst"},
+        {"onBlockStartBreak","","(Lnet/minecraft/world/item/ItemStack;Lnet/minecraft/core/BlockPos;Lnet/minecraft/world/entity/player/Player;)Z","item-onBlockStartBreak"},
+        {"setDamage","","(Lnet/minecraft/world/item/ItemStack;I)V","item-setDamage"},
+        {"damageItem","","(Lnet/minecraft/world/item/ItemStack;ILnet/minecraft/world/entity/LivingEntity;Ljava/util/function/Consumer;)I","item-damageItem"},
+        {"getDamage","","(Lnet/minecraft/world/item/ItemStack;)I","item-getDamage"},{"getMaxDamage","","(Lnet/minecraft/world/item/ItemStack;)I","item-getMaxDamage"},
+        {"mineBlock","m_6813_","(Lnet/minecraft/world/item/ItemStack;Lnet/minecraft/world/level/Level;Lnet/minecraft/world/level/block/state/BlockState;Lnet/minecraft/core/BlockPos;Lnet/minecraft/world/entity/LivingEntity;)Z","item-mineBlock"},
+        {"hurtEnemy","m_7579_","(Lnet/minecraft/world/item/ItemStack;Lnet/minecraft/world/entity/LivingEntity;Lnet/minecraft/world/entity/LivingEntity;)Z","item-hurtEnemy"}
+    };
+    private static final String[][] BLOCK_ACTIONS={{"place","m_40576_","(Lnet/minecraft/world/item/context/BlockPlaceContext;)Lnet/minecraft/world/InteractionResult;","item-place"}};
+    private static final String[][] BOTTLE_ACTIONS={{"turnBottleIntoItem","m_40651_","(Lnet/minecraft/world/item/ItemStack;Lnet/minecraft/world/entity/player/Player;Lnet/minecraft/world/item/ItemStack;)Lnet/minecraft/world/item/ItemStack;","item-turnBottleIntoItem"}};
+    private static boolean mapped(StackWalker.StackFrame frame,String operation,String[][] mappings){
+        for(String[] mapping:mappings)if(mapping[3].equals(operation)&&names(frame.getMethodName(),mapping[0],mapping[1])&&frame.getDescriptor().equals(mapping[2]))return true;
+        return false;
+    }
+    private static boolean virtualBody(StackWalker.StackFrame frame){
+        for(Method method:frame.getDeclaringClass().getDeclaredMethods())if(method.getName().equals(frame.getMethodName())&&MethodType.methodType(method.getReturnType(),method.getParameterTypes()).descriptorString().equals(frame.getDescriptor()))
+            return !Modifier.isPrivate(method.getModifiers())&&!Modifier.isStatic(method.getModifiers());
+        return false;
+    }
+    private static boolean mappedGame(StackWalker.StackFrame frame,String operation){return ServerPlayerGameMode.class.isAssignableFrom(frame.getDeclaringClass())&&mapped(frame,operation,GAME_ACTIONS)
+            &&(operation.equals("equipment-remove-block")?frame.getDeclaringClass()==ServerPlayerGameMode.class:virtualBody(frame));}
+    private static boolean mappedItem(StackWalker.StackFrame frame,String operation){return virtualBody(frame)&&(Item.class.isAssignableFrom(frame.getDeclaringClass())||frame.getDeclaringClass()==net.minecraftforge.common.extensions.IForgeItem.class)
+            &&(mapped(frame,operation,ITEM_ACTIONS)||BlockItem.class.isAssignableFrom(frame.getDeclaringClass())&&mapped(frame,operation,BLOCK_ACTIONS)||BottleItem.class.isAssignableFrom(frame.getDeclaringClass())&&mapped(frame,operation,BOTTLE_ACTIONS));}
     static void declareDispatchTargets(Class<?> agent)throws ReflectiveOperationException {
         Method declare=agent.getMethod("declareDispatchArgumentsTarget",Class.class,String.class,String.class);
         declare(declare,LivingEntity.class,new String[][]{{"setItemSlot","m_8061_","(Lnet/minecraft/world/entity/EquipmentSlot;Lnet/minecraft/world/item/ItemStack;)V"},{"setItemInHand","m_21008_","(Lnet/minecraft/world/InteractionHand;Lnet/minecraft/world/item/ItemStack;)V"}});
@@ -833,6 +1050,16 @@ public final class EquipmentPolicy {
         declare(declare,Inventory.class,new String[][]{{"setItem","m_6836_","(ILnet/minecraft/world/item/ItemStack;)V"},{"removeItem","m_7407_","(II)Lnet/minecraft/world/item/ItemStack;"},{"removeItemNoUpdate","m_8016_","(I)Lnet/minecraft/world/item/ItemStack;"},{"removeItem","m_36057_","(Lnet/minecraft/world/item/ItemStack;)V"},{"removeFromSelected","m_182403_","(Z)Lnet/minecraft/world/item/ItemStack;"},{"dropAll","m_36071_","()V"},{"clearContent","m_6211_","()V"},{"load","m_36035_","(Lnet/minecraft/nbt/ListTag;)V"},{"replaceWith","m_36006_","(Lnet/minecraft/world/entity/player/Inventory;)V"}});
         declare(declare,ContainerHelper.class,new String[][]{{"takeItem","m_18966_","(Ljava/util/List;I)Lnet/minecraft/world/item/ItemStack;"},{"removeItem","m_18969_","(Ljava/util/List;II)Lnet/minecraft/world/item/ItemStack;"}});
         declare(declare,ARRAY_LIST,new String[][]{{"set","","(ILjava/lang/Object;)Ljava/lang/Object;"},{"replaceAll","","(Ljava/util/function/UnaryOperator;)V"},{"sort","","(Ljava/util/Comparator;)V"}});
+        Method actions=agent.getMethod("declareEquipmentActionTarget",Class.class,String.class,String.class,String.class);
+        declareActions(actions,ServerPlayerGameMode.class,GAME_ACTIONS);
+        declareActions(actions,Item.class,ITEM_ACTIONS);
+        declareActions(actions,net.minecraftforge.common.extensions.IForgeItem.class,ITEM_ACTIONS);
+        declareActions(actions,BlockItem.class,BLOCK_ACTIONS);declareActions(actions,BottleItem.class,BOTTLE_ACTIONS);
+    }
+    private static void declareActions(Method declare,Class<?> owner,String[][] mappings)throws ReflectiveOperationException{
+        for(String[] mapping:mappings)for(Method method:owner.getDeclaredMethods())if(names(method.getName(),mapping[0],mapping[1])
+                &&MethodType.methodType(method.getReturnType(),method.getParameterTypes()).toMethodDescriptorString().equals(mapping[2]))
+            declare.invoke(null,owner,method.getName(),mapping[2],mapping[3]);
     }
     private static void declare(Method declare,Class<?> owner,String[][] entries)throws ReflectiveOperationException{
         for(String[] entry:entries)for(Method method:owner.getDeclaredMethods())if((method.getName().equals(entry[0])||!entry[1].isEmpty()&&method.getName().equals(entry[1]))

@@ -3,7 +3,7 @@
 #include <bcrypt.h>
 // Preserve Object.clone itself, including Cloneable checks; never substitute a Java ancestor body.
 JNIEXPORT jint JNICALL Java_dev_ronova_pro_bootstrap_NativeControl_abi(JNIEnv *env, jclass type) {
-    (void)env; (void)type; return 71;
+    (void)env; (void)type; return 72;
 }
 JNIEXPORT jobject JNICALL Java_dev_ronova_pro_bootstrap_NativeControl_returnIdentifier0(JNIEnv *env,jclass type) {
     (void)type;
@@ -123,6 +123,8 @@ static int native_bind_controller(JNIEnv *env,jclass controller){
         {"jvmtiDefinitionsPending0","(Ljava/lang/Module;)Z",(void*)Java_dev_ronova_pro_bootstrap_NativeControl_jvmtiDefinitionsPending0},
         {"heapEventPermit0","(Ljava/lang/Object;Ljava/lang/Class;)Z",(void*)Java_dev_ronova_pro_bootstrap_NativeControl_heapEventPermit0},
         {"codeState0","(Ljava/lang/Module;)[J",(void*)Java_dev_ronova_pro_bootstrap_NativeControl_codeState0},
+        {"retireCode0","(Ljava/lang/Module;)V",(void*)Java_dev_ronova_pro_bootstrap_NativeControl_retireCode0},
+        {"codeRetirementFramePermit0","(Ljava/lang/Class;ILjava/lang/Object;Ljava/lang/Module;)Z",(void*)Java_dev_ronova_pro_bootstrap_NativeControl_codeRetirementFramePermit0},
         {"preparedClass0","(Ljava/lang/Class;)Z",(void*)Java_dev_ronova_pro_bootstrap_NativeControl_preparedClass0},
         {"sourceCapture0","()Z",(void*)Java_dev_ronova_pro_bootstrap_NativeControl_sourceCapture0},
         {"arrayCopyInternalBoundary0","()Z",(void*)Java_dev_ronova_pro_bootstrap_NativeControl_arrayCopyInternalBoundary0},
@@ -158,6 +160,7 @@ static int native_bind_controller(JNIEnv *env,jclass controller){
         {"hostReady0","()Z",(void*)Java_dev_ronova_pro_bootstrap_NativeControl_hostReady0},
         {"hostLibraryLoadReady0","()Z",(void*)Java_dev_ronova_pro_bootstrap_NativeControl_hostLibraryLoadReady0},
         {"hostKernelProtect0","(Ljava/lang/Module;Z)V",(void*)host_kernel_protect0},
+        {"hostKernelOwnerProtect0","(Z)V",(void*)host_kernel_owner_protect0},
         {"hostKernelFile0","(Ljava/io/FileDescriptor;[Ljava/lang/Module;)Ljava/lang/String;",(void*)host_kernel_file0},
         {"hostKernelState0","(Ljava/lang/Module;)[J",(void*)host_kernel_state0},
         {"hostState0","(Ljava/lang/Module;)[J",(void*)Java_dev_ronova_pro_bootstrap_NativeControl_hostState0},

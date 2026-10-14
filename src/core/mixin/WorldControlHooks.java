@@ -24,8 +24,14 @@ public final class WorldControlHooks {
         private void passenger(Entity vehicle,Entity passenger,CallbackInfo callback){if(ProRuntime.worldFrozen(passenger)){
             for(Entity nested:passenger.getPassengers())tickPassenger(passenger,nested);callback.cancel();
         }}
-        @Inject(method={"tickTime","advanceWeatherCycle"},at=@At("HEAD"),cancellable=true)
+        @Inject(method={"tickTime","advanceWeatherCycle","resetWeatherCycle"},at=@At("HEAD"),cancellable=true)
         private void clock(CallbackInfo callback){if(ProRuntime.worldClockFrozen((ServerLevel)(Object)this))callback.cancel();}
+        @Inject(method="setDayTime",at=@At("HEAD"),cancellable=true)
+        private void day(long time,CallbackInfo callback){if(ProRuntime.worldClockFrozen((ServerLevel)(Object)this))callback.cancel();}
+        @Inject(method="setWeatherParameters",at=@At("HEAD"),cancellable=true)
+        private void weather(int clear,int rain,boolean raining,boolean thundering,CallbackInfo callback){if(ProRuntime.worldClockFrozen((ServerLevel)(Object)this))callback.cancel();}
+        @Inject(method="unload",at=@At("HEAD"))
+        private void unload(net.minecraft.world.level.chunk.LevelChunk chunk,CallbackInfo callback){ProRuntime.worldPostProcessingUnloaded((ServerLevel)(Object)this,chunk);}
         @Inject(method="addFreshEntity",at=@At("HEAD"),cancellable=true)
         private void spawn(Entity entity,CallbackInfoReturnable<Boolean> callback){if(ProRuntime.worldSpawnDenied((ServerLevel)(Object)this,entity))callback.setReturnValue(false);}
         // Keep frozen events on vanilla's reschedule path until this position can tick again.
@@ -51,6 +57,23 @@ public final class WorldControlHooks {
         private void randomBlock(net.minecraft.world.level.block.state.BlockState state,ServerLevel level,BlockPos pos,net.minecraft.util.RandomSource random){if(!ProRuntime.worldFrozen(level,pos))state.randomTick(level,pos,random);}
         @Redirect(method="tickChunk",at=@At(value="INVOKE",target="Lnet/minecraft/world/level/material/FluidState;randomTick(Lnet/minecraft/world/level/Level;Lnet/minecraft/core/BlockPos;Lnet/minecraft/util/RandomSource;)V"))
         private void randomFluid(net.minecraft.world.level.material.FluidState state,Level level,BlockPos pos,net.minecraft.util.RandomSource random){if(!ProRuntime.worldFrozen(level,pos))state.randomTick(level,pos,random);}
+    }
+    @Mixin(Level.class) public abstract static class BlockWrites {
+        @Inject(method="setBlock(Lnet/minecraft/core/BlockPos;Lnet/minecraft/world/level/block/state/BlockState;II)Z",at=@At("HEAD"),cancellable=true)
+        private void state(BlockPos pos,net.minecraft.world.level.block.state.BlockState state,int flags,int recursion,CallbackInfoReturnable<Boolean> callback){
+            if(ProRuntime.worldBlockMutationDenied((Level)(Object)this,pos))callback.setReturnValue(false);
+        }
+        // Refuse before vanilla publishes drops or invokes the block's destruction effects.
+        @Inject(method="destroyBlock(Lnet/minecraft/core/BlockPos;ZLnet/minecraft/world/entity/Entity;I)Z",at=@At("HEAD"),cancellable=true)
+        private void destroy(BlockPos pos,boolean drops,Entity actor,int recursion,CallbackInfoReturnable<Boolean> callback){
+            if(ProRuntime.worldBlockMutationDenied((Level)(Object)this,pos))callback.setReturnValue(false);
+        }
+        @Inject(method="removeBlockEntity",at=@At("HEAD"),cancellable=true)
+        private void removeTile(BlockPos pos,CallbackInfo callback){if(ProRuntime.worldBlockMutationDenied((Level)(Object)this,pos))callback.cancel();}
+        @Inject(method="setBlockEntity",at=@At("HEAD"),cancellable=true)
+        private void publishTile(net.minecraft.world.level.block.entity.BlockEntity tile,CallbackInfo callback){
+            if(ProRuntime.worldBlockMutationDenied((Level)(Object)this,tile.getBlockPos()))callback.cancel();
+        }
     }
     @Mixin(targets="net.minecraft.world.level.chunk.LevelChunk$BoundTickingBlockEntity") public abstract static class Block {
         @Shadow @Final private net.minecraft.world.level.block.entity.BlockEntity blockEntity;

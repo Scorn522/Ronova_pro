@@ -1,6 +1,6 @@
 # Ronova Host Windows 驱动源码
 
-此目录交付 Windows x64 内核源码、共享 IOCTL 头、集中 WDK 构建入口和显式开发部署工具。当前用户态 Java ABI72 / Native ABI69；本轮驱动和管理器源码未改、未重建，沿用 Native58 EA 工作包的37888字节SYS与 Native56 工作包的190464字节EXE。上述产物已用官方 WDK/SDK NuGet 10.0.26100.6584 头库及 Zig/LLD 编译链接；前一包及原结果保留。正式 VS/WDK MSBuild 未执行；未签名、生成CAT、安装或加载，没有修改TestSigning，两 altitude 仍待真实配置。实际内核 I/O和UAC部署命令未运行。
+此目录交付 Windows x64 内核源码、共享 IOCTL 头、集中 WDK 构建入口和显式开发部署工具。本轮追加独立的会话 owner process 外部句柄保护，驱动与管理器已随 Java77/Native72 强度包重新编译链接，SYS38912、管理器190464字节。共享协议保持版本1与既有结构长度，以新增 capability 协商 owner 路径；使用已有官方 WDK/SDK NuGet 10.0.26100.6584 头库及 Zig/LLD。正式 VS/WDK MSBuild、签名、CAT、安装、加载、实际内核 I/O 和 UAC 部署动作未执行，没有修改 TestSigning，两 altitude 仍待真实配置。游戏入口 `/ronova_pro host protect-jvm true|false` 沿现有管理员命令资格，显示实际回执，不自动安装或加载驱动。
 
 `RonovaHost.vcxproj` 使用 Visual Studio 2022 C++ 工具、匹配的 Windows SDK/WDK 与 VS WDK 扩展、`WindowsKernelModeDriver10.0`；目标 Windows 10 2004（19041）及以后，内核 C17，链接 FltMgr/Wdmsec/NtosKrnl，设置 `/INTEGRITYCHECK`。`RonovaHostManage.vcxproj` 是 x64 C17 Win32 控制台工具，链接 Newdev/Setupapi/FltLib/Advapi32/Shell32/Ole32。启动按 `asInvoker` 使用调用者当前权限，只有用户选择修改命令后才按实际 token 决定是否请求 UAC。`RonovaHost.proj` 将两者放在同一次集中构建中。
 
@@ -78,6 +78,7 @@ UAC 重新启动只用 `GetModuleFileNameW(NULL)` 得到的当前工具路径，
 
 - `\\.\RonovaHost` 控制设备 ACL 为 SYSTEM/管理员；每个实际设备 FILE_OBJECT 只绑定打开时的原始进程。所有 IOCTL 必须来自同一实际进程和句柄表，拒绝 WOW64、kernel requestor、陌生会话与不准确结构长度。
 - PROCESS_ADD 用 UserMode、`*PsProcessType` 和查询/设置权限验证真实 HANDLE，保留 PEPROCESS 引用；拒绝会话自己的 JVM/controller 和 System 对象。opaque Scope 只表示现有 Host 记录，不授予内核权限，也不按 PID、modid、线程名或名称匹配。
+- 独立的 OWNER_PROTECT 不接收目标 HANDLE、PID、Scope 或 Mod 身份，只作用于原设备会话已引用的 owner PEPROCESS。生产桥只有原核心资格的显式 JVM 选择才能开启，支持的唯一 Effects 是外部危险 process/thread 句柄权限收紧；不拒绝 JVM 正常创建子进程，也不冒充同 JVM 内 Mod 身份。Effects=0 或该 owner target 的 REMOVE 撤销本会话规则，退出和 CLEANUP 使其失效。query 返回独立 owner TargetId、实际观察 PID、Effects、State 与权限收紧次数，owner 不占用 Host 子进程表名额。
 - ObRegisterCallbacks 在实际 process/thread handle 创建与复制时，移除微软允许修改的危险访问位。复制按实际接收进程判断；controller 和目标自身只获得各自对象的例外。已有句柄、继承、只读权限和 kernel handles 保留缺口。
 - PsSetCreateProcessNotifyRoutineEx 在真实创建线程上下文中检查当前创建者的 PEPROCESS；选定对象的后续子进程通过 CreationStatus 被拒绝。退出通知撤销原对象的效力，不沿 PID 复用迁移。此通知也是 session owner/actor 生命周期的必要依赖；Ob 单独注册成功不会宣称整个进程策略可用。
 - FILE_ADD 必须绑定同一会话、同一 Scope 的真实进程 TargetId。UserMode、`*IoFileObjectType` 验证原打开文件，保留 FileObject、kernel keep-open HANDLE、实际 Volume/Instance 和 128 位 FileIdInformation；只对该实际 actor 对象访问这一文件的规则生效。只接 NTFS/ReFS 的已安装实例和普通文件。已有、复制、继承或新开的文件句柄发起适用的用户非 paging read/write 与元数据写时，均按当前真实 actor 和原 FileObject/同文件 ID 判断；其他 actor 或文件继续原操作，不能解析 ID 的旧别名保留缺口。
@@ -87,7 +88,7 @@ UAC 重新启动只用 `GetModuleFileNameW(NULL)` 得到的当前工具路径，
 
 ## 协议和生命周期
 
-以 `ronova_host_protocol.h` 的固定结构为准：请求头32、响应头32、session reply88、process add64、file add72、target request48、target reply152字节。METHOD_BUFFERED IOCTL 要求 read/write access，输入和输出长度必须准确。合法 transport 的真实动作结果放在响应 Status（NTSTATUS）；transport 失败时没有可使用的回执。HELLO 的 Ob、Ps、FltRegister、FltStart 状态独立来自实际调用，Capabilities 只发布已安装且依赖可用的分支。
+以 `ronova_host_protocol.h` 的固定结构为准：请求头32、响应头32、session reply88、process add64、owner protect40、file add72、target request48、target reply152字节。METHOD_BUFFERED IOCTL 要求 read/write access，输入和输出长度必须准确。合法 transport 的真实动作结果放在响应 Status（NTSTATUS）；transport 失败时没有可使用的回执。HELLO 的 Ob、Ps、FltRegister、FltStart 状态独立来自实际调用，Capabilities 只发布已安装且依赖可用的分支。OWNER_PROCESS_HANDLES 要求 Ob 与进程退出通知均可用；旧驱动缺该 capability 时，用户态保留明确的未服务结果，不误报 owner active。已有句柄、继承、kernel handles 的缺口也由 Unserved 单独列出。
 
 同会话同对象同 Scope 的 ADD 原子替换 Effects 并保留 TargetId；同对象不同 Scope 拒绝。移除实际 process 前先移除该会话绑定的文件，否则返回 STATUS_DEVICE_BUSY。REMOVE 只撤销本会话登记对象。CLEANUP 立即关闭该会话发布、等待在途 IOCTL，释放其实际文件与进程引用；CLOSE 释放会话本身。没有终止进程、读写任意内存、按路径重新打开目标或在 kernel 中自动扩大来源的 IOCTL。
 
@@ -95,9 +96,9 @@ UAC 重新启动只用 `GetModuleFileNameW(NULL)` 得到的当前工具路径，
 
 ## 外部部署条件与未服务范围
 
-`RonovaHost.inf` 是源码配套模板，ObAltitude 和 FilterAltitude 尚未分配，保持空值。后续部署需要实际合适的 Ob altitude、微软分配的 Security Enhancer minifilter altitude、Windows 接受的驱动签名和真实系统授权；源码不会挑另一个数字跳过冲突。空配置、签名/完整性失败、altitude 冲突、无实例或不支持的文件系统会返回真实错误。此次交付编写了安装、加载、查询、非强制卸载、升级和移除的调用路径，但未执行这些系统动作；前一包官方 WDK/SDK 头库的 Zig/LLD 编译链接已通过，本包 FSCTL 追加尚待集中构建。正式 WDK MSBuild、Inf2Cat 和签名未执行，不具有内核运行通过证据。
+`RonovaHost.inf` 是源码配套模板，ObAltitude 和 FilterAltitude 尚未分配，保持空值。后续部署需要实际合适的 Ob altitude、微软分配的 Security Enhancer minifilter altitude、Windows 接受的驱动签名和真实系统授权；源码不会挑另一个数字跳过冲突。空配置、签名/完整性失败、altitude 冲突、无实例或不支持的文件系统会返回真实错误。此次交付编写了安装、加载、查询、非强制卸载、升级和移除的调用路径，但未执行这些系统动作；前一包官方 WDK/SDK 头库的 Zig/LLD 编译链接已通过，本包 owner 保护追加尚待集中构建。正式 WDK MSBuild、Inf2Cat 和签名未执行，不具有内核运行通过证据。
 
-本版本不具有单个 Java Mod 的内核执行身份；共享 JVM 内的模块必须继续由现有 Java/Native 来源截点处理。用户态只应提交已证明专属的实际 Host 子进程与已授权文件，unknown/shared/transfer gaps 不能转成内核目标。它未提供完整 Windows 映像准入、已有映射清除、旧句柄权限追溯、任意内核来源阻断或全 OS 完成结论。
+本版本不具有单个 Java Mod 的内核执行身份；共享 JVM 内的模块必须继续由现有 Java/Native 来源截点处理。独立 owner 规则保护游戏 JVM 整个进程，仅对之后向外部接收进程创建/复制的句柄移除微软允许修改的危险访问位；查询/读取权限、既有句柄、继承句柄和 kernel handles 不受其控制，也不回收、退改或升级已授予权限。Host 子进程与文件规则仍只提交已证明专属的实际对象，unknown/shared/transfer gaps 不能转成内核目标。它未提供完整 Windows 映像准入、已有映射清除、旧句柄权限追溯、任意内核来源阻断或全 OS 完成结论。
 
 依据微软正式 DDI：
 

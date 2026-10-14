@@ -24,21 +24,13 @@ public final class SaveFinallyPlugin implements IMixinConfigPlugin {
             weaveEquipmentAction(node,"handlePickItem","m_7965_","(Lnet/minecraft/network/protocol/game/ServerboundPickItemPacket;)V","equipment-pick");
             weaveEquipmentAction(node,"handleInteract","m_6946_","(Lnet/minecraft/network/protocol/game/ServerboundInteractPacket;)V","equipment-interact");return;
         }
-        if(mixin.endsWith(".EquipmentActionHooks$Use")) {
-            weaveEquipmentAction(node,"useItem","m_6261_","(Lnet/minecraft/server/level/ServerPlayer;Lnet/minecraft/world/level/Level;Lnet/minecraft/world/item/ItemStack;Lnet/minecraft/world/InteractionHand;)Lnet/minecraft/world/InteractionResult;","equipment-use");
-            weaveEquipmentAction(node,"useItemOn","m_7179_","(Lnet/minecraft/server/level/ServerPlayer;Lnet/minecraft/world/level/Level;Lnet/minecraft/world/item/ItemStack;Lnet/minecraft/world/InteractionHand;Lnet/minecraft/world/phys/BlockHitResult;)Lnet/minecraft/world/InteractionResult;","equipment-use");return;
-        }
+        // The agent wraps both this original and real overrides with one invocation protocol.
+        if(mixin.endsWith(".EquipmentActionHooks$Use"))return;
         if(mixin.endsWith(".EquipmentActionHooks$PlayerAttack")) {
             weaveEquipmentAction(node,"attack","m_5706_","(Lnet/minecraft/world/entity/Entity;)V","equipment-attack");return;
         }
         if(mixin.endsWith(".EquipmentActionHooks$PlayerTick")) { weaveEquipmentDriver(node);return; }
-        if(mixin.endsWith(".EquipmentActionHooks$Digging")) {
-            weaveEquipmentAction(node,"handleBlockBreakAction","m_214168_","(Lnet/minecraft/core/BlockPos;Lnet/minecraft/network/protocol/game/ServerboundPlayerActionPacket$Action;Lnet/minecraft/core/Direction;II)V","equipment-dig-action");
-            weaveEquipmentAction(node,"tick","m_7712_","()V","equipment-dig-tick");
-            weaveEquipmentAction(node,"destroyBlock","m_9280_","(Lnet/minecraft/core/BlockPos;)Z","equipment-destroy");
-            weaveEquipmentAction(node,"removeBlock","removeBlock","(Lnet/minecraft/core/BlockPos;Z)Z","equipment-remove-block");
-            weaveEquipmentAction(node,"setLevel","m_9260_","(Lnet/minecraft/server/level/ServerLevel;)V","equipment-dig-level");return;
-        }
+        if(mixin.endsWith(".EquipmentActionHooks$Digging"))return;
         if(mixin.endsWith(".EquipmentActionHooks$Using")) {
             weaveEquipmentAction(node,"updateUsingItem","m_142106_","(Lnet/minecraft/world/item/ItemStack;)V","equipment-use-tick");
             weaveEquipmentAction(node,"completeUsingItem","m_8095_","()V","equipment-consume");

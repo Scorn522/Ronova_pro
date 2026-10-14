@@ -1,5 +1,23 @@
 # Ronova Pro 当前进度
 
+## 2026-10-14：C 强度接续——旧帧、实际覆写、区域加载与 JVM 外部保护
+
+接续 `aeb7e34`，Java ABI77 / Native ABI72 / Storage3 / Journal6，协议仍为 `r3-client-8`。本包将旧执行帧、装备动作覆写、手动区域锁和 Windows 游戏进程外部保护整包写齐后统一构建；自身外观及武器注册继续暂缓。
+
+停止组的生产入口现接入真实线程观察、独立早期 JVMTI 能力申请与逐线程 SingleStep。事件中重读当前方法版本、实际归属及执行 token；只对无未知业务清理责任的可退出子集按既有返回策略 ForceEarlyReturn，由真实 FramePop 以异常式关闭原来源 token。递归帧按方法与距栈底深度匹配，只恢复自己成功建立的暂停；未知 finally/锁、框架/共享代码及原生或未结来源作用域保持 pending，不使用会重调 invoke 的 PopFrame，也不宣称回滚。
+
+GameMode、Item/IForgeItem 的标准契约及实际覆写接入完整 receiver/参数与正常/异常退出。override→super 续接同一动作；同模块外部回调也不能借权。补当前 Item、BlockItem/瓶子转换及标准回填助手的准确链，消费效果仅接受实际当前 finishUsingItem。未知 capability 内部、任意 helper、自定义上下文与未观察 native 方法体仍保留边界。
+
+手动区域冻结拦住标准 Level/LevelChunk 方块写入、破坏与已绑定方块实体替换，先拒绝再产生掉落、监听/ticker/onLoad 副作用；时间锁同时覆盖直接时间/天气修改及睡眠重置。规则发布为只读区域快照，归档自身暂停与手动写锁分开，归档与手动锁重叠时等待。原版初次后处理的冻结坐标保留在原 ShortList/数组 slot，解除后只续跑剩余坐标；卸载只忘旧对象索引，存盘/重载保留原载体。非空 UpgradeData 的实际升级范围与锁交叠时整次延后，含原版箱子邻接与叶级联，不重跑已完成的后处理尾部。未知自定义区块/升级器没有泛化完成承诺。
+
+Windows 新独立 owner 规则绑定设备会话实际游戏进程，限制外部新建/复制危险进程、线程句柄；不借 Mod 身份代表整个 JVM。现有管理员命令 `/ronova_pro host protect-jvm true|false` 沿实际玩家/控制台资格，各 runtime 保存自己的选择，最后撤销/关闭时交接。状态分开显示请求、实际回执与 pending；查询不打开设备，旧驱动缺 capability 如实不支持。既有/继承/kernel 句柄及同 JVM Mod 身份不提升为完成，未安装、签名或加载驱动。
+
+最初沙箱构建分别被 Gradle 原生 DLL 加载与 Zig 自路径限制阻断，原失败日志保留。改用已有本机工具链后，`build-c-java77-native72-strength-final-20261014.log` **PASS，1分7秒**，Core/Agent/Bootstrap/Native 与现有夹具统一生成；`build-c-driver72-owner-final-20261014.log` **PASS**，本轮 SYS/管理器重新编译链接，未部署。AuditFixCheck 对匹配运行类路径编译通过。一次真实 prelaunch 入口检查 `c-system-arraycopy-java77-native72-strength-20261014.log` **实际退出0、SYSTEM_ARRAYCOPY_PASS**，新匹配载荷完成原生桥/绑定安装，真实受控数组写拒和原复制语义通过。旧帧强退、装备动作与世界接续游戏分支仍未运行，不能由入口检查或构建代称通过；未重跑旧矩阵。
+
+候选 `distribution/candidate-c-java77-native72-strength-wip-20261014`，源码包 `distribution/Ronova-Pro-C-Strength-WIP-Java77-Native72-20261014.zip`。完整 C/B 尚未完成。
+
+---
+
 ## 2026-10-14：C 接续——启动期写入内联与真实数组复制入口
 
 接续 `80ac1a8`，Java ABI76 / Native ABI71 / Storage3 / Journal6；协议保持 `r3-client-8`。prelaunch 为新 HotSpot JDK17 游戏 JVM 禁用对应的 Unsafe 写入及 System.arraycopy 编译器内联，涵盖 plain/volatile/opaque/release、非对齐、CAS/exchange/weak CAS、getAndAdd/getAndSet 与 copyMemory；保留用户参数原序，原有 DisableIntrinsic 清单继续累积。读、fence、分配及无关数学内联不在本包范围。仅直接加载 Mod 的晚挂载方式没有这项启动期约束。

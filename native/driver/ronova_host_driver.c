@@ -63,6 +63,8 @@ typedef struct RVH_SESSION {
     PEPROCESS Owner;
     PFILE_OBJECT DeviceFile;
     ULONGLONG Id,Unserved;
+    ULONGLONG OwnerProtectionId,OwnerRightsReduced;
+    ULONG OwnerEffects;
     BOOLEAN Closed,OwnerExited;
     RVH_PROCESS_RECORD Processes[RVH_MAX_PROCESSES];
     RVH_FILE_RECORD Files[RVH_MAX_FILES];
@@ -161,7 +163,7 @@ static VOID RvhHeader(RVH_RESPONSE *Out,const RVH_REQUEST *In,RVH_SESSION *Sessi
 static ULONGLONG RvhCapabilities(VOID){
     ULONGLONG result=RVH_CAP_DEVICE_SESSION;
     if(NT_SUCCESS(RvhNotifyStatus))result|=RVH_CAP_PROCESS_OBJECT_BIND;
-    if(NT_SUCCESS(RvhObStatus)&&NT_SUCCESS(RvhNotifyStatus))result|=RVH_CAP_OUTSIDE_HANDLE_RIGHTS;
+    if(NT_SUCCESS(RvhObStatus)&&NT_SUCCESS(RvhNotifyStatus))result|=RVH_CAP_OUTSIDE_HANDLE_RIGHTS|RVH_CAP_OWNER_PROCESS_HANDLES;
     if(NT_SUCCESS(RvhNotifyStatus))result|=RVH_CAP_CHILD_CREATION_DENIAL;
     if(NT_SUCCESS(RvhNotifyStatus)&&NT_SUCCESS(RvhFilterStatus)&&NT_SUCCESS(RvhFilterStartStatus))result|=RVH_CAP_EXACT_FILE_BIND|RVH_CAP_FILE_READ_WRITE|RVH_CAP_NEW_EXECUTE_OPEN_DENIAL;
     return result;
@@ -183,6 +185,12 @@ static VOID RvhProcessReply(RVH_SESSION *Session,RVH_PROCESS_RECORD *Record,RVH_
     Out->State=Session->OwnerExited?RVH_TARGET_OWNER_EXITED:Record->Exited?RVH_TARGET_PROCESS_EXITED:RVH_TARGET_ACTIVE;
     Out->HandleRightsReduced=Record->RightsReduced;Out->ChildCreationsDenied=Record->ChildrenDenied;
 }
+static VOID RvhOwnerReply(RVH_SESSION *Session,RVH_TARGET_REPLY *Out){
+    Out->Kind=RVH_TARGET_OWNER_PROCESS;Out->Effects=Session->OwnerEffects;Out->TargetId=Session->OwnerProtectionId;
+    Out->ObservedProcessId=(ULONGLONG)(ULONG_PTR)PsGetProcessId(Session->Owner);
+    Out->State=Session->OwnerExited?RVH_TARGET_OWNER_EXITED:Session->OwnerEffects?RVH_TARGET_ACTIVE:RVH_TARGET_DISABLED;
+    Out->HandleRightsReduced=Session->OwnerRightsReduced;
+}
 static VOID RvhFileReply(RVH_SESSION *Session,RVH_FILE_RECORD *Record,RVH_TARGET_REPLY *Out){
     Out->Kind=RVH_TARGET_FILE;Out->Effects=Record->Effects;Out->TargetId=Record->Id;Out->Scope=Record->Scope;
     Out->ActorTargetId=Record->ActorId;Out->ObservedProcessId=(ULONGLONG)(ULONG_PTR)PsGetProcessId(Record->Actor);
@@ -190,6 +198,24 @@ static VOID RvhFileReply(RVH_SESSION *Session,RVH_FILE_RECORD *Record,RVH_TARGET
     RtlCopyMemory(Out->FileId,Record->Identity.FileId.Identifier,sizeof(Out->FileId));
     Out->State=Session->OwnerExited?RVH_TARGET_OWNER_EXITED:Record->ActorExited?RVH_TARGET_PROCESS_EXITED:Record->Detached?RVH_TARGET_VOLUME_DETACHED:RVH_TARGET_ACTIVE;
     Out->FileOperationsDenied=Record->Denied;Out->SectionAttemptsObserved=Record->Sections;Out->UnservedObservations=Record->Unserved;
+}
+
+static NTSTATUS RvhProtectOwner(RVH_SESSION *Session,const RVH_OWNER_PROTECT_REQUEST *In,RVH_TARGET_REPLY *Out){
+    NTSTATUS status;KIRQL irql;
+    if(In->Reserved!=0||(In->Effects&~RVH_OWNER_ALLOWED_FLAGS)!=0)return STATUS_INVALID_PARAMETER;
+    if(In->Effects!=0){
+        if(!NT_SUCCESS(RvhObStatus))return RvhObStatus;
+        if(!NT_SUCCESS(RvhNotifyStatus))return RvhNotifyStatus;
+        if(Session->Owner==PsInitialSystemProcess)return STATUS_ACCESS_DENIED;
+        if(PsGetProcessExitStatus(Session->Owner)!=STATUS_PENDING)return STATUS_PROCESS_IS_TERMINATING;
+    }
+    KeAcquireSpinLock(&RvhLock,&irql);
+    if(Session->Closed||Session->OwnerExited)status=STATUS_FILE_CLOSED;
+    else{
+        if(In->Effects!=0&&Session->OwnerProtectionId==0)Session->OwnerProtectionId=RvhNextId();
+        Session->OwnerEffects=In->Effects;RvhOwnerReply(Session,Out);status=STATUS_SUCCESS;
+    }
+    KeReleaseSpinLock(&RvhLock,irql);return status;
 }
 
 static NTSTATUS RvhAddProcess(RVH_SESSION *Session,const RVH_PROCESS_ADD_REQUEST *In,RVH_TARGET_REPLY *Out){
@@ -282,10 +308,14 @@ Done:
 static NTSTATUS RvhTarget(RVH_SESSION *Session,const RVH_TARGET_REQUEST *In,RVH_TARGET_REPLY *Out,BOOLEAN Remove){
     RVH_PROCESS_RECORD *process;RVH_FILE_RECORD *file;RVH_FILE_RECORD released={0};PEPROCESS releasedProcess=NULL,observedProcess=NULL;
     NTSTATUS status=STATUS_INVALID_HANDLE;KIRQL irql;ULONG i;
-    if(In->Reserved!=0||In->TargetId==0||(In->Kind!=RVH_TARGET_PROCESS&&In->Kind!=RVH_TARGET_FILE))return STATUS_INVALID_PARAMETER;
+    if(In->Reserved!=0||In->TargetId==0||(In->Kind!=RVH_TARGET_PROCESS&&In->Kind!=RVH_TARGET_FILE&&In->Kind!=RVH_TARGET_OWNER_PROCESS))return STATUS_INVALID_PARAMETER;
     KeAcquireSpinLock(&RvhLock,&irql);
     if(Session->Closed)status=STATUS_FILE_CLOSED;
-    else if(In->Kind==RVH_TARGET_PROCESS&&(process=RvhProcessById(Session,In->TargetId))!=NULL){
+    else if(In->Kind==RVH_TARGET_OWNER_PROCESS&&In->TargetId==Session->OwnerProtectionId){
+        status=STATUS_SUCCESS;
+        if(Remove)Session->OwnerEffects=0;
+        else RvhOwnerReply(Session,Out);
+    }else if(In->Kind==RVH_TARGET_PROCESS&&(process=RvhProcessById(Session,In->TargetId))!=NULL){
         status=STATUS_SUCCESS;
         if(Remove){
             for(i=0;i<RVH_MAX_FILES;i++)if(Session->Files[i].Id!=0&&Session->Files[i].ActorId==process->Id){status=STATUS_DEVICE_BUSY;break;}
@@ -320,6 +350,14 @@ static OB_PREOP_CALLBACK_STATUS RvhObjectPre(PVOID Context,POB_PRE_OPERATION_INF
     KeAcquireSpinLock(&RvhLock,&irql);
     for(link=RvhSessions.Flink;link!=&RvhSessions;link=link->Flink){
         RVH_SESSION *session=CONTAINING_RECORD(link,RVH_SESSION,Link);if(session->Closed||session->OwnerExited)continue;
+        /* This policy is the whole session owner, independently of child Mod
+         * records. Only handles received by another real process are reduced;
+         * the owner JVM/controller keeps its own process/thread operations.
+         * An owner duplicating out does not lend the recipient its exemption. */
+        if(target==session->Owner&&destination!=session->Owner
+                &&(session->OwnerEffects&RVH_OWNER_PROTECT_OUTSIDE_HANDLES)!=0&&(*access&mask)!=0){
+            *access&=~mask;session->OwnerRightsReduced++;
+        }
         for(i=0;i<RVH_MAX_PROCESSES;i++){
             RVH_PROCESS_RECORD *record=&session->Processes[i];
             if(record->Id==0||record->Exited||record->Process!=target||(record->Effects&RVH_PROCESS_PROTECT_OUTSIDE_HANDLES)==0)continue;
@@ -339,7 +377,7 @@ static VOID RvhProcessNotify(PEPROCESS Process,HANDLE ProcessId,PPS_CREATE_NOTIF
     for(link=RvhSessions.Flink;link!=&RvhSessions;link=link->Flink){
         RVH_SESSION *session=CONTAINING_RECORD(link,RVH_SESSION,Link);if(session->Closed)continue;
         if(Create==NULL){
-            if(session->Owner==Process)session->OwnerExited=TRUE;
+            if(session->Owner==Process){session->OwnerExited=TRUE;session->OwnerEffects=0;}
             for(i=0;i<RVH_MAX_PROCESSES;i++)if(session->Processes[i].Id!=0&&session->Processes[i].Process==Process)session->Processes[i].Exited=TRUE;
             for(i=0;i<RVH_MAX_FILES;i++)if(session->Files[i].Id!=0&&session->Files[i].Actor==Process)session->Files[i].ActorExited=TRUE;
         }else if(!session->OwnerExited&&NT_SUCCESS(Create->CreationStatus)){
@@ -662,7 +700,7 @@ static NTSTATUS RvhReadAltitude(PUNICODE_STRING RegistryPath,PCWSTR Suffix,PCWST
 
 static VOID RvhRetireSession(RVH_SESSION *Session){
     ULONG i;KIRQL irql;RVH_FILE_RECORD file;PEPROCESS process;BOOLEAN already;
-    KeAcquireSpinLock(&RvhLock,&irql);already=Session->Closed;Session->Closed=TRUE;KeReleaseSpinLock(&RvhLock,irql);
+    KeAcquireSpinLock(&RvhLock,&irql);already=Session->Closed;Session->Closed=TRUE;Session->OwnerEffects=0;KeReleaseSpinLock(&RvhLock,irql);
     if(already){(VOID)KeWaitForSingleObject(&Session->Retired,Executive,KernelMode,FALSE,NULL);return;}
     /* Close publication before waiting; in-flight ADD rechecks Closed. */
     ExWaitForRundownProtectionRelease(&Session->Requests);
@@ -701,6 +739,7 @@ static NTSTATUS RvhControl(PIRP Irp,PIO_STACK_LOCATION Stack,PULONG_PTR Informat
     switch(code){
         case IOCTL_RVH_HELLO:case IOCTL_RVH_QUERY_SESSION:inSize=sizeof(RVH_REQUEST);outSize=sizeof(RVH_SESSION_REPLY);break;
         case IOCTL_RVH_PROCESS_ADD:inSize=sizeof(RVH_PROCESS_ADD_REQUEST);outSize=sizeof(RVH_TARGET_REPLY);break;
+        case IOCTL_RVH_OWNER_PROTECT:inSize=sizeof(RVH_OWNER_PROTECT_REQUEST);outSize=sizeof(RVH_TARGET_REPLY);break;
         case IOCTL_RVH_FILE_ADD:inSize=sizeof(RVH_FILE_ADD_REQUEST);outSize=sizeof(RVH_TARGET_REPLY);break;
         case IOCTL_RVH_QUERY_TARGET:inSize=sizeof(RVH_TARGET_REQUEST);outSize=sizeof(RVH_TARGET_REPLY);break;
         case IOCTL_RVH_REMOVE:inSize=sizeof(RVH_TARGET_REQUEST);outSize=sizeof(RVH_RESPONSE);break;
@@ -717,6 +756,7 @@ static NTSTATUS RvhControl(PIRP Irp,PIO_STACK_LOCATION Stack,PULONG_PTR Informat
     RtlZeroMemory(&target,sizeof(target));RtlZeroMemory(&reply,sizeof(reply));RtlZeroMemory(&response,sizeof(response));
     if(code==IOCTL_RVH_HELLO||code==IOCTL_RVH_QUERY_SESSION){RvhSessionReply(session,&reply);status=STATUS_SUCCESS;}
     else if(code==IOCTL_RVH_PROCESS_ADD)status=RvhAddProcess(session,(const RVH_PROCESS_ADD_REQUEST *)Irp->AssociatedIrp.SystemBuffer,&target);
+    else if(code==IOCTL_RVH_OWNER_PROTECT)status=RvhProtectOwner(session,(const RVH_OWNER_PROTECT_REQUEST *)Irp->AssociatedIrp.SystemBuffer,&target);
     else if(code==IOCTL_RVH_FILE_ADD)status=RvhAddFile(session,(const RVH_FILE_ADD_REQUEST *)Irp->AssociatedIrp.SystemBuffer,&target);
     else status=RvhTarget(session,(const RVH_TARGET_REQUEST *)Irp->AssociatedIrp.SystemBuffer,&target,code==IOCTL_RVH_REMOVE);
     if(outSize==sizeof(reply)){RvhHeader(&reply.Header,&request,session,outSize,status);RtlCopyMemory(Irp->AssociatedIrp.SystemBuffer,&reply,outSize);}

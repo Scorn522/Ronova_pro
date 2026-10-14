@@ -243,6 +243,9 @@ public final class WorldFixture {
         private LevelChunkTicks<Block> blocks;
         private LevelChunkTicks<Fluid> fluids;
         private BlockPos pos;
+        private BlockPos postPos;
+        private short postPacked;
+        private int postSection;
         private ScheduledTick<Block> heldBlock,pendingBlock,otherBlock;
         private ScheduledTick<Fluid> heldFluid;
         private Path worldRoot;
@@ -276,6 +279,16 @@ public final class WorldFixture {
                     require(!chunk.isUnsaved(),"ordinary initial save did not clean the new chunk");
                     FixtureCommands.execute(server,"region freeze "+coordinates(pos)+" "+coordinates(pos)+" 1200");
                     require(ProRuntime.worldFrozen(level,pos),"installed region freeze command did not freeze the selected position");
+                    var frozenState=level.getBlockState(pos);
+                    require(!level.setBlock(pos,Blocks.AIR.defaultBlockState(),3),"level write bypassed region freeze");
+                    require(!level.destroyBlock(pos,true),"destroy published a frozen block's effects");
+                    require(chunk.setBlockState(pos,Blocks.STONE.defaultBlockState(),false)==null,"direct chunk write bypassed region freeze");
+                    require(level.getBlockState(pos)==frozenState,"frozen block changed after rejected writes");
+                    BlockPos neighbor=pos.east();var priorNeighbor=level.getBlockState(neighbor);
+                    require(level.setBlock(neighbor,Blocks.GOLD_BLOCK.defaultBlockState(),2),"region freeze blocked an unselected neighbor");
+                    level.setBlock(neighbor,priorNeighbor,2);
+                    level.getChunkSource().save(true);
+                    require(!chunk.isUnsaved(),"neighbour setup did not establish the scheduling dirty baseline");
                     long due=level.getGameTime()+3;
                     heldBlock=new ScheduledTick<>(Blocks.OAK_SLAB,pos,due,TickPriority.HIGH,level.nextSubTickCount());
                     heldFluid=new ScheduledTick<>(Fluids.WATER,pos,due,TickPriority.VERY_HIGH,level.nextSubTickCount());
@@ -308,15 +321,32 @@ public final class WorldFixture {
                     pass("WORLD_HELD_ORDINARY_CHUNK_SAVE_STORAGE_NBT_NO_RESUME");
                     require(level.setBlock(pos.offset(3,0,3),Blocks.GLASS.defaultBlockState(),2),"real out-of-region marker change for the final save");
                     require(chunk.isUnsaved(),"real marker change did not require a final chunk save");
+                    holdPostProcessing(server);
                     next(3);
-                }else if(phase==3&&level.getGameTime()>savedAt){
+                }else if(phase==3&&level.getGameTime()>savedAt&&!ProRuntime.worldFrozen(level,postPos)){
                     active(runtime);
+                    require(level.getBlockState(postPos).getValue(BlockStateProperties.EAST)&&!chunk.getPostProcessing()[postSection].contains(postPacked),
+                            "released original postprocess item did not finish its actual shape write and consume its pending entry");
+                    pass("WORLD_POSTPROCESS_RELEASED_ORIGINAL_ITEM_CONTINUED");
                     require(chunk.isUnsaved(),"final dirty chunk was saved before normal shutdown");
                     require(blocks.getAll().anyMatch(tick->tick==pendingBlock)&&blocks.getAll().anyMatch(tick->tick==otherBlock)
                             &&blocks.getAll().noneMatch(tick->tick==heldBlock)&&fluids.getAll().noneMatch(tick->tick==heldFluid),"held save resumed or consumed the actual runtime entries");
                     stopping=true;server.halt(false);
                 }
             }catch(Throwable failure){finish(server,failure);}
+        }
+        private void holdPostProcessing(net.minecraft.server.MinecraftServer server){
+            postPos=pos.above();postPacked=net.minecraft.world.level.chunk.ProtoChunk.packOffsetCoordinates(postPos);postSection=chunk.getSectionIndex(postPos.getY());
+            require(level.setBlock(postPos.east(),Blocks.STONE.defaultBlockState(),Block.UPDATE_CLIENTS|Block.UPDATE_KNOWN_SHAPE),"place actual postprocess neighbor");
+            require(level.setBlock(postPos,Blocks.OAK_FENCE.defaultBlockState(),Block.UPDATE_CLIENTS|Block.UPDATE_KNOWN_SHAPE),"place actual pending shape carrier");
+            require(!level.getBlockState(postPos).getValue(BlockStateProperties.EAST),"pending shape was already applied before the original carrier ran");
+            chunk.addPackedPostProcess(postPacked,postSection);
+            FixtureCommands.execute(server,"region freeze "+coordinates(postPos)+" "+coordinates(postPos)+" 4");
+            chunk.postProcessGeneration();
+            require(chunk.getPostProcessing()[postSection].contains(postPacked)&&!level.getBlockState(postPos).getValue(BlockStateProperties.EAST),"frozen initial postprocess item was consumed or executed");
+            var encoded=ChunkSerializer.write(level,chunk).getList("PostProcessing",net.minecraft.nbt.Tag.TAG_LIST).getList(postSection);
+            require(encoded.stream().anyMatch(value->value instanceof net.minecraft.nbt.NumericTag number&&number.getAsShort()==postPacked),"ordinary serializer lost the frozen original postprocess item");
+            pass("WORLD_POSTPROCESS_ORIGINAL_PENDING_RETAINED_AND_SERIALIZED");
         }
         private void active(ProRuntime runtime){
             require(ProRuntime.worldFrozen(level,pos),"saving ended the actual freeze rule");

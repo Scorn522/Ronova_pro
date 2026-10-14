@@ -328,6 +328,17 @@ public final class CodeSourceBridge {
         if(AUTHORITY.getCallerClass()!=NativeControl.class||!NativeControl.executionPopPermit(token))throw new SecurityException("ACTUAL_EXECUTION_POP_REQUIRED");
         return ExecutionFlow.popped(token,normal);
     }
+    static Object[] executionRetirementFrame(Class<?> declaring,String selector,int location,Object plan,Module owner){
+        if(AUTHORITY.getCallerClass()!=NativeControl.class||!NativeControl.codeRetirementFramePermit(declaring,location,plan,owner))
+            throw new SecurityException("ACTUAL_CODE_RETIREMENT_FRAME_REQUIRED");
+        List<StackWalker.StackFrame> frames=executionStack();int at=0;
+        while(at<frames.size()&&frames.get(at).getDeclaringClass()==NativeControl.class)at++;
+        if(at==frames.size())return new Object[]{null,"EXECUTION_FRAME_UNOBSERVED"};
+        StackWalker.StackFrame actual=frames.get(at);
+        if(actual.getDeclaringClass()!=declaring||!(actual.getMethodName()+actual.getDescriptor()).equals(selector)
+                ||actual.getByteCodeIndex()!=location)return new Object[]{null,"EXECUTION_FRAME_UNOBSERVED"};
+        return ExecutionFlow.retirementFrame(plan,actual,frames.size()-at,owner);
+    }
     public static void executionReference(Object token,int instruction,Object actual){
         if(token==null)return;List<StackWalker.StackFrame> frames=executionStack();if(!frames.isEmpty())ExecutionFlow.reference(token,instruction,actual,frames.get(0),frames.size());
     }

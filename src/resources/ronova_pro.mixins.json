@@ -37,6 +37,7 @@
     "EntityHooks",
     "PresentationHooks",
     "WorldControlHooks$World",
+    "WorldControlHooks$BlockWrites",
     "WorldControlHooks$Block",
     "WorldControlHooks$Scheduled",
     "WorldControlHooks$SavedTicks",

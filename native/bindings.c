@@ -30,7 +30,7 @@ typedef struct NativeUnsafeInstall {
 } NativeUnsafeInstall;
 typedef struct Binding {jmethodID method;jweak type,origin;Owner *owner,*declared;OwnerLink *owners;NativeLibrary *library,*loading;struct HostImage *hostImage;HostLibraryLoad *hostLoad;int hostUnknown;void *original,*entry;char *signature,*fileMethod;char result;unsigned unsafeOperation,fileOperation,fileArgument,threadOperation,arraycopyOperation;const char *unsafeKind;volatile LONG active,current,valid;RUNTIME_FUNCTION unwind;struct Binding *previous,*next;} Binding;
 typedef struct NativeDefinition {jclass declaring;jobject loader;jbyteArray bytes;unsigned phase;struct NativeDefinition *previous;} NativeDefinition;
-typedef struct CodeExit {jmethodID method;jobject token;struct CodeExit *previous;} CodeExit;
+typedef struct CodeExit {jmethodID method;jobject token;jint bottom;struct CodeRetirementOwner *retirementOwner;struct CodeExit *previous;} CodeExit;
 typedef struct NativeUnsafeFrame {jobject token;uint64_t expected;struct NativeMemoryCall *memoryCall;} NativeUnsafeFrame;
 enum { UNSAFE_PUT=1,UNSAFE_CAS,UNSAFE_EXCHANGE,UNSAFE_SET,UNSAFE_COPY,UNSAFE_SWAP,UNSAFE_ALLOCATE,UNSAFE_REALLOCATE,UNSAFE_FREE,UNSAFE_READ };
 typedef struct NativeFileFrame {jobject receiver,token;jclass declaring;jstring method;jobjectArray sources,references;jlongArray arguments;jint operation;jlong address,length;int finishing;} NativeFileFrame;
@@ -50,6 +50,7 @@ typedef struct NativeThread {
     NativeToolingImage *toolingImage;struct HostCreation *processScope;struct HostProcess *processCreated;
     struct NativeToolingInvocation *toolingInvocation;struct NativeToolingDefinitionCall *definitionCall;
     struct NativeToolingSlot *heapWorkerAnchor;
+    struct CodeRetirementScope *codeRetirement;
     /* VM detach ends Java attachments, not a C callback or an OS worker. */
     struct HostThreadWorker *hostWorker;
     HostLibraryLoad *hostLoad;struct HostImage *hostUnloadImage;
@@ -106,6 +107,8 @@ static int code_current_stopped(JNIEnv *env);
 static void JNICALL code_class_prepared(jvmtiEnv *ti,JNIEnv *env,jthread thread,jclass type);
 static void JNICALL code_frame_popped(jvmtiEnv *ti,JNIEnv *env,jthread thread,jmethodID method,jboolean exceptional);
 static void code_thread_end(JNIEnv *env,NativeThread *state);
+static void JNICALL code_retirement_step(jvmtiEnv*,JNIEnv*,jthread,jmethodID,jlocation);
+static void code_retirement_thread_end(JNIEnv*,jthread);
 static int heap_initialize(void);
 static void JNICALL heap_field_modified(jvmtiEnv*,JNIEnv*,jthread,jmethodID,jlocation,jclass,jobject,jfieldID,char,jvalue);
 static void native_unsafe_classify(JNIEnv*,jclass,Binding*,const char*,const char*);
@@ -979,7 +982,7 @@ static int native_thread_java_pending(const NativeThread *state){
             ||state->depth||state->execution||state->memoryWrite||state->filePermit||state->threadPermit
             ||state->defined||state->prepared||state->changedClass||state->created||state->mutation
             ||state->popped||state->changedHolder||state->bufferAddress||state->bufferSources||state->unobservedLibrary
-            ||state->definition||state->definitionCall||state->registration||state->bindingSeed||state->unsafeMutation
+            ||state->definition||state->definitionCall||state->registration||state->bindingSeed||state->unsafeMutation||state->codeRetirement
             ||state->processScope||state->processCreated)return 1;
     for(unsigned i=0;i<128;i++){
         const NativeUnsafeFrame *unsafe=&state->unsafeFrames[i];
@@ -1069,6 +1072,7 @@ static void JNICALL native_thread_start(jvmtiEnv *api,JNIEnv *env,jthread thread
 }
 static void JNICALL native_thread_end(jvmtiEnv *api,JNIEnv *env,jthread thread){
     (void)api;(void)thread;
+    code_retirement_thread_end(env,thread);
     if(native_tls==TLS_OUT_OF_INDEXES)return;
     NativeThread *state=(NativeThread*)TlsGetValue(native_tls);if(!state)return;
     state->vmThreadEnding++;native_thread_java_end(env,state);state->vmThreadEnding--;
@@ -2137,7 +2141,7 @@ static jint native_initialize(JavaVM *vm){
     if((*native_ti)->AddCapabilities(native_ti,&caps)!=JVMTI_ERROR_NONE||!native_tooling_install(vm,native_ti))return JNI_ERR;
     jvmtiEventCallbacks callbacks;memset(&callbacks,0,sizeof(callbacks));callbacks.NativeMethodBind=native_binding;
     callbacks.ThreadStart=native_thread_start;callbacks.ThreadEnd=native_thread_end;
-    callbacks.ClassFileLoadHook=native_tooling_own_image;callbacks.ClassPrepare=code_class_prepared;callbacks.FramePop=code_frame_popped;callbacks.FieldModification=heap_field_modified;
+    callbacks.ClassFileLoadHook=native_tooling_own_image;callbacks.ClassPrepare=code_class_prepared;callbacks.FramePop=code_frame_popped;callbacks.FieldModification=heap_field_modified;callbacks.SingleStep=code_retirement_step;
     if((*native_ti)->SetEventCallbacks(native_ti,&callbacks,sizeof(callbacks))!=JVMTI_ERROR_NONE
             ||(*native_ti)->SetEventNotificationMode(native_ti,JVMTI_ENABLE,JVMTI_EVENT_NATIVE_METHOD_BIND,NULL)!=JVMTI_ERROR_NONE
             ||(*native_ti)->SetEventNotificationMode(native_ti,JVMTI_ENABLE,JVMTI_EVENT_THREAD_START,NULL)!=JVMTI_ERROR_NONE

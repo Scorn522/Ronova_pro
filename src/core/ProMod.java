@@ -100,6 +100,11 @@ public final class ProMod {
     }
     private void commands(RegisterCommandsEvent e) {
         e.getDispatcher().register(Commands.literal("ronova_pro").requires(s->s.hasPermission(2))
+            .then(Commands.literal("host").then(Commands.literal("protect-jvm")
+                .then(Commands.argument("enabled",BoolArgumentType.bool()).executes(c->{
+                    String state=ProRuntime.get(c.getSource().getServer()).hostJvmProtection(BoolArgumentType.getBool(c,"enabled"));
+                    c.getSource().sendSuccess(()->Component.literal(state),false);return 1;
+                }))))
             .then(Commands.literal("fields")
                 .then(Commands.literal("snapshot").then(Commands.argument("targets",EntityArgument.entities())
                     .executes(c->{UUID id=ProRuntime.get(c.getSource().getServer()).fieldImage(EntityArgument.getEntities(c,"targets"),false,false);c.getSource().sendSuccess(()->Component.literal("字段图采集已受理："+id),false);return 1;})

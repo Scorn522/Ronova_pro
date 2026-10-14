@@ -30,9 +30,13 @@
 #define IOCTL_RVH_REMOVE RVH_IOCTL(0x803)
 #define IOCTL_RVH_QUERY_TARGET RVH_IOCTL(0x804)
 #define IOCTL_RVH_QUERY_SESSION RVH_IOCTL(0x805)
+#define IOCTL_RVH_OWNER_PROTECT RVH_IOCTL(0x806)
 
 #define RVH_TARGET_PROCESS 1UL
 #define RVH_TARGET_FILE 2UL
+#define RVH_TARGET_OWNER_PROCESS 3UL
+#define RVH_OWNER_PROTECT_OUTSIDE_HANDLES 0x00000001UL
+#define RVH_OWNER_ALLOWED_FLAGS 0x00000001UL
 #define RVH_PROCESS_PROTECT_OUTSIDE_HANDLES 0x00000001UL
 #define RVH_PROCESS_DENY_CHILD_CREATION 0x00000002UL
 #define RVH_PROCESS_ALLOWED_FLAGS 0x00000003UL
@@ -48,6 +52,7 @@
 #define RVH_CAP_EXACT_FILE_BIND 0x0000000000000010ULL
 #define RVH_CAP_FILE_READ_WRITE 0x0000000000000020ULL
 #define RVH_CAP_NEW_EXECUTE_OPEN_DENIAL 0x0000000000000040ULL
+#define RVH_CAP_OWNER_PROCESS_HANDLES 0x0000000000000080ULL
 
 /* These paths are explicitly not controlled by this driver version. */
 #define RVH_GAP_SHARED_JVM_MOD_IDENTITY 0x0000000000000001ULL
@@ -64,7 +69,8 @@
 #define RVH_GAP_OPEN_ADMISSION_UNAVAILABLE 0x0000000000000800ULL
 #define RVH_GAP_FILE_CONTROL_SOURCE_UNAVAILABLE 0x0000000000001000ULL
 #define RVH_GAP_PREEXISTING_OFFLOAD_TOKENS 0x0000000000002000ULL
-#define RVH_BASE_GAPS 0x00000000000023FFULL
+#define RVH_GAP_KERNEL_HANDLES 0x0000000000004000ULL
+#define RVH_BASE_GAPS 0x00000000000063FFULL
 
 #define RVH_DRIVER_LOADED 1UL
 #define RVH_DRIVER_UNLOADING 2UL
@@ -72,6 +78,7 @@
 #define RVH_TARGET_PROCESS_EXITED 0x00000002UL
 #define RVH_TARGET_VOLUME_DETACHED 0x00000004UL
 #define RVH_TARGET_OWNER_EXITED 0x00000008UL
+#define RVH_TARGET_DISABLED 0x00000010UL
 
 #pragma pack(push,8)
 typedef struct RVH_SCOPE {
@@ -121,6 +128,15 @@ typedef struct RVH_PROCESS_ADD_REQUEST {
     ULONG Reserved;
 } RVH_PROCESS_ADD_REQUEST;
 
+/* This separate rule always targets the FILE_OBJECT's referenced owner process.
+ * No supplied process HANDLE, PID, Scope or Java module can select its object.
+ * Zero Effects withdraws this session's rule; it never upgrades old handles. */
+typedef struct RVH_OWNER_PROTECT_REQUEST {
+    RVH_REQUEST Header;
+    ULONG Effects;
+    ULONG Reserved;
+} RVH_OWNER_PROTECT_REQUEST;
+
 typedef struct RVH_FILE_ADD_REQUEST {
     RVH_REQUEST Header;
     ULONGLONG FileHandle; /* FILE_READ_ATTRIBUTES; an open regular file */
@@ -164,6 +180,7 @@ typedef char rvh_size_request[(sizeof(RVH_REQUEST)==32)?1:-1];
 typedef char rvh_size_response[(sizeof(RVH_RESPONSE)==32)?1:-1];
 typedef char rvh_size_session_reply[(sizeof(RVH_SESSION_REPLY)==88)?1:-1];
 typedef char rvh_size_process_add[(sizeof(RVH_PROCESS_ADD_REQUEST)==64)?1:-1];
+typedef char rvh_size_owner_protect[(sizeof(RVH_OWNER_PROTECT_REQUEST)==40)?1:-1];
 typedef char rvh_size_file_add[(sizeof(RVH_FILE_ADD_REQUEST)==72)?1:-1];
 typedef char rvh_size_target_request[(sizeof(RVH_TARGET_REQUEST)==48)?1:-1];
 typedef char rvh_size_target_reply[(sizeof(RVH_TARGET_REPLY)==152)?1:-1];

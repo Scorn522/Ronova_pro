@@ -11,7 +11,7 @@ final class ExecutionBoundary {
     private static final int CONSTRUCTOR_SITE=Integer.MIN_VALUE;
     private record Site(LabelNode label,int instruction){}
     private record UnsafeCall(String kind,int destination,int offset,int length){}
-    private record MethodData(String selector,int locals,int[] arguments,int[][] operations,Module[][] sources,String[][] fields,boolean constructor,List<Site> sites){}
+    private record MethodData(String selector,int locals,int[] arguments,int[][] operations,Module[][] sources,String[][] fields,boolean constructor,boolean retirementSafe,List<Site> sites){}
     static final class Weaving {
         final Map<String,Module[][]> owners;final IdentityHashMap<AbstractInsnNode,LabelNode> actual;private final List<MethodData> methods;
         Weaving(Map<String,Module[][]> owners,List<MethodData> methods,IdentityHashMap<AbstractInsnNode,LabelNode> actual){this.owners=Map.copyOf(owners);this.methods=List.copyOf(methods);this.actual=actual;}
@@ -21,7 +21,7 @@ final class ExecutionBoundary {
             for(int i=0;i<methods.size();i++){
                 MethodData method=methods.get(i);int[][] sites=new int[method.sites.size()][];
                 for(int j=0;j<sites.length;j++){Site site=method.sites.get(j);sites[j]=new int[]{site.label.getLabel().getOffset(),site.instruction};}
-                result[i]=new Object[]{method.selector,method.locals,method.arguments,method.operations,method.sources,sites,method.fields,method.constructor};
+                result[i]=new Object[]{method.selector,method.locals,method.arguments,method.operations,method.sources,sites,method.fields,method.constructor,method.retirementSafe};
             }
             return result;
         }
@@ -101,7 +101,22 @@ final class ExecutionBoundary {
         }
         List<Integer> arguments=new ArrayList<>();if((method.access&Opcodes.ACC_STATIC)==0)arguments.add(1);
         for(Type type:Type.getArgumentTypes(method.desc))arguments.add(type.getSize());
-        return new MethodData(method.name+method.desc,method.maxLocals,arguments.stream().mapToInt(Integer::intValue).toArray(),operations,sources,fields,constructor!=null,new ArrayList<>());
+        return new MethodData(method.name+method.desc,method.maxLocals,arguments.stream().mapToInt(Integer::intValue).toArray(),operations,sources,fields,constructor!=null,retirementSafe(method),new ArrayList<>());
+    }
+    // This is the body before our execution observer is inserted. No call can
+    // have acquired an unknown native/Java lock or opened a caller-owned scope;
+    // no business handler/finally is bypassed by the VM return. Other bodies
+    // retain natural unwinding even when their current instruction is sourced.
+    private static boolean retirementSafe(MethodNode method){
+        if(method.name.startsWith("<")||(method.access&Opcodes.ACC_SYNCHRONIZED)!=0||!method.tryCatchBlocks.isEmpty())return false;
+        for(AbstractInsnNode at:method.instructions.toArray()){
+            int op=at.getOpcode();
+            if(at instanceof MethodInsnNode||at instanceof InvokeDynamicInsnNode
+                    ||at instanceof LdcInsnNode constant&&constant.cst instanceof ConstantDynamic
+                    ||op==Opcodes.MONITORENTER||op==Opcodes.MONITOREXIT||op==Opcodes.NEW
+                    ||op==Opcodes.JSR||op==Opcodes.RET)return false;
+        }
+        return true;
     }
     private static MethodData insert(MethodNode method,MethodData plan,ConstructorFlow.Entry constructor,IdentityHashMap<AbstractInsnNode,Module[]> carried,IdentityHashMap<AbstractInsnNode,LabelNode> positions){
         AbstractInsnNode[] original=method.instructions.toArray();int token=method.maxLocals++,error=method.maxLocals++;List<Site> sites=new ArrayList<>();
@@ -166,7 +181,7 @@ final class ExecutionBoundary {
             method.instructions.add(exit(token,false,ordinal,sites));method.instructions.add(new VarInsnNode(Opcodes.ALOAD,error));method.instructions.add(new InsnNode(Opcodes.ATHROW));
             method.tryCatchBlocks.add(new TryCatchBlockNode(start,end,handler,"java/lang/Throwable"));
         }
-        return new MethodData(plan.selector,plan.locals,plan.arguments,plan.operations,plan.sources,plan.fields,plan.constructor,List.copyOf(sites));
+        return new MethodData(plan.selector,plan.locals,plan.arguments,plan.operations,plan.sources,plan.fields,plan.constructor,plan.retirementSafe,List.copyOf(sites));
     }
     private static boolean reference(Type type){return type.getSort()==Type.OBJECT||type.getSort()==Type.ARRAY;}
     private static UnsafeCall unsafeCall(MethodInsnNode call){

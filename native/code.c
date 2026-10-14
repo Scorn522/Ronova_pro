@@ -31,6 +31,7 @@ static size_t code_image_bucket_count,code_image_count;
 static CodeClass *code_classes;
 static volatile LONG code_available,code_pop_available,code_pop_failures,code_sourced;
 static jmethodID code_prepared_callback,code_pop_callback,code_root_gate;
+static jmethodID code_retirement_query;
 static jclass code_bridge;
 static jobject code_control_registry;
 static jfieldID code_control_backing;
@@ -44,6 +45,12 @@ static int code_vm_self(CodePool*,unsigned);
 static int code_vm_bootstrap(CodePool*,unsigned);
 static int code_vm_snapshot(JNIEnv*,jmethodID,CodeVMMethod*,CodePool*,const char*,const char*);
 static int code_vm_unchanged(jmethodID,CodeVMMethod*);
+static void code_retirement_initialize(void);
+static int code_retirement_candidate(JNIEnv*,jmethodID,jobject);
+static int code_retirement_observed(JNIEnv*,jmethodID,jlocation,jobject,int*);
+static void code_retirement_state(JNIEnv*,jobject,jlong*);
+static void code_retirement_popped(JNIEnv*,jthread,jmethodID,jint,int);
+static void code_retirement_exit_observed(struct CodeRetirementOwner*,int);
 static uint32_t code_u(CodeCursor *cursor,unsigned size){
     if(!cursor->valid||size>(size_t)(cursor->end-cursor->at)){cursor->valid=0;return 0;}uint32_t value=0;for(unsigned i=0;i<size;i++)value=(value<<8)|*cursor->at++;return value;
 }
@@ -339,13 +346,14 @@ static int code_initialize(void){
     memset(&capabilities,0,sizeof(capabilities));capabilities.can_generate_frame_pop_events=1;
     int pops=(*native_ti)->AddCapabilities(native_ti,&capabilities)==JVMTI_ERROR_NONE
             &&(*native_ti)->SetEventNotificationMode(native_ti,JVMTI_ENABLE,JVMTI_EVENT_FRAME_POP,NULL)==JVMTI_ERROR_NONE;
-    InterlockedExchange(&code_pop_available,pops);return ready;
+    InterlockedExchange(&code_pop_available,pops);code_retirement_initialize();return ready;
 }
 static int code_prepare(JNIEnv *env){
     // Heap/JNI observers can run as soon as their hooks are published, before
     // the first producer class supplies a code image.
     if(!code_prepared_callback)code_prepared_callback=native_original.GetStaticMethodID(env,native_controller,"codePrepared","(Ljava/lang/Class;)V");
     if(!code_pop_callback)code_pop_callback=native_original.GetStaticMethodID(env,native_controller,"executionPopped","(Ljava/lang/Object;Z)Z");
+    if(!code_retirement_query)code_retirement_query=native_original.GetStaticMethodID(env,native_controller,"codeRetirementFrame","(Ljava/lang/Class;Ljava/lang/String;ILjava/lang/Object;Ljava/lang/Module;)[Ljava/lang/Object;");
     if(!code_root_gate)code_root_gate=native_original.GetStaticMethodID(env,native_controller,"executionRootCaller","()Z");
     if(!code_bridge||!code_control_registry){
         jclass bridge=native_original.FindClass(env,"dev/ronova/pro/bootstrap/CodeSourceBridge");
@@ -366,7 +374,7 @@ static int code_prepare(JNIEnv *env){
         if(actual)native_original.DeleteLocalRef(env,actual);if(registry)native_original.DeleteLocalRef(env,registry);
         if(bridge)native_original.DeleteLocalRef(env,bridge);if(map)native_original.DeleteLocalRef(env,map);
     }
-    return code_bridge&&code_prepared_callback&&code_pop_callback&&code_root_gate
+    return code_bridge&&code_prepared_callback&&code_pop_callback&&code_retirement_query&&code_root_gate
             &&code_control_registry&&code_control_backing&&!native_original.ExceptionCheck(env);
 }
 /* Inspect this invocation's actual Java/native method frames without a Java
@@ -477,20 +485,21 @@ static int code_method_relevant(JNIEnv *env,jmethodID method,jobject module){
 }
 JNIEXPORT jlongArray JNICALL Java_dev_ronova_pro_bootstrap_NativeControl_codeState0(JNIEnv *env,jclass type,jobject module){
     (void)type;if(!native_jni_ready||!native_original.CallStaticBooleanMethod(env,native_controller,native_control_gate)){native_refuse(env,"ACTUAL_CODE_STATE_AGENT_REQUIRED");return NULL;}
-    jlong values[5]={code_available,0,0,code_pop_available,code_pop_failures};jint count=0;jthread *threads=NULL;
+    jlong values[19]={code_available,0,0,code_pop_available,code_pop_failures};jint count=0;jthread *threads=NULL;
     if(code_available&&(*native_ti)->GetAllThreads(native_ti,&count,&threads)==JVMTI_ERROR_NONE){
         for(jint i=0;i<count;i++){
             jvmtiFrameInfo *frames=NULL;jint depth=0;
             if(code_trace(threads[i],&frames,&depth))for(jint j=0;j<depth;j++){
-                if(frames[j].location<0||!code_method_relevant(env,frames[j].method,module))continue;OwnerLink *owners=NULL;int known=0,unknown=0;
-                if(!code_frame_sources_query(env,frames[j].method,frames[j].location,&owners,&known,&unknown))values[2]++;
-                else {if(owners&&native_owner_matches(env,owners,module))values[1]++;if(unknown)values[2]++;}code_links_free(owners);
+                if(!code_retirement_candidate(env,frames[j].method,module))continue;int unknown=0;
+                if(code_retirement_observed(env,frames[j].method,frames[j].location,module,&unknown))values[1]++;
+                if(unknown)values[2]++;
             }
             else {jint state=0;if((*native_ti)->GetThreadState(native_ti,threads[i],&state)!=JVMTI_ERROR_NONE||(state&JVMTI_THREAD_STATE_ALIVE))values[2]++;}
             free(frames);native_original.DeleteLocalRef(env,threads[i]);
         }(*native_ti)->Deallocate(native_ti,(unsigned char*)threads);
     }else if(code_available)values[2]++;
-    jlongArray result=native_original.NewLongArray(env,5);if(result)native_original.SetLongArrayRegion(env,result,0,5,values);return result;
+    code_retirement_state(env,module,values);
+    jlongArray result=native_original.NewLongArray(env,19);if(result)native_original.SetLongArrayRegion(env,result,0,19,values);return result;
 }
 static int code_class_matches(JNIEnv *env,CodeImage *image,jclass actual,jobject loader,const char *signature){
     // The caller holds code_records shared. This image's chain only narrows
@@ -920,7 +929,7 @@ JNIEXPORT jboolean JNICALL Java_dev_ronova_pro_bootstrap_NativeControl_execution
             int matched=recorded&&native_original.IsSameObject(env,recorded,plan);if(recorded)native_original.DeleteLocalRef(env,recorded);
             if(!matched)break;
             CodeExit *entry=(CodeExit*)calloc(1,sizeof(*entry));if(!entry)break;
-            entry->method=frames[i].method;entry->token=native_original.NewGlobalRef(env,token);
+            entry->method=frames[i].method;entry->bottom=count-i;entry->token=native_original.NewGlobalRef(env,token);
             if(entry->token&&(*native_ti)->NotifyFramePop(native_ti,thread,i)==JVMTI_ERROR_NONE){entry->previous=state->execution;state->execution=entry;result=JNI_TRUE;}
             else{if(entry->token)native_original.DeleteGlobalRef(env,entry->token);free(entry);}
             break;
@@ -931,27 +940,46 @@ JNIEXPORT jboolean JNICALL Java_dev_ronova_pro_bootstrap_NativeControl_execution
 failed:
     if(!result)InterlockedIncrement(&code_pop_failures);return result;
 }
-static void code_exit_dispatch(JNIEnv *env,NativeThread *state,CodeExit *entry,jboolean normal){
+static int code_exit_dispatch(JNIEnv *env,NativeThread *state,CodeExit *entry,jboolean normal){
+    if(!entry->token){SecureZeroMemory(entry,sizeof(*entry));free(entry);return 1;}
     jthrowable pending=native_original.ExceptionOccurred(env);if(pending)native_original.ExceptionClear(env);
     jobject previous=state->popped;state->popped=entry->token;state->control++;
     jboolean closed=native_original.CallStaticBooleanMethod(env,native_controller,code_pop_callback,entry->token,normal);
     state->control--;state->popped=previous;
-    if(native_original.ExceptionCheck(env)){native_original.ExceptionClear(env);InterlockedIncrement(&code_pop_failures);}
+    if(native_original.ExceptionCheck(env)){native_original.ExceptionClear(env);InterlockedIncrement(&code_pop_failures);closed=JNI_FALSE;}
     else if(!closed)InterlockedIncrement(&code_pop_failures);
     if(pending){native_original.Throw(env,pending);native_original.DeleteLocalRef(env,pending);}
-    native_original.DeleteGlobalRef(env,entry->token);SecureZeroMemory(entry,sizeof(*entry));free(entry);
+    native_original.DeleteGlobalRef(env,entry->token);SecureZeroMemory(entry,sizeof(*entry));free(entry);return closed==JNI_TRUE;
 }
 static void JNICALL code_frame_popped(jvmtiEnv *ti,JNIEnv *env,jthread thread,jmethodID method,jboolean exceptional){
-    (void)ti;(void)thread;if(!native_jni_ready||!code_pop_callback||native_tls==TLS_OUT_OF_INDEXES)return;
-    NativeThread *state=(NativeThread*)TlsGetValue(native_tls);if(!state||!state->execution)return;
-    CodeExit *entry=state->execution;if(entry->method!=method){InterlockedIncrement(&code_pop_failures);return;}
-    state->execution=entry->previous;code_exit_dispatch(env,state,entry,exceptional?JNI_FALSE:JNI_TRUE);
+    (void)ti;if(!native_jni_ready||!code_pop_callback||native_tls==TLS_OUT_OF_INDEXES)return;
+    jint bottom=0;if((*native_ti)->GetFrameCount(native_ti,thread,&bottom)!=JVMTI_ERROR_NONE){InterlockedIncrement(&code_pop_failures);return;}
+    NativeThread *state=(NativeThread*)TlsGetValue(native_tls);int closed=1;
+    if(state){
+        // A watcher may legitimately belong to an outer constructor while a
+        // framework wait returns. A watcher at a deeper/equal different frame
+        // cannot: keep that lost source completion visible instead of closing
+        // an unrelated recursive invocation's token.
+        for(CodeExit *entry=state->execution;entry;entry=entry->previous)
+            if(entry->bottom>bottom||(entry->bottom==bottom&&entry->method!=method)){InterlockedIncrement(&code_pop_failures);closed=0;break;}
+        CodeExit **slot=&state->execution;
+        while(*slot&&((*slot)->method!=method||(*slot)->bottom!=bottom))slot=&(*slot)->previous;
+        if(*slot){CodeExit *entry=*slot;*slot=entry->previous;struct CodeRetirementOwner *retired=entry->retirementOwner;
+            int dispatched=code_exit_dispatch(env,state,entry,retired||exceptional?JNI_FALSE:JNI_TRUE);closed=closed&&dispatched;
+            if(retired)code_retirement_exit_observed(retired,closed);
+        }
+    }
+    // A wait on a framework frame has no source token. Its real return only
+    // rearms this same thread; it does not authorize skipping that framework.
+    code_retirement_popped(env,thread,method,bottom,closed);
 }
 static void code_thread_end(JNIEnv *env,NativeThread *state){
     while(state->execution){CodeExit *entry=state->execution;state->execution=entry->previous;
+        if(entry->retirementOwner)code_retirement_exit_observed(entry->retirementOwner,0);
         InterlockedIncrement(&code_pop_failures);code_exit_dispatch(env,state,entry,JNI_FALSE);
     }
 }
+#include "code_retirement.c"
 JNIEXPORT jboolean JNICALL Java_dev_ronova_pro_bootstrap_NativeControl_executionPopPermit0(JNIEnv *env,jclass controller,jobject token){
     (void)controller;NativeThread *state=native_thread();
     return state&&state->popped&&code_caller(env)

@@ -28,7 +28,7 @@ public final class ControlBridge {
         }
     };
     private ControlBridge() { }
-    public static int abiVersion(){return 76;}
+    public static int abiVersion(){return 77;}
     public static long arrayRevision(Object value){if(!recoveryWriter())throw new SecurityException("RECOVERY_ARRAY_READER_REQUIRED");return CodeSourceBridge.executionArrayRevision(value);}
 
     public static synchronized void install(Class<?> agent,ClassFileTransformer[] transformers) throws ReflectiveOperationException {
@@ -827,7 +827,7 @@ public final class ControlBridge {
             "registerConsoleInput","beginConsoleCommand","endConsoleCommand","consoleDispatchTrusted",
             "clearProtectedMap","unsafeWriteAllowed","unsafeMemoryAllowed",
             "nativeArrayElementAllowed","nativePrimitiveArrayPolicy","nativeArrayPointerAllowed","nativeArrayCopyInternal","nativeRegistrationAllowed","nativeRegistrationTargetAllowed","nativeHeapTargetAllowed","arrayWriteAllowed",
-            "resourceReleaseAllowed","lifeResult","dispatchAllowed","dispatchDeniedResult","equipmentActionSourceAllowed","taskEffectAllowed",
+            "resourceReleaseAllowed","lifeResult","dispatchAllowed","dispatchDeniedResult","equipmentActionSourceAllowed","beginEquipmentInvocation","equipmentInvocationDenied","equipmentInvocationResult","endEquipmentInvocation","failedEquipmentInvocation","taskEffectAllowed",
             "resultPublicationAllowed");
     static boolean controlCaller() {
         // The query omits guard entry points, preserving the real ledger writer.
@@ -2189,14 +2189,57 @@ public final class ControlBridge {
         try{return (Object)result.invokeExact(receiver,operation,arguments);}
         catch(Throwable failure){throw new IllegalStateException("DISPATCH_RESULT_POLICY_FAILED",failure);}
     }
+    record EquipmentInvocations(java.lang.invoke.MethodHandle begin,java.lang.invoke.MethodHandle denied,
+            java.lang.invoke.MethodHandle result,java.lang.invoke.MethodHandle end,java.lang.invoke.MethodHandle failed) { }
+    static volatile EquipmentInvocations equipmentInvocations;
+    public static synchronized void installEquipmentActions(Class<?> owner,java.lang.invoke.MethodHandle begin,java.lang.invoke.MethodHandle denied,
+            java.lang.invoke.MethodHandle result,java.lang.invoke.MethodHandle end,java.lang.invoke.MethodHandle failed) {
+        requirePolicyInstaller();if(guards==null||guards.owner()!=owner)throw new SecurityException("EQUIPMENT_INVOCATION_OWNER");
+        var next=new EquipmentInvocations(
+                Objects.requireNonNull(begin).asType(java.lang.invoke.MethodType.methodType(Object.class,Object.class,Object.class,String.class)),
+                Objects.requireNonNull(denied).asType(java.lang.invoke.MethodType.methodType(boolean.class,Object.class)),
+                Objects.requireNonNull(result).asType(java.lang.invoke.MethodType.methodType(Object.class,Object.class,String.class,Object.class)),
+                Objects.requireNonNull(end).asType(java.lang.invoke.MethodType.methodType(void.class,Object.class)),
+                Objects.requireNonNull(failed).asType(java.lang.invoke.MethodType.methodType(void.class,Object.class,Throwable.class)));
+        equipmentInvocations=next;
+    }
+    public static Object beginEquipmentInvocation(Object receiver,Object arguments,String operation) {
+        var callbacks=equipmentInvocations;if(callbacks==null)return null;
+        try{return (Object)callbacks.begin.invokeExact(receiver,arguments,operation);}
+        catch(Throwable failure){throw new IllegalStateException("EQUIPMENT_INVOCATION_BEGIN_FAILED",failure);}
+    }
+    public static boolean equipmentInvocationDenied(Object token) {
+        var callbacks=equipmentInvocations;if(callbacks==null)return false;
+        try{return (boolean)callbacks.denied.invokeExact(token);}
+        catch(Throwable failure){throw new IllegalStateException("EQUIPMENT_INVOCATION_GATE_FAILED",failure);}
+    }
+    public static Object equipmentInvocationResult(Object receiver,String operation,Object arguments) {
+        var callbacks=equipmentInvocations;if(callbacks==null)throw new IllegalStateException("EQUIPMENT_INVOCATION_POLICY_UNAVAILABLE");
+        try{return (Object)callbacks.result.invokeExact(receiver,operation,arguments);}
+        catch(Throwable failure){throw new IllegalStateException("EQUIPMENT_INVOCATION_RESULT_FAILED",failure);}
+    }
+    public static void endEquipmentInvocation(Object token) {
+        var callbacks=equipmentInvocations;if(callbacks==null)return;
+        try{callbacks.end.invokeExact(token);}
+        catch(RuntimeException|Error failure){throw failure;}
+        catch(Throwable failure){throw new IllegalStateException("EQUIPMENT_INVOCATION_END_FAILED",failure);}
+    }
+    public static void failedEquipmentInvocation(Object token,Throwable failure) {
+        var callbacks=equipmentInvocations;if(callbacks==null)return;
+        try{callbacks.failed.invokeExact(token,failure);}
+        catch(Throwable cleanup){if(cleanup!=failure)failure.addSuppressed(cleanup);}
+    }
     /** Existing source continuity is a condition of an exact game action, never an input credential. */
     public static boolean equipmentActionSourceAllowed() {
-        return equipmentActionSourcesAllowed(WALKER.getCallerClass(),null);
+        return equipmentActionSourcesAllowed(WALKER.getCallerClass(),null,null);
     }
     public static boolean equipmentActionSourceAllowed(Class<?> delegatedItem) {
-        return equipmentActionSourcesAllowed(WALKER.getCallerClass(),delegatedItem);
+        return equipmentActionSourcesAllowed(WALKER.getCallerClass(),null,delegatedItem);
     }
-    private static boolean equipmentActionSourcesAllowed(Class<?> caller,Class<?> delegatedItem) {
+    public static boolean equipmentActionSourceAllowed(Class<?> gameMode,Class<?> delegatedItem) {
+        return equipmentActionSourcesAllowed(WALKER.getCallerClass(),gameMode,delegatedItem);
+    }
+    private static boolean equipmentActionSourcesAllowed(Class<?> caller,Class<?> gameMode,Class<?> delegatedItem) {
         Guards current=guards;
         if(current==null||!caller.getName().equals("dev.ronova.pro.EquipmentPolicy")
                 ||caller.getClassLoader()!=current.owner().getClassLoader()||DefinitionBridge.module(caller)!=current.owner().getModule()
@@ -2204,14 +2247,15 @@ public final class ControlBridge {
             throw new SecurityException("EQUIPMENT_ACTION_SOURCE_OWNER");
         if(sourceUnknown())return false;
         Module delegate=delegatedItem==null?null:DefinitionBridge.module(delegatedItem);
-        for(Module source:scopedSources())if(source==null||producer(source)&&source!=current.owner().getModule()&&source!=delegate)return false;
+        Module game=gameMode==null?null:DefinitionBridge.module(gameMode);
+        for(Module source:scopedSources())if(source==null||producer(source)&&source!=current.owner().getModule()&&source!=delegate&&source!=game)return false;
         return ORIGIN_WALKER.walk(frames->{var cursor=frames.iterator();while(cursor.hasNext()) {
             var frame=cursor.next();Class<?> type=frame.getDeclaringClass();
             if(ownState(type)||ControlBridge.owns(type))continue;
             for(Module source:CodeSourceBridge.frameSources(frame))
-                if(source==null||producer(source)&&source!=current.owner().getModule()&&source!=delegate)return false;
+                if(source==null||producer(source)&&source!=current.owner().getModule()&&source!=delegate&&source!=game)return false;
             Module physical=DefinitionBridge.module(type);
-            if(producer(physical)&&physical!=current.owner().getModule()&&physical!=delegate)return false;
+            if(producer(physical)&&physical!=current.owner().getModule()&&physical!=delegate&&physical!=game)return false;
         }return true;});
     }
     static boolean taskEffectAllowed(Guards current,Object task,String effect) {

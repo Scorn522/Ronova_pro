@@ -28,6 +28,16 @@ public final class DefenseFixture {
     private int actionPhase,actionAttackCalls;private boolean actionMiningProbe,actionProbing;
     private ItemStack actionTool;private BlockPos actionMine,actionOther;private float actionVictimHealth;
     private Throwable actionCallbackFailure;
+    private ActionGameMode actionGameMode;
+    /** Standard override bodies must enter only for the real player driver and preserve super dispatch. */
+    private static final class ActionGameMode extends ServerPlayerGameMode {
+        int ticks,digs,destroys;
+        ActionGameMode(ServerPlayer player){super(player);}
+        @Override public void tick(){ticks++;super.tick();}
+        @Override public void handleBlockBreakAction(BlockPos pos,net.minecraft.network.protocol.game.ServerboundPlayerActionPacket.Action action,
+                net.minecraft.core.Direction direction,int height,int sequence){digs++;super.handleBlockBreakAction(pos,action,direction,height,sequence);}
+        @Override public boolean destroyBlock(BlockPos pos){destroys++;return super.destroyBlock(pos);}
+    }
     public DefenseFixture() {
         MinecraftForge.EVENT_BUS.addListener(EventPriority.HIGHEST,this::tick);
         MinecraftForge.EVENT_BUS.addListener(EventPriority.NORMAL,this::entered);
@@ -189,9 +199,11 @@ public final class DefenseFixture {
             unsafe.putInt(mode,start,previousStart-1000);unsafe.putInt(mode,ticks,previousTicks+1000);
             require(unsafe.getBoolean(mode,delayed)&&unsafe.getObject(mode,pos)==previousPos&&unsafe.getInt(mode,start)==previousStart
                     &&unsafe.getInt(mode,ticks)==previousTicks,"foreign BreakSpeed callback changed live GameMode mining fields");
-            mode.tick();require(unsafe.getInt(mode,ticks)==previousTicks,"foreign BreakSpeed callback recursively advanced GameMode tick");
+            int overrideTicks=actionGameMode.ticks,overrideDestroys=actionGameMode.destroys;
+            mode.tick();require(unsafe.getInt(mode,ticks)==previousTicks&&actionGameMode.ticks==overrideTicks,"foreign BreakSpeed callback entered custom GameMode tick");
             require(!mode.destroyBlock(actionOther)&&player.serverLevel().getBlockState(actionOther).is(Blocks.STONE),
                     "foreign BreakSpeed callback borrowed destroyBlock for another target");
+            require(actionGameMode.destroys==overrideDestroys,"foreign BreakSpeed callback entered custom destroyBlock before its super gate");
             require(actionTool.getDamageValue()==damage,"foreign BreakSpeed callback borrowed delayed tool lease");actionMiningProbe=true;
         }catch(Throwable failure){if(actionCallbackFailure==null)actionCallbackFailure=failure;}finally{actionProbing=false;}
     }
@@ -212,6 +224,10 @@ public final class DefenseFixture {
                 actionMine=floor.offset(1,1,0);actionOther=floor.offset(-1,1,0);
                 level.setBlock(actionMine,Blocks.STONE.defaultBlockState(),3);level.setBlock(actionOther,Blocks.STONE.defaultBlockState(),3);
                 player.setGameMode(GameType.SURVIVAL);player.connection.teleport(bx+.5,floor.getY()+1,bz+.5,0,0);
+                actionGameMode=new ActionGameMode(player);
+                java.lang.reflect.Field modeField;
+                try{modeField=ServerPlayer.class.getDeclaredField("gameMode");}catch(NoSuchFieldException production){modeField=ServerPlayer.class.getDeclaredField("f_8941_");}
+                var modeUnsafe=equipmentUnsafe();modeUnsafe.putObject(player,modeUnsafe.objectFieldOffset(modeField),actionGameMode);
                 cow=noHealCow(level,bx+.5,floor.getY()+1,bz+2.5);neighbour=noHealCow(level,bx+2.5,floor.getY()+1,bz+2.5);
                 actionVictimHealth=cow.getHealth();actionTool=new ItemStack(Items.WOODEN_PICKAXE);player.setItemSlot(EquipmentSlot.MAINHAND,actionTool);
                 ItemStack ordinary=new ItemStack(Items.WOODEN_PICKAXE);neighbour.setItemSlot(EquipmentSlot.MAINHAND,ordinary);
@@ -226,6 +242,7 @@ public final class DefenseFixture {
                 // Actual DiggerItem.mineBlock consumes one durability for nonzero-hardness stone.
                 require(actionMiningProbe&&player.getMainHandItem()==actionTool&&actionTool.getDamageValue()==3,
                         "real early STOP did not finish through delayed GameMode tick: probe="+actionMiningProbe+" damage="+actionTool.getDamageValue());
+                require(actionGameMode.ticks>0&&actionGameMode.digs>=2&&actionGameMode.destroys>0,"real GameMode overrides did not continue through their super implementations");
                 require(level.getBlockState(actionOther).is(Blocks.STONE),"callback changed neighbouring block");
                 FixtureCommands.revoke(runtime,player);actionTool.setDamageValue(0);require(actionTool.getDamageValue()==0,"release retained tool field guard");
                 require(player.gameMode.destroyBlock(actionOther)&&level.getBlockState(actionOther).isAir()&&actionTool.getDamageValue()==1,

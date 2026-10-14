@@ -91,7 +91,7 @@ public final class RecoveryAgent {
             bootstrap=new JarFile(Path.of(argument).toAbsolutePath().normalize().toFile());
             api.appendToBootstrapClassLoaderSearch(bootstrap);
             bridge=Class.forName("dev.ronova.pro.bootstrap.TaskBridge",true,null);
-            if(!Integer.valueOf(76).equals(bridge.getMethod("abiVersion").invoke(null)))throw new IllegalStateException("TASK_BRIDGE_ABI_MISMATCH");
+            if(!Integer.valueOf(77).equals(bridge.getMethod("abiVersion").invoke(null)))throw new IllegalStateException("TASK_BRIDGE_ABI_MISMATCH");
             Class.forName("dev.ronova.pro.bootstrap.SourceMapBridge",true,null);
             // Default-Map guards test UUID keys while class-loading maps are
             // active. Resolve that type before publishing the guarded methods.
@@ -105,7 +105,7 @@ public final class RecoveryAgent {
             // libinstrument is filling that frame's class bytes through JNI.
             for(String helper:List.of("Key","OwnerRef","Gate","Scope","Frame","ConcurrentFrame","Refused"))
                 Class.forName("dev.ronova.pro.bootstrap.SourceMapBridge$"+helper,true,null);
-            for(String helper:List.of("SourcePublication","SourceIndexMutation","FastListView","FieldMutation"))
+            for(String helper:List.of("SourcePublication","SourceIndexMutation","FastListView","FieldMutation","EquipmentInvocations"))
                 Class.forName("dev.ronova.pro.bootstrap.ControlBridge$"+helper,true,null);
             // A JNI observation uses this exact family's mutually referring metadata.
             // Define its direct member classes without initializing them before that
@@ -132,7 +132,7 @@ public final class RecoveryAgent {
             Class.forName("dev.ronova.pro.bootstrap.ControlBridge$ProducerFrame",false,null);
             Class.forName("dev.ronova.pro.bootstrap.EventFaultBridge",true,null);
             Class<?> control=Class.forName("dev.ronova.pro.bootstrap.ControlBridge",true,null);
-            if(!Integer.valueOf(76).equals(control.getMethod("abiVersion").invoke(null)))throw new IllegalStateException("CONTROL_BRIDGE_ABI_MISMATCH");
+            if(!Integer.valueOf(77).equals(control.getMethod("abiVersion").invoke(null)))throw new IllegalStateException("CONTROL_BRIDGE_ABI_MISMATCH");
             Module base=Object.class.getModule(),ours=RecoveryAgent.class.getModule();
             api.redefineModule(base,Set.of(bridge.getModule()),Map.of(
                     "jdk.internal.org.objectweb.asm",Set.of(ours),"jdk.internal.org.objectweb.asm.commons",Set.of(ours),
@@ -316,6 +316,8 @@ public final class RecoveryAgent {
                         api.redefineModule(module,Set.of(bridge.getModule()),Map.of(),Map.of(),Set.of(),Map.of());
                     byte[] dispatch=DispatchBoundary.transform(loader,name,type,initial);
                     byte[] current=dispatch==null?initial:dispatch;
+                    byte[] equipment=EquipmentActionBoundary.transform(loader,name,type,current);
+                    if(equipment!=null)current=equipment;
                     if(loader==null) {
                         if(current!=bytes&&module!=null&&!module.canRead(bridge.getModule()))
                             api.redefineModule(module,Set.of(bridge.getModule()),Map.of(),Map.of(),Set.of(),Map.of());
@@ -543,6 +545,14 @@ public final class RecoveryAgent {
     public static boolean declareDispatchArgumentsTarget(Class<?> owner,String methodName,String descriptor) {
         controlImages.declare(owner);
         return DispatchBoundary.declare(owner,methodName,descriptor,true);
+    }
+    /** Full invocation lifetime for exact equipment action contracts and their real overrides. */
+    public static boolean declareEquipmentActionTarget(Class<?> owner,String methodName,String descriptor,String operation) {
+        Class<?> caller=CALLER.getCallerClass(),runtime=modGroupRuntime;
+        if(runtime==null||!caller.getName().equals("dev.ronova.pro.EquipmentPolicy")||caller.getClassLoader()!=runtime.getClassLoader()
+                ||caller.getModule()!=runtime.getModule()||!Objects.equals(caller.getProtectionDomain().getCodeSource(),runtime.getProtectionDomain().getCodeSource()))throw new SecurityException("EQUIPMENT_ACTION_DECLARATION_OWNER");
+        controlImages.declare(owner);
+        return EquipmentActionBoundary.declare(owner,methodName,descriptor,operation);
     }
     /** The declaration state, so a caller can tell "covered" from "nothing declared yet". */
     public static String dispatchState() {
@@ -825,6 +835,7 @@ public final class RecoveryAgent {
         Instrumentation api=instrumentation;
         if(api==null)throw new IllegalStateException("AGENT_NOT_INSTALLED");
         DispatchBoundary.retransformDeclared(api);
+        EquipmentActionBoundary.retransformDeclared(api);
         var missing=DispatchBoundary.missingPrimaryEntries();
         if(!missing.isEmpty())report("DISPATCH_PRIMARY_UNCOVERED:"+String.join(",",missing));
     }

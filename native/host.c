@@ -128,6 +128,12 @@ typedef struct HostCreation {OwnerLink *owners;HostProcess *created;struct HostC
 static SRWLOCK host_records=SRWLOCK_INIT;
 static CONDITION_VARIABLE host_changed=CONDITION_VARIABLE_INIT;
 static HostProcess *host_processes;
+/* Whole JVM policy, independent of every child process's Java Mod sources.
+ * Accessed under host_records; a read never selects or opens the backend. */
+static int host_jvm_owner_desired,host_jvm_owner_pending;
+static DWORD host_jvm_owner_error;
+static LONG host_jvm_owner_status;
+static RVH_TARGET_REPLY host_jvm_owner_observed;
 static uint64_t host_next_token,host_next_kernel_file;
 static HostCreateProcessW host_original_create;
 static HostProcessCreate host_original_process;
@@ -333,8 +339,28 @@ static void host_collect(HostProcess *process){
             ||!host_close(&process->job,&process->error))return;
     process->retired=1;process->error=0;
 }
-/* Called with host_records held; status reads never create a new session. */
+static void host_kernel_owner_refresh(int observation){
+    ULONG effects=host_jvm_owner_desired?RVH_OWNER_PROTECT_OUTSIDE_HANDLES:0;
+    if(observation){
+        if(!host_kernel_owner_current(effects)){
+            SecureZeroMemory(&host_jvm_owner_observed,sizeof(host_jvm_owner_observed));
+            if(host_jvm_owner_desired)host_jvm_owner_pending=1;
+            return;
+        }
+    }else{
+        if(!host_jvm_owner_pending&&host_kernel_owner_current(effects))return;
+        if(!host_jvm_owner_desired&&!host_jvm_owner_pending&&!host_jvm_owner_observed.Effects)return;
+    }
+    HostKernelResult result={0};RVH_TARGET_REPLY reply={0};
+    int ready=observation?host_kernel_owner_observe(&reply,&result):host_kernel_owner_apply(effects,&reply,&result);
+    host_jvm_owner_observed=reply;host_jvm_owner_pending=!ready;
+    host_jvm_owner_error=result.error;host_jvm_owner_status=result.status;
+}
+/* Called with host_records held. Only a previously selected owner policy can
+ * reopen the backend; merely reading status cannot select this process. */
 static void host_kernel_close_idle(void){
+    host_kernel_owner_refresh(0);
+    if(host_jvm_owner_desired||host_jvm_owner_pending)return;
     for(HostProcess *process=host_processes;process;process=process->next){
         if(process->creating)return;
         if(!process->exited&&host_kernel_effects(process))return;
@@ -353,6 +379,7 @@ static DWORD WINAPI host_worker(LPVOID argument){
         int pending=0;
         for(HostProcess *process=host_processes;process;process=process->next){host_collect(process);pending|=!process->retired;}
         host_kernel_close_idle();
+        pending|=host_jvm_owner_desired||host_jvm_owner_pending;
         SleepConditionVariableSRW(&host_changed,&host_records,pending?1000:INFINITE,0);
     }
 }
@@ -1796,6 +1823,19 @@ static int host_kernel_sources_contain(JNIEnv *env,jobjectArray selected,OwnerLi
         }if(!found)return 0;
     }return !native_original.ExceptionCheck(env);
 }
+static void JNICALL host_kernel_owner_protect0(JNIEnv *env,jclass type,jboolean protect){
+    if(!native_controller||!native_original.IsSameObject(env,type,native_controller))return;
+    jmethodID gate=native_original.GetStaticMethodID(env,native_controller,"hostKernelCoreCaller","()Z");
+    if(!gate||!native_original.CallStaticBooleanMethod(env,native_controller,gate)){
+        native_refuse(env,"HOST_KERNEL_OWNER_ACTUAL_CORE_REQUIRED");return;
+    }
+    if(protect&&!host_worker_ready()){
+        native_refuse(env,"HOST_KERNEL_OWNER_MAINTENANCE_UNAVAILABLE");return;
+    }
+    AcquireSRWLockExclusive(&host_records);
+    host_jvm_owner_desired=protect?1:0;host_jvm_owner_pending=1;
+    host_kernel_close_idle();WakeConditionVariable(&host_changed);ReleaseSRWLockExclusive(&host_records);
+}
 static void JNICALL host_kernel_protect0(JNIEnv *env,jclass type,jobject module,jboolean protect){
     (void)type;jmethodID gate=native_controller?native_original.GetStaticMethodID(env,native_controller,"hostKernelCoreCaller","()Z"):NULL;
     if(!gate||!native_original.CallStaticBooleanMethod(env,native_controller,gate)){
@@ -1854,8 +1894,14 @@ static jlongArray JNICALL host_kernel_state0(JNIEnv *env,jclass type,jobject mod
         jmethodID core=native_original.GetStaticMethodID(env,native_controller,"hostKernelCoreCaller","()Z");
         if(!core||!native_original.CallStaticBooleanMethod(env,native_controller,core)){native_refuse(env,"HOST_KERNEL_CONTROL_STATE_REQUIRED");return NULL;}
     }
-    int64_t raw[17]={0};host_kernel_state(raw);jlong values[21]={0};for(unsigned index=0;index<17;index++)values[index]=(jlong)raw[index];
+    int64_t raw[17]={0};jlong values[30]={0};
     AcquireSRWLockExclusive(&host_records);
+    host_kernel_owner_refresh(1);host_kernel_state(raw);
+    if(!raw[0]){
+        SecureZeroMemory(&host_jvm_owner_observed,sizeof(host_jvm_owner_observed));
+        if(host_jvm_owner_desired){host_jvm_owner_pending=1;host_jvm_owner_error=(DWORD)raw[4];host_jvm_owner_status=(LONG)raw[5];}
+    }
+    for(unsigned index=0;index<17;index++)values[index]=(jlong)raw[index];
     for(HostProcess *process=host_processes;process;process=process->next){
         if(module&&!native_owner_matches(env,process->owners,module))continue;
         if(process->kernelTarget.witness||process->kernelTarget.targetId)values[17]++;
@@ -1864,8 +1910,14 @@ static jlongArray JNICALL host_kernel_state0(JNIEnv *env,jclass type,jobject mod
         if(!process->retired&&!host_kernel_effects(process))for(OwnerLink *link=process->owners;link;link=link->next)
             if(InterlockedCompareExchange(&link->owner->kernelProtected,0,0)){values[20]++;break;}
     }
+    values[21]=host_jvm_owner_desired;
+    values[22]=host_jvm_owner_observed.Effects==RVH_OWNER_PROTECT_OUTSIDE_HANDLES
+            &&host_jvm_owner_observed.State==RVH_TARGET_ACTIVE&&!host_jvm_owner_pending;
+    values[23]=(jlong)host_jvm_owner_observed.TargetId;values[24]=(jlong)host_jvm_owner_observed.HandleRightsReduced;
+    values[25]=host_jvm_owner_error;values[26]=host_jvm_owner_status;values[27]=host_jvm_owner_observed.State;
+    values[28]=(jlong)host_jvm_owner_observed.ObservedProcessId;values[29]=host_jvm_owner_pending;
     ReleaseSRWLockExclusive(&host_records);
-    jlongArray result=native_original.NewLongArray(env,21);if(result)native_original.SetLongArrayRegion(env,result,0,21,values);return result;
+    jlongArray result=native_original.NewLongArray(env,30);if(result)native_original.SetLongArrayRegion(env,result,0,30,values);return result;
 }
 
 JNIEXPORT jlongArray JNICALL Java_dev_ronova_pro_bootstrap_NativeControl_hostState0(JNIEnv *env,jclass type,jobject module){

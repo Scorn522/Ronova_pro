@@ -219,7 +219,7 @@ final class ExecutionFlow {
     private record Control(int instruction,int end,Sources sources){Control{CodeSourceBridge.executionControls(this);}}
     private record Deferred(String name,String descriptor,Sources sources){Deferred{CodeSourceBridge.executionControls(this);}}
     private static final class Method {
-        final String selector;final int locals;final int[] arguments;final int[][] operations;final Sources[] sources;final boolean constructor;final String[][] fields;final Map<Integer,Integer> sites;
+        final String selector;final int locals;final int[] arguments;final int[][] operations;final Sources[] sources;final boolean constructor,retirementSafe;final String[][] fields;final Map<Integer,Integer> sites;
         Method(Object[] row){
             selector=(String)row[0];locals=(Integer)row[1];arguments=((int[])row[2]).clone();
             int[][] original=(int[][])row[3];operations=new int[original.length][];for(int i=0;i<original.length;i++)operations[i]=original[i].clone();
@@ -227,6 +227,7 @@ final class ExecutionFlow {
             for(int i=0;i<supplied.length;i++)sources[i]=supplied[i].length==0?NONE:moduleSources(supplied[i]);
             String[][] suppliedFields=(String[][])row[6];fields=new String[suppliedFields.length][];for(int i=0;i<fields.length;i++)fields[i]=suppliedFields[i]==null?null:suppliedFields[i].clone();
             constructor=(Boolean)row[7];
+            retirementSafe=row.length>8&&Boolean.TRUE.equals(row[8]);
             int[][] positions=(int[][])row[5];Map<Integer,Integer> selected=new TraceMap<>();for(int[] position:positions)selected.put(position[0],position[1]);sites=Map.copyOf(selected);
             CodeSourceBridge.executionControls(this,arguments,operations,sources,fields,sites);for(int[] operation:operations)CodeSourceBridge.executionControls(operation);for(String[] field:fields)if(field!=null)CodeSourceBridge.executionControls((Object)field);
         }
@@ -356,6 +357,24 @@ final class ExecutionFlow {
         bridge(CALLER.getCallerClass());if(!(token instanceof Frame frame)||frame.thread!=Thread.currentThread())return false;
         if(frame.closed)return true;if(CURRENT.get()!=frame)return false;
         close(frame,normal);return true;
+    }
+    static Object[] retirementFrame(Object supplied,StackWalker.StackFrame actual,int depth,Module owner){
+        bridge(CALLER.getCallerClass());
+        if(actual==null||!ControlBridge.modStopped(owner)||DefinitionBridge.module(actual.getDeclaringClass())!=owner)
+            return new Object[]{null,"SHARED_DECLARATION"};
+        if(!(supplied instanceof Plan plan))return new Object[]{null,"EXECUTION_PLAN_UNOBSERVED"};
+        String selector=actual.getMethodName()+actual.getDescriptor();Method method=plan.methods.get(selector);
+        if(method==null||!method.retirementSafe)return new Object[]{null,"METHOD_CLEANUP_REQUIRED"};
+        Integer instruction=method.sites.get(actual.getByteCodeIndex());
+        if(instruction==null||instruction<0)return new Object[]{null,"FRAME_NOT_AT_BOUNDARY"};
+        Frame frame=CURRENT.get();
+        if(frame==null||frame.closed||frame.thread!=Thread.currentThread()||frame.declaring!=actual.getDeclaringClass()
+                ||frame.method!=method||frame.depth!=depth)return new Object[]{null,"EXECUTION_FRAME_UNOBSERVED"};
+        if(instruction!=frame.instruction)return new Object[]{null,"FRAME_NOT_AT_BOUNDARY"};
+        // A heap receipt must finish through the actual after hook. In
+        // particular, a write already performed must never be closed as false.
+        if(frame.heap!=null||frame.call!=null||!frame.deferred.isEmpty())return new Object[]{null,"SOURCE_SCOPE_PENDING"};
+        return new Object[]{frame,null};
     }
     static void reference(Object token,int instruction,Object actual,StackWalker.StackFrame caller,int depth){
         bridge(CALLER.getCallerClass());Frame frame=site(token,instruction,caller,depth);if(frame==null)return;

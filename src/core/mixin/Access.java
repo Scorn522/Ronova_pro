@@ -27,6 +27,7 @@ public final class Access {
         @Accessor("attributes") net.minecraft.world.entity.ai.attributes.AttributeMap pro$attributes();
         @Accessor("activeEffects") Map<net.minecraft.world.effect.MobEffect,net.minecraft.world.effect.MobEffectInstance> pro$effects();
         @Accessor("useItem") net.minecraft.world.item.ItemStack pro$useItem();
+        @Accessor("useItemRemaining") int pro$useRemaining();
         @Accessor("DATA_LIVING_ENTITY_FLAGS") static net.minecraft.network.syncher.EntityDataAccessor<Byte> pro$useFlags() { throw new AssertionError(); }
     }
     @Mixin(net.minecraft.world.entity.player.Player.class) public interface PlayerState {

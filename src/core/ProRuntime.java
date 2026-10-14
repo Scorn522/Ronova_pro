@@ -111,6 +111,7 @@ public final class ProRuntime implements AutoCloseable {
     private final Set<Module> stoppedModules=Collections.newSetFromMap(new IdentityHashMap<>());
     private final Set<String> protectedMods=new LinkedHashSet<>();
     private final Set<Module> protectedModules=Collections.newSetFromMap(new IdentityHashMap<>());
+    private volatile boolean hostJvmProtected;
     private final Map<Module,Subject> moduleSubjects=Collections.synchronizedMap(new IdentityHashMap<>());
     private final Map<UUID,UUID> groupMembers=new java.util.concurrent.ConcurrentHashMap<>();
     private static final class Group {
@@ -718,6 +719,7 @@ public final class ProRuntime implements AutoCloseable {
         if(owner!=worldArchive||caller==null||caller.getNestHost()!=WorldArchive.class&&caller!=ProRuntime.class&&caller!=ProMod.class)throw new SecurityException("ACTUAL_WORLD_ARCHIVE_REQUIRED");
     }
     void archiveFreeze(WorldArchive owner,UUID id,ServerLevel level,BlockPos low,BlockPos high,boolean active){requireArchive(owner);worldControl.archive(id,level,low,high,active);publishPolicy();}
+    boolean archiveMutationLocked(WorldArchive owner,ServerLevel level,BlockPos low,BlockPos high){requireArchive(owner);return worldControl.mutationLocked(level,low,high);}
     List<net.minecraft.world.ticks.ScheduledTick<?>> archiveHeldTicks(WorldArchive owner,ServerLevel level,BlockPos low,BlockPos high,boolean fluid,boolean remove){
         requireArchive(owner);return worldControl.heldTicks(fluid?level.getFluidTicks():level.getBlockTicks(),low,high,remove);
     }
@@ -842,13 +844,40 @@ public final class ProRuntime implements AutoCloseable {
         // but the actual serializer must still retain every held tick in that save.
         return runtime==null?original:runtime.worldControl.ticksForSave(level,chunk,original);
     }
+    public static it.unimi.dsi.fastutil.shorts.ShortListIterator worldPostProcessingIterator(net.minecraft.world.level.chunk.LevelChunk chunk,it.unimi.dsi.fastutil.shorts.ShortList pending){
+        if(ACTION_CALLER.getCallerClass()!=net.minecraft.world.level.chunk.LevelChunk.class)throw new SecurityException("ACTUAL_CHUNK_POSTPROCESS_REQUIRED");
+        if(!(chunk.getLevel() instanceof ServerLevel level))return pending.iterator();
+        if(!level.getServer().isSameThread())throw new IllegalStateException("WORLD_POSTPROCESS_SERVER_THREAD_REQUIRED");
+        ProRuntime runtime=get(level.getServer());return runtime==null?pending.iterator():runtime.worldControl.postProcessingIterator(chunk,pending);
+    }
+    public static boolean worldPostProcessingClear(net.minecraft.world.level.chunk.LevelChunk chunk,it.unimi.dsi.fastutil.shorts.ShortList pending){
+        if(ACTION_CALLER.getCallerClass()!=net.minecraft.world.level.chunk.LevelChunk.class)throw new SecurityException("ACTUAL_CHUNK_POSTPROCESS_REQUIRED");
+        if(!(chunk.getLevel() instanceof ServerLevel level))return false;
+        if(!level.getServer().isSameThread())throw new IllegalStateException("WORLD_POSTPROCESS_SERVER_THREAD_REQUIRED");
+        ProRuntime runtime=get(level.getServer());return runtime!=null&&runtime.worldControl.postProcessingClear(chunk,pending);
+    }
+    public static boolean worldDeferChunkUpgrade(net.minecraft.world.level.chunk.LevelChunk chunk,net.minecraft.world.level.chunk.UpgradeData upgrade){
+        if(ACTION_CALLER.getCallerClass()!=net.minecraft.world.level.chunk.LevelChunk.class)throw new SecurityException("ACTUAL_CHUNK_UPGRADE_REQUIRED");
+        if(!(chunk.getLevel() instanceof ServerLevel level))return false;
+        if(!level.getServer().isSameThread())throw new IllegalStateException("WORLD_POSTPROCESS_SERVER_THREAD_REQUIRED");
+        ProRuntime runtime=get(level.getServer());return runtime!=null&&runtime.worldControl.deferUpgrade(chunk,upgrade);
+    }
+    public static void worldPostProcessingUnloaded(ServerLevel level,net.minecraft.world.level.chunk.LevelChunk chunk){
+        if(ACTION_CALLER.getCallerClass()!=ServerLevel.class||chunk.getLevel()!=level)throw new SecurityException("ACTUAL_WORLD_CHUNK_UNLOAD_REQUIRED");
+        if(!level.getServer().isSameThread())throw new IllegalStateException("WORLD_POSTPROCESS_SERVER_THREAD_REQUIRED");
+        ProRuntime runtime=get(level.getServer());if(runtime!=null)runtime.worldControl.postProcessingUnloaded(chunk);
+    }
     public static boolean worldFrozen(Entity entity){
         if(entity==null||!(((Access.EntityState)entity).pro$level() instanceof ServerLevel level)||!level.getServer().isSameThread())return false;
         ProRuntime runtime=get(level.getServer());return runtime!=null&&runtime.worldControl.frozen(entity);
     }
     public static boolean worldFrozen(net.minecraft.world.level.Level level,BlockPos position){
-        if(!(level instanceof ServerLevel serverLevel)||!serverLevel.getServer().isSameThread())return false;
+        if(!(level instanceof ServerLevel serverLevel)||position==null)return false;
         ProRuntime runtime=get(serverLevel.getServer());return runtime!=null&&runtime.worldControl.frozen(level,position);
+    }
+    public static boolean worldBlockMutationDenied(net.minecraft.world.level.Level level,BlockPos position){
+        if(!(level instanceof ServerLevel serverLevel)||position==null)return false;
+        ProRuntime runtime=get(serverLevel.getServer());return runtime!=null&&runtime.worldControl.mutationDenied(level,position);
     }
     public static boolean worldClockFrozen(ServerLevel level){ProRuntime runtime=get(level.getServer());return runtime!=null&&runtime.worldControl.clock(level);}
     public static boolean worldSpawnDenied(Entity entity){
@@ -1030,6 +1059,15 @@ public final class ProRuntime implements AutoCloseable {
     private static String hostProtection(Module module,boolean protect){
         try{return (String)Class.forName("dev.ronova.pro.bootstrap.NativeControl",false,null).getMethod("hostKernelProtect",Module.class,boolean.class).invoke(null,module,protect);}
         catch(ReflectiveOperationException unavailable){return "HOST_KERNEL_PROTECTION_UNAVAILABLE:"+String.valueOf(unavailable.getCause()==null?unavailable.getMessage():unavailable.getCause().getMessage());}
+    }
+    public String hostJvmProtection(boolean protect){
+        commandAction();if(protect)writable();
+        synchronized(ProRuntime.class){hostJvmProtected=protect;return "HOST_JVM_REQUESTED="+protect+";"+publishHostJvmProtection();}
+    }
+    private static String publishHostJvmProtection(){
+        boolean protect=sourceRuntimes().stream().anyMatch(runtime->!runtime.closing&&runtime.hostJvmProtected);
+        try{return (String)Class.forName("dev.ronova.pro.bootstrap.NativeControl",false,null).getMethod("hostKernelOwnerProtect",boolean.class).invoke(null,protect);}
+        catch(ReflectiveOperationException unavailable){return "HOST_JVM_PROTECTION_UNAVAILABLE:"+String.valueOf(unavailable.getCause()==null?unavailable.getMessage():unavailable.getCause().getMessage());}
     }
     private String protectResolved(LinkedHashMap<String,Module> targets) {
         Set<Module> modules=Collections.newSetFromMap(new IdentityHashMap<>());modules.addAll(targets.values());
@@ -2743,7 +2781,7 @@ public final class ProRuntime implements AutoCloseable {
             LiveStatePolicy.initialize();
             EquipmentPolicy.initialize();
             Class<?> bridge=Class.forName("dev.ronova.pro.bootstrap.TaskBridge",false,null);
-            if(!Integer.valueOf(76).equals(bridge.getMethod("abiVersion").invoke(null)))throw new IllegalStateException("INDEX_BRIDGE_ABI_MISMATCH");
+            if(!Integer.valueOf(77).equals(bridge.getMethod("abiVersion").invoke(null)))throw new IllegalStateException("INDEX_BRIDGE_ABI_MISMATCH");
             var lookup=java.lang.invoke.MethodHandles.lookup();
             var field=lookup.findStatic(ProRuntime.class,"preventFieldWrite",java.lang.invoke.MethodType.methodType(boolean.class,Object.class,Class.class,String.class,Object.class));
             var dispatch=lookup.findStatic(ProRuntime.class,"preventDispatch",java.lang.invoke.MethodType.methodType(boolean.class,Object.class,String.class,Object.class));
@@ -2788,6 +2826,7 @@ public final class ProRuntime implements AutoCloseable {
                     &&indexGuardState.startsWith("INSTALLED")
                     &&Boolean.TRUE.equals(agent.getMethod("controlReady").invoke(null));
             for(ProRuntime runtime:sourceRuntimes())for(Module module:runtime.protectedModules)hostProtection(module,true);
+            synchronized(ProRuntime.class){if(sourceRuntimes().stream().anyMatch(runtime->!runtime.closing&&runtime.hostJvmProtected))publishHostJvmProtection();}
         } catch(ReflectiveOperationException|RuntimeException|LinkageError unavailable) {
             productionControlsInstalled=false;
             Throwable cause=unavailable;
@@ -2871,6 +2910,13 @@ public final class ProRuntime implements AutoCloseable {
     private static void installEquipmentResults(java.lang.invoke.MethodHandles.Lookup lookup)throws ReflectiveOperationException {
         var result=lookup.findStatic(ProRuntime.class,"equipmentDeniedResult",java.lang.invoke.MethodType.methodType(Object.class,Object.class,String.class,Object.class));
         Class.forName("dev.ronova.pro.bootstrap.ControlBridge",false,null).getMethod("installDispatchResults",Class.class,java.lang.invoke.MethodHandle.class).invoke(null,ProRuntime.class,result);
+        var begin=lookup.findStatic(EquipmentPolicy.class,"beginInvocation",java.lang.invoke.MethodType.methodType(Object.class,Object.class,Object.class,String.class));
+        var denied=lookup.findStatic(EquipmentPolicy.class,"invocationDenied",java.lang.invoke.MethodType.methodType(boolean.class,Object.class));
+        var deniedResult=lookup.findStatic(EquipmentPolicy.class,"invocationResult",java.lang.invoke.MethodType.methodType(Object.class,Object.class,String.class,Object.class));
+        var end=lookup.findStatic(EquipmentPolicy.class,"endInvocation",java.lang.invoke.MethodType.methodType(void.class,Object.class));
+        var failed=lookup.findStatic(EquipmentPolicy.class,"failedInvocation",java.lang.invoke.MethodType.methodType(void.class,Object.class,Throwable.class));
+        Class.forName("dev.ronova.pro.bootstrap.ControlBridge",false,null).getMethod("installEquipmentActions",Class.class,java.lang.invoke.MethodHandle.class,java.lang.invoke.MethodHandle.class,
+                java.lang.invoke.MethodHandle.class,java.lang.invoke.MethodHandle.class,java.lang.invoke.MethodHandle.class).invoke(null,ProRuntime.class,begin,denied,deniedResult,end,failed);
     }
     private static UnsafeMapping unsafeFields() {
         try {
@@ -3208,6 +3254,7 @@ public final class ProRuntime implements AutoCloseable {
     @Override public void close() throws IOException {
         lifecycleAction("stopped");
         closing=true;
+        synchronized(ProRuntime.class){if(hostJvmProtected){hostJvmProtected=false;publishHostJvmProtection();}}
         for(Module module:protectedModules)if(sourceRuntimes().stream().noneMatch(runtime->runtime!=this&&runtime.modProtected(module)))hostProtection(module,false);
         worldArchive.close();
         fieldGraphs.close();

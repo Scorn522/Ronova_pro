@@ -43,7 +43,7 @@ public final class NativeControl {
             if(!early.isEmpty()) {
                 Path actual=Path.of(early).toAbsolutePath();if(!hash(Files.readAllBytes(actual)).equals(digest))throw new IOException("EARLY_NATIVE_IMAGE_MISMATCH");dll=actual;
             }
-            System.load(dll.toString());if(abi()!=71)throw new UnsatisfiedLinkError("NATIVE_CONTROL_ABI");
+            System.load(dll.toString());if(abi()!=72)throw new UnsatisfiedLinkError("NATIVE_CONTROL_ABI");
             if(!initialize0(ControlBridge.class,DefinitionBridge.class))throw new UnsatisfiedLinkError("ACTUAL_NATIVE_BOUNDARY_INSTALL_FAILED");
             if(!initializeDefinitionDirectory0(definitionDirectoryOwner))throw new UnsatisfiedLinkError("ACTUAL_DEFINITION_DIRECTORY_CAS_UNAVAILABLE");
             libraryBoundaryPresent=libraryPresent0();available=true;return state="NATIVE_BIND_AND_JNI_FIELD_READY";
@@ -172,6 +172,12 @@ public final class NativeControl {
         return available&&executionWatch0(frame.getDeclaringClass(),frame.getMethodName(),frame.getDescriptor(),frame.getByteCodeIndex(),plan,token);
     }
     private static boolean executionPopped(Object token,boolean normal){return CodeSourceBridge.executionPopped(token,normal);}
+    private static Object[] codeRetirementFrame(Class<?> declaring,String selector,int location,Object plan,Module owner){
+        return CodeSourceBridge.executionRetirementFrame(declaring,selector,location,plan,owner);
+    }
+    static boolean codeRetirementFramePermit(Class<?> declaring,int location,Object plan,Module owner){
+        return CALLER.getCallerClass()==CodeSourceBridge.class&&available&&codeRetirementFramePermit0(declaring,location,plan,owner);
+    }
     static boolean executionPopPermit(Object token){return CALLER.getCallerClass()==CodeSourceBridge.class&&available&&executionPopPermit0(token);}
     static Class<?> codeFieldOwner(Class<?> symbolic,String name,String descriptor){
         if(CALLER.getCallerClass()!=CodeSourceBridge.class)throw new SecurityException("ACTUAL_CODE_FIELD_BRIDGE_REQUIRED");
@@ -288,6 +294,7 @@ public final class NativeControl {
     }
     public static String codeRetirementGap(Module module){
         if(!controlCaller())throw new SecurityException("ACTUAL_CODE_STATE_AGENT_REQUIRED");
+        if(available)retireCode0(module);
         String creation=ControlBridge.creationSourceGap(module);if(!creation.isEmpty())return creation;
         String heap=CodeSourceBridge.executionRetirementGap(module);if(!heap.isEmpty())return heap;
         if(!available)return "EXTERNAL_CODE_VM_BACKEND_UNAVAILABLE";long[] frames=codeState0(module);
@@ -296,10 +303,18 @@ public final class NativeControl {
         if(memory[0]!=0||memory[1]!=0||memory[2]!=0||memory[3]!=0)return "EXTERNAL_NATIVE_MEMORY_PENDING:allocations="+memory[0]+":ranges="+memory[1]+":active="+memory[2]+":unmapped="+memory[3]+":sharedReads="+memory[4];
         long[] heapState=heapState0();if(heapState==null||heapState.length<2||heapState[0]==0)return "EXTERNAL_HEAP_EVENT_BACKEND_UNAVAILABLE";
         if(heapState[1]!=0)return "EXTERNAL_HEAP_EVENTS_UNOBSERVED:events="+heapState[1];
-        if(frames==null||frames[0]==0)return "EXTERNAL_CODE_VM_BYTECODES_UNAVAILABLE";
+        if(frames==null||frames.length<5||frames[0]==0)return "EXTERNAL_CODE_VM_BYTECODES_UNAVAILABLE";
         if(frames.length<5||frames[3]==0)return "EXTERNAL_EXECUTION_POP_BACKEND_UNAVAILABLE";
         if(frames[4]!=0)return "EXTERNAL_EXECUTION_POP_UNOBSERVED:events="+frames[4];
-        return frames[1]!=0||frames[2]!=0?"EXTERNAL_CODE_FRAMES_PENDING:active="+frames[1]+":unmapped="+frames[2]:"";
+        if(frames.length<19)return "EXTERNAL_CODE_RETIREMENT_BACKEND_UNAVAILABLE";
+        if(frames[16]!=0)return "EXTERNAL_CODE_OWN_SUSPENSION_PENDING:threads="+frames[16];
+        boolean active=frames[1]!=0||frames[2]!=0||frames[9]!=0||frames[18]!=0;
+        if(frames[15]!=0&&(active||frames[10]!=frames[11]))return "EXTERNAL_CODE_RETIREMENT_VM_FAILURES:operations="+frames[15];
+        if(active&&(frames[5]==0||frames[6]==0||frames[7]==0))
+            return "EXTERNAL_CODE_RETIREMENT_CAPABILITIES_UNAVAILABLE:suspend="+frames[5]+":earlyReturn="+frames[6]+":step="+frames[7]+":onLoad="+frames[8];
+        return active?"EXTERNAL_CODE_FRAMES_PENDING:active="+frames[1]+":unmapped="+frames[2]+":requests="+frames[9]
+                +":cleanup="+frames[12]+":framework="+frames[13]+":nativeScopes="+frames[14]+":sourceScopes="+frames[17]
+                +":returnsRequested="+frames[10]+":popped="+frames[11]+":awaitingPop="+frames[18]:"";
     }
     private static Class<?> platformType(String name){
         try{return Class.forName(name,false,null);}catch(ClassNotFoundException unavailable){throw new ExceptionInInitializerError(unavailable);}
@@ -516,6 +531,17 @@ public final class NativeControl {
         hostKernelProtect0(module,protect);long[] actual=hostKernelState0(module);
         return "HOST_KERNEL_SESSION="+actual[0]+";WIN32="+actual[4]+";NTSTATUS="+actual[5]+";CAPABILITIES="+actual[6]+";UNSERVED="+actual[7]+";POLICY_PENDING="+actual[19]+";SHARED_UNSERVED="+actual[20];
     }
+    public static String hostKernelOwnerProtect(boolean protect){
+        Class<?> caller=CALLER.getCallerClass();
+        if(!ControlBridge.coreWriter()||!caller.getName().equals("dev.ronova.pro.ProRuntime"))throw new SecurityException("HOST_KERNEL_OWNER_ACTUAL_CORE_REQUIRED");
+        if(!available)return "HOST_KERNEL_NATIVE_UNAVAILABLE";
+        hostKernelOwnerProtect0(protect);return hostKernelOwnerSummary(hostKernelState0(null));
+    }
+    private static String hostKernelOwnerSummary(long[] actual){
+        return "HOST_JVM_OWNER_DESIRED="+actual[21]+";HOST_JVM_OWNER_ACTIVE="+actual[22]+";HOST_JVM_OWNER_TARGET="+actual[23]
+                +";HOST_JVM_OWNER_RIGHTS_REDUCED="+actual[24]+";HOST_JVM_OWNER_WIN32="+actual[25]+";HOST_JVM_OWNER_NTSTATUS="+actual[26]
+                +";HOST_JVM_OWNER_STATE="+actual[27]+";HOST_JVM_OWNER_OBSERVED_PID="+actual[28]+";HOST_JVM_OWNER_PENDING="+actual[29];
+    }
     static String hostKernelFile(FileDescriptor descriptor,Module[] selected){
         if(CALLER.getCallerClass()!=ResourceBridge.class||!ResourceBridge.kernelFileActive(descriptor,selected))throw new SecurityException("HOST_KERNEL_ACTUAL_FILE_SCOPE_REQUIRED");
         return available?hostKernelFile0(descriptor,selected):"HOST_KERNEL_NATIVE_UNAVAILABLE";
@@ -524,11 +550,12 @@ public final class NativeControl {
     private static String hostKernelSummary(Module module){
         if(!available)return "HOST_KERNEL_NATIVE_UNAVAILABLE";long[] actual=hostKernelState0(module);
         return "HOST_KERNEL_SESSION="+actual[0]+";HOST_KERNEL_WIN32="+actual[4]+";HOST_KERNEL_NTSTATUS="+actual[5]+";HOST_KERNEL_CAPABILITIES="+actual[6]+";HOST_KERNEL_UNSERVED="+actual[7]
-                +";HOST_KERNEL_PROCESS_RECEIPTS="+actual[17]+";HOST_KERNEL_FILE_RECEIPTS="+actual[18]+";HOST_KERNEL_POLICY_PENDING="+actual[19]+";HOST_KERNEL_SHARED_UNSERVED="+actual[20];
+                +";HOST_KERNEL_PROCESS_RECEIPTS="+actual[17]+";HOST_KERNEL_FILE_RECEIPTS="+actual[18]+";HOST_KERNEL_POLICY_PENDING="+actual[19]+";HOST_KERNEL_SHARED_UNSERVED="+actual[20]
+                +";"+hostKernelOwnerSummary(actual);
     }
     public static void module(Module module,boolean stopped) {
         if(!controlCaller())throw new SecurityException("NATIVE_CONTROL_AGENT_REQUIRED");
-        if(available)module0(module,stopped);
+        if(available){module0(module,stopped);if(stopped)retireCode0(module);}
     }
     /** Invoked by the native wrapper only after the actual VM API returned NONE. */
     private static boolean jvmtiDefinitionsChanged(Class<?>[] actuals){
@@ -687,6 +714,8 @@ public final class NativeControl {
     private static native long[] heapState0();
     private static native boolean heapEventPermit0(Object holder,Class<?> declaring);
     private static native long[] codeState0(Module module);
+    private static native void retireCode0(Module module);
+    private static native boolean codeRetirementFramePermit0(Class<?> declaring,int location,Object plan,Module owner);
     private static native boolean preparedClass0(Class<?> actual);
     private static native boolean sourceCapture0();
     private static native boolean arrayCopyInternalBoundary0();
@@ -722,6 +751,7 @@ public final class NativeControl {
     private static native boolean hostReady0();
     private static native boolean hostLibraryLoadReady0();
     private static native void hostKernelProtect0(Module module,boolean protect);
+    private static native void hostKernelOwnerProtect0(boolean protect);
     private static native String hostKernelFile0(FileDescriptor descriptor,Module[] selected);
     private static native long[] hostKernelState0(Module module);
     private static native long[] hostState0(Module module);
