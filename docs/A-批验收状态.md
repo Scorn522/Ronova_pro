@@ -1,26 +1,24 @@
 # Ronova Pro 当前进度
 
-## 2026-10-14：C 接续——发送来源、原生提交与独立禁疗
+## 2026-10-14：C 接续——Unsafe 裸地址写入、释放与回调借权
 
-接续 `4697c24`，Java ABI72 / Native ABI68 / Storage3 / Journal6，客户端协议 `r3-client-8`。主工程仍为 `D:\桌面\ronova_GPT`；自身外观及武器注册暂缓。
+接续 `732aeaa`，Java ABI72 / Native ABI69 / Storage3 / Journal6；客户端协议仍为 `r3-client-8`。上一包的发送来源、Host 效果定序和独立禁疗源码保持；自身外观和武器注册继续暂缓。
 
-连接前的实际 Connection/PacketHolder 队列按每次提交保留来源，真实 poll 到私有发送和 EventLoop 延后执行保持同一收据，原 Runnable 结束后归还 scope。共享 vanilla packet 的不同提交不互相继承发送者；退役只移除准确、独占、已停来源的 CLQ 节点。Netty WriteTask 的 ctx/msg/promise 配对变化保留已捕获发送者并加入实际来源与 unknown，避免失配清空发送者。真实字段和私有方法名从当前字节码的生产/消费路径解析，兼容本轮实际 SRG 载荷。
+已观察的 Unsafe 裸地址 put/set/copy 原入口此前能将已登记 Native 控制地址当作未跟踪业务内存写入；free/reallocate 的另一条实际分派也会在业务目录未命中后继续调用 JVM 原函数。现于这两个真实 admission 入口、业务目录和 allocation gate 之前查询准确 `native_control_range`，命中分别抛出 `NATIVE_MEMORY_CONTROL_WRITE_DENIED`、`NATIVE_MEMORY_CONTROL_FREE_DENIED` 或 `NATIVE_MEMORY_CONTROL_REALLOCATE_DENIED`，未知/溢出为 `NATIVE_MEMORY_CONTROL_RANGE_UNAVAILABLE`；保留异常并沿原清理路径撤销临时来源/分配，不返回空 token 假装准入。realloc 新长零仍检查非零旧地址；NULL、普通未知分配和原业务生命周期保留。原始读取不因该写入规则被拒绝。
 
-已观察 Host 的 WriteProcessMemory、VirtualProtect/Ex、VirtualFree/Ex、UnmapViewOfFile/Ex 在来源和域查询完成后，以同一短 private gate 复核准确私有分配及本地输出并执行真实 API。释放在 gate 内重查实际 allocation geometry；受限回调使用 Try 锁，不在门内进入 JNI/VM 或其它域锁。本次只衔接本方私有分配登记与这些已观察效果，不推广为任意原生 store/syscall、VM 物理回收或映像复用均已闭合。
+实际外部 JVMTI 事件、受支持扩展和 heap callback 在成功建立原来源/hold 后保存并清零借来的 `control`，退出时按嵌套层恢复；只以原 retained image 保留本 DLL 的原控制回调。原 source、受限标志、临时 TLS、环境及 worker anchor 接续保持。扩展生成 frame 已按真实 sizeof 计算，未硬改未知 ABI。同步外部回调借权案例未实跑，不能用下述 raw JNI 回调检查代称。
 
-新增 `/ronova_pro no-heal <目标> true|false`。单独禁疗只拒绝真实健康槽升值及正向 heal，普通伤害、移除照旧；与 protect 独立组合，false 保留 protect，release 撤销两位。setHealth、SynchedEntityData、实际 DataItem、既有字段/Unsafe 桥共用真实 healthItem 判断，覆盖实际继承分派。合法 Clone、换维度与最终 respawn 通过原 permit 交接；新造的健康观察不持有身体/关系快照，已有未结 Work 不被释放。客户端两位随同一 revision 发布，按实际世界、ID/UUID 重绑；旧协议不解码新增字段。`NO_HEAL/1` 仅为当前会话操作记录，未实现跨重启恢复。
+本包在独立 `.work/c-raw-unsafe72-69-20261014/build/` 构建，原 native 构建脚本接受 Gradle 传入的实际输出目录，避免覆盖运行中的载荷。首个写入/回调版本构建 PASS43秒，原 raw 写入检查退出0；补齐相邻释放/重分配后一次集中重建 `build-c-java72-native69-raw-unsafe-final2-20261014.log` PASS22秒，相关现有夹具编译通过。最终 `c-raw-unsafe-java72-native69-final2-20261014.log` 实际退出0、RAW_UNSAFE_PASS，Native/JNI 与线程绑定就绪。
 
-完整包初次离线构建仅因实际 runtime classpath 缺少 srgutils 失败，保留 `build-c-java72-native68-network-memory-20261014.log`；正常解析 `resolve-c-runtime72-68-20261014.log` PASS22秒。源码写齐后 `build-c-java72-native68-strength-final3-20261014.log` PASS27秒。引用持有修复后的 final4 因运行中夹具 JAR 被占用而失败，原日志保留；改用独立夹具输出后 `build-c-java72-native68-strength-final5-20261014.log` PASS12秒，Agent/Bootstrap/Native 均为未变的 UP-TO-DATE 载荷。
+最终直接检查在真实 JNI 调用中取当前 JavaVM/JVMTI/JNIEnv 三个首槽，保持实际新 JVMTI 环境存活：公共 sun.misc 及准确 bootstrap 私有 native putLong、setMemory0、copyMemory0 的同值/同字节写拒绝；公共与真实 private free/reallocate（含零新长）拒绝；每次均要求准确目标拒绝异常，原八字节保持。普通真实 Unsafe allocation 的写入、复制、扩容、缩容、合法 NULL/零长度及配对释放保持，拒绝 copy 后的原读 scope 能结束，真实 Dispose 完成。只给夹具 JVM 加 internal Unsafe 反射访问参数，未加生产资格或假 producer。原 passing Host68 内存检查未重跑。
 
-直接相关实际结果：`c-memory-effects-java72-native68-20261014.log` 退出0、HOST_MEMORY_EFFECTS_PASS，Native/JNI 与线程绑定就绪。IAT/GPA 的普通写入、权限修改、释放/取消映射、真实 same-access alias、decommit/reservation/recommit 及文件视图效果保留，准确控制目标、本地输出和页尾范围拒绝。未确定性竞跑新私有分配与实际写入，不能据此宣布并发关闭全部通过；未重跑旧矩阵。
+该查询只关闭已登记控制范围的确定性绕过；不跨真实 JVM Unsafe 函数持 private/domain 锁，后续并发发布 TOCTOU 仍保留。未观察原始入口、CPU store/syscall、未知扩展 ABI 和其它旧未支持边界不提升为完成。
 
-网络首次运行在 PropertiesUtil 的 JarURLConnection 缓存链失败，final2 又在真实 Mod 发送的数组写入回调遇到 TreeMap$AscendingSubMap 类循环；两个原失败日志保留。已收窄容器出生的分析归属，仅透过实际容器构造/clone 链，保留 ASM 图交接时的显式保护；并在安装钩子前定义 tailMap.values 实际使用的八个冷依赖类型。final3 原 JVM 正继续：18:34 现场已在真实 LocalServerChannel/Netty allocator 类转换，未取得 NETWORK_PRECONNECT_PASS，不能记为发送或停组通过。WriteTask 真实字段篡改后停组未实跑。
+网络 Java72/Native68 final3 最终退出1，只有原10秒收包断言失败、未记录底层异常，原日志保留，不能据此认定只是延迟。现有检查改为先等待真实 client EventLoop scope 哨兵，再等单 loop 服务端已提交任务，随后仍作原10秒收包/来源断言，并记录剩余计数；没有提高 deadline、预热框架或改生产网络规则。Java72/Native69 已用同一生产路径、真实 fixture module 和 LocalChannel 重跑，`c-network-java72-native69-20261014.log` 当前仍在执行，无发送/停组通过结论；WriteTask 真实篡改停组仍 NOTRUN。
 
-禁疗实际游戏使用最终 Core 和独立重映射夹具，在新空白世界 `.work/c-no-heal72-20261014-01/server/` 启动，父进程89308；截至18:36只有 Native/JNI/线程绑定就绪和 Agent 安装日志，尚无 WORLD_LOADED/Done/NO_HEAL_PASS。现有 DefenseFixture 的独立 no-heal 分支只测试普通 Cow 的四条升血入口、正常伤害、组合和独立撤销、邻居保持；没有假 Binding/ServerLevel，也不执行旧防护矩阵。
+Java72/Native68 的禁疗空白世界 `.work/c-no-heal72-20261014-01/server/` 原实例继续运行；19:00日志已进入实际 Forge/ModLauncher 的 Mixin SERVER 阶段，尚无 WORLD_LOADED/Done/NO_HEAL_PASS，不算 Native69 游戏通过。未停止或重启来替换结果。此前 Java63/Native61 run03 已不在，旧日志仍无冻结保存结论。Native69 未改驱动/管理器，仍带既有未签名 SYS37888字节、管理器190464字节，未部署。
 
-此前 Java63/Native61 run03 的原 PID 已不在，未找到新的正常退出、世界加载或冻结保存结果；旧 PID106440已被其它应用复用，不是旧网络 JVM。旧日志保持原范围，未当作本包游戏通过。驱动/管理器源码、签名及部署未改，沿用既有未签名 SYS37888字节、管理器190464字节，未加载。
-
-本轮候选 `distribution/candidate-c-java72-native68-strength-wip-20261014`，Core2474241字节、prelaunch22440字节；匹配包 `distribution/Ronova-Pro-C-Strength-WIP-Java72-Native68-20261014.zip`。本次源码、对应候选 JAR 与既有报告摘要同步公开 Git；ZIP、未签名系统产物、原始日志、第三方研究和存档留本地。完整 C/B 未完成：本轮网络及禁疗结果仍待取得，旧客户端停组重放、真实冻结保存/重启、Native 返回策略等未跑项仍保留；活体效果、饥饿和装备状态保护尚没有对应的完整写入拒绝语义，不能由生命防护或字段图清体代称。
+本轮候选 `distribution/candidate-c-java72-native69-raw-unsafe-wip-20261014`，Core2474311字节、prelaunch22440字节；匹配源码包 `distribution/Ronova-Pro-C-RawUnsafe-WIP-Java72-Native69-20261014.zip`。源码、匹配候选 JAR 与本报告摘要同步公开 Git；ZIP、原始日志、研究和存档留本地。完整 C/B 仍未完成：上述实际网络/禁疗运行、同步外部回调及旧客户端重放、冻结保存重启等没有结果；活体效果、饥饿和装备状态保护仍缺完整实际写入语义。
 
 ---
 ## 2026-10-14：C 接续——JNI 调用者输出保护

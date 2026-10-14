@@ -21,6 +21,7 @@ typedef struct NativeToolingHeapInvocation {
     NativeToolingEnv *previousEnvironment;
     NativeToolingSlot *previousWorkerAnchor;
     NativeToolingHeapSlot *slot;DWORD lastError;int installed;
+    unsigned savedControl;int controlSuspended;
 } NativeToolingHeapInvocation;
 
 typedef struct NativeToolingHeapCall {
@@ -205,6 +206,12 @@ static int native_tooling_heap_callback_begin(NativeToolingHeapCall *call,unsign
     invocation->previousEnvironment=state->toolingCallbackEnvironment;state->toolingCallbackEnvironment=record;
     invocation->previousWorkerAnchor=state->heapWorkerAnchor;state->heapWorkerAnchor=slot->published?slot->retirement:NULL;
     state->tooling=&invocation->scope;state->heapCallback++;invocation->slot=slot;InterlockedIncrement(&slot->active);
+    /* Preparation captured this exact callback image while loader queries were
+     * permitted. Heap workers only suspend borrowed control for outside code. */
+    HMODULE image=slot->retirement?slot->retirement->image:NULL;
+    invocation->savedControl=state->control;
+    invocation->controlSuspended=!image||image!=native_control_image();
+    if(invocation->controlSuspended)state->control=0;
     SetLastError(invocation->lastError);return 1;
 }
 
@@ -214,6 +221,7 @@ static void native_tooling_heap_callback_end(NativeToolingHeapInvocation *invoca
     invocation->thread->heapWorkerAnchor=invocation->previousWorkerAnchor;
     invocation->thread->heapCallback--;invocation->thread->tooling=invocation->scope.previous;
     InterlockedDecrement(&invocation->slot->active);
+    if(invocation->controlSuspended)invocation->thread->control=invocation->savedControl;
     if(invocation->installed)TlsSetValue(native_tls,invocation->previousThread);
     NativeThread *state=invocation->thread;invocation->slot=NULL;invocation->thread=NULL;
     native_thread_callback_leave(state);SetLastError(lastError);

@@ -1,4 +1,4 @@
-﻿param([string]$JdkHome=$env:JAVA_HOME,[string]$Zig=$env:RONOVA_CONTROL_ZIG)
+﻿param([string]$JdkHome=$env:JAVA_HOME,[string]$Zig=$env:RONOVA_CONTROL_ZIG,[string]$OutputDirectory)
 $ErrorActionPreference='Stop'
 $projectRoot=[IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
 $zigCommand=$null
@@ -10,7 +10,7 @@ $includeRoot=Join-Path $JdkHome 'include'
 if(-not(Test-Path -LiteralPath (Join-Path $includeRoot 'jni.h'))) { throw 'JNI headers required' }
 if(-not $env:ZIG_GLOBAL_CACHE_DIR) { $env:ZIG_GLOBAL_CACHE_DIR=Join-Path $projectRoot 'build/zig-global' }
 if(-not $env:ZIG_LOCAL_CACHE_DIR) { $env:ZIG_LOCAL_CACHE_DIR=Join-Path $projectRoot 'build/zig-local' }
-$outputDirectory=Join-Path $projectRoot 'build/control-native/ronova-native/windows-x86_64'
+if(-not $OutputDirectory){$OutputDirectory=Join-Path $projectRoot 'build/control-native/ronova-native/windows-x86_64'}
 New-Item -ItemType Directory -Force -Path $outputDirectory | Out-Null
 $outputDll=Join-Path $outputDirectory 'ronova-pro-control.dll'
 & $Zig cc '-std=gnu23' '-O2' '-shared' '-target' 'x86_64-windows-gnu' (Join-Path $PSScriptRoot 'control.c') '-I' $includeRoot '-I' (Join-Path $includeRoot 'win32') '-lbcrypt' '-o' $outputDll

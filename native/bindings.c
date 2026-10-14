@@ -1108,6 +1108,7 @@ typedef struct NativeToolingUse {NativeToolingEnv *environment;} NativeToolingUs
 typedef struct NativeToolingInvocation {
     NativeToolingSlot *slot;NativeThread *thread;NativeToolingScope scope;
     struct NativeToolingInvocation *previous;
+    unsigned savedControl;int controlSuspended;
 } NativeToolingInvocation;
 struct NativeToolingImage {
     jobject declaration,loader,domain;jstring name;jclass actual;jbyteArray original,bytes;
@@ -1267,7 +1268,13 @@ static int native_tooling_callback_begin(NativeToolingSlot *slot,jvmtiEnv *api,N
     invocation->thread=state;
     invocation->previous=state->toolingInvocation;state->toolingInvocation=invocation;
     invocation->scope=(NativeToolingScope){slot->owners,slot->origin,slot->unknown,state->depth,state->tooling};
-    native_thread_callback_enter(state);state->tooling=&invocation->scope;return 1;
+    native_thread_callback_enter(state);state->tooling=&invocation->scope;
+    /* The VM may synchronously call an outside event from controller JNI.
+     * Its source hold is real, but it must not inherit that JNI recursion bypass. */
+    invocation->savedControl=state->control;
+    invocation->controlSuspended=!slot->image||slot->image!=native_control_image();
+    if(invocation->controlSuspended)state->control=0;
+    return 1;
 }
 static void native_tooling_slot_retire(NativeToolingSlot *slot){
     if(!slot)return;
@@ -1281,6 +1288,7 @@ static void native_tooling_callback_end(NativeToolingInvocation *invocation){
     InterlockedDecrement(&slot->active);slot->environment->active--;if(slot->agent)InterlockedExchange(&slot->admitted,0);
     native_tooling_slot_queue_locked(slot);native_tooling_environment_queue_locked(slot->environment);
     ReleaseSRWLockExclusive(&native_tooling_records);
+    if(invocation->controlSuspended)state->control=invocation->savedControl;
     invocation->slot=NULL;invocation->thread=NULL;native_thread_callback_leave(state);SetLastError(error);
 }
 #define COMMA ,

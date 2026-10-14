@@ -1909,6 +1909,29 @@ done:
         if(failure){fprintf(stderr,"HOST_MEMORY_RELEASE_FAILED stage=%s win32=%lu\n",failure,(unsigned long)error);load_thread_fail(env,failure);}
     }
 }
+JNIEXPORT void JNICALL Java_dev_ronova_pro_AuditFixCheck_hostRawUnsafe0(JNIEnv *env,jclass check){
+    JavaVM *vm=NULL;jvmtiEnv *api=NULL;
+    if((*env)->GetJavaVM(env,&vm)!=JNI_OK||!vm
+            ||(*vm)->GetEnv(vm,(void**)&api,JVMTI_VERSION_1_2)!=JNI_OK||!api){
+        load_thread_fail(env,"RAW_UNSAFE_ACTUAL_VM_JVMTI_ENVIRONMENT_REQUIRED");return;
+    }
+    /* Only actual public first slots leave this synchronous fixture call. No
+     * controller registration, source identity or replacement table is made. */
+    jclass lifetimeFailure=(*env)->FindClass(env,"dev/ronova/pro/AuditFixCheck$RawUnsafeLifetimeFailure");
+    jmethodID action=lifetimeFailure?(*env)->GetStaticMethodID(env,check,"rawUnsafeSlots","(JJJ)V"):NULL;
+    if(action)(*env)->CallStaticVoidMethod(env,check,action,(jlong)(uintptr_t)vm,(jlong)(uintptr_t)api,(jlong)(uintptr_t)env);
+    jthrowable failure=(*env)->ExceptionOccurred(env);
+    if(failure)(*env)->ExceptionClear(env);
+    if(failure&&lifetimeFailure&&(*env)->IsInstanceOf(env,failure,lifetimeFailure)){
+        /* An unexpectedly accepted free/reallocation may have invalidated api.
+         * Preserve that failure without dereferencing it during cleanup. */
+        (*env)->DeleteLocalRef(env,lifetimeFailure);(*env)->Throw(env,failure);(*env)->DeleteLocalRef(env,failure);return;
+    }
+    jvmtiError disposed=(*api)->DisposeEnvironment(api);
+    if(lifetimeFailure)(*env)->DeleteLocalRef(env,lifetimeFailure);
+    if(failure){(*env)->Throw(env,failure);(*env)->DeleteLocalRef(env,failure);return;}
+    if(!action||disposed!=JVMTI_ERROR_NONE)load_thread_fail(env,"RAW_UNSAFE_ACTUAL_ENVIRONMENT_DISPOSE_FAILED");
+}
 JNIEXPORT void JNICALL Java_dev_ronova_pro_AuditFixCheck_hostThreadCreate0(JNIEnv *env,jclass check,jclass type,jobject payload){
     (void)check;JavaVM *vm=NULL;jclass actual=payload?(*env)->GetObjectClass(env,payload):NULL;
     int correct=actual&&type&&(*env)->IsSameObject(env,actual,type);if(actual)(*env)->DeleteLocalRef(env,actual);

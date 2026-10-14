@@ -90,7 +90,8 @@ tasks.register('compileControlNative',Exec) {
     outputs.file(layout.buildDirectory.file('control-native/ronova-native/windows-x86_64/ronova-pro-control.dll'))
     doFirst {
         def jdk=javaToolchains.launcherFor { languageVersion = JavaLanguageVersion.of(17) }.get().metadata.installationPath.asFile
-        commandLine 'powershell.exe','-NoProfile','-ExecutionPolicy','Bypass','-File',file('native/build-control.ps1').absolutePath,'-JdkHome',jdk.absolutePath
+        commandLine 'powershell.exe','-NoProfile','-ExecutionPolicy','Bypass','-File',file('native/build-control.ps1').absolutePath,'-JdkHome',jdk.absolutePath,
+                '-OutputDirectory',layout.buildDirectory.dir('control-native/ronova-native/windows-x86_64').get().asFile.absolutePath
         if(project.hasProperty('controlZig')) args '-Zig',project.property('controlZig')
     }
 }
@@ -116,7 +117,8 @@ tasks.register('compileStorageNative',Exec) {
     outputs.file(layout.buildDirectory.file('native/ronova-pro-storage.dll'))
     doFirst {
         def jdk=javaToolchains.launcherFor { languageVersion = JavaLanguageVersion.of(17) }.get().metadata.installationPath.asFile
-        commandLine 'powershell.exe','-NoProfile','-ExecutionPolicy','Bypass','-File',file('native/build.ps1').absolutePath,'-JdkHome',jdk.absolutePath
+        commandLine 'powershell.exe','-NoProfile','-ExecutionPolicy','Bypass','-File',file('native/build.ps1').absolutePath,'-JdkHome',jdk.absolutePath,
+                '-OutputDirectory',layout.buildDirectory.dir('native').get().asFile.absolutePath
         def zig=project.findProperty('storageZig') ?: project.findProperty('controlZig')
         if(zig) args '-Zig',zig
     }

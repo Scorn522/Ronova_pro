@@ -1,6 +1,7 @@
-param(
+﻿param(
     [string]$JdkHome = $env:JAVA_HOME,
-    [string]$Zig = $env:RONOVA_STORAGE_ZIG
+    [string]$Zig = $env:RONOVA_STORAGE_ZIG,
+    [string]$OutputDirectory
 )
 $ErrorActionPreference = 'Stop'
 $projectRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
@@ -15,7 +16,7 @@ if (-not (Test-Path -LiteralPath (Join-Path $includeRoot 'jni.h'))) {
     throw 'The selected JDK must contain JNI headers.'
 }
 if (-not (Test-Path -LiteralPath $Zig)) { throw 'Zig compiler not found.' }
-$outputDirectory = Join-Path $projectRoot 'build/native'
+if (-not $OutputDirectory) { $OutputDirectory = Join-Path $projectRoot 'build/native' }
 New-Item -ItemType Directory -Force -Path $outputDirectory | Out-Null
 $outputDll = Join-Path $outputDirectory 'ronova-pro-storage.dll'
 & $Zig c++ '-std=gnu++23' '-O2' '-shared' '-target' 'x86_64-windows-gnu' `

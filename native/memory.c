@@ -190,6 +190,20 @@ static int native_memory_call_begin(JNIEnv *env,NativeThread *state,Binding *bin
     }
     if(binding->unsafeOperation==UNSAFE_ALLOCATE)call->bytes=native_unsafe_argument(binding,frame,2);
     else{call->address=native_unsafe_argument(binding,frame,2);if(binding->unsafeOperation==UNSAFE_REALLOCATE)call->bytes=native_unsafe_argument(binding,frame,3);}
+    if(call->address&&(binding->unsafeOperation==UNSAFE_FREE||binding->unsafeOperation==UNSAFE_REALLOCATE)){
+        /* The old pointer can name private control state even when it has no
+         * business allocation row. Check it before acquiring business holds;
+         * realloc with a zero new size can release it just like free. */
+        uintptr_t address=(uintptr_t)call->address;
+        int restricted=state->heapCallback||state->toolingRestricted||state->vmDetaching||state->vmThreadEnding
+                ||state->hostUnloadImage||state->hostRelease||state->hostLoad&&state->hostLoad->calling;
+        int hit=native_control_range(address,address,restricted);
+        if(hit){
+            native_refuse(env,hit<0?"NATIVE_MEMORY_CONTROL_RANGE_UNAVAILABLE":binding->unsafeOperation==UNSAFE_FREE
+                    ?"NATIVE_MEMORY_CONTROL_FREE_DENIED":"NATIVE_MEMORY_CONTROL_REALLOCATE_DENIED");
+            goto refused;
+        }
+    }
     if(binding->unsafeOperation!=UNSAFE_FREE){
         call->prepared=(NativeMemoryAllocation*)calloc(1,sizeof(*call->prepared));
         if(!call->prepared){native_refuse(env,"NATIVE_MEMORY_RECORD_CAPACITY");goto refused;}
@@ -310,6 +324,22 @@ JNIEXPORT jlong JNICALL Java_dev_ronova_pro_bootstrap_NativeControl_memoryWriteB
     state->control++;int ready=native_memory_sources(env,state,contributors,&write->sources,&write->unknown,reading==JNI_TRUE&&contributors!=NULL);state->control--;
     if(!ready){native_owner_links_free(write->sources);free(write);native_refuse(env,"NATIVE_MEMORY_SOURCES_UNAVAILABLE");return 0;}
     write->address=(uint64_t)address;write->length=(uint64_t)length;write->reading=reading==JNI_TRUE;write->detached=write->reading&&snapshot==JNI_TRUE;
+    if(!write->reading&&write->length){
+        /* A raw writer must not mistake an already registered control span for
+         * an untracked business allocation. This is admission, not a lock over
+         * the later JVM Unsafe body: no private/domain gate crosses that body
+         * or any Java/JNI transition. Concurrent later publication stays open. */
+        uintptr_t first=(uintptr_t)write->address;uint64_t span=write->length-1;
+        int restricted=state->heapCallback||state->toolingRestricted||state->vmDetaching||state->vmThreadEnding
+                ||state->hostUnloadImage||state->hostRelease||state->hostLoad&&state->hostLoad->calling;
+        int hit=span>UINTPTR_MAX-first?-1:native_control_range(first,first+(uintptr_t)span,restricted);
+        if(hit){
+            /* A zero receipt alone would let rawReceipt authorize the write.
+             * Keep the pending exception through normal scope/source cleanup. */
+            native_refuse(env,hit>0?"NATIVE_MEMORY_CONTROL_WRITE_DENIED":"NATIVE_MEMORY_CONTROL_RANGE_UNAVAILABLE");
+            goto refused;
+        }
+    }
     AcquireSRWLockShared(&native_memory_records);write->allocation=native_memory_find(write->address,write->length,0);
     if(write->allocation&&!InterlockedCompareExchange(&write->allocation->sealed,0,0)){
         write->generation=write->allocation->generation;InterlockedIncrement(&write->allocation->users);write->admitted=1;

@@ -65,6 +65,7 @@ public final class AuditFixCheck {
     private static native void hostJvmtiOutput0();
     private static native boolean hostJniOutput0();
     private static native boolean hostMemoryRead0();
+    private static native void hostRawUnsafe0();
     private static native void hostModuleRelease0(String controlDll);
     private static native void hostModuleReleaseThread0(String controlDll);
     private static native void hostMemory0(String controlDll);
@@ -74,6 +75,11 @@ public final class AuditFixCheck {
     private static void hostThreadCreate(){
         System.load(java.nio.file.Path.of(System.getProperty("ronova.pro.audit.thread.native")).toAbsolutePath().toString());
         String phase=System.getProperty("ronova.pro.audit.thread.phase","thread-create");
+        if(phase.equals("raw-unsafe")){
+            hostRawUnsafe0();
+            System.out.println("RAW_UNSAFE_PASS actual_sun_misc_putLong_free_reallocate actual_internal_native_putLong_setMemory0_copyMemory0_freeMemory0_reallocateMemory0 VM_JVMTI_JNI_first_slots_same_value_and_lifetime_refused_bytes_preserved ordinary_allocate_put_set_copy_grow_shrink_zero_length_NULL_conventions_paired_free actual_Dispose no_fabricated_authority");
+            return;
+        }
         if(phase.equals("memory-effects")){
             hostMemory0(System.getProperty("ronova.pro.control.native"));
             hostMemoryRelease0(System.getProperty("ronova.pro.control.native"));
@@ -137,6 +143,93 @@ public final class AuditFixCheck {
         try {hostThreadCreate0(HostThreadCreatePayload.class,payload);}
         finally {java.lang.ref.Reference.reachabilityFence(payload);}
         System.out.println("HOST_THREAD_CREATE_PASS actual_CreateThread current_process_CreateRemoteThread current_process_CreateRemoteThreadEx actual_loaded_CRT_beginthread_beginthreadex private_dynamic_hooks native_userdata_cookie thread_id suspended_until_resume actual_thread_exit CRT_auto_close_beginthread owned_observation_handle_closed beginthreadex_handle_closed actual_CRT_errno_doserrno native_userdata_retired tagged_heap_callback_create resume_and_wait_after_walk");
+    }
+
+    @FunctionalInterface private interface RawUnsafeAction {void run()throws Exception;}
+    private static final class RawUnsafeLifetimeFailure extends AssertionError {
+        RawUnsafeLifetimeFailure(String operation,Throwable failure){super(operation+" did not confirm rejection; control lifetime is now unknown",failure);}
+    }
+    private static void rawUnsafeRefused(long address,byte[] before,String operation,RawUnsafeAction action)throws Exception {
+        rawUnsafeRefused(address,before,operation,"NATIVE_MEMORY_CONTROL_WRITE_DENIED",false,action);
+    }
+    private static void rawUnsafeRefused(long address,byte[] before,String operation,String expected,boolean lifetime,RawUnsafeAction action)throws Exception {
+        Throwable refused=null;
+        try {action.run();}
+        catch(InvocationTargetException wrapped){refused=wrapped.getCause();}
+        catch(IllegalStateException|SecurityException failure){refused=failure;}
+        boolean denied=refused instanceof IllegalStateException&&expected.equals(refused.getMessage());
+        // Never inspect or dispose a possibly freed/reallocated control target.
+        if(!denied&&lifetime)throw new RawUnsafeLifetimeFailure(operation,refused);
+        require(denied,operation+" was not refused at the actual Native control destination: "+refused);
+        for(int offset=0;offset<before.length;offset++)require(U.getByte(address+offset)==before[offset],operation+" changed first-slot bytes");
+    }
+    /** Invoked synchronously by the fixture JNI call while its real JVMTI environment is still live. */
+    private static void rawUnsafeSlots(long vm,long api,long env)throws Exception {
+        require(U.addressSize()==Long.BYTES&&vm!=0&&api!=0&&env!=0&&vm!=api&&api!=env&&vm!=env,"actual x64 VM/JVMTI/JNI slots required");
+        Class<?> internal=Class.forName("jdk.internal.misc.Unsafe",false,null);
+        Field singleton=internal.getDeclaredField("theUnsafe");singleton.setAccessible(true);Object unsafe=singleton.get(null);
+        Method putLong=internal.getDeclaredMethod("putLong",Object.class,long.class,long.class);
+        Method setMemory=internal.getDeclaredMethod("setMemory0",Object.class,long.class,long.class,byte.class);
+        Method copyMemory=internal.getDeclaredMethod("copyMemory0",Object.class,long.class,Object.class,long.class,long.class);
+        Method freeMemory=internal.getDeclaredMethod("freeMemory0",long.class);
+        Method reallocateMemory=internal.getDeclaredMethod("reallocateMemory0",long.class,long.class);
+        putLong.setAccessible(true);setMemory.setAccessible(true);copyMemory.setAccessible(true);freeMemory.setAccessible(true);reallocateMemory.setAccessible(true);
+        require(internal.getClassLoader()==null&&Modifier.isNative(putLong.getModifiers())&&Modifier.isNative(setMemory.getModifiers())
+                &&Modifier.isNative(copyMemory.getModifiers())&&Modifier.isNative(freeMemory.getModifiers())
+                &&Modifier.isNative(reallocateMemory.getModifiers()),"exact observed bootstrap Unsafe native methods required");
+        long first=0,second=0,fromNull=0;boolean lifetimeUnknown=false;
+        try {
+            first=U.allocateMemory(32);second=U.allocateMemory(32);
+            require(first!=0&&second!=0&&first!=second,"actual ordinary native allocation required");
+            U.setMemory(first,32,(byte)0x21);U.setMemory(second,32,(byte)0x32);
+            U.putLong(first,0x1020304050607080L);
+            require(U.getLong(first)==0x1020304050607080L,"ordinary sun.misc putLong changed value");
+            putLong.invoke(unsafe,null,first+8,0x1122334455667788L);
+            require(U.getLong(first+8)==0x1122334455667788L,"ordinary internal native putLong changed value");
+            setMemory.invoke(unsafe,null,first+16,1L,(byte)0x56);
+            require(U.getByte(first+16)==(byte)0x56&&U.getByte(first+17)==(byte)0x21,"ordinary native setMemory0 changed range");
+            copyMemory.invoke(unsafe,null,first,null,second,32L);
+            for(int offset=0;offset<32;offset++)require(U.getByte(first+offset)==U.getByte(second+offset),"ordinary native copyMemory0 changed bytes");
+            setMemory.invoke(unsafe,null,first,0L,(byte)0x7f);
+            copyMemory.invoke(unsafe,null,first,null,second,0L);
+            U.setMemory(first,0,(byte)0x7f);U.copyMemory(first,second,0);
+            for(int offset=0;offset<32;offset++)require(U.getByte(first+offset)==U.getByte(second+offset),"zero-length operation changed ordinary buffers");
+            byte[] prefix=new byte[32];for(int offset=0;offset<prefix.length;offset++)prefix[offset]=U.getByte(first+offset);
+            long grown=U.reallocateMemory(first,64);require(grown!=0,"ordinary public reallocation returned NULL");first=grown;
+            for(int offset=0;offset<prefix.length;offset++)require(U.getByte(first+offset)==prefix[offset],"ordinary growing reallocation changed prefix");
+            long shrunk=(Long)reallocateMemory.invoke(unsafe,first,16L);require(shrunk!=0,"ordinary native reallocation returned NULL");first=shrunk;
+            for(int offset=0;offset<16;offset++)require(U.getByte(first+offset)==prefix[offset],"ordinary shrinking reallocation changed prefix");
+            U.freeMemory(0);
+            fromNull=U.reallocateMemory(0,Long.BYTES);require(fromNull!=0,"legal NULL public reallocation did not allocate");
+            U.putLong(fromNull,0x123456789abcdef0L);require(U.getLong(fromNull)==0x123456789abcdef0L,"NULL-origin allocation did not retain ordinary data");
+            fromNull=U.reallocateMemory(fromNull,0);require(fromNull==0,"public zero-length reallocation did not return NULL");
+            for(long address:new long[]{vm,api,env}) {
+                byte[] before=new byte[Long.BYTES];for(int offset=0;offset<before.length;offset++)before[offset]=U.getByte(address+offset);
+                long value=U.getLong(address);require(value!=0,"actual Native first table pointer required");
+                rawUnsafeRefused(address,before,"sun.misc.putLong",()->U.putLong(address,value));
+                rawUnsafeRefused(address,before,"internal.native.putLong",()->putLong.invoke(unsafe,null,address,value));
+                rawUnsafeRefused(address,before,"internal.native.setMemory0",()->setMemory.invoke(unsafe,null,address,1L,before[0]));
+                U.putLong(first,value);long source=first;
+                rawUnsafeRefused(address,before,"internal.native.copyMemory0",()->copyMemory.invoke(unsafe,null,source,null,address,(long)Long.BYTES));
+                rawUnsafeRefused(address,before,"sun.misc.freeMemory","NATIVE_MEMORY_CONTROL_FREE_DENIED",true,()->U.freeMemory(address));
+                rawUnsafeRefused(address,before,"internal.native.freeMemory0","NATIVE_MEMORY_CONTROL_FREE_DENIED",true,()->freeMemory.invoke(unsafe,address));
+                rawUnsafeRefused(address,before,"sun.misc.reallocateMemory","NATIVE_MEMORY_CONTROL_REALLOCATE_DENIED",true,()->U.reallocateMemory(address,16));
+                rawUnsafeRefused(address,before,"internal.native.reallocateMemory0","NATIVE_MEMORY_CONTROL_REALLOCATE_DENIED",true,()->reallocateMemory.invoke(unsafe,address,16L));
+                // The JDK public wrapper implements size zero by calling freeMemory.
+                rawUnsafeRefused(address,before,"sun.misc.reallocateMemory.zero","NATIVE_MEMORY_CONTROL_FREE_DENIED",true,()->U.reallocateMemory(address,0));
+                rawUnsafeRefused(address,before,"internal.native.reallocateMemory0.zero","NATIVE_MEMORY_CONTROL_REALLOCATE_DENIED",true,()->reallocateMemory.invoke(unsafe,address,0L));
+            }
+            // A refused copy must close its read scope; a following ordinary copy still executes.
+            U.copyMemory(first,second,Long.BYTES);
+            require(U.getLong(first)==U.getLong(second),"ordinary copy after target refusal changed value");
+        } catch(RawUnsafeLifetimeFailure failure) {lifetimeUnknown=true;throw failure;}
+        finally {
+            if(!lifetimeUnknown) {
+                try {if(fromNull!=0)U.freeMemory(fromNull);}
+                finally {try {if(second!=0)freeMemory.invoke(unsafe,second);}
+                    finally {if(first!=0)U.freeMemory(first);}}
+            }
+        }
     }
 
     // This command loads one AUDIT_JVMTI_DISPATCH_CHECK fixture; it does not run
@@ -811,8 +904,14 @@ public final class AuditFixCheck {
             flush.invoke(connection);
             require(queue.isEmpty(),"original Connection.flushQueue did not consume its real queue");
             require(networkSources(current).length==0,"flushQueue leaked its dispatch scope to the non-Mod caller");
-            require(written.await(10,TimeUnit.SECONDS)&&received.await(10,TimeUnit.SECONDS),"real local EventLoop did not deliver all queued packets: "+failure.get());
             var cleared=client.eventLoop().submit(()->networkSources(current));cleared.sync();
+            // This single client loop completes the original submitted writes before
+            // the sentinel. LocalChannel then schedules reads on the distinct peer
+            // loop; the one-thread server group drains those submitted tasks first.
+            serverLoops.submit(()->{}).sync();
+            require(written.await(10,TimeUnit.SECONDS)&&received.await(10,TimeUnit.SECONDS),
+                    "real local EventLoop did not deliver all queued packets: writtenRemaining="+written.getCount()
+                            +", receivedRemaining="+received.getCount()+", failure="+failure.get());
             require(cleared.get().length==0,"EventLoop receipt scope remained after its original Runnable returned");
             Object[] remaining;synchronized(channels){remaining=active.toArray();}
             for(Object scope:remaining){
