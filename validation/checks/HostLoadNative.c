@@ -564,6 +564,84 @@ done:
     if(failure){fprintf(stderr,"JNI_OUTPUT_FAILED stage=%s target=%u jni=%d dispose=%d\n",failure,target,(int)result,(int)disposed);fflush(stderr);load_ti_fail(env,failure);return JNI_FALSE;}
     fprintf(stdout,"JNI_OUTPUT_PASS\n");fflush(stdout);return JNI_TRUE;
 }
+typedef BOOL (WINAPI *LoadMemoryRead)(HANDLE,LPCVOID,LPVOID,SIZE_T,SIZE_T*);
+extern LoadMemoryRead __imp_ReadProcessMemory;
+/* Exercise only local output admission through the real import and GPA. The
+ * source handle is either the current pseudo handle or its VM_READ-only alias. */
+JNIEXPORT jboolean JNICALL Java_dev_ronova_pro_AuditFixCheck_hostMemoryRead0(JNIEnv *env,jclass check){
+    (void)check;JavaVM *vm=NULL;jvmtiEnv *api=NULL;HANDLE actual=NULL;
+    LoadJvmtiOutputSlot slots[3]={0};int observed=0;unsigned mode=0,target=3;
+    const char *failure=NULL;jint result=JNI_OK;jvmtiError disposed=JVMTI_ERROR_NONE;DWORD error=0;
+    const unsigned char source[sizeof(void*)]={0x31,0x53,0x75,0x19};
+    unsigned char output[sizeof(void*)+2],before[sizeof(output)];memset(before,0x5a,sizeof(before));
+    if((*env)->ExceptionCheck(env))return JNI_FALSE;
+    result=(*env)->GetJavaVM(env,&vm);
+    if(result!=JNI_OK||!vm||(*env)->ExceptionCheck(env)){failure="HOST_MEMORY_READ_REAL_VM_REQUIRED";goto done;}
+    result=(*vm)->GetEnv(vm,(void**)&api,JVMTI_VERSION_1_2);
+    if(result!=JNI_OK||!api||(*env)->ExceptionCheck(env)){failure="HOST_MEMORY_READ_REAL_JVMTI_ENV_REQUIRED";goto done;}
+    if(!load_ti_output_slot(&slots[0],vm)||!load_ti_output_slot(&slots[1],api)||!load_ti_output_slot(&slots[2],env)){
+        failure="HOST_MEMORY_READ_REAL_PUBLIC_SLOTS_REQUIRED";goto done;
+    }
+    observed=1;
+    HMODULE kernel=GetModuleHandleW(L"kernel32.dll");
+    LoadMemoryRead entries[]={__imp_ReadProcessMemory,kernel?(LoadMemoryRead)GetProcAddress(kernel,"ReadProcessMemory"):NULL};
+    if(!load_private_entry((void*)entries[0])||!load_private_entry((void*)entries[1])){
+        failure="HOST_MEMORY_READ_ACTUAL_IMPORT_OR_GPA_NOT_CONTROLLED";goto done;
+    }
+    if(!DuplicateHandle(GetCurrentProcess(),GetCurrentProcess(),GetCurrentProcess(),&actual,PROCESS_VM_READ,FALSE,0)){
+        error=GetLastError();failure="HOST_MEMORY_READ_VM_READ_ONLY_CURRENT_ALIAS";goto done;
+    }
+    for(mode=0;mode<2;mode++){
+        HANDLE process=mode?actual:GetCurrentProcess();SIZE_T copied=(SIZE_T)0x7e;BOOL read;
+        target=3;memcpy(output,before,sizeof(output));
+        read=entries[mode](process,source,output+1,sizeof(source),&copied);error=GetLastError();
+        if(!read||copied!=sizeof(source)||memcmp(output+1,source,sizeof(source))||output[0]!=0x5a||output[sizeof(output)-1]!=0x5a){
+            failure="HOST_MEMORY_READ_ORDINARY_BYTES_AND_COUNT";goto done;
+        }
+        memcpy(output,before,sizeof(output));
+        read=entries[mode](process,source,output+1,sizeof(source),NULL);error=GetLastError();
+        if(!read||memcmp(output+1,source,sizeof(source))||output[0]!=0x5a||output[sizeof(output)-1]!=0x5a){
+            failure="HOST_MEMORY_READ_ORDINARY_OPTIONAL_NULL_COUNT";goto done;
+        }
+        copied=(SIZE_T)0x7e;
+        read=entries[mode](process,source,slots[0].address,0,&copied);error=GetLastError();
+        if(!read||copied!=0||!load_jni_output_slots_unchanged(slots)){
+            failure="HOST_MEMORY_READ_ZERO_LENGTH_NO_BUFFER_WRITE";goto done;
+        }
+        for(target=0;target<3;target++){
+            /* The payload attempt copies the slot's own value; it never
+             * deliberately replaces a live VM function-table pointer. */
+            copied=(SIZE_T)0x7e;SetLastError(0);
+            read=entries[mode](process,slots[target].bytes,slots[target].address,sizeof(slots[target].bytes),&copied);error=GetLastError();
+            if(read||error!=ERROR_ACCESS_DENIED||copied!=(SIZE_T)0x7e||!load_jni_output_slots_unchanged(slots)){
+                failure="HOST_MEMORY_READ_PROTECTED_PAYLOAD_OUTPUT";goto done;
+            }
+            memcpy(output,before,sizeof(output));SetLastError(0);
+            read=entries[mode](process,source,output+1,sizeof(source),(SIZE_T*)slots[target].address);error=GetLastError();
+            if(read||error!=ERROR_ACCESS_DENIED||memcmp(output,before,sizeof(output))||!load_jni_output_slots_unchanged(slots)){
+                failure="HOST_MEMORY_READ_PROTECTED_COUNT_NO_PARTIAL_PAYLOAD";goto done;
+            }
+            SetLastError(0);
+            read=entries[mode](process,source,(void*)(uintptr_t)1,0,(SIZE_T*)slots[target].address);error=GetLastError();
+            if(read||error!=ERROR_ACCESS_DENIED||!load_jni_output_slots_unchanged(slots)){
+                failure="HOST_MEMORY_READ_ZERO_LENGTH_PROTECTED_COUNT";goto done;
+            }
+        }
+    }
+done:
+    /* Never repair or dereference a table after an actual output changed it. */
+    if(observed&&!load_jni_output_slots_unchanged(slots)){
+        fprintf(stderr,"HOST_MEMORY_READ_FAILED stage=%s route=%u target=%u control_slot_changed\n",failure?failure:"cleanup",mode,target);fflush(stderr);return JNI_FALSE;
+    }
+    if(actual&&!CloseHandle(actual)&&!failure){error=GetLastError();failure="HOST_MEMORY_READ_CURRENT_ALIAS_CLOSE";}
+    if(api){disposed=(*api)->DisposeEnvironment(api);if(disposed!=JVMTI_ERROR_NONE&&!failure)failure="HOST_MEMORY_READ_REAL_DISPOSE";}
+    if((*env)->ExceptionCheck(env)&&!failure)failure="HOST_MEMORY_READ_UNEXPECTED_EXCEPTION";
+    if(failure){
+        fprintf(stderr,"HOST_MEMORY_READ_FAILED stage=%s route=%u target=%u win32=%lu jni=%d dispose=%d\n",failure,mode,target,(unsigned long)error,(int)result,(int)disposed);
+        fflush(stderr);load_ti_fail(env,failure);return JNI_FALSE;
+    }
+    fprintf(stdout,"HOST_MEMORY_READ_PASS\n");fflush(stdout);return JNI_TRUE;
+}
 static int load_jvmti_environment(JavaVM *vm,JNIEnv *env,jclass check){
     jvmtiEnv *api=NULL;
     if((*vm)->GetEnv(vm,(void**)&api,JVMTI_VERSION_1_2)!=JNI_OK||!api){load_ti_fail(env,"REAL_JVMTI_GETENV_FAILED");return 0;}

@@ -2,10 +2,12 @@
  * Admission protects the current control ranges; it does not intercept CPU
  * stores, raw syscalls, or memory APIs consumed outside the observed images.
  * https://learn.microsoft.com/en-us/windows/win32/api/handleapi/nf-handleapi-compareobjecthandles
+ * https://learn.microsoft.com/en-us/windows/win32/api/memoryapi/nf-memoryapi-readprocessmemory
  * https://learn.microsoft.com/en-us/windows/win32/api/memoryapi/nf-memoryapi-writeprocessmemory
  * https://learn.microsoft.com/en-us/windows/win32/api/memoryapi/nf-memoryapi-virtualprotect
  */
 typedef BOOL (WINAPI *HostWriteProcessMemory)(HANDLE,LPVOID,LPCVOID,SIZE_T,SIZE_T*);
+typedef BOOL (WINAPI *HostReadProcessMemory)(HANDLE,LPCVOID,LPVOID,SIZE_T,SIZE_T*);
 typedef BOOL (WINAPI *HostVirtualProtect)(LPVOID,SIZE_T,DWORD,PDWORD);
 typedef BOOL (WINAPI *HostVirtualProtectEx)(HANDLE,LPVOID,SIZE_T,DWORD,PDWORD);
 typedef BOOL (WINAPI *HostVirtualFree)(LPVOID,SIZE_T,DWORD);
@@ -77,6 +79,59 @@ static int host_memory_range(const void *address,SIZE_T size,int pages,int restr
     }
     int hit=native_control_range(first,last,restricted);
     return hit?hit:host_memory_import_range(first,last,restricted);
+}
+/* The caller holds native_private_gate. This is only the final local output
+ * check: source/Host/VM directory queries must have finished before the gate. */
+static int host_memory_output_locked(const void *address,SIZE_T size){
+    if(!size)return 0;uintptr_t first=(uintptr_t)address,span=(uintptr_t)(size-1);
+    return span>UINTPTR_MAX-first?-1:native_private_range_locked(first,first+span);
+}
+static uint64_t host_native_memory_read(HostImport *entry,void *caller,uintptr_t *arguments){
+    DWORD incoming=GetLastError();OwnerLink *owners=NULL;int unknown=0;
+    HANDLE source=(HANDLE)arguments[0];LPCVOID address=(LPCVOID)arguments[1];
+    LPVOID buffer=(LPVOID)arguments[2];SIZE_T size=(SIZE_T)arguments[3];SIZE_T *read=(SIZE_T*)arguments[4];
+    NativeThread *state=native_tls==TLS_OUT_OF_INDEXES?NULL:(NativeThread*)TlsGetValue(native_tls);
+    int restricted=state&&(state->heapCallback||state->toolingRestricted||state->vmDetaching||state->vmThreadEnding
+            ||state->hostUnloadImage||state->hostRelease||state->hostLoad&&state->hostLoad->calling);
+    if(!restricted)entry=host_consumed_entry(entry,state,caller);
+    if(!host_entry_sources_query(entry,state,caller,&owners,NULL,1,&unknown)){
+        DWORD error=GetLastError();native_owner_links_free(owners);SetLastError(error);return FALSE;
+    }
+    DWORD error=0;HANDLE process=NULL;BOOL result=FALSE;
+    if(native_owner_stopped(owners))error=ERROR_ACCESS_DENIED;
+    else if(unknown&&(restricted||native_has_producer(owners)))error=ERROR_INVALID_DATA;
+    /* Both destinations are local even when the source process is remote.
+     * A SAME_ACCESS alias fixes exactly the supplied kernel object without
+     * acquiring query rights or reclassifying it through a PID. */
+    if(!error&&!host_real_duplicate(GetCurrentProcess(),source,GetCurrentProcess(),&process,0,FALSE,DUPLICATE_SAME_ACCESS))
+        error=GetLastError();
+    int hit=0;
+    if(!error)hit=host_memory_range(buffer,size,0,restricted);
+    if(!error&&!hit&&read)hit=host_memory_range(read,sizeof(*read),0,restricted);
+    if(!error&&hit)error=hit>0?ERROR_ACCESS_DENIED:restricted?ERROR_BUSY:ERROR_INVALID_DATA;
+    if(!error){
+        int locked=restricted?TryAcquireSRWLockExclusive(&native_private_gate):
+                (AcquireSRWLockExclusive(&native_private_gate),1);
+        if(!locked)error=ERROR_BUSY;
+        else {
+            hit=host_memory_output_locked(buffer,size);
+            if(!hit&&read)hit=host_memory_output_locked(read,sizeof(*read));
+            if(hit)error=hit>0?ERROR_ACCESS_DENIED:restricted?ERROR_BUSY:ERROR_INVALID_DATA;
+            else if(native_owner_stopped(owners))error=ERROR_ACCESS_DENIED;
+            else {
+                /* Unlike a VM query, the real Windows copy can execute inside
+                 * this allocation/publication gate. Do not stage either output:
+                 * a failed read can have real partial effects, and NULL, zero
+                 * length and overlapping outputs keep their original contract. */
+                SetLastError(incoming);
+                result=((HostReadProcessMemory)entry->original)(process,address,buffer,size,read);
+                error=GetLastError();
+            }
+            ReleaseSRWLockExclusive(&native_private_gate);
+        }
+    }
+    if(process&&!host_real_close(process))InterlockedIncrement(&native_failures);
+    native_owner_links_free(owners);SetLastError(error);return (uint64_t)result;
 }
 static BOOL host_memory_original(HostImport *entry,HANDLE process,const uintptr_t *a){
     switch(entry->kind){

@@ -63,6 +63,7 @@ public final class AuditFixCheck {
     private static native void hostJniTable0();
     private static native void hostJvmtiOutput0();
     private static native boolean hostJniOutput0();
+    private static native boolean hostMemoryRead0();
     private static native void hostModuleRelease0(String controlDll);
     private static native void hostModuleReleaseThread0(String controlDll);
     private static native void hostMemory0(String controlDll);
@@ -72,6 +73,10 @@ public final class AuditFixCheck {
     private static void hostThreadCreate(){
         System.load(java.nio.file.Path.of(System.getProperty("ronova.pro.audit.thread.native")).toAbsolutePath().toString());
         String phase=System.getProperty("ronova.pro.audit.thread.phase","thread-create");
+        if(phase.equals("read-memory")){
+            require(hostMemoryRead0(),"Host memory read output control failed");
+            return;
+        }
         if(phase.equals("free-exit")){
             hostModuleReleaseThread0(System.getProperty("ronova.pro.control.native"));
             System.out.println("HOST_FREE_EXIT_PASS actual_FreeLibraryAndExitThread_IAT_GPA unattached_native_workers original_exit_codes signaled_nonreturn actual_resource_view_unmapped exact_control_borrowed_attack_mapping_preserved handles_closed temporary_files_removed no_fabricated_authority");

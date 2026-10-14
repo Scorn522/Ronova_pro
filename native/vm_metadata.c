@@ -20,7 +20,7 @@ static CodeVMLayout code_vm_layout;
 static INIT_ONCE code_vm_once=INIT_ONCE_STATIC_INIT;
 static int code_vm_read(uintptr_t address,void *destination,size_t size){
     SIZE_T copied=0;
-    return address&&size<=UINTPTR_MAX-address&&ReadProcessMemory(GetCurrentProcess(),(LPCVOID)address,destination,size,&copied)&&copied==size;
+    return address&&size<=UINTPTR_MAX-address&&host_real_read_process_memory(GetCurrentProcess(),(LPCVOID)address,destination,size,&copied)&&copied==size;
 }
 static int code_vm_export(HMODULE image,const char *name,void *value,size_t size){
     uintptr_t address=(uintptr_t)GetProcAddress(image,name);

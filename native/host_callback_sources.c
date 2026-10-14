@@ -79,7 +79,7 @@ static int host_callback_scopes_locked(NativeThread *state,OwnerLink **owners,in
 static int host_callback_entry_sources(HostImport *entry,NativeThread *state,void *caller,
         OwnerLink **owners,NativeLibrary **selected,int retainSources,int threadAdmissionOnly,int *unobserved){
     if(selected)*selected=NULL;
-    if(!state||(!state->heapCallback&&!state->vmDetaching&&!state->vmThreadEnding&&!state->hostUnloadImage&&!state->hostRelease
+    if(!state||(!state->heapCallback&&!state->toolingRestricted&&!state->vmDetaching&&!state->vmThreadEnding&&!state->hostUnloadImage&&!state->hostRelease
             &&!(state->hostLoad&&state->hostLoad->calling))){
         SetLastError(ERROR_INVALID_STATE);return 0;
     }

@@ -86,7 +86,7 @@ static void native_memory_revision_release(NativeMemoryRevision *revision){
     }
 }
 static int native_memory_read(uint64_t address,void *bytes,size_t length){
-    DWORD error=GetLastError();SIZE_T copied=0;int ready=ReadProcessMemory(GetCurrentProcess(),(const void*)(uintptr_t)address,bytes,length,&copied)&&copied==length;SetLastError(error);return ready;
+    DWORD error=GetLastError();SIZE_T copied=0;int ready=host_real_read_process_memory(GetCurrentProcess(),(const void*)(uintptr_t)address,bytes,length,&copied)&&copied==length;SetLastError(error);return ready;
 }
 static NativeMemoryImage *native_memory_image(NativeMemoryWrite *write){
     if(!write->length||write->length>SIZE_MAX)return NULL;

@@ -153,6 +153,7 @@ static int native_control_range(uintptr_t,uintptr_t,int);
 static BOOL host_real_virtual_protect(LPVOID,SIZE_T,DWORD,PDWORD);
 static BOOL host_real_virtual_free(LPVOID,SIZE_T,DWORD);
 static BOOL host_real_write_process_memory(HANDLE,LPVOID,LPCVOID,SIZE_T,SIZE_T*);
+static BOOL host_real_read_process_memory(HANDLE,LPCVOID,LPVOID,SIZE_T,SIZE_T*);
 static NativeThread *native_thread(void) {
     if(native_tls==TLS_OUT_OF_INDEXES)return NULL;NativeThread *state=(NativeThread*)TlsGetValue(native_tls);
     if(!state){state=(NativeThread*)calloc(1,sizeof(*state));if(state){state->storageOwned=1;if(!TlsSetValue(native_tls,state)){free(state);return NULL;}}}return state;
@@ -1605,7 +1606,7 @@ static jvmtiError JNICALL native_tooling_set_callbacks(jvmtiEnv *api,const jvmti
     if(callbacks&&(native_tooling_stopped(env,caller)||!native_tooling_capture(env,caller,&owners,&origin,&unknown))){native_owner_links_free(owners);return native_tooling_error(JVMTI_ERROR_ACCESS_DENIED);}
     NativeToolingVersion *version=calloc(1,sizeof(*version));jvmtiEventCallbacks submitted;memset(&submitted,0,sizeof(submitted));
     SIZE_T copied=0;size_t length=size<(jint)sizeof(submitted)?(size_t)size:sizeof(submitted);
-    int ready=version&&(!callbacks||!length||ReadProcessMemory(GetCurrentProcess(),callbacks,&submitted,length,&copied)&&copied==length);
+    int ready=version&&(!callbacks||!length||host_real_read_process_memory(GetCurrentProcess(),callbacks,&submitted,length,&copied)&&copied==length);
     int alias=0;
     if(ready){
 #define TOOLING_ALIAS(NAME,COUNT) if(submitted.NAME&&native_tooling_internal((void*)submitted.NAME))alias=1;
@@ -1666,7 +1667,7 @@ static jvmtiError JNICALL native_tooling_set_jni(jvmtiEnv *api,const jniNativeIn
     if(!table)return JVMTI_ERROR_NULL_POINTER;
     if(InterlockedCompareExchange(&native_guarded_ready,0,0)){
         jniNativeInterface incoming;SIZE_T copied=0;
-        if(!ReadProcessMemory(GetCurrentProcess(),table,&incoming,sizeof(incoming),&copied)||copied!=sizeof(incoming))return native_tooling_error(JVMTI_ERROR_ILLEGAL_ARGUMENT);
+        if(!host_real_read_process_memory(GetCurrentProcess(),table,&incoming,sizeof(incoming),&copied)||copied!=sizeof(incoming))return native_tooling_error(JVMTI_ERROR_ILLEGAL_ARGUMENT);
         const uintptr_t *original=(const uintptr_t*)&native_original,*guarded=(const uintptr_t*)&native_guarded,*proposed=(const uintptr_t*)&incoming;
         for(unsigned i=0;i<sizeof(incoming)/sizeof(uintptr_t);i++)if(guarded[i]!=original[i]&&proposed[i]!=guarded[i])return native_tooling_error(JVMTI_ERROR_ACCESS_DENIED);
         /* The VM receives exactly the private table that passed the guard.
@@ -1847,7 +1848,7 @@ static jvmtiError native_tooling_thread_list(jvmtiEnv *api,jint count,const jthr
     if(!snapshot||!allowed||!frames||!effects){free(snapshot);free(allowed);free(frames);free(effects);return JVMTI_ERROR_OUT_OF_MEMORY;}
     SIZE_T copied=0;size_t length=(size_t)count*sizeof(*snapshot);JNIEnv *env=native_tooling_jni();jint selected=0;
     jvmtiError result=JVMTI_ERROR_NONE;
-    if(!ReadProcessMemory(GetCurrentProcess(),threads,snapshot,length,&copied)||copied!=length)result=JVMTI_ERROR_ILLEGAL_ARGUMENT;
+    if(!host_real_read_process_memory(GetCurrentProcess(),threads,snapshot,length,&copied)||copied!=length)result=JVMTI_ERROR_ILLEGAL_ARGUMENT;
     if(result==JVMTI_ERROR_NONE){for(jint i=0;i<count;i++){
             effects[i]=native_tooling_thread_begin(env,snapshot[i],resume?5:4,caller,&frames[i]);
             if(effects[i]==JVMTI_ERROR_NONE)allowed[selected++]=snapshot[i];

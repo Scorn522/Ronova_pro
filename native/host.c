@@ -26,7 +26,7 @@ enum {
     HOST_LOAD_LIBRARY_A=22,HOST_LOAD_LIBRARY_W=23,HOST_LOAD_LIBRARY_EX_A=24,HOST_LOAD_LIBRARY_EX_W=25,
     HOST_FREE_LIBRARY=26,HOST_WRITE_PROCESS_MEMORY=27,HOST_VIRTUAL_PROTECT=28,HOST_VIRTUAL_PROTECT_EX=29,
     HOST_VIRTUAL_FREE=30,HOST_VIRTUAL_FREE_EX=31,HOST_UNMAP_VIEW=32,HOST_UNMAP_VIEW_EX=33,
-    HOST_FREE_LIBRARY_EXIT_THREAD=34,HOST_KIND_COUNT=35
+    HOST_FREE_LIBRARY_EXIT_THREAD=34,HOST_READ_PROCESS_MEMORY=35,HOST_KIND_COUNT=36
 };
 static int host_is_create(int kind){return kind==HOST_CREATE_W||kind==HOST_CREATE_A
         ||kind>=HOST_CREATE_USER_W&&kind<=HOST_CREATE_LOGON_W;}
@@ -80,6 +80,11 @@ static BOOL host_real_write_process_memory(HANDLE process,LPVOID address,LPCVOID
     DWORD incoming=GetLastError();void *actual=host_real_memory_target(HOST_WRITE_PROCESS_MEMORY,"WriteProcessMemory");
     if(!actual){SetLastError(ERROR_PROC_NOT_FOUND);return FALSE;}
     SetLastError(incoming);return ((BOOL (WINAPI*)(HANDLE,LPVOID,LPCVOID,SIZE_T,SIZE_T*))actual)(process,address,buffer,size,written);
+}
+static BOOL host_real_read_process_memory(HANDLE process,LPCVOID address,LPVOID buffer,SIZE_T size,SIZE_T *read){
+    DWORD incoming=GetLastError();void *actual=host_real_memory_target(HOST_READ_PROCESS_MEMORY,"ReadProcessMemory");
+    if(!actual){SetLastError(ERROR_PROC_NOT_FOUND);return FALSE;}
+    SetLastError(incoming);return ((BOOL (WINAPI*)(HANDLE,LPCVOID,LPVOID,SIZE_T,SIZE_T*))actual)(process,address,buffer,size,read);
 }
 static BOOL host_real_close(HANDLE handle){
     void *actual=__atomic_load_n(&host_windows_api[HOST_CLOSE],__ATOMIC_ACQUIRE);
@@ -673,7 +678,7 @@ static int host_entry_association(HostImport *entry,NativeThread *state,OwnerLin
 #include "host_callback_sources.c"
 static int host_entry_sources_query(HostImport *entry,NativeThread *state,void *caller,OwnerLink **owners,NativeLibrary **selected,int retainSources,int *unknown){
     int unobserved=entry->unknown;
-    if(state&&(state->heapCallback||state->vmDetaching||state->vmThreadEnding||state->hostUnloadImage||state->hostRelease
+    if(state&&(state->heapCallback||state->toolingRestricted||state->vmDetaching||state->vmThreadEnding||state->hostUnloadImage||state->hostRelease
             ||state->hostLoad&&state->hostLoad->calling))
         return host_callback_entry_sources(entry,state,caller,owners,selected,retainSources,host_is_thread_admission(entry->kind),unknown);
     AcquireSRWLockShared(&host_imports);AcquireSRWLockShared(&native_records);
@@ -741,7 +746,7 @@ static void host_refresh_targets(HostImage *image);
 static FARPROC WINAPI host_native_resolve(HMODULE module,LPCSTR name,HostImport *entry,void *caller){
     DWORD incoming=GetLastError();
     NativeThread *state=native_tls==TLS_OUT_OF_INDEXES?NULL:(NativeThread*)TlsGetValue(native_tls);
-    if(state&&state->heapCallback){SetLastError(ERROR_BUSY);return NULL;}
+    if(state&&(state->heapCallback||state->toolingRestricted)){SetLastError(ERROR_BUSY);return NULL;}
     entry=host_consumed_entry(entry,state,caller);
     AcquireSRWLockShared(&host_imports);AcquireSRWLockShared(&native_records);
     int associated=host_entry_association(entry,state,NULL,NULL);
@@ -982,6 +987,7 @@ static uint64_t host_native_dispatch(HostImport *entry,void *caller,uintptr_t *a
     if(entry->kind==HOST_FREE_LIBRARY)return host_native_module_release(entry,caller,arguments);
     if(host_is_memory_write(entry->kind))return host_native_memory(entry,caller,arguments);
     if(host_is_memory_release(entry->kind))return host_native_memory_release(entry,caller,arguments);
+    if(entry->kind==HOST_READ_PROCESS_MEMORY)return host_native_memory_read(entry,caller,arguments);
     SetLastError(ERROR_INVALID_FUNCTION);return 0;
 }
 static uint64_t host_native_call(HostImport *entry,void *caller,uintptr_t *arguments){
@@ -990,7 +996,7 @@ static uint64_t host_native_call(HostImport *entry,void *caller,uintptr_t *argum
     if(entry->kind==HOST_FREE_LIBRARY_EXIT_THREAD)host_native_module_exit(entry,caller,arguments);
     DWORD incoming=GetLastError();
     NativeThread *state=native_tls==TLS_OUT_OF_INDEXES?NULL:(NativeThread*)TlsGetValue(native_tls);
-    int restricted=state&&(state->heapCallback||state->vmDetaching||state->vmThreadEnding||state->hostUnloadImage||state->hostRelease
+    int restricted=state&&(state->heapCallback||state->toolingRestricted||state->vmDetaching||state->vmThreadEnding||state->hostUnloadImage||state->hostRelease
             ||state->hostLoad&&state->hostLoad->calling);
     if(restricted){
         if(!TryAcquireSRWLockShared(&host_imports)){SetLastError(ERROR_BUSY);return 0;}
@@ -1017,7 +1023,7 @@ static unsigned host_import_arguments(int kind){
         case HOST_BEGIN_THREAD_EX:return 6;
         case HOST_LOAD_LIBRARY_A:case HOST_LOAD_LIBRARY_W:return 1;
         case HOST_LOAD_LIBRARY_EX_A:case HOST_LOAD_LIBRARY_EX_W:return 3;
-        case HOST_WRITE_PROCESS_MEMORY:case HOST_VIRTUAL_PROTECT_EX:return 5;
+        case HOST_WRITE_PROCESS_MEMORY:case HOST_VIRTUAL_PROTECT_EX:case HOST_READ_PROCESS_MEMORY:return 5;
         case HOST_VIRTUAL_PROTECT:return 4;
         case HOST_VIRTUAL_FREE:return 3;
         case HOST_VIRTUAL_FREE_EX:return 4;
@@ -1066,7 +1072,7 @@ static const char *host_api_names[HOST_KIND_COUNT]={NULL,"CreateProcessW","GetPr
         "CreateThread","CreateRemoteThread","CreateRemoteThreadEx","_beginthread","_beginthreadex",
         "LoadLibraryA","LoadLibraryW","LoadLibraryExA","LoadLibraryExW","FreeLibrary",
         "WriteProcessMemory","VirtualProtect","VirtualProtectEx",
-        "VirtualFree","VirtualFreeEx","UnmapViewOfFile","UnmapViewOfFileEx","FreeLibraryAndExitThread"};
+        "VirtualFree","VirtualFreeEx","UnmapViewOfFile","UnmapViewOfFileEx","FreeLibraryAndExitThread","ReadProcessMemory"};
 static void host_windows_targets(void **targets){
     host_memory_prepare();
     HMODULE kernel=GetModuleHandleW(L"kernel32.dll"),advapi=GetModuleHandleW(L"advapi32.dll");
@@ -1325,7 +1331,7 @@ static void *volatile *host_delay_call_slot(HostImage *image,void *caller){
     free(marks);free(queue);return proven?address:NULL;
 }
 static HostImport *host_consumed_entry(HostImport *entry,NativeThread *state,void *caller){
-    if(state&&(state->heapCallback||state->vmDetaching||state->vmThreadEnding))return entry;
+    if(state&&(state->heapCallback||state->toolingRestricted||state->vmDetaching||state->vmThreadEnding))return entry;
     if(!entry->returned)return entry;
     HostImport *consumed=entry;HostImage *image=entry->image;
     AcquireSRWLockExclusive(&host_imports);int mapped=image->live;

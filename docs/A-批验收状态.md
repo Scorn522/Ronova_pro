@@ -1,5 +1,16 @@
 # Ronova Pro 当前进度
 
+## 2026-10-14：C 接续——Windows 读取 API 的本地输出保护
+
+接续 `f51380d`，Java ABI71 / Native ABI67 / Storage3 / Journal6。ReadProcessMemory 已接入真实 IAT/GPA 分类及分发；[原接口](https://learn.microsoft.com/en-us/windows/win32/api/memoryapi/nf-memoryapi-readprocessmemory) 的数据和字节数输出均在本地，保护不依赖源进程是否为当前进程。来源和域查询完成后，短 private gate 内复核两个实际输出范围及停止状态，再仅调用一次真实 API；不预清或暂存原输出，获准调用保留实际 BOOL、即时 LastError 和可能的部分效果。源句柄仅以 SAME_ACCESS 固定自有 alias。自有快照读取走保留真实入口；GC/ObjectFree 只补必要的受限路由和 Try 锁，不进入普通 JNI 来源路径。
+
+控制登记通知的资格检查，继续取实际 StackWalker 调用者，仅用 CodeSourceBridge/实际 ControlRegistry 的精确类身份替代原 nest 查询；其它三类资格和发布前通知顺序保留。原 run03 的15:41实际栈显示主线程等待 CONTROLS，continuation 持锁调用该 nest 查询；前序栈显示线程仍会推进，不能定性为持续死锁。本修复去掉这一个已观察的持锁 VM 查询，未挪锁或撤销通知，不宣称世界启动已修。
+
+完整源码写齐后构建 `build-c-java71-native67-read-20261014.log` PASS33秒；复用夹具独立 read-memory 分支编译通过，`c-host-read67-20261014.log` 实际退出0、HOST_MEMORY_READ_PASS，Native/JNI 与线程绑定就绪。IAT/实际 GPA 路径的普通复制、可选 NULL、仅 VM_READ 的真实当前进程 alias、零长度输出均通过；真实 VM/JVMTI/JNI 首槽作为数据或字节数输出均拒绝，字节和映射保持，字节数拒绝不先写普通 payload。未重跑旧矩阵；跨进程实读、真实受限回调和并发生命周期未实跑，不作扩展通过声明，原未观察入口边界保留。文件绑定仍有74 pending。
+
+原 Java63/Native61 run03 会话本轮仍存活，日志到15:15进度加载，尚无 WORLD_LOADED/Done/冻结保存结果，未停止或重启。自身外观及武器注册暂缓；驱动/管理器源码、签名及部署未改，沿用既有未签名产物。候选 `distribution/candidate-c-java71-native67-read-wip-20261014`，Core2456819字节、prelaunch22440字节；匹配包 `distribution/Ronova-Pro-C-HostRead-WIP-Java71-Native67-20261014.zip`。源码与报告摘要同步 Git，旧包、原始日志、候选和存档留本地；完整 C/B 仍在收口。
+
+---
 ## 2026-10-14：C 接续——JNI 调用者输出保护
 
 接续 `2d6db6f`，Java ABI70 / Native ABI66 / Storage3 / Journal6。自身外观与武器物品注册继续暂缓，沿用现有命令和底层入口。

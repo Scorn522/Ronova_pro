@@ -145,6 +145,10 @@ public final class CodeSourceBridge {
         public void clear(){if(Key.writer(WALKER.getCallerClass()))super.clear();}
         public boolean enqueue(){return Key.writer(WALKER.getCallerClass())&&super.enqueue();}
     }
+    /** Exact notification writers; avoid a VM nest query while CONTROLS is held. */
+    static boolean heapPolicyWriter(Class<?> caller){
+        return caller==CodeSourceBridge.class||caller==ControlRegistry.class;
+    }
     /** Used only under its own monitor; registration never enters a monitored JDK map. */
     private static final class ControlRegistry {
         private ControlKey[] table=new ControlKey[16];private int size;

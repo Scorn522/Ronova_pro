@@ -43,7 +43,7 @@ static void native_tooling_definitions_free(JNIEnv *env,NativeToolingDefinitionC
     free(call->classes);free(call->images);free(call->definitions);native_owner_links_free(call->owners);free(call);
 }
 static int native_tooling_definitions_read(const void *source,void *target,size_t length){
-    SIZE_T copied=0;return !length||source&&ReadProcessMemory(GetCurrentProcess(),source,target,length,&copied)&&copied==length;
+    SIZE_T copied=0;return !length||source&&host_real_read_process_memory(GetCurrentProcess(),source,target,length,&copied)&&copied==length;
 }
 static int native_tooling_definitions_snapshot(JNIEnv *env,NativeToolingDefinitionCall *call,
         const jvmtiClassDefinition *definitions,const jclass *types,int redefine,void *caller){

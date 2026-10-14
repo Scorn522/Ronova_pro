@@ -566,7 +566,7 @@ static jvmtiError native_tooling_heap_prepare(NativeToolingEnv *record,JNIEnv *e
     if(record->own&&!native_tooling_internal(caller)||native_tooling_stopped(env,caller))return JVMTI_ERROR_ACCESS_DENIED;
     jvmtiHeapCallbacks supplied={0};
     if(callbacks){SIZE_T copied=0;
-        if(!ReadProcessMemory(GetCurrentProcess(),callbacks,&supplied,sizeof(supplied),&copied)||copied!=sizeof(supplied))return JVMTI_ERROR_ILLEGAL_ARGUMENT;}
+        if(!host_real_read_process_memory(GetCurrentProcess(),callbacks,&supplied,sizeof(supplied),&copied)||copied!=sizeof(supplied))return JVMTI_ERROR_ILLEGAL_ARGUMENT;}
     OwnerLink *sources=NULL;jweak origin=NULL;int unknown=0;
     if(!native_tooling_capture(env,caller,&sources,&origin,&unknown)){
         if(origin)native_original.DeleteWeakGlobalRef(env,origin);native_owner_links_free(sources);return JVMTI_ERROR_ACCESS_DENIED;}

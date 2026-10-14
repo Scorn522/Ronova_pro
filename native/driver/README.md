@@ -1,6 +1,6 @@
 # Ronova Host Windows 驱动源码
 
-此目录交付 Windows x64 内核源码、共享 IOCTL 头、集中 WDK 构建入口和显式开发部署工具。当前用户态 Java ABI70 / Native ABI66；本轮驱动和管理器源码未改、未重建，沿用 Native58 EA 工作包的37888字节SYS与 Native56 工作包的190464字节EXE。上述产物已用官方 WDK/SDK NuGet 10.0.26100.6584 头库及 Zig/LLD 编译链接；前一包及原结果保留。正式 VS/WDK MSBuild 未执行；未签名、生成CAT、安装或加载，没有修改TestSigning，两 altitude 仍待真实配置。实际内核 I/O和UAC部署命令未运行。
+此目录交付 Windows x64 内核源码、共享 IOCTL 头、集中 WDK 构建入口和显式开发部署工具。当前用户态 Java ABI71 / Native ABI67；本轮驱动和管理器源码未改、未重建，沿用 Native58 EA 工作包的37888字节SYS与 Native56 工作包的190464字节EXE。上述产物已用官方 WDK/SDK NuGet 10.0.26100.6584 头库及 Zig/LLD 编译链接；前一包及原结果保留。正式 VS/WDK MSBuild 未执行；未签名、生成CAT、安装或加载，没有修改TestSigning，两 altitude 仍待真实配置。实际内核 I/O和UAC部署命令未运行。
 
 `RonovaHost.vcxproj` 使用 Visual Studio 2022 C++ 工具、匹配的 Windows SDK/WDK 与 VS WDK 扩展、`WindowsKernelModeDriver10.0`；目标 Windows 10 2004（19041）及以后，内核 C17，链接 FltMgr/Wdmsec/NtosKrnl，设置 `/INTEGRITYCHECK`。`RonovaHostManage.vcxproj` 是 x64 C17 Win32 控制台工具，链接 Newdev/Setupapi/FltLib/Advapi32/Shell32/Ole32。启动按 `asInvoker` 使用调用者当前权限，只有用户选择修改命令后才按实际 token 决定是否请求 UAC。`RonovaHost.proj` 将两者放在同一次集中构建中。
 
