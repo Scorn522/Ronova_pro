@@ -28,7 +28,7 @@ public final class ControlBridge {
         }
     };
     private ControlBridge() { }
-    public static int abiVersion(){return 73;}
+    public static int abiVersion(){return 74;}
     public static long arrayRevision(Object value){if(!recoveryWriter())throw new SecurityException("RECOVERY_ARRAY_READER_REQUIRED");return CodeSourceBridge.executionArrayRevision(value);}
 
     public static synchronized void install(Class<?> agent,ClassFileTransformer[] transformers) throws ReflectiveOperationException {
@@ -827,7 +827,7 @@ public final class ControlBridge {
             "registerConsoleInput","beginConsoleCommand","endConsoleCommand","consoleDispatchTrusted",
             "clearProtectedMap","unsafeWriteAllowed","unsafeMemoryAllowed",
             "nativeArrayElementAllowed","nativePrimitiveArrayPolicy","nativeArrayPointerAllowed","nativeRegistrationAllowed","nativeRegistrationTargetAllowed","nativeHeapTargetAllowed","arrayWriteAllowed",
-            "resourceReleaseAllowed","lifeResult","dispatchAllowed","taskEffectAllowed",
+            "resourceReleaseAllowed","lifeResult","dispatchAllowed","dispatchDeniedResult","equipmentActionSourceAllowed","taskEffectAllowed",
             "resultPublicationAllowed");
     static boolean controlCaller() {
         // The query omits guard entry points, preserving the real ledger writer.
@@ -2135,6 +2135,44 @@ public final class ControlBridge {
         if(guard==null||receiver==null)return true;
         try { return !(boolean)guard.invokeExact(receiver,operation,value); }
         catch(Throwable failure) { throw new IllegalStateException("DISPATCH_POLICY_FAILED",failure); }
+    }
+    static volatile java.lang.invoke.MethodHandle dispatchResults;
+    public static synchronized void installDispatchResults(Class<?> owner,java.lang.invoke.MethodHandle result) {
+        requirePolicyInstaller();
+        Guards current=guards;
+        if(current==null||current.owner()!=owner)throw new SecurityException("DISPATCH_RESULT_OWNER");
+        dispatchResults=Objects.requireNonNull(result).asType(java.lang.invoke.MethodType.methodType(Object.class,Object.class,String.class,Object.class));
+    }
+    public static Object dispatchDeniedResult(Object receiver,String operation,Object arguments) {
+        var result=dispatchResults;
+        if(result==null)throw new IllegalStateException("DISPATCH_RESULT_POLICY_UNAVAILABLE");
+        try{return (Object)result.invokeExact(receiver,operation,arguments);}
+        catch(Throwable failure){throw new IllegalStateException("DISPATCH_RESULT_POLICY_FAILED",failure);}
+    }
+    /** Existing source continuity is a condition of an exact game action, never an input credential. */
+    public static boolean equipmentActionSourceAllowed() {
+        return equipmentActionSourcesAllowed(WALKER.getCallerClass(),null);
+    }
+    public static boolean equipmentActionSourceAllowed(Class<?> delegatedItem) {
+        return equipmentActionSourcesAllowed(WALKER.getCallerClass(),delegatedItem);
+    }
+    private static boolean equipmentActionSourcesAllowed(Class<?> caller,Class<?> delegatedItem) {
+        Guards current=guards;
+        if(current==null||!caller.getName().equals("dev.ronova.pro.EquipmentPolicy")
+                ||caller.getClassLoader()!=current.owner().getClassLoader()||DefinitionBridge.module(caller)!=current.owner().getModule()
+                ||!Objects.equals(caller.getProtectionDomain().getCodeSource(),current.owner().getProtectionDomain().getCodeSource()))
+            throw new SecurityException("EQUIPMENT_ACTION_SOURCE_OWNER");
+        if(sourceUnknown())return false;
+        Module delegate=delegatedItem==null?null:DefinitionBridge.module(delegatedItem);
+        for(Module source:scopedSources())if(source==null||producer(source)&&source!=current.owner().getModule()&&source!=delegate)return false;
+        return ORIGIN_WALKER.walk(frames->{var cursor=frames.iterator();while(cursor.hasNext()) {
+            var frame=cursor.next();Class<?> type=frame.getDeclaringClass();
+            if(ownState(type)||ControlBridge.owns(type))continue;
+            for(Module source:CodeSourceBridge.frameSources(frame))
+                if(source==null||producer(source)&&source!=current.owner().getModule()&&source!=delegate)return false;
+            Module physical=DefinitionBridge.module(type);
+            if(producer(physical)&&physical!=current.owner().getModule()&&physical!=delegate)return false;
+        }return true;});
     }
     static boolean taskEffectAllowed(Guards current,Object task,String effect) {
         if(modStopped(objectModule(task))||stoppedInvocation())return false;

@@ -27,9 +27,46 @@ public final class Access {
         @Accessor("attributes") net.minecraft.world.entity.ai.attributes.AttributeMap pro$attributes();
         @Accessor("activeEffects") Map<net.minecraft.world.effect.MobEffect,net.minecraft.world.effect.MobEffectInstance> pro$effects();
         @Accessor("useItem") net.minecraft.world.item.ItemStack pro$useItem();
+        @Accessor("DATA_LIVING_ENTITY_FLAGS") static net.minecraft.network.syncher.EntityDataAccessor<Byte> pro$useFlags() { throw new AssertionError(); }
     }
     @Mixin(net.minecraft.world.entity.player.Player.class) public interface PlayerState {
         @Accessor("foodData") net.minecraft.world.food.FoodData pro$foodData();
+        @Accessor("inventory") net.minecraft.world.entity.player.Inventory pro$inventory();
+    }
+    @Mixin(net.minecraft.world.entity.player.Inventory.class) public interface InventoryState {
+        @Accessor("items") net.minecraft.core.NonNullList<net.minecraft.world.item.ItemStack> pro$items();
+        @Accessor("armor") net.minecraft.core.NonNullList<net.minecraft.world.item.ItemStack> pro$armor();
+        @Accessor("offhand") net.minecraft.core.NonNullList<net.minecraft.world.item.ItemStack> pro$offhand();
+        @Accessor("compartments") List<net.minecraft.core.NonNullList<net.minecraft.world.item.ItemStack>> pro$compartments();
+        @Accessor("selected") int pro$selected();
+        @Accessor("player") net.minecraft.world.entity.player.Player pro$player();
+    }
+    @Mixin(net.minecraft.server.level.ServerPlayerGameMode.class) public interface EquipmentGameMode {
+        @Accessor("player") net.minecraft.server.level.ServerPlayer pro$player();
+    }
+    @Mixin(net.minecraft.world.entity.Mob.class) public interface MobEquipment {
+        @Accessor("handItems") net.minecraft.core.NonNullList<net.minecraft.world.item.ItemStack> pro$hands();
+        @Accessor("armorItems") net.minecraft.core.NonNullList<net.minecraft.world.item.ItemStack> pro$armor();
+    }
+    @Mixin(net.minecraft.world.entity.decoration.ArmorStand.class) public interface StandEquipment {
+        @Accessor("handItems") net.minecraft.core.NonNullList<net.minecraft.world.item.ItemStack> pro$hands();
+        @Accessor("armorItems") net.minecraft.core.NonNullList<net.minecraft.world.item.ItemStack> pro$armor();
+    }
+    @Mixin(net.minecraft.core.NonNullList.class) public interface EquipmentList {
+        @Accessor("list") List<?> pro$list();
+    }
+    @Mixin(net.minecraft.world.item.ItemStack.class) public interface StackState {
+        @Accessor("count") int pro$count();
+        @Accessor("item") net.minecraft.world.item.Item pro$item();
+        @Accessor("tag") net.minecraft.nbt.CompoundTag pro$tag();
+        @Accessor(value="delegate",remap=false) net.minecraft.core.Holder.Reference<net.minecraft.world.item.Item> pro$delegate();
+        @Accessor(value="capNBT",remap=false) net.minecraft.nbt.CompoundTag pro$capNBT();
+    }
+    @Mixin(net.minecraft.nbt.CompoundTag.class) public interface EquipmentCompound {
+        @Accessor("tags") Map<String,net.minecraft.nbt.Tag> pro$tags();
+    }
+    @Mixin(net.minecraft.nbt.ListTag.class) public interface EquipmentTags {
+        @Accessor("list") List<net.minecraft.nbt.Tag> pro$list();
     }
     @Mixin(net.minecraft.world.effect.MobEffectInstance.class) public interface EffectState {
         @Accessor("hiddenEffect") net.minecraft.world.effect.MobEffectInstance pro$hiddenEffect();

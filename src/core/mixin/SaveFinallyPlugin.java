@@ -16,6 +16,32 @@ public final class SaveFinallyPlugin implements IMixinConfigPlugin {
     @Override public List<String> getMixins() { return null; }
     @Override public void preApply(String target,ClassNode node,String mixin,IMixinInfo info) { }
     @Override public void postApply(String target,ClassNode node,String mixin,IMixinInfo info) {
+        if(mixin.endsWith(".EquipmentActionHooks$Packets")) {
+            weaveEquipmentAction(node,"handleSetCarriedItem","m_7798_","(Lnet/minecraft/network/protocol/game/ServerboundSetCarriedItemPacket;)V","equipment-select");
+            weaveEquipmentAction(node,"handleContainerClick","m_5914_","(Lnet/minecraft/network/protocol/game/ServerboundContainerClickPacket;)V","equipment-menu");
+            weaveEquipmentAction(node,"handlePlayerAction","m_7502_","(Lnet/minecraft/network/protocol/game/ServerboundPlayerActionPacket;)V","equipment-player-action");
+            weaveEquipmentAction(node,"handleSetCreativeModeSlot","m_5964_","(Lnet/minecraft/network/protocol/game/ServerboundSetCreativeModeSlotPacket;)V","equipment-creative");
+            weaveEquipmentAction(node,"handlePickItem","m_7965_","(Lnet/minecraft/network/protocol/game/ServerboundPickItemPacket;)V","equipment-pick");return;
+        }
+        if(mixin.endsWith(".EquipmentActionHooks$Use")) {
+            weaveEquipmentAction(node,"useItem","m_6261_","(Lnet/minecraft/server/level/ServerPlayer;Lnet/minecraft/world/level/Level;Lnet/minecraft/world/item/ItemStack;Lnet/minecraft/world/InteractionHand;)Lnet/minecraft/world/InteractionResult;","equipment-use");
+            weaveEquipmentAction(node,"useItemOn","m_7179_","(Lnet/minecraft/server/level/ServerPlayer;Lnet/minecraft/world/level/Level;Lnet/minecraft/world/item/ItemStack;Lnet/minecraft/world/InteractionHand;Lnet/minecraft/world/phys/BlockHitResult;)Lnet/minecraft/world/InteractionResult;","equipment-use");return;
+        }
+        if(mixin.endsWith(".EquipmentActionHooks$Using")) {
+            weaveEquipmentAction(node,"updateUsingItem","m_142106_","(Lnet/minecraft/world/item/ItemStack;)V","equipment-use-tick");
+            weaveEquipmentAction(node,"completeUsingItem","m_8095_","()V","equipment-consume");
+            weaveEquipmentAction(node,"releaseUsingItem","m_21253_","()V","equipment-release");return;
+        }
+        if(mixin.endsWith(".EquipmentActionHooks$MobActions")) {
+            weaveEquipmentAction(node,"pickUpItem","m_7581_","(Lnet/minecraft/world/entity/item/ItemEntity;)V","equipment-pickup");
+            weaveEquipmentAction(node,"readAdditionalSaveData","m_7378_","(Lnet/minecraft/nbt/CompoundTag;)V","equipment-load");return;
+        }
+        if(mixin.endsWith(".EquipmentActionHooks$PlayerLoad")||mixin.endsWith(".EquipmentActionHooks$StandLoad")) {
+            weaveEquipmentAction(node,"readAdditionalSaveData","m_7378_","(Lnet/minecraft/nbt/CompoundTag;)V","equipment-load");return;
+        }
+        if(mixin.endsWith(".EquipmentActionHooks$Load")) {
+            weaveEquipmentAction(node,"load","m_20258_","(Lnet/minecraft/nbt/CompoundTag;)V","equipment-load-root");return;
+        }
         if(mixin.endsWith(".LiveStateHooks$Effects")) {
             weaveLiveState(node,"tickEffects","()V",-1,"effects-tick");
             weaveLiveState(node,"completeUsingItem","()V",-1,"consume");return;
@@ -151,6 +177,71 @@ public final class SaveFinallyPlugin implements IMixinConfigPlugin {
         method.instructions.add(new InsnNode(Opcodes.ATHROW));
         method.tryCatchBlocks.add(new TryCatchBlockNode(start,end,handler,"java/lang/RuntimeException"));
         method.maxStack=Math.max(method.maxStack,3);
+    }
+    private static void weaveEquipmentAction(ClassNode node,String name,String srg,String descriptor,String operation) {
+        var matches=node.methods.stream().filter(method->(method.name.equals(name)||method.name.equals(srg))&&method.desc.equals(descriptor)
+                &&(method.access&(Opcodes.ACC_STATIC|Opcodes.ACC_ABSTRACT|Opcodes.ACC_NATIVE))==0).toList();
+        if(matches.size()!=1)throw new IllegalStateException("EQUIPMENT_ACTION_BOUNDARY:"+node.name+":"+name+descriptor);
+        MethodNode method=matches.get(0);int lease=method.maxLocals++,failure=method.maxLocals++;
+        extendFramesWithLease(node,method,lease);
+        String policy="dev/ronova/pro/EquipmentPolicy";
+        InsnList entry=new InsnList();entry.add(new VarInsnNode(Opcodes.ALOAD,0));
+        Type[] arguments=Type.getArgumentTypes(descriptor);entry.add(new LdcInsnNode(arguments.length));
+        entry.add(new TypeInsnNode(Opcodes.ANEWARRAY,"java/lang/Object"));int local=1;
+        for(int index=0;index<arguments.length;index++) {
+            Type argument=arguments[index];
+            if(argument.getSort()!=Type.OBJECT&&argument.getSort()!=Type.ARRAY)throw new IllegalStateException("EQUIPMENT_ACTION_ARGUMENT:"+descriptor);
+            entry.add(new InsnNode(Opcodes.DUP));entry.add(new LdcInsnNode(index));entry.add(new VarInsnNode(Opcodes.ALOAD,local++));
+            entry.add(new InsnNode(Opcodes.AASTORE));
+        }
+        entry.add(new LdcInsnNode(operation));entry.add(new MethodInsnNode(Opcodes.INVOKESTATIC,policy,"beginAction",
+                "(Ljava/lang/Object;Ljava/lang/Object;Ljava/lang/String;)Ljava/lang/Object;",false));
+        entry.add(new VarInsnNode(Opcodes.ASTORE,lease));
+        LabelNode start=new LabelNode(),body=new LabelNode(),end=new LabelNode(),handler=new LabelNode();
+        entry.add(new VarInsnNode(Opcodes.ALOAD,0));entry.add(new LdcInsnNode(operation));entry.add(new VarInsnNode(Opcodes.ALOAD,lease));
+        entry.add(new MethodInsnNode(Opcodes.INVOKESTATIC,policy,"anchorDenied","(Ljava/lang/Object;Ljava/lang/String;Ljava/lang/Object;)Z",false));
+        entry.add(new JumpInsnNode(Opcodes.IFEQ,body));
+        Type result=Type.getReturnType(descriptor);
+        if(result.getSort()==Type.VOID)entry.add(new InsnNode(Opcodes.RETURN));
+        else if(result.getDescriptor().equals("Lnet/minecraft/world/InteractionResult;")) {
+            entry.add(new FieldInsnNode(Opcodes.GETSTATIC,"net/minecraft/world/InteractionResult","PASS","Lnet/minecraft/world/InteractionResult;"));
+            entry.add(new InsnNode(Opcodes.ARETURN));
+        }else throw new IllegalStateException("EQUIPMENT_ACTION_RETURN:"+descriptor);
+        entry.add(body);Object[] locals=lifecycleFrameLocals(node,method,lease),bodyLocals=locals;
+        if(node.name.equals("net/minecraft/server/network/ServerGamePacketListenerImpl")) {
+            MethodInsnNode dispatch=null;
+            for(AbstractInsnNode instruction:method.instructions.toArray()) {
+                if(instruction instanceof FrameNode frame)bodyLocals=frame.local.toArray();
+                if(instruction instanceof MethodInsnNode call&&call.getOpcode()==Opcodes.INVOKESTATIC
+                        &&call.owner.equals("net/minecraft/network/protocol/PacketUtils")
+                        &&(call.name.equals("ensureRunningOnSameThread")||call.name.equals("m_131359_"))
+                        &&call.desc.equals("(Lnet/minecraft/network/protocol/Packet;Lnet/minecraft/network/PacketListener;Lnet/minecraft/server/level/ServerLevel;)V")) {
+                    dispatch=call;break;
+                }
+            }
+            if(dispatch==null)throw new IllegalStateException("EQUIPMENT_PACKET_DISPATCH_BOUNDARY:"+name);
+            // The Netty invocation must reach the original scheduler with no action lease.
+            // Only the second invocation, after the real thread check returns, can open one.
+            entry.add(new FrameNode(Opcodes.F_NEW,bodyLocals.length,bodyLocals,0,new Object[0]));method.instructions.insert(dispatch,entry);
+            InsnList pending=new InsnList();pending.add(new InsnNode(Opcodes.ACONST_NULL));pending.add(new VarInsnNode(Opcodes.ASTORE,lease));pending.add(start);
+            method.instructions.insert(pending);
+        }else {
+            entry.add(new FrameNode(Opcodes.F_NEW,locals.length,locals,0,new Object[0]));
+            // beginAction publishes only after its own checks; once stored, even a gate failure closes it.
+            AbstractInsnNode stored=entry.getFirst();while(!(stored instanceof VarInsnNode variable&&variable.getOpcode()==Opcodes.ASTORE&&variable.var==lease))stored=stored.getNext();
+            entry.insert(stored,start);method.instructions.insert(entry);
+        }
+        for(AbstractInsnNode instruction:method.instructions.toArray())if(instruction.getOpcode()==Opcodes.RETURN||instruction.getOpcode()==Opcodes.ARETURN) {
+            InsnList finish=new InsnList();finish.add(new VarInsnNode(Opcodes.ALOAD,lease));
+            finish.add(new MethodInsnNode(Opcodes.INVOKESTATIC,policy,"endAction","(Ljava/lang/Object;)V",false));method.instructions.insertBefore(instruction,finish);
+        }
+        method.instructions.add(end);method.instructions.add(handler);
+        method.instructions.add(new FrameNode(Opcodes.F_NEW,locals.length,locals,1,new Object[]{"java/lang/Throwable"}));
+        method.instructions.add(new VarInsnNode(Opcodes.ASTORE,failure));method.instructions.add(new VarInsnNode(Opcodes.ALOAD,lease));
+        method.instructions.add(new VarInsnNode(Opcodes.ALOAD,failure));
+        method.instructions.add(new MethodInsnNode(Opcodes.INVOKESTATIC,policy,"failedAction","(Ljava/lang/Object;Ljava/lang/Throwable;)V",false));
+        method.instructions.add(new VarInsnNode(Opcodes.ALOAD,failure));method.instructions.add(new InsnNode(Opcodes.ATHROW));
+        method.tryCatchBlocks.add(new TryCatchBlockNode(start,end,handler,"java/lang/Throwable"));method.maxStack=Math.max(method.maxStack,8);
     }
     private static void weaveLiveState(ClassNode node,String name,String descriptor,int argument,String operation) {
         String srg=switch(name) {

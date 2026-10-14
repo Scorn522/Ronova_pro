@@ -91,7 +91,7 @@ public final class RecoveryAgent {
             bootstrap=new JarFile(Path.of(argument).toAbsolutePath().normalize().toFile());
             api.appendToBootstrapClassLoaderSearch(bootstrap);
             bridge=Class.forName("dev.ronova.pro.bootstrap.TaskBridge",true,null);
-            if(!Integer.valueOf(73).equals(bridge.getMethod("abiVersion").invoke(null)))throw new IllegalStateException("TASK_BRIDGE_ABI_MISMATCH");
+            if(!Integer.valueOf(74).equals(bridge.getMethod("abiVersion").invoke(null)))throw new IllegalStateException("TASK_BRIDGE_ABI_MISMATCH");
             Class.forName("dev.ronova.pro.bootstrap.SourceMapBridge",true,null);
             // Default-Map guards test UUID keys while class-loading maps are
             // active. Resolve that type before publishing the guarded methods.
@@ -132,7 +132,7 @@ public final class RecoveryAgent {
             Class.forName("dev.ronova.pro.bootstrap.ControlBridge$ProducerFrame",false,null);
             Class.forName("dev.ronova.pro.bootstrap.EventFaultBridge",true,null);
             Class<?> control=Class.forName("dev.ronova.pro.bootstrap.ControlBridge",true,null);
-            if(!Integer.valueOf(73).equals(control.getMethod("abiVersion").invoke(null)))throw new IllegalStateException("CONTROL_BRIDGE_ABI_MISMATCH");
+            if(!Integer.valueOf(74).equals(control.getMethod("abiVersion").invoke(null)))throw new IllegalStateException("CONTROL_BRIDGE_ABI_MISMATCH");
             Module base=Object.class.getModule(),ours=RecoveryAgent.class.getModule();
             api.redefineModule(base,Set.of(bridge.getModule()),Map.of(
                     "jdk.internal.org.objectweb.asm",Set.of(ours),"jdk.internal.org.objectweb.asm.commons",Set.of(ours),
@@ -316,7 +316,12 @@ public final class RecoveryAgent {
                         api.redefineModule(module,Set.of(bridge.getModule()),Map.of(),Map.of(),Set.of(),Map.of());
                     byte[] dispatch=DispatchBoundary.transform(loader,name,type,initial);
                     byte[] current=dispatch==null?initial:dispatch;
-                    if(loader==null||name==null||module==RecoveryAgent.class.getModule()
+                    if(loader==null) {
+                        if(current!=bytes&&module!=null&&!module.canRead(bridge.getModule()))
+                            api.redefineModule(module,Set.of(bridge.getModule()),Map.of(),Map.of(),Set.of(),Map.of());
+                        return current==bytes?null:current;
+                    }
+                    if(name==null||module==RecoveryAgent.class.getModule()
                             &&loader==RecoveryAgent.class.getClassLoader()
                             &&domain!=null&&java.util.Objects.equals(domain.getCodeSource(),RecoveryAgent.class.getProtectionDomain().getCodeSource()))return null;
                     byte[] nativeClone=CloneBoundary.transform(loader,current);
@@ -533,6 +538,11 @@ public final class RecoveryAgent {
         Instrumentation api=instrumentation;
         // Installation is batched after all exact defining classes have been declared.
         return added;
+    }
+    /** Keeps the actual argument tuple for equipment slots and extraction results. */
+    public static boolean declareDispatchArgumentsTarget(Class<?> owner,String methodName,String descriptor) {
+        controlImages.declare(owner);
+        return DispatchBoundary.declare(owner,methodName,descriptor,true);
     }
     /** The declaration state, so a caller can tell "covered" from "nothing declared yet". */
     public static String dispatchState() {

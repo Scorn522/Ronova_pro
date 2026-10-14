@@ -1217,13 +1217,16 @@ public final class ProRuntime implements AutoCloseable {
         String liveStateGap="";
         try{LiveStatePolicy.publish(entity,b.subject.generation);}
         catch(RuntimeException|LinkageError failure){liveStateGap="LIVE_STATE_CAPTURE_UNRESOLVED:"+failure.getMessage();coverageGap=true;}
+        try{EquipmentPolicy.publish(entity,b.subject.generation);}
+        catch(RuntimeException|LinkageError failure){liveStateGap+=(liveStateGap.isEmpty()?"":";")+"EQUIPMENT_CAPTURE_UNRESOLVED:"+failure.getMessage();coverageGap=true;}
         b.protection=true;
         b.protectionGeneration=b.subject.generation;
+        b.protectionGap=liveStateGap;
         publishProtection(this,b,entity);
         // Publish the policy before registering each exact slot. A writer already inside that
         // container's short gate finishes first; later writers see both the slot and policy.
         String indexGap=publishIndexOwners(b,entity);
-        b.protectionGap=liveStateGap.isEmpty()?indexGap:liveStateGap+(indexGap.isEmpty()?"":";"+indexGap);
+        if(!indexGap.isEmpty())b.protectionGap+=(b.protectionGap.isEmpty()?"":";")+indexGap;
         publishOwners(entity);
     }
     private String publishIndexOwners(Binding binding,Entity entity) {
@@ -1306,6 +1309,7 @@ public final class ProRuntime implements AutoCloseable {
     }
     /** Null key/value asks only whether this proven container currently has protection to preserve on clear. */
     public static boolean preventIndexSlotRemoval(Object container,Object key,Object value) {
+        if(EquipmentPolicy.elementDenied(container,value,null))return true;
         if(LiveStatePolicy.elementDenied(container,value,null))return true;
         if(BlockGroupPolicy.containerMutationDenied(container,key,value))return true;
         // A detached HashMap Node can retain an old backing-owner association. Its actual
@@ -1351,6 +1355,9 @@ public final class ProRuntime implements AutoCloseable {
         try{LiveStatePolicy.publish(entity,binding.protection?binding.protectionGeneration:0);}
         catch(RuntimeException|LinkageError failure){String gap="LIVE_STATE_CAPTURE_UNRESOLVED:"+failure.getMessage();
             if(!binding.protectionGap.contains(gap))binding.protectionGap+=(binding.protectionGap.isEmpty()?"":";")+gap;runtime.coverageGap=true;}
+        try{EquipmentPolicy.publish(entity,binding.protection?binding.protectionGeneration:0);}
+        catch(RuntimeException|LinkageError failure){String gap="EQUIPMENT_CAPTURE_UNRESOLVED:"+failure.getMessage();
+            if(!binding.protectionGap.contains(gap))binding.protectionGap+=(binding.protectionGap.isEmpty()?"":";")+gap;runtime.coverageGap=true;}
         PROTECTION.put(entity,new ProtectionSnapshot(runtime,binding,binding.address.entityUuid(),
                 binding.protectionGeneration,binding.records));
     }
@@ -1362,7 +1369,7 @@ public final class ProRuntime implements AutoCloseable {
     private static boolean snapshotProtected(Entity e) { return protectedBinding(e)!=null; }
     static long liveStateGeneration(Entity entity){Binding binding=protectedBinding(entity);return binding==null?0:binding.protectionGeneration;}
     static boolean liveStateLifecycleAllowed(Entity entity){return playerLifecycleAllows(entity);}
-    private static void clearProtection(Entity e) { PROTECTION.remove(e);LiveStatePolicy.publish(e,0); }
+    private static void clearProtection(Entity e) { PROTECTION.remove(e);LiveStatePolicy.publish(e,0);EquipmentPolicy.publish(e,0); }
     /**
      * Captures the real-owner associations used by the write guards. Runs where the state is already walked:
      * the synchronized-data items of a body we just protected, and its maximum-health attribute instance.
@@ -2538,6 +2545,8 @@ public final class ProRuntime implements AutoCloseable {
             Class.forName("dev.ronova.pro.bootstrap.ControlBridge",false,null).getMethod("installGuards",Class.class,java.lang.invoke.MethodHandle.class,java.lang.invoke.MethodHandle.class,
                     java.lang.invoke.MethodHandle.class).invoke(null,ProRuntime.class,field,method,task);
             installLifeResults(bridge,lookup);
+            EquipmentPolicy.initialize();
+            installEquipmentResults(lookup);
             installEntityDispatch(Class.forName("dev.ronova.pro.agent.RecoveryAgent",false,ClassLoader.getSystemClassLoader()));
             clientBasePolicyInstalled=true;
         }catch(ReflectiveOperationException unavailable){throw new IllegalStateException("CLIENT_BASE_POLICY_UNAVAILABLE",unavailable);}
@@ -2598,6 +2607,7 @@ public final class ProRuntime implements AutoCloseable {
     }
     public static boolean preventDispatch(Object receiver,String operation,Object value) {
         if(clientDispatchDenied(receiver,operation,value))return true;
+        if(EquipmentPolicy.dispatchDenied(receiver,operation,value))return true;
         if(LiveStatePolicy.dispatchDenied(receiver,operation,value))return true;
         if(!(receiver instanceof Entity entity))return false;
         if(entity instanceof LivingEntity living&&value instanceof Number number) {
@@ -2725,8 +2735,9 @@ public final class ProRuntime implements AutoCloseable {
             Class.forName(SourceMaps.class.getName(),true,ProRuntime.class.getClassLoader());
             Class.forName(BackingPolicy.class.getName(),true,ProRuntime.class.getClassLoader());
             LiveStatePolicy.initialize();
+            EquipmentPolicy.initialize();
             Class<?> bridge=Class.forName("dev.ronova.pro.bootstrap.TaskBridge",false,null);
-            if(!Integer.valueOf(73).equals(bridge.getMethod("abiVersion").invoke(null)))throw new IllegalStateException("INDEX_BRIDGE_ABI_MISMATCH");
+            if(!Integer.valueOf(74).equals(bridge.getMethod("abiVersion").invoke(null)))throw new IllegalStateException("INDEX_BRIDGE_ABI_MISMATCH");
             var lookup=java.lang.invoke.MethodHandles.lookup();
             var field=lookup.findStatic(ProRuntime.class,"preventFieldWrite",java.lang.invoke.MethodType.methodType(boolean.class,Object.class,Class.class,String.class,Object.class));
             var dispatch=lookup.findStatic(ProRuntime.class,"preventDispatch",java.lang.invoke.MethodType.methodType(boolean.class,Object.class,String.class,Object.class));
@@ -2741,6 +2752,7 @@ public final class ProRuntime implements AutoCloseable {
             bridge.getMethod("installTaskPublicationGate",Class.class,java.lang.invoke.MethodHandle.class)
                     .invoke(null,ProRuntime.class,publication);
             installLifeResults(bridge,lookup);
+            installEquipmentResults(lookup);
             BackingPolicy.initialize(bridge);
             var release=lookup.findStatic(BackingPolicy.class,"resourceDenied",java.lang.invoke.MethodType.methodType(boolean.class,Object.class));
             Class.forName("dev.ronova.pro.bootstrap.ControlBridge",false,null).getMethod("installResourceGuard",Class.class,java.lang.invoke.MethodHandle.class).invoke(null,ProRuntime.class,release);
@@ -2844,7 +2856,15 @@ public final class ProRuntime implements AutoCloseable {
             if((method.getName().equals(entry[0])||method.getName().equals(entry[1]))&&java.lang.invoke.MethodType.methodType(method.getReturnType(),method.getParameterTypes()).descriptorString().equals(entry[2]))
                 declare.invoke(null,net.minecraft.world.effect.MobEffectInstance.class,method.getName(),entry[2]);
         declare.invoke(null,net.minecraftforge.eventbus.api.Event.class,"setCanceled","(Z)V");
+        EquipmentPolicy.declareDispatchTargets(agent);
         agent.getMethod("installDeclaredDispatch").invoke(null);
+    }
+    public static Object equipmentDeniedResult(Object receiver,String operation,Object arguments) {
+        return EquipmentPolicy.deniedResult(receiver,operation,arguments);
+    }
+    private static void installEquipmentResults(java.lang.invoke.MethodHandles.Lookup lookup)throws ReflectiveOperationException {
+        var result=lookup.findStatic(ProRuntime.class,"equipmentDeniedResult",java.lang.invoke.MethodType.methodType(Object.class,Object.class,String.class,Object.class));
+        Class.forName("dev.ronova.pro.bootstrap.ControlBridge",false,null).getMethod("installDispatchResults",Class.class,java.lang.invoke.MethodHandle.class).invoke(null,ProRuntime.class,result);
     }
     private static UnsafeMapping unsafeFields() {
         try {
@@ -2862,6 +2882,7 @@ public final class ProRuntime implements AutoCloseable {
                     fields.add(field);offsets.add((Long)offset.invoke(unsafe,field));
                 }
             for(var field:LiveStatePolicy.unsafeFields())if(!fields.contains(field)){fields.add(field);offsets.add((Long)offset.invoke(unsafe,field));}
+            for(var field:EquipmentPolicy.unsafeFields())if(!fields.contains(field)){fields.add(field);offsets.add((Long)offset.invoke(unsafe,field));}
             long[] values=new long[offsets.size()];for(int i=0;i<values.length;i++)values[i]=offsets.get(i);
             return new UnsafeMapping(fields.toArray(java.lang.reflect.Field[]::new),values,"");
         } catch(ReflectiveOperationException|RuntimeException|LinkageError unavailable) {

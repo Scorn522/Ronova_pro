@@ -1,5 +1,21 @@
 # Ronova Pro 当前进度
 
+## 2026-10-14：C 接续——当前装备、ItemStack 与 NBT
+
+接续 `24f5dc3`，Java ABI74 / Native ABI69 / Storage3 / Journal6，客户端协议 `r3-client-8`。标准 Player、Mob、ArmorStand 的当前六槽、真实 NonNullList/Arrays$ArrayList/Object[]、ItemStack 与当前 NBT 图接入现有方法、集合、字段、反射、句柄、Unsafe/CAS/相对 bulk 写入规则。按准确身体、代次、当前实际成员和全部共享 owner 判断，旧槽/节点/release 即时失活。EMPTY、全局 Item/Holder 定义、Tag.TYPE 不纳入装备归属；未知自定义槽载体/NBT 实现明确保留 gap，原生命/索引保护继续。
+
+拆分、取出、丢弃入口先拒绝再进入业务：被拒的 split/copyAndClear/remove 返回 EMPTY，直接 Arrays$ArrayList.set 返回旧元素，避免清槽被挡但副本仍发布。15个原版动作入口按真实 actor、手、栈、菜单与连续来源交接本次许可，保留原线程调度及正常/异常回收；空 token 和同名嵌套不能借旧 scope。当前 Item 的准确使用方法只委托本次真实栈，其它回调/来源仍拒。引用宽度取当前 JVM 实值，避免压缩引用误伤邻槽；全参分派带实际 receiver，静态帮助入口用准确定义 Class。修正 bootstrap 转换回传和抽象 setItemSlot 无方法体却被要求转换的安装阻塞，对象拒绝结果处理器先安装。
+
+未知自定义 capability 内部、物品全局定义，以及 Player.attack/handleInteract、GameMode.tick 延后挖掘耐久的正常委托尚未覆盖；这些正常装备修改仍会被拒，不能称所有动作已支持。自身外观与武器注册继续暂缓。
+
+整包写齐后首次统一构建只因两处 final ItemStack 的 Mixin Access 强转失败，保留原日志；改为经 Object 转换后，`build-c-java74-native69-equipment-final-20261014.log` **PASS45秒**，Core2560279、prelaunch22440字节，匹配 Agent/Bootstrap/Native69 和现有夹具已生成。DefenseFixture equipment 分支编译完成，包含真实 Cow 的数量、拆分无副本泄露、NBT/数组/叶值/实际载体写拒、邻居及 release；**装备游戏分支 NOTRUN**。未重复已通过的 Native raw/Host 检查或旧矩阵。
+
+旧网络 `c-network-java72-native69-live-state-20261014.log` 已退出1：三次 outbound、两次收包，首次 promise 为 EXTERNAL_NATIVE_CALL_SOURCE_UNOBSERVED/scoped_sources，其余两次成功。现有 AuditFixCheck 仅补原 Throwable cause；原发送、等待和10秒 deadline 不变。本次匹配版本重跑 `c-network-java74-native69-equipment-20261014.log` 当前仍运行，没有生产网络修复或通过结论。
+
+原 Java72/Native68 禁疗实例 PID112724 已核对仍在，未停或重启；一次线程栈 main RUNNABLE，仍在 Mixin 初始化的类资源读取/来源查询链，尚无 WORLD_LOADED/Done/NO_HEAL_PASS。本包 Native69 和驱动/管理器源码未改，沿用既有未签名系统产物，未部署。候选 `distribution/candidate-c-java74-native69-equipment-wip-20261014`，源码包 `distribution/Ronova-Pro-C-Equipment-WIP-Java74-Native69-20261014.zip`。源码、匹配 JAR 和既有摘要同步原公开仓库；ZIP、原始日志、存档留本地。完整 C/B 仍未完成。
+
+---
+
 ## 2026-10-14：C 接续——活跃效果、饥饿数据与底层禁生成
 
 接续 `fd77b99`，Java ABI73 / Native ABI69 / Storage3 / Journal6，客户端协议 `r3-client-8`。本包新增 `LiveStatePolicy`，按准确身体、保护代次及当前真实载体关联 activeEffects、实际效果实例和 FoodData；接入现有方法分派、集合节点/视图、字段、反射、句柄、Unsafe/CAS 及相对 bulk 写入判断。原状态引用不能偷换，旧代次与 release 即时失活，单独禁疗不启用这些保护。

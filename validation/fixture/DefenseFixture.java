@@ -4,10 +4,13 @@ import dev.ronova.pro.*;
 import dev.ronova.pro.mixin.Access;
 import java.nio.file.*;
 import java.util.*;
+import net.minecraft.core.NonNullList;
 import net.minecraft.core.SectionPos;
+import net.minecraft.nbt.*;
 import net.minecraft.server.level.*;
 import net.minecraft.world.entity.*;
 import net.minecraft.world.entity.animal.Cow;
+import net.minecraft.world.item.*;
 import net.minecraftforge.common.MinecraftForge;
 import net.minecraftforge.event.TickEvent;
 import net.minecraftforge.event.entity.EntityEvent;
@@ -23,7 +26,7 @@ public final class DefenseFixture {
         MinecraftForge.EVENT_BUS.addListener(EventPriority.NORMAL,this::entered);
     }
     private void entered(EntityEvent.EnteringSection event) {
-        if(finished||"no-heal".equals(System.getProperty("ronova.pro.fixture.variant"))||"live-state".equals(System.getProperty("ronova.pro.fixture.variant"))||event.getEntity()!=cow||age<20)return;
+        if(finished||"no-heal".equals(System.getProperty("ronova.pro.fixture.variant"))||"live-state".equals(System.getProperty("ronova.pro.fixture.variant"))||"equipment".equals(System.getProperty("ronova.pro.fixture.variant"))||event.getEntity()!=cow||age<20)return;
         var section=((Access.Callback)((Access.EntityState)cow).pro$callback()).pro$section();
         // This is an ordinary mod callback during the move, not the vanilla removal itself.
         section.remove(cow);entryAttacks++;
@@ -80,6 +83,74 @@ public final class DefenseFixture {
         try{duration=net.minecraft.world.effect.MobEffectInstance.class.getDeclaredField("duration");}
         catch(NoSuchFieldException production){duration=net.minecraft.world.effect.MobEffectInstance.class.getDeclaredField("f_19503_");}
         unsafe.putInt(effect,unsafe.objectFieldOffset(duration),value);
+    }
+    private static sun.misc.Unsafe equipmentUnsafe()throws ReflectiveOperationException{
+        var field=sun.misc.Unsafe.class.getDeclaredField("theUnsafe");field.setAccessible(true);return (sun.misc.Unsafe)field.get(null);
+    }
+    private static ItemStack equipmentStack(){
+        ItemStack stack=new ItemStack(Items.PAPER,8);CompoundTag tag=new CompoundTag();
+        // This leaf is outside IntTag's shared value cache; no global tag singleton is mutated.
+        tag.putInt("counter",7197);tag.putIntArray("carrier",new int[]{31,47});stack.setTag(tag);return stack;
+    }
+    private static void equipmentTag(Cow entity,sun.misc.Unsafe unsafe,boolean denied)throws ReflectiveOperationException{
+        CompoundTag tag=entity.getMainHandItem().getTag();require(tag!=null,"actual equipped tag absent");
+        IntTag leaf=(IntTag)tag.get("counter");int before=leaf.getAsInt();java.lang.reflect.Field data;
+        try{data=IntTag.class.getDeclaredField("data");}catch(NoSuchFieldException production){data=IntTag.class.getDeclaredField("f_128671_");}
+        unsafe.putInt(leaf,unsafe.objectFieldOffset(data),before+1);
+        require(leaf.getAsInt()==(denied?before:before+1),"equipped numeric leaf write denied="+denied);
+        int[] actual=tag.getIntArray("carrier");int first=actual[0];actual[0]=first+1;
+        require(tag.getIntArray("carrier")[0]==(denied?first:first+1),"equipped actual primitive array write denied="+denied);
+        tag.putInt("counter",before+2);
+        require(tag.getInt("counter")== (denied?before:before+2),"equipped CompoundTag replacement denied="+denied);
+        if(denied)require(tag.get("counter")==leaf,"denied tag replacement changed leaf identity");
+    }
+    @SuppressWarnings("unchecked") private static void equipmentCarriers(Cow entity,sun.misc.Unsafe unsafe,boolean denied)throws ReflectiveOperationException{
+        NonNullList<ItemStack> hands=((Access.MobEquipment)entity).pro$hands();
+        List<ItemStack> backing=(List<ItemStack>)((Access.EquipmentList)hands).pro$list();
+        require(backing.getClass().getName().equals("java.util.Arrays$ArrayList"),"actual vanilla equipment backing changed");
+        for(List<ItemStack> carrier:List.of(hands,backing)){
+            ItemStack before=entity.getMainHandItem(),next=new ItemStack(Items.DIRT,2);
+            require(carrier.set(0,next)==before,"actual equipment list set return contract");
+            require(entity.getMainHandItem()==(denied?before:next),"actual "+carrier.getClass().getName()+" write denied="+denied);
+        }
+        var arrayField=backing.getClass().getDeclaredField("a");
+        Object[] array=(Object[])unsafe.getObject(backing,unsafe.objectFieldOffset(arrayField));
+        ItemStack before=entity.getMainHandItem(),next=new ItemStack(Items.DIRT,3);array[0]=next;
+        require(entity.getMainHandItem()==(denied?before:next),"actual equipment backing array write denied="+denied);
+    }
+    private static void equipmentAllowed(Cow entity,sun.misc.Unsafe unsafe)throws ReflectiveOperationException{
+        ItemStack stack=entity.getMainHandItem();equipmentTag(entity,unsafe,false);
+        stack.setCount(7);require(stack.getCount()==7,"ordinary equipment setCount blocked");
+        stack.shrink(1);require(stack.getCount()==6,"ordinary equipment shrink blocked");
+        ItemStack split=stack.split(2);require(split!=stack&&split.getCount()==2&&stack.getCount()==4,"ordinary equipment split changed");
+        ItemStack taken=stack.copyAndClear();require(taken!=stack&&taken.getCount()==4&&stack.isEmpty(),"ordinary equipment copyAndClear changed");
+        ItemStack replacement=new ItemStack(Items.DIRT,4);entity.setItemSlot(EquipmentSlot.MAINHAND,replacement);
+        require(entity.getMainHandItem()==replacement,"ordinary equipment setItemSlot blocked");equipmentCarriers(entity,unsafe,false);
+    }
+    private void equipmentTick(TickEvent.ServerTickEvent event){
+        var server=event.getServer();age++;if(age!=10)return;
+        try{
+            var runtime=ProRuntime.get(server);var level=server.overworld();var pos=level.getSharedSpawnPos();
+            level.getChunk(pos.getX()>>4,pos.getZ()>>4);
+            cow=noHealCow(level,pos.getX()+.5,pos.getY()+4,pos.getZ()+.5);
+            neighbour=noHealCow(level,pos.getX()+2.5,pos.getY()+4,pos.getZ()+.5);
+            ItemStack held=equipmentStack();cow.setItemSlot(EquipmentSlot.MAINHAND,held);neighbour.setItemSlot(EquipmentSlot.MAINHAND,equipmentStack());
+            require(cow.getMainHandItem()==held,"initial real mainhand publication failed");
+            var unsafe=equipmentUnsafe();FixtureCommands.protect(runtime,cow);
+            held.setCount(0);require(held.getCount()==8,"protected mainhand setCount changed count");
+            held.shrink(2);require(held.getCount()==8,"protected mainhand shrink changed count");
+            require(held.split(2)==ItemStack.EMPTY&&held.getCount()==8,"protected split leaked a copy or changed count");
+            require(held.copyAndClear()==ItemStack.EMPTY&&held.getCount()==8,"protected copyAndClear leaked a copy or cleared held stack");
+            cow.setItemSlot(EquipmentSlot.MAINHAND,new ItemStack(Items.DIRT,4));
+            require(cow.getMainHandItem()==held,"protected setItemSlot replaced exact mainhand");
+            equipmentTag(cow,unsafe,true);equipmentCarriers(cow,unsafe,true);
+            require(cow.getMainHandItem()==held&&held.getCount()==8,"direct carrier writes changed protected mainhand");
+            equipmentAllowed(neighbour,unsafe);
+            require(cow.getMainHandItem()==held&&held.getCount()==8,"ordinary neighbour writes affected protected body");
+            FixtureCommands.revoke(runtime,cow);equipmentAllowed(cow,unsafe);
+            finish("EQUIPMENT_PASS exact_mainhand_count_split_copyAndClear_no_copy_leak_slot_nbt_primitive_leaf_NonNullList_ArraysList_array_neighbour_release");
+            server.halt(false);
+        }catch(Throwable failure){failure.printStackTrace();try{finish("EQUIPMENT_FAILED "+failure);}finally{server.halt(false);}}
     }
     private void noHealTick(TickEvent.ServerTickEvent event) {
         var server=event.getServer();
@@ -183,6 +254,7 @@ public final class DefenseFixture {
         if(finished||event.phase!=TickEvent.Phase.START)return;
         if("no-heal".equals(System.getProperty("ronova.pro.fixture.variant"))){noHealTick(event);return;}
         if("live-state".equals(System.getProperty("ronova.pro.fixture.variant"))){liveStateTick(event);return;}
+        if("equipment".equals(System.getProperty("ronova.pro.fixture.variant"))){equipmentTick(event);return;}
         var server=event.getServer();if(server.getPlayerList().getPlayers().isEmpty())return;
         try {
             age++;var runtime=ProRuntime.get(server);var level=server.overworld();

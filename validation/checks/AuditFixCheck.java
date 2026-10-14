@@ -928,14 +928,14 @@ public final class AuditFixCheck {
                     "real local EventLoop did not deliver all queued packets: writtenRemaining="+written.getCount()
                             +", receivedRemaining="+received.getCount()+", failure="+failure.get()
                             +", promises="+networkPromises(promises)+", flushes="+flushes.get()+", reads="+reads+", readCompletes="+readCompletes.get()
-                            +", peer="+networkPeerState(peer.get())+", clientPending="+networkClientPending(client));
+                            +", peer="+networkPeerState(peer.get())+", clientPending="+networkClientPending(client),failure.get());
             require(cleared.get().length==0,"EventLoop receipt scope remained after its original Runnable returned");
             Object[] remaining;synchronized(channels){remaining=active.toArray();}
             for(Object scope:remaining){
                 Field sources=scope.getClass().getDeclaredField("modules");sources.setAccessible(true);
                 require(!Arrays.asList((Module[])sources.get(scope)).contains(module),"completed receipt still retained this fixture source in ACTIVE");
             }
-            require(failure.get()==null,"actual local transport failed: "+failure.get());
+            if(failure.get()!=null)throw new AssertionError("actual local transport failed",failure.get());
             require(promises.size()==3&&promises.stream().allMatch(io.netty.channel.ChannelPromise::isSuccess),"actual local write promises did not all succeed: "+networkPromises(promises));
             require(writes.size()==3&&Arrays.asList(writes.get(0)).contains(module)&&!Arrays.asList(writes.get(1)).contains(module)
                     &&Arrays.asList(writes.get(2)).contains(module),"shared packet lost a sender or inherited a different submission's source");

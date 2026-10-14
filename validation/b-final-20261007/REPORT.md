@@ -1,5 +1,19 @@
 # B 批实际报告：2026-10-09 代码收敛接续
 
+## 2026-10-14：C 接续——装备、ItemStack 与 NBT
+
+接续 `24f5dc3`，Java ABI74 / Native ABI69 / Storage3 / Journal6；协议 `r3-client-8`。标准 Player/Mob/ArmorStand 的当前六槽、准确载体、ItemStack 与当前 NBT 图接入原方法/集合/字段/Unsafe 写入规则，按代次、当前实际成员和全部共享 owner 判断，旧槽/节点/release 失活。拒绝拆分/取出返回 EMPTY，直接 Arrays$ArrayList.set 返回旧元素，避免副本先发布。实际引用宽度来自当前 JVM，静态帮助方法用准确 Class 和全参；修正 bootstrap 转换回传与抽象 primary 安装阻塞，结果处理器先安装，匹配 Java 桥升74。
+
+15个真实动作入口保留原 packet 线程交接，准确 actor/手/栈/菜单和 finally 成对，同名嵌套与空 token 不能借旧许可。当前 Item 准确使用方法有限委托本次栈，写入时复查来源；共享对象全部 owner 仍须获准。未知自定义载体/capability 内部、Player.attack 与 GameMode.tick 延后挖掘的正常装备委托尚未覆盖。
+
+首次整包编译因两处 final ItemStack→Mixin Access 强转失败，原日志保留；改为经 Object 转换后，最终 `build-c-java74-native69-equipment-final-20261014.log` **PASS45秒**，Core2560279、prelaunch22440字节，匹配 Agent/Bootstrap/Native 及现有 DefenseFixture equipment 分支编译完成。该真实 Cow 分支包含数量、拆分无副本泄露、NBT/primitive 叶/实际载体写拒、邻居/release，**游戏分支 NOTRUN**；未起第三个重游戏实例或重复旧 Native/Host 矩阵。
+
+旧网络69重跑已退出1：三次 outbound、两次收包，首次 promise 为 EXTERNAL_NATIVE_CALL_SOURCE_UNOBSERVED/scoped_sources，其余成功。AuditFixCheck 仅保留原 Throwable cause，未加等待/flush/read、未改 deadline 或资格；本次匹配 Java74/Native69 重跑 `c-network-java74-native69-equipment-20261014.log` 仍运行，无生产修复/通过结论。原禁疗 Java72/Native68 实例 PID112724 核对仍在，一次线程栈 main RUNNABLE，处于 Mixin 类资源读取/来源查询链，未进世界或取得 NO_HEAL_PASS；未停/重启。
+
+本次 Native69、驱动/管理器源码未改，未签名驱动沿用、未部署。候选 `distribution/candidate-c-java74-native69-equipment-wip-20261014`，ZIP `distribution/Ronova-Pro-C-Equipment-WIP-Java74-Native69-20261014.zip`；源码与匹配 JAR 同步公开 Git，原日志/ZIP/存档留本地。自身外观及武器注册暂缓，C/B 未完成。
+
+---
+
 ## 2026-10-14：C 接续——活跃效果、饥饿数据与底层禁生成
 
 接续 `fd77b99`，Java ABI73 / Native ABI69 / Storage3 / Journal6，客户端协议 `r3-client-8`。effects/FoodData 准确载体与代次接入原方法、集合、字段及 Unsafe 写入路径；正常原版效果 tick、食用和 FoodData tick 保留，本次许可与异常退出成对，外部回调及嵌套新入口不能借上一层回执。单独禁疗不附带该策略。FoodData 外来篡改防护不等于免饿；未知 Map/损坏链保留缺口，继续原生命/索引保护，装备/ItemStack/NBT 仍未完成。三参数/对象返回分派需要匹配代理，Java桥统一升73；同时修正 Core 遗留的 ABI55 检查导致整组生产守卫安装被拒的问题，实际游戏安装结果仍待运行。

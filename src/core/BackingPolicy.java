@@ -19,6 +19,7 @@ final class BackingPolicy {
     private static final StackWalker CALLER=StackWalker.getInstance(StackWalker.Option.RETAIN_CLASS_REFERENCE);
     private static volatile Object unsafe;
     private static volatile Method fieldOffset,staticOffset,arrayBase,arrayScale;
+    private static volatile int referenceWidth=8;
     private BackingPolicy() { }
     static void initialize(Class<?> bridge)throws ReflectiveOperationException {
         Class<?> agent=Class.forName("dev.ronova.pro.agent.RecoveryAgent",false,ClassLoader.getSystemClassLoader());
@@ -34,6 +35,7 @@ final class BackingPolicy {
         Class<?> type=Class.forName("sun.misc.Unsafe");Field singleton=type.getDeclaredField("theUnsafe");singleton.setAccessible(true);unsafe=singleton.get(null);
         fieldOffset=type.getMethod("objectFieldOffset",Field.class);staticOffset=type.getMethod("staticFieldOffset",Field.class);
         arrayBase=type.getMethod("arrayBaseOffset",Class.class);arrayScale=type.getMethod("arrayIndexScale",Class.class);
+        referenceWidth=(Integer)arrayScale.invoke(unsafe,Object[].class);
         var lookup=java.lang.invoke.MethodHandles.lookup();
         Class.forName("dev.ronova.pro.bootstrap.ControlBridge",false,null).getMethod("installBackingPolicy",Class.class,java.lang.invoke.MethodHandle.class,java.lang.invoke.MethodHandle.class,java.lang.invoke.MethodHandle.class,java.lang.invoke.MethodHandle.class,java.lang.invoke.MethodHandle.class)
             .invoke(null,ProRuntime.class,lookup.findStatic(BackingPolicy.class,"known",java.lang.invoke.MethodType.methodType(boolean.class,Object.class)),
@@ -42,7 +44,7 @@ final class BackingPolicy {
                 lookup.findStatic(BackingPolicy.class,"offsetDenied",java.lang.invoke.MethodType.methodType(boolean.class,Object.class,long.class,Object.class)),
                 lookup.findStatic(BackingPolicy.class,"memoryDenied",java.lang.invoke.MethodType.methodType(boolean.class,Object.class,long.class,long.class)));
     }
-    static boolean known(Object object) {return object!=null&&(OWNERS.containsKey(object)||SourceMaps.observed(object)||LiveStatePolicy.known(object));}
+    static boolean known(Object object) {return object!=null&&(OWNERS.containsKey(object)||SourceMaps.observed(object)||LiveStatePolicy.known(object)||EquipmentPolicy.known(object));}
     private static void owner(Object object,Entity entity) {
         if(object==null)return;
         synchronized(OWNERS) {
@@ -156,6 +158,7 @@ final class BackingPolicy {
                 ||node(value)&&nodeContains(value,entity);
     }
     static boolean elementDenied(Object container,Object old,Object next) {
+        if(EquipmentPolicy.elementDenied(container,old,next))return true;
         if(LiveStatePolicy.elementDenied(container,old,next))return true;
         if(SourceMaps.denies(container,null,next))return true;
         if(old==next)return false;List<Owner> owners=OWNERS.get(container);if(owners==null)return false;
@@ -176,6 +179,7 @@ final class BackingPolicy {
         return false;
     }
     static boolean arrayDenied(Object array,int index,Object next) {
+        if(EquipmentPolicy.arrayDenied(array,index,next))return true;
         if(LiveStatePolicy.arrayDenied(array,index,next))return true;
         if(!known(array)||array==null||!array.getClass().isArray()||index<0||index>=Array.getLength(array))return false;
         Object prior=Array.get(array,index);if(array.getClass().getComponentType().isPrimitive()?Objects.equals(prior,next):prior==next)return false;
@@ -264,6 +268,7 @@ final class BackingPolicy {
         return false;
     }
     static boolean fieldDenied(Object receiver,Class<?> declaring,String name,Object next) {
+        if(EquipmentPolicy.fieldDenied(receiver,declaring,name,next))return true;
         if(LiveStatePolicy.fieldDenied(receiver,declaring,name,next))return true;
         if(SourceMaps.carrierFieldDenied(receiver,declaring,name,next))return true;
         Map<Field,Object> fields=FIELDS.get(receiver);if(fields==null)return false;
@@ -333,7 +338,7 @@ final class BackingPolicy {
     }
     static void controllers(Class<?> bridge)throws ReflectiveOperationException {
         var roots=new ArrayList<Object>();
-        for(Class<?> type:List.of(ProRuntime.class,RecoverySources.class,RecoveryTasks.class,BackingPolicy.class,SourceMaps.class,LiveStatePolicy.class))for(Field field:type.getDeclaredFields()) {
+        for(Class<?> type:List.of(ProRuntime.class,RecoverySources.class,RecoveryTasks.class,BackingPolicy.class,SourceMaps.class,LiveStatePolicy.class,EquipmentPolicy.class))for(Field field:type.getDeclaredFields()) {
             if(!Modifier.isStatic(field.getModifiers())||!field.trySetAccessible())continue;
             if(Map.class.isAssignableFrom(field.getType())||Collection.class.isAssignableFrom(field.getType())||java.util.concurrent.ExecutorService.class.isAssignableFrom(field.getType())) {
                 Object value=field.get(null);if(value!=null) {
@@ -390,6 +395,7 @@ final class BackingPolicy {
         return caller==null||!Set.of(ProRuntime.class,IntentJournal.class,RecoveryTasks.class,RecoveryStorage.class,RecoveryRecords.class).contains(caller.getNestHost());
     }
     static boolean offsetDenied(Object receiver,long offset,Object next) {
+        if(EquipmentPolicy.offsetDenied(receiver,offset,next))return true;
         if(LiveStatePolicy.offsetDenied(receiver,offset,next))return true;
         if(receiver instanceof Class<?> holder)return SourceMaps.staticHolderOffsetDenied(holder,offset,next,unsafe,staticOffset);
         if(receiver!=null&&SourceMaps.instanceHolderOffsetDenied(receiver,offset,next,unsafe,fieldOffset))return true;
@@ -404,7 +410,7 @@ final class BackingPolicy {
                 return false;
             }
             for(Field field:FIELDS.getOrDefault(receiver,Map.of()).keySet()) {
-                long at=(Long)fieldOffset.invoke(unsafe,field),size=field.getType().isPrimitive()?primitiveWidth(field.getType()):8;
+                long at=(Long)fieldOffset.invoke(unsafe,field),size=field.getType().isPrimitive()?primitiveWidth(field.getType()):referenceWidth;
                 if(offset<at+size&&at<offset+writeWidth(next))
                     if(fieldDenied(receiver,field.getDeclaringClass(),field.getName(),offset==at&&writeWidth(next)==size?next:null))return true;
             }
@@ -412,15 +418,16 @@ final class BackingPolicy {
         return false;
     }
     private static int primitiveWidth(Class<?> type) {return type==long.class||type==double.class?8:type==int.class||type==float.class?4:type==short.class||type==char.class?2:1;}
-    private static int writeWidth(Object value) {return value instanceof Long||value instanceof Double||value==null||!(value instanceof Number||value instanceof Boolean||value instanceof Character)?8:value instanceof Integer||value instanceof Float?4:value instanceof Short||value instanceof Character?2:1;}
+    private static int writeWidth(Object value) {return value instanceof Long||value instanceof Double?8:value==null||!(value instanceof Number||value instanceof Boolean||value instanceof Character)?referenceWidth:value instanceof Integer||value instanceof Float?4:value instanceof Short||value instanceof Character?2:1;}
     /** Object-relative bulk writes must not cross an observed protected slot. */
     static boolean memoryDenied(Object receiver,long offset,long length) {
+        if(EquipmentPolicy.memoryDenied(receiver,offset,length))return true;
         if(LiveStatePolicy.memoryDenied(receiver,offset,length))return true;
         if(receiver instanceof Class<?> holder&&length>0) {
             final long end;try {end=Math.addExact(offset,length);}catch(ArithmeticException overflow){return true;}
             for(Field field:holder.getDeclaredFields())if(Modifier.isStatic(field.getModifiers())&&!field.getType().isPrimitive())try {
                 long at=(Long)staticOffset.invoke(unsafe,field);
-                if(offset<at+8&&end>at&&SourceMaps.staticHolderRangeDenied(holder,field.getName()))return true;
+                if(offset<at+referenceWidth&&end>at&&SourceMaps.staticHolderRangeDenied(holder,field.getName()))return true;
             }catch(ReflectiveOperationException unavailable){return true;}
             return false;
         }
@@ -441,7 +448,7 @@ final class BackingPolicy {
                 return false;
             }
             for(Field field:FIELDS.getOrDefault(receiver,Map.of()).keySet()) {
-                long at=(Long)fieldOffset.invoke(unsafe,field),size=field.getType().isPrimitive()?Math.max(1,field.getType()==long.class||field.getType()==double.class?8:field.getType()==int.class||field.getType()==float.class?4:field.getType()==short.class||field.getType()==char.class?2:1):8;
+                long at=(Long)fieldOffset.invoke(unsafe,field),size=field.getType().isPrimitive()?primitiveWidth(field.getType()):referenceWidth;
                 if(offset<at+size&&end>at&&fieldDenied(receiver,field.getDeclaringClass(),field.getName(),null))return true;
             }
         }catch(ReflectiveOperationException unavailable){throw new IllegalStateException("BACKING_MEMORY_UNAVAILABLE",unavailable);}
