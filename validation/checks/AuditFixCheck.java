@@ -24,6 +24,7 @@ public final class AuditFixCheck {
         if(args.length==1&&args[0].equals("host-load")){hostLoad();return;}
         if(args.length==1&&args[0].equals("jvmti-dispatch")){jvmtiDispatch();return;}
         if(args.length==1&&args[0].equals("host-thread-create")){hostThreadCreate();return;}
+        if(args.length==1&&args[0].equals("world-held-save")){worldHeldSave();return;}
         if(args.length==1&&args[0].equals("storage-native")){storageNative();return;}
         if(args.length==1&&args[0].equals("host-process")){System.load(java.nio.file.Path.of(System.getProperty("ronova.pro.audit.native")).toAbsolutePath().toString());hostProcess0();System.out.println("HOST_PROCESS_PASS actual_windows_children A_W_imports A_W_dynamic suspended_preserved stopped_source_refused cached_result_refused unrelated_original_preserved retired_image_refused handles_retired");return;}
         ProRuntime runtime=(ProRuntime)U.allocateInstance(ProRuntime.class);
@@ -416,6 +417,46 @@ public final class AuditFixCheck {
             require(System.nanoTime()<deadline,"accepted socket data did not complete");if(received==0)Thread.sleep(1);
         }
         require(Arrays.equals(bytes,input.array()),"accepted socket changed actual message bytes");
+    }
+    private static void worldHeldSave(){
+        String heldType="ronova_audit:held_tick",otherType="ronova_audit:other_tick";
+        var pos=new net.minecraft.core.BlockPos(17,64,-31);
+        var pending=new net.minecraft.world.ticks.ScheduledTick<>(heldType,pos,300L,net.minecraft.world.ticks.TickPriority.LOW,9L);
+        var other=new net.minecraft.world.ticks.ScheduledTick<>(otherType,pos,220L,net.minecraft.world.ticks.TickPriority.VERY_HIGH,10L);
+        var held=new net.minecraft.world.ticks.ScheduledTick<>(heldType,pos,90L,net.minecraft.world.ticks.TickPriority.HIGH,1L);
+        var original=new net.minecraft.world.ticks.LevelChunkTicks<String>();original.schedule(pending);original.schedule(other);
+        List<net.minecraft.world.ticks.ScheduledTick<String>> deferred=new ArrayList<>(List.of(held));
+        java.util.function.Function<String,String> names=java.util.function.Function.identity();
+        Map<String,String> types=Map.of(heldType,heldType,otherType,otherType);
+        java.util.function.Function<String,Optional<String>> lookup=id->Optional.ofNullable(types.get(id));
+        long[] times={100L,125L};var before=List.of(original.save(times[0],names),original.save(times[1],names));
+        var merged=WorldControl.withHeldTicks(original,deferred);
+        for(int pass=0;pass<times.length;pass++){
+            long now=times[pass];var encoded=merged.save(now,names);
+            require(encoded instanceof net.minecraft.nbt.ListTag,"held tick save did not return the actual NBT tick list");
+            var list=(net.minecraft.nbt.ListTag)encoded;
+            List<net.minecraft.world.ticks.SavedTick<String>> loaded=new ArrayList<>();
+            for(int index=0;index<list.size();index++)loaded.add(net.minecraft.world.ticks.SavedTick.loadTick(list.getCompound(index),lookup)
+                    .orElseThrow(()->new AssertionError("vanilla SavedTick could not decode a held tick save row")));
+            require(loaded.size()==2,"held tick save duplicated the same type/position or lost the other type");
+            var savedHeld=loaded.stream().filter(entry->entry.type()==heldType).findFirst()
+                    .orElseThrow(()->new AssertionError("held tick type identity absent after vanilla NBT decode"));
+            var savedOther=loaded.stream().filter(entry->entry.type()==otherType).findFirst()
+                    .orElseThrow(()->new AssertionError("other tick type at the same position was removed"));
+            require(savedHeld.pos().equals(pos)&&savedHeld.priority()==net.minecraft.world.ticks.TickPriority.HIGH&&savedHeld.delay()==90L-now,
+                    "old held tick did not replace the newer same-key pending tick with its original priority and trigger-now delay");
+            require(savedOther.pos().equals(pos)&&savedOther.priority()==net.minecraft.world.ticks.TickPriority.VERY_HIGH&&savedOther.delay()==220L-now,
+                    "held tick save changed the other type's position, priority or trigger-now delay");
+            require(original.count()==2&&original.peek()==other&&original.getAll().anyMatch(entry->entry==pending)
+                    &&original.getAll().anyMatch(entry->entry==other)&&original.save(now,names).equals(before.get(pass)),
+                    "held tick serialization changed or consumed the original chunk tick container");
+            require(deferred.size()==1&&deferred.get(0)==held&&held.type()==heldType&&held.pos()==pos&&held.triggerTick()==90L
+                    &&held.priority()==net.minecraft.world.ticks.TickPriority.HIGH&&held.subTickOrder()==1L
+                    &&pending.triggerTick()==300L&&pending.priority()==net.minecraft.world.ticks.TickPriority.LOW&&pending.subTickOrder()==9L
+                    &&other.triggerTick()==220L&&other.priority()==net.minecraft.world.ticks.TickPriority.VERY_HIGH&&other.subTickOrder()==10L,
+                    "held tick serialization modified a captured tick or consumed the deferred list");
+        }
+        System.out.println("WORLD_HELD_SAVE_PASS actual_LevelChunkTicks_ScheduledTick_NBT_vanilla_SavedTick_decode same_identity_position_old_held_replaces_pending other_type_same_position_preserved priority_trigger_minus_now_preserved repeated_save_delay_recomputed original_container_ticks_deferred_unchanged data_codec_only");
     }
     private static void sourceListFixes()throws Exception {
         Class<?> publications=Class.forName("dev.ronova.pro.SourceMaps$Publications");

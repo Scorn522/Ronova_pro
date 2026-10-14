@@ -87,11 +87,11 @@ public final class ClientBridge {
         final OverlayInit init;final Ref<Map<?,?>> map;final Ref<List<?>> order;final Map<Object,OverlayRegistration> registrations=new IdentityHashMap<>();
         OverlayEvent(OverlayInit init,Map<?,?> map,List<?> order){this.init=init;this.map=new Ref<>(map);this.order=new Ref<>(order);overlayProtect(this,this.map,this.order,registrations);}
     }
-    private record OverlayRegistration(Ref<Object> callback,Module[] modules){}
+    private record OverlayRegistration(Ref<Object> callback,Module[] modules,boolean unknown){}
     private static final class OverlaySlot {
-        final OverlayFields fields;final long generation;final Object key;final Ref<Object> named,callback;final Module[] modules;final boolean observed;boolean retired;
-        OverlaySlot(OverlayFields fields,long generation,Object key,Object named,Object callback,Module[] modules,boolean observed){
-            this.fields=fields;this.generation=generation;this.key=key;this.named=new Ref<>(named);this.callback=new Ref<>(callback);this.modules=modules;this.observed=observed;overlayProtect(this,this.named,this.callback,modules);
+        final OverlayFields fields;final long generation;final Object key;final Ref<Object> named,callback;Module[] modules;final boolean observed;boolean unknown,retired;
+        OverlaySlot(OverlayFields fields,long generation,Object key,Object named,Object callback,Module[] modules,boolean observed,boolean unknown){
+            this.fields=fields;this.generation=generation;this.key=key;this.named=new Ref<>(named);this.callback=new Ref<>(callback);this.modules=modules;this.observed=observed;this.unknown=unknown;overlayProtect(this,this.named,this.callback,modules);
         }
     }
     private static final class OverlayRegistry {
@@ -708,8 +708,9 @@ public final class ClientBridge {
             if(observed.init.fields.eventMap.get(event)!=registrations||observed.init.fields.eventOrder.get(event)!=order||key==null||key.getClass()!=observed.init.fields.id.getType()
                     ||callback==null||!observed.init.fields.callback.getType().isInstance(callback)||registrations.get(key)!=callback)throw new IllegalStateException("CLIENT_OVERLAY_REGISTRATION_CHANGED");
             int matches=0;for(Object entry:order)if(entry==key)matches++;if(matches!=1)throw new IllegalStateException("CLIENT_OVERLAY_ORDER_REGISTRATION_CHANGED");
-            Module[] modules=union(ControlBridge.invokingSources(),currentSources(),origins(callback));
-            OverlayRegistration slot=new OverlayRegistration(new Ref<>(callback),modules);overlayProtect(slot,slot.callback(),modules);
+            Module[] actual=ControlBridge.objectSources(callback),invoking=ControlBridge.invokingSources(),modules=union(invoking,currentSources(),origins(callback));
+            boolean unknown=ControlBridge.objectSourceUnknown(callback)||ControlBridge.sourceUnknown()||toastNullSource(actual)||toastNullSource(invoking);
+            OverlayRegistration slot=new OverlayRegistration(new Ref<>(callback),modules,unknown);overlayProtect(slot,slot.callback(),modules);
             synchronized(SOURCES){observed.registrations.put(key,slot);}
         }catch(ReflectiveOperationException unavailable){throw new IllegalStateException("CLIENT_OVERLAY_REGISTRATION_CAPTURE_FAILED",unavailable);}
     }
@@ -728,8 +729,11 @@ public final class ClientBridge {
                 if(key!=order.get(index)||registrations.get(key)!=callback||byName.get(key)!=value)throw new IllegalStateException("CLIENT_OVERLAY_PUBLICATION_ASSOCIATION_CHANGED");
                 OverlayRegistration observed; synchronized(SOURCES){observed=init.event.registrations.get(key);}
                 if(observed!=null&&observed.callback().get()!=callback)throw new IllegalStateException("CLIENT_OVERLAY_CALLBACK_CHANGED_AFTER_REGISTRATION");
-                Module[] modules=observed==null?origins(callback):union(observed.modules(),origins(callback));
-                slots.add(new OverlaySlot(init.fields,init.generation,key,value,callback,modules,observed!=null));
+                Module[] actual=ControlBridge.objectSources(callback),namedSources=ControlBridge.objectSources(value);
+                Module[] modules=union(observed==null?new Module[0]:observed.modules(),origins(callback),origins(value));
+                boolean unknown=observed==null||observed.unknown()||ControlBridge.objectSourceUnknown(callback)||ControlBridge.objectSourceUnknown(value)
+                        ||ControlBridge.sourceUnknown()||toastNullSource(actual)||toastNullSource(namedSources);
+                slots.add(new OverlaySlot(init.fields,init.generation,key,value,callback,modules,observed!=null,unknown));
             }
             init.fields.gate.lock();try{synchronized(SOURCES){
                 if(init.fields.generation!=init.generation||init.fields.list.get(null)!=list||init.fields.map.get(null)!=map)throw new IllegalStateException("CLIENT_OVERLAY_PUBLICATION_GENERATION_CHANGED");
@@ -738,19 +742,27 @@ public final class ClientBridge {
             }}finally{init.fields.gate.unlock();}
         }catch(ReflectiveOperationException|RuntimeException unavailable){synchronized(SOURCES){init.fields.pending="CLIENT_OVERLAY_PUBLICATION_CAPTURE_FAILED";}throw new IllegalStateException("CLIENT_OVERLAY_PUBLICATION_CAPTURE_FAILED",unavailable);}
     }
-    private static Module[] overlaySources(OverlaySlot slot){return union(slot.modules,origins(slot.callback.get()));}
+    private static Module[] overlaySources(OverlaySlot slot){
+        Object callback=slot.callback.get(),named=slot.named.get();Module[] actual=ControlBridge.objectSources(callback),namedSources=ControlBridge.objectSources(named);
+        synchronized(SOURCES){
+            slot.unknown|=callback==null||named==null||ControlBridge.objectSourceUnknown(callback)||ControlBridge.objectSourceUnknown(named)
+                    ||toastNullSource(actual)||toastNullSource(namedSources);
+            slot.modules=union(slot.modules,origins(callback),origins(named));overlayProtect((Object)slot.modules);return slot.modules;
+        }
+    }
     private static boolean overlayMatches(OverlaySlot slot,Object named)throws ReflectiveOperationException{
         Object callback=slot.callback.get();return named!=null&&named==slot.named.get()&&named.getClass()==slot.fields.named&&slot.fields.id.get(named)==slot.key&&callback!=null&&slot.fields.callback.get(named)==callback;
     }
     public static Object overlayEntering(Object named){
         var frame=boundary();overlayBoundary(frame,"net.minecraftforge.client.gui.overlay.ForgeGui","lambda$render$0",OVERLAY_RENDER);OverlaySlot slot;
         synchronized(SOURCES){slot=OVERLAY_NAMES.get(new Key(named,false));}
-        Module[] modules=new Module[0];
+        Module[] modules=new Module[0];boolean unknown=ControlBridge.sourceUnknown();
         if(slot!=null)try{
             if(!overlayMatches(slot,named)){synchronized(SOURCES){slot.fields.pending="CLIENT_OVERLAY_NAMED_ASSOCIATION_CHANGED";}slot=null;}
-            else{modules=overlaySources(slot);if(slot.retired||slot.observed&&exclusive(modules))return Boolean.FALSE;}
+            else{modules=overlaySources(slot);unknown|=slot.unknown;if(slot.retired||slot.observed&&!slot.unknown&&exclusive(modules))return Boolean.FALSE;}
         }catch(ReflectiveOperationException unavailable){throw new IllegalStateException("CLIENT_OVERLAY_CALLBACK_CAPTURE_FAILED",unavailable);}
-        Scope scope=new Scope(CURRENT.get(),union(modules,currentSources()),frame,slot);synchronized(SOURCES){ACTIVE.add(scope);overlayProtect(scope,scope.sources);}CURRENT.set(scope);return scope;
+        unknown|=slot==null;
+        Scope scope=new Scope(CURRENT.get(),union(modules,currentSources()),frame,slot,null,null,unknown);synchronized(SOURCES){ACTIVE.add(scope);overlayProtect(scope,scope.sources);}CURRENT.set(scope);return scope;
     }
     public static void overlayExiting(Object token){exit(token);}
     private static boolean overlayActive(OverlaySlot slot){synchronized(SOURCES){for(Scope scope:ACTIVE)if(!scope.ended&&scope.overlay==slot)return true;return false;}}
@@ -763,7 +775,8 @@ public final class ClientBridge {
                 if(fields.list.get(null)!=registry.list||fields.map.get(null)!=registry.map){fields.pending="CLIENT_OVERLAY_CURRENT_PAIR_CHANGED";continue;}
                 List<Object> retained=new ArrayList<>();Map<Object,Object> names=new LinkedHashMap<>();List<OverlaySlot> kept=new ArrayList<>(),removed=new ArrayList<>();
                 for(OverlaySlot slot:registry.slots){Object named=slot.named.get();if(!overlayMatches(slot,named)){fields.pending="CLIENT_OVERLAY_NAMED_ASSOCIATION_CHANGED";removed.clear();break;}
-                    if(slot.observed&&exclusive(overlaySources(slot))&&!overlayActive(slot))removed.add(slot);else{retained.add(named);names.put(slot.key,named);kept.add(slot);}}
+                    Module[] modules=overlaySources(slot);
+                    if(slot.observed&&!slot.unknown&&exclusive(modules)&&!overlayActive(slot))removed.add(slot);else{retained.add(named);names.put(slot.key,named);kept.add(slot);}}
                 if(removed.isEmpty())continue;
                 Object nextList=fields.listCopy.invoke(null,retained),nextMap=fields.mapCopy.invoke(null,names);
                 retirement=new OverlayRetirement(registry,nextList,nextMap,kept,removed);
@@ -771,7 +784,7 @@ public final class ClientBridge {
             if(!fields.gate.tryLock())continue;
             try{synchronized(SOURCES){
                 if(fields.initializing!=0||fields.generation!=registry.generation||OVERLAY_REGISTRIES.get(new Key(fields.type,false))!=registry)continue;
-                for(OverlaySlot slot:retirement.removed)if(!exclusive(overlaySources(slot))||overlayActive(slot))throw new IllegalStateException("CLIENT_OVERLAY_RETIREMENT_SOURCES_CHANGED");
+                for(OverlaySlot slot:retirement.removed)if(!exclusive(overlaySources(slot))||!slot.observed||slot.unknown||overlayActive(slot))throw new IllegalStateException("CLIENT_OVERLAY_RETIREMENT_SOURCES_CHANGED");
                 Object currentList=fields.list.get(null),currentMap=fields.map.get(null);
                 if((currentList!=registry.list&&currentList!=retirement.list)||(currentMap!=registry.map&&currentMap!=retirement.map)){fields.pending="CLIENT_OVERLAY_CURRENT_PAIR_CHANGED";continue;}
                 registry.retirement=retirement;
@@ -786,7 +799,7 @@ public final class ClientBridge {
         }catch(ReflectiveOperationException|RuntimeException unavailable){synchronized(SOURCES){registry.fields.pending="CLIENT_OVERLAY_RETIREMENT_PENDING:"+unavailable.getClass().getSimpleName();if(registry.retirement!=null)registry.retirement.pending=registry.fields.pending;}}
     }
     private static long overlayPending(Module module){
-        long count=0;
+        long count=0;boolean unknown=false;
         for(OverlayRegistry registry:OVERLAY_REGISTRIES.values()){
             Set<Object> actual=Collections.newSetFromMap(new IdentityHashMap<>());boolean readable=true;
             try{
@@ -799,10 +812,10 @@ public final class ClientBridge {
                 Object named=slot.named.get();if(!actual.contains(named))continue;
                 try{if(!overlayMatches(slot,named)){registry.fields.pending="CLIENT_OVERLAY_NAMED_ASSOCIATION_CHANGED";return -2;}}
                 catch(ReflectiveOperationException unavailable){registry.fields.pending="CLIENT_OVERLAY_ACTUAL_PAIR_READ_FAILED";return -1;}
-                count++;
+                count++;unknown|=slot.unknown;
             }
         }
-        return count;
+        return unknown?-3:count;
     }
     /** Same recoverable cause/suppressed contract as Core ClientFaults, at this bootstrap-only boundary. */
     private static boolean uiRecoverable(Throwable failure){
@@ -1613,7 +1626,7 @@ public final class ClientBridge {
             catch(ReflectiveOperationException unavailable){ui++;}
         }
         long overlays=overlayPending(module);
-        String overlayState=overlays==-1?"CLIENT_OVERLAY_ACTUAL_PAIR_READ_FAILED":overlays==-2?"CLIENT_OVERLAY_NAMED_ASSOCIATION_CHANGED":"";
+        String overlayState=overlays==-1?"CLIENT_OVERLAY_ACTUAL_PAIR_READ_FAILED":overlays==-2?"CLIENT_OVERLAY_NAMED_ASSOCIATION_CHANGED":overlays==-3?"CLIENT_OVERLAY_SOURCE_UNKNOWN":"";
         long widgets=0,widgetShared=0,widgetUnknown=0;String widgetState="";
         for(ScreenRegistry registry:SCREEN_WIDGETS.values())for(WidgetSlot slot:registry.widgets.values()){
             Module[] modules=widgetSources(slot);if(Arrays.stream(modules).noneMatch(source->source==module))continue;Object owner=registry.owner.get(),widget=slot.widget.get();if(owner==null||widget==null)continue;

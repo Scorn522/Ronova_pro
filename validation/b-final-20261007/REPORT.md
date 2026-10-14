@@ -1,5 +1,21 @@
 # B 批实际报告：2026-10-09 代码收敛接续
 
+## 2026-10-14：C 强度接续——HUD 未知份额、发送者来源与时停 tick 保存
+
+接续 `3eb5c5b`，Java ABI62 / Native ABI60 / Storage3 / Journal6。自身外观与武器注册继续暂缓；本包修复的是目标 Mod 绘制/通信及实际世界 tick 数据路径，完整 C/B 尚未完成。
+
+- HUD：真实 overlay register、Named 发布、后续来源刷新与绘制 Scope 贯穿 unknown，保留已知模块且保护新来源数组本体。未知条目不按独占移除；实际 list/map 清理在锁内重新核对来源和活动 scope，已知 module 对应且仍在真实容器的未知条目返回现有 pending 状态。原 stoppedEffects 策略保留，unknown 不提供放行身份。
+- 通信：真实 Netty WriteTask.init 返回时，在 CHANNELS 锁外捕获 ControlBridge.invokingSources，合入 currentSources 与 packetSources 的任务快照；发送共享/其他模块消息也保留实际发送者来源，跨线程消费及 retirement pending 可接续。准确 task/context/message/promise 关系、recycle、原拒绝时的一次消息释放和 tryFailure 不变。
+- 世界：ChunkSerializer.write 的实际 getTicksForSerialization 处合入当前 LevelChunk/level、对应 block/fluid 调度器和 chunk 坐标的 held 快照。保存只包装 SerializableTickContainer.save 的 NBT 结果，原容器只调用一次，不提前 resume、不消费 held；按真实类型身份+位置保留旧 held，替换同键新 pending，其他类型与 NBT 深拷贝保留，使用同一 now/registry 和 vanilla SavedTick 的优先级、相对 delay 格式。首次暂存仅把 getChunkNow 已加载的真实区块标记待保存，不加载区块。实际 serializer+服务器线程准入保留，closing 阶段仍可保存 held。
+
+实际结果：集中主包 `build-c-java62-native60-client-world-sources-20261014.log` PASS 20秒；既有 AuditFixCheck 增量编译 PASS，`compile-c-scope62-world-save-20261014.log`。新增 world-held-save 分支 `c-world-held-save62-20261014.log` 实际退出0：使用真实 LevelChunkTicks/ScheduledTick/NBT、vanilla SavedTick.loadTick 读回，同键旧 held 替代新 pending、同位置不同类型保留、原优先级不变；now100/125 两次保存的已到期 held 分别保留 -10/-35 delay，原调度容器、tick 引用/时间/优先级/order 和 deferred 列表未改或消费。此检查仅数据序列化往返，无伪 ServerLevel/producer/控制权限，不代替真实区块存档。
+
+HUD 实际停组清理、真实 producer 排队→停组→EventLoop 拒绝，以及真实区块保存/卸载/重启仍 NOTRUN，未声明通过。未重跑旧 Native/thread/heap/网络/客户端矩阵，没有启动游戏或安装驱动；Native/驱动代码未改，控制 DLL 沿用 Native60，未签名 SYS 37888字节与管理器190464字节沿用此前实际产物。旧原生/映射并发复用及未观察入口等边界仍按原范围保留。
+
+本地候选 `distribution/candidate-c-java62-native60-scope-wip-20261014`，Core JAR 2415016字节，prelaunch 22440字节；匹配包 `distribution/Ronova-Pro-C-Scope-WIP-Java62-Native60-20261014.zip`。旧包和日志保留，同步源码与简要结果到 Git，产物留本地，强度收口目标继续执行。
+
+---
+
 ## 2026-10-14：C 强度接续——原生释放与取消映射防拆
 
 接续 `ba89fbb`，Java ABI61 / Native ABI60 / Storage3 / Journal6。自身外观和武器注册继续暂缓，目标 Mod 的绘制/UI 等强度路径继续；完整 C/B 尚未完成。

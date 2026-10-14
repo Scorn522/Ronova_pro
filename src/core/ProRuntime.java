@@ -828,6 +828,14 @@ public final class ProRuntime implements AutoCloseable {
                 .invoke(null,ProRuntime.class,worldControl.controlObjects());}
         catch(ReflectiveOperationException unavailable){throw new IllegalStateException("WORLD_CONTROL_AUTHORITY_UNAVAILABLE",unavailable);}
     }
+    public static net.minecraft.world.level.chunk.ChunkAccess.TicksToSave worldTicksForSave(ServerLevel level,net.minecraft.world.level.chunk.ChunkAccess chunk,net.minecraft.world.level.chunk.ChunkAccess.TicksToSave original){
+        if(ACTION_CALLER.getCallerClass()!=net.minecraft.world.level.chunk.storage.ChunkSerializer.class)throw new SecurityException("ACTUAL_WORLD_TICK_SERIALIZER_REQUIRED");
+        if(!level.getServer().isSameThread())throw new IllegalStateException("WORLD_TICK_SAVE_SERVER_THREAD_REQUIRED");
+        ProRuntime runtime=get(level.getServer());
+        // ServerStopping precedes the final vanilla chunk save. Closing ends control work,
+        // but the actual serializer must still retain every held tick in that save.
+        return runtime==null?original:runtime.worldControl.ticksForSave(level,chunk,original);
+    }
     public static boolean worldFrozen(Entity entity){
         if(entity==null||!(((Access.EntityState)entity).pro$level() instanceof ServerLevel level)||!level.getServer().isSameThread())return false;
         ProRuntime runtime=get(level.getServer());return runtime!=null&&runtime.worldControl.frozen(entity);

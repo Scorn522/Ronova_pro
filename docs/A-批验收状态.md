@@ -1,17 +1,18 @@
 # Ronova Pro 当前进度
 
-## 2026-10-14：C 强度接续——原生释放与取消映射防拆
+## 2026-10-14：C 强度接续——HUD 未知份额、发送者来源与时停 tick 保存
 
-接续 `ba89fbb`，Java ABI61 / Native ABI60 / Storage3 / Journal6。自身外观和武器注册继续暂缓，目标 Mod 的绘制/UI 等强度路径继续；完整 C/B 尚未完成。
+接续 `3eb5c5b`，Java ABI62 / Native ABI60 / Storage3 / Journal6。自身外观与武器注册继续暂缓；本包修复的是目标 Mod 绘制/通信及实际世界 tick 数据路径，完整 C/B 尚未完成。
 
-- VirtualFree、VirtualFreeEx、UnmapViewOfFile、UnmapViewOfFileEx 已观察 IAT/GPA 接入实际当前来源、停止准入与准确控制范围。MEM_RELEASE 及零长度 MEM_DECOMMIT 按真实完整 allocation，Unmap 按真实完整 view 检查；从 AllocationBase 逐属性段推进，不把首个 RegionSize 当整块。非零 decommit 按整页，placeholder 的非零 split/coalesce 请求保留原 flags 并检查完整显式范围；查询缺失、矛盾或锁忙保持未知并拒绝，不建新的分配器目录。
-- FreeEx 沿既有 SAME_ACCESS 私有 alias 和 CompareObjectHandles 固定真实进程对象，确认当前进程后用 VirtualQuery，不额外索要 QUERY 权限；真实原 API 仍用相同权限的对象、原地址/长度/flags，仅调用一次，保留 BOOL 和即时 LastError。受限回调保持 Try 与原来源守卫。自有未发布表/跳板的失败清理改走私有原 VirtualFree，没有赋予外部回调通用 bypass。
+- HUD：真实 overlay register、Named 发布、后续来源刷新与绘制 Scope 贯穿 unknown，保留已知模块且保护新来源数组本体。未知条目不按独占移除；实际 list/map 清理在锁内重新核对来源和活动 scope，已知 module 对应且仍在真实容器的未知条目返回现有 pending 状态。原 stoppedEffects 策略保留，unknown 不提供放行身份。
+- 通信：真实 Netty WriteTask.init 返回时，在 CHANNELS 锁外捕获 ControlBridge.invokingSources，合入 currentSources 与 packetSources 的任务快照；发送共享/其他模块消息也保留实际发送者来源，跨线程消费及 retirement pending 可接续。准确 task/context/message/promise 关系、recycle、原拒绝时的一次消息释放和 tryFailure 不变。
+- 世界：ChunkSerializer.write 的实际 getTicksForSerialization 处合入当前 LevelChunk/level、对应 block/fluid 调度器和 chunk 坐标的 held 快照。保存只包装 SerializableTickContainer.save 的 NBT 结果，原容器只调用一次，不提前 resume、不消费 held；按真实类型身份+位置保留旧 held，替换同键新 pending，其他类型与 NBT 深拷贝保留，使用同一 now/registry 和 vanilla SavedTick 的优先级、相对 delay 格式。首次暂存仅把 getChunkNow 已加载的真实区块标记待保存，不加载区块。实际 serializer+服务器线程准入保留，closing 阶段仍可保存 held。
 
-实际结果：集中主包 `build-c-java61-native60-host-release-20261014.log` PASS 27秒；既有夹具增量编译 PASS，`compile-c-host-release60-20261014.log`。独立 release-memory phase 实际 JVM 退出0，`c-host-release60-20261014.log`：四入口真实 IAT/GPA 正常调用通过；自有页 decommit 后为 MEM_RESERVE，同址重新 commit 后零读/写正常，release 后为 MEM_FREE；FreeEx 的仅 VM_OPERATION 当前进程真实句柄正常。新临时文件的四个真实 view 在 Unmap/Ex 的 IAT/GPA 正常解除，Ex 的0及 transient-boost=1原 flags 通过，映射/文件句柄关闭、临时文件删除。真实 VM shadow 的零长度整块 decommit 和 release、真实 GPA thunk 的整块 release/整页 decommit，以及准确控制 DLL 的 Unmap/Ex 均返回 BOOL0/5，原 mapping、字节与权限保留；释放后只查询页面，不读已释放字节。
+实际结果：集中主包 `build-c-java62-native60-client-world-sources-20261014.log` PASS 20秒；既有 AuditFixCheck 增量编译 PASS，`compile-c-scope62-world-save-20261014.log`。新增 world-held-save 分支 `c-world-held-save62-20261014.log` 实际退出0：使用真实 LevelChunkTicks/ScheduledTick/NBT、vanilla SavedTick.loadTick 读回，同键旧 held 替代新 pending、同位置不同类型保留、原优先级不变；now100/125 两次保存的已到期 held 分别保留 -10/-35 delay，原调度容器、tick 引用/时间/优先级/order 和 deferred 列表未改或消费。此检查仅数据序列化往返，无伪 ServerLevel/producer/控制权限，不代替真实区块存档。
 
-没有重跑旧写入/权限、thread、heap、定义等矩阵，也没有伪造 Mod producer。真实目标 Mod stopped/共享来源、受限回调并发和 placeholder 实机效果仍 NOTRUN；公共 Win32 查询与释放之间没有原子 allocation 身份 pin，映射并发替换仍未闭合。CPU stores、原始系统调用、未观察入口/旧缓存、未登记 JNI/特殊 VM IAT 等旧范围仍保留；本候选游戏、保存重启和内核运行未执行。驱动/管理器本轮未改、未重建，沿用此前未签名 SYS 37888字节及管理器190464字节，未安装/加载。
+HUD 实际停组清理、真实 producer 排队→停组→EventLoop 拒绝，以及真实区块保存/卸载/重启仍 NOTRUN，未声明通过。未重跑旧 Native/thread/heap/网络/客户端矩阵，没有启动游戏或安装驱动；Native/驱动代码未改，控制 DLL 沿用 Native60，未签名 SYS 37888字节与管理器190464字节沿用此前实际产物。旧原生/映射并发复用及未观察入口等边界仍按原范围保留。
 
-本地候选 `distribution/candidate-c-java61-native60-release-wip-20261014`，Core JAR 2410813字节，prelaunch 22440字节。匹配源码/产物包 `distribution/Ronova-Pro-C-Release-WIP-Java61-Native60-20261014.zip`；旧候选和日志保留。同步当前源码和简要实际结果到 Git，二进制留本地，强度收口目标继续执行。
+本地候选 `distribution/candidate-c-java62-native60-scope-wip-20261014`，Core JAR 2415016字节，prelaunch 22440字节；匹配包 `distribution/Ronova-Pro-C-Scope-WIP-Java62-Native60-20261014.zip`。旧包和日志保留，同步源码与简要结果到 Git，产物留本地，强度收口目标继续执行。
 
 ---
 ## 2026-10-13：C 接续——54/51 用户态接线与自编 Windows 驱动源码

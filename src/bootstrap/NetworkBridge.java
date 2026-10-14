@@ -115,7 +115,10 @@ public final class NetworkBridge {
     public static void encodedBuffer(Object buffer){boundary();synchronized(CHANNELS){record(BUFFERS,buffer,currentSources());}}
     public static void writeCreated(Object task,Object context,Object message,Object promise){
         if(!boundary().getMethodName().equals("init"))throw new SecurityException("ACTUAL_NETTY_WRITE_ITEM_REQUIRED");
-        Module[] modules=union(currentSources(),packetSources(message));synchronized(CHANNELS){reap();WRITES.put(new Key(task,true),new Write(modules,new Ref<>(context),new Ref<>(message),new Ref<>(promise)));CodeSourceBridge.contributionControl(modules);}
+        // A shared message does not identify the sender whose accepted write
+        // crosses to the EventLoop. Capture that invocation before publication.
+        Module[] sender=ControlBridge.invokingSources();
+        Module[] modules=union(sender,currentSources(),packetSources(message));synchronized(CHANNELS){reap();WRITES.put(new Key(task,true),new Write(modules,new Ref<>(context),new Ref<>(message),new Ref<>(promise)));CodeSourceBridge.contributionControl(modules);}
     }
     public static Object writeEnter(Object task){
         var frame=boundary();Write write;synchronized(CHANNELS){write=WRITES.get(new Key(task,false));}

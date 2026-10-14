@@ -29,6 +29,7 @@
     "WorldControlHooks$World",
     "WorldControlHooks$Block",
     "WorldControlHooks$Scheduled",
+    "WorldControlHooks$SavedTicks",
     "WorldControlHooks$RaidTick",
     "WorldControlHooks$RaidManagement",
     "WorldControlHooks$Lightning",

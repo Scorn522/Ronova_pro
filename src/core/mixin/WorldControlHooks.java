@@ -76,6 +76,13 @@ public final class WorldControlHooks {
             return true;
         }
     }
+    @Mixin(net.minecraft.world.level.chunk.storage.ChunkSerializer.class) public abstract static class SavedTicks {
+        @Redirect(method="write(Lnet/minecraft/server/level/ServerLevel;Lnet/minecraft/world/level/chunk/ChunkAccess;)Lnet/minecraft/nbt/CompoundTag;",
+                at=@At(value="INVOKE",target="Lnet/minecraft/world/level/chunk/ChunkAccess;getTicksForSerialization()Lnet/minecraft/world/level/chunk/ChunkAccess$TicksToSave;"),require=1,allow=1)
+        private static net.minecraft.world.level.chunk.ChunkAccess.TicksToSave save(net.minecraft.world.level.chunk.ChunkAccess chunk,ServerLevel level,net.minecraft.world.level.chunk.ChunkAccess original){
+            return ProRuntime.worldTicksForSave(level,chunk,chunk.getTicksForSerialization());
+        }
+    }
     @Mixin(net.minecraft.world.entity.raid.Raid.class) public abstract static class RaidTick {
         @Inject(method="tick",at=@At("HEAD"),cancellable=true)
         private void tick(CallbackInfo callback){net.minecraft.world.entity.raid.Raid raid=(net.minecraft.world.entity.raid.Raid)(Object)this;

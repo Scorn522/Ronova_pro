@@ -3,15 +3,23 @@ package dev.ronova.pro;
 import java.util.*;
 import dev.ronova.pro.mixin.Access;
 import net.minecraft.core.BlockPos;
+import net.minecraft.nbt.CompoundTag;
+import net.minecraft.nbt.ListTag;
+import net.minecraft.nbt.Tag;
 import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.world.entity.Entity;
 import net.minecraft.world.entity.player.Player;
 import net.minecraft.world.level.Level;
+import net.minecraft.world.level.ChunkPos;
+import net.minecraft.world.level.chunk.ChunkAccess;
+import net.minecraft.world.level.chunk.LevelChunk;
 import net.minecraft.world.phys.AABB;
 import net.minecraft.world.phys.Vec3;
 import net.minecraft.world.ticks.LevelTicks;
+import net.minecraft.world.ticks.SavedTick;
 import net.minecraft.world.ticks.ScheduledTick;
+import net.minecraft.world.ticks.SerializableTickContainer;
 
 /** Selected world areas share the existing runtime authority and body operations. */
 final class WorldControl {
@@ -65,6 +73,43 @@ final class WorldControl {
             if(pos.getX()>=low.getX()&&pos.getX()<=high.getX()&&pos.getY()>=low.getY()&&pos.getY()<=high.getY()&&pos.getZ()>=low.getZ()&&pos.getZ()<=high.getZ()){result.add(entry.tick());if(remove)iterator.remove();}}
         if(queue.isEmpty())held.remove(container);return result;
     }
+    ChunkAccess.TicksToSave ticksForSave(ServerLevel level,ChunkAccess chunk,ChunkAccess.TicksToSave original){
+        if(!(chunk instanceof LevelChunk live)||live.getLevel()!=level)return original;
+        var blocks=heldForSave(level.getBlockTicks(),chunk.getPos());var fluids=heldForSave(level.getFluidTicks(),chunk.getPos());
+        if(blocks.isEmpty()&&fluids.isEmpty())return original;
+        return new ChunkAccess.TicksToSave(withHeldTicks(original.blocks(),blocks),withHeldTicks(original.fluids(),fluids));
+    }
+    @SuppressWarnings("unchecked") private <T> List<ScheduledTick<T>> heldForSave(LevelTicks<T> container,ChunkPos chunk){
+        List<Held> pending=held.get(container);if(pending==null)return List.of();List<ScheduledTick<T>> result=new ArrayList<>();
+        for(Held waiting:pending)if(ChunkPos.asLong(waiting.tick().pos())==chunk.toLong())result.add((ScheduledTick<T>)(ScheduledTick<?>)waiting.tick());
+        return result;
+    }
+    /** Serialize the held logical entries without resuming or changing either live queue. */
+    static <T> SerializableTickContainer<T> withHeldTicks(SerializableTickContainer<T> original,List<ScheduledTick<T>> deferred){
+        if(deferred.isEmpty())return original;
+        Map<T,Set<BlockPos>> positions=new IdentityHashMap<>();List<ScheduledTick<T>> unique=new ArrayList<>();
+        for(ScheduledTick<T> tick:deferred)if(positions.computeIfAbsent(tick.type(),ignored->new HashSet<>()).add(tick.pos()))unique.add(tick);
+        List<ScheduledTick<T>> snapshot=List.copyOf(unique);
+        return (now,names)->{
+            Tag saved=original.save(now,names);if(!(saved instanceof ListTag rows)||!rows.isEmpty()&&rows.getElementType()!=Tag.TAG_COMPOUND)throw new IllegalStateException("WORLD_HELD_TICK_SAVE_FORMAT_UNAVAILABLE");
+            Map<String,T> types=new HashMap<>();
+            for(T type:positions.keySet()){
+                String name=names.apply(type);T prior=types.putIfAbsent(name,type);
+                if(prior!=null&&prior!=type)throw new IllegalStateException("WORLD_HELD_TICK_SAVE_TYPE_NAME_COLLISION");
+            }
+            ListTag result=new ListTag();
+            for(Tag row:rows){
+                if(row instanceof CompoundTag data){
+                    Optional<SavedTick<T>> entry=SavedTick.loadTick(data,name->Optional.ofNullable(types.get(name)));
+                    if(entry.isPresent()&&positions.get(entry.get().type()).contains(entry.get().pos()))continue;
+                }
+                result.add(row.copy());
+            }
+            // Use the SAME now/name function as vanilla, including its int delay and priority format.
+            for(ScheduledTick<T> tick:snapshot)result.add(SavedTick.saveTick(tick,names,now));
+            return result;
+        };
+    }
     boolean clock(ServerLevel level){for(Rule rule:rules.values())if(rule.freeze&&rule.clock&&rule.area.level()==level)return true;return false;}
     boolean frozen(Level level,BlockPos pos){for(Rule rule:rules.values())if(rule.freeze&&rule.area.level()==level&&rule.area.contains(pos))return true;return false;}
     boolean frozen(Entity entity){
@@ -97,7 +142,9 @@ final class WorldControl {
         List<Held> pending=held.computeIfAbsent(container,ignored->new ArrayList<>());
         // LevelChunkTicks keeps one entry per type identity and position, including while paused.
         for(Held prior:pending)if(prior.tick().type()==scheduled.type()&&prior.tick().pos().equals(scheduled.pos()))return true;
-        pending.add(new Held((LevelTicks<Object>)container,(ScheduledTick<Object>)scheduled));return true;
+        pending.add(new Held((LevelTicks<Object>)container,(ScheduledTick<Object>)scheduled));
+        LevelChunk chunk=owner.getChunkSource().getChunkNow(scheduled.pos().getX()>>4,scheduled.pos().getZ()>>4);
+        if(chunk!=null)chunk.setUnsaved(true);return true;
     }
     void tick(MinecraftServer server){
         tick++;if(rules.values().removeIf(rule->tick>=rule.until))revision++;
