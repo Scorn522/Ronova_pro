@@ -38,6 +38,7 @@ typedef struct NativeThread {
     /* VM detach ends Java attachments, not a C callback or an OS worker. */
     struct HostThreadWorker *hostWorker;
     HostLibraryLoad *hostLoad;struct HostImage *hostUnloadImage;
+    struct HostModuleRelease *hostRelease;
     unsigned callbackHolds,vmDetaching,vmThreadEnding;
     int storageOwned,vmAttached,javaEnded,javaCleaning;
 } NativeThread;
@@ -129,6 +130,7 @@ static int host_module_capture(NativeThread*,void*,OwnerLink**,struct HostImage*
 static int host_module_binding_enter(Binding*);
 static void host_module_binding_leave(Binding*);
 static int host_capture_caller(NativeThread*,void*,OwnerLink**);
+static HMODULE native_control_image(void);
 static NativeThread *native_thread(void) {
     if(native_tls==TLS_OUT_OF_INDEXES)return NULL;NativeThread *state=(NativeThread*)TlsGetValue(native_tls);
     if(!state){state=(NativeThread*)calloc(1,sizeof(*state));if(state){state->storageOwned=1;if(!TlsSetValue(native_tls,state)){free(state);return NULL;}}}return state;
@@ -1012,6 +1014,9 @@ static const struct JNIInvokeInterface_ *native_vm_shadow;
 static struct JNINativeInterface_ native_guarded;
 static volatile LONG native_tooling_ready,native_tooling_failures,native_guarded_ready;
 static HMODULE native_tooling_pin;
+static HMODULE native_control_image(void){
+    return (HMODULE)InterlockedCompareExchangePointer((void *volatile*)&native_tooling_pin,NULL,NULL);
+}
 static uintptr_t native_tooling_image_begin,native_tooling_image_end;
 static jmethodID native_tooling_image_query,native_tooling_thread_query,native_tooling_frame_query;
 static jmethodID native_tooling_heap_target,native_tooling_definitions_query;
@@ -1330,7 +1335,7 @@ static NativeToolingSlot *native_tooling_slot(JNIEnv *env,NativeToolingEnv *reco
     if(slot->image&&!GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS,(LPCSTR)callback,&slot->pin))ready=0;
     if(!slot->image)slot->unknown=1;
     if(ready)slot->entry=agent?(void*)native_tooling_agent:native_tooling_entry(slot,wrapper,arguments);
-    if(!slot->entry){if(slot->pin)FreeLibrary(slot->pin);if(slot->sourceLease)native_original.DeleteGlobalRef(env,slot->sourceLease);if(slot->origin)native_original.DeleteWeakGlobalRef(env,slot->origin);native_owner_links_free(slot->owners);free(slot);return NULL;}
+    if(!slot->entry){if(slot->pin)host_real_free_library(slot->pin);if(slot->sourceLease)native_original.DeleteGlobalRef(env,slot->sourceLease);if(slot->origin)native_original.DeleteWeakGlobalRef(env,slot->origin);native_owner_links_free(slot->owners);free(slot);return NULL;}
     slot->admitted=1;AcquireSRWLockExclusive(&native_tooling_records);slot->next=native_tooling_slots;native_tooling_slots=slot;ReleaseSRWLockExclusive(&native_tooling_records);return slot;
 }
 static void native_tooling_version_retire(NativeToolingVersion *version){
@@ -1388,6 +1393,7 @@ static DWORD WINAPI native_tooling_retirement_worker(void *argument){
             if(!native_tooling_retirement_jni(&env)){InterlockedIncrement(&native_tooling_failures);break;}
             host_thread_workers_reap(&env);if(!env)break;
             host_module_loads_reap(&env);if(!env)break;
+            host_module_releases_reap(&env);if(!env)break;
             if(!definitionsReaped){native_tooling_definitions_reap(env);definitionsReaped=1;
                 if(!native_tooling_retirement_jni(&env)){InterlockedIncrement(&native_tooling_failures);break;}}
             AcquireSRWLockExclusive(&native_tooling_records);
@@ -1402,7 +1408,7 @@ static DWORD WINAPI native_tooling_retirement_worker(void *argument){
                 ReleaseSRWLockExclusive(&native_tooling_records);
                 NativeToolingScope scope={slot->owners,origin,slot->unknown,state->depth,state->tooling};
                 native_thread_callback_enter(state);state->tooling=&scope;
-                int released=!pin||FreeLibrary(pin);
+                int released=!pin||host_real_free_library(pin);
                 if(!released){state->tooling=scope.previous;
                     AcquireSRWLockExclusive(&native_tooling_records);slot->pin=pin;slot->sourceLease=lease;slot->origin=origin;slot->releasing=0;ReleaseSRWLockExclusive(&native_tooling_records);
                     native_thread_callback_leave(state);InterlockedIncrement(&native_tooling_failures);continue;}
@@ -1538,6 +1544,10 @@ static jvmtiError JNICALL native_tooling_set_jni(jvmtiEnv *api,const jniNativeIn
         if(!ReadProcessMemory(GetCurrentProcess(),table,&incoming,sizeof(incoming),&copied)||copied!=sizeof(incoming))return native_tooling_error(JVMTI_ERROR_ILLEGAL_ARGUMENT);
         const uintptr_t *original=(const uintptr_t*)&native_original,*guarded=(const uintptr_t*)&native_guarded,*proposed=(const uintptr_t*)&incoming;
         for(unsigned i=0;i<sizeof(incoming)/sizeof(uintptr_t);i++)if(guarded[i]!=original[i]&&proposed[i]!=guarded[i])return native_tooling_error(JVMTI_ERROR_ACCESS_DENIED);
+        /* The VM receives exactly the private table that passed the guard.
+         * Rereading the caller's mutable table could replace a guarded slot
+         * between the check above and the actual global JNI publication. */
+        return record->original->SetJNIFunctionTable(api,&incoming);
     }
     return record->original->SetJNIFunctionTable(api,table);
 }
@@ -1841,7 +1851,7 @@ static int native_tooling_install(JavaVM *vm,jvmtiEnv *api){
     const IMAGE_DOS_HEADER *toolingDos=(const IMAGE_DOS_HEADER*)native_tooling_pin;
     const IMAGE_NT_HEADERS64 *toolingNt=(const IMAGE_NT_HEADERS64*)(native_tooling_image_begin+toolingDos->e_lfanew);
     native_tooling_image_end=native_tooling_image_begin+toolingNt->OptionalHeader.SizeOfImage;
-    if(!native_tooling_observe(api,NULL,(void*)native_tooling_install,1)){FreeLibrary(native_tooling_pin);native_tooling_pin=NULL;VirtualFree(shadow,0,MEM_RELEASE);return 0;}
+    if(!native_tooling_observe(api,NULL,(void*)native_tooling_install,1)){host_real_free_library(native_tooling_pin);native_tooling_pin=NULL;VirtualFree(shadow,0,MEM_RELEASE);return 0;}
     /* The installed environment now references this DLL even if starting the
      * retirement worker fails; retain its image rather than unmapping entries. */
     if(!native_tooling_retirement_start()){InterlockedIncrement(&native_tooling_failures);return 0;}

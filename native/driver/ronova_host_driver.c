@@ -116,6 +116,7 @@ static const FLT_OPERATION_REGISTRATION RvhOperations[]={
     {IRP_MJ_WRITE,0,RvhPreFileOperation,NULL},
     {IRP_MJ_SET_INFORMATION,0,RvhPreFileOperation,NULL},
     {IRP_MJ_SET_SECURITY,0,RvhPreFileOperation,NULL},
+    {IRP_MJ_SET_EA,0,RvhPreFileOperation,NULL},
     {IRP_MJ_FILE_SYSTEM_CONTROL,0,RvhPreFileOperation,NULL},
     {IRP_MJ_ACQUIRE_FOR_SECTION_SYNCHRONIZATION,0,RvhPreFileOperation,NULL},
     {IRP_MJ_OPERATION_END}
@@ -524,7 +525,7 @@ static BOOLEAN RvhCompletedOpenAccess(PIO_SECURITY_CONTEXT Security,ACCESS_MASK 
 static ULONG RvhOpenEffects(ACCESS_MASK Access){
     ULONG effects=0;
     if((Access&FILE_READ_DATA)!=0)effects|=RVH_FILE_DENY_READ;
-    if((Access&(FILE_WRITE_DATA|FILE_APPEND_DATA))!=0)effects|=RVH_FILE_DENY_WRITE;
+    if((Access&(FILE_WRITE_DATA|FILE_APPEND_DATA|FILE_WRITE_EA))!=0)effects|=RVH_FILE_DENY_WRITE;
     if((Access&FILE_EXECUTE)!=0)effects|=RVH_FILE_DENY_NEW_EXECUTE_OPEN;
     return effects;
 }
@@ -587,7 +588,8 @@ static FLT_PREOP_CALLBACK_STATUS RvhPreFileOperation(PFLT_CALLBACK_DATA Data,PCF
     if(Data->RequestorMode!=UserMode){RvhFileGap(actor,Objects->Volume,Objects->Instance,RVH_GAP_KERNEL_MODE_IO);ExReleaseRundownProtection(&RvhCalls);return FLT_PREOP_SUCCESS_NO_CALLBACK;}
     if(FlagOn(Data->Iopb->IrpFlags,IRP_PAGING_IO)){RvhFileGap(actor,Objects->Volume,Objects->Instance,RVH_GAP_PAGING_IO);ExReleaseRundownProtection(&RvhCalls);return FLT_PREOP_SUCCESS_NO_CALLBACK;}
     if(Data->Iopb->MajorFunction==IRP_MJ_READ)effect=RVH_FILE_DENY_READ;
-    else if(Data->Iopb->MajorFunction==IRP_MJ_WRITE||Data->Iopb->MajorFunction==IRP_MJ_SET_SECURITY)effect=RVH_FILE_DENY_WRITE;
+    else if(Data->Iopb->MajorFunction==IRP_MJ_WRITE||Data->Iopb->MajorFunction==IRP_MJ_SET_SECURITY
+            ||Data->Iopb->MajorFunction==IRP_MJ_SET_EA)effect=RVH_FILE_DENY_WRITE;
     else if(Data->Iopb->MajorFunction==IRP_MJ_SET_INFORMATION&&RvhMutatesFile(Data->Iopb->Parameters.SetFileInformation.FileInformationClass))effect=RVH_FILE_DENY_WRITE;
     else if(Data->Iopb->MajorFunction==IRP_MJ_FILE_SYSTEM_CONTROL){
         if(Data->Iopb->MinorFunction!=IRP_MN_USER_FS_REQUEST){ExReleaseRundownProtection(&RvhCalls);return FLT_PREOP_SUCCESS_NO_CALLBACK;}

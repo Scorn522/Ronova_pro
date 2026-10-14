@@ -252,7 +252,7 @@ static void native_tooling_heap_release(JNIEnv *env,NativeToolingHeapCall *call)
         if(slot->pin){
             NativeThread *state=native_thread();NativeToolingScope scope;
             if(state){native_thread_callback_enter(state);scope=(NativeToolingScope){slot->owners,slot->origin,slot->unknown,state->depth,state->tooling};state->tooling=&scope;}
-            released=FreeLibrary(slot->pin);
+            released=host_real_free_library(slot->pin);
             if(state){state->tooling=scope.previous;native_thread_callback_leave(state);}
             /* A real DLL callback can end this caller's Java attachment. Use
              * its current environment; never reattach an external caller or

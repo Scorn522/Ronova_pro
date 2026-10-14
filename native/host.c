@@ -24,7 +24,7 @@ enum {
     HOST_CREATE_THREAD=17,HOST_CREATE_REMOTE_THREAD=18,HOST_CREATE_REMOTE_THREAD_EX=19,
     HOST_BEGIN_THREAD=20,HOST_BEGIN_THREAD_EX=21,
     HOST_LOAD_LIBRARY_A=22,HOST_LOAD_LIBRARY_W=23,HOST_LOAD_LIBRARY_EX_A=24,HOST_LOAD_LIBRARY_EX_W=25,
-    HOST_KIND_COUNT=26
+    HOST_FREE_LIBRARY=26,HOST_KIND_COUNT=27
 };
 static int host_is_create(int kind){return kind==HOST_CREATE_W||kind==HOST_CREATE_A
         ||kind>=HOST_CREATE_USER_W&&kind<=HOST_CREATE_LOGON_W;}
@@ -33,6 +33,19 @@ static int host_is_thread_admission(int kind){return kind>=HOST_CREATE_THREAD&&k
 static HostCompareHandles host_compare_handles;
 static HostGetProcAddress host_windows_resolver;
 static void *host_windows_api[HOST_KIND_COUNT];
+static BOOL host_real_free_library(HMODULE module){
+    /* Backend pins own an independently acquired reference. Resolving the
+     * original export avoids consuming a producer's newly controlled IAT. */
+    DWORD incoming=GetLastError();
+    void *actual=__atomic_load_n(&host_windows_api[HOST_FREE_LIBRARY],__ATOMIC_ACQUIRE);
+    if(!actual){HMODULE kernel=GetModuleHandleW(L"kernel32.dll");
+        HostGetProcAddress resolve=__atomic_load_n(&host_windows_resolver,__ATOMIC_ACQUIRE);
+        actual=kernel?(void*)(resolve?resolve(kernel,"FreeLibrary"):GetProcAddress(kernel,"FreeLibrary")):NULL;
+        if(actual)__atomic_store_n(&host_windows_api[HOST_FREE_LIBRARY],actual,__ATOMIC_RELEASE);
+    }
+    if(!actual){SetLastError(ERROR_PROC_NOT_FOUND);return FALSE;}
+    SetLastError(incoming);return ((BOOL (WINAPI*)(HMODULE))actual)(module);
+}
 static BOOL host_real_close(HANDLE handle){
     void *actual=__atomic_load_n(&host_windows_api[HOST_CLOSE],__ATOMIC_ACQUIRE);
     return actual?((BOOL (WINAPI*)(HANDLE))actual)(handle):CloseHandle(handle);
@@ -129,6 +142,9 @@ static int native_tooling_retirement_jni(JNIEnv**);
 static void native_thread_worker_wake(void);
 static int native_thread_worker_backend_ready(void);
 static jobjectArray native_tooling_sources(JNIEnv*,OwnerLink*,int);
+static HostLibraryLoad *host_module_release_sources(NativeThread*);
+static void host_module_releases_reap(JNIEnv**);
+static void host_module_releases_state(JNIEnv*,jobject,jlong*);
 static int host_handle_identity_ready(void){
     if(__atomic_load_n(&host_compare_handles,__ATOMIC_ACQUIRE))return 1;
     HMODULE kernel=GetModuleHandleW(L"kernelbase.dll");
@@ -607,7 +623,7 @@ static int host_entry_association(HostImport *entry,NativeThread *state,OwnerLin
 #include "host_callback_sources.c"
 static int host_entry_sources_query(HostImport *entry,NativeThread *state,void *caller,OwnerLink **owners,NativeLibrary **selected,int retainSources,int *unknown){
     int unobserved=entry->unknown;
-    if(state&&(state->heapCallback||state->vmDetaching||state->vmThreadEnding||state->hostUnloadImage
+    if(state&&(state->heapCallback||state->vmDetaching||state->vmThreadEnding||state->hostUnloadImage||state->hostRelease
             ||state->hostLoad&&state->hostLoad->calling))
         return host_callback_entry_sources(entry,state,caller,owners,selected,retainSources,host_is_thread_admission(entry->kind),unknown);
     AcquireSRWLockShared(&host_imports);AcquireSRWLockShared(&native_records);
@@ -853,12 +869,13 @@ static uint64_t host_native_dispatch(HostImport *entry,void *caller,uintptr_t *a
     if(host_is_crt_thread_create(entry->kind))return host_native_crt_thread_create(entry,caller,arguments);
     if(host_is_handle(entry->kind))return host_native_handle(entry,caller,arguments);
     if(host_is_module_load(entry->kind))return host_native_module_load(entry,caller,arguments);
+    if(entry->kind==HOST_FREE_LIBRARY)return host_native_module_release(entry,caller,arguments);
     SetLastError(ERROR_INVALID_FUNCTION);return 0;
 }
 static uint64_t host_native_call(HostImport *entry,void *caller,uintptr_t *arguments){
     DWORD incoming=GetLastError();
     NativeThread *state=native_tls==TLS_OUT_OF_INDEXES?NULL:(NativeThread*)TlsGetValue(native_tls);
-    int restricted=state&&(state->heapCallback||state->vmDetaching||state->vmThreadEnding||state->hostUnloadImage
+    int restricted=state&&(state->heapCallback||state->vmDetaching||state->vmThreadEnding||state->hostUnloadImage||state->hostRelease
             ||state->hostLoad&&state->hostLoad->calling);
     if(restricted){
         if(!TryAcquireSRWLockShared(&host_imports)){SetLastError(ERROR_BUSY);return 0;}
@@ -887,7 +904,7 @@ static unsigned host_import_arguments(int kind){
         case HOST_LOAD_LIBRARY_EX_A:case HOST_LOAD_LIBRARY_EX_W:return 3;
         case HOST_DUPLICATE:return 7;
         case HOST_HANDLE_FLAGS:case HOST_OPEN_PROCESS:case HOST_OPEN_THREAD:return 3;
-        case HOST_CLOSE:case HOST_RESUME_THREAD:case HOST_SUSPEND_THREAD:return 1;
+        case HOST_CLOSE:case HOST_RESUME_THREAD:case HOST_SUSPEND_THREAD:case HOST_FREE_LIBRARY:return 1;
         default:return 2;
     }
 }
@@ -925,7 +942,7 @@ static const char *host_api_names[HOST_KIND_COUNT]={NULL,"CreateProcessW","GetPr
         "CloseHandle","DuplicateHandle","SetHandleInformation","OpenProcess","OpenThread",
         "ResumeThread","SuspendThread","TerminateProcess","TerminateThread",
         "CreateThread","CreateRemoteThread","CreateRemoteThreadEx","_beginthread","_beginthreadex",
-        "LoadLibraryA","LoadLibraryW","LoadLibraryExA","LoadLibraryExW"};
+        "LoadLibraryA","LoadLibraryW","LoadLibraryExA","LoadLibraryExW","FreeLibrary"};
 static void host_windows_targets(void **targets){
     HMODULE kernel=GetModuleHandleW(L"kernel32.dll"),advapi=GetModuleHandleW(L"advapi32.dll");
     HostGetProcAddress resolve=__atomic_load_n(&host_windows_resolver,__ATOMIC_ACQUIRE);
@@ -1736,5 +1753,6 @@ JNIEXPORT jlongArray JNICALL Java_dev_ronova_pro_bootstrap_NativeControl_hostSta
     host_import_state(env,module,values);
     host_thread_workers_state(env,module,values);
     host_module_loads_state(env,module,values);
+    host_module_releases_state(env,module,values);
     jlongArray result=native_original.NewLongArray(env,32);if(result)native_original.SetLongArrayRegion(env,result,0,32,values);return result;
 }

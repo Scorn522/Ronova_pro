@@ -130,7 +130,7 @@ static NativeToolingSlot *native_tooling_extension_slot(JNIEnv *env,NativeToolin
     if(!slot->image)slot->unknown=1;
     if(ready)slot->entry=native_tooling_extension_entry(slot,signature);
     if(!slot->entry){
-        if(slot->pin)FreeLibrary(slot->pin);if(slot->sourceLease)native_original.DeleteGlobalRef(env,slot->sourceLease);
+        if(slot->pin)host_real_free_library(slot->pin);if(slot->sourceLease)native_original.DeleteGlobalRef(env,slot->sourceLease);
         if(slot->origin)native_original.DeleteWeakGlobalRef(env,slot->origin);native_owner_links_free(slot->owners);free(slot);return NULL;
     }
     slot->admitted=1;AcquireSRWLockExclusive(&native_tooling_records);
@@ -147,7 +147,7 @@ static int native_tooling_extensions_unresolved_locked(const NativeToolingEnv *r
 static void native_tooling_extension_abandon(NativeToolingExtension *extension){
     if(!extension)return;
     if(extension->slot)native_tooling_slot_retire(extension->slot);
-    else {if(extension->pin)FreeLibrary(extension->pin);native_owner_links_free(extension->owners);}
+    else {if(extension->pin)host_real_free_library(extension->pin);native_owner_links_free(extension->owners);}
     free(extension);
 }
 static jvmtiError JNICALL native_tooling_extension(jvmtiEnv *api,jint index,jvmtiExtensionEvent callback){

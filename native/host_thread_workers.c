@@ -171,7 +171,7 @@ static HostThreadWorker *host_thread_worker_prepare(HostImport *entry,NativeThre
          * the exact start DLL, but cannot use JNI or Java-frame discovery to
          * manufacture a new strong source lease in this window.
          */
-        int nativeOnly=state&&(state->vmDetaching||state->vmThreadEnding);
+        int nativeOnly=state&&(state->vmDetaching||state->vmThreadEnding||state->hostRelease);
         int attached=!nativeOnly&&native_vm&&(*native_vm)->GetEnv(native_vm,(void**)&env,JNI_VERSION_1_8)==JNI_OK;
         /* An actual child receipt can carry the full already retained lease
          * into a detached worker. The source token is distinct from heap slots. */
@@ -344,7 +344,7 @@ static void host_thread_workers_reap(JNIEnv **environment){
             ReleaseSRWLockExclusive(&host_records);
         }
         NativeToolingScope scope={worker->owners,NULL,worker->unknown,daemon->depth,daemon->tooling};daemon->tooling=&scope;
-        int released=!worker->pin||FreeLibrary(worker->pin);DWORD error=released?0:GetLastError();daemon->tooling=scope.previous;
+        int released=!worker->pin||host_real_free_library(worker->pin);DWORD error=released?0:GetLastError();daemon->tooling=scope.previous;
         if(released){AcquireSRWLockExclusive(&host_records);worker->pin=NULL;ReleaseSRWLockExclusive(&host_records);}
         if(released){AcquireSRWLockExclusive(&host_records);
             /* Close and erase the exact internal aliases atomically with the

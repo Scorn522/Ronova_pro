@@ -58,14 +58,25 @@ public final class AuditFixCheck {
     private static native void hostThreadCreate0(Class<?> type,Object payload);
     private static native void hostThreadEnd0();
     private static native void hostModuleLoad0();
+    private static native void hostJniTable0();
+    private static native void hostModuleRelease0(String controlDll);
     private static native void hostDefinitionsChanged0(ClassLoader loader);
     private static final class HostThreadCreatePayload { }
     private static void hostThreadCreate(){
         System.load(java.nio.file.Path.of(System.getProperty("ronova.pro.audit.thread.native")).toAbsolutePath().toString());
         String phase=System.getProperty("ronova.pro.audit.thread.phase","thread-create");
-        if(phase.equals("module-load")||phase.equals("admission")){
+        if(phase.equals("jni-table")||phase.equals("strength")){
+            hostJniTable0();
+            System.out.println("JNI_TABLE_PUBLICATION_PASS actual_GetEnv original_current_table_accepted private_snapshot_copied caller_table_change_not_published guarded_DefineClass_replacement_refused actual_Dispose no_fabricated_authority");
+            if(phase.equals("jni-table"))return;
+        }
+        if(phase.equals("module-load")||phase.equals("admission")||phase.equals("strength")){
             hostModuleLoad0();
             System.out.println("HOST_MODULE_LOAD_PASS actual_A_W_ExA_ExW_imports_and_dynamic_results original_parameters_flags_actual_HMODULE actual_invalid_image_error actual_DATAFILE_IMAGE_RESOURCE_tagged_HMODULE original_resource_flags actual_loader_LastError balanced_FreeLibrary temporary_input_removed no_manufactured_producer_authority");
+            if(phase.equals("strength")){
+                hostModuleRelease0(System.getProperty("ronova.pro.control.native"));
+                System.out.println("HOST_FREE_LIBRARY_PASS actual_import_and_dynamic_entries original_success_and_failure actual_LastError balanced_application_references exact_control_DLL_release_refused no_fabricated_producer");
+            }
             if(phase.equals("admission")){
                 ClassLoader loader=new ClassLoader(null) { };
                 try {hostDefinitionsChanged0(loader);}finally {java.lang.ref.Reference.reachabilityFence(loader);}

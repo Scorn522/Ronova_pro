@@ -257,6 +257,34 @@ static int load_ti_define(JNIEnv *env,jobject loader,char suffix){
 static jclass JNICALL load_ti_uncontrolled_define(JNIEnv *env,const char *name,jobject loader,const jbyte *bytes,jsize length){
     (void)env;(void)name;(void)loader;(void)bytes;(void)length;return NULL;
 }
+/* Only the global JNI publication path changed here. Use a real fresh JVMTI
+ * environment; leave the old class/heap/worker matrices outside this phase. */
+JNIEXPORT void JNICALL Java_dev_ronova_pro_AuditFixCheck_hostJniTable0(JNIEnv *env,jclass check){
+    (void)check;JavaVM *vm=NULL;jvmtiEnv *api=NULL;
+    jniNativeInterface *table=NULL,*published=NULL;const char *failure=NULL;
+    if((*env)->GetJavaVM(env,&vm)!=JNI_OK||!vm
+            ||(*vm)->GetEnv(vm,(void**)&api,JVMTI_VERSION_1_2)!=JNI_OK||!api){
+        load_ti_fail(env,"JNI_TABLE_REAL_ENVIRONMENT_REQUIRED");return;
+    }
+    if((*api)->GetJNIFunctionTable(api,&table)!=JVMTI_ERROR_NONE||!table)failure="JNI_TABLE_ACTUAL_CURRENT_TABLE";
+    if(!failure){
+        jclass (JNICALL *define)(JNIEnv*,const char*,jobject,const jbyte*,jsize)=table->DefineClass;
+        if(!define||(*api)->SetJNIFunctionTable(api,table)!=JVMTI_ERROR_NONE)failure="JNI_TABLE_ACCEPTED_SNAPSHOT_PUBLICATION";
+        if(!failure){
+            table->DefineClass=load_ti_uncontrolled_define;
+            if((*api)->GetJNIFunctionTable(api,&published)!=JVMTI_ERROR_NONE||!published
+                    ||published->DefineClass!=define)failure="JNI_TABLE_CALLER_CHANGE_REACHED_VM";
+            if(!failure&&(*api)->SetJNIFunctionTable(api,table)!=JVMTI_ERROR_ACCESS_DENIED)failure="JNI_TABLE_GUARDED_REPLACEMENT_ACCEPTED";
+            if(published){(*api)->Deallocate(api,(unsigned char*)published);published=NULL;}
+            if(!failure&&((*api)->GetJNIFunctionTable(api,&published)!=JVMTI_ERROR_NONE||!published
+                    ||published->DefineClass!=define))failure="JNI_TABLE_REJECTED_PUBLICATION_CHANGED_VM";
+        }
+    }
+    if(published)(*api)->Deallocate(api,(unsigned char*)published);
+    if(table)(*api)->Deallocate(api,(unsigned char*)table);
+    if((*api)->DisposeEnvironment(api)!=JVMTI_ERROR_NONE&&!failure)failure="JNI_TABLE_ACTUAL_DISPOSE";
+    if(failure)load_ti_fail(env,failure);
+}
 static int load_jvmti_environment(JavaVM *vm,JNIEnv *env,jclass check){
     jvmtiEnv *api=NULL;
     if((*vm)->GetEnv(vm,(void**)&api,JVMTI_VERSION_1_2)!=JNI_OK||!api){load_ti_fail(env,"REAL_JVMTI_GETENV_FAILED");return 0;}
@@ -925,6 +953,8 @@ typedef HMODULE (WINAPI *LoadModuleA)(LPCSTR);
 typedef HMODULE (WINAPI *LoadModuleW)(LPCWSTR);
 typedef HMODULE (WINAPI *LoadModuleExA)(LPCSTR,HANDLE,DWORD);
 typedef HMODULE (WINAPI *LoadModuleExW)(LPCWSTR,HANDLE,DWORD);
+typedef BOOL (WINAPI *LoadModuleFree)(HMODULE);
+extern LoadModuleFree __imp_FreeLibrary;
 extern LoadModuleA __imp_LoadLibraryA;
 extern LoadModuleW __imp_LoadLibraryW;
 extern LoadModuleExA __imp_LoadLibraryExA;
@@ -980,6 +1010,34 @@ static const char *load_module_resource(void *entry,unsigned kind,const char *a,
     int tagged=(tag&expectedTag)!=0;
     if(!FreeLibrary(actual))return "HOST_MODULE_RESOURCE_REFERENCE_RELEASE";
     return tagged?NULL:"HOST_MODULE_RESOURCE_RETURN_TAG_CHANGED";
+}
+JNIEXPORT void JNICALL Java_dev_ronova_pro_AuditFixCheck_hostModuleRelease0(JNIEnv *env,jclass check,jstring controlPath){
+    (void)check;HMODULE kernel=GetModuleHandleW(L"kernel32.dll");
+    void *entries[]={(void*)__imp_FreeLibrary,kernel?(void*)GetProcAddress(kernel,"FreeLibrary"):NULL};
+    if(!controlPath||!load_private_entry(entries[0])||!load_private_entry(entries[1])){
+        load_thread_fail(env,"HOST_RELEASE_ACTUAL_ENTRIES_OR_CONTROL_PATH");return;
+    }
+    jsize length=(*env)->GetStringLength(env,controlPath);
+    wchar_t *path=(wchar_t*)calloc((size_t)length+1,sizeof(wchar_t));
+    if(!path){load_thread_fail(env,"HOST_RELEASE_CONTROL_PATH_MEMORY");return;}
+    (*env)->GetStringRegion(env,controlPath,0,length,(jchar*)path);
+    HMODULE control=(*env)->ExceptionCheck(env)?NULL:GetModuleHandleW(path);free(path);
+    if(!control){load_thread_fail(env,"HOST_RELEASE_ACTUAL_CONTROL_IMAGE");return;}
+    for(unsigned mode=0;mode<2;mode++){
+        LoadModuleFree release=(LoadModuleFree)entries[mode];
+        HMODULE actual=LoadLibraryW(L"kernel32.dll");
+        if(!actual||actual!=kernel){if(actual)FreeLibrary(actual);load_thread_fail(env,"HOST_RELEASE_ACTUAL_APPLICATION_REFERENCE");return;}
+        SetLastError(0x524e0058);BOOL result=release(actual);DWORD error=GetLastError();
+        fprintf(stderr,"HOST_RELEASE_ACTUAL mode=%s result=%d actualLastError=%lu\n",mode?"dynamic":"import",result!=FALSE,(unsigned long)error);
+        if(!result){load_thread_fail(env,"HOST_RELEASE_ORIGINAL_SUCCESS_CHANGED");return;}
+        SetLastError(0x524e0058);result=release(NULL);error=GetLastError();
+        fprintf(stderr,"HOST_RELEASE_INVALID_ACTUAL mode=%s result=%d actualLastError=%lu\n",mode?"dynamic":"import",result!=FALSE,(unsigned long)error);
+        if(result||!error||error==ERROR_ACCESS_DENIED){load_thread_fail(env,"HOST_RELEASE_ORIGINAL_FAILURE_CHANGED");return;}
+        SetLastError(0x524e0058);result=release(control);error=GetLastError();
+        if(result||error!=ERROR_ACCESS_DENIED){load_thread_fail(env,"HOST_RELEASE_CONTROL_IMAGE_NOT_PROTECTED");return;}
+        fprintf(stderr,"HOST_RELEASE_CONTROL_REFUSED mode=%s module=%p actualLastError=%lu\n",mode?"dynamic":"import",(void*)control,(unsigned long)error);
+    }
+    fprintf(stderr,"HOST_RELEASE_STOPPED_CACHE_AND_DETACH_CHILD_SOURCES_NOTRUN no_actual_Mod_producer no_manufactured_sources; FreeLibraryAndExitThread_application_ref_ownership_and_final_unmap_not_covered\n");
 }
 JNIEXPORT void JNICALL Java_dev_ronova_pro_AuditFixCheck_hostModuleLoad0(JNIEnv *env,jclass check){
     (void)check;HMODULE kernel=GetModuleHandleW(L"kernel32.dll");

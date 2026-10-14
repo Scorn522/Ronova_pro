@@ -114,11 +114,14 @@ final class ExecutionBoundary {
         int slot=0;if((method.access&Opcodes.ACC_STATIC)==0){if(constructor==null)enter.add(argument(token,slot,sites));slot++;}
         for(Type type:Type.getArgumentTypes(method.desc)){if(reference(type))enter.add(argument(token,slot,sites));slot+=type.getSize();}
         method.instructions.insert(enter);
-        Set<LabelNode> catches=Collections.newSetFromMap(new IdentityHashMap<>());for(TryCatchBlockNode block:method.tryCatchBlocks)catches.add(block.handler);
+        Map<LabelNode,LabelNode> catches=new IdentityHashMap<>();List<Site> catchTargets=new ArrayList<>();
+        for(TryCatchBlockNode block:method.tryCatchBlocks){
+            LabelNode target=block.handler;block.handler=catches.computeIfAbsent(target,ignored->new LabelNode());
+        }
         int ordinal=0;
         for(AbstractInsnNode at:original){
-            if(at instanceof LabelNode label&&catches.contains(label)){
-                InsnList caught=hook("executionCaught",token,ordinal,sites);method.instructions.insert(label,caught);
+            if(at instanceof LabelNode label&&catches.containsKey(label)){
+                catchTargets.add(new Site(label,ordinal));
             }
             if(at.getOpcode()<0)continue;
             InsnList before=hook("executionBefore",token,ordinal,sites);LabelNode actual=new LabelNode();sites.add(new Site(actual,ordinal));positions.put(at,actual);
@@ -148,6 +151,15 @@ final class ExecutionBoundary {
             }
             if(after.size()!=0){carry(after,carried.get(at),carried);method.instructions.insert(at,after);}
             ordinal++;
+        }
+        // A handler target can also have a valid ordinary predecessor carrying
+        // a Throwable. Only the exception table may reset the shadow stack.
+        // The analyzed body has no normal tail fall-through, and every original
+        // range end stays before these entries. The existing outer cleanup still
+        // covers observer failures here; constructor cleanup remains VM-owned.
+        for(Site target:catchTargets){
+            method.instructions.add(catches.get(target.label));method.instructions.add(hook("executionCaught",token,target.instruction,sites));
+            method.instructions.add(new JumpInsnNode(Opcodes.GOTO,target.label));
         }
         if(constructor==null){
             method.instructions.add(end);method.instructions.add(handler);method.instructions.add(new VarInsnNode(Opcodes.ASTORE,error));

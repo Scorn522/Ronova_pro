@@ -142,7 +142,7 @@ static HostImage *host_module_address_locked(void *address,HMODULE actual,int re
 static int host_module_capture(NativeThread *state,void *address,OwnerLink **owners,
         HostImage **actualImage,HostLibraryLoad **actualLoad,int *unknown){
     if(actualImage)*actualImage=NULL;if(actualLoad)*actualLoad=NULL;
-    int restricted=state&&(state->heapCallback||state->vmDetaching||state->vmThreadEnding||state->hostUnloadImage
+    int restricted=state&&(state->heapCallback||state->vmDetaching||state->vmThreadEnding||state->hostUnloadImage||state->hostRelease
             ||state->hostLoad&&state->hostLoad->calling);
     HMODULE handle=restricted?NULL:native_image(address);
     if(restricted){if(!TryAcquireSRWLockShared(&host_imports))return 0;}
@@ -154,7 +154,7 @@ static int host_module_capture(NativeThread *state,void *address,OwnerLink **own
 }
 static void host_module_parent(NativeThread *state,void *caller,HostLibraryLoad *load){
     uintptr_t address=(uintptr_t)caller;
-    int restricted=state&&(state->vmDetaching||state->vmThreadEnding||state->hostUnloadImage
+    int restricted=state&&(state->vmDetaching||state->vmThreadEnding||state->hostUnloadImage||state->hostRelease
             ||state->hostLoad&&state->hostLoad->calling);
     if(restricted){if(!TryAcquireSRWLockShared(&host_imports)){load->unknown=1;return;}
         if(!TryAcquireSRWLockShared(&native_records)){ReleaseSRWLockShared(&host_imports);load->unknown=1;return;}
@@ -190,6 +190,7 @@ static void host_module_binding_leave(Binding *binding){
 }
 static int host_module_borrow_load(NativeThread *state,HostLibraryLoad *load){
     HostLibraryLoad *parent=state?state->hostLoad:NULL;
+    if(!parent&&state)parent=host_module_release_sources(state);
     if(!parent&&state)parent=host_thread_worker_child(state,NULL);
     AcquireSRWLockExclusive(&host_imports);
     int ready=parent&&!parent->retired&&!parent->releasing&&!parent->unknown&&parent->leaseComplete
@@ -201,7 +202,7 @@ static int host_module_borrow_load(NativeThread *state,HostLibraryLoad *load){
     return ready;
 }
 static int host_module_keep_sources(NativeThread *state,HostLibraryLoad *load){
-    JNIEnv *env=NULL;int nativeOnly=state&&(state->vmDetaching||state->vmThreadEnding||state->heapCallback||state->hostUnloadImage
+    JNIEnv *env=NULL;int nativeOnly=state&&(state->vmDetaching||state->vmThreadEnding||state->heapCallback||state->hostUnloadImage||state->hostRelease
             ||state->hostLoad&&state->hostLoad->calling);
     int attached=!nativeOnly&&native_vm&&(*native_vm)->GetEnv(native_vm,(void**)&env,JNI_VERSION_1_8)==JNI_OK;
     if(!attached)return !load->unknown&&host_module_borrow_load(state,load);
@@ -227,13 +228,13 @@ static void host_module_return(HostLibraryLoad *load,HMODULE actual,DWORD error)
     if(load->resource)return;
     HMODULE pin=NULL;
     if(!GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS,(LPCSTR)actual,&pin)||pin!=actual){
-        load->unknown=1;if(pin&&!FreeLibrary(pin))load->sparePin=pin;return;}
+        load->unknown=1;if(pin&&!host_real_free_library(pin))load->sparePin=pin;return;}
     IMAGE_DOS_HEADER *dos=(IMAGE_DOS_HEADER*)actual;
     int dll=dos->e_magic==IMAGE_DOS_SIGNATURE&&dos->e_lfanew>0;
     IMAGE_NT_HEADERS64 *nt=dll?(IMAGE_NT_HEADERS64*)((unsigned char*)actual+dos->e_lfanew):NULL;
     dll=dll&&nt->Signature==IMAGE_NT_SIGNATURE&&(nt->FileHeader.Characteristics&IMAGE_FILE_DLL)!=0;
     load->nonExecutable=(load->flags&DONT_RESOLVE_DLL_REFERENCES)!=0||!dll;
-    if(load->nonExecutable){if(!FreeLibrary(pin))load->sparePin=pin;return;}
+    if(load->nonExecutable){if(!host_real_free_library(pin))load->sparePin=pin;return;}
     void *targets[HOST_KIND_COUNT]={0};host_windows_targets(targets);
     int publicCarrier=0;for(int kind=1;kind<HOST_KIND_COUNT&&!publicCarrier;kind++)
         if(targets[kind])publicCarrier=native_image(targets[kind])==actual;
@@ -242,7 +243,7 @@ static void host_module_return(HostLibraryLoad *load,HMODULE actual,DWORD error)
          * by whichever consumer just acquired another aggregate reference.
          * Its caller's imports/resolver already carry that actual source.
          * Return our observation pin now, leaving the original loader ref. */
-        load->publicCarrier=1;if(!FreeLibrary(pin))load->sparePin=pin;return;
+        load->publicCarrier=1;if(!host_real_free_library(pin))load->sparePin=pin;return;
     }
     AcquireSRWLockExclusive(&host_imports);
     HostImage *image=host_images;while(image&&(!image->live||image->releasing||image->handle!=actual))image=image->next;
@@ -257,7 +258,7 @@ static void host_module_return(HostLibraryLoad *load,HMODULE actual,DWORD error)
     ReleaseSRWLockExclusive(&host_imports);
     /* This spare belongs only to Ronova. The surviving directory pin retains
      * the same image while the extra reference is returned. */
-    if(spare&&!FreeLibrary(spare)){AcquireSRWLockExclusive(&host_imports);load->sparePin=spare;
+    if(spare&&!host_real_free_library(spare)){AcquireSRWLockExclusive(&host_imports);load->sparePin=spare;
         ReleaseSRWLockExclusive(&host_imports);InterlockedIncrement(&native_failures);}
 }
 static void host_module_mark_export(HMODULE requested,void *actual){
@@ -285,7 +286,7 @@ static void host_module_loads_reap(JNIEnv **environment){
             if(candidate->sparePin&&!candidate->calling&&!candidate->releasing){load=candidate;load->releasing=1;pin=load->sparePin;break;}
         ReleaseSRWLockExclusive(&host_imports);if(!load)break;
         NativeToolingScope scope={load->owners,load->origin,load->unknown,state->depth,state->tooling};state->tooling=&scope;
-        int released=FreeLibrary(pin)!=0;DWORD error=released?0:GetLastError();state->tooling=scope.previous;
+        int released=host_real_free_library(pin)!=0;DWORD error=released?0:GetLastError();state->tooling=scope.previous;
         AcquireSRWLockExclusive(&host_imports);if(released)load->sparePin=NULL;else load->error=error;
         load->releasing=0;ReleaseSRWLockExclusive(&host_imports);
         if(!native_tooling_retirement_jni(environment)){native_thread_callback_leave(state);return;}
@@ -310,7 +311,7 @@ static void host_module_loads_reap(JNIEnv **environment){
         if(!image){native_owner_links_free(sources);break;}
         HostImage *previousImage=state->hostUnloadImage;state->hostUnloadImage=image;
         NativeToolingScope scope={sources,NULL,0,state->depth,state->tooling};state->tooling=&scope;
-        int released=FreeLibrary(pin)!=0;DWORD error=released?0:GetLastError();state->tooling=scope.previous;
+        int released=host_real_free_library(pin)!=0;DWORD error=released?0:GetLastError();state->tooling=scope.previous;
         state->hostUnloadImage=previousImage;
         AcquireSRWLockExclusive(&host_imports);
         if(released){image->pin=NULL;image->pinReleased=1;}else {image->live=oldLive;image->opaque=1;

@@ -1,20 +1,19 @@
 # Ronova Pro 当前进度
 
-## 2026-10-14：C 接续——子 DLL、Screen 控件、双端时停与网络失败结算
+## 2026-10-14：C 强度接续——JNI 发布、异常来源、FreeLibrary 防拆与 EA 写拦截
 
-接续 `4f7c180`，Java ABI58 / Native ABI57 / Storage3 / Journal6；GNU C23/C++23、Java17，独立驱动和管理工具 C17。本工作包源码已写齐并集中构建；完整 C/B 仍未收口。
+接续 `fa4e380`，Java ABI59 / Native ABI58 / Storage3 / Journal6。用户已明确暂停 Ronova 自身外观美化、暂不注册武器；目标 Mod 的渲染/UI 控制仍按强度功能继续。本工作包四条具体漏控链已写齐并集中构建，C/B 整体仍未完成，强度收口目标保持执行。
 
-- 子 DLL：在真实 LoadLibrary 调用前保存完整强来源，真实成功返回登记准确 parent/HMODULE，贯穿子映像 imports、GetProcAddress、JNI Binding 与原生 worker。B 的真实当前作用域及选中的缓存动态入口来源优先；共享/unknown/opaque 保持未决。资源句柄按实际低位标签处理，不以 flags 猜测可执行映像。真实 Windows API 公共载体保留加载来源并归还临时观察引用，不把共享系统 IAT 接管为私有 child。
-- 原生退役：沿既有 daemon 等待实际调用和 borrower 退出，关闭准确子映像准入后只归还 Ronova 自有 pin、强来源和借用关系。没有消费应用的 loader 引用；自有引用释放与应用引用寿命/最终 unmap 分开报告。Native hostState 32项与 Java 两处消费同步。
-- 客户端：Screen 的三个注册入口和 Forge addEventWidget 接入真实 List.add 前守卫、正常/异常尾及每个实际容器中的 widget 关系。render/input/focus/narration 贯穿条目来源与 unknown，focused/lastNarratable 实际发布受控；只在准确 Minecraft 线程按身份清除全部来源已停的已观察条目、焦点/拖动/旁白引用，部分清理按真实剩余条目接续。共享或未知条目保留。union 后的新来源数组本体进入原控制对象保护，避免 varargs 只登记元素而漏掉数组。
-- 双端时停：冻结根实体或中间乘客仍沿原 tickPassenger 处理未冻结的下层乘客；乘客守卫位于原 removed/vehicle/Player/ticking 条件之后，保留原无效骑乘解除和组外行为。
-- 网络：三处 Netty outbound 拒绝保留一次消息释放，以专用取消原因 tryFailure 结算原 promise，保留共享 flush。准确 Connection.exceptionCaught 只消费这个私有原因，其他取消和真实 I/O 错误继续原处理；没有新增 future 台账、关连接或中断线程。
+- JNI 防拆：SetJNIFunctionTable 校验后提交同一份私有 incoming 快照，消除再读 caller 可变表的竞态窗口；未启用 guarded table 时继续原调用。局部快照可以按原合同提交，VM 会复制表，见 [JVMTI SetJNIFunctionTable](https://docs.oracle.com/en/java/javase/17/docs/specs/jvmti.html#SetJNIFunctionTable)。没有放宽调用者、环境或受保护 slot 条件。
+- 异常来源：原异常表指向专用 trampoline，再调用既有 executionCaught 并跳入原 handler。普通 CFG 跳入共享 handler Label 时保留真实来源栈；catch 顺序/type/原范围、业务 ordinal、构造规则和准确调用位置保留。沿原非构造 synthetic cleanup 覆盖观察器异常，没有另建通用异常体系。
+- DLL 防拆与停组：普通 FreeLibrary 的已观察导入/动态入口现在经过完整来源和真实当前作用域准入；heap/受限 callback 和已停来源按原条件处理。准确已捕获 control DLL HMODULE 拒绝外部释放，不按路径/名字或屏蔽 resource tags 判断。获准动作只调用原 API 一次，保留原 HMODULE/BOOL/即时 LastError；release frame 强来源与 borrower 沿既有 daemon 清理，自有 pin 走独立实际 FreeLibrary。hostState[26] 只纳入真实未释放的来源 hold，不推断 app 引用或最终 unmap。
+- Windows 文件防护：注册实际 IRP_MJ_SET_EA，将 FILE_WRITE_EA 新打开准入和准确 SET_EA 效果纳入已有 DENY_WRITE，沿真实 actor/FileObject/文件 ID 拒绝。未读写 EA 缓冲、未扩大协议或替代未知旧别名/section/kernel/paging 条件，见 [微软 SET_EA 操作合同](https://learn.microsoft.com/en-us/windows-hardware/drivers/ifs/flt-parameters-for-irp-mj-set-ea)。
 
-实际结果：首次完整构建 `build-c-java58-native57-child-ui-cached-20261014.log` PASS 32秒；随后修正来源数组保护，最终匹配载荷 `build-c-java58-native57-child-ui-final-20261014.log` PASS 21秒。首次日志保留，没有把编译提示写成失败。既有模块夹具编译通过，`c-host-module57-child-load-20261014.log` 实际退出0：四类 API 各真实导入/动态入口的原 HMODULE、flags、有效 LastError 与无效图像193错误保持；DATAFILE 实际 tag1/flags2、IMAGE_RESOURCE 实际 tag2/flags32，均正常 FreeLibrary，临时输入删除成功。
+实际结果：主包 `build-c-java59-native58-strength-20261014.log` PASS 28秒。改动驱动官方 WDK/SDK+Zig/LLD 仅 SYS 编译链接 PASS，`build-c-driver58-ea-20261014.log`，SYS 37888字节；未重建未改的管理器，未正式 MSBuild、签名、安装/加载。既有夹具增量编译通过，`c-strength58-jni-release-20261014.log` 独立 JVM 实际退出0：真实当前 JNI 表提交被接受、之后 caller 副本变更不影响 VM、非法 DefineClass slot 被拒且表不变、真实 Dispose；四类 LoadLibrary 原结果/193错误与 resource tag1/2 正常释放；FreeLibrary 实际 import/GPA 成功 BOOL1、原 LastError 标记保留，NULL 返回 BOOL0/126，准确控制 DLL 在两入口均返回 BOOL0/5。每次成功仅归还实际申请的应用引用，拒绝目标没有补做 FreeLibrary。没有声称做过并发竞态实战或旧 VM 表屏障。
 
-这次夹具没有真实 Mod producer 或新可执行子 DLL，因此停止组/共享 B/worker 的子来源退役仍 NOTRUN；Screen、双端时停和网络拒绝效果尚无本候选实机结果。没有重跑旧定义/heap/thread/Host 全矩阵，没有启动游戏或安装驱动。驱动源码未改，本地包沿用上一包已编译的未签名驱动，未宣称新的内核运行结果。
+真实 Mod 的 stopped/cache/共享来源与 DLL detach 后继退役仍 NOTRUN；新异常来源路径缺少真实 source-bearing 现有独立夹具，未伪造 producer/权限；EA 内核运行、当前游戏与保存重启亦 NOTRUN。未重跑旧定义/heap/thread/Host 全矩阵。FreeLibraryAndExitThread 非返回入口、预观察 DllMain/TLS、原 VM 缓存/裸原生写者、应用引用归属与最终 unmap，以及旧内核映射等缺口仍明确保留。
 
-本地候选 `distribution/candidate-c-java58-native57-wip-20261014`，Core JAR 2404958字节，附匹配 prelaunch 和原 unsigned-driver。源码与匹配产物包为 `distribution/Ronova-Pro-C-WIP-Java58-Native57-20261014.zip`；有效源码继续仅在 src/<组件>，不带缓存/旧布局/游戏存档/原始日志，旧包保留。源码和简要结果同步 Git，产物留本地。初次 DllMain/TLS、缓存原 VM 表、裸原生/未观察 loader、应用引用与最终 unmap、未知呈现载体及既有内核映射仍有边界；本候选完整游戏与保存重启未取得通过，旧结果保持其原候选范围。
+本地候选 `distribution/candidate-c-java59-native58-strength-wip-20261014`，Core JAR 2406766字节，附匹配 prelaunch 和本次未签名 SYS，管理器/INF/协议沿用未改内容。包 `distribution/Ronova-Pro-C-Strength-WIP-Java59-Native58-20261014.zip` 含有效源码和匹配产物，不带旧布局、缓存、游戏存档或原始日志；旧包保留。源码与简要实际结果同步 Git，二进制留本地。
 
 ---
 ## 2026-10-13：C 接续——54/51 用户态接线与自编 Windows 驱动源码

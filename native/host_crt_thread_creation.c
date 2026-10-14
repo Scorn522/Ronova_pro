@@ -53,16 +53,16 @@ static void host_crt_thread_publish(void *actual,int kind,HostGetProcAddress res
     HostCrtDosErrno dosError=(HostCrtDosErrno)resolve(image,"__doserrno");
     if(!error||!dosError||native_image((void*)error)!=image||native_image((void*)dosError)!=image)return;
     if(!GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS,(LPCSTR)actual,&pin)||pin!=image){
-        if(pin)FreeLibrary(pin);return;
+        if(pin)host_real_free_library(pin);return;
     }
     HostCrtThreadTarget *entry=(HostCrtThreadTarget*)calloc(1,sizeof(*entry));
-    if(!entry){FreeLibrary(pin);return;}
+    if(!entry){host_real_free_library(pin);return;}
     entry->original=actual;entry->kind=kind;entry->image=image;entry->pin=pin;entry->error=error;entry->dosError=dosError;
     for(;;){
         HostCrtThreadTarget *head=(HostCrtThreadTarget*)InterlockedCompareExchangePointer((void *volatile*)&host_crt_thread_exports,NULL,NULL);
         int known=0;for(HostCrtThreadTarget *old=head;old;old=old->next)
             if(old->original==actual&&old->kind==kind){known=1;break;}
-        if(known){FreeLibrary(pin);free(entry);return;}
+        if(known){host_real_free_library(pin);free(entry);return;}
         entry->next=head;
         if(InterlockedCompareExchangePointer((void *volatile*)&host_crt_thread_exports,entry,head)==head)return;
     }
