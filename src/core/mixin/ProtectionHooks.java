@@ -37,7 +37,11 @@ public final class ProtectionHooks {
     public abstract static class Health {
         @Inject(method="setHealth",at=@At("HEAD"),cancellable=true)
         private void health(float value,CallbackInfo callback) {
-            if(ProRuntime.preventHealthLoss((LivingEntity)(Object)this,value))callback.cancel();
+            if(ProRuntime.preventHealthWrite((LivingEntity)(Object)this,value))callback.cancel();
+        }
+        @Inject(method="heal",at=@At("HEAD"),cancellable=true)
+        private void healing(float amount,CallbackInfo callback) {
+            if(ProRuntime.preventHealing((LivingEntity)(Object)this,amount))callback.cancel();
         }
     }
     @Mixin(SynchedEntityData.class)
@@ -46,7 +50,7 @@ public final class ProtectionHooks {
         @Inject(method="set(Lnet/minecraft/network/syncher/EntityDataAccessor;Ljava/lang/Object;Z)V",at=@At("HEAD"),cancellable=true)
         private <T> void health(EntityDataAccessor<T> key,T value,boolean force,CallbackInfo callback) {
             if(entity instanceof LivingEntity living&&key==Access.Living.pro$healthKey()&&value instanceof Float health
-                    &&ProRuntime.preventHealthLoss(living,health))callback.cancel();
+                    &&ProRuntime.preventHealthWrite(living,health))callback.cancel();
         }
     }
     @Mixin(net.minecraft.server.level.ServerLevel.class)

@@ -133,7 +133,7 @@ public final class ClientPresence {
                     worldAppliedScope=lastResetScope;awaitingScope=false;awaitingAfterScope=-1;
                 } else if(!awaitingScope) { hudPolicies.clear();awaitingScope=true;awaitingAfterScope=worldAppliedScope; }
             }
-            applyPendingWorld(mc);applyTerminalMirrors(mc);
+            applyPendingWorld(mc);applyTerminalMirrors(mc);applyLifeMirrors(mc);
         }
         return mc;
     }
@@ -210,13 +210,13 @@ public final class ClientPresence {
             for(ProNetwork.ModGroup pending:List.copyOf(pendingModGroups.values()))if(p.session().equals(pending.session()))modGroup(pending,source);
             pendingModGroups.clear();
             policyOverflowReported=false;
-            applyPendingWorld(Minecraft.getInstance());applyTerminalMirrors(Minecraft.getInstance());
+            applyPendingWorld(Minecraft.getInstance());applyTerminalMirrors(Minecraft.getInstance());applyLifeMirrors(Minecraft.getInstance());
         }
     }
     static void policy(ProNetwork.Protection p,Object source) {
         if(p==null||!current(source))return;
-        if(policy.accept(source,p.session(),p.scope(),p.dimension(),p.revision(),p.entityId(),p.entityUuid(),p.protectedNow())) {
-            if(!p.protectedNow()) {
+        if(policy.accept(source,p.session(),p.scope(),p.dimension(),p.revision(),p.entityId(),p.entityUuid(),p.protectedNow(),p.noHeal())) {
+            if(!p.protectedNow()&&!p.noHeal()) {
                 synchronized(localBodies) {localBodies.entrySet().removeIf(entry->entry.getValue().id()==p.entityId()&&entry.getValue().uuid().equals(p.entityUuid()));}
             }
             var mc=Minecraft.getInstance();
@@ -249,12 +249,12 @@ public final class ClientPresence {
     public static void bindLocal(net.minecraft.world.entity.Entity entity) {
         if(!(entity instanceof net.minecraft.world.entity.LivingEntity living))return;
         var raw=(Access.EntityState)entity;
-        if(!removalDenied(raw.pro$id(),raw.pro$uuid())) {removeLocal(entity);return;}
+        if(!lifePolicy(raw.pro$id(),raw.pro$uuid())) {removeLocal(entity);return;}
         if(raw.pro$level()!=Minecraft.getInstance().level)return;
         if(Minecraft.getInstance().level.getEntity(raw.pro$id())!=entity&&Minecraft.getInstance().player!=entity)return;
-        if(!removalDenied(raw.pro$id(),raw.pro$uuid())) {removeLocal(entity);return;}
+        if(!lifePolicy(raw.pro$id(),raw.pro$uuid())) {removeLocal(entity);return;}
         var item=((Access.Data)raw.pro$data()).pro$item(Access.Living.pro$healthKey());float floor=item.getValue();
-        if(Float.isFinite(floor)&&floor>0) {
+        if(Float.isFinite(floor)&&(floor>0||policy.noHeal(connection,levelDimension(Minecraft.getInstance()),raw.pro$id(),raw.pro$uuid()))) {
             LocalBody body=new LocalBody(new java.lang.ref.WeakReference<>(living),floor,raw.pro$id(),raw.pro$uuid());localBodies.put(entity,body);localBodies.put(item,body);
         }
     }
@@ -264,22 +264,35 @@ public final class ClientPresence {
     private static boolean currentBody(LocalBody body) {
         if(body==null)return false;
         var entity=body.entity().get();if(entity==null||localBodies.get(entity)!=body)return false;
-        boolean current=Minecraft.getInstance().isSameThread()?removalDenied(body.id(),body.uuid()):
-                !awaitingScope&&policy.denies(connection,policy.dimension(),body.id(),body.uuid());
+        boolean current=Minecraft.getInstance().isSameThread()?lifePolicy(body.id(),body.uuid()):
+                !awaitingScope&&(policy.denies(connection,policy.dimension(),body.id(),body.uuid())||policy.noHeal(connection,policy.dimension(),body.id(),body.uuid()));
         if(!current) {removeLocal(entity);return false;}
         return ((Access.EntityState)entity).pro$level()==world;
+    }
+    private static boolean lifePolicy(int id,UUID uuid) {
+        return !awaitingScope&&(removalDenied(id,uuid)||policy.noHeal(connection,levelDimension(Minecraft.getInstance()),id,uuid));
+    }
+    private static boolean protectedBody(LocalBody body) {
+        return policy.denies(connection,policy.dimension(),body.id(),body.uuid());
+    }
+    private static boolean healthDenied(LocalBody body,float value) {
+        if(protectedBody(body)&&(!Float.isFinite(value)||value<body.floor()))return true;
+        if(!policy.noHeal(connection,policy.dimension(),body.id(),body.uuid()))return false;
+        var entity=body.entity().get();if(entity==null)return false;
+        float current=((Access.Data)((Access.EntityState)entity).pro$data()).pro$item(Access.Living.pro$healthKey()).getValue();
+        return !Float.isFinite(value)||!Float.isFinite(current)||value>current;
     }
     public static boolean healthWriteDenied(net.minecraft.world.entity.LivingEntity entity,float value) {
         if(entity==null||!Minecraft.getInstance().isSameThread())return false;
         LocalBody body=localBodies.get(entity);
         if(!currentBody(body)||body.entity.get()!=entity)return false;
-        var raw=(Access.EntityState)entity;
-        return removalDenied(raw.pro$id(),raw.pro$uuid())&&(!Float.isFinite(value)||value<body.floor);
+        return healthDenied(body,value);
     }
     public static boolean clientField(Object receiver,Class<?> declaring,String field,Object value) {
         LocalBody body=localBodies.get(receiver);
         if(currentBody(body)&&localBodies.containsKey(body.entity.get())) {
-            if(receiver instanceof net.minecraft.network.syncher.SynchedEntityData.DataItem<?> &&(field.equals("value")||field.equals("f_135391_")))return !(value instanceof Float number)||!Float.isFinite(number)||number<body.floor;
+            if(receiver instanceof net.minecraft.network.syncher.SynchedEntityData.DataItem<?> &&(field.equals("value")||field.equals("f_135391_")))return !(value instanceof Float number)||healthDenied(body,number);
+            if(!protectedBody(body))return false;
             return switch(field) {case "id","f_19848_"->!(value instanceof Number n)||n.intValue()!=body.id();case "uuid","f_19820_"->!Objects.equals(value,body.uuid());case "stringUUID","f_19821_"->!Objects.equals(value,body.uuid().toString());case "dead","f_20890_"->Boolean.TRUE.equals(value);case "deathTime","f_20919_"->value instanceof Number n&&n.intValue()>0;case "removalReason","f_146795_"->value!=null;default->false;};
         }
         if(receiver instanceof net.minecraftforge.eventbus.api.Event event&&(field.equals("isCanceled")||field.equals("canceled")))return clientDispatch(event,"setCanceled",value);
@@ -287,7 +300,7 @@ public final class ClientPresence {
     }
     public static Object clientLifeResult(Object receiver,String method) {
         LocalBody body=localBodies.get(receiver);
-        if(!currentBody(body)||body.entity().get()!=receiver)return null;
+        if(!currentBody(body)||body.entity().get()!=receiver||!protectedBody(body))return null;
         return switch(method) {
             case "getHealth","m_21223_" -> {
                 float actual=((Access.Data)((Access.EntityState)receiver).pro$data()).pro$item(Access.Living.pro$healthKey()).getValue();
@@ -304,8 +317,9 @@ public final class ClientPresence {
             if(!currentBody(body)||body.entity.get()!=entity)return false;
             return switch(method) {
                 case "remove","m_142467_","setRemoved","m_142687_","discard","m_146870_","kill","m_6074_",
-                     "hurt","m_6469_","actuallyHurt","m_6475_","die","m_6667_" -> true;
-                case "setHealth","m_21153_" -> value instanceof Number n&&(!Float.isFinite(n.floatValue())||n.floatValue()<body.floor);
+                     "hurt","m_6469_","actuallyHurt","m_6475_","die","m_6667_" -> protectedBody(body);
+                case "setHealth","m_21153_" -> value instanceof Number n&&healthDenied(body,n.floatValue());
+                case "heal","m_5634_" -> policy.noHeal(connection,policy.dimension(),body.id(),body.uuid())&&value instanceof Number n&&(!Float.isFinite(n.floatValue())||n.floatValue()>0);
                 default -> false;
             };
         }
@@ -393,6 +407,14 @@ public final class ClientPresence {
         if(awaitingScope||mc.level==null)return;
         for(ClientPolicyState.Address address:terminalPolicy.activeAddresses(connection,levelDimension(mc)))
             retireTerminalMirror(mc,address.id(),address.uuid());
+    }
+    private static void applyLifeMirrors(Minecraft mc) {
+        if(awaitingScope||mc.level==null)return;
+        for(ClientPolicyState.Address address:policy.activeAddresses(connection,levelDimension(mc))) {
+            Entity entity=mc.level.getEntity(address.id());
+            if(mc.player!=null&&mc.player.getId()==address.id()&&mc.player.getUUID().equals(address.uuid()))entity=mc.player;
+            if(entity!=null&&((Access.EntityState)entity).pro$uuid().equals(address.uuid()))bindLocal(entity);
+        }
     }
     public static boolean publicationDenied(Object level,int id,Entity entity) {
         Minecraft mc=context();if(level!=mc.level||mc.level==null||entity==null)return false;

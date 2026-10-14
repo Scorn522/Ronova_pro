@@ -20,6 +20,9 @@ final class FixtureCommands {
     }
     static UUID clear(ProRuntime runtime, Entity target) { return entityAction(runtime,"clear",target); }
     static UUID protect(ProRuntime runtime, Entity target) { return entityAction(runtime,"protect",target); }
+    static void noHeal(Entity target,boolean enabled) {
+        execute(target.getServer(),"no-heal "+target.getUUID()+" "+enabled);
+    }
     static void revoke(ProRuntime runtime, Entity target) {
         execute(target.getServer(),"release "+target.getUUID());
         if(runtime.protectionStatus(target).startsWith("ACTIVE"))throw new IllegalStateException("FIXTURE_COMMAND_RELEASE_DID_NOT_CHANGE_POLICY");

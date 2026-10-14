@@ -86,6 +86,19 @@ static int host_memory_output_locked(const void *address,SIZE_T size){
     if(!size)return 0;uintptr_t first=(uintptr_t)address,span=(uintptr_t)(size-1);
     return span>UINTPTR_MAX-first?-1:native_private_range_locked(first,first+span);
 }
+/* The gate also serializes private allocation/registration with actual local
+ * writes and page changes. No source, Host, VM or JNI query belongs here. */
+static int host_memory_range_locked(const void *address,SIZE_T size,int pages){
+    if(!pages)return host_memory_output_locked(address,size);
+    if(!size)size=1;
+    uintptr_t first=(uintptr_t)address,span=(uintptr_t)(size-1);
+    if(span>UINTPTR_MAX-first)return -1;uintptr_t last=first+span;
+    DWORD page=__atomic_load_n(&host_memory_page_size,__ATOMIC_ACQUIRE);
+    if(!page)return -1;first-=first%page;
+    uintptr_t remaining=page-1-last%page;
+    last=remaining>UINTPTR_MAX-last?UINTPTR_MAX:last+remaining;
+    return native_private_range_locked(first,last);
+}
 static uint64_t host_native_memory_read(HostImport *entry,void *caller,uintptr_t *arguments){
     DWORD incoming=GetLastError();OwnerLink *owners=NULL;int unknown=0;
     HANDLE source=(HANDLE)arguments[0];LPCVOID address=(LPCVOID)arguments[1];
@@ -144,7 +157,7 @@ static BOOL host_memory_original(HostImport *entry,HANDLE process,const uintptr_
 static uint64_t host_native_memory(HostImport *entry,void *caller,uintptr_t *arguments){
     DWORD incoming=GetLastError();OwnerLink *owners=NULL;int unknown=0;
     NativeThread *state=native_tls==TLS_OUT_OF_INDEXES?NULL:(NativeThread*)TlsGetValue(native_tls);
-    int restricted=state&&(state->heapCallback||state->vmDetaching||state->vmThreadEnding||state->hostUnloadImage||state->hostRelease
+    int restricted=state&&(state->heapCallback||state->toolingRestricted||state->vmDetaching||state->vmThreadEnding||state->hostUnloadImage||state->hostRelease
             ||state->hostLoad&&state->hostLoad->calling);
     /* Delay-slot promotion takes a blocking directory lock and inspects PE
      * code. A restricted callback consumes its genuine saved entry directly;
@@ -168,21 +181,42 @@ static uint64_t host_native_memory(HostImport *entry,void *caller,uintptr_t *arg
         else if(!host_real_duplicate(GetCurrentProcess(),(HANDLE)arguments[0],GetCurrentProcess(),&process,0,FALSE,DUPLICATE_SAME_ACCESS))error=GetLastError();
         else local=compare(process,GetCurrentProcess())!=0;
     }
+    const void *address=(const void*)arguments[entry->kind==HOST_VIRTUAL_PROTECT?0:1];
+    SIZE_T size=(SIZE_T)arguments[entry->kind==HOST_WRITE_PROCESS_MEMORY?3:entry->kind==HOST_VIRTUAL_PROTECT?1:2];
+    const void *output=(const void*)arguments[entry->kind==HOST_VIRTUAL_PROTECT?3:4];
+    SIZE_T outputSize=entry->kind==HOST_WRITE_PROCESS_MEMORY?sizeof(SIZE_T):sizeof(DWORD);
     int hit=0;
     if(!error&&local){
-        const void *address=(const void*)arguments[entry->kind==HOST_VIRTUAL_PROTECT?0:1];
-        SIZE_T size=(SIZE_T)arguments[entry->kind==HOST_WRITE_PROCESS_MEMORY?3:entry->kind==HOST_VIRTUAL_PROTECT?1:2];
         hit=host_memory_range(address,size,entry->kind!=HOST_WRITE_PROCESS_MEMORY,restricted);
     }
     /* Outputs always belong to this process, even when the target is remote.
      * Refusing a write leaves both output bytes and requested page state alone. */
     if(!error&&!hit){
-        const void *output=(const void*)arguments[entry->kind==HOST_VIRTUAL_PROTECT?3:4];
-        if(output)hit=host_memory_range(output,entry->kind==HOST_WRITE_PROCESS_MEMORY?sizeof(SIZE_T):sizeof(DWORD),0,restricted);
+        if(output)hit=host_memory_range(output,outputSize,0,restricted);
     }
     if(!error&&hit)error=hit>0?ERROR_ACCESS_DENIED:restricted?ERROR_BUSY:ERROR_INVALID_DATA;
-    if(!error&&native_owner_stopped(owners))error=ERROR_ACCESS_DENIED;
-    if(!error){SetLastError(incoming);result=host_memory_original(entry,process,arguments);error=GetLastError();}
+    if(!error&&(local||output)){
+        int locked=restricted?TryAcquireSRWLockExclusive(&native_private_gate):
+                (AcquireSRWLockExclusive(&native_private_gate),1);
+        if(!locked)error=ERROR_BUSY;
+        else {
+            hit=local?host_memory_range_locked(address,size,entry->kind!=HOST_WRITE_PROCESS_MEMORY):0;
+            if(!hit&&output)hit=host_memory_output_locked(output,outputSize);
+            if(hit)error=hit>0?ERROR_ACCESS_DENIED:restricted?ERROR_BUSY:ERROR_INVALID_DATA;
+            else if(native_owner_stopped(owners))error=ERROR_ACCESS_DENIED;
+            else {
+                /* Consume the genuine Windows entry while private allocation
+                 * and publication are excluded. Preserve its one-call partial
+                 * effects and optional output contract; no staging or preclear. */
+                SetLastError(incoming);result=host_memory_original(entry,process,arguments);error=GetLastError();
+            }
+            ReleaseSRWLockExclusive(&native_private_gate);
+        }
+    }else if(!error){
+        /* A remote target with no local output has no private local effect. */
+        if(native_owner_stopped(owners))error=ERROR_ACCESS_DENIED;
+        else {SetLastError(incoming);result=host_memory_original(entry,process,arguments);error=GetLastError();}
+    }
     /* Capture the original API's error before releasing only our alias. No
      * caller-owned handle is closed, and no output is synthesized on refusal. */
     if(process&&!host_real_close(process))InterlockedIncrement(&native_failures);
@@ -196,10 +230,12 @@ static uint64_t host_native_memory(HostImport *entry,void *caller,uintptr_t *arg
  * https://learn.microsoft.com/en-us/windows/win32/api/memoryapi/nf-memoryapi-virtualquery
  * https://learn.microsoft.com/en-us/windows/win32/api/winnt/ns-winnt-memory_basic_information
  */
-static int host_memory_allocation_range(const void *address,int restricted){
+/* Resolve only Win32 allocation geometry. Both the domain preflight and the
+ * final gate-held check use this routine; it never enters another directory. */
+static int host_memory_allocation_span(const void *address,const void **allocation,SIZE_T *size,int *pages){
     MEMORY_BASIC_INFORMATION initial;
     if(VirtualQuery(address,&initial,sizeof(initial))!=sizeof(initial))return -1;
-    if(initial.State==MEM_FREE)return host_memory_range(address,1,1,restricted);
+    if(initial.State==MEM_FREE){*allocation=address;*size=1;*pages=1;return 0;}
     uintptr_t requested=(uintptr_t)address,segment=(uintptr_t)initial.BaseAddress,base=(uintptr_t)initial.AllocationBase;
     if(!base||base>segment||segment>requested||!initial.RegionSize||requested-segment>=initial.RegionSize)return -1;
     uintptr_t maximum=__atomic_load_n(&host_memory_maximum,__ATOMIC_ACQUIRE),cursor=base;
@@ -214,7 +250,17 @@ static int host_memory_allocation_range(const void *address,int restricted){
         cursor+=(uintptr_t)current.RegionSize;
     }
     if(cursor<=requested||cursor<=base)return -1;
-    return host_memory_range((const void*)base,(SIZE_T)(cursor-base),0,restricted);
+    *allocation=(const void*)base;*size=(SIZE_T)(cursor-base);*pages=0;return 0;
+}
+static int host_memory_allocation_range(const void *address,int restricted){
+    const void *allocation;SIZE_T size;int pages;
+    if(host_memory_allocation_span(address,&allocation,&size,&pages))return -1;
+    return host_memory_range(allocation,size,pages,restricted);
+}
+static int host_memory_allocation_locked(const void *address){
+    const void *allocation;SIZE_T size;int pages;
+    if(host_memory_allocation_span(address,&allocation,&size,&pages))return -1;
+    return host_memory_range_locked(allocation,size,pages);
 }
 static int host_memory_release_range(HostImport *entry,const uintptr_t *arguments,int restricted){
     const void *address=(const void*)arguments[entry->kind==HOST_VIRTUAL_FREE_EX?1:0];
@@ -234,6 +280,18 @@ static int host_memory_release_range(HostImport *entry,const uintptr_t *argument
     int hit=host_memory_allocation_range(address,restricted);
     return hit||!size?hit:host_memory_range(address,size,1,restricted);
 }
+/* Repeat the affected current reservation/view and explicit interval under
+ * the private gate. Reusing release_range here would take domain locks. */
+static int host_memory_release_locked(HostImport *entry,const uintptr_t *arguments){
+    const void *address=(const void*)arguments[entry->kind==HOST_VIRTUAL_FREE_EX?1:0];
+    if(entry->kind==HOST_UNMAP_VIEW||entry->kind==HOST_UNMAP_VIEW_EX)
+        return host_memory_allocation_locked(address);
+    SIZE_T size=(SIZE_T)arguments[entry->kind==HOST_VIRTUAL_FREE_EX?2:1];
+    DWORD type=(DWORD)arguments[entry->kind==HOST_VIRTUAL_FREE_EX?3:2];
+    if(type==MEM_DECOMMIT&&size)return host_memory_range_locked(address,size,1);
+    int hit=host_memory_allocation_locked(address);
+    return hit||!size?hit:host_memory_range_locked(address,size,1);
+}
 static BOOL host_memory_release_original(HostImport *entry,HANDLE process,const uintptr_t *a){
     switch(entry->kind){
         case HOST_VIRTUAL_FREE:return ((HostVirtualFree)entry->original)((LPVOID)a[0],(SIZE_T)a[1],(DWORD)a[2]);
@@ -246,7 +304,7 @@ static BOOL host_memory_release_original(HostImport *entry,HANDLE process,const 
 static uint64_t host_native_memory_release(HostImport *entry,void *caller,uintptr_t *arguments){
     DWORD incoming=GetLastError();OwnerLink *owners=NULL;int unknown=0;
     NativeThread *state=native_tls==TLS_OUT_OF_INDEXES?NULL:(NativeThread*)TlsGetValue(native_tls);
-    int restricted=state&&(state->heapCallback||state->vmDetaching||state->vmThreadEnding||state->hostUnloadImage||state->hostRelease
+    int restricted=state&&(state->heapCallback||state->toolingRestricted||state->vmDetaching||state->vmThreadEnding||state->hostUnloadImage||state->hostRelease
             ||state->hostLoad&&state->hostLoad->calling);
     if(!restricted)entry=host_consumed_entry(entry,state,caller);
     if(!host_entry_sources_query(entry,state,caller,&owners,NULL,1,&unknown)){
@@ -269,11 +327,30 @@ static uint64_t host_native_memory_release(HostImport *entry,void *caller,uintpt
      * acquire local ownership merely because their numeric values coincide. */
     int hit=!error&&local?host_memory_release_range(entry,arguments,restricted):0;
     if(!error&&hit)error=hit>0?ERROR_ACCESS_DENIED:restricted?ERROR_BUSY:ERROR_INVALID_DATA;
-    if(!error&&native_owner_stopped(owners))error=ERROR_ACCESS_DENIED;
-    /* Win32 exposes no allocation-incarnation pin or atomic query-and-free.
-     * A concurrent mapping replacement after observation is unresolved, even
-     * though the process object is fixed. This guard does not claim otherwise. */
-    if(!error){SetLastError(incoming);result=host_memory_release_original(entry,process,arguments);error=GetLastError();}
+    if(!error&&local){
+        int locked=restricted?TryAcquireSRWLockExclusive(&native_private_gate):
+                (AcquireSRWLockExclusive(&native_private_gate),1);
+        if(!locked)error=ERROR_BUSY;
+        else {
+            hit=host_memory_release_locked(entry,arguments);
+            if(hit)error=hit>0?ERROR_ACCESS_DENIED:restricted?ERROR_BUSY:ERROR_INVALID_DATA;
+            else if(native_owner_stopped(owners))error=ERROR_ACCESS_DENIED;
+            else {
+                /* The actual local release cannot cross a private allocation
+                 * or registration published by this DLL while this gate is
+                 * held. It is a Windows memory operation, not FreeLibrary or
+                 * a VM disposal call, and cannot run their user callbacks. */
+                SetLastError(incoming);result=host_memory_release_original(entry,process,arguments);error=GetLastError();
+            }
+            ReleaseSRWLockExclusive(&native_private_gate);
+        }
+    }else if(!error){
+        if(native_owner_stopped(owners))error=ERROR_ACCESS_DENIED;
+        else {SetLastError(incoming);result=host_memory_release_original(entry,process,arguments);error=GetLastError();}
+    }
+    /* Win32 has no allocation-incarnation pin for unrelated code replacing a
+     * mapping outside this gate. The guarantee is allocation/publication by
+     * this DLL, not atomicity with raw stores, syscalls or VM disposal. */
     if(process&&!host_real_close(process))InterlockedIncrement(&native_failures);
     native_owner_links_free(owners);SetLastError(error);return (uint64_t)result;
 }

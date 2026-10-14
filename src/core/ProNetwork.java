@@ -12,7 +12,7 @@ import net.minecraftforge.network.*;
 import net.minecraftforge.network.simple.SimpleChannel;
 
 public final class ProNetwork {
-    static final String WIRE_VERSION="r3-client-7";
+    static final String WIRE_VERSION="r3-client-8";
     static final SimpleChannel CHANNEL=NetworkRegistry.newSimpleChannel(new ResourceLocation("ronova_pro","presence"),
             ()->WIRE_VERSION,v->v.equals(WIRE_VERSION)||v.equals(NetworkRegistry.ABSENT),v->v.equals(WIRE_VERSION)||v.equals(NetworkRegistry.ABSENT));
     public record Probe(UUID session,UUID operation,UUID challenge,String dimension,int entityId,UUID entityUuid) {}
@@ -24,7 +24,7 @@ public final class ProNetwork {
      * The actual protection policy as the server applies it, for one exact object. This is not a presence
      * observation: presence says whether an entity was seen, policy says whether its removal is allowed.
      */
-    record Protection(UUID session,long scope,String dimension,long revision,int entityId,UUID entityUuid,boolean protectedNow) {}
+    record Protection(UUID session,long scope,String dimension,long revision,int entityId,UUID entityUuid,boolean protectedNow,boolean noHeal) {}
     record HudPolicy(UUID session,long scope,String dimension,long revision,UUID hud,boolean protectedNow,boolean terminal) {}
     record Terminal(UUID session,long scope,String dimension,long revision,int entityId,UUID entityUuid,boolean terminal) {}
     record PolicyReset(UUID session,long scope,String dimension) {}
@@ -55,8 +55,8 @@ public final class ProNetwork {
             .decoder(b->new Forget(b.readUUID(),b.readUUID(),b.readUUID()))
             .consumerMainThread((p,c)->DistExecutor.unsafeRunWhenOn(Dist.CLIENT,()->()->ClientPresence.forget(p,c.get().getNetworkManager()))).add();
         CHANNEL.messageBuilder(Protection.class,3,NetworkDirection.PLAY_TO_CLIENT)
-            .encoder((p,b)->{b.writeUUID(p.session);b.writeLong(p.scope);b.writeUtf(p.dimension,256);b.writeLong(p.revision);b.writeVarInt(p.entityId);b.writeUUID(p.entityUuid);b.writeBoolean(p.protectedNow);})
-            .decoder(b->new Protection(b.readUUID(),b.readLong(),b.readUtf(256),b.readLong(),b.readVarInt(),b.readUUID(),b.readBoolean()))
+            .encoder((p,b)->{b.writeUUID(p.session);b.writeLong(p.scope);b.writeUtf(p.dimension,256);b.writeLong(p.revision);b.writeVarInt(p.entityId);b.writeUUID(p.entityUuid);b.writeBoolean(p.protectedNow);b.writeBoolean(p.noHeal);})
+            .decoder(b->new Protection(b.readUUID(),b.readLong(),b.readUtf(256),b.readLong(),b.readVarInt(),b.readUUID(),b.readBoolean(),b.readBoolean()))
             .consumerMainThread((p,c)->DistExecutor.unsafeRunWhenOn(Dist.CLIENT,()->()->ClientPresence.policy(p,c.get().getNetworkManager()))).add();
         CHANNEL.messageBuilder(PolicyReset.class,4,NetworkDirection.PLAY_TO_CLIENT)
             .encoder((p,b)->{b.writeUUID(p.session);b.writeLong(p.scope);b.writeUtf(p.dimension,256);})
@@ -121,9 +121,9 @@ public final class ProNetwork {
         if(!present(p)||session==null||scope<=0||dimension==null)return false;
         CHANNEL.send(PacketDistributor.PLAYER.with(()->p),new PolicyReset(session,scope,dimension));return true;
     }
-    static boolean protection(ServerPlayer p,UUID session,long scope,String dimension,long revision,int entityId,UUID entityUuid,boolean protectedNow) {
+    static boolean protection(ServerPlayer p,UUID session,long scope,String dimension,long revision,int entityId,UUID entityUuid,boolean protectedNow,boolean noHeal) {
         if(!present(p)||session==null||scope<=0||dimension==null||revision<=0||entityUuid==null)return false;
-        CHANNEL.send(PacketDistributor.PLAYER.with(()->p),new Protection(session,scope,dimension,revision,entityId,entityUuid,protectedNow));return true;
+        CHANNEL.send(PacketDistributor.PLAYER.with(()->p),new Protection(session,scope,dimension,revision,entityId,entityUuid,protectedNow,noHeal));return true;
     }
     static boolean terminal(ServerPlayer player,UUID session,long scope,String dimension,long revision,int id,UUID uuid,boolean terminal) {
         if(!present(player)||session==null||scope<=0||dimension==null||revision<=0||uuid==null)return false;

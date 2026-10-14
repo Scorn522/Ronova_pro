@@ -65,6 +65,13 @@ public final class WorldFixture {
         public static java.util.stream.IntStream stream(){effects++;return java.util.stream.IntStream.of(7);}
         public static Future<?> future(){effects++;return new CompletableFuture<>();}
     }
+    /** A real active Mod caller submits a shared vanilla packet before connection. */
+    public static final class NetworkSender {
+        public static void send(Object connection,Object packet)throws ReflectiveOperationException {
+            Class<?> packetType=Class.forName("net.minecraft.network.protocol.Packet",false,connection.getClass().getClassLoader());
+            connection.getClass().getMethod("send",packetType).invoke(connection,packet);
+        }
+    }
     int phase, age, enteredAt, stoppedTicks;
     int commandCalls;
     boolean groupBackingChecked;

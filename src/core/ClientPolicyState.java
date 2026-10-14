@@ -18,7 +18,9 @@ final class ClientPolicyState {
     private String dimension;
     private long scope=-1;
     private boolean overflow;
-    private record Entry(UUID identity,long revision,boolean protectedNow) { }
+    private record Entry(UUID identity,long revision,boolean protectedNow,boolean noHeal) {
+        boolean active(){return protectedNow||noHeal;}
+    }
     record Address(int id,UUID uuid) { }
 
     synchronized void connection(Object active) {
@@ -33,6 +35,9 @@ final class ClientPolicyState {
         this.session=session;this.scope=scope;this.dimension=dimension;overflow=false;entries.clear();revisions.clear();return true;
     }
     synchronized boolean accept(Object source,UUID session,long scope,String dimension,long revision,int id,UUID uuid,boolean protect) {
+        return accept(source,session,scope,dimension,revision,id,uuid,protect,false);
+    }
+    synchronized boolean accept(Object source,UUID session,long scope,String dimension,long revision,int id,UUID uuid,boolean protect,boolean noHeal) {
         if(source==null||source!=connection||this.session==null||!this.session.equals(session)
                 ||this.scope!=scope||!Objects.equals(this.dimension,dimension)||revision<=0||uuid==null)return false;
         Entry old=entries.get(id);
@@ -44,7 +49,7 @@ final class ClientPolicyState {
         }
         revisions.put(id,revision);
         // Revoking an older UUID cannot remove a newer protected body which reused the id.
-        if(protect||old==null||old.identity().equals(uuid)||!old.protectedNow())entries.put(id,new Entry(uuid,revision,protect));
+        if(protect||noHeal||old==null||old.identity().equals(uuid)||!old.active())entries.put(id,new Entry(uuid,revision,protect,noHeal));
         return true;
     }
     synchronized boolean denies(Object active,String dimension,int id,UUID uuid) {
@@ -52,11 +57,16 @@ final class ClientPolicyState {
         Entry current=entries.get(id);
         return current!=null&&current.protectedNow()&&uuid.equals(current.identity());
     }
-    /** A scope activation applies retained terminal decisions once to the new world's actual mirrors. */
+    synchronized boolean noHeal(Object active,String dimension,int id,UUID uuid) {
+        if(active==null||active!=connection||!Objects.equals(this.dimension,dimension)||uuid==null)return false;
+        Entry current=entries.get(id);
+        return current!=null&&current.noHeal()&&uuid.equals(current.identity());
+    }
+    /** Scope activation resolves active decisions against the new world's exact mirrors. */
     synchronized List<Address> activeAddresses(Object active,String dimension) {
         if(active==null||active!=connection||!Objects.equals(this.dimension,dimension))return List.of();
         List<Address> result=new ArrayList<>();
-        for(var entry:entries.entrySet())if(entry.getValue().protectedNow())result.add(new Address(entry.getKey(),entry.getValue().identity()));
+        for(var entry:entries.entrySet())if(entry.getValue().active())result.add(new Address(entry.getKey(),entry.getValue().identity()));
         return List.copyOf(result);
     }
     synchronized boolean overflowed() { return overflow; }

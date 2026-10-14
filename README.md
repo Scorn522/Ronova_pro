@@ -1,9 +1,18 @@
 # Ronova Pro
 
-主工程：`D:\桌面\ronova_GPT`。Java ABI71 / Native ABI67 / Storage3 / Journal6。
+主工程：`D:\桌面\ronova_GPT`。Java ABI72 / Native ABI68 / Storage3 / Journal6，客户端协议 `r3-client-8`。
 Java 17；用户态 GNU C23 / GNU C++23；独立 Windows 驱动及管理工具 C17。
-当前包构建通过；ReadProcessMemory 的 IAT/GPA 入口保护本地数据和字节数输出，实际控制槽拒绝、普通读取、可选输出及零长度检查通过，Native 初始化正常。控制登记中的通知资格改用精确类身份，去掉锁内该分支的 VM nest 查询。自身外观及武器注册暂缓；完整 C/B 尚未完成，实际结果与剩余范围看
-[当前进度](docs/A-批验收状态.md) 和 [实际报告](validation/b-final-20261007/REPORT.md)。
+当前源码包含连接前队列逐次发送来源及 EventLoop 接续、原生写入/改权限/释放与私有控制内存登记的短提交门，以及独立禁疗。整包构建通过，原生内存实际效果检查通过；网络及真实游戏结果以
+[当前进度](docs/A-批验收状态.md) 和 [实际报告](validation/b-final-20261007/REPORT.md) 为准。自身外观及武器注册暂缓，完整 C/B 尚未完成。
+
+禁疗复用现有管理命令，目标为单个实体选择器或 UUID：
+
+```text
+/ronova_pro no-heal <目标> true
+/ronova_pro no-heal <目标> false
+```
+
+单独禁疗拒绝实际升血，正常伤害继续生效；可与 `protect` 组合，单独关闭禁疗保留防护，`release` 撤销两者。服务端与客户端使用同版 JAR；旧 `r3-client-7` 不解码新增策略字段。
 
 ## 目录
 
@@ -43,7 +52,7 @@ Windows x64 上使用 JDK17 和 Zig。先写齐工作包，再按实际需要构
 java -jar ronova-pro-prelaunch.jar --java <游戏java.exe> --core <当前core.jar> <原有全部游戏参数>
 ```
 
-本地整理包：`distribution/Ronova-Pro-C-HostRead-WIP-Java71-Native67-20261014.zip`。包含当前源码、Core/prelaunch JAR 和未签名驱动；只打包指定候选，不带缓存、旧布局、游戏存档或历史分发包：
+本地整理包：`distribution/Ronova-Pro-C-Strength-WIP-Java72-Native68-20261014.zip`。包含当前源码、Core/prelaunch JAR 和未签名驱动；只打包指定候选，不带缓存、旧布局、游戏存档或历史分发包：
 
 ```powershell
 .\distribution\package-current.ps1 -CandidateDirectory <本次候选目录> -OutputPath <新ZIP路径>

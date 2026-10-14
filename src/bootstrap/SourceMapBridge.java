@@ -22,13 +22,17 @@ public final class SourceMapBridge {
     private static final class AnalysisCaller implements java.util.function.Function<java.util.stream.Stream<StackWalker.StackFrame>,Boolean>{
         public Boolean apply(java.util.stream.Stream<StackWalker.StackFrame> frames){
             var cursor=frames.iterator();while(cursor.hasNext()){
-                Class<?> type=cursor.next().getDeclaringClass();
-                if(type.getNestHost()==SourceMapBridge.class)continue;
-                String name=type.getName();
-                if(type.getClassLoader()==null&&(name.startsWith("java.")||name.startsWith("jdk.")||name.startsWith("sun.")))continue;
-                // The first actual application caller must be our admitted
-                // agent. A foreign callback (including hidden code) stops here;
-                // an agent farther down the stack supplies no such authority.
+                var frame=cursor.next();Class<?> type=frame.getDeclaringClass();
+                if(type.getClassLoader()==null&&type.getNestHost()==SourceMapBridge.class)continue;
+                String method=frame.getMethodName();
+                boolean container=type==HashMap.class||type==LinkedHashMap.class||type==ArrayList.class
+                        ||type==java.util.concurrent.ConcurrentHashMap.class||type==java.util.concurrent.atomic.AtomicReference.class
+                        ||type==java.util.concurrent.CopyOnWriteArrayList.class;
+                if(container&&(method.equals("<init>")||method.equals("clone")))continue;
+                // Only the observed container's constructor/clone chain is
+                // transparent. Ordinary JDK resource/cache initialization and
+                // foreign callbacks stop here; a deeper agent is no owner.
+                // Retained ASM graphs are protected at their actual handoff.
                 return ControlBridge.owns(type);
             }
             return false;

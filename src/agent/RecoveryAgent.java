@@ -91,7 +91,7 @@ public final class RecoveryAgent {
             bootstrap=new JarFile(Path.of(argument).toAbsolutePath().normalize().toFile());
             api.appendToBootstrapClassLoaderSearch(bootstrap);
             bridge=Class.forName("dev.ronova.pro.bootstrap.TaskBridge",true,null);
-            if(!Integer.valueOf(71).equals(bridge.getMethod("abiVersion").invoke(null)))throw new IllegalStateException("TASK_BRIDGE_ABI_MISMATCH");
+            if(!Integer.valueOf(72).equals(bridge.getMethod("abiVersion").invoke(null)))throw new IllegalStateException("TASK_BRIDGE_ABI_MISMATCH");
             Class.forName("dev.ronova.pro.bootstrap.SourceMapBridge",true,null);
             // Default-Map guards test UUID keys while class-loading maps are
             // active. Resolve that type before publishing the guarded methods.
@@ -111,10 +111,20 @@ public final class RecoveryAgent {
             // Define its direct member classes without initializing them before that
             // observation can recursively request its own ArrayChange/receipt bytes.
             Class.forName("dev.ronova.pro.bootstrap.ExecutionFlow",false,null).getDeclaredClasses();
+            // Array-change completion iterates this exact TreeMap tail view.
+            // Define its view/value/entry iterator chain before JNI can fill
+            // those class bytes through the same guarded array-completion path.
+            for(String helper:List.of("java.util.TreeMap$NavigableSubMap","java.util.TreeMap$AscendingSubMap",
+                    "java.util.TreeMap$NavigableSubMap$EntrySetView","java.util.TreeMap$AscendingSubMap$AscendingEntrySetView",
+                    "java.util.TreeMap$NavigableSubMap$SubMapIterator","java.util.TreeMap$NavigableSubMap$SubMapEntryIterator",
+                    "java.util.AbstractMap$2","java.util.AbstractMap$2$1"))
+                Class.forName(helper,false,null);
             // These are the metadata carried by one actual RenderSystem queue
             // publication and its poll-to-finally handoff, never a Mod wrapper.
             for(String helper:List.of("RenderQueueFields","RenderCallEntry","RenderSubmission","RenderReplay","RenderConsumption"))
                 Class.forName("dev.ronova.pro.bootstrap.ClientBridge$"+helper,false,null);
+            for(String helper:List.of("PacketEntry","Deferred"))
+                Class.forName("dev.ronova.pro.bootstrap.NetworkBridge$"+helper,false,null);
             Class.forName("dev.ronova.pro.bootstrap.TaskBridge$Helper",false,null);
             Class.forName("dev.ronova.pro.bootstrap.CodeSourceBridge$LedgerMap",false,null);
             Class.forName("dev.ronova.pro.bootstrap.CodeSourceBridge$FrameMethods",false,null);
@@ -122,7 +132,7 @@ public final class RecoveryAgent {
             Class.forName("dev.ronova.pro.bootstrap.ControlBridge$ProducerFrame",false,null);
             Class.forName("dev.ronova.pro.bootstrap.EventFaultBridge",true,null);
             Class<?> control=Class.forName("dev.ronova.pro.bootstrap.ControlBridge",true,null);
-            if(!Integer.valueOf(71).equals(control.getMethod("abiVersion").invoke(null)))throw new IllegalStateException("CONTROL_BRIDGE_ABI_MISMATCH");
+            if(!Integer.valueOf(72).equals(control.getMethod("abiVersion").invoke(null)))throw new IllegalStateException("CONTROL_BRIDGE_ABI_MISMATCH");
             Module base=Object.class.getModule(),ours=RecoveryAgent.class.getModule();
             api.redefineModule(base,Set.of(bridge.getModule()),Map.of(
                     "jdk.internal.org.objectweb.asm",Set.of(ours),"jdk.internal.org.objectweb.asm.commons",Set.of(ours),

@@ -23,7 +23,7 @@ public final class DefenseFixture {
         MinecraftForge.EVENT_BUS.addListener(EventPriority.NORMAL,this::entered);
     }
     private void entered(EntityEvent.EnteringSection event) {
-        if(finished||event.getEntity()!=cow||age<20)return;
+        if(finished||"no-heal".equals(System.getProperty("ronova.pro.fixture.variant"))||event.getEntity()!=cow||age<20)return;
         var section=((Access.Callback)((Access.EntityState)cow).pro$callback()).pro$section();
         // This is an ordinary mod callback during the move, not the vanilla removal itself.
         section.remove(cow);entryAttacks++;
@@ -56,8 +56,72 @@ public final class DefenseFixture {
     private static Cow spawn(ServerLevel level,double x,double y,double z) {
         Cow c=new CounterCow(level);c.setNoAi(true);c.setNoGravity(true);c.moveTo(x,y,z,0,0);require(level.addFreshEntity(c),"spawn refused");return c;
     }
+    private static Cow noHealCow(ServerLevel level,double x,double y,double z) {
+        // Use vanilla damage/health bodies; CounterCow intentionally replaces hurt.
+        Cow c=new Cow(EntityType.COW,level);c.setNoAi(true);c.setNoGravity(true);c.moveTo(x,y,z,0,0);
+        require(level.addFreshEntity(c),"no-heal cow spawn refused");c.setHealth(4);return c;
+    }
+    private static net.minecraft.network.syncher.SynchedEntityData.DataItem<Float> healthItem(Cow entity) {
+        return ((Access.Data)((Access.EntityState)entity).pro$data()).pro$item(Access.Living.pro$healthKey());
+    }
+    private static void health(Cow entity,float expected,String why) {
+        require(entity.getHealth()==expected&&healthItem(entity).getValue()==expected,why);
+    }
+    private static void gainDenied(Cow entity) {
+        float before=healthItem(entity).getValue();
+        entity.heal(1);health(entity,before,"no-heal allowed ordinary heal");
+        entity.setHealth(before+1);health(entity,before,"no-heal allowed direct setHealth gain");
+        entity.getEntityData().set(Access.Living.pro$healthKey(),before+1);health(entity,before,"no-heal allowed synchronized health gain");
+        healthItem(entity).setValue(before+1);health(entity,before,"no-heal allowed direct health item gain");
+    }
+    private void noHealTick(TickEvent.ServerTickEvent event) {
+        var server=event.getServer();
+        try {
+            age++;var runtime=ProRuntime.get(server);var level=server.overworld();
+            if(age==10) {
+                var spawn=level.getSharedSpawnPos();level.getChunk(spawn.getX()>>4,spawn.getZ()>>4);
+                cow=noHealCow(level,spawn.getX()+0.5,spawn.getY()+4,spawn.getZ()+0.5);
+                neighbour=noHealCow(level,spawn.getX()+2.5,spawn.getY()+4,spawn.getZ()+0.5);
+                FixtureCommands.noHeal(cow,true);gainDenied(cow);
+                neighbour.heal(1);health(neighbour,5,"no-heal blocked neighbour heal");
+                neighbour.setHealth(6);health(neighbour,6,"no-heal blocked neighbour setHealth");
+                neighbour.getEntityData().set(Access.Living.pro$healthKey(),7F);health(neighbour,7,"no-heal blocked neighbour synchronized health");
+                healthItem(neighbour).setValue(8F);health(neighbour,8,"no-heal blocked neighbour health item");
+                require(cow.hurt(level.damageSources().generic(),1),"standalone no-heal blocked actual damage");
+                health(cow,3,"standalone no-heal did not permit life loss");
+                require(neighbour.hurt(level.damageSources().generic(),1),"no-heal blocked neighbour damage");
+                health(neighbour,7,"neighbour damage did not reduce actual health");
+                FixtureCommands.noHeal(cow,false);cow.heal(2);health(cow,5,"disabling standalone no-heal did not restore healing");
+            }
+            if(age==40) {
+                // Thirty real ticks separate the first damage from this phase,
+                // so vanilla invulnerableTime cannot impersonate protection.
+                health(cow,5,"standalone no-heal release changed later health");
+                FixtureCommands.noHeal(cow,true);FixtureCommands.protect(runtime,cow);gainDenied(cow);
+                require(!cow.hurt(level.damageSources().generic(),1),"combined protection allowed actual damage");
+                health(cow,5,"combined protection lost health");
+                FixtureCommands.noHeal(cow,false);cow.heal(1);health(cow,6,"disabling no-heal left healing blocked by protection");
+                require(!cow.hurt(level.damageSources().generic(),1),"disabling no-heal also removed protection");
+                health(cow,6,"independent no-heal release lost damage protection");
+                neighbour.heal(1);health(neighbour,8,"combined policy blocked neighbour heal");
+                require(neighbour.hurt(level.damageSources().generic(),1),"combined policy blocked neighbour damage");
+                health(neighbour,7,"combined policy changed neighbour life loss");
+                FixtureCommands.noHeal(cow,true);cow.heal(1);health(cow,6,"combined no-heal re-enable did not deny healing");
+                FixtureCommands.revoke(runtime,cow);
+                require(cow.hurt(level.damageSources().generic(),1),"release left damage protection active");
+                health(cow,5,"release did not restore actual damage");
+                cow.heal(1);health(cow,6,"release did not preserve restored healing");
+                finish("NO_HEAL_PASS standalone_gains_denied_actual_damage_allowed_disable_restores_heal_combined_protect_independent_disable_and_neighbour");
+                server.halt(false);
+            }
+        } catch(Throwable failure) {
+            failure.printStackTrace();
+            try{finish("NO_HEAL_FAILED "+failure);}finally{server.halt(false);}
+        }
+    }
     private void tick(TickEvent.ServerTickEvent event) {
         if(finished||event.phase!=TickEvent.Phase.START)return;
+        if("no-heal".equals(System.getProperty("ronova.pro.fixture.variant"))){noHealTick(event);return;}
         var server=event.getServer();if(server.getPlayerList().getPlayers().isEmpty())return;
         try {
             age++;var runtime=ProRuntime.get(server);var level=server.overworld();

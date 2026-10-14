@@ -13,6 +13,7 @@ public final class AuditFixCheck {
     private static Object invoke(Object receiver,String name)throws Exception {var m=receiver.getClass().getDeclaredMethod(name);m.setAccessible(true);try{return m.invoke(receiver);}catch(InvocationTargetException e){if(e.getCause() instanceof Exception x)throw x;throw e;}}
     public static void main(String[] args)throws Exception {
         if(args.length==3&&args[0].equals("mod-group-returns")){modGroupReturns(args[1],args[2]);return;}
+        if(args.length==2&&args[0].equals("network-preconnect")){networkPreconnect(args[1]);return;}
         if(args.length==1&&args[0].equals("source-list-fixes")){sourceListFixes();return;}
         if(args.length==1&&args[0].equals("live-control-writer")){liveControlWriter();return;}
         if(args.length==1&&args[0].equals("clone-boundary")){cloneBoundary();return;}
@@ -73,6 +74,12 @@ public final class AuditFixCheck {
     private static void hostThreadCreate(){
         System.load(java.nio.file.Path.of(System.getProperty("ronova.pro.audit.thread.native")).toAbsolutePath().toString());
         String phase=System.getProperty("ronova.pro.audit.thread.phase","thread-create");
+        if(phase.equals("memory-effects")){
+            hostMemory0(System.getProperty("ronova.pro.control.native"));
+            hostMemoryRelease0(System.getProperty("ronova.pro.control.native"));
+            System.out.println("HOST_MEMORY_EFFECTS_PASS actual_IAT_GPA_write_protect_free_unmap ordinary_effects_preserved exact_control_targets_and_local_outputs_refused no_fabricated_authority");
+            return;
+        }
         if(phase.equals("read-memory")){
             require(hostMemoryRead0(),"Host memory read output control failed");
             return;
@@ -728,6 +735,104 @@ public final class AuditFixCheck {
         require("business-override".equals(new OverriddenClone().duplicate()),"business clone override rewritten");
         System.out.println("CLONE_BOUNDARY_PASS actual_agent_native sealed_enum_permits values_clone inherited_owner distinct_identity payload non_cloneable_exception business_override");
     }
+    private static void networkPreconnect(String jar)throws Exception {
+        var finder=java.lang.module.ModuleFinder.of(java.nio.file.Path.of(jar));
+        require(finder.findAll().size()==1,"one actual isolated fixture module is required");
+        String name=finder.findAll().iterator().next().descriptor().name();
+        var configuration=ModuleLayer.boot().configuration().resolve(finder,java.lang.module.ModuleFinder.of(),Set.of(name));
+        var layer=ModuleLayer.boot().defineModulesWithOneLoader(configuration,ClassLoader.getPlatformClassLoader());
+        Class<?> sender=Class.forName("dev.ronova.pro.validation.WorldFixture$NetworkSender",true,layer.findLoader(name));
+        Module module=sender.getModule();
+        require(module.isNamed()&&module==layer.findModule(name).orElseThrow(),"sender did not load from the actual fixture module");
+        Method submit=sender.getMethod("send",Object.class,Object.class);
+        Class<?> bridge=Class.forName("dev.ronova.pro.bootstrap.NetworkBridge",true,null);
+        Method current=bridge.getDeclaredMethod("currentSources");current.setAccessible(true);
+        Field activeField=bridge.getDeclaredField("ACTIVE"),channelsField=bridge.getDeclaredField("CHANNELS");
+        activeField.setAccessible(true);channelsField.setAccessible(true);
+        Set<?> active=(Set<?>)activeField.get(null);Object channels=channelsField.get(null);
+        Class<?> controls=Class.forName("dev.ronova.pro.bootstrap.ControlBridge",true,null);
+        Method producer=controls.getDeclaredMethod("producer",Module.class);producer.setAccessible(true);
+        Method stopped=controls.getDeclaredMethod("modStopped",Module.class);stopped.setAccessible(true);
+        require(!Boolean.TRUE.equals(producer.invoke(null,AuditFixCheck.class.getModule())),"outside consumer is a Mod producer");
+        require(!Boolean.TRUE.equals(stopped.invoke(null,module)),"preconnect fixture must remain active without bootStop");
+        require(networkSources(current).length==0,"caller started inside a network scope");
+        var connection=new net.minecraft.network.Connection(net.minecraft.network.protocol.PacketFlow.SERVERBOUND);
+        var packet=new net.minecraft.network.protocol.game.ClientboundKeepAlivePacket(7197L);
+        require(!connection.isConnected(),"connection unexpectedly active before real submissions");
+        submit.invoke(null,connection,packet);
+        connection.send(packet);
+        submit.invoke(null,connection,packet);
+        require(Boolean.TRUE.equals(producer.invoke(null,module)),"actual @Mod fixture source was not registered");
+        require(!Boolean.TRUE.equals(stopped.invoke(null,module)),"active fixture unexpectedly stopped");
+        Field queueField=Arrays.stream(net.minecraft.network.Connection.class.getDeclaredFields())
+                .filter(field->!Modifier.isStatic(field.getModifiers())&&Queue.class.isAssignableFrom(field.getType())).findFirst().orElseThrow();
+        queueField.setAccessible(true);Queue<?> queue=(Queue<?>)queueField.get(connection);
+        var holders=new ArrayList<>(queue);
+        require(holders.size()==3&&holders.get(0)!=holders.get(1)&&holders.get(0)!=holders.get(2)&&holders.get(1)!=holders.get(2),"actual preconnect submissions did not create independent queue items");
+        require(networkSources(current).length==0,"preconnect submission leaked its scope to the caller");
+        var writes=Collections.synchronizedList(new ArrayList<Module[]>());
+        var writeThreads=Collections.synchronizedList(new ArrayList<Thread>());
+        var writeInLoop=Collections.synchronizedList(new ArrayList<Boolean>());
+        var failure=new java.util.concurrent.atomic.AtomicReference<Throwable>();
+        var written=new CountDownLatch(3);var received=new CountDownLatch(3);
+        Thread consumer=Thread.currentThread();
+        var serverLoops=new io.netty.channel.DefaultEventLoopGroup(1);
+        var clientLoops=new io.netty.channel.DefaultEventLoopGroup(1);
+        io.netty.channel.Channel server=null,client=null;
+        try {
+            server=new io.netty.bootstrap.ServerBootstrap().group(serverLoops).channel(io.netty.channel.local.LocalServerChannel.class)
+                    .childHandler(new io.netty.channel.ChannelInitializer<io.netty.channel.local.LocalChannel>() {
+                        protected void initChannel(io.netty.channel.local.LocalChannel channel){
+                            channel.pipeline().addLast(new io.netty.channel.ChannelInboundHandlerAdapter(){
+                                public void channelRead(io.netty.channel.ChannelHandlerContext context,Object message){
+                                    if(message!=packet)failure.compareAndSet(null,new AssertionError("local transport changed the submitted packet identity"));
+                                    io.netty.util.ReferenceCountUtil.release(message);received.countDown();
+                                }
+                                public void exceptionCaught(io.netty.channel.ChannelHandlerContext context,Throwable error){failure.compareAndSet(null,error);context.close();}
+                            });
+                        }
+                    }).bind(new io.netty.channel.local.LocalAddress("ronova-preconnect-"+UUID.randomUUID())).sync().channel();
+            client=new io.netty.bootstrap.Bootstrap().group(clientLoops).channel(io.netty.channel.local.LocalChannel.class)
+                    .handler(new io.netty.channel.ChannelInitializer<io.netty.channel.local.LocalChannel>() {
+                        protected void initChannel(io.netty.channel.local.LocalChannel channel){
+                            channel.pipeline().addLast(new io.netty.channel.ChannelOutboundHandlerAdapter(){
+                                public void write(io.netty.channel.ChannelHandlerContext context,Object message,io.netty.channel.ChannelPromise promise)throws Exception {
+                                    if(message==packet){writes.add(networkSources(current));writeThreads.add(Thread.currentThread());writeInLoop.add(context.executor().inEventLoop());written.countDown();}
+                                    else failure.compareAndSet(null,new AssertionError("unexpected local outbound message"));
+                                    context.write(message,promise);
+                                }
+                            });
+                            channel.pipeline().addLast("packet_handler",connection);
+                        }
+                    }).connect(server.localAddress()).sync().channel();
+            client.eventLoop().submit(()->{}).sync();
+            require(connection.isConnected()&&!client.eventLoop().inEventLoop(),"real Connection was not activated on a distinct EventLoop");
+            Method flush=net.minecraft.network.Connection.class.getDeclaredMethod("flushQueue");flush.setAccessible(true);
+            flush.invoke(connection);
+            require(queue.isEmpty(),"original Connection.flushQueue did not consume its real queue");
+            require(networkSources(current).length==0,"flushQueue leaked its dispatch scope to the non-Mod caller");
+            require(written.await(10,TimeUnit.SECONDS)&&received.await(10,TimeUnit.SECONDS),"real local EventLoop did not deliver all queued packets: "+failure.get());
+            var cleared=client.eventLoop().submit(()->networkSources(current));cleared.sync();
+            require(cleared.get().length==0,"EventLoop receipt scope remained after its original Runnable returned");
+            Object[] remaining;synchronized(channels){remaining=active.toArray();}
+            for(Object scope:remaining){
+                Field sources=scope.getClass().getDeclaredField("modules");sources.setAccessible(true);
+                require(!Arrays.asList((Module[])sources.get(scope)).contains(module),"completed receipt still retained this fixture source in ACTIVE");
+            }
+            require(failure.get()==null,"actual local transport failed: "+failure.get());
+            require(writes.size()==3&&Arrays.asList(writes.get(0)).contains(module)&&!Arrays.asList(writes.get(1)).contains(module)
+                    &&Arrays.asList(writes.get(2)).contains(module),"shared packet lost a sender or inherited a different submission's source");
+            for(int i=0;i<3;i++)require(writeThreads.get(i)!=consumer&&writeInLoop.get(i),"write did not execute on the actual separate EventLoop");
+            System.out.println("NETWORK_PRECONNECT_PASS actual_active_named_Mod Connection_send shared_vanilla_packet independent_queue_items nonMod_flushQueue real_LocalChannel_EventLoop deferred_sender_sources no_shared_packet_source_pollution scope_finally_and_ACTIVE_cleared");
+            System.out.println("NETWORK_PRECONNECT_STOP_NOTRUN actual_game_Runtime_required no_fabricated_stop_or_producer_authority");
+        } finally {
+            if(client!=null)client.close().syncUninterruptibly();
+            if(server!=null)server.close().syncUninterruptibly();
+            clientLoops.shutdownGracefully(0,5,TimeUnit.SECONDS).syncUninterruptibly();
+            serverLoops.shutdownGracefully(0,5,TimeUnit.SECONDS).syncUninterruptibly();
+        }
+    }
+    private static Module[] networkSources(Method current)throws ReflectiveOperationException {return (Module[])current.invoke(null);}
     private static void modGroupReturns(String jar,String profile)throws Exception {
         var finder=java.lang.module.ModuleFinder.of(java.nio.file.Path.of(jar));
         String name=finder.findAll().iterator().next().descriptor().name();

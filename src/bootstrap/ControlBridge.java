@@ -28,7 +28,7 @@ public final class ControlBridge {
         }
     };
     private ControlBridge() { }
-    public static int abiVersion(){return 71;}
+    public static int abiVersion(){return 72;}
     public static long arrayRevision(Object value){if(!recoveryWriter())throw new SecurityException("RECOVERY_ARRAY_READER_REQUIRED");return CodeSourceBridge.executionArrayRevision(value);}
 
     public static synchronized void install(Class<?> agent,ClassFileTransformer[] transformers) throws ReflectiveOperationException {
@@ -494,6 +494,7 @@ public final class ControlBridge {
         return frameSources();
     }
     static boolean sourceUnknown(){
+        if(NetworkBridge.sourceUnknown())return true;
         if(ClientBridge.sourceUnknown())return true;
         if(CodeSourceBridge.executionUnknown())return true;
         ProducerFrame producer=PRODUCERS.get();if(producer!=null&&producer.overflow)return true;

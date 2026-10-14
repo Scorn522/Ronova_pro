@@ -200,6 +200,13 @@ public final class ProMod {
                 UUID id=runtime.protect(target);watch(c.getSource(),runtime,id,target);
                 c.getSource().sendSuccess(()->Component.literal(runtime.operationSummary(id)+"；操作："+id),false);return 1;
             })))
+            .then(Commands.literal("no-heal").then(Commands.argument("target",EntityArgument.entity())
+                .then(Commands.argument("enabled",BoolArgumentType.bool()).executes(c->{
+                    boolean enabled=BoolArgumentType.getBool(c,"enabled");
+                    boolean applied=ProRuntime.get(c.getSource().getServer()).noHeal(EntityArgument.getEntity(c,"target"),enabled);
+                    c.getSource().sendSuccess(()->Component.literal(applied?(enabled?"目标禁疗已启用。":"目标禁疗已解除；其他保护保持。"):"目标没有当前生命策略。"),false);
+                    return applied?1:0;
+                }))))
             .then(Commands.literal("release").then(Commands.argument("target",EntityArgument.entity()).executes(c-> {
                 ProRuntime.get(c.getSource().getServer()).revoke(EntityArgument.getEntity(c,"target"));return 1;
             })))

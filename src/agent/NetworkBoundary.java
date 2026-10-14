@@ -11,12 +11,15 @@ final class NetworkBoundary {
     private static final String SIMPLE="net/minecraftforge/network/simple/SimpleChannel",CODEC="net/minecraftforge/network/simple/IndexedMessageCodec";
     private static final String HANDLER=CODEC+"$MessageHandler",EVENT="net/minecraftforge/network/event/EventNetworkChannel";
     private static final String CONNECTION="net/minecraft/network/Connection",HOLDER=CONNECTION+"$PacketHolder",ENCODER="net/minecraft/network/PacketEncoder";
+    private static final String PACKET="Lnet/minecraft/network/protocol/Packet;",LISTENER="Lnet/minecraft/network/PacketSendListener;",SEND="("+PACKET+LISTENER+")V";
     private static final String NETTY="io/netty/channel/AbstractChannelHandlerContext";
     private static final String WRITE=NETTY+"$WriteTask",BYTE_ENCODER="io/netty/handler/codec/MessageToByteEncoder";
     static final Set<String> TARGETS=Set.of(INSTANCE,REGISTRY,SIMPLE,CODEC,HANDLER,EVENT,CONNECTION,HOLDER,ENCODER,NETTY,WRITE,BYTE_ENCODER);
     private NetworkBoundary(){}
     static byte[] transform(ClassLoader loader,String name,byte[] bytes){
         if(!TARGETS.contains(name))return null;ClassNode node=new ClassNode();new ClassReader(bytes).accept(node,0);boolean changed=false;
+        String[] connection=name.equals(CONNECTION)?connectionLayout(node):null;
+        String packetField=name.equals(HOLDER)?uniqueField(node,PACKET):null,listenerField=name.equals(HOLDER)?uniqueField(node,LISTENER):null;
         for(MethodNode method:node.methods){
             if((method.access&(Opcodes.ACC_ABSTRACT|Opcodes.ACC_NATIVE))!=0)continue;
             Type[] args=Type.getArgumentTypes(method.desc);int[] vars=locals(method,args);Type result=Type.getReturnType(method.desc);
@@ -26,14 +29,13 @@ final class NetworkBoundary {
                     returns(method,code->{code.add(new VarInsnNode(Opcodes.ALOAD,0));code.add(new VarInsnNode(Opcodes.ALOAD,vars[0]));call(code,"wrapperCreated","(Ljava/lang/Object;Ljava/lang/Object;)V");});changed=true;
                 }else if(name.equals(HANDLER)&&args.length==7){
                     returns(method,code->{code.add(new VarInsnNode(Opcodes.ALOAD,0));for(int i:new int[]{0,2,3,4,5})code.add(new VarInsnNode(Opcodes.ALOAD,vars[i]));call(code,"handlerCreated","(Ljava/lang/Object;Ljava/lang/Object;Ljava/lang/Object;Ljava/lang/Object;Ljava/lang/Object;Ljava/lang/Object;)V");});changed=true;
-                }else if(name.equals(HOLDER)&&args.length>0){
-                    returns(method,code->{code.add(new VarInsnNode(Opcodes.ALOAD,0));code.add(new VarInsnNode(Opcodes.ALOAD,vars[0]));call(code,"holderCreated","(Ljava/lang/Object;Ljava/lang/Object;)V");});changed=true;
+                }else if(name.equals(HOLDER)&&method.desc.equals(SEND)){
+                    returns(method,code->{code.add(new VarInsnNode(Opcodes.ALOAD,0));code.add(new VarInsnNode(Opcodes.ALOAD,vars[0]));code.add(new VarInsnNode(Opcodes.ALOAD,vars[1]));code.add(new LdcInsnNode(packetField));code.add(new LdcInsnNode(listenerField));call(code,"holderCreated","(Ljava/lang/Object;Ljava/lang/Object;Ljava/lang/Object;Ljava/lang/String;Ljava/lang/String;)V");});changed=true;
                 }else if(name.equals(CONNECTION)){
-                    FieldNode queue=node.fields.stream().filter(field->field.desc.equals("Ljava/util/Queue;")&&(field.access&Opcodes.ACC_STATIC)==0).findFirst().orElse(null);
-                    if(queue==null)throw new IllegalStateException("CONNECTION_PACKET_QUEUE_LAYOUT_UNAVAILABLE");
-                    returns(method,code->{code.add(new VarInsnNode(Opcodes.ALOAD,0));code.add(new VarInsnNode(Opcodes.ALOAD,0));code.add(new FieldInsnNode(Opcodes.GETFIELD,name,queue.name,queue.desc));code.add(new LdcInsnNode(queue.name));call(code,"connectionCreated","(Ljava/lang/Object;Ljava/lang/Object;Ljava/lang/String;)V");});changed=true;
+                    returns(method,code->{code.add(new VarInsnNode(Opcodes.ALOAD,0));code.add(new VarInsnNode(Opcodes.ALOAD,0));code.add(new FieldInsnNode(Opcodes.GETFIELD,name,connection[0],"Ljava/util/Queue;"));for(String value:connection)code.add(new LdcInsnNode(value));call(code,"connectionCreated","(Ljava/lang/Object;Ljava/lang/Object;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;)V");});changed=true;
                 }continue;
             }
+            if(connection!=null)connectionCalls(method,connection);
             if(name.equals(REGISTRY)&&method.name.equals("createInstance")&&result.getDescriptor().equals("L"+INSTANCE+";")){
                 returns(method,code->{code.add(new InsnNode(Opcodes.DUP));call(code,"routePublished","(Ljava/lang/Object;)V");});changed=true;
             }
@@ -96,6 +98,67 @@ final class NetworkBoundary {
         }
         if(!changed)throw new IllegalStateException("NETWORK_BOUNDARY_LAYOUT_UNAVAILABLE:"+name);
         ControlClassWriter writer=new ControlClassWriter(loader,node);node.accept(writer);return writer.toByteArray();
+    }
+    private static String uniqueField(ClassNode node,String descriptor){
+        String result=null;for(FieldNode field:node.fields)if((field.access&Opcodes.ACC_STATIC)==0&&field.desc.equals(descriptor)){
+            if(result!=null)throw new IllegalStateException("NETWORK_FIELD_LAYOUT_UNAVAILABLE:"+node.name+":"+descriptor);result=field.name;
+        }if(result==null)throw new IllegalStateException("NETWORK_FIELD_LAYOUT_UNAVAILABLE:"+node.name+":"+descriptor);return result;
+    }
+    private static List<AbstractInsnNode> instructions(MethodNode method){return Arrays.stream(method.instructions.toArray()).filter(at->at.getOpcode()>=0).toList();}
+    /** Resolve names from the actual queue producer/consumer, including SRG images. */
+    private static String[] connectionLayout(ClassNode node){
+        String[] layout={uniqueField(node,"Ljava/util/Queue;"),null,null,null,null,null};
+        for(MethodNode method:node.methods)if((method.access&Opcodes.ACC_STATIC)==0){
+            for(AbstractInsnNode at:method.instructions.toArray())if(at instanceof MethodInsnNode invoke&&invoke.owner.equals("java/util/Queue")){
+                if(invoke.name.equals("add")&&invoke.desc.equals("(Ljava/lang/Object;)Z")&&method.desc.equals(SEND)){
+                    if(layout[1]!=null)throw new IllegalStateException("CONNECTION_PACKET_PUBLICATION_AMBIGUOUS");layout[1]=method.name;
+                }else if(invoke.name.equals("poll")&&invoke.desc.equals("()Ljava/lang/Object;")&&method.desc.equals("()V")){
+                    if(layout[2]!=null)throw new IllegalStateException("CONNECTION_PACKET_CONSUMPTION_AMBIGUOUS");layout[2]=method.name;
+                    for(AbstractInsnNode part:method.instructions.toArray()){
+                        if(part instanceof FieldInsnNode field&&field.getOpcode()==Opcodes.GETFIELD&&field.owner.equals(HOLDER)){
+                            if(field.desc.equals(PACKET))layout[4]=field.name;else if(field.desc.equals(LISTENER))layout[5]=field.name;
+                        }else if(part instanceof MethodInsnNode send&&send.owner.equals(CONNECTION)&&send.desc.equals(SEND)){
+                            if(layout[3]!=null)throw new IllegalStateException("CONNECTION_PACKET_DISPATCH_AMBIGUOUS");layout[3]=send.name;
+                        }
+                    }
+                }
+            }
+        }
+        for(String value:layout)if(value==null)throw new IllegalStateException("CONNECTION_PACKET_QUEUE_LAYOUT_UNAVAILABLE");return layout;
+    }
+    private static void connectionCalls(MethodNode method,String[] layout){
+        if(method.name.equals(layout[1])&&method.desc.equals(SEND)){
+            int count=0;for(AbstractInsnNode at:method.instructions.toArray())if(at instanceof MethodInsnNode invoke&&invoke.owner.equals("java/util/Queue")&&invoke.name.equals("add")&&invoke.desc.equals("(Ljava/lang/Object;)Z")){
+                method.instructions.insertBefore(at,new VarInsnNode(Opcodes.ALOAD,0));method.instructions.set(at,new MethodInsnNode(Opcodes.INVOKESTATIC,BRIDGE,"packetQueued","(Ljava/lang/Object;Ljava/lang/Object;Ljava/lang/Object;)Z",false));count++;
+            }if(count!=1)throw new IllegalStateException("CONNECTION_PACKET_PUBLICATION_MISSING");
+        }
+        if(method.name.equals(layout[2])&&method.desc.equals("()V")){
+            int polls=0,sends=0;List<AbstractInsnNode> code=instructions(method);
+            for(int i=0;i<code.size();i++)if(code.get(i) instanceof MethodInsnNode invoke){
+                if(invoke.owner.equals("java/util/Queue")&&invoke.name.equals("poll")&&invoke.desc.equals("()Ljava/lang/Object;")){
+                    if(i<1||!(code.get(i-1) instanceof FieldInsnNode field)||!field.owner.equals(CONNECTION)||!field.name.equals(layout[0]))throw new IllegalStateException("CONNECTION_PACKET_POLL_OWNER_UNAVAILABLE");
+                    method.instructions.insertBefore(invoke,new VarInsnNode(Opcodes.ALOAD,0));method.instructions.set(invoke,new MethodInsnNode(Opcodes.INVOKESTATIC,BRIDGE,"packetPoll","(Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;",false));polls++;
+                }else if(invoke.owner.equals(CONNECTION)&&invoke.name.equals(layout[3])&&invoke.desc.equals(SEND)){
+                    if(i<5||!(code.get(i-1) instanceof FieldInsnNode listener)||!listener.owner.equals(HOLDER)||!listener.name.equals(layout[5])
+                            ||!(code.get(i-2) instanceof VarInsnNode holder)||holder.getOpcode()!=Opcodes.ALOAD
+                            ||!(code.get(i-3) instanceof FieldInsnNode packet)||!packet.owner.equals(HOLDER)||!packet.name.equals(layout[4])
+                            ||!(code.get(i-4) instanceof VarInsnNode same)||same.getOpcode()!=Opcodes.ALOAD||same.var!=holder.var)throw new IllegalStateException("CONNECTION_PACKET_DISPATCH_PAIR_UNAVAILABLE");
+                    method.instructions.insertBefore(invoke,new VarInsnNode(Opcodes.ALOAD,holder.var));method.instructions.set(invoke,new MethodInsnNode(Opcodes.INVOKESTATIC,BRIDGE,"packetQueueSend","(Ljava/lang/Object;Ljava/lang/Object;Ljava/lang/Object;Ljava/lang/Object;)V",false));sends++;
+                }
+            }
+            if(polls!=1||sends!=1)throw new IllegalStateException("CONNECTION_PACKET_CONSUMPTION_MISSING");
+            int token=method.maxLocals++,error=method.maxLocals++;LabelNode start=new LabelNode(),end=new LabelNode(),complete=new LabelNode(),failed=new LabelNode();
+            for(AbstractInsnNode at:method.instructions.toArray())if(at.getOpcode()==Opcodes.RETURN)method.instructions.set(at,new JumpInsnNode(Opcodes.GOTO,complete));
+            InsnList enter=new InsnList();enter.add(new VarInsnNode(Opcodes.ALOAD,0));enter.add(new FieldInsnNode(Opcodes.GETFIELD,CONNECTION,layout[0],"Ljava/util/Queue;"));enter.add(new VarInsnNode(Opcodes.ALOAD,0));call(enter,"packetQueueEntering","(Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;");enter.add(new VarInsnNode(Opcodes.ASTORE,token));enter.add(start);method.instructions.insert(enter);
+            InsnList tail=new InsnList();tail.add(end);tail.add(complete);tail.add(new VarInsnNode(Opcodes.ALOAD,token));call(tail,"packetQueueExiting","(Ljava/lang/Object;)V");tail.add(new InsnNode(Opcodes.RETURN));
+            tail.add(failed);tail.add(new VarInsnNode(Opcodes.ASTORE,error));tail.add(new VarInsnNode(Opcodes.ALOAD,token));call(tail,"packetQueueExiting","(Ljava/lang/Object;)V");tail.add(new VarInsnNode(Opcodes.ALOAD,error));tail.add(new InsnNode(Opcodes.ATHROW));method.instructions.add(tail);method.tryCatchBlocks.add(new TryCatchBlockNode(start,end,failed,null));
+        }
+        if(method.name.equals(layout[3])&&method.desc.equals(SEND)){
+            int count=0;for(AbstractInsnNode at:method.instructions.toArray())if(at instanceof MethodInsnNode invoke&&invoke.owner.equals("io/netty/channel/EventLoop")&&invoke.name.equals("execute")&&invoke.desc.equals("(Ljava/lang/Runnable;)V")){
+                InsnList actual=new InsnList();actual.add(new VarInsnNode(Opcodes.ALOAD,0));actual.add(new VarInsnNode(Opcodes.ALOAD,1));actual.add(new VarInsnNode(Opcodes.ALOAD,2));method.instructions.insertBefore(at,actual);
+                method.instructions.set(at,new MethodInsnNode(Opcodes.INVOKESTATIC,BRIDGE,"packetDeferred","(Ljava/lang/Object;Ljava/lang/Runnable;Ljava/lang/Object;Ljava/lang/Object;Ljava/lang/Object;)V",false));count++;
+            }if(count!=1)throw new IllegalStateException("CONNECTION_PACKET_EVENTLOOP_HANDOFF_MISSING");
+        }
     }
     private static int[] locals(MethodNode method,Type[] args){int[] result=new int[args.length];int at=(method.access&Opcodes.ACC_STATIC)==0?1:0;for(int i=0;i<args.length;i++){result[i]=at;at+=args[i].getSize();}return result;}
     private static void call(InsnList code,String name,String desc){code.add(new MethodInsnNode(Opcodes.INVOKESTATIC,BRIDGE,name,desc,false));}
