@@ -1092,6 +1092,148 @@ JNIEXPORT void JNICALL Java_dev_ronova_pro_AuditFixCheck_hostModuleLoad0(JNIEnv 
     if(failure){load_thread_fail(env,failure);return;}
     fprintf(stderr,"HOST_MODULE_PRODUCER_AND_NEW_CHILD_SOURCES_NOTRUN no_actual_Mod_producer no_new_executable_child_DLL no_fabricated_sources; preobservation_loader_window_not_covered\n");
 }
+
+/* One independent memory phase. Every writable allocation and process handle
+ * belongs to this process; no controller, producer or raw backend is embedded. */
+typedef BOOL (WINAPI *LoadMemoryWrite)(HANDLE,LPVOID,LPCVOID,SIZE_T,SIZE_T*);
+typedef BOOL (WINAPI *LoadMemoryProtect)(LPVOID,SIZE_T,DWORD,PDWORD);
+typedef BOOL (WINAPI *LoadMemoryProtectEx)(HANDLE,LPVOID,SIZE_T,DWORD,PDWORD);
+extern LoadMemoryWrite __imp_WriteProcessMemory;
+extern LoadMemoryProtect __imp_VirtualProtect;
+extern LoadMemoryProtectEx __imp_VirtualProtectEx;
+typedef struct LoadMemoryEntries {
+    LoadMemoryWrite write[2];LoadMemoryProtect protect[2];LoadMemoryProtectEx protectEx[2];
+} LoadMemoryEntries;
+typedef struct LoadMemoryTarget {
+    void *address;SIZE_T bytes;DWORD protect;BYTE before[sizeof(uintptr_t)];
+} LoadMemoryTarget;
+static int load_memory_readonly(DWORD protect){
+    DWORD basic=protect&0xff;
+    return !(protect&PAGE_GUARD)&&(basic==PAGE_READONLY||basic==PAGE_EXECUTE_READ);
+}
+static int load_memory_target(LoadMemoryTarget *target,void *address,SIZE_T bytes,DWORD type,void *allocation){
+    MEMORY_BASIC_INFORMATION region={0};
+    if(!address||!bytes||bytes>sizeof(target->before)||VirtualQuery(address,&region,sizeof(region))!=sizeof(region)
+            ||region.State!=MEM_COMMIT||region.Type!=type||!load_memory_readonly(region.Protect)
+            ||allocation&&region.AllocationBase!=allocation)return 0;
+    uintptr_t offset=(uintptr_t)address-(uintptr_t)region.BaseAddress;
+    if(offset>=region.RegionSize||bytes>region.RegionSize-offset)return 0;
+    target->address=address;target->bytes=bytes;target->protect=region.Protect;memcpy(target->before,address,bytes);return 1;
+}
+static int load_memory_unchanged(const LoadMemoryTarget *target){
+    MEMORY_BASIC_INFORMATION region={0};
+    return VirtualQuery(target->address,&region,sizeof(region))==sizeof(region)&&region.State==MEM_COMMIT
+            &&region.Protect==target->protect&&!memcmp(target->address,target->before,target->bytes);
+}
+static int load_memory_scratch_protect(BYTE *scratch,DWORD expected){
+    MEMORY_BASIC_INFORMATION region={0};return VirtualQuery(scratch,&region,sizeof(region))==sizeof(region)
+            &&region.State==MEM_COMMIT&&region.Type==MEM_PRIVATE&&region.AllocationBase==scratch&&region.Protect==expected;
+}
+static const char *load_memory_normal(const LoadMemoryEntries *entries,HANDLE actual,BYTE *scratch){
+    static const BYTE patterns[2][8]={{0x31,0x72,0x19,0xa4,0x55,0x96,0x27,0xe8},{0x82,0x13,0x64,0xb5,0x26,0xd7,0x48,0x99}};
+    for(unsigned mode=0;mode<2;mode++){
+        HANDLE process=mode?actual:GetCurrentProcess();SIZE_T written=0,read=0;BYTE observed[8]={0};DWORD old=0;
+        /* The count is optional for WPM. No success LastError value is assumed. */
+        if(!entries->write[mode](process,scratch+16,patterns[mode],sizeof(patterns[mode]),mode?NULL:&written)
+                ||!mode&&written!=sizeof(patterns[mode])||memcmp(scratch+16,patterns[mode],sizeof(patterns[mode])))return "HOST_MEMORY_ORIGINAL_SCRATCH_WRITE";
+        if(!ReadProcessMemory(process,scratch+16,observed,sizeof(observed),&read)||read!=sizeof(observed)
+                ||memcmp(observed,patterns[mode],sizeof(observed)))return "HOST_MEMORY_ORIGINAL_SCRATCH_READ";
+        if(!entries->protect[mode](scratch+1,1,PAGE_READONLY,&old)||old!=PAGE_READWRITE||!load_memory_scratch_protect(scratch,PAGE_READONLY))return "HOST_MEMORY_ORIGINAL_PRIVATE_PROTECT";
+        if(!entries->protect[mode](scratch+1,1,PAGE_READWRITE,&old)||old!=PAGE_READONLY||!load_memory_scratch_protect(scratch,PAGE_READWRITE))return "HOST_MEMORY_ORIGINAL_PRIVATE_PROTECT_RESTORE";
+        if(!entries->protectEx[mode](process,scratch+2,1,PAGE_READONLY,&old)||old!=PAGE_READWRITE||!load_memory_scratch_protect(scratch,PAGE_READONLY))return "HOST_MEMORY_ORIGINAL_PRIVATE_PROTECT_EX";
+        if(!entries->protectEx[mode](process,scratch+2,1,PAGE_READWRITE,&old)||old!=PAGE_READONLY||!load_memory_scratch_protect(scratch,PAGE_READWRITE))return "HOST_MEMORY_ORIGINAL_PRIVATE_PROTECT_EX_RESTORE";
+        if(memcmp(scratch+16,patterns[mode],sizeof(patterns[mode])))return "HOST_MEMORY_PRIVATE_PROTECTION_CHANGED_DATA";
+    }
+    return NULL;
+}
+static const char *load_memory_write_refused(LoadMemoryWrite entry,HANDLE process,const LoadMemoryTarget *target,const char *stage){
+    SIZE_T written=(SIZE_T)-1;SetLastError(0x524e004d);
+    BOOL result=entry(process,target->address,target->before,target->bytes,&written);DWORD error=GetLastError();
+    fprintf(stderr,"HOST_MEMORY_WRITE_ACTUAL target=%s result=%d win32=%lu bytes=%llu\n",stage,result!=FALSE,(unsigned long)error,(unsigned long long)written);
+    /* Read-only OS failure alone is not a successful policy rejection. */
+    return !result&&error==ERROR_ACCESS_DENIED&&written==(SIZE_T)-1&&load_memory_unchanged(target)?NULL:stage;
+}
+static const char *load_memory_protect_refused(const LoadMemoryEntries *entries,HANDLE process,const LoadMemoryTarget *target,int extended,void *address,const char *stage){
+    DWORD old=0x524e004d;SetLastError(0x524e004d);
+    /* Even an unexpectedly accepted call cannot remove execute permission or
+     * enable a write: the requested protection is exactly the live original. */
+    BOOL result=extended?entries->protectEx[0](process,address,1,target->protect,&old):entries->protect[1](address,1,target->protect,&old);
+    DWORD error=GetLastError();fprintf(stderr,"HOST_MEMORY_PROTECT_ACTUAL target=%s extended=%d result=%d win32=%lu\n",stage,extended,result!=FALSE,(unsigned long)error);
+    return !result&&error==ERROR_ACCESS_DENIED&&load_memory_unchanged(target)?NULL:stage;
+}
+static const char *load_memory_outputs(const LoadMemoryEntries *entries,HANDLE actual,BYTE *scratch,const LoadMemoryTarget *output){
+    BYTE before=scratch[24],next=(BYTE)(before^0x5a);SetLastError(0x524e004d);
+    BOOL result=entries->write[0](GetCurrentProcess(),scratch+24,&next,1,(SIZE_T*)output->address);DWORD error=GetLastError();
+    if(result||error!=ERROR_ACCESS_DENIED||scratch[24]!=before||!load_memory_unchanged(output))return "HOST_MEMORY_PROTECTED_SIZE_T_OUTPUT";
+    /* The output alias is in the exact DLL's reserved DOS header, never in
+     * an instruction. No failure path attempts to write a replacement output. */
+    SetLastError(0x524e004d);result=entries->protect[0](scratch+24,1,PAGE_READONLY,(DWORD*)output->address);error=GetLastError();
+    if(result||error!=ERROR_ACCESS_DENIED||!load_memory_scratch_protect(scratch,PAGE_READWRITE)||!load_memory_unchanged(output))return "HOST_MEMORY_PROTECTED_DWORD_OUTPUT";
+    SetLastError(0x524e004d);result=entries->protectEx[1](actual,scratch+24,1,PAGE_READONLY,(DWORD*)output->address);error=GetLastError();
+    if(result||error!=ERROR_ACCESS_DENIED||!load_memory_scratch_protect(scratch,PAGE_READWRITE)||!load_memory_unchanged(output))return "HOST_MEMORY_PROTECTED_DWORD_OUTPUT_EX";
+    return NULL;
+}
+JNIEXPORT void JNICALL Java_dev_ronova_pro_AuditFixCheck_hostMemory0(JNIEnv *env,jclass check,jstring controlPath){
+    (void)check;const char *failure=NULL;HANDLE actual=NULL;BYTE *scratch=NULL;wchar_t *path=NULL;JavaVM *vm=NULL;
+    HMODULE kernel=GetModuleHandleW(L"kernel32.dll"),base=GetModuleHandleW(L"kernelbase.dll"),control=NULL,observed=NULL;
+    SYSTEM_INFO system={0};GetSystemInfo(&system);
+    LoadMemoryEntries entries={{__imp_WriteProcessMemory,kernel?(LoadMemoryWrite)GetProcAddress(kernel,"WriteProcessMemory"):NULL},
+        {__imp_VirtualProtect,kernel?(LoadMemoryProtect)GetProcAddress(kernel,"VirtualProtect"):NULL},
+        {__imp_VirtualProtectEx,kernel?(LoadMemoryProtectEx)GetProcAddress(kernel,"VirtualProtectEx"):NULL}};
+    LoadSame same=base?(LoadSame)GetProcAddress(base,"CompareObjectHandles"):NULL;
+    for(unsigned mode=0;mode<2;mode++)if(!load_private_entry((void*)entries.write[mode])||!load_private_entry((void*)entries.protect[mode])||!load_private_entry((void*)entries.protectEx[mode])){
+        failure="HOST_MEMORY_ACTUAL_IMPORT_OR_GPA_NOT_CONTROLLED";goto done;
+    }
+    if(!same||!DuplicateHandle(GetCurrentProcess(),GetCurrentProcess(),GetCurrentProcess(),&actual,
+            PROCESS_VM_OPERATION|PROCESS_VM_WRITE|PROCESS_VM_READ,FALSE,0)||!same(GetCurrentProcess(),actual)){
+        failure="HOST_MEMORY_ACTUAL_VM_RIGHTS_ONLY_CURRENT_ALIAS";goto done;
+    }
+    if(system.dwPageSize<64||(scratch=VirtualAlloc(NULL,system.dwPageSize,MEM_COMMIT|MEM_RESERVE,PAGE_READWRITE))==NULL){failure="HOST_MEMORY_PRIVATE_SCRATCH_ALLOCATION";goto done;}
+    failure=load_memory_normal(&entries,actual,scratch);if(failure)goto done;
+    if(!controlPath){failure="HOST_MEMORY_ACTUAL_CONTROL_PATH";goto done;}
+    jsize length=(*env)->GetStringLength(env,controlPath);path=calloc((size_t)length+1,sizeof(*path));
+    if(!path){failure="HOST_MEMORY_CONTROL_PATH_ALLOCATION";goto done;}
+    (*env)->GetStringRegion(env,controlPath,0,length,(jchar*)path);if((*env)->ExceptionCheck(env))goto done;
+    control=GetModuleHandleW(path);free(path);path=NULL;
+    void *code=control?(void*)GetProcAddress(control,"Java_dev_ronova_pro_bootstrap_NativeControl_abi"):NULL;
+    LoadMemoryTarget codeTarget={0},vmTarget={0},thunkTarget={0},outputTarget={0};
+    if(!code||!GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS|GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,(LPCSTR)code,&observed)
+            ||observed!=control||!load_memory_target(&codeTarget,code,1,MEM_IMAGE,control)){
+        failure="HOST_MEMORY_EXACT_CONTROL_DLL_CODE";goto done;
+    }
+    if((*env)->GetJavaVM(env,&vm)!=JNI_OK||!vm||!*vm||!(*vm)->GetEnv
+            ||!load_memory_target(&vmTarget,(void*)&(*vm)->GetEnv,sizeof((*vm)->GetEnv),MEM_PRIVATE,(void*)*vm)){
+        failure="HOST_MEMORY_ACTUAL_VM_SHADOW_GETENV_SLOT";goto done;
+    }
+    if(!load_memory_target(&thunkTarget,(void*)entries.write[1],1,MEM_PRIVATE,NULL)){failure="HOST_MEMORY_ACTUAL_GPA_HOOK_THUNK";goto done;}
+    IMAGE_DOS_HEADER *dos=(IMAGE_DOS_HEADER*)control;
+    if(dos->e_magic!=IMAGE_DOS_SIGNATURE||(uintptr_t)&dos->e_res2[0]%sizeof(SIZE_T)
+            ||!load_memory_target(&outputTarget,&dos->e_res2[0],sizeof(SIZE_T),MEM_IMAGE,control)){
+        failure="HOST_MEMORY_EXACT_READONLY_CONTROL_OUTPUT_AREA";goto done;
+    }
+    failure=load_memory_write_refused(entries.write[0],GetCurrentProcess(),&codeTarget,"HOST_MEMORY_CONTROL_CODE_SAME_VALUE_WRITE");if(failure)goto done;
+    failure=load_memory_write_refused(entries.write[1],actual,&vmTarget,"HOST_MEMORY_VM_SHADOW_SAME_VALUE_WRITE");if(failure)goto done;
+    failure=load_memory_write_refused(entries.write[0],actual,&thunkTarget,"HOST_MEMORY_HOOK_THUNK_SAME_VALUE_WRITE");if(failure)goto done;
+    failure=load_memory_protect_refused(&entries,GetCurrentProcess(),&codeTarget,0,codeTarget.address,"HOST_MEMORY_CONTROL_CODE_PROTECT");if(failure)goto done;
+    /* The address is outside the public VM table structure but in its actual
+     * committed page. A byte-only overlap check would miss VirtualProtect's effect. */
+    uintptr_t vmPage=(uintptr_t)*vm-(uintptr_t)*vm%system.dwPageSize;
+    void *tail=(void*)(vmPage+system.dwPageSize-1);MEMORY_BASIC_INFORMATION region={0};
+    if((uintptr_t)tail<(uintptr_t)*vm+sizeof(**vm)||VirtualQuery(tail,&region,sizeof(region))!=sizeof(region)
+            ||region.State!=MEM_COMMIT||region.AllocationBase!=(void*)*vm||region.Protect!=vmTarget.protect){
+        failure="HOST_MEMORY_ACTUAL_SHADOW_PAGE_TAIL";goto done;
+    }
+    failure=load_memory_protect_refused(&entries,actual,&vmTarget,1,tail,"HOST_MEMORY_SHADOW_SAME_PAGE_TAIL_PROTECT_EX");if(failure)goto done;
+    failure=load_memory_protect_refused(&entries,actual,&thunkTarget,0,thunkTarget.address,"HOST_MEMORY_HOOK_THUNK_PROTECT");if(failure)goto done;
+    failure=load_memory_outputs(&entries,actual,scratch,&outputTarget);
+done:
+    {
+        DWORD failureError=GetLastError();free(path);
+        if(scratch&&!VirtualFree(scratch,0,MEM_RELEASE)&&!failure){failure="HOST_MEMORY_PRIVATE_SCRATCH_RELEASE";failureError=GetLastError();}
+        if(actual&&!CloseHandle(actual)&&!failure){failure="HOST_MEMORY_CURRENT_ALIAS_CLOSE";failureError=GetLastError();}
+        if(failure){fprintf(stderr,"HOST_MEMORY_FAILED stage=%s win32=%lu\n",failure,(unsigned long)failureError);load_thread_fail(env,failure);}
+    }
+}
 JNIEXPORT void JNICALL Java_dev_ronova_pro_AuditFixCheck_hostThreadCreate0(JNIEnv *env,jclass check,jclass type,jobject payload){
     (void)check;JavaVM *vm=NULL;jclass actual=payload?(*env)->GetObjectClass(env,payload):NULL;
     int correct=actual&&type&&(*env)->IsSameObject(env,actual,type);if(actual)(*env)->DeleteLocalRef(env,actual);

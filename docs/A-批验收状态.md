@@ -1,19 +1,18 @@
 # Ronova Pro 当前进度
 
-## 2026-10-14：C 强度接续——JNI 发布、异常来源、FreeLibrary 防拆与 EA 写拦截
+## 2026-10-14：C 强度接续——Windows 原生内存防拆入口
 
-接续 `fa4e380`，Java ABI59 / Native ABI58 / Storage3 / Journal6。用户已明确暂停 Ronova 自身外观美化、暂不注册武器；目标 Mod 的渲染/UI 控制仍按强度功能继续。本工作包四条具体漏控链已写齐并集中构建，C/B 整体仍未完成，强度收口目标保持执行。
+接续 `96faf3e`，Java ABI60 / Native ABI59 / Storage3 / Journal6。自身外观继续暂缓，武器不注册，目标 Mod 的渲染/UI 控制仍在强度范围；完整 C/B 尚未收口。
 
-- JNI 防拆：SetJNIFunctionTable 校验后提交同一份私有 incoming 快照，消除再读 caller 可变表的竞态窗口；未启用 guarded table 时继续原调用。局部快照可以按原合同提交，VM 会复制表，见 [JVMTI SetJNIFunctionTable](https://docs.oracle.com/en/java/javase/17/docs/specs/jvmti.html#SetJNIFunctionTable)。没有放宽调用者、环境或受保护 slot 条件。
-- 异常来源：原异常表指向专用 trampoline，再调用既有 executionCaught 并跳入原 handler。普通 CFG 跳入共享 handler Label 时保留真实来源栈；catch 顺序/type/原范围、业务 ordinal、构造规则和准确调用位置保留。沿原非构造 synthetic cleanup 覆盖观察器异常，没有另建通用异常体系。
-- DLL 防拆与停组：普通 FreeLibrary 的已观察导入/动态入口现在经过完整来源和真实当前作用域准入；heap/受限 callback 和已停来源按原条件处理。准确已捕获 control DLL HMODULE 拒绝外部释放，不按路径/名字或屏蔽 resource tags 判断。获准动作只调用原 API 一次，保留原 HMODULE/BOOL/即时 LastError；release frame 强来源与 borrower 沿既有 daemon 清理，自有 pin 走独立实际 FreeLibrary。hostState[26] 只纳入真实未释放的来源 hold，不推断 app 引用或最终 unmap。
-- Windows 文件防护：注册实际 IRP_MJ_SET_EA，将 FILE_WRITE_EA 新打开准入和准确 SET_EA 效果纳入已有 DENY_WRITE，沿真实 actor/FileObject/文件 ID 拒绝。未读写 EA 缓冲、未扩大协议或替代未知旧别名/section/kernel/paging 条件，见 [微软 SET_EA 操作合同](https://learn.microsoft.com/en-us/windows-hardware/drivers/ifs/flt-parameters-for-irp-mj-set-ea)。
+- 已观察映像的 WriteProcessMemory、VirtualProtect、VirtualProtectEx 真实 IAT 与 GetProcAddress 返回接入当前来源和停止准入。进程入口用 SAME_ACCESS 私有 DuplicateHandle 固定真实对象，CompareObjectHandles 比较当前进程，不依赖 PID 查询权限；原句柄并发关闭/复用不能重定向这次调用。获准底层只调用一次，保留其他参数、BOOL、即时 LastError 与真实输出，末尾只归还本方副本。
+- 当前进程目标按准确闭区间检查；权限变更按实际整页范围检查。本地 SIZE_T/DWORD 输出地址即便目标进程不同也先检查，拒绝不写输出。保护范围来自真实控制 DLL pin、已发布 Binding、VM/JVMTI shadow、callback 版本/跳板/控制元数据及来源链、Host 的实际 published import/load/release 记录和 live IAT、当前同步 heap walking；不扫描通用 malloc 或猜测 VM 私有布局。不同目录分锁；受限回调使用 Try，忙/关闭保持未知，已 disposed 环境和已释放 IAT 槽不沿历史地址保护。
+- 自有控制表/跳板安装改走私有原 API，未给外部回调新增 bypass 资格。线程列表的 caller results 在任何实际线程动作前检查；原内存恢复仅在目标范围明确无重叠时走原 WPM，读回确认实际结果，忙/拒绝仍待处理。DLL 受限回调跳过会阻塞的 delay-slot 提升，保留实际返回入口并沿原当前来源守卫处理。
 
-实际结果：主包 `build-c-java59-native58-strength-20261014.log` PASS 28秒。改动驱动官方 WDK/SDK+Zig/LLD 仅 SYS 编译链接 PASS，`build-c-driver58-ea-20261014.log`，SYS 37888字节；未重建未改的管理器，未正式 MSBuild、签名、安装/加载。既有夹具增量编译通过，`c-strength58-jni-release-20261014.log` 独立 JVM 实际退出0：真实当前 JNI 表提交被接受、之后 caller 副本变更不影响 VM、非法 DefineClass slot 被拒且表不变、真实 Dispose；四类 LoadLibrary 原结果/193错误与 resource tag1/2 正常释放；FreeLibrary 实际 import/GPA 成功 BOOL1、原 LastError 标记保留，NULL 返回 BOOL0/126，准确控制 DLL 在两入口均返回 BOOL0/5。每次成功仅归还实际申请的应用引用，拒绝目标没有补做 FreeLibrary。没有声称做过并发竞态实战或旧 VM 表屏障。
+实际结果：首次主包构建 PASS 31秒，`build-c-java60-native59-host-memory-20261014.log`；收尾修正受限回调后最终主包 PASS 16秒，`build-c-java60-native59-host-memory-final-20261014.log`，最终候选取后者。既有夹具增量编译 PASS，`compile-c-host-memory59-20261014.log`。新增独立 memory phase 实际 JVM 退出0，`c-host-memory59-20261014.log`：真实 IAT/GPA、当前进程 pseudo handle 与仅 VM_OPERATION/VM_WRITE/VM_READ 的真实句柄；自有 VirtualAlloc 写入/读回和 RW/RO 恢复通过；准确控制代码、VM GetEnv shadow 槽与真实 hook 跳板同值写均返回 BOOL0/5，written sentinel 保留；控制页及 shadow 结构外同页尾权限修改均拒绝，三类本地输出别名拒绝且 scratch 状态保持。没有改写控制指令或伪造 producer/权限。
 
-真实 Mod 的 stopped/cache/共享来源与 DLL detach 后继退役仍 NOTRUN；新异常来源路径缺少真实 source-bearing 现有独立夹具，未伪造 producer/权限；EA 内核运行、当前游戏与保存重启亦 NOTRUN。未重跑旧定义/heap/thread/Host 全矩阵。FreeLibraryAndExitThread 非返回入口、预观察 DllMain/TLS、原 VM 缓存/裸原生写者、应用引用归属与最终 unmap，以及旧内核映射等缺口仍明确保留。
+真实目标 Mod 停止组、共享来源、受限 DLL/heap 回调竞争及新线程 results 拒绝的实机效果仍 NOTRUN；独立夹具不能替代这些结果。CPU 直接存储、原始系统调用、未观察原生入口/旧缓存、未观察代码主动关闭本方私有句柄、特殊 VM IAT/JNI 实表未登记范围仍未闭合。未重跑旧矩阵；本候选游戏与保存重启未运行，旧74项 file binding pending 不因此算通过。驱动/管理器本轮未改、未重建，沿用 Native58 EA 包的未签名 SYS 37888字节和此前管理器190464字节，未签名/安装/加载。
 
-本地候选 `distribution/candidate-c-java59-native58-strength-wip-20261014`，Core JAR 2406766字节，附匹配 prelaunch 和本次未签名 SYS，管理器/INF/协议沿用未改内容。包 `distribution/Ronova-Pro-C-Strength-WIP-Java59-Native58-20261014.zip` 含有效源码和匹配产物，不带旧布局、缓存、游戏存档或原始日志；旧包保留。源码与简要实际结果同步 Git，二进制留本地。
+本地候选 `distribution/candidate-c-java60-native59-memory-wip-20261014`，Core JAR 2409945字节，prelaunch 22440字节。源码与匹配产物包为 `distribution/Ronova-Pro-C-Memory-WIP-Java60-Native59-20261014.zip`，旧包保留；同步源码和简要实际结果到 Git，二进制留本地。强度收口目标继续执行。
 
 ---
 ## 2026-10-13：C 接续——54/51 用户态接线与自编 Windows 驱动源码

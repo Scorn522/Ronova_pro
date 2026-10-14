@@ -532,9 +532,9 @@ static int native_memory_restore_range(NativeMemoryAllocation *allocation,Native
     const unsigned char *expected=head->image->after+(size_t)(range->start-head->image->start);
     uint64_t address=allocation->address+range->start;ready=native_memory_read(address,current,length);
     if(ready&&memcmp(current,incoming,length)!=0){
-        ready=memcmp(current,expected,length)==0;
+        ready=memcmp(current,expected,length)==0&&host_memory_range((void*)(uintptr_t)address,length,0,1)==0;
         if(ready){
-            DWORD error=GetLastError();SIZE_T written=0;WriteProcessMemory(GetCurrentProcess(),(void*)(uintptr_t)address,incoming,length,&written);SetLastError(error);
+            DWORD error=GetLastError();SIZE_T written=0;host_real_write_process_memory(GetCurrentProcess(),(void*)(uintptr_t)address,incoming,length,&written);SetLastError(error);
             ready=native_memory_read(address,current,length)&&memcmp(current,incoming,length)==0;
             if(!ready)native_memory_unmapped(head->sources);
         }

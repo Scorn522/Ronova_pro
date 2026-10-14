@@ -112,7 +112,7 @@ static void *native_tooling_extension_entry(NativeToolingSlot *slot,const Native
     unsigned char *unwind=page+4080;unwind[0]=1;unwind[1]=7;unwind[2]=2;unwind[3]=0;unwind[4]=7;unwind[5]=1;
     unsigned short scaled=(unsigned short)(frame/8);memcpy(unwind+6,&scaled,2);
     DWORD previous;
-    if(!VirtualProtect(page,4096,PAGE_EXECUTE_READ,&previous)||!RtlAddFunctionTable(&slot->unwind,1,(DWORD64)(uintptr_t)page)){
+    if(!host_real_virtual_protect(page,4096,PAGE_EXECUTE_READ,&previous)||!RtlAddFunctionTable(&slot->unwind,1,(DWORD64)(uintptr_t)page)){
         VirtualFree(page,0,MEM_RELEASE);return NULL;
     }
     FlushInstructionCache(GetCurrentProcess(),page,4096);return page;

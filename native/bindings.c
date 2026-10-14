@@ -131,6 +131,9 @@ static int host_module_binding_enter(Binding*);
 static void host_module_binding_leave(Binding*);
 static int host_capture_caller(NativeThread*,void*,OwnerLink**);
 static HMODULE native_control_image(void);
+static int native_control_range(uintptr_t,uintptr_t,int);
+static BOOL host_real_virtual_protect(LPVOID,SIZE_T,DWORD,PDWORD);
+static BOOL host_real_write_process_memory(HANDLE,LPVOID,LPCVOID,SIZE_T,SIZE_T*);
 static NativeThread *native_thread(void) {
     if(native_tls==TLS_OUT_OF_INDEXES)return NULL;NativeThread *state=(NativeThread*)TlsGetValue(native_tls);
     if(!state){state=(NativeThread*)calloc(1,sizeof(*state));if(state){state->storageOwned=1;if(!TlsSetValue(native_tls,state)){free(state);return NULL;}}}return state;
@@ -288,7 +291,7 @@ static void *native_entry(Binding *binding) {
     jump=(uint32_t)(c.at-(finish+4));memcpy(finish,&jump,4);nb(&c,0x48);nb(&c,0x81);nb(&c,0xc4);nw(&c,frame);nb(&c,0xc3);
     binding->unwind.BeginAddress=0;binding->unwind.EndAddress=(DWORD)(c.at-page);binding->unwind.UnwindData=capacity-16;
     unsigned char *unwind=page+capacity-16;unwind[0]=1;unwind[1]=7;unwind[2]=2;unwind[3]=0;unwind[4]=7;unwind[5]=1;unsigned short scaled=(unsigned short)(frame/8);memcpy(unwind+6,&scaled,2);
-    DWORD previous;if(!VirtualProtect(page,capacity,PAGE_EXECUTE_READ,&previous)||!RtlAddFunctionTable(&binding->unwind,1,(DWORD64)(uintptr_t)page)){VirtualFree(page,0,MEM_RELEASE);return NULL;}
+    DWORD previous;if(!host_real_virtual_protect(page,capacity,PAGE_EXECUTE_READ,&previous)||!RtlAddFunctionTable(&binding->unwind,1,(DWORD64)(uintptr_t)page)){VirtualFree(page,0,MEM_RELEASE);return NULL;}
     FlushInstructionCache(GetCurrentProcess(),page,capacity);return page;
 }
 #include "host_kernel.c"
@@ -1139,7 +1142,7 @@ static void *native_tooling_entry(NativeToolingSlot *slot,void *target,unsigned 
     unsigned char *unwind=page+4080;unwind[0]=1;unwind[1]=7;unwind[2]=2;unwind[3]=0;unwind[4]=7;unwind[5]=1;
     unsigned short scaled=(unsigned short)(frame/8);memcpy(unwind+6,&scaled,2);
     DWORD previous;
-    if(!VirtualProtect(page,4096,PAGE_EXECUTE_READ,&previous)||!RtlAddFunctionTable(&slot->unwind,1,(DWORD64)(uintptr_t)page)){
+    if(!host_real_virtual_protect(page,4096,PAGE_EXECUTE_READ,&previous)||!RtlAddFunctionTable(&slot->unwind,1,(DWORD64)(uintptr_t)page)){
         VirtualFree(page,0,MEM_RELEASE);return NULL;
     }
     FlushInstructionCache(GetCurrentProcess(),page,4096);return page;
@@ -1707,6 +1710,10 @@ static jvmtiError native_tooling_thread_list(jvmtiEnv *api,jint count,const jthr
     if(record->own&&!native_tooling_internal(caller)||native_tooling_stopped(native_tooling_jni(),caller))return native_tooling_error(JVMTI_ERROR_ACCESS_DENIED);
     if(count<0)return JVMTI_ERROR_ILLEGAL_ARGUMENT;if(!threads||!results)return JVMTI_ERROR_NULL_POINTER;
     if(!count)return resume?record->original->ResumeThreadList(api,count,threads,results):record->original->SuspendThreadList(api,count,threads,results);
+    /* This destination is supplied by the caller. Check it before applying any
+     * thread effect; our private original API is not an external write bypass. */
+    int protected=host_memory_range(results,(size_t)count*sizeof(*results),0,native_tooling_restricted());
+    if(protected)return native_tooling_error(protected>0?JVMTI_ERROR_ACCESS_DENIED:JVMTI_ERROR_NOT_AVAILABLE);
     jthread *snapshot=(jthread*)calloc((size_t)count,sizeof(*snapshot)),*allowed=(jthread*)calloc((size_t)count,sizeof(*allowed));
     NativeThreadFrame *frames=(NativeThreadFrame*)calloc((size_t)count,sizeof(*frames));jvmtiError *effects=(jvmtiError*)calloc((size_t)count,sizeof(*effects));
     if(!snapshot||!allowed||!frames||!effects){free(snapshot);free(allowed);free(frames);free(effects);return JVMTI_ERROR_OUT_OF_MEMORY;}
@@ -1721,7 +1728,7 @@ static jvmtiError native_tooling_thread_list(jvmtiEnv *api,jint count,const jthr
         if(!partial)result=JVMTI_ERROR_OUT_OF_MEMORY;
         else {result=selected?(resume?record->original->ResumeThreadList(api,selected,allowed,partial):record->original->SuspendThreadList(api,selected,allowed,partial)):JVMTI_ERROR_ACCESS_DENIED;
             jint at=0;for(jint i=0;i<count;i++)if(effects[i]==JVMTI_ERROR_NONE)effects[i]=result==JVMTI_ERROR_NONE?partial[at++]:result;
-            SIZE_T written=0;if(!WriteProcessMemory(GetCurrentProcess(),results,effects,(size_t)count*sizeof(*effects),&written)||written!=(size_t)count*sizeof(*effects))result=JVMTI_ERROR_ILLEGAL_ARGUMENT;
+            SIZE_T written=0;if(!host_real_write_process_memory(GetCurrentProcess(),results,effects,(size_t)count*sizeof(*effects),&written)||written!=(size_t)count*sizeof(*effects))result=JVMTI_ERROR_ILLEGAL_ARGUMENT;
             free(partial);}
     }
     for(jint i=0;i<count;i++)native_tooling_thread_end_call(env,&frames[i],effects[i]);
@@ -1745,10 +1752,11 @@ static jvmtiError JNICALL native_tooling_run_agent(jvmtiEnv *api,jthread thread,
     if(result!=JVMTI_ERROR_NONE)native_tooling_slot_retire(slot);return result;
 }
 #include "tooling_extensions.c"
+#include "control_ranges.c"
 static int native_tooling_exchange(void *volatile *slot,void *expected,void *replacement){
     MEMORY_BASIC_INFORMATION region;if(!VirtualQuery((void*)slot,&region,sizeof(region))||region.State!=MEM_COMMIT||(region.Protect&(PAGE_GUARD|PAGE_NOACCESS)))return 0;
-    DWORD previous=0;if(!VirtualProtect((void*)slot,sizeof(void*),PAGE_READWRITE,&previous))return 0;
-    void *actual=InterlockedCompareExchangePointer(slot,replacement,expected);DWORD ignored;int restored=VirtualProtect((void*)slot,sizeof(void*),previous,&ignored);
+    DWORD previous=0;if(!host_real_virtual_protect((void*)slot,sizeof(void*),PAGE_READWRITE,&previous))return 0;
+    void *actual=InterlockedCompareExchangePointer(slot,replacement,expected);DWORD ignored;int restored=host_real_virtual_protect((void*)slot,sizeof(void*),previous,&ignored);
     if(!restored)InterlockedIncrement(&native_tooling_failures);return actual==expected;
 }
 static int native_tooling_observe(jvmtiEnv *api,JNIEnv *env,void *caller,int own){
@@ -1780,7 +1788,7 @@ static int native_tooling_observe(jvmtiEnv *api,JNIEnv *env,void *caller,int own
     TOOLING_EFFECT(SetLocalObject) TOOLING_EFFECT(SetLocalInt) TOOLING_EFFECT(SetLocalLong) TOOLING_EFFECT(SetLocalFloat) TOOLING_EFFECT(SetLocalDouble)
     TOOLING_EFFECT(FollowReferences) TOOLING_EFFECT(IterateThroughHeap) TOOLING_EFFECT(IterateOverObjectsReachableFromObject) TOOLING_EFFECT(IterateOverReachableObjects) TOOLING_EFFECT(IterateOverHeap) TOOLING_EFFECT(IterateOverInstancesOfClass)
 #undef TOOLING_EFFECT
-    DWORD previous;if(!VirtualProtect(shadow,sizeof(*shadow),PAGE_READONLY,&previous)){if(record->sourceLease)native_original.DeleteGlobalRef(env,record->sourceLease);native_owner_links_free(record->owners);free(record);VirtualFree(shadow,0,MEM_RELEASE);return 0;}
+    DWORD previous;if(!host_real_virtual_protect(shadow,sizeof(*shadow),PAGE_READONLY,&previous)){if(record->sourceLease)native_original.DeleteGlobalRef(env,record->sourceLease);native_owner_links_free(record->owners);free(record);VirtualFree(shadow,0,MEM_RELEASE);return 0;}
     AcquireSRWLockExclusive(&native_tooling_records);record->next=native_tooling_environments;native_tooling_environments=record;ReleaseSRWLockExclusive(&native_tooling_records);
     if(!native_tooling_exchange((void *volatile*)api,(void*)original,shadow)){InterlockedExchange(&record->closing,1);InterlockedIncrement(&native_tooling_failures);return 0;}return 1;
 }
@@ -1845,7 +1853,7 @@ static int native_tooling_install(JavaVM *vm,jvmtiEnv *api){
     *shadow=*original;shadow->GetEnv=native_tooling_getenv;
     shadow->AttachCurrentThread=native_vm_attach;shadow->AttachCurrentThreadAsDaemon=native_vm_attach_daemon;
     shadow->DetachCurrentThread=native_vm_detach;DWORD previous;
-    if(!VirtualProtect(shadow,sizeof(*shadow),PAGE_READONLY,&previous)){VirtualFree(shadow,0,MEM_RELEASE);return 0;}
+    if(!host_real_virtual_protect(shadow,sizeof(*shadow),PAGE_READONLY,&previous)){VirtualFree(shadow,0,MEM_RELEASE);return 0;}
     if(!GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS,(LPCSTR)native_tooling_getenv,&native_tooling_pin)){VirtualFree(shadow,0,MEM_RELEASE);return 0;}
     native_tooling_image_begin=(uintptr_t)native_tooling_pin;
     const IMAGE_DOS_HEADER *toolingDos=(const IMAGE_DOS_HEADER*)native_tooling_pin;

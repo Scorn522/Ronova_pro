@@ -24,7 +24,8 @@ enum {
     HOST_CREATE_THREAD=17,HOST_CREATE_REMOTE_THREAD=18,HOST_CREATE_REMOTE_THREAD_EX=19,
     HOST_BEGIN_THREAD=20,HOST_BEGIN_THREAD_EX=21,
     HOST_LOAD_LIBRARY_A=22,HOST_LOAD_LIBRARY_W=23,HOST_LOAD_LIBRARY_EX_A=24,HOST_LOAD_LIBRARY_EX_W=25,
-    HOST_FREE_LIBRARY=26,HOST_KIND_COUNT=27
+    HOST_FREE_LIBRARY=26,HOST_WRITE_PROCESS_MEMORY=27,HOST_VIRTUAL_PROTECT=28,HOST_VIRTUAL_PROTECT_EX=29,
+    HOST_KIND_COUNT=30
 };
 static int host_is_create(int kind){return kind==HOST_CREATE_W||kind==HOST_CREATE_A
         ||kind>=HOST_CREATE_USER_W&&kind<=HOST_CREATE_LOGON_W;}
@@ -45,6 +46,26 @@ static BOOL host_real_free_library(HMODULE module){
     }
     if(!actual){SetLastError(ERROR_PROC_NOT_FOUND);return FALSE;}
     SetLastError(incoming);return ((BOOL (WINAPI*)(HMODULE))actual)(module);
+}
+static void *host_real_memory_target(int kind,const char *name){
+    void *actual=__atomic_load_n(&host_windows_api[kind],__ATOMIC_ACQUIRE);
+    if(!actual){HMODULE kernel=GetModuleHandleW(L"kernel32.dll");
+        HostGetProcAddress resolve=__atomic_load_n(&host_windows_resolver,__ATOMIC_ACQUIRE);
+        actual=kernel?(void*)(resolve?resolve(kernel,name):GetProcAddress(kernel,name)):NULL;
+        if(actual)__atomic_store_n(&host_windows_api[kind],actual,__ATOMIC_RELEASE);
+    }return actual;
+}
+/* Only Ronova's own table/code installation calls these original exports.
+ * An external callback never acquires a TLS flag or another bypass identity. */
+static BOOL host_real_virtual_protect(LPVOID address,SIZE_T size,DWORD protection,PDWORD oldProtection){
+    DWORD incoming=GetLastError();void *actual=host_real_memory_target(HOST_VIRTUAL_PROTECT,"VirtualProtect");
+    if(!actual){SetLastError(ERROR_PROC_NOT_FOUND);return FALSE;}
+    SetLastError(incoming);return ((BOOL (WINAPI*)(LPVOID,SIZE_T,DWORD,PDWORD))actual)(address,size,protection,oldProtection);
+}
+static BOOL host_real_write_process_memory(HANDLE process,LPVOID address,LPCVOID buffer,SIZE_T size,SIZE_T *written){
+    DWORD incoming=GetLastError();void *actual=host_real_memory_target(HOST_WRITE_PROCESS_MEMORY,"WriteProcessMemory");
+    if(!actual){SetLastError(ERROR_PROC_NOT_FOUND);return FALSE;}
+    SetLastError(incoming);return ((BOOL (WINAPI*)(HANDLE,LPVOID,LPCVOID,SIZE_T,SIZE_T*))actual)(process,address,buffer,size,written);
 }
 static BOOL host_real_close(HANDLE handle){
     void *actual=__atomic_load_n(&host_windows_api[HOST_CLOSE],__ATOMIC_ACQUIRE);
@@ -861,6 +882,7 @@ static uint64_t host_native_handle(HostImport *entry,void *caller,uintptr_t *arg
 #include "host_crt_thread_creation.c"
 #include "host_thread_workers.c"
 #include "host_module_admission.c"
+#include "host_memory.c"
 static uint64_t host_native_dispatch(HostImport *entry,void *caller,uintptr_t *arguments){
     if(entry->kind==HOST_RESOLVE)return (uintptr_t)host_native_resolve((HMODULE)arguments[0],(LPCSTR)arguments[1],entry,caller);
     if(host_is_create(entry->kind))return host_native_create(entry,caller,arguments);
@@ -870,6 +892,7 @@ static uint64_t host_native_dispatch(HostImport *entry,void *caller,uintptr_t *a
     if(host_is_handle(entry->kind))return host_native_handle(entry,caller,arguments);
     if(host_is_module_load(entry->kind))return host_native_module_load(entry,caller,arguments);
     if(entry->kind==HOST_FREE_LIBRARY)return host_native_module_release(entry,caller,arguments);
+    if(host_is_memory_write(entry->kind))return host_native_memory(entry,caller,arguments);
     SetLastError(ERROR_INVALID_FUNCTION);return 0;
 }
 static uint64_t host_native_call(HostImport *entry,void *caller,uintptr_t *arguments){
@@ -902,6 +925,8 @@ static unsigned host_import_arguments(int kind){
         case HOST_BEGIN_THREAD_EX:return 6;
         case HOST_LOAD_LIBRARY_A:case HOST_LOAD_LIBRARY_W:return 1;
         case HOST_LOAD_LIBRARY_EX_A:case HOST_LOAD_LIBRARY_EX_W:return 3;
+        case HOST_WRITE_PROCESS_MEMORY:case HOST_VIRTUAL_PROTECT_EX:return 5;
+        case HOST_VIRTUAL_PROTECT:return 4;
         case HOST_DUPLICATE:return 7;
         case HOST_HANDLE_FLAGS:case HOST_OPEN_PROCESS:case HOST_OPEN_THREAD:return 3;
         case HOST_CLOSE:case HOST_RESUME_THREAD:case HOST_SUSPEND_THREAD:case HOST_FREE_LIBRARY:return 1;
@@ -926,15 +951,15 @@ static void *host_import_entry(HostImport *entry){
     unsigned char *unwind=page+capacity-16;unwind[0]=1;unwind[1]=7;unwind[2]=2;unwind[3]=0;unwind[4]=7;unwind[5]=1;
     unsigned short scaled=(unsigned short)(frame/8);memcpy(unwind+6,&scaled,2);
     DWORD protection;
-    if(!VirtualProtect(page,capacity,PAGE_EXECUTE_READ,&protection)||!RtlAddFunctionTable(&entry->unwind,1,(DWORD64)(uintptr_t)page)){
+    if(!host_real_virtual_protect(page,capacity,PAGE_EXECUTE_READ,&protection)||!RtlAddFunctionTable(&entry->unwind,1,(DWORD64)(uintptr_t)page)){
         VirtualFree(page,0,MEM_RELEASE);return NULL;
     }
     FlushInstructionCache(GetCurrentProcess(),page,capacity);entry->slotOwned=entry->slot!=NULL;return page;
 }
 static int host_exchange_import(HostImport *entry,void *expected,void *replacement){
-    DWORD protection;if(!VirtualProtect((void*)entry->slot,sizeof(*entry->slot),PAGE_READWRITE,&protection))return 0;
+    DWORD protection;if(!host_real_virtual_protect((void*)entry->slot,sizeof(*entry->slot),PAGE_READWRITE,&protection))return 0;
     void *old=InterlockedCompareExchangePointer(entry->slot,replacement,expected);
-    DWORD ignored;BOOL restored=VirtualProtect((void*)entry->slot,sizeof(*entry->slot),protection,&ignored);
+    DWORD ignored;BOOL restored=host_real_virtual_protect((void*)entry->slot,sizeof(*entry->slot),protection,&ignored);
     return old==expected&&restored;
 }
 static const char *host_api_names[HOST_KIND_COUNT]={NULL,"CreateProcessW","GetProcAddress","CreateProcessA",
@@ -942,8 +967,10 @@ static const char *host_api_names[HOST_KIND_COUNT]={NULL,"CreateProcessW","GetPr
         "CloseHandle","DuplicateHandle","SetHandleInformation","OpenProcess","OpenThread",
         "ResumeThread","SuspendThread","TerminateProcess","TerminateThread",
         "CreateThread","CreateRemoteThread","CreateRemoteThreadEx","_beginthread","_beginthreadex",
-        "LoadLibraryA","LoadLibraryW","LoadLibraryExA","LoadLibraryExW","FreeLibrary"};
+        "LoadLibraryA","LoadLibraryW","LoadLibraryExA","LoadLibraryExW","FreeLibrary",
+        "WriteProcessMemory","VirtualProtect","VirtualProtectEx"};
 static void host_windows_targets(void **targets){
+    host_memory_prepare();
     HMODULE kernel=GetModuleHandleW(L"kernel32.dll"),advapi=GetModuleHandleW(L"advapi32.dll");
     HostGetProcAddress resolve=__atomic_load_n(&host_windows_resolver,__ATOMIC_ACQUIRE);
     if(!resolve&&kernel){
@@ -1433,10 +1460,10 @@ static int host_import(HMODULE image){
             void *volatile *slot=(void *volatile*)&table[j].u1.Function;
             if(__atomic_load_n(slot,__ATOMIC_ACQUIRE)!=expected)return 0;
             DWORD protection;
-            if(!VirtualProtect((void*)slot,sizeof(*slot),PAGE_READWRITE,&protection))return 0;
+            if(!host_real_virtual_protect((void*)slot,sizeof(*slot),PAGE_READWRITE,&protection))return 0;
             host_original_create=(HostCreateProcessW)expected;host_import_slot=slot;
             void *old=InterlockedCompareExchangePointer(slot,(void*)host_create_process,expected);
-            DWORD ignored;BOOL restored=VirtualProtect((void*)slot,sizeof(*slot),protection,&ignored);
+            DWORD ignored;BOOL restored=host_real_virtual_protect((void*)slot,sizeof(*slot),protection,&ignored);
             return old==expected&&restored;
         }
     }
