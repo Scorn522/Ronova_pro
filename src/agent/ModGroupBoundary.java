@@ -46,7 +46,9 @@ final class ModGroupBoundary {
     private static final Map<Module,Set<String>> metadata=Collections.synchronizedMap(new IdentityHashMap<>());
     private static final AtomicInteger methods=new AtomicInteger();
     private static final Set<String> unresolved=ConcurrentHashMap.newKeySet();
-    private record Returns() { String mode(){return "default";} }
+    private record Returns(String mode,String fixedUuid) {
+        Returns(String mode){this(mode,mode.equals("uuid-fixed")?java.util.UUID.randomUUID().toString():null);}
+    }
     private static final Map<Module,Returns> returns=Collections.synchronizedMap(new IdentityHashMap<>());
     private static final Map<Module,Set<String>> groupGaps=Collections.synchronizedMap(new IdentityHashMap<>());
     private static final Map<Module,String> codeRetirementGaps=Collections.synchronizedMap(new IdentityHashMap<>());
@@ -55,7 +57,7 @@ final class ModGroupBoundary {
         String normalized=mode.trim().toLowerCase(java.util.Locale.ROOT);
         if(!Set.of("default","null","empty","uuid-fixed","uuid-each","invalid-id").contains(normalized))
             throw new IllegalArgumentException("INVALID_RETURN_POLICY:"+mode);
-        return "default";
+        return normalized;
     }
     private static void gap(Module module,String value) {
         unresolved.add(value);
@@ -105,15 +107,16 @@ final class ModGroupBoundary {
             gap(module,String.valueOf(module.getName())+":RESERVED_MOD_IN_SHARED_MODULE:"+owners);
             return false;
         }
-        // A file/module is indivisible; selecting an owner includes all its declared aliases.
-        denied.addAll(owners);
-        synchronized(exact) {exact.add(module);}
         returns.computeIfAbsent(module,ignored->{
             Set<String> policies=new HashSet<>();for(String id:owners){String policy=System.getProperty("ronova.pro.bootReturns."+id);if(policy!=null)policies.add(returnMode(policy));}
             if(policies.size()>1)throw new IllegalArgumentException("SHARED_MODULE_RETURN_CONFLICT:"+owners);
             String mode=policies.isEmpty()?System.getProperty("ronova.pro.bootReturns","default"):policies.iterator().next();
-            returnMode(mode);return new Returns();
+            return new Returns(returnMode(mode));
         });
+        // Publish the complete policy before this module can take the exact fast path.
+        // A file/module is indivisible; selecting an owner includes all its declared aliases.
+        denied.addAll(owners);
+        synchronized(exact) {exact.add(module);}
         return true;
     }
     static byte[] transform(ClassLoader loader,Module module,String name,Class<?> actualType,byte[] bytes) {
@@ -168,19 +171,33 @@ final class ModGroupBoundary {
     }
     static void suppressExternal(Module module,MethodNode method){
         Returns policy=returns.get(module);if(policy==null)throw new IllegalStateException("STOPPED_RETURN_POLICY_REQUIRED");
+    String mode=policy.mode();
     Type result=Type.getReturnType(method.desc);
     InsnList code=new InsnList();
     switch(result.getSort()) {
         case Type.VOID -> code.add(new InsnNode(Opcodes.RETURN));
         case Type.BOOLEAN,Type.BYTE,Type.CHAR,Type.SHORT,Type.INT -> {
-            code.add(new InsnNode(Opcodes.ICONST_0));code.add(new InsnNode(Opcodes.IRETURN));
+            code.add(new InsnNode(result.getSort()==Type.INT&&mode.equals("invalid-id")?Opcodes.ICONST_M1:Opcodes.ICONST_0));
+            code.add(new InsnNode(Opcodes.IRETURN));
         }
         case Type.LONG -> {code.add(new InsnNode(Opcodes.LCONST_0));code.add(new InsnNode(Opcodes.LRETURN));}
         case Type.FLOAT -> {code.add(new InsnNode(Opcodes.FCONST_0));code.add(new InsnNode(Opcodes.FRETURN));}
         case Type.DOUBLE -> {code.add(new InsnNode(Opcodes.DCONST_0));code.add(new InsnNode(Opcodes.DRETURN));}
         default -> {
             String type=result.getSort()==Type.OBJECT?result.getInternalName():"";
-            if(result.getSort()==Type.ARRAY) {
+            if(mode.equals("null"))code.add(new InsnNode(Opcodes.ACONST_NULL));
+            else if((mode.equals("uuid-fixed")||mode.equals("uuid-each"))
+                    &&(type.equals("java/util/UUID")||type.equals("java/lang/String"))) {
+                code.add(new LdcInsnNode(mode));
+                code.add(policy.fixedUuid()==null?new InsnNode(Opcodes.ACONST_NULL):new LdcInsnNode(policy.fixedUuid()));
+                code.add(new InsnNode(type.equals("java/lang/String")?Opcodes.ICONST_1:Opcodes.ICONST_0));
+                code.add(new MethodInsnNode(Opcodes.INVOKESTATIC,"dev/ronova/pro/bootstrap/DefinitionBridge","returnIdentifier",
+                        "(Ljava/lang/String;Ljava/lang/String;Z)Ljava/lang/Object;",false));
+                code.add(new TypeInsnNode(Opcodes.CHECKCAST,type));
+            } else if(mode.equals("empty")&&(type.equals("java/lang/String")||type.equals("java/lang/CharSequence")))
+                code.add(new LdcInsnNode(""));
+            else if(result.getSort()==Type.ARRAY&&!mode.equals("empty"))code.add(new InsnNode(Opcodes.ACONST_NULL));
+            else if(result.getSort()==Type.ARRAY) {
                 String component=result.getDescriptor().substring(1);
                 code.add(new InsnNode(Opcodes.ICONST_0));
                 if(component.length()==1)code.add(new IntInsnNode(Opcodes.NEWARRAY,switch(component.charAt(0)) {
@@ -200,9 +217,8 @@ final class ModGroupBoundary {
             else if(Set.of("java/util/stream/Stream","java/util/stream/IntStream","java/util/stream/LongStream","java/util/stream/DoubleStream").contains(type))
                 code.add(new MethodInsnNode(Opcodes.INVOKESTATIC,type,"empty","()L"+type+";",true));
             else if(Set.of("java/util/concurrent/CompletableFuture","java/util/concurrent/CompletionStage","java/util/concurrent/Future").contains(type)) {
-                code.add(new InsnNode(Opcodes.ACONST_NULL));
-                code.add(new MethodInsnNode(Opcodes.INVOKESTATIC,"java/util/concurrent/CompletableFuture","completedFuture",
-                        "(Ljava/lang/Object;)Ljava/util/concurrent/CompletableFuture;",false));
+                code.add(new MethodInsnNode(Opcodes.INVOKESTATIC,"dev/ronova/pro/bootstrap/DefinitionBridge","returnFuture",
+                        "()Ljava/util/concurrent/CompletableFuture;",false));
             } else code.add(new InsnNode(Opcodes.ACONST_NULL));
             code.add(new InsnNode(Opcodes.ARETURN));
         }
@@ -243,12 +259,19 @@ final class ModGroupBoundary {
         mode=returnMode(mode);
         String selection=validate(ids,hints);
         if(!selection.equals("READY"))return selection;
+        Set<Module> selected=Collections.newSetFromMap(new IdentityHashMap<>());selected.addAll(Arrays.asList(hints));
+        for(Module module:selected) {
+            Returns previous=returns.get(module);
+            // Repeating the same selection/publication does not start a new policy generation.
+            if(previous==null||!previous.mode().equals(mode))returns.put(module,new Returns(mode));
+        }
         for(int i=0;i<ids.length;i++) {
             denied.add(ids[i].trim().toLowerCase(java.util.Locale.ROOT));
             synchronized(exact){exact.add(hints[i]);}
-            returns.put(hints[i],new Returns());
         }
-        return retransform(api,new HashSet<>(Arrays.asList(hints)));
+        // Native-only/unmodifiable classes may never publish from a transformed Java body.
+        for(Module module:selected)RecoveryAgent.publishStoppedModule(module);
+        return retransform(api,selected);
     }
     static String validate(String[] ids,Module[] hints) {
         if(ids.length!=hints.length||ids.length==0)return "EMPTY_OR_MISMATCHED_SELECTION";
@@ -298,6 +321,7 @@ final class ModGroupBoundary {
     }
     static String state() {return "TARGETS="+denied+";METHODS="+methods.get()+";UNRESOLVED="+unresolved.size()+";GAPS="+unresolved.stream().limit(8).toList();}
     static String mode(Module module) {Returns policy=returns.get(module);return policy==null?"default":policy.mode();}
+    static String fixedUuid(Module module) {Returns policy=returns.get(module);return policy==null?null:policy.fixedUuid();}
     private static boolean nativeControlled(Class<?> type,String name,String descriptor){
         if(type==null)return false;
         try{

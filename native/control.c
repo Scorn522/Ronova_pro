@@ -1,8 +1,49 @@
 #include <jni.h>
 #include "bindings.c"
+#include <bcrypt.h>
 // Preserve Object.clone itself, including Cloneable checks; never substitute a Java ancestor body.
 JNIEXPORT jint JNICALL Java_dev_ronova_pro_bootstrap_NativeControl_abi(JNIEnv *env, jclass type) {
-    (void)env; (void)type; return 62;
+    (void)env; (void)type; return 63;
+}
+JNIEXPORT jobject JNICALL Java_dev_ronova_pro_bootstrap_NativeControl_returnIdentifier0(JNIEnv *env,jclass type) {
+    (void)type;
+    if(native_original.ExceptionCheck(env))return NULL;
+    unsigned char bytes[16];
+    if(BCryptGenRandom(NULL,bytes,sizeof(bytes),BCRYPT_USE_SYSTEM_PREFERRED_RNG)<0){
+        native_refuse(env,"NATIVE_RETURN_IDENTIFIER_RANDOM_UNAVAILABLE");return NULL;
+    }
+    bytes[6]=(bytes[6]&0x0f)|0x40;bytes[8]=(bytes[8]&0x3f)|0x80;
+    uint64_t most=0,least=0;
+    for(unsigned i=0;i<8;i++){most=(most<<8)|bytes[i];least=(least<<8)|bytes[i+8];}
+    NativeThread *state=native_thread();
+    if(!state){native_refuse(env,"NATIVE_RETURN_IDENTIFIER_SCOPE_UNAVAILABLE");return NULL;}
+    state->control++;
+    jclass uuid=native_original.FindClass(env,"java/util/UUID");
+    jmethodID constructor=uuid?native_original.GetMethodID(env,uuid,"<init>","(JJ)V"):NULL;
+    jobject result=constructor?native_original.NewObject(env,uuid,constructor,(jlong)most,(jlong)least):NULL;
+    if(uuid)native_original.DeleteLocalRef(env,uuid);
+    state->control--;
+    return result;
+}
+JNIEXPORT jobject JNICALL Java_dev_ronova_pro_bootstrap_NativeControl_returnFuture0(JNIEnv *env,jclass type) {
+    (void)type;
+    if(native_original.ExceptionCheck(env))return NULL;
+    NativeThread *state=native_thread();
+    if(!state){native_refuse(env,"NATIVE_RETURN_FUTURE_SCOPE_UNAVAILABLE");return NULL;}
+    state->control++;
+    jclass future=native_original.FindClass(env,"java/util/concurrent/CompletableFuture");
+    /* Match completedFuture(null)'s exact JDK construction without entering a
+     * woven inline factory that could notify a foreign synchronous observer. */
+    jfieldID emptyField=future?native_original.GetStaticFieldID(env,future,"NIL",
+            "Ljava/util/concurrent/CompletableFuture$AltResult;"):NULL;
+    jobject empty=emptyField?native_original.GetStaticObjectField(env,future,emptyField):NULL;
+    if(!empty)native_refuse(env,"NATIVE_RETURN_FUTURE_EMPTY_RESULT_UNAVAILABLE");
+    jmethodID constructor=empty?native_original.GetMethodID(env,future,"<init>","(Ljava/lang/Object;)V"):NULL;
+    jobject result=constructor?native_original.NewObject(env,future,constructor,empty):NULL;
+    if(empty)native_original.DeleteLocalRef(env,empty);
+    if(future)native_original.DeleteLocalRef(env,future);
+    state->control--;
+    return result;
 }
 JNIEXPORT jboolean JNICALL Java_dev_ronova_pro_bootstrap_NativeControl_hostLibraryLoadReady0(JNIEnv *env,jclass type) {
     (void)env; (void)type; return host_library_load_ready()?JNI_TRUE:JNI_FALSE;
@@ -49,6 +90,8 @@ static void JNICALL host_module0(JNIEnv *env,jclass type,jobject module,jboolean
 static int native_bind_controller(JNIEnv *env,jclass controller){
     static const JNINativeMethod methods[]={
         {"abi","()I",(void*)Java_dev_ronova_pro_bootstrap_NativeControl_abi},
+        {"returnIdentifier0","()Ljava/util/UUID;",(void*)Java_dev_ronova_pro_bootstrap_NativeControl_returnIdentifier0},
+        {"returnFuture0","()Ljava/util/concurrent/CompletableFuture;",(void*)Java_dev_ronova_pro_bootstrap_NativeControl_returnFuture0},
         {"controlWriter0","()Ljava/lang/Class;",(void*)Java_dev_ronova_pro_bootstrap_NativeControl_controlWriter0},
         {"rawMemoryWriter0","()Ljava/lang/Class;",(void*)Java_dev_ronova_pro_bootstrap_NativeControl_rawMemoryWriter0},
         {"initialize0","(Ljava/lang/Class;Ljava/lang/Class;)Z",(void*)Java_dev_ronova_pro_bootstrap_NativeControl_initialize0},

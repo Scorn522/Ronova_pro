@@ -282,7 +282,12 @@ public final class CodeSourceBridge {
     }
     public static Object executionPlan(Object[][] rows){requireAgent();return ExecutionFlow.plan(rows);}
     private static List<StackWalker.StackFrame> executionStack(){
-        return WALKER.walk(frames->frames.dropWhile(frame->frame.getDeclaringClass().getNestHost()==CodeSourceBridge.class).toList());
+        return WALKER.walk(frames->frames.dropWhile(frame->{
+            Class<?> type=frame.getDeclaringClass();
+            // Resolving a foreign nest host can define another class while
+            // this very walk is still determining its execution sources.
+            return type.getClassLoader()==null&&type.getNestHost()==CodeSourceBridge.class;
+        }).toList());
     }
     public static Object executionRootEnter(){
         return NativeControl.executionRootAllowed()?executionEnter():null;

@@ -91,27 +91,34 @@ public final class RecoveryAgent {
             bootstrap=new JarFile(Path.of(argument).toAbsolutePath().normalize().toFile());
             api.appendToBootstrapClassLoaderSearch(bootstrap);
             bridge=Class.forName("dev.ronova.pro.bootstrap.TaskBridge",true,null);
-            if(!Integer.valueOf(66).equals(bridge.getMethod("abiVersion").invoke(null)))throw new IllegalStateException("TASK_BRIDGE_ABI_MISMATCH");
+            if(!Integer.valueOf(67).equals(bridge.getMethod("abiVersion").invoke(null)))throw new IllegalStateException("TASK_BRIDGE_ABI_MISMATCH");
             Class.forName("dev.ronova.pro.bootstrap.SourceMapBridge",true,null);
             // Default-Map guards test UUID keys while class-loading maps are
             // active. Resolve that type before publishing the guarded methods.
             Class.forName("java.util.UUID",false,null);
+            // This classfile was first requested beneath a stopped empty-stream return.
+            Class.forName("java.util.stream.IntPipeline$Head",false,null);
+            // ExternalCodeDefinitions.expandGraph iterates an IdentityHashMap's
+            // values inside transform; its first definition cannot need itself.
+            Class.forName("java.util.IdentityHashMap$ValueIterator",false,null);
             // A guarded Map operation must not first define its own frame while
             // libinstrument is filling that frame's class bytes through JNI.
             for(String helper:List.of("Key","OwnerRef","Gate","Scope","Frame","ConcurrentFrame","Refused"))
                 Class.forName("dev.ronova.pro.bootstrap.SourceMapBridge$"+helper,true,null);
             for(String helper:List.of("SourcePublication","SourceIndexMutation","FastListView","FieldMutation"))
                 Class.forName("dev.ronova.pro.bootstrap.ControlBridge$"+helper,true,null);
-            // This new map is used from a JNI array-observation upcall. Define
-            // it before that upcall can itself fill class bytes through JNI.
-            Class.forName("dev.ronova.pro.bootstrap.ExecutionFlow$TraceMap",false,null);
+            // A JNI observation uses this exact family's mutually referring metadata.
+            // Define its direct member classes without initializing them before that
+            // observation can recursively request its own ArrayChange/receipt bytes.
+            Class.forName("dev.ronova.pro.bootstrap.ExecutionFlow",false,null).getDeclaredClasses();
+            Class.forName("dev.ronova.pro.bootstrap.TaskBridge$Helper",false,null);
             Class.forName("dev.ronova.pro.bootstrap.CodeSourceBridge$LedgerMap",false,null);
             Class.forName("dev.ronova.pro.bootstrap.CodeSourceBridge$FrameMethods",false,null);
             Class.forName("dev.ronova.pro.bootstrap.CodeSourceBridge$MethodBucket",false,null);
             Class.forName("dev.ronova.pro.bootstrap.ControlBridge$ProducerFrame",false,null);
             Class.forName("dev.ronova.pro.bootstrap.EventFaultBridge",true,null);
             Class<?> control=Class.forName("dev.ronova.pro.bootstrap.ControlBridge",true,null);
-            if(!Integer.valueOf(66).equals(control.getMethod("abiVersion").invoke(null)))throw new IllegalStateException("CONTROL_BRIDGE_ABI_MISMATCH");
+            if(!Integer.valueOf(67).equals(control.getMethod("abiVersion").invoke(null)))throw new IllegalStateException("CONTROL_BRIDGE_ABI_MISMATCH");
             Module base=Object.class.getModule(),ours=RecoveryAgent.class.getModule();
             api.redefineModule(base,Set.of(bridge.getModule()),Map.of(
                     "jdk.internal.org.objectweb.asm",Set.of(ours),"jdk.internal.org.objectweb.asm.commons",Set.of(ours),
@@ -129,6 +136,10 @@ public final class RecoveryAgent {
             Class.forName("dev.ronova.pro.bootstrap.ResourceBridge$CharacterWrappers",true,null);
             Class.forName("dev.ronova.pro.bootstrap.ResourceBridge$WrapperRecord",true,null);
             Class.forName("dev.ronova.pro.bootstrap.IoBridge",true,null);
+            // Resolve the observed field-write and completed-result dependencies
+            // before Native/JDK hooks can encounter their own class bytes.
+            Class.forName("dev.ronova.pro.bootstrap.ControlBridge$HandleWriters",true,null);
+            Class.forName("java.util.concurrent.CompletableFuture",true,null);
             report(String.valueOf(Class.forName("dev.ronova.pro.bootstrap.NativeControl",true,null).getMethod("install",Path.class).invoke(null,Path.of(argument))));
             instrumentation=api;
             Module instrument=Instrumentation.class.getModule();
@@ -179,7 +190,11 @@ public final class RecoveryAgent {
                     // Forge's discovery loader is active before its module resources and frame types exist.
                     // It does not own world effects; touching it here creates a false partial install.
                     byte[] stopped=ModGroupBoundary.transform(loader,module,name,type,bytes);
-                    if(stopped!=null) {registerProducer(module);publishStoppedModule(module);return stopped;}
+                    if(stopped!=null) {
+                        if(module!=null&&!module.canRead(bridge.getModule()))
+                            api.redefineModule(module,Set.of(bridge.getModule()),Map.of(),Map.of(),Set.of(),Map.of());
+                        registerProducer(module);publishStoppedModule(module);return stopped;
+                    }
                     if(BufferBoundary.wrapTarget(name)&&loader!=null&&!producerModule(module)){
                         if(module!=null&&!module.canRead(bridge.getModule()))
                             api.redefineModule(module,Set.of(bridge.getModule()),Map.of(),Map.of(),Set.of(),Map.of());
@@ -583,13 +598,17 @@ public final class RecoveryAgent {
         if(caller!=authorized||!authorized.getName().equals(expected)||authorized.getModule()!=runtime.getModule())
             throw new SecurityException("MOD_GROUP_CONTROL_CALLER");
     }
-    private static void publishStoppedModule(Module module) {
+    static void publishStoppedModule(Module module) {
+        synchronized(ModGroupBoundary.class) {
         try {
+            // Capture and publish the same policy generation before any native owner gate closes.
+            Class.forName("dev.ronova.pro.bootstrap.DefinitionBridge",false,null).getMethod("policy",Module.class,String.class,String.class)
+                    .invoke(null,module,ModGroupBoundary.mode(module),ModGroupBoundary.fixedUuid(module));
             Class.forName("dev.ronova.pro.bootstrap.ControlBridge",false,null).getMethod("stopModules",Module[].class).invoke(null,(Object)new Module[]{module});
-            Class.forName("dev.ronova.pro.bootstrap.DefinitionBridge",false,null).getMethod("policy",Module.class,String.class).invoke(null,module,ModGroupBoundary.mode(module));
             Class.forName("dev.ronova.pro.bootstrap.NativeControl",false,null).getMethod("module",Module.class,boolean.class).invoke(null,module,true);
         }
         catch(ReflectiveOperationException failure) {throw new IllegalStateException("MOD_TASK_GATE_PUBLICATION_FAILED",failure);}
+        }
     }
     /** Called only through the private bootstrap callback after its exact native TLS proof. */
     public static byte[] nativeFinalImage(Module module,ClassLoader loader,String name,Class<?> actual,ProtectionDomain domain,byte[] original,byte[] bytes,Module[] writers,boolean changed){

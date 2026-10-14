@@ -43,7 +43,7 @@ public final class NativeControl {
             if(!early.isEmpty()) {
                 Path actual=Path.of(early).toAbsolutePath();if(!hash(Files.readAllBytes(actual)).equals(digest))throw new IOException("EARLY_NATIVE_IMAGE_MISMATCH");dll=actual;
             }
-            System.load(dll.toString());if(abi()!=62)throw new UnsatisfiedLinkError("NATIVE_CONTROL_ABI");
+            System.load(dll.toString());if(abi()!=63)throw new UnsatisfiedLinkError("NATIVE_CONTROL_ABI");
             if(!initialize0(ControlBridge.class,DefinitionBridge.class))throw new UnsatisfiedLinkError("ACTUAL_NATIVE_BOUNDARY_INSTALL_FAILED");
             if(!initializeDefinitionDirectory0(definitionDirectoryOwner))throw new UnsatisfiedLinkError("ACTUAL_DEFINITION_DIRECTORY_CAS_UNAVAILABLE");
             libraryBoundaryPresent=libraryPresent0();available=true;return state="NATIVE_BIND_AND_JNI_FIELD_READY";
@@ -54,6 +54,16 @@ public final class NativeControl {
         catch(NoSuchAlgorithmException impossible) { throw new AssertionError(impossible); }
     }
     public static boolean available() { return available; }
+    static java.util.UUID returnIdentifier(){
+        if(CALLER.getCallerClass()!=DefinitionBridge.class)throw new SecurityException("DEFINITION_RETURN_FACTORY_REQUIRED");
+        if(!available)throw new IllegalStateException("NATIVE_RETURN_IDENTIFIER_UNAVAILABLE:"+state);
+        return returnIdentifier0();
+    }
+    static java.util.concurrent.CompletableFuture<?> returnFuture(){
+        if(CALLER.getCallerClass()!=DefinitionBridge.class)throw new SecurityException("DEFINITION_RETURN_FACTORY_REQUIRED");
+        if(!available)throw new IllegalStateException("NATIVE_RETURN_FUTURE_UNAVAILABLE:"+state);
+        return returnFuture0();
+    }
     /** Revoke only a current native heap callback's saved target permission. */
     static void heapPolicyChanged(Object object){
         if(!available)return;
@@ -643,6 +653,8 @@ public final class NativeControl {
         return clone0(source);
     }
     private static native int abi();
+    private static native java.util.UUID returnIdentifier0();
+    private static native java.util.concurrent.CompletableFuture<?> returnFuture0();
     private static native Class<?> controlWriter0();
     private static native Class<?> rawMemoryWriter0();
     private static native boolean initialize0(Class<?> tasks,Class<?> definitions);

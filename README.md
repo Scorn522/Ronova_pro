@@ -1,8 +1,8 @@
 # Ronova Pro
 
-主工程：`D:\桌面\ronova_GPT`。Java ABI66 / Native ABI62 / Storage3 / Journal6。
+主工程：`D:\桌面\ronova_GPT`。Java ABI67 / Native ABI63 / Storage3 / Journal6。
 Java 17；用户态 GNU C23 / GNU C++23；独立 Windows 驱动及管理工具 C17。
-当前包构建通过，补齐非返回 DLL 卸载入口及准确线程退出后的来源回收，相关独立入口检查通过；此前 Screen/Overlay、Unsafe 原表安装和冻结 tick 重载去重修复保留。完整 C/B 尚未完成，真实冻结保存的结果与剩余范围看
+当前包构建通过，六种停组返回策略按实际选择生效，修复 Future/UUID 适配及来源记录循环加载，相关独立入口检查通过；此前非返回 DLL 卸载、Screen/Overlay 和冻结 tick 修复保留。完整 C/B 尚未完成，真实冻结保存的结果与剩余范围看
 [当前进度](docs/A-批验收状态.md) 和 [实际报告](validation/b-final-20261007/REPORT.md)。
 
 ## 目录
@@ -43,7 +43,7 @@ Windows x64 上使用 JDK17 和 Zig。先写齐工作包，再按实际需要构
 java -jar ronova-pro-prelaunch.jar --java <游戏java.exe> --core <当前core.jar> <原有全部游戏参数>
 ```
 
-本地整理包：`distribution/Ronova-Pro-C-Free-Exit-WIP-Java66-Native62-20261014.zip`。包含当前源码、Core/prelaunch JAR 和未签名驱动；只打包指定候选，不带缓存、旧布局、游戏存档或历史分发包：
+本地整理包：`distribution/Ronova-Pro-C-Returns-WIP-Java67-Native63-20261014.zip`。包含当前源码、Core/prelaunch JAR 和未签名驱动；只打包指定候选，不带缓存、旧布局、游戏存档或历史分发包：
 
 ```powershell
 .\distribution\package-current.ps1 -CandidateDirectory <本次候选目录> -OutputPath <新ZIP路径>

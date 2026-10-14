@@ -1,5 +1,21 @@
 # B 批实际报告：2026-10-09 代码收敛接续
 
+## 2026-10-14：C 接续——实际停组返回策略
+
+接续 `d6c1152`，Java ABI67 / Native ABI63 / Storage3 / Journal6。原命令接受的六种 returns 策略此前在 Java 停组表被统一丢为 default；现保留 default/null/empty/uuid-fixed/uuid-each/invalid-id 的实际选择，并在关停 Native module gate 前发布同一策略。固定 UUID 由准确 module 的策略代次生成并供 Java/Native 共用，同模式重复发布复用，切换后重新选择；没有新增返回语法或业务资格。
+
+普通基本类型返回合法零值，invalid-id 仅将 int 设为 -1；强制 null 覆盖全部引用及 Future，只有 empty 创建零长度数组和空字符串。其他非 null 策略保留准确类型的 Optional、集合、迭代器、Stream 及已完成空结果 Future 适配，子类不按名称套用。Future 经无参工厂以准确 JDK17 CF.NIL 和私有构造器创建全新实例，避开 inline factory 的同步 observer；每次 UUID 经既有 [BCrypt 系统随机源](https://learn.microsoft.com/en-us/windows/win32/api/bcrypt/nf-bcrypt-bcryptgenrandom)生成 v4 值，再调用准确 UUID(long,long) 构造器。两条 Native 入口只构造新值，不接业务目标、值或回调，调用后归还原 control 深度，原 JNI 异常保留，停组业务写入规则不变。
+
+实际复跑先发现 ValueIterator 循环加载、外国 nest host 被来源检查额外加载、Future 未完成，以及 UUID$Holder 首次加载被拒。修复准确 walker 后，在守卫安装前预定义 ExecutionFlow 的直接成员元数据闭包及本链已定位依赖；没有清除 unknown、伪造 producer、扩大 Native 数组放行或预热整个 bootstrap/JDK。中间轮虽有功能 PASS，仍出现 ArrayChange/JPLIS 异常，未将其算作完整通过。原失败日志与中间结果均保留。
+
+最终集中构建 `build-c-java67-native63-return-policy-final4-20261014.log` PASS18秒。复用既有 GroupReturns 分支，以 AuditFixCheck 当前入口运行真实 fixture JAR 的实际 ModuleLayer/metadata；六个独立 JVM 均退出0，`c-return-policy67-final3-{invalid-id,uuid-fixed,uuid-each,null,empty,default}-20261014.log` 均有 MOD_GROUP_RETURN_EFFECTS_PASS，未再出现此前数组写拒绝、类循环或 JPLIS 断言。覆盖基本类型、数组、UUID、准确空适配器、Future 终态、业务副作用抑制和无半对象构造；未新增夹具角色或重跑旧矩阵。真实 Native 方法早退/ForceEarlyReturn 的各策略及动态策略代次切换未实跑，源码接线不冒充这些场景通过。
+
+原 Java63/Native61 run03 仍由原实例运行，launch/debug 日志尚停于 Forge 加载阶段，没有世界加载或冻结保存结果，不能算作本候选游戏通过；未重启、未停止。驱动及管理器源码未改、未重建、未加载，沿用未签名 SYS 37888字节、管理器190464字节。自身外观与武器注册继续暂缓，完整 C/B 继续收口。
+
+本地候选 `distribution/candidate-c-java67-native63-returns-wip-20261014`，Core JAR 2424274字节、prelaunch 22440字节；匹配包 `distribution/Ronova-Pro-C-Returns-WIP-Java67-Native63-20261014.zip`。只同步本包源码与现有报告摘要，旧包、存档和原始日志保留本地。
+
+---
+
 ## 2026-10-14：C 接续——非返回卸库入口
 
 接续 `21dd6bc`，Java ABI66 / Native ABI62 / Storage3 / Journal6。已观察 IAT/GPA 的 FreeLibraryAndExitThread 现接入实际来源、停组及准确控制 DLL 原始 HMODULE 检查；允许时原参数调用真实 API 一次，拒绝仅抑制卸库，仍以原退出码调用真实 ExitThread，保持 non-return。没有把它拆成普通 FreeLibrary 后再退出。接口合同见 [微软文档](https://learn.microsoft.com/en-us/windows/win32/api/libloaderapi/nf-libloaderapi-freelibraryandexitthread)。

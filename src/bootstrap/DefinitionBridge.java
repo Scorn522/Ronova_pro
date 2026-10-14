@@ -6,7 +6,13 @@ import java.lang.ref.WeakReference;
 import java.lang.reflect.Array;
 import java.lang.reflect.Method;
 import java.util.*;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CompletionStage;
+import java.util.concurrent.Future;
 import java.util.function.Function;
+import java.util.stream.DoubleStream;
+import java.util.stream.IntStream;
+import java.util.stream.LongStream;
 import java.util.stream.Stream;
 
 /** Records actual definition scopes; an application stack alone is never a class origin. */
@@ -120,8 +126,40 @@ public final class DefinitionBridge {
         requireAgent(WALKER.getCallerClass());synchronized(CURRENT){Scope scope=CURRENT.get(Thread.currentThread());return scope!=null&&scope.loader==loader&&Objects.equals(scope.name,name)?scope.module:null;}
     }
     public static void policy(Module module,String mode) {
-        requireAgent(WALKER.getCallerClass());if(!Set.of("default","null","empty","uuid-fixed","uuid-each","invalid-id").contains(mode))throw new IllegalArgumentException(mode);
-        synchronized(RETURNS){RETURNS.put(module,mode);}publish();
+        requireAgent(WALKER.getCallerClass());publishPolicy(module,mode,null,false);
+    }
+    public static void policy(Module module,String mode,String fixedUuid) {
+        requireAgent(WALKER.getCallerClass());publishPolicy(module,mode,fixedUuid,true);
+    }
+    private static void publishPolicy(Module module,String mode,String fixedUuid,boolean supplied) {
+        if(!Set.of("default","null","empty","uuid-fixed","uuid-each","invalid-id").contains(mode))throw new IllegalArgumentException(mode);
+        UUID fixed=mode.equals("uuid-fixed")&&supplied?(UUID)returnIdentifier(mode,fixedUuid,false):null;
+        synchronized(RETURNS){synchronized(FIXED){
+            if(mode.equals("uuid-fixed")) {
+                // The generation-aware agent supplies the same UUID used by
+                // its Java bodies. The older overload retains its module value.
+                if(!supplied){fixed=FIXED.get(module);if(fixed==null)fixed=UUID.randomUUID();}
+                FIXED.put(module,fixed);
+            }
+            RETURNS.put(module,mode);
+        }}
+        publish();
+    }
+    /** Produces a return value only; it neither installs a policy nor grants control. */
+    public static Object returnIdentifier(String mode,String fixedUuid,boolean stringResult) {
+        UUID id=switch(mode) {
+            case "uuid-fixed" -> {
+                if(fixedUuid==null)throw new IllegalArgumentException("FIXED_RETURN_UUID_REQUIRED");
+                yield UUID.fromString(fixedUuid);
+            }
+            case "uuid-each" -> NativeControl.returnIdentifier();
+            default -> throw new IllegalArgumentException("IDENTIFIER_RETURN_POLICY:"+mode);
+        };
+        return stringResult?id.toString():id;
+    }
+    /** A fresh terminal adapter; no caller-supplied target or work enters its construction. */
+    public static CompletableFuture<?> returnFuture() {
+        return NativeControl.returnFuture();
     }
     public static Object before(Object host,byte[] bytes,int offset,int length) {
         Class<?> caller=directCaller();
@@ -232,22 +270,28 @@ public final class DefinitionBridge {
         return stoppedReturn(module(type),result);
     }
     private static Object stoppedReturn(Module owner,Class<?> result) {
-        String mode;synchronized(RETURNS){mode=RETURNS.getOrDefault(owner,"default");}
+        String mode;UUID fixed;synchronized(RETURNS){synchronized(FIXED){
+            mode=RETURNS.getOrDefault(owner,"default");fixed=FIXED.get(owner);
+        }}
         if(result==void.class)return null;
         if(result==boolean.class)return false;if(result==byte.class)return (byte)0;if(result==char.class)return (char)0;
         if(result==short.class)return (short)0;if(result==int.class)return mode.equals("invalid-id")?-1:0;
         if(result==long.class)return 0L;if(result==float.class)return 0F;if(result==double.class)return 0D;
-        if((mode.equals("uuid-fixed")||mode.equals("uuid-each"))&&(result==UUID.class||result==String.class)) {
-            UUID id;
-            if(mode.equals("uuid-each"))id=UUID.randomUUID();else synchronized(FIXED){id=FIXED.get(owner);if(id==null){id=UUID.randomUUID();FIXED.put(owner,id);}}
-            return result==String.class?id.toString():id;
-        }
+        if(mode.equals("null"))return null;
+        if((mode.equals("uuid-fixed")||mode.equals("uuid-each"))&&(result==UUID.class||result==String.class))
+            return returnIdentifier(mode,fixed==null?null:fixed.toString(),result==String.class);
         if(mode.equals("empty")) {
             if(result.isArray())return Array.newInstance(result.componentType(),0);
-            if(result==String.class||result==CharSequence.class)return "";if(result==Optional.class)return Optional.empty();
-            if(result==List.class||result==Collection.class||result==Iterable.class)return List.of();
-            if(result==Set.class)return Set.of();if(result==Map.class)return Map.of();if(result==Iterator.class)return Collections.emptyIterator();
+            if(result==String.class||result==CharSequence.class)return "";
         }
+        if(result==Optional.class)return Optional.empty();if(result==OptionalInt.class)return OptionalInt.empty();
+        if(result==OptionalLong.class)return OptionalLong.empty();if(result==OptionalDouble.class)return OptionalDouble.empty();
+        if(result==List.class||result==Collection.class||result==Iterable.class)return List.of();
+        if(result==Set.class)return Set.of();if(result==Map.class)return Map.of();
+        if(result==Iterator.class)return Collections.emptyIterator();if(result==Enumeration.class)return Collections.emptyEnumeration();
+        if(result==Stream.class)return Stream.empty();if(result==IntStream.class)return IntStream.empty();
+        if(result==LongStream.class)return LongStream.empty();if(result==DoubleStream.class)return DoubleStream.empty();
+        if(result==Future.class||result==CompletionStage.class||result==CompletableFuture.class)return returnFuture();
         return null;
     }
 }

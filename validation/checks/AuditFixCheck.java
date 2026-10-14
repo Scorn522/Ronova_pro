@@ -12,6 +12,7 @@ public final class AuditFixCheck {
     private static void require(boolean yes,String message) {if(!yes)throw new AssertionError(message);}
     private static Object invoke(Object receiver,String name)throws Exception {var m=receiver.getClass().getDeclaredMethod(name);m.setAccessible(true);try{return m.invoke(receiver);}catch(InvocationTargetException e){if(e.getCause() instanceof Exception x)throw x;throw e;}}
     public static void main(String[] args)throws Exception {
+        if(args.length==3&&args[0].equals("mod-group-returns")){modGroupReturns(args[1],args[2]);return;}
         if(args.length==1&&args[0].equals("source-list-fixes")){sourceListFixes();return;}
         if(args.length==1&&args[0].equals("live-control-writer")){liveControlWriter();return;}
         if(args.length==1&&args[0].equals("clone-boundary")){cloneBoundary();return;}
@@ -711,4 +712,50 @@ public final class AuditFixCheck {
         require("business-override".equals(new OverriddenClone().duplicate()),"business clone override rewritten");
         System.out.println("CLONE_BOUNDARY_PASS actual_agent_native sealed_enum_permits values_clone inherited_owner distinct_identity payload non_cloneable_exception business_override");
     }
+    private static void modGroupReturns(String jar,String profile)throws Exception {
+        var finder=java.lang.module.ModuleFinder.of(java.nio.file.Path.of(jar));
+        String name=finder.findAll().iterator().next().descriptor().name();
+        var configuration=ModuleLayer.boot().configuration().resolve(finder,java.lang.module.ModuleFinder.of(),Set.of(name));
+        var layer=ModuleLayer.boot().defineModulesWithOneLoader(configuration,ClassLoader.getPlatformClassLoader());
+        Class<?> target=Class.forName("dev.ronova.pro.validation.WorldFixture$GroupReturns",true,layer.findLoader(name));
+        java.util.function.Function<String,Object> call=method->{
+            try {return target.getMethod(method).invoke(null);}
+            catch(ReflectiveOperationException error){throw new IllegalStateException(error);}
+        };
+        call.apply("action");
+        require(Boolean.FALSE.equals(call.apply("bool"))&&Byte.valueOf((byte)0).equals(call.apply("bytes"))
+                &&Character.valueOf((char)0).equals(call.apply("chars"))&&Short.valueOf((short)0).equals(call.apply("shorts"))
+                &&Integer.valueOf(profile.equals("invalid-id")?-1:0).equals(call.apply("ints"))
+                &&Long.valueOf(0).equals(call.apply("longs"))&&Float.valueOf(0).equals(call.apply("floats"))
+                &&Double.valueOf(0).equals(call.apply("doubles")),"all primitive and void entries suppress business effects");
+        require(call.apply("object")==null,"reference business object is not published");
+        Object array=call.apply("array"),matrix=call.apply("matrix");
+        require(profile.equals("empty")?array instanceof int[] a&&a.length==0&&matrix instanceof String[][] m&&m.length==0
+                :array==null&&matrix==null,"primitive and multidimensional arrays honor the chosen policy");
+        Object identity=call.apply("identity"),text=call.apply("text");
+        if(profile.startsWith("uuid-")) {
+            require(identity instanceof java.util.UUID&&text instanceof String,"UUID and String policies return valid identities");
+            java.util.UUID.fromString((String)text);
+            require(profile.equals("uuid-fixed")?identity.equals(call.apply("identity"))&&!identity.toString().equals("live")
+                    :!identity.equals(call.apply("identity")),"fixed and per-call UUID semantics differ as selected");
+        } else require(identity==null&&(profile.equals("empty")?"".equals(text):text==null),"identity and text honor the chosen null or empty policy");
+        if(profile.equals("null"))require(call.apply("optional")==null&&call.apply("future")==null,"forced null covers reference contracts");
+        else {
+            require(((java.util.OptionalInt)call.apply("optional")).isEmpty()&&!((Iterator<?>)call.apply("iterator")).hasNext()
+                    &&((java.util.stream.IntStream)call.apply("stream")).count()==0,"typed empty consumers stay usable");
+            Future<?> future=(Future<?>)call.apply("future");
+            require(future.isDone(),"Future consumer has no pending business work");
+            try {require(future.get(1,TimeUnit.SECONDS)==null,"Future consumer returns an empty result");}
+            catch(CancellationException|ExecutionException refused) {require(future.isDone(),"refused Future releases its consumer");}
+        }
+        try {target.getConstructor().newInstance();throw new AssertionError("stopped constructor returned a half object");}
+        catch(InvocationTargetException expected) {
+            require(expected.getCause() instanceof IllegalStateException
+                    &&"RONOVA_MOD_GROUP_CREATION_REFUSED".equals(expected.getCause().getMessage()),"business constructor is refused before its prefix executes");
+        }
+        require(target.getField("effects").getInt(null)==0,"raw business effect count remains zero");
+        require(new java.util.ArrayList<>(List.of(7)).get(0)==7,"outside shared framework remains active");
+        System.out.println("MOD_GROUP_RETURN_EFFECTS_PASS profile="+profile);
+    }
+
 }
