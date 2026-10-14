@@ -138,10 +138,12 @@ final class WorldControl {
     }
     @SuppressWarnings("unchecked") boolean defer(LevelTicks<?> container,ScheduledTick<?> scheduled,MinecraftServer server){
         ServerLevel owner=null;for(ServerLevel level:server.getAllLevels())if(level.getBlockTicks()==container||level.getFluidTicks()==container){owner=level;break;}
-        if(owner==null||!frozen(owner,scheduled.pos()))return false;
-        List<Held> pending=held.computeIfAbsent(container,ignored->new ArrayList<>());
-        // LevelChunkTicks keeps one entry per type identity and position, including while paused.
-        for(Held prior:pending)if(prior.tick().type()==scheduled.type()&&prior.tick().pos().equals(scheduled.pos()))return true;
+        if(owner==null)return false;
+        List<Held> pending=held.get(container);
+        // The original keeps its key until restoration, including a saved copy reloaded after resume.
+        if(pending!=null)for(Held prior:pending)if(prior.tick().type()==scheduled.type()&&prior.tick().pos().equals(scheduled.pos()))return true;
+        if(!frozen(owner,scheduled.pos()))return false;
+        if(pending==null){pending=new ArrayList<>();held.put(container,pending);}
         pending.add(new Held((LevelTicks<Object>)container,(ScheduledTick<Object>)scheduled));
         LevelChunk chunk=owner.getChunkSource().getChunkNow(scheduled.pos().getX()>>4,scheduled.pos().getZ()>>4);
         if(chunk!=null)chunk.setUnsaved(true);return true;

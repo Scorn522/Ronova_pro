@@ -1,5 +1,17 @@
 # Ronova Pro 当前进度
 
+## 2026-10-14：C 接续——重载 tick 的原键保留
+
+接续 `9c1e5c6`，Java ABI64 / Native ABI61 / Storage3 / Journal6。仅修正 WorldControl.defer 的顺序：准确 level-wide 调度器已有同类型身份、同位置 held 时，先取消重载副本；没有已有 held 才检查冻结规则并新增。原 held 在准确恢复前继续占有其逻辑键，避免解除冻结后，区块 NBT 副本先执行、END 阶段又恢复原 tick 的重复窗口。新建、标脏及原 tick 恢复入口保持原有职责，没有增加目录或持久格式。
+
+本包集中构建 `build-c-java64-native61-held-reload-20261014.log` PASS25秒。未伪造 ServerLevel、producer 或控制权限，未新增测试块、证明文件或重跑旧矩阵；命中“真实 reload 晚于 END 恢复、早于下次 poll”的实际时序案例尚未执行，不能宣称该竞态实机通过。
+
+此前 Java63/Native61 的 run03 仍由原进程继续启动，未因源码更新重启。最新真实线程现场已推进至 Forge GameData.freezeData 的方块状态烘焙，主线程 RUNNABLE；Forge 自身更新检查另报 HTTP 超时警告。尚未到世界加载或冻结保存结果，不能把此运行算作 Java64 或完整 C/B 通过。
+
+本地候选 `distribution/candidate-c-java64-native61-held-reload-wip-20261014`，Core JAR 2416835字节、prelaunch 22440字节；匹配包 `distribution/Ronova-Pro-C-Held-Reload-WIP-Java64-Native61-20261014.zip`。Native 与驱动本轮未改、未重建；沿用未签名 SYS 37888字节和管理器190464字节，未加载。自身外观、武器注册继续暂缓，完整 C/B 继续收口。
+
+---
+
 ## 2026-10-14：C 接续——Unsafe 原表安装与真实冻结保存场景
 
 接续 `5017751`，Java ABI63 / Native ABI61 / Storage3 / Journal6。自身外观和武器注册继续暂缓，完整 C/B 尚未完成。
