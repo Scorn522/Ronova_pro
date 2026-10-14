@@ -1,5 +1,26 @@
 # Ronova Pro 当前进度
 
+## 2026-10-14：C 接续——JVMTI 与 JavaVM 输出保护
+
+接续 `4c8641a`，Java ABI69 / Native ABI65 / Storage3 / Journal6。完整当前工作包写齐后集中构建；自身外观和武器注册继续暂缓。
+
+已观察 JVMTI 表的查询输出、Allocate、Deallocate 和 CreateRawMonitor 接入真实原 API。固定值/结构、多输出、VM 分配结果及 GetStackTrace 调用者缓冲区先由 VM 写本次临时结果，成功后所有实际输出槽在同一短 gate 内复核，再复制；准确控制范围拒绝时不发布一半的 count、pointer 或帧。必需/可选 NULL 与原错误保持，拒绝后释放本次 VM buffer、嵌套字符串、JNI localref 或新 monitor。准确本 DLL 的直接 C 调用仅对本方 native_ti 使用保留原入口，外部回调不能借深层控制帧取得此路径。Suspend/ResumeThreadList 的结果预检查和实际提交接同一 gate；临时分配失败不再把尚未执行的已准入线程记为完成，提交失败也不抹掉实际已发生的效果。
+
+本 DLL 的实际 CRT 私有分配、重分配、字符串副本与 VirtualAlloc 页覆盖分配至登记、注销至物理释放的短定序；元数据本体也保护。JNI 数组和字符串副本的业务 contents 明确保留为外部值，lease/来源仍属控制。真实观察的 IAT 槽、VM/JVMTI 首槽及当前 JNI 环境首槽登记准确范围；JNI 槽观察与 Java 生命周期标志分开，ThreadEnd 外派前仍登记有效 env，结束后撤销。实际 heap walking 栈记录保留至 finish 末尾。未登记整个堆或凭地址猜分配器。
+
+普通 VM 查询、Java 与外部回调不持上述 gate。官方允许的 callback-safe 输出通过当前实际回调环境借用原 active hold，无 JNI、无 attach，忙时明确拒绝；GC/ObjectFree 的受限身份沿真实回调范围恢复。[JDK17 接口定义](https://raw.githubusercontent.com/openjdk/jdk17u/master/src/hotspot/share/prims/jvmti.xml) 中的 CreateRawMonitor 可用于该回调，最终修正其标志。Deallocate 只在短 gate 内拒绝当前准确控制点，放锁后调用真实 VM 释放；Dispose 保留逻辑 API 范围至真实成功返回再撤销。二者均可能进入 VM，不能持锁等待 GC；VM 内部物理回收、无效/过期指针与并发 double-free/reuse 不宣称原子闭合。
+
+实际检查首两轮的输出分支虽 PASS，日志出现 Native 初始化退化，未算整包通过；`c-jvmti-outputs65-20261014.log` 与 `c-jvmti-outputs65-final2-20261014.log` 保留。补充实际错误信息后定位 NATIVE_UNSAFE_VM_LAYOUT_REQUIRED：旧元数据检查把新 GetBytecodes 包装地址误认作错误 JVM。现仅从准确本方 live 环境、当前 retained shadow 与该实际 wrapper 关系解回保留的原 GetBytecodes，再核原 JVM 映像；原 GetJavaVM/GetEnv 及 HotSpot 导出布局检查保留，未放宽外部资格。
+
+修复载荷构建 `build-c-java69-native65-outputs-final3-20261014.log` PASS21秒；复用既有 AuditFixCheck 的独立 jvmti-output 分支，夹具编译 PASS，`c-jvmti-outputs65-final3-20261014.log` 实际退出0且 JVMTI_OUTPUT_PASS：Native/JNI 与线程绑定就绪；真实 vm/api/env 三个首槽均拒绝 GetEnv/Attach/Daemon 输出、GetVersionNumber/Allocate/GetMethodName/GetStackTrace 输出及 Deallocate，原字节与页保护保持；多输出拒绝不改普通 canary/帧/count。普通 GetEnv/Attach/Daemon 对已附加当前线程返回原 JNIEnv；普通 Allocate/Deallocate、可选 NULL、原 INVALID_METHODID、当前栈，以及真实 JNI 数组副本写版本后 JNI_ABORT 释放均通过。文件绑定仍报告74 pending，不冒充全部就绪。
+
+最终 `build-c-java69-native65-outputs-final4-20261014.log` PASS23秒；最后仅修正 CreateRawMonitor 的 callback-safe 标志，普通已通过分支未受影响，未重复运行。真实受限回调、首次 worker 附加及 ThreadEnd 并发攻击、线程列表效果与本族其余查询未逐项实跑，不作全族实机通过声明；未重跑旧矩阵。未观察原表/缓存入口、扩展 variadic 输出、任意 CPU store/syscall、最终映像 unmap 与映射复用等边界仍保留。既有 Host/Unsafe 各写入入口没有因此自动取得本次提交 gate 的原子保证。
+
+原 Java63/Native61 run03 的既有运行会话本轮确认仍存活；日志仍停于13:46的资源阶段，没有 WORLD_LOADED、Done 或冻结保存结果，未重启或停止，不能算新包游戏通过。驱动/管理器源码未改、未重建、未加载，沿用未签名 SYS 37888字节及管理器190464字节。
+
+本地候选 `distribution/candidate-c-java69-native65-outputs-wip-20261014`，Core JAR 2454939字节、prelaunch 22440字节；匹配包 `distribution/Ronova-Pro-C-Outputs-WIP-Java69-Native65-20261014.zip`。同步源码及既有报告摘要，旧包、存档与原始日志留本地。完整 C/B 继续收口。
+
+---
 ## 2026-10-14：C 接续——队列消费、控制线程与方块事件
 
 接续 `9afb934`，Java ABI68 / Native ABI64 / Storage3 / Journal6。本包三项生产入口已完整写齐后统一构建；自身外观与武器注册继续暂缓。

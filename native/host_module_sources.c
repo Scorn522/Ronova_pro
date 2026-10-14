@@ -299,7 +299,7 @@ static void host_module_loads_reap(JNIEnv **environment){
         if(image){
             int ready=1;for(HostLibraryLoad *load=image->loads;load&&ready;load=load->imageNext)
                 ready=native_owner_merge(&sources,load->owners);
-            if(ready){image->releasing=1;pin=image->pin;oldLive=image->live;
+            if(ready){image->releasing=1;host_image_private_slots_locked(image);pin=image->pin;oldLive=image->live;
                 AcquireSRWLockShared(&native_records);int jni=0;
                 for(NativeLibrary *library=native_libraries;library&&!jni;library=library->next)
                     jni=library->hostImage==image&&host_library_current(library,image->handle);
@@ -316,7 +316,7 @@ static void host_module_loads_reap(JNIEnv **environment){
         AcquireSRWLockExclusive(&host_imports);
         if(released){image->pin=NULL;image->pinReleased=1;}else {image->live=oldLive;image->opaque=1;
             for(HostLibraryLoad *load=image->loads;load;load=load->imageNext)load->error=error;}
-        image->releasing=0;InterlockedExchange(&image->retiring,0);ReleaseSRWLockExclusive(&host_imports);native_owner_links_free(sources);
+        image->releasing=0;host_image_private_slots_locked(image);InterlockedExchange(&image->retiring,0);ReleaseSRWLockExclusive(&host_imports);native_owner_links_free(sources);
         if(!native_tooling_retirement_jni(environment)){native_thread_callback_leave(state);return;}
         if(!released)break;
     }

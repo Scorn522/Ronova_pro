@@ -74,7 +74,7 @@ static BOOL host_real_virtual_protect(LPVOID address,SIZE_T size,DWORD protectio
 static BOOL host_real_virtual_free(LPVOID address,SIZE_T size,DWORD type){
     DWORD incoming=GetLastError();void *actual=host_real_memory_target(HOST_VIRTUAL_FREE,"VirtualFree");
     if(!actual){SetLastError(ERROR_PROC_NOT_FOUND);return FALSE;}
-    SetLastError(incoming);return ((BOOL (WINAPI*)(LPVOID,SIZE_T,DWORD))actual)(address,size,type);
+    SetLastError(incoming);return native_private_virtual_free(address,size,type,(NativePrivateVirtualFree)actual);
 }
 static BOOL host_real_write_process_memory(HANDLE process,LPVOID address,LPCVOID buffer,SIZE_T size,SIZE_T *written){
     DWORD incoming=GetLastError();void *actual=host_real_memory_target(HOST_WRITE_PROCESS_MEMORY,"WriteProcessMemory");
@@ -127,6 +127,7 @@ static uint64_t host_next_token,host_next_kernel_file;
 static HostCreateProcessW host_original_create;
 static HostProcessCreate host_original_process;
 static void *volatile *host_import_slot;
+static NativePrivateRange host_process_import_range;
 // The JDK import table is read-only outside host_import's VirtualProtect window.
 // Even compare-exchange(NULL, NULL) requires write permission, so observations
 // use an acquire load; only the actual replacement uses compare-exchange.
@@ -149,6 +150,7 @@ typedef struct HostImport {
     OwnerLink *sources;
     int kind,delayed,returned,slotOwned,unknown;
     RUNTIME_FUNCTION unwind;
+    NativePrivateRange slotRange;
     struct HostImport *next;
 } HostImport;
 typedef struct HostImage {
@@ -170,6 +172,16 @@ typedef struct HostImage {
  * never reactivates an old import entry or carries its former sources forward. */
 static SRWLOCK host_imports=SRWLOCK_INIT;
 static HostImage *host_images;
+/* host_imports is held; only the current logical image incarnation may keep
+ * an outside IAT address registered. Retained thunk tombstones keep no such
+ * span after that incarnation closes, even if the address is later reused. */
+static void host_image_private_slots_locked(HostImage *image){
+    for(HostImport *entry=image->imports;entry;entry=entry->next){
+        if(image->live&&!image->releasing&&entry->slot){
+            if(!native_private_register(&entry->slotRange,(const void*)entry->slot,sizeof(*entry->slot)))image->failed=1;
+        }else native_private_unregister(&entry->slotRange);
+    }
+}
 static void host_image_imports(HostImage*);
 static void host_windows_targets(void**);
 static HostLibraryLoad *host_thread_worker_child(NativeThread*,HMODULE);
@@ -1126,6 +1138,7 @@ static void host_install_slot(HostImage *image,void *volatile *slot,int declared
     HostImport *entry=(HostImport*)calloc(1,sizeof(*entry));
     if(!entry){image->failed=1;return;}
     entry->image=image;entry->slot=slot;entry->kind=kind?kind:declared;entry->delayed=delayed;
+    if(!native_private_register(&entry->slotRange,(const void*)slot,sizeof(*slot))){free(entry);image->failed=1;return;}
     entry->next=image->imports;image->imports=entry;
     image->loadWindow=1;
     if(!kind)return; /* A declared unresolved delay entry is not an API result. */
@@ -1471,7 +1484,7 @@ static void host_library_load_failed(NativeLibrary *library){
     AcquireSRWLockExclusive(&host_imports);AcquireSRWLockShared(&native_records);
     HostImage *image=library->hostImage;
     if(image&&image->live&&!host_image_other_live(image,library)){
-        image->failed=1;image->delayImports=1;image->live=0;
+        image->failed=1;image->delayImports=1;image->live=0;host_image_private_slots_locked(image);
     }
     ReleaseSRWLockShared(&native_records);ReleaseSRWLockExclusive(&host_imports);
 }
@@ -1485,7 +1498,7 @@ static void host_library_releasing(NativeLibrary *library){
      * before that call would reopen process creation for the stopped source.
      * Disable the last image entry first. Only its exact live unload scope may
      * still call it; other callers are refused without reading a retired IAT. */
-    if(!shared&&image->live){image->delayImports=host_delay_gaps(image);image->live=0;}
+    if(!shared&&image->live){image->delayImports=host_delay_gaps(image);image->live=0;host_image_private_slots_locked(image);}
     ReleaseSRWLockExclusive(&host_imports);
 }
 static void host_refuse(JNIEnv *env,const char *message){
@@ -1524,7 +1537,9 @@ static jlong JNICALL host_process_create(JNIEnv *env,jclass type,jstring command
 /* Only the import in the code image of the actual JDK native create export is changed. */
 static int host_import(HMODULE image){
     if(host_import_slot&&native_image((void*)host_import_slot)==image
-            &&__atomic_load_n(host_import_slot,__ATOMIC_ACQUIRE)==(void*)host_create_process)return 1;
+            &&__atomic_load_n(host_import_slot,__ATOMIC_ACQUIRE)==(void*)host_create_process)
+        return native_private_register(&host_process_import_range,(const void*)host_import_slot,sizeof(*host_import_slot));
+    native_private_unregister(&host_process_import_range);
     unsigned char *base=(unsigned char*)image;IMAGE_DOS_HEADER *dos=(IMAGE_DOS_HEADER*)base;
     if(dos->e_magic!=IMAGE_DOS_SIGNATURE||dos->e_lfanew<=0)return 0;
     IMAGE_NT_HEADERS64 *nt=(IMAGE_NT_HEADERS64*)(base+dos->e_lfanew);
@@ -1549,10 +1564,17 @@ static int host_import(HMODULE image){
             if(__atomic_load_n(slot,__ATOMIC_ACQUIRE)!=expected)return 0;
             DWORD protection;
             if(!host_real_virtual_protect((void*)slot,sizeof(*slot),PAGE_READWRITE,&protection))return 0;
+            AcquireSRWLockExclusive(&native_private_gate);
             host_original_create=(HostCreateProcessW)expected;host_import_slot=slot;
             void *old=InterlockedCompareExchangePointer(slot,(void*)host_create_process,expected);
+            int registered=0;
+            if(old==expected||old==(void*)host_create_process)
+                registered=native_private_register_locked(&host_process_import_range,(const void*)slot,sizeof(*slot));
+            ReleaseSRWLockExclusive(&native_private_gate);
             DWORD ignored;BOOL restored=host_real_virtual_protect((void*)slot,sizeof(*slot),protection,&ignored);
-            return old==expected&&restored;
+            /* Failed restoration does not undo an actual installed control
+             * entry. Its stable JDK-image slot remains registered in that case. */
+            return old==expected&&registered&&restored;
         }
     }
     return 0;

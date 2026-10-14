@@ -31,6 +31,7 @@ typedef struct NativeToolingHeapCall {
     size_t *tags;size_t tagCapacity;
     LONG64 tagEpoch,policyEpoch;int claimed;
     volatile LONG refusal,policyChanged;int restricted,objectsPublished;
+    NativePrivateRange privateRange;
 } NativeToolingHeapCall;
 
 typedef struct NativeToolingHeapObject {
@@ -593,6 +594,7 @@ static jvmtiError native_tooling_heap_prepare(NativeToolingEnv *record,JNIEnv *e
     if(origin)native_original.DeleteWeakGlobalRef(env,origin);native_owner_links_free(sources);
     if(result!=JVMTI_ERROR_NONE)return result;
     call->tagState=native_tooling_heap_environment(record,1);if(!call->tagState)return JVMTI_ERROR_OUT_OF_MEMORY;
+    if(!native_private_register(&call->privateRange,call,sizeof(*call)))return JVMTI_ERROR_NOT_AVAILABLE;
     if(InterlockedCompareExchangePointer((void *volatile*)&call->tagState->walking,call,NULL))return JVMTI_ERROR_NOT_AVAILABLE;
     call->claimed=1;
     if(call->restricted)InterlockedIncrement(&native_tooling_heap_policy_active);
@@ -602,6 +604,7 @@ static jvmtiError native_tooling_heap_prepare(NativeToolingEnv *record,JNIEnv *e
 static jvmtiError native_tooling_heap_finish(JNIEnv *env,NativeToolingHeapCall *call,jvmtiError result){
     LONG refusal=InterlockedCompareExchange(&call->refusal,0,0);
     native_tooling_heap_release(env,call);
+    native_private_unregister(&call->privateRange);
     if(result==JVMTI_ERROR_NONE&&refusal!=JVMTI_ERROR_NONE)return native_tooling_error((jvmtiError)refusal);
     return result;
 }

@@ -11,6 +11,7 @@ static HostJvmUnload host_jvm_unload_original;
 static HMODULE host_loader_image;
 static void *volatile *host_jvm_load_slot;
 static void *volatile *host_jvm_unload_slot;
+static NativePrivateRange host_jvm_load_range,host_jvm_unload_range;
 static volatile LONG host_loader_installed;
 static void *JNICALL host_jvm_load(const char *name,jboolean throwing);
 static void JNICALL host_jvm_unload(void *handle);
@@ -88,9 +89,16 @@ static int host_library_load_install(void){
     if(!load||!unload||!host_loader_imports(image,load,unload,&loadSlot,&unloadSlot))return 0;
     host_jvm_load_original=(HostJvmLoad)load;host_jvm_unload_original=(HostJvmUnload)unload;
     host_loader_image=image;host_jvm_load_slot=loadSlot;host_jvm_unload_slot=unloadSlot;
-    if(!host_loader_exchange(unloadSlot,unload,(void*)host_jvm_unload))return 0;
+    if(!native_private_register(&host_jvm_unload_range,(const void*)unloadSlot,sizeof(*unloadSlot)))return 0;
+    if(!host_loader_exchange(unloadSlot,unload,(void*)host_jvm_unload)){
+        if(__atomic_load_n(unloadSlot,__ATOMIC_ACQUIRE)!=(void*)host_jvm_unload)native_private_unregister(&host_jvm_unload_range);return 0;
+    }
+    if(!native_private_register(&host_jvm_load_range,(const void*)loadSlot,sizeof(*loadSlot))){
+        if(host_loader_exchange(unloadSlot,(void*)host_jvm_unload,unload))native_private_unregister(&host_jvm_unload_range);return 0;
+    }
     if(!host_loader_exchange(loadSlot,load,(void*)host_jvm_load)){
-        (void)host_loader_exchange(unloadSlot,(void*)host_jvm_unload,unload);return 0;
+        if(__atomic_load_n(loadSlot,__ATOMIC_ACQUIRE)!=(void*)host_jvm_load)native_private_unregister(&host_jvm_load_range);
+        if(host_loader_exchange(unloadSlot,(void*)host_jvm_unload,unload))native_private_unregister(&host_jvm_unload_range);return 0;
     }
     InterlockedExchange(&host_loader_installed,1);return host_library_load_ready();
 }

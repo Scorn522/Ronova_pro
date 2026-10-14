@@ -61,6 +61,7 @@ public final class AuditFixCheck {
     private static native void hostThreadEnd0();
     private static native void hostModuleLoad0();
     private static native void hostJniTable0();
+    private static native void hostJvmtiOutput0();
     private static native void hostModuleRelease0(String controlDll);
     private static native void hostModuleReleaseThread0(String controlDll);
     private static native void hostMemory0(String controlDll);
@@ -83,6 +84,11 @@ public final class AuditFixCheck {
         if(phase.equals("memory")){
             hostMemory0(System.getProperty("ronova.pro.control.native"));
             System.out.println("HOST_MEMORY_PASS actual_IAT_GPA current_process_pseudo_and_VM_rights_only_real_alias private_VirtualAlloc_write_read_protection_restored exact_control_DLL_VM_shadow_hook_thunk_same_value_write_refused page_rounded_shadow_tail_protect_refused protected_local_output_aliases_refused no_control_instruction_change no_fabricated_authority");
+            return;
+        }
+        if(phase.equals("jvmti-output")){
+            hostJvmtiOutput0();
+            System.out.println("JVMTI_OUTPUT_PASS actual_GetEnv live_VM_JVMTI_slots_refused_bytes_and_protection_preserved ordinary_Allocate_Deallocate optional_NULL original_INVALID_METHODID grouped_GetMethodName_no_partial_output GetStackTrace_frames_count_no_partial_output control_Deallocate_refused actual_Dispose no_fabricated_authority");
             return;
         }
         if(phase.equals("jni-table")||phase.equals("strength")){

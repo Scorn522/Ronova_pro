@@ -285,6 +285,125 @@ JNIEXPORT void JNICALL Java_dev_ronova_pro_AuditFixCheck_hostJniTable0(JNIEnv *e
     if((*api)->DisposeEnvironment(api)!=JVMTI_ERROR_NONE&&!failure)failure="JNI_TABLE_ACTUAL_DISPOSE";
     if(failure)load_ti_fail(env,failure);
 }
+/* Only the public VM, JVMTI and current JNI environment table slots are attack targets. */
+typedef struct LoadJvmtiOutputSlot {
+    void *address;MEMORY_BASIC_INFORMATION region;unsigned char bytes[sizeof(void*)];
+} LoadJvmtiOutputSlot;
+static int load_ti_output_slot(LoadJvmtiOutputSlot *slot,void *address){
+    MEMORY_BASIC_INFORMATION region={0};
+    if(!address||VirtualQuery(address,&region,sizeof(region))!=sizeof(region)||region.State!=MEM_COMMIT
+            ||(region.Protect&(PAGE_GUARD|PAGE_NOACCESS)))return 0;
+    uintptr_t offset=(uintptr_t)address-(uintptr_t)region.BaseAddress;
+    if(offset>=region.RegionSize||sizeof(slot->bytes)>region.RegionSize-offset)return 0;
+    slot->address=address;slot->region=region;memcpy(slot->bytes,address,sizeof(slot->bytes));return 1;
+}
+static int load_ti_output_unchanged(const LoadJvmtiOutputSlot *slot){
+    MEMORY_BASIC_INFORMATION region={0};
+    return VirtualQuery(slot->address,&region,sizeof(region))==sizeof(region)&&region.State==MEM_COMMIT
+            &&region.AllocationBase==slot->region.AllocationBase&&region.Type==slot->region.Type&&region.Protect==slot->region.Protect
+            &&!memcmp(slot->bytes,slot->address,sizeof(slot->bytes));
+}
+JNIEXPORT void JNICALL Java_dev_ronova_pro_AuditFixCheck_hostJvmtiOutput0(JNIEnv *env,jclass check){
+    JavaVM *vm=NULL;jvmtiEnv *api=NULL;const char *failure=NULL;jvmtiError error=JVMTI_ERROR_NONE;
+    unsigned char *allocated=NULL;char *name=NULL,*signature=NULL;jthread current=NULL;void *attackSlot=NULL;int unexpectedDeallocation=0;
+    jintArray copiedArray=NULL;jint *copiedElements=NULL;
+    JNIEnv *observedEnv=NULL;jint ordinaryGetEnv=JNI_ERR,ordinaryAttach=JNI_ERR,ordinaryDaemon=JNI_ERR,jniResult=JNI_OK;
+    if((*env)->GetJavaVM(env,&vm)!=JNI_OK||!vm
+            ||(*vm)->GetEnv(vm,(void**)&api,JVMTI_VERSION_1_2)!=JNI_OK||!api){
+        load_ti_fail(env,"JVMTI_OUTPUT_REAL_ENVIRONMENT_REQUIRED");return;
+    }
+    LoadJvmtiOutputSlot slots[3]={0};
+    if(!load_ti_output_slot(&slots[0],vm)||!load_ti_output_slot(&slots[1],api)||!load_ti_output_slot(&slots[2],env)){
+        (*api)->DisposeEnvironment(api);load_ti_fail(env,"JVMTI_OUTPUT_ACTUAL_VM_ENVIRONMENT_SLOTS");return;
+    }
+    jint version=0,copyVersion=0,normalFrames=0;
+    jniResult=ordinaryGetEnv=(*vm)->GetEnv(vm,(void**)&observedEnv,JNI_VERSION_1_8);
+    if(jniResult!=JNI_OK||observedEnv!=env){failure="VM_OUTPUT_ORDINARY_CURRENT_GETENV";goto done;}
+    observedEnv=NULL;jniResult=ordinaryAttach=(*vm)->AttachCurrentThread(vm,(void**)&observedEnv,NULL);
+    if(jniResult!=JNI_OK||observedEnv!=env){failure="VM_OUTPUT_ORDINARY_ALREADY_ATTACHED";goto done;}
+    observedEnv=NULL;jniResult=ordinaryDaemon=(*vm)->AttachCurrentThreadAsDaemon(vm,(void**)&observedEnv,NULL);
+    if(jniResult!=JNI_OK||observedEnv!=env){failure="VM_OUTPUT_ORDINARY_ALREADY_ATTACHED_DAEMON";goto done;}
+    error=(*api)->GetVersionNumber(api,&version);
+    if(error!=JVMTI_ERROR_NONE||!version){failure="JVMTI_OUTPUT_ORDINARY_VERSION";goto done;}
+    error=(*api)->GetVersionNumber(api,NULL);
+    if(error!=JVMTI_ERROR_NULL_POINTER){failure="JVMTI_OUTPUT_REQUIRED_NULL_ERROR";goto done;}
+    error=(*api)->Allocate(api,32,&allocated);
+    if(error!=JVMTI_ERROR_NONE||!allocated){failure="JVMTI_OUTPUT_REAL_ALLOCATION";goto done;}
+    memset(allocated,0x5a,32);
+    if(allocated[0]!=0x5a||allocated[31]!=0x5a){failure="JVMTI_OUTPUT_REAL_ALLOCATION_CONTENT";goto done;}
+    error=(*api)->Deallocate(api,NULL);
+    if(error!=JVMTI_ERROR_NONE){failure="JVMTI_OUTPUT_OPTIONAL_NULL_DEALLOCATION";goto done;}
+    copiedArray=(*env)->NewIntArray(env,1);
+    if(!copiedArray||(*env)->ExceptionCheck(env)){failure="JVMTI_OUTPUT_REAL_JNI_ARRAY";goto done;}
+    jboolean isCopy=JNI_FALSE;copiedElements=(*env)->GetIntArrayElements(env,copiedArray,&isCopy);
+    if(!copiedElements||isCopy!=JNI_TRUE||(*env)->ExceptionCheck(env)){failure="JVMTI_OUTPUT_REAL_JNI_ARRAY_COPY";goto done;}
+    error=(*api)->GetVersionNumber(api,copiedElements);copyVersion=copiedElements[0];
+    if(error!=JVMTI_ERROR_NONE||copyVersion!=version){failure="JVMTI_OUTPUT_JNI_COPY_VERSION";goto done;}
+    (*env)->ReleaseIntArrayElements(env,copiedArray,copiedElements,JNI_ABORT);copiedElements=NULL;
+    if((*env)->ExceptionCheck(env)){failure="JVMTI_OUTPUT_JNI_COPY_ABORT_RELEASE";goto done;}
+    (*env)->DeleteLocalRef(env,copiedArray);copiedArray=NULL;
+    jmethodID method=(*env)->GetStaticMethodID(env,check,"main","([Ljava/lang/String;)V");
+    if(!method||(*env)->ExceptionCheck(env)){failure="JVMTI_OUTPUT_ACTUAL_METHOD_ID";goto done;}
+    error=(*api)->GetMethodName(api,method,&name,&signature,NULL);
+    if(error!=JVMTI_ERROR_NONE||!name||!signature||strcmp(name,"main")||strcmp(signature,"([Ljava/lang/String;)V")){
+        failure="JVMTI_OUTPUT_ORDINARY_METHOD_OPTIONAL_NULL";goto done;
+    }
+    char invalidCanary=0;char *invalidName=&invalidCanary;
+    error=(*api)->GetMethodName(api,NULL,&invalidName,NULL,NULL);
+    if(error!=JVMTI_ERROR_INVALID_METHODID){failure="JVMTI_OUTPUT_ORIGINAL_INVALID_METHOD_ID";goto done;}
+    error=(*api)->GetCurrentThread(api,&current);
+    if(error!=JVMTI_ERROR_NONE||!current){failure="JVMTI_OUTPUT_ACTUAL_CURRENT_THREAD";goto done;}
+    jvmtiFrameInfo frames[2]={{0}},before[2];jint count=0;
+    error=(*api)->GetStackTrace(api,current,0,2,frames,&count);
+    if(error!=JVMTI_ERROR_NONE||count<1||count>2||!frames[0].method){failure="JVMTI_OUTPUT_ORDINARY_STACK_TRACE";goto done;}
+    normalFrames=count;
+    for(unsigned target=0;target<3;target++){
+        void *slot=slots[target].address;attackSlot=slot;
+        jniResult=(*vm)->GetEnv(vm,(void**)slot,JVMTI_VERSION_1_2);
+        if(jniResult!=JNI_ERR){failure="VM_OUTPUT_CONTROL_GETENV_ACCEPTED";goto done;}
+        if(!load_ti_output_unchanged(&slots[0])||!load_ti_output_unchanged(&slots[1])||!load_ti_output_unchanged(&slots[2])){failure="VM_OUTPUT_CONTROL_GETENV_CHANGED_SLOT";goto done;}
+        jniResult=(*vm)->AttachCurrentThread(vm,(void**)slot,NULL);
+        if(jniResult!=JNI_ERR){failure="VM_OUTPUT_CONTROL_ATTACH_ACCEPTED";goto done;}
+        if(!load_ti_output_unchanged(&slots[0])||!load_ti_output_unchanged(&slots[1])||!load_ti_output_unchanged(&slots[2])){failure="VM_OUTPUT_CONTROL_ATTACH_CHANGED_SLOT";goto done;}
+        jniResult=(*vm)->AttachCurrentThreadAsDaemon(vm,(void**)slot,NULL);
+        if(jniResult!=JNI_ERR){failure="VM_OUTPUT_CONTROL_ATTACH_DAEMON_ACCEPTED";goto done;}
+        if(!load_ti_output_unchanged(&slots[0])||!load_ti_output_unchanged(&slots[1])||!load_ti_output_unchanged(&slots[2])){failure="VM_OUTPUT_CONTROL_ATTACH_DAEMON_CHANGED_SLOT";goto done;}
+        error=(*api)->GetVersionNumber(api,(jint*)slot);
+        if(error!=JVMTI_ERROR_ACCESS_DENIED){failure="JVMTI_OUTPUT_CONTROL_VERSION_ACCEPTED";goto done;}
+        if(!load_ti_output_unchanged(&slots[0])||!load_ti_output_unchanged(&slots[1])||!load_ti_output_unchanged(&slots[2])){failure="JVMTI_OUTPUT_CONTROL_VERSION_CHANGED_SLOT";goto done;}
+        error=(*api)->Allocate(api,16,(unsigned char**)slot);
+        if(error!=JVMTI_ERROR_ACCESS_DENIED){failure="JVMTI_OUTPUT_CONTROL_ALLOCATION_ACCEPTED";goto done;}
+        if(!load_ti_output_unchanged(&slots[0])||!load_ti_output_unchanged(&slots[1])||!load_ti_output_unchanged(&slots[2])){failure="JVMTI_OUTPUT_CONTROL_ALLOCATION_CHANGED_SLOT";goto done;}
+        char canary=0;char *ordinary=&canary;
+        error=(*api)->GetMethodName(api,method,&ordinary,(char**)slot,NULL);
+        if(error!=JVMTI_ERROR_ACCESS_DENIED||ordinary!=&canary){failure="JVMTI_OUTPUT_METHOD_PARTIAL_COMMIT";goto done;}
+        if(!load_ti_output_unchanged(&slots[0])||!load_ti_output_unchanged(&slots[1])||!load_ti_output_unchanged(&slots[2])){failure="JVMTI_OUTPUT_METHOD_CHANGED_SLOT";goto done;}
+        memset(frames,0x5a,sizeof(frames));memcpy(before,frames,sizeof(frames));
+        error=(*api)->GetStackTrace(api,current,0,2,frames,(jint*)slot);
+        if(error!=JVMTI_ERROR_ACCESS_DENIED||memcmp(frames,before,sizeof(frames))){failure="JVMTI_OUTPUT_STACK_FRAMES_PARTIAL_COMMIT";goto done;}
+        if(!load_ti_output_unchanged(&slots[0])||!load_ti_output_unchanged(&slots[1])||!load_ti_output_unchanged(&slots[2])){failure="JVMTI_OUTPUT_STACK_COUNT_CHANGED_SLOT";goto done;}
+        count=-37;
+        error=(*api)->GetStackTrace(api,current,0,1,(jvmtiFrameInfo*)slot,&count);
+        if(error!=JVMTI_ERROR_ACCESS_DENIED||count!=-37){failure="JVMTI_OUTPUT_STACK_COUNT_PARTIAL_COMMIT";goto done;}
+        if(!load_ti_output_unchanged(&slots[0])||!load_ti_output_unchanged(&slots[1])||!load_ti_output_unchanged(&slots[2])){failure="JVMTI_OUTPUT_STACK_FRAMES_CHANGED_SLOT";goto done;}
+        error=(*api)->Deallocate(api,(unsigned char*)slot);
+        if(error!=JVMTI_ERROR_ACCESS_DENIED){unexpectedDeallocation=1;failure="JVMTI_OUTPUT_CONTROL_DEALLOCATION_ACCEPTED";goto done;}
+        if(!load_ti_output_unchanged(&slots[0])||!load_ti_output_unchanged(&slots[1])||!load_ti_output_unchanged(&slots[2])){failure="JVMTI_OUTPUT_CONTROL_DEALLOCATION_CHANGED_SLOT";goto done;}
+    }
+done:
+    if(copiedElements)(*env)->ReleaseIntArrayElements(env,copiedArray,copiedElements,JNI_ABORT);
+    if(copiedArray)(*env)->DeleteLocalRef(env,copiedArray);
+    if(current&&!unexpectedDeallocation)(*env)->DeleteLocalRef(env,current);
+    /* Never repair a changed control slot or read one after an unexpected free. */
+    if(!unexpectedDeallocation&&load_ti_output_unchanged(&slots[0])&&load_ti_output_unchanged(&slots[1])&&load_ti_output_unchanged(&slots[2])){
+        if(allocated){jvmtiError cleanup=(*api)->Deallocate(api,allocated);if(cleanup!=JVMTI_ERROR_NONE&&!failure){failure="JVMTI_OUTPUT_REAL_ALLOCATION_RELEASE";error=cleanup;}}
+        if(name){jvmtiError cleanup=(*api)->Deallocate(api,(unsigned char*)name);if(cleanup!=JVMTI_ERROR_NONE&&!failure){failure="JVMTI_OUTPUT_REAL_NAME_RELEASE";error=cleanup;}}
+        if(signature){jvmtiError cleanup=(*api)->Deallocate(api,(unsigned char*)signature);if(cleanup!=JVMTI_ERROR_NONE&&!failure){failure="JVMTI_OUTPUT_REAL_SIGNATURE_RELEASE";error=cleanup;}}
+        jvmtiError cleanup=(*api)->DisposeEnvironment(api);if(cleanup!=JVMTI_ERROR_NONE&&!failure){failure="JVMTI_OUTPUT_REAL_DISPOSE";error=cleanup;}
+    }else if(!failure)failure="JVMTI_OUTPUT_CONTROL_SLOT_CHANGED";
+    if(failure){fprintf(stderr,"JVMTI_OUTPUT_FAILED stage=%s target=%p jni=%d jvmti=%d\n",failure,attackSlot,(int)jniResult,(int)error);fflush(stderr);load_ti_fail(env,failure);}
+    else {fprintf(stdout,"JVMTI_OUTPUT_ACTUAL vmSlot=%p environmentSlot=%p jniEnvironmentSlot=%p version=0x%X jniCopyVersion=0x%X normalFrames=%d ordinaryGetEnvJNI18=%d attachedCurrent=%d daemonCurrent=%d vmJvmtiJniSlots_GetEnvJVMTI12_Attach_AttachDaemon=JNI_ERR\n",(void*)vm,(void*)api,(void*)env,(unsigned)version,(unsigned)copyVersion,(int)normalFrames,(int)ordinaryGetEnv,(int)ordinaryAttach,(int)ordinaryDaemon);fflush(stdout);}
+}
 static int load_jvmti_environment(JavaVM *vm,JNIEnv *env,jclass check){
     jvmtiEnv *api=NULL;
     if((*vm)->GetEnv(vm,(void**)&api,JVMTI_VERSION_1_2)!=JNI_OK||!api){load_ti_fail(env,"REAL_JVMTI_GETENV_FAILED");return 0;}
