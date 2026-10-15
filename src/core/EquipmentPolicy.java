@@ -24,7 +24,7 @@ import net.minecraft.world.level.Level;
 
 /** Current equipment shares, rather than a snapshot of items the body once held. */
 public final class EquipmentPolicy {
-    private enum Kind { BODY, GAME_MODE, INVENTORY, COMPARTMENTS, COMPARTMENT_ARRAY, EQUIPMENT_LIST, EQUIPMENT_BACKING, EQUIPMENT_ARRAY, STACK, NBT }
+    private enum Kind { BODY, GAME_MODE, INVENTORY, COMPARTMENTS, COMPARTMENT_ARRAY, EQUIPMENT_LIST, EQUIPMENT_BACKING, EQUIPMENT_ARRAY, CURATIVE_LIST, CURATIVE_ARRAY, STACK, NBT }
     private record Slot(Field field,long offset,int width) { }
     private static final class Owner {
         final WeakReference<LivingEntity> entity;final long generation;
@@ -253,10 +253,14 @@ public final class EquipmentPolicy {
             case EQUIPMENT_LIST -> list(owner,link.part)==value;
             case EQUIPMENT_BACKING -> backing(list(owner,link.part))==value;
             case EQUIPMENT_ARRAY -> array(backing(list(owner,link.part)))==value;
-            case STACK -> shares(owner,link.stack.get())!=0&&link.stack.get()==value;
-            case NBT -> shares(owner,link.stack.get())!=0&&walk(owner,link.stack.get(),value,false,null);
+            case CURATIVE_LIST -> LiveStatePolicy.curativeListCurrent(owner.entity.get(),owner.generation,value);
+            case CURATIVE_ARRAY -> LiveStatePolicy.curativeArrayCurrent(owner.entity.get(),owner.generation,value);
+            case STACK -> stackCurrent(owner,link.stack.get())&&link.stack.get()==value;
+            case NBT -> stackCurrent(owner,link.stack.get())&&walk(owner,link.stack.get(),value,false,null);
         };}catch(ReflectiveOperationException failure){throw new IllegalStateException("EQUIPMENT_CURRENT_CARRIER_ACCESS",failure);}
     }
+    private static boolean curativeStack(Owner owner,ItemStack stack){return LiveStatePolicy.curativeStackCurrent(owner.entity.get(),owner.generation,stack);}
+    private static boolean stackCurrent(Owner owner,ItemStack stack){return shares(owner,stack)!=0||curativeStack(owner,stack);}
     private static boolean compartmentArray(Owner owner,Object expected)throws IllegalAccessException{
         Inventory inventory=inventory(owner);if(inventory==null)return false;Object compartments=((Access.InventoryState)inventory).pro$compartments();
         for(Slot slot:slots(compartments))if(slot.field.getType().isArray()&&slot.field.get(compartments)==expected)return true;
@@ -300,6 +304,32 @@ public final class EquipmentPolicy {
         }
     }
     private static void captureStack(Owner owner,ItemStack stack){if(stack!=null&&stack!=ItemStack.EMPTY){link(owner,stack,Kind.STACK,-1,stack);walk(owner,stack,null,true,null);}}
+    record CurativeList(Object[] values,int size) { }
+    static CurativeList knownCurativeLayout(Object list){
+        return initialized&&list!=null&&(list.getClass()==ArrayList.class||list.getClass()==ARRAY_LIST)?curativeLayout(list):null;
+    }
+    /** Use the same actual list storage and stack/NBT graph as equipped stacks. */
+    static CurativeList curativeLayout(Object list){
+        if(!initialized)throw new IllegalStateException("CURATIVE_GRAPH_NOT_INITIALIZED");
+        try {
+            Object values;int size;
+            if(list!=null&&list.getClass()==ArrayList.class){values=LIST_VALUES.get(list);size=LIST_SIZE.getInt(list);}
+            else if(list!=null&&list.getClass()==ARRAY_LIST){values=ARRAY_VALUES.get(list);size=values instanceof Object[] array?array.length:-1;}
+            else throw new IllegalStateException("CURATIVE_LIST_IMPLEMENTATION_UNRESOLVED:"+(list==null?"null":list.getClass().getName()));
+            if(!(values instanceof Object[] array)||size<0||size>array.length||size>MAX_GRAPH)throw new IllegalStateException("CURATIVE_LIST_STORAGE_UNRESOLVED");
+            return new CurativeList(array,size);
+        }catch(IllegalAccessException failure){throw new IllegalStateException("CURATIVE_LIST_STORAGE_ACCESS",failure);}
+    }
+    static void captureCurativeItems(LivingEntity entity,long generation,Object list){
+        if(list==null)return;CurativeList layout=curativeLayout(list);
+        for(int at=0;at<layout.size;at++)if(!(layout.values[at] instanceof ItemStack stack)||stack.getClass()!=ItemStack.class)
+            throw new IllegalStateException("CURATIVE_ITEMSTACK_IMPLEMENTATION_UNRESOLVED");
+        if(entity==null||generation<=0||ProRuntime.liveStateGeneration(entity)!=generation)return;
+        Owner owner=OWNERS.get(entity);
+        if(owner==null||owner.generation!=generation){MINING.remove(entity);owner=new Owner(entity,generation);OWNERS.put(entity,owner);}
+        link(owner,list,Kind.CURATIVE_LIST,-1,null);link(owner,layout.values,Kind.CURATIVE_ARRAY,-1,null);
+        for(int at=0;at<layout.size;at++)captureStack(owner,(ItemStack)layout.values[at]);
+    }
     /** Traverse only real NBT storage. A HashMap node belongs only while linked from the current table. */
     private static boolean walk(Owner owner,ItemStack stack,Object expected,boolean capture,Object proposed){
         if(stack==null||stack==ItemStack.EMPTY)return false;
@@ -808,7 +838,12 @@ public final class EquipmentPolicy {
             if(path)return true;
         }return false;
     }
-    private static boolean permitStack(Link link,boolean entry){ItemStack stack=link.stack.get();return permitted(link.owner,shares(link.owner,stack),stack,entry);}
+    private static boolean permitStack(Link link,boolean entry){
+        ItemStack stack=link.stack.get();
+        // Vanilla replaces a curative recipe list; it never edits its ItemStacks
+        // or NBT in place. An equipment action cannot lend it that permission.
+        return !curativeStack(link.owner,stack)&&permitted(link.owner,shares(link.owner,stack),stack,entry);
+    }
     private static boolean anySlotDenied(Owner owner,boolean entry){
         for(int part=0;part<(owner.entity.get() instanceof Player?3:2);part++){
             Object[] values=(Object[])array(backing(list(owner,part)));if(values==null)continue;
@@ -817,6 +852,7 @@ public final class EquipmentPolicy {
     }
     public static boolean listWriteDenied(Object receiver,int index,Object next){
         if(!initialized)return false;
+        for(Link link:links(receiver))if((link.kind==Kind.CURATIVE_LIST||link.kind==Kind.CURATIVE_ARRAY)&&current(link,receiver))return true;
         for(Link link:links(receiver))if((link.kind==Kind.EQUIPMENT_LIST||link.kind==Kind.EQUIPMENT_BACKING||link.kind==Kind.EQUIPMENT_ARRAY)&&current(link,receiver)){
             Object[] values=(Object[])array(backing(list(link.owner,link.part)));if(index<0||index>=values.length)return false;
             if(values[index]==next)continue;int mask=bit(link.owner,link.part,index);if(mask==0)continue;
@@ -876,7 +912,7 @@ public final class EquipmentPolicy {
                 Object[] values=(Object[])array(receiver);return index>=0&&index<values.length&&elementDenied(receiver,values[index],args[1]);
             }
             for(Link link:links(receiver))if(current(link,receiver)){
-                if(link.kind==Kind.NBT)return true;
+                if(link.kind==Kind.NBT||link.kind==Kind.CURATIVE_LIST)return true;
                 if(link.kind==Kind.EQUIPMENT_BACKING&&anySlotDenied(link.owner,true))return true;
             }
         }
@@ -890,6 +926,7 @@ public final class EquipmentPolicy {
     static boolean elementDenied(Object container,Object old,Object next){
         if(old==next&&old!=null)return false;
         for(Link link:links(container))if(current(link,container)){
+            if(link.kind==Kind.CURATIVE_LIST||link.kind==Kind.CURATIVE_ARRAY)return true;
             if(link.kind==Kind.NBT){if(!permitStack(link,false))return true;cancelToolMining(link);if(next!=null)walk(link.owner,link.stack.get(),null,true,next);}
             else if(link.kind==Kind.COMPARTMENTS||link.kind==Kind.COMPARTMENT_ARRAY)return true;
             else if(link.kind==Kind.EQUIPMENT_LIST||link.kind==Kind.EQUIPMENT_BACKING){
@@ -910,6 +947,7 @@ public final class EquipmentPolicy {
         Object old;try{old=selected.field.get(receiver);}catch(IllegalAccessException failure){throw new IllegalStateException("EQUIPMENT_FIELD_READ",failure);}
         if(selected.field.getType().isPrimitive()?Objects.equals(old,next):old==next)return false;
         for(Link link:links(receiver))if(current(link,receiver)){
+            if(link.kind==Kind.CURATIVE_LIST)return true;
             if(link.kind==Kind.GAME_MODE){if(gameFieldDenied(link.owner,(ServerPlayerGameMode)receiver,name,next))return true;continue;}
             if(link.kind==Kind.BODY||link.kind==Kind.INVENTORY||link.kind==Kind.EQUIPMENT_LIST||link.kind==Kind.EQUIPMENT_BACKING||link.kind==Kind.COMPARTMENTS){if(structureFieldDenied(link,declaring,name,next))return true;continue;}
             if(link.kind==Kind.STACK){
@@ -999,7 +1037,7 @@ public final class EquipmentPolicy {
         if(!initialized||receiver==null||length<=0)return false;
         if(receiver.getClass().isArray()){
             for(Link link:links(receiver))if(current(link,receiver)){
-                if(link.kind==Kind.EQUIPMENT_ARRAY||link.kind==Kind.COMPARTMENT_ARRAY)return true;
+                if(link.kind==Kind.EQUIPMENT_ARRAY||link.kind==Kind.COMPARTMENT_ARRAY||link.kind==Kind.CURATIVE_ARRAY)return true;
                 if(link.kind==Kind.NBT){if(!permitStack(link,false))return true;cancelToolMining(link);}
             }return false;
         }

@@ -82,6 +82,7 @@ public final class Access {
     @Mixin(net.minecraft.world.effect.MobEffectInstance.class) public interface EffectState {
         @Accessor("hiddenEffect") net.minecraft.world.effect.MobEffectInstance pro$hiddenEffect();
         @Accessor("factorData") Optional<net.minecraft.world.effect.MobEffectInstance.FactorData> pro$factorData();
+        @Accessor(value="curativeItems",remap=false) List<net.minecraft.world.item.ItemStack> pro$curativeItems();
     }
     @Mixin(net.minecraft.network.syncher.SynchedEntityData.class) public interface Data {
         @Invoker("getItem") <T> net.minecraft.network.syncher.SynchedEntityData.DataItem<T> pro$item(net.minecraft.network.syncher.EntityDataAccessor<T> key);

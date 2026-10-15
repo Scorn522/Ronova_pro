@@ -43,6 +43,8 @@
     "WorldControlHooks$SectionWrites",
     "WorldControlHooks$PaletteWrites",
     "WorldControlHooks$StorageWrites",
+    "WorldControlHooks$StateRegistry",
+    "WorldControlHooks$GlobalRegistryMap",
     "WorldControlHooks$Block",
     "WorldControlHooks$Scheduled",
     "WorldControlHooks$SavedTicks",

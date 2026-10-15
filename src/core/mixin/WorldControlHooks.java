@@ -109,6 +109,17 @@ public final class WorldControlHooks {
             if(ProRuntime.worldStorageMutationDenied(storage,index,value))callback.setReturnValue(storage.get(index));
         }
     }
+    @Mixin(net.minecraft.core.IdMapper.class) public abstract static class StateRegistry<T> {
+        // addMapping publishes the reverse entry first. Reject the actual
+        // state/id pair before either side can leave a partial frozen mapping.
+        @Inject(method="addMapping(Ljava/lang/Object;I)V",at=@At("HEAD"),require=1,allow=1)
+        private void mapping(T state,int id,CallbackInfo callback){
+            if(ProRuntime.worldRegistryMappingDenied((net.minecraft.core.IdMapper<?>)(Object)this,state,id))
+                throw new SecurityException("FROZEN_WORLD_REGISTRY_MAPPING_REJECTED");
+        }
+    }
+    @Mixin(value=it.unimi.dsi.fastutil.objects.Object2IntOpenCustomHashMap.class,remap=false)
+    public abstract static class GlobalRegistryMap { }
     @Mixin(targets="net.minecraft.world.level.chunk.LevelChunk$BoundTickingBlockEntity") public abstract static class Block {
         @Shadow @Final private net.minecraft.world.level.block.entity.BlockEntity blockEntity;
         @Inject(method="tick",at=@At("HEAD"),cancellable=true)

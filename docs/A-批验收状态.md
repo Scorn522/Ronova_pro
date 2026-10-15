@@ -1,5 +1,19 @@
 # Ronova Pro 当前进度
 
+## 2026-10-15：C 接续——标准全局表、解药图与满队列
+
+接续 `646a30e`，Java ABI81 / Native ABI74 / Storage3 / Journal6，协议 `r3-client-8`。上一整包已构建并同步后，本轮继续补已确认的标准载体，不把未验证项改成已完成。
+
+标准 BlockState IdMapper 的实际 idToT ArrayList/size/backing、tToId identity map 的 key/value/mask/strategy/defaultReturn 及其数组进入原五查询。所有冻结格保留网络序列化所用的 state→id；Global palette 另保留实际读取的 byId 槽。addMapping 在发布反向条目前先核对真实 state/id，负 id 也不能先破坏冻结反查再靠原异常退出。原版 rehash 的完整本次 tuple 经冻结内容比较后，逐字段按实际 receiver/值/原顺序与同栈层接续，正常及异常 finally 撤销；未用 ID 的新增及原版扩容保留。未知 List/registry/strategy 不执行，私有表 shiftKeys 的移除重排仍可能被拒绝，没有增加搬移许可。
+
+效果的当前 activeEffects/hidden→curativeItems→标准列表/backing→真实 ItemStack/NBT 复用已有装备图与写门，多 owner 分别核对，删除或替换后旧根立即失去当前归属。首次 getter 只接受真实 IForgeMobEffect 默认 provider 及本次实际返回列表的 null→值发布，正常/异常 finally 结清；原 setDetailsFrom/setCurativeItems 沿原合法 scope，发布前捕获新图。不借装备动作修改 recipe；未知自定义 List/ItemStack/provider override 和未序列化 capability 保留边界。
+
+默认满队列拒绝补真实 offerTask false→addTask 假分支→原 RejectedExecutionHandlers$1 ATHROW 事件，绑定同一 Submission/task/executor、实际 LinkedBlockingQueue 与默认 REJECT 单例、实际栈底和当前 VM 方法/BCI/版本。确认未入队后沿既有 Cleanup0/1、原 cause 和一次 cancel 结清；custom/backoff/MPSC/接受后 throw 或任何身份/读取变化仍 pending。没有新增 Native 接口或许可层。
+
+统一构建 **PASS，57秒**，27项任务中20项执行、7项保持最新；匹配 AuditFixCheck 编译退出0。真实 Netty 四目标及原 fastutil rehash 经本批转换/织入后，`-Xverify:all` 加载检查 **退出0、NETWORK_BYTECODE_VERIFY_PASS、WORLD_REGISTRY_BYTECODE_VERIFY_PASS**；rehash 检查保留织入器生成的 frame，仅计算 maxs，不用重算 frame 掩盖安装问题。真实游戏冻结/同步、解药及停组/满队列分支仍 **NOTRUN**；驱动未部署，完整 C/B 未完成。匹配候选已写入 `distribution/candidate-c-java81-native74-carriers-wip-20261015`，Core2728834、prelaunch23309字节；源码、匹配 JAR 和原摘要同步 GitHub，未生成源码 ZIP。
+
+---
+
 ## 2026-10-15：C 接续——冻结载体、效果内部状态与拒绝队列
 
 接续 `ecae56e`，Java ABI80 / Native ABI74 / Storage3 / Journal6，协议 `r3-client-8`。本包继续实际强度源码；Native/驱动未改，自身外观与武器注册暂缓。

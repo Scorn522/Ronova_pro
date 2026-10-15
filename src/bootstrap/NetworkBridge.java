@@ -78,6 +78,7 @@ public final class NetworkBridge {
         final Submission parent;final Thread thread=Thread.currentThread();final Class<?> declaring;final int boundaryDepth;
         final Ref<Object> executor,task;final Write write;
         Throwable rejection,queryFailure;Cleanup cleanup;boolean proven,caught,claimed,closed;
+        Ref<Object> failedQueue,failedHandler;Class<?> offerExecutor;int offerDepth;boolean offerRejected;
         Submission(Object executor,Object task,Write write,Class<?> declaring,int boundaryDepth){
             parent=SUBMITTING.get();this.executor=new Ref<>(executor);this.task=new Ref<>(task);this.write=write;this.declaring=declaring;this.boundaryDepth=boundaryDepth;
         }
@@ -231,6 +232,60 @@ public final class NetworkBridge {
     private static boolean writeTuple(Object task,Write write){
         return task!=null&&field(task,"ctx")==write.context().get()&&field(task,"msg")==write.message().get()&&field(task,"promise")==write.promise().get();
     }
+    /** The actual offerTask false value, while its producer frame is still live. */
+    public static void writeSubmissionOfferFailed(Object executor,Object task){
+        var frame=boundary();Class<?> base=frame.getDeclaringClass();
+        if(!base.getName().equals("io.netty.util.concurrent.SingleThreadEventExecutor")||!frame.getMethodName().equals("offerTask")||!frame.getDescriptor().equals("(Ljava/lang/Runnable;)Z"))throw new SecurityException("ACTUAL_NETTY_TASK_OFFER_FAILURE_REQUIRED");
+        Submission submission=SUBMITTING.get();
+        if(submission==null||submission.closed||submission.thread!=Thread.currentThread()||submission.rejection!=null||submission.offerDepth!=0
+                ||submission.executor.get()!=executor||submission.task.get()!=task)return;
+        try{
+            if(!NetworkCleanup.standardExecutor(executor,base))return;
+            Object queue=NetworkCleanup.rejectionQueue(executor,base),handler=NetworkCleanup.defaultRejectHandler(executor,base);
+            if(queue==null||handler==null||!offerFailurePath(submission,base)||!NetworkCleanup.submissionBoundary(submission.declaring,submission.boundaryDepth))return;
+            int depth=NativeControl.networkBoundaryDepth(base,"addTask");if(depth<=0)return;
+            Ref<Object> queueRef=new Ref<>(queue),handlerRef=new Ref<>(handler);protect(queueRef,handlerRef);
+            synchronized(CHANNELS){
+                if(WRITES.get(new Key(task,false))!=submission.write||!writeTuple(task,submission.write))return;
+                submission.failedQueue=queueRef;submission.failedHandler=handlerRef;submission.offerExecutor=base;submission.offerDepth=depth;
+            }
+        }catch(RuntimeException|Error unavailable){submission.queryFailure=unavailable;}
+    }
+    /** Pair that producer with the original addTask branch which consumes false. */
+    public static void writeSubmissionOfferRejected(Object executor,Object task){
+        var frame=boundary();Class<?> base=frame.getDeclaringClass();
+        if(!base.getName().equals("io.netty.util.concurrent.SingleThreadEventExecutor")||!frame.getMethodName().equals("addTask")||!frame.getDescriptor().equals("(Ljava/lang/Runnable;)V"))throw new SecurityException("ACTUAL_NETTY_TASK_OFFER_REJECTION_REQUIRED");
+        Submission submission=SUBMITTING.get();
+        if(submission==null||submission.closed||submission.thread!=Thread.currentThread()||submission.rejection!=null||submission.offerRejected
+                ||submission.executor.get()!=executor||submission.task.get()!=task||submission.offerExecutor!=base||submission.offerDepth<=0
+                ||submission.failedHandler==null||submission.failedQueue==null)return;
+        try{
+            Object handler=submission.failedHandler.get(),queue=submission.failedQueue.get();
+            if(handler==null||queue==null||NetworkCleanup.defaultRejectHandler(executor,base)!=handler||NetworkCleanup.rejectionQueue(executor,base)!=queue
+                    ||NativeControl.networkBoundaryDepth(base,"addTask")!=submission.offerDepth||!offerRejectionPath(submission,base)
+                    ||!NetworkCleanup.submissionBoundary(submission.declaring,submission.boundaryDepth))return;
+            synchronized(CHANNELS){if(WRITES.get(new Key(task,false))==submission.write&&writeTuple(task,submission.write))submission.offerRejected=true;}
+        }catch(RuntimeException|Error unavailable){submission.queryFailure=unavailable;}
+    }
+    /** The default singleton's original exception, before its actual ATHROW. */
+    public static void writeSubmissionDefaultRejected(Throwable failure,Object handler,Object task,Object executor){
+        var frame=boundary();Class<?> handlerType=frame.getDeclaringClass();
+        if(!handlerType.getName().equals("io.netty.util.concurrent.RejectedExecutionHandlers$1")||!frame.getMethodName().equals("rejected")
+                ||!frame.getDescriptor().equals("(Ljava/lang/Runnable;Lio/netty/util/concurrent/SingleThreadEventExecutor;)V")||handler==null||handler.getClass()!=handlerType)throw new SecurityException("ACTUAL_NETTY_DEFAULT_REJECTION_REQUIRED");
+        Submission submission=SUBMITTING.get();
+        if(submission==null||submission.closed||submission.thread!=Thread.currentThread()||submission.rejection!=null||failure==null
+                ||failure.getClass()!=java.util.concurrent.RejectedExecutionException.class||submission.executor.get()!=executor||submission.task.get()!=task)return;
+        submission.rejection=failure;
+        try{
+            Class<?> base=submission.offerExecutor;
+            if(base==null||!submission.offerRejected||submission.offerDepth<=0||submission.failedHandler==null||submission.failedHandler.get()!=handler||submission.failedQueue==null
+                    ||!NetworkCleanup.standardExecutor(executor,base)||NetworkCleanup.defaultRejectHandler(executor,base)!=handler
+                    ||NetworkCleanup.rejectionQueue(executor,base)!=submission.failedQueue.get()
+                    ||NativeControl.networkBoundaryDepth(base,"addTask")!=submission.offerDepth||!defaultRejectionPath(submission,handlerType,base)
+                    ||!NetworkCleanup.submissionBoundary(submission.declaring,submission.boundaryDepth))return;
+            synchronized(CHANNELS){if(WRITES.get(new Key(task,false))==submission.write&&writeTuple(task,submission.write))submission.proven=true;}
+        }catch(RuntimeException|Error unavailable){submission.queryFailure=unavailable;}
+    }
     /** Called immediately before the original static reject's actual ATHROW. */
     public static void writeSubmissionRejected(Throwable failure){
         var frame=boundary();if(!frame.getDeclaringClass().getName().equals("io.netty.util.concurrent.SingleThreadEventExecutor")||!frame.getMethodName().equals("reject")||!frame.getDescriptor().equals("()V"))throw new SecurityException("ACTUAL_NETTY_EXECUTOR_REJECTION_REQUIRED");
@@ -257,12 +312,39 @@ public final class NetworkBridge {
                 if(!cursor.hasNext()||!submissionFrame(cursor.next(),executorBase,"addTask","(Ljava/lang/Runnable;)V")||!cursor.hasNext())return false;
                 caller=cursor.next();
             }else if(!NetworkCleanup.removalQueue(executor,executorBase))return false;
-            if(!submissionFrame(caller,executorBase,"execute","(Ljava/lang/Runnable;Z)V")||!cursor.hasNext())return false;
-            var dispatch=cursor.next();boolean lazy=submissionFrame(dispatch,executorBase,"lazyExecute0","(Ljava/lang/Runnable;)V");
-            if(!lazy&&!submissionFrame(dispatch,executorBase,"execute0","(Ljava/lang/Runnable;)V")||!cursor.hasNext())return false;
-            if(!submissionFrame(cursor.next(),executorBase,lazy?"lazyExecute":"execute","(Ljava/lang/Runnable;)V")||!cursor.hasNext())return false;
-            return submissionFrame(cursor.next(),submission.declaring,"safeExecute","(Lio/netty/util/concurrent/EventExecutor;Ljava/lang/Runnable;Lio/netty/channel/ChannelPromise;Ljava/lang/Object;Z)Z");
+            return submissionDispatch(caller,cursor,submission,executorBase);
         });
+    }
+    private static boolean offerFailurePath(Submission submission,Class<?> executorBase){
+        return WALKER.walk(frames->{
+            var cursor=frames.dropWhile(frame->frame.getDeclaringClass().getNestHost()==NetworkBridge.class).iterator();
+            if(!cursor.hasNext()||!submissionFrame(cursor.next(),executorBase,"offerTask","(Ljava/lang/Runnable;)Z")||!cursor.hasNext())return false;
+            if(!submissionFrame(cursor.next(),executorBase,"addTask","(Ljava/lang/Runnable;)V")||!cursor.hasNext())return false;
+            return submissionDispatch(cursor.next(),cursor,submission,executorBase);
+        });
+    }
+    private static boolean offerRejectionPath(Submission submission,Class<?> executorBase){
+        return WALKER.walk(frames->{
+            var cursor=frames.dropWhile(frame->frame.getDeclaringClass().getNestHost()==NetworkBridge.class).iterator();
+            if(!cursor.hasNext()||!submissionFrame(cursor.next(),executorBase,"addTask","(Ljava/lang/Runnable;)V")||!cursor.hasNext())return false;
+            return submissionDispatch(cursor.next(),cursor,submission,executorBase);
+        });
+    }
+    private static boolean defaultRejectionPath(Submission submission,Class<?> handlerType,Class<?> executorBase){
+        return WALKER.walk(frames->{
+            var cursor=frames.dropWhile(frame->frame.getDeclaringClass().getNestHost()==NetworkBridge.class).iterator();
+            if(!cursor.hasNext()||!submissionFrame(cursor.next(),handlerType,"rejected","(Ljava/lang/Runnable;Lio/netty/util/concurrent/SingleThreadEventExecutor;)V")
+                    ||!cursor.hasNext()||!submissionFrame(cursor.next(),executorBase,"reject","(Ljava/lang/Runnable;)V")
+                    ||!cursor.hasNext()||!submissionFrame(cursor.next(),executorBase,"addTask","(Ljava/lang/Runnable;)V")||!cursor.hasNext())return false;
+            return submissionDispatch(cursor.next(),cursor,submission,executorBase);
+        });
+    }
+    private static boolean submissionDispatch(StackWalker.StackFrame execute,Iterator<StackWalker.StackFrame> cursor,Submission submission,Class<?> executorBase){
+        if(!submissionFrame(execute,executorBase,"execute","(Ljava/lang/Runnable;Z)V")||!cursor.hasNext())return false;
+        var dispatch=cursor.next();boolean lazy=submissionFrame(dispatch,executorBase,"lazyExecute0","(Ljava/lang/Runnable;)V");
+        if(!lazy&&!submissionFrame(dispatch,executorBase,"execute0","(Ljava/lang/Runnable;)V")||!cursor.hasNext())return false;
+        if(!submissionFrame(cursor.next(),executorBase,lazy?"lazyExecute":"execute","(Ljava/lang/Runnable;)V")||!cursor.hasNext())return false;
+        return submissionFrame(cursor.next(),submission.declaring,"safeExecute","(Lio/netty/util/concurrent/EventExecutor;Ljava/lang/Runnable;Lio/netty/channel/ChannelPromise;Ljava/lang/Object;Z)Z");
     }
     private static boolean submissionFrame(StackWalker.StackFrame frame,Class<?> type,String method,String descriptor){
         return frame.getDeclaringClass()==type&&frame.getMethodName().equals(method)&&frame.getDescriptor().equals(descriptor);

@@ -50,6 +50,8 @@ public final class LiveStateHooks {
     }
     @Mixin(MobEffectInstance.class)
     public abstract static class EffectValue {
+        @Inject(method="getCurativeItems",at=@At("HEAD"),remap=false)
+        private void ronova$liveCuratives(CallbackInfoReturnable<java.util.List<ItemStack>> callback) { }
         @Inject(method="tick",at=@At("HEAD"),cancellable=true)
         private void ronova$liveTick(LivingEntity entity,Runnable changed,CallbackInfoReturnable<Boolean> callback) {
             if(LiveStatePolicy.effectTickDenied((MobEffectInstance)(Object)this,entity))callback.setReturnValue(false);

@@ -15,8 +15,9 @@ final class NetworkBoundary {
     private static final String NETTY="io/netty/channel/AbstractChannelHandlerContext";
     private static final String WRITE=NETTY+"$WriteTask",BYTE_ENCODER="io/netty/handler/codec/MessageToByteEncoder";
     private static final String EXECUTOR="io/netty/util/concurrent/SingleThreadEventExecutor";
+    private static final String DEFAULT_REJECT="io/netty/util/concurrent/RejectedExecutionHandlers$1";
     private static final String SAFE_EXECUTE="(Lio/netty/util/concurrent/EventExecutor;Ljava/lang/Runnable;Lio/netty/channel/ChannelPromise;Ljava/lang/Object;Z)Z";
-    static final Set<String> TARGETS=Set.of(INSTANCE,REGISTRY,SIMPLE,CODEC,HANDLER,EVENT,CONNECTION,HOLDER,ENCODER,NETTY,WRITE,BYTE_ENCODER,EXECUTOR);
+    static final Set<String> TARGETS=Set.of(INSTANCE,REGISTRY,SIMPLE,CODEC,HANDLER,EVENT,CONNECTION,HOLDER,ENCODER,NETTY,WRITE,BYTE_ENCODER,EXECUTOR,DEFAULT_REJECT);
     private NetworkBoundary(){}
     static byte[] transform(ClassLoader loader,String name,byte[] bytes){
         if(!TARGETS.contains(name))return null;ClassNode node=new ClassNode();new ClassReader(bytes).accept(node,0);boolean changed=false;
@@ -77,6 +78,10 @@ final class NetworkBoundary {
             }
             if(name.equals(NETTY)&&method.name.equals("safeExecute")&&method.desc.equals(SAFE_EXECUTE)){writeSubmission(method);changed=true;}
             if(name.equals(EXECUTOR)&&method.name.equals("reject")&&method.desc.equals("()V")&&(method.access&Opcodes.ACC_STATIC)!=0){writeRejected(method);changed=true;}
+            if(name.equals(EXECUTOR)&&method.name.equals("addTask")&&method.desc.equals("(Ljava/lang/Runnable;)V")){writeOfferFailed(method);changed=true;}
+            if(name.equals(EXECUTOR)&&method.name.equals("offerTask")&&method.desc.equals("(Ljava/lang/Runnable;)Z"))writeOfferLayout(method);
+            if(name.equals(EXECUTOR)&&method.name.equals("reject")&&method.desc.equals("(Ljava/lang/Runnable;)V"))writeHandlerLayout(method);
+            if(name.equals(DEFAULT_REJECT)&&method.name.equals("rejected")&&method.desc.equals("(Ljava/lang/Runnable;Lio/netty/util/concurrent/SingleThreadEventExecutor;)V")){writeDefaultRejected(method);changed=true;}
             if(name.equals(NETTY)&&Set.of("invokeWrite","invokeWriteAndFlush").contains(method.name)&&args.length==2&&args[0].getDescriptor().equals("Ljava/lang/Object;")&&args[1].getDescriptor().equals("Lio/netty/channel/ChannelPromise;")&&(method.access&Opcodes.ACC_STATIC)==0){
                 InsnList guard=gate(vars[0],"outboundAllowed");rejectOutbound(method,guard,vars[0],vars[1],-1,method.name.equals("invokeWriteAndFlush")?"invokeFlush":null);
                 guard.add(new InsnNode(Opcodes.RETURN));endGate(guard);method.instructions.insert(guard);changed=true;
@@ -179,6 +184,49 @@ final class NetworkBoundary {
                 ||!(code.get(3) instanceof MethodInsnNode init)||init.getOpcode()!=Opcodes.INVOKESPECIAL||!init.owner.equals(type.desc)||!init.name.equals("<init>")||!init.desc.equals("(Ljava/lang/String;)V")
                 ||code.get(4).getOpcode()!=Opcodes.ATHROW||!method.tryCatchBlocks.isEmpty())throw new IllegalStateException("NETTY_EXECUTOR_REJECTION_LAYOUT_UNAVAILABLE");
         InsnList rejected=new InsnList();rejected.add(new InsnNode(Opcodes.DUP));call(rejected,"writeSubmissionRejected","(Ljava/lang/Throwable;)V");method.instructions.insertBefore(code.get(4),rejected);
+    }
+    private static boolean variable(AbstractInsnNode instruction,int opcode,int slot){return instruction instanceof VarInsnNode value&&value.getOpcode()==opcode&&value.var==slot;}
+    private static boolean invoke(AbstractInsnNode instruction,int opcode,String owner,String name,String descriptor){return instruction instanceof MethodInsnNode call&&call.getOpcode()==opcode&&call.owner.equals(owner)&&call.name.equals(name)&&call.desc.equals(descriptor);}
+    private static AbstractInsnNode executable(LabelNode label){AbstractInsnNode at=label;while(at!=null&&at.getOpcode()<0)at=at.getNext();return at;}
+    private static void writeOfferFailed(MethodNode method){
+        List<AbstractInsnNode> code=instructions(method);
+        if((method.access&Opcodes.ACC_STATIC)!=0||code.size()!=12||!method.tryCatchBlocks.isEmpty()
+                ||!variable(code.get(0),Opcodes.ALOAD,1)||!(code.get(1) instanceof LdcInsnNode name)||!"task".equals(name.cst)
+                ||!invoke(code.get(2),Opcodes.INVOKESTATIC,"io/netty/util/internal/ObjectUtil","checkNotNull","(Ljava/lang/Object;Ljava/lang/String;)Ljava/lang/Object;")||code.get(3).getOpcode()!=Opcodes.POP
+                ||!variable(code.get(4),Opcodes.ALOAD,0)||!variable(code.get(5),Opcodes.ALOAD,1)||!invoke(code.get(6),Opcodes.INVOKEVIRTUAL,EXECUTOR,"offerTask","(Ljava/lang/Runnable;)Z")
+                ||!(code.get(7) instanceof JumpInsnNode accepted)||accepted.getOpcode()!=Opcodes.IFNE||executable(accepted.label)!=code.get(11)
+                ||!variable(code.get(8),Opcodes.ALOAD,0)||!variable(code.get(9),Opcodes.ALOAD,1)||!invoke(code.get(10),Opcodes.INVOKEVIRTUAL,EXECUTOR,"reject","(Ljava/lang/Runnable;)V")
+                ||code.get(11).getOpcode()!=Opcodes.RETURN)throw new IllegalStateException("NETTY_WRITE_OFFER_FAILURE_LAYOUT_UNAVAILABLE");
+        InsnList failed=new InsnList();failed.add(new InsnNode(Opcodes.DUP2));call(failed,"writeSubmissionOfferRejected","(Ljava/lang/Object;Ljava/lang/Object;)V");method.instructions.insertBefore(code.get(10),failed);
+    }
+    private static void writeOfferLayout(MethodNode method){
+        List<AbstractInsnNode> code=instructions(method);
+        if((method.access&Opcodes.ACC_STATIC)!=0||code.size()!=9||!method.tryCatchBlocks.isEmpty()||!variable(code.get(0),Opcodes.ALOAD,0)
+                ||!invoke(code.get(1),Opcodes.INVOKEVIRTUAL,EXECUTOR,"isShutdown","()Z")||!(code.get(2) instanceof JumpInsnNode live)||live.getOpcode()!=Opcodes.IFEQ||executable(live.label)!=code.get(4)
+                ||!invoke(code.get(3),Opcodes.INVOKESTATIC,EXECUTOR,"reject","()V")||!variable(code.get(4),Opcodes.ALOAD,0)
+                ||!(code.get(5) instanceof FieldInsnNode queue)||queue.getOpcode()!=Opcodes.GETFIELD||!queue.owner.equals(EXECUTOR)||!queue.name.equals("taskQueue")||!queue.desc.equals("Ljava/util/Queue;")
+                ||!variable(code.get(6),Opcodes.ALOAD,1)||!invoke(code.get(7),Opcodes.INVOKEINTERFACE,"java/util/Queue","offer","(Ljava/lang/Object;)Z")||code.get(8).getOpcode()!=Opcodes.IRETURN)
+            throw new IllegalStateException("NETTY_WRITE_OFFER_LAYOUT_UNAVAILABLE");
+        // Read the real producer frame/version before it returns. The caller's
+        // false branch subsequently pairs this same task and addTask depth.
+        LabelNode accepted=new LabelNode();InsnList failed=new InsnList();failed.add(new InsnNode(Opcodes.DUP));failed.add(new JumpInsnNode(Opcodes.IFNE,accepted));
+        failed.add(new VarInsnNode(Opcodes.ALOAD,0));failed.add(new VarInsnNode(Opcodes.ALOAD,1));call(failed,"writeSubmissionOfferFailed","(Ljava/lang/Object;Ljava/lang/Object;)V");failed.add(accepted);method.instructions.insertBefore(code.get(8),failed);
+    }
+    private static void writeHandlerLayout(MethodNode method){
+        List<AbstractInsnNode> code=instructions(method);
+        if((method.access&Opcodes.ACC_STATIC)!=0||code.size()!=6||!method.tryCatchBlocks.isEmpty()||!variable(code.get(0),Opcodes.ALOAD,0)
+                ||!(code.get(1) instanceof FieldInsnNode handler)||handler.getOpcode()!=Opcodes.GETFIELD||!handler.owner.equals(EXECUTOR)||!handler.name.equals("rejectedExecutionHandler")||!handler.desc.equals("Lio/netty/util/concurrent/RejectedExecutionHandler;")
+                ||!variable(code.get(2),Opcodes.ALOAD,1)||!variable(code.get(3),Opcodes.ALOAD,0)
+                ||!invoke(code.get(4),Opcodes.INVOKEINTERFACE,"io/netty/util/concurrent/RejectedExecutionHandler","rejected","(Ljava/lang/Runnable;Lio/netty/util/concurrent/SingleThreadEventExecutor;)V")||code.get(5).getOpcode()!=Opcodes.RETURN)
+            throw new IllegalStateException("NETTY_WRITE_REJECTION_HANDLER_LAYOUT_UNAVAILABLE");
+    }
+    private static void writeDefaultRejected(MethodNode method){
+        List<AbstractInsnNode> code=instructions(method);
+        if((method.access&Opcodes.ACC_STATIC)!=0||code.size()!=4||!method.tryCatchBlocks.isEmpty()||!(code.get(0) instanceof TypeInsnNode type)||type.getOpcode()!=Opcodes.NEW||!type.desc.equals("java/util/concurrent/RejectedExecutionException")
+                ||code.get(1).getOpcode()!=Opcodes.DUP||!invoke(code.get(2),Opcodes.INVOKESPECIAL,type.desc,"<init>","()V")||code.get(3).getOpcode()!=Opcodes.ATHROW)
+            throw new IllegalStateException("NETTY_DEFAULT_REJECTION_LAYOUT_UNAVAILABLE");
+        InsnList rejected=new InsnList();rejected.add(new InsnNode(Opcodes.DUP));for(int local:new int[]{0,1,2})rejected.add(new VarInsnNode(Opcodes.ALOAD,local));
+        call(rejected,"writeSubmissionDefaultRejected","(Ljava/lang/Throwable;Ljava/lang/Object;Ljava/lang/Object;Ljava/lang/Object;)V");method.instructions.insertBefore(code.get(3),rejected);
     }
     private static void writeCancel(MethodNode method){
         var calls=Arrays.stream(method.instructions.toArray()).filter(at->at instanceof MethodInsnNode invoke&&invoke.owner.equals(WRITE)&&invoke.name.equals("cancel")&&invoke.desc.equals("()V")).toList();

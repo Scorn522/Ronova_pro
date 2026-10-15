@@ -16,6 +16,7 @@ public final class SaveFinallyPlugin implements IMixinConfigPlugin {
     @Override public List<String> getMixins() { return null; }
     @Override public void preApply(String target,ClassNode node,String mixin,IMixinInfo info) { }
     @Override public void postApply(String target,ClassNode node,String mixin,IMixinInfo info) {
+        if(mixin.endsWith(".WorldControlHooks$GlobalRegistryMap")) { dev.ronova.pro.WorldRegistryWeaver.apply(node);return; }
         if(mixin.endsWith(".EquipmentActionHooks$Packets")) {
             weaveEquipmentAction(node,"handleSetCarriedItem","m_7798_","(Lnet/minecraft/network/protocol/game/ServerboundSetCarriedItemPacket;)V","equipment-select");
             weaveEquipmentAction(node,"handleContainerClick","m_5914_","(Lnet/minecraft/network/protocol/game/ServerboundContainerClickPacket;)V","equipment-menu");
@@ -53,6 +54,9 @@ public final class SaveFinallyPlugin implements IMixinConfigPlugin {
         if(mixin.endsWith(".LiveStateHooks$Factors")) {
             weaveLiveState(node,"tick","(Lnet/minecraft/world/effect/MobEffectInstance;)V",1,"factor-tick");
             weaveLiveState(node,"getFactor","(Lnet/minecraft/world/entity/LivingEntity;F)F",1,"factor-read");return;
+        }
+        if(mixin.endsWith(".LiveStateHooks$EffectValue")) {
+            weaveLiveState(node,"getCurativeItems","()Ljava/util/List;",-1,"curative-read");return;
         }
         if(mixin.endsWith(".LiveStateHooks$Food")) {
             weaveLiveState(node,"tick","(Lnet/minecraft/world/entity/player/Player;)V",1,"food-tick");return;
@@ -277,6 +281,7 @@ public final class SaveFinallyPlugin implements IMixinConfigPlugin {
             case "completeUsingItem"->"m_8095_";
             case "tick"->node.name.equals("net/minecraft/world/effect/MobEffectInstance$FactorData")?"m_267690_":"m_38710_";
             case "getFactor"->"m_238413_";
+            case "getCurativeItems"->"getCurativeItems";
             case "causeFoodExhaustion"->"m_36399_";
             default->throw new IllegalArgumentException(name);
         };
@@ -285,20 +290,45 @@ public final class SaveFinallyPlugin implements IMixinConfigPlugin {
         if(matches.size()!=1)throw new IllegalStateException("LIVE_STATE_SCOPE_BOUNDARY:"+node.name+":"+name+descriptor);
         MethodNode method=matches.get(0);int lease=method.maxLocals++,failure=method.maxLocals++;
         boolean floatResult=Type.getReturnType(descriptor).getSort()==Type.FLOAT;
+        boolean curativeRead=operation.equals("curative-read");
+        if(curativeRead) {
+            int providers=0,stores=0;
+            for(AbstractInsnNode instruction:method.instructions.toArray()) {
+                if(instruction instanceof FieldInsnNode field&&field.getOpcode()==Opcodes.PUTFIELD&&field.owner.equals(node.name)
+                        &&field.name.equals("curativeItems")&&field.desc.equals("Ljava/util/List;"))stores++;
+                if(instruction instanceof MethodInsnNode call&&call.getOpcode()==Opcodes.INVOKEVIRTUAL&&call.owner.equals("net/minecraft/world/effect/MobEffect")
+                        &&call.name.equals("getCurativeItems")&&call.desc.equals("()Ljava/util/List;")) {
+                    // The original stack holds the effect receiver and the
+                    // actual provider, then that same receiver and its result.
+                    var before=new InsnList();before.add(new InsnNode(Opcodes.DUP2));
+                    before.add(new MethodInsnNode(Opcodes.INVOKESTATIC,"dev/ronova/pro/LiveStatePolicy","curativeProvider",
+                            "(Lnet/minecraft/world/effect/MobEffectInstance;Lnet/minecraft/world/effect/MobEffect;)V",false));
+                    method.instructions.insertBefore(call,before);
+                    var after=new InsnList();after.add(new InsnNode(Opcodes.DUP2));
+                    after.add(new MethodInsnNode(Opcodes.INVOKESTATIC,"dev/ronova/pro/LiveStatePolicy","curativeResult",
+                            "(Lnet/minecraft/world/effect/MobEffectInstance;Ljava/util/List;)V",false));
+                    method.instructions.insert(call,after);providers++;
+                }
+            }
+            if(providers!=1||stores!=1)throw new IllegalStateException("CURATIVE_ORIGINAL_PUBLICATION_BOUNDARY:"+providers+"/"+stores);
+        }
         var enter=new InsnList();enter.add(new VarInsnNode(Opcodes.ALOAD,0));
         enter.add(argument<0?new InsnNode(Opcodes.ACONST_NULL):new VarInsnNode(Opcodes.ALOAD,argument));enter.add(new LdcInsnNode(operation));
         enter.add(new MethodInsnNode(Opcodes.INVOKESTATIC,"dev/ronova/pro/LiveStatePolicy","begin","(Ljava/lang/Object;Ljava/lang/Object;Ljava/lang/String;)Ljava/lang/Object;",false));
         enter.add(new VarInsnNode(Opcodes.ASTORE,lease));
         LabelNode body=new LabelNode(),start=new LabelNode(),end=new LabelNode(),handler=new LabelNode();
         enter.add(start);
-        enter.add(new VarInsnNode(Opcodes.ALOAD,0));enter.add(new LdcInsnNode(operation));enter.add(new VarInsnNode(Opcodes.ALOAD,lease));
-        enter.add(new MethodInsnNode(Opcodes.INVOKESTATIC,"dev/ronova/pro/LiveStatePolicy","anchorDenied","(Ljava/lang/Object;Ljava/lang/String;Ljava/lang/Object;)Z",false));
-        enter.add(new JumpInsnNode(Opcodes.IFEQ,body));if(floatResult)enter.add(new InsnNode(Opcodes.FCONST_0));
-        enter.add(new InsnNode(floatResult?Opcodes.FRETURN:Opcodes.RETURN));enter.add(body);method.instructions.insert(enter);
+        if(!curativeRead) {
+            enter.add(new VarInsnNode(Opcodes.ALOAD,0));enter.add(new LdcInsnNode(operation));enter.add(new VarInsnNode(Opcodes.ALOAD,lease));
+            enter.add(new MethodInsnNode(Opcodes.INVOKESTATIC,"dev/ronova/pro/LiveStatePolicy","anchorDenied","(Ljava/lang/Object;Ljava/lang/String;Ljava/lang/Object;)Z",false));
+            enter.add(new JumpInsnNode(Opcodes.IFEQ,body));if(floatResult)enter.add(new InsnNode(Opcodes.FCONST_0));
+            enter.add(new InsnNode(floatResult?Opcodes.FRETURN:Opcodes.RETURN));
+        }
+        enter.add(body);method.instructions.insert(enter);
         extendFramesWithLease(node,method,lease);
         Object[] bodyLocals=lifecycleFrameLocals(node,method,lease);
         method.instructions.insert(body,new FrameNode(Opcodes.F_NEW,bodyLocals.length,bodyLocals,0,new Object[0]));
-        for(AbstractInsnNode instruction:method.instructions.toArray())if(instruction.getOpcode()==Opcodes.RETURN||floatResult&&instruction.getOpcode()==Opcodes.FRETURN) {
+        for(AbstractInsnNode instruction:method.instructions.toArray())if(instruction.getOpcode()==Opcodes.RETURN||floatResult&&instruction.getOpcode()==Opcodes.FRETURN||curativeRead&&instruction.getOpcode()==Opcodes.ARETURN) {
             var leave=new InsnList();leave.add(new VarInsnNode(Opcodes.ALOAD,lease));
             leave.add(new MethodInsnNode(Opcodes.INVOKESTATIC,"dev/ronova/pro/LiveStatePolicy","end","(Ljava/lang/Object;)V",false));method.instructions.insertBefore(instruction,leave);
         }

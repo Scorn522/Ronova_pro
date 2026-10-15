@@ -10,6 +10,7 @@ import java.util.IdentityHashMap;
 final class NetworkCleanup {
     private static final String CTX="io.netty.channel.AbstractChannelHandlerContext",WRITE=CTX+"$WriteTask";
     private static final String EXECUTOR="io.netty.util.concurrent.SingleThreadEventExecutor";
+    private static final String DEFAULT_REJECT="io.netty.util.concurrent.RejectedExecutionHandlers$1";
     private static final String SAFE_EXECUTE="(Lio/netty/util/concurrent/EventExecutor;Ljava/lang/Runnable;Lio/netty/channel/ChannelPromise;Ljava/lang/Object;Z)Z";
     private static final long CONTEXT=1,PIPELINE=2,CHANNEL=4,UNSAFE=8,OUTBOUND=16,ENTRY=32,PROMISE=64,MESSAGE=128,
             ALLOCATOR=256,METRIC=512,COUNTER=1024,CELL=2048,LOCK=4096,SYNC=8192,NODE=16384,CHUNK=32768,
@@ -99,8 +100,17 @@ final class NetworkCleanup {
     static boolean removalQueue(Object executor,Class<?> base){
         // This branch is reached only after Netty's removeTask returned true.
         // A custom Queue's boolean cannot establish removal of the real task.
+        return rejectionQueue(executor,base)!=null;
+    }
+    static Object rejectionQueue(Object executor,Class<?> base){
         Object queue=NativeControl.networkReadField(executor,base,"taskQueue",false);
-        return queue!=null&&queue.getClass()==java.util.concurrent.LinkedBlockingQueue.class;
+        return queue!=null&&queue.getClass()==java.util.concurrent.LinkedBlockingQueue.class?queue:null;
+    }
+    static Object defaultRejectHandler(Object executor,Class<?> base){
+        Object handler=NativeControl.networkReadField(executor,base,"rejectedExecutionHandler",false);
+        if(!standard(handler,base,DEFAULT_REJECT))return null;
+        Class<?> factory=resolve(base,"io.netty.util.concurrent.RejectedExecutionHandlers");
+        return factory!=null&&framework(factory,base)&&handler==staticValue(factory,"REJECT")?handler:null;
     }
     /** The caller also checks the original array/backing policy and exact boundary. */
     static boolean arrayAllowed(Object array,int index,Object value){
@@ -449,10 +459,11 @@ final class NetworkCleanup {
         if(phase==-2){
             if(type==NetworkCleanup.class&&method.equals("submissionBoundary"))return 1;
             if(type==NativeControl.class&&oneOf(method,"networkCleanupBoundary","networkCleanupBoundary0"))return 1;
-            if(type==NetworkBridge.class&&method.equals("writeSubmissionRejected"))return 1;
+            if(type==NetworkBridge.class&&oneOf(method,"writeSubmissionRejected","writeSubmissionOfferFailed","writeSubmissionOfferRejected","writeSubmissionDefaultRejected"))return 1;
             if(type==boundary&&type.getName().equals(CTX)&&method.equals("safeExecute")&&descriptor.equals(SAFE_EXECUTE))return 2;
+            if(type.getName().equals(DEFAULT_REJECT)&&framework(type,boundary))return method.equals("rejected")&&descriptor.equals("(Ljava/lang/Runnable;Lio/netty/util/concurrent/SingleThreadEventExecutor;)V")?1:0;
             if(!type.getName().equals(EXECUTOR)||!framework(type,boundary))return 0;
-            return method.equals("reject")&&descriptor.equals("()V")||method.equals("offerTask")&&descriptor.equals("(Ljava/lang/Runnable;)Z")
+            return method.equals("reject")&&(descriptor.equals("()V")||descriptor.equals("(Ljava/lang/Runnable;)V"))||method.equals("offerTask")&&descriptor.equals("(Ljava/lang/Runnable;)Z")
                     ||method.equals("addTask")&&descriptor.equals("(Ljava/lang/Runnable;)V")||method.equals("execute")&&descriptor.equals("(Ljava/lang/Runnable;Z)V")
                     ||oneOf(method,"execute0","lazyExecute0","execute","lazyExecute")&&descriptor.equals("(Ljava/lang/Runnable;)V")?1:0;
         }

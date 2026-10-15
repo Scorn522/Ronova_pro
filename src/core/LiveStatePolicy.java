@@ -4,16 +4,18 @@ import dev.ronova.pro.mixin.Access;
 import java.lang.ref.WeakReference;
 import java.lang.reflect.*;
 import java.util.*;
+import net.minecraft.world.effect.MobEffect;
 import net.minecraft.world.effect.MobEffectInstance;
 import net.minecraft.world.entity.Entity;
 import net.minecraft.world.entity.LivingEntity;
 import net.minecraft.world.entity.player.Player;
 import net.minecraft.world.food.FoodData;
 import net.minecraft.world.item.*;
+import net.minecraftforge.common.extensions.IForgeMobEffect;
 
 /** Exact live effect/food carriers. Their ownership is independent of world indices and source history. */
 public final class LiveStatePolicy {
-    private enum Kind { MAP, TABLE, NODE, EFFECT, FOOD, FACTOR_OPTIONAL, FACTOR }
+    private enum Kind { MAP, TABLE, NODE, EFFECT, FOOD, FACTOR_OPTIONAL, FACTOR, CURATIVE_LIST, CURATIVE_ARRAY, CURATIVE_STACK }
     private record Slot(Field field,long offset,int width) { }
     private static final class Owner {
         final WeakReference<LivingEntity> entity;
@@ -30,11 +32,17 @@ public final class LiveStatePolicy {
         final WeakReference<Thread> thread=new WeakReference<>(Thread.currentThread());final Scope previous;
         final WeakReference<Object> used,argument;
         final int occurrences;
+        final List<Owner> related;
+        WeakReference<Object> provider,result;
+        boolean providerAccepted;
         boolean closed;
         Scope(Owner owner,String operation,StackWalker.StackFrame frame,Scope previous,Object used,Object argument,int occurrences) {
+            this(owner,operation,frame,previous,used,argument,occurrences,null);
+        }
+        Scope(Owner owner,String operation,StackWalker.StackFrame frame,Scope previous,Object used,Object argument,int occurrences,List<Owner> related) {
             this.owner=owner;this.operation=operation;anchor=frame.getDeclaringClass();method=frame.getMethodName();
             descriptor=frame.getDescriptor();this.previous=previous;this.used=new WeakReference<>(used);
-            this.argument=new WeakReference<>(argument);this.occurrences=occurrences;
+            this.argument=new WeakReference<>(argument);this.occurrences=occurrences;this.related=related;
         }
     }
     // Prepared before guard publication. A guard never initializes reflection/offset helpers inside a map write.
@@ -117,7 +125,8 @@ public final class LiveStatePolicy {
                 for(Object head:buckets)for(Object node=head;node!=null;node=NODE_NEXT.get(node)) {
                     if(count==seen.length||containsIdentity(seen,count,node))throw new IllegalStateException("LIVE_STATE_MAP_STRUCTURE_UNRESOLVED");seen[count++]=node;
                     if(kind==Kind.NODE&&node==carrier)return true;
-                    if((kind==Kind.EFFECT||kind==Kind.FACTOR_OPTIONAL||kind==Kind.FACTOR)&&effectContains(NODE_VALUE.get(node),carrier,kind))return true;
+                    if((kind==Kind.EFFECT||kind==Kind.FACTOR_OPTIONAL||kind==Kind.FACTOR
+                            ||kind==Kind.CURATIVE_LIST||kind==Kind.CURATIVE_ARRAY||kind==Kind.CURATIVE_STACK)&&effectContains(NODE_VALUE.get(node),carrier,kind))return true;
                 }
             }
         }catch(IllegalAccessException unavailable){throw new IllegalStateException("LIVE_STATE_CARRIER_ACCESS",unavailable);}
@@ -132,6 +141,17 @@ public final class LiveStatePolicy {
             Object optional=((Access.EffectState)cursor).pro$factorData();
             if(kind==Kind.FACTOR_OPTIONAL&&optional==expected)return true;
             if(kind==Kind.FACTOR&&factorValue(optional)==expected)return true;
+            if(kind==Kind.CURATIVE_LIST||kind==Kind.CURATIVE_ARRAY||kind==Kind.CURATIVE_STACK) {
+                Object curatives=((Access.EffectState)cursor).pro$curativeItems();
+                if(curatives!=null) {
+                    if(kind==Kind.CURATIVE_LIST&&curatives==expected)return true;
+                    EquipmentPolicy.CurativeList layout=EquipmentPolicy.knownCurativeLayout(curatives);
+                    if(layout!=null) {
+                        if(kind==Kind.CURATIVE_ARRAY&&layout.values()==expected)return true;
+                        if(kind==Kind.CURATIVE_STACK)for(int at=0;at<layout.size();at++)if(layout.values()[at]==expected)return true;
+                    }
+                }
+            }
             cursor=((Access.EffectState)cursor).pro$hiddenEffect();
         }
         return false;
@@ -160,6 +180,8 @@ public final class LiveStatePolicy {
             link(owner,value,Kind.EFFECT);
             Object optional=((Access.EffectState)value).pro$factorData();
             Object factor=factorValue(optional);link(owner,optional,Kind.FACTOR_OPTIONAL);link(owner,factor,Kind.FACTOR);
+            Object curatives=((Access.EffectState)value).pro$curativeItems();
+            if(curatives!=null)EquipmentPolicy.captureCurativeItems(owner.entity.get(),owner.generation,curatives);
             value=((Access.EffectState)value).pro$hiddenEffect();
         }
     }
@@ -195,10 +217,18 @@ public final class LiveStatePolicy {
     private static List<Link> links(Object value){return !initialized||value==null?List.of():CARRIERS.getOrDefault(value,List.of());}
     private static boolean containsIdentity(Object[] values,int length,Object value){for(int i=0;i<length;i++)if(values[i]==value)return true;return false;}
     static boolean known(Object value){for(Link link:links(value))if(current(link.owner,link.kind,value))return true;return false;}
+    private static boolean curativeCurrent(LivingEntity entity,long generation,Object value,Kind kind) {
+        if(!initialized||entity==null||value==null)return false;Owner owner=OWNERS.get(entity);
+        return owner!=null&&owner.generation==generation&&current(owner,kind,value);
+    }
+    static boolean curativeListCurrent(LivingEntity entity,long generation,Object value){return curativeCurrent(entity,generation,value,Kind.CURATIVE_LIST);}
+    static boolean curativeArrayCurrent(LivingEntity entity,long generation,Object value){return curativeCurrent(entity,generation,value,Kind.CURATIVE_ARRAY);}
+    static boolean curativeStackCurrent(LivingEntity entity,long generation,ItemStack value){return value!=ItemStack.EMPTY&&curativeCurrent(entity,generation,value,Kind.CURATIVE_STACK);}
 
     /** Only exact original bodies woven by SaveFinallyPlugin can create a scope. */
     public static Object begin(Object receiver,Object argument,String operation) {
         if(!initialized)return null;
+        if(operation.equals("curative-read"))return beginCurative(receiver);
         if(operation.equals("factor-tick")||operation.equals("factor-read"))return beginFactor(receiver,argument,operation);
         List<StackWalker.StackFrame> frames=WALKER.walk(stream->stream.filter(frame->frame.getDeclaringClass().getNestHost()!=LiveStatePolicy.class).toList());
         if(frames.size()<2)return null;StackWalker.StackFrame entry=frames.get(0),caller=frames.get(1);
@@ -233,6 +263,70 @@ public final class LiveStatePolicy {
     }
     private static boolean sameAnchor(StackWalker.StackFrame frame,Scope scope) {
         return frame.getDeclaringClass()==scope.anchor&&frame.getMethodName().equals(scope.method)&&frame.getDescriptor().equals(scope.descriptor);
+    }
+    private static Object beginCurative(Object receiver) {
+        if(!(receiver instanceof MobEffectInstance instance)||((Access.EffectState)instance).pro$curativeItems()!=null)return null;
+        List<Owner> owners=new ArrayList<>();
+        for(Link link:links(instance))if(link.kind==Kind.EFFECT&&current(link.owner,link.kind,instance)&&!owners.contains(link.owner))owners.add(link.owner);
+        if(owners.isEmpty())return null;
+        List<StackWalker.StackFrame> frames=WALKER.walk(stream->stream.filter(frame->frame.getDeclaringClass().getNestHost()!=LiveStatePolicy.class).toList());
+        if(frames.isEmpty()||!sameFrame(frames.get(0),MobEffectInstance.class,"getCurativeItems","getCurativeItems","()Ljava/util/List;"))return null;
+        Scope previous=SCOPES.get(Thread.currentThread());
+        for(Scope scope=previous;scope!=null;scope=scope.previous)if(!scope.closed&&scope.operation.equals("curative-read")&&scope.used.get()==instance)return null;
+        StackWalker.StackFrame entry=frames.get(0);int occurrences=0;
+        for(var frame:frames)if(frame.getDeclaringClass()==entry.getDeclaringClass()&&frame.getMethodName().equals(entry.getMethodName())&&frame.getDescriptor().equals(entry.getDescriptor()))occurrences++;
+        Scope scope=new Scope(owners.get(0),"curative-read",entry,previous,instance,null,occurrences,List.copyOf(owners));
+        SCOPES.put(Thread.currentThread(),scope);return scope;
+    }
+    private static boolean curativePath(Scope scope) {
+        if(scope==null||scope.closed||scope.thread.get()!=Thread.currentThread()||scope!=SCOPES.get(Thread.currentThread()))return false;
+        return WALKER.walk(stream->{List<StackWalker.StackFrame> frames=stream.toList();int occurrences=0;
+            for(var frame:frames)if(sameAnchor(frame,scope))occurrences++;
+            if(occurrences!=scope.occurrences)return false;
+            for(var frame:frames) {
+                if(sameAnchor(frame,scope))return true;
+                if(!infrastructure(frame.getDeclaringClass()))return false;
+            }
+            return false;
+        });
+    }
+    private static Scope curativeScope(MobEffectInstance instance) {
+        Scope scope=SCOPES.get(Thread.currentThread());
+        if(scope!=null&&scope.operation.equals("curative-read")&&scope.used.get()==instance&&curativePath(scope))return scope;
+        for(Link link:links(instance))if(link.kind==Kind.EFFECT&&current(link.owner,link.kind,instance))
+            throw new IllegalStateException("CURATIVE_ORIGINAL_PUBLICATION_REQUIRED");
+        return null;
+    }
+    /** Called immediately before the real getter's actual provider invocation. */
+    public static void curativeProvider(MobEffectInstance instance,MobEffect provider) {
+        if(!initialized)return;Scope scope=curativeScope(instance);if(scope==null)return;
+        if(((Access.EffectState)instance).pro$curativeItems()!=null||provider==null)throw new IllegalStateException("CURATIVE_ORIGINAL_INPUT_CHANGED");
+        try {
+            Method method=provider.getClass().getMethod("getCurativeItems");
+            if(method.getDeclaringClass()!=IForgeMobEffect.class||method.getReturnType()!=List.class||Modifier.isStatic(method.getModifiers()))
+                throw new IllegalStateException("CURATIVE_PROVIDER_IMPLEMENTATION_UNRESOLVED");
+        }catch(NoSuchMethodException unavailable){throw new IllegalStateException("CURATIVE_PROVIDER_IMPLEMENTATION_UNRESOLVED",unavailable);}
+        scope.provider=new WeakReference<>(provider);scope.providerAccepted=true;
+    }
+    /** The value is the real invocation's return, still on its original store stack. */
+    public static void curativeResult(MobEffectInstance instance,List<?> proposed) {
+        if(!initialized)return;Scope scope=curativeScope(instance);if(scope==null)return;
+        if(!scope.providerAccepted||scope.provider==null||scope.provider.get()==null||proposed==null
+                ||((Access.EffectState)instance).pro$curativeItems()!=null)throw new IllegalStateException("CURATIVE_ORIGINAL_RESULT_REQUIRED");
+        for(Owner owner:scope.related)if(current(owner,Kind.EFFECT,instance))EquipmentPolicy.captureCurativeItems(owner.entity.get(),owner.generation,proposed);
+        scope.result=new WeakReference<>(proposed);
+    }
+    private static boolean curativePublicationAllowed(Owner owner,Object receiver,Object proposed) {
+        Scope scope=SCOPES.get(Thread.currentThread());
+        return proposed!=null&&scope!=null&&scope.operation.equals("curative-read")&&scope.used.get()==receiver
+                &&scope.related.contains(owner)&&scope.providerAccepted&&scope.result!=null&&scope.result.get()==proposed
+                &&((Access.EffectState)receiver).pro$curativeItems()==null&&curativePath(scope);
+    }
+    private static boolean curativeUpdateWriter() {
+        return WALKER.walk(stream->{var frame=stream.filter(entry->!infrastructure(entry.getDeclaringClass())).findFirst().orElse(null);
+            return frame!=null&&(sameFrame(frame,MobEffectInstance.class,"setDetailsFrom","m_19548_","(Lnet/minecraft/world/effect/MobEffectInstance;)V")
+                    ||sameFrame(frame,MobEffectInstance.class,"setCurativeItems","setCurativeItems","(Ljava/util/List;)V"));
+        });
     }
     private static boolean factorTickPath(Owner owner,List<StackWalker.StackFrame> frames) {
         if(frames.size()<4
@@ -279,7 +373,7 @@ public final class LiveStatePolicy {
     public static void end(Object token) {
         if(!(token instanceof Scope scope)||scope.closed)return;
         if(scope.thread.get()!=Thread.currentThread()||SCOPES.get(Thread.currentThread())!=scope)throw new IllegalMonitorStateException("LIVE_STATE_SCOPE_ORDER");
-        try{if(active(scope.owner)&&!scope.operation.equals("factor-tick")&&!scope.operation.equals("factor-read"))refresh(scope.owner);}finally {
+        try{if(active(scope.owner)&&!scope.operation.equals("factor-tick")&&!scope.operation.equals("factor-read")&&!scope.operation.equals("curative-read"))refresh(scope.owner);}finally {
             scope.closed=true;if(scope.previous==null)SCOPES.remove(Thread.currentThread());else SCOPES.put(Thread.currentThread(),scope.previous);
         }
     }
@@ -316,7 +410,7 @@ public final class LiveStatePolicy {
     }
     private static boolean gameFrame(StackWalker.StackFrame frame,Scope scope) {
         Class<?> type=frame.getDeclaringClass(),host=type.getNestHost();String name=frame.getMethodName();
-        if(host==MobEffectInstance.class)return Set.of("tick","m_19552_","tickDownDuration","m_19579_","mapDuration","m_267696_","update","m_19558_","setDetailsFrom","m_19548_","getCurativeItems","lambda$tickDownDuration$1","lambda$tick$0","m_267553_","m_267554_","applyAsInt").contains(name);
+        if(host==MobEffectInstance.class)return Set.of("tick","m_19552_","tickDownDuration","m_19579_","mapDuration","m_267696_","update","m_19558_","setDetailsFrom","m_19548_","setCurativeItems","getCurativeItems","lambda$tickDownDuration$1","lambda$tick$0","m_267553_","m_267554_","applyAsInt").contains(name);
         if(type==FoodData.class)return Set.of("tick","m_38710_","eat","m_38707_","m_38712_","addExhaustion","m_38703_","setFoodLevel","m_38705_","setSaturation","m_38717_","setExhaustion","m_150378_").contains(name);
         if(type==LivingEntity.class||type==Player.class)return Set.of("tickEffects","m_21217_","addEffect","m_7292_","m_147207_","forceAddEffect","m_147215_","removeEffect","m_21195_","removeEffectNoUpdate","m_6234_","removeAllEffects","m_21219_","curePotionEffects","onEffectAdded","m_142540_","onEffectUpdated","m_141973_","onEffectRemoved","m_7285_","eat","m_5584_","addEatEffect","m_21063_","completeUsingItem","m_8095_","causeFoodExhaustion","m_36399_","lambda$tickEffects$3","lambda$tickEffects$4","m_21264_").contains(name);
         if(type==ItemStack.class)return name.equals("finishUsingItem")||name.equals("m_41671_");
@@ -430,6 +524,12 @@ public final class LiveStatePolicy {
             }
             if(link.kind==Kind.EFFECT&&declaring==MobEffectInstance.class&&(name.equals("factorData")||name.equals("f_216885_"))) {
                 if(next!=((Access.EffectState)receiver).pro$factorData())return true;
+                continue;
+            }
+            if(link.kind==Kind.EFFECT&&declaring==MobEffectInstance.class&&name.equals("curativeItems")) {
+                if(curativePublicationAllowed(link.owner,receiver,next))continue;
+                if(!curativeUpdateWriter()||!permitted(link.owner,true))return true;
+                if(next!=null)EquipmentPolicy.captureCurativeItems(link.owner.entity.get(),link.owner.generation,next);
                 continue;
             }
             Owner owner=link.owner;if(!permitted(owner,link.kind!=Kind.FOOD))return true;

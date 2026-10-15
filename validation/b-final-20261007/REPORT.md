@@ -1,5 +1,17 @@
 # B 批实际报告：2026-10-09 代码收敛接续
 
+## 2026-10-15：C 接续——标准状态载体收口
+
+接续 `646a30e`，Java81 / Native74 / Storage3 / Journal6，协议保持 `r3-client-8`。标准全局 BlockState 表接入准确 ArrayList 长度/backing、identity reverse map 与实际数组修改判断；所有冻结格保护反查 ID，Global 另保护前向读取槽。原 addMapping 在副作用前按实际 state/id 拒绝，包括负 id 的原异常前发布。原版 rehash 的实际新旧 tuple 在发布前核对，准确字段/值/顺序与同一真实栈层接续，异常 finally 关闭。未知 strategy/List 不调用，shiftKeys 移除重排仍保留严格拒绝边界。
+
+curativeItems 接入当前效果/hidden 的真实列表根，标准 ArrayList/Arrays$ArrayList backing 以及 ItemStack/NBT 复用原装备遍历和写门；共享 owner 分别核对，脱链立即解除。原默认 IForgeMobEffect provider 与真实结果的一次 null→值初始化、原合法复制/替换及正常/异常 finally 写齐。未知自定义 List/ItemStack/provider override 与未序列化 capability 没有提升覆盖。
+
+原默认队列满拒绝以真实 offer 失败、同一 task/submission、LinkedBlockingQueue/REJECT 单例、当前方法版本及栈层配对后接入原清理；未知/custom/backoff/MPSC/接受后抛异常保留 pending。新增准确变换目标仅 RejectedExecutionHandlers$1，无新 bootstrap 成员或 Native 接口。
+
+`build-c-java81-native74-carriers-20261015.log` **PASS，57秒**，27项任务中20项执行、7项保持最新；Native74/Storage3 源码未改、构建任务保持最新。`compile-c-java81-native74-carriers-20261015.log` **退出0**。`c-java81-native74-network-bytecode-20261015.log` 复用现有 AuditFixCheck 对本批真实 Netty 四类、原 fastutil rehash 织入结果用 `-Xverify:all` 加载并读取声明方法，**退出0、NETWORK_BYTECODE_VERIFY_PASS、WORLD_REGISTRY_BYTECODE_VERIFY_PASS**；rehash 只 COMPUTE_MAXS，保留实际 frame。结果仅是本批直接字节码加载，不是游戏行为验证；未启动游戏或重跑旧矩阵。真实游戏冻结/同步、curative 与满队列/停组场景 **NOTRUN**。匹配候选已写入 `distribution/candidate-c-java81-native74-carriers-wip-20261015`，Core2728834、prelaunch23309字节；源码和匹配 JAR 直接同步 GitHub，Native/驱动未改、未部署，未生成源码 ZIP，完整 C/B 未完成。
+
+---
+
 ## 2026-10-15：C 接续——当前世界载体与异常队列收尾
 
 接续 `ecae56e`，Java80 / Native74 / Storage3 / Journal6，协议 `r3-client-8`。原版冻结坐标继续下接 SimpleBitStorage.set/getAndSet、实际 long[] 的整 word/部分字节/bulk 写、标准 palette 的已用 ID 值表及 section/Data/storage 替换；当前真实 owner 与逐冻结格 BlockState identity 决定拒绝，不发全类/线程许可。原版邻居写、未用 ID 追加、padding、保持冻结内容的 resize/copy 走原实现。record 实际 offset 和压缩引用宽度随 VM 布局读取；未知实现及未观察 CPU store 仍保留。

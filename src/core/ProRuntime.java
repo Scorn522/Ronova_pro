@@ -899,6 +899,18 @@ public final class ProRuntime implements AutoCloseable {
         if(ACTION_CALLER.getCallerClass()!=net.minecraft.util.SimpleBitStorage.class)throw new SecurityException("ACTUAL_WORLD_BIT_STORAGE_WRITE_REQUIRED");
         return WorldStatePolicy.storageDenied(storage,index,value);
     }
+    public static boolean worldRegistryMappingDenied(net.minecraft.core.IdMapper<?> registry,Object state,int id){
+        if(ACTION_CALLER.getCallerClass()!=net.minecraft.core.IdMapper.class)throw new SecurityException("ACTUAL_WORLD_REGISTRY_MAPPING_REQUIRED");
+        return WorldStatePolicy.mappingDenied(registry,state,id);
+    }
+    public static Object worldRegistryRehashEnter(Object receiver,int capacity,int mask,Object[] oldKeys,int[] oldValues,Object[] keys,int[] values){
+        if(ACTION_CALLER.getCallerClass()!=it.unimi.dsi.fastutil.objects.Object2IntOpenCustomHashMap.class)throw new SecurityException("ACTUAL_WORLD_REGISTRY_REHASH_REQUIRED");
+        return WorldStatePolicy.rehashEnter(receiver,capacity,mask,oldKeys,oldValues,keys,values);
+    }
+    public static void worldRegistryRehashExit(Object token){
+        if(ACTION_CALLER.getCallerClass()!=it.unimi.dsi.fastutil.objects.Object2IntOpenCustomHashMap.class)throw new SecurityException("ACTUAL_WORLD_REGISTRY_REHASH_REQUIRED");
+        WorldStatePolicy.rehashExit(token);
+    }
     static boolean worldStateQuery(WorldStatePolicy.Query query){
         for(ProRuntime runtime:sourceRuntimes())if(runtime.worldControl.stateMutationDenied(query))return true;
         return false;
@@ -2805,7 +2817,7 @@ public final class ProRuntime implements AutoCloseable {
             EquipmentPolicy.initialize();
             WorldStatePolicy.initialize();
             Class<?> bridge=Class.forName("dev.ronova.pro.bootstrap.TaskBridge",false,null);
-            if(!Integer.valueOf(80).equals(bridge.getMethod("abiVersion").invoke(null)))throw new IllegalStateException("INDEX_BRIDGE_ABI_MISMATCH");
+            if(!Integer.valueOf(81).equals(bridge.getMethod("abiVersion").invoke(null)))throw new IllegalStateException("INDEX_BRIDGE_ABI_MISMATCH");
             var lookup=java.lang.invoke.MethodHandles.lookup();
             var field=lookup.findStatic(ProRuntime.class,"preventFieldWrite",java.lang.invoke.MethodType.methodType(boolean.class,Object.class,Class.class,String.class,Object.class));
             var dispatch=lookup.findStatic(ProRuntime.class,"preventDispatch",java.lang.invoke.MethodType.methodType(boolean.class,Object.class,String.class,Object.class));
