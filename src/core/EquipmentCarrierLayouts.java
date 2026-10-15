@@ -23,7 +23,7 @@ final class EquipmentCarrierLayouts {
     private static final String C="java.util.Collections$",I="java.util.ImmutableCollections$",G="com.google.common.collect.",A="java.util.concurrent.atomic.";
     private static final Set<String> JDK=Set.of(
             "java.util.ArrayList","java.util.ArrayList$SubList","java.util.LinkedList","java.util.Arrays$ArrayList",
-            "java.util.HashMap","java.util.LinkedHashMap","java.util.IdentityHashMap","java.util.HashSet","java.util.LinkedHashSet",
+            "java.util.HashMap","java.util.LinkedHashMap","java.util.IdentityHashMap","java.util.EnumMap","java.util.HashSet","java.util.LinkedHashSet",
             I+"ListN",I+"List12",I+"SubList",I+"SetN",I+"Set12",I+"MapN",I+"Map1",
             C+"SingletonList",C+"SingletonSet",C+"SingletonMap",C+"EmptyList",C+"EmptySet",C+"EmptyMap",C+"CopiesList",
             C+"UnmodifiableCollection",C+"UnmodifiableList",C+"UnmodifiableRandomAccessList",C+"UnmodifiableSet",C+"UnmodifiableMap",
@@ -169,6 +169,7 @@ final class EquipmentCarrierLayouts {
             if(listName(name)){Item[] items=list(object,type,new IdentityHashMap<>());if(items==null){complete=false;return null;}emit(items);return items;}
             if(named(name,"java.util.HashMap","java.util.LinkedHashMap")){hashMap(value,setKeys);return null;}
             if(name.equals("java.util.IdentityHashMap")){identityMap(value,setKeys);return null;}
+            if(name.equals("java.util.EnumMap")){enumMap(value,setKeys);return null;}
             if(named(name,"java.util.HashSet","java.util.LinkedHashSet")){Object map=value.get("java.util.HashSet","map");
                 if(map==null||!jdk(map.getClass(),"java.util.HashMap")&&!jdk(map.getClass(),"java.util.LinkedHashMap"))throw unsupported("SET_BACKING");child(map,true);return null;}
             if(named(name,I+"Set12",C+"SingletonSet",G+"SingletonImmutableSet")){
@@ -311,6 +312,17 @@ final class EquipmentCarrierLayouts {
             for(int at=0;at<table.length;at+=2){Object key=table[at],entry=table[at+1];if(key==null)continue;
                 if(key!=empty)data(key);if(!keys)data(entry);
             }
+        }
+        void enumMap(Meta value,boolean keys){
+            Object[] values=array(value.get("java.util.EnumMap","vals"));bound(values.length);
+            Object universe=value.get("java.util.EnumMap","keyUniverse"),keyType=value.get("java.util.EnumMap","keyType");
+            if(!(universe instanceof Enum<?>[] actual)||actual.length!=values.length||!(keyType instanceof Class<?>))throw unsupported("ENUM_MAP_LAYOUT");
+            bound(number(value.get("java.util.EnumMap","size")));
+            Object nullValue=staticValue(java.util.EnumMap.class,"NULL","Ljava/lang/Object;");
+            // vals is this map's actual data array. The VM-wide enum universe
+            // remains borrowed; it is never registered as an owned array.
+            range(values,0,values.length,1,false);
+            for(int at=0;at<values.length;at++)if(values[at]!=null){data(actual[at]);if(!keys&&values[at]!=nullValue)data(values[at]);}
         }
         void immutableMap(Meta value){
             Object[] table=array(value.get(I+"MapN","table"));if((table.length&1)!=0)throw unsupported("IMMUTABLE_MAP_TABLE");range(table,0,table.length,1,true);int count=0;

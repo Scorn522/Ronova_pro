@@ -91,7 +91,7 @@ public final class RecoveryAgent {
             bootstrap=new JarFile(Path.of(argument).toAbsolutePath().normalize().toFile());
             api.appendToBootstrapClassLoaderSearch(bootstrap);
             bridge=Class.forName("dev.ronova.pro.bootstrap.TaskBridge",true,null);
-            if(!Integer.valueOf(85).equals(bridge.getMethod("abiVersion").invoke(null)))throw new IllegalStateException("TASK_BRIDGE_ABI_MISMATCH");
+            if(!Integer.valueOf(86).equals(bridge.getMethod("abiVersion").invoke(null)))throw new IllegalStateException("TASK_BRIDGE_ABI_MISMATCH");
             Class.forName("dev.ronova.pro.bootstrap.SourceMapBridge",true,null);
             // Default-Map guards test UUID keys while class-loading maps are
             // active. Resolve that type before publishing the guarded methods.
@@ -133,7 +133,7 @@ public final class RecoveryAgent {
             Class.forName("dev.ronova.pro.bootstrap.ControlBridge$ProducerFrame",false,null);
             Class.forName("dev.ronova.pro.bootstrap.EventFaultBridge",true,null);
             Class<?> control=Class.forName("dev.ronova.pro.bootstrap.ControlBridge",true,null);
-            if(!Integer.valueOf(85).equals(control.getMethod("abiVersion").invoke(null)))throw new IllegalStateException("CONTROL_BRIDGE_ABI_MISMATCH");
+            if(!Integer.valueOf(86).equals(control.getMethod("abiVersion").invoke(null)))throw new IllegalStateException("CONTROL_BRIDGE_ABI_MISMATCH");
             Module base=Object.class.getModule(),ours=RecoveryAgent.class.getModule();
             api.redefineModule(base,Set.of(bridge.getModule()),Map.of(
                     "jdk.internal.org.objectweb.asm",Set.of(ours),"jdk.internal.org.objectweb.asm.commons",Set.of(ours),
@@ -212,6 +212,10 @@ public final class RecoveryAgent {
                         if(module!=null&&!module.canRead(bridge.getModule()))
                             api.redefineModule(module,Set.of(bridge.getModule()),Map.of(),Map.of(),Set.of(),Map.of());
                         registerProducer(module);publishStoppedModule(module);return stopped;
+                    }
+                    if(loader==null&&module==base&&"java/util/Optional".equals(name)){
+                        if(!module.canRead(bridge.getModule()))api.redefineModule(module,Set.of(bridge.getModule()),Map.of(),Map.of(),Set.of(),Map.of());
+                        return EquipmentOptionalBoundary.transform(loader,name,bytes);
                     }
                     if(BufferBoundary.wrapTarget(name)&&loader!=null&&!producerModule(module)){
                         if(module!=null&&!module.canRead(bridge.getModule()))
@@ -412,7 +416,7 @@ public final class RecoveryAgent {
             api.addTransformer(taskTransformer,true);
             api.addTransformer(objectTransformer,true);
             for(String wrapper:characterWrappers)api.retransformClasses(Class.forName(wrapper.replace('/','.'),false,null));
-            api.retransformClasses(ModuleLayer.class,ClassLoader.class,Thread.class,java.lang.invoke.MethodHandles.class,java.lang.invoke.MethodHandles.Lookup.class,java.lang.ref.Reference.class,
+            api.retransformClasses(ModuleLayer.class,ClassLoader.class,Thread.class,java.lang.invoke.MethodHandles.class,java.lang.invoke.MethodHandles.Lookup.class,java.lang.ref.Reference.class,java.util.Optional.class,
                     java.util.Timer.class,Class.forName("java.util.TimerThread",false,null),java.io.FileDescriptor.class,
                     java.io.FileInputStream.class,java.io.FileOutputStream.class,java.io.RandomAccessFile.class,
                     java.nio.channels.spi.AbstractInterruptibleChannel.class,Class.forName("sun.nio.ch.FileChannelImpl",false,null),

@@ -17,6 +17,7 @@ public final class AuditFixCheck {
         if(args.length==1&&args[0].equals("resource-bytecode")){resourceBytecode();return;}
         if(args.length==1&&args[0].equals("custom-carrier-bytecode")){carrierBytecode();capabilityBytecode();return;}
         if(args.length==1&&args[0].equals("equipment-slot-bytecode")){equipmentSlotBytecode();capabilityBytecode();return;}
+        if(args.length==1&&args[0].equals("capability-callback-bytecode")){capabilityCallbackBytecode();return;}
         if(args.length==3&&args[0].equals("mod-group-returns")){modGroupReturns(args[1],args[2]);return;}
         if(args.length==2&&args[0].equals("network-preconnect")){networkPreconnect(args[1]);return;}
         if(args.length==1&&args[0].equals("source-list-fixes")){sourceListFixes();return;}
@@ -1177,6 +1178,74 @@ public final class AuditFixCheck {
         };
         for(String name:targets){Class<?> actual=Class.forName(name,false,loader);require(actual.getClassLoader()==loader,"actual capability class was not defined");actual.getDeclaredMethods();}
         System.out.println("CAPABILITY_BYTECODE_VERIFY_PASS actual_Forge_provider_dispatcher_lazy_optional JVM_verifier_only no_game_capability_runtime_claim");
+    }
+    /** Actual transformed Optional bodies, renamed solely for an isolated JVM body check. */
+    private static void capabilityCallbackBytecode()throws Exception{
+        capabilityBytecode();
+        Class<?> bridge=Class.forName("dev.ronova.pro.bootstrap.ControlBridge",true,null);
+        Field callbacks=bridge.getDeclaredField("capabilityCallbacks");callbacks.setAccessible(true);
+        require(callbacks.get(null)==null,"isolated callback body check requires the Bridge callbacks to remain uninstalled");
+        Class<?> boundary=Class.forName("dev.ronova.pro.agent.EquipmentOptionalBoundary");
+        Method transform=boundary.getDeclaredMethod("transform",ClassLoader.class,String.class,byte[].class);transform.setAccessible(true);
+        byte[] original;try(var input=Optional.class.getResourceAsStream("Optional.class")){
+            require(input!=null,"actual JDK Optional bytes unavailable");original=input.readAllBytes();
+        }
+        byte[] changed=(byte[])transform.invoke(null,null,"java/util/Optional",original);
+        require(changed!=null,"actual JDK Optional callback bodies were not transformed");
+        Class<?> visitor=Class.forName("jdk.internal.org.objectweb.asm.ClassVisitor"),reader=Class.forName("jdk.internal.org.objectweb.asm.ClassReader"),writer=Class.forName("jdk.internal.org.objectweb.asm.ClassWriter");
+        Class<?> remapper=Class.forName("jdk.internal.org.objectweb.asm.commons.Remapper"),simple=Class.forName("jdk.internal.org.objectweb.asm.commons.SimpleRemapper"),classRemapper=Class.forName("jdk.internal.org.objectweb.asm.commons.ClassRemapper");
+        String checkedName="dev.ronova.pro.validation.CheckedOptional";
+        Object output=writer.getConstructor(int.class).newInstance(0);
+        Object rename=simple.getConstructor(String.class,String.class).newInstance("java/util/Optional",checkedName.replace('.','/'));
+        Object mapping=classRemapper.getConstructor(visitor,remapper).newInstance(output,rename);
+        Object input=reader.getConstructor(byte[].class).newInstance((Object)changed);reader.getMethod("accept",visitor,int.class).invoke(input,mapping,0);
+        byte[] renamed=(byte[])writer.getMethod("toByteArray").invoke(output);
+        Class<?> checked=new ClassLoader(AuditFixCheck.class.getClassLoader()){
+            Class<?> defineBody(){Class<?> result=defineClass(checkedName,renamed,0,renamed.length);resolveClass(result);return result;}
+        }.defineBody();
+        require(checked.getClassLoader()!=null&&checked.getName().equals(checkedName),"renamed Optional must remain an isolated class body");checked.getDeclaredMethods();
+        Method of=checked.getMethod("of",Object.class),emptyFactory=checked.getMethod("empty"),get=checked.getMethod("get"),isEmpty=checked.getMethod("isEmpty");
+        Method accept=checked.getMethod("ifPresent",java.util.function.Consumer.class),map=checked.getMethod("map",java.util.function.Function.class),filter=checked.getMethod("filter",java.util.function.Predicate.class);
+        Method flatMap=checked.getMethod("flatMap",java.util.function.Function.class),orElseGet=checked.getMethod("orElseGet",java.util.function.Supplier.class),orElseThrow=checked.getMethod("orElseThrow",java.util.function.Supplier.class);
+        Object value=new Object(),mapped=new Object(),fallback=new Object(),present=of.invoke(null,value),empty=emptyFactory.invoke(null),nested=of.invoke(null,mapped);
+        require(present.getClass()==checked&&empty.getClass()==checked&&get.invoke(present)==value,"actual remapped factories lost Optional value identity");
+        int[] calls={0};
+        java.util.function.Consumer<Object> consumer=actual->{require(actual==value,"ifPresent changed the actual callback operand");calls[0]++;};
+        accept.invoke(present,consumer);accept.invoke(empty,consumer);require(calls[0]==1,"ifPresent must invoke the original callback once only for a present value");
+        calls[0]=0;java.util.function.Function<Object,Object> function=actual->{require(actual==value,"map changed the actual callback operand");calls[0]++;return mapped;};
+        Object mappedOptional=map.invoke(present,function),emptyMapped=map.invoke(empty,function);
+        require(calls[0]==1&&get.invoke(mappedOptional)==mapped&&Boolean.TRUE.equals(isEmpty.invoke(emptyMapped)),"map changed callback count or original return");
+        calls[0]=0;java.util.function.Predicate<Object> predicate=actual->{require(actual==value,"filter changed the actual callback operand");calls[0]++;return true;};
+        require(filter.invoke(present,predicate)==present&&filter.invoke(empty,predicate)==empty&&calls[0]==1,"filter changed true/empty identity or callback count");
+        java.util.function.Predicate<Object> rejected=actual->{require(actual==value,"filter changed the rejected callback operand");calls[0]++;return false;};
+        require(Boolean.TRUE.equals(isEmpty.invoke(filter.invoke(present,rejected)))&&calls[0]==2,"filter false result changed the original empty return");
+        calls[0]=0;java.util.function.Function<Object,Object> flatten=actual->{require(actual==value,"flatMap changed the actual callback operand");calls[0]++;return nested;};
+        require(flatMap.invoke(present,flatten)==nested&&Boolean.TRUE.equals(isEmpty.invoke(flatMap.invoke(empty,flatten)))&&calls[0]==1,"flatMap changed the actual alias return or callback count");
+        calls[0]=0;java.util.function.Supplier<Object> supplier=()->{calls[0]++;return fallback;};
+        require(orElseGet.invoke(present,supplier)==value&&orElseGet.invoke(empty,supplier)==fallback&&calls[0]==1,"orElseGet changed the original value or supplier count");
+        calls[0]=0;Exception returnedFailure=new Exception("actual_optional_supplier_throwable");
+        java.util.function.Supplier<Exception> failureFactory=()->{calls[0]++;return returnedFailure;};
+        require(orElseThrow.invoke(present,failureFactory)==value&&calls[0]==0,"present orElseThrow unexpectedly invoked its supplier");
+        optionalCallbackFailure(orElseThrow,empty,failureFactory,returnedFailure,calls);
+        RuntimeException originalFailure=new IllegalStateException("actual_optional_callback_failure");
+        java.util.function.Consumer<Object> failedConsumer=actual->{calls[0]++;throw originalFailure;};
+        java.util.function.Function<Object,Object> failedFunction=actual->{calls[0]++;throw originalFailure;};
+        java.util.function.Predicate<Object> failedPredicate=actual->{calls[0]++;throw originalFailure;};
+        java.util.function.Supplier<Object> failedSupplier=()->{calls[0]++;throw originalFailure;};
+        optionalCallbackFailure(accept,present,failedConsumer,originalFailure,calls);
+        optionalCallbackFailure(map,present,failedFunction,originalFailure,calls);
+        optionalCallbackFailure(filter,present,failedPredicate,originalFailure,calls);
+        optionalCallbackFailure(flatMap,present,failedFunction,originalFailure,calls);
+        optionalCallbackFailure(orElseGet,empty,failedSupplier,originalFailure,calls);
+        optionalCallbackFailure(orElseThrow,empty,failedSupplier,originalFailure,calls);
+        require(callbacks.get(null)==null,"isolated Optional body check installed callback authority");
+        System.out.println("CAPABILITY_CALLBACK_BYTECODE_PASS renamed_isolated_JVM_body_check actual_JDK_Optional_six_transformed_callback_bodies Bridge_callbacks_uninstalled original_callbacks_once values_returns_and_Throwable_identity_preserved no_actual_java_base_retransform_or_game_runtime_claim");
+    }
+    private static void optionalCallbackFailure(Method method,Object receiver,Object callback,Throwable original,int[] calls)throws Exception{
+        int before=calls[0];
+        try{method.invoke(receiver,callback);throw new AssertionError(method.getName()+" lost the original callback exception");}
+        catch(InvocationTargetException thrown){require(thrown.getCause()==original,method.getName()+" replaced the original Throwable");}
+        require(calls[0]==before+1,method.getName()+" invoked the failing callback more or less than once");
     }
     /** Verify the actual transformed Netty methods without starting another game JVM. */
     private static void networkBytecode()throws Exception{

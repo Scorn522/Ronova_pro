@@ -43,7 +43,7 @@ public final class NativeControl {
             if(!early.isEmpty()) {
                 Path actual=Path.of(early).toAbsolutePath();if(!hash(Files.readAllBytes(actual)).equals(digest))throw new IOException("EARLY_NATIVE_IMAGE_MISMATCH");dll=actual;
             }
-            System.load(dll.toString());if(abi()!=78)throw new UnsatisfiedLinkError("NATIVE_CONTROL_ABI");
+            System.load(dll.toString());if(abi()!=79)throw new UnsatisfiedLinkError("NATIVE_CONTROL_ABI");
             if(!initialize0(ControlBridge.class,DefinitionBridge.class))throw new UnsatisfiedLinkError("ACTUAL_NATIVE_BOUNDARY_INSTALL_FAILED");
             if(!initializeDefinitionDirectory0(definitionDirectoryOwner))throw new UnsatisfiedLinkError("ACTUAL_DEFINITION_DIRECTORY_CAS_UNAVAILABLE");
             libraryBoundaryPresent=libraryPresent0();available=true;return state="NATIVE_BIND_AND_JNI_FIELD_READY";
@@ -271,12 +271,15 @@ public final class NativeControl {
         if(CALLER.getCallerClass()!=CarrierBridge.class)throw new SecurityException("ACTUAL_CARRIER_BRIDGE_REQUIRED");
         return available?carrierCallbackDepth0(declaring,name,descriptor):0;
     }
-    static boolean carrierCallback(Object consumer,Class<?> callee,String name,String descriptor,int calleeBottomDepth,
+    static boolean carrierCallback(Object callback,Class<?> callee,String name,String descriptor,int calleeBottomDepth,
                                    Class<?> boundary,String boundaryMethod,String boundaryDescriptor,int boundaryBottomDepth){
         if(CALLER.getCallerClass()!=CarrierBridge.class)throw new SecurityException("ACTUAL_CARRIER_BRIDGE_REQUIRED");
-        return available&&carrierCallback0(consumer,callee,name,descriptor,calleeBottomDepth,boundary,boundaryMethod,boundaryDescriptor,boundaryBottomDepth);
+        return available&&carrierCallback0(callback,callee,name,descriptor,calleeBottomDepth,boundary,boundaryMethod,boundaryDescriptor,boundaryBottomDepth);
     }
     private static boolean carrierReader(){return ControlBridge.coreWriter();}
+    private static boolean carrierAdapter(Object plan,String selector,int location,int opcode,String owner,String name,String descriptor){
+        return ExecutionFlow.callbackAdapter(plan,selector,location,opcode,owner,name,descriptor);
+    }
     static boolean arrayCopyInternalBoundary(){return CALLER.getCallerClass()==ControlBridge.class&&arrayCopyInternalBoundary0();}
     static boolean arrayCopyReadBoundary(Object source,int from,int length){return CALLER.getCallerClass()==ControlBridge.class&&arrayCopyReadBoundary0(source,from,length);}
     static boolean arrayCopyBoundary(Object source,int from,int length,Object target,int to,int prefix,Object read){return CALLER.getCallerClass()==ControlBridge.class&&arrayCopyBoundary0(source,from,length,target,to,prefix,read);}
@@ -778,7 +781,7 @@ public final class NativeControl {
     private static native Object[] carrierRead0(Object receiver,java.lang.reflect.Field field);
     private static native Object[] carrierStaticValue0(Class<?> declaring,String name,String descriptor);
     private static native int carrierCallbackDepth0(Class<?> declaring,String name,String descriptor);
-    private static native boolean carrierCallback0(Object consumer,Class<?> callee,String name,String descriptor,int calleeBottomDepth,
+    private static native boolean carrierCallback0(Object callback,Class<?> callee,String name,String descriptor,int calleeBottomDepth,
                                                   Class<?> boundary,String boundaryMethod,String boundaryDescriptor,int boundaryBottomDepth);
     private static native boolean arrayCopyInternalBoundary0();
     private static native boolean arrayCopyReadBoundary0(Object source,int from,int length);

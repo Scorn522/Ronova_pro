@@ -1,5 +1,18 @@
 # B 批实际报告：2026-10-09 代码收敛接续
 
+## 2026-10-16：C 接续——完整本批回调与复杂载体接点
+
+接续 `ddd92bc`，Java86 / Native79 / Storage3 / Journal6，协议 `r3-client-8`。既有三个 6.1 Sol max 子代理分别完成 VM 深链/纯转发读取、Forge/JDK Optional 真实调用点及复杂容器查询；主线程接齐 Core 四类 callback、失效监听双层分派、当前动作弱派生关系与 Bootstrap 五 handles。整包源码写齐后统一构建，自身外观、武器注册及驱动部署不做。
+
+Forge supply/consumer/map/lazyMap/filter/监听/回退，以及 JDK Optional 六个指定入口消费原真实 operands，各 callback 只执行一次；原 Throwable 对象保留，供应者原 monitor 和返回后才开启的 publication Gate 不变。原 Set.forEach 仍执行一次，按当前真实 HashSet/lifecycle/member 接外层原分派 Consumer 及内层 listener。派生关系只记录实际非空返回及原 parent/value/supplier，在同一当前 Scope 内按真实 root/全部 owner 复核；不会给全局 Optional.empty 记 owner，空结果 fallback 原样执行但没有装备写委托。未安装 Core callbacks 时 Bootstrap 原 JDK callback 直通。
+
+Native 八个准确 Forge/JDK SAM 契约扩为最多16个物理帧的真实直接 CP/BCI/版本/来源链；二次 functional 只准准确纯转发 bridge/隐藏适配。新增 callbackSafe 原始布尔与只读 Plan 唯一 invocation 核对，既有 retirementSafe 计算和控制职责不变，无新 capability/JNI 导出。复杂 MapN/Guava/标准树桶读取实际 probe、桶链或树路径，精确 Enum/Integer/String hash/equals/comparison 使用当前字段/字节及缓存，不执行 key 自定义方法；EnumMap 实际值存储接通用图，keyUniverse 不登记 owned 数组。旧五门、拟写值预测和当前 backing 更新继续接续；未知 Map/key/异步函数/动态间接调用/native opaque 仍有边界。
+
+`build-c-java86-native79-callbacks-20261016.log` **首轮 PASS，1分6秒**，21项任务中15项执行、6项保持最新；`compile-c-java86-native79-callbacks-20261016.log` **退出0**。`c-java86-native79-callbacks-slot-bytecode-20261016.log` 执行现有 AuditFixCheck 的 `capability-callback-bytecode`，**退出0、CAPABILITY_BYTECODE_VERIFY_PASS、CAPABILITY_CALLBACK_BYTECODE_PASS**。Forge 保留生产 frame/COMPUTE_MAXS；JDK Optional 使用真实变换后字节码，只为合法子加载器定义而单类 rename，保持原字段/方法/frame。其六处 callback 普通分支检查了原操作数/次数/返回和原 Throwable identity，Bridge handles 始终未安装，不造 Core/Scope/module/source 资格。日志明确是 renamed isolated JVM body check，不能代称实际 java.base 重变换或游戏结果。
+
+本包 Native 实际深链、复杂键/树桶的写门、真实能力/换装/失效/停组游戏行为 **NOTRUN**。未重复旧已通过矩阵，未启动游戏，旧 Native75 预启动失败及上一批编译/隔离检查失败记录保持原状。候选 `distribution/candidate-c-java86-native79-callbacks-wip-20261016`：Core2913173、prelaunch23309字节；源码、匹配 JAR 和本摘要同步 GitHub，未生成源码 ZIP，完整 C/B 尚未完成。
+
+---
 ## 2026-10-16：C 接续——消费者委托与自定义槽位
 
 接续 `2fdef27`，Java85 / Native78 / Storage3 / Journal6，协议 `r3-client-8`。既有三个 6.1 Sol max 子代理分别完成 VM 回调通道、实际 getter 读取织入及槽位图/Core 写门；主线程完成回调作用域、Bootstrap/Agent 接线与当前正常 selector。源码整包写齐后才构建，自身外观、武器注册、驱动部署继续暂缓。

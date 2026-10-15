@@ -1,5 +1,22 @@
 # Ronova Pro 当前进度
 
+## 2026-10-16：C 接续——能力回调链与复杂容器
+
+接续已推送的 `ddd92bc`，Java ABI86 / Native ABI79 / Storage3 / Journal6，协议仍为 `r3-client-8`。本包将能力回调、Java Optional 后续调用及复杂标准载体写齐后统一构建；自身外观、武器注册、驱动部署与源码 ZIP 不在本包。
+
+真实 Forge LazyOptional 的供应者、消费、映射、筛选、回退供应者、即时监听及失效监听接原 callback/value 操作数，原回调只执行一次，所有 Throwable 保留原对象。getValue 的原 monitor 和异常出口保留，发布 Gate 仍在供应者返回及原 MutableObject 构造后才开启。失效仍调用原 Set.forEach 一次；只对当前真实 HashSet/lifecycle，用 Core 包装分别接真实外层分派 Consumer 和当前 listener，原 clear 与异常迭代行为保留，没有重放 iterator 或猜隐藏捕获。
+
+Forge map/filter 的 Java Optional 和 lazyMap 非空结果沿同一当前 Scope、原 parent、实际 value/supplier 记录弱派生关系。JDK Optional 的 ifPresent/map/filter/flatMap/orElseGet/orElseThrow(Supplier) 在原接口调用点接入同一门，Core 尚未安装时直接执行原 JDK 回调。当前 owner/root、optional 状态、原 supplier、真实 resolved 值及生命周期持续复核；动作关闭、脱链或其他 owner/stack 不借权。全局共享 Optional.empty 没有按对象登记派生 owner，其 fallback 原样执行，但不因此获得装备写入委托；不把临时映射值伪造为实体持有的 payload。
+
+Native 支持 Forge/JDK 的 accept/get/apply/test 八个准确接口契约，按当前真实 CP/BCI、Method 版本、来源及最多16个物理帧接直接业务调用边。普通 helper 不因同时实现 Runnable 等被整类拒绝。二次函数入口仅允许真实 bridge/已匹配隐藏映像的准确纯转发适配；只读现有 Plan 的实际指令、调用点和原始 callbackSafe（非构造器、非同步、无原 handler），唯一 invocation 与当前 CP selector 一致才认可。旧 retirementSafe 计算和退役资格未放松，未新增 JVMTI capability、JNI 导出或泛用写许可；未知/停止来源、反射/MH/动态不可解析路径及超限链继续拒绝。
+
+复杂槽位查询补真实 MapN probe、Guava RegularImmutableMap 桶/mask/smear/nextInKeyBucket、JdkBacked 委托与 Singleton 的实际 equals 方向；HashMap 树桶沿原 next 前置判断、parent/root/left/right 和原 find 回退路径读取，不用链表 next 代替树查询。Enum/Integer/String 按准确身份及实际字段、String 缓存/hash/value/coder/UTF16 字节读取，不调用任意 key.hashCode/equals/compareTo。EnumMap 值数组补入通用 payload 图，NULL sentinel 过滤，keyUniverse 仍是借用数据。原 owner/generation、拟写值预测、字段/数组/offset/memory 和 backing observer 保持接续。未知 key/Map/容器覆写、异常或超既有容量的载体仍明确 unsupported。
+
+`build-c-java86-native79-callbacks-20261016.log` **首轮 PASS，1分6秒**，21项任务中15项执行、6项保持最新，Java86/Native79 编译链接完成；`compile-c-java86-native79-callbacks-20261016.log` **退出0**。现有 AuditFixCheck 的 `capability-callback-bytecode` 复用 Forge 三类织入，并将真实已变换 JDK Optional 单类重命名后按原字段/方法/frame 隔离定义，**退出0、CAPABILITY_BYTECODE_VERIFY_PASS、CAPABILITY_CALLBACK_BYTECODE_PASS**。检查确认未安装 Bridge handles 时六处回调的原参数、次数、返回及 Throwable identity；只证明隔离字节码及该直通语义，不代表实际 java.base 重变换或游戏授权动作通过。未重跑旧槽位、退役、Netty/世界矩阵，未启动游戏。
+
+Native 当前 VM 深链、复杂键/树桶实际保护、失效/换装/停组等游戏效果 **NOTRUN**，旧失败记录全部保留。候选 `distribution/candidate-c-java86-native79-callbacks-wip-20261016` 含 Core2913173、prelaunch23309字节；源码、匹配 JAR 与原摘要同步 GitHub。任意异步/未知函数组合、未知自定义 getter/原生状态等仍有边界，完整 C/B 未宣称完成。
+
+---
 ## 2026-10-16：C 接续——能力消费者与自定义装备槽
 
 接续已推送的 `2fdef27`，Java ABI85 / Native ABI78 / Storage3 / Journal6，协议仍为 `r3-client-8`。本包写齐能力消费者委托、自然 getter 读取轨迹和当前槽位的实际写门后统一构建；自身外观、武器注册与驱动部署继续暂缓。

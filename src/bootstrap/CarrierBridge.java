@@ -34,13 +34,13 @@ public final class CarrierBridge {
         core();Objects.requireNonNull(declaring,"declaring");Objects.requireNonNull(name,"name");Objects.requireNonNull(descriptor,"descriptor");
         return NativeControl.carrierCallbackDepth(declaring,name,descriptor);
     }
-    /** The Core supplies the operand from its one original consumer.accept call. */
-    public static boolean callback(Object consumer,Class<?> callee,String name,String descriptor,int calleeBottomDepth,
+    /** The Core supplies its original functional operand; every physical business edge is read from the current VM. */
+    public static boolean callback(Object callback,Class<?> callee,String name,String descriptor,int calleeBottomDepth,
                                    Class<?> boundary,String boundaryMethod,String boundaryDescriptor,int boundaryBottomDepth){
-        core();Objects.requireNonNull(consumer,"consumer");Objects.requireNonNull(callee,"callee");
+        core();Objects.requireNonNull(callback,"callback");Objects.requireNonNull(callee,"callee");
         Objects.requireNonNull(name,"name");Objects.requireNonNull(descriptor,"descriptor");Objects.requireNonNull(boundary,"boundary");
         Objects.requireNonNull(boundaryMethod,"boundaryMethod");Objects.requireNonNull(boundaryDescriptor,"boundaryDescriptor");
-        return calleeBottomDepth>0&&boundaryBottomDepth>0&&NativeControl.carrierCallback(consumer,callee,name,descriptor,calleeBottomDepth,
+        return calleeBottomDepth>0&&boundaryBottomDepth>0&&NativeControl.carrierCallback(callback,callee,name,descriptor,calleeBottomDepth,
                 boundary,boundaryMethod,boundaryDescriptor,boundaryBottomDepth);
     }
 }

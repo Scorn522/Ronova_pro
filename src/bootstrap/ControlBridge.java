@@ -28,7 +28,7 @@ public final class ControlBridge {
         }
     };
     private ControlBridge() { }
-    public static int abiVersion(){return 85;}
+    public static int abiVersion(){return 86;}
     public static long arrayRevision(Object value){if(!recoveryWriter())throw new SecurityException("RECOVERY_ARRAY_READER_REQUIRED");return CodeSourceBridge.executionArrayRevision(value);}
 
     public static synchronized void install(Class<?> agent,ClassFileTransformer[] transformers) throws ReflectiveOperationException {
@@ -897,6 +897,7 @@ public final class ControlBridge {
             "nativeArrayElementAllowed","nativePrimitiveArrayPolicy","nativeArrayPointerAllowed","nativeArrayCopyInternal","nativeRegistrationAllowed","nativeRegistrationTargetAllowed","nativeHeapTargetAllowed","arrayWriteAllowed",
             "resourceReleaseAllowed","lifeResult","dispatchAllowed","dispatchDeniedResult","equipmentActionSourceAllowed","equipmentCarrierSourceAllowed","beginEquipmentInvocation","equipmentInvocationDenied","equipmentInvocationResult","endEquipmentInvocation","failedEquipmentInvocation","taskEffectAllowed",
             "beginEquipmentSlotRead","equipmentSlotFieldRead","equipmentSlotArrayRead","equipmentSlotContainerRead","equipmentSlotSelectorRead","equipmentSlotUnresolved","observeEquipmentSlot","failedEquipmentSlotRead",
+            "capabilityAccept","capabilitySupply","capabilityApply","capabilityTest","capabilityDerived",
             "resultPublicationAllowed");
     static boolean controlCaller() {
         // The query omits guard entry points, preserving the real ledger writer.
@@ -2294,6 +2295,40 @@ public final class ControlBridge {
     record EquipmentInvocations(java.lang.invoke.MethodHandle begin,java.lang.invoke.MethodHandle denied,
             java.lang.invoke.MethodHandle result,java.lang.invoke.MethodHandle end,java.lang.invoke.MethodHandle failed) { }
     static volatile EquipmentInvocations equipmentInvocations;
+    private static volatile java.lang.invoke.MethodHandle[] capabilityCallbacks;
+    public static synchronized void installCapabilityCallbacks(Class<?> owner,java.lang.invoke.MethodHandle[] callbacks){
+        requirePolicyInstaller();if(guards==null||guards.owner()!=owner)throw new SecurityException("EQUIPMENT_CALLBACK_OWNER");
+        java.lang.invoke.MethodType[] types={
+            java.lang.invoke.MethodType.methodType(void.class,Object.class,Object.class,Object.class,String.class),
+            java.lang.invoke.MethodType.methodType(Object.class,Object.class,Object.class,String.class),
+            java.lang.invoke.MethodType.methodType(Object.class,Object.class,Object.class,Object.class,String.class),
+            java.lang.invoke.MethodType.methodType(boolean.class,Object.class,Object.class,Object.class,String.class),
+            java.lang.invoke.MethodType.methodType(void.class,Object.class,Object.class,String.class)};
+        if(callbacks==null||callbacks.length!=types.length)throw new IllegalArgumentException("EQUIPMENT_CALLBACK_HANDLES");
+        var next=callbacks.clone();for(int at=0;at<next.length;at++)next[at]=Objects.requireNonNull(next[at]).asType(types[at]);capabilityCallbacks=next;
+    }
+    @SuppressWarnings("unchecked") private static <E extends Throwable> RuntimeException capabilityFailure(Throwable failure)throws E{throw (E)failure;}
+    @SuppressWarnings("unchecked") public static void capabilityAccept(Object optional,Object consumer,Object value,String phase){
+        var callbacks=capabilityCallbacks;
+        if(callbacks==null){((java.util.function.Consumer<Object>)consumer).accept(value);return;}
+        try{callbacks[0].invokeExact(optional,consumer,value,phase);}catch(Throwable failure){throw ControlBridge.<RuntimeException>capabilityFailure(failure);}
+    }
+    @SuppressWarnings("unchecked") public static Object capabilitySupply(Object optional,Object supplier,String phase){
+        var callbacks=capabilityCallbacks;if(callbacks==null)return ((java.util.function.Supplier<Object>)supplier).get();
+        try{return (Object)callbacks[1].invokeExact(optional,supplier,phase);}catch(Throwable failure){throw ControlBridge.<RuntimeException>capabilityFailure(failure);}
+    }
+    @SuppressWarnings("unchecked") public static Object capabilityApply(Object optional,Object function,Object value,String phase){
+        var callbacks=capabilityCallbacks;if(callbacks==null)return ((java.util.function.Function<Object,Object>)function).apply(value);
+        try{return (Object)callbacks[2].invokeExact(optional,function,value,phase);}catch(Throwable failure){throw ControlBridge.<RuntimeException>capabilityFailure(failure);}
+    }
+    @SuppressWarnings("unchecked") public static boolean capabilityTest(Object optional,Object predicate,Object value,String phase){
+        var callbacks=capabilityCallbacks;if(callbacks==null)return ((java.util.function.Predicate<Object>)predicate).test(value);
+        try{return (boolean)callbacks[3].invokeExact(optional,predicate,value,phase);}catch(Throwable failure){throw ControlBridge.<RuntimeException>capabilityFailure(failure);}
+    }
+    public static void capabilityDerived(Object parent,Object returned,String phase){
+        var callbacks=capabilityCallbacks;if(callbacks==null)return;
+        try{callbacks[4].invokeExact(parent,returned,phase);}catch(Throwable failure){throw ControlBridge.<RuntimeException>capabilityFailure(failure);}
+    }
     private static volatile java.lang.invoke.MethodHandle[] equipmentSlots;
     public static synchronized void installEquipmentSlots(Class<?> owner,java.lang.invoke.MethodHandle[] callbacks){
         requirePolicyInstaller();if(guards==null||guards.owner()!=owner)throw new SecurityException("EQUIPMENT_SLOT_OBSERVER_OWNER");

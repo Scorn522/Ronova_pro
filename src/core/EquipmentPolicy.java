@@ -150,13 +150,20 @@ public final class EquipmentPolicy {
     private static Map<Thread,CapabilityScope> CAP_SCOPES;
     private static Map<Thread,CapabilityQuery> CAP_QUERIES;
     private static final ThreadLocal<CapabilityConsumer> CAP_CONSUMERS=new ThreadLocal<>();
+    private static final Map<Object,DerivedCapability> CAP_DERIVED=Collections.synchronizedMap(new WeakIdentityMap<>());
     private static MethodHandle CALLBACK_DEPTH,CALLBACK_FRAME;
-    private static final String CONSUMER_BOUNDARY="invokeCapabilityConsumer",CONSUMER_DESCRIPTOR="(Lnet/minecraftforge/common/util/NonNullConsumer;Ljava/lang/Object;Ljava/lang/Object;)V";
+    private static final class DerivedCapability {
+        final WeakReference<Scope> action;final WeakReference<Object> parent,marker;final boolean lazy;
+        DerivedCapability(Scope action,Object parent,Object marker,boolean lazy){this.action=new WeakReference<>(action);this.parent=new WeakReference<>(parent);this.marker=new WeakReference<>(marker);this.lazy=lazy;}
+    }
+    private record CallbackOrigin(ItemStack root,List<Link> links,CapabilityScope lifecycle) { }
     private static final class CapabilityConsumer {
         final Scope action;final Object optional,consumer,value;final ItemStack root;final List<Link> links;
+        final String phase,boundary,descriptor;final CapabilityScope lifecycle;
         final Thread thread=Thread.currentThread();final CapabilityConsumer previous;int bottomDepth;boolean closed;
-        CapabilityConsumer(Scope action,Object optional,Object consumer,Object value,ItemStack root,List<Link> links,CapabilityConsumer previous){
-            this.action=action;this.optional=optional;this.consumer=consumer;this.value=value;this.root=root;this.links=List.copyOf(links);this.previous=previous;
+        CapabilityConsumer(Scope action,Object optional,Object consumer,Object value,CallbackOrigin origin,String phase,String boundary,String descriptor,CapabilityConsumer previous){
+            this.action=action;this.optional=optional;this.consumer=consumer;this.value=value;this.root=origin.root;this.links=origin.links;this.lifecycle=origin.lifecycle;
+            this.phase=phase;this.boundary=boundary;this.descriptor=descriptor;this.previous=previous;
         }
     }
     private static final class CapabilityQuery {
@@ -170,9 +177,11 @@ public final class EquipmentPolicy {
     }
     private static final class CapabilityScope {
         final Object receiver,next,listeners;final String phase;final Class<?> anchor;final String method,descriptor;
+        final List<Link> links;
         final List<StackWalker.StackFrame> tail;final Thread thread=Thread.currentThread();final CapabilityScope previous;boolean closed;Object gate;
-        CapabilityScope(Object receiver,Object next,Object listeners,String phase,StackWalker.StackFrame entry,List<StackWalker.StackFrame> tail,CapabilityScope previous){
+        CapabilityScope(Object receiver,Object next,Object listeners,String phase,List<Link> links,StackWalker.StackFrame entry,List<StackWalker.StackFrame> tail,CapabilityScope previous){
             this.receiver=receiver;this.next=next;this.listeners=listeners;this.phase=phase;this.anchor=entry.getDeclaringClass();this.method=entry.getMethodName();this.descriptor=entry.getDescriptor();this.tail=tail;this.previous=previous;
+            this.links=List.copyOf(links);
         }
     }
     private static volatile int REFERENCE_WIDTH=8;
@@ -599,7 +608,7 @@ public final class EquipmentPolicy {
         Object listeners=receiver.getClass()==LazyOptional.class?capRead(OPTIONAL_LISTENERS,receiver):null;
         CapabilityScope previous=CAP_SCOPES.get(Thread.currentThread());
         for(CapabilityScope parent=previous;parent!=null;parent=parent.previous)if(parent.receiver==receiver&&parent.phase.equals(phase))throw new SecurityException("EQUIPMENT_CAPABILITY_REENTRY");
-        CapabilityScope scope=new CapabilityScope(receiver,next,listeners,phase,frames.get(0),List.copyOf(frames.subList(1,frames.size())),previous);
+        CapabilityScope scope=new CapabilityScope(receiver,next,listeners,phase,selected,frames.get(0),List.copyOf(frames.subList(1,frames.size())),previous);
         boolean installed=false;
         try{
             if(publish||resolve)scope.gate=ProRuntime.equipmentCapabilityGate(receiver);
@@ -682,48 +691,153 @@ public final class EquipmentPolicy {
         }
     }
     public static void capabilityQueryFailed(Object token,Throwable failure){try{closeQuery(token,null,false);}catch(RuntimeException|Error cleanup){if(cleanup!=failure)failure.addSuppressed(cleanup);}}
-    /** The original ifPresent operands enter here once; this never replays a supplier or callback. */
-    @SuppressWarnings("unchecked")
-    public static void capabilityAccept(Object optional,Object consumer,Object value){
-        var actual=(net.minecraftforge.common.util.NonNullConsumer<Object>)Objects.requireNonNull(consumer);
-        CapabilityConsumer lease=null,previous=CAP_CONSUMERS.get();
-        if(initialized&&optional!=null&&optional.getClass()==LazyOptional.class){
-            List<StackWalker.StackFrame> frames=capabilityFrames();Scope action=SCOPES.get(Thread.currentThread());
-            boolean entry=!frames.isEmpty()&&frames.get(0).getDeclaringClass()==LazyOptional.class&&frames.get(0).getMethodName().equals("ifPresent")
-                    &&frames.get(0).getDescriptor().equals("(Lnet/minecraftforge/common/util/NonNullConsumer;)V");
-            if(entry&&action!=null&&!action.closed&&scopePath(action,frames.subList(1,frames.size()))&&sourceAllowed(action)
-                    &&capBool(OPTIONAL_VALID,optional)&&resolvedValue(optional)==value&&value!=null){
-                List<Link> selected=new ArrayList<>();ItemStack root=null;boolean shared=false;
-                for(Link link:links(optional))if(current(link,optional)){
-                    ItemStack candidate=link.stack.get();
-                    if(link.owner!=action.owner||candidate==null||curativeStack(link.owner,candidate)||!actionCurrent(action,candidate,shares(link.owner,candidate))
-                            ||root!=null&&root!=candidate){shared=true;break;}
-                    root=candidate;selected.add(link);
-                }
-                if(!shared&&root!=null&&!selected.isEmpty()&&capabilityWalk(action.owner,root,value,false,null)){
-                    lease=new CapabilityConsumer(action,optional,consumer,value,root,selected,previous);CAP_CONSUMERS.set(lease);
-                }
-            }
-        }
-        Throwable original=null;
-        try{invokeCapabilityConsumer(actual,value,lease);}catch(RuntimeException|Error failure){original=failure;throw failure;}
-        finally{if(lease!=null)try{lease.closed=true;if(CAP_CONSUMERS.get()!=lease)throw new IllegalMonitorStateException("EQUIPMENT_CAPABILITY_CONSUMER_ORDER");
-                if(previous==null)CAP_CONSUMERS.remove();else CAP_CONSUMERS.set(previous);}
-            catch(RuntimeException|Error failure){if(original==null)throw failure;if(failure!=original)original.addSuppressed(failure);}}
+    private static boolean optional(Object value){return value!=null&&(value.getClass()==LazyOptional.class||value.getClass()==Optional.class);}
+    private static Object resolvedValue(Object optional){
+        if(optional!=null&&optional.getClass()==Optional.class){for(var field:EquipmentCarrierGraph.fields(optional))if(field.field().getDeclaringClass()==Optional.class&&field.field().getName().equals("value"))return field.value();throw new IllegalStateException("ACTUAL_OPTIONAL_VALUE_REQUIRED");}
+        Object holder=capRead(OPTIONAL_VALUE,optional);return holder!=null&&holder.getClass()==MutableObject.class?capRead(MUTABLE_VALUE,holder):null;
     }
-    private static Object resolvedValue(Object optional){Object holder=capRead(OPTIONAL_VALUE,optional);return holder!=null&&holder.getClass()==MutableObject.class?capRead(MUTABLE_VALUE,holder):null;}
-    private static void invokeCapabilityConsumer(net.minecraftforge.common.util.NonNullConsumer<Object> consumer,Object value,Object token){
-        if(token instanceof CapabilityConsumer lease)try{
-            lease.bottomDepth=(int)CALLBACK_DEPTH.invokeExact((Class<?>)EquipmentPolicy.class,CONSUMER_BOUNDARY,CONSUMER_DESCRIPTOR);
-        }catch(Throwable failure){throw new IllegalStateException("EQUIPMENT_CONSUMER_BOUNDARY_UNAVAILABLE",failure);}
-        consumer.accept(value);
+    private static boolean optionalValid(Object optional){return optional.getClass()==Optional.class||capBool(OPTIONAL_VALID,optional);}
+    private static boolean callbackEntry(StackWalker.StackFrame frame,String phase){
+        String supplier="(Lnet/minecraftforge/common/util/NonNullSupplier;)Ljava/lang/Object;",function="(Lnet/minecraftforge/common/util/NonNullFunction;)Ljava/util/Optional;";
+        if(frame.getDeclaringClass()==LazyOptional.class)return switch(phase){
+            case "supply"->sameAnchor(frame,LazyOptional.class,"getValue","()Ljava/lang/Object;");
+            case "if-present"->sameAnchor(frame,LazyOptional.class,"ifPresent","(Lnet/minecraftforge/common/util/NonNullConsumer;)V");
+            case "map"->sameAnchor(frame,LazyOptional.class,"map",function);
+            case "filter"->sameAnchor(frame,LazyOptional.class,"filter","(Lnet/minecraftforge/common/util/NonNullPredicate;)Ljava/util/Optional;");
+            case "lazy-map"->sameAnchor(frame,LazyOptional.class,"lambda$lazyMap$0","(Lnet/minecraftforge/common/util/NonNullFunction;)Ljava/lang/Object;");
+            case "listener-immediate"->sameAnchor(frame,LazyOptional.class,"addListener","(Lnet/minecraftforge/common/util/NonNullConsumer;)V");
+            case "listener-invalidate"->sameAnchor(frame,LazyOptional.class,"lambda$invalidate$1","(Lnet/minecraftforge/common/util/NonNullConsumer;)V");
+            case "or-else-get"->sameAnchor(frame,LazyOptional.class,"orElseGet",supplier);
+            case "or-else-throw"->sameAnchor(frame,LazyOptional.class,"orElseThrow",supplier);
+            default->false;};
+        if(frame.getDeclaringClass()!=Optional.class)return false;
+        return switch(phase){
+            case "jdk-if-present"->sameAnchor(frame,Optional.class,"ifPresent","(Ljava/util/function/Consumer;)V");
+            case "jdk-map"->sameAnchor(frame,Optional.class,"map","(Ljava/util/function/Function;)Ljava/util/Optional;");
+            case "jdk-flat-map"->sameAnchor(frame,Optional.class,"flatMap","(Ljava/util/function/Function;)Ljava/util/Optional;");
+            case "jdk-filter"->sameAnchor(frame,Optional.class,"filter","(Ljava/util/function/Predicate;)Ljava/util/Optional;");
+            case "jdk-or-else-get"->sameAnchor(frame,Optional.class,"orElseGet","(Ljava/util/function/Supplier;)Ljava/lang/Object;");
+            case "jdk-or-else-throw"->sameAnchor(frame,Optional.class,"orElseThrow","(Ljava/util/function/Supplier;)Ljava/lang/Object;");
+            default->false;};
+    }
+    private static boolean lifecycleCurrent(CapabilityScope lifecycle,Object optional){
+        if(lifecycle==null||lifecycle.receiver!=optional||lifecycle.closed||lifecycle.thread!=Thread.currentThread()||!capabilityAnchor(lifecycle,false))return false;
+        for(CapabilityScope at=CAP_SCOPES.get(Thread.currentThread());at!=null;at=at.previous)if(at==lifecycle)return true;return false;
+    }
+    private static CallbackOrigin callbackOrigin(Object optional,Scope action,int depth){
+        if(!optional(optional)||action==null||action.closed||depth>=16)return null;
+        List<Link> selected=new ArrayList<>();ItemStack root=null;
+        CapabilityScope lifecycle=CAP_SCOPES.get(Thread.currentThread());
+        boolean invalidating=lifecycleCurrent(lifecycle,optional)&&lifecycle.phase.equals("invalidate-optional");
+        List<Link> related=new ArrayList<>(links(optional));if(invalidating)for(Link captured:lifecycle.links)if(!related.contains(captured))related.add(captured);
+        for(Link link:related)if(current(link,optional)||invalidating&&lifecycle.links.contains(link)){
+            ItemStack candidate=link.stack.get();
+            if(link.owner!=action.owner||candidate==null||curativeStack(link.owner,candidate)||!actionCurrent(action,candidate,shares(link.owner,candidate))||root!=null&&root!=candidate)return null;
+            root=candidate;selected.add(link);
+        }
+        if(root!=null&&!selected.isEmpty())return new CallbackOrigin(root,List.copyOf(selected),invalidating?lifecycle:null);
+        DerivedCapability derived=CAP_DERIVED.get(optional);if(derived==null||derived.action.get()!=action)return null;
+        Object parent=derived.parent.get(),marker=derived.marker.get();if(parent==null||marker==null||!optionalValid(optional))return null;
+        if((derived.lazy?capRead(OPTIONAL_SUPPLIER,optional):resolvedValue(optional))!=marker)return null;
+        return callbackOrigin(parent,action,depth+1);
+    }
+    private static boolean listenerPresent(Object listeners,Object listener){
+        if(listeners==null||listeners.getClass()!=HashSet.class)return false;
+        var layout=EquipmentCarrierLayouts.layout(listeners);if(layout==null||!layout.complete())return false;
+        for(var edge:layout.children())if(!edge.storage()&&edge.value()==listener)return true;return false;
+    }
+    private static boolean callbackState(Object optional,Object callback,Object value,String phase,CapabilityScope lifecycle){
+        if(phase.equals("supply"))return optional.getClass()==LazyOptional.class&&optionalValid(optional)&&capRead(OPTIONAL_VALUE,optional)==null&&capRead(OPTIONAL_SUPPLIER,optional)==callback;
+        if(phase.equals("listener-dispatch"))return optional.getClass()==LazyOptional.class&&!optionalValid(optional)
+                &&lifecycleCurrent(lifecycle,optional)&&lifecycle.phase.equals("invalidate-optional")&&capRead(OPTIONAL_LISTENERS,optional)==lifecycle.listeners&&listenerPresent(lifecycle.listeners,value);
+        if(phase.equals("listener-invalidate"))return optional.getClass()==LazyOptional.class&&!optionalValid(optional)&&value==optional
+                &&lifecycleCurrent(lifecycle,optional)&&lifecycle.phase.equals("invalidate-optional")&&capRead(OPTIONAL_LISTENERS,optional)==lifecycle.listeners&&listenerPresent(lifecycle.listeners,callback);
+        if(phase.equals("listener-immediate"))return optional.getClass()==LazyOptional.class&&!optionalValid(optional)&&value==optional;
+        if(phase.endsWith("or-else-get")||phase.endsWith("or-else-throw"))return !optionalValid(optional)||resolvedValue(optional)==null;
+        return optionalValid(optional)&&value!=null&&resolvedValue(optional)==value;
+    }
+    private static CapabilityConsumer beginConsumer(Object optional,Object callback,Object value,String phase,String boundary,String descriptor){
+        if(!initialized||!optional(optional))return null;
+        Scope action=SCOPES.get(Thread.currentThread());if(action==null||action.closed)return null;
+        CallbackOrigin origin=callbackOrigin(optional,action,0);if(origin==null)return null;var frames=capabilityFrames();
+        if(frames.isEmpty()||!callbackEntry(frames.get(0),phase)||!scopePath(action,frames.subList(1,frames.size()))||!sourceAllowed(action))return null;
+        if(!callbackState(optional,callback,value,phase,origin.lifecycle))return null;
+        CapabilityConsumer lease=new CapabilityConsumer(action,optional,callback,value,origin,phase,boundary,descriptor,CAP_CONSUMERS.get());CAP_CONSUMERS.set(lease);return lease;
+    }
+    private static void closeConsumer(CapabilityConsumer lease,Throwable original){
+        if(lease==null)return;try{lease.closed=true;if(CAP_CONSUMERS.get()!=lease)throw new IllegalMonitorStateException("EQUIPMENT_CAPABILITY_CALLBACK_ORDER");
+            if(lease.previous==null)CAP_CONSUMERS.remove();else CAP_CONSUMERS.set(lease.previous);
+        }catch(RuntimeException|Error failure){if(original==null)throw failure;if(failure!=original)original.addSuppressed(failure);}
+    }
+    @SuppressWarnings("unchecked") private static <E extends Throwable> RuntimeException callbackFailure(Throwable failure)throws E{throw (E)failure;}
+    private static void consumerDepth(Object token){if(token instanceof CapabilityConsumer lease)try{
+        lease.bottomDepth=(int)CALLBACK_DEPTH.invokeExact((Class<?>)EquipmentPolicy.class,lease.boundary,lease.descriptor);
+    }catch(Throwable failure){throw new IllegalStateException("EQUIPMENT_CALLBACK_BOUNDARY_UNAVAILABLE",failure);}}
+    public static void capabilityAccept(Object optional,Object consumer,Object value){capabilityAccept(optional,consumer,value,"if-present");}
+    @SuppressWarnings("unchecked") public static void capabilityAccept(Object optional,Object consumer,Object value,String phase){
+        Objects.requireNonNull(consumer);boolean jdk=phase.startsWith("jdk-");String boundary=jdk?"invokeJdkConsumer":"invokeCapabilityConsumer";
+        String descriptor=jdk?"(Ljava/util/function/Consumer;Ljava/lang/Object;Ljava/lang/Object;)V":"(Lnet/minecraftforge/common/util/NonNullConsumer;Ljava/lang/Object;Ljava/lang/Object;)V";
+        CapabilityConsumer lease=beginConsumer(optional,consumer,value,phase,boundary,descriptor);Throwable original=null;
+        try{if(jdk)invokeJdkConsumer((java.util.function.Consumer<Object>)consumer,value,lease);else invokeCapabilityConsumer((net.minecraftforge.common.util.NonNullConsumer<Object>)consumer,value,lease);}
+        catch(Throwable failure){original=failure;throw EquipmentPolicy.<RuntimeException>callbackFailure(failure);}finally{closeConsumer(lease,original);}
+    }
+    @SuppressWarnings("unchecked") public static Object capabilitySupply(Object optional,Object supplier,String phase){
+        Objects.requireNonNull(supplier);boolean jdk=phase.startsWith("jdk-");String boundary=jdk?"invokeJdkSupplier":"invokeCapabilitySupplier";
+        String descriptor=jdk?"(Ljava/util/function/Supplier;Ljava/lang/Object;)Ljava/lang/Object;":"(Lnet/minecraftforge/common/util/NonNullSupplier;Ljava/lang/Object;)Ljava/lang/Object;";
+        CapabilityConsumer lease=beginConsumer(optional,supplier,null,phase,boundary,descriptor);Throwable original=null;
+        try{return jdk?invokeJdkSupplier((java.util.function.Supplier<Object>)supplier,lease):invokeCapabilitySupplier((net.minecraftforge.common.util.NonNullSupplier<Object>)supplier,lease);}
+        catch(Throwable failure){original=failure;throw EquipmentPolicy.<RuntimeException>callbackFailure(failure);}finally{closeConsumer(lease,original);}
+    }
+    @SuppressWarnings("unchecked") public static Object capabilityApply(Object optional,Object function,Object value,String phase){
+        Objects.requireNonNull(function);boolean jdk=phase.startsWith("jdk-");String boundary=jdk?"invokeJdkFunction":"invokeCapabilityFunction";
+        String descriptor=jdk?"(Ljava/util/function/Function;Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;":"(Lnet/minecraftforge/common/util/NonNullFunction;Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;";
+        CapabilityConsumer lease=beginConsumer(optional,function,value,phase,boundary,descriptor);Throwable original=null;
+        try{return jdk?invokeJdkFunction((java.util.function.Function<Object,Object>)function,value,lease):invokeCapabilityFunction((net.minecraftforge.common.util.NonNullFunction<Object,Object>)function,value,lease);}
+        catch(Throwable failure){original=failure;throw EquipmentPolicy.<RuntimeException>callbackFailure(failure);}finally{closeConsumer(lease,original);}
+    }
+    @SuppressWarnings("unchecked") public static boolean capabilityTest(Object optional,Object predicate,Object value,String phase){
+        Objects.requireNonNull(predicate);boolean jdk=phase.startsWith("jdk-");String boundary=jdk?"invokeJdkPredicate":"invokeCapabilityPredicate";
+        String descriptor=jdk?"(Ljava/util/function/Predicate;Ljava/lang/Object;Ljava/lang/Object;)Z":"(Lnet/minecraftforge/common/util/NonNullPredicate;Ljava/lang/Object;Ljava/lang/Object;)Z";
+        CapabilityConsumer lease=beginConsumer(optional,predicate,value,phase,boundary,descriptor);Throwable original=null;
+        try{return jdk?invokeJdkPredicate((java.util.function.Predicate<Object>)predicate,value,lease):invokeCapabilityPredicate((net.minecraftforge.common.util.NonNullPredicate<Object>)predicate,value,lease);}
+        catch(Throwable failure){original=failure;throw EquipmentPolicy.<RuntimeException>callbackFailure(failure);}finally{closeConsumer(lease,original);}
+    }
+    private static void invokeCapabilityConsumer(net.minecraftforge.common.util.NonNullConsumer<Object> callback,Object value,Object token){consumerDepth(token);callback.accept(value);}
+    private static Object invokeCapabilitySupplier(net.minecraftforge.common.util.NonNullSupplier<Object> callback,Object token){consumerDepth(token);return callback.get();}
+    private static Object invokeCapabilityFunction(net.minecraftforge.common.util.NonNullFunction<Object,Object> callback,Object value,Object token){consumerDepth(token);return callback.apply(value);}
+    private static boolean invokeCapabilityPredicate(net.minecraftforge.common.util.NonNullPredicate<Object> callback,Object value,Object token){consumerDepth(token);return callback.test(value);}
+    private static void invokeJdkConsumer(java.util.function.Consumer<Object> callback,Object value,Object token){consumerDepth(token);callback.accept(value);}
+    private static Object invokeJdkSupplier(java.util.function.Supplier<Object> callback,Object token){consumerDepth(token);return callback.get();}
+    private static Object invokeJdkFunction(java.util.function.Function<Object,Object> callback,Object value,Object token){consumerDepth(token);return callback.apply(value);}
+    private static boolean invokeJdkPredicate(java.util.function.Predicate<Object> callback,Object value,Object token){consumerDepth(token);return callback.test(value);}
+    /** Keep the original HashSet.forEach; bind each original dispatch callback at its actual value. */
+    @SuppressWarnings("unchecked") public static void capabilityForEach(Object optional,Object actualSet,Object actualConsumer){
+        var set=(Set<Object>)actualSet;var consumer=(java.util.function.Consumer<Object>)actualConsumer;
+        Scope action=initialized?SCOPES.get(Thread.currentThread()):null;CapabilityScope lifecycle=initialized?CAP_SCOPES.get(Thread.currentThread()):null;
+        if(action==null||actualSet==null||actualSet.getClass()!=HashSet.class||!lifecycleCurrent(lifecycle,optional)||!lifecycle.phase.equals("invalidate-optional")
+                ||lifecycle.listeners!=actualSet||capRead(OPTIONAL_LISTENERS,optional)!=actualSet){set.forEach(consumer);return;}
+        var frames=capabilityFrames();
+        if(frames.isEmpty()||!sameAnchor(frames.get(0),LazyOptional.class,"invalidate","()V")||!scopePath(action,frames.subList(1,frames.size()))||!sourceAllowed(action)){set.forEach(consumer);return;}
+        set.forEach(value->{
+            CallbackOrigin origin=action==SCOPES.get(Thread.currentThread())?callbackOrigin(optional,action,0):null;CapabilityConsumer lease=null;
+            if(origin!=null&&origin.lifecycle==lifecycle&&callbackState(optional,consumer,value,"listener-dispatch",lifecycle)){
+                lease=new CapabilityConsumer(action,optional,consumer,value,origin,"listener-dispatch","invokeJdkConsumer","(Ljava/util/function/Consumer;Ljava/lang/Object;Ljava/lang/Object;)V",CAP_CONSUMERS.get());CAP_CONSUMERS.set(lease);
+            }
+            Throwable original=null;try{invokeJdkConsumer(consumer,value,lease);}catch(Throwable failure){original=failure;throw EquipmentPolicy.<RuntimeException>callbackFailure(failure);}finally{closeConsumer(lease,original);}
+        });
+    }
+    public static void capabilityDerived(Object parent,Object returned,String phase){
+        if(!initialized||parent==returned||!optional(parent)||!optional(returned))return;Scope action=SCOPES.get(Thread.currentThread());if(action==null||action.closed||callbackOrigin(parent,action,0)==null)return;var frames=capabilityFrames();
+        if(frames.isEmpty())return;var frame=frames.get(0);
+        boolean entry=phase.equals("lazy-map")?sameAnchor(frame,LazyOptional.class,"lazyMap","(Lnet/minecraftforge/common/util/NonNullFunction;)Lnet/minecraftforge/common/util/LazyOptional;"):callbackEntry(frame,phase);
+        if(!entry||!scopePath(action,frames.subList(1,frames.size()))||!sourceAllowed(action)||!optionalValid(returned))return;
+        boolean lazy=returned.getClass()==LazyOptional.class;Object marker=lazy?capRead(OPTIONAL_SUPPLIER,returned):resolvedValue(returned);if(marker==null)return;
+        synchronized(CAP_DERIVED){DerivedCapability old=CAP_DERIVED.get(returned);Scope oldAction=old==null?null:old.action.get();if(oldAction==null||oldAction.closed)CAP_DERIVED.put(returned,new DerivedCapability(action,parent,marker,lazy));}
     }
     private static boolean consumerCurrent(CapabilityConsumer lease){
-        if(lease.closed||lease.thread!=Thread.currentThread()||lease.action!=SCOPES.get(Thread.currentThread())||lease.bottomDepth<=0
-                ||!capBool(OPTIONAL_VALID,lease.optional)||resolvedValue(lease.optional)!=lease.value
-                ||!actionCurrent(lease.action,lease.root,shares(lease.action.owner,lease.root)))return false;
-        for(Link link:lease.links)if(link.owner!=lease.action.owner||link.stack.get()!=lease.root||!current(link,lease.optional))return false;
-        return capabilityWalk(lease.action.owner,lease.root,lease.value,false,null);
+        if(lease.closed||lease.thread!=Thread.currentThread()||lease.action!=SCOPES.get(Thread.currentThread())||lease.bottomDepth<=0)return false;
+        CallbackOrigin origin=callbackOrigin(lease.optional,lease.action,0);
+        return origin!=null&&origin.root==lease.root&&origin.lifecycle==lease.lifecycle&&callbackState(lease.optional,lease.consumer,lease.value,lease.phase,lease.lifecycle);
     }
     private static boolean consumerFrame(StackWalker.StackFrame requested,Scope action){
         for(CapabilityConsumer lease=CAP_CONSUMERS.get();lease!=null;lease=lease.previous)if(lease.action==action&&consumerCurrent(lease)){
@@ -734,7 +848,7 @@ public final class EquipmentPolicy {
                 }}
             if(bottom<0)continue;
             try{if((boolean)CALLBACK_FRAME.invokeExact(lease.consumer,requested.getDeclaringClass(),requested.getMethodName(),requested.getDescriptor(),bottom,
-                    (Class<?>)EquipmentPolicy.class,CONSUMER_BOUNDARY,CONSUMER_DESCRIPTOR,lease.bottomDepth))return true;}
+                    (Class<?>)EquipmentPolicy.class,lease.boundary,lease.descriptor,lease.bottomDepth))return true;}
             catch(Throwable failure){throw new IllegalStateException("EQUIPMENT_CONSUMER_FRAME_UNAVAILABLE",failure);}
         }return false;
     }
@@ -1276,7 +1390,9 @@ public final class EquipmentPolicy {
         if(ownedNbtRedirect(frame))return true;
         if(type==CapabilityProvider.class)return names(name,"invalidateCaps","reviveCaps","deserializeCaps","getCapabilities","doGatherCapabilities","gatherCapabilities");
         if(type==CapabilityDispatcher.class)return names(name,"invalidate","deserializeNBT","getCapability");
-        if(type==LazyOptional.class)return names(name,"invalidate","addListener","removeListener")||name.equals("ifPresent")&&CAP_CONSUMERS.get()!=null;
+        if(type==LazyOptional.class)return names(name,"invalidate","addListener","removeListener","getValue","getValueUnsafe","isPresent","resolve","ifPresent","map","filter","lazyMap","orElse","orElseGet","orElseThrow","lambda$lazyMap$0","lambda$invalidate$1");
+        if(type==Optional.class)return names(name,"ifPresent","map","flatMap","filter","orElseGet","orElseThrow","isPresent","isEmpty","get");
+        if(type==Iterable.class&&name.equals("forEach"))for(CapabilityConsumer lease=CAP_CONSUMERS.get();lease!=null;lease=lease.previous)if(lease.action==scope&&lease.phase.equals("listener-dispatch")&&consumerCurrent(lease))return true;
         if(capabilityProviderType(type))return names(name,"fill","drain","setFluid","setContainerToEmpty");
         if(!vanilla(frame)){
             if(type==net.minecraftforge.common.extensions.IForgeItem.class)return invocationFrame(frame,scope,true);

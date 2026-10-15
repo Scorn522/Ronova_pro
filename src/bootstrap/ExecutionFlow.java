@@ -230,7 +230,7 @@ final class ExecutionFlow {
     private record Control(int instruction,int end,Sources sources){Control{CodeSourceBridge.executionControls(this);}}
     private record Deferred(String name,String descriptor,Sources sources){Deferred{CodeSourceBridge.executionControls(this);}}
     private static final class Method {
-        final String selector;final int locals;final int[] arguments;final int[][] operations;final Sources[] sources;final boolean constructor,retirementSafe;final String[][] fields;final Map<Integer,Integer> sites;
+        final String selector;final int locals;final int[] arguments;final int[][] operations;final Sources[] sources;final boolean constructor,retirementSafe,callbackSafe;final String[][] fields;final Map<Integer,Integer> sites;
         Method(Object[] row){
             selector=(String)row[0];locals=(Integer)row[1];arguments=((int[])row[2]).clone();
             int[][] original=(int[][])row[3];operations=new int[original.length][];for(int i=0;i<original.length;i++)operations[i]=original[i].clone();
@@ -239,6 +239,7 @@ final class ExecutionFlow {
             String[][] suppliedFields=(String[][])row[6];fields=new String[suppliedFields.length][];for(int i=0;i<fields.length;i++)fields[i]=suppliedFields[i]==null?null:suppliedFields[i].clone();
             constructor=(Boolean)row[7];
             retirementSafe=row.length>8&&Boolean.TRUE.equals(row[8]);
+            callbackSafe=row.length>9&&Boolean.TRUE.equals(row[9]);
             int[][] positions=(int[][])row[5];Map<Integer,Integer> selected=new TraceMap<>();for(int[] position:positions)selected.put(position[0],position[1]);sites=Map.copyOf(selected);
             CodeSourceBridge.executionControls(this,arguments,operations,sources,fields,sites);for(int[] operation:operations)CodeSourceBridge.executionControls(operation);for(String[] field:fields)if(field!=null)CodeSourceBridge.executionControls((Object)field);
         }
@@ -1471,5 +1472,22 @@ final class ExecutionFlow {
                 return frame.active.modules();
             }
         }return null;
+    }
+    /** Only the native reader supplies a plan after matching its whole actual VM method image. */
+    static boolean callbackAdapter(Object actual,String selector,int location,int opcode,String owner,String name,String descriptor){
+        if(CALLER.getCallerClass()!=NativeControl.class)throw new SecurityException("ACTUAL_CALLBACK_ADAPTER_READER_REQUIRED");
+        if(!(actual instanceof Plan plan)||selector==null||owner==null||name==null||descriptor==null)return false;
+        Method method=plan.methods.get(selector);if(method==null||method.constructor||!method.callbackSafe)return false;
+        Integer site=method.sites.get(location);if(site==null||site<0||site>=method.operations.length)return false;
+        int call=-1,returned=-1;
+        for(int at=0;at<method.operations.length;at++){
+            int[] operation=method.operations[at];if(operation==null||operation.length==0)return false;int code=operation[0];
+            if(code>=182&&code<=185){if(call!=-1)return false;call=at;}
+            else if(code>=172&&code<=177){if(returned!=-1)return false;returned=at;}
+            else if(code==87||code==88){if(call<0||returned>=0)return false;}
+            else if(!((code>=21&&code<=45)||code==180||code==192||(code>=133&&code<=147)))return false;
+        }
+        if(call!=site||returned!=method.operations.length-1||call>=returned||method.operations[call][0]!=opcode)return false;
+        String[] target=method.fields[call];return target!=null&&target.length==3&&owner.equals(target[0])&&name.equals(target[1])&&descriptor.equals(target[2]);
     }
 }
