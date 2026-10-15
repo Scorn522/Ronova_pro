@@ -2858,7 +2858,7 @@ public final class ProRuntime implements AutoCloseable {
             EquipmentPolicy.initialize();
             WorldStatePolicy.initialize();
             Class<?> bridge=Class.forName("dev.ronova.pro.bootstrap.TaskBridge",false,null);
-            if(!Integer.valueOf(83).equals(bridge.getMethod("abiVersion").invoke(null)))throw new IllegalStateException("INDEX_BRIDGE_ABI_MISMATCH");
+            if(!Integer.valueOf(84).equals(bridge.getMethod("abiVersion").invoke(null)))throw new IllegalStateException("INDEX_BRIDGE_ABI_MISMATCH");
             var lookup=java.lang.invoke.MethodHandles.lookup();
             var field=lookup.findStatic(ProRuntime.class,"preventFieldWrite",java.lang.invoke.MethodType.methodType(boolean.class,Object.class,Class.class,String.class,Object.class));
             var dispatch=lookup.findStatic(ProRuntime.class,"preventDispatch",java.lang.invoke.MethodType.methodType(boolean.class,Object.class,String.class,Object.class));
@@ -2888,7 +2888,7 @@ public final class ProRuntime implements AutoCloseable {
             var producer=lookup.findStatic(ProRuntime.class,"producerInput",java.lang.invoke.MethodType.methodType(Object.class,Object.class,Object.class));
             Class.forName("dev.ronova.pro.bootstrap.ControlBridge",false,null).getMethod("installProducerObserver",Class.class,java.lang.invoke.MethodHandle.class).invoke(null,ProRuntime.class,producer);
             var sourceWrite=lookup.findStatic(SourceMaps.class,"denies",java.lang.invoke.MethodType.methodType(boolean.class,Object.class,Object.class,Object.class));
-            var sourceChanged=lookup.findStatic(SourceMaps.class,"changed",java.lang.invoke.MethodType.methodType(void.class,Object.class));
+            var sourceChanged=lookup.findStatic(ProRuntime.class,"sourceCarrierChanged",java.lang.invoke.MethodType.methodType(void.class,Object.class));
             Class.forName("dev.ronova.pro.bootstrap.ControlBridge",false,null).getMethod("installSourceWriteObserver",Class.class,java.lang.invoke.MethodHandle.class,java.lang.invoke.MethodHandle.class).invoke(null,ProRuntime.class,sourceWrite,sourceChanged);
             BackingPolicy.controllers(bridge);
             for(ProRuntime runtime:sourceRuntimes())BackingPolicy.runtimeControllers(runtime,runtime,runtime.journal,
@@ -2911,6 +2911,11 @@ public final class ProRuntime implements AutoCloseable {
             dispatchState="DISPATCH_DECLARATION_FAILED:"+cause.getClass().getSimpleName()+":"+String.valueOf(cause.getMessage());
             System.err.println("RONOVA_"+dispatchState);
         }
+    }
+    /** Both observers receive the same successful store while its original receiver gate is held. */
+    private static void sourceCarrierChanged(Object holder){
+        SourceMaps.changed(holder);
+        EquipmentPolicy.carrierChanged(holder);
     }
     /** The same method-entry protection is installed for a remote client, without starting server state. */
     private static void installLifeResults(Class<?> bridge,java.lang.invoke.MethodHandles.Lookup lookup)throws ReflectiveOperationException {

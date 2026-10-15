@@ -15,6 +15,7 @@ public final class AuditFixCheck {
     public static void main(String[] args)throws Exception {
         if(args.length==1&&args[0].equals("network-bytecode")){networkBytecode();return;}
         if(args.length==1&&args[0].equals("resource-bytecode")){resourceBytecode();return;}
+        if(args.length==1&&args[0].equals("custom-carrier-bytecode")){carrierBytecode();capabilityBytecode();return;}
         if(args.length==3&&args[0].equals("mod-group-returns")){modGroupReturns(args[1],args[2]);return;}
         if(args.length==2&&args[0].equals("network-preconnect")){networkPreconnect(args[1]);return;}
         if(args.length==1&&args[0].equals("source-list-fixes")){sourceListFixes();return;}
@@ -1077,6 +1078,41 @@ public final class AuditFixCheck {
         Class<?> actual=Class.forName(target,false,loader);require(actual.getClassLoader()==loader,"actual FileDispatcher class was not defined");actual.getDeclaredMethods();
         System.out.println("RESOURCE_BYTECODE_VERIFY_PASS actual_JDK_FileDispatcher_duplicate JVM_verifier_only no_native_IO_runtime_claim");
         capabilityBytecode();
+    }
+    /** Load actual Forge handler bodies with the carrier-call wrapper; this is only a verifier check. */
+    private static void carrierBytecode()throws Exception{
+        Class<?> boundary=Class.forName("dev.ronova.pro.agent.EquipmentActionBoundary");
+        Class<?> visitor=Class.forName("jdk.internal.org.objectweb.asm.ClassVisitor"),nodeType=Class.forName("jdk.internal.org.objectweb.asm.tree.ClassNode");
+        Class<?> methodType=Class.forName("jdk.internal.org.objectweb.asm.tree.MethodNode"),readerType=Class.forName("jdk.internal.org.objectweb.asm.ClassReader");
+        Method weave=boundary.getDeclaredMethod("weave",methodType,String.class);weave.setAccessible(true);
+        Class<?> writerType=Class.forName("dev.ronova.pro.agent.ControlClassWriter");
+        Constructor<?> writerConstructor=writerType.getDeclaredConstructor(ClassLoader.class,nodeType);writerConstructor.setAccessible(true);
+        String target="net.minecraftforge.items.ItemStackHandler";
+        ClassLoader loader=new ClassLoader(AuditFixCheck.class.getClassLoader()){
+            @Override protected Class<?> loadClass(String name,boolean resolve)throws ClassNotFoundException{
+                if(!name.equals(target))return super.loadClass(name,resolve);
+                synchronized(getClassLoadingLock(name)){
+                    Class<?> result=findLoadedClass(name);
+                    if(result==null)try(var input=getParent().getResourceAsStream(name.replace('.','/')+".class")){
+                        if(input==null)throw new ClassNotFoundException(name);Object node=nodeType.getConstructor().newInstance();
+                        Object reader=readerType.getConstructor(byte[].class).newInstance((Object)input.readAllBytes());
+                        readerType.getMethod("accept",visitor,int.class).invoke(reader,node,0);int changed=0;
+                        for(Object method:(List<?>)nodeType.getField("methods").get(node)){
+                            String methodName=(String)methodType.getField("name").get(method);int access=methodType.getField("access").getInt(method);
+                            if(methodName.startsWith("<")||(access&(Modifier.STATIC|Modifier.ABSTRACT|Modifier.NATIVE))!=0)continue;
+                            weave.invoke(null,method,"carrier-call");changed++;
+                        }
+                        require(changed>0,"actual handler contained no carrier bodies");Object writer=writerConstructor.newInstance(this,node);
+                        nodeType.getMethod("accept",visitor).invoke(node,writer);
+                        byte[] bytes=(byte[])Class.forName("jdk.internal.org.objectweb.asm.ClassWriter").getMethod("toByteArray").invoke(writer);
+                        result=defineClass(name,bytes,0,bytes.length);
+                    }catch(java.io.IOException|ReflectiveOperationException failure){throw new ClassNotFoundException(name,failure);}
+                    if(resolve)resolveClass(result);return result;
+                }
+            }
+        };
+        Class<?> actual=Class.forName(target,false,loader);require(actual.getClassLoader()==loader,"actual handler class was not defined");actual.getDeclaredMethods();
+        System.out.println("CARRIER_BYTECODE_VERIFY_PASS actual_Forge_ItemStackHandler_instance_bodies JVM_verifier_only no_action_or_game_runtime_claim");
     }
     /** Keep the actual Forge publication frames produced by the current Mixin plugin. */
     private static void capabilityBytecode()throws Exception{

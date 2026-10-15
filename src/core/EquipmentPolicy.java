@@ -31,15 +31,15 @@ import org.apache.commons.lang3.mutable.MutableObject;
 
 /** Current equipment shares, rather than a snapshot of items the body once held. */
 public final class EquipmentPolicy {
-    private enum Kind { BODY, GAME_MODE, INVENTORY, COMPARTMENTS, COMPARTMENT_ARRAY, EQUIPMENT_LIST, EQUIPMENT_BACKING, EQUIPMENT_ARRAY, CURATIVE_LIST, CURATIVE_ARRAY, STACK, NBT, CAPABILITY }
+    private enum Kind { BODY, GAME_MODE, INVENTORY, COMPARTMENTS, COMPARTMENT_ARRAY, EQUIPMENT_LIST, EQUIPMENT_BACKING, EQUIPMENT_ARRAY, CURATIVE_LIST, CURATIVE_ARRAY, CURATIVE_CARRIER, STACK, NBT, CAPABILITY }
     private record Slot(Field field,long offset,int width) { }
     private static final class Owner {
         final WeakReference<LivingEntity> entity;final long generation;
         Owner(LivingEntity entity,long generation){this.entity=new WeakReference<>(entity);this.generation=generation;}
     }
     private static final class Link {
-        final Owner owner;final Kind kind;final int part;final WeakReference<ItemStack> stack;
-        Link(Owner owner,Kind kind,int part,ItemStack stack){this.owner=owner;this.kind=kind;this.part=part;this.stack=new WeakReference<>(stack);}
+        final Owner owner;final Kind kind;final int part;final WeakReference<ItemStack> stack;final WeakReference<Object> root;
+        Link(Owner owner,Kind kind,int part,ItemStack stack,Object root){this.owner=owner;this.kind=kind;this.part=part;this.stack=new WeakReference<>(stack);this.root=new WeakReference<>(root);}
     }
     private static final class Scope {
         final Owner owner;final String operation;final Class<?> anchor;final String method,descriptor;
@@ -131,12 +131,22 @@ public final class EquipmentPolicy {
     private static Field ARRAY_VALUES,LIST_VALUES,LIST_SIZE,MAP_TABLE,NODE_NEXT,NODE_VALUE;
     private static Field INTERACT_ID,INTERACT_ACTION;private static Object ATTACK_ACTION;
     private static Field CONTEXT_PLAYER,CONTEXT_STACK;
-    private static MethodHandle ACTION_SOURCE,ACTION_DELEGATE;
+    private static MethodHandle ACTION_SOURCE,ACTION_DELEGATE,CARRIER_SOURCE;
     private static Class<?> UNMODIFIABLE_COLLECTION,UNMODIFIABLE_LIST,UNMODIFIABLE_RANDOM;
     private static Field CAP_DISPATCHER,CAP_VALID,CAP_INITIALIZED,CAP_DATA;
     private static Field DISPATCH_PROVIDERS,DISPATCH_WRITERS,DISPATCH_NAMES,DISPATCH_LISTENERS;
     private static Field OPTIONAL_SUPPLIER,OPTIONAL_VALUE,OPTIONAL_LISTENERS,OPTIONAL_VALID,MUTABLE_VALUE,SET_MAP,UNMODIFIABLE_VALUES;
     private static Map<Thread,CapabilityScope> CAP_SCOPES;
+    private static Map<Thread,CapabilityQuery> CAP_QUERIES;
+    private static final class CapabilityQuery {
+        final Object dispatcher,request,direction;final Thread thread=Thread.currentThread();final CapabilityQuery previous;
+        final List<Link> related;final Class<?> anchor;final String method,descriptor;final List<StackWalker.StackFrame> tail;
+        final List<EquipmentCarrierGraph.Observation> observed=new ArrayList<>();boolean closed;
+        CapabilityQuery(Object dispatcher,Object request,Object direction,CapabilityQuery previous,List<Link> related,List<StackWalker.StackFrame> frames){
+            this.dispatcher=dispatcher;this.request=request;this.direction=direction;this.previous=previous;this.related=related;
+            var entry=frames.get(0);anchor=entry.getDeclaringClass();method=entry.getMethodName();descriptor=entry.getDescriptor();tail=List.copyOf(frames.subList(1,frames.size()));
+        }
+    }
     private static final class CapabilityScope {
         final Object receiver,next,listeners;final String phase;final Class<?> anchor;final String method,descriptor;
         final List<StackWalker.StackFrame> tail;final Thread thread=Thread.currentThread();final CapabilityScope previous;boolean closed;Object gate;
@@ -203,11 +213,14 @@ public final class EquipmentPolicy {
         Class<?> bridge=Class.forName("dev.ronova.pro.bootstrap.ControlBridge",false,null);
         ACTION_SOURCE=MethodHandles.publicLookup().findStatic(bridge,"equipmentActionSourceAllowed",MethodType.methodType(boolean.class));
         ACTION_DELEGATE=MethodHandles.publicLookup().findStatic(bridge,"equipmentActionSourceAllowed",MethodType.methodType(boolean.class,Class.class,Class.class));
+        CARRIER_SOURCE=MethodHandles.publicLookup().findStatic(bridge,"equipmentCarrierSourceAllowed",MethodType.methodType(boolean.class,Class.class,Class.class,Class[].class));
+        EquipmentCarrierGraph.initialize();
         OWNERS=Collections.synchronizedMap(new WeakIdentityMap<>());CARRIERS=Collections.synchronizedMap(new WeakIdentityMap<>());
         SCOPES=Collections.synchronizedMap(new WeakIdentityMap<>());FIELDS=Map.copyOf(fields);
         MINING=Collections.synchronizedMap(new WeakIdentityMap<>());DRIVERS=Collections.synchronizedMap(new WeakIdentityMap<>());INVOCATIONS=Collections.synchronizedMap(new WeakIdentityMap<>());
         CAP_SCOPES=Collections.synchronizedMap(new WeakIdentityMap<>());
-        WALKER=StackWalker.getInstance(StackWalker.Option.RETAIN_CLASS_REFERENCE);initialized=true;
+        CAP_QUERIES=Collections.synchronizedMap(new WeakIdentityMap<>());
+        WALKER=StackWalker.getInstance(Set.of(StackWalker.Option.RETAIN_CLASS_REFERENCE,StackWalker.Option.SHOW_HIDDEN_FRAMES));initialized=true;
     }
     private static Field access(Class<?> type,String name)throws ReflectiveOperationException{Field field=type.getDeclaredField(name);field.setAccessible(true);return field;}
     private static Field accessAny(Class<?> type,String... names)throws ReflectiveOperationException{for(String name:names)try{return access(type,name);}catch(NoSuchFieldException ignored){ }throw new NoSuchFieldException(type.getName()+":"+Arrays.toString(names));}
@@ -247,6 +260,16 @@ public final class EquipmentPolicy {
         if(value instanceof Inventory)return FIELDS.get(Inventory.class);
         return List.of();
     }
+    private static List<Slot> mutationSlots(Object value){
+        boolean dynamic=false;for(Link link:links(value))if((link.kind==Kind.CAPABILITY||link.kind==Kind.NBT||link.kind==Kind.CURATIVE_CARRIER||link.kind==Kind.CURATIVE_LIST
+                ||link.kind==Kind.STACK&&value.getClass()!=ItemStack.class)&&current(link,value)){dynamic=true;break;}
+        if(!dynamic)return slots(value);
+        List<Slot> result=new ArrayList<>(slots(value));
+        for(EquipmentCarrierGraph.Slot actual:EquipmentCarrierGraph.fields(value)){
+            boolean found=false;for(Slot prior:result)if(prior.field.equals(actual.field())){found=true;break;}
+            if(!found)result.add(new Slot(actual.field(),actual.offset(),actual.width()));
+        }return result;
+    }
     private static Inventory inventory(Owner owner){LivingEntity entity=owner.entity.get();return entity instanceof Player player?((Access.PlayerState)player).pro$inventory():null;}
     private static NonNullList<ItemStack> list(Owner owner,int part){
         LivingEntity entity=owner.entity.get();
@@ -280,15 +303,18 @@ public final class EquipmentPolicy {
     }
     private static List<Link> links(Object value){return !initialized||value==null?List.of():CARRIERS.getOrDefault(value,List.of());}
     private static void link(Owner owner,Object value,Kind kind,int part,ItemStack stack){
+        link(owner,value,kind,part,stack,stack);
+    }
+    private static void link(Owner owner,Object value,Kind kind,int part,ItemStack stack,Object root){
         if(value==null||value==ItemStack.EMPTY)return;
         synchronized(CARRIERS){
             List<Link> next=new ArrayList<>();boolean found=false;
             for(Link prior:CARRIERS.getOrDefault(value,List.of())){
                 if(prior.owner!=owner&&!active(prior.owner))continue;
-                if(prior.owner==owner&&prior.kind==kind&&prior.part==part&&prior.stack.get()==stack)found=true;
+                if(prior.owner==owner&&prior.kind==kind&&prior.part==part&&prior.stack.get()==stack&&prior.root.get()==root)found=true;
                 next.add(prior);
             }
-            if(!found)next.add(new Link(owner,kind,part,stack));CARRIERS.put(value,List.copyOf(next));
+            if(!found)next.add(new Link(owner,kind,part,stack,root));CARRIERS.put(value,List.copyOf(next));
         }
     }
     private static boolean current(Link link,Object value){
@@ -304,6 +330,7 @@ public final class EquipmentPolicy {
             case EQUIPMENT_ARRAY -> array(backing(list(owner,link.part)))==value;
             case CURATIVE_LIST -> LiveStatePolicy.curativeListCurrent(owner.entity.get(),owner.generation,value);
             case CURATIVE_ARRAY -> LiveStatePolicy.curativeArrayCurrent(owner.entity.get(),owner.generation,value);
+            case CURATIVE_CARRIER -> link.root.get()!=null&&LiveStatePolicy.curativeListCurrent(owner.entity.get(),owner.generation,link.root.get())&&EquipmentCarrierGraph.curatives(link.root.get()).contains(value);
             case STACK -> stackCurrent(owner,link.stack.get())&&link.stack.get()==value;
             case NBT -> stackCurrent(owner,link.stack.get())&&walk(owner,link.stack.get(),value,false,null);
             case CAPABILITY -> stackCurrent(owner,link.stack.get())&&capabilityWalk(owner,link.stack.get(),value,false,null);
@@ -317,6 +344,14 @@ public final class EquipmentPolicy {
         return false;
     }
     static boolean known(Object value){for(Link link:links(value))if(current(link,value))return true;return false;}
+    /** The existing successful-store observer supplies this actual receiver. */
+    static void carrierChanged(Object receiver){
+        if(!initialized||receiver==null)return;
+        for(Link link:links(receiver))if(active(link.owner)){
+            ItemStack root=link.stack.get();if(root==null||!stackCurrent(link.owner,root))continue;
+            walk(link.owner,root,null,true,null);capabilityWalk(link.owner,root,null,true,null);
+        }
+    }
     static void publish(Entity entity,long generation){
         if(!initialized||!(entity instanceof LivingEntity living))return;
         if(generation<=0){OWNERS.remove(living);MINING.remove(living);return;}
@@ -378,47 +413,21 @@ public final class EquipmentPolicy {
         }catch(IllegalAccessException failure){throw new IllegalStateException("CURATIVE_LIST_STORAGE_ACCESS",failure);}
     }
     static void captureCurativeItems(LivingEntity entity,long generation,Object list){
-        if(list==null)return;CurativeList layout=curativeLayout(list);
-        for(int at=0;at<layout.size;at++)if(!(layout.values[at] instanceof ItemStack stack)||stack.getClass()!=ItemStack.class)
-            throw new IllegalStateException("CURATIVE_ITEMSTACK_IMPLEMENTATION_UNRESOLVED");
+        if(list==null)return;EquipmentCarrierGraph.View graph=EquipmentCarrierGraph.curatives(list);
         if(entity==null||generation<=0||ProRuntime.liveStateGeneration(entity)!=generation)return;
         Owner owner=OWNERS.get(entity);
         if(owner==null||owner.generation!=generation){MINING.remove(entity);owner=new Owner(entity,generation);OWNERS.put(entity,owner);}
-        link(owner,list,Kind.CURATIVE_LIST,-1,null);if(layout.backed)link(owner,layout.values,Kind.CURATIVE_ARRAY,-1,null);
-        for(int at=0;at<layout.size;at++)captureStack(owner,(ItemStack)layout.values[at]);
+        link(owner,list,Kind.CURATIVE_LIST,-1,null,list);
+        for(Object carrier:graph.nodes.keySet())if(carrier!=list)link(owner,carrier,Kind.CURATIVE_CARRIER,-1,null,list);
+        for(ItemStack stack:graph.stacks())captureStack(owner,stack);
+        EquipmentCarrierGraph.declare(graph);
     }
     /** Traverse only real NBT storage. A HashMap node belongs only while linked from the current table. */
     private static boolean walk(Owner owner,ItemStack stack,Object expected,boolean capture,Object proposed){
         if(stack==null||stack==ItemStack.EMPTY)return false;
-        if(proposed instanceof String)return false; // Compound keys are shared immutable labels, never equipment carriers.
-        Visit[] queue=new Visit[MAX_GRAPH];Object[] seen=new Object[MAX_GRAPH];int head=0,tail=0,count=0;
-        Access.StackState state=(Access.StackState)(Object)stack;
-        if(proposed!=null)queue[tail++]=new Visit(proposed,-1);
-        else{if(state.pro$tag()!=null)queue[tail++]=new Visit(state.pro$tag(),-1);if(state.pro$capNBT()!=null&&state.pro$capNBT()!=state.pro$tag())queue[tail++]=new Visit(state.pro$capNBT(),-1);
-            try{Object lazy=CAP_DATA.get(stack);if(lazy!=null&&lazy!=state.pro$tag()&&lazy!=state.pro$capNBT())queue[tail++]=new Visit(lazy,-1);}catch(IllegalAccessException failure){throw new IllegalStateException("EQUIPMENT_CAPABILITY_DATA_ACCESS",failure);}}
-        try{while(head<tail){
-            Visit visit=queue[head++];Object value=visit.value;if(value==null||value==EndTag.INSTANCE)continue;
-            boolean found=false;for(int i=0;i<count;i++)if(seen[i]==value){found=true;break;}if(found)continue;
-            if(count==MAX_GRAPH)throw new IllegalStateException("EQUIPMENT_NBT_GRAPH_CAPACITY");seen[count++]=value;
-            if(value==expected)return true;
-            if(capture)link(owner,value,Kind.NBT,-1,stack);
-            Object[] children=null;int limit=-1;
-            if(value.getClass()==CompoundTag.class){children=new Object[]{((Access.EquipmentCompound)value).pro$tags()};}
-            else if(value.getClass()==ListTag.class){children=new Object[]{((Access.EquipmentTags)value).pro$list()};}
-            else if(value.getClass()==HashMap.class||value.getClass()==LinkedHashMap.class){children=new Object[]{MAP_TABLE.get(value)};}
-            else if(NODE.isInstance(value)){children=new Object[]{NODE_VALUE.get(value),NODE_NEXT.get(value)};}
-            else if(value.getClass()==ArrayList.class){children=new Object[]{LIST_VALUES.get(value)};limit=LIST_SIZE.getInt(value);}
-            else if(value.getClass()==ARRAY_LIST){children=new Object[]{ARRAY_VALUES.get(value)};}
-            else if(value instanceof Object[] values){int end=visit.limit<0?values.length:visit.limit;if(end<0||end>values.length)throw new IllegalStateException("EQUIPMENT_NBT_LIST_SIZE_UNRESOLVED");children=Arrays.copyOf(values,end);}
-            else if(value.getClass()==ByteArrayTag.class||value.getClass()==IntArrayTag.class||value.getClass()==LongArrayTag.class){
-                for(Slot slot:slots(value))if(slot.field.getType().isArray()){children=new Object[]{slot.field.get(value)};break;}
-            }else if(value.getClass().isArray()&&value.getClass().getComponentType().isPrimitive()){ }
-            else if(!(value.getClass()==ByteTag.class||value.getClass()==ShortTag.class||value.getClass()==IntTag.class||value.getClass()==LongTag.class
-                    ||value.getClass()==FloatTag.class||value.getClass()==DoubleTag.class||value.getClass()==StringTag.class))
-                throw new IllegalStateException("EQUIPMENT_NBT_IMPLEMENTATION_UNRESOLVED:"+value.getClass().getName());
-            if(children!=null)for(Object child:children)if(child!=null){if(tail==MAX_GRAPH)throw new IllegalStateException("EQUIPMENT_NBT_GRAPH_CAPACITY");queue[tail++]=new Visit(child,limit);}
-        }}catch(IllegalAccessException failure){throw new IllegalStateException("EQUIPMENT_NBT_STORAGE_ACCESS",failure);}
-        return false;
+        EquipmentCarrierGraph.View graph=proposed==null?EquipmentCarrierGraph.nbt(stack):EquipmentCarrierGraph.candidate(stack,proposed);
+        if(capture){for(Object carrier:graph.nodes.keySet())link(owner,carrier,Kind.NBT,-1,stack);EquipmentCarrierGraph.declare(graph);}
+        return expected!=null&&graph.contains(expected);
     }
     private static boolean capabilityProviderType(Class<?> type){
         return type==FluidBucketWrapper.class||type==FluidHandlerItemStack.class||type==FluidHandlerItemStack.Consumable.class||type==FluidHandlerItemStack.SwapEmpty.class
@@ -427,34 +436,12 @@ public final class EquipmentPolicy {
     /** Current standard storage only. Provider callbacks, suppliers and listener objects are leaves. */
     private static boolean capabilityWalk(Owner owner,ItemStack stack,Object expected,boolean capture,Object proposed){
         if(stack==null||stack==ItemStack.EMPTY)return false;
-        Visit[] queue=new Visit[MAX_GRAPH];Object[] seen=new Object[MAX_GRAPH];int head=0,tail=0,count=0;
-        try{
-            if(proposed!=null)queue[tail++]=new Visit(proposed,-1);
-            else if(CAP_INITIALIZED.getBoolean(stack)){Object dispatcher=CAP_DISPATCHER.get(stack);if(dispatcher!=null)queue[tail++]=new Visit(dispatcher,-1);}
-            while(head<tail){
-                Visit visit=queue[head++];Object value=visit.value;if(value==null||value==ItemStack.EMPTY)continue;Class<?> type=value.getClass();
-                boolean found=false;for(int at=0;at<count;at++)if(seen[at]==value){found=true;break;}if(found)continue;
-                if(count==MAX_GRAPH)throw new IllegalStateException("EQUIPMENT_CAPABILITY_GRAPH_CAPACITY");seen[count++]=value;
-                Object[] children=null;int limit=-1;
-                if(type==CapabilityDispatcher.class)children=new Object[]{DISPATCH_PROVIDERS.get(value),DISPATCH_WRITERS.get(value),DISPATCH_NAMES.get(value),DISPATCH_LISTENERS.get(value)};
-                else if(capabilityProviderType(type)){for(Slot slot:slots(value))if(slot.field.getType()==LazyOptional.class){children=new Object[]{slot.field.get(value)};break;}}
-                else if(type==LazyOptional.class){if(OPTIONAL_SUPPLIER.get(value)==null)continue;children=new Object[]{OPTIONAL_VALUE.get(value),OPTIONAL_LISTENERS.get(value)};}
-                else if(type==MutableObject.class)children=new Object[]{MUTABLE_VALUE.get(value)};
-                else if(type==HashSet.class)children=new Object[]{SET_MAP.get(value)};
-                else if(type==HashMap.class||type==LinkedHashMap.class)children=new Object[]{MAP_TABLE.get(value)};
-                else if(NODE.isInstance(value))children=new Object[]{NODE_VALUE.get(value),NODE_NEXT.get(value)};
-                else if(type==UNMODIFIABLE_COLLECTION||type==UNMODIFIABLE_LIST||type==UNMODIFIABLE_RANDOM)children=new Object[]{UNMODIFIABLE_VALUES.get(value)};
-                else if(type==ArrayList.class){children=new Object[]{LIST_VALUES.get(value)};limit=LIST_SIZE.getInt(value);}
-                else if(type==ARRAY_LIST){children=new Object[]{ARRAY_VALUES.get(value)};}
-                else if(knownCurativeLayout(value)!=null){CurativeList layout=curativeLayout(value);children=Arrays.copyOf(layout.values,layout.size);}
-                else if(value instanceof Object[] values){int end=visit.limit<0?values.length:visit.limit;if(end<0||end>values.length)throw new IllegalStateException("EQUIPMENT_CAPABILITY_ARRAY_SIZE");children=Arrays.copyOf(values,end);}
-                else continue;
-                if(value==expected)return true;
-                if(capture&&value!=stack)link(owner,value,Kind.CAPABILITY,-1,stack);
-                if(children!=null)for(Object child:children)if(child!=null){if(tail==MAX_GRAPH)throw new IllegalStateException("EQUIPMENT_CAPABILITY_GRAPH_CAPACITY");queue[tail++]=new Visit(child,limit);}
-            }
-        }catch(IllegalAccessException failure){throw new IllegalStateException("EQUIPMENT_CAPABILITY_STORAGE_ACCESS",failure);}
-        return false;
+        EquipmentCarrierGraph.View graph=proposed==null?EquipmentCarrierGraph.capabilities(stack):EquipmentCarrierGraph.candidate(stack,proposed);
+        if(capture){for(Object carrier:graph.nodes.keySet())link(owner,carrier,Kind.CAPABILITY,-1,stack);EquipmentCarrierGraph.declare(graph);}
+        return expected!=null&&graph.contains(expected);
+    }
+    private static EquipmentCarrierGraph.Node heldNode(Link link,Object receiver){
+        return (link.kind==Kind.NBT?EquipmentCarrierGraph.nbt(link.stack.get()):EquipmentCarrierGraph.capabilities(link.stack.get())).node(receiver);
     }
     private static Object capRead(Field field,Object receiver){try{return field.get(receiver);}catch(IllegalAccessException failure){throw new IllegalStateException("EQUIPMENT_CAPABILITY_FIELD_ACCESS",failure);}}
     private static boolean capBool(Field field,Object receiver){return Boolean.TRUE.equals(capRead(field,receiver));}
@@ -489,8 +476,10 @@ public final class EquipmentPolicy {
     /** Called only at the original body entry or after its supplier returned. */
     public static Object capabilityEnter(Object receiver,Object next,String phase){
         if(!initialized||receiver==null)return null;
-        List<Link> selected=new ArrayList<>();for(Link link:links(receiver))if((link.kind==Kind.STACK||link.kind==Kind.CAPABILITY)&&current(link,receiver))selected.add(link);
+        List<Link> selected=new ArrayList<>();for(Link link:links(receiver))if((link.kind==Kind.STACK||link.kind==Kind.CAPABILITY||link.kind==Kind.NBT)&&current(link,receiver))selected.add(link);
         if(selected.isEmpty())return null;
+        if(receiver.getClass()==LazyOptional.class&&!capBool(OPTIONAL_VALID,receiver)&&(phase.equals("invalidate-optional")||phase.equals("listen-add")))return null;
+        if(receiver instanceof CapabilityProvider<?> &&phase.equals("revive-provider")&&capBool(CAP_VALID,receiver))return null;
         var frames=capabilityFrames();if(frames.isEmpty()||!capabilityEntry(frames.get(0),phase)||!frames.get(0).getDeclaringClass().isInstance(receiver))throw new SecurityException("ACTUAL_EQUIPMENT_CAPABILITY_BODY_REQUIRED");
         boolean publish=phase.equals("publish"),resolve=phase.equals("resolve"),listen=phase.startsWith("listen-");
         Object listeners=receiver.getClass()==LazyOptional.class?capRead(OPTIONAL_LISTENERS,receiver):null;
@@ -506,17 +495,16 @@ public final class EquipmentPolicy {
             }else if(resolve){
                 if(receiver.getClass()!=LazyOptional.class||!capBool(OPTIONAL_VALID,receiver)||capRead(OPTIONAL_VALUE,receiver)!=null||next==null||next.getClass()!=MutableObject.class)
                     throw new SecurityException("EQUIPMENT_CAPABILITY_INITIAL_RESOLUTION_REQUIRED");
-                Object value=capRead(MUTABLE_VALUE,next);if(value==null||!capabilityProviderType(value.getClass()))throw new SecurityException("EQUIPMENT_CAPABILITY_STANDARD_HOLDER_REQUIRED");
-                boolean holder=false;for(Slot slot:slots(value))if(slot.field.getType()==LazyOptional.class&&capRead(slot.field,value)==receiver)holder=true;
-                if(!holder)throw new SecurityException("EQUIPMENT_CAPABILITY_STANDARD_HOLDER_REQUIRED");
-                for(Link link:selected)if(!capabilityWalk(link.owner,link.stack.get(),value,false,null))throw new SecurityException("EQUIPMENT_CAPABILITY_CURRENT_HOLDER_REQUIRED");
+                // The candidate is the original supplier's actual MutableObject,
+                // after the callback returned. No callback runs inside this lease.
+                for(Link link:selected)if(heldNode(link,receiver)==null)throw new SecurityException("EQUIPMENT_CAPABILITY_CURRENT_HOLDER_REQUIRED");
             }else if(listen){
                 if(receiver.getClass()!=LazyOptional.class||listeners==null||listeners.getClass()!=HashSet.class)
                     throw new SecurityException("EQUIPMENT_CAPABILITY_LISTENER_STORAGE_UNRESOLVED");
                 Object map=capRead(SET_MAP,listeners);if(map==null||map.getClass()!=HashMap.class)throw new SecurityException("EQUIPMENT_CAPABILITY_LISTENER_STORAGE_UNRESOLVED");
                 for(Link link:selected)if(!permitStack(link,false))throw new SecurityException("EQUIPMENT_CAPABILITY_WRITE_REJECTED");
             }else for(Link link:selected)if(!permitStack(link,false))throw new SecurityException("EQUIPMENT_CAPABILITY_WRITE_REJECTED");
-            if(listeners!=null)for(Link link:links(listeners))if(current(link,listeners)&&!capabilityWalk(link.owner,link.stack.get(),receiver,false,null))
+            if(listeners!=null)for(Link link:links(listeners))if(current(link,listeners)&&heldNode(link,receiver)==null)
                 throw new SecurityException("EQUIPMENT_CAPABILITY_SHARED_LISTENERS_REJECTED");
             CAP_SCOPES.put(Thread.currentThread(),scope);installed=true;return scope;
         }finally{if(!installed&&scope.gate!=null)capabilityGateExit(scope);}
@@ -535,6 +523,51 @@ public final class EquipmentPolicy {
         }finally{scope.closed=true;if(scope.previous==null)CAP_SCOPES.remove(Thread.currentThread());else CAP_SCOPES.put(Thread.currentThread(),scope.previous);capabilityGateExit(scope);}
     }
     public static void capabilityFailed(Object token,Throwable failure){try{closeCapability(token,false);}catch(RuntimeException|Error cleanup){if(cleanup!=failure)failure.addSuppressed(cleanup);}}
+    public static Object capabilityQueryEnter(Object dispatcher,Object request,Object direction){
+        if(!initialized||dispatcher==null)return null;List<Link> related=new ArrayList<>();for(Link link:links(dispatcher))if(current(link,dispatcher))related.add(link);if(related.isEmpty())return null;
+        List<StackWalker.StackFrame> frames=capabilityFrames();
+        if(frames.isEmpty()||frames.get(0).getDeclaringClass()!=CapabilityDispatcher.class||!frames.get(0).getMethodName().equals("getCapability")
+                ||!frames.get(0).getDescriptor().equals("(Lnet/minecraftforge/common/capabilities/Capability;Lnet/minecraft/core/Direction;)Lnet/minecraftforge/common/util/LazyOptional;"))
+            throw new SecurityException("ACTUAL_CAPABILITY_QUERY_BODY_REQUIRED");
+        CapabilityQuery previous=CAP_QUERIES.get(Thread.currentThread());
+        for(CapabilityQuery prior=previous;prior!=null;prior=prior.previous)if(prior.dispatcher==dispatcher&&prior.request==request&&prior.direction==direction)throw new SecurityException("EQUIPMENT_CAPABILITY_QUERY_REENTRY");
+        CapabilityQuery query=new CapabilityQuery(dispatcher,request,direction,previous,List.copyOf(related),frames);CAP_QUERIES.put(Thread.currentThread(),query);return query;
+    }
+    private static boolean queryPath(CapabilityQuery query){
+        if(query.closed||query.thread!=Thread.currentThread()||CAP_QUERIES.get(Thread.currentThread())!=query)return false;
+        List<StackWalker.StackFrame> frames=capabilityFrames();if(frames.isEmpty()||!sameAnchor(frames.get(0),query.anchor,query.method,query.descriptor)||frames.size()!=query.tail.size()+1)return false;
+        for(int at=0;at<query.tail.size();at++){var expected=query.tail.get(at);var actual=frames.get(at+1);
+            if(!sameAnchor(actual,expected.getDeclaringClass(),expected.getMethodName(),expected.getDescriptor())||actual.getByteCodeIndex()!=expected.getByteCodeIndex())return false;}
+        return true;
+    }
+    private static void queryCapture(CapabilityQuery query){
+        for(Link link:query.related)if(current(link,query.dispatcher)){
+            ItemStack root=link.stack.get();if(root!=null){walk(link.owner,root,null,true,null);capabilityWalk(link.owner,root,null,true,null);}
+            else if(link.root.get()!=null&&LiveStatePolicy.curativeListCurrent(link.owner.entity.get(),link.owner.generation,link.root.get()))captureCurativeItems(link.owner.entity.get(),link.owner.generation,link.root.get());
+        }
+    }
+    public static void capabilityQueryObserved(Object token,Object provider,Object originalResult){
+        if(token==null)return;if(!(token instanceof CapabilityQuery query)||!queryPath(query))throw new SecurityException("ACTUAL_CAPABILITY_QUERY_RETURN_REQUIRED");
+        if(!EquipmentCarrierGraph.providerCurrent(query.dispatcher,provider))throw new SecurityException("CAPABILITY_QUERY_PROVIDER_DETACHED");
+        boolean current=false;for(Link link:query.related)if(current(link,query.dispatcher)){current=true;break;}if(!current)return;
+        EquipmentCarrierGraph.Observation observed=EquipmentCarrierGraph.observe(query.dispatcher,provider,query.request,query.direction,originalResult);
+        if(observed!=null){query.observed.add(observed);queryCapture(query);}
+    }
+    public static void capabilityQueryExit(Object token,Object actualReturn){closeQuery(token,actualReturn,true);}
+    private static void closeQuery(Object token,Object result,boolean success){
+        if(!(token instanceof CapabilityQuery query)||query.closed)return;
+        if(query.thread!=Thread.currentThread()||CAP_QUERIES.get(Thread.currentThread())!=query)throw new IllegalMonitorStateException("EQUIPMENT_CAPABILITY_QUERY_SCOPE_ORDER");
+        EquipmentCarrierGraph.Observation retained=null;
+        try{
+            if(success){if(!queryPath(query))throw new SecurityException("ACTUAL_CAPABILITY_QUERY_EXIT_REQUIRED");
+                EquipmentCarrierGraph.Observation chosen=null;for(EquipmentCarrierGraph.Observation observed:query.observed)if(observed.optional.get()==result)chosen=observed;
+                if(chosen!=null){EquipmentCarrierGraph.retain(chosen);queryCapture(query);retained=chosen;}}
+        }finally{
+            for(EquipmentCarrierGraph.Observation observed:query.observed)if(observed!=retained)EquipmentCarrierGraph.forget(observed);
+            query.closed=true;if(query.previous==null)CAP_QUERIES.remove(Thread.currentThread());else CAP_QUERIES.put(Thread.currentThread(),query.previous);
+        }
+    }
+    public static void capabilityQueryFailed(Object token,Throwable failure){try{closeQuery(token,null,false);}catch(RuntimeException|Error cleanup){if(cleanup!=failure)failure.addSuppressed(cleanup);}}
     private static boolean listenerCarrier(CapabilityScope scope,Object target){
         Object set=scope.listeners;if(set==null||set.getClass()!=HashSet.class)return false;Object map=capRead(SET_MAP,set);if(map==null||map.getClass()!=HashMap.class)return false;
         if(target==set||target==map)return true;Object table=capRead(MAP_TABLE,map);if(target==table)return true;
@@ -544,7 +577,7 @@ public final class EquipmentPolicy {
     private static boolean capabilityListeners(Link link,Object target){
         CapabilityScope scope=CAP_SCOPES.get(Thread.currentThread());
         return scope!=null&&(scope.phase.startsWith("listen-")||scope.phase.equals("invalidate-optional"))&&capabilityAnchor(scope,true)
-                &&capabilityWalk(link.owner,link.stack.get(),scope.receiver,false,null)&&listenerCarrier(scope,target);
+                &&heldNode(link,scope.receiver)!=null&&listenerCarrier(scope,target);
     }
     /** null means this is ordinary stack/NBT data rather than capability metadata. */
     private static Boolean capabilityField(Link link,Object receiver,Field field,Object next){
@@ -560,14 +593,34 @@ public final class EquipmentPolicy {
         }
         if(capabilityListeners(link,receiver))return declaring!=HashSet.class;
         if(declaring==CapabilityProvider.class){if(field.equals(CAP_DATA))return permitStack(link,false);return false;}
-        if(declaring==CapabilityDispatcher.class||declaring==LazyOptional.class||declaring==MutableObject.class||declaring==HashSet.class
-                ||declaring==UNMODIFIABLE_COLLECTION||declaring==UNMODIFIABLE_LIST||declaring==UNMODIFIABLE_RANDOM)return false;
-        if(capabilityProviderType(declaring))return !field.getType().equals(LazyOptional.class)&&permitStack(link,false);
+        EquipmentCarrierGraph.Node node=heldNode(link,receiver);
+        if(node!=null){
+            if(node.metadata())return false;
+            if(receiver instanceof ItemStack&&names(field.getName(),"item","f_41589_","delegate"))return false;
+            if(receiver instanceof ItemStack&&names(field.getName(),"count","f_41587_")&&(!(next instanceof Integer count)||count<0))return false;
+            if(immutableTag(receiver))return false;
+            if(field.getDeclaringClass()==CompoundTag.class||field.getDeclaringClass()==ListTag.class&&field.getType()==List.class)return false;
+            if(NODE.isInstance(receiver)&&names(field.getName(),"key","hash"))return false;
+            return node.data()&&permitStack(link,false);
+        }
+        if(declaring==CapabilityDispatcher.class||declaring==LazyOptional.class)return false;
         return null;
     }
+    private static boolean immutableTag(Object receiver){Class<?> type=receiver.getClass();return type==ByteTag.class||type==ShortTag.class||type==IntTag.class||type==LongTag.class||type==FloatTag.class||type==DoubleTag.class||type==StringTag.class||type==EndTag.class;}
     private static boolean sourceAllowed(){try{return (boolean)ACTION_SOURCE.invokeExact();}catch(Throwable failure){throw new IllegalStateException("EQUIPMENT_ACTION_SOURCE_UNAVAILABLE",failure);}}
     private static boolean sourceAllowed(Class<?> game,Class<?> item){try{return (boolean)ACTION_DELEGATE.invokeExact(game,item);}catch(Throwable failure){throw new IllegalStateException("EQUIPMENT_DELEGATE_SOURCE_UNAVAILABLE",failure);}}
-    private static boolean sourceAllowed(Scope scope){ServerPlayerGameMode game=scope.game.get();return sourceAllowed(game==null?null:game.getClass(),scope.itemType);}
+    private static boolean sourceAllowed(Scope scope){return sourceAllowed(scope,null,null);}
+    private static boolean sourceAllowed(Scope scope,Class<?> receiver,Class<?> body){
+        List<Class<?>> carriers=new ArrayList<>();if(receiver!=null)carriers.add(receiver);if(body!=null&&body!=receiver)carriers.add(body);
+        for(Invocation invocation=INVOCATIONS.get(Thread.currentThread());invocation!=null;invocation=invocation.previous)
+            if(invocation.action==scope&&invocation.operation.equals("carrier-call")&&invocationCurrent(invocation)){
+                Object actual=invocation.receiver.get();if(actual!=null&&!carriers.contains(actual.getClass()))carriers.add(actual.getClass());
+                if(!carriers.contains(invocation.anchor))carriers.add(invocation.anchor);
+            }
+        ServerPlayerGameMode game=scope.game.get();Class<?> gameType=game==null?null:game.getClass();
+        if(carriers.isEmpty())return sourceAllowed(gameType,scope.itemType);
+        try{return (boolean)CARRIER_SOURCE.invokeExact(gameType,scope.itemType,carriers.toArray(Class<?>[]::new));}catch(Throwable failure){throw new IllegalStateException("EQUIPMENT_CARRIER_SOURCE_UNAVAILABLE",failure);}
+    }
     private static Item item(ItemStack stack){
         if(stack==null||stack==ItemStack.EMPTY)return null;Access.StackState state=(Access.StackState)(Object)stack;
         Object delegate=state.pro$delegate();Item item=delegate instanceof net.minecraft.core.Holder<?> holder&&holder.value() instanceof Item actual?actual:state.pro$item();
@@ -728,8 +781,7 @@ public final class EquipmentPolicy {
         Class<?> type=frame.getDeclaringClass();return type.getModule()==Entity.class.getModule()&&type.getClassLoader()==Entity.class.getClassLoader()
                 &&(!frame.getMethodName().contains("$")||frame.getMethodName().startsWith("lambda$")||frame.getMethodName().matches("m_[0-9]+_"));
     }
-    private static List<StackWalker.StackFrame> invocationFrames(){return WALKER.walk(stream->stream.filter(frame->frame.getDeclaringClass().getNestHost()!=EquipmentPolicy.class
-            &&!(frame.getDeclaringClass().getClassLoader()==null&&frame.getDeclaringClass().getName().equals("dev.ronova.pro.bootstrap.ControlBridge"))).toList());}
+    private static List<StackWalker.StackFrame> invocationFrames(){return WALKER.walk(stream->stream.filter(frame->!infrastructure(frame.getDeclaringClass())).toList());}
     private static boolean gameParentCaller(StackWalker.StackFrame caller,ServerPlayerGameMode game,String operation){
         Invocation invocation=INVOCATIONS.get(Thread.currentThread());
         return caller!=null&&invocation!=null&&invocation.receiver.get()==game&&invocation.operation.equals(operation)
@@ -753,6 +805,13 @@ public final class EquipmentPolicy {
     private static boolean invocationCurrent(Invocation invocation){
         if(invocation==null||invocation.closed||invocation.thread.get()!=Thread.currentThread())return false;
         Scope scope=invocation.action;
+        if(invocation.operation.equals("carrier-call")){
+            Object receiver=invocation.receiver.get();ItemStack root=invocation.stack.get();
+            if(receiver==null||root==null||curativeStack(scope.owner,root)||!actionCurrent(scope,root,invocation.mask))return false;
+            for(Link link:links(receiver))if(link.owner==scope.owner&&link.stack.get()==root&&(link.kind==Kind.CAPABILITY||link.kind==Kind.NBT||link.kind==Kind.STACK)&&current(link,receiver)){
+                EquipmentCarrierGraph.Node node=heldNode(link,receiver);if(node!=null&&node.data()&&!node.metadata())return true;
+            }return false;
+        }
         if(invocation.receiver.get() instanceof ServerPlayerGameMode game){
             if(scope.game.get()!=game||!gameOwned(scope.owner,game)||scope.closed||scope.thread.get()!=Thread.currentThread())return false;
             if(actionCurrent(scope,scope.used.get(),scope.mask))return true;
@@ -766,13 +825,28 @@ public final class EquipmentPolicy {
     }
     private static boolean invocationFrame(StackWalker.StackFrame frame,Scope scope,boolean item){
         for(Invocation invocation=INVOCATIONS.get(Thread.currentThread());invocation!=null;invocation=invocation.previous)
-            if(invocation.action==scope&&(invocation.receiver.get() instanceof Item)==item&&sameAnchor(frame,invocation.anchor,invocation.method,invocation.descriptor)&&invocationCurrent(invocation))return true;
+            if(!invocation.operation.equals("carrier-call")&&invocation.action==scope&&(invocation.receiver.get() instanceof Item)==item&&sameAnchor(frame,invocation.anchor,invocation.method,invocation.descriptor)&&invocationCurrent(invocation))return true;
+        return false;
+    }
+    private static boolean carrierFrame(StackWalker.StackFrame frame,Scope scope){
+        for(Invocation invocation=INVOCATIONS.get(Thread.currentThread());invocation!=null;invocation=invocation.previous)
+            if(invocation.operation.equals("carrier-call")&&invocation.action==scope&&sameAnchor(frame,invocation.anchor,invocation.method,invocation.descriptor)&&invocationCurrent(invocation))return true;
         return false;
     }
     private static boolean invocationDepths(Scope scope,List<StackWalker.StackFrame> frames){
+        List<Invocation> checked=new ArrayList<>();
         for(Invocation invocation=INVOCATIONS.get(Thread.currentThread());invocation!=null;invocation=invocation.previous)if(invocation.action==scope&&!invocation.closed){
             int count=0;for(var frame:frames)if(sameAnchor(frame,invocation.anchor,invocation.method,invocation.descriptor))count++;
-            if(count!=invocation.occurrences)return false;
+            if(invocation.operation.equals("carrier-call")){
+                boolean prior=false;for(Invocation done:checked)if(done.anchor==invocation.anchor&&done.method.equals(invocation.method)&&done.descriptor.equals(invocation.descriptor)){prior=true;break;}if(prior)continue;
+                int expected=invocation.occurrences;if(count!=expected)return false;
+                for(Invocation level=invocation;level!=null;level=level.previous)if(level.action==scope&&!level.closed&&level.operation.equals("carrier-call")
+                        &&level.anchor==invocation.anchor&&level.method.equals(invocation.method)&&level.descriptor.equals(invocation.descriptor)){
+                    if(level.occurrences!=expected--||!invocationCurrent(level))return false;
+                }
+                int inside=0;for(var frame:frames){if(sameAnchor(frame,scope.anchor,scope.method,scope.descriptor))break;if(sameAnchor(frame,invocation.anchor,invocation.method,invocation.descriptor))inside++;}
+                if(inside!=count-expected)return false;checked.add(invocation);
+            }else if(count!=invocation.occurrences)return false;
         }return true;
     }
     private static boolean scopePath(Scope scope,List<StackWalker.StackFrame> frames){
@@ -791,7 +865,18 @@ public final class EquipmentPolicy {
         List<StackWalker.StackFrame> frames=invocationFrames();if(frames.isEmpty())return INVOCATION_REFUSED;
         StackWalker.StackFrame entry=frames.get(0),caller=frames.size()>1?frames.get(1):null;
         Invocation previous=INVOCATIONS.get(Thread.currentThread());Scope scope;ItemStack stack=null;int mask=0;boolean opens=false;
-        if(receiver instanceof ServerPlayerGameMode game){
+        if(operation.equals("carrier-call")){
+            if(receiver==null||!EquipmentCarrierGraph.declared(entry.getDeclaringClass())||!entry.getDeclaringClass().isInstance(receiver)||carrierCallback(receiver,entry))return null;
+            scope=SCOPES.get(Thread.currentThread());if(scope==null||scope.closed||!scopePath(scope,frames.subList(1,frames.size())))return null;
+            boolean found=false;
+            for(Link link:links(receiver))if((link.kind==Kind.CAPABILITY||link.kind==Kind.NBT||link.kind==Kind.STACK)&&current(link,receiver)){
+                EquipmentCarrierGraph.Node node=heldNode(link,receiver);if(node==null||!node.data()||node.metadata())continue;
+                ItemStack root=link.stack.get();int actualMask=shares(link.owner,root);
+                if(link.owner!=scope.owner||root==null||curativeStack(link.owner,root)||!actionCurrent(scope,root,actualMask)||stack!=null&&stack!=root)return null;
+                stack=root;mask=actualMask;found=true;
+            }
+            if(!found||!sourceAllowed(scope,receiver.getClass(),entry.getDeclaringClass()))return null;
+        }else if(receiver instanceof ServerPlayerGameMode game){
             LivingEntity entity=actionEntity(receiver,args);Owner owner=entity==null?null:OWNERS.get(entity);if(!active(owner))return null;
             if(!mappedGame(entry,operation)||!entry.getDeclaringClass().isInstance(receiver)||!gameOwned(owner,game))return INVOCATION_REFUSED;
             // An override invoking its real super implementation continues the same action once.
@@ -819,7 +904,7 @@ public final class EquipmentPolicy {
         try{
             int occurrences=0;for(var frame:frames)if(sameAnchor(frame,entry.getDeclaringClass(),entry.getMethodName(),entry.getDescriptor()))occurrences++;
             // Reentrant calls to the same body cannot consume a second dispatch using the outer receiver tuple.
-            for(Invocation prior=previous;prior!=null;prior=prior.previous)if(!prior.closed&&prior.receiver.get()==receiver&&sameAnchor(entry,prior.anchor,prior.method,prior.descriptor)){
+            for(Invocation prior=previous;!operation.equals("carrier-call")&&prior!=null;prior=prior.previous)if(!prior.closed&&prior.receiver.get()==receiver&&sameAnchor(entry,prior.anchor,prior.method,prior.descriptor)){
                 if(opens)closeAction(scope,false);return itemRead(operation)?null:INVOCATION_REFUSED;
             }
             invocation=new Invocation(scope,receiver,args,operation,entry,occurrences,previous,opens,stack,mask);INVOCATIONS.put(Thread.currentThread(),invocation);return invocation;
@@ -844,10 +929,26 @@ public final class EquipmentPolicy {
     private static void closeInvocation(Object token,boolean success){
         if(!(token instanceof Invocation invocation)||invocation.closed)return;
         if(invocation.thread.get()!=Thread.currentThread()||INVOCATIONS.get(Thread.currentThread())!=invocation)throw new IllegalMonitorStateException("EQUIPMENT_INVOCATION_ORDER");
-        try{if(invocation.opensAction)closeAction(invocation.action,success);else if(!success)cancelMining(invocation.action.owner);}
+        try{if(invocation.opensAction)closeAction(invocation.action,success);else if(!success)cancelMining(invocation.action.owner);
+            else if(invocation.operation.equals("carrier-call"))carrierChanged(invocation.receiver.get());}
         finally{invocation.closed=true;if(invocation.previous==null)INVOCATIONS.remove(Thread.currentThread());else INVOCATIONS.put(Thread.currentThread(),invocation.previous);}
     }
     public static void failedInvocation(Object token,Throwable failure){try{closeInvocation(token,false);}catch(RuntimeException|Error cleanup){if(cleanup!=failure)failure.addSuppressed(cleanup);}}
+    private static boolean carrierCallback(Object receiver,StackWalker.StackFrame frame){
+        String name=frame.getMethodName(),descriptor=frame.getDescriptor();
+        if(name.startsWith("lambda$"))return true;
+        if(receiver instanceof net.minecraftforge.common.capabilities.ICapabilityProvider&&name.equals("getCapability")&&descriptor.equals("(Lnet/minecraftforge/common/capabilities/Capability;Lnet/minecraft/core/Direction;)Lnet/minecraftforge/common/util/LazyOptional;"))return true;
+        if(receiver instanceof net.minecraftforge.common.util.INBTSerializable<?>&&(name.equals("serializeNBT")&&descriptor.startsWith("()")||name.equals("deserializeNBT")&&descriptor.endsWith(")V")))return true;
+        if(receiver instanceof Runnable&&name.equals("run")&&descriptor.equals("()V")||receiver instanceof java.util.concurrent.Callable<?> &&name.equals("call")&&descriptor.equals("()Ljava/lang/Object;"))return true;
+        if(receiver instanceof Comparator<?> &&name.equals("compare"))return true;
+        for(Class<?> type=receiver.getClass();type!=null;type=type.getSuperclass())for(Class<?> contract:type.getInterfaces())
+            if(functionalContract(contract)&&Set.of("accept","apply","applyAsInt","applyAsLong","applyAsDouble","get","getAsBoolean","getAsInt","getAsLong","getAsDouble","test").contains(name))return true;
+        return false;
+    }
+    private static boolean functionalContract(Class<?> type){
+        if(type.getPackageName().equals("java.util.function")||type==net.minecraftforge.common.util.NonNullSupplier.class||type==net.minecraftforge.common.util.NonNullConsumer.class||type==net.minecraftforge.common.util.NonNullFunction.class)return true;
+        for(Class<?> parent:type.getInterfaces())if(functionalContract(parent))return true;return false;
+    }
     private static ItemStack handStack(Owner owner,InteractionHand hand){return hand==InteractionHand.MAIN_HAND?main(owner):itemAt(owner,owner.entity.get() instanceof Player?2:0,owner.entity.get() instanceof Player?0:1);}
     private static UseOnContext itemContext(String operation,Object[] args){
         Object context=operation.equals("item-useOn")||operation.equals("item-place")?args.length==1?args[0]:null:operation.equals("item-onItemUseFirst")&&args.length==2?args[1]:null;
@@ -978,11 +1079,13 @@ public final class EquipmentPolicy {
     private static boolean infrastructure(Class<?> type){
         if(type.getClassLoader()==EquipmentPolicy.class.getClassLoader()&&type.getModule()==EquipmentPolicy.class.getModule()&&type.getName().startsWith("dev.ronova.pro."))return true;
         if(type.getClassLoader()!=null)return false;String name=type.getNestHost().getName();
-        return name.startsWith("dev.ronova.pro.bootstrap.")||name.equals("java.lang.reflect.Field")||name.startsWith("jdk.internal.reflect.")||name.equals("sun.misc.Unsafe")||name.equals("jdk.internal.misc.Unsafe")
+        return name.startsWith("dev.ronova.pro.bootstrap.")||name.equals("java.lang.reflect.Field")||name.startsWith("jdk.internal.reflect.")||name.startsWith("java.lang.invoke.")||name.equals("sun.misc.Unsafe")||name.equals("jdk.internal.misc.Unsafe")
                 ||Set.of("java.util.HashMap","java.util.LinkedHashMap","java.util.AbstractMap","java.util.ArrayList","java.util.AbstractList","java.util.AbstractCollection","java.util.Arrays","java.util.Collections").contains(name)||type==ARRAY_LIST;
     }
     private static boolean gameFrame(StackWalker.StackFrame frame,Scope scope){
         Class<?> type=frame.getDeclaringClass();String name=frame.getMethodName();
+        if(carrierFrame(frame,scope))return true;
+        if(EquipmentCarrierLayouts.known(type)||EquipmentCarrierLayouts.known(type.getNestHost()))return true;
         if(Item.class.isAssignableFrom(type)){
             return invocationFrame(frame,scope,true);
         }
@@ -1130,10 +1233,16 @@ public final class EquipmentPolicy {
         if(receiver!=null&&receiver.getClass()==ARRAY_LIST&&operation.equals("set")&&args.length>0&&args[0] instanceof Integer index){Object[] values=(Object[])array(receiver);return values[index];}
         return ItemStack.EMPTY;
     }
-    static boolean elementDenied(Object container,Object old,Object next){
+    static boolean elementDenied(Object container,Object old,Object next){return elementDenied(container,old,next,-1);}
+    private static boolean elementDenied(Object container,Object old,Object next,int index){
         if(old==next&&old!=null)return false;
         for(Link link:links(container))if(current(link,container)){
-            if(link.kind==Kind.CAPABILITY){if(!capabilityListeners(link,container))return true;if(next!=null)capabilityWalk(link.owner,link.stack.get(),null,true,next);continue;}
+            if(link.kind==Kind.CAPABILITY||link.kind==Kind.NBT){
+                EquipmentCarrierGraph.Node node=heldNode(link,container);if(node==null||index>=0&&!node.contains(index))continue;
+                if(node.metadata()?!capabilityListeners(link,container):!node.data()||!permitStack(link,false))throw new SecurityException("EQUIPMENT_CAPABILITY_WRITE_REJECTED");
+                cancelToolMining(link);if(next!=null){if(link.kind==Kind.NBT)walk(link.owner,link.stack.get(),null,true,next);else capabilityWalk(link.owner,link.stack.get(),null,true,next);}continue;
+            }
+            if(link.kind==Kind.CURATIVE_CARRIER){EquipmentCarrierGraph.Node node=EquipmentCarrierGraph.curatives(link.root.get()).node(container);if(node!=null&&(index<0||node.contains(index)))throw new SecurityException("CURATIVE_CARRIER_WRITE_REJECTED");continue;}
             if(link.kind==Kind.CURATIVE_LIST||link.kind==Kind.CURATIVE_ARRAY)return true;
             if(link.kind==Kind.NBT){if(!permitStack(link,false))return true;cancelToolMining(link);if(next!=null)walk(link.owner,link.stack.get(),null,true,next);}
             else if(link.kind==Kind.COMPARTMENTS||link.kind==Kind.COMPARTMENT_ARRAY)return true;
@@ -1144,28 +1253,31 @@ public final class EquipmentPolicy {
     }
     static boolean arrayDenied(Object array,int index,Object next){
         if(array==null||!array.getClass().isArray()||index<0||index>=Array.getLength(array))return false;
-        Object old=Array.get(array,index);if(array.getClass().getComponentType().isPrimitive()?Objects.equals(old,next):old==next)return false;
+        Object old=Array.get(array,index);if(array.getClass().getComponentType().isPrimitive()?samePrimitive(old,next):old==next)return false;
         if(listWriteDenied(array,index,next))return true;
-        return elementDenied(array,old,next);
+        return elementDenied(array,old,next,index);
     }
     static boolean fieldDenied(Object receiver,Class<?> declaring,String name,Object next){
         if(!initialized||receiver==null||declaring==null)return false;Slot selected=null;
-        for(Slot slot:slots(receiver))if(slot.field.getDeclaringClass()==declaring&&slot.field.getName().equals(name)){selected=slot;break;}
+        for(Slot slot:mutationSlots(receiver))if(slot.field.getDeclaringClass()==declaring&&slot.field.getName().equals(name)){selected=slot;break;}
         if(selected==null)return false;
-        Object old;try{old=selected.field.get(receiver);}catch(IllegalAccessException failure){throw new IllegalStateException("EQUIPMENT_FIELD_READ",failure);}
-        if(selected.field.getType().isPrimitive()?Objects.equals(old,next):old==next)return false;
+        Object old;
+        if(!links(receiver).isEmpty())old=EquipmentCarrierGraph.read(receiver,selected.field);
+        else try{old=selected.field.get(receiver);}catch(IllegalAccessException failure){throw new IllegalStateException("EQUIPMENT_FIELD_READ",failure);}
+        if(selected.field.getType().isPrimitive()?samePrimitive(old,next):old==next)return false;
         for(Link link:links(receiver))if(current(link,receiver)){
-            if(link.kind==Kind.STACK||link.kind==Kind.CAPABILITY){
+            if(link.kind==Kind.STACK||link.kind==Kind.CAPABILITY||link.kind==Kind.NBT){
                 Boolean capability=capabilityField(link,receiver,selected.field,next);
                 if(capability!=null){
-                    if(!capability)return true;
-                    if(next!=null&&!selected.field.getType().isPrimitive())capabilityWalk(link.owner,link.stack.get(),null,true,next);
+                    if(!capability)throw new SecurityException("EQUIPMENT_CAPABILITY_WRITE_REJECTED");
+                    if(next!=null&&!selected.field.getType().isPrimitive()){if(link.kind==Kind.NBT)walk(link.owner,link.stack.get(),null,true,next);else capabilityWalk(link.owner,link.stack.get(),null,true,next);}
                     if(next instanceof Tag)walk(link.owner,link.stack.get(),null,true,next);
-                    if(capabilityProviderType(selected.field.getDeclaringClass())||selected.field.equals(CAP_DATA))cancelToolMining(link);
+                    if(link.kind==Kind.CAPABILITY||link.kind==Kind.NBT||selected.field.equals(CAP_DATA))cancelToolMining(link);
                     continue;
                 }
-                if(link.kind==Kind.CAPABILITY)return true;
+                if(link.kind==Kind.CAPABILITY||link.kind==Kind.NBT)throw new SecurityException("EQUIPMENT_CAPABILITY_WRITE_REJECTED");
             }
+            if(link.kind==Kind.CURATIVE_CARRIER)throw new SecurityException("CURATIVE_CARRIER_WRITE_REJECTED");
             if(link.kind==Kind.CURATIVE_LIST)return true;
             if(link.kind==Kind.GAME_MODE){if(gameFieldDenied(link.owner,(ServerPlayerGameMode)receiver,name,next))return true;continue;}
             if(link.kind==Kind.BODY||link.kind==Kind.INVENTORY||link.kind==Kind.EQUIPMENT_LIST||link.kind==Kind.EQUIPMENT_BACKING||link.kind==Kind.COMPARTMENTS){if(structureFieldDenied(link,declaring,name,next))return true;continue;}
@@ -1186,6 +1298,11 @@ public final class EquipmentPolicy {
                 if(next!=null&&!selected.field.getType().isPrimitive()&&!(next instanceof String))walk(link.owner,link.stack.get(),null,true,next);
             }
         }return false;
+    }
+    private static boolean samePrimitive(Object first,Object second){
+        if(first instanceof Float a&&second instanceof Float b)return Float.floatToRawIntBits(a)==Float.floatToRawIntBits(b);
+        if(first instanceof Double a&&second instanceof Double b)return Double.doubleToRawLongBits(a)==Double.doubleToRawLongBits(b);
+        return Objects.equals(first,second);
     }
     private static void cancelToolMining(Link link){
         Mining mining=MINING.get(link.owner.entity.get());if(mining!=null&&mining.tool.get()==link.stack.get())cancelMining(link.owner);
@@ -1245,7 +1362,8 @@ public final class EquipmentPolicy {
     private static boolean overlaps(long first,long length,long second,long width){return first>=0&&length>0&&second>=0&&width>0&&first<=Long.MAX_VALUE-length&&second<=Long.MAX_VALUE-width&&first<second+width&&second<first+length;}
     static boolean offsetDenied(Object receiver,long offset,Object next){
         if(!initialized||receiver==null)return false;int width=next==null||!(next instanceof Number||next instanceof Boolean||next instanceof Character)?REFERENCE_WIDTH:next instanceof Long||next instanceof Double?8:next instanceof Byte||next instanceof Boolean?1:next instanceof Short||next instanceof Character?2:4;
-        for(Slot slot:slots(receiver))if(overlaps(offset,width,slot.offset,slot.width)){
+        for(Slot slot:mutationSlots(receiver))if(overlaps(offset,width,slot.offset,slot.width)){
+            if((offset!=slot.offset||width!=slot.width)&&carrierRangeDenied(receiver,slot))return true;
             Object value=offset==slot.offset&&width==slot.width?next:null;
             if(slot.field.getType()==float.class&&value instanceof Integer bits)value=Float.intBitsToFloat(bits);
             if(slot.field.getType()==double.class&&value instanceof Long bits)value=Double.longBitsToDouble(bits);
@@ -1256,13 +1374,28 @@ public final class EquipmentPolicy {
         if(!initialized||receiver==null||length<=0)return false;
         if(receiver.getClass().isArray()){
             for(Link link:links(receiver))if(current(link,receiver)){
-                if(link.kind==Kind.CAPABILITY){if(!capabilityListeners(link,receiver))return true;continue;}
+                if(link.kind==Kind.CAPABILITY||link.kind==Kind.NBT){
+                    EquipmentCarrierGraph.Node node=heldNode(link,receiver);if(node==null||!node.overlaps(offset,length))continue;
+                    if(!receiver.getClass().getComponentType().isPrimitive()||(node.metadata()?!capabilityListeners(link,receiver):!node.data()||!permitStack(link,false)))
+                        throw new SecurityException("EQUIPMENT_CAPABILITY_MEMORY_WRITE_REJECTED");continue;
+                }
+                if(link.kind==Kind.CURATIVE_CARRIER){EquipmentCarrierGraph.Node node=EquipmentCarrierGraph.curatives(link.root.get()).node(receiver);if(node!=null&&node.overlaps(offset,length))throw new SecurityException("CURATIVE_CARRIER_MEMORY_WRITE_REJECTED");continue;}
                 if(link.kind==Kind.EQUIPMENT_ARRAY||link.kind==Kind.COMPARTMENT_ARRAY||link.kind==Kind.CURATIVE_ARRAY)return true;
                 if(link.kind==Kind.NBT){if(!permitStack(link,false))return true;cancelToolMining(link);}
             }return false;
         }
-        for(Slot slot:slots(receiver))if(overlaps(offset,length,slot.offset,slot.width)&&fieldDenied(receiver,slot.field.getDeclaringClass(),slot.field.getName(),null))return true;
+        for(Slot slot:mutationSlots(receiver))if(overlaps(offset,length,slot.offset,slot.width)){
+            if(carrierRangeDenied(receiver,slot))return true;
+            if(fieldDenied(receiver,slot.field.getDeclaringClass(),slot.field.getName(),null))return true;
+        }
         return false;
+    }
+    private static boolean carrierRangeDenied(Object receiver,Slot slot){
+        for(Link link:links(receiver))if(current(link,receiver)){
+            if(link.kind==Kind.CURATIVE_CARRIER||link.kind==Kind.CURATIVE_LIST)throw new SecurityException("CURATIVE_CARRIER_MEMORY_WRITE_REJECTED");
+            if(link.kind==Kind.CAPABILITY||link.kind==Kind.NBT){EquipmentCarrierGraph.Node node=heldNode(link,receiver);
+                if(!slot.field.getType().isPrimitive()||node==null||node.metadata()||!node.data()||!permitStack(link,false))throw new SecurityException("EQUIPMENT_CAPABILITY_MEMORY_WRITE_REJECTED");}
+        }return false;
     }
     static List<Field> unsafeFields(){if(!initialized)return List.of();List<Field> result=new ArrayList<>();for(var slots:FIELDS.values())for(Slot slot:slots)if(!result.contains(slot.field))result.add(slot.field);return result;}
     private static final String[][] GAME_ACTIONS={

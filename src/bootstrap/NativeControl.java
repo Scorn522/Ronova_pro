@@ -43,7 +43,7 @@ public final class NativeControl {
             if(!early.isEmpty()) {
                 Path actual=Path.of(early).toAbsolutePath();if(!hash(Files.readAllBytes(actual)).equals(digest))throw new IOException("EARLY_NATIVE_IMAGE_MISMATCH");dll=actual;
             }
-            System.load(dll.toString());if(abi()!=76)throw new UnsatisfiedLinkError("NATIVE_CONTROL_ABI");
+            System.load(dll.toString());if(abi()!=77)throw new UnsatisfiedLinkError("NATIVE_CONTROL_ABI");
             if(!initialize0(ControlBridge.class,DefinitionBridge.class))throw new UnsatisfiedLinkError("ACTUAL_NATIVE_BOUNDARY_INSTALL_FAILED");
             if(!initializeDefinitionDirectory0(definitionDirectoryOwner))throw new UnsatisfiedLinkError("ACTUAL_DEFINITION_DIRECTORY_CAS_UNAVAILABLE");
             libraryBoundaryPresent=libraryPresent0();available=true;return state="NATIVE_BIND_AND_JNI_FIELD_READY";
@@ -255,6 +255,19 @@ public final class NativeControl {
         if(CALLER.getCallerClass()!=NetworkBridge.class)throw new SecurityException("ACTUAL_NETWORK_FIELD_QUERY_REQUIRED");
         return available&&declaring!=null&&name!=null?networkField0(declaring,name):null;
     }
+    static Object[][] carrierFields(Object receiver){
+        if(CALLER.getCallerClass()!=CarrierBridge.class)throw new SecurityException("ACTUAL_CARRIER_BRIDGE_REQUIRED");
+        return available?carrierFields0(receiver):null;
+    }
+    static Object[] carrierRead(Object receiver,java.lang.reflect.Field field){
+        if(CALLER.getCallerClass()!=CarrierBridge.class)throw new SecurityException("ACTUAL_CARRIER_BRIDGE_REQUIRED");
+        return available?carrierRead0(receiver,field):null;
+    }
+    static Object[] carrierStaticValue(Class<?> declaring,String name,String descriptor){
+        if(CALLER.getCallerClass()!=CarrierBridge.class)throw new SecurityException("ACTUAL_CARRIER_BRIDGE_REQUIRED");
+        return available?carrierStaticValue0(declaring,name,descriptor):null;
+    }
+    private static boolean carrierReader(){return ControlBridge.coreWriter();}
     static boolean arrayCopyInternalBoundary(){return CALLER.getCallerClass()==ControlBridge.class&&arrayCopyInternalBoundary0();}
     static boolean arrayCopyReadBoundary(Object source,int from,int length){return CALLER.getCallerClass()==ControlBridge.class&&arrayCopyReadBoundary0(source,from,length);}
     static boolean arrayCopyBoundary(Object source,int from,int length,Object target,int to,int prefix,Object read){return CALLER.getCallerClass()==ControlBridge.class&&arrayCopyBoundary0(source,from,length,target,to,prefix,read);}
@@ -752,6 +765,9 @@ public final class NativeControl {
     private static native boolean networkCleanupBoundary0(Class<?> boundary,String method,int phase,int bottomDepth);
     private static native Object networkReadField0(Object receiver,Class<?> declaring,String name,boolean statik);
     private static native java.lang.reflect.Field networkField0(Class<?> declaring,String name);
+    private static native Object[][] carrierFields0(Object receiver);
+    private static native Object[] carrierRead0(Object receiver,java.lang.reflect.Field field);
+    private static native Object[] carrierStaticValue0(Class<?> declaring,String name,String descriptor);
     private static native boolean arrayCopyInternalBoundary0();
     private static native boolean arrayCopyReadBoundary0(Object source,int from,int length);
     private static native boolean arrayCopyBoundary0(Object source,int from,int length,Object target,int to,int prefix,Object read);

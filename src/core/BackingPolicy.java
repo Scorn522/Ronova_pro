@@ -158,7 +158,10 @@ final class BackingPolicy {
                 ||node(value)&&nodeContains(value,entity);
     }
     static boolean elementDenied(Object container,Object old,Object next) {
-        if(EquipmentPolicy.elementDenied(container,old,next))return true;
+        return elementDenied(container,old,next,false);
+    }
+    private static boolean elementDenied(Object container,Object old,Object next,boolean equipmentChecked) {
+        if(!equipmentChecked&&EquipmentPolicy.elementDenied(container,old,next))return true;
         if(LiveStatePolicy.elementDenied(container,old,next))return true;
         if(SourceMaps.denies(container,null,next))return true;
         if(old==next)return false;List<Owner> owners=OWNERS.get(container);if(owners==null)return false;
@@ -185,9 +188,9 @@ final class BackingPolicy {
         if(!known(array)||array==null||!array.getClass().isArray()||index<0||index>=Array.getLength(array))return false;
         Object prior=Array.get(array,index);if(array.getClass().getComponentType().isPrimitive()?Objects.equals(prior,next):prior==next)return false;
         if(SourceMaps.primitiveBackingDenied(array))return true;
-        if(elementDenied(array,null,next))return true;
+        if(elementDenied(array,null,next,true))return true;
         var peer=ARRAY_VALUES.get(array);Object values=peer==null?null:peer.get();
-        if(values instanceof Object[] objects&&index<objects.length&&elementDenied(array,objects[index],null))return true;
+        if(values instanceof Object[] objects&&index<objects.length&&elementDenied(array,objects[index],null,true))return true;
         if(LINK_ARRAYS.contains(array))for(Owner owner:OWNERS.getOrDefault(array,List.of())) {Entity entity=owner.entity.get();if(entity!=null&&ProRuntime.preventIndexRemoval(entity))return true;}
         for(Owner owner:OWNERS.getOrDefault(array,List.of())) {Entity entity=owner.entity.get();if(entity!=null&&target(prior,entity)&&!target(next,entity)&&!SectionMoves.allows(array,entity)&&ProRuntime.preventIndexRemoval(entity))return true;}
         return false;

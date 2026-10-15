@@ -144,11 +144,8 @@ public final class LiveStatePolicy {
                 Object curatives=((Access.EffectState)cursor).pro$curativeItems();
                 if(curatives!=null) {
                     if(kind==Kind.CURATIVE_LIST&&curatives==expected)return true;
-                    EquipmentPolicy.CurativeList layout=EquipmentPolicy.knownCurativeLayout(curatives);
-                    if(layout!=null) {
-                        if(kind==Kind.CURATIVE_ARRAY&&layout.backed()&&layout.values()==expected)return true;
-                        if(kind==Kind.CURATIVE_STACK)for(int at=0;at<layout.size();at++)if(layout.values()[at]==expected)return true;
-                    }
+                    if((kind==Kind.CURATIVE_ARRAY&&expected!=null&&expected.getClass().isArray()||kind==Kind.CURATIVE_STACK&&expected instanceof ItemStack)
+                            &&EquipmentCarrierGraph.curatives(curatives).contains(expected))return true;
                 }
             }
             cursor=((Access.EffectState)cursor).pro$hiddenEffect();

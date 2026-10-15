@@ -9,7 +9,38 @@ import jdk.internal.org.objectweb.asm.tree.*;
 final class EquipmentActionBoundary {
     private record Entry(Class<?> owner,String method,String descriptor,String operation,boolean virtual) { }
     private static volatile Entry[] entries=new Entry[0];
+    private static final class Carrier {
+        final java.lang.ref.WeakReference<Class<?>> type;
+        volatile boolean transformed;
+        Carrier(Class<?> actual){type=new java.lang.ref.WeakReference<>(actual);}
+    }
+    private static volatile Carrier[] carriers=new Carrier[0];
     private static final String BRIDGE="dev/ronova/pro/bootstrap/ControlBridge";
+    private static Carrier carrier(Class<?> actual) {
+        if(actual!=null)for(Carrier entry:carriers)if(entry.type.get()==actual)return entry;
+        return null;
+    }
+    static void transformFailed(Class<?> actual){Carrier entry=carrier(actual);if(entry!=null)entry.transformed=false;}
+    private static synchronized Carrier declareCarrier(Class<?> actual) {
+        Carrier present=carrier(actual);if(present!=null)return present;
+        var living=new ArrayList<Carrier>();for(Carrier entry:carriers)if(entry.type.get()!=null)living.add(entry);
+        Carrier added=new Carrier(actual);living.add(added);Carrier[] next=living.toArray(Carrier[]::new);
+        ControlImages.protect(next,added,added.type);carriers=next;return added;
+    }
+    /** One actual data class at a time; no virtual class-name or module-wide grant. */
+    static void installCarrier(Instrumentation api,Class<?> actual) {
+        Objects.requireNonNull(actual);
+        if(api==null||actual.isArray()||actual.isPrimitive()||actual.getClassLoader()==null||!api.isModifiableClass(actual))
+            throw new IllegalStateException("EQUIPMENT_CARRIER_INSTALL_UNAVAILABLE:"+actual.getName());
+        Carrier entry=declareCarrier(actual);
+        synchronized(entry) {
+            if(entry.transformed)return;
+            try{api.retransformClasses(actual);}
+            catch(java.lang.instrument.UnmodifiableClassException failure){entry.transformed=false;throw new IllegalStateException("EQUIPMENT_CARRIER_INSTALL_FAILED:"+actual.getName(),failure);}
+            catch(RuntimeException|Error failure){entry.transformed=false;throw failure;}
+            if(!entry.transformed)throw new IllegalStateException("EQUIPMENT_CARRIER_TRANSFORM_MISSING:"+actual.getName());
+        }
+    }
     static synchronized boolean declare(Class<?> owner,String method,String descriptor,String operation) {
         Objects.requireNonNull(owner);Objects.requireNonNull(method);Objects.requireNonNull(descriptor);Objects.requireNonNull(operation);
         java.lang.reflect.Method definition=null;
@@ -32,19 +63,21 @@ final class EquipmentActionBoundary {
         return false;
     }
     static byte[] transform(ClassLoader loader,String name,Class<?> actual,byte[] bytes) {
-        if(name==null||entries.length==0||loader==null)return null;
+        Carrier data=carrier(actual);
+        if(name==null||entries.length==0&&data==null||loader==null)return null;
         ClassNode node=new ClassNode();new ClassReader(bytes).accept(node,0);boolean changed=false;
         for(MethodNode method:node.methods) {
-            if((method.access&(Opcodes.ACC_STATIC|Opcodes.ACC_ABSTRACT|Opcodes.ACC_NATIVE))!=0)continue;
+            if(method.name.startsWith("<")||(method.access&(Opcodes.ACC_STATIC|Opcodes.ACC_ABSTRACT|Opcodes.ACC_NATIVE))!=0)continue;
             Entry selected=null;
             for(Entry entry:entries)if(entry.method.equals(method.name)&&entry.descriptor.equals(method.desc)
                     &&((method.access&Opcodes.ACC_PRIVATE)==0||entry.owner.getName().replace('.','/').equals(name)&&entry.owner.getClassLoader()==loader)
                     &&matches(entry,loader,name,actual,node)){selected=entry;break;}
-            if(selected==null)continue;
-            weave(method,selected.operation);changed=true;
+            if(selected==null&&data==null)continue;
+            weave(method,selected==null?"carrier-call":selected.operation);changed=true;
         }
-        if(!changed)return null;
-        ControlClassWriter writer=new ControlClassWriter(loader,node);node.accept(writer);return writer.toByteArray();
+        if(!changed){if(data!=null)data.transformed=true;return null;}
+        ControlClassWriter writer=new ControlClassWriter(loader,node);node.accept(writer);byte[] result=writer.toByteArray();
+        if(data!=null)data.transformed=true;return result;
     }
     private static void weave(MethodNode method,String operation) {
         int arguments=method.maxLocals++,lease=method.maxLocals++,failure=method.maxLocals++;
@@ -61,7 +94,11 @@ final class EquipmentActionBoundary {
         LabelNode start=new LabelNode(),body=new LabelNode(),end=new LabelNode(),handler=new LabelNode();entry.add(start);
         entry.add(new VarInsnNode(Opcodes.ALOAD,lease));entry.add(new MethodInsnNode(Opcodes.INVOKESTATIC,BRIDGE,"equipmentInvocationDenied","(Ljava/lang/Object;)Z",false));
         entry.add(new JumpInsnNode(Opcodes.IFEQ,body));
-        if(result.getSort()==Type.OBJECT||result.getSort()==Type.ARRAY) {
+        if(operation.equals("carrier-call")) {
+            entry.add(new TypeInsnNode(Opcodes.NEW,"java/lang/SecurityException"));entry.add(new InsnNode(Opcodes.DUP));
+            entry.add(new LdcInsnNode("EQUIPMENT_CARRIER_INVOCATION_REFUSED"));
+            entry.add(new MethodInsnNode(Opcodes.INVOKESPECIAL,"java/lang/SecurityException","<init>","(Ljava/lang/String;)V",false));entry.add(new InsnNode(Opcodes.ATHROW));
+        }else if(result.getSort()==Type.OBJECT||result.getSort()==Type.ARRAY) {
             entry.add(new VarInsnNode(Opcodes.ALOAD,0));entry.add(new LdcInsnNode(operation));entry.add(new VarInsnNode(Opcodes.ALOAD,arguments));
             entry.add(new MethodInsnNode(Opcodes.INVOKESTATIC,BRIDGE,"equipmentInvocationResult","(Ljava/lang/Object;Ljava/lang/String;Ljava/lang/Object;)Ljava/lang/Object;",false));
             entry.add(new TypeInsnNode(Opcodes.CHECKCAST,result.getInternalName()));entry.add(new InsnNode(Opcodes.ARETURN));

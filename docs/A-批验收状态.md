@@ -1,5 +1,22 @@
 # Ronova Pro 当前进度
 
+## 2026-10-15：C 接续——自定义能力与实际载体
+
+接续已推送的 `5ff82f3`，Java ABI84 / Native ABI77 / Storage3 / Journal6，协议 `r3-client-8`。本包先写齐自定义能力、深层载体、自然返回观察及动作接续，再统一构建；自身外观、武器注册与驱动部署继续暂缓。
+
+能力图沿当前 ItemStack 的实际 dispatcher/provider 实例字段、自然解析的 LazyOptional 值和真实 getCapability 返回值延伸，不再局限于固定流体 provider。实际 provider 调用返回后、Forge 的 isPresent 之前观察原返回；正常只保留真正选中的弱关系，异常和非选中结果结清。关系逐当前 root、provider 在 caps 中的身份及 optional 有效状态复核；invalid optional 不沿 resolved 残留追 payload，Provider.valid=false 不沿 query 弱观察曝光，其他仍被实际实例字段持有的独立数据根保留。
+
+新增实际 VM 只读字段通道，返回准确 Field、声明类、描述符、类型、offset、宽度及当前值。两个元数据原入口只来自本机真实 Unsafe 注册表；查询时才读取已初始化的真实 Unsafe 实例。字段类型尚未解析、必要元数据不可用或静态声明尚未初始化时明确失败，不执行自定义类加载、getter、序列化器、supplier 或构造器重放，不以 null 冒充成功，不遍历自定义 static 图。
+
+自定义数据、嵌套 ItemStack/ItemStackHandler/NBT、custom Tag 和自定义 curative List 接原当前归属及字段、元素、数组、offset、memory 门。常见 JDK/Guava 列表、映射、集合、包装器、NonNullList 和原子容器读取实际字段/backing/node；可变 Map key 与 value 都进入数据图。子视图只登记其实际逻辑槽，临时快照和未使用容量不冒充 payload。保留原容器分步更新，成功写通知复用现有 observer 回读新图；数组准确 index 检查后不再重复无 index 的装备判断，其他来源、世界及实体门保持。浮点 no-op 按真实 NaN 位判断。
+
+载体按实际 Class 弱登记并逐类安装实例 Java body，实际 default interface 和合法递归也按当前 receiver、方法、父调用、层次及物品动作绑定。共享 owner 分别核对，脱链旧目标失活；回调、同类其他实例或同模块身份不能借用动作。世界、实体、注册表、类加载器、线程、运行时资源等为借用叶。直接业务调用可接续；未知 functional/supplier/listener 回调不自动获得写权。
+
+统一构建 **PASS，1分16秒**，21项任务中16项执行、5项保持最新，Java84/Native77 实际编译链接完成。复用现有 AuditFixCheck，仅对实际 Forge ItemStackHandler 的 carrier-call 包装，以及本批 CapabilityProvider/CapabilityDispatcher/LazyOptional 织入执行 `-Xverify:all` 加载，**退出0、CARRIER_BYTECODE_VERIFY_PASS、CAPABILITY_BYTECODE_VERIFY_PASS**；Forge 保留生产 frame、只计算 maxs。没有重跑旧 FileDispatcher/Netty/世界矩阵，没有启动游戏。本批自定义能力实际使用、失效、共享 owner 和停组行为 **NOTRUN**；Native75 的旧预启动中止记录保留，编译/字节码结果不代称游戏通过。
+
+原生 opaque 状态、未解析字段类型、不可安装类及未知自定义槽语义仍保留明确边界，完整 C/B 尚未宣称完成。匹配候选为 `distribution/candidate-c-java84-native77-custom-carriers-wip-20261015`，Core2832142、prelaunch23309字节；源码、匹配 JAR 与原报告摘要同步 GitHub，未生成源码 ZIP，未安装或加载驱动。
+
+---
 ## 2026-10-15：C 接续——文件副本与能力容器
 
 接续已推送的 `426c1b5`，Java ABI83 / Native ABI76 / Storage3 / Journal6，协议仍为 `r3-client-8`。继续写齐两个明确缺口后才统一构建；自身外观、武器注册、驱动部署仍不做。

@@ -324,6 +324,7 @@ static int native_unsafe_registered(JNIEnv *env,NativeThread *state,jclass type,
         ReleaseSRWLockExclusive(&native_records);
         if(ready)ready=native_binding_seed_one(env,state,type,actual[i],methods[i].name,methods[i].signature,3)==0;
     }
+    if(ready&&!native_original.ExceptionCheck(env))native_carrier_metadata_registered(env,type,methods,actual,count,caller);
     state->control--;if(!ready)native_refuse(env,"NATIVE_UNSAFE_CURRENT_BINDINGS_PENDING");return ready&&!native_original.ExceptionCheck(env);
 }
 

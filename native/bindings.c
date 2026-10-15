@@ -117,6 +117,7 @@ static int native_unsafe_prepare(JNIEnv*);
 static int native_unsafe_install(JNIEnv*);
 static NativeUnsafeInstall *native_unsafe_registration(JNIEnv*,NativeThread*,jclass,const JNINativeMethod*,jint,void*);
 static int native_unsafe_registered(JNIEnv*,NativeThread*,jclass,const JNINativeMethod*,jmethodID*,jint,void*);
+static void native_carrier_metadata_registered(JNIEnv*,jclass,const JNINativeMethod*,jmethodID*,jint,void*);
 static int native_unsafe_vm_target(jmethodID,void*);
 static int native_unsafe_begin(JNIEnv*,NativeThread*,Binding*,unsigned char*);
 static int native_unsafe_network_retirement(JNIEnv*,NativeThread*,Binding*,unsigned char*,jobject);
@@ -2593,3 +2594,4 @@ JNIEXPORT jobject JNICALL Java_dev_ronova_pro_bootstrap_NativeControl_networkFie
     if(native_original.ExceptionCheck(env)){if(result)native_original.DeleteLocalRef(env,result);return NULL;}
     return result;
 }
+#include "carrier.c"

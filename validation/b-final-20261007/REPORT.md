@@ -1,5 +1,18 @@
 # B 批实际报告：2026-10-09 代码收敛接续
 
+## 2026-10-15：C 接续——自定义能力与载体闭包
+
+接续 `5ff82f3`，Java84 / Native77 / Storage3 / Journal6，协议 `r3-client-8`。三个既有 6.1 Sol max 子代理分别完成 VM 只读字段通道、标准容器布局及 Core 数据图；主线程接齐实际载体 Class 安装、来源门、getCapability 自然返回观察、成功写通知和数组逻辑范围。源码整包写齐后才构建，自身外观及武器注册不做。
+
+当前 provider 实例字段、自然 resolved 值及真实被选择的 getCapability 返回值接当前 ItemStack；嵌套 ItemStack/ItemStackHandler/NBT/custom Tag、自定义 curative List 的实际 effect/root 关系复用原五类写门。真实 backing/node、可变 Map key/value、列表子视图及原子数据有准确范围；临时快照不登记，分步容器更新不被错误计数不变量阻断。原成功 store observer 接回新增 payload，原来源/世界/实体判断保留。Class 弱登记、default interface、递归 token 和 actual receiver/method/动作链只接本次合法业务；未知回调不借权。invalid optional 的 resolved 残留解除 payload 关系，Provider.valid=false 不曝光 query 弱观察，实际独立字段根仍保留。共享 owner 逐个核对，旧链接按当前图退役。
+
+VM 字段通道只读真实声明、值、offset 和宽度，不执行库 accessor、自定义加载器、supplier、序列化或构造器。所需 Unsafe 元数据入口来自实际 VM 注册表，读取单例延后到确认初始化之后。未解析类型或必要元数据不可用明确失败；字段逐项读取，不宣称全对象原子快照。全局/owner/runtime 资源留作借用叶；未知 functional 回调、native opaque、不可安装类及未知自定义槽仍未泛化覆盖。
+
+`build-c-java84-native77-carriers-20261015.log` **PASS，1分16秒**，21项任务中16项执行、5项保持最新，包含 Java84/Native77 实际编译链接；`compile-c-java84-native77-carriers-20261015.log` **退出0**。`c-java84-native77-custom-carrier-bytecode-20261015.log` 复用现有 AuditFixCheck，只加载真实 ItemStackHandler 的实例 body 包装和本批 Forge 三类织入，**退出0、CARRIER_BYTECODE_VERIFY_PASS、CAPABILITY_BYTECODE_VERIFY_PASS**，Forge 仅 COMPUTE_MAXS 保留原 frame。只确认 JVM 安装格式，不代表 Native 字段读取、游戏能力行为或停组结果通过；这些实际场景 **NOTRUN**。未重跑旧矩阵、未启动游戏；旧 Native75 预启动中止保留为原失败记录。
+
+候选 `distribution/candidate-c-java84-native77-custom-carriers-wip-20261015`：Core2832142、prelaunch23309字节。源码、匹配 JAR 与本摘要同步原 GitHub，未生成源码 ZIP、未部署驱动；完整 C/B 未宣称完成。
+
+---
 ## 2026-10-15：C 接续——文件复制与标准能力图
 
 接续已推送的 `426c1b5`，Java83 / Native76 / Storage3 / Journal6，协议 `r3-client-8`。本包继续完成实际 duplicateForMapping/duplicateHandle/新 FD 发布及失败副本接续、标准 Forge capability 元数据图，并补 Guava SingletonImmutableList。自身外观、武器注册与驱动部署不在本包。

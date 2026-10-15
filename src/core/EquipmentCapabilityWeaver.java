@@ -30,6 +30,7 @@ public final class EquipmentCapabilityWeaver {
             body(type,method(type,"reviveCaps","()V"),"revive-provider",false);
         }else if(type.name.equals(DISPATCHER)){
             body(type,method(type,"invalidate","()V"),"invalidate-dispatcher",false);
+            query(type,method(type,"getCapability","(Lnet/minecraftforge/common/capabilities/Capability;Lnet/minecraft/core/Direction;)L"+OPTIONAL+";"));
         }else if(type.name.equals(OPTIONAL)){
             MethodNode resolve=method(type,"getValue","()Ljava/lang/Object;");
             FieldInsnNode resolved=store(resolve,OPTIONAL,"resolved","Lorg/apache/commons/lang3/mutable/Mutable;");
@@ -90,6 +91,39 @@ public final class EquipmentCapabilityWeaver {
         int token=prepare(type,method);LabelNode start=new LabelNode();InsnList head=initialize(token,start);
         head.add(enter(token,phase,listener?new VarInsnNode(Opcodes.ALOAD,1):new InsnNode(Opcodes.ACONST_NULL)));method.instructions.insert(head);
         finish(type,method,token,start);
+    }
+    /** Observe the original provider return before Forge's own isPresent can resolve it. */
+    private static void query(ClassNode type,MethodNode method){
+        MethodInsnNode original=null;
+        for(AbstractInsnNode instruction:method.instructions)if(instruction instanceof MethodInsnNode call&&call.getOpcode()==Opcodes.INVOKEINTERFACE
+                &&call.owner.equals("net/minecraftforge/common/capabilities/ICapabilityProvider")&&call.name.equals("getCapability")&&call.desc.equals(method.desc)){
+            if(original!=null)throw new IllegalStateException("EQUIPMENT_CAPABILITY_QUERY_AMBIGUOUS");original=call;
+        }
+        if(original==null||!load(previous(original),Opcodes.ALOAD,2)||!load(previous(previous(original)),Opcodes.ALOAD,1))
+            throw new IllegalStateException("EQUIPMENT_CAPABILITY_QUERY_ARGUMENT_LAYOUT");
+        int token=prepare(type,method),provider=method.maxLocals++,request=method.maxLocals++,direction=method.maxLocals++,result=method.maxLocals++;
+        LabelNode start=new LabelNode();InsnList head=initialize(token,start);
+        head.add(new VarInsnNode(Opcodes.ALOAD,0));head.add(new VarInsnNode(Opcodes.ALOAD,1));head.add(new VarInsnNode(Opcodes.ALOAD,2));
+        head.add(new MethodInsnNode(Opcodes.INVOKESTATIC,POLICY,"capabilityQueryEnter","(Ljava/lang/Object;Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;",false));
+        head.add(new VarInsnNode(Opcodes.ASTORE,token));method.instructions.insert(head);
+        // Preserve the actual invocation operand, rather than guessing a provider local or replaying the call.
+        InsnList before=new InsnList();before.add(new VarInsnNode(Opcodes.ASTORE,direction));before.add(new VarInsnNode(Opcodes.ASTORE,request));
+        before.add(new InsnNode(Opcodes.DUP));before.add(new VarInsnNode(Opcodes.ASTORE,provider));
+        before.add(new VarInsnNode(Opcodes.ALOAD,request));before.add(new VarInsnNode(Opcodes.ALOAD,direction));method.instructions.insertBefore(original,before);
+        InsnList observed=new InsnList();observed.add(new InsnNode(Opcodes.DUP));observed.add(new VarInsnNode(Opcodes.ASTORE,result));
+        observed.add(new VarInsnNode(Opcodes.ALOAD,token));observed.add(new VarInsnNode(Opcodes.ALOAD,provider));observed.add(new VarInsnNode(Opcodes.ALOAD,result));
+        observed.add(new MethodInsnNode(Opcodes.INVOKESTATIC,POLICY,"capabilityQueryObserved","(Ljava/lang/Object;Ljava/lang/Object;Ljava/lang/Object;)V",false));method.instructions.insert(original,observed);
+        for(AbstractInsnNode instruction:method.instructions.toArray())if(instruction.getOpcode()==Opcodes.ARETURN){
+            InsnList close=new InsnList();close.add(new InsnNode(Opcodes.DUP));close.add(new VarInsnNode(Opcodes.ALOAD,token));close.add(new InsnNode(Opcodes.SWAP));
+            close.add(new MethodInsnNode(Opcodes.INVOKESTATIC,POLICY,"capabilityQueryExit","(Ljava/lang/Object;Ljava/lang/Object;)V",false));method.instructions.insertBefore(instruction,close);
+        }
+        int failure=method.maxLocals++;LabelNode end=new LabelNode(),handler=new LabelNode();method.instructions.add(end);method.instructions.add(handler);
+        Object[] locals=SaveFinallyPlugin.lifecycleFrameLocals(type,method,token);
+        method.instructions.add(new FrameNode(Opcodes.F_NEW,locals.length,locals,1,new Object[]{"java/lang/Throwable"}));
+        method.instructions.add(new VarInsnNode(Opcodes.ASTORE,failure));method.instructions.add(new VarInsnNode(Opcodes.ALOAD,token));method.instructions.add(new VarInsnNode(Opcodes.ALOAD,failure));
+        method.instructions.add(new MethodInsnNode(Opcodes.INVOKESTATIC,POLICY,"capabilityQueryFailed","(Ljava/lang/Object;Ljava/lang/Throwable;)V",false));
+        method.instructions.add(new VarInsnNode(Opcodes.ALOAD,failure));method.instructions.add(new InsnNode(Opcodes.ATHROW));
+        method.tryCatchBlocks.add(new TryCatchBlockNode(start,end,handler,"java/lang/Throwable"));method.maxStack=Math.max(method.maxStack+3,6);
     }
     private static void finish(ClassNode type,MethodNode method,int token,LabelNode start){
         // Append after the original handlers, particularly getValue's monitor exit.

@@ -28,7 +28,7 @@ public final class ControlBridge {
         }
     };
     private ControlBridge() { }
-    public static int abiVersion(){return 83;}
+    public static int abiVersion(){return 84;}
     public static long arrayRevision(Object value){if(!recoveryWriter())throw new SecurityException("RECOVERY_ARRAY_READER_REQUIRED");return CodeSourceBridge.executionArrayRevision(value);}
 
     public static synchronized void install(Class<?> agent,ClassFileTransformer[] transformers) throws ReflectiveOperationException {
@@ -895,7 +895,7 @@ public final class ControlBridge {
             "registerConsoleInput","beginConsoleCommand","endConsoleCommand","consoleDispatchTrusted",
             "clearProtectedMap","unsafeWriteAllowed","unsafeMemoryAllowed","networkRetirementWriteAllowed","networkRetirementOwnerAllowed","networkRetirementActive",
             "nativeArrayElementAllowed","nativePrimitiveArrayPolicy","nativeArrayPointerAllowed","nativeArrayCopyInternal","nativeRegistrationAllowed","nativeRegistrationTargetAllowed","nativeHeapTargetAllowed","arrayWriteAllowed",
-            "resourceReleaseAllowed","lifeResult","dispatchAllowed","dispatchDeniedResult","equipmentActionSourceAllowed","beginEquipmentInvocation","equipmentInvocationDenied","equipmentInvocationResult","endEquipmentInvocation","failedEquipmentInvocation","taskEffectAllowed",
+            "resourceReleaseAllowed","lifeResult","dispatchAllowed","dispatchDeniedResult","equipmentActionSourceAllowed","equipmentCarrierSourceAllowed","beginEquipmentInvocation","equipmentInvocationDenied","equipmentInvocationResult","endEquipmentInvocation","failedEquipmentInvocation","taskEffectAllowed",
             "resultPublicationAllowed");
     static boolean controlCaller() {
         // The query omits guard entry points, preserving the real ledger writer.
@@ -1381,7 +1381,7 @@ public final class ControlBridge {
     }
     static boolean ownState(Class<?> declaring) {
         if(declaring==null)return false;Class<?> host=declaring.getClassLoader()==null?declaring.getNestHost():declaring;Guards current=guards;
-        if(host==TaskBridge.class||host==BackingBridge.class||host==SourceMapBridge.class||host==NativeControl.class||host==DefinitionBridge.class||host==ResourceBridge.class||host==IoBridge.class||host==CodeSourceBridge.class||host==NetworkBridge.class||host==ClientBridge.class
+        if(host==TaskBridge.class||host==BackingBridge.class||host==CarrierBridge.class||host==SourceMapBridge.class||host==NativeControl.class||host==DefinitionBridge.class||host==ResourceBridge.class||host==IoBridge.class||host==CodeSourceBridge.class||host==NetworkBridge.class||host==ClientBridge.class
                 ||host==EventFaultBridge.class||host==ControlBridge.class||host==ExecutionFlow.class||host==NetworkCleanup.class)return true;
         if(ControlBridge.owns(declaring))return true;
         return current!=null&&DefinitionBridge.module(declaring)==current.owner().getModule()&&declaring.getClassLoader()==current.owner().getClassLoader()&&declaring.getName().startsWith("dev.ronova.pro.");
@@ -2332,31 +2332,42 @@ public final class ControlBridge {
     }
     /** Existing source continuity is a condition of an exact game action, never an input credential. */
     public static boolean equipmentActionSourceAllowed() {
-        return equipmentActionSourcesAllowed(WALKER.getCallerClass(),null,null);
+        return equipmentActionSourcesAllowed(WALKER.getCallerClass(),null,null,null);
     }
     public static boolean equipmentActionSourceAllowed(Class<?> delegatedItem) {
-        return equipmentActionSourcesAllowed(WALKER.getCallerClass(),null,delegatedItem);
+        return equipmentActionSourcesAllowed(WALKER.getCallerClass(),null,delegatedItem,null);
     }
     public static boolean equipmentActionSourceAllowed(Class<?> gameMode,Class<?> delegatedItem) {
-        return equipmentActionSourcesAllowed(WALKER.getCallerClass(),gameMode,delegatedItem);
+        return equipmentActionSourcesAllowed(WALKER.getCallerClass(),gameMode,delegatedItem,null);
     }
-    private static boolean equipmentActionSourcesAllowed(Class<?> caller,Class<?> gameMode,Class<?> delegatedItem) {
+    /** Only the Core's current receiver chain may extend an existing action's source set. */
+    public static boolean equipmentCarrierSourceAllowed(Class<?> gameMode,Class<?> delegatedItem,Class<?>[] actualCarriers) {
+        Objects.requireNonNull(actualCarriers);
+        return equipmentActionSourcesAllowed(WALKER.getCallerClass(),gameMode,delegatedItem,actualCarriers);
+    }
+    private static boolean equipmentSourceAllowed(Module source,Module owner,Module delegate,Module game,Class<?>[] carriers) {
+        if(source==null||modStopped(source))return false;
+        if(!producer(source)||source==owner||source==delegate||source==game)return true;
+        if(carriers!=null)for(Class<?> carrier:carriers)if(carrier!=null&&source==DefinitionBridge.module(carrier))return true;
+        return false;
+    }
+    private static boolean equipmentActionSourcesAllowed(Class<?> caller,Class<?> gameMode,Class<?> delegatedItem,Class<?>[] carriers) {
         Guards current=guards;
         if(current==null||!caller.getName().equals("dev.ronova.pro.EquipmentPolicy")
                 ||caller.getClassLoader()!=current.owner().getClassLoader()||DefinitionBridge.module(caller)!=current.owner().getModule()
                 ||!Objects.equals(caller.getProtectionDomain().getCodeSource(),current.owner().getProtectionDomain().getCodeSource()))
             throw new SecurityException("EQUIPMENT_ACTION_SOURCE_OWNER");
-        if(sourceUnknown())return false;
+        if(sourceUnknown()||stoppedInvocation())return false;
         Module delegate=delegatedItem==null?null:DefinitionBridge.module(delegatedItem);
         Module game=gameMode==null?null:DefinitionBridge.module(gameMode);
-        for(Module source:scopedSources())if(source==null||producer(source)&&source!=current.owner().getModule()&&source!=delegate&&source!=game)return false;
+        for(Module source:scopedSources())if(!equipmentSourceAllowed(source,current.owner().getModule(),delegate,game,carriers))return false;
         return ORIGIN_WALKER.walk(frames->{var cursor=frames.iterator();while(cursor.hasNext()) {
             var frame=cursor.next();Class<?> type=frame.getDeclaringClass();
             if(ownState(type)||ControlBridge.owns(type))continue;
             for(Module source:CodeSourceBridge.frameSources(frame))
-                if(source==null||producer(source)&&source!=current.owner().getModule()&&source!=delegate&&source!=game)return false;
+                if(!equipmentSourceAllowed(source,current.owner().getModule(),delegate,game,carriers))return false;
             Module physical=DefinitionBridge.module(type);
-            if(producer(physical)&&physical!=current.owner().getModule()&&physical!=delegate&&physical!=game)return false;
+            if(!equipmentSourceAllowed(physical,current.owner().getModule(),delegate,game,carriers))return false;
         }return true;});
     }
     static boolean taskEffectAllowed(Guards current,Object task,String effect) {
