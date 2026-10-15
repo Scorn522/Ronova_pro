@@ -16,7 +16,7 @@
 
 第四次真实栈确认准确的 Class.reflectionData 缓存 CAS 被 represented-module 停源门误拒，JDK 在缓存为空时反复重试。现仅对既有准确 JDK 调用链及实际 Class 实例字段区分该目标归属；真实 stoppedInvocation、原 offset/控制/来源与字段守卫继续执行，其他 Class mirror 写入沿原限制，未改检查顺序。
 
-首轮78/72源码统一构建39秒通过；前四次直接检查受阻的日志及实际线程栈保留，均核对当前进程身份后只结束自建检查 JVM，退出-1。最新 `build-c-java78-native73-strength-final2-20261015.log` **PASS，13秒**，Core2636524、prelaunch23309字节；Native73已在前一次22秒构建实际编译链接，Storage/驱动未改，驱动未部署。匹配 AuditFixCheck 编译退出0。最新 `c-network-promise-java78-native73-final2-20261015.log` 正在按原 bootStop/EmbeddedChannel 路径运行，尚无 promise/flush 通过结论。世界底层写入及字段图游戏场景 **NOTRUN**，不由构建代称通过。候选 `distribution/candidate-c-java78-native73-strength-wip-20261015`；本轮只同步 GitHub 的源码、匹配 JAR 与既有摘要，未生成源码 ZIP。完整 C/B 仍未完成。
+首轮78/72源码统一构建39秒通过；前四次直接检查受阻的日志及实际线程栈保留，均核对当前进程身份后只结束自建检查 JVM，退出-1。最新 `build-c-java78-native73-strength-final2-20261015.log` **PASS，13秒**，Core2636524、prelaunch23309字节；Native73已在前一次22秒构建实际编译链接，Storage/驱动未改，驱动未部署。匹配 AuditFixCheck 编译退出0。最新 `c-network-promise-java78-native73-final2-20261015.log` 按原 bootStop/EmbeddedChannel 路径实际结束，**退出0、NETWORK_PROMISE_STOP_PASS**：真实 named fixture Mod Class 消息的异 channel promise 保持原异常且未改写，已完成 promise 保持原异常，取消写不额外 flush，合法停源消息被拒绝且之前无关写入仍正常 flush。该结果仅覆盖此 Class 消息分支，未改检查顺序或参数。世界底层写入及字段图游戏场景 **NOTRUN**，活跃排队后再停组的 ByteBuf/promise 收尾仍未验证，不由本次通过代称闭合。候选 `distribution/candidate-c-java78-native73-strength-wip-20261015`；本轮只同步 GitHub 的源码、匹配 JAR 与既有摘要，未生成源码 ZIP。完整 C/B 仍未完成。
 
 ---
 
