@@ -28,7 +28,7 @@ public final class ControlBridge {
         }
     };
     private ControlBridge() { }
-    public static int abiVersion(){return 87;}
+    public static int abiVersion(){return 88;}
     public static long arrayRevision(Object value){if(!recoveryWriter())throw new SecurityException("RECOVERY_ARRAY_READER_REQUIRED");return CodeSourceBridge.executionArrayRevision(value);}
 
     public static synchronized void install(Class<?> agent,ClassFileTransformer[] transformers) throws ReflectiveOperationException {
@@ -899,7 +899,7 @@ public final class ControlBridge {
             "beginEquipmentSlotRead","equipmentSlotFieldRead","equipmentSlotArrayRead","equipmentSlotContainerRead","equipmentSlotSelectorRead","equipmentSlotUnresolved","observeEquipmentSlot","failedEquipmentSlotRead",
             "capabilityAccept","capabilitySupply","capabilityApply","capabilityTest","capabilityDerived",
             "capabilityComposed","beginEquipmentSlotCall","endEquipmentSlotCall","failedEquipmentSlotCall","beginEquipmentSlotMethod","endEquipmentSlotMethod","failedEquipmentSlotMethod",
-            "resultPublicationAllowed");
+            "invokeEquipmentCallback","invokeEquipmentOriginal","resultPublicationAllowed");
     static boolean controlCaller() {
         // The query omits guard entry points, preserving the real ledger writer.
         Class<?> caller=NativeControl.available()?NativeControl.controlWriterCaller():WALKER.walk(CONTROL_WRITER_CALLER);

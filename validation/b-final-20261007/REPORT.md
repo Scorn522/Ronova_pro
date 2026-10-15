@@ -1,5 +1,18 @@
 # B 批实际报告：2026-10-09 代码收敛接续
 
+## 2026-10-16：C 接续——异步能力与复杂载体
+
+接续 `02c61a0`，Java88 / Native81 / Storage3 / Journal6，协议 `r3-client-8`。三个既有6.1 Sol max子代理分别完成真实任务与JDK回调交接、Native特殊调用/四类接口、复杂载体图；主线程接齐Core弱上下文、worker局部Scope、派生链、原保护门和Bootstrap安装。整包源码写齐后统一构建，自身外观、武器注册、驱动部署及源码ZIP暂缓。
+
+TaskBridge上下文只在原合法能力callback提交时捕获，不保留原Scope/Thread；准确Inline/Completion.fn及认证JDK包装真实字段传递，当前非dispatch任务帧在原callback点单次领取，不搜索其它active外层任务。FutureTask真实cancel(Z)Z的原0→4/5 CAS成功才清共享记录；空转tryFire、未知execute结果和普通submission结束不伪造完成。Core重新核owner/generation、原root/槽位/世界、有效且相同dispatcher和逐层optional/marker，worker仅获ItemStack/NBT/能力payload作用域；新的provider/listener生命周期在首store前拒绝，避免中途撤销形成半次失效。派生optional自然回调和再次提交保留当前新链，原异常对象与finally恢复不变。未知/停止来源及原实际taskEffect守卫保留，未安装Core/无上下文仍原接口直通。
+
+Native添加准确Runnable/Callable/BiFunction/BiConsumer契约，并按真实symbolic解析及caller父链选择祖先super和直接interface.super/default；不执行getter/loader/clinit。Graph保留兼任callback的真实数据容器，回调入口不借业务权；SlotGraph使用exact不可变scalar身份，并只对VM确认继承标准get的实际子类按既有父布局查询。自定义覆写仍自然trace，未知包装/delegate/key、间接special、native/opaque等不提升覆盖。
+
+`build-c-java88-native81-async-carriers-20261016.log` **首轮PASS，54秒**，21项任务中15项执行、6项保持最新，Java88/Native81实际编译链接完成。`compile-c-java88-native81-async-carriers-20261016.log` **退出0**；`c-java88-native81-async-carriers-bytecode-20261016.log` 复用现有AuditFixCheck的 `equipment-async-carrier-bytecode`，**退出0、EQUIPMENT_ASYNC_CARRIER_BYTECODE_PASS、EQUIPMENT_ASYNC_CARRIER_FALLBACK_PASS**。实际JDK 19类/30处原callback生产转换及TaskBridge hook连接通过；实际RunnableAdapter先按生产TaskResultBoundary织入，再仅alias/nest元数据隔离，保留原字段/ctor/call，用真实singleThreadExecutor验证一次Runnable、worker线程、原结果和同一ExecutionException.cause。Core handles全程null，没有造票/Scope/来源身份，不能代称实际java.base安装、Core异步授权或Native载体保护通过。
+
+本批带Core的异步写入/失效/取消/共享owner、复杂子类/getter及实际游戏场景 **NOTRUN**，未重复旧Forge/Optional、槽位、Netty、世界与退役矩阵；旧失败记录原样保留。候选 `distribution/candidate-c-java88-native81-async-carriers-wip-20261016`：Core2949381、prelaunch23309字节，源码、匹配JAR及本摘要同步原GitHub，完整C/B尚未完成。
+
+---
 ## 2026-10-16：C 接续——同步 getter helper 与函数组合
 
 接续 `ca5edc8`，Java87 / Native80 / Storage3 / Journal6，协议 `r3-client-8`。三个既有6.1 Sol max子代理分别完成准确 helper 织入、VM只读实际声明分派及标准JDK组合体；主线程接齐Core读取/嵌套作用域、Bootstrap handles与版本。整包源码完成后才统一构建，没有自身外观、武器注册、驱动部署或源码ZIP。

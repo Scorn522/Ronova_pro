@@ -41,6 +41,20 @@ public final class TaskBridge {
     static final Map<EventKey,ThreadOrigin> THREAD_ORIGINS=new HashMap<>();
     static final Set<EventKey> RETIRED_THREADS=new java.util.HashSet<>();
     static final Map<EventKey,java.lang.ref.WeakReference<Object>> THREAD_TIMERS=new HashMap<>();
+    private static final Object EQUIPMENT_ASYNC_LOCK=new Object();
+    private static final java.lang.ref.ReferenceQueue<Object> EQUIPMENT_ASYNC_QUEUE=new java.lang.ref.ReferenceQueue<>();
+    private static final Map<EventKey,AsyncBinding> EQUIPMENT_ASYNC_TASKS=new HashMap<>();
+    private static final Map<EventKey,java.lang.ref.WeakReference<Object>> EQUIPMENT_ASYNC_CALLBACKS=new HashMap<>();
+    private static volatile EquipmentAsync equipmentAsync;
+    private static final class EquipmentAsync {
+        final Class<?> owner;final java.lang.invoke.MethodHandle capture,invoke;
+        EquipmentAsync(Class<?> owner,java.lang.invoke.MethodHandle capture,java.lang.invoke.MethodHandle invoke){this.owner=owner;this.capture=capture;this.invoke=invoke;}
+    }
+    /** Shared by the real wrapper/delegate identities; only a leaf may claim it once. */
+    private static final class AsyncBinding {
+        final EquipmentAsync installation;Object ticket;boolean claimed;
+        AsyncBinding(EquipmentAsync installation,Object ticket){this.installation=installation;this.ticket=ticket;}
+    }
     static final class ThreadOrigin {
         final Set<Module> sources=Collections.newSetFromMap(new IdentityHashMap<>());
         final java.util.concurrent.locks.ReentrantLock io=new java.util.concurrent.locks.ReentrantLock();
@@ -620,7 +634,183 @@ public final class TaskBridge {
         finally { if(prior==null)AUTHORITY.remove();else AUTHORITY.set(prior); }
     }
     private TaskBridge() {}
-    public static int abiVersion(){return 87;}
+    public static int abiVersion(){return 88;}
+    public static synchronized void installEquipmentAsync(Class<?> owner,java.lang.invoke.MethodHandle capture,java.lang.invoke.MethodHandle invoke){
+        requirePolicyInstaller();if(guards==null||guards.owner()!=owner||equipmentAsync!=null&&equipmentAsync.owner!=owner)throw new SecurityException("EQUIPMENT_ASYNC_OWNER");
+        equipmentAsync=new EquipmentAsync(owner,Objects.requireNonNull(capture).asType(java.lang.invoke.MethodType.methodType(Object.class,Object.class,Object.class,Object.class)),
+                Objects.requireNonNull(invoke).asType(java.lang.invoke.MethodType.methodType(Object.class,Object.class,Object.class,Object.class,Object.class,String.class)));
+    }
+    private static void reapEquipmentAsync(){
+        EventKey stale;while((stale=(EventKey)EQUIPMENT_ASYNC_QUEUE.poll())!=null){EQUIPMENT_ASYNC_TASKS.remove(stale);EQUIPMENT_ASYNC_CALLBACKS.remove(stale);}
+    }
+    private static void bindEquipmentAsync(Object task,Object callback,AsyncBinding binding){
+        if(task==null||callback==null||binding==null||binding.claimed||binding.ticket==null)return;
+        EventKey lookup=new EventKey(task,null);AsyncBinding previous=EQUIPMENT_ASYNC_TASKS.get(lookup);
+        if(previous!=null){
+            java.lang.ref.WeakReference<Object> expected=EQUIPMENT_ASYNC_CALLBACKS.get(lookup);
+            if(previous!=binding||expected==null||expected.get()!=callback){discardEquipmentAsync(previous);discardEquipmentAsync(binding);}
+            return;
+        }
+        EventKey key=new EventKey(task,EQUIPMENT_ASYNC_QUEUE);EQUIPMENT_ASYNC_TASKS.put(key,binding);EQUIPMENT_ASYNC_CALLBACKS.put(key,new java.lang.ref.WeakReference<>(callback));
+    }
+    private static void discardEquipmentAsync(AsyncBinding binding){
+        if(binding==null)return;binding.claimed=true;binding.ticket=null;
+        for(var entries=EQUIPMENT_ASYNC_TASKS.entrySet().iterator();entries.hasNext();){var entry=entries.next();if(entry.getValue()==binding){EQUIPMENT_ASYNC_CALLBACKS.remove(entry.getKey());entries.remove();}}
+    }
+    /** No Core call occurs under either task/source metadata monitor. */
+    private static void captureEquipmentAsync(Object task,Object scheduler,Object parent,Object callback){
+        EquipmentAsync installation=equipmentAsync;if(installation==null||task==null||callback==null||DELIVERING.get()!=null)return;
+        synchronized(EQUIPMENT_ASYNC_LOCK){reapEquipmentAsync();if(EQUIPMENT_ASYNC_TASKS.containsKey(new EventKey(task,null)))return;}
+        try{
+            Object ticket=(Object)installation.capture.invokeExact(task,scheduler,parent);if(ticket==null)return;
+            synchronized(EQUIPMENT_ASYNC_LOCK){reapEquipmentAsync();if(equipmentAsync==installation&&!EQUIPMENT_ASYNC_TASKS.containsKey(new EventKey(task,null)))bindEquipmentAsync(task,callback,new AsyncBinding(installation,ticket));}
+        }catch(Throwable unavailable){lost(unavailable);}
+    }
+    private static void captureEquipmentSubmission(Object task,Object scheduler,Object parent){
+        // Completion callbacks are paired at their real constructor return with
+        // the current stage's exact fn operand, rather than a generic parent.
+        if(!EquipmentAsyncFields.completion(task))captureEquipmentAsync(task,scheduler,parent,task);
+    }
+    private static void inheritEquipmentCompletion(Object task){
+        if(equipmentAsync==null)return;
+        Object callback=EquipmentAsyncFields.completionCallback(task);if(callback==null)return;
+        Frame frame=currentFrame(registration);
+        if(frame==null||!(frame.task instanceof Inline inline)||inline.closed||inline.thread!=Thread.currentThread()||inline.callback!=callback)return;
+        synchronized(EQUIPMENT_ASYNC_LOCK){reapEquipmentAsync();AsyncBinding binding=EQUIPMENT_ASYNC_TASKS.get(new EventKey(inline,null));if(binding!=null)bindEquipmentAsync(task,callback,binding);}
+    }
+    private static void inheritEquipmentDelegate(Object wrapper,Object delegate){
+        if(equipmentAsync==null||wrapper==null||delegate==null||!EquipmentAsyncFields.delegate(wrapper,delegate))return;
+        synchronized(EQUIPMENT_ASYNC_LOCK){
+            reapEquipmentAsync();EventKey key=new EventKey(wrapper,null);AsyncBinding binding=EQUIPMENT_ASYNC_TASKS.get(key);
+            java.lang.ref.WeakReference<Object> expected=EQUIPMENT_ASYNC_CALLBACKS.get(key);
+            if(binding!=null&&expected!=null&&expected.get()==wrapper)bindEquipmentAsync(delegate,delegate,binding);
+        }
+    }
+    private static void removeEquipmentTask(Object task){
+        if(equipmentAsync==null||task==null)return;synchronized(EQUIPMENT_ASYNC_LOCK){reapEquipmentAsync();EventKey key=new EventKey(task,null);EQUIPMENT_ASYNC_TASKS.remove(key);EQUIPMENT_ASYNC_CALLBACKS.remove(key);}
+    }
+    private static void cancelEquipmentTask(Object task){
+        if(equipmentAsync==null||task==null)return;synchronized(EQUIPMENT_ASYNC_LOCK){reapEquipmentAsync();discardEquipmentAsync(EQUIPMENT_ASYNC_TASKS.get(new EventKey(task,null)));}
+    }
+    private static AsyncBinding claimEquipmentAsync(Object callback){
+        if(equipmentAsync==null||callback==null||DELIVERING.get()!=null||overflowing()||EquipmentAsyncFields.wrapper(callback))return null;
+        // Only the current physical invocation owns this callback. An unrelated
+        // nested task must not search an outer invocation for a matching operand.
+        Frame frame=currentFrame(registration);
+        if(frame==null||frame.dispatch||frame.exited||frame.blocked||frame.thread!=Thread.currentThread())return null;
+        synchronized(EQUIPMENT_ASYNC_LOCK){
+            reapEquipmentAsync();
+            EventKey key=new EventKey(frame.task,null);AsyncBinding binding=EQUIPMENT_ASYNC_TASKS.get(key);java.lang.ref.WeakReference<Object> expected=EQUIPMENT_ASYNC_CALLBACKS.get(key);
+            if(binding==null||binding.installation!=equipmentAsync||binding.claimed||binding.ticket==null||expected==null||expected.get()!=callback)return null;
+            binding.claimed=true;
+            for(var entries=EQUIPMENT_ASYNC_TASKS.entrySet().iterator();entries.hasNext();){var entry=entries.next();if(entry.getValue()==binding){EQUIPMENT_ASYNC_CALLBACKS.remove(entry.getKey());entries.remove();}}
+            return binding;
+        }
+    }
+    /** The original callback position, after the ordinary source/stop task guard. */
+    public static Object invokeEquipmentCallback(Object callback,Object first,Object second,String contract){
+        requireInvocation(callback);
+        AsyncBinding binding=equipmentAsync!=null&&equipmentAsyncCaller(contract)?claimEquipmentAsync(callback):null;
+        if(binding==null)return invokeEquipmentOriginal(callback,first,second,contract);
+        try{return (Object)binding.installation.invoke.invokeExact(binding.ticket,callback,first,second,contract);}
+        catch(Throwable original){throw TaskBridge.<RuntimeException>equipmentAsyncFailure(original);}
+        finally{binding.ticket=null;}
+    }
+    @SuppressWarnings("unchecked") private static <E extends Throwable> RuntimeException equipmentAsyncFailure(Throwable original)throws E{throw (E)original;}
+    @SuppressWarnings("unchecked") private static Object invokeEquipmentOriginal(Object callback,Object first,Object second,String contract){
+        try{return switch(contract){
+            case "function"->((java.util.function.Function<Object,Object>)callback).apply(first);
+            case "consumer"->{((Consumer<Object>)callback).accept(first);yield null;}
+            case "supplier"->((java.util.function.Supplier<Object>)callback).get();
+            case "runnable"->{((Runnable)callback).run();yield null;}
+            case "callable"->((java.util.concurrent.Callable<Object>)callback).call();
+            case "bifunction"->((java.util.function.BiFunction<Object,Object,Object>)callback).apply(first,second);
+            case "biconsumer"->{((java.util.function.BiConsumer<Object,Object>)callback).accept(first,second);yield null;}
+            case "predicate"->Boolean.valueOf(((java.util.function.Predicate<Object>)callback).test(first));
+            default->throw new IllegalArgumentException("EQUIPMENT_ASYNC_CONTRACT");
+        };}catch(Throwable original){throw TaskBridge.<RuntimeException>equipmentAsyncFailure(original);}
+    }
+    private static boolean equipmentAsyncCaller(String contract){
+        return WALKER.walk(stream->{var frame=stream.dropWhile(value->value.getDeclaringClass()==TaskBridge.class).findFirst().orElse(null);if(frame==null)return false;
+            Class<?> type=frame.getDeclaringClass();if(type.getClassLoader()!=null||type.getModule()!=Object.class.getModule())return false;
+            String owner=type.getName(),method=frame.getMethodName(),descriptor=frame.getDescriptor();
+            synchronized(TaskBridge.class){if(!certified.contains(owner.replace('.','/')))return false;}
+            if(type==java.util.concurrent.CompletableFuture.class)return switch(method){
+                case "uniApplyNow"->contract.equals("function")&&descriptor.equals("(Ljava/lang/Object;Ljava/util/concurrent/Executor;Ljava/util/function/Function;)Ljava/util/concurrent/CompletableFuture;");
+                case "uniAcceptNow"->contract.equals("consumer")&&descriptor.equals("(Ljava/lang/Object;Ljava/util/concurrent/Executor;Ljava/util/function/Consumer;)Ljava/util/concurrent/CompletableFuture;");
+                case "uniRunNow"->contract.equals("runnable")&&descriptor.equals("(Ljava/lang/Object;Ljava/util/concurrent/Executor;Ljava/lang/Runnable;)Ljava/util/concurrent/CompletableFuture;");
+                case "uniWhenComplete"->contract.equals("biconsumer")&&descriptor.equals("(Ljava/lang/Object;Ljava/util/function/BiConsumer;Ljava/util/concurrent/CompletableFuture$UniWhenComplete;)Z");
+                case "uniHandle"->contract.equals("bifunction")&&descriptor.equals("(Ljava/lang/Object;Ljava/util/function/BiFunction;Ljava/util/concurrent/CompletableFuture$UniHandle;)Z");
+                case "uniExceptionally"->contract.equals("function")&&descriptor.equals("(Ljava/lang/Object;Ljava/util/function/Function;Ljava/util/concurrent/CompletableFuture$UniExceptionally;)Z");
+                case "uniComposeStage","uniComposeExceptionallyStage"->contract.equals("function")&&descriptor.equals("(Ljava/util/concurrent/Executor;Ljava/util/function/Function;)Ljava/util/concurrent/CompletableFuture;");
+                case "biApply"->contract.equals("bifunction")&&descriptor.equals("(Ljava/lang/Object;Ljava/lang/Object;Ljava/util/function/BiFunction;Ljava/util/concurrent/CompletableFuture$BiApply;)Z");
+                case "biAccept"->contract.equals("biconsumer")&&descriptor.equals("(Ljava/lang/Object;Ljava/lang/Object;Ljava/util/function/BiConsumer;Ljava/util/concurrent/CompletableFuture$BiAccept;)Z");
+                case "biRun"->contract.equals("runnable")&&descriptor.equals("(Ljava/lang/Object;Ljava/lang/Object;Ljava/lang/Runnable;Ljava/util/concurrent/CompletableFuture$BiRun;)Z");
+                default->false;
+            };
+            if(type==java.util.concurrent.FutureTask.class)return contract.equals("callable")&&(method.equals("run")&&descriptor.equals("()V")||method.equals("runAndReset")&&descriptor.equals("()Z"));
+            if(type==java.util.concurrent.ThreadPoolExecutor.class)return contract.equals("runnable")&&method.equals("runWorker")&&descriptor.equals("(Ljava/util/concurrent/ThreadPoolExecutor$Worker;)V");
+            if(type==java.util.concurrent.ThreadPoolExecutor.CallerRunsPolicy.class)return contract.equals("runnable")&&method.equals("rejectedExecution")&&descriptor.equals("(Ljava/lang/Runnable;Ljava/util/concurrent/ThreadPoolExecutor;)V");
+            if(owner.equals("java.util.concurrent.Executors$RunnableAdapter"))return contract.equals("runnable")&&method.equals("call")&&descriptor.equals("()Ljava/lang/Object;");
+            if(owner.equals("java.util.concurrent.ForkJoinTask$AdaptedCallable"))return contract.equals("callable")&&method.equals("exec")&&descriptor.equals("()Z");
+            if(Set.of("java.util.concurrent.ForkJoinTask$AdaptedRunnable","java.util.concurrent.ForkJoinTask$AdaptedRunnableAction","java.util.concurrent.ForkJoinTask$RunnableExecuteAction").contains(owner))return contract.equals("runnable")&&method.equals("exec")&&descriptor.equals("()Z");
+            if(owner.equals("java.util.concurrent.CompletableFuture$AsyncSupply"))return contract.equals("supplier")&&method.equals("run")&&descriptor.equals("()V");
+            if(owner.equals("java.util.concurrent.CompletableFuture$AsyncRun"))return contract.equals("runnable")&&method.equals("run")&&descriptor.equals("()V");
+            if(!method.equals("tryFire")||!descriptor.equals("(I)Ljava/util/concurrent/CompletableFuture;"))return false;
+            return switch(owner){
+                case "java.util.concurrent.CompletableFuture$UniApply","java.util.concurrent.CompletableFuture$UniCompose","java.util.concurrent.CompletableFuture$UniComposeExceptionally","java.util.concurrent.CompletableFuture$OrApply"->contract.equals("function");
+                case "java.util.concurrent.CompletableFuture$UniAccept","java.util.concurrent.CompletableFuture$OrAccept"->contract.equals("consumer");
+                case "java.util.concurrent.CompletableFuture$UniRun","java.util.concurrent.CompletableFuture$OrRun"->contract.equals("runnable");
+                default->false;
+            };
+        });
+    }
+    private static boolean equipmentCancellation(Object task,int expected,int update){
+        if(equipmentAsync==null||!(task instanceof java.util.concurrent.FutureTask<?>)||expected!=0||update!=4&&update!=5)return false;
+        return WALKER.walk(stream->stream.dropWhile(frame->frame.getDeclaringClass()==TaskBridge.class).findFirst().map(frame->{
+            if(frame.getDeclaringClass()!=java.util.concurrent.FutureTask.class||!frame.getMethodName().equals("cancel")||!frame.getDescriptor().equals("(Z)Z"))return false;
+            synchronized(TaskBridge.class){return certified.contains("java/util/concurrent/FutureTask");}
+        }).orElse(false));
+    }
+    /** Only existing, exact JDK fields are read; no accessor, task or callback is invoked. */
+    private static final class EquipmentAsyncFields {
+        private static final Map<Class<?>,java.lang.reflect.Field> FIELDS=new HashMap<>();
+        static boolean completion(Object task){Class<?> type=task==null?null:task.getClass();return type!=null&&type.getClassLoader()==null&&type.getModule()==Object.class.getModule()&&type.getName().startsWith("java.util.concurrent.CompletableFuture$");}
+        private static Object read(Object target,Class<?> declaring,String name,Class<?> fieldType){
+            try{
+                java.lang.reflect.Field field;synchronized(FIELDS){field=FIELDS.get(declaring);if(field==null){field=declaring.getDeclaredField(name);if(field.getType()!=fieldType||java.lang.reflect.Modifier.isStatic(field.getModifiers()))throw new IllegalStateException("EQUIPMENT_ASYNC_FIELD_LAYOUT");field.setAccessible(true);FIELDS.put(declaring,field);}}
+                if(!field.getName().equals(name)||field.getType()!=fieldType||!declaring.isInstance(target))throw new IllegalStateException("EQUIPMENT_ASYNC_FIELD_IDENTITY");return field.get(target);
+            }catch(ReflectiveOperationException unavailable){throw new IllegalStateException("EQUIPMENT_ASYNC_FIELD_UNAVAILABLE",unavailable);}
+        }
+        static Object completionCallback(Object task){
+            if(!completion(task))return null;Class<?> type=task.getClass();Class<?> callback=switch(type.getName()){
+                case "java.util.concurrent.CompletableFuture$UniApply","java.util.concurrent.CompletableFuture$UniCompose","java.util.concurrent.CompletableFuture$UniComposeExceptionally","java.util.concurrent.CompletableFuture$UniExceptionally","java.util.concurrent.CompletableFuture$OrApply"->java.util.function.Function.class;
+                case "java.util.concurrent.CompletableFuture$UniAccept","java.util.concurrent.CompletableFuture$OrAccept"->Consumer.class;
+                case "java.util.concurrent.CompletableFuture$UniRun","java.util.concurrent.CompletableFuture$BiRun","java.util.concurrent.CompletableFuture$OrRun","java.util.concurrent.CompletableFuture$AsyncRun"->Runnable.class;
+                case "java.util.concurrent.CompletableFuture$UniWhenComplete","java.util.concurrent.CompletableFuture$BiAccept"->java.util.function.BiConsumer.class;
+                case "java.util.concurrent.CompletableFuture$UniHandle","java.util.concurrent.CompletableFuture$BiApply"->java.util.function.BiFunction.class;
+                case "java.util.concurrent.CompletableFuture$AsyncSupply"->java.util.function.Supplier.class;
+                default->null;
+            };return callback==null?null:read(task,type,"fn",callback);
+        }
+        static boolean wrapper(Object callback){
+            return callback instanceof java.util.concurrent.FutureTask<?>||callback instanceof java.util.concurrent.ForkJoinTask<?>||callback.getClass().getClassLoader()==null
+                    &&callback.getClass().getModule()==Object.class.getModule()&&callback.getClass().getName().equals("java.util.concurrent.Executors$RunnableAdapter");
+        }
+        static boolean delegate(Object wrapper,Object actual){
+            var frame=WALKER.walk(stream->stream.dropWhile(value->value.getDeclaringClass().getNestHost()==TaskBridge.class).findFirst().orElse(null));if(frame==null)return false;
+            Class<?> caller=frame.getDeclaringClass();if(caller.getClassLoader()!=null||caller.getModule()!=Object.class.getModule())return false;
+            String method=frame.getMethodName(),descriptor=frame.getDescriptor(),name=caller.getName();
+            synchronized(TaskBridge.class){if(!certified.contains(name.replace('.','/')))return false;}
+            if(caller==java.util.concurrent.FutureTask.class&&(method.equals("run")&&descriptor.equals("()V")||method.equals("runAndReset")&&descriptor.equals("()Z")))return wrapper instanceof java.util.concurrent.FutureTask<?> &&read(wrapper,caller,"callable",java.util.concurrent.Callable.class)==actual;
+            if(wrapper.getClass()!=caller)return false;
+            if(name.equals("java.util.concurrent.Executors$RunnableAdapter")&&method.equals("call")&&descriptor.equals("()Ljava/lang/Object;"))return read(wrapper,caller,"task",Runnable.class)==actual;
+            if(!method.equals("exec")||!descriptor.equals("()Z"))return false;
+            if(name.equals("java.util.concurrent.ForkJoinTask$AdaptedCallable"))return read(wrapper,caller,"callable",java.util.concurrent.Callable.class)==actual;
+            if(Set.of("java.util.concurrent.ForkJoinTask$AdaptedRunnable","java.util.concurrent.ForkJoinTask$AdaptedRunnableAction","java.util.concurrent.ForkJoinTask$RunnableExecuteAction").contains(name))return read(wrapper,caller,"runnable",Runnable.class)==actual;
+            return false;
+        }
+    }
     public static synchronized void installTaskPublicationGate(Class<?> owner,java.lang.invoke.MethodHandle callback) {
         requirePolicyInstaller();
         if(guards==null||guards.owner()!=owner)throw new SecurityException("TASK_PUBLICATION_OWNER");
@@ -970,7 +1160,7 @@ public final class TaskBridge {
     /** Ordinary cancellation is unchanged. Cancellation and actual exit are distinct events. */
     public static boolean cancelState(java.lang.invoke.VarHandle handle,Object task,int expected,int update) {
         boolean changed=handle.compareAndSet(task,expected,update);
-        if(changed)emit(registration,CANCELLED,task,null,currentTask(),null);
+        if(changed){if(equipmentCancellation(task,expected,update))cancelEquipmentTask(task);emit(registration,CANCELLED,task,null,currentTask(),null);}
         return changed;
     }
     public static void body(Object task) {
@@ -984,6 +1174,7 @@ public final class TaskBridge {
             Registration current=registration;
             if(task!=null&&boundary(false)){
                 taskRelation(task,null,currentTask());
+                inheritEquipmentCompletion(task);
                 emit(current,11,task,null,currentTask(),null);
             }
         } catch(Throwable unavailable){lost();}
@@ -995,7 +1186,7 @@ public final class TaskBridge {
     }
     public static void delegated(Object wrapper,Object delegate) {
         try {
-            if(wrapper!=null&&delegate!=null&&boundary(false))taskRelation(delegate,null,wrapper);
+            if(wrapper!=null&&delegate!=null&&boundary(false)){taskRelation(delegate,null,wrapper);inheritEquipmentDelegate(wrapper,delegate);}
             if(wrapper!=null&&delegate!=null&&boundary(false))emit(registration,21,delegate,wrapper,wrapper,null);
         } catch(Throwable unavailable) { lost(); }
     }
@@ -1032,6 +1223,7 @@ public final class TaskBridge {
         try {
             if(registration==null||DELIVERING.get()!=null||!inlineBoundary())return null;
             Inline task=new Inline(source,other,callback);
+            captureEquipmentAsync(task,null,currentTask(),callback);
             task.frame=enterFrame(task,false);
             return task;
         } catch(Throwable unavailable){lost();return null;}
@@ -1042,6 +1234,7 @@ public final class TaskBridge {
             task.output=output;
             try { exitFrame(task.frame); }
             finally {
+                removeEquipmentTask(task);
                 task.source=null;task.other=null;task.callback=null;task.output=null;task.frame=null;task.thread=null;
                 task.closed=true;
             }
@@ -1086,6 +1279,7 @@ public final class TaskBridge {
     public static Object enterDelegate(Object wrapper,Object task) {
         try {
             if(wrapper==null||!boundary(false))return null;
+            inheritEquipmentDelegate(wrapper,task);
             Object token=enterFrame(task,false);
             if(token instanceof Frame frame)frame.delegateOwner=wrapper;
             emit(registration,21,task,wrapper,wrapper,null);
@@ -1217,6 +1411,7 @@ public final class TaskBridge {
         if(task==null||DELIVERING.get()!=null||!boundary(true))return;
         Frame frame=currentFrame(current);
         taskRelation(task,scheduler(scheduler,task),frame==null?null:frame.task);
+        captureEquipmentSubmission(task,scheduler(scheduler,task),frame==null?null:frame.task);
         emit(current,SUBMIT,task,scheduler(scheduler,task),frame==null?null:frame.task,frame);
     }
     /** Publication spans the entire platform submission, including rejection/CallerRuns. */
@@ -1232,6 +1427,7 @@ public final class TaskBridge {
                 SCHEDULER_SUBMISSIONS.merge(new EventKey(token.pool,CREATION_QUEUE),1,Integer::sum);token.schedulerTracked=true;
             }
             taskRelation(task,token.scheduler,token.parent);
+            captureEquipmentSubmission(task,token.scheduler,token.parent);
             synchronized(TaskBridge.class) {
                 if(submissionEntries>=ADMISSION_LIMIT)lost();
                 else {

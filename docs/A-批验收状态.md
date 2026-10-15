@@ -1,5 +1,20 @@
 # Ronova Pro 当前进度
 
+## 2026-10-16：C 接续——异步能力与复杂自定义载体
+
+接续已推送的 `02c61a0`，Java ABI88 / Native ABI81 / Storage3 / Journal6，协议 `r3-client-8`。本批源码全部写齐后统一构建；自身外观、武器注册、驱动部署和源码 ZIP 继续暂缓。
+
+当前合法能力回调提交的标准执行器、Future/ForkJoin 包装和 CompletableFuture 原回调接弱上下文。阶段仅绑定本次真实 callback/Completion.fn，包装交接核当前认证 JDK body 和真实 callable/task/runnable 字段；仅当前实际任务帧在原 callback 位置领取一次，不跨内层任务借外层关系。成功 FutureTask 取消按原真实 CAS 清理；无 body 的 tryFire 和未知提交结果不伪记完成。原回调、返回、Throwable 和 Future 发布/异常处理顺序保留，未安装 Core 时直通原接口。
+
+worker 新建当前线程作用域，只接原装备的 ItemStack/NBT/能力数据；不持提交 Scope/Thread，不授换槽、实体、世界或新能力生命周期许可。每次使用仍核 owner/代次、原物品与槽位、世界、当前有效 dispatcher 和准确 optional/派生 marker 链，失效/脱链/换装及未知或停止来源拒绝借权。派生 Optional 在 worker 内自然消费或再次提交时沿准确当前链续接；正常/异常都关闭委托并恢复原线程状态。Native 增加准确 Runnable/Callable/BiFunction/BiConsumer 四个接口契约，原 CP/BCI/版本/来源和二次函数边限制保留。
+
+复杂槽位 helper 补祖先 super、直接 interface.super 与实际继承 default 的准确选择。继承标准 get 的自定义 ArrayList/LinkedList/HashMap/LinkedHashMap/IdentityHashMap/EnumMap/NonNullList 等子类，先由 VM 确认真实声明，再按既有标准父存储复核；自定义覆写仍走原 helper trace。兼任 callback 的实际 Collection/Map/ItemStack/Tag 数据不再整颗跳过，回调方法本身仍不能冒充普通业务入口；custom Number 数据 holder 不再误当不可变标量。没有调用 getter/key/iterator 重放或新增泛用写权。
+
+统一构建 `build-c-java88-native81-async-carriers-20261016.log` **首轮 PASS，54秒**，21项任务中15项执行、6项保持最新；检查器编译退出0。`equipment-async-carrier-bytecode` **退出0**：19个实际 JDK 任务类、30处原 callback 的生产转换及 hook 连接通过；真实 RunnableAdapter 的隔离 body 在单线程执行器上保留一次执行、worker 线程、原结果及 ExecutionException.cause 身份。Core handles 始终未安装，只证明上述转换和普通直通行为；本批真实 java.base 安装、带 Core 的异步授权/撤销、复杂载体 Native 保护和游戏效果 **NOTRUN**。未重跑旧矩阵，旧失败记录保留。
+
+候选 `distribution/candidate-c-java88-native81-async-carriers-wip-20261016`：Core2949381、prelaunch23309字节，随源码与既有摘要同步 GitHub。未知执行器/自定义包装、未知键语义、反射等间接链、间接接口 special 和不透明原生状态仍有边界，完整 C/B 尚未完成。
+
+---
 ## 2026-10-16：C 接续——槽位 helper 与标准函数组合
 
 接续已推送的 `ca5edc8`，Java ABI87 / Native ABI80 / Storage3 / Journal6，协议 `r3-client-8`。本批源码全部写齐后统一构建；自身外观、武器注册、驱动部署和源码 ZIP 继续暂缓。

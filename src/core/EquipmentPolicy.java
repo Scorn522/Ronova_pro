@@ -48,6 +48,7 @@ public final class EquipmentPolicy {
         final WeakReference<ItemStack> used;final WeakReference<Object> menu;final Scope previous;final int mask,occurrences;final Class<?> itemType;
         final WeakReference<ServerPlayerGameMode> game;
         boolean closed;
+        AsyncCapability async;
         Intent intent;DigFrame dig;WeakReference<Entity> attacked;
         Scope(Owner owner,String operation,StackWalker.StackFrame frame,Scope previous,int mask,ItemStack used,Object menu,int occurrences,ServerPlayerGameMode game){
             this.owner=owner;this.operation=operation;anchor=frame.getDeclaringClass();method=frame.getMethodName();descriptor=frame.getDescriptor();
@@ -166,6 +167,21 @@ public final class EquipmentPolicy {
     private static final ThreadLocal<CapabilityConsumer> CAP_CONSUMERS=new ThreadLocal<>();
     private static final Map<Object,DerivedCapability> CAP_DERIVED=Collections.synchronizedMap(new WeakIdentityMap<>());
     private static MethodHandle CALLBACK_DEPTH,CALLBACK_FRAME;
+    private static Class<?> ASYNC_TASK_BRIDGE;
+    /** A scheduled continuation retains current ownership facts, never its submitting Scope or Thread. */
+    private static final class AsyncOptional {
+        final WeakReference<Object> optional,marker;final boolean lazy,derived;
+        AsyncOptional(Object optional,Object marker,boolean lazy,boolean derived){this.optional=new WeakReference<>(optional);this.marker=new WeakReference<>(marker);this.lazy=lazy;this.derived=derived;}
+    }
+    private static final class AsyncCapability {
+        final Owner owner;final WeakReference<ItemStack> root;final WeakReference<Level> level;final WeakReference<ServerPlayerGameMode> game;final WeakReference<Object> dispatcher;
+        final Class<?> itemType;final int mask,depth;final boolean gameBound;final List<AsyncOptional> optionals;final List<Link> links;final Class<?>[] sources;
+        AsyncCapability(Scope action,CapabilityConsumer consumer,int mask,List<AsyncOptional> optionals,Class<?>[] sources){
+            owner=action.owner;root=new WeakReference<>(consumer.root);level=new WeakReference<>(((Access.EntityState)owner.entity.get()).pro$level());game=new WeakReference<>(action.game.get());
+            dispatcher=new WeakReference<>(capRead(CAP_DISPATCHER,consumer.root));
+            itemType=EquipmentPolicy.itemType(consumer.root);gameBound=action.game.get()!=null;this.mask=mask;depth=action.async==null?1:action.async.depth+1;this.optionals=List.copyOf(optionals);links=List.copyOf(consumer.links);this.sources=sources.clone();
+        }
+    }
     private static final class DerivedCapability {
         final WeakReference<Scope> action;final WeakReference<Object> parent,marker;final boolean lazy;
         DerivedCapability(Scope action,Object parent,Object marker,boolean lazy){this.action=new WeakReference<>(action);this.parent=new WeakReference<>(parent);this.marker=new WeakReference<>(marker);this.lazy=lazy;}
@@ -268,6 +284,7 @@ public final class EquipmentPolicy {
         CALLBACK_DEPTH=MethodHandles.publicLookup().findStatic(carrierBridge,"callbackDepth",MethodType.methodType(int.class,Class.class,String.class,String.class));
         SLOT_METHOD=MethodHandles.publicLookup().findStatic(carrierBridge,"method",MethodType.methodType(Class.class,Object.class,Class.class,String.class,String.class,int.class,Class.class));
         CALLBACK_FRAME=MethodHandles.publicLookup().findStatic(carrierBridge,"callback",MethodType.methodType(boolean.class,Object.class,Class.class,String.class,String.class,int.class,Class.class,String.class,String.class,int.class));
+        ASYNC_TASK_BRIDGE=Class.forName("dev.ronova.pro.bootstrap.TaskBridge",false,null);
         OWNERS=Collections.synchronizedMap(new WeakIdentityMap<>());CARRIERS=Collections.synchronizedMap(new WeakIdentityMap<>());
         SCOPES=Collections.synchronizedMap(new WeakIdentityMap<>());FIELDS=Map.copyOf(fields);
         MINING=Collections.synchronizedMap(new WeakIdentityMap<>());DRIVERS=Collections.synchronizedMap(new WeakIdentityMap<>());INVOCATIONS=Collections.synchronizedMap(new WeakIdentityMap<>());
@@ -696,6 +713,10 @@ public final class EquipmentPolicy {
         if(receiver instanceof CapabilityProvider<?> &&phase.equals("revive-provider")&&capBool(CAP_VALID,receiver))return null;
         var frames=capabilityFrames();if(frames.isEmpty()||!capabilityEntry(frames.get(0),phase)||!frames.get(0).getDeclaringClass().isInstance(receiver))throw new SecurityException("ACTUAL_EQUIPMENT_CAPABILITY_BODY_REQUIRED");
         boolean publish=phase.equals("publish"),resolve=phase.equals("resolve"),listen=phase.startsWith("listen-");
+        Scope action=SCOPES.get(Thread.currentThread());
+        // A continuation owns payload work, not a new provider/listener lifecycle.
+        // Reject before its first store; revoking a provider midway must not leave a half invalidation.
+        if(action!=null&&action.async!=null&&!resolve)throw new SecurityException("EQUIPMENT_ASYNC_PAYLOAD_ONLY");
         Object listeners=receiver.getClass()==LazyOptional.class?capRead(OPTIONAL_LISTENERS,receiver):null;
         CapabilityScope previous=CAP_SCOPES.get(Thread.currentThread());
         for(CapabilityScope parent=previous;parent!=null;parent=parent.previous)if(parent.receiver==receiver&&parent.phase.equals(phase))throw new SecurityException("EQUIPMENT_CAPABILITY_REENTRY");
@@ -827,6 +848,9 @@ public final class EquipmentPolicy {
             root=candidate;selected.add(link);
         }
         if(root!=null&&!selected.isEmpty())return new CallbackOrigin(root,List.copyOf(selected),invalidating?lifecycle:null);
+        if(action.async!=null&&asyncCurrent(action.async))for(AsyncOptional captured:action.async.optionals)if(captured.optional.get()==optional){
+            ItemStack actual=action.async.root.get();if(actual!=null&&actionCurrent(action,actual,shares(action.owner,actual)))return new CallbackOrigin(actual,action.async.links,null);
+        }
         DerivedCapability derived=CAP_DERIVED.get(optional);if(derived==null||derived.action.get()!=action)return null;
         Object parent=derived.parent.get(),marker=derived.marker.get();if(parent==null||marker==null||!optionalValid(optional))return null;
         if((derived.lazy?capRead(OPTIONAL_SUPPLIER,optional):resolvedValue(optional))!=marker)return null;
@@ -901,6 +925,111 @@ public final class EquipmentPolicy {
     private static Object invokeJdkSupplier(java.util.function.Supplier<Object> callback,Object token){consumerDepth(token);return callback.get();}
     private static Object invokeJdkFunction(java.util.function.Function<Object,Object> callback,Object value,Object token){consumerDepth(token);return callback.apply(value);}
     private static boolean invokeJdkPredicate(java.util.function.Predicate<Object> callback,Object value,Object token){consumerDepth(token);return callback.test(value);}
+    private static void invokeAsyncRunnable(Runnable callback,Object token){consumerDepth(token);callback.run();}
+    private static Object invokeAsyncCallable(java.util.concurrent.Callable<?> callback,Object token)throws Exception{consumerDepth(token);return callback.call();}
+    private static Object invokeAsyncBiFunction(java.util.function.BiFunction<Object,Object,Object> callback,Object first,Object second,Object token){consumerDepth(token);return callback.apply(first,second);}
+    private static void invokeAsyncBiConsumer(java.util.function.BiConsumer<Object,Object> callback,Object first,Object second,Object token){consumerDepth(token);callback.accept(first,second);}
+    private static boolean asyncBridgeCaller(String method){return WALKER.walk(stream->stream.filter(frame->{Class<?> type=frame.getDeclaringClass();return type.getNestHost()!=EquipmentPolicy.class&&!type.getName().startsWith("java.lang.invoke.");})
+            .findFirst().map(frame->frame.getDeclaringClass()==ASYNC_TASK_BRIDGE&&(method==null||frame.getMethodName().equals(method))).orElse(false));}
+    private static boolean asyncPlatformFrame(StackWalker.StackFrame frame){
+        Class<?> type=frame.getDeclaringClass();if(type.getClassLoader()!=null||!"java.base".equals(type.getModule().getName()))return false;
+        Class<?> host=type.getNestHost();return host==java.util.concurrent.CompletableFuture.class||host==java.util.concurrent.FutureTask.class
+                ||host==java.util.concurrent.ThreadPoolExecutor.class||host==java.util.concurrent.ScheduledThreadPoolExecutor.class
+                ||host==java.util.concurrent.ForkJoinPool.class||host==java.util.concurrent.ForkJoinTask.class
+                ||host==java.util.concurrent.Executors.class||type==java.util.concurrent.AbstractExecutorService.class;
+    }
+    private static List<AsyncOptional> asyncOptionals(Object optional,Scope action,ItemStack root){
+        List<AsyncOptional> result=new ArrayList<>();IdentityHashMap<Object,Boolean> seen=new IdentityHashMap<>();
+        for(int depth=0;depth<16;depth++){
+            if(optional==null||!optionalValid(optional)||seen.put(optional,Boolean.TRUE)!=null)return List.of();
+            if(action.async!=null)for(int at=0;at<action.async.optionals.size();at++)if(action.async.optionals.get(at).optional.get()==optional){
+                if(!asyncCurrent(action.async)||result.size()+action.async.optionals.size()-at>16)return List.of();
+                result.addAll(action.async.optionals.subList(at,action.async.optionals.size()));return List.copyOf(result);
+            }
+            boolean held=false;for(Link link:links(optional))if(current(link,optional)){
+                if(link.owner!=action.owner||link.stack.get()!=root)return List.of();held=true;
+            }
+            if(held){result.add(new AsyncOptional(optional,null,false,false));return List.copyOf(result);}
+            DerivedCapability derived=CAP_DERIVED.get(optional);if(derived==null||derived.action.get()!=action)return List.of();
+            Object parent=derived.parent.get(),marker=derived.marker.get();if(parent==null||marker==null||(derived.lazy?capRead(OPTIONAL_SUPPLIER,optional):resolvedValue(optional))!=marker)return List.of();
+            result.add(new AsyncOptional(optional,marker,derived.lazy,true));optional=parent;
+        }return List.of();
+    }
+    /** Called by the original submission/stage boundary while the submitting callback is still physical. */
+    public static Object captureAsync(Object task,Object scheduler,Object parent){
+        if(!initialized||task==null||!asyncBridgeCaller(null))return null;
+        CapabilityConsumer consumer=CAP_CONSUMERS.get();if(consumer==null||consumer.lifecycle!=null||!consumerCurrent(consumer))return null;
+        Scope action=consumer.action;if(action.async!=null&&action.async.depth>=16)return null;
+        ItemStack root=consumer.root;int mask=shares(action.owner,root);if(mask==0||!actionCurrent(action,root,mask)||!sourceAllowed(action))return null;
+        List<StackWalker.StackFrame> frames=capabilityFrames();int first=0;while(first<frames.size()&&asyncPlatformFrame(frames.get(first)))first++;
+        if(first==frames.size()||!scopePath(action,frames.subList(first,frames.size())))return null;
+        List<AsyncOptional> optionals=asyncOptionals(consumer.optional,action,root);
+        if(optionals.isEmpty())return null;
+        List<Class<?>> sources=new ArrayList<>();if(action.async!=null)Collections.addAll(sources,action.async.sources);
+        for(var frame:frames)if(consumerFrame(frame,action)&&!sources.contains(frame.getDeclaringClass()))sources.add(frame.getDeclaringClass());
+        AsyncCapability captured=new AsyncCapability(action,consumer,mask,optionals,sources.toArray(Class<?>[]::new));return asyncCurrent(captured)?captured:null;
+    }
+    private static boolean asyncCurrent(AsyncCapability captured){
+        if(captured==null||captured.depth>16||!active(captured.owner))return false;ItemStack root=captured.root.get();Level level=captured.level.get();
+        if(root==null||root==ItemStack.EMPTY||level==null||((Access.EntityState)captured.owner.entity.get()).pro$level()!=level
+                ||itemType(root)!=captured.itemType||shares(captured.owner,root)!=captured.mask||curativeStack(captured.owner,root))return false;
+        Object dispatcher=captured.dispatcher.get();if(dispatcher==null||!capBool(CAP_INITIALIZED,root)||!capBool(CAP_VALID,root)||capRead(CAP_DISPATCHER,root)!=dispatcher)return false;
+        ServerPlayerGameMode game=captured.game.get();if(captured.gameBound&&(game==null||!gameOwned(captured.owner,game)||((Access.EquipmentGameMode)game).pro$level()!=level))return false;
+        if(captured.optionals.isEmpty())return false;
+        for(AsyncOptional node:captured.optionals){Object optional=node.optional.get();if(optional==null||!optionalValid(optional))return false;
+            if(node.derived){Object marker=node.marker.get();if(marker==null||(node.lazy?capRead(OPTIONAL_SUPPLIER,optional):resolvedValue(optional))!=marker)return false;}
+            else{boolean held=false;for(Link link:links(optional))if(current(link,optional)){if(link.owner!=captured.owner||link.stack.get()!=root)return false;held=true;}if(!held)return false;}
+        }
+        return true;
+    }
+    private static String asyncBoundary(String contract){return switch(contract){case "function"->"invokeJdkFunction";case "consumer"->"invokeJdkConsumer";case "supplier"->"invokeJdkSupplier";case "predicate"->"invokeJdkPredicate";case "runnable"->"invokeAsyncRunnable";case "callable"->"invokeAsyncCallable";case "bifunction"->"invokeAsyncBiFunction";case "biconsumer"->"invokeAsyncBiConsumer";default->throw new IllegalArgumentException("EQUIPMENT_ASYNC_CONTRACT");};}
+    private static String asyncDescriptor(String contract){return switch(contract){
+        case "function"->"(Ljava/util/function/Function;Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;";
+        case "consumer"->"(Ljava/util/function/Consumer;Ljava/lang/Object;Ljava/lang/Object;)V";
+        case "supplier"->"(Ljava/util/function/Supplier;Ljava/lang/Object;)Ljava/lang/Object;";
+        case "predicate"->"(Ljava/util/function/Predicate;Ljava/lang/Object;Ljava/lang/Object;)Z";
+        case "runnable"->"(Ljava/lang/Runnable;Ljava/lang/Object;)V";
+        case "callable"->"(Ljava/util/concurrent/Callable;Ljava/lang/Object;)Ljava/lang/Object;";
+        case "bifunction"->"(Ljava/util/function/BiFunction;Ljava/lang/Object;Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;";
+        case "biconsumer"->"(Ljava/util/function/BiConsumer;Ljava/lang/Object;Ljava/lang/Object;Ljava/lang/Object;)V";
+        default->throw new IllegalArgumentException("EQUIPMENT_ASYNC_CONTRACT");};}
+    /** The worker gets a new, payload-only action after the original task and callback were selected. */
+    @SuppressWarnings("unchecked") public static Object invokeAsync(Object ticket,Object callback,Object first,Object second,String contract){
+        if(!asyncBridgeCaller("invokeEquipmentCallback"))throw new SecurityException("ACTUAL_EQUIPMENT_ASYNC_TASK_BOUNDARY_REQUIRED");
+        Scope scope=null;CapabilityConsumer lease=null;Throwable original=null;
+        try{
+        if(ticket instanceof AsyncCapability captured&&asyncCurrent(captured)){
+            var frames=capabilityFrames();
+            if(!frames.isEmpty()&&asyncPlatformFrame(frames.get(0))){
+                List<Class<?>> sources=new ArrayList<>(Arrays.asList(captured.sources));if(!sources.contains(callback.getClass()))sources.add(callback.getClass());
+                boolean allowed;try{ServerPlayerGameMode game=captured.game.get();allowed=(boolean)CARRIER_SOURCE.invokeExact(game==null?null:game.getClass(),captured.itemType,sources.toArray(Class<?>[]::new));}
+                catch(Throwable failure){throw new IllegalStateException("EQUIPMENT_ASYNC_SOURCE_UNAVAILABLE",failure);}
+                if(allowed){
+                    var entry=frames.get(0);int occurrences=0;for(var frame:frames)if(sameAnchor(frame,entry.getDeclaringClass(),entry.getMethodName(),entry.getDescriptor()))occurrences++;
+                    scope=new Scope(captured.owner,"capability-async",entry,SCOPES.get(Thread.currentThread()),captured.mask,captured.root.get(),null,occurrences,captured.game.get());scope.async=captured;SCOPES.put(Thread.currentThread(),scope);
+                    lease=new CapabilityConsumer(scope,captured.optionals.get(0).optional.get(),callback,first,new CallbackOrigin(captured.root.get(),captured.links,null),"async",asyncBoundary(contract),asyncDescriptor(contract),CAP_CONSUMERS.get());CAP_CONSUMERS.set(lease);
+                }
+            }
+        }
+        return switch(contract){
+            case "function"->invokeJdkFunction((java.util.function.Function<Object,Object>)callback,first,lease);
+            case "consumer"->{invokeJdkConsumer((java.util.function.Consumer<Object>)callback,first,lease);yield null;}
+            case "supplier"->invokeJdkSupplier((java.util.function.Supplier<Object>)callback,lease);
+            case "predicate"->Boolean.valueOf(invokeJdkPredicate((java.util.function.Predicate<Object>)callback,first,lease));
+            case "runnable"->{invokeAsyncRunnable((Runnable)callback,lease);yield null;}
+            case "callable"->invokeAsyncCallable((java.util.concurrent.Callable<?>)callback,lease);
+            case "bifunction"->invokeAsyncBiFunction((java.util.function.BiFunction<Object,Object,Object>)callback,first,second,lease);
+            case "biconsumer"->{invokeAsyncBiConsumer((java.util.function.BiConsumer<Object,Object>)callback,first,second,lease);yield null;}
+            default->throw new IllegalArgumentException("EQUIPMENT_ASYNC_CONTRACT");};
+        }catch(Throwable failure){original=failure;throw EquipmentPolicy.<RuntimeException>callbackFailure(failure);}
+        finally{try{closeConsumer(lease,original);}finally{closeAsyncScope(scope,original);}}
+    }
+    private static void closeAsyncScope(Scope scope,Throwable original){
+        if(scope==null)return;
+        try{if(SCOPES.get(Thread.currentThread())!=scope||scope.thread.get()!=Thread.currentThread())throw new IllegalMonitorStateException("EQUIPMENT_ASYNC_SCOPE_ORDER");if(active(scope.owner))refresh(scope.owner);}
+        catch(RuntimeException|Error failure){if(original==null)throw failure;if(failure!=original)original.addSuppressed(failure);}
+        finally{scope.closed=true;if(SCOPES.get(Thread.currentThread())==scope){if(scope.previous==null)SCOPES.remove(Thread.currentThread());else SCOPES.put(Thread.currentThread(),scope.previous);}}
+    }
     /** Keep the original HashSet.forEach; bind each original dispatch callback at its actual value. */
     @SuppressWarnings("unchecked") public static void capabilityForEach(Object optional,Object actualSet,Object actualConsumer){
         var set=(Set<Object>)actualSet;var consumer=(java.util.function.Consumer<Object>)actualConsumer;
@@ -928,6 +1057,7 @@ public final class EquipmentPolicy {
     private static boolean consumerCurrent(CapabilityConsumer lease){
         if(lease.closed||lease.thread!=Thread.currentThread()||lease.action!=SCOPES.get(Thread.currentThread())||lease.bottomDepth<=0)return false;
         if(lease.delegatedFrom!=null)return lease.delegationDepth<=16&&consumerCurrent(lease.delegatedFrom)&&lease.root==lease.delegatedFrom.root;
+        if(lease.phase.equals("async"))return lease.action.async!=null&&lease.root==lease.action.async.root.get()&&asyncCurrent(lease.action.async);
         CallbackOrigin origin=callbackOrigin(lease.optional,lease.action,0);
         return origin!=null&&origin.root==lease.root&&origin.lifecycle==lease.lifecycle&&callbackState(lease.optional,lease.consumer,lease.value,lease.phase,lease.lifecycle);
     }
@@ -1015,6 +1145,7 @@ public final class EquipmentPolicy {
     private static boolean sourceAllowed(Scope scope){return sourceAllowed(scope,null,null);}
     private static boolean sourceAllowed(Scope scope,Class<?> receiver,Class<?> body){
         List<Class<?>> carriers=new ArrayList<>();if(receiver!=null)carriers.add(receiver);if(body!=null&&body!=receiver)carriers.add(body);
+        if(scope.async!=null)for(Class<?> source:scope.async.sources)if(!carriers.contains(source))carriers.add(source);
         if(CAP_CONSUMERS.get()!=null)for(var frame:WALKER.walk(stream->stream.toList()))if(consumerFrame(frame,scope)&&!carriers.contains(frame.getDeclaringClass()))carriers.add(frame.getDeclaringClass());
         for(Invocation invocation=INVOCATIONS.get(Thread.currentThread());invocation!=null;invocation=invocation.previous)
             if(invocation.action==scope&&invocation.operation.equals("carrier-call")&&invocationCurrent(invocation)){
@@ -1198,6 +1329,7 @@ public final class EquipmentPolicy {
     }
     private static boolean actionCurrent(Scope scope,ItemStack stack,int mask){
         if(scope==null||scope.closed||!active(scope.owner)||scope.thread.get()!=Thread.currentThread()||(scope.mask&mask)!=mask)return false;
+        if(scope.async!=null&&(!asyncCurrent(scope.async)||scope.async.root.get()!=stack))return false;
         if(scope.game.get()!=null&&!gameOwned(scope.owner,scope.game.get()))return false;
         if(scope.used.get()!=null&&(scope.used.get()!=stack||itemType(stack)!=scope.itemType||(shares(scope.owner,stack)&mask)!=mask))return false;
         if(scope.intent!=null&&!currentIntent(scope.owner,scope.intent,scope.operation.equals("equipment-attack"))||scope.dig!=null&&!digContext(scope))return false;
@@ -1280,6 +1412,7 @@ public final class EquipmentPolicy {
             boolean setter=slotSetter(entry.getDeclaringClass(),entry.getMethodName(),entry.getDescriptor(),receiver,args);
             if(!setter&&(receiver==null||!EquipmentCarrierGraph.declared(entry.getDeclaringClass())||!entry.getDeclaringClass().isInstance(receiver)||carrierCallback(receiver,entry)))return null;
             scope=SCOPES.get(Thread.currentThread());if(scope==null||scope.closed||!scopePath(scope,frames.subList(1,frames.size())))return null;
+            if(setter&&scope.async!=null)return INVOCATION_REFUSED;
             boolean found=false;
             if(setter){Owner owner=OWNERS.get((LivingEntity)receiver);if(!active(owner)||scope.owner!=owner)return null;EquipmentSlot slot=(EquipmentSlot)args[0];int at=EquipmentSlotGraph.ordinal(slot);if(at<0)return INVOCATION_REFUSED;
                 stack=slotStack(owner,slot);mask=1<<at;if(stack==null)throw new SecurityException("EQUIPMENT_SLOT_READ_PENDING");if(!actionCurrent(scope,stack,mask))return INVOCATION_REFUSED;found=true;
@@ -1543,10 +1676,12 @@ public final class EquipmentPolicy {
                 ||type==ListTag.class&&(name.endsWith("$set")&&descriptor.equals("(Ljava/util/List;ILjava/lang/Object;)Ljava/lang/Object;")
                         ||name.endsWith("$add")&&descriptor.equals("(Ljava/util/List;ILjava/lang/Object;)V"));
     }
-    private static boolean permitted(Owner owner,int mask,ItemStack stack,boolean entryQuery){
+    private static boolean permitted(Owner owner,int mask,ItemStack stack,boolean entryQuery){return permitted(owner,mask,stack,entryQuery,false);}
+    private static boolean permitted(Owner owner,int mask,ItemStack stack,boolean entryQuery,boolean asyncPayload){
         if(!active(owner))return false;LivingEntity entity=owner.entity.get();
         if(ProRuntime.liveStateLifecycleAllowed(entity))return true;
         for(Scope scope=SCOPES.get(Thread.currentThread());scope!=null;scope=scope.previous){
+            if(scope.async!=null&&!asyncPayload)continue;
             if(scope.closed||scope.owner!=owner||scope.thread.get()!=Thread.currentThread()||(scope.mask&mask)!=mask)continue;
             if(!actionCurrent(scope,stack,mask))continue;
             if(scope.intent!=null&&!currentIntent(owner,scope.intent,scope.operation.equals("equipment-attack"))||scope.dig!=null&&!digContext(scope))continue;
@@ -1570,7 +1705,7 @@ public final class EquipmentPolicy {
         ItemStack stack=link.stack.get();
         // Vanilla replaces a curative recipe list; it never edits its ItemStacks
         // or NBT in place. An equipment action cannot lend it that permission.
-        return !curativeStack(link.owner,stack)&&permitted(link.owner,shares(link.owner,stack),stack,entry);
+        return !curativeStack(link.owner,stack)&&permitted(link.owner,shares(link.owner,stack),stack,entry,true);
     }
     private static boolean anySlotDenied(Owner owner,boolean entry){
         if(owner.tracedSlots){var view=slotView(owner);if(view.resolvedMask()!=ALL)return true;for(int at=0;at<6;at++)if(!permitted(owner,1<<at,view.stack(EquipmentSlotGraph.slot(at)),entry))return true;return false;}

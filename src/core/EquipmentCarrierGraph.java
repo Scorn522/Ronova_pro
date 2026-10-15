@@ -190,7 +190,12 @@ final class EquipmentCarrierGraph {
         if(value==null||value==ItemStack.EMPTY)return true;Class<?> type=value.getClass();
         return type==String.class||type==Byte.class||type==Short.class||type==Integer.class||type==Long.class||type==Float.class||type==Double.class||type==Boolean.class||type==Character.class
                 ||type==java.math.BigInteger.class||type==java.math.BigDecimal.class||type==UUID.class||value instanceof Enum<?>
-                ||borrowedType(type)||callbacks&&callback(value);
+                ||borrowedType(type)||callbacks&&callback(value)&&!dataCarrier(value);
+    }
+    // A data container can also implement a callback contract. Its actual held
+    // storage remains data; invocation policy still excludes the callback body.
+    private static boolean dataCarrier(Object value){
+        return value instanceof Collection<?>||value instanceof Map<?,?>||value instanceof ItemStack||value instanceof Tag;
     }
     private static boolean borrowedType(Class<?> type){
         Class<?> host=type.getNestHost();

@@ -41,11 +41,12 @@ final class EquipmentSlotGraph {
     private static final String C="java.util.Collections$",I="java.util.ImmutableCollections$",G="com.google.common.collect.";
     private static final EquipmentSlot[] SIX={EquipmentSlot.MAINHAND,EquipmentSlot.OFFHAND,EquipmentSlot.FEET,EquipmentSlot.LEGS,EquipmentSlot.CHEST,EquipmentSlot.HEAD};
     private static final Map<LivingEntity,State> STATES=Collections.synchronizedMap(new WeakIdentityMap<>());
-    private static final MethodHandle READ,STATIC;private static final Object UNSAFE;private static final Method BASE,SCALE,STATIC_BASE,STATIC_OFFSET;
+    private static final MethodHandle READ,STATIC,METHOD;private static final Object UNSAFE;private static final Method BASE,SCALE,STATIC_BASE,STATIC_OFFSET;
     static {
         try {Class<?> bridge=Class.forName("dev.ronova.pro.bootstrap.CarrierBridge",false,null);var lookup=MethodHandles.publicLookup();
             READ=lookup.findStatic(bridge,"read",MethodType.methodType(Object.class,Object.class,Field.class));
             STATIC=lookup.findStatic(bridge,"staticValue",MethodType.methodType(Object.class,Class.class,String.class,String.class));
+            METHOD=lookup.findStatic(bridge,"method",MethodType.methodType(Class.class,Object.class,Class.class,String.class,String.class,int.class,Class.class));
             Class<?> type=Class.forName("sun.misc.Unsafe",false,ClassLoader.getPlatformClassLoader());Field singleton=type.getDeclaredField("theUnsafe");singleton.setAccessible(true);UNSAFE=singleton.get(null);
             BASE=type.getMethod("arrayBaseOffset",Class.class);SCALE=type.getMethod("arrayIndexScale",Class.class);
             STATIC_BASE=type.getMethod("staticFieldBase",Field.class);STATIC_OFFSET=type.getMethod("staticFieldOffset",Field.class);
@@ -151,7 +152,19 @@ final class EquipmentSlotGraph {
         if(selected==null)throw unsupported("ACTUAL_FIELD");Object current=read(holder,selected);
         if(selected.getType().isPrimitive()?!samePrimitive(current,result):current!=result)throw unsupported("FIELD_VALUE");return new FieldRead(holder,selected,result);
     }
-    static boolean containerSupported(Object value,boolean map){return value!=null&&(map?value.getClass()==EnumMap.class||EquipmentCarrierLayouts.known(value.getClass())&&value instanceof Map<?,?>:EquipmentCarrierLayouts.known(value.getClass())&&value instanceof List<?>);}
+    static boolean containerSupported(Object value,boolean map){try{return queryBase(value,map)!=null;}catch(Unresolved unavailable){return false;}}
+    /** Resolve the public virtual query, without running a container or key method. */
+    private static Class<?> queryBase(Object receiver,boolean map){
+        if(receiver==null||!(map?receiver instanceof Map<?,?>:receiver instanceof List<?>))return null;
+        Class<?> base=null;for(Class<?> at=receiver.getClass();at!=null;at=at.getSuperclass())if(EquipmentCarrierLayouts.known(at)){base=at;break;}
+        if(base==null||!(map?Map.class.isAssignableFrom(base):List.class.isAssignableFrom(base)))return null;
+        Class<?> contract=map?Map.class:List.class;String descriptor=map?"(Ljava/lang/Object;)Ljava/lang/Object;":"(I)Ljava/lang/Object;";Class<?> actual;
+        try{actual=(Class<?>)METHOD.invokeExact(receiver,contract,"get",descriptor,185,EquipmentSlotGraph.class);}
+        catch(RuntimeException failure){throw unsupported("QUERY_DISPATCH");}catch(Error failure){throw failure;}catch(Throwable failure){throw unsupported("QUERY_DISPATCH");}
+        // A custom override must take the original helper trace. Only an actual
+        // supported platform body may use the corresponding standard storage.
+        return actual!=null&&EquipmentCarrierLayouts.known(actual)&&actual.isAssignableFrom(base)?base:null;
+    }
     private static final class Uses {
         final int mask;final List<FieldUse> fields=new ArrayList<>();final List<ArrayUse> arrays=new ArrayList<>();int count;
         final Replacement replacement;Uses(int mask){this(mask,null);}Uses(int mask,Replacement replacement){this.mask=mask;this.replacement=replacement;}
@@ -169,8 +182,8 @@ final class EquipmentSlotGraph {
         Object array(Object array,int index,boolean terminal){if(array==null||!array.getClass().isArray()||index<0||index>=Array.getLength(array))throw unsupported("ARRAY_INDEX");if(++count>LIMIT)throw unsupported("READ_CAPACITY");Object value=replacement!=null&&replacement.declaring==null&&replacement.receiver==array&&replacement.index==index?replacement.value:Array.get(array,index);arrays.add(new ArrayUse(array,index,index+1,1,mask,terminal));return value;}
     }
     private static Object list(Uses uses,Object receiver,int index,boolean terminal,IdentityHashMap<Object,Boolean> path){
-        if(receiver==null||!EquipmentCarrierLayouts.known(receiver.getClass())||!(receiver instanceof List<?>)||path.put(receiver,Boolean.TRUE)!=null||path.size()>LIMIT)throw unsupported("LIST_IMPLEMENTATION");
-        String name=receiver.getClass().getName();try{
+        Class<?> type=queryBase(receiver,false);if(type==null||path.put(receiver,Boolean.TRUE)!=null||path.size()>LIMIT)throw unsupported("LIST_IMPLEMENTATION");
+        String name=type.getName();try{
             if(index<0)throw unsupported("LIST_INDEX");
             if(name.equals("java.util.ArrayList")){int size=integer(uses.get(receiver,name,"size"));if(index>=size)throw unsupported("LIST_INDEX");return uses.array(uses.get(receiver,name,"elementData"),index,terminal);}
             if(name.equals("java.util.Arrays$ArrayList"))return uses.array(uses.get(receiver,name,"a"),index,terminal);
@@ -189,15 +202,15 @@ final class EquipmentSlotGraph {
             if(name.equals(G+"ImmutableList$ReverseImmutableList")){Object forward=uses.get(receiver,name,"forwardList");EquipmentCarrierLayouts.Layout layout=EquipmentCarrierLayouts.layout(forward);if(layout==null||!layout.complete()||layout.elements()==null||index>=layout.elements().length)throw unsupported("REVERSE_LIST");return list(uses,forward,layout.elements().length-1-index,terminal,path);}
             if(name.equals(G+"RegularImmutableAsList"))return list(uses,uses.get(receiver,name,"delegateList"),index,terminal,path);
             if(name.startsWith(C+"Unmodifiable")||name.startsWith(C+"Synchronized")){String prefix=C+(name.startsWith(C+"Unmodifiable")?"Unmodifiable":"Synchronized");Object delegate=uses.get(receiver,prefix+"List","list");if(delegate!=uses.get(receiver,prefix+"Collection","c"))throw unsupported("LIST_ALIAS");return list(uses,delegate,index,terminal,path);}
-            if(receiver.getClass()==net.minecraft.core.NonNullList.class)return list(uses,uses.get(receiver,name,"list","f_122773_"),index,terminal,path);
+            if(type==net.minecraft.core.NonNullList.class)return list(uses,uses.get(receiver,name,"list","f_122773_"),index,terminal,path);
             throw unsupported("LIST_LAYOUT");
         }finally{path.remove(receiver);}
     }
     private static Object map(Uses uses,Object receiver,Object key,boolean terminal,IdentityHashMap<Object,Boolean> path){
-        if(receiver==null||path.put(receiver,Boolean.TRUE)!=null||path.size()>LIMIT)throw unsupported("MAP_CYCLE");Class<?> type=receiver.getClass();String name=type.getName();try{
+        Class<?> type=queryBase(receiver,true);if(type==null)throw unsupported("MAP_IMPLEMENTATION");
+        if(path.put(receiver,Boolean.TRUE)!=null||path.size()>LIMIT)throw unsupported("MAP_CYCLE");String name=type.getName();try{
             if(type==EnumMap.class){Object keyType=uses.get(receiver,name,"keyType");if(!(key instanceof Enum<?> actual)||key.getClass()!=keyType&&key.getClass().getSuperclass()!=keyType)return null;
                 Object value=uses.array(uses.get(receiver,name,"vals"),enumOrdinal(uses,actual),terminal);return value==uses.constant(EnumMap.class,"NULL")?null:value;}
-            if(!EquipmentCarrierLayouts.known(type)||!(receiver instanceof Map<?,?>))throw unsupported("MAP_IMPLEMENTATION");
             if(name.startsWith(C+"Unmodifiable")||name.startsWith(C+"Synchronized")){String owner=C+(name.startsWith(C+"Unmodifiable")?"Unmodifiable":"Synchronized")+"Map";return map(uses,uses.get(receiver,owner,"m"),key,terminal,path);}
             if(type==HashMap.class||type==LinkedHashMap.class)return hashMap(uses,receiver,key,terminal);
             if(type==IdentityHashMap.class){Object[] table=references(uses.get(receiver,name,"table"));Object actualKey=key==null?uses.constant(type,"NULL_KEY"):key;int length=table.length;if(length<2||(length&1)!=0)throw unsupported("IDENTITY_TABLE");int h=System.identityHashCode(actualKey),at=((h<<1)-(h<<8))&(length-1),start=at;
@@ -306,7 +319,11 @@ final class EquipmentSlotGraph {
     private static int byteAt(Uses uses,byte[] value,int at){Object actual=uses.array(value,at,false);if(actual instanceof Byte result)return result.intValue()&255;throw unsupported("STRING_BYTE");}
     private static byte[] bytes(Object value){if(value instanceof byte[] actual)return actual;throw unsupported("STRING_VALUE");}
     private static int enumOrdinal(Uses uses,Enum<?> value){return integer(uses.get(value,"java.lang.Enum","ordinal"));}
-    private static boolean scalar(Object value){return value instanceof String||value instanceof Number||value instanceof Boolean||value instanceof Character||value instanceof Enum<?>||value instanceof Class<?>;}
+    private static boolean scalar(Object value){
+        if(value==null)return true;Class<?> type=value.getClass();
+        return type==String.class||type==Byte.class||type==Short.class||type==Integer.class||type==Long.class||type==Float.class||type==Double.class
+                ||type==Boolean.class||type==Character.class||type==java.math.BigInteger.class||type==java.math.BigDecimal.class||value instanceof Enum<?>||value instanceof Class<?>;
+    }
     private static boolean borrowed(Object value){return value instanceof Entity||value instanceof net.minecraft.world.level.Level||value instanceof net.minecraft.server.MinecraftServer||value instanceof net.minecraft.world.level.block.entity.BlockEntity||value instanceof net.minecraft.world.level.chunk.ChunkAccess
             ||value instanceof ClassLoader||value instanceof Thread||value instanceof ThreadGroup||value instanceof Module||value instanceof java.lang.ref.Reference<?>||value instanceof java.lang.ref.ReferenceQueue<?>||value instanceof ThreadLocal<?>||value instanceof java.util.concurrent.locks.Lock||value instanceof java.nio.Buffer||value instanceof java.nio.channels.Channel||value instanceof java.net.Socket
             ||value instanceof net.minecraft.world.item.Item||value instanceof net.minecraft.core.Registry<?>||value instanceof net.minecraft.core.Holder<?>;}

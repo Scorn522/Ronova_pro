@@ -19,6 +19,7 @@ public final class AuditFixCheck {
         if(args.length==1&&args[0].equals("equipment-slot-bytecode")){equipmentSlotBytecode();capabilityBytecode();return;}
         if(args.length==1&&args[0].equals("capability-callback-bytecode")){capabilityCallbackBytecode();return;}
         if(args.length==1&&args[0].equals("equipment-helper-composition-bytecode")){equipmentSlotBytecode();equipmentSlotHelperBytecode();equipmentFunctionBytecode();return;}
+        if(args.length==1&&args[0].equals("equipment-async-carrier-bytecode")){equipmentAsyncCarrierBytecode();return;}
         if(args.length==3&&args[0].equals("mod-group-returns")){modGroupReturns(args[1],args[2]);return;}
         if(args.length==2&&args[0].equals("network-preconnect")){networkPreconnect(args[1]);return;}
         if(args.length==1&&args[0].equals("source-list-fixes")){sourceListFixes();return;}
@@ -1276,6 +1277,96 @@ public final class AuditFixCheck {
         optionalCallbackFailure(orElseThrow,empty,failedSupplier,originalFailure,calls);
         require(callbacks.get(null)==null,"isolated Optional body check installed callback authority");
         System.out.println("CAPABILITY_CALLBACK_BYTECODE_PASS renamed_isolated_JVM_body_check actual_JDK_Optional_six_transformed_callback_bodies Bridge_callbacks_uninstalled original_callbacks_once values_returns_and_Throwable_identity_preserved no_actual_java_base_retransform_or_game_runtime_claim");
+    }
+    /** Only this package's actual JDK callback images and one ordinary worker fallback. */
+    @SuppressWarnings("unchecked") private static void equipmentAsyncCarrierBytecode()throws Exception{
+        Class<?> tasks=Class.forName("dev.ronova.pro.bootstrap.TaskBridge",true,null),controls=Class.forName("dev.ronova.pro.bootstrap.ControlBridge",true,null);
+        Field installed=tasks.getDeclaredField("equipmentAsync"),callbacks=controls.getDeclaredField("capabilityCallbacks");installed.setAccessible(true);callbacks.setAccessible(true);
+        require(installed.get(null)==null&&callbacks.get(null)==null,"async body check requires uninstalled Core callback handles");
+        Class<?> boundary=Class.forName("dev.ronova.pro.agent.JdkTaskBoundaryContract");
+        Method transform=boundary.getMethod("transform",String.class,byte[].class);
+        String cf="java/util/concurrent/CompletableFuture",adapter="java/util/concurrent/Executors$RunnableAdapter",hookOwner="dev/ronova/pro/bootstrap/TaskBridge";
+        String hook="invokeEquipmentCallback",hookDescriptor="(Ljava/lang/Object;Ljava/lang/Object;Ljava/lang/Object;Ljava/lang/String;)Ljava/lang/Object;";
+        Set<String> required=Set.of("java/util/concurrent/FutureTask",adapter,"java/util/concurrent/ForkJoinTask$AdaptedRunnable",
+                "java/util/concurrent/ForkJoinTask$AdaptedRunnableAction","java/util/concurrent/ForkJoinTask$RunnableExecuteAction","java/util/concurrent/ForkJoinTask$AdaptedCallable",
+                "java/util/concurrent/ThreadPoolExecutor","java/util/concurrent/ThreadPoolExecutor$CallerRunsPolicy");
+        Set<String> candidates=new TreeSet<>(required),checked=new TreeSet<>(),linked=new HashSet<>();
+        for(String name:(Set<String>)boundary.getMethod("targets").invoke(null))if(name.equals(cf)||name.startsWith(cf+"$"))candidates.add(name);
+        byte[] adapterBytes=null;int callbackSites=0;
+        for(String name:candidates){
+            Class<?> actual=Class.forName(name.replace('/','.'),false,null);
+            require(actual.getClassLoader()==null&&actual.getModule()==Object.class.getModule(),"callback image must be an actual java.base class: "+name);
+            byte[] original;try(var input=actual.getResourceAsStream(name.substring(name.lastIndexOf('/')+1)+".class")){
+                require(input!=null,"actual JDK callback bytes unavailable: "+name);original=input.readAllBytes();
+            }
+            var before=new org.objectweb.asm.tree.ClassNode();new org.objectweb.asm.ClassReader(original).accept(before,0);int expected=equipmentAsyncCallbackSites(before);
+            if(expected==0){require(!required.contains(name),"required actual callback body missing: "+name);continue;}
+            byte[] changed=(byte[])transform.invoke(null,name,original);require(changed!=null,"production task boundary did not transform actual callback image: "+name);
+            var after=new org.objectweb.asm.tree.ClassNode();new org.objectweb.asm.ClassReader(changed).accept(after,0);
+            require(after.name.equals(name),"production task transform changed class identity: "+name);int hooks=0;
+            for(var method:after.methods)for(var instruction:method.instructions)if(instruction instanceof org.objectweb.asm.tree.MethodInsnNode call&&call.owner.equals(hookOwner)){
+                require(call.getOpcode()==org.objectweb.asm.Opcodes.INVOKESTATIC,"task hook must remain static: "+name+"."+call.name);
+                String selector=call.name+call.desc;
+                if(linked.add(selector))try{MethodHandles.publicLookup().findStatic(tasks,call.name,MethodType.fromMethodDescriptorString(call.desc,null));}
+                catch(NoSuchMethodException|IllegalAccessException failure){throw new AssertionError("production task hook cannot link: "+selector,failure);}
+                if(call.name.equals(hook)){require(call.desc.equals(hookDescriptor),"actual async callback hook descriptor changed: "+name);hooks++;}
+            }
+            require(hooks==expected,"actual async callback sites were lost or duplicated: "+name+" "+hooks+"/"+expected);
+            checked.add(name);callbackSites+=hooks;if(name.equals(adapter))adapterBytes=original;
+        }
+        require(checked.contains(cf)&&checked.containsAll(required)&&adapterBytes!=null,"current callback family was not transformed completely");
+        System.out.println("EQUIPMENT_ASYNC_CARRIER_BYTECODE_PASS actual_current_JDK_CF_FutureTask_RunnableAdapter_ForkJoin_adapters_TPE_CallerRuns production_transform hooks_linked images="+checked.size()+" callback_sites="+callbackSites+" no_actual_java_base_installation_or_native_graph_claim");
+        equipmentAsyncRunnableAdapter(adapterBytes,tasks);
+        require(installed.get(null)==null&&callbacks.get(null)==null,"ordinary async fallback installed Core callback authority");
+        System.out.println("EQUIPMENT_ASYNC_CARRIER_FALLBACK_PASS isolated_actual_Executors_RunnableAdapter original_fields_ctor_call real_singleThreadExecutor Core_handles_uninstalled_no_ticket Runnable_once_worker_thread result_and_ExecutionException_cause_identity no_equipment_authority_claim");
+    }
+    private static int equipmentAsyncCallbackSites(org.objectweb.asm.tree.ClassNode node){
+        Set<String> selectors=Set.of("java/util/function/Function#apply(Ljava/lang/Object;)Ljava/lang/Object;","java/util/function/Consumer#accept(Ljava/lang/Object;)V",
+                "java/util/function/Supplier#get()Ljava/lang/Object;","java/lang/Runnable#run()V","java/util/concurrent/Callable#call()Ljava/lang/Object;",
+                "java/util/function/BiFunction#apply(Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;","java/util/function/BiConsumer#accept(Ljava/lang/Object;Ljava/lang/Object;)V",
+                "java/util/function/Predicate#test(Ljava/lang/Object;)Z");
+        int count=0;for(var method:node.methods)if(!method.name.startsWith("<"))for(var instruction:method.instructions)
+            if(instruction instanceof org.objectweb.asm.tree.MethodInsnNode call&&call.getOpcode()==org.objectweb.asm.Opcodes.INVOKEINTERFACE&&selectors.contains(call.owner+"#"+call.name+call.desc))count++;
+        return count;
+    }
+    /** Keep the actual adapter's fields, constructor and call instructions; change only its identity/nest metadata. */
+    @SuppressWarnings("unchecked") private static void equipmentAsyncRunnableAdapter(byte[] original,Class<?> tasks)throws Exception{
+        Class<?> visitor=Class.forName("jdk.internal.org.objectweb.asm.ClassVisitor"),reader=Class.forName("jdk.internal.org.objectweb.asm.ClassReader"),writer=Class.forName("jdk.internal.org.objectweb.asm.ClassWriter");
+        Class<?> nodeType=Class.forName("jdk.internal.org.objectweb.asm.tree.ClassNode"),resultBoundary=Class.forName("dev.ronova.pro.agent.TaskResultBoundary");
+        Method instrument=resultBoundary.getDeclaredMethod("instrument",nodeType);instrument.setAccessible(true);
+        Object node=nodeType.getConstructor().newInstance(),input=reader.getConstructor(byte[].class).newInstance((Object)original);reader.getMethod("accept",visitor,int.class).invoke(input,node,8);
+        instrument.invoke(null,node);Object output=writer.getConstructor(int.class).newInstance(3);nodeType.getMethod("accept",visitor).invoke(node,output);
+        byte[] changed=(byte[])writer.getMethod("toByteArray").invoke(output);
+        var actual=new org.objectweb.asm.tree.ClassNode();new org.objectweb.asm.ClassReader(changed).accept(actual,0);
+        require(equipmentAsyncCallbackSites(actual)==0,"isolated adapter retained the unwrapped original Runnable call");
+        int hooks=0;for(var method:actual.methods)for(var instruction:method.instructions)if(instruction instanceof org.objectweb.asm.tree.MethodInsnNode call
+                &&call.owner.equals("dev/ronova/pro/bootstrap/TaskBridge")&&call.name.equals("invokeEquipmentCallback"))hooks++;
+        require(hooks==1,"actual RunnableAdapter must contain one production callback hook");
+        node=nodeType.getConstructor().newInstance();input=reader.getConstructor(byte[].class).newInstance((Object)changed);reader.getMethod("accept",visitor,int.class).invoke(input,node,0);
+        nodeType.getField("nestHostClass").set(node,null);
+        String alias="dev.ronova.pro.validation.CheckedAsyncRunnableAdapter",originalName="java/util/concurrent/Executors$RunnableAdapter";
+        Class<?> remapper=Class.forName("jdk.internal.org.objectweb.asm.commons.Remapper"),simple=Class.forName("jdk.internal.org.objectweb.asm.commons.SimpleRemapper"),classRemapper=Class.forName("jdk.internal.org.objectweb.asm.commons.ClassRemapper");
+        Object renamedOutput=writer.getConstructor(int.class).newInstance(0),rename=simple.getConstructor(String.class,String.class).newInstance(originalName,alias.replace('.','/'));
+        Object mapping=classRemapper.getConstructor(visitor,remapper).newInstance(renamedOutput,rename);nodeType.getMethod("accept",visitor).invoke(node,mapping);
+        byte[] renamed=(byte[])writer.getMethod("toByteArray").invoke(renamedOutput);
+        Class<?> checked=new ClassLoader(AuditFixCheck.class.getClassLoader()){
+            Class<?> defineBody(){Class<?> result=defineClass(alias,renamed,0,renamed.length);resolveClass(result);return result;}
+        }.defineBody();
+        require(checked.getClassLoader()!=null&&checked.getNestHost()==checked&&Callable.class.isAssignableFrom(checked),"actual adapter must remain an isolated Callable body");checked.getDeclaredMethods();
+        Constructor<?> constructor=checked.getDeclaredConstructor(Runnable.class,Object.class);constructor.setAccessible(true);
+        MethodHandles.publicLookup().findStatic(tasks,"invokeEquipmentCallback",MethodType.methodType(Object.class,Object.class,Object.class,Object.class,String.class));
+        var calls=new java.util.concurrent.atomic.AtomicInteger();var worker=new java.util.concurrent.atomic.AtomicReference<Thread>();Thread caller=Thread.currentThread();Object expected=new Object();
+        Callable<Object> ordinary=(Callable<Object>)constructor.newInstance((Runnable)()->{calls.incrementAndGet();worker.set(Thread.currentThread());},expected);
+        ExecutorService executor=Executors.newSingleThreadExecutor();
+        try{
+            require(executor.submit(ordinary).get(10,TimeUnit.SECONDS)==expected,"actual RunnableAdapter changed the original result identity");
+            require(calls.get()==1&&worker.get()!=null&&worker.get()!=caller,"actual RunnableAdapter must run its original Runnable once on the worker");
+            calls.set(0);worker.set(null);RuntimeException originalFailure=new IllegalStateException("actual_async_runnable_failure");
+            Callable<Object> failed=(Callable<Object>)constructor.newInstance((Runnable)()->{calls.incrementAndGet();worker.set(Thread.currentThread());throw originalFailure;},expected);
+            try{executor.submit(failed).get(10,TimeUnit.SECONDS);throw new AssertionError("actual async Runnable failure was lost");}
+            catch(ExecutionException failure){require(failure.getCause()==originalFailure,"actual async Runnable Throwable identity changed: "+failure.getCause());}
+            require(calls.get()==1&&worker.get()!=null&&worker.get()!=caller,"failing Runnable was repeated or executed on the caller");
+        }finally{executor.shutdownNow();require(executor.awaitTermination(10,TimeUnit.SECONDS),"isolated adapter worker did not terminate");}
     }
     /** Actual standard composition factories and hidden bodies, with the real Bridge fallback left uninstalled. */
     @SuppressWarnings("unchecked") private static void equipmentFunctionBytecode()throws Exception{
