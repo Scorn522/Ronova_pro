@@ -118,7 +118,9 @@ public final class EquipmentPolicy {
     private static final Object INVOCATION_REFUSED=new Object();
     private static Map<Class<?>,List<Slot>> FIELDS;
     private static StackWalker WALKER;
-    private static Class<?> ARRAY_LIST,NODE,IMMUTABLE_LIST;
+    private static Class<?> ARRAY_LIST,NODE,IMMUTABLE_LIST,IMMUTABLE_N,IMMUTABLE_12,SINGLETON_LIST,EMPTY_LIST;
+    private static Field IMMUTABLE_VALUES,IMMUTABLE_FIRST,IMMUTABLE_SECOND,SINGLETON_VALUE,GUAVA_VALUES;
+    private static Object IMMUTABLE_EMPTY;
     private static Field ARRAY_VALUES,LIST_VALUES,LIST_SIZE,MAP_TABLE,NODE_NEXT,NODE_VALUE;
     private static Field INTERACT_ID,INTERACT_ACTION;private static Object ATTACK_ACTION;
     private static Field CONTEXT_PLAYER,CONTEXT_STACK;
@@ -132,10 +134,14 @@ public final class EquipmentPolicy {
         NODE=Class.forName("java.util.HashMap$Node",false,null);
         Class<?> tree=Class.forName("java.util.HashMap$TreeNode",false,null);
         IMMUTABLE_LIST=Class.forName("com.google.common.collect.RegularImmutableList",false,EquipmentPolicy.class.getClassLoader());
+        IMMUTABLE_N=Class.forName("java.util.ImmutableCollections$ListN",false,null);
+        IMMUTABLE_12=Class.forName("java.util.ImmutableCollections$List12",false,null);
+        SINGLETON_LIST=Class.forName("java.util.Collections$SingletonList",false,null);
+        EMPTY_LIST=Class.forName("java.util.Collections$EmptyList",false,null);
         Class<?>[] carriers={Player.class,ServerPlayer.class,ServerPlayerGameMode.class,ServerboundInteractPacket.class,UseOnContext.class,Inventory.class,Mob.class,ArmorStand.class,NonNullList.class,ItemStack.class,
                 CompoundTag.class,ListTag.class,ByteArrayTag.class,IntArrayTag.class,LongArrayTag.class,
                 ByteTag.class,ShortTag.class,IntTag.class,LongTag.class,FloatTag.class,DoubleTag.class,StringTag.class,
-                HashMap.class,LinkedHashMap.class,ArrayList.class,ARRAY_LIST,NODE,tree,IMMUTABLE_LIST};
+                HashMap.class,LinkedHashMap.class,ArrayList.class,ARRAY_LIST,NODE,tree,IMMUTABLE_LIST,IMMUTABLE_N,IMMUTABLE_12,SINGLETON_LIST,EMPTY_LIST};
         Class.forName("dev.ronova.pro.agent.RecoveryAgent",false,ClassLoader.getSystemClassLoader())
                 .getMethod("openBackingAccess",Class.class,Class[].class).invoke(null,EquipmentPolicy.class,(Object)carriers);
         Class<?> type=Class.forName("sun.misc.Unsafe",false,ClassLoader.getPlatformClassLoader());
@@ -154,6 +160,9 @@ public final class EquipmentPolicy {
             fields.put(carrier,List.copyOf(slots));
         }
         ARRAY_VALUES=access(ARRAY_LIST,"a");LIST_VALUES=access(ArrayList.class,"elementData");LIST_SIZE=access(ArrayList.class,"size");
+        IMMUTABLE_VALUES=access(IMMUTABLE_N,"elements");IMMUTABLE_FIRST=access(IMMUTABLE_12,"e0");IMMUTABLE_SECOND=access(IMMUTABLE_12,"e1");
+        SINGLETON_VALUE=access(SINGLETON_LIST,"element");GUAVA_VALUES=access(IMMUTABLE_LIST,"array");
+        IMMUTABLE_EMPTY=access(Class.forName("java.util.ImmutableCollections",false,null),"EMPTY").get(null);
         MAP_TABLE=access(HashMap.class,"table");NODE_NEXT=access(NODE,"next");NODE_VALUE=access(NODE,"value");
         INTERACT_ID=accessAny(ServerboundInteractPacket.class,"entityId","f_134030_");INTERACT_ACTION=accessAny(ServerboundInteractPacket.class,"action","f_134031_");
         ATTACK_ACTION=accessAny(ServerboundInteractPacket.class,"ATTACK_ACTION","f_179595_").get(null);
@@ -184,7 +193,7 @@ public final class EquipmentPolicy {
         if(type==LinkedHashMap.class)return Set.of("head","tail","accessOrder").contains(name);
         if(type==ArrayList.class)return names(name,"elementData","size");
         if(type==AbstractList.class)return name.equals("modCount");
-        if(type==ARRAY_LIST||type==IMMUTABLE_LIST)return true;
+        if(type==ARRAY_LIST||type==IMMUTABLE_LIST||type==IMMUTABLE_N||type==IMMUTABLE_12||type==SINGLETON_LIST||type==EMPTY_LIST)return true;
         return type.getPackageName().equals("net.minecraft.nbt")||NODE!=null&&NODE.isAssignableFrom(type);
     }
     private static List<Slot> slots(Object value){
@@ -304,20 +313,26 @@ public final class EquipmentPolicy {
         }
     }
     private static void captureStack(Owner owner,ItemStack stack){if(stack!=null&&stack!=ItemStack.EMPTY){link(owner,stack,Kind.STACK,-1,stack);walk(owner,stack,null,true,null);}}
-    record CurativeList(Object[] values,int size) { }
+    record CurativeList(Object[] values,int size,boolean backed) { }
     static CurativeList knownCurativeLayout(Object list){
-        return initialized&&list!=null&&(list.getClass()==ArrayList.class||list.getClass()==ARRAY_LIST)?curativeLayout(list):null;
+        if(!initialized||list==null)return null;Class<?> type=list.getClass();
+        return type==ArrayList.class||type==ARRAY_LIST||type==IMMUTABLE_LIST||type==IMMUTABLE_N||type==IMMUTABLE_12||type==SINGLETON_LIST||type==EMPTY_LIST?curativeLayout(list):null;
     }
     /** Use the same actual list storage and stack/NBT graph as equipped stacks. */
     static CurativeList curativeLayout(Object list){
         if(!initialized)throw new IllegalStateException("CURATIVE_GRAPH_NOT_INITIALIZED");
         try {
-            Object values;int size;
+            Object values;int size;boolean backed=true;
             if(list!=null&&list.getClass()==ArrayList.class){values=LIST_VALUES.get(list);size=LIST_SIZE.getInt(list);}
             else if(list!=null&&list.getClass()==ARRAY_LIST){values=ARRAY_VALUES.get(list);size=values instanceof Object[] array?array.length:-1;}
+            else if(list!=null&&list.getClass()==IMMUTABLE_N){values=IMMUTABLE_VALUES.get(list);size=values instanceof Object[] array?array.length:-1;}
+            else if(list!=null&&list.getClass()==IMMUTABLE_LIST){values=GUAVA_VALUES.get(list);size=values instanceof Object[] array?array.length:-1;}
+            else if(list!=null&&list.getClass()==IMMUTABLE_12){Object first=IMMUTABLE_FIRST.get(list),second=IMMUTABLE_SECOND.get(list);values=second==IMMUTABLE_EMPTY?new Object[]{first}:new Object[]{first,second};size=((Object[])values).length;backed=false;}
+            else if(list!=null&&list.getClass()==SINGLETON_LIST){values=new Object[]{SINGLETON_VALUE.get(list)};size=1;backed=false;}
+            else if(list!=null&&list.getClass()==EMPTY_LIST){values=new Object[0];size=0;backed=false;}
             else throw new IllegalStateException("CURATIVE_LIST_IMPLEMENTATION_UNRESOLVED:"+(list==null?"null":list.getClass().getName()));
             if(!(values instanceof Object[] array)||size<0||size>array.length||size>MAX_GRAPH)throw new IllegalStateException("CURATIVE_LIST_STORAGE_UNRESOLVED");
-            return new CurativeList(array,size);
+            return new CurativeList(array,size,backed);
         }catch(IllegalAccessException failure){throw new IllegalStateException("CURATIVE_LIST_STORAGE_ACCESS",failure);}
     }
     static void captureCurativeItems(LivingEntity entity,long generation,Object list){
@@ -327,7 +342,7 @@ public final class EquipmentPolicy {
         if(entity==null||generation<=0||ProRuntime.liveStateGeneration(entity)!=generation)return;
         Owner owner=OWNERS.get(entity);
         if(owner==null||owner.generation!=generation){MINING.remove(entity);owner=new Owner(entity,generation);OWNERS.put(entity,owner);}
-        link(owner,list,Kind.CURATIVE_LIST,-1,null);link(owner,layout.values,Kind.CURATIVE_ARRAY,-1,null);
+        link(owner,list,Kind.CURATIVE_LIST,-1,null);if(layout.backed)link(owner,layout.values,Kind.CURATIVE_ARRAY,-1,null);
         for(int at=0;at<layout.size;at++)captureStack(owner,(ItemStack)layout.values[at]);
     }
     /** Traverse only real NBT storage. A HashMap node belongs only while linked from the current table. */

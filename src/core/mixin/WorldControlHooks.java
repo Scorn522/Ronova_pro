@@ -120,6 +120,8 @@ public final class WorldControlHooks {
     }
     @Mixin(value=it.unimi.dsi.fastutil.objects.Object2IntOpenCustomHashMap.class,remap=false)
     public abstract static class GlobalRegistryMap { }
+    @Mixin(targets="it.unimi.dsi.fastutil.objects.Object2IntOpenCustomHashMap$MapIterator",remap=false)
+    public abstract static class GlobalRegistryIterator { }
     @Mixin(targets="net.minecraft.world.level.chunk.LevelChunk$BoundTickingBlockEntity") public abstract static class Block {
         @Shadow @Final private net.minecraft.world.level.block.entity.BlockEntity blockEntity;
         @Inject(method="tick",at=@At("HEAD"),cancellable=true)

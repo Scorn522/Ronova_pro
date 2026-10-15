@@ -16,8 +16,11 @@ final class NetworkBoundary {
     private static final String WRITE=NETTY+"$WriteTask",BYTE_ENCODER="io/netty/handler/codec/MessageToByteEncoder";
     private static final String EXECUTOR="io/netty/util/concurrent/SingleThreadEventExecutor";
     private static final String DEFAULT_REJECT="io/netty/util/concurrent/RejectedExecutionHandlers$1";
+    private static final String MPSC="io/netty/util/internal/shaded/org/jctools/queues/",MPSC_BASE=MPSC+"BaseMpscLinkedArrayQueue",MPSC_CHUNK=MPSC+"MpscChunkedArrayQueue",
+            MPSC_ATOMIC_BASE=MPSC+"atomic/BaseMpscLinkedAtomicArrayQueue",MPSC_ATOMIC_CHUNK=MPSC+"atomic/MpscChunkedAtomicArrayQueue";
     private static final String SAFE_EXECUTE="(Lio/netty/util/concurrent/EventExecutor;Ljava/lang/Runnable;Lio/netty/channel/ChannelPromise;Ljava/lang/Object;Z)Z";
-    static final Set<String> TARGETS=Set.of(INSTANCE,REGISTRY,SIMPLE,CODEC,HANDLER,EVENT,CONNECTION,HOLDER,ENCODER,NETTY,WRITE,BYTE_ENCODER,EXECUTOR,DEFAULT_REJECT);
+    static final Set<String> TARGETS=Set.of(INSTANCE,REGISTRY,SIMPLE,CODEC,HANDLER,EVENT,CONNECTION,HOLDER,ENCODER,NETTY,WRITE,BYTE_ENCODER,EXECUTOR,DEFAULT_REJECT,MPSC_BASE,MPSC_CHUNK,MPSC_ATOMIC_BASE,MPSC_ATOMIC_CHUNK,
+            MPSC_BASE+"ProducerFields",MPSC_BASE+"ColdProducerFields",MPSC_BASE+"ConsumerFields",MPSC_ATOMIC_BASE+"ProducerFields",MPSC_ATOMIC_BASE+"ColdProducerFields",MPSC_ATOMIC_BASE+"ConsumerFields");
     private NetworkBoundary(){}
     static byte[] transform(ClassLoader loader,String name,byte[] bytes){
         if(!TARGETS.contains(name))return null;ClassNode node=new ClassNode();new ClassReader(bytes).accept(node,0);boolean changed=false;
@@ -82,6 +85,18 @@ final class NetworkBoundary {
             if(name.equals(EXECUTOR)&&method.name.equals("offerTask")&&method.desc.equals("(Ljava/lang/Runnable;)Z"))writeOfferLayout(method);
             if(name.equals(EXECUTOR)&&method.name.equals("reject")&&method.desc.equals("(Ljava/lang/Runnable;)V"))writeHandlerLayout(method);
             if(name.equals(DEFAULT_REJECT)&&method.name.equals("rejected")&&method.desc.equals("(Ljava/lang/Runnable;Lio/netty/util/concurrent/SingleThreadEventExecutor;)V")){writeDefaultRejected(method);changed=true;}
+            if((name.equals(MPSC_BASE)||name.equals(MPSC_ATOMIC_BASE))&&method.name.equals("offer")&&method.desc.equals("(Ljava/lang/Object;)Z")){mpscOffer(method,name);changed=true;}
+            if((name.equals(MPSC_BASE)||name.equals(MPSC_ATOMIC_BASE))&&method.name.equals("offerSlowPath")&&method.desc.equals("(JJJ)I")){mpscSlowPath(method,name);changed=true;}
+            if(method.desc.equals("()J")){
+                if((name.equals(MPSC_BASE+"ColdProducerFields")||name.equals(MPSC_ATOMIC_BASE+"ColdProducerFields"))&&method.name.equals("lvProducerLimit")){mpscRead(method,name,"producerLimit",0);changed=true;}
+                if((name.equals(MPSC_BASE+"ProducerFields")||name.equals(MPSC_ATOMIC_BASE+"ProducerFields"))&&method.name.equals("lvProducerIndex")){mpscRead(method,name,"producerIndex",1);changed=true;}
+                if((name.equals(MPSC_BASE+"ConsumerFields")||name.equals(MPSC_ATOMIC_BASE+"ConsumerFields"))&&method.name.equals("lvConsumerIndex")){mpscRead(method,name,"consumerIndex",2);changed=true;}
+            }
+            if(name.equals(MPSC_CHUNK)||name.equals(MPSC_ATOMIC_CHUNK)){
+                if(method.name.equals("getCurrentBufferCapacity")&&method.desc.equals("(J)J")){mpscCapacity(method,name,0);changed=true;}
+                if(method.name.equals("availableInQueue")&&method.desc.equals("(JJ)J")){mpscCapacity(method,name,1);changed=true;}
+                if(method.name.equals("offer")&&method.desc.equals("(Ljava/lang/Object;)Z"))mpscOfferBridge(method,name);
+            }
             if(name.equals(NETTY)&&Set.of("invokeWrite","invokeWriteAndFlush").contains(method.name)&&args.length==2&&args[0].getDescriptor().equals("Ljava/lang/Object;")&&args[1].getDescriptor().equals("Lio/netty/channel/ChannelPromise;")&&(method.access&Opcodes.ACC_STATIC)==0){
                 InsnList guard=gate(vars[0],"outboundAllowed");rejectOutbound(method,guard,vars[0],vars[1],-1,method.name.equals("invokeWriteAndFlush")?"invokeFlush":null);
                 guard.add(new InsnNode(Opcodes.RETURN));endGate(guard);method.instructions.insert(guard);changed=true;
@@ -188,6 +203,85 @@ final class NetworkBoundary {
     private static boolean variable(AbstractInsnNode instruction,int opcode,int slot){return instruction instanceof VarInsnNode value&&value.getOpcode()==opcode&&value.var==slot;}
     private static boolean invoke(AbstractInsnNode instruction,int opcode,String owner,String name,String descriptor){return instruction instanceof MethodInsnNode call&&call.getOpcode()==opcode&&call.owner.equals(owner)&&call.name.equals(name)&&call.desc.equals(descriptor);}
     private static AbstractInsnNode executable(LabelNode label){AbstractInsnNode at=label;while(at!=null&&at.getOpcode()<0)at=at.getNext();return at;}
+    private static void mpscOps(InsnList code,int... opcodes){for(int opcode:opcodes)code.add(new InsnNode(opcode));}
+    private static void mpscVars(InsnList code,int opcode,int... slots){for(int slot:slots)code.add(new VarInsnNode(opcode,slot));}
+    private static void mpscCall(InsnList code,int opcode,String owner,String name,String descriptor){code.add(new MethodInsnNode(opcode,owner,name,descriptor,opcode==Opcodes.INVOKEINTERFACE));}
+    /** Match the real branch graph as well as its calls; a foreign callback is not a standard offer. */
+    private static boolean mpscLayout(MethodNode method,InsnList expected){
+        if((method.access&Opcodes.ACC_STATIC)!=0||!method.tryCatchBlocks.isEmpty())return false;
+        List<AbstractInsnNode> actual=instructions(method),wanted=Arrays.stream(expected.toArray()).filter(at->at.getOpcode()>=0).toList();
+        if(actual.size()!=wanted.size())return false;
+        for(int i=0;i<actual.size();i++){
+            AbstractInsnNode at=actual.get(i),want=wanted.get(i);if(at.getOpcode()!=want.getOpcode()||at.getType()!=want.getType())return false;
+            if(want instanceof VarInsnNode value){if(((VarInsnNode)at).var!=value.var)return false;}
+            else if(want instanceof TypeInsnNode value){if(!((TypeInsnNode)at).desc.equals(value.desc))return false;}
+            else if(want instanceof FieldInsnNode value){var field=(FieldInsnNode)at;if(!field.owner.equals(value.owner)||!field.name.equals(value.name)||!field.desc.equals(value.desc))return false;}
+            else if(want instanceof MethodInsnNode value){var call=(MethodInsnNode)at;if(!call.owner.equals(value.owner)||!call.name.equals(value.name)||!call.desc.equals(value.desc)||call.itf!=value.itf)return false;}
+            else if(want instanceof LdcInsnNode value){if(!Objects.equals(((LdcInsnNode)at).cst,value.cst))return false;}
+            else if(want instanceof JumpInsnNode value){if(actual.indexOf(executable(((JumpInsnNode)at).label))!=wanted.indexOf(executable(value.label)))return false;}
+            else if(want instanceof TableSwitchInsnNode value){var table=(TableSwitchInsnNode)at;
+                if(table.min!=value.min||table.max!=value.max||table.labels.size()!=value.labels.size()||actual.indexOf(executable(table.dflt))!=wanted.indexOf(executable(value.dflt)))return false;
+                for(int entry=0;entry<table.labels.size();entry++)if(actual.indexOf(executable(table.labels.get(entry)))!=wanted.indexOf(executable(value.labels.get(entry))))return false;
+            }else if(!(want instanceof InsnNode))return false;
+        }return true;
+    }
+    private static void mpscCapacity(MethodNode method,String owner,int stage){
+        InsnList expected=new InsnList();if(stage==0)mpscVars(expected,Opcodes.LLOAD,1);
+        else{mpscVars(expected,Opcodes.ALOAD,0);expected.add(new FieldInsnNode(Opcodes.GETFIELD,owner,"maxQueueCapacity","J"));mpscVars(expected,Opcodes.LLOAD,1,3);mpscOps(expected,Opcodes.LSUB,Opcodes.LSUB);}
+        mpscOps(expected,Opcodes.LRETURN);if(!mpscLayout(method,expected))throw new IllegalStateException("NETTY_MPSC_CAPACITY_LAYOUT_UNAVAILABLE:"+owner+":"+method.name);
+        InsnList observed=new InsnList();LabelNode positive=new LabelNode();
+        if(stage==1){mpscOps(observed,Opcodes.DUP2,Opcodes.LCONST_0,Opcodes.LCMP);observed.add(new JumpInsnNode(Opcodes.IFGT,positive));}
+        mpscVars(observed,Opcodes.ALOAD,0);mpscOps(observed,Opcodes.ICONST_0+stage);call(observed,"writeSubmissionMpscCapacity","(Ljava/lang/Object;I)V");if(stage==1)observed.add(positive);
+        method.instructions.insertBefore(instructions(method).get(instructions(method).size()-1),observed);
+    }
+    private static void mpscRead(MethodNode method,String owner,String field,int stage){
+        InsnList expected=new InsnList();mpscVars(expected,Opcodes.ALOAD,0);expected.add(new FieldInsnNode(Opcodes.GETFIELD,owner,field,"J"));mpscOps(expected,Opcodes.LRETURN);
+        if((method.access&Opcodes.ACC_FINAL)==0||!mpscLayout(method,expected))throw new IllegalStateException("NETTY_MPSC_INDEX_READ_LAYOUT_UNAVAILABLE:"+owner+":"+method.name);
+        InsnList observed=new InsnList();mpscVars(observed,Opcodes.ALOAD,0);mpscOps(observed,Opcodes.ICONST_0+stage);call(observed,"writeSubmissionMpscRead","(Ljava/lang/Object;I)V");
+        List<AbstractInsnNode> actual=instructions(method);method.instructions.insertBefore(actual.get(actual.size()-1),observed);
+    }
+    private static void mpscOfferBridge(MethodNode method,String owner){
+        InsnList expected=new InsnList();mpscVars(expected,Opcodes.ALOAD,0,1);mpscCall(expected,Opcodes.INVOKESPECIAL,owner+"ColdProducerFields","offer","(Ljava/lang/Object;)Z");mpscOps(expected,Opcodes.IRETURN);
+        if(!mpscLayout(method,expected))throw new IllegalStateException("NETTY_MPSC_OFFER_BRIDGE_UNAVAILABLE:"+owner);
+    }
+    private static void mpscSlowPath(MethodNode method,String owner){
+        InsnList code=new InsnList();LabelNode fullTest=new LabelNode(),proceed=new LabelNode(),resize=new LabelNode(),retry=new LabelNode();
+        mpscVars(code,Opcodes.ALOAD,0);mpscCall(code,Opcodes.INVOKEVIRTUAL,owner,"lvConsumerIndex","()J");mpscVars(code,Opcodes.LSTORE,7);
+        mpscVars(code,Opcodes.ALOAD,0);mpscVars(code,Opcodes.LLOAD,1);mpscCall(code,Opcodes.INVOKEVIRTUAL,owner,"getCurrentBufferCapacity","(J)J");mpscVars(code,Opcodes.LSTORE,9);
+        mpscVars(code,Opcodes.LLOAD,7,9);mpscOps(code,Opcodes.LADD);mpscVars(code,Opcodes.LLOAD,3);mpscOps(code,Opcodes.LCMP);code.add(new JumpInsnNode(Opcodes.IFLE,fullTest));
+        mpscVars(code,Opcodes.ALOAD,0);mpscVars(code,Opcodes.LLOAD,5,7,9);mpscOps(code,Opcodes.LADD);mpscCall(code,Opcodes.INVOKEVIRTUAL,owner,"casProducerLimit","(JJ)Z");code.add(new JumpInsnNode(Opcodes.IFNE,proceed));
+        mpscOps(code,Opcodes.ICONST_1,Opcodes.IRETURN);code.add(proceed);mpscOps(code,Opcodes.ICONST_0,Opcodes.IRETURN);
+        code.add(fullTest);mpscVars(code,Opcodes.ALOAD,0);mpscVars(code,Opcodes.LLOAD,3,7);mpscCall(code,Opcodes.INVOKEVIRTUAL,owner,"availableInQueue","(JJ)J");mpscOps(code,Opcodes.LCONST_0,Opcodes.LCMP);code.add(new JumpInsnNode(Opcodes.IFGT,resize));
+        mpscOps(code,Opcodes.ICONST_2,Opcodes.IRETURN);code.add(resize);mpscVars(code,Opcodes.ALOAD,0);mpscVars(code,Opcodes.LLOAD,3,3);mpscOps(code,Opcodes.LCONST_1,Opcodes.LADD);
+        mpscCall(code,Opcodes.INVOKEVIRTUAL,owner,"casProducerIndex","(JJ)Z");code.add(new JumpInsnNode(Opcodes.IFEQ,retry));mpscOps(code,Opcodes.ICONST_3,Opcodes.IRETURN);code.add(retry);mpscOps(code,Opcodes.ICONST_1,Opcodes.IRETURN);
+        if(!mpscLayout(method,code))throw new IllegalStateException("NETTY_MPSC_SLOW_PATH_LAYOUT_UNAVAILABLE:"+owner);
+        List<AbstractInsnNode> actual=instructions(method);for(int i=0;i<actual.size()-1;i++)if(actual.get(i).getOpcode()==Opcodes.ICONST_2&&actual.get(i+1).getOpcode()==Opcodes.IRETURN){
+            InsnList full=new InsnList();mpscVars(full,Opcodes.ALOAD,0);call(full,"writeSubmissionMpscFull","(Ljava/lang/Object;)V");method.instructions.insertBefore(actual.get(i+1),full);return;
+        }throw new IllegalStateException("NETTY_MPSC_FULL_RETURN_UNAVAILABLE:"+owner);
+    }
+    private static void mpscOffer(MethodNode method,String owner){
+        boolean atomic=owner.equals(MPSC_ATOMIC_BASE);String buffer=atomic?"Ljava/util/concurrent/atomic/AtomicReferenceArray;":"[Ljava/lang/Object;";
+        InsnList code=new InsnList();LabelNode retry=new LabelNode(),even=new LabelNode(),cas=new LabelNode(),proceed=new LabelNode(),again=new LabelNode(),full=new LabelNode(),resize=new LabelNode(),failed=new LabelNode(),write=new LabelNode();
+        mpscOps(code,Opcodes.ACONST_NULL);mpscVars(code,Opcodes.ALOAD,1);code.add(new JumpInsnNode(Opcodes.IF_ACMPNE,retry));code.add(new TypeInsnNode(Opcodes.NEW,"java/lang/NullPointerException"));mpscOps(code,Opcodes.DUP);mpscCall(code,Opcodes.INVOKESPECIAL,"java/lang/NullPointerException","<init>","()V");mpscOps(code,Opcodes.ATHROW);
+        code.add(retry);mpscVars(code,Opcodes.ALOAD,0);mpscCall(code,Opcodes.INVOKEVIRTUAL,owner,"lvProducerLimit","()J");mpscVars(code,Opcodes.LSTORE,7);
+        mpscVars(code,Opcodes.ALOAD,0);mpscCall(code,Opcodes.INVOKEVIRTUAL,owner,"lvProducerIndex","()J");mpscVars(code,Opcodes.LSTORE,5);
+        mpscVars(code,Opcodes.LLOAD,5);mpscOps(code,Opcodes.LCONST_1,Opcodes.LAND,Opcodes.LCONST_1,Opcodes.LCMP);code.add(new JumpInsnNode(Opcodes.IFNE,even));code.add(new JumpInsnNode(Opcodes.GOTO,retry));
+        code.add(even);mpscVars(code,Opcodes.ALOAD,0);code.add(new FieldInsnNode(Opcodes.GETFIELD,owner,"producerMask","J"));mpscVars(code,Opcodes.LSTORE,2);
+        mpscVars(code,Opcodes.ALOAD,0);code.add(new FieldInsnNode(Opcodes.GETFIELD,owner,"producerBuffer",buffer));mpscVars(code,Opcodes.ASTORE,4);
+        mpscVars(code,Opcodes.LLOAD,7,5);mpscOps(code,Opcodes.LCMP);code.add(new JumpInsnNode(Opcodes.IFGT,cas));
+        mpscVars(code,Opcodes.ALOAD,0);mpscVars(code,Opcodes.LLOAD,2,5,7);mpscCall(code,Opcodes.INVOKESPECIAL,owner,"offerSlowPath","(JJJ)I");mpscVars(code,Opcodes.ISTORE,9);mpscVars(code,Opcodes.ILOAD,9);
+        code.add(new TableSwitchInsnNode(0,3,cas,proceed,again,full,resize));code.add(proceed);code.add(new JumpInsnNode(Opcodes.GOTO,cas));code.add(again);code.add(new JumpInsnNode(Opcodes.GOTO,retry));code.add(full);mpscOps(code,Opcodes.ICONST_0,Opcodes.IRETURN);
+        code.add(resize);mpscVars(code,Opcodes.ALOAD,0);mpscVars(code,Opcodes.LLOAD,2);mpscVars(code,Opcodes.ALOAD,4);mpscVars(code,Opcodes.LLOAD,5);mpscVars(code,Opcodes.ALOAD,1);mpscOps(code,Opcodes.ACONST_NULL);
+        mpscCall(code,Opcodes.INVOKESPECIAL,owner,"resize","(J"+buffer+"JLjava/lang/Object;L"+MPSC+"MessagePassingQueue$Supplier;)V");mpscOps(code,Opcodes.ICONST_1,Opcodes.IRETURN);
+        code.add(cas);mpscVars(code,Opcodes.ALOAD,0);mpscVars(code,Opcodes.LLOAD,5,5);code.add(new LdcInsnNode(2L));mpscOps(code,Opcodes.LADD);mpscCall(code,Opcodes.INVOKEVIRTUAL,owner,"casProducerIndex","(JJ)Z");code.add(new JumpInsnNode(Opcodes.IFEQ,failed));code.add(new JumpInsnNode(Opcodes.GOTO,write));code.add(failed);code.add(new JumpInsnNode(Opcodes.GOTO,retry));
+        code.add(write);mpscVars(code,Opcodes.LLOAD,5,2);mpscCall(code,Opcodes.INVOKESTATIC,atomic?MPSC+"atomic/AtomicQueueUtil":MPSC+"LinkedArrayQueueUtil","modifiedCalcCircularRefElementOffset",atomic?"(JJ)I":"(JJ)J");mpscVars(code,atomic?Opcodes.ISTORE:Opcodes.LSTORE,7);
+        mpscVars(code,Opcodes.ALOAD,4);mpscVars(code,atomic?Opcodes.ILOAD:Opcodes.LLOAD,7);mpscVars(code,Opcodes.ALOAD,1);
+        mpscCall(code,Opcodes.INVOKESTATIC,atomic?MPSC+"atomic/AtomicQueueUtil":"io/netty/util/internal/shaded/org/jctools/util/UnsafeRefArrayAccess","soRefElement","("+buffer+(atomic?"I":"J")+"Ljava/lang/Object;)V");mpscOps(code,Opcodes.ICONST_1,Opcodes.IRETURN);
+        if(!mpscLayout(method,code))throw new IllegalStateException("NETTY_MPSC_OFFER_LAYOUT_UNAVAILABLE:"+owner);
+        List<AbstractInsnNode> actual=instructions(method);for(int i=0;i<actual.size()-1;i++)if(actual.get(i).getOpcode()==Opcodes.ICONST_0&&actual.get(i+1).getOpcode()==Opcodes.IRETURN){
+            InsnList rejected=new InsnList();mpscVars(rejected,Opcodes.ALOAD,0,1);call(rejected,"writeSubmissionMpscOffered","(Ljava/lang/Object;Ljava/lang/Object;)V");method.instructions.insertBefore(actual.get(i+1),rejected);return;
+        }throw new IllegalStateException("NETTY_MPSC_OFFER_FALSE_UNAVAILABLE:"+owner);
+    }
     private static void writeOfferFailed(MethodNode method){
         List<AbstractInsnNode> code=instructions(method);
         if((method.access&Opcodes.ACC_STATIC)!=0||code.size()!=12||!method.tryCatchBlocks.isEmpty()

@@ -79,6 +79,7 @@ public final class NetworkBridge {
         final Ref<Object> executor,task;final Write write;
         Throwable rejection,queryFailure;Cleanup cleanup;boolean proven,caught,claimed,closed;
         Ref<Object> failedQueue,failedHandler;Class<?> offerExecutor;int offerDepth;boolean offerRejected;
+        Ref<Object> mpscQueue;Class<?> mpscBase,mpscExecutor;int mpscReadStage,mpscSlowDepth,mpscProducerDepth,mpscOfferDepth;boolean mpscCapacity,mpscAvailable,mpscFull,mpscFailed,mpscUnresolved;
         Submission(Object executor,Object task,Write write,Class<?> declaring,int boundaryDepth){
             parent=SUBMITTING.get();this.executor=new Ref<>(executor);this.task=new Ref<>(task);this.write=write;this.declaring=declaring;this.boundaryDepth=boundaryDepth;
         }
@@ -232,6 +233,96 @@ public final class NetworkBridge {
     private static boolean writeTuple(Object task,Write write){
         return task!=null&&field(task,"ctx")==write.context().get()&&field(task,"msg")==write.message().get()&&field(task,"promise")==write.promise().get();
     }
+    /** The original volatile field reads cannot hide an overwritten getter callback. */
+    public static void writeSubmissionMpscRead(Object queue,int stage){
+        Submission submission=SUBMITTING.get();
+        if(submission==null||submission.closed||submission.thread!=Thread.currentThread()||submission.rejection!=null||submission.offerDepth!=0)return;
+        int before=submission.mpscReadStage;submission.mpscReadStage=0;
+        submission.mpscCapacity=false;submission.mpscAvailable=false;submission.mpscFull=false;submission.mpscFailed=false;
+        if(stage==0){submission.mpscQueue=null;submission.mpscBase=null;submission.mpscExecutor=null;submission.mpscSlowDepth=0;submission.mpscProducerDepth=0;submission.mpscOfferDepth=0;}
+        else if(stage<0||stage>2)throw new SecurityException("ACTUAL_NETTY_MPSC_INDEX_STAGE_REQUIRED");
+        var frame=boundary();String method=stage==0?"lvProducerLimit":stage==1?"lvProducerIndex":"lvConsumerIndex";
+        if(!frame.getMethodName().equals(method)||!frame.getDescriptor().equals("()J"))throw new SecurityException("ACTUAL_NETTY_MPSC_INDEX_READ_REQUIRED");
+        boolean observed=false;
+        try{
+            Object executor=submission.executor.get();Class<?> executorBase=NetworkCleanup.mpscExecutor(executor),base=NetworkCleanup.mpscBase(queue,executorBase);
+            if(base==null||frame.getDeclaringClass()!=NetworkCleanup.mpscReadType(queue,base,stage)||NetworkCleanup.rejectionQueue(executor,executorBase)!=queue
+                    ||stage!=0&&(before!=stage||submission.mpscQueue==null||submission.mpscQueue.get()!=queue||submission.mpscBase!=base||submission.mpscExecutor!=executorBase)
+                    ||!mpscReadPath(submission,frame.getDeclaringClass(),queue.getClass(),base,executorBase,stage)
+                    ||!NetworkCleanup.submissionBoundary(submission.declaring,submission.boundaryDepth))return;
+            int producerDepth=NativeControl.networkBoundaryDepth(base,"offer"),offerDepth=NativeControl.networkBoundaryDepth(executorBase,"offerTask");
+            if(producerDepth<=0||offerDepth<=0)return;
+            if(stage==0){
+                Ref<Object> retained=new Ref<>(queue);protect(retained);submission.mpscQueue=retained;submission.mpscBase=base;submission.mpscExecutor=executorBase;
+                submission.mpscProducerDepth=producerDepth;submission.mpscOfferDepth=offerDepth;
+            }else if(submission.mpscProducerDepth!=producerDepth||submission.mpscOfferDepth!=offerDepth)return;
+            if(stage==2){int slowDepth=NativeControl.networkBoundaryDepth(base,"offerSlowPath");if(slowDepth<=0)return;submission.mpscSlowDepth=slowDepth;}
+            submission.mpscReadStage=stage+1;observed=true;
+        }catch(RuntimeException|Error unavailable){submission.queryFailure=unavailable;}
+        finally{if(!observed)submission.mpscUnresolved=true;}
+    }
+    /** Observe the original bounded queue's capacity methods while its offer is live. */
+    public static void writeSubmissionMpscCapacity(Object queue,int stage){
+        Submission submission=SUBMITTING.get();
+        if(submission==null||submission.closed||submission.thread!=Thread.currentThread()||submission.rejection!=null||submission.offerDepth!=0)return;
+        if(stage==0){
+            submission.mpscCapacity=false;submission.mpscAvailable=false;submission.mpscFull=false;submission.mpscFailed=false;
+        }else if(stage==1){submission.mpscAvailable=false;submission.mpscFull=false;submission.mpscFailed=false;}
+        else throw new SecurityException("ACTUAL_NETTY_MPSC_CAPACITY_STAGE_REQUIRED");
+        var frame=boundary();
+        if(!frame.getMethodName().equals(stage==0?"getCurrentBufferCapacity":"availableInQueue")||!frame.getDescriptor().equals(stage==0?"(J)J":"(JJ)J"))throw new SecurityException("ACTUAL_NETTY_MPSC_CAPACITY_REQUIRED");
+        boolean observed=false;
+        try{
+            Object executor=submission.executor.get();Class<?> executorBase=NetworkCleanup.mpscExecutor(executor),base=NetworkCleanup.mpscBase(queue,executorBase);
+            if(base==null||submission.mpscReadStage!=3||submission.mpscQueue==null||submission.mpscQueue.get()!=queue||submission.mpscBase!=base||submission.mpscExecutor!=executorBase
+                    ||stage==1&&!submission.mpscCapacity||frame.getDeclaringClass()!=queue.getClass()||NetworkCleanup.rejectionQueue(executor,executorBase)!=queue
+                    ||!mpscOfferPath(submission,queue.getClass(),base,executorBase,stage)
+                    ||!NetworkCleanup.submissionBoundary(submission.declaring,submission.boundaryDepth))return;
+            int slowDepth=NativeControl.networkBoundaryDepth(base,"offerSlowPath"),offerDepth=NativeControl.networkBoundaryDepth(executorBase,"offerTask");
+            if(slowDepth<=0||offerDepth<=0||submission.mpscSlowDepth!=slowDepth||submission.mpscOfferDepth!=offerDepth
+                    ||NativeControl.networkBoundaryDepth(base,"offer")!=submission.mpscProducerDepth)return;
+            if(stage==0)submission.mpscCapacity=true;else submission.mpscAvailable=true;observed=true;
+        }catch(RuntimeException|Error unavailable){submission.queryFailure=unavailable;}
+        finally{if(!observed)submission.mpscUnresolved=true;}
+    }
+    /** The original full return is before the queue reserves an index or stores the task. */
+    public static void writeSubmissionMpscFull(Object queue){
+        Submission submission=SUBMITTING.get();
+        if(submission==null||submission.closed||submission.thread!=Thread.currentThread()||submission.rejection!=null||submission.offerDepth!=0)return;
+        submission.mpscFull=false;submission.mpscFailed=false;
+        var frame=boundary();
+        if(!frame.getMethodName().equals("offerSlowPath")||!frame.getDescriptor().equals("(JJJ)I"))throw new SecurityException("ACTUAL_NETTY_MPSC_FULL_RETURN_REQUIRED");
+        boolean observed=false;
+        try{
+            Class<?> base=submission.mpscBase,executorBase=submission.mpscExecutor;Object executor=submission.executor.get();
+            if(!submission.mpscAvailable||submission.mpscQueue==null||submission.mpscQueue.get()!=queue||base==null||frame.getDeclaringClass()!=base
+                    ||NetworkCleanup.mpscBase(queue,executorBase)!=base||NetworkCleanup.mpscExecutor(executor)!=executorBase||NetworkCleanup.rejectionQueue(executor,executorBase)!=queue
+                    ||NativeControl.networkBoundaryDepth(base,"offerSlowPath")!=submission.mpscSlowDepth||NativeControl.networkBoundaryDepth(executorBase,"offerTask")!=submission.mpscOfferDepth
+                    ||NativeControl.networkBoundaryDepth(base,"offer")!=submission.mpscProducerDepth
+                    ||!mpscOfferPath(submission,queue.getClass(),base,executorBase,2)||!NetworkCleanup.submissionBoundary(submission.declaring,submission.boundaryDepth))return;
+            submission.mpscFull=true;observed=true;
+        }catch(RuntimeException|Error unavailable){submission.queryFailure=unavailable;}
+        finally{if(!observed)submission.mpscUnresolved=true;}
+    }
+    /** Bind the actual offer argument, rather than attributing a returned producer frame later. */
+    public static void writeSubmissionMpscOffered(Object queue,Object task){
+        Submission submission=SUBMITTING.get();
+        if(submission==null||submission.closed||submission.thread!=Thread.currentThread()||submission.rejection!=null||submission.offerDepth!=0)return;
+        submission.mpscFailed=false;
+        var frame=boundary();
+        if(!frame.getMethodName().equals("offer")||!frame.getDescriptor().equals("(Ljava/lang/Object;)Z"))throw new SecurityException("ACTUAL_NETTY_MPSC_OFFER_FALSE_REQUIRED");
+        boolean observed=false;
+        try{
+            Class<?> base=submission.mpscBase,executorBase=submission.mpscExecutor;Object executor=submission.executor.get();
+            if(task!=submission.task.get()||!submission.mpscFull||submission.mpscQueue==null||submission.mpscQueue.get()!=queue||base==null||frame.getDeclaringClass()!=base
+                    ||NetworkCleanup.mpscBase(queue,executorBase)!=base||NetworkCleanup.mpscExecutor(executor)!=executorBase||NetworkCleanup.rejectionQueue(executor,executorBase)!=queue
+                    ||NativeControl.networkBoundaryDepth(executorBase,"offerTask")!=submission.mpscOfferDepth||NativeControl.networkBoundaryDepth(base,"offer")!=submission.mpscProducerDepth
+                    ||!mpscOfferPath(submission,queue.getClass(),base,executorBase,3)
+                    ||!NetworkCleanup.submissionBoundary(submission.declaring,submission.boundaryDepth))return;
+            synchronized(CHANNELS){if(WRITES.get(new Key(task,false))==submission.write&&writeTuple(task,submission.write)){submission.mpscFailed=true;observed=true;}}
+        }catch(RuntimeException|Error unavailable){submission.queryFailure=unavailable;}
+        finally{if(!observed)submission.mpscUnresolved=true;}
+    }
     /** The actual offerTask false value, while its producer frame is still live. */
     public static void writeSubmissionOfferFailed(Object executor,Object task){
         var frame=boundary();Class<?> base=frame.getDeclaringClass();
@@ -242,7 +333,10 @@ public final class NetworkBridge {
         try{
             if(!NetworkCleanup.standardExecutor(executor,base))return;
             Object queue=NetworkCleanup.rejectionQueue(executor,base),handler=NetworkCleanup.defaultRejectHandler(executor,base);
-            if(queue==null||handler==null||!offerFailurePath(submission,base)||!NetworkCleanup.submissionBoundary(submission.declaring,submission.boundaryDepth))return;
+            if(submission.mpscUnresolved||queue==null||handler==null||!offerFailurePath(submission,base)||!NetworkCleanup.submissionBoundary(submission.declaring,submission.boundaryDepth))return;
+            if(queue.getClass()!=java.util.concurrent.LinkedBlockingQueue.class&&(!submission.mpscFailed||submission.mpscQueue==null||submission.mpscQueue.get()!=queue
+                    ||submission.mpscExecutor!=base||NetworkCleanup.mpscBase(queue,base)!=submission.mpscBase
+                    ||NativeControl.networkBoundaryDepth(base,"offerTask")!=submission.mpscOfferDepth))return;
             int depth=NativeControl.networkBoundaryDepth(base,"addTask");if(depth<=0)return;
             Ref<Object> queueRef=new Ref<>(queue),handlerRef=new Ref<>(handler);protect(queueRef,handlerRef);
             synchronized(CHANNELS){
@@ -278,7 +372,7 @@ public final class NetworkBridge {
         submission.rejection=failure;
         try{
             Class<?> base=submission.offerExecutor;
-            if(base==null||!submission.offerRejected||submission.offerDepth<=0||submission.failedHandler==null||submission.failedHandler.get()!=handler||submission.failedQueue==null
+            if(submission.mpscUnresolved||base==null||!submission.offerRejected||submission.offerDepth<=0||submission.failedHandler==null||submission.failedHandler.get()!=handler||submission.failedQueue==null
                     ||!NetworkCleanup.standardExecutor(executor,base)||NetworkCleanup.defaultRejectHandler(executor,base)!=handler
                     ||NetworkCleanup.rejectionQueue(executor,base)!=submission.failedQueue.get()
                     ||NativeControl.networkBoundaryDepth(base,"addTask")!=submission.offerDepth||!defaultRejectionPath(submission,handlerType,base)
@@ -297,7 +391,7 @@ public final class NetworkBridge {
         submission.rejection=failure;
         Object executor=submission.executor.get(),task=submission.task.get();
         try{
-            if(executor==null||task==null||!rejectionPath(submission,frame.getDeclaringClass())
+            if(submission.mpscUnresolved||executor==null||task==null||!rejectionPath(submission,frame.getDeclaringClass())
                     ||!NetworkCleanup.submissionBoundary(submission.declaring,submission.boundaryDepth))return;
             synchronized(CHANNELS){if(WRITES.get(new Key(task,false))==submission.write&&writeTuple(task,submission.write))submission.proven=true;}
         }catch(RuntimeException|Error unavailable){submission.queryFailure=unavailable;}
@@ -320,6 +414,30 @@ public final class NetworkBridge {
             var cursor=frames.dropWhile(frame->frame.getDeclaringClass().getNestHost()==NetworkBridge.class).iterator();
             if(!cursor.hasNext()||!submissionFrame(cursor.next(),executorBase,"offerTask","(Ljava/lang/Runnable;)Z")||!cursor.hasNext())return false;
             if(!submissionFrame(cursor.next(),executorBase,"addTask","(Ljava/lang/Runnable;)V")||!cursor.hasNext())return false;
+            return submissionDispatch(cursor.next(),cursor,submission,executorBase);
+        });
+    }
+    private static boolean mpscOfferPath(Submission submission,Class<?> concrete,Class<?> base,Class<?> executorBase,int stage){
+        return WALKER.walk(frames->{
+            var cursor=frames.dropWhile(frame->frame.getDeclaringClass().getNestHost()==NetworkBridge.class).iterator();
+            if(stage<2&&(!cursor.hasNext()||!submissionFrame(cursor.next(),concrete,stage==0?"getCurrentBufferCapacity":"availableInQueue",stage==0?"(J)J":"(JJ)J")))return false;
+            if(stage<3&&(!cursor.hasNext()||!submissionFrame(cursor.next(),base,"offerSlowPath","(JJJ)I")))return false;
+            if(!cursor.hasNext()||!submissionFrame(cursor.next(),base,"offer","(Ljava/lang/Object;)Z")
+                    ||!cursor.hasNext()||!submissionFrame(cursor.next(),concrete,"offer","(Ljava/lang/Object;)Z")
+                    ||!cursor.hasNext()||!submissionFrame(cursor.next(),executorBase,"offerTask","(Ljava/lang/Runnable;)Z")
+                    ||!cursor.hasNext()||!submissionFrame(cursor.next(),executorBase,"addTask","(Ljava/lang/Runnable;)V")||!cursor.hasNext())return false;
+            return submissionDispatch(cursor.next(),cursor,submission,executorBase);
+        });
+    }
+    private static boolean mpscReadPath(Submission submission,Class<?> reader,Class<?> concrete,Class<?> base,Class<?> executorBase,int stage){
+        return WALKER.walk(frames->{
+            var cursor=frames.dropWhile(frame->frame.getDeclaringClass().getNestHost()==NetworkBridge.class).iterator();
+            if(!cursor.hasNext()||!submissionFrame(cursor.next(),reader,stage==0?"lvProducerLimit":stage==1?"lvProducerIndex":"lvConsumerIndex","()J"))return false;
+            if(stage==2&&(!cursor.hasNext()||!submissionFrame(cursor.next(),base,"offerSlowPath","(JJJ)I")))return false;
+            if(!cursor.hasNext()||!submissionFrame(cursor.next(),base,"offer","(Ljava/lang/Object;)Z")
+                    ||!cursor.hasNext()||!submissionFrame(cursor.next(),concrete,"offer","(Ljava/lang/Object;)Z")
+                    ||!cursor.hasNext()||!submissionFrame(cursor.next(),executorBase,"offerTask","(Ljava/lang/Runnable;)Z")
+                    ||!cursor.hasNext()||!submissionFrame(cursor.next(),executorBase,"addTask","(Ljava/lang/Runnable;)V")||!cursor.hasNext())return false;
             return submissionDispatch(cursor.next(),cursor,submission,executorBase);
         });
     }

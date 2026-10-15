@@ -766,6 +766,13 @@ public final class ResourceBridge {
     /** Entered only while the actual JNI binding keeps this receiver and source tuple live. */
     public static Object nativeFileOperation(Object value,Class<?> declaring,String method,Module[] sources,int operation,long address,long length)throws IOException {
         if(!NativeControl.fileOperationBoundary(value,declaring,method,sources,operation,address,length))throw new SecurityException("ACTUAL_NATIVE_FILE_OPERATION_REQUIRED");
+        if(operation==9){
+            if(!ControlBridge.recoveryWriter()){
+                for(Module source:sources)if(source!=null&&ControlBridge.modStopped(source))throw new java.net.SocketException("RONOVA_TERMINAL_SOCKET_OPEN_REFUSED");
+                if(!ControlBridge.taskEffectAllowed(null,"socket-open"))throw new java.net.SocketException("RONOVA_TERMINAL_SOCKET_OPEN_REFUSED");
+            }
+            return null;
+        }
         if(operation==7){IoBridge.nativeSocketClosing(declaring,method,address,sources);return null;}
         if(operation==6){
             synchronized(STREAMS){for(BufferStorage storage:BUFFER_ACTIONS.values())

@@ -1,11 +1,11 @@
 # Ronova Pro
 
-主工程：`D:\桌面\ronova_GPT`。Java ABI81 / Native ABI74 / Storage3 / Journal6，客户端协议 `r3-client-8`。
+主工程：`D:\桌面\ronova_GPT`。Java ABI82 / Native ABI75 / Storage3 / Journal6，客户端协议 `r3-client-8`。
 Java 17；用户态 GNU C23 / GNU C++23；独立 Windows 驱动及管理工具 C17。
 当前接续补齐手动冻结区域的实际 section/palette 写入判断、字段图原子恢复与已知共享来源保留，并修正 Netty 停源拒绝抢在原 promise 校验之前的误伤。未知载体与未观察底层写入仍按状态页保留边界。
 停组后的原 Netty WriteTask 保留发送来源直到 run/cancel 的 finally；拒绝写入分步执行消息释放、promise 终结及原 flush，异常不跳过后续收尾。清理资格绑定实际对象关系、字段/数组槽、准确调用链和实际递归层，不向用户回调提供写权；停组任务在原回收位置丢弃，不再送回共享对象池。实际运行结果仍以状态页为准。
 冻结区域的原版位存储、实际 backing 数组、调色板值表及 section/Data 替换接入同一当前世界目标判断，允许冻结格内容不变的邻居写入和原版扩容。活跃效果的真实 Optional/FactorData 连接和字段也接入原保护门，原版 tick 与准确读取回填保留。Netty 原版执行器的真实拒绝分支补 release、失败通知与取消的异常收尾；无法确认未入队的任务保留待结清。
-标准全局方块状态表的正向列表、反向编号及其数组也纳入冻结判断，原版 rehash 按本次实际完整数据接续。效果的标准解药列表复用已有 ItemStack/NBT 保护，默认 provider 的首次初始化保留。原版默认满队列拒绝仅在真实 LinkedBlockingQueue 和 REJECT 单例配对时接入原收尾；自定义队列/handler 不取得该资格。
+标准全局方块状态表的正向列表、反向编号及其数组也纳入冻结判断；原版 rehash、删除与迭代器搬移按本次实际键值接续，冻结映射在副作用前拒绝，半写仅按准确旧值 CAS 收尾。效果的标准解药列表复用已有 ItemStack/NBT 保护，包含常见 JDK/Guava 不可变及单元素列表，实际 provider 覆写的返回值只在原 getter 一次发布。默认满队列拒绝支持真实 LinkedBlockingQueue 和标准有界 MPSC 两种实现，按活跃原读取/offer/REJECT 链接入原收尾；自定义队列/handler 不取得该资格。Windows JDK 的实际 Net.socket0 创建入口补入 Native 来源和停组判断，未解析的旧入口仍保持 pending。
 本轮新增旧运行帧的准确退役与来源收尾、GameMode/Item 真实覆写动作接续，以及手动冻结区域的标准方块写入阻断。Windows 当前游戏进程的外部新建/复制危险句柄保护使用独立命令 `/ronova_pro host protect-jvm true`，`false` 撤销；沿实际玩家/控制台资格，各运行实例只撤销自己的选择，显示实际驱动回执，命令不会安装或加载驱动。旧帧仅对无未知清理责任的可退出子集强退；未知 finally/锁、未观察的机器码/系统调用、既有句柄和未知自定义载体继续保留边界。
 当前源码包含连接前队列逐次发送来源及 EventLoop 接续、独立禁疗、已观察 Host 效果的短提交门，以及原生 Unsafe 写入/free/realloc 的准确控制范围拒绝。外部 JVMTI/堆回调暂时移除借来的内部计数，结束后恢复。活跃效果、FoodData、标准身体的当前六槽装备及其真实 ItemStack/NBT 接入实际写入防护；换装、物品使用、食用、真实攻击与延后挖掘按准确原业务动作交接，拒绝取出时返回 EMPTY，避免留下物品副本。挖掘续接绑定实际玩家、GameMode、世界、目标坐标与当前工具，普通回调不能借用；JNI 数组副本保留获取时的已知及未知来源，提交时并入原检查。FoodData 防写保留自然消耗，不等于免饿。区域禁生成接入底层管理器准入。自定义载体及尚未接入的正常动作仍保留缺口。实际构建、网络及游戏结果以
 [当前进度](docs/A-批验收状态.md) 和 [实际报告](validation/b-final-20261007/REPORT.md) 为准。自身外观及武器注册暂缓，完整 C/B 尚未完成。

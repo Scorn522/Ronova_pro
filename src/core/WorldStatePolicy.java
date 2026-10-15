@@ -11,6 +11,7 @@ import it.unimi.dsi.fastutil.HashCommon;
 import it.unimi.dsi.fastutil.objects.AbstractObject2IntFunction;
 import it.unimi.dsi.fastutil.objects.Object2IntMap;
 import it.unimi.dsi.fastutil.objects.Object2IntOpenCustomHashMap;
+import it.unimi.dsi.fastutil.objects.ObjectArrayList;
 import net.minecraft.util.*;
 import net.minecraft.world.level.Level;
 import net.minecraft.world.level.LevelHeightAccessor;
@@ -21,7 +22,7 @@ import net.minecraft.world.level.chunk.*;
 
 /** Read the current world chain; neither a captured graph nor the caller grants a write. */
 final class WorldStatePolicy {
-    private enum Kind { KNOWN, ARRAY, FIELD, OFFSET, MEMORY, MAPPING, REHASH }
+    private enum Kind { KNOWN, ARRAY, FIELD, OFFSET, MEMORY, MAPPING, REHASH, REMOVAL, CLEAR, SHIFT }
     private record Slot(Field field,long offset,int width) { }
     static final class Query {
         final Kind kind;final Object receiver,next;final Field field;final int index;final long offset,length;
@@ -37,31 +38,44 @@ final class WorldStatePolicy {
     private static final Object UNKNOWN=new Object();
     private static final boolean LITTLE=ByteOrder.nativeOrder()==ByteOrder.LITTLE_ENDIAN;
     private static volatile boolean initialized;
-    private static Class<?> DATA;
+    private static Class<?> DATA,ITERATOR;
     private static Field SECTIONS,SECTION_STATES,PALETTE_DATA,STRATEGY,REGISTRY,STORAGE,PALETTE,SIMPLE_DATA,SINGLE_VALUE,LINEAR_VALUES,LINEAR_SIZE,HASH_VALUES,BY_ID,GLOBAL_REGISTRY;
     private static Field ID_LIST,ID_REVERSE,LIST_DATA,LIST_SIZE,REVERSE_KEYS,REVERSE_VALUES,REVERSE_MASK,REVERSE_STRATEGY,REVERSE_DEFAULT;
+    private static Field REVERSE_N,REVERSE_SIZE,ITERATOR_OWNER,ITERATOR_LAST,ITERATOR_POS,ITERATOR_WRAPPED,WRAPPED_DATA,WRAPPED_SIZE;
     private static Object IDENTITY_STRATEGY;
+    private static Object VM_UNSAFE;private static Method RESTORE_REFERENCE,RESTORE_INT;
     private static Map<Class<?>,List<Slot>> FIELDS=Map.of();
     private static long LONG_BASE,INT_BASE,REFERENCE_BASE;private static int REFERENCE_WIDTH;
     private record Anchor(Class<?> owner,String method,int bci) { }
     private static final StackWalker WALKER=StackWalker.getInstance(StackWalker.Option.RETAIN_CLASS_REFERENCE);
     private static final ThreadLocal<Rehash> REHASH=new ThreadLocal<>();
+    private static final ThreadLocal<Shift> SHIFT=new ThreadLocal<>();
+    private static final String ITERATOR_NAME="it.unimi.dsi.fastutil.objects.Object2IntOpenCustomHashMap$MapIterator";
     private static final class Rehash {
         final Object receiver;final Object[] keys;final int[] values;final int mask;final List<Anchor> anchor;int step;
         Rehash(Object receiver,Object[] keys,int[] values,int mask,List<Anchor> anchor){this.receiver=receiver;this.keys=keys;this.values=values;this.mask=mask;this.anchor=anchor;}
+    }
+    private static final class Shift {
+        final Object actor,receiver,state,priorKey;final Object[] keys;final int[] values;final int from,to,value,priorValue;final Class<?> owner;final List<Anchor> anchor;int step;boolean restoring;
+        Shift(Object actor,Object receiver,Object[] keys,int[] values,int from,int to,Object state,int value,Class<?> owner,List<Anchor> anchor){
+            this.actor=actor;this.receiver=receiver;this.keys=keys;this.values=values;this.from=from;this.to=to;this.state=state;this.value=value;this.owner=owner;this.anchor=anchor;
+            this.priorKey=keys[to];this.priorValue=values[to];
+        }
     }
     private WorldStatePolicy() { }
 
     static synchronized void initialize()throws ReflectiveOperationException{
         if(initialized)return;
         DATA=Class.forName("net.minecraft.world.level.chunk.PalettedContainer$Data",false,PalettedContainer.class.getClassLoader());
+        ITERATOR=Class.forName(ITERATOR_NAME,false,Object2IntOpenCustomHashMap.class.getClassLoader());
         Class<?> unsafeType=Class.forName("jdk.internal.misc.Unsafe",false,null);
         Class<?>[] carriers={ChunkAccess.class,LevelChunk.class,LevelChunkSection.class,PalettedContainer.class,DATA,SimpleBitStorage.class,ZeroBitStorage.class,
                 SingleValuePalette.class,LinearPalette.class,HashMapPalette.class,GlobalPalette.class,CrudeIncrementalIntIdentityHashBiMap.class,
-                IdMapper.class,ArrayList.class,Object2IntOpenCustomHashMap.class,AbstractObject2IntFunction.class,unsafeType};
+                IdMapper.class,ArrayList.class,Object2IntOpenCustomHashMap.class,AbstractObject2IntFunction.class,ITERATOR,ObjectArrayList.class,unsafeType};
         Class.forName("dev.ronova.pro.agent.RecoveryAgent",false,ClassLoader.getSystemClassLoader()).getMethod("openBackingAccess",Class.class,Class[].class)
                 .invoke(null,WorldStatePolicy.class,(Object)carriers);
         Object unsafe=unsafeType.getMethod("getUnsafe").invoke(null);Method offset=unsafeType.getMethod("objectFieldOffset",Field.class);
+        VM_UNSAFE=unsafe;RESTORE_REFERENCE=unsafeType.getMethod("compareAndSetReference",Object.class,long.class,Object.class,Object.class);RESTORE_INT=unsafeType.getMethod("compareAndSetInt",Object.class,long.class,int.class,int.class);
         LONG_BASE=((Number)unsafeType.getMethod("arrayBaseOffset",Class.class).invoke(unsafe,long[].class)).longValue();
         INT_BASE=((Number)unsafeType.getMethod("arrayBaseOffset",Class.class).invoke(unsafe,int[].class)).longValue();
         REFERENCE_BASE=((Number)unsafeType.getMethod("arrayBaseOffset",Class.class).invoke(unsafe,Object[].class)).longValue();
@@ -76,10 +90,13 @@ final class WorldStatePolicy {
         LIST_DATA=typed(ArrayList.class,Object[].class);LIST_SIZE=named(ArrayList.class,"size");
         REVERSE_KEYS=named(Object2IntOpenCustomHashMap.class,"key");REVERSE_VALUES=named(Object2IntOpenCustomHashMap.class,"value");REVERSE_MASK=named(Object2IntOpenCustomHashMap.class,"mask");
         REVERSE_STRATEGY=typed(Object2IntOpenCustomHashMap.class,Hash.Strategy.class);REVERSE_DEFAULT=named(AbstractObject2IntFunction.class,"defRetValue");
+        REVERSE_N=named(Object2IntOpenCustomHashMap.class,"n");REVERSE_SIZE=named(Object2IntOpenCustomHashMap.class,"size");
+        ITERATOR_OWNER=typed(ITERATOR,Object2IntOpenCustomHashMap.class);ITERATOR_LAST=named(ITERATOR,"last");ITERATOR_POS=named(ITERATOR,"pos");ITERATOR_WRAPPED=typed(ITERATOR,ObjectArrayList.class);
+        WRAPPED_DATA=typed(ObjectArrayList.class,Object[].class);WRAPPED_SIZE=named(ObjectArrayList.class,"size");
         IDENTITY_STRATEGY=net.minecraft.Util.identityStrategy();
         Map<Class<?>,List<Slot>> fields=new HashMap<>();
         for(Class<?> type:carriers){
-            if(type==unsafeType)continue;List<Slot> slots=new ArrayList<>();
+            if(type==unsafeType||type==ITERATOR||type==ObjectArrayList.class)continue;List<Slot> slots=new ArrayList<>();
             for(Class<?> owner=type;owner!=null&&owner!=Object.class;owner=owner.getSuperclass())for(Field field:owner.getDeclaredFields())if(!Modifier.isStatic(field.getModifiers())&&selected(field)){
                 field.setAccessible(true);slots.add(new Slot(field,((Number)offset.invoke(unsafe,field)).longValue(),width(field.getType())));
             }
@@ -120,6 +137,7 @@ final class WorldStatePolicy {
     static boolean known(Object value){return candidate(value)&&ProRuntime.worldStateQuery(new Query(Kind.KNOWN,value,null,-1,null,0,0));}
     static boolean arrayDenied(Object array,int index,Object next){
         if(!candidate(array)||!array.getClass().isArray()||index<0||index>=Array.getLength(array))return false;
+        if(shiftRestoring(array,index,next)||shiftWrite(array,index,next))return false;
         Object prior=Array.get(array,index);if(same(prior,next,array.getClass().getComponentType()))return false;
         return ProRuntime.worldStateQuery(new Query(Kind.ARRAY,array,null,index,next,0,0));
     }
@@ -133,6 +151,9 @@ final class WorldStatePolicy {
     }
     static boolean offsetDenied(Object receiver,long offset,Object next){
         if(!candidate(receiver))return false;
+        Shift restored=SHIFT.get();
+        if(restored!=null&&(receiver==restored.keys&&offset==REFERENCE_BASE+(long)restored.to*REFERENCE_WIDTH||receiver==restored.values&&offset==INT_BASE+(long)restored.to*4)
+                &&shiftRestoring(receiver,restored.to,next))return false;
         if(receiver instanceof Object[]){
             // This value-only backing ABI cannot distinguish putObject(Long)
             // from an eight-byte primitive store into compressed reference slots.
@@ -163,11 +184,130 @@ final class WorldStatePolicy {
         return initialized&&registry==Block.BLOCK_STATE_REGISTRY&&registry.getClass()==IdMapper.class
                 &&ProRuntime.worldStateQuery(new Query(Kind.MAPPING,registry,null,id,state,0,0));
     }
+    static boolean registryWriter(Class<?> caller){
+        return caller==Object2IntOpenCustomHashMap.class||caller.getName().equals(ITERATOR_NAME)&&caller.getClassLoader()==Object2IntOpenCustomHashMap.class.getClassLoader();
+    }
+    private static Object registryActor(Object actor){
+        if(!initialized||actor==null)return null;
+        Object map=actor.getClass()==Object2IntOpenCustomHashMap.class?actor:ITERATOR.isInstance(actor)?read(actor,ITERATOR_OWNER,null):null;
+        return map==read(Block.BLOCK_STATE_REGISTRY,ID_REVERSE,null)&&map!=null&&map.getClass()==Object2IntOpenCustomHashMap.class?map:null;
+    }
+    private static void removal(Object map,Object key){
+        requireRemovalStrategy(map);
+        if(ProRuntime.worldStateQuery(new Query(Kind.REMOVAL,map,null,-1,key,0,0)))throw new SecurityException("FROZEN_WORLD_REGISTRY_REMOVAL_REJECTED");
+    }
+    private static void requireRemovalStrategy(Object map){
+        if(read(map,REVERSE_STRATEGY,null)!=IDENTITY_STRATEGY&&ProRuntime.worldStateQuery(new Query(Kind.KNOWN,map,null,-1,null,0,0)))
+            throw new SecurityException("WORLD_REGISTRY_REMOVAL_STRATEGY_UNSUPPORTED");
+    }
+    static void registryRemove(Object actor,int slot,boolean nullEntry){
+        Object map=registryActor(actor);if(map==null)return;
+        GlobalTable table=new GlobalTable(null);Object index=nullEntry?read(map,REVERSE_N,null):slot;
+        if(!(index instanceof Integer at)||!(table.keys instanceof Object[] keys)){removal(map,UNKNOWN);return;}
+        // An invalid direct call retains the original bounds exception.
+        if(at<0||at>=keys.length)return;removal(map,keys[at]);
+    }
+    static void iteratorRemove(Object actor){
+        Object map=registryActor(actor);if(map==null||!ITERATOR.isInstance(actor))return;
+        Object last=read(actor,ITERATOR_LAST,null),position=read(actor,ITERATOR_POS,null),capacity=read(map,REVERSE_N,null);
+        if(last instanceof Integer n&&n==-1)return;
+        if(!(last instanceof Integer at)||!(position instanceof Integer pos)||!(capacity instanceof Integer n)){removal(map,UNKNOWN);return;}
+        if(at==n||pos>=0){registryRemove(actor,at,false);return;}
+        // remove() clears wrapped before calling removeInt. Read its real
+        // standard slot first so a refusal preserves wrapped and last as well.
+        Object wrapped=read(actor,ITERATOR_WRAPPED,null);
+        if(wrapped==null||wrapped.getClass()!=ObjectArrayList.class){removal(map,UNKNOWN);return;}
+        Object data=read(wrapped,WRAPPED_DATA,null),size=read(wrapped,WRAPPED_SIZE,null);long index=-(long)pos-1;
+        if(!(data instanceof Object[] keys)||!(size instanceof Integer count)){removal(map,UNKNOWN);return;}
+        if(index<0||index>=count||index>=keys.length)return;removal(map,keys[(int)index]);
+    }
+    static void registryClear(Object receiver){
+        Object map=registryActor(receiver);if(map==null||Integer.valueOf(0).equals(read(map,REVERSE_SIZE,null)))return;
+        requireRemovalStrategy(map);
+        if(ProRuntime.worldStateQuery(new Query(Kind.CLEAR,map,null,-1,null,0,0)))throw new SecurityException("FROZEN_WORLD_REGISTRY_REMOVAL_REJECTED");
+    }
+    static Object shiftEnter(Object actor,Object[] keys,int from,int to,Object state){
+        Object map=registryActor(actor);if(map==null)return null;GlobalTable current=new GlobalTable(null);if(!current.identity)return null;
+        Class<?> owner=actor==map?Object2IntOpenCustomHashMap.class:ITERATOR;List<Anchor> anchor=mutationAnchor(owner,"shiftKeys");
+        if(anchor==null)throw new SecurityException("ACTUAL_WORLD_REGISTRY_SHIFT_REQUIRED");
+        if(SHIFT.get()!=null||REHASH.get()!=null)throw new SecurityException("WORLD_REGISTRY_SHIFT_REENTRY");
+        if(current.keys!=keys||!(current.ids instanceof int[] values)||from<0||to<0||from>=keys.length||to>=keys.length
+                ||from>=values.length||to>=values.length||from==to||state==null||keys[from]!=state)
+            throw new SecurityException("ACTUAL_WORLD_REGISTRY_SHIFT_TUPLE_REQUIRED");
+        Shift tuple=new Shift(actor,map,keys,values,from,to,state,values[from],owner,anchor);
+        if(ProRuntime.worldStateQuery(new Query(Kind.SHIFT,map,null,-1,tuple,0,0)))throw new SecurityException("FROZEN_WORLD_REGISTRY_SHIFT_REJECTED");
+        SHIFT.set(tuple);return tuple;
+    }
+    static void shiftCommit(Object token){
+        if(!(token instanceof Shift tuple))return;
+        if(SHIFT.get()!=tuple||tuple.step!=2||!tuple.anchor.equals(mutationAnchor(tuple.owner,"shiftKeys"))
+                ||tuple.keys[tuple.to]!=tuple.state||tuple.values[tuple.to]!=tuple.value){
+            var failure=new SecurityException("WORLD_REGISTRY_SHIFT_STORE_WITHHELD");shiftFailed(tuple,failure);throw failure;
+        }shiftExit(tuple);
+    }
+    static void shiftCleared(Object actor,Object[] keys,int index){
+        Object map=registryActor(actor);if(map!=null&&read(map,REVERSE_KEYS,null)==keys&&keys[index]!=null)
+            throw new SecurityException("WORLD_REGISTRY_SHIFT_STORE_WITHHELD");
+    }
+    static void shiftExit(Object token){
+        Shift tuple=SHIFT.get();if(tuple!=null&&(tuple==token||token==null&&tuple.anchor.equals(mutationAnchor(tuple.owner,"shiftKeys")))){
+            try{restorePartialShift(tuple);}finally{SHIFT.remove();}
+        }
+    }
+    static void shiftFailed(Object token,Throwable failure){
+        try{shiftExit(token);}catch(RuntimeException|Error cleanup){if(cleanup!=failure)failure.addSuppressed(cleanup);}
+    }
+    private static boolean shiftRestoring(Object array,int index,Object next){
+        Shift tuple=SHIFT.get();if(tuple==null||!tuple.restoring||index!=tuple.to||!tuple.anchor.equals(restoreAnchor(tuple,array)))return false;
+        if(registryActor(tuple.actor)!=tuple.receiver||read(tuple.receiver,REVERSE_KEYS,null)!=tuple.keys||read(tuple.receiver,REVERSE_VALUES,null)!=tuple.values)return false;
+        return array==tuple.keys&&next==tuple.priorKey&&tuple.keys[index]==tuple.state&&tuple.values[index]==tuple.priorValue
+                ||array==tuple.values&&Integer.valueOf(tuple.priorValue).equals(next)&&tuple.keys[index]==tuple.priorKey&&tuple.values[index]==tuple.value;
+    }
+    private static void restorePartialShift(Shift tuple){
+        if(!tuple.anchor.equals(mutationAnchor(tuple.owner,"shiftKeys"))||registryActor(tuple.actor)!=tuple.receiver
+                ||read(tuple.receiver,REVERSE_KEYS,null)!=tuple.keys||read(tuple.receiver,REVERSE_VALUES,null)!=tuple.values)
+            throw new SecurityException("WORLD_REGISTRY_SHIFT_RESTORE_TARGET_CHANGED");
+        Object key=tuple.keys[tuple.to];int value=tuple.values[tuple.to];
+        if(key==tuple.state&&value==tuple.value)return; // The original pair completed.
+        if(key==tuple.priorKey&&value==tuple.priorValue)return;
+        tuple.restoring=true;
+        try{
+            if(key==tuple.state&&value==tuple.priorValue){
+                boolean changed=Boolean.TRUE.equals(RESTORE_REFERENCE.invoke(VM_UNSAFE,tuple.keys,REFERENCE_BASE+(long)tuple.to*REFERENCE_WIDTH,tuple.state,tuple.priorKey));
+                if(!changed)throw new SecurityException("WORLD_REGISTRY_SHIFT_RESTORE_COMPARE_FAILED");
+            }else if(key==tuple.priorKey&&value==tuple.value){
+                boolean changed=Boolean.TRUE.equals(RESTORE_INT.invoke(VM_UNSAFE,tuple.values,INT_BASE+(long)tuple.to*4,tuple.value,tuple.priorValue));
+                if(!changed)throw new SecurityException("WORLD_REGISTRY_SHIFT_RESTORE_COMPARE_FAILED");
+            }else throw new SecurityException("WORLD_REGISTRY_SHIFT_RESTORE_VALUE_CHANGED");
+            if(tuple.keys[tuple.to]!=tuple.priorKey||tuple.values[tuple.to]!=tuple.priorValue)throw new SecurityException("WORLD_REGISTRY_SHIFT_RESTORE_VALUE_CHANGED");
+        }catch(ReflectiveOperationException unavailable){throw new IllegalStateException("WORLD_REGISTRY_SHIFT_RESTORE_UNAVAILABLE",unavailable);}
+        finally{tuple.restoring=false;}
+    }
+    private static List<Anchor> restoreAnchor(Shift tuple,Object array){
+        return WALKER.walk(stream->{
+            var all=stream.toList();if(all.stream().noneMatch(frame->frame.getDeclaringClass()==WorldStatePolicy.class&&frame.getMethodName().equals("restorePartialShift")))return null;
+            var frames=all.stream().filter(frame->!frame.getClassName().startsWith("dev.ronova.pro.")).toList();int first=0;
+            if(!frames.isEmpty()&&frames.get(0).getDeclaringClass()==VM_UNSAFE.getClass()
+                    &&frames.get(0).isNativeMethod()&&frames.get(0).getMethodName().equals(array==tuple.keys?"compareAndSetReference":"compareAndSetInt"))first++;
+            if(first>=frames.size()||frames.get(first).getDeclaringClass()!=tuple.owner||!frames.get(first).getMethodName().equals("shiftKeys"))return null;
+            return frames.subList(first+1,frames.size()).stream().map(frame->new Anchor(frame.getDeclaringClass(),frame.getMethodName(),frame.getByteCodeIndex())).toList();
+        });
+    }
+    private static boolean shiftWrite(Object array,int index,Object next){
+        Shift tuple=SHIFT.get();if(tuple==null||!tuple.anchor.equals(mutationAnchor(tuple.owner,"shiftKeys")))return false;
+        if(array!=tuple.keys&&array!=tuple.values)return false;
+        if(registryActor(tuple.actor)!=tuple.receiver||read(tuple.receiver,REVERSE_KEYS,null)!=tuple.keys||read(tuple.receiver,REVERSE_VALUES,null)!=tuple.values
+                ||read(tuple.receiver,REVERSE_STRATEGY,null)!=IDENTITY_STRATEGY||index!=tuple.to
+                ||tuple.step==0&&(array!=tuple.keys||next!=tuple.state)
+                ||tuple.step==1&&(array!=tuple.values||!Integer.valueOf(tuple.value).equals(next))||tuple.step>1)
+            throw new SecurityException("WORLD_REGISTRY_SHIFT_PUBLICATION_MISMATCH");
+        tuple.step++;return true;
+    }
     static Object rehashEnter(Object receiver,int capacity,int mask,Object[] oldKeys,int[] oldValues,Object[] keys,int[] values){
         if(!initialized||receiver==null||receiver.getClass()!=Object2IntOpenCustomHashMap.class||receiver!=read(Block.BLOCK_STATE_REGISTRY,ID_REVERSE,null))return null;
         GlobalTable current=new GlobalTable(null);if(!current.identity)return null;
         List<Anchor> anchor=rehashAnchor();if(anchor==null)throw new SecurityException("ACTUAL_WORLD_REGISTRY_REHASH_REQUIRED");
-        if(REHASH.get()!=null)throw new SecurityException("WORLD_REGISTRY_REHASH_REENTRY");
+        if(REHASH.get()!=null||SHIFT.get()!=null)throw new SecurityException("WORLD_REGISTRY_REHASH_REENTRY");
         if(current.keys!=oldKeys||current.ids!=oldValues||capacity<=0||(capacity&(capacity-1))!=0||mask!=capacity-1
                 ||keys==null||values==null||(long)capacity+1!=keys.length||keys.length!=values.length)
             throw new SecurityException("ACTUAL_WORLD_REGISTRY_REHASH_TUPLE_REQUIRED");
@@ -176,10 +316,10 @@ final class WorldStatePolicy {
         REHASH.set(tuple);return tuple;
     }
     static void rehashExit(Object token){
-        if(token==null)return;Rehash tuple=REHASH.get();
+        Rehash tuple=REHASH.get();if(tuple==null)return;
         // Removal is unconditional for this exact invocation, including an error
         // from another field policy while the original stores are in progress.
-        if(tuple==token)REHASH.remove();
+        if(tuple==token||token==null&&tuple.anchor.equals(rehashAnchor()))REHASH.remove();
     }
     private static boolean rehashWrite(Object receiver,Field field,Object next){
         Rehash tuple=REHASH.get();if(tuple==null||tuple.receiver!=receiver||!tuple.anchor.equals(rehashAnchor()))return false;
@@ -190,9 +330,12 @@ final class WorldStatePolicy {
         tuple.step++;return true;
     }
     private static List<Anchor> rehashAnchor(){
+        return mutationAnchor(Object2IntOpenCustomHashMap.class,"rehash");
+    }
+    private static List<Anchor> mutationAnchor(Class<?> owner,String method){
         return WALKER.walk(stream->{
             var frames=stream.filter(frame->!frame.getClassName().startsWith("dev.ronova.pro.")).toList();
-            if(frames.isEmpty()||frames.get(0).getDeclaringClass()!=Object2IntOpenCustomHashMap.class||!frames.get(0).getMethodName().equals("rehash"))return null;
+            if(frames.isEmpty()||frames.get(0).getDeclaringClass()!=owner||!frames.get(0).getMethodName().equals(method))return null;
             // The caller tail distinguishes this invocation from a nested call
             // with the same method name; the current rehash BCI necessarily moves.
             return frames.subList(1,frames.size()).stream().map(frame->new Anchor(frame.getDeclaringClass(),frame.getMethodName(),frame.getByteCodeIndex())).toList();
@@ -229,6 +372,7 @@ final class WorldStatePolicy {
     }
     private static Object element(Object array,int index,Query change){
         if(array==null||!array.getClass().isArray()||index<0||index>=Array.getLength(array))return UNKNOWN;
+        if(change!=null&&change.kind==Kind.SHIFT){Shift tuple=(Shift)change.next;if(index==tuple.to){if(array==tuple.keys)return tuple.state;if(array==tuple.values)return tuple.value;}}
         if(change!=null&&change.receiver==array){
             if(change.kind==Kind.ARRAY&&change.index==index)return change.next;
             if(change.kind==Kind.OFFSET&&array instanceof Object[]&&change.offset==REFERENCE_BASE+(long)index*REFERENCE_WIDTH)return change.next;
@@ -360,6 +504,8 @@ final class WorldStatePolicy {
         for(int y=slice.minY;y<=slice.maxY;y++)for(int z=slice.minZ;z<=slice.maxZ;z++)for(int x=slice.minX;x<=slice.maxX;x++){
             int index=(y<<8)|(z<<4)|x;
             Object old=before.state(index,null);
+            if(change.kind==Kind.REMOVAL){if(old==UNKNOWN||change.next==UNKNOWN||old==change.next)return true;continue;}
+            if(change.kind==Kind.CLEAR){if(old==UNKNOWN||before.table.reverseSlot(old)>=0)return true;continue;}
             if(change.kind==Kind.MAPPING){
                 if(before.global&&before.id(index,null)==change.index&&old!=change.next||old==change.next&&!Objects.equals(before.table.reverse(old,null),change.index))return true;
                 continue;

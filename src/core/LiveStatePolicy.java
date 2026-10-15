@@ -11,7 +11,6 @@ import net.minecraft.world.entity.LivingEntity;
 import net.minecraft.world.entity.player.Player;
 import net.minecraft.world.food.FoodData;
 import net.minecraft.world.item.*;
-import net.minecraftforge.common.extensions.IForgeMobEffect;
 
 /** Exact live effect/food carriers. Their ownership is independent of world indices and source history. */
 public final class LiveStatePolicy {
@@ -147,7 +146,7 @@ public final class LiveStatePolicy {
                     if(kind==Kind.CURATIVE_LIST&&curatives==expected)return true;
                     EquipmentPolicy.CurativeList layout=EquipmentPolicy.knownCurativeLayout(curatives);
                     if(layout!=null) {
-                        if(kind==Kind.CURATIVE_ARRAY&&layout.values()==expected)return true;
+                        if(kind==Kind.CURATIVE_ARRAY&&layout.backed()&&layout.values()==expected)return true;
                         if(kind==Kind.CURATIVE_STACK)for(int at=0;at<layout.size();at++)if(layout.values()[at]==expected)return true;
                     }
                 }
@@ -303,7 +302,9 @@ public final class LiveStatePolicy {
         if(((Access.EffectState)instance).pro$curativeItems()!=null||provider==null)throw new IllegalStateException("CURATIVE_ORIGINAL_INPUT_CHANGED");
         try {
             Method method=provider.getClass().getMethod("getCurativeItems");
-            if(method.getDeclaringClass()!=IForgeMobEffect.class||method.getReturnType()!=List.class||Modifier.isStatic(method.getModifiers()))
+            // The provider runs without a publication allowance. Only its actual
+            // return at this original getter's store can become the initial list.
+            if(!List.class.isAssignableFrom(method.getReturnType())||Modifier.isStatic(method.getModifiers())||Modifier.isAbstract(method.getModifiers()))
                 throw new IllegalStateException("CURATIVE_PROVIDER_IMPLEMENTATION_UNRESOLVED");
         }catch(NoSuchMethodException unavailable){throw new IllegalStateException("CURATIVE_PROVIDER_IMPLEMENTATION_UNRESOLVED",unavailable);}
         scope.provider=new WeakReference<>(provider);scope.providerAccepted=true;

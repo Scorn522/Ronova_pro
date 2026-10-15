@@ -45,6 +45,7 @@
     "WorldControlHooks$StorageWrites",
     "WorldControlHooks$StateRegistry",
     "WorldControlHooks$GlobalRegistryMap",
+    "WorldControlHooks$GlobalRegistryIterator",
     "WorldControlHooks$Block",
     "WorldControlHooks$Scheduled",
     "WorldControlHooks$SavedTicks",

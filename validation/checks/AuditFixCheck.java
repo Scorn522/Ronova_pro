@@ -1055,7 +1055,11 @@ public final class AuditFixCheck {
     private static void networkBytecode()throws Exception{
         Class<?> boundary=Class.forName("dev.ronova.pro.agent.NetworkBoundary");
         Method transform=boundary.getDeclaredMethod("transform",ClassLoader.class,String.class,byte[].class);transform.setAccessible(true);
-        Set<String> targets=Set.of("io.netty.channel.AbstractChannelHandlerContext","io.netty.channel.AbstractChannelHandlerContext$WriteTask","io.netty.util.concurrent.SingleThreadEventExecutor","io.netty.util.concurrent.RejectedExecutionHandlers$1");
+        Set<String> targets=Set.of("io.netty.channel.AbstractChannelHandlerContext","io.netty.channel.AbstractChannelHandlerContext$WriteTask","io.netty.util.concurrent.SingleThreadEventExecutor","io.netty.util.concurrent.RejectedExecutionHandlers$1",
+                "io.netty.util.internal.shaded.org.jctools.queues.BaseMpscLinkedArrayQueue","io.netty.util.internal.shaded.org.jctools.queues.MpscChunkedArrayQueue",
+                "io.netty.util.internal.shaded.org.jctools.queues.atomic.BaseMpscLinkedAtomicArrayQueue","io.netty.util.internal.shaded.org.jctools.queues.atomic.MpscChunkedAtomicArrayQueue",
+                "io.netty.util.internal.shaded.org.jctools.queues.BaseMpscLinkedArrayQueueProducerFields","io.netty.util.internal.shaded.org.jctools.queues.BaseMpscLinkedArrayQueueColdProducerFields","io.netty.util.internal.shaded.org.jctools.queues.BaseMpscLinkedArrayQueueConsumerFields",
+                "io.netty.util.internal.shaded.org.jctools.queues.atomic.BaseMpscLinkedAtomicArrayQueueProducerFields","io.netty.util.internal.shaded.org.jctools.queues.atomic.BaseMpscLinkedAtomicArrayQueueColdProducerFields","io.netty.util.internal.shaded.org.jctools.queues.atomic.BaseMpscLinkedAtomicArrayQueueConsumerFields");
         ClassLoader loader=new ClassLoader(AuditFixCheck.class.getClassLoader()){
             @Override protected Class<?> loadClass(String name,boolean resolve)throws ClassNotFoundException{
                 if(!name.startsWith("io.netty."))return super.loadClass(name,resolve);
@@ -1071,14 +1075,16 @@ public final class AuditFixCheck {
             }
         };
         for(String name:targets){Class<?> actual=Class.forName(name,false,loader);require(actual.getClassLoader()==loader,"actual transformed class was not defined");actual.getDeclaredMethods();}
-        System.out.println("NETWORK_BYTECODE_VERIFY_PASS actual_Netty_write_WriteTask_executor_and_default_rejection JVM_verifier_only no_stop_or_cleanup_runtime_claim");
+        System.out.println("NETWORK_BYTECODE_VERIFY_PASS actual_Netty_write_WriteTask_executor_default_rejection_and_bounded_MPSC JVM_verifier_only no_stop_or_cleanup_runtime_claim");
         worldRegistryBytecode();
     }
-    /** Verify the real rehash body changed by the existing Mixin plugin, without a world. */
+    /** Verify the real registry and iterator bodies changed by the existing Mixin plugin, without a world. */
     private static void worldRegistryBytecode()throws Exception{
         Class<?> weaver=Class.forName("dev.ronova.pro.WorldRegistryWeaver");
         Method apply=weaver.getMethod("apply",org.objectweb.asm.tree.ClassNode.class);
+        Method applyIterator=weaver.getMethod("applyIterator",org.objectweb.asm.tree.ClassNode.class);
         String target="it.unimi.dsi.fastutil.objects.Object2IntOpenCustomHashMap";
+        String iterator=target+"$MapIterator";
         ClassLoader loader=new ClassLoader(AuditFixCheck.class.getClassLoader()){
             @Override protected Class<?> loadClass(String name,boolean resolve)throws ClassNotFoundException{
                 if(!name.startsWith("it.unimi.dsi.fastutil."))return super.loadClass(name,resolve);
@@ -1086,8 +1092,8 @@ public final class AuditFixCheck {
                     Class<?> result=findLoadedClass(name);
                     if(result==null)try(var input=getParent().getResourceAsStream(name.replace('.','/')+".class")){
                         if(input==null)throw new ClassNotFoundException(name);byte[] bytes=input.readAllBytes();
-                        if(name.equals(target)){
-                            var node=new org.objectweb.asm.tree.ClassNode();new org.objectweb.asm.ClassReader(bytes).accept(node,org.objectweb.asm.ClassReader.EXPAND_FRAMES);apply.invoke(null,node);
+                        if(name.equals(target)||name.equals(iterator)){
+                            var node=new org.objectweb.asm.tree.ClassNode();new org.objectweb.asm.ClassReader(bytes).accept(node,org.objectweb.asm.ClassReader.EXPAND_FRAMES);(name.equals(target)?apply:applyIterator).invoke(null,node);
                             var writer=new org.objectweb.asm.ClassWriter(org.objectweb.asm.ClassWriter.COMPUTE_MAXS);
                             node.accept(writer);bytes=writer.toByteArray();
                         }
@@ -1097,8 +1103,8 @@ public final class AuditFixCheck {
                 }
             }
         };
-        Class<?> actual=Class.forName(target,false,loader);require(actual.getClassLoader()==loader,"actual rehash class was not defined");actual.getDeclaredMethods();
-        System.out.println("WORLD_REGISTRY_BYTECODE_VERIFY_PASS actual_fastutil_rehash JVM_verifier_only no_game_mutation_claim");
+        for(String name:new String[]{target,iterator}){Class<?> actual=Class.forName(name,false,loader);require(actual.getClassLoader()==loader,"actual registry class was not defined");actual.getDeclaredMethods();}
+        System.out.println("WORLD_REGISTRY_BYTECODE_VERIFY_PASS actual_fastutil_rehash_remove_shift_and_iterator JVM_verifier_only no_game_mutation_claim");
     }
     /** Prepare from an unselected consumer; stop through genuine console input, then finish below. */
     public static Object networkQueuedStop(Object runtime,Class<?> sender)throws Exception {

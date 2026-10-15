@@ -3,6 +3,7 @@
 enum { NATIVE_FILE_TYPES=13, NATIVE_FILE_DISPATCHER=3, NATIVE_FILE_DESCRIPTOR=4, NATIVE_FILE_CHANNEL=5,
        NATIVE_SOCKET_DISPATCHER=6, NATIVE_DATAGRAM_DISPATCHER=7, NATIVE_SOCKET_NET=8, NATIVE_DATAGRAM_CHANNEL=9,
        NATIVE_ASYNC_SOCKET=10, NATIVE_ASYNC_SERVER=11, NATIVE_ASYNC_FILE=12 };
+enum { NATIVE_FILE_CREATE_SOCKET=9 };
 static jclass native_file_types[NATIVE_FILE_TYPES],native_file_bridge;
 static jmethodID native_file_begin_query,native_file_end_query,native_io_begin_query,native_io_end_query;
 static unsigned native_file_descriptor_argument(const char *signature){
@@ -10,8 +11,14 @@ static unsigned native_file_descriptor_argument(const char *signature){
     if(strncmp(signature,"(ZLjava/io/FileDescriptor;",sizeof("(ZLjava/io/FileDescriptor;")-1)==0)return 3;
     return 0;
 }
-static int native_file_accepts(unsigned type,jint modifiers,const char *signature){
+static int native_file_socket_creation(unsigned type,jint modifiers,const char *name,const char *signature){
+    return type==NATIVE_SOCKET_NET&&(modifiers&0x0008)&&strcmp(name,"socket0")==0&&strcmp(signature,"(ZZZZ)I")==0;
+}
+static int native_file_accepts(unsigned type,jint modifiers,const char *name,const char *signature){
     if(!(modifiers&0x0100))return 0;
+    // This Windows JDK entry allocates the descriptor number before any
+    // FileDescriptor exists. It must still pass the actual native source gate.
+    if(native_file_socket_creation(type,modifiers,name,signature))return 1;
     if(type==NATIVE_FILE_DISPATCHER)return (modifiers&0x0008)&&strncmp(signature,"(Ljava/io/FileDescriptor;",sizeof("(Ljava/io/FileDescriptor;")-1)==0;
     if(type==NATIVE_FILE_CHANNEL)return !(modifiers&0x0008)||strcmp(signature,"(JJ)I")==0;
     if(type==NATIVE_SOCKET_DISPATCHER&&(modifiers&0x0008)&&strcmp(signature,"(I)V")==0)return 1;
@@ -25,7 +32,7 @@ static int native_file_seed_one(JNIEnv *env,NativeThread *state,unsigned type,jm
     if((*native_ti)->GetMethodModifiers(native_ti,method,&modifiers)!=JVMTI_ERROR_NONE)return 1;
     if(!(modifiers&0x0100))return 0;
     if((*native_ti)->GetMethodName(native_ti,method,&name,&signature,NULL)!=JVMTI_ERROR_NONE)goto done;
-    if(!native_file_accepts(type,modifiers,signature)){remaining=0;goto done;}
+    if(!native_file_accepts(type,modifiers,name,signature)){remaining=0;goto done;}
     remaining=native_binding_seed_one(env,state,native_file_types[type],method,name,signature,1);
 done:
     if(name)(*native_ti)->Deallocate(native_ti,(unsigned char*)name);if(signature)(*native_ti)->Deallocate(native_ti,(unsigned char*)signature);return remaining;
@@ -48,12 +55,13 @@ JNIEXPORT jint JNICALL Java_dev_ronova_pro_bootstrap_NativeControl_fileBindings0
 static void native_file_classify(JNIEnv *env,jclass type,Binding *binding,const char *name){
     unsigned matched=NATIVE_FILE_TYPES;for(unsigned i=0;i<NATIVE_FILE_TYPES;i++)if(native_file_types[i]&&native_original.IsSameObject(env,type,native_file_types[i])){matched=i;break;}
     if(matched==NATIVE_FILE_TYPES)return;
-    jint modifiers=0;if((*native_ti)->GetMethodModifiers(native_ti,binding->method,&modifiers)!=JVMTI_ERROR_NONE||!native_file_accepts(matched,modifiers,binding->signature))return;
+    jint modifiers=0;if((*native_ti)->GetMethodModifiers(native_ti,binding->method,&modifiers)!=JVMTI_ERROR_NONE||!native_file_accepts(matched,modifiers,name,binding->signature))return;
     binding->fileMethod=_strdup(name);
     if(!binding->fileMethod){native_refuse(env,"NATIVE_FILE_METHOD_CAPTURE_FAILED");return;}
     binding->fileArgument=matched>=NATIVE_SOCKET_DISPATCHER?native_file_descriptor_argument(binding->signature):matched==NATIVE_FILE_DISPATCHER?2:1;
     if(!binding->fileArgument)binding->fileArgument=1;
-    binding->fileOperation=matched==NATIVE_FILE_DISPATCHER?(strcmp(name,"close0")==0?4:3)
+    binding->fileOperation=native_file_socket_creation(matched,modifiers,name,binding->signature)?NATIVE_FILE_CREATE_SOCKET
+            :matched==NATIVE_FILE_DISPATCHER?(strcmp(name,"close0")==0?4:3)
             :matched==NATIVE_SOCKET_DISPATCHER&&strcmp(name,"close0")==0?7
             :matched>=NATIVE_ASYNC_SOCKET?8
             :matched==NATIVE_SOCKET_NET&&strcmp(name,"accept")==0
@@ -127,7 +135,8 @@ static int native_io_arguments(JNIEnv *env,Binding *binding,unsigned char *frame
 }
 static void native_file_refuse(JNIEnv *env,Binding *binding){
     if(native_original.ExceptionCheck(env))return;
-    const char *name=binding->fileOperation==2?"java/io/FileNotFoundException":binding->fileOperation==5?"java/io/SyncFailedException":"java/io/IOException";
+    const char *name=binding->fileOperation==2?"java/io/FileNotFoundException":binding->fileOperation==5?"java/io/SyncFailedException"
+            :binding->fileOperation==NATIVE_FILE_CREATE_SOCKET?"java/net/SocketException":"java/io/IOException";
     jclass type=native_original.FindClass(env,name);
     if(type){native_original.ThrowNew(env,type,"RONOVA_NATIVE_FILE_OPERATION_REFUSED");native_original.DeleteLocalRef(env,type);}
 }

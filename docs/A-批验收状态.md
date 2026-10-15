@@ -1,5 +1,23 @@
 # Ronova Pro 当前进度
 
+## 2026-10-15：C 接续——删除搬移、标准队列与 socket 创建
+
+接续 `563ddfb`，Java ABI82 / Native ABI75 / Storage3 / Journal6，协议 `r3-client-8`。三个 6.1 Sol max 子代理分别完成世界表、网络队列和 Native 入口；主线程接齐解药载体及版本，整包源码写齐后才统一构建。自身外观和武器注册继续暂缓。
+
+标准全局 BlockState reverse map 的 removeEntry、removeNullEntry、clear 与 MapIterator.remove 在原副作用前核对冻结映射。无关项保留原 shiftKeys 循环、size 和 wrapped 更新，仅按本次实际 map/数组/键值/索引接续原两个连续 store。store 被其他门拒绝即显式中止；半写只对实际旧值作准确 CAS 收尾，继续经过原来源、目标和 FieldGate，保留原异常及并发变化，不覆盖后来写入。正常和异常出口均关闭本次作用域。
+
+效果的 curativeItems 扩至本机 JDK ListN/List12、单元素/空列表及 Guava RegularImmutableList，读取实际字段和 backing，不调用未知容器；List12 等临时读取视图不冒充实际数组。实际 provider 覆写在无发布许可下执行，只有原 getter 的真实返回能一次发布；返回列表的 ItemStack/NBT 复用现有保护。任意自定义列表和未序列化 capability 仍保留边界。
+
+Netty 标准有界 MpscChunkedArrayQueue 及 atomic 实现的真实 getter→容量不足→full→offer false→默认 REJECT 链接入既有异常清理和一次 cancel。准确队列、task、当前方法版本和真实栈层逐段绑定；本次 Submission 的未知来源查询不会被重试洗白。未知队列/custom handler/backoff/接受后抛异常仍不取得未入队资格。无限队列没有原版满队列分支。
+
+本机 Windows JDK 的实际 `Net.socket0(ZZZZ)I` 补入原 Native 来源、停组、owner 和 host 门，op9 用原 NativeFileFrame 回执接 Java 的 socket-open 判断，拒绝保留 SocketException；没有拿 Class 对象建立资源释放所有权。既有 unresolved 仍是 pending，新入口若尚未解析也保留；没有主动执行未解析 native、猜 DLL 原地址或把数量改成 ready。`duplicateHandle(J)J` 的准确父 descriptor 关联尚未接齐。
+
+统一构建 **PASS，1分6秒**，27项任务中21项执行、6项保持最新，包含 Java82 与 Native75 实际编译链接。复用 AuditFixCheck，对本批真实 Netty 14 类及 fastutil map/iterator 的织入结果按 `-Xverify:all` 加载，**退出0、NETWORK_BYTECODE_VERIFY_PASS、WORLD_REGISTRY_BYTECODE_VERIFY_PASS**；fastutil 仅 COMPUTE_MAXS，保留生产 frame。现有 socket 场景通过真实 prelaunch 启动，初始化仍报告 `NATIVE_FILE_CURRENT_BINDINGS_PENDING:74`（含尚未首次调用的 socket0）。实际线程栈先后位于 BufferBoundary/ASM 输出和 HandleWriteBoundary/ExecutionFlow 来源记录，尚未进入 socket 场景；已保存两份栈并核对身份后结束本次自建 JVM115716，GAME_EXIT=-1，该业务检查记 **NOTRUN/未完成**，不计 PASS，也未为等待结果扩大检查或优化旧启动流程。当前游戏冻结/效果/provider 与停组队列场景仍 **NOTRUN**，不能由字节码加载代称通过。
+
+匹配候选为 `distribution/candidate-c-java82-native75-lifecycle-wip-20261015`，Core2747025、prelaunch23309字节。源码、匹配 JAR 和原有摘要直接同步 GitHub；未生成 ZIP，未安装或加载驱动。完整 C/B 未完成。
+
+---
+
 ## 2026-10-15：C 接续——标准全局表、解药图与满队列
 
 接续 `646a30e`，Java ABI81 / Native ABI74 / Storage3 / Journal6，协议 `r3-client-8`。上一整包已构建并同步后，本轮继续补已确认的标准载体，不把未验证项改成已完成。

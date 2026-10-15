@@ -1,5 +1,21 @@
 # B 批实际报告：2026-10-09 代码收敛接续
 
+## 2026-10-15：C 接续——标准删除与队列生命周期
+
+接续 `563ddfb`，Java82 / Native75 / Storage3 / Journal6，协议 `r3-client-8`。本包写齐标准 reverse map 删除/shiftKeys 与真实 iterator 接续、JDK/Guava 常见解药列表和实际 provider 覆写、Netty 两种标准有界 MPSC 的原版 full/default REJECT 收尾，以及 Windows JDK `Net.socket0(ZZZZ)I` 的原生创建入口判断；不改自身外观，不注册武器。
+
+世界表的冻结映射在 size/wrapped/键值副作用前拒绝；无关项沿原循环，准确键值对的两次 store 与真实 map/数组/索引/同一 anchor 绑定。静默拒写中止，准确半写按实际旧值 CAS 回填，原来源和 FieldGate 不绕过；原异常优先，后来值不覆盖，finally 撤销作用域。解药载体不执行未知容器方法；provider 回调无发布权，只有原 getter 的真实结果取得一次初始化。
+
+有界 MPSC full 分支绑定真实 lvProducerLimit/lvProducerIndex/lvConsumerIndex、容量与 offerSlowPath、实际 task 和原默认 REJECT 链，使用现有只读 VM 方法版本/BCI/栈底深度查询。未知查询在同一 Submission 中持续保留，不能由重试成功消除；原 release、promise 终结和 cancel 一次收口保持。自定义队列/handler/backoff 和接受后抛异常仍 pending。
+
+`socket0` op9 经原 NativeFileFrame 回执、停组/来源/owner/host 与 Java taskEffectAllowed 判断，原异常/finish 保持，不以静态 Class 建 descriptor 清理权。既有 unresolved 未提升为 ready，不主动调用这些 native；socket0 自身未解析时也保持 pending。`duplicateHandle(J)J` 的准确父 descriptor 接续仍未完成；Native/驱动不由本包构建代称全覆盖。
+
+`build-c-java82-native75-carriers-20261015.log` **PASS，1分6秒**，27项任务中21项执行、6项保持最新，Java82/Native75 实际编译链接。`compile-c-java82-native75-carriers-20261015.log` **退出0**。`c-java82-native75-network-bytecode-20261015.log` 使用现有 AuditFixCheck 加载实际转换后的 Netty14类与 fastutil map/MapIterator，**退出0、NETWORK_BYTECODE_VERIFY_PASS、WORLD_REGISTRY_BYTECODE_VERIFY_PASS**，仅说明插桩能被 JVM 校验接受；fastutil 保留实际 frame、仅 COMPUTE_MAXS。`c-socket-java82-native75-20261015.log` 启动了真实 prelaunch/Native75，初始化实际报告 `NATIVE_FILE_CURRENT_BINDINGS_PENDING:74`，包含本轮新增 socket0。43秒栈位于 BufferBoundary/ASM 输出，179秒栈位于 HandleWriteBoundary/ExecutionFlow 来源记录，均未进入 socket 场景；原日志与两份线程栈保留。核对命令行/创建时间后仅结束本次自建 JVM115716，`RONOVA_GAME_EXIT=-1`；socket 业务断言 **NOTRUN/未完成**，不计为通过，未修改旧启动性能路径或反复重跑。未启动游戏或重跑旧矩阵；本批真实世界冻结、效果/provider、活跃入队后停组的行为仍 **NOTRUN**。
+
+候选 `distribution/candidate-c-java82-native75-lifecycle-wip-20261015` 含 Core2747025、prelaunch23309字节；源码及匹配 JAR 直接同步 GitHub，未生成源码 ZIP，未部署驱动，完整 C/B 未完成。
+
+---
+
 ## 2026-10-15：C 接续——标准状态载体收口
 
 接续 `646a30e`，Java81 / Native74 / Storage3 / Journal6，协议保持 `r3-client-8`。标准全局 BlockState 表接入准确 ArrayList 长度/backing、identity reverse map 与实际数组修改判断；所有冻结格保护反查 ID，Global 另保护前向读取槽。原 addMapping 在副作用前按实际 state/id 拒绝，包括负 id 的原异常前发布。原版 rehash 的实际新旧 tuple 在发布前核对，准确字段/值/顺序与同一真实栈层接续，异常 finally 关闭。未知 strategy/List 不调用，shiftKeys 移除重排仍保留严格拒绝边界。

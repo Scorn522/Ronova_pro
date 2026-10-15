@@ -911,6 +911,39 @@ public final class ProRuntime implements AutoCloseable {
         if(ACTION_CALLER.getCallerClass()!=it.unimi.dsi.fastutil.objects.Object2IntOpenCustomHashMap.class)throw new SecurityException("ACTUAL_WORLD_REGISTRY_REHASH_REQUIRED");
         WorldStatePolicy.rehashExit(token);
     }
+    public static void worldRegistryRemove(Object actor,int slot,boolean nullEntry){
+        if(!WorldStatePolicy.registryWriter(ACTION_CALLER.getCallerClass()))throw new SecurityException("ACTUAL_WORLD_REGISTRY_REMOVAL_REQUIRED");
+        WorldStatePolicy.registryRemove(actor,slot,nullEntry);
+    }
+    public static void worldRegistryIteratorRemove(Object iterator){
+        Class<?> caller=ACTION_CALLER.getCallerClass();
+        if(caller==it.unimi.dsi.fastutil.objects.Object2IntOpenCustomHashMap.class||!WorldStatePolicy.registryWriter(caller))throw new SecurityException("ACTUAL_WORLD_REGISTRY_ITERATOR_REQUIRED");
+        WorldStatePolicy.iteratorRemove(iterator);
+    }
+    public static void worldRegistryClear(Object receiver){
+        if(ACTION_CALLER.getCallerClass()!=it.unimi.dsi.fastutil.objects.Object2IntOpenCustomHashMap.class)throw new SecurityException("ACTUAL_WORLD_REGISTRY_REMOVAL_REQUIRED");
+        WorldStatePolicy.registryClear(receiver);
+    }
+    public static Object worldRegistryShiftEnter(Object actor,Object[] keys,int from,int to,Object state){
+        if(!WorldStatePolicy.registryWriter(ACTION_CALLER.getCallerClass()))throw new SecurityException("ACTUAL_WORLD_REGISTRY_SHIFT_REQUIRED");
+        return WorldStatePolicy.shiftEnter(actor,keys,from,to,state);
+    }
+    public static void worldRegistryShiftExit(Object token){
+        if(!WorldStatePolicy.registryWriter(ACTION_CALLER.getCallerClass()))throw new SecurityException("ACTUAL_WORLD_REGISTRY_SHIFT_REQUIRED");
+        WorldStatePolicy.shiftExit(token);
+    }
+    public static void worldRegistryShiftCommit(Object token){
+        if(!WorldStatePolicy.registryWriter(ACTION_CALLER.getCallerClass()))throw new SecurityException("ACTUAL_WORLD_REGISTRY_SHIFT_REQUIRED");
+        WorldStatePolicy.shiftCommit(token);
+    }
+    public static void worldRegistryShiftCleared(Object actor,Object[] keys,int index){
+        if(!WorldStatePolicy.registryWriter(ACTION_CALLER.getCallerClass()))throw new SecurityException("ACTUAL_WORLD_REGISTRY_SHIFT_REQUIRED");
+        WorldStatePolicy.shiftCleared(actor,keys,index);
+    }
+    public static void worldRegistryShiftFailed(Object token,Throwable failure){
+        if(!WorldStatePolicy.registryWriter(ACTION_CALLER.getCallerClass()))throw new SecurityException("ACTUAL_WORLD_REGISTRY_SHIFT_REQUIRED");
+        WorldStatePolicy.shiftFailed(token,failure);
+    }
     static boolean worldStateQuery(WorldStatePolicy.Query query){
         for(ProRuntime runtime:sourceRuntimes())if(runtime.worldControl.stateMutationDenied(query))return true;
         return false;
@@ -2817,7 +2850,7 @@ public final class ProRuntime implements AutoCloseable {
             EquipmentPolicy.initialize();
             WorldStatePolicy.initialize();
             Class<?> bridge=Class.forName("dev.ronova.pro.bootstrap.TaskBridge",false,null);
-            if(!Integer.valueOf(81).equals(bridge.getMethod("abiVersion").invoke(null)))throw new IllegalStateException("INDEX_BRIDGE_ABI_MISMATCH");
+            if(!Integer.valueOf(82).equals(bridge.getMethod("abiVersion").invoke(null)))throw new IllegalStateException("INDEX_BRIDGE_ABI_MISMATCH");
             var lookup=java.lang.invoke.MethodHandles.lookup();
             var field=lookup.findStatic(ProRuntime.class,"preventFieldWrite",java.lang.invoke.MethodType.methodType(boolean.class,Object.class,Class.class,String.class,Object.class));
             var dispatch=lookup.findStatic(ProRuntime.class,"preventDispatch",java.lang.invoke.MethodType.methodType(boolean.class,Object.class,String.class,Object.class));

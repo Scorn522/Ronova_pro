@@ -17,6 +17,7 @@ public final class SaveFinallyPlugin implements IMixinConfigPlugin {
     @Override public void preApply(String target,ClassNode node,String mixin,IMixinInfo info) { }
     @Override public void postApply(String target,ClassNode node,String mixin,IMixinInfo info) {
         if(mixin.endsWith(".WorldControlHooks$GlobalRegistryMap")) { dev.ronova.pro.WorldRegistryWeaver.apply(node);return; }
+        if(mixin.endsWith(".WorldControlHooks$GlobalRegistryIterator")) { dev.ronova.pro.WorldRegistryWeaver.applyIterator(node);return; }
         if(mixin.endsWith(".EquipmentActionHooks$Packets")) {
             weaveEquipmentAction(node,"handleSetCarriedItem","m_7798_","(Lnet/minecraft/network/protocol/game/ServerboundSetCarriedItemPacket;)V","equipment-select");
             weaveEquipmentAction(node,"handleContainerClick","m_5914_","(Lnet/minecraft/network/protocol/game/ServerboundContainerClickPacket;)V","equipment-menu");

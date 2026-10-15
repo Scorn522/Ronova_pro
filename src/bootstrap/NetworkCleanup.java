@@ -11,6 +11,8 @@ final class NetworkCleanup {
     private static final String CTX="io.netty.channel.AbstractChannelHandlerContext",WRITE=CTX+"$WriteTask";
     private static final String EXECUTOR="io.netty.util.concurrent.SingleThreadEventExecutor";
     private static final String DEFAULT_REJECT="io.netty.util.concurrent.RejectedExecutionHandlers$1";
+    private static final String MPSC="io.netty.util.internal.shaded.org.jctools.queues.",MPSC_BASE=MPSC+"BaseMpscLinkedArrayQueue",MPSC_CHUNK=MPSC+"MpscChunkedArrayQueue",
+            MPSC_ATOMIC_BASE=MPSC+"atomic.BaseMpscLinkedAtomicArrayQueue",MPSC_ATOMIC_CHUNK=MPSC+"atomic.MpscChunkedAtomicArrayQueue";
     private static final String SAFE_EXECUTE="(Lio/netty/util/concurrent/EventExecutor;Ljava/lang/Runnable;Lio/netty/channel/ChannelPromise;Ljava/lang/Object;Z)Z";
     private static final long CONTEXT=1,PIPELINE=2,CHANNEL=4,UNSAFE=8,OUTBOUND=16,ENTRY=32,PROMISE=64,MESSAGE=128,
             ALLOCATOR=256,METRIC=512,COUNTER=1024,CELL=2048,LOCK=4096,SYNC=8192,NODE=16384,CHUNK=32768,
@@ -100,11 +102,29 @@ final class NetworkCleanup {
     static boolean removalQueue(Object executor,Class<?> base){
         // This branch is reached only after Netty's removeTask returned true.
         // A custom Queue's boolean cannot establish removal of the real task.
-        return rejectionQueue(executor,base)!=null;
+        Object queue=NativeControl.networkReadField(executor,base,"taskQueue",false);
+        return queue!=null&&queue.getClass()==java.util.concurrent.LinkedBlockingQueue.class;
     }
     static Object rejectionQueue(Object executor,Class<?> base){
         Object queue=NativeControl.networkReadField(executor,base,"taskQueue",false);
-        return queue!=null&&queue.getClass()==java.util.concurrent.LinkedBlockingQueue.class?queue:null;
+        if(queue!=null&&queue.getClass()==java.util.concurrent.LinkedBlockingQueue.class)return queue;
+        return mpscExecutor(executor)==base&&mpscBase(queue,base)!=null?queue:null;
+    }
+    static Class<?> mpscExecutor(Object executor){
+        Class<?> base=parent(executor,EXECUTOR);
+        return standardExecutor(executor,base)&&executor.getClass().getName().equals("io.netty.channel.nio.NioEventLoop")?base:null;
+    }
+    /** Exact bounded implementations; unbounded queues have no original full return. */
+    static Class<?> mpscBase(Object queue,Class<?> anchor){
+        if(queue==null||!framework(queue.getClass(),anchor))return null;
+        String concrete=queue.getClass().getName(),name=concrete.equals(MPSC_CHUNK)?MPSC_BASE:concrete.equals(MPSC_ATOMIC_CHUNK)?MPSC_ATOMIC_BASE:null;
+        Class<?> base=name==null?null:parent(queue,name);
+        return framework(base,anchor)?base:null;
+    }
+    static Class<?> mpscReadType(Object queue,Class<?> base,int stage){
+        if(base==null||stage<0||stage>2)return null;
+        Class<?> type=parent(queue,base.getName()+(stage==0?"ColdProducerFields":stage==1?"ProducerFields":"ConsumerFields"));
+        return framework(type,base)?type:null;
     }
     static Object defaultRejectHandler(Object executor,Class<?> base){
         Object handler=NativeControl.networkReadField(executor,base,"rejectedExecutionHandler",false);
@@ -459,9 +479,17 @@ final class NetworkCleanup {
         if(phase==-2){
             if(type==NetworkCleanup.class&&method.equals("submissionBoundary"))return 1;
             if(type==NativeControl.class&&oneOf(method,"networkCleanupBoundary","networkCleanupBoundary0"))return 1;
-            if(type==NetworkBridge.class&&oneOf(method,"writeSubmissionRejected","writeSubmissionOfferFailed","writeSubmissionOfferRejected","writeSubmissionDefaultRejected"))return 1;
+            if(type==NetworkBridge.class&&oneOf(method,"writeSubmissionRejected","writeSubmissionOfferFailed","writeSubmissionOfferRejected","writeSubmissionDefaultRejected","writeSubmissionMpscRead","writeSubmissionMpscCapacity","writeSubmissionMpscFull","writeSubmissionMpscOffered"))return 1;
             if(type==boundary&&type.getName().equals(CTX)&&method.equals("safeExecute")&&descriptor.equals(SAFE_EXECUTE))return 2;
             if(type.getName().equals(DEFAULT_REJECT)&&framework(type,boundary))return method.equals("rejected")&&descriptor.equals("(Ljava/lang/Runnable;Lio/netty/util/concurrent/SingleThreadEventExecutor;)V")?1:0;
+            if(framework(type,boundary)){
+                if(oneOf(type.getName(),MPSC_BASE+"ColdProducerFields",MPSC_ATOMIC_BASE+"ColdProducerFields"))return method.equals("lvProducerLimit")&&descriptor.equals("()J")?1:0;
+                if(oneOf(type.getName(),MPSC_BASE+"ProducerFields",MPSC_ATOMIC_BASE+"ProducerFields"))return method.equals("lvProducerIndex")&&descriptor.equals("()J")?1:0;
+                if(oneOf(type.getName(),MPSC_BASE+"ConsumerFields",MPSC_ATOMIC_BASE+"ConsumerFields"))return method.equals("lvConsumerIndex")&&descriptor.equals("()J")?1:0;
+                if(oneOf(type.getName(),MPSC_BASE,MPSC_ATOMIC_BASE))return method.equals("offer")&&descriptor.equals("(Ljava/lang/Object;)Z")||method.equals("offerSlowPath")&&descriptor.equals("(JJJ)I")?1:0;
+                if(oneOf(type.getName(),MPSC_CHUNK,MPSC_ATOMIC_CHUNK))return method.equals("offer")&&descriptor.equals("(Ljava/lang/Object;)Z")
+                        ||method.equals("getCurrentBufferCapacity")&&descriptor.equals("(J)J")||method.equals("availableInQueue")&&descriptor.equals("(JJ)J")?1:0;
+            }
             if(!type.getName().equals(EXECUTOR)||!framework(type,boundary))return 0;
             return method.equals("reject")&&(descriptor.equals("()V")||descriptor.equals("(Ljava/lang/Runnable;)V"))||method.equals("offerTask")&&descriptor.equals("(Ljava/lang/Runnable;)Z")
                     ||method.equals("addTask")&&descriptor.equals("(Ljava/lang/Runnable;)V")||method.equals("execute")&&descriptor.equals("(Ljava/lang/Runnable;Z)V")
