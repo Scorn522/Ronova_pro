@@ -194,6 +194,29 @@ final class WorldControl {
         }
         return false;
     }
+    boolean stateMutationDenied(WorldStatePolicy.Query query){
+        for(Area area:mutationAreas){
+            ServerLevel level=area.level();Access.Tracking tracking=(Access.Tracking)level.getChunkSource().chunkMap;
+            for(ChunkHolder holder:tracking.pro$visibleChunks().values()){
+                ChunkPos origin=holder.getPos();
+                int minX=Math.max(0,area.low().getX()-origin.getMinBlockX()),maxX=Math.min(15,area.high().getX()-origin.getMinBlockX());
+                int minZ=Math.max(0,area.low().getZ()-origin.getMinBlockZ()),maxZ=Math.min(15,area.high().getZ()-origin.getMinBlockZ());
+                if(minX>maxX||minZ>maxZ)continue;LevelChunk chunk=holder.getFullChunk();
+                if(chunk==null||chunk.getClass()!=LevelChunk.class||chunk.getLevel()!=level)continue;
+                LevelChunkSection[] sections=chunk.getSections();
+                int first=Math.max(0,chunk.getSectionIndex(area.low().getY())),last=Math.min(sections.length-1,chunk.getSectionIndex(area.high().getY()));
+                for(int section=first;section<=last;section++){
+                    LevelChunkSection body=sections[section];if(body==null||body.getClass()!=LevelChunkSection.class)continue;
+                    PalettedContainer<?> states=body.getStates();if(states.getClass()!=PalettedContainer.class||((Access.StatePalette)states).pro$strategy()!=PalettedContainer.Strategy.SECTION_STATES)continue;
+                    int base=chunk.getSectionYFromSectionIndex(section)<<4,minY=Math.max(0,area.low().getY()-base),maxY=Math.min(15,area.high().getY()-base);
+                    if(minY>maxY)continue;
+                    var slice=new WorldStatePolicy.Slice(chunk,sections,section,body,states,minX,minY,minZ,maxX,maxY,maxZ);
+                    if(WorldStatePolicy.matches(query,slice)&&tracking.pro$visibleChunks().get(origin.toLong())==holder&&holder.getFullChunk()==chunk
+                            &&chunk.getSections()==sections&&sections[section]==body&&body.getStates()==states)return true;
+                }
+            }
+        }return false;
+    }
     private static int postProcessingSection(LevelChunk chunk,ShortList pending){
         // These are the vanilla field's actual slots, not a caller-supplied list
         // or an assumption about an unknown chunk implementation.

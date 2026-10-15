@@ -17,6 +17,7 @@ public final class NetworkBridge {
     private static final List<Registry> REGISTRIES=new ArrayList<>();
     private static final ThreadLocal<Scope> CURRENT=new ThreadLocal<>();
     private static final ThreadLocal<Cleanup> CLEANING=new ThreadLocal<>();
+    private static final ThreadLocal<Submission> SUBMITTING=new ThreadLocal<>();
     private static final Set<Scope> ACTIVE=Collections.newSetFromMap(new IdentityHashMap<>());
     private static final class Scope{
         final Scope parent;Module[] modules;final Class<?> declaring;final String method;final Thread thread;
@@ -67,14 +68,30 @@ public final class NetworkBridge {
             finally{try{finishPacket(scope);}finally{action=null;}}
         }
     }
-    private record Write(Module[] modules,Ref<Object> context,Ref<Object> message,Ref<Object> promise){}
+    private static final class Write{
+        final Module[] modules;final Ref<Object> context,message,promise;Submission cancellation;boolean submitted;
+        Write(Module[] modules,Ref<Object> context,Ref<Object> message,Ref<Object> promise){this.modules=modules;this.context=context;this.message=message;this.promise=promise;}
+        Module[] modules(){return modules;}Ref<Object> context(){return context;}Ref<Object> message(){return message;}Ref<Object> promise(){return promise;}
+    }
+    /** One actual safeExecute call; rejection evidence grants no cleanup write policy. */
+    private static final class Submission{
+        final Submission parent;final Thread thread=Thread.currentThread();final Class<?> declaring;final int boundaryDepth;
+        final Ref<Object> executor,task;final Write write;
+        Throwable rejection,queryFailure;Cleanup cleanup;boolean proven,caught,claimed,closed;
+        Submission(Object executor,Object task,Write write,Class<?> declaring,int boundaryDepth){
+            parent=SUBMITTING.get();this.executor=new Ref<>(executor);this.task=new Ref<>(task);this.write=write;this.declaring=declaring;this.boundaryDepth=boundaryDepth;
+        }
+    }
     private static final class Cleanup{
         final Cleanup parent;final Thread thread=Thread.currentThread();final Object context,message,promise;
-        final Class<?> declaring;final String method;final int boundaryDepth;final OutboundRejected failure=new OutboundRejected();
+        final Class<?> declaring;final String method;final int boundaryDepth;final Throwable failure;
         int phase=-1;boolean closed;Object graph;
         Cleanup(Object context,Object message,Object promise,StackWalker.StackFrame frame,int boundaryDepth){
+            this(context,message,promise,frame,boundaryDepth,new OutboundRejected());
+        }
+        Cleanup(Object context,Object message,Object promise,StackWalker.StackFrame frame,int boundaryDepth,Throwable failure){
             parent=CLEANING.get();this.context=context;this.message=message;this.promise=promise;
-            declaring=frame.getDeclaringClass();method=frame.getMethodName();this.boundaryDepth=boundaryDepth;
+            declaring=frame.getDeclaringClass();method=frame.getMethodName();this.boundaryDepth=boundaryDepth;this.failure=failure;
         }
     }
     private static final class OutboundRejected extends java.util.concurrent.CancellationException{
@@ -187,6 +204,123 @@ public final class NetworkBridge {
         Module[] sender=ControlBridge.invokingSources();
         Module[] modules=union(sender,currentSources(),packetSources(message));if(ControlBridge.sourceUnknown())modules=union(modules,new Module[]{null});synchronized(CHANNELS){reap();WRITES.put(new Key(task,true),new Write(modules,new Ref<>(context),new Ref<>(message),new Ref<>(promise)));CodeSourceBridge.contributionControl(modules);}
     }
+    private static StackWalker.StackFrame submissionBoundary(){
+        var frame=boundary();if(!frame.getDeclaringClass().getName().equals("io.netty.channel.AbstractChannelHandlerContext")||!frame.getMethodName().equals("safeExecute")
+                ||!frame.getDescriptor().equals("(Lio/netty/util/concurrent/EventExecutor;Ljava/lang/Runnable;Lio/netty/channel/ChannelPromise;Ljava/lang/Object;Z)Z"))throw new SecurityException("ACTUAL_NETTY_WRITE_SUBMISSION_REQUIRED");
+        return frame;
+    }
+    public static Object writeSubmissionEnter(Object executor,Object task,Object promise,Object message){
+        var frame=submissionBoundary();Write write;synchronized(CHANNELS){
+            write=WRITES.get(new Key(task,false));
+            if(write==null||write.submitted||message!=write.message().get()||promise!=write.promise().get()||!writeTuple(task,write))return null;
+            // A second call cannot reinterpret an already published task as a
+            // fresh rejected submission, even when all three fields still match.
+            write.submitted=true;
+        }
+        int depth=NativeControl.networkBoundaryDepth(frame.getDeclaringClass(),frame.getMethodName());
+        Submission submission=new Submission(executor,task,write,frame.getDeclaringClass(),depth);
+        try{
+            protect(submission,submission.executor,submission.task);
+            synchronized(CHANNELS){if(WRITES.get(new Key(task,false))==write)write.cancellation=submission;}
+            SUBMITTING.set(submission);return submission;
+        }
+        catch(RuntimeException|Error failure){
+            if(SUBMITTING.get()==submission){if(submission.parent==null)SUBMITTING.remove();else SUBMITTING.set(submission.parent);}throw failure;
+        }
+    }
+    private static boolean writeTuple(Object task,Write write){
+        return task!=null&&field(task,"ctx")==write.context().get()&&field(task,"msg")==write.message().get()&&field(task,"promise")==write.promise().get();
+    }
+    /** Called immediately before the original static reject's actual ATHROW. */
+    public static void writeSubmissionRejected(Throwable failure){
+        var frame=boundary();if(!frame.getDeclaringClass().getName().equals("io.netty.util.concurrent.SingleThreadEventExecutor")||!frame.getMethodName().equals("reject")||!frame.getDescriptor().equals("()V"))throw new SecurityException("ACTUAL_NETTY_EXECUTOR_REJECTION_REQUIRED");
+        Submission submission=SUBMITTING.get();
+        if(submission==null||submission.closed||submission.thread!=Thread.currentThread()||submission.rejection!=null
+                ||failure==null||failure.getClass()!=java.util.concurrent.RejectedExecutionException.class)return;
+        // Preserve the actual original exception even when metadata inspection
+        // cannot establish the narrow unqueued path. Such a receipt stays pending.
+        submission.rejection=failure;
+        Object executor=submission.executor.get(),task=submission.task.get();
+        try{
+            if(executor==null||task==null||!rejectionPath(submission,frame.getDeclaringClass())
+                    ||!NetworkCleanup.submissionBoundary(submission.declaring,submission.boundaryDepth))return;
+            synchronized(CHANNELS){if(WRITES.get(new Key(task,false))==submission.write&&writeTuple(task,submission.write))submission.proven=true;}
+        }catch(RuntimeException|Error unavailable){submission.queryFailure=unavailable;}
+    }
+    private static boolean rejectionPath(Submission submission,Class<?> executorBase){
+        Object executor=submission.executor.get();if(executor==null||!NetworkCleanup.standardExecutor(executor,executorBase))return false;
+        return WALKER.walk(frames->{
+            var cursor=frames.dropWhile(frame->frame.getDeclaringClass().getNestHost()==NetworkBridge.class).iterator();
+            if(!cursor.hasNext()||!submissionFrame(cursor.next(),executorBase,"reject","()V")||!cursor.hasNext())return false;
+            var caller=cursor.next();
+            if(submissionFrame(caller,executorBase,"offerTask","(Ljava/lang/Runnable;)Z")){
+                if(!cursor.hasNext()||!submissionFrame(cursor.next(),executorBase,"addTask","(Ljava/lang/Runnable;)V")||!cursor.hasNext())return false;
+                caller=cursor.next();
+            }else if(!NetworkCleanup.removalQueue(executor,executorBase))return false;
+            if(!submissionFrame(caller,executorBase,"execute","(Ljava/lang/Runnable;Z)V")||!cursor.hasNext())return false;
+            var dispatch=cursor.next();boolean lazy=submissionFrame(dispatch,executorBase,"lazyExecute0","(Ljava/lang/Runnable;)V");
+            if(!lazy&&!submissionFrame(dispatch,executorBase,"execute0","(Ljava/lang/Runnable;)V")||!cursor.hasNext())return false;
+            if(!submissionFrame(cursor.next(),executorBase,lazy?"lazyExecute":"execute","(Ljava/lang/Runnable;)V")||!cursor.hasNext())return false;
+            return submissionFrame(cursor.next(),submission.declaring,"safeExecute","(Lio/netty/util/concurrent/EventExecutor;Ljava/lang/Runnable;Lio/netty/channel/ChannelPromise;Ljava/lang/Object;Z)Z");
+        });
+    }
+    private static boolean submissionFrame(StackWalker.StackFrame frame,Class<?> type,String method,String descriptor){
+        return frame.getDeclaringClass()==type&&frame.getMethodName().equals(method)&&frame.getDescriptor().equals(descriptor);
+    }
+    private static Submission submission(Object token){
+        var frame=submissionBoundary();if(token==null)return null;
+        if(!(token instanceof Submission submission)||submission.thread!=Thread.currentThread()||!submission.closed&&SUBMITTING.get()!=submission||submission.declaring!=frame.getDeclaringClass())throw new SecurityException("ACTUAL_NETTY_WRITE_SUBMISSION_RECEIPT_REQUIRED");
+        return submission;
+    }
+    public static Object writeSubmissionCaught(Object token,Throwable failure){
+        Submission submission=submission(token);if(submission==null||submission.closed||!submission.proven||submission.rejection!=failure||CLEANING.get()!=null)return null;
+        Object task=submission.task.get();synchronized(CHANNELS){
+            if(task==null||WRITES.get(new Key(task,false))!=submission.write||!writeTuple(task,submission.write))return null;
+            Cleanup cleanup=new Cleanup(submission.write.context().get(),submission.write.message().get(),submission.write.promise().get(),submissionBoundary(),submission.boundaryDepth,failure);
+            protect(cleanup);submission.cleanup=cleanup;CLEANING.set(cleanup);submission.caught=true;return cleanup;
+        }
+    }
+    private static boolean claimCancellation(Submission submission,Object task){
+        if(submission==null||submission.claimed||!submission.caught||submission.thread!=Thread.currentThread()||task==null||submission.task.get()!=task)return false;
+        synchronized(CHANNELS){
+            if(submission.write.cancellation!=submission||WRITES.get(new Key(task,false))!=submission.write||!writeTuple(task,submission.write))return false;
+            submission.claimed=true;submission.write.cancellation=null;return true;
+        }
+    }
+    public static boolean writeSubmissionCancel(Object token){
+        Submission submission=submission(token);if(submission==null||!submission.caught)return false;
+        closeSubmissionCleanup(submission);return claimCancellation(submission,submission.task.get());
+    }
+    public static boolean writeCancelAllowed(Object task){
+        var frame=boundary();if(!frame.getDeclaringClass().getName().equals("io.netty.channel.AbstractChannelHandlerContext")||!frame.getMethodName().equals("write")
+                ||!frame.getDescriptor().equals("(Ljava/lang/Object;ZLio/netty/channel/ChannelPromise;)V"))throw new SecurityException("ACTUAL_NETTY_WRITE_CANCEL_REQUIRED");
+        synchronized(CHANNELS){Write write=WRITES.get(new Key(task,false));return write!=null&&claimCancellation(write.cancellation,task);}
+    }
+    public static Throwable writeSubmissionFailure(Object token,Throwable release,Throwable notification,Throwable cancel){
+        submission(token);
+        try{
+            Throwable failure=release!=null?release:notification!=null?notification:cancel;
+            if(failure!=null){if(notification!=null&&notification!=failure)failure.addSuppressed(notification);if(cancel!=null&&cancel!=failure&&cancel!=notification)failure.addSuppressed(cancel);}
+            return failure;
+        }finally{writeSubmissionExit(token);}
+    }
+    private static void closeSubmissionCleanup(Submission submission){
+        Cleanup cleanup=submission.cleanup;if(cleanup==null)return;
+        if(CLEANING.get()==cleanup){
+            try{cleanup.closed=true;}finally{if(cleanup.parent==null)CLEANING.remove();else CLEANING.set(cleanup.parent);}
+        }else if(!cleanup.closed){
+            if(submission.caught)throw new IllegalStateException("NETWORK_WRITE_SUBMISSION_CLEANUP_ORDER");
+            // Token construction failed before installation. Closing its
+            // metadata does not settle the still-retained Write receipt.
+            cleanup.closed=true;
+        }
+    }
+    public static void writeSubmissionExit(Object token){
+        submissionBoundary();if(token==null)return;
+        if(!(token instanceof Submission submission)||submission.thread!=Thread.currentThread())throw new SecurityException("ACTUAL_NETTY_WRITE_SUBMISSION_RECEIPT_REQUIRED");
+        if(submission.closed)return;if(SUBMITTING.get()!=submission)throw new IllegalStateException("NETWORK_WRITE_SUBMISSION_ORDER");
+        try{closeSubmissionCleanup(submission);}finally{submission.closed=true;if(submission.parent==null)SUBMITTING.remove();else SUBMITTING.set(submission.parent);}
+    }
     public static Object writeEnter(Object task){
         var frame=boundary();Write write;synchronized(CHANNELS){write=WRITES.get(new Key(task,false));}
         Object message=field(task,"msg");
@@ -207,7 +341,12 @@ public final class NetworkBridge {
             return scope;
         }catch(RuntimeException|Error failure){exitScope(scope);throw failure;}
     }
-    public static void writeRetired(Object task){if(!boundary().getMethodName().equals("recycle"))throw new SecurityException("ACTUAL_NETTY_WRITE_RETIREMENT_REQUIRED");synchronized(CHANNELS){WRITES.remove(new Key(task,false));}}
+    public static void writeRetired(Object task){
+        var frame=boundary();if(!frame.getDeclaringClass().getName().equals("io.netty.channel.AbstractChannelHandlerContext$WriteTask")||!frame.getMethodName().equals("recycle")||!frame.getDescriptor().equals("()V"))throw new SecurityException("ACTUAL_NETTY_WRITE_RETIREMENT_REQUIRED");
+        if(field(task,"ctx")!=null||field(task,"msg")!=null||field(task,"promise")!=null)throw new IllegalStateException("NETWORK_WRITE_TUPLE_STILL_HELD");
+        Scope scope=CURRENT.get();if(scope==null||scope.writeTask!=task||scope.write==null)return;
+        synchronized(CHANNELS){WRITES.remove(new Key(task,false),scope.write);}
+    }
     public static boolean writeRecycleAllowed(Object task){
         var frame=boundary();if(!frame.getDeclaringClass().getName().equals("io.netty.channel.AbstractChannelHandlerContext$WriteTask")
                 ||!frame.getMethodName().equals("recycle")||!frame.getDescriptor().equals("()V"))throw new SecurityException("ACTUAL_NETTY_WRITE_RETIREMENT_REQUIRED");
@@ -277,9 +416,11 @@ public final class NetworkBridge {
     }
     private static StackWalker.StackFrame rejectedBoundary(){
         var frame=boundary();String method=frame.getMethodName(),descriptor=frame.getDescriptor();
+        boolean submitted=method.equals("safeExecute")&&descriptor.equals("(Lio/netty/util/concurrent/EventExecutor;Ljava/lang/Runnable;Lio/netty/channel/ChannelPromise;Ljava/lang/Object;Z)Z");
         if(!frame.getDeclaringClass().getName().equals("io.netty.channel.AbstractChannelHandlerContext")
                 ||!(method.equals("write")&&descriptor.equals("(Ljava/lang/Object;ZLio/netty/channel/ChannelPromise;)V")
-                ||(method.equals("invokeWrite")||method.equals("invokeWriteAndFlush"))&&descriptor.equals("(Ljava/lang/Object;Lio/netty/channel/ChannelPromise;)V")))throw new SecurityException("ACTUAL_REJECTED_NETTY_WRITE_REQUIRED");
+                ||(method.equals("invokeWrite")||method.equals("invokeWriteAndFlush"))&&descriptor.equals("(Ljava/lang/Object;Lio/netty/channel/ChannelPromise;)V")||submitted))throw new SecurityException("ACTUAL_REJECTED_NETTY_WRITE_REQUIRED");
+        if(submitted){Submission submission=SUBMITTING.get();if(submission==null||!submission.caught||submission.cleanup==null||submission.cleanup!=CLEANING.get())throw new SecurityException("ACTUAL_REJECTED_NETTY_SUBMISSION_REQUIRED");}
         return frame;
     }
     public static Object outboundCleanupEnter(Object context,Object message,Object promise){
@@ -508,6 +649,6 @@ public final class NetworkBridge {
         long unknownActive=ACTIVE.stream().filter(scope->unknown(scope.modules)).count();
         return active!=0||writes!=0||queued!=0||unknownActive!=0||unobservedQueues!=0?"NETWORK_RETIREMENT_PENDING:active="+active+":writes="+writes+":queued="+queued+":unknownActive="+unknownActive+":queueUnobserved="+unobservedQueues:"";
     }}
-    public static Object[] controlObjects(){agent();return new Object[]{CHANNELS,HANDLERS,PACKETS,BUFFERS,WRAPPERS,HOLDERS,QUEUES,WRITES,ROLES,REGISTRIES,DEAD,CURRENT,ACTIVE,CLEANING};}
+    public static Object[] controlObjects(){agent();return new Object[]{CHANNELS,HANDLERS,PACKETS,BUFFERS,WRAPPERS,HOLDERS,QUEUES,WRITES,ROLES,REGISTRIES,DEAD,CURRENT,ACTIVE,CLEANING,SUBMITTING};}
     private static void reap(){for(Key key;(key=(Key)DEAD.poll())!=null;){CHANNELS.remove(key);HANDLERS.remove(key);PACKETS.remove(key);BUFFERS.remove(key);WRAPPERS.remove(key);HOLDERS.remove(key);QUEUES.remove(key);WRITES.remove(key);}}
 }

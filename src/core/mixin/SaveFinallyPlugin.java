@@ -50,6 +50,10 @@ public final class SaveFinallyPlugin implements IMixinConfigPlugin {
             weaveLiveState(node,"tickEffects","()V",-1,"effects-tick");
             weaveLiveState(node,"completeUsingItem","()V",-1,"consume");return;
         }
+        if(mixin.endsWith(".LiveStateHooks$Factors")) {
+            weaveLiveState(node,"tick","(Lnet/minecraft/world/effect/MobEffectInstance;)V",1,"factor-tick");
+            weaveLiveState(node,"getFactor","(Lnet/minecraft/world/entity/LivingEntity;F)F",1,"factor-read");return;
+        }
         if(mixin.endsWith(".LiveStateHooks$Food")) {
             weaveLiveState(node,"tick","(Lnet/minecraft/world/entity/player/Player;)V",1,"food-tick");return;
         }
@@ -271,7 +275,8 @@ public final class SaveFinallyPlugin implements IMixinConfigPlugin {
         String srg=switch(name) {
             case "tickEffects"->"m_21217_";
             case "completeUsingItem"->"m_8095_";
-            case "tick"->"m_38710_";
+            case "tick"->node.name.equals("net/minecraft/world/effect/MobEffectInstance$FactorData")?"m_267690_":"m_38710_";
+            case "getFactor"->"m_238413_";
             case "causeFoodExhaustion"->"m_36399_";
             default->throw new IllegalArgumentException(name);
         };
@@ -279,18 +284,21 @@ public final class SaveFinallyPlugin implements IMixinConfigPlugin {
                 &&(method.access&Opcodes.ACC_STATIC)==0).toList();
         if(matches.size()!=1)throw new IllegalStateException("LIVE_STATE_SCOPE_BOUNDARY:"+node.name+":"+name+descriptor);
         MethodNode method=matches.get(0);int lease=method.maxLocals++,failure=method.maxLocals++;
+        boolean floatResult=Type.getReturnType(descriptor).getSort()==Type.FLOAT;
         var enter=new InsnList();enter.add(new VarInsnNode(Opcodes.ALOAD,0));
         enter.add(argument<0?new InsnNode(Opcodes.ACONST_NULL):new VarInsnNode(Opcodes.ALOAD,argument));enter.add(new LdcInsnNode(operation));
         enter.add(new MethodInsnNode(Opcodes.INVOKESTATIC,"dev/ronova/pro/LiveStatePolicy","begin","(Ljava/lang/Object;Ljava/lang/Object;Ljava/lang/String;)Ljava/lang/Object;",false));
         enter.add(new VarInsnNode(Opcodes.ASTORE,lease));
         LabelNode body=new LabelNode(),start=new LabelNode(),end=new LabelNode(),handler=new LabelNode();
+        enter.add(start);
         enter.add(new VarInsnNode(Opcodes.ALOAD,0));enter.add(new LdcInsnNode(operation));enter.add(new VarInsnNode(Opcodes.ALOAD,lease));
         enter.add(new MethodInsnNode(Opcodes.INVOKESTATIC,"dev/ronova/pro/LiveStatePolicy","anchorDenied","(Ljava/lang/Object;Ljava/lang/String;Ljava/lang/Object;)Z",false));
-        enter.add(new JumpInsnNode(Opcodes.IFEQ,body));enter.add(new InsnNode(Opcodes.RETURN));enter.add(body);enter.add(start);method.instructions.insert(enter);
+        enter.add(new JumpInsnNode(Opcodes.IFEQ,body));if(floatResult)enter.add(new InsnNode(Opcodes.FCONST_0));
+        enter.add(new InsnNode(floatResult?Opcodes.FRETURN:Opcodes.RETURN));enter.add(body);method.instructions.insert(enter);
         extendFramesWithLease(node,method,lease);
         Object[] bodyLocals=lifecycleFrameLocals(node,method,lease);
         method.instructions.insert(body,new FrameNode(Opcodes.F_NEW,bodyLocals.length,bodyLocals,0,new Object[0]));
-        for(AbstractInsnNode instruction:method.instructions.toArray())if(instruction.getOpcode()==Opcodes.RETURN) {
+        for(AbstractInsnNode instruction:method.instructions.toArray())if(instruction.getOpcode()==Opcodes.RETURN||floatResult&&instruction.getOpcode()==Opcodes.FRETURN) {
             var leave=new InsnList();leave.add(new VarInsnNode(Opcodes.ALOAD,lease));
             leave.add(new MethodInsnNode(Opcodes.INVOKESTATIC,"dev/ronova/pro/LiveStatePolicy","end","(Ljava/lang/Object;)V",false));method.instructions.insertBefore(instruction,leave);
         }

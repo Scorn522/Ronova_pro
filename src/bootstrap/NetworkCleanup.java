@@ -9,6 +9,8 @@ import java.util.IdentityHashMap;
 /** Exact objects reached by one original Netty write's retirement housekeeping. */
 final class NetworkCleanup {
     private static final String CTX="io.netty.channel.AbstractChannelHandlerContext",WRITE=CTX+"$WriteTask";
+    private static final String EXECUTOR="io.netty.util.concurrent.SingleThreadEventExecutor";
+    private static final String SAFE_EXECUTE="(Lio/netty/util/concurrent/EventExecutor;Ljava/lang/Runnable;Lio/netty/channel/ChannelPromise;Ljava/lang/Object;Z)Z";
     private static final long CONTEXT=1,PIPELINE=2,CHANNEL=4,UNSAFE=8,OUTBOUND=16,ENTRY=32,PROMISE=64,MESSAGE=128,
             ALLOCATOR=256,METRIC=512,COUNTER=1024,CELL=2048,LOCK=4096,SYNC=8192,NODE=16384,CHUNK=32768,
             ARENA=65536,LIST=131072,SUBPAGE=262144,CACHE=524288,REGION=1048576,REGION_ENTRY=2097152,
@@ -87,6 +89,18 @@ final class NetworkCleanup {
     }
     static boolean boundaryAllowed(Class<?> boundary,String method,int phase){
         return NativeControl.networkCleanupBoundary(boundary,method,phase,NetworkBridge.retirementBoundaryDepth());
+    }
+    /** Only observes the original reject path; it does not enter a write scope. */
+    static boolean submissionBoundary(Class<?> boundary,int depth){return NativeControl.networkCleanupBoundary(boundary,"safeExecute",-2,depth);}
+    static boolean standardExecutor(Object executor,Class<?> base){
+        return executor!=null&&base!=null&&base.getName().equals(EXECUTOR)&&parent(executor,EXECUTOR)==base&&framework(executor.getClass(),base)
+                &&oneOf(executor.getClass().getName(),"io.netty.util.concurrent.DefaultEventExecutor","io.netty.channel.DefaultEventLoop","io.netty.channel.nio.NioEventLoop");
+    }
+    static boolean removalQueue(Object executor,Class<?> base){
+        // This branch is reached only after Netty's removeTask returned true.
+        // A custom Queue's boolean cannot establish removal of the real task.
+        Object queue=NativeControl.networkReadField(executor,base,"taskQueue",false);
+        return queue!=null&&queue.getClass()==java.util.concurrent.LinkedBlockingQueue.class;
     }
     /** The caller also checks the original array/backing policy and exact boundary. */
     static boolean arrayAllowed(Object array,int index,Object value){
@@ -432,10 +446,21 @@ final class NetworkCleanup {
     /** 0 refuses a callback/unknown frame, 1 continues, 2 is the original boundary. */
     static int frame(Class<?> type,String method,String descriptor,Class<?> boundary,String boundaryMethod,int phase){
         if(type==null||method==null||descriptor==null||boundary==null)return 0;
+        if(phase==-2){
+            if(type==NetworkCleanup.class&&method.equals("submissionBoundary"))return 1;
+            if(type==NativeControl.class&&oneOf(method,"networkCleanupBoundary","networkCleanupBoundary0"))return 1;
+            if(type==NetworkBridge.class&&method.equals("writeSubmissionRejected"))return 1;
+            if(type==boundary&&type.getName().equals(CTX)&&method.equals("safeExecute")&&descriptor.equals(SAFE_EXECUTE))return 2;
+            if(!type.getName().equals(EXECUTOR)||!framework(type,boundary))return 0;
+            return method.equals("reject")&&descriptor.equals("()V")||method.equals("offerTask")&&descriptor.equals("(Ljava/lang/Runnable;)Z")
+                    ||method.equals("addTask")&&descriptor.equals("(Ljava/lang/Runnable;)V")||method.equals("execute")&&descriptor.equals("(Ljava/lang/Runnable;Z)V")
+                    ||oneOf(method,"execute0","lazyExecute0","execute","lazyExecute")&&descriptor.equals("(Ljava/lang/Runnable;)V")?1:0;
+        }
         if(type==boundary&&method.equals(boundaryMethod)){
             if(phase==-1&&type.getName().equals(WRITE)&&oneOf(method,"run","cancel")&&descriptor.equals("()V"))return 2;
             if(phase>=0&&type.getName().equals(CTX)&&(method.equals("write")&&descriptor.equals("(Ljava/lang/Object;ZLio/netty/channel/ChannelPromise;)V")
-                    ||oneOf(method,"invokeWrite","invokeWriteAndFlush")&&descriptor.equals("(Ljava/lang/Object;Lio/netty/channel/ChannelPromise;)V")))return 2;
+                    ||oneOf(method,"invokeWrite","invokeWriteAndFlush")&&descriptor.equals("(Ljava/lang/Object;Lio/netty/channel/ChannelPromise;)V")
+                    ||method.equals("safeExecute")&&descriptor.equals(SAFE_EXECUTE)))return 2;
             return 0;
         }
         if(type==NetworkCleanup.class||type==Graph.class||type==Visit.class)return 1;
@@ -471,7 +496,7 @@ final class NetworkCleanup {
         if(name.equals("io.netty.channel.ChannelOutboundBuffer$Entry"))return oneOf(method,"cancel","recycle")?1:0;
         if(name.equals(WRITE))return oneOf(method,"decrementPendingOutboundBytes","recycle")?1:0;
         if(oneOf(name,"io.netty.util.concurrent.DefaultPromise","io.netty.channel.DefaultChannelPromise","io.netty.channel.DefaultChannelProgressivePromise","io.netty.util.concurrent.DefaultProgressivePromise"))
-            return oneOf(method,"tryFailure","setFailure0","setValue0","trySuccess","setSuccess0","setUncancellable","checkNotifyWaiters","notifyListeners","notifyListenersNow","notifyListeners0","notifyListener0","safeExecute","executor")?1:0;
+            return oneOf(method,"tryFailure","setFailure0","setValue0","trySuccess","setSuccess0","setUncancellable","checkNotifyWaiters","notifyListeners","notifyListenersNow","notifyListeners0","notifyListener0","safeExecute","executor")||phase==1&&method.equals("setFailure")?1:0;
         if(name.equals("io.netty.util.concurrent.DefaultPromise$CauseHolder"))return phase==1&&method.equals("<init>")&&descriptor.equals("(Ljava/lang/Throwable;)V")?1:0;
         if(name.equals("io.netty.util.ReferenceCountUtil"))return oneOf(method,"release","safeRelease")||phase==2&&method.equals("retain")?1:0;
         if(name.equals("io.netty.util.internal.ReferenceCountUpdater"))return oneOf(method,"release","nonVolatileRawCnt","tryFinalRelease0","nonFinalRelease0","retryRelease0","toLiveRealRefCnt")||phase==2&&method.equals("retain")?1:0;

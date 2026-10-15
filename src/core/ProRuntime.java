@@ -895,6 +895,14 @@ public final class ProRuntime implements AutoCloseable {
         for(ProRuntime runtime:sourceRuntimes())if(runtime.worldControl.paletteMutationDenied(palette,index))return true;
         return false;
     }
+    public static boolean worldStorageMutationDenied(net.minecraft.util.SimpleBitStorage storage,int index,int value){
+        if(ACTION_CALLER.getCallerClass()!=net.minecraft.util.SimpleBitStorage.class)throw new SecurityException("ACTUAL_WORLD_BIT_STORAGE_WRITE_REQUIRED");
+        return WorldStatePolicy.storageDenied(storage,index,value);
+    }
+    static boolean worldStateQuery(WorldStatePolicy.Query query){
+        for(ProRuntime runtime:sourceRuntimes())if(runtime.worldControl.stateMutationDenied(query))return true;
+        return false;
+    }
     public static boolean worldSpawnDenied(Entity entity){
         return ((Access.EntityState)entity).pro$level() instanceof ServerLevel level&&worldSpawnDenied(level,entity);
     }
@@ -2795,8 +2803,9 @@ public final class ProRuntime implements AutoCloseable {
             Class.forName(BackingPolicy.class.getName(),true,ProRuntime.class.getClassLoader());
             LiveStatePolicy.initialize();
             EquipmentPolicy.initialize();
+            WorldStatePolicy.initialize();
             Class<?> bridge=Class.forName("dev.ronova.pro.bootstrap.TaskBridge",false,null);
-            if(!Integer.valueOf(79).equals(bridge.getMethod("abiVersion").invoke(null)))throw new IllegalStateException("INDEX_BRIDGE_ABI_MISMATCH");
+            if(!Integer.valueOf(80).equals(bridge.getMethod("abiVersion").invoke(null)))throw new IllegalStateException("INDEX_BRIDGE_ABI_MISMATCH");
             var lookup=java.lang.invoke.MethodHandles.lookup();
             var field=lookup.findStatic(ProRuntime.class,"preventFieldWrite",java.lang.invoke.MethodType.methodType(boolean.class,Object.class,Class.class,String.class,Object.class));
             var dispatch=lookup.findStatic(ProRuntime.class,"preventDispatch",java.lang.invoke.MethodType.methodType(boolean.class,Object.class,String.class,Object.class));
@@ -2950,6 +2959,7 @@ public final class ProRuntime implements AutoCloseable {
                 }
             for(var field:LiveStatePolicy.unsafeFields())if(!fields.contains(field)){fields.add(field);offsets.add((Long)offset.invoke(unsafe,field));}
             for(var field:EquipmentPolicy.unsafeFields())if(!fields.contains(field)){fields.add(field);offsets.add((Long)offset.invoke(unsafe,field));}
+            for(var field:WorldStatePolicy.unsafeFields())if(!fields.contains(field)){fields.add(field);offsets.add(WorldStatePolicy.actualOffset(field));}
             long[] values=new long[offsets.size()];for(int i=0;i<values.length;i++)values[i]=offsets.get(i);
             return new UnsafeMapping(fields.toArray(java.lang.reflect.Field[]::new),values,"");
         } catch(ReflectiveOperationException|RuntimeException|LinkageError unavailable) {

@@ -1055,7 +1055,7 @@ public final class AuditFixCheck {
     private static void networkBytecode()throws Exception{
         Class<?> boundary=Class.forName("dev.ronova.pro.agent.NetworkBoundary");
         Method transform=boundary.getDeclaredMethod("transform",ClassLoader.class,String.class,byte[].class);transform.setAccessible(true);
-        Set<String> targets=Set.of("io.netty.channel.AbstractChannelHandlerContext","io.netty.channel.AbstractChannelHandlerContext$WriteTask");
+        Set<String> targets=Set.of("io.netty.channel.AbstractChannelHandlerContext","io.netty.channel.AbstractChannelHandlerContext$WriteTask","io.netty.util.concurrent.SingleThreadEventExecutor");
         ClassLoader loader=new ClassLoader(AuditFixCheck.class.getClassLoader()){
             @Override protected Class<?> loadClass(String name,boolean resolve)throws ClassNotFoundException{
                 if(!name.startsWith("io.netty."))return super.loadClass(name,resolve);
@@ -1071,7 +1071,7 @@ public final class AuditFixCheck {
             }
         };
         for(String name:targets){Class<?> actual=Class.forName(name,false,loader);require(actual.getClassLoader()==loader,"actual transformed class was not defined");actual.getDeclaredMethods();}
-        System.out.println("NETWORK_BYTECODE_VERIFY_PASS actual_Netty_write_and_WriteTask JVM_verifier_only no_stop_or_cleanup_runtime_claim");
+        System.out.println("NETWORK_BYTECODE_VERIFY_PASS actual_Netty_write_WriteTask_and_executor JVM_verifier_only no_stop_or_cleanup_runtime_claim");
     }
     /** Prepare from an unselected consumer; stop through genuine console input, then finish below. */
     public static Object networkQueuedStop(Object runtime,Class<?> sender)throws Exception {

@@ -1,5 +1,17 @@
 # B 批实际报告：2026-10-09 代码收敛接续
 
+## 2026-10-15：C 接续——当前世界载体与异常队列收尾
+
+接续 `ecae56e`，Java80 / Native74 / Storage3 / Journal6，协议 `r3-client-8`。原版冻结坐标继续下接 SimpleBitStorage.set/getAndSet、实际 long[] 的整 word/部分字节/bulk 写、标准 palette 的已用 ID 值表及 section/Data/storage 替换；当前真实 owner 与逐冻结格 BlockState identity 决定拒绝，不发全类/线程许可。原版邻居写、未用 ID 追加、padding、保持冻结内容的 resize/copy 走原实现。record 实际 offset 和压缩引用宽度随 VM 布局读取；未知实现及未观察 CPU store 仍保留。
+
+活跃效果跟踪真实 Optional/FactorData，按当前 map/hidden 链解除旧 owner。准确原版 tick 和同 owner 的 getFactor 回填各有正常/异常 finally，重入层次不能借旧 scope；字段、Unsafe offset、bulk 共用现有门。curativeItems 深层图和自定义新增字段未覆盖。
+
+Netty 提交只有原版真实 reject 事件和完整实际方法链才取得未入队事实；保留原 Throwable，release/setFailure 分段一次，异常尾尝试原 cancel，正常 false 沿原 caller cancel。提交和取消资格绑定同一真实 task tuple；未知/可能仍排队的任务保留 WRITES。recycle 的来源退役移到原字段真实清空之后，仍排队的任务不提前回收。新 bootstrap Submission 元数据在守卫安装前预定义。
+
+共享全局 BlockState registry 的内部 IdMapper/List 本体、object-null 绝对地址及未知候选仍保留边界。`build-c-java80-native74-world-20261015.log` **PASS，40秒**，27项任务中20项执行、7项已是最新；Core/Agent/Bootstrap 与既有夹具实际编译，Native74/Storage3 源码未改、构建任务保持最新。`compile-c-java80-native74-world-20261015.log` **退出0**；`c-java80-native74-network-bytecode-20261015.log` 对当前转换后的真实 Netty write/WriteTask/SingleThreadEventExecutor 用 `-Xverify:all` 加载并读取声明方法，**退出0、NETWORK_BYTECODE_VERIFY_PASS**，只代表字节码加载通过。当前真实游戏冻结/解除、效果读取及停组队列分支 **NOTRUN**，不由编译代称通过；未启动新游戏检查、重跑旧矩阵或生成源码 ZIP。匹配候选已写入 `distribution/candidate-c-java80-native74-world-wip-20261015`，Core2704678、prelaunch23309字节；源码、匹配 JAR 与本摘要同步 GitHub，完整 C/B 未完成。
+
+---
+
 ## 2026-10-15：C 接续——停组队列收尾源码
 
 接续 `b084f1f`，Java79 / Native74 / Storage3 / Journal6，协议 `r3-client-8`。本包为原 WriteTask.run/cancel 保留真实 tuple/source 至 finally；release、tryFailure、原 flush 逐段异常收口，退出 token 后保留实际异常。停组任务只在原 recycle 字段清空后跳过回池，避免共享 recycler 写入自拒。

@@ -1,5 +1,21 @@
 # Ronova Pro 当前进度
 
+## 2026-10-15：C 接续——冻结载体、效果内部状态与拒绝队列
+
+接续 `ecae56e`，Java ABI80 / Native ABI74 / Storage3 / Journal6，协议 `r3-client-8`。本包继续实际强度源码；Native/驱动未改，自身外观与武器注册暂缓。
+
+冻结区域的原版 SimpleBitStorage 两个写入口及其真实 long[]、标准调色板值表、section/PalettedContainer.Data/storage 替换接入原字段、数组、offset 与 bulk 门。每次按当前 visible holder/full chunk/section/palette 关系逐冻结格比较，不把旧图或同类对象当授权；共享 storage/数组的所有实际冻结 owner 保留，未冻结 bits、padding 和保持冻结内容的原版扩容可继续。部分字节写入按 VM 数组布局与实际字节序比较，无法取得值的 bulk 只拒真实接触冻结内容的区间。record 字段使用实际 VM offset，引用宽度由真实 Object[] 布局取得。未知区块、palette/storage 及未观察原生机器码写入仍无泛化覆盖。
+
+效果保护跟进当前 activeEffects/hidden 链的真实 Optional→FactorData，禁止连接替换及外部字段/offset/bulk 改写。原版 tick 仅接受真实 lambda/Optional/instance.tick/已有 effects-tick 完整链；getFactor 只准同 owner 实体、同一 FactorData、原 current 值回填 previousFrame。作用域按实际重入层次配对，正常及异常 finally 关闭；curativeItems 深层图和自定义载体仍保留边界。
+
+原 Netty SingleThreadEventExecutor 的真实静态 reject Throwable、实际提交 tuple、完整调用链和栈底深度共同确认未入队。仅此分支逐段尝试消息 release、原 cause 的 promise setFailure，并在异常退出时配对原 cancel；正常 false 继续原 caller 位置取消，一次提交只消费一次取消资格。未知 executor/handler、接受后抛异常或无法确认未入队的任务保留来源持有及 pending。WriteTask 仅在原 ctx/msg/promise 已实际清空后退役记录，不因回收入口先删回执而丢失仍持有的来源。
+
+共享全局 BlockState registry 内部 IdMapper/List 本体、object-null 绝对地址及未知候选不属于本包可定位的私有载体链；不提升为已覆盖。
+
+本包统一构建 **PASS，40秒**，Core/Agent/Bootstrap 与既有夹具实际编译，Native74/Storage3 源码未改、构建任务保持最新。匹配 AuditFixCheck 编译退出0；真实 Netty write/WriteTask/SingleThreadEventExecutor 经当前转换器及 `-Xverify:all` 加载，**退出0、NETWORK_BYTECODE_VERIFY_PASS**。真实游戏冻结/解除、效果 tick/读取及停止后的队列运行仍 **NOTRUN**；构建和字节码加载不代称实际游戏通过。完整 C/B 未完成，匹配候选已写入 `distribution/candidate-c-java80-native74-world-wip-20261015`，Core2704678、prelaunch23309字节；源码、匹配 JAR 和现有摘要同步 GitHub，未生成源码 ZIP。
+
+---
+
 ## 2026-10-15：C 接续——停组后的原队列收尾
 
 接续 `b084f1f`，Java ABI79 / Native ABI74 / Storage3 / Journal6，协议仍为 `r3-client-8`。本包集中处理原 Netty WriteTask 已接受入队后停组的收尾；自身外观与武器注册继续暂缓。

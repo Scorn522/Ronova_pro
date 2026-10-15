@@ -96,6 +96,19 @@ public final class WorldControlHooks {
             if(ProRuntime.worldPaletteMutationDenied((net.minecraft.world.level.chunk.PalettedContainer<?>)(Object)this,index))callback.cancel();
         }
     }
+    @Mixin(net.minecraft.util.SimpleBitStorage.class) public abstract static class StorageWrites {
+        // Both vanilla inclusiveBetween checks have already accepted index/value
+        // here. Invalid calls retain their original exception and never reach policy.
+        @Inject(method="set(II)V",at=@At(value="INVOKE",target="Lnet/minecraft/util/SimpleBitStorage;cellIndex(I)I"),cancellable=true,require=1,allow=1)
+        private void state(int index,int value,CallbackInfo callback){
+            if(ProRuntime.worldStorageMutationDenied((net.minecraft.util.SimpleBitStorage)(Object)this,index,value))callback.cancel();
+        }
+        @Inject(method="getAndSet(II)I",at=@At(value="INVOKE",target="Lnet/minecraft/util/SimpleBitStorage;cellIndex(I)I"),cancellable=true,require=1,allow=1)
+        private void swap(int index,int value,CallbackInfoReturnable<Integer> callback){
+            var storage=(net.minecraft.util.SimpleBitStorage)(Object)this;
+            if(ProRuntime.worldStorageMutationDenied(storage,index,value))callback.setReturnValue(storage.get(index));
+        }
+    }
     @Mixin(targets="net.minecraft.world.level.chunk.LevelChunk$BoundTickingBlockEntity") public abstract static class Block {
         @Shadow @Final private net.minecraft.world.level.block.entity.BlockEntity blockEntity;
         @Inject(method="tick",at=@At("HEAD"),cancellable=true)

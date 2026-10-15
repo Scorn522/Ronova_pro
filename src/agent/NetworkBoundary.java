@@ -14,7 +14,9 @@ final class NetworkBoundary {
     private static final String PACKET="Lnet/minecraft/network/protocol/Packet;",LISTENER="Lnet/minecraft/network/PacketSendListener;",SEND="("+PACKET+LISTENER+")V";
     private static final String NETTY="io/netty/channel/AbstractChannelHandlerContext";
     private static final String WRITE=NETTY+"$WriteTask",BYTE_ENCODER="io/netty/handler/codec/MessageToByteEncoder";
-    static final Set<String> TARGETS=Set.of(INSTANCE,REGISTRY,SIMPLE,CODEC,HANDLER,EVENT,CONNECTION,HOLDER,ENCODER,NETTY,WRITE,BYTE_ENCODER);
+    private static final String EXECUTOR="io/netty/util/concurrent/SingleThreadEventExecutor";
+    private static final String SAFE_EXECUTE="(Lio/netty/util/concurrent/EventExecutor;Ljava/lang/Runnable;Lio/netty/channel/ChannelPromise;Ljava/lang/Object;Z)Z";
+    static final Set<String> TARGETS=Set.of(INSTANCE,REGISTRY,SIMPLE,CODEC,HANDLER,EVENT,CONNECTION,HOLDER,ENCODER,NETTY,WRITE,BYTE_ENCODER,EXECUTOR);
     private NetworkBoundary(){}
     static byte[] transform(ClassLoader loader,String name,byte[] bytes){
         if(!TARGETS.contains(name))return null;ClassNode node=new ClassNode();new ClassReader(bytes).accept(node,0);boolean changed=false;
@@ -71,8 +73,10 @@ final class NetworkBoundary {
             if(name.equals(NETTY)&&method.name.equals("write")&&args.length==3&&args[0].getDescriptor().equals("Ljava/lang/Object;")&&args[1].getSort()==Type.BOOLEAN&&args[2].getDescriptor().equals("Lio/netty/channel/ChannelPromise;")){
                 if(result.getSort()!=Type.VOID)throw new IllegalStateException("NETTY_WRITE_RETURN_LAYOUT_UNAVAILABLE:"+method.desc);
                 InsnList guard=gate(vars[0],"outboundAllowed");rejectOutbound(method,guard,vars[0],vars[2],vars[1],"flush");
-                guard.add(new InsnNode(Opcodes.RETURN));endGate(guard);afterWriteValidation(method,guard);changed=true;
+                guard.add(new InsnNode(Opcodes.RETURN));endGate(guard);afterWriteValidation(method,guard);writeCancel(method);changed=true;
             }
+            if(name.equals(NETTY)&&method.name.equals("safeExecute")&&method.desc.equals(SAFE_EXECUTE)){writeSubmission(method);changed=true;}
+            if(name.equals(EXECUTOR)&&method.name.equals("reject")&&method.desc.equals("()V")&&(method.access&Opcodes.ACC_STATIC)!=0){writeRejected(method);changed=true;}
             if(name.equals(NETTY)&&Set.of("invokeWrite","invokeWriteAndFlush").contains(method.name)&&args.length==2&&args[0].getDescriptor().equals("Ljava/lang/Object;")&&args[1].getDescriptor().equals("Lio/netty/channel/ChannelPromise;")&&(method.access&Opcodes.ACC_STATIC)==0){
                 InsnList guard=gate(vars[0],"outboundAllowed");rejectOutbound(method,guard,vars[0],vars[1],-1,method.name.equals("invokeWriteAndFlush")?"invokeFlush":null);
                 guard.add(new InsnNode(Opcodes.RETURN));endGate(guard);method.instructions.insert(guard);changed=true;
@@ -88,8 +92,7 @@ final class NetworkBoundary {
             }
             if(name.equals(WRITE)&&(method.name.equals("run")||method.name.equals("cancel"))&&method.desc.equals("()V")){scope(method,0,"writeEnter");changed=true;}
             if(name.equals(WRITE)&&method.name.equals("recycle")&&method.desc.equals("()V")){
-                writeRecycle(method);
-                InsnList retired=new InsnList();retired.add(new VarInsnNode(Opcodes.ALOAD,0));call(retired,"writeRetired","(Ljava/lang/Object;)V");method.instructions.insert(retired);changed=true;
+                writeRecycle(method);changed=true;
             }
         }
         if(!changed)throw new IllegalStateException("NETWORK_BOUNDARY_LAYOUT_UNAVAILABLE:"+name);
@@ -169,6 +172,64 @@ final class NetworkBoundary {
         method.instructions.insert(valid.label,guard);
     }
     private static void call(InsnList code,String name,String desc){code.add(new MethodInsnNode(Opcodes.INVOKESTATIC,BRIDGE,name,desc,false));}
+    private static void writeRejected(MethodNode method){
+        List<AbstractInsnNode> code=instructions(method);
+        if(code.size()!=5||!(code.get(0) instanceof TypeInsnNode type)||type.getOpcode()!=Opcodes.NEW||!type.desc.equals("java/util/concurrent/RejectedExecutionException")
+                ||code.get(1).getOpcode()!=Opcodes.DUP||!(code.get(2) instanceof LdcInsnNode message)||!message.cst.equals("event executor terminated")
+                ||!(code.get(3) instanceof MethodInsnNode init)||init.getOpcode()!=Opcodes.INVOKESPECIAL||!init.owner.equals(type.desc)||!init.name.equals("<init>")||!init.desc.equals("(Ljava/lang/String;)V")
+                ||code.get(4).getOpcode()!=Opcodes.ATHROW||!method.tryCatchBlocks.isEmpty())throw new IllegalStateException("NETTY_EXECUTOR_REJECTION_LAYOUT_UNAVAILABLE");
+        InsnList rejected=new InsnList();rejected.add(new InsnNode(Opcodes.DUP));call(rejected,"writeSubmissionRejected","(Ljava/lang/Throwable;)V");method.instructions.insertBefore(code.get(4),rejected);
+    }
+    private static void writeCancel(MethodNode method){
+        var calls=Arrays.stream(method.instructions.toArray()).filter(at->at instanceof MethodInsnNode invoke&&invoke.owner.equals(WRITE)&&invoke.name.equals("cancel")&&invoke.desc.equals("()V")).toList();
+        if(calls.size()!=1)throw new IllegalStateException("NETTY_WRITE_CANCEL_CALL_UNAVAILABLE");
+        // A thrown execute can have accepted its task. Only the observed original
+        // rejection may authorize this cancellation; an unknown submission stays held.
+        LabelNode skip=new LabelNode(),complete=new LabelNode();InsnList gate=new InsnList();gate.add(new InsnNode(Opcodes.DUP));call(gate,"writeCancelAllowed","(Ljava/lang/Object;)Z");
+        gate.add(new JumpInsnNode(Opcodes.IFEQ,skip));method.instructions.insertBefore(calls.get(0),gate);
+        InsnList tail=new InsnList();tail.add(new JumpInsnNode(Opcodes.GOTO,complete));tail.add(skip);tail.add(new InsnNode(Opcodes.POP));tail.add(complete);method.instructions.insert(calls.get(0),tail);
+    }
+    private static void writeSubmission(MethodNode method){
+        if((method.access&Opcodes.ACC_STATIC)==0)throw new IllegalStateException("NETTY_WRITE_SUBMISSION_STATIC_REQUIRED");
+        var catches=method.tryCatchBlocks.stream().filter(block->"java/lang/Throwable".equals(block.type)).toList();
+        if(catches.size()!=1)throw new IllegalStateException("NETTY_WRITE_SUBMISSION_CATCH_UNAVAILABLE");
+        AbstractInsnNode store=catches.get(0).handler.getNext();while(store!=null&&store.getOpcode()<0)store=store.getNext();
+        if(!(store instanceof VarInsnNode caught)||caught.getOpcode()!=Opcodes.ASTORE)throw new IllegalStateException("NETTY_WRITE_SUBMISSION_CAUSE_UNAVAILABLE");
+        int token=method.maxLocals++,cleanup=method.maxLocals++,released=method.maxLocals++,notified=method.maxLocals++,cancelled=method.maxLocals++,failure=method.maxLocals++;
+        InsnList rejected=new InsnList();LabelNode original=new LabelNode();rejected.add(new VarInsnNode(Opcodes.ALOAD,token));rejected.add(new VarInsnNode(Opcodes.ALOAD,caught.var));
+        call(rejected,"writeSubmissionCaught","(Ljava/lang/Object;Ljava/lang/Throwable;)Ljava/lang/Object;");rejected.add(new VarInsnNode(Opcodes.ASTORE,cleanup));rejected.add(new VarInsnNode(Opcodes.ALOAD,cleanup));rejected.add(new JumpInsnNode(Opcodes.IFNULL,original));
+        for(int local:new int[]{released,notified,cancelled}){rejected.add(new InsnNode(Opcodes.ACONST_NULL));rejected.add(new VarInsnNode(Opcodes.ASTORE,local));}
+        cleanupStep(method,rejected,cleanup,0,released,step->{
+            LabelNode absent=new LabelNode();step.add(new VarInsnNode(Opcodes.ALOAD,3));step.add(new JumpInsnNode(Opcodes.IFNULL,absent));step.add(new VarInsnNode(Opcodes.ALOAD,3));
+            step.add(new MethodInsnNode(Opcodes.INVOKESTATIC,"io/netty/util/ReferenceCountUtil","release","(Ljava/lang/Object;)Z",false));step.add(new InsnNode(Opcodes.POP));step.add(absent);
+        });
+        cleanupStep(method,rejected,cleanup,1,notified,step->{
+            step.add(new VarInsnNode(Opcodes.ALOAD,2));step.add(new VarInsnNode(Opcodes.ALOAD,caught.var));step.add(new MethodInsnNode(Opcodes.INVOKEINTERFACE,"io/netty/channel/ChannelPromise","setFailure","(Ljava/lang/Throwable;)Lio/netty/channel/ChannelPromise;",true));step.add(new InsnNode(Opcodes.POP));
+        });
+        // Normal rejection retains Netty's original caller-side cancel. The
+        // method's exceptional finally owns cancellation if either action fails.
+        rejected.add(new VarInsnNode(Opcodes.ALOAD,cleanup));rejected.add(new VarInsnNode(Opcodes.ALOAD,released));rejected.add(new VarInsnNode(Opcodes.ALOAD,notified));rejected.add(new InsnNode(Opcodes.ACONST_NULL));
+        call(rejected,"outboundCleanupExit","(Ljava/lang/Object;Ljava/lang/Throwable;Ljava/lang/Throwable;Ljava/lang/Throwable;)Ljava/lang/Throwable;");rejected.add(new VarInsnNode(Opcodes.ASTORE,failure));
+        LabelNode failed=new LabelNode();rejected.add(new VarInsnNode(Opcodes.ALOAD,failure));rejected.add(new JumpInsnNode(Opcodes.IFNONNULL,failed));
+        rejected.add(new InsnNode(Opcodes.ICONST_0));rejected.add(new InsnNode(Opcodes.IRETURN));rejected.add(failed);
+        rejected.add(new VarInsnNode(Opcodes.ALOAD,failure));rejected.add(new InsnNode(Opcodes.ATHROW));rejected.add(original);
+        method.instructions.insert(store,rejected);
+        LabelNode start=new LabelNode(),end=new LabelNode(),handler=new LabelNode();InsnList enter=new InsnList();
+        for(int local:new int[]{0,1,2,3})enter.add(new VarInsnNode(Opcodes.ALOAD,local));call(enter,"writeSubmissionEnter","(Ljava/lang/Object;Ljava/lang/Object;Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;");enter.add(new VarInsnNode(Opcodes.ASTORE,token));enter.add(start);method.instructions.insert(enter);
+        returns(method,step->{step.add(new VarInsnNode(Opcodes.ALOAD,token));call(step,"writeSubmissionExit","(Ljava/lang/Object;)V");});
+        method.instructions.add(end);method.instructions.add(handler);method.instructions.add(new VarInsnNode(Opcodes.ASTORE,failure));method.instructions.add(new InsnNode(Opcodes.ACONST_NULL));method.instructions.add(new VarInsnNode(Opcodes.ASTORE,cancelled));
+        writeSubmissionStep(method,method.instructions,cancelled,step->{
+            LabelNode skip=new LabelNode();step.add(new VarInsnNode(Opcodes.ALOAD,token));call(step,"writeSubmissionCancel","(Ljava/lang/Object;)Z");step.add(new JumpInsnNode(Opcodes.IFEQ,skip));
+            step.add(new VarInsnNode(Opcodes.ALOAD,1));step.add(new TypeInsnNode(Opcodes.CHECKCAST,WRITE));step.add(new MethodInsnNode(Opcodes.INVOKEVIRTUAL,WRITE,"cancel","()V",false));step.add(skip);
+        });
+        method.instructions.add(new VarInsnNode(Opcodes.ALOAD,token));method.instructions.add(new VarInsnNode(Opcodes.ALOAD,failure));method.instructions.add(new VarInsnNode(Opcodes.ALOAD,cancelled));method.instructions.add(new InsnNode(Opcodes.ACONST_NULL));
+        call(method.instructions,"writeSubmissionFailure","(Ljava/lang/Object;Ljava/lang/Throwable;Ljava/lang/Throwable;Ljava/lang/Throwable;)Ljava/lang/Throwable;");method.instructions.add(new InsnNode(Opcodes.ATHROW));method.tryCatchBlocks.add(new TryCatchBlockNode(start,end,handler,null));
+    }
+    private static void writeSubmissionStep(MethodNode method,InsnList code,int failure,java.util.function.Consumer<InsnList> action){
+        LabelNode start=new LabelNode(),end=new LabelNode(),handler=new LabelNode(),complete=new LabelNode();code.add(start);action.accept(code);code.add(end);
+        code.add(new JumpInsnNode(Opcodes.GOTO,complete));code.add(handler);code.add(new VarInsnNode(Opcodes.ASTORE,failure));code.add(complete);
+        method.tryCatchBlocks.add(0,new TryCatchBlockNode(start,end,handler,"java/lang/Throwable"));
+    }
     private static void writeRecycle(MethodNode method){
         var calls=Arrays.stream(method.instructions.toArray()).filter(at->at instanceof MethodInsnNode invoke
                 &&invoke.getOpcode()==Opcodes.INVOKEINTERFACE&&invoke.owner.equals("io/netty/util/internal/ObjectPool$Handle")
@@ -176,7 +237,7 @@ final class NetworkBoundary {
         if(calls.size()!=1)throw new IllegalStateException("NETTY_WRITE_RECYCLE_CALL_UNAVAILABLE");
         // Keep the original field clearing and the real run/cancel finally. A
         // retired item need not publish itself back into a shared recycler.
-        LabelNode allowed=new LabelNode();InsnList gate=new InsnList();gate.add(new VarInsnNode(Opcodes.ALOAD,0));
+        LabelNode allowed=new LabelNode();InsnList gate=new InsnList();gate.add(new VarInsnNode(Opcodes.ALOAD,0));call(gate,"writeRetired","(Ljava/lang/Object;)V");gate.add(new VarInsnNode(Opcodes.ALOAD,0));
         call(gate,"writeRecycleAllowed","(Ljava/lang/Object;)Z");gate.add(new JumpInsnNode(Opcodes.IFNE,allowed));
         gate.add(new InsnNode(Opcodes.POP2));gate.add(new InsnNode(Opcodes.RETURN));gate.add(allowed);method.instructions.insertBefore(calls.get(0),gate);
     }

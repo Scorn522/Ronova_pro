@@ -13,7 +13,7 @@ import net.minecraft.world.item.*;
 
 /** Exact live effect/food carriers. Their ownership is independent of world indices and source history. */
 public final class LiveStatePolicy {
-    private enum Kind { MAP, TABLE, NODE, EFFECT, FOOD }
+    private enum Kind { MAP, TABLE, NODE, EFFECT, FOOD, FACTOR_OPTIONAL, FACTOR }
     private record Slot(Field field,long offset,int width) { }
     private static final class Owner {
         final WeakReference<LivingEntity> entity;
@@ -28,11 +28,13 @@ public final class LiveStatePolicy {
     private static final class Scope {
         final Owner owner;final String operation;final Class<?> anchor;final String method,descriptor;
         final WeakReference<Thread> thread=new WeakReference<>(Thread.currentThread());final Scope previous;
-        final WeakReference<Object> used;
+        final WeakReference<Object> used,argument;
+        final int occurrences;
         boolean closed;
-        Scope(Owner owner,String operation,StackWalker.StackFrame frame,Scope previous,Object used) {
+        Scope(Owner owner,String operation,StackWalker.StackFrame frame,Scope previous,Object used,Object argument,int occurrences) {
             this.owner=owner;this.operation=operation;anchor=frame.getDeclaringClass();method=frame.getMethodName();
             descriptor=frame.getDescriptor();this.previous=previous;this.used=new WeakReference<>(used);
+            this.argument=new WeakReference<>(argument);this.occurrences=occurrences;
         }
     }
     // Prepared before guard publication. A guard never initializes reflection/offset helpers inside a map write.
@@ -42,8 +44,9 @@ public final class LiveStatePolicy {
     private static Map<Thread,Scope> SCOPES;
     private static Map<Class<?>,List<Slot>> FIELDS;
     private static StackWalker WALKER;
-    private static Field MAP_TABLE,NODE_KEY,NODE_VALUE,NODE_NEXT;
+    private static Field MAP_TABLE,NODE_KEY,NODE_VALUE,NODE_NEXT,OPTIONAL_VALUE,FACTOR_CURRENT;
     private static Class<?> NODE;
+    private static int REFERENCE_WIDTH;
     private LiveStatePolicy() { }
 
     static synchronized void initialize()throws ReflectiveOperationException {
@@ -51,9 +54,12 @@ public final class LiveStatePolicy {
         Class<?> unsafeType=Class.forName("sun.misc.Unsafe",false,ClassLoader.getPlatformClassLoader());
         Field singleton=unsafeType.getDeclaredField("theUnsafe");singleton.setAccessible(true);Object unsafe=singleton.get(null);
         Method offset=unsafeType.getMethod("objectFieldOffset",Field.class);
+        REFERENCE_WIDTH=((Number)unsafeType.getMethod("arrayIndexScale",Class.class).invoke(unsafe,Object[].class)).intValue();
+        if(REFERENCE_WIDTH<=0)throw new IllegalStateException("LIVE_STATE_REFERENCE_WIDTH_UNAVAILABLE");
         NODE=Class.forName("java.util.HashMap$Node",false,null);
         Class<?> tree=Class.forName("java.util.HashMap$TreeNode",false,null);
-        Class<?>[] carriers={LivingEntity.class,Player.class,FoodData.class,MobEffectInstance.class,HashMap.class,LinkedHashMap.class,NODE,tree};
+        Class<?>[] carriers={LivingEntity.class,Player.class,FoodData.class,MobEffectInstance.class,MobEffectInstance.FactorData.class,
+                Optional.class,HashMap.class,LinkedHashMap.class,NODE,tree};
         Class.forName("dev.ronova.pro.agent.RecoveryAgent",false,ClassLoader.getSystemClassLoader())
                 .getMethod("openBackingAccess",Class.class,Class[].class).invoke(null,LiveStatePolicy.class,(Object)carriers);
         Map<Class<?>,List<Slot>> fields=new HashMap<>();
@@ -63,7 +69,7 @@ public final class LiveStatePolicy {
                 if(Modifier.isStatic(field.getModifiers())||!selected(field))continue;
                 if(!field.trySetAccessible())throw new IllegalStateException("LIVE_STATE_FIELD_ACCESS:"+field);
                 Class<?> value=field.getType();int width=value==long.class||value==double.class?8:value==int.class||value==float.class?4:value==short.class||value==char.class?2:1;
-                if(!value.isPrimitive())width=8;
+                if(!value.isPrimitive())width=REFERENCE_WIDTH;
                 slots.add(new Slot(field,(Long)offset.invoke(unsafe,field),width));
             }
             fields.put(type,List.copyOf(slots));
@@ -72,6 +78,10 @@ public final class LiveStatePolicy {
         NODE_KEY=NODE.getDeclaredField("key");NODE_KEY.setAccessible(true);
         NODE_VALUE=NODE.getDeclaredField("value");NODE_VALUE.setAccessible(true);
         NODE_NEXT=NODE.getDeclaredField("next");NODE_NEXT.setAccessible(true);
+        OPTIONAL_VALUE=Optional.class.getDeclaredField("value");OPTIONAL_VALUE.setAccessible(true);
+        try{FACTOR_CURRENT=MobEffectInstance.FactorData.class.getDeclaredField("factorCurrent");}
+        catch(NoSuchFieldException production){FACTOR_CURRENT=MobEffectInstance.FactorData.class.getDeclaredField("f_216911_");}
+        FACTOR_CURRENT.setAccessible(true);
         OWNERS=Collections.synchronizedMap(new WeakIdentityMap<>());
         CARRIERS=Collections.synchronizedMap(new WeakIdentityMap<>());
         SCOPES=Collections.synchronizedMap(new WeakIdentityMap<>());
@@ -82,7 +92,8 @@ public final class LiveStatePolicy {
         Class<?> owner=field.getDeclaringClass();String name=field.getName();
         if(owner==LivingEntity.class)return name.equals("activeEffects")||name.equals("f_20945_")||name.equals("effectsDirty")||name.equals("f_20948_");
         if(owner==Player.class)return name.equals("foodData")||name.equals("f_36097_");
-        if(owner==FoodData.class||owner==MobEffectInstance.class)return true;
+        if(owner==FoodData.class||owner==MobEffectInstance.class||owner==MobEffectInstance.FactorData.class)return true;
+        if(owner==Optional.class)return name.equals("value");
         if(owner==HashMap.class)return Set.of("table","size","modCount","threshold","loadFactor").contains(name);
         return NODE!=null&&NODE.isAssignableFrom(owner);
     }
@@ -106,21 +117,32 @@ public final class LiveStatePolicy {
                 for(Object head:buckets)for(Object node=head;node!=null;node=NODE_NEXT.get(node)) {
                     if(count==seen.length||containsIdentity(seen,count,node))throw new IllegalStateException("LIVE_STATE_MAP_STRUCTURE_UNRESOLVED");seen[count++]=node;
                     if(kind==Kind.NODE&&node==carrier)return true;
-                    if(kind==Kind.EFFECT&&effectContains(NODE_VALUE.get(node),carrier))return true;
+                    if((kind==Kind.EFFECT||kind==Kind.FACTOR_OPTIONAL||kind==Kind.FACTOR)&&effectContains(NODE_VALUE.get(node),carrier,kind))return true;
                 }
             }
         }catch(IllegalAccessException unavailable){throw new IllegalStateException("LIVE_STATE_CARRIER_ACCESS",unavailable);}
         return false;
     }
-    private static boolean effectContains(Object first,Object expected) {
+    private static boolean effectContains(Object first,Object expected,Kind kind) {
         Object cursor=first;int remaining=256;
         Object[] seen=new Object[remaining];int count=0;
         while(cursor instanceof MobEffectInstance) {
             if(count==seen.length||containsIdentity(seen,count,cursor))throw new IllegalStateException("LIVE_STATE_EFFECT_CHAIN_UNRESOLVED");seen[count++]=cursor;
-            if(cursor==expected)return true;
+            if(kind==Kind.EFFECT&&cursor==expected)return true;
+            Object optional=((Access.EffectState)cursor).pro$factorData();
+            if(kind==Kind.FACTOR_OPTIONAL&&optional==expected)return true;
+            if(kind==Kind.FACTOR&&factorValue(optional)==expected)return true;
             cursor=((Access.EffectState)cursor).pro$hiddenEffect();
         }
         return false;
+    }
+    private static Object factorValue(Object optional) {
+        if(!(optional instanceof Optional<?>))throw new IllegalStateException("LIVE_STATE_FACTOR_OPTIONAL_UNRESOLVED");
+        try {
+            Object value=OPTIONAL_VALUE.get(optional);
+            if(value!=null&&!(value instanceof MobEffectInstance.FactorData))throw new IllegalStateException("LIVE_STATE_FACTOR_VALUE_UNRESOLVED");
+            return value;
+        }catch(IllegalAccessException unavailable){throw new IllegalStateException("LIVE_STATE_FACTOR_ACCESS",unavailable);}
     }
     private static void link(Owner owner,Object value,Kind kind) {
         if(value==null)return;
@@ -135,7 +157,10 @@ public final class LiveStatePolicy {
         Object[] seen=new Object[256];int count=0;
         while(value instanceof MobEffectInstance) {
             if(count==seen.length||containsIdentity(seen,count,value))throw new IllegalStateException("LIVE_STATE_EFFECT_CHAIN_UNRESOLVED");seen[count++]=value;
-            link(owner,value,Kind.EFFECT);value=((Access.EffectState)value).pro$hiddenEffect();
+            link(owner,value,Kind.EFFECT);
+            Object optional=((Access.EffectState)value).pro$factorData();
+            Object factor=factorValue(optional);link(owner,optional,Kind.FACTOR_OPTIONAL);link(owner,factor,Kind.FACTOR);
+            value=((Access.EffectState)value).pro$hiddenEffect();
         }
     }
     static void publish(Entity entity,long generation) {
@@ -171,10 +196,11 @@ public final class LiveStatePolicy {
     private static boolean containsIdentity(Object[] values,int length,Object value){for(int i=0;i<length;i++)if(values[i]==value)return true;return false;}
     static boolean known(Object value){for(Link link:links(value))if(current(link.owner,link.kind,value))return true;return false;}
 
-    /** Only the three exact original bodies woven by SaveFinallyPlugin can create a scope. */
+    /** Only exact original bodies woven by SaveFinallyPlugin can create a scope. */
     public static Object begin(Object receiver,Object argument,String operation) {
         if(!initialized)return null;
-        List<StackWalker.StackFrame> frames=WALKER.walk(stream->stream.filter(frame->frame.getDeclaringClass().getNestHost()!=LiveStatePolicy.class).limit(3).toList());
+        if(operation.equals("factor-tick")||operation.equals("factor-read"))return beginFactor(receiver,argument,operation);
+        List<StackWalker.StackFrame> frames=WALKER.walk(stream->stream.filter(frame->frame.getDeclaringClass().getNestHost()!=LiveStatePolicy.class).toList());
         if(frames.size()<2)return null;StackWalker.StackFrame entry=frames.get(0),caller=frames.get(1);
         LivingEntity entity;Owner owner;Object used=null;
         if(operation.equals("food-tick")) {
@@ -198,12 +224,62 @@ public final class LiveStatePolicy {
         Scope previous=SCOPES.get(Thread.currentThread());
         for(Scope active=previous;active!=null;active=active.previous)
             if(!active.closed&&active.owner==owner&&active.operation.equals(operation))return null;
-        Scope scope=new Scope(owner,operation,entry,previous,used);SCOPES.put(Thread.currentThread(),scope);return scope;
+        int occurrences=0;
+        for(var frame:frames)if(frame.getDeclaringClass()==entry.getDeclaringClass()&&frame.getMethodName().equals(entry.getMethodName())&&frame.getDescriptor().equals(entry.getDescriptor()))occurrences++;
+        Scope scope=new Scope(owner,operation,entry,previous,used,null,occurrences);SCOPES.put(Thread.currentThread(),scope);return scope;
+    }
+    private static boolean sameFrame(StackWalker.StackFrame frame,Class<?> declaring,String official,String srg,String descriptor) {
+        return frame.getDeclaringClass()==declaring&&named(frame,official,srg)&&frame.getDescriptor().equals(descriptor);
+    }
+    private static boolean sameAnchor(StackWalker.StackFrame frame,Scope scope) {
+        return frame.getDeclaringClass()==scope.anchor&&frame.getMethodName().equals(scope.method)&&frame.getDescriptor().equals(scope.descriptor);
+    }
+    private static boolean factorTickPath(Owner owner,List<StackWalker.StackFrame> frames) {
+        if(frames.size()<4
+                ||!sameFrame(frames.get(1),MobEffectInstance.class,"lambda$tick$0","m_267554_","(Lnet/minecraft/world/effect/MobEffectInstance$FactorData;)V")
+                ||!sameFrame(frames.get(2),Optional.class,"ifPresent","ifPresent","(Ljava/util/function/Consumer;)V")
+                ||!sameFrame(frames.get(3),MobEffectInstance.class,"tick","m_19552_","(Lnet/minecraft/world/entity/LivingEntity;Ljava/lang/Runnable;)Z"))return false;
+        for(Scope scope=SCOPES.get(Thread.currentThread());scope!=null;scope=scope.previous) {
+            if(scope.closed||scope.owner!=owner||scope.thread.get()!=Thread.currentThread()||!scope.operation.equals("effects-tick"))continue;
+            int occurrences=0;for(var frame:frames)if(sameAnchor(frame,scope))occurrences++;
+            if(occurrences!=scope.occurrences)continue;
+            boolean path=true;
+            // Optional.ifPresent is accepted only in the exact original tick
+            // sequence above, never as a general Consumer/callback permission.
+            for(int at=3;at<frames.size();at++) {
+                var frame=frames.get(at);
+                if(sameAnchor(frame,scope)){if(path)return true;break;}
+                if(!infrastructure(frame.getDeclaringClass())&&!gameFrame(frame,scope)){path=false;break;}
+            }
+        }
+        return false;
+    }
+    private static Object beginFactor(Object receiver,Object argument,String operation) {
+        if(!(receiver instanceof MobEffectInstance.FactorData))return null;
+        List<StackWalker.StackFrame> frames=WALKER.walk(stream->stream.filter(frame->frame.getDeclaringClass().getNestHost()!=LiveStatePolicy.class).toList());
+        if(frames.isEmpty())return null;StackWalker.StackFrame entry=frames.get(0);boolean tick=operation.equals("factor-tick");
+        if(!sameFrame(entry,MobEffectInstance.FactorData.class,tick?"tick":"getFactor",tick?"m_267690_":"m_238413_",
+                tick?"(Lnet/minecraft/world/effect/MobEffectInstance;)V":"(Lnet/minecraft/world/entity/LivingEntity;F)F"))return null;
+        for(Link link:links(receiver))if(link.kind==Kind.FACTOR&&current(link.owner,link.kind,receiver)) {
+            Owner owner=link.owner;
+            if(tick) {
+                if(!(argument instanceof MobEffectInstance effect)||!current(owner,Kind.EFFECT,effect)
+                        ||factorValue(((Access.EffectState)effect).pro$factorData())!=receiver||!factorTickPath(owner,frames))continue;
+            }else if(argument!=owner.entity.get())continue;
+            Scope previous=SCOPES.get(Thread.currentThread());
+            for(Scope active=previous;active!=null;active=active.previous)
+                if(!active.closed&&active.owner==owner&&active.operation.equals(operation))return null;
+            int occurrences=0;
+            for(var frame:frames)if(frame.getDeclaringClass()==entry.getDeclaringClass()&&frame.getMethodName().equals(entry.getMethodName())&&frame.getDescriptor().equals(entry.getDescriptor()))occurrences++;
+            Scope scope=new Scope(owner,operation,entry,previous,receiver,argument,occurrences);
+            SCOPES.put(Thread.currentThread(),scope);return scope;
+        }
+        return null;
     }
     public static void end(Object token) {
         if(!(token instanceof Scope scope)||scope.closed)return;
         if(scope.thread.get()!=Thread.currentThread()||SCOPES.get(Thread.currentThread())!=scope)throw new IllegalMonitorStateException("LIVE_STATE_SCOPE_ORDER");
-        try{if(active(scope.owner))refresh(scope.owner);}finally {
+        try{if(active(scope.owner)&&!scope.operation.equals("factor-tick")&&!scope.operation.equals("factor-read"))refresh(scope.owner);}finally {
             scope.closed=true;if(scope.previous==null)SCOPES.remove(Thread.currentThread());else SCOPES.put(Thread.currentThread(),scope.previous);
         }
     }
@@ -212,6 +288,15 @@ public final class LiveStatePolicy {
     }
     public static boolean anchorDenied(Object receiver,String operation,Object token) {
         if(!initialized)return false;Owner owner=receiver instanceof LivingEntity living?OWNERS.get(living):null;
+        if(receiver instanceof MobEffectInstance.FactorData) {
+            boolean protectedFactor=false;
+            for(Link link:links(receiver))if(link.kind==Kind.FACTOR&&current(link.owner,link.kind,receiver)) {
+                protectedFactor=true;
+                if(token instanceof Scope scope&&scope.owner==link.owner&&scope.used.get()==receiver&&scope==SCOPES.get(Thread.currentThread())
+                        &&!scope.closed&&scope.thread.get()==Thread.currentThread()&&scope.operation.equals(operation))return false;
+            }
+            return protectedFactor;
+        }
         if(receiver instanceof FoodData)for(Link link:links(receiver))if(link.kind==Kind.FOOD&&current(link.owner,link.kind,receiver)){owner=link.owner;break;}
         if(!active(owner))return false;
         return !(token instanceof Scope scope)||scope!=SCOPES.get(Thread.currentThread())||scope.owner!=owner||scope.closed
@@ -296,6 +381,33 @@ public final class LiveStatePolicy {
         }return false;
     }
     static boolean arrayDenied(Object array,int index,Object next){return elementDenied(array,null,next);}
+    private static boolean factorFieldDenied(Owner owner,Object receiver,String name,Object next) {
+        // The original constructor is the only writer of the padding setting.
+        if(next==null||name.equals("paddingDuration")||name.equals("f_216908_"))return true;
+        for(Scope scope=SCOPES.get(Thread.currentThread());scope!=null;scope=scope.previous) {
+            if(scope.closed||scope.owner!=owner||scope.used.get()!=receiver||scope.thread.get()!=Thread.currentThread())continue;
+            if(scope.operation.equals("factor-tick")) {
+                if(!(scope.argument.get() instanceof MobEffectInstance effect)||!current(owner,Kind.EFFECT,effect)
+                        ||factorValue(((Access.EffectState)effect).pro$factorData())!=receiver)continue;
+            }else if(scope.operation.equals("factor-read")) {
+                if(scope.argument.get()!=owner.entity.get()||!name.equals("factorPreviousFrame")&&!name.equals("f_216913_")||!(next instanceof Float value))continue;
+                try{if(Float.floatToRawIntBits(value)!=Float.floatToRawIntBits(FACTOR_CURRENT.getFloat(receiver)))continue;}
+                catch(IllegalAccessException unavailable){throw new IllegalStateException("LIVE_STATE_FACTOR_ACCESS",unavailable);}
+            }else continue;
+            Scope selected=scope;
+            boolean path=WALKER.walk(stream->{List<StackWalker.StackFrame> frames=stream.toList();int occurrences=0;
+                for(var frame:frames)if(sameAnchor(frame,selected))occurrences++;
+                if(occurrences!=selected.occurrences)return false;
+                for(var frame:frames) {
+                    if(sameAnchor(frame,selected))return true;
+                    if(!infrastructure(frame.getDeclaringClass()))return false;
+                }
+                return false;
+            });
+            if(path)return false;
+        }
+        return true;
+    }
     static boolean fieldDenied(Object receiver,Class<?> declaring,String name,Object next) {
         if(!initialized||receiver==null||declaring==null)return false;
         if(receiver instanceof LivingEntity living&&declaring==LivingEntity.class&&(name.equals("activeEffects")||name.equals("f_20945_"))) {
@@ -307,6 +419,19 @@ public final class LiveStatePolicy {
         for(Link link:links(receiver))if(current(link.owner,link.kind,receiver)) {
             Slot selected=null;for(Slot slot:slots(receiver))if(slot.field.getDeclaringClass()==declaring&&slot.field.getName().equals(name)){selected=slot;break;}
             if(selected==null)return false;
+            if(link.kind==Kind.FACTOR_OPTIONAL) {
+                // Optional is immutable, including the shared empty instance.
+                // A bulk writer's unknown value must not look like a null no-op.
+                return true;
+            }
+            if(link.kind==Kind.FACTOR) {
+                if(factorFieldDenied(link.owner,receiver,name,next))return true;
+                continue;
+            }
+            if(link.kind==Kind.EFFECT&&declaring==MobEffectInstance.class&&(name.equals("factorData")||name.equals("f_216885_"))) {
+                if(next!=((Access.EffectState)receiver).pro$factorData())return true;
+                continue;
+            }
             Owner owner=link.owner;if(!permitted(owner,link.kind!=Kind.FOOD))return true;
             if(next==null&&selected.field.getType().isPrimitive())return true;
             if(next instanceof Number number&&declaring==FoodData.class) {
@@ -325,6 +450,8 @@ public final class LiveStatePolicy {
     private static List<Slot> slots(Object receiver) {
         if(receiver instanceof FoodData)return FIELDS.get(FoodData.class);
         if(receiver instanceof MobEffectInstance)return FIELDS.get(MobEffectInstance.class);
+        if(receiver instanceof MobEffectInstance.FactorData)return FIELDS.get(MobEffectInstance.FactorData.class);
+        if(receiver instanceof Optional<?>)return FIELDS.get(Optional.class);
         if(receiver instanceof Player)return FIELDS.get(Player.class);
         if(receiver instanceof LivingEntity)return FIELDS.get(LivingEntity.class);
         return FIELDS.getOrDefault(receiver.getClass(),List.of());
@@ -334,7 +461,7 @@ public final class LiveStatePolicy {
     }
     static boolean offsetDenied(Object receiver,long offset,Object next) {
         if(!initialized||receiver==null)return false;
-        int width=next instanceof Long||next instanceof Double||next==null||!(next instanceof Number||next instanceof Boolean||next instanceof Character)?8:next instanceof Byte||next instanceof Boolean?1:next instanceof Short||next instanceof Character?2:4;
+        int width=next==null||!(next instanceof Number||next instanceof Boolean||next instanceof Character)?REFERENCE_WIDTH:next instanceof Long||next instanceof Double?8:next instanceof Byte||next instanceof Boolean?1:next instanceof Short||next instanceof Character?2:4;
         for(Slot slot:slots(receiver))if(overlap(offset,width,slot.offset,slot.width)) {
             Object value=offset==slot.offset&&width==slot.width?next:null;
             if(slot.field.getType()==float.class&&value instanceof Integer bits)value=Float.intBitsToFloat(bits);
@@ -351,7 +478,7 @@ public final class LiveStatePolicy {
     }
     static List<Field> unsafeFields() {
         if(!initialized)return List.of();List<Field> result=new ArrayList<>();
-        for(Class<?> type:List.of(LivingEntity.class,Player.class,FoodData.class,MobEffectInstance.class))for(Slot slot:FIELDS.get(type))if(!result.contains(slot.field))result.add(slot.field);
+        for(Class<?> type:List.of(LivingEntity.class,Player.class,FoodData.class,MobEffectInstance.class,MobEffectInstance.FactorData.class,Optional.class))for(Slot slot:FIELDS.get(type))if(!result.contains(slot.field))result.add(slot.field);
         return result;
     }
 }

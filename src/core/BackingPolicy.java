@@ -44,7 +44,7 @@ final class BackingPolicy {
                 lookup.findStatic(BackingPolicy.class,"offsetDenied",java.lang.invoke.MethodType.methodType(boolean.class,Object.class,long.class,Object.class)),
                 lookup.findStatic(BackingPolicy.class,"memoryDenied",java.lang.invoke.MethodType.methodType(boolean.class,Object.class,long.class,long.class)));
     }
-    static boolean known(Object object) {return object!=null&&(OWNERS.containsKey(object)||SourceMaps.observed(object)||LiveStatePolicy.known(object)||EquipmentPolicy.known(object));}
+    static boolean known(Object object) {return object!=null&&(WorldStatePolicy.known(object)||OWNERS.containsKey(object)||SourceMaps.observed(object)||LiveStatePolicy.known(object)||EquipmentPolicy.known(object));}
     private static void owner(Object object,Entity entity) {
         if(object==null)return;
         synchronized(OWNERS) {
@@ -179,6 +179,7 @@ final class BackingPolicy {
         return false;
     }
     static boolean arrayDenied(Object array,int index,Object next) {
+        if(WorldStatePolicy.arrayDenied(array,index,next))return true;
         if(EquipmentPolicy.arrayDenied(array,index,next))return true;
         if(LiveStatePolicy.arrayDenied(array,index,next))return true;
         if(!known(array)||array==null||!array.getClass().isArray()||index<0||index>=Array.getLength(array))return false;
@@ -268,6 +269,7 @@ final class BackingPolicy {
         return false;
     }
     static boolean fieldDenied(Object receiver,Class<?> declaring,String name,Object next) {
+        if(WorldStatePolicy.fieldDenied(receiver,declaring,name,next))return true;
         if(EquipmentPolicy.fieldDenied(receiver,declaring,name,next))return true;
         if(LiveStatePolicy.fieldDenied(receiver,declaring,name,next))return true;
         if(SourceMaps.carrierFieldDenied(receiver,declaring,name,next))return true;
@@ -395,6 +397,7 @@ final class BackingPolicy {
         return caller==null||!Set.of(ProRuntime.class,IntentJournal.class,RecoveryTasks.class,RecoveryStorage.class,RecoveryRecords.class).contains(caller.getNestHost());
     }
     static boolean offsetDenied(Object receiver,long offset,Object next) {
+        if(WorldStatePolicy.offsetDenied(receiver,offset,next))return true;
         if(EquipmentPolicy.offsetDenied(receiver,offset,next))return true;
         if(LiveStatePolicy.offsetDenied(receiver,offset,next))return true;
         if(receiver instanceof Class<?> holder)return SourceMaps.staticHolderOffsetDenied(holder,offset,next,unsafe,staticOffset);
@@ -421,6 +424,7 @@ final class BackingPolicy {
     private static int writeWidth(Object value) {return value instanceof Long||value instanceof Double?8:value==null||!(value instanceof Number||value instanceof Boolean||value instanceof Character)?referenceWidth:value instanceof Integer||value instanceof Float?4:value instanceof Short||value instanceof Character?2:1;}
     /** Object-relative bulk writes must not cross an observed protected slot. */
     static boolean memoryDenied(Object receiver,long offset,long length) {
+        if(WorldStatePolicy.memoryDenied(receiver,offset,length))return true;
         if(EquipmentPolicy.memoryDenied(receiver,offset,length))return true;
         if(LiveStatePolicy.memoryDenied(receiver,offset,length))return true;
         if(receiver instanceof Class<?> holder&&length>0) {

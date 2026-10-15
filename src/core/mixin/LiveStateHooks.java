@@ -55,6 +55,13 @@ public final class LiveStateHooks {
             if(LiveStatePolicy.effectTickDenied((MobEffectInstance)(Object)this,entity))callback.setReturnValue(false);
         }
     }
+    @Mixin(MobEffectInstance.FactorData.class)
+    public abstract static class Factors {
+        @Inject(method="tick",at=@At("HEAD"))
+        private void ronova$liveFactorTick(MobEffectInstance effect,CallbackInfo callback) { }
+        @Inject(method="getFactor",at=@At("HEAD"))
+        private void ronova$liveFactorRead(LivingEntity entity,float partialTick,CallbackInfoReturnable<Float> callback) { }
+    }
     @Mixin(FoodData.class)
     public abstract static class Food {
         @Inject(method="tick",at=@At("HEAD"))

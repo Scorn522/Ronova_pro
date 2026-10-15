@@ -81,6 +81,7 @@ public final class Access {
     }
     @Mixin(net.minecraft.world.effect.MobEffectInstance.class) public interface EffectState {
         @Accessor("hiddenEffect") net.minecraft.world.effect.MobEffectInstance pro$hiddenEffect();
+        @Accessor("factorData") Optional<net.minecraft.world.effect.MobEffectInstance.FactorData> pro$factorData();
     }
     @Mixin(net.minecraft.network.syncher.SynchedEntityData.class) public interface Data {
         @Invoker("getItem") <T> net.minecraft.network.syncher.SynchedEntityData.DataItem<T> pro$item(net.minecraft.network.syncher.EntityDataAccessor<T> key);
@@ -173,6 +174,12 @@ public final class Access {
     }
     @Mixin(net.minecraft.world.level.chunk.PalettedContainer.class) public interface StatePalette {
         @Accessor("strategy") net.minecraft.world.level.chunk.PalettedContainer.Strategy pro$strategy();
+    }
+    @Mixin(net.minecraft.util.SimpleBitStorage.class) public interface StateBits {
+        @Accessor("data") long[] pro$words();
+        @Accessor("mask") long pro$mask();
+        @Accessor("valuesPerLong") int pro$perLong();
+        @Invoker("cellIndex") int pro$cell(int index);
     }
     @Mixin(BlockEntity.class) public interface Block {
         @Accessor("level") Level pro$level();
