@@ -12,6 +12,8 @@
 
 未知载体、直接 BitStorage/数组/Unsafe 写入、未观察共享来源、任意 native store/syscall 及旧明确平台边界保留。完整 C/B 未完成，自身外观和武器注册暂缓。
 
+只读收尾核对：当前 Class 消息的 release 不进入引用计数，outboundAllowed 不将消息来源发布到 CURRENT；DefaultPromise.tryFailure 失败后也没有 CAS 重试。真实 WriteTask.run 的来源 scope 仍保持至 finally，ByteBuf 引用计数释放与 promise CAS 在该 scope 下的自拒尚未排除。该活跃排队后停组场景仍为 NOTRUN，不能由当前 Class 消息分支代称闭合。
+
 ---
 
 ## 2026-10-14：C 强度接续——旧帧、实际覆写、区域加载与 JVM 外部保护

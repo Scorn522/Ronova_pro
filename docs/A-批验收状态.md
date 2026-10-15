@@ -10,6 +10,8 @@
 
 网络停源 gate 移到实际 Netty isNotValidPromise 的成功分支后，保留原 null/message、异 channel、已完成和取消 promise 的校验/回收语义；取消的 writeAndFlush 不再额外 flush 之前的无关写入。合法停源拒绝仍沿实际 context flush。池化 WriteTask 不从仍在队列的位置提前 cancel/recycle，原发送与 finally 回收保持。
 
+当前 Class 消息检查不进入引用计数释放，拒绝检查读取消息来源后也不发布该来源作用域。真实 WriteTask.run 的来源作用域则保持至原 finally；其中的 ByteBuf 引用计数释放与 promise CAS 收尾仍未实跑，停源下的自拒尚未排除。活跃排队后再停组的收尾不计为闭合，不能由当前 Class 消息检查代称通过。
+
 真实 bootStop 检查还定位了来源查询自递归：方法字符串拼接及来源/停源 Walker 自身扩批触发 arraycopy，重新进入同一查询。现移除拼接，真实空 selector/负 BCI 直接返回；SourceQuery 在同线程保留已有来源和显式 unknown，Native 出口也保留该状态，finally 撤销。停源查询在 Native 可用时用固定16帧的只读 JVMTI reader，按真实模块、实际 jmethod/BCI/VM 版本与原 ExecutionFlow 父层来源判断；父层用实际栈底深度区分同方法同位置递归。查询不发放写许可，原目标守卫/回执照常。Native 不可用的外层保留原 fallback，无法读取的重入明确失败。
 
 第四次真实栈确认准确的 Class.reflectionData 缓存 CAS 被 represented-module 停源门误拒，JDK 在缓存为空时反复重试。现仅对既有准确 JDK 调用链及实际 Class 实例字段区分该目标归属；真实 stoppedInvocation、原 offset/控制/来源与字段守卫继续执行，其他 Class mirror 写入沿原限制，未改检查顺序。
