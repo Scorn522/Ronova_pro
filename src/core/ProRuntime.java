@@ -2858,7 +2858,7 @@ public final class ProRuntime implements AutoCloseable {
             EquipmentPolicy.initialize();
             WorldStatePolicy.initialize();
             Class<?> bridge=Class.forName("dev.ronova.pro.bootstrap.TaskBridge",false,null);
-            if(!Integer.valueOf(86).equals(bridge.getMethod("abiVersion").invoke(null)))throw new IllegalStateException("INDEX_BRIDGE_ABI_MISMATCH");
+            if(!Integer.valueOf(87).equals(bridge.getMethod("abiVersion").invoke(null)))throw new IllegalStateException("INDEX_BRIDGE_ABI_MISMATCH");
             var lookup=java.lang.invoke.MethodHandles.lookup();
             var field=lookup.findStatic(ProRuntime.class,"preventFieldWrite",java.lang.invoke.MethodType.methodType(boolean.class,Object.class,Class.class,String.class,Object.class));
             var dispatch=lookup.findStatic(ProRuntime.class,"preventDispatch",java.lang.invoke.MethodType.methodType(boolean.class,Object.class,String.class,Object.class));
@@ -3007,14 +3007,21 @@ public final class ProRuntime implements AutoCloseable {
             lookup.findStatic(EquipmentPolicy.class,"slotSelectorRead",java.lang.invoke.MethodType.methodType(void.class,Object.class,Object.class,String.class,String.class,Object.class)),
             lookup.findStatic(EquipmentPolicy.class,"slotUnresolved",java.lang.invoke.MethodType.methodType(void.class,Object.class)),
             lookup.findStatic(EquipmentPolicy.class,"slotReadEnd",java.lang.invoke.MethodType.methodType(void.class,Object.class,Object.class)),
-            lookup.findStatic(EquipmentPolicy.class,"slotReadFailed",java.lang.invoke.MethodType.methodType(void.class,Object.class,Throwable.class))};
+            lookup.findStatic(EquipmentPolicy.class,"slotReadFailed",java.lang.invoke.MethodType.methodType(void.class,Object.class,Throwable.class)),
+            lookup.findStatic(EquipmentPolicy.class,"slotCallBegin",java.lang.invoke.MethodType.methodType(Object.class,Object.class,Object.class,Class.class,String.class,String.class,int.class,Object[].class)),
+            lookup.findStatic(EquipmentPolicy.class,"slotCallEnd",java.lang.invoke.MethodType.methodType(void.class,Object.class,Object.class)),
+            lookup.findStatic(EquipmentPolicy.class,"slotCallFailed",java.lang.invoke.MethodType.methodType(void.class,Object.class,Throwable.class)),
+            lookup.findStatic(EquipmentPolicy.class,"slotMethodBegin",java.lang.invoke.MethodType.methodType(Object.class,Object.class,Class.class,String.class,String.class,Object[].class)),
+            lookup.findStatic(EquipmentPolicy.class,"slotMethodEnd",java.lang.invoke.MethodType.methodType(void.class,Object.class,Object.class)),
+            lookup.findStatic(EquipmentPolicy.class,"slotMethodFailed",java.lang.invoke.MethodType.methodType(void.class,Object.class,Throwable.class))};
         Class.forName("dev.ronova.pro.bootstrap.ControlBridge",false,null).getMethod("installEquipmentSlots",Class.class,java.lang.invoke.MethodHandle[].class).invoke(null,ProRuntime.class,(Object)slotCallbacks);
         var capabilityCallbacks=new java.lang.invoke.MethodHandle[]{
             lookup.findStatic(EquipmentPolicy.class,"capabilityAccept",java.lang.invoke.MethodType.methodType(void.class,Object.class,Object.class,Object.class,String.class)),
             lookup.findStatic(EquipmentPolicy.class,"capabilitySupply",java.lang.invoke.MethodType.methodType(Object.class,Object.class,Object.class,String.class)),
             lookup.findStatic(EquipmentPolicy.class,"capabilityApply",java.lang.invoke.MethodType.methodType(Object.class,Object.class,Object.class,Object.class,String.class)),
             lookup.findStatic(EquipmentPolicy.class,"capabilityTest",java.lang.invoke.MethodType.methodType(boolean.class,Object.class,Object.class,Object.class,String.class)),
-            lookup.findStatic(EquipmentPolicy.class,"capabilityDerived",java.lang.invoke.MethodType.methodType(void.class,Object.class,Object.class,String.class))};
+            lookup.findStatic(EquipmentPolicy.class,"capabilityDerived",java.lang.invoke.MethodType.methodType(void.class,Object.class,Object.class,String.class)),
+            lookup.findStatic(EquipmentPolicy.class,"capabilityComposed",java.lang.invoke.MethodType.methodType(Object.class,Object.class,Object.class,String.class))};
         Class.forName("dev.ronova.pro.bootstrap.ControlBridge",false,null).getMethod("installCapabilityCallbacks",Class.class,java.lang.invoke.MethodHandle[].class).invoke(null,ProRuntime.class,(Object)capabilityCallbacks);
     }
     private static UnsafeMapping unsafeFields() {

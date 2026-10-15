@@ -10,37 +10,38 @@ import java.util.Set;
 import jdk.internal.org.objectweb.asm.*;
 import jdk.internal.org.objectweb.asm.tree.*;
 
-/** Read witnesses from the original body of one exactly declared virtual slot getter. */
+/** Read witnesses from an exact slot getter and its synchronously invoked Java bodies. */
 final class EquipmentSlotBoundary {
     static final String DESCRIPTOR="(Lnet/minecraft/world/entity/EquipmentSlot;)Lnet/minecraft/world/item/ItemStack;";
     private static final String SLOT="net/minecraft/world/entity/EquipmentSlot",STACK="net/minecraft/world/item/ItemStack",BRIDGE="dev/ronova/pro/bootstrap/ControlBridge";
     private static final String TOKEN="Ljava/lang/Object;";
-    private static final Set<String> MAPS=Set.of("java/util/Map","java/util/AbstractMap","java/util/HashMap","java/util/LinkedHashMap","java/util/IdentityHashMap","java/util/EnumMap",
-            "java/util/ImmutableCollections$Map1","java/util/ImmutableCollections$MapN","java/util/Collections$SingletonMap","java/util/Collections$UnmodifiableMap","java/util/Collections$UnmodifiableSortedMap","java/util/Collections$UnmodifiableNavigableMap",
-            "java/util/Collections$SynchronizedMap","java/util/Collections$SynchronizedSortedMap","java/util/Collections$SynchronizedNavigableMap",
-            "com/google/common/collect/ImmutableMap","com/google/common/collect/ImmutableBiMap","com/google/common/collect/RegularImmutableMap","com/google/common/collect/SingletonImmutableBiMap","com/google/common/collect/JdkBackedImmutableMap");
-    private static final Set<String> LISTS=Set.of("java/util/List","java/util/AbstractList","java/util/AbstractSequentialList","java/util/ArrayList","java/util/ArrayList$SubList","java/util/LinkedList","java/util/Arrays$ArrayList",
-            "java/util/ImmutableCollections$AbstractImmutableList","java/util/ImmutableCollections$ListN","java/util/ImmutableCollections$List12","java/util/ImmutableCollections$SubList",
-            "java/util/Collections$SingletonList","java/util/Collections$EmptyList","java/util/Collections$CopiesList","java/util/Collections$UnmodifiableList","java/util/Collections$UnmodifiableRandomAccessList","java/util/Collections$SynchronizedList","java/util/Collections$SynchronizedRandomAccessList",
-            "com/google/common/collect/ImmutableList","com/google/common/collect/RegularImmutableList","com/google/common/collect/SingletonImmutableList","com/google/common/collect/ImmutableList$SubList","com/google/common/collect/ImmutableList$ReverseImmutableList","com/google/common/collect/RegularImmutableAsList", "net/minecraft/core/NonNullList");
     private static final class Getter {
-        final WeakReference<Class<?>> owner;final String name,descriptor;volatile boolean transformed;
-        Getter(Class<?> actual,String name,String descriptor){owner=new WeakReference<>(actual);this.name=name;this.descriptor=descriptor;}
+        final WeakReference<Class<?>> owner;final String name,descriptor;final boolean helper;volatile boolean transformed;
+        Getter(Class<?> actual,String name,String descriptor,boolean helper){owner=new WeakReference<>(actual);this.name=name;this.descriptor=descriptor;this.helper=helper;}
     }
     private static volatile Getter[] getters=new Getter[0];
     private EquipmentSlotBoundary(){ }
 
-    private static synchronized Getter declare(Class<?> actual,String name,String descriptor){
+    private static synchronized Getter declare(Class<?> actual,String name,String descriptor,boolean helper){
         List<Getter> living=new ArrayList<>();Getter found=null;
         for(Getter getter:getters)if(getter.owner.get()!=null){living.add(getter);if(getter.owner.get()==actual&&getter.name.equals(name)&&getter.descriptor.equals(descriptor))found=getter;}
-        if(found!=null)return found;
-        Getter added=new Getter(actual,name,descriptor);living.add(added);Getter[] next=living.toArray(Getter[]::new);
+        if(found!=null){if(found.helper!=helper)throw new IllegalStateException("EQUIPMENT_SLOT_METHOD_ROLE_CONFLICT:"+actual.getName()+"#"+name+descriptor);return found;}
+        Getter added=new Getter(actual,name,descriptor,helper);living.add(added);Getter[] next=living.toArray(Getter[]::new);
         ControlImages.protect(next,added,added.owner);getters=next;return added;
     }
     /** No loaded-class scan or class-loader-wide registration is involved. */
     static void install(Instrumentation api,Class<?> actual,String name,String descriptor){
         Objects.requireNonNull(actual);Objects.requireNonNull(name);Objects.requireNonNull(descriptor);
         if(!DESCRIPTOR.equals(descriptor)||!name.equals("getItemBySlot")&&!name.equals("m_6844_"))throw new IllegalArgumentException("EQUIPMENT_SLOT_GETTER_SIGNATURE_REQUIRED");
+        install(api,actual,name,descriptor,false);
+    }
+    static void installHelper(Instrumentation api,Class<?> actual,String name,String descriptor){
+        Objects.requireNonNull(actual);Objects.requireNonNull(name);Objects.requireNonNull(descriptor);
+        if(actual.getClassLoader()==null)throw new IllegalStateException("EQUIPMENT_SLOT_PLATFORM_HELPER_UNSUPPORTED:"+actual.getName());
+        if(name.startsWith("<"))throw new IllegalArgumentException("EQUIPMENT_SLOT_CONSTRUCTOR_HELPER_UNSUPPORTED");
+        install(api,actual,name,descriptor,true);
+    }
+    private static void install(Instrumentation api,Class<?> actual,String name,String descriptor,boolean helper){
         if(api==null||actual.isArray()||actual.isPrimitive()||!api.isModifiableClass(actual))throw new IllegalStateException("EQUIPMENT_SLOT_INSTALL_UNAVAILABLE:"+actual.getName());
         java.lang.reflect.Method declared=null;
         for(var method:actual.getDeclaredMethods())if(method.getName().equals(name)&&Type.getMethodDescriptor(method).equals(descriptor)){declared=method;break;}
@@ -48,8 +49,8 @@ final class EquipmentSlotBoundary {
         int access=declared.getModifiers();
         if(Modifier.isNative(access))throw new IllegalStateException("EQUIPMENT_SLOT_NATIVE_GETTER_UNSUPPORTED:"+actual.getName());
         if(Modifier.isAbstract(access))throw new IllegalStateException("EQUIPMENT_SLOT_ABSTRACT_GETTER_UNSUPPORTED:"+actual.getName());
-        if(Modifier.isStatic(access)||Modifier.isPrivate(access))throw new IllegalStateException("EQUIPMENT_SLOT_VIRTUAL_GETTER_REQUIRED:"+actual.getName());
-        Getter getter=declare(actual,name,descriptor);
+        if(!helper&&(Modifier.isStatic(access)||Modifier.isPrivate(access)))throw new IllegalStateException("EQUIPMENT_SLOT_VIRTUAL_GETTER_REQUIRED:"+actual.getName());
+        Getter getter=declare(actual,name,descriptor,helper);
         synchronized(getter){
             if(getter.transformed)return;
             try{api.retransformClasses(actual);}
@@ -68,8 +69,9 @@ final class EquipmentSlotBoundary {
         for(Getter getter:selected){
             MethodNode found=null;for(MethodNode method:node.methods)if(getter.name.equals(method.name)&&getter.descriptor.equals(method.desc)){if(found!=null)throw new IllegalStateException("EQUIPMENT_SLOT_AMBIGUOUS_BODY:"+name);found=method;}
             if(found==null)throw new IllegalStateException("EQUIPMENT_SLOT_BODY_MISSING:"+name);
-            if((found.access&(Opcodes.ACC_STATIC|Opcodes.ACC_PRIVATE|Opcodes.ACC_NATIVE|Opcodes.ACC_ABSTRACT))!=0)throw new IllegalStateException("EQUIPMENT_SLOT_BODY_UNSUPPORTED:"+name);
-            weave(found);
+            if(found.name.startsWith("<")||(found.access&(Opcodes.ACC_NATIVE|Opcodes.ACC_ABSTRACT))!=0
+                    ||!getter.helper&&(found.access&(Opcodes.ACC_STATIC|Opcodes.ACC_PRIVATE))!=0)throw new IllegalStateException("EQUIPMENT_SLOT_BODY_UNSUPPORTED:"+name);
+            if(getter.helper)weave(node.name,found,true);else weave(found);
         }
         ControlClassWriter writer=new ControlClassWriter(loader,node);node.accept(writer);byte[] result=writer.toByteArray();
         for(Getter getter:selected)getter.transformed=true;return result;
@@ -79,12 +81,28 @@ final class EquipmentSlotBoundary {
     private static void load(InsnList code,Type type,int slot){code.add(new VarInsnNode(type.getOpcode(Opcodes.ILOAD),slot));}
     private static void store(InsnList code,Type type,int slot){code.add(new VarInsnNode(type.getOpcode(Opcodes.ISTORE),slot));}
     private static void unresolved(InsnList code,int token){code.add(new VarInsnNode(Opcodes.ALOAD,token));call(code,"equipmentSlotUnresolved","("+TOKEN+")V");}
-    private static void weave(MethodNode method){
+    private static void weave(MethodNode method){weave(null,method,false);}
+    private static void arguments(InsnList code,Type[] types,int[] locals){
+        code.add(new LdcInsnNode(types.length));code.add(new TypeInsnNode(Opcodes.ANEWARRAY,"java/lang/Object"));
+        for(int at=0;at<types.length;at++){
+            code.add(new InsnNode(Opcodes.DUP));code.add(new LdcInsnNode(at));load(code,types[at],locals[at]);ControlClassWriter.box(code,types[at]);code.add(new InsnNode(Opcodes.AASTORE));
+        }
+    }
+    private static void weave(String declaring,MethodNode method,boolean helper){
         AbstractInsnNode[] original=method.instructions.toArray();
-        int receiver=local(method,Type.getType(Object.class)),slot=local(method,Type.getType(Object.class)),token=local(method,Type.getType(Object.class)),returned=local(method,Type.getType(Object.class)),failure=local(method,Type.getType(Throwable.class));
+        Type result=Type.getReturnType(method.desc);int token=local(method,Type.getType(Object.class)),returned=result.getSort()==Type.VOID?-1:local(method,result),failure=local(method,Type.getType(Throwable.class));
         LabelNode start=new LabelNode(),end=new LabelNode(),handler=new LabelNode();InsnList head=new InsnList();
-        head.add(new VarInsnNode(Opcodes.ALOAD,0));head.add(new VarInsnNode(Opcodes.ASTORE,receiver));head.add(new VarInsnNode(Opcodes.ALOAD,1));head.add(new VarInsnNode(Opcodes.ASTORE,slot));
-        head.add(new VarInsnNode(Opcodes.ALOAD,receiver));head.add(new VarInsnNode(Opcodes.ALOAD,slot));call(head,"beginEquipmentSlotRead","("+TOKEN+TOKEN+")"+TOKEN);
+        if(helper){
+            boolean statik=(method.access&Opcodes.ACC_STATIC)!=0;Type[] types=Type.getArgumentTypes(method.desc);int[] slots=new int[types.length];int cursor=statik?0:1;
+            for(int at=0;at<types.length;at++){slots[at]=cursor;cursor+=types[at].getSize();}
+            head.add(statik?new InsnNode(Opcodes.ACONST_NULL):new VarInsnNode(Opcodes.ALOAD,0));head.add(new LdcInsnNode(Type.getObjectType(declaring)));
+            head.add(new LdcInsnNode(method.name));head.add(new LdcInsnNode(method.desc));arguments(head,types,slots);
+            call(head,"beginEquipmentSlotMethod","("+TOKEN+"Ljava/lang/Class;Ljava/lang/String;Ljava/lang/String;[Ljava/lang/Object;)"+TOKEN);
+        }else{
+            int receiver=local(method,Type.getType(Object.class)),slot=local(method,Type.getType(Object.class));
+            head.add(new VarInsnNode(Opcodes.ALOAD,0));head.add(new VarInsnNode(Opcodes.ASTORE,receiver));head.add(new VarInsnNode(Opcodes.ALOAD,1));head.add(new VarInsnNode(Opcodes.ASTORE,slot));
+            head.add(new VarInsnNode(Opcodes.ALOAD,receiver));head.add(new VarInsnNode(Opcodes.ALOAD,slot));call(head,"beginEquipmentSlotRead","("+TOKEN+TOKEN+")"+TOKEN);
+        }
         head.add(new VarInsnNode(Opcodes.ASTORE,token));head.add(start);method.instructions.insert(head);
         // An original handler can swallow a failed read/call before its success
         // witness exists. Its fallback must not masquerade as a complete trace.
@@ -96,22 +114,23 @@ final class EquipmentSlotBoundary {
             if(opcode>=Opcodes.IALOAD&&opcode<=Opcodes.SALOAD){arrayRead(method,instruction,token);continue;}
             if(instruction instanceof MethodInsnNode invoke){
                 boolean virtual=invoke.getOpcode()==Opcodes.INVOKEVIRTUAL||invoke.getOpcode()==Opcodes.INVOKEINTERFACE;
-                if(virtual&&invoke.name.equals("get")&&invoke.desc.equals("(Ljava/lang/Object;)Ljava/lang/Object;")&&MAPS.contains(invoke.owner))containerRead(method,invoke,token,true);
-                else if(virtual&&invoke.name.equals("get")&&invoke.desc.equals("(I)Ljava/lang/Object;")&&LISTS.contains(invoke.owner))containerRead(method,invoke,token,false);
+                if(invoke.name.startsWith("<")){InsnList unknown=new InsnList();unresolved(unknown,token);method.instructions.insertBefore(instruction,unknown);}
                 else if(virtual&&selector(invoke))selectorRead(method,invoke,token);
-                else{InsnList unknown=new InsnList();unresolved(unknown,token);method.instructions.insertBefore(instruction,unknown);}
+                else invocation(method,invoke,token);
                 continue;
             }
             if(instruction instanceof InvokeDynamicInsnNode){InsnList unknown=new InsnList();unresolved(unknown,token);method.instructions.insertBefore(instruction,unknown);continue;}
             if(opcode==Opcodes.IF_ACMPEQ||opcode==Opcodes.IF_ACMPNE||opcode==Opcodes.IFNULL||opcode==Opcodes.IFNONNULL){stackComparison(method,instruction,token);continue;}
-            if(opcode==Opcodes.ARETURN){
-                InsnList finish=new InsnList();finish.add(new VarInsnNode(Opcodes.ASTORE,returned));finish.add(new VarInsnNode(Opcodes.ALOAD,token));finish.add(new VarInsnNode(Opcodes.ALOAD,returned));
-                call(finish,"observeEquipmentSlot","("+TOKEN+TOKEN+")V");finish.add(new VarInsnNode(Opcodes.ALOAD,returned));method.instructions.insertBefore(instruction,finish);
+            if(opcode>=Opcodes.IRETURN&&opcode<=Opcodes.RETURN){
+                InsnList finish=new InsnList();if(returned>=0)store(finish,result,returned);finish.add(new VarInsnNode(Opcodes.ALOAD,token));
+                if(returned<0)finish.add(new InsnNode(Opcodes.ACONST_NULL));else{load(finish,result,returned);ControlClassWriter.box(finish,result);}
+                call(finish,helper?"endEquipmentSlotMethod":"observeEquipmentSlot","("+TOKEN+TOKEN+")V");
+                if(returned>=0)load(finish,result,returned);method.instructions.insertBefore(instruction,finish);
             }
         }
         method.instructions.add(end);method.instructions.add(handler);method.instructions.add(new VarInsnNode(Opcodes.ASTORE,failure));
         method.instructions.add(new VarInsnNode(Opcodes.ALOAD,token));method.instructions.add(new VarInsnNode(Opcodes.ALOAD,failure));
-        method.instructions.add(new MethodInsnNode(Opcodes.INVOKESTATIC,BRIDGE,"failedEquipmentSlotRead","("+TOKEN+"Ljava/lang/Throwable;)V",false));
+        method.instructions.add(new MethodInsnNode(Opcodes.INVOKESTATIC,BRIDGE,helper?"failedEquipmentSlotMethod":"failedEquipmentSlotRead","("+TOKEN+"Ljava/lang/Throwable;)V",false));
         method.instructions.add(new VarInsnNode(Opcodes.ALOAD,failure));method.instructions.add(new InsnNode(Opcodes.ATHROW));
         method.tryCatchBlocks.add(new TryCatchBlockNode(start,end,handler,"java/lang/Throwable"));
     }
@@ -130,11 +149,27 @@ final class EquipmentSlotBoundary {
         InsnList after=new InsnList();store(after,type,value);after.add(new VarInsnNode(Opcodes.ALOAD,token));after.add(new VarInsnNode(Opcodes.ALOAD,array));after.add(new VarInsnNode(Opcodes.ILOAD,index));load(after,type,value);ControlClassWriter.box(after,type);
         call(after,"equipmentSlotArrayRead","("+TOKEN+TOKEN+"I"+TOKEN+")V");load(after,type,value);method.instructions.insert(instruction,after);
     }
-    private static void containerRead(MethodNode method,MethodInsnNode invoke,int token,boolean map){
-        Type keyType=map?Type.getType(Object.class):Type.INT_TYPE;int key=local(method,keyType),container=local(method,Type.getType(Object.class)),value=local(method,Type.getType(Object.class));
-        InsnList before=new InsnList();store(before,keyType,key);before.add(new VarInsnNode(Opcodes.ASTORE,container));before.add(new VarInsnNode(Opcodes.ALOAD,container));load(before,keyType,key);method.instructions.insertBefore(invoke,before);
-        InsnList after=new InsnList();after.add(new VarInsnNode(Opcodes.ASTORE,value));after.add(new VarInsnNode(Opcodes.ALOAD,token));after.add(new VarInsnNode(Opcodes.ALOAD,container));load(after,keyType,key);ControlClassWriter.box(after,keyType);
-        after.add(new VarInsnNode(Opcodes.ALOAD,value));after.add(new InsnNode(map?Opcodes.ICONST_1:Opcodes.ICONST_0));call(after,"equipmentSlotContainerRead","("+TOKEN+TOKEN+TOKEN+TOKEN+"Z)V");after.add(new VarInsnNode(Opcodes.ALOAD,value));method.instructions.insert(invoke,after);
+    private static void invocation(MethodNode method,MethodInsnNode invoke,int token){
+        Type[] types=Type.getArgumentTypes(invoke.desc);Type result=Type.getReturnType(invoke.desc);boolean statik=invoke.getOpcode()==Opcodes.INVOKESTATIC;
+        int[] args=new int[types.length];for(int at=0;at<types.length;at++)args[at]=local(method,types[at]);
+        int receiver=statik?-1:local(method,Type.getType(Object.class)),callToken=local(method,Type.getType(Object.class)),value=result.getSort()==Type.VOID?-1:local(method,result),failure=local(method,Type.getType(Throwable.class));
+        LabelNode start=new LabelNode(),end=new LabelNode(),handler=new LabelNode(),resume=new LabelNode();InsnList before=new InsnList();
+        for(int at=types.length-1;at>=0;at--)store(before,types[at],args[at]);
+        if(!statik)before.add(new VarInsnNode(Opcodes.ASTORE,receiver));
+        before.add(new VarInsnNode(Opcodes.ALOAD,token));before.add(statik?new InsnNode(Opcodes.ACONST_NULL):new VarInsnNode(Opcodes.ALOAD,receiver));
+        before.add(new LdcInsnNode(Type.getObjectType(invoke.owner)));before.add(new LdcInsnNode(invoke.name));before.add(new LdcInsnNode(invoke.desc));before.add(new LdcInsnNode(invoke.getOpcode()));arguments(before,types,args);
+        call(before,"beginEquipmentSlotCall","("+TOKEN+TOKEN+"Ljava/lang/Class;Ljava/lang/String;Ljava/lang/String;I[Ljava/lang/Object;)"+TOKEN);before.add(new VarInsnNode(Opcodes.ASTORE,callToken));
+        if(!statik)before.add(new VarInsnNode(Opcodes.ALOAD,receiver));for(int at=0;at<types.length;at++)load(before,types[at],args[at]);before.add(start);method.instructions.insertBefore(invoke,before);
+        InsnList after=new InsnList();after.add(end);
+        if(value>=0)store(after,result,value);after.add(new VarInsnNode(Opcodes.ALOAD,callToken));
+        if(value<0)after.add(new InsnNode(Opcodes.ACONST_NULL));else{load(after,result,value);ControlClassWriter.box(after,result);}
+        call(after,"endEquipmentSlotCall","("+TOKEN+TOKEN+")V");after.add(new JumpInsnNode(Opcodes.GOTO,resume));
+        // The narrow handler remains at the original call's position inside
+        // its original try regions, so the same Throwable reaches their handlers.
+        after.add(handler);after.add(new VarInsnNode(Opcodes.ASTORE,failure));after.add(new VarInsnNode(Opcodes.ALOAD,callToken));after.add(new VarInsnNode(Opcodes.ALOAD,failure));
+        call(after,"failedEquipmentSlotCall","("+TOKEN+"Ljava/lang/Throwable;)V");after.add(new VarInsnNode(Opcodes.ALOAD,failure));after.add(new InsnNode(Opcodes.ATHROW));
+        after.add(resume);if(value>=0)load(after,result,value);method.instructions.insert(invoke,after);
+        method.tryCatchBlocks.add(0,new TryCatchBlockNode(start,end,handler,"java/lang/Throwable"));
     }
     private static boolean selector(MethodInsnNode invoke){
         if(invoke.owner.equals("java/lang/Enum")&&invoke.name.equals("ordinal")&&invoke.desc.equals("()I"))return true;

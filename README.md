@@ -1,6 +1,6 @@
 # Ronova Pro
 
-主工程：`D:\桌面\ronova_GPT`。Java ABI86 / Native ABI79 / Storage3 / Journal6，客户端协议 `r3-client-8`。
+主工程：`D:\桌面\ronova_GPT`。Java ABI87 / Native ABI80 / Storage3 / Journal6，客户端协议 `r3-client-8`。
 Java 17；用户态 GNU C23 / GNU C++23；独立 Windows 驱动及管理工具 C17。
 当前接续补齐手动冻结区域的实际 section/palette 写入判断、字段图原子恢复与已知共享来源保留，并修正 Netty 停源拒绝抢在原 promise 校验之前的误伤。未知载体与未观察底层写入仍按状态页保留边界。
 停组后的原 Netty WriteTask 保留发送来源直到 run/cancel 的 finally；拒绝写入分步执行消息释放、promise 终结及原 flush，异常不跳过后续收尾。清理资格绑定实际对象关系、字段/数组槽、准确调用链和实际递归层，不向用户回调提供写权；停组任务在原回收位置丢弃，不再送回共享对象池。实际运行结果仍以状态页为准。
@@ -8,6 +8,7 @@ Java 17；用户态 GNU C23 / GNU C++23；独立 Windows 驱动及管理工具 C
 标准全局方块状态表的正向列表、反向编号及其数组也纳入冻结判断；原版 rehash、删除与迭代器搬移按本次实际键值接续，冻结映射在副作用前拒绝，半写仅按准确旧值 CAS 收尾。效果的标准解药列表复用已有 ItemStack/NBT 保护，包含常见 JDK/Guava 不可变及单元素列表，实际 provider 覆写的返回值只在原 getter 一次发布。默认满队列拒绝支持真实 LinkedBlockingQueue 和标准有界 MPSC 两种实现，按活跃原读取/offer/REJECT 链接入原收尾；自定义队列/handler 不取得该资格。Windows JDK 的实际 Net.socket0 创建入口补入 Native 来源和停组判断，未解析的旧入口仍保持 pending。
 装备与解药物品的能力图继续沿实际 provider 私有实例字段、自然解析的 LazyOptional 值和真实 getCapability 返回值接续，包含嵌套 ItemStack/NBT、常见列表、映射、包装容器及实际存储。自定义载体的真实实例方法接当前物品动作链，能力失效或 provider 脱链后解除对应关系；不主动调用 getter、序列化器或 supplier 重放能力，回调不自动继承物品动作许可。只读字段与布局来自当前 VM，未解析字段类型明确报错；世界、实体、全局定义和执行回调保持借用边界。文件映射复制保留实际父描述符、原生返回、新描述符发布及异常副本收尾。未知原生私有状态和未解析原生入口仍保留边界。
 能力供应、消费、映射、筛选与失效监听沿原 callback/value 单次执行；Forge 和 Java Optional 的非空派生关系只在同一当前动作内接续。失效监听保留原 Set.forEach，分别绑定真实外层分派消费者和内层 listener；发布门仍在供应者返回后开启。VM 按真实 CP/BCI、版本、来源与最多16个物理帧接直接业务链，二次函数入口只允许准确纯转发适配，未知回调、反射/MH/动态间接链不借权。全局共享 EMPTY 不登记派生 owner，回退函数原样运行。自定义槽位仍沿自然 getter 实际读过的位置复核；标准 MapN、Guava Map、HashMap 树桶及 EnumMap 的当前字段、查询路径和值数组也已接入，支持准确 Enum/Integer/String 键语义，不调用任意 key 方法。未知自定义 getter/容器、键语义或原生状态继续保留边界。
+自定义槽位 getter 的同步 Java helper 接在原调用前后，记录原 receiver、参数、返回及正常读取，不重放 getter；支持真实虚分派、private/static 和直接父类的普通 super 方法。最终仍按原实体、槽位和当前实际存储复核，未知平台方法、构造器、native、歧义或角色冲突保持 unresolved。JDK Function/Consumer/Predicate 的标准组合在真实私有实现体中逐原回调接续，保留中间值、短路、异常和原次数；委托只沿当前已确认能力回调的同线程物理链，未知组合和异步链不继承。
 本轮新增旧运行帧的准确退役与来源收尾、GameMode/Item 真实覆写动作接续，以及手动冻结区域的标准方块写入阻断。Windows 当前游戏进程的外部新建/复制危险句柄保护使用独立命令 `/ronova_pro host protect-jvm true`，`false` 撤销；沿实际玩家/控制台资格，各运行实例只撤销自己的选择，显示实际驱动回执，命令不会安装或加载驱动。旧帧仅对无未知清理责任的可退出子集强退；未知 finally/锁、未观察的机器码/系统调用、既有句柄和未知自定义载体继续保留边界。
 当前源码包含连接前队列逐次发送来源及 EventLoop 接续、独立禁疗、已观察 Host 效果的短提交门，以及原生 Unsafe 写入/free/realloc 的准确控制范围拒绝。外部 JVMTI/堆回调暂时移除借来的内部计数，结束后恢复。活跃效果、FoodData、标准身体的当前六槽装备及其真实 ItemStack/NBT 接入实际写入防护；换装、物品使用、食用、真实攻击与延后挖掘按准确原业务动作交接，拒绝取出时返回 EMPTY，避免留下物品副本。挖掘续接绑定实际玩家、GameMode、世界、目标坐标与当前工具，普通回调不能借用；JNI 数组副本保留获取时的已知及未知来源，提交时并入原检查。FoodData 防写保留自然消耗，不等于免饿。区域禁生成接入底层管理器准入。未观察的原生状态和未接入的正常动作仍保留边界。实际构建、网络及游戏结果以
 [当前进度](docs/A-批验收状态.md) 和 [实际报告](validation/b-final-20261007/REPORT.md) 为准。自身外观及武器注册暂缓，完整 C/B 尚未完成。

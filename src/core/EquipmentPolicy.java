@@ -124,7 +124,9 @@ public final class EquipmentPolicy {
     private static Map<Thread,Driver> DRIVERS;
     private static Map<Thread,Invocation> INVOCATIONS;
     private static final ThreadLocal<SlotRead> SLOT_READS=new ThreadLocal<>();
-    private static MethodHandle DECLARE_SLOT;
+    private static MethodHandle DECLARE_SLOT,DECLARE_SLOT_HELPER,SLOT_METHOD;
+    private static final ThreadLocal<SlotCall> SLOT_CALLS=new ThreadLocal<>();
+    private static final ThreadLocal<SlotMethod> SLOT_METHODS=new ThreadLocal<>();
     private static final String SLOT_DESCRIPTOR="(Lnet/minecraft/world/entity/EquipmentSlot;)Lnet/minecraft/world/item/ItemStack;";
     private static final class SlotRead {
         final Owner owner;final EquipmentSlot slot;final Thread thread=Thread.currentThread();final SlotRead previous;
@@ -132,6 +134,18 @@ public final class EquipmentPolicy {
         final List<EquipmentSlotGraph.Read> reads=new ArrayList<>();boolean unresolved,closed;
         SlotRead(Owner owner,EquipmentSlot slot,SlotRead previous,List<StackWalker.StackFrame> frames){this.owner=owner;this.slot=slot;this.previous=previous;
             var entry=frames.get(0);anchor=entry.getDeclaringClass();method=entry.getMethodName();descriptor=entry.getDescriptor();tail=List.copyOf(frames.subList(1,frames.size()));}
+    }
+    private static final class SlotCall {
+        final SlotRead read;final SlotMethod parent;final SlotCall previous;final Object receiver;final Object[] arguments;
+        final Class<?> declaring;final String name,descriptor;final int kind,depth;final List<StackWalker.StackFrame> frames;
+        boolean entered,finished,closed;Object result;
+        SlotCall(SlotRead read,SlotMethod parent,SlotCall previous,Object receiver,Object[] arguments,Class<?> declaring,String name,String descriptor,int kind,List<StackWalker.StackFrame> frames){
+            this.read=read;this.parent=parent;this.previous=previous;this.receiver=receiver;this.arguments=arguments.clone();this.declaring=declaring;this.name=name;this.descriptor=descriptor;this.kind=kind;this.frames=List.copyOf(frames);depth=previous==null?1:previous.depth+1;
+        }
+    }
+    private static final class SlotMethod {
+        final SlotCall call;final SlotMethod previous;final List<StackWalker.StackFrame> frames;boolean closed;
+        SlotMethod(SlotCall call,SlotMethod previous,List<StackWalker.StackFrame> frames){this.call=call;this.previous=previous;this.frames=List.copyOf(frames);}
     }
     private static final Object INVOCATION_REFUSED=new Object();
     private static Map<Class<?>,List<Slot>> FIELDS;
@@ -159,11 +173,14 @@ public final class EquipmentPolicy {
     private record CallbackOrigin(ItemStack root,List<Link> links,CapabilityScope lifecycle) { }
     private static final class CapabilityConsumer {
         final Scope action;final Object optional,consumer,value;final ItemStack root;final List<Link> links;
-        final String phase,boundary,descriptor;final CapabilityScope lifecycle;
+        final String phase,boundary,descriptor;final CapabilityScope lifecycle;final CapabilityConsumer delegatedFrom;final int delegationDepth;
         final Thread thread=Thread.currentThread();final CapabilityConsumer previous;int bottomDepth;boolean closed;
         CapabilityConsumer(Scope action,Object optional,Object consumer,Object value,CallbackOrigin origin,String phase,String boundary,String descriptor,CapabilityConsumer previous){
+            this(action,optional,consumer,value,origin,phase,boundary,descriptor,previous,null);
+        }
+        CapabilityConsumer(Scope action,Object optional,Object consumer,Object value,CallbackOrigin origin,String phase,String boundary,String descriptor,CapabilityConsumer previous,CapabilityConsumer delegatedFrom){
             this.action=action;this.optional=optional;this.consumer=consumer;this.value=value;this.root=origin.root;this.links=origin.links;this.lifecycle=origin.lifecycle;
-            this.phase=phase;this.boundary=boundary;this.descriptor=descriptor;this.previous=previous;
+            this.phase=phase;this.boundary=boundary;this.descriptor=descriptor;this.previous=previous;this.delegatedFrom=delegatedFrom;delegationDepth=delegatedFrom==null?0:delegatedFrom.delegationDepth+1;
         }
     }
     private static final class CapabilityQuery {
@@ -246,8 +263,10 @@ public final class EquipmentPolicy {
         CARRIER_SOURCE=MethodHandles.publicLookup().findStatic(bridge,"equipmentCarrierSourceAllowed",MethodType.methodType(boolean.class,Class.class,Class.class,Class[].class));
         EquipmentCarrierGraph.initialize();
         DECLARE_SLOT=MethodHandles.publicLookup().findStatic(Class.forName("dev.ronova.pro.agent.RecoveryAgent",false,ClassLoader.getSystemClassLoader()),"declareEquipmentSlotGetter",MethodType.methodType(void.class,Class.class,String.class,String.class));
+        DECLARE_SLOT_HELPER=MethodHandles.publicLookup().findStatic(Class.forName("dev.ronova.pro.agent.RecoveryAgent",false,ClassLoader.getSystemClassLoader()),"declareEquipmentSlotHelper",MethodType.methodType(void.class,Class.class,String.class,String.class));
         Class<?> carrierBridge=Class.forName("dev.ronova.pro.bootstrap.CarrierBridge",false,null);
         CALLBACK_DEPTH=MethodHandles.publicLookup().findStatic(carrierBridge,"callbackDepth",MethodType.methodType(int.class,Class.class,String.class,String.class));
+        SLOT_METHOD=MethodHandles.publicLookup().findStatic(carrierBridge,"method",MethodType.methodType(Class.class,Object.class,Class.class,String.class,String.class,int.class,Class.class));
         CALLBACK_FRAME=MethodHandles.publicLookup().findStatic(carrierBridge,"callback",MethodType.methodType(boolean.class,Object.class,Class.class,String.class,String.class,int.class,Class.class,String.class,String.class,int.class));
         OWNERS=Collections.synchronizedMap(new WeakIdentityMap<>());CARRIERS=Collections.synchronizedMap(new WeakIdentityMap<>());
         SCOPES=Collections.synchronizedMap(new WeakIdentityMap<>());FIELDS=Map.copyOf(fields);
@@ -426,10 +445,10 @@ public final class EquipmentPolicy {
         refresh(owner);
     }
     public static Object slotReadBegin(Object receiver,Object requested){
-        if(!initialized||!(receiver instanceof LivingEntity entity)||!(requested instanceof EquipmentSlot slot))return null;Owner owner=OWNERS.get(entity);
+        if(!initialized)return null;SlotRead previous=SLOT_READS.get();if(previous!=null){previous.unresolved=true;return null;}
+        if(!(receiver instanceof LivingEntity entity)||!(requested instanceof EquipmentSlot slot))return null;Owner owner=OWNERS.get(entity);
         if(!active(owner)||!owner.tracedSlots||owner.slotType==null)return null;List<StackWalker.StackFrame> frames=capabilityFrames();
         if(frames.isEmpty()||!sameAnchor(frames.get(0),owner.slotType,owner.slotMethod,SLOT_DESCRIPTOR)||!owner.slotType.isInstance(receiver))throw new SecurityException("ACTUAL_EQUIPMENT_SLOT_GETTER_REQUIRED");
-        SlotRead previous=SLOT_READS.get();if(previous!=null)previous.unresolved=true;
         SlotRead token=new SlotRead(owner,slot,previous,frames);SLOT_READS.set(token);return token;
     }
     private static boolean slotReadPath(SlotRead token){
@@ -439,9 +458,81 @@ public final class EquipmentPolicy {
         return true;
     }
     private static SlotRead actualSlotRead(Object token){
+        if(token instanceof SlotMethod method){SlotRead read=method.call.read;if(!active(read.owner)){read.unresolved=true;return null;}
+            if(!slotMethodPath(method))throw new SecurityException("ACTUAL_EQUIPMENT_SLOT_HELPER_READ_REQUIRED");return read;}
         if(token==null)return null;if(token instanceof SlotRead read&&!active(read.owner)&&read.thread==Thread.currentThread()&&SLOT_READS.get()==read){read.unresolved=true;return null;}
-        if(!(token instanceof SlotRead read)||!slotReadPath(read))throw new SecurityException("ACTUAL_EQUIPMENT_SLOT_READ_REQUIRED");return read;
+        if(!(token instanceof SlotRead read)||SLOT_METHODS.get()!=null||!slotReadPath(read))throw new SecurityException("ACTUAL_EQUIPMENT_SLOT_READ_REQUIRED");return read;
     }
+    private static boolean slotFrames(List<StackWalker.StackFrame> expected,List<StackWalker.StackFrame> actual,int skip,boolean compareFirstBci){
+        if(actual.size()!=expected.size()+skip)return false;
+        for(int at=0;at<expected.size();at++){var left=expected.get(at);var right=actual.get(at+skip);
+            if(!sameAnchor(right,left.getDeclaringClass(),left.getMethodName(),left.getDescriptor())||((at>0||compareFirstBci)&&right.getByteCodeIndex()!=left.getByteCodeIndex()))return false;}
+        return true;
+    }
+    private static boolean slotMethodPath(SlotMethod method){return !method.closed&&!method.call.closed&&method.call.read.thread==Thread.currentThread()
+            &&SLOT_READS.get()==method.call.read&&SLOT_METHODS.get()==method&&slotFrames(method.frames,capabilityFrames(),0,false);}
+    public static Object slotCallBegin(Object token,Object receiver,Class<?> symbolic,String name,String descriptor,int opcode,Object[] arguments){
+        SlotRead read=actualSlotRead(token);if(read==null||read.unresolved)return null;
+        if(symbolic==null||name==null||descriptor==null||arguments==null||name.startsWith("<")){read.unresolved=true;return null;}
+        SlotCall previous=SLOT_CALLS.get();if(previous!=null&&previous.depth>=16){read.unresolved=true;return null;}
+        int kind=0;Class<?> declaring=null;List<StackWalker.StackFrame> frames=capabilityFrames();
+        if(frames.isEmpty()){read.unresolved=true;return null;}
+        if(name.equals("get")&&descriptor.equals("(Ljava/lang/Object;)Ljava/lang/Object;")&&arguments.length==1&&EquipmentSlotGraph.containerSupported(receiver,true))kind=1;
+        else if(name.equals("get")&&descriptor.equals("(I)Ljava/lang/Object;")&&arguments.length==1&&arguments[0] instanceof Integer&&EquipmentSlotGraph.containerSupported(receiver,false))kind=2;
+        if(kind==0){
+            if(receiver!=null&&!EquipmentSlotGraph.helperReceiver(read.owner.entity.get(),read.slot,receiver,read.reads)){read.unresolved=true;return null;}
+            try{
+                declaring=(Class<?>)SLOT_METHOD.invokeExact(receiver,symbolic,name,descriptor,opcode,frames.get(0).getDeclaringClass());
+                if(declaring==null||declaring.getClassLoader()==null){read.unresolved=true;return null;}
+                DECLARE_SLOT_HELPER.invokeExact(declaring,name,descriptor);
+            }catch(RuntimeException|LinkageError unsupported){read.unresolved=true;return null;}
+            catch(Error failure){throw failure;}catch(Throwable failure){read.unresolved=true;return null;}
+        }
+        SlotCall call=new SlotCall(read,SLOT_METHODS.get(),previous,receiver,arguments,declaring,name,descriptor,kind,frames);SLOT_CALLS.set(call);return call;
+    }
+    public static Object slotMethodBegin(Object receiver,Class<?> declaring,String name,String descriptor,Object[] arguments){
+        SlotCall call=SLOT_CALLS.get();if(call==null||call.closed||call.kind!=0||call.read.unresolved||!active(call.read.owner))return null;
+        var frames=capabilityFrames();
+        if(call.entered||call.receiver!=receiver||call.declaring!=declaring||!call.name.equals(name)||!call.descriptor.equals(descriptor)||arguments==null
+                ||SLOT_METHODS.get()!=call.parent||!slotArguments(descriptor,call.arguments,arguments)||frames.isEmpty()||!sameAnchor(frames.get(0),declaring,name,descriptor)||!slotFrames(call.frames,frames,1,false)){
+            call.read.unresolved=true;return null;
+        }
+        call.entered=true;SlotMethod method=new SlotMethod(call,SLOT_METHODS.get(),frames);SLOT_METHODS.set(method);return method;
+    }
+    private static boolean slotArguments(String descriptor,Object[] first,Object[] second){
+        if(first.length!=second.length)return false;int parameter=0;
+        for(int at=1;at<descriptor.length()&&descriptor.charAt(at)!=')';){
+            if(parameter>=first.length)return false;char type=descriptor.charAt(at++);boolean reference=type=='L'||type=='[';
+            if(type=='['){while(at<descriptor.length()&&descriptor.charAt(at)=='[')at++;if(at>=descriptor.length())return false;type=descriptor.charAt(at++);}
+            if(type=='L'){int end=descriptor.indexOf(';',at);if(end<0)return false;at=end+1;}
+            Object left=first[parameter],right=second[parameter++];
+            if(reference){if(left!=right)return false;}
+            else{Class<?> boxed=switch(type){case 'Z'->Boolean.class;case 'B'->Byte.class;case 'S'->Short.class;case 'C'->Character.class;case 'I'->Integer.class;case 'J'->Long.class;case 'F'->Float.class;case 'D'->Double.class;default->null;};
+                if(boxed==null||left==null||right==null||left.getClass()!=boxed||right.getClass()!=boxed||!samePrimitive(left,right))return false;}
+        }return parameter==first.length;
+    }
+    public static void slotMethodEnd(Object token,Object result){closeSlotMethod(token,result,true);}
+    private static void closeSlotMethod(Object token,Object result,boolean success){
+        if(token==null)return;if(!(token instanceof SlotMethod method)||method.closed)return;
+        SlotCall call=method.call;
+        if(SLOT_METHODS.get()!=method||call.read.thread!=Thread.currentThread())throw new IllegalMonitorStateException("EQUIPMENT_SLOT_HELPER_ORDER");
+        try{if(!success||!slotMethodPath(method))call.read.unresolved=true;call.finished=success;call.result=result;}
+        finally{method.closed=true;if(method.previous==null)SLOT_METHODS.remove();else SLOT_METHODS.set(method.previous);}
+    }
+    public static void slotMethodFailed(Object token,Throwable original){try{closeSlotMethod(token,null,false);}catch(RuntimeException|Error cleanup){if(cleanup!=original)original.addSuppressed(cleanup);}}
+    public static void slotCallEnd(Object token,Object result){closeSlotCall(token,result,true);}
+    private static void closeSlotCall(Object token,Object result,boolean success){
+        if(token==null)return;if(!(token instanceof SlotCall call)||call.closed)return;
+        if(call.read.thread!=Thread.currentThread()||SLOT_CALLS.get()!=call||SLOT_METHODS.get()!=call.parent)throw new IllegalMonitorStateException("EQUIPMENT_SLOT_CALL_ORDER");
+        try{
+            if(!success||!active(call.read.owner)||!slotFrames(call.frames,capabilityFrames(),0,false)){call.read.unresolved=true;return;}
+            if(call.kind==0){String returns=call.descriptor.substring(call.descriptor.lastIndexOf(')')+1);boolean primitive=returns.length()==1;
+                if(!call.entered||!call.finished||(primitive?!samePrimitive(call.result,result):call.result!=result))call.read.unresolved=true;
+            }else if(call.kind==1)slotRecord(call.read,new EquipmentSlotGraph.MapRead(call.receiver,call.arguments[0],result));
+            else if(call.kind==2)slotRecord(call.read,new EquipmentSlotGraph.ListRead(call.receiver,((Integer)call.arguments[0]).intValue(),result));
+        }finally{call.closed=true;if(call.previous==null)SLOT_CALLS.remove();else SLOT_CALLS.set(call.previous);}
+    }
+    public static void slotCallFailed(Object token,Throwable original){try{closeSlotCall(token,null,false);}catch(RuntimeException|Error cleanup){if(cleanup!=original)original.addSuppressed(cleanup);}}
     private static void slotRecord(SlotRead read,EquipmentSlotGraph.Read actual){if(read.reads.size()>=MAX_GRAPH)read.unresolved=true;else read.reads.add(actual);}
     public static void slotFieldRead(Object token,Object holder,Class<?> symbolic,String name,String descriptor,Object value){
         SlotRead read=actualSlotRead(token);if(read==null||read.unresolved)return;
@@ -483,7 +574,7 @@ public final class EquipmentPolicy {
         try{if(!active(read.owner))return;if(success&&!slotReadPath(read))throw new SecurityException("ACTUAL_EQUIPMENT_SLOT_EXIT_REQUIRED");
             if(!success||read.unresolved||!(result instanceof ItemStack stack)||!EquipmentSlotGraph.observe(read.owner.entity.get(),read.owner.generation,read.slot,stack,read.reads))EquipmentSlotGraph.forget(read.owner.entity.get(),read.owner.generation,read.slot);
             else captureSlots(read.owner);
-        }finally{read.closed=true;if(read.previous==null)SLOT_READS.remove();else SLOT_READS.set(read.previous);}
+        }finally{read.closed=true;SLOT_CALLS.remove();SLOT_METHODS.remove();if(read.previous==null)SLOT_READS.remove();else SLOT_READS.set(read.previous);}
     }
     public static void slotReadFailed(Object token,Throwable original){try{closeSlotRead(token,null,false);}catch(RuntimeException|Error cleanup){if(cleanup!=original)original.addSuppressed(cleanup);}}
     private static void refresh(Owner owner){
@@ -836,21 +927,49 @@ public final class EquipmentPolicy {
     }
     private static boolean consumerCurrent(CapabilityConsumer lease){
         if(lease.closed||lease.thread!=Thread.currentThread()||lease.action!=SCOPES.get(Thread.currentThread())||lease.bottomDepth<=0)return false;
+        if(lease.delegatedFrom!=null)return lease.delegationDepth<=16&&consumerCurrent(lease.delegatedFrom)&&lease.root==lease.delegatedFrom.root;
         CallbackOrigin origin=callbackOrigin(lease.optional,lease.action,0);
         return origin!=null&&origin.root==lease.root&&origin.lifecycle==lease.lifecycle&&callbackState(lease.optional,lease.consumer,lease.value,lease.phase,lease.lifecycle);
     }
+    private static boolean composedEntry(StackWalker.StackFrame frame,String contract){
+        Class<?> type=frame.getDeclaringClass();String name=frame.getMethodName(),descriptor=frame.getDescriptor();
+        return switch(contract){
+            case "function"->type==java.util.function.Function.class&&names(name,"lambda$compose$0","lambda$andThen$1")&&descriptor.equals("(Ljava/util/function/Function;Ljava/lang/Object;)Ljava/lang/Object;");
+            case "consumer"->type==java.util.function.Consumer.class&&name.equals("lambda$andThen$0")&&descriptor.equals("(Ljava/util/function/Consumer;Ljava/lang/Object;)V");
+            case "predicate"->type==java.util.function.Predicate.class&&(names(name,"lambda$and$0","lambda$or$2")&&descriptor.equals("(Ljava/util/function/Predicate;Ljava/lang/Object;)Z")||name.equals("lambda$negate$1")&&descriptor.equals("(Ljava/lang/Object;)Z"));
+            default->false;};
+    }
+    @SuppressWarnings("unchecked") public static Object capabilityComposed(Object callback,Object value,String contract){
+        CapabilityConsumer parent=CAP_CONSUMERS.get(),lease=null;
+        if(parent!=null&&parent.delegationDepth<16&&consumerCurrent(parent)){
+            var frames=capabilityFrames();
+            if(!frames.isEmpty()&&composedEntry(frames.get(0),contract)&&consumerFrame(parent,frames.get(0))&&sourceAllowed(parent.action)&&scopePath(parent.action,frames)){
+                String boundary=switch(contract){case "function"->"invokeJdkFunction";case "consumer"->"invokeJdkConsumer";case "predicate"->"invokeJdkPredicate";default->throw new IllegalArgumentException("EQUIPMENT_CALLBACK_CONTRACT");};
+                String descriptor=switch(contract){case "function"->"(Ljava/util/function/Function;Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;";case "consumer"->"(Ljava/util/function/Consumer;Ljava/lang/Object;Ljava/lang/Object;)V";default->"(Ljava/util/function/Predicate;Ljava/lang/Object;Ljava/lang/Object;)Z";};
+                lease=new CapabilityConsumer(parent.action,parent.optional,callback,value,new CallbackOrigin(parent.root,parent.links,parent.lifecycle),"composed-"+contract,boundary,descriptor,parent,parent);CAP_CONSUMERS.set(lease);
+            }
+        }
+        Throwable original=null;
+        try{return switch(contract){
+            case "function"->invokeJdkFunction((java.util.function.Function<Object,Object>)callback,value,lease);
+            case "consumer"->{invokeJdkConsumer((java.util.function.Consumer<Object>)callback,value,lease);yield null;}
+            case "predicate"->Boolean.valueOf(invokeJdkPredicate((java.util.function.Predicate<Object>)callback,value,lease));
+            default->throw new IllegalArgumentException("EQUIPMENT_CALLBACK_CONTRACT");};
+        }catch(Throwable failure){original=failure;throw EquipmentPolicy.<RuntimeException>callbackFailure(failure);}finally{closeConsumer(lease,original);}
+    }
+    private static boolean consumerFrame(CapabilityConsumer lease,StackWalker.StackFrame requested){
+        if(!consumerCurrent(lease))return false;
+        List<StackWalker.StackFrame> frames=WALKER.walk(stream->stream.toList());int bottom=-1;
+        for(int at=0;at<frames.size();at++){var frame=frames.get(at);if(sameAnchor(frame,requested.getDeclaringClass(),requested.getMethodName(),requested.getDescriptor())&&frame.getByteCodeIndex()==requested.getByteCodeIndex()){
+            if(bottom!=-1)return false;bottom=frames.size()-at;
+        }}
+        if(bottom<0)return false;
+        try{return (boolean)CALLBACK_FRAME.invokeExact(lease.consumer,requested.getDeclaringClass(),requested.getMethodName(),requested.getDescriptor(),bottom,
+                (Class<?>)EquipmentPolicy.class,lease.boundary,lease.descriptor,lease.bottomDepth);}
+        catch(Throwable failure){throw new IllegalStateException("EQUIPMENT_CONSUMER_FRAME_UNAVAILABLE",failure);}
+    }
     private static boolean consumerFrame(StackWalker.StackFrame requested,Scope action){
-        for(CapabilityConsumer lease=CAP_CONSUMERS.get();lease!=null;lease=lease.previous)if(lease.action==action&&consumerCurrent(lease)){
-            List<StackWalker.StackFrame> frames=WALKER.walk(stream->stream.toList());int bottom=-1;
-            for(int at=0;at<frames.size();at++){var frame=frames.get(at);
-                if(sameAnchor(frame,requested.getDeclaringClass(),requested.getMethodName(),requested.getDescriptor())&&frame.getByteCodeIndex()==requested.getByteCodeIndex()){
-                    if(bottom!=-1)return false;bottom=frames.size()-at;
-                }}
-            if(bottom<0)continue;
-            try{if((boolean)CALLBACK_FRAME.invokeExact(lease.consumer,requested.getDeclaringClass(),requested.getMethodName(),requested.getDescriptor(),bottom,
-                    (Class<?>)EquipmentPolicy.class,lease.boundary,lease.descriptor,lease.bottomDepth))return true;}
-            catch(Throwable failure){throw new IllegalStateException("EQUIPMENT_CONSUMER_FRAME_UNAVAILABLE",failure);}
-        }return false;
+        for(CapabilityConsumer lease=CAP_CONSUMERS.get();lease!=null;lease=lease.previous)if(lease.action==action&&consumerFrame(lease,requested))return true;return false;
     }
     private static boolean listenerCarrier(CapabilityScope scope,Object target){
         Object set=scope.listeners;if(set==null||set.getClass()!=HashSet.class)return false;Object map=capRead(SET_MAP,set);if(map==null||map.getClass()!=HashMap.class)return false;

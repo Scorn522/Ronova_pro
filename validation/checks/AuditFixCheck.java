@@ -18,6 +18,7 @@ public final class AuditFixCheck {
         if(args.length==1&&args[0].equals("custom-carrier-bytecode")){carrierBytecode();capabilityBytecode();return;}
         if(args.length==1&&args[0].equals("equipment-slot-bytecode")){equipmentSlotBytecode();capabilityBytecode();return;}
         if(args.length==1&&args[0].equals("capability-callback-bytecode")){capabilityCallbackBytecode();return;}
+        if(args.length==1&&args[0].equals("equipment-helper-composition-bytecode")){equipmentSlotBytecode();equipmentSlotHelperBytecode();equipmentFunctionBytecode();return;}
         if(args.length==3&&args[0].equals("mod-group-returns")){modGroupReturns(args[1],args[2]);return;}
         if(args.length==2&&args[0].equals("network-preconnect")){networkPreconnect(args[1]);return;}
         if(args.length==1&&args[0].equals("source-list-fixes")){sourceListFixes();return;}
@@ -1154,6 +1155,41 @@ public final class AuditFixCheck {
         Class<?> actual=Class.forName(target,false,loader);require(actual.getClassLoader()==loader,"actual Mob class was not defined");actual.getDeclaredMethods();
         System.out.println("EQUIPMENT_SLOT_BYTECODE_VERIFY_PASS actual_Mob_original_getter_isolated_body JVM_verifier_only no_slot_action_or_game_runtime_claim");
     }
+    /** Actual helper bodies cover reference, primitive and void returns without inventing a getter. */
+    private static void equipmentSlotHelperBytecode()throws Exception{
+        Class<?> boundary=Class.forName("dev.ronova.pro.agent.EquipmentSlotBoundary");
+        Class<?> visitor=Class.forName("jdk.internal.org.objectweb.asm.ClassVisitor"),nodeType=Class.forName("jdk.internal.org.objectweb.asm.tree.ClassNode");
+        Class<?> methodType=Class.forName("jdk.internal.org.objectweb.asm.tree.MethodNode"),readerType=Class.forName("jdk.internal.org.objectweb.asm.ClassReader");
+        Method weave=boundary.getDeclaredMethod("weave",String.class,methodType,boolean.class);weave.setAccessible(true);
+        Class<?> writerType=Class.forName("dev.ronova.pro.agent.ControlClassWriter");
+        Constructor<?> writerConstructor=writerType.getDeclaredConstructor(ClassLoader.class,nodeType);writerConstructor.setAccessible(true);
+        String target="net.minecraftforge.items.ItemStackHandler";
+        Set<String> selected=Set.of("getStackInSlot(I)Lnet/minecraft/world/item/ItemStack;","validateSlotIndex(I)V","getSlotLimit(I)I","isItemValid(ILnet/minecraft/world/item/ItemStack;)Z");
+        ClassLoader loader=new ClassLoader(AuditFixCheck.class.getClassLoader()){
+            @Override protected Class<?> loadClass(String name,boolean resolve)throws ClassNotFoundException{
+                if(!name.equals(target))return super.loadClass(name,resolve);
+                synchronized(getClassLoadingLock(name)){
+                    Class<?> result=findLoadedClass(name);
+                    if(result==null)try(var input=getParent().getResourceAsStream(name.replace('.','/')+".class")){
+                        if(input==null)throw new ClassNotFoundException(name);Object node=nodeType.getConstructor().newInstance();
+                        Object reader=readerType.getConstructor(byte[].class).newInstance((Object)input.readAllBytes());
+                        readerType.getMethod("accept",visitor,int.class).invoke(reader,node,0);int changed=0;
+                        for(Object method:(List<?>)nodeType.getField("methods").get(node)){
+                            String methodName=(String)methodType.getField("name").get(method),descriptor=(String)methodType.getField("desc").get(method);
+                            if(selected.contains(methodName+descriptor)){weave.invoke(null,name.replace('.','/'),method,true);changed++;}
+                        }
+                        require(changed==selected.size(),"actual ItemStackHandler helper bodies missing");Object writer=writerConstructor.newInstance(this,node);
+                        nodeType.getMethod("accept",visitor).invoke(node,writer);
+                        byte[] bytes=(byte[])Class.forName("jdk.internal.org.objectweb.asm.ClassWriter").getMethod("toByteArray").invoke(writer);
+                        result=defineClass(name,bytes,0,bytes.length);
+                    }catch(java.io.IOException|ReflectiveOperationException failure){throw new ClassNotFoundException(name,failure);}
+                    if(resolve)resolveClass(result);return result;
+                }
+            }
+        };
+        Class<?> actual=Class.forName(target,false,loader);require(actual.getClassLoader()==loader,"actual helper class was not defined");actual.getDeclaredMethods();
+        System.out.println("EQUIPMENT_SLOT_HELPER_BYTECODE_VERIFY_PASS actual_Forge_ItemStackHandler_reference_primitive_void_bodies JVM_verifier_only no_native_dispatch_or_game_runtime_claim");
+    }
     /** Keep the actual Forge publication frames produced by the current Mixin plugin. */
     private static void capabilityBytecode()throws Exception{
         Class<?> weaver=Class.forName("dev.ronova.pro.EquipmentCapabilityWeaver");
@@ -1240,6 +1276,119 @@ public final class AuditFixCheck {
         optionalCallbackFailure(orElseThrow,empty,failedSupplier,originalFailure,calls);
         require(callbacks.get(null)==null,"isolated Optional body check installed callback authority");
         System.out.println("CAPABILITY_CALLBACK_BYTECODE_PASS renamed_isolated_JVM_body_check actual_JDK_Optional_six_transformed_callback_bodies Bridge_callbacks_uninstalled original_callbacks_once values_returns_and_Throwable_identity_preserved no_actual_java_base_retransform_or_game_runtime_claim");
+    }
+    /** Actual standard composition factories and hidden bodies, with the real Bridge fallback left uninstalled. */
+    @SuppressWarnings("unchecked") private static void equipmentFunctionBytecode()throws Exception{
+        Class<?> bridge=Class.forName("dev.ronova.pro.bootstrap.ControlBridge",true,null);Field callbacks=bridge.getDeclaredField("capabilityCallbacks");callbacks.setAccessible(true);
+        require(callbacks.get(null)==null,"composition body check requires uninstalled Bridge callbacks");
+        Class<?> boundary=Class.forName("dev.ronova.pro.agent.EquipmentFunctionBoundary");Method transform=boundary.getDeclaredMethod("transform",ClassLoader.class,String.class,byte[].class);transform.setAccessible(true);
+        Class<?> function=equipmentFunctionAlias(java.util.function.Function.class,transform,4),consumer=equipmentFunctionAlias(java.util.function.Consumer.class,transform,2),predicate=equipmentFunctionAlias(java.util.function.Predicate.class,transform,5);
+        try(var input=java.util.function.Supplier.class.getResourceAsStream("Supplier.class")){
+            require(input!=null,"actual Supplier bytes unavailable");require(transform.invoke(null,null,"java/util/function/Supplier",input.readAllBytes())==null,"Supplier must not acquire a synthetic composition body");
+        }
+        Object input=new Object(),middle=new Object(),output=new Object();List<String> order=new ArrayList<>();
+        java.util.function.Function<Object,Object> before=value->{require(value==input,"compose changed before input");order.add("before");return middle;};
+        java.util.function.Function<Object,Object> finish=value->{require(value==middle,"compose changed intermediate identity");order.add("finish");return output;};
+        var composed=(java.util.function.Function<Object,Object>)equipmentFunctionCombination(function,"compose",finish,before);
+        require(composed.apply(input)==output&&order.equals(List.of("before","finish")),"Function.compose changed callback order/count/result");
+        order.clear();java.util.function.Function<Object,Object> first=value->{require(value==input,"andThen changed first input");order.add("first");return middle;};
+        java.util.function.Function<Object,Object> after=value->{require(value==middle,"andThen changed intermediate identity");order.add("after");return output;};
+        var chained=(java.util.function.Function<Object,Object>)equipmentFunctionCombination(function,"andThen",first,after);
+        require(chained.apply(input)==output&&order.equals(List.of("first","after")),"Function.andThen changed callback order/count/result");
+
+        order.clear();java.util.function.Consumer<Object> accept=value->{require(value==input,"Consumer changed original value");order.add("first");};
+        java.util.function.Consumer<Object> next=value->{require(value==input,"Consumer changed second value");order.add("after");};
+        var accepted=(java.util.function.Consumer<Object>)equipmentFunctionCombination(consumer,"andThen",accept,next);accepted.accept(input);
+        require(order.equals(List.of("first","after")),"Consumer.andThen changed callback order/count");
+
+        java.util.function.Predicate<Object> yes=value->{require(value==input,"Predicate changed original value");order.add("yes");return true;};
+        java.util.function.Predicate<Object> no=value->{require(value==input,"Predicate changed original value");order.add("no");return false;};
+        order.clear();var and=(java.util.function.Predicate<Object>)equipmentFunctionCombination(predicate,"and",no,yes);
+        require(!and.test(input)&&order.equals(List.of("no")),"Predicate.and lost false short circuit");
+        order.clear();and=(java.util.function.Predicate<Object>)equipmentFunctionCombination(predicate,"and",yes,no);
+        require(!and.test(input)&&order.equals(List.of("yes","no")),"Predicate.and changed second operand or result");
+        order.clear();and=(java.util.function.Predicate<Object>)equipmentFunctionCombination(predicate,"and",yes,yes);
+        require(and.test(input)&&order.equals(List.of("yes","yes")),"Predicate.and changed true result/count");
+        order.clear();var or=(java.util.function.Predicate<Object>)equipmentFunctionCombination(predicate,"or",yes,no);
+        require(or.test(input)&&order.equals(List.of("yes")),"Predicate.or lost true short circuit");
+        order.clear();or=(java.util.function.Predicate<Object>)equipmentFunctionCombination(predicate,"or",no,yes);
+        require(or.test(input)&&order.equals(List.of("no","yes")),"Predicate.or changed second operand or result");
+        order.clear();or=(java.util.function.Predicate<Object>)equipmentFunctionCombination(predicate,"or",no,no);
+        require(!or.test(input)&&order.equals(List.of("no","no")),"Predicate.or changed false result/count");
+        order.clear();var negate=(java.util.function.Predicate<Object>)equipmentFunctionCombination(predicate,"negate",yes,null);
+        require(!negate.test(input)&&order.equals(List.of("yes")),"Predicate.negate changed true operand count/result");
+        order.clear();negate=(java.util.function.Predicate<Object>)equipmentFunctionCombination(predicate,"negate",no,null);
+        require(negate.test(input)&&order.equals(List.of("no")),"Predicate.negate changed false operand count/result");
+
+        RuntimeException original=new IllegalStateException("actual_composed_callback_failure");Error originalError=new AssertionError("actual_composed_callback_error");
+        java.util.function.Function<Object,Object> failed=value->{order.add("failed");throw original;};
+        java.util.function.Function<Object,Object> failedAfter=value->{order.add("failedAfter");throw originalError;};
+        var composeFailed=(java.util.function.Function<Object,Object>)equipmentFunctionCombination(function,"compose",finish,failed);
+        equipmentComposedFailure(()->composeFailed.apply(input),original,order,"failed");
+        var chainFailed=(java.util.function.Function<Object,Object>)equipmentFunctionCombination(function,"andThen",failed,after);
+        equipmentComposedFailure(()->chainFailed.apply(input),original,order,"failed");
+        var composeLastFailed=(java.util.function.Function<Object,Object>)equipmentFunctionCombination(function,"compose",failedAfter,before);
+        equipmentComposedFailure(()->composeLastFailed.apply(input),originalError,order,"before","failedAfter");
+        var chainLastFailed=(java.util.function.Function<Object,Object>)equipmentFunctionCombination(function,"andThen",first,failedAfter);
+        equipmentComposedFailure(()->chainLastFailed.apply(input),originalError,order,"first","failedAfter");
+        java.util.function.Consumer<Object> failedAccept=value->{order.add("failed");throw original;},failedNext=value->{order.add("failedAfter");throw originalError;};
+        var acceptFailed=(java.util.function.Consumer<Object>)equipmentFunctionCombination(consumer,"andThen",failedAccept,next);
+        equipmentComposedFailure(()->acceptFailed.accept(input),original,order,"failed");
+        var acceptLastFailed=(java.util.function.Consumer<Object>)equipmentFunctionCombination(consumer,"andThen",accept,failedNext);
+        equipmentComposedFailure(()->acceptLastFailed.accept(input),originalError,order,"first","failedAfter");
+        java.util.function.Predicate<Object> failedTest=value->{order.add("failed");throw original;};
+        for(String operation:List.of("and","or","negate")){
+            var testFailed=(java.util.function.Predicate<Object>)equipmentFunctionCombination(predicate,operation,failedTest,operation.equals("negate")?null:yes);
+            equipmentComposedFailure(()->testFailed.test(input),original,order,"failed");
+        }
+        var andLastFailed=(java.util.function.Predicate<Object>)equipmentFunctionCombination(predicate,"and",yes,failedTest);
+        equipmentComposedFailure(()->andLastFailed.test(input),original,order,"yes","failed");
+        var orLastFailed=(java.util.function.Predicate<Object>)equipmentFunctionCombination(predicate,"or",no,failedTest);
+        equipmentComposedFailure(()->orLastFailed.test(input),original,order,"no","failed");
+        require(callbacks.get(null)==null,"composition body check installed callback authority");
+        System.out.println("EQUIPMENT_FUNCTION_COMPOSITION_BYTECODE_PASS isolated_actual_JDK_factories_and_hidden_bodies eleven_Bridge_calls callbacks_uninstalled original_order_intermediate_identity_short_circuit_RuntimeException_Error_identity_preserved no_actual_java_base_retransform_or_equipment_authority_claim");
+    }
+    private static Class<?> equipmentFunctionAlias(Class<?> original,Method transform,int expectedHooks)throws Exception{
+        String originalName=original.getName().replace('.','/'),aliasName="dev.ronova.pro.validation.CheckedComposed"+original.getSimpleName(),aliasInternal=aliasName.replace('.','/');byte[] bytes;
+        try(var input=original.getResourceAsStream(original.getSimpleName()+".class")){require(input!=null,"actual "+original.getName()+" bytes unavailable");bytes=input.readAllBytes();}
+        byte[] changed=(byte[])transform.invoke(null,null,originalName,bytes);require(changed!=null,"actual composition interface was not transformed: "+original.getName());
+        var node=new org.objectweb.asm.tree.ClassNode();new org.objectweb.asm.ClassReader(changed).accept(node,0);int hooks=0;
+        require(node.name.equals(originalName)&&node.interfaces.isEmpty(),"actual function interface identity/layout changed");
+        node.name=aliasInternal;node.interfaces.add(originalName);
+        if(node.signature!=null)node.signature+="L"+originalName+(original==java.util.function.Function.class?"<TT;TR;>":"<TT;>")+";";
+        for(var method:node.methods)for(var instruction:method.instructions){
+            if(instruction instanceof org.objectweb.asm.tree.MethodInsnNode call&&call.owner.equals("dev/ronova/pro/bootstrap/ControlBridge")&&call.name.equals("capabilityComposed")){
+                require(call.getOpcode()==org.objectweb.asm.Opcodes.INVOKESTATIC&&call.desc.equals("(Ljava/lang/Object;Ljava/lang/Object;Ljava/lang/String;)Ljava/lang/Object;"),"composition hook signature changed");hooks++;
+            }
+            if(instruction instanceof org.objectweb.asm.tree.InvokeDynamicInsnNode indy&&indy.bsmArgs.length==3&&indy.bsmArgs[1] instanceof org.objectweb.asm.Handle implementation&&implementation.getOwner().equals(originalName)){
+                indy.bsmArgs[1]=new org.objectweb.asm.Handle(implementation.getTag(),aliasInternal,implementation.getName(),implementation.getDesc(),implementation.isInterface());
+                if(implementation.getTag()==org.objectweb.asm.Opcodes.H_INVOKEINTERFACE){String captured="(L"+originalName+";";require(indy.desc.startsWith(captured),"composition factory did not capture its original this");indy.desc="(L"+aliasInternal+";"+indy.desc.substring(captured.length());}
+            }
+        }
+        require(hooks==expectedHooks,"missing actual composition callback hook: "+original.getName()+" "+hooks);
+        // Original method descriptors and callback targets stay JDK interfaces.
+        // Only the private implementation owner and its captured this become aliases.
+        var writer=new org.objectweb.asm.ClassWriter(0);node.accept(writer);byte[] renamed=writer.toByteArray();
+        Class<?> checked=new ClassLoader(AuditFixCheck.class.getClassLoader()){
+            Class<?> defineBody(){Class<?> result=defineClass(aliasName,renamed,0,renamed.length);resolveClass(result);return result;}
+        }.defineBody();
+        require(checked.getClassLoader()!=null&&checked.isInterface()&&original.isAssignableFrom(checked),"composition alias must implement the original contract");checked.getDeclaredMethods();return checked;
+    }
+    @SuppressWarnings("unchecked") private static Object equipmentFunctionCombination(Class<?> alias,String operation,Object first,Object other)throws Exception{
+        Class<?> contract=alias.getInterfaces()[0];Object receiver=Proxy.newProxyInstance(alias.getClassLoader(),new Class<?>[]{alias},(proxy,method,args)->{
+            if(method.getDeclaringClass()==Object.class)return switch(method.getName()){case "equals"->Boolean.valueOf(proxy==args[0]);case "hashCode"->Integer.valueOf(System.identityHashCode(proxy));case "toString"->alias.getName();default->throw new AssertionError(method);};
+            if(method.isDefault())return InvocationHandler.invokeDefault(proxy,method,args==null?new Object[0]:args);
+            if(contract==java.util.function.Function.class)return ((java.util.function.Function<Object,Object>)first).apply(args[0]);
+            if(contract==java.util.function.Consumer.class){((java.util.function.Consumer<Object>)first).accept(args[0]);return null;}
+            if(contract==java.util.function.Predicate.class)return Boolean.valueOf(((java.util.function.Predicate<Object>)first).test(args[0]));throw new AssertionError(contract);
+        });
+        Method factory=operation.equals("negate")?alias.getMethod(operation):alias.getMethod(operation,contract);
+        Object composed=operation.equals("negate")?factory.invoke(receiver):factory.invoke(receiver,other);
+        require(contract.isInstance(composed)&&composed.getClass().isHidden()&&composed.getClass().getNestHost()==alias,"composition did not execute the isolated original factory/hidden body");return composed;
+    }
+    private static void equipmentComposedFailure(Runnable operation,Throwable original,List<String> order,String... expected){
+        order.clear();try{operation.run();throw new AssertionError("composition lost the original callback failure");}catch(Throwable failure){require(failure==original,"composition replaced the original callback Throwable: "+failure);}
+        require(order.equals(Arrays.asList(expected)),"composition repeated a callback or continued after failure: "+order);
     }
     private static void optionalCallbackFailure(Method method,Object receiver,Object callback,Throwable original,int[] calls)throws Exception{
         int before=calls[0];

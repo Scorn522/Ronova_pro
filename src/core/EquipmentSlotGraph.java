@@ -121,6 +121,14 @@ final class EquipmentSlotGraph {
         if(receiver.getClass().isArray())for(int at=0;at<before;at++)if(reads.get(at).value()==receiver&&reads.get(at) instanceof FieldRead field&&Modifier.isStatic(field.field.getModifiers())&&receiver.getClass().getComponentType().isPrimitive())return true;
         return false;
     }
+    static boolean helperReceiver(LivingEntity entity,EquipmentSlot slot,Object receiver,List<Read> reads){
+        if(receiver==entity||receiver==slot||receiver==EquipmentSlot.Type.HAND||receiver==EquipmentSlot.Type.ARMOR)return true;
+        IdentityHashMap<Object,Boolean> rooted=new IdentityHashMap<>();rooted.put(entity,Boolean.TRUE);
+        for(Read read:reads)if(!(read instanceof FieldRead field&&Modifier.isStatic(field.field().getModifiers()))&&rooted.containsKey(read.receiver())){
+            Object value=read.value();if(value!=null&&!(value instanceof ItemStack)&&!scalar(value)&&!borrowed(value))rooted.put(value,Boolean.TRUE);
+        }
+        return rooted.containsKey(receiver);
+    }
     static ItemStack stack(LivingEntity entity,long generation,EquipmentSlot slot){return view(entity,generation).stack(slot);}
     static View view(LivingEntity entity,long generation){
         View result=new View();if(entity==null||generation<=0||ProRuntime.liveStateGeneration(entity)!=generation)return result;State state=STATES.get(entity);if(state==null||state.generation!=generation)return result;

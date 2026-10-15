@@ -43,7 +43,7 @@ public final class NativeControl {
             if(!early.isEmpty()) {
                 Path actual=Path.of(early).toAbsolutePath();if(!hash(Files.readAllBytes(actual)).equals(digest))throw new IOException("EARLY_NATIVE_IMAGE_MISMATCH");dll=actual;
             }
-            System.load(dll.toString());if(abi()!=79)throw new UnsatisfiedLinkError("NATIVE_CONTROL_ABI");
+            System.load(dll.toString());if(abi()!=80)throw new UnsatisfiedLinkError("NATIVE_CONTROL_ABI");
             if(!initialize0(ControlBridge.class,DefinitionBridge.class))throw new UnsatisfiedLinkError("ACTUAL_NATIVE_BOUNDARY_INSTALL_FAILED");
             if(!initializeDefinitionDirectory0(definitionDirectoryOwner))throw new UnsatisfiedLinkError("ACTUAL_DEFINITION_DIRECTORY_CAS_UNAVAILABLE");
             libraryBoundaryPresent=libraryPresent0();available=true;return state="NATIVE_BIND_AND_JNI_FIELD_READY";
@@ -262,6 +262,10 @@ public final class NativeControl {
     static Object[] carrierRead(Object receiver,java.lang.reflect.Field field){
         if(CALLER.getCallerClass()!=CarrierBridge.class)throw new SecurityException("ACTUAL_CARRIER_BRIDGE_REQUIRED");
         return available?carrierRead0(receiver,field):null;
+    }
+    static Class<?> carrierMethod(Object receiver,Class<?> symbolic,String name,String descriptor,int opcode,Class<?> caller){
+        if(CALLER.getCallerClass()!=CarrierBridge.class)throw new SecurityException("ACTUAL_CARRIER_BRIDGE_REQUIRED");
+        return available?carrierMethod0(receiver,symbolic,name,descriptor,opcode,caller):null;
     }
     static Object[] carrierStaticValue(Class<?> declaring,String name,String descriptor){
         if(CALLER.getCallerClass()!=CarrierBridge.class)throw new SecurityException("ACTUAL_CARRIER_BRIDGE_REQUIRED");
@@ -779,6 +783,7 @@ public final class NativeControl {
     private static native java.lang.reflect.Field networkField0(Class<?> declaring,String name);
     private static native Object[][] carrierFields0(Object receiver);
     private static native Object[] carrierRead0(Object receiver,java.lang.reflect.Field field);
+    private static native Class<?> carrierMethod0(Object receiver,Class<?> symbolic,String name,String descriptor,int opcode,Class<?> caller);
     private static native Object[] carrierStaticValue0(Class<?> declaring,String name,String descriptor);
     private static native int carrierCallbackDepth0(Class<?> declaring,String name,String descriptor);
     private static native boolean carrierCallback0(Object callback,Class<?> callee,String name,String descriptor,int calleeBottomDepth,

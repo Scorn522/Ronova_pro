@@ -1,5 +1,18 @@
 # Ronova Pro 当前进度
 
+## 2026-10-16：C 接续——槽位 helper 与标准函数组合
+
+接续已推送的 `ca5edc8`，Java ABI87 / Native ABI80 / Storage3 / Journal6，协议 `r3-client-8`。本批源码全部写齐后统一构建；自身外观、武器注册、驱动部署和源码 ZIP 继续暂缓。
+
+自定义槽位 getter 的原同步 Java 调用接准确 receiver、原参数、实际 helper HEAD、原返回及嵌套读取，仍归同一实体/代次/槽位。私有、静态、真实虚分派、唯一 default 和直接父类普通 super 方法通过 VM 只读声明识别，不调用 getter、加载器或类初始化。原操作只执行一次，异常保留原对象及原 catch 顺序；原异常分支、歧义、native、构造器、未知平台方法、超限或 helper/root 角色冲突保持 unresolved。已有根入口先拒绝重复 mint，父类已作 root 时不会误抛子类 anchor 异常。最终关系仍按当前原存储复核，未知槽不伪造 EMPTY。
+
+JDK Function.compose/andThen、Consumer.andThen、Predicate.and/or/negate 在真实工厂指向的准确私有实现体接原回调；保留中间值、顺序、短路和原 Throwable。子回调委托要求同线程、同一当前能力作用域和物理调用链，由现有 Native callback 边检查接续，结束恢复原层。任意自定义组合、异步、未知间接链、复杂 interface/super 特殊调用及不透明原生状态仍有边界。
+
+统一构建 `build-c-java87-native80-helper-composition-20261016.log` **首轮 PASS，52秒**，21项任务中15项执行、6项保持最新。检查器编译退出0；现有 AuditFixCheck 的 `equipment-helper-composition-bytecode` **退出0**，实际 Mob getter、ItemStackHandler 四个引用/primitive/void helper 体按生产织入隔离加载通过；真实 JDK 三接口组合体的11个 Bridge 调用通过顺序、中间值、短路及 RuntimeException/Error 身份检查。Bridge callbacks 全程未安装，只确认隔离字节码及直通语义，不代表实际 java.base 重变换、Native 分派或游戏授权动作通过。没有重跑旧 Forge/Optional、Netty、世界或退役矩阵；本批游戏场景 **NOTRUN**，旧失败记录保留。
+
+候选 `distribution/candidate-c-java87-native80-helper-composition-wip-20261016`：Core2930187、prelaunch23309字节。源码、匹配 JAR 与既有报告摘要同步 GitHub；完整 C/B 尚未完成。
+
+---
 ## 2026-10-16：C 接续——能力回调链与复杂容器
 
 接续已推送的 `ddd92bc`，Java ABI86 / Native ABI79 / Storage3 / Journal6，协议仍为 `r3-client-8`。本包将能力回调、Java Optional 后续调用及复杂标准载体写齐后统一构建；自身外观、武器注册、驱动部署与源码 ZIP 不在本包。

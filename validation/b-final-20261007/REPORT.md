@@ -1,5 +1,18 @@
 # B 批实际报告：2026-10-09 代码收敛接续
 
+## 2026-10-16：C 接续——同步 getter helper 与函数组合
+
+接续 `ca5edc8`，Java87 / Native80 / Storage3 / Journal6，协议 `r3-client-8`。三个既有6.1 Sol max子代理分别完成准确 helper 织入、VM只读实际声明分派及标准JDK组合体；主线程接齐Core读取/嵌套作用域、Bootstrap handles与版本。整包源码完成后才统一构建，没有自身外观、武器注册、驱动部署或源码ZIP。
+
+helper沿原调用操作数和实际方法HEAD接当前实体/槽位，原invoke、返回和Throwable只经过一次；窄失败清理仍在原try区域，保留原catch顺序。引用参数按身份、primitive按准确包装类型/原位值比对，辅助读取只沿已有真实根接续。VM仅识别真实声明、虚分派、唯一default、private/static和直接父类普通super，不执行目标方法/加载器/初始化。未知/歧义/native/构造器/平台body/超限/角色冲突不记完整轨迹；重复root先标unresolved，修正父类已为root时的错误anchor异常。最终实际存储复核及原五类写门不变。
+
+Function.compose/andThen、Consumer.andThen、Predicate.and/or/negate准确工厂及private synthetic body接原callback，保留中间值、短路及原异常。嵌套委托只沿当前同线程能力parent、原root/owner和Native物理调用边，正常/异常恢复前层；未知自定义函数组合、异步/间接链、复杂special、不可安装helper和原生私有状态仍未泛化覆盖。
+
+`build-c-java87-native80-helper-composition-20261016.log` **首轮PASS，52秒**，21项任务中15项执行、6项保持最新，包含Java87/Native80编译链接。`compile-c-java87-native80-helper-composition-20261016.log` **退出0**；`c-java87-native80-helper-composition-bytecode-20261016.log` 使用现有AuditFixCheck的 `equipment-helper-composition-bytecode`，**退出0、EQUIPMENT_SLOT_BYTECODE_VERIFY_PASS、EQUIPMENT_SLOT_HELPER_BYTECODE_VERIFY_PASS、EQUIPMENT_FUNCTION_COMPOSITION_BYTECODE_PASS**。实际Mob getter与ItemStackHandler四个helper体按生产weave/writer隔离加载；实际JDK组合体仅为子加载器合法定义而改alias名称、captured-this和impl owner，原方法签名/回调契约保留，11个Bridge调用的顺序/中间值/短路及RuntimeException/Error身份通过。Bridge callbacks始终未安装，没有构造Core/Scope/来源资格，不能代称真实java.base重变换、Native helper识别或装备保护通过。
+
+没有重跑旧已通过Forge/Optional/Netty/世界/退役矩阵，未启动游戏，本批Native及实际能力/槽位/换装/停组场景 **NOTRUN**；旧失败记录保持原状。候选 `distribution/candidate-c-java87-native80-helper-composition-wip-20261016` 含Core2930187、prelaunch23309字节；源码、匹配JAR和本摘要同步原GitHub，完整C/B尚未完成。
+
+---
 ## 2026-10-16：C 接续——完整本批回调与复杂载体接点
 
 接续 `ddd92bc`，Java86 / Native79 / Storage3 / Journal6，协议 `r3-client-8`。既有三个 6.1 Sol max 子代理分别完成 VM 深链/纯转发读取、Forge/JDK Optional 真实调用点及复杂容器查询；主线程接齐 Core 四类 callback、失效监听双层分派、当前动作弱派生关系与 Bootstrap 五 handles。整包源码写齐后统一构建，自身外观、武器注册及驱动部署不做。

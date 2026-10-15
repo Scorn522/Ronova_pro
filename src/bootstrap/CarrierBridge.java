@@ -22,6 +22,12 @@ public final class CarrierBridge {
         if(value==null||value.length!=1)throw new IllegalStateException("CARRIER_FIELD_READ_UNAVAILABLE");
         return value[0];
     }
+    /** Actual Java declaration before the original invocation; unknown dispatch stays unresolved. */
+    public static Class<?> method(Object receiver,Class<?> symbolic,String name,String descriptor,int opcode,Class<?> caller){
+        core();Objects.requireNonNull(symbolic,"symbolic");Objects.requireNonNull(name,"name");
+        Objects.requireNonNull(descriptor,"descriptor");Objects.requireNonNull(caller,"caller");
+        return NativeControl.carrierMethod(receiver,symbolic,name,descriptor,opcode,caller);
+    }
     /** Exact initialized platform sentinels; this does not enumerate a static payload graph. */
     public static Object staticValue(Class<?> declaring,String name,String descriptor){
         core();Objects.requireNonNull(declaring,"declaring");Objects.requireNonNull(name,"name");Objects.requireNonNull(descriptor,"descriptor");

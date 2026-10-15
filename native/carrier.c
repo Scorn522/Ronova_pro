@@ -257,6 +257,201 @@ JNIEXPORT jobjectArray JNICALL Java_dev_ronova_pro_bootstrap_NativeControl_carri
     if(!result||native_original.ExceptionCheck(env)){if(result)native_original.DeleteLocalRef(env,result);if(!native_original.ExceptionCheck(env))native_refuse(env,"CARRIER_INITIALIZED_STATIC_FIELD_REQUIRED");return NULL;}return result;
 }
 
+/* Resolve only the declarations reachable from these actual mirrors. This is
+ * an installation hint: the Core still checks the original invocation's HEAD,
+ * operands and return. No lookup below resolves a name through a Java loader. */
+enum { NATIVE_CARRIER_METHOD_TYPES=256 };
+typedef struct NativeCarrierMethod {jclass declaring;jmethodID method;jint modifiers;} NativeCarrierMethod;
+typedef struct NativeCarrierMethods {
+    NativeCarrierMethod classes[NATIVE_CARRIER_METHOD_TYPES],interfaces[NATIVE_CARRIER_METHOD_TYPES];
+    jint classCount,interfaceCount;
+} NativeCarrierMethods;
+static int native_carrier_method_class(JNIEnv *env,jclass type,int *contract){
+    jint status=0,modifiers=0;jboolean array=JNI_TRUE;
+    int valid=type&&(*native_ti)->GetClassStatus(native_ti,type,&status)==JVMTI_ERROR_NONE
+            &&(status&JVMTI_CLASS_STATUS_PREPARED)&&!(status&JVMTI_CLASS_STATUS_ERROR)
+            &&(*native_ti)->IsArrayClass(native_ti,type,&array)==JVMTI_ERROR_NONE&&!array
+            &&(*native_ti)->GetClassModifiers(native_ti,type,&modifiers)==JVMTI_ERROR_NONE;
+    if(valid)*contract=(modifiers&0x0200)!=0;return valid&&!native_original.ExceptionCheck(env);
+}
+/* Absence is distinct from a failed metadata read. */
+static int native_carrier_method_declared(JNIEnv *env,NativeCarrierMethod *selected,const char *name,const char *descriptor){
+    jmethodID *methods=NULL;jint count=0;int valid=1;selected->method=NULL;selected->modifiers=0;
+    if((*native_ti)->GetClassMethods(native_ti,selected->declaring,&count,&methods)!=JVMTI_ERROR_NONE||count<0)valid=0;
+    for(jint i=0;valid&&i<count&&!native_original.ExceptionCheck(env);i++){
+        char *actual=NULL,*signature=NULL;jclass declaring=NULL;jboolean obsolete=JNI_TRUE;
+        valid=(*native_ti)->GetMethodName(native_ti,methods[i],&actual,&signature,NULL)==JVMTI_ERROR_NONE&&actual&&signature;
+        if(valid&&!strcmp(actual,name)&&!strcmp(signature,descriptor)){
+            valid=!selected->method&&(*native_ti)->GetMethodDeclaringClass(native_ti,methods[i],&declaring)==JVMTI_ERROR_NONE
+                    &&declaring&&native_original.IsSameObject(env,declaring,selected->declaring)
+                    &&(*native_ti)->GetMethodModifiers(native_ti,methods[i],&selected->modifiers)==JVMTI_ERROR_NONE
+                    &&(*native_ti)->IsMethodObsolete(native_ti,methods[i],&obsolete)==JVMTI_ERROR_NONE&&!obsolete;
+            if(valid)selected->method=methods[i];
+        }
+        if(declaring)native_original.DeleteLocalRef(env,declaring);
+        if(actual)(*native_ti)->Deallocate(native_ti,(unsigned char*)actual);if(signature)(*native_ti)->Deallocate(native_ti,(unsigned char*)signature);
+    }
+    if(methods)(*native_ti)->Deallocate(native_ti,(unsigned char*)methods);return valid&&!native_original.ExceptionCheck(env);
+}
+static void native_carrier_methods_clear(JNIEnv *env,NativeCarrierMethods *types){
+    for(jint i=0;i<types->classCount;i++)if(types->classes[i].declaring)native_original.DeleteLocalRef(env,types->classes[i].declaring);
+    for(jint i=0;i<types->interfaceCount;i++)if(types->interfaces[i].declaring)native_original.DeleteLocalRef(env,types->interfaces[i].declaring);
+}
+static int native_carrier_method_classes(JNIEnv *env,jobject receiver,const char *name,const char *descriptor,NativeCarrierMethods *types){
+    jclass current=native_original.GetObjectClass(env,receiver);int valid=current!=NULL;
+    while(current&&valid&&!native_original.ExceptionCheck(env)){
+        int contract=0;
+        valid=types->classCount<NATIVE_CARRIER_METHOD_TYPES&&native_carrier_method_class(env,current,&contract)&&!contract;
+        if(!valid)break;
+        NativeCarrierMethod *entry=&types->classes[types->classCount++];entry->declaring=current;current=NULL;
+        valid=native_carrier_method_declared(env,entry,name,descriptor);
+        if(valid)current=native_original.GetSuperclass(env,entry->declaring);
+    }
+    if(current)native_original.DeleteLocalRef(env,current);return valid&&!native_original.ExceptionCheck(env);
+}
+static int native_carrier_method_interfaces_add(JNIEnv *env,jclass type,const char *name,const char *descriptor,NativeCarrierMethods *types){
+    jclass *interfaces=NULL;jint count=0;int valid=(*native_ti)->GetImplementedInterfaces(native_ti,type,&count,&interfaces)==JVMTI_ERROR_NONE&&count>=0;
+    for(jint i=0;valid&&i<count&&!native_original.ExceptionCheck(env);i++){
+        int present=0,contract=0;
+        for(jint at=0;at<types->interfaceCount&&!present;at++)present=native_original.IsSameObject(env,interfaces[i],types->interfaces[at].declaring);
+        if(present)continue;
+        valid=types->interfaceCount<NATIVE_CARRIER_METHOD_TYPES&&native_carrier_method_class(env,interfaces[i],&contract)&&contract;
+        if(valid){NativeCarrierMethod *entry=&types->interfaces[types->interfaceCount++];entry->declaring=interfaces[i];interfaces[i]=NULL;
+            valid=native_carrier_method_declared(env,entry,name,descriptor);}
+    }
+    if(interfaces){for(jint i=0;i<count;i++)if(interfaces[i])native_original.DeleteLocalRef(env,interfaces[i]);(*native_ti)->Deallocate(native_ti,(unsigned char*)interfaces);}
+    return valid&&!native_original.ExceptionCheck(env);
+}
+static int native_carrier_method_interfaces(JNIEnv *env,const char *name,const char *descriptor,NativeCarrierMethods *types){
+    for(jint i=0;i<types->classCount;i++)if(!native_carrier_method_interfaces_add(env,types->classes[i].declaring,name,descriptor,types))return 0;
+    for(jint i=0;i<types->interfaceCount;i++)if(!native_carrier_method_interfaces_add(env,types->interfaces[i].declaring,name,descriptor,types))return 0;
+    return !native_original.ExceptionCheck(env);
+}
+/* The defining loader and binary package both participate in runtime package
+ * identity. A hidden-name form with an extra slash remains unsupported here. */
+static int native_carrier_method_package(JNIEnv *env,jclass first,jclass second){
+    if(native_original.IsSameObject(env,first,second))return 1;
+    jobject firstLoader=NULL,secondLoader=NULL;char *firstName=NULL,*secondName=NULL;int same=-1;
+    int valid=(*native_ti)->GetClassLoader(native_ti,first,&firstLoader)==JVMTI_ERROR_NONE
+            &&(*native_ti)->GetClassLoader(native_ti,second,&secondLoader)==JVMTI_ERROR_NONE
+            &&(*native_ti)->GetClassSignature(native_ti,first,&firstName,NULL)==JVMTI_ERROR_NONE&&firstName&&firstName[0]=='L'
+            &&(*native_ti)->GetClassSignature(native_ti,second,&secondName,NULL)==JVMTI_ERROR_NONE&&secondName&&secondName[0]=='L';
+    if(valid&&!strstr(firstName,"/0x")&&!strstr(secondName,"/0x")){
+        const char *firstEnd=strrchr(firstName,'/'),*secondEnd=strrchr(secondName,'/');
+        size_t firstLength=firstEnd?(size_t)(firstEnd-firstName):1,secondLength=secondEnd?(size_t)(secondEnd-secondName):1;
+        same=native_original.IsSameObject(env,firstLoader,secondLoader)&&firstLength==secondLength&&!memcmp(firstName,secondName,firstLength);
+    }
+    if(firstLoader)native_original.DeleteLocalRef(env,firstLoader);if(secondLoader)native_original.DeleteLocalRef(env,secondLoader);
+    if(firstName)(*native_ti)->Deallocate(native_ti,(unsigned char*)firstName);if(secondName)(*native_ti)->Deallocate(native_ti,(unsigned char*)secondName);
+    return !native_original.ExceptionCheck(env)?same:-1;
+}
+/* All candidates here are real public interface declarations. An abstract
+ * child shadows its inherited default too; two concrete maxima are unknown. */
+static NativeCarrierMethod *native_carrier_method_maximum(JNIEnv *env,NativeCarrierMethods *types,jclass root,int resolution){
+    NativeCarrierMethod *selected=NULL,*abstract=NULL;
+    for(jint i=0;i<types->interfaceCount&&!native_original.ExceptionCheck(env);i++){
+        NativeCarrierMethod *entry=&types->interfaces[i];
+        if(!entry->method||(entry->modifiers&0x000a)||(root&&!native_original.IsAssignableFrom(env,root,entry->declaring)))continue;
+        if(!(entry->modifiers&0x0001))return NULL;
+        int shadowed=0;
+        for(jint j=0;j<types->interfaceCount&&!shadowed;j++){
+            NativeCarrierMethod *child=&types->interfaces[j];
+            if(i==j||!child->method||(child->modifiers&0x000a)||(root&&!native_original.IsAssignableFrom(env,root,child->declaring)))continue;
+            if(!(child->modifiers&0x0001))return NULL;
+            shadowed=native_original.IsAssignableFrom(env,child->declaring,entry->declaring);
+        }
+        if(shadowed)continue;
+        if(entry->modifiers&0x0400){if(!abstract)abstract=entry;continue;}
+        if(selected)return NULL;selected=entry;
+    }
+    return native_original.ExceptionCheck(env)?NULL:selected?selected:resolution?abstract:NULL;
+}
+static int native_carrier_method_body(const NativeCarrierMethod *entry,int statik){
+    return entry&&entry->method&&!(entry->modifiers&0x0500)&&((entry->modifiers&0x0008)!=0)==statik;
+}
+static jclass native_carrier_method_result(JNIEnv *env,const NativeCarrierMethod *selected,const char *name,const char *descriptor,int statik){
+    if(!native_carrier_method_body(selected,statik))return NULL;
+    NativeCarrierMethod current={selected->declaring,NULL,0};
+    return native_carrier_method_declared(env,&current,name,descriptor)&&current.method==selected->method&&current.modifiers==selected->modifiers
+            ?(jclass)native_original.NewLocalRef(env,selected->declaring):NULL;
+}
+/* Only an exact direct superclass is needed for ordinary super getters. More
+ * distant ACC_SUPER and interface.super cases need additional caller linkage. */
+static jclass native_carrier_method_super(JNIEnv *env,jobject receiver,jclass symbolic,jclass caller,const char *name,const char *descriptor){
+    int contract=0;if(!native_carrier_method_class(env,caller,&contract)||contract||!native_original.IsInstanceOf(env,receiver,caller))return NULL;
+    jclass current=native_original.GetSuperclass(env,caller);jclass result=NULL;
+    int valid=current&&native_original.IsSameObject(env,current,symbolic);
+    for(jint depth=0;valid&&current&&depth<NATIVE_CARRIER_METHOD_TYPES&&!native_original.ExceptionCheck(env);depth++){
+        NativeCarrierMethod entry={current,NULL,0};
+        valid=native_carrier_method_class(env,current,&contract)&&!contract&&native_carrier_method_declared(env,&entry,name,descriptor);
+        if(valid&&entry.method){
+            if((entry.modifiers&0x0005)&&!(entry.modifiers&0x0002))result=native_carrier_method_result(env,&entry,name,descriptor,0);
+            break;
+        }
+        jclass parent=valid?native_original.GetSuperclass(env,current):NULL;native_original.DeleteLocalRef(env,current);current=parent;
+    }
+    if(current)native_original.DeleteLocalRef(env,current);return result;
+}
+JNIEXPORT jclass JNICALL Java_dev_ronova_pro_bootstrap_NativeControl_carrierMethod0(JNIEnv *env,jclass controller,jobject receiver,jclass symbolic,jstring name,jstring signature,jint opcode,jclass caller){
+    if(!native_carrier_reader(env,controller)||!symbolic||!name||!signature||!caller||opcode<182||opcode>185)return NULL;
+    NativeThread *state=native_thread();if(!state)return NULL;state->control++;
+    const char *key=native_original.GetStringUTFChars(env,name,NULL),*descriptor=key?native_original.GetStringUTFChars(env,signature,NULL):NULL;
+    NativeCarrierMethods *types=NULL;NativeCarrierMethod declared={symbolic,NULL,0},*resolved=NULL,*selected=NULL;jclass result=NULL;
+    int contract=0,interfaces=0;
+    if(!key||!descriptor||!key[0]||key[0]=='<'||descriptor[0]!='('||!native_carrier_method_class(env,symbolic,&contract)
+            ||!native_carrier_method_declared(env,&declared,key,descriptor))goto done;
+    if(opcode==184){result=native_carrier_method_result(env,&declared,key,descriptor,1);goto done;}
+    if(!receiver||!native_original.IsInstanceOf(env,receiver,symbolic)||native_original.ExceptionCheck(env))goto done;
+    if(opcode!=183&&(opcode==185)!=contract)goto done;
+    /* Private resolution never dispatches to a same-name child declaration. */
+    if(declared.method&&(declared.modifiers&0x0002)){
+        result=native_carrier_method_result(env,&declared,key,descriptor,0);goto done;
+    }
+    if(opcode==183){if(!contract)result=native_carrier_method_super(env,receiver,symbolic,caller,key,descriptor);goto done;}
+    if(native_original.EnsureLocalCapacity(env,NATIVE_CARRIER_METHOD_TYPES*2+16)!=JNI_OK)goto done;
+    types=(NativeCarrierMethods*)calloc(1,sizeof(*types));if(!types||!native_carrier_method_classes(env,receiver,key,descriptor,types))goto done;
+    if(contract){
+        resolved=declared.method?&declared:NULL;
+        if(!resolved&&types->classCount){NativeCarrierMethod *object=&types->classes[types->classCount-1];
+            if(object->method&&(object->modifiers&0x0009)==0x0001&&native_bootstrap_class(env,object->declaring,"Ljava/lang/Object;"))resolved=object;}
+    }else{
+        jint start=-1;
+        for(jint i=0;i<types->classCount;i++)if(native_original.IsSameObject(env,types->classes[i].declaring,symbolic)){start=i;break;}
+        if(start<0)goto done;
+        for(jint i=start;i<types->classCount;i++)if(types->classes[i].method){resolved=&types->classes[i];break;}
+    }
+    if(!resolved){
+        if(!native_carrier_method_interfaces(env,key,descriptor,types))goto done;interfaces=1;
+        resolved=native_carrier_method_maximum(env,types,symbolic,1);
+    }
+    if(!resolved||(resolved->modifiers&0x000a))goto done;
+    int resolvedInterface=0;if(!native_carrier_method_class(env,resolved->declaring,&resolvedInterface))goto done;
+    if(resolvedInterface){
+        if(!(resolved->modifiers&0x0001))goto done;
+        for(jint i=0;i<types->classCount;i++)if(types->classes[i].method&&!(types->classes[i].modifiers&0x000a)){
+            selected=&types->classes[i];if(!(selected->modifiers&0x0001))goto done;break;}
+        if(!selected){
+            if(!interfaces&&!native_carrier_method_interfaces(env,key,descriptor,types))goto done;
+            selected=native_carrier_method_maximum(env,types,NULL,0);
+        }
+    }else{
+        int active=0,open=(resolved->modifiers&0x0005)!=0;
+        for(jint i=types->classCount;i-->0;){
+            NativeCarrierMethod *entry=&types->classes[i];
+            if(entry==resolved){active=1;selected=entry;continue;}
+            if(!active||!entry->method||(entry->modifiers&0x000a))continue;
+            if(!open&&native_carrier_method_package(env,entry->declaring,resolved->declaring)!=1)goto done;
+            selected=entry;open|=(entry->modifiers&0x0005)!=0;
+        }
+    }
+    if(opcode==185&&selected&&!(selected->modifiers&0x0001))goto done;
+    result=native_carrier_method_result(env,selected,key,descriptor,0);
+done:
+    if(types){native_carrier_methods_clear(env,types);free(types);}
+    if(descriptor)native_original.ReleaseStringUTFChars(env,signature,descriptor);if(key)native_original.ReleaseStringUTFChars(env,name,key);state->control--;
+    if(native_original.ExceptionCheck(env)){if(result)native_original.DeleteLocalRef(env,result);return NULL;}return result;
+}
+
 /* A callback identity is read only while its exact Core invocation is still
  * physically on this thread. No method pointer or retained verdict escapes. */
 enum { NATIVE_CARRIER_CALLBACK_FRAMES=16 };
