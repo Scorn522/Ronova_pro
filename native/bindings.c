@@ -125,7 +125,7 @@ static uint64_t native_unsafe_result(JNIEnv*,Binding*,unsigned char*);
 static void native_file_classify(JNIEnv*,jclass,Binding*,const char*);
 static int native_file_prepare(JNIEnv*);
 static int native_file_begin(JNIEnv*,NativeThread*,Binding*,jobject,unsigned char*);
-static void native_file_end(JNIEnv*,NativeThread*);
+static void native_file_end(JNIEnv*,NativeThread*,unsigned char*);
 static void native_file_thread_end(JNIEnv*,NativeThread*);
 static void native_file_refuse(JNIEnv*,Binding*);
 static int native_binding_seed_target(JNIEnv*,NativeThread*,jclass,jmethodID,void**,void**);
@@ -250,7 +250,7 @@ static uint64_t native_enter(JNIEnv *env,jobject receiver,Binding *binding,unsig
     // JDK atomics must not recursively enter the Java memory bookkeeping.
     int internalArrayCopy=binding->arraycopyOperation&&native_arraycopy_internal(env,state,binding);
     if(binding->arraycopyOperation&&native_original.ExceptionCheck(env))return 0;
-    if(((binding->unsafeOperation||binding->fileOperation||binding->threadOperation)&&state->control)||internalArrayCopy){if(!host_module_binding_enter(binding))return 0;state->entries[state->depth]=binding;state->stack[state->depth++]=binding;InterlockedIncrement(&binding->active);return (uint64_t)(uintptr_t)(internalArrayCopy?native_arraycopy_internal_target():binding->original);}
+    if(((binding->unsafeOperation||(binding->fileOperation&&binding->fileOperation!=10)||binding->threadOperation)&&state->control)||internalArrayCopy){if(!host_module_binding_enter(binding))return 0;state->entries[state->depth]=binding;state->stack[state->depth++]=binding;InterlockedIncrement(&binding->active);return (uint64_t)(uintptr_t)(internalArrayCopy?native_arraycopy_internal_target():binding->original);}
     if(binding->declared&&InterlockedCompareExchange(&binding->declared->stopped,0,0))return 0;
     // A stopped caller may finish an already sealed resource's original close.
     // The exact descriptor scope is checked by the file bridge before dispatch.
@@ -307,7 +307,7 @@ static void native_leave(Binding *binding,unsigned char *frame){
     if(binding->unsafeOperation||binding->fileOperation||binding->threadOperation){
         unsigned args=native_arguments(binding->signature),save=32+(args>4?(args-4)*8:0);JNIEnv *env;memcpy(&env,frame+save,sizeof(env));
         if(binding->unsafeOperation)native_unsafe_end(env,state,binding,frame);
-        if(binding->fileOperation)native_file_end(env,state);
+        if(binding->fileOperation)native_file_end(env,state,frame);
         if(binding->threadOperation)native_thread_finish(env,state,&state->threadFrames[state->depth-1],!native_original.ExceptionCheck(env));
     }
     state->depth--;Binding *active=state->stack[state->depth];InterlockedDecrement(&active->active);

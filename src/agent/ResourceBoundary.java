@@ -14,7 +14,8 @@ final class ResourceBoundary {
     static byte[] transform(ClassLoader loader,String name,byte[] bytes){
         if(loader==null&&CHARACTER_WRAPPERS.contains(name))return characterWrapper(loader,name,bytes);
         byte[] buffers=BufferBoundary.transform(loader,name,bytes);if(buffers!=null)return buffers;
-        byte[] io=IoBoundary.transform(loader,name,bytes);if(io!=null)return io;
+        byte[] io=IoBoundary.transform(loader,name,bytes);
+        if(io!=null)return name.equals("sun/nio/ch/FileDispatcherImpl")?fileDispatcher(loader,io):io;
         if(loader!=null||!TARGETS.contains(name))return null;
         ClassNode node=new ClassNode();new ClassReader(bytes).accept(node,0);boolean changed=false;
         if(name.equals("java/lang/ProcessImpl"))return process(loader,node);
@@ -96,6 +97,58 @@ final class ResourceBoundary {
     private static InsnList fileFinished(int token){
         InsnList code=new InsnList();code.add(new VarInsnNode(Opcodes.ALOAD,token));
         code.add(new MethodInsnNode(Opcodes.INVOKESTATIC,BRIDGE,"fileOperationFinished","(Ljava/lang/Object;)V",false));return code;
+    }
+    private static byte[] fileDispatcher(ClassLoader loader,byte[] bytes){
+        ClassNode node=new ClassNode();new ClassReader(bytes).accept(node,0);
+        MethodNode duplicate=node.methods.stream().filter(method->method.name.equals("duplicateForMapping")
+                &&method.desc.equals("(Ljava/io/FileDescriptor;)Ljava/io/FileDescriptor;")).findFirst().orElseThrow();
+        java.util.List<AbstractInsnNode> body=new java.util.ArrayList<>();
+        for(AbstractInsnNode at:duplicate.instructions.toArray())if(at.getOpcode()>=0)body.add(at);
+        String descriptor="java/io/FileDescriptor",access="jdk/internal/access/JavaIOFileDescriptorAccess";
+        boolean valid=(duplicate.access&(Opcodes.ACC_STATIC|Opcodes.ACC_NATIVE|Opcodes.ACC_ABSTRACT))==0
+                &&duplicate.tryCatchBlocks.isEmpty()&&body.size()==18
+                &&type(body.get(0),Opcodes.NEW,descriptor)&&body.get(1).getOpcode()==Opcodes.DUP
+                &&call(body.get(2),Opcodes.INVOKESPECIAL,descriptor,"<init>","()V")&&variable(body.get(3),Opcodes.ASTORE,2)
+                &&access(body.get(4),node.name,access)&&variable(body.get(5),Opcodes.ALOAD,1)
+                &&call(body.get(6),Opcodes.INVOKEINTERFACE,access,"getHandle","(Ljava/io/FileDescriptor;)J")
+                &&call(body.get(7),Opcodes.INVOKESTATIC,node.name,"duplicateHandle","(J)J")&&variable(body.get(8),Opcodes.LSTORE,3)
+                &&access(body.get(9),node.name,access)&&variable(body.get(10),Opcodes.ALOAD,2)&&variable(body.get(11),Opcodes.LLOAD,3)
+                &&call(body.get(12),Opcodes.INVOKEINTERFACE,access,"setHandle","(Ljava/io/FileDescriptor;J)V")
+                &&access(body.get(13),node.name,access)&&variable(body.get(14),Opcodes.ALOAD,2)
+                &&call(body.get(15),Opcodes.INVOKEINTERFACE,access,"registerCleanup","(Ljava/io/FileDescriptor;)V")
+                &&variable(body.get(16),Opcodes.ALOAD,2)&&body.get(17).getOpcode()==Opcodes.ARETURN;
+        if(!valid)throw new IllegalStateException("FILE_MAPPING_DUPLICATE_LAYOUT_UNAVAILABLE");
+        int token=duplicate.maxLocals++,failure=duplicate.maxLocals++;
+        LabelNode start=new LabelNode(),end=new LabelNode(),handler=new LabelNode();
+        InsnList entry=new InsnList();entry.add(new VarInsnNode(Opcodes.ALOAD,0));entry.add(new VarInsnNode(Opcodes.ALOAD,1));
+        entry.add(new MethodInsnNode(Opcodes.INVOKESTATIC,BRIDGE,"mappingDuplicateBegin","(Ljava/lang/Object;Ljava/io/FileDescriptor;)Ljava/lang/Object;",false));
+        entry.add(new VarInsnNode(Opcodes.ASTORE,token));entry.add(start);duplicate.instructions.insert(entry);
+        InsnList allocated=new InsnList();allocated.add(new VarInsnNode(Opcodes.ALOAD,token));allocated.add(new VarInsnNode(Opcodes.ALOAD,2));
+        allocated.add(new MethodInsnNode(Opcodes.INVOKESTATIC,BRIDGE,"mappingDuplicateAllocated","(Ljava/lang/Object;Ljava/io/FileDescriptor;)V",false));
+        duplicate.instructions.insert(body.get(3),allocated);
+        InsnList invoking=new InsnList();invoking.add(new InsnNode(Opcodes.DUP2));invoking.add(new VarInsnNode(Opcodes.LSTORE,3));
+        invoking.add(new VarInsnNode(Opcodes.ALOAD,token));invoking.add(new VarInsnNode(Opcodes.LLOAD,3));
+        invoking.add(new MethodInsnNode(Opcodes.INVOKESTATIC,BRIDGE,"mappingDuplicateCalling","(Ljava/lang/Object;J)V",false));
+        duplicate.instructions.insertBefore(body.get(7),invoking);
+        duplicate.instructions.insertBefore(body.get(17),mappingDuplicateExit(token,2,-1));
+        duplicate.instructions.add(end);duplicate.instructions.add(handler);duplicate.instructions.add(new VarInsnNode(Opcodes.ASTORE,failure));
+        duplicate.instructions.add(mappingDuplicateExit(token,-1,failure));duplicate.instructions.add(new VarInsnNode(Opcodes.ALOAD,failure));
+        duplicate.instructions.add(new InsnNode(Opcodes.ATHROW));
+        duplicate.tryCatchBlocks.add(new TryCatchBlockNode(start,end,handler,"java/lang/Throwable"));return write(loader,node);
+    }
+    private static boolean variable(AbstractInsnNode at,int opcode,int slot){return at instanceof VarInsnNode variable&&variable.getOpcode()==opcode&&variable.var==slot;}
+    private static boolean type(AbstractInsnNode at,int opcode,String name){return at instanceof TypeInsnNode type&&type.getOpcode()==opcode&&type.desc.equals(name);}
+    private static boolean call(AbstractInsnNode at,int opcode,String owner,String name,String descriptor){
+        return at instanceof MethodInsnNode call&&call.getOpcode()==opcode&&call.owner.equals(owner)&&call.name.equals(name)&&call.desc.equals(descriptor);
+    }
+    private static boolean access(AbstractInsnNode at,String owner,String type){
+        return at instanceof FieldInsnNode field&&field.getOpcode()==Opcodes.GETSTATIC&&field.owner.equals(owner)&&field.name.equals("fdAccess")&&field.desc.equals("L"+type+";");
+    }
+    private static InsnList mappingDuplicateExit(int token,int result,int failure){
+        InsnList code=new InsnList();code.add(new VarInsnNode(Opcodes.ALOAD,token));
+        code.add(result<0?new InsnNode(Opcodes.ACONST_NULL):new VarInsnNode(Opcodes.ALOAD,result));
+        code.add(failure<0?new InsnNode(Opcodes.ACONST_NULL):new VarInsnNode(Opcodes.ALOAD,failure));
+        code.add(new MethodInsnNode(Opcodes.INVOKESTATIC,BRIDGE,"mappingDuplicateExit","(Ljava/lang/Object;Ljava/io/FileDescriptor;Ljava/lang/Throwable;)V",false));return code;
     }
     private static byte[] fileFactory(ClassLoader loader,ClassNode node){
         boolean opened=false;

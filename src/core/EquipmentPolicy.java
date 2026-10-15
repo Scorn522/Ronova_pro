@@ -21,10 +21,17 @@ import net.minecraft.world.item.*;
 import net.minecraft.world.item.context.UseOnContext;
 import net.minecraft.world.item.context.BlockPlaceContext;
 import net.minecraft.world.level.Level;
+import net.minecraftforge.common.capabilities.CapabilityProvider;
+import net.minecraftforge.common.capabilities.CapabilityDispatcher;
+import net.minecraftforge.common.util.LazyOptional;
+import net.minecraftforge.fluids.capability.templates.FluidHandlerItemStack;
+import net.minecraftforge.fluids.capability.templates.FluidHandlerItemStackSimple;
+import net.minecraftforge.fluids.capability.wrappers.FluidBucketWrapper;
+import org.apache.commons.lang3.mutable.MutableObject;
 
 /** Current equipment shares, rather than a snapshot of items the body once held. */
 public final class EquipmentPolicy {
-    private enum Kind { BODY, GAME_MODE, INVENTORY, COMPARTMENTS, COMPARTMENT_ARRAY, EQUIPMENT_LIST, EQUIPMENT_BACKING, EQUIPMENT_ARRAY, CURATIVE_LIST, CURATIVE_ARRAY, STACK, NBT }
+    private enum Kind { BODY, GAME_MODE, INVENTORY, COMPARTMENTS, COMPARTMENT_ARRAY, EQUIPMENT_LIST, EQUIPMENT_BACKING, EQUIPMENT_ARRAY, CURATIVE_LIST, CURATIVE_ARRAY, STACK, NBT, CAPABILITY }
     private record Slot(Field field,long offset,int width) { }
     private static final class Owner {
         final WeakReference<LivingEntity> entity;final long generation;
@@ -118,13 +125,25 @@ public final class EquipmentPolicy {
     private static final Object INVOCATION_REFUSED=new Object();
     private static Map<Class<?>,List<Slot>> FIELDS;
     private static StackWalker WALKER;
-    private static Class<?> ARRAY_LIST,NODE,IMMUTABLE_LIST,IMMUTABLE_N,IMMUTABLE_12,SINGLETON_LIST,EMPTY_LIST;
-    private static Field IMMUTABLE_VALUES,IMMUTABLE_FIRST,IMMUTABLE_SECOND,SINGLETON_VALUE,GUAVA_VALUES;
+    private static Class<?> ARRAY_LIST,NODE,IMMUTABLE_LIST,IMMUTABLE_N,IMMUTABLE_12,SINGLETON_LIST,EMPTY_LIST,GUAVA_SINGLETON;
+    private static Field IMMUTABLE_VALUES,IMMUTABLE_FIRST,IMMUTABLE_SECOND,SINGLETON_VALUE,GUAVA_VALUES,GUAVA_ELEMENT;
     private static Object IMMUTABLE_EMPTY;
     private static Field ARRAY_VALUES,LIST_VALUES,LIST_SIZE,MAP_TABLE,NODE_NEXT,NODE_VALUE;
     private static Field INTERACT_ID,INTERACT_ACTION;private static Object ATTACK_ACTION;
     private static Field CONTEXT_PLAYER,CONTEXT_STACK;
     private static MethodHandle ACTION_SOURCE,ACTION_DELEGATE;
+    private static Class<?> UNMODIFIABLE_COLLECTION,UNMODIFIABLE_LIST,UNMODIFIABLE_RANDOM;
+    private static Field CAP_DISPATCHER,CAP_VALID,CAP_INITIALIZED,CAP_DATA;
+    private static Field DISPATCH_PROVIDERS,DISPATCH_WRITERS,DISPATCH_NAMES,DISPATCH_LISTENERS;
+    private static Field OPTIONAL_SUPPLIER,OPTIONAL_VALUE,OPTIONAL_LISTENERS,OPTIONAL_VALID,MUTABLE_VALUE,SET_MAP,UNMODIFIABLE_VALUES;
+    private static Map<Thread,CapabilityScope> CAP_SCOPES;
+    private static final class CapabilityScope {
+        final Object receiver,next,listeners;final String phase;final Class<?> anchor;final String method,descriptor;
+        final List<StackWalker.StackFrame> tail;final Thread thread=Thread.currentThread();final CapabilityScope previous;boolean closed;Object gate;
+        CapabilityScope(Object receiver,Object next,Object listeners,String phase,StackWalker.StackFrame entry,List<StackWalker.StackFrame> tail,CapabilityScope previous){
+            this.receiver=receiver;this.next=next;this.listeners=listeners;this.phase=phase;this.anchor=entry.getDeclaringClass();this.method=entry.getMethodName();this.descriptor=entry.getDescriptor();this.tail=tail;this.previous=previous;
+        }
+    }
     private static volatile int REFERENCE_WIDTH=8;
     private EquipmentPolicy(){ }
 
@@ -134,14 +153,23 @@ public final class EquipmentPolicy {
         NODE=Class.forName("java.util.HashMap$Node",false,null);
         Class<?> tree=Class.forName("java.util.HashMap$TreeNode",false,null);
         IMMUTABLE_LIST=Class.forName("com.google.common.collect.RegularImmutableList",false,EquipmentPolicy.class.getClassLoader());
+        GUAVA_SINGLETON=Class.forName("com.google.common.collect.SingletonImmutableList",false,EquipmentPolicy.class.getClassLoader());
         IMMUTABLE_N=Class.forName("java.util.ImmutableCollections$ListN",false,null);
         IMMUTABLE_12=Class.forName("java.util.ImmutableCollections$List12",false,null);
         SINGLETON_LIST=Class.forName("java.util.Collections$SingletonList",false,null);
         EMPTY_LIST=Class.forName("java.util.Collections$EmptyList",false,null);
+        UNMODIFIABLE_COLLECTION=Class.forName("java.util.Collections$UnmodifiableCollection",false,null);
+        UNMODIFIABLE_LIST=Class.forName("java.util.Collections$UnmodifiableList",false,null);
+        UNMODIFIABLE_RANDOM=Class.forName("java.util.Collections$UnmodifiableRandomAccessList",false,null);
         Class<?>[] carriers={Player.class,ServerPlayer.class,ServerPlayerGameMode.class,ServerboundInteractPacket.class,UseOnContext.class,Inventory.class,Mob.class,ArmorStand.class,NonNullList.class,ItemStack.class,
                 CompoundTag.class,ListTag.class,ByteArrayTag.class,IntArrayTag.class,LongArrayTag.class,
                 ByteTag.class,ShortTag.class,IntTag.class,LongTag.class,FloatTag.class,DoubleTag.class,StringTag.class,
-                HashMap.class,LinkedHashMap.class,ArrayList.class,ARRAY_LIST,NODE,tree,IMMUTABLE_LIST,IMMUTABLE_N,IMMUTABLE_12,SINGLETON_LIST,EMPTY_LIST};
+                HashMap.class,LinkedHashMap.class,ArrayList.class,ARRAY_LIST,NODE,tree,IMMUTABLE_LIST,IMMUTABLE_N,IMMUTABLE_12,SINGLETON_LIST,EMPTY_LIST,GUAVA_SINGLETON};
+        Class<?>[] capabilityCarriers={CapabilityProvider.class,CapabilityDispatcher.class,LazyOptional.class,MutableObject.class,HashSet.class,
+                UNMODIFIABLE_COLLECTION,UNMODIFIABLE_LIST,UNMODIFIABLE_RANDOM,FluidBucketWrapper.class,
+                FluidHandlerItemStack.class,FluidHandlerItemStack.Consumable.class,FluidHandlerItemStack.SwapEmpty.class,
+                FluidHandlerItemStackSimple.class,FluidHandlerItemStackSimple.Consumable.class,FluidHandlerItemStackSimple.SwapEmpty.class};
+        carriers=java.util.stream.Stream.concat(Arrays.stream(carriers),Arrays.stream(capabilityCarriers)).toArray(Class<?>[]::new);
         Class.forName("dev.ronova.pro.agent.RecoveryAgent",false,ClassLoader.getSystemClassLoader())
                 .getMethod("openBackingAccess",Class.class,Class[].class).invoke(null,EquipmentPolicy.class,(Object)carriers);
         Class<?> type=Class.forName("sun.misc.Unsafe",false,ClassLoader.getPlatformClassLoader());
@@ -161,18 +189,24 @@ public final class EquipmentPolicy {
         }
         ARRAY_VALUES=access(ARRAY_LIST,"a");LIST_VALUES=access(ArrayList.class,"elementData");LIST_SIZE=access(ArrayList.class,"size");
         IMMUTABLE_VALUES=access(IMMUTABLE_N,"elements");IMMUTABLE_FIRST=access(IMMUTABLE_12,"e0");IMMUTABLE_SECOND=access(IMMUTABLE_12,"e1");
-        SINGLETON_VALUE=access(SINGLETON_LIST,"element");GUAVA_VALUES=access(IMMUTABLE_LIST,"array");
+        SINGLETON_VALUE=access(SINGLETON_LIST,"element");GUAVA_VALUES=access(IMMUTABLE_LIST,"array");GUAVA_ELEMENT=access(GUAVA_SINGLETON,"element");
         IMMUTABLE_EMPTY=access(Class.forName("java.util.ImmutableCollections",false,null),"EMPTY").get(null);
         MAP_TABLE=access(HashMap.class,"table");NODE_NEXT=access(NODE,"next");NODE_VALUE=access(NODE,"value");
         INTERACT_ID=accessAny(ServerboundInteractPacket.class,"entityId","f_134030_");INTERACT_ACTION=accessAny(ServerboundInteractPacket.class,"action","f_134031_");
         ATTACK_ACTION=accessAny(ServerboundInteractPacket.class,"ATTACK_ACTION","f_179595_").get(null);
         CONTEXT_PLAYER=accessAny(UseOnContext.class,"player","f_43703_");CONTEXT_STACK=accessAny(UseOnContext.class,"itemStack","f_43707_");
+        CAP_DISPATCHER=access(CapabilityProvider.class,"capabilities");CAP_VALID=access(CapabilityProvider.class,"valid");CAP_INITIALIZED=access(CapabilityProvider.class,"initialized");
+        CAP_DATA=access(CapabilityProvider.class,"lazyData");
+        DISPATCH_PROVIDERS=access(CapabilityDispatcher.class,"caps");DISPATCH_WRITERS=access(CapabilityDispatcher.class,"writers");DISPATCH_NAMES=access(CapabilityDispatcher.class,"names");DISPATCH_LISTENERS=access(CapabilityDispatcher.class,"listeners");
+        OPTIONAL_SUPPLIER=access(LazyOptional.class,"supplier");OPTIONAL_VALUE=access(LazyOptional.class,"resolved");OPTIONAL_LISTENERS=access(LazyOptional.class,"listeners");OPTIONAL_VALID=access(LazyOptional.class,"isValid");
+        MUTABLE_VALUE=access(MutableObject.class,"value");SET_MAP=access(HashSet.class,"map");UNMODIFIABLE_VALUES=access(UNMODIFIABLE_COLLECTION,"c");
         Class<?> bridge=Class.forName("dev.ronova.pro.bootstrap.ControlBridge",false,null);
         ACTION_SOURCE=MethodHandles.publicLookup().findStatic(bridge,"equipmentActionSourceAllowed",MethodType.methodType(boolean.class));
         ACTION_DELEGATE=MethodHandles.publicLookup().findStatic(bridge,"equipmentActionSourceAllowed",MethodType.methodType(boolean.class,Class.class,Class.class));
         OWNERS=Collections.synchronizedMap(new WeakIdentityMap<>());CARRIERS=Collections.synchronizedMap(new WeakIdentityMap<>());
         SCOPES=Collections.synchronizedMap(new WeakIdentityMap<>());FIELDS=Map.copyOf(fields);
         MINING=Collections.synchronizedMap(new WeakIdentityMap<>());DRIVERS=Collections.synchronizedMap(new WeakIdentityMap<>());INVOCATIONS=Collections.synchronizedMap(new WeakIdentityMap<>());
+        CAP_SCOPES=Collections.synchronizedMap(new WeakIdentityMap<>());
         WALKER=StackWalker.getInstance(StackWalker.Option.RETAIN_CLASS_REFERENCE);initialized=true;
     }
     private static Field access(Class<?> type,String name)throws ReflectiveOperationException{Field field=type.getDeclaredField(name);field.setAccessible(true);return field;}
@@ -189,11 +223,17 @@ public final class EquipmentPolicy {
         if(type==ArmorStand.class)return names(name,"handItems","f_31538_","armorItems","f_31539_");
         if(type==NonNullList.class)return names(name,"list","f_122773_","defaultValue","f_122774_");
         if(type==ItemStack.class)return names(name,"count","f_41587_","item","f_41589_","tag","f_41590_","delegate","capNBT");
+        if(type==CapabilityProvider.class)return names(name,"baseClass","capabilities","valid","isLazy","lazyParentSupplier","lazyData","initialized");
+        if(type==CapabilityDispatcher.class||type==LazyOptional.class)return true;
+        if(type==MutableObject.class)return name.equals("value");
+        if(type==HashSet.class)return name.equals("map");
+        if(type==UNMODIFIABLE_COLLECTION||type==UNMODIFIABLE_LIST||type==UNMODIFIABLE_RANDOM)return true;
+        if(capabilityProviderType(type))return names(name,"holder","container","capacity","emptyContainer");
         if(type==HashMap.class)return Set.of("table","size","modCount","threshold","loadFactor").contains(name);
         if(type==LinkedHashMap.class)return Set.of("head","tail","accessOrder").contains(name);
         if(type==ArrayList.class)return names(name,"elementData","size");
         if(type==AbstractList.class)return name.equals("modCount");
-        if(type==ARRAY_LIST||type==IMMUTABLE_LIST||type==IMMUTABLE_N||type==IMMUTABLE_12||type==SINGLETON_LIST||type==EMPTY_LIST)return true;
+        if(type==ARRAY_LIST||type==IMMUTABLE_LIST||type==IMMUTABLE_N||type==IMMUTABLE_12||type==SINGLETON_LIST||type==EMPTY_LIST||type==GUAVA_SINGLETON)return true;
         return type.getPackageName().equals("net.minecraft.nbt")||NODE!=null&&NODE.isAssignableFrom(type);
     }
     private static List<Slot> slots(Object value){
@@ -266,6 +306,7 @@ public final class EquipmentPolicy {
             case CURATIVE_ARRAY -> LiveStatePolicy.curativeArrayCurrent(owner.entity.get(),owner.generation,value);
             case STACK -> stackCurrent(owner,link.stack.get())&&link.stack.get()==value;
             case NBT -> stackCurrent(owner,link.stack.get())&&walk(owner,link.stack.get(),value,false,null);
+            case CAPABILITY -> stackCurrent(owner,link.stack.get())&&capabilityWalk(owner,link.stack.get(),value,false,null);
         };}catch(ReflectiveOperationException failure){throw new IllegalStateException("EQUIPMENT_CURRENT_CARRIER_ACCESS",failure);}
     }
     private static boolean curativeStack(Owner owner,ItemStack stack){return LiveStatePolicy.curativeStackCurrent(owner.entity.get(),owner.generation,stack);}
@@ -312,11 +353,11 @@ public final class EquipmentPolicy {
             }
         }
     }
-    private static void captureStack(Owner owner,ItemStack stack){if(stack!=null&&stack!=ItemStack.EMPTY){link(owner,stack,Kind.STACK,-1,stack);walk(owner,stack,null,true,null);}}
+    private static void captureStack(Owner owner,ItemStack stack){if(stack!=null&&stack!=ItemStack.EMPTY){link(owner,stack,Kind.STACK,-1,stack);walk(owner,stack,null,true,null);capabilityWalk(owner,stack,null,true,null);}}
     record CurativeList(Object[] values,int size,boolean backed) { }
     static CurativeList knownCurativeLayout(Object list){
         if(!initialized||list==null)return null;Class<?> type=list.getClass();
-        return type==ArrayList.class||type==ARRAY_LIST||type==IMMUTABLE_LIST||type==IMMUTABLE_N||type==IMMUTABLE_12||type==SINGLETON_LIST||type==EMPTY_LIST?curativeLayout(list):null;
+        return type==ArrayList.class||type==ARRAY_LIST||type==IMMUTABLE_LIST||type==IMMUTABLE_N||type==IMMUTABLE_12||type==SINGLETON_LIST||type==EMPTY_LIST||type==GUAVA_SINGLETON?curativeLayout(list):null;
     }
     /** Use the same actual list storage and stack/NBT graph as equipped stacks. */
     static CurativeList curativeLayout(Object list){
@@ -329,6 +370,7 @@ public final class EquipmentPolicy {
             else if(list!=null&&list.getClass()==IMMUTABLE_LIST){values=GUAVA_VALUES.get(list);size=values instanceof Object[] array?array.length:-1;}
             else if(list!=null&&list.getClass()==IMMUTABLE_12){Object first=IMMUTABLE_FIRST.get(list),second=IMMUTABLE_SECOND.get(list);values=second==IMMUTABLE_EMPTY?new Object[]{first}:new Object[]{first,second};size=((Object[])values).length;backed=false;}
             else if(list!=null&&list.getClass()==SINGLETON_LIST){values=new Object[]{SINGLETON_VALUE.get(list)};size=1;backed=false;}
+            else if(list!=null&&list.getClass()==GUAVA_SINGLETON){values=new Object[]{GUAVA_ELEMENT.get(list)};size=1;backed=false;}
             else if(list!=null&&list.getClass()==EMPTY_LIST){values=new Object[0];size=0;backed=false;}
             else throw new IllegalStateException("CURATIVE_LIST_IMPLEMENTATION_UNRESOLVED:"+(list==null?"null":list.getClass().getName()));
             if(!(values instanceof Object[] array)||size<0||size>array.length||size>MAX_GRAPH)throw new IllegalStateException("CURATIVE_LIST_STORAGE_UNRESOLVED");
@@ -352,7 +394,8 @@ public final class EquipmentPolicy {
         Visit[] queue=new Visit[MAX_GRAPH];Object[] seen=new Object[MAX_GRAPH];int head=0,tail=0,count=0;
         Access.StackState state=(Access.StackState)(Object)stack;
         if(proposed!=null)queue[tail++]=new Visit(proposed,-1);
-        else{if(state.pro$tag()!=null)queue[tail++]=new Visit(state.pro$tag(),-1);if(state.pro$capNBT()!=null&&state.pro$capNBT()!=state.pro$tag())queue[tail++]=new Visit(state.pro$capNBT(),-1);}
+        else{if(state.pro$tag()!=null)queue[tail++]=new Visit(state.pro$tag(),-1);if(state.pro$capNBT()!=null&&state.pro$capNBT()!=state.pro$tag())queue[tail++]=new Visit(state.pro$capNBT(),-1);
+            try{Object lazy=CAP_DATA.get(stack);if(lazy!=null&&lazy!=state.pro$tag()&&lazy!=state.pro$capNBT())queue[tail++]=new Visit(lazy,-1);}catch(IllegalAccessException failure){throw new IllegalStateException("EQUIPMENT_CAPABILITY_DATA_ACCESS",failure);}}
         try{while(head<tail){
             Visit visit=queue[head++];Object value=visit.value;if(value==null||value==EndTag.INSTANCE)continue;
             boolean found=false;for(int i=0;i<count;i++)if(seen[i]==value){found=true;break;}if(found)continue;
@@ -376,6 +419,151 @@ public final class EquipmentPolicy {
             if(children!=null)for(Object child:children)if(child!=null){if(tail==MAX_GRAPH)throw new IllegalStateException("EQUIPMENT_NBT_GRAPH_CAPACITY");queue[tail++]=new Visit(child,limit);}
         }}catch(IllegalAccessException failure){throw new IllegalStateException("EQUIPMENT_NBT_STORAGE_ACCESS",failure);}
         return false;
+    }
+    private static boolean capabilityProviderType(Class<?> type){
+        return type==FluidBucketWrapper.class||type==FluidHandlerItemStack.class||type==FluidHandlerItemStack.Consumable.class||type==FluidHandlerItemStack.SwapEmpty.class
+                ||type==FluidHandlerItemStackSimple.class||type==FluidHandlerItemStackSimple.Consumable.class||type==FluidHandlerItemStackSimple.SwapEmpty.class;
+    }
+    /** Current standard storage only. Provider callbacks, suppliers and listener objects are leaves. */
+    private static boolean capabilityWalk(Owner owner,ItemStack stack,Object expected,boolean capture,Object proposed){
+        if(stack==null||stack==ItemStack.EMPTY)return false;
+        Visit[] queue=new Visit[MAX_GRAPH];Object[] seen=new Object[MAX_GRAPH];int head=0,tail=0,count=0;
+        try{
+            if(proposed!=null)queue[tail++]=new Visit(proposed,-1);
+            else if(CAP_INITIALIZED.getBoolean(stack)){Object dispatcher=CAP_DISPATCHER.get(stack);if(dispatcher!=null)queue[tail++]=new Visit(dispatcher,-1);}
+            while(head<tail){
+                Visit visit=queue[head++];Object value=visit.value;if(value==null||value==ItemStack.EMPTY)continue;Class<?> type=value.getClass();
+                boolean found=false;for(int at=0;at<count;at++)if(seen[at]==value){found=true;break;}if(found)continue;
+                if(count==MAX_GRAPH)throw new IllegalStateException("EQUIPMENT_CAPABILITY_GRAPH_CAPACITY");seen[count++]=value;
+                Object[] children=null;int limit=-1;
+                if(type==CapabilityDispatcher.class)children=new Object[]{DISPATCH_PROVIDERS.get(value),DISPATCH_WRITERS.get(value),DISPATCH_NAMES.get(value),DISPATCH_LISTENERS.get(value)};
+                else if(capabilityProviderType(type)){for(Slot slot:slots(value))if(slot.field.getType()==LazyOptional.class){children=new Object[]{slot.field.get(value)};break;}}
+                else if(type==LazyOptional.class){if(OPTIONAL_SUPPLIER.get(value)==null)continue;children=new Object[]{OPTIONAL_VALUE.get(value),OPTIONAL_LISTENERS.get(value)};}
+                else if(type==MutableObject.class)children=new Object[]{MUTABLE_VALUE.get(value)};
+                else if(type==HashSet.class)children=new Object[]{SET_MAP.get(value)};
+                else if(type==HashMap.class||type==LinkedHashMap.class)children=new Object[]{MAP_TABLE.get(value)};
+                else if(NODE.isInstance(value))children=new Object[]{NODE_VALUE.get(value),NODE_NEXT.get(value)};
+                else if(type==UNMODIFIABLE_COLLECTION||type==UNMODIFIABLE_LIST||type==UNMODIFIABLE_RANDOM)children=new Object[]{UNMODIFIABLE_VALUES.get(value)};
+                else if(type==ArrayList.class){children=new Object[]{LIST_VALUES.get(value)};limit=LIST_SIZE.getInt(value);}
+                else if(type==ARRAY_LIST){children=new Object[]{ARRAY_VALUES.get(value)};}
+                else if(knownCurativeLayout(value)!=null){CurativeList layout=curativeLayout(value);children=Arrays.copyOf(layout.values,layout.size);}
+                else if(value instanceof Object[] values){int end=visit.limit<0?values.length:visit.limit;if(end<0||end>values.length)throw new IllegalStateException("EQUIPMENT_CAPABILITY_ARRAY_SIZE");children=Arrays.copyOf(values,end);}
+                else continue;
+                if(value==expected)return true;
+                if(capture&&value!=stack)link(owner,value,Kind.CAPABILITY,-1,stack);
+                if(children!=null)for(Object child:children)if(child!=null){if(tail==MAX_GRAPH)throw new IllegalStateException("EQUIPMENT_CAPABILITY_GRAPH_CAPACITY");queue[tail++]=new Visit(child,limit);}
+            }
+        }catch(IllegalAccessException failure){throw new IllegalStateException("EQUIPMENT_CAPABILITY_STORAGE_ACCESS",failure);}
+        return false;
+    }
+    private static Object capRead(Field field,Object receiver){try{return field.get(receiver);}catch(IllegalAccessException failure){throw new IllegalStateException("EQUIPMENT_CAPABILITY_FIELD_ACCESS",failure);}}
+    private static boolean capBool(Field field,Object receiver){return Boolean.TRUE.equals(capRead(field,receiver));}
+    private static List<StackWalker.StackFrame> capabilityFrames(){return WALKER.walk(stream->stream.filter(frame->!infrastructure(frame.getDeclaringClass())).toList());}
+    private static boolean capabilityEntry(StackWalker.StackFrame frame,String phase){
+        Class<?> type=frame.getDeclaringClass();String name=frame.getMethodName(),descriptor=frame.getDescriptor();
+        return phase.equals("publish")&&type==CapabilityProvider.class&&name.equals("doGatherCapabilities")&&descriptor.equals("(Lnet/minecraftforge/common/capabilities/ICapabilityProvider;)V")
+                ||phase.equals("resolve")&&type==LazyOptional.class&&name.equals("getValue")&&descriptor.equals("()Ljava/lang/Object;")
+                ||phase.equals("listen-add")&&type==LazyOptional.class&&name.equals("addListener")&&descriptor.equals("(Lnet/minecraftforge/common/util/NonNullConsumer;)V")
+                ||phase.equals("listen-remove")&&type==LazyOptional.class&&name.equals("removeListener")&&descriptor.equals("(Lnet/minecraftforge/common/util/NonNullConsumer;)V")
+                ||phase.equals("invalidate-provider")&&type==CapabilityProvider.class&&name.equals("invalidateCaps")&&descriptor.equals("()V")
+                ||phase.equals("revive-provider")&&type==CapabilityProvider.class&&name.equals("reviveCaps")&&descriptor.equals("()V")
+                ||phase.equals("invalidate-dispatcher")&&type==CapabilityDispatcher.class&&name.equals("invalidate")&&descriptor.equals("()V")
+                ||phase.equals("invalidate-optional")&&type==LazyOptional.class&&name.equals("invalidate")&&descriptor.equals("()V");
+    }
+    private static boolean capabilityAnchor(CapabilityScope scope,boolean metadata){
+        if(scope.closed||scope.thread!=Thread.currentThread())return false;
+        var frames=capabilityFrames();int found=-1;
+        for(int at=0;at<frames.size();at++)if(sameAnchor(frames.get(at),scope.anchor,scope.method,scope.descriptor)){
+            if(found!=-1)return false;found=at;
+        }
+        if(found<0||frames.size()-found-1!=scope.tail.size())return false;
+        for(int at=0;at<scope.tail.size();at++){var left=scope.tail.get(at);var right=frames.get(found+1+at);
+            if(!sameAnchor(right,left.getDeclaringClass(),left.getMethodName(),left.getDescriptor())||right.getByteCodeIndex()!=left.getByteCodeIndex())return false;
+        }
+        if(metadata)for(int at=0;at<found;at++){
+            Class<?> type=frames.get(at).getDeclaringClass();
+            if(type!=HashSet.class&&type.getNestHost()!=HashMap.class&&type!=LazyOptional.class)return false;
+        }
+        return true;
+    }
+    /** Called only at the original body entry or after its supplier returned. */
+    public static Object capabilityEnter(Object receiver,Object next,String phase){
+        if(!initialized||receiver==null)return null;
+        List<Link> selected=new ArrayList<>();for(Link link:links(receiver))if((link.kind==Kind.STACK||link.kind==Kind.CAPABILITY)&&current(link,receiver))selected.add(link);
+        if(selected.isEmpty())return null;
+        var frames=capabilityFrames();if(frames.isEmpty()||!capabilityEntry(frames.get(0),phase)||!frames.get(0).getDeclaringClass().isInstance(receiver))throw new SecurityException("ACTUAL_EQUIPMENT_CAPABILITY_BODY_REQUIRED");
+        boolean publish=phase.equals("publish"),resolve=phase.equals("resolve"),listen=phase.startsWith("listen-");
+        Object listeners=receiver.getClass()==LazyOptional.class?capRead(OPTIONAL_LISTENERS,receiver):null;
+        CapabilityScope previous=CAP_SCOPES.get(Thread.currentThread());
+        for(CapabilityScope parent=previous;parent!=null;parent=parent.previous)if(parent.receiver==receiver&&parent.phase.equals(phase))throw new SecurityException("EQUIPMENT_CAPABILITY_REENTRY");
+        CapabilityScope scope=new CapabilityScope(receiver,next,listeners,phase,frames.get(0),List.copyOf(frames.subList(1,frames.size())),previous);
+        boolean installed=false;
+        try{
+            if(publish||resolve)scope.gate=ProRuntime.equipmentCapabilityGate(receiver);
+            if(publish){
+                if(!(receiver instanceof ItemStack)||capBool(CAP_INITIALIZED,receiver)||capRead(CAP_DISPATCHER,receiver)!=null||next!=null&&next.getClass()!=CapabilityDispatcher.class)
+                    throw new SecurityException("EQUIPMENT_CAPABILITY_INITIAL_PUBLICATION_REQUIRED");
+            }else if(resolve){
+                if(receiver.getClass()!=LazyOptional.class||!capBool(OPTIONAL_VALID,receiver)||capRead(OPTIONAL_VALUE,receiver)!=null||next==null||next.getClass()!=MutableObject.class)
+                    throw new SecurityException("EQUIPMENT_CAPABILITY_INITIAL_RESOLUTION_REQUIRED");
+                Object value=capRead(MUTABLE_VALUE,next);if(value==null||!capabilityProviderType(value.getClass()))throw new SecurityException("EQUIPMENT_CAPABILITY_STANDARD_HOLDER_REQUIRED");
+                boolean holder=false;for(Slot slot:slots(value))if(slot.field.getType()==LazyOptional.class&&capRead(slot.field,value)==receiver)holder=true;
+                if(!holder)throw new SecurityException("EQUIPMENT_CAPABILITY_STANDARD_HOLDER_REQUIRED");
+                for(Link link:selected)if(!capabilityWalk(link.owner,link.stack.get(),value,false,null))throw new SecurityException("EQUIPMENT_CAPABILITY_CURRENT_HOLDER_REQUIRED");
+            }else if(listen){
+                if(receiver.getClass()!=LazyOptional.class||listeners==null||listeners.getClass()!=HashSet.class)
+                    throw new SecurityException("EQUIPMENT_CAPABILITY_LISTENER_STORAGE_UNRESOLVED");
+                Object map=capRead(SET_MAP,listeners);if(map==null||map.getClass()!=HashMap.class)throw new SecurityException("EQUIPMENT_CAPABILITY_LISTENER_STORAGE_UNRESOLVED");
+                for(Link link:selected)if(!permitStack(link,false))throw new SecurityException("EQUIPMENT_CAPABILITY_WRITE_REJECTED");
+            }else for(Link link:selected)if(!permitStack(link,false))throw new SecurityException("EQUIPMENT_CAPABILITY_WRITE_REJECTED");
+            if(listeners!=null)for(Link link:links(listeners))if(current(link,listeners)&&!capabilityWalk(link.owner,link.stack.get(),receiver,false,null))
+                throw new SecurityException("EQUIPMENT_CAPABILITY_SHARED_LISTENERS_REJECTED");
+            CAP_SCOPES.put(Thread.currentThread(),scope);installed=true;return scope;
+        }finally{if(!installed&&scope.gate!=null)capabilityGateExit(scope);}
+    }
+    private static void capabilityGateExit(CapabilityScope scope){
+        Object gate=scope.gate;scope.gate=null;if(gate!=null)ProRuntime.equipmentCapabilityGateExit(gate);
+    }
+    public static void capabilityExit(Object token){closeCapability(token,true);}
+    private static void closeCapability(Object token,boolean success){
+        if(!(token instanceof CapabilityScope scope)||scope.closed)return;
+        if(scope.thread!=Thread.currentThread()||CAP_SCOPES.get(Thread.currentThread())!=scope)throw new IllegalMonitorStateException("EQUIPMENT_CAPABILITY_SCOPE_ORDER");
+        try{
+            if(success&&(scope.phase.equals("publish")&&(!capBool(CAP_INITIALIZED,scope.receiver)||capRead(CAP_DISPATCHER,scope.receiver)!=scope.next)
+                    ||scope.phase.equals("resolve")&&capRead(OPTIONAL_VALUE,scope.receiver)!=scope.next))throw new SecurityException("EQUIPMENT_CAPABILITY_PUBLICATION_WITHHELD");
+            for(Link link:links(scope.receiver))if(current(link,scope.receiver)){ItemStack stack=link.stack.get();if(stack!=null){walk(link.owner,stack,null,true,null);capabilityWalk(link.owner,stack,null,true,null);}}
+        }finally{scope.closed=true;if(scope.previous==null)CAP_SCOPES.remove(Thread.currentThread());else CAP_SCOPES.put(Thread.currentThread(),scope.previous);capabilityGateExit(scope);}
+    }
+    public static void capabilityFailed(Object token,Throwable failure){try{closeCapability(token,false);}catch(RuntimeException|Error cleanup){if(cleanup!=failure)failure.addSuppressed(cleanup);}}
+    private static boolean listenerCarrier(CapabilityScope scope,Object target){
+        Object set=scope.listeners;if(set==null||set.getClass()!=HashSet.class)return false;Object map=capRead(SET_MAP,set);if(map==null||map.getClass()!=HashMap.class)return false;
+        if(target==set||target==map)return true;Object table=capRead(MAP_TABLE,map);if(target==table)return true;
+        if(table instanceof Object[] heads){int count=0;for(Object node:heads)while(node!=null&&NODE.isInstance(node)&&count++<MAX_GRAPH){if(node==target)return true;node=capRead(NODE_NEXT,node);}}
+        return false;
+    }
+    private static boolean capabilityListeners(Link link,Object target){
+        CapabilityScope scope=CAP_SCOPES.get(Thread.currentThread());
+        return scope!=null&&(scope.phase.startsWith("listen-")||scope.phase.equals("invalidate-optional"))&&capabilityAnchor(scope,true)
+                &&capabilityWalk(link.owner,link.stack.get(),scope.receiver,false,null)&&listenerCarrier(scope,target);
+    }
+    /** null means this is ordinary stack/NBT data rather than capability metadata. */
+    private static Boolean capabilityField(Link link,Object receiver,Field field,Object next){
+        CapabilityScope scope=CAP_SCOPES.get(Thread.currentThread());Class<?> declaring=field.getDeclaringClass();
+        if(scope!=null&&scope.receiver==receiver&&capabilityAnchor(scope,true)){
+            if(scope.phase.equals("publish")){
+                if(field.equals(CAP_DISPATCHER)&&next==scope.next&&!capBool(CAP_INITIALIZED,receiver)&&capRead(CAP_DISPATCHER,receiver)==null)return true;
+                if(field.equals(CAP_INITIALIZED)&&Boolean.TRUE.equals(next)&&!capBool(CAP_INITIALIZED,receiver)&&capRead(CAP_DISPATCHER,receiver)==scope.next)return true;
+            }
+            if(scope.phase.equals("resolve")&&field.equals(OPTIONAL_VALUE)&&next==scope.next&&capRead(OPTIONAL_VALUE,receiver)==null)return true;
+            if((scope.phase.equals("invalidate-provider")||scope.phase.equals("revive-provider"))&&field.equals(CAP_VALID))return Objects.equals(next,scope.phase.equals("revive-provider"));
+            if(scope.phase.equals("invalidate-optional")&&field.equals(OPTIONAL_VALID))return Boolean.FALSE.equals(next);
+        }
+        if(capabilityListeners(link,receiver))return declaring!=HashSet.class;
+        if(declaring==CapabilityProvider.class){if(field.equals(CAP_DATA))return permitStack(link,false);return false;}
+        if(declaring==CapabilityDispatcher.class||declaring==LazyOptional.class||declaring==MutableObject.class||declaring==HashSet.class
+                ||declaring==UNMODIFIABLE_COLLECTION||declaring==UNMODIFIABLE_LIST||declaring==UNMODIFIABLE_RANDOM)return false;
+        if(capabilityProviderType(declaring))return !field.getType().equals(LazyOptional.class)&&permitStack(link,false);
+        return null;
     }
     private static boolean sourceAllowed(){try{return (boolean)ACTION_SOURCE.invokeExact();}catch(Throwable failure){throw new IllegalStateException("EQUIPMENT_ACTION_SOURCE_UNAVAILABLE",failure);}}
     private static boolean sourceAllowed(Class<?> game,Class<?> item){try{return (boolean)ACTION_DELEGATE.invokeExact(game,item);}catch(Throwable failure){throw new IllegalStateException("EQUIPMENT_DELEGATE_SOURCE_UNAVAILABLE",failure);}}
@@ -800,6 +988,10 @@ public final class EquipmentPolicy {
         }
         if(ServerPlayerGameMode.class.isAssignableFrom(type))return invocationFrame(frame,scope,false)||type==ServerPlayerGameMode.class&&named(frame,"incrementDestroyProgress","m_9276_","destroyAndAck","m_215116_");
         if(ownedNbtRedirect(frame))return true;
+        if(type==CapabilityProvider.class)return names(name,"invalidateCaps","reviveCaps","deserializeCaps","getCapabilities","doGatherCapabilities","gatherCapabilities");
+        if(type==CapabilityDispatcher.class)return names(name,"invalidate","deserializeNBT","getCapability");
+        if(type==LazyOptional.class)return names(name,"invalidate","addListener","removeListener");
+        if(capabilityProviderType(type))return names(name,"fill","drain","setFluid","setContainerToEmpty");
         if(!vanilla(frame)){
             if(type==net.minecraftforge.common.extensions.IForgeItem.class)return invocationFrame(frame,scope,true);
             if(type==net.minecraftforge.common.extensions.IForgeItemStack.class)return names(name,"onBlockStartBreak")&&frame.getDescriptor().equals("(Lnet/minecraft/core/BlockPos;Lnet/minecraft/world/entity/player/Player;)Z");
@@ -941,6 +1133,7 @@ public final class EquipmentPolicy {
     static boolean elementDenied(Object container,Object old,Object next){
         if(old==next&&old!=null)return false;
         for(Link link:links(container))if(current(link,container)){
+            if(link.kind==Kind.CAPABILITY){if(!capabilityListeners(link,container))return true;if(next!=null)capabilityWalk(link.owner,link.stack.get(),null,true,next);continue;}
             if(link.kind==Kind.CURATIVE_LIST||link.kind==Kind.CURATIVE_ARRAY)return true;
             if(link.kind==Kind.NBT){if(!permitStack(link,false))return true;cancelToolMining(link);if(next!=null)walk(link.owner,link.stack.get(),null,true,next);}
             else if(link.kind==Kind.COMPARTMENTS||link.kind==Kind.COMPARTMENT_ARRAY)return true;
@@ -962,6 +1155,17 @@ public final class EquipmentPolicy {
         Object old;try{old=selected.field.get(receiver);}catch(IllegalAccessException failure){throw new IllegalStateException("EQUIPMENT_FIELD_READ",failure);}
         if(selected.field.getType().isPrimitive()?Objects.equals(old,next):old==next)return false;
         for(Link link:links(receiver))if(current(link,receiver)){
+            if(link.kind==Kind.STACK||link.kind==Kind.CAPABILITY){
+                Boolean capability=capabilityField(link,receiver,selected.field,next);
+                if(capability!=null){
+                    if(!capability)return true;
+                    if(next!=null&&!selected.field.getType().isPrimitive())capabilityWalk(link.owner,link.stack.get(),null,true,next);
+                    if(next instanceof Tag)walk(link.owner,link.stack.get(),null,true,next);
+                    if(capabilityProviderType(selected.field.getDeclaringClass())||selected.field.equals(CAP_DATA))cancelToolMining(link);
+                    continue;
+                }
+                if(link.kind==Kind.CAPABILITY)return true;
+            }
             if(link.kind==Kind.CURATIVE_LIST)return true;
             if(link.kind==Kind.GAME_MODE){if(gameFieldDenied(link.owner,(ServerPlayerGameMode)receiver,name,next))return true;continue;}
             if(link.kind==Kind.BODY||link.kind==Kind.INVENTORY||link.kind==Kind.EQUIPMENT_LIST||link.kind==Kind.EQUIPMENT_BACKING||link.kind==Kind.COMPARTMENTS){if(structureFieldDenied(link,declaring,name,next))return true;continue;}
@@ -1052,6 +1256,7 @@ public final class EquipmentPolicy {
         if(!initialized||receiver==null||length<=0)return false;
         if(receiver.getClass().isArray()){
             for(Link link:links(receiver))if(current(link,receiver)){
+                if(link.kind==Kind.CAPABILITY){if(!capabilityListeners(link,receiver))return true;continue;}
                 if(link.kind==Kind.EQUIPMENT_ARRAY||link.kind==Kind.COMPARTMENT_ARRAY||link.kind==Kind.CURATIVE_ARRAY)return true;
                 if(link.kind==Kind.NBT){if(!permitStack(link,false))return true;cancelToolMining(link);}
             }return false;

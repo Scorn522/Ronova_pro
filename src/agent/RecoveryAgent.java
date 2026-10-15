@@ -91,7 +91,7 @@ public final class RecoveryAgent {
             bootstrap=new JarFile(Path.of(argument).toAbsolutePath().normalize().toFile());
             api.appendToBootstrapClassLoaderSearch(bootstrap);
             bridge=Class.forName("dev.ronova.pro.bootstrap.TaskBridge",true,null);
-            if(!Integer.valueOf(82).equals(bridge.getMethod("abiVersion").invoke(null)))throw new IllegalStateException("TASK_BRIDGE_ABI_MISMATCH");
+            if(!Integer.valueOf(83).equals(bridge.getMethod("abiVersion").invoke(null)))throw new IllegalStateException("TASK_BRIDGE_ABI_MISMATCH");
             Class.forName("dev.ronova.pro.bootstrap.SourceMapBridge",true,null);
             // Default-Map guards test UUID keys while class-loading maps are
             // active. Resolve that type before publishing the guarded methods.
@@ -133,7 +133,7 @@ public final class RecoveryAgent {
             Class.forName("dev.ronova.pro.bootstrap.ControlBridge$ProducerFrame",false,null);
             Class.forName("dev.ronova.pro.bootstrap.EventFaultBridge",true,null);
             Class<?> control=Class.forName("dev.ronova.pro.bootstrap.ControlBridge",true,null);
-            if(!Integer.valueOf(82).equals(control.getMethod("abiVersion").invoke(null)))throw new IllegalStateException("CONTROL_BRIDGE_ABI_MISMATCH");
+            if(!Integer.valueOf(83).equals(control.getMethod("abiVersion").invoke(null)))throw new IllegalStateException("CONTROL_BRIDGE_ABI_MISMATCH");
             Module base=Object.class.getModule(),ours=RecoveryAgent.class.getModule();
             api.redefineModule(base,Set.of(bridge.getModule()),Map.of(
                     "jdk.internal.org.objectweb.asm",Set.of(ours),"jdk.internal.org.objectweb.asm.commons",Set.of(ours),
@@ -150,6 +150,8 @@ public final class RecoveryAgent {
             Class.forName("dev.ronova.pro.bootstrap.ResourceBridge$BufferPlatform",true,null);
             Class.forName("dev.ronova.pro.bootstrap.ResourceBridge$CharacterWrappers",true,null);
             Class.forName("dev.ronova.pro.bootstrap.ResourceBridge$WrapperRecord",true,null);
+            Class.forName("dev.ronova.pro.bootstrap.ResourceBridge$MappingDuplicate",true,null);
+            Class.forName("dev.ronova.pro.bootstrap.ResourceBridge$MappingDuplicateNative",true,null);
             Class.forName("dev.ronova.pro.bootstrap.IoBridge",true,null);
             // Resolve the observed field-write and completed-result dependencies
             // before Native/JDK hooks can encounter their own class bytes.

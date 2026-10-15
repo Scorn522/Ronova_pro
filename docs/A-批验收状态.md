@@ -1,5 +1,23 @@
 # Ronova Pro 当前进度
 
+## 2026-10-15：C 接续——文件副本与能力容器
+
+接续已推送的 `426c1b5`，Java ABI83 / Native ABI76 / Storage3 / Journal6，协议仍为 `r3-client-8`。继续写齐两个明确缺口后才统一构建；自身外观、武器注册、驱动部署仍不做。
+
+实际 Windows JDK `duplicateForMapping → duplicateHandle(J)J → 新 FileDescriptor 发布` 现已接齐。保留原 IoBoundary，按实际父描述符和 handle、同一次原方法/当前 VM 版本及栈层接入 op10，原来源、停组、owner、host 和字段门不绕过。实际 JNI 返回寄存器先进入本次自有元数据，再执行原 setHandle/registerCleanup；只有同一新目标、真实返回及 FileCleanable.referent/fd/handle 一致才完成分配和来源登记。此入口也取得实际 NativeFileFrame，不漏过 controller 内部调用。
+
+原生成功后 Java 发布失败的副本在进入 native 前已有强 pending 位置和未分配的 DescriptorRecord，正常发布后移除；异常保留本次实际返回、父/目标、来源和版本，正常/异常 finally 均关闭原 FileOperation。RecoverySources 的现有 remaining/retireGroup 能枚举该事实，仅已按原规则选中的准确目标才进原异步 retire/release。handle 未安装、目标/清理关联改变、共享或未知来源继续 pending，不凭 long 制造描述符或关闭资格。
+
+当前装备/curative ItemStack 的标准 CapabilityProvider、已初始化 CapabilityDispatcher、caps/writers/names 数组与实际监听集合接入原字段、数组、offset 和 memory 门。有限标准 provider 为本机 Forge FluidBucketWrapper、FluidHandlerItemStack/Simple 及其 Consumable/SwapEmpty，按其真实 holder/容器字段继续追踪非 EMPTY LazyOptional、MutableObject 与 HashSet/HashMap backing，pending lazyData 也接原 NBT 图。关系逐当前 owner 复查，脱链解除，共享 owner 分别核对。Guava 单元素 SingletonImmutableList 的实际 element 也补齐，临时读取视图不冒充 backing。
+
+原 doGatherCapabilities 和 LazyOptional.getValue 只在供应者回调返回后的实际字段发布段持原 target FieldPolicyGate；不跨回调持锁，正常/异常关闭。listener/lifecycle 接续沿现有实际装备动作许可，不给未知回调泛用写权。任意 provider 私有 payload、未知可执行 supplier/listener 内部状态与非上述标准实现仍未覆盖，不把元数据图等同完整能力行为。
+
+统一构建 **PASS，58秒**，21项任务中16项执行、5项保持最新，包含 Java83 与 Native76 实际编译链接。复用 AuditFixCheck 只检查本批实际 JDK FileDispatcherImpl 及三个 Forge 类的当前织入，**退出0、RESOURCE_BYTECODE_VERIFY_PASS、CAPABILITY_BYTECODE_VERIFY_PASS**；Forge 仅 COMPUTE_MAXS 保留实际 frame。没有重跑已通过的 Netty/世界表或启动游戏；本批真实映射复制/失败清理、能力使用/失效与停组行为 **NOTRUN**。上一批 Native75 的预启动中止仍按原记录保留，不能代称当前运行通过。
+
+匹配候选为 `distribution/candidate-c-java83-native76-io-capability-wip-20261015`，Core2774289、prelaunch23309字节；源码、匹配 JAR 和原摘要直接同步 GitHub。未生成源码 ZIP，未安装/加载驱动，完整 C/B 未宣称完成。
+
+---
+
 ## 2026-10-15：C 接续——删除搬移、标准队列与 socket 创建
 
 接续 `563ddfb`，Java ABI82 / Native ABI75 / Storage3 / Journal6，协议 `r3-client-8`。三个 6.1 Sol max 子代理分别完成世界表、网络队列和 Native 入口；主线程接齐解药载体及版本，整包源码写齐后才统一构建。自身外观和武器注册继续暂缓。

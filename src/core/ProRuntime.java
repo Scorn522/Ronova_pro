@@ -550,6 +550,14 @@ public final class ProRuntime implements AutoCloseable {
     static <T> T withBlockIndexGate(Object container,java.util.function.Supplier<T> action) {
         try(var gate=FieldPolicyGate.enter(container)) {return action.get();}
     }
+    static Object equipmentCapabilityGate(Object receiver){
+        if(LIFECYCLE_WALKER.getCallerClass()!=EquipmentPolicy.class)throw new SecurityException("ACTUAL_EQUIPMENT_CAPABILITY_POLICY_REQUIRED");
+        return FieldPolicyGate.enter(receiver);
+    }
+    static void equipmentCapabilityGateExit(Object token){
+        if(LIFECYCLE_WALKER.getCallerClass()!=EquipmentPolicy.class)throw new SecurityException("ACTUAL_EQUIPMENT_CAPABILITY_POLICY_REQUIRED");
+        ((FieldPolicyGate)token).close();
+    }
     /** Public request methods are command entrypoints, not an authority granted to every in-process mod. */
     private void commandAction() {
         thread();
@@ -2850,7 +2858,7 @@ public final class ProRuntime implements AutoCloseable {
             EquipmentPolicy.initialize();
             WorldStatePolicy.initialize();
             Class<?> bridge=Class.forName("dev.ronova.pro.bootstrap.TaskBridge",false,null);
-            if(!Integer.valueOf(82).equals(bridge.getMethod("abiVersion").invoke(null)))throw new IllegalStateException("INDEX_BRIDGE_ABI_MISMATCH");
+            if(!Integer.valueOf(83).equals(bridge.getMethod("abiVersion").invoke(null)))throw new IllegalStateException("INDEX_BRIDGE_ABI_MISMATCH");
             var lookup=java.lang.invoke.MethodHandles.lookup();
             var field=lookup.findStatic(ProRuntime.class,"preventFieldWrite",java.lang.invoke.MethodType.methodType(boolean.class,Object.class,Class.class,String.class,Object.class));
             var dispatch=lookup.findStatic(ProRuntime.class,"preventDispatch",java.lang.invoke.MethodType.methodType(boolean.class,Object.class,String.class,Object.class));

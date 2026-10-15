@@ -33,6 +33,8 @@ public final class ResourceBridge {
     private static final HashMap<Key,BufferStorage> BUFFER_ACTIONS=new HashMap<>(),BUFFER_CLEANERS=new HashMap<>();
     private static final ThreadLocal<BufferOperation> BUFFER_OPERATIONS=new ThreadLocal<>();
     private static final ThreadLocal<FileOperation> FILE_OPERATIONS=new ThreadLocal<>();
+    private static final ThreadLocal<MappingDuplicate> MAPPING_DUPLICATING=new ThreadLocal<>();
+    private static final IdentityHashMap<FileDescriptor,MappingDuplicateNative> MAPPING_DUPLICATE_PENDING=new IdentityHashMap<>();
     private static final ThreadLocal<BufferStorage> BUFFER_CLEANING=new ThreadLocal<>();
     private static final ThreadLocal<BufferAllocation> BUFFER_ALLOCATING=new ThreadLocal<>();
     private static final ThreadLocal<BufferWrapScope> BUFFER_WRAPPING=new ThreadLocal<>();
@@ -56,6 +58,7 @@ public final class ResourceBridge {
     private static final Class<?> PIPE_REDIRECT=platformType("java.lang.ProcessBuilder$RedirectPipeImpl");
     private static final Class<?> FILE_CHANNEL=platformType("sun.nio.ch.FileChannelImpl"),FILE_CLOSER=platformType("sun.nio.ch.FileChannelImpl$Closer");
     private static final Class<?> FILE_FACTORY=optionalPlatformType("sun.nio.fs.WindowsChannelFactory"),SOCKET_NET=platformType("sun.nio.ch.Net");
+    private static final Class<?> FILE_DISPATCHER=platformType("sun.nio.ch.FileDispatcherImpl"),FILE_CLEANABLE=platformType("java.io.FileCleanable"),FD_ACCESS=platformType("java.io.FileDescriptor$1");
     private static final Field CHANNEL_FD=field(FILE_CHANNEL,"fd"),CHANNEL_PARENT=field(FILE_CHANNEL,"parent"),CHANNEL_PATH=field(FILE_CHANNEL,"path"),CHANNEL_CLOSER=field(FILE_CHANNEL,"closer");
     private static final Field CLOSER_FD=field(FILE_CLOSER,"fd");
     private static final class BufferPlatform {
@@ -115,6 +118,8 @@ public final class ResourceBridge {
     };
     private static final Field FD_NUMBER=field(FileDescriptor.class,"fd"),FD_HANDLE=field(FileDescriptor.class,"handle");
     private static final Field FD_CLOSED=field(FileDescriptor.class,"closed"),FD_PARENT=field(FileDescriptor.class,"parent"),FD_PEERS=field(FileDescriptor.class,"otherParents");
+    private static final Field FD_CLEANUP=field(FileDescriptor.class,"cleanup"),CLEANABLE_HANDLE=field(FILE_CLEANABLE,"handle"),CLEANABLE_NUMBER=field(FILE_CLEANABLE,"fd"),CLEANABLE_REFERENT=field(Reference.class,"referent");
+    private static final Field DISPATCHER_FD_ACCESS=field(FILE_DISPATCHER,"fdAccess");
     private static final ThreadPoolExecutor CLOSER=new ThreadPoolExecutor(0,2,10,TimeUnit.SECONDS,
             new ArrayBlockingQueue<>(64),work->{Thread thread=new Thread(work);thread.setDaemon(true);return thread;},new ThreadPoolExecutor.AbortPolicy());
     private static final class Key extends WeakReference<Object> {
@@ -409,6 +414,21 @@ public final class ResourceBridge {
         final Thread caller=Thread.currentThread();
         final FileOperation source,target;
         NativeFilePair(FileOperation source,FileOperation target){this.source=source;this.target=target;}
+    }
+    /** Only one actual duplicateForMapping frame may consume its captured parent. */
+    private static final class MappingDuplicate {
+        final Thread caller=Thread.currentThread();final MappingDuplicate previous=MAPPING_DUPLICATING.get();
+        final Object dispatcher;final FileDescriptor parent;final FileOperation operation;final Module[] sources;
+        final long handle;final long[] frame;
+        FileDescriptor target;MappingDuplicateNative nativeCall;int phase;boolean published;volatile boolean closed;
+        MappingDuplicate(Object dispatcher,FileDescriptor parent,FileOperation operation,Module[] sources,long handle,long[] frame){
+            this.dispatcher=dispatcher;this.parent=parent;this.operation=operation;this.sources=sources;this.handle=handle;this.frame=frame;
+        }
+    }
+    private static final class MappingDuplicateNative {
+        final MappingDuplicate scope;final FileOperation operation;final Module[] sources;
+        volatile long returned;volatile boolean nativeSucceeded;boolean completed,closed;
+        MappingDuplicateNative(MappingDuplicate scope,FileOperation operation,Module[] sources){this.scope=scope;this.operation=operation;this.sources=sources;}
     }
     private record DescriptorView(FileDescriptor descriptor,List<Object> streams,List<Object> channels,boolean allocated) { }
     static {
@@ -719,6 +739,163 @@ public final class ResourceBridge {
         if(declaring!=FILE_CHANNEL&&!LAYOUTS.containsKey(declaring))throw new SecurityException("ACTUAL_FILE_OPERATION_REQUIRED");
         return fileOperation(value,declaring,method,null);
     }
+    public static Object mappingDuplicateBegin(Object dispatcher,FileDescriptor parent)throws IOException {
+        if(dispatcher==null||dispatcher.getClass()!=FILE_DISPATCHER||parent==null)throw new IOException("MAPPING_DUPLICATE_PARENT_REQUIRED");
+        long[] frame=new long[5];
+        if(!NativeControl.mappingDuplicateFrame(frame,0))throw new IOException("MAPPING_DUPLICATE_ORIGINAL_FRAME_REQUIRED");
+        if(!ControlBridge.taskEffectAllowed(parent,"file-duplicate"))throw new ClosedChannelException();
+        FileOperation operation=null;
+        try{
+            long handle;
+            synchronized(parent){handle=FD_HANDLE.getLong(parent);if(handle==-1||FD_CLOSED.getBoolean(parent))throw new ClosedChannelException();}
+            operation=(FileOperation)fileOperation(parent,FILE_DISPATCHER,"duplicateForMapping",null);
+            Module[] sources=operation==null?ControlBridge.resourceOperationSources(null):operation.sources;
+            MappingDuplicate scope=new MappingDuplicate(dispatcher,parent,operation,sources,handle,frame);
+            mappingDuplicateParent(scope);
+            CodeSourceBridge.resourceLayoutControls(scope);CodeSourceBridge.resourceLayoutControls(frame);CodeSourceBridge.resourceLayoutControls(sources);
+            CodeSourceBridge.resourceLayoutControls(MAPPING_DUPLICATE_PENDING);
+            MAPPING_DUPLICATING.set(scope);return scope;
+        }catch(IllegalAccessException failure){
+            IOException unavailable=new IOException("MAPPING_DUPLICATE_PARENT_UNAVAILABLE",failure);
+            try{if(operation!=null)finishFileOperation(operation);}catch(RuntimeException|Error cleanup){unavailable.addSuppressed(cleanup);}throw unavailable;
+        }catch(IOException|RuntimeException|Error failure){
+            try{if(operation!=null)finishFileOperation(operation);}catch(RuntimeException|Error cleanup){if(cleanup!=failure)failure.addSuppressed(cleanup);}throw failure;
+        }
+    }
+    private static MappingDuplicate mappingDuplicate(Object value)throws IOException {
+        if(!(value instanceof MappingDuplicate scope)||scope.caller!=Thread.currentThread()||scope.closed||MAPPING_DUPLICATING.get()!=scope)
+            throw new IOException("MAPPING_DUPLICATE_SCOPE_REQUIRED");
+        return scope;
+    }
+    private static void mappingDuplicateParent(MappingDuplicate scope)throws IllegalAccessException,IOException {
+        Object access=DISPATCHER_FD_ACCESS.get(null);
+        if(access==null||access.getClass()!=FD_ACCESS)throw new IOException("MAPPING_DUPLICATE_ORIGINAL_ACCESSOR_REQUIRED");
+        synchronized(scope.parent){
+            if(FD_HANDLE.getLong(scope.parent)!=scope.handle||FD_CLOSED.getBoolean(scope.parent))throw new IOException("MAPPING_DUPLICATE_PARENT_CHANGED");
+        }
+        synchronized(STREAMS){FileRecord record=fileRecord(scope.parent);if(record!=null&&record.sealed)throw new ClosedChannelException();}
+    }
+    private static boolean mappingDuplicateFresh(FileDescriptor target)throws IllegalAccessException {
+        return FD_HANDLE.getLong(target)==-1&&FD_NUMBER.getInt(target)==-1&&!FD_CLOSED.getBoolean(target)
+                &&FD_PARENT.get(target)==null&&FD_PEERS.get(target)==null&&FD_CLEANUP.get(target)==null;
+    }
+    public static void mappingDuplicateAllocated(Object value,FileDescriptor target)throws IOException {
+        MappingDuplicate scope=mappingDuplicate(value);
+        if(scope.phase!=0||target==null||target==scope.parent||!NativeControl.mappingDuplicateFrame(scope.frame,2))
+            throw new IOException("MAPPING_DUPLICATE_NEW_DESCRIPTOR_REQUIRED");
+        try{
+            synchronized(target){if(!mappingDuplicateFresh(target))throw new IOException("MAPPING_DUPLICATE_NEW_DESCRIPTOR_CHANGED");}
+            scope.target=target;scope.phase=1;
+        }catch(IllegalAccessException failure){throw new IOException("MAPPING_DUPLICATE_DESCRIPTOR_UNAVAILABLE",failure);}
+    }
+    public static void mappingDuplicateCalling(Object value,long handle)throws IOException {
+        MappingDuplicate scope=mappingDuplicate(value);
+        if(scope.phase!=1||handle!=scope.handle||!NativeControl.mappingDuplicateFrame(scope.frame,2))
+            throw new IOException("MAPPING_DUPLICATE_ORIGINAL_HANDLE_REQUIRED");
+        try{
+            mappingDuplicateParent(scope);
+            synchronized(scope.target){if(!mappingDuplicateFresh(scope.target))throw new IOException("MAPPING_DUPLICATE_NEW_DESCRIPTOR_CHANGED");}
+            // There is no Java call between this return and the woven actual native invocation.
+            scope.phase=2;
+        }catch(IllegalAccessException failure){throw new IOException("MAPPING_DUPLICATE_DESCRIPTOR_UNAVAILABLE",failure);}
+    }
+    private static Object nativeMappingDuplicate(Object receiver,Class<?> declaring,String method,Module[] sources,long handle)throws IOException {
+        MappingDuplicate scope=mappingDuplicate(MAPPING_DUPLICATING.get());
+        if(receiver!=FILE_DISPATCHER||declaring!=FILE_DISPATCHER||!method.equals("duplicateHandle")||scope.phase!=2
+                ||handle!=scope.handle||!NativeControl.mappingDuplicateFrame(scope.frame,1))
+            throw new IOException("MAPPING_DUPLICATE_ACTUAL_NATIVE_CALL_REQUIRED");
+        for(Module source:sources)if(source!=null&&ControlBridge.modStopped(source))throw new ClosedChannelException();
+        FileOperation operation=null;
+        try{
+            mappingDuplicateParent(scope);
+            synchronized(scope.target){if(!mappingDuplicateFresh(scope.target))throw new IOException("MAPPING_DUPLICATE_NEW_DESCRIPTOR_CHANGED");}
+            operation=(FileOperation)fileOperation(scope.parent,declaring,method,sources);
+            Module[] actual=operation==null?ControlBridge.resourceOperationSources(sources):operation.sources;
+            MappingDuplicateNative token=new MappingDuplicateNative(scope,operation,actual);
+            CodeSourceBridge.resourceLayoutControls(token);CodeSourceBridge.resourceLayoutControls(actual);
+            // Reserve before entering the OS. A later Java publication failure
+            // retains this exact new target/return receipt without claiming it allocated.
+            synchronized(STREAMS){descriptorRecord(scope.target);MAPPING_DUPLICATE_PENDING.put(scope.target,token);}
+            scope.nativeCall=token;scope.phase=3;return token;
+        }catch(IllegalAccessException failure){
+            IOException unavailable=new IOException("MAPPING_DUPLICATE_DESCRIPTOR_UNAVAILABLE",failure);
+            try{if(operation!=null)finishFileOperation(operation);}catch(RuntimeException|Error cleanup){unavailable.addSuppressed(cleanup);}throw unavailable;
+        }catch(IOException|RuntimeException|Error failure){
+            try{if(operation!=null)finishFileOperation(operation);}catch(RuntimeException|Error cleanup){if(cleanup!=failure)failure.addSuppressed(cleanup);}throw failure;
+        }
+    }
+    /** The real JNI return register is captured before the original Java setHandle. */
+    private static void nativeMappingDuplicateFinished(Object value,long returned,boolean completed){
+        if(!NativeControl.fileOperationFinishing(value)||!(value instanceof MappingDuplicateNative token)||token.closed)
+            throw new SecurityException("MAPPING_DUPLICATE_ACTUAL_RETURN_REQUIRED");
+        MappingDuplicate scope=token.scope;
+        try{
+            token.completed=completed&&token.nativeSucceeded&&token.returned==returned&&scope.caller==Thread.currentThread()&&!scope.closed&&MAPPING_DUPLICATING.get()==scope
+                    &&scope.nativeCall==token&&scope.phase==3;
+        }finally{
+            token.closed=true;
+            if(token.operation!=null)finishFileOperation(token.operation);
+        }
+    }
+    private static void mappingDuplicateResult(MappingDuplicateNative call,FileDescriptor result)throws IllegalAccessException,IOException {
+        Object cleanup=FD_CLEANUP.get(result);
+        if(FD_HANDLE.getLong(result)!=call.returned||FD_NUMBER.getInt(result)!=-1||FD_CLOSED.getBoolean(result)
+                ||FD_PARENT.get(result)!=null||FD_PEERS.get(result)!=null||cleanup==null||cleanup.getClass()!=FILE_CLEANABLE
+                ||CLEANABLE_REFERENT.get(cleanup)!=result||CLEANABLE_HANDLE.getLong(cleanup)!=call.returned||CLEANABLE_NUMBER.getInt(cleanup)!=-1)
+            throw new IOException("MAPPING_DUPLICATE_ORIGINAL_PUBLICATION_CHANGED");
+    }
+    public static void mappingDuplicateExit(Object value,FileDescriptor result,Throwable original)throws IOException {
+        if(!(value instanceof MappingDuplicate scope)||scope.caller!=Thread.currentThread())throw new SecurityException("MAPPING_DUPLICATE_SCOPE_REQUIRED");
+        if(scope.closed)return;
+        Throwable primary=original;
+        try{
+            if(MAPPING_DUPLICATING.get()!=scope)throw new IOException("MAPPING_DUPLICATE_SCOPE_ORDER_REQUIRED");
+            if(original==null){
+                MappingDuplicateNative call=scope.nativeCall;
+                if(scope.phase!=3||result!=scope.target||call==null||!call.closed||!call.completed||!call.nativeSucceeded||call.returned==-1
+                        ||!NativeControl.mappingDuplicateFrame(scope.frame,2))throw new IOException("MAPPING_DUPLICATE_NATIVE_RESULT_UNOBSERVED");
+                mappingDuplicateParent(scope);
+                synchronized(result){
+                    mappingDuplicateResult(call,result);
+                    // Finish the parent's operation before publishing allocation;
+                    // a receipt-exit failure must leave this copy unpublished.
+                    if(scope.operation!=null&&!scope.operation.closed)finishFileOperation(scope.operation);
+                    // Establish allocation only from this new object and the captured actual JNI result.
+                    // A reusable OS number alone never creates a descriptor or release record.
+                    ControlBridge.resourceCreated(result,call.sources);
+                    // Creation delivery can run its existing observer; it cannot
+                    // substitute either endpoint before allocation publication.
+                    mappingDuplicateParent(scope);mappingDuplicateResult(call,result);
+                    if(!NativeControl.mappingDuplicateFrame(scope.frame,2))throw new IOException("MAPPING_DUPLICATE_ORIGINAL_FRAME_CHANGED");
+                    synchronized(STREAMS){
+                        DescriptorRecord record=descriptorRecord(result);record.allocated=true;
+                        if(call.sources.length==0)record.unknownUse=true;
+                        for(Module source:call.sources){if(source==null)record.unknownUse=true;else record.nativeSources.add(source);}
+                        scope.published=true;MAPPING_DUPLICATE_PENDING.remove(result);
+                    }
+                }
+            }
+        }catch(IllegalAccessException failure){
+            IOException unavailable=new IOException("MAPPING_DUPLICATE_PUBLICATION_UNAVAILABLE",failure);
+            if(original==null){primary=unavailable;throw unavailable;}original.addSuppressed(unavailable);
+        }catch(IOException|RuntimeException|Error failure){
+            if(original==null){primary=failure;throw failure;}if(failure!=original)original.addSuppressed(failure);
+        }finally{
+            try{
+                // A JNI global-reference failure can occur after the Java entry
+                // acquired its nested receipt but before Native retained its token.
+                MappingDuplicateNative call=scope.nativeCall;
+                if(call!=null){call.closed=true;if(call.operation!=null&&!call.operation.closed)finishFileOperation(call.operation);}
+                if(scope.operation!=null&&!scope.operation.closed)finishFileOperation(scope.operation);
+            }
+            catch(RuntimeException|Error cleanup){if(primary==null)throw cleanup;if(cleanup!=primary)primary.addSuppressed(cleanup);}
+            finally{
+                MappingDuplicateNative call=scope.nativeCall;
+                synchronized(STREAMS){if(call!=null&&(!call.nativeSucceeded||scope.published))MAPPING_DUPLICATE_PENDING.remove(scope.target);}
+                scope.closed=true;if(scope.previous==null)MAPPING_DUPLICATING.remove();else MAPPING_DUPLICATING.set(scope.previous);
+            }
+        }
+    }
     private static Object nativeIoOperation(Class<?> declaring,String method,long[] arguments,Object[] references,Module[] sources)throws IOException {
         if(!NativeControl.ioOperationBoundary(declaring,method,arguments,references,sources))throw new SecurityException("ACTUAL_NATIVE_IO_OPERATION_REQUIRED");
         if(declaring==FILE_CHANNEL&&method.equals("transferTo0"))return nativeFileTransfer(declaring,method,arguments,references,sources);
@@ -766,6 +943,7 @@ public final class ResourceBridge {
     /** Entered only while the actual JNI binding keeps this receiver and source tuple live. */
     public static Object nativeFileOperation(Object value,Class<?> declaring,String method,Module[] sources,int operation,long address,long length)throws IOException {
         if(!NativeControl.fileOperationBoundary(value,declaring,method,sources,operation,address,length))throw new SecurityException("ACTUAL_NATIVE_FILE_OPERATION_REQUIRED");
+        if(operation==10)return nativeMappingDuplicate(value,declaring,method,sources,address);
         if(operation==9){
             if(!ControlBridge.recoveryWriter()){
                 for(Module source:sources)if(source!=null&&ControlBridge.modStopped(source))throw new java.net.SocketException("RONOVA_TERMINAL_SOCKET_OPEN_REFUSED");
@@ -1928,11 +2106,76 @@ public final class ResourceBridge {
         if(!ControlBridge.recoveryWriter()||!ControlBridge.coreResourceCallback(selected))throw new SecurityException("RESOURCE_RELEASE_CORE_REQUIRED");
         try{
             boolean buffer;synchronized(STREAMS){buffer=BUFFERS.containsKey(new Key(stream,false))||BUFFER_ACTIONS.containsKey(new Key(stream,false));}
+            if(stream instanceof FileDescriptor descriptor){
+                MappingDuplicateNative pending;synchronized(STREAMS){pending=MAPPING_DUPLICATE_PENDING.get(descriptor);}
+                if(pending!=null)return releaseMappingDuplicate(descriptor,pending,selected);
+            }
             if(characterWrapper(stream))return releaseWrapper(stream,selected);
             if(buffer)return releaseBuffer(stream,selected);
             if(IoBridge.resource(stream))return IoBridge.release(stream,selected,FILE_SELECTION.get());
             return fileChannel(stream)?releaseChannel(stream,selected):releaseStream(stream,selected);
         }catch(ReflectiveOperationException|IOException|RuntimeException failure){return "RESOURCE_RELEASE_FAILED:"+failure.getClass().getSimpleName()+":"+failure.getMessage();}
+    }
+    /** An unpublished copy never borrows the parent's close or allocation authority. */
+    private static String releaseMappingDuplicate(FileDescriptor descriptor,MappingDuplicateNative call,Predicate<Object> selected)throws ReflectiveOperationException,IOException {
+        MappingDuplicate scope=call.scope;
+        if(scope.target!=descriptor||!scope.closed)return "MAPPING_DUPLICATE_FRAME_EXIT_PENDING";
+        if(!call.nativeSucceeded||call.returned==-1)return "MAPPING_DUPLICATE_NATIVE_RESULT_UNOBSERVED";
+        Set<Module> selection=FILE_SELECTION.get();
+        if(selection==null||call.sources.length==0)return "MAPPING_DUPLICATE_SOURCE_GROUP_UNOBSERVED";
+        for(Module source:call.sources)if(source==null||!selection.contains(source))return "MAPPING_DUPLICATE_SOURCE_GROUP_UNOBSERVED";
+        if(!selected.test(descriptor))return "MAPPING_DUPLICATE_SHARED_TARGET_PENDING";
+        synchronized(descriptor){
+            // If setHandle was rejected there is no safe original object close.
+            // Keep the actual native receipt instead of manufacturing an FD from its number.
+            if(FD_HANDLE.getLong(descriptor)!=call.returned||FD_NUMBER.getInt(descriptor)!=-1||FD_CLOSED.getBoolean(descriptor))
+                return "MAPPING_DUPLICATE_HANDLE_INSTALL_OR_TARGET_CHANGED";
+            Object cleanup=FD_CLEANUP.get(descriptor);
+            if(cleanup!=null&&(cleanup.getClass()!=FILE_CLEANABLE||CLEANABLE_REFERENT.get(cleanup)!=descriptor
+                    ||CLEANABLE_HANDLE.getLong(cleanup)!=call.returned||CLEANABLE_NUMBER.getInt(cleanup)!=-1))
+                return "MAPPING_DUPLICATE_CLEANUP_ASSOCIATION_CHANGED";
+            descriptorView(descriptor);
+            if(!descriptorReleaseAllowed(descriptor))return "MAPPING_DUPLICATE_SHARED_TARGET_PENDING";
+            String pending=ioDescriptorRetirement(descriptor,selected,selection);if(!pending.isEmpty())return pending;
+            sealIoDescriptor(descriptor,selection);
+            Method close=FileDescriptor.class.getDeclaredMethod("close");close.setAccessible(true);close.invoke(descriptor);
+            if(FD_HANDLE.getLong(descriptor)!=-1)return "MAPPING_DUPLICATE_ORIGINAL_CLOSE_PENDING";
+            synchronized(STREAMS){
+                DescriptorRecord record=ATTACHMENTS.get(new Key(descriptor,false));if(record!=null)record.retired=true;
+                if(MAPPING_DUPLICATE_PENDING.get(descriptor)==call)MAPPING_DUPLICATE_PENDING.remove(descriptor);
+            }
+            return "";
+        }
+    }
+    /** Existing retirement/report callers can see copies which never reached a Java return. */
+    public static Object[][] mappingDuplicatePending(Module[] modules){
+        if(!ControlBridge.coreWriter())throw new SecurityException("MAPPING_DUPLICATE_RECOVERY_CALLER_REQUIRED");
+        Objects.requireNonNull(modules);List<Object[]> rows=new ArrayList<>();
+        synchronized(STREAMS){
+            for(var entry:MAPPING_DUPLICATE_PENDING.entrySet()){
+                MappingDuplicateNative call=entry.getValue();boolean included=call.sources.length==0;
+                for(Module source:call.sources){
+                    if(source==null)included=true;
+                    else for(Module module:modules)if(source==module){included=true;break;}
+                }
+                if(included)rows.add(new Object[]{entry.getKey(),call.sources.clone(),mappingDuplicatePendingReason(call)});
+            }
+        }
+        return rows.toArray(Object[][]::new);
+    }
+    private static String mappingDuplicatePendingReason(MappingDuplicateNative call){
+        if(!call.scope.closed)return "MAPPING_DUPLICATE_FRAME_EXIT_PENDING";
+        if(!call.nativeSucceeded)return "MAPPING_DUPLICATE_NATIVE_RESULT_UNOBSERVED";
+        try{
+            FileDescriptor target=call.scope.target;
+            if(FD_HANDLE.getLong(target)!=call.returned||FD_NUMBER.getInt(target)!=-1||FD_CLOSED.getBoolean(target))
+                return "MAPPING_DUPLICATE_HANDLE_INSTALL_OR_TARGET_CHANGED";
+            Object cleanup=FD_CLEANUP.get(target);
+            if(cleanup!=null&&(cleanup.getClass()!=FILE_CLEANABLE||CLEANABLE_REFERENT.get(cleanup)!=target
+                    ||CLEANABLE_HANDLE.getLong(cleanup)!=call.returned||CLEANABLE_NUMBER.getInt(cleanup)!=-1))
+                return "MAPPING_DUPLICATE_CLEANUP_ASSOCIATION_CHANGED";
+            return "MAPPING_DUPLICATE_ORIGINAL_CLOSE_PENDING";
+        }catch(IllegalAccessException unavailable){return "MAPPING_DUPLICATE_PUBLICATION_UNAVAILABLE";}
     }
     private static DescriptorView descriptorView(FileDescriptor descriptor)throws ReflectiveOperationException,IOException {
         List<Object> streams=new ArrayList<>(),channels=new ArrayList<>();boolean allocated;

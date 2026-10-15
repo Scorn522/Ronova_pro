@@ -1,5 +1,19 @@
 # B 批实际报告：2026-10-09 代码收敛接续
 
+## 2026-10-15：C 接续——文件复制与标准能力图
+
+接续已推送的 `426c1b5`，Java83 / Native76 / Storage3 / Journal6，协议 `r3-client-8`。本包继续完成实际 duplicateForMapping/duplicateHandle/新 FD 发布及失败副本接续、标准 Forge capability 元数据图，并补 Guava SingletonImmutableList。自身外观、武器注册与驱动部署不在本包。
+
+op10 绑定真实父 FD/handle、实际原方法的 Method/ConstMethod/CP/栈底层及当前来源版本，保留原 Native 所有门；controller 内部的本入口也取得原 NativeFileFrame。真实 RAX 先写本次自有 receipt，再回调 finish；同一新 target 的真实 handle 和 FileCleanable.referent/fd/handle 全部一致后才分配/登记。异常保留原 Throwable并关闭 nested/parent FileOperation。native 成功但后续发布失败时，进入 native 前的强 pending 与未分配 DescriptorRecord 保留准确事实；原 RecoverySources.remaining/retireGroup 枚举，只有原规则已选中的 target 沿原异步 retire/release 尝试关闭。未知/共享、handle 从未安装、target/cleanup 改变仍 pending，不按 long 制造资源资格或伪造已结清。
+
+标准能力图包含当前 ItemStack 的 CapabilityProvider/已初始化 dispatcher、实际 provider/序列化数组与 listener backing，以及本机已确认 FluidBucketWrapper/FluidHandlerItemStack 系列持有的 LazyOptional、MutableObject 和真实集合。pending lazyData 复用 NBT，所有链接按当前 root 和各 owner 复核。首次 lazy 发布仅在原 callback 返回后的字段 store 段持原 Gate，正常/异常关闭；listener/lifecycle 继续需要现有实际装备动作许可。未知 provider 私有字段和 callback 私有状态、未知实现不计覆盖，供应回调不获得写权。
+
+`build-c-java83-native76-carriers-20261015.log` **PASS，58秒**，21项任务中16项执行、5项保持最新，Java83/Native76 实际编译链接。`compile-c-java83-native76-carriers-20261015.log` **退出0**。`c-java83-native76-resource-bytecode-20261015.log` 使用现有 AuditFixCheck 对真实 FileDispatcherImpl 的当前转换及 CapabilityProvider/CapabilityDispatcher/LazyOptional 的当前 plugin 织入按 `-Xverify:all` 加载，**退出0、RESOURCE_BYTECODE_VERIFY_PASS、CAPABILITY_BYTECODE_VERIFY_PASS**；Forge 保留生产 frame、仅 COMPUTE_MAXS。只确认直接字节码安装可接受，不代表实际 native 复制/异常关闭或游戏能力行为通过。未重跑旧 Netty/世界表检查，未启动游戏；相关运行场景 **NOTRUN**。Native75 的旧预启动中止保留为历史记录，没有改成 PASS。
+
+候选 `distribution/candidate-c-java83-native76-io-capability-wip-20261015` 含 Core2774289、prelaunch23309字节；源码、匹配 JAR 和摘要直接同步 GitHub，未生成源码 ZIP、未部署驱动，完整 C/B 未宣称完成。
+
+---
+
 ## 2026-10-15：C 接续——标准删除与队列生命周期
 
 接续 `563ddfb`，Java82 / Native75 / Storage3 / Journal6，协议 `r3-client-8`。本包写齐标准 reverse map 删除/shiftKeys 与真实 iterator 接续、JDK/Guava 常见解药列表和实际 provider 覆写、Netty 两种标准有界 MPSC 的原版 full/default REJECT 收尾，以及 Windows JDK `Net.socket0(ZZZZ)I` 的原生创建入口判断；不改自身外观，不注册武器。

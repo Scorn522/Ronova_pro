@@ -16,6 +16,7 @@ public final class SaveFinallyPlugin implements IMixinConfigPlugin {
     @Override public List<String> getMixins() { return null; }
     @Override public void preApply(String target,ClassNode node,String mixin,IMixinInfo info) { }
     @Override public void postApply(String target,ClassNode node,String mixin,IMixinInfo info) {
+        if(mixin.startsWith("dev.ronova.pro.mixin.EquipmentCapabilityHooks$")) { dev.ronova.pro.EquipmentCapabilityWeaver.apply(node);return; }
         if(mixin.endsWith(".WorldControlHooks$GlobalRegistryMap")) { dev.ronova.pro.WorldRegistryWeaver.apply(node);return; }
         if(mixin.endsWith(".WorldControlHooks$GlobalRegistryIterator")) { dev.ronova.pro.WorldRegistryWeaver.applyIterator(node);return; }
         if(mixin.endsWith(".EquipmentActionHooks$Packets")) {

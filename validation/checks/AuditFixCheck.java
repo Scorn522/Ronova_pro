@@ -14,6 +14,7 @@ public final class AuditFixCheck {
     private static Object invoke(Object receiver,String name)throws Exception {var m=receiver.getClass().getDeclaredMethod(name);m.setAccessible(true);try{return m.invoke(receiver);}catch(InvocationTargetException e){if(e.getCause() instanceof Exception x)throw x;throw e;}}
     public static void main(String[] args)throws Exception {
         if(args.length==1&&args[0].equals("network-bytecode")){networkBytecode();return;}
+        if(args.length==1&&args[0].equals("resource-bytecode")){resourceBytecode();return;}
         if(args.length==3&&args[0].equals("mod-group-returns")){modGroupReturns(args[1],args[2]);return;}
         if(args.length==2&&args[0].equals("network-preconnect")){networkPreconnect(args[1]);return;}
         if(args.length==1&&args[0].equals("source-list-fixes")){sourceListFixes();return;}
@@ -1050,6 +1051,57 @@ public final class AuditFixCheck {
             require(writes.get()==1&&flushes.get()==1&&channel.readOutbound()==unrelated&&channel.readOutbound()==null,"valid stopped rejection lost the preceding unrelated write/flush");
             System.out.println("NETWORK_PROMISE_STOP_PASS actual_bootStop_named_Mod_Class_source real_EmbeddedChannel foreign_promise_unchanged completed_promise_original_exception cancelled_no_flush valid_stopped_rejected preceding_unrelated_write_flushed");
         } finally {channel.finishAndReleaseAll();other.finishAndReleaseAll();}
+    }
+    /** Verify the real FileDispatcher method changed by the current resource transformer. */
+    private static void resourceBytecode()throws Exception{
+        Class<?> boundary=Class.forName("dev.ronova.pro.agent.ResourceBoundary");
+        Method transform=boundary.getDeclaredMethod("transform",ClassLoader.class,String.class,byte[].class);transform.setAccessible(true);
+        String target="sun.nio.ch.FileDispatcherImpl";
+        ClassLoader loader=new ClassLoader(AuditFixCheck.class.getClassLoader()){
+            @Override protected Class<?> loadClass(String name,boolean resolve)throws ClassNotFoundException{
+                if(!name.startsWith("sun.nio.ch."))return super.loadClass(name,resolve);
+                synchronized(getClassLoadingLock(name)){
+                    Class<?> result=findLoadedClass(name);
+                    if(result==null)try(var input=getParent().getResourceAsStream(name.replace('.','/')+".class")){
+                        if(input==null)throw new ClassNotFoundException(name);byte[] bytes=input.readAllBytes();
+                        if(name.equals(target)){
+                            byte[] changed=(byte[])transform.invoke(null,null,name.replace('.','/'),bytes);
+                            require(changed!=null,"actual FileDispatcher method was not transformed");bytes=changed;
+                        }
+                        result=defineClass(name,bytes,0,bytes.length);
+                    }catch(java.io.IOException|ReflectiveOperationException failure){throw new ClassNotFoundException(name,failure);}
+                    if(resolve)resolveClass(result);return result;
+                }
+            }
+        };
+        Class<?> actual=Class.forName(target,false,loader);require(actual.getClassLoader()==loader,"actual FileDispatcher class was not defined");actual.getDeclaredMethods();
+        System.out.println("RESOURCE_BYTECODE_VERIFY_PASS actual_JDK_FileDispatcher_duplicate JVM_verifier_only no_native_IO_runtime_claim");
+        capabilityBytecode();
+    }
+    /** Keep the actual Forge publication frames produced by the current Mixin plugin. */
+    private static void capabilityBytecode()throws Exception{
+        Class<?> weaver=Class.forName("dev.ronova.pro.EquipmentCapabilityWeaver");
+        Method apply=weaver.getMethod("apply",org.objectweb.asm.tree.ClassNode.class);
+        Set<String> targets=Set.of("net.minecraftforge.common.capabilities.CapabilityProvider","net.minecraftforge.common.capabilities.CapabilityDispatcher","net.minecraftforge.common.util.LazyOptional");
+        ClassLoader loader=new ClassLoader(AuditFixCheck.class.getClassLoader()){
+            @Override protected Class<?> loadClass(String name,boolean resolve)throws ClassNotFoundException{
+                if(!name.startsWith("net.minecraftforge.common.capabilities.")&&!name.startsWith("net.minecraftforge.common.util.LazyOptional"))return super.loadClass(name,resolve);
+                synchronized(getClassLoadingLock(name)){
+                    Class<?> result=findLoadedClass(name);
+                    if(result==null)try(var input=getParent().getResourceAsStream(name.replace('.','/')+".class")){
+                        if(input==null)throw new ClassNotFoundException(name);byte[] bytes=input.readAllBytes();
+                        if(targets.contains(name)){
+                            var node=new org.objectweb.asm.tree.ClassNode();new org.objectweb.asm.ClassReader(bytes).accept(node,org.objectweb.asm.ClassReader.EXPAND_FRAMES);apply.invoke(null,node);
+                            var writer=new org.objectweb.asm.ClassWriter(org.objectweb.asm.ClassWriter.COMPUTE_MAXS);node.accept(writer);bytes=writer.toByteArray();
+                        }
+                        result=defineClass(name,bytes,0,bytes.length);
+                    }catch(java.io.IOException|ReflectiveOperationException failure){throw new ClassNotFoundException(name,failure);}
+                    if(resolve)resolveClass(result);return result;
+                }
+            }
+        };
+        for(String name:targets){Class<?> actual=Class.forName(name,false,loader);require(actual.getClassLoader()==loader,"actual capability class was not defined");actual.getDeclaredMethods();}
+        System.out.println("CAPABILITY_BYTECODE_VERIFY_PASS actual_Forge_provider_dispatcher_lazy_optional JVM_verifier_only no_game_capability_runtime_claim");
     }
     /** Verify the actual transformed Netty methods without starting another game JVM. */
     private static void networkBytecode()throws Exception{

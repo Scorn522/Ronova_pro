@@ -43,7 +43,7 @@ public final class NativeControl {
             if(!early.isEmpty()) {
                 Path actual=Path.of(early).toAbsolutePath();if(!hash(Files.readAllBytes(actual)).equals(digest))throw new IOException("EARLY_NATIVE_IMAGE_MISMATCH");dll=actual;
             }
-            System.load(dll.toString());if(abi()!=75)throw new UnsatisfiedLinkError("NATIVE_CONTROL_ABI");
+            System.load(dll.toString());if(abi()!=76)throw new UnsatisfiedLinkError("NATIVE_CONTROL_ABI");
             if(!initialize0(ControlBridge.class,DefinitionBridge.class))throw new UnsatisfiedLinkError("ACTUAL_NATIVE_BOUNDARY_INSTALL_FAILED");
             if(!initializeDefinitionDirectory0(definitionDirectoryOwner))throw new UnsatisfiedLinkError("ACTUAL_DEFINITION_DIRECTORY_CAS_UNAVAILABLE");
             libraryBoundaryPresent=libraryPresent0();available=true;return state="NATIVE_BIND_AND_JNI_FIELD_READY";
@@ -262,6 +262,10 @@ public final class NativeControl {
         return CALLER.getCallerClass()==ResourceBridge.class&&fileOperationBoundary0(receiver,declaring,method,sources,operation,address,length);
     }
     static boolean fileOperationFinishing(Object token){return CALLER.getCallerClass()==ResourceBridge.class&&fileOperationFinishing0(token);}
+    static boolean mappingDuplicateFrame(long[] identity,int phase){
+        if(CALLER.getCallerClass()!=ResourceBridge.class)throw new SecurityException("ACTUAL_MAPPING_DUPLICATE_QUERY_REQUIRED");
+        return available&&identity!=null&&identity.length==5&&phase>=0&&phase<=2&&mappingDuplicateFrame0(identity,phase);
+    }
     static boolean ioOperationBoundary(Class<?> declaring,String method,long[] arguments,Object[] references,Module[] sources){
         return CALLER.getCallerClass()==ResourceBridge.class&&ioOperationBoundary0(declaring,method,arguments,references,sources);
     }
@@ -753,6 +757,7 @@ public final class NativeControl {
     private static native boolean arrayCopyBoundary0(Object source,int from,int length,Object target,int to,int prefix,Object read);
     private static native boolean fileOperationBoundary0(Object receiver,Class<?> declaring,String method,Module[] sources,int operation,long address,long length);
     private static native boolean fileOperationFinishing0(Object token);
+    private static native boolean mappingDuplicateFrame0(long[] identity,int phase);
     private static native boolean ioOperationBoundary0(Class<?> declaring,String method,long[] arguments,Object[] references,Module[] sources);
     private static native int fileBindings0();
     private static native boolean bufferAllocationBoundary0();

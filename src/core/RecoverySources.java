@@ -209,6 +209,10 @@ public final class RecoverySources implements AutoCloseable {
             else if(!discovery.isEmpty())remaining.add("HOLDER_DISCOVERY:"+source.locator+":"+discovery);
         }
         synchronized(pendingCloses) { if(!pendingCloses.isEmpty())remaining.add("SOURCE_STREAM_RESOURCE_PENDING"); }
+        try{
+            for(Object[] row:mappingDuplicateRows(runtime.canonicalSubject(subject)))
+                remaining.add("MAPPING_DUPLICATE_RESOURCE_PENDING:"+System.identityHashCode(row[0])+":"+row[2]);
+        }catch(ReflectiveOperationException|RuntimeException unavailable){remaining.add("MAPPING_DUPLICATE_DISCOVERY_UNAVAILABLE");}
         synchronized(groupWalks) {for(var groups:groupWalks.values())for(GroupWalk walk:groups.values())if(runtime.groupTargets(subject).contains(walk.subject)&&(!walk.complete||!walk.gap.isEmpty()))
             remaining.add("GROUP_SOURCE:"+walk.source.locator+":"+(walk.gap.isEmpty()?"DISPOSITION_PENDING":walk.gap));}
         for(String entry:expected) {
@@ -394,6 +398,7 @@ public final class RecoverySources implements AutoCloseable {
         retireExternalFields(authority);
         retireExternalHeapValues(authority);
         retireExternalMemory(authority);
+        retireMappingDuplicates(authority);
         List<GroupWalk> walks;
         synchronized(groupWalks) {walks=groupWalks.values().stream().flatMap(groups->groups.values().stream())
                 .filter(w->runtime.canonicalSubject(w.subject)==authority&&!w.complete).toList();}
@@ -566,6 +571,23 @@ public final class RecoverySources implements AutoCloseable {
             }else authority.unresolvedSources.add("EXTERNAL_NATIVE_MEMORY_RECOVERY_PENDING");
         }catch(ReflectiveOperationException|RuntimeException unavailable){authority.unresolvedSources.add("EXTERNAL_NATIVE_MEMORY_RECOVERY_UNAVAILABLE");}
     }
+    private Object[][] mappingDuplicateRows(ProRuntime.Subject authority)throws ReflectiveOperationException{
+        if(authority==null)return new Object[0][];
+        return (Object[][])Class.forName("dev.ronova.pro.bootstrap.ResourceBridge",false,null)
+                .getMethod("mappingDuplicatePending",Module[].class).invoke(null,(Object)runtime.groupModules(authority));
+    }
+    private void retireMappingDuplicates(ProRuntime.Subject authority){
+        authority.unresolvedSources.remove("MAPPING_DUPLICATE_RELEASE_PENDING");
+        try{
+            Object[][] rows=mappingDuplicateRows(authority);authority.unresolvedSources.remove("MAPPING_DUPLICATE_DISCOVERY_UNAVAILABLE");
+            for(Object[] row:rows){
+                if(!(row[0] instanceof FileDescriptor descriptor)||runtime.groupSubject(descriptor)!=authority)continue;
+                try{
+                    if(!retireDescriptorStream(descriptor,authority))authority.unresolvedSources.add("MAPPING_DUPLICATE_RELEASE_PENDING");
+                }catch(IOException|ReflectiveOperationException|RuntimeException pending){authority.unresolvedSources.add("MAPPING_DUPLICATE_RELEASE_PENDING");}
+            }
+        }catch(ReflectiveOperationException|RuntimeException unavailable){authority.unresolvedSources.add("MAPPING_DUPLICATE_DISCOVERY_UNAVAILABLE");}
+    }
     private boolean retireResource(Object value,ProRuntime.Subject authority)throws IOException,ReflectiveOperationException {
         if(runtime.groupSubject(value)!=authority)return true;
         // Detach the selected wrapper's actual fields in GroupWalk. Its captured
@@ -604,6 +626,7 @@ public final class RecoverySources implements AutoCloseable {
             if(!buffer.isDirect())return true;
             return retireDescriptorStream(value,authority);
         }
+        if(value instanceof FileDescriptor)return retireDescriptorStream(value,authority);
         if(Boolean.TRUE.equals(Class.forName("dev.ronova.pro.bootstrap.ResourceBridge",false,null).getMethod("bufferResource",Object.class).invoke(null,value)))
             return retireDescriptorStream(value,authority);
         if(Boolean.TRUE.equals(Class.forName("dev.ronova.pro.bootstrap.ResourceBridge",false,null).getMethod("ioResource",Object.class).invoke(null,value)))
