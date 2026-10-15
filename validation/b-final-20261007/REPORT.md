@@ -1,5 +1,19 @@
 # B 批实际报告：2026-10-09 代码收敛接续
 
+## 2026-10-15：C 接续——底层冻结写入与准确恢复/发送
+
+接续 `839375e`，Java78 / Native73 / Storage3 / Journal6，协议 `r3-client-8`。当前已完成源码包：实际 section/palette 物理索引写入在计数与 idFor 前按可见 holder/current chunk/section/palette identity 拒绝，包含 worker、共享 palette、同 section 邻居与解除接续；字段图以实际 VM offset 的 typed CAS 替代 primitive 先读后写，已知冲突 origin 保留为共享，最终独占复核与 CAS 同短锁，原写门准备/收尾在锁外；Netty 停源拒绝位于实际 promise 校验成功之后。装备核对没有确认新缺口，未改其实现。
+
+首轮78/72统一构建39秒通过。三次实际阻塞的日志和当前 JVM 线程栈均保留：首次 frameSources 拼接→arraycopy；第二次来源 Walker 扩批；第三次外层停源 Walker 扩批。只在重新核对实际命令行/创建时间后结束相应自建 JVM，退出-1。源码移除该拼接，SourceQuery 保留已知来源+null/unknown及原 Native contributors，sourceUnknown/Native出口同步保留；只读 JVMTI reader 查真实模块、当前方法/BCI/VM版本和栈底深度匹配的动态父层来源，不因control跳过，不增加copy/Unsafe许可，回执及finally保持。
+
+第四次真实栈确认 Class.newReflectionData 的准确实例缓存 CAS 被 represented-module 停源门误拒，JDK 反复重试；核对身份后仅结束该自建 JVM，退出-1。现复用准确 JDK 调用链及实际 Class.reflectionData 字段判定，仅区分该目标归属，仍执行真实 stoppedInvocation 及后续 offset/控制/来源与字段守卫；不移动检查顺序。
+
+`build-c-java78-native73-strength-20261015.log` **PASS，22秒**，包含Native73实际编译链接；最新修复后 `build-c-java78-native73-strength-final2-20261015.log` **PASS，13秒**，最终Core2636524、prelaunch23309字节。`compile-c-java78-native73-network-promise-20261015.log` **退出0**。最新 `c-network-promise-java78-native73-final2-20261015.log` 使用真实 prelaunch、匹配 Native73、真实 bootStop named fixture 模块及原 EmbeddedChannel 断言，当前运行，尚无通过结论。世界底层冻结与字段图游戏场景 **NOTRUN**；活跃排队后再停组的网络场景仍未运行，不能由 bootStop 检查代称。Storage/驱动未改，未安装或加载驱动，未重跑旧矩阵，未生成源码 ZIP；源码和匹配候选直接同步原 GitHub。
+
+未知载体、直接 BitStorage/数组/Unsafe 写入、未观察共享来源、任意 native store/syscall 及旧明确平台边界保留。完整 C/B 未完成，自身外观和武器注册暂缓。
+
+---
+
 ## 2026-10-14：C 强度接续——旧帧、实际覆写、区域加载与 JVM 外部保护
 
 接续 `aeb7e34`，Java77 / Native72 / Storage3 / Journal6、协议 `r3-client-8`。本包三路子代理及主代理整合：旧帧停止入口→真实线程事件→准确方法/来源/token 再核验→可退出子集强退→FramePop 配对收尾；GameMode/Item 实际覆写与原参数动作接续；手动区域标准写入/破坏/替换、直接时间天气与睡眠重置；原 PostProcessing/UpgradeData 保留、存盘与解除后续跑；独立 Windows session-owner 句柄规则及有原命令资格的显式 JVM 保护入口。没有通用 scope/counter 写权，未注册物品或制作自身外观。

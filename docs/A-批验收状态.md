@@ -1,5 +1,23 @@
 # Ronova Pro 当前进度
 
+## 2026-10-15：C 接续——底层区域写入、字段图竞态与网络 promise
+
+接续 `839375e`，Java ABI78 / Native ABI73 / Storage3 / Journal6，协议保持 `r3-client-8`。本包先写齐源码再集中构建；三个 6.1 Sol max 子代理分别核对网络、装备和世界，装备未确认新缺口，保留原实现。自身外观及武器注册继续暂缓。
+
+手动冻结补到实际 LevelChunkSection 五参写入及 PalettedContainer 两个私有物理索引写入口，在区块计数与 palette idFor/resize 之前拒绝；四参转发、checked/unchecked/set 和非标准 xyz 别名都经过同一实际槽位判断。按 ChunkMap 的实际 volatile 可见快照、holder 当前 full chunk、section 数组和 palette identity 逐次确认，worker 不依赖返回 null 的 getChunkNow；同 palette 的共享 section 不能绕过，独立初载 copy、未选邻居和解除后的坐标保留原路径。原 PostProcessing/UpgradeData/归档流程沿用。未知 chunk/section/palette 实现、直接 BitStorage/数组/Unsafe 写入及整体载体替换仍未覆盖。
+
+字段图按 VM 实际声明/数组布局使用各 primitive 与引用 CAS，包含原始浮点位及 hidden/record 字段，避免“比较后直接 putVolatile”覆盖后写。任务的首个因果 origin 继续留作来源线索，冲突观察另记共享身份，不再用于独占破坏资格；每槽复查，并在已开原写门后将最终独占复核与 CAS 放在同一 origin 短锁内，原回执准备/收尾及资源释放不在该锁内。已知共享节点保留并报告 PARTIAL；未观察的共享关系与任意 native 写入不提升为完成。
+
+网络停源 gate 移到实际 Netty isNotValidPromise 的成功分支后，保留原 null/message、异 channel、已完成和取消 promise 的校验/回收语义；取消的 writeAndFlush 不再额外 flush 之前的无关写入。合法停源拒绝仍沿实际 context flush。池化 WriteTask 不从仍在队列的位置提前 cancel/recycle，原发送与 finally 回收保持。
+
+真实 bootStop 检查还定位了来源查询自递归：方法字符串拼接及来源/停源 Walker 自身扩批触发 arraycopy，重新进入同一查询。现移除拼接，真实空 selector/负 BCI 直接返回；SourceQuery 在同线程保留已有来源和显式 unknown，Native 出口也保留该状态，finally 撤销。停源查询在 Native 可用时用固定16帧的只读 JVMTI reader，按真实模块、实际 jmethod/BCI/VM 版本与原 ExecutionFlow 父层来源判断；父层用实际栈底深度区分同方法同位置递归。查询不发放写许可，原目标守卫/回执照常。Native 不可用的外层保留原 fallback，无法读取的重入明确失败。
+
+第四次真实栈确认准确的 Class.reflectionData 缓存 CAS 被 represented-module 停源门误拒，JDK 在缓存为空时反复重试。现仅对既有准确 JDK 调用链及实际 Class 实例字段区分该目标归属；真实 stoppedInvocation、原 offset/控制/来源与字段守卫继续执行，其他 Class mirror 写入沿原限制，未改检查顺序。
+
+首轮78/72源码统一构建39秒通过；前四次直接检查受阻的日志及实际线程栈保留，均核对当前进程身份后只结束自建检查 JVM，退出-1。最新 `build-c-java78-native73-strength-final2-20261015.log` **PASS，13秒**，Core2636524、prelaunch23309字节；Native73已在前一次22秒构建实际编译链接，Storage/驱动未改，驱动未部署。匹配 AuditFixCheck 编译退出0。最新 `c-network-promise-java78-native73-final2-20261015.log` 正在按原 bootStop/EmbeddedChannel 路径运行，尚无 promise/flush 通过结论。世界底层写入及字段图游戏场景 **NOTRUN**，不由构建代称通过。候选 `distribution/candidate-c-java78-native73-strength-wip-20261015`；本轮只同步 GitHub 的源码、匹配 JAR 与既有摘要，未生成源码 ZIP。完整 C/B 仍未完成。
+
+---
+
 ## 2026-10-14：C 强度接续——旧帧、实际覆写、区域加载与 JVM 外部保护
 
 接续 `aeb7e34`，Java ABI77 / Native ABI72 / Storage3 / Journal6，协议仍为 `r3-client-8`。本包将旧执行帧、装备动作覆写、手动区域锁和 Windows 游戏进程外部保护整包写齐后统一构建；自身外观及武器注册继续暂缓。

@@ -171,6 +171,9 @@ public final class Access {
         @Accessor("level") Level pro$level();
         @Accessor("tickersInLevel") Map<BlockPos,?> pro$tickers();
     }
+    @Mixin(net.minecraft.world.level.chunk.PalettedContainer.class) public interface StatePalette {
+        @Accessor("strategy") net.minecraft.world.level.chunk.PalettedContainer.Strategy pro$strategy();
+    }
     @Mixin(BlockEntity.class) public interface Block {
         @Accessor("level") Level pro$level();
         @Accessor("worldPosition") BlockPos pro$pos();

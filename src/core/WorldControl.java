@@ -12,6 +12,7 @@ import net.minecraft.nbt.CompoundTag;
 import net.minecraft.nbt.ListTag;
 import net.minecraft.nbt.Tag;
 import net.minecraft.server.MinecraftServer;
+import net.minecraft.server.level.ChunkHolder;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.world.entity.Entity;
 import net.minecraft.world.entity.player.Player;
@@ -19,6 +20,8 @@ import net.minecraft.world.level.Level;
 import net.minecraft.world.level.ChunkPos;
 import net.minecraft.world.level.chunk.ChunkAccess;
 import net.minecraft.world.level.chunk.LevelChunk;
+import net.minecraft.world.level.chunk.LevelChunkSection;
+import net.minecraft.world.level.chunk.PalettedContainer;
 import net.minecraft.world.level.chunk.ProtoChunk;
 import net.minecraft.world.level.chunk.UpgradeData;
 import net.minecraft.world.level.block.Block;
@@ -150,6 +153,45 @@ final class WorldControl {
     boolean mutationLocked(Level level,BlockPos low,BlockPos high){
         for(Area area:mutationAreas)if(area.level()==level&&area.low().getX()<=high.getX()&&area.high().getX()>=low.getX()
                 &&area.low().getY()<=high.getY()&&area.high().getY()>=low.getY()&&area.low().getZ()<=high.getZ()&&area.high().getZ()>=low.getZ())return true;
+        return false;
+    }
+    boolean sectionMutationDenied(LevelChunkSection section,int x,int y,int z){
+        // The same actual state palette can be shared by two section objects.
+        // Refuse before the section updates its block/fluid counters as well.
+        PalettedContainer<?> states=section.getStates();
+        if(states.getClass()!=PalettedContainer.class||((Access.StatePalette)states).pro$strategy()!=PalettedContainer.Strategy.SECTION_STATES)return false;
+        return paletteMutationDenied(states,PalettedContainer.Strategy.SECTION_STATES.getIndex(x,y,z));
+    }
+    boolean paletteMutationDenied(PalettedContainer<?> states,int index){
+        if(index<0||index>=4096||states.getClass()!=PalettedContainer.class
+                ||((Access.StatePalette)states).pro$strategy()!=PalettedContainer.Strategy.SECTION_STATES)return false;
+        int x=index&15,y=(index>>8)&15,z=(index>>4)&15;
+        for(Area area:mutationAreas){
+            ServerLevel level=area.level();
+            // getChunkNow deliberately returns null on a worker. Vanilla instead
+            // publishes this cloned visible map through a volatile field, and a
+            // holder publishes its full chunk through a volatile completed future.
+            // Read those actual owners without loading chunks or retaining a grant.
+            Access.Tracking tracking=(Access.Tracking)level.getChunkSource().chunkMap;
+            var visible=tracking.pro$visibleChunks();
+            for(ChunkHolder holder:visible.values()){
+                ChunkPos origin=holder.getPos();int worldX=origin.getMinBlockX()+x,worldZ=origin.getMinBlockZ()+z;
+                if(worldX<area.low().getX()||worldX>area.high().getX()||worldZ<area.low().getZ()||worldZ>area.high().getZ())continue;
+                LevelChunk chunk=holder.getFullChunk();
+                if(chunk==null||chunk.getClass()!=LevelChunk.class||chunk.getLevel()!=level)continue;
+                LevelChunkSection[] sections=chunk.getSections();
+                int first=Math.max(0,chunk.getSectionIndex(area.low().getY())),last=Math.min(sections.length-1,chunk.getSectionIndex(area.high().getY()));
+                for(int section=first;section<=last;section++){
+                    LevelChunkSection actual=sections[section];int worldY=(chunk.getSectionYFromSectionIndex(section)<<4)+y;
+                    if(worldY<area.low().getY()||worldY>area.high().getY()||actual==null||actual.getClass()!=LevelChunkSection.class||actual.getStates()!=states)continue;
+                    // A retired holder, replaced section or detached copy cannot
+                    // inherit the old binding. Shared live palettes retain every
+                    // affected coordinate, rather than trusting a first owner.
+                    if(tracking.pro$visibleChunks().get(origin.toLong())==holder&&holder.getFullChunk()==chunk
+                            &&chunk.getSections()[section]==actual&&actual.getStates()==states)return true;
+                }
+            }
+        }
         return false;
     }
     private static int postProcessingSection(LevelChunk chunk,ShortList pending){

@@ -284,6 +284,7 @@ public final class WorldFixture {
                     require(!level.destroyBlock(pos,true),"destroy published a frozen block's effects");
                     require(chunk.setBlockState(pos,Blocks.STONE.defaultBlockState(),false)==null,"direct chunk write bypassed region freeze");
                     require(level.getBlockState(pos)==frozenState,"frozen block changed after rejected writes");
+                    frozenSections(frozenState);
                     BlockPos neighbor=pos.east();var priorNeighbor=level.getBlockState(neighbor);
                     require(level.setBlock(neighbor,Blocks.GOLD_BLOCK.defaultBlockState(),2),"region freeze blocked an unselected neighbor");
                     level.setBlock(neighbor,priorNeighbor,2);
@@ -328,12 +329,62 @@ public final class WorldFixture {
                     require(level.getBlockState(postPos).getValue(BlockStateProperties.EAST)&&!chunk.getPostProcessing()[postSection].contains(postPacked),
                             "released original postprocess item did not finish its actual shape write and consume its pending entry");
                     pass("WORLD_POSTPROCESS_RELEASED_ORIGINAL_ITEM_CONTINUED");
+                    releasedSection();
                     require(chunk.isUnsaved(),"final dirty chunk was saved before normal shutdown");
                     require(blocks.getAll().anyMatch(tick->tick==pendingBlock)&&blocks.getAll().anyMatch(tick->tick==otherBlock)
                             &&blocks.getAll().noneMatch(tick->tick==heldBlock)&&fluids.getAll().noneMatch(tick->tick==heldFluid),"held save resumed or consumed the actual runtime entries");
                     stopping=true;server.halt(false);
                 }
             }catch(Throwable failure){finish(server,failure);}
+        }
+        private void frozenSections(net.minecraft.world.level.block.state.BlockState original)throws Exception{
+            var section=chunk.getSection(chunk.getSectionIndex(pos.getY()));var states=section.getStates();
+            int x=pos.getX()&15,y=pos.getY()&15,z=pos.getZ()&15;
+            boolean fluidTicking=section.isRandomlyTickingFluids(),blockTicking=section.isRandomlyTickingBlocks();
+            require(section.setBlockState(x,y,z,Blocks.AIR.defaultBlockState())==original,"direct section state write lost its original result");
+            require(section.setBlockState(x,y,z,Blocks.STONE.defaultBlockState(),false)==original,"unchecked section write lost its original result");
+            require(states.getAndSet(x,y,z,Blocks.AIR.defaultBlockState())==original,"direct checked palette write lost its original result");
+            require(states.getAndSetUnchecked(x,y,z,Blocks.STONE.defaultBlockState())==original,"direct unchecked palette write lost its original result");
+            states.set(x,y,z,Blocks.AIR.defaultBlockState());
+            require(states.getAndSetUnchecked(x|(z<<4),y,0,Blocks.STONE.defaultBlockState())==original,"noncanonical xyz alias bypassed the actual frozen palette index");
+            require(level.getBlockState(pos)==original&&section.isRandomlyTickingFluids()==fluidTicking&&section.isRandomlyTickingBlocks()==blockTicking,
+                    "refused low-level mutation changed the live state or section tick counts");
+            pass("WORLD_FROZEN_ACTUAL_SECTION_PALETTE_AND_INDEX_ALIAS_REFUSED");
+            var detached=new net.minecraft.world.level.chunk.LevelChunkSection(states.copy(),section.getBiomes());
+            require(detached.setBlockState(x,y,z,Blocks.STONE.defaultBlockState())==original&&detached.getBlockState(x,y,z).is(Blocks.STONE),
+                    "live frozen position incorrectly locked a detached initial-load palette copy");
+            var shared=new net.minecraft.world.level.chunk.LevelChunkSection(states,section.getBiomes());
+            require(shared.setBlockState(x,y,z,Blocks.AIR.defaultBlockState(),false)==original&&level.getBlockState(pos)==original,
+                    "another exact section object sharing the actual live palette bypassed freeze");
+            BlockPos neighbor=pos.east();int nx=neighbor.getX()&15;
+            var previous=section.getBlockState(nx,y,z);
+            section.setBlockState(nx,y,z,Blocks.GOLD_BLOCK.defaultBlockState());
+            require(states.getAndSetUnchecked(nx,y,z,Blocks.DIAMOND_BLOCK.defaultBlockState()).is(Blocks.GOLD_BLOCK)
+                    &&level.getBlockState(neighbor).is(Blocks.DIAMOND_BLOCK),"freeze overreached an unselected cell in the same actual palette");
+            section.setBlockState(nx,y,z,previous);
+            pass("WORLD_FROZEN_DETACHED_COPY_SHARED_PALETTE_AND_NEIGHBOR_EXACT");
+            CompletableFuture.runAsync(()->{
+                require(section.setBlockState(x,y,z,Blocks.AIR.defaultBlockState(),false)==original,"worker section denial lost its original result");
+                require(states.getAndSetUnchecked(x,y,z,Blocks.STONE.defaultBlockState())==original,"worker palette denial lost its original result");
+                states.set(x,y,z,Blocks.AIR.defaultBlockState());
+                require(section.getBlockState(x,y,z)==original,"worker bypassed the actual published chunk/section identity");
+                section.setBlockState(nx,y,z,Blocks.GOLD_BLOCK.defaultBlockState(),false);
+                require(states.getAndSetUnchecked(nx,y,z,Blocks.DIAMOND_BLOCK.defaultBlockState()).is(Blocks.GOLD_BLOCK),"worker freeze overreached its palette neighbor");
+                section.setBlockState(nx,y,z,previous,false);
+            }).get(20,TimeUnit.SECONDS);
+            require(level.getBlockState(pos)==original&&level.getBlockState(neighbor)==previous,"worker mutation did not preserve the selected cell and restore its neighbor");
+            pass("WORLD_FROZEN_WORKER_SECTION_PALETTE_REFUSED_NEIGHBOR_ALLOWED");
+        }
+        private void releasedSection(){
+            var section=chunk.getSection(postSection);var states=section.getStates();
+            int x=postPos.getX()&15,y=postPos.getY()&15,z=postPos.getZ()&15;
+            var original=level.getBlockState(postPos);
+            require(section.setBlockState(x,y,z,Blocks.IRON_BLOCK.defaultBlockState())==original&&level.getBlockState(postPos).is(Blocks.IRON_BLOCK),
+                    "expired rule retained the direct section write lock");
+            require(states.getAndSetUnchecked(x,y,z,original).is(Blocks.IRON_BLOCK)&&level.getBlockState(postPos)==original,
+                    "expired rule retained the direct palette write lock");
+            require(ProRuntime.worldFrozen(level,pos),"releasing another cell ended the original active rule in this section");
+            pass("WORLD_RELEASED_SECTION_PALETTE_WRITES_CONTINUED_WITH_OTHER_CELL_FROZEN");
         }
         private void holdPostProcessing(net.minecraft.server.MinecraftServer server){
             postPos=pos.above();postPacked=net.minecraft.world.level.chunk.ProtoChunk.packOffsetCoordinates(postPos);postSection=chunk.getSectionIndex(postPos.getY());

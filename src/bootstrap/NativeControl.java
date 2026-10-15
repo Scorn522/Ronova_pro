@@ -43,7 +43,7 @@ public final class NativeControl {
             if(!early.isEmpty()) {
                 Path actual=Path.of(early).toAbsolutePath();if(!hash(Files.readAllBytes(actual)).equals(digest))throw new IOException("EARLY_NATIVE_IMAGE_MISMATCH");dll=actual;
             }
-            System.load(dll.toString());if(abi()!=72)throw new UnsatisfiedLinkError("NATIVE_CONTROL_ABI");
+            System.load(dll.toString());if(abi()!=73)throw new UnsatisfiedLinkError("NATIVE_CONTROL_ABI");
             if(!initialize0(ControlBridge.class,DefinitionBridge.class))throw new UnsatisfiedLinkError("ACTUAL_NATIVE_BOUNDARY_INSTALL_FAILED");
             if(!initializeDefinitionDirectory0(definitionDirectoryOwner))throw new UnsatisfiedLinkError("ACTUAL_DEFINITION_DIRECTORY_CAS_UNAVAILABLE");
             libraryBoundaryPresent=libraryPresent0();available=true;return state="NATIVE_BIND_AND_JNI_FIELD_READY";
@@ -230,6 +230,15 @@ public final class NativeControl {
     private static void codePrepared(Class<?> actual){CodeSourceBridge.classPrepared(actual);}
     static boolean preparedClass(Class<?> actual){return CALLER.getCallerClass()==CodeSourceBridge.class&&available&&preparedClass0(actual);}
     static boolean sourceCapture(){return CALLER.getCallerClass()==ControlBridge.class&&sourceCapture0();}
+    static boolean sourceQueryStopped(){
+        if(CALLER.getCallerClass()!=ControlBridge.class||!ControlBridge.sourceQueryActive())throw new SecurityException("ACTUAL_SOURCE_QUERY_REQUIRED");
+        if(!available)throw new IllegalStateException("SOURCE_QUERY_STACK_UNAVAILABLE");
+        return sourceQueryStopped0();
+    }
+    private static Module[] sourceQueryFrame(Class<?> declaring,String name,String descriptor,int location,int depth){
+        if(!ControlBridge.sourceQueryActive())throw new SecurityException("ACTUAL_SOURCE_QUERY_FRAME_REQUIRED");
+        return ExecutionFlow.sourceQueryFrame(declaring,name,descriptor,location,depth);
+    }
     static boolean arrayCopyInternalBoundary(){return CALLER.getCallerClass()==ControlBridge.class&&arrayCopyInternalBoundary0();}
     static boolean arrayCopyReadBoundary(Object source,int from,int length){return CALLER.getCallerClass()==ControlBridge.class&&arrayCopyReadBoundary0(source,from,length);}
     static boolean arrayCopyBoundary(Object source,int from,int length,Object target,int to,int prefix,Object read){return CALLER.getCallerClass()==ControlBridge.class&&arrayCopyBoundary0(source,from,length,target,to,prefix,read);}
@@ -718,6 +727,7 @@ public final class NativeControl {
     private static native boolean codeRetirementFramePermit0(Class<?> declaring,int location,Object plan,Module owner);
     private static native boolean preparedClass0(Class<?> actual);
     private static native boolean sourceCapture0();
+    private static native boolean sourceQueryStopped0();
     private static native boolean arrayCopyInternalBoundary0();
     private static native boolean arrayCopyReadBoundary0(Object source,int from,int length);
     private static native boolean arrayCopyBoundary0(Object source,int from,int length,Object target,int to,int prefix,Object read);

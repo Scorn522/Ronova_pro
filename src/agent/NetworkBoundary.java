@@ -75,7 +75,7 @@ final class NetworkBoundary {
                 // original context's outbound selection and executor rather than the rejected write.
                 LabelNode noFlush=new LabelNode();guard.add(new VarInsnNode(Opcodes.ILOAD,vars[1]));guard.add(new JumpInsnNode(Opcodes.IFEQ,noFlush));
                 guard.add(new VarInsnNode(Opcodes.ALOAD,0));guard.add(new MethodInsnNode(Opcodes.INVOKEVIRTUAL,name,"flush","()Lio/netty/channel/ChannelHandlerContext;",false));guard.add(new InsnNode(Opcodes.POP));guard.add(noFlush);
-                guard.add(new InsnNode(Opcodes.RETURN));endGate(guard);method.instructions.insert(guard);changed=true;
+                guard.add(new InsnNode(Opcodes.RETURN));endGate(guard);afterWriteValidation(method,guard);changed=true;
             }
             if(name.equals(NETTY)&&Set.of("invokeWrite","invokeWriteAndFlush").contains(method.name)&&args.length==2&&args[0].getDescriptor().equals("Ljava/lang/Object;")&&args[1].getDescriptor().equals("Lio/netty/channel/ChannelPromise;")&&(method.access&Opcodes.ACC_STATIC)==0){
                 InsnList guard=gate(vars[0],"outboundAllowed");rejectOutbound(guard,vars[0],vars[1]);
@@ -161,6 +161,17 @@ final class NetworkBoundary {
         }
     }
     private static int[] locals(MethodNode method,Type[] args){int[] result=new int[args.length];int at=(method.access&Opcodes.ACC_STATIC)==0?1:0;for(int i=0;i<args.length;i++){result[i]=at;at+=args[i].getSize();}return result;}
+    private static void afterWriteValidation(MethodNode method,InsnList guard){
+        var checks=Arrays.stream(method.instructions.toArray()).filter(at->at instanceof MethodInsnNode call&&call.owner.equals(NETTY)
+                &&call.name.equals("isNotValidPromise")&&call.desc.equals("(Lio/netty/channel/ChannelPromise;Z)Z")).toList();
+        if(checks.size()!=1)throw new IllegalStateException("NETTY_WRITE_PROMISE_VALIDATION_UNAVAILABLE");
+        AbstractInsnNode next=checks.get(0).getNext();while(next!=null&&next.getOpcode()<0)next=next.getNext();
+        if(!(next instanceof JumpInsnNode valid)||valid.getOpcode()!=Opcodes.IFEQ)throw new IllegalStateException("NETTY_WRITE_PROMISE_VALID_BRANCH_UNAVAILABLE");
+        // Netty owns null/message checks, cancelled-promise release and foreign or
+        // completed-promise rejection. A stopped write may touch its promise and
+        // flush earlier messages only after that original validation accepts it.
+        method.instructions.insert(valid.label,guard);
+    }
     private static void call(InsnList code,String name,String desc){code.add(new MethodInsnNode(Opcodes.INVOKESTATIC,BRIDGE,name,desc,false));}
     private static void rejectOutbound(InsnList code,int message,int promise){
         code.add(new VarInsnNode(Opcodes.ALOAD,message));code.add(new MethodInsnNode(Opcodes.INVOKESTATIC,"io/netty/util/ReferenceCountUtil","release","(Ljava/lang/Object;)Z",false));code.add(new InsnNode(Opcodes.POP));

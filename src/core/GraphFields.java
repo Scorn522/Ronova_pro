@@ -8,12 +8,20 @@ final class GraphFields {
     private static final Object UNSAFE;
     private static final Class<?> UNSAFE_TYPE;
     private static final Method OBJECT_OFFSET,STATIC_OFFSET,STATIC_BASE,INITIALIZE;
-    private static final Method NATIVE_WRITE;
+    private static final Map<Class<?>,Method> COMPARES;
     static {
         try{
-            UNSAFE_TYPE=Class.forName("sun.misc.Unsafe");Field singleton=UNSAFE_TYPE.getDeclaredField("theUnsafe");singleton.setAccessible(true);UNSAFE=singleton.get(null);
+            UNSAFE_TYPE=Class.forName("jdk.internal.misc.Unsafe",false,null);
+            Class.forName("dev.ronova.pro.agent.RecoveryAgent",false,ClassLoader.getSystemClassLoader()).getMethod("openBackingAccess",Class.class,Class[].class)
+                .invoke(null,GraphFields.class,(Object)new Class<?>[]{UNSAFE_TYPE});
+            Field singleton=UNSAFE_TYPE.getDeclaredField("theUnsafe");singleton.setAccessible(true);UNSAFE=singleton.get(null);
             OBJECT_OFFSET=UNSAFE_TYPE.getMethod("objectFieldOffset",Field.class);STATIC_OFFSET=UNSAFE_TYPE.getMethod("staticFieldOffset",Field.class);STATIC_BASE=UNSAFE_TYPE.getMethod("staticFieldBase",Field.class);INITIALIZE=UNSAFE_TYPE.getMethod("shouldBeInitialized",Class.class);
-            NATIVE_WRITE=Class.forName("dev.ronova.pro.bootstrap.NativeControl",false,null).getMethod("restoreRecoveredField",Field.class,Object.class,Object.class,Object.class);
+            Map<Class<?>,Method> compares=new IdentityHashMap<>();
+            for(Class<?> primitive:List.of(boolean.class,byte.class,char.class,short.class,int.class,long.class,float.class,double.class)){
+                String name=primitive.getName();name=Character.toUpperCase(name.charAt(0))+name.substring(1);
+                compares.put(primitive,UNSAFE_TYPE.getMethod("compareAndSet"+name,Object.class,long.class,primitive,primitive));
+            }
+            compares.put(Object.class,UNSAFE_TYPE.getMethod("compareAndSetReference",Object.class,long.class,Object.class,Object.class));COMPARES=Map.copyOf(compares);
         }catch(ReflectiveOperationException unavailable){throw new ExceptionInInitializerError(unavailable);}
     }
     private GraphFields(){}
@@ -44,7 +52,7 @@ final class GraphFields {
         if(type==double.class)return left instanceof Double a&&right instanceof Double b&&Double.doubleToRawLongBits(a)==Double.doubleToRawLongBits(b);return Objects.equals(left,right);
     }
     static Object zero(Class<?> type){if(!type.isPrimitive())return null;if(type==boolean.class)return false;if(type==byte.class)return (byte)0;if(type==short.class)return (short)0;if(type==char.class)return (char)0;if(type==int.class)return 0;if(type==long.class)return 0L;if(type==float.class)return 0F;if(type==double.class)return 0D;throw new IllegalArgumentException("FIELD_GRAPH_PRIMITIVE_UNAVAILABLE");}
-    static boolean write(Field field,Object receiver,Object expected,Object value)throws ReflectiveOperationException{
+    static boolean write(Field field,Object receiver,Object expected,Object value,Object originLock,java.util.function.BooleanSupplier exclusive)throws ReflectiveOperationException{
         if(!field.getType().isPrimitive()&&value!=null&&!field.getType().isInstance(value))throw new IllegalArgumentException("FIELD_GRAPH_VALUE_TYPE_MISMATCH");
         if(!same(field,read(field,receiver),expected))return false;
         Object target=Modifier.isStatic(field.getModifiers())?field.getDeclaringClass():receiver;
@@ -52,17 +60,15 @@ final class GraphFields {
         Object gate=bridge.getMethod("beginRecoveryMutation",Object.class).invoke(null,target);if(Boolean.FALSE.equals(gate))return false;boolean written=false;
         try{
             if(!same(field,read(field,receiver),expected))return false;
-            if(!field.getDeclaringClass().isHidden()&&!field.getDeclaringClass().isRecord()){
-                boolean statik=Modifier.isStatic(field.getModifiers());Object base=statik?STATIC_BASE.invoke(UNSAFE,field):receiver;long offset=((Number)(statik?STATIC_OFFSET:OBJECT_OFFSET).invoke(UNSAFE,field)).longValue();
-                if(!field.getType().isPrimitive()){
-                    if(!Boolean.TRUE.equals(UNSAFE_TYPE.getMethod("compareAndSwapObject",Object.class,long.class,Object.class,Object.class).invoke(UNSAFE,base,offset,expected,value)))return false;
-                    written=true;
-                }else{String suffix=field.getType().getName();suffix=Character.toUpperCase(suffix.charAt(0))+suffix.substring(1);written=true;UNSAFE_TYPE.getMethod("put"+suffix+"Volatile",Object.class,long.class,field.getType()).invoke(UNSAFE,base,offset,value);}
-            }else{if(!Boolean.TRUE.equals(NATIVE_WRITE.invoke(null,field,receiver,expected,value)))return false;written=true;}
+            boolean statik=Modifier.isStatic(field.getModifiers());Object base=statik?STATIC_BASE.invoke(UNSAFE,field):receiver;long offset=((Number)(statik?STATIC_OFFSET:OBJECT_OFFSET).invoke(UNSAFE,field)).longValue();
+            // The VM supplies the actual declaration's offset, including hidden/record fields.
+            // Comparing and storing must be one operation: a later writer can run after the read above.
+            synchronized(originLock){if(!exclusive.getAsBoolean())return false;written=compare(field.getType(),base,offset,expected,value);}
+            if(!written)return false;
             return same(field,read(field,receiver),value);
         }finally{bridge.getMethod("finishFieldMutation",Object.class,boolean.class).invoke(null,gate,written);}
     }
-    static boolean writeArray(Object array,int index,Object expected,Object value)throws ReflectiveOperationException{
+    static boolean writeArray(Object array,int index,Object expected,Object value,Object originLock,java.util.function.BooleanSupplier exclusive)throws ReflectiveOperationException{
         Class<?> type=array.getClass().getComponentType();if(type==null||index<0||index>=Array.getLength(array))throw new IllegalArgumentException("FIELD_GRAPH_ARRAY_POSITION_CHANGED");
         if(!type.isPrimitive()&&value!=null&&!type.isInstance(value))throw new IllegalArgumentException("FIELD_GRAPH_ARRAY_VALUE_TYPE_MISMATCH");
         Class<?> bridge=Class.forName("dev.ronova.pro.bootstrap.ControlBridge",false,null);Object gate=bridge.getMethod("beginRecoveryMutation",Object.class).invoke(null,array);if(Boolean.FALSE.equals(gate))return false;boolean written=false;
@@ -71,9 +77,12 @@ final class GraphFields {
             int base=((Number)UNSAFE_TYPE.getMethod("arrayBaseOffset",Class.class).invoke(UNSAFE,array.getClass())).intValue();
             int scale=((Number)UNSAFE_TYPE.getMethod("arrayIndexScale",Class.class).invoke(UNSAFE,array.getClass())).intValue();if(scale<=0)return false;
             long offset=base+(long)index*scale;
-            if(!type.isPrimitive()){if(!Boolean.TRUE.equals(UNSAFE_TYPE.getMethod("compareAndSwapObject",Object.class,long.class,Object.class,Object.class).invoke(UNSAFE,array,offset,expected,value)))return false;written=true;}
-            else{String suffix=type.getName();suffix=Character.toUpperCase(suffix.charAt(0))+suffix.substring(1);written=true;UNSAFE_TYPE.getMethod("put"+suffix+"Volatile",Object.class,long.class,type).invoke(UNSAFE,array,offset,value);}
+            synchronized(originLock){if(!exclusive.getAsBoolean())return false;written=compare(type,array,offset,expected,value);}
+            if(!written)return false;
             Object readback=Array.get(array,index);return type.isPrimitive()?bitsEqual(type,readback,value):readback==value;
         }finally{bridge.getMethod("finishFieldMutation",Object.class,boolean.class).invoke(null,gate,written);}
+    }
+    private static boolean compare(Class<?> type,Object base,long offset,Object expected,Object value)throws ReflectiveOperationException{
+        return Boolean.TRUE.equals(COMPARES.get(type.isPrimitive()?type:Object.class).invoke(UNSAFE,base,offset,expected,value));
     }
 }

@@ -127,10 +127,17 @@ final class FieldGraph {
         if(image.writing==null){image.state="CAPTURE_INCOMPLETE";return;}int budget=256;boolean incomplete=false;
         while(budget>0&&image.nodeCursor<image.writing.size()){
             Node node=image.writing.get(image.nodeCursor);
+            // An object observed under another body after capture is now shared.
+            // Keep its original image for reporting, but never clear or restore its live fields.
+            if(!node.statics&&!runtime.graphOwns(this,image.roots,node.receiver)){
+                node.pending="";for(Slot slot:node.slots){slot.preserved=true;slot.pending="FIELD_GRAPH_SHARED_ORIGIN_RETAINED";}
+                image.nodeCursor++;image.slotCursor=0;continue;
+            }
             if(image.mode==Mode.CLEAR&&!node.resourceReleased){String resource=runtime.graphRelease(this,image.roots,node.receiver);if(!resource.isEmpty()){node.pending=resource;incomplete=true;image.nodeCursor++;image.slotCursor=0;continue;}node.resourceReleased=true;node.pending="";}
             if(image.mode==Mode.RESTORE&&runtime.graphLifetime(this,node.receiver)){node.pending="FIELD_GRAPH_RESOURCE_HISTORY_RESTORE_PENDING";incomplete=true;image.nodeCursor++;image.slotCursor=0;continue;}
             while(budget-->0&&image.slotCursor<node.slots.size()){
                 Slot slot=node.slots.get(image.slotCursor++);Object desired=image.mode==Mode.CLEAR?GraphFields.zero(slot.field==null?node.receiver.getClass().getComponentType():slot.field.getType()):slot.value;
+                if(!node.statics&&!runtime.graphOwns(this,image.roots,node.receiver)){slot.pending="FIELD_GRAPH_SHARED_ORIGIN_RETAINED";slot.preserved=true;continue;}
                 // Inherited/interface statics remain part of the field image, but the
                 // declared-static command only selects declarations on the actual roots.
                 if(node.statics&&!image.statics.contains(slot.field.getDeclaringClass())){slot.pending="FIELD_GRAPH_SHARED_DECLARATION_RETAINED";slot.preserved=true;continue;}
@@ -143,7 +150,8 @@ final class FieldGraph {
                     if(image.mode==Mode.RESTORE&&!same(node,slot,prior,expected)&&!same(node,slot,prior,desired)){
                         slot.pending="FIELD_GRAPH_LATER_CHANGE_PRESERVED";slot.preserved=true;continue;
                     }
-                    boolean done=same(node,slot,prior,desired)||(slot.field==null?GraphFields.writeArray(node.receiver,slot.element,expected,desired):GraphFields.write(slot.field,node.statics?null:node.receiver,expected,desired));
+                    Object originLock=runtime.graphOriginLock(this);java.util.function.BooleanSupplier exclusive=()->node.statics||runtime.graphExclusive(this,image.roots,node.receiver);
+                    boolean done=same(node,slot,prior,desired)||(slot.field==null?GraphFields.writeArray(node.receiver,slot.element,expected,desired,originLock,exclusive):GraphFields.write(slot.field,node.statics?null:node.receiver,expected,desired,originLock,exclusive));
                     if(done&&image.mode==Mode.RESTORE)slot.applied=true;
                     slot.pending=done?"":"FIELD_GRAPH_WRITE_CHANGED_OR_REFUSED";if(!done)incomplete=true;
                 }catch(ReflectiveOperationException|RuntimeException unavailable){slot.pending=unavailable.getClass().getSimpleName()+":"+String.valueOf(unavailable.getMessage());incomplete=true;}

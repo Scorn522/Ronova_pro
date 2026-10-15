@@ -1046,6 +1046,91 @@ static int code_current_stopped(JNIEnv *env){
     OwnerLink *owners=NULL;int unknown=0,observed=code_current_sources_query(env,&owners,&unknown),stopped=native_owner_stopped(owners)!=NULL;
     code_links_free(owners);if(!observed){native_refuse(env,"EXTERNAL_NATIVE_CALL_SOURCE_UNOBSERVED");return 1;}return stopped;
 }
+static int code_source_query_module_stopped(JNIEnv *env,jobject module,jobjectArray policy){
+    if(!module)return 0;jsize count=native_original.GetArrayLength(env,policy);int stopped=0;
+    for(jsize i=0;i<count&&!stopped&&!native_original.ExceptionCheck(env);i++){
+        jobject selected=native_original.GetObjectArrayElement(env,policy,i);
+        stopped=selected&&native_original.IsSameObject(env,module,selected);
+        if(selected)native_original.DeleteLocalRef(env,selected);
+    }
+    if(!stopped){AcquireSRWLockShared(&native_records);
+        for(Owner *owner=native_owners;owner;owner=owner->next)
+            if(InterlockedCompareExchange(&owner->stopped,0,0)&&native_original.IsSameObject(env,owner->module,module)){stopped=1;break;}
+        ReleaseSRWLockShared(&native_records);
+    }return stopped;
+}
+static int code_source_query_owners_stopped(JNIEnv *env,OwnerLink *owners,jobjectArray policy){
+    for(OwnerLink *entry=owners;entry&&!native_original.ExceptionCheck(env);entry=entry->next)
+        if(InterlockedCompareExchange(&entry->owner->stopped,0,0)||code_source_query_module_stopped(env,entry->owner->module,policy))return 1;
+    return 0;
+}
+JNIEXPORT jboolean JNICALL Java_dev_ronova_pro_bootstrap_NativeControl_sourceQueryStopped0(JNIEnv *env,jclass type){
+    NativeThread *state=native_thread();jobjectArray policy=NULL;OwnerLink *owners=NULL;int valid=1,stopped=0;
+    if(!state||!native_jni_ready||!native_ti||!native_controls||!native_controller||!native_original.IsSameObject(env,type,native_controller)){
+        native_refuse(env,"SOURCE_QUERY_STACK_UNAVAILABLE");return JNI_TRUE;
+    }
+    jmethodID active=native_original.GetStaticMethodID(env,native_controls,"sourceQueryActive","()Z");
+    jmethodID frameQuery=native_original.GetStaticMethodID(env,type,"sourceQueryFrame","(Ljava/lang/Class;Ljava/lang/String;Ljava/lang/String;II)[Ljava/lang/Module;");
+    jfieldID stoppedField=native_original.GetStaticFieldID(env,native_controls,"stoppedModules","[Ljava/lang/Module;");
+    if(!active||!frameQuery||!stoppedField||native_original.ExceptionCheck(env)
+            ||!native_original.CallStaticBooleanMethod(env,native_controls,active)){
+        native_refuse(env,"ACTUAL_SOURCE_QUERY_REQUIRED");return JNI_TRUE;
+    }
+    // Read the actual Java stop policy too: its publication precedes the
+    // native Owner update. A retained policy supplied by a caller grants nothing.
+    policy=(jobjectArray)native_original.GetStaticObjectField(env,native_controls,stoppedField);
+    if(!policy||native_original.ExceptionCheck(env)){valid=0;goto done;}
+    int unknown=0;
+    if(!native_capture_scope_sources(env,state,&owners,&unknown)){valid=0;goto done;}
+    stopped=code_source_query_owners_stopped(env,owners,policy);code_links_free(owners);owners=NULL;
+    jint totalDepth=0;
+    if((*native_ti)->GetFrameCount(native_ti,NULL,&totalDepth)!=JVMTI_ERROR_NONE){valid=0;goto done;}
+    // No state->control shortcut and no Java StackWalker: that walk may be
+    // suspended in its own frame-buffer copy. Each chunk is this native reader's
+    // private stack image; the original destination policy still runs afterward.
+    for(jint depth=0;valid&&!stopped&&!native_original.ExceptionCheck(env);){
+        jvmtiFrameInfo frames[16];jint count=0;
+        jvmtiError error=(*native_ti)->GetStackTrace(native_ti,NULL,depth,16,frames,&count);
+        if(error==JVMTI_ERROR_ILLEGAL_ARGUMENT&&depth>0)break;
+        if(error!=JVMTI_ERROR_NONE){valid=0;break;}
+        for(jint i=0;i<count&&valid&&!stopped&&!native_original.ExceptionCheck(env);i++){
+            jclass declaring=NULL;jobject module=NULL;jstring methodName=NULL,methodDescriptor=NULL;jobjectArray dynamic=NULL;char *name=NULL,*descriptor=NULL;
+            error=(*native_ti)->GetMethodDeclaringClass(native_ti,frames[i].method,&declaring);
+            if(error!=JVMTI_ERROR_NONE||!declaring)valid=0;
+            if(valid){module=native_original.GetModule(env,declaring);if(!module)valid=0;else stopped=code_source_query_module_stopped(env,module,policy);}
+            if(valid&&!stopped&&frames[i].location>=0){
+                error=(*native_ti)->GetMethodName(native_ti,frames[i].method,&name,&descriptor,NULL);
+                if(error!=JVMTI_ERROR_NONE||!name||!descriptor)valid=0;
+                if(valid){methodName=native_original.NewStringUTF(env,name);methodDescriptor=native_original.NewStringUTF(env,descriptor);if(!methodName||!methodDescriptor)valid=0;}
+                if(valid&&!native_original.ExceptionCheck(env)){
+                    dynamic=(jobjectArray)native_original.CallStaticObjectMethod(env,type,frameQuery,declaring,methodName,methodDescriptor,(jint)frames[i].location,totalDepth-depth-i);
+                    if(dynamic){jsize length=native_original.GetArrayLength(env,dynamic);
+                        for(jsize at=0;at<length&&!stopped&&!native_original.ExceptionCheck(env);at++){
+                            jobject source=native_original.GetObjectArrayElement(env,dynamic,at);stopped=code_source_query_module_stopped(env,source,policy);
+                            if(source)native_original.DeleteLocalRef(env,source);
+                        }
+                    }
+                    if(!stopped&&!native_original.ExceptionCheck(env)&&code_method_relevant(env,frames[i].method,NULL)){
+                        int known=0,unobserved=0;
+                        valid=code_available&&code_frame_sources_query(env,frames[i].method,frames[i].location,&owners,&known,&unobserved);
+                        if(valid)stopped=code_source_query_owners_stopped(env,owners,policy);
+                        // Unknown remains in the active Java query. This predicate
+                        // asks whether a real known contributor has been stopped.
+                        code_links_free(owners);owners=NULL;
+                    }
+                }
+            }
+            if(name)(*native_ti)->Deallocate(native_ti,(unsigned char*)name);if(descriptor)(*native_ti)->Deallocate(native_ti,(unsigned char*)descriptor);
+            if(dynamic)native_original.DeleteLocalRef(env,dynamic);if(methodName)native_original.DeleteLocalRef(env,methodName);if(methodDescriptor)native_original.DeleteLocalRef(env,methodDescriptor);
+            if(module)native_original.DeleteLocalRef(env,module);if(declaring)native_original.DeleteLocalRef(env,declaring);
+        }
+        if(count<16)break;if(depth>INT32_MAX-count){valid=0;break;}depth+=count;
+    }
+done:
+    code_links_free(owners);if(policy)native_original.DeleteLocalRef(env,policy);
+    if(!valid||native_original.ExceptionCheck(env)){native_refuse(env,"SOURCE_QUERY_FRAME_UNOBSERVED");return JNI_TRUE;}
+    return stopped?JNI_TRUE:JNI_FALSE;
+}
 JNIEXPORT jobjectArray JNICALL Java_dev_ronova_pro_bootstrap_NativeControl_codeFrame0(JNIEnv *env,jclass type,jclass declaring,jstring name,jstring descriptor,jint location){
     (void)type;if(!code_caller(env)){native_refuse(env,"ACTUAL_CODE_FRAME_BRIDGE_REQUIRED");return NULL;}
     OwnerLink *owners=NULL;jthread thread=NULL;jvmtiFrameInfo *frames=NULL;jint count=0;int unknown=0;const char *key=native_original.GetStringUTFChars(env,name,NULL),*desc=native_original.GetStringUTFChars(env,descriptor,NULL);

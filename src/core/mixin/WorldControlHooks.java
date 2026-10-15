@@ -75,6 +75,27 @@ public final class WorldControlHooks {
             if(ProRuntime.worldBlockMutationDenied((Level)(Object)this,tile.getBlockPos()))callback.cancel();
         }
     }
+    @Mixin(net.minecraft.world.level.chunk.LevelChunkSection.class) public abstract static class SectionWrites {
+        @Inject(method="setBlockState(IIILnet/minecraft/world/level/block/state/BlockState;Z)Lnet/minecraft/world/level/block/state/BlockState;",at=@At("HEAD"),cancellable=true,require=1,allow=1)
+        private void state(int x,int y,int z,net.minecraft.world.level.block.state.BlockState state,boolean checked,CallbackInfoReturnable<net.minecraft.world.level.block.state.BlockState> callback){
+            var section=(net.minecraft.world.level.chunk.LevelChunkSection)(Object)this;
+            if(ProRuntime.worldSectionMutationDenied(section,x,y,z))callback.setReturnValue(section.getBlockState(x,y,z));
+        }
+    }
+    @Mixin(net.minecraft.world.level.chunk.PalettedContainer.class) public abstract static class PaletteWrites<T> {
+        @Shadow protected abstract T get(int index);
+        // These are the common, already-resolved index boundaries for set,
+        // getAndSet and getAndSetUnchecked. Check before idFor can resize or
+        // mutate a palette, including noncanonical xyz aliases of a real cell.
+        @Inject(method="getAndSet(ILjava/lang/Object;)Ljava/lang/Object;",at=@At("HEAD"),cancellable=true,require=1,allow=1)
+        private void swap(int index,T state,CallbackInfoReturnable<T> callback){
+            if(ProRuntime.worldPaletteMutationDenied((net.minecraft.world.level.chunk.PalettedContainer<?>)(Object)this,index))callback.setReturnValue(get(index));
+        }
+        @Inject(method="set(ILjava/lang/Object;)V",at=@At("HEAD"),cancellable=true,require=1,allow=1)
+        private void state(int index,T state,CallbackInfo callback){
+            if(ProRuntime.worldPaletteMutationDenied((net.minecraft.world.level.chunk.PalettedContainer<?>)(Object)this,index))callback.cancel();
+        }
+    }
     @Mixin(targets="net.minecraft.world.level.chunk.LevelChunk$BoundTickingBlockEntity") public abstract static class Block {
         @Shadow @Final private net.minecraft.world.level.block.entity.BlockEntity blockEntity;
         @Inject(method="tick",at=@At("HEAD"),cancellable=true)

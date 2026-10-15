@@ -3,7 +3,7 @@
 #include <bcrypt.h>
 // Preserve Object.clone itself, including Cloneable checks; never substitute a Java ancestor body.
 JNIEXPORT jint JNICALL Java_dev_ronova_pro_bootstrap_NativeControl_abi(JNIEnv *env, jclass type) {
-    (void)env; (void)type; return 72;
+    (void)env; (void)type; return 73;
 }
 JNIEXPORT jobject JNICALL Java_dev_ronova_pro_bootstrap_NativeControl_returnIdentifier0(JNIEnv *env,jclass type) {
     (void)type;
@@ -127,6 +127,7 @@ static int native_bind_controller(JNIEnv *env,jclass controller){
         {"codeRetirementFramePermit0","(Ljava/lang/Class;ILjava/lang/Object;Ljava/lang/Module;)Z",(void*)Java_dev_ronova_pro_bootstrap_NativeControl_codeRetirementFramePermit0},
         {"preparedClass0","(Ljava/lang/Class;)Z",(void*)Java_dev_ronova_pro_bootstrap_NativeControl_preparedClass0},
         {"sourceCapture0","()Z",(void*)Java_dev_ronova_pro_bootstrap_NativeControl_sourceCapture0},
+        {"sourceQueryStopped0","()Z",(void*)Java_dev_ronova_pro_bootstrap_NativeControl_sourceQueryStopped0},
         {"arrayCopyInternalBoundary0","()Z",(void*)Java_dev_ronova_pro_bootstrap_NativeControl_arrayCopyInternalBoundary0},
         {"arrayCopyReadBoundary0","(Ljava/lang/Object;II)Z",(void*)Java_dev_ronova_pro_bootstrap_NativeControl_arrayCopyReadBoundary0},
         {"arrayCopyBoundary0","(Ljava/lang/Object;IILjava/lang/Object;IILjava/lang/Object;)Z",(void*)Java_dev_ronova_pro_bootstrap_NativeControl_arrayCopyBoundary0},

@@ -275,10 +275,22 @@ public final class CodeSourceBridge {
     }
     static Module[] frameSources(StackWalker.StackFrame frame){
         Module[] execution=ExecutionFlow.frameSources(frame);if(execution!=null)return execution;
+        if(frame.getByteCodeIndex()<0)return NO_FRAME_SOURCES;
         Class<?> type=frame.getDeclaringClass();FrameMethods methods=FRAME_METHODS.get(type);
         if(methods.revision()!=methods.bucket().revision){FRAME_METHODS.remove(type);methods=FRAME_METHODS.get(type);}
-        if(!methods.selectors().contains(frame.getMethodName()+frame.getDescriptor())||frame.getByteCodeIndex()<0)return NO_FRAME_SOURCES;
-        Module[] actual=NativeControl.codeFrame(frame);return actual==null?NO_FRAME_SOURCES:actual;
+        if(methods.selectors().isEmpty())return NO_FRAME_SOURCES;
+        for(String selector:methods.selectors())if(frameSelector(frame,selector)){
+            Module[] actual=NativeControl.codeFrame(frame);return actual==null?NO_FRAME_SOURCES:actual;
+        }return NO_FRAME_SOURCES;
+    }
+    static boolean frameSelector(StackWalker.StackFrame frame,String selector){
+        // This lookup runs inside the native arraycopy source query itself.
+        // Concatenating the walked name/descriptor would copy String bytes and
+        // recursively request the same sources before this lookup can finish.
+        String name=frame.getMethodName();int split=name.length();
+        if(selector.length()<=split||selector.charAt(split)!='('||!selector.regionMatches(0,name,0,split))return false;
+        String descriptor=frame.getDescriptor();
+        return selector.length()==split+descriptor.length()&&selector.regionMatches(split,descriptor,0,descriptor.length());
     }
     static boolean hasFrameSources(){
         if(ExecutionFlow.hasFrame())return true;

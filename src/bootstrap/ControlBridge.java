@@ -28,7 +28,7 @@ public final class ControlBridge {
         }
     };
     private ControlBridge() { }
-    public static int abiVersion(){return 77;}
+    public static int abiVersion(){return 78;}
     public static long arrayRevision(Object value){if(!recoveryWriter())throw new SecurityException("RECOVERY_ARRAY_READER_REQUIRED");return CodeSourceBridge.executionArrayRevision(value);}
 
     public static synchronized void install(Class<?> agent,ClassFileTransformer[] transformers) throws ReflectiveOperationException {
@@ -129,6 +129,36 @@ public final class ControlBridge {
 
 
     static final Module[] NO_SOURCES=new Module[0];
+    private static final Module[] QUERY_UNKNOWN_SOURCES=new Module[]{null};
+    private static final ThreadLocal<SourceQuery> SOURCE_QUERIES=new ThreadLocal<>();
+    private static final class SourceQuery {
+        final Thread thread=Thread.currentThread();Module[] partial=QUERY_UNKNOWN_SOURCES;
+        void retain(Module[] incoming){
+            if(incoming==null||incoming.length==0)return;int additions=0;
+            for(int i=0;i<incoming.length;i++){
+                Module source=incoming[i];if(source==null)continue;boolean known=false;
+                for(Module retained:partial)if(retained==source){known=true;break;}
+                for(int j=0;j<i&&!known;j++)known=incoming[j]==source;
+                if(!known)additions++;
+            }
+            if(additions==0)return;Module[] next=new Module[partial.length+additions];int at=0;
+            // A source query may be observing arraycopy itself. Its partial
+            // snapshot must not perform another copy to retain the old sources.
+            for(Module source:partial)next[at++]=source;
+            for(Module source:incoming){if(source==null)continue;boolean known=false;for(int i=0;i<at;i++)if(next[i]==source){known=true;break;}if(!known)next[at++]=source;}
+            partial=next;CodeSourceBridge.mutationControls((Object)next);
+        }
+    }
+    private static SourceQuery beginSourceQuery(Module[] retained){
+        SourceQuery query=new SourceQuery();SOURCE_QUERIES.set(query);
+        try{query.retain(retained);CodeSourceBridge.mutationControls(query,SOURCE_QUERIES,query.partial);return query;}
+        catch(RuntimeException|Error failure){SOURCE_QUERIES.remove();throw failure;}
+    }
+    private static void endSourceQuery(SourceQuery query){
+        if(query.thread!=Thread.currentThread()||SOURCE_QUERIES.get()!=query)throw new IllegalStateException("SOURCE_QUERY_THREAD_AND_ORDER_REQUIRED");
+        SOURCE_QUERIES.remove();
+    }
+    static boolean sourceQueryActive(){SourceQuery query=SOURCE_QUERIES.get();return WALKER.getCallerClass()==NativeControl.class&&query!=null&&query.thread==Thread.currentThread();}
     static final int MAX_DEPTH=128;
     static final StackWalker WALKER=StackWalker.getInstance(StackWalker.Option.RETAIN_CLASS_REFERENCE);
     static final StackWalker ORIGIN_WALKER=StackWalker.getInstance(Set.of(StackWalker.Option.RETAIN_CLASS_REFERENCE,StackWalker.Option.SHOW_HIDDEN_FRAMES));
@@ -208,12 +238,13 @@ public final class ControlBridge {
     static final class InvokingSources implements java.util.function.Function<java.util.stream.Stream<StackWalker.StackFrame>,Module[]> {
         public Module[] apply(java.util.stream.Stream<StackWalker.StackFrame> frames){
             var cursor=frames.iterator();while(cursor.hasNext()){
-                var frame=cursor.next();Module[] sources=CodeSourceBridge.frameSources(frame);if(sources.length!=0)return sources;
-                sources=producerRootSources(frame);if(sources.length!=0)return sources;
-                Module physical=DefinitionBridge.module(frame.getDeclaringClass());if(producer(physical))return new Module[]{physical};
+                var frame=cursor.next();Module[] sources=CodeSourceBridge.frameSources(frame);if(sources.length!=0)return retainQuerySources(sources);
+                sources=producerRootSources(frame);if(sources.length!=0)return retainQuerySources(sources);
+                Module physical=DefinitionBridge.module(frame.getDeclaringClass());if(producer(physical))return retainQuerySources(new Module[]{physical});
             }
             Frame task=CURRENT.get();
             if(task==null||task.exited||DELIVERING.get()!=null||CREATION_DELIVERY.get()!=null||PRODUCER_DELIVERY.get()!=null||OWN_LEDGER_MUTATION.get()!=null)return NO_SOURCES;
+            retainQuerySources(task.sources);
             return task.sources.clone();
         }
     }
@@ -243,10 +274,13 @@ public final class ControlBridge {
     }
     static final class StoppedCall implements java.util.function.Function<java.util.stream.Stream<StackWalker.StackFrame>,Boolean> {
         public Boolean apply(java.util.stream.Stream<StackWalker.StackFrame> frames){
-            var cursor=frames.iterator();while(cursor.hasNext()){
-                var frame=cursor.next();if(modStopped(DefinitionBridge.module(frame.getDeclaringClass())))return true;
-                for(Module source:CodeSourceBridge.frameSources(frame))if(modStopped(source))return true;
-            }return false;
+            SourceQuery previous=SOURCE_QUERIES.get(),query=previous==null?beginSourceQuery(NO_SOURCES):previous;
+            try{
+                var cursor=frames.iterator();while(cursor.hasNext()){
+                    var frame=cursor.next();if(modStopped(DefinitionBridge.module(frame.getDeclaringClass())))return true;
+                    for(Module source:retainQuerySources(CodeSourceBridge.frameSources(frame)))if(modStopped(source))return true;
+                }return false;
+            }finally{if(previous==null)endSourceQuery(query);}
         }
     }
     static final class Invoking implements java.util.function.Function<java.util.stream.Stream<StackWalker.StackFrame>,Module> {
@@ -274,7 +308,11 @@ public final class ControlBridge {
         }
     }
     static Module invokingModule() {
-        return ORIGIN_WALKER.walk(INVOKING);
+        // A singleton cannot represent an incomplete query. Its caller still
+        // observes sourceUnknown(), while the actual outer query keeps running.
+        if(SOURCE_QUERIES.get()!=null)return null;
+        SourceQuery query=beginSourceQuery(NO_SOURCES);
+        try{return ORIGIN_WALKER.walk(INVOKING);}finally{endSourceQuery(query);}
     }
     static boolean producer(Module module) {synchronized(PRODUCER_MODULES){return PRODUCER_MODULES.contains(module);}}
     static Object nativeThreadOperation(Thread thread,Module[] sources,int operation)throws ReflectiveOperationException {
@@ -318,10 +356,19 @@ public final class ControlBridge {
     }
     static boolean stoppedInvocation() {
         if(stoppedModules.length==0)return false;
-        if(NetworkBridge.stoppedSource())return true;
-        if(ClientBridge.stoppedSource())return true;
-        for(Module source:CodeSourceBridge.executionSources())if(modStopped(source))return true;
-        return ORIGIN_WALKER.walk(STOPPED_CALL);
+        SourceQuery previous=SOURCE_QUERIES.get(),query=previous==null?beginSourceQuery(NO_SOURCES):previous;
+        try{
+            if(NetworkBridge.stoppedSource())return true;
+            if(ClientBridge.stoppedSource())return true;
+            for(Module source:retainQuerySources(CodeSourceBridge.executionSources()))if(modStopped(source))return true;
+            for(Module source:query.partial)if(modStopped(source))return true;
+            // The outer stop query can resize its Java walker just like a
+            // reentrant one. The installed reader observes the same actual
+            // stack and dynamic frames without copying a Java frame batch.
+            // Only an outer Java-only query has the original walker fallback;
+            // an unavailable nested reader remains an observation failure.
+            return NativeControl.available()||previous!=null?NativeControl.sourceQueryStopped():ORIGIN_WALKER.walk(STOPPED_CALL);
+        }finally{if(previous==null)endSourceQuery(query);}
     }
     record CreationDefinition(java.lang.ref.WeakReference<ClassLoader> loader,boolean bootstrap,String name,Set<String> sites,ControlRef actual) { }
     record CreationObserver(Class<?> owner,java.lang.invoke.MethodHandle callback,java.lang.invoke.MethodHandle failure) { }
@@ -490,10 +537,18 @@ public final class ControlBridge {
         synchronized(CREATION_OWNERS) {EventKey key=new EventKey(object,null);return CREATION_UNKNOWN.contains(key)?null:CREATION_OWNERS.get(key);}
     }
     static Module[] invokingSources(){
-        Module[] scoped=scopedSources();if(scoped.length!=0)return scoped;
-        return frameSources();
+        return invokingSources(NO_SOURCES);
+    }
+    private static Module[] invokingSources(Module[] retained){
+        SourceQuery active=SOURCE_QUERIES.get();if(active!=null){active.retain(retained);return active.partial;}
+        SourceQuery query=beginSourceQuery(retained);
+        try{
+            Module[] scoped=scopedSources();if(scoped.length!=0)return scoped;
+            return sourceFrameWalk();
+        }finally{endSourceQuery(query);}
     }
     static boolean sourceUnknown(){
+        if(SOURCE_QUERIES.get()!=null)return true;
         if(NetworkBridge.sourceUnknown())return true;
         if(ClientBridge.sourceUnknown())return true;
         if(CodeSourceBridge.executionUnknown())return true;
@@ -501,6 +556,7 @@ public final class ControlBridge {
         Frame task=CURRENT.get();return task!=null&&!task.exited&&task.sourcesUnknown;
     }
     static Module[] mutationSources(Object receiver){
+        SourceQuery query=SOURCE_QUERIES.get();if(query!=null)return query.partial;
         Module[] scoped=scopedSources();if(scoped.length!=0)return scoped;
         // Ordinary stores keep their real gate/policy, but need no historical
         // provenance work before this receiver or execution has been observed.
@@ -511,6 +567,11 @@ public final class ControlBridge {
         return NO_SOURCES;
     }
     static Module[] frameSources(){
+        SourceQuery active=SOURCE_QUERIES.get();if(active!=null)return active.partial;
+        SourceQuery query=beginSourceQuery(NO_SOURCES);
+        try{return sourceFrameWalk();}finally{endSourceQuery(query);}
+    }
+    private static Module[] sourceFrameWalk(){
         // Inspect the live registries on every operation. Before any producer,
         // external instruction row or execution frame exists, walking all of
         // Minecraft's construction frames can only return this same empty set.
@@ -525,13 +586,18 @@ public final class ControlBridge {
         return sources;
     }
     static Set<Module> scopedSourceSet(){
-        Set<Module> modules=addModuleSources(null,NetworkBridge.currentSources(),false);
-        modules=addModuleSources(modules,ClientBridge.currentSources(),false);
-        modules=addModuleSources(modules,IoBridge.currentSources(),false);
-        modules=addModuleSources(modules,ResourceBridge.currentFileSources(),false);
-        modules=addModuleSources(modules,ResourceBridge.currentBufferSources(),false);
-        modules=addModuleSources(modules,CodeSourceBridge.executionSources(),false);
+        Set<Module> modules=addModuleSources(null,retainQuerySources(NetworkBridge.currentSources()),false);
+        modules=addModuleSources(modules,retainQuerySources(ClientBridge.currentSources()),false);
+        modules=addModuleSources(modules,retainQuerySources(IoBridge.currentSources()),false);
+        modules=addModuleSources(modules,retainQuerySources(ResourceBridge.currentFileSources()),false);
+        modules=addModuleSources(modules,retainQuerySources(ResourceBridge.currentBufferSources()),false);
+        modules=addModuleSources(modules,retainQuerySources(CodeSourceBridge.executionSources()),false);
         return modules;
+    }
+    private static Module[] retainQuerySources(Module[] sources){SourceQuery query=SOURCE_QUERIES.get();if(query!=null)query.retain(sources);return sources;}
+    private static Module[] unknownSources(Module[] sources){
+        for(Module source:sources)if(source==null)return sources;
+        Module[] partial=new Module[sources.length+1];for(int i=0;i<sources.length;i++)partial[i+1]=sources[i];return partial;
     }
     static Module[] scopedSources(){
         // This query also runs while LambdaMetafactory updates its own counters.
@@ -539,7 +605,9 @@ public final class ControlBridge {
         Set<Module> modules=scopedSourceSet();return modules==null?NO_SOURCES:modules.toArray(new Module[0]);
     }
     static Module[] nativeNetworkSources(){
-        if(!NativeControl.sourceCapture())throw new SecurityException("ACTUAL_NATIVE_SOURCE_CAPTURE_REQUIRED");return scopedSources();
+        if(!NativeControl.sourceCapture())throw new SecurityException("ACTUAL_NATIVE_SOURCE_CAPTURE_REQUIRED");
+        SourceQuery query=SOURCE_QUERIES.get();if(query!=null)return query.partial;
+        Module[] sources=scopedSources();return sourceUnknown()?unknownSources(sources):sources;
     }
     static Module[] nativeProcessSources(){
         if(!NativeControl.sourceCapture())throw new SecurityException("ACTUAL_NATIVE_SOURCE_CAPTURE_REQUIRED");return invokingSources();
@@ -1338,7 +1406,8 @@ public final class ControlBridge {
         return unsafeWriteAllowed(receiver,offset,value,ResourceBridge.unsafeWidth(kind));
     }
     static boolean classReflectionWrite(Object receiver,long offset,int width){
-        // A controller's Class mirror also holds Class's own instance cache.
+        // A Class mirror also holds Class's own instance cache, separately
+        // from the represented declaration and its static business fields.
         // Admit only its real JDK CAS, never an arbitrary write to that mirror.
         if(!ORIGIN_WALKER.walk(CLASS_REFLECTION_WRITER))return false;
         var field=ResourceBridge.exactField(receiver,offset,width);
@@ -1353,9 +1422,15 @@ public final class ControlBridge {
         if(!CodeSourceBridge.fieldRangeAllowed(receiver,offset,resourceWidth)&&!coreWriter())return false;
         if(!ResourceBridge.bufferWrapMutationAllowed(receiver,offset,value,resourceWidth)
                 &&!ResourceBridge.unsafeMutationAllowed(receiver,offset,resourceWidth))return false;
-        if((modStopped(objectModule(receiver))||stoppedInvocation())&&!coreWriter())return false;
-        if(receiver instanceof Class<?> owner&&ownState(owner)&&!classReflectionWrite(receiver,offset,resourceWidth)
-                ||receiver!=null&&ownState(receiver.getClass()))return false;
+        boolean targetStopped=modStopped(objectModule(receiver));
+        boolean ownMirror=receiver instanceof Class<?> owner&&ownState(owner);
+        boolean reflectionCache=receiver instanceof Class<?>&&(targetStopped||ownMirror)&&classReflectionWrite(receiver,offset,resourceWidth);
+        // Stopping a represented class must not turn Class.newReflectionData's
+        // own cache CAS into a permanently false retry. Its exact JDK/instance
+        // field proof excludes that target attribution only; the real caller's
+        // stopped sources and all following receiver policies still apply.
+        if(((targetStopped&&!reflectionCache)||stoppedInvocation())&&!coreWriter())return false;
+        if(ownMirror&&!reflectionCache||receiver!=null&&ownState(receiver.getClass()))return false;
         if(receiver==null)return true; // Raw-address writes have no exact object binding here.
         if(receiver instanceof java.util.Map.Entry<?,?>&&controlled(SourceMapBridge.ownerOf(receiver))&&!controlCaller())return false;
         if(!controlMutationAllowed(receiver)||!BackingBridge.offsetAllowed(receiver,offset,value))return false;
@@ -1755,8 +1830,9 @@ public final class ControlBridge {
         catch(RuntimeException|Error failure){gate.unlock();throw failure;}
     }
     static Module[] mutationSources(Module[] nativeSources){
-        Set<Module> sources=addModuleSources(null,invokingSources(),false);
-        sources=addModuleSources(sources,Objects.requireNonNull(nativeSources),false);
+        Objects.requireNonNull(nativeSources);
+        Set<Module> sources=addModuleSources(null,invokingSources(nativeSources),false);
+        sources=addModuleSources(sources,nativeSources,false);
         return sources==null?new Module[0]:sources.toArray(new Module[0]);
     }
     public static Object beginNativeArrayMutation(Object receiver,int start,int length,Module[] contributors){

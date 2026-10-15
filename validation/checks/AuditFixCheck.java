@@ -916,6 +916,7 @@ public final class AuditFixCheck {
         Method producer=controls.getDeclaredMethod("producer",Module.class);producer.setAccessible(true);
         Method stopped=controls.getDeclaredMethod("modStopped",Module.class);stopped.setAccessible(true);
         require(!Boolean.TRUE.equals(producer.invoke(null,AuditFixCheck.class.getModule())),"outside consumer is a Mod producer");
+        if(Boolean.TRUE.equals(stopped.invoke(null,module))){networkStoppedPromises(sender,controls);return;}
         require(!Boolean.TRUE.equals(stopped.invoke(null,module)),"preconnect fixture must remain active without bootStop");
         require(networkSources(current).length==0,"caller started inside a network scope");
         var connection=new net.minecraft.network.Connection(net.minecraft.network.protocol.PacketFlow.SERVERBOUND);
@@ -1010,13 +1011,44 @@ public final class AuditFixCheck {
                     &&Arrays.asList(writes.get(2)).contains(module),"shared packet lost a sender or inherited a different submission's source");
             for(int i=0;i<3;i++)require(writeThreads.get(i)!=consumer&&writeInLoop.get(i),"write did not execute on the actual separate EventLoop");
             System.out.println("NETWORK_PRECONNECT_PASS actual_active_named_Mod Connection_send shared_vanilla_packet independent_queue_items nonMod_flushQueue real_LocalChannel_EventLoop deferred_sender_sources no_shared_packet_source_pollution scope_finally_and_ACTIVE_cleared");
-            System.out.println("NETWORK_PRECONNECT_STOP_NOTRUN actual_game_Runtime_required no_fabricated_stop_or_producer_authority");
+            System.out.println("NETWORK_PRECONNECT_QUEUED_STOP_NOTRUN actual_active_to_stop_transition_requires_game_Runtime no_fabricated_stop_or_producer_authority");
         } finally {
             if(client!=null)client.close().syncUninterruptibly();
             if(server!=null)server.close().syncUninterruptibly();
             clientLoops.shutdownGracefully(0,5,TimeUnit.SECONDS).syncUninterruptibly();
             serverLoops.shutdownGracefully(0,5,TimeUnit.SECONDS).syncUninterruptibly();
         }
+    }
+    private static void networkStoppedPromises(Class<?> source,Class<?> controls)throws Exception {
+        // The same actual named fixture module is stopped by its configured
+        // bootStop policy. Its Class identity carries that source without
+        // executing a stopped sender or manufacturing a receipt/authority.
+        Module[] sources=(Module[])controls.getMethod("objectSources",Object.class).invoke(null,source);
+        require(Arrays.asList(sources).contains(source.getModule()),"actual stopped fixture Class lost its module source");
+        var writes=new java.util.concurrent.atomic.AtomicInteger();var flushes=new java.util.concurrent.atomic.AtomicInteger();
+        var channel=new io.netty.channel.embedded.EmbeddedChannel(new io.netty.channel.ChannelOutboundHandlerAdapter(){
+            public void write(io.netty.channel.ChannelHandlerContext context,Object message,io.netty.channel.ChannelPromise promise)throws Exception{writes.incrementAndGet();context.write(message,promise);}
+            public void flush(io.netty.channel.ChannelHandlerContext context)throws Exception{flushes.incrementAndGet();context.flush();}
+        });
+        var other=new io.netty.channel.embedded.EmbeddedChannel();
+        try {
+            Object unrelated=new Object();channel.write(unrelated);
+            require(writes.get()==1&&flushes.get()==0&&channel.readOutbound()==null,"unrelated write did not remain queued before its flush");
+            var foreign=other.newPromise();
+            try{channel.writeAndFlush(source,foreign);throw new AssertionError("foreign channel promise was accepted by stopped-source gate");}
+            catch(IllegalArgumentException expected){require(!foreign.isDone(),"stopped write changed another channel's promise");}
+            var completed=channel.newPromise();completed.setSuccess();
+            try{channel.writeAndFlush(source,completed);throw new AssertionError("completed promise was accepted by stopped-source gate");}
+            catch(IllegalArgumentException expected){require(completed.isSuccess(),"stopped write changed an already completed promise");}
+            var cancelled=channel.newPromise();require(cancelled.cancel(false),"actual promise did not enter cancelled state");
+            require(channel.writeAndFlush(source,cancelled)==cancelled&&cancelled.isCancelled(),"original cancelled-promise result changed");
+            require(writes.get()==1&&flushes.get()==0&&channel.readOutbound()==null,"invalid or cancelled stopped write flushed an unrelated queued message");
+            var refused=channel.newPromise();channel.writeAndFlush(source,refused);
+            require(refused.isDone()&&!refused.isSuccess()&&refused.cause() instanceof CancellationException
+                    &&"NETWORK_OUTBOUND_REJECTED".equals(refused.cause().getMessage()),"valid stopped-source write escaped the actual outbound gate");
+            require(writes.get()==1&&flushes.get()==1&&channel.readOutbound()==unrelated&&channel.readOutbound()==null,"valid stopped rejection lost the preceding unrelated write/flush");
+            System.out.println("NETWORK_PROMISE_STOP_PASS actual_bootStop_named_Mod_Class_source real_EmbeddedChannel foreign_promise_unchanged completed_promise_original_exception cancelled_no_flush valid_stopped_rejected preceding_unrelated_write_flushed");
+        } finally {channel.finishAndReleaseAll();other.finishAndReleaseAll();}
     }
     private static String networkPromises(List<io.netty.channel.ChannelPromise> promises){
         synchronized(promises){return promises.stream().map(promise->"done="+promise.isDone()+"/success="+promise.isSuccess()+"/cause="+promise.cause()).toList().toString();}

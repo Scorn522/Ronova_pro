@@ -651,7 +651,12 @@ public final class ProRuntime implements AutoCloseable {
         requireGraph(owner);if(roots.contains(value))return true;
         // BackingPolicy associations also contain shared world indices; they are not private ownership evidence.
         if(BackingPolicy.known(value))return false;
-        UUID origin=recoveryTasks.subjectOf(value);if(origin==null)return false;
+        return graphExclusive(owner,roots,value);
+    }
+    Object graphOriginLock(FieldGraph owner){requireGraph(owner);return recoveryTasks.originLock();}
+    boolean graphExclusive(FieldGraph owner,Set<Entity> roots,Object value){
+        requireGraph(owner);if(roots.contains(value))return true;
+        UUID origin=recoveryTasks.exclusiveSubjectOf(value);if(origin==null)return false;
         for(Entity root:roots){Binding binding=bindings.get(root);if(binding!=null&&origin.equals(binding.subject.id))return true;}return false;
     }
     UUID graphRemove(FieldGraph owner,Entity entity){requireGraph(owner);return clearBody(entity);}
@@ -669,7 +674,7 @@ public final class ProRuntime implements AutoCloseable {
         if(!process&&value.getClass()!=java.io.FileInputStream.class&&value.getClass()!=java.io.FileOutputStream.class&&value.getClass()!=java.io.RandomAccessFile.class)return "FIELD_GRAPH_RESOURCE_DISPOSITION_PENDING";
         Map<Subject,Long> qualifications=new IdentityHashMap<>();Set<UUID> selected=new HashSet<>();
         for(Entity root:roots){Binding binding=bindings.get(root);if(binding!=null){selected.add(binding.subject.id);qualifications.put(binding.subject,binding.subject.generation);}}
-        java.util.function.Predicate<Object> owns=item->selected.contains(recoveryTasks.subjectOf(item));
+        java.util.function.Predicate<Object> owns=item->selected.contains(recoveryTasks.exclusiveSubjectOf(item));
         try{
             Class<?> bridge=Class.forName("dev.ronova.pro.bootstrap.ResourceBridge",false,null);
             java.util.concurrent.Callable<String> release=()->{
@@ -880,6 +885,16 @@ public final class ProRuntime implements AutoCloseable {
         ProRuntime runtime=get(serverLevel.getServer());return runtime!=null&&runtime.worldControl.mutationDenied(level,position);
     }
     public static boolean worldClockFrozen(ServerLevel level){ProRuntime runtime=get(level.getServer());return runtime!=null&&runtime.worldControl.clock(level);}
+    public static boolean worldSectionMutationDenied(net.minecraft.world.level.chunk.LevelChunkSection section,int x,int y,int z){
+        if(ACTION_CALLER.getCallerClass()!=net.minecraft.world.level.chunk.LevelChunkSection.class)throw new SecurityException("ACTUAL_WORLD_SECTION_WRITE_REQUIRED");
+        for(ProRuntime runtime:sourceRuntimes())if(runtime.worldControl.sectionMutationDenied(section,x,y,z))return true;
+        return false;
+    }
+    public static boolean worldPaletteMutationDenied(net.minecraft.world.level.chunk.PalettedContainer<?> palette,int index){
+        if(ACTION_CALLER.getCallerClass()!=net.minecraft.world.level.chunk.PalettedContainer.class)throw new SecurityException("ACTUAL_WORLD_PALETTE_WRITE_REQUIRED");
+        for(ProRuntime runtime:sourceRuntimes())if(runtime.worldControl.paletteMutationDenied(palette,index))return true;
+        return false;
+    }
     public static boolean worldSpawnDenied(Entity entity){
         return ((Access.EntityState)entity).pro$level() instanceof ServerLevel level&&worldSpawnDenied(level,entity);
     }
@@ -2781,7 +2796,7 @@ public final class ProRuntime implements AutoCloseable {
             LiveStatePolicy.initialize();
             EquipmentPolicy.initialize();
             Class<?> bridge=Class.forName("dev.ronova.pro.bootstrap.TaskBridge",false,null);
-            if(!Integer.valueOf(77).equals(bridge.getMethod("abiVersion").invoke(null)))throw new IllegalStateException("INDEX_BRIDGE_ABI_MISMATCH");
+            if(!Integer.valueOf(78).equals(bridge.getMethod("abiVersion").invoke(null)))throw new IllegalStateException("INDEX_BRIDGE_ABI_MISMATCH");
             var lookup=java.lang.invoke.MethodHandles.lookup();
             var field=lookup.findStatic(ProRuntime.class,"preventFieldWrite",java.lang.invoke.MethodType.methodType(boolean.class,Object.class,Class.class,String.class,Object.class));
             var dispatch=lookup.findStatic(ProRuntime.class,"preventDispatch",java.lang.invoke.MethodType.methodType(boolean.class,Object.class,String.class,Object.class));

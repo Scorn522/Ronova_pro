@@ -1349,8 +1349,24 @@ final class ExecutionFlow {
         // walked frame. Authenticate that caller without walking the same stack again.
         bridge(CALLER.getCallerClass());for(Frame frame=current;frame!=null;frame=frame.parent)
             if(!frame.closed&&frame.thread==Thread.currentThread()&&caller.getDeclaringClass()==frame.declaring
-                    &&(caller.getMethodName()+caller.getDescriptor()).equals(frame.method.selector)
+                    &&CodeSourceBridge.frameSelector(caller,frame.method.selector)
                     &&Objects.equals(frame.method.sites.get(caller.getByteCodeIndex()),frame.instruction))return frame.active.modules().clone();
         return null;
+    }
+    static Module[] sourceQueryFrame(Class<?> declaring,String name,String descriptor,int location,int depth){
+        if(CALLER.getCallerClass()!=NativeControl.class)throw new SecurityException("ACTUAL_SOURCE_QUERY_FRAME_REQUIRED");
+        for(Frame frame=CURRENT.get();frame!=null;frame=frame.parent){
+            if(frame.closed||frame.thread!=Thread.currentThread()||frame.declaring!=declaring||frame.depth!=depth)continue;
+            String selector=frame.method.selector;int split=selector.indexOf('(');
+            if(split==name.length()&&selector.regionMatches(0,name,0,split)&&selector.length()==split+descriptor.length()
+                    &&selector.regionMatches(split,descriptor,0,descriptor.length())
+                    &&Objects.equals(frame.method.sites.get(location),frame.instruction)){
+                // The bottom depth distinguishes recursive frames even when
+                // their actual method and suspended instruction are identical.
+                // Native only reads this protected immutable source cell. A
+                // clone here could reenter the very memory query reading it.
+                return frame.active.modules();
+            }
+        }return null;
     }
 }

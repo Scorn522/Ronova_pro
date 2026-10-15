@@ -37,6 +37,9 @@ final class RecoveryTasks implements AutoCloseable {
     private final ProRuntime runtime;
     private final ConcurrentLinkedQueue<Capture> events=new ConcurrentLinkedQueue<>();
     private final Map<Object,UUID> origins=Collections.synchronizedMap(new WeakIdentityMap<>());
+    // A first causal origin remains useful for task lineage, but a conflicting
+    // observation cannot also serve as exclusive ownership for destructive graph writes.
+    private final Set<Object> sharedOrigins=Collections.newSetFromMap(new WeakIdentityMap<>());
     private final Map<Object,Task> tasks=new IdentityHashMap<>();
     private final Map<Object,Set<Task>> producers=new IdentityHashMap<>();
     private final Map<Object,Set<Task>> dependents=new IdentityHashMap<>();
@@ -260,7 +263,7 @@ final class RecoveryTasks implements AutoCloseable {
         try {
             bridge=Class.forName("dev.ronova.pro.bootstrap.TaskBridge",false,null);
             if(bridge.getClassLoader()!=null)throw new IllegalStateException("NON_BOOTSTRAP_TASK_BRIDGE");
-            if(!Integer.valueOf(77).equals(bridge.getMethod("abiVersion").invoke(null)))throw new IllegalStateException("TASK_BRIDGE_ABI_MISMATCH");
+            if(!Integer.valueOf(78).equals(bridge.getMethod("abiVersion").invoke(null)))throw new IllegalStateException("TASK_BRIDGE_ABI_MISMATCH");
             Class<?> agent=Class.forName("dev.ronova.pro.agent.RecoveryAgent",false,ClassLoader.getSystemClassLoader());
             if(!Boolean.TRUE.equals(agent.getMethod("openTaskAccess",Class.class).invoke(null,RecoveryTasks.class)))
                 throw new IllegalStateException("TASK_ACCESS_UNAVAILABLE");
@@ -305,6 +308,7 @@ final class RecoveryTasks implements AutoCloseable {
         synchronized(origins) {
             UUID prior=origins.get(object);
             if(prior!=null&&!prior.equals(subject)) {
+                sharedOrigins.add(object);
                 recordGap("CONFLICTING_TASK_ORIGIN");return;
             }
             origins.put(object,subject);
@@ -320,15 +324,19 @@ final class RecoveryTasks implements AutoCloseable {
         catch(ReflectiveOperationException failure) { recordGap("EXECUTING_SOURCE_BINDING_UNAVAILABLE"); }
     }
     UUID subjectOf(Object object) { return origins.get(object); }
+    Object originLock(){return origins;}
+    UUID exclusiveSubjectOf(Object object) {synchronized(origins){return sharedOrigins.contains(object)?null:origins.get(object);}}
     void groupObserved(Object object,Object scheduler,UUID subject) {
         groupObserved(object,scheduler,subject,null);
     }
     private void groupObserved(Object object,Object scheduler,UUID subject,Object observation) {
         if(object==null)return;
         synchronized(LISTENERS) {
-            UUID previous=origins.get(object);
-            if(previous!=null&&runtime.canonicalSubject(previous)!=runtime.canonicalSubject(subject)) {recordGap("CONFLICTING_GROUP_TASK_ORIGIN");return;}
-            origins.put(object,subject);
+            synchronized(origins){
+                UUID previous=origins.get(object);
+                if(previous!=null&&runtime.canonicalSubject(previous)!=runtime.canonicalSubject(subject)) {sharedOrigins.add(object);recordGap("CONFLICTING_GROUP_TASK_ORIGIN");return;}
+                origins.put(object,subject);
+            }
             capture(new Object[]{11,object,scheduler,null,observation,Thread.currentThread(),System.nanoTime(),0L});
         }
     }
@@ -2326,7 +2334,7 @@ final class RecoveryTasks implements AutoCloseable {
             }
             detached=true;
             // Every collection is owned by this observer. External queues, delegates and pools are untouched.
-            events.clear();tasks.clear();producers.clear();dependents.clear();childrenByParent.clear();origins.clear();workerBindings.clear();captureEpochs.clear();
+            events.clear();tasks.clear();producers.clear();dependents.clear();childrenByParent.clear();synchronized(origins){origins.clear();sharedOrigins.clear();}workerBindings.clear();captureEpochs.clear();
             windows.clear();waiting.clear();policyPending.clear();
             retirementFact=PREFIX+"\tOBSERVER_RELEASED\t"+runtime.session+"\t"+epoch;
             retirementFactAck=runtime.journal.append(retirementFact);
