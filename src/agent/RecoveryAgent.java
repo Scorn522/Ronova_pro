@@ -91,7 +91,7 @@ public final class RecoveryAgent {
             bootstrap=new JarFile(Path.of(argument).toAbsolutePath().normalize().toFile());
             api.appendToBootstrapClassLoaderSearch(bootstrap);
             bridge=Class.forName("dev.ronova.pro.bootstrap.TaskBridge",true,null);
-            if(!Integer.valueOf(84).equals(bridge.getMethod("abiVersion").invoke(null)))throw new IllegalStateException("TASK_BRIDGE_ABI_MISMATCH");
+            if(!Integer.valueOf(85).equals(bridge.getMethod("abiVersion").invoke(null)))throw new IllegalStateException("TASK_BRIDGE_ABI_MISMATCH");
             Class.forName("dev.ronova.pro.bootstrap.SourceMapBridge",true,null);
             // Default-Map guards test UUID keys while class-loading maps are
             // active. Resolve that type before publishing the guarded methods.
@@ -133,7 +133,7 @@ public final class RecoveryAgent {
             Class.forName("dev.ronova.pro.bootstrap.ControlBridge$ProducerFrame",false,null);
             Class.forName("dev.ronova.pro.bootstrap.EventFaultBridge",true,null);
             Class<?> control=Class.forName("dev.ronova.pro.bootstrap.ControlBridge",true,null);
-            if(!Integer.valueOf(84).equals(control.getMethod("abiVersion").invoke(null)))throw new IllegalStateException("CONTROL_BRIDGE_ABI_MISMATCH");
+            if(!Integer.valueOf(85).equals(control.getMethod("abiVersion").invoke(null)))throw new IllegalStateException("CONTROL_BRIDGE_ABI_MISMATCH");
             Module base=Object.class.getModule(),ours=RecoveryAgent.class.getModule();
             api.redefineModule(base,Set.of(bridge.getModule()),Map.of(
                     "jdk.internal.org.objectweb.asm",Set.of(ours),"jdk.internal.org.objectweb.asm.commons",Set.of(ours),
@@ -323,6 +323,7 @@ public final class RecoveryAgent {
                     byte[] initial=console==null?bytes:console;
                     if(console!=null&&module!=null&&!module.canRead(bridge.getModule()))
                         api.redefineModule(module,Set.of(bridge.getModule()),Map.of(),Map.of(),Set.of(),Map.of());
+                    byte[] slots=EquipmentSlotBoundary.transform(loader,name,type,initial);if(slots!=null)initial=slots;
                     byte[] dispatch=DispatchBoundary.transform(loader,name,type,initial);
                     byte[] current=dispatch==null?initial:dispatch;
                     byte[] equipment=EquipmentActionBoundary.transform(loader,name,type,current);
@@ -576,6 +577,13 @@ public final class RecoveryAgent {
         if(api==null)throw new IllegalStateException("EQUIPMENT_CARRIER_AGENT_UNAVAILABLE");
         controlImages.declare(actual);
         EquipmentActionBoundary.installCarrier(api,actual);
+    }
+    public static void declareEquipmentSlotGetter(Class<?> actual,String method,String descriptor){
+        Class<?> caller=CALLER.getCallerClass(),runtime=modGroupRuntime;
+        if(runtime==null||!caller.getName().equals("dev.ronova.pro.EquipmentPolicy")||caller.getClassLoader()!=runtime.getClassLoader()
+                ||caller.getModule()!=runtime.getModule()||!Objects.equals(caller.getProtectionDomain().getCodeSource(),runtime.getProtectionDomain().getCodeSource()))
+            throw new SecurityException("EQUIPMENT_SLOT_DECLARATION_OWNER");
+        Objects.requireNonNull(actual);controlImages.declare(actual);EquipmentSlotBoundary.install(instrumentation,actual,method,descriptor);
     }
     /** The declaration state, so a caller can tell "covered" from "nothing declared yet". */
     public static String dispatchState() {

@@ -20,7 +20,7 @@ final class EquipmentActionBoundary {
         if(actual!=null)for(Carrier entry:carriers)if(entry.type.get()==actual)return entry;
         return null;
     }
-    static void transformFailed(Class<?> actual){Carrier entry=carrier(actual);if(entry!=null)entry.transformed=false;}
+    static void transformFailed(Class<?> actual){Carrier entry=carrier(actual);if(entry!=null)entry.transformed=false;EquipmentSlotBoundary.transformFailed(actual);}
     private static synchronized Carrier declareCarrier(Class<?> actual) {
         Carrier present=carrier(actual);if(present!=null)return present;
         var living=new ArrayList<Carrier>();for(Carrier entry:carriers)if(entry.type.get()!=null)living.add(entry);

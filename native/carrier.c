@@ -256,3 +256,185 @@ JNIEXPORT jobjectArray JNICALL Java_dev_ronova_pro_bootstrap_NativeControl_carri
     if(descriptor)native_original.ReleaseStringUTFChars(env,signature,descriptor);if(key)native_original.ReleaseStringUTFChars(env,name,key);state->control--;
     if(!result||native_original.ExceptionCheck(env)){if(result)native_original.DeleteLocalRef(env,result);if(!native_original.ExceptionCheck(env))native_refuse(env,"CARRIER_INITIALIZED_STATIC_FIELD_REQUIRED");return NULL;}return result;
 }
+
+/* A callback identity is read only while its exact Core invocation is still
+ * physically on this thread. No method pointer or retained verdict escapes. */
+typedef struct NativeCarrierFrame {
+    jvmtiFrameInfo actual;jclass declaring;char *name,*descriptor;unsigned char *bytes;jint length,modifiers;
+    CodeVMMethod version;CodePool pool;
+} NativeCarrierFrame;
+static void native_carrier_frame_clear(JNIEnv *env,NativeCarrierFrame *frame){
+    if(frame->declaring)native_original.DeleteLocalRef(env,frame->declaring);
+    if(frame->name)(*native_ti)->Deallocate(native_ti,(unsigned char*)frame->name);
+    if(frame->descriptor)(*native_ti)->Deallocate(native_ti,(unsigned char*)frame->descriptor);
+    if(frame->bytes)(*native_ti)->Deallocate(native_ti,frame->bytes);
+    free(frame->version.handlers);code_pool_free(&frame->pool);memset(frame,0,sizeof(*frame));
+}
+static int native_carrier_selector(JNIEnv *env,jmethodID method,jclass declaring,const char *name,const char *descriptor){
+    jclass actual=NULL;char *actualName=NULL,*actualDescriptor=NULL;
+    int valid=(*native_ti)->GetMethodDeclaringClass(native_ti,method,&actual)==JVMTI_ERROR_NONE&&actual,matched=0;
+    if(valid&&native_original.IsSameObject(env,actual,declaring)){
+        valid=(*native_ti)->GetMethodName(native_ti,method,&actualName,&actualDescriptor,NULL)==JVMTI_ERROR_NONE&&actualName&&actualDescriptor;
+        matched=valid&&!strcmp(name,actualName)&&!strcmp(descriptor,actualDescriptor);
+    }
+    if(actual)native_original.DeleteLocalRef(env,actual);
+    if(actualName)(*native_ti)->Deallocate(native_ti,(unsigned char*)actualName);
+    if(actualDescriptor)(*native_ti)->Deallocate(native_ti,(unsigned char*)actualDescriptor);
+    return valid&&!native_original.ExceptionCheck(env)?matched:-1;
+}
+static int native_carrier_frame_open(JNIEnv *env,jvmtiFrameInfo actual,jobjectArray policy,NativeCarrierFrame *frame){
+    frame->actual=actual;jboolean obsolete=JNI_TRUE;
+    int valid=actual.location>=0&&(*native_ti)->IsMethodObsolete(native_ti,actual.method,&obsolete)==JVMTI_ERROR_NONE&&!obsolete
+            &&(*native_ti)->GetMethodDeclaringClass(native_ti,actual.method,&frame->declaring)==JVMTI_ERROR_NONE&&frame->declaring
+            &&(*native_ti)->GetMethodName(native_ti,actual.method,&frame->name,&frame->descriptor,NULL)==JVMTI_ERROR_NONE&&frame->name&&frame->descriptor
+            &&(*native_ti)->GetMethodModifiers(native_ti,actual.method,&frame->modifiers)==JVMTI_ERROR_NONE&&!(frame->modifiers&0x0500)
+            &&code_vm_snapshot(env,actual.method,&frame->version,&frame->pool,frame->name,frame->descriptor)
+            &&(*native_ti)->GetBytecodes(native_ti,actual.method,&frame->length,&frame->bytes)==JVMTI_ERROR_NONE
+            &&frame->bytes&&frame->length>0&&frame->version.codeLength==(unsigned)frame->length;
+    unsigned count=0,*offsets=valid?code_offsets(frame->bytes,(unsigned)frame->length,&count):NULL;
+    if(valid)valid=offsets&&code_index(offsets,count,actual.location)>=0&&actual.location<frame->length;free(offsets);
+    jobject module=valid?native_original.GetModule(env,frame->declaring):NULL;
+    if(valid)valid=module&&!code_source_query_module_stopped(env,module,policy);if(module)native_original.DeleteLocalRef(env,module);
+    if(valid){
+        OwnerLink *owners=NULL;int known=0,unknown=0;
+        valid=code_available&&code_frame_sources_query(env,actual.method,actual.location,&owners,&known,&unknown)
+                &&!unknown&&!code_source_query_owners_stopped(env,owners,policy);code_links_free(owners);
+    }
+    return valid&&!native_original.ExceptionCheck(env)&&code_vm_unchanged(actual.method,&frame->version);
+}
+static int native_carrier_frame_current(JNIEnv *env,NativeCarrierFrame *frame,jint depth){
+    jmethodID method=NULL;jlocation location=-1;jboolean obsolete=JNI_TRUE;
+    return !native_original.ExceptionCheck(env)&&code_vm_unchanged(frame->actual.method,&frame->version)
+            &&(*native_ti)->GetFrameLocation(native_ti,NULL,depth,&method,&location)==JVMTI_ERROR_NONE
+            &&method==frame->actual.method&&location==frame->actual.location
+            &&(*native_ti)->IsMethodObsolete(native_ti,method,&obsolete)==JVMTI_ERROR_NONE&&!obsolete;
+}
+/* Bind a mirror found through the actual initiating loader to the CP's real
+ * resolved Klass, using that mirror's own declared VM method metadata. */
+static int native_carrier_holder(JNIEnv *env,jclass type,uintptr_t holder){
+    jmethodID *methods=NULL;jint count=0;int matched=0;
+    if((*native_ti)->GetClassMethods(native_ti,type,&count,&methods)!=JVMTI_ERROR_NONE||count<0)return 0;
+    for(jint i=0;i<count&&!matched&&!native_original.ExceptionCheck(env);i++){
+        jclass declaring=NULL;CodeVMMethod version={0};CodePool pool={0};
+        if((*native_ti)->GetMethodDeclaringClass(native_ti,methods[i],&declaring)==JVMTI_ERROR_NONE&&declaring
+                &&native_original.IsSameObject(env,declaring,type)&&code_vm_snapshot(env,methods[i],&version,&pool,NULL,NULL))
+            matched=pool.holder==holder&&code_vm_unchanged(methods[i],&version);
+        if(declaring)native_original.DeleteLocalRef(env,declaring);free(version.handlers);code_pool_free(&pool);
+    }
+    if(methods)(*native_ti)->Deallocate(native_ti,(unsigned char*)methods);return matched;
+}
+static jclass native_carrier_call_owner(JNIEnv *env,NativeCarrierFrame *caller,NativeCarrierFrame *callee,unsigned index){
+    CodePool *pool=&caller->pool;unsigned char tag=0;uint32_t slot=0;uintptr_t holder=0;
+    if(!code_vm_tag(pool,index,&tag)||tag!=7||!code_vm_slot(pool,index,&slot,sizeof(slot))
+            ||(slot&65535)>=pool->resolvedCount||!pool->resolved
+            ||!code_vm_read(pool->resolved+(uintptr_t)(slot&65535)*sizeof(uintptr_t),&holder,sizeof(holder))||!holder)return NULL;
+    if(holder==pool->holder)return (jclass)native_original.NewLocalRef(env,caller->declaring);
+    if(holder==callee->pool.holder)return (jclass)native_original.NewLocalRef(env,callee->declaring);
+    if(!code_vm_entry(pool,index)||pool->entries[index][0]!=7)return NULL;
+    unsigned nameIndex=code_be(pool->entries[index]+1,2);if(!code_vm_entry(pool,nameIndex))return NULL;
+    char *name=code_utf(pool,nameIndex);if(!name)return NULL;
+    size_t length=strlen(name);char *signature=(char*)malloc(length+3);jclass result=NULL;NativeCarrierTypes types={0};
+    if(signature){signature[0]='L';memcpy(signature+1,name,length);signature[length+1]=';';signature[length+2]=0;
+        if(native_carrier_types(env,caller->declaring,&types))for(jint i=0;i<types.count&&!result&&!native_original.ExceptionCheck(env);i++){
+            char *actual=NULL;
+            int equal=(*native_ti)->GetClassSignature(native_ti,types.types[i],&actual,NULL)==JVMTI_ERROR_NONE&&actual&&!strcmp(signature,actual);
+            if(actual)(*native_ti)->Deallocate(native_ti,(unsigned char*)actual);
+            if(equal&&native_carrier_holder(env,types.types[i],holder))result=(jclass)native_original.NewLocalRef(env,types.types[i]);
+        }}
+    free(signature);free(name);native_carrier_types_clear(env,&types);return result;
+}
+static int native_carrier_invocation(JNIEnv *env,NativeCarrierFrame *caller,NativeCarrierFrame *callee,jobject consumer,int boundary,int locals,jint calleeDepth){
+    unsigned at=(unsigned)caller->actual.location,opcode=caller->bytes[at];
+    if(opcode<182||opcode>185||at+3>(unsigned)caller->length||(boundary&&opcode!=185))return 0;
+    unsigned index=code_be(caller->bytes+at+1,2);CodePool *pool=&caller->pool;
+    if(!code_vm_entry(pool,index))return 0;const unsigned char *entry=pool->entries[index];
+    if((entry[0]!=10&&entry[0]!=11)||(opcode==185&&entry[0]!=11)||(opcode==182&&entry[0]!=10))return 0;
+    unsigned ownerIndex=code_be(entry+1,2),selector=code_be(entry+3,2);
+    if(!code_vm_entry(pool,selector)||pool->entries[selector][0]!=12)return 0;
+    unsigned nameIndex=code_be(pool->entries[selector]+1,2),descriptorIndex=code_be(pool->entries[selector]+3,2);
+    if(!code_vm_entry(pool,nameIndex)||!code_vm_entry(pool,descriptorIndex))return 0;
+    char *name=code_utf(pool,nameIndex),*descriptor=code_utf(pool,descriptorIndex);
+    int valid=name&&descriptor&&!strcmp(name,callee->name)&&!strcmp(descriptor,callee->descriptor)
+            &&((opcode==184)==((callee->modifiers&0x0008)!=0));
+    jclass owner=valid?native_carrier_call_owner(env,caller,callee,ownerIndex):NULL;
+    if(valid)valid=owner!=NULL;
+    if(valid&&boundary){
+        char *signature=NULL;
+        valid=!strcmp(name,"accept")&&!strcmp(descriptor,"(Ljava/lang/Object;)V")
+                &&(*native_ti)->GetClassSignature(native_ti,owner,&signature,NULL)==JVMTI_ERROR_NONE&&signature
+                &&!strcmp(signature,"Lnet/minecraftforge/common/util/NonNullConsumer;")
+                &&native_original.IsInstanceOf(env,consumer,owner);
+        if(signature)(*native_ti)->Deallocate(native_ti,(unsigned char*)signature);
+    }else if(valid)valid=native_original.IsAssignableFrom(env,callee->declaring,owner)||native_original.IsAssignableFrom(env,owner,callee->declaring);
+    // The supported live-attach route has no new locals capability. Its exact
+    // Core callsite binds the captured consumer operand. When this environment
+    // already has local access, also verify the actual physical receiver.
+    if(valid&&locals&&!(callee->modifiers&0x0008)){
+        jobject receiver=NULL;valid=(*native_ti)->GetLocalInstance(native_ti,NULL,calleeDepth,&receiver)==JVMTI_ERROR_NONE&&receiver;
+        if(valid)valid=native_original.IsInstanceOf(env,receiver,owner)&&(!boundary||native_original.IsSameObject(env,receiver,consumer));
+        if(receiver)native_original.DeleteLocalRef(env,receiver);
+    }
+    if(owner)native_original.DeleteLocalRef(env,owner);free(name);free(descriptor);return valid&&!native_original.ExceptionCheck(env);
+}
+static int native_carrier_adapter(JNIEnv *env,NativeCarrierFrame *frame){
+    if(frame->modifiers&0x0040)return 1;
+    jobject loader=NULL;char *signature=NULL;int matched=0;
+    if((*native_ti)->GetClassLoader(native_ti,frame->declaring,&loader)!=JVMTI_ERROR_NONE
+            ||(*native_ti)->GetClassSignature(native_ti,frame->declaring,&signature,NULL)!=JVMTI_ERROR_NONE||!signature)goto done;
+    AcquireSRWLockShared(&code_records);CodeCandidates scan=code_candidates(signature);
+    for(CodeImage *image=code_candidate_next(&scan);image&&!matched;image=code_candidate_next(&scan))
+        if(image->hidden&&code_class_matches(env,image,frame->declaring,loader,signature)){
+            CodeMethod *method=code_method(image,frame->name,frame->descriptor);unsigned ordinal=0;
+            matched=method&&method->access==(unsigned)frame->modifiers
+                    &&code_equivalent(image,method,frame->bytes,(unsigned)frame->length,&frame->pool,&frame->version,frame->actual.location,&ordinal)
+                    &&code_vm_unchanged(frame->actual.method,&frame->version);
+        }
+    ReleaseSRWLockShared(&code_records);
+done:
+    if(loader)native_original.DeleteLocalRef(env,loader);if(signature)(*native_ti)->Deallocate(native_ti,(unsigned char*)signature);return matched&&!native_original.ExceptionCheck(env);
+}
+JNIEXPORT jint JNICALL Java_dev_ronova_pro_bootstrap_NativeControl_carrierCallbackDepth0(JNIEnv *env,jclass controller,jclass declaring,jstring name,jstring descriptor){
+    if(!native_carrier_reader(env,controller)||!declaring||!name||!descriptor)return 0;
+    NativeThread *state=native_thread();if(!state)return 0;state->control++;
+    const char *key=native_original.GetStringUTFChars(env,name,NULL),*signature=key?native_original.GetStringUTFChars(env,descriptor,NULL):NULL;
+    jint total=0,result=0;int valid=key&&signature&&!native_original.ExceptionCheck(env)&&(*native_ti)->GetFrameCount(native_ti,NULL,&total)==JVMTI_ERROR_NONE;
+    for(jint first=0;valid&&first<total&&!result;){
+        jvmtiFrameInfo frames[16];jint count=0;
+        valid=(*native_ti)->GetStackTrace(native_ti,NULL,first,16,frames,&count)==JVMTI_ERROR_NONE&&count>0&&count<=total-first;
+        for(jint i=0;valid&&i<count&&!result;i++){
+            int selected=native_carrier_selector(env,frames[i].method,declaring,key,signature);
+            if(selected<0)valid=0;else if(selected)result=total-first-i;
+        }
+        first+=count;
+    }
+    if(signature)native_original.ReleaseStringUTFChars(env,descriptor,signature);if(key)native_original.ReleaseStringUTFChars(env,name,key);state->control--;
+    return valid&&!native_original.ExceptionCheck(env)?result:0;
+}
+JNIEXPORT jboolean JNICALL Java_dev_ronova_pro_bootstrap_NativeControl_carrierCallback0(JNIEnv *env,jclass controller,jobject consumer,jclass callee,jstring name,jstring descriptor,jint calleeBottomDepth,
+                                                                                     jclass boundary,jstring boundaryName,jstring boundaryDescriptor,jint boundaryBottomDepth){
+    if(!native_carrier_reader(env,controller)||!consumer||!callee||!name||!descriptor||!boundary||!boundaryName||!boundaryDescriptor)return JNI_FALSE;
+    if(boundaryBottomDepth<=0||calleeBottomDepth<=boundaryBottomDepth||calleeBottomDepth-boundaryBottomDepth>2)return JNI_FALSE;
+    jint delta=calleeBottomDepth-boundaryBottomDepth;
+    NativeThread *state=native_thread();if(!state)return JNI_FALSE;state->control++;
+    NativeCarrierFrame selected[3]={0};jobjectArray policy=NULL;const char *keys[4]={0};jstring texts[4]={name,descriptor,boundaryName,boundaryDescriptor};
+    jint total=0,count=0,first=0;int valid=1;jvmtiFrameInfo frames[16];jvmtiCapabilities capabilities;memset(&capabilities,0,sizeof(capabilities));
+    for(unsigned i=0;i<4&&valid;i++){keys[i]=native_original.GetStringUTFChars(env,texts[i],NULL);valid=keys[i]&&!native_original.ExceptionCheck(env);}
+    if(valid)valid=(*native_ti)->GetFrameCount(native_ti,NULL,&total)==JVMTI_ERROR_NONE&&calleeBottomDepth<=total;
+    if(valid){first=total-calleeBottomDepth;valid=(*native_ti)->GetStackTrace(native_ti,NULL,first,16,frames,&count)==JVMTI_ERROR_NONE&&count>delta;}
+    if(valid)valid=native_carrier_selector(env,frames[0].method,callee,keys[0],keys[1])==1
+            &&native_carrier_selector(env,frames[delta].method,boundary,keys[2],keys[3])==1;
+    jfieldID stopped=valid?native_original.GetStaticFieldID(env,native_controls,"stoppedModules","[Ljava/lang/Module;"):NULL;
+    if(stopped&&!native_original.ExceptionCheck(env))policy=(jobjectArray)native_original.GetStaticObjectField(env,native_controls,stopped);valid=valid&&policy&&!native_original.ExceptionCheck(env);
+    for(jint i=0;i<=delta&&valid;i++)valid=native_carrier_frame_open(env,frames[i],policy,&selected[i]);
+    NativeCarrierFrame *accept=&selected[delta-1];
+    if(valid)valid=!strcmp(accept->name,"accept")&&!strcmp(accept->descriptor,"(Ljava/lang/Object;)V")
+            &&(accept->modifiers&0x0009)==0x0001&&native_original.IsInstanceOf(env,consumer,accept->declaring);
+    if(valid)valid=(*native_ti)->GetCapabilities(native_ti,&capabilities)==JVMTI_ERROR_NONE;
+    if(valid)valid=native_carrier_invocation(env,&selected[delta],accept,consumer,1,capabilities.can_access_local_variables,first+delta-1);
+    if(valid&&delta==2)valid=native_carrier_adapter(env,accept)
+            &&native_carrier_invocation(env,accept,&selected[0],NULL,0,capabilities.can_access_local_variables,first);
+    for(jint i=0;i<=delta&&valid;i++)valid=native_carrier_frame_current(env,&selected[i],first+i);
+    for(unsigned i=0;i<3;i++)native_carrier_frame_clear(env,&selected[i]);if(policy)native_original.DeleteLocalRef(env,policy);
+    for(unsigned i=0;i<4;i++)if(keys[i])native_original.ReleaseStringUTFChars(env,texts[i],keys[i]);state->control--;
+    return valid&&!native_original.ExceptionCheck(env)?JNI_TRUE:JNI_FALSE;
+}

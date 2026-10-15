@@ -31,10 +31,11 @@ import org.apache.commons.lang3.mutable.MutableObject;
 
 /** Current equipment shares, rather than a snapshot of items the body once held. */
 public final class EquipmentPolicy {
-    private enum Kind { BODY, GAME_MODE, INVENTORY, COMPARTMENTS, COMPARTMENT_ARRAY, EQUIPMENT_LIST, EQUIPMENT_BACKING, EQUIPMENT_ARRAY, CURATIVE_LIST, CURATIVE_ARRAY, CURATIVE_CARRIER, STACK, NBT, CAPABILITY }
+    private enum Kind { BODY, GAME_MODE, INVENTORY, COMPARTMENTS, COMPARTMENT_ARRAY, EQUIPMENT_LIST, EQUIPMENT_BACKING, EQUIPMENT_ARRAY, SLOT_CARRIER, CURATIVE_LIST, CURATIVE_ARRAY, CURATIVE_CARRIER, STACK, NBT, CAPABILITY }
     private record Slot(Field field,long offset,int width) { }
     private static final class Owner {
         final WeakReference<LivingEntity> entity;final long generation;
+        volatile Class<?> slotType;String slotMethod;volatile boolean tracedSlots=true;
         Owner(LivingEntity entity,long generation){this.entity=new WeakReference<>(entity);this.generation=generation;}
     }
     private static final class Link {
@@ -122,6 +123,16 @@ public final class EquipmentPolicy {
     private static Map<LivingEntity,Mining> MINING;
     private static Map<Thread,Driver> DRIVERS;
     private static Map<Thread,Invocation> INVOCATIONS;
+    private static final ThreadLocal<SlotRead> SLOT_READS=new ThreadLocal<>();
+    private static MethodHandle DECLARE_SLOT;
+    private static final String SLOT_DESCRIPTOR="(Lnet/minecraft/world/entity/EquipmentSlot;)Lnet/minecraft/world/item/ItemStack;";
+    private static final class SlotRead {
+        final Owner owner;final EquipmentSlot slot;final Thread thread=Thread.currentThread();final SlotRead previous;
+        final Class<?> anchor;final String method,descriptor;final List<StackWalker.StackFrame> tail;
+        final List<EquipmentSlotGraph.Read> reads=new ArrayList<>();boolean unresolved,closed;
+        SlotRead(Owner owner,EquipmentSlot slot,SlotRead previous,List<StackWalker.StackFrame> frames){this.owner=owner;this.slot=slot;this.previous=previous;
+            var entry=frames.get(0);anchor=entry.getDeclaringClass();method=entry.getMethodName();descriptor=entry.getDescriptor();tail=List.copyOf(frames.subList(1,frames.size()));}
+    }
     private static final Object INVOCATION_REFUSED=new Object();
     private static Map<Class<?>,List<Slot>> FIELDS;
     private static StackWalker WALKER;
@@ -138,6 +149,16 @@ public final class EquipmentPolicy {
     private static Field OPTIONAL_SUPPLIER,OPTIONAL_VALUE,OPTIONAL_LISTENERS,OPTIONAL_VALID,MUTABLE_VALUE,SET_MAP,UNMODIFIABLE_VALUES;
     private static Map<Thread,CapabilityScope> CAP_SCOPES;
     private static Map<Thread,CapabilityQuery> CAP_QUERIES;
+    private static final ThreadLocal<CapabilityConsumer> CAP_CONSUMERS=new ThreadLocal<>();
+    private static MethodHandle CALLBACK_DEPTH,CALLBACK_FRAME;
+    private static final String CONSUMER_BOUNDARY="invokeCapabilityConsumer",CONSUMER_DESCRIPTOR="(Lnet/minecraftforge/common/util/NonNullConsumer;Ljava/lang/Object;Ljava/lang/Object;)V";
+    private static final class CapabilityConsumer {
+        final Scope action;final Object optional,consumer,value;final ItemStack root;final List<Link> links;
+        final Thread thread=Thread.currentThread();final CapabilityConsumer previous;int bottomDepth;boolean closed;
+        CapabilityConsumer(Scope action,Object optional,Object consumer,Object value,ItemStack root,List<Link> links,CapabilityConsumer previous){
+            this.action=action;this.optional=optional;this.consumer=consumer;this.value=value;this.root=root;this.links=List.copyOf(links);this.previous=previous;
+        }
+    }
     private static final class CapabilityQuery {
         final Object dispatcher,request,direction;final Thread thread=Thread.currentThread();final CapabilityQuery previous;
         final List<Link> related;final Class<?> anchor;final String method,descriptor;final List<StackWalker.StackFrame> tail;
@@ -215,6 +236,10 @@ public final class EquipmentPolicy {
         ACTION_DELEGATE=MethodHandles.publicLookup().findStatic(bridge,"equipmentActionSourceAllowed",MethodType.methodType(boolean.class,Class.class,Class.class));
         CARRIER_SOURCE=MethodHandles.publicLookup().findStatic(bridge,"equipmentCarrierSourceAllowed",MethodType.methodType(boolean.class,Class.class,Class.class,Class[].class));
         EquipmentCarrierGraph.initialize();
+        DECLARE_SLOT=MethodHandles.publicLookup().findStatic(Class.forName("dev.ronova.pro.agent.RecoveryAgent",false,ClassLoader.getSystemClassLoader()),"declareEquipmentSlotGetter",MethodType.methodType(void.class,Class.class,String.class,String.class));
+        Class<?> carrierBridge=Class.forName("dev.ronova.pro.bootstrap.CarrierBridge",false,null);
+        CALLBACK_DEPTH=MethodHandles.publicLookup().findStatic(carrierBridge,"callbackDepth",MethodType.methodType(int.class,Class.class,String.class,String.class));
+        CALLBACK_FRAME=MethodHandles.publicLookup().findStatic(carrierBridge,"callback",MethodType.methodType(boolean.class,Object.class,Class.class,String.class,String.class,int.class,Class.class,String.class,String.class,int.class));
         OWNERS=Collections.synchronizedMap(new WeakIdentityMap<>());CARRIERS=Collections.synchronizedMap(new WeakIdentityMap<>());
         SCOPES=Collections.synchronizedMap(new WeakIdentityMap<>());FIELDS=Map.copyOf(fields);
         MINING=Collections.synchronizedMap(new WeakIdentityMap<>());DRIVERS=Collections.synchronizedMap(new WeakIdentityMap<>());INVOCATIONS=Collections.synchronizedMap(new WeakIdentityMap<>());
@@ -261,10 +286,16 @@ public final class EquipmentPolicy {
         return List.of();
     }
     private static List<Slot> mutationSlots(Object value){
+        List<Slot> slotFields=new ArrayList<>();
+        for(Link link:links(value))if(link.kind==Kind.SLOT_CARRIER&&active(link.owner))for(var use:slotView(link.owner).fields())if(use.receiver()==value){
+            boolean found=false;for(Slot prior:slotFields)if(prior.field.equals(use.field())){found=true;break;}
+            if(!found)slotFields.add(new Slot(use.field(),use.offset(),use.width()));
+        }
         boolean dynamic=false;for(Link link:links(value))if((link.kind==Kind.CAPABILITY||link.kind==Kind.NBT||link.kind==Kind.CURATIVE_CARRIER||link.kind==Kind.CURATIVE_LIST
                 ||link.kind==Kind.STACK&&value.getClass()!=ItemStack.class)&&current(link,value)){dynamic=true;break;}
-        if(!dynamic)return slots(value);
+        if(!dynamic){if(slotFields.isEmpty())return slots(value);for(Slot slot:slots(value))if(slotFields.stream().noneMatch(prior->prior.field.equals(slot.field)))slotFields.add(slot);return slotFields;}
         List<Slot> result=new ArrayList<>(slots(value));
+        for(Slot slot:slotFields)if(result.stream().noneMatch(prior->prior.field.equals(slot.field)))result.add(slot);
         for(EquipmentCarrierGraph.Slot actual:EquipmentCarrierGraph.fields(value)){
             boolean found=false;for(Slot prior:result)if(prior.field.equals(actual.field())){found=true;break;}
             if(!found)result.add(new Slot(actual.field(),actual.offset(),actual.width()));
@@ -291,15 +322,33 @@ public final class EquipmentPolicy {
         return part==0&&index>=0&&index<2?1<<index:part==1&&index>=0&&index<4?1<<(index+2):0;
     }
     private static ItemStack itemAt(Owner owner,int part,int index){
+        if(owner.tracedSlots){EquipmentSlot slot=partSlot(owner,part,index);if(slot!=null)return slotView(owner).stack(slot);}
         Object[] values=(Object[])array(backing(list(owner,part)));
         return values!=null&&index>=0&&index<values.length&&values[index] instanceof ItemStack stack?stack:null;
     }
     private static int shares(Owner owner,ItemStack stack){
         if(stack==null||stack==ItemStack.EMPTY)return 0;int mask=0;
+        if(owner.tracedSlots){var view=slotView(owner);for(int at=0;at<6;at++)if(view.stack(EquipmentSlotGraph.slot(at))==stack)mask|=1<<at;return mask;}
         for(int part=0;part<(owner.entity.get() instanceof Player?3:2);part++){
             Object[] values=(Object[])array(backing(list(owner,part)));if(values==null)continue;
             for(int i=0;i<values.length;i++)if(values[i]==stack)mask|=bit(owner,part,i);
         }return mask;
+    }
+    private static EquipmentSlot partSlot(Owner owner,int part,int index){
+        if(part==1)return index>=0&&index<4?EquipmentSlotGraph.slot(index+2):null;
+        if(owner.entity.get() instanceof Player){if(part==2&&index==0)return EquipmentSlot.OFFHAND;return part==0&&index==selected(owner)?EquipmentSlot.MAINHAND:null;}
+        return part==0&&index>=0&&index<2?EquipmentSlotGraph.slot(index):null;
+    }
+    private static EquipmentSlotGraph.View slotView(Owner owner){return EquipmentSlotGraph.view(owner.entity.get(),owner.generation);}
+    private static ItemStack slotStack(Owner owner,EquipmentSlot slot){
+        if(owner.tracedSlots)return slotView(owner).stack(slot);int at=EquipmentSlotGraph.ordinal(slot);if(at<0)return null;
+        return at>=2?itemAt(owner,1,at-2):at==0?itemAt(owner,0,owner.entity.get() instanceof Player?selected(owner):0):itemAt(owner,owner.entity.get() instanceof Player?2:0,owner.entity.get() instanceof Player?0:1);
+    }
+    private static void captureSlots(Owner owner){
+        if(!owner.tracedSlots)return;var view=slotView(owner);
+        for(var use:view.fields())link(owner,use.receiver(),Kind.SLOT_CARRIER,-1,null);
+        for(var use:view.arrays())link(owner,use.array(),Kind.SLOT_CARRIER,-1,null);
+        for(int at=0;at<6;at++)captureStack(owner,view.stack(EquipmentSlotGraph.slot(at)));
     }
     private static List<Link> links(Object value){return !initialized||value==null?List.of():CARRIERS.getOrDefault(value,List.of());}
     private static void link(Owner owner,Object value,Kind kind,int part,ItemStack stack){
@@ -328,6 +377,7 @@ public final class EquipmentPolicy {
             case EQUIPMENT_LIST -> list(owner,link.part)==value;
             case EQUIPMENT_BACKING -> backing(list(owner,link.part))==value;
             case EQUIPMENT_ARRAY -> array(backing(list(owner,link.part)))==value;
+            case SLOT_CARRIER -> owner.tracedSlots&&slotView(owner).contains(value);
             case CURATIVE_LIST -> LiveStatePolicy.curativeListCurrent(owner.entity.get(),owner.generation,value);
             case CURATIVE_ARRAY -> LiveStatePolicy.curativeArrayCurrent(owner.entity.get(),owner.generation,value);
             case CURATIVE_CARRIER -> link.root.get()!=null&&LiveStatePolicy.curativeListCurrent(owner.entity.get(),owner.generation,link.root.get())&&EquipmentCarrierGraph.curatives(link.root.get()).contains(value);
@@ -348,25 +398,89 @@ public final class EquipmentPolicy {
     static void carrierChanged(Object receiver){
         if(!initialized||receiver==null)return;
         for(Link link:links(receiver))if(active(link.owner)){
+            if(link.kind==Kind.SLOT_CARRIER){captureSlots(link.owner);continue;}
             ItemStack root=link.stack.get();if(root==null||!stackCurrent(link.owner,root))continue;
             walk(link.owner,root,null,true,null);capabilityWalk(link.owner,root,null,true,null);
         }
     }
     static void publish(Entity entity,long generation){
         if(!initialized||!(entity instanceof LivingEntity living))return;
-        if(generation<=0){OWNERS.remove(living);MINING.remove(living);return;}
+        if(generation<=0){OWNERS.remove(living);MINING.remove(living);EquipmentSlotGraph.publish(living,0);return;}
         Owner owner=OWNERS.get(living);if(owner==null||owner.generation!=generation){MINING.remove(living);owner=new Owner(living,generation);OWNERS.put(living,owner);}
-        refresh(owner);
-        if(!(living instanceof Player||living instanceof Mob||living instanceof ArmorStand))throw new IllegalStateException("EQUIPMENT_CUSTOM_CARRIER_UNRESOLVED:"+living.getClass().getName());
-        try{
+        if(owner.slotType==null)try{
             Method getter=null;for(String name:List.of("getItemBySlot","m_6844_"))try{getter=living.getClass().getMethod(name,EquipmentSlot.class);break;}catch(NoSuchMethodException ignored){ }
-            if(getter!=null&&!Set.of(Player.class,Mob.class,ArmorStand.class).contains(getter.getDeclaringClass()))
-                throw new IllegalStateException("EQUIPMENT_CUSTOM_SLOT_CARRIER_UNRESOLVED:"+getter.getDeclaringClass().getName());
-        }catch(SecurityException failure){throw new IllegalStateException("EQUIPMENT_SLOT_DEFINITION_UNRESOLVED",failure);}
+            if(getter==null||getter.getReturnType()!=ItemStack.class||Modifier.isStatic(getter.getModifiers()))throw new IllegalStateException("EQUIPMENT_SLOT_DEFINITION_UNRESOLVED");
+            Class<?> actualType=getter.getDeclaringClass();String actualName=getter.getName();boolean traced=!Set.of(Player.class,Mob.class,ArmorStand.class).contains(actualType);
+            if(traced){EquipmentSlotGraph.publish(living,generation);DECLARE_SLOT.invokeExact(actualType,actualName,SLOT_DESCRIPTOR);}
+            owner.slotMethod=actualName;owner.slotType=actualType;owner.tracedSlots=traced;
+        }catch(RuntimeException|Error failure){throw failure;}catch(Throwable failure){throw new IllegalStateException("EQUIPMENT_SLOT_DEFINITION_UNRESOLVED",failure);}
+        refresh(owner);
     }
+    public static Object slotReadBegin(Object receiver,Object requested){
+        if(!initialized||!(receiver instanceof LivingEntity entity)||!(requested instanceof EquipmentSlot slot))return null;Owner owner=OWNERS.get(entity);
+        if(!active(owner)||!owner.tracedSlots||owner.slotType==null)return null;List<StackWalker.StackFrame> frames=capabilityFrames();
+        if(frames.isEmpty()||!sameAnchor(frames.get(0),owner.slotType,owner.slotMethod,SLOT_DESCRIPTOR)||!owner.slotType.isInstance(receiver))throw new SecurityException("ACTUAL_EQUIPMENT_SLOT_GETTER_REQUIRED");
+        SlotRead previous=SLOT_READS.get();if(previous!=null)previous.unresolved=true;
+        SlotRead token=new SlotRead(owner,slot,previous,frames);SLOT_READS.set(token);return token;
+    }
+    private static boolean slotReadPath(SlotRead token){
+        if(token.closed||token.thread!=Thread.currentThread()||SLOT_READS.get()!=token||!active(token.owner))return false;
+        List<StackWalker.StackFrame> frames=capabilityFrames();if(frames.size()!=token.tail.size()+1||frames.isEmpty()||!sameAnchor(frames.get(0),token.anchor,token.method,token.descriptor))return false;
+        for(int at=0;at<token.tail.size();at++){var actual=frames.get(at+1);var expected=token.tail.get(at);if(!sameAnchor(actual,expected.getDeclaringClass(),expected.getMethodName(),expected.getDescriptor())||actual.getByteCodeIndex()!=expected.getByteCodeIndex())return false;}
+        return true;
+    }
+    private static SlotRead actualSlotRead(Object token){
+        if(token==null)return null;if(token instanceof SlotRead read&&!active(read.owner)&&read.thread==Thread.currentThread()&&SLOT_READS.get()==read){read.unresolved=true;return null;}
+        if(!(token instanceof SlotRead read)||!slotReadPath(read))throw new SecurityException("ACTUAL_EQUIPMENT_SLOT_READ_REQUIRED");return read;
+    }
+    private static void slotRecord(SlotRead read,EquipmentSlotGraph.Read actual){if(read.reads.size()>=MAX_GRAPH)read.unresolved=true;else read.reads.add(actual);}
+    public static void slotFieldRead(Object token,Object holder,Class<?> symbolic,String name,String descriptor,Object value){
+        SlotRead read=actualSlotRead(token);if(read==null||read.unresolved)return;
+        try{slotRecord(read,EquipmentSlotGraph.fieldRead(holder==null?symbolic:holder,symbolic,name,descriptor,value));}catch(EquipmentSlotGraph.Unresolved unavailable){read.unresolved=true;}
+    }
+    public static void slotArrayRead(Object token,Object array,int index,Object value){
+        SlotRead read=actualSlotRead(token);if(read==null||read.unresolved)return;
+        if(array==null||!array.getClass().isArray()||index<0||index>=Array.getLength(array)){read.unresolved=true;return;}
+        Class<?> type=array.getClass().getComponentType();Object normalized=value;
+        if(value instanceof Integer number){int raw=number.intValue();if(type==byte.class&&raw==(byte)raw)normalized=Byte.valueOf((byte)raw);else if(type==short.class&&raw==(short)raw)normalized=Short.valueOf((short)raw);
+            else if(type==char.class&&raw==(char)raw)normalized=Character.valueOf((char)raw);else if(type==boolean.class&&(raw==0||raw==1))normalized=Boolean.valueOf(raw!=0);}
+        Object current=Array.get(array,index);if(type.isPrimitive()?!samePrimitive(current,normalized):current!=normalized){read.unresolved=true;return;}
+        slotRecord(read,new EquipmentSlotGraph.ArrayRead(array,index,normalized));
+    }
+    public static void slotContainerRead(Object token,Object container,Object selector,Object value,boolean map){
+        SlotRead read=actualSlotRead(token);if(read==null||read.unresolved)return;
+        if(!EquipmentSlotGraph.containerSupported(container,map)){read.unresolved=true;return;}
+        if(map)slotRecord(read,new EquipmentSlotGraph.MapRead(container,selector,value));
+        else if(selector instanceof Integer index)slotRecord(read,new EquipmentSlotGraph.ListRead(container,index.intValue(),value));else read.unresolved=true;
+    }
+    public static void slotSelectorRead(Object token,Object receiver,String name,String descriptor,Object value){
+        SlotRead read=actualSlotRead(token);if(read==null||read.unresolved)return;
+        boolean originalSlot=receiver==read.slot,slotType=receiver==EquipmentSlot.Type.HAND||receiver==EquipmentSlot.Type.ARMOR;
+        if(!originalSlot&&!slotType){read.unresolved=true;return;}String field=null;Class<?> declaring=EquipmentSlot.class;
+        if(originalSlot&&names(name,"getIndex","m_20749_")&&descriptor.equals("()I"))field="index";
+        else if(originalSlot&&names(name,"getType","m_20743_")&&descriptor.equals("()Lnet/minecraft/world/entity/EquipmentSlot$Type;"))field="type";
+        else if(name.equals("ordinal")&&descriptor.equals("()I")){field="ordinal";declaring=Enum.class;}
+        if(field==null){read.unresolved=true;return;}
+        try{EquipmentCarrierGraph.Slot actual=null;for(var candidate:EquipmentCarrierGraph.fields(receiver))if(candidate.field().getDeclaringClass()==declaring
+                    &&(candidate.field().getName().equals(field)||field.equals("index")&&candidate.field().getName().equals("f_20731_")||field.equals("type")&&candidate.field().getName().equals("f_20730_"))){if(actual!=null){read.unresolved=true;return;}actual=candidate;}
+            if(actual==null||(actual.type().isPrimitive()?!samePrimitive(actual.value(),value):actual.value()!=value)){read.unresolved=true;return;}
+            slotRecord(read,new EquipmentSlotGraph.FieldRead(receiver,actual.field(),value));
+        }catch(EquipmentSlotGraph.Unresolved unavailable){read.unresolved=true;}
+    }
+    public static void slotUnresolved(Object token){SlotRead read=actualSlotRead(token);if(read!=null)read.unresolved=true;}
+    public static void slotReadEnd(Object token,Object result){closeSlotRead(token,result,true);}
+    private static void closeSlotRead(Object token,Object result,boolean success){
+        if(token==null)return;if(!(token instanceof SlotRead read)||read.thread!=Thread.currentThread()||read.closed||SLOT_READS.get()!=read)throw new IllegalMonitorStateException("EQUIPMENT_SLOT_READ_ORDER");
+        try{if(!active(read.owner))return;if(success&&!slotReadPath(read))throw new SecurityException("ACTUAL_EQUIPMENT_SLOT_EXIT_REQUIRED");
+            if(!success||read.unresolved||!(result instanceof ItemStack stack)||!EquipmentSlotGraph.observe(read.owner.entity.get(),read.owner.generation,read.slot,stack,read.reads))EquipmentSlotGraph.forget(read.owner.entity.get(),read.owner.generation,read.slot);
+            else captureSlots(read.owner);
+        }finally{read.closed=true;if(read.previous==null)SLOT_READS.remove();else SLOT_READS.set(read.previous);}
+    }
+    public static void slotReadFailed(Object token,Throwable original){try{closeSlotRead(token,null,false);}catch(RuntimeException|Error cleanup){if(cleanup!=original)original.addSuppressed(cleanup);}}
     private static void refresh(Owner owner){
         LivingEntity entity=owner.entity.get();if(entity==null)return;link(owner,entity,Kind.BODY,-1,null);
         if(entity instanceof ServerPlayer player&&player.gameMode!=null)link(owner,player.gameMode,Kind.GAME_MODE,-1,null);
+        if(owner.tracedSlots){captureSlots(owner);return;}
         if(entity instanceof Player){
             Inventory inventory=inventory(owner);if(inventory==null)throw new IllegalStateException("EQUIPMENT_INVENTORY_UNAVAILABLE");
             link(owner,inventory,Kind.INVENTORY,-1,null);Object compartments=((Access.InventoryState)inventory).pro$compartments();
@@ -568,6 +682,62 @@ public final class EquipmentPolicy {
         }
     }
     public static void capabilityQueryFailed(Object token,Throwable failure){try{closeQuery(token,null,false);}catch(RuntimeException|Error cleanup){if(cleanup!=failure)failure.addSuppressed(cleanup);}}
+    /** The original ifPresent operands enter here once; this never replays a supplier or callback. */
+    @SuppressWarnings("unchecked")
+    public static void capabilityAccept(Object optional,Object consumer,Object value){
+        var actual=(net.minecraftforge.common.util.NonNullConsumer<Object>)Objects.requireNonNull(consumer);
+        CapabilityConsumer lease=null,previous=CAP_CONSUMERS.get();
+        if(initialized&&optional!=null&&optional.getClass()==LazyOptional.class){
+            List<StackWalker.StackFrame> frames=capabilityFrames();Scope action=SCOPES.get(Thread.currentThread());
+            boolean entry=!frames.isEmpty()&&frames.get(0).getDeclaringClass()==LazyOptional.class&&frames.get(0).getMethodName().equals("ifPresent")
+                    &&frames.get(0).getDescriptor().equals("(Lnet/minecraftforge/common/util/NonNullConsumer;)V");
+            if(entry&&action!=null&&!action.closed&&scopePath(action,frames.subList(1,frames.size()))&&sourceAllowed(action)
+                    &&capBool(OPTIONAL_VALID,optional)&&resolvedValue(optional)==value&&value!=null){
+                List<Link> selected=new ArrayList<>();ItemStack root=null;boolean shared=false;
+                for(Link link:links(optional))if(current(link,optional)){
+                    ItemStack candidate=link.stack.get();
+                    if(link.owner!=action.owner||candidate==null||curativeStack(link.owner,candidate)||!actionCurrent(action,candidate,shares(link.owner,candidate))
+                            ||root!=null&&root!=candidate){shared=true;break;}
+                    root=candidate;selected.add(link);
+                }
+                if(!shared&&root!=null&&!selected.isEmpty()&&capabilityWalk(action.owner,root,value,false,null)){
+                    lease=new CapabilityConsumer(action,optional,consumer,value,root,selected,previous);CAP_CONSUMERS.set(lease);
+                }
+            }
+        }
+        Throwable original=null;
+        try{invokeCapabilityConsumer(actual,value,lease);}catch(RuntimeException|Error failure){original=failure;throw failure;}
+        finally{if(lease!=null)try{lease.closed=true;if(CAP_CONSUMERS.get()!=lease)throw new IllegalMonitorStateException("EQUIPMENT_CAPABILITY_CONSUMER_ORDER");
+                if(previous==null)CAP_CONSUMERS.remove();else CAP_CONSUMERS.set(previous);}
+            catch(RuntimeException|Error failure){if(original==null)throw failure;if(failure!=original)original.addSuppressed(failure);}}
+    }
+    private static Object resolvedValue(Object optional){Object holder=capRead(OPTIONAL_VALUE,optional);return holder!=null&&holder.getClass()==MutableObject.class?capRead(MUTABLE_VALUE,holder):null;}
+    private static void invokeCapabilityConsumer(net.minecraftforge.common.util.NonNullConsumer<Object> consumer,Object value,Object token){
+        if(token instanceof CapabilityConsumer lease)try{
+            lease.bottomDepth=(int)CALLBACK_DEPTH.invokeExact((Class<?>)EquipmentPolicy.class,CONSUMER_BOUNDARY,CONSUMER_DESCRIPTOR);
+        }catch(Throwable failure){throw new IllegalStateException("EQUIPMENT_CONSUMER_BOUNDARY_UNAVAILABLE",failure);}
+        consumer.accept(value);
+    }
+    private static boolean consumerCurrent(CapabilityConsumer lease){
+        if(lease.closed||lease.thread!=Thread.currentThread()||lease.action!=SCOPES.get(Thread.currentThread())||lease.bottomDepth<=0
+                ||!capBool(OPTIONAL_VALID,lease.optional)||resolvedValue(lease.optional)!=lease.value
+                ||!actionCurrent(lease.action,lease.root,shares(lease.action.owner,lease.root)))return false;
+        for(Link link:lease.links)if(link.owner!=lease.action.owner||link.stack.get()!=lease.root||!current(link,lease.optional))return false;
+        return capabilityWalk(lease.action.owner,lease.root,lease.value,false,null);
+    }
+    private static boolean consumerFrame(StackWalker.StackFrame requested,Scope action){
+        for(CapabilityConsumer lease=CAP_CONSUMERS.get();lease!=null;lease=lease.previous)if(lease.action==action&&consumerCurrent(lease)){
+            List<StackWalker.StackFrame> frames=WALKER.walk(stream->stream.toList());int bottom=-1;
+            for(int at=0;at<frames.size();at++){var frame=frames.get(at);
+                if(sameAnchor(frame,requested.getDeclaringClass(),requested.getMethodName(),requested.getDescriptor())&&frame.getByteCodeIndex()==requested.getByteCodeIndex()){
+                    if(bottom!=-1)return false;bottom=frames.size()-at;
+                }}
+            if(bottom<0)continue;
+            try{if((boolean)CALLBACK_FRAME.invokeExact(lease.consumer,requested.getDeclaringClass(),requested.getMethodName(),requested.getDescriptor(),bottom,
+                    (Class<?>)EquipmentPolicy.class,CONSUMER_BOUNDARY,CONSUMER_DESCRIPTOR,lease.bottomDepth))return true;}
+            catch(Throwable failure){throw new IllegalStateException("EQUIPMENT_CONSUMER_FRAME_UNAVAILABLE",failure);}
+        }return false;
+    }
     private static boolean listenerCarrier(CapabilityScope scope,Object target){
         Object set=scope.listeners;if(set==null||set.getClass()!=HashSet.class)return false;Object map=capRead(SET_MAP,set);if(map==null||map.getClass()!=HashMap.class)return false;
         if(target==set||target==map)return true;Object table=capRead(MAP_TABLE,map);if(target==table)return true;
@@ -612,6 +782,7 @@ public final class EquipmentPolicy {
     private static boolean sourceAllowed(Scope scope){return sourceAllowed(scope,null,null);}
     private static boolean sourceAllowed(Scope scope,Class<?> receiver,Class<?> body){
         List<Class<?>> carriers=new ArrayList<>();if(receiver!=null)carriers.add(receiver);if(body!=null&&body!=receiver)carriers.add(body);
+        if(CAP_CONSUMERS.get()!=null)for(var frame:WALKER.walk(stream->stream.toList()))if(consumerFrame(frame,scope)&&!carriers.contains(frame.getDeclaringClass()))carriers.add(frame.getDeclaringClass());
         for(Invocation invocation=INVOCATIONS.get(Thread.currentThread());invocation!=null;invocation=invocation.previous)
             if(invocation.action==scope&&invocation.operation.equals("carrier-call")&&invocationCurrent(invocation)){
                 Object actual=invocation.receiver.get();if(actual!=null&&!carriers.contains(actual.getClass()))carriers.add(actual.getClass());
@@ -628,7 +799,7 @@ public final class EquipmentPolicy {
     }
     private static Class<?> itemType(ItemStack stack){Item item=item(stack);return item==null?null:item.getClass();}
     private static int selected(Owner owner){Inventory inventory=inventory(owner);return inventory==null?-1:((Access.InventoryState)inventory).pro$selected();}
-    private static ItemStack main(Owner owner){return itemAt(owner,0,selected(owner));}
+    private static ItemStack main(Owner owner){return slotStack(owner,EquipmentSlot.MAINHAND);}
     private static ServerPlayerGameMode currentGame(Owner owner){return owner.entity.get() instanceof ServerPlayer player?player.gameMode:null;}
     private static boolean gameOwned(Owner owner,ServerPlayerGameMode game){return active(owner)&&owner.entity.get() instanceof ServerPlayer player&&player.gameMode==game&&((Access.EquipmentGameMode)game).pro$player()==player;}
     private static boolean worldCurrent(Owner owner,ServerPlayerGameMode game,ServerLevel expected){return gameOwned(owner,game)&&expected!=null&&((Access.EntityState)owner.entity.get()).pro$level()==expected&&((Access.EquipmentGameMode)game).pro$level()==expected;}
@@ -807,6 +978,9 @@ public final class EquipmentPolicy {
         Scope scope=invocation.action;
         if(invocation.operation.equals("carrier-call")){
             Object receiver=invocation.receiver.get();ItemStack root=invocation.stack.get();
+            if(receiver==scope.owner.entity.get()&&slotSetter(invocation.anchor,invocation.method,invocation.descriptor,receiver,invocation.arguments)){
+                EquipmentSlot slot=(EquipmentSlot)invocation.arguments[0];return root!=null&&slotStack(scope.owner,slot)==root&&invocation.mask==(1<<EquipmentSlotGraph.ordinal(slot))&&actionCurrent(scope,root,invocation.mask);
+            }
             if(receiver==null||root==null||curativeStack(scope.owner,root)||!actionCurrent(scope,root,invocation.mask))return false;
             for(Link link:links(receiver))if(link.owner==scope.owner&&link.stack.get()==root&&(link.kind==Kind.CAPABILITY||link.kind==Kind.NBT||link.kind==Kind.STACK)&&current(link,receiver)){
                 EquipmentCarrierGraph.Node node=heldNode(link,receiver);if(node!=null&&node.data()&&!node.metadata())return true;
@@ -860,16 +1034,24 @@ public final class EquipmentPolicy {
         }return false;
     }
     /** No caller-supplied object can mint a lease: the first frame must be the actual mapped virtual body. */
+    private static boolean slotSetter(Class<?> declaring,String method,String descriptor,Object receiver,Object[] arguments){
+        return receiver instanceof LivingEntity&&declaring.isInstance(receiver)&&names(method,"setItemSlot","m_8061_")&&descriptor.equals("(Lnet/minecraft/world/entity/EquipmentSlot;Lnet/minecraft/world/item/ItemStack;)V")
+                &&arguments.length==2&&arguments[0] instanceof EquipmentSlot&&arguments[1] instanceof ItemStack;
+    }
     public static Object beginInvocation(Object receiver,Object arguments,String operation){
         if(!initialized||!(arguments instanceof Object[] args))return null;
         List<StackWalker.StackFrame> frames=invocationFrames();if(frames.isEmpty())return INVOCATION_REFUSED;
         StackWalker.StackFrame entry=frames.get(0),caller=frames.size()>1?frames.get(1):null;
         Invocation previous=INVOCATIONS.get(Thread.currentThread());Scope scope;ItemStack stack=null;int mask=0;boolean opens=false;
         if(operation.equals("carrier-call")){
-            if(receiver==null||!EquipmentCarrierGraph.declared(entry.getDeclaringClass())||!entry.getDeclaringClass().isInstance(receiver)||carrierCallback(receiver,entry))return null;
+            boolean setter=slotSetter(entry.getDeclaringClass(),entry.getMethodName(),entry.getDescriptor(),receiver,args);
+            if(!setter&&(receiver==null||!EquipmentCarrierGraph.declared(entry.getDeclaringClass())||!entry.getDeclaringClass().isInstance(receiver)||carrierCallback(receiver,entry)))return null;
             scope=SCOPES.get(Thread.currentThread());if(scope==null||scope.closed||!scopePath(scope,frames.subList(1,frames.size())))return null;
             boolean found=false;
-            for(Link link:links(receiver))if((link.kind==Kind.CAPABILITY||link.kind==Kind.NBT||link.kind==Kind.STACK)&&current(link,receiver)){
+            if(setter){Owner owner=OWNERS.get((LivingEntity)receiver);if(!active(owner)||scope.owner!=owner)return null;EquipmentSlot slot=(EquipmentSlot)args[0];int at=EquipmentSlotGraph.ordinal(slot);if(at<0)return INVOCATION_REFUSED;
+                stack=slotStack(owner,slot);mask=1<<at;if(stack==null)throw new SecurityException("EQUIPMENT_SLOT_READ_PENDING");if(!actionCurrent(scope,stack,mask))return INVOCATION_REFUSED;found=true;
+            }
+            for(Link link:setter?List.<Link>of():links(receiver))if((link.kind==Kind.CAPABILITY||link.kind==Kind.NBT||link.kind==Kind.STACK)&&current(link,receiver)){
                 EquipmentCarrierGraph.Node node=heldNode(link,receiver);if(node==null||!node.data()||node.metadata())continue;
                 ItemStack root=link.stack.get();int actualMask=shares(link.owner,root);
                 if(link.owner!=scope.owner||root==null||curativeStack(link.owner,root)||!actionCurrent(scope,root,actualMask)||stack!=null&&stack!=root)return null;
@@ -949,7 +1131,7 @@ public final class EquipmentPolicy {
         if(type.getPackageName().equals("java.util.function")||type==net.minecraftforge.common.util.NonNullSupplier.class||type==net.minecraftforge.common.util.NonNullConsumer.class||type==net.minecraftforge.common.util.NonNullFunction.class)return true;
         for(Class<?> parent:type.getInterfaces())if(functionalContract(parent))return true;return false;
     }
-    private static ItemStack handStack(Owner owner,InteractionHand hand){return hand==InteractionHand.MAIN_HAND?main(owner):itemAt(owner,owner.entity.get() instanceof Player?2:0,owner.entity.get() instanceof Player?0:1);}
+    private static ItemStack handStack(Owner owner,InteractionHand hand){return slotStack(owner,hand==InteractionHand.MAIN_HAND?EquipmentSlot.MAINHAND:EquipmentSlot.OFFHAND);}
     private static UseOnContext itemContext(String operation,Object[] args){
         Object context=operation.equals("item-useOn")||operation.equals("item-place")?args.length==1?args[0]:null:operation.equals("item-onItemUseFirst")&&args.length==2?args[1]:null;
         return context!=null&&(operation.equals("item-place")?context.getClass()==BlockPlaceContext.class:context.getClass()==UseOnContext.class)?(UseOnContext)context:null;
@@ -1084,6 +1266,7 @@ public final class EquipmentPolicy {
     }
     private static boolean gameFrame(StackWalker.StackFrame frame,Scope scope){
         Class<?> type=frame.getDeclaringClass();String name=frame.getMethodName();
+        if(consumerFrame(frame,scope))return true;
         if(carrierFrame(frame,scope))return true;
         if(EquipmentCarrierLayouts.known(type)||EquipmentCarrierLayouts.known(type.getNestHost()))return true;
         if(Item.class.isAssignableFrom(type)){
@@ -1093,7 +1276,7 @@ public final class EquipmentPolicy {
         if(ownedNbtRedirect(frame))return true;
         if(type==CapabilityProvider.class)return names(name,"invalidateCaps","reviveCaps","deserializeCaps","getCapabilities","doGatherCapabilities","gatherCapabilities");
         if(type==CapabilityDispatcher.class)return names(name,"invalidate","deserializeNBT","getCapability");
-        if(type==LazyOptional.class)return names(name,"invalidate","addListener","removeListener");
+        if(type==LazyOptional.class)return names(name,"invalidate","addListener","removeListener")||name.equals("ifPresent")&&CAP_CONSUMERS.get()!=null;
         if(capabilityProviderType(type))return names(name,"fill","drain","setFluid","setContainerToEmpty");
         if(!vanilla(frame)){
             if(type==net.minecraftforge.common.extensions.IForgeItem.class)return invocationFrame(frame,scope,true);
@@ -1155,13 +1338,39 @@ public final class EquipmentPolicy {
         return !curativeStack(link.owner,stack)&&permitted(link.owner,shares(link.owner,stack),stack,entry);
     }
     private static boolean anySlotDenied(Owner owner,boolean entry){
+        if(owner.tracedSlots){var view=slotView(owner);if(view.resolvedMask()!=ALL)return true;for(int at=0;at<6;at++)if(!permitted(owner,1<<at,view.stack(EquipmentSlotGraph.slot(at)),entry))return true;return false;}
         for(int part=0;part<(owner.entity.get() instanceof Player?3:2);part++){
             Object[] values=(Object[])array(backing(list(owner,part)));if(values==null)continue;
             for(int i=0;i<values.length;i++){int mask=bit(owner,part,i);if(mask!=0&&!permitted(owner,mask,values[i] instanceof ItemStack stack?stack:null,entry))return true;}
         }return false;
     }
+    private static boolean slotChangeDenied(Owner owner,EquipmentSlotGraph.View view,int mask,Object next,boolean terminal,boolean entry){
+        if(mask==0)return false;
+        if(terminal&&!(next instanceof ItemStack))throw new SecurityException("EQUIPMENT_SLOT_VALUE_REQUIRED");
+        for(int at=0;at<6;at++)if((mask&(1<<at))!=0){ItemStack stack=view.stack(EquipmentSlotGraph.slot(at));if(stack==null||!permitted(owner,1<<at,stack,entry))throw new SecurityException("EQUIPMENT_SLOT_WRITE_REJECTED");}
+        if((mask&1)!=0)cancelMining(owner);if(next instanceof ItemStack stack)captureStack(owner,stack);return false;
+    }
+    private static boolean slotFieldDenied(Object receiver,Class<?> declaring,String name,Object next){
+        for(Link link:links(receiver))if(link.kind==Kind.SLOT_CARRIER&&active(link.owner)){
+            var view=slotView(link.owner);int mask=EquipmentSlotGraph.fieldChangeMask(link.owner.entity.get(),link.owner.generation,receiver,declaring,name,next);if(mask==0)continue;
+            boolean terminal=false;for(var use:view.fields())if(use.receiver()==receiver&&use.field().getDeclaringClass()==declaring&&use.field().getName().equals(name)&&use.terminal()){terminal=true;break;}
+            slotChangeDenied(link.owner,view,mask,next,terminal,false);
+        }return false;
+    }
+    private static boolean slotArrayDenied(Object receiver,int index,Object next){
+        for(Link link:links(receiver))if(link.kind==Kind.SLOT_CARRIER&&active(link.owner)){
+            var view=slotView(link.owner);int mask=EquipmentSlotGraph.arrayChangeMask(link.owner.entity.get(),link.owner.generation,receiver,index,next);if(mask==0)continue;
+            boolean terminal=false;for(var use:view.arrays())if(use.array()==receiver&&index>=use.from()&&index<use.to()&&(index-use.from())%use.stride()==0&&use.terminal()){terminal=true;break;}
+            slotChangeDenied(link.owner,view,mask,next,terminal,false);
+        }return false;
+    }
     public static boolean listWriteDenied(Object receiver,int index,Object next){
         if(!initialized)return false;
+        for(Link link:links(receiver))if(link.kind==Kind.SLOT_CARRIER&&active(link.owner)){
+            var view=slotView(link.owner);int mask=0;if(receiver.getClass().isArray()){for(var use:view.arrays())if(use.array()==receiver&&use.terminal()&&index>=use.from()&&index<use.to()&&(index-use.from())%use.stride()==0)mask|=use.mask();}else mask=view.listMask(receiver,index);
+            boolean same=true;for(int at=0;at<6;at++)if((mask&(1<<at))!=0&&view.stack(EquipmentSlotGraph.slot(at))!=next){same=false;break;}
+            if(!same)slotChangeDenied(link.owner,view,mask,next,true,true);
+        }
         for(Link link:links(receiver))if((link.kind==Kind.CURATIVE_LIST||link.kind==Kind.CURATIVE_ARRAY)&&current(link,receiver))return true;
         for(Link link:links(receiver))if((link.kind==Kind.EQUIPMENT_LIST||link.kind==Kind.EQUIPMENT_BACKING||link.kind==Kind.EQUIPMENT_ARRAY)&&current(link,receiver)){
             Object[] values=(Object[])array(backing(list(link.owner,link.part)));if(index<0||index>=values.length)return false;
@@ -1175,10 +1384,8 @@ public final class EquipmentPolicy {
     }
     public static boolean itemSlotDenied(LivingEntity entity,EquipmentSlot slot,ItemStack next){
         if(!initialized||slot==null||next==null)return false;Owner owner=OWNERS.get(entity);if(!active(owner))return false;
-        int mask=slot==EquipmentSlot.MAINHAND?1:slot==EquipmentSlot.OFFHAND?2:1<<(slot.getIndex()+2);
-        int part=slot.getType()==EquipmentSlot.Type.ARMOR?1:entity instanceof Player&&slot==EquipmentSlot.OFFHAND?2:0;
-        int index=slot.getType()==EquipmentSlot.Type.ARMOR?slot.getIndex():entity instanceof Player?slot==EquipmentSlot.OFFHAND?0:((Access.InventoryState)inventory(owner)).pro$selected():slot.getIndex();
-        ItemStack current=itemAt(owner,part,index);if(current==next)return false;
+        int at=EquipmentSlotGraph.ordinal(slot);if(at<0)return true;int mask=1<<at;
+        ItemStack current=slotStack(owner,slot);if(current==null)throw new SecurityException("EQUIPMENT_SLOT_READ_PENDING");if(current==next)return false;
         if(!permitted(owner,mask,current,true))return true;if((mask&1)!=0)cancelMining(owner);captureStack(owner,next);return false;
     }
     public static boolean stackEntryDenied(ItemStack stack,String operation,Object[] args){
@@ -1205,6 +1412,7 @@ public final class EquipmentPolicy {
     }
     public static boolean takeDenied(Object list,int index,int amount){
         if(amount<=0)return false;
+        for(Link link:links(list))if(link.kind==Kind.SLOT_CARRIER&&active(link.owner)){var view=slotView(link.owner);int mask=view.listMask(list,index);for(int at=0;at<6;at++)if((mask&(1<<at))!=0&&!permitted(link.owner,1<<at,view.stack(EquipmentSlotGraph.slot(at)),true))return true;}
         for(Link link:links(list))if((link.kind==Kind.EQUIPMENT_LIST||link.kind==Kind.EQUIPMENT_BACKING)&&current(link,list)){
             int mask=bit(link.owner,link.part,index);if(mask!=0&&!permitted(link.owner,mask,itemAt(link.owner,link.part,index),true))return true;
         }return false;
@@ -1254,6 +1462,7 @@ public final class EquipmentPolicy {
     static boolean arrayDenied(Object array,int index,Object next){
         if(array==null||!array.getClass().isArray()||index<0||index>=Array.getLength(array))return false;
         Object old=Array.get(array,index);if(array.getClass().getComponentType().isPrimitive()?samePrimitive(old,next):old==next)return false;
+        if(slotArrayDenied(array,index,next))return true;
         if(listWriteDenied(array,index,next))return true;
         return elementDenied(array,old,next,index);
     }
@@ -1262,9 +1471,10 @@ public final class EquipmentPolicy {
         for(Slot slot:mutationSlots(receiver))if(slot.field.getDeclaringClass()==declaring&&slot.field.getName().equals(name)){selected=slot;break;}
         if(selected==null)return false;
         Object old;
-        if(!links(receiver).isEmpty())old=EquipmentCarrierGraph.read(receiver,selected.field);
+        if(!links(receiver).isEmpty())old=EquipmentSlotGraph.readField(receiver,selected.field);
         else try{old=selected.field.get(receiver);}catch(IllegalAccessException failure){throw new IllegalStateException("EQUIPMENT_FIELD_READ",failure);}
         if(selected.field.getType().isPrimitive()?samePrimitive(old,next):old==next)return false;
+        if(slotFieldDenied(receiver,declaring,name,next))return true;
         for(Link link:links(receiver))if(current(link,receiver)){
             if(link.kind==Kind.STACK||link.kind==Kind.CAPABILITY||link.kind==Kind.NBT){
                 Boolean capability=capabilityField(link,receiver,selected.field,next);
@@ -1280,6 +1490,7 @@ public final class EquipmentPolicy {
             if(link.kind==Kind.CURATIVE_CARRIER)throw new SecurityException("CURATIVE_CARRIER_WRITE_REJECTED");
             if(link.kind==Kind.CURATIVE_LIST)return true;
             if(link.kind==Kind.GAME_MODE){if(gameFieldDenied(link.owner,(ServerPlayerGameMode)receiver,name,next))return true;continue;}
+            if(link.kind==Kind.BODY&&link.owner.tracedSlots)continue;
             if(link.kind==Kind.BODY||link.kind==Kind.INVENTORY||link.kind==Kind.EQUIPMENT_LIST||link.kind==Kind.EQUIPMENT_BACKING||link.kind==Kind.COMPARTMENTS){if(structureFieldDenied(link,declaring,name,next))return true;continue;}
             if(link.kind==Kind.STACK){
                 if(names(name,"item","f_41589_","delegate"))return true;
@@ -1372,6 +1583,12 @@ public final class EquipmentPolicy {
     }
     static boolean memoryDenied(Object receiver,long offset,long length){
         if(!initialized||receiver==null||length<=0)return false;
+        for(Link link:links(receiver))if(link.kind==Kind.SLOT_CARRIER&&active(link.owner)){
+            var view=slotView(link.owner);int mask=view.memoryMask(receiver,offset,length);if(mask==0)continue;
+            if(receiver.getClass().isArray()&&!receiver.getClass().getComponentType().isPrimitive())throw new SecurityException("EQUIPMENT_SLOT_REFERENCE_MEMORY_REJECTED");
+            for(var use:view.fields())if(use.receiver()==receiver&&!use.field().getType().isPrimitive()&&overlaps(offset,length,use.offset(),use.width()))throw new SecurityException("EQUIPMENT_SLOT_REFERENCE_MEMORY_REJECTED");
+            slotChangeDenied(link.owner,view,mask,null,false,false);
+        }
         if(receiver.getClass().isArray()){
             for(Link link:links(receiver))if(current(link,receiver)){
                 if(link.kind==Kind.CAPABILITY||link.kind==Kind.NBT){
@@ -1392,6 +1609,7 @@ public final class EquipmentPolicy {
     }
     private static boolean carrierRangeDenied(Object receiver,Slot slot){
         for(Link link:links(receiver))if(current(link,receiver)){
+            if(link.kind==Kind.SLOT_CARRIER){var view=slotView(link.owner);int mask=view.fieldMask(receiver,slot.field.getDeclaringClass(),slot.field.getName());if(mask!=0){if(!slot.field.getType().isPrimitive())throw new SecurityException("EQUIPMENT_SLOT_REFERENCE_MEMORY_REJECTED");slotChangeDenied(link.owner,view,mask,null,false,false);}continue;}
             if(link.kind==Kind.CURATIVE_CARRIER||link.kind==Kind.CURATIVE_LIST)throw new SecurityException("CURATIVE_CARRIER_MEMORY_WRITE_REJECTED");
             if(link.kind==Kind.CAPABILITY||link.kind==Kind.NBT){EquipmentCarrierGraph.Node node=heldNode(link,receiver);
                 if(!slot.field.getType().isPrimitive()||node==null||node.metadata()||!node.data()||!permitStack(link,false))throw new SecurityException("EQUIPMENT_CAPABILITY_MEMORY_WRITE_REJECTED");}
@@ -1442,6 +1660,9 @@ public final class EquipmentPolicy {
         declare(declare,ContainerHelper.class,new String[][]{{"takeItem","m_18966_","(Ljava/util/List;I)Lnet/minecraft/world/item/ItemStack;"},{"removeItem","m_18969_","(Ljava/util/List;II)Lnet/minecraft/world/item/ItemStack;"}});
         declare(declare,ARRAY_LIST,new String[][]{{"set","","(ILjava/lang/Object;)Ljava/lang/Object;"},{"replaceAll","","(Ljava/util/function/UnaryOperator;)V"},{"sort","","(Ljava/util/Comparator;)V"}});
         Method actions=agent.getMethod("declareEquipmentActionTarget",Class.class,String.class,String.class,String.class);
+        for(Method setter:LivingEntity.class.getDeclaredMethods())if(names(setter.getName(),"setItemSlot","m_8061_")
+                &&MethodType.methodType(setter.getReturnType(),setter.getParameterTypes()).descriptorString().equals("(Lnet/minecraft/world/entity/EquipmentSlot;Lnet/minecraft/world/item/ItemStack;)V"))
+            actions.invoke(null,LivingEntity.class,setter.getName(),"(Lnet/minecraft/world/entity/EquipmentSlot;Lnet/minecraft/world/item/ItemStack;)V","carrier-call");
         declareActions(actions,ServerPlayerGameMode.class,GAME_ACTIONS);
         declareActions(actions,Item.class,ITEM_ACTIONS);
         declareActions(actions,net.minecraftforge.common.extensions.IForgeItem.class,ITEM_ACTIONS);

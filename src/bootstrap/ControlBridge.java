@@ -28,7 +28,7 @@ public final class ControlBridge {
         }
     };
     private ControlBridge() { }
-    public static int abiVersion(){return 84;}
+    public static int abiVersion(){return 85;}
     public static long arrayRevision(Object value){if(!recoveryWriter())throw new SecurityException("RECOVERY_ARRAY_READER_REQUIRED");return CodeSourceBridge.executionArrayRevision(value);}
 
     public static synchronized void install(Class<?> agent,ClassFileTransformer[] transformers) throws ReflectiveOperationException {
@@ -896,6 +896,7 @@ public final class ControlBridge {
             "clearProtectedMap","unsafeWriteAllowed","unsafeMemoryAllowed","networkRetirementWriteAllowed","networkRetirementOwnerAllowed","networkRetirementActive",
             "nativeArrayElementAllowed","nativePrimitiveArrayPolicy","nativeArrayPointerAllowed","nativeArrayCopyInternal","nativeRegistrationAllowed","nativeRegistrationTargetAllowed","nativeHeapTargetAllowed","arrayWriteAllowed",
             "resourceReleaseAllowed","lifeResult","dispatchAllowed","dispatchDeniedResult","equipmentActionSourceAllowed","equipmentCarrierSourceAllowed","beginEquipmentInvocation","equipmentInvocationDenied","equipmentInvocationResult","endEquipmentInvocation","failedEquipmentInvocation","taskEffectAllowed",
+            "beginEquipmentSlotRead","equipmentSlotFieldRead","equipmentSlotArrayRead","equipmentSlotContainerRead","equipmentSlotSelectorRead","equipmentSlotUnresolved","observeEquipmentSlot","failedEquipmentSlotRead",
             "resultPublicationAllowed");
     static boolean controlCaller() {
         // The query omits guard entry points, preserving the real ledger writer.
@@ -2293,6 +2294,57 @@ public final class ControlBridge {
     record EquipmentInvocations(java.lang.invoke.MethodHandle begin,java.lang.invoke.MethodHandle denied,
             java.lang.invoke.MethodHandle result,java.lang.invoke.MethodHandle end,java.lang.invoke.MethodHandle failed) { }
     static volatile EquipmentInvocations equipmentInvocations;
+    private static volatile java.lang.invoke.MethodHandle[] equipmentSlots;
+    public static synchronized void installEquipmentSlots(Class<?> owner,java.lang.invoke.MethodHandle[] callbacks){
+        requirePolicyInstaller();if(guards==null||guards.owner()!=owner)throw new SecurityException("EQUIPMENT_SLOT_OBSERVER_OWNER");
+        java.lang.invoke.MethodType[] types={
+            java.lang.invoke.MethodType.methodType(Object.class,Object.class,Object.class),
+            java.lang.invoke.MethodType.methodType(void.class,Object.class,Object.class,Class.class,String.class,String.class,Object.class),
+            java.lang.invoke.MethodType.methodType(void.class,Object.class,Object.class,int.class,Object.class),
+            java.lang.invoke.MethodType.methodType(void.class,Object.class,Object.class,Object.class,Object.class,boolean.class),
+            java.lang.invoke.MethodType.methodType(void.class,Object.class,Object.class,String.class,String.class,Object.class),
+            java.lang.invoke.MethodType.methodType(void.class,Object.class),
+            java.lang.invoke.MethodType.methodType(void.class,Object.class,Object.class),
+            java.lang.invoke.MethodType.methodType(void.class,Object.class,Throwable.class)};
+        if(callbacks==null||callbacks.length!=types.length)throw new IllegalArgumentException("EQUIPMENT_SLOT_CALLBACKS");
+        var next=callbacks.clone();for(int at=0;at<next.length;at++)next[at]=Objects.requireNonNull(next[at]).asType(types[at]);equipmentSlots=next;
+    }
+    public static Object beginEquipmentSlotRead(Object receiver,Object slot){
+        var callbacks=equipmentSlots;if(callbacks==null)return null;
+        try{return (Object)callbacks[0].invokeExact(receiver,slot);}catch(Throwable failure){throw slotFailure(failure);}
+    }
+    public static void equipmentSlotFieldRead(Object token,Object holder,Class<?> symbolic,String name,String descriptor,Object value){
+        var callbacks=equipmentSlots;if(callbacks==null||token==null)return;
+        try{callbacks[1].invokeExact(token,holder,symbolic,name,descriptor,value);}catch(Throwable failure){throw slotFailure(failure);}
+    }
+    public static void equipmentSlotArrayRead(Object token,Object array,int index,Object value){
+        var callbacks=equipmentSlots;if(callbacks==null||token==null)return;
+        try{callbacks[2].invokeExact(token,array,index,value);}catch(Throwable failure){throw slotFailure(failure);}
+    }
+    public static void equipmentSlotContainerRead(Object token,Object container,Object key,Object value,boolean map){
+        var callbacks=equipmentSlots;if(callbacks==null||token==null)return;
+        try{callbacks[3].invokeExact(token,container,key,value,map);}catch(Throwable failure){throw slotFailure(failure);}
+    }
+    public static void equipmentSlotSelectorRead(Object token,Object receiver,String name,String descriptor,Object value){
+        var callbacks=equipmentSlots;if(callbacks==null||token==null)return;
+        try{callbacks[4].invokeExact(token,receiver,name,descriptor,value);}catch(Throwable failure){throw slotFailure(failure);}
+    }
+    public static void equipmentSlotUnresolved(Object token){
+        var callbacks=equipmentSlots;if(callbacks==null||token==null)return;
+        try{callbacks[5].invokeExact(token);}catch(Throwable failure){throw slotFailure(failure);}
+    }
+    public static void observeEquipmentSlot(Object token,Object value){
+        var callbacks=equipmentSlots;if(callbacks==null||token==null)return;
+        try{callbacks[6].invokeExact(token,value);}catch(Throwable failure){throw slotFailure(failure);}
+    }
+    public static void failedEquipmentSlotRead(Object token,Throwable original){
+        var callbacks=equipmentSlots;if(callbacks==null||token==null)return;
+        try{callbacks[7].invokeExact(token,original);}catch(Throwable failure){if(failure!=original)original.addSuppressed(failure);}
+    }
+    private static RuntimeException slotFailure(Throwable failure){
+        if(failure instanceof Error error)throw error;if(failure instanceof RuntimeException runtime)return runtime;
+        return new IllegalStateException("EQUIPMENT_SLOT_OBSERVER_FAILED",failure);
+    }
     public static synchronized void installEquipmentActions(Class<?> owner,java.lang.invoke.MethodHandle begin,java.lang.invoke.MethodHandle denied,
             java.lang.invoke.MethodHandle result,java.lang.invoke.MethodHandle end,java.lang.invoke.MethodHandle failed) {
         requirePolicyInstaller();if(guards==null||guards.owner()!=owner)throw new SecurityException("EQUIPMENT_INVOCATION_OWNER");

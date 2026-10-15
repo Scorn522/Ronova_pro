@@ -1,5 +1,20 @@
 # Ronova Pro 当前进度
 
+## 2026-10-16：C 接续——能力消费者与自定义装备槽
+
+接续已推送的 `2fdef27`，Java ABI85 / Native ABI78 / Storage3 / Journal6，协议仍为 `r3-client-8`。本包写齐能力消费者委托、自然 getter 读取轨迹和当前槽位的实际写门后统一构建；自身外观、武器注册与驱动部署继续暂缓。
+
+`LazyOptional.ifPresent` 在原调用位置保留同一 consumer/value，消费者只执行一次。资格绑定当前装备动作、真实有效 optional/payload、当前 root 和每个共享 owner；Core 私有调用点与 Native 按实际 jmethod/BCI、Method/ConstMethod/CP 版本、栈底深度及来源复核消费者本体，或真实 bridge/已绑定隐藏 accept 的一层直接目标。没有新申请 JVMTI locals capability；已有能力时再核对实际 receiver。额外用户层、未知/停止来源与版本变化不取得许可，正常/异常退出关闭委托并恢复上一层。未知 supplier/listener/其他 functional 回调没有因此泛化。
+
+自定义实体及覆写槽位 getter 按准确 Class 弱登记、单类重变换，在原 dispatch/action fallback 之前记录原 getter 实际读过的字段、数组位置、受支持 Map/List 查询及 EquipmentSlot/Type selector，原操作和返回只执行一次。关系绑定实体、当前代次、真实 root 与终端存储；原异常、吞异常分支、未知调用、ItemStack 条件分支或不完整路径不冒认为完整槽位，也不虚构六个 EMPTY。未解析槽的 setter 保留明确 pending。只读取轨迹已到达的位置，不重放 getter、supplier、序列化或扫描实体/世界对象图。
+
+实际槽位接当前 shares/main/hand、物品/NBT/能力归属及字段、数组、offset、memory 与容器入口。标准布局按本次拟写值解析当前位置，内容未变的受支持写入保持；引用裸内存写仍拒绝。准确实际 setItemSlot body 接原动作链，不能凭同类或同模块借权。成功 store 接现有 observer，标准容器换 backing 后登记当前载体/物品；自定义中间引用或 selector 改变则旧路径退役，等待下一次自然 getter 重绑。静态依赖使用真实初始化字段及实际 Unsafe static base，B/C/S/boolean 数组 load 按原 JVM 值归一；HashMap 树桶、未知查询/key 语义、未知容器覆写、计算/native opaque 路径继续保留边界。
+
+首轮编译因两处 `Map<?>` 参数数目错误 **FAILED，38秒**，原日志 `build-c-java85-native78-equipment-first-failed-20261016.log` 保留；修为 `Map<?,?>` 并补 EquipmentSlot.Type.ordinal 后，统一构建 **PASS，1分9秒**，21项任务中15项执行、6项保持最新，含 Java85/Native78 编译链接。现有 AuditFixCheck 首次独立加载完整 Mob 时因未修改方法与父加载器 LivingEntity 的 runtime package 不同而 **VerifyError**，原日志 `c-java85-native78-equipment-slot-bytecode-first-failed-20261016.log` 保留。检查随后只保留本次修改的真实 Mob getter 本体，复用同一实际字段/父类和生产 writer；仅重编检查并执行当前 getter 及三个 Forge 类的织入加载，**退出0、EQUIPMENT_SLOT_BYTECODE_VERIFY_PASS、CAPABILITY_BYTECODE_VERIFY_PASS**。未重复已通过的主构建，未运行旧矩阵或启动游戏。
+
+本批 Native 回调核对、实际能力使用、换装、共享槽与停组效果 **NOTRUN**；字节码通过只确认隔离 getter 本体与 Forge 织入可被 JVM 接受，不代表游戏安装/行为通过。Native75 的旧预启动中止记录保留，完整 C/B 尚未宣称完成。匹配候选 `distribution/candidate-c-java85-native78-equipment-wip-20261016`：Core2890897、prelaunch23309字节；源码、匹配 JAR 与原报告摘要同步 GitHub，未生成源码 ZIP。
+
+---
 ## 2026-10-15：C 接续——自定义能力与实际载体
 
 接续已推送的 `5ff82f3`，Java ABI84 / Native ABI77 / Storage3 / Journal6，协议 `r3-client-8`。本包先写齐自定义能力、深层载体、自然返回观察及动作接续，再统一构建；自身外观、武器注册与驱动部署继续暂缓。

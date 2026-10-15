@@ -29,4 +29,18 @@ public final class CarrierBridge {
         if(value==null||value.length!=1)throw new IllegalStateException("CARRIER_STATIC_FIELD_READ_UNAVAILABLE");
         return value[0];
     }
+    /** Current physical frame identity, counted from the bottom, including hidden frames. */
+    public static int callbackDepth(Class<?> declaring,String name,String descriptor){
+        core();Objects.requireNonNull(declaring,"declaring");Objects.requireNonNull(name,"name");Objects.requireNonNull(descriptor,"descriptor");
+        return NativeControl.carrierCallbackDepth(declaring,name,descriptor);
+    }
+    /** The Core supplies the operand from its one original consumer.accept call. */
+    public static boolean callback(Object consumer,Class<?> callee,String name,String descriptor,int calleeBottomDepth,
+                                   Class<?> boundary,String boundaryMethod,String boundaryDescriptor,int boundaryBottomDepth){
+        core();Objects.requireNonNull(consumer,"consumer");Objects.requireNonNull(callee,"callee");
+        Objects.requireNonNull(name,"name");Objects.requireNonNull(descriptor,"descriptor");Objects.requireNonNull(boundary,"boundary");
+        Objects.requireNonNull(boundaryMethod,"boundaryMethod");Objects.requireNonNull(boundaryDescriptor,"boundaryDescriptor");
+        return calleeBottomDepth>0&&boundaryBottomDepth>0&&NativeControl.carrierCallback(consumer,callee,name,descriptor,calleeBottomDepth,
+                boundary,boundaryMethod,boundaryDescriptor,boundaryBottomDepth);
+    }
 }

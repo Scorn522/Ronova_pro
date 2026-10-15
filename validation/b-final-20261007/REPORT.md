@@ -1,5 +1,18 @@
 # B 批实际报告：2026-10-09 代码收敛接续
 
+## 2026-10-16：C 接续——消费者委托与自定义槽位
+
+接续 `2fdef27`，Java85 / Native78 / Storage3 / Journal6，协议 `r3-client-8`。既有三个 6.1 Sol max 子代理分别完成 VM 回调通道、实际 getter 读取织入及槽位图/Core 写门；主线程完成回调作用域、Bootstrap/Agent 接线与当前正常 selector。源码整包写齐后才构建，自身外观、武器注册、驱动部署继续暂缓。
+
+原 LazyOptional.ifPresent consumer/value 仅调用一次；委托绑定当前动作、root、有效 optional/payload 与全部共享 owner。VM 根据真实方法/BCI、版本、CP 调用和栈底位置，只接消费者本体及实际 bridge/已绑定隐藏 accept 的一层直接目标；原 unknown/stopped 检查保留，不新增 locals capability。正常/异常关闭并恢复原作用域，其他回调没有泛用许可。自定义 getter 在准确 Class 上单类安装，记录原字段/数组、受支持 Map/List 和真实 slot/type selector 的自然读取。原异常或不完整/未知分支保持 unresolved，未知槽不伪造 EMPTY；不重放 getter 或扫描 Entity/世界图。实际关系按当前实体/代次/root 复核，接 shares/main/hand、NBT/能力以及字段、元素、offset/memory 和容器入口。准确 setter 仅接原动作，标准 backing 更新沿现有成功 store observer 重取；自定义路径变更后旧链接退役，等待自然 getter 重绑。真实 static base、窄数组值及同值拟写处理接齐，树桶/未知 Map 查询或 key 语义、未知容器/计算 getter/native opaque 仍有边界。
+
+`build-c-java85-native78-equipment-first-failed-20261016.log` **FAILED，38秒**：两处 Map 泛型参数不完整；改为 `Map<?,?>` 并补 `EquipmentSlot.Type.ordinal` 后，`build-c-java85-native78-equipment-20261016.log` **PASS，1分9秒**，21项任务中15项执行、6项保持最新，Java85/Native78 实际编译链接完成。`compile-c-java85-native78-equipment-20261016.log` **退出0**。
+
+现有 AuditFixCheck 首次独立加载完整 Mob 因另一个未修改方法与父加载器 LivingEntity 分属不同 runtime package 而 **VerifyError**，`c-java85-native78-equipment-slot-bytecode-first-failed-20261016.log` 原样保留。检查只保留当前实际 Mob getter 本体，字段与父类仍取真实类，使用生产 SlotBoundary.weave/ControlClassWriter；仅重编检查并加载该本体及本批三个 Forge capability 类，`c-java85-native78-equipment-slot-bytecode-20261016.log` **退出0、EQUIPMENT_SLOT_BYTECODE_VERIFY_PASS、CAPABILITY_BYTECODE_VERIFY_PASS**，Forge 保留生产 frame、只计算 maxs。未重跑已通过的主构建或旧矩阵，未启动游戏。
+
+以上只确认编译链接及隔离 getter/Forge 的字节码安装格式，Native 回调和实际能力/槽位/换装/共享 owner/停组效果均 **NOTRUN**，不能代称游戏安装和行为通过。旧 Native75 预启动失败继续保留。候选 `distribution/candidate-c-java85-native78-equipment-wip-20261016` 含 Core2890897、prelaunch23309字节；源码、匹配 JAR 与本摘要同步 GitHub，未生成源码 ZIP，完整 C/B 未宣称完成。
+
+---
 ## 2026-10-15：C 接续——自定义能力与载体闭包
 
 接续 `5ff82f3`，Java84 / Native77 / Storage3 / Journal6，协议 `r3-client-8`。三个既有 6.1 Sol max 子代理分别完成 VM 只读字段通道、标准容器布局及 Core 数据图；主线程接齐实际载体 Class 安装、来源门、getCapability 自然返回观察、成功写通知和数组逻辑范围。源码整包写齐后才构建，自身外观及武器注册不做。

@@ -42,6 +42,7 @@ public final class EquipmentCapabilityWeaver {
             body(type,method(type,"addListener","(Lnet/minecraftforge/common/util/NonNullConsumer;)V"),"listen-add",true);
             body(type,method(type,"removeListener","(Lnet/minecraftforge/common/util/NonNullConsumer;)V"),"listen-remove",true);
             body(type,method(type,"invalidate","()V"),"invalidate-optional",false);
+            consumer(method(type,"ifPresent","(Lnet/minecraftforge/common/util/NonNullConsumer;)V"));
         }else throw new IllegalArgumentException("ACTUAL_EQUIPMENT_CAPABILITY_CLASS_REQUIRED");
     }
 
@@ -91,6 +92,20 @@ public final class EquipmentCapabilityWeaver {
         int token=prepare(type,method);LabelNode start=new LabelNode();InsnList head=initialize(token,start);
         head.add(enter(token,phase,listener?new VarInsnNode(Opcodes.ALOAD,1):new InsnNode(Opcodes.ACONST_NULL)));method.instructions.insert(head);
         finish(type,method,token,start);
+    }
+    private static void consumer(MethodNode method){
+        MethodInsnNode original=null;
+        for(AbstractInsnNode instruction:method.instructions)if(instruction instanceof MethodInsnNode call&&call.getOpcode()==Opcodes.INVOKEINTERFACE
+                &&call.owner.equals("net/minecraftforge/common/util/NonNullConsumer")&&call.name.equals("accept")&&call.desc.equals("(Ljava/lang/Object;)V")){
+            if(original!=null)throw new IllegalStateException("EQUIPMENT_CAPABILITY_CONSUMER_AMBIGUOUS");original=call;
+        }
+        if(original==null)throw new IllegalStateException("EQUIPMENT_CAPABILITY_CONSUMER_MISSING");
+        int consumer=method.maxLocals++,value=method.maxLocals++;InsnList args=new InsnList();
+        args.add(new VarInsnNode(Opcodes.ASTORE,value));args.add(new VarInsnNode(Opcodes.ASTORE,consumer));
+        args.add(new VarInsnNode(Opcodes.ALOAD,0));args.add(new VarInsnNode(Opcodes.ALOAD,consumer));args.add(new VarInsnNode(Opcodes.ALOAD,value));
+        method.instructions.insertBefore(original,args);
+        method.instructions.set(original,new MethodInsnNode(Opcodes.INVOKESTATIC,POLICY,"capabilityAccept","(Ljava/lang/Object;Ljava/lang/Object;Ljava/lang/Object;)V",false));
+        method.maxStack=Math.max(method.maxStack,3);
     }
     /** Observe the original provider return before Forge's own isPresent can resolve it. */
     private static void query(ClassNode type,MethodNode method){
