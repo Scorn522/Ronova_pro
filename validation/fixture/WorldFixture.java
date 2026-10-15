@@ -71,6 +71,12 @@ public final class WorldFixture {
             Class<?> packetType=Class.forName("net.minecraft.network.protocol.Packet",false,connection.getClass().getClassLoader());
             connection.getClass().getMethod("send",packetType).invoke(connection,packet);
         }
+        public static void write(Object channel,Object message,Object promise)throws ReflectiveOperationException {
+            ClassLoader loader=channel.getClass().getClassLoader();
+            Class<?> channelType=Class.forName("io.netty.channel.Channel",false,loader);
+            Class<?> promiseType=Class.forName("io.netty.channel.ChannelPromise",false,loader);
+            channelType.getMethod("writeAndFlush",Object.class,promiseType).invoke(channel,message,promise);
+        }
     }
     int phase, age, enteredAt, stoppedTicks;
     int commandCalls;

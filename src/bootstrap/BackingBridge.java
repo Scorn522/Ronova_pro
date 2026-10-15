@@ -31,7 +31,7 @@ public final class BackingBridge {
         // arrayWriteAllowed already checks this array's control identity and
         // actual writer, as well as stopped-module effects. The generic
         // container control query repeated that same check for every element.
-        if(!ControlBridge.arrayWriteAllowed(array))return false;
+        if(!ControlBridge.arrayWriteAllowed(array,index,value))return false;
         Policy current=policy;if(current==null)return true;
         Boolean active=POLICY_CALLBACK.get();POLICY_CALLBACK.set(true);
         try {return !(boolean)current.array.invokeExact(array,index,value);}catch(Throwable e){throw new IllegalStateException("BACKING_ARRAY_GUARD",e);}

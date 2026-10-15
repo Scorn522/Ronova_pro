@@ -69,6 +69,53 @@ static void native_unsafe_destination(Binding *binding,unsigned char *frame,jobj
     *offset=(jlong)native_unsafe_argument(binding,frame,destination+1);
     *length=binding->unsafeOperation>=UNSAFE_SET&&binding->unsafeOperation<=UNSAFE_SWAP?(jlong)native_unsafe_argument(binding,frame,destination+2):0;
 }
+static int native_unsafe_network_retirement(JNIEnv *env,NativeThread *state,Binding *binding,unsigned char *frame,jobject owner){
+    if(!state||!binding||(binding->unsafeOperation!=UNSAFE_CAS&&binding->unsafeOperation!=UNSAFE_PUT)||!binding->unsafeKind
+            ||!native_network_retirement_write_query||!native_network_retirement_owner_query
+            ||!InterlockedCompareExchange(&binding->valid,0,0)||!InterlockedCompareExchange(&binding->current,0,0)
+            ||binding->hostUnknown||native_owner_stopped(binding->owners)
+            ||binding->declared&&InterlockedCompareExchange(&binding->declared->stopped,0,0)
+            ||!native_unsafe_vm_target(binding->method,binding->original))return 0;
+    int compare=binding->unsafeOperation==UNSAFE_CAS;
+    const char *method=NULL,*volatileMethod=NULL,*signature=NULL;
+    if(!strcmp(binding->unsafeKind,"Int")){
+        method=compare?"compareAndSetInt":"putInt";volatileMethod="putIntVolatile";
+        signature=compare?"(Ljava/lang/Object;JII)Z":"(Ljava/lang/Object;JI)V";
+    }else if(!strcmp(binding->unsafeKind,"Long")){
+        method=compare?"compareAndSetLong":"putLong";volatileMethod="putLongVolatile";
+        signature=compare?"(Ljava/lang/Object;JJJ)Z":"(Ljava/lang/Object;JJ)V";
+    }else if(!strcmp(binding->unsafeKind,"Object")){
+        method=compare?"compareAndSetReference":"putReference";volatileMethod="putReferenceVolatile";
+        signature=compare?"(Ljava/lang/Object;JLjava/lang/Object;Ljava/lang/Object;)Z":"(Ljava/lang/Object;JLjava/lang/Object;)V";
+    }
+    else return 0;
+    if(strcmp(binding->signature,signature))return 0;
+    jclass declaring=NULL;char *actualName=NULL,*actualDescriptor=NULL;
+    int actual=(*native_ti)->GetMethodDeclaringClass(native_ti,binding->method,&declaring)==JVMTI_ERROR_NONE
+            &&declaring&&native_original.IsSameObject(env,declaring,native_unsafe_class)
+            &&(*native_ti)->GetMethodName(native_ti,binding->method,&actualName,&actualDescriptor,NULL)==JVMTI_ERROR_NONE
+            &&actualName&&actualDescriptor&&(!strcmp(actualName,method)||!compare&&!strcmp(actualName,volatileMethod))&&!strcmp(actualDescriptor,signature);
+    if(actualName)(*native_ti)->Deallocate(native_ti,(unsigned char*)actualName);
+    if(actualDescriptor)(*native_ti)->Deallocate(native_ti,(unsigned char*)actualDescriptor);
+    if(declaring)native_original.DeleteLocalRef(env,declaring);
+    if(!actual||native_original.ExceptionCheck(env))return 0;
+    jobject receiver=(jobject)(uintptr_t)native_unsafe_argument(binding,frame,2);
+    jlong offset=(jlong)native_unsafe_argument(binding,frame,3);
+    if(!receiver||offset<0)return 0;
+    // sun.misc.Unsafe's Java CAS and ordered/volatile PUT adapters arrive at
+    // these exact bootstrap VM bindings. The original begin/end path retains
+    // a CAS's argument 4 (expected) and real result; PUT reads its actual value.
+    state->control++;
+    jstring kind=native_original.NewStringUTF(env,binding->unsafeKind);
+    jobject proposed=kind?native_unsafe_box(env,binding->unsafeKind,native_unsafe_argument(binding,frame,compare?5:4)):NULL;
+    int allowed=0;
+    if(kind&&!native_original.ExceptionCheck(env))
+        allowed=owner?native_original.CallStaticBooleanMethod(env,native_controls,native_network_retirement_owner_query,owner,receiver,offset,proposed,kind)
+                :native_original.CallStaticBooleanMethod(env,native_controls,native_network_retirement_write_query,receiver,offset,proposed,kind);
+    if(proposed&&strcmp(binding->unsafeKind,"Object"))native_original.DeleteLocalRef(env,proposed);
+    if(kind)native_original.DeleteLocalRef(env,kind);
+    state->control--;return allowed&&!native_original.ExceptionCheck(env);
+}
 static int native_unsafe_begin(JNIEnv *env,NativeThread *state,Binding *binding,unsigned char *frame){
     unsigned depth=state->depth-1;NativeUnsafeFrame *use=&state->unsafeFrames[depth];memset(use,0,sizeof(*use));
     if(binding->unsafeOperation>=UNSAFE_ALLOCATE&&binding->unsafeOperation<=UNSAFE_FREE)return native_memory_call_begin(env,state,binding,frame,use);
@@ -190,6 +237,9 @@ static int native_unsafe_prepare(JNIEnv *env){
     if(!native_original.ExceptionCheck(env))native_unsafe_begin_query=native_original.GetStaticMethodID(env,native_controls,"beginNativeUnsafeMutation","(Ljava/lang/Object;JJLjava/lang/Object;Ljava/lang/String;Z[Ljava/lang/Module;)Ljava/lang/Object;");
     if(!native_original.ExceptionCheck(env))native_unsafe_read_begin_query=native_original.GetStaticMethodID(env,native_controls,"beginNativeUnsafeRead","(Ljava/lang/Object;JLjava/lang/String;[Ljava/lang/Module;)Ljava/lang/Object;");
     if(!native_original.ExceptionCheck(env))native_unsafe_copy_begin_query=native_original.GetStaticMethodID(env,native_controls,"beginNativeUnsafeCopy","(Ljava/lang/Object;JLjava/lang/Object;JJ[Ljava/lang/Module;)Ljava/lang/Object;");
+    if(!native_original.ExceptionCheck(env))native_network_retirement_write_query=native_original.GetStaticMethodID(env,native_controls,"networkRetirementWriteAllowed","(Ljava/lang/Object;JLjava/lang/Object;Ljava/lang/String;)Z");
+    if(!native_original.ExceptionCheck(env))native_network_retirement_owner_query=native_original.GetStaticMethodID(env,native_controls,"networkRetirementOwnerAllowed","(Ljava/lang/Object;Ljava/lang/Object;JLjava/lang/Object;Ljava/lang/String;)Z");
+    if(!native_original.ExceptionCheck(env))native_network_retirement_active_query=native_original.GetStaticMethodID(env,native_controls,"networkRetirementActive","()Z");
     if(!native_original.ExceptionCheck(env))native_unsafe_metadata_query=native_original.GetStaticMethodID(env,native_controller,"unsafeMetadata","(Ljava/lang/Object;)Z");
     if(!native_original.ExceptionCheck(env))native_memory_gate=native_original.GetStaticMethodID(env,native_controls,"rawMemoryCaller","()Z");
     if(!native_original.ExceptionCheck(env))booleanType=native_original.FindClass(env,"java/lang/Boolean");
@@ -197,7 +247,7 @@ static int native_unsafe_prepare(JNIEnv *env){
     jobject denied=no?native_original.GetStaticObjectField(env,booleanType,no):NULL;
     if(denied){native_unsafe_denied=native_original.NewGlobalRef(env,denied);native_original.DeleteLocalRef(env,denied);}
     if(unsafe)native_original.DeleteLocalRef(env,unsafe);if(backing)native_original.DeleteLocalRef(env,backing);if(booleanType)native_original.DeleteLocalRef(env,booleanType);
-    int ready=native_unsafe_class&&native_unsafe_backing&&native_unsafe_register&&native_unsafe_read_query&&native_unsafe_begin_query&&native_unsafe_read_begin_query&&native_unsafe_copy_begin_query&&native_unsafe_metadata_query&&native_memory_gate&&native_unsafe_denied&&!native_original.ExceptionCheck(env);
+    int ready=native_unsafe_class&&native_unsafe_backing&&native_unsafe_register&&native_unsafe_read_query&&native_unsafe_begin_query&&native_unsafe_read_begin_query&&native_unsafe_copy_begin_query&&native_network_retirement_write_query&&native_network_retirement_owner_query&&native_network_retirement_active_query&&native_unsafe_metadata_query&&native_memory_gate&&native_unsafe_denied&&!native_original.ExceptionCheck(env);
     state->control--;return ready;
 }
 static NativeUnsafeInstall *native_unsafe_registration(JNIEnv *env,NativeThread *state,jclass type,const JNINativeMethod *methods,jint count,void *caller){

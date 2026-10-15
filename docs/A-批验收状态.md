@@ -1,5 +1,19 @@
 # Ronova Pro 当前进度
 
+## 2026-10-15：C 接续——停组后的原队列收尾
+
+接续 `b084f1f`，Java ABI79 / Native ABI74 / Storage3 / Journal6，协议仍为 `r3-client-8`。本包集中处理原 Netty WriteTask 已接受入队后停组的收尾；自身外观与武器注册继续暂缓。
+
+原 task 的 ctx/message/promise 及发送来源保留至 run/cancel 的实际 finally。拒绝写入按消息 release、promise tryFailure、原 context flush 分段执行；每段失败仍尝试后续必要动作，清理 token 退出后重抛实际异常。原 promise 校验顺序保持。停组任务在原 recycle 已清空字段的位置丢弃，不再写共享对象池，未从仍在队列的位置提前回收。
+
+清理资格按标准 Netty 4.1.82 的实际 context、outbound buffer、消息、promise、旧 Entry、池块/handle/cache、计数器及 leak tracker 派生关系核对，保留脱链前的实际对象。字段、数组槽及 VM CAS/PUT 仍经过原目标策略、门和写入记录。只读 JVMTI 分16帧核对完整框架调用链、实际栈底深度和当前方法版本来源；未知或被停来源改写的方法不能冒充原框架。读取对象关系只读字段，不反射执行外部库方法。用户 listener、自定义 deallocate 及回调重入不能借清理资格；不支持的停组清理 CAS/PUT 明确报错，避免返回 false 后无限重试。
+
+冷字段读取改为 JVMTI 实际声明枚举及原 JNI 只读访问，避免首次 Class.reflectionData 缓存 CAS 在清理门内自拒；不执行库方法、包装类构造或 valueOf，也不初始化未知静态类。只有每个准确获准且实际成功的收尾写入才在原恢复历史中形成终态基线，失败 CAS 不建立；原来源和 unknown 保留。后续业务写可恢复至此基线，不能重新抬高 refCnt 或把 promise 改回未完成；有效终态与未收尾 pending 分开，未知/重叠/更晚写入仍保守处理。
+
+本包统一构建 **PASS，1分1秒**，Java 与 Native74 实际编译链接完成；匹配 AuditFixCheck 编译退出0。新插桩使用真实 Netty 类字节经 `-Xverify:all` 加载，**退出0、NETWORK_BYTECODE_VERIFY_PASS**，仅说明 JVM 字节码校验通过。实际游戏 active→queued→stop→run、池化/并发释放及两阶段检查消费者仍 **NOTRUN**，不把构建或字节码加载视为游戏通过；未知 allocator/载体、直接原生释放与旧平台边界继续保留。完整 C/B 未完成。匹配候选已写入 `distribution/candidate-c-java79-native74-queue-wip-20261015`，Core2674826、prelaunch23309字节；源码、匹配 JAR 与本摘要同步原 GitHub，未生成源码 ZIP。
+
+---
+
 ## 2026-10-15：C 接续——底层区域写入、字段图竞态与网络 promise
 
 接续 `839375e`，Java ABI78 / Native ABI73 / Storage3 / Journal6，协议保持 `r3-client-8`。本包先写齐源码再集中构建；三个 6.1 Sol max 子代理分别核对网络、装备和世界，装备未确认新缺口，保留原实现。自身外观及武器注册继续暂缓。

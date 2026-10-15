@@ -43,7 +43,7 @@ public final class NativeControl {
             if(!early.isEmpty()) {
                 Path actual=Path.of(early).toAbsolutePath();if(!hash(Files.readAllBytes(actual)).equals(digest))throw new IOException("EARLY_NATIVE_IMAGE_MISMATCH");dll=actual;
             }
-            System.load(dll.toString());if(abi()!=73)throw new UnsatisfiedLinkError("NATIVE_CONTROL_ABI");
+            System.load(dll.toString());if(abi()!=74)throw new UnsatisfiedLinkError("NATIVE_CONTROL_ABI");
             if(!initialize0(ControlBridge.class,DefinitionBridge.class))throw new UnsatisfiedLinkError("ACTUAL_NATIVE_BOUNDARY_INSTALL_FAILED");
             if(!initializeDefinitionDirectory0(definitionDirectoryOwner))throw new UnsatisfiedLinkError("ACTUAL_DEFINITION_DIRECTORY_CAS_UNAVAILABLE");
             libraryBoundaryPresent=libraryPresent0();available=true;return state="NATIVE_BIND_AND_JNI_FIELD_READY";
@@ -238,6 +238,22 @@ public final class NativeControl {
     private static Module[] sourceQueryFrame(Class<?> declaring,String name,String descriptor,int location,int depth){
         if(!ControlBridge.sourceQueryActive())throw new SecurityException("ACTUAL_SOURCE_QUERY_FRAME_REQUIRED");
         return ExecutionFlow.sourceQueryFrame(declaring,name,descriptor,location,depth);
+    }
+    static int networkBoundaryDepth(Class<?> boundary,String method){
+        if(CALLER.getCallerClass()!=NetworkBridge.class)throw new SecurityException("ACTUAL_NETWORK_BOUNDARY_QUERY_REQUIRED");
+        return available&&boundary!=null&&method!=null?networkBoundaryDepth0(boundary,method):0;
+    }
+    static boolean networkCleanupBoundary(Class<?> boundary,String method,int phase,int bottomDepth){
+        if(CALLER.getCallerClass()!=NetworkCleanup.class)throw new SecurityException("ACTUAL_NETWORK_CLEANUP_QUERY_REQUIRED");
+        return available&&boundary!=null&&method!=null&&bottomDepth>0&&networkCleanupBoundary0(boundary,method,phase,bottomDepth);
+    }
+    static Object networkReadField(Object receiver,Class<?> declaring,String name,boolean statik){
+        if(CALLER.getCallerClass()!=NetworkCleanup.class)throw new SecurityException("ACTUAL_NETWORK_FIELD_READER_REQUIRED");
+        return available&&declaring!=null&&name!=null?networkReadField0(receiver,declaring,name,statik):null;
+    }
+    static java.lang.reflect.Field networkField(Class<?> declaring,String name){
+        if(CALLER.getCallerClass()!=NetworkBridge.class)throw new SecurityException("ACTUAL_NETWORK_FIELD_QUERY_REQUIRED");
+        return available&&declaring!=null&&name!=null?networkField0(declaring,name):null;
     }
     static boolean arrayCopyInternalBoundary(){return CALLER.getCallerClass()==ControlBridge.class&&arrayCopyInternalBoundary0();}
     static boolean arrayCopyReadBoundary(Object source,int from,int length){return CALLER.getCallerClass()==ControlBridge.class&&arrayCopyReadBoundary0(source,from,length);}
@@ -728,6 +744,10 @@ public final class NativeControl {
     private static native boolean preparedClass0(Class<?> actual);
     private static native boolean sourceCapture0();
     private static native boolean sourceQueryStopped0();
+    private static native int networkBoundaryDepth0(Class<?> boundary,String method);
+    private static native boolean networkCleanupBoundary0(Class<?> boundary,String method,int phase,int bottomDepth);
+    private static native Object networkReadField0(Object receiver,Class<?> declaring,String name,boolean statik);
+    private static native java.lang.reflect.Field networkField0(Class<?> declaring,String name);
     private static native boolean arrayCopyInternalBoundary0();
     private static native boolean arrayCopyReadBoundary0(Object source,int from,int length);
     private static native boolean arrayCopyBoundary0(Object source,int from,int length,Object target,int to,int prefix,Object read);

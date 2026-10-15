@@ -16,10 +16,11 @@ public final class NetworkBridge {
     private static final List<Role> ROLES=new ArrayList<>();
     private static final List<Registry> REGISTRIES=new ArrayList<>();
     private static final ThreadLocal<Scope> CURRENT=new ThreadLocal<>();
+    private static final ThreadLocal<Cleanup> CLEANING=new ThreadLocal<>();
     private static final Set<Scope> ACTIVE=Collections.newSetFromMap(new IdentityHashMap<>());
     private static final class Scope{
         final Scope parent;Module[] modules;final Class<?> declaring;final String method;final Thread thread;
-        boolean ended;QueueRef queue;Object connection;PacketEntry entry;
+        boolean ended;QueueRef queue;Object connection;PacketEntry entry;Object writeTask;Write write;int boundaryDepth;Object retirementGraph;
         Scope(Scope parent,Module[] modules,Class<?> declaring,String method){this.parent=parent;this.modules=modules;this.declaring=declaring;this.method=method;thread=Thread.currentThread();}
     }
     private static long dropped,unobservedQueues;
@@ -67,6 +68,15 @@ public final class NetworkBridge {
         }
     }
     private record Write(Module[] modules,Ref<Object> context,Ref<Object> message,Ref<Object> promise){}
+    private static final class Cleanup{
+        final Cleanup parent;final Thread thread=Thread.currentThread();final Object context,message,promise;
+        final Class<?> declaring;final String method;final int boundaryDepth;final OutboundRejected failure=new OutboundRejected();
+        int phase=-1;boolean closed;Object graph;
+        Cleanup(Object context,Object message,Object promise,StackWalker.StackFrame frame,int boundaryDepth){
+            parent=CLEANING.get();this.context=context;this.message=message;this.promise=promise;
+            declaring=frame.getDeclaringClass();method=frame.getMethodName();this.boundaryDepth=boundaryDepth;
+        }
+    }
     private static final class OutboundRejected extends java.util.concurrent.CancellationException{
         private static final long serialVersionUID=1L;
         private OutboundRejected(){super("NETWORK_OUTBOUND_REJECTED");}
@@ -180,16 +190,32 @@ public final class NetworkBridge {
     public static Object writeEnter(Object task){
         var frame=boundary();Write write;synchronized(CHANNELS){write=WRITES.get(new Key(task,false));}
         Object message=field(task,"msg");
-        if(write==null)return scope(frame,union(currentSources(),packetSources(message),new Module[]{null}));
+        if(write==null)return writeScope(frame,task,null,union(currentSources(),packetSources(message),new Module[]{null}));
         if(field(task,"ctx")!=write.context().get()||message!=write.message().get()||field(task,"promise")!=write.promise().get()){
             // A changed tuple loses its exact association, not the already
             // captured sender. Keep that source through the real write gate;
             // the current message and unknown marker add no replacement proof.
             Module[] modules=union(write.modules(),currentSources(),packetSources(message),new Module[]{null});
-            synchronized(CHANNELS){unobservedQueues++;}return scope(frame,modules);
-        }return scope(frame,write.modules());
+            synchronized(CHANNELS){unobservedQueues++;}return writeScope(frame,task,null,modules);
+        }return writeScope(frame,task,write,write.modules());
+    }
+    private static Scope writeScope(StackWalker.StackFrame frame,Object task,Write write,Module[] modules){
+        Scope scope=scope(frame,modules);scope.writeTask=task;scope.write=write;
+        try{
+            scope.boundaryDepth=NativeControl.networkBoundaryDepth(frame.getDeclaringClass(),frame.getMethodName());
+            if(write!=null)scope.retirementGraph=NetworkCleanup.capture(write.context().get(),write.message().get(),write.promise().get(),task,-1);
+            return scope;
+        }catch(RuntimeException|Error failure){exitScope(scope);throw failure;}
     }
     public static void writeRetired(Object task){if(!boundary().getMethodName().equals("recycle"))throw new SecurityException("ACTUAL_NETTY_WRITE_RETIREMENT_REQUIRED");synchronized(CHANNELS){WRITES.remove(new Key(task,false));}}
+    public static boolean writeRecycleAllowed(Object task){
+        var frame=boundary();if(!frame.getDeclaringClass().getName().equals("io.netty.channel.AbstractChannelHandlerContext$WriteTask")
+                ||!frame.getMethodName().equals("recycle")||!frame.getDescriptor().equals("()V"))throw new SecurityException("ACTUAL_NETTY_WRITE_RETIREMENT_REQUIRED");
+        Scope scope=CURRENT.get();
+        // At the original finally only: clearing the tuple retires the task.
+        // A stopped task is discarded instead of lending its source to the shared pool.
+        return scope==null||scope.writeTask!=task||!stopped(scope.modules)&&!ControlBridge.stoppedEffects();
+    }
     public static void exit(Object token){
         var frame=boundary();if(!(token instanceof Scope scope)||scope.thread!=Thread.currentThread()||scope.declaring!=frame.getDeclaringClass()||!scope.method.equals(frame.getMethodName()))throw new SecurityException("ACTUAL_NETWORK_DISPATCH_SCOPE_REQUIRED");
         exitScope(scope);
@@ -244,11 +270,87 @@ public final class NetworkBridge {
     public static boolean packetAllowed(Object message){boundary();return packet(message)&&!ControlBridge.stoppedEffects();}
     public static boolean outboundAllowed(Object message){boundary();boolean allowed=packet(message)&&!ControlBridge.stoppedEffects();if(!allowed)synchronized(CHANNELS){dropped++;}return allowed;}
     public static Throwable outboundRejected(){
+        var frame=rejectedBoundary();Cleanup cleanup=CLEANING.get();
+        if(cleanup!=null&&cleanup.thread==Thread.currentThread()&&!cleanup.closed&&cleanup.phase==1
+                &&cleanup.declaring==frame.getDeclaringClass()&&cleanup.method.equals(frame.getMethodName()))return cleanup.failure;
+        throw new SecurityException("ACTUAL_NETTY_REJECTION_COMPLETION_REQUIRED");
+    }
+    private static StackWalker.StackFrame rejectedBoundary(){
         var frame=boundary();String method=frame.getMethodName(),descriptor=frame.getDescriptor();
         if(!frame.getDeclaringClass().getName().equals("io.netty.channel.AbstractChannelHandlerContext")
                 ||!(method.equals("write")&&descriptor.equals("(Ljava/lang/Object;ZLio/netty/channel/ChannelPromise;)V")
                 ||(method.equals("invokeWrite")||method.equals("invokeWriteAndFlush"))&&descriptor.equals("(Ljava/lang/Object;Lio/netty/channel/ChannelPromise;)V")))throw new SecurityException("ACTUAL_REJECTED_NETTY_WRITE_REQUIRED");
-        return new OutboundRejected();
+        return frame;
+    }
+    public static Object outboundCleanupEnter(Object context,Object message,Object promise){
+        var frame=rejectedBoundary();if(context==null||!frame.getDeclaringClass().isInstance(context)||message==null||promise==null)
+            throw new SecurityException("ACTUAL_NETTY_REJECTION_TUPLE_REQUIRED");
+        if(CLEANING.get()!=null)throw new SecurityException("NETWORK_REJECTION_CALLBACK_REENTRY");
+        Scope scope=CURRENT.get();if(scope!=null&&scope.writeTask!=null&&(scope.write==null||scope.write.context().get()!=context
+                ||scope.write.message().get()!=message||scope.write.promise().get()!=promise))throw new SecurityException("NETWORK_REJECTION_TASK_TUPLE_CHANGED");
+        int depth=NativeControl.networkBoundaryDepth(frame.getDeclaringClass(),frame.getMethodName());
+        Cleanup cleanup=new Cleanup(context,message,promise,frame,depth);protect(cleanup,cleanup.failure);CLEANING.set(cleanup);return cleanup;
+    }
+    private static Cleanup cleanup(Object token){
+        var frame=rejectedBoundary();
+        if(!(token instanceof Cleanup cleanup)||cleanup.closed||cleanup.thread!=Thread.currentThread()||CLEANING.get()!=cleanup
+                ||cleanup.declaring!=frame.getDeclaringClass()||!cleanup.method.equals(frame.getMethodName()))throw new SecurityException("ACTUAL_NETTY_REJECTION_COMPLETION_REQUIRED");
+        return cleanup;
+    }
+    public static void outboundCleanupPhase(Object token,int phase){
+        Cleanup cleanup=cleanup(token);if(phase!=cleanup.phase+1||phase>2)throw new IllegalStateException("NETWORK_REJECTION_PHASE_ORDER");cleanup.phase=phase;
+        Scope scope=CURRENT.get();cleanup.graph=NetworkCleanup.capture(cleanup.context,cleanup.message,cleanup.promise,scope==null?null:scope.writeTask,phase);
+    }
+    public static Throwable outboundCleanupExit(Object token,Throwable release,Throwable promise,Throwable flush){
+        Cleanup cleanup=cleanup(token);
+        try{Throwable failure=release!=null?release:promise!=null?promise:flush;
+            if(failure!=null){if(promise!=null&&promise!=failure)failure.addSuppressed(promise);if(flush!=null&&flush!=failure&&flush!=promise)failure.addSuppressed(flush);}
+            return failure;
+        }finally{cleanup.closed=true;if(cleanup.parent==null)CLEANING.remove();else CLEANING.set(cleanup.parent);}
+    }
+    static boolean retirementFieldAllowed(Object receiver,Class<?> declaring,String name,Object value){
+        if(receiver==null||declaring==null)return false;
+        Field field=NativeControl.networkField(declaring,name);return field!=null&&retirementAllowed(receiver,field,value);
+    }
+    static boolean retirementWriteAllowed(Object receiver,long offset,Object value,int width){
+        if(receiver==null||CLEANING.get()==null&&CURRENT.get()==null)return false;
+        if(receiver.getClass().isArray()){
+            long[] layout=ResourceBridge.arrayLayout(receiver.getClass());if(layout==null||layout[1]!=width||offset<layout[0]||(offset-layout[0])%layout[1]!=0)return false;
+            long index=(offset-layout[0])/layout[1];return index<=Integer.MAX_VALUE&&retirementArrayAllowed(receiver,(int)index,value);
+        }
+        Field field=ResourceBridge.exactField(receiver,offset,width);return field!=null&&retirementAllowed(receiver,field,value);
+    }
+    static boolean retirementArrayAllowed(Object array,int index,Object value){
+        Cleanup cleanup=CLEANING.get();if(cleanup!=null&&!cleanup.closed&&cleanup.thread==Thread.currentThread())
+            return NetworkCleanup.boundaryAllowed(cleanup.declaring,cleanup.method,cleanup.phase)&&NetworkCleanup.arrayAllowed(array,index,value);
+        Scope scope=CURRENT.get();return scope!=null&&!scope.ended&&scope.thread==Thread.currentThread()&&scope.writeTask!=null&&stopped(scope.modules)
+                &&NetworkCleanup.boundaryAllowed(scope.declaring,scope.method,-1)&&NetworkCleanup.arrayAllowed(array,index,value);
+    }
+    private static boolean retirementAllowed(Object receiver,Field field,Object value){
+        Cleanup cleanup=CLEANING.get();Scope scope=CURRENT.get();
+        if(cleanup!=null&&!cleanup.closed&&cleanup.thread==Thread.currentThread()){
+            return NetworkCleanup.allowed(cleanup.context,cleanup.message,cleanup.promise,scope==null?null:scope.writeTask,
+                    cleanup.declaring,cleanup.method,cleanup.phase,receiver,field,value);
+        }
+        if(scope==null||scope.ended||scope.thread!=Thread.currentThread()||scope.writeTask==null||!stopped(scope.modules))return false;
+        Write write=scope.write;
+        return NetworkCleanup.allowed(write==null?null:write.context().get(),write==null?null:write.message().get(),write==null?null:write.promise().get(),
+                scope.writeTask,scope.declaring,scope.method,-1,receiver,field,value);
+    }
+    static boolean rejectionCause(Object value){
+        Cleanup cleanup=CLEANING.get();return cleanup!=null&&!cleanup.closed&&cleanup.thread==Thread.currentThread()&&cleanup.phase==1&&value==cleanup.failure;
+    }
+    static boolean retirementActive(){
+        Cleanup cleanup=CLEANING.get();if(cleanup!=null&&!cleanup.closed&&cleanup.thread==Thread.currentThread())return true;
+        Scope scope=CURRENT.get();return scope!=null&&!scope.ended&&scope.thread==Thread.currentThread()&&scope.writeTask!=null&&stopped(scope.modules);
+    }
+    static int retirementBoundaryDepth(){
+        Cleanup cleanup=CLEANING.get();if(cleanup!=null&&!cleanup.closed&&cleanup.thread==Thread.currentThread())return cleanup.boundaryDepth;
+        Scope scope=CURRENT.get();return scope!=null&&!scope.ended&&scope.thread==Thread.currentThread()?scope.boundaryDepth:0;
+    }
+    static Object retirementGraph(){
+        Cleanup cleanup=CLEANING.get();if(cleanup!=null&&!cleanup.closed&&cleanup.thread==Thread.currentThread())return cleanup.graph;
+        Scope scope=CURRENT.get();return scope!=null&&!scope.ended&&scope.thread==Thread.currentThread()?scope.retirementGraph:null;
     }
     /** The ordinary failure listener also delivers rejected writes to the shared game connection. */
     public static boolean outboundFailureUnhandled(Object failure){
@@ -406,6 +508,6 @@ public final class NetworkBridge {
         long unknownActive=ACTIVE.stream().filter(scope->unknown(scope.modules)).count();
         return active!=0||writes!=0||queued!=0||unknownActive!=0||unobservedQueues!=0?"NETWORK_RETIREMENT_PENDING:active="+active+":writes="+writes+":queued="+queued+":unknownActive="+unknownActive+":queueUnobserved="+unobservedQueues:"";
     }}
-    public static Object[] controlObjects(){agent();return new Object[]{CHANNELS,HANDLERS,PACKETS,BUFFERS,WRAPPERS,HOLDERS,QUEUES,WRITES,ROLES,REGISTRIES,DEAD,CURRENT,ACTIVE};}
+    public static Object[] controlObjects(){agent();return new Object[]{CHANNELS,HANDLERS,PACKETS,BUFFERS,WRAPPERS,HOLDERS,QUEUES,WRITES,ROLES,REGISTRIES,DEAD,CURRENT,ACTIVE,CLEANING};}
     private static void reap(){for(Key key;(key=(Key)DEAD.poll())!=null;){CHANNELS.remove(key);HANDLERS.remove(key);PACKETS.remove(key);BUFFERS.remove(key);WRAPPERS.remove(key);HOLDERS.remove(key);QUEUES.remove(key);WRITES.remove(key);}}
 }

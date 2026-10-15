@@ -1,5 +1,19 @@
 # B 批实际报告：2026-10-09 代码收敛接续
 
+## 2026-10-15：C 接续——停组队列收尾源码
+
+接续 `b084f1f`，Java79 / Native74 / Storage3 / Journal6，协议 `r3-client-8`。本包为原 WriteTask.run/cancel 保留真实 tuple/source 至 finally；release、tryFailure、原 flush 逐段异常收口，退出 token 后保留实际异常。停组任务只在原 recycle 字段清空后跳过回池，避免共享 recycler 写入自拒。
+
+标准 Netty 清理对象图在真实释放/脱链之前读取并保留，含实际 buffer/chunk/handle/cache、promise/旧 Entry、计数器、leak tracker 及其实际槽位。资格同时核对真实字段/数组、完整框架链、实际递归层和当前 VM 方法版本来源；来源不清空，原 fieldGate/Backing/Resource 与写入记录继续执行。metadata 查询不执行外部方法，自定义回调不能继承资格，未支持的停组 CAS/PUT 明确失败。
+
+冷 metadata 字段读取使用实际 JVMTI fieldID 与原 JNI 读取，不经过 Class.reflectionData；静态类未初始化即不读，primitive 仅对已初始化的真实 bootstrap 包装类直接装箱，不调用构造/valueOf。成功且准确获准的逐操作 receipt 建立恢复终态基线，原 sources/unknown 不变，失败 CAS 不标记。后续业务写能恢复至真实终态，不能把 refCnt/promise 复活；有效终态历史不作为 pending，更晚写入及不完整/重叠历史照常保留。
+
+`build-c-java79-native74-queue-20261015.log` **PASS，1分1秒**，27项任务中20项执行、7项已是最新，Java 与 Native74 实际编译链接完成。`compile-c-java79-native74-queue-20261015.log` **退出0**。`c-java79-native74-network-bytecode-20261015.log` 使用真实 Netty 类字节及当前 NetworkBoundary 转换结果，经 `-Xverify:all` 加载和读取声明方法，**退出0、NETWORK_BYTECODE_VERIFY_PASS**；未安装 Agent 或运行停组收尾。AuditFixCheck 复用原夹具增加真实活动发送→原任务入队→外部真实控制台停组→独立未停消费者 finish 的两阶段分支，检查 refCnt、promise、无关队列、回调拒绝及 scope/receipt 退出。当前独立游戏消费者尚未接线，**游戏分支 NOTRUN**；没有放宽命令资格、伪造停组来源或重跑旧矩阵。池化/并发分支也不由编译代称通过。
+
+匹配候选已写入 `distribution/candidate-c-java79-native74-queue-wip-20261015`，Core2674826、prelaunch23309字节。Storage/驱动未改、未部署，未生成源码 ZIP；源码、匹配 JAR 和本摘要同步 GitHub。完整 C/B 未完成。
+
+---
+
 ## 2026-10-15：C 接续——底层冻结写入与准确恢复/发送
 
 接续 `839375e`，Java78 / Native73 / Storage3 / Journal6，协议 `r3-client-8`。当前已完成源码包：实际 section/palette 物理索引写入在计数与 idFor 前按可见 holder/current chunk/section/palette identity 拒绝，包含 worker、共享 palette、同 section 邻居与解除接续；字段图以实际 VM offset 的 typed CAS 替代 primitive 先读后写，已知冲突 origin 保留为共享，最终独占复核与 CAS 同短锁，原写门准备/收尾在锁外；Netty 停源拒绝位于实际 promise 校验成功之后。装备核对没有确认新缺口，未改其实现。

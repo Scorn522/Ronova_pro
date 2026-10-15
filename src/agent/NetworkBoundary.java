@@ -70,16 +70,11 @@ final class NetworkBoundary {
             }
             if(name.equals(NETTY)&&method.name.equals("write")&&args.length==3&&args[0].getDescriptor().equals("Ljava/lang/Object;")&&args[1].getSort()==Type.BOOLEAN&&args[2].getDescriptor().equals("Lio/netty/channel/ChannelPromise;")){
                 if(result.getSort()!=Type.VOID)throw new IllegalStateException("NETTY_WRITE_RETURN_LAYOUT_UNAVAILABLE:"+method.desc);
-                InsnList guard=gate(vars[0],"outboundAllowed");rejectOutbound(guard,vars[0],vars[2]);
-                // The flush request also belongs to previously accepted messages. Use the
-                // original context's outbound selection and executor rather than the rejected write.
-                LabelNode noFlush=new LabelNode();guard.add(new VarInsnNode(Opcodes.ILOAD,vars[1]));guard.add(new JumpInsnNode(Opcodes.IFEQ,noFlush));
-                guard.add(new VarInsnNode(Opcodes.ALOAD,0));guard.add(new MethodInsnNode(Opcodes.INVOKEVIRTUAL,name,"flush","()Lio/netty/channel/ChannelHandlerContext;",false));guard.add(new InsnNode(Opcodes.POP));guard.add(noFlush);
+                InsnList guard=gate(vars[0],"outboundAllowed");rejectOutbound(method,guard,vars[0],vars[2],vars[1],"flush");
                 guard.add(new InsnNode(Opcodes.RETURN));endGate(guard);afterWriteValidation(method,guard);changed=true;
             }
             if(name.equals(NETTY)&&Set.of("invokeWrite","invokeWriteAndFlush").contains(method.name)&&args.length==2&&args[0].getDescriptor().equals("Ljava/lang/Object;")&&args[1].getDescriptor().equals("Lio/netty/channel/ChannelPromise;")&&(method.access&Opcodes.ACC_STATIC)==0){
-                InsnList guard=gate(vars[0],"outboundAllowed");rejectOutbound(guard,vars[0],vars[1]);
-                if(method.name.equals("invokeWriteAndFlush")){guard.add(new VarInsnNode(Opcodes.ALOAD,0));guard.add(new MethodInsnNode(Opcodes.INVOKEVIRTUAL,name,"invokeFlush","()V",false));}
+                InsnList guard=gate(vars[0],"outboundAllowed");rejectOutbound(method,guard,vars[0],vars[1],-1,method.name.equals("invokeWriteAndFlush")?"invokeFlush":null);
                 guard.add(new InsnNode(Opcodes.RETURN));endGate(guard);method.instructions.insert(guard);changed=true;
             }
             if(name.equals(BYTE_ENCODER)&&method.name.equals("write")&&args.length==3){
@@ -91,8 +86,9 @@ final class NetworkBoundary {
             if(name.equals(WRITE)&&method.name.equals("init")&&args.length==5){
                 returns(method,code->{for(int i:new int[]{0,1,2,3})code.add(new VarInsnNode(Opcodes.ALOAD,vars[i]));call(code,"writeCreated","(Ljava/lang/Object;Ljava/lang/Object;Ljava/lang/Object;Ljava/lang/Object;)V");});changed=true;
             }
-            if(name.equals(WRITE)&&method.name.equals("run")&&method.desc.equals("()V")){scope(method,0,"writeEnter");changed=true;}
+            if(name.equals(WRITE)&&(method.name.equals("run")||method.name.equals("cancel"))&&method.desc.equals("()V")){scope(method,0,"writeEnter");changed=true;}
             if(name.equals(WRITE)&&method.name.equals("recycle")&&method.desc.equals("()V")){
+                writeRecycle(method);
                 InsnList retired=new InsnList();retired.add(new VarInsnNode(Opcodes.ALOAD,0));call(retired,"writeRetired","(Ljava/lang/Object;)V");method.instructions.insert(retired);changed=true;
             }
         }
@@ -173,10 +169,54 @@ final class NetworkBoundary {
         method.instructions.insert(valid.label,guard);
     }
     private static void call(InsnList code,String name,String desc){code.add(new MethodInsnNode(Opcodes.INVOKESTATIC,BRIDGE,name,desc,false));}
-    private static void rejectOutbound(InsnList code,int message,int promise){
-        code.add(new VarInsnNode(Opcodes.ALOAD,message));code.add(new MethodInsnNode(Opcodes.INVOKESTATIC,"io/netty/util/ReferenceCountUtil","release","(Ljava/lang/Object;)Z",false));code.add(new InsnNode(Opcodes.POP));
-        code.add(new VarInsnNode(Opcodes.ALOAD,promise));call(code,"outboundRejected","()Ljava/lang/Throwable;");
-        code.add(new MethodInsnNode(Opcodes.INVOKEINTERFACE,"io/netty/channel/ChannelPromise","tryFailure","(Ljava/lang/Throwable;)Z",true));code.add(new InsnNode(Opcodes.POP));
+    private static void writeRecycle(MethodNode method){
+        var calls=Arrays.stream(method.instructions.toArray()).filter(at->at instanceof MethodInsnNode invoke
+                &&invoke.getOpcode()==Opcodes.INVOKEINTERFACE&&invoke.owner.equals("io/netty/util/internal/ObjectPool$Handle")
+                &&invoke.name.equals("recycle")&&invoke.desc.equals("(Ljava/lang/Object;)V")).toList();
+        if(calls.size()!=1)throw new IllegalStateException("NETTY_WRITE_RECYCLE_CALL_UNAVAILABLE");
+        // Keep the original field clearing and the real run/cancel finally. A
+        // retired item need not publish itself back into a shared recycler.
+        LabelNode allowed=new LabelNode();InsnList gate=new InsnList();gate.add(new VarInsnNode(Opcodes.ALOAD,0));
+        call(gate,"writeRecycleAllowed","(Ljava/lang/Object;)Z");gate.add(new JumpInsnNode(Opcodes.IFNE,allowed));
+        gate.add(new InsnNode(Opcodes.POP2));gate.add(new InsnNode(Opcodes.RETURN));gate.add(allowed);method.instructions.insertBefore(calls.get(0),gate);
+    }
+    private static void rejectOutbound(MethodNode method,InsnList code,int message,int promise,int flush,String flushMethod){
+        int token=method.maxLocals++,released=method.maxLocals++,failed=method.maxLocals++,flushed=method.maxLocals++;
+        code.add(new VarInsnNode(Opcodes.ALOAD,0));code.add(new VarInsnNode(Opcodes.ALOAD,message));code.add(new VarInsnNode(Opcodes.ALOAD,promise));
+        call(code,"outboundCleanupEnter","(Ljava/lang/Object;Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;");code.add(new VarInsnNode(Opcodes.ASTORE,token));
+        for(int failure:new int[]{released,failed,flushed}){code.add(new InsnNode(Opcodes.ACONST_NULL));code.add(new VarInsnNode(Opcodes.ASTORE,failure));}
+        // Each original action is attempted once. A release failure must not strand
+        // the promise or prevent the original flush of already accepted messages.
+        cleanupStep(method,code,token,0,released,step->{
+            step.add(new VarInsnNode(Opcodes.ALOAD,message));step.add(new MethodInsnNode(Opcodes.INVOKESTATIC,"io/netty/util/ReferenceCountUtil","release","(Ljava/lang/Object;)Z",false));step.add(new InsnNode(Opcodes.POP));
+        });
+        cleanupStep(method,code,token,1,failed,step->{
+            step.add(new VarInsnNode(Opcodes.ALOAD,promise));call(step,"outboundRejected","()Ljava/lang/Throwable;");
+            step.add(new MethodInsnNode(Opcodes.INVOKEINTERFACE,"io/netty/channel/ChannelPromise","tryFailure","(Ljava/lang/Throwable;)Z",true));step.add(new InsnNode(Opcodes.POP));
+        });
+        if(flushMethod!=null){
+            LabelNode noFlush=new LabelNode();if(flush>=0){code.add(new VarInsnNode(Opcodes.ILOAD,flush));code.add(new JumpInsnNode(Opcodes.IFEQ,noFlush));}
+            // Preserve context selection/executor semantics: submission uses flush,
+            // while an already dispatched WriteTask uses its original invokeFlush.
+            cleanupStep(method,code,token,2,flushed,step->{
+                step.add(new VarInsnNode(Opcodes.ALOAD,0));step.add(new MethodInsnNode(Opcodes.INVOKEVIRTUAL,NETTY,flushMethod,flushMethod.equals("flush")?"()Lio/netty/channel/ChannelHandlerContext;":"()V",false));
+                if(flushMethod.equals("flush"))step.add(new InsnNode(Opcodes.POP));
+            });code.add(noFlush);
+        }
+        // No throwing operation remains outside the three handlers before exit.
+        // The bridge restores its exact cleanup token in finally and combines the
+        // failures there, without giving a user callback the token's write policy.
+        code.add(new VarInsnNode(Opcodes.ALOAD,token));for(int failure:new int[]{released,failed,flushed})code.add(new VarInsnNode(Opcodes.ALOAD,failure));
+        call(code,"outboundCleanupExit","(Ljava/lang/Object;Ljava/lang/Throwable;Ljava/lang/Throwable;Ljava/lang/Throwable;)Ljava/lang/Throwable;");
+        LabelNode complete=new LabelNode();code.add(new InsnNode(Opcodes.DUP));code.add(new JumpInsnNode(Opcodes.IFNULL,complete));code.add(new InsnNode(Opcodes.ATHROW));code.add(complete);code.add(new InsnNode(Opcodes.POP));
+    }
+    private static void cleanupStep(MethodNode method,InsnList code,int token,int phase,int failure,java.util.function.Consumer<InsnList> action){
+        LabelNode start=new LabelNode(),end=new LabelNode(),handler=new LabelNode(),complete=new LabelNode();code.add(start);
+        code.add(new VarInsnNode(Opcodes.ALOAD,token));code.add(new InsnNode(Opcodes.ICONST_0+phase));call(code,"outboundCleanupPhase","(Ljava/lang/Object;I)V");action.accept(code);
+        code.add(end);code.add(new JumpInsnNode(Opcodes.GOTO,complete));code.add(handler);code.add(new VarInsnNode(Opcodes.ASTORE,failure));code.add(complete);
+        // These action-local handlers must precede any original Netty handler;
+        // only the merged failure escapes after the exact cleanup scope closes.
+        method.tryCatchBlocks.add(0,new TryCatchBlockNode(start,end,handler,"java/lang/Throwable"));
     }
     private static InsnList gate(int value,String operation){InsnList code=new InsnList();code.add(new VarInsnNode(Opcodes.ALOAD,value));call(code,operation,"(Ljava/lang/Object;)Z");code.add(new JumpInsnNode(Opcodes.IFNE,new LabelNode()));return code;}
     private static void endGate(InsnList code){for(AbstractInsnNode at:code.toArray())if(at instanceof JumpInsnNode jump&&jump.getOpcode()==Opcodes.IFNE){code.add(jump.label);return;}}

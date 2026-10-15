@@ -88,6 +88,7 @@ static jmethodID native_process_sources;
 static jclass native_unsafe_class,native_unsafe_backing;
 static jobject native_unsafe_denied;
 static jmethodID native_unsafe_begin_query,native_unsafe_read_begin_query,native_unsafe_copy_begin_query,native_unsafe_read_query,native_unsafe_register,native_unsafe_metadata_query;
+static jmethodID native_network_retirement_write_query,native_network_retirement_owner_query,native_network_retirement_active_query;
 static jmethodID native_memory_gate;
 static struct JNINativeInterface_ native_original;
 static HMODULE native_vm_getenv_image(JavaVM *vm);
@@ -118,6 +119,7 @@ static NativeUnsafeInstall *native_unsafe_registration(JNIEnv*,NativeThread*,jcl
 static int native_unsafe_registered(JNIEnv*,NativeThread*,jclass,const JNINativeMethod*,jmethodID*,jint,void*);
 static int native_unsafe_vm_target(jmethodID,void*);
 static int native_unsafe_begin(JNIEnv*,NativeThread*,Binding*,unsigned char*);
+static int native_unsafe_network_retirement(JNIEnv*,NativeThread*,Binding*,unsigned char*,jobject);
 static void native_unsafe_end(JNIEnv*,NativeThread*,Binding*,unsigned char*);
 static uint64_t native_unsafe_result(JNIEnv*,Binding*,unsigned char*);
 static void native_file_classify(JNIEnv*,jclass,Binding*,const char*);
@@ -252,13 +254,37 @@ static uint64_t native_enter(JNIEnv *env,jobject receiver,Binding *binding,unsig
     if(binding->declared&&InterlockedCompareExchange(&binding->declared->stopped,0,0))return 0;
     // A stopped caller may finish an already sealed resource's original close.
     // The exact descriptor scope is checked by the file bridge before dispatch.
-    if(code_current_stopped(env)&&binding->fileOperation!=4&&binding->fileOperation!=7&&binding->fileOperation!=8&&binding->unsafeOperation!=UNSAFE_FREE)return 0;
+    int stopped=code_current_stopped(env),networkRetirement=0;
+    if(native_original.ExceptionCheck(env))return 0;
+    if(stopped&&binding->fileOperation!=4&&binding->fileOperation!=7&&binding->fileOperation!=8&&binding->unsafeOperation!=UNSAFE_FREE){
+        networkRetirement=native_unsafe_network_retirement(env,state,binding,frame,NULL);
+        if(native_original.ExceptionCheck(env))return 0;
+        if(!networkRetirement){
+            // A real rejected-write cleanup must not silently lose an unsupported
+            // PUT or retry its CAS forever. This observation only refuses it.
+            if((binding->unsafeOperation==UNSAFE_CAS||binding->unsafeOperation==UNSAFE_PUT)&&native_network_retirement_active_query){
+                state->control++;
+                jboolean active=native_original.CallStaticBooleanMethod(env,native_controls,native_network_retirement_active_query);
+                state->control--;
+                if(active&&!native_original.ExceptionCheck(env))native_refuse(env,"NETWORK_RETIREMENT_WRITE_UNSUPPORTED");
+            }
+            return 0;
+        }
+    }
     Binding *effective=binding;
     while(effective&&(!InterlockedCompareExchange(&effective->valid,0,0)||native_owner_stopped(effective->owners)||effective->hostUnknown
             ||effective->library&&(!InterlockedCompareExchange(&effective->library->alive,0,0)||InterlockedCompareExchange(&effective->library->closing,0,0))))effective=effective->previous;
     if(!effective)return 0;
     state->control++;jobject type=native_original.NewLocalRef(env,effective->origin);
     jboolean allowed=type&&native_controls?native_original.CallStaticBooleanMethod(env,native_controls,native_owner_gate,type):JNI_FALSE;
+    if(!allowed&&type&&!native_original.ExceptionCheck(env)){
+        // Only this actual VM scalar write may substitute the exact retirement decision
+        // for the owner's stopped-invocation check. The owner's module still
+        // passes the Java owner predicate, and no permission escapes this call.
+        if(!networkRetirement)networkRetirement=native_unsafe_network_retirement(env,state,binding,frame,NULL);
+        if(networkRetirement&&!native_original.ExceptionCheck(env))
+            allowed=native_unsafe_network_retirement(env,state,effective,frame,type)?JNI_TRUE:JNI_FALSE;
+    }
     if(type)native_original.DeleteLocalRef(env,type);state->control--;if(native_original.ExceptionCheck(env)||!allowed)return 0;
     if(effective->hostUnknown||!host_module_binding_enter(effective))return 0;
     state->entries[state->depth]=binding;state->stack[state->depth++]=effective;InterlockedIncrement(&effective->active);
@@ -2336,3 +2362,234 @@ static jclass native_live_writer(JNIEnv *env,jclass type,int raw){
 }
 JNIEXPORT jclass JNICALL Java_dev_ronova_pro_bootstrap_NativeControl_controlWriter0(JNIEnv *env,jclass type){return native_live_writer(env,type,0);}
 JNIEXPORT jclass JNICALL Java_dev_ronova_pro_bootstrap_NativeControl_rawMemoryWriter0(JNIEnv *env,jclass type){return native_live_writer(env,type,1);}
+
+JNIEXPORT jint JNICALL Java_dev_ronova_pro_bootstrap_NativeControl_networkBoundaryDepth0(JNIEnv *env,jclass type,jclass boundary,jstring boundaryMethod){
+    NativeThread *state=native_thread();
+    if(!state||!native_jni_ready||!native_ti||!native_controller||!boundary||!boundaryMethod
+            ||!native_original.IsSameObject(env,type,native_controller)||native_original.ExceptionCheck(env))return 0;
+    state->control++;
+    const char *wanted=native_original.GetStringUTFChars(env,boundaryMethod,NULL);jint total=0,result=0;
+    int valid=wanted&&!native_original.ExceptionCheck(env)&&(*native_ti)->GetFrameCount(native_ti,NULL,&total)==JVMTI_ERROR_NONE;
+    for(jint depth=0;valid&&!result;){
+        jvmtiFrameInfo frames[16];jint count=0;
+        jvmtiError error=(*native_ti)->GetStackTrace(native_ti,NULL,depth,16,frames,&count);
+        if(error!=JVMTI_ERROR_NONE){valid=0;break;}
+        for(jint at=0;at<count&&valid&&!result;at++){
+            jclass declaring=NULL;char *name=NULL;
+            error=(*native_ti)->GetMethodDeclaringClass(native_ti,frames[at].method,&declaring);
+            if(error!=JVMTI_ERROR_NONE||!declaring)valid=0;
+            if(valid&&native_original.IsSameObject(env,declaring,boundary)){
+                error=(*native_ti)->GetMethodName(native_ti,frames[at].method,&name,NULL,NULL);
+                if(error!=JVMTI_ERROR_NONE||!name)valid=0;
+                else if(!strcmp(name,wanted)){result=total-depth-at;if(result<=0)valid=0;}
+            }
+            if(name)(*native_ti)->Deallocate(native_ti,(unsigned char*)name);
+            if(declaring)native_original.DeleteLocalRef(env,declaring);
+            if(native_original.ExceptionCheck(env))valid=0;
+        }
+        if(count<16)break;if(depth>INT32_MAX-count){valid=0;break;}depth+=count;
+    }
+    if(wanted)native_original.ReleaseStringUTFChars(env,boundaryMethod,wanted);
+    state->control--;return valid&&!native_original.ExceptionCheck(env)?result:0;
+}
+
+/* This reader establishes only a real call path. It never authorizes a field,
+ * target or value, and its internal JNI bookkeeping does not supply a verdict. */
+JNIEXPORT jboolean JNICALL Java_dev_ronova_pro_bootstrap_NativeControl_networkCleanupBoundary0(JNIEnv *env,jclass type,jclass boundary,jstring boundaryMethod,jint phase,jint bottomDepth){
+    NativeThread *state=native_thread();
+    if(!state||!native_jni_ready||!native_ti||!native_controller||!boundary||!boundaryMethod||bottomDepth<=0
+            ||!native_original.IsSameObject(env,type,native_controller)||native_original.ExceptionCheck(env))return JNI_FALSE;
+    state->control++;
+    jfieldID stoppedField=native_original.GetStaticFieldID(env,native_controls,"stoppedModules","[Ljava/lang/Module;");
+    jobjectArray policy=stoppedField&&!native_original.ExceptionCheck(env)
+            ?(jobjectArray)native_original.GetStaticObjectField(env,native_controls,stoppedField):NULL;
+    // The Java caller is already NetworkCleanup. Resolve its trusted callback
+    // here rather than initializing a new helper during controller installation.
+    jclass helper=policy&&!native_original.ExceptionCheck(env)?native_original.FindClass(env,"dev/ronova/pro/bootstrap/NetworkCleanup"):NULL;
+    jmethodID query=helper&&native_bootstrap_class(env,helper,"Ldev/ronova/pro/bootstrap/NetworkCleanup;")
+            ?native_original.GetStaticMethodID(env,helper,"frame","(Ljava/lang/Class;Ljava/lang/String;Ljava/lang/String;Ljava/lang/Class;Ljava/lang/String;I)I"):NULL;
+    jint total=0;
+    int valid=policy&&helper&&query&&!native_original.ExceptionCheck(env)
+            &&(*native_ti)->GetFrameCount(native_ti,NULL,&total)==JVMTI_ERROR_NONE,matched=0;
+    for(jint depth=0;valid&&!matched;){
+        jvmtiFrameInfo frames[16];jint count=0;
+        jvmtiError error=(*native_ti)->GetStackTrace(native_ti,NULL,depth,16,frames,&count);
+        if(error!=JVMTI_ERROR_NONE){valid=0;break;}
+        for(jint at=0;at<count&&valid&&!matched;at++){
+            jclass declaring=NULL;jstring method=NULL,descriptor=NULL;char *name=NULL,*signature=NULL;
+            error=(*native_ti)->GetMethodDeclaringClass(native_ti,frames[at].method,&declaring);
+            if(error!=JVMTI_ERROR_NONE||!declaring)valid=0;
+            if(valid){
+                error=(*native_ti)->GetMethodName(native_ti,frames[at].method,&name,&signature,NULL);
+                if(error!=JVMTI_ERROR_NONE||!name||!signature)valid=0;
+            }
+            if(valid){method=native_original.NewStringUTF(env,name);descriptor=native_original.NewStringUTF(env,signature);if(!method||!descriptor)valid=0;}
+            if(valid&&!native_original.ExceptionCheck(env)){
+                jint decision=native_original.CallStaticIntMethod(env,helper,query,declaring,method,descriptor,boundary,boundaryMethod,phase);
+                if(native_original.ExceptionCheck(env)||decision!=1&&decision!=2)valid=0;
+                else {
+                    // A framework name does not make an overwritten instruction
+                    // a framework writer. Read this actual method/BCI/version's
+                    // contributors only; the outer rejected-write source stays
+                    // in its original scope and is not merged into this decision.
+                    if(frames[at].location>=0&&code_method_relevant(env,frames[at].method,NULL)){
+                        OwnerLink *owners=NULL;int known=0,unknown=0;
+                        valid=code_available&&code_frame_sources_query(env,frames[at].method,frames[at].location,&owners,&known,&unknown);
+                        if(valid&&(unknown||code_source_query_owners_stopped(env,owners,policy)))valid=0;
+                        code_links_free(owners);
+                    }
+                    if(valid&&!native_original.ExceptionCheck(env)&&decision==2){if(total-depth-at==bottomDepth)matched=1;else valid=0;}
+                }
+            }else valid=0;
+            if(name)(*native_ti)->Deallocate(native_ti,(unsigned char*)name);
+            if(signature)(*native_ti)->Deallocate(native_ti,(unsigned char*)signature);
+            if(method)native_original.DeleteLocalRef(env,method);if(descriptor)native_original.DeleteLocalRef(env,descriptor);
+            if(declaring)native_original.DeleteLocalRef(env,declaring);
+        }
+        if(count<16)break;if(depth>INT32_MAX-count){valid=0;break;}depth+=count;
+    }
+    if(helper)native_original.DeleteLocalRef(env,helper);
+    if(policy)native_original.DeleteLocalRef(env,policy);
+    state->control--;return valid&&matched&&!native_original.ExceptionCheck(env)?JNI_TRUE:JNI_FALSE;
+}
+
+/* These metadata readers never resolve a Java reflection cache or call a Java
+ * accessor. A name that has more than one VM declaration is not an exact key. */
+static jfieldID native_network_declared_field(JNIEnv *env,jclass declaring,const char *wanted,char **signature,jint *modifiers){
+    jint count=0;jfieldID *fields=NULL,selected=NULL;int valid=1;
+    *signature=NULL;*modifiers=0;
+    if((*native_ti)->GetClassFields(native_ti,declaring,&count,&fields)!=JVMTI_ERROR_NONE||count<0)valid=0;
+    for(jint at=0;valid&&at<count;at++){
+        char *name=NULL,*descriptor=NULL;jclass owner=NULL;
+        if((*native_ti)->GetFieldName(native_ti,declaring,fields[at],&name,&descriptor,NULL)!=JVMTI_ERROR_NONE||!name||!descriptor)valid=0;
+        if(valid&&!strcmp(name,wanted)){
+            jint actualModifiers=0;
+            if(selected||(*native_ti)->GetFieldDeclaringClass(native_ti,declaring,fields[at],&owner)!=JVMTI_ERROR_NONE
+                    ||!owner||!native_original.IsSameObject(env,owner,declaring)
+                    ||(*native_ti)->GetFieldModifiers(native_ti,declaring,fields[at],&actualModifiers)!=JVMTI_ERROR_NONE)valid=0;
+            else {selected=fields[at];*signature=descriptor;descriptor=NULL;*modifiers=actualModifiers;}
+        }
+        if(name)(*native_ti)->Deallocate(native_ti,(unsigned char*)name);
+        if(descriptor)(*native_ti)->Deallocate(native_ti,(unsigned char*)descriptor);
+        if(owner)native_original.DeleteLocalRef(env,owner);
+        if(native_original.ExceptionCheck(env))valid=0;
+    }
+    if(fields)(*native_ti)->Deallocate(native_ti,(unsigned char*)fields);
+    if(!valid){if(*signature)(*native_ti)->Deallocate(native_ti,(unsigned char*)*signature);*signature=NULL;return NULL;}
+    return selected;
+}
+
+typedef struct {const char *signature;jclass type;jfieldID value;} NativeNetworkBox;
+static NativeNetworkBox native_network_boxes[]={
+    {"Ljava/lang/Boolean;",NULL,NULL},{"Ljava/lang/Byte;",NULL,NULL},
+    {"Ljava/lang/Character;",NULL,NULL},{"Ljava/lang/Short;",NULL,NULL},
+    {"Ljava/lang/Integer;",NULL,NULL},{"Ljava/lang/Long;",NULL,NULL},
+    {"Ljava/lang/Float;",NULL,NULL},{"Ljava/lang/Double;",NULL,NULL}
+};
+static SRWLOCK native_network_boxes_lock=SRWLOCK_INIT;
+
+/* Find only an already initialized bootstrap wrapper. FindClass/GetFieldID can
+ * initialize a class, so even these lookups use the VM's existing declarations. */
+static jclass native_network_box_type(JNIEnv *env,unsigned index,char kind,jfieldID *value){
+    NativeNetworkBox *box=&native_network_boxes[index];jclass result=NULL;
+    AcquireSRWLockShared(&native_network_boxes_lock);
+    if(box->type){result=(jclass)native_original.NewLocalRef(env,box->type);*value=box->value;}
+    ReleaseSRWLockShared(&native_network_boxes_lock);
+    if(result||native_original.ExceptionCheck(env))return result;
+    jint count=0;jclass *classes=NULL;
+    if((*native_ti)->GetLoadedClasses(native_ti,&count,&classes)!=JVMTI_ERROR_NONE||count<0)goto finished;
+    for(jint at=0;at<count&&!result&&!native_original.ExceptionCheck(env);at++){
+        jint status=0;
+        if(native_bootstrap_class(env,classes[at],box->signature)
+                &&(*native_ti)->GetClassStatus(native_ti,classes[at],&status)==JVMTI_ERROR_NONE
+                &&(status&JVMTI_CLASS_STATUS_INITIALIZED))result=(jclass)native_original.NewLocalRef(env,classes[at]);
+    }
+finished:
+    if(classes){for(jint at=0;at<count;at++)if(classes[at])native_original.DeleteLocalRef(env,classes[at]);(*native_ti)->Deallocate(native_ti,(unsigned char*)classes);}
+    if(!result||native_original.ExceptionCheck(env)){if(result)native_original.DeleteLocalRef(env,result);return NULL;}
+    char *signature=NULL;jint modifiers=0;
+    jfieldID field=native_network_declared_field(env,result,"value",&signature,&modifiers);
+    int exact=field&&signature&&signature[0]==kind&&!signature[1]&&!(modifiers&0x0008)&&!native_original.ExceptionCheck(env);
+    if(signature)(*native_ti)->Deallocate(native_ti,(unsigned char*)signature);
+    if(!exact){native_original.DeleteLocalRef(env,result);return NULL;}
+    jclass retained=(jclass)native_original.NewGlobalRef(env,result);
+    if(!retained||native_original.ExceptionCheck(env)){native_original.DeleteLocalRef(env,result);return NULL;}
+    AcquireSRWLockExclusive(&native_network_boxes_lock);
+    if(!box->type){box->type=retained;box->value=field;retained=NULL;}
+    ReleaseSRWLockExclusive(&native_network_boxes_lock);
+    if(retained)native_original.DeleteGlobalRef(env,retained);
+    *value=field;return result;
+}
+
+static jobject native_network_box(JNIEnv *env,char kind,jvalue value){
+    unsigned index;
+    switch(kind){case 'Z':index=0;break;case 'B':index=1;break;case 'C':index=2;break;case 'S':index=3;break;
+        case 'I':index=4;break;case 'J':index=5;break;case 'F':index=6;break;case 'D':index=7;break;default:return NULL;}
+    jfieldID field=NULL;jclass type=native_network_box_type(env,index,kind,&field);
+    jobject result=type&&field&&!native_original.ExceptionCheck(env)?native_original.AllocObject(env,type):NULL;
+    if(result&&!native_original.ExceptionCheck(env))switch(kind){
+        case 'Z':native_original.SetBooleanField(env,result,field,value.z);break;
+        case 'B':native_original.SetByteField(env,result,field,value.b);break;
+        case 'C':native_original.SetCharField(env,result,field,value.c);break;
+        case 'S':native_original.SetShortField(env,result,field,value.s);break;
+        case 'I':native_original.SetIntField(env,result,field,value.i);break;
+        case 'J':native_original.SetLongField(env,result,field,value.j);break;
+        case 'F':native_original.SetFloatField(env,result,field,value.f);break;
+        case 'D':native_original.SetDoubleField(env,result,field,value.d);break;
+    }
+    if(type)native_original.DeleteLocalRef(env,type);
+    if(native_original.ExceptionCheck(env)){if(result)native_original.DeleteLocalRef(env,result);return NULL;}
+    return result;
+}
+
+JNIEXPORT jobject JNICALL Java_dev_ronova_pro_bootstrap_NativeControl_networkReadField0(JNIEnv *env,jclass type,jobject receiver,jclass declaring,jstring fieldName,jboolean statik){
+    NativeThread *state=native_thread();
+    if(!state||!native_jni_ready||!native_ti||!native_controller||!declaring||!fieldName
+            ||!native_original.IsSameObject(env,type,native_controller)||native_original.ExceptionCheck(env))return NULL;
+    state->control++;
+    const char *wanted=native_original.GetStringUTFChars(env,fieldName,NULL);char *signature=NULL;jint modifiers=0;
+    jfieldID field=wanted&&!native_original.ExceptionCheck(env)?native_network_declared_field(env,declaring,wanted,&signature,&modifiers):NULL;
+    jobject result=NULL;
+    if(!field||!signature||!!(modifiers&0x0008)!=!!statik||native_original.ExceptionCheck(env))goto finished;
+    if(statik){jint status=0;if((*native_ti)->GetClassStatus(native_ti,declaring,&status)!=JVMTI_ERROR_NONE||!(status&JVMTI_CLASS_STATUS_INITIALIZED))goto finished;}
+    else if(!receiver||!native_original.IsInstanceOf(env,receiver,declaring))goto finished;
+    if(signature[0]=='L'||signature[0]=='[')result=statik?native_original.GetStaticObjectField(env,declaring,field):native_original.GetObjectField(env,receiver,field);
+    else if(!signature[1]){
+        jvalue value={0};
+#define NETWORK_READ_PRIMITIVE(KIND,NAME,MEMBER) case KIND:value.MEMBER=statik?native_original.GetStatic##NAME##Field(env,declaring,field):native_original.Get##NAME##Field(env,receiver,field);break;
+        switch(signature[0]){
+            NETWORK_READ_PRIMITIVE('Z',Boolean,z)
+            NETWORK_READ_PRIMITIVE('B',Byte,b)
+            NETWORK_READ_PRIMITIVE('C',Char,c)
+            NETWORK_READ_PRIMITIVE('S',Short,s)
+            NETWORK_READ_PRIMITIVE('I',Int,i)
+            NETWORK_READ_PRIMITIVE('J',Long,j)
+            NETWORK_READ_PRIMITIVE('F',Float,f)
+            NETWORK_READ_PRIMITIVE('D',Double,d)
+            default:goto finished;
+        }
+#undef NETWORK_READ_PRIMITIVE
+        if(!native_original.ExceptionCheck(env))result=native_network_box(env,signature[0],value);
+    }
+finished:
+    if(signature)(*native_ti)->Deallocate(native_ti,(unsigned char*)signature);
+    if(wanted)native_original.ReleaseStringUTFChars(env,fieldName,wanted);
+    state->control--;
+    if(native_original.ExceptionCheck(env)){if(result)native_original.DeleteLocalRef(env,result);return NULL;}
+    return result;
+}
+
+JNIEXPORT jobject JNICALL Java_dev_ronova_pro_bootstrap_NativeControl_networkField0(JNIEnv *env,jclass type,jclass declaring,jstring fieldName){
+    NativeThread *state=native_thread();
+    if(!state||!native_jni_ready||!native_ti||!native_controller||!declaring||!fieldName
+            ||!native_original.IsSameObject(env,type,native_controller)||native_original.ExceptionCheck(env))return NULL;
+    state->control++;
+    const char *wanted=native_original.GetStringUTFChars(env,fieldName,NULL);char *signature=NULL;jint modifiers=0;
+    jfieldID field=wanted&&!native_original.ExceptionCheck(env)?native_network_declared_field(env,declaring,wanted,&signature,&modifiers):NULL;
+    jobject result=field&&!native_original.ExceptionCheck(env)?native_original.ToReflectedField(env,declaring,field,(modifiers&0x0008)?JNI_TRUE:JNI_FALSE):NULL;
+    if(signature)(*native_ti)->Deallocate(native_ti,(unsigned char*)signature);
+    if(wanted)native_original.ReleaseStringUTFChars(env,fieldName,wanted);
+    state->control--;
+    if(native_original.ExceptionCheck(env)){if(result)native_original.DeleteLocalRef(env,result);return NULL;}
+    return result;
+}

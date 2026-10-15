@@ -100,7 +100,10 @@ final class ExecutionFlow {
             if(actual==null)throw new IllegalStateException("HEAP_BASELINE_RELEASED");return actual;
         }
     }
-    private record Revision(Value before,Value after,Sources previous,Revision parent){Revision{CodeSourceBridge.executionControls(this);}}
+    private record Revision(Value before,Value after,Sources previous,Revision parent,boolean retirement){
+        Revision(Value before,Value after,Sources previous,Revision parent){this(before,after,previous,parent,false);}
+        Revision{CodeSourceBridge.executionControls(this);}
+    }
     private record UnsafeUse(Frame frame,int instruction,Object receipt,boolean reading){UnsafeUse{CodeSourceBridge.executionControls(this);}}
     private record PlatformCall(Frame frame,Call call){PlatformCall{CodeSourceBridge.executionControls(this);}}
     private static final class Recovery {
@@ -133,8 +136,9 @@ final class ExecutionFlow {
             CodeSourceBridge.executionControls(this);
         }
     }
-    private record ArrayRevision(ArrayImage before,ArrayImage after,Sources sources,Sources prior,ArrayRevision previous,boolean complete,boolean baseline){
-        ArrayRevision(ArrayImage before,ArrayImage after,Sources sources,Sources prior,ArrayRevision previous,boolean complete){this(before,after,sources,prior,previous,complete,false);}
+    private record ArrayRevision(ArrayImage before,ArrayImage after,Sources sources,Sources prior,ArrayRevision previous,boolean complete,boolean baseline,boolean retirement){
+        ArrayRevision(ArrayImage before,ArrayImage after,Sources sources,Sources prior,ArrayRevision previous,boolean complete){this(before,after,sources,prior,previous,complete,false,false);}
+        ArrayRevision(ArrayImage before,ArrayImage after,Sources sources,Sources prior,ArrayRevision previous,boolean complete,boolean baseline){this(before,after,sources,prior,previous,complete,baseline,false);}
         ArrayRevision{CodeSourceBridge.executionControls(this);}
     }
     private static final class ArrayRange {
@@ -143,8 +147,15 @@ final class ExecutionFlow {
     }
     private static final class ArrayChange {
         final Object carrier;final Heap heap;final long start,length;final Thread thread=Thread.currentThread();final ArrayChange root;
-        ArrayImage before;ArrayImage[] parts;Sources written;boolean closed,overlap,changed,complete=true,images=true;
-        ArrayChange(Object carrier,Heap heap,long start,long length,Sources written,ArrayChange root){this.carrier=carrier;this.heap=heap;this.start=start;this.length=length;this.written=written;this.root=root==null?this:root;}
+        final boolean typed;
+        ArrayImage before;ArrayImage[] parts;Sources written;boolean closed,overlap,changed,retirement,complete=true,images=true;
+        ArrayRetirement retirements,lastRetirement;
+        ArrayChange(Object carrier,Heap heap,long start,long length,Sources written,ArrayChange root,boolean typed){this.carrier=carrier;this.heap=heap;this.start=start;this.length=length;this.written=written;this.root=root==null?this:root;this.typed=typed;}
+    }
+    /** Exact successful nested stores retain their own span, never their enclosing copy's extent. */
+    private static final class ArrayRetirement {
+        final long start;final int length;final ArrayImage after;final Sources sources;ArrayRetirement next;
+        ArrayRetirement(long start,int length,ArrayImage after,Sources sources){this.start=start;this.length=length;this.after=after;this.sources=sources;CodeSourceBridge.executionControls(this);}
     }
     private static final class ArrayRecovery {
         final WeakReference<Object> carrier;final Heap heap;final ArrayRange range;final ArrayRevision head;final Set<Module> selected;
@@ -158,7 +169,7 @@ final class ExecutionFlow {
     private static final class HeapUse {
         final Heap holder;final Slot slot;final Object location;final WeakReference<Object> carrier;final long version,carrierVersion;final Sources prior,written;final boolean write,readable;
         Value before;
-        boolean closed,observed;ArrayChange arrayChange;MemoryRead arrayRead;boolean arrayReading;
+        boolean closed,observed,retirement;ArrayChange arrayChange;MemoryRead arrayRead;boolean arrayReading;
         HeapUse(Object carrier,Heap holder,Slot slot,Object location,boolean write,Sources written){
             this.carrier=new WeakReference<>(carrier);this.holder=holder;this.slot=slot;this.location=location;this.write=write;this.written=written;prior=slot.sources;carrierVersion=holder.version;
             readable=slot.watched&&slot.writers==0&&holder.writers==0;
@@ -179,7 +190,7 @@ final class ExecutionFlow {
         // to foreign Java/reflection/Unsafe/JNI writers by ownState. Its child
         // arrays, collections and plain weak references keep their registrations.
         // Do not enqueue a redundant weak control key for every byte-store receipt.
-        final Heap holder;final long version;final boolean broad;Sources written;final Thread thread=Thread.currentThread();Prior prior,last;boolean closed;
+        final Heap holder;final long version;final boolean broad;Sources written;final Thread thread=Thread.currentThread();Prior prior,last;boolean closed,retirement;
         int arrayStart=-1,arrayLength;boolean rangeOverlap;
         Slot capturedSlot;FieldCapture capture;
         final Frame frame=CURRENT.get();final int instruction=frame==null?-1:frame.instruction;
@@ -677,7 +688,7 @@ final class ExecutionFlow {
     private static ArrayRevision slice(ArrayRevision head,long start,int length){
         List<ArrayRevision> history=new TraceList<>();for(ArrayRevision entry=head;entry!=null;entry=entry.previous())history.add(entry);
         ArrayRevision result=null;for(int i=history.size()-1;i>=0;i--){ArrayRevision entry=history.get(i);
-            result=new ArrayRevision(slice(entry.before(),start,length),slice(entry.after(),start,length),entry.sources(),entry.prior(),result,entry.complete(),entry.baseline());}
+            result=new ArrayRevision(slice(entry.before(),start,length),slice(entry.after(),start,length),entry.sources(),entry.prior(),result,entry.complete(),entry.baseline(),entry.retirement());}
         return result;
     }
     private static void splitArrayRange(Heap heap,long boundary){
@@ -705,7 +716,7 @@ final class ExecutionFlow {
             if(pending.thread==Thread.currentThread()&&start>=pending.start&&end<=pending.start+pending.length){root=pending.root;break;}
         }
         if(written.modules().length!=0)heap.arrayOrigins=true;
-        ArrayChange change=new ArrayChange(carrier,heap,start,length,written,root);
+        ArrayChange change=new ArrayChange(carrier,heap,start,length,written,root,typed);
         change.images=(typed||carrier.getClass().getComponentType().isPrimitive())
                 &&(heap.arrayOrigins||!written.unknown());
         change.complete=typed&&change.images;
@@ -763,13 +774,25 @@ final class ExecutionFlow {
     private static void refreshArraySlot(Heap heap,Slot slot,int index,int unit){
         slot.sources=arraySources(heap,(long)index*unit,unit);slot.revision=null;slot.watched=true;slot.version++;
     }
+    private static void captureArrayRetirement(ArrayChange change){
+        if(!change.typed)return;ArrayChange root=change.root;long end=change.start+change.length;
+        for(long at=change.start;at<end;){int length=(int)Math.min(65536,end-at);
+            ArrayRetirement retired=new ArrayRetirement(at,length,arrayImage(change.carrier,at,length),change.written);
+            if(root.lastRetirement==null)root.retirements=retired;else root.lastRetirement.next=retired;
+            root.lastRetirement=retired;at+=length;
+        }
+    }
     private static void finishArrayChange(ArrayChange change,boolean written){
-        if(change==null||change.closed)return;change.closed=true;Heap heap=change.heap;heap.arrayChanges.remove(change);
+        if(change==null||change.closed)return;
+        // The controller marks only the successful, qualified operation. A
+        // failed CAS cannot publish a baseline, even inside a shared receipt.
+        if(written&&change.retirement)captureArrayRetirement(change);
+        change.closed=true;Heap heap=change.heap;heap.arrayChanges.remove(change);
         ArrayChange root=change.root;root.changed|=written;
         if(change!=root){root.written=join(root.written,change.written);return;}
         heap.arrayRevision++;
         for(ArrayChange pending:heap.arrayChanges)if(pending.root==root)root.overlap=true;
-        if(!root.images&&!heap.arrayOrigins){
+        if(!root.images&&!heap.arrayOrigins&&root.retirements==null){
             // No owned revision has ever existed. Preserve UNKNOWN and all
             // live read/write windows without copying every inflater/file byte.
             // The first attributable writer captures the then-current baseline.
@@ -779,24 +802,45 @@ final class ExecutionFlow {
             observeArrayReads(heap,first,count,join(root.written,UNKNOWN));
             root.before=null;root.parts=null;return;
         }
+        for(ArrayRetirement retired=root.retirements;retired!=null;retired=retired.next){
+            splitArrayRange(heap,retired.start);splitArrayRange(heap,retired.start+retired.length);
+        }
         long end=root.start+root.length;int part=0;
-        for(long at=root.start;at<end;){int length=(int)Math.min(65536,end-at);ArrayImage before=root.parts==null?root.before:root.parts[part++],after=root.images?arrayImage(root.carrier,at,length,before):null;
+        for(long at=root.start;at<end;){int length=(int)Math.min(65536,end-at);ArrayImage before=root.parts==null?root.before:root.parts[part++],after=root.images||root.retirements!=null?arrayImage(root.carrier,at,length,before):null;
             boolean same=sameImage(before,after);
             if(!written&&!root.changed&&same&&!root.overlap){at+=length;continue;}
             if(!same)root.changed=true;
             splitArrayRange(heap,at);splitArrayRange(heap,at+length);
             for(long cursor=at;cursor<at+length;){
                 ArrayRange previous=heap.arrayRanges.get(cursor);Long next=heap.arrayRanges.higherKey(cursor);
-                int count=previous!=null?previous.length:(int)((next==null?at+length:Math.min(next,at+length))-cursor);
+                long boundary=next==null?at+length:Math.min(next,at+length);
+                for(ArrayRetirement retired=root.retirements;retired!=null;retired=retired.next){
+                    if(retired.start>cursor)boundary=Math.min(boundary,retired.start);
+                    if(retired.start+retired.length>cursor)boundary=Math.min(boundary,retired.start+retired.length);
+                }
+                int count=previous!=null?(int)Math.min(previous.length,boundary-cursor):(int)(boundary-cursor);
                 ArrayImage saved,current=slice(after,cursor,count);
                 ArrayRevision history=previous==null?null:previous.head;
                 Sources prior=history==null?heap.arrayBaseline:history.sources();
                 boolean complete=root.complete&&!root.overlap&&written&&before!=null&&current!=null&&(history==null||sameImageSlice(history.after(),before,cursor,count));
                 Sources sources=complete?root.written:join(root.written,prior,UNKNOWN);
-                if(complete&&history!=null&&history.complete()&&sameSources(sources,history.sources())){
+                ArrayRetirement retirement=null;
+                if(!root.overlap)for(ArrayRetirement retired=root.retirements;retired!=null;retired=retired.next)
+                    if(cursor>=retired.start&&cursor+count<=retired.start+retired.length)retirement=retired;
+                ArrayRevision revision;
+                if(retirement!=null){
+                    ArrayImage terminal=slice(retirement.after,cursor,count);
+                    ArrayRevision baseline=new ArrayRevision(terminal,terminal,retirement.sources,prior,history,terminal!=null,false,true);
+                    if(sameImage(terminal,current))
+                        revision=new ArrayRevision(terminal,terminal,root.written,prior,history,true,false,true);
+                    else revision=new ArrayRevision(terminal,current,sources,retirement.sources,baseline,false);
+                }else if(complete&&history!=null&&history.complete()&&!history.retirement()&&sameSources(sources,history.sources())){
                     saved=history.before();prior=history.prior();history=history.previous();
-                }else saved=before==after?current:slice(before,cursor,count);
-                ArrayRevision revision=new ArrayRevision(saved,current,sources,prior,history,complete);
+                    revision=new ArrayRevision(saved,current,sources,prior,history,complete);
+                }else{
+                    saved=before==after?current:slice(before,cursor,count);
+                    revision=new ArrayRevision(saved,current,sources,prior,history,complete);
+                }
                 // Splitting above fixed this exact physical span. Its wrapper
                 // can stay; every write still installs a new immutable head,
                 // which is also checked by every outstanding recovery receipt.
@@ -808,7 +852,7 @@ final class ExecutionFlow {
         refreshArraySources(root.carrier,heap,root.start,root.length);
         if(written||root.changed||root.overlap)observeArrayReads(heap,(int)(root.start/arrayUnit(root.carrier)),
                 (int)((root.start+root.length+arrayUnit(root.carrier)-1)/arrayUnit(root.carrier)-root.start/arrayUnit(root.carrier)),root.written);
-        root.before=null;root.parts=null;
+        root.before=null;root.parts=null;root.retirements=null;root.lastRetirement=null;
     }
     private static boolean overlaps(int start,int length,int other,int count){return (long)start<other+(long)count&&(long)other<start+(long)length;}
     // replaceRegion keeps this actual partition sorted and disjoint. Locate
@@ -1005,10 +1049,20 @@ final class ExecutionFlow {
             for(Prior prior=use.prior;prior!=null;prior=prior.next)prior.slot().sources=join(prior.slot().sources,added);
         }
     }
+    /** Marks an actual successful qualified cleanup receipt, without changing its sources or permissions. */
+    static void memoryRetirement(Object token){
+        bridge(CALLER.getCallerClass());
+        if(!(token instanceof MemoryUse use)||use.closed||use.thread!=Thread.currentThread())return;
+        synchronized(HEAP){use.retirement=true;}
+    }
     static void memoryAfter(Object token,boolean written){
         bridge(CALLER.getCallerClass());if(!(token instanceof MemoryUse use)||use.closed||use.thread!=Thread.currentThread())return;
         synchronized(HEAP){
-            if(use.delegated!=null){use.closed=true;if(!written)use.delegated.before=null;return;}
+            if(use.delegated!=null){
+                use.closed=true;if(!written)use.delegated.before=null;
+                else if(use.retirement)use.delegated.retirement=true;
+                return;
+            }
             use.closed=true;Heap heap=use.holder;
             boolean carrierSerial=heap.version==use.version&&(use.broad?heap.writers==1&&!heap.overlap:heap.writers==0);
             boolean regionSerial=carrierSerial;
@@ -1019,14 +1073,17 @@ final class ExecutionFlow {
                 else slot.sources=join(slot.sources,prior.sources(),use.written,UNKNOWN);
                 if(written||!serial){
                     FieldCapture capture=use.capturedSlot==slot?use.capture:null;
-                    boolean captured=serial&&written&&slot.vmWatched&&capture!=null&&capture.before()!=null&&!use.written.unknown()&&use.written.modules().length!=0;
+                    boolean retirement=serial&&written&&use.retirement&&slot.vmWatched&&capture!=null;
+                    boolean captured=retirement||serial&&written&&slot.vmWatched&&capture!=null&&capture.before()!=null&&!use.written.unknown()&&use.written.modules().length!=0;
                     Value after=captured?readValue(capture.carrier().get(),capture.field()):null;
                     if(after!=null){
-                        slot.watched=true;slot.revision=revision(capture.before(),after,prior.sources(),use.written,capture.revision());
+                        slot.watched=true;slot.revision=retirement?new Revision(after,after,prior.sources(),capture.revision(),true)
+                                :revision(capture.before(),after,prior.sources(),use.written,capture.revision());
                     }else slot.revision=null;
                 }
                 slot.version++;if(slot.writers==0)slot.overlap=false;
             }
+            if(written&&use.retirement&&use.arrayChange!=null)use.arrayChange.retirement=true;
             finishRegion(use,written,regionSerial);
             if(written){
                 // The root change already notified this interval after its
@@ -1044,17 +1101,32 @@ final class ExecutionFlow {
         bridge(CALLER.getCallerClass());int fields=0,arrays=0,spans=0,active=0;
         synchronized(HEAP){
             reapHeap();for(var entry:HEAP.entrySet()){
-                if(entry.getKey().get()==null)continue;Heap heap=entry.getValue();boolean related=false;
+                Object carrier=entry.getKey().get();if(carrier==null)continue;Heap heap=entry.getValue();boolean related=false;
+                boolean array=carrier.getClass().isArray();int unit=array?arrayUnit(carrier):1;
                 for(var selected:heap.slots.entrySet()){
-                    Slot slot=selected.getValue();boolean contains=false;for(Module source:slot.sources.modules())if(source==module){contains=true;break;}
-                    for(Revision revision=slot.revision;!contains&&revision!=null;revision=revision.parent())
-                        for(Module source:revision.previous().modules())if(source==module){contains=true;break;}
+                    Slot slot=selected.getValue();
+                    boolean terminal=heap.writers==0&&slot.writers==0&&!slot.overlap&&slot.watched&&slot.revision!=null
+                            &&slot.revision.retirement()&&slot.revision.after().live();
+                    if(!terminal&&array&&selected.getKey() instanceof Integer index&&slot.writers==0&&!slot.overlap)
+                        terminal=retiredArraySpan(heap,(long)index*unit,unit);
+                    if(terminal)continue;
+                    Sources sources=slot.sources;boolean contains=containsSource(sources,module);
+                    for(Revision revision=slot.revision;!contains&&revision!=null;revision=revision.parent()){
+                        if(revision.retirement())break;
+                        sources=revision.previous();contains=containsSource(sources,module);
+                    }
                     if(!contains)continue;related=true;if(selected.getKey() instanceof FieldSlot)fields++;else arrays++;if(slot.writers!=0)active++;
                 }
-                for(Region region:heap.regions)for(Module source:region.sources().modules())if(source==module){related=true;spans++;break;}
+                for(Region region:heap.regions)if(containsSource(region.sources(),module)
+                        &&(!array||!retiredArraySpan(heap,(long)region.start()*unit,(long)region.length()*unit))){related=true;spans++;}
                 for(ArrayRange range:heap.arrayRanges.values()){
-                    boolean contains=false;for(ArrayRevision revision=range.head;revision!=null&&!contains;revision=revision.previous())
-                        for(Module source:join(revision.sources(),revision.prior()).modules())if(source==module){contains=true;break;}
+                    if(retiredArraySpan(heap,range.start,range.length))continue;
+                    boolean contains=false;
+                    for(ArrayRevision revision=range.head;revision!=null&&!contains;revision=revision.previous()){
+                        contains=containsSource(revision.sources(),module);
+                        if(revision.retirement())break;
+                        contains|=containsSource(revision.prior(),module);
+                    }
                     if(contains){related=true;spans++;}
                 }
                 for(ArrayChange pending:heap.arrayChanges)for(Module source:pending.written.modules())if(source==module){related=true;active++;break;}
@@ -1063,6 +1135,25 @@ final class ExecutionFlow {
             }
         }
         return fields!=0||arrays!=0||spans!=0||active!=0?"EXTERNAL_HEAP_SOURCES_PENDING:fields="+fields+":arrays="+arrays+":arraySpans="+spans+":writers="+active:"";
+    }
+    private static boolean containsSource(Sources sources,Module module){
+        for(Module source:sources.modules())if(source==module)return true;return false;
+    }
+    /** The retained provenance is terminal only while this entire physical span stays at its cleanup heads. */
+    private static boolean retiredArraySpan(Heap heap,long start,long length){
+        if(heap.writers!=0)return false;long end=start+length;
+        for(ArrayChange pending:heap.arrayChanges)if(start<pending.start+pending.length&&pending.start<end)return false;
+        var entry=heap.arrayRanges.floorEntry(start);
+        if(entry==null||entry.getValue().start+entry.getValue().length<=start)entry=heap.arrayRanges.ceilingEntry(start);
+        long cursor=start;
+        while(entry!=null&&cursor<end){
+            ArrayRange range=entry.getValue();ArrayRevision head=range.head;
+            if(range.start>cursor||!head.retirement()||!head.complete()||head.after()==null)return false;
+            ArrayImage after=head.after();
+            if(after.values instanceof Value[] values)for(int i=0;i<after.length;i++)if(!values[after.offset+i].live())return false;
+            cursor=range.start+range.length;entry=heap.arrayRanges.higherEntry(range.start);
+        }
+        return cursor>=end;
     }
     private static boolean selected(Sources sources,Set<Module> modules){
         if(sources.unknown()||sources.modules().length==0)return false;
@@ -1077,6 +1168,7 @@ final class ExecutionFlow {
     }
     private static boolean selectedRevision(Sources sources,Revision revision,Set<Module> modules){
         for(Revision current=revision;current!=null;current=current.parent()){
+            if(current.retirement())break;
             if(selected(sources,modules))return true;sources=current.previous();
         }
         return false;
@@ -1085,11 +1177,13 @@ final class ExecutionFlow {
     private record RevisionPlan(Value value,Sources sources,Revision revision,boolean changed) { }
     /** Each node is one complete typed field write; retaining an outside node keeps its actual after-value. */
     private static RevisionPlan withoutSelected(Sources sources,Revision revision,Set<Module> selected){
-        List<RevisionEntry> entries=new TraceList<>();Revision oldest=revision;
+        List<RevisionEntry> entries=new TraceList<>();Revision oldest=revision,baseline=null;
         for(Revision current=revision;current!=null;current=current.parent()){
+            if(current.retirement()){baseline=current;break;}
             entries.add(new RevisionEntry(current,sources));sources=current.previous();oldest=current;
         }
-        Value value=oldest.before();Sources previous=oldest.previous();Revision rebuilt=null;boolean changed=false;
+        Value value=baseline==null?oldest.before():baseline.after();Sources previous=baseline==null?oldest.previous():sources;
+        Revision rebuilt=baseline;boolean changed=false;
         for(int i=entries.size()-1;i>=0;i--){
             RevisionEntry entry=entries.get(i);
             if(selected(entry.sources(),selected)){changed=true;continue;}
@@ -1130,7 +1224,8 @@ final class ExecutionFlow {
             for(Module source:recovery.selected)if(!ControlBridge.modStopped(source))return false;
             RevisionPlan remaining=withoutSelected(slot.sources,revision,recovery.selected);
             if(!remaining.changed()||!remaining.value().live())return false;
-            if(!sameValue(revision.after(),remaining.value())&&containsStopped(remaining.sources()))return false;
+            if(!sameValue(revision.after(),remaining.value())&&containsStopped(remaining.sources())
+                    &&(remaining.revision()==null||!remaining.revision().retirement()))return false;
             Object expected=revision.after().actual(),incoming=remaining.value().actual();
             slot.recovering=Thread.currentThread();boolean restored;
             try{
@@ -1152,7 +1247,10 @@ final class ExecutionFlow {
         }}finally{gate.unlock();}
     }
     private static boolean arraySelected(ArrayRevision head,Set<Module> selected){
-        for(ArrayRevision revision=head;revision!=null&&revision.complete();revision=revision.previous())if(!revision.baseline()&&selected(revision.sources(),selected))return true;
+        for(ArrayRevision revision=head;revision!=null&&revision.complete();revision=revision.previous()){
+            if(revision.retirement())break;
+            if(!revision.baseline()&&selected(revision.sources(),selected))return true;
+        }
         return false;
     }
     private static boolean restoreArrayImage(Object carrier,ArrayImage expected,ArrayImage incoming){
@@ -1185,18 +1283,21 @@ final class ExecutionFlow {
             Heap heap=recovery.heap;ArrayRange range=recovery.range;ArrayRevision head=recovery.head;
             if(heap.arrayRanges.get(range.start)!=range||range.head!=head||heap.writers!=0||!heap.arrayChanges.isEmpty()||heap.arrayReaders!=0||!heap.reads.isEmpty())return false;
             for(Module source:recovery.selected)if(!ControlBridge.modStopped(source))return false;
-            List<ArrayRevision> history=new TraceList<>();for(ArrayRevision revision=head;revision!=null;revision=revision.previous()){
+            List<ArrayRevision> history=new TraceList<>();ArrayRevision baseline=null;
+            for(ArrayRevision revision=head;revision!=null;revision=revision.previous()){
+                if(revision.retirement()){baseline=revision;break;}
                 if(!revision.complete()||revision.before()==null||revision.after()==null)break;history.add(revision);
             }
             if(history.isEmpty())return false;
-            ArrayRevision oldest=history.get(history.size()-1),rebuilt=oldest.previous();ArrayImage value=oldest.before();Sources sources=oldest.prior();boolean changed=false;
+            ArrayRevision oldest=history.get(history.size()-1),rebuilt=baseline==null?oldest.previous():baseline;
+            ArrayImage value=baseline==null?oldest.before():baseline.after();Sources sources=baseline==null?oldest.prior():baseline.sources();boolean changed=false;
             for(int i=history.size()-1;i>=0;i--){ArrayRevision entry=history.get(i);
                 if(entry.baseline())continue;
                 if(selected(entry.sources(),recovery.selected)){changed=true;continue;}
                 rebuilt=new ArrayRevision(value,entry.after(),entry.sources(),sources,rebuilt,true);value=entry.after();sources=entry.sources();
             }
             if(!changed)return false;
-            if(!sameImage(head.after(),value)&&containsStopped(sources))return false;
+            if(!sameImage(head.after(),value)&&containsStopped(sources)&&(rebuilt==null||!rebuilt.retirement()))return false;
             boolean restored=sameImage(head.after(),value)?matchesArrayImage(carrier,range.start,range.length,head.after()):restoreArrayImage(carrier,head.after(),value);
             if(!restored){range.head=new ArrayRevision(head.before(),head.after(),join(head.sources(),UNKNOWN),head.prior(),head.previous(),false);return false;}
             // Keep an observed baseline even when no write remains, so later partial writes
@@ -1230,7 +1331,7 @@ final class ExecutionFlow {
     }
     private static Revision revision(Value before,Value after,Sources prior,Sources written,Revision previous){
         if(previous!=null&&!sameValue(previous.after(),before)){previous=null;prior=join(prior,UNKNOWN);}
-        if(previous!=null&&sameSources(written,prior))return new Revision(previous.before(),after,previous.previous(),previous.parent());
+        if(previous!=null&&!previous.retirement()&&sameSources(written,prior))return new Revision(previous.before(),after,previous.previous(),previous.parent());
         return new Revision(before,after,prior,previous);
     }
     private static void finishHeap(Frame frame,boolean success,Object reference){
@@ -1243,10 +1344,12 @@ final class ExecutionFlow {
                 if(use.arrayChange!=null)finishArrayChange(use.arrayChange,success);
                 else if(success){Revision previous=slot.revision;
                     boolean fieldObserved=use.location instanceof FieldSlot&&slot.vmWatched&&use.observed;
-                    boolean captured=serial&&(!(use.location instanceof FieldSlot)||fieldObserved)&&!use.written.unknown()&&use.written.modules().length!=0&&use.before!=null;
+                    boolean retirement=serial&&use.retirement&&(!(use.location instanceof FieldSlot)||slot.vmWatched);
+                    boolean captured=retirement||serial&&(!(use.location instanceof FieldSlot)||fieldObserved)&&!use.written.unknown()&&use.written.modules().length!=0&&use.before!=null;
                     Value after=captured?readValue(use.carrier.get(),use.location):null;
                     if(after==null)slot.revision=null;
-                    else {if(fieldObserved)slot.watched=true;slot.revision=revision(use.before,after,use.prior,use.written,previous);}
+                    else {if(fieldObserved||retirement)slot.watched=true;slot.revision=retirement?new Revision(after,after,use.prior,previous,true)
+                            :revision(use.before,after,use.prior,use.written,previous);}
                 }else if(!serial)slot.revision=null;
                 if(success&&use.location instanceof FieldSlot field)observeFieldReads(use.holder,field,slot.sources);
                 if(success&&frame.operands!=null)bind(frame.operands[frame.operands.length-1].alias(),reference);

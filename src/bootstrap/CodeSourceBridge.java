@@ -491,6 +491,10 @@ public final class CodeSourceBridge {
         if(AUTHORITY.getCallerClass()!=ControlBridge.class)throw new SecurityException("ACTUAL_MEMORY_MUTATION_BOUNDARY_REQUIRED");
         ExecutionFlow.memoryAfter(token,written);
     }
+    static void executionMemoryRetirement(Object token){
+        if(AUTHORITY.getCallerClass()!=ControlBridge.class)throw new SecurityException("ACTUAL_MEMORY_MUTATION_BOUNDARY_REQUIRED");
+        ExecutionFlow.memoryRetirement(token);
+    }
     static void executionMemoryContributors(Object token,Module[] contributors){
         if(AUTHORITY.getCallerClass()!=ControlBridge.class)throw new SecurityException("ACTUAL_MEMORY_MUTATION_BOUNDARY_REQUIRED");
         ExecutionFlow.memoryContributors(token,contributors);
@@ -1465,7 +1469,7 @@ public final class CodeSourceBridge {
     }
     static void contributionControl(Object value){
         Class<?> caller=AUTHORITY.getCallerClass().getNestHost();
-        if(caller!=ClientBridge.class&&caller!=NetworkBridge.class)throw new SecurityException("ACTUAL_CONTRIBUTION_CONTROL_WRITER_REQUIRED");
+        if(caller!=ClientBridge.class&&caller!=NetworkBridge.class&&caller!=NetworkCleanup.class)throw new SecurityException("ACTUAL_CONTRIBUTION_CONTROL_WRITER_REQUIRED");
         if(value==null)return;
         synchronized(CONTROLS){CONTROLS.add(value);}
     }

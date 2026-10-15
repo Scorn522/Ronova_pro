@@ -13,6 +13,7 @@ public final class AuditFixCheck {
     private static void require(boolean yes,String message) {if(!yes)throw new AssertionError(message);}
     private static Object invoke(Object receiver,String name)throws Exception {var m=receiver.getClass().getDeclaredMethod(name);m.setAccessible(true);try{return m.invoke(receiver);}catch(InvocationTargetException e){if(e.getCause() instanceof Exception x)throw x;throw e;}}
     public static void main(String[] args)throws Exception {
+        if(args.length==1&&args[0].equals("network-bytecode")){networkBytecode();return;}
         if(args.length==3&&args[0].equals("mod-group-returns")){modGroupReturns(args[1],args[2]);return;}
         if(args.length==2&&args[0].equals("network-preconnect")){networkPreconnect(args[1]);return;}
         if(args.length==1&&args[0].equals("source-list-fixes")){sourceListFixes();return;}
@@ -1049,6 +1050,136 @@ public final class AuditFixCheck {
             require(writes.get()==1&&flushes.get()==1&&channel.readOutbound()==unrelated&&channel.readOutbound()==null,"valid stopped rejection lost the preceding unrelated write/flush");
             System.out.println("NETWORK_PROMISE_STOP_PASS actual_bootStop_named_Mod_Class_source real_EmbeddedChannel foreign_promise_unchanged completed_promise_original_exception cancelled_no_flush valid_stopped_rejected preceding_unrelated_write_flushed");
         } finally {channel.finishAndReleaseAll();other.finishAndReleaseAll();}
+    }
+    /** Verify the actual transformed Netty methods without starting another game JVM. */
+    private static void networkBytecode()throws Exception{
+        Class<?> boundary=Class.forName("dev.ronova.pro.agent.NetworkBoundary");
+        Method transform=boundary.getDeclaredMethod("transform",ClassLoader.class,String.class,byte[].class);transform.setAccessible(true);
+        Set<String> targets=Set.of("io.netty.channel.AbstractChannelHandlerContext","io.netty.channel.AbstractChannelHandlerContext$WriteTask");
+        ClassLoader loader=new ClassLoader(AuditFixCheck.class.getClassLoader()){
+            @Override protected Class<?> loadClass(String name,boolean resolve)throws ClassNotFoundException{
+                if(!name.startsWith("io.netty."))return super.loadClass(name,resolve);
+                synchronized(getClassLoadingLock(name)){
+                    Class<?> result=findLoadedClass(name);
+                    if(result==null)try(var input=getParent().getResourceAsStream(name.replace('.','/')+".class")){
+                        if(input==null)throw new ClassNotFoundException(name);byte[] bytes=input.readAllBytes();
+                        if(targets.contains(name))bytes=(byte[])transform.invoke(null,this,name.replace('.','/'),bytes);
+                        result=defineClass(name,bytes,0,bytes.length);
+                    }catch(java.io.IOException|ReflectiveOperationException failure){throw new ClassNotFoundException(name,failure);}
+                    if(resolve)resolveClass(result);return result;
+                }
+            }
+        };
+        for(String name:targets){Class<?> actual=Class.forName(name,false,loader);require(actual.getClassLoader()==loader,"actual transformed class was not defined");actual.getDeclaredMethods();}
+        System.out.println("NETWORK_BYTECODE_VERIFY_PASS actual_Netty_write_and_WriteTask JVM_verifier_only no_stop_or_cleanup_runtime_claim");
+    }
+    /** Prepare from an unselected consumer; stop through genuine console input, then finish below. */
+    public static Object networkQueuedStop(Object runtime,Class<?> sender)throws Exception {
+        require(runtime!=null&&runtime.getClass().getName().equals("dev.ronova.pro.ProRuntime"),"actual game Runtime required");
+        Class<?> runtimeType=runtime.getClass();Field serverField=runtimeType.getDeclaredField("server");serverField.setAccessible(true);
+        Object server=serverField.get(runtime);Class<?> serverType=Class.forName("net.minecraft.server.MinecraftServer",false,runtimeType.getClassLoader());
+        require(server!=null&&runtimeType.getMethod("get",serverType).invoke(null,server)==runtime,"Runtime is not the actual registered game instance");
+        require(sender!=null&&sender.getName().equals("dev.ronova.pro.validation.WorldFixture$NetworkSender")&&sender.getModule().isNamed(),"actual named fixture sender required");
+        Class<?> controls=Class.forName("dev.ronova.pro.bootstrap.ControlBridge",true,null);
+        Method stopped=controls.getDeclaredMethod("modStopped",Module.class),invoking=controls.getDeclaredMethod("invokingSources");
+        stopped.setAccessible(true);invoking.setAccessible(true);
+        require(!Boolean.TRUE.equals(stopped.invoke(null,sender.getModule())),"queue submission must precede the real stop");
+        require(!Arrays.asList((Module[])invoking.invoke(null)).contains(sender.getModule()),"queued-stop consumer still runs inside the selected fixture source");
+        var pending=new NetworkQueuedStop(sender.getModule(),controls);
+        try{
+            pending.channel.pipeline().addLast(pending.loops,"actual-write",new io.netty.channel.ChannelOutboundHandlerAdapter(){
+                public void write(io.netty.channel.ChannelHandlerContext context,Object message,io.netty.channel.ChannelPromise promise)throws Exception{
+                    pending.forwarded.add(message);pending.scopes.add(networkSources(pending.current));context.write(message,promise);
+                }
+            });
+            var ready=pending.executor.submit(()->{});require(ready.await(10,TimeUnit.SECONDS)&&ready.isSuccess(),"actual handler executor did not initialize");
+            var entered=new CountDownLatch(1);
+            pending.executor.execute(()->{entered.countDown();try{pending.release.await();}catch(InterruptedException interrupted){Thread.currentThread().interrupt();}});
+            require(entered.await(10,TimeUnit.SECONDS),"actual handler executor did not enter its queue barrier");
+            pending.result.addListener(result->{
+                try{pending.other.writeAndFlush(pending.callback,pending.callbackResult);}
+                catch(RuntimeException|Error refused){pending.callbackFailure.compareAndSet(null,refused);throw refused;}
+            });
+            pending.channel.writeAndFlush(pending.before,pending.beforeResult);
+            sender.getMethod("write",Object.class,Object.class,Object.class).invoke(null,pending.channel,pending.message,pending.result);
+            pending.channel.writeAndFlush(pending.after,pending.afterResult);
+            require(pending.message.refCnt()==1&&!pending.result.isDone(),"original accepted write did not remain pending before stop");
+            Field queueField=io.netty.util.concurrent.SingleThreadEventExecutor.class.getDeclaredField("taskQueue");queueField.setAccessible(true);
+            Queue<?> queue=(Queue<?>)queueField.get(pending.executor);
+            for(Object item:queue)if(item.getClass().getName().equals("io.netty.channel.AbstractChannelHandlerContext$WriteTask")){
+                Field message=item.getClass().getDeclaredField("msg"),promise=item.getClass().getDeclaredField("promise");message.setAccessible(true);promise.setAccessible(true);
+                if(message.get(item)==pending.message&&promise.get(item)==pending.result){require(pending.task==null,"same accepted write has multiple original tasks");pending.task=item;}
+            }
+            require(pending.task!=null,"real Netty WriteTask was not queued by the active fixture call");
+            synchronized(pending.lock){
+                Object receipt=null;
+                for(var entry:pending.writes.entrySet())if(((java.lang.ref.Reference<?>)entry.getKey()).get()==pending.task)receipt=entry.getValue();
+                require(receipt!=null,"queued original WriteTask has no captured real network receipt");
+                Field modules=receipt.getClass().getDeclaredField("modules");modules.setAccessible(true);
+                require(Arrays.asList((Module[])modules.get(receipt)).contains(pending.source),"active fixture sender was not captured on the actual WriteTask");
+            }
+            require(networkSources(pending.current).length==0,"accepted queue publication leaked its source scope");
+            System.out.println("NETWORK_QUEUED_STOP_READY actual_active_named_fixture real_WriteTask_pending requires_real_console_ronova_pro_mod_stop_pro_fixture");
+            return pending;
+        }catch(Exception|Error failure){pending.close();throw failure;}
+    }
+    /** The selected fixture's own transformed tick cannot serve as this consumer. */
+    public static void finishNetworkQueuedStop(Object prepared)throws Exception {
+        require(prepared instanceof NetworkQueuedStop,"actual prepared network queue check required");var pending=(NetworkQueuedStop)prepared;
+        try{
+            Method stopped=pending.controls.getDeclaredMethod("modStopped",Module.class),invoking=pending.controls.getDeclaredMethod("invokingSources");stopped.setAccessible(true);invoking.setAccessible(true);
+            require(!Arrays.asList((Module[])invoking.invoke(null)).contains(pending.source),"queued-stop finish still runs inside the selected fixture source");
+            require(Boolean.TRUE.equals(stopped.invoke(null,pending.source)),"real console stop has not fenced the named fixture module");
+            pending.release.countDown();
+            var cleared=pending.executor.submit(()->networkSources(pending.current));require(cleared.await(10,TimeUnit.SECONDS)&&cleared.isSuccess(),"actual executor did not return after the original stopped WriteTask");
+            pending.channel.runPendingTasks();pending.other.runPendingTasks();
+            require(pending.message.refCnt()==0,"stopped original WriteTask did not release its actual ByteBuf to zero");
+            require(pending.result.isDone()&&!pending.result.isSuccess()&&pending.result.cause() instanceof CancellationException
+                    &&"NETWORK_OUTBOUND_REJECTED".equals(pending.result.cause().getMessage()),"stopped original WriteTask left its accepted promise unresolved");
+            require(pending.beforeResult.isSuccess()&&pending.afterResult.isSuccess()&&pending.forwarded.size()==2
+                    &&pending.forwarded.get(0)==pending.before&&pending.forwarded.get(1)==pending.after,"stopped task consumed or denied an unrelated queued write");
+            require(pending.scopes.size()==2&&pending.scopes.stream().allMatch(modules->!Arrays.asList(modules).contains(pending.source)),"unrelated original write inherited the stopped task's receipt");
+            require(pending.channel.readOutbound()==pending.before&&pending.channel.readOutbound()==pending.after&&pending.channel.readOutbound()==null,"actual outbound delivery changed the unrelated queue items");
+            require(pending.callback.refCnt()==1&&!pending.callbackResult.isDone()&&pending.other.readOutbound()==null,
+                    "explicitly refused promise listener changed another message or promise before ownership transfer");
+            Throwable callbackFailure=pending.callbackFailure.get();
+            require(callbackFailure instanceof SecurityException&&"NETWORK_REJECTION_CALLBACK_REENTRY".equals(callbackFailure.getMessage()),
+                    "promise listener was not explicitly refused at cleanup reentry: "+callbackFailure);
+            require(cleared.get().length==0&&networkSources(pending.current).length==0,"original WriteTask finally leaked its network scope");
+            synchronized(pending.lock){
+                for(Object key:pending.writes.keySet())require(((java.lang.ref.Reference<?>)key).get()!=pending.task,"completed original WriteTask retained its queue receipt");
+                for(Object scope:pending.active){Field modules=scope.getClass().getDeclaredField("modules");modules.setAccessible(true);require(!Arrays.asList((Module[])modules.get(scope)).contains(pending.source),"completed original WriteTask retained an active source scope");}
+            }
+            for(String name:List.of("ctx","msg","promise")){Field field=pending.task.getClass().getDeclaredField(name);field.setAccessible(true);require(field.get(pending.task)==null,"original WriteTask did not recycle its actual "+name+" field");}
+            System.out.println("NETWORK_QUEUED_STOP_PASS actual_active_named_fixture_to_real_Runtime_stop original_WriteTask_run ByteBuf_refCnt_zero promise_rejected receipt_recycled scope_finally unrelated_queue_preserved callback_no_borrow");
+        }finally{pending.close();}
+    }
+    public static Throwable networkQueuedStopCallbackFailure(Object prepared){
+        require(prepared instanceof NetworkQueuedStop,"actual prepared network queue check required");return ((NetworkQueuedStop)prepared).callbackFailure.get();
+    }
+    private static final class NetworkQueuedStop {
+        final Module source;final Class<?> controls;final Method current;final Object lock;final Set<?> active;final Map<?,?> writes;
+        final io.netty.util.concurrent.DefaultEventExecutorGroup loops=new io.netty.util.concurrent.DefaultEventExecutorGroup(1);
+        final io.netty.util.concurrent.EventExecutor executor=loops.next();
+        final io.netty.channel.embedded.EmbeddedChannel channel=new io.netty.channel.embedded.EmbeddedChannel(),other=new io.netty.channel.embedded.EmbeddedChannel();
+        final io.netty.buffer.ByteBuf message=io.netty.buffer.Unpooled.buffer(1).writeByte(17),before=io.netty.buffer.Unpooled.buffer(1).writeByte(18),after=io.netty.buffer.Unpooled.buffer(1).writeByte(19),callback=io.netty.buffer.Unpooled.buffer(1).writeByte(20);
+        final io.netty.channel.ChannelPromise result=channel.newPromise(),beforeResult=channel.newPromise(),afterResult=channel.newPromise(),callbackResult=other.newPromise();
+        final java.util.concurrent.atomic.AtomicReference<Throwable> callbackFailure=new java.util.concurrent.atomic.AtomicReference<>();
+        final CountDownLatch release=new CountDownLatch(1);final List<Object> forwarded=Collections.synchronizedList(new ArrayList<>());final List<Module[]> scopes=Collections.synchronizedList(new ArrayList<>());
+        Object task;
+        NetworkQueuedStop(Module source,Class<?> controls)throws Exception{
+            this.source=source;this.controls=controls;Class<?> bridge=Class.forName("dev.ronova.pro.bootstrap.NetworkBridge",true,null);
+            current=bridge.getDeclaredMethod("currentSources");current.setAccessible(true);
+            Field monitor=bridge.getDeclaredField("CHANNELS"),scopes=bridge.getDeclaredField("ACTIVE"),queued=bridge.getDeclaredField("WRITES");monitor.setAccessible(true);scopes.setAccessible(true);queued.setAccessible(true);
+            lock=monitor.get(null);active=(Set<?>)scopes.get(null);writes=(Map<?,?>)queued.get(null);
+        }
+        void close(){
+            release.countDown();
+            try{
+                executor.submit(()->{}).awaitUninterruptibly(10,TimeUnit.SECONDS);channel.finishAndReleaseAll();other.finishAndReleaseAll();
+                for(var bytes:List.of(message,before,after,callback))if(bytes.refCnt()>0)bytes.release(bytes.refCnt());
+            }finally{loops.shutdownGracefully(0,5,TimeUnit.SECONDS).awaitUninterruptibly(10,TimeUnit.SECONDS);}
+        }
     }
     private static String networkPromises(List<io.netty.channel.ChannelPromise> promises){
         synchronized(promises){return promises.stream().map(promise->"done="+promise.isDone()+"/success="+promise.isSuccess()+"/cause="+promise.cause()).toList().toString();}

@@ -3,7 +3,7 @@
 #include <bcrypt.h>
 // Preserve Object.clone itself, including Cloneable checks; never substitute a Java ancestor body.
 JNIEXPORT jint JNICALL Java_dev_ronova_pro_bootstrap_NativeControl_abi(JNIEnv *env, jclass type) {
-    (void)env; (void)type; return 73;
+    (void)env; (void)type; return 74;
 }
 JNIEXPORT jobject JNICALL Java_dev_ronova_pro_bootstrap_NativeControl_returnIdentifier0(JNIEnv *env,jclass type) {
     (void)type;
@@ -128,6 +128,10 @@ static int native_bind_controller(JNIEnv *env,jclass controller){
         {"preparedClass0","(Ljava/lang/Class;)Z",(void*)Java_dev_ronova_pro_bootstrap_NativeControl_preparedClass0},
         {"sourceCapture0","()Z",(void*)Java_dev_ronova_pro_bootstrap_NativeControl_sourceCapture0},
         {"sourceQueryStopped0","()Z",(void*)Java_dev_ronova_pro_bootstrap_NativeControl_sourceQueryStopped0},
+        {"networkBoundaryDepth0","(Ljava/lang/Class;Ljava/lang/String;)I",(void*)Java_dev_ronova_pro_bootstrap_NativeControl_networkBoundaryDepth0},
+        {"networkCleanupBoundary0","(Ljava/lang/Class;Ljava/lang/String;II)Z",(void*)Java_dev_ronova_pro_bootstrap_NativeControl_networkCleanupBoundary0},
+        {"networkReadField0","(Ljava/lang/Object;Ljava/lang/Class;Ljava/lang/String;Z)Ljava/lang/Object;",(void*)Java_dev_ronova_pro_bootstrap_NativeControl_networkReadField0},
+        {"networkField0","(Ljava/lang/Class;Ljava/lang/String;)Ljava/lang/reflect/Field;",(void*)Java_dev_ronova_pro_bootstrap_NativeControl_networkField0},
         {"arrayCopyInternalBoundary0","()Z",(void*)Java_dev_ronova_pro_bootstrap_NativeControl_arrayCopyInternalBoundary0},
         {"arrayCopyReadBoundary0","(Ljava/lang/Object;II)Z",(void*)Java_dev_ronova_pro_bootstrap_NativeControl_arrayCopyReadBoundary0},
         {"arrayCopyBoundary0","(Ljava/lang/Object;IILjava/lang/Object;IILjava/lang/Object;)Z",(void*)Java_dev_ronova_pro_bootstrap_NativeControl_arrayCopyBoundary0},
