@@ -9,15 +9,24 @@ final class EventFaultBoundary {
     private static final String BRIDGE="dev/ronova/pro/bootstrap/EventFaultBridge";
     static byte[] transform(ClassLoader loader,byte[] bytes) {
         ClassNode node=new ClassNode();new ClassReader(bytes).accept(node,0);
-        int replaced=0,removal=0;
+        int existingDispatch=0,existingRemoval=0;
+        for(MethodNode method:node.methods)for(AbstractInsnNode instruction:method.instructions.toArray())if(instruction instanceof MethodInsnNode call) {
+            if(method.name.equals("post")&&method.desc.equals("(Lnet/minecraftforge/eventbus/api/Event;Lnet/minecraftforge/eventbus/api/IEventBusInvokeDispatcher;)Z")
+                    &&call.owner.equals(BRIDGE)&&call.name.equals("dispatch")&&call.desc.equals("(Ljava/lang/Object;Ljava/lang/Object;Ljava/lang/Object;)Z"))existingDispatch++;
+            if(method.name.equals("unregister")&&method.desc.equals("(Ljava/lang/Object;)V")&&call.owner.equals("dev/ronova/pro/bootstrap/ControlBridge")
+                    &&call.name.equals("listenerRemovalAllowed")&&call.desc.equals("(Ljava/lang/Object;)Z"))existingRemoval++;
+        }
+        if(existingDispatch>1||existingRemoval>1)throw new IllegalStateException("EVENT_FAULT_DUPLICATE_BOUNDARY");
+        if(existingDispatch==1&&existingRemoval==1)return null;
+        int replaced=existingDispatch,removal=existingRemoval;
         for(MethodNode method:node.methods) {
-            if(method.name.equals("unregister")&&method.desc.equals("(Ljava/lang/Object;)V")) {
+            if(existingRemoval==0&&method.name.equals("unregister")&&method.desc.equals("(Ljava/lang/Object;)V")) {
                 InsnList code=new InsnList();LabelNode allowed=new LabelNode();code.add(new VarInsnNode(Opcodes.ALOAD,1));
                 code.add(new MethodInsnNode(Opcodes.INVOKESTATIC,"dev/ronova/pro/bootstrap/ControlBridge","listenerRemovalAllowed","(Ljava/lang/Object;)Z",false));
                 code.add(new JumpInsnNode(Opcodes.IFNE,allowed));code.add(new InsnNode(Opcodes.RETURN));code.add(allowed);
                 method.instructions.insert(code);removal++;
             }
-            if(!method.name.equals("post") || !method.desc.equals("(Lnet/minecraftforge/eventbus/api/Event;Lnet/minecraftforge/eventbus/api/IEventBusInvokeDispatcher;)Z"))continue;
+            if(existingDispatch!=0||!method.name.equals("post") || !method.desc.equals("(Lnet/minecraftforge/eventbus/api/Event;Lnet/minecraftforge/eventbus/api/IEventBusInvokeDispatcher;)Z"))continue;
             for(AbstractInsnNode instruction:method.instructions.toArray()) {
                 if(!(instruction instanceof MethodInsnNode call)
                         || !call.owner.equals("net/minecraftforge/eventbus/api/IEventBusInvokeDispatcher")

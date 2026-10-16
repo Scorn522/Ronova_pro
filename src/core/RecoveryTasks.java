@@ -28,6 +28,24 @@ final class RecoveryTasks implements AutoCloseable {
             "UniExceptionally","UniComposeExceptionally","UniCompose","UniRelay","BiApply","BiAccept","BiRun",
             "BiRelay","OrApply","OrAccept","OrRun","CoCompletion","AsyncSupply","AsyncRun","AnyOf");
     private static Class<?> bridge;
+    private static volatile ResourceMethods cachedResourceMethods;
+    private static final class ResourceMethods {
+        final Class<?> definition;
+        final Method retireTimer,timerEnded,schedulerDisposition,retireScheduler,schedulerEnded,realScheduler,drainAccepted,timerTaskRetired;
+        ResourceMethods(Class<?> definition)throws ReflectiveOperationException {
+            this.definition=definition;
+            retireTimer=definition.getMethod("retireTimer",Object.class,Module[].class);timerEnded=definition.getMethod("timerResourceEnded",Object.class,Module[].class);
+            schedulerDisposition=definition.getMethod("schedulerDisposition",Object.class,Module[].class);retireScheduler=definition.getMethod("retireScheduler",Object.class,Module[].class);
+            schedulerEnded=definition.getMethod("schedulerResourceEnded",Object.class);realScheduler=definition.getMethod("realScheduler",Object.class);
+            drainAccepted=definition.getMethod("schedulerDrainAccepted",Object.class,Object.class);timerTaskRetired=definition.getMethod("timerTaskRetired",Object.class);
+        }
+    }
+    private static ResourceMethods resourceMethods()throws ReflectiveOperationException {
+        ResourceMethods cached=cachedResourceMethods;
+        if(cached!=null&&(bridge==null||cached.definition==bridge))return cached;
+        Class<?> actual=bridge==null?Class.forName("dev.ronova.pro.bootstrap.TaskBridge",false,null):bridge;
+        ResourceMethods resolved=new ResourceMethods(actual);cachedResourceMethods=resolved;return resolved;
+    }
     private static volatile String backend="TASK_AGENT_NOT_ATTACHED";
     private static final int DRAIN=256;
     /** Definition-local metadata only; actual field values, owners and policy are still read on every event. */
@@ -84,6 +102,7 @@ final class RecoveryTasks implements AutoCloseable {
     // observation cannot also serve as exclusive ownership for destructive graph writes.
     private final Set<Object> sharedOrigins=Collections.newSetFromMap(new WeakIdentityMap<>());
     private final Map<Object,Task> tasks=new IdentityHashMap<>();
+    private final Map<UUID,Set<Task>> operationTasks=new HashMap<>();
     private final Map<Object,Set<Task>> producers=new IdentityHashMap<>();
     private final Map<Object,Set<Task>> dependents=new IdentityHashMap<>();
     private final Map<Object,Set<Task>> childrenByParent=new IdentityHashMap<>();
@@ -176,6 +195,21 @@ final class RecoveryTasks implements AutoCloseable {
     }
     private record PendingCapture(Capture event,OwnerRegistration owner,CaptureRoots roots,
             Object[] identities,CaptureDelivery delivery,String failure) { }
+    /** Handles and actual resource identities only. No queue absence or completion result is cached here. */
+    private record ResourceBinding(Object scheduler,Field queueField,Object queue,List<Field> lockFields,
+            List<java.util.concurrent.locks.ReentrantLock> locks,Field scheduledOwner,Field scheduledDelegate,
+            ProRuntime.Subject authority,ProRuntime.Subject scope,long qualification,long generation,Object backendImage,long backendEpoch) {
+        boolean current(Task task)throws IllegalAccessException {
+            if(task.scheduler!=scheduler||queueField!=null&&queueField.get(scheduler)!=queue)return false;
+            if(scheduledOwner!=null&&(scheduledOwner.get(task.object)!=scheduler||scheduledDelegate.get(task.object)!=task.object))return false;
+            for(int i=0;i<lockFields.size();i++)if(lockFields.get(i).get(queue)!=locks.get(i))return false;
+            return true;
+        }
+        boolean sameScope(Task task,ProRuntime.Subject actual) {
+            return task.authority==authority&&actual==scope&&task.qualification==qualification
+                    &&(actual==null?-1:actual.generation)==generation&&task.backendImage==backendImage&&task.backendEpoch==backendEpoch;
+        }
+    }
     private static final class Task {
         final UUID id=UUID.randomUUID();
         final Object object;
@@ -229,6 +263,7 @@ final class RecoveryTasks implements AutoCloseable {
         final Set<Task> children=Collections.newSetFromMap(new IdentityHashMap<>());
         final Set<Task> parents=Collections.newSetFromMap(new IdentityHashMap<>());
         Object scheduler,queue;
+        ResourceBinding resources;
         ProRuntime.Subject authority;
         UUID operation;
         long qualification,retryAt,revision,lastMutation;
@@ -354,7 +389,7 @@ final class RecoveryTasks implements AutoCloseable {
         try {
             bridge=Class.forName("dev.ronova.pro.bootstrap.TaskBridge",false,null);
             if(bridge.getClassLoader()!=null)throw new IllegalStateException("NON_BOOTSTRAP_TASK_BRIDGE");
-            if(!Integer.valueOf(94).equals(bridge.getMethod("abiVersion").invoke(null)))throw new IllegalStateException("TASK_BRIDGE_ABI_MISMATCH");
+            if(!Integer.valueOf(95).equals(bridge.getMethod("abiVersion").invoke(null)))throw new IllegalStateException("TASK_BRIDGE_ABI_MISMATCH");
             Class<?> agent=Class.forName("dev.ronova.pro.agent.RecoveryAgent",false,ClassLoader.getSystemClassLoader());
             if(!Boolean.TRUE.equals(agent.getMethod("openTaskAccess",Class.class).invoke(null,RecoveryTasks.class)))
                 throw new IllegalStateException("TASK_ACCESS_UNAVAILABLE");
@@ -576,9 +611,9 @@ final class RecoveryTasks implements AutoCloseable {
         group.unresolvedSources.add("GROUP_SCHEDULER_RESOURCES_PENDING");
     }
     void retireGroupSchedulers(ProRuntime.Subject group){
-        Class<?> bridge;
-        try{bridge=Class.forName("dev.ronova.pro.bootstrap.TaskBridge",false,null);}
-        catch(ClassNotFoundException unavailable){recordGap("GROUP_SCHEDULER_BRIDGE_UNAVAILABLE");return;}
+        ResourceMethods methods;
+        try{methods=resourceMethods();}
+        catch(ReflectiveOperationException unavailable){recordGap("GROUP_SCHEDULER_BRIDGE_UNAVAILABLE");return;}
         Set<Object> pending;
         synchronized(LISTENERS){
             pending=retiringSchedulers.computeIfAbsent(group.id,ignored->Collections.newSetFromMap(new IdentityHashMap<>()));
@@ -596,16 +631,16 @@ final class RecoveryTasks implements AutoCloseable {
             try{
                 boolean ended;
                 if(scheduler instanceof java.util.Timer){
-                    @SuppressWarnings("unchecked") List<Runnable> removed=(List<Runnable>)bridge.getMethod("retireTimer",Object.class,Module[].class).invoke(null,scheduler,(Object)modules);
+                    @SuppressWarnings("unchecked") List<Runnable> removed=(List<Runnable>)methods.retireTimer.invoke(null,scheduler,(Object)modules);
                     schedulerDrained(scheduler,removed,group);
-                    ended=Boolean.TRUE.equals(bridge.getMethod("timerResourceEnded",Object.class,Module[].class).invoke(null,scheduler,(Object)modules));
+                    ended=Boolean.TRUE.equals(methods.timerEnded.invoke(null,scheduler,(Object)modules));
                 }else{
-                    String disposition=(String)bridge.getMethod("schedulerDisposition",Object.class,Module[].class).invoke(null,scheduler,(Object)modules);
+                    String disposition=(String)methods.schedulerDisposition.invoke(null,scheduler,(Object)modules);
                     if(disposition.equals("SHARED")){pending.remove(scheduler);continue;}
                     if(!disposition.equals("PRIVATE"))continue;
-                    @SuppressWarnings("unchecked") List<Runnable> removed=(List<Runnable>)bridge.getMethod("retireScheduler",Object.class,Module[].class).invoke(null,scheduler,(Object)modules);
+                    @SuppressWarnings("unchecked") List<Runnable> removed=(List<Runnable>)methods.retireScheduler.invoke(null,scheduler,(Object)modules);
                     schedulerDrained(scheduler,removed,group);
-                    ended=Boolean.TRUE.equals(bridge.getMethod("schedulerResourceEnded",Object.class).invoke(null,scheduler));
+                    ended=Boolean.TRUE.equals(methods.schedulerEnded.invoke(null,scheduler));
                 }
                 if(ended)pending.remove(scheduler);
             }catch(ReflectiveOperationException|RuntimeException unavailable){
@@ -617,7 +652,7 @@ final class RecoveryTasks implements AutoCloseable {
     }
     void schedulerDrained(Object scheduler,List<Runnable> removed,ProRuntime.Subject group) {
         try {
-            Object actual=Class.forName("dev.ronova.pro.bootstrap.TaskBridge",false,null).getMethod("realScheduler",Object.class).invoke(null,scheduler);
+            Object actual=resourceMethods().realScheduler.invoke(null,scheduler);
             if(actual!=null)scheduler=actual;
         }catch(ReflectiveOperationException unavailable){recordTransient("SCHEDULER_DELEGATE_UNAVAILABLE");return;}
         for(Runnable object:removed) {
@@ -636,8 +671,7 @@ final class RecoveryTasks implements AutoCloseable {
     }
     private boolean acknowledgeSchedulerDrain(Object scheduler,Object object){
         if(!(scheduler instanceof ExecutorService))return true;
-        try{Class.forName("dev.ronova.pro.bootstrap.TaskBridge",false,null)
-                .getMethod("schedulerDrainAccepted",Object.class,Object.class).invoke(null,scheduler,object);return true;}
+        try{resourceMethods().drainAccepted.invoke(null,scheduler,object);return true;}
         catch(ReflectiveOperationException|RuntimeException unavailable){return false;}
     }
     private void recordGap(String reason) {
@@ -733,11 +767,12 @@ final class RecoveryTasks implements AutoCloseable {
     }
     private boolean observeBackend(Task task)throws ReflectiveOperationException {
         task.coverageConfirmed=false;
+        ResourceBinding resources=resourceBinding(task);if(resources==null)return false;
         List<String> required;
         if(task.inline||task.completion||task.result) {
             if(boundarySnapshot==null||inlineClosed==null)return false;
             if(task.scheduler instanceof ThreadPoolExecutor) {
-                Object queue=queue(task.scheduler);if(queue==null||!supportedQueue(queue))return false;
+                Object queue=resources.queue;if(queue==null||!supportedQueue(queue))return false;
                 required=CF_EXECUTOR_BOUNDARIES.get(queue.getClass().getName());
             } else required=CF_BOUNDARIES;
         } else if(task.forkJoin) {
@@ -750,10 +785,10 @@ final class RecoveryTasks implements AutoCloseable {
         } else if(task.authority!=null&&!exactFuture(task.object)&&drainedTasks.get(task.object)==runtime.canonicalSubject(task.authority.id)) {
             if(boundarySnapshot==null)return false;
             if(task.scheduler instanceof java.util.Timer)required=TIMER_REQUIREMENTS;
-            else {Object queue=queue(task.scheduler);if(queue==null||!supportedQueue(queue))return false;required=FUTURE_QUEUE_BOUNDARIES.get(queue.getClass().getName());}
+            else {Object queue=resources.queue;if(queue==null||!supportedQueue(queue))return false;required=FUTURE_QUEUE_BOUNDARIES.get(queue.getClass().getName());}
         } else {
             if(boundarySnapshot==null||!exactFuture(task.object))return false;
-            Object queue=queue(task.scheduler);if(queue==null||!supportedQueue(queue))return false;
+            Object queue=resources.queue;if(queue==null||!supportedQueue(queue))return false;
             boolean scheduled=task.object.getClass()!=FutureTask.class;
             if(scheduled&&(task.scheduler==null||task.scheduler.getClass()!=ScheduledThreadPoolExecutor.class))return false;
             required=(scheduled?SCHEDULED_QUEUE_BOUNDARIES:FUTURE_QUEUE_BOUNDARIES).get(queue.getClass().getName());
@@ -1228,17 +1263,14 @@ final class RecoveryTasks implements AutoCloseable {
         if(!windows.isEmpty()&&(tick<leaseStarted||tick-leaseStarted>=LEASE_TICKS)) {
             if(waiting.isEmpty())leaseStarted=tick;else yieldWindow(tick);
         }
-        // No task qualification or graph mutation occurs between these admission calls.
-        Map<UUID,List<Task>> operations=new HashMap<>();
-        for(Task task:tasks.values())if(task.operation!=null)operations.computeIfAbsent(task.operation,key->new ArrayList<>()).add(task);
         // Newly discovered children join the existing lease before its next observation.
-        admitComponents(List.copyOf(windows),operations);
+        admitComponents(List.copyOf(windows));
         for(int budget=0;budget<SAMPLE_BUDGET&&windows.size()<WINDOW_TARGET&&!waiting.isEmpty();budget++) {
             Task task=waiting.removeFirst();task.queued=false;
             if(!qualified(task))continue;
             if(tick<task.retryAt) { enqueue(task);continue; }
             if(windows.isEmpty())leaseStarted=tick;
-            admitComponents(List.of(task),operations);
+            admitComponents(List.of(task));
         }
         int visits=Math.min(windows.size(),Math.min(MAX_SAMPLE_BUDGET,Math.max(SAMPLE_BUDGET,(windows.size()+7)/8)));
         for(int budget=0;budget<visits;budget++) {
@@ -1262,14 +1294,14 @@ final class RecoveryTasks implements AutoCloseable {
         }
         if(done&&!waiting.isEmpty()||!progressing&&!windows.isEmpty())yieldWindow(tick);
     }
-    private void admitComponents(Collection<Task> roots,Map<UUID,List<Task>> operations) {
+    private void admitComponents(Collection<Task> roots) {
         var pending=new ArrayDeque<Task>();pending.addAll(roots);
         Set<Task> seen=Collections.newSetFromMap(new IdentityHashMap<>());
         Set<Task> active=Collections.newSetFromMap(new IdentityHashMap<>());active.addAll(windows);
         Set<UUID> includedOperations=new HashSet<>();
         while(!pending.isEmpty()) {
             Task task=pending.removeFirst();if(!seen.add(task))continue;
-            if(task.operation!=null&&includedOperations.add(task.operation))pending.addAll(operations.getOrDefault(task.operation,List.of()));
+            if(task.operation!=null&&includedOperations.add(task.operation))pending.addAll(operationTasks.getOrDefault(task.operation,Set.of()));
             if(qualified(task)&&active.add(task)) {
                 waiting.remove(task);task.queued=false;task.retryAt=0;windows.addLast(task);
             }
@@ -1304,13 +1336,13 @@ final class RecoveryTasks implements AutoCloseable {
             if(task.inline!=event.inline||task.callbackDefinition!=event.callbackDefinition) { task.reason="CALLBACK_DEFINITION_BINDING_CHANGED";continue; }
             // Merge the event first. A queued source delivery can still add another owner;
             // an exact-object fence is decided only after the publication batch is complete.
-            task.subjects.addAll(event.subjects);
+            if(task.subjects.addAll(event.subjects))task.resources=null;
             queuePolicy(task);
             if(drainedTasks.get(task.object)==runtime.groupAuthority(task.subjects))task.queueRemoved=true;
             changed(task,tick);
             if(task.authority!=null)enqueue(task);
             if(event.scheduler!=null&&event.kind!=13&&event.kind!=15&&event.kind!=16&&event.kind!=17&&event.kind!=21) {
-                if(task.scheduler!=null&&task.scheduler!=event.scheduler)task.reason="MULTIPLE_SCHEDULER_OWNERS";
+                if(task.scheduler!=null&&task.scheduler!=event.scheduler) {task.reason="MULTIPLE_SCHEDULER_OWNERS";invalidateResources(task);}
                 else task.scheduler=event.scheduler;
             }
             Task parent=tasks.get(event.parent);
@@ -1561,9 +1593,18 @@ final class RecoveryTasks implements AutoCloseable {
             }
             if(task.ack!=null&&task.qualification!=subject.generation) { task.reason="OLD_TASK_INTENT_QUERY_ONLY";continue; }
             if(task.authority==subject&&task.operation!=null&&task.qualification==subject.generation)continue;
-            task.authority=subject;task.operation=operation;task.qualification=subject.generation;
+            task.authority=subject;assignOperation(task,operation);task.qualification=subject.generation;task.resources=null;
             enqueue(task);
         }
+    }
+    private void assignOperation(Task task,UUID operation) {
+        if(!Objects.equals(task.operation,operation))removeOperation(task);
+        task.operation=operation;
+        if(operation!=null)operationTasks.computeIfAbsent(operation,ignored->Collections.newSetFromMap(new IdentityHashMap<>())).add(task);
+    }
+    private void removeOperation(Task task) {
+        Set<Task> members=operationTasks.get(task.operation);
+        if(members!=null&&members.remove(task)&&members.isEmpty())operationTasks.remove(task.operation);
     }
     private boolean exclusive(Task task) {
         return !task.subjects.isEmpty()&&runtime.sameGroup(task.subjects,task.authority);
@@ -1615,7 +1656,7 @@ final class RecoveryTasks implements AutoCloseable {
         final boolean[] queueConfirmed={false};
         if(!queueGuarded(task,()->{
             try {
-            Object queue=queue(task.scheduler);
+            Object queue=taskQueue(task);
             if(queue==null) { resetWindow(task,"QUEUE_OWNER_UNOBSERVED");return; }
             if(task.queue!=null&&task.queue!=queue) { task.reason="QUEUE_OWNER_REPLACED";return; }
             task.queue=queue;
@@ -1653,23 +1694,20 @@ final class RecoveryTasks implements AutoCloseable {
         return queueGuarded(task,action,false);
     }
     private boolean queueGuarded(Task task,Runnable action,boolean observationOnly)throws ReflectiveOperationException {
-        Object queue=queue(task.scheduler);if(queue==null||!supportedQueue(queue))return gateFailure(task,"QUEUE_BACKEND_UNSUPPORTED");
-        if(exactFuture(task.object)&&task.object.getClass()!=FutureTask.class) {
-            Class<?> type=task.object.getClass();
-            if(readField(type,"this$0",task.object)!=task.scheduler||readField(type,"outerTask",task.object)!=task.object)
-                return gateFailure(task,"SCHEDULED_TASK_DELEGATE_OR_OWNER_CHANGED");
-        }
+        if(!observeBackend(task))return gateFailure(task,"REQUIRED_QUEUE_BOUNDARY_UNAVAILABLE");
+        ResourceBinding resources=resourceBinding(task);
+        if(resources==null||resources.queue==null||!supportedQueue(resources.queue))return gateFailure(task,"QUEUE_BACKEND_UNSUPPORTED");
         List<java.util.concurrent.locks.ReentrantLock> acquired=new ArrayList<>();
         try {
-            for(String name:queue.getClass()==LinkedBlockingQueue.class?List.of("putLock","takeLock"):List.of("lock")) {
-                Object value=readField(queue.getClass(),name,queue);
-                if(value==null||value.getClass()!=java.util.concurrent.locks.ReentrantLock.class)return gateFailure(task,"QUEUE_LOCK_LAYOUT_UNSUPPORTED");
-                var lock=(java.util.concurrent.locks.ReentrantLock)value;
+            for(var lock:resources.locks) {
                 if(!lock.tryLock())return gateFailure(task,"QUEUE_LOCK_BUSY");acquired.add(lock);
             }
             boolean[] invoked={false};
             Runnable bound=()->{
-                try { if(queue(task.scheduler)==queue) { action.run();invoked[0]=true; }else gateFailure(task,"QUEUE_OWNER_REPLACED"); }
+                try {
+                    if(resourceBinding(task)!=resources) { gateFailure(task,"QUEUE_OWNER_REPLACED");return; }
+                    action.run();invoked[0]=resourceBinding(task)==resources;
+                }
                 catch(ReflectiveOperationException failure) { throw new IllegalStateException(failure); }
             };
             boolean accepted;
@@ -1814,7 +1852,7 @@ final class RecoveryTasks implements AutoCloseable {
                 if(((Integer)activeInvocations.invoke(null,task.object))!=0)return;
                 if(task.admissionReleased) { if(!completionFieldsAbsent(task,true)||!completionStacksAbsent(task))return; }
                 else if(admission[0]!=1||admission[1]!=0)return;
-                Object observed=queue(task.scheduler);
+                Object observed=taskQueue(task);
                 if(task.queue!=null&&task.queue!=observed) { task.reason="QUEUE_OWNER_REPLACED";return; }
                 task.queue=observed;
                 int removed=0;
@@ -1888,7 +1926,7 @@ final class RecoveryTasks implements AutoCloseable {
         if(snapshot==null||snapshot.length!=3||!(snapshot[0] instanceof Long epoch)||epoch<0||!Integer.valueOf(1).equals(snapshot[1])) {
             task.gateReason="FORKJOIN_QUEUE_LOCATION_UNOBSERVED_OR_PRESENT";return false;
         }
-        if(readField(ForkJoinPool.class,"queues",task.scheduler)==null&&!Boolean.TRUE.equals(bridge.getMethod("schedulerResourceEnded",Object.class).invoke(null,task.scheduler)))return false;
+        if(readField(ForkJoinPool.class,"queues",task.scheduler)==null&&!Boolean.TRUE.equals(resourceMethods().schedulerEnded.invoke(null,task.scheduler)))return false;
         task.forkQueueReadbackEpoch=epoch;return forkQueueReadbackCurrent(task);
     }
     private static boolean forkQueueReadbackCurrent(Task task)throws ReflectiveOperationException {
@@ -1936,7 +1974,7 @@ final class RecoveryTasks implements AutoCloseable {
         boolean[] absent={false};
         if(!queueGuarded(task,()->{
             try {
-                Object observed=queue(task.scheduler);
+                Object observed=taskQueue(task);
                 if(task.queue!=null&&task.queue!=observed)return;
                 for(Object entry:((BlockingQueue<?>)observed).toArray())if(entry==task.object)return;
                 absent[0]=true;
@@ -2035,14 +2073,54 @@ final class RecoveryTasks implements AutoCloseable {
     private static final ClassValue<ConcurrentMap<String,Field>> READ_FIELDS=new ClassValue<>() {
         @Override protected ConcurrentMap<String,Field> computeValue(Class<?> type) { return new ConcurrentHashMap<>(); }
     };
-    private static Object readField(Class<?> type,String name,Object object)throws ReflectiveOperationException {
+    private static Field readField(Class<?> type,String name)throws ReflectiveOperationException {
         var fields=READ_FIELDS.get(type);Field field=fields.get(name);
         if(field==null) {
             field=type.getDeclaredField(name);
             if(!field.trySetAccessible())throw new IllegalAccessException("FIELD_UNAVAILABLE:"+type.getName()+"."+name);
             Field prior=fields.putIfAbsent(name,field);if(prior!=null)field=prior;
         }
-        return field.get(object);
+        return field;
+    }
+    private static Object readField(Class<?> type,String name,Object object)throws ReflectiveOperationException {
+        return readField(type,name).get(object);
+    }
+    private ResourceBinding resourceBinding(Task task)throws ReflectiveOperationException {
+        ProRuntime.Subject scope=task.authority==null?null:runtime.canonicalSubject(task.authority.id);
+        ResourceBinding prior=task.resources;
+        if(prior!=null) {
+            if(!prior.current(task)) {invalidateResources(task);return null;}
+            if(prior.sameScope(task,scope))return prior;
+            task.resources=null;
+        }
+        Field queueField=task.scheduler instanceof ThreadPoolExecutor?readField(ThreadPoolExecutor.class,"workQueue"):
+                task.scheduler instanceof java.util.Timer?readField(java.util.Timer.class,"queue"):null;
+        Object queue=queueField==null?null:queueField.get(task.scheduler);
+        if(task.queue!=null&&task.queue!=queue) {invalidateResources(task);return null;}
+        var lockFields=new ArrayList<Field>();var locks=new ArrayList<java.util.concurrent.locks.ReentrantLock>();
+        if(queue!=null&&supportedQueue(queue))for(String name:queue.getClass()==LinkedBlockingQueue.class?List.of("putLock","takeLock"):List.of("lock")) {
+            Field field=readField(queue.getClass(),name);Object actual=field.get(queue);
+            if(actual==null||actual.getClass()!=java.util.concurrent.locks.ReentrantLock.class) {
+                task.gateReason="QUEUE_LOCK_LAYOUT_UNSUPPORTED";return null;
+            }
+            lockFields.add(field);locks.add((java.util.concurrent.locks.ReentrantLock)actual);
+        }
+        Field owner=null,delegate=null;
+        if(exactFuture(task.object)&&task.object.getClass()!=FutureTask.class) {
+            owner=readField(task.definition,"this$0");delegate=readField(task.definition,"outerTask");
+        }
+        ResourceBinding bound=new ResourceBinding(task.scheduler,queueField,queue,List.copyOf(lockFields),List.copyOf(locks),owner,delegate,
+                task.authority,scope,task.qualification,scope==null?-1:scope.generation,task.backendImage,task.backendEpoch);
+        if(!bound.current(task)) {invalidateResources(task);return null;}
+        task.resources=bound;return bound;
+    }
+    private static void invalidateResources(Task task) {
+        task.resources=null;task.coverageConfirmed=false;task.queue=null;task.queueRemoved=false;task.callableReleased=false;
+        task.servicedOwnerQueues.clear();task.forkQueueReadbackEpoch=-1;
+        task.gateReason="RESOURCE_OWNER_OR_LAYOUT_CHANGED";resetWindow(task,"RESOURCE_BINDING_CHANGED");
+    }
+    private Object taskQueue(Task task)throws ReflectiveOperationException {
+        ResourceBinding bound=resourceBinding(task);return bound==null?null:bound.queue;
     }
     private boolean waitersReleased(Task task)throws ReflectiveOperationException {
         if(task.waiterCoverageGap||waiterCount==null||waiterNodeObserved==null)return false;
@@ -2346,15 +2424,15 @@ final class RecoveryTasks implements AutoCloseable {
         task.ack=runtime.journal.retryRejected(task.intent,task.ack);if(!confirmed(task.ack)) {resetWindow(task,"WAIT_ACK");return;}
         if(task.releaseAck==null) {task.releaseIntent=PREFIX+"\tCAPTURE_RELEASE_OBSERVED\t"+task.id+"\t"+task.operation+"\t"+runtime.session+"\t"+(timer?"TIMER_QUEUE_REMOVED_CANCELLED_STATE_ACTUAL_INVOCATION_EXIT":"PRIVATE_EXECUTOR_ACTUAL_DRAIN_AND_TERMINATION");task.releaseAck=runtime.journal.append(task.releaseIntent);}
         task.releaseAck=runtime.journal.retryRejected(task.releaseIntent,task.releaseAck);if(!confirmed(task.releaseAck)) {resetWindow(task,"WAIT_DRAIN_RESOURCE_ACK");return;}
-        if(task.queue==null)task.queue=queue(task.scheduler);
+        if(task.queue==null)task.queue=taskQueue(task);
         if(task.queue==null){resetWindow(task,"DRAINED_RUNNABLE_QUEUE_OWNER_UNOBSERVED");return;}
         task.callableReleased=true;finishScope(task,tick,(task.entered?"EXIT_OBSERVED":"START_PRECLUDED")+"\t"+(timer?"ACTUAL_TIMER_QUEUE_REMOVAL_AND_CANCELLED_STATE":"ACTUAL_PRIVATE_QUEUE_DRAIN_AND_POOL_TERMINATION"));
     }
     private boolean drainedDispositionCurrent(Task task)throws ReflectiveOperationException{
         if(task.authority==null||!exclusive(task)||!task.queueRemoved||drainedTasks.get(task.object)!=runtime.canonicalSubject(task.authority.id)
                 ||task.entered&&!task.exitObserved)return false;
-        if(task.scheduler instanceof java.util.Timer)return Boolean.TRUE.equals(bridge.getMethod("timerTaskRetired",Object.class).invoke(null,task.object));
-        return task.scheduler instanceof ExecutorService&&Boolean.TRUE.equals(bridge.getMethod("schedulerResourceEnded",Object.class).invoke(null,task.scheduler));
+        if(task.scheduler instanceof java.util.Timer)return Boolean.TRUE.equals(resourceMethods().timerTaskRetired.invoke(null,task.object));
+        return task.scheduler instanceof ExecutorService&&Boolean.TRUE.equals(resourceMethods().schedulerEnded.invoke(null,task.scheduler));
     }
     /** Confirm naturally completed calls without replaying callbacks or inventing cancellation authority. */
     private void advanceObserved(Task task,long tick)throws ReflectiveOperationException {
@@ -2450,11 +2528,15 @@ final class RecoveryTasks implements AutoCloseable {
                     for(Task task:group)settlements.computeIfAbsent(task.id,k->new Settlement(task));
                     Task leader=group.get(0);
                     if(!guarded(leader,()->{
-                        for(Task task:group)if(runtime.canonicalSubject(task.authority.id)!=runtime.canonicalSubject(leader.authority.id)||!currentFact(task,tick,0L))return;
                         for(Task task:group) {
-                            retiredObjects.put(task.object,task.id);tasks.remove(task.object);
+                            if(runtime.canonicalSubject(task.authority.id)!=runtime.canonicalSubject(leader.authority.id)||!currentFact(task,tick,0L))return;
+                            if(exactFuture(task.object))try {if(!executorQueueAbsent(task)||!((Future<?>)task.object).isDone())return;}
+                            catch(ReflectiveOperationException failure) {throw new IllegalStateException("QUEUE_RETIREMENT_READBACK_UNAVAILABLE",failure);}
+                        }
+                        for(Task task:group) {
+                            retiredObjects.put(task.object,task.id);tasks.remove(task.object);removeOperation(task);
                             windows.remove(task);waiting.remove(task);policyPending.remove(task);task.policyQueued=false;
-                            task.scheduler=null;task.queue=null;task.completionSources.clear();task.completionOutputs.clear();task.completionReleaseCursors.clear();task.completionReadbacks.clear();
+                            task.scheduler=null;task.queue=null;task.resources=null;task.completionSources.clear();task.completionOutputs.clear();task.completionReleaseCursors.clear();task.completionReadbacks.clear();
                             task.delegateOwners.clear();task.servicedOwnerQueues.clear();task.forkCaptureEdges.clear();
                             task.forkQueueReadbackEpoch=-1;
                             task.children.clear();task.parents.clear();
@@ -2538,8 +2620,7 @@ final class RecoveryTasks implements AutoCloseable {
     }
     private boolean capabilityCurrent(Task task) {
         try {
-            return boundaryCapabilities!=null&&boundaryCapabilities.invoke(null)==task.backendImage?
-                    task.coverageConfirmed:observeBackend(task);
+            return observeBackend(task);
         } catch(ReflectiveOperationException|RuntimeException unavailable) {return false;}
     }
     /** A prior successful release is history, not proof that an actual owner has not republished a reference. */
@@ -2551,7 +2632,7 @@ final class RecoveryTasks implements AutoCloseable {
             if(task.completion)return task.admissionFenced?completionOwnerReleased(task):completionReleased(task);
             if(task.forkJoin)return task.callbackFieldsReleased&&forkQueuesAbsent(task)&&forkCapturesAbsent(task)
                     &&waitersReleased(task)&&forkQueueReadbackCurrent(task);
-            if(exactFuture(task.object))return callableReleased(task.object)&&waitersReleased(task);
+            if(exactFuture(task.object))return ((Future<?>)task.object).isDone()&&callableReleased(task.object)&&waitersReleased(task);
             return true; // Delegated scopes claim their observed invocation, not disposal of the shared callable.
         } catch(ReflectiveOperationException|RuntimeException unavailable) {return false;}
     }
@@ -2615,10 +2696,15 @@ final class RecoveryTasks implements AutoCloseable {
                 ||task.scheduler!=null||!task.submissions.isEmpty()||task.completionSources.isEmpty())return false;
         return completionFieldsAbsent(task,true)&&completionStacksAbsent(task);
     }
-    private static Object queue(Object scheduler)throws ReflectiveOperationException {
-        if(scheduler instanceof java.util.Timer)return readField(java.util.Timer.class,"queue",scheduler);
-        if(!(scheduler instanceof ThreadPoolExecutor))return null;
-        return readField(ThreadPoolExecutor.class,"workQueue",scheduler);
+    private boolean executorQueueAbsent(Task task)throws ReflectiveOperationException {
+        boolean[] absent={false};
+        return queueGuarded(task,()->{
+            try {
+                Object queue=taskQueue(task);if(queue==null||task.queue!=null&&task.queue!=queue)return;
+                for(Object value:((BlockingQueue<?>)queue).toArray())if(value==task.object)return;
+                absent[0]=true;
+            } catch(ReflectiveOperationException failure) {throw new IllegalStateException(failure);}
+        },true)&&absent[0];
     }
     private static boolean callableReleased(Object task)throws ReflectiveOperationException {
         if(!exactFuture(task))return false;
@@ -2781,7 +2867,7 @@ final class RecoveryTasks implements AutoCloseable {
                     }catch(ReflectiveOperationException failure){throw new IOException("TASK_DRAIN_RETIREMENT_QUERY_UNAVAILABLE",failure);}
                     continue;
                 }
-                try { if(!observeBackend(task)||!callableReleased(task.object))throw new IOException("TASK_RETIREMENT_COVERAGE_OR_CALLABLE_UNRESOLVED:"+task.id); }
+                try { if(!observeBackend(task)||!executorQueueAbsent(task)||!callableReleased(task.object))throw new IOException("TASK_RETIREMENT_COVERAGE_OR_CALLABLE_UNRESOLVED:"+task.id); }
                 catch(ReflectiveOperationException failure) { throw new IOException("TASK_RETIREMENT_COVERAGE_UNAVAILABLE",failure); }
                 Future<?> future=(Future<?>)task.object;
                 if(!future.isDone()||(task.entered?!task.exitObserved:!task.queueRemoved&&!task.dispatchExitObserved))
@@ -2823,7 +2909,7 @@ final class RecoveryTasks implements AutoCloseable {
             }
             detached=true;
             // Every collection is owned by this observer. External queues, delegates and pools are untouched.
-            events.clear();pendingCaptures.clear();pendingRoots.clear();tasks.clear();producers.clear();dependents.clear();childrenByParent.clear();synchronized(origins){origins.clear();sharedOrigins.clear();}workerBindings.clear();captureEpochs.clear();captureGaps.clear();
+            events.clear();pendingCaptures.clear();pendingRoots.clear();tasks.clear();operationTasks.clear();producers.clear();dependents.clear();childrenByParent.clear();synchronized(origins){origins.clear();sharedOrigins.clear();}workerBindings.clear();captureEpochs.clear();captureGaps.clear();
             windows.clear();waiting.clear();policyPending.clear();
             retirementFact=PREFIX+"\tOBSERVER_RELEASED\t"+runtime.session+"\t"+epoch;
             retirementFactAck=runtime.journal.append(retirementFact);

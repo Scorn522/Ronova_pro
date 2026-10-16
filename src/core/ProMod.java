@@ -22,13 +22,17 @@ import net.minecraftforge.fml.common.Mod;
 @Mod("ronova_pro")
 public final class ProMod {
     private static final org.slf4j.Logger LOG=com.mojang.logging.LogUtils.getLogger();
-    private record Feedback(UUID player,String last) { }
+    private record Feedback(UUID player,String last,long next,boolean failed) { }
     private final java.util.LinkedHashMap<UUID,Feedback> feedback=new java.util.LinkedHashMap<>();
+    private final java.util.ArrayDeque<UUID> feedbackReady=new java.util.ArrayDeque<>();
     private void watch(net.minecraft.commands.CommandSourceStack source,ProRuntime runtime,UUID operation,net.minecraft.world.entity.Entity target) {
         String result=runtime.operationSummary(operation);
         LOG.info("RONOVA_OPERATION {} target={} type={} {}",operation,target.getUUID(),net.minecraft.core.registries.BuiltInRegistries.ENTITY_TYPE.getKey(target.getType()),result);
-        if(feedback.size()>=128)feedback.remove(feedback.keySet().iterator().next());
-        feedback.put(operation,new Feedback(source.getEntity() instanceof ServerPlayer p?p.getUUID():null,result));
+        if(!feedback.containsKey(operation)) {
+            if(feedback.size()>=128) {UUID oldest=feedback.keySet().iterator().next();feedback.remove(oldest);feedbackReady.remove(oldest);}
+            feedbackReady.addLast(operation);
+        }
+        feedback.put(operation,new Feedback(source.getEntity() instanceof ServerPlayer p?p.getUUID():null,result,runtime.server.getTickCount()+10L,false));
     }
     public ProMod() {
         // Zero-argument startup: the player supplies no Ronova JVM argument. The mod extracts its own agent and
@@ -48,6 +52,7 @@ public final class ProMod {
         bus.addListener(this::stopping);
         bus.addListener(this::stopped);
         bus.addListener(EventPriority.NORMAL,this::tick);
+        bus.addListener(EventPriority.LOWEST,this::feedbackTick);
         bus.addListener(this::commands);
         bus.addListener(EventPriority.LOWEST,this::joined);
         bus.addListener(this::participant);
@@ -58,7 +63,7 @@ public final class ProMod {
         catch(Exception ex) { throw new IllegalStateException("Ronova Pro durable authority unavailable; refusing writes",ex); }
     }
     private void stopped(ServerStoppedEvent e) {
-        feedback.clear();
+        feedback.clear();feedbackReady.clear();
         try { ProRuntime.stop(e.getServer()); }
         catch(Exception ex) { System.err.println("RONOVA_PRO_UNSETTLED_SHUTDOWN "+ex); }
     }
@@ -67,17 +72,27 @@ public final class ProMod {
     }
     private void tick(TickEvent.ServerTickEvent e) {
         if(e.phase==TickEvent.Phase.END) {
-            ProRuntime r=ProRuntime.get(e.getServer()); if(r!=null) {
-                r.tick();
-                if(e.getServer().getTickCount()%10==0)for(var entry:java.util.List.copyOf(feedback.entrySet())) {
-                    String now=r.operationSummary(entry.getKey());Feedback previous=entry.getValue();
-                    if(now.equals(previous.last()))continue;
-                    LOG.info("RONOVA_OPERATION {} {}",entry.getKey(),now);
-                    var player=previous.player()==null?null:e.getServer().getPlayerList().getPlayer(previous.player());
-                    if(player!=null)player.sendSystemMessage(Component.literal("Ronova "+entry.getKey()+"："+now));
-                    feedback.put(entry.getKey(),new Feedback(previous.player(),now));
-                }
+            ProRuntime r=ProRuntime.get(e.getServer());if(r!=null)r.tick();
+        }
+    }
+    /** Human feedback has its own bounded turn and never participates in enforcement. */
+    private void feedbackTick(TickEvent.ServerTickEvent e) {
+        if(e.phase!=TickEvent.Phase.END||feedbackReady.isEmpty())return;
+        ProRuntime runtime=ProRuntime.get(e.getServer());if(runtime==null)return;
+        UUID operation=feedbackReady.removeFirst();Feedback previous=feedback.get(operation);
+        if(previous==null)return;feedbackReady.addLast(operation);
+        long nowTick=e.getServer().getTickCount();if(nowTick<previous.next()&&previous.next()-nowTick<=100)return;
+        try {
+            String now=runtime.operationSummary(operation);
+            if(!now.equals(previous.last())) {
+                LOG.info("RONOVA_OPERATION {} {}",operation,now);
+                var player=previous.player()==null?null:e.getServer().getPlayerList().getPlayer(previous.player());
+                if(player!=null)player.sendSystemMessage(Component.literal("Ronova "+operation+"："+now));
             }
+            feedback.put(operation,new Feedback(previous.player(),now,nowTick+10,false));
+        } catch(RuntimeException|LinkageError unavailable) {
+            if(!previous.failed())LOG.warn("RONOVA_OPERATION_FEEDBACK_UNAVAILABLE {} {}",operation,unavailable.toString());
+            feedback.put(operation,new Feedback(previous.player(),previous.last(),nowTick+100,true));
         }
     }
     private void joined(EntityJoinLevelEvent e) { if(!e.getLevel().isClientSide)ProRuntime.joined(e.getEntity()); }

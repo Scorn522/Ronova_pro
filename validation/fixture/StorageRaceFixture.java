@@ -14,7 +14,7 @@ import net.minecraftforge.common.MinecraftForge;
 import net.minecraftforge.event.TickEvent;
 import net.minecraftforge.eventbus.api.EventPriority;
 
-/** Real files, OS locks and normal revocation. Reflection only delays the existing worker; it supplies no evidence. */
+/** Real files, OS locks and normal revocation. Reflection delays/observes work; it supplies no commit evidence. */
 final class StorageRaceFixture {
     private static final class Data extends SavedData {
         final ConcurrentHashMap<String,CompoundTag> records=new ConcurrentHashMap<>();
@@ -40,6 +40,8 @@ final class StorageRaceFixture {
     private int tick,phase,scenario,entered;
     private boolean finished;
     private final List<String> results=new ArrayList<>();
+    private final boolean focused=Boolean.getBoolean("ronova.pro.storageSchedulingCheck");
+    private final List<Path> focusedFiles=new ArrayList<>();
     StorageRaceFixture() { MinecraftForge.EVENT_BUS.addListener(EventPriority.LOWEST,this::tick); }
     private void pauseStorage(ProRuntime runtime)throws Exception {
         var field=ProRuntime.class.getDeclaredField("recoveryStorage");field.setAccessible(true);Object storage=field.get(runtime);
@@ -54,6 +56,7 @@ final class StorageRaceFixture {
         tick++;
         try {
             if(tick>1600)throw new AssertionError("STORAGE_RACE_TIMEOUT scenario="+scenario+" phase="+phase);
+            if(focused) { schedulingTick(event,runtime);return; }
             if(phase==0) {
                 var level=event.getServer().overworld();level.setChunkForced(0,0,true);
                 target=scenario==3?new SaveBomb(level):new Cow(EntityType.COW,level);target.setNoAi(true);target.setPos(4+scenario,80,4);
@@ -100,6 +103,83 @@ final class StorageRaceFixture {
                 if(scenario==5)finish(event,runtime,"STORAGE_RACE_PRODUCTION_PASS\n");
             }
         } catch(Throwable failure) { failure.printStackTrace();finish(event,runtime,"FAILED\n"+failure+"\n"); }
+    }
+    private void schedulingTick(TickEvent.ServerTickEvent event,ProRuntime runtime)throws Exception {
+        if(phase==0) {
+            var level=event.getServer().overworld();level.setChunkForced(0,0,true);
+            target=new Cow(EntityType.COW,level);target.setNoAi(true);target.setPos(4,80,4);
+            require(level.addFreshEntity(target),"SPAWN");
+            CompoundTag record=target.saveWithoutId(new CompoundTag());
+            Path directory=event.getServer().getWorldPath(net.minecraft.world.level.storage.LevelResource.ROOT).resolve("data");
+            for(int i=0;i<40;i++) {
+                Data saved=new Data();saved.records.put("target",record);
+                CompoundTag keep=new CompoundTag();keep.putString("payload","unrelated");saved.records.put("keep",keep);
+                String name="pro_storage_schedule_"+i;level.getDataStorage().set(name,saved);saved.setDirty();
+                focusedFiles.add(directory.resolve(name+".dat"));
+            }
+            level.getDataStorage().save();pauseStorage(runtime);operation=FixtureCommands.clear(runtime,target);
+            phase=10;entered=tick;
+        } else if(phase==10&&tick-entered>=8) {
+            List<String> rows=runtime.recoveryStatus(operation);
+            require(!rows.contains("已知恢复链已处置"),"QUEUED_SAVES_REPORTED_SETTLED");
+            if(rows.stream().noneMatch(row->row.contains("STORAGE_WORKER_BUDGET_WAIT"))) {
+                require(tick-entered<20,"STORAGE_QUEUE_REJECTION_NOT_EXERCISED");return;
+            }
+            release.countDown();phase=11;
+        } else if(phase==11&&runtime.recoveryStatus(operation).contains("已知恢复链已处置")) {
+            for(Path path:focusedFiles) {
+                CompoundTag read=NbtIo.readCompressed(path.toFile()).getCompound("data");
+                require(!read.contains("target")&&read.getCompound("keep").getString("payload").equals("unrelated")
+                        &&read.getString("unknown").equals("preserve-exactly"),"REJECTED_STORAGE_WORK_LOST:"+path.getFileName());
+            }
+            results.add("REJECTED_QUEUE_WORK_REQUEUED_ALL_40_REAL_SAVES");
+            pauseStorage(runtime);phase=12;entered=tick;
+        } else if(phase==12) {
+            Object storage=observed(runtime,"recoveryStorage"),pending=null;
+            for(Object item:((Map<?,?>)observed(storage,"work")).values())
+                if(operation.equals(observed(item,"operation"))&&Boolean.TRUE.equals(observed(item,"running"))
+                        &&"READBACK_CONFIRMED".equals(observed(item,"state"))) { pending=item;break; }
+            if(pending==null) { require(tick-entered<10,"READBACK_RECHECK_NOT_QUEUED_WITHIN_LEASE");return; }
+            long last=(Long)observed(pending,"lastQuery"),now=Integer.toUnsignedLong(event.getServer().getTickCount());
+            require(last>=0&&now>=last&&now-last<=10,"FRESH_READBACK_WINDOW_NOT_EXERCISED");
+            List<String> rows=runtime.recoveryStatus(operation);
+            require(rows.contains("STORAGE_RESOURCES_PENDING:"+observed(pending,"id"))&&!rows.contains("已知恢复链已处置"),
+                    "RUNNING_READBACK_REUSED_RELEASE_RECEIPT");
+            results.add("RUNNING_READBACK_REMAINS_RESOURCE_PENDING");
+            failedReadClose(storage,pending,focusedFiles.get(0));
+            results.add("FAILED_READ_CLOSE_CANNOT_BECOME_NOOP_RELEASE_RECEIPT");
+            release.countDown();phase=13;
+        } else if(phase==13&&runtime.recoveryStatus(operation).contains("已知恢复链已处置"))
+            finish(event,runtime,"STORAGE_SCHEDULING_PRODUCTION_PASS\n");
+    }
+    private static Object observed(Object owner,String name)throws ReflectiveOperationException {
+        var field=owner.getClass().getDeclaredField(name);field.setAccessible(true);return field.get(owner);
+    }
+    private static void failedReadClose(Object storage,Object template,Path path)throws Exception {
+        // This detached work owns only the real input below. It is never indexed,
+        // and no descriptor, ACK, readback or release fact is supplied to live work.
+        Object descriptor=observed(template,"descriptor");
+        var constructor=template.getClass().getDeclaredConstructor(descriptor.getClass());constructor.setAccessible(true);
+        Object detached=constructor.newInstance(descriptor);
+        var inputField=detached.getClass().getDeclaredField("queryInput");inputField.setAccessible(true);
+        var close=storage.getClass().getDeclaredMethod("closeQueryInput",detached.getClass());close.setAccessible(true);
+        class FailedInput extends FileInputStream {
+            int calls;
+            FailedInput()throws FileNotFoundException { super(path.toFile()); }
+            @Override public void close()throws IOException {
+                calls++;super.close();if(calls==1)throw new IOException("EXPECTED_READBACK_CLOSE_FAILURE");
+            }
+        }
+        FailedInput input=new FailedInput();inputField.set(detached,input);
+        try {
+            for(int attempt=0;attempt<2;attempt++)try {
+                close.invoke(null,detached);throw new AssertionError("FAILED_READ_CLOSE_BECAME_RELEASE_RECEIPT");
+            } catch(java.lang.reflect.InvocationTargetException failure) {
+                require(failure.getCause() instanceof IOException,"UNEXPECTED_READ_CLOSE_FAILURE:"+failure.getCause());
+            }
+            require(input.calls==1&&observed(detached,"queryInput")==input&&Boolean.TRUE.equals(observed(detached,"queryClosePending"))
+                    &&observed(detached,"queryCloseFailure") instanceof IOException,"FAILED_READ_CLOSE_STATE_LOST");
+        } finally { input.close(); }
     }
     private void finish(TickEvent.ServerTickEvent event,ProRuntime runtime,String heading) {
         finished=true;if(release!=null)release.countDown();

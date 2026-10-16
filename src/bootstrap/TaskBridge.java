@@ -85,6 +85,16 @@ public final class TaskBridge {
     static final class SchedulerRetired extends java.util.concurrent.RejectedExecutionException {
         SchedulerRetired(){super("RONOVA_PRIVATE_SCHEDULER_RETIRED");}
     }
+    private record SchedulerCalls(java.lang.invoke.MethodHandle shutdown,java.lang.invoke.MethodHandle terminated) { }
+    private static final java.util.concurrent.ConcurrentMap<Class<?>,SchedulerCalls> SCHEDULER_CALLS=new java.util.concurrent.ConcurrentHashMap<>();
+    private static volatile java.lang.invoke.MethodHandle threadInterrupt;
+    /** Definition metadata only. Thread targets and source ownership are still read at every use. */
+    private static final ClassValue<Class<?>> THREAD_RUN_IMPLEMENTATIONS=new ClassValue<>() {
+        @Override protected Class<?> computeValue(Class<?> type) {
+            try{return type.getMethod("run").getDeclaringClass();}
+            catch(NoSuchMethodException unavailable){throw new IllegalStateException("THREAD_RUN_UNAVAILABLE",unavailable);}
+        }
+    };
     static final java.util.Map<EventKey,Thread> TIMER_RUNNING=new java.util.HashMap<>();
     // Source registration already holds CREATION_OWNERS. Notify only a real
     // addition, before publishing it, so repeated observations keep a heap
@@ -209,9 +219,17 @@ public final class TaskBridge {
     }
     static Object schedulerCall(Object pool,String name,Class<?> result)throws ReflectiveOperationException {
         Class<?> base=pool instanceof java.util.concurrent.ThreadPoolExecutor?java.util.concurrent.ThreadPoolExecutor.class:java.util.concurrent.ForkJoinPool.class;
-        try {
+        SchedulerCalls calls=SCHEDULER_CALLS.get(base);
+        if(calls==null) {
             var lookup=java.lang.invoke.MethodHandles.privateLookupIn(base,java.lang.invoke.MethodHandles.lookup());
-            return lookup.findSpecial(base,name,java.lang.invoke.MethodType.methodType(result),base).invoke(pool);
+            SchedulerCalls resolved=new SchedulerCalls(lookup.findSpecial(base,"shutdownNow",java.lang.invoke.MethodType.methodType(List.class),base),
+                    lookup.findSpecial(base,"isTerminated",java.lang.invoke.MethodType.methodType(boolean.class),base));
+            SchedulerCalls prior=SCHEDULER_CALLS.putIfAbsent(base,resolved);calls=prior==null?resolved:prior;
+        }
+        java.lang.invoke.MethodHandle method=switch(name){case "shutdownNow"->calls.shutdown;case "isTerminated"->calls.terminated;default->null;};
+        if(method==null||method.type().returnType()!=result)throw new NoSuchMethodException("SCHEDULER_OPERATION_UNAVAILABLE:"+name);
+        try {
+            return method.invoke(pool);
         }catch(ReflectiveOperationException failure){throw failure;}
         catch(Throwable failure){throw new java.lang.reflect.InvocationTargetException(failure);}
     }
@@ -252,8 +270,12 @@ public final class TaskBridge {
     static void requestThreadInterrupt(Thread thread)throws ReflectiveOperationException {
         InterruptRequest previous=RETIRE_INTERRUPTS.get();RETIRE_INTERRUPTS.set(new InterruptRequest(thread,null));
         try {
-            var lookup=java.lang.invoke.MethodHandles.privateLookupIn(Thread.class,java.lang.invoke.MethodHandles.lookup());
-            lookup.findSpecial(Thread.class,"interrupt",java.lang.invoke.MethodType.methodType(void.class),Thread.class).invoke(thread);
+            java.lang.invoke.MethodHandle interrupt=threadInterrupt;
+            if(interrupt==null) {
+                var lookup=java.lang.invoke.MethodHandles.privateLookupIn(Thread.class,java.lang.invoke.MethodHandles.lookup());
+                interrupt=lookup.findSpecial(Thread.class,"interrupt",java.lang.invoke.MethodType.methodType(void.class),Thread.class);threadInterrupt=interrupt;
+            }
+            interrupt.invoke(thread);
         }catch(ReflectiveOperationException failure){throw failure;}
         catch(Throwable failure){throw new java.lang.reflect.InvocationTargetException(failure);}
         finally{if(previous==null)RETIRE_INTERRUPTS.remove();else RETIRE_INTERRUPTS.set(previous);}
@@ -311,7 +333,7 @@ public final class TaskBridge {
     static ThreadOrigin threadOrigin(Thread thread,Object target)throws NoSuchMethodException {
         ThreadOrigin origin=observedThreadOrigin(thread);
         threadSources(thread,origin,thread);threadSources(thread,origin,target);
-        Class<?> implementation=thread.getClass().getMethod("run").getDeclaringClass();Module declaration=DefinitionBridge.module(implementation);
+        Class<?> implementation=THREAD_RUN_IMPLEMENTATIONS.get(thread.getClass());Module declaration=DefinitionBridge.module(implementation);
         if(producer(declaration))taskSource(thread,origin.sources,declaration);
         else if(implementation!=Thread.class&&!threadWorker(thread,target)){
             if(!origin.unknown)NativeControl.heapPolicyChanged(thread);origin.unknown=true;
@@ -460,6 +482,16 @@ public final class TaskBridge {
     public static void timerExit(Object task){
         timerThreadCaller();synchronized(CREATION_OWNERS){EventKey key=new EventKey(task,null);if(TIMER_RUNNING.get(key)==Thread.currentThread())TIMER_RUNNING.remove(key);}
     }
+    private static final class TimerPlatform {
+        static final Class<?> TYPE=ThreadPlatform.type("java.util.TaskQueue");
+        static final java.lang.reflect.Field QUEUE=ThreadPlatform.field(java.util.Timer.class,"queue"),TABLE=ThreadPlatform.field(TYPE,"queue"),SIZE=ThreadPlatform.field(TYPE,"size"),
+                STATE=ThreadPlatform.field(java.util.TimerTask.class,"state"),LOCK=ThreadPlatform.field(java.util.TimerTask.class,"lock");
+        static final java.lang.reflect.Method REMOVE=method("quickRemove",int.class),HEAP=method("heapify");
+        private static java.lang.reflect.Method method(String name,Class<?>... arguments){
+            try{var method=TYPE.getDeclaredMethod(name,arguments);method.setAccessible(true);return method;}
+            catch(ReflectiveOperationException unavailable){throw new ExceptionInInitializerError(unavailable);}
+        }
+    }
     public static java.util.List<Runnable> retireTimer(Object value,Module module)throws ReflectiveOperationException {
         return retireTimer(value,new Module[]{module});
     }
@@ -467,27 +499,38 @@ public final class TaskBridge {
         if(!coreWriter()||value==null||value.getClass()!=java.util.Timer.class)throw new SecurityException("GROUP_TIMER_CORE_REQUIRED");
         Set<Module> selected=selectedSchedulerModules(modules);if(selected.isEmpty())throw new SecurityException("GROUP_TIMER_SOURCES_REQUIRED");
         for(Module source:selected)if(!modStopped(source))throw new SecurityException("STOPPED_TIMER_SOURCES_REQUIRED");
-        var queueField=java.util.Timer.class.getDeclaredField("queue");queueField.setAccessible(true);Object queue=queueField.get(value);
-        Class<?> type=queue.getClass();java.lang.reflect.Field tableField=type.getDeclaredField("queue"),sizeField=type.getDeclaredField("size");tableField.setAccessible(true);sizeField.setAccessible(true);
-        java.lang.reflect.Method remove=type.getDeclaredMethod("quickRemove",int.class),heap=type.getDeclaredMethod("heapify");remove.setAccessible(true);heap.setAccessible(true);
-        java.lang.reflect.Field stateField=java.util.TimerTask.class.getDeclaredField("state"),lockField=java.util.TimerTask.class.getDeclaredField("lock");stateField.setAccessible(true);lockField.setAccessible(true);
+        Object queue=TimerPlatform.QUEUE.get(value);
+        if(queue==null||queue.getClass()!=TimerPlatform.TYPE)throw new IllegalStateException("TIMER_QUEUE_LAYOUT_UNAVAILABLE");
         java.util.List<Runnable> removed=new java.util.ArrayList<>();java.util.Set<Object> seen=java.util.Collections.newSetFromMap(new java.util.IdentityHashMap<>());
-        synchronized(queue){Object[] table=(Object[])tableField.get(queue);
-            for(int i=sizeField.getInt(queue);i>=1;i--){Object task=table[i];if(!selectedTimerTask(task,selected))continue;
-                synchronized(lockField.get(task)){stateField.setInt(task,3);remove.invoke(queue,i);removed.add((Runnable)task);seen.add(task);}
+        synchronized(queue){
+            if(TimerPlatform.QUEUE.get(value)!=queue)throw new IllegalStateException("TIMER_QUEUE_OWNER_CHANGED");
+            Object[] table=(Object[])TimerPlatform.TABLE.get(queue);
+            for(int i=TimerPlatform.SIZE.getInt(queue);i>=1;i--){Object task=table[i];if(!selectedTimerTask(task,selected))continue;
+                Object lock=TimerPlatform.LOCK.get(task);
+                synchronized(lock){
+                    if(TimerPlatform.QUEUE.get(value)!=queue||TimerPlatform.LOCK.get(task)!=lock)throw new IllegalStateException("TIMER_QUEUE_OWNER_CHANGED");
+                    TimerPlatform.STATE.setInt(task,3);TimerPlatform.REMOVE.invoke(queue,i);removed.add((Runnable)task);seen.add(task);
+                }
             }
-            if(!removed.isEmpty())heap.invoke(queue);
+            if(!removed.isEmpty())TimerPlatform.HEAP.invoke(queue);
         }
         java.util.List<Object> published=new java.util.ArrayList<>();synchronized(CREATION_OWNERS){
             for(var entry:TASK_SCHEDULERS.entrySet())if(entry.getValue().get()==value){Object task=entry.getKey().get();if(task!=null&&task instanceof java.util.TimerTask)published.add(task);}
         }
-        for(Object task:published)if(!seen.contains(task)&&selectedTimerTask(task,selected))synchronized(lockField.get(task)){stateField.setInt(task,3);removed.add((Runnable)task);}
+        for(Object task:published)if(!seen.contains(task)&&selectedTimerTask(task,selected)) {
+            Object lock=TimerPlatform.LOCK.get(task);
+            synchronized(lock){
+                if(TimerPlatform.LOCK.get(task)!=lock)throw new IllegalStateException("TIMER_TASK_LOCK_CHANGED");
+                TimerPlatform.STATE.setInt(task,3);removed.add((Runnable)task);
+            }
+        }
         synchronized(queue){
+            if(TimerPlatform.QUEUE.get(value)!=queue)throw new IllegalStateException("TIMER_QUEUE_OWNER_CHANGED");
             // Successful publication holds this same queue monitor. Decide and cancel
             // without allowing a new outside submission between the two operations.
             boolean exclusive;synchronized(CREATION_OWNERS){
                 exclusive=schedulerDisposition(List.of(value),selected).equals("PRIVATE");
-                if(sizeField.getInt(queue)!=0){exclusive=false;SHARED_SCHEDULERS.add(new EventKey(value,CREATION_QUEUE));}
+                if(TimerPlatform.SIZE.getInt(queue)!=0){exclusive=false;SHARED_SCHEDULERS.add(new EventKey(value,CREATION_QUEUE));}
             }
             if(exclusive){
                 ((java.util.Timer)value).cancel();
@@ -508,26 +551,28 @@ public final class TaskBridge {
     public static boolean timerResourceEnded(Object value)throws ReflectiveOperationException {
         if(!coreWriter()||value==null||value.getClass()!=java.util.Timer.class)throw new SecurityException("GROUP_TIMER_CORE_REQUIRED");
         synchronized(CREATION_OWNERS){if(SHARED_SCHEDULERS.contains(new EventKey(value,null)))return true;}
-        var field=java.util.Timer.class.getDeclaredField("thread");field.setAccessible(true);return !((Thread)field.get(value)).isAlive();
+        return !((Thread)ThreadPlatform.TIMER_THREAD.get(value)).isAlive();
     }
     public static boolean timerResourceEnded(Object value,Module[] modules)throws ReflectiveOperationException {
         if(!coreWriter()||value==null||value.getClass()!=java.util.Timer.class)throw new SecurityException("GROUP_TIMER_CORE_REQUIRED");
         String disposition;synchronized(CREATION_OWNERS){disposition=schedulerDisposition(List.of(value),selectedSchedulerModules(modules));}
         if(disposition.equals("SHARED"))return true;
         if(!disposition.equals("PRIVATE"))throw new IllegalStateException("TIMER_"+disposition);
-        var field=java.util.Timer.class.getDeclaredField("thread");field.setAccessible(true);return !((Thread)field.get(value)).isAlive();
+        return !((Thread)ThreadPlatform.TIMER_THREAD.get(value)).isAlive();
     }
     public static boolean timerTaskRetired(Object task)throws ReflectiveOperationException {
         if(!coreWriter()||!(task instanceof java.util.TimerTask))throw new SecurityException("GROUP_TIMER_CORE_REQUIRED");
         synchronized(CREATION_OWNERS){if(TIMER_RUNNING.containsKey(new EventKey(task,null)))return false;}
-        java.lang.reflect.Field stateField=java.util.TimerTask.class.getDeclaredField("state"),lockField=java.util.TimerTask.class.getDeclaredField("lock");stateField.setAccessible(true);lockField.setAccessible(true);
-        synchronized(lockField.get(task)){return stateField.getInt(task)==3;}
+        Object lock=TimerPlatform.LOCK.get(task);
+        synchronized(lock){return TimerPlatform.LOCK.get(task)==lock&&TimerPlatform.STATE.getInt(task)==3;}
     }
     static Object schedulerDelegate(Object value) {
         List<Object> chain=schedulerChain(value);return chain.isEmpty()?null:chain.get(chain.size()-1);
     }
     static final class SchedulerDelegates {
         static final Map<Class<?>,java.lang.reflect.Field> FIELDS=fields();
+        static final java.lang.ref.ReferenceQueue<Object> QUEUE=new java.lang.ref.ReferenceQueue<>();
+        static final Map<EventKey,SchedulerBinding> BINDINGS=new HashMap<>();
         private static Map<Class<?>,java.lang.reflect.Field> fields(){
             Map<Class<?>,java.lang.reflect.Field> fields=new IdentityHashMap<>();
             try{
@@ -539,14 +584,52 @@ public final class TaskBridge {
             return Collections.unmodifiableMap(fields);
         }
     }
-    static List<Object> schedulerChain(Object value){
-        List<Object> chain=new ArrayList<>();Set<Object> seen=Collections.newSetFromMap(new IdentityHashMap<>());Object current=value;
-        while(current!=null&&seen.add(current)){
-            chain.add(current);if(current instanceof java.util.concurrent.ThreadPoolExecutor||current instanceof java.util.concurrent.ForkJoinPool)return chain;
-            java.lang.reflect.Field delegate=SchedulerDelegates.FIELDS.get(current.getClass());if(delegate==null||!delegate.trySetAccessible())return List.of();
-            try{current=delegate.get(current);}catch(IllegalAccessException unavailable){return List.of();}
+    /** Weak actual chains plus their read handles. Disposition, submissions and termination are never retained. */
+    private static final class SchedulerBinding {
+        final List<java.lang.ref.WeakReference<Object>> objects;
+        final List<java.lang.reflect.Field> delegates;
+        final Object backendImage;
+        SchedulerBinding(List<Object> chain,List<java.lang.reflect.Field> delegates,Object backendImage) {
+            var references=new ArrayList<java.lang.ref.WeakReference<Object>>();
+            for(Object actual:chain)references.add(new java.lang.ref.WeakReference<>(actual));
+            objects=List.copyOf(references);this.delegates=List.copyOf(delegates);this.backendImage=backendImage;
         }
-        return List.of();
+        List<Object> current(Object value) {
+            if(backendImage!=boundaryCapabilities)return null;
+            var chain=new ArrayList<Object>(objects.size());Object actual=value;
+            for(int i=0;i<objects.size();i++) {
+                if(actual==null||objects.get(i).get()!=actual)return null;
+                chain.add(actual);
+                if(i<delegates.size())try{actual=delegates.get(i).get(actual);}catch(IllegalAccessException unavailable){return null;}
+            }
+            return List.copyOf(chain);
+        }
+    }
+    static List<Object> schedulerChain(Object value){
+        if(value==null)return List.of();
+        synchronized(SchedulerDelegates.BINDINGS) {
+            EventKey stale;while((stale=(EventKey)SchedulerDelegates.QUEUE.poll())!=null)SchedulerDelegates.BINDINGS.remove(stale);
+            EventKey key=new EventKey(value,null);SchedulerBinding previous=SchedulerDelegates.BINDINGS.get(key);
+            if(previous!=null) {
+                List<Object> actual=previous.current(value);if(actual!=null)return actual;
+                SchedulerDelegates.BINDINGS.remove(key);
+            }
+            List<Object> chain=new ArrayList<>();var delegates=new ArrayList<java.lang.reflect.Field>();
+            Set<Object> seen=Collections.newSetFromMap(new IdentityHashMap<>());Object current=value;
+            while(current!=null&&seen.add(current)){
+                chain.add(current);
+                if(current instanceof java.util.concurrent.ThreadPoolExecutor||current instanceof java.util.concurrent.ForkJoinPool) {
+                    SchedulerBinding resolved=new SchedulerBinding(chain,delegates,boundaryCapabilities);List<Object> actual=resolved.current(value);
+                    if(actual==null)return List.of();
+                    SchedulerDelegates.BINDINGS.put(new EventKey(value,SchedulerDelegates.QUEUE),resolved);return actual;
+                }
+                java.lang.reflect.Field delegate=SchedulerDelegates.FIELDS.get(current.getClass());
+                if(delegate==null||!delegate.canAccess(current)&&!delegate.trySetAccessible())return List.of();
+                delegates.add(delegate);
+                try{current=delegate.get(current);}catch(IllegalAccessException unavailable){return List.of();}
+            }
+            return List.of();
+        }
     }
     public static Object[][] groupTaskSnapshot(Module[] modules) {
         if(!coreWriter())throw new SecurityException("GROUP_CORE_REQUIRED");
@@ -1063,7 +1146,7 @@ public final class TaskBridge {
         finally { if(prior==null)AUTHORITY.remove();else AUTHORITY.set(prior); }
     }
     private TaskBridge() {}
-    public static int abiVersion(){return 94;}
+    public static int abiVersion(){return 95;}
     public static synchronized void installEquipmentAsync(Class<?> owner,java.lang.invoke.MethodHandle capture,java.lang.invoke.MethodHandle invoke){
         requirePolicyInstaller();if(guards==null||guards.owner()!=owner||equipmentAsync!=null&&equipmentAsync.owner!=owner)throw new SecurityException("EQUIPMENT_ASYNC_OWNER");
         equipmentAsync=new EquipmentAsync(owner,Objects.requireNonNull(capture).asType(java.lang.invoke.MethodType.methodType(Object.class,Object.class,Object.class,Object.class)),

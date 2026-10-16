@@ -411,3 +411,41 @@ done:
     if(failure){jclass error=(*env)->FindClass(env,"java/lang/AssertionError");if(error)(*env)->ThrowNew(env,error,failure);}
     return failure?JNI_FALSE:JNI_TRUE;
 }
+
+/* Keep the production Java stop-publication path, including its real JNI
+ * crossing. Only these isolated native bodies call the blocking/reentry probes;
+ * no controller, JVMTI dispatcher, original JNI table or native retirement is installed. */
+static jclass audit_stop_fixture;
+static jmethodID audit_stop_probe,audit_stop_reentry;
+static void JNICALL audit_stop_module(JNIEnv *env,jclass control,jobject module,jboolean stopped){
+    (void)control;(*env)->CallStaticVoidMethod(env,audit_stop_fixture,audit_stop_probe,module,stopped);
+}
+static void JNICALL audit_stop_retire(JNIEnv *env,jclass control,jobject module){(void)env;(void)control;(void)module;}
+JNIEXPORT void JNICALL Java_dev_ronova_pro_AuditFixCheck_stopPolicyStop0(JNIEnv *env,jclass type,jclass control){
+    (void)type;if(control)(*env)->UnregisterNatives(env,control);
+    if(audit_stop_fixture)(*env)->DeleteGlobalRef(env,audit_stop_fixture);
+    audit_stop_fixture=NULL;audit_stop_probe=audit_stop_reentry=NULL;
+}
+JNIEXPORT void JNICALL Java_dev_ronova_pro_AuditFixCheck_stopPolicySetup0(JNIEnv *env,jclass type,jclass control){
+    if(audit_stop_fixture||native_controller||native_jni_ready||native_vm){audit_physical_failure(env,"stop publication fixture requires an uninstalled controller");return;}
+    audit_stop_fixture=(jclass)(*env)->NewGlobalRef(env,type);
+    audit_stop_probe=(*env)->GetStaticMethodID(env,type,"stopPolicyNativeProbe","(Ljava/lang/Module;Z)V");
+    audit_stop_reentry=(*env)->GetStaticMethodID(env,type,"stopPolicyNativeReenter","(Ljava/lang/Module;)V");
+    if(!audit_stop_fixture||!audit_stop_probe||!audit_stop_reentry){
+        if(audit_stop_fixture)(*env)->DeleteGlobalRef(env,audit_stop_fixture);
+        audit_stop_fixture=NULL;audit_stop_probe=audit_stop_reentry=NULL;return;
+    }
+    JNINativeMethod methods[]={
+        {"module0","(Ljava/lang/Module;Z)V",(void*)audit_stop_module},
+        {"retireCode0","(Ljava/lang/Module;)V",(void*)audit_stop_retire},
+        {"heapPolicyChanged0","(Ljava/lang/Object;)V",(void*)Java_dev_ronova_pro_bootstrap_NativeControl_heapPolicyChanged0}
+    };
+    if((*env)->RegisterNatives(env,control,methods,sizeof(methods)/sizeof(methods[0]))!=JNI_OK){
+        if(audit_stop_fixture)(*env)->DeleteGlobalRef(env,audit_stop_fixture);
+        audit_stop_fixture=NULL;audit_stop_probe=audit_stop_reentry=NULL;
+    }
+}
+JNIEXPORT void JNICALL Java_dev_ronova_pro_AuditFixCheck_stopPolicyCallback0(JNIEnv *env,jclass type,jobject module){
+    (void)type;if(!audit_stop_fixture||!audit_stop_reentry){audit_physical_failure(env,"stop publication native callback is not prepared");return;}
+    (*env)->CallStaticVoidMethod(env,audit_stop_fixture,audit_stop_reentry,module);
+}

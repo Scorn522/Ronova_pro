@@ -1,5 +1,26 @@
 # Ronova Pro 当前进度
 
+## 2026-10-16：C 接续——任务增量调度、资源绑定与停组无锁交接
+
+接续 `f86c94e`，Java ABI95 / Native ABI85 / SourceMapBridge2 / Storage3 / Journal6，协议 `r3-client-8`。按问题总整理收口 P1-05/06/07/08/11/18 及相关热路径；先写齐本包源码，再统一构建。未恢复旧 JDK 容器 Hook，未做自身外观、武器注册或源码 ZIP。
+
+任务 operation 索引在资格赋值、退役和关闭时增量维护，当前任务窗继续沿真实 parent/child 关系纳入迟到任务。恢复链改为当前/历史轮转队列，资格变化通知更新分类，当前工作每五 tick 选取一轮；历史义务独立推进。存储工作用 ready/deadline 和 worker 完成事件调度，队列拒绝次 tick 重排；新保存读回唤醒旧代待收尾工作，运行中的唤醒保留到 finally。查询、状态和最终提交仍读当前资格与真实资源，不以调度缓存授予清理权。
+
+ResourceBinding 缓存准确 scheduler、queue、lock 和 scheduled owner/delegate 布局，复用前重读实际字段及当前 canonical group、qualification、backend image/epoch；变化撤销旧完成事实。最终释放 Core 的准确 Future 引用前，在真实队列锁下确认缺席并重读 isDone。scheduler 基类 MethodHandle、线程 run 定义、Timer 布局与弱身份委托链缓存元数据；归属、委托和终止仍动态读取。存储 remaining/superseded/successor 均拒绝运行中、持有 queryInput、关闭未确认或过期读回；独立读取流首次 close 抛错后保留失败，后续空 close 不生成释放收据。
+
+停组按实际模块串行发布不可变 Returns 代次，DefinitionBridge/ControlBridge/Native 调用不持 ModGroupBoundary 类锁。Native 回调只标记 pending，不等待正在回调的发布者；发布者继续同代补交及最新策略，控制入口等待实际完成，重转换后复核策略代次。重复 uuid-fixed 保留 UUID。ProRuntime 查询停组状态也释放 moduleSubjects 监视器后才进入可回调路径，并重核所查归属与代次。
+
+修正 Forge EventBus 提前返回漏装后续边界：注册/监听、注销保护、异常分派和已声明 dispatch 依序组合，EventFault 边界支持幂等。普通 producer 的内部转换异常保留原输入并记录实际来源 gap；已停止来源、准确选中目标与控制载体继续硬拒绝，只有实际控制载体失败影响全局控制状态。诊断摘要从 enforcement tick 拆成独立有界 listener；高频来源与客户端精确清理入口缓存反射元数据，保留真实 caller/scope 与写后读回。
+
+主构建 `build-c-java95-native85-recovery-scheduling-20261016.log` **PASS，29秒**，21项任务中14项执行、7项保持最新；生产 Native85 未改，沿用同一构建输出。末尾检查器首次 javac 缺内部 ASM 导出参数，原 `compile-c-java95-native85-recovery-scheduling-20261016.log` 保留；仅补编译导出参数，`compile-c-java95-native85-checker-exports-20261016.log` **退出0**。隔离 JNI 夹具首次 Zig 在沙箱无法定位自身，原 `compile-c-java95-native85-native-fixture-20261016.log` 保留；使用同一现有编译器正常访问后，`compile-c-java95-native85-native-fixture-access-20261016.log` **退出0**。未重复主构建或旧矩阵。
+
+三个直接检查均首轮退出0：`event-image-composition` 使用真实 Forge EventBus 字节调用生产组合入口，覆盖四边界、原 dispatcher fallback、二次幂等、ASM 与 JVM 定义校验；`scoped-transform-failure` 覆盖普通来源同一输入、scoped gap、已停止/选中/控制目标的 VM 硬拒绝和仅控制失败影响全局状态；`stop-policy-concurrency` 经真实 NativeControl JNI 入口检查不持类锁、双线程回调立即返回、同代 pending 与新策略接续、Java/native 返回一致和固定 UUID 复用。后两项的目标登记与 native body 使用隔离夹具，不代表真实 Agent/Native 控制器安装。
+
+既有 StorageRaceFixture 增加单独 `ronova.pro.storageSchedulingCheck=true` 场景，源码编译 `compile-c-java95-native85-storage-fixture-20261016.log` **退出0**。它要求40个真实 SavedData 工作经历满队列拒绝后逐文件完成、保留无关字段，检查读回 worker 运行中不结清及失败 close 不冒认释放；本轮真实 Forge 场景 **NOTRUN**，不据夹具源码声明这些结果通过。真实整体安装、进服、存档重启、性能及 Windows 驱动加载亦未运行。
+
+匹配候选 `distribution/candidate-c-java95-native85-recovery-scheduling-wip-20261016`：Core3007582、prelaunch23226字节。源码、候选和既有摘要同步 GitHub。已删容器路径的防护、未知自定义载体及间接/原生不透明路径继续按实际缺口报告，完整 C/B 不以本包构建及隔离检查标完成。
+
+---
 ## 2026-10-16：C 接续——启动批次、物理帧 token、队列定位与当前读回
 
 接续 `5e60323`，Java ABI94 / Native ABI85 / SourceMapBridge2 / Storage3 / Journal6，协议 `r3-client-8`。这四项整包源码写齐后统一构建，没有恢复旧容器 Hook、生成源码 ZIP 或扩展自身外观/武器。

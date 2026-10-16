@@ -155,7 +155,7 @@ public final class RecoveryAgent {
             bootstrap=new JarFile(nativeBootstrapPath.toFile());
             api.appendToBootstrapClassLoaderSearch(bootstrap);
             bridge=Class.forName("dev.ronova.pro.bootstrap.TaskBridge",true,null);
-            if(!Integer.valueOf(94).equals(bridge.getMethod("abiVersion").invoke(null)))throw new IllegalStateException("TASK_BRIDGE_ABI_MISMATCH");
+            if(!Integer.valueOf(95).equals(bridge.getMethod("abiVersion").invoke(null)))throw new IllegalStateException("TASK_BRIDGE_ABI_MISMATCH");
             // This classfile was first requested beneath a stopped empty-stream return.
             Class.forName("java.util.stream.IntPipeline$Head",false,null);
             for(String helper:List.of("SourcePublication","SourceIndexMutation","FastListView","FieldMutation","EquipmentInvocations"))
@@ -187,7 +187,7 @@ public final class RecoveryAgent {
             Class.forName("dev.ronova.pro.bootstrap.ControlBridge$ProducerFrame",false,null);
             Class.forName("dev.ronova.pro.bootstrap.EventFaultBridge",true,null);
             Class<?> control=Class.forName("dev.ronova.pro.bootstrap.ControlBridge",true,null);
-            if(!Integer.valueOf(94).equals(control.getMethod("abiVersion").invoke(null)))throw new IllegalStateException("CONTROL_BRIDGE_ABI_MISMATCH");
+            if(!Integer.valueOf(95).equals(control.getMethod("abiVersion").invoke(null)))throw new IllegalStateException("CONTROL_BRIDGE_ABI_MISMATCH");
             Module base=Object.class.getModule(),ours=RecoveryAgent.class.getModule();
             api.redefineModule(base,Set.of(bridge.getModule()),Map.of(
                     "jdk.internal.org.objectweb.asm",Set.of(ours),"jdk.internal.org.objectweb.asm.commons",Set.of(ours),
@@ -266,14 +266,8 @@ public final class RecoveryAgent {
                     platformReturned(loader,name,type,result==null?bytes:result);return result;
                     }catch(RuntimeException|LinkageError failure){
                         platformReturned(loader,name,type,null);
-                        if(controlFailure==null){
-                            controlFailure=String.valueOf(name)+":"+failure.getClass().getSimpleName()+":"+String.valueOf(failure.getMessage());
-                            System.err.println("RONOVA_CONTROL_TRANSFORM_FAILED:"+controlFailure);
-                        }
-                        if(origin!=null||producer||control||watched||promoted||confirmedContract(type)){
-                            ModGroupBoundary.failed(declaration,String.valueOf(name),failure);return new byte[]{0,0,0,0};
-                        }
-                        throw failure;
+                        return failedTransform(declaration,name,bytes,failure,control,
+                                control||ModGroupBoundary.stopped(declaration)||watched||promoted||confirmedContract(type));
                     }
                 }
                 private byte[] apply(Module module,ClassLoader loader,String name,Class<?> type,ProtectionDomain domain,byte[] bytes,boolean externalSources) {
@@ -340,11 +334,10 @@ public final class RecoveryAgent {
                     }
                     byte[] defining=DefinitionBoundary.platform(loader,name,bytes);
                     if(defining!=null){byte[] handle=HandleWriteBoundary.transform(loader,name,defining);return handle==null?defining:handle;}
-                    byte[] eventBus=EventBusBoundary.transform(name,bytes);
-                    if(eventBus!=null) {
+                    if(EventBusBoundary.TARGET.equals(name)) {
                         if(module!=null&&!module.canRead(bridge.getModule()))
                             api.redefineModule(module,Set.of(bridge.getModule()),Map.of(),Map.of(),Set.of(),Map.of());
-                        return eventBus;
+                        return eventImage(loader,name,type,bytes);
                     }
                     byte[] command=CommandBoundary.transform(loader,name,bytes);
                     if(command!=null) {
@@ -360,13 +353,6 @@ public final class RecoveryAgent {
                     if(nativeLibraries!=null)return nativeLibraries;
                     byte[] sectionKeys=SectionKeyBoundary.transform(loader,name,bytes);
                     if(sectionKeys!=null)return sectionKeys;
-                    if(EventFaultBoundary.TARGET.equals(name)) {
-                        if(module!=null&&!module.canRead(bridge.getModule()))
-                            api.redefineModule(module,Set.of(bridge.getModule()),Map.of(),Map.of(),Set.of(),Map.of());
-                        byte[] guardedEvent=EventFaultBoundary.transform(loader,bytes);
-                        byte[] declaredEvent=DispatchBoundary.transform(loader,name,type,guardedEvent);
-                        eventFaultGuarded=true;return declaredEvent==null?guardedEvent:declaredEvent;
-                    }
                     byte[] handles=HandleWriteBoundary.transform(loader,name,bytes);if(handles!=null)return handles;
                     if(loader==null&&("java/util/concurrent/ThreadPoolExecutor".equals(name)
                             ||"java/util/concurrent/ScheduledThreadPoolExecutor".equals(name)))return BackingBoundary.transform(loader,name,bytes);
@@ -436,14 +422,6 @@ public final class RecoveryAgent {
                         throw new IllegalStateException("CODE_SOURCE_BOUNDARY_BINDING_FAILED:"+name,failure);
                     }catch(RuntimeException|LinkageError failure) {
                         EquipmentActionBoundary.transformFailed(type);
-                        if(controlFailure==null)controlFailure=String.valueOf(name)+":"+failure.getClass().getSimpleName()+":"+String.valueOf(failure.getMessage());
-                        System.err.println("RONOVA_CONTROL_TRANSFORM_FAILED:"+controlFailure);
-                        if(ModGroupBoundary.stopped(module)) {
-                            ModGroupBoundary.failed(module,String.valueOf(name),failure);
-                            // Transformer exceptions alone are ignored by Instrumentation. Invalid bytes refuse
-                            // this selected definition; a failed retransform retains and reports the old body.
-                            return new byte[]{0,0,0,0};
-                        }
                         throw failure;
                     }
                 }
@@ -579,6 +557,24 @@ public final class RecoveryAgent {
             if(image!=null&&!image.accepted()&&api.isModifiableClass(actual))pending.add(actual);
         }
         retransformStartup(api,pending,"NATIVE_RETRY_PLATFORM",true);
+    }
+    /** All protections for the shared Forge dispatcher compose on the same returned body. */
+    private static byte[] eventImage(ClassLoader loader,String name,Class<?> actual,byte[] bytes) {
+        if(!EventBusBoundary.TARGET.equals(name))return null;
+        byte[] registration=EventBusBoundary.transform(name,bytes),current=registration==null?bytes:registration;
+        byte[] fault=EventFaultBoundary.transform(loader,current);if(fault!=null)current=fault;
+        byte[] declared=DispatchBoundary.transform(loader,name,actual,current);if(declared!=null)current=declared;
+        eventFaultGuarded=true;return current==bytes?null:current;
+    }
+    private static byte[] failedTransform(Module module,String name,byte[] input,Throwable failure,boolean control,boolean required) {
+        ModGroupBoundary.failed(module,String.valueOf(name),failure);
+        if(control&&controlFailure==null) {
+            controlFailure=String.valueOf(name)+":"+failure.getClass().getSimpleName()+":"+String.valueOf(failure.getMessage());
+            System.err.println("RONOVA_CONTROL_TRANSFORM_FAILED:"+controlFailure);
+        }
+        // Observation failure in an unselected source remains a scoped gap. Only a selected
+        // definition or an actual control contract refuses the VM's attempted image.
+        return required?new byte[]{0,0,0,0}:input;
     }
     private static boolean taskReadinessTarget(ClassLoader loader,String name){
         return loader==null&&(JdkTaskBoundaryContract.registered(name)||name.equals("java/lang/Thread")
@@ -820,17 +816,19 @@ public final class RecoveryAgent {
             throw new SecurityException("MOD_GROUP_CONTROL_CALLER");
     }
     static void publishStoppedModule(Module module) {
-        synchronized(ModGroupBoundary.class) {
+        ModGroupBoundary.Returns policy=ModGroupBoundary.beginPublication(module);if(policy==null)return;
         try {
-            // Capture and publish the same policy generation before any native owner gate closes.
-            ModGroupBoundary.Returns policy=ModGroupBoundary.policy(module);
-            Class.forName("dev.ronova.pro.bootstrap.DefinitionBridge",false,null).getMethod("policy",Module.class,String.class,String.class)
-                    .invoke(null,module,policy.mode(),policy.fixedUuid());
-            Class.forName("dev.ronova.pro.bootstrap.ControlBridge",false,null).getMethod("stopModules",Module[].class).invoke(null,(Object)new Module[]{module});
-            Class.forName("dev.ronova.pro.bootstrap.NativeControl",false,null).getMethod("module",Module.class,boolean.class).invoke(null,module,true);
+            do {
+                // Only this module's publisher enters Native. Reentrant callbacks leave it to drain a newer policy.
+                Class.forName("dev.ronova.pro.bootstrap.DefinitionBridge",false,null).getMethod("policy",Module.class,String.class,String.class)
+                        .invoke(null,module,policy.mode(),policy.fixedUuid());
+                Class.forName("dev.ronova.pro.bootstrap.ControlBridge",false,null).getMethod("stopModules",Module[].class).invoke(null,(Object)new Module[]{module});
+                Class.forName("dev.ronova.pro.bootstrap.NativeControl",false,null).getMethod("module",Module.class,boolean.class).invoke(null,module,true);
+                policy=ModGroupBoundary.finishPublication(module,policy);
+            }while(policy!=null);
         }
         catch(ReflectiveOperationException failure) {throw new IllegalStateException("MOD_TASK_GATE_PUBLICATION_FAILED",failure);}
-        }
+        finally{ModGroupBoundary.failedPublication(module);}
     }
     /** Called only through the private bootstrap callback after its exact native TLS proof. */
     public static boolean nativeImageCandidate(Module module,ClassLoader loader,String name,Class<?> actual,Module[] writers){
@@ -861,10 +859,9 @@ public final class RecoveryAgent {
         boolean registered=ExternalCodeImages.recorded(loader,name)||ExternalCodeDefinitions.executionSourcesObserved(loader,name)||watchedDefinition(actual)||confirmedContract(actual);
         boolean declared=origin!=null||producerModule(declaration);
         if(!producer&&!control&&!registered&&!declared)return bytes;
-        // A name alone is a candidate, not confirmed ownership. Hard refusal
-        // is reserved for real producers, control carriers and exact watched
-        // declarations; unrelated malformed callbacks retain VM semantics.
-        boolean confirmed=producer||control||declared||watchedDefinition(actual)||confirmedContract(actual);
+        // Source ownership selects observation. Hard refusal needs an actual control contract or stopped source.
+        boolean confirmed=control||ModGroupBoundary.stopped(declaration)||watchedDefinition(actual)||confirmedContract(actual)
+                ||Arrays.stream(writers).anyMatch(ModGroupBoundary::stopped);
         try{
             if(name==null)name=new jdk.internal.org.objectweb.asm.ClassReader(bytes).getClassName();
             if(!name.equals(new jdk.internal.org.objectweb.asm.ClassReader(original).getClassName())||!name.equals(new jdk.internal.org.objectweb.asm.ClassReader(bytes).getClassName())){
@@ -888,15 +885,21 @@ public final class RecoveryAgent {
         try {if(caller!=Class.forName("dev.ronova.pro.bootstrap.DefinitionBridge",false,null))throw new SecurityException("ACTUAL_DEFINITION_BRIDGE_REQUIRED");}
         catch(ClassNotFoundException unavailable){throw new IllegalStateException(unavailable);}
         if(!producerModule(module))return bytes;
+        String name=null;
+        try {
         if(!module.canRead(bridge.getModule()))instrumentation.redefineModule(module,Set.of(bridge.getModule()),Map.of(),Map.of(),Set.of(),Map.of());
         if(loader!=null&&!loader.getUnnamedModule().canRead(bridge.getModule()))
             instrumentation.redefineModule(loader.getUnnamedModule(),Set.of(bridge.getModule()),Map.of(),Map.of(),Set.of(),Map.of());
-        String name=new jdk.internal.org.objectweb.asm.ClassReader(bytes).getClassName();
+        name=new jdk.internal.org.objectweb.asm.ClassReader(bytes).getClassName();
         ExternalCodeRuntime.Source source=ExternalCodeRuntime.prepare(module,loader,name,null,bytes,hidden);
         byte[] current=DefinitionBoundary.generated(loader,source.bytes());
         byte[] fields=FieldWriteBoundary.transform(loader,module,current);if(fields!=null)current=fields;
         NativeBindingBoundary.observe(name,bytes);
         return ExternalCodeRuntime.finish(loader,name,null,source,current);
+        } catch(RuntimeException|LinkageError failure) {
+            boolean control=controlImages.critical(module,loader,name,null);
+            return failedTransform(module,name,bytes,failure,control,control||ModGroupBoundary.stopped(module));
+        }
     }
     public static void externalDefinitionAccepted(Class<?> actual,byte[] bytes){
         Class<?> caller=CALLER.getCallerClass();

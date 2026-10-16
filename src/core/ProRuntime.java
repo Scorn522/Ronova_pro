@@ -158,24 +158,44 @@ public final class ProRuntime implements AutoCloseable {
     UUID groupOperation(UUID subject,UUID original) {Group group=groups.get(groupMembers.getOrDefault(subject,subject));return group==null?original:group.operation;}
     List<String> groupCodeGaps(UUID id) {
         UUID root=groupMembers.getOrDefault(id,id);Subject subject=subjects.get(root);
-        if(!groups.containsKey(root))return List.of();
-        List<String> gaps=new ArrayList<>();if(subject!=null){gaps.addAll(subject.unresolvedSources);gaps.addAll(presentations.groupGaps(subject));}
+        Group group=groups.get(root);if(group==null)return List.of();
+        if(subject==null)return List.of("GROUP_AUTHORITY_UNAVAILABLE");
+        long generation=subject.generation;Module[] modules=group.modules;
+        List<String> gaps=new ArrayList<>();gaps.addAll(subject.unresolvedSources);gaps.addAll(presentations.groupGaps(subject));
         try {
-            Class<?> agent=Class.forName("dev.ronova.pro.agent.RecoveryAgent",false,ClassLoader.getSystemClassLoader());
-            synchronized(moduleSubjects) {for(var entry:moduleSubjects.entrySet())if(entry.getValue()==subject) {
-                String state=String.valueOf(agent.getMethod("modGroupState",Module.class).invoke(null,entry.getKey()));
+            var query=groupStateQuery;
+            if(query==null)groupStateQuery=query=Class.forName("dev.ronova.pro.agent.RecoveryAgent",false,ClassLoader.getSystemClassLoader()).getMethod("modGroupState",Module.class);
+            // The query can enter Native and return through Java. Never keep the
+            // module ownership monitor across that call; recheck its exact snapshot.
+            for(Module module:modules) {
+                if(moduleSubjects.get(module)!=subject){gaps.add("GROUP_MODULE_AUTHORITY_CHANGED");continue;}
+                String state=String.valueOf(query.invoke(null,module));
                 if(!state.contains(";STATE=STOPPED;"))gaps.add("GROUP_CODE:"+state);
-            }}
+                if(moduleSubjects.get(module)!=subject)gaps.add("GROUP_MODULE_AUTHORITY_CHANGED");
+            }
         }catch(ReflectiveOperationException unavailable){gaps.add("GROUP_CODE_QUERY_UNAVAILABLE");}
+        if(group.modules!=modules||subject.generation!=generation||canonicalSubject(id)!=subject)gaps.add("GROUP_CODE_SCOPE_CHANGED");
         return List.copyOf(gaps);
+    }
+    private static volatile java.lang.reflect.Method groupStateQuery;
+    private record CreationAccess(java.lang.reflect.Method unknown,java.lang.reflect.Method sources,java.lang.reflect.Method delivering) { }
+    private static volatile CreationAccess creationAccess;
+    private static CreationAccess creationAccess()throws ReflectiveOperationException {
+        CreationAccess access=creationAccess;
+        if(access==null) {
+            Class<?> bridge=Class.forName("dev.ronova.pro.bootstrap.ControlBridge",false,null);
+            creationAccess=access=new CreationAccess(bridge.getMethod("objectSourceUnknown",Object.class),
+                    bridge.getMethod("objectSources",Object.class),bridge.getMethod("deliveringCreationTo",Class.class));
+        }
+        return access;
     }
     boolean sameGroup(Collection<UUID> ids,Subject authority) {return authority!=null&&groupAuthority(ids)==canonicalSubject(authority.id);}
     Subject groupSubject(Object value) {
         if(value==null)return null;
         try {
-            Class<?> bridge=Class.forName("dev.ronova.pro.bootstrap.TaskBridge",false,null);
-            if(Boolean.TRUE.equals(Class.forName("dev.ronova.pro.bootstrap.ControlBridge",false,null).getMethod("objectSourceUnknown",Object.class).invoke(null,value)))return null;
-            Module[] origins=(Module[])Class.forName("dev.ronova.pro.bootstrap.ControlBridge",false,null).getMethod("objectSources",Object.class).invoke(null,value);
+            CreationAccess access=creationAccess();
+            if(Boolean.TRUE.equals(access.unknown.invoke(null,value)))return null;
+            Module[] origins=(Module[])access.sources.invoke(null,value);
             Subject selected=null;for(Module origin:origins){
                 Subject next=origin==null?null:moduleSubjects.get(origin);if(next==null||selected!=null&&next!=selected)return null;selected=next;
             }return selected;
@@ -191,6 +211,7 @@ public final class ProRuntime implements AutoCloseable {
         UUID key=UUID.nameUUIDFromBytes(("ronova-mod-group/1|"+aliases).getBytes(java.nio.charset.StandardCharsets.UTF_8));
         Subject subject=subjects.computeIfAbsent(key,Subject::new);
         try(var gate=subject.commitGate.enter()) {if(!subject.terminal){subject.generation++;subject.terminal=true;}}
+        qualificationChanged(subject);
         groupMembers.put(key,key);Group state=groups.computeIfAbsent(key,ignored->new Group(UUID.randomUUID()));UUID operation=state.operation;
         for(Module module:targets.values())bindGroupModule(key,module);
         state.aliases=aliases;
@@ -199,6 +220,9 @@ public final class ProRuntime implements AutoCloseable {
         String previous=state.mode;state.mode=mode;
         if(previous!=null&&!previous.equals(mode))groupFact(key,"GROUP/1\tRETURN\t"+key+"\t"+mode);
         return subject;
+    }
+    private void qualificationChanged(Subject subject) {
+        RecoveryChain chain=recoveryChain;if(chain!=null)chain.qualificationChanged(subject.id);
     }
     private void groupMember(Subject group,Subject member) {
         UUID previous=groupMembers.putIfAbsent(member.id,group.id);
@@ -267,8 +291,7 @@ public final class ProRuntime implements AutoCloseable {
     private static Module bodyModule(Entity entity,Set<Module> selected) {
         Module direct=entity.getClass().getModule();if(selected.isEmpty()||selected.contains(direct))return direct;
         try {
-            Class<?> bridge=Class.forName("dev.ronova.pro.bootstrap.TaskBridge",false,null);
-            if(Boolean.TRUE.equals(Class.forName("dev.ronova.pro.bootstrap.ControlBridge",false,null).getMethod("objectSourceUnknown",Object.class).invoke(null,entity)))return direct;
+            if(Boolean.TRUE.equals(creationAccess().unknown.invoke(null,entity)))return direct;
             var query=creationModuleQuery;
             if(query==null)creationModuleQuery=query=Class.forName("dev.ronova.pro.bootstrap.ControlBridge",false,null).getMethod("creationSources",Object.class);
             Module[] origins=(Module[])query.invoke(null,entity);if(origins.length!=0&&selected.containsAll(Arrays.asList(origins)))return origins[0];
@@ -288,39 +311,59 @@ public final class ProRuntime implements AutoCloseable {
     private long tick;
     private boolean coverageGap;
     private Entity removing;
+    private record ClientAccess(Class<?> bridge,java.lang.reflect.Method payload,java.lang.reflect.Method sort,
+            java.lang.reflect.Method begin,java.lang.reflect.Method end) { }
+    private static volatile ClientAccess clientAccess;
+    private static ClientAccess clientAccess()throws ReflectiveOperationException {
+        ClientAccess access=clientAccess;
+        if(access==null) {
+            Class<?> bridge=Class.forName("dev.ronova.pro.bootstrap.ClientBridge",false,null);
+            Class<?> resources=Class.forName("dev.ronova.pro.bootstrap.ResourceBridge",false,null);
+            clientAccess=access=new ClientAccess(bridge,
+                    bridge.getMethod("clientPayloadAllowed",Object.class,Object.class,int.class,int.class,boolean.class),
+                    bridge.getMethod("clientSortPointAllowed",Object.class,Object.class,boolean.class),
+                    resources.getMethod("beginClientPayload",java.nio.ByteBuffer.class,int.class,int.class),resources.getMethod("endClientPayload",Object.class));
+        }
+        return access;
+    }
+    private static final ClassValue<java.lang.reflect.Field[]> SORT_COORDINATES=new ClassValue<>() {
+        @Override protected java.lang.reflect.Field[] computeValue(Class<?> type) {
+            try {
+                if(type!=Class.forName("org.joml.Vector3f",false,type.getClassLoader()))throw new SecurityException("ACTUAL_CLIENT_SORT_POINT_REQUIRED");
+                java.lang.reflect.Field[] fields=new java.lang.reflect.Field[3];String[] names={"x","y","z"};
+                for(int index=0;index<3;index++) {
+                    java.lang.reflect.Field field=type.getField(names[index]);int modifiers=field.getModifiers();
+                    if(field.getDeclaringClass()!=type||field.getType()!=float.class||java.lang.reflect.Modifier.isStatic(modifiers)
+                            ||!java.lang.reflect.Modifier.isPublic(modifiers))throw new SecurityException("ACTUAL_CLIENT_SORT_COORDINATES_REQUIRED");
+                    fields[index]=field;
+                }
+                return fields;
+            }catch(ReflectiveOperationException unavailable){throw new IllegalStateException("CLIENT_SORT_ERASE_UNAVAILABLE",unavailable);}
+        }
+    };
     /** Exact client retirement token; the original buffer and other vertices stay in place. */
     public static void clearClientPayload(Object proof,java.nio.ByteBuffer storage,int offset,int length) {
         try {
-            Class<?> bridge=Class.forName("dev.ronova.pro.bootstrap.ClientBridge",false,null);
-            if(LIFECYCLE_WALKER.getCallerClass()!=bridge)throw new SecurityException("ACTUAL_CLIENT_PAYLOAD_CALLER_REQUIRED");
-            java.lang.reflect.Method allowed=bridge.getMethod("clientPayloadAllowed",Object.class,Object.class,int.class,int.class,boolean.class);
-            Class<?> resources=Class.forName("dev.ronova.pro.bootstrap.ResourceBridge",false,null);
-            Object lease=resources.getMethod("beginClientPayload",java.nio.ByteBuffer.class,int.class,int.class).invoke(null,storage,offset,length);
+            ClientAccess access=clientAccess();
+            if(LIFECYCLE_WALKER.getCallerClass()!=access.bridge)throw new SecurityException("ACTUAL_CLIENT_PAYLOAD_CALLER_REQUIRED");
+            java.lang.reflect.Method allowed=access.payload;
+            Object lease=access.begin.invoke(null,storage,offset,length);
             try {
                 if(!Boolean.TRUE.equals(allowed.invoke(null,proof,storage,offset,length,false)))throw new SecurityException("ACTUAL_CLIENT_PAYLOAD_SCOPE_REQUIRED");
                 // Absolute writes preserve the original position, limit and storage identity.
                 for(int at=offset;at<offset+length;at++)storage.put(at,(byte)0);
                 if(!Boolean.TRUE.equals(allowed.invoke(null,proof,storage,offset,length,true)))throw new IllegalStateException("CLIENT_PAYLOAD_ERASE_READBACK_PENDING");
-            } finally { resources.getMethod("endClientPayload",Object.class).invoke(null,lease); }
+            } finally { access.end.invoke(null,lease); }
         } catch(ReflectiveOperationException unavailable) {throw new IllegalStateException("CLIENT_PAYLOAD_ERASE_UNAVAILABLE",unavailable);}
     }
     public static void clearClientSortPoint(Object proof,Object point) {
         try {
-            Class<?> bridge=Class.forName("dev.ronova.pro.bootstrap.ClientBridge",false,null);
-            if(LIFECYCLE_WALKER.getCallerClass()!=bridge)throw new SecurityException("ACTUAL_CLIENT_SORT_CALLER_REQUIRED");
-            java.lang.reflect.Method allowed=bridge.getMethod("clientSortPointAllowed",Object.class,Object.class,boolean.class);
+            ClientAccess access=clientAccess();
+            if(LIFECYCLE_WALKER.getCallerClass()!=access.bridge)throw new SecurityException("ACTUAL_CLIENT_SORT_CALLER_REQUIRED");
+            java.lang.reflect.Method allowed=access.sort;
             if(!Boolean.TRUE.equals(allowed.invoke(null,proof,point,false)))throw new SecurityException("ACTUAL_CLIENT_SORT_SCOPE_REQUIRED");
             if(point==null)throw new SecurityException("ACTUAL_CLIENT_SORT_POINT_REQUIRED");
-            Class<?> type=point.getClass();
-            if(type!=Class.forName("org.joml.Vector3f",false,type.getClassLoader()))throw new SecurityException("ACTUAL_CLIENT_SORT_POINT_REQUIRED");
-            java.lang.reflect.Field[] coordinates=new java.lang.reflect.Field[3];String[] names={"x","y","z"};
-            for(int index=0;index<3;index++) {
-                java.lang.reflect.Field coordinate=type.getField(names[index]);
-                if(coordinate.getDeclaringClass()!=type||coordinate.getType()!=float.class||java.lang.reflect.Modifier.isStatic(coordinate.getModifiers())
-                        ||!java.lang.reflect.Modifier.isPublic(coordinate.getModifiers()))throw new SecurityException("ACTUAL_CLIENT_SORT_COORDINATES_REQUIRED");
-                coordinates[index]=coordinate;
-            }
-            for(java.lang.reflect.Field coordinate:coordinates)coordinate.setFloat(point,0.0f);
+            for(java.lang.reflect.Field coordinate:SORT_COORDINATES.get(point.getClass()))coordinate.setFloat(point,0.0f);
             if(!Boolean.TRUE.equals(allowed.invoke(null,proof,point,true)))throw new IllegalStateException("CLIENT_SORT_ERASE_READBACK_PENDING");
         } catch(ReflectiveOperationException unavailable) {throw new IllegalStateException("CLIENT_SORT_ERASE_UNAVAILABLE",unavailable);}
     }
@@ -798,7 +841,7 @@ public final class ProRuntime implements AutoCloseable {
             boolean permitted=true;
             for(Binding binding:bindings.values())if(binding.records!=null&&binding.records.uuid.equals(uuid)&&binding.records.level==level&&binding.subject.terminal){
                 UUID groupId=groupMembers.get(binding.subject.id);Subject group=groupId==null?null:canonicalSubject(groupId);if(group!=null&&group.terminal){settled=false;permitted=false;break;}
-                try(var gate=binding.subject.commitGate.enter()){binding.subject.generation++;binding.subject.terminal=false;binding.protection=false;}
+                try(var gate=binding.subject.commitGate.enter()){binding.subject.generation++;binding.subject.terminal=false;binding.protection=false;qualificationChanged(binding.subject);}
                 journal.append("REVOKE\t"+binding.subject.id+"\t"+binding.subject.generation+"\t"+session);
                 for(Work previous:work.values())if(previous.binding!=null&&previous.binding.subject==binding.subject)fence(previous,"AUTHORIZED_WORLD_ROLLBACK");
             }
@@ -1013,7 +1056,7 @@ public final class ProRuntime implements AutoCloseable {
             resolveUnknownIntent(b);
             b.records=new EntityRecords((ServerLevel)((Access.EntityState)e).pro$level(),e);
             if(!BackingPolicy.capture(b.records,e))b.subject.unresolvedSources.add("TERMINAL_BACKING_CAPTURE_INCOMPLETE");
-            if(!b.subject.terminal) { b.subject.generation++; b.subject.terminal=true; b.protection=false; }
+            if(!b.subject.terminal) { b.subject.generation++; b.subject.terminal=true; b.protection=false;qualificationChanged(b.subject); }
             publishProtection(this,b,e);
             }
         }
@@ -1320,6 +1363,7 @@ public final class ProRuntime implements AutoCloseable {
     private void commitProtection(Binding binding,float floor) {
         boolean retainNoHeal=noHealBinding(binding.entity())==binding;
         binding.subject.generation++;binding.subject.terminal=false;binding.protection=false;
+        qualificationChanged(binding.subject);
         binding.noHeal=retainNoHeal;if(retainNoHeal)binding.noHealGeneration=binding.subject.generation;
         binding.healthFloor=floor;
         activate(binding);
@@ -1545,6 +1589,7 @@ public final class ProRuntime implements AutoCloseable {
         if(b==null) return;
         try(var fieldGate=FieldPolicyGate.enter(e);var authorityGate=b.subject.commitGate.enter()) {
             b.subject.generation++; b.subject.terminal=false; b.protection=false;b.noHeal=false;
+            qualificationChanged(b.subject);
         }
         for(Binding other:bindings.values()) if(other.subject==b.subject) {other.protection=false;other.noHeal=false;}
         for(Entity bound:List.copyOf(bindings.keySet()))
@@ -1606,6 +1651,7 @@ public final class ProRuntime implements AutoCloseable {
             if(w.binding.entity()!=null)revokeBound(w.binding.entity());
             else try(var gate=w.binding.subject.commitGate.enter()) {
                 w.binding.subject.generation++;w.binding.subject.terminal=false;
+                qualificationChanged(w.binding.subject);
                 journal.append("REVOKE\t"+w.binding.subject.id+"\t"+w.binding.subject.generation+"\t"+session);
             }
         }
@@ -1887,6 +1933,7 @@ public final class ProRuntime implements AutoCloseable {
                         publishProtection(this,binding,player);
                     }
                 }
+                qualificationChanged(binding.subject);
                 for(Work workItem:work.values())if(workItem.binding==binding)fence(workItem,"PLAYER_DIMENSION_SCOPE_CHANGED");
                 if(retained) {UUID next=queue(binding,null,"PROTECT");if(priorProtection!=null)priorProtection.protectionSuccessor=next;}
                 else if(transfer)coverageGap=true;
@@ -1962,6 +2009,7 @@ public final class ProRuntime implements AutoCloseable {
                     try(var fieldGate=FieldPolicyGate.enter(player);var dataGate=FieldPolicyGate.enter(healthItem(player));
                             var gate=binding.subject.commitGate.enter()) {
                         binding.subject.generation++;
+                        qualificationChanged(binding.subject);
                         binding.records=records;binding.address=address;
                         pendingRespawnProtections.remove(player);unverifiedRespawnPolicies.remove(player);
                         if(binding.noHeal)binding.noHealGeneration=binding.subject.generation;
@@ -2985,7 +3033,7 @@ public final class ProRuntime implements AutoCloseable {
             EquipmentPolicy.initialize();
             WorldStatePolicy.initialize();
             Class<?> bridge=Class.forName("dev.ronova.pro.bootstrap.TaskBridge",false,null);
-            if(!Integer.valueOf(94).equals(bridge.getMethod("abiVersion").invoke(null)))throw new IllegalStateException("INDEX_BRIDGE_ABI_MISMATCH");
+            if(!Integer.valueOf(95).equals(bridge.getMethod("abiVersion").invoke(null)))throw new IllegalStateException("INDEX_BRIDGE_ABI_MISMATCH");
             var lookup=java.lang.invoke.MethodHandles.lookup();
             var field=lookup.findStatic(ProRuntime.class,"preventFieldWrite",java.lang.invoke.MethodType.methodType(boolean.class,Object.class,Class.class,String.class,Object.class));
             var dispatch=lookup.findStatic(ProRuntime.class,"preventDispatch",java.lang.invoke.MethodType.methodType(boolean.class,Object.class,String.class,Object.class));
@@ -3288,8 +3336,7 @@ public final class ProRuntime implements AutoCloseable {
     public static void constructed(Object object) {
         if(object==null)return;
         try {
-            Class<?> bridge=Class.forName("dev.ronova.pro.bootstrap.TaskBridge",false,null);
-            if(!Boolean.TRUE.equals(Class.forName("dev.ronova.pro.bootstrap.ControlBridge",false,null).getMethod("deliveringCreationTo",Class.class).invoke(null,ProRuntime.class)))return;
+            if(!Boolean.TRUE.equals(creationAccess().delivering.invoke(null,ProRuntime.class)))return;
             for(ProRuntime runtime:sourceRuntimes())if(!runtime.closing) {
                 Subject group=runtime.groupSubject(object);
                 if(group!=null&&group.terminal&&!(object instanceof Entity))runtime.recoverySources.groupCreated(object,group.id);
@@ -3310,8 +3357,7 @@ public final class ProRuntime implements AutoCloseable {
     }
     public static void constructionFailed(Object error) {
         try {
-            Class<?> bridge=Class.forName("dev.ronova.pro.bootstrap.TaskBridge",false,null);
-            if(Boolean.TRUE.equals(Class.forName("dev.ronova.pro.bootstrap.ControlBridge",false,null).getMethod("deliveringCreationTo",Class.class).invoke(null,ProRuntime.class)))RecoveryTasks.constructionFailed();
+            if(Boolean.TRUE.equals(creationAccess().delivering.invoke(null,ProRuntime.class)))RecoveryTasks.constructionFailed();
         } catch(ReflectiveOperationException|LinkageError unavailable) { }
     }
     boolean resourcesClosing() {return closing;}
@@ -3513,7 +3559,7 @@ public final class ProRuntime implements AutoCloseable {
         worldArchive.close();
         fieldGraphs.close();
         recoverySources.beginStop();
-        for(Binding binding:bindings.values())try(var authorityGate=binding.subject.commitGate.enter()) { binding.subject.terminal=false;binding.noHeal=false; }
+        for(Binding binding:bindings.values())try(var authorityGate=binding.subject.commitGate.enter()) { binding.subject.terminal=false;binding.noHeal=false;qualificationChanged(binding.subject); }
         for(Work w:work.values())fence(w,"RUNTIME_STOPPED_HISTORY_RETAINED");
         finishClose();
     }

@@ -50,6 +50,11 @@ final class ModGroupBoundary {
         Returns(String mode){this(mode,mode.equals("uuid-fixed")?java.util.UUID.randomUUID().toString():null);}
     }
     private static final Map<Module,Returns> returns=Collections.synchronizedMap(new IdentityHashMap<>());
+    private static final class Publication {
+        final Thread owner=Thread.currentThread();boolean pending;
+    }
+    private static final Map<Module,Publication> publishing=new IdentityHashMap<>();
+    private static final Map<Module,Returns> published=new IdentityHashMap<>();
     private static final Map<Module,Set<String>> groupGaps=Collections.synchronizedMap(new IdentityHashMap<>());
     private static final Map<Module,String> codeRetirementGaps=Collections.synchronizedMap(new IdentityHashMap<>());
     private static final ThreadLocal<Class<?>[]> batch=new ThreadLocal<>();
@@ -255,24 +260,27 @@ final class ModGroupBoundary {
         } catch(AnalyzerException|RuntimeException unavailable) {return false;}
         return false;
     }
-    static synchronized String prepare(Instrumentation api,String[] ids,Module[] hints,String mode) {
+    static String prepare(Instrumentation api,String[] ids,Module[] hints,String mode) {
         if(api==null)return "AGENT_UNAVAILABLE";
         mode=returnMode(mode);
+        ids=ids==null?null:ids.clone();hints=hints==null?null:hints.clone();
         String selection=validate(ids,hints);
         if(!selection.equals("READY"))return selection;
         Set<Module> selected=Collections.newSetFromMap(new IdentityHashMap<>());selected.addAll(Arrays.asList(hints));
-        Map<Module,Returns> policies=new IdentityHashMap<>();
-        for(Module module:selected) {
-            Returns previous=returns.get(module);
-            // Repeating the same selection/publication does not start a new policy generation.
-            policies.put(module,previous!=null&&previous.mode().equals(mode)?previous:new Returns(mode));
+        Map<Module,Returns> policies=new IdentityHashMap<>();for(Module module:selected)policies.put(module,new Returns(mode));
+        synchronized(ModGroupBoundary.class) {
+            for(Module module:selected) {
+                Returns previous=returns.get(module);
+                // Repeating the same selection/publication does not start a new policy generation.
+                if(previous!=null&&previous.mode().equals(mode))policies.put(module,previous);
+            }
+            returns.putAll(policies);
         }
-        returns.putAll(policies);
         // Bind every selected policy before the first task/native stopped publication.
-        for(Module module:selected)RecoveryAgent.publishStoppedModule(module);
-        return "READY";
+        return publishSelected(selected);
     }
-    static synchronized String stop(Instrumentation api,String[] ids,Module[] hints,String mode) {
+    static String stop(Instrumentation api,String[] ids,Module[] hints,String mode) {
+        ids=ids==null?null:ids.clone();hints=hints==null?null:hints.clone();
         String prepared=prepare(api,ids,hints,mode);
         if(!prepared.equals("READY"))return prepared;
         Set<Module> selected=Collections.newSetFromMap(new IdentityHashMap<>());selected.addAll(Arrays.asList(hints));
@@ -281,6 +289,47 @@ final class ModGroupBoundary {
             synchronized(exact){exact.add(hints[i]);}
         }
         return retransform(api,selected);
+    }
+    /** Claim the exact module; a native callback must never wait for its current publisher. */
+    static Returns beginPublication(Module module) {
+        synchronized(ModGroupBoundary.class) {
+            Publication active=publishing.get(module);if(active!=null){active.pending=true;return null;}
+            Returns policy=policy(module);published.remove(module);publishing.put(module,new Publication());return policy;
+        }
+    }
+    static Returns finishPublication(Module module,Returns completed) {
+        synchronized(ModGroupBoundary.class) {
+            Publication active=publishing.get(module);
+            if(active==null||active.owner!=Thread.currentThread())throw new IllegalStateException("MOD_GROUP_PUBLICATION_OWNER_CHANGED");
+            Returns current=policy(module);boolean pending=active.pending;active.pending=false;
+            if(current!=completed||pending)return current;
+            published.put(module,current);publishing.remove(module);ModGroupBoundary.class.notifyAll();return null;
+        }
+    }
+    static void failedPublication(Module module) {
+        synchronized(ModGroupBoundary.class) {
+            Publication active=publishing.get(module);
+            if(active!=null&&active.owner==Thread.currentThread()){publishing.remove(module);ModGroupBoundary.class.notifyAll();}
+        }
+    }
+    private static String publishSelected(Set<Module> selected) {
+        for(Module module:selected)RecoveryAgent.publishStoppedModule(module);
+        for(;;) {
+            Set<Module> retry=Collections.newSetFromMap(new IdentityHashMap<>());
+            synchronized(ModGroupBoundary.class) {
+                boolean pending=false;
+                for(Module module:selected)if(published.get(module)!=returns.get(module)) {
+                    pending=true;Publication activePublication=publishing.get(module);Thread owner=activePublication==null?null:activePublication.owner;
+                    // A reentrant control call cannot wait for the native call whose callback it is servicing.
+                    if(owner==Thread.currentThread())return "MOD_GROUP_PUBLICATION_PENDING";
+                    if(owner==null)retry.add(module);
+                }
+                if(!pending)return "READY";
+                if(retry.isEmpty())try{ModGroupBoundary.class.wait();}
+                catch(InterruptedException interrupted){Thread.currentThread().interrupt();return "MOD_GROUP_PUBLICATION_INTERRUPTED";}
+            }
+            for(Module module:retry)RecoveryAgent.publishStoppedModule(module);
+        }
     }
     static String validate(String[] ids,Module[] hints) {
         if(ids==null||hints==null||ids.length!=hints.length||ids.length==0)return "EMPTY_OR_MISMATCHED_SELECTION";
@@ -300,10 +349,11 @@ final class ModGroupBoundary {
         }
         return "READY";
     }
-    static synchronized String stopByIds(Instrumentation api,String[] ids,String mode) {
+    static String stopByIds(Instrumentation api,String[] ids,String mode) {
         if(api==null)return "AGENT_UNAVAILABLE";
         mode=returnMode(mode);
         if(ids==null||ids.length==0)return "EMPTY_SELECTION";
+        ids=ids.clone();
         Set<String> selected=new HashSet<>();
         for(String raw:ids) {
             if(raw==null)return "INVALID_TARGET:null";
@@ -323,6 +373,9 @@ final class ModGroupBoundary {
     }
     private static String retransform(Instrumentation api,Set<Module> selected) {
         int loaded=0,failed=0;
+        for(;;) {
+        Map<Module,Returns> policies=new IdentityHashMap<>();
+        synchronized(ModGroupBoundary.class){for(Module module:selected)policies.put(module,policy(module));}
         Class<?>[] snapshot=batch.get();if(snapshot==null)snapshot=RecoveryAgent.loadedClasses();
         Set<Class<?>> external=Collections.newSetFromMap(new IdentityHashMap<>());
         external.addAll(Arrays.asList(ExternalCodeImages.affected(snapshot,selected.toArray(Module[]::new))));
@@ -338,8 +391,14 @@ final class ModGroupBoundary {
                 if(contribution)ExternalCodeImages.failed(selected.toArray(Module[]::new),type.getName()+":EXTERNAL_RETRANSFORM_FAILED:"+failure.getClass().getSimpleName());else gap(module,type.getName()+":"+failure.getClass().getSimpleName());failed++;
             }
         }
-        Returns policy=returns.get(selected.iterator().next());
-        return "TARGETS="+denied+";RETRANSFORMED_CLASSES="+loaded+";FAILED="+failed+";METHODS="+methods.get()+";RETURNS="+policy.mode()+";UNRESOLVED="+unresolved.size()+";GAPS="+unresolved.stream().limit(8).toList();
+        boolean current=true;
+        synchronized(ModGroupBoundary.class){for(Module module:selected)if(policy(module)!=policies.get(module)||published.get(module)!=policies.get(module)){current=false;break;}}
+        if(current) {
+            Returns policy=policies.get(selected.iterator().next());
+            return "TARGETS="+denied+";RETRANSFORMED_CLASSES="+loaded+";FAILED="+failed+";METHODS="+methods.get()+";RETURNS="+policy.mode()+";UNRESOLVED="+unresolved.size()+";GAPS="+unresolved.stream().limit(8).toList();
+        }
+        String publication=publishSelected(selected);if(!publication.equals("READY"))return publication;
+        }
     }
     static String state() {return "TARGETS="+denied+";METHODS="+methods.get()+";UNRESOLVED="+unresolved.size()+";GAPS="+unresolved.stream().limit(8).toList();}
     static Returns policy(Module module) {

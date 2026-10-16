@@ -19,9 +19,13 @@ final class RecoveryStorage implements AutoCloseable {
     private final Map<UUID,Work> work=new ConcurrentSkipListMap<>();
     private final Map<Save,List<Work>> bySave=new ConcurrentHashMap<>();
     private final Map<UUID,List<Work>> bySubject=new ConcurrentHashMap<>();
+    private final Map<UUID,List<Work>> byOperation=new ConcurrentHashMap<>();
+    private final LinkedHashSet<Work> ready=new LinkedHashSet<>();
+    private final NavigableSet<Work> deadlines=new TreeSet<>(Comparator.comparingLong((Work w)->w.scheduledAt).thenComparing(w->w.id));
+    private final ConcurrentLinkedQueue<Work> schedulingChanges=new ConcurrentLinkedQueue<>(),confirmedReadbacks=new ConcurrentLinkedQueue<>();
+    private final java.util.concurrent.atomic.AtomicInteger indexedWork=new java.util.concurrent.atomic.AtomicInteger();
     private final ThreadPoolExecutor worker;
     private volatile boolean closing;
-    private long cursor;
     private String gap="";
     private final java.util.concurrent.atomic.AtomicLong changes=new java.util.concurrent.atomic.AtomicLong();
     record Status(UUID id,UUID operation,String state,String reason,boolean nativeReleased,boolean transientReleased) { }
@@ -56,15 +60,21 @@ final class RecoveryStorage implements AutoCloseable {
         volatile String state="WAIT_PREPARE",reason="";
         volatile boolean running,nativeReleased=true,transientReleased=true;
         volatile long retryAt;
+        // Membership and deadline keys belong only to the server tick. Workers
+        // publish registration, retirement and completion through schedulingChanges.
+        long scheduledAt;
+        boolean queuedReady,queuedDeadline,wakeAfterRun;
         Ticket ticket;
-        FileInputStream queryInput;
-        boolean queryClosePending;
+        volatile FileInputStream queryInput;
+        volatile boolean queryClosePending;
+        IOException queryCloseFailure;
         boolean originalIntent,commitPossible;
         volatile boolean preparing;
         CompletableFuture<Void> intentAck;
         String transaction;
         UUID transactionSession;
-        boolean queryNativeClosed=true,restartRetry;
+        volatile boolean queryNativeClosed=true;
+        boolean restartRetry;
         long reboundGeneration;
         volatile boolean resourcesConfirmed;
         boolean readbackEverConfirmed;
@@ -165,11 +175,15 @@ final class RecoveryStorage implements AutoCloseable {
         Save key=new Save(item.subject,item.qualification,item.source,item.code,item.saveGeneration);
         bySave.computeIfAbsent(key,ignored->new CopyOnWriteArrayList<>()).add(item);
         bySubject.computeIfAbsent(item.subject,ignored->new CopyOnWriteArrayList<>()).add(item);
+        byOperation.computeIfAbsent(item.operation,ignored->new CopyOnWriteArrayList<>()).add(item);
+        indexedWork.incrementAndGet();schedulingChanges.add(item);
     }
     private void unindex(Work item) {
         List<Work> saves=bySave.get(new Save(item.subject,item.qualification,item.source,item.code,item.saveGeneration));
         if(saves!=null)saves.remove(item);
         List<Work> subjects=bySubject.get(item.subject);if(subjects!=null)subjects.remove(item);
+        List<Work> operations=byOperation.get(item.operation);if(operations!=null)operations.remove(item);
+        indexedWork.decrementAndGet();schedulingChanges.add(item);
     }
     private void restore() {
         for(String line:runtime.journal.history()) {
@@ -229,15 +243,22 @@ final class RecoveryStorage implements AutoCloseable {
     }
     void tick(long tick) {
         if(closing)return;
-        List<Work> pending=new ArrayList<>(work.values());
+        drainScheduling(tick);
+        while(!deadlines.isEmpty()&&deadlines.first().scheduledAt<=tick) {
+            Work due=deadlines.pollFirst();due.queuedDeadline=false;
+            due.queuedReady=true;ready.add(due);
+        }
         // Current obligations get a complete selection round within five ticks;
         // running work and retired generations do not consume that selection share.
-        int budget=Math.min(pending.size(),Math.max(16,(pending.size()+4)/5)),accepted=0;
-        for(int i=0;i<pending.size()&&accepted<budget;i++) {
-            Work w=pending.get((int)Math.floorMod(cursor++,pending.size()));
-            if(superseded(w))continue;
-            if(w.running||tick<w.retryAt||w.state.equals("FENCED")
-                    &&w.nativeReleased&&w.transientReleased&&!w.queryClosePending&&successor(w)==null)continue;
+        int count=indexedWork.get(),budget=Math.min(count,Math.max(16,(count+4)/5)),accepted=0,available=ready.size();
+        for(int i=0;i<available&&accepted<budget&&!ready.isEmpty();i++) {
+            Iterator<Work> cursor=ready.iterator();Work w=cursor.next();cursor.remove();w.queuedReady=false;
+            if(work.get(w.id)!=w||w.running)continue;
+            // These are live decisions, not cached settlement or release authority.
+            if(superseded(w)) { schedule(w,tick+5,tick);continue; }
+            if(w.state.equals("FENCED")&&w.nativeReleased&&w.transientReleased&&!w.queryClosePending&&w.queryInput==null&&w.queryNativeClosed&&successor(w)==null) {
+                schedule(w,tick+20,tick);continue;
+            }
             w.retryAt=tick+(w.preparing?1:w.state.equals("READBACK_CONFIRMED")?5:20);
             w.running=true;
             try { worker.execute(()->{
@@ -247,21 +268,58 @@ final class RecoveryStorage implements AutoCloseable {
                     if(w.preparing)try { retire(w,"PREPARATION_EXCEPTION"); }catch(Throwable retirement) { failure.addSuppressed(retirement); }
                     w.state=w.commitPossible?"COMMIT_QUERY_REQUIRED":"PREPARE_UNRESOLVED";w.reason=failure.getClass().getSimpleName()+":"+failure.getMessage();
                 }
-                finally { w.running=false;if(!before.equals(w.state+":"+w.reason+":"+w.nativeReleased+":"+w.transientReleased+":"+w.resourcesConfirmed))changes.incrementAndGet(); }
+                finally {
+                    // A first preparation/readback can change its retry class in
+                    // this invocation; keep the existing 1/5/20 tick periods.
+                    if(w.preparing)w.retryAt=Math.min(w.retryAt,tick+1);
+                    else if(w.state.equals("READBACK_CONFIRMED"))w.retryAt=Math.min(w.retryAt,tick+5);
+                    w.running=false;
+                    if(!before.equals(w.state+":"+w.reason+":"+w.nativeReleased+":"+w.transientReleased+":"+w.resourcesConfirmed))changes.incrementAndGet();
+                    schedulingChanges.add(w);
+                }
             });accepted++; }
             catch(RejectedExecutionException capacity) {
                 w.running=false;w.retryAt=tick+1;w.reason="STORAGE_WORKER_BUDGET_WAIT";
+                schedule(w,w.retryAt,tick);
                 break;
             }
         }
+    }
+    private void drainScheduling(long tick) {
+        for(Work item;(item=schedulingChanges.poll())!=null;) {
+            if(work.get(item.id)!=item) { unschedule(item);continue; }
+            if(!item.running&&!item.queuedReady&&!item.queuedDeadline) {
+                long due=item.wakeAfterRun?tick:item.retryAt;item.wakeAfterRun=false;schedule(item,due,tick);
+            }
+        }
+        for(Work newer;(newer=confirmedReadbacks.poll())!=null;) {
+            if(work.get(newer.id)!=newer)continue;
+            // A newly confirmed save can retire a fenced private candidate before
+            // its next slow retry. advance() still rechecks the actual successor.
+            for(Work older:bySubject.getOrDefault(newer.subject,List.of()))
+                if(older!=newer&&older.qualification==newer.qualification&&older.source.equals(newer.source)
+                        &&older.saveGeneration<newer.saveGeneration) {
+                    if(older.running)older.wakeAfterRun=true;
+                    else if(!older.queuedReady)schedule(older,tick,tick);
+                }
+        }
+    }
+    private void schedule(Work item,long due,long tick) {
+        unschedule(item);
+        if(closing||work.get(item.id)!=item||item.running)return;
+        item.retryAt=due;item.scheduledAt=due;
+        if(due<=tick) { item.queuedReady=true;ready.add(item); }
+        else { item.queuedDeadline=true;deadlines.add(item); }
+    }
+    private void unschedule(Work item) {
+        if(item.queuedReady) { ready.remove(item);item.queuedReady=false; }
+        if(item.queuedDeadline) { deadlines.remove(item);item.queuedDeadline=false; }
     }
     private void advance(Work w)throws IOException {
         if(work.get(w.id)!=w)return;
         if(!StorageNative.available()) { w.state="UNSUPPORTED";w.reason=StorageNative.reason();return; }
         StorageNative.maintain0();
-        if(w.queryClosePending) {
-            w.queryInput.close();w.queryInput=null;w.queryClosePending=false;
-        }
+        if(w.queryClosePending)closeQueryInput(w);
         if(w.ticket!=null&&!w.nativeReleased&&!w.preparing) {
             long[] retired=w.ticket.nativeRetirement(w.ticket.token);
             if(retired[1]!=1) { w.reason="NATIVE_RESOURCE_RETIREMENT_PENDING";return; }
@@ -405,8 +463,7 @@ final class RecoveryStorage implements AutoCloseable {
         } catch(Throwable failure) {
             if(actual!=null)actual.close();throw failure;
         } finally {
-            w.queryClosePending=true;
-            try { input.close();w.queryInput=null;w.queryClosePending=false; }
+            try { closeQueryInput(w); }
             catch(IOException failure) { if(actual!=null)actual.close();throw failure; }
         }
         // A successful independent close above is part of the readback fact.
@@ -419,10 +476,12 @@ final class RecoveryStorage implements AutoCloseable {
                 w.decodedProjection=projection;w.decodedImageHash=hash;
             }
             if(expected&&d.preserved.equals(w.decodedProjection)) {
-                if(!w.state.equals("READBACK_CONFIRMED"))ack(fact("READBACK",w,"IDENTITY_EXPECTED_IMAGE_AND_FULL_PROJECTION_CONFIRMED"));
+                boolean changed=!w.state.equals("READBACK_CONFIRMED"),released=w.resourcesConfirmed;
+                if(changed)ack(fact("READBACK",w,"IDENTITY_EXPECTED_IMAGE_AND_FULL_PROJECTION_CONFIRMED"));
                 w.readbackEverConfirmed=true;w.state="READBACK_CONFIRMED";w.reason="TASK_MEMORY_SOURCE_AND_RESOURCES_STILL_SEPARATE";
                 if(w.nativeReleased&&w.queryNativeClosed&&!w.resourcesConfirmed) { release(w);ack(fact("RESOURCES",w,"EXECUTOR_BUFFER_AND_NATIVE_HANDLES_RELEASED"));w.resourcesConfirmed=true; }
                 w.lastQuery=Integer.toUnsignedLong(runtime.server.getTickCount());
+                if(changed||!released&&w.resourcesConfirmed)confirmedReadbacks.add(w);
             } else {
                 w.state=w.commitPossible?"COMMIT_QUERY_REQUIRED":"RESTART_QUERY";
                 w.reason=hash.equals(d.baseline)?"BASELINE_PRESENT_OLD_TRANSACTION_NONCOMMIT_NOT_PROVEN":"NEITHER_EXPECTED_NOR_BASELINE_IMAGE";
@@ -430,17 +489,25 @@ final class RecoveryStorage implements AutoCloseable {
             }
         } finally { actual.close(); }
     }
+    private static void closeQueryInput(Work w)throws IOException {
+        // FileInputStream can mark itself closed before its descriptor close
+        // throws. A later no-op close is not a release receipt for that failure.
+        if(w.queryCloseFailure!=null)throw new IOException("INDEPENDENT_READ_CLOSE_UNCONFIRMED",w.queryCloseFailure);
+        w.queryClosePending=true;
+        try { w.queryInput.close(); }
+        catch(IOException failure) { w.queryCloseFailure=failure;throw failure; }
+        w.queryInput=null;w.queryClosePending=false;
+    }
     /** Private candidates and descriptors are prepared on this worker, outside Root gates.
      * A crash in the first source's commit cannot discard the other already-known saves. */
     private boolean prepareKnownSources(Work current)throws IOException {
         String dependencies=sources.dependencies(current.subject);int budget=16;
-        List<Work> related=work.values().stream().filter(item->item.subject.equals(current.subject)
-                &&item.qualification==current.qualification).toList();
-        for(Work item:related)if(!item.originalIntent&&item.snapshot!=null&&item.snapshot.source.current(item.snapshot)) {
+        List<Work> related=bySubject.getOrDefault(current.subject,List.of());
+        for(Work item:related)if(item.qualification==current.qualification&&!item.originalIntent&&item.snapshot!=null&&item.snapshot.source.current(item.snapshot)) {
             if(budget--==0||!prepareIntent(item))return false;
         }
         Map<String,Set<KnownSave>> captured=new HashMap<>();
-        for(Work item:related)if(item.originalIntent) {
+        for(Work item:related)if(item.qualification==current.qualification&&item.originalIntent) {
             Descriptor descriptor=item.descriptor;
             captured.computeIfAbsent(descriptor.source,key->new HashSet<>()).add(
                     new KnownSave(descriptor.code,descriptor.saveGeneration,descriptor.identity,descriptor.baseline));
@@ -516,7 +583,7 @@ final class RecoveryStorage implements AutoCloseable {
     }
     String dependencies(UUID operation) {
         StringBuilder key=new StringBuilder();
-        for(Work item:work.values())if(item.operation.equals(operation))key.append('|').append(item.id).append(':')
+        for(Work item:byOperation.getOrDefault(operation,List.of()))key.append('|').append(item.id).append(':')
             .append(item.saveGeneration).append(':').append(item.state).append(':').append(item.commitPossible)
             .append(':').append(item.nativeReleased).append(':').append(item.transientReleased).append(':').append(item.resourcesConfirmed)
             .append(':').append(item.supersededBy);
@@ -574,25 +641,26 @@ final class RecoveryStorage implements AutoCloseable {
         } catch(IOException|IllegalArgumentException invalid) { throw new IllegalArgumentException("ORIGINAL_PATHS_INVALID",invalid); }
     }
     private boolean superseded(Work old) {
-        if(!old.nativeReleased||!old.transientReleased||!old.resourcesConfirmed||old.queryClosePending||!old.queryNativeClosed)return false;
+        if(old.running||!old.nativeReleased||!old.transientReleased||!old.resourcesConfirmed||old.queryClosePending||old.queryInput!=null||!old.queryNativeClosed)return false;
         Work newer=successor(old);
         return newer!=null&&(old.readbackEverConfirmed||newer.id.equals(old.supersededBy));
     }
     private Work successor(Work old) {
         long now=Integer.toUnsignedLong(runtime.server.getTickCount());
-        for(Work newer:work.values())if(newer!=old&&newer.subject.equals(old.subject)&&newer.qualification==old.qualification
+        for(Work newer:bySubject.getOrDefault(old.subject,List.of()))if(newer!=old&&newer.qualification==old.qualification
                 &&newer.source.equals(old.source)&&newer.saveGeneration>old.saveGeneration&&newer.state.equals("READBACK_CONFIRMED")
-                &&newer.resourcesConfirmed&&newer.nativeReleased&&newer.transientReleased&&newer.lastQuery>=0&&now-newer.lastQuery<=10)return newer;
+                &&!newer.running&&newer.resourcesConfirmed&&newer.nativeReleased&&newer.transientReleased&&!newer.queryClosePending&&newer.queryInput==null&&newer.queryNativeClosed
+                &&newer.lastQuery>=0&&now>=newer.lastQuery&&now-newer.lastQuery<=10)return newer;
         return null;
     }
     List<String> remaining(UUID operation) {
         List<String> out=new ArrayList<>();if(!gap.isEmpty())out.add(gap);
-        for(Work item:work.values())if(item.operation.equals(operation)) {
+        for(Work item:byOperation.getOrDefault(operation,List.of())) {
             if(superseded(item))continue;
             if(!item.state.equals("READBACK_CONFIRMED"))out.add("STORAGE:"+item.id+":"+item.state+":"+item.reason);
             long now=Integer.toUnsignedLong(runtime.server.getTickCount());
             if(item.lastQuery<0||now<item.lastQuery||now-item.lastQuery>10)out.add("STORAGE_READBACK_EXPIRED:"+item.id);
-            if(item.running&&!item.state.equals("READBACK_CONFIRMED")||!item.nativeReleased||!item.transientReleased||!item.resourcesConfirmed||item.queryClosePending||!item.queryNativeClosed)
+            if(item.running||!item.nativeReleased||!item.transientReleased||!item.resourcesConfirmed||item.queryClosePending||item.queryInput!=null||!item.queryNativeClosed)
                 out.add("STORAGE_RESOURCES_PENDING:"+item.id);
         }
         return List.copyOf(out);
@@ -731,7 +799,7 @@ final class RecoveryStorage implements AutoCloseable {
     private static String text(String value) { return JournalLineage.encodeText(value); }
     private static String untext(String value) { return JournalLineage.decodeText(value); }
     List<Status> status(UUID operation) {
-        return work.values().stream().filter(w->w.operation.equals(operation))
+        return byOperation.getOrDefault(operation,List.of()).stream()
                 .map(w->new Status(w.id,w.operation,w.state,w.reason,w.nativeReleased,w.transientReleased)).toList();
     }
     String gap() { return gap; }
@@ -743,7 +811,8 @@ final class RecoveryStorage implements AutoCloseable {
         for(Work w:work.values()) {
             try { retireCandidate(w); }
             catch(IOException failure) { if(candidateClose==null)candidateClose=failure;else candidateClose.addSuppressed(failure); }
-            if(w.queryClosePending) { w.queryInput.close();w.queryInput=null;w.queryClosePending=false; }
+            if(w.queryClosePending)try { closeQueryInput(w); }
+            catch(IOException failure) { if(candidateClose==null)candidateClose=failure;else candidateClose.addSuppressed(failure); }
             if(w.ticket!=null) {
                 if(w.ticket.token==0&&w.nativeReleased) { release(w);continue; }
                 long[] retired=StorageNative.finish0(w.ticket,w.ticket.token,null);

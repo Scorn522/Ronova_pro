@@ -5,6 +5,8 @@ import dev.ronova.pro.persistence.JournalLineage;
 import java.nio.charset.StandardCharsets;
 import java.util.*;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ConcurrentLinkedQueue;
 import net.minecraft.world.entity.Entity;
 
 /** Durable known-source scope. O01 and opaque callback effects retain their original contracts. */
@@ -13,7 +15,11 @@ final class RecoveryChain {
     private final ProRuntime runtime;
     private final Map<UUID,Work> work=new LinkedHashMap<>();
     private final Map<UUID,List<Work>> bySubject=new HashMap<>();
-    private long historyCursor;
+    private final LinkedHashSet<Work> active=new LinkedHashSet<>(),history=new LinkedHashSet<>();
+    private final Map<UUID,Qualification> qualifications=new HashMap<>();
+    private final ConcurrentLinkedQueue<UUID> qualificationChanges=new ConcurrentLinkedQueue<>();
+    private final Set<UUID> queuedQualifications=ConcurrentHashMap.newKeySet();
+    private record Qualification(ProRuntime.Subject authority,long generation,boolean terminal) { }
     private static final class Work {
         final UUID id,subject,session,entity,incarnation;
         final long generation;
@@ -58,6 +64,7 @@ final class RecoveryChain {
                 throw new IllegalArgumentException("UNKNOWN_CHAIN_FACT");
         } catch(RuntimeException invalid) { runtime.journal.refuseWrites("CHAIN_HISTORY_QUERY_ONLY:"+invalid.getMessage()); }
         for(Work item:work.values())bySubject.computeIfAbsent(item.subject,key->new ArrayList<>()).add(item);
+        for(UUID subject:bySubject.keySet())refreshQualification(subject);
         for(String line:history)if(line.startsWith("SOURCE_UNKNOWN/"))try {
             String[] row=line.split("\t",-1);
             if(!row[0].equals("SOURCE_UNKNOWN/1")||row.length!=5)throw new IllegalArgumentException("UNKNOWN_SOURCE_PROTOCOL");
@@ -70,6 +77,9 @@ final class RecoveryChain {
         if(work.putIfAbsent(operation,item)!=null)throw new IllegalStateException("CHAIN_OPERATION_ALREADY_EXISTS");
         bySubject.computeIfAbsent(item.subject,key->new ArrayList<>()).add(item);
         item.ack=runtime.journal.append(item.intent);
+        refreshQualification(item.subject);
+        if(current(item)) { history.remove(item);active.add(item); }
+        else { active.remove(item);history.add(item); }
     }
     void retireBody(UUID operation) { Work item=work.get(operation);if(item!=null)item.bodyRetired=true; }
     void acceptGroup(UUID operation,ProRuntime.Subject subject,String root) {
@@ -78,24 +88,54 @@ final class RecoveryChain {
         accept(operation,subject,"",absent,absent,root);
     }
     UUID operationFor(UUID subject) {
+        refreshQualification(subject);
         var authority=runtime.subjects.get(subject);
         if(authority!=null&&authority.terminal)for(Work item:bySubject.getOrDefault(subject,List.of()))
             if(item.generation==authority.generation)return item.id;
         return null;
     }
+    // Qualification gates may notify from another thread. Only tick/accept/query
+    // ownership changes the rings; notification never enters a recovery query.
+    void qualificationChanged(UUID subject) {
+        if(queuedQualifications.add(subject))qualificationChanges.add(subject);
+    }
+    private void refreshQualification(UUID subject) {
+        var authority=runtime.subjects.get(subject);
+        long generation=authority==null?0:authority.generation;boolean terminal=authority!=null&&authority.terminal;
+        Qualification previous=qualifications.get(subject);
+        if(previous!=null&&previous.authority==authority&&previous.generation==generation&&previous.terminal==terminal)return;
+        Qualification next=new Qualification(authority,generation,terminal);qualifications.put(subject,next);
+        for(Work item:bySubject.getOrDefault(subject,List.of())) {
+            boolean selected=next.terminal&&item.generation==next.generation;
+            if(selected) { history.remove(item);active.add(item); }
+            else { active.remove(item);history.add(item); }
+        }
+    }
+    private boolean current(Work item) {
+        var authority=runtime.subjects.get(item.subject);
+        return authority!=null&&authority.terminal&&authority.generation==item.generation;
+    }
+    private static Work rotate(LinkedHashSet<Work> ring) {
+        Iterator<Work> cursor=ring.iterator();Work item=cursor.next();cursor.remove();ring.add(item);return item;
+    }
     void tick(long tick) {
-        List<Work> active=new ArrayList<>(),history=new ArrayList<>();
-        for(Work item:work.values()) {
-            var authority=runtime.subjects.get(item.subject);
-            if(authority!=null&&authority.terminal&&authority.generation==item.generation)active.add(item);
-            else history.add(item);
+        for(UUID subject;(subject=qualificationChanges.poll())!=null;) {
+            queuedQualifications.remove(subject);refreshQualification(subject);
         }
         // Size the current-window share to a five-tick round, including at capacity.
         // Obsolete qualifications retain durable duties but cannot consume current leases.
-        int budget=sampleBudget(active.size());
-        active.sort(Comparator.comparingLong(item->item.last<0?tick-5:item.last));
-        for(int i=0;i<budget;i++)sample(active.get(i),tick);
-        for(int i=0;i<Math.min(16,history.size());i++)sample(history.get((int)Math.floorMod(historyCursor++,history.size())),tick);
+        int budget=sampleBudget(active.size()),selected=0,available=active.size();
+        while(selected<budget&&available-->0&&!active.isEmpty()) {
+            Work item=rotate(active);
+            if(!current(item)) { refreshQualification(item.subject);continue; }
+            sample(item,tick);selected++;
+        }
+        int historical=Math.min(16,history.size());
+        for(int i=0;i<historical&&!history.isEmpty();i++) {
+            Work item=rotate(history);
+            if(current(item)) { refreshQualification(item.subject);continue; }
+            sample(item,tick);
+        }
     }
     static int sampleBudget(int active) {return active==0?0:Math.max(1,(active+4)/5);}
     private void sample(Work item,long tick) {

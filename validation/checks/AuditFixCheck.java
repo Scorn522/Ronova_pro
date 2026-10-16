@@ -14,6 +14,8 @@ public final class AuditFixCheck {
     private static void require(boolean yes,String message) {if(!yes)throw new AssertionError(message);}
     private static Object invoke(Object receiver,String name)throws Exception {var m=receiver.getClass().getDeclaredMethod(name);m.setAccessible(true);try{return m.invoke(receiver);}catch(InvocationTargetException e){if(e.getCause() instanceof Exception x)throw x;throw e;}}
     public static void main(String[] args)throws Exception {
+        if(args.length==1&&args[0].equals("event-image-composition")){eventImageComposition();return;}
+        if(args.length==1&&args[0].equals("scoped-transform-failure")){scopedTransformFailure();return;}
         if(args.length==1&&args[0].equals("startup-batches")){startupBatch();return;}
         if(args.length==1&&args[0].equals("retirement-readback")){retirementReadback();return;}
         if(args.length==1&&args[0].equals("physical-token")){physicalToken();return;}
@@ -21,6 +23,7 @@ public final class AuditFixCheck {
         if(args.length==1&&args[0].equals("root-retry-lifecycle-fixes")){definitionRetryLifecycle();nativeInstallLifecycle();return;}
         if(args.length==1&&args[0].equals("definition-retry")){definitionRetryLifecycle();return;}
         if(args.length==1&&args[0].equals("native-install-lifecycle")){nativeInstallLifecycle();return;}
+        if(args.length==1&&args[0].equals("stop-policy-concurrency")){stopPolicyConcurrency();return;}
         if(args.length==1&&args[0].equals("external-root-candidates")){externalRootCandidates();return;}
         if(args.length==1&&args[0].equals("policy-native-capture-fixes")){
             stopPolicyPublication();taskCaptureScope();
@@ -80,6 +83,137 @@ public final class AuditFixCheck {
         storage.close();var nativeReleased=storageWork.getDeclaredField("nativeReleased");nativeReleased.setAccessible(true);var resourcesConfirmed=storageWork.getDeclaredField("resourcesConfirmed");resourcesConfirmed.setAccessible(true);
         require(worker.isTerminated()&&!nativeReleased.getBoolean(restored)&&!resourcesConfirmed.getBoolean(restored),"shutdown fabricated a historic transaction settlement");
         System.out.println("STORAGE_SHUTDOWN_METADATA_PASS no_current_handle historic_unknown_preserved worker_closed");
+    }
+
+    /** The production composition must retain all four protections on the actual Forge dispatcher image. */
+    private static void eventImageComposition()throws Exception {
+        String name="net/minecraftforge/eventbus/EventBus";
+        Class<?> actual=Class.forName(name.replace('/','.'),false,AuditFixCheck.class.getClassLoader());
+        ClassLoader loader=actual.getClassLoader();byte[] original;
+        try(var input=actual.getResourceAsStream("EventBus.class")){
+            require(input!=null,"actual Forge EventBus class resource unavailable");original=input.readAllBytes();
+        }
+        require(new org.objectweb.asm.ClassReader(original).getClassName().equals(name),"Forge resource is not the actual EventBus definition");
+        Class<?> agent=Class.forName("dev.ronova.pro.agent.RecoveryAgent"),registration=Class.forName("dev.ronova.pro.agent.EventBusBoundary"),dispatch=Class.forName("dev.ronova.pro.agent.DispatchBoundary");
+        Method compose=agent.getDeclaredMethod("eventImage",ClassLoader.class,String.class,Class.class,byte[].class);compose.setAccessible(true);
+        Field ready=agent.getDeclaredField("eventFaultGuarded"),installed=registration.getDeclaredField("installed"),entries=dispatch.getDeclaredField("entries");
+        for(Field field:List.of(ready,installed,entries))field.setAccessible(true);
+        Object oldEntries=entries.get(null);boolean oldReady=ready.getBoolean(null),oldInstalled=installed.getBoolean(null);byte[] changed;
+        try {
+            // Isolate unrelated declarative contracts; these four actual EventBus boundaries remain production code.
+            entries.set(null,Array.newInstance(entries.getType().getComponentType(),0));
+            changed=(byte[])compose.invoke(null,loader,name,actual,original);
+            require(changed!=null&&changed!=original,"shared Forge dispatcher image was not composed");
+            require(ready.getBoolean(null),"composed EventBus image did not publish its boundary result");
+            var node=new org.objectweb.asm.tree.ClassNode();new org.objectweb.asm.ClassReader(changed).accept(node,0);
+            String bridge="dev/ronova/pro/bootstrap/ControlBridge",fault="dev/ronova/pro/bootstrap/EventFaultBridge";
+            require(eventHookCount(node,"addToListeners","(Ljava/lang/Object;Ljava/lang/Class;Lnet/minecraftforge/eventbus/api/IEventListener;Lnet/minecraftforge/eventbus/api/EventPriority;)V",bridge,"modOwnerAllowed","(Ljava/lang/Object;)Z")==1
+                    &&eventHookCount(node,"addToListeners","(Ljava/lang/Object;Ljava/lang/Class;Lnet/minecraftforge/eventbus/api/IEventListener;Lnet/minecraftforge/eventbus/api/EventPriority;)V",bridge,"modListenerRegistered","(Ljava/lang/Object;Ljava/lang/Object;)V")==1,
+                    "registration owner gate or actual listener relation was lost during composition");
+            String post="(Lnet/minecraftforge/eventbus/api/Event;Lnet/minecraftforge/eventbus/api/IEventBusInvokeDispatcher;)Z";
+            require(eventHookCount(node,"post",post,bridge,"modListenerAllowed","(Ljava/lang/Object;)Z")==1,
+                    "shared dispatcher composition lost or duplicated the stopped-listener gate");
+            require(eventHookCount(node,"post",post,fault,"dispatch","(Ljava/lang/Object;Ljava/lang/Object;Ljava/lang/Object;)Z")==1
+                    &&eventHookCount(node,"post",post,"net/minecraftforge/eventbus/api/IEventBusInvokeDispatcher","invoke","(Lnet/minecraftforge/eventbus/api/IEventListener;Lnet/minecraftforge/eventbus/api/Event;)V")==1,
+                    "exception boundary or its original dispatcher fallback was lost during composition");
+            require(eventHookCount(node,"unregister","(Ljava/lang/Object;)V",bridge,"listenerRemovalAllowed","(Ljava/lang/Object;)Z")==1,
+                    "shared dispatcher composition lost or duplicated the protected listener-removal gate");
+            byte[] twice=(byte[])compose.invoke(null,loader,name,actual,changed);
+            require(twice==null||Arrays.equals(changed,twice),"second EventBus composition duplicated or changed an installed boundary");
+        } finally {entries.set(null,oldEntries);ready.setBoolean(null,oldReady);installed.setBoolean(null,oldInstalled);}
+        Class<?> reader=Class.forName("jdk.internal.org.objectweb.asm.ClassReader"),checker=Class.forName("jdk.internal.org.objectweb.asm.util.CheckClassAdapter");
+        java.io.StringWriter diagnostics=new java.io.StringWriter();
+        checker.getMethod("verify",reader,ClassLoader.class,boolean.class,java.io.PrintWriter.class).invoke(null,
+                reader.getConstructor(byte[].class).newInstance((Object)changed),loader,false,new java.io.PrintWriter(diagnostics));
+        require(diagnostics.toString().isEmpty(),"composed actual Forge EventBus failed bytecode dataflow verification: "+diagnostics);
+        Class<?> checked=new ClassLoader(loader){
+            Class<?> defineBody(){Class<?> result=defineClass(name.replace('/','.'),changed,0,changed.length);resolveClass(result);return result;}
+        }.defineBody();
+        require(checked!=actual&&checked.getClassLoader()!=loader,"composed EventBus was not verified in an isolated definition");
+        checked.getDeclaredConstructors();checked.getDeclaredMethods();
+        System.out.println("EVENT_IMAGE_COMPOSITION_PASS actual_Forge_EventBus production_eventImage registration_listener_removal_exception_boundaries original_dispatch_fallback second_pass_idempotent ASM_and_JVM_verification no_live_EventBus_install");
+    }
+    private static int eventHookCount(org.objectweb.asm.tree.ClassNode node,String method,String descriptor,String owner,String called,String calledDescriptor){
+        int count=0;
+        for(var body:node.methods)if(body.name.equals(method)&&body.desc.equals(descriptor))for(var instruction:body.instructions)
+            if(instruction instanceof org.objectweb.asm.tree.MethodInsnNode call&&call.owner.equals(owner)&&call.name.equals(called)&&call.desc.equals(calledDescriptor))count++;
+        return count;
+    }
+    private static final class ScopedTransformBody {static int value(){return 7;}}
+    /** One observed producer failure must not acquire the refusal authority of a selected/control image. */
+    @SuppressWarnings("unchecked")
+    private static void scopedTransformFailure()throws Exception {
+        Class<?> agent=Class.forName("dev.ronova.pro.agent.RecoveryAgent"),group=Class.forName("dev.ronova.pro.agent.ModGroupBoundary");
+        Field instrumentation=agent.getDeclaredField("instrumentation"),controlFailure=agent.getDeclaredField("controlFailure"),images=agent.getDeclaredField("controlImages"),watching=agent.getDeclaredField("watching"),definitions=agent.getDeclaredField("definitions"),producers=agent.getDeclaredField("producerModules");
+        Field metadata=group.getDeclaredField("metadata"),exact=group.getDeclaredField("exact"),unresolved=group.getDeclaredField("unresolved"),gaps=group.getDeclaredField("groupGaps");
+        for(Field field:List.of(instrumentation,controlFailure,images,watching,definitions,producers,metadata,exact,unresolved,gaps))field.setAccessible(true);
+        require(instrumentation.get(null)==null,"scoped transform failure check requires an isolated uninstalled Agent");
+        Object oldFailure=controlFailure.get(null);require(oldFailure==null,"scoped transform failure check requires no prior control failure");
+        String name=ScopedTransformBody.class.getName().replace('.','/');byte[] input;
+        try(var resource=AuditFixCheck.class.getResourceAsStream("/"+name+".class")){
+            require(resource!=null,"actual producer body bytes unavailable");input=resource.readAllBytes();
+        }
+        Class<?> ordinary=new ClassLoader(AuditFixCheck.class.getClassLoader()){
+            Class<?> defineBody(){return defineClass(name.replace('/','.'),input,0,input.length);}
+        }.defineBody();ordinary.getDeclaredMethods();Module module=ordinary.getModule();
+        Map<Module,Set<String>> metadataRows=(Map<Module,Set<String>>)metadata.get(null),gapRows=(Map<Module,Set<String>>)gaps.get(null);
+        Map<Module,Boolean> producerRows=(Map<Module,Boolean>)producers.get(null);Set<Module> exactRows=(Set<Module>)exact.get(null);
+        Set<String> unresolvedRows=(Set<String>)unresolved.get(null),oldUnresolved=new HashSet<>(unresolvedRows);Set<Class<?>> watches=(Set<Class<?>>)watching.get(null);
+        Object definitionMonitor=definitions.get(null);boolean oldWatch; synchronized(definitionMonitor){oldWatch=watches.contains(ordinary);}
+        Set<String> oldMetadata=metadataRows.get(module);Boolean oldProducer=producerRows.get(module);boolean oldExact=exactRows.contains(module);
+        Map<Module,Set<String>> oldGapRows=new IdentityHashMap<>(),oldGapValues=new IdentityHashMap<>();
+        for(Module target:List.of(module,Object.class.getModule())) {
+            Set<String> prior=gapRows.get(target);oldGapRows.put(target,prior);oldGapValues.put(target,prior==null?Set.of():new HashSet<>(prior));
+        }
+        Method producer=agent.getDeclaredMethod("producerModule",Module.class),watched=agent.getDeclaredMethod("watchedDefinition",Class.class),stopped=group.getDeclaredMethod("stopped",Module.class);
+        Method failed=agent.getDeclaredMethod("failedTransform",Module.class,String.class,byte[].class,Throwable.class,boolean.class,boolean.class);
+        Object controlImages=images.get(null);Method critical=controlImages.getClass().getDeclaredMethod("critical",Module.class,ClassLoader.class,String.class,Class.class);
+        for(Method method:List.of(producer,watched,stopped,failed,critical))method.setAccessible(true);
+        try {
+            metadataRows.put(module,Set.of("audit_transform_source"));producerRows.remove(module);
+            require(Boolean.TRUE.equals(producer.invoke(null,module))&&Boolean.FALSE.equals(stopped.invoke(null,module))
+                    &&Boolean.FALSE.equals(watched.invoke(null,ordinary))&&Boolean.FALSE.equals(critical.invoke(controlImages,module,ordinary.getClassLoader(),name,ordinary)),
+                    "ordinary source fixture accidentally acquired selected/control authority");
+            byte[] ordinaryResult=(byte[])failed.invoke(null,module,name,input,new IllegalStateException("ordinary source observation"),false,false);
+            require(ordinaryResult==input&&controlFailure.get(null)==null,"ordinary producer failure replaced input or poisoned the global control failure");
+            require(gapRows.get(module).contains(name+":TRANSFORM_FAILED:IllegalStateException"),"ordinary producer failure lost its actual source-scoped gap");
+            exactRows.add(module);boolean stoppedScope=Boolean.TRUE.equals(stopped.invoke(null,module));require(stoppedScope,"actual stopped-source predicate did not select the producer");
+            refusedTransformImage(input,(byte[])failed.invoke(null,module,name,input,new UnsupportedOperationException("stopped source observation"),false,stoppedScope),"stopped source");
+            require(controlFailure.get(null)==null,"stopped source failure poisoned an unrelated control image");
+            exactRows.remove(module);synchronized(definitionMonitor){watches.add(ordinary);}
+            boolean selectedScope=Boolean.TRUE.equals(watched.invoke(null,ordinary));
+            require(selectedScope&&Boolean.FALSE.equals(stopped.invoke(null,module)),"selected-definition check borrowed stopped-source authority");
+            refusedTransformImage(input,(byte[])failed.invoke(null,module,name,input,new LinkageError("selected definition observation"),false,selectedScope),"selected definition");
+            require(controlFailure.get(null)==null,"selected source failure poisoned an unrelated control image");
+            String controlName="java/lang/reflect/Field";byte[] controlInput;
+            try(var resource=Field.class.getResourceAsStream("Field.class")){require(resource!=null,"actual control carrier bytes unavailable");controlInput=resource.readAllBytes();}
+            boolean controlScope=Boolean.TRUE.equals(critical.invoke(controlImages,Field.class.getModule(),null,controlName,Field.class));require(controlScope,"actual Field control image was not critical");
+            refusedTransformImage(controlInput,(byte[])failed.invoke(null,Field.class.getModule(),controlName,controlInput,new VerifyError("actual control image failure"),controlScope,controlScope),"actual control image");
+            Object controlDiagnostic=controlFailure.get(null);require(controlDiagnostic instanceof String message&&message.startsWith(controlName+":VerifyError:"),"actual control failure did not retain its exact global diagnostic");
+            synchronized(definitionMonitor){watches.remove(ordinary);}
+            require(Boolean.FALSE.equals(watched.invoke(null,ordinary))&&Boolean.FALSE.equals(stopped.invoke(null,module)),"later ordinary observation retained a selected-source predicate");
+            require(failed.invoke(null,module,name,input,new IllegalArgumentException("later ordinary observation"),false,false)==input&&controlFailure.get(null)==controlDiagnostic,
+                    "ordinary observation replaced input or rewrote an existing control failure");
+        } finally {
+            controlFailure.set(null,oldFailure);if(oldMetadata==null)metadataRows.remove(module);else metadataRows.put(module,oldMetadata);
+            if(oldProducer==null)producerRows.remove(module);else producerRows.put(module,oldProducer);
+            if(oldExact)exactRows.add(module);else exactRows.remove(module);
+            synchronized(definitionMonitor){if(oldWatch)watches.add(ordinary);else watches.remove(ordinary);}
+            unresolvedRows.clear();unresolvedRows.addAll(oldUnresolved);
+            for(Module target:oldGapRows.keySet()) {
+                Set<String> prior=oldGapRows.get(target);if(prior==null)gapRows.remove(target);else {prior.clear();prior.addAll(oldGapValues.get(target));gapRows.put(target,prior);}
+            }
+        }
+        System.out.println("SCOPED_TRANSFORM_FAILURE_PASS actual_producer_and_control_predicates ordinary_input_identity_preserved source_gap_retained stopped_and_selected_and_control_images_VM_refused only_control_failure_global isolated_metadata_restored no_Agent_install");
+    }
+    private static void refusedTransformImage(byte[] input,byte[] refused,String scope){
+        require(refused!=null&&refused!=input,"selected transform failure preserved an executable image: "+scope);
+        try {
+            new ClassLoader(AuditFixCheck.class.getClassLoader()){
+                Class<?> defineBody(){return defineClass(null,refused,0,refused.length);}
+            }.defineBody();
+            throw new AssertionError("VM accepted the refused transform image: "+scope);
+        } catch(ClassFormatError expected) { }
     }
 
     /** Current graph reads must invalidate a reused image even when its stack head is unchanged. */
@@ -959,6 +1093,106 @@ public final class AuditFixCheck {
             if(!oldDenied)deniedRows.remove(ids[0]);if(!oldExact)exactRows.remove(target);
         }
         System.out.println("STOP_POLICY_PUBLICATION_PASS actual_prepare_and_publish selected_mode_before_cleanup repeated_fixed_UUID invalid_selection_unchanged isolated_metadata_no_Agent_install");
+    }
+    private static final class StopPolicyProbe {
+        final Class<?> group;final Module target;final Method publisher;final Map<Module,String> modes;
+        final CountDownLatch entered=new CountDownLatch(1),release=new CountDownLatch(1),callbackReturned=new CountDownLatch(1);
+        final java.util.concurrent.atomic.AtomicInteger calls=new java.util.concurrent.atomic.AtomicInteger(),active=new java.util.concurrent.atomic.AtomicInteger();
+        final List<String> nativeModes=Collections.synchronizedList(new ArrayList<>());
+        StopPolicyProbe(Class<?> group,Module target,Method publisher,Map<Module,String> modes){this.group=group;this.target=target;this.publisher=publisher;this.modes=modes;}
+    }
+    private static volatile StopPolicyProbe stopPolicyProbe;
+    private static native void stopPolicySetup0(Class<?> control);
+    private static native void stopPolicyCallback0(Module module);
+    private static native void stopPolicyStop0(Class<?> control);
+    /** Called through the real NativeControl.module JNI entry, with only its native body replaced by the fixture. */
+    public static void stopPolicyNativeProbe(Module module,boolean stopped)throws Exception {
+        StopPolicyProbe probe=Objects.requireNonNull(stopPolicyProbe);
+        require(module==probe.target&&stopped,"native stop publication changed its exact target");
+        require(!Thread.holdsLock(probe.group),"native stop publication still holds the group class monitor");
+        int active=probe.active.incrementAndGet();
+        try{
+            require(active==1,"two publishers entered Native for the same module");
+            synchronized(probe.modes){probe.nativeModes.add(probe.modes.get(module));}
+            if(probe.calls.incrementAndGet()==1){probe.entered.countDown();require(probe.release.await(5,TimeUnit.SECONDS),"old native publication was not released");}
+        }finally{probe.active.decrementAndGet();}
+    }
+    public static void stopPolicyNativeReenter(Module module)throws Exception {
+        StopPolicyProbe probe=Objects.requireNonNull(stopPolicyProbe);require(module==probe.target,"native callback changed module");
+        probe.publisher.invoke(null,module);
+    }
+    private static Object stopPolicyJavaReturn(Class<?> group,Module target,String descriptor)throws Exception {
+        var node=new jdk.internal.org.objectweb.asm.tree.ClassNode();node.version=61;node.access=1;node.name="dev/ronova/pro/StopPolicyBody";node.superName="java/lang/Object";
+        var method=new jdk.internal.org.objectweb.asm.tree.MethodNode(9,"value",descriptor,null,null);node.methods.add(method);
+        Method suppress=group.getDeclaredMethod("suppressExternal",Module.class,jdk.internal.org.objectweb.asm.tree.MethodNode.class);suppress.setAccessible(true);suppress.invoke(null,target,method);
+        var writer=new jdk.internal.org.objectweb.asm.ClassWriter(jdk.internal.org.objectweb.asm.ClassWriter.COMPUTE_MAXS);node.accept(writer);byte[] bytes=writer.toByteArray();
+        Class<?> body=new ClassLoader(AuditFixCheck.class.getClassLoader()){Class<?> defineBody(){return defineClass(null,bytes,0,bytes.length);}}.defineBody();
+        return body.getMethod("value").invoke(null);
+    }
+    @SuppressWarnings("unchecked")
+    private static void stopPolicyConcurrency()throws Exception {
+        System.load(java.nio.file.Path.of(System.getProperty("ronova.pro.audit.native")).toAbsolutePath().toString());
+        Class<?> agent=Class.forName("dev.ronova.pro.agent.RecoveryAgent"),group=Class.forName("dev.ronova.pro.agent.ModGroupBoundary");
+        Class<?> controls=Class.forName("dev.ronova.pro.bootstrap.ControlBridge",true,null),definitions=Class.forName("dev.ronova.pro.bootstrap.DefinitionBridge",true,null),nativeControl=Class.forName("dev.ronova.pro.bootstrap.NativeControl",true,null);
+        // Initialize bookkeeping before enabling the isolated Native entry replacements.
+        Class.forName("dev.ronova.pro.bootstrap.CodeSourceBridge",true,null);
+        Field owner=controls.getDeclaredField("instrumentationOwner"),installed=agent.getDeclaredField("instrumentation"),stopped=controls.getDeclaredField("stoppedModules"),available=nativeControl.getDeclaredField("available");
+        for(Field field:List.of(owner,installed,stopped,available))field.setAccessible(true);
+        Object oldOwner=owner.get(null),oldInstalled=installed.get(null),oldStopped=stopped.get(null);boolean oldAvailable=available.getBoolean(null);
+        require(!oldAvailable,"publication fixture requires an uninstalled native controller");
+        Field metadata=group.getDeclaredField("metadata"),policies=group.getDeclaredField("returns"),completed=group.getDeclaredField("published"),active=group.getDeclaredField("publishing"),modes=definitions.getDeclaredField("RETURNS"),fixed=definitions.getDeclaredField("FIXED");
+        for(Field field:List.of(metadata,policies,completed,active,modes,fixed))field.setAccessible(true);
+        Module target=Class.forName("java.sql.Driver").getModule();String[] ids={"audit_policy"};Module[] modules={target};
+        Map<Module,Object> metadataRows=(Map<Module,Object>)metadata.get(null),policyRows=(Map<Module,Object>)policies.get(null),completedRows=(Map<Module,Object>)completed.get(null),activeRows=(Map<Module,Object>)active.get(null);
+        Map<Module,String> modeRows=(Map<Module,String>)modes.get(null);Map<Module,UUID> uuidRows=(Map<Module,UUID>)fixed.get(null);
+        Object oldMetadata=metadataRows.get(target),oldPolicy=policyRows.get(target),oldCompleted=completedRows.get(target);String oldMode=modeRows.get(target);UUID oldUuid=uuidRows.get(target);
+        require(!activeRows.containsKey(target),"publication fixture target already has a publisher");
+        var api=(java.lang.instrument.Instrumentation)Proxy.newProxyInstance(AuditFixCheck.class.getClassLoader(),new Class<?>[]{java.lang.instrument.Instrumentation.class},(proxy,method,args)->{
+            if(method.getName().equals("getAllLoadedClasses"))return new Class<?>[0];if(method.getReturnType()==boolean.class)return true;if(method.getReturnType()==long.class)return 0L;return null;
+        });
+        Method prepare=group.getDeclaredMethod("prepare",java.lang.instrument.Instrumentation.class,String[].class,Module[].class,String.class),publisher=agent.getDeclaredMethod("publishStoppedModule",Module.class);
+        prepare.setAccessible(true);publisher.setAccessible(true);
+        List<Thread> workers=new ArrayList<>();boolean nativeSetup=false;Object fixedGeneration=null;UUID fixedIdentity=null;
+        try{
+            owner.set(null,agent);installed.set(null,api);metadataRows.put(target,Set.of(ids[0]));stopPolicySetup0(nativeControl);nativeSetup=true;available.setBoolean(null,true);
+            for(boolean replacePolicy:List.of(false,true)){
+                StopPolicyProbe probe=new StopPolicyProbe(group,target,publisher,modeRows);stopPolicyProbe=probe;
+                var failure=new java.util.concurrent.atomic.AtomicReference<Throwable>();var firstResult=new java.util.concurrent.atomic.AtomicReference<Object>();var secondResult=new java.util.concurrent.atomic.AtomicReference<Object>();
+                Thread first=new Thread(()->{try{firstResult.set(prepare.invoke(null,api,ids,modules,"uuid-fixed"));}catch(Throwable error){failure.compareAndSet(null,error);}},"audit-stop-old");
+                Thread second=new Thread(()->{try{stopPolicyCallback0(target);probe.callbackReturned.countDown();if(replacePolicy)secondResult.set(prepare.invoke(null,api,ids,modules,"empty"));}catch(Throwable error){failure.compareAndSet(null,error);}},"audit-stop-new");
+                first.setDaemon(true);second.setDaemon(true);workers.add(first);workers.add(second);
+                first.start();require(probe.entered.await(5,TimeUnit.SECONDS),"old policy did not enter Native:"+failure.get());
+                if(fixedGeneration!=null)require(policyRows.get(target)==fixedGeneration&&fixedIdentity.equals(uuidRows.get(target)),"same-mode prepare replaced its fixed UUID generation");
+                second.start();require(probe.callbackReturned.await(5,TimeUnit.SECONDS),"native callback waited for the in-flight group publisher:"+failure.get());
+                if(replacePolicy){
+                    long deadline=System.nanoTime()+TimeUnit.SECONDS.toNanos(5);
+                    while(!"empty".equals(invoke(policyRows.get(target),"mode"))&&System.nanoTime()<deadline)Thread.sleep(1);
+                    require("empty".equals(invoke(policyRows.get(target),"mode"))&&secondResult.get()==null,"new policy was not queued or returned READY before native completion");
+                }
+                probe.release.countDown();first.join(5000);second.join(5000);
+                require(!first.isAlive()&&!second.isAlive()&&failure.get()==null,"publication threads failed or deadlocked:"+failure.get());
+                require("READY".equals(firstResult.get())&&(!replacePolicy||"READY".equals(secondResult.get())),"completed policy drain did not return READY");
+                require(probe.nativeModes.equals(List.of("uuid-fixed",replacePolicy?"empty":"uuid-fixed"))&&completedRows.get(target)==policyRows.get(target)&&!activeRows.containsKey(target),"callback/current policy was not drained in order");
+                if(!replacePolicy){fixedGeneration=policyRows.get(target);fixedIdentity=uuidRows.get(target);}
+            }
+            Method nativeReturn=definitions.getMethod("nativeReturn",Module.class,Class.class,String.class);
+            require(stopPolicyJavaReturn(group,target,"()[Ljava/lang/String;") instanceof String[] javaEmpty&&javaEmpty.length==0
+                    &&nativeReturn.invoke(null,target,AuditFixCheck.class,"()[Ljava/lang/String;") instanceof String[] nativeEmpty&&nativeEmpty.length==0,"Java/native final empty policy differed");
+            require("READY".equals(prepare.invoke(null,api,ids,modules,"uuid-fixed")),"fixed policy could not publish after drain");
+            Object generation=policyRows.get(target);UUID identity=uuidRows.get(target);
+            require("READY".equals(prepare.invoke(null,api,ids,modules,"uuid-fixed"))&&policyRows.get(target)==generation&&identity!=null&&identity.equals(uuidRows.get(target)),"same-mode prepare replaced the fixed UUID generation");
+            require(identity.equals(stopPolicyJavaReturn(group,target,"()Ljava/util/UUID;"))&&identity.equals(nativeReturn.invoke(null,target,AuditFixCheck.class,"()Ljava/util/UUID;")),"Java/native fixed UUID differed after repeated handoff");
+        }finally{
+            StopPolicyProbe probe=stopPolicyProbe;if(probe!=null)probe.release.countDown();
+            for(Thread worker:workers)if(worker.isAlive())worker.join(5000);
+            require(workers.stream().noneMatch(Thread::isAlive),"publication fixture could not release its threads");
+            available.setBoolean(null,false);if(nativeSetup)stopPolicyStop0(nativeControl);stopPolicyProbe=null;
+            owner.set(null,oldOwner);installed.set(null,oldInstalled);stopped.set(null,oldStopped);available.setBoolean(null,oldAvailable);
+            if(oldMetadata==null)metadataRows.remove(target);else metadataRows.put(target,oldMetadata);if(oldPolicy==null)policyRows.remove(target);else policyRows.put(target,oldPolicy);
+            if(oldCompleted==null)completedRows.remove(target);else completedRows.put(target,oldCompleted);activeRows.remove(target);
+            if(oldMode==null)modeRows.remove(target);else modeRows.put(target,oldMode);if(oldUuid==null)uuidRows.remove(target);else uuidRows.put(target,oldUuid);
+        }
+        System.out.println("STOP_POLICY_CONCURRENCY_PASS actual_NativeControl_JNI_entry no_group_monitor two_thread_native_callback_reentry same_generation_callback_drained latest_policy_drained Java_native_returns_match fixed_UUID_reused isolated_native_body_fixture_no_live_install");
     }
     private static volatile Object taskCaptureMonitor;
     private static volatile CountDownLatch taskCaptureEntered,taskCaptureProceed;
