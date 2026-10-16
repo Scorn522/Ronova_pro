@@ -51,9 +51,11 @@ static void JNICALL host_jvm_unload(void *handle){
     if(selected){
         /* Failed JNI_OnLoad unloads inside the original JDK call, before its
          * Java return. Disable the last image before its IAT becomes unmapped. */
-        InterlockedExchange(&scope->library->closing,1);host_library_releasing(scope->library);
+        host_library_releasing(scope->library,0);
     }
-    SetLastError(incoming);host_jvm_unload_original(handle);
+    SetLastError(incoming);
+    __try {host_jvm_unload_original(handle);}
+    __finally {if(selected)host_static_library_returned(scope->library,host_static_environment());}
 }
 static int host_loader_imports(HMODULE image,void *load,void *unload,void *volatile **loadSlot,void *volatile **unloadSlot){
     unsigned char *base=(unsigned char*)image;IMAGE_DOS_HEADER *dos=(IMAGE_DOS_HEADER*)base;
@@ -141,9 +143,12 @@ static void JNICALL native_library_unload(JNIEnv *env,jclass type,jstring name,j
                 &&other->consumer!=scope->library->consumer&&!native_owner_stopped(other->owners)){shared=1;break;}
     ReleaseSRWLockShared(&native_records);if(shared){native_refuse(env,"NATIVE_SHARED_IMAGE_UNLOAD_PENDING");return;}
     jstring snapshot=native_original.NewString(env,(const jchar*)scope->library->path,scope->library->nameLength);if(!snapshot)return;
-    InterlockedExchange(&scope->library->closing,1);
-    host_library_releasing(scope->library);
-    scope->phase=1;native_unload_original(env,type,snapshot,builtin,jni,handle);native_original.DeleteLocalRef(env,snapshot);scope->success=!native_original.ExceptionCheck(env);scope->phase=2;
+    if(!host_library_releasing(scope->library,1)){
+        native_original.DeleteLocalRef(env,snapshot);native_refuse(env,"NATIVE_IMAGE_STORAGE_UNLOAD_PENDING");return;
+    }
+    scope->phase=1;
+    __try {native_unload_original(env,type,snapshot,builtin,jni,handle);scope->success=!native_original.ExceptionCheck(env);scope->phase=2;}
+    __finally {host_static_library_returned(scope->library,env);native_original.DeleteLocalRef(env,snapshot);}
 }
 static int native_library_install(JNIEnv *env){
     jclass libraries=native_original.FindClass(env,"jdk/internal/loader/NativeLibraries");

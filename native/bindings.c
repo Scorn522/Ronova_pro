@@ -15,6 +15,7 @@
 
 typedef struct Owner { jweak module; volatile LONG stopped,producer,kernelProtected; struct Owner *next; } Owner;
 typedef struct OwnerLink {Owner *owner;struct OwnerLink *next;} OwnerLink;
+#include "host_memory_tracking.h"
 typedef struct HostLibraryLoad HostLibraryLoad;
 typedef struct NativeToolingScope {OwnerLink *owners;jweak origin;int unknown;unsigned depth;struct NativeToolingScope *previous;} NativeToolingScope;
 typedef struct NativeToolingImage NativeToolingImage;
@@ -457,8 +458,11 @@ static int native_field_allowed(JNIEnv *env,jobject object,jclass type,jfieldID 
     if(reflected)native_original.DeleteLocalRef(env,reflected);if(declaring)native_original.DeleteLocalRef(env,declaring);state->control--;return allowed&&!native_original.ExceptionCheck(env);
 }
 static jobject native_box(JNIEnv *env,const char *name,const char *signature,jvalue value){NativeThread *state=native_thread();if(!state)return NULL;state->control++;jclass type=native_original.FindClass(env,name);jmethodID method=type?native_original.GetStaticMethodID(env,type,"valueOf",signature):NULL;jobject result=method?native_original.CallStaticObjectMethodA(env,type,method,&value):NULL;if(type)native_original.DeleteLocalRef(env,type);state->control--;return result;}
+static int native_private_execution_unknown(NativeThread*);
 static jobjectArray native_mutation_sources_from(JNIEnv *env,NativeThread *state,OwnerLink *retained,int retainedUnknown){
     OwnerLink *owners=NULL;int unknown=retainedUnknown!=0;
+    unknown|=native_private_execution_unknown(state);
+    if(state)for(unsigned at=0;at<state->depth;at++)if(host_private_binding_unknown(state->stack[at])){unknown=1;break;}
     if(!native_owner_merge(&owners,retained)||!native_capture_scope_sources(env,state,&owners,&unknown)){
         native_owner_links_free(owners);if(!native_original.ExceptionCheck(env))native_refuse(env,"NATIVE_MUTATION_SOURCES_UNAVAILABLE");return NULL;
     }
@@ -1167,6 +1171,19 @@ typedef struct NativeToolingInvocation {
     struct NativeToolingInvocation *previous;
     unsigned savedControl;int controlSuspended;
 } NativeToolingInvocation;
+/* These are actual executing native scopes, not an owner-wide loss flag.
+ * Their CPU data accesses cannot be reconstructed from an empty Binding stack. */
+static int native_private_execution_unknown(NativeThread *state){
+    if(!state)return 0;
+    for(NativeToolingInvocation *call=state->toolingInvocation;call;call=call->previous)
+        if(call->slot&&native_has_producer(call->slot->owners))return 1;
+    if(state->hostWorker&&native_has_producer(state->hostWorker->owners))return 1;
+    for(NativeLibraryScope *scope=state->library;scope;scope=scope->previous)
+        if(scope->library&&native_has_producer(scope->library->owners))return 1;
+    for(HostLibraryLoad *load=state->hostLoad;load;load=load->parentLoad)
+        if(native_has_producer(load->owners))return 1;
+    return 0;
+}
 struct NativeToolingImage {
     jobject declaration,loader,domain;jstring name;jclass actual;jbyteArray original,bytes;
     jobjectArray writers;jboolean changed;unsigned phase;

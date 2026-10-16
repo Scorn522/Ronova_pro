@@ -5,14 +5,24 @@ typedef struct NativeMemoryInterest {Owner *owner;volatile LONG revisions;struct
 typedef struct NativeMemoryRevision {size_t references;OwnerLink *sources;NativeMemoryImage *image;struct NativeMemoryAllocation *allocation;int complete,counted;struct NativeMemoryRevision *previous;} NativeMemoryRevision;
 typedef struct NativeMemoryRange {uint64_t start,length;NativeMemoryRevision *revision;struct NativeMemoryRange *next;} NativeMemoryRange;
 typedef struct NativeBufferAlias {jweak buffer;uint64_t address,bytes,generation;LONG users;int borrowed;struct NativeBufferAlias *next;} NativeBufferAlias;
-typedef struct NativeMemoryAllocation {uint64_t address,bytes,generation,writeEpoch;jobject allocator;jweak bufferRoot,bufferAction;void *release;OwnerLink *sources,*readers,*preserved;NativeMemoryRange *ranges;NativeMemoryInterest *interests;NativeBufferAlias *aliases;CRITICAL_SECTION gate;volatile LONG alive,writers,reading,changing,users,sealed,retiring,unknownReaders,unknownUse,opaque,releaseFailed,managed,restoring;struct NativeMemoryAllocation *next;} NativeMemoryAllocation;
+typedef struct NativeHostMemoryContext {void *release;uintptr_t context;uint64_t epoch;LONG allocating,changing;int uncertain;struct NativeHostMemoryContext *next;} NativeHostMemoryContext;
+typedef struct NativeMemoryImageState {void *tag;int retiring,retired;struct NativeMemoryImageState *next;} NativeMemoryImageState;
+typedef struct NativeMemoryAllocation {uint64_t address,bytes,generation,writeEpoch;jobject allocator;jweak bufferRoot,bufferAction;void *release;OwnerLink *sources,*readers,*preserved;NativeMemoryRange *ranges;NativeMemoryInterest *interests;NativeBufferAlias *aliases;int hostFamily;void *hostAllocator,*imageTag;uintptr_t hostContext,hostFreeFlags;uint64_t hostContextEpoch;HMODULE hostReleasePin;CRITICAL_SECTION gate;volatile LONG alive,writers,reading,changing,users,sealed,retiring,unknownReaders,unknownUse,opaque,releaseFailed,managed,restoring;struct NativeMemoryAllocation *next;} NativeMemoryAllocation;
 typedef struct NativeMemoryCall {NativeMemoryAllocation *allocation,*prepared;OwnerLink *sources;jobject allocator;jweak bufferRoot;void *release;uint64_t address,bytes,generation;int locked,admitted,known,unknown,managed,cleanup;} NativeMemoryCall;
 typedef struct NativeMemoryWrite {NativeMemoryAllocation *allocation;OwnerLink *sources,*observed;NativeMemoryImage *image;uint64_t address,length,generation;int locked,written,reading,detached,unobserved,opaque,uncertain,unknown,admitted,initializing;struct NativeMemoryWrite *previous,*root;} NativeMemoryWrite;
 typedef struct NativeBufferIoWrite {NativeMemoryWrite write;uint64_t epoch;jobject receipt,group;struct NativeBufferIoWrite *next;} NativeBufferIoWrite;
+typedef struct NativeHostMemoryHold {NativeMemoryAllocation *allocation;uint64_t generation;struct NativeHostMemoryHold *next;} NativeHostMemoryHold;
+struct NativeHostMemoryCall {int family,operation,unknown;void *release;uintptr_t context;uint64_t address,bytes,contextEpoch;OwnerLink *sources;NativeHostMemoryContext *heap;NativeHostMemoryHold *holds;};
 static SRWLOCK native_memory_records=SRWLOCK_INIT;
 static NativeMemoryAllocation *native_memory_allocations;
 static OwnerLink *native_memory_unknown;
 static NativeBufferIoWrite *native_buffer_io_writes;
+static NativeHostMemoryContext *native_memory_host_contexts;
+static NativeMemoryImageState *native_memory_images;
+static void native_memory_released(JNIEnv*,NativeMemoryAllocation*);
+static void native_memory_release_provider(NativeMemoryAllocation*);
+static void native_memory_reap_references(JNIEnv*,NativeMemoryAllocation*);
+static void native_memory_revision_release(NativeMemoryRevision*);
 
 static int native_memory_preserved(NativeMemoryAllocation *allocation,Owner *owner){
     for(OwnerLink *source=allocation->preserved;source;source=source->next)if(source->owner==owner)return 1;return 0;
@@ -38,6 +48,7 @@ static int native_memory_observed(uint64_t address,uint64_t length){
     ReleaseSRWLockShared(&native_memory_records);return observed;
 }
 static int native_memory_buffer_aliases(JNIEnv *env,NativeMemoryAllocation *allocation){
+    if(!env){for(NativeBufferAlias *alias=allocation->aliases;alias;alias=alias->next)if(alias->generation==allocation->generation)return 1;return 0;}
     int borrowed=0;NativeBufferAlias **link=&allocation->aliases;
     while(*link){NativeBufferAlias *alias=*link;
         if(!alias->users&&native_original.IsSameObject(env,alias->buffer,NULL)){
@@ -123,7 +134,8 @@ static int native_memory_buffer_use(JNIEnv *env,jobject buffer,jlong token,uint6
         ready=ready&&alias->users>0;
         if(ready){alias->users--;InterlockedDecrement(&allocation->users);}
     }
-    ReleaseSRWLockExclusive(&native_memory_records);LeaveCriticalSection(&allocation->gate);return ready;
+    ReleaseSRWLockExclusive(&native_memory_records);LeaveCriticalSection(&allocation->gate);
+    if(!retain&&!allocation->alive)native_memory_reap_references(env,allocation);return ready;
 }
 JNIEXPORT jlongArray JNICALL Java_dev_ronova_pro_bootstrap_NativeControl_observeBufferStorage0(JNIEnv *env,jclass type,jobject buffer,jobject action,jlong address,jlong bytes){
     jmethodID gate=native_controller?native_original.GetStaticMethodID(env,native_controller,"bufferStorageCaller","(Ljava/nio/Buffer;Ljava/lang/Object;JJ)Z"):NULL;
@@ -185,6 +197,230 @@ static int native_memory_sources(JNIEnv *env,NativeThread *state,jobjectArray su
 }
 static void native_memory_unmapped(OwnerLink *sources){
     AcquireSRWLockExclusive(&native_memory_records);if(!native_owner_merge(&native_memory_unknown,sources))InterlockedIncrement(&native_failures);ReleaseSRWLockExclusive(&native_memory_records);
+}
+static void native_memory_host_unobserved(OwnerLink *owners){native_memory_unmapped(owners);}
+/* memory_records is held. A context row is observed API metadata, never a
+ * claimed allocation. Only a successful original allocator creates a block. */
+static NativeHostMemoryContext *native_memory_host_context(void *release,uintptr_t context,int create){
+    for(NativeHostMemoryContext *entry=native_memory_host_contexts;entry;entry=entry->next)
+        if(entry->release==release&&entry->context==context)return entry;
+    if(!create)return NULL;NativeHostMemoryContext *entry=(NativeHostMemoryContext*)calloc(1,sizeof(*entry));if(!entry)return NULL;
+    entry->release=release;entry->context=context;entry->epoch=1;entry->next=native_memory_host_contexts;native_memory_host_contexts=entry;return entry;
+}
+static NativeMemoryImageState *native_memory_image_state(void *tag,int create){
+    for(NativeMemoryImageState *entry=native_memory_images;entry;entry=entry->next)if(entry->tag==tag)return entry;
+    if(!create)return NULL;NativeMemoryImageState *entry=(NativeMemoryImageState*)calloc(1,sizeof(*entry));if(!entry)return NULL;
+    entry->tag=tag;entry->next=native_memory_images;native_memory_images=entry;return entry;
+}
+static void native_memory_release_provider(NativeMemoryAllocation *allocation){
+    HMODULE pin=NULL;
+    if(TryEnterCriticalSection(&allocation->gate)){
+        if(!InterlockedCompareExchange(&allocation->alive,0,0)&&!InterlockedCompareExchange(&allocation->changing,0,0)){
+            pin=allocation->hostReleasePin;allocation->hostReleasePin=NULL;
+        }
+        LeaveCriticalSection(&allocation->gate);
+    }
+    if(pin&&!host_real_free_library(pin))InterlockedIncrement(&native_failures);
+}
+static void native_memory_host_record(JNIEnv *env,int family,void *allocator,void *release,uintptr_t context,uintptr_t flags,
+        uint64_t address,uint64_t bytes,OwnerLink *owners,int unknown,uint64_t contextEpoch,void *imageTag){
+    if(!address)return;NativeMemoryAllocation *entry=(NativeMemoryAllocation*)calloc(1,sizeof(*entry));
+    if(!entry){native_memory_unmapped(owners);return;}InitializeCriticalSection(&entry->gate);
+    entry->hostFamily=family;entry->hostAllocator=allocator;entry->release=release;entry->hostContext=context;entry->hostFreeFlags=flags;entry->imageTag=imageTag;
+    entry->address=address;entry->bytes=bytes==UINT64_MAX||bytes>UINT64_MAX-address?0:bytes;entry->generation=1;entry->opaque=entry->alive=1;
+    if(unknown||!owners||bytes==UINT64_MAX||bytes>UINT64_MAX-address||!native_owner_merge(&entry->sources,owners))entry->unknownUse=1;
+    if(family!=NATIVE_MEMORY_HOST_IMAGE){
+        if(!release||!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS,(LPCWSTR)release,&entry->hostReleasePin))entry->unknownUse=1;
+    }
+    int accepted=1;AcquireSRWLockExclusive(&native_memory_records);
+    if(family==NATIVE_MEMORY_HOST_HEAP){
+        NativeHostMemoryContext *heap=native_memory_host_context(release,context,1);
+        if(!heap||heap->changing||heap->uncertain||(contextEpoch&&contextEpoch!=heap->epoch))accepted=0;
+        else entry->hostContextEpoch=heap->epoch;
+    }else if(family==NATIVE_MEMORY_HOST_IMAGE){
+        NativeMemoryImageState *image=native_memory_image_state(imageTag,1);
+        if(!image||image->retiring||image->retired)accepted=0;
+        for(NativeMemoryAllocation *old=native_memory_allocations;accepted&&old;old=old->next)
+            if(old->alive&&old->imageTag==imageTag&&old->address==address&&old->bytes==entry->bytes){
+                if(!native_owner_merge(&old->sources,owners)||unknown)InterlockedExchange(&old->unknownUse,1);accepted=2;break;
+            }
+    }
+    if(accepted==1){
+        // A nested allocator may expose a sub-block of another observed
+        // allocator. Keep both actual origins, but do not free either overlap
+        // on the strength of a guessed physical allocator relationship.
+        for(NativeMemoryAllocation *old=native_memory_allocations;old;old=old->next)if(old->alive&&entry->bytes&&old->bytes
+                &&address<old->address+old->bytes&&old->address<address+entry->bytes){
+            InterlockedExchange(&old->unknownUse,1);entry->unknownUse=1;
+        }
+        entry->next=native_memory_allocations;native_memory_allocations=entry;
+    }
+    ReleaseSRWLockExclusive(&native_memory_records);
+    if(accepted!=1){
+        if(!accepted)native_memory_unmapped(owners);
+        if(entry->hostReleasePin)host_real_free_library(entry->hostReleasePin);native_owner_links_free(entry->sources);DeleteCriticalSection(&entry->gate);free(entry);
+    }
+    (void)env;
+}
+static void native_memory_host_allocated(JNIEnv *env,int family,void *allocator,void *release,uintptr_t context,uintptr_t flags,
+        uint64_t address,uint64_t bytes,OwnerLink *owners,int unknown){
+    native_memory_host_record(env,family,allocator,release,context,flags,address,bytes,owners,unknown,0,NULL);
+}
+/* records is held and no original API is running under this short gate. */
+static int native_memory_host_hold(JNIEnv *env,NativeHostMemoryCall *call,NativeMemoryAllocation *allocation){
+    if(!TryEnterCriticalSection(&allocation->gate))return 0;
+    int ready=allocation->alive&&!allocation->sealed&&!allocation->retiring&&!allocation->changing&&!allocation->users
+            &&!allocation->writers&&!allocation->reading&&!native_memory_buffer_aliases(env,allocation);
+    NativeHostMemoryHold *hold=ready?(NativeHostMemoryHold*)calloc(1,sizeof(*hold)):NULL;
+    if(hold){hold->allocation=allocation;hold->generation=allocation->generation;hold->next=call->holds;call->holds=hold;
+        InterlockedIncrement(&allocation->users);InterlockedIncrement(&allocation->changing);}
+    LeaveCriticalSection(&allocation->gate);return hold!=NULL;
+}
+static void native_memory_host_drop_locked(NativeHostMemoryCall *call,int uncertain){
+    for(NativeHostMemoryHold *hold=call->holds;hold;hold=hold->next){NativeMemoryAllocation *allocation=hold->allocation;
+        if(uncertain){InterlockedExchange(&allocation->unknownUse,1);InterlockedExchange(&allocation->releaseFailed,1);InterlockedExchange(&allocation->retiring,1);}
+        InterlockedDecrement(&allocation->changing);InterlockedDecrement(&allocation->users);
+    }
+    if(call->heap){
+        if(call->operation==NATIVE_MEMORY_HOST_ALLOCATE)call->heap->allocating--;
+        else if(call->operation==NATIVE_MEMORY_HOST_CONTEXT_FREE){call->heap->changing=0;if(uncertain)call->heap->uncertain=1;}
+    }
+}
+static void native_memory_host_dispose(NativeHostMemoryCall *call){
+    while(call->holds){NativeHostMemoryHold *hold=call->holds;call->holds=hold->next;native_memory_release_provider(hold->allocation);free(hold);}
+    native_owner_links_free(call->sources);free(call);
+}
+static NativeHostMemoryCall *native_memory_host_prepare(JNIEnv *env,int family,void *release,uintptr_t context,uint64_t address,uint64_t bytes,
+        int operation,OwnerLink *owners,int unknown,int *denied){
+    *denied=0;NativeHostMemoryCall *call=(NativeHostMemoryCall*)calloc(1,sizeof(*call));
+    if(!call){
+        AcquireSRWLockShared(&native_memory_records);
+        for(NativeMemoryAllocation *allocation=native_memory_allocations;allocation;allocation=allocation->next)if(allocation->alive
+                &&(operation==NATIVE_MEMORY_HOST_CONTEXT_FREE?allocation->hostFamily==family&&allocation->hostContext==context&&allocation->release==release
+                    :operation==NATIVE_MEMORY_HOST_DECOMMIT?allocation->hostFamily==family&&address>=allocation->address&&address-allocation->address<=allocation->bytes
+                    :operation!=NATIVE_MEMORY_HOST_ALLOCATE&&allocation->address==address)){*denied=1;break;}
+        ReleaseSRWLockShared(&native_memory_records);native_memory_unmapped(owners);return NULL;
+    }
+    call->family=family;call->operation=operation;call->release=release;call->context=context;call->address=address;call->bytes=bytes;call->unknown=unknown||!owners;
+    if(!native_owner_merge(&call->sources,owners)){call->unknown=1;native_memory_unmapped(owners);}
+    int ready=1,found=operation==NATIVE_MEMORY_HOST_ALLOCATE||operation==NATIVE_MEMORY_HOST_CONTEXT_FREE;
+    AcquireSRWLockExclusive(&native_memory_records);
+    if(family==NATIVE_MEMORY_HOST_HEAP&&(operation==NATIVE_MEMORY_HOST_ALLOCATE||operation==NATIVE_MEMORY_HOST_CONTEXT_FREE)){
+        NativeHostMemoryContext *heap=native_memory_host_context(release,context,1);
+        if(!heap||heap->changing||heap->uncertain||operation==NATIVE_MEMORY_HOST_CONTEXT_FREE&&heap->allocating)ready=0;
+        else{call->heap=heap;call->contextEpoch=heap->epoch;if(operation==NATIVE_MEMORY_HOST_ALLOCATE)heap->allocating++;else heap->changing=1;}
+    }
+    if(ready&&operation!=NATIVE_MEMORY_HOST_ALLOCATE){
+        for(NativeMemoryAllocation *allocation=native_memory_allocations;allocation;allocation=allocation->next){
+            if(!allocation->alive)continue;
+            int match=operation==NATIVE_MEMORY_HOST_CONTEXT_FREE
+                    ?allocation->hostFamily==family&&allocation->hostContext==context&&allocation->release==release
+                    :operation==NATIVE_MEMORY_HOST_DECOMMIT
+                    ?allocation->hostFamily==family&&address>=allocation->address&&address-allocation->address<=allocation->bytes
+                    :allocation->address==address;
+            if(!match)continue;found=1;
+            if(allocation->managed||allocation->hostFamily==NATIVE_MEMORY_HOST_IMAGE||!native_memory_host_hold(env,call,allocation)){ready=0;break;}
+            if(allocation->hostFamily!=family||allocation->hostContext!=context||allocation->release!=release){
+                // A different provider can receive this scalar pointer during
+                // an ordinary call, but it has no exact cleanup capability.
+                // Its unobserved outcome must not leave the old row freeable.
+                InterlockedExchange(&allocation->unknownUse,1);InterlockedExchange(&allocation->releaseFailed,1);InterlockedExchange(&allocation->retiring,1);
+                native_memory_host_drop_locked(call,0);found=0;break;
+            }
+            if(operation!=NATIVE_MEMORY_HOST_CONTEXT_FREE)break;
+        }
+    }
+    if(!ready){*denied=1;native_memory_host_drop_locked(call,0);}
+    ReleaseSRWLockExclusive(&native_memory_records);
+    if(!ready||!found){native_memory_host_dispose(call);return NULL;}return call;
+}
+static void native_memory_host_complete(JNIEnv *env,NativeHostMemoryCall *call,uint64_t returned,uint64_t bytes,int completed,int released){
+    if(!call)return;OwnerLink *sources=NULL;int unknown=call->unknown;
+    if(!native_owner_merge(&sources,call->sources))unknown=1;
+    for(NativeHostMemoryHold *hold=call->holds;hold;hold=hold->next){
+        NativeMemoryAllocation *allocation=hold->allocation;EnterCriticalSection(&allocation->gate);
+        if(completed&&allocation->alive&&allocation->generation==hold->generation){
+            if(call->operation==NATIVE_MEMORY_HOST_REALLOCATE&&returned){if(!native_owner_merge(&sources,allocation->sources))unknown=1;}
+            AcquireSRWLockExclusive(&native_memory_records);
+            if(released||call->operation==NATIVE_MEMORY_HOST_REALLOCATE&&returned)native_memory_released(env,allocation);
+            else if(call->operation==NATIVE_MEMORY_HOST_DECOMMIT){
+                allocation->generation++;allocation->writeEpoch++;InterlockedExchange(&allocation->opaque,1);
+                NativeMemoryRange *range=allocation->ranges;allocation->ranges=NULL;
+                while(range){NativeMemoryRange *next=range->next;native_memory_revision_release(range->revision);free(range);range=next;}
+                if(env)native_memory_buffer_aliases_clear(env,allocation);
+            }
+            ReleaseSRWLockExclusive(&native_memory_records);
+        }
+        LeaveCriticalSection(&allocation->gate);
+    }
+    AcquireSRWLockExclusive(&native_memory_records);
+    int current=!call->heap||call->contextEpoch==call->heap->epoch;
+    if(completed&&released&&call->operation==NATIVE_MEMORY_HOST_CONTEXT_FREE&&call->heap)call->heap->epoch++;
+    native_memory_host_drop_locked(call,0);ReleaseSRWLockExclusive(&native_memory_records);
+    if(completed&&returned&&(call->operation==NATIVE_MEMORY_HOST_ALLOCATE||call->operation==NATIVE_MEMORY_HOST_REALLOCATE)){
+        if(current)native_memory_host_record(env,call->family,NULL,call->release,call->context,0,returned,bytes,sources,unknown,call->contextEpoch,NULL);
+        else native_memory_unmapped(sources);
+    }
+    for(NativeHostMemoryHold *hold=call->holds;hold;hold=hold->next)native_memory_reap_references(env,hold->allocation);
+    native_owner_links_free(sources);native_memory_host_dispose(call);
+}
+static void native_memory_host_abort(JNIEnv *env,NativeHostMemoryCall *call){
+    (void)env;if(!call)return;AcquireSRWLockExclusive(&native_memory_records);native_memory_host_drop_locked(call,1);ReleaseSRWLockExclusive(&native_memory_records);
+    native_memory_unmapped(call->sources);native_memory_host_dispose(call);
+}
+static void native_memory_image_span(JNIEnv *env,void *imageTag,uint64_t address,uint64_t bytes,OwnerLink *owners,int unknown){
+    if(!imageTag||!address||!bytes)return;
+    native_memory_host_record(env,NATIVE_MEMORY_HOST_IMAGE,NULL,NULL,0,0,address,bytes,owners,unknown,0,imageTag);
+}
+static int native_memory_image_busy(JNIEnv *env,void *imageTag){
+    if(!imageTag)return 1;int busy=0;AcquireSRWLockShared(&native_memory_records);
+    for(NativeMemoryAllocation *allocation=native_memory_allocations;allocation;allocation=allocation->next)if(allocation->alive&&allocation->imageTag==imageTag){
+        if(!TryEnterCriticalSection(&allocation->gate)){busy=1;break;}
+        busy=allocation->users||allocation->writers||allocation->reading||allocation->changing||native_memory_buffer_aliases(env,allocation);
+        LeaveCriticalSection(&allocation->gate);if(busy)break;
+    }
+    ReleaseSRWLockShared(&native_memory_records);return busy;
+}
+static int native_memory_image_prepare(JNIEnv *env,void *imageTag){
+    int ready=imageTag!=NULL;NativeHostMemoryHold *sealed=NULL;AcquireSRWLockExclusive(&native_memory_records);
+    NativeMemoryImageState *image=ready?native_memory_image_state(imageTag,1):NULL;
+    if(!image||image->retired)ready=0;
+    for(NativeMemoryAllocation *allocation=native_memory_allocations;ready&&allocation;allocation=allocation->next)if(allocation->alive&&allocation->imageTag==imageTag){
+        if(!TryEnterCriticalSection(&allocation->gate)){ready=0;break;}
+        ready=!allocation->users&&!allocation->writers&&!allocation->reading&&!allocation->changing&&!native_memory_buffer_aliases(env,allocation);
+        if(ready&&!allocation->retiring){
+            NativeHostMemoryHold *hold=(NativeHostMemoryHold*)calloc(1,sizeof(*hold));
+            if(!hold)ready=0;else{hold->allocation=allocation;hold->next=sealed;sealed=hold;InterlockedExchange(&allocation->retiring,1);}
+        }
+        LeaveCriticalSection(&allocation->gate);
+    }
+    if(ready)image->retiring=1;
+    while(sealed){NativeHostMemoryHold *hold=sealed;sealed=hold->next;if(!ready)InterlockedExchange(&hold->allocation->retiring,0);free(hold);}
+    ReleaseSRWLockExclusive(&native_memory_records);return ready;
+}
+static void native_memory_image_cancel(JNIEnv *env,void *imageTag){
+    (void)env;if(!imageTag)return;AcquireSRWLockExclusive(&native_memory_records);NativeMemoryImageState *image=native_memory_image_state(imageTag,0);
+    if(image&&!image->retired){image->retiring=0;
+        for(NativeMemoryAllocation *allocation=native_memory_allocations;allocation;allocation=allocation->next)
+            if(allocation->alive&&allocation->imageTag==imageTag&&!allocation->sealed)InterlockedExchange(&allocation->retiring,0);
+    }
+    ReleaseSRWLockExclusive(&native_memory_records);
+}
+static void native_memory_image_retire(JNIEnv *env,void *imageTag){
+    if(!imageTag)return;AcquireSRWLockExclusive(&native_memory_records);NativeMemoryImageState *image=native_memory_image_state(imageTag,1);
+    if(image)image->retired=image->retiring=1;NativeMemoryAllocation *head=native_memory_allocations;ReleaseSRWLockExclusive(&native_memory_records);
+    for(NativeMemoryAllocation *allocation=head;allocation;allocation=allocation->next)if(allocation->imageTag==imageTag){
+        if(TryEnterCriticalSection(&allocation->gate)){
+            AcquireSRWLockExclusive(&native_memory_records);if(allocation->alive)native_memory_released(env,allocation);ReleaseSRWLockExclusive(&native_memory_records);
+            LeaveCriticalSection(&allocation->gate);
+        }else{
+            // The real image is already gone. Invalidate its pair immediately;
+            // a remaining old receipt can release its counts and weak refs later.
+            AcquireSRWLockExclusive(&native_memory_records);
+            if(allocation->alive){InterlockedExchange(&allocation->alive,0);InterlockedExchange(&allocation->sealed,1);allocation->generation++;}
+            ReleaseSRWLockExclusive(&native_memory_records);
+        }
+    }
 }
 static int native_memory_same_sources(OwnerLink *left,OwnerLink *right){
     for(OwnerLink *entry=left;entry;entry=entry->next){int found=0;for(OwnerLink *other=right;other;other=other->next)if(entry->owner==other->owner){found=1;break;}if(!found)return 0;}
@@ -354,6 +590,10 @@ static int native_memory_call_begin(JNIEnv *env,NativeThread *state,Binding *bin
                     ||InterlockedCompareExchange(&call->allocation->reading,0,0)||InterlockedCompareExchange(&call->allocation->changing,0,0)!=1){
                 native_refuse(env,"NATIVE_MEMORY_ALLOCATION_IN_USE");goto refused;
             }
+            if(call->allocation->hostFamily==NATIVE_MEMORY_HOST_IMAGE
+                    ||call->allocation->hostFamily&&native_memory_buffer_aliases(env,call->allocation)){
+                native_refuse(env,"NATIVE_HOST_MEMORY_ORIGINAL_LIFETIME_REQUIRED");goto refused;
+            }
             if(InterlockedCompareExchange(&call->allocation->managed,0,0)){
                 int allowed=binding->unsafeOperation==UNSAFE_FREE;
                 if(allowed&&call->allocation->bufferAction)allowed=native_buffer_releasing(env,state,call->allocation->bufferAction);
@@ -381,12 +621,27 @@ static void native_memory_clip(NativeMemoryAllocation *allocation){
 }
 static void native_memory_released(JNIEnv *env,NativeMemoryAllocation *allocation){
     InterlockedExchange(&allocation->alive,0);InterlockedExchange(&allocation->sealed,1);allocation->generation++;
-    native_memory_buffer_aliases_clear(env,allocation);
+    int aliasesIdle=1;for(NativeBufferAlias *alias=allocation->aliases;alias;alias=alias->next)if(alias->users){aliasesIdle=0;break;}
+    if(env&&aliasesIdle)native_memory_buffer_aliases_clear(env,allocation);
     NativeMemoryRange *range=allocation->ranges;allocation->ranges=NULL;
     while(range){NativeMemoryRange *next=range->next;native_memory_revision_release(range->revision);free(range);range=next;}
-    if(allocation->allocator){native_original.DeleteGlobalRef(env,allocation->allocator);allocation->allocator=NULL;}allocation->release=NULL;
-    if(allocation->bufferRoot){native_original.DeleteWeakGlobalRef(env,allocation->bufferRoot);allocation->bufferRoot=NULL;}
-    if(allocation->bufferAction){native_original.DeleteWeakGlobalRef(env,allocation->bufferAction);allocation->bufferAction=NULL;}
+    if(env&&allocation->allocator){native_original.DeleteGlobalRef(env,allocation->allocator);allocation->allocator=NULL;}allocation->release=NULL;
+    if(env&&allocation->bufferRoot){native_original.DeleteWeakGlobalRef(env,allocation->bufferRoot);allocation->bufferRoot=NULL;}
+    if(env&&allocation->bufferAction){native_original.DeleteWeakGlobalRef(env,allocation->bufferAction);allocation->bufferAction=NULL;}
+}
+static void native_memory_reap_references(JNIEnv *env,NativeMemoryAllocation *allocation){
+    if(env&&TryEnterCriticalSection(&allocation->gate)){
+        if(!allocation->alive&&!allocation->users&&!allocation->changing){
+            native_memory_buffer_aliases_clear(env,allocation);
+            if(allocation->allocator){native_original.DeleteGlobalRef(env,allocation->allocator);allocation->allocator=NULL;}
+            if(allocation->bufferRoot){native_original.DeleteWeakGlobalRef(env,allocation->bufferRoot);allocation->bufferRoot=NULL;}
+            if(allocation->bufferAction){native_original.DeleteWeakGlobalRef(env,allocation->bufferAction);allocation->bufferAction=NULL;}
+            NativeMemoryRange *range=allocation->ranges;allocation->ranges=NULL;
+            while(range){NativeMemoryRange *next=range->next;native_memory_revision_release(range->revision);free(range);range=next;}
+        }
+        LeaveCriticalSection(&allocation->gate);
+    }
+    native_memory_release_provider(allocation);
 }
 static void native_memory_call_end(JNIEnv *env,NativeThread *state,Binding *binding,unsigned char *frame,NativeUnsafeFrame *use){
     (void)state;NativeMemoryCall *call=use->memoryCall;if(!call)return;use->memoryCall=NULL;
@@ -406,6 +661,7 @@ static void native_memory_call_end(JNIEnv *env,NativeThread *state,Binding *bind
         if(call->managed){InterlockedExchange(&allocation->managed,1);allocation->bufferRoot=call->bufferRoot;call->bufferRoot=NULL;}
         if(call->unknown||!call->known||binding->unsafeOperation==UNSAFE_REALLOCATE&&call->address&&!call->allocation)InterlockedExchange(&allocation->unknownUse,1);
         native_memory_buffer_aliases_clear(env,allocation);
+        allocation->hostFamily=0;allocation->hostContext=allocation->hostFreeFlags=0;allocation->hostContextEpoch=0;allocation->hostAllocator=allocation->imageTag=NULL;
         allocation->address=returned;allocation->bytes=call->bytes;allocation->generation++;InterlockedExchange(&allocation->alive,1);native_memory_clip(allocation);
     }
     if(call->allocation&&(!completed||!call->known||binding->unsafeOperation==UNSAFE_REALLOCATE&&!returned&&!call->bytes)){
@@ -413,7 +669,7 @@ static void native_memory_call_end(JNIEnv *env,NativeThread *state,Binding *bind
     }
     ReleaseSRWLockExclusive(&native_memory_records);
     if(!frame)native_memory_unmapped(call->sources);
-    native_memory_call_dispose(env,call);
+    NativeMemoryAllocation *finished=call->allocation;native_memory_call_dispose(env,call);if(finished)native_memory_reap_references(env,finished);
 }
 JNIEXPORT jlongArray JNICALL Java_dev_ronova_pro_bootstrap_NativeControl_bindBufferStorage0(JNIEnv *env,jclass type,jobject buffer,jobject action,jlong address,jlong bytes){
     jmethodID gate=native_controller?native_original.GetStaticMethodID(env,native_controller,"bufferBindingCaller","(Ljava/nio/Buffer;Ljava/lang/Object;JJ)Z"):NULL;
@@ -473,7 +729,8 @@ JNIEXPORT jlong JNICALL Java_dev_ronova_pro_bootstrap_NativeControl_memoryWriteB
         }
     }
     AcquireSRWLockShared(&native_memory_records);write->allocation=native_memory_find(write->address,write->length,0);
-    if(write->allocation&&!InterlockedCompareExchange(&write->allocation->sealed,0,0)&&!InterlockedCompareExchange(&write->allocation->retiring,0,0)){
+    if(write->allocation&&!InterlockedCompareExchange(&write->allocation->sealed,0,0)&&!InterlockedCompareExchange(&write->allocation->retiring,0,0)
+            &&!InterlockedCompareExchange(&write->allocation->changing,0,0)){
         write->generation=write->allocation->generation;InterlockedIncrement(&write->allocation->users);write->admitted=1;
         if(write->detached&&!native_memory_creator_sources(write->allocation,&write->observed))write->unobserved=1;
     }
@@ -638,7 +895,7 @@ static int native_memory_created_targets(NativeMemoryAllocation *allocation,Owne
     return 0;
 }
 static int native_memory_private(JNIEnv *env,NativeMemoryAllocation *allocation,OwnerLink *selected){
-    if(!allocation->allocator||!allocation->release||InterlockedCompareExchange(&allocation->managed,0,0)||!native_memory_selected(allocation->sources,selected)
+    if((!allocation->allocator&&!allocation->hostFamily)||allocation->hostFamily==NATIVE_MEMORY_HOST_IMAGE||!allocation->release||InterlockedCompareExchange(&allocation->managed,0,0)||!native_memory_selected(allocation->sources,selected)
             ||InterlockedCompareExchange(&allocation->unknownReaders,0,0)||InterlockedCompareExchange(&allocation->unknownUse,0,0)
             ||InterlockedCompareExchange(&allocation->releaseFailed,0,0)||InterlockedCompareExchange(&allocation->sealed,0,0))return 0;
     if(native_memory_buffer_aliases(env,allocation))return 0;
@@ -660,9 +917,20 @@ static int native_memory_retire_allocation(JNIEnv *env,NativeMemoryAllocation *a
             &&!InterlockedCompareExchange(&allocation->reading,0,0)&&!InterlockedCompareExchange(&allocation->changing,0,0);
     if(ready){InterlockedExchange(&allocation->sealed,1);InterlockedIncrement(&allocation->changing);}
     ReleaseSRWLockExclusive(&native_memory_records);if(!ready)return 0;
-    void (JNICALL *release)(JNIEnv*,jobject,jlong)=(void (JNICALL *)(JNIEnv*,jobject,jlong))allocation->release;
-    release(env,allocation->allocator,(jlong)allocation->address);
-    ready=!native_original.ExceptionCheck(env);AcquireSRWLockExclusive(&native_memory_records);
+    // No allocator runs under a tracker mutex. Sealing shares admission's
+    // lookup lock, and this exact row remains stable while its original free runs.
+    LeaveCriticalSection(&allocation->gate);
+    if(allocation->hostFamily==NATIVE_MEMORY_HOST_HEAP){
+        ready=((BOOL (WINAPI*)(HANDLE,DWORD,LPVOID))allocation->release)((HANDLE)allocation->hostContext,(DWORD)allocation->hostFreeFlags,(LPVOID)(uintptr_t)allocation->address)!=FALSE;
+    }else if(allocation->hostFamily==NATIVE_MEMORY_HOST_VIRTUAL){
+        ready=((BOOL (WINAPI*)(LPVOID,SIZE_T,DWORD))allocation->release)((LPVOID)(uintptr_t)allocation->address,0,MEM_RELEASE)!=FALSE;
+    }else if(allocation->hostFamily==NATIVE_MEMORY_HOST_CRT){
+        ((void (__cdecl*)(void*))allocation->release)((void*)(uintptr_t)allocation->address);ready=1;
+    }else{
+        void (JNICALL *release)(JNIEnv*,jobject,jlong)=(void (JNICALL *)(JNIEnv*,jobject,jlong))allocation->release;
+        release(env,allocation->allocator,(jlong)allocation->address);ready=!native_original.ExceptionCheck(env);
+    }
+    EnterCriticalSection(&allocation->gate);AcquireSRWLockExclusive(&native_memory_records);
     if(ready)native_memory_released(env,allocation);
     else {InterlockedExchange(&allocation->releaseFailed,1);InterlockedExchange(&allocation->unknownUse,1);}
     InterlockedDecrement(&allocation->changing);ReleaseSRWLockExclusive(&native_memory_records);return ready;
@@ -930,7 +1198,7 @@ JNIEXPORT jlongArray JNICALL Java_dev_ronova_pro_bootstrap_NativeControl_restore
             }else remaining--;
             LeaveCriticalSection(&allocation->gate);
         }
-        allocation=allocation->next;offset=0;
+        native_memory_reap_references(env,allocation);allocation=allocation->next;offset=0;
     }
     if(!allocation)values[4]=1;
     native_owner_links_free(selected);jlongArray result=native_original.ExceptionCheck(env)?NULL:native_original.NewLongArray(env,5);if(result)native_original.SetLongArrayRegion(env,result,0,5,values);state->control--;return result;
@@ -958,7 +1226,7 @@ JNIEXPORT jlongArray JNICALL Java_dev_ronova_pro_bootstrap_NativeControl_memoryS
             for(OwnerLink *reader=allocation->readers;!shared&&reader;reader=reader->next)if(!module||!native_original.IsSameObject(env,reader->owner->module,module))shared=1;
             if(related&&shared)values[4]++;
         }
-        LeaveCriticalSection(&allocation->gate);
+        LeaveCriticalSection(&allocation->gate);native_memory_reap_references(env,allocation);
     }
     jlongArray result=native_original.NewLongArray(env,5);if(result)native_original.SetLongArrayRegion(env,result,0,5,values);return result;
 }

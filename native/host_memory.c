@@ -30,6 +30,25 @@ static int host_is_memory_write(int kind){
 static int host_is_memory_release(int kind){
     return kind>=HOST_VIRTUAL_FREE&&kind<=HOST_UNMAP_VIEW_EX;
 }
+/* A Host worker need not be attached to Java. Never attach it just to record
+ * a native allocation; the tracker retires generations without a JNIEnv and
+ * defers only JNI reference disposal until a safe attached observation. */
+static JNIEnv *host_memory_environment(int restricted){
+    JNIEnv *env=NULL;
+    if(!restricted&&native_vm&&native_vm_original.GetEnv
+            &&native_vm_original.GetEnv(native_vm,(void**)&env,JNI_VERSION_1_8)==JNI_OK)return env;
+    return NULL;
+}
+static int host_memory_cleanup_scope(HostImport *entry,NativeThread *state){
+    if(!entry||!entry->image||!state)return 0;
+    if(state->hostUnloadImage==entry->image)return 1;
+    for(NativeLibraryScope *scope=state->library;scope;scope=scope->previous)
+        if(scope->unloading&&scope->phase==1&&scope->library&&scope->library->hostImage==entry->image
+                &&scope->library->handle==entry->image->handle
+                &&InterlockedCompareExchange(&scope->library->alive,0,0)
+                &&InterlockedCompareExchange(&scope->library->closing,0,0))return 1;
+    return 0;
+}
 static int host_memory_overlaps(uintptr_t first,uintptr_t last,const void *allocation,SIZE_T size){
     if(!allocation||!size)return 0;uintptr_t base=(uintptr_t)allocation;
     uintptr_t span=(uintptr_t)(size-1),end=span>UINTPTR_MAX-base?UINTPTR_MAX:base+span;
@@ -301,6 +320,31 @@ static BOOL host_memory_release_original(HostImport *entry,HANDLE process,const 
         default:SetLastError(ERROR_INVALID_FUNCTION);return FALSE;
     }
 }
+static NativeHostMemoryCall *host_memory_release_tracking(HostImport *entry,const uintptr_t *arguments,
+        JNIEnv *env,OwnerLink *owners,int unknown,int *denied,uint64_t *affected){
+    if(entry->kind!=HOST_VIRTUAL_FREE&&entry->kind!=HOST_VIRTUAL_FREE_EX)return NULL;
+    unsigned first=entry->kind==HOST_VIRTUAL_FREE_EX?1:0;
+    const void *address=(const void*)arguments[first];SIZE_T bytes=(SIZE_T)arguments[first+1];
+    DWORD type=(DWORD)arguments[first+2];int operation=NATIVE_MEMORY_HOST_FREE;
+    if(type!=MEM_RELEASE){
+        operation=NATIVE_MEMORY_HOST_DECOMMIT;
+        if(type==MEM_DECOMMIT&&bytes){
+            DWORD page=__atomic_load_n(&host_memory_page_size,__ATOMIC_ACQUIRE);
+            uintptr_t raw=(uintptr_t)address;if(!page||bytes>UINTPTR_MAX-raw)return NULL;
+            uintptr_t start=raw-raw%page,end=raw+bytes;
+            uintptr_t tail=end%page? page-end%page:0;
+            if(tail>UINTPTR_MAX-end)return NULL;
+            address=(const void*)start;bytes=(SIZE_T)(end+tail-start);
+        }else {
+            const void *base=NULL;int pages=0;
+            if(host_memory_allocation_span(address,&base,&bytes,&pages)||pages)return NULL;
+            address=base;
+        }
+    }
+    *affected=bytes;void *release=host_real_memory_target(HOST_VIRTUAL_FREE,"VirtualFree");
+    return native_memory_host_prepare(env,NATIVE_MEMORY_HOST_VIRTUAL,release,0,(uint64_t)(uintptr_t)address,
+            bytes,operation,owners,unknown,denied);
+}
 static uint64_t host_native_memory_release(HostImport *entry,void *caller,uintptr_t *arguments){
     DWORD incoming=GetLastError();OwnerLink *owners=NULL;int unknown=0;
     NativeThread *state=native_tls==TLS_OUT_OF_INDEXES?NULL:(NativeThread*)TlsGetValue(native_tls);
@@ -310,47 +354,61 @@ static uint64_t host_native_memory_release(HostImport *entry,void *caller,uintpt
     if(!host_entry_sources_query(entry,state,caller,&owners,NULL,1,&unknown)){
         DWORD error=GetLastError();native_owner_links_free(owners);SetLastError(error);return FALSE;
     }
-    DWORD error=0;HANDLE process=NULL;BOOL result=FALSE;
-    if(native_owner_stopped(owners))error=ERROR_ACCESS_DENIED;
-    else if(unknown&&(restricted||native_has_producer(owners)))error=ERROR_INVALID_DATA;
+    DWORD error=0;HANDLE process=NULL;BOOL result=FALSE;int returned=0,denied=0;
+    JNIEnv *env=host_memory_environment(restricted);NativeHostMemoryCall *tracking=NULL;uint64_t affected=0;
     int local=entry->kind!=HOST_VIRTUAL_FREE_EX;
-    if(!error&&!local){
-        HostCompareHandles compare=__atomic_load_n(&host_compare_handles,__ATOMIC_ACQUIRE);
-        if(!compare&&!restricted&&host_handle_identity_ready())compare=__atomic_load_n(&host_compare_handles,__ATOMIC_ACQUIRE);
-        if(!compare)error=ERROR_NOT_SUPPORTED;
-        else if(!host_real_duplicate(GetCurrentProcess(),(HANDLE)arguments[0],GetCurrentProcess(),&process,0,FALSE,DUPLICATE_SAME_ACCESS))error=GetLastError();
-        else local=compare(process,GetCurrentProcess())!=0;
-    }
-    /* A confirmed current-process alias needs only VirtualQuery. Requiring
-     * VirtualQueryEx on that same-access handle would wrongly require QUERY
-     * access that VirtualFreeEx itself does not need. Remote addresses never
-     * acquire local ownership merely because their numeric values coincide. */
-    int hit=!error&&local?host_memory_release_range(entry,arguments,restricted):0;
-    if(!error&&hit)error=hit>0?ERROR_ACCESS_DENIED:restricted?ERROR_BUSY:ERROR_INVALID_DATA;
-    if(!error&&local){
-        int locked=restricted?TryAcquireSRWLockExclusive(&native_private_gate):
-                (AcquireSRWLockExclusive(&native_private_gate),1);
-        if(!locked)error=ERROR_BUSY;
-        else {
-            hit=host_memory_release_locked(entry,arguments);
-            if(hit)error=hit>0?ERROR_ACCESS_DENIED:restricted?ERROR_BUSY:ERROR_INVALID_DATA;
-            else if(native_owner_stopped(owners))error=ERROR_ACCESS_DENIED;
-            else {
-                /* The actual local release cannot cross a private allocation
-                 * or registration published by this DLL while this gate is
-                 * held. It is a Windows memory operation, not FreeLibrary or
-                 * a VM disposal call, and cannot run their user callbacks. */
-                SetLastError(incoming);result=host_memory_release_original(entry,process,arguments);error=GetLastError();
-            }
-            ReleaseSRWLockExclusive(&native_private_gate);
+    unsigned originalFirst=entry->kind==HOST_VIRTUAL_FREE_EX?1:0;
+    int cleanup=(entry->kind==HOST_VIRTUAL_FREE||entry->kind==HOST_VIRTUAL_FREE_EX)
+            &&(DWORD)arguments[originalFirst+2]==MEM_RELEASE&&host_memory_cleanup_scope(entry,state);
+    __try {
+        if(native_owner_stopped(owners)&&!cleanup)error=ERROR_ACCESS_DENIED;
+        else if(unknown&&(restricted||native_has_producer(owners))&&!cleanup)error=ERROR_INVALID_DATA;
+        if(!error&&!local){
+            HostCompareHandles compare=__atomic_load_n(&host_compare_handles,__ATOMIC_ACQUIRE);
+            if(!compare&&!restricted&&host_handle_identity_ready())compare=__atomic_load_n(&host_compare_handles,__ATOMIC_ACQUIRE);
+            if(!compare)error=ERROR_NOT_SUPPORTED;
+            else if(!host_real_duplicate(GetCurrentProcess(),(HANDLE)arguments[0],GetCurrentProcess(),&process,0,FALSE,DUPLICATE_SAME_ACCESS))error=GetLastError();
+            else local=compare(process,GetCurrentProcess())!=0;
         }
-    }else if(!error){
-        if(native_owner_stopped(owners))error=ERROR_ACCESS_DENIED;
-        else {SetLastError(incoming);result=host_memory_release_original(entry,process,arguments);error=GetLastError();}
+        /* A fixed SAME_ACCESS alias establishes the actual target object.
+         * Remote addresses never acquire local allocation ownership. */
+        int hit=!error&&local?host_memory_release_range(entry,arguments,restricted):0;
+        if(!error&&hit)error=hit>0?ERROR_ACCESS_DENIED:restricted?ERROR_BUSY:ERROR_INVALID_DATA;
+        if(!error&&local){
+            tracking=host_memory_release_tracking(entry,arguments,env,owners,unknown,&denied,&affected);
+            if(denied)error=ERROR_BUSY;
+        }
+        int retiring=cleanup&&local&&tracking&&host_memory_cleanup_scope(entry,state);
+        if(!error&&native_owner_stopped(owners)&&!retiring)error=ERROR_ACCESS_DENIED;
+        else if(!error&&unknown&&(restricted||native_has_producer(owners))&&!retiring)error=ERROR_INVALID_DATA;
+        if(!error&&local){
+            int locked=restricted?TryAcquireSRWLockExclusive(&native_private_gate):
+                    (AcquireSRWLockExclusive(&native_private_gate),1);
+            if(!locked)error=ERROR_BUSY;
+            else __try {
+                hit=host_memory_release_locked(entry,arguments);
+                if(hit)error=hit>0?ERROR_ACCESS_DENIED:restricted?ERROR_BUSY:ERROR_INVALID_DATA;
+                else if(native_owner_stopped(owners)&&!(retiring&&host_memory_cleanup_scope(entry,state)))error=ERROR_ACCESS_DENIED;
+                else {SetLastError(incoming);result=host_memory_release_original(entry,process,arguments);error=GetLastError();returned=1;}
+            } __finally {ReleaseSRWLockExclusive(&native_private_gate);}
+        }else if(!error){
+            if(native_owner_stopped(owners))error=ERROR_ACCESS_DENIED;
+            else {SetLastError(incoming);result=host_memory_release_original(entry,process,arguments);error=GetLastError();returned=1;}
+        }
+        if(tracking){
+            NativeHostMemoryCall *finished=tracking;tracking=NULL;
+            unsigned first=entry->kind==HOST_VIRTUAL_FREE_EX?1:0;
+            native_memory_host_complete(env,finished,0,affected,returned&&result,
+                    returned&&result&&(DWORD)arguments[first+2]==MEM_RELEASE);
+        }else if(returned&&result&&local&&(entry->kind==HOST_VIRTUAL_FREE||entry->kind==HOST_VIRTUAL_FREE_EX))
+            native_memory_host_unobserved(owners);
+    } __finally {
+        DWORD interrupted=GetLastError();if(tracking)native_memory_host_abort(env,tracking);
+        if(process&&!host_real_close(process))InterlockedIncrement(&native_failures);
+        native_owner_links_free(owners);SetLastError(returned?error:error?error:interrupted);
     }
     /* Win32 has no allocation-incarnation pin for unrelated code replacing a
      * mapping outside this gate. The guarantee is allocation/publication by
      * this DLL, not atomicity with raw stores, syscalls or VM disposal. */
-    if(process&&!host_real_close(process))InterlockedIncrement(&native_failures);
-    native_owner_links_free(owners);SetLastError(error);return (uint64_t)result;
+    return (uint64_t)result;
 }

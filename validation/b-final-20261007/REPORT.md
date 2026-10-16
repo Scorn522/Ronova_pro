@@ -1,5 +1,24 @@
 # B 批实际报告：2026-10-09 代码收敛接续
 
+## 2026-10-16：C 接续——实际 Native 私有分配与 DLL 静态存储
+
+接续 `89ad335`，Java ABI98 / Native ABI88 / SourceMapBridge2 / Storage3 / Journal6，协议 `r3-client-8`。本包先补可观察 Native 私有状态，生产源码整包写齐后统一构建；不恢复 JDK 容器广谱 Hook，不增加自身外观、武器或源码 ZIP。
+
+已观察模块实际消费的 Windows HeapAlloc/HeapReAlloc/HeapFree/HeapDestroy、VirtualAlloc/VirtualAllocEx 以及已加载 ucrtbase/msvcrt 的 malloc/calloc/realloc/free 接入同一内存目录。记录实际返回、精确 provider、heap context、释放函数和代次，不从裸数值地址或请求大小猜来源。重分配失败保留旧块，成功即使同址也生成新代；HeapDestroy 以准确 heap epoch 收尾，正在分配、活读写租约或借用视图阻止误销毁。原 API 调用一次，SEH finally 清准确持有，保留原异常、errno/doserrno 和 LastError。无法观察错误状态的普通 CRT 原调用保持原语义，相关旧记录封闭为未决；缺口不变成虚构的释放成功。卸载期仅准确原 scope 中已知 provider/context/代次的释放可继续，新分配和未知指针不能借清理权。
+
+已观察的真实 DLL image 捕获可写、非执行且非 discardable 的静态数据段，作为借用的 opaque IMAGE 存储接来源与 DirectBuffer。普通已知分配的私有释放继续依赖真实释放函数；CPU 暴露后的 byte undo 不补造完整性。IMAGE 活视图、读写租约及 active native scope 阻止卸载准备；准备先封新 admission，原释放返回后才查询准确旧 MEM_IMAGE 映射。只归还 Ronova 自己的额外 pin、应用仍有引用或同址映射无法分辨时，旧 tag 保持 sealed/unresolved，不能冒称物理卸载。确认原映射不在才退役旧代，静态段从不单独 free。实际 binding、JVMTI callback、Host worker、库与加载 scope 的数据贡献保留已知模块并附一个 CPU 私有状态 unknown；不污染全局来源，不改 allocator creator 的准确所有权。
+
+构建 Native88 编译链接通过；安装路径修复后的最终必要增量构建 `build-c-java98-native88-source-holder-handoff-20261016.log` **PASS，21秒**，Native/Bootstrap 保持同一最新构建。Java 检查器与两种 Native 夹具均编译退出0。Zig 初次在沙箱内不能解析自身路径，使用既有编译器权限后成功；检查器初次缺 ASM exports，补准确 javac 参数后成功，没有改业务源码绕过编译。
+
+`private-native-state` 首轮 **退出0**；追加本包“仍映射 DLL 不得假报退役”的准确 guard 后，仅重编该夹具并复查同一 mode，仍 **退出0**。使用真实 HeapAlloc/HeapReAlloc/HeapFree、真实同址收缩、JNI DirectBuffer 与 GC，覆盖 active read/live alias 阻 Host/private free、known Module/null 读回、旧代拒绝、精确私有释放；读取实际 fixture DLL 的 PE 静态段、排除代码页，并覆盖 IMAGE seal/cancel/retire 与仍映射 guard。登记、许可 gate、Binding/callback/worker scope 和最终 IMAGE retire 属于隔离夹具 seam；没有安装其自身 IAT、全局 JNI 表或 Core 授权，不把 metadata 断言当成真实游戏许可。
+
+实际 `host-thread-create` 的独立 `private-allocations` phase 最终 **退出0**，日志 `c-java98-native88-host-private-allocations-original-error-20261016.log`。它使用本包真实 premain、Bootstrap、Native88 与 Host IAT/GPA 路由，输出 `AGENT_PREMAIN_READY:INSTALLED_FULL`；实际覆盖 Heap 失败保旧与同址收缩、原 HEAP_GENERATE_EXCEPTIONS 异常穿透及后续分配、live block HeapDestroy，VirtualAlloc decommit/recommit、仅 PROCESS_VM_OPERATION 权限的本进程 alias，以及 ucrtbase/msvcrt 两套实际 CRT 的 IAT/GPA、zero/overflow、失败 realloc 保旧、realloc(p,0)、free(NULL) 与原错误状态。这是普通来源的真实 API 路由；producer-only lifecycle 权限另由上面的隔离 tracker 检查，不能互相代称。
+
+失败记录保留在原日志：首次 JDK17 的 Unicode bootstrap JAR append 失败，检查改用同一 JAR 的 ASCII 路径副本；之后实际安装暴露 Client/Network/CodeSource 与 SourceMap 的首次初始化 Unsafe 回入，已将这四个直接依赖桥移到 Native 全局入口发布前，未增加 UI 功能。中间 `...-ascii-...` / `...-final-...` 失败均不标通过。最终入口曾因夹具要求 HeapReAlloc 失败时 LastError 保持 sentinel 而退出；按其实际 API 合同移除未定义错误值断言，只保留 NULL 和旧块内容检查，生产结果未改。没有重跑旧矩阵。
+
+匹配候选 `distribution/candidate-c-java98-native88-private-state-wip-20261016`：Core3083370、prelaunch23226字节。源码、候选及既有摘要同步 GitHub。小 JVM 的 premain 报告 FULL，但同日志仍明确报告77个文件 Native 入口 pending、CLIENT_FAULT_DISPATCH=false；不因此宣称所有 C 防护或游戏环境全部就绪。进服、存档重启、性能 **NOTRUN**。任意 CPU 裸读写、未消费进观察路径的缓存函数/原始 syscall、自定义 arena/TLS/C++ 对象语义、未知应用 loader 引用及已删除容器 Hook 的缺口仍保留，完整 C/B 不标完成。
+
+---
 ## 2026-10-16：C 接续——未知键自然语义与原生视图生命周期
 
 接续 `1de5df3`，Java ABI97 / Native ABI87 / SourceMapBridge2 / Storage3 / Journal6，协议 `r3-client-8`。本包先补未知键与已观察原生分配的实际缺口；不恢复旧 JDK 容器 Hook，不做自身外观、武器注册或源码 ZIP。

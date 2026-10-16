@@ -1127,6 +1127,83 @@ static int load_crt_thread_check(JNIEnv *env){
     }
     *callerError=savedError;*callerDosError=savedDosError;SetLastError(savedWindowsError);return ready;
 }
+/* The allocation phase reuses this independently loaded CRT fixture. Each
+ * selected runtime owns the actual function and TLS error storage it returns. */
+#include <errno.h>
+typedef void *(__cdecl *LoadCrtMalloc)(size_t);
+typedef void *(__cdecl *LoadCrtCalloc)(size_t,size_t);
+typedef void *(__cdecl *LoadCrtRealloc)(void*,size_t);
+typedef void (__cdecl *LoadCrtFree)(void*);
+extern LoadCrtMalloc __imp_malloc;
+extern LoadCrtCalloc __imp_calloc;
+extern LoadCrtRealloc __imp_realloc;
+extern LoadCrtFree __imp_free;
+static int load_crt_allocation_check(JNIEnv *env){
+    const wchar_t *modules[]={L"ucrtbase.dll",L"msvcrt.dll"};const char *names[]={"ucrtbase.dll","msvcrt.dll"};
+    int selected=0;
+    for(unsigned at=0;at<sizeof(modules)/sizeof(modules[0]);at++){
+        HMODULE image=GetModuleHandleW(modules[at]);if(!image)continue;selected++;
+        LoadCrtMalloc allocate=(LoadCrtMalloc)GetProcAddress(image,"malloc");
+        LoadCrtCalloc zero=(LoadCrtCalloc)GetProcAddress(image,"calloc");
+        LoadCrtRealloc resize=(LoadCrtRealloc)GetProcAddress(image,"realloc");
+        LoadCrtFree release=(LoadCrtFree)GetProcAddress(image,"free");
+        LoadCrtErrno error=(LoadCrtErrno)GetProcAddress(image,"_errno");LoadCrtDosErrno dos=(LoadCrtDosErrno)GetProcAddress(image,"__doserrno");
+        HMODULE errorImage=NULL,dosImage=NULL;
+        if(!allocate||!zero||!resize||!release||!load_private_entry((void*)allocate)||!load_private_entry((void*)zero)
+                ||!load_private_entry((void*)resize)||!load_private_entry((void*)release))return load_thread_fail(env,"HOST_CRT_ALLOCATION_ACTUAL_GPA_ENTRIES");
+        if(!error||!dos||!GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS|GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,(LPCSTR)error,&errorImage)
+                ||!GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS|GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,(LPCSTR)dos,&dosImage)
+                ||errorImage!=image||dosImage!=image)return load_thread_fail(env,"HOST_CRT_ALLOCATION_PROVIDER_ERROR_STORAGE");
+        int *actualError=error();unsigned long *actualDos=dos();if(!actualError||!actualDos)return load_thread_fail(env,"HOST_CRT_ALLOCATION_CALLER_TLS");
+        int savedError=*actualError;unsigned long savedDos=*actualDos;DWORD savedWindows=GetLastError();
+        unsigned char *block=NULL,*cleared=NULL;void *empty=NULL;const char *failure=NULL;DWORD failureWindows=0;int failureError=0;
+        *actualError=EDOM;*actualDos=0x524e0088;SetLastError(0x524e0089);release(NULL);
+        if(*actualError!=EDOM||*actualDos!=0x524e0088||GetLastError()!=0x524e0089){failure="HOST_CRT_FREE_NULL_ERRORS_CHANGED";goto allocated_done;}
+        block=(unsigned char*)allocate(32);cleared=(unsigned char*)zero(8,4);
+        if(!block||!cleared){failure="HOST_CRT_ALLOCATION_ACTUAL_SMALL_RESULTS";goto allocated_done;}
+        for(unsigned i=0;i<32;i++){if(cleared[i]){failure="HOST_CRT_CALLOC_ACTUAL_ZEROED_BYTES";goto allocated_done;}block[i]=(unsigned char)(i^0xa7);}
+        {
+            /* This request exceeds the selected Microsoft CRT's maximum. A
+             * NULL failure must keep the exact old caller allocation usable. */
+            *actualError=EDOM;SetLastError(0x524e0089);void *failed=resize(block,SIZE_MAX);
+            failureWindows=GetLastError();failureError=*actualError;
+            if(failed){block=(unsigned char*)failed;failure="HOST_CRT_REALLOC_MAXIMUM_WAS_NOT_REFUSED";goto allocated_done;}
+            if(failureError!=ENOMEM){failure="HOST_CRT_REALLOC_ORIGINAL_ERRNO";goto allocated_done;}
+            for(unsigned i=0;i<32;i++)if(block[i]!=(unsigned char)(i^0xa7)){failure="HOST_CRT_REALLOC_FAILURE_LOST_OLD_BYTES";goto allocated_done;}
+            unsigned char *grown=(unsigned char*)resize(block,64);if(!grown){failure="HOST_CRT_REALLOC_ACTUAL_GROW";goto allocated_done;}block=grown;
+            for(unsigned i=0;i<32;i++)if(block[i]!=(unsigned char)(i^0xa7)){failure="HOST_CRT_REALLOC_GROW_LOST_ORIGINAL_BYTES";goto allocated_done;}
+            void *released=resize(block,0);block=(unsigned char*)released;
+            if(released){failure="HOST_CRT_REALLOC_ZERO_ORIGINAL_RELEASE_RESULT";goto allocated_done;}
+        }
+        empty=allocate(0);if(!empty){failure="HOST_CRT_MALLOC_ZERO_ORIGINAL_RESULT";goto allocated_done;}release(empty);empty=NULL;
+        empty=zero(0,17);if(!empty){failure="HOST_CRT_CALLOC_ZERO_ORIGINAL_RESULT";goto allocated_done;}release(empty);empty=NULL;
+        empty=resize(NULL,0);if(!empty){failure="HOST_CRT_REALLOC_NULL_ZERO_ORIGINAL_RESULT";goto allocated_done;}release(empty);empty=NULL;
+        {
+            *actualError=EDOM;size_t count=SIZE_MAX/2+1;empty=zero(count,2);
+            if(empty||*actualError!=ENOMEM){failure="HOST_CRT_CALLOC_OVERFLOW_ORIGINAL_RESULT_ERRNO";goto allocated_done;}
+        }
+        if(error()!=actualError||dos()!=actualDos){failure="HOST_CRT_ALLOCATION_ERROR_STORAGE_CHANGED";goto allocated_done;}
+allocated_done:
+        if(empty)release(empty);if(cleared)release(cleared);if(block)release(block);
+        *actualError=savedError;*actualDos=savedDos;SetLastError(savedWindows);
+        if(failure){fprintf(stderr,"HOST_CRT_ALLOCATION_FAILED runtime=%s stage=%s reallocFailureErrno=%d reallocFailureWin32=%lu\n",names[at],failure,failureError,(unsigned long)failureWindows);return load_thread_fail(env,failure);}
+        fprintf(stdout,"HOST_CRT_ALLOCATION_RESULT runtime=%s actual_GPA_original_small_zero_overflow_and_failed_realloc_old_bytes retained_TLS reallocFailureErrno=%d reallocFailureWin32=%lu\n",names[at],failureError,(unsigned long)failureWindows);
+    }
+    if(!selected)return load_thread_fail(env,"HOST_CRT_ALLOCATION_LOADED_PROVIDER_ABSENT");
+    if(!load_private_entry((void*)__imp_malloc)||!load_private_entry((void*)__imp_calloc)
+            ||!load_private_entry((void*)__imp_realloc)||!load_private_entry((void*)__imp_free))return load_thread_fail(env,"HOST_CRT_ALLOCATION_ACTUAL_IAT_ENTRIES");
+    unsigned char *direct=(unsigned char*)__imp_malloc(16),*cleared=(unsigned char*)__imp_calloc(4,4);
+    if(!direct||!cleared){if(direct)__imp_free(direct);if(cleared)__imp_free(cleared);return load_thread_fail(env,"HOST_CRT_ALLOCATION_IAT_RESULTS");}
+    int ready=1;for(unsigned i=0;i<16;i++){if(cleared[i])ready=0;direct[i]=(unsigned char)(i+1);}
+    unsigned char *grown=(unsigned char*)__imp_realloc(direct,32);
+    if(grown){direct=grown;for(unsigned i=0;i<16;i++)if(direct[i]!=(unsigned char)(i+1))ready=0;}else ready=0;
+    __imp_free(direct);__imp_free(cleared);if(!ready)return load_thread_fail(env,"HOST_CRT_ALLOCATION_IAT_DATA_RETAINED");
+    fprintf(stdout,"HOST_CRT_ALLOCATION_PASS actual_loaded_providers=%d actual_IAT_and_GPA returned_blocks zero_request_lifetimes overflow_original_failure realloc_failure_old_bytes realloc_zero_release provider_errno_doserrno_free_null_LastError no_Cplusplus_object_disposal_claim\n",selected);
+    return 1;
+}
+JNIEXPORT jboolean JNICALL Java_dev_ronova_pro_AuditFixCheck_hostCrtAllocations0(JNIEnv *env,jclass check){
+    (void)check;return load_crt_allocation_check(env)?JNI_TRUE:JNI_FALSE;
+}
 /* Native55 selects only this phase. No producer registration is manufactured:
  * an ordinary observed profiler tests ThreadEnd dispatch and Host sources, not
  * the producer-only start wrapper, source lease or image retirement. */
@@ -1908,6 +1985,97 @@ done:
         if(actual&&!CloseHandle(actual)&&!failure){failure="HOST_MEMORY_RELEASE_CURRENT_ALIAS_CLOSE";error=GetLastError();}
         if(failure){fprintf(stderr,"HOST_MEMORY_RELEASE_FAILED stage=%s win32=%lu\n",failure,(unsigned long)error);load_thread_fail(env,failure);}
     }
+}
+typedef LPVOID (WINAPI *LoadHeapAllocate)(HANDLE,DWORD,SIZE_T);
+typedef LPVOID (WINAPI *LoadHeapReallocate)(HANDLE,DWORD,LPVOID,SIZE_T);
+typedef BOOL (WINAPI *LoadHeapRelease)(HANDLE,DWORD,LPVOID);
+typedef BOOL (WINAPI *LoadHeapDestroy)(HANDLE);
+typedef LPVOID (WINAPI *LoadVirtualAllocate)(LPVOID,SIZE_T,DWORD,DWORD);
+typedef LPVOID (WINAPI *LoadVirtualAllocateEx)(HANDLE,LPVOID,SIZE_T,DWORD,DWORD);
+extern LoadHeapAllocate __imp_HeapAlloc;
+extern LoadHeapReallocate __imp_HeapReAlloc;
+extern LoadHeapRelease __imp_HeapFree;
+extern LoadVirtualAllocate __imp_VirtualAlloc;
+static int load_win32_allocation_check(JNIEnv *env){
+    HMODULE kernel=GetModuleHandleW(L"kernel32.dll");
+    LoadHeapAllocate allocate=kernel?(LoadHeapAllocate)GetProcAddress(kernel,"HeapAlloc"):NULL;
+    LoadHeapDestroy destroy=kernel?(LoadHeapDestroy)GetProcAddress(kernel,"HeapDestroy"):NULL;
+    LoadVirtualAllocateEx allocateEx=kernel?(LoadVirtualAllocateEx)GetProcAddress(kernel,"VirtualAllocEx"):NULL;
+    LoadMemoryFreeEx releaseEx=kernel?(LoadMemoryFreeEx)GetProcAddress(kernel,"VirtualFreeEx"):NULL;
+    void *actuals[]={(void*)__imp_HeapAlloc,(void*)__imp_HeapReAlloc,(void*)__imp_HeapFree,
+            (void*)__imp_VirtualAlloc,(void*)allocate,(void*)destroy,(void*)allocateEx,(void*)releaseEx};
+    for(unsigned i=0;i<sizeof(actuals)/sizeof(actuals[0]);i++)
+        if(!load_private_entry(actuals[i]))return load_thread_fail(env,"HOST_ALLOCATION_ACTUAL_IMPORT_OR_RESULT_UNCONTROLLED");
+    HANDLE heap=NULL,process=NULL;BYTE *block=NULL,*zero=NULL,*reservation=NULL,*extended=NULL;
+    const char *failure=NULL;DWORD saved=0;SYSTEM_INFO system;GetSystemInfo(&system);
+    heap=HeapCreate(0,0,0);if(!heap)return load_thread_fail(env,"HOST_ALLOCATION_REAL_HEAP_CREATE");
+    __try {
+        SetLastError(0x524e0061);block=HeapAlloc(heap,HEAP_ZERO_MEMORY,48);saved=GetLastError();
+        if(!block||saved!=0x524e0061){failure="HOST_ALLOCATION_HEAP_ORIGINAL_RESULT_ERROR";__leave;}
+        for(unsigned i=0;i<48;i++)if(block[i]){failure="HOST_ALLOCATION_ZERO_MEMORY_FLAG_LOST";break;}
+        if(failure)__leave;block[0]=0xa5;block[23]=0x5a;block[47]=0x6c;
+        SetLastError(0x524e0062);void *failed=HeapReAlloc(heap,0,block,SIZE_MAX);saved=GetLastError();
+        if(failed){block=failed;failure="HOST_ALLOCATION_HUGE_REALLOC_UNEXPECTED_SUCCESS";__leave;}
+        /* HeapReAlloc does not promise a GetLastError value on failure. Its
+         * actual NULL and unchanged old allocation are the usable contract. */
+        if(block[0]!=0xa5||block[23]!=0x5a||block[47]!=0x6c){
+            failure="HOST_ALLOCATION_FAILED_REALLOC_CHANGED_OLD_BLOCK";__leave;
+        }
+        SetLastError(0x524e0063);void *shrunk=HeapReAlloc(heap,HEAP_REALLOC_IN_PLACE_ONLY,block,24);saved=GetLastError();
+        if(shrunk!=block){if(shrunk)block=shrunk;failure="HOST_ALLOCATION_IN_PLACE_ONLY_ORIGINAL_RESULT";__leave;}
+        if(saved!=0x524e0063||block[0]!=0xa5||block[23]!=0x5a){
+            failure="HOST_ALLOCATION_SAME_ADDRESS_SHRINK_OR_FLAGS_CHANGED";__leave;
+        }
+        if(!HeapFree(heap,0,block)){failure="HOST_ALLOCATION_HEAP_REAL_FREE";__leave;}block=NULL;
+        zero=allocate(heap,0,0);if(!zero){failure="HOST_ALLOCATION_ZERO_BYTE_REAL_RESULT";__leave;}
+        if(!HeapFree(heap,0,zero)){failure="HOST_ALLOCATION_ZERO_BYTE_REAL_FREE";__leave;}zero=NULL;
+        DWORD exception=0;void *unexpected=NULL;
+        __try {unexpected=HeapAlloc(heap,HEAP_GENERATE_EXCEPTIONS,SIZE_MAX);}
+        __except(EXCEPTION_EXECUTE_HANDLER){exception=GetExceptionCode();}
+        if(unexpected){HeapFree(heap,0,unexpected);failure="HOST_ALLOCATION_EXCEPTION_REQUEST_RETURNED_POINTER";__leave;}
+        if(exception!=0xc0000017UL){failure="HOST_ALLOCATION_ORIGINAL_NO_MEMORY_EXCEPTION_CHANGED";__leave;}
+        block=allocate(heap,0,8);if(!block){failure="HOST_ALLOCATION_EXCEPTION_LEFT_CONTEXT_BUSY";__leave;}
+        /* Destroy the actual heap with one live observed block. No attempt is
+         * made to discover other heaps or dereference the retired pointer. */
+        if(!destroy(heap)){failure="HOST_ALLOCATION_REAL_HEAP_DESTROY";__leave;}heap=NULL;block=NULL;
+        if(!system.dwPageSize){failure="HOST_ALLOCATION_SYSTEM_PAGE_SIZE";__leave;}
+        reservation=VirtualAlloc(NULL,(SIZE_T)system.dwPageSize*2,MEM_RESERVE|MEM_COMMIT,PAGE_READWRITE);
+        if(!reservation||!load_memory_release_state(reservation,MEM_COMMIT,reservation)){
+            failure="HOST_ALLOCATION_REAL_VIRTUAL_RETURN_GEOMETRY";__leave;
+        }
+        reservation[1]=0x7d;
+        if(!VirtualFree(reservation,system.dwPageSize,MEM_DECOMMIT)
+                ||!load_memory_release_state(reservation,MEM_RESERVE,reservation)){
+            failure="HOST_ALLOCATION_REAL_DECOMMIT_RESERVATION";__leave;
+        }
+        if(VirtualAlloc(reservation,system.dwPageSize,MEM_COMMIT,PAGE_READWRITE)!=reservation||reservation[1]!=0){
+            failure="HOST_ALLOCATION_ORIGINAL_RECOMMIT_RETURN_ZERO";__leave;
+        }
+        if(!DuplicateHandle(GetCurrentProcess(),GetCurrentProcess(),GetCurrentProcess(),&process,PROCESS_VM_OPERATION,FALSE,0)){
+            failure="HOST_ALLOCATION_CURRENT_VM_OPERATION_ALIAS";__leave;
+        }
+        extended=allocateEx(process,NULL,system.dwPageSize,MEM_RESERVE|MEM_COMMIT,PAGE_READWRITE);
+        if(!extended||!load_memory_release_state(extended,MEM_COMMIT,extended)){
+            failure="HOST_ALLOCATION_CURRENT_EX_ORIGINAL_RESULT";__leave;
+        }
+        extended[0]=0x39;
+        if(!releaseEx(process,extended,0,MEM_RELEASE)){failure="HOST_ALLOCATION_CURRENT_EX_REAL_FREE";__leave;}
+        extended=NULL;
+        if(!VirtualFree(reservation,0,MEM_RELEASE)){failure="HOST_ALLOCATION_REAL_RESERVATION_RELEASE";__leave;}reservation=NULL;
+    } __finally {
+        if(extended)releaseEx(process,extended,0,MEM_RELEASE);
+        if(reservation)VirtualFree(reservation,0,MEM_RELEASE);
+        if(process)CloseHandle(process);
+        if(zero)HeapFree(heap,0,zero);
+        if(block)HeapFree(heap,0,block);
+        if(heap)destroy(heap);
+    }
+    if(failure){fprintf(stderr,"HOST_ALLOCATION_FAILED stage=%s win32=%lu\n",failure,(unsigned long)saved);return load_thread_fail(env,failure);}
+    fprintf(stderr,"HOST_ALLOCATION_ACTUAL heap=IAT/dynamic realloc=failure/same-address exception=original virtual=current-process/commit/release\n");
+    return 1;
+}
+JNIEXPORT void JNICALL Java_dev_ronova_pro_AuditFixCheck_hostWin32Allocations0(JNIEnv *env,jclass check){
+    (void)check;load_win32_allocation_check(env);
 }
 JNIEXPORT void JNICALL Java_dev_ronova_pro_AuditFixCheck_hostRawUnsafe0(JNIEnv *env,jclass check){
     JavaVM *vm=NULL;jvmtiEnv *api=NULL;

@@ -155,7 +155,7 @@ public final class RecoveryAgent {
             bootstrap=new JarFile(nativeBootstrapPath.toFile());
             api.appendToBootstrapClassLoaderSearch(bootstrap);
             bridge=Class.forName("dev.ronova.pro.bootstrap.TaskBridge",true,null);
-            if(!Integer.valueOf(97).equals(bridge.getMethod("abiVersion").invoke(null)))throw new IllegalStateException("TASK_BRIDGE_ABI_MISMATCH");
+            if(!Integer.valueOf(98).equals(bridge.getMethod("abiVersion").invoke(null)))throw new IllegalStateException("TASK_BRIDGE_ABI_MISMATCH");
             // This classfile was first requested beneath a stopped empty-stream return.
             Class.forName("java.util.stream.IntPipeline$Head",false,null);
             for(String helper:List.of("SourcePublication","SourceIndexMutation","FastListView","FieldMutation","EquipmentInvocations"))
@@ -187,7 +187,7 @@ public final class RecoveryAgent {
             Class.forName("dev.ronova.pro.bootstrap.ControlBridge$ProducerFrame",false,null);
             Class.forName("dev.ronova.pro.bootstrap.EventFaultBridge",true,null);
             Class<?> control=Class.forName("dev.ronova.pro.bootstrap.ControlBridge",true,null);
-            if(!Integer.valueOf(97).equals(control.getMethod("abiVersion").invoke(null)))throw new IllegalStateException("CONTROL_BRIDGE_ABI_MISMATCH");
+            if(!Integer.valueOf(98).equals(control.getMethod("abiVersion").invoke(null)))throw new IllegalStateException("CONTROL_BRIDGE_ABI_MISMATCH");
             Module base=Object.class.getModule(),ours=RecoveryAgent.class.getModule();
             api.redefineModule(base,Set.of(bridge.getModule()),Map.of(
                     "jdk.internal.org.objectweb.asm",Set.of(ours),"jdk.internal.org.objectweb.asm.commons",Set.of(ours),
@@ -211,6 +211,12 @@ public final class RecoveryAgent {
             // before Native/JDK hooks can encounter their own class bytes.
             Class.forName("dev.ronova.pro.bootstrap.ControlBridge$HandleWriters",true,null);
             Class.forName("java.util.concurrent.CompletableFuture",true,null);
+            // Native source queries enter these bridges immediately, including
+            // while another bootstrap initializer performs a guarded Unsafe CAS.
+            Class.forName("dev.ronova.pro.bootstrap.NetworkBridge",true,null);
+            Class.forName("dev.ronova.pro.bootstrap.ClientBridge",true,null);
+            Class.forName("dev.ronova.pro.bootstrap.CodeSourceBridge",true,null);
+            Class.forName("dev.ronova.pro.bootstrap.SourceMapBridge",true,null);
             Class<?> nativeControl=Class.forName("dev.ronova.pro.bootstrap.NativeControl",true,null);
             report(String.valueOf(nativeControl.getMethod("install",Path.class).invoke(null,nativeBootstrapPath)));
             instrumentation=api;

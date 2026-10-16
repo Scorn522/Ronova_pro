@@ -686,3 +686,165 @@ done:
 #undef OPAQUE_REQUIRE
     return failure?JNI_FALSE:JNI_TRUE;
 }
+
+/* Actual allocator returns are supplied to the production tracker without
+ * installing this fixture DLL's imports or a global JNI/Host controller. */
+static volatile uint64_t audit_private_native_static=0x98a1b2c3d4e5f607ULL;
+static int audit_private_native_sources(JNIEnv *env,jobjectArray sources,jobjectArray modules){
+    jobject expected=native_original.GetObjectArrayElement(env,modules,0);int known=0,unknown=0,other=0;
+    if(sources)for(jsize index=0;index<native_original.GetArrayLength(env,sources);index++){
+        jobject source=native_original.GetObjectArrayElement(env,sources,index);
+        if(!source)unknown++;else{if(native_original.IsSameObject(env,source,expected))known++;else other++;native_original.DeleteLocalRef(env,source);}
+    }
+    if(expected)native_original.DeleteLocalRef(env,expected);if(sources)native_original.DeleteLocalRef(env,sources);
+    return known==1&&unknown==1&&!other&&!native_original.ExceptionCheck(env);
+}
+static jlong audit_private_native_read(JNIEnv *env,jclass type,NativeMemoryAllocation *allocation,jobjectArray modules){
+    jlong receipt=Java_dev_ronova_pro_bootstrap_NativeControl_memoryWriteBegin0(env,type,(jlong)allocation->address,8,modules,JNI_TRUE,JNI_FALSE);
+    if(!receipt)return 0;
+    jobjectArray sources=Java_dev_ronova_pro_bootstrap_NativeControl_memoryReadSources0(env,type,receipt);
+    return audit_private_native_sources(env,sources,modules)?receipt:0;
+}
+static int audit_private_native_aliases_collected(JNIEnv *env,NativeMemoryAllocation *allocation){
+    jclass system=native_original.FindClass(env,"java/lang/System");
+    jmethodID collect=system?native_original.GetStaticMethodID(env,system,"gc","()V"):NULL;int ready=0;
+    for(int attempt=0;collect&&attempt<8&&!native_original.ExceptionCheck(env);attempt++){
+        native_original.CallStaticVoidMethod(env,system,collect);
+        EnterCriticalSection(&allocation->gate);ready=!native_memory_buffer_aliases(env,allocation);LeaveCriticalSection(&allocation->gate);
+        if(ready)break;
+    }
+    if(system)native_original.DeleteLocalRef(env,system);return ready&&!native_original.ExceptionCheck(env);
+}
+JNIEXPORT jboolean JNICALL Java_dev_ronova_pro_AuditFixCheck_privateNativeState0(JNIEnv *env,jclass type,jobjectArray modules){
+    const char *failure=NULL;NativeThread thread={0};DWORD fixtureTls=TLS_OUT_OF_INDEXES;int initialized=0,denied=0;
+    NativeHostMemoryCall *call=NULL;NativeMemoryAllocation *first=NULL,*allocation=NULL,*imageAllocation=NULL;
+    HANDLE heap=NULL;void *block=NULL;jobject view=NULL;Owner *owner=NULL;OwnerLink selected={0};
+    HostImage image={0};HostStaticMemory parsed={0};jlong binding[2]={0};
+    HANDLE (WINAPI *createHeap)(DWORD,SIZE_T,SIZE_T)=NULL;
+    LPVOID (WINAPI *allocate)(HANDLE,DWORD,SIZE_T)=NULL;
+    LPVOID (WINAPI *resize)(HANDLE,DWORD,LPVOID,SIZE_T)=NULL;
+    BOOL (WINAPI *release)(HANDLE,DWORD,LPVOID)=NULL;
+    BOOL (WINAPI *destroyHeap)(HANDLE)=NULL;
+#define PRIVATE_REQUIRE(CONDITION,MESSAGE) do{if(!(CONDITION)){failure=(MESSAGE);goto done;}}while(0)
+    PRIVATE_REQUIRE(!native_controller&&!native_vm&&native_tls==TLS_OUT_OF_INDEXES&&!native_memory_allocations
+            &&!native_memory_host_contexts&&!native_memory_images&&!native_owners,"private tracker fixture requires an uninstalled controller");
+    native_original=**env;initialized=1;fixtureTls=TlsAlloc();native_tls=fixtureTls;
+    PRIVATE_REQUIRE(fixtureTls!=TLS_OUT_OF_INDEXES&&TlsSetValue(fixtureTls,&thread),"private tracker fixture TLS unavailable");
+    native_controller=(jclass)native_original.NewGlobalRef(env,type);native_controls=(jclass)native_original.NewGlobalRef(env,type);
+    native_memory_gate=native_original.GetStaticMethodID(env,type,"memoryRecoveryCaller","()Z");
+    HMODULE kernel=GetModuleHandleW(L"kernel32.dll");
+    createHeap=(HANDLE (WINAPI*)(DWORD,SIZE_T,SIZE_T))GetProcAddress(kernel,"HeapCreate");
+    allocate=(LPVOID (WINAPI*)(HANDLE,DWORD,SIZE_T))GetProcAddress(kernel,"HeapAlloc");
+    resize=(LPVOID (WINAPI*)(HANDLE,DWORD,LPVOID,SIZE_T))GetProcAddress(kernel,"HeapReAlloc");
+    release=(BOOL (WINAPI*)(HANDLE,DWORD,LPVOID))GetProcAddress(kernel,"HeapFree");
+    destroyHeap=(BOOL (WINAPI*)(HANDLE))GetProcAddress(kernel,"HeapDestroy");
+    PRIVATE_REQUIRE(native_controller&&native_controls&&native_memory_gate&&createHeap&&allocate&&resize&&release&&destroyHeap,"private tracker fixture original entries unavailable");
+    jobject module=native_original.GetObjectArrayElement(env,modules,0);owner=native_owner(env,module);if(module)native_original.DeleteLocalRef(env,module);
+    PRIVATE_REQUIRE(owner,"private tracker fixture actual module unavailable");owner->producer=1;selected.owner=owner;
+    NativeToolingSlot slot={0};slot.owners=&selected;NativeToolingInvocation invocation={0};invocation.slot=&slot;
+    HostThreadWorker worker={0};worker.owners=&selected;
+    PRIVATE_REQUIRE(!native_private_execution_unknown(&thread),"ordinary empty native scope acquired private CPU opacity");
+    thread.toolingInvocation=&invocation;PRIVATE_REQUIRE(native_private_execution_unknown(&thread),"actual tooling invocation lost private CPU opacity");thread.toolingInvocation=NULL;
+    thread.hostWorker=&worker;PRIVATE_REQUIRE(native_private_execution_unknown(&thread),"actual Host worker lost private CPU opacity");thread.hostWorker=NULL;
+    Binding business={0};business.owners=&selected;thread.stack[0]=&business;thread.depth=1;
+    PRIVATE_REQUIRE(audit_private_native_sources(env,native_mutation_sources_from(env,&thread,NULL,0),modules),"actual business native contribution lost its known owner or private CPU marker");
+    thread.depth=0;thread.stack[0]=NULL;
+    call=native_memory_host_prepare(env,NATIVE_MEMORY_HOST_CRT,(void*)release,0,0x1234,8,NATIVE_MEMORY_HOST_FREE,&selected,0,&denied);
+    PRIVATE_REQUIRE(!call&&!denied&&!native_memory_allocations,"numeric pointer manufactured a native allocation lifetime");
+    heap=createHeap(0,0,0);PRIVATE_REQUIRE(heap,"actual private heap unavailable");
+    call=native_memory_host_prepare(env,NATIVE_MEMORY_HOST_HEAP,(void*)release,(uintptr_t)heap,0,64,NATIVE_MEMORY_HOST_ALLOCATE,&selected,0,&denied);
+    PRIVATE_REQUIRE(call&&!denied,"actual heap allocation context admission unavailable");
+    block=allocate(heap,0,64);native_memory_host_complete(env,call,(uint64_t)(uintptr_t)block,64,block!=NULL,0);call=NULL;
+    first=allocation=native_memory_find((uint64_t)(uintptr_t)block,64,1);
+    PRIVATE_REQUIRE(block&&allocation&&allocation->hostFamily==NATIVE_MEMORY_HOST_HEAP&&allocation->hostContext==(uintptr_t)heap
+            &&allocation->release==(void*)release&&allocation->opaque&&!allocation->unknownUse&&!native_memory_unknown,"actual allocator return lost exact opaque lifetime/provider ownership");
+    uint64_t oldGeneration=allocation->generation;
+    call=native_memory_host_prepare(env,NATIVE_MEMORY_HOST_HEAP,(void*)release,(uintptr_t)heap,(uint64_t)(uintptr_t)block,UINT64_MAX,NATIVE_MEMORY_HOST_REALLOCATE,&selected,0,&denied);
+    PRIVATE_REQUIRE(call&&!denied,"actual failed realloc admission unavailable");
+    void *resized=resize(heap,0,block,(SIZE_T)-1);
+    native_memory_host_complete(env,call,(uint64_t)(uintptr_t)resized,UINT64_MAX,resized!=NULL,0);call=NULL;if(resized)block=resized;
+    PRIVATE_REQUIRE(!resized&&allocation->alive&&allocation->generation==oldGeneration&&!allocation->changing&&!allocation->users,"failed original realloc retired or held its old lifetime");
+    call=native_memory_host_prepare(env,NATIVE_MEMORY_HOST_HEAP,(void*)release,(uintptr_t)heap,(uint64_t)(uintptr_t)block,32,NATIVE_MEMORY_HOST_REALLOCATE,&selected,0,&denied);
+    PRIVATE_REQUIRE(call&&!denied,"same-address realloc admission unavailable");
+    void *oldAddress=block;resized=resize(heap,HEAP_REALLOC_IN_PLACE_ONLY,block,32);
+    native_memory_host_complete(env,call,(uint64_t)(uintptr_t)resized,32,resized!=NULL,0);call=NULL;if(resized)block=resized;
+    allocation=native_memory_find((uint64_t)(uintptr_t)block,32,1);
+    PRIVATE_REQUIRE(resized==oldAddress&&allocation&&allocation!=first&&!first->alive&&first->generation!=oldGeneration
+            &&allocation->bytes==32&&!allocation->unknownUse,"successful same-address realloc reused the old generation");
+    memset(block,0x98,32);jlong receipt=audit_private_native_read(env,type,allocation,modules);
+    PRIVATE_REQUIRE(receipt&&!native_memory_unknown,"private CPU bytes lost known source plus unknown read marker");
+    call=native_memory_host_prepare(env,NATIVE_MEMORY_HOST_HEAP,(void*)release,(uintptr_t)heap,(uint64_t)(uintptr_t)block,0,NATIVE_MEMORY_HOST_FREE,&selected,0,&denied);
+    PRIVATE_REQUIRE(!call&&denied&&allocation->alive,"active actual native read lease permitted original free");
+    Java_dev_ronova_pro_bootstrap_NativeControl_memoryWriteEnd0(env,type,receipt,JNI_TRUE);
+    view=native_original.NewDirectByteBuffer(env,block,32);
+    PRIVATE_REQUIRE(view&&native_memory_buffer_observe(env,view,NULL,(uint64_t)(uintptr_t)block,32,binding)&&binding[0]
+            &&!native_memory_buffer_use(env,view,(jlong)(uintptr_t)first,oldGeneration,(uint64_t)(uintptr_t)block,32,1),"new actual view accepted the old same-address lifetime");
+    call=native_memory_host_prepare(env,NATIVE_MEMORY_HOST_HEAP,(void*)release,(uintptr_t)heap,(uint64_t)(uintptr_t)block,0,NATIVE_MEMORY_HOST_FREE,&selected,0,&denied);
+    PRIVATE_REQUIRE(!call&&denied&&allocation->alive,"live JNI borrowed view permitted Host free");
+    owner->stopped=1;EnterCriticalSection(&allocation->gate);int retired=native_memory_retire_allocation(env,allocation,&selected);LeaveCriticalSection(&allocation->gate);
+    PRIVATE_REQUIRE(!retired&&allocation->alive,"live JNI borrowed view permitted private cleanup");
+    native_original.DeleteLocalRef(env,view);view=NULL;
+    PRIVATE_REQUIRE(audit_private_native_aliases_collected(env,allocation),"actual released JNI view remained reachable during private cleanup fixture");
+    EnterCriticalSection(&allocation->gate);retired=native_memory_retire_allocation(env,allocation,&selected);LeaveCriticalSection(&allocation->gate);
+    if(retired)block=NULL;native_memory_reap_references(env,allocation);
+    PRIVATE_REQUIRE(retired&&!allocation->alive&&!allocation->hostReleasePin,"exact private stopped allocation did not call its actual HeapFree and retire");
+    image.handle=native_image((void*)&audit_private_native_static);image.live=1;
+    PRIVATE_REQUIRE(image.handle&&host_static_parse(&image,&parsed),"actual fixture PE writable-storage parse failed");
+    int containsStatic=0,containsCode=0,executable=0;
+    for(HostStaticSpan *span=parsed.spans;span;span=span->next){
+        uint64_t data=(uint64_t)(uintptr_t)&audit_private_native_static,code=(uint64_t)(uintptr_t)audit_private_native_read;
+        if(data>=span->address&&sizeof(audit_private_native_static)<=span->bytes&&data-span->address<=span->bytes-sizeof(audit_private_native_static))containsStatic=1;
+        if(code>=span->address&&code-span->address<span->bytes)containsCode=1;
+        for(uint64_t cursor=span->address;cursor<span->address+span->bytes;){MEMORY_BASIC_INFORMATION region={0};
+            PRIVATE_REQUIRE(VirtualQuery((void*)(uintptr_t)cursor,&region,sizeof(region))==sizeof(region)&&region.RegionSize,"actual fixture data page query unavailable");
+            if(region.Protect&(PAGE_EXECUTE|PAGE_EXECUTE_READ|PAGE_EXECUTE_READWRITE|PAGE_EXECUTE_WRITECOPY))executable=1;
+            cursor=(uint64_t)(uintptr_t)region.BaseAddress+region.RegionSize;
+        }
+    }
+    PRIVATE_REQUIRE(containsStatic&&!containsCode&&!executable,"actual fixture PE parser omitted writable static storage or included executable code");
+    native_memory_image_span(env,&image,(uint64_t)(uintptr_t)&audit_private_native_static,sizeof(audit_private_native_static),&selected,0);
+    imageAllocation=native_memory_find((uint64_t)(uintptr_t)&audit_private_native_static,sizeof(audit_private_native_static),1);
+    PRIVATE_REQUIRE(imageAllocation&&imageAllocation->hostFamily==NATIVE_MEMORY_HOST_IMAGE&&!imageAllocation->release&&!imageAllocation->hostReleasePin,"static IMAGE span gained independent free authority");
+    receipt=audit_private_native_read(env,type,imageAllocation,modules);
+    PRIVATE_REQUIRE(receipt&&native_memory_image_busy(env,&image)&&!native_memory_image_prepare(env,&image),"actual IMAGE read lease did not block unload preparation");
+    Java_dev_ronova_pro_bootstrap_NativeControl_memoryWriteEnd0(env,type,receipt,JNI_TRUE);
+    view=native_original.NewDirectByteBuffer(env,(void*)&audit_private_native_static,sizeof(audit_private_native_static));
+    PRIVATE_REQUIRE(view&&native_memory_buffer_observe(env,view,NULL,(uint64_t)(uintptr_t)&audit_private_native_static,sizeof(audit_private_native_static),binding)
+            &&binding[0]&&!native_memory_image_prepare(env,&image),"live IMAGE borrowed alias permitted unload preparation");
+    native_original.DeleteLocalRef(env,view);view=NULL;
+    PRIVATE_REQUIRE(audit_private_native_aliases_collected(env,imageAllocation)&&native_memory_image_prepare(env,&image)&&imageAllocation->retiring,"quiescent IMAGE storage did not seal before unload");
+    PRIVATE_REQUIRE(!native_memory_buffer_enter(env,(uint64_t)(uintptr_t)&audit_private_native_static,sizeof(audit_private_native_static),&allocation)
+            &&native_original.ExceptionCheck(env),"prepared IMAGE admitted a new native view");native_original.ExceptionClear(env);
+    oldGeneration=imageAllocation->generation;image.privateMemory=&parsed;image.live=0;host_static_image_released(&image,env);
+    PRIVATE_REQUIRE(imageAllocation->alive&&imageAllocation->generation==oldGeneration&&imageAllocation->retiring&&!parsed.closed,
+            "returning an extra image pin retired still-mapped fixture IMAGE storage");image.live=1;
+    native_memory_image_cancel(env,&image);PRIVATE_REQUIRE(!imageAllocation->retiring&&native_memory_image_prepare(env,&image),"failed original unload did not restore exact IMAGE admission");
+    oldGeneration=imageAllocation->generation;native_memory_image_retire(env,&image);
+    PRIVATE_REQUIRE(!imageAllocation->alive&&imageAllocation->generation!=oldGeneration&&!native_memory_image_prepare(env,&image)
+            &&audit_private_native_static==0x98a1b2c3d4e5f607ULL&&!native_memory_unknown,"IMAGE lifetime retirement retained an old pair, freed static bytes or polluted unrelated sources");
+done:
+    if(initialized){
+        if(native_original.ExceptionCheck(env))native_original.ExceptionClear(env);
+        if(call)native_memory_host_abort(env,call);
+        while(thread.memoryWrite)native_memory_write_end(&thread,thread.memoryWrite,0);
+        if(view)native_original.DeleteLocalRef(env,view);
+        if(block&&heap&&release)release(heap,0,block);if(heap&&destroyHeap)destroyHeap(heap);
+        while(parsed.spans){HostStaticSpan *span=parsed.spans;parsed.spans=span->next;free(span);}
+        while(native_memory_allocations){NativeMemoryAllocation *entry=native_memory_allocations;native_memory_allocations=entry->next;
+            native_memory_released(env,entry);native_memory_reap_references(env,entry);
+            native_owner_links_free(entry->sources);native_owner_links_free(entry->readers);native_owner_links_free(entry->preserved);
+            while(entry->interests){NativeMemoryInterest *interest=entry->interests;entry->interests=interest->next;free(interest);}DeleteCriticalSection(&entry->gate);free(entry);}
+        while(native_memory_host_contexts){NativeHostMemoryContext *entry=native_memory_host_contexts;native_memory_host_contexts=entry->next;free(entry);}
+        while(native_memory_images){NativeMemoryImageState *entry=native_memory_images;native_memory_images=entry->next;free(entry);}
+        native_owner_links_free(native_memory_unknown);native_memory_unknown=NULL;
+        while(native_owners){Owner *entry=native_owners;native_owners=entry->next;if(entry->module)native_original.DeleteWeakGlobalRef(env,entry->module);free(entry);}
+        native_private_unregister(&thread.jniRange);
+        if(native_controller)native_original.DeleteGlobalRef(env,native_controller);if(native_controls)native_original.DeleteGlobalRef(env,native_controls);
+        native_controller=native_controls=NULL;native_memory_gate=NULL;
+        if(fixtureTls!=TLS_OUT_OF_INDEXES){TlsSetValue(fixtureTls,NULL);TlsFree(fixtureTls);}native_tls=TLS_OUT_OF_INDEXES;
+        memset(&native_original,0,sizeof(native_original));
+    }
+    if(failure)audit_physical_failure(env,failure);
+#undef PRIVATE_REQUIRE
+    return failure?JNI_FALSE:JNI_TRUE;
+}

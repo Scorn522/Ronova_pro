@@ -254,6 +254,7 @@ static void host_module_return(HostLibraryLoad *load,HMODULE actual,DWORD error)
     HMODULE spare=NULL;if(!image->pin)image->pin=pin;else spare=pin;
     load->image=image;load->imageNext=image->loads;image->loads=load;
     if(!image->checked)host_image_imports(image);
+    host_static_image_observed(image);
     InterlockedExchange(&image->retiring,host_module_image_sources_retired_locked(image));
     ReleaseSRWLockExclusive(&host_imports);
     /* This spare belongs only to Ronova. The surviving directory pin retains
@@ -280,6 +281,10 @@ static int host_module_image_release_ready_locked(HostImage *image){
 static void host_module_loads_reap(JNIEnv **environment){
     if(!environment||!*environment)return;NativeThread *state=native_thread();if(!state)return;
     native_thread_callback_enter(state);
+    AcquireSRWLockExclusive(&host_imports);
+    for(HostImage *image=host_images;image;image=image->next)
+        if(!image->live)host_static_image_released(image,*environment);
+    ReleaseSRWLockExclusive(&host_imports);
     for(;;){HostLibraryLoad *load=NULL;HMODULE pin=NULL;
         AcquireSRWLockExclusive(&host_imports);
         for(HostLibraryLoad *candidate=host_library_loads;candidate;candidate=candidate->next)
@@ -295,7 +300,7 @@ static void host_module_loads_reap(JNIEnv **environment){
     for(;;){HostImage *image=NULL;HMODULE pin=NULL;OwnerLink *sources=NULL;int oldLive=0;
         AcquireSRWLockExclusive(&host_imports);
         for(HostImage *candidate=host_images;candidate;candidate=candidate->next)
-            if(host_module_image_release_ready_locked(candidate)){image=candidate;break;}
+            if(host_module_image_release_ready_locked(candidate)&&host_static_image_prepare(candidate,*environment)){image=candidate;break;}
         if(image){
             int ready=1;for(HostLibraryLoad *load=image->loads;load&&ready;load=load->imageNext)
                 ready=native_owner_merge(&sources,load->owners);
@@ -305,7 +310,7 @@ static void host_module_loads_reap(JNIEnv **environment){
                     jni=library->hostImage==image&&host_library_current(library,image->handle);
                 ReleaseSRWLockShared(&native_records);
                 if(!jni)image->live=0; /* logical tombstone before our own release */
-            }else {image->opaque=1;image=NULL;InterlockedIncrement(&native_failures);}
+            }else {host_static_image_cancel(image,*environment);image->opaque=1;image=NULL;InterlockedIncrement(&native_failures);}
         }
         ReleaseSRWLockExclusive(&host_imports);
         if(!image){native_owner_links_free(sources);break;}
@@ -316,6 +321,7 @@ static void host_module_loads_reap(JNIEnv **environment){
         AcquireSRWLockExclusive(&host_imports);
         if(released){image->pin=NULL;image->pinReleased=1;}else {image->live=oldLive;image->opaque=1;
             for(HostLibraryLoad *load=image->loads;load;load=load->imageNext)load->error=error;}
+        if(released&&!image->live)host_static_image_released(image,*environment);else host_static_image_cancel(image,*environment);
         image->releasing=0;host_image_private_slots_locked(image);InterlockedExchange(&image->retiring,0);ReleaseSRWLockExclusive(&host_imports);native_owner_links_free(sources);
         if(!native_tooling_retirement_jni(environment)){native_thread_callback_leave(state);return;}
         if(!released)break;

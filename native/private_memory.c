@@ -3,6 +3,14 @@
  * Java, a JVMTI operation, or an outside callback. */
 #include <stddef.h>
 #include <errno.h>
+#include <malloc.h>
+
+/* This translation unit's real CRT heap, before its allocation names are
+ * redirected. Heap handles from another provider never identify this heap. */
+static HANDLE native_private_crt_heap(void){
+    DWORD error=GetLastError();int saved=errno;intptr_t actual=_get_heap_handle();
+    errno=saved;SetLastError(error);return actual>0?(HANDLE)(uintptr_t)actual:NULL;
+}
 
 typedef struct NativePrivateRange {
     const void *address;SIZE_T length;struct NativePrivateRange *next;

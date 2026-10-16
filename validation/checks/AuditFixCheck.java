@@ -55,6 +55,7 @@ public final class AuditFixCheck {
         if(args.length==1&&args[0].equals("clone-boundary")){cloneBoundary();return;}
         if(args.length==1&&args[0].equals("buffer-release")){bufferRelease();return;}
         if(args.length==1&&args[0].equals("opaque-native-state")){opaqueNativeState();return;}
+        if(args.length==1&&args[0].equals("private-native-state")){privateNativeState();return;}
         if(args.length==1&&args[0].equals("buffer-wrap")){bufferWrap();return;}
         if(args.length==1&&args[0].equals("buffer-font")){bufferFont();return;}
         if(args.length==1&&args[0].equals("native-image-srg")){nativeImageSrg();return;}
@@ -875,6 +876,8 @@ public final class AuditFixCheck {
     private static native void hostJvmtiOutput0();
     private static native boolean hostJniOutput0();
     private static native boolean hostMemoryRead0();
+    private static native void hostWin32Allocations0();
+    private static native boolean hostCrtAllocations0();
     private static native void hostRawUnsafe0();
     private static native void hostModuleRelease0(String controlDll);
     private static native void hostModuleReleaseThread0(String controlDll);
@@ -885,6 +888,11 @@ public final class AuditFixCheck {
     private static void hostThreadCreate(){
         System.load(java.nio.file.Path.of(System.getProperty("ronova.pro.audit.thread.native")).toAbsolutePath().toString());
         String phase=System.getProperty("ronova.pro.audit.thread.phase","thread-create");
+        if(phase.equals("private-allocations")){
+            hostWin32Allocations0();
+            require(hostCrtAllocations0(),"actual CRT allocation regression failed");
+            return;
+        }
         if(phase.equals("raw-unsafe")){
             hostRawUnsafe0();
             System.out.println("RAW_UNSAFE_PASS actual_sun_misc_putLong_free_reallocate actual_internal_native_putLong_setMemory0_copyMemory0_freeMemory0_reallocateMemory0 VM_JVMTI_JNI_first_slots_same_value_and_lifetime_refused_bytes_preserved ordinary_allocate_put_set_copy_grow_shrink_zero_length_NULL_conventions_paired_free actual_Dispose no_fabricated_authority");
@@ -2027,6 +2035,16 @@ public final class AuditFixCheck {
     private static int opaqueNativeObserverMode;
     private static final RuntimeException OPAQUE_NATIVE_FAILURE=new RuntimeException("opaque-native-original");
     private static native boolean opaqueNativeState0(Object action,Module[] modules,Throwable original);
+    private static native boolean privateNativeState0(Module[] modules);
+    private static void privateNativeState(){
+        System.load(java.nio.file.Path.of(System.getProperty("ronova.pro.audit.native")).toAbsolutePath().toString());
+        opaqueNativeModules=new Module[]{AuditFixCheck.class.getModule()};opaqueNativeFixture=true;
+        try{
+            require(privateNativeState0(opaqueNativeModules),"actual private native lifetime regression failed");
+            System.out.println("PRIVATE_NATIVE_STATE_PASS actual_heap_returns failed_realloc_preserved same_address_new_generation read_source_known_and_unknown live_alias_and_read_lease_block_free actual_private_HeapFree writable_PE_static_spans IMAGE_seal_cancel_retire scoped_native_CPU_unknown fixture_metadata_no_global_install");
+        }
+        finally{opaqueNativeFixture=false;opaqueNativeModules=null;}
+    }
     // Only the isolated C fixture owns these expected tuples. Production
     // allocation/alias/restore code runs unchanged, with no controller install.
     private static boolean bufferRestoreCaller(Object action,long token,long generation,Module[] modules,long cursor,int budget){
