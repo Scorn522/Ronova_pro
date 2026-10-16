@@ -28,7 +28,7 @@ public final class ControlBridge {
         }
     };
     private ControlBridge() { }
-    public static int abiVersion(){return 93;}
+    public static int abiVersion(){return 94;}
     public static long arrayRevision(Object value){if(!recoveryWriter())throw new SecurityException("RECOVERY_ARRAY_READER_REQUIRED");return CodeSourceBridge.executionArrayRevision(value);}
 
     public static synchronized void install(Class<?> agent,ClassFileTransformer[] transformers) throws ReflectiveOperationException {
@@ -1562,10 +1562,16 @@ public final class ControlBridge {
     }
     static final class FieldMutation {
         final java.util.concurrent.locks.ReentrantLock gate;final Object source,receiver;
+        final Object queueMutation;
         final Thread thread=Thread.currentThread();final SourcePublication publication;boolean closed,retirementQualified;
         FieldMutation(java.util.concurrent.locks.ReentrantLock gate,Object source,Object receiver){
             this.gate=gate;this.source=source;this.receiver=receiver;
             publication=SourceMapBridge.holderRegistered(receiver)||SourceMapBridge.carrierRegistered(receiver)?new SourcePublication(receiver):null;
+            Class<?> type=receiver==null?null:receiver.getClass();
+            boolean queue=receiver instanceof java.util.concurrent.ForkJoinPool||receiver instanceof java.util.concurrent.ForkJoinTask<?>[]
+                    ||type!=null&&type.getClassLoader()==null&&(type.getName().equals("java.util.concurrent.ForkJoinPool$WorkQueue")
+                    ||type.getName().equals("[Ljava.util.concurrent.ForkJoinPool$WorkQueue;"));
+            queueMutation=queue?TaskBridge.externalQueueMutationBegin(receiver):null;
         }
         java.util.concurrent.locks.ReentrantLock gate(){return gate;}
         Object source(){return source;}
@@ -1573,7 +1579,8 @@ public final class ControlBridge {
         void close(){
             if(closed)return;
             if(thread!=Thread.currentThread())throw new IllegalMonitorStateException("FIELD_MUTATION_THREAD_REQUIRED");
-            try{if(publication!=null)publication.close();}finally{closed=true;gate.unlock();}
+            try{if(publication!=null)publication.close();}
+            finally{try{TaskBridge.externalQueueMutationEnd(queueMutation);}finally{closed=true;gate.unlock();}}
         }
     }
     public static void observeSourceHolder(Object holder){

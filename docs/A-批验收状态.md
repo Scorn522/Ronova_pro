@@ -1,5 +1,25 @@
 # Ronova Pro 当前进度
 
+## 2026-10-16：C 接续——启动批次、物理帧 token、队列定位与当前读回
+
+接续 `5e60323`，Java ABI94 / Native ABI85 / SourceMapBridge2 / Storage3 / Journal6，协议 `r3-client-8`。这四项整包源码写齐后统一构建，没有恢复旧容器 Hook、生成源码 ZIP 或扩展自身外观/武器。
+
+初装各目标组复用一次实际 loadedClasses 快照，按阶段批量转换已加载类，不强制加载可选任务、句柄和包装类。未来加载覆盖与已返回/被 VM 接受的实际 image 分开；精准 bootstrap ClassPrepare 消费对应回执，拒批清除回执。Native 恢复只重试尚未完成的实际目标，不重装 Java 转换链；Java-only 启动继续保留。
+
+已建立 watcher 的热 hook 使用实际 JVMTI 方法、Method/ConstMethod/常量池版本、BCI 和物理深度，拒绝递归外层、跨线程及过期 token。首次进入和未建立 watcher 的普通方法仍用真实栈，构造器保持 Native 要求；已建立 watcher 失效不能回退授权。正常/异常退出由真实 FramePop 收尾，过期来源不作为正常返回接续。
+
+ForkJoin 按池做稳定存量采样，再用真实槽位写入/取出/删除、队列登记与扩容回执维护准确任务位置；Core 只处理该任务所在队列。现有字段/Unsafe/JNI/数组写收据使对应队列图失效，未完成转移、缺失覆盖和旧物理 writer 未退役不报缺席。旧 writer 屏障只检查实际直接写入的方法，不等待长期 worker 分派循环退出；Native 不可用时索引缺席证据保持 pending。
+
+安装能力使用不可变快照，只有实际 image/epoch 或所需边界改变才重算；提交仍要求当前 epoch。CF 反射布局缓存，弱链图复用时重读实际 head 与全部 next，链中插入、循环及弱引用失效不沿用旧缺席。最终清图重新核对当前字段、队列版本、实际执行/等待退出与必要 ACK；委托调用不冒认共享对象已清除。
+
+统一构建 `build-c-java94-native85-root-retirement-20261016.log` 首轮 **PASS，1分17秒**，21项任务中15项执行、6项保持最新，含 Native85；检查器与 Native 夹具编译退出0。`startup-batches`、`retirement-readback`、`queue-locations` 首轮均退出0，分别覆盖拒批不认证、旧 epoch 拒绝、真实 CF 链中重插及队列迁移/扩容/字段重插；队列真实 JDK 变换输出通过数据流检查。启动 API 返回、队列安装及字段收据使用隔离夹具元数据，不代表实际 VM 安装。
+
+物理夹具初次未按生产 prelaunch 的 Agent_OnLoad 提前申请 FramePop 能力，setup失败；补早期申请后，未登记自己的 JVMTI 环境又被实际 VM 方法版本入口拒绝。原 `c-java94-native85-physical-token-20261016.log` 与 `c-java94-native85-physical-token-onload-20261016.log` 均保留。只修正隔离夹具的早期能力及私有 JVMTI 环境交接，不改生产代码、不交换全局 JavaVM/JNI 表；`c-java94-native85-physical-token-owned-env-20261016.log` 最终 **退出0，PHYSICAL_TOKEN_PASS**，覆盖真实 JVMTI 当前/父帧、递归外层和另一线程拒绝、捕获版本失配拒绝，以及实际正常/异常 FramePop 和原异常身份。夹具也调用生产队列旧帧扫描核心检查真实有界栈及错误 Class 拒绝；没有实际制造旧 JDK writer，也没有执行真实类重定义，版本失配由夹具记录内注入。主构建及前三项不重复，未运行旧矩阵。
+
+匹配候选 `distribution/candidate-c-java94-native85-root-retirement-wip-20261016`：Core2988093、prelaunch23226字节。源码、候选与本摘要同步 GitHub；真实 premain/Core/Native 整体安装、实际 VM 重变换攻防、进服与性能均未运行，不以本包隔离结果代称。完整 C/B、已删容器防护与未知载体等剩余缺口不标完成。
+
+---
+
 ## 2026-10-16：C 接续——来源候选、延迟解析与失败续接
 
 接续 `f996c18`，Java ABI93 / Native ABI84 / SourceMapBridge2 / Storage3 / Journal6，协议 `r3-client-8`。本包先写齐所有源码再统一构建；继续保留上一包的停组策略顺序、原 Native 返回语义与准确丢失范围，没有恢复旧容器 Hook。

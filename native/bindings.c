@@ -30,7 +30,12 @@ typedef struct NativeUnsafeInstall {
 } NativeUnsafeInstall;
 typedef struct Binding {jmethodID method;jweak type,origin;Owner *owner,*declared;OwnerLink *owners;NativeLibrary *library,*loading;struct HostImage *hostImage;HostLibraryLoad *hostLoad;int hostUnknown;void *original,*entry;char *signature,*fileMethod;char result;unsigned unsafeOperation,fileOperation,fileArgument,threadOperation,arraycopyOperation;const char *unsafeKind;volatile LONG active,current,valid;RUNTIME_FUNCTION unwind;struct Binding *previous,*next;} Binding;
 typedef struct NativeDefinition {jclass declaring;jobject loader;jbyteArray bytes;unsigned phase;struct NativeDefinition *previous;} NativeDefinition;
-typedef struct CodeExit {jmethodID method;jobject token;jint bottom;struct CodeRetirementOwner *retirementOwner;struct CodeExit *previous;} CodeExit;
+typedef struct CodeExit {
+    jmethodID method;jobject token;jint bottom;
+    /* Bound only after the whole live method image selected its execution plan. */
+    uintptr_t physicalVersion[3];unsigned physicalLength;int physical;
+    struct CodeRetirementOwner *retirementOwner;struct CodeExit *previous;
+} CodeExit;
 typedef struct NativeUnsafeFrame {jobject token;uint64_t expected;struct NativeMemoryCall *memoryCall;} NativeUnsafeFrame;
 enum { UNSAFE_PUT=1,UNSAFE_CAS,UNSAFE_EXCHANGE,UNSAFE_SET,UNSAFE_COPY,UNSAFE_SWAP,UNSAFE_ALLOCATE,UNSAFE_REALLOCATE,UNSAFE_FREE,UNSAFE_READ };
 typedef struct NativeFileFrame {jobject receiver,token;jclass declaring;jstring method;jobjectArray sources,references;jlongArray arguments;jint operation;jlong address,length;int finishing;} NativeFileFrame;
@@ -44,6 +49,7 @@ typedef struct NativeThread {
     NativeUnsafeInstall *unsafeInstall;
     struct NativeArrayCopyContext *arraycopy;
     unsigned depth,control,sourceCapture,unsafeInstalling,bufferAllocation,heapCallback,toolingRestricted,arraycopyQuery;
+    int poppedObserved;
     jclass defined,prepared,changedClass;jobject created,mutation,popped,changedHolder,bufferAddress,unobservedLibrary;
     jobjectArray bufferSources;CodeExit *execution;NativeDefinition *definition;NativeLibraryScope *library;
     NativeRegistration *registration;NativeToolingScope *tooling;struct NativeToolingEnv *toolingCallbackEnvironment;

@@ -27,12 +27,14 @@ final class BackingBoundary {
         return writes[0];
     }
     static boolean coreInstalled() {return CORE_INSTALLED.containsAll(Set.of("java/util/concurrent/ThreadPoolExecutor","java/util/concurrent/ScheduledThreadPoolExecutor"));}
+    static boolean installed(String name) {return CORE_INSTALLED.contains(name);}
     static byte[] transform(ClassLoader loader,String name,byte[] bytes) {
         return transform(loader,null,name,bytes);
     }
     static byte[] transform(ClassLoader loader,Module module,String name,byte[] bytes) {
         ClassNode node=new ClassNode();new ClassReader(bytes).accept(node,0);boolean changed=false;
         if(loader==null&&(name.equals("java/util/concurrent/ThreadPoolExecutor")||name.equals("java/util/concurrent/ScheduledThreadPoolExecutor"))) {
+            CORE_INSTALLED.remove(name);
             for(MethodNode method:node.methods)if(method.name.equals("shutdown")||method.name.equals("shutdownNow")) {
                 InsnList code=new InsnList();LabelNode allowed=new LabelNode();code.add(new VarInsnNode(Opcodes.ALOAD,0));
                 code.add(new MethodInsnNode(Opcodes.INVOKESTATIC,"dev/ronova/pro/bootstrap/ControlBridge","resourceReleaseAllowed","(Ljava/lang/Object;)Z",false));

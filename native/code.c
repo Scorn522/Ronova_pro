@@ -33,6 +33,7 @@ static volatile LONG code_available,code_pop_available,code_pop_failures,code_so
 static jmethodID code_prepared_callback,code_pop_callback,code_root_gate;
 static jmethodID code_retirement_query;
 static jclass code_bridge;
+static char **code_prepare_targets;static unsigned code_prepare_target_count;
 static jobject code_control_registry;
 static jfieldID code_control_backing;
 static int code_class_matches(JNIEnv*,CodeImage*,jclass,jobject,const char*);
@@ -741,11 +742,126 @@ JNIEXPORT jobjectArray JNICALL Java_dev_ronova_pro_bootstrap_NativeControl_codeV
 JNIEXPORT jobjectArray JNICALL Java_dev_ronova_pro_bootstrap_NativeControl_codeMethodVersion0(JNIEnv *env,jclass controller,jclass type,jbyteArray expected,jstring method){
     (void)controller;if(!method)return NULL;return code_version(env,type,expected,method);
 }
+static int code_prepare_target_order(const void *left,const void *right){
+    return strcmp(*(const char *const*)left,*(const char *const*)right);
+}
+JNIEXPORT jboolean JNICALL Java_dev_ronova_pro_bootstrap_NativeControl_platformPrepareTargets0(JNIEnv *env,jclass controller,jobjectArray names){
+    if(!native_jni_ready||!native_original.IsSameObject(env,controller,native_controller)||!names
+            ||!native_original.CallStaticBooleanMethod(env,native_controller,native_control_gate)){
+        native_refuse(env,"ACTUAL_PLATFORM_PREPARATION_AGENT_REQUIRED");return JNI_FALSE;
+    }
+    jsize length=native_original.GetArrayLength(env,names);char **targets=length?(char**)calloc((size_t)length,sizeof(*targets)):NULL;
+    unsigned count=0;int ready=!length||targets!=NULL;
+    for(jsize i=0;ready&&i<length;i++){
+        jstring name=(jstring)native_original.GetObjectArrayElement(env,names,i);
+        const char *text=name?native_original.GetStringUTFChars(env,name,NULL):NULL;
+        size_t size=text?strlen(text):0;char *signature=size&&size<=SIZE_MAX-3?(char*)malloc(size+3):NULL;
+        if(!signature)ready=0;
+        else{
+            signature[0]='L';for(size_t at=0;at<size;at++){
+                unsigned char value=(unsigned char)text[at];
+                if(value==';'||value=='['||value=='\\'||value<0x20){ready=0;break;}
+                signature[at+1]=value=='.'?'/':(char)value;
+            }
+            if(ready){signature[size+1]=';';signature[size+2]=0;targets[count++]=signature;}
+            else free(signature);
+        }
+        if(text)native_original.ReleaseStringUTFChars(env,name,text);if(name)native_original.DeleteLocalRef(env,name);
+        if(native_original.ExceptionCheck(env))ready=0;
+    }
+    if(ready){
+        if(count)qsort(targets,count,sizeof(*targets),code_prepare_target_order);
+        AcquireSRWLockExclusive(&code_records);char **previous=code_prepare_targets;unsigned oldCount=code_prepare_target_count;
+        code_prepare_targets=targets;code_prepare_target_count=count;targets=NULL;count=0;
+        for(unsigned i=0;i<oldCount;i++)free(previous[i]);free(previous);ReleaseSRWLockExclusive(&code_records);
+    }
+    for(unsigned i=0;i<count;i++)free(targets[i]);free(targets);return ready?JNI_TRUE:JNI_FALSE;
+}
+static int code_platform_queue_caller(JNIEnv *env){
+    jvmtiFrameInfo frames[8];jint count=0;
+    if(!native_jni_ready||!native_ti||!native_controller||native_original.ExceptionCheck(env)
+            ||(*native_ti)->GetStackTrace(native_ti,NULL,0,8,frames,&count)!=JVMTI_ERROR_NONE||count<=0||count>8)return 0;
+    for(jint i=0;i<count;i++){
+        jclass actual=NULL;
+        if((*native_ti)->GetMethodDeclaringClass(native_ti,frames[i].method,&actual)!=JVMTI_ERROR_NONE||!actual)return 0;
+        int controller=native_original.IsSameObject(env,actual,native_controller);
+        int allowed=!controller&&native_bootstrap_class(env,actual,"Ldev/ronova/pro/bootstrap/TaskBridge;");
+        native_original.DeleteLocalRef(env,actual);if(native_original.ExceptionCheck(env))return 0;
+        if(!controller)return allowed;
+    }
+    return 0;
+}
+static int code_platform_queue_writer(jmethodID method,int pool){
+    /* These are the direct slot/array publishers accepted by the JDK 17
+     * instrumentQueueLocations contract. Old dispatch/parking loops invoke
+     * the current writers and need not end before a queue can be seeded. */
+    static const char *poolWriters[][2]={
+        {"registerWorker","(Ljava/util/concurrent/ForkJoinPool$WorkQueue;)V"},
+        {"deregisterWorker","(Ljava/util/concurrent/ForkJoinWorkerThread;Ljava/lang/Throwable;)V"},
+        {"submissionQueue","()Ljava/util/concurrent/ForkJoinPool$WorkQueue;"},
+        {"<init>","(ILjava/util/concurrent/ForkJoinPool$ForkJoinWorkerThreadFactory;Ljava/lang/Thread$UncaughtExceptionHandler;ZIIILjava/util/function/Predicate;JLjava/util/concurrent/TimeUnit;)V"},
+        {"<init>","(B)V"}
+    };
+    static const char *queueWriters[][2]={
+        {"<init>","(I)V"},
+        {"getAndClearSlot","([Ljava/util/concurrent/ForkJoinTask;I)Ljava/util/concurrent/ForkJoinTask;"},
+        {"setSlotVolatile","([Ljava/util/concurrent/ForkJoinTask;ILjava/util/concurrent/ForkJoinTask;)V"},
+        {"casSlotToNull","([Ljava/util/concurrent/ForkJoinTask;ILjava/util/concurrent/ForkJoinTask;)Z"},
+        {"lockedPush","(Ljava/util/concurrent/ForkJoinTask;)Z"},
+        {"growArray","()V"},
+        {"tryRemove","(Ljava/util/concurrent/ForkJoinTask;Z)Z"},
+        {"push","(Ljava/util/concurrent/ForkJoinTask;Ljava/util/concurrent/ForkJoinPool;)V"}
+    };
+    char *name=NULL,*descriptor=NULL;int writer=-1;
+    if((*native_ti)->GetMethodName(native_ti,method,&name,&descriptor,NULL)==JVMTI_ERROR_NONE&&name&&descriptor){
+        const char *(*selected)[2]=pool?poolWriters:queueWriters;
+        size_t count=pool?sizeof(poolWriters)/sizeof(poolWriters[0]):sizeof(queueWriters)/sizeof(queueWriters[0]);writer=0;
+        for(size_t at=0;at<count;at++)if(!strcmp(name,selected[at][0])&&!strcmp(descriptor,selected[at][1])){writer=1;break;}
+    }
+    if(name)(*native_ti)->Deallocate(native_ti,(unsigned char*)name);if(descriptor)(*native_ti)->Deallocate(native_ti,(unsigned char*)descriptor);return writer;
+}
+static int code_platform_queue_quiescent(JNIEnv *env,jclass pool,jclass queue){
+    if(!native_ti||!pool||!queue||native_original.ExceptionCheck(env)
+            ||!native_bootstrap_class(env,pool,"Ljava/util/concurrent/ForkJoinPool;")
+            ||!native_bootstrap_class(env,queue,"Ljava/util/concurrent/ForkJoinPool$WorkQueue;"))return 0;
+    enum {MAXIMUM=4096};jvmtiStackInfo *stacks=NULL;jint count=0;int ready=1;
+    // One atomic JVMTI snapshot, including native callers. A full buffer may
+    // hide an older pre-install body and therefore cannot certify quiescence.
+    if((*native_ti)->GetAllStackTraces(native_ti,MAXIMUM,&stacks,&count)!=JVMTI_ERROR_NONE||count<0||count&&!stacks)return 0;
+    for(jint at=0;at<count;at++){
+        jvmtiStackInfo *stack=&stacks[at];
+        if(stack->frame_count<0||stack->frame_count>=MAXIMUM||stack->frame_count&&!stack->frame_buffer)ready=0;
+        for(jint index=0;ready&&index<stack->frame_count;index++){
+            jclass declaring=NULL;
+            if((*native_ti)->GetMethodDeclaringClass(native_ti,stack->frame_buffer[index].method,&declaring)!=JVMTI_ERROR_NONE||!declaring){ready=0;break;}
+            int poolFrame=native_original.IsSameObject(env,declaring,pool);
+            int relevant=poolFrame||native_original.IsSameObject(env,declaring,queue);
+            native_original.DeleteLocalRef(env,declaring);
+            if(relevant){jboolean obsolete=JNI_TRUE;
+                if((*native_ti)->IsMethodObsolete(native_ti,stack->frame_buffer[index].method,&obsolete)!=JVMTI_ERROR_NONE
+                        ||obsolete&&code_platform_queue_writer(stack->frame_buffer[index].method,poolFrame)!=0)ready=0;
+            }
+            if(native_original.ExceptionCheck(env))ready=0;
+        }
+        if(stack->thread)native_original.DeleteLocalRef(env,stack->thread);
+    }
+    if(stacks)(*native_ti)->Deallocate(native_ti,(unsigned char*)stacks);return ready;
+}
+JNIEXPORT jboolean JNICALL Java_dev_ronova_pro_bootstrap_NativeControl_platformQueueQuiescent0(JNIEnv *env,jclass controller,jclass pool,jclass queue){
+    if(!native_jni_ready||!native_controller||!native_original.IsSameObject(env,controller,native_controller)||!code_platform_queue_caller(env))return JNI_FALSE;
+    return code_platform_queue_quiescent(env,pool,queue)?JNI_TRUE:JNI_FALSE;
+}
 static void JNICALL code_class_prepared(jvmtiEnv *ti,JNIEnv *env,jthread thread,jclass type){
     (void)thread;if(!native_jni_ready||!code_prepared_callback)return;jobject loader=NULL;char *signature=NULL;int candidate=0;
     if((*ti)->GetClassLoader(ti,type,&loader)==JVMTI_ERROR_NONE&&(*ti)->GetClassSignature(ti,type,&signature,NULL)==JVMTI_ERROR_NONE){
         AcquireSRWLockShared(&code_records);CodeCandidates candidates=code_candidates(signature);
-        for(CodeImage *image=code_candidate_next(&candidates);image;image=code_candidate_next(&candidates))if(code_class_matches(env,image,type,loader,signature)){candidate=1;break;}ReleaseSRWLockShared(&code_records);
+        for(CodeImage *image=code_candidate_next(&candidates);image;image=code_candidate_next(&candidates))if(code_class_matches(env,image,type,loader,signature)){candidate=1;break;}
+        // This immutable exact bootstrap set only forwards a real prepare
+        // event. Java still matches its returned-image receipt before any
+        // installation is certified; no external code image is invented.
+        if(!candidate&&!loader&&code_prepare_target_count
+                &&bsearch(&signature,code_prepare_targets,code_prepare_target_count,sizeof(*code_prepare_targets),code_prepare_target_order))candidate=1;
+        ReleaseSRWLockShared(&code_records);
     }
     if(signature)(*ti)->Deallocate(ti,(unsigned char*)signature);if(loader)native_original.DeleteLocalRef(env,loader);
     NativeThread *state=candidate?native_thread():NULL;if(!state)return;jclass previous=state->prepared;state->prepared=type;state->control++;
@@ -842,6 +958,45 @@ done:
     if(descriptor)(*native_ti)->Deallocate(native_ti,(unsigned char*)descriptor);if(loader)native_original.DeleteLocalRef(env,loader);
     if(declaring)native_original.DeleteLocalRef(env,declaring);return result;
 }
+/* A hot hook may only describe its first real caller. In particular a
+ * recursive/deeper matching method, reflective adapter or virtual callback
+ * cannot borrow an outer frame's token. This bounded prefix contains only
+ * the controller and this exact bootstrap bridge; its bottom depth is read
+ * independently from the real VM stack on every query. */
+static int code_execution_frame(JNIEnv *env,jmethodID *method,jlocation *location,jint *depth,jint *bottom){
+    if(!native_jni_ready||!native_ti||!native_controller||!code_bridge||native_original.ExceptionCheck(env))return 0;
+    jvmtiFrameInfo frames[8];jint count=0,total=0;int bridge=0;
+    if((*native_ti)->GetFrameCount(native_ti,NULL,&total)!=JVMTI_ERROR_NONE
+            ||(*native_ti)->GetStackTrace(native_ti,NULL,0,8,frames,&count)!=JVMTI_ERROR_NONE||count<=0||count>8)return 0;
+    for(jint i=0;i<count;i++){
+        jclass declaring=NULL;
+        if((*native_ti)->GetMethodDeclaringClass(native_ti,frames[i].method,&declaring)!=JVMTI_ERROR_NONE||!declaring){
+            if(declaring)native_original.DeleteLocalRef(env,declaring);return 0;
+        }
+        int controller=native_original.IsSameObject(env,declaring,native_controller);
+        int transparent=native_original.IsSameObject(env,declaring,code_bridge);
+        native_original.DeleteLocalRef(env,declaring);
+        if(native_original.ExceptionCheck(env)||controller&&bridge)return 0;
+        if(controller)continue;
+        if(transparent){bridge=1;continue;}
+        if(!bridge||frames[i].location<0||frames[i].location>INT32_MAX||total<=i)return 0;
+        *method=frames[i].method;*location=frames[i].location;*depth=i;*bottom=total-i;return 1;
+    }
+    return 0;
+}
+static int code_execution_matches(JNIEnv *env,jmethodID method,jclass declaring,const char *name,const char *descriptor){
+    jclass actual=NULL;char *key=NULL,*signature=NULL;
+    int same=(*native_ti)->GetMethodDeclaringClass(native_ti,method,&actual)==JVMTI_ERROR_NONE&&actual
+            &&native_original.IsSameObject(env,actual,declaring)
+            &&(*native_ti)->GetMethodName(native_ti,method,&key,&signature,NULL)==JVMTI_ERROR_NONE&&key&&signature
+            &&!strcmp(key,name)&&!strcmp(signature,descriptor);
+    if(actual)native_original.DeleteLocalRef(env,actual);if(key)(*native_ti)->Deallocate(native_ti,(unsigned char*)key);
+    if(signature)(*native_ti)->Deallocate(native_ti,(unsigned char*)signature);return same&&!native_original.ExceptionCheck(env);
+}
+static int code_execution_version(CodeExit *entry){
+    CodeVMMethod version={0};version.method=entry->physicalVersion[0];version.constantMethod=entry->physicalVersion[1];version.constants=entry->physicalVersion[2];
+    return entry->physical&&entry->physicalLength&&code_vm_unchanged(entry->method,&version);
+}
 static jclass code_field_owner(JNIEnv *env,jclass type,const char *name,const char *descriptor,int *ready){
     if(!type||!*ready)return NULL;
     jfieldID *fields=NULL;jint count=0;jclass result=NULL;
@@ -889,23 +1044,12 @@ JNIEXPORT jobject JNICALL Java_dev_ronova_pro_bootstrap_NativeControl_executionP
         native_refuse(env,"ACTUAL_CODE_FRAME_BRIDGE_REQUIRED");return NULL;
     }
     if(!code_available||!declaring||!name||!descriptor||location<0)return NULL;
-    jobject result=NULL;jthread thread=NULL;jvmtiFrameInfo *frames=NULL;jint count=0;
+    jobject result=NULL;jmethodID method=NULL;jlocation at=-1;jint depth=0,bottom=0;
     const char *key=native_original.GetStringUTFChars(env,name,NULL),*desc=key?native_original.GetStringUTFChars(env,descriptor,NULL):NULL;
-    if(key&&desc&&(*native_ti)->GetCurrentThread(native_ti,&thread)==JVMTI_ERROR_NONE&&code_trace(thread,&frames,&count)){
-        for(jint i=0;i<count;i++){
-            if(frames[i].location!=location)continue;
-            jclass actual=NULL;char *method=NULL,*signature=NULL;
-            int same=(*native_ti)->GetMethodDeclaringClass(native_ti,frames[i].method,&actual)==JVMTI_ERROR_NONE
-                    &&native_original.IsSameObject(env,actual,declaring)
-                    &&(*native_ti)->GetMethodName(native_ti,frames[i].method,&method,&signature,NULL)==JVMTI_ERROR_NONE
-                    &&!strcmp(method,key)&&!strcmp(signature,desc);
-            if(actual)native_original.DeleteLocalRef(env,actual);if(method)(*native_ti)->Deallocate(native_ti,(unsigned char*)method);
-            if(signature)(*native_ti)->Deallocate(native_ti,(unsigned char*)signature);
-            if(same){result=code_frame_plan(env,frames[i].method,frames[i].location);break;}
-        }
-    }
+    if(key&&desc&&code_execution_frame(env,&method,&at,&depth,&bottom)&&at==location
+            &&code_execution_matches(env,method,declaring,key,desc))result=code_frame_plan(env,method,at);
     if(key)native_original.ReleaseStringUTFChars(env,name,key);if(desc)native_original.ReleaseStringUTFChars(env,descriptor,desc);
-    free(frames);if(thread)native_original.DeleteLocalRef(env,thread);return result;
+    return result;
 }
 JNIEXPORT jboolean JNICALL Java_dev_ronova_pro_bootstrap_NativeControl_executionWatch0(JNIEnv *env,jclass controller,jclass declaring,jstring name,jstring descriptor,jint location,jobject plan,jobject token){
     (void)controller;if(!code_caller(env)){
@@ -913,39 +1057,76 @@ JNIEXPORT jboolean JNICALL Java_dev_ronova_pro_bootstrap_NativeControl_execution
     }
     NativeThread *state=native_thread();jboolean result=JNI_FALSE;
     if(!state||!code_pop_available||!code_pop_callback||!declaring||!name||!descriptor||location<0||!plan||!token)goto failed;
-    jthread thread=NULL;jvmtiFrameInfo *frames=NULL;jint count=0;
+    jthread thread=NULL;jmethodID method=NULL;jlocation at=-1;jint depth=0,bottom=0;
     const char *key=native_original.GetStringUTFChars(env,name,NULL),*desc=key?native_original.GetStringUTFChars(env,descriptor,NULL):NULL;
-    if(key&&desc&&(*native_ti)->GetCurrentThread(native_ti,&thread)==JVMTI_ERROR_NONE&&code_trace(thread,&frames,&count)){
-        for(jint i=0;i<count;i++){
-            if(frames[i].location!=location)continue;
-            jclass actual=NULL;char *method=NULL,*signature=NULL;
-            int same=(*native_ti)->GetMethodDeclaringClass(native_ti,frames[i].method,&actual)==JVMTI_ERROR_NONE
-                    &&native_original.IsSameObject(env,actual,declaring)
-                    &&(*native_ti)->GetMethodName(native_ti,frames[i].method,&method,&signature,NULL)==JVMTI_ERROR_NONE
-                    &&!strcmp(method,key)&&!strcmp(signature,desc);
-            if(actual)native_original.DeleteLocalRef(env,actual);if(method)(*native_ti)->Deallocate(native_ti,(unsigned char*)method);
-            if(signature)(*native_ti)->Deallocate(native_ti,(unsigned char*)signature);if(!same)continue;
-            jobject recorded=code_frame_plan(env,frames[i].method,frames[i].location);
-            int matched=recorded&&native_original.IsSameObject(env,recorded,plan);if(recorded)native_original.DeleteLocalRef(env,recorded);
-            if(!matched)break;
-            CodeExit *entry=(CodeExit*)calloc(1,sizeof(*entry));if(!entry)break;
-            entry->method=frames[i].method;entry->bottom=count-i;entry->token=native_original.NewGlobalRef(env,token);
-            if(entry->token&&(*native_ti)->NotifyFramePop(native_ti,thread,i)==JVMTI_ERROR_NONE){entry->previous=state->execution;state->execution=entry;result=JNI_TRUE;}
-            else{if(entry->token)native_original.DeleteGlobalRef(env,entry->token);free(entry);}
-            break;
+    if(key&&desc&&(*native_ti)->GetCurrentThread(native_ti,&thread)==JVMTI_ERROR_NONE
+            &&code_execution_frame(env,&method,&at,&depth,&bottom)&&at==location&&code_execution_matches(env,method,declaring,key,desc)){
+        CodePool pool={0};CodeVMMethod version={0};
+        int versioned=code_vm_snapshot(env,method,&version,&pool,key,desc);
+        jobject recorded=versioned?code_frame_plan(env,method,at):NULL;
+        int matched=recorded&&native_original.IsSameObject(env,recorded,plan)&&code_vm_unchanged(method,&version);
+        if(recorded)native_original.DeleteLocalRef(env,recorded);
+        /* One token belongs to one invocation. Re-registering an outer token
+         * for a recursive call must not create a second physical authority. */
+        for(CodeExit *entry=state->execution;matched&&entry;entry=entry->previous)
+            if(native_original.IsSameObject(env,entry->token,token)||entry->bottom==bottom)matched=0;
+        if(matched){
+            CodeExit *entry=(CodeExit*)calloc(1,sizeof(*entry));
+            if(entry){
+                entry->method=method;entry->bottom=bottom;entry->token=native_original.NewGlobalRef(env,token);
+                entry->physicalVersion[0]=version.method;entry->physicalVersion[1]=version.constantMethod;entry->physicalVersion[2]=version.constants;
+                entry->physicalLength=version.codeLength;entry->physical=1;
+                jmethodID current=NULL;jlocation currentAt=-1;jint total=0;
+                int currentFrame=(*native_ti)->GetFrameCount(native_ti,thread,&total)==JVMTI_ERROR_NONE&&total-depth==bottom
+                        &&(*native_ti)->GetFrameLocation(native_ti,thread,depth,&current,&currentAt)==JVMTI_ERROR_NONE
+                        &&current==method&&currentAt==at&&code_execution_version(entry);
+                if(entry->token&&currentFrame&&(*native_ti)->NotifyFramePop(native_ti,thread,depth)==JVMTI_ERROR_NONE){
+                    entry->previous=state->execution;state->execution=entry;result=JNI_TRUE;
+                }else{if(entry->token)native_original.DeleteGlobalRef(env,entry->token);free(entry);}
+            }
         }
+        free(version.handlers);code_pool_free(&pool);
     }
     if(key)native_original.ReleaseStringUTFChars(env,name,key);if(desc)native_original.ReleaseStringUTFChars(env,descriptor,desc);
-    free(frames);if(thread)native_original.DeleteLocalRef(env,thread);
+    if(thread)native_original.DeleteLocalRef(env,thread);
 failed:
     if(!result)InterlockedIncrement(&code_pop_failures);return result;
+}
+JNIEXPORT jlong JNICALL Java_dev_ronova_pro_bootstrap_NativeControl_executionSite0(JNIEnv *env,jclass controller,jobject token){
+    if(!native_jni_ready||!native_ti||!native_controller||!token||!native_original.IsSameObject(env,controller,native_controller))return 0;
+    NativeThread *state=native_tls==TLS_OUT_OF_INDEXES?NULL:(NativeThread*)TlsGetValue(native_tls);
+    if(!state||!code_pop_available)return 0;
+    CodeExit *entry=state->execution;
+    while(entry&&!native_original.IsSameObject(env,entry->token,token))entry=entry->previous;
+    if(!entry||!code_execution_version(entry))return 0;
+    jmethodID method=NULL;jlocation at=-1;jint depth=0,bottom=0;
+    if(!code_execution_frame(env,&method,&at,&depth,&bottom)||method!=entry->method||bottom!=entry->bottom
+            ||at<0||(uint64_t)at>=entry->physicalLength||!code_execution_version(entry))return 0;
+    return (jlong)(((uint64_t)(uint32_t)bottom<<32)|((uint64_t)(uint32_t)at+1));
+}
+/* Source readers and a defined callback may inspect a suspended watched
+ * frame. Its retained bottom is only an address into this live stack: the VM
+ * must independently return the same method/version and current instruction. */
+JNIEXPORT jlong JNICALL Java_dev_ronova_pro_bootstrap_NativeControl_executionFrameSite0(JNIEnv *env,jclass controller,jobject token){
+    if(!native_jni_ready||!native_ti||!native_controller||!token||!native_original.IsSameObject(env,controller,native_controller)||!code_caller(env))return 0;
+    NativeThread *state=native_tls==TLS_OUT_OF_INDEXES?NULL:(NativeThread*)TlsGetValue(native_tls);
+    if(!state||!code_pop_available)return 0;
+    CodeExit *entry=state->execution;
+    while(entry&&!native_original.IsSameObject(env,entry->token,token))entry=entry->previous;
+    if(!entry||!code_execution_version(entry))return 0;
+    jmethodID method=NULL;jlocation at=-1;jint total=0;
+    if((*native_ti)->GetFrameCount(native_ti,NULL,&total)!=JVMTI_ERROR_NONE||total<entry->bottom
+            ||(*native_ti)->GetFrameLocation(native_ti,NULL,total-entry->bottom,&method,&at)!=JVMTI_ERROR_NONE
+            ||method!=entry->method||at<0||(uint64_t)at>=entry->physicalLength||!code_execution_version(entry))return 0;
+    return (jlong)(((uint64_t)(uint32_t)entry->bottom<<32)|((uint64_t)(uint32_t)at+1));
 }
 static int code_exit_dispatch(JNIEnv *env,NativeThread *state,CodeExit *entry,jboolean normal){
     if(!entry->token){SecureZeroMemory(entry,sizeof(*entry));free(entry);return 1;}
     jthrowable pending=native_original.ExceptionOccurred(env);if(pending)native_original.ExceptionClear(env);
-    jobject previous=state->popped;state->popped=entry->token;state->control++;
-    jboolean closed=native_original.CallStaticBooleanMethod(env,native_controller,code_pop_callback,entry->token,normal);
-    state->control--;state->popped=previous;
+    jobject previous=state->popped;int previouslyObserved=state->poppedObserved;
+    state->popped=entry->token;state->poppedObserved=!entry->physical||code_execution_version(entry);state->control++;
+    jboolean closed=native_original.CallStaticBooleanMethod(env,native_controller,code_pop_callback,entry->token,state->poppedObserved?normal:JNI_FALSE);
+    state->control--;state->popped=previous;state->poppedObserved=previouslyObserved;
     if(native_original.ExceptionCheck(env)){native_original.ExceptionClear(env);InterlockedIncrement(&code_pop_failures);closed=JNI_FALSE;}
     else if(!closed)InterlockedIncrement(&code_pop_failures);
     if(pending){native_original.Throw(env,pending);native_original.DeleteLocalRef(env,pending);}
@@ -980,10 +1161,10 @@ static void code_thread_end(JNIEnv *env,NativeThread *state){
     }
 }
 #include "code_retirement.c"
-JNIEXPORT jboolean JNICALL Java_dev_ronova_pro_bootstrap_NativeControl_executionPopPermit0(JNIEnv *env,jclass controller,jobject token){
+JNIEXPORT jint JNICALL Java_dev_ronova_pro_bootstrap_NativeControl_executionPopPermit0(JNIEnv *env,jclass controller,jobject token){
     (void)controller;NativeThread *state=native_thread();
     return state&&state->popped&&code_caller(env)
-            &&native_original.IsSameObject(env,state->popped,token)?JNI_TRUE:JNI_FALSE;
+            &&native_original.IsSameObject(env,state->popped,token)?state->poppedObserved?1:2:0;
 }
 static void code_source_failure(JNIEnv *env,CodeFailure *failure,jmethodID method,jlocation location,int known){
     jclass declaring=NULL;char *signature=NULL,*name=NULL,*descriptor=NULL;jboolean obsolete=JNI_FALSE;jvmtiError obsoleteError=JVMTI_ERROR_NONE;

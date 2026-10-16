@@ -3,7 +3,7 @@
 #include <bcrypt.h>
 // Preserve Object.clone itself, including Cloneable checks; never substitute a Java ancestor body.
 JNIEXPORT jint JNICALL Java_dev_ronova_pro_bootstrap_NativeControl_abi(JNIEnv *env, jclass type) {
-    (void)env; (void)type; return 84;
+    (void)env; (void)type; return 85;
 }
 JNIEXPORT jobject JNICALL Java_dev_ronova_pro_bootstrap_NativeControl_returnIdentifier0(JNIEnv *env,jclass type) {
     (void)type;
@@ -110,7 +110,11 @@ static int native_bind_controller(JNIEnv *env,jclass controller){
         {"executionRootAllowed0","()Z",(void*)Java_dev_ronova_pro_bootstrap_NativeControl_executionRootAllowed0},
         {"executionPlan0","(Ljava/lang/Class;Ljava/lang/String;Ljava/lang/String;I)Ljava/lang/Object;",(void*)Java_dev_ronova_pro_bootstrap_NativeControl_executionPlan0},
         {"executionWatch0","(Ljava/lang/Class;Ljava/lang/String;Ljava/lang/String;ILjava/lang/Object;Ljava/lang/Object;)Z",(void*)Java_dev_ronova_pro_bootstrap_NativeControl_executionWatch0},
-        {"executionPopPermit0","(Ljava/lang/Object;)Z",(void*)Java_dev_ronova_pro_bootstrap_NativeControl_executionPopPermit0},
+        {"executionSite0","(Ljava/lang/Object;)J",(void*)Java_dev_ronova_pro_bootstrap_NativeControl_executionSite0},
+        {"executionFrameSite0","(Ljava/lang/Object;)J",(void*)Java_dev_ronova_pro_bootstrap_NativeControl_executionFrameSite0},
+        {"platformPrepareTargets0","([Ljava/lang/String;)Z",(void*)Java_dev_ronova_pro_bootstrap_NativeControl_platformPrepareTargets0},
+        {"platformQueueQuiescent0","(Ljava/lang/Class;Ljava/lang/Class;)Z",(void*)Java_dev_ronova_pro_bootstrap_NativeControl_platformQueueQuiescent0},
+        {"executionPopPermit0","(Ljava/lang/Object;)I",(void*)Java_dev_ronova_pro_bootstrap_NativeControl_executionPopPermit0},
         {"codeFieldOwner0","(Ljava/lang/Class;Ljava/lang/String;Ljava/lang/String;)Ljava/lang/Class;",(void*)Java_dev_ronova_pro_bootstrap_NativeControl_codeFieldOwner0},
         {"heapWatch0","(Ljava/lang/Object;Ljava/lang/Class;Ljava/lang/String;Ljava/lang/String;)Z",(void*)Java_dev_ronova_pro_bootstrap_NativeControl_heapWatch0},
         {"heapReadField0","(Ljava/lang/Object;Ljava/lang/Class;Ljava/lang/String;Ljava/lang/String;)[Ljava/lang/Object;",(void*)Java_dev_ronova_pro_bootstrap_NativeControl_heapReadField0},

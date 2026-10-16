@@ -11,6 +11,7 @@ final class HandleWriteBoundary {
     static List<String> targets() {return TARGETS;}
     private static final Set<String> INSTALLED=java.util.concurrent.ConcurrentHashMap.newKeySet();
     static boolean complete() {return INSTALLED.containsAll(TARGETS);}
+    static boolean installed(String name) {return INSTALLED.contains(name);}
     static int installedCount() {return INSTALLED.size();}
     private static List<String> createTargets() {
         List<String> names=new ArrayList<>(List.of("java/lang/invoke/MethodHandles","java/lang/invoke/MethodHandles$Lookup","java/lang/reflect/Method"));
@@ -20,6 +21,7 @@ final class HandleWriteBoundary {
     }
     static byte[] transform(ClassLoader loader,String name,byte[] bytes) {
         if(name==null||!targets().contains(name))return null;
+        INSTALLED.remove(name);
         ClassNode node=new ClassNode();new ClassReader(bytes).accept(node,0);boolean changed=false;
         for(MethodNode method:node.methods) {
             if(name.equals("java/lang/reflect/Method")&&method.name.equals("invoke")&&method.desc.equals("(Ljava/lang/Object;[Ljava/lang/Object;)Ljava/lang/Object;")) {

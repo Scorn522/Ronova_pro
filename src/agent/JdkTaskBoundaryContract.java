@@ -91,10 +91,6 @@ public final class JdkTaskBoundaryContract {
     public static boolean registered(String name){return name.equals(CF)||TARGETS.containsKey(name)||REFERENCE_IMAGES.contains(name)||completion(name);}
     public static void enable(){
         enabled=true;
-        // Optional reference adapters need both lock variants registered before
-        // the first probe. An absent optional class does not disable task capture.
-        for(String name:REFERENCE_IMAGES)try{Class.forName(name.replace('/','.'),false,null);}
-        catch(ClassNotFoundException|LinkageError|SecurityException unsupported) { /* Query remains unavailable. */ }
     }
     public static boolean enabled(){return enabled;}
     public static String platformImageHash(String name) {
@@ -166,6 +162,7 @@ public final class JdkTaskBoundaryContract {
                 instrumentWait(node,"waitingGet","(Z)Ljava/lang/Object;");instrumentWait(node,"timedGet","(J)Ljava/lang/Object;");
             }
             if(name.equals("java/util/concurrent/ForkJoinPool$WorkQueue"))instrumentOwnerQueue(node);
+            if(name.equals("java/util/concurrent/ForkJoinPool")||name.equals("java/util/concurrent/ForkJoinPool$WorkQueue"))instrumentQueueLocations(node);
             if(name.equals("java/util/concurrent/ForkJoinPool")) {
                 MethodNode idle=node.methods.stream().filter(m->m.name.equals("awaitWork")&&m.desc.equals("(Ljava/util/concurrent/ForkJoinPool$WorkQueue;)I")).findFirst().orElseThrow();
                 var parks=Arrays.stream(idle.instructions.toArray()).filter(i->i instanceof MethodInsnNode call
@@ -298,6 +295,88 @@ public final class JdkTaskBoundaryContract {
         hook.add(new FieldInsnNode(Opcodes.GETFIELD,owner,"owner","Ljava/util/concurrent/ForkJoinWorkerThread;"));
         hook.add(new MethodInsnNode(Opcodes.INVOKESTATIC,HOOK,"serviceOwnedQueue","(Ljava/lang/Object;Ljava/lang/Thread;)V",false));
         return hook;
+    }
+    /** Receipts surround only the certified ForkJoin queue mutations, including pool resize/registration. */
+    private static void instrumentQueueLocations(ClassNode node) {
+        String pool="java/util/concurrent/ForkJoinPool",queue=pool+"$WorkQueue";
+        boolean poolImage=node.name.equals(pool);
+        Set<String> observed=new HashSet<>();
+        for(MethodNode method:node.methods) {
+            if((method.access&(Opcodes.ACC_ABSTRACT|Opcodes.ACC_NATIVE))!=0)continue;
+            for(AbstractInsnNode instruction:method.instructions.toArray()) {
+                if(instruction.getOpcode()==Opcodes.AASTORE) {
+                    if(poolImage&&method.name.equals("contextWithPermissions")||!poolImage&&method.name.equals("initializeInnocuousWorker"))continue;
+                    if(poolImage&&!Set.of("registerWorker","deregisterWorker","submissionQueue").contains(method.name))
+                        throw new IllegalStateException("unregistered pool queue store: "+method.name);
+                    if(!poolImage&&!Set.of("lockedPush","growArray","tryRemove").contains(method.name))
+                        throw new IllegalStateException("unregistered task queue store: "+method.name);
+                    method.instructions.set(instruction,new MethodInsnNode(Opcodes.INVOKESTATIC,HOOK,
+                            poolImage?"forkPoolQueueStore":"forkQueueArrayStore","([Ljava/lang/Object;ILjava/lang/Object;)V",false));
+                    observed.add(method.name);
+                } else if(instruction instanceof MethodInsnNode call&&!poolImage&&call.owner.equals("java/lang/invoke/VarHandle")) {
+                    String hook=switch(method.name) {
+                        case "getAndClearSlot" -> call.name.equals("getAndSet")?"forkQueueGetAndClear":null;
+                        case "setSlotVolatile" -> call.name.equals("setVolatile")?"forkQueueSetVolatile":null;
+                        case "casSlotToNull" -> call.name.equals("compareAndSet")?"forkQueueCompareAndClear":null;
+                        default -> null;
+                    };
+                    if(hook!=null) {
+                        String tasks="[Ljava/util/concurrent/ForkJoinTask;",task="Ljava/util/concurrent/ForkJoinTask;";
+                        String actual=switch(hook) {
+                            case "forkQueueGetAndClear" -> "("+tasks+"ILjava/lang/Void;)"+task;
+                            case "forkQueueSetVolatile" -> "("+tasks+"I"+task+")V";
+                            default -> "("+tasks+"I"+task+"Ljava/lang/Void;)Z";
+                        };
+                        if(!call.desc.equals(actual))throw new IllegalStateException("unregistered queue cell ABI: "+method.name);
+                        String descriptor=switch(hook) {
+                            case "forkQueueGetAndClear" -> "(Ljava/lang/invoke/VarHandle;"+tasks+"ILjava/lang/Object;)"+task;
+                            case "forkQueueSetVolatile" -> "(Ljava/lang/invoke/VarHandle;"+tasks+"I"+task+")V";
+                            default -> "(Ljava/lang/invoke/VarHandle;"+tasks+"I"+task+"Ljava/lang/Object;)Z";
+                        };
+                        method.instructions.set(call,new MethodInsnNode(Opcodes.INVOKESTATIC,HOOK,hook,descriptor,false));
+                        observed.add(method.name);
+                    }
+                } else if(instruction instanceof FieldInsnNode field&&field.getOpcode()==Opcodes.PUTFIELD
+                        &&(field.owner.equals(pool)&&field.name.equals("queues")||field.owner.equals(queue)&&field.name.equals("array"))) {
+                    int receiver=method.maxLocals++,value=method.maxLocals++,token=method.maxLocals++;
+                    var before=new InsnList();before.add(new VarInsnNode(Opcodes.ASTORE,value));before.add(new VarInsnNode(Opcodes.ASTORE,receiver));
+                    before.add(new VarInsnNode(Opcodes.ALOAD,receiver));before.add(new InsnNode(field.owner.equals(pool)?Opcodes.ICONST_1:Opcodes.ICONST_0));
+                    before.add(new MethodInsnNode(Opcodes.INVOKESTATIC,HOOK,"forkQueueFieldBegin","(Ljava/lang/Object;Z)Ljava/lang/Object;",false));
+                    before.add(new VarInsnNode(Opcodes.ASTORE,token));before.add(new VarInsnNode(Opcodes.ALOAD,receiver));before.add(new VarInsnNode(Opcodes.ALOAD,value));
+                    method.instructions.insertBefore(field,before);
+                    var after=new InsnList();after.add(new VarInsnNode(Opcodes.ALOAD,token));after.add(new VarInsnNode(Opcodes.ALOAD,value));
+                    after.add(new MethodInsnNode(Opcodes.INVOKESTATIC,HOOK,"forkQueueFieldEnd","(Ljava/lang/Object;Ljava/lang/Object;)V",false));
+                    method.instructions.insert(field,after);
+                    observed.add(field.name);
+                }
+            }
+            if(!poolImage&&Set.of("growArray","tryRemove").contains(method.name))instrumentQueueTransition(method);
+        }
+        Set<String> required=poolImage?Set.of("registerWorker","deregisterWorker","submissionQueue","queues"):
+                Set.of("lockedPush","growArray","tryRemove","getAndClearSlot","setSlotVolatile","casSlotToNull","array");
+        if(!observed.containsAll(required))throw new IllegalStateException("queue mutation receipts unavailable");
+    }
+    private static void instrumentQueueTransition(MethodNode method) {
+        int token=method.maxLocals++,failure=method.maxLocals++;
+        Type result=Type.getReturnType(method.desc);int returned=method.maxLocals;method.maxLocals+=result.getSize();
+        var start=new LabelNode();var end=new LabelNode();var handler=new LabelNode();var normal=new LabelNode();
+        for(AbstractInsnNode instruction:method.instructions.toArray())if(instruction.getOpcode()>=Opcodes.IRETURN&&instruction.getOpcode()<=Opcodes.RETURN) {
+            var exit=new InsnList();if(result.getSort()!=Type.VOID)exit.add(new VarInsnNode(result.getOpcode(Opcodes.ISTORE),returned));
+            exit.add(new JumpInsnNode(Opcodes.GOTO,normal));method.instructions.insertBefore(instruction,exit);method.instructions.remove(instruction);
+        }
+        var entry=new InsnList();entry.add(new VarInsnNode(Opcodes.ALOAD,0));
+        entry.add(new MethodInsnNode(Opcodes.INVOKESTATIC,HOOK,"forkQueueTransitionBegin","(Ljava/lang/Object;)Ljava/lang/Object;",false));
+        entry.add(new VarInsnNode(Opcodes.ASTORE,token));entry.add(start);method.instructions.insert(entry);
+        method.instructions.add(end);method.instructions.add(handler);method.instructions.add(new VarInsnNode(Opcodes.ASTORE,failure));
+        method.instructions.add(queueTransitionExit(token,false));method.instructions.add(new VarInsnNode(Opcodes.ALOAD,failure));method.instructions.add(new InsnNode(Opcodes.ATHROW));
+        method.instructions.add(normal);method.instructions.add(queueTransitionExit(token,true));
+        if(result.getSort()!=Type.VOID)method.instructions.add(new VarInsnNode(result.getOpcode(Opcodes.ILOAD),returned));
+        method.instructions.add(new InsnNode(result.getSort()==Type.VOID?Opcodes.RETURN:result.getOpcode(Opcodes.IRETURN)));
+        method.tryCatchBlocks.add(new TryCatchBlockNode(start,end,handler,"java/lang/Throwable"));
+    }
+    private static InsnList queueTransitionExit(int token,boolean normal) {
+        var code=new InsnList();code.add(new VarInsnNode(Opcodes.ALOAD,token));code.add(new InsnNode(normal?Opcodes.ICONST_1:Opcodes.ICONST_0));
+        code.add(new MethodInsnNode(Opcodes.INVOKESTATIC,HOOK,"forkQueueTransitionEnd","(Ljava/lang/Object;Z)V",false));return code;
     }
     /** Observe the real stage call and its real return value; preserve the platform body and all exception handlers. */
     private static void instrumentInline(MethodNode method,InlineBoundary boundary) {

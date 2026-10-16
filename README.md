@@ -1,9 +1,10 @@
 # Ronova Pro
 
-主工程：`D:\桌面\ronova_GPT`。Java ABI93 / Native ABI84 / Storage3 / Journal6，客户端协议 `r3-client-8`。
+主工程：`D:\桌面\ronova_GPT`。Java ABI94 / Native ABI85 / Storage3 / Journal6，客户端协议 `r3-client-8`。
 Java 17；用户态 GNU C23 / GNU C++23；独立 Windows 驱动及管理工具 C17。
 停组先绑定所选返回策略，再发布停止入口并清理；同模式重复交接保留固定 UUID。Native Attach/GetEnv 的观察失败记录覆盖缺口，保留原成功结果、环境与异常，不以观察失败伪造 API 失败或回滚附件。普通任务回调保存真实根、直接来源、浅层回调引用及会被平台清空的瞬时操作数，来源图在有界 drain 中解析，policy 使用独立 tick/关闭预算；未解析关系暂缓结清，实际构造/发布前的来源判定仍同步执行。已定位丢失按任务、会话与注册代次保留，无法定位的丢失仍阻断全局结清。
-类加载按实际来源关系筛选，未命中保留轻量类头/引用及原字节供后续提升，不先建立完整执行图；来源发现与实际 loader/module 关联，失效的负缓存不再永久阻止发现。定义刷新失败保留续接与受影响来源，自动重试，成功才解除对应缺口。Native 未改写的自身类事件在跨 JNI 前返回；安装结果区分 FULL/DEGRADED/FAILED，只重试尚未发布或可独立恢复的阶段，不重复安装已发布的表与 Hook。物理调用点、递归栈深度和危险操作资格仍保留，普通执行栈只留当前/父帧与深度。构建与相关检查的实际结果见既有状态页。
+类加载按实际来源关系筛选，未命中保留轻量类头/引用及原字节供后续提升，不先建立完整执行图；来源发现与实际 loader/module 关联，失效的负缓存不再永久阻止发现。定义刷新失败保留续接与受影响来源，自动重试，成功才解除对应缺口。Native 未改写的自身类事件在跨 JNI 前返回；安装结果区分 FULL/DEGRADED/FAILED，只重试尚未发布或可独立恢复的阶段，不重复安装已发布的表与 Hook。构建与相关检查的实际结果见既有状态页。
+初装各目标组共用一次真实类快照，批量转换已加载目标，不强制加载可选任务/句柄类；晚加载按真实返回 image 和精确 ClassPrepare 认证，Native 恢复仅补未完成目标。热执行 hook 在已建立 watcher 时查询实际 JVMTI 方法/版本、BCI 和物理深度，失效 token 不回退授权；未建立 watcher 的普通方法保留真实栈遍历。ForkJoin 用池级存量采样、真实写入回执与准确任务位置索引，扩容、外部字段/数组写和旧 writer 帧未退出时不报缺席。能力快照只在安装 epoch 改变时重算；CF 弱链快照复用时仍读实际链头及每条 next，最终结清继续核对当前字段、队列、退出与 ACK。
 本版按用户选择删除旧 JDK 容器广谱 Hook：HashMap/Node/LinkedHashMap/Map、ArrayList 及其视图/迭代器、IdentityHashMap、ConcurrentHashMap、AtomicReference、CopyOnWriteArrayList 和 AbstractCollection 不再接旧变换、构造观察或操作追踪。保留 premain、Bootstrap、JVMTI/Native、线程/任务/类定义等根入口及明确的游戏/Fastutil 目标。普通容器方法写入、来源回填冻结与依赖这些作用域的清理暂时缺失，明确报告 JDK_CONTAINER_HOOKS_REMOVED；以下既有能力描述只在保留路径范围内成立，不能理解为 Native 已补齐被删防护。
 启动交接复用当前真实 Agent 状态，安装中与失败后的已有部分 hook 不重复安装；预启动仅报告准备完成，保存的停组目标与非默认返回策略按实际所选服务端世界读回。保护与禁疗共用准确当前对象、代次、身份和世界资格；吸收值、着火、自定义 setter 覆写与对应字段/Unsafe/JNI 写门接同一判定。
 自定义业务包装中的八种标准 SAM 调用沿当前真实方法、原指令与实际 callback/参数接续当前能力消费者；同步交接复用原调用的来源和返回关系。BiFunction/BiConsumer 的标准 andThen 接各原回调，保持原参数、中间结果、顺序和异常。未知具体类调用、反射/MH 与原生不透明路径继续保留边界。

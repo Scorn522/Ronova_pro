@@ -12,6 +12,17 @@ public final class RecoveryAgent {
     private static final StackWalker CALLER=StackWalker.getInstance(StackWalker.Option.RETAIN_CLASS_REFERENCE);
     private static JarFile bootstrap;
     private static final Set<String> installed=ConcurrentHashMap.newKeySet();
+    /** Returned Java images and their actual VM completion, never class names alone. */
+    private static final class PlatformImage {
+        private final Class<?> actual;
+        private final boolean valid,accepted;
+        PlatformImage(Class<?> actual,boolean valid,boolean accepted){this.actual=actual;this.valid=valid;this.accepted=accepted;}
+        Class<?> actual(){return actual;}
+        boolean valid(){return valid;}
+        boolean accepted(){return accepted;}
+    }
+    private static final Map<String,PlatformImage> platformImages=new ConcurrentHashMap<>();
+    private static final ThreadLocal<Map<String,PlatformImage>> platformReturns=ThreadLocal.withInitial(HashMap::new);
     /** True once the reflection field-write entry points carry the policy guard. */
     private static volatile boolean reflectionGuarded,unsafeGuarded;
     private static volatile boolean eventFaultGuarded;
@@ -28,6 +39,7 @@ public final class RecoveryAgent {
     private static volatile String controlFailure;
     private static volatile Path nativeBootstrapPath;
     private static volatile boolean javaTransformersPublished,javaInstallationFinished;
+    private static volatile boolean platformPreparationTracked;
     private static final Map<Class<?>,String> definitions=Collections.synchronizedMap(new WeakHashMap<>());
     private static final Set<Class<?>> watching=Collections.newSetFromMap(new WeakHashMap<>());
     private static final ThreadLocal<Class<?>> externalPromotion=new ThreadLocal<>();
@@ -55,15 +67,19 @@ public final class RecoveryAgent {
     }
     private static synchronized void start(String argument,Instrumentation api,String mode) {
         if(!installState.equals("NOT_ATTEMPTED")) {
-            if(!nativeRetryable()){report("AGENT_EXISTING_STATE:"+installState());return;}
+            boolean retryNative=nativeRetryable();
+            boolean retryPlatform=javaTransformersPublished&&javaInstallationFinished&&"FULL".equals(nativeInstallMode())
+                    &&(!platformPreparationTracked||platformImages.values().stream().anyMatch(image->!image.accepted()));
+            if(!retryNative&&!retryPlatform){report("AGENT_EXISTING_STATE:"+installState());return;}
             if(javaTransformersPublished){
                 // The Native handoff can resume only its documented safe
                 // phase. An existing Java chain is never installed twice.
                 try{
                     Class<?> nativeControl=Class.forName("dev.ronova.pro.bootstrap.NativeControl",false,null);
-                    report(String.valueOf(nativeControl.getMethod("install",Path.class).invoke(null,nativeBootstrapPath)));
+                    if(retryNative)report(String.valueOf(nativeControl.getMethod("install",Path.class).invoke(null,nativeBootstrapPath)));
+                    if(javaInstallationFinished&&"FULL".equals(nativeInstallMode()))resumePlatformBoundaries(nativeControl);
                     installState=installationComplete()?"INSTALLED_FULL":"INSTALLED_PARTIAL:NATIVE_RETRY_JAVA_CHAIN_RETAINED";
-                }catch(ReflectiveOperationException|RuntimeException|LinkageError unavailable){report("AGENT_NATIVE_RETRY_UNAVAILABLE:"+unavailable.getClass().getSimpleName());}
+                }catch(ReflectiveOperationException|UnmodifiableClassException|RuntimeException|LinkageError unavailable){report("AGENT_NATIVE_RETRY_UNAVAILABLE:"+unavailable.getClass().getSimpleName());}
                 report("AGENT_EXISTING_STATE:"+installState());return;
             }
             // No transformer was published: a safe Native prepublication
@@ -105,7 +121,7 @@ public final class RecoveryAgent {
         String failure=controlFailure;
         if(failure!=null)return actual.startsWith("INSTALLING:")?actual+":TRANSFORM_FAILED:"+failure:"INSTALLED_PARTIAL:TRANSFORM_FAILED:"+failure;
         if(actual.equals("INSTALLED_FULL")&&!installationComplete())return "INSTALLED_PARTIAL:CURRENT_BOUNDARY_UNAVAILABLE:NATIVE="+nativeInstallMode();
-        if(actual.startsWith("INSTALLED_PARTIAL"))return actual+":NATIVE="+nativeInstallMode()+":NATIVE_RETRYABLE="+nativeRetryable();
+        if(actual.startsWith("INSTALLED_PARTIAL"))return installationComplete()?"INSTALLED_FULL":actual+":NATIVE="+nativeInstallMode()+":NATIVE_RETRYABLE="+nativeRetryable();
         return actual;
     }
     private static String nativeInstallMode(){
@@ -120,14 +136,14 @@ public final class RecoveryAgent {
     }
     private static boolean installationComplete() {
         try {
-            return javaInstallationFinished&&"FULL".equals(nativeInstallMode())&&installed.containsAll(JdkTaskBoundaryContract.targets())&&reflectionGuarded&&unsafeGuarded
-                    &&HandleWriteBoundary.complete()&&BackingBoundary.coreInstalled()&&controlReady();
+            return javaInstallationFinished&&platformPreparationTracked&&"FULL".equals(nativeInstallMode())&&platformImages.values().stream().allMatch(PlatformImage::accepted)
+                    &&reflectionGuarded&&unsafeGuarded&&controlReady();
         } catch(RuntimeException|LinkageError unavailable) { return false; }
     }
     public static String sourceMapState() { return "REMOVED:JDK_CONTAINER_HOOKS_UNAVAILABLE"; }
     public static String sourcePublicationState(){return "UNAVAILABLE:JDK_CONTAINER_HOOKS_REMOVED";}
     /** Remaining exact field writers; this does not certify ordinary JDK collection mutations. */
-    public static String sourceFieldState(){return reflectionGuarded&&unsafeGuarded&&HandleWriteBoundary.complete()
+    public static String sourceFieldState(){return reflectionGuarded&&unsafeGuarded&&loadedHandleBoundariesReady()
             &&installState().equals("INSTALLED_FULL")?"INSTALLED":"SOURCE_FIELD_SCOPE_UNAVAILABLE";}
     private static volatile String installState="NOT_ATTEMPTED";
     private static synchronized void install(String argument,Instrumentation api) throws Exception {
@@ -139,7 +155,7 @@ public final class RecoveryAgent {
             bootstrap=new JarFile(nativeBootstrapPath.toFile());
             api.appendToBootstrapClassLoaderSearch(bootstrap);
             bridge=Class.forName("dev.ronova.pro.bootstrap.TaskBridge",true,null);
-            if(!Integer.valueOf(93).equals(bridge.getMethod("abiVersion").invoke(null)))throw new IllegalStateException("TASK_BRIDGE_ABI_MISMATCH");
+            if(!Integer.valueOf(94).equals(bridge.getMethod("abiVersion").invoke(null)))throw new IllegalStateException("TASK_BRIDGE_ABI_MISMATCH");
             // This classfile was first requested beneath a stopped empty-stream return.
             Class.forName("java.util.stream.IntPipeline$Head",false,null);
             for(String helper:List.of("SourcePublication","SourceIndexMutation","FastListView","FieldMutation","EquipmentInvocations"))
@@ -171,7 +187,7 @@ public final class RecoveryAgent {
             Class.forName("dev.ronova.pro.bootstrap.ControlBridge$ProducerFrame",false,null);
             Class.forName("dev.ronova.pro.bootstrap.EventFaultBridge",true,null);
             Class<?> control=Class.forName("dev.ronova.pro.bootstrap.ControlBridge",true,null);
-            if(!Integer.valueOf(93).equals(control.getMethod("abiVersion").invoke(null)))throw new IllegalStateException("CONTROL_BRIDGE_ABI_MISMATCH");
+            if(!Integer.valueOf(94).equals(control.getMethod("abiVersion").invoke(null)))throw new IllegalStateException("CONTROL_BRIDGE_ABI_MISMATCH");
             Module base=Object.class.getModule(),ours=RecoveryAgent.class.getModule();
             api.redefineModule(base,Set.of(bridge.getModule()),Map.of(
                     "jdk.internal.org.objectweb.asm",Set.of(ours),"jdk.internal.org.objectweb.asm.commons",Set.of(ours),
@@ -205,8 +221,10 @@ public final class RecoveryAgent {
             ClassFileTransformer taskTransformer=new ClassFileTransformer() {
                 @Override public byte[] transform(Module module,ClassLoader loader,String name,Class<?> type,
                         ProtectionDomain domain,byte[] bytes) {
-                    if(loader!=null||module!=base||!JdkTaskBoundaryContract.registered(name))return null;
+                    if(loader!=null||module!=base||name==null||!JdkTaskBoundaryContract.registered(name))return null;
+                    platformTransforming(loader,name,type);
                     boundary(name,false);
+                    installed.remove(name);
                     byte[] transformed=JdkTaskBoundaryContract.transform(name,bytes);
                     boolean valid=JdkTaskBoundaryContract.verify(name,transformed==null?bytes:transformed);
                     if(valid)installed.add(name);else { installed.remove(name);report("PLATFORM_IMAGE_CHANGED:"+name); }
@@ -221,6 +239,7 @@ public final class RecoveryAgent {
                     // implementation is not an external definition to be taken over.
                     if(module==ours&&loader==RecoveryAgent.class.getClassLoader()&&domain!=null
                             &&java.util.Objects.equals(domain.getCodeSource(),RecoveryAgent.class.getProtectionDomain().getCodeSource()))return null;
+                    if(name==null||!JdkTaskBoundaryContract.registered(name))platformTransforming(loader,name,type);
                     Module origin=definitionOrigin(type,loader,name),declaration=origin==null?module:origin;
                     boolean producer=producerModule(declaration),watched=watchedDefinition(type);
                     boolean recorded=ExternalCodeImages.recorded(loader,name);
@@ -231,7 +250,7 @@ public final class RecoveryAgent {
                     boolean control=controlImages.critical(module,loader,name,type);
                     boolean contract=contractCandidate(loader,name,type,references);
                     boolean candidate=sourceCandidate||control||contract||boundaryCandidate(loader,name,bytes);
-                    if(!candidate){ExternalCodeDefinitions.referenceOnly(loader,name,type,declaration,bytes,bytes,references);return null;}
+                    if(!candidate){ExternalCodeDefinitions.referenceOnly(loader,name,type,declaration,bytes,bytes,references);platformReturned(loader,name,type,null);return null;}
                     try {
                     if(origin!=null&&module!=null&&!module.canRead(bridge.getModule()))
                         api.redefineModule(module,Set.of(bridge.getModule()),Map.of(),Map.of(),Set.of(),Map.of());
@@ -243,8 +262,10 @@ public final class RecoveryAgent {
                     if(origin!=null)result=DefinitionBoundary.generated(loader,result,true);
                     if(source!=null&&(source.present()||source.image()!=null))result=ExternalCodeRuntime.finish(loader,name,type,source,result);
                     else ExternalCodeDefinitions.referenceOnly(loader,name,type,declaration,result,input,references==null?ExternalCodeDefinitions.references(name,input):references);
-                    recordDefinition(type,result==null?bytes:result);return result;
+                    recordDefinition(type,result==null?bytes:result);
+                    platformReturned(loader,name,type,result==null?bytes:result);return result;
                     }catch(RuntimeException|LinkageError failure){
+                        platformReturned(loader,name,type,null);
                         if(controlFailure==null){
                             controlFailure=String.valueOf(name)+":"+failure.getClass().getSimpleName()+":"+String.valueOf(failure.getMessage());
                             System.err.println("RONOVA_CONTROL_TRANSFORM_FAILED:"+controlFailure);
@@ -315,9 +336,8 @@ public final class RecoveryAgent {
                     }
                     if(name!=null&&name.startsWith("net/minecraftforge/fml/loading/")&&!producerModule(module))return null;
                     if(loader==null&&"java/lang/Thread".equals(name)){
-                        boundary(name,false);return ThreadBoundary.transform(loader,name,bytes);
+                        return ThreadBoundary.transform(loader,name,bytes);
                     }
-                    if("java/util/Timer".equals(name)||"java/util/TimerThread".equals(name))boundary(name,false);
                     byte[] defining=DefinitionBoundary.platform(loader,name,bytes);
                     if(defining!=null){byte[] handle=HandleWriteBoundary.transform(loader,name,defining);return handle==null?defining:handle;}
                     byte[] eventBus=EventBusBoundary.transform(name,bytes);
@@ -453,96 +473,76 @@ public final class RecoveryAgent {
             codeSourceBridge.getMethod("install",Class.class).invoke(null,RecoveryAgent.class);
             imageControlReader=codeSourceBridge.getMethod("imageControlFields",Object[].class,java.lang.reflect.Field[][].class);
             ControlImages.protect(imageControlReader);
-            Set<ModuleLayer> sourceLayers=Collections.newSetFromMap(new IdentityHashMap<>());
-            for(Class<?> loaded:loadedClasses())if(loaded.getModule().getLayer()!=null)sourceLayers.add(loaded.getModule().getLayer());
-            for(ModuleLayer layer:sourceLayers)codeSourceBridge.getMethod("seedLayer",ModuleLayer.class).invoke(null,layer);
             bridge.getMethod("prepareThreadBoundary").invoke(null);
-            Set<String> characterWrappers=ResourceBoundary.CHARACTER_WRAPPERS;
+            Set<String> futureTasks=futureTaskBoundaries();
+            platformPreparationTracked=preparePlatformBoundaries(nativeControl,futureTasks);
             api.addTransformer(controlImages,true);
             api.addTransformer(taskTransformer,true);
             api.addTransformer(objectTransformer,true);
-            for(String wrapper:characterWrappers)api.retransformClasses(Class.forName(wrapper.replace('/','.'),false,null));
-            api.retransformClasses(ModuleLayer.class,ClassLoader.class,Thread.class,java.lang.invoke.MethodHandles.class,java.lang.invoke.MethodHandles.Lookup.class,java.lang.ref.Reference.class,java.util.Optional.class,
-                    java.util.function.Function.class,java.util.function.Consumer.class,java.util.function.Predicate.class,java.util.function.Supplier.class,java.util.function.BiFunction.class,java.util.function.BiConsumer.class,
-                    java.util.Timer.class,Class.forName("java.util.TimerThread",false,null),java.io.FileDescriptor.class,
-                    java.io.FileInputStream.class,java.io.FileOutputStream.class,java.io.RandomAccessFile.class,
-                    java.nio.channels.spi.AbstractInterruptibleChannel.class,Class.forName("sun.nio.ch.FileChannelImpl",false,null),
-                    Class.forName("java.lang.ProcessImpl",false,null),java.net.URL.class,java.io.InputStreamReader.class,
-                    Class.forName("jdk.internal.loader.NativeLibraries$NativeLibraryImpl",false,null),
-                    Class.forName("jdk.internal.loader.NativeLibraries$Unloader",false,null));
-            try{api.retransformClasses(Class.forName("sun.nio.fs.WindowsChannelFactory",false,null));}
-            catch(ClassNotFoundException absent){report("WINDOWS_FILE_FACTORY_UNAVAILABLE_ON_CURRENT_JDK");}
-            Class.forName("dev.ronova.pro.bootstrap.NativeControl",false,null).getMethod("libraryBoundaryInstalled").invoke(null);
-            Class.forName("dev.ronova.pro.bootstrap.NativeControl",false,null).getMethod("processBoundaryInstalled").invoke(null);
-            report(String.valueOf(Class.forName("dev.ronova.pro.bootstrap.NativeControl",false,null).getMethod("threadBoundaryInstalled").invoke(null)));
-            for(Class<?> loaded:loadedClasses())if(loaded.getClassLoader()==null&&BufferBoundary.TARGETS.contains(loaded.getName().replace('.','/'))&&api.isModifiableClass(loaded))api.retransformClasses(loaded);
-            for(Class<?> loaded:loadedClasses())if(loaded.getClassLoader()==null&&IoBoundary.TARGETS.contains(loaded.getName().replace('.','/'))&&api.isModifiableClass(loaded))api.retransformClasses(loaded);
-            report(String.valueOf(Class.forName("dev.ronova.pro.bootstrap.NativeControl",false,null).getMethod("fileBoundaryInstalled").invoke(null)));
-            if(ThreadBoundary.installed())boundary("java/lang/Thread",true);
-            for(String timer:List.of("java/util/Timer","java/util/TimerThread"))if(TimerBoundary.installed(timer))boundary(timer,true);
-            for(Class<?> loaded:loadedClasses())
-                if((loaded.getName().replace('.','/').equals(CommandBoundary.TARGET)
-                        ||loaded.getClassLoader()!=null&&(CodeSourceBoundary.TARGETS.contains(loaded.getName().replace('.','/'))||NetworkBoundary.TARGETS.contains(loaded.getName().replace('.','/'))||ClientBoundary.TARGETS.contains(loaded.getName().replace('.','/'))||BufferBoundary.wrapTarget(loaded.getName().replace('.','/')))&&!producerModule(loaded.getModule()))
-                        &&api.isModifiableClass(loaded))
-                    api.retransformClasses(loaded);
-            Class<?> manager=Class.forName("sun.instrument.TransformerManager",false,null);
-            api.retransformClasses(manager,api.getClass());
+            // Publish future-load coverage first. One real snapshot then closes every
+            // class already present; classes racing after it use the same transformers.
+            Class<?>[] startup=loadedClasses();
+            Set<ModuleLayer> sourceLayers=Collections.newSetFromMap(new IdentityHashMap<>());
+            List<Class<?>> platform=new ArrayList<>(),sources=new ArrayList<>(),instrumentationClasses=new ArrayList<>(),
+                    controls=new ArrayList<>(),tasks=new ArrayList<>(),writers=new ArrayList<>(),indices=new ArrayList<>(),
+                    consoles=new ArrayList<>(),events=new ArrayList<>();
+            for(Class<?> loaded:startup){
+                ModuleLayer layer=loaded.getModule().getLayer();if(layer!=null)sourceLayers.add(layer);
+                if(loaded.isArray()||loaded.isPrimitive())continue;
+                String name=loaded.getName().replace('.','/');ClassLoader loader=loaded.getClassLoader();
+                if(platformGuardTarget(loader,name)){
+                    PlatformImage observed=platformImages.putIfAbsent(name,new PlatformImage(loaded,false,false));
+                    if(taskReadinessTarget(loader,name)&&(observed==null||!observed.accepted()))boundary(name,false);
+                }
+                if(!api.isModifiableClass(loaded)){
+                    if(loader==null&&JdkTaskBoundaryContract.registered(name))throw new IllegalStateException("UNMODIFIABLE_BOUNDARY:"+name);
+                    if(name.equals(ConsoleBoundary.TARGET))ConsoleBoundary.unavailable("UNMODIFIABLE");
+                    continue;
+                }
+                if(loader==null&&(name.equals(InstrumentationBoundary.MANAGER)||name.equals(InstrumentationBoundary.API)))instrumentationClasses.add(loaded);
+                else if(name.startsWith("dev/ronova/pro/agent/")||name.startsWith("dev/ronova/pro/bootstrap/"))controls.add(loaded);
+                else if(loader==null&&JdkTaskBoundaryContract.registered(name))tasks.add(loaded);
+                else if(name.equals("java/lang/reflect/Field")||name.equals("sun/misc/Unsafe")||name.equals("jdk/internal/misc/Unsafe")
+                        ||HandleWriteBoundary.targets().contains(name)&&!name.equals("java/lang/invoke/MethodHandles")&&!name.equals("java/lang/invoke/MethodHandles$Lookup"))writers.add(loaded);
+                else if(loader==null&&startupPlatformTarget(name))platform.add(loaded);
+                else if(name.equals(CommandBoundary.TARGET)||loader!=null&&!producerModule(loaded.getModule())
+                        &&(CodeSourceBoundary.TARGETS.contains(name)||NetworkBoundary.TARGETS.contains(name)||ClientBoundary.TARGETS.contains(name)||BufferBoundary.wrapTarget(name)))sources.add(loaded);
+                else if(FastutilIndexBoundary.targets().contains(name)||SectionKeyBoundary.targets().contains(name))indices.add(loaded);
+                else if(name.equals(ConsoleBoundary.TARGET))consoles.add(loaded);
+                else if(name.equals(EventFaultBoundary.TARGET))events.add(loaded);
+            }
+            bridge.getMethod("boundaryFutureTargets",String[].class).invoke(null,(Object)futureTasks.toArray(String[]::new));
+            for(ModuleLayer layer:sourceLayers)codeSourceBridge.getMethod("seedLayer",ModuleLayer.class).invoke(null,layer);
+            retransformStartup(api,platform,"PLATFORM",true);
+            nativeControl.getMethod("libraryBoundaryInstalled").invoke(null);
+            nativeControl.getMethod("processBoundaryInstalled").invoke(null);
+            report(String.valueOf(nativeControl.getMethod("threadBoundaryInstalled").invoke(null)));
+            report(String.valueOf(nativeControl.getMethod("fileBoundaryInstalled").invoke(null)));
+            retransformStartup(api,sources,"SOURCE_BOUNDARIES",true);
+            retransformStartup(api,instrumentationClasses,"INSTRUMENTATION",true);
             protectInstrumentation(api);
             control.getMethod("installed").invoke(null);
             ExternalCodeDefinitions.start(api);
             // The agent/bridge were loaded before our transformer, so seed their actual images once.
-            for(Class<?> loaded:loadedClasses())if((loaded.getName().startsWith("dev.ronova.pro.agent.")
-                    ||loaded.getName().startsWith("dev.ronova.pro.bootstrap."))&&api.isModifiableClass(loaded))api.retransformClasses(loaded);
+            retransformStartup(api,controls,"CONTROL_IMAGES",true);
             report("INSTRUMENTATION_REMOVAL_AND_PUBLICATION_GUARD:"+controlReady());
-            for(String name:JdkTaskBoundaryContract.certificationTargets()) {
-                Class<?> type=Class.forName(name.replace('/','.'),false,null);
-                if(!api.isModifiableClass(type))throw new IllegalStateException("UNMODIFIABLE_BOUNDARY:"+name);
-                api.retransformClasses(type);
-                if(installed.contains(name))boundary(name,true);
-            }
-            try {
-                for(String target:HandleWriteBoundary.targets()) {Class<?> type=Class.forName(target.replace('/','.'),false,null);if(api.isModifiableClass(type))api.retransformClasses(type);}
-            } catch(ClassNotFoundException|UnmodifiableClassException|RuntimeException|LinkageError unavailable) {
-                report("HANDLE_FACTORY_RETRANSFORM_UNAVAILABLE:"+unavailable.getClass().getSimpleName());
-            }
+            retransformStartup(api,tasks,"TASK_BOUNDARIES",true);
             report(indexGuardState());
             report(sourceMapState());
             report(sourcePublicationState());
-            installIndexBoundaries();
-            for(Class<?> type:loadedClasses())if(type.getName().replace('.','/').equals(ConsoleBoundary.TARGET)) {
-                try {
-                    if(api.isModifiableClass(type))api.retransformClasses(type);
-                    else ConsoleBoundary.unavailable("UNMODIFIABLE");
-                }
-                catch(UnmodifiableClassException|RuntimeException|LinkageError failure) {
-                    ConsoleBoundary.unavailable(failure.getClass().getSimpleName());
-                    report("CONSOLE_BOUNDARY_UNAVAILABLE:"+failure.getClass().getSimpleName());
-                }
-            }
+            retransformStartup(api,indices,"FASTUTIL_INDEX",false);
+            retransformStartup(api,consoles,"CONSOLE_BOUNDARY",false);
             report("CONSOLE_BOUNDARY:"+ConsoleBoundary.state());
-            // Reflection Field is loaded long before an attach-time install, so its guard must be applied by an
-            // explicit retransformation here; the transformer alone only covers classes that load later.
-            try {
-                Class<?> field=Class.forName("java.lang.reflect.Field",false,null);
-                if(api.isModifiableClass(field)) { api.retransformClasses(field);reflectionGuarded=ReflectionWriteBoundary.guardedCount()==9; }
-            } catch(ClassNotFoundException|RuntimeException|LinkageError|UnmodifiableClassException unavailable) {
-                report("REFLECTION_FIELD_GUARD_RETRANSFORM_UNAVAILABLE:"+unavailable.getClass().getSimpleName());
-            }
+            // Field/Unsafe and the already-used handle variants need the real loaded
+            // bodies. Unused variants are woven when first defined, without forcing them.
+            retransformStartup(api,writers,"FIELD_AND_HANDLE_GUARDS",false);
             report(ReflectionWriteBoundary.state());
-            try {
-                Class<?> unsafe=Class.forName("sun.misc.Unsafe",false,ClassLoader.getPlatformClassLoader());
-                if(api.isModifiableClass(unsafe)) { api.retransformClasses(unsafe);unsafeGuarded=UnsafeWriteBoundary.entries()==31; }
-                Class<?> internalUnsafe=Class.forName("jdk.internal.misc.Unsafe",false,null);
-                if(api.isModifiableClass(internalUnsafe))api.retransformClasses(internalUnsafe);
-            } catch(ClassNotFoundException|UnmodifiableClassException|RuntimeException|LinkageError failure) {
-                report("UNSAFE_GUARD_UNAVAILABLE:"+failure.getClass().getSimpleName());
-            }
             report("UNSAFE_OBJECT_PUT_CAS_ATOMIC_OBJECT_BULK:"+unsafeGuarded+":UNOBSERVED_RAW_NATIVE_AND_UNWOVEN_COMPILER_INTRINSIC_WRITERS_UNSUPPORTED");
-            report("EXECUTOR_RELEASE_BOUNDARY:"+BackingBoundary.coreInstalled()+":JDK_CONTAINER_HOOKS:REMOVED:HANDLE_FACTORIES:"+HandleWriteBoundary.installedCount()+"/"+HandleWriteBoundary.targets().size());
-            DispatchBoundary.retransformDeclared(api);
-            for(Class<?> type:loadedClasses())if(type.getName().replace('.','/').equals(EventFaultBoundary.TARGET)) {
+            report("EXECUTOR_RELEASE_BOUNDARY:"+loadedExecutorBoundariesReady()+":JDK_CONTAINER_HOOKS:REMOVED:HANDLE_FACTORIES:"+HandleWriteBoundary.installedCount()+"/"+HandleWriteBoundary.targets().size());
+            DispatchBoundary.retransformDeclared(api,startup);
+            for(Class<?> type:events) {
                 try {
-                    Class.forName("dev.ronova.pro.bootstrap.ControlBridge",false,null).getMethod("installEventBoundary",Class.class).invoke(null,type);
+                    control.getMethod("installEventBoundary",Class.class).invoke(null,type);
                     eventFaultGuarded=false;api.retransformClasses(type);
                 }
                 catch(ReflectiveOperationException failure){throw new IllegalStateException("EVENT_CONTROL_BINDING",failure);}
@@ -551,12 +551,132 @@ public final class RecoveryAgent {
                 }
             }
             report("CLIENT_FAULT_DISPATCH:"+eventFaultGuarded);
-            report(installed.containsAll(JdkTaskBoundaryContract.targets())?
+            report(loadedTaskBoundariesReady()?
                     "JDK_FUTURE_WORKER_SCHEDULED_FORKJOIN_CF_DEFERRED_AND_STAGE_INVOCATIONS":"PARTIAL_TASK_BOUNDARIES");
             if(!NativeBindingBoundary.observedBindings().isEmpty())
                 report("NATIVE_ENTRIES_OBSERVED:"+NativeBindingBoundary.observedBindings().size()
                         +":"+NativeBindingBoundary.backendState());
             javaInstallationFinished=true;
+    }
+    private static Set<String> futureTaskBoundaries(){
+        Set<String> names=new HashSet<>(JdkTaskBoundaryContract.certificationTargets());
+        Collections.addAll(names,"java/lang/Thread","java/util/Timer","java/util/TimerThread");return names;
+    }
+    private static boolean preparePlatformBoundaries(Class<?> nativeControl,Set<String> futureTasks)throws ReflectiveOperationException{
+        Set<String> names=new HashSet<>(futureTasks);names.addAll(HandleWriteBoundary.targets());names.add("java/lang/reflect/Field");
+        return Boolean.TRUE.equals(nativeControl.getMethod("platformPrepareTargets",String[].class).invoke(null,(Object)names.toArray(String[]::new)));
+    }
+    /** Resume only the old chain's pending classes after a Native-degraded install. */
+    private static void resumePlatformBoundaries(Class<?> nativeControl)throws ReflectiveOperationException,UnmodifiableClassException{
+        platformPreparationTracked=preparePlatformBoundaries(nativeControl,futureTaskBoundaries());
+        if(!platformPreparationTracked)return;
+        Instrumentation api=instrumentation;if(api==null)return;
+        List<Class<?>> pending=new ArrayList<>();
+        for(Class<?> actual:loadedClasses()){
+            String name=actual.getName().replace('.','/');
+            if(!platformGuardTarget(actual.getClassLoader(),name))continue;
+            PlatformImage image=platformImages.get(name);
+            if(image!=null&&!image.accepted()&&api.isModifiableClass(actual))pending.add(actual);
+        }
+        retransformStartup(api,pending,"NATIVE_RETRY_PLATFORM",true);
+    }
+    private static boolean taskReadinessTarget(ClassLoader loader,String name){
+        return loader==null&&(JdkTaskBoundaryContract.registered(name)||name.equals("java/lang/Thread")
+                ||name.equals("java/util/Timer")||name.equals("java/util/TimerThread"));
+    }
+    private static boolean platformGuardTarget(ClassLoader loader,String name){
+        if(name==null)return false;
+        return loader==null&&(taskReadinessTarget(loader,name)||HandleWriteBoundary.targets().contains(name)
+                ||name.equals("java/lang/reflect/Field"))
+                ||name.equals("sun/misc/Unsafe")&&(loader==null||loader==ClassLoader.getPlatformClassLoader());
+    }
+    private static boolean startupPlatformTarget(String name){
+        return ResourceBoundary.CHARACTER_WRAPPERS.contains(name)||ResourceBoundary.TARGETS.contains(name)
+                ||BufferBoundary.TARGETS.contains(name)||IoBoundary.TARGETS.contains(name)||NativeLibraryBoundary.TARGETS.contains(name)
+                ||CodeSourceBoundary.TARGETS.contains(name)||EquipmentFunctionBoundary.target(name)
+                ||Set.of("java/lang/ClassLoader","java/lang/Thread","java/lang/ref/Reference","java/util/Optional",
+                    "java/util/Timer","java/util/TimerThread","java/lang/invoke/MethodHandles","java/lang/invoke/MethodHandles$Lookup").contains(name);
+    }
+    private static void platformTransforming(ClassLoader loader,String name,Class<?> actual){
+        if(!platformGuardTarget(loader,name))return;
+        platformImages.put(name,new PlatformImage(actual,false,false));platformReturns.get().remove(name);
+        if(name.equals("java/lang/reflect/Field"))reflectionGuarded=false;
+        if(name.equals("sun/misc/Unsafe"))unsafeGuarded=false;
+        if(loader==null&&(name.equals("java/lang/Thread")||name.equals("java/util/Timer")||name.equals("java/util/TimerThread")))boundary(name,false);
+    }
+    /** This receipt describes only the image our last Java transformer actually returned. */
+    private static void platformReturned(ClassLoader loader,String name,Class<?> actual,byte[] returned){
+        if(!platformGuardTarget(loader,name))return;
+        boolean valid=returned!=null&&returned.length>=4&&returned[0]==(byte)0xca&&returned[1]==(byte)0xfe
+                &&returned[2]==(byte)0xba&&returned[3]==(byte)0xbe;
+        if(valid){
+            if(loader==null&&JdkTaskBoundaryContract.registered(name))valid=installed.contains(name)
+                    &&(!name.equals("java/util/concurrent/ThreadPoolExecutor")&&!name.equals("java/util/concurrent/ScheduledThreadPoolExecutor")||BackingBoundary.installed(name));
+            else if(HandleWriteBoundary.targets().contains(name))valid=HandleWriteBoundary.installed(name);
+            else if(name.equals("java/lang/Thread"))valid=ThreadBoundary.installed();
+            else if(name.equals("java/util/Timer")||name.equals("java/util/TimerThread"))valid=TimerBoundary.installed(name);
+            else if(name.equals("java/lang/reflect/Field"))valid=ReflectionWriteBoundary.guardedCount()==9;
+            else if(name.equals("sun/misc/Unsafe"))valid=UnsafeWriteBoundary.entries()==31;
+        }
+        PlatformImage image=new PlatformImage(actual,valid,false);
+        platformImages.put(name,image);platformReturns.get().put(name,image);
+    }
+    /** A successful API return or exact ClassPrepare consumes this thread's returned-image receipt. */
+    private static void platformAccepted(Class<?> actual){
+        if(actual==null)return;String name=actual.getName().replace('.','/');ClassLoader loader=actual.getClassLoader();
+        if(!platformGuardTarget(loader,name))return;
+        PlatformImage returned=platformReturns.get().remove(name);
+        // ClassPrepare can run on another thread after a load returned. Only a
+        // first-definition receipt may cross threads: this exact platform loader
+        // and name can define one Class, and an unprepared class cannot be
+        // retransformed. A retransform receipt always needs its own API thread.
+        if(returned==null){
+            PlatformImage initial=platformImages.get(name);
+            if(initial!=null&&initial.actual()==null)returned=initial;
+        }
+        if(returned==null||!returned.valid()||returned.actual()!=null&&returned.actual()!=actual)return;
+        PlatformImage accepted=new PlatformImage(actual,true,true);
+        if(!platformImages.replace(name,returned,accepted))return;
+        if(name.equals("java/lang/reflect/Field"))reflectionGuarded=true;
+        if(name.equals("sun/misc/Unsafe"))unsafeGuarded=true;
+        if(taskReadinessTarget(loader,name))boundary(name,true);
+    }
+    private static boolean loadedTaskBoundariesReady(){
+        for(var entry:platformImages.entrySet())if(JdkTaskBoundaryContract.registered(entry.getKey())&&!entry.getValue().accepted())return false;
+        return true;
+    }
+    private static boolean loadedHandleBoundariesReady(){
+        for(String name:HandleWriteBoundary.targets()){
+            PlatformImage image=platformImages.get(name);if(image!=null&&!image.accepted())return false;
+        }return true;
+    }
+    private static boolean loadedExecutorBoundariesReady(){
+        for(String name:List.of("java/util/concurrent/ThreadPoolExecutor","java/util/concurrent/ScheduledThreadPoolExecutor")){
+            PlatformImage image=platformImages.get(name);if(image!=null&&!image.accepted())return false;
+        }return true;
+    }
+    private static void platformRejected(Class<?> actual){
+        String name=actual.getName().replace('.','/');if(!platformGuardTarget(actual.getClassLoader(),name))return;
+        PlatformImage returned=platformReturns.get().remove(name);
+        if(returned!=null)platformImages.replace(name,returned,new PlatformImage(actual,false,false));
+    }
+    private static void retransformStartup(Instrumentation api,List<Class<?>> targets,String phase,boolean required)throws UnmodifiableClassException{
+        if(targets.isEmpty())return;
+        Class<?>[] actuals=targets.toArray(Class<?>[]::new);
+        try{
+            api.retransformClasses(actuals);for(Class<?> actual:actuals)platformAccepted(actual);
+        }catch(UnmodifiableClassException|RuntimeException|LinkageError failure){
+            for(Class<?> actual:actuals)platformRejected(actual);
+            if(required)throw failure;
+            // A rejected batch installs none of its images. Isolate only that real
+            // failure so the other already-loaded targets still receive their guards.
+            if(actuals.length>1){
+                for(Class<?> actual:actuals)retransformStartup(api,List.of(actual),phase,false);
+            }else{
+                if(actuals[0].getName().replace('.','/').equals(ConsoleBoundary.TARGET))ConsoleBoundary.unavailable(failure.getClass().getSimpleName());
+                report(phase+"_RETRANSFORM_UNAVAILABLE:"+actuals[0].getName()+":"+failure.getClass().getSimpleName());
+            }
+        }
     }
     /** The honest native backend state for callers that report capability. */
     public static String nativeBindingState() {
@@ -807,12 +927,12 @@ public final class RecoveryAgent {
     public static Module[] externalMixinSelection(Object tree,Module origin,Module[] contributors){requireCodeSourceCaller();return ExternalCodeImages.mixinSelection(tree,origin,contributors);}
     public static Map<String,Module[]> externalMixinMetadata(Object tree,Module origin,Module[] contributors){requireCodeSourceCaller();return ExternalCodeImages.mixinMetadata(tree,origin,contributors);}
     public static Object[] externalMemberMetadata(Object member){requireCodeSourceCaller();return ExternalCodeImages.memberMetadata(member);}
-    public static void externalClassPrepared(Class<?> actual){requireCodeSourceCaller();ExternalCodeDefinitions.prepared(actual);}
+    public static void externalClassPrepared(Class<?> actual){requireCodeSourceCaller();platformAccepted(actual);ExternalCodeDefinitions.prepared(actual);}
     public static void externalDefinitionsChanged(Class<?>[] actuals){
         Class<?> caller=CALLER.getCallerClass();
         try{if(caller!=Class.forName("dev.ronova.pro.bootstrap.ControlBridge",false,null))throw new SecurityException("ACTUAL_INSTRUMENTATION_COMPLETION_REQUIRED");}
         catch(ClassNotFoundException unavailable){throw new IllegalStateException(unavailable);}
-        for(Class<?> actual:actuals)ExternalCodeDefinitions.changed(actual);
+        for(Class<?> actual:actuals){platformAccepted(actual);ExternalCodeDefinitions.changed(actual);}
     }
     static String[] externalCodeVersion(Class<?> actual,byte[] bytes){
         if(CALLER.getCallerClass()!=ExternalCodeDefinitions.class)throw new SecurityException("ACTUAL_CODE_DEFINITION_REGISTRY_REQUIRED");

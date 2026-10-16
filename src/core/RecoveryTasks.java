@@ -20,8 +20,9 @@ final class RecoveryTasks implements AutoCloseable {
     private static long bridgeRegistrationEpoch=-1;
     private static String unknownCaptureGap="";
     private static final Consumer<Object[]> SINK=RecoveryTasks::receive;
-    private static Method currentTask,currentExecution,delivery,coverage,observerMatches,droppedEvents,captureState,acknowledgeCaptureLoss,uninstall,boundarySnapshot,withBoundaries,pendingDeliveries,inlineDetails,inlineClosed,
-            fenceTask,admissionState,releaseFence,requestOwnedQueueRelease,cancelOwnedQueueRelease,wakeOwnedQueue,waiterCount,waiterNodeObserved,activeInvocations,sourceOrigin,invocationState,submissionClosed,helperReferences;
+    private static Method currentTask,currentExecution,delivery,coverage,observerMatches,droppedEvents,captureState,acknowledgeCaptureLoss,uninstall,boundarySnapshot,boundaryCapabilities,withBoundaries,pendingDeliveries,inlineDetails,inlineClosed,
+            fenceTask,admissionState,releaseFence,requestOwnedQueueRelease,cancelOwnedQueueRelease,wakeOwnedQueue,waiterCount,waiterNodeObserved,activeInvocations,sourceOrigin,invocationState,submissionClosed,helperReferences,
+            forkQueueSnapshot,forkQueueEpoch;
     private static final String PREFIX="TASK/6";
     private static final Set<String> CF_COMPLETIONS=Set.of("UniApply","UniAccept","UniRun","UniWhenComplete","UniHandle",
             "UniExceptionally","UniComposeExceptionally","UniCompose","UniRelay","BiApply","BiAccept","BiRun",
@@ -195,6 +196,7 @@ final class RecoveryTasks implements AutoCloseable {
         final Class<?> callbackDefinition;
         final Set<Object> completionSources=Collections.newSetFromMap(new IdentityHashMap<>());
         final Map<Object,CompletionCursor> completionReleaseCursors=new IdentityHashMap<>();
+        final Map<Object,CompletionStackImage> completionReadbacks=new IdentityHashMap<>();
         boolean creationObserved,asynchronousCompletion,completionModeObserved;
         boolean admissionFenced,admissionReleased,blockedEntryObserved,callbackFieldsReleased;
         /** A policy-only fence is owned here until adopted by disposal or explicitly released. */
@@ -216,8 +218,7 @@ final class RecoveryTasks implements AutoCloseable {
         final Map<Object,Object> ownedQueueRequests=new IdentityHashMap<>();
         final Map<Object,Long> ownedQueueEpochs=new IdentityHashMap<>();
         final Set<Object> servicedOwnerQueues=Collections.newSetFromMap(new IdentityHashMap<>());
-        int ownerQueueCursor,sharedQueueCursor;
-        java.lang.ref.WeakReference<Object[]> sharedQueueImage;
+        long forkQueueReadbackEpoch=-1;
         String admissionRecord,callbackReleaseRecord,fenceReleaseRecord;
         CompletableFuture<Void> admissionAck,callbackReleaseAck,fenceReleaseAck;
         final Set<UUID> subjects=new HashSet<>();
@@ -232,7 +233,9 @@ final class RecoveryTasks implements AutoCloseable {
         UUID operation;
         long qualification,retryAt,revision,lastMutation;
         long backendEpoch=-1;
-        boolean coverageConfirmed;
+        Object backendImage;
+        List<String> backendRequirements=List.of();
+        boolean coverageConfirmed,backendImageReady;
         boolean callableReleased;
         String[] requiredBoundaries=new String[0];
         String state="OBSERVED",reason="",gateReason="",intent,releaseIntent;
@@ -351,7 +354,7 @@ final class RecoveryTasks implements AutoCloseable {
         try {
             bridge=Class.forName("dev.ronova.pro.bootstrap.TaskBridge",false,null);
             if(bridge.getClassLoader()!=null)throw new IllegalStateException("NON_BOOTSTRAP_TASK_BRIDGE");
-            if(!Integer.valueOf(93).equals(bridge.getMethod("abiVersion").invoke(null)))throw new IllegalStateException("TASK_BRIDGE_ABI_MISMATCH");
+            if(!Integer.valueOf(94).equals(bridge.getMethod("abiVersion").invoke(null)))throw new IllegalStateException("TASK_BRIDGE_ABI_MISMATCH");
             Class<?> agent=Class.forName("dev.ronova.pro.agent.RecoveryAgent",false,ClassLoader.getSystemClassLoader());
             if(!Boolean.TRUE.equals(agent.getMethod("openTaskAccess",Class.class).invoke(null,RecoveryTasks.class)))
                 throw new IllegalStateException("TASK_ACCESS_UNAVAILABLE");
@@ -362,6 +365,7 @@ final class RecoveryTasks implements AutoCloseable {
             captureState=bridge.getMethod("captureState",Object.class);
             acknowledgeCaptureLoss=bridge.getMethod("acknowledgeCaptureLoss",Object.class,Object.class,long.class,long.class);
             boundarySnapshot=bridge.getMethod("boundarySnapshot",String[].class);
+            boundaryCapabilities=bridge.getMethod("boundaryCapabilities");
             withBoundaries=bridge.getMethod("withBoundaries",String[].class,long.class,Runnable.class);
             pendingDeliveries=bridge.getMethod("pendingDeliveries");
             inlineDetails=bridge.getMethod("inlineDetails",Object.class);inlineClosed=bridge.getMethod("inlineClosed",Object.class);
@@ -373,6 +377,7 @@ final class RecoveryTasks implements AutoCloseable {
             waiterCount=bridge.getMethod("waiterCount",Object.class);waiterNodeObserved=bridge.getMethod("waiterNodeObserved",Object.class,Object.class);
             activeInvocations=bridge.getMethod("activeInvocations",Object.class);
             helperReferences=bridge.getMethod("helperReferences",Object.class);
+            forkQueueSnapshot=bridge.getMethod("forkQueueSnapshot",Object.class,Object.class);forkQueueEpoch=bridge.getMethod("forkQueueEpoch",Object.class);
             submissionClosed=bridge.getMethod("submissionClosed",Object.class,Object.class);
             sourceOrigin=bridge.getMethod("sourceOrigin",Object.class,Object.class,Object.class);invocationState=bridge.getMethod("invocationState",Object.class);
             bridge.getMethod("install",Consumer.class).invoke(null,SINK);
@@ -687,6 +692,8 @@ final class RecoveryTasks implements AutoCloseable {
             "java/util/concurrent/ForkJoinTask","java/util/concurrent/ForkJoinTask$AdaptedRunnable",
             "java/util/concurrent/ForkJoinTask$AdaptedRunnableAction","java/util/concurrent/ForkJoinTask$AdaptedCallable",
             "java/util/concurrent/ForkJoinTask$RunnableExecuteAction"};
+    private static final List<String> FORK_REQUIREMENTS=List.of(FORK_BOUNDARIES),DELEGATE_REQUIREMENTS=List.of(DELEGATE_BOUNDARIES),
+            TIMER_REQUIREMENTS=List.of("java/util/Timer","java/util/TimerThread");
     private static final String[] EXECUTOR_BOUNDARIES={"java/util/concurrent/ThreadPoolExecutor","java/util/concurrent/ThreadPoolExecutor$Worker",
             "java/util/concurrent/locks/ReentrantLock","java/util/concurrent/locks/ReentrantLock$Sync",
             "java/util/concurrent/locks/ReentrantLock$FairSync","java/util/concurrent/locks/ReentrantLock$NonfairSync",
@@ -726,29 +733,42 @@ final class RecoveryTasks implements AutoCloseable {
     }
     private boolean observeBackend(Task task)throws ReflectiveOperationException {
         task.coverageConfirmed=false;
+        List<String> required;
         if(task.inline||task.completion||task.result) {
             if(boundarySnapshot==null||inlineClosed==null)return false;
             if(task.scheduler instanceof ThreadPoolExecutor) {
                 Object queue=queue(task.scheduler);if(queue==null||!supportedQueue(queue))return false;
-                task.requiredBoundaries=CF_EXECUTOR_BOUNDARIES.get(queue.getClass().getName()).toArray(String[]::new);
-            } else task.requiredBoundaries=CF_BOUNDARIES.toArray(String[]::new);
+                required=CF_EXECUTOR_BOUNDARIES.get(queue.getClass().getName());
+            } else required=CF_BOUNDARIES;
         } else if(task.forkJoin) {
             if(boundarySnapshot==null||fenceTask==null)return false;
             forkCancellation();
-            task.requiredBoundaries=FORK_BOUNDARIES.clone();
+            required=FORK_REQUIREMENTS;
         } else if(task.delegated&&!exactFuture(task.object)) {
             if(boundarySnapshot==null)return false;
-            task.requiredBoundaries=DELEGATE_BOUNDARIES.clone();
+            required=DELEGATE_REQUIREMENTS;
         } else if(task.authority!=null&&!exactFuture(task.object)&&drainedTasks.get(task.object)==runtime.canonicalSubject(task.authority.id)) {
             if(boundarySnapshot==null)return false;
-            if(task.scheduler instanceof java.util.Timer)task.requiredBoundaries=new String[]{"java/util/Timer","java/util/TimerThread"};
-            else {Object queue=queue(task.scheduler);if(queue==null||!supportedQueue(queue))return false;task.requiredBoundaries=FUTURE_QUEUE_BOUNDARIES.get(queue.getClass().getName()).toArray(String[]::new);}
+            if(task.scheduler instanceof java.util.Timer)required=TIMER_REQUIREMENTS;
+            else {Object queue=queue(task.scheduler);if(queue==null||!supportedQueue(queue))return false;required=FUTURE_QUEUE_BOUNDARIES.get(queue.getClass().getName());}
         } else {
             if(boundarySnapshot==null||!exactFuture(task.object))return false;
             Object queue=queue(task.scheduler);if(queue==null||!supportedQueue(queue))return false;
             boolean scheduled=task.object.getClass()!=FutureTask.class;
             if(scheduled&&(task.scheduler==null||task.scheduler.getClass()!=ScheduledThreadPoolExecutor.class))return false;
-            task.requiredBoundaries=(scheduled?SCHEDULED_QUEUE_BOUNDARIES:FUTURE_QUEUE_BOUNDARIES).get(queue.getClass().getName()).toArray(String[]::new);
+            required=(scheduled?SCHEDULED_QUEUE_BOUNDARIES:FUTURE_QUEUE_BOUNDARIES).get(queue.getClass().getName());
+        }
+        boolean same=task.backendRequirements.equals(required);
+        if(!same) {task.backendRequirements=required;task.requiredBoundaries=required.toArray(String[]::new);task.backendImage=null;}
+        // Only installation capability is cached. Live queue ownership, exits and fields are never inferred from it.
+        if(boundaryCapabilities!=null) {
+            Object actual=boundaryCapabilities.invoke(null);
+            if(same&&actual==task.backendImage)return task.coverageConfirmed=task.backendImageReady;
+            if(!(actual instanceof Map.Entry<?,?> image)||!(image.getKey() instanceof Long epoch)
+                    ||!(image.getValue() instanceof Set<?> usable))return false;
+            task.backendImage=actual;
+            task.backendImageReady=!required.isEmpty()&&usable.containsAll(required);
+            return boundaryState(task,new long[]{epoch,task.backendImageReady?1:0});
         }
         long[] state=(long[])boundarySnapshot.invoke(null,(Object)task.requiredBoundaries);
         return boundaryState(task,state);
@@ -1477,11 +1497,11 @@ final class RecoveryTasks implements AutoCloseable {
                 ||!task.workerReferences.isEmpty()||!task.adoptedInvocations.isEmpty()
                 ||((Integer)activeInvocations.invoke(null,task.object))!=0)return false;
         if(policyWithdrawn(task))return true; // registry only: shared callback/queue objects are untouched
-        if(((Integer)helperReferences.invoke(null,task.object))!=0||!waitersReleased(task))return false;
         if(task.completion)return completionOwnerReleased(task);
         if(task.authority==null||!forkTerminal(task)||!forkQueuesAbsent(task))return false;
+        if(((Integer)helperReferences.invoke(null,task.object))!=0||!waitersReleased(task))return false;
         if(!bindForkCaptures(task))return false;
-        return forkCapturesAbsent(task);
+        return forkCapturesAbsent(task)&&forkQueueReadbackCurrent(task);
     }
     private boolean retirePolicyFence(Task task)throws ReflectiveOperationException {
         synchronized(LISTENERS) {
@@ -1684,11 +1704,13 @@ final class RecoveryTasks implements AutoCloseable {
         finishScope(task,tick,"DELEGATED_INVOCATION_EXIT_OBSERVED\tEXECUTION_RESERVATIONS_RETIRED_SHARED_CALLBACK_NOT_DISPOSED");
     }
     /** The actual JDK state transition also signals join/get waiters and cannot dispatch to a Mod override. */
+    private static volatile Method cachedForkCancellation;
     private static Method forkCancellation()throws ReflectiveOperationException {
+        Method cached=cachedForkCancellation;if(cached!=null)return cached;
         Method cancel=ForkJoinTask.class.getDeclaredMethod("trySetCancelled");
         if(cancel.getReturnType()!=int.class||!Modifier.isPrivate(cancel.getModifiers())||!cancel.trySetAccessible())
             throw new IllegalAccessException("FORKJOIN_CANCELLATION_STATE_UNAVAILABLE");
-        return cancel;
+        cachedForkCancellation=cancel;return cancel;
     }
     private void advanceForkJoin(Task task,long tick)throws ReflectiveOperationException {
         for(var request:task.ownedQueueRequests.entrySet()) {
@@ -1805,7 +1827,7 @@ final class RecoveryTasks implements AutoCloseable {
     }
     private void advanceForkJoinReferences(Task task,long tick)throws ReflectiveOperationException {
         if(!(task.scheduler instanceof ForkJoinPool)||!forkQueuesAbsent(task)
-                ||((Integer)helperReferences.invoke(null,task.object))!=0||!task.ownedQueueRequests.isEmpty()) {
+                ||((Integer)helperReferences.invoke(null,task.object))!=0||!task.ownedQueueRequests.isEmpty()||!forkQueueReadbackCurrent(task)) {
             resetWindow(task,"FORKJOIN_QUEUE_OR_HELPER_REFERENCE_PRESENT");return;
         }
         if(!bindForkCaptures(task)) { resetWindow(task,"FORKJOIN_CAPTURE_FIELD_INACCESSIBLE");return; }
@@ -1813,13 +1835,14 @@ final class RecoveryTasks implements AutoCloseable {
             if(!guarded(task,()->{
                 try {
                     long[] admission=(long[])admissionState.invoke(null,SINK,task.object);
-                    if(admission[0]!=1||admission[1]!=0||((Integer)helperReferences.invoke(null,task.object))!=0||!forkQueuesAbsent(task))return;
+                    if(admission[0]!=1||admission[1]!=0||!forkQueuesAbsent(task)||((Integer)helperReferences.invoke(null,task.object))!=0)return;
                     if(!forkTerminal(task)||task.object.getClass()!=task.definition)return;
                     for(var edge:task.forkCaptureEdges.entrySet())if(edge.getKey().get(task.object)!=edge.getValue())return;
+                    if(!forkQueueReadbackCurrent(task))return;
                     for(Field field:task.forkCaptureEdges.keySet())field.set(task.object,null);
                 } catch(ReflectiveOperationException failure) { throw new IllegalStateException(failure); }
             }))return;
-            if(!forkCapturesAbsent(task)) { resetWindow(task,"FORKJOIN_CAPTURE_READBACK_PENDING");return; }
+            if(!forkCapturesAbsent(task)||!forkQueueReadbackCurrent(task)) { resetWindow(task,"FORKJOIN_CAPTURE_READBACK_PENDING");return; }
             task.callbackFieldsReleased=true;
         }
         if(task.callbackReleaseRecord==null) {
@@ -1857,26 +1880,33 @@ final class RecoveryTasks implements AutoCloseable {
         ForkJoinTask<?> future=(ForkJoinTask<?>)task.object;
         return future.isCancelled()||future.isDone()&&task.entered&&task.exitObserved;
     }
-    /** Read the exact registered pool under the publication gate; helper locals are a separate counter. */
+    /** One pool seed plus actual queue receipts; no pool/deque scan is repeated for each task. */
     private boolean forkQueuesAbsent(Task task)throws ReflectiveOperationException {
-        if(!(task.scheduler instanceof ForkJoinPool)||!task.ownedQueueRequests.isEmpty())return false;
-        Object[] queues=(Object[])readField(ForkJoinPool.class,"queues",task.scheduler);
-        if(queues==null)return Boolean.TRUE.equals(Class.forName("dev.ronova.pro.bootstrap.TaskBridge",false,null)
-                .getMethod("schedulerResourceEnded",Object.class).invoke(null,task.scheduler));
-        Class<?> type=Class.forName("java.util.concurrent.ForkJoinPool$WorkQueue",false,null);
-        for(int index=0;index<queues.length;index++) {
-            Object queue=queues[index];if(queue==null)continue;
-            if(queue.getClass()!=type)return false;
-            Object[] entries=(Object[])readField(type,"array",queue);
-            if(entries!=null)for(Object value:entries)if(value==task.object)return false;
-            if(readField(type,"array",queue)!=entries||queues[index]!=queue)return false;
+        task.forkQueueReadbackEpoch=-1;
+        if(!(task.scheduler instanceof ForkJoinPool)||!task.ownedQueueRequests.isEmpty()||forkQueueSnapshot==null||forkQueueEpoch==null)return false;
+        Object[] snapshot=(Object[])forkQueueSnapshot.invoke(null,task.scheduler,task.object);
+        if(snapshot==null||snapshot.length!=3||!(snapshot[0] instanceof Long epoch)||epoch<0||!Integer.valueOf(1).equals(snapshot[1])) {
+            task.gateReason="FORKJOIN_QUEUE_LOCATION_UNOBSERVED_OR_PRESENT";return false;
         }
-        return readField(ForkJoinPool.class,"queues",task.scheduler)==queues;
+        if(readField(ForkJoinPool.class,"queues",task.scheduler)==null&&!Boolean.TRUE.equals(bridge.getMethod("schedulerResourceEnded",Object.class).invoke(null,task.scheduler)))return false;
+        task.forkQueueReadbackEpoch=epoch;return forkQueueReadbackCurrent(task);
+    }
+    private static boolean forkQueueReadbackCurrent(Task task)throws ReflectiveOperationException {
+        return task.forkQueueReadbackEpoch>=0&&forkQueueEpoch!=null
+                &&Long.valueOf(task.forkQueueReadbackEpoch).equals(forkQueueEpoch.invoke(null,task.scheduler));
+    }
+    private static Object[] locatedForkQueues(Task task)throws ReflectiveOperationException {
+        if(forkQueueSnapshot==null||forkQueueEpoch==null)return null;
+        Object[] snapshot=(Object[])forkQueueSnapshot.invoke(null,task.scheduler,task.object);
+        if(snapshot==null||snapshot.length!=3||!(snapshot[0] instanceof Long epoch)||epoch<0
+                ||!(snapshot[1] instanceof Integer state)||state<0||!(snapshot[2] instanceof Object[] queues)
+                ||!Long.valueOf(epoch).equals(forkQueueEpoch.invoke(null,task.scheduler)))return null;
+        return queues;
     }
     private void finishReleasedForkJoin(Task task,long tick)throws ReflectiveOperationException {
         if(!confirmed(task.fenceReleaseAck)||!confirmed(task.callbackReleaseAck)||!task.queueRecords.isEmpty())return;
-        if(!forkCapturesAbsent(task)||!forkQueuesAbsent(task)||((Integer)helperReferences.invoke(null,task.object))!=0
-                ||!waitersReleased(task)) { resetWindow(task,"FORKJOIN_REFERENCE_REASSERTION_OR_EXIT_PENDING");return; }
+        if(!forkQueuesAbsent(task)||!forkCapturesAbsent(task)||((Integer)helperReferences.invoke(null,task.object))!=0
+                ||!waitersReleased(task)||!forkQueueReadbackCurrent(task)) { resetWindow(task,"FORKJOIN_REFERENCE_REASSERTION_OR_EXIT_PENDING");return; }
         if(task.entered&&!task.exitObserved||!task.entered&&!task.queueRemoved&&!task.blockedEntryObserved) {
             resetWindow(task,"FORKJOIN_START_OR_EXIT_UNCONFIRMED");return;
         }
@@ -1886,11 +1916,12 @@ final class RecoveryTasks implements AutoCloseable {
     /** Query the known owner's share independently. Never extrapolate a worker-deque snapshot
      * to ForkJoin helper-stack retirement or to arbitrary third-party callback aliases. */
     private boolean completionOwnerReleased(Task task)throws ReflectiveOperationException {
+        if(task.scheduler instanceof ForkJoinPool&&!forkQueuesAbsent(task))return false;
         if(!task.creationObserved||!completionFieldsAbsent(task,true)||!completionStacksAbsent(task)
                 ||!task.executions.isEmpty()||!task.dispatches.isEmpty()||!task.submissions.isEmpty()
                 ||!task.workerReferences.isEmpty()||!task.adoptedInvocations.isEmpty()
                 ||((Integer)activeInvocations.invoke(null,task.object))!=0||((Integer)helperReferences.invoke(null,task.object))!=0||!waitersReleased(task))return false;
-        if(task.scheduler instanceof ForkJoinPool)return forkQueuesAbsent(task);
+        if(task.scheduler instanceof ForkJoinPool)return forkQueueReadbackCurrent(task);
         if(task.scheduler==null) {
             if(task.completionModeObserved&&!task.asynchronousCompletion&&task.entered&&task.exitObserved)return true;
             // A callback fenced before dispatch has no worker EXIT. Its observed factory
@@ -2006,9 +2037,11 @@ final class RecoveryTasks implements AutoCloseable {
     };
     private static Object readField(Class<?> type,String name,Object object)throws ReflectiveOperationException {
         var fields=READ_FIELDS.get(type);Field field=fields.get(name);
-        if(field==null)field=type.getDeclaredField(name);
-        if(!field.trySetAccessible())throw new IllegalAccessException("FIELD_UNAVAILABLE:"+type.getName()+"."+name);
-        fields.putIfAbsent(name,field);
+        if(field==null) {
+            field=type.getDeclaredField(name);
+            if(!field.trySetAccessible())throw new IllegalAccessException("FIELD_UNAVAILABLE:"+type.getName()+"."+name);
+            Field prior=fields.putIfAbsent(name,field);if(prior!=null)field=prior;
+        }
         return field.get(object);
     }
     private boolean waitersReleased(Task task)throws ReflectiveOperationException {
@@ -2048,18 +2081,18 @@ final class RecoveryTasks implements AutoCloseable {
         task.queueRecords.put(record,runtime.journal.append(record));
     }
     private void requestOwnerQueues(Task task)throws ReflectiveOperationException {
-        Field queues=ForkJoinPool.class.getDeclaredField("queues");if(!queues.trySetAccessible())return;
-        Object[] observed=(Object[])queues.get(task.scheduler);if(observed==null||observed.length==0)return;
-        Class<?> type=Class.forName("java.util.concurrent.ForkJoinPool$WorkQueue",false,null);
-        Field owner=type.getDeclaredField("owner");if(!owner.trySetAccessible())return;
-        for(int visited=0;visited<Math.min(64,observed.length);visited++) {
-            Object queue=observed[Math.floorMod(task.ownerQueueCursor++,observed.length)];
-            if(queue==null||queue.getClass()!=type||owner.get(queue)==null)continue;
+        Object[] observed=locatedForkQueues(task);
+        if(observed==null){task.gateReason="FORKJOIN_QUEUE_LOCATION_PENDING";return;}
+        Set<Object> locations=Collections.newSetFromMap(new IdentityHashMap<>());Collections.addAll(locations,observed);
+        for(var pending:List.copyOf(task.ownedQueueRequests.entrySet()))
+            if(!locations.contains(pending.getKey())||!Objects.equals(task.ownedQueueEpochs.get(pending.getKey()),task.backendEpoch))
+                cancelOwnedQueueRelease.invoke(null,SINK,pending.getValue());
+        for(Object queue:observed) {
+            if(queue==null||queue.getClass()!=ForkQueueAccess.TYPE||ForkQueueAccess.OWNER.get(queue)==null)continue;
             if(task.ownedQueueRequests.containsKey(queue)) {
                 if(!Objects.equals(task.ownedQueueEpochs.get(queue),task.backendEpoch))cancelOwnedQueueRelease.invoke(null,SINK,task.ownedQueueRequests.get(queue));
                 continue;
             }
-            if(task.servicedOwnerQueues.contains(queue))continue;
             if(task.queueRecords.size()+2*task.ownedQueueRequests.size()>=62)return;
             guarded(task,()->{
                 try {
@@ -2102,12 +2135,12 @@ final class RecoveryTasks implements AutoCloseable {
     }
     /** Shutdown may finish a durable, already-cleared disposal without authorizing another mutation. */
     private boolean forkRetirementReady(Task task)throws ReflectiveOperationException {
-        return task.forkJoin&&!task.completion&&task.callbackFieldsReleased&&confirmed(task.callbackReleaseAck)
+        return task.forkJoin&&!task.completion&&forkQueuesAbsent(task)&&task.callbackFieldsReleased&&confirmed(task.callbackReleaseAck)
                 &&task.executions.isEmpty()&&task.dispatches.isEmpty()&&task.submissions.isEmpty()
                 &&task.workerReferences.isEmpty()&&task.adoptedInvocations.isEmpty()
                 &&((Integer)activeInvocations.invoke(null,task.object))==0
                 &&((Integer)helperReferences.invoke(null,task.object))==0&&waitersReleased(task)
-                &&forkCapturesAbsent(task)&&forkQueuesAbsent(task);
+                &&forkCapturesAbsent(task)&&forkQueueReadbackCurrent(task);
     }
     private boolean releaseAdmissionResource(Task task,boolean retiring)throws ReflectiveOperationException {
         if(!task.ownedQueueRequests.isEmpty())return false;
@@ -2145,45 +2178,48 @@ final class RecoveryTasks implements AutoCloseable {
     }
     /** Only external submission queues use this queue lock; worker-owned deques are never treated as externally owned. */
     private void releaseSharedForkQueues(Task task)throws ReflectiveOperationException {
-        Field queues=ForkJoinPool.class.getDeclaredField("queues");
-        if(!queues.trySetAccessible())return;
-        Object[] observed=(Object[])queues.get(task.scheduler);if(observed==null||observed.length==0)return;
-        if(task.sharedQueueImage==null||task.sharedQueueImage.get()!=observed) {
-            task.sharedQueueImage=new java.lang.ref.WeakReference<>(observed);task.sharedQueueCursor=0;
-        }
-        Class<?> type=Class.forName("java.util.concurrent.ForkJoinPool$WorkQueue",false,null);
-        Field owner=type.getDeclaredField("owner"),array=type.getDeclaredField("array"),top=type.getDeclaredField("top"),base=type.getDeclaredField("base");
-        Method remove=type.getDeclaredMethod("tryRemove",ForkJoinTask.class,boolean.class);
-        if(!owner.trySetAccessible()||!array.trySetAccessible()||!top.trySetAccessible()||!base.trySetAccessible()||!remove.trySetAccessible())return;
-        var lookup=java.lang.invoke.MethodHandles.privateLookupIn(type,java.lang.invoke.MethodHandles.lookup());
-        var source=lookup.findVarHandle(type,"source",int.class);
-        for(int visited=0;visited<Math.min(64,observed.length);visited++) {
+        Object[] observed=locatedForkQueues(task);
+        if(observed==null){task.gateReason="FORKJOIN_QUEUE_LOCATION_PENDING";return;}
+        for(Object queue:observed) {
             if(task.queueRecords.size()+2*task.ownedQueueRequests.size()>=64||task.nextQueueReceipt==Long.MAX_VALUE)return;
-            int index=Math.floorMod(task.sharedQueueCursor++,observed.length);
-            Object queue=observed[index];int slot=index;
-            if(queue==null||queue.getClass()!=type||owner.get(queue)!=null)continue;
+            if(queue==null||queue.getClass()!=ForkQueueAccess.TYPE||ForkQueueAccess.OWNER.get(queue)!=null)continue;
             // Never wait for a shared queue while holding Root, publication or certificate gates.
-            if(!(boolean)source.compareAndSet(queue,0,1))continue;
+            if(!(boolean)ForkQueueAccess.SOURCE.compareAndSet(queue,0,1))continue;
             try {
-                int span=top.getInt(queue)-base.getInt(queue);
-                Object image=array.get(queue);
+                int span=ForkQueueAccess.TOP.getInt(queue)-ForkQueueAccess.BASE.getInt(queue);
+                Object image=ForkQueueAccess.ARRAY.get(queue);
                 if(!(image instanceof Object[] entries)||span<0||span>entries.length)continue;
                 guarded(task,()->{
                     try {
                         long[] admission=(long[])admissionState.invoke(null,SINK,task.object);
-                        if(admission[0]!=1||admission[1]!=0||queues.get(task.scheduler)!=observed||observed[slot]!=queue||owner.get(queue)!=null||array.get(queue)!=image)return;
+                        if(admission[0]!=1||admission[1]!=0||ForkQueueAccess.OWNER.get(queue)!=null||ForkQueueAccess.ARRAY.get(queue)!=image)return;
+                        Object[] current=locatedForkQueues(task);if(current==null)return;
+                        boolean located=false;for(Object candidate:current)if(candidate==queue){located=true;break;}
+                        if(!located)return;
                         // We hold the real shared-queue lock. The verified helper's owned path skips reacquiring it.
-                        if(Boolean.TRUE.equals(remove.invoke(queue,task.object,true))) {
+                        if(Boolean.TRUE.equals(ForkQueueAccess.REMOVE.invoke(queue,task.object,true))) {
                             task.queueRemoved=true;
                             queueReceipt(task,"QUEUE_REFERENCE_REMOVED","SHARED_FORKJOIN_SUBMISSION_QUEUE_ONLY");
                         }
                     } catch(ReflectiveOperationException failure) { throw new IllegalStateException(failure); }
                 });
-            } finally { source.setRelease(queue,0); }
+            } finally { ForkQueueAccess.SOURCE.setRelease(queue,0); }
         }
     }
+    private static final class ForkQueueAccess {
+        static final Class<?> TYPE=type();
+        static final Field OWNER=field("owner"),ARRAY=field("array"),TOP=field("top"),BASE=field("base");
+        static final Method REMOVE=remove();
+        static final java.lang.invoke.VarHandle SOURCE=source();
+        private static Class<?> type(){try{return Class.forName("java.util.concurrent.ForkJoinPool$WorkQueue",false,null);}catch(ClassNotFoundException unavailable){throw new ExceptionInInitializerError(unavailable);}}
+        private static Field field(String name){try {Field field=TYPE.getDeclaredField(name);field.setAccessible(true);return field;}catch(ReflectiveOperationException unavailable){throw new ExceptionInInitializerError(unavailable);}}
+        private static Method remove(){try {Method method=TYPE.getDeclaredMethod("tryRemove",ForkJoinTask.class,boolean.class);method.setAccessible(true);return method;}catch(ReflectiveOperationException unavailable){throw new ExceptionInInitializerError(unavailable);}}
+        private static java.lang.invoke.VarHandle source(){try{return java.lang.invoke.MethodHandles.privateLookupIn(TYPE,java.lang.invoke.MethodHandles.lookup()).findVarHandle(TYPE,"source",int.class);}catch(ReflectiveOperationException unavailable){throw new ExceptionInInitializerError(unavailable);}}
+    }
+    private static final ConcurrentMap<Class<?>,List<Field>> COMPLETION_FIELDS=new ConcurrentHashMap<>();
     private static List<Field> completionFields(Task task)throws ReflectiveOperationException {
         if(!exactCompletion(task.object)||task.definition!=task.object.getClass())throw new IllegalAccessException("CF_DEFINITION_CHANGED");
+        List<Field> cached=COMPLETION_FIELDS.get(task.definition);if(cached!=null)return cached;
         var result=new ArrayList<Field>();
         for(Class<?> type=task.definition;type!=null&&type.getName().startsWith("java.util.concurrent.CompletableFuture$");type=type.getSuperclass()) {
             for(Field field:type.getDeclaredFields())if(!Modifier.isStatic(field.getModifiers())&&!field.getType().isPrimitive()) {
@@ -2192,7 +2228,8 @@ final class RecoveryTasks implements AutoCloseable {
                 result.add(field);
             }
         }
-        return result;
+        List<Field> resolved=List.copyOf(result),prior=COMPLETION_FIELDS.putIfAbsent(task.definition,resolved);
+        return prior==null?resolved:prior;
     }
     private static boolean completionFieldsAbsent(Task task,boolean includeNext)throws ReflectiveOperationException {
         for(Field field:completionFields(task))if((includeNext||!field.getName().equals("next"))&&field.get(task.object)!=null)return false;
@@ -2227,15 +2264,40 @@ final class RecoveryTasks implements AutoCloseable {
             head=actualHead;previous=null;node=actualHead;initialized=true;seen.clear();
         }
     }
+    /** Weak graph image: every reuse rereads the actual root and every observed volatile edge.
+     * An equal head alone is insufficient: a node can be inserted in the middle of the same stack. */
+    private static final class CompletionStackImage {
+        final java.lang.ref.WeakReference<Object>[] nodes;
+        @SuppressWarnings("unchecked") CompletionStackImage(List<Object> chain) {
+            nodes=(java.lang.ref.WeakReference<Object>[])new java.lang.ref.WeakReference<?>[chain.size()];
+            for(int i=0;i<nodes.length;i++)nodes[i]=new java.lang.ref.WeakReference<>(chain.get(i));
+        }
+        boolean current(CompletionLinks links,Object source) {
+            Object head=links.stack.getVolatile(source),node=head;
+            for(var reference:nodes) {
+                Object observed=reference.get();
+                if(observed==null||node!=observed)return false;
+                node=links.next.getVolatile(observed);
+            }
+            return node==null&&links.stack.getVolatile(source)==head;
+        }
+    }
     private static boolean completionStacksAbsent(Task task)throws ReflectiveOperationException {
         CompletionLinks links=completionLinks();
         if(!links.node.isInstance(task.object))return true; // AsyncSupply/AsyncRun have no completion-stack link.
         if(task.completionSources.isEmpty())return false;
         for(Object source:task.completionSources) {
             if(!standardCompletionSource(source))return false;
+            CompletionStackImage cached=task.completionReadbacks.get(source);
+            if(cached!=null&&cached.current(links,source))continue;
+            task.completionReadbacks.remove(source);
             Set<Object> seen=Collections.newSetFromMap(new IdentityHashMap<>());
+            List<Object> chain=new ArrayList<>();
             for(Object node=links.stack.getVolatile(source);node!=null;node=links.next.getVolatile(node))
-                if(node==task.object||!links.node.isInstance(node)||!seen.add(node))return false;
+                if(node==task.object||!links.node.isInstance(node)||!seen.add(node))return false;else chain.add(node);
+            CompletionStackImage image=new CompletionStackImage(chain);
+            if(!image.current(links,source))return false;
+            task.completionReadbacks.put(source,image);
         }
         return true;
     }
@@ -2392,9 +2454,9 @@ final class RecoveryTasks implements AutoCloseable {
                         for(Task task:group) {
                             retiredObjects.put(task.object,task.id);tasks.remove(task.object);
                             windows.remove(task);waiting.remove(task);policyPending.remove(task);task.policyQueued=false;
-                            task.scheduler=null;task.queue=null;task.completionSources.clear();task.completionOutputs.clear();task.completionReleaseCursors.clear();
+                            task.scheduler=null;task.queue=null;task.completionSources.clear();task.completionOutputs.clear();task.completionReleaseCursors.clear();task.completionReadbacks.clear();
                             task.delegateOwners.clear();task.servicedOwnerQueues.clear();task.forkCaptureEdges.clear();
-                            task.sharedQueueImage=null;task.sharedQueueCursor=0;
+                            task.forkQueueReadbackEpoch=-1;
                             task.children.clear();task.parents.clear();
                             Settlement settled=settlements.get(task.id);settled.released=true;settled.record=null;settled.ack=null;
                         }
@@ -2466,13 +2528,32 @@ final class RecoveryTasks implements AutoCloseable {
     private boolean localCurrent(Task task,long tick,long captureEpoch) {
         return !rootPending(task.object)&&!taskGap(task.object)&&task.reason.isEmpty()&&task.authority!=null
                 &&(!task.admissionFenced||task.admissionReleased&&confirmed(task.fenceReleaseAck))
-                &&task.coverageConfirmed&&qualified(task)&&exclusive(task)
+                &&capabilityCurrent(task)&&qualified(task)&&exclusive(task)
                 &&task.executions.isEmpty()&&task.dispatches.isEmpty()&&task.submissions.isEmpty()
                 &&task.workerReferences.isEmpty()&&task.adoptedInvocations.isEmpty()&&task.waiters.isEmpty()&&!task.waiterCoverageGap&&waiterFactsCurrent(task)&&task.callableReleased
                 &&confirmed(task.ack)&&confirmed(task.releaseAck)&&(task.inline||task.forkJoin||task.result||task.delegated||task.queue!=null)
                 &&(!task.resultCancellationAttempted||!task.resultDrainPending&&confirmed(task.resultCancelAck))
                 &&(task.result||(task.entered?task.exitObserved:task.queueRemoved||task.dispatchExitObserved||task.forkJoin&&task.blockedEntryObserved))
-                &&invocationReferencesReleased(task);
+                &&invocationReferencesReleased(task)&&retirementReferencesCurrent(task);
+    }
+    private boolean capabilityCurrent(Task task) {
+        try {
+            return boundaryCapabilities!=null&&boundaryCapabilities.invoke(null)==task.backendImage?
+                    task.coverageConfirmed:observeBackend(task);
+        } catch(ReflectiveOperationException|RuntimeException unavailable) {return false;}
+    }
+    /** A prior successful release is history, not proof that an actual owner has not republished a reference. */
+    private boolean retirementReferencesCurrent(Task task) {
+        try {
+            if(task.inline)return inlineClosed!=null&&Boolean.TRUE.equals(inlineClosed.invoke(null,task.object));
+            if(task.result)return readField(CompletableFuture.class,"result",task.object)!=null&&waitersReleased(task);
+            if(task.delegated&&!task.admissionFenced)return true;
+            if(task.completion)return task.admissionFenced?completionOwnerReleased(task):completionReleased(task);
+            if(task.forkJoin)return task.callbackFieldsReleased&&forkQueuesAbsent(task)&&forkCapturesAbsent(task)
+                    &&waitersReleased(task)&&forkQueueReadbackCurrent(task);
+            if(exactFuture(task.object))return callableReleased(task.object)&&waitersReleased(task);
+            return true; // Delegated scopes claim their observed invocation, not disposal of the shared callable.
+        } catch(ReflectiveOperationException|RuntimeException unavailable) {return false;}
     }
     private boolean invocationReferencesReleased(Task task) {
         if(activeInvocations==null||helperReferences==null)return false;
@@ -2532,35 +2613,16 @@ final class RecoveryTasks implements AutoCloseable {
         // A synchronous JDK completion has no executor admission. Async queues/worker locals need separate evidence.
         if(!task.completion||!task.creationObserved||!task.completionModeObserved||task.asynchronousCompletion
                 ||task.scheduler!=null||!task.submissions.isEmpty()||task.completionSources.isEmpty())return false;
-        for(Class<?> type=task.definition;type!=null&&type.getName().startsWith("java.util.concurrent.CompletableFuture$");type=type.getSuperclass()) {
-            for(Field field:type.getDeclaredFields())if(!Modifier.isStatic(field.getModifiers())&&!field.getType().isPrimitive()) {
-                if(!field.trySetAccessible()||field.get(task.object)!=null)return false;
-            }
-        }
-        Field stack=CompletableFuture.class.getDeclaredField("stack");
-        Class<?> completion=Class.forName("java.util.concurrent.CompletableFuture$Completion",false,null);
-        Field next=completion.getDeclaredField("next");
-        if(!stack.trySetAccessible()||!next.trySetAccessible())return false;
-        for(Object source:task.completionSources) {
-            Class<?> type=source.getClass();
-            if(type!=CompletableFuture.class&&!(type.getClassLoader()==null&&type.getName().equals("java.util.concurrent.CompletableFuture$MinimalStage")))return false;
-            Set<Object> seen=Collections.newSetFromMap(new IdentityHashMap<>());
-            for(Object node=stack.get(source);node!=null;node=next.get(node)) {
-                if(node==task.object||!completion.isInstance(node)||!seen.add(node))return false;
-            }
-        }
-        return true;
+        return completionFieldsAbsent(task,true)&&completionStacksAbsent(task);
     }
     private static Object queue(Object scheduler)throws ReflectiveOperationException {
-        if(scheduler instanceof java.util.Timer){Field field=java.util.Timer.class.getDeclaredField("queue");return field.trySetAccessible()?field.get(scheduler):null;}
+        if(scheduler instanceof java.util.Timer)return readField(java.util.Timer.class,"queue",scheduler);
         if(!(scheduler instanceof ThreadPoolExecutor))return null;
-        Field field=ThreadPoolExecutor.class.getDeclaredField("workQueue");
-        return field.trySetAccessible()?field.get(scheduler):null;
+        return readField(ThreadPoolExecutor.class,"workQueue",scheduler);
     }
     private static boolean callableReleased(Object task)throws ReflectiveOperationException {
         if(!exactFuture(task))return false;
-        Field field=FutureTask.class.getDeclaredField("callable");
-        return field.trySetAccessible()&&field.get(task)==null;
+        return readField(FutureTask.class,"callable",task)==null;
     }
     private static boolean supportedQueue(Object queue) {
         Class<?> type=queue.getClass();return type.getClassLoader()==null&&Set.of("java.util.concurrent.ArrayBlockingQueue",
@@ -2706,8 +2768,8 @@ final class RecoveryTasks implements AutoCloseable {
                 }
                 if(task.forkJoin&&!task.completion) {
                     try {
-                        if(!task.admissionReleased||!forkCapturesAbsent(task)||!forkQueuesAbsent(task)
-                                ||((Integer)helperReferences.invoke(null,task.object))!=0)
+                        if(!task.admissionReleased||!forkQueuesAbsent(task)||!forkCapturesAbsent(task)
+                                ||((Integer)helperReferences.invoke(null,task.object))!=0||!forkQueueReadbackCurrent(task))
                             throw new IOException("FORKJOIN_RETIREMENT_REFERENCES_PENDING:"+task.id);
                     } catch(ReflectiveOperationException failure) { throw new IOException("FORKJOIN_RETIREMENT_QUERY_UNAVAILABLE",failure); }
                     continue;

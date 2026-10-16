@@ -2,8 +2,37 @@
  * fixture DLL's real import table and real Windows children. The source/image
  * registration is fixture-owned; this does not certify game library discovery. */
 #define JNI_OnLoad audit_backend_on_load
+#define Agent_OnLoad audit_backend_agent_load
+#define Agent_OnUnload audit_backend_agent_unload
 #include "../../native/control.c"
 #undef JNI_OnLoad
+#undef Agent_OnLoad
+#undef Agent_OnUnload
+
+/* Physical FramePop capabilities belong to JVMTI's OnLoad environment on
+ * this VM. Reserve only that fixture environment; do not install the real
+ * controller, native_initialize, JNI table or JavaVM dispatcher. */
+static jvmtiEnv *audit_physical_early;
+JNIEXPORT jint JNICALL Agent_OnLoad(JavaVM *vm,char *options,void *reserved){
+    (void)options;(void)reserved;jvmtiCapabilities requested,actual;
+    jint status=(*vm)->GetEnv(vm,(void**)&audit_physical_early,JVMTI_VERSION_1_2);
+    jvmtiError error=JVMTI_ERROR_NONE;memset(&requested,0,sizeof(requested));memset(&actual,0,sizeof(actual));
+    requested.can_get_bytecodes=1;requested.can_generate_frame_pop_events=1;
+    if(status==JNI_OK&&audit_physical_early){
+        error=(*audit_physical_early)->AddCapabilities(audit_physical_early,&requested);
+        if(error==JVMTI_ERROR_NONE)error=(*audit_physical_early)->GetCapabilities(audit_physical_early,&actual);
+    }
+    if(status!=JNI_OK||!audit_physical_early||error!=JVMTI_ERROR_NONE||!actual.can_get_bytecodes||!actual.can_generate_frame_pop_events){
+        fprintf(stderr,"PHYSICAL_FIXTURE_ONLOAD_FAILED jni=%d jvmti=%d bytecodes=%u framePop=%u\n",
+                status,(int)error,actual.can_get_bytecodes,actual.can_generate_frame_pop_events);
+        if(audit_physical_early)(*audit_physical_early)->DisposeEnvironment(audit_physical_early);
+        audit_physical_early=NULL;return JNI_ERR;
+    }
+    return JNI_OK;
+}
+JNIEXPORT void JNICALL Agent_OnUnload(JavaVM *vm){
+    (void)vm;if(audit_physical_early)(*audit_physical_early)->DisposeEnvironment(audit_physical_early);audit_physical_early=NULL;
+}
 
 static Owner audit_owner;
 static OwnerLink audit_sources;
@@ -59,6 +88,149 @@ static void audit_restore_imports(void){
     ReleaseSRWLockExclusive(&host_imports);
 }
 JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM *vm,void *reserved){(void)vm;(void)reserved;return JNI_VERSION_1_8;}
+
+/* Isolated real-JVMTI stack fixture. Only the registration of the bridge and
+ * watched tokens is fixture-owned. Site selection, live version checks and
+ * normal/exceptional FramePop disposal below are production code. No original
+ * JNI/JavaVM entry is replaced and no whole Agent installation is implied. */
+static void audit_physical_failure(JNIEnv *env,const char *message){
+    if((*env)->ExceptionCheck(env))return;
+    jclass type=(*env)->FindClass(env,"java/lang/AssertionError");
+    if(type){(*env)->ThrowNew(env,type,message);(*env)->DeleteLocalRef(env,type);}
+}
+JNIEXPORT void JNICALL Java_dev_ronova_pro_AuditFixCheck_physicalStop0(JNIEnv *env,jclass type){
+    (void)type;
+    NativeToolingEnv *tooling=native_ti?native_tooling_environment(native_ti):NULL;
+    if(native_ti){const struct jvmtiInterface_1_ *original=tooling?tooling->original:*native_ti;
+        original->SetEventNotificationMode(native_ti,JVMTI_DISABLE,JVMTI_EVENT_FRAME_POP,NULL);}
+    InterlockedExchange(&code_pop_available,0);InterlockedExchange(&native_jni_ready,0);
+    NativeThread *state=native_tls==TLS_OUT_OF_INDEXES?NULL:(NativeThread*)TlsGetValue(native_tls);
+    if(state){
+        while(state->execution){CodeExit *entry=state->execution;state->execution=entry->previous;
+            if(entry->token)(*env)->DeleteGlobalRef(env,entry->token);free(entry);}
+        TlsSetValue(native_tls,NULL);free(state);
+    }
+    if(native_tls!=TLS_OUT_OF_INDEXES){TlsFree(native_tls);native_tls=TLS_OUT_OF_INDEXES;}
+    if(code_bridge){(*env)->DeleteGlobalRef(env,code_bridge);code_bridge=NULL;}
+    if(native_controller){(*env)->DeleteGlobalRef(env,native_controller);native_controller=NULL;}
+    code_pop_callback=NULL;
+    int retired=1;
+    if(native_ti){
+        if(tooling){
+            AcquireSRWLockExclusive(&tooling->mutation);
+            retired=native_tooling_exchange((void *volatile*)native_ti,tooling->shadow,(void*)tooling->original);
+            if(retired){
+                native_private_unregister(&tooling->apiRange);
+                retired=tooling->original->DisposeEnvironment(native_ti)==JVMTI_ERROR_NONE;
+                if(retired){InterlockedExchange(&tooling->closing,1);InterlockedExchange(&tooling->disposed,1);}
+            }
+            ReleaseSRWLockExclusive(&tooling->mutation);
+        }else retired=(*native_ti)->DisposeEnvironment(native_ti)==JVMTI_ERROR_NONE;
+        native_ti=NULL;
+    }
+    native_private_unregister(&native_tooling_image_range);native_tooling_image_begin=native_tooling_image_end=0;
+    native_vm=NULL;memset(&native_vm_original,0,sizeof(native_vm_original));memset(&native_original,0,sizeof(native_original));
+    if(!retired)audit_physical_failure(env,"fixture own JVMTI environment did not restore/dispose");
+}
+JNIEXPORT void JNICALL Java_dev_ronova_pro_AuditFixCheck_physicalSetup0(JNIEnv *env,jclass type,jclass bridge){
+    JavaVM *vm=NULL;jvmtiCapabilities capability,actual;jvmtiEventCallbacks callbacks;
+    const char *failure="GetJavaVM";jint status=JNI_ERR;jvmtiError error=JVMTI_ERROR_NONE;int early=audit_physical_early!=NULL;
+    memset(&actual,0,sizeof(actual));
+    if(native_controller||native_jni_ready||native_ti||!bridge){audit_physical_failure(env,"physical fixture requires its own uninstalled JVM");return;}
+    status=(*env)->GetJavaVM(env,&vm);if(status!=JNI_OK||!vm)goto failed;
+    failure="GetEnv";
+    if(audit_physical_early){native_ti=audit_physical_early;audit_physical_early=NULL;}
+    else{status=(*vm)->GetEnv(vm,(void**)&native_ti,JVMTI_VERSION_1_2);if(status!=JNI_OK||!native_ti)goto failed;}
+    native_original=**env;native_vm=vm;
+    memset(&capability,0,sizeof(capability));capability.can_get_bytecodes=1;capability.can_generate_frame_pop_events=1;
+    failure="AddCapabilities";error=(*native_ti)->AddCapabilities(native_ti,&capability);if(error!=JVMTI_ERROR_NONE)goto failed;
+    failure="GetCapabilities";error=(*native_ti)->GetCapabilities(native_ti,&actual);
+    if(error!=JVMTI_ERROR_NONE||!actual.can_get_bytecodes||!actual.can_generate_frame_pop_events)goto failed;
+    /* The VM-layout reader requires an actually admitted own JVMTI table,
+     * whose original GetBytecodes entry belongs to this same running VM.
+     * Register only this fixture environment; the JavaVM/JNI tables stay real. */
+    failure="own JVMTI environment admission";native_vm_original=**vm;
+    HMODULE toolingImage=native_image((void*)Java_dev_ronova_pro_AuditFixCheck_physicalSetup0);
+    if(!toolingImage)goto failed;
+    native_tooling_image_begin=(uintptr_t)toolingImage;
+    const IMAGE_DOS_HEADER *toolingDos=(const IMAGE_DOS_HEADER*)toolingImage;
+    const IMAGE_NT_HEADERS64 *toolingNt=(const IMAGE_NT_HEADERS64*)(native_tooling_image_begin+toolingDos->e_lfanew);
+    native_tooling_image_end=native_tooling_image_begin+toolingNt->OptionalHeader.SizeOfImage;
+    if(!native_private_register(&native_tooling_image_range,(const void*)native_tooling_image_begin,
+            (SIZE_T)(native_tooling_image_end-native_tooling_image_begin))
+            ||!native_tooling_observe(native_ti,env,(void*)Java_dev_ronova_pro_AuditFixCheck_physicalSetup0,1))goto failed;
+    failure="controller/frame-pop registration";
+    native_controller=(jclass)(*env)->NewGlobalRef(env,type);code_bridge=(jclass)(*env)->NewGlobalRef(env,bridge);
+    code_pop_callback=(*env)->GetStaticMethodID(env,type,"physicalPopped","(Ljava/lang/Object;Z)Z");native_tls=TlsAlloc();
+    if(!native_controller||!code_bridge||!code_pop_callback||native_tls==TLS_OUT_OF_INDEXES||!native_thread())goto failed;
+    memset(&callbacks,0,sizeof(callbacks));callbacks.FramePop=code_frame_popped;
+    failure="SetEventCallbacks";error=(*native_ti)->SetEventCallbacks(native_ti,&callbacks,sizeof(callbacks));if(error!=JVMTI_ERROR_NONE)goto failed;
+    failure="SetEventNotificationMode";error=(*native_ti)->SetEventNotificationMode(native_ti,JVMTI_ENABLE,JVMTI_EVENT_FRAME_POP,NULL);if(error!=JVMTI_ERROR_NONE)goto failed;
+    jclass pool=(*env)->FindClass(env,"java/util/concurrent/ForkJoinPool"),queue=(*env)->FindClass(env,"java/util/concurrent/ForkJoinPool$WorkQueue");
+    int quiescent=pool&&queue&&code_platform_queue_quiescent(env,pool,queue)
+            &&!code_platform_queue_quiescent(env,type,queue)&&!code_platform_queue_quiescent(env,pool,type);
+    if(pool)(*env)->DeleteLocalRef(env,pool);if(queue)(*env)->DeleteLocalRef(env,queue);
+    if(!quiescent){failure="bounded queue snapshot/exact class refusal";goto failed;}
+    InterlockedExchange(&code_pop_available,1);InterlockedExchange(&native_jni_ready,1);return;
+failed:
+    jvmtiPhase phase=JVMTI_PHASE_DEAD;if(native_ti)(*native_ti)->GetPhase(native_ti,&phase);char evidence[256];
+    snprintf(evidence,sizeof(evidence),"physical setup %s jni=%d jvmti=%d phase=%d bytecodes=%u framePop=%u early=%d",
+            failure,status,(int)error,(int)phase,actual.can_get_bytecodes,actual.can_generate_frame_pop_events,early);
+    Java_dev_ronova_pro_AuditFixCheck_physicalStop0(env,type);audit_physical_failure(env,evidence);
+}
+JNIEXPORT void JNICALL Java_dev_ronova_pro_AuditFixCheck_physicalBind0(JNIEnv *env,jclass type,jobject token){
+    (void)type;jmethodID method=NULL;jlocation location=-1;jint depth=0,bottom=0;jthread thread=NULL;
+    CodeVMMethod version={0};CodePool pool={0};char *name=NULL,*descriptor=NULL;CodeExit *entry=NULL;
+    NativeThread *state=native_tls==TLS_OUT_OF_INDEXES?NULL:(NativeThread*)TlsGetValue(native_tls);int ready=0;
+    const char *stage="state/token";jvmtiError error=JVMTI_ERROR_NONE;CodeFailure failure;code_failure_init(&failure);
+    if(!state||!token)goto done;
+    stage="actual caller prefix";if(!code_execution_frame(env,&method,&location,&depth,&bottom))goto done;
+    stage="GetMethodName";error=(*native_ti)->GetMethodName(native_ti,method,&name,&descriptor,NULL);
+    if(error!=JVMTI_ERROR_NONE||!name||!descriptor)goto done;
+    stage="method snapshot";if(!code_vm_snapshot_diagnostic(env,method,&version,&pool,name,descriptor,&failure))goto done;
+    stage="snapshot unchanged";if(!code_vm_unchanged(method,&version))goto done;
+    stage="GetCurrentThread";error=(*native_ti)->GetCurrentThread(native_ti,&thread);if(error!=JVMTI_ERROR_NONE)goto done;
+    stage="duplicate watcher";
+    for(CodeExit *seen=state->execution;seen;seen=seen->previous)
+        if(seen->bottom==bottom||(*env)->IsSameObject(env,seen->token,token))goto done;
+    stage="watcher allocation";entry=(CodeExit*)calloc(1,sizeof(*entry));if(!entry)goto done;
+    entry->method=method;entry->bottom=bottom;entry->token=(*env)->NewGlobalRef(env,token);
+    entry->physicalVersion[0]=version.method;entry->physicalVersion[1]=version.constantMethod;entry->physicalVersion[2]=version.constants;
+    entry->physicalLength=version.codeLength;entry->physical=1;
+    stage="global token";if(!entry->token)goto done;
+    stage="captured version";if(!code_execution_version(entry))goto done;
+    stage="NotifyFramePop";error=(*native_ti)->NotifyFramePop(native_ti,thread,depth);if(error!=JVMTI_ERROR_NONE)goto done;
+    entry->previous=state->execution;state->execution=entry;entry=NULL;ready=1;
+done:
+    char evidence[512];
+    if(!ready)snprintf(evidence,sizeof(evidence),"physical bind %s jvmti=%d snapshot=%s snapshotError=%d selector=%s%s bci=%lld depth=%d bottom=%d layout=%d ownBytecodes=%d",
+            stage,(int)error,failure.stage?failure.stage:"none",(int)failure.error,name?name:"?",descriptor?descriptor:"?",
+            (long long)location,depth,bottom,code_vm_layout.ready,native_tooling_getbytecodes_image(native_ti)!=NULL);
+    if(entry){if(entry->token)(*env)->DeleteGlobalRef(env,entry->token);free(entry);}
+    if(thread)(*env)->DeleteLocalRef(env,thread);if(name)(*native_ti)->Deallocate(native_ti,(unsigned char*)name);
+    if(descriptor)(*native_ti)->Deallocate(native_ti,(unsigned char*)descriptor);free(version.handlers);code_pool_free(&pool);
+    if(!ready)audit_physical_failure(env,evidence);
+}
+JNIEXPORT jlong JNICALL Java_dev_ronova_pro_AuditFixCheck_physicalSite0(JNIEnv *env,jclass type,jobject token){
+    return Java_dev_ronova_pro_bootstrap_NativeControl_executionSite0(env,type,token);
+}
+JNIEXPORT jlong JNICALL Java_dev_ronova_pro_AuditFixCheck_physicalFrameSite0(JNIEnv *env,jclass type,jobject token){
+    return Java_dev_ronova_pro_bootstrap_NativeControl_executionFrameSite0(env,type,token);
+}
+JNIEXPORT void JNICALL Java_dev_ronova_pro_AuditFixCheck_physicalInvalidate0(JNIEnv *env,jclass type,jobject token){
+    (void)type;NativeThread *state=native_tls==TLS_OUT_OF_INDEXES?NULL:(NativeThread*)TlsGetValue(native_tls);
+    for(CodeExit *entry=state?state->execution:NULL;entry;entry=entry->previous)
+        if((*env)->IsSameObject(env,entry->token,token)){entry->physicalVersion[0]^=(uintptr_t)1;return;}
+    audit_physical_failure(env,"fixture stale version had no actual watched token");
+}
+JNIEXPORT void JNICALL Java_dev_ronova_pro_AuditFixCheck_physicalRelease0(JNIEnv *env,jclass type,jobject token){
+    (void)type;NativeThread *state=native_tls==TLS_OUT_OF_INDEXES?NULL:(NativeThread*)TlsGetValue(native_tls);
+    CodeExit **slot=state?&state->execution:NULL;
+    while(slot&&*slot&&!(*env)->IsSameObject(env,(*slot)->token,token))slot=&(*slot)->previous;
+    if(slot&&*slot){CodeExit *entry=*slot;*slot=entry->previous;(*env)->DeleteGlobalRef(env,entry->token);free(entry);return;}
+    audit_physical_failure(env,"fixture release had no actual watched token");
+}
+
 JNIEXPORT void JNICALL Java_dev_ronova_pro_AuditFixCheck_hostProcess0(JNIEnv *env,jclass type){
     (void)type;const char *failure=NULL;void *dynamic_a=NULL,*dynamic_w=NULL;
     DWORD count_a=GetSystemDirectoryA(audit_directory_a,MAX_PATH),count_w=GetSystemDirectoryW(audit_directory_w,MAX_PATH);

@@ -49,7 +49,7 @@ public final class NativeControl {
                 if(dll==null)return installFailure("OBJECT_CLONE_JNI_PAYLOAD_ABSENT",false);
                 nativeLoadAttempted=true;
                 System.load(dll.toString());nativeLoaded=true;
-                if(abi()!=84)throw new UnsatisfiedLinkError("NATIVE_CONTROL_ABI");
+                if(abi()!=85)throw new UnsatisfiedLinkError("NATIVE_CONTROL_ABI");
             }
             if(!nativeBoundaryInstalled){
                 nativeHandoffRetryable=false;
@@ -188,6 +188,15 @@ public final class NativeControl {
         if(!available)throw new IllegalStateException("ACTUAL_BOOTSTRAP_CLASS_QUERY_UNAVAILABLE");
         return bootstrapLookupClasses0();
     }
+    /** Exact late bootstrap classes whose returned installation image awaits a real prepare event. */
+    public static boolean platformPrepareTargets(String[] names){
+        if(!controlCaller())throw new SecurityException("ACTUAL_PLATFORM_PREPARATION_AGENT_REQUIRED");
+        return available&&names!=null&&platformPrepareTargets0(names);
+    }
+    public static boolean platformQueueQuiescent(Class<?> pool,Class<?> queue){
+        if(CALLER.getCallerClass()!=TaskBridge.class)throw new SecurityException("ACTUAL_PLATFORM_QUEUE_READER_REQUIRED");
+        return available&&pool!=null&&queue!=null&&platformQueueQuiescent0(pool,queue);
+    }
     public static Class<?>[] loadedClasses(){
         if(!controlCaller())throw new SecurityException("ACTUAL_LOADED_CLASS_QUERY_REQUIRED");
         // A Java-only installation retains its original Instrumentation query.
@@ -222,6 +231,14 @@ public final class NativeControl {
         if(CALLER.getCallerClass()!=CodeSourceBridge.class)throw new SecurityException("ACTUAL_CODE_FRAME_BRIDGE_REQUIRED");
         return available&&executionWatch0(frame.getDeclaringClass(),frame.getMethodName(),frame.getDescriptor(),frame.getByteCodeIndex(),plan,token);
     }
+    static long executionSite(Object token){
+        if(CALLER.getCallerClass()!=CodeSourceBridge.class)throw new SecurityException("ACTUAL_CODE_FRAME_BRIDGE_REQUIRED");
+        return available&&token!=null?executionSite0(token):0;
+    }
+    static long executionFrameSite(Object token){
+        if(CALLER.getCallerClass()!=CodeSourceBridge.class)throw new SecurityException("ACTUAL_CODE_FRAME_BRIDGE_REQUIRED");
+        return available&&token!=null?executionFrameSite0(token):0;
+    }
     private static boolean executionPopped(Object token,boolean normal){return CodeSourceBridge.executionPopped(token,normal);}
     private static Object[] codeRetirementFrame(Class<?> declaring,String selector,int location,Object plan,Module owner){
         return CodeSourceBridge.executionRetirementFrame(declaring,selector,location,plan,owner);
@@ -229,7 +246,7 @@ public final class NativeControl {
     static boolean codeRetirementFramePermit(Class<?> declaring,int location,Object plan,Module owner){
         return CALLER.getCallerClass()==CodeSourceBridge.class&&available&&codeRetirementFramePermit0(declaring,location,plan,owner);
     }
-    static boolean executionPopPermit(Object token){return CALLER.getCallerClass()==CodeSourceBridge.class&&available&&executionPopPermit0(token);}
+    static int executionPopPermit(Object token){return CALLER.getCallerClass()==CodeSourceBridge.class&&available?executionPopPermit0(token):0;}
     static Class<?> codeFieldOwner(Class<?> symbolic,String name,String descriptor){
         if(CALLER.getCallerClass()!=CodeSourceBridge.class)throw new SecurityException("ACTUAL_CODE_FIELD_BRIDGE_REQUIRED");
         return available?codeFieldOwner0(symbolic,name,descriptor):null;
@@ -818,7 +835,11 @@ public final class NativeControl {
     private static native boolean executionRootAllowed0();
     private static native Object executionPlan0(Class<?> declaring,String method,String descriptor,int location);
     private static native boolean executionWatch0(Class<?> declaring,String method,String descriptor,int location,Object plan,Object token);
-    private static native boolean executionPopPermit0(Object token);
+    private static native long executionSite0(Object token);
+    private static native long executionFrameSite0(Object token);
+    private static native boolean platformPrepareTargets0(String[] names);
+    private static native boolean platformQueueQuiescent0(Class<?> pool,Class<?> queue);
+    private static native int executionPopPermit0(Object token);
     private static native Class<?> codeFieldOwner0(Class<?> symbolic,String name,String descriptor);
     private static native boolean heapWatch0(Object holder,Class<?> declaring,String name,String descriptor);
     private static native void heapPolicyChanged0(Object object);

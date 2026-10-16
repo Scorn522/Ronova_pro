@@ -14,6 +14,10 @@ public final class AuditFixCheck {
     private static void require(boolean yes,String message) {if(!yes)throw new AssertionError(message);}
     private static Object invoke(Object receiver,String name)throws Exception {var m=receiver.getClass().getDeclaredMethod(name);m.setAccessible(true);try{return m.invoke(receiver);}catch(InvocationTargetException e){if(e.getCause() instanceof Exception x)throw x;throw e;}}
     public static void main(String[] args)throws Exception {
+        if(args.length==1&&args[0].equals("startup-batches")){startupBatch();return;}
+        if(args.length==1&&args[0].equals("retirement-readback")){retirementReadback();return;}
+        if(args.length==1&&args[0].equals("physical-token")){physicalToken();return;}
+        if(args.length==1&&args[0].equals("queue-locations")){queueLocations();return;}
         if(args.length==1&&args[0].equals("root-retry-lifecycle-fixes")){definitionRetryLifecycle();nativeInstallLifecycle();return;}
         if(args.length==1&&args[0].equals("definition-retry")){definitionRetryLifecycle();return;}
         if(args.length==1&&args[0].equals("native-install-lifecycle")){nativeInstallLifecycle();return;}
@@ -78,9 +82,200 @@ public final class AuditFixCheck {
         System.out.println("STORAGE_SHUTDOWN_METADATA_PASS no_current_handle historic_unknown_preserved worker_closed");
     }
 
+    /** Current graph reads must invalidate a reused image even when its stack head is unchanged. */
+    private static void retirementReadback()throws Exception {
+        Class<?> node=Class.forName("java.util.concurrent.CompletableFuture$Completion",false,null);
+        Class<?> callback=Class.forName("java.util.concurrent.CompletableFuture$UniRun",false,null);
+        Object target=U.allocateInstance(callback),first=U.allocateInstance(callback),last=U.allocateInstance(callback);
+        Class<?> taskType=Class.forName("dev.ronova.pro.RecoveryTasks$Task");
+        Constructor<?> constructor=taskType.getDeclaredConstructor(Object.class,ClassLoader.class,boolean.class,Class.class);constructor.setAccessible(true);
+        Object task=constructor.newInstance(target,null,false,null);
+        Field sources=taskType.getDeclaredField("completionSources");sources.setAccessible(true);
+        CompletableFuture<Object> source=new CompletableFuture<>();
+        @SuppressWarnings("unchecked") Set<Object> retained=(Set<Object>)sources.get(task);retained.add(source);
+        Field stack=CompletableFuture.class.getDeclaredField("stack"),next=node.getDeclaredField("next");stack.setAccessible(true);next.setAccessible(true);
+        Method absent=RecoveryTasks.class.getDeclaredMethod("completionStacksAbsent",taskType);absent.setAccessible(true);
+        Method fields=RecoveryTasks.class.getDeclaredMethod("completionFields",taskType);fields.setAccessible(true);
+        next.set(first,last);stack.set(source,first);
+        require(Boolean.TRUE.equals(absent.invoke(null,task)),"ordinary callback chain was not absent");
+        Object layout=fields.invoke(null,task);require(layout==fields.invoke(null,task),"exact JDK layout was rediscovered");
+        next.set(first,target);next.set(target,last);
+        require(Boolean.FALSE.equals(absent.invoke(null,task)),"same-head middle insertion reused an absent readback");
+        next.set(first,last);next.set(target,null);
+        require(Boolean.TRUE.equals(absent.invoke(null,task)),"actual detached chain did not refresh");
+        stack.set(source,target);require(Boolean.FALSE.equals(absent.invoke(null,task)),"changed actual head reused readback");
+        stack.set(source,first);next.set(last,first);
+        require(Boolean.FALSE.equals(absent.invoke(null,task)),"cyclic actual graph claimed absence");
+        next.set(last,null);stack.set(source,null);
+        require(Boolean.TRUE.equals(absent.invoke(null,task)),"empty actual stack did not retire");
+
+        Class<?> bridge=Class.forName("dev.ronova.pro.bootstrap.TaskBridge",false,null);
+        Map<Field,Object> saved=new LinkedHashMap<>();
+        for(String name:List.of("certified","futureBoundaries","pendingBoundaries","boundaryCapabilities","certificationEpoch","registration","registrationEpoch")) {
+            Field field=bridge.getDeclaredField(name);field.setAccessible(true);Object value=field.get(null);
+            saved.put(field,value instanceof Set<?> set?new HashSet<>(set):value);
+        }
+        try {
+            for(var entry:saved.entrySet())if(entry.getValue() instanceof Set<?>) {
+                @SuppressWarnings("unchecked") Set<String> values=(Set<String>)entry.getKey().get(null);values.clear();
+                if(entry.getKey().getName().equals("futureBoundaries"))values.add("future/Boundary");
+                if(entry.getKey().getName().equals("certified"))values.add("ready/Boundary");
+            }
+            Method publish=bridge.getDeclaredMethod("publishBoundaryCapabilities");publish.setAccessible(true);publish.invoke(null);
+            Method capabilities=bridge.getMethod("boundaryCapabilities");
+            Object image=capabilities.invoke(null);require(image==capabilities.invoke(null),"unchanged installation image was rebuilt");
+            @SuppressWarnings("unchecked") Map.Entry<Long,Set<String>> ready=(Map.Entry<Long,Set<String>>)image;
+            require(ready.getValue().containsAll(Set.of("future/Boundary","ready/Boundary")),"future coverage was forced into loaded certification");
+            try {ready.getValue().add("forged/Boundary");throw new AssertionError("capability image was mutable");}catch(UnsupportedOperationException expected) { }
+            for(var entry:saved.entrySet())if(entry.getKey().getName().equals("pendingBoundaries")) {
+                @SuppressWarnings("unchecked") Set<String> values=(Set<String>)entry.getKey().get(null);values.add("future/Boundary");
+            }
+            publish.invoke(null);
+            @SuppressWarnings("unchecked") Map.Entry<Long,Set<String>> pending=(Map.Entry<Long,Set<String>>)capabilities.invoke(null);
+            require(pending!=ready&&pending.getKey()>ready.getKey()&&!pending.getValue().contains("future/Boundary"),"in-flight/failed image retained readiness");
+            Class<?> registration=Class.forName("dev.ronova.pro.bootstrap.TaskBridge$Registration",false,null);
+            Constructor<?> registrationConstructor=registration.getDeclaredConstructor(Consumer.class);registrationConstructor.setAccessible(true);
+            Object observer=registrationConstructor.newInstance((Consumer<Object[]>)row->{});
+            for(Field field:saved.keySet())if(field.getName().equals("registration"))field.set(null,observer);
+            Method commit=bridge.getMethod("withBoundaries",String[].class,long.class,Runnable.class);
+            boolean[] ran={false};Runnable action=()->ran[0]=true;
+            require(Boolean.FALSE.equals(commit.invoke(null,new String[]{"ready/Boundary"},ready.getKey(),action))&&!ran[0],"stale capability epoch executed a mutation");
+            require(Boolean.TRUE.equals(commit.invoke(null,new String[]{"ready/Boundary"},pending.getKey(),action))&&ran[0],"current exact boundary could not execute");
+        } finally {
+            for(var entry:saved.entrySet())if(entry.getValue() instanceof Set<?> prior) {
+                @SuppressWarnings("unchecked") Set<Object> values=(Set<Object>)entry.getKey().get(null);values.clear();values.addAll(prior);
+            } else entry.getKey().set(null,entry.getValue());
+        }
+        System.out.println("RETIREMENT_READBACK_PASS actual_CF_head_and_middle_edges cycle_refused empty_refresh immutable_capabilities pending_image_revokes_readiness stale_commit_epoch_refused fixture_only");
+    }
+
     // Actual isolated TxF preparation; no commit permit is constructed or granted.
     private static native void hostProcess0();
     private static native boolean nativeVmResults0();
+    private static native void physicalSetup0(Class<?> bridge);
+    private static native void physicalBind0(Object token);
+    private static native long physicalSite0(Object token);
+    private static native long physicalFrameSite0(Object token);
+    private static native void physicalInvalidate0(Object token);
+    private static native void physicalRelease0(Object token);
+    private static native void physicalStop0();
+    private static final Map<Object,Boolean> PHYSICAL_POPPED=new IdentityHashMap<>();
+    private static boolean physicalPopped(Object token,boolean normal) {PHYSICAL_POPPED.put(token,normal);return true;}
+    private static final class PhysicalBridge {
+        static void bind(Object token) {physicalBind0(token);}
+        static long site(Object token) {return physicalSite0(token);}
+        static long frame(Object token) {return physicalFrameSite0(token);}
+    }
+    private static final class PhysicalBody {
+        static Object normalToken,throwingToken;
+        static final RuntimeException FAILURE=new RuntimeException("physical original");
+        static void recursive(int depth,Object parent)throws Exception {
+            Object token=new Object();PhysicalBridge.bind(token);
+            require(PhysicalBridge.site(token)!=0,"own physical frame site unavailable");
+            if(parent!=null) {
+                require(PhysicalBridge.site(parent)==0,"recursive caller borrowed outer token");
+                require(PhysicalBridge.frame(parent)!=0,"exact suspended parent frame unavailable");
+            }
+            require(PhysicalBridge.site(new Object())==0,"unwatched token described actual site");
+            if(depth!=0)recursive(depth-1,token);
+            long[] other={-1};Thread worker=new Thread(()->other[0]=PhysicalBridge.site(token));worker.start();worker.join();
+            require(other[0]==0,"another thread borrowed physical token");
+            physicalInvalidate0(token);require(PhysicalBridge.site(token)==0&&PhysicalBridge.frame(token)==0,"obsolete captured method version remained authorized");
+            physicalRelease0(token);require(PhysicalBridge.site(token)==0,"released native watch remained authorized");
+        }
+        static void normal() {normalToken=new Object();PhysicalBridge.bind(normalToken);require(PhysicalBridge.site(normalToken)!=0,"normal watch unavailable");}
+        static void throwing() {throwingToken=new Object();PhysicalBridge.bind(throwingToken);throw FAILURE;}
+    }
+    private static void physicalToken()throws Exception {
+        System.load(java.nio.file.Path.of(System.getProperty("ronova.pro.audit.native")).toAbsolutePath().toString());
+        physicalSetup0(PhysicalBridge.class);
+        try {
+            PhysicalBody.recursive(2,null);
+            PhysicalBody.normal();require(Boolean.TRUE.equals(PHYSICAL_POPPED.get(PhysicalBody.normalToken)),"normal actual FramePop did not retire token");
+            try {PhysicalBody.throwing();throw new AssertionError("original throw disappeared");}
+            catch(RuntimeException original) {require(original==PhysicalBody.FAILURE,"exception identity changed");}
+            require(Boolean.FALSE.equals(PHYSICAL_POPPED.get(PhysicalBody.throwingToken)),"exceptional actual FramePop did not retire token");
+            require(PhysicalBridge.site(PhysicalBody.normalToken)==0&&PhysicalBridge.frame(PhysicalBody.throwingToken)==0,"popped physical token remained usable");
+        } finally {physicalStop0();PHYSICAL_POPPED.clear();}
+        System.out.println("PHYSICAL_TOKEN_PASS actual_JVMTI_sites recursive_outer_and_other_thread_refused captured_version_mismatch_refused actual_normal_exceptional_FramePop fixture_owned_registration");
+    }
+    private static void queueLocations()throws Exception {
+        Class<?> bridge=Class.forName("dev.ronova.pro.bootstrap.TaskBridge",false,null);
+        Class<?> queueType=Class.forName("java.util.concurrent.ForkJoinPool$WorkQueue",false,null);
+        Map<Field,Object> saved=new LinkedHashMap<>();
+        for(String name:List.of("certified","futureBoundaries","pendingBoundaries","boundaryCapabilities","certificationEpoch","forkQueueQuiescentEpoch")) {
+            Field field=bridge.getDeclaredField(name);field.setAccessible(true);Object value=field.get(null);
+            saved.put(field,value instanceof Set<?> set?new HashSet<>(set):value);
+        }
+        ForkJoinPool pool=new ForkJoinPool(1);
+        try {
+            for(var entry:saved.entrySet())if(entry.getValue() instanceof Set<?>) {
+                @SuppressWarnings("unchecked") Set<String> values=(Set<String>)entry.getKey().get(null);values.clear();
+                if(entry.getKey().getName().equals("certified"))values.addAll(Set.of("java/util/concurrent/ForkJoinPool","java/util/concurrent/ForkJoinPool$WorkQueue"));
+            }
+            Method publish=bridge.getDeclaredMethod("publishBoundaryCapabilities");publish.setAccessible(true);publish.invoke(null);
+            @SuppressWarnings("unchecked") Map.Entry<Long,Set<String>> capabilities=(Map.Entry<Long,Set<String>>)bridge.getMethod("boundaryCapabilities").invoke(null);
+            for(Field field:saved.keySet())if(field.getName().equals("forkQueueQuiescentEpoch"))field.setLong(null,capabilities.getKey()); // Fixture-owned installation metadata; no Agent is installed.
+            Object first=U.allocateInstance(queueType),second=U.allocateInstance(queueType);
+            ForkJoinTask<?> target=ForkJoinTask.adapt(()->{}),other=ForkJoinTask.adapt(()->{});
+            ForkJoinTask<?>[] firstArray=new ForkJoinTask<?>[8],secondArray=new ForkJoinTask<?>[8];firstArray[0]=target;
+            Field array=queueType.getDeclaredField("array"),top=queueType.getDeclaredField("top"),queues=ForkJoinPool.class.getDeclaredField("queues");
+            array.setAccessible(true);top.setAccessible(true);queues.setAccessible(true);
+            array.set(first,firstArray);array.set(second,secondArray);top.setInt(first,1);
+            Object image=Array.newInstance(queueType,2);Array.set(image,0,first);Array.set(image,1,second);queues.set(pool,image);
+            Method snapshot=bridge.getMethod("forkQueueSnapshot",Object.class,Object.class),epoch=bridge.getMethod("forkQueueEpoch",Object.class);
+            Object[] present=(Object[])snapshot.invoke(null,pool,target);
+            require(Integer.valueOf(0).equals(present[1])&&((Object[])present[2]).length==1&&((Object[])present[2])[0]==first,"preobserved exact queue task was lost");
+            Object[] absent=(Object[])snapshot.invoke(null,pool,other);require(Integer.valueOf(1).equals(absent[1])&&absent[0].equals(present[0]),"one seed did not cover independent task");
+            Field lockField=bridge.getDeclaredField("FORK_QUEUE_LOCK");lockField.setAccessible(true);Object lock=lockField.get(null);
+            Method arrayImage=bridge.getDeclaredMethod("forkArray",Object[].class);arrayImage.setAccessible(true);
+            Object firstState=arrayImage.invoke(null,(Object)firstArray),secondState=arrayImage.invoke(null,(Object)secondArray);
+            Method cell=bridge.getDeclaredMethod("recordForkCell",firstState.getClass(),int.class,Object.class,Object.class);cell.setAccessible(true);
+            synchronized(lock) {firstArray[0]=null;top.setInt(first,0);cell.invoke(null,firstState,0,target,null);secondArray[0]=target;top.setInt(second,1);cell.invoke(null,secondState,0,null,target);}
+            Object[] moved=(Object[])snapshot.invoke(null,pool,target);
+            require(Integer.valueOf(0).equals(moved[1])&&((Object[])moved[2]).length==1&&((Object[])moved[2])[0]==second&&!present[0].equals(epoch.invoke(null,pool)),"moved task kept an obsolete queue readback");
+            Method begin=bridge.getDeclaredMethod("beginForkQueueTransition",Object.class,boolean.class);begin.setAccessible(true);
+            Object transition=begin.invoke(null,second,false);
+            require(Integer.valueOf(-1).equals(((Object[])snapshot.invoke(null,pool,target))[1])&&Long.valueOf(-1).equals(epoch.invoke(null,pool)),"incomplete queue transition fabricated absence");
+            Method bind=bridge.getDeclaredMethod("bindForkArray",Class.forName(bridge.getName()+"$ForkQueueImage",false,null),Object[].class);bind.setAccessible(true);
+            Method findQueue=bridge.getDeclaredMethod("forkQueue",Object.class);findQueue.setAccessible(true);
+            ForkJoinTask<?>[] grown=new ForkJoinTask<?>[16];grown[0]=target;
+            Method finish=bridge.getDeclaredMethod("finishForkTransition",transition.getClass(),boolean.class);finish.setAccessible(true);
+            synchronized(lock) {array.set(second,grown);bind.invoke(null,findQueue.invoke(null,second),grown);finish.invoke(null,transition,true);}
+            require(Integer.valueOf(0).equals(((Object[])snapshot.invoke(null,pool,target))[1]),"resized actual array lost task identity");
+            Object grownState=arrayImage.invoke(null,(Object)grown);
+            synchronized(lock) {grown[0]=null;top.setInt(second,0);cell.invoke(null,grownState,0,target,null);}
+            require(Integer.valueOf(1).equals(((Object[])snapshot.invoke(null,pool,target))[1]),"actual removal remained present");
+            try {bridge.getMethod("forkQueueArrayStore",Object[].class,int.class,Object.class).invoke(null,grown,0,target);throw new AssertionError("non-JDK caller wrote through queue receipt");}
+            catch(InvocationTargetException refused) {require(refused.getCause() instanceof SecurityException&&grown[0]==null,"queue caller refusal changed task cell");}
+            Class<?> mutationType=Class.forName("dev.ronova.pro.bootstrap.ControlBridge$FieldMutation",false,null);
+            Constructor<?> mutation=mutationType.getDeclaredConstructor(java.util.concurrent.locks.ReentrantLock.class,Object.class,Object.class);mutation.setAccessible(true);
+            Method closed=mutationType.getDeclaredMethod("close");closed.setAccessible(true);
+            var gate=new java.util.concurrent.locks.ReentrantLock();gate.lock();Object receipt=mutation.newInstance(gate,null,grown);
+            try {
+                require(Integer.valueOf(-1).equals(((Object[])snapshot.invoke(null,pool,target))[1]),"out-of-band write in flight retained absence");
+                grown[0]=target;top.setInt(second,1);
+            } finally {closed.invoke(receipt);}
+            Object[] republished=(Object[])snapshot.invoke(null,pool,target);
+            require(Integer.valueOf(0).equals(republished[1])&&((Object[])republished[2])[0]==second&&!gate.isLocked(),"existing field/array receipt did not invalidate and reseed reinsertion");
+        } finally {
+            pool.shutdownNow();
+            for(var entry:saved.entrySet())if(entry.getValue() instanceof Set<?> prior) {
+                @SuppressWarnings("unchecked") Set<Object> values=(Set<Object>)entry.getKey().get(null);values.clear();values.addAll(prior);
+            } else entry.getKey().set(null,entry.getValue());
+        }
+        Class<?> contract=Class.forName("dev.ronova.pro.agent.JdkTaskBoundaryContract");
+        Class<?> reader=Class.forName("jdk.internal.org.objectweb.asm.ClassReader"),checker=Class.forName("jdk.internal.org.objectweb.asm.util.CheckClassAdapter");
+        for(String name:List.of("java/util/concurrent/ForkJoinPool","java/util/concurrent/ForkJoinPool$WorkQueue")) {
+            byte[] original;try(var input=ClassLoader.getPlatformClassLoader().getResourceAsStream(name+".class")){original=input.readAllBytes();}
+            byte[] transformed=(byte[])contract.getMethod("transform",String.class,byte[].class).invoke(null,name,original);
+            require(transformed!=null,"current JDK queue image did not transform: "+name);
+            java.io.StringWriter diagnostics=new java.io.StringWriter();
+            checker.getMethod("verify",reader,boolean.class,java.io.PrintWriter.class).invoke(null,reader.getConstructor(byte[].class).newInstance((Object)transformed),false,new java.io.PrintWriter(diagnostics));
+            require(diagnostics.toString().isEmpty(),"queue bytecode verification failed: "+name+":"+diagnostics);
+        }
+        System.out.println("QUEUE_LOCATIONS_PASS actual_JDK_layout seed_move_resize_remove pending_refusal stale_epoch_refused exact_caller_refused field_receipt_reinsertion transformed_queue_dataflow fixture_owned_certification_no_live_hooks");
+    }
 
     // One AUDIT_HOST_THREAD_CREATE_CHECK DLL. thread-create uses unattached
     // starts; thread-end checks actual attachment/detachment without rerunning it.
@@ -2330,6 +2525,54 @@ public final class AuditFixCheck {
         io.netty.channel.ChannelOutboundBuffer buffer=client.unsafe().outboundBuffer();return buffer==null?"closed":Integer.toString(buffer.size());
     }
     private static Module[] networkSources(Method current)throws ReflectiveOperationException {return (Module[])current.invoke(null);}
+    /** Real platform transformer output with a proxy for the VM batch return only. */
+    @SuppressWarnings("unchecked")
+    private static void startupBatch()throws Exception {
+        Class<?> agent=Class.forName("dev.ronova.pro.agent.RecoveryAgent"),reflection=Class.forName("dev.ronova.pro.agent.ReflectionWriteBoundary"),handles=Class.forName("dev.ronova.pro.agent.HandleWriteBoundary");
+        Field images=agent.getDeclaredField("platformImages"),returns=agent.getDeclaredField("platformReturns"),bridge=agent.getDeclaredField("bridge"),fieldReady=agent.getDeclaredField("reflectionGuarded"),unsafeReady=agent.getDeclaredField("unsafeGuarded"),guarded=reflection.getDeclaredField("guarded"),handleInstalled=handles.getDeclaredField("INSTALLED");
+        for(Field field:List.of(images,returns,bridge,fieldReady,unsafeReady,guarded,handleInstalled))field.setAccessible(true);
+        Map<String,Object> actualImages=(Map<String,Object>)images.get(null);Map<String,Object> oldImages=new HashMap<>(actualImages);
+        ThreadLocal<Map<String,Object>> local=(ThreadLocal<Map<String,Object>>)returns.get(null);Map<String,Object> originalReturns=local.get(),oldReturns=new HashMap<>(originalReturns);
+        Set<String> installedHandles=(Set<String>)handleInstalled.get(null),oldHandles=new HashSet<>(installedHandles);
+        Object oldBridge=bridge.get(null);boolean oldField=fieldReady.getBoolean(null),oldUnsafe=unsafeReady.getBoolean(null);int oldGuarded=guarded.getInt(null);
+        Method batch=agent.getDeclaredMethod("retransformStartup",java.lang.instrument.Instrumentation.class,List.class,String.class,boolean.class),starting=agent.getDeclaredMethod("platformTransforming",ClassLoader.class,String.class,Class.class),returned=agent.getDeclaredMethod("platformReturned",ClassLoader.class,String.class,Class.class,byte[].class),accepted=agent.getDeclaredMethod("platformAccepted",Class.class);
+        Method fieldTransform=reflection.getDeclaredMethod("transform",ClassLoader.class,String.class,byte[].class),handleTransform=handles.getDeclaredMethod("transform",ClassLoader.class,String.class,byte[].class);
+        for(Method method:List.of(batch,starting,returned,accepted,fieldTransform,handleTransform))method.setAccessible(true);
+        List<Class<?>> targets=List.of(Field.class,Method.class);Map<Class<?>,byte[]> bytes=new IdentityHashMap<>();
+        for(Class<?> type:targets)try(var input=type.getResourceAsStream("/"+type.getName().replace('.','/')+".class")){bytes.put(type,Objects.requireNonNull(input).readAllBytes());}
+        List<Class<?>[]> calls=new ArrayList<>();int[] mode={0};
+        var api=(java.lang.instrument.Instrumentation)Proxy.newProxyInstance(AuditFixCheck.class.getClassLoader(),new Class<?>[]{java.lang.instrument.Instrumentation.class},(proxy,method,args)->{
+            if(!method.getName().equals("retransformClasses"))throw new AssertionError("unexpected startup API:"+method.getName());
+            Class<?>[] actuals=((Class<?>[])args[0]).clone();calls.add(actuals);
+            for(Class<?> actual:actuals){
+                String name=actual.getName().replace('.','/');starting.invoke(null,null,name,actual);
+                byte[] output=(byte[])(actual==Field.class?fieldTransform:handleTransform).invoke(null,null,name,bytes.get(actual));
+                require(output!=null&&output.length>4,"real platform guard output absent:"+name);
+                returned.invoke(null,null,name,actual,output);
+            }
+            if(mode[0]==0||mode[0]==2&&(actuals.length>1||actuals[0]==Method.class))throw new java.lang.instrument.UnmodifiableClassException("audit actual batch refusal");
+            return null;
+        });
+        try{
+            bridge.set(null,null);actualImages.clear();originalReturns.clear();fieldReady.setBoolean(null,false);unsafeReady.setBoolean(null,false);
+            try{batch.invoke(null,api,targets,"AUDIT_STARTUP",true);throw new AssertionError("rejected required batch returned success");}
+            catch(InvocationTargetException refused){require(refused.getCause() instanceof java.lang.instrument.UnmodifiableClassException,"required batch hid its actual VM refusal");}
+            require(calls.size()==1&&Arrays.equals(calls.get(0),targets.toArray(Class<?>[]::new)),"required targets were split or changed before the real batch");
+            for(Object image:actualImages.values())require(Boolean.FALSE.equals(invoke(image,"accepted")),"VM-refused image was certified");
+            accepted.invoke(null,Field.class);accepted.invoke(null,Method.class);
+            require(!fieldReady.getBoolean(null)&&originalReturns.isEmpty(),"rejected batch retained a consumable success receipt");
+            mode[0]=1;calls.clear();batch.invoke(null,api,targets,"AUDIT_STARTUP",true);
+            require(calls.size()==1&&fieldReady.getBoolean(null),"successful real target batch was split or not accepted");
+            for(Object image:actualImages.values())require(Boolean.TRUE.equals(invoke(image,"accepted")),"successful API return lost its exact returned image");
+            mode[0]=2;calls.clear();batch.invoke(null,api,targets,"AUDIT_STARTUP_OPTIONAL",false);
+            require(calls.size()==3&&calls.get(0).length==2&&calls.get(1).length==1&&calls.get(1)[0]==Field.class&&calls.get(2).length==1&&calls.get(2)[0]==Method.class,"optional batch refusal did not isolate only its loaded targets");
+            require(Boolean.TRUE.equals(invoke(actualImages.get("java/lang/reflect/Field"),"accepted"))&&Boolean.FALSE.equals(invoke(actualImages.get("java/lang/reflect/Method"),"accepted")),"optional refusal skipped a recoverable loaded target or certified a refused one");
+        }finally{
+            actualImages.clear();actualImages.putAll(oldImages);originalReturns.clear();originalReturns.putAll(oldReturns);local.set(originalReturns);
+            installedHandles.clear();installedHandles.addAll(oldHandles);guarded.setInt(null,oldGuarded);bridge.set(null,oldBridge);fieldReady.setBoolean(null,oldField);unsafeReady.setBoolean(null,oldUnsafe);
+        }
+        System.out.println("STARTUP_BATCH_PASS actual_Field_Method_transformer_outputs one_required_batch refused_images_unaccepted failed_receipts_discarded optional_refusal_isolates_loaded_targets proxy_VM_return_only_no_live_install");
+    }
     private static void modGroupReturns(String jar,String profile)throws Exception {
         var finder=java.lang.module.ModuleFinder.of(java.nio.file.Path.of(jar));
         String name=finder.findAll().iterator().next().descriptor().name();

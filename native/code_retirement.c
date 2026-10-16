@@ -9,7 +9,7 @@ typedef struct CodeRetirement {
     jmethodID waitMethod;jint waitBottom;struct CodeRetirement *next;
 } CodeRetirement;
 typedef struct CodeRetirementScope {
-    jclass declaring;jobject plan,module;jlocation location;
+    jclass declaring;jobject plan,module;jlocation location;jmethodID method;jint bottom;CodeVMMethod *version;
 } CodeRetirementScope;
 enum {CODE_RETIRE_READY,CODE_RETIRE_CLEANUP,CODE_RETIRE_FRAMEWORK,CODE_RETIRE_NATIVE_SCOPE,CODE_RETIRE_SOURCE_SCOPE,CODE_RETIRE_VM};
 static SRWLOCK code_retirement_records=SRWLOCK_INIT;
@@ -162,15 +162,20 @@ static jvmtiError code_retirement_return(jthread thread,char result,jvalue bits)
 JNIEXPORT jboolean JNICALL Java_dev_ronova_pro_bootstrap_NativeControl_codeRetirementFramePermit0(JNIEnv *env,jclass type,jclass declaring,jint location,jobject plan,jobject owner){
     NativeThread *state=native_tls==TLS_OUT_OF_INDEXES?NULL:(NativeThread*)TlsGetValue(native_tls);
     CodeRetirementScope *scope=state?state->codeRetirement:NULL;
-    return scope&&native_original.IsSameObject(env,type,native_controller)&&scope->location==location
-        &&native_original.IsSameObject(env,scope->declaring,declaring)&&native_original.IsSameObject(env,scope->plan,plan)
-        &&native_original.IsSameObject(env,scope->module,owner)?JNI_TRUE:JNI_FALSE;
+    if(!scope||!code_caller(env)||!native_original.IsSameObject(env,type,native_controller)||scope->location!=location
+        ||!native_original.IsSameObject(env,scope->declaring,declaring)||!native_original.IsSameObject(env,scope->plan,plan)
+        ||!native_original.IsSameObject(env,scope->module,owner)||!scope->version||!code_vm_unchanged(scope->method,scope->version))return JNI_FALSE;
+    jmethodID method=NULL;jlocation at=-1;jint total=0;
+    return (*native_ti)->GetFrameCount(native_ti,NULL,&total)==JVMTI_ERROR_NONE&&scope->bottom>0&&total>=scope->bottom
+        &&(*native_ti)->GetFrameLocation(native_ti,NULL,total-scope->bottom,&method,&at)==JVMTI_ERROR_NONE
+        &&method==scope->method&&at==location&&code_vm_unchanged(scope->method,scope->version)
+        ?JNI_TRUE:JNI_FALSE;
 }
 static void code_retirement_force(JNIEnv *env,jthread thread,NativeThread *state,CodeRetirement *request,
         CodeRetirementOwner *owner,jmethodID method,jlocation location,jint bottom){
     jclass declaring=NULL;jobject plan=NULL,module=NULL,value=NULL,token=NULL;jobjectArray selected=NULL;
     jstring selector=NULL,descriptor=NULL;char *name=NULL,*signature=NULL;unsigned char *bytes=NULL;jint length=0,access=0;
-    CodePool pool={0};CodeVMMethod version={0};CodeExit *exit=NULL;int permanent=1,reason=CODE_RETIRE_SOURCE_SCOPE,ready=0;
+    CodePool pool={0};CodeVMMethod version={0};CodeExit *exit=NULL,*observed=NULL;int permanent=1,reason=CODE_RETIRE_SOURCE_SCOPE,ready=0;
     if((*native_ti)->GetMethodDeclaringClass(native_ti,method,&declaring)!=JVMTI_ERROR_NONE
         ||(*native_ti)->GetMethodName(native_ti,method,&name,&signature,NULL)!=JVMTI_ERROR_NONE
         ||(*native_ti)->GetMethodModifiers(native_ti,method,&access)!=JVMTI_ERROR_NONE
@@ -182,7 +187,7 @@ static void code_retirement_force(JNIEnv *env,jthread thread,NativeThread *state
     if(plan){
         size_t a=strlen(name),b=strlen(signature);char *text=(char*)malloc(a+b+1);if(!text)goto done;
         memcpy(text,name,a);memcpy(text+a,signature,b+1);selector=native_original.NewStringUTF(env,text);free(text);if(!selector)goto done;
-        CodeRetirementScope scope={declaring,plan,module,location};state->codeRetirement=&scope;state->control++;
+        CodeRetirementScope scope={declaring,plan,module,location,method,bottom,&version};state->codeRetirement=&scope;state->control++;
         selected=(jobjectArray)native_original.CallStaticObjectMethod(env,native_controller,code_retirement_query,declaring,selector,(jint)location,plan,module);
         state->control--;state->codeRetirement=NULL;
         if(native_original.ExceptionCheck(env)||!selected||native_original.GetArrayLength(env,selected)!=2)goto done;
@@ -215,17 +220,25 @@ static void code_retirement_force(JNIEnv *env,jthread thread,NativeThread *state
     if(code_retirement_native_scope(state)||!code_vm_unchanged(method,&version)
         ||(*native_ti)->GetFrameCount(native_ti,thread,&frames)!=JVMTI_ERROR_NONE||frames!=bottom
         ||(*native_ti)->GetFrameLocation(native_ti,thread,0,&actual,&at)!=JVMTI_ERROR_NONE||actual!=method||at!=location)goto done;
-    exit=(CodeExit*)calloc(1,sizeof(*exit));if(!exit)goto done;
-    exit->method=method;exit->bottom=bottom;exit->retirementOwner=owner;
-    if(token){exit->token=native_original.NewGlobalRef(env,token);if(!exit->token)goto done;}
-    if((*native_ti)->NotifyFramePop(native_ti,thread,0)!=JVMTI_ERROR_NONE)goto done;
+    if(token){
+        for(observed=state->execution;observed;observed=observed->previous)
+            if(observed->method==method&&observed->bottom==bottom&&native_original.IsSameObject(env,observed->token,token))break;
+        if(!observed||observed->retirementOwner||!code_execution_version(observed)){
+            permanent=1;reason=CODE_RETIRE_CLEANUP;goto done;
+        }
+    }else{
+        exit=(CodeExit*)calloc(1,sizeof(*exit));if(!exit)goto done;
+        exit->method=method;exit->bottom=bottom;exit->retirementOwner=owner;
+        if((*native_ti)->NotifyFramePop(native_ti,thread,0)!=JVMTI_ERROR_NONE)goto done;
+    }
     // Disable stepping before the request: after ForceEarlyReturn succeeds the
     // stack is undefined until the Java thread is resumed. Only its real pop
     // event may close the exact source token and rearm the next frame.
     if(!code_retirement_event(request,thread,0))goto done;
     jvmtiError error=code_retirement_return(thread,result,returned);
     if(error!=JVMTI_ERROR_NONE){permanent=1;reason=CODE_RETIRE_VM;code_retirement_failure(request);goto done;}
-    exit->previous=state->execution;state->execution=exit;exit=NULL;
+    if(observed)observed->retirementOwner=owner;
+    else{exit->previous=state->execution;state->execution=exit;exit=NULL;}
     request->waitMethod=method;request->waitBottom=bottom;InterlockedExchange(&request->pendingForce,1);
     InterlockedExchange(&request->reason,CODE_RETIRE_READY);InterlockedIncrement64(&owner->requested);ready=1;
 done:

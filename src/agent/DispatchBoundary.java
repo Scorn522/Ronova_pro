@@ -119,11 +119,19 @@ final class DispatchBoundary {
         catch(ClassNotFoundException|LinkageError unavailable) { return false; }
     }
     static void retransformDeclared(Instrumentation api) {
-        for(Class<?> type:RecoveryAgent.loadedClasses()) {
+        if(entries.length==0)return;
+        retransformDeclared(api,RecoveryAgent.loadedClasses());
+    }
+    static void retransformDeclared(Instrumentation api,Class<?>[] loaded) {
+        if(entries.length==0)return;
+        var targets=new ArrayList<Class<?>>();
+        for(Class<?> type:loaded) {
             if(type.isArray()||type.isPrimitive()||!api.isModifiableClass(type))continue;
             boolean wanted=false;for(Entry e:entries)if(e.owner.isAssignableFrom(type)) { wanted=true;break; }
-            if(wanted)try { api.retransformClasses(type); }
-            catch(java.lang.instrument.UnmodifiableClassException e) { throw new IllegalStateException("DISPATCH_INSTALL_FAILED:"+type.getName(),e); }
+            if(wanted)targets.add(type);
         }
+        if(targets.isEmpty())return;
+        try { api.retransformClasses(targets.toArray(Class<?>[]::new)); }
+        catch(java.lang.instrument.UnmodifiableClassException e) { throw new IllegalStateException("DISPATCH_INSTALL_FAILED",e); }
     }
 }

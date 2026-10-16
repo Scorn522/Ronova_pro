@@ -32,7 +32,9 @@ public final class TaskBridge {
     static volatile Registration registration;
     static volatile String coverage="AGENT_NOT_READY";
     static final java.util.Set<String> certified=new java.util.HashSet<>();
+    private static final Set<String> futureBoundaries=new java.util.HashSet<>(),pendingBoundaries=new java.util.HashSet<>();
     static long certificationEpoch;
+    private static volatile Map.Entry<Long,Set<String>> boundaryCapabilities=Map.entry(0L,Set.of());
     static final int ADMISSION_LIMIT=8192;
     static final Object BLOCKED=new Object();
     static final java.util.Map<EventKey,Set<Module>> TASK_OWNERS=new java.util.HashMap<>();
@@ -584,6 +586,407 @@ public final class TaskBridge {
     }
     static int submissionEntries;
     static final ThreadLocal<Registration> AUTHORITY=new ThreadLocal<>();
+    private static final Object FORK_QUEUE_LOCK=new Object();
+    private static final java.lang.ref.ReferenceQueue<Object> FORK_QUEUE_GC=new java.lang.ref.ReferenceQueue<>();
+    private static final Map<EventKey,ForkPoolImage> FORK_POOLS=new HashMap<>();
+    private static final Map<EventKey,ForkPoolImage> FORK_POOL_ARRAYS=new HashMap<>();
+    private static final Map<EventKey,ForkQueueImage> FORK_QUEUES=new HashMap<>();
+    private static final Map<EventKey,ForkArrayImage> FORK_ARRAYS=new HashMap<>();
+    private static long forkQueueSequence,forkQueueLosses;
+    private static final Object FORK_QUIESCENCE_GATE=new Object();
+    private static volatile long forkQueueQuiescentEpoch=-1;
+    private static long forkQueueQuiescenceRetry;
+    private static boolean forkQueueQuiescenceProbing;
+    private static final String FORK_POOL_NAME="java.util.concurrent.ForkJoinPool",FORK_QUEUE_NAME=FORK_POOL_NAME+"$WorkQueue";
+    private static final class ForkPoolImage {
+        final java.lang.ref.WeakReference<Object> pool;
+        java.lang.ref.WeakReference<Object[]> image=new java.lang.ref.WeakReference<>(null);
+        final Set<ForkQueueImage> queues=Collections.newSetFromMap(new IdentityHashMap<>());
+        final Map<EventKey,Set<ForkQueueImage>> locations=new HashMap<>();
+        long epoch,seedAttempt=-1,certification=-1,losses=-1,retryAfter;
+        int pending;
+        boolean complete;
+        ForkPoolImage(Object pool){this.pool=new java.lang.ref.WeakReference<>(pool);}
+    }
+    private static final class ForkQueueImage {
+        final java.lang.ref.WeakReference<Object> queue;
+        ForkPoolImage pool;
+        ForkArrayImage array;
+        int pending;
+        ForkQueueImage(Object queue){this.queue=new java.lang.ref.WeakReference<>(queue);}
+    }
+    private static final class ForkArrayImage {
+        final java.lang.ref.WeakReference<Object[]> array;
+        final Map<Integer,EventKey> cells=new HashMap<>();
+        final Map<EventKey,Integer> counts=new HashMap<>();
+        final Set<ForkQueueImage> owners=Collections.newSetFromMap(new IdentityHashMap<>());
+        boolean complete;
+        ForkArrayImage(Object[] array){this.array=new java.lang.ref.WeakReference<>(array);}
+    }
+    private static final class ForkQueueTransition {
+        final ForkPoolImage pool;
+        final ForkQueueImage queue;
+        final Thread thread=Thread.currentThread();
+        boolean closed;
+        ForkQueueTransition(ForkPoolImage pool,ForkQueueImage queue){this.pool=pool;this.queue=queue;}
+    }
+    private static final class ForkExternalMutation {
+        final ForkPoolImage pool;
+        final List<ForkQueueImage> queues;
+        final Thread thread=Thread.currentThread();
+        boolean closed;
+        ForkExternalMutation(ForkPoolImage pool,List<ForkQueueImage> queues){this.pool=pool;this.queues=queues;}
+    }
+    private static final class ForkQueueLayout {
+        static final Class<?> TYPE=queueType();
+        static final java.lang.reflect.Field POOL=field(java.util.concurrent.ForkJoinPool.class,"queues"),MODE=field(java.util.concurrent.ForkJoinPool.class,"mode"),ARRAY=field(TYPE,"array"),OWNER=field(TYPE,"owner"),
+                TOP=field(TYPE,"top"),BASE=field(TYPE,"base"),SOURCE=field(TYPE,"source");
+        static final java.lang.reflect.Method REMOVE=remove();
+        static Class<?> queueType(){try{return Class.forName(FORK_QUEUE_NAME,false,null);}catch(ClassNotFoundException unavailable){throw new ExceptionInInitializerError(unavailable);}}
+        static java.lang.reflect.Field field(Class<?> owner,String name) {
+            try {var field=owner.getDeclaredField(name);field.setAccessible(true);return field;}
+            catch(ReflectiveOperationException unavailable){throw new ExceptionInInitializerError(unavailable);}
+        }
+        static java.lang.reflect.Method remove() {
+            try {var method=TYPE.getDeclaredMethod("tryRemove",java.util.concurrent.ForkJoinTask.class,boolean.class);method.setAccessible(true);return method;}
+            catch(ReflectiveOperationException unavailable){throw new ExceptionInInitializerError(unavailable);}
+        }
+    }
+    private static void forkQueueCaller(Class<?> caller,boolean pool) {
+        if(caller.getClassLoader()!=null||!(caller.getName().equals(FORK_QUEUE_NAME)||pool&&caller.getName().equals(FORK_POOL_NAME)))
+            throw new SecurityException("FORK_QUEUE_PLATFORM_CALLER_REQUIRED");
+    }
+    private static void reapForkQueues() {
+        EventKey key;
+        while((key=(EventKey)FORK_QUEUE_GC.poll())!=null) {
+            FORK_POOLS.remove(key);FORK_POOL_ARRAYS.remove(key);FORK_ARRAYS.remove(key);
+            ForkQueueImage queue=FORK_QUEUES.remove(key);if(queue!=null)detachForkQueue(queue);
+        }
+    }
+    private static ForkPoolImage forkPool(Object pool) {
+        ForkPoolImage state=FORK_POOLS.get(new EventKey(pool,null));
+        if(state==null){state=new ForkPoolImage(pool);FORK_POOLS.put(new EventKey(pool,FORK_QUEUE_GC),state);touchForkPool(state);}
+        return state;
+    }
+    private static ForkQueueImage forkQueue(Object queue) {
+        ForkQueueImage state=FORK_QUEUES.get(new EventKey(queue,null));
+        if(state==null){state=new ForkQueueImage(queue);FORK_QUEUES.put(new EventKey(queue,FORK_QUEUE_GC),state);}
+        return state;
+    }
+    private static void touchForkPool(ForkPoolImage pool) {
+        if(forkQueueSequence==Long.MAX_VALUE){pool.complete=false;return;}
+        pool.epoch=++forkQueueSequence;
+    }
+    private static void forkQueueObservationLost() {
+        if(forkQueueLosses<Long.MAX_VALUE)forkQueueLosses++;
+        else for(ForkPoolImage pool:FORK_POOLS.values())pool.complete=false;
+    }
+    private static void forkLocation(ForkQueueImage queue,EventKey task,boolean present) {
+        ForkPoolImage pool=queue.pool;if(pool==null)return;
+        if(present)pool.locations.computeIfAbsent(task,ignored->Collections.newSetFromMap(new IdentityHashMap<>())).add(queue);
+        else {Set<ForkQueueImage> locations=pool.locations.get(task);if(locations!=null){locations.remove(queue);if(locations.isEmpty())pool.locations.remove(task);}}
+    }
+    private static void detachForkQueue(ForkQueueImage queue) {
+        ForkPoolImage pool=queue.pool;if(pool==null)return;
+        if(queue.array!=null)for(EventKey task:queue.array.counts.keySet())forkLocation(queue,task,false);
+        pool.queues.remove(queue);pool.pending-=queue.pending;queue.pool=null;touchForkPool(pool);
+    }
+    private static ForkArrayImage forkArray(Object[] array) {
+        ForkArrayImage state=FORK_ARRAYS.get(new EventKey(array,null));
+        if(state!=null)return state;
+        state=new ForkArrayImage(array);FORK_ARRAYS.put(new EventKey(array,FORK_QUEUE_GC),state);
+        seedForkArray(state,array);return state;
+    }
+    private static void seedForkArray(ForkArrayImage state,Object[] array) {
+        for(ForkQueueImage owner:state.owners)for(EventKey task:state.counts.keySet())forkLocation(owner,task,false);
+        state.cells.clear();state.counts.clear();state.complete=true;
+        for(int index=0;index<array.length;index++)if(array[index]!=null) {
+            if(!(array[index] instanceof java.util.concurrent.ForkJoinTask<?>)){state.complete=false;continue;}
+            EventKey task=new EventKey(array[index],null);state.cells.put(index,task);state.counts.merge(task,1,Integer::sum);
+        }
+        for(ForkQueueImage owner:state.owners) {
+            for(EventKey task:state.counts.keySet())forkLocation(owner,task,true);
+            if(owner.pool!=null&&!state.complete)owner.pool.complete=false;
+        }
+    }
+    private static void bindForkArray(ForkQueueImage queue,Object[] array) {
+        if(queue.array!=null) {
+            for(EventKey task:queue.array.counts.keySet())forkLocation(queue,task,false);
+            queue.array.owners.remove(queue);
+        }
+        queue.array=array==null?null:forkArray(array);
+        if(queue.array!=null) {
+            queue.array.owners.add(queue);
+            for(EventKey task:queue.array.counts.keySet())forkLocation(queue,task,true);
+            if(queue.pool!=null&&!queue.array.complete)queue.pool.complete=false;
+        }
+        if(queue.pool!=null)touchForkPool(queue.pool);
+    }
+    private static void bindForkPool(ForkPoolImage pool,Object[] image)throws IllegalAccessException {
+        Set<ForkQueueImage> present=Collections.newSetFromMap(new IdentityHashMap<>());
+        if(image!=null)for(Object value:image)if(value!=null) {
+            if(value.getClass()!=ForkQueueLayout.TYPE){pool.complete=false;continue;}
+            ForkQueueImage queue=forkQueue(value);present.add(queue);
+            if(queue.pool!=pool) {
+                if(queue.pool!=null){queue.pool.complete=false;detachForkQueue(queue);pool.complete=false;}
+                queue.pool=pool;pool.queues.add(queue);pool.pending+=queue.pending;
+                Object array=ForkQueueLayout.ARRAY.get(value);
+                if(array!=null&&!(array instanceof java.util.concurrent.ForkJoinTask<?>[])){pool.complete=false;continue;}
+                bindForkArray(queue,(Object[])array);
+            }
+        }
+        for(ForkQueueImage queue:List.copyOf(pool.queues))if(!present.contains(queue))detachForkQueue(queue);
+        Object[] prior=pool.image.get();if(prior!=null&&prior!=image)FORK_POOL_ARRAYS.remove(new EventKey(prior,null));
+        pool.image=new java.lang.ref.WeakReference<>(image);
+        if(image!=null)FORK_POOL_ARRAYS.put(new EventKey(image,FORK_QUEUE_GC),pool);
+        touchForkPool(pool);
+    }
+    private static void recordForkCell(ForkArrayImage array,int index,Object before,Object after) {
+        EventKey prior=array.cells.get(index);Object recorded=prior==null?null:prior.get();
+        if(recorded!=before)array.complete=false;
+        if(prior!=null) {
+            Integer count=array.counts.get(prior);
+            if(count==null||count<1)array.complete=false;
+            else if(count==1){array.counts.remove(prior);for(ForkQueueImage owner:array.owners)forkLocation(owner,prior,false);}
+            else array.counts.put(prior,count-1);
+        }
+        array.cells.remove(index);
+        if(after!=null) {
+            if(!(after instanceof java.util.concurrent.ForkJoinTask<?>))array.complete=false;
+            else {
+                EventKey task=new EventKey(after,null);array.cells.put(index,task);array.counts.merge(task,1,Integer::sum);
+                for(ForkQueueImage owner:array.owners)forkLocation(owner,task,true);
+            }
+        }
+        for(ForkQueueImage owner:array.owners)if(owner.pool!=null){if(!array.complete)owner.pool.complete=false;touchForkPool(owner.pool);}
+    }
+    private static ForkArrayImage observeForkArray(Object[] array) {
+        try{return forkArray(array);}catch(Throwable unavailable){forkQueueObservationLost();return null;}
+    }
+    private static void observedForkCell(ForkArrayImage state,int index,Object before,Object after) {
+        try{if(state!=null)recordForkCell(state,index,before,after);else forkQueueObservationLost();}
+        catch(Throwable unavailable){forkQueueObservationLost();}
+    }
+    /** The actual platform mutation runs exactly once under the short receipt monitor. */
+    public static java.util.concurrent.ForkJoinTask<?> forkQueueGetAndClear(java.lang.invoke.VarHandle handle,java.util.concurrent.ForkJoinTask<?>[] array,int index,Object ignored) {
+        forkQueueCaller(WALKER.getCallerClass(),false);synchronized(FORK_QUEUE_LOCK) {
+            boolean nested=OWN_LEDGER_MUTATION.get()!=null;OWN_LEDGER_MUTATION.set(true);
+            try {ForkArrayImage state=observeForkArray(array);var prior=(java.util.concurrent.ForkJoinTask<?>)handle.getAndSet(array,index,(java.util.concurrent.ForkJoinTask<?>)null);observedForkCell(state,index,prior,null);return prior;}
+            finally {if(!nested)OWN_LEDGER_MUTATION.remove();}
+        }
+    }
+    public static boolean forkQueueCompareAndClear(java.lang.invoke.VarHandle handle,java.util.concurrent.ForkJoinTask<?>[] array,int index,java.util.concurrent.ForkJoinTask<?> expected,Object ignored) {
+        forkQueueCaller(WALKER.getCallerClass(),false);synchronized(FORK_QUEUE_LOCK) {
+            boolean nested=OWN_LEDGER_MUTATION.get()!=null;OWN_LEDGER_MUTATION.set(true);
+            try {ForkArrayImage state=observeForkArray(array);boolean changed=handle.compareAndSet(array,index,expected,(java.util.concurrent.ForkJoinTask<?>)null);if(changed)observedForkCell(state,index,expected,null);return changed;}
+            finally {if(!nested)OWN_LEDGER_MUTATION.remove();}
+        }
+    }
+    public static void forkQueueSetVolatile(java.lang.invoke.VarHandle handle,java.util.concurrent.ForkJoinTask<?>[] array,int index,java.util.concurrent.ForkJoinTask<?> task) {
+        forkQueueCaller(WALKER.getCallerClass(),false);synchronized(FORK_QUEUE_LOCK) {
+            boolean nested=OWN_LEDGER_MUTATION.get()!=null;OWN_LEDGER_MUTATION.set(true);
+            try {ForkArrayImage state=observeForkArray(array);Object prior=array[index];handle.setVolatile(array,index,task);observedForkCell(state,index,prior,task);}
+            finally {if(!nested)OWN_LEDGER_MUTATION.remove();}
+        }
+    }
+    public static void forkQueueArrayStore(Object[] array,int index,Object task) {
+        forkQueueCaller(WALKER.getCallerClass(),false);synchronized(FORK_QUEUE_LOCK) {
+            boolean nested=OWN_LEDGER_MUTATION.get()!=null;OWN_LEDGER_MUTATION.set(true);
+            try {ForkArrayImage state=observeForkArray(array);Object prior=array[index];array[index]=task;observedForkCell(state,index,prior,task);}
+            finally {if(!nested)OWN_LEDGER_MUTATION.remove();}
+        }
+    }
+    public static void forkPoolQueueStore(Object[] array,int index,Object queue) {
+        forkQueueCaller(WALKER.getCallerClass(),true);synchronized(FORK_QUEUE_LOCK) {
+            boolean nested=OWN_LEDGER_MUTATION.get()!=null;OWN_LEDGER_MUTATION.set(true);
+            try {
+                array[index]=queue;
+                try {ForkPoolImage pool=FORK_POOL_ARRAYS.get(new EventKey(array,null));if(pool!=null)bindForkPool(pool,array);}
+                catch(Throwable unavailable){forkQueueObservationLost();}
+            } finally {if(!nested)OWN_LEDGER_MUTATION.remove();}
+        }
+    }
+    public static Object forkQueueFieldBegin(Object receiver,boolean poolField) {
+        forkQueueCaller(WALKER.getCallerClass(),true);return beginForkQueueTransition(receiver,poolField);
+    }
+    private static Object beginForkQueueTransition(Object receiver,boolean poolField) {
+        synchronized(FORK_QUEUE_LOCK) {
+            boolean nested=OWN_LEDGER_MUTATION.get()!=null;OWN_LEDGER_MUTATION.set(true);
+            try {
+                ForkPoolImage pool=poolField?forkPool(receiver):null;ForkQueueImage queue=poolField?null:forkQueue(receiver);
+                if(pool!=null){pool.pending++;touchForkPool(pool);}
+                else {queue.pending++;if(queue.pool!=null){queue.pool.pending++;touchForkPool(queue.pool);}}
+                return new ForkQueueTransition(pool,queue);
+            } catch(Throwable unavailable){forkQueueObservationLost();return null;}
+            finally {if(!nested)OWN_LEDGER_MUTATION.remove();}
+        }
+    }
+    public static void forkQueueFieldEnd(Object token,Object image) {
+        forkQueueCaller(WALKER.getCallerClass(),true);synchronized(FORK_QUEUE_LOCK) {
+            boolean nested=OWN_LEDGER_MUTATION.get()!=null;OWN_LEDGER_MUTATION.set(true);
+            try {
+                if(!(token instanceof ForkQueueTransition transition)||transition.closed||transition.thread!=Thread.currentThread()){forkQueueObservationLost();return;}
+                if(image!=null&&!(image instanceof Object[])){forkQueueObservationLost();return;}
+                if(transition.pool!=null)bindForkPool(transition.pool,(Object[])image);else bindForkArray(transition.queue,(Object[])image);
+                finishForkTransition(transition,true);
+            } catch(Throwable unavailable){forkQueueObservationLost();if(token instanceof ForkQueueTransition transition&&!transition.closed)finishForkTransition(transition,false);}
+            finally {if(!nested)OWN_LEDGER_MUTATION.remove();}
+        }
+    }
+    public static Object forkQueueTransitionBegin(Object queue) {
+        forkQueueCaller(WALKER.getCallerClass(),false);return beginForkQueueTransition(queue,false);
+    }
+    public static void forkQueueTransitionEnd(Object token,boolean normal) {
+        forkQueueCaller(WALKER.getCallerClass(),false);synchronized(FORK_QUEUE_LOCK) {
+            boolean nested=OWN_LEDGER_MUTATION.get()!=null;OWN_LEDGER_MUTATION.set(true);
+            try {if(token instanceof ForkQueueTransition transition&&!transition.closed&&transition.thread==Thread.currentThread())finishForkTransition(transition,normal);else forkQueueObservationLost();}
+            catch(Throwable unavailable){forkQueueObservationLost();}
+            finally {if(!nested)OWN_LEDGER_MUTATION.remove();}
+        }
+    }
+    private static void finishForkTransition(ForkQueueTransition transition,boolean normal) {
+        transition.closed=true;
+        ForkPoolImage pool=transition.pool;
+        if(transition.queue!=null){transition.queue.pending--;pool=transition.queue.pool;}
+        if(pool!=null){pool.pending--;if(!normal)pool.complete=false;touchForkPool(pool);}
+    }
+    /** Existing field/Unsafe/JNI/array receipts invalidate only actual platform queue receivers. */
+    static Object externalQueueMutationBegin(Object receiver) {
+        if(OWN_LEDGER_MUTATION.get()!=null||receiver==null)return null;
+        Class<?> type=receiver.getClass();boolean pool=receiver instanceof java.util.concurrent.ForkJoinPool;
+        boolean queue=type.getClassLoader()==null&&type.getName().equals(FORK_QUEUE_NAME);
+        boolean tasks=receiver instanceof java.util.concurrent.ForkJoinTask<?>[];
+        boolean queueArray=receiver instanceof Object[]&&type.getComponentType().getClassLoader()==null&&type.getComponentType().getName().equals(FORK_QUEUE_NAME);
+        if(!pool&&!queue&&!tasks&&!queueArray)return null;
+        if(WALKER.getCallerClass().getNestHost()!=ControlBridge.class)throw new SecurityException("FORK_QUEUE_MEMORY_RECEIPT_REQUIRED");
+        synchronized(FORK_QUEUE_LOCK) {
+            boolean nested=OWN_LEDGER_MUTATION.get()!=null;OWN_LEDGER_MUTATION.set(true);
+            try {
+                ForkPoolImage direct=pool?forkPool(receiver):queueArray?FORK_POOL_ARRAYS.get(new EventKey(receiver,null)):null;
+                List<ForkQueueImage> owners;
+                if(queue)owners=List.of(forkQueue(receiver));
+                else if(tasks) {
+                    ForkArrayImage array=FORK_ARRAYS.get(new EventKey(receiver,null));
+                    if(array==null)return null;
+                    array.complete=false;owners=List.copyOf(array.owners);
+                } else owners=List.of();
+                if(direct==null&&owners.isEmpty())return null;
+                ForkExternalMutation mutation=new ForkExternalMutation(direct,owners);
+                if(direct!=null){direct.pending++;direct.complete=false;touchForkPool(direct);}
+                for(ForkQueueImage owner:owners) {
+                    owner.pending++;
+                    if(owner.pool!=null){owner.pool.pending++;owner.pool.complete=false;touchForkPool(owner.pool);}
+                }
+                return mutation;
+            } catch(Throwable unavailable){forkQueueObservationLost();return null;}
+            finally {if(!nested)OWN_LEDGER_MUTATION.remove();}
+        }
+    }
+    static void externalQueueMutationEnd(Object token) {
+        if(token==null)return;
+        if(WALKER.getCallerClass().getNestHost()!=ControlBridge.class)throw new SecurityException("FORK_QUEUE_MEMORY_RECEIPT_REQUIRED");
+        synchronized(FORK_QUEUE_LOCK) {
+            boolean nested=OWN_LEDGER_MUTATION.get()!=null;OWN_LEDGER_MUTATION.set(true);
+            try {
+                if(!(token instanceof ForkExternalMutation mutation)||mutation.closed||mutation.thread!=Thread.currentThread()){forkQueueObservationLost();return;}
+                mutation.closed=true;
+                if(mutation.pool!=null){mutation.pool.pending--;mutation.pool.complete=false;mutation.pool.seedAttempt=-1;touchForkPool(mutation.pool);}
+                for(ForkQueueImage owner:mutation.queues) {
+                    owner.pending--;
+                    if(owner.pool!=null){owner.pool.pending--;owner.pool.complete=false;owner.pool.seedAttempt=-1;touchForkPool(owner.pool);}
+                }
+            } catch(Throwable unavailable){forkQueueObservationLost();}
+            finally {if(!nested)OWN_LEDGER_MUTATION.remove();}
+        }
+    }
+    /** One pool seed covers entries which predate attachment; steady queries visit this task's locations only. */
+    public static Object[] forkQueueSnapshot(Object value,Object task)throws ReflectiveOperationException {
+        if(!(value instanceof java.util.concurrent.ForkJoinPool)||!(task instanceof java.util.concurrent.ForkJoinTask<?>))return new Object[]{-1L,-1,new Object[0]};
+        long[] boundary=boundarySnapshot(new String[]{"java/util/concurrent/ForkJoinPool","java/util/concurrent/ForkJoinPool$WorkQueue"});
+        if(!forkQueuePlatformReady(boundary))return new Object[]{-1L,-1,new Object[0]};
+        Object[] result=forkQueueSnapshotLocked(value,task,boundary);
+        long[] after=boundarySnapshot(new String[]{"java/util/concurrent/ForkJoinPool","java/util/concurrent/ForkJoinPool$WorkQueue"});
+        return boundary[1]==1&&after[1]==1&&boundary[0]==after[0]?result:new Object[]{result[0],-1,new Object[0]};
+    }
+    /** Old uninstrumented mutation frames must physically retire before receipts can prove absence. */
+    private static boolean forkQueuePlatformReady(long[] boundary) {
+        if(boundary[1]!=1)return false;
+        if(forkQueueQuiescentEpoch==boundary[0])return true;
+        synchronized(FORK_QUIESCENCE_GATE) {
+            if(forkQueueQuiescentEpoch==boundary[0])return true;
+            if(forkQueueQuiescenceProbing||System.nanoTime()<forkQueueQuiescenceRetry)return false;
+            forkQueueQuiescenceProbing=true;
+        }
+        boolean ready=false;
+        try {
+            ready=NativeControl.platformQueueQuiescent(java.util.concurrent.ForkJoinPool.class,ForkQueueLayout.TYPE);
+            long[] after=boundarySnapshot(new String[]{"java/util/concurrent/ForkJoinPool","java/util/concurrent/ForkJoinPool$WorkQueue"});
+            ready&=after[1]==1&&after[0]==boundary[0];
+            if(ready)forkQueueQuiescentEpoch=boundary[0];
+            return ready;
+        } catch(RuntimeException|LinkageError unavailable){return false;}
+        finally {synchronized(FORK_QUIESCENCE_GATE){forkQueueQuiescenceProbing=false;forkQueueQuiescenceRetry=System.nanoTime()+50_000_000L;}}
+    }
+    private static Object[] forkQueueSnapshotLocked(Object value,Object task,long[] boundary)throws ReflectiveOperationException {
+        synchronized(FORK_QUEUE_LOCK) {
+            boolean nested=OWN_LEDGER_MUTATION.get()!=null;OWN_LEDGER_MUTATION.set(true);
+            try {
+                reapForkQueues();ForkPoolImage pool=forkPool(value);
+                if(boundary[1]!=1||forkQueueSequence==Long.MAX_VALUE||forkQueueLosses==Long.MAX_VALUE)return new Object[]{pool.epoch,-1,new Object[0]};
+                Object image=ForkQueueLayout.POOL.get(value);
+                if(image!=null&&!(image instanceof Object[]))return new Object[]{pool.epoch,-1,new Object[0]};
+                if(pool.image.get()!=image){pool.complete=false;touchForkPool(pool);}
+                if(pool.certification!=boundary[0]||pool.losses!=forkQueueLosses)pool.complete=false;
+                if(!pool.complete&&pool.pending==0&&(pool.seedAttempt<0||System.nanoTime()>=pool.retryAfter||pool.certification!=boundary[0]||pool.losses!=forkQueueLosses)) {
+                    pool.complete=image!=null||(ForkQueueLayout.MODE.getInt(value)&(1<<25))!=0;bindForkPool(pool,(Object[])image);
+                    for(ForkQueueImage queue:pool.queues) {
+                        Object actual=queue.queue.get();Object array=actual==null?null:ForkQueueLayout.ARRAY.get(actual);
+                        if(actual==null||array!=null&&!(array instanceof java.util.concurrent.ForkJoinTask<?>[])){pool.complete=false;continue;}
+                        int base=ForkQueueLayout.BASE.getInt(actual),top=ForkQueueLayout.TOP.getInt(actual);
+                        boolean shared=ForkQueueLayout.OWNER.get(actual)==null;
+                        if(shared&&ForkQueueLayout.SOURCE.getInt(actual)!=0){pool.complete=false;continue;}
+                        java.lang.invoke.VarHandle.acquireFence();
+                        if(queue.array==null||queue.array.array.get()!=array)bindForkArray(queue,(Object[])array);
+                        if(queue.array!=null) {
+                            seedForkArray(queue.array,(Object[])array);
+                            int span=top-base;
+                            if(!queue.array.complete||span<0||span>((Object[])array).length||queue.array.cells.size()!=span)pool.complete=false;
+                        }
+                        java.lang.invoke.VarHandle.acquireFence();
+                        if(ForkQueueLayout.ARRAY.get(actual)!=array||ForkQueueLayout.BASE.getInt(actual)!=base||ForkQueueLayout.TOP.getInt(actual)!=top
+                                ||shared&&ForkQueueLayout.SOURCE.getInt(actual)!=0)pool.complete=false;
+                    }
+                    if(ForkQueueLayout.POOL.get(value)!=image)pool.complete=false;
+                    pool.certification=boundary[0];pool.losses=forkQueueLosses;pool.seedAttempt=pool.epoch;pool.retryAfter=System.nanoTime()+50_000_000L;
+                }
+                if(!pool.complete||pool.pending!=0)return new Object[]{pool.epoch,-1,new Object[0]};
+                Set<ForkQueueImage> known=pool.locations.get(new EventKey(task,null));var queues=new ArrayList<Object>();
+                if(known!=null)for(ForkQueueImage queue:known) {
+                    Object actual=queue.queue.get();Object[] array=queue.array==null?null:queue.array.array.get();
+                    if(actual==null||queue.pool!=pool||array==null||ForkQueueLayout.ARRAY.get(actual)!=array){pool.complete=false;touchForkPool(pool);return new Object[]{pool.epoch,-1,new Object[0]};}
+                    queues.add(actual);
+                }
+                return new Object[]{pool.epoch,queues.isEmpty()?1:0,queues.toArray()};
+            } catch(ReflectiveOperationException|RuntimeException|LinkageError unavailable){forkQueueObservationLost();throw unavailable;}
+            finally {if(!nested)OWN_LEDGER_MUTATION.remove();}
+        }
+    }
+    /** A negative version invalidates a readback during resize, registration, missing coverage or observation loss. */
+    public static long forkQueueEpoch(Object value) {
+        long[] boundary=boundarySnapshot(new String[]{"java/util/concurrent/ForkJoinPool","java/util/concurrent/ForkJoinPool$WorkQueue"});
+        if(!forkQueuePlatformReady(boundary))return -1;
+        long observed;
+        synchronized(FORK_QUEUE_LOCK) {
+            ForkPoolImage pool=FORK_POOLS.get(new EventKey(value,null));
+            if(pool!=null)try {
+                if(pool.image.get()!=ForkQueueLayout.POOL.get(value)){pool.complete=false;touchForkPool(pool);}
+            } catch(ReflectiveOperationException|RuntimeException|LinkageError unavailable){forkQueueObservationLost();return -1;}
+            observed=pool==null||!pool.complete||pool.pending!=0||boundary[1]!=1||pool.certification!=boundary[0]||pool.losses!=forkQueueLosses
+                    ||forkQueueSequence==Long.MAX_VALUE||forkQueueLosses==Long.MAX_VALUE?-1:pool.epoch;
+        }
+        long[] after=boundarySnapshot(new String[]{"java/util/concurrent/ForkJoinPool","java/util/concurrent/ForkJoinPool$WorkQueue"});
+        return boundary[1]==1&&after[1]==1&&boundary[0]==after[0]?observed:-1;
+    }
     static final java.util.IdentityHashMap<Object,java.util.ArrayList<QueueRelease>> QUEUE_RELEASES=new java.util.IdentityHashMap<>();
     /** Published under the ledger lock; idle workers never take that lock for an unrelated queue. */
     static volatile Object[] queuesWithRelease=new Object[0];
@@ -621,28 +1024,46 @@ public final class TaskBridge {
     }
     /** Agent publishes readiness only after retransformClasses has returned successfully. */
     public static synchronized void boundaryState(String name,boolean ready) {
+        requireBoundaryAgent();
+        boolean changed=ready?certified.add(name):certified.remove(name);
+        changed|=ready?pendingBoundaries.remove(name):pendingBoundaries.add(name);
+        if(changed)publishBoundaryCapabilities();
+    }
+    private static void requireBoundaryAgent() {
         if(TaskBridge.class.getClassLoader()==null&&!WALKER.walk(frames->frames
                 .dropWhile(frame->frame.getDeclaringClass()==TaskBridge.class).findFirst()
                 .map(frame->frame.getDeclaringClass().getName().equals("dev.ronova.pro.agent.RecoveryAgent")
                         &&frame.getDeclaringClass().getClassLoader()==ClassLoader.getSystemClassLoader()).orElse(false)))
             throw new SecurityException("TASK_BOUNDARY_AGENT_CALLER_REQUIRED");
-        boolean changed=ready?certified.add(name):certified.remove(name);
-        if(changed)certificationEpoch=Math.addExact(certificationEpoch,1);
     }
+    /** Covers not-yet-loaded images only while the installed transformer remains their boundary. */
+    public static synchronized void boundaryFutureTargets(String[] names) {
+        requireBoundaryAgent();
+        Set<String> replacement=Set.of(names);
+        if(futureBoundaries.equals(replacement))return;
+        futureBoundaries.clear();futureBoundaries.addAll(replacement);publishBoundaryCapabilities();
+    }
+    private static void publishBoundaryCapabilities() {
+        certificationEpoch=Math.addExact(certificationEpoch,1);
+        Set<String> usable=new java.util.HashSet<>(futureBoundaries);usable.addAll(certified);usable.removeAll(pendingBoundaries);
+        boundaryCapabilities=Map.entry(certificationEpoch,Set.copyOf(usable));
+    }
+    /** Immutable installation image. Readers reuse membership results only for this exact image. */
+    public static Map.Entry<Long,Set<String>> boundaryCapabilities() { return boundaryCapabilities; }
     public static synchronized long[] boundarySnapshot(String[] required) {
-        return new long[]{certificationEpoch,required.length>0&&certified.containsAll(java.util.List.of(required))?1:0};
+        return new long[]{certificationEpoch,required.length>0&&boundaryCapabilities.getValue().containsAll(java.util.List.of(required))?1:0};
     }
     public static synchronized boolean withBoundaries(String[] required,long expected,Runnable action) {
         Registration current=registration;
         if(current==null||!WALKER.walk(frames->frames.dropWhile(frame->frame.getDeclaringClass()==TaskBridge.class).findFirst()
                 .map(frame->frame.getDeclaringClass().getNestHost()==current.sink.getClass().getNestHost()).orElse(false)))return false;
-        if(required.length==0||!certified.containsAll(java.util.List.of(required)))return false;
+        if(expected!=certificationEpoch||required.length==0||!boundaryCapabilities.getValue().containsAll(java.util.List.of(required)))return false;
         Registration prior=AUTHORITY.get();AUTHORITY.set(registration);
         try { action.run();return true; }
         finally { if(prior==null)AUTHORITY.remove();else AUTHORITY.set(prior); }
     }
     private TaskBridge() {}
-    public static int abiVersion(){return 93;}
+    public static int abiVersion(){return 94;}
     public static synchronized void installEquipmentAsync(Class<?> owner,java.lang.invoke.MethodHandle capture,java.lang.invoke.MethodHandle invoke){
         requirePolicyInstaller();if(guards==null||guards.owner()!=owner||equipmentAsync!=null&&equipmentAsync.owner!=owner)throw new SecurityException("EQUIPMENT_ASYNC_OWNER");
         equipmentAsync=new EquipmentAsync(owner,Objects.requireNonNull(capture).asType(java.lang.invoke.MethodType.methodType(Object.class,Object.class,Object.class,Object.class)),
@@ -1050,8 +1471,7 @@ public final class TaskBridge {
             synchronized(TaskBridge.class) {
                 if(!(token instanceof QueueRelease request)||registration==null||registration.sink!=expected||request.owner!=registration
                         ||request.retired||request.working||System.nanoTime()<request.retryAfter)return;
-                var field=request.queue.getClass().getDeclaredField("owner");
-                if(field.trySetAccessible())java.util.concurrent.locks.LockSupport.unpark((Thread)field.get(request.queue));
+                if(request.queue.getClass()==ForkQueueLayout.TYPE)java.util.concurrent.locks.LockSupport.unpark((Thread)ForkQueueLayout.OWNER.get(request.queue));
             }
         } catch(ReflectiveOperationException unavailable) {
             if(token instanceof QueueRelease request)lostTask(request.owner,16,request.task,request.queue,null,request,unavailable);else lost(unavailable);
@@ -1080,9 +1500,8 @@ public final class TaskBridge {
                 // Rotate visited work so a busy or revoked first entry cannot starve later requests.
                 for(QueueRelease item:pending) { entries.remove(item);entries.add(item); }
             }
-            var type=queue.getClass();var remove=type.getDeclaredMethod("tryRemove",java.util.concurrent.ForkJoinTask.class,boolean.class);
-            var top=type.getDeclaredField("top");var base=type.getDeclaredField("base");var array=type.getDeclaredField("array");var actualOwner=type.getDeclaredField("owner");
-            if(!remove.trySetAccessible()||!top.trySetAccessible()||!base.trySetAccessible()||!array.trySetAccessible()||!actualOwner.trySetAccessible())return;
+            if(queue.getClass()!=ForkQueueLayout.TYPE)return;
+            var remove=ForkQueueLayout.REMOVE;var top=ForkQueueLayout.TOP;var base=ForkQueueLayout.BASE;var array=ForkQueueLayout.ARRAY;var actualOwner=ForkQueueLayout.OWNER;
             for(QueueRelease request:pending) {
                 synchronized(TaskBridge.class) {
                     if(request.retired||request.working||request.owner!=registration||System.nanoTime()<request.retryAfter)continue;
