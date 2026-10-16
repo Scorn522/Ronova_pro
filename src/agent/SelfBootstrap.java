@@ -14,20 +14,30 @@ import java.util.concurrent.TimeUnit;
  * failure rather than a success.
  */
 public final class SelfBootstrap {
+    private static boolean attempted;
     private SelfBootstrap() { }
 
     /** The backend state as the agent itself reports it, not as this helper's exit code suggests. */
     public static String state() {
         try { return String.valueOf(Class.forName("dev.ronova.pro.agent.RecoveryAgent",false,ClassLoader.getSystemClassLoader())
                 .getMethod("installState").invoke(null)); }
-        catch(ReflectiveOperationException|LinkageError absent) { return "UNAVAILABLE:"+absent.getClass().getSimpleName(); }
+        catch(ClassNotFoundException absent) { return "NOT_PRESENT"; }
+        catch(ReflectiveOperationException|RuntimeException|LinkageError unavailable) {
+            return "UNAVAILABLE:"+unavailable.getClass().getSimpleName()+":"+String.valueOf(unavailable.getMessage());
+        }
     }
 
-    /** @return true only when the helper exited cleanly AND the agent reports a completed installation. */
-    public static boolean install(Path agentJar,Path bootstrapJar,long timeoutSeconds) {
+    /** @return true only when the current agent reports a completed installation. */
+    public static synchronized boolean install(Path agentJar,Path bootstrapJar,long timeoutSeconds) {
         Process helper=null;
         try {
-            if(agentJar==null||bootstrapJar==null)return false;
+            String active=state();
+            if(active.equals("INSTALLED_FULL"))return true;
+            if(!active.equals("NOT_PRESENT")&&!active.equals("NOT_ATTEMPTED")) {
+                report("RONOVA_SELF_BOOTSTRAP_EXISTING_BACKEND:"+active);return false;
+            }
+            if(attempted) { report("RONOVA_SELF_BOOTSTRAP_ALREADY_ATTEMPTED:"+active);return false; }
+            if(agentJar==null||bootstrapJar==null||timeoutSeconds<=0)return false;
             if(!Files.isReadable(agentJar)||!Files.isReadable(bootstrapJar))return false;
             String javaBinary=Path.of(System.getProperty("java.home"),"bin",
                     System.getProperty("os.name","").toLowerCase().contains("win")?"java.exe":"java").toString();
@@ -44,29 +54,35 @@ public final class SelfBootstrap {
                     "base64:"+encoded);
             builder.redirectErrorStream(true);
             helper=builder.start();
+            attempted=true;
             // The helper is drained on a separate thread so a full pipe buffer can never block it, and the wait
             // below is a real deadline rather than one that only starts after the process has already finished.
             StringBuffer output=new StringBuffer();
             Thread reader=drain(helper,output);
             if(!helper.waitFor(timeoutSeconds,TimeUnit.SECONDS)) {
                 helper.destroyForcibly();
-                report("RONOVA_SELF_BOOTSTRAP_TIMEOUT");
+                String actual=state();
+                if(actual.equals("INSTALLED_FULL"))return true;
+                report("RONOVA_SELF_BOOTSTRAP_TIMEOUT:BACKEND="+actual);
                 return false;
             }
             reader.join(TimeUnit.SECONDS.toMillis(5));
             if(helper.exitValue()!=0) {
                 String text=output.toString().trim();
                 report(text.isEmpty()?"RONOVA_SELF_BOOTSTRAP_FAILED":text);
-                return false;
             }
             // The attach call returning is not the backend result; the agent's own state is.
             String state=state();
             if(state.equals("INSTALLED_FULL"))return true;
             report("RONOVA_SELF_BOOTSTRAP_BACKEND_NOT_INSTALLED:"+state);
             return false;
+        } catch(InterruptedException interrupted) {
+            Thread.currentThread().interrupt();
+            report("RONOVA_SELF_BOOTSTRAP_INTERRUPTED");
+            return state().equals("INSTALLED_FULL");
         } catch(Throwable unavailable) {
             report("RONOVA_SELF_BOOTSTRAP_UNAVAILABLE:"+unavailable.getClass().getSimpleName());
-            return false;
+            return state().equals("INSTALLED_FULL");
         } finally {
             if(helper!=null&&helper.isAlive())helper.destroyForcibly();
         }

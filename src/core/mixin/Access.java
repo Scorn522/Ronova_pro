@@ -31,6 +31,7 @@ public final class Access {
         @Accessor("DATA_LIVING_ENTITY_FLAGS") static net.minecraft.network.syncher.EntityDataAccessor<Byte> pro$useFlags() { throw new AssertionError(); }
     }
     @Mixin(net.minecraft.world.entity.player.Player.class) public interface PlayerState {
+        @Accessor("DATA_PLAYER_ABSORPTION_ID") static net.minecraft.network.syncher.EntityDataAccessor<Float> pro$absorptionKey() { throw new AssertionError(); }
         @Accessor("foodData") net.minecraft.world.food.FoodData pro$foodData();
         @Accessor("inventory") net.minecraft.world.entity.player.Inventory pro$inventory();
     }

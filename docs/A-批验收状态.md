@@ -1,5 +1,18 @@
 # Ronova Pro 当前进度
 
+## 2026-10-16：C 接续——启动交接与统一生命保护
+
+接续 `6fc3ea4`，Java ABI90 / Native ABI82 / Storage3 / Journal6，协议 `r3-client-8`。本包先写齐再统一构建，吸收 Buer 的阶段交接与集中入口组织思路，没有复制其包名信任、全局属性授权或函数表回写。
+
+Agent 在首次发布前认领安装状态，安装中、失败或部分安装不再重复追加 hook；Core 每次查询真实 Agent 状态，FULL 按现有 Java 边界重新计算。保留 Java-only 合同，非 FULL 明确报告，不新增全局游戏启动阻断。预启动只报告 PREPARED；修复启动选项与六种返回策略被无条件改成 default，按实际选中的服务端世界读回停组策略，持久记录真实损坏不再当空目标继续。Native 的 JNI 表发布与必要 Unsafe/arraycopy 完成分别记录，部分失败后的重复交接不会被误报成功。
+
+伤害、死亡/移除、生命写入、防降/禁疗、吸收值、着火、字段和 Unsafe/JNI 写门共用当前准确 body、代次、地址及世界记录资格；旧发布不跟随可变 binding 进入新代。补自定义不调 super 的两个 setter 入口，吸收读取真实基础字段或 Player 同步数据，不依赖自定义吸收 getter。生命数据整体、items 表、实际 health/受保护 absorption 数据项及底层存储的替换接同一关系，避免先换载体再绕过值写门；标准 map 内部搬移保留。防护与禁疗独立，原合法生命周期沿既有准确 permit，客户端镜像同样接续。
+
+首轮统一构建 **PASS，1分23秒**（`build-c-java90-native82-startup-life-20261016.log`），检查器编译及 `startup-protection-bytecode` **退出0**：实际 JournalLineage 所选服务端世界的 STOP/RETURN 和六种策略读回通过；真实继承合同的生产 DispatchBoundary 织入及独立 setter 投影拒绝/允许次数与原异常身份通过。声明元数据仅在检查进程临时设置后恢复，Core guards 未安装；不能代称真实 Agent 注册、启动或带策略保护通过。实际启动、Native 安装与游戏场景 **NOTRUN**。
+
+收尾将生命表键限定为真实 Integer，避免调用自定义 Number 方法；重编时遗漏工具参数的失败日志 `build-c-java90-native82-startup-life-exact-key-20261016.log` 保留。恢复原配置后最终构建 **PASS，51秒**（`build-c-java90-native82-startup-life-final-20261016.log`），未重复已通过检查。匹配候选 `distribution/candidate-c-java90-native82-startup-life-wip-20261016`：Core2968376、prelaunch23226字节，随源码与既有摘要同步 GitHub。未知反射/MH、复杂自定义载体及原生不透明状态仍有边界，完整 C/B 尚未完成；自身外观、武器注册、驱动部署与源码 ZIP 未做。
+
+---
 ## 2026-10-15：C 接续——自定义包装回调与双参数组合
 
 接续 `a7e1a47`，Java ABI89 / Native ABI81 / Storage3 / Journal6，协议 `r3-client-8`。本包接齐源码后统一构建；Native 和驱动源码未改。

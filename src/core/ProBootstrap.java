@@ -22,26 +22,29 @@ public final class ProBootstrap {
     private static final String CACHE_DIRECTORY="ronova-pro/bootstrap";
     private static String state="NOT_ATTEMPTED";
     private static String detail="";
+    private static boolean handOverStarted;
 
     private ProBootstrap() { }
 
-    public static synchronized String state() { return state+(detail.isEmpty()?"":":"+detail)
-            +(ProRuntime.productionControlsInstalled()?"":":CORE_CONTROLS="+ProRuntime.dispatchState()); }
-    public static synchronized boolean available() { return (state.equals("ATTACHED")||state.equals("ALREADY_INSTALLED"))
-            &&detail.startsWith("INSTALLED_FULL")&&ProRuntime.productionControlsInstalled(); }
+    public static synchronized String state() {
+        String actual=agentState();
+        String current=(state.equals("ATTACHED")||state.equals("ALREADY_INSTALLED"))&&!actual.equals("INSTALLED_FULL")?"UNAVAILABLE":state;
+        return current+":AGENT="+actual+(detail.isEmpty()?"":":HANDOVER="+detail)
+                +(ProRuntime.productionControlsInstalled()?"":":CORE_CONTROLS="+ProRuntime.dispatchState());
+    }
+    public static synchronized boolean available() {
+        return agentState().equals("INSTALLED_FULL")&&ProRuntime.productionControlsInstalled();
+    }
 
     /** Called once, as early as the mod can run. Safe to call again: an already installed agent is left alone. */
     public static synchronized void install() {
-        if(state.equals("ATTACHED")||state.equals("ALREADY_INSTALLED"))return;
         try {
-            try {
-                Class<?> active=Class.forName("dev.ronova.pro.agent.RecoveryAgent",false,ClassLoader.getSystemClassLoader());
-                String actual=String.valueOf(active.getMethod("installState").invoke(null));
-                if(actual.equals("INSTALLED_FULL")) { state="ALREADY_INSTALLED";detail=actual;return; }
-                // An attempted installation owns this JVM's Instrumentation.
-                // Reattaching the same agent cannot repair its failed start.
-                if(!actual.equals("NOT_ATTEMPTED")){state="UNAVAILABLE";detail=actual;return;}
-            } catch(ClassNotFoundException absent) { }
+            String actual=agentState();
+            if(actual.equals("INSTALLED_FULL")) { state="ALREADY_INSTALLED";detail="";return; }
+            // Installing, partial and failed agents retain their existing hooks. A second attach cannot repair
+            // those hooks, and a timed-out helper may still have an installation running in the target JVM.
+            if(!actual.equals("NOT_ATTEMPTED")&&!actual.equals("NOT_PRESENT")) { fail(actual);return; }
+            if(handOverStarted) { fail("ATTACH_ALREADY_ATTEMPTED:"+actual);return; }
             // Read our own module resource: Forge UnionFileSystem code sources are not ordinary JarFile paths.
             Path cache=Path.of(System.getProperty("user.dir",".")).resolve(CACHE_DIRECTORY).toAbsolutePath().normalize();
             Files.createDirectories(cache);
@@ -49,12 +52,24 @@ public final class ProBootstrap {
             Path bootstrap=extract(cache,false);
             if(agent==null) { fail("AGENT_PAYLOAD_NOT_SHIPPED");return; }
             if(bootstrap==null) { fail("BOOTSTRAP_PAYLOAD_NOT_SHIPPED");return; }
+            handOverStarted=true;state="ATTACHING";detail="";
             String outcome=handOver(agent,bootstrap);
-            if(!outcome.startsWith("INSTALLED")) { fail(outcome);return; }
+            actual=agentState();
+            if(!actual.equals("INSTALLED_FULL")) { fail(outcome+":AGENT="+actual);return; }
             state="ATTACHED";
-            detail=outcome+":"+agent.getFileName();
+            detail=agent.getFileName().toString();
         } catch(ReflectiveOperationException|IOException|RuntimeException|LinkageError unavailable) {
             fail(unavailable.getClass().getSimpleName()+":"+String.valueOf(unavailable.getMessage()));
+        }
+    }
+
+    private static String agentState() {
+        try {
+            Class<?> active=Class.forName("dev.ronova.pro.agent.RecoveryAgent",false,ClassLoader.getSystemClassLoader());
+            return String.valueOf(active.getMethod("installState").invoke(null));
+        } catch(ClassNotFoundException absent) { return "NOT_PRESENT"; }
+        catch(ReflectiveOperationException|RuntimeException|LinkageError unavailable) {
+            return "UNAVAILABLE:"+unavailable.getClass().getSimpleName()+":"+String.valueOf(unavailable.getMessage());
         }
     }
 

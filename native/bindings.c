@@ -67,7 +67,7 @@ static Owner *native_owners;
 static Binding *native_bindings;
 static NativeLibrary *native_libraries;
 static DWORD native_tls=TLS_OUT_OF_INDEXES;
-static volatile LONG native_events,native_jni_ready,native_failures;
+static volatile LONG native_events,native_jni_ready,native_boundary_ready,native_failures;
 static volatile LONG native_describe_recorded;
 static jclass native_controller;
 static jmethodID native_control_gate;
@@ -2191,7 +2191,10 @@ JNIEXPORT jboolean JNICALL Java_dev_ronova_pro_bootstrap_NativeControl_initializ
             ||!native_bootstrap_class(env,definitions,"Ldev/ronova/pro/bootstrap/DefinitionBridge;")
             ||native_controller&&!(*env)->IsSameObject(env,native_controller,type)){native_refuse(env,"ACTUAL_NATIVE_CONTROLLER_REQUIRED");return JNI_FALSE;}
     jmethodID control=(*env)->GetStaticMethodID(env,type,"controlCaller","()Z");if(!control||!(*env)->CallStaticBooleanMethod(env,type,control)){native_refuse(env,"NATIVE_CONTROL_AGENT_REQUIRED");return JNI_FALSE;}
-    if(native_jni_ready)return JNI_TRUE;
+    /* A published JNI table is only one stage. Unsafe/arraycopy installation
+     * may have failed after that publication; a repeated handoff must retain
+     * that failure rather than report a complete boundary. */
+    if(native_jni_ready)return native_boundary_ready?JNI_TRUE:JNI_FALSE;
     if(!native_events)return JNI_FALSE;struct JNINativeInterface_ *table=NULL;if((*native_ti)->GetJNIFunctionTable(native_ti,&table)!=JVMTI_ERROR_NONE)return JNI_FALSE;native_original=*table;
     native_controller=(jclass)native_original.NewGlobalRef(env,type);native_control_gate=control;
     native_library_gate=(*env)->GetStaticMethodID(env,type,"libraryBoundaryCaller","(Ljava/lang/String;)Z");
@@ -2248,7 +2251,8 @@ JNIEXPORT jboolean JNICALL Java_dev_ronova_pro_bootstrap_NativeControl_initializ
     if(result==JVMTI_ERROR_NONE)InterlockedExchange(&native_library_present,native_library_install(env));
     if(result==JVMTI_ERROR_NONE&&!native_unsafe_install(env))return JNI_FALSE;
     if(result==JVMTI_ERROR_NONE&&!native_arraycopy_install(env))return JNI_FALSE;
-    return result==JVMTI_ERROR_NONE?JNI_TRUE:JNI_FALSE;
+    if(result!=JVMTI_ERROR_NONE)return JNI_FALSE;
+    InterlockedExchange(&native_boundary_ready,1);return JNI_TRUE;
 }
 JNIEXPORT void JNICALL Java_dev_ronova_pro_bootstrap_NativeControl_module0(JNIEnv *env,jclass type,jobject module,jboolean stopped){(void)type;if(!native_controller||!native_original.CallStaticBooleanMethod(env,native_controller,native_control_gate)){native_refuse(env,"NATIVE_CONTROL_AGENT_REQUIRED");return;}AcquireSRWLockExclusive(&native_records);Owner *owner=native_owner(env,module);if(owner){InterlockedExchange(&owner->producer,1);if(stopped)InterlockedExchange(&owner->stopped,1);}if(!owner)InterlockedIncrement(&native_failures);ReleaseSRWLockExclusive(&native_records);if(stopped)native_tooling_retire(env,module);}
 #include "sources.c"

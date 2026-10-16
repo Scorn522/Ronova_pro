@@ -12,7 +12,6 @@ import java.util.Arrays;
 import java.util.Base64;
 import java.util.HexFormat;
 import java.util.List;
-import java.util.Map;
 import java.util.Properties;
 import java.util.TreeSet;
 import java.util.jar.JarFile;
@@ -30,9 +29,9 @@ public final class PrelaunchMain {
         Path directory=Path.of(System.getProperty("user.dir")).toAbsolutePath().normalize();
         if(!Files.isRegularFile(java)||!Files.isRegularFile(core))throw new IOException("GAME_JAVA_OR_RONOVA_JAR_MISSING");
         Properties selection=targets(directory.resolve("ronova-prelaunch.properties"));
-        RestartTargets.Selection restarted;String restartGap="";
+        RestartTargets.Selection restarted;
         try{restarted=RestartTargets.read(directory,Arrays.asList(arguments).subList(4,arguments.length));}
-        catch(IOException unavailable){restartGap=unavailable.getMessage();restarted=new RestartTargets.Selection(null,null,Map.of());System.err.println("RONOVA_PRELAUNCH_DURABLE_RESTORE_UNAVAILABLE:"+restartGap);}
+        catch(IOException unavailable){throw new IOException("RONOVA_PRELAUNCH_DURABLE_RESTORE_UNAVAILABLE:"+unavailable.getMessage(),unavailable);}
         TreeSet<String> selectedIds=new TreeSet<>(restarted.modes().keySet());
         for(String id:selection.getProperty("stop","").split(","))if(!id.isEmpty())selectedIds.add(id);
         String selected=String.join(",",selectedIds);
@@ -54,7 +53,6 @@ public final class PrelaunchMain {
         // the original game arguments below retain their own disabled entries.
         command.add("-XX:+UnlockDiagnosticVMOptions");
         command.add("-XX:DisableIntrinsic="+DISABLED_WRITER_INTRINSICS);
-        if(!restartGap.isEmpty())command.add("-Dronova.pro.restartGap="+restartGap);
         if(!selected.isEmpty())command.add("-Dronova.pro.bootStop="+selected);
         if(!selected.isEmpty())command.add("-Dronova.pro.bootReturns="+returns);
         for(String id:selectedIds){
@@ -68,7 +66,9 @@ public final class PrelaunchMain {
         if(nativeStorage!=null)command.add("-Dronova.pro.storage.native="+nativeStorage);
         command.add("-javaagent:"+agent+"=base64:"+encoded);
         for(int i=4;i<arguments.length;i++)command.add(arguments[i]);
-        System.out.println("RONOVA_PRELAUNCH_READY targets="+(selected.isEmpty()?"NONE":selected));
+        // The child premain publishes its actual ready/partial/failed state. This process has only prepared
+        // payloads and launch arguments; individual controls decide whether their actual backend is usable.
+        System.out.println("RONOVA_PRELAUNCH_PREPARED targets="+(selected.isEmpty()?"NONE":selected));
         ProcessBuilder launch=new ProcessBuilder(command).directory(directory.toFile()).inheritIO();
         if(!selected.isEmpty())launch.environment().put("RONOVA_PRO_BOOT_STOP",selected);
         if(!protectedIds.isEmpty())launch.environment().put("RONOVA_PRO_BOOT_PROTECT",protectedIds);

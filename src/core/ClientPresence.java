@@ -36,7 +36,10 @@ public final class ClientPresence {
     private static final System.Logger LOG=System.getLogger("ronova_pro.client");
     private record Hud(long revision,boolean protect,boolean terminal,java.lang.ref.WeakReference<net.minecraft.client.gui.components.LerpingBossEvent> carrier) { }
     private static final Map<UUID,Hud> hudPolicies=new HashMap<>();
-    private record LocalBody(java.lang.ref.WeakReference<net.minecraft.world.entity.LivingEntity> entity,float floor,int id,UUID uuid) { }
+    private record LocalBody(java.lang.ref.WeakReference<net.minecraft.world.entity.LivingEntity> entity,float floor,int id,UUID uuid,
+            java.lang.ref.WeakReference<Object> data,java.lang.ref.WeakReference<Object> items,
+            java.lang.ref.WeakReference<net.minecraft.network.syncher.SynchedEntityData.DataItem<Float>> health,
+            java.lang.ref.WeakReference<net.minecraft.network.syncher.SynchedEntityData.DataItem<Float>> absorption) { }
     private static final Map<Object,LocalBody> localBodies=Collections.synchronizedMap(new WeakIdentityMap<>());
     private static boolean controlsInstalled;
     private static volatile Object connection;
@@ -255,7 +258,14 @@ public final class ClientPresence {
         if(!lifePolicy(raw.pro$id(),raw.pro$uuid())) {removeLocal(entity);return;}
         var item=((Access.Data)raw.pro$data()).pro$item(Access.Living.pro$healthKey());float floor=item.getValue();
         if(Float.isFinite(floor)&&(floor>0||policy.noHeal(connection,levelDimension(Minecraft.getInstance()),raw.pro$id(),raw.pro$uuid()))) {
-            LocalBody body=new LocalBody(new java.lang.ref.WeakReference<>(living),floor,raw.pro$id(),raw.pro$uuid());localBodies.put(entity,body);localBodies.put(item,body);
+            var absorption=entity instanceof net.minecraft.world.entity.player.Player?
+                    ((Access.Data)raw.pro$data()).pro$item(Access.PlayerState.pro$absorptionKey()):null;
+            LocalBody body=new LocalBody(new java.lang.ref.WeakReference<>(living),floor,raw.pro$id(),raw.pro$uuid(),
+                    new java.lang.ref.WeakReference<>(raw.pro$data()),new java.lang.ref.WeakReference<>(((Access.Data)raw.pro$data()).pro$items()),
+                    new java.lang.ref.WeakReference<>(item),new java.lang.ref.WeakReference<>(absorption));localBodies.put(entity,body);localBodies.put(item,body);
+            localBodies.put(raw.pro$data(),body);localBodies.put(((Access.Data)raw.pro$data()).pro$items(),body);
+            if(absorption!=null)localBodies.put(absorption,body);
+            if(!BackingPolicy.captureHealthStorage(entity,raw.pro$data()))LOG.log(System.Logger.Level.WARNING,"CLIENT_LIFE_STORAGE_CAPTURE_INCOMPLETE");
         }
     }
     private static void removeLocal(Object entity) {
@@ -276,11 +286,13 @@ public final class ClientPresence {
         return policy.denies(connection,policy.dimension(),body.id(),body.uuid());
     }
     private static boolean healthDenied(LocalBody body,float value) {
-        if(protectedBody(body)&&(!Float.isFinite(value)||value<body.floor()))return true;
-        if(!policy.noHeal(connection,policy.dimension(),body.id(),body.uuid()))return false;
+        boolean protection=protectedBody(body),noHeal=policy.noHeal(connection,policy.dimension(),body.id(),body.uuid());
+        if(!protection&&!noHeal)return false;
+        if(!Float.isFinite(value)||protection&&value<body.floor())return true;
         var entity=body.entity().get();if(entity==null)return false;
-        float current=((Access.Data)((Access.EntityState)entity).pro$data()).pro$item(Access.Living.pro$healthKey()).getValue();
-        return !Float.isFinite(value)||!Float.isFinite(current)||value>current;
+        var item=body.health().get();if(item==null)return true;
+        float current=item.getValue();
+        return protection&&Float.isFinite(current)&&value<current||noHeal&&(!Float.isFinite(current)||value>current);
     }
     public static boolean healthWriteDenied(net.minecraft.world.entity.LivingEntity entity,float value) {
         if(entity==null||!Minecraft.getInstance().isSameThread())return false;
@@ -291,9 +303,33 @@ public final class ClientPresence {
     public static boolean clientField(Object receiver,Class<?> declaring,String field,Object value) {
         LocalBody body=localBodies.get(receiver);
         if(currentBody(body)&&localBodies.containsKey(body.entity.get())) {
-            if(receiver instanceof net.minecraft.network.syncher.SynchedEntityData.DataItem<?> &&(field.equals("value")||field.equals("f_135391_")))return !(value instanceof Float number)||healthDenied(body,number);
+            var entity=body.entity.get();
+            var storage=(Access.Data)((Access.EntityState)entity).pro$data();
+            if(receiver==entity&&declaring==Entity.class&&(field.equals("entityData")||field.equals("f_19804_")))
+                return value!=storage;
+            if(receiver==storage&&declaring==net.minecraft.network.syncher.SynchedEntityData.class
+                    &&(field.equals("itemsById")||field.equals("f_135345_")))return value!=storage.pro$items();
+            if(declaring==net.minecraft.network.syncher.SynchedEntityData.DataItem.class
+                    &&receiver instanceof net.minecraft.network.syncher.SynchedEntityData.DataItem<?> &&(field.equals("value")||field.equals("f_135391_"))) {
+                var data=(Access.Data)((Access.EntityState)entity).pro$data();
+                if(data.pro$items()==body.items().get()&&body.health().get()==receiver)return !(value instanceof Float number)||healthDenied(body,number);
+                if(body.absorption().get()==receiver&&data.pro$items()==body.items().get())
+                    return protectedBody(body)&&(!(value instanceof Float number)||absorptionDenied(entity,number));
+                return false;
+            }
+            if(receiver!=entity||declaring!=Entity.class&&declaring!=net.minecraft.world.entity.LivingEntity.class)return false;
             if(!protectedBody(body))return false;
-            return switch(field) {case "id","f_19848_"->!(value instanceof Number n)||n.intValue()!=body.id();case "uuid","f_19820_"->!Objects.equals(value,body.uuid());case "stringUUID","f_19821_"->!Objects.equals(value,body.uuid().toString());case "dead","f_20890_"->Boolean.TRUE.equals(value);case "deathTime","f_20919_"->value instanceof Number n&&n.intValue()>0;case "removalReason","f_146795_"->value!=null;default->false;};
+            return switch(field) {
+                case "id","f_19848_" -> !(value instanceof Number n)||n.intValue()!=body.id();
+                case "uuid","f_19820_" -> !Objects.equals(value,body.uuid());
+                case "stringUUID","f_19821_" -> !Objects.equals(value,body.uuid().toString());
+                case "dead","f_20890_" -> !Boolean.FALSE.equals(value);
+                case "deathTime","f_20919_","remainingFireTicks","f_19831_" -> !(value instanceof Integer n)||n>0;
+                case "absorptionAmount","f_20955_" -> !(value instanceof Float n)||absorptionDenied(entity,n);
+                case "canUpdate","isAddedToWorld" -> !Boolean.TRUE.equals(value);
+                case "removalReason","f_146795_" -> value!=null;
+                default -> false;
+            };
         }
         if(receiver instanceof net.minecraftforge.eventbus.api.Event event&&(field.equals("isCanceled")||field.equals("canceled")))return clientDispatch(event,"setCanceled",value);
         return false;
@@ -312,6 +348,14 @@ public final class ClientPresence {
         };
     }
     public static boolean clientDispatch(Object receiver,String method,Object value) {
+        if(method.equals("health-storage-remove")) {
+            LocalBody body=localBodies.get(receiver);
+            if(!currentBody(body))return false;
+            var entity=body.entity.get();var data=(Access.Data)((Access.EntityState)entity).pro$data();
+            return receiver==data.pro$items()&&(value==null||value instanceof Number n&&n.intValue()==Access.Living.pro$healthKey().getId()
+                    ||value instanceof Number absorptionId&&entity instanceof net.minecraft.world.entity.player.Player&&protectedBody(body)
+                        &&absorptionId.intValue()==Access.PlayerState.pro$absorptionKey().getId());
+        }
         if(receiver instanceof net.minecraft.world.entity.Entity entity) {
             LocalBody body=localBodies.get(entity);
             if(!currentBody(body)||body.entity.get()!=entity)return false;
@@ -320,6 +364,13 @@ public final class ClientPresence {
                      "hurt","m_6469_","actuallyHurt","m_6475_","die","m_6667_" -> protectedBody(body);
                 case "setHealth","m_21153_" -> value instanceof Number n&&healthDenied(body,n.floatValue());
                 case "heal","m_5634_" -> policy.noHeal(connection,policy.dimension(),body.id(),body.uuid())&&value instanceof Number n&&(!Float.isFinite(n.floatValue())||n.floatValue()>0);
+                case "setAbsorptionAmount","m_7911_" -> protectedBody(body)&&value instanceof Number n&&absorptionDenied(body.entity.get(),n.floatValue());
+                case "setRemainingFireTicks","m_7311_" -> protectedBody(body)&&value instanceof Number n&&n.intValue()>0;
+                case "life-health-carrier" -> value==body.data().get()||value==body.items().get()||value==body.health().get()
+                        ||protectedBody(body)&&value!=null&&value==body.absorption().get();
+                case "life-health-items" -> value==body.items().get()&&value==((Access.Data)((Access.EntityState)entity).pro$data()).pro$items();
+                case "life-health-item" -> (value==body.health().get()||protectedBody(body)&&value!=null&&value==body.absorption().get())
+                        &&body.items().get()==((Access.Data)((Access.EntityState)entity).pro$data()).pro$items();
                 default -> false;
             };
         }
@@ -331,6 +382,11 @@ public final class ClientPresence {
             return protectedPlayer()&&event.getOverlay().id().equals(net.minecraftforge.client.gui.overlay.VanillaGuiOverlay.PLAYER_HEALTH.id());
         if(receiver instanceof net.minecraftforge.client.event.CustomizeGuiOverlayEvent.BossEventProgress event)return hudRemovalDenied(event.getBossEvent().getId());
         return false;
+    }
+    private static boolean absorptionDenied(net.minecraft.world.entity.LivingEntity entity,float value) {
+        if(!Float.isFinite(value)||value<0)return true;
+        float current=ProRuntime.rawAbsorption(entity);
+        return !Float.isFinite(current)||value<current;
     }
     /** Refuse the whole mutation before ClientLevel can partly remove a protected mirror. */
     public static boolean replacementDenied(Object level,int id,net.minecraft.world.entity.Entity replacement) {

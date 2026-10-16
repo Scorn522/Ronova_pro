@@ -64,6 +64,34 @@ final class BackingPolicy {
     static boolean capture(EntityRecords records,Entity entity) {
         ArrayDeque<Object> queue=new ArrayDeque<>();Collections.addAll(queue,entity,records.level,records.manager,records.lookup,records.sections,records.ticks,records.tracking);
         if(entity instanceof net.minecraft.server.level.ServerPlayer)queue.add(records.level.getServer().getPlayerList());
+        return captureQueued(queue,entity);
+    }
+    /** Capture only the actual health storage, without granting noHeal authority over body membership. */
+    static boolean captureHealthStorage(Entity entity,Object data) {
+        if(!(data instanceof Access.Data actual))return false;
+        ArrayDeque<Object> queue=new ArrayDeque<>();queue.add(data);
+        boolean complete=captureQueued(queue,entity);
+        complete&=captureHealthField(entity,Entity.class,entity,"entityData","f_19804_");
+        Object health=actual.pro$item(Access.Living.pro$healthKey());
+        complete&=captureHealthField(health,net.minecraft.network.syncher.SynchedEntityData.DataItem.class,entity,"value","f_135391_");
+        if(entity instanceof net.minecraft.world.entity.player.Player) {
+            Object absorption=actual.pro$item(Access.PlayerState.pro$absorptionKey());
+            complete&=captureHealthField(absorption,net.minecraft.network.syncher.SynchedEntityData.DataItem.class,entity,"value","f_135391_");
+        }
+        return complete;
+    }
+    private static boolean captureHealthField(Object receiver,Class<?> declaring,Entity entity,String name,String production) {
+        if(receiver==null)return false;
+        try {
+            Field field;
+            try {field=declaring.getDeclaredField(name);}catch(NoSuchFieldException remapped){field=declaring.getDeclaredField(production);}
+            if(!accessible(field))return false;
+            owner(receiver,entity);
+            var fields=new HashMap<>(FIELDS.getOrDefault(receiver,Map.of()));
+            fields.put(field,new WeakReference<>(field.get(receiver)));FIELDS.put(receiver,Map.copyOf(fields));return true;
+        }catch(ReflectiveOperationException unavailable){return false;}
+    }
+    private static boolean captureQueued(ArrayDeque<Object> queue,Entity entity) {
         Set<Object> seen=Collections.newSetFromMap(new IdentityHashMap<>());
         boolean complete=true;
         while(!queue.isEmpty()&&seen.size()<2048) {
@@ -165,6 +193,17 @@ final class BackingPolicy {
         if(LiveStatePolicy.elementDenied(container,old,next))return true;
         if(SourceMaps.denies(container,null,next))return true;
         if(old==next)return false;List<Owner> owners=OWNERS.get(container);if(owners==null)return false;
+        for(Owner owner:owners) {
+            Entity entity=owner.entity.get();if(entity==null)continue;
+            if(ProRuntime.lifeHealthEntry(entity,container,old))return true;
+            for(Object observed:FIELDS.getOrDefault(entity,Map.of()).values())if(observed instanceof WeakReference<?> data) {
+                Object holder=data.get();if(!(holder instanceof Access.Data actual))continue;
+                Object items=actual.pro$items();
+                if(backingOf(items,container)&&ProRuntime.lifeHealthEntry(entity,items,old)) {
+                    if(!originalWriter(items))return true;
+                }
+            }
+        }
         if(next instanceof Entity entity&&ProRuntime.preventAdmission(entity))return true;
         if(next instanceof Access.Tracked tracked&&ProRuntime.preventAdmission(tracked.pro$entity()))return true;
         if(next instanceof Access.Section section)for(Entity entity:((Access.Group)section.pro$storage()).pro$all())if(ProRuntime.preventAdmission(entity))return true;
@@ -187,6 +226,7 @@ final class BackingPolicy {
         if(LiveStatePolicy.arrayDenied(array,index,next))return true;
         if(!known(array)||array==null||!array.getClass().isArray()||index<0||index>=Array.getLength(array))return false;
         Object prior=Array.get(array,index);if(array.getClass().getComponentType().isPrimitive()?Objects.equals(prior,next):prior==next)return false;
+        if(elementDenied(array,prior,next,true))return true;
         if(SourceMaps.primitiveBackingDenied(array))return true;
         if(elementDenied(array,null,next,true))return true;
         var peer=ARRAY_VALUES.get(array);Object values=peer==null?null:peer.get();
@@ -276,6 +316,8 @@ final class BackingPolicy {
         if(EquipmentPolicy.fieldDenied(receiver,declaring,name,next))return true;
         if(LiveStatePolicy.fieldDenied(receiver,declaring,name,next))return true;
         if(SourceMaps.carrierFieldDenied(receiver,declaring,name,next))return true;
+        if(declaring==net.minecraft.network.syncher.SynchedEntityData.DataItem.class
+                &&(name.equals("value")||name.equals("f_135391_")))return ProRuntime.preventDataWrite(receiver,next);
         Map<Field,Object> fields=FIELDS.get(receiver);if(fields==null)return false;
         for(var entry:fields.entrySet()) {
             Field field=entry.getKey();if(field.getDeclaringClass()!=declaring||!field.getName().equals(name))continue;
@@ -285,7 +327,13 @@ final class BackingPolicy {
                     &&field.getType()==net.minecraft.world.level.entity.EntityInLevelCallback.class
                     &&next instanceof Access.Callback callback
                     &&ProRuntime.allowInitialGroupCallback(entity,callback))return false;
-            boolean active=false,terminal=false;for(Owner owner:OWNERS.getOrDefault(receiver,List.of())) {Entity entity=owner.entity.get();active|=entity!=null&&ProRuntime.preventIndexRemoval(entity);terminal|=entity!=null&&ProRuntime.preventAdmission(entity);}
+            boolean active=false,terminal=false,healthItems=false;
+            for(Owner owner:OWNERS.getOrDefault(receiver,List.of())) {
+                Entity entity=owner.entity.get();
+                active|=entity!=null&&ProRuntime.preventIndexRemoval(entity);terminal|=entity!=null&&ProRuntime.preventAdmission(entity);
+                if(entity!=null&&ProRuntime.lifeHealthCarrier(entity,prior))return true;
+                healthItems|=entity!=null&&ProRuntime.lifeHealthItems(entity,receiver);
+            }
             if(receiver instanceof Access.Ticks&&originalWriter(receiver)) {
                 // Vanilla swaps its two existing maps while the old active map is being iterated.
                 // Keep both old identities until the RETURN publication hook captures the pair.
@@ -295,7 +343,7 @@ final class BackingPolicy {
             // Only the original implementation can publish an internal grow/copy. The new backing is tracked before publication.
             boolean internal=node(receiver)||sectionTree(receiver)||receiver instanceof Access.Callback||receiver instanceof Access.Tracked
                     ||receiver.getClass()==ArrayList.class||receiver.getClass()==HashMap.class||receiver.getClass().getName().startsWith("it.unimi.dsi.fastutil.");
-            if((active||terminal)&&internal&&originalWriter(receiver)) {
+            if((active||terminal||healthItems)&&internal&&originalWriter(receiver)) {
                 if(field.getType().isPrimitive())return false;
                 if(node(receiver))return false; // HashMap's entry guard already decided the exact mutation.
                 if(next==null&&sectionTree(receiver))return false;
@@ -308,7 +356,7 @@ final class BackingPolicy {
             // Never enumerate a map inside its sealed implementation's multi-field resize:
             // key/value/link/size are only a coherent tuple once that implementation returns.
             if(terminal&&containsTerminal(next))return true;
-            return active;
+            return active||healthItems;
         }
         return false;
     }

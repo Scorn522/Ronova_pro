@@ -1,5 +1,18 @@
 # B 批实际报告：2026-10-09 代码收敛接续
 
+## 2026-10-16：C 接续——启动交接与统一生命保护
+
+接续 `6fc3ea4`，Java90 / Native82 / Storage3 / Journal6，协议 `r3-client-8`。整包源码写齐后构建，未复制 Buer 样本代码，未写自身外观、注册武器、部署驱动或生成源码 ZIP。
+
+启动按当前实际 Agent 状态交接：安装前认领、重复入口复用、失败/部分 hook 不盲重装、FULL 实时复算，Java-only 合同保留。非 FULL 只明确报告，由实际动作门决定可用性。预启动不再提前报 READY，所选服务端世界和保存的非默认返回策略不再被 default 覆盖；durable 读回失败明确停止交付。Native 初始化新增实际完成标志，JNI 表已发布但必要 Unsafe/arraycopy 失败后，重复初始化不能返回成功。
+
+保护/禁疗统一资格绑定当前 body、subject generation、发布地址和世界记录，值写门保持防降与禁增各自语义。精确 setter 声明接不调 super 的覆写，吸收值读取真实存储；同步值、整生命载体、items 表、数据项、底层数组及身份字段的 Java/Unsafe/JNI 接原写门。生命项归属按当前代和真实 map 关系复核，标准内部搬移保留，合法玩家生命周期沿原 permit。客户端镜像接同一生命/吸收/火焰与存储关系，修正治疗后可降至旧 floor 的差异。
+
+`build-c-java90-native82-startup-life-20261016.log` **首轮 PASS，1分23秒**，含 Native82 编译链接；检查器编译 **退出0**。`c-java90-native82-startup-life-bytecode-20261016.log` 的 `startup-protection-bytecode` **退出0**，输出 `STARTUP_RETURN_REPLAY_PASS` 和 `PROTECTION_SETTER_BYTECODE_PASS`：前者使用实际 JournalLineage 写入/读取所选服务端世界的 STOP/RETURN、非默认策略及 client 分离；后者临时设置并恢复隔离声明记录，调用生产 DispatchBoundary 匹配真实 Entity/LivingEntity 继承合同，检查拒绝前无原副作用、允许一次执行、参数及 RuntimeException/Error 身份。执行投影仅改名、去实体父类/构造器并重定向单一 Bridge 调用到普通测试 predicate，未安装 Core guards，不证明公开声明注册、真实 Agent 安装、Native 或游戏保护。
+
+最后将生命数据表键限定 Integer；收尾重编遗漏 Zig 与构建目录参数，`build-c-java90-native82-startup-life-exact-key-20261016.log` **FAILED，57秒**，原记录保留。恢复首轮配置后，`build-c-java90-native82-startup-life-final-20261016.log` **PASS，51秒**，未重跑已通过检查或旧矩阵。真实 premain/attach、Native 安装及带策略游戏场景 **NOTRUN**。最终候选 `distribution/candidate-c-java90-native82-startup-life-wip-20261016`：Core2968376、prelaunch23226字节，与源码及本摘要同步 GitHub。未知间接调用与不透明载体边界仍保留，完整 C/B 未宣称完成。
+
+---
 ## 2026-10-15：C 接续——自定义包装回调与双参数组合
 
 接续 `a7e1a47`，Java89 / Native81 / Storage3 / Journal6，协议 `r3-client-8`。本包源码全部写齐后才构建，Native/驱动源码未改。

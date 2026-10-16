@@ -30,7 +30,12 @@ public final class RecoveryAgent {
     private static final Set<Class<?>> watching=Collections.newSetFromMap(new WeakHashMap<>());
     private static long definitionEpoch;
     private RecoveryAgent() { }
-    public static void premain(String argument,Instrumentation api) { start(argument,api,"PREMAIN"); }
+    public static void premain(String argument,Instrumentation api) {
+        start(argument,api,"PREMAIN");
+        String actual=installState();
+        if(!actual.equals("INSTALLED_FULL")) { report("AGENT_PREMAIN_BACKEND_UNAVAILABLE:"+actual);return; }
+        report("AGENT_PREMAIN_READY:"+actual);
+    }
     /**
      * Attach-time entry, used by the zero-argument bootstrap the mod starts after Forge is up.
      *
@@ -44,23 +49,24 @@ public final class RecoveryAgent {
         start(argument,api,"ATTACH");
     }
     private static synchronized void start(String argument,Instrumentation api,String mode) {
-        if(instrumentation!=null) { report("AGENT_EXISTING_STATE:"+installState);return; }
-        if(Boolean.getBoolean("ronova.pro.startupTrace")){
-            Thread starting=Thread.currentThread();
-            Thread trace=new Thread(()->{
-                for(int sample=0;sample<3;sample++){
-                    try{Thread.sleep(90000);}catch(InterruptedException done){return;}
-                    System.err.println("RONOVA_STARTUP_THREAD_SAMPLE "+sample);
-                    for(StackTraceElement frame:starting.getStackTrace())System.err.println("  at "+frame);
-                }
-            },"Ronova startup failure trace");
-            trace.setDaemon(true);trace.start();
-        }
+        if(!installState.equals("NOT_ATTEMPTED")) { report("AGENT_EXISTING_STATE:"+installState());return; }
+        // Claim the installation before bootstrap/native publication, not only once Instrumentation is saved.
+        // Even a failure before addTransformer leaves this attempt's exact bootstrap classes in the JVM.
+        installState="INSTALLING:"+mode;
         try {
+            if(Boolean.getBoolean("ronova.pro.startupTrace")){
+                Thread starting=Thread.currentThread();
+                Thread trace=new Thread(()->{
+                    for(int sample=0;sample<3;sample++){
+                        try{Thread.sleep(90000);}catch(InterruptedException done){return;}
+                        System.err.println("RONOVA_STARTUP_THREAD_SAMPLE "+sample);
+                        for(StackTraceElement frame:starting.getStackTrace())System.err.println("  at "+frame);
+                    }
+                },"Ronova startup failure trace");
+                trace.setDaemon(true);trace.start();
+            }
             install(argument,api);
-            installState=installed.containsAll(JdkTaskBoundaryContract.targets())&&indexGuarded&&reflectionGuarded&&unsafeGuarded
-                    &&HandleWriteBoundary.complete()&&BackingBoundary.coreInstalled()&&HashMapBoundary.sourceInstalled()
-                    &&ConcurrentSourceBoundary.installed()&&FieldWriteBoundary.sourceCarriersInstalled()&&controlReady()?"INSTALLED_FULL":"INSTALLED_PARTIAL";
+            installState=installationComplete()?"INSTALLED_FULL":"INSTALLED_PARTIAL";
         } catch(Throwable unavailable) {
             while(unavailable instanceof java.lang.reflect.InvocationTargetException&&unavailable.getCause()!=null)unavailable=unavailable.getCause();
             installState="FAILED:"+unavailable.getClass().getSimpleName()+":"+unavailable.getMessage();
@@ -75,8 +81,19 @@ public final class RecoveryAgent {
     }
     /** The real result of the last installation attempt; an attach call returning is not this. */
     public static String installState() {
+        String actual=installState;
+        if(actual.startsWith("FAILED:"))return actual;
         String failure=controlFailure;
-        return failure==null?installState:"INSTALLED_PARTIAL:TRANSFORM_FAILED:"+failure;
+        if(failure!=null)return actual.startsWith("INSTALLING:")?actual+":TRANSFORM_FAILED:"+failure:"INSTALLED_PARTIAL:TRANSFORM_FAILED:"+failure;
+        if(actual.equals("INSTALLED_FULL")&&!installationComplete())return "INSTALLED_PARTIAL:CURRENT_BOUNDARY_UNAVAILABLE";
+        return actual;
+    }
+    private static boolean installationComplete() {
+        try {
+            return installed.containsAll(JdkTaskBoundaryContract.targets())&&indexGuarded&&reflectionGuarded&&unsafeGuarded
+                    &&HandleWriteBoundary.complete()&&BackingBoundary.coreInstalled()&&HashMapBoundary.sourceInstalled()
+                    &&ConcurrentSourceBoundary.installed()&&FieldWriteBoundary.sourceCarriersInstalled()&&controlReady();
+        } catch(RuntimeException|LinkageError unavailable) { return false; }
     }
     public static String sourceMapState() { return HashMapBoundary.sourceInstalled()&&ConcurrentSourceBoundary.installed()?"INSTALLED":"SOURCE_MAP_SCOPE_UNAVAILABLE"; }
     public static String sourcePublicationState(){
@@ -85,13 +102,14 @@ public final class RecoveryAgent {
     }
     private static volatile String installState="NOT_ATTEMPTED";
     private static synchronized void install(String argument,Instrumentation api) throws Exception {
+        if(api==null)throw new IllegalArgumentException("INSTRUMENTATION_REQUIRED");
         if(!api.isRetransformClassesSupported())throw new IllegalStateException("RETRANSFORM_UNSUPPORTED");
             if(argument==null||argument.isBlank())throw new IllegalArgumentException("BOOTSTRAP_JAR_PATH_REQUIRED");
             if(argument.startsWith("base64:"))argument=new String(Base64.getUrlDecoder().decode(argument.substring(7)),java.nio.charset.StandardCharsets.UTF_8);
             bootstrap=new JarFile(Path.of(argument).toAbsolutePath().normalize().toFile());
             api.appendToBootstrapClassLoaderSearch(bootstrap);
             bridge=Class.forName("dev.ronova.pro.bootstrap.TaskBridge",true,null);
-            if(!Integer.valueOf(89).equals(bridge.getMethod("abiVersion").invoke(null)))throw new IllegalStateException("TASK_BRIDGE_ABI_MISMATCH");
+            if(!Integer.valueOf(90).equals(bridge.getMethod("abiVersion").invoke(null)))throw new IllegalStateException("TASK_BRIDGE_ABI_MISMATCH");
             Class.forName("dev.ronova.pro.bootstrap.SourceMapBridge",true,null);
             // Default-Map guards test UUID keys while class-loading maps are
             // active. Resolve that type before publishing the guarded methods.
@@ -134,7 +152,7 @@ public final class RecoveryAgent {
             Class.forName("dev.ronova.pro.bootstrap.ControlBridge$ProducerFrame",false,null);
             Class.forName("dev.ronova.pro.bootstrap.EventFaultBridge",true,null);
             Class<?> control=Class.forName("dev.ronova.pro.bootstrap.ControlBridge",true,null);
-            if(!Integer.valueOf(89).equals(control.getMethod("abiVersion").invoke(null)))throw new IllegalStateException("CONTROL_BRIDGE_ABI_MISMATCH");
+            if(!Integer.valueOf(90).equals(control.getMethod("abiVersion").invoke(null)))throw new IllegalStateException("CONTROL_BRIDGE_ABI_MISMATCH");
             Module base=Object.class.getModule(),ours=RecoveryAgent.class.getModule();
             api.redefineModule(base,Set.of(bridge.getModule()),Map.of(
                     "jdk.internal.org.objectweb.asm",Set.of(ours),"jdk.internal.org.objectweb.asm.commons",Set.of(ours),

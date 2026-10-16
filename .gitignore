@@ -95,6 +95,10 @@ validation/a-takeover-tasks-01/server/Pro-A-Tasks/
 /distribution/candidate-c-java89-native81-defined-bi-wip-20261015/*
 !/distribution/candidate-c-java89-native81-defined-bi-wip-20261015/ronova-pro-core-0.1.0-stage-b-dev.jar
 !/distribution/candidate-c-java89-native81-defined-bi-wip-20261015/ronova-pro-prelaunch.jar
+!/distribution/candidate-c-java90-native82-startup-life-wip-20261016/
+/distribution/candidate-c-java90-native82-startup-life-wip-20261016/*
+!/distribution/candidate-c-java90-native82-startup-life-wip-20261016/ronova-pro-core-0.1.0-stage-b-dev.jar
+!/distribution/candidate-c-java90-native82-startup-life-wip-20261016/ronova-pro-prelaunch.jar
 !/distribution/candidate-modwide-a-20261001/
 !/distribution/candidate-modwide-a-complete-20261001/
 !/distribution/candidate-b-source-20261004/

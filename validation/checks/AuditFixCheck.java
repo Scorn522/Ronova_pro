@@ -13,6 +13,7 @@ public final class AuditFixCheck {
     private static void require(boolean yes,String message) {if(!yes)throw new AssertionError(message);}
     private static Object invoke(Object receiver,String name)throws Exception {var m=receiver.getClass().getDeclaredMethod(name);m.setAccessible(true);try{return m.invoke(receiver);}catch(InvocationTargetException e){if(e.getCause() instanceof Exception x)throw x;throw e;}}
     public static void main(String[] args)throws Exception {
+        if(args.length==1&&args[0].equals("startup-protection-bytecode")){startupReturnReplay();protectionSetterBytecode();return;}
         if(args.length==1&&args[0].equals("network-bytecode")){networkBytecode();return;}
         if(args.length==1&&args[0].equals("resource-bytecode")){resourceBytecode();return;}
         if(args.length==1&&args[0].equals("custom-carrier-bytecode")){carrierBytecode();capabilityBytecode();return;}
@@ -21,6 +22,7 @@ public final class AuditFixCheck {
         if(args.length==1&&args[0].equals("equipment-helper-composition-bytecode")){equipmentSlotBytecode();equipmentSlotHelperBytecode();equipmentFunctionBytecode();return;}
         if(args.length==1&&args[0].equals("equipment-defined-bi-bytecode")){equipmentDefinedCallbackBytecode();equipmentBiCompositionBytecode();return;}
         if(args.length==1&&args[0].equals("equipment-async-carrier-bytecode")){equipmentAsyncCarrierBytecode();return;}
+        if(args.length==1&&args[0].equals("protection-setter-bytecode")){protectionSetterBytecode();return;}
         if(args.length==3&&args[0].equals("mod-group-returns")){modGroupReturns(args[1],args[2]);return;}
         if(args.length==2&&args[0].equals("network-preconnect")){networkPreconnect(args[1]);return;}
         if(args.length==1&&args[0].equals("source-list-fixes")){sourceListFixes();return;}
@@ -1057,6 +1059,146 @@ public final class AuditFixCheck {
             require(writes.get()==1&&flushes.get()==1&&channel.readOutbound()==unrelated&&channel.readOutbound()==null,"valid stopped rejection lost the preceding unrelated write/flush");
             System.out.println("NETWORK_PROMISE_STOP_PASS actual_bootStop_named_Mod_Class_source real_EmbeddedChannel foreign_promise_unchanged completed_promise_original_exception cancelled_no_flush valid_stopped_rejected preceding_unrelated_write_flushed");
         } finally {channel.finishAndReleaseAll();other.finishAndReleaseAll();}
+    }
+    /** The actual early reader must retain the selected world and its durable return policy. */
+    private static void startupReturnReplay()throws Exception{
+        var directory=java.nio.file.Files.createTempDirectory(java.nio.file.Path.of(".work"),"startup-life-").toAbsolutePath();
+        var world=directory.resolve("universe/chosen");var journal=world.resolve("ronova-pro");java.nio.file.Files.createDirectories(journal);
+        UUID realm=UUID.randomUUID(),session=UUID.randomUUID();String id="startup_target";
+        UUID group=UUID.nameUUIDFromBytes(("ronova-mod-group/1|"+id).getBytes(java.nio.charset.StandardCharsets.UTF_8));
+        String empty=HexFormat.of().formatHex(java.security.MessageDigest.getInstance("SHA-256").digest(new byte[0]));
+        int version=dev.ronova.pro.persistence.JournalLineage.VERSION;
+        try(var file=java.nio.channels.FileChannel.open(journal.resolve("intent-v"+version+".log"),java.nio.file.StandardOpenOption.CREATE_NEW,java.nio.file.StandardOpenOption.WRITE)){
+            dev.ronova.pro.persistence.JournalLineage.writeRecord(file,"HEADER\t"+version+"\t"+realm);
+            for(int prior=1;prior<version;prior++)dev.ronova.pro.persistence.JournalLineage.writeRecord(file,"MIGRATED_V"+prior+"\t"+empty+"\t0");
+            dev.ronova.pro.persistence.JournalLineage.writeRecord(file,"GROUP/1\tSTOP\t"+group+"\t"+session+"\t1\t"+id+"\tdefault");
+            dev.ronova.pro.persistence.JournalLineage.writeRecord(file,"GROUP/1\tRETURN\t"+group+"\tempty");file.force(true);
+        }
+        Class<?> targets=Class.forName("dev.ronova.pro.prelaunch.RestartTargets");
+        Method read=targets.getDeclaredMethod("read",java.nio.file.Path.class,List.class);read.setAccessible(true);
+        Object selected=read.invoke(null,directory,List.of("--launchTarget=forgeserver","--universe","universe","--world=chosen"));
+        require(world.equals(invoke(selected,"world"))&&realm.equals(invoke(selected,"realm"))
+                &&Map.of(id,"empty").equals(invoke(selected,"modes")),"early restart reader lost selected world or durable non-default return policy");
+        Object client=read.invoke(null,directory,List.of("--launchTarget","forgeclient","--world=chosen"));
+        require(invoke(client,"world")==null&&Map.of().equals(invoke(client,"modes")),"client launch borrowed a dedicated-server return policy");
+        Method mode=targets.getDeclaredMethod("mode",String.class);mode.setAccessible(true);
+        for(String policy:List.of("default","null","empty","uuid-fixed","uuid-each","invalid-id"))
+            require(policy.equals(mode.invoke(null,policy)),"early return parser replaced the saved policy: "+policy);
+        System.out.println("STARTUP_RETURN_REPLAY_PASS actual_JournalLineage_selected_dedicated_world_STOP_RETURN_nondefault_mode client_separate six_policies_preserved no_game_restart_or_Agent_installation_claim");
+    }
+    /** These entity overrides deliberately omit super; no entity is constructed by the isolated check. */
+    public abstract static class ProtectionSetterBody extends net.minecraft.world.entity.LivingEntity {
+        public int bodyCalls,fireValue;
+        public float absorptionValue;
+        public Throwable originalFailure;
+        protected ProtectionSetterBody(net.minecraft.world.entity.EntityType<? extends net.minecraft.world.entity.LivingEntity> type,net.minecraft.world.level.Level level){super(type,level);}
+        @Override public void setAbsorptionAmount(float value){bodyCalls++;absorptionValue=value;failOriginal();}
+        @Override public void setRemainingFireTicks(int value){bodyCalls++;fireValue=value;failOriginal();}
+        public void m_7911_(float value){bodyCalls++;absorptionValue=value;failOriginal();}
+        public void m_7311_(int value){bodyCalls++;fireValue=value;failOriginal();}
+        private void failOriginal(){
+            if(originalFailure instanceof RuntimeException failure)throw failure;
+            if(originalFailure instanceof Error failure)throw failure;
+        }
+    }
+    private static Object setterExpectedReceiver,setterExpectedValue;
+    private static String setterExpectedOperation;
+    private static boolean setterAllow;
+    private static int setterGuardCalls;
+    /** Ordinary test predicate for an isolated executable copy, never installed into the real Bridge. */
+    public static boolean protectionSetterAllowed(Object receiver,String operation,Object value){
+        require(receiver==setterExpectedReceiver&&operation.equals(setterExpectedOperation),"setter entry changed its exact receiver or operation");
+        require(value!=null&&value.getClass()==setterExpectedValue.getClass()&&value.equals(setterExpectedValue),"setter entry changed its primitive argument or boxing");
+        setterGuardCalls++;return setterAllow;
+    }
+    private static void protectionSetterBytecode()throws Exception{
+        Class<?> controls=Class.forName("dev.ronova.pro.bootstrap.ControlBridge",true,null);
+        Field guards=controls.getDeclaredField("guards");guards.setAccessible(true);
+        require(guards.get(null)==null,"isolated setter body check requires uninstalled Core guards");
+        MethodHandles.publicLookup().findStatic(controls,"dispatchAllowed",MethodType.methodType(boolean.class,Object.class,String.class,Object.class));
+        Class<?> boundary=Class.forName("dev.ronova.pro.agent.DispatchBoundary"),entryType=Class.forName("dev.ronova.pro.agent.DispatchBoundary$Entry");
+        Constructor<?> entryConstructor=entryType.getDeclaredConstructor(Class.class,String.class,String.class,boolean.class);entryConstructor.setAccessible(true);
+        Field entries=boundary.getDeclaredField("entries");entries.setAccessible(true);
+        Method transform=boundary.getDeclaredMethod("transform",ClassLoader.class,String.class,Class.class,byte[].class);transform.setAccessible(true);
+        var selected=new LinkedHashMap<String,Class<?>>();var declarations=new ArrayList<Object>();
+        Class<?>[] owners={net.minecraft.world.entity.LivingEntity.class,net.minecraft.world.entity.Entity.class};
+        String[][] names={{"setAbsorptionAmount","m_7911_","(F)V"},{"setRemainingFireTicks","m_7311_","(I)V"}};
+        for(int index=0;index<owners.length;index++){
+            int matches=0;
+            for(Method method:owners[index].getDeclaredMethods())if((method.getName().equals(names[index][0])||method.getName().equals(names[index][1]))
+                    &&MethodType.methodType(method.getReturnType(),method.getParameterTypes()).descriptorString().equals(names[index][2])){
+                declarations.add(entryConstructor.newInstance(owners[index],method.getName(),names[index][2],false));selected.put(method.getName(),method.getParameterTypes()[0]);matches++;
+            }
+            require(matches==1,"actual game setter declaration missing or ambiguous: "+names[index][0]);
+        }
+        String originalName=AuditFixCheck.class.getName().replace('.','/')+"$ProtectionSetterBody";byte[] original;
+        try(var input=AuditFixCheck.class.getClassLoader().getResourceAsStream(originalName+".class")){
+            require(input!=null,"actual custom entity override bytes unavailable");original=input.readAllBytes();
+        }
+        // Isolate only the declarative match records. This does not exercise public declaration registration,
+        // install an Agent, or grant any Core guard, source or invocation authority.
+        Object previousEntries=entries.get(null),isolatedEntries=Array.newInstance(entryType,declarations.size());
+        for(int index=0;index<declarations.size();index++)Array.set(isolatedEntries,index,declarations.get(index));
+        byte[] changed;
+        try{entries.set(null,isolatedEntries);changed=(byte[])transform.invoke(null,AuditFixCheck.class.getClassLoader(),originalName,null,original);}
+        finally{entries.set(null,previousEntries);}
+        require(changed!=null,"production dispatch boundary did not weave the actual entity overrides");
+        var node=new org.objectweb.asm.tree.ClassNode();new org.objectweb.asm.ClassReader(changed).accept(node,0);int hooks=0;
+        for(var method:node.methods)if(selected.containsKey(method.name)){
+            int guarded=0;boolean sawGuard=false;
+            for(var instruction:method.instructions){
+                if(instruction instanceof org.objectweb.asm.tree.MethodInsnNode call&&call.owner.equals("dev/ronova/pro/bootstrap/ControlBridge")&&call.name.equals("dispatchAllowed")){
+                    require(call.getOpcode()==org.objectweb.asm.Opcodes.INVOKESTATIC&&call.desc.equals("(Ljava/lang/Object;Ljava/lang/String;Ljava/lang/Object;)Z"),"setter entry hook changed its production contract");
+                    var branch=call.getNext();while(branch!=null&&branch.getOpcode()<0)branch=branch.getNext();
+                    var refusal=branch==null?null:branch.getNext();while(refusal!=null&&refusal.getOpcode()<0)refusal=refusal.getNext();
+                    require(branch instanceof org.objectweb.asm.tree.JumpInsnNode jump&&jump.getOpcode()==org.objectweb.asm.Opcodes.IFNE
+                            &&refusal!=null&&refusal.getOpcode()==org.objectweb.asm.Opcodes.RETURN,"setter refusal does not return before the original body");
+                    // Only the executable copy uses this test predicate. The original hook above remains the production evidence.
+                    call.owner=AuditFixCheck.class.getName().replace('.','/');call.name="protectionSetterAllowed";
+                    sawGuard=true;guarded++;hooks++;
+                }else if(!sawGuard&&instruction instanceof org.objectweb.asm.tree.FieldInsnNode)
+                    throw new AssertionError("custom setter field effect precedes its dispatch guard: "+method.name);
+                else if(instruction instanceof org.objectweb.asm.tree.MethodInsnNode call&&call.getOpcode()==org.objectweb.asm.Opcodes.INVOKESPECIAL
+                        &&call.name.equals(method.name))throw new AssertionError("custom setter check unexpectedly delegates to super");
+            }
+            require(guarded==1,"custom setter must contain exactly one production dispatch guard: "+method.name);
+        }
+        require(hooks==selected.size(),"production dispatch boundary missed or duplicated a custom setter");
+        // Execute only the independent setter bodies. Removing their entity superclass and unused constructors
+        // avoids manufacturing a game entity or initializing Minecraft merely to check these entry instructions.
+        node.superName="java/lang/Object";node.access&=~org.objectweb.asm.Opcodes.ACC_ABSTRACT;
+        node.nestHostClass=null;node.nestMembers=null;node.innerClasses.clear();node.outerClass=null;node.outerMethod=null;node.outerMethodDesc=null;
+        node.methods.removeIf(method->method.name.equals("<init>"));
+        String alias="dev.ronova.pro.validation.CheckedProtectionSetterBody";
+        var writer=new org.objectweb.asm.ClassWriter(0);
+        node.accept(new org.objectweb.asm.commons.ClassRemapper(writer,new org.objectweb.asm.commons.SimpleRemapper(originalName,alias.replace('.','/'))));
+        byte[] isolated=writer.toByteArray();
+        Class<?> checked=new ClassLoader(AuditFixCheck.class.getClassLoader()){
+            Class<?> defineBody(){Class<?> result=defineClass(alias,isolated,0,isolated.length);resolveClass(result);return result;}
+        }.defineBody();
+        require(checked.getSuperclass()==Object.class,"setter execution must remain an isolated method body");
+        Field calls=checked.getField("bodyCalls"),failure=checked.getField("originalFailure");
+        try{
+            for(var entry:selected.entrySet()){
+                Object body=U.allocateInstance(checked);Method method=checked.getMethod(entry.getKey(),entry.getValue());
+                Object value=entry.getValue()==float.class?(Object)Float.valueOf(3.25F):Integer.valueOf(150);
+                Field state=checked.getField(entry.getValue()==float.class?"absorptionValue":"fireValue");Object before=state.get(body);
+                setterExpectedReceiver=body;setterExpectedOperation=entry.getKey();setterExpectedValue=value;
+                setterAllow=false;setterGuardCalls=0;failure.set(body,new AssertionError("denied setter body must not execute"));
+                method.invoke(body,value);
+                require(setterGuardCalls==1&&calls.getInt(body)==0&&state.get(body).equals(before),"denied custom setter executed its original body or changed state");
+                setterAllow=true;setterGuardCalls=0;failure.set(body,null);method.invoke(body,value);
+                require(setterGuardCalls==1&&calls.getInt(body)==1&&state.get(body).equals(value),"allowed custom setter changed its original count, argument or effect");
+                for(Throwable originalFailure:List.of(new IllegalStateException("actual_setter_runtime_failure"),new AssertionError("actual_setter_error"))){
+                    int prior=calls.getInt(body);setterGuardCalls=0;failure.set(body,originalFailure);
+                    try{method.invoke(body,value);throw new AssertionError("custom setter lost its original Throwable");}
+                    catch(InvocationTargetException thrown){require(thrown.getCause()==originalFailure,"custom setter replaced its original Throwable");}
+                    require(setterGuardCalls==1&&calls.getInt(body)==prior+1,"failing custom setter body or guard ran more or less than once");
+                }
+            }
+            require(guards.get(null)==null,"isolated setter check installed Core protection authority");
+        }finally{setterExpectedReceiver=null;setterExpectedValue=null;setterExpectedOperation=null;}
+        System.out.println("PROTECTION_SETTER_BYTECODE_PASS actual_Entity_LivingEntity_contracts isolated_declaration_records_restored production_DispatchBoundary_custom_no_super_overrides receiver_operation_Float_Integer entry_void_refusal_before_effect isolated_body_allowed_once_RuntimeException_Error_identity Core_guards_uninstalled no_public_declaration_registration_Agent_installation_game_protection_or_native_override_claim");
     }
     /** Verify the real FileDispatcher method changed by the current resource transformer. */
     private static void resourceBytecode()throws Exception{

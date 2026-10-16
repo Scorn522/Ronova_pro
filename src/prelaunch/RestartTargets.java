@@ -47,7 +47,7 @@ final class RestartTargets {
         return new Selection(world,history.realm(),Map.copyOf(modes));
     }
     static String mode(String value)throws IOException {
-        if(!Set.of("default","null","empty","uuid-fixed","uuid-each","invalid-id").contains(value))throw new IOException("INVALID_RETURN_POLICY:"+value);return "default";
+        if(!Set.of("default","null","empty","uuid-fixed","uuid-each","invalid-id").contains(value))throw new IOException("INVALID_RETURN_POLICY:"+value);return value;
     }
     private static void validId(String id){if(!id.matches("[a-z0-9_.-]{2,64}")||Set.of("ronova_pro","minecraft","forge","java").contains(id))throw new IllegalArgumentException("INVALID_OR_OWN_MOD_ID:"+id);}
     private static String option(List<String> args,String name)throws IOException {
@@ -64,7 +64,7 @@ final class RestartTargets {
             if(next.isEmpty())throw new IOException("EMPTY_WORLD_LAUNCH_OPTION:"+name);
             value=next;
         }
-        return "default";
+        return value;
     }
     private static List<String> expand(Path directory,List<String> args)throws IOException {
         List<String> result=new ArrayList<>();boolean enabled=true;

@@ -30,7 +30,10 @@ public final class ProRuntime implements AutoCloseable {
             Collections.synchronizedMap(new WeakIdentityMap<>());
     // Real-owner associations: a data item and an attribute instance do not point back to their entity, so the
     // association is captured where the game state is already being walked. No extra traversal is added.
-    private static final Map<Object,java.lang.ref.WeakReference<Entity>> SYNC_OWNERS=Collections.synchronizedMap(new WeakIdentityMap<>());
+    private enum LifeCarrierKind { DATA,HEALTH_ITEMS,HEALTH,ABSORPTION,MAX_HEALTH }
+    private record LifeCarrier(java.lang.ref.WeakReference<Entity> entity,long generation,LifeCarrierKind kind,
+            java.lang.ref.WeakReference<Object> items) { }
+    private static final Map<Object,LifeCarrier> SYNC_OWNERS=Collections.synchronizedMap(new WeakIdentityMap<>());
     // Only actual world containers observed while installing protection enter this weak identity index.
     private record IndexSlot(java.lang.ref.WeakReference<Entity> entity,
             java.lang.ref.WeakReference<Object> value,Object key,long generation) { }
@@ -39,7 +42,8 @@ public final class ProRuntime implements AutoCloseable {
     private static volatile long indexContainerMask;
     private static volatile String indexGuardState="NOT_INSTALLED";
     public static String indexGuardState() { return indexGuardState; }
-    private record ProtectionSnapshot(ProRuntime runtime,Binding binding,UUID identity,long generation,EntityRecords records) { }
+    private record ProtectionSnapshot(ProRuntime runtime,Binding binding,PolicyAddress address,long generation,
+            EntityRecords records,boolean protectedNow,boolean noHeal,float healthFloor) { }
     private record PolicyAddress(int entityId,UUID entityUuid,String dimension) { }
     private final Map<PolicyAddress,Subject> terminalAddresses=new LinkedHashMap<>();
     private record SentPolicy(long revision,boolean protectedNow,boolean noHeal) {
@@ -1278,7 +1282,7 @@ public final class ProRuntime implements AutoCloseable {
         try(var fieldGate=FieldPolicyGate.enter(e);var healthGate=FieldPolicyGate.enter(healthItem(living));
                 var authorityGate=binding.subject.commitGate.enter()) {
             binding.noHeal=enabled;binding.noHealGeneration=binding.subject.generation;
-            publishOwners(e);publishProtection(this,binding,e);
+            publishProtection(this,binding,e);
         }
         if(created)releaseNoHealObservation(binding,createdRecords,true);
         journal.append("NO_HEAL/1\t"+binding.subject.id+"\t"+binding.subject.generation+"\t"+session+"\t"+enabled);
@@ -1314,7 +1318,7 @@ public final class ProRuntime implements AutoCloseable {
         return queue(b,null,"PROTECT");
     }
     private void commitProtection(Binding binding,float floor) {
-        boolean retainNoHeal=binding.noHeal&&binding.noHealGeneration==binding.subject.generation&&!binding.subject.terminal;
+        boolean retainNoHeal=noHealBinding(binding.entity())==binding;
         binding.subject.generation++;binding.subject.terminal=false;binding.protection=false;
         binding.noHeal=retainNoHeal;if(retainNoHeal)binding.noHealGeneration=binding.subject.generation;
         binding.healthFloor=floor;
@@ -1328,20 +1332,14 @@ public final class ProRuntime implements AutoCloseable {
         BackingPolicy.resources(this,journal,recoveryTasks,recoveryStorage,recoveryRecords);
         Entity entity=b.entity();
         if(entity==null)return;
-        String liveStateGap="";
-        try{LiveStatePolicy.publish(entity,b.subject.generation);}
-        catch(RuntimeException|LinkageError failure){liveStateGap="LIVE_STATE_CAPTURE_UNRESOLVED:"+failure.getMessage();coverageGap=true;}
-        try{EquipmentPolicy.publish(entity,b.subject.generation);}
-        catch(RuntimeException|LinkageError failure){liveStateGap+=(liveStateGap.isEmpty()?"":";")+"EQUIPMENT_CAPTURE_UNRESOLVED:"+failure.getMessage();coverageGap=true;}
         b.protection=true;
         b.protectionGeneration=b.subject.generation;
-        b.protectionGap=liveStateGap;
+        b.protectionGap="";
         publishProtection(this,b,entity);
         // Publish the policy before registering each exact slot. A writer already inside that
         // container's short gate finishes first; later writers see both the slot and policy.
         String indexGap=publishIndexOwners(b,entity);
         if(!indexGap.isEmpty())b.protectionGap+=(b.protectionGap.isEmpty()?"":";")+indexGap;
-        publishOwners(entity);
     }
     private String publishIndexOwners(Binding binding,Entity entity) {
         EntityRecords records=binding.records;
@@ -1414,8 +1412,8 @@ public final class ProRuntime implements AutoCloseable {
         synchronized(PROTECTION) { published=List.copyOf(PROTECTION.values()); }
         for(ProtectionSnapshot snapshot:published) {
             ProRuntime runtime=snapshot.runtime();Binding binding=snapshot.binding();Entity entity=binding.entity();
-            if(runtime.closing||!runtime.server.isSameThread()||entity==null||snapshot.records().ticks!=owner
-                    ||!binding.protection||binding.protectionGeneration!=binding.subject.generation)continue;
+            if(!runtime.server.isSameThread()||entity==null||snapshot.records().ticks!=owner
+                    ||currentLifePolicy(entity)!=snapshot||!protectionActive(snapshot))continue;
             if(!BackingPolicy.capture(binding.records,entity))binding.protectionGap="TICK_BACKING_CAPTURE_INCOMPLETE";
             addIndexSlot(ticks.pro$active(),snapshot.records().id,entity,entity,binding.subject.generation);
             addIndexSlot(ticks.pro$passive(),snapshot.records().id,entity,entity,binding.subject.generation);
@@ -1423,6 +1421,7 @@ public final class ProRuntime implements AutoCloseable {
     }
     /** Null key/value asks only whether this proven container currently has protection to preserve on clear. */
     public static boolean preventIndexSlotRemoval(Object container,Object key,Object value) {
+        if(lifeHealthSlotRemoval(container,key,value)||clientDispatchDenied(container,"health-storage-remove",key))return true;
         if(EquipmentPolicy.elementDenied(container,value,null))return true;
         if(LiveStatePolicy.elementDenied(container,value,null))return true;
         if(BlockGroupPolicy.containerMutationDenied(container,key,value))return true;
@@ -1466,14 +1465,21 @@ public final class ProRuntime implements AutoCloseable {
         return false;
     }
     private static void publishProtection(ProRuntime runtime,Binding binding,Entity entity) {
-        try{LiveStatePolicy.publish(entity,binding.protection?binding.protectionGeneration:0);}
+        long generation=binding.subject.generation;
+        boolean active=!binding.subject.terminal;
+        ProtectionSnapshot snapshot=new ProtectionSnapshot(runtime,binding,binding.address,generation,binding.records,
+                active&&binding.protection&&binding.protectionGeneration==generation,
+                active&&binding.noHeal&&binding.noHealGeneration==generation,binding.healthFloor);
+        // Carrier capture asks the same current-generation qualification as a writer. Publish the exact
+        // body first so a newly installed generation can acquire its real effect/equipment carrier guards.
+        PROTECTION.put(entity,snapshot);
+        if(snapshot.protectedNow()||snapshot.noHeal())runtime.publishOwners(entity);
+        try{LiveStatePolicy.publish(entity,snapshot.protectedNow()?generation:0);}
         catch(RuntimeException|LinkageError failure){String gap="LIVE_STATE_CAPTURE_UNRESOLVED:"+failure.getMessage();
             if(!binding.protectionGap.contains(gap))binding.protectionGap+=(binding.protectionGap.isEmpty()?"":";")+gap;runtime.coverageGap=true;}
-        try{EquipmentPolicy.publish(entity,binding.protection?binding.protectionGeneration:0);}
+        try{EquipmentPolicy.publish(entity,snapshot.protectedNow()?generation:0);}
         catch(RuntimeException|LinkageError failure){String gap="EQUIPMENT_CAPTURE_UNRESOLVED:"+failure.getMessage();
             if(!binding.protectionGap.contains(gap))binding.protectionGap+=(binding.protectionGap.isEmpty()?"":";")+gap;runtime.coverageGap=true;}
-        PROTECTION.put(entity,new ProtectionSnapshot(runtime,binding,binding.address.entityUuid(),
-                binding.protectionGeneration,binding.records));
     }
     /** Exact object lookup works even after its UUID or raw level has been corrupted. */
     static ProRuntime policyRuntime(Entity e) {
@@ -1481,7 +1487,7 @@ public final class ProRuntime implements AutoCloseable {
         return snapshot==null?runtime(e):snapshot.runtime();
     }
     private static boolean snapshotProtected(Entity e) { return protectedBinding(e)!=null; }
-    static long liveStateGeneration(Entity entity){Binding binding=protectedBinding(entity);return binding==null?0:binding.protectionGeneration;}
+    static long liveStateGeneration(Entity entity){ProtectionSnapshot snapshot=currentLifePolicy(entity);return protectionActive(snapshot)?snapshot.generation():0;}
     static boolean liveStateLifecycleAllowed(Entity entity){return playerLifecycleAllows(entity);}
     private static void clearProtection(Entity e) { PROTECTION.remove(e);LiveStatePolicy.publish(e,0);EquipmentPolicy.publish(e,0); }
     /**
@@ -1489,20 +1495,35 @@ public final class ProRuntime implements AutoCloseable {
      * the synchronized-data items of a body we just protected, and its maximum-health attribute instance.
      */
     private void publishOwners(Entity entity) {
+        Binding binding=bindings.get(entity);if(binding==null)return;
+        long generation=binding.subject.generation;
         try {
-            var data=((Access.EntityState)entity).pro$data();
-            if(entity instanceof LivingEntity living)SYNC_OWNERS.put(healthItem(living),new java.lang.ref.WeakReference<>(entity));
+            if(entity instanceof LivingEntity living) {
+                var data=((Access.EntityState)entity).pro$data();
+                Object items=((Access.Data)data).pro$items();var itemIdentity=new java.lang.ref.WeakReference<Object>(items);
+                SYNC_OWNERS.put(data,new LifeCarrier(new java.lang.ref.WeakReference<>(entity),generation,LifeCarrierKind.DATA,itemIdentity));
+                SYNC_OWNERS.put(items,new LifeCarrier(new java.lang.ref.WeakReference<>(entity),generation,LifeCarrierKind.HEALTH_ITEMS,itemIdentity));
+                SYNC_OWNERS.put(healthItem(living),new LifeCarrier(new java.lang.ref.WeakReference<>(entity),generation,LifeCarrierKind.HEALTH,itemIdentity));
+                if(entity instanceof net.minecraft.world.entity.player.Player)
+                    SYNC_OWNERS.put(absorptionItem(living),new LifeCarrier(new java.lang.ref.WeakReference<>(entity),generation,LifeCarrierKind.ABSORPTION,itemIdentity));
+                if(!BackingPolicy.captureHealthStorage(entity,data)) {
+                    binding.protectionGap="LIFE_STORAGE_CAPTURE_INCOMPLETE";coverageGap=true;
+                }
+            }
         } catch(RuntimeException unavailable) { coverageGap=true; }
         if(entity instanceof LivingEntity living)try {
             var instance=((Access.Living)living).pro$attributes()
                     .getInstance(net.minecraft.world.entity.ai.attributes.Attributes.MAX_HEALTH);
-            if(instance!=null)SYNC_OWNERS.put(instance,new java.lang.ref.WeakReference<>(entity));
+            if(instance!=null)SYNC_OWNERS.put(instance,new LifeCarrier(new java.lang.ref.WeakReference<>(entity),generation,LifeCarrierKind.MAX_HEALTH,new java.lang.ref.WeakReference<>(null)));
         } catch(RuntimeException unavailable) { coverageGap=true; }
     }
     /** The living body that really owns this attribute instance, if it has been observed. */
     public static LivingEntity attributeOwner(Object instance) {
-        var identity=SYNC_OWNERS.get(instance);Entity owner=identity==null?null:identity.get();
-        return owner instanceof LivingEntity living?living:null;
+        LifeCarrier carrier=SYNC_OWNERS.get(instance);Entity owner=carrier==null?null:carrier.entity().get();
+        if(!(owner instanceof LivingEntity living)||carrier.kind()!=LifeCarrierKind.MAX_HEALTH)return null;
+        ProtectionSnapshot snapshot=currentLifePolicy(living);
+        if(!protectionActive(snapshot)||snapshot.generation()!=carrier.generation())return null;
+        return ((Access.Living)living).pro$attributes().getInstance(net.minecraft.world.entity.ai.attributes.Attributes.MAX_HEALTH)==instance?living:null;
     }
     /**
      * An earlier unresolved callback is recorded as a gap, not used as a global gate. Its unknown effects stay
@@ -1624,7 +1645,7 @@ public final class ProRuntime implements AutoCloseable {
     public boolean observedSaveCopyLoadCovered() { return !coverageGap; }
     public String protectionStatus(Entity e) {
         thread(); Binding b=bindings.get(e);
-        if(b==null||!b.protection||b.protectionGeneration!=b.subject.generation)return "INACTIVE";
+        if(b==null||protectedBinding(e)!=b)return "INACTIVE";
         var raw=(Access.EntityState)e;
         if(raw.pro$id()!=b.address.entityId()||!Objects.equals(raw.pro$uuid(),b.address.entityUuid()))return "ACTIVE_WITH_GAP:IDENTITY_CHANGED";
         return b.protectionGap.isEmpty()?"ACTIVE":"ACTIVE_WITH_GAP:"+b.protectionGap;
@@ -1750,13 +1771,13 @@ public final class ProRuntime implements AutoCloseable {
         if(!next.bound()||!next.registered()) {binding.protectionGap="SECTION_TRANSITION_INCOMPLETE";return;}
         binding.records=next;
         binding.protectionGap=runtime.publishIndexOwners(binding,entity);
-        publishProtection(runtime,binding,entity);runtime.publishOwners(entity);
+        publishProtection(runtime,binding,entity);
     }
     private void publishHudPolicy(ServerPlayer player,ClientPolicy state) {
         Map<UUID,Integer> desired=new HashMap<>();
         for(var entry:exclusiveHudOwners().entrySet()) {
             Binding binding=bindings.get(entry.getValue());if(binding==null||!binding.address.dimension().equals(state.dimension))continue;
-            int mode=binding.subject.terminal?2:binding.protection&&binding.protectionGeneration==binding.subject.generation?1:0;
+            int mode=binding.subject.terminal?2:protectedBinding(binding.entity())==binding?1:0;
             if(mode!=0)desired.put(entry.getKey().getId(),mode);
         }
         for(var entry:retiredHudSubjects.entrySet())if(entry.getKey().dimension().equals(state.dimension)&&entry.getValue().terminal)
@@ -1795,12 +1816,12 @@ public final class ProRuntime implements AutoCloseable {
         Map<PolicyAddress,LifePolicy> desired=new HashMap<>();
         for(Binding binding:List.copyOf(bindings.values())) {
             Entity entity=binding.entity();
-            boolean protection=binding.protection&&binding.protectionGeneration==binding.subject.generation;
-            boolean noHeal=binding.noHeal&&binding.noHealGeneration==binding.subject.generation;
-            if((protection||noHeal)&&!binding.subject.terminal
+            ProtectionSnapshot snapshot=currentLifePolicy(entity);
+            boolean protection=protectionActive(snapshot),noHeal=noHealActive(snapshot);
+            if((protection||noHeal)
                     &&entity!=null&&entity!=removing&&!(entity instanceof ServerPlayer player
                     &&(pendingRespawnProtections.containsKey(player)||unverifiedRespawnPolicies.contains(player))))
-                desired.put(binding.address,new LifePolicy(protection,noHeal));
+                desired.put(snapshot.address(),new LifePolicy(protection,noHeal));
         }
         return desired;
     }
@@ -1846,7 +1867,7 @@ public final class ProRuntime implements AutoCloseable {
                 coverageGap=true;
             } else {
                 if(prior.dimension().equals(level.dimension().location().toString()))return;
-                boolean transfer=binding.protection&&binding.protectionGeneration==binding.subject.generation&&!binding.subject.terminal;
+                boolean transfer=protectedBinding(player)==binding;
                 boolean transferNoHeal=noHealBinding(player)==binding;
                 float floor=binding.healthFloor;
                 EntityRecords records=new EntityRecords(level,player);
@@ -1863,7 +1884,7 @@ public final class ProRuntime implements AutoCloseable {
                     }
                     if(transferNoHeal) {
                         binding.noHeal=true;binding.noHealGeneration=binding.subject.generation;
-                        publishOwners(player);publishProtection(this,binding,player);
+                        publishProtection(this,binding,player);
                     }
                 }
                 for(Work workItem:work.values())if(workItem.binding==binding)fence(workItem,"PLAYER_DIMENSION_SCOPE_CHANGED");
@@ -1886,7 +1907,7 @@ public final class ProRuntime implements AutoCloseable {
         if(permit==null||!permit.allows(original)||permit.runtime!=this||permit.thread!=Thread.currentThread()
                 ||!server.isSameThread()) { coverageGap=true;return; }
         permit.entities.add(replacement);
-        boolean transfer=prior!=null&&prior.protection&&prior.protectionGeneration==prior.subject.generation&&!prior.subject.terminal;
+        boolean transfer=protectedBinding(original)==prior;
         boolean transferNoHeal=noHealBinding(original)==prior;
         UUID stablePlayerUuid=prior==null?null:prior.address.entityUuid();
         if(prior!=null) {
@@ -1904,7 +1925,7 @@ public final class ProRuntime implements AutoCloseable {
             if(transferNoHeal&&replacementBinding!=null)try(var fieldGate=FieldPolicyGate.enter(replacement);
                     var healthGate=FieldPolicyGate.enter(healthItem(replacement));var gate=replacementBinding.subject.commitGate.enter()) {
                 replacementBinding.noHeal=true;replacementBinding.noHealGeneration=replacementBinding.subject.generation;
-                publishOwners(replacement);publishProtection(this,replacementBinding,replacement);
+                publishProtection(this,replacementBinding,replacement);
             }
             if(replacementBinding!=null&&(protectedBinding(replacement)!=null||noHealBinding(replacement)!=null))
                 pendingRespawnProtections.put(replacement,new PendingRespawnProtection(replacementBinding,stablePlayerUuid,
@@ -1945,7 +1966,7 @@ public final class ProRuntime implements AutoCloseable {
                         pendingRespawnProtections.remove(player);unverifiedRespawnPolicies.remove(player);
                         if(binding.noHeal)binding.noHealGeneration=binding.subject.generation;
                         if(binding.protection)activate(binding);
-                        else {publishOwners(player);publishProtection(this,binding,player);}
+                        else publishProtection(this,binding,player);
                     }
                     for(Work old:work.values())if(old.binding==binding)fence(old,"PLAYER_RESPAWN_FINAL_IDENTITY_CHANGED");
                     if(binding.protection) {UUID next=queue(binding,null,"PROTECT");if(priorProtection!=null)priorProtection.protectionSuccessor=next;}
@@ -2124,7 +2145,7 @@ public final class ProRuntime implements AutoCloseable {
         recoveryChain.tick(tick);
         for(Binding b:List.copyOf(bindings.values())) {
             try {
-                if(b.protection && b.protectionGeneration==b.subject.generation) maintain(b);
+                if(protectedBinding(b.entity())==b) maintain(b);
                 if(b.subject.terminal) advanceTerminal(b);
             } catch(RuntimeException ex) {
                 coverageGap=true; b.protectionGap="MAINTENANCE_UNRESOLVED:"+ex.getClass().getSimpleName();
@@ -2303,6 +2324,30 @@ public final class ProRuntime implements AutoCloseable {
         // The exact accessor is used directly; a replaced backing map is reported by the caller, not by refusing
         // the write the game itself would have performed.
         return ((Access.Data)((Access.EntityState)living).pro$data()).pro$item(Access.Living.pro$healthKey());
+    }
+    private static net.minecraft.network.syncher.SynchedEntityData.DataItem<Float> absorptionItem(LivingEntity living) {
+        return ((Access.Data)((Access.EntityState)living).pro$data()).pro$item(Access.PlayerState.pro$absorptionKey());
+    }
+    private static volatile java.lang.reflect.Field rawAbsorptionField;
+    /** Prepared before any guard can read it; an entity cannot override this exact declaring-field read. */
+    private static synchronized void initializeLifeFields()throws ReflectiveOperationException {
+        if(rawAbsorptionField!=null)return;
+        Class.forName("dev.ronova.pro.agent.RecoveryAgent",false,ClassLoader.getSystemClassLoader())
+                .getMethod("openBackingAccess",Class.class,Class[].class).invoke(null,ProRuntime.class,(Object)new Class<?>[]{LivingEntity.class});
+        java.lang.reflect.Field field;
+        try {field=LivingEntity.class.getDeclaredField("absorptionAmount");}
+        catch(NoSuchFieldException production){field=LivingEntity.class.getDeclaredField("f_20955_");}
+        if(field.getType()!=float.class||java.lang.reflect.Modifier.isStatic(field.getModifiers())||!field.trySetAccessible())
+            throw new IllegalStateException("ABSORPTION_DECLARING_FIELD_UNAVAILABLE");
+        rawAbsorptionField=field;
+    }
+    /** Player stores absorption in synchronized data; other living bodies use the original base field. */
+    static float rawAbsorption(LivingEntity living) {
+        if(living instanceof net.minecraft.world.entity.player.Player)return absorptionItem(living).getValue();
+        java.lang.reflect.Field field=rawAbsorptionField;
+        if(field==null)throw new IllegalStateException("ABSORPTION_DECLARING_FIELD_UNAVAILABLE");
+        try {return field.getFloat(living);}
+        catch(IllegalAccessException unavailable){throw new IllegalStateException("ABSORPTION_DECLARING_FIELD_UNAVAILABLE",unavailable);}
     }
     private void sample(Work w) {
         Set<String> remaining=w.records==null?w.block.remaining():w.records.remaining();
@@ -2516,20 +2561,82 @@ public final class ProRuntime implements AutoCloseable {
                     ||reason==Entity.RemovalReason.UNLOADED_WITH_PLAYER))return false;
         return protectedBinding(e)!=null;
     }
-    /** Exact current protection. Live binding on the server thread, published snapshot on any other thread. */
-    private static Binding protectedBinding(Entity entity) {
+    /**
+     * One qualification for all life guards. A publication cannot follow a mutable binding into another
+     * generation or world. Worker threads compare only published identities and volatile authority fields;
+     * they never inspect a live world lookup. Raw UUID/level corruption cannot revoke an exact body policy.
+     */
+    private static ProtectionSnapshot currentLifePolicy(Entity entity) {
+        if(entity==null)return null;
         ProtectionSnapshot snapshot=PROTECTION.get(entity);
         if(snapshot==null||snapshot.runtime().closing)return null;
-        Binding binding=snapshot.binding();
-        return binding.entity()==entity&&binding.protection&&!binding.subject.terminal
-                &&binding.protectionGeneration==binding.subject.generation?binding:null;
+        Binding binding=snapshot.binding();EntityRecords records=binding.records;PolicyAddress address=snapshot.address();
+        if(binding.entity()!=entity||binding.subject.terminal||binding.subject.generation!=snapshot.generation()
+                ||binding.address!=address||records==null||records.level!=snapshot.records().level
+                ||records.id!=address.entityId()||!records.uuid.equals(address.entityUuid()))return null;
+        ProRuntime runtime=snapshot.runtime();
+        if(runtime.server.isSameThread()&&(runtime.bindings.get(entity)!=binding
+                ||runtime.server.getLevel(records.level.dimension())!=records.level))return null;
+        return snapshot;
+    }
+    private static boolean protectionActive(ProtectionSnapshot snapshot) {
+        return snapshot!=null&&snapshot.protectedNow()&&snapshot.binding().protection
+                &&!snapshot.binding().subject.terminal&&snapshot.binding().subject.generation==snapshot.generation()
+                &&snapshot.binding().protectionGeneration==snapshot.generation();
+    }
+    private static boolean noHealActive(ProtectionSnapshot snapshot) {
+        return snapshot!=null&&snapshot.noHeal()&&snapshot.binding().noHeal
+                &&!snapshot.binding().subject.terminal&&snapshot.binding().subject.generation==snapshot.generation()
+                &&snapshot.binding().noHealGeneration==snapshot.generation();
+    }
+    private static Binding protectedBinding(Entity entity) {
+        ProtectionSnapshot snapshot=currentLifePolicy(entity);
+        return protectionActive(snapshot)?snapshot.binding():null;
     }
     private static Binding noHealBinding(Entity entity) {
-        ProtectionSnapshot snapshot=PROTECTION.get(entity);
-        if(snapshot==null||snapshot.runtime().closing)return null;
-        Binding binding=snapshot.binding();
-        return binding.entity()==entity&&binding.noHeal&&!binding.subject.terminal
-                &&binding.noHealGeneration==binding.subject.generation?binding:null;
+        ProtectionSnapshot snapshot=currentLifePolicy(entity);
+        return noHealActive(snapshot)?snapshot.binding():null;
+    }
+    private static boolean currentLifeCarrier(Entity entity,Object carrier,LifeCarrierKind kind) {
+        if(carrier==null)return false;
+        ProtectionSnapshot snapshot=currentLifePolicy(entity);
+        if(!(protectionActive(snapshot)||noHealActive(snapshot))||playerLifecycleAllows(entity)||!(entity instanceof LivingEntity living))return false;
+        if(kind==LifeCarrierKind.ABSORPTION&&!protectionActive(snapshot))return false;
+        LifeCarrier owner=SYNC_OWNERS.get(carrier);
+        if(owner==null||owner.entity().get()!=entity||owner.generation()!=snapshot.generation()||owner.kind()!=kind)return false;
+        var data=((Access.EntityState)entity).pro$data();
+        return switch(kind) {
+            case DATA -> data==carrier;
+            case HEALTH_ITEMS -> ((Access.Data)data).pro$items()==carrier;
+            // The exact health item cannot be detached while this policy is active. Comparing its captured
+            // map owner avoids reading fastutil's temporarily incoherent tuple during its own rehash.
+            case HEALTH,ABSORPTION -> owner.items().get()==((Access.Data)data).pro$items();
+            default -> false;
+        };
+    }
+    static boolean lifeHealthCarrier(Entity entity,Object carrier) {
+        return carrier!=null&&(currentLifeCarrier(entity,carrier,LifeCarrierKind.DATA)
+                ||currentLifeCarrier(entity,carrier,LifeCarrierKind.HEALTH_ITEMS)
+                ||currentLifeCarrier(entity,carrier,LifeCarrierKind.HEALTH)
+                ||currentLifeCarrier(entity,carrier,LifeCarrierKind.ABSORPTION)
+                ||clientDispatchDenied(entity,"life-health-carrier",carrier));
+    }
+    static boolean lifeHealthItems(Entity entity,Object carrier) {
+        return carrier!=null&&(currentLifeCarrier(entity,carrier,LifeCarrierKind.HEALTH_ITEMS)
+                ||clientDispatchDenied(entity,"life-health-items",carrier));
+    }
+    static boolean lifeHealthEntry(Entity entity,Object map,Object value) {
+        return value!=null&&lifeHealthItems(entity,map)&&(currentLifeCarrier(entity,value,LifeCarrierKind.HEALTH)
+                ||currentLifeCarrier(entity,value,LifeCarrierKind.ABSORPTION)
+                ||clientDispatchDenied(entity,"life-health-item",value));
+    }
+    private static boolean lifeHealthSlotRemoval(Object container,Object key,Object value) {
+        LifeCarrier carrier=SYNC_OWNERS.get(container);Entity entity=carrier==null?null:carrier.entity().get();
+        return entity!=null&&currentLifeCarrier(entity,container,LifeCarrierKind.HEALTH_ITEMS)
+                &&(key==null&&value==null||key instanceof Integer number&&number.intValue()==Access.Living.pro$healthKey().getId()
+                    ||key instanceof Integer absorptionId&&entity instanceof net.minecraft.world.entity.player.Player
+                        &&protectionActive(currentLifePolicy(entity))&&absorptionId.intValue()==Access.PlayerState.pro$absorptionKey().getId()
+                    ||currentLifeCarrier(entity,value,LifeCarrierKind.HEALTH)||currentLifeCarrier(entity,value,LifeCarrierKind.ABSORPTION));
     }
     /**
      * Registration removal guard. Illegal deletion of an exact protected object's slots is rejected in the
@@ -2612,24 +2719,30 @@ public final class ProRuntime implements AutoCloseable {
         runtime.coverageGap=true;
         runtime.journal.append("ADMISSION_REFUSED/1\t"+uuid+"\t"+runtime.session+"\tEXACT_OBJECT_UNDER_CURRENT_PROTECTION");
     }
-    public static boolean preventDamage(Entity entity) { return protectedBinding(entity)!=null||clientDispatchDenied(entity,"hurt",null); }
+    public static boolean preventDamage(Entity entity) { return protectionActive(currentLifePolicy(entity))||clientDispatchDenied(entity,"hurt",null); }
     public static boolean preventHealthLoss(LivingEntity entity,float value) {
-        Binding binding=protectedBinding(entity);if(binding==null)return false;
-        if(!Float.isFinite(value)||value<binding.healthFloor)return true;
+        ProtectionSnapshot snapshot=currentLifePolicy(entity);if(!protectionActive(snapshot))return false;
+        if(!Float.isFinite(value)||value<snapshot.healthFloor())return true;
         try { float current=healthItem(entity).getValue();return Float.isFinite(current)&&value<current; }
-        catch(RuntimeException unavailable) { binding.protectionGap="HEALTH_WRITE_BACKEND_UNAVAILABLE";return true; }
+        catch(RuntimeException unavailable) { snapshot.binding().protectionGap="HEALTH_WRITE_BACKEND_UNAVAILABLE";return true; }
     }
     public static boolean preventHealing(LivingEntity entity,float amount) {
-        return noHealBinding(entity)!=null&&!playerLifecycleAllows(entity)&&(!Float.isFinite(amount)||amount>0)
+        return noHealActive(currentLifePolicy(entity))&&!playerLifecycleAllows(entity)&&(!Float.isFinite(amount)||amount>0)
                 ||clientDispatchDenied(entity,"heal",amount);
     }
     public static boolean preventHealthWrite(LivingEntity entity,float value) {
         if(clientDispatchDenied(entity,"setHealth",value))return true;
-        if(preventHealthLoss(entity,value))return true;
-        Binding binding=noHealBinding(entity);if(binding==null)return false;
-        if(playerLifecycleAllows(entity))return false;
-        try {float current=healthItem(entity).getValue();return !Float.isFinite(value)||!Float.isFinite(current)||value>current;}
-        catch(RuntimeException unavailable){binding.protectionGap="NO_HEAL_WRITE_BACKEND_UNAVAILABLE";return true;}
+        ProtectionSnapshot snapshot=currentLifePolicy(entity);
+        boolean protection=protectionActive(snapshot),noHeal=noHealActive(snapshot)&&!playerLifecycleAllows(entity);
+        if(!protection&&!noHeal)return false;
+        if(!Float.isFinite(value)||protection&&value<snapshot.healthFloor())return true;
+        try {
+            float current=healthItem(entity).getValue();
+            return protection&&Float.isFinite(current)&&value<current
+                    ||noHeal&&(!Float.isFinite(current)||value>current);
+        } catch(RuntimeException unavailable) {
+            snapshot.binding().protectionGap=protection?"HEALTH_WRITE_BACKEND_UNAVAILABLE":"NO_HEAL_WRITE_BACKEND_UNAVAILABLE";return true;
+        }
     }
     /**
      * Fire is a state writer the target can drive either through the method or through a direct field write.
@@ -2637,10 +2750,15 @@ public final class ProRuntime implements AutoCloseable {
      * legitimate, including our own disposal path. This is a pre-write refusal, not a value repaired afterwards.
      */
     public static boolean preventAbsorptionLoss(LivingEntity entity,float value) {
-        if(protectedBinding(entity)==null)return false;
-        return !Float.isFinite(value)||value<0||value<entity.getAbsorptionAmount();
+        if(clientDispatchDenied(entity,"setAbsorptionAmount",value))return true;
+        ProtectionSnapshot snapshot=currentLifePolicy(entity);if(!protectionActive(snapshot))return false;
+        if(!Float.isFinite(value)||value<0)return true;
+        try {float current=rawAbsorption(entity);return !Float.isFinite(current)||value<current;}
+        catch(RuntimeException unavailable){snapshot.binding().protectionGap="ABSORPTION_WRITE_BACKEND_UNAVAILABLE";return true;}
     }
-    public static boolean preventFireWrite(Entity entity,int ticks) { return ticks>0&&protectedBinding(entity)!=null; }
+    public static boolean preventFireWrite(Entity entity,int ticks) {
+        return ticks>0&&(protectionActive(currentLifePolicy(entity))||clientDispatchDenied(entity,"setRemainingFireTicks",ticks));
+    }
     /**
      * The exact original fields this build protects. They are matched by name against the declaring class, so a
      * same-named field on an unrelated class is never treated as protected state.
@@ -2655,6 +2773,8 @@ public final class ProRuntime implements AutoCloseable {
     static void installClientControls(java.lang.invoke.MethodHandle fields,java.lang.invoke.MethodHandle dispatch,java.lang.invoke.MethodHandle results) {
         Class<?> caller=LIFECYCLE_WALKER.getCallerClass();
         if(!caller.getName().equals("dev.ronova.pro.ClientPresence")||caller.getClassLoader()!=ProRuntime.class.getClassLoader())throw new SecurityException("CLIENT_CONTROL_OWNER");
+        try {initializeLifeFields();}
+        catch(ReflectiveOperationException unavailable){throw new IllegalStateException("CLIENT_LIFE_FIELD_UNAVAILABLE",unavailable);}
         clientFields=fields;clientDispatch=dispatch;clientLifeResults=results;
         if(!productionControlsInstalled&&!clientBasePolicyInstalled)try {
             var lookup=java.lang.invoke.MethodHandles.lookup();
@@ -2664,6 +2784,7 @@ public final class ProRuntime implements AutoCloseable {
             var task=lookup.findStatic(ProRuntime.class,"preventTaskEffect",java.lang.invoke.MethodType.methodType(boolean.class,Object.class,String.class));
             Class.forName("dev.ronova.pro.bootstrap.ControlBridge",false,null).getMethod("installGuards",Class.class,java.lang.invoke.MethodHandle.class,java.lang.invoke.MethodHandle.class,
                     java.lang.invoke.MethodHandle.class).invoke(null,ProRuntime.class,field,method,task);
+            BackingPolicy.initialize(bridge);
             installLifeResults(bridge,lookup);
             EquipmentPolicy.initialize();
             installEquipmentResults(lookup);
@@ -2698,8 +2819,9 @@ public final class ProRuntime implements AutoCloseable {
             return (fieldName.equals("value")||fieldName.equals("f_135391_"))&&preventDataWrite(receiver,value);
         if(!(receiver instanceof Entity entity)||declaring==null||!declaring.isInstance(receiver))return false;
         if(declaring!=Entity.class&&declaring!=LivingEntity.class)return false;
-        Binding binding=protectedBinding(entity);
-        if(binding==null)return false;
+        ProtectionSnapshot snapshot=currentLifePolicy(entity);
+        if(!protectionActive(snapshot))return false;
+        Binding binding=snapshot.binding();
         if(playerLifecycleAllows(entity)&&entity instanceof ServerPlayer) {
             if((fieldName.equals("canUpdate")||fieldName.equals("isAddedToWorld"))&&Boolean.FALSE.equals(value))return false;
             if((fieldName.equals("removalReason")||fieldName.equals("f_146795_"))
@@ -2707,10 +2829,11 @@ public final class ProRuntime implements AutoCloseable {
                         ||value==Entity.RemovalReason.UNLOADED_WITH_PLAYER))return false;
         }
         return switch(fieldName) {
-            case "id","f_19848_" -> !(value instanceof Number number)||number.intValue()!=binding.address.entityId()&&!respawnIdentityAssignment(entity);
-            case "uuid","f_19820_" -> !Objects.equals(value,binding.address.entityUuid());
-            case "stringUUID","f_19821_" -> !Objects.equals(value,binding.address.entityUuid().toString());
+            case "id","f_19848_" -> !(value instanceof Number number)||number.intValue()!=snapshot.address().entityId()&&!respawnIdentityAssignment(entity);
+            case "uuid","f_19820_" -> !Objects.equals(value,snapshot.address().entityUuid());
+            case "stringUUID","f_19821_" -> !Objects.equals(value,snapshot.address().entityUuid().toString());
             case "remainingFireTicks","f_19831_" -> !(value instanceof Integer n)||n>0;
+            case "absorptionAmount","f_20955_" -> entity instanceof LivingEntity living&&(!(value instanceof Float n)||preventAbsorptionLoss(living,n));
             case "removalReason","f_146795_" -> value!=null&&(!(value instanceof Entity.RemovalReason reason)||preventRemoval(entity,reason));
             case "canUpdate","isAddedToWorld" -> !Boolean.TRUE.equals(value);
             case "dead","f_20890_" -> !Boolean.FALSE.equals(value);
@@ -2733,7 +2856,10 @@ public final class ProRuntime implements AutoCloseable {
         if(entity instanceof LivingEntity living&&value instanceof Number number) {
             if((operation.equals("heal")||operation.equals("m_5634_"))&&preventHealing(living,number.floatValue()))return true;
             if((operation.equals("setHealth")||operation.equals("m_21153_"))&&preventHealthWrite(living,number.floatValue()))return true;
+            if((operation.equals("setAbsorptionAmount")||operation.equals("m_7911_"))&&preventAbsorptionLoss(living,number.floatValue()))return true;
         }
+        if((operation.equals("setRemainingFireTicks")||operation.equals("m_7311_"))&&value instanceof Number number
+                &&preventFireWrite(entity,number.intValue()))return true;
         ProRuntime groupRuntime=runtime(entity);
         if(groupRuntime!=null&&groupRuntime.stoppedBody(entity)&&switch(operation) {
             case "tick","m_8119_","baseTick","m_6075_","aiStep","m_8107_",
@@ -2854,11 +2980,12 @@ public final class ProRuntime implements AutoCloseable {
             // Establish the policy's own data classes before a newly guarded world writer can call into them.
             Class.forName(SourceMaps.class.getName(),true,ProRuntime.class.getClassLoader());
             Class.forName(BackingPolicy.class.getName(),true,ProRuntime.class.getClassLoader());
+            initializeLifeFields();
             LiveStatePolicy.initialize();
             EquipmentPolicy.initialize();
             WorldStatePolicy.initialize();
             Class<?> bridge=Class.forName("dev.ronova.pro.bootstrap.TaskBridge",false,null);
-            if(!Integer.valueOf(89).equals(bridge.getMethod("abiVersion").invoke(null)))throw new IllegalStateException("INDEX_BRIDGE_ABI_MISMATCH");
+            if(!Integer.valueOf(90).equals(bridge.getMethod("abiVersion").invoke(null)))throw new IllegalStateException("INDEX_BRIDGE_ABI_MISMATCH");
             var lookup=java.lang.invoke.MethodHandles.lookup();
             var field=lookup.findStatic(ProRuntime.class,"preventFieldWrite",java.lang.invoke.MethodType.methodType(boolean.class,Object.class,Class.class,String.class,Object.class));
             var dispatch=lookup.findStatic(ProRuntime.class,"preventDispatch",java.lang.invoke.MethodType.methodType(boolean.class,Object.class,String.class,Object.class));
@@ -2924,10 +3051,10 @@ public final class ProRuntime implements AutoCloseable {
     }
     public static Object protectedLifeResult(Object receiver,String method) {
         if(receiver instanceof LivingEntity living) {
-            Binding binding=protectedBinding(living);
-            if(binding!=null)return switch(method) {
+            ProtectionSnapshot snapshot=currentLifePolicy(living);
+            if(protectionActive(snapshot))return switch(method) {
                 case "getHealth","m_21223_" -> {
-                    float actual=healthItem(living).getValue(),floor=binding.healthFloor;
+                    float actual=healthItem(living).getValue(),floor=snapshot.healthFloor();
                     yield Float.valueOf(Float.isFinite(actual)?Math.max(actual,floor):floor);
                 }
                 case "isAlive","m_6084_" -> Boolean.TRUE;
@@ -2949,6 +3076,7 @@ public final class ProRuntime implements AutoCloseable {
             {"discard","m_146870_","()V"},{"kill","m_6074_","()V"},
             {"setHealth","m_21153_","(F)V"},{"tick","m_8119_","()V"},{"baseTick","m_6075_","()V"},
             {"heal","m_5634_","(F)V"},
+            {"setAbsorptionAmount","m_7911_","(F)V"},{"setRemainingFireTicks","m_7311_","(I)V"},
             {"aiStep","m_8107_","()V"},{"serverAiStep","","()V"},{"customServerAiStep","","()V"},
             {"onAddedToWorld","","()V"},{"onRemovedFromWorld","","()V"},
             {"hurt","m_6469_","(Lnet/minecraft/world/damagesource/DamageSource;F)Z"},
@@ -3036,10 +3164,11 @@ public final class ProRuntime implements AutoCloseable {
             var access=type.getDeclaredField("theUnsafe");access.setAccessible(true);Object unsafe=access.get(null);
             var offset=type.getMethod("objectFieldOffset",java.lang.reflect.Field.class);
             var fields=new ArrayList<java.lang.reflect.Field>();var offsets=new ArrayList<Long>();
-            Set<String> names=Set.of("remainingFireTicks","f_19831_","removalReason","f_146795_","canUpdate","isAddedToWorld",
+            Set<String> names=Set.of("id","f_19848_","uuid","f_19820_","stringUUID","f_19821_","entityData","f_19804_","itemsById","f_135345_",
+                    "remainingFireTicks","f_19831_","absorptionAmount","f_20955_","removalReason","f_146795_","canUpdate","isAddedToWorld",
                     "dead","f_20890_","deathTime","f_20919_","value","f_135391_",
                     "remove","f_58859_","level","f_58857_","worldPosition","f_58858_","blockEntities","f_187610_");
-            for(Class<?> owner:List.of(Entity.class,LivingEntity.class,net.minecraft.network.syncher.SynchedEntityData.DataItem.class,
+            for(Class<?> owner:List.of(Entity.class,LivingEntity.class,net.minecraft.network.syncher.SynchedEntityData.class,net.minecraft.network.syncher.SynchedEntityData.DataItem.class,
                     net.minecraft.world.entity.ai.attributes.AttributeInstance.class,net.minecraft.world.level.block.entity.BlockEntity.class,
                     net.minecraft.world.level.chunk.ChunkAccess.class))
                 for(var field:owner.getDeclaredFields())if((names.contains(field.getName())||owner==net.minecraft.world.entity.ai.attributes.AttributeInstance.class&&field.getType()==double.class)&&!java.lang.reflect.Modifier.isStatic(field.getModifiers())) {
@@ -3059,8 +3188,8 @@ public final class ProRuntime implements AutoCloseable {
      * living body is considered, and only when it would drop the ceiling below the protected floor.
      */
     public static boolean preventMaxHealthLoss(LivingEntity entity,double value) {
-        Binding binding=protectedBinding(entity);if(binding==null)return false;
-        return !Double.isFinite(value)||value<binding.healthFloor;
+        ProtectionSnapshot snapshot=currentLifePolicy(entity);if(!protectionActive(snapshot))return false;
+        return !Double.isFinite(value)||value<snapshot.healthFloor();
     }
     /**
      * Direct synchronized-data write. The entity is resolved from the data item's real owner, so a field write
@@ -3068,10 +3197,14 @@ public final class ProRuntime implements AutoCloseable {
      */
     public static boolean preventDataWrite(Object dataItem,Object value) {
         if(clientFieldDenied(dataItem,net.minecraft.network.syncher.SynchedEntityData.DataItem.class,"value",value))return true;
-        var identity=SYNC_OWNERS.get(dataItem);Entity owner=identity==null?null:identity.get();
-        if(!(owner instanceof LivingEntity living))return false;
-        if(!(value instanceof Float written))return protectedBinding(living)!=null||noHealBinding(living)!=null;
-        return preventHealthWrite(living,written);
+        LifeCarrier carrier=SYNC_OWNERS.get(dataItem);Entity owner=carrier==null?null:carrier.entity().get();
+        if(!(owner instanceof LivingEntity living)||(carrier.kind()!=LifeCarrierKind.HEALTH&&carrier.kind()!=LifeCarrierKind.ABSORPTION))return false;
+        ProtectionSnapshot snapshot=currentLifePolicy(living);
+        if(snapshot==null||snapshot.generation()!=carrier.generation())return false;
+        boolean absorption=carrier.kind()==LifeCarrierKind.ABSORPTION;
+        if(carrier.items().get()!=((Access.Data)((Access.EntityState)living).pro$data()).pro$items())return false;
+        if(!(value instanceof Float written))return protectionActive(snapshot)||!absorption&&noHealActive(snapshot);
+        return absorption?preventAbsorptionLoss(living,written):preventHealthWrite(living,written);
     }
     public static boolean preventAdmission(Entity e) {
         for(ProRuntime runtime:sourceRuntimes())if(!runtime.closing&&runtime.fieldGraphs.retired(e))return true;
@@ -3282,14 +3415,13 @@ public final class ProRuntime implements AutoCloseable {
                 child.noHeal=inheritNoHeal&&e instanceof LivingEntity;child.noHealGeneration=authority.generation;
                 bindings.put(e,child);
                 if(!BackingPolicy.capture(child.records,e))coverageGap=true;
-                if(child.noHeal)publishOwners(e);
                 publishProtection(this,child,e);
                 recoveryTasks.observed(e,authority.id);
                 if(child.noHeal)releaseNoHealObservation(child,createdRecords,true);
             } catch(RuntimeException ex) { coverageGap=true;return false; }
         }else if(inheritNoHeal&&e instanceof LivingEntity)try(var fieldGate=FieldPolicyGate.enter(e);
                 var healthGate=FieldPolicyGate.enter(healthItem((LivingEntity)e));var gate=authority.commitGate.enter()) {
-            prior.noHeal=true;prior.noHealGeneration=authority.generation;publishOwners(e);publishProtection(this,prior,e);
+            prior.noHeal=true;prior.noHealGeneration=authority.generation;publishProtection(this,prior,e);
         }
         authority.sourceRevision.incrementAndGet();
         for(Work w:work.values()) if(w.binding!=null && w.binding.subject==authority) invalidate(w,"NEW_SOURCE_BINDING");
