@@ -9,7 +9,7 @@ import net.minecraft.world.item.ItemStack;
 
 /** Actual reads of one naturally executed slot getter; no entity heap search or getter replay. */
 final class EquipmentSlotGraph {
-    sealed interface Read permits FieldRead,ArrayRead,ListRead,MapRead,ContainerRead { Object receiver();Object value(); }
+    sealed interface Read permits FieldRead,ArrayRead,ListRead,MapRead,ContainerRead,BuiltinRead { Object receiver();Object value(); }
     record FieldRead(Object receiver,Field field,Object value) implements Read { }
     record ArrayRead(Object array,int index,Object value) implements Read { public Object receiver(){return array;} }
     record ListRead(Object list,int index,Object value) implements Read { public Object receiver(){return list;} }
@@ -21,7 +21,66 @@ final class EquipmentSlotGraph {
         boolean current(){return image!=null&&image.equals(methodImage(declaring,name,descriptor));}
     }
     private record Query(boolean map,Class<?> symbolic,String name,String descriptor,int opcode,Class<?> caller,Class<?> body,MethodImage image) { }
-    private record ContainerRead(Object receiver,Object key,Object value,Query query) implements Read { }
+    private record ContainerRead(Object receiver,Object key,Object value,Query query,KeySnapshot keys) implements Read { }
+    private record BuiltinRead(Object receiver,Object value,BuiltinCall call) implements Read { }
+    record KeyTarget(Object receiver,Class<?> declaring,String name,String descriptor) { }
+    static final class MethodRead {
+        private final Definition definition;
+        private MethodRead(Definition definition){this.definition=definition;}
+        private void current(){if(!definition.current())throw unsupported("KEY_METHOD_CHANGED");}
+    }
+    private record KeyStep(Object receiver,Query query,Class<?> layout) { }
+    static final class QueryKeys {
+        private final Object receiver,key,semanticReceiver;private final Query query;
+        private final List<KeyStep> steps;private final List<HeldRead> connections;private final List<KeyTarget> targets;
+        private final List<MethodRead> methods=new ArrayList<>();
+        private QueryKeys(Object receiver,Object key,Object semanticReceiver,Query query,List<KeyStep> steps,List<HeldRead> connections,List<KeyTarget> targets){
+            this.receiver=receiver;this.key=key;this.semanticReceiver=semanticReceiver;this.query=query;this.steps=List.copyOf(steps);this.connections=List.copyOf(connections);this.targets=List.copyOf(targets);
+            for(KeyStep step:steps)methods.add(new MethodRead(new Definition(step.query.body,step.query.name,step.query.descriptor,step.query.image)));
+        }
+        private void current(Uses uses){
+            for(MethodRead method:methods)method.current();for(KeyStep step:steps)if(queryBase(step.receiver,step.query)==null)throw unsupported("KEY_QUERY_CHANGED");
+            for(HeldRead read:connections)if(!read.value.same(read.current(uses,false)))throw unsupported("KEY_QUERY_CONNECTION_CHANGED");
+            for(MethodRead method:methods)method.current();
+        }
+    }
+    private record KeySnapshot(List<HeldRead> connections,List<MethodRead> methods,List<KeySemantics> semantics) {
+        private void current(Uses uses){for(MethodRead method:methods)method.current();for(HeldRead read:connections)if(!read.value.same(read.current(uses,false)))throw unsupported("KEY_QUERY_CONNECTION_CHANGED");for(KeySemantics semantic:semantics)semantic.current(uses);for(MethodRead method:methods)method.current();}
+    }
+    static final class KeySemantics {
+        private final Value receiver;private final List<Value> arguments;private final String name,descriptor;private final Object result;
+        private final List<HeldRead> reads;private final List<MethodRead> methods;
+        private KeySemantics(Object receiver,String name,String descriptor,Object[] arguments,Object result,List<Read> reads,List<MethodRead> methods){
+            this.receiver=new Value(receiver,false);this.name=name;this.descriptor=descriptor;this.result=result;List<Value> values=new ArrayList<>();for(Object argument:arguments)values.add(new Value(argument,false));this.arguments=List.copyOf(values);
+            List<HeldRead> held=new ArrayList<>();for(Read read:reads)held.add(new HeldRead(read));this.reads=List.copyOf(held);this.methods=List.copyOf(methods);
+        }
+        private boolean matches(Object receiver,String name,String descriptor,Object[] arguments){
+            if(!this.receiver.same(receiver)||!this.name.equals(name)||!this.descriptor.equals(descriptor)||this.arguments.size()!=arguments.length)return false;
+            for(int at=0;at<arguments.length;at++)if(!this.arguments.get(at).same(arguments[at]))return false;return true;
+        }
+        private Object current(Uses uses){
+            if(!receiver.alive())throw unsupported("DETACHED_KEY_RECEIVER");for(Value value:arguments)if(!value.alive())throw unsupported("DETACHED_KEY_ARGUMENT");
+            for(MethodRead method:methods)method.current();for(HeldRead read:reads)if(!read.value.same(read.current(uses,false)))throw unsupported("KEY_READ_CHANGED");
+            for(MethodRead method:methods)method.current();return result;
+        }
+    }
+    private record BuiltinCall(String name,String descriptor,List<Value> arguments,List<MethodRead> methods) {
+        private Object current(Uses uses,Object receiver){
+            for(MethodRead method:methods)method.current();
+            if(name.equals("compare")&&(receiver==Integer.class||receiver==Long.class)){
+                long first=receiver==Integer.class?((Integer)arguments.get(0).get()).intValue():((Long)arguments.get(0).get()).longValue();
+                long second=receiver==Integer.class?((Integer)arguments.get(1).get()).intValue():((Long)arguments.get(1).get()).longValue();
+                int result=first<second?-1:first==second?0:1;for(MethodRead method:methods)method.current();return Integer.valueOf(result);
+            }
+            Object argument=arguments.isEmpty()?null:arguments.get(0).get();
+            if(!arguments.isEmpty()&&!arguments.get(0).alive())throw unsupported("DETACHED_BUILTIN_KEY_ARGUMENT");Object result;
+            if(name.equals("hashCode"))result=Integer.valueOf(keyHash(uses,receiver));
+            else if(name.equals("equals"))result=Boolean.valueOf(keyEqual(uses,receiver,argument));
+            else if(receiver instanceof Enum<?> first){if(!(argument instanceof Enum<?> second)||enumType(first)!=enumType(second))throw unsupported("ENUM_COMPARE_TYPE");result=Integer.valueOf(enumOrdinal(uses,first)-enumOrdinal(uses,second));}
+            else result=Integer.valueOf(keyComparable(uses,receiver,argument));
+            for(MethodRead method:methods)method.current();return result;
+        }
+    }
     record FieldUse(Object receiver,Field field,long offset,int width,int mask,boolean terminal) { }
     record ArrayUse(Object array,int from,int to,int stride,int mask,boolean terminal) { }
     static final class View {
@@ -49,13 +108,15 @@ final class EquipmentSlotGraph {
     private static final String C="java.util.Collections$",I="java.util.ImmutableCollections$",G="com.google.common.collect.";
     private static final EquipmentSlot[] SIX={EquipmentSlot.MAINHAND,EquipmentSlot.OFFHAND,EquipmentSlot.FEET,EquipmentSlot.LEGS,EquipmentSlot.CHEST,EquipmentSlot.HEAD};
     private static final Map<LivingEntity,State> STATES=Collections.synchronizedMap(new WeakIdentityMap<>());
-    private static final MethodHandle READ,STATIC,METHOD,IMAGE;private static final Object UNSAFE;private static final Method BASE,SCALE,STATIC_BASE,STATIC_OFFSET;
+    private static final MethodHandle READ,STATIC,METHOD,IMAGE,FRAME,DEPTH;private static final Object UNSAFE;private static final Method BASE,SCALE,STATIC_BASE,STATIC_OFFSET;
     static {
         try {Class<?> bridge=Class.forName("dev.ronova.pro.bootstrap.CarrierBridge",false,null);var lookup=MethodHandles.publicLookup();
             READ=lookup.findStatic(bridge,"read",MethodType.methodType(Object.class,Object.class,Field.class));
             STATIC=lookup.findStatic(bridge,"staticValue",MethodType.methodType(Object.class,Class.class,String.class,String.class));
             METHOD=lookup.findStatic(bridge,"method",MethodType.methodType(Class.class,Object.class,Class.class,String.class,String.class,int.class,Class.class));
             IMAGE=lookup.findStatic(bridge,"methodImage",MethodType.methodType(long[].class,Class.class,String.class,String.class));
+            FRAME=lookup.findStatic(bridge,"frame",MethodType.methodType(long[].class,Class.class,String.class,String.class,int.class));
+            DEPTH=lookup.findStatic(bridge,"callbackDepth",MethodType.methodType(int.class,Class.class,String.class,String.class));
             Class<?> type=Class.forName("sun.misc.Unsafe",false,ClassLoader.getPlatformClassLoader());Field singleton=type.getDeclaredField("theUnsafe");singleton.setAccessible(true);UNSAFE=singleton.get(null);
             BASE=type.getMethod("arrayBaseOffset",Class.class);SCALE=type.getMethod("arrayIndexScale",Class.class);
             STATIC_BASE=type.getMethod("staticFieldBase",Field.class);STATIC_OFFSET=type.getMethod("staticFieldOffset",Field.class);
@@ -70,21 +131,27 @@ final class EquipmentSlotGraph {
         boolean same(Object actual){return alive()&&(primitive?samePrimitive(scalar,actual):reference.get()==actual);}
     }
     private static final class HeldRead {
-        final int kind,index;final WeakReference<Object> receiver,key;final boolean nullKey;final Field field;final Value value;final Query query;
+        final int kind,index;final WeakReference<Object> receiver,key;final boolean nullKey;final Field field;final Value value;final Query query;final KeySnapshot keys;final BuiltinCall builtin;
         HeldRead(Read read){receiver=new WeakReference<>(read.receiver());field=read instanceof FieldRead f?f.field:null;query=read instanceof ContainerRead c?c.query:null;
+            keys=read instanceof ContainerRead c?c.keys:null;builtin=read instanceof BuiltinRead b?b.call:null;
             index=read instanceof ArrayRead a?a.index:read instanceof ListRead l?l.index:read instanceof ContainerRead c&&!c.query.map&&c.key instanceof Integer i?i.intValue():-1;
             Object actualKey=read instanceof MapRead m?m.key:read instanceof ContainerRead c&&c.query.map?c.key:null;key=new WeakReference<>(actualKey);nullKey=actualKey==null;
-            kind=read instanceof FieldRead?0:read instanceof ArrayRead?1:read instanceof ListRead||query!=null&&!query.map?2:3;
-            value=new Value(read.value(),field!=null?field.getType().isPrimitive():read instanceof ArrayRead a&&a.array.getClass().getComponentType().isPrimitive());}
+            kind=read instanceof FieldRead?0:read instanceof ArrayRead?1:read instanceof BuiltinRead?4:read instanceof ListRead||query!=null&&!query.map?2:3;
+            value=new Value(read.value(),builtin!=null|| (field!=null?field.getType().isPrimitive():read instanceof ArrayRead a&&a.array.getClass().getComponentType().isPrimitive()));}
         Object current(Uses uses,boolean terminal){Object holder=receiver.get();if(holder==null)throw unsupported("DETACHED_READ");
             if(kind==0)return uses.field(holder,field,terminal);
             if(kind==1)return uses.array(holder,index,terminal);
-            Object result;
-            if(kind==2)result=list(uses,holder,index,terminal,new IdentityHashMap<>(),query);
-            else {Object actualKey=key.get();if(actualKey==null&&!nullKey)throw unsupported("DETACHED_KEY");result=map(uses,holder,actualKey,terminal,new IdentityHashMap<>(),query);}
-            if(query!=null&&!query.image.equals(methodImage(query.body,query.name,query.descriptor)))throw unsupported("QUERY_DEFINITION_CHANGED");return result;
+            if(kind==4)return builtin.current(uses,holder);
+            List<KeySemantics> previous=uses.keys;Object result;
+            try {
+                if(keys!=null){keys.current(uses);uses.keys=keys.semantics;}
+                if(kind==2)result=list(uses,holder,index,terminal,new IdentityHashMap<>(),query);
+                else {Object actualKey=key.get();if(actualKey==null&&!nullKey)throw unsupported("DETACHED_KEY");result=map(uses,holder,actualKey,terminal,new IdentityHashMap<>(),query);}
+                if(keys!=null)keys.current(uses);
+                if(query!=null&&!query.image.equals(methodImage(query.body,query.name,query.descriptor)))throw unsupported("QUERY_DEFINITION_CHANGED");return result;
+            }finally{uses.keys=previous;}
         }
-        boolean sameAddress(HeldRead other){return kind==other.kind&&Objects.equals(query,other.query)&&receiver.get()!=null&&receiver.get()==other.receiver.get()&&(kind==0?field.equals(other.field):kind==3?key.get()==other.key.get():index==other.index);}
+        boolean sameAddress(HeldRead other){return kind==other.kind&&Objects.equals(query,other.query)&&Objects.equals(builtin,other.builtin)&&receiver.get()!=null&&receiver.get()==other.receiver.get()&&(kind==0?field.equals(other.field):kind==3?key.get()==other.key.get():index==other.index);}
     }
     private static final class Binding {
         final List<HeldRead> reads;final int terminal;final Definition definition;
@@ -181,7 +248,150 @@ final class EquipmentSlotGraph {
     static Read containerRead(Object receiver,Object key,Object value,boolean map,Class<?> symbolic,String name,String descriptor,int opcode,Class<?> caller){
         Query query=query(receiver,map,symbolic,name,descriptor,opcode,caller);
         if(query==null||!map&&!(key instanceof Integer))throw unsupported("QUERY_CONTRACT");
-        return new ContainerRead(receiver,key,value,query);
+        return new ContainerRead(receiver,key,value,query,null);
+    }
+    static MethodRead methodRead(Class<?> declaring,String name,String descriptor,long[] image){
+        MethodImage actual=MethodImage.of(image);if(declaring==null||name==null||descriptor==null||actual==null)throw unsupported("KEY_METHOD_IMAGE");
+        MethodRead read=new MethodRead(new Definition(declaring,name,descriptor,actual));read.current();return read;
+    }
+    private static MethodRead methodRead(Class<?> declaring,String name,String descriptor){
+        MethodImage image=methodImage(declaring,name,descriptor);if(image==null)throw unsupported("KEY_METHOD_IMAGE");return new MethodRead(new Definition(declaring,name,descriptor,image));
+    }
+    static KeySemantics keySemantics(Object receiver,String name,String descriptor,Object[] arguments,Object result,List<Read> reads,List<MethodRead> methods){
+        int kind=keyKind(name,descriptor);if(receiver==null||arguments==null||arguments.length!=(kind==0?0:1)||kind<0
+                ||(kind==1?!(result instanceof Boolean):!(result instanceof Integer))||reads==null||reads.size()>LIMIT||methods==null||methods.isEmpty()||methods.size()>LIMIT)throw unsupported("KEY_SEMANTICS_TUPLE");
+        MethodRead first=methods.get(0);Class<?> symbolic=kind==2?Comparable.class:Object.class;int opcode=kind==2?185:182;
+        if(first==null||!first.definition.name.equals(name)||!first.definition.descriptor.equals(descriptor)
+                ||dispatch(receiver,symbolic,name,descriptor,opcode,EquipmentSlotGraph.class)!=first.definition.declaring)throw unsupported("KEY_SEMANTICS_DISPATCH");
+        for(Read read:reads)if(read==null||read.receiver()==null)throw unsupported("KEY_SEMANTICS_READ");
+        KeySemantics semantics=new KeySemantics(receiver,name,descriptor,arguments,result,reads,methods);semantics.current(new Uses(0));return semantics;
+    }
+    static List<KeyTarget> keyTargets(QueryKeys keys){return keys==null?List.of():keys.targets;}
+    static QueryKeys prepareKeys(Object receiver,Object key,Class<?> symbolic,String name,String descriptor,int opcode,Class<?> caller){
+        Query root=query(receiver,true,symbolic,name,descriptor,opcode,caller);if(root==null)throw unsupported("KEY_QUERY_CONTRACT");
+        List<KeyStep> steps=new ArrayList<>();List<HeldRead> connections=new ArrayList<>();IdentityHashMap<Object,Boolean> seen=new IdentityHashMap<>();Object at=receiver;Query contract=root;Class<?> layout;
+        while(true){
+            layout=queryBase(at,contract);if(layout==null||seen.put(at,Boolean.TRUE)!=null||steps.size()>=16)throw unsupported("KEY_QUERY_PATH");steps.add(new KeyStep(at,contract,layout));
+            String type=layout.getName();String owner=null,field=null;
+            if(type.startsWith(C+"Unmodifiable")||type.startsWith(C+"Synchronized")){owner=C+(type.startsWith(C+"Unmodifiable")?"Unmodifiable":"Synchronized")+"Map";field="m";}
+            else if(type.equals(G+"JdkBackedImmutableMap")){owner=type;field="delegateMap";}
+            if(owner==null)break;FieldRead read=knownField(at,owner,field);connections.add(new HeldRead(read));at=read.value;
+            contract=query(at,true,Map.class,"get","(Ljava/lang/Object;)Ljava/lang/Object;",185,contract.body);if(contract==null)throw unsupported("KEY_QUERY_DELEGATE");
+        }
+        Object semantic=key;String leaf=layout.getName();
+        if(leaf.equals(G+"SingletonImmutableBiMap")){FieldRead stored=knownField(at,leaf,"singleKey");connections.add(new HeldRead(stored));semantic=stored.value;}
+        List<KeyTarget> targets=new ArrayList<>();boolean identity=layout==IdentityHashMap.class||layout==EnumMap.class||leaf.equals(C+"EmptyMap");
+        if(!identity&&!builtinKey(semantic)&&semantic!=null){
+            if(layout==HashMap.class||layout==LinkedHashMap.class||leaf.equals(I+"MapN")||leaf.equals(G+"RegularImmutableMap"))keyTarget(targets,semantic,"hashCode","()I",Object.class,182);
+            keyTarget(targets,semantic,"equals","(Ljava/lang/Object;)Z",Object.class,182);
+            if((layout==HashMap.class||layout==LinkedHashMap.class)&&selfComparable(semantic))keyTarget(targets,semantic,"compareTo","(Ljava/lang/Object;)I",Comparable.class,185);
+        }
+        QueryKeys keys=new QueryKeys(receiver,key,semantic,root,steps,connections,targets);
+        if(!identity&&!builtinKey(semantic)&&semantic!=null&&identityMethod(semantic,"equals"))keys.methods.add(methodRead(Object.class,"equals","(Ljava/lang/Object;)Z"));
+        keys.current(new Uses(0));return keys;
+    }
+    private static void keyTarget(List<KeyTarget> targets,Object receiver,String name,String descriptor,Class<?> symbolic,int opcode){
+        Class<?> actual=dispatch(receiver,symbolic,name,descriptor,opcode,EquipmentSlotGraph.class);
+        if(actual!=null&&actual.getClassLoader()!=null)targets.add(new KeyTarget(receiver,actual,name,descriptor));
+    }
+    private static FieldRead knownField(Object receiver,String owner,String name){
+        Class<?> declaring=declaring(receiver.getClass(),owner);
+        for(var slot:EquipmentCarrierGraph.fields(receiver))if(slot.field().getDeclaringClass()==declaring&&slot.field().getName().equals(name))return new FieldRead(receiver,slot.field(),read(receiver,slot.field()));
+        throw unsupported("KEY_QUERY_FIELD");
+    }
+    static Read containerRead(QueryKeys keys,Object result,List<KeySemantics> semantics){
+        if(keys==null||semantics==null||semantics.size()>LIMIT)throw unsupported("KEY_QUERY_RESULTS");keys.current(new Uses(0));
+        KeySnapshot snapshot=new KeySnapshot(keys.connections,List.copyOf(keys.methods),List.copyOf(semantics));
+        return new ContainerRead(keys.receiver,keys.key,result,keys.query,snapshot);
+    }
+    private static int keyKind(String name,String descriptor){
+        if("hashCode".equals(name)&&"()I".equals(descriptor))return 0;
+        if("equals".equals(name)&&"(Ljava/lang/Object;)Z".equals(descriptor))return 1;
+        return "compareTo".equals(name)&&"(Ljava/lang/Object;)I".equals(descriptor)?2:-1;
+    }
+    private static boolean builtinKey(Object key){return key==null||key instanceof Enum<?>||key.getClass()==Integer.class||key.getClass()==String.class;}
+    private static Class<?> enumType(Enum<?> value){Class<?> type=value.getClass();return type.getSuperclass()==Enum.class?type:type.getSuperclass();}
+    private static boolean selfComparable(Object key){
+        if(!(key instanceof Comparable<?>))return false;Class<?> type=key.getClass();
+        for(java.lang.reflect.Type contract:type.getGenericInterfaces())if(contract instanceof ParameterizedType parameterized&&parameterized.getRawType()==Comparable.class){
+            java.lang.reflect.Type[] arguments=parameterized.getActualTypeArguments();if(arguments.length==1&&arguments[0]==type)return true;
+        }return false;
+    }
+    static boolean keyReadSupported(Object receiver,Class<?> symbolic,String name,String descriptor,int opcode,Class<?> caller,Object[] arguments){
+        try{return builtinCall(receiver,symbolic,name,descriptor,opcode,caller,arguments)!=null;}catch(Unresolved unsupported){return false;}
+    }
+    static Read keyRead(Object receiver,Class<?> symbolic,String name,String descriptor,int opcode,Class<?> caller,Object[] arguments,Object result){
+        BuiltinCall call=builtinCall(receiver,symbolic,name,descriptor,opcode,caller,arguments);if(call==null)throw unsupported("BUILTIN_KEY_CONTRACT");
+        Object holder=receiver==null?symbolic:receiver;Object current=call.current(new Uses(0),holder);if(!samePrimitive(current,result))throw unsupported("BUILTIN_KEY_RETURN");return new BuiltinRead(holder,result,call);
+    }
+    private static BuiltinCall builtinCall(Object receiver,Class<?> symbolic,String name,String descriptor,int opcode,Class<?> caller,Object[] arguments){
+        if(opcode==184&&receiver==null&&name!=null&&name.equals("compare")&&arguments!=null&&arguments.length==2&&caller!=null){
+            Class<?> boxed=symbolic==Integer.class&&"(II)I".equals(descriptor)?Integer.class:symbolic==Long.class&&"(JJ)I".equals(descriptor)?Long.class:null;
+            if(boxed==null||arguments[0]==null||arguments[1]==null||arguments[0].getClass()!=boxed||arguments[1].getClass()!=boxed
+                    ||dispatch(null,symbolic,name,descriptor,opcode,caller)!=boxed)return null;
+            return new BuiltinCall(name,descriptor,List.of(new Value(arguments[0],true),new Value(arguments[1],true)),List.of(methodRead(boxed,name,descriptor)));
+        }
+        if(receiver==null||!builtinKey(receiver)||arguments==null||symbolic==null||caller==null||opcode!=182&&opcode!=183&&opcode!=185)return null;
+        Class<?> type=receiver instanceof Enum<?>?Enum.class:receiver.getClass();int kind=keyKind(name,descriptor);
+        String typed="(L"+type.getName().replace('.','/')+";)I";
+        if(kind<0&&"compareTo".equals(name)&&typed.equals(descriptor))kind=2;
+        if(kind<0||arguments.length!=(kind==0?0:1)||dispatch(receiver,symbolic,name,descriptor,opcode,caller)!=type)return null;
+        if(kind==2){Object argument=arguments[0];if(argument==null)return null;
+            if(type==Enum.class){if(!(argument instanceof Enum<?> other)||enumType((Enum<?>)receiver)!=enumType(other))return null;}
+            else if(argument.getClass()!=type)return null;
+        }
+        List<MethodRead> methods=new ArrayList<>();methods.add(methodRead(type,name,descriptor));
+        if(kind==2&&!typed.equals(descriptor))methods.add(methodRead(type,name,typed));
+        List<Value> values=arguments.length==0?List.of():List.of(new Value(arguments[0],false));return new BuiltinCall(name,descriptor,values,List.copyOf(methods));
+    }
+    /** Only the exact natural key callback inside this prepared platform get.
+     * The Policy also checks the original get's physical bottom/site and the
+     * first installed KEY token; no frame-name verdict is an authorization. */
+    static boolean keyCall(QueryKeys keys,Object receiver,Class<?> declaring,String name,String descriptor,Object[] arguments,List<StackWalker.StackFrame> frames){
+        try {
+            int kind=keyKind(name,descriptor);if(keys==null||kind<0||receiver!=keys.semanticReceiver||arguments==null||arguments.length!=(kind==0?0:1)||frames==null||frames.size()<2)return false;
+            boolean target=false;for(KeyTarget actual:keys.targets)if(actual.receiver==receiver&&actual.declaring==declaring&&actual.name.equals(name)&&actual.descriptor.equals(descriptor)){target=true;break;}
+            if(!target||!frame(frames,0,declaring.getName(),name,descriptor)||frames.get(0).getDeclaringClass()!=declaring)return false;
+            keys.current(new Uses(0));KeyStep leaf=keys.steps.get(keys.steps.size()-1);String layout=leaf.layout.getName();int at=1;
+            if(leaf.layout==HashMap.class||leaf.layout==LinkedHashMap.class){
+                if(kind==0){if(!frame(frames,at++,"java.util.HashMap","hash","(Ljava/lang/Object;)I"))return false;}
+                else if(kind==2){if(!selfComparable(receiver)||arguments[0]==null||arguments[0].getClass()!=receiver.getClass()
+                        ||!frame(frames,at++,"java.util.HashMap","compareComparables","(Ljava/lang/Class;Ljava/lang/Object;Ljava/lang/Object;)I"))return false;}
+                if(kind==2||frame(frames,at,"java.util.HashMap$TreeNode","find","(ILjava/lang/Object;Ljava/lang/Class;)Ljava/util/HashMap$TreeNode;")){
+                    int first=at;while(frame(frames,at,"java.util.HashMap$TreeNode","find","(ILjava/lang/Object;Ljava/lang/Class;)Ljava/util/HashMap$TreeNode;"))at++;
+                    if(at==first||!frame(frames,at++,"java.util.HashMap$TreeNode","getTreeNode","(ILjava/lang/Object;)Ljava/util/HashMap$TreeNode;"))return false;
+                }
+                if(!frame(frames,at++,"java.util.HashMap","getNode","(Ljava/lang/Object;)Ljava/util/HashMap$Node;"))return false;
+            }else if(layout.equals(I+"MapN")){
+                if(kind==2||!frame(frames,at++,layout,"probe","(Ljava/lang/Object;)I"))return false;
+            }else if(layout.equals(C+"SingletonMap")){
+                if(kind!=1||!frame(frames,at++,"java.util.Collections","eq","(Ljava/lang/Object;Ljava/lang/Object;)Z"))return false;
+                if(arguments[0]!=knownField(leaf.receiver,layout,"k").value)return false;
+            }else if(layout.equals(I+"Map1")){
+                if(kind!=1||arguments[0]!=knownField(leaf.receiver,layout,"k0").value)return false;
+            }else if(layout.equals(G+"SingletonImmutableBiMap")){
+                if(kind!=1||arguments[0]!=keys.key)return false;
+            }else if(layout.equals(G+"RegularImmutableMap")){
+                if(kind==2||!frame(frames,at++,layout,"get","(Ljava/lang/Object;[Lcom/google/common/collect/ImmutableMapEntry;I)Ljava/lang/Object;"))return false;
+            }else return false;
+            for(int index=keys.steps.size()-1;index>=0;index--){KeyStep step=keys.steps.get(index);
+                if(!frame(frames,at++,step.query.body.getName(),step.query.name,step.query.descriptor)||frames.get(at-1).getDeclaringClass()!=step.query.body)return false;
+            }
+            int bottom=(int)DEPTH.invokeExact(declaring,name,descriptor);if(bottom<=at)return false;
+            for(int index=0;index<at;index++){
+                var selected=frames.get(index);long[] physical=(long[])FRAME.invokeExact(selected.getDeclaringClass(),selected.getMethodName(),selected.getDescriptor(),bottom-index);
+                if(physical==null||physical.length!=6)return false;
+                MethodRead observed=methodRead(selected.getDeclaringClass(),selected.getMethodName(),selected.getDescriptor(),Arrays.copyOfRange(physical,2,6));
+                boolean present=false;for(MethodRead method:keys.methods)if(method.definition.equals(observed.definition)){present=true;break;}
+                if(!present){if(keys.methods.size()>=LIMIT)return false;keys.methods.add(observed);}
+            }
+            return true;
+        }catch(Unresolved unavailable){return false;}catch(Error failure){throw failure;}catch(Throwable unavailable){return false;}
+    }
+    private static boolean frame(List<StackWalker.StackFrame> frames,int at,String owner,String name,String descriptor){
+        if(at<0||at>=frames.size())return false;var frame=frames.get(at);Class<?> type=frame.getDeclaringClass();
+        boolean platform=owner.startsWith("java.")?jdk(type,owner):owner.startsWith(G)?guava(type,owner):type.getName().equals(owner);
+        return platform&&frame.getMethodName().equals(name)&&frame.getDescriptor().equals(descriptor);
     }
     private static Query query(Object receiver,boolean map,Class<?> symbolic,String name,String descriptor,int opcode,Class<?> caller){
         if(receiver==null||symbolic==null||caller==null||!(map?receiver instanceof Map<?,?>:receiver instanceof List<?>)||!"get".equals(name)
@@ -221,6 +431,7 @@ final class EquipmentSlotGraph {
     }
     private static final class Uses {
         final int mask;final List<FieldUse> fields=new ArrayList<>();final List<ArrayUse> arrays=new ArrayList<>();int count;
+        List<KeySemantics> keys=List.of();
         final Replacement replacement;Uses(int mask){this(mask,null);}Uses(int mask,Replacement replacement){this.mask=mask;this.replacement=replacement;}
         Object field(Object receiver,Field actual,boolean terminal){
             if(++count>LIMIT)throw unsupported("READ_CAPACITY");Object value=replacement!=null&&replacement.field(receiver,actual)?replacement.value:read(receiver,actual);long offset=-1;int width;
@@ -234,6 +445,13 @@ final class EquipmentSlotGraph {
         Object constant(Class<?> declaring,String name){try{Field actual=declaring.getDeclaredField(name);if(!Modifier.isStatic(actual.getModifiers()))throw unsupported("STATIC_FIELD");return field(declaring,actual,false);}catch(NoSuchFieldException failure){throw unsupported("STATIC_FIELD:"+declaring.getName()+":"+name);}}
         Object terminal(Object receiver,String owner,String name,boolean terminal){Class<?> declaring=declaring(receiver.getClass(),owner);for(var slot:EquipmentCarrierGraph.fields(receiver))if(slot.field().getDeclaringClass()==declaring&&slot.field().getName().equals(name))return field(receiver,slot.field(),terminal);throw unsupported("TERMINAL_FIELD");}
         Object array(Object array,int index,boolean terminal){if(array==null||!array.getClass().isArray()||index<0||index>=Array.getLength(array))throw unsupported("ARRAY_INDEX");if(++count>LIMIT)throw unsupported("READ_CAPACITY");Object value=replacement!=null&&replacement.declaring==null&&replacement.receiver==array&&replacement.index==index?replacement.value:Array.get(array,index);arrays.add(new ArrayUse(array,index,index+1,1,mask,terminal));return value;}
+        Object key(Object receiver,String name,String descriptor,Object... arguments){
+            Object result=null;boolean found=false;
+            for(KeySemantics semantic:keys)if(semantic.matches(receiver,name,descriptor,arguments)){
+                Object current=semantic.current(this);if(found&&!samePrimitive(result,current))throw unsupported("AMBIGUOUS_KEY_SEMANTICS");result=current;found=true;
+            }
+            if(!found)throw unsupported("MISSING_NATURAL_KEY_SEMANTICS");return result;
+        }
     }
     private static Object list(Uses uses,Object receiver,int index,boolean terminal,IdentityHashMap<Object,Boolean> path){return list(uses,receiver,index,terminal,path,null);}
     private static Object list(Uses uses,Object receiver,int index,boolean terminal,IdentityHashMap<Object,Boolean> path,Query query){
@@ -336,7 +554,8 @@ final class EquipmentSlotGraph {
         if(key.getClass()==String.class){int hash=integer(uses.get(key,"java.lang.String","hash"));if(hash!=0)return hash;
             Object zero=uses.get(key,"java.lang.String","hashIsZero");if(!(zero instanceof Boolean))throw unsupported("STRING_ZERO_HASH");if(Boolean.TRUE.equals(zero))return 0;
             StringData data=stringData(uses,key);for(int at=0;at<data.length();at++)hash=31*hash+data.character(uses,at);return hash;}
-        throw unsupported("MAP_KEY_SEMANTICS");
+        if(identityMethod(key,"hashCode"))return System.identityHashCode(key);
+        return integer(uses.key(key,"hashCode","()I"));
     }
     private static boolean hashKeyEqual(Uses uses,Object key,Object actual){return key==actual||key!=null&&keyEqual(uses,key,actual);}
     /** The first argument is the real equals receiver; Guava's singleton uses the stored key. */
@@ -346,7 +565,8 @@ final class EquipmentSlotGraph {
         if(first.getClass()==String.class){if(first==second)return true;if(second==null||second.getClass()!=String.class)return false;
             boolean compact=compactStrings(uses);if(compact&&coder(uses,first)!=coder(uses,second))return false;byte[] a=bytes(uses.get(first,"java.lang.String","value")),b=bytes(uses.get(second,"java.lang.String","value"));if(a.length!=b.length)return false;
             for(int at=0;at<a.length;at++)if(byteAt(uses,a,at)!=byteAt(uses,b,at))return false;return true;}
-        throw unsupported("MAP_KEY_EQUALS_SEMANTICS");
+        if(identityMethod(first,"equals"))return first==second;
+        Object result=uses.key(first,"equals","(Ljava/lang/Object;)Z",second);if(result instanceof Boolean actual)return actual;throw unsupported("KEY_EQUALS_RETURN");
     }
     private static int keyComparable(Uses uses,Object key,Object actual){
         if(key==null)return 0;
@@ -358,7 +578,12 @@ final class EquipmentSlotGraph {
             // interfaces. An ordinary enum inherits Comparable from Enum.
             for(Class<?> contract:key.getClass().getInterfaces())if(contract==Comparable.class)throw unsupported("ENUM_DIRECT_COMPARABLE");return 0;
         }
-        throw unsupported("MAP_KEY_COMPARISON_SEMANTICS");
+        if(!selfComparable(key)||actual==null||actual.getClass()!=key.getClass())return 0;
+        return integer(uses.key(key,"compareTo","(Ljava/lang/Object;)I",actual));
+    }
+    private static boolean identityMethod(Object receiver,String name){
+        try {Method method=receiver.getClass().getMethod(name,name.equals("equals")?new Class<?>[]{Object.class}:new Class<?>[0]);return method.getDeclaringClass()==Object.class&&!Modifier.isStatic(method.getModifiers());}
+        catch(ReflectiveOperationException unavailable){throw unsupported("KEY_IDENTITY_DISPATCH");}
     }
     private record StringData(byte[] bytes,int coder,int high,int low){
         int length(){return bytes.length>>coder;}

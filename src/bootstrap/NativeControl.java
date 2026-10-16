@@ -49,7 +49,7 @@ public final class NativeControl {
                 if(dll==null)return installFailure("OBJECT_CLONE_JNI_PAYLOAD_ABSENT",false);
                 nativeLoadAttempted=true;
                 System.load(dll.toString());nativeLoaded=true;
-                if(abi()!=86)throw new UnsatisfiedLinkError("NATIVE_CONTROL_ABI");
+                if(abi()!=87)throw new UnsatisfiedLinkError("NATIVE_CONTROL_ABI");
             }
             if(!nativeBoundaryInstalled){
                 nativeHandoffRetryable=false;
@@ -388,6 +388,25 @@ public final class NativeControl {
         return available?bindBufferStorage0(buffer,action,address,bytes):new long[]{0,0};
     }
     private static boolean bufferBindingCaller(java.nio.Buffer buffer,Object action,long address,long bytes){return ResourceBridge.bufferBindingActive(buffer,action,address,bytes);}
+    static long[] observeBufferStorage(java.nio.Buffer buffer,Object action,long address,long bytes){
+        if(CALLER.getCallerClass()!=ResourceBridge.class||!ResourceBridge.bufferStorageActive(buffer,action,address,bytes))throw new SecurityException("ACTUAL_BUFFER_STORAGE_OBSERVATION_REQUIRED");
+        return available?observeBufferStorage0(buffer,action,address,bytes):new long[]{0,0};
+    }
+    private static boolean bufferStorageCaller(java.nio.Buffer buffer,Object action,long address,long bytes){return ResourceBridge.bufferStorageActive(buffer,action,address,bytes);}
+    static boolean bufferStorageUse(java.nio.Buffer buffer,long token,long generation,long address,long bytes,boolean retain){
+        if(CALLER.getCallerClass()!=ResourceBridge.class||!ResourceBridge.bufferStorageUseActive(buffer,token,generation,address,bytes,retain))throw new SecurityException("ACTUAL_BUFFER_STORAGE_USE_REQUIRED");
+        return available&&bufferStorageUse0(buffer,token,generation,address,bytes,retain);
+    }
+    private static boolean bufferStorageUseCaller(java.nio.Buffer buffer,long token,long generation,long address,long bytes,boolean retain){
+        return ResourceBridge.bufferStorageUseActive(buffer,token,generation,address,bytes,retain);
+    }
+    static void exposeBufferStorage(java.nio.Buffer buffer,long token,long generation,long address,long bytes,Module[] sources){
+        if(CALLER.getCallerClass()!=ResourceBridge.class||!ResourceBridge.bufferStorageExposureActive(buffer,token,generation,address,bytes,sources))throw new SecurityException("ACTUAL_BUFFER_STORAGE_EXPOSURE_REQUIRED");
+        if(available)exposeBufferStorage0(buffer,token,generation,address,bytes,sources);
+    }
+    private static boolean bufferStorageExposureCaller(java.nio.Buffer buffer,long token,long generation,long address,long bytes,Module[] sources){
+        return ResourceBridge.bufferStorageExposureActive(buffer,token,generation,address,bytes,sources);
+    }
     static long[] restoreBufferStorage(Object action,long token,long generation,Module[] modules,long cursor,int budget){
         if(CALLER.getCallerClass()!=ResourceBridge.class||!ResourceBridge.bufferRestoreActive(action,token,generation,modules,cursor,budget))
             throw new SecurityException("ACTUAL_BUFFER_SOURCE_RESTORE_REQUIRED");
@@ -896,6 +915,9 @@ public final class NativeControl {
     private static native boolean bufferAllocationBoundary0();
     private static native boolean bufferAddressBoundary0(Object buffer,Module[] sources);
     private static native long[] bindBufferStorage0(java.nio.Buffer buffer,Object action,long address,long bytes);
+    private static native long[] observeBufferStorage0(java.nio.Buffer buffer,Object action,long address,long bytes);
+    private static native boolean bufferStorageUse0(java.nio.Buffer buffer,long token,long generation,long address,long bytes,boolean retain);
+    private static native void exposeBufferStorage0(java.nio.Buffer buffer,long token,long generation,long address,long bytes,Module[] sources);
     private static native long[] restoreBufferStorage0(Object action,long token,long generation,Module[] modules,long cursor,int budget);
     private static native long ioBufferWrite0(Object receipt,Object action,long allocation,long generation,long address,long bytes,Module[] sources);
     private static native void ioBufferWritten0(Object receipt,long token,long bytes,boolean completed);

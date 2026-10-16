@@ -128,7 +128,7 @@ final class EquipmentActionBoundary {
     private static boolean slotEntry(MethodInsnNode call) {
         return call.getOpcode()==Opcodes.INVOKESTATIC&&call.owner.equals(BRIDGE)
                 &&(call.name.equals("beginEquipmentSlotRead")&&call.desc.equals("(Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;")
-                ||call.name.equals("beginEquipmentSlotMethod")&&call.desc.equals("(Ljava/lang/Object;Ljava/lang/Class;Ljava/lang/String;Ljava/lang/String;[Ljava/lang/Object;)Ljava/lang/Object;"));
+                ||(call.name.equals("beginEquipmentSlotMethod")||call.name.equals("beginEquipmentSlotKey"))&&call.desc.equals("(Ljava/lang/Object;Ljava/lang/Class;Ljava/lang/String;Ljava/lang/String;[Ljava/lang/Object;)Ljava/lang/Object;"));
     }
     private static boolean business(MethodInsnNode call) {
         String owner=call.owner;

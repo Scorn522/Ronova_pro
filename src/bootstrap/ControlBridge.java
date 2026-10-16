@@ -28,7 +28,7 @@ public final class ControlBridge {
         }
     };
     private ControlBridge() { }
-    public static int abiVersion(){return 96;}
+    public static int abiVersion(){return 97;}
     public static long arrayRevision(Object value){if(!recoveryWriter())throw new SecurityException("RECOVERY_ARRAY_READER_REQUIRED");return CodeSourceBridge.executionArrayRevision(value);}
 
     public static synchronized void install(Class<?> agent,ClassFileTransformer[] transformers) throws ReflectiveOperationException {
@@ -900,6 +900,7 @@ public final class ControlBridge {
             "beginEquipmentSlotRead","equipmentSlotFieldRead","equipmentSlotArrayRead","equipmentSlotContainerRead","equipmentSlotSelectorRead","equipmentSlotUnresolved","observeEquipmentSlot","failedEquipmentSlotRead",
             "capabilityAccept","capabilitySupply","capabilityApply","capabilityTest","capabilityDerived",
             "capabilityComposed","capabilityComposedBi","beginEquipmentSlotCall","endEquipmentSlotCall","failedEquipmentSlotCall","beginEquipmentSlotMethod","endEquipmentSlotMethod","failedEquipmentSlotMethod",
+            "beginEquipmentSlotKey","endEquipmentSlotKey","failedEquipmentSlotKey",
             "invokeEquipmentCallback","invokeEquipmentOriginal","invokeDefinedEquipmentCallback","executionEquipmentCallback","resultPublicationAllowed");
     static boolean controlCaller() {
         // The query omits guard entry points, preserving the real ledger writer.
@@ -2270,6 +2271,9 @@ public final class ControlBridge {
             java.lang.invoke.MethodType.methodType(void.class,Object.class,Throwable.class),
             java.lang.invoke.MethodType.methodType(Object.class,Object.class,Class.class,String.class,String.class,Object[].class),
             java.lang.invoke.MethodType.methodType(void.class,Object.class,Object.class),
+            java.lang.invoke.MethodType.methodType(void.class,Object.class,Throwable.class),
+            java.lang.invoke.MethodType.methodType(Object.class,Object.class,Class.class,String.class,String.class,Object[].class),
+            java.lang.invoke.MethodType.methodType(void.class,Object.class,Object.class),
             java.lang.invoke.MethodType.methodType(void.class,Object.class,Throwable.class)};
         if(callbacks==null||callbacks.length!=types.length)throw new IllegalArgumentException("EQUIPMENT_SLOT_CALLBACKS");
         var next=callbacks.clone();for(int at=0;at<next.length;at++)next[at]=Objects.requireNonNull(next[at]).asType(types[at]);equipmentSlots=next;
@@ -2329,6 +2333,18 @@ public final class ControlBridge {
     public static void failedEquipmentSlotMethod(Object token,Throwable original){
         var callbacks=equipmentSlots;if(callbacks==null||token==null)return;
         try{callbacks[13].invokeExact(token,original);}catch(Throwable failure){if(failure!=original)original.addSuppressed(failure);}
+    }
+    public static Object beginEquipmentSlotKey(Object receiver,Class<?> declaring,String name,String descriptor,Object[] arguments){
+        var callbacks=equipmentSlots;if(callbacks==null)return null;
+        try{return (Object)callbacks[14].invokeExact(receiver,declaring,name,descriptor,arguments);}catch(Throwable failure){throw slotFailure(failure);}
+    }
+    public static void endEquipmentSlotKey(Object token,Object result){
+        var callbacks=equipmentSlots;if(callbacks==null||token==null)return;
+        try{callbacks[15].invokeExact(token,result);}catch(Throwable failure){throw slotFailure(failure);}
+    }
+    public static void failedEquipmentSlotKey(Object token,Throwable original){
+        var callbacks=equipmentSlots;if(callbacks==null||token==null)return;
+        try{callbacks[16].invokeExact(token,original);}catch(Throwable failure){if(failure!=original)original.addSuppressed(failure);}
     }
     private static RuntimeException slotFailure(Throwable failure){
         if(failure instanceof Error error)throw error;if(failure instanceof RuntimeException runtime)return runtime;

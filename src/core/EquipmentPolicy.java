@@ -126,9 +126,10 @@ public final class EquipmentPolicy {
     private static Map<Thread,Driver> DRIVERS;
     private static Map<Thread,Invocation> INVOCATIONS;
     private static final ThreadLocal<SlotRead> SLOT_READS=new ThreadLocal<>();
-    private static MethodHandle DECLARE_SLOT,DECLARE_SLOT_HELPER,SLOT_METHOD,CARRIER_FRAME,CARRIER_CALL_SITE;
+    private static MethodHandle DECLARE_SLOT,DECLARE_SLOT_HELPER,DECLARE_SLOT_KEY,SLOT_METHOD,CARRIER_FRAME,CARRIER_CALL_SITE;
     private static final ThreadLocal<SlotCall> SLOT_CALLS=new ThreadLocal<>();
     private static final ThreadLocal<SlotMethod> SLOT_METHODS=new ThreadLocal<>();
+    private static final ThreadLocal<SlotKey> SLOT_KEYS=new ThreadLocal<>();
     private static final ThreadLocal<DelegateCall> CARRIER_DELEGATES=new ThreadLocal<>();
     private static final class DelegateCall {
         final Scope action;final Thread thread=Thread.currentThread();final DelegateCall previous;
@@ -152,6 +153,8 @@ public final class EquipmentPolicy {
     private static final class SlotCall {
         final SlotRead read;final SlotMethod parent;final SlotCall previous;final Object receiver;final Object[] arguments;
         final Class<?> declaring,symbolic;final String name,descriptor;final int kind,depth,opcode;final List<StackWalker.StackFrame> frames;final long[] site;
+        final SlotKey semantic=SLOT_KEYS.get();
+        EquipmentSlotGraph.QueryKeys keys;final List<EquipmentSlotGraph.KeySemantics> semantics=new ArrayList<>();
         boolean entered,finished,closed;Object result;
         SlotCall(SlotRead read,SlotMethod parent,SlotCall previous,Object receiver,Object[] arguments,Class<?> declaring,Class<?> symbolic,String name,String descriptor,int opcode,int kind,List<StackWalker.StackFrame> frames,long[] site){
             this.read=read;this.parent=parent;this.previous=previous;this.receiver=receiver;this.arguments=arguments.clone();this.declaring=declaring;this.symbolic=symbolic;this.name=name;this.descriptor=descriptor;this.opcode=opcode;this.kind=kind;this.frames=List.copyOf(frames);this.site=site;depth=previous==null?1:previous.depth+1;
@@ -160,6 +163,17 @@ public final class EquipmentPolicy {
     private static final class SlotMethod {
         final SlotCall call;final SlotMethod previous;final List<StackWalker.StackFrame> frames;final long[] image;boolean closed;
         SlotMethod(SlotCall call,SlotMethod previous,List<StackWalker.StackFrame> frames){this.call=call;this.previous=previous;this.frames=List.copyOf(frames);image=carrierFrameImage(frames.get(0));}
+    }
+    /** Dependencies of an actually executed key operation, never an entity storage root. */
+    private static final class SlotKey {
+        final SlotCall call;final SlotKey previous;final SlotMethod parent;final Object receiver;final Object[] arguments;
+        final Class<?> declaring;final String name,descriptor;final List<StackWalker.StackFrame> frames;final long[] image;
+        final List<EquipmentSlotGraph.Read> reads=new ArrayList<>();final List<EquipmentSlotGraph.MethodRead> methods=new ArrayList<>();
+        boolean closed;
+        SlotKey(SlotCall call,Object receiver,Class<?> declaring,String name,String descriptor,Object[] arguments,List<StackWalker.StackFrame> frames){
+            this.call=call;previous=SLOT_KEYS.get();parent=SLOT_METHODS.get();this.receiver=receiver;this.declaring=declaring;this.name=name;this.descriptor=descriptor;
+            this.arguments=arguments.clone();this.frames=List.copyOf(frames);image=carrierFrameImage(frames.get(0));
+        }
     }
     private static final Object INVOCATION_REFUSED=new Object();
     private static Map<Class<?>,List<Slot>> FIELDS;
@@ -293,6 +307,7 @@ public final class EquipmentPolicy {
         EquipmentCarrierGraph.initialize();
         DECLARE_SLOT=MethodHandles.publicLookup().findStatic(Class.forName("dev.ronova.pro.agent.RecoveryAgent",false,ClassLoader.getSystemClassLoader()),"declareEquipmentSlotGetter",MethodType.methodType(void.class,Class.class,String.class,String.class));
         DECLARE_SLOT_HELPER=MethodHandles.publicLookup().findStatic(Class.forName("dev.ronova.pro.agent.RecoveryAgent",false,ClassLoader.getSystemClassLoader()),"declareEquipmentSlotHelper",MethodType.methodType(void.class,Class.class,String.class,String.class));
+        DECLARE_SLOT_KEY=MethodHandles.publicLookup().findStatic(Class.forName("dev.ronova.pro.agent.RecoveryAgent",false,ClassLoader.getSystemClassLoader()),"declareEquipmentSlotKey",MethodType.methodType(void.class,Class.class,String.class,String.class));
         Class<?> carrierBridge=Class.forName("dev.ronova.pro.bootstrap.CarrierBridge",false,null);
         CALLBACK_DEPTH=MethodHandles.publicLookup().findStatic(carrierBridge,"callbackDepth",MethodType.methodType(int.class,Class.class,String.class,String.class));
         SLOT_METHOD=MethodHandles.publicLookup().findStatic(carrierBridge,"method",MethodType.methodType(Class.class,Object.class,Class.class,String.class,String.class,int.class,Class.class));
@@ -498,6 +513,9 @@ public final class EquipmentPolicy {
         return true;
     }
     private static SlotRead actualSlotRead(Object token){
+        if(token instanceof SlotKey key){SlotRead read=key.call.read;if(!active(read.owner)){read.unresolved=true;return null;}
+            if(!slotKeyPath(key))throw new SecurityException("ACTUAL_EQUIPMENT_SLOT_KEY_READ_REQUIRED");
+            if(!slotKeyImageCurrent(key)){read.unresolved=true;return null;}return read;}
         if(token instanceof SlotMethod method){SlotRead read=method.call.read;if(!active(read.owner)){read.unresolved=true;return null;}
             if(!slotMethodPath(method))throw new SecurityException("ACTUAL_EQUIPMENT_SLOT_HELPER_READ_REQUIRED");
             if(!slotMethodImageCurrent(method)){read.unresolved=true;return null;}return read;}
@@ -513,6 +531,20 @@ public final class EquipmentPolicy {
     }
     private static boolean slotMethodPath(SlotMethod method){return !method.closed&&!method.call.closed&&method.call.read.thread==Thread.currentThread()
             &&SLOT_READS.get()==method.call.read&&SLOT_METHODS.get()==method&&slotFrames(method.frames,capabilityFrames(),0,false);}
+    private static boolean slotKeyPath(SlotKey key){return !key.closed&&!key.call.closed&&key.call.read.thread==Thread.currentThread()
+            &&SLOT_READS.get()==key.call.read&&SLOT_KEYS.get()==key&&SLOT_CALLS.get()==key.call&&SLOT_METHODS.get()==key.parent
+            &&slotFrames(key.frames,capabilityFrames(),0,false);}
+    private static boolean slotKeyImageCurrent(SlotKey key){return slotCallerCurrent(key.call,true)
+            &&carrierFrameCurrent(key.image,key.declaring,key.name,key.descriptor,false);}
+    private static boolean slotHelperReceiver(SlotRead read,Object receiver){
+        SlotKey key=SLOT_KEYS.get();if(key==null)return EquipmentSlotGraph.helperReceiver(read.owner.entity.get(),read.slot,receiver,read.reads);
+        if(key.call.read!=read||key.closed)return false;
+        IdentityHashMap<Object,Boolean> rooted=new IdentityHashMap<>();rooted.put(key.receiver,Boolean.TRUE);
+        for(Object argument:key.arguments)if(argument!=null)rooted.put(argument,Boolean.TRUE);
+        for(var dependency:key.reads)if(!(dependency instanceof EquipmentSlotGraph.FieldRead field&&Modifier.isStatic(field.field().getModifiers()))&&rooted.containsKey(dependency.receiver())&&dependency.value()!=null)
+            rooted.put(dependency.value(),Boolean.TRUE);
+        return rooted.containsKey(receiver);
+    }
     private static boolean validCarrierImage(long[] image){return image!=null&&image.length==6&&image[0]>0&&image[0]<=Integer.MAX_VALUE
             &&image[1]>=0&&image[1]<image[5]&&image[2]!=0&&image[3]!=0&&image[4]!=0&&image[5]>0;}
     private static long[] carrierFrameImage(StackWalker.StackFrame frame){
@@ -556,8 +588,9 @@ public final class EquipmentPolicy {
                 &&EquipmentSlotGraph.containerSupported(receiver,true,symbolic,name,descriptor,opcode,frames.get(0).getDeclaringClass()))kind=1;
         else if(name.equals("get")&&descriptor.equals("(I)Ljava/lang/Object;")&&arguments.length==1&&arguments[0] instanceof Integer
                 &&EquipmentSlotGraph.containerSupported(receiver,false,symbolic,name,descriptor,opcode,frames.get(0).getDeclaringClass()))kind=2;
+        else if(SLOT_KEYS.get()!=null&&EquipmentSlotGraph.keyReadSupported(receiver,symbolic,name,descriptor,opcode,frames.get(0).getDeclaringClass(),arguments))kind=3;
         if(kind==0){
-            if(receiver!=null&&!EquipmentSlotGraph.helperReceiver(read.owner.entity.get(),read.slot,receiver,read.reads)){read.unresolved=true;return null;}
+            if(receiver!=null&&!slotHelperReceiver(read,receiver)){read.unresolved=true;return null;}
             try{
                 declaring=(Class<?>)SLOT_METHOD.invokeExact(receiver,symbolic,name,descriptor,opcode,frames.get(0).getDeclaringClass());
                 if(declaring==null||declaring.getClassLoader()==null){read.unresolved=true;return null;}
@@ -567,8 +600,51 @@ public final class EquipmentPolicy {
         }
         long[] site=carrierCallSite(receiver,symbolic,name,descriptor,opcode,frames.get(0));
         if(site==null){read.unresolved=true;return null;}
-        SlotCall call=new SlotCall(read,SLOT_METHODS.get(),previous,receiver,arguments,declaring,symbolic,name,descriptor,opcode,kind,frames,site);SLOT_CALLS.set(call);return call;
+        SlotCall call=new SlotCall(read,SLOT_METHODS.get(),previous,receiver,arguments,declaring,symbolic,name,descriptor,opcode,kind,frames,site);
+        if(kind==1)try{
+            call.keys=EquipmentSlotGraph.prepareKeys(receiver,arguments[0],symbolic,name,descriptor,opcode,frames.get(0).getDeclaringClass());
+            for(var target:EquipmentSlotGraph.keyTargets(call.keys))DECLARE_SLOT_KEY.invokeExact(target.declaring(),target.name(),target.descriptor());
+        }catch(RuntimeException|LinkageError unavailable){read.unresolved=true;return null;}
+        catch(Error failure){throw failure;}catch(Throwable unavailable){read.unresolved=true;return null;}
+        SLOT_CALLS.set(call);return call;
     }
+    public static Object slotKeyBegin(Object receiver,Class<?> declaring,String name,String descriptor,Object[] arguments){
+        if(!initialized)return null;SlotCall call=SLOT_CALLS.get();
+        // A key method may also be an exact helper of the getter or another key.
+        // Its one installed entry serves both roles without a second wrapper.
+        if(call!=null&&call.kind==0&&call.receiver==receiver&&call.declaring==declaring&&call.name.equals(name)&&call.descriptor.equals(descriptor))
+            return slotMethodBegin(receiver,declaring,name,descriptor,arguments);
+        if(call==null||call.closed||call.kind!=1||call.keys==null||call.read.unresolved||!active(call.read.owner))return null;
+        var frames=capabilityFrames();
+        var actual=WALKER.walk(stream->stream.dropWhile(frame->!sameAnchor(frame,declaring,name,descriptor)).toList());
+        int skip=frames.size()-call.frames.size();
+        if(receiver==null||arguments==null||SLOT_KEYS.get()!=call.semantic||SLOT_METHODS.get()!=call.parent||frames.isEmpty()
+                ||!sameAnchor(frames.get(0),declaring,name,descriptor)||skip<1||!slotFrames(call.frames,frames,skip,false)||!slotCallerCurrent(call,true)
+                ||!EquipmentSlotGraph.keyCall(call.keys,receiver,declaring,name,descriptor,arguments,actual)){
+            call.read.unresolved=true;return null;
+        }
+        SlotKey key=new SlotKey(call,receiver,declaring,name,descriptor,arguments,frames);
+        if(key.image==null){call.read.unresolved=true;return null;}
+        try{key.methods.add(EquipmentSlotGraph.methodRead(declaring,name,descriptor,Arrays.copyOfRange(key.image,2,6)));}
+        catch(EquipmentSlotGraph.Unresolved unavailable){call.read.unresolved=true;return null;}
+        SLOT_KEYS.set(key);return key;
+    }
+    public static void slotKeyEnd(Object token,Object result){closeSlotKey(token,result,true);}
+    private static void closeSlotKey(Object token,Object result,boolean success){
+        if(token instanceof SlotMethod){closeSlotMethod(token,result,success);return;}
+        if(token==null)return;if(!(token instanceof SlotKey key)||key.closed)return;
+        if(key.call.read.thread!=Thread.currentThread()||SLOT_KEYS.get()!=key||SLOT_METHODS.get()!=key.parent||SLOT_CALLS.get()!=key.call)
+            throw new IllegalMonitorStateException("EQUIPMENT_SLOT_KEY_ORDER");
+        try{
+            if(!success||!active(key.call.read.owner)||!slotKeyPath(key)||!slotKeyImageCurrent(key)){key.call.read.unresolved=true;return;}
+            if(!key.call.read.unresolved){
+                if(key.call.semantics.size()>=MAX_GRAPH){key.call.read.unresolved=true;return;}
+                try{key.call.semantics.add(EquipmentSlotGraph.keySemantics(key.receiver,key.name,key.descriptor,key.arguments,result,key.reads,key.methods));}
+                catch(EquipmentSlotGraph.Unresolved unavailable){key.call.read.unresolved=true;}
+            }
+        }finally{key.closed=true;if(key.previous==null)SLOT_KEYS.remove();else SLOT_KEYS.set(key.previous);}
+    }
+    public static void slotKeyFailed(Object token,Throwable original){try{closeSlotKey(token,null,false);}catch(RuntimeException|Error cleanup){if(cleanup!=original)original.addSuppressed(cleanup);}}
     public static Object slotMethodBegin(Object receiver,Class<?> declaring,String name,String descriptor,Object[] arguments){
         SlotCall call=SLOT_CALLS.get();if(call==null||call.closed||call.kind!=0||call.read.unresolved||!active(call.read.owner))return null;
         var frames=capabilityFrames();
@@ -596,25 +672,34 @@ public final class EquipmentPolicy {
         if(token==null)return;if(!(token instanceof SlotMethod method)||method.closed)return;
         SlotCall call=method.call;
         if(SLOT_METHODS.get()!=method||call.read.thread!=Thread.currentThread())throw new IllegalMonitorStateException("EQUIPMENT_SLOT_HELPER_ORDER");
-        try{if(!success||!slotMethodPath(method)||!slotMethodImageCurrent(method))call.read.unresolved=true;call.finished=success;call.result=result;}
+        try{if(!success||!slotMethodPath(method)||!slotMethodImageCurrent(method))call.read.unresolved=true;
+            if(!call.read.unresolved&&call.semantic!=null)try{var frame=method.frames.get(0);
+                call.semantic.methods.add(EquipmentSlotGraph.methodRead(frame.getDeclaringClass(),frame.getMethodName(),frame.getDescriptor(),Arrays.copyOfRange(method.image,2,6)));
+                if(call.semantic.methods.size()>MAX_GRAPH)call.read.unresolved=true;
+            }catch(EquipmentSlotGraph.Unresolved unavailable){call.read.unresolved=true;}
+            call.finished=success;call.result=result;}
         finally{method.closed=true;if(method.previous==null)SLOT_METHODS.remove();else SLOT_METHODS.set(method.previous);}
     }
     public static void slotMethodFailed(Object token,Throwable original){try{closeSlotMethod(token,null,false);}catch(RuntimeException|Error cleanup){if(cleanup!=original)original.addSuppressed(cleanup);}}
     public static void slotCallEnd(Object token,Object result){closeSlotCall(token,result,true);}
     private static void closeSlotCall(Object token,Object result,boolean success){
         if(token==null)return;if(!(token instanceof SlotCall call)||call.closed)return;
-        if(call.read.thread!=Thread.currentThread()||SLOT_CALLS.get()!=call||SLOT_METHODS.get()!=call.parent)throw new IllegalMonitorStateException("EQUIPMENT_SLOT_CALL_ORDER");
+        if(call.read.thread!=Thread.currentThread()||SLOT_CALLS.get()!=call||SLOT_METHODS.get()!=call.parent||SLOT_KEYS.get()!=call.semantic)throw new IllegalMonitorStateException("EQUIPMENT_SLOT_CALL_ORDER");
         try{
             if(!success||!active(call.read.owner)||!slotFrames(call.frames,capabilityFrames(),0,false)||!slotCallerCurrent(call,false)){call.read.unresolved=true;return;}
+            if(call.read.unresolved)return;
             if(call.kind==0){String returns=call.descriptor.substring(call.descriptor.lastIndexOf(')')+1);boolean primitive=returns.length()==1;
                 if(!call.entered||!call.finished||(primitive?!samePrimitive(call.result,result):call.result!=result))call.read.unresolved=true;
-            }else try {slotRecord(call.read,EquipmentSlotGraph.containerRead(call.receiver,call.arguments[0],result,call.kind==1,
-                    call.symbolic,call.name,call.descriptor,call.opcode,call.frames.get(0).getDeclaringClass()));}
+            }else try {slotRecord(call.read,call.kind==1?EquipmentSlotGraph.containerRead(call.keys,result,call.semantics)
+                    :call.kind==3?EquipmentSlotGraph.keyRead(call.receiver,call.symbolic,call.name,call.descriptor,call.opcode,call.frames.get(0).getDeclaringClass(),call.arguments,result)
+                    :EquipmentSlotGraph.containerRead(call.receiver,call.arguments[0],result,false,call.symbolic,call.name,call.descriptor,call.opcode,call.frames.get(0).getDeclaringClass()));}
             catch(EquipmentSlotGraph.Unresolved unavailable){call.read.unresolved=true;}
         }finally{call.closed=true;if(call.previous==null)SLOT_CALLS.remove();else SLOT_CALLS.set(call.previous);}
     }
     public static void slotCallFailed(Object token,Throwable original){try{closeSlotCall(token,null,false);}catch(RuntimeException|Error cleanup){if(cleanup!=original)original.addSuppressed(cleanup);}}
-    private static void slotRecord(SlotRead read,EquipmentSlotGraph.Read actual){if(read.reads.size()>=MAX_GRAPH)read.unresolved=true;else read.reads.add(actual);}
+    private static void slotRecord(SlotRead read,EquipmentSlotGraph.Read actual){SlotKey key=SLOT_KEYS.get();
+        List<EquipmentSlotGraph.Read> reads=key!=null&&key.call.read==read?key.reads:read.reads;
+        if(reads.size()>=MAX_GRAPH)read.unresolved=true;else reads.add(actual);}
     public static void slotFieldRead(Object token,Object holder,Class<?> symbolic,String name,String descriptor,Object value){
         SlotRead read=actualSlotRead(token);if(read==null||read.unresolved)return;
         try{slotRecord(read,EquipmentSlotGraph.fieldRead(holder==null?symbolic:holder,symbolic,name,descriptor,value));}catch(EquipmentSlotGraph.Unresolved unavailable){read.unresolved=true;}
@@ -658,7 +743,7 @@ public final class EquipmentPolicy {
             if(!success||read.unresolved||!(result instanceof ItemStack stack)||!EquipmentSlotGraph.observe(read.owner.entity.get(),read.owner.generation,read.slot,stack,read.reads,
                     read.anchor,read.method,read.descriptor,read.image==null?null:Arrays.copyOfRange(read.image,2,6)))EquipmentSlotGraph.forget(read.owner.entity.get(),read.owner.generation,read.slot);
             else captureSlots(read.owner);
-        }finally{read.closed=true;SLOT_CALLS.remove();SLOT_METHODS.remove();if(read.previous==null)SLOT_READS.remove();else SLOT_READS.set(read.previous);}
+        }finally{read.closed=true;SLOT_CALLS.remove();SLOT_METHODS.remove();SLOT_KEYS.remove();if(read.previous==null)SLOT_READS.remove();else SLOT_READS.set(read.previous);}
     }
     public static void slotReadFailed(Object token,Throwable original){try{closeSlotRead(token,null,false);}catch(RuntimeException|Error cleanup){if(cleanup!=original)original.addSuppressed(cleanup);}}
     private static void refresh(Owner owner){

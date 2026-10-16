@@ -155,6 +155,7 @@ static void native_thread_refuse(JNIEnv*,Binding*);
 static int native_buffer_prepare(JNIEnv*);
 static int native_buffer_allocation(JNIEnv*,NativeThread*);
 static void *JNICALL native_buffer_address(JNIEnv*,jobject);
+static jobject JNICALL native_buffer_new(JNIEnv*,void*,jlong);
 static unsigned native_arguments(const char*);
 static int native_memory_call_begin(JNIEnv*,NativeThread*,Binding*,unsigned char*,NativeUnsafeFrame*);
 static void native_memory_call_end(JNIEnv*,NativeThread*,Binding*,unsigned char*,NativeUnsafeFrame*);
@@ -2323,7 +2324,7 @@ JNIEXPORT jboolean JNICALL Java_dev_ronova_pro_bootstrap_NativeControl_initializ
     INSTALL_NATIVE_ARRAY(Boolean) INSTALL_NATIVE_ARRAY(Byte) INSTALL_NATIVE_ARRAY(Char) INSTALL_NATIVE_ARRAY(Short) INSTALL_NATIVE_ARRAY(Int) INSTALL_NATIVE_ARRAY(Long) INSTALL_NATIVE_ARRAY(Float) INSTALL_NATIVE_ARRAY(Double)
     table->GetPrimitiveArrayCritical=native_get_critical;table->ReleasePrimitiveArrayCritical=native_release_critical;
     table->GetStringCritical=native_get_string_critical;table->ReleaseStringCritical=native_release_string_critical;
-    table->GetDirectBufferAddress=native_buffer_address;
+    table->GetDirectBufferAddress=native_buffer_address;table->NewDirectByteBuffer=native_buffer_new;
     table->ExceptionDescribe=native_describe;
     table->RegisterNatives=native_register;table->UnregisterNatives=native_unregister;
     table->FindClass=native_find;table->GetMethodID=native_lookup_GetMethodID;table->GetStaticMethodID=native_lookup_GetStaticMethodID;table->GetFieldID=native_lookup_GetFieldID;table->GetStaticFieldID=native_lookup_GetStaticFieldID;

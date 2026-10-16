@@ -1,5 +1,21 @@
 # Ronova Pro 当前进度
 
+## 2026-10-16：C 接续——未知键自然语义与原生视图生命周期
+
+接续 `1de5df3`，Java ABI97 / Native ABI87 / SourceMapBridge2 / Storage3 / Journal6，协议 `r3-client-8`。本包先补未知键与已观察原生分配的实际缺口；不恢复旧 JDK 容器 Hook，不做自身外观、武器注册或源码 ZIP。
+
+自定义槽位中的真实 Map.get 在原调用前，只为当前查询键（Guava 单项 Map 为实际存储键）安装准确 Java hashCode/equals/compareTo。KEY 与 getter/helper 共用一次正文织入，原调用及返回不替换；键正文和准确 helper 的字段、数组、内建 String/Integer/Enum 调用结果及方法版本单独记录，不成为实体槽位存储根。查询沿真实 HashMap 碰撞/树节点、MapN、单项 Map 和已支持的包装链定位，核实际平台调用链、原 get 的 CP/BCI 与物理方法版本。解 Map 前后重核键依赖和定义，变化、未知 native/动态调用、实际写入或 monitor 操作使旧语义失效；没有调用用户键方法来重放查找。
+
+JNI NewDirectByteBuffer 及真实 Java DirectBuffer 视图只关联已经观察的 allocation 与 generation，空绑定也不在后来的同址分配中补造归属。视图使用持有实际分配短租约，原释放或重分配使旧代视图失效；活着的独立借用视图阻止自动释放及 managed/unmanaged 字节回滚。JNI GetDirectBufferAddress 与真实 Java address() 外泄进入同一 allocation 的不透明使用状态，视图 GC 不抹掉已外泄地址。已成功 JNI 创建的观察失败保留原结果并保留实际不透明义务，未知地址不生成来源或释放权。
+
+统一构建首次在 Bootstrap 的不可达受检异常 catch 处失败（35秒），原 `build-c-java97-native87-key-opaque-20261016.log` 保留。修正后，`build-c-java97-native87-key-opaque-final-20261016.log` **PASS，38秒**。收口时继续修复原生外泄读来源遗漏：已绑定 allocation 的 opaque 贡献单独保存，嵌套读接续，输出保留真实 Module 并加入既有 null 未知标记，不把这块已定位的不透明性升级为全局 unmapped。必要 Native/载荷构建 `build-c-java97-native87-key-opaque-readback-20261016.log` **PASS，31秒**；Java/Agent/Bootstrap 源码保持最新。Java 检查器与两次对应 Native 夹具编译均退出0。
+
+仅运行两个本包直接 mode，均首轮退出0。`unknown-map-key-semantics` 同时运行 KEY/Slot/Action 字节码检查，覆盖原返回及 Throwable、未装策略直通、写入/隐式 monitor 失效；真实 HashMap 同 hash 树碰撞命中/未命中、String.hashCode 和 Integer.compare 原委托、字段/数组及终槽读取中变化、一次真实 RedefineClasses，读回不重放 hashCode/equals/compareTo。注册和字段读取使用夹具 seam，物理方法由实际 JVMTI 读取；不代称真实 Core 授权或实体防护已安装。`opaque-native-state` 使用实际 VirtualAlloc/VirtualFree、同址复用和 JNI DirectBuffer，覆盖活 alias 阻止 private free、raw/managed undo、无 revision 的自动 retirement pending、租约和旧代拒绝、外泄读来源同时保留真实 Module/null 且全局 unknown 不受污染、原成功结果/Throwable/LastError 及 stopped 拒绝。分配/来源登记与观察回调属于夹具，没有安装生产 Unsafe、Agent 或全局 JNI 表。两项通过后未重复旧矩阵或未知键检查。
+
+匹配候选 `distribution/candidate-c-java97-native87-key-opaque-wip-20261016`：Core3069972、prelaunch23226字节，随本包源码和既有摘要同步 GitHub。真实整体 premain/Core/Native 安装、进服、存档重启及性能 **NOTRUN**。首次动态补装 helper 使旧物理帧失效时等待后续自然读取，不重放 getter。键内未知 Native/动态调用、未观察的任意 Native 私有结构、已删除容器 Hook 的对应缺口仍不提升覆盖，完整 C/B 尚未完成。
+
+---
+
 ## 2026-10-16：C 接续——未知载体、真实委托与槽位定义版本
 
 接续 `e7dfaac`，Java ABI96 / Native ABI86 / SourceMapBridge2 / Storage3 / Journal6，协议 `r3-client-8`。本包补实际可定位的未知 Java 载体路径，先写齐生产源码后统一构建；不恢复 JDK 容器广谱 Hook，不做自身外观、武器或源码 ZIP。

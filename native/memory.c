@@ -4,9 +4,10 @@ typedef struct NativeMemoryImage {uint64_t start,length;size_t references;unsign
 typedef struct NativeMemoryInterest {Owner *owner;volatile LONG revisions;struct NativeMemoryInterest *next;} NativeMemoryInterest;
 typedef struct NativeMemoryRevision {size_t references;OwnerLink *sources;NativeMemoryImage *image;struct NativeMemoryAllocation *allocation;int complete,counted;struct NativeMemoryRevision *previous;} NativeMemoryRevision;
 typedef struct NativeMemoryRange {uint64_t start,length;NativeMemoryRevision *revision;struct NativeMemoryRange *next;} NativeMemoryRange;
-typedef struct NativeMemoryAllocation {uint64_t address,bytes,generation,writeEpoch;jobject allocator;jweak bufferRoot,bufferAction;void *release;OwnerLink *sources,*readers,*preserved;NativeMemoryRange *ranges;NativeMemoryInterest *interests;CRITICAL_SECTION gate;volatile LONG alive,writers,reading,changing,users,sealed,unknownReaders,unknownUse,releaseFailed,managed,restoring;struct NativeMemoryAllocation *next;} NativeMemoryAllocation;
+typedef struct NativeBufferAlias {jweak buffer;uint64_t address,bytes,generation;LONG users;int borrowed;struct NativeBufferAlias *next;} NativeBufferAlias;
+typedef struct NativeMemoryAllocation {uint64_t address,bytes,generation,writeEpoch;jobject allocator;jweak bufferRoot,bufferAction;void *release;OwnerLink *sources,*readers,*preserved;NativeMemoryRange *ranges;NativeMemoryInterest *interests;NativeBufferAlias *aliases;CRITICAL_SECTION gate;volatile LONG alive,writers,reading,changing,users,sealed,retiring,unknownReaders,unknownUse,opaque,releaseFailed,managed,restoring;struct NativeMemoryAllocation *next;} NativeMemoryAllocation;
 typedef struct NativeMemoryCall {NativeMemoryAllocation *allocation,*prepared;OwnerLink *sources;jobject allocator;jweak bufferRoot;void *release;uint64_t address,bytes,generation;int locked,admitted,known,unknown,managed,cleanup;} NativeMemoryCall;
-typedef struct NativeMemoryWrite {NativeMemoryAllocation *allocation;OwnerLink *sources,*observed;NativeMemoryImage *image;uint64_t address,length,generation;int locked,written,reading,detached,unobserved,uncertain,unknown,admitted,initializing;struct NativeMemoryWrite *previous,*root;} NativeMemoryWrite;
+typedef struct NativeMemoryWrite {NativeMemoryAllocation *allocation;OwnerLink *sources,*observed;NativeMemoryImage *image;uint64_t address,length,generation;int locked,written,reading,detached,unobserved,opaque,uncertain,unknown,admitted,initializing;struct NativeMemoryWrite *previous,*root;} NativeMemoryWrite;
 typedef struct NativeBufferIoWrite {NativeMemoryWrite write;uint64_t epoch;jobject receipt,group;struct NativeBufferIoWrite *next;} NativeBufferIoWrite;
 static SRWLOCK native_memory_records=SRWLOCK_INIT;
 static NativeMemoryAllocation *native_memory_allocations;
@@ -35,6 +36,134 @@ static int native_memory_observed(uint64_t address,uint64_t length){
     AcquireSRWLockShared(&native_memory_records);
     int observed=native_memory_find(address,length,0)!=NULL;
     ReleaseSRWLockShared(&native_memory_records);return observed;
+}
+static int native_memory_buffer_aliases(JNIEnv *env,NativeMemoryAllocation *allocation){
+    int borrowed=0;NativeBufferAlias **link=&allocation->aliases;
+    while(*link){NativeBufferAlias *alias=*link;
+        if(!alias->users&&native_original.IsSameObject(env,alias->buffer,NULL)){
+            *link=alias->next;native_original.DeleteWeakGlobalRef(env,alias->buffer);free(alias);continue;
+        }
+        if(alias->borrowed&&alias->generation==allocation->generation)borrowed=1;link=&alias->next;
+    }
+    return borrowed;
+}
+static void native_memory_buffer_aliases_clear(JNIEnv *env,NativeMemoryAllocation *allocation){
+    NativeBufferAlias *alias=allocation->aliases;allocation->aliases=NULL;
+    while(alias){NativeBufferAlias *next=alias->next;native_original.DeleteWeakGlobalRef(env,alias->buffer);free(alias);alias=next;}
+}
+/* Called only by an actual JNI direct-buffer entry. Unknown numeric spans stay unknown. */
+static int native_memory_buffer_enter(JNIEnv *env,uint64_t address,uint64_t bytes,NativeMemoryAllocation **held){
+    *held=NULL;if(!address||!bytes)return 1;AcquireSRWLockShared(&native_memory_records);NativeMemoryAllocation *allocation=native_memory_find(address,bytes,0);
+    ReleaseSRWLockShared(&native_memory_records);if(!allocation)return 1;
+    EnterCriticalSection(&allocation->gate);AcquireSRWLockExclusive(&native_memory_records);
+    int ready=InterlockedCompareExchange(&allocation->alive,0,0)&&!InterlockedCompareExchange(&allocation->sealed,0,0)&&!InterlockedCompareExchange(&allocation->retiring,0,0)
+            &&!InterlockedCompareExchange(&allocation->changing,0,0)&&address>=allocation->address&&bytes<=allocation->bytes&&address-allocation->address<=allocation->bytes-bytes;
+    if(ready){InterlockedIncrement(&allocation->users);*held=allocation;}
+    ReleaseSRWLockExclusive(&native_memory_records);LeaveCriticalSection(&allocation->gate);
+    if(!ready)native_refuse(env,"BUFFER_NATIVE_STORAGE_LIFETIME_CHANGED");return ready;
+}
+static void native_memory_buffer_leave(NativeMemoryAllocation *allocation){
+    if(!allocation)return;AcquireSRWLockExclusive(&native_memory_records);InterlockedDecrement(&allocation->users);ReleaseSRWLockExclusive(&native_memory_records);
+}
+static void native_memory_buffer_exposed(JNIEnv *env,NativeMemoryAllocation *allocation,jobjectArray sources){
+    if(!allocation)return;EnterCriticalSection(&allocation->gate);OwnerLink *readers=NULL;int unknown=0;
+    jsize count=sources?native_original.GetArrayLength(env,sources):0;
+    AcquireSRWLockExclusive(&native_records);
+    for(jsize i=0;i<count&&!native_original.ExceptionCheck(env);i++){
+        jobject module=native_original.GetObjectArrayElement(env,sources,i);Owner *owner=module?native_owner(env,module):NULL;
+        if(!owner||!native_owner_add(&readers,owner))unknown=1;if(module)native_original.DeleteLocalRef(env,module);
+    }
+    ReleaseSRWLockExclusive(&native_records);AcquireSRWLockExclusive(&native_memory_records);
+    // An exposed pointer can be retained and changed by native instructions
+    // with no observed write boundary. Old byte images cannot authorize undo.
+    InterlockedExchange(&allocation->opaque,1);InterlockedExchange(&allocation->unknownUse,1);
+    if(unknown||!readers||!native_owner_merge(&allocation->readers,readers))InterlockedExchange(&allocation->unknownReaders,1);
+    ReleaseSRWLockExclusive(&native_memory_records);native_owner_links_free(readers);LeaveCriticalSection(&allocation->gate);
+}
+static int native_memory_buffer_observe(JNIEnv *env,jobject buffer,jobject action,uint64_t address,uint64_t bytes,jlong values[2]){
+    if(!address||!bytes)return 1;
+    AcquireSRWLockShared(&native_memory_records);NativeMemoryAllocation *allocation=native_memory_find(address,bytes,0);
+    ReleaseSRWLockShared(&native_memory_records);if(!allocation)return 1;
+    EnterCriticalSection(&allocation->gate);
+    int ready=InterlockedCompareExchange(&allocation->alive,0,0)&&!InterlockedCompareExchange(&allocation->sealed,0,0)&&!InterlockedCompareExchange(&allocation->retiring,0,0)
+            &&!InterlockedCompareExchange(&allocation->changing,0,0)&&address>=allocation->address&&bytes<=allocation->bytes&&address-allocation->address<=allocation->bytes-bytes;
+    NativeBufferAlias *alias=NULL;int capacityFailed=0;
+    if(ready){
+        native_memory_buffer_aliases(env,allocation);
+        for(alias=allocation->aliases;alias;alias=alias->next)if(native_original.IsSameObject(env,alias->buffer,buffer))break;
+        if(alias)ready=alias->generation==allocation->generation&&alias->address==address&&alias->bytes==bytes;
+        else{
+            alias=(NativeBufferAlias*)calloc(1,sizeof(*alias));
+            if(alias)alias->buffer=native_original.NewWeakGlobalRef(env,buffer);
+            ready=alias&&alias->buffer&&!native_original.ExceptionCheck(env);
+            if(ready){
+                alias->address=address;alias->bytes=bytes;alias->generation=allocation->generation;
+                alias->borrowed=!action||!allocation->bufferAction||!native_original.IsSameObject(env,allocation->bufferAction,action);
+                alias->next=allocation->aliases;allocation->aliases=alias;
+            }else{capacityFailed=1;if(alias){if(alias->buffer)native_original.DeleteWeakGlobalRef(env,alias->buffer);free(alias);alias=NULL;}}
+        }
+        if(ready){values[0]=(jlong)(uintptr_t)allocation;values[1]=(jlong)allocation->generation;}
+    }
+    if(capacityFailed){InterlockedExchange(&allocation->opaque,1);InterlockedExchange(&allocation->unknownUse,1);}
+    LeaveCriticalSection(&allocation->gate);return ready||capacityFailed;
+}
+static int native_memory_buffer_use(JNIEnv *env,jobject buffer,jlong token,uint64_t generation,uint64_t address,uint64_t bytes,int retain){
+    AcquireSRWLockShared(&native_memory_records);NativeMemoryAllocation *allocation=native_memory_allocations;
+    while(allocation&&(jlong)(uintptr_t)allocation!=token)allocation=allocation->next;
+    ReleaseSRWLockShared(&native_memory_records);if(!allocation)return 0;
+    EnterCriticalSection(&allocation->gate);NativeBufferAlias *alias=allocation->aliases;
+    while(alias&&!native_original.IsSameObject(env,alias->buffer,buffer))alias=alias->next;
+    int ready=alias&&alias->generation==generation&&alias->address==address&&alias->bytes==bytes;
+    AcquireSRWLockExclusive(&native_memory_records);
+    if(retain){
+        ready=ready&&InterlockedCompareExchange(&allocation->alive,0,0)&&allocation->generation==generation
+                &&!InterlockedCompareExchange(&allocation->sealed,0,0)&&!InterlockedCompareExchange(&allocation->retiring,0,0)&&!InterlockedCompareExchange(&allocation->changing,0,0);
+        if(ready){alias->users++;InterlockedIncrement(&allocation->users);}
+    }else{
+        ready=ready&&alias->users>0;
+        if(ready){alias->users--;InterlockedDecrement(&allocation->users);}
+    }
+    ReleaseSRWLockExclusive(&native_memory_records);LeaveCriticalSection(&allocation->gate);return ready;
+}
+JNIEXPORT jlongArray JNICALL Java_dev_ronova_pro_bootstrap_NativeControl_observeBufferStorage0(JNIEnv *env,jclass type,jobject buffer,jobject action,jlong address,jlong bytes){
+    jmethodID gate=native_controller?native_original.GetStaticMethodID(env,native_controller,"bufferStorageCaller","(Ljava/nio/Buffer;Ljava/lang/Object;JJ)Z"):NULL;
+    if(!gate||!native_original.IsSameObject(env,type,native_controller)||!native_original.CallStaticBooleanMethod(env,native_controller,gate,buffer,action,address,bytes)||native_original.ExceptionCheck(env)){
+        native_refuse(env,"ACTUAL_BUFFER_STORAGE_OBSERVATION_REQUIRED");return NULL;
+    }
+    if(!buffer||bytes<0){native_refuse(env,"ACTUAL_BUFFER_STORAGE_SPAN_REQUIRED");return NULL;}jlong values[2]={0,0};
+    if(!native_memory_buffer_observe(env,buffer,action,(uint64_t)address,(uint64_t)bytes,values)){
+        if(!native_original.ExceptionCheck(env))native_refuse(env,"BUFFER_NATIVE_STORAGE_OBSERVATION_CHANGED");return NULL;
+    }
+    jlongArray result=native_original.NewLongArray(env,2);if(result)native_original.SetLongArrayRegion(env,result,0,2,values);return result;
+}
+JNIEXPORT jboolean JNICALL Java_dev_ronova_pro_bootstrap_NativeControl_bufferStorageUse0(JNIEnv *env,jclass type,jobject buffer,jlong token,jlong generation,jlong address,jlong bytes,jboolean retain){
+    jmethodID gate=native_controller?native_original.GetStaticMethodID(env,native_controller,"bufferStorageUseCaller","(Ljava/nio/Buffer;JJJJZ)Z"):NULL;
+    if(!gate||!native_original.IsSameObject(env,type,native_controller)||!native_original.CallStaticBooleanMethod(env,native_controller,gate,buffer,token,generation,address,bytes,retain)||native_original.ExceptionCheck(env)){
+        native_refuse(env,"ACTUAL_BUFFER_STORAGE_USE_REQUIRED");return JNI_FALSE;
+    }
+    if(!buffer||!token||bytes<0)return JNI_FALSE;
+    return native_memory_buffer_use(env,buffer,token,(uint64_t)generation,(uint64_t)address,(uint64_t)bytes,retain==JNI_TRUE)?JNI_TRUE:JNI_FALSE;
+}
+JNIEXPORT void JNICALL Java_dev_ronova_pro_bootstrap_NativeControl_exposeBufferStorage0(JNIEnv *env,jclass type,jobject buffer,jlong token,jlong generation,jlong address,jlong bytes,jobjectArray sources){
+    jmethodID gate=native_controller?native_original.GetStaticMethodID(env,native_controller,"bufferStorageExposureCaller","(Ljava/nio/Buffer;JJJJ[Ljava/lang/Module;)Z"):NULL;
+    if(!gate||!native_original.IsSameObject(env,type,native_controller)||!native_original.CallStaticBooleanMethod(env,native_controller,gate,buffer,token,generation,address,bytes,sources)||native_original.ExceptionCheck(env)){
+        native_refuse(env,"ACTUAL_BUFFER_STORAGE_EXPOSURE_REQUIRED");return;
+    }
+    AcquireSRWLockShared(&native_memory_records);NativeMemoryAllocation *allocation=native_memory_allocations;
+    while(allocation&&(jlong)(uintptr_t)allocation!=token)allocation=allocation->next;
+    ReleaseSRWLockShared(&native_memory_records);int ready=0;
+    if(allocation){
+        EnterCriticalSection(&allocation->gate);
+        for(NativeBufferAlias *alias=allocation->aliases;alias;alias=alias->next)
+            if(alias->users>0&&alias->generation==(uint64_t)generation&&alias->address==(uint64_t)address&&alias->bytes==(uint64_t)bytes
+                    &&native_original.IsSameObject(env,alias->buffer,buffer)&&InterlockedCompareExchange(&allocation->alive,0,0)&&allocation->generation==(uint64_t)generation){ready=1;break;}
+        if(ready){
+            native_memory_buffer_exposed(env,allocation,sources);
+            if(native_original.ExceptionCheck(env)){native_original.ExceptionClear(env);InterlockedIncrement(&native_failures);}
+        }
+        LeaveCriticalSection(&allocation->gate);
+    }
+    if(!ready)native_refuse(env,"BUFFER_NATIVE_STORAGE_GENERATION_CHANGED");
 }
 static int native_memory_sources(JNIEnv *env,NativeThread *state,jobjectArray supplied,OwnerLink **sources,int *unknown,int capturedJava){
     if(capturedJava){
@@ -252,6 +381,7 @@ static void native_memory_clip(NativeMemoryAllocation *allocation){
 }
 static void native_memory_released(JNIEnv *env,NativeMemoryAllocation *allocation){
     InterlockedExchange(&allocation->alive,0);InterlockedExchange(&allocation->sealed,1);allocation->generation++;
+    native_memory_buffer_aliases_clear(env,allocation);
     NativeMemoryRange *range=allocation->ranges;allocation->ranges=NULL;
     while(range){NativeMemoryRange *next=range->next;native_memory_revision_release(range->revision);free(range);range=next;}
     if(allocation->allocator){native_original.DeleteGlobalRef(env,allocation->allocator);allocation->allocator=NULL;}allocation->release=NULL;
@@ -275,6 +405,7 @@ static void native_memory_call_end(JNIEnv *env,NativeThread *state,Binding *bind
         allocation->allocator=call->allocator;call->allocator=NULL;allocation->release=call->release;
         if(call->managed){InterlockedExchange(&allocation->managed,1);allocation->bufferRoot=call->bufferRoot;call->bufferRoot=NULL;}
         if(call->unknown||!call->known||binding->unsafeOperation==UNSAFE_REALLOCATE&&call->address&&!call->allocation)InterlockedExchange(&allocation->unknownUse,1);
+        native_memory_buffer_aliases_clear(env,allocation);
         allocation->address=returned;allocation->bytes=call->bytes;allocation->generation++;InterlockedExchange(&allocation->alive,1);native_memory_clip(allocation);
     }
     if(call->allocation&&(!completed||!call->known||binding->unsafeOperation==UNSAFE_REALLOCATE&&!returned&&!call->bytes)){
@@ -312,6 +443,7 @@ static int native_memory_authority(JNIEnv *env,jclass type){
 static int native_memory_read_sources(NativeMemoryWrite *read,OwnerLink **sources){
     NativeMemoryAllocation *allocation=read->allocation;
     if(!allocation||!InterlockedCompareExchange(&allocation->alive,0,0)||allocation->generation!=read->generation)return 1;
+    if(InterlockedCompareExchange(&allocation->opaque,0,0))read->opaque=1;
     int ready=native_memory_creator_sources(allocation,sources);uint64_t start=read->address-allocation->address;
     for(NativeMemoryRange *range=allocation->ranges;ready&&range;range=range->next)
         if(start<range->start+range->length&&range->start<start+read->length)ready=native_memory_revision_sources(sources,range->revision);
@@ -341,7 +473,7 @@ JNIEXPORT jlong JNICALL Java_dev_ronova_pro_bootstrap_NativeControl_memoryWriteB
         }
     }
     AcquireSRWLockShared(&native_memory_records);write->allocation=native_memory_find(write->address,write->length,0);
-    if(write->allocation&&!InterlockedCompareExchange(&write->allocation->sealed,0,0)){
+    if(write->allocation&&!InterlockedCompareExchange(&write->allocation->sealed,0,0)&&!InterlockedCompareExchange(&write->allocation->retiring,0,0)){
         write->generation=write->allocation->generation;InterlockedIncrement(&write->allocation->users);write->admitted=1;
         if(write->detached&&!native_memory_creator_sources(write->allocation,&write->observed))write->unobserved=1;
     }
@@ -395,6 +527,7 @@ static void native_memory_write_end(NativeThread *state,NativeMemoryWrite *write
         write->root->unknown|=write->unknown;
         if(write->reading&&(applied||write->written)){
             write->root->unobserved|=write->unobserved;
+            write->root->opaque|=write->opaque;
             if(!native_owner_merge(&write->root->observed,write->observed))write->root->unobserved=1;
         }
         if(write->admitted)InterlockedDecrement(&allocation->users);
@@ -448,6 +581,11 @@ JNIEXPORT jobjectArray JNICALL Java_dev_ronova_pro_bootstrap_NativeControl_memor
     if(ready)ready=native_owner_merge(&read->observed,sources);
     jclass module=NULL;jobjectArray result=NULL,retained=NULL;jsize count=0,at=0;
     if(ready){
+        // A real exposed allocation retains its known contributors, but native
+        // instructions may have added an unobserved writer. Use the existing
+        // null-source protocol without turning this local opacity into a
+        // global unmapped allocation/source failure.
+        if(read->opaque||read->unobserved)count=at=1;
         for(OwnerLink *source=sources;source;source=source->next)count++;
         module=native_original.FindClass(env,"java/lang/Module");retained=module?native_original.NewObjectArray(env,count,module,NULL):NULL;
         for(OwnerLink *source=sources;retained&&source&&!native_original.ExceptionCheck(env);source=source->next){
@@ -499,10 +637,11 @@ static int native_memory_created_targets(NativeMemoryAllocation *allocation,Owne
         if(!native_memory_preserved(allocation,source->owner))for(OwnerLink *target=selected;target;target=target->next)if(source->owner==target->owner)return 1;
     return 0;
 }
-static int native_memory_private(NativeMemoryAllocation *allocation,OwnerLink *selected){
+static int native_memory_private(JNIEnv *env,NativeMemoryAllocation *allocation,OwnerLink *selected){
     if(!allocation->allocator||!allocation->release||InterlockedCompareExchange(&allocation->managed,0,0)||!native_memory_selected(allocation->sources,selected)
             ||InterlockedCompareExchange(&allocation->unknownReaders,0,0)||InterlockedCompareExchange(&allocation->unknownUse,0,0)
             ||InterlockedCompareExchange(&allocation->releaseFailed,0,0)||InterlockedCompareExchange(&allocation->sealed,0,0))return 0;
+    if(native_memory_buffer_aliases(env,allocation))return 0;
     if(allocation->readers&&!native_memory_selected(allocation->readers,selected))return 0;
     for(NativeMemoryInterest *interest=allocation->interests;interest;interest=interest->next){
         if(InterlockedCompareExchange(&interest->revisions,0,0)<=0)continue;
@@ -516,7 +655,7 @@ static int native_memory_retire_allocation(JNIEnv *env,NativeMemoryAllocation *a
     // sealing also share the lookup lock, so a read waiting for the gate cannot
     // disappear from the decision to call the saved allocator's deallocator.
     AcquireSRWLockExclusive(&native_memory_records);
-    int ready=InterlockedCompareExchange(&allocation->alive,0,0)&&native_memory_private(allocation,selected)
+    int ready=InterlockedCompareExchange(&allocation->alive,0,0)&&native_memory_private(env,allocation,selected)
             &&!InterlockedCompareExchange(&allocation->users,0,0)&&!InterlockedCompareExchange(&allocation->writers,0,0)
             &&!InterlockedCompareExchange(&allocation->reading,0,0)&&!InterlockedCompareExchange(&allocation->changing,0,0);
     if(ready){InterlockedExchange(&allocation->sealed,1);InterlockedIncrement(&allocation->changing);}
@@ -605,7 +744,7 @@ JNIEXPORT jlong JNICALL Java_dev_ronova_pro_bootstrap_NativeControl_ioBufferWrit
         EnterCriticalSection(&allocation->gate);
         ready=InterlockedCompareExchange(&allocation->alive,0,0)&&allocation->generation==(uint64_t)generation
                 &&InterlockedCompareExchange(&allocation->managed,0,0)&&allocation->bufferAction&&native_original.IsSameObject(env,allocation->bufferAction,action)
-                &&!InterlockedCompareExchange(&allocation->sealed,0,0)&&!InterlockedCompareExchange(&allocation->changing,0,0)
+                &&!InterlockedCompareExchange(&allocation->sealed,0,0)&&!InterlockedCompareExchange(&allocation->retiring,0,0)&&!InterlockedCompareExchange(&allocation->changing,0,0)
                 &&(uint64_t)address>=allocation->address&&(uint64_t)bytes<=allocation->bytes&&(uint64_t)address-allocation->address<=allocation->bytes-(uint64_t)bytes;
         if(ready){
             entry->write.allocation=allocation;entry->write.address=(uint64_t)address;entry->write.length=(uint64_t)bytes;entry->write.generation=(uint64_t)generation;
@@ -694,7 +833,7 @@ JNIEXPORT jlongArray JNICALL Java_dev_ronova_pro_bootstrap_NativeControl_restore
     jmethodID gate=native_controller?native_original.GetStaticMethodID(env,native_controller,"bufferRestoreCaller","(Ljava/lang/Object;JJ[Ljava/lang/Module;JI)Z"):NULL;
     if(!gate||!native_original.IsSameObject(env,type,native_controller)||!native_original.CallStaticBooleanMethod(env,native_controller,gate,action,token,generation,modules,cursor,budget)
             ||native_original.ExceptionCheck(env)){native_refuse(env,"ACTUAL_BUFFER_SOURCE_RESTORE_REQUIRED");return NULL;}
-    NativeThread *state=native_thread();if(!state||!action||!token||cursor<0||budget<=0){native_refuse(env,"BUFFER_SOURCE_RESTORE_SCOPE_UNAVAILABLE");return NULL;}
+    NativeThread *state=native_thread();if(!state||!action||!token||cursor<0||budget<0){native_refuse(env,"BUFFER_SOURCE_RESTORE_SCOPE_UNAVAILABLE");return NULL;}
     state->control++;OwnerLink *selected=NULL;jlong values[4]={cursor,1,0,0};
     if(!native_memory_selection(env,modules,&selected)){native_owner_links_free(selected);state->control--;native_refuse(env,"ACTUAL_STOPPED_MEMORY_SOURCES_REQUIRED");return NULL;}
     NativeMemoryAllocation *allocation=NULL;
@@ -709,9 +848,16 @@ JNIEXPORT jlongArray JNICALL Java_dev_ronova_pro_bootstrap_NativeControl_restore
             int ready=!InterlockedCompareExchange(&allocation->sealed,0,0)&&!InterlockedCompareExchange(&allocation->users,0,0)
                     &&!InterlockedCompareExchange(&allocation->writers,0,0)&&!InterlockedCompareExchange(&allocation->reading,0,0)
                     &&!InterlockedCompareExchange(&allocation->changing,0,0)&&!InterlockedCompareExchange(&allocation->restoring,0,0)
-                    &&!InterlockedCompareExchange(&allocation->unknownUse,0,0)&&!InterlockedCompareExchange(&allocation->releaseFailed,0,0);
-            if(ready)InterlockedExchange(&allocation->restoring,1);ReleaseSRWLockExclusive(&native_memory_records);
+                    &&(!budget||!InterlockedCompareExchange(&allocation->retiring,0,0))
+                    &&!InterlockedCompareExchange(&allocation->unknownUse,0,0)&&!InterlockedCompareExchange(&allocation->releaseFailed,0,0)
+                    &&!native_memory_buffer_aliases(env,allocation);
+            if(ready){InterlockedExchange(&allocation->restoring,1);if(!budget)InterlockedExchange(&allocation->retiring,1);}ReleaseSRWLockExclusive(&native_memory_records);
             if(ready){
+                if(!budget){
+                    // The actual Java retirement will run this original cleaner.
+                    // Keep new byte/view admissions out until that exact free.
+                    values[0]=0;values[1]=0;values[3]=1;
+                }else{
                 int remaining=budget>256?256:budget;NativeMemoryRange **link=&allocation->ranges;
                 while(*link&&(*link)->start+(*link)->length<=(uint64_t)cursor)link=&(*link)->next;
                 while(*link&&remaining--){
@@ -733,6 +879,7 @@ JNIEXPORT jlongArray JNICALL Java_dev_ronova_pro_bootstrap_NativeControl_restore
                         if(!native_owner_merge(&allocation->preserved,selected))values[1]=1;
                         ReleaseSRWLockExclusive(&native_memory_records);
                     }
+                }
                 }
                 InterlockedExchange(&allocation->restoring,0);
             }
@@ -771,6 +918,7 @@ JNIEXPORT jlongArray JNICALL Java_dev_ronova_pro_bootstrap_NativeControl_restore
                     NativeMemoryRange *range=*link;uint64_t next=range->start+range->length;remaining--;
                     if(native_memory_targets(range->revision,selected)){
                         if(!InterlockedCompareExchange(&allocation->managed,0,0)&&!InterlockedCompareExchange(&allocation->releaseFailed,0,0)
+                                &&!InterlockedCompareExchange(&allocation->opaque,0,0)&&!native_memory_buffer_aliases(env,allocation)
                                 &&!InterlockedCompareExchange(&allocation->users,0,0)&&!InterlockedCompareExchange(&allocation->writers,0,0)&&!InterlockedCompareExchange(&allocation->reading,0,0)
                                 &&!InterlockedCompareExchange(&allocation->changing,0,0)&&native_memory_restore_range(allocation,range,selected))values[3]+=(jlong)range->length;
                         if(native_memory_targets(range->revision,selected))values[2]++;

@@ -3,7 +3,7 @@
 #include <bcrypt.h>
 // Preserve Object.clone itself, including Cloneable checks; never substitute a Java ancestor body.
 JNIEXPORT jint JNICALL Java_dev_ronova_pro_bootstrap_NativeControl_abi(JNIEnv *env, jclass type) {
-    (void)env; (void)type; return 86;
+    (void)env; (void)type; return 87;
 }
 JNIEXPORT jobject JNICALL Java_dev_ronova_pro_bootstrap_NativeControl_returnIdentifier0(JNIEnv *env,jclass type) {
     (void)type;
@@ -156,6 +156,9 @@ static int native_bind_controller(JNIEnv *env,jclass controller){
         {"bufferAllocationBoundary0","()Z",(void*)Java_dev_ronova_pro_bootstrap_NativeControl_bufferAllocationBoundary0},
         {"bufferAddressBoundary0","(Ljava/lang/Object;[Ljava/lang/Module;)Z",(void*)Java_dev_ronova_pro_bootstrap_NativeControl_bufferAddressBoundary0},
         {"bindBufferStorage0","(Ljava/nio/Buffer;Ljava/lang/Object;JJ)[J",(void*)Java_dev_ronova_pro_bootstrap_NativeControl_bindBufferStorage0},
+        {"observeBufferStorage0","(Ljava/nio/Buffer;Ljava/lang/Object;JJ)[J",(void*)Java_dev_ronova_pro_bootstrap_NativeControl_observeBufferStorage0},
+        {"bufferStorageUse0","(Ljava/nio/Buffer;JJJJZ)Z",(void*)Java_dev_ronova_pro_bootstrap_NativeControl_bufferStorageUse0},
+        {"exposeBufferStorage0","(Ljava/nio/Buffer;JJJJ[Ljava/lang/Module;)V",(void*)Java_dev_ronova_pro_bootstrap_NativeControl_exposeBufferStorage0},
         {"restoreBufferStorage0","(Ljava/lang/Object;JJ[Ljava/lang/Module;JI)[J",(void*)Java_dev_ronova_pro_bootstrap_NativeControl_restoreBufferStorage0},
         {"ioBufferWrite0","(Ljava/lang/Object;Ljava/lang/Object;JJJJ[Ljava/lang/Module;)J",(void*)Java_dev_ronova_pro_bootstrap_NativeControl_ioBufferWrite0},
         {"ioBufferWritten0","(Ljava/lang/Object;JJZ)V",(void*)Java_dev_ronova_pro_bootstrap_NativeControl_ioBufferWritten0},

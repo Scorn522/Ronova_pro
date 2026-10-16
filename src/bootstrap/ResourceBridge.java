@@ -44,6 +44,8 @@ public final class ResourceBridge {
     private static final List<BufferWrapRole> BUFFER_WRAP_ROLES=new ArrayList<>();
     private static volatile Class<?> bufferWrapAgent;
     private static final ThreadLocal<BufferRegistration> BUFFER_REGISTERING=new ThreadLocal<>();
+    private static final ThreadLocal<BufferObservation> BUFFER_OBSERVING_STORAGE=new ThreadLocal<>();
+    private static final ThreadLocal<BufferUse> BUFFER_USING_STORAGE=new ThreadLocal<>();
     private static final ThreadLocal<BufferRestore> BUFFER_RESTORING=new ThreadLocal<>();
     private static final ThreadLocal<IoBufferWrite> IO_BUFFER_WRITE=new ThreadLocal<>();
     private static final HashMap<Class<?>,Layout> LAYOUTS=new HashMap<>();
@@ -257,7 +259,7 @@ public final class ResourceBridge {
         final BufferStorage storage;
         final WeakReference<Object> parent;
         final long address,bytes;
-        boolean constructed;
+        boolean constructed,memoryObserved;long memoryToken,memoryGeneration;
         BufferView(Buffer buffer,BufferStorage storage,Object parent)throws IllegalAccessException {
             this.storage=storage;this.parent=new WeakReference<>(parent);address=(Long)CodeSourceBridge.controlField(BufferPlatform.ADDRESS,buffer);
             int shift=buffer instanceof ByteBuffer?0:buffer instanceof CharBuffer||buffer instanceof ShortBuffer?1:
@@ -266,7 +268,7 @@ public final class ResourceBridge {
         }
     }
     private static final class BufferUse {
-        final Buffer buffer;final BufferView view;boolean returned;
+        final Buffer buffer;final BufferView view;boolean returned,memoryActive,memoryRetaining;Module[] memoryExposure;
         BufferUse(Buffer buffer,BufferView view){this.buffer=buffer;this.view=view;}
     }
     private static final class BufferAllocation {
@@ -310,6 +312,7 @@ public final class ResourceBridge {
     }
     private static final BufferWrapWriter BUFFER_WRAP_WRITER=new BufferWrapWriter();
     private record BufferRegistration(Buffer buffer,BufferStorage storage){}
+    private record BufferObservation(Buffer buffer,BufferView view,Object action){}
     private record BufferSpan(Object holder,BufferStorage storage,long address,long bytes){}
     private record BufferWrite(BufferSpan span,Object receipt){}
     private record BufferRead(Object receipt,Module[] before){}
@@ -1327,7 +1330,7 @@ public final class ResourceBridge {
                     view=new BufferView(buffer,storage,parent);view.unknownUse=true;
                     BUFFERS.put(new Key(buffer,true),view);storage.views.add(new WeakReference<>(buffer));storage.viewsVersion++;
                 }
-                view.constructed=true;bufferSources(storage,sources);
+                view.constructed=true;bufferSources(storage,sources);observeBufferStorage(buffer,view);
             }
             // Observing this borrowed view creates neither storage ownership nor native release rights.
             ControlBridge.resourceExposedByOperation(buffer,sources);
@@ -1346,6 +1349,67 @@ public final class ResourceBridge {
     static boolean bufferBindingActive(Buffer buffer,Object action,long address,long bytes){
         if(WALKER.getCallerClass()!=NativeControl.class)return false;BufferRegistration scope=BUFFER_REGISTERING.get();
         return scope!=null&&scope.buffer==buffer&&scope.storage.original==action&&scope.storage.address==address&&scope.storage.bytes==bytes;
+    }
+    /** An observed view can borrow an existing allocation, never create one from its address. STREAMS is held. */
+    private static void observeBufferStorage(Buffer buffer,BufferView view){
+        if(view.memoryObserved)return;
+        BufferObservation previous=BUFFER_OBSERVING_STORAGE.get(),scope=new BufferObservation(buffer,view,view.storage.original);
+        BUFFER_OBSERVING_STORAGE.set(scope);
+        try{
+            long[] binding=NativeControl.observeBufferStorage(buffer,scope.action,view.address,view.bytes);
+            // Even an absent binding belongs to this observation. A later allocation
+            // at the same numeric address must not turn this old view into its alias.
+            view.memoryObserved=true;view.memoryToken=binding[0];view.memoryGeneration=binding[1];
+        }catch(RuntimeException|LinkageError|OutOfMemoryError unavailable){
+            if(unavailable instanceof IllegalStateException&&"BUFFER_NATIVE_STORAGE_OBSERVATION_CHANGED".equals(unavailable.getMessage()))throw (IllegalStateException)unavailable;
+            view.memoryObserved=true;view.storage.unknownUse=true;
+        }finally{if(previous==null)BUFFER_OBSERVING_STORAGE.remove();else BUFFER_OBSERVING_STORAGE.set(previous);}
+    }
+    private static boolean currentBufferView(Buffer buffer,BufferView view){
+        try{
+            Field parent=BufferPlatform.PARENT.get(buffer.getClass());
+            return view.address==(Long)CodeSourceBridge.controlField(BufferPlatform.ADDRESS,buffer)
+                    &&view.bytes==((long)(Integer)CodeSourceBridge.controlField(BufferPlatform.CAPACITY,buffer))*elementBytes(buffer)
+                    &&view.parent.get()==(parent==null?null:CodeSourceBridge.controlField(parent,buffer));
+        }catch(RuntimeException unavailable){return false;}
+    }
+    static boolean bufferStorageActive(Buffer buffer,Object action,long address,long bytes){
+        if(WALKER.getCallerClass()!=NativeControl.class)return false;BufferObservation scope=BUFFER_OBSERVING_STORAGE.get();
+        return scope!=null&&scope.buffer==buffer&&scope.action==action&&scope.view.storage.original==action
+                &&scope.view.address==address&&scope.view.bytes==bytes&&BUFFERS.get(new Key(buffer,false))==scope.view&&currentBufferView(buffer,scope.view);
+    }
+    static boolean bufferStorageUseActive(Buffer buffer,long token,long generation,long address,long bytes,boolean retain){
+        if(WALKER.getCallerClass()!=NativeControl.class)return false;BufferUse use=BUFFER_USING_STORAGE.get();
+        return use!=null&&use.buffer==buffer&&use.memoryRetaining==retain&&use.memoryActive!=retain
+                &&use.view.memoryToken==token&&use.view.memoryGeneration==generation&&use.view.address==address&&use.view.bytes==bytes
+                &&(!retain||BUFFERS.get(new Key(buffer,false))==use.view&&currentBufferView(buffer,use.view));
+    }
+    static boolean bufferStorageExposureActive(Buffer buffer,long token,long generation,long address,long bytes,Module[] sources){
+        if(WALKER.getCallerClass()!=NativeControl.class)return false;BufferUse use=BUFFER_USING_STORAGE.get();
+        return use!=null&&use.buffer==buffer&&use.memoryActive&&use.memoryExposure==sources
+                &&use.view.memoryToken==token&&use.view.memoryGeneration==generation&&use.view.address==address&&use.view.bytes==bytes;
+    }
+    private static void exposeBufferUse(BufferUse use,Module[] sources){
+        if(!use.memoryActive)return;BufferUse previous=BUFFER_USING_STORAGE.get();use.memoryExposure=sources;BUFFER_USING_STORAGE.set(use);
+        try{NativeControl.exposeBufferStorage(use.buffer,use.view.memoryToken,use.view.memoryGeneration,use.view.address,use.view.bytes,sources);}
+        finally{use.memoryExposure=null;if(previous==null)BUFFER_USING_STORAGE.remove();else BUFFER_USING_STORAGE.set(previous);}
+    }
+    private static void retainBufferUse(BufferUse use){
+        if(use.memoryActive)return;observeBufferStorage(use.buffer,use.view);if(use.view.memoryToken==0)return;
+        BufferUse previous=BUFFER_USING_STORAGE.get();use.memoryRetaining=true;BUFFER_USING_STORAGE.set(use);
+        try{
+            if(!NativeControl.bufferStorageUse(use.buffer,use.view.memoryToken,use.view.memoryGeneration,use.view.address,use.view.bytes,true))
+                throw new IllegalStateException("BUFFER_NATIVE_STORAGE_GENERATION_CHANGED");
+            use.memoryActive=true;
+        }finally{if(previous==null)BUFFER_USING_STORAGE.remove();else BUFFER_USING_STORAGE.set(previous);}
+    }
+    private static void releaseBufferUse(BufferUse use){
+        if(!use.memoryActive)return;BufferUse previous=BUFFER_USING_STORAGE.get();use.memoryRetaining=false;BUFFER_USING_STORAGE.set(use);
+        try{
+            if(!NativeControl.bufferStorageUse(use.buffer,use.view.memoryToken,use.view.memoryGeneration,use.view.address,use.view.bytes,false))
+                throw new IllegalStateException("BUFFER_NATIVE_STORAGE_LEASE_CHANGED");
+            use.memoryActive=false;
+        }finally{if(previous==null)BUFFER_USING_STORAGE.remove();else BUFFER_USING_STORAGE.set(previous);}
     }
     static boolean bufferRestoreActive(Object action,long token,long generation,Module[] modules,long cursor,int budget){
         if(WALKER.getCallerClass()!=NativeControl.class||!ControlBridge.recoveryWriter())return false;BufferRestore scope=BUFFER_RESTORING.get();
@@ -1380,7 +1444,7 @@ public final class ResourceBridge {
                 if(storage.original!=null&&(view.address<storage.address||view.bytes<0||view.bytes>storage.bytes||view.address-storage.address>storage.bytes-view.bytes))
                     throw new IllegalStateException("BUFFER_VIEW_OUTSIDE_ORIGINAL_STORAGE");
                 if(parent==null&&storage.original!=null&&CodeSourceBridge.controlField(BufferPlatform.CLEANUP,buffer)!=storage.cleaner.get())throw new IllegalStateException("BUFFER_CLEANER_ASSOCIATION_CHANGED");
-                view.constructed=true;bufferSources(storage,sources);
+                view.constructed=true;bufferSources(storage,sources);observeBufferStorage(buffer,view);
                 storage.gap=storage.created?"":"BUFFER_ORIGINAL_STORAGE_UNOBSERVED";
             }
         }catch(IllegalAccessException failure){throw new IllegalStateException("BUFFER_VIEW_CAPTURE_FAILED",failure);}
@@ -1554,7 +1618,7 @@ public final class ResourceBridge {
             BufferStorage storage=captured!=null?captured:owner==null?new BufferStorage(null,false):owner.storage;
             view=new BufferView(buffer,storage,parent);view.unknownUse=true;
             if(owner==null&&captured==null){storage.unknownUse=true;storage.gap="BUFFER_ORIGINAL_STORAGE_UNOBSERVED";}
-            BUFFERS.put(new Key(buffer,true),view);storage.views.add(new WeakReference<>(buffer));storage.viewsVersion++;return view;
+            BUFFERS.put(new Key(buffer,true),view);storage.views.add(new WeakReference<>(buffer));storage.viewsVersion++;observeBufferStorage(buffer,view);return view;
         }catch(IllegalAccessException failure){throw new IllegalStateException("IO_BUFFER_VIEW_UNAVAILABLE",failure);}
     }
     private static List<Buffer> ioBuffers(List<Buffer> values,Object value){
@@ -1564,7 +1628,7 @@ public final class ResourceBridge {
     }
     private static Object borrowIoBuffers(Object[] arguments,Module[] sources,boolean runtimeManaged){
         List<Buffer> values=null;for(Object argument:arguments)values=ioBuffers(values,argument);if(values==null)return null;
-        List<BufferUse> uses=null;Boolean previous=FILE_OBSERVING.get();FILE_OBSERVING.set(Boolean.TRUE);
+        List<BufferUse> uses=null;boolean delivered=false;Boolean previous=FILE_OBSERVING.get();FILE_OBSERVING.set(Boolean.TRUE);
         try{
             synchronized(STREAMS){
                 // Validate the whole request before reserving any storage.
@@ -1579,6 +1643,7 @@ public final class ResourceBridge {
                 for(BufferUse use:uses){use.view.observing++;use.view.storage.observing++;if(runtimeManaged)use.view.storage.runtimeManaged=true;}
             }
             try{
+                synchronized(STREAMS){for(BufferUse use:uses)retainBufferUse(use);}
                 // These views belong to this one borrow. Collect its actual
                 // current context once, then record every selected identity.
                 // IoBridge captured these sources at this actual synchronous
@@ -1588,8 +1653,9 @@ public final class ResourceBridge {
                     synchronized(STREAMS){if(!known)use.view.unknownUse=true;bufferSources(use.view.storage,sources);}}
                 IoBufferLease lease=new IoBufferLease(uses);
                 synchronized(STREAMS){for(BufferUse use:uses){use.view.active++;use.view.storage.active++;}}
+                delivered=true;
                 return lease;
-            }finally{synchronized(STREAMS){for(BufferUse use:uses){use.view.observing--;use.view.storage.observing--;}}}
+            }finally{synchronized(STREAMS){for(BufferUse use:uses){use.view.observing--;use.view.storage.observing--;if(!delivered)releaseBufferUse(use);}}}
         }finally{if(previous==null)FILE_OBSERVING.remove();else FILE_OBSERVING.set(previous);}
     }
     static void releaseIoBuffers(Object value){
@@ -1603,6 +1669,7 @@ public final class ResourceBridge {
     }
     private static void releaseIoUse(BufferUse use){
         if(use.returned)return;
+        releaseBufferUse(use);
         use.returned=true;use.view.active--;use.view.storage.active--;
     }
     static Object ioBufferWriting(IoBridge.BufferLeases leases,long[] spans,Module[] sources){
@@ -1678,8 +1745,8 @@ public final class ResourceBridge {
         }else if(value instanceof Buffer[] buffers)for(Buffer buffer:buffers)if(buffer!=null)observeBufferUse(uses,buffer);
     }
     private static final class ClientPayloadLease {
-        final BufferView view;final ByteBuffer buffer;final Thread thread=Thread.currentThread();boolean closed;
-        ClientPayloadLease(BufferView view,ByteBuffer buffer){this.view=view;this.buffer=buffer;}
+        final BufferView view;final ByteBuffer buffer;final BufferUse use;final Thread thread=Thread.currentThread();boolean closed;
+        ClientPayloadLease(BufferView view,ByteBuffer buffer){this.view=view;this.buffer=buffer;use=new BufferUse(buffer,view);}
     }
     private static void requireClientPayloadCore(){
         Class<?> caller=WALKER.walk(ControlBridge.CORE_CALLER);
@@ -1698,13 +1765,14 @@ public final class ResourceBridge {
                 throw new IllegalStateException("CLIENT_PAYLOAD_STORAGE_RETIRED");
             if(offset>view.bytes-length)throw new SecurityException("ACTUAL_CLIENT_PAYLOAD_RANGE_REQUIRED");
             ClientPayloadLease lease=new ClientPayloadLease(view,buffer);
+            retainBufferUse(lease.use);
             view.active++;storage.active++;return lease;
         }
     }
     public static void endClientPayload(Object token){
         requireClientPayloadCore();
         if(!(token instanceof ClientPayloadLease lease)||lease.thread!=Thread.currentThread())throw new SecurityException("ACTUAL_CLIENT_PAYLOAD_LEASE_REQUIRED");
-        synchronized(STREAMS){if(lease.closed)throw new SecurityException("CLIENT_PAYLOAD_LEASE_ALREADY_CLOSED");lease.closed=true;lease.view.active--;lease.view.storage.active--;STREAMS.notifyAll();}
+        synchronized(STREAMS){if(lease.closed)throw new SecurityException("CLIENT_PAYLOAD_LEASE_ALREADY_CLOSED");releaseBufferUse(lease.use);lease.closed=true;lease.view.active--;lease.view.storage.active--;STREAMS.notifyAll();}
     }
 
     public static Object bufferOperation(Object receiver,Object[] arguments,Class<?> declaring,String method){
@@ -1712,11 +1780,12 @@ public final class ResourceBridge {
         if(FILE_OBSERVING.get()!=null)return null;FILE_OBSERVING.set(Boolean.TRUE);
         // This private per-call list is never a business source. Avoid registering
         // two temporary ArrayLists in the global source directory for every read.
-        List<BufferUse> uses=new LinkedList<>();
+        List<BufferUse> uses=new LinkedList<>();boolean delivered=false;
         try{
             if(ControlBridge.recoveryWriter())return null;
             synchronized(STREAMS){
                 observeBufferUse(uses,receiver);for(Object argument:arguments)observeBufferUse(uses,argument);
+                for(BufferUse use:uses)retainBufferUse(use);
             }
             if(uses.isEmpty()&&!(receiver instanceof Buffer))return null;
             if(!ControlBridge.recoveryWriter()&&!(receiver instanceof Buffer buffer&&IoBridge.finishingBuffer(buffer))&&!ControlBridge.taskEffectAllowed(receiver,"buffer-io"))throw new IllegalStateException("RONOVA_TERMINAL_BUFFER_IO");
@@ -1727,7 +1796,9 @@ public final class ResourceBridge {
                 boolean known=ControlBridge.resourceExposedByOperation(use.buffer,sources);
                 synchronized(STREAMS){
                     if(!known)use.view.unknownUse=true;bufferSources(use.view.storage,sources);
-                    if((method.equals("address")||method.equals("fileDescriptor"))&&receiver==use.buffer&&!bufferBorrowed(use.view.storage))use.view.storage.escaped=true;
+                    if((method.equals("address")||method.equals("fileDescriptor"))&&receiver==use.buffer&&!bufferBorrowed(use.view.storage)){
+                        use.view.storage.escaped=true;if(method.equals("address"))exposeBufferUse(use,sources);
+                    }
                 }
             }
             synchronized(STREAMS){for(BufferUse use:uses){use.view.active++;use.view.storage.active++;}}
@@ -1739,9 +1810,10 @@ public final class ResourceBridge {
             }}catch(RuntimeException|Error failure){
                 try{finishBufferOperation(operation,false);}catch(Throwable cleanup){if(cleanup!=failure)failure.addSuppressed(cleanup);}throw failure;
             }
+            delivered=true;
             return operation;
         }finally{
-            synchronized(STREAMS){for(BufferUse use:uses){use.view.observing--;use.view.storage.observing--;}}
+            synchronized(STREAMS){for(BufferUse use:uses){use.view.observing--;use.view.storage.observing--;if(!delivered)releaseBufferUse(use);}}
             FILE_OBSERVING.remove();
         }
     }
@@ -1768,7 +1840,10 @@ public final class ResourceBridge {
             catch(RuntimeException|Error failure){if(failed==null)failed=failure;else if(failed!=failure)failed.addSuppressed(failure);}
             try{if(operation.read!=null)ControlBridge.bufferDataFinished(operation.read.receipt,written);}
             catch(RuntimeException|Error failure){if(failed==null)failed=failure;else if(failed!=failure)failed.addSuppressed(failure);}
-            synchronized(STREAMS){operation.closed=true;operation.sources=null;for(BufferUse use:operation.uses){use.view.active--;use.view.storage.active--;}}
+            synchronized(STREAMS){operation.closed=true;operation.sources=null;for(BufferUse use:operation.uses){
+                try{releaseBufferUse(use);}catch(RuntimeException|Error failure){if(failed==null)failed=failure;else if(failed!=failure)failed.addSuppressed(failure);}
+                use.view.active--;use.view.storage.active--;
+            }}
             if(operation.previous==null)BUFFER_OPERATIONS.remove();else BUFFER_OPERATIONS.set(operation.previous);
         }
         if(failed instanceof RuntimeException exception)throw exception;if(failed instanceof Error error)throw error;
@@ -1857,6 +1932,19 @@ public final class ResourceBridge {
             synchronized(STREAMS){storage.restoring=false;STREAMS.notifyAll();}
         }
     }
+    /** STREAMS is held; this is the original cleaner's actual retirement, not a separate lifetime probe. */
+    private static String prepareBufferRelease(BufferStorage storage,Set<Module> selection){
+        if(storage.memoryToken==0||storage.original==null)return "";
+        BufferRestore previous=BUFFER_RESTORING.get(),scope=new BufferRestore(storage,selection.toArray(Module[]::new),0,0);
+        storage.restoring=true;BUFFER_RESTORING.set(scope);
+        try{
+            long[] result=NativeControl.restoreBufferStorage(storage.original,storage.memoryToken,storage.memoryGeneration,scope.modules,0,0);
+            return result[3]!=0&&result[1]==0?"":"BUFFER_BORROWED_NATIVE_VIEW_PENDING";
+        }finally{
+            if(previous==null)BUFFER_RESTORING.remove();else BUFFER_RESTORING.set(previous);
+            storage.restoring=false;STREAMS.notifyAll();
+        }
+    }
     private static String releaseBuffer(Object value,Predicate<Object> selected)throws ReflectiveOperationException {
         BufferStorage storage;FileRecord requested;List<Buffer> views=new ArrayList<>();Set<Module> selection=FILE_SELECTION.get();long version;boolean preserve;
         synchronized(STREAMS){
@@ -1878,7 +1966,7 @@ public final class ResourceBridge {
             if(storage.observing!=0||version!=storage.viewsVersion)return "BUFFER_VIEW_OBSERVATION_PENDING";
             preserve|=storage.runtimeManaged||!selection.containsAll(storage.sources);
             if(storage.active!=0||storage.cleaning||storage.restoring)return "BUFFER_OPERATIONS_EXIT_PENDING";
-            if(!preserve){storage.sealed=true;requested.preserved=false;}
+            if(!preserve){String pending=prepareBufferRelease(storage,selection);if(!pending.isEmpty())return pending;storage.sealed=true;requested.preserved=false;}
         }
         if(preserve)return preserveBuffer(storage,requested,selection,version);
         if(storage.original==null){bufferCleanupResult(storage,true);return storage.gap;}
@@ -1911,14 +1999,28 @@ public final class ResourceBridge {
             return nest!=ResourceBridge.class&&nest!=NativeControl.class&&nest!=TaskBridge.class&&nest!=ControlBridge.class&&nest!=CodeSourceBridge.class&&nest!=BackingBridge.class&&nest!=ExecutionFlow.class&&actual!=BufferPlatform.UNSAFE;
         }).findFirst().map(frame->frame.getDeclaringClass()==BufferPlatform.DIRECT&&frame.getMethodName().equals("<init>")).orElse(false));
     }
-    private static void nativeBufferAddress(Object value,Module[] sources){
+    private static boolean nativeBufferAddress(Object value,Module[] sources){
         if(!NativeControl.bufferAddressBoundary(value,sources))throw new SecurityException("ACTUAL_BUFFER_NATIVE_ADDRESS_REQUIRED");
-        if(!(value instanceof Buffer))return;
-        if(!ControlBridge.taskEffectAllowed(value,"buffer-native-address"))throw new IllegalStateException("RONOVA_TERMINAL_BUFFER_ADDRESS");
+        if(!(value instanceof Buffer buffer))return true;
+        if(!ControlBridge.taskEffectAllowed(value,"buffer-native-address"))return false;
         Module[] contributors=ControlBridge.resourceOperationSources(sources);
-        synchronized(STREAMS){BufferView view=BUFFERS.get(new Key(value,false));if(view==null)return;
-            if(view.storage.sealed||view.storage.cleaned)throw new IllegalStateException("RONOVA_RETIRED_BUFFER_ADDRESS");
-            view.storage.escaped=true;bufferSources(view.storage,contributors);}
+        synchronized(STREAMS){BufferView view=borrowedBufferView(buffer);if(view==null)return true;
+            if(view.storage.sealed||view.storage.cleaned||!currentBufferView(buffer,view))return false;
+            // Check the recorded lifetime even when this operation only exposes
+            // the address and does not enter a Java get/put body.
+            BufferUse use=new BufferUse(buffer,view);
+            try{retainBufferUse(use);}catch(IllegalStateException changed){
+                if("BUFFER_NATIVE_STORAGE_GENERATION_CHANGED".equals(changed.getMessage())||"BUFFER_NATIVE_STORAGE_OBSERVATION_CHANGED".equals(changed.getMessage()))return false;
+                throw changed;
+            }
+            try{view.storage.escaped=true;bufferSources(view.storage,contributors);}finally{releaseBufferUse(use);}}
+        return true;
+    }
+    private static void nativeBufferCreated(Object value,Module[] sources){
+        if(!NativeControl.bufferAddressBoundary(value,sources))throw new SecurityException("ACTUAL_NATIVE_BUFFER_RESULT_REQUIRED");
+        if(!(value instanceof ByteBuffer buffer)||buffer.getClass()!=BufferPlatform.DIRECT)throw new SecurityException("ACTUAL_NATIVE_DIRECT_BUFFER_REQUIRED");
+        if(!nativeBufferAddress(value,sources))return;
+        synchronized(STREAMS){BufferView view=BUFFERS.get(new Key(value,false));if(view!=null)view.constructed=true;}
     }
     private static boolean fileChannel(Object value){return value!=null&&value.getClass()==FILE_CHANNEL;}
     private static boolean platformLayout(Class<?> type){return CharacterWrappers.TYPES.contains(type)||type==PROCESS_TYPE||type==PIPE_REDIRECT||type==BufferedInputStream.class||type==BufferedOutputStream.class||type==FilterInputStream.class||type==FilterOutputStream.class||type==FileDescriptor.class||type==FileInputStream.class

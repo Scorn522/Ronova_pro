@@ -15,6 +15,7 @@ public final class AuditFixCheck {
     private static Object invoke(Object receiver,String name)throws Exception {var m=receiver.getClass().getDeclaredMethod(name);m.setAccessible(true);try{return m.invoke(receiver);}catch(InvocationTargetException e){if(e.getCause() instanceof Exception x)throw x;throw e;}}
     public static void main(String[] args)throws Exception {
         if(args.length==1&&args[0].equals("unknown-carrier-graph")){unknownCarrierGraph();return;}
+        if(args.length==1&&args[0].equals("unknown-map-key-semantics")){unknownMapKeySemantics();return;}
         if(args.length==1&&args[0].equals("event-image-composition")){eventImageComposition();return;}
         if(args.length==1&&args[0].equals("scoped-transform-failure")){scopedTransformFailure();return;}
         if(args.length==1&&args[0].equals("startup-batches")){startupBatch();return;}
@@ -53,6 +54,7 @@ public final class AuditFixCheck {
         if(args.length==1&&args[0].equals("system-arraycopy")){systemArraycopy();return;}
         if(args.length==1&&args[0].equals("clone-boundary")){cloneBoundary();return;}
         if(args.length==1&&args[0].equals("buffer-release")){bufferRelease();return;}
+        if(args.length==1&&args[0].equals("opaque-native-state")){opaqueNativeState();return;}
         if(args.length==1&&args[0].equals("buffer-wrap")){bufferWrap();return;}
         if(args.length==1&&args[0].equals("buffer-font")){bufferFont();return;}
         if(args.length==1&&args[0].equals("native-image-srg")){nativeImageSrg();return;}
@@ -88,6 +90,162 @@ public final class AuditFixCheck {
         System.out.println("STORAGE_SHUTDOWN_METADATA_PASS no_current_handle historic_unknown_preserved worker_closed");
     }
 
+    public static final class UnknownMapKey implements Comparable<UnknownMapKey> {
+        public int id;public String label="collision";public byte[] salt={0};
+        public UnknownMapKey(int id){this.id=id;}
+        public int hashCode(){return label.hashCode()+salt[0];}
+        public boolean equals(Object other){return other instanceof UnknownMapKey key&&id==key.id;}
+        public int compareTo(UnknownMapKey other){return Integer.compare(id,other.id);}
+    }
+    private static EquipmentSlotGraph.QueryKeys UNKNOWN_KEY_QUERY;private static Object UNKNOWN_KEY_OTHER,UNKNOWN_KEY_MUTATE_RECEIVER;
+    private static Runnable UNKNOWN_KEY_MUTATE;private static int UNKNOWN_KEY_EXECUTIONS,UNKNOWN_KEY_HELPERS,UNKNOWN_KEY_BUILTINS;
+    private static final List<EquipmentSlotGraph.KeySemantics> UNKNOWN_KEY_RESULTS=new ArrayList<>();
+    private static final List<Boolean> UNKNOWN_KEY_EQUAL_RESULTS=new ArrayList<>();
+    private static UnknownKeyCapture UNKNOWN_KEY_CAPTURE;private static UnknownKeyCall UNKNOWN_KEY_CALL;
+    private static final class UnknownKeyCapture {
+        final Object receiver;final String name,descriptor;final Object[] arguments;
+        final List<EquipmentSlotGraph.Read> reads=new ArrayList<>();final List<EquipmentSlotGraph.MethodRead> methods=new ArrayList<>();
+        UnknownKeyCapture(Object receiver,Class<?> declaring,String name,String descriptor,Object[] arguments){
+            this.receiver=receiver;this.name=name;this.descriptor=descriptor;this.arguments=arguments.clone();
+            methods.add(EquipmentSlotGraph.methodRead(declaring,name,descriptor,carrierSiteImage0(declaring,name,descriptor)));
+        }
+    }
+    private static final class UnknownKeyCall {
+        final UnknownKeyCall previous=UNKNOWN_KEY_CALL;
+        final UnknownKeyCapture key;final Object receiver;final Class<?> symbolic,caller;final String name,descriptor;final int opcode;final Object[] arguments;final boolean builtin;Object result;
+        UnknownKeyCall(UnknownKeyCapture key,Object receiver,Class<?> symbolic,String name,String descriptor,int opcode,Object[] arguments,boolean builtin){
+            this.key=key;this.receiver=receiver;this.symbolic=symbolic;this.caller=key.receiver.getClass();this.name=name;this.descriptor=descriptor;this.opcode=opcode;this.arguments=arguments.clone();this.builtin=builtin;
+        }
+    }
+    private static Object unknownKeyBegin(Object receiver,Class<?> declaring,String name,String descriptor,Object[] arguments){
+        UNKNOWN_KEY_EXECUTIONS++;if(UNKNOWN_KEY_QUERY==null)return null;
+        require(UNKNOWN_KEY_CAPTURE==null,"fixture key callback reentered without its original helper edge");
+        List<StackWalker.StackFrame> frames=StackWalker.getInstance(StackWalker.Option.RETAIN_CLASS_REFERENCE).walk(stream->stream.dropWhile(frame->frame.getDeclaringClass()!=declaring||!frame.getMethodName().equals(name)||!frame.getDescriptor().equals(descriptor)).toList());
+        require(EquipmentSlotGraph.keyCall(UNKNOWN_KEY_QUERY,receiver,declaring,name,descriptor,arguments,frames),"actual natural JDK map-to-key path was unresolved");
+        require(!EquipmentSlotGraph.keyCall(UNKNOWN_KEY_QUERY,UNKNOWN_KEY_OTHER,declaring,name,descriptor,arguments,frames),"different same-Class key receiver borrowed the query");
+        return UNKNOWN_KEY_CAPTURE=new UnknownKeyCapture(receiver,declaring,name,descriptor,arguments);
+    }
+    private static void unknownKeyEnd(Object token,Object result){
+        require(token==UNKNOWN_KEY_CAPTURE&&UNKNOWN_KEY_CALL==null,"fixture key result lost its original method");UnknownKeyCapture key=UNKNOWN_KEY_CAPTURE;
+        UNKNOWN_KEY_RESULTS.add(EquipmentSlotGraph.keySemantics(key.receiver,key.name,key.descriptor,key.arguments,result,key.reads,key.methods));
+        if(key.name.equals("equals"))UNKNOWN_KEY_EQUAL_RESULTS.add((Boolean)result);UNKNOWN_KEY_CAPTURE=null;
+    }
+    private static void unknownKeyFailed(Object token,Throwable original){throw new AssertionError("fixture natural key unexpectedly failed",original);}
+    private static void unknownKeyField(Object token,Object holder,Class<?> symbolic,String name,String descriptor,Object value){
+        require(token==UNKNOWN_KEY_CAPTURE,"fixture field read left its natural key");UNKNOWN_KEY_CAPTURE.reads.add(EquipmentSlotGraph.fieldRead(holder==null?symbolic:holder,symbolic,name,descriptor,value));
+    }
+    private static void unknownKeyArray(Object token,Object array,int index,Object value){
+        require(token==UNKNOWN_KEY_CAPTURE,"fixture array read left its natural key");Object normalized=array instanceof byte[]&&value instanceof Integer number?Byte.valueOf((byte)number.intValue()):value;
+        UNKNOWN_KEY_CAPTURE.reads.add(new EquipmentSlotGraph.ArrayRead(array,index,normalized));
+    }
+    private static void unknownKeyUnresolved(Object token){throw new AssertionError("pure fixture key trace became unresolved");}
+    private static Object unknownKeyCallBegin(Object token,Object receiver,Class<?> symbolic,String name,String descriptor,int opcode,Object[] arguments){
+        require(token==UNKNOWN_KEY_CAPTURE,"fixture helper nested outside its actual key");
+        boolean builtin=EquipmentSlotGraph.keyReadSupported(receiver,symbolic,name,descriptor,opcode,UNKNOWN_KEY_CAPTURE.receiver.getClass(),arguments);
+        require(builtin||receiver==UNKNOWN_KEY_CAPTURE.receiver&&name.equals("compareTo"),"fixture encountered an unselected helper");
+        if(builtin)UNKNOWN_KEY_BUILTINS++;return UNKNOWN_KEY_CALL=new UnknownKeyCall(UNKNOWN_KEY_CAPTURE,receiver,symbolic,name,descriptor,opcode,arguments,builtin);
+    }
+    private static void unknownKeyCallEnd(Object token,Object result){
+        require(token==UNKNOWN_KEY_CALL,"fixture helper result changed its call");UnknownKeyCall call=UNKNOWN_KEY_CALL;
+        if(call.builtin)call.key.reads.add(EquipmentSlotGraph.keyRead(call.receiver,call.symbolic,call.name,call.descriptor,call.opcode,call.caller,call.arguments,result));
+        else require(call.result instanceof Integer actual&&result instanceof Integer returned&&actual.intValue()==returned.intValue(),"fixture typed bridge changed original return");UNKNOWN_KEY_CALL=call.previous;
+    }
+    private static Object unknownKeyHelperBegin(Object receiver,Class<?> declaring,String name,String descriptor,Object[] arguments){
+        if(UNKNOWN_KEY_CAPTURE==null)return null;UnknownKeyCall call=UNKNOWN_KEY_CALL;
+        require(call!=null&&!call.builtin&&call.receiver==receiver&&call.name.equals(name)&&call.descriptor.equals(descriptor),"fixture typed helper did not follow its original invoke");
+        UNKNOWN_KEY_CAPTURE.methods.add(EquipmentSlotGraph.methodRead(declaring,name,descriptor,carrierSiteImage0(declaring,name,descriptor)));UNKNOWN_KEY_HELPERS++;return UNKNOWN_KEY_CAPTURE;
+    }
+    private static void unknownKeyHelperEnd(Object token,Object result){require(token==UNKNOWN_KEY_CAPTURE&&UNKNOWN_KEY_CALL!=null,"fixture typed helper lost its key");UNKNOWN_KEY_CALL.result=result;}
+    private static Object unknownMapRead(Object receiver,Field field){
+        Object result=unknownCarrierRead(receiver,field);
+        if(receiver==UNKNOWN_KEY_MUTATE_RECEIVER&&field.getName().equals("value")){Runnable mutation=UNKNOWN_KEY_MUTATE;UNKNOWN_KEY_MUTATE_RECEIVER=null;UNKNOWN_KEY_MUTATE=null;mutation.run();}
+        return result;
+    }
+    private static Object unknownMapStatic(Class<?> declaring,String name,String descriptor)throws Exception{
+        Field field=declaring.getDeclaredField(name);require(Modifier.isStatic(field.getModifiers())&&field.getType().descriptorString().equals(descriptor),"fixture static tuple mismatch");
+        Object base=U.staticFieldBase(field);long at=U.staticFieldOffset(field);Class<?> type=field.getType();
+        if(!type.isPrimitive())return U.getObjectVolatile(base,at);if(type==boolean.class)return U.getBooleanVolatile(base,at);if(type==int.class)return U.getIntVolatile(base,at);
+        if(type==byte.class)return U.getByteVolatile(base,at);if(type==short.class)return U.getShortVolatile(base,at);if(type==char.class)return U.getCharVolatile(base,at);
+        if(type==long.class)return U.getLongVolatile(base,at);if(type==float.class)return U.getFloatVolatile(base,at);return U.getDoubleVolatile(base,at);
+    }
+    private static Object[] unknownMapKeyBody()throws Exception{
+        String original=UnknownMapKey.class.getName().replace('.','/'),alias="dev.ronova.pro.CheckedUnknownMapKey";
+        var node=new org.objectweb.asm.tree.ClassNode();try(var input=UnknownMapKey.class.getResourceAsStream("/"+original+".class")){new org.objectweb.asm.ClassReader(input.readAllBytes()).accept(node,0);}
+        node.nestHostClass=null;node.nestMembers=null;node.innerClasses.clear();node.outerClass=null;node.outerMethod=null;node.outerMethodDesc=null;
+        var remapped=new org.objectweb.asm.ClassWriter(0);node.accept(new org.objectweb.asm.commons.ClassRemapper(remapped,new org.objectweb.asm.commons.SimpleRemapper(original,alias.replace('.','/'))));
+        Class<?> visitor=Class.forName("jdk.internal.org.objectweb.asm.ClassVisitor"),nodeType=Class.forName("jdk.internal.org.objectweb.asm.tree.ClassNode"),methodType=Class.forName("jdk.internal.org.objectweb.asm.tree.MethodNode");
+        Object transformed=nodeType.getConstructor().newInstance(),reader=Class.forName("jdk.internal.org.objectweb.asm.ClassReader").getConstructor(byte[].class).newInstance((Object)remapped.toByteArray());
+        reader.getClass().getMethod("accept",visitor,int.class).invoke(reader,transformed,0);
+        Class<?> boundary=Class.forName("dev.ronova.pro.agent.EquipmentSlotBoundary");Method key=boundary.getDeclaredMethod("weaveKey",String.class,methodType),helper=boundary.getDeclaredMethod("weave",String.class,methodType,boolean.class);key.setAccessible(true);helper.setAccessible(true);
+        for(Object method:(List<?>)nodeType.getField("methods").get(transformed)){
+            String name=(String)methodType.getField("name").get(method),descriptor=(String)methodType.getField("desc").get(method);if(name.startsWith("<"))continue;
+            if(name.equals("hashCode")||name.equals("equals")||name.equals("compareTo")&&descriptor.equals("(Ljava/lang/Object;)I"))key.invoke(null,alias.replace('.','/'),method);
+            else helper.invoke(null,alias.replace('.','/'),method,true);
+        }
+        var constructor=Class.forName("dev.ronova.pro.agent.ControlClassWriter").getDeclaredConstructor(ClassLoader.class,nodeType);constructor.setAccessible(true);Object writer=constructor.newInstance(AuditFixCheck.class.getClassLoader(),transformed);nodeType.getMethod("accept",visitor).invoke(transformed,writer);
+        byte[] bytes=(byte[])writer.getClass().getMethod("toByteArray").invoke(writer);
+        Class<?> result=new ClassLoader(AuditFixCheck.class.getClassLoader()){Class<?> body(){Class<?> type=defineClass(alias,bytes,0,bytes.length);resolveClass(type);return type;}}.body();return new Object[]{result,bytes};
+    }
+    private static Object unknownMapCurrent(Object held)throws Exception{
+        Class<?> uses=Class.forName("dev.ronova.pro.EquipmentSlotGraph$Uses");var constructor=uses.getDeclaredConstructor(int.class);constructor.setAccessible(true);
+        Method current=held.getClass().getDeclaredMethod("current",uses,boolean.class);current.setAccessible(true);
+        try{return current.invoke(held,constructor.newInstance(0),false);}catch(InvocationTargetException failure){if(failure.getCause() instanceof EquipmentSlotGraph.Unresolved unresolved)throw unresolved;throw failure;}
+    }
+    private static Object unknownMapHeld(EquipmentSlotGraph.Read read)throws Exception{
+        var constructor=Class.forName("dev.ronova.pro.EquipmentSlotGraph$HeldRead").getDeclaredConstructor(EquipmentSlotGraph.Read.class);constructor.setAccessible(true);return constructor.newInstance(read);
+    }
+    private static void unknownMapStale(Object held,String reason)throws Exception{
+        try {unknownMapCurrent(held);throw new AssertionError(reason);}catch(EquipmentSlotGraph.Unresolved expected){ }
+    }
+    private static Object unknownMapNode(HashMap<Object,Object> map,Object value)throws Exception{
+        Object[] table=(Object[])unknownCarrierRead(map,HashMap.class.getDeclaredField("table"));Class<?> node=Class.forName("java.util.HashMap$Node");Field next=node.getDeclaredField("next"),stored=node.getDeclaredField("value");
+        for(Object head:table)for(Object at=head;at!=null;at=unknownCarrierRead(at,next))if(unknownCarrierRead(at,stored)==value)return at;throw new AssertionError("fixture actual node unavailable");
+    }
+    private static void unknownMapKeySemantics()throws Exception{
+        slotKeyBytecode();System.load(java.nio.file.Path.of(System.getProperty("ronova.pro.audit.native")).toAbsolutePath().toString());
+        Class<?> controls=Class.forName("dev.ronova.pro.bootstrap.ControlBridge",true,null),sources=Class.forName("dev.ronova.pro.bootstrap.CodeSourceBridge",true,null);Field slots=controls.getDeclaredField("equipmentSlots");slots.setAccessible(true);Object previousSlots=slots.get(null);
+        Map<Field,Object> readers=new LinkedHashMap<>();var lookup=MethodHandles.lookup();
+        MethodHandle fields=lookup.findStatic(AuditFixCheck.class,"unknownCarrierFields",MethodType.methodType(Object[][].class,Object.class));
+        MethodHandle read=lookup.findStatic(AuditFixCheck.class,"unknownMapRead",MethodType.methodType(Object.class,Object.class,Field.class));
+        Map<String,MethodHandle> graph=Map.of("READ",read,"STATIC",lookup.findStatic(AuditFixCheck.class,"unknownMapStatic",MethodType.methodType(Object.class,Class.class,String.class,String.class)),
+                "METHOD",lookup.findStatic(AuditFixCheck.class,"carrierSiteMethod0",MethodType.methodType(Class.class,Object.class,Class.class,String.class,String.class,int.class,Class.class)),
+                "IMAGE",lookup.findStatic(AuditFixCheck.class,"carrierSiteImage0",MethodType.methodType(long[].class,Class.class,String.class,String.class)),
+                "FRAME",lookup.findStatic(AuditFixCheck.class,"carrierSiteFrame0",MethodType.methodType(long[].class,Class.class,String.class,String.class,int.class)),
+                "DEPTH",lookup.findStatic(AuditFixCheck.class,"carrierSiteDepth0",MethodType.methodType(int.class,Class.class,String.class,String.class)));
+        Class.forName(EquipmentCarrierLayouts.class.getName(),true,EquipmentCarrierLayouts.class.getClassLoader());Class.forName(EquipmentSlotGraph.class.getName(),true,EquipmentSlotGraph.class.getClassLoader());
+        for(Class<?> type:List.of(EquipmentCarrierGraph.class,EquipmentCarrierLayouts.class))for(String name:List.of("FIELDS","READ")){Field field=type.getDeclaredField(name);field.setAccessible(true);readers.put(field,field.get(null));}
+        for(String name:graph.keySet()){Field field=EquipmentSlotGraph.class.getDeclaredField(name);field.setAccessible(true);readers.put(field,field.get(null));}
+        CARRIER_SITE_ACTIVE=true;carrierSiteSetup0(controls,sources);
+        try {
+            for(Field field:readers.keySet()){MethodHandle replacement=field.getDeclaringClass()==EquipmentSlotGraph.class?graph.get(field.getName()):field.getName().equals("FIELDS")?fields:read;U.putObjectVolatile(U.staticFieldBase(field),U.staticFieldOffset(field),replacement);}
+            MethodType keyType=MethodType.methodType(Object.class,Object.class,Class.class,String.class,String.class,Object[].class),endType=MethodType.methodType(void.class,Object.class,Object.class),failedType=MethodType.methodType(void.class,Object.class,Throwable.class);
+            MethodType[] types={MethodType.methodType(Object.class,Object.class,Object.class),MethodType.methodType(void.class,Object.class,Object.class,Class.class,String.class,String.class,Object.class),MethodType.methodType(void.class,Object.class,Object.class,int.class,Object.class),MethodType.methodType(void.class,Object.class,Object.class,Object.class,Object.class,boolean.class),MethodType.methodType(void.class,Object.class,Object.class,String.class,String.class,Object.class),MethodType.methodType(void.class,Object.class),endType,failedType,MethodType.methodType(Object.class,Object.class,Object.class,Class.class,String.class,String.class,int.class,Object[].class),endType,failedType,keyType,endType,failedType,keyType,endType,failedType};
+            MethodHandle[] callbacks=new MethodHandle[types.length];for(int at=0;at<types.length;at++)callbacks[at]=MethodHandles.empty(types[at]);
+            String[] names={null,"unknownKeyField","unknownKeyArray",null,null,"unknownKeyUnresolved",null,"unknownKeyFailed","unknownKeyCallBegin","unknownKeyCallEnd","unknownKeyFailed","unknownKeyHelperBegin","unknownKeyHelperEnd","unknownKeyFailed","unknownKeyBegin","unknownKeyEnd","unknownKeyFailed"};
+            for(int at=0;at<types.length;at++)if(names[at]!=null)callbacks[at]=lookup.findStatic(AuditFixCheck.class,names[at],types[at]);slots.set(null,callbacks);
+            Object[] body=unknownMapKeyBody();Class<?> type=(Class<?>)body[0];var constructor=type.getConstructor(int.class);HashMap<Object,Object> map=new HashMap<>(64);Object[] values=new Object[12];
+            for(int at=0;at<values.length;at++){values[at]=new Object();map.put(constructor.newInstance(at),values[at]);}
+            Object query=constructor.newInstance(7);UNKNOWN_KEY_OTHER=constructor.newInstance(7);UNKNOWN_KEY_RESULTS.clear();UNKNOWN_KEY_EQUAL_RESULTS.clear();UNKNOWN_KEY_HELPERS=UNKNOWN_KEY_BUILTINS=0;
+            UNKNOWN_KEY_QUERY=EquipmentSlotGraph.prepareKeys(map,query,Map.class,"get","(Ljava/lang/Object;)Ljava/lang/Object;",185,AuditFixCheck.class);
+            require(EquipmentSlotGraph.keyTargets(UNKNOWN_KEY_QUERY).size()==3,"fixture hash/equality/comparison Java targets unavailable");
+            Object result=map.get(query);require(result==values[7]&&UNKNOWN_KEY_EQUAL_RESULTS.contains(Boolean.FALSE)&&UNKNOWN_KEY_EQUAL_RESULTS.contains(Boolean.TRUE)&&UNKNOWN_KEY_HELPERS>0&&UNKNOWN_KEY_BUILTINS>1,"actual colliding tree lookup did not capture natural key semantics");
+            Object held=unknownMapHeld(EquipmentSlotGraph.containerRead(UNKNOWN_KEY_QUERY,result,UNKNOWN_KEY_RESULTS));UNKNOWN_KEY_QUERY=null;int executions=UNKNOWN_KEY_EXECUTIONS;
+            require(unknownMapCurrent(held)==result&&UNKNOWN_KEY_EXECUTIONS==executions,"slot readback replayed hashCode/equals/compareTo or lost actual hit");
+            Field id=type.getField("id"),salt=type.getField("salt");id.setInt(query,99);unknownMapStale(held,"mutable key field kept old slot semantics");id.setInt(query,7);
+            byte[] bytes=(byte[])salt.get(query);bytes[0]=1;unknownMapStale(held,"mutable key array kept old hash semantics");bytes[0]=0;
+            UNKNOWN_KEY_MUTATE_RECEIVER=unknownMapNode(map,result);UNKNOWN_KEY_MUTATE=()->{try{id.setInt(query,99);}catch(IllegalAccessException failure){throw new AssertionError(failure);}};
+            unknownMapStale(held,"terminal value read bypassed the final key dependency recheck");id.setInt(query,7);require(UNKNOWN_KEY_MUTATE_RECEIVER==null,"fixture terminal mutation was not reached");
+            var changed=new org.objectweb.asm.tree.ClassNode();new org.objectweb.asm.ClassReader((byte[])body[1]).accept(changed,0);for(var method:changed.methods)if(method.name.equals("hashCode"))method.instructions.insert(new org.objectweb.asm.tree.InsnNode(0));var writer=new org.objectweb.asm.ClassWriter(0);changed.accept(writer);carrierSiteRedefine0(type,writer.toByteArray());
+            unknownMapStale(held,"real key method redefinition kept old semantic evidence");require(UNKNOWN_KEY_EXECUTIONS==executions,"dependency/version checks replayed an original key method");
+            UNKNOWN_KEY_RESULTS.clear();UNKNOWN_KEY_EQUAL_RESULTS.clear();Object missing=constructor.newInstance(99);UNKNOWN_KEY_OTHER=constructor.newInstance(99);
+            UNKNOWN_KEY_QUERY=EquipmentSlotGraph.prepareKeys(map,missing,Map.class,"get","(Ljava/lang/Object;)Ljava/lang/Object;",185,AuditFixCheck.class);Object absent=map.get(missing);require(absent==null,"actual missing colliding key unexpectedly hit");
+            Object missingHeld=unknownMapHeld(EquipmentSlotGraph.containerRead(UNKNOWN_KEY_QUERY,absent,UNKNOWN_KEY_RESULTS));UNKNOWN_KEY_QUERY=null;executions=UNKNOWN_KEY_EXECUTIONS;require(unknownMapCurrent(missingHeld)==null&&UNKNOWN_KEY_EXECUTIONS==executions,"missing-key readback replayed methods or invented a slot");
+        } finally {
+            UNKNOWN_KEY_QUERY=null;UNKNOWN_KEY_CAPTURE=null;UNKNOWN_KEY_CALL=null;UNKNOWN_KEY_MUTATE_RECEIVER=null;UNKNOWN_KEY_MUTATE=null;UNKNOWN_KEY_RESULTS.clear();slots.set(null,previousSlots);
+            for(var saved:readers.entrySet())U.putObjectVolatile(U.staticFieldBase(saved.getKey()),U.staticFieldOffset(saved.getKey()),saved.getValue());carrierSiteStop0();CARRIER_SITE_ACTIVE=false;
+        }
+        System.out.println("UNKNOWN_MAP_KEY_SEMANTICS_PASS production_KEY_weaving actual_HashMap_tree_hit_collision_miss String_hash_and_Integer_compare_delegates mutable_field_array_terminal_change_and_actual_redefine_refused no_hash_equals_compare_replay metadata_registration_fixture_only_no_live_Core_authorization");
+    }
     private interface UnknownCarrierFunction {Object apply(Object value);}
     private interface UnknownCarrierBusiness {Object read();void write(Object value);}
     private static final class UnknownCarrierLeaf {int amount=7;Object extra;}
@@ -1862,6 +2020,33 @@ public final class AuditFixCheck {
         catch(RuntimeException failure){require(expected.isInstance(failure),path+" threw "+failure.getClass().getName()+" instead of "+expected.getName());return;}
         throw new AssertionError(path+" returned without the original exception");
     }
+    private static boolean opaqueNativeFixture;
+    private static Object opaqueNativeAction,opaqueNativeSeen;
+    private static Module[] opaqueNativeModules;
+    private static long opaqueNativeToken,opaqueNativeGeneration;
+    private static int opaqueNativeObserverMode;
+    private static final RuntimeException OPAQUE_NATIVE_FAILURE=new RuntimeException("opaque-native-original");
+    private static native boolean opaqueNativeState0(Object action,Module[] modules,Throwable original);
+    // Only the isolated C fixture owns these expected tuples. Production
+    // allocation/alias/restore code runs unchanged, with no controller install.
+    private static boolean bufferRestoreCaller(Object action,long token,long generation,Module[] modules,long cursor,int budget){
+        return opaqueNativeFixture&&action==opaqueNativeAction&&token==opaqueNativeToken&&generation==opaqueNativeGeneration
+                &&modules==opaqueNativeModules&&cursor==0&&(budget==0||budget==8);
+    }
+    private static boolean memoryRecoveryCaller(){return opaqueNativeFixture;}
+    private static boolean opaqueNativeAddress(Object buffer,Module[] sources){
+        opaqueNativeSeen=buffer;if(opaqueNativeObserverMode==1)throw OPAQUE_NATIVE_FAILURE;return opaqueNativeObserverMode!=2;
+    }
+    private static void opaqueNativeCreated(Object buffer,Module[] sources){
+        opaqueNativeSeen=buffer;if(opaqueNativeObserverMode==1)throw OPAQUE_NATIVE_FAILURE;
+    }
+    private static void opaqueNativeState(){
+        System.load(java.nio.file.Path.of(System.getProperty("ronova.pro.audit.native")).toAbsolutePath().toString());
+        opaqueNativeAction=new Object();opaqueNativeModules=new Module[]{AuditFixCheck.class.getModule()};opaqueNativeFixture=true;
+        try{require(opaqueNativeState0(opaqueNativeAction,opaqueNativeModules,OPAQUE_NATIVE_FAILURE),"opaque native allocation regression failed");}
+        finally{opaqueNativeFixture=false;opaqueNativeSeen=opaqueNativeAction=null;opaqueNativeModules=null;opaqueNativeToken=opaqueNativeGeneration=0;opaqueNativeObserverMode=0;}
+        System.out.println("OPAQUE_NATIVE_STATE_PASS actual_JNI_views live_alias_blocks_private_free_raw_and_managed_undo no_revision_retirement_pending original_release_same_address_reuse_rejects_old_lifetime current_lease_seals_retirement opaque_exposure_blocks_undo original_result_Throwable_LastError_preserved stopped_refused unknown_span_not_registered fixture_allocation_registration_only no_Agent_or_JNI_table_install");
+    }
     private static void bufferRelease()throws Exception {
         java.nio.ByteBuffer direct=java.nio.ByteBuffer.allocateDirect(32);
         direct.putLong(0,0x1020304050607080L);
@@ -2555,6 +2740,91 @@ public final class AuditFixCheck {
         Class<?> result=new ClassLoader(AuditFixCheck.class.getClassLoader()){
             Class<?> defineBody(){Class<?> type=defineClass(alias,finished,0,finished.length);resolveClass(type);return type;}
         }.defineBody();return new Object[]{result,finished,positions};
+    }
+    public static final class SlotKeyBody implements Comparable<Object> {
+        public int code,writes;public Object expected;public RuntimeException failure;
+        public SlotKeyBody(int code,Object expected){this.code=code;this.expected=expected;}
+        private int selected(){return code;}
+        @Override public int hashCode(){if(failure!=null)throw failure;return selected();}
+        @Override public boolean equals(Object other){return other==expected;}
+        @Override public int compareTo(Object other){return other==expected?code:-code;}
+        public int mutate(){writes++;return code;}
+        public synchronized int locked(){return code;}
+    }
+    private static final Object SLOT_KEY_TOKEN=new Object();
+    private static Object SLOT_KEY_RECEIVER,SLOT_KEY_ARGUMENT,SLOT_KEY_RESULT;private static String SLOT_KEY_NAME;
+    private static Throwable SLOT_KEY_FAILURE;private static int SLOT_KEY_BEGINS,SLOT_KEY_ENDS,SLOT_KEY_READS,SLOT_KEY_UNKNOWN;
+    private static Object slotKeyBytecodeBegin(Object receiver,Class<?> declaring,String name,String descriptor,Object[] arguments){
+        require(receiver==SLOT_KEY_RECEIVER&&declaring==receiver.getClass()&&name.equals(SLOT_KEY_NAME),"key entry changed its actual receiver or method");
+        require(arguments.length==(name.equals("hashCode")?0:1)&&(arguments.length==0||arguments[0]==SLOT_KEY_ARGUMENT),"key entry changed its actual operand");
+        require(descriptor.equals(name.equals("hashCode")?"()I":name.equals("equals")?"(Ljava/lang/Object;)Z":"(Ljava/lang/Object;)I"),"key entry changed its exact descriptor");
+        SLOT_KEY_BEGINS++;return SLOT_KEY_TOKEN;
+    }
+    private static void slotKeyBytecodeEnd(Object token,Object result){require(token==SLOT_KEY_TOKEN,"key result changed its token");SLOT_KEY_RESULT=result;SLOT_KEY_ENDS++;}
+    private static void slotKeyBytecodeFailed(Object token,Throwable original){require(token==SLOT_KEY_TOKEN,"key failure changed its token");SLOT_KEY_FAILURE=original;}
+    private static void slotKeyBytecodeField(Object token,Object holder,Class<?> symbolic,String name,String descriptor,Object value){require(token==SLOT_KEY_TOKEN,"key dependency changed its token");SLOT_KEY_READS++;}
+    private static void slotKeyBytecodeUnknown(Object token){require(token==SLOT_KEY_TOKEN,"key side effect changed its token");SLOT_KEY_UNKNOWN++;}
+    /** Production key/helper weaving around one natural Java key body. */
+    public static void slotKeyBytecode()throws Exception{
+        String original=SlotKeyBody.class.getName().replace('.','/'),alias="dev.ronova.pro.CheckedSlotKeyBody";
+        var renamed=new org.objectweb.asm.tree.ClassNode();
+        try(var input=SlotKeyBody.class.getResourceAsStream("/"+original+".class")){
+            require(input!=null,"actual custom key body unavailable");new org.objectweb.asm.ClassReader(input.readAllBytes()).accept(renamed,0);
+        }
+        renamed.nestHostClass=null;renamed.nestMembers=null;renamed.innerClasses.clear();renamed.outerClass=null;renamed.outerMethod=null;renamed.outerMethodDesc=null;
+        var remapped=new org.objectweb.asm.ClassWriter(0);renamed.accept(new org.objectweb.asm.commons.ClassRemapper(remapped,new org.objectweb.asm.commons.SimpleRemapper(original,alias.replace('.','/'))));
+        Class<?> visitor=Class.forName("jdk.internal.org.objectweb.asm.ClassVisitor"),nodeType=Class.forName("jdk.internal.org.objectweb.asm.tree.ClassNode");
+        Class<?> methodType=Class.forName("jdk.internal.org.objectweb.asm.tree.MethodNode"),readerType=Class.forName("jdk.internal.org.objectweb.asm.ClassReader"),writerType=Class.forName("dev.ronova.pro.agent.ControlClassWriter");
+        Object node=nodeType.getConstructor().newInstance(),reader=readerType.getConstructor(byte[].class).newInstance((Object)remapped.toByteArray());readerType.getMethod("accept",visitor,int.class).invoke(reader,node,0);
+        Class<?> boundary=Class.forName("dev.ronova.pro.agent.EquipmentSlotBoundary");Method key=boundary.getDeclaredMethod("weaveKey",String.class,methodType);key.setAccessible(true);
+        Method helper=boundary.getDeclaredMethod("weave",String.class,methodType,boolean.class);helper.setAccessible(true);
+        Method action=Class.forName("dev.ronova.pro.agent.EquipmentActionBoundary").getDeclaredMethod("weave",methodType,String.class);action.setAccessible(true);
+        for(Object method:(List<?>)nodeType.getField("methods").get(node)){
+            String name=(String)methodType.getField("name").get(method);if(name.startsWith("<"))continue;
+            if(Set.of("hashCode","equals","compareTo").contains(name))key.invoke(null,alias.replace('.','/'),method);
+            else helper.invoke(null,alias.replace('.','/'),method,true);
+            action.invoke(null,method,"carrier-call");
+        }
+        Constructor<?> constructor=writerType.getDeclaredConstructor(ClassLoader.class,nodeType);constructor.setAccessible(true);Object writer=constructor.newInstance(AuditFixCheck.class.getClassLoader(),node);nodeType.getMethod("accept",visitor).invoke(node,writer);
+        byte[] bytes=(byte[])Class.forName("jdk.internal.org.objectweb.asm.ClassWriter").getMethod("toByteArray").invoke(writer);
+        var combined=new org.objectweb.asm.tree.ClassNode();new org.objectweb.asm.ClassReader(bytes).accept(combined,0);int keyEntries=0,delegateSites=0,originalSelected=0;
+        for(var method:combined.methods)for(var instruction:method.instructions){
+            if(instruction instanceof org.objectweb.asm.tree.LdcInsnNode phase&&phase.cst.equals("carrier-delegate"))delegateSites++;
+            if(instruction instanceof org.objectweb.asm.tree.MethodInsnNode call){
+                if(call.owner.equals("dev/ronova/pro/bootstrap/ControlBridge")&&call.name.equals("beginEquipmentSlotKey"))keyEntries++;
+                if(method.name.equals("hashCode")&&call.owner.equals(alias.replace('.','/'))&&call.name.equals("selected"))originalSelected++;
+            }
+        }
+        require(keyEntries==3&&delegateSites==0&&originalSelected==1,"key/helper/action composition duplicated or lost the original Java key body");
+        Class<?> checked=new ClassLoader(AuditFixCheck.class.getClassLoader()){
+            Class<?> body(){Class<?> result=defineClass(alias,bytes,0,bytes.length);resolveClass(result);return result;}
+        }.body();Object operand=new Object(),receiver=checked.getConstructor(int.class,Object.class).newInstance(37,operand);
+        Method hash=checked.getMethod("hashCode"),equal=checked.getMethod("equals",Object.class),compare=checked.getMethod("compareTo",Object.class);
+        Class<?> controls=Class.forName("dev.ronova.pro.bootstrap.ControlBridge",true,null);Field slots=controls.getDeclaredField("equipmentSlots");slots.setAccessible(true);Object saved=slots.get(null);
+        Field invocations=controls.getDeclaredField("equipmentInvocations");invocations.setAccessible(true);require(invocations.get(null)==null,"key bytecode check requires uninstalled equipment invocation authority");
+        MethodType[] types={MethodType.methodType(Object.class,Object.class,Object.class),MethodType.methodType(void.class,Object.class,Object.class,Class.class,String.class,String.class,Object.class),
+                MethodType.methodType(void.class,Object.class,Object.class,int.class,Object.class),MethodType.methodType(void.class,Object.class,Object.class,Object.class,Object.class,boolean.class),
+                MethodType.methodType(void.class,Object.class,Object.class,String.class,String.class,Object.class),MethodType.methodType(void.class,Object.class),MethodType.methodType(void.class,Object.class,Object.class),MethodType.methodType(void.class,Object.class,Throwable.class),
+                MethodType.methodType(Object.class,Object.class,Object.class,Class.class,String.class,String.class,int.class,Object[].class),MethodType.methodType(void.class,Object.class,Object.class),MethodType.methodType(void.class,Object.class,Throwable.class),
+                MethodType.methodType(Object.class,Object.class,Class.class,String.class,String.class,Object[].class),MethodType.methodType(void.class,Object.class,Object.class),MethodType.methodType(void.class,Object.class,Throwable.class),
+                MethodType.methodType(Object.class,Object.class,Class.class,String.class,String.class,Object[].class),MethodType.methodType(void.class,Object.class,Object.class),MethodType.methodType(void.class,Object.class,Throwable.class)};
+        MethodHandle[] callbacks=new MethodHandle[types.length];for(int at=0;at<types.length;at++)callbacks[at]=types[at].returnType()==void.class?MethodHandles.empty(types[at]):MethodHandles.dropArguments(MethodHandles.constant(Object.class,SLOT_KEY_TOKEN),0,types[at].parameterArray());
+        var lookup=MethodHandles.lookup();callbacks[1]=lookup.findStatic(AuditFixCheck.class,"slotKeyBytecodeField",types[1]);callbacks[5]=lookup.findStatic(AuditFixCheck.class,"slotKeyBytecodeUnknown",types[5]);
+        callbacks[14]=lookup.findStatic(AuditFixCheck.class,"slotKeyBytecodeBegin",types[14]);callbacks[15]=lookup.findStatic(AuditFixCheck.class,"slotKeyBytecodeEnd",types[15]);callbacks[16]=lookup.findStatic(AuditFixCheck.class,"slotKeyBytecodeFailed",types[16]);
+        try{
+            slots.set(null,null);require((Integer)hash.invoke(receiver)==37&&Boolean.TRUE.equals(equal.invoke(receiver,operand))&&(Integer)compare.invoke(receiver,operand)==37,"uninstalled key callbacks changed natural results");
+            SLOT_KEY_RECEIVER=receiver;SLOT_KEY_ARGUMENT=operand;SLOT_KEY_BEGINS=0;SLOT_KEY_ENDS=0;SLOT_KEY_READS=0;SLOT_KEY_UNKNOWN=0;SLOT_KEY_FAILURE=null;slots.set(null,callbacks);
+            SLOT_KEY_NAME="hashCode";require((Integer)hash.invoke(receiver)==37&&Integer.valueOf(37).equals(SLOT_KEY_RESULT),"natural hash result changed");
+            SLOT_KEY_NAME="equals";require(Boolean.TRUE.equals(equal.invoke(receiver,operand))&&Boolean.TRUE.equals(SLOT_KEY_RESULT),"natural equality result changed");
+            SLOT_KEY_NAME="compareTo";require((Integer)compare.invoke(receiver,operand)==37&&Integer.valueOf(37).equals(SLOT_KEY_RESULT),"natural comparison result changed");
+            require(SLOT_KEY_BEGINS==3&&SLOT_KEY_ENDS==3&&SLOT_KEY_READS>0&&SLOT_KEY_UNKNOWN==0,"natural key methods were replayed or lost their dependencies");
+            RuntimeException failure=new IllegalStateException("actual_key_failure");checked.getField("failure").set(receiver,failure);SLOT_KEY_NAME="hashCode";
+            try{hash.invoke(receiver);throw new AssertionError("key original failure disappeared");}catch(InvocationTargetException thrown){require(thrown.getCause()==failure&&SLOT_KEY_FAILURE==failure,"key failure identity changed");}
+            checked.getField("failure").set(receiver,null);int unknown=SLOT_KEY_UNKNOWN;
+            require((Integer)checked.getMethod("mutate").invoke(receiver)==37&&checked.getField("writes").getInt(receiver)==1&&SLOT_KEY_UNKNOWN>unknown,"key helper write did not invalidate its trace exactly once");
+            unknown=SLOT_KEY_UNKNOWN;require((Integer)checked.getMethod("locked").invoke(receiver)==37&&SLOT_KEY_UNKNOWN>unknown,"implicit synchronized monitor kept reusable key semantics");
+        }finally{slots.set(null,saved);SLOT_KEY_RECEIVER=null;SLOT_KEY_ARGUMENT=null;SLOT_KEY_RESULT=null;SLOT_KEY_FAILURE=null;}
+        System.out.println("EQUIPMENT_SLOT_KEY_BYTECODE_PASS exact_custom_key_hash_equals_compare_original_results_and_Throwable_identity field_read_hooks helper_write_and_synchronized_unresolved uninstalled_callback_fallback single_KEY_Slot_Action_layer no_live_equipment_authority_claim");
     }
     /** Verify the slot read hooks on the actual game getter, without constructing an entity. */
     private static void equipmentSlotBytecode()throws Exception{

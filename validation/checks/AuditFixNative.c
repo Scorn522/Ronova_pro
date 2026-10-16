@@ -513,3 +513,176 @@ JNIEXPORT void JNICALL Java_dev_ronova_pro_AuditFixCheck_stopPolicyCallback0(JNI
     (void)type;if(!audit_stop_fixture||!audit_stop_reentry){audit_physical_failure(env,"stop publication native callback is not prepared");return;}
     (*env)->CallStaticVoidMethod(env,audit_stop_fixture,audit_stop_reentry,module);
 }
+
+/* Real OS allocations and real JNI direct views. Only the allocator/source
+ * registration and Java observer bodies belong to this fixture; allocation
+ * completion, weak aliases, lifetime admission and both undo entries are the
+ * production implementations. No Agent or process-wide JNI table is installed. */
+static BOOL (WINAPI *audit_opaque_real_free)(LPVOID,SIZE_T,DWORD);
+static void *(JNICALL *audit_opaque_address_original)(JNIEnv*,jobject);
+static jobject (JNICALL *audit_opaque_new_original)(JNIEnv*,void*,jlong);
+static jthrowable audit_opaque_original_failure;
+static int audit_opaque_release_count,audit_opaque_original_calls;
+static void JNICALL audit_opaque_release(JNIEnv *env,jobject allocator,jlong address){
+    (void)allocator;audit_opaque_release_count++;
+    if(!audit_opaque_real_free((LPVOID)(uintptr_t)address,0,MEM_RELEASE))audit_physical_failure(env,"actual opaque allocation release failed");
+}
+static void *JNICALL audit_opaque_address_success(JNIEnv *env,jobject buffer){
+    audit_opaque_original_calls++;void *address=audit_opaque_address_original(env,buffer);SetLastError(0x97b1);return address;
+}
+static void *JNICALL audit_opaque_address_failure(JNIEnv *env,jobject buffer){
+    (void)buffer;audit_opaque_original_calls++;native_original.Throw(env,audit_opaque_original_failure);SetLastError(0x97b2);return NULL;
+}
+static jobject JNICALL audit_opaque_new_success(JNIEnv *env,void *address,jlong bytes){
+    audit_opaque_original_calls++;jobject buffer=audit_opaque_new_original(env,address,bytes);SetLastError(0x97c1);return buffer;
+}
+static NativeMemoryAllocation *audit_opaque_record(JNIEnv *env,jclass type,NativeThread *state,void *address,Owner *owner){
+    NativeMemoryCall *call=(NativeMemoryCall*)calloc(1,sizeof(*call));
+    NativeMemoryAllocation *prepared=(NativeMemoryAllocation*)calloc(1,sizeof(*prepared));
+    if(!call||!prepared){free(call);free(prepared);return NULL;}InitializeCriticalSection(&prepared->gate);
+    call->prepared=prepared;call->bytes=65536;call->known=1;call->release=(void*)audit_opaque_release;
+    call->allocator=native_original.NewGlobalRef(env,type);
+    if(!call->allocator||!native_owner_add(&call->sources,owner)){native_memory_call_dispose(env,call);return NULL;}
+    Binding binding={0};binding.signature="(J)J";binding.unsafeOperation=UNSAFE_ALLOCATE;
+    unsigned char returned[256]={0};uint64_t value=(uint64_t)(uintptr_t)address;
+    memcpy(returned+native_unsafe_save(&binding)+96,&value,sizeof(value));
+    NativeUnsafeFrame frame={0};frame.memoryCall=call;native_memory_call_end(env,state,&binding,returned,&frame);
+    return native_memory_allocations;
+}
+static int audit_opaque_original_release(JNIEnv *env,jclass type,NativeThread *state,NativeMemoryAllocation *allocation){
+    NativeMemoryCall *call=(NativeMemoryCall*)calloc(1,sizeof(*call));if(!call)return 0;
+    call->allocation=allocation;call->known=1;call->address=allocation->address;
+    audit_opaque_release(env,type,(jlong)allocation->address);
+    Binding binding={0};binding.signature="(J)V";binding.unsafeOperation=UNSAFE_FREE;
+    unsigned char returned[256]={0};NativeUnsafeFrame frame={0};frame.memoryCall=call;
+    native_memory_call_end(env,state,&binding,returned,&frame);return !native_original.ExceptionCheck(env)&&!allocation->alive;
+}
+static int audit_opaque_revision(NativeMemoryAllocation *allocation,Owner *owner,uint64_t before,uint64_t after){
+    memcpy((void*)(uintptr_t)allocation->address,&before,sizeof(before));OwnerLink source={0};source.owner=owner;
+    NativeMemoryWrite write={0};write.allocation=allocation;write.address=allocation->address;write.length=sizeof(before);write.generation=allocation->generation;write.sources=&source;
+    write.image=native_memory_image(&write);if(!write.image)return 0;
+    memcpy((void*)(uintptr_t)allocation->address,&after,sizeof(after));
+    int ready=native_memory_read(write.address,write.image->after,sizeof(after));
+    if(ready)native_memory_range(&write);native_memory_image_release(write.image);
+    return ready&&allocation->ranges&&allocation->ranges->revision&&allocation->ranges->revision->complete;
+}
+static void audit_opaque_scope(JNIEnv *env,jclass type,NativeMemoryAllocation *allocation){
+    native_original.SetStaticLongField(env,type,native_original.GetStaticFieldID(env,type,"opaqueNativeToken","J"),(jlong)(uintptr_t)allocation);
+    native_original.SetStaticLongField(env,type,native_original.GetStaticFieldID(env,type,"opaqueNativeGeneration","J"),(jlong)allocation->generation);
+}
+static int audit_opaque_result(JNIEnv *env,jlongArray result,int managed,int pending){
+    jlong values[5]={0};int count=managed?4:5,ready=result&&native_original.GetArrayLength(env,result)==count;
+    if(ready){native_original.GetLongArrayRegion(env,result,0,count,values);ready=!native_original.ExceptionCheck(env)
+            &&(pending?values[managed?1:2]>0:values[managed?1:2]==0)&&values[managed?2:3]==0&&values[managed?3:4]==(managed&&pending?0:1);}
+    if(result)native_original.DeleteLocalRef(env,result);return ready;
+}
+JNIEXPORT jboolean JNICALL Java_dev_ronova_pro_AuditFixCheck_opaqueNativeState0(JNIEnv *env,jclass type,jobject action,jobjectArray modules,jthrowable original){
+    const char *failure=NULL;void *page=NULL,*unknownPage=NULL,*sameAddress=NULL;NativeThread thread={0};Owner *owner=NULL;
+    NativeMemoryAllocation *allocation=NULL,*first=NULL;DWORD fixtureTls=TLS_OUT_OF_INDEXES;int initialized=0;
+    LPVOID (WINAPI *allocate)(LPVOID,SIZE_T,DWORD,DWORD)=NULL;
+    jobject view=NULL,latest=NULL,unknownView=NULL;uint64_t before=0x1020304050607080ULL,after=0x8070605040302010ULL;
+    jlong oldBinding[2]={0},binding[2]={0};jfieldID observerMode=NULL,seen=NULL;
+#define OPAQUE_REQUIRE(CONDITION,MESSAGE) do{if(!(CONDITION)){failure=(MESSAGE);goto done;}}while(0)
+    OPAQUE_REQUIRE(!native_controller&&!native_vm&&native_tls==TLS_OUT_OF_INDEXES&&!native_memory_allocations&&!native_owners,"opaque fixture requires an uninstalled controller");
+    native_original=**env;initialized=1;fixtureTls=TlsAlloc();native_tls=fixtureTls;
+    OPAQUE_REQUIRE(fixtureTls!=TLS_OUT_OF_INDEXES&&TlsSetValue(fixtureTls,&thread),"opaque fixture TLS unavailable");
+    native_controller=(jclass)native_original.NewGlobalRef(env,type);native_file_bridge=(jclass)native_original.NewGlobalRef(env,type);
+    native_controls=(jclass)native_original.NewGlobalRef(env,type);native_memory_gate=native_original.GetStaticMethodID(env,type,"memoryRecoveryCaller","()Z");
+    native_buffer_address_query=native_original.GetStaticMethodID(env,type,"opaqueNativeAddress","(Ljava/lang/Object;[Ljava/lang/Module;)Z");
+    native_buffer_created_query=native_original.GetStaticMethodID(env,type,"opaqueNativeCreated","(Ljava/lang/Object;[Ljava/lang/Module;)V");
+    observerMode=native_original.GetStaticFieldID(env,type,"opaqueNativeObserverMode","I");seen=native_original.GetStaticFieldID(env,type,"opaqueNativeSeen","Ljava/lang/Object;");
+    HMODULE kernel=GetModuleHandleW(L"kernel32.dll");
+    allocate=(LPVOID (WINAPI*)(LPVOID,SIZE_T,DWORD,DWORD))GetProcAddress(kernel,"VirtualAlloc");
+    audit_opaque_real_free=(BOOL (WINAPI*)(LPVOID,SIZE_T,DWORD))GetProcAddress(kernel,"VirtualFree");
+    OPAQUE_REQUIRE(native_controller&&native_file_bridge&&native_controls&&native_memory_gate&&native_buffer_address_query&&native_buffer_created_query&&observerMode&&seen&&allocate&&audit_opaque_real_free,"opaque fixture original entries unavailable");
+    jobject module=native_original.GetObjectArrayElement(env,modules,0);owner=native_owner(env,module);if(module)native_original.DeleteLocalRef(env,module);
+    OPAQUE_REQUIRE(owner,"opaque fixture actual module unavailable");owner->producer=owner->stopped=1;OwnerLink selected={0};selected.owner=owner;
+    audit_opaque_address_original=native_original.GetDirectBufferAddress;audit_opaque_new_original=native_original.NewDirectByteBuffer;
+    audit_opaque_original_failure=original;audit_opaque_release_count=audit_opaque_original_calls=0;
+    page=allocate(NULL,65536,MEM_RESERVE|MEM_COMMIT,PAGE_READWRITE);OPAQUE_REQUIRE(page,"actual opaque allocation unavailable");sameAddress=page;
+    first=allocation=audit_opaque_record(env,type,&thread,page,owner);OPAQUE_REQUIRE(allocation&&allocation->address==(uint64_t)(uintptr_t)page,"production allocation completion lost actual return");
+    view=audit_opaque_new_original(env,page,32);OPAQUE_REQUIRE(view,"actual JNI direct view unavailable");
+    OPAQUE_REQUIRE(native_memory_buffer_observe(env,view,NULL,(uint64_t)(uintptr_t)page,32,oldBinding)&&oldBinding[0]&&oldBinding[1],"actual JNI view did not bind its observed allocation");
+    OPAQUE_REQUIRE(native_memory_buffer_use(env,view,oldBinding[0],(uint64_t)oldBinding[1],(uint64_t)(uintptr_t)page,32,1)&&allocation->users==1,"current native view did not retain its lifetime");
+    OPAQUE_REQUIRE(native_memory_buffer_use(env,view,oldBinding[0],(uint64_t)oldBinding[1],(uint64_t)(uintptr_t)page,32,0)&&!allocation->users,"native view lifetime did not release");
+    EnterCriticalSection(&allocation->gate);int retired=native_memory_retire_allocation(env,allocation,&selected);LeaveCriticalSection(&allocation->gate);
+    OPAQUE_REQUIRE(!retired&&allocation->alive&&!audit_opaque_release_count,"live borrowed view permitted private native free");
+    OPAQUE_REQUIRE(audit_opaque_revision(allocation,owner,before,after),"actual opaque byte revision unavailable");
+    OPAQUE_REQUIRE(audit_opaque_result(env,Java_dev_ronova_pro_bootstrap_NativeControl_restoreMemory0(env,type,modules,0,0,8),0,1)
+            &&allocation->alive&&!audit_opaque_release_count&&*(uint64_t*)page==after,"live borrowed view permitted raw native undo");
+    allocation->managed=1;allocation->bufferAction=native_original.NewWeakGlobalRef(env,action);audit_opaque_scope(env,type,allocation);
+    OPAQUE_REQUIRE(audit_opaque_result(env,Java_dev_ronova_pro_bootstrap_NativeControl_restoreBufferStorage0(env,type,action,oldBinding[0],oldBinding[1],modules,0,8),1,1)&&*(uint64_t*)page==after,"live borrowed view permitted managed native undo");
+    while(allocation->ranges){NativeMemoryRange *range=allocation->ranges;allocation->ranges=range->next;native_memory_revision_release(range->revision);free(range);}
+    OPAQUE_REQUIRE(audit_opaque_result(env,Java_dev_ronova_pro_bootstrap_NativeControl_restoreBufferStorage0(env,type,action,oldBinding[0],oldBinding[1],modules,0,0),1,1)&&!allocation->retiring,"empty revision list bypassed live borrowed view during managed free");
+    OPAQUE_REQUIRE(audit_opaque_original_release(env,type,&thread,allocation),"actual original native release did not finish its lifecycle");page=NULL;
+    OPAQUE_REQUIRE(!native_memory_buffer_use(env,view,oldBinding[0],(uint64_t)oldBinding[1],(uint64_t)(uintptr_t)sameAddress,32,1),"released native view retained its old lifetime");
+    page=allocate(sameAddress,65536,MEM_RESERVE|MEM_COMMIT,PAGE_READWRITE);OPAQUE_REQUIRE(page==sameAddress,"actual same-address allocation reuse unavailable");
+    allocation=audit_opaque_record(env,type,&thread,page,owner);OPAQUE_REQUIRE(allocation&&allocation!=first,"new actual allocation reused an old allocation token");
+    latest=audit_opaque_new_original(env,page,32);OPAQUE_REQUIRE(latest,"replacement JNI direct view unavailable");
+    allocation->managed=1;allocation->bufferAction=native_original.NewWeakGlobalRef(env,action);
+    OPAQUE_REQUIRE(native_memory_buffer_observe(env,latest,action,(uint64_t)(uintptr_t)page,32,binding)&&binding[0]&&binding[1],"replacement view binding unavailable");
+    OPAQUE_REQUIRE(!native_memory_buffer_use(env,view,oldBinding[0],(uint64_t)oldBinding[1],(uint64_t)(uintptr_t)page,32,1)
+            &&!native_memory_buffer_use(env,view,binding[0],(uint64_t)binding[1],(uint64_t)(uintptr_t)page,32,1),"same-address allocation admitted an old view or mixed lifetime");
+    audit_opaque_scope(env,type,allocation);
+    OPAQUE_REQUIRE(native_memory_buffer_use(env,latest,binding[0],(uint64_t)binding[1],(uint64_t)(uintptr_t)page,32,1),"replacement lifetime did not admit its actual view");
+    OPAQUE_REQUIRE(audit_opaque_result(env,Java_dev_ronova_pro_bootstrap_NativeControl_restoreBufferStorage0(env,type,action,binding[0],binding[1],modules,0,0),1,1)&&!allocation->retiring,"active actual view lease permitted managed free");
+    OPAQUE_REQUIRE(native_memory_buffer_use(env,latest,binding[0],(uint64_t)binding[1],(uint64_t)(uintptr_t)page,32,0),"replacement lifetime lease did not finish");
+    OPAQUE_REQUIRE(audit_opaque_result(env,Java_dev_ronova_pro_bootstrap_NativeControl_restoreBufferStorage0(env,type,action,binding[0],binding[1],modules,0,0),1,0)&&allocation->retiring,"actual managed retirement did not close lifetime admission");
+    OPAQUE_REQUIRE(!native_memory_buffer_use(env,latest,binding[0],(uint64_t)binding[1],(uint64_t)(uintptr_t)page,32,1),"managed retirement reopened a Java native view lease");
+    OPAQUE_REQUIRE(audit_opaque_original_release(env,type,&thread,allocation),"reserved managed original release did not finish");page=NULL;
+    page=allocate(sameAddress,65536,MEM_RESERVE|MEM_COMMIT,PAGE_READWRITE);OPAQUE_REQUIRE(page==sameAddress,"second actual address reuse unavailable");
+    allocation=audit_opaque_record(env,type,&thread,page,owner);OPAQUE_REQUIRE(allocation&&audit_opaque_revision(allocation,owner,before,after),"opaque exposure allocation unavailable");
+    jobject exposed=audit_opaque_new_original(env,page,32);OPAQUE_REQUIRE(exposed,"actual exposure view unavailable");
+    unknownPage=allocate(NULL,65536,MEM_RESERVE|MEM_COMMIT,PAGE_READWRITE);OPAQUE_REQUIRE(unknownPage,"unobserved original allocation unavailable");
+    native_original.NewDirectByteBuffer=audit_opaque_new_success;native_original.GetDirectBufferAddress=audit_opaque_address_success;
+    native_original.SetStaticIntField(env,type,observerMode,1);NativeMemoryAllocation *known=native_memory_allocations;
+    unknownView=native_buffer_new(env,unknownPage,32);DWORD newError=GetLastError();
+    OPAQUE_REQUIRE(unknownView&&!native_original.ExceptionCheck(env)&&newError==0x97c1
+            &&audit_opaque_address_original(env,unknownView)==unknownPage&&native_original.GetDirectBufferCapacity(env,unknownView)==32
+            &&native_memory_allocations==known&&!native_memory_unknown&&!allocation->opaque,"unknown JNI view observer failure changed original result or invented allocation provenance");
+    native_original.GetDirectBufferAddress=audit_opaque_address_failure;
+    void *address=native_buffer_address(env,exposed);DWORD error=GetLastError();
+    OPAQUE_REQUIRE(!address&&error==0x97b2&&audit_vm_pending_same(env,original),"original JNI address failure lost Throwable identity or LastError");
+    native_original.GetDirectBufferAddress=audit_opaque_address_success;
+    address=native_buffer_address(env,exposed);error=GetLastError();
+    OPAQUE_REQUIRE(address==page&&!native_original.ExceptionCheck(env)&&error==0x97b1&&allocation->opaque&&allocation->unknownUse&&!allocation->users&&!native_memory_unknown,"JNI address observer failure changed original result or failed to retain exact opaque allocation");
+    jlong read=Java_dev_ronova_pro_bootstrap_NativeControl_memoryWriteBegin0(env,type,(jlong)(uintptr_t)page,8,modules,JNI_TRUE,JNI_FALSE);
+    OPAQUE_REQUIRE(read&&!native_original.ExceptionCheck(env),"actual opaque native read receipt unavailable");
+    jobjectArray contributors=Java_dev_ronova_pro_bootstrap_NativeControl_memoryReadSources0(env,type,read);int knownSource=0,unknownSource=0;
+    jobject expectedModule=native_original.GetObjectArrayElement(env,modules,0);
+    if(contributors)for(jsize index=0;index<native_original.GetArrayLength(env,contributors);index++){
+        jobject source=native_original.GetObjectArrayElement(env,contributors,index);
+        if(!source)unknownSource++;else{if(native_original.IsSameObject(env,source,expectedModule))knownSource++;native_original.DeleteLocalRef(env,source);}
+    }
+    if(contributors)native_original.DeleteLocalRef(env,contributors);if(expectedModule)native_original.DeleteLocalRef(env,expectedModule);
+    Java_dev_ronova_pro_bootstrap_NativeControl_memoryWriteEnd0(env,type,read,JNI_TRUE);
+    OPAQUE_REQUIRE(knownSource==1&&unknownSource==1&&!native_original.ExceptionCheck(env)&&!native_memory_unknown,"opaque read lost its real source or unknown marker, or globally polluted unrelated native memory");
+    OPAQUE_REQUIRE(audit_opaque_result(env,Java_dev_ronova_pro_bootstrap_NativeControl_restoreMemory0(env,type,modules,0,0,8),0,1)&&allocation->alive&&*(uint64_t*)page==after,"opaque native address exposure permitted old byte-image undo");
+    native_original.SetStaticIntField(env,type,observerMode,2);address=native_buffer_address(env,exposed);
+    OPAQUE_REQUIRE(!address&&native_original.ExceptionCheck(env),"actual address lifetime refusal was softened");native_original.ExceptionClear(env);
+    NativeToolingScope stopped={0};stopped.owners=&selected;thread.tooling=&stopped;int calls=audit_opaque_original_calls;
+    address=native_buffer_address(env,exposed);OPAQUE_REQUIRE(!address&&native_original.ExceptionCheck(env)&&audit_opaque_original_calls==calls,"stopped native address source reached original API");native_original.ExceptionClear(env);
+    jobject denied=native_buffer_new(env,page,32);OPAQUE_REQUIRE(!denied&&native_original.ExceptionCheck(env)&&audit_opaque_original_calls==calls,"stopped native view source reached original API");native_original.ExceptionClear(env);thread.tooling=NULL;
+done:
+    if(initialized){
+        if(native_original.ExceptionCheck(env))native_original.ExceptionClear(env);
+        while(thread.memoryWrite)native_memory_write_end(&thread,thread.memoryWrite,0);
+        native_original.GetDirectBufferAddress=audit_opaque_address_original?audit_opaque_address_original:native_original.GetDirectBufferAddress;
+        native_original.NewDirectByteBuffer=audit_opaque_new_original?audit_opaque_new_original:native_original.NewDirectByteBuffer;
+        if(page&&audit_opaque_real_free)audit_opaque_real_free(page,0,MEM_RELEASE);
+        if(unknownPage&&audit_opaque_real_free)audit_opaque_real_free(unknownPage,0,MEM_RELEASE);
+        while(native_memory_allocations){NativeMemoryAllocation *next=native_memory_allocations->next;NativeMemoryAllocation *entry=native_memory_allocations;
+            native_memory_released(env,entry);native_owner_links_free(entry->sources);native_owner_links_free(entry->readers);native_owner_links_free(entry->preserved);
+            while(entry->interests){NativeMemoryInterest *interest=entry->interests;entry->interests=interest->next;free(interest);}DeleteCriticalSection(&entry->gate);free(entry);native_memory_allocations=next;}
+        native_owner_links_free(native_memory_unknown);native_memory_unknown=NULL;
+        while(native_owners){Owner *next=native_owners->next;if(native_owners->module)native_original.DeleteWeakGlobalRef(env,native_owners->module);free(native_owners);native_owners=next;}
+        native_private_unregister(&thread.jniRange);
+        if(native_controller)native_original.DeleteGlobalRef(env,native_controller);if(native_file_bridge)native_original.DeleteGlobalRef(env,native_file_bridge);if(native_controls)native_original.DeleteGlobalRef(env,native_controls);
+        native_controller=native_file_bridge=native_controls=NULL;native_memory_gate=NULL;native_buffer_address_query=native_buffer_created_query=NULL;
+        if(fixtureTls!=TLS_OUT_OF_INDEXES){TlsSetValue(fixtureTls,NULL);TlsFree(fixtureTls);}native_tls=TLS_OUT_OF_INDEXES;
+        audit_opaque_original_failure=NULL;audit_opaque_address_original=NULL;audit_opaque_new_original=NULL;memset(&native_original,0,sizeof(native_original));
+    }
+    if(failure)audit_physical_failure(env,failure);
+#undef OPAQUE_REQUIRE
+    return failure?JNI_FALSE:JNI_TRUE;
+}

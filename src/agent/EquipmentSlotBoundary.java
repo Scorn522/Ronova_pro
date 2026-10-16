@@ -15,41 +15,52 @@ final class EquipmentSlotBoundary {
     static final String DESCRIPTOR="(Lnet/minecraft/world/entity/EquipmentSlot;)Lnet/minecraft/world/item/ItemStack;";
     private static final String SLOT="net/minecraft/world/entity/EquipmentSlot",STACK="net/minecraft/world/item/ItemStack",BRIDGE="dev/ronova/pro/bootstrap/ControlBridge";
     private static final String TOKEN="Ljava/lang/Object;";
+    private static final int GETTER=0,HELPER=1,KEY=2;
     private static final class Getter {
-        final WeakReference<Class<?>> owner;final String name,descriptor;volatile boolean helper,transformed,transformedHelper;
-        Getter(Class<?> actual,String name,String descriptor,boolean helper){owner=new WeakReference<>(actual);this.name=name;this.descriptor=descriptor;this.helper=helper;}
+        final WeakReference<Class<?>> owner;final String name,descriptor;volatile int role,transformedRole=-1;volatile boolean transformed;
+        Getter(Class<?> actual,String name,String descriptor,int role){owner=new WeakReference<>(actual);this.name=name;this.descriptor=descriptor;this.role=role;}
     }
     private static volatile Getter[] getters=new Getter[0];
     private EquipmentSlotBoundary(){ }
 
-    private static synchronized Getter declare(Class<?> actual,String name,String descriptor,boolean helper){
+    private static synchronized Getter declare(Class<?> actual,String name,String descriptor,int role){
         List<Getter> living=new ArrayList<>();Getter found=null;
         for(Getter getter:getters)if(getter.owner.get()!=null){living.add(getter);if(getter.owner.get()==actual&&getter.name.equals(name)&&getter.descriptor.equals(descriptor))found=getter;}
         if(found!=null){
-            if(found.helper!=helper){
+            if(found.role!=role){
+                if(found.role==KEY&&role==HELPER)return found;
+                if(found.role==HELPER&&role==KEY){found.role=KEY;found.transformed=false;return found;}
                 if(!DESCRIPTOR.equals(descriptor)||!name.equals("getItemBySlot")&&!name.equals("m_6844_"))throw new IllegalStateException("EQUIPMENT_SLOT_METHOD_ROLE_CONFLICT:"+actual.getName()+"#"+name+descriptor);
                 // A canonical getter's root hook also services an exact nested
                 // helper call. Upgrade a helper-only body once; never double-weave it.
-                if(!helper){found.helper=false;found.transformed=false;}
+                if(role==GETTER){found.role=GETTER;found.transformed=false;}
             }
             return found;
         }
-        Getter added=new Getter(actual,name,descriptor,helper);living.add(added);Getter[] next=living.toArray(Getter[]::new);
+        Getter added=new Getter(actual,name,descriptor,role);living.add(added);Getter[] next=living.toArray(Getter[]::new);
         ControlImages.protect(next,added,added.owner);getters=next;return added;
     }
     /** No loaded-class scan or class-loader-wide registration is involved. */
     static void install(Instrumentation api,Class<?> actual,String name,String descriptor){
         Objects.requireNonNull(actual);Objects.requireNonNull(name);Objects.requireNonNull(descriptor);
         if(!DESCRIPTOR.equals(descriptor)||!name.equals("getItemBySlot")&&!name.equals("m_6844_"))throw new IllegalArgumentException("EQUIPMENT_SLOT_GETTER_SIGNATURE_REQUIRED");
-        install(api,actual,name,descriptor,false);
+        install(api,actual,name,descriptor,GETTER);
     }
     static void installHelper(Instrumentation api,Class<?> actual,String name,String descriptor){
         Objects.requireNonNull(actual);Objects.requireNonNull(name);Objects.requireNonNull(descriptor);
         if(actual.getClassLoader()==null)throw new IllegalStateException("EQUIPMENT_SLOT_PLATFORM_HELPER_UNSUPPORTED:"+actual.getName());
         if(name.startsWith("<"))throw new IllegalArgumentException("EQUIPMENT_SLOT_CONSTRUCTOR_HELPER_UNSUPPORTED");
-        install(api,actual,name,descriptor,true);
+        install(api,actual,name,descriptor,HELPER);
     }
-    private static void install(Instrumentation api,Class<?> actual,String name,String descriptor,boolean helper){
+    /** Only the actual virtual key contract reached by this one Map query. */
+    static void installKey(Instrumentation api,Class<?> actual,String name,String descriptor){
+        Objects.requireNonNull(actual);Objects.requireNonNull(name);Objects.requireNonNull(descriptor);
+        if(actual.getClassLoader()==null)throw new IllegalStateException("EQUIPMENT_SLOT_PLATFORM_KEY_UNSUPPORTED:"+actual.getName());
+        if(!(name.equals("hashCode")&&descriptor.equals("()I")||name.equals("equals")&&descriptor.equals("(Ljava/lang/Object;)Z")
+                ||name.equals("compareTo")&&descriptor.equals("(Ljava/lang/Object;)I")))throw new IllegalArgumentException("EQUIPMENT_SLOT_KEY_SIGNATURE_REQUIRED");
+        install(api,actual,name,descriptor,KEY);
+    }
+    private static void install(Instrumentation api,Class<?> actual,String name,String descriptor,int role){
         if(api==null||actual.isArray()||actual.isPrimitive()||!api.isModifiableClass(actual))throw new IllegalStateException("EQUIPMENT_SLOT_INSTALL_UNAVAILABLE:"+actual.getName());
         java.lang.reflect.Method declared=null;
         for(var method:actual.getDeclaredMethods())if(method.getName().equals(name)&&Type.getMethodDescriptor(method).equals(descriptor)){declared=method;break;}
@@ -57,48 +68,51 @@ final class EquipmentSlotBoundary {
         int access=declared.getModifiers();
         if(Modifier.isNative(access))throw new IllegalStateException("EQUIPMENT_SLOT_NATIVE_GETTER_UNSUPPORTED:"+actual.getName());
         if(Modifier.isAbstract(access))throw new IllegalStateException("EQUIPMENT_SLOT_ABSTRACT_GETTER_UNSUPPORTED:"+actual.getName());
-        if(!helper&&(Modifier.isStatic(access)||Modifier.isPrivate(access)))throw new IllegalStateException("EQUIPMENT_SLOT_VIRTUAL_GETTER_REQUIRED:"+actual.getName());
-        Getter getter=declare(actual,name,descriptor,helper);
+        if(role!=HELPER&&(Modifier.isStatic(access)||Modifier.isPrivate(access)))throw new IllegalStateException("EQUIPMENT_SLOT_VIRTUAL_GETTER_REQUIRED:"+actual.getName());
+        Getter getter=declare(actual,name,descriptor,role);
         synchronized(getter){
-            if(getter.transformed&&getter.transformedHelper==getter.helper)return;
+            if(getter.transformed&&getter.transformedRole==getter.role)return;
             try{api.retransformClasses(actual);}
             catch(java.lang.instrument.UnmodifiableClassException failure){getter.transformed=false;throw new IllegalStateException("EQUIPMENT_SLOT_INSTALL_FAILED:"+actual.getName(),failure);}
             catch(RuntimeException|Error failure){getter.transformed=false;throw failure;}
-            if(!getter.transformed||getter.transformedHelper!=getter.helper)throw new IllegalStateException("EQUIPMENT_SLOT_TRANSFORM_MISSING:"+actual.getName());
+            if(!getter.transformed||getter.transformedRole!=getter.role)throw new IllegalStateException("EQUIPMENT_SLOT_TRANSFORM_MISSING:"+actual.getName());
         }
     }
     static void transformFailed(Class<?> actual){if(actual!=null)for(Getter getter:getters)if(getter.owner.get()==actual)getter.transformed=false;}
     /** This pass must precede dispatch/action fallbacks, which are not natural returns. */
     static byte[] transform(ClassLoader loader,String name,Class<?> actual,byte[] bytes){
         if(actual==null||name==null||actual.getClassLoader()!=loader||!actual.getName().replace('.','/').equals(name))return null;
-        List<Getter> selected=new ArrayList<>();java.util.IdentityHashMap<Getter,Boolean> roles=new java.util.IdentityHashMap<>();
-        for(Getter getter:getters)if(getter.owner.get()==actual){getter.transformed=false;selected.add(getter);roles.put(getter,getter.helper);}
+        List<Getter> selected=new ArrayList<>();java.util.IdentityHashMap<Getter,Integer> roles=new java.util.IdentityHashMap<>();
+        for(Getter getter:getters)if(getter.owner.get()==actual){getter.transformed=false;selected.add(getter);roles.put(getter,getter.role);}
         if(selected.isEmpty())return null;
         ClassNode node=new ClassNode();new ClassReader(bytes).accept(node,0);
         for(Getter getter:selected){
-            boolean helper=roles.get(getter);
+            int role=roles.get(getter);
             MethodNode found=null;for(MethodNode method:node.methods)if(getter.name.equals(method.name)&&getter.descriptor.equals(method.desc)){if(found!=null)throw new IllegalStateException("EQUIPMENT_SLOT_AMBIGUOUS_BODY:"+name);found=method;}
             if(found==null)throw new IllegalStateException("EQUIPMENT_SLOT_BODY_MISSING:"+name);
             if(found.name.startsWith("<")||(found.access&(Opcodes.ACC_NATIVE|Opcodes.ACC_ABSTRACT))!=0
-                    ||!helper&&(found.access&(Opcodes.ACC_STATIC|Opcodes.ACC_PRIVATE))!=0)throw new IllegalStateException("EQUIPMENT_SLOT_BODY_UNSUPPORTED:"+name);
-            if(helper)weave(node.name,found,true);else weave(found);
+                    ||role!=HELPER&&(found.access&(Opcodes.ACC_STATIC|Opcodes.ACC_PRIVATE))!=0)throw new IllegalStateException("EQUIPMENT_SLOT_BODY_UNSUPPORTED:"+name);
+            weave(node.name,found,role);
         }
         ControlClassWriter writer=new ControlClassWriter(loader,node);node.accept(writer);byte[] result=writer.toByteArray();
-        for(Getter getter:selected){getter.transformedHelper=roles.get(getter);getter.transformed=true;}return result;
+        for(Getter getter:selected){getter.transformedRole=roles.get(getter);getter.transformed=true;}return result;
     }
     private static void call(InsnList code,String name,String descriptor){code.add(new MethodInsnNode(Opcodes.INVOKESTATIC,BRIDGE,name,descriptor,false));}
     private static int local(MethodNode method,Type type){int at=method.maxLocals;method.maxLocals+=type.getSize();if(method.maxLocals>65535)throw new IllegalStateException("EQUIPMENT_SLOT_LOCAL_LIMIT");return at;}
     private static void load(InsnList code,Type type,int slot){code.add(new VarInsnNode(type.getOpcode(Opcodes.ILOAD),slot));}
     private static void store(InsnList code,Type type,int slot){code.add(new VarInsnNode(type.getOpcode(Opcodes.ISTORE),slot));}
     private static void unresolved(InsnList code,int token){code.add(new VarInsnNode(Opcodes.ALOAD,token));call(code,"equipmentSlotUnresolved","("+TOKEN+")V");}
-    private static void weave(MethodNode method){weave(null,method,false);}
+    private static void weave(MethodNode method){weave(null,method,GETTER);}
     private static void arguments(InsnList code,Type[] types,int[] locals){
         code.add(new LdcInsnNode(types.length));code.add(new TypeInsnNode(Opcodes.ANEWARRAY,"java/lang/Object"));
         for(int at=0;at<types.length;at++){
             code.add(new InsnNode(Opcodes.DUP));code.add(new LdcInsnNode(at));load(code,types[at],locals[at]);ControlClassWriter.box(code,types[at]);code.add(new InsnNode(Opcodes.AASTORE));
         }
     }
-    private static void weave(String declaring,MethodNode method,boolean helper){
+    private static void weave(String declaring,MethodNode method,boolean helper){weave(declaring,method,helper?HELPER:GETTER);}
+    private static void weaveKey(String declaring,MethodNode method){weave(declaring,method,KEY);}
+    private static void weave(String declaring,MethodNode method,int role){
+        boolean helper=role!=GETTER;
         AbstractInsnNode[] original=method.instructions.toArray();
         Type result=Type.getReturnType(method.desc);int token=local(method,Type.getType(Object.class)),returned=result.getSort()==Type.VOID?-1:local(method,result),failure=local(method,Type.getType(Throwable.class));
         LabelNode start=new LabelNode(),end=new LabelNode(),handler=new LabelNode();InsnList head=new InsnList();
@@ -107,13 +121,15 @@ final class EquipmentSlotBoundary {
             for(int at=0;at<types.length;at++){slots[at]=cursor;cursor+=types[at].getSize();}
             head.add(statik?new InsnNode(Opcodes.ACONST_NULL):new VarInsnNode(Opcodes.ALOAD,0));head.add(new LdcInsnNode(Type.getObjectType(declaring)));
             head.add(new LdcInsnNode(method.name));head.add(new LdcInsnNode(method.desc));arguments(head,types,slots);
-            call(head,"beginEquipmentSlotMethod","("+TOKEN+"Ljava/lang/Class;Ljava/lang/String;Ljava/lang/String;[Ljava/lang/Object;)"+TOKEN);
+            call(head,role==KEY?"beginEquipmentSlotKey":"beginEquipmentSlotMethod","("+TOKEN+"Ljava/lang/Class;Ljava/lang/String;Ljava/lang/String;[Ljava/lang/Object;)"+TOKEN);
         }else{
             int receiver=local(method,Type.getType(Object.class)),slot=local(method,Type.getType(Object.class));
             head.add(new VarInsnNode(Opcodes.ALOAD,0));head.add(new VarInsnNode(Opcodes.ASTORE,receiver));head.add(new VarInsnNode(Opcodes.ALOAD,1));head.add(new VarInsnNode(Opcodes.ASTORE,slot));
             head.add(new VarInsnNode(Opcodes.ALOAD,receiver));head.add(new VarInsnNode(Opcodes.ALOAD,slot));call(head,"beginEquipmentSlotRead","("+TOKEN+TOKEN+")"+TOKEN);
         }
-        head.add(new VarInsnNode(Opcodes.ASTORE,token));head.add(start);method.instructions.insert(head);
+        head.add(new VarInsnNode(Opcodes.ASTORE,token));head.add(start);
+        if((method.access&Opcodes.ACC_SYNCHRONIZED)!=0)unresolved(head,token);
+        method.instructions.insert(head);
         // An original handler can swallow a failed read/call before its success
         // witness exists. Its fallback must not masquerade as a complete trace.
         Set<LabelNode> caught=java.util.Collections.newSetFromMap(new java.util.IdentityHashMap<>());
@@ -121,6 +137,11 @@ final class EquipmentSlotBoundary {
         for(AbstractInsnNode instruction:original){
             if(instruction instanceof FieldInsnNode field&&(field.getOpcode()==Opcodes.GETFIELD||field.getOpcode()==Opcodes.GETSTATIC)){fieldRead(method,field,token);continue;}
             int opcode=instruction.getOpcode();
+            if(opcode==Opcodes.PUTFIELD||opcode==Opcodes.PUTSTATIC||opcode>=Opcodes.IASTORE&&opcode<=Opcodes.SASTORE
+                    ||opcode==Opcodes.MONITORENTER||opcode==Opcodes.MONITOREXIT||opcode==Opcodes.ATHROW
+                    ||instruction instanceof LdcInsnNode constant&&constant.cst instanceof ConstantDynamic){
+                InsnList unknown=new InsnList();unresolved(unknown,token);method.instructions.insertBefore(instruction,unknown);
+            }
             if(opcode>=Opcodes.IALOAD&&opcode<=Opcodes.SALOAD){arrayRead(method,instruction,token);continue;}
             if(instruction instanceof MethodInsnNode invoke){
                 boolean virtual=invoke.getOpcode()==Opcodes.INVOKEVIRTUAL||invoke.getOpcode()==Opcodes.INVOKEINTERFACE;
@@ -134,13 +155,13 @@ final class EquipmentSlotBoundary {
             if(opcode>=Opcodes.IRETURN&&opcode<=Opcodes.RETURN){
                 InsnList finish=new InsnList();if(returned>=0)store(finish,result,returned);finish.add(new VarInsnNode(Opcodes.ALOAD,token));
                 if(returned<0)finish.add(new InsnNode(Opcodes.ACONST_NULL));else{load(finish,result,returned);ControlClassWriter.box(finish,result);}
-                call(finish,helper?"endEquipmentSlotMethod":"observeEquipmentSlot","("+TOKEN+TOKEN+")V");
+                call(finish,role==KEY?"endEquipmentSlotKey":helper?"endEquipmentSlotMethod":"observeEquipmentSlot","("+TOKEN+TOKEN+")V");
                 if(returned>=0)load(finish,result,returned);method.instructions.insertBefore(instruction,finish);
             }
         }
         method.instructions.add(end);method.instructions.add(handler);method.instructions.add(new VarInsnNode(Opcodes.ASTORE,failure));
         method.instructions.add(new VarInsnNode(Opcodes.ALOAD,token));method.instructions.add(new VarInsnNode(Opcodes.ALOAD,failure));
-        method.instructions.add(new MethodInsnNode(Opcodes.INVOKESTATIC,BRIDGE,helper?"failedEquipmentSlotMethod":"failedEquipmentSlotRead","("+TOKEN+"Ljava/lang/Throwable;)V",false));
+        method.instructions.add(new MethodInsnNode(Opcodes.INVOKESTATIC,BRIDGE,role==KEY?"failedEquipmentSlotKey":helper?"failedEquipmentSlotMethod":"failedEquipmentSlotRead","("+TOKEN+"Ljava/lang/Throwable;)V",false));
         method.instructions.add(new VarInsnNode(Opcodes.ALOAD,failure));method.instructions.add(new InsnNode(Opcodes.ATHROW));
         method.tryCatchBlocks.add(new TryCatchBlockNode(start,end,handler,"java/lang/Throwable"));
     }
