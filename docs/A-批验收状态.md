@@ -1,5 +1,22 @@
 # Ronova Pro 当前进度
 
+## 2026-10-16：C 接续——移除旧 JDK 容器广谱 Hook
+
+接续 `35fb3c8`，Java ABI91 / Native ABI82 / SourceMapBridge2 / Storage3 / Journal6，协议 `r3-client-8`。用户明确选择先彻底删除旧容器 Hook，接受对应防护暂缺；本批不做自定义 JVM，不提前补造替代覆盖。
+
+移除 HashMap/Node/LinkedHashMap/Map、ArrayList 及其视图/迭代器、IdentityHashMap、AbstractCollection、ConcurrentHashMap、AtomicReference 和 CopyOnWriteArrayList 的旧 JDK 本体变换、重变换安装和镜像锁定。删除 HashMapBoundary、SourceMapBoundary、ConcurrentSourceBoundary，连同已无调用的容器适配器、构造 born/StackWalker 分类、普通对象操作帧/计数、节点绑定和排空门。普通容器构造/方法不再进入这套追踪；不把 retained root 控制宣称为容器写拦截的等价替代。
+
+保留 premain、Bootstrap、JVMTI/Native、线程/执行器/任务/类定义/Native binding 等根入口，以及显式游戏、Fastutil、字段/Unsafe/JNI 与数组控制。任务交接所需队列/引用的既有准确边界继续保留；没有宣称整个 JDK 完全不变换。Native 源码和 ABI82 本批未改。SourceMapBridge2 只在实际 holder/carrier 注册处保存弱关系，字段观察与 Fastutil 修订号独立于已删的全局作用域。Core 的剩余控制就绪不再强依赖已移除的容器安装位；容器保护缺口仍逐实际义务报告。
+
+JDK Map/List/Set/Atomic 的一致快照、来源回填冻结、节点/视图写入防护及依赖它们的清理不再标为已覆盖。相关接口返回不可用，不执行传入动作；去掉 CHM 原始快照/直接清理和 Atomic/COW 无观察读回等旧回退。当前及历史边的缺失作用域不会产生新的完成事实；组清理、嵌套来源和客户端监听器清理记录 `JDK_CONTAINER_HOOKS_REMOVED`。自身外观、武器、驱动部署和源码 ZIP 暂缓，完整 C/B 仍未完成。
+
+统一构建 `build-c-java91-native82-no-container-hooks-20261016.log` **PASS，1分3秒**，21项任务中14项执行、7项保持最新。Native82 沿用已构建产物，本轮没有 Native 源码变更。检查器首次编译因 Runnable 与现有 Action 接口类型不匹配 **FAILED**（原 `compile-c-java91-native82-no-container-hooks-20261016.log` 保留）；改成原动作的方法引用后，仅重编检查器，`compile-c-java91-native82-no-container-hooks-fixed-20261016.log` **退出0**，未重复主构建。
+
+现有 AuditFixCheck 的 `container-scope-removal` **退出0，CONTAINER_SCOPE_REMOVAL_PASS**，日志 `c-java91-native82-no-container-hooks-bytecode-20261016.log`。检查确认 BackingBoundary 对真实八种 JDK 容器类不再产生变换；HashMap/CHM 的不可用快照、遍历与动作不触发操作，ArrayList/COW 的无作用域移除拒绝并保留原元素；历史 Atomic/COW/List/Map 边不据普通读回新增完成事实。Core 与 Agent 均未安装，只确认上述实际接口/变换行为；真实 premain、Native 安装、游戏场景和性能 **NOTRUN**。没有运行旧矩阵。
+
+匹配候选 `distribution/candidate-c-java91-native82-no-container-hooks-wip-20261016`：Core2917394、prelaunch23226字节。Core 内嵌 Agent/Bootstrap 的三种已删容器变换类及旧 Frame/AnalysisCaller/ConcurrentFrame 类确认不再残留，避免增量构建带回旧实现。源码、匹配 JAR 和既有摘要同步 GitHub，未生成源码 ZIP。旧记录保留；被删容器防护没有因本批构建通过而恢复，完整 C/B 尚未完成。
+
+---
 ## 2026-10-16：C 接续——启动交接与统一生命保护
 
 接续 `6fc3ea4`，Java ABI90 / Native ABI82 / Storage3 / Journal6，协议 `r3-client-8`。本包先写齐再统一构建，吸收 Buer 的阶段交接与集中入口组织思路，没有复制其包名信任、全局属性授权或函数表回写。

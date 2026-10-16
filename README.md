@@ -1,7 +1,8 @@
 # Ronova Pro
 
-主工程：`D:\桌面\ronova_GPT`。Java ABI90 / Native ABI82 / Storage3 / Journal6，客户端协议 `r3-client-8`。
+主工程：`D:\桌面\ronova_GPT`。Java ABI91 / Native ABI82 / Storage3 / Journal6，客户端协议 `r3-client-8`。
 Java 17；用户态 GNU C23 / GNU C++23；独立 Windows 驱动及管理工具 C17。
+本版按用户选择删除旧 JDK 容器广谱 Hook：HashMap/Node/LinkedHashMap/Map、ArrayList 及其视图/迭代器、IdentityHashMap、ConcurrentHashMap、AtomicReference、CopyOnWriteArrayList 和 AbstractCollection 不再接旧变换、构造观察或操作追踪。保留 premain、Bootstrap、JVMTI/Native、线程/任务/类定义等根入口及明确的游戏/Fastutil 目标。普通容器方法写入、来源回填冻结与依赖这些作用域的清理暂时缺失，明确报告 JDK_CONTAINER_HOOKS_REMOVED；以下既有能力描述只在保留路径范围内成立，不能理解为 Native 已补齐被删防护。
 启动交接复用当前真实 Agent 状态，安装中与失败后的已有部分 hook 不重复安装；预启动仅报告准备完成，保存的停组目标与非默认返回策略按实际所选服务端世界读回。保护与禁疗共用准确当前对象、代次、身份和世界资格；吸收值、着火、自定义 setter 覆写与对应字段/Unsafe/JNI 写门接同一判定。
 自定义业务包装中的八种标准 SAM 调用沿当前真实方法、原指令与实际 callback/参数接续当前能力消费者；同步交接复用原调用的来源和返回关系。BiFunction/BiConsumer 的标准 andThen 接各原回调，保持原参数、中间结果、顺序和异常。未知具体类调用、反射/MH 与原生不透明路径继续保留边界。
 当前接续补齐手动冻结区域的实际 section/palette 写入判断、字段图原子恢复与已知共享来源保留，并修正 Netty 停源拒绝抢在原 promise 校验之前的误伤。未知载体与未观察底层写入仍按状态页保留边界。

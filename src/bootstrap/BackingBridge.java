@@ -5,14 +5,12 @@ import java.lang.reflect.*;
 import java.util.*;
 import java.util.function.*;
 
-/** Actual collection/array mutation adapters. No registration or authority is accepted from a caller. */
+/** Array, exact fastutil and native mutation adapters. No caller supplies registration or authority. */
 public final class BackingBridge {
     public static final Object UNHANDLED=new Object();
     private record Policy(MethodHandle known,MethodHandle element,MethodHandle array,MethodHandle offset,MethodHandle memory) { }
     private static volatile Policy policy;
     private static final ThreadLocal<Boolean> POLICY_CALLBACK=new ThreadLocal<>();
-    private static final Field MOD_COUNT;
-    static {try {MOD_COUNT=AbstractList.class.getDeclaredField("modCount");MOD_COUNT.setAccessible(true);}catch(Exception e){throw new ExceptionInInitializerError(e);}}
     private BackingBridge() { }
     static void install(MethodHandle known,MethodHandle element,MethodHandle array,MethodHandle offset,MethodHandle memory) {
         policy=new Policy(known.asType(MethodType.methodType(boolean.class,Object.class)),
@@ -235,7 +233,6 @@ public final class BackingBridge {
     public static void setAll(double[] array,IntToDoubleFunction function) {Objects.requireNonNull(function);for(int i=0;i<array.length;i++)doubleStore(array,i,function.applyAsDouble(i));}
     public static void parallelSetAll(double[] array,IntToDoubleFunction function) {Objects.requireNonNull(function);java.util.stream.IntStream.range(0,array.length).parallel().forEach(i->doubleStore(array,i,function.applyAsDouble(i)));}
     private static final ThreadLocal<Boolean> WRAPPING=new ThreadLocal<>();
-    private static final ThreadLocal<Boolean> LIST_INTERNAL=new ThreadLocal<>();
     private static Object unsafe;
     private static final Map<String,Method> READERS=new HashMap<>();
     private static synchronized Object readUnsafe(Object receiver,long offset,String kind) {
@@ -343,92 +340,6 @@ public final class BackingBridge {
     public static void setLong(Object array,int index,long value) {typedSet(array,index,value,'J');}
     public static void setFloat(Object array,int index,float value) {typedSet(array,index,value,'F');}
     public static void setDouble(Object array,int index,double value) {typedSet(array,index,value,'D');}
-    private static int version(ArrayList<?> list) {
-        try {return MOD_COUNT.getInt(list);}catch(IllegalAccessException e){throw new IllegalStateException(e);}
-    }
-    private static void version(ArrayList<?> list,int value) {
-        try {MOD_COUNT.setInt(list,value);}catch(IllegalAccessException e){throw new IllegalStateException(e);}
-    }
-    public static Object identityMutation(Object receiver,String method,Object[] args) {
-        if(ControlBridge.controlMutationAllowed(receiver))return UNHANDLED;
-        if(method.equals("put"))return ((Map<?,?>)receiver).get(args[0]);
-        if(method.equals("remove")&&args.length==2)return Boolean.FALSE;
-        return null;
-    }
-    private static final class ListViews {
-        static final Field ROOT,OFFSET,SIZE,PARENT,ITR_ROOT,ITR_LAST,ITR_MOD,VIEW_ITR_ROOT,VIEW_ITR_LAST,VIEW_ITR_MOD;
-        static {
-            try {
-                Class<?> view=Class.forName("java.util.ArrayList$SubList"),itr=Class.forName("java.util.ArrayList$Itr"),viewItr=Class.forName("java.util.ArrayList$SubList$1");
-                ROOT=field(view,"root");OFFSET=field(view,"offset");SIZE=field(view,"size");PARENT=field(view,"parent");
-                ITR_ROOT=field(itr,"this$0");ITR_LAST=field(itr,"lastRet");ITR_MOD=field(itr,"expectedModCount");
-                VIEW_ITR_ROOT=field(viewItr,"this$0");VIEW_ITR_LAST=field(viewItr,"lastRet");VIEW_ITR_MOD=field(viewItr,"expectedModCount");
-            }catch(Exception failure){throw new ExceptionInInitializerError(failure);}
-        }
-        private static Field field(Class<?> type,String name)throws ReflectiveOperationException {Field field=type.getDeclaredField(name);field.setAccessible(true);return field;}
-    }
-    public static boolean listViewRemovalDenied(Object receiver,Object value) {
-        if(receiver==null||!receiver.getClass().getName().equals("java.util.ArrayList$SubList")
-                ||POLICY_CALLBACK.get()!=null||LIST_INTERNAL.get()!=null)return false;
-        try {
-            ArrayList<?> root=(ArrayList<?>)ListViews.ROOT.get(receiver);if(!known(root))return false;
-            List<?> view=(List<?>)receiver;int at=view.indexOf(value);
-            return at>=0&&deny(root,view.get(at),null);
-        }catch(ReflectiveOperationException failure){throw new IllegalStateException("LIST_VIEW_REMOVE_OBJECT",failure);}
-    }
-    /** Reject before the iterator rewinds its cursor or changes a view's size. */
-    public static boolean listIteratorDenied(Object iterator,Object value,boolean add) {
-        if(POLICY_CALLBACK.get()!=null||LIST_INTERNAL.get()!=null)return false;
-        try {
-            boolean view=iterator.getClass().getName().equals("java.util.ArrayList$SubList$1");
-            Object owner=(view?ListViews.VIEW_ITR_ROOT:ListViews.ITR_ROOT).get(iterator);
-            ArrayList<?> root=(ArrayList<?>)(view?ListViews.ROOT.get(owner):owner);
-            if(!known(root))return false;
-            Field last=view?ListViews.VIEW_ITR_LAST:ListViews.ITR_LAST;
-            if((view?ListViews.VIEW_ITR_MOD:ListViews.ITR_MOD).getInt(iterator)!=version(root))return false;
-            if(add)return deny(root,null,value);
-            int at=last.getInt(iterator);if(at<0)return false;
-            int offset=view?ListViews.OFFSET.getInt(owner):0;
-            if(deny(root,root.get(offset+at),null)) {last.setInt(iterator,-1);return true;}
-            return false;
-        }catch(ReflectiveOperationException failure){throw new IllegalStateException("LIST_ITERATOR_BOUNDARY",failure);}
-    }
-    private static final class ViewProgress {
-        final ArrayList<?> root;int expected;
-        ViewProgress(ArrayList<?> root){this.root=root;expected=version(root);}
-        void changed(int before){if(expected==before)expected=version(root);}
-    }
-    @SuppressWarnings({"rawtypes","unchecked"})
-    public static Object listViewMutation(Object view,String method,Object[] args) {
-        if(POLICY_CALLBACK.get()!=null||LIST_INTERNAL.get()!=null)return UNHANDLED;
-        try {
-            ArrayList root=(ArrayList)ListViews.ROOT.get(view);if(!known(root))return UNHANDLED;
-            if(MOD_COUNT.getInt(view)!=version(root))throw new ConcurrentModificationException();
-            int offset=ListViews.OFFSET.getInt(view),size=ListViews.SIZE.getInt(view),before=root.size();Object result;ViewProgress progress=new ViewProgress(root);
-            try {switch(method) {
-                case "set" -> {int at=(Integer)args[0];Objects.checkIndex(at,size);return root.set(offset+at,args[1]);}
-                case "remove" -> {int at=(Integer)args[0];Objects.checkIndex(at,size);result=root.remove(offset+at);progress.changed(progress.expected);}
-                case "add" -> {int at=(Integer)args[0];Objects.checkIndex(at,size+1);root.add(offset+at,args[1]);progress.changed(progress.expected);result=null;}
-                case "addAll" -> {int at=args.length==2?(Integer)args[0]:size;Objects.checkIndex(at,size+1);Object[] input=((Collection)Objects.requireNonNull(args[args.length-1])).toArray();
-                    if(version(root)!=progress.expected)throw new ConcurrentModificationException();
-                    result=root.addAll(offset+at,Arrays.asList(input));progress.changed(progress.expected);}
-                case "removeRange" -> {int from=(Integer)args[0],to=(Integer)args[1];Objects.checkFromToIndex(from,to,size);result=listMutation(root,"removeRange",new Object[]{offset+from,offset+to},progress);}
-                case "removeIf" -> {result=listMutation(root,"removeIf",new Object[]{args[0],offset,offset+size},progress);}
-                case "batchRemove" -> {result=listMutation(root,"batchRemove",new Object[]{args[0],args[1],offset,offset+size},progress);}
-                case "replaceAll" -> {return listMutation(root,"replaceAllRange",new Object[]{args[0],offset,offset+size},progress);}
-                default -> {return UNHANDLED;}
-            }
-            return result;
-            } finally {
-                int delta=root.size()-before;
-                // Only our own structural writes advance this view. A callback's root mutation
-                // keeps the original fail-fast version, including when its exception is not CME.
-                for(Object current=version(root)==progress.expected?view:null;current!=null;current=ListViews.PARENT.get(current)) {
-                    ListViews.SIZE.setInt(current,ListViews.SIZE.getInt(current)+delta);MOD_COUNT.setInt(current,version(root));
-                }
-            }
-        }catch(ReflectiveOperationException failure){throw new IllegalStateException("LIST_VIEW_BOUNDARY",failure);}
-    }
     /** The exact fastutil writer owns the receiver gate before inspecting proposals. */
     @SuppressWarnings({"rawtypes","unchecked"})
     public static Object fastCollectionMutation(Object receiver,String method,Object[] args){
@@ -468,82 +379,5 @@ public final class BackingBridge {
             return null;
         }
         return UNHANDLED;
-    }
-    @SuppressWarnings({"rawtypes","unchecked"})
-    public static Object listMutation(Object receiver,String method,Object[] args) {
-        return listMutation(receiver,method,args,null);
-    }
-    @SuppressWarnings({"rawtypes","unchecked"})
-    private static Object listMutation(Object receiver,String method,Object[] args,ViewProgress progress) {
-        if(LIST_INTERNAL.get()!=null||POLICY_CALLBACK.get()!=null)return UNHANDLED;
-        if(receiver==null||receiver.getClass()!=ArrayList.class||!known(receiver))return UNHANDLED;
-        ArrayList list=(ArrayList)receiver;
-        boolean controlled=ControlBridge.controlled(receiver);
-        if(controlled&&!ControlBridge.controlCaller())return switch(method) {
-            case "set","removeIndex"->list.get((Integer)args[0]);case "add","addAll","removeObject","removeIf","batchRemove"->Boolean.FALSE;default->null;
-        };
-        // The real writer was just authenticated. Before a business element
-        // policy exists, plain add has no second decision or callback to make.
-        // Its actual JDK backing store and publication guards still execute.
-        if(controlled&&policy==null&&method.equals("add"))return UNHANDLED;
-        switch(method) {
-            case "add" -> {
-                Object proposed=args.length==2?args[1]:args[0];
-                if(!deny(list,null,proposed))return UNHANDLED;
-                if(args.length==2)Objects.checkIndex((Integer)args[0],list.size()+1);
-                return args.length==1?Boolean.FALSE:null;
-            }
-            case "addAll" -> {
-                int at=args.length==2?(Integer)args[0]:list.size();Objects.checkIndex(at,list.size()+1);
-                Collection input=(Collection)Objects.requireNonNull(args[args.length-1]);Object[] values=input.toArray();
-                var accepted=new ArrayList<Object>(values.length);
-                for(Object value:values)if(!deny(list,null,value))accepted.add(value);
-                if(accepted.isEmpty())return Boolean.FALSE;
-                LIST_INTERNAL.set(true);
-                try {return list.addAll(at,accepted);}
-                finally {LIST_INTERNAL.remove();}
-            }
-            case "set" -> {
-                int at=(Integer)args[0];Object prior=list.get(at);return deny(list,prior,args[1])?prior:UNHANDLED;
-            }
-            case "removeIndex" -> {Object prior=list.get((Integer)args[0]);return deny(list,prior,null)?prior:UNHANDLED;}
-            case "fastRemove" -> {
-                Object[] values=(Object[])args[0];int at=(Integer)args[1];
-                return deny(list,values[at],null)?null:UNHANDLED;
-            }
-            case "removeObject" -> {
-                int at=list.indexOf(args[0]);return at>=0&&deny(list,list.get(at),null)?Boolean.FALSE:UNHANDLED;
-            }
-            case "clear","removeRange" -> {
-                int from=method.equals("clear")?0:(Integer)args[0],to=method.equals("clear")?list.size():(Integer)args[1];
-                Objects.checkFromToIndex(from,to,list.size());
-                for(int i=to-1;i>=from;i--)if(!deny(list,list.get(i),null)) {
-                    int before=version(list);list.remove(i);if(progress!=null)progress.changed(before);
-                }
-                return null;
-            }
-            case "removeIf","batchRemove" -> {
-                Object callback=Objects.requireNonNull(args[0]);boolean batch=method.equals("batchRemove");
-                int from=batch?(Integer)args[2]:args.length==3?(Integer)args[1]:0;
-                int to=batch?(Integer)args[3]:args.length==3?(Integer)args[2]:list.size();
-                Objects.checkFromToIndex(from,to,list.size());boolean changed=false;int stamp=version(list);
-                for(int i=from;i<to;) {
-                    Object value=list.get(i);
-                    boolean remove=batch?((Collection)callback).contains(value)!=(Boolean)args[1]:((Predicate)callback).test(value);
-                    if(stamp!=version(list))throw new ConcurrentModificationException();
-                    if(remove&&!deny(list,value,null)) {int before=version(list);list.remove(i);if(progress!=null)progress.changed(before);to--;stamp=version(list);changed=true;}else i++;
-                }
-                return changed;
-            }
-            case "replaceAllRange" -> {
-                UnaryOperator callback=(UnaryOperator)Objects.requireNonNull(args[0]);int from=(Integer)args[1],to=(Integer)args[2];
-                Objects.checkFromToIndex(from,to,list.size());int stamp=version(list);
-                for(int i=from;i<to;i++) {
-                    Object value=callback.apply(list.get(i));if(stamp!=version(list))throw new ConcurrentModificationException();list.set(i,value);
-                }
-                return null;
-            }
-            default -> {return UNHANDLED;}
-        }
     }
 }

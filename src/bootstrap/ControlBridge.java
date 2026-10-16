@@ -28,7 +28,7 @@ public final class ControlBridge {
         }
     };
     private ControlBridge() { }
-    public static int abiVersion(){return 90;}
+    public static int abiVersion(){return 91;}
     public static long arrayRevision(Object value){if(!recoveryWriter())throw new SecurityException("RECOVERY_ARRAY_READER_REQUIRED");return CodeSourceBridge.executionArrayRevision(value);}
 
     public static synchronized void install(Class<?> agent,ClassFileTransformer[] transformers) throws ReflectiveOperationException {
@@ -270,7 +270,7 @@ public final class ControlBridge {
         if(name.equals("dev.ronova.pro.bootstrap.ResourceBridge$BufferWrapWriter"))return false;
         if(type==BackingBridge.class)return method.equals("readUnsafe");
         if(type==ResourceBridge.class)return !(method.equals("mutationAllowed")||method.equals("critical")||method.equals("fieldMutationAllowed")||method.equals("unsafeMutationAllowed")||method.equals("bufferWrapMutationAllowed"));
-        if(type==SourceMapBridge.class)return !(method.equals("valueAllowed")||method.equals("checkIncoming")||method.equals("internal")||method.equals("changed"));
+        if(type==SourceMapBridge.class)return !(method.equals("valueAllowed")||method.equals("internal"));
         return !name.startsWith("java.")&&!name.startsWith("jdk.")&&!name.startsWith("sun.");
     }
     static final class StoppedCall implements java.util.function.Function<java.util.stream.Stream<StackWalker.StackFrame>,Boolean> {
@@ -886,13 +886,13 @@ public final class ControlBridge {
     static final ThreadLocal<Boolean> OWN_LEDGER_MUTATION=new ThreadLocal<>();
     static final Set<String> EXTERNAL_GUARD_ENTRIES=Set.of(
             "nativeDefinitionsChanged","deliverDefinitionsChanged",
-            "controlCaller","controlWriterAllowed","controlled","criticalEntry","referenceRetirementAllowed","controlMutationAllowed","fieldGateMutationAllowed","inheritControl","controlBackingPublished",
+            "controlCaller","controlWriterAllowed","controlled","criticalEntry","referenceRetirementAllowed","controlMutationAllowed","fieldGateMutationAllowed","inheritControl",
             "fieldWriteAllowed","staticFieldWriteAllowed","reflectFieldWrite",
             // Field-write entry wrappers are still live at the policy query;
             // they must not lend their own controller identity to that write.
             "beginFieldMutation","staticFieldMutation","beginOwnStaticFieldMutation","beginStaticFieldMutation",
             "beginNativeUnsafeMutation","beginExecutedUnsafeMutation","beginNativeUnsafeCopy","beginNativeFieldMutation","beginNativeArrayMutation","beginNativeArrayCopyRead","beginNativeArrayCopy",
-            "indexDenied","indexRemovalAllowed","indexWriteAllowed","beginIndexWrite","beginIndexNodeWrite","beginIndexArrayWrite","beginIndexRemoval","beginIndexNodeRemoval","beginIndexArrayRemoval","beginIndexStructure","endIndexMutation","deniedIndexCurrent",
+            "indexDenied","indexRemovalAllowed","indexWriteAllowed","beginIndexArrayWrite","beginIndexArrayRemoval","beginIndexStructure","endIndexMutation",
             "registerConsoleInput","beginConsoleCommand","endConsoleCommand","consoleDispatchTrusted",
             "clearProtectedMap","unsafeWriteAllowed","unsafeMemoryAllowed","networkRetirementWriteAllowed","networkRetirementOwnerAllowed","networkRetirementActive",
             "nativeArrayElementAllowed","nativePrimitiveArrayPolicy","nativeArrayPointerAllowed","nativeArrayCopyInternal","nativeRegistrationAllowed","nativeRegistrationTargetAllowed","nativeHeapTargetAllowed","arrayWriteAllowed",
@@ -964,15 +964,6 @@ public final class ControlBridge {
         if(next==null||!controlled(parent)||controlled(next)||!(controlCaller()||NativeControl.libraryImplementationCaller()))return;
         if(!(next.getClass().isArray()||next instanceof java.util.Map<?,?>||next instanceof java.util.Collection<?>))return;
         CodeSourceBridge.controlBacking(parent,next);
-    }
-    /** Called immediately before an actual JDK container publishes its new backing array. */
-    public static void controlBackingPublished(Object parent,Object next) {
-        if(!controlled(parent))return;
-        Class<?> caller=WALKER.getCallerClass();
-        if(caller!=java.util.HashMap.class&&caller!=java.util.ArrayList.class&&caller!=java.util.IdentityHashMap.class)
-            throw new SecurityException("CONTROL_BACKING_PUBLICATION_OWNER");
-        if(!controlCaller()&&!NativeControl.libraryImplementationCaller())throw new SecurityException("CONTROL_BACKING_PUBLICATION_REFUSED");
-        if(next!=null)CodeSourceBridge.controlBacking(parent,next);
     }
     public static void producerReceiver(Object receiver) {
         if(producerSite()){ProducerFrame frame=PRODUCERS.get();if(frame!=null)frame.receiver=receiver;producerReference(receiver,false);}
@@ -1154,34 +1145,6 @@ public final class ControlBridge {
     public static boolean indexWriteAllowed(Object map,Object key,Object current,Object proposed) {
         return current==proposed||controlMutationAllowed(map)&&!indexDenied(guards,map,key,current)&&SourceMapBridge.valueAllowed(map,key,proposed);
     }
-    /** Hold the receiver's short gate from the final index decision through its actual value store. */
-    public static Object beginIndexWrite(Object map,Object key,Object current,Object proposed) {
-        // Constructor-registered ledgers already hold their own monitor. Keep
-        // the writer check without nesting a business gate under that monitor.
-        if(CodeSourceBridge.executionMap(map))return controlMutationAllowed(map)?null:Boolean.FALSE;
-        java.util.concurrent.locks.ReentrantLock gate=fieldGate(map);
-        gate.lock();
-        Object token=indexMutation(map,gate);
-        boolean allowed;
-        try { allowed=indexWriteAllowed(map,key,current,proposed); }
-        catch(RuntimeException|Error failure) { endIndexMutation(token);throw failure; }
-        if(!allowed) { endIndexMutation(token);return Boolean.FALSE; }
-        return token;
-    }
-    public static Object beginIndexNodeWrite(Object map,Object node,Object proposed) {
-        if(CodeSourceBridge.executionMap(map))return controlMutationAllowed(map)?null:Boolean.FALSE;
-        Object owner=SourceMapBridge.ownerOf(node);
-        java.util.concurrent.locks.ReentrantLock gate=fieldGate(owner==null?map:owner);
-        gate.lock();
-        Object token=indexMutation(map,gate);
-        boolean allowed;
-        try {
-            java.util.Map.Entry<?,?> entry=(java.util.Map.Entry<?,?>)node;
-            allowed=(owner==null||controlMutationAllowed(owner))&&indexWriteAllowed(map,entry.getKey(),entry.getValue(),proposed);
-        } catch(RuntimeException|Error failure) { endIndexMutation(token);throw failure; }
-        if(!allowed) { endIndexMutation(token);return Boolean.FALSE; }
-        return token;
-    }
     public static Object beginIndexArrayWrite(Object map,Object key,Object[] values,int index,Object proposed) {
         if(CodeSourceBridge.executionMap(map))return controlMutationAllowed(map)?null:Boolean.FALSE;
         java.util.concurrent.locks.ReentrantLock gate=fieldGate(map);
@@ -1192,28 +1155,6 @@ public final class ControlBridge {
         catch(RuntimeException|Error failure) { endIndexMutation(token);throw failure; }
         if(!allowed) { endIndexMutation(token);return Boolean.FALSE; }
         return token;
-    }
-    public static Object beginIndexRemoval(Object map,Object key,Object current) {
-        if(CodeSourceBridge.executionMap(map))return controlMutationAllowed(map)?null:Boolean.FALSE;
-        java.util.concurrent.locks.ReentrantLock gate=fieldGate(map);
-        gate.lock();
-        boolean allowed;
-        try { allowed=indexRemovalAllowed(map,key,current); }
-        catch(RuntimeException|Error failure) { gate.unlock();throw failure; }
-        if(!allowed) { gate.unlock();return Boolean.FALSE; }
-        return indexMutation(map,gate);
-    }
-    public static Object beginIndexNodeRemoval(Object map,Object node) {
-        if(CodeSourceBridge.executionMap(map))return controlMutationAllowed(map)?null:Boolean.FALSE;
-        java.util.concurrent.locks.ReentrantLock gate=fieldGate(map);
-        gate.lock();
-        boolean allowed;
-        try {
-            java.util.Map.Entry<?,?> entry=(java.util.Map.Entry<?,?>)node;
-            allowed=indexRemovalAllowed(map,entry.getKey(),entry.getValue());
-        } catch(RuntimeException|Error failure) { gate.unlock();throw failure; }
-        if(!allowed) { gate.unlock();return Boolean.FALSE; }
-        return indexMutation(map,gate);
     }
     public static Object beginIndexArrayRemoval(Object map,Object key,Object[] values,int index) {
         if(CodeSourceBridge.executionMap(map))return controlMutationAllowed(map)?null:Boolean.FALSE;
@@ -1336,14 +1277,6 @@ public final class ControlBridge {
         gate.lock();
         return indexMutation(map,gate);
     }
-    /** Only registered exact index maps and callback-free UUID/int keys can take this default-Map path. */
-    public static Object deniedIndexCurrent(Object container,Object key,Object proposed) {
-        Guards snapshot=guards;if(snapshot==null)return null;
-        if(!(key instanceof Integer||key instanceof Long||key instanceof java.util.UUID)||!indexDenied(snapshot,container,null,null))return null;
-        if(!(container instanceof java.util.Map<?,?> map))return null;
-        Object current=map.get(key);
-        return current!=null&&current!=proposed&&indexDenied(guards,container,key,current)?current:null;
-    }
     /** Mixed clear keeps protected slots and still clears unrelated entries in this exact map. */
     public static boolean clearProtectedMap(Object candidate) {
         if(!controlMutationAllowed(candidate))return true;
@@ -1444,7 +1377,6 @@ public final class ControlBridge {
                 &&!NetworkBridge.retirementWriteAllowed(receiver,offset,value,resourceWidth))return false;
         if(ownMirror&&!reflectionCache||receiver!=null&&ownState(receiver.getClass()))return false;
         if(receiver==null)return true; // Raw-address writes have no exact object binding here.
-        if(receiver instanceof java.util.Map.Entry<?,?>&&controlled(SourceMapBridge.ownerOf(receiver))&&!controlCaller())return false;
         if(!controlMutationAllowed(receiver)||!BackingBridge.offsetAllowed(receiver,offset,value))return false;
         Guards current=guards;
         if(current==null)return true;
@@ -1500,8 +1432,7 @@ public final class ControlBridge {
                 &&Objects.equals(caller.getProtectionDomain().getCodeSource(),current.owner().getProtectionDomain().getCodeSource());
     }
     static final ThreadLocal<Boolean> FIELD_POLICY_ACTIVE=new ThreadLocal<>();
-    // The gate directory must not itself use an observed Map: an index hook can
-    // re-enter it while SourceMapBridge decides whether that Map may publish.
+    // Exact weak identities avoid re-entering a writer while its field/index gate is held.
     static final class FieldGateNode extends java.lang.ref.WeakReference<Object> {
         final int hash;
         final java.util.concurrent.locks.ReentrantLock gate=newFieldGate();
@@ -1629,14 +1560,6 @@ public final class ControlBridge {
             if(locks!=null)for(int i=locks.size()-1;i>=0;i--)locks.get(i).unlock();
         }
     }
-    static Object beginSourcePublication(Object receiver){
-        if(WALKER.getCallerClass()!=SourceMapBridge.class)throw new SecurityException("ACTUAL_SOURCE_WRITER_REQUIRED");
-        return receiver==null?null:new SourcePublication(receiver);
-    }
-    static void endSourcePublication(Object token){
-        if(WALKER.getCallerClass()!=SourceMapBridge.class)throw new SecurityException("ACTUAL_SOURCE_WRITER_REQUIRED");
-        if(token instanceof SourcePublication publication)publication.close();
-    }
     static final class FieldMutation {
         final java.util.concurrent.locks.ReentrantLock gate;final Object source,receiver;
         final Thread thread=Thread.currentThread();final SourcePublication publication;boolean closed,retirementQualified;
@@ -1662,20 +1585,9 @@ public final class ControlBridge {
         SourceMapBridge.registerCarrier(carrier);
     }
     public static void recoveredSourceChange(Object map){
-        if(!coreWriter())throw new SecurityException("SOURCE_RECOVERY_CORE_REQUIRED");
-        if(primitiveSourceIndex(map)){
-            if(!fieldGate(map).isHeldByCurrentThread())throw new IllegalMonitorStateException("SOURCE_INDEX_GATE_REQUIRED");
-            SourceMapBridge.holderChanged(map);return;
-        }
-        SourceMapBridge.recoveredChange(map);
-    }
-    public static void finishSourceCarrier(Object scope,Object mutation,boolean written){
-        try{finishFieldMutation(mutation,written);}finally{SourceMapBridge.exit(scope);}
-    }
-    public static void failedSourceCarrier(Object scope,Object mutation,Throwable failure){
-        try{fieldMutationFailed(mutation,failure);}finally{
-            try{SourceMapBridge.exit(scope);}catch(RuntimeException|Error unavailable){if(unavailable!=failure)failure.addSuppressed(unavailable);}
-        }
+        if(!coreWriter()||!primitiveSourceIndex(map))throw new SecurityException("SOURCE_RECOVERY_INDEX_CORE_REQUIRED");
+        if(!fieldGate(map).isHeldByCurrentThread())throw new IllegalMonitorStateException("SOURCE_INDEX_GATE_REQUIRED");
+        SourceMapBridge.holderChanged(map);
     }
     /** The incoming carrier stays locked through actual write, readback and failed-CAS cleanup. */
     public static boolean holdSourcePublication(Object holder,Object incoming){
@@ -1687,18 +1599,10 @@ public final class ControlBridge {
         }
         if(mutation==null)return false;
         if(incoming==null)return true;
-        java.util.concurrent.locks.Lock gate;
-        if(incoming.getClass()==java.util.concurrent.atomic.AtomicReference.class
-                ||incoming.getClass()==java.util.concurrent.CopyOnWriteArrayList.class||incoming instanceof Object[]
-                ||incoming.getClass()==java.util.HashSet.class||incoming.getClass()==java.util.LinkedHashSet.class||primitiveSourceIndex(incoming)
-                ||incoming.getClass().getClassLoader()!=null&&!(incoming instanceof Map<?,?>)&&!(incoming instanceof Collection<?>)){
-            gate=fieldGate(incoming);if(!gate.tryLock())return false;
-        }else {gate=SourceMapBridge.publicationGate(incoming);if(gate==null)return false;}
+        if(!primitiveSourceIndex(incoming)&&!(incoming instanceof Object[])
+                &&!(incoming.getClass().getClassLoader()!=null&&!(incoming instanceof Map<?,?>)&&!(incoming instanceof Collection<?>)))return false;
+        java.util.concurrent.locks.Lock gate=fieldGate(incoming);if(!gate.tryLock())return false;
         mutation.retain(gate);
-        if(incoming.getClass()==java.util.concurrent.atomic.AtomicReference.class||incoming.getClass()==java.util.concurrent.CopyOnWriteArrayList.class){
-            java.util.concurrent.locks.Lock direct=SourceMapBridge.publicationGate(incoming);if(direct==null)return false;
-            mutation.retain(direct);
-        }
         return true;
     }
     record RecoveryArrayMutation(Object array,FieldMutation mutation,int start){
@@ -2252,7 +2156,6 @@ public final class ControlBridge {
         if(!ResourceBridge.fieldMutationAllowed(receiver,field.getDeclaringClass()))return false;
         if((modStopped(objectModule(receiver==null?field.getDeclaringClass():receiver))||stoppedInvocation())&&!coreWriter()&&!ClientBridge.cleanupField(receiver,field.getDeclaringClass(),field.getName())
                 &&!NetworkBridge.retirementFieldAllowed(receiver,field.getDeclaringClass(),field.getName(),value))return false;
-        if(receiver instanceof java.util.Map.Entry<?,?>&&controlled(SourceMapBridge.ownerOf(receiver))&&!controlCaller())return false;
         if(ownState(field.getDeclaringClass())||receiver!=null&&ownState(receiver.getClass())||controlled(receiver)&&!controlCaller())return false;
         Guards current=guards;
         if(current==null)return true;

@@ -1107,7 +1107,7 @@ public final class ClientBridge {
     }
     public static void reloadStarting(Object manager){
         var frame=boundary();if(!clientMember(frame,"net.minecraft.server.packs.resources.ReloadableResourceManager","createReload","m_142463_","(Ljava/util/concurrent/Executor;Ljava/util/concurrent/Executor;Ljava/util/concurrent/CompletableFuture;Ljava/util/List;)Lnet/minecraft/server/packs/resources/ReloadInstance;"))throw new SecurityException("ACTUAL_RELOAD_START_REQUIRED");
-        try{Collection<?> listeners=(Collection<?>)field(manager,frame.getDeclaringClass(),"listeners");listeners.removeIf(listener->exclusive(sources(listener)));synchronized(SOURCES){RELOAD_LISTENERS.put(new Key(manager,true),new Ref<>(listeners));}}
+        try{Collection<?> listeners=(Collection<?>)field(manager,frame.getDeclaringClass(),"listeners");retireListeners(listeners);synchronized(SOURCES){RELOAD_LISTENERS.put(new Key(manager,true),new Ref<>(listeners));}}
         catch(ReflectiveOperationException unavailable){throw new IllegalStateException("ACTUAL_RELOAD_LIST_UNAVAILABLE",unavailable);}
     }
     public static java.util.concurrent.CompletableFuture<Void> skipReload(Object barrier){
@@ -1124,7 +1124,13 @@ public final class ClientBridge {
     }
     private static void retireReloadListeners(){
         List<Collection<?>> lists=new ArrayList<>();synchronized(SOURCES){for(Ref<Collection<?>> reference:RELOAD_LISTENERS.values()){Collection<?> list=reference.get();if(list!=null)lists.add(list);}}
-        for(Collection<?> list:lists)SourceMapBridge.withList(list,()->list.removeIf(listener->exclusive(sources(listener))));
+        for(Collection<?> list:lists)retireListeners(list);
+    }
+    private static void retireListeners(Collection<?> listeners){
+        if(SourceMapBridge.withList(listeners,()->listeners.removeIf(listener->exclusive(sources(listener)))))return;
+        synchronized(SOURCES){
+            if(!REQUESTED.isEmpty())FAILURES.put(new Key(listeners,true),union(FAILURES.get(new Key(listeners,false)),REQUESTED.toArray(Module[]::new)));
+        }
     }
     public static void verticesBegin(Object builder){GPU.begin(builder,boundary());}
     public static Object verticesEntering(Object builder,Object bulk){return GPU.enter(builder,bulk,boundary());}
@@ -1542,7 +1548,7 @@ public final class ClientBridge {
         try{
             Class<?> type=frame.getDeclaringClass();Map<?,?> instances=(Map<?,?>)field(engine,type,"instanceToChannel");Object access=field(engine,type,"channelAccess");
             Class<?> accessType=actualBase(access,"net.minecraft.client.sounds.ChannelAccess");if(accessType==null||access.getClass()!=accessType)throw new IllegalStateException("ACTUAL_SOUND_CHANNEL_ACCESS_CHANGED");
-            Collection<?> listeners=(Collection<?>)field(engine,type,"listeners");SourceMapBridge.withList(listeners,()->listeners.removeIf(listener->exclusive(sources(listener))));
+            Collection<?> listeners=(Collection<?>)field(engine,type,"listeners");retireListeners(listeners);
             synchronized(SOURCES){SOUNDS.put(new Key(engine,true),new SoundRegistry(new Ref<>(instances),new Ref<>(listeners)));}
             Set<Object> queued=Collections.newSetFromMap(new IdentityHashMap<>());
             queued.addAll(((Map<?,?>)field(engine,type,"queuedSounds")).keySet());queued.addAll((Collection<?>)field(engine,type,"queuedTickableSounds"));
@@ -1837,9 +1843,16 @@ public final class ClientBridge {
         long resources=RETIREMENTS.values().stream().filter(row->Arrays.stream(row.modules).anyMatch(source->source==module)).count();
         long failures=FAILURES.values().stream().filter(row->Arrays.stream(row).anyMatch(source->source==module)).count();
         long sounds=SOUND_STOPS.values().stream().filter(row->Arrays.stream(row.modules).anyMatch(source->source==module)).count();
-        for(SoundRegistry registry:SOUNDS.values()){Collection<?> listeners=registry.listeners().get();if(listeners!=null)for(Object listener:listeners)if(Arrays.stream(sources(listener)).anyMatch(source->source==module))sounds++;}
+        String soundState="",reloadState="";
+        for(SoundRegistry registry:SOUNDS.values()){Collection<?> listeners=registry.listeners().get();if(listeners!=null){
+            Module[] unavailable=FAILURES.get(new Key(listeners,false));if(unavailable!=null&&Arrays.stream(unavailable).anyMatch(source->source==module))soundState="JDK_CONTAINER_HOOKS_REMOVED";
+            for(Object listener:listeners)if(Arrays.stream(sources(listener)).anyMatch(source->source==module))sounds++;
+        }}
         RELOAD_WORK.entrySet().removeIf(entry->entry.getValue().future().isDone());long reloads=RELOAD_WORK.values().stream().filter(row->Arrays.stream(row.modules()).anyMatch(source->source==module)).count();
-        for(Ref<Collection<?>> reference:RELOAD_LISTENERS.values()){Collection<?> listeners=reference.get();if(listeners!=null)for(Object listener:listeners)if(Arrays.stream(sources(listener)).anyMatch(source->source==module))reloads++;}
+        for(Ref<Collection<?>> reference:RELOAD_LISTENERS.values()){Collection<?> listeners=reference.get();if(listeners!=null){
+            Module[] unavailable=FAILURES.get(new Key(listeners,false));if(unavailable!=null&&Arrays.stream(unavailable).anyMatch(source->source==module))reloadState="JDK_CONTAINER_HOOKS_REMOVED";
+            for(Object listener:listeners)if(Arrays.stream(sources(listener)).anyMatch(source->source==module))reloads++;
+        }}
         long ui=0;for(var entry:UI_OWNERS.entrySet()){Object owner=entry.getKey().get();if(owner==null)continue;
             try{for(boolean screen:new boolean[]{true,false}){Object current=entry.getValue().current(owner,screen);if(current!=null&&Arrays.stream(sources(current)).anyMatch(source->source==module))ui++;}}
             catch(ReflectiveOperationException unavailable){ui++;}
@@ -1867,7 +1880,7 @@ public final class ClientBridge {
             else if(!exclusive(modules)){toastShared++;if(toastState.isEmpty())toastState="CLIENT_TOAST_OTHER_SOURCES_REMAIN_LIVE";}
             if(!registry.pending.isEmpty())toastState=registry.pending;
         }
-        return active!=0||textures!=0||resources!=0||sounds!=0||reloads!=0||gpu!=0||failures!=0||ui!=0||renderCalls!=0||overlays!=0||widgets!=0||toastQueued!=0||toastVisible!=0?"CLIENT_RETIREMENT_PENDING:active="+active+":textures="+textures+":resources="+resources+":sounds="+sounds+":reloads="+reloads+":gpu="+gpu+":gpuState="+gpuState+":ui="+ui+":renderCalls="+(renderCalls<0?"unknown":Long.toString(renderCalls))+":overlays="+(overlays<0?"unknown":Long.toString(overlays))+":overlayState="+overlayState+":widgets="+widgets+":widgetShared="+widgetShared+":widgetUnknown="+widgetUnknown+":widgetState="+widgetState+":toastQueued="+toastQueued+":toastVisible="+toastVisible+":toastShared="+toastShared+":toastUnknown="+toastUnknown+":toastState="+toastState+":shared="+shared+":releaseFailures="+failures:"";
+        return active!=0||textures!=0||resources!=0||sounds!=0||reloads!=0||gpu!=0||failures!=0||ui!=0||renderCalls!=0||overlays!=0||widgets!=0||toastQueued!=0||toastVisible!=0?"CLIENT_RETIREMENT_PENDING:active="+active+":textures="+textures+":resources="+resources+":sounds="+sounds+":soundState="+soundState+":reloads="+reloads+":reloadState="+reloadState+":gpu="+gpu+":gpuState="+gpuState+":ui="+ui+":renderCalls="+(renderCalls<0?"unknown":Long.toString(renderCalls))+":overlays="+(overlays<0?"unknown":Long.toString(overlays))+":overlayState="+overlayState+":widgets="+widgets+":widgetShared="+widgetShared+":widgetUnknown="+widgetUnknown+":widgetState="+widgetState+":toastQueued="+toastQueued+":toastVisible="+toastVisible+":toastShared="+toastShared+":toastUnknown="+toastUnknown+":toastState="+toastState+":shared="+shared+":releaseFailures="+failures:"";
     }}
     public static Object[] controlObjects(){agent();List<Object> roots=new ArrayList<>(Arrays.asList(SOURCES,TEXTURES,ROLES,REQUESTED,CURRENT,RELEASING,ACTIVE,DEAD,IMAGES,PIXELS,RETIREMENTS,FAILURES,SOUNDS,SOUND_STOPS,SOUND_RELEASING,RELOAD_LISTENERS,RELOAD_WORK,UI_OWNERS,UI_RETIRING,UI_FIELDS,SCREEN_WIDGETS,SCREEN_ADDING,WIDGET_RETIRING,SCREEN_FIELDS,TOASTS,TOAST_FIELDS,OVERLAY_EVENTS,OVERLAY_REGISTRIES,OVERLAY_NAMES,OVERLAY_INITIALIZING,OVERLAY_FIELDS,RENDER_QUEUES,RENDER_REPLAY,RENDER_FIELDS));Collections.addAll(roots,GPU.controls());return roots.toArray();}
     private static void reap(){for(Key key;(key=(Key)DEAD.poll())!=null;){SOURCES.remove(key);TEXTURES.remove(key);IMAGES.remove(key);PIXELS.remove(key);FAILURES.remove(key);SOUNDS.remove(key);RELOAD_LISTENERS.remove(key);UI_OWNERS.remove(key);SCREEN_WIDGETS.remove(key);TOASTS.remove(key);OVERLAY_EVENTS.remove(key);OVERLAY_REGISTRIES.remove(key);OVERLAY_NAMES.remove(key);RENDER_QUEUES.remove(key);}}

@@ -13,6 +13,7 @@ public final class AuditFixCheck {
     private static void require(boolean yes,String message) {if(!yes)throw new AssertionError(message);}
     private static Object invoke(Object receiver,String name)throws Exception {var m=receiver.getClass().getDeclaredMethod(name);m.setAccessible(true);try{return m.invoke(receiver);}catch(InvocationTargetException e){if(e.getCause() instanceof Exception x)throw x;throw e;}}
     public static void main(String[] args)throws Exception {
+        if(args.length==1&&args[0].equals("container-scope-removal")){containerScopeRemoval();return;}
         if(args.length==1&&args[0].equals("startup-protection-bytecode")){startupReturnReplay();protectionSetterBytecode();return;}
         if(args.length==1&&args[0].equals("network-bytecode")){networkBytecode();return;}
         if(args.length==1&&args[0].equals("resource-bytecode")){resourceBytecode();return;}
@@ -593,6 +594,48 @@ public final class AuditFixCheck {
         }
         System.out.println("WORLD_HELD_SAVE_PASS actual_LevelChunkTicks_ScheduledTick_NBT_vanilla_SavedTick_decode same_identity_position_old_held_replaces_pending other_type_same_position_preserved priority_trigger_minus_now_preserved repeated_save_delay_recomputed original_container_ticks_deferred_unchanged data_codec_only");
     }
+    private static void containerScopeRemoval()throws Exception {
+        Object target=new Object();int[] actions={0};Runnable action=()->actions[0]++;
+        Map<Object,Object> plain=new HashMap<>();plain.put("key",target);
+        Map<Object,Object> concurrent=new ConcurrentHashMap<>(plain);
+        for(Map<Object,Object> map:List.of(plain,concurrent)){
+            require(!SourceMaps.with(map,action::run)&&SourceMaps.entries(map)==null&&SourceMaps.peek(map,"key")==null
+                    &&SourceMaps.revision(map)<0,"removed map scope still advertised: "+map.getClass());
+            require(!SourceMaps.visit(map,new SourceMaps.Cursor(map),8,(key,value,node,cursor)->{actions[0]++;return true;}),"removed map visitor ran");
+            require(map.get("key")==target,"unobserved map was mutated");
+        }
+        Class<?> bridge=Class.forName("dev.ronova.pro.bootstrap.SourceMapBridge",true,null);
+        for(List<Object> list:List.of(new ArrayList<>(List.of(target)),new CopyOnWriteArrayList<>(List.of(target)))){
+            for(String method:List.of("withList","withListRead"))require(Boolean.FALSE.equals(bridge.getMethod(method,Object.class,Runnable.class).invoke(null,list,action)),"removed list action ran");
+            try{SourceMaps.removeListIdentity(list,target);throw new AssertionError("unobserved list removal ran");}
+            catch(IllegalStateException expected){require("JDK_CONTAINER_HOOKS_REMOVED".equals(expected.getMessage()),"wrong missing-scope reason");}
+            require(list.size()==1&&list.get(0)==target,"removed list alias was changed");
+        }
+        Class<?> edgeType=Class.forName("dev.ronova.pro.RecoveryRecords$Edge");
+        Method advance=RecoveryRecords.class.getDeclaredMethod("advance",edgeType);advance.setAccessible(true);
+        Method absent=RecoveryRecords.class.getDeclaredMethod("absent",edgeType,Object.class,Object.class);absent.setAccessible(true);
+        Object records=U.allocateInstance(RecoveryRecords.class);
+        Object[][] retired={{"ATOMIC",new java.util.concurrent.atomic.AtomicReference<>()},
+                {"COPY_ON_WRITE_LIST",new CopyOnWriteArrayList<>()},{"ARRAY_LIST",new ArrayList<>()},{"ENTITY_MAP",concurrent}};
+        for(Object[] row:retired){
+            Object edge=U.allocateInstance(edgeType);put(edge,"kind",row[0]);put(edge,"container",row[1]);
+            advance.invoke(records,edge);
+            require(Boolean.FALSE.equals(absent.invoke(records,edge,row[1],target)),"unobserved absence became a fact");
+            Field reason=edgeType.getDeclaredField("reason"),fact=edgeType.getDeclaredField("fact"),released=edgeType.getDeclaredField("released");
+            reason.setAccessible(true);fact.setAccessible(true);released.setAccessible(true);
+            require("JDK_CONTAINER_HOOKS_REMOVED".equals(reason.get(edge))&&fact.get(edge)==null&&!released.getBoolean(edge),"removed scope settled an edge");
+        }
+        Class<?> boundary=Class.forName("dev.ronova.pro.agent.BackingBoundary");
+        Method transform=boundary.getDeclaredMethod("transform",ClassLoader.class,String.class,byte[].class);transform.setAccessible(true);
+        for(Class<?> type:List.of(HashMap.class,LinkedHashMap.class,ArrayList.class,IdentityHashMap.class,AbstractCollection.class,ConcurrentHashMap.class,
+                java.util.concurrent.atomic.AtomicReference.class,CopyOnWriteArrayList.class)){
+            String name=type.getName().replace('.','/');byte[] bytes;
+            try(var input=type.getResourceAsStream("/"+name+".class")){bytes=Objects.requireNonNull(input).readAllBytes();}
+            require(transform.invoke(null,null,name,bytes)==null,"collection body still transformed: "+name);
+        }
+        require(actions[0]==0,"removed scope invoked an action");
+        System.out.println("CONTAINER_SCOPE_REMOVAL_PASS actual_JDK_bodies_unmodified_by_BackingBoundary removed_map_list_actions_refused old_edge_absence_not_settled no_Core_or_Agent_install");
+    }
     private static void sourceListFixes()throws Exception {
         Class<?> publications=Class.forName("dev.ronova.pro.SourceMaps$Publications");
         Class<?> controls=Class.forName("dev.ronova.pro.bootstrap.ControlBridge",false,null);
@@ -605,8 +648,6 @@ public final class AuditFixCheck {
         require(target!=neighbor&&target.equals(neighbor),"fixture must distinguish identity from equal NBT");
         Method image=RecoveryRecords.class.getDeclaredMethod("listImage",Object.class,Object.class);image.setAccessible(true);
         List<List<net.minecraft.nbt.CompoundTag>> carriers=List.of(
-                new ArrayList<>(List.of(target,neighbor,target)),
-                new CopyOnWriteArrayList<>(List.of(target,neighbor,target)),
                 new it.unimi.dsi.fastutil.objects.ObjectArrayList<>(List.of(target,neighbor,target)));
         for(List<net.minecraft.nbt.CompoundTag> carrier:carriers){
             String projected=(String)image.invoke(null,carrier,target);
@@ -616,7 +657,7 @@ public final class AuditFixCheck {
             require(projected.equals(image.invoke(null,carrier,null)),"projection does not match all removed aliases: "+carrier.getClass().getName());
             require(!SourceMaps.removeListIdentity(carrier,target)&&carrier.get(0)==neighbor,"absent target changed neighbor: "+carrier.getClass().getName());
         }
-        System.out.println("SOURCE_LIST_FIXES_PASS bridge_owner array_list copy_on_write fastutil duplicate_identity preserved_equal_neighbor exact_nbt_projection");
+        System.out.println("SOURCE_LIST_FIXES_PASS bridge_owner fastutil duplicate_identity preserved_equal_neighbor exact_nbt_projection JDK_container_scopes_removed");
     }
     private static void liveControlWriter()throws Exception {
         Class<?> nativeControl=Class.forName("dev.ronova.pro.bootstrap.NativeControl",true,null);

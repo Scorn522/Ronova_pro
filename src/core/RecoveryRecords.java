@@ -95,7 +95,6 @@ final class RecoveryRecords implements AutoCloseable {
         final Set<String> issues=new TreeSet<>();
         Set<String> completedIssues=Set.of();
         final Map<Field,WeakReference<Object>> containers=new HashMap<>();
-        final Map<Field,WeakReference<Object[]>> lists=new HashMap<>();
         final Map<Field,Long> listRevisions=new HashMap<>();
         final Map<Field,Long> mapRevisions=new HashMap<>(),arrayRevisions=new HashMap<>();
         int fieldIndex,listIndex;
@@ -113,12 +112,6 @@ final class RecoveryRecords implements AutoCloseable {
         }
         void finishField(){field=null;container=null;list=null;map=null;listIndex=0;fieldIndex++;}
     }
-    private static final ClassValue<Field> LIST_ARRAY=new ClassValue<>() {
-        @Override protected Field computeValue(Class<?> type) {
-            try {Field field=type.getDeclaredField("array");field.setAccessible(true);return field;}
-            catch(ReflectiveOperationException unavailable){throw new IllegalStateException("REFERENCE_LIST_LAYOUT_UNAVAILABLE",unavailable);}
-        }
-    };
     private final AtomicLong epoch=new AtomicLong();
     private long cursor;
     private long edgeCursor;
@@ -425,7 +418,7 @@ final class RecoveryRecords implements AutoCloseable {
                 scan.issues.add("REFERENCE_FIELD_MUTABLE_REPLACEMENT_COVERAGE_UNPROVEN:"+field.getName());
             WeakReference<Object> previousContainer=scan.containers.get(field);
             if(previousContainer==null||previousContainer.get()!=container) {
-                scan.containers.put(field,new WeakReference<>(container));scan.lists.remove(field);scan.listRevisions.remove(field);scan.mapRevisions.remove(field);scan.arrayRevisions.remove(field);scanned.remove(source);
+                scan.containers.put(field,new WeakReference<>(container));scan.listRevisions.remove(field);scan.mapRevisions.remove(field);scan.arrayRevisions.remove(field);scanned.remove(source);
             }
             if(container!=scan.container){
                 scan.container=container;scan.map=null;scan.list=null;scan.listIndex=0;
@@ -438,31 +431,10 @@ final class RecoveryRecords implements AutoCloseable {
             if(nestedHolder(container)){
                 nested(source,field,"FIELD",null,container,scan.issues);scan.finishField();continue;
             }
-            if(container.getClass()==AtomicReference.class) {
-                Object value=((AtomicReference<?>)container).get();
-                if(nestedHolder(value)&&ownedTarget(value,runtime,true)==null)nested(source,field,"ATOMIC",null,value,scan.issues);
-                else if(unsupportedWrapper(value))scan.issues.add("REFERENCE_WRAPPER_PROFILE_UNSUPPORTED:"+value.getClass().getName());
-                else capture(source,field,null,container,value,"ATOMIC",scan.issues);
-                scan.finishField();
+            if(SourceMaps.removedJdkContainer(container)){
+                scan.issues.add("JDK_CONTAINER_HOOKS_REMOVED:"+field.getName());scan.finishField();continue;
             }
-            else if(container.getClass()==CopyOnWriteArrayList.class) {
-                Object[] values=(Object[])LIST_ARRAY.get(container.getClass()).get(container);
-                if(values!=scan.list){
-                    WeakReference<Object[]> previous=scan.lists.put(field,new WeakReference<>(values));
-                    if(previous==null||previous.get()!=values)scanned.remove(source);
-                    scan.list=values;scan.listIndex=0;
-                }
-                int limit=Math.min(32,remaining);
-                while(limit-->0&&scan.listIndex<values.length) {
-                    Object value=values[scan.listIndex];
-                    if(nestedHolder(value)&&ownedTarget(value,runtime,true)==null)nested(source,field,"LIST",scan.listIndex,value,scan.issues);
-                    else if(unsupportedWrapper(value))scan.issues.add("REFERENCE_WRAPPER_PROFILE_UNSUPPORTED:"+value.getClass().getName());
-                    else capture(source,field,null,container,value,"COPY_ON_WRITE_LIST",scan.issues);
-                    scan.listIndex++;remaining--;
-                }
-                if(field.get(isStatic?null:actualHolder)!=container||LIST_ARRAY.get(container.getClass()).get(container)!=values){scan.container=null;scan.list=null;scan.listIndex=0;scanned.remove(source);break;}
-                if(scan.listIndex==values.length)scan.finishField();else break;
-            } else if(container instanceof Object[] values) {
+            if(container instanceof Object[] values) {
                 if(values.length==0){scan.finishField();continue;}
                 int limit=Math.min(Math.min(32,remaining),values.length-scan.listIndex);
                 Object ticket=ArrayAccess.READ.invoke(null,container);
@@ -574,8 +546,6 @@ final class RecoveryRecords implements AutoCloseable {
         for(var entry:scan.containers.entrySet()) {
             Object actual=entry.getKey().get(receiver);
             if(actual!=entry.getValue().get())return false;
-            WeakReference<Object[]> list=scan.lists.get(entry.getKey());
-            if(list!=null&&(actual==null||actual.getClass()!=CopyOnWriteArrayList.class||LIST_ARRAY.get(actual.getClass()).get(actual)!=list.get()))return false;
             Long mapRevision=scan.mapRevisions.get(entry.getKey());
             if(mapRevision!=null){Object map=SourceMaps.supportedSet(actual)?SourceMaps.setMap(actual):actual;if(mapRevision.longValue()!=SourceMaps.revision(map))return false;}
             Long arrayRevision=scan.arrayRevisions.get(entry.getKey());
@@ -676,7 +646,12 @@ final class RecoveryRecords implements AutoCloseable {
         if(value==null||value instanceof Entity||value.getClass()==CompoundTag.class||immutableScalar(value))return false;
         return wrapperProfile(value,runtime,true)==null;
     }
+    private static boolean removedContainerEdge(String kind,Object container){
+        return !kind.equals("DIRECT_FIELD")&&!kind.equals("UUID_SELECTOR")
+                &&(SourceMaps.removedJdkContainer(container)||kind.equals("ATOMIC")||kind.equals("COPY_ON_WRITE_LIST"));
+    }
     private void advance(Edge edge)throws ReflectiveOperationException {
+        if(removedContainerEdge(edge.kind,edge.container)){edge.reason="JDK_CONTAINER_HOOKS_REMOVED";return;}
         if(edge.kind.equals("HASH_SET")&&SourceMaps.supportedSet(edge.container)){
             if(!SourceMaps.with(SourceMaps.setMap(edge.container),()->advanceLocked(edge)))edge.reason="REFERENCE_SET_SCOPE_BUSY_OR_UNOBSERVED";
         }else if(edge.kind.equals("OBJECT_ARRAY")&&edge.container instanceof Object[] values) {
@@ -723,10 +698,7 @@ final class RecoveryRecords implements AutoCloseable {
             else edge.reason="EFFECT_QUERY_REQUIRED";
             return;
         }
-        if(edge.kind.equals("COPY_ON_WRITE_LIST")) {
-            Field lock=CopyOnWriteArrayList.class.getDeclaredField("lock");if(!lock.trySetAccessible()) { edge.reason="LIST_LOCK_UNAVAILABLE";return; }
-            synchronized(lock.get(edge.container)) { remove(edge); }
-        } else if(edge.kind.equals("ENTITY_MAP"))removeMap(edge);else remove(edge);
+        if(edge.kind.equals("ENTITY_MAP"))removeMap(edge);else remove(edge);
         boolean absent=absent(edge,edge.container,edge.object);
         if(edge.applied&&!edge.expectedImage.isEmpty()&&!edge.expectedImage.equals(listImage(edge.container,null))) {
             edge.reason="REFERENCE_PROJECTED_IMAGE_CHANGED_QUERY_REQUIRED";return;
@@ -801,11 +773,6 @@ final class RecoveryRecords implements AutoCloseable {
                             edge.applied=Modifier.isStatic(edge.field.getModifiers())?handle.compareAndSet(edge.object,null):
                                     handle.compareAndSet(edge.receiver(),edge.object,null);
                         }
-                        case "ATOMIC" -> {
-                            if(ownedTarget(edge.object,runtime,true)!=edge.target) { edge.reason="REFERENCE_WRAPPER_TARGET_CHANGED";return; }
-                            edge.attempted=true;
-                            edge.applied=((AtomicReference<Object>)edge.container).compareAndSet(edge.object,null);
-                        }
                         case "OBJECT_ARRAY" -> {
                             var elements=java.lang.invoke.MethodHandles.arrayElementVarHandle(edge.container.getClass());
                             edge.attempted=true;
@@ -820,7 +787,7 @@ final class RecoveryRecords implements AutoCloseable {
                                 edge.attempted=true;edge.applied=SourceMaps.removeIdentityVisited(position,edge.object);return false;
                             });}catch(java.io.IOException unavailable){edge.reason="REFERENCE_SET_SCAN_UNAVAILABLE";}
                         }
-                        case "COPY_ON_WRITE_LIST", "ARRAY_LIST" -> {
+                        case "ARRAY_LIST" -> {
                             var list=(List<Object>)edge.container;
                             if(!prepareListImage(edge,list))return;
                             if(ownedTarget(edge.object,runtime,true)!=edge.target) { edge.reason="REFERENCE_WRAPPER_TARGET_CHANGED";return; }
@@ -833,14 +800,13 @@ final class RecoveryRecords implements AutoCloseable {
         } finally { if(graph)RecoverySources.releaseRecordGraph(); }
     }
     private boolean absent(Edge edge,Object container,Object object) {
+        if(removedContainerEdge(edge.kind,container)){edge.reason="JDK_CONTAINER_HOOKS_REMOVED";return false;}
         return switch(edge.kind) {
             case "DIRECT_FIELD", "UUID_SELECTOR" -> {
                 try {yield edge.field.get(edge.receiver())!=object;}
                 catch(IllegalAccessException unavailable) {edge.reason="DIRECT_FIELD_READ_UNAVAILABLE";yield false;}
             }
-            case "ATOMIC" -> ((AtomicReference<?>)container).get()!=object;
             case "OBJECT_ARRAY" -> ((Object[])container)[(Integer)edge.key]!=object;
-            case "COPY_ON_WRITE_LIST" -> Arrays.stream(((CopyOnWriteArrayList<?>)container).toArray()).noneMatch(value->value==object);
             case "ARRAY_LIST" -> {
                 boolean found=false;for(Object value:(List<?>)container)if(value==object){found=true;break;}
                 yield !found;
@@ -877,6 +843,7 @@ final class RecoveryRecords implements AutoCloseable {
         }
     }
     private boolean historicalAbsent(Historical item,RecoverySources.Source source)throws ReflectiveOperationException{
+                if(item.kind.equals("ATOMIC")||item.kind.equals("COPY_ON_WRITE_LIST")){item.reason="JDK_CONTAINER_HOOKS_REMOVED";return false;}
                 int split=item.field.lastIndexOf('#');if(split<0)throw new IllegalArgumentException("FIELD");
                 Object actualHolder=source.holder();boolean absent=false;
                 if(actualHolder==null) {
@@ -890,11 +857,11 @@ final class RecoveryRecords implements AutoCloseable {
                     boolean direct=item.kind.equals("DIRECT_FIELD")||item.kind.equals("UUID_SELECTOR");
                     if(!field.trySetAccessible()) { item.reason="REFERENCE_FIELD_UNSUPPORTED";return false; }
                     Object container=field.get(actualHolder instanceof Class<?>?null:actualHolder);
+                    if(removedContainerEdge(item.kind,container)){item.reason="JDK_CONTAINER_HOOKS_REMOVED";return false;}
                     SourceMaps.observeField(source,field,container);
                     if(!direct&&!SourceMaps.replacementCovered(source,field,container)){item.reason="REFERENCE_FIELD_PUBLICATION_UNAVAILABLE";return false;}
                     if(container==null&&(source.cleared(field)||SourceMaps.replacementCovered(source,field,container)))absent=true;
                     else if(direct)absent=container==null;
-                    else if(item.kind.equals("ATOMIC")&&container!=null&&container.getClass()==AtomicReference.class)absent=((AtomicReference<?>)container).get()==null;
                     else if(item.kind.equals("OBJECT_ARRAY")&&container instanceof Object[] values) {
                         if(!item.key.startsWith("java.lang.Integer:"))throw new IllegalArgumentException("ARRAY_INDEX");
                         int index=Integer.parseInt(item.key.substring("java.lang.Integer:".length()));
@@ -906,8 +873,6 @@ final class RecoveryRecords implements AutoCloseable {
                             try{absent=values[index]==null;}finally{ArrayAccess.END_READ.invoke(null,ticket);}
                         }
                     }
-                    else if(item.kind.equals("COPY_ON_WRITE_LIST")&&container!=null&&container.getClass()==CopyOnWriteArrayList.class)
-                        absent=item.expected.isEmpty()?((CopyOnWriteArrayList<?>)container).isEmpty():listProjectionCurrent(item,listImage(container,null));
                     else if(item.kind.equals("ARRAY_LIST")&&container!=null&&SourceMaps.scopedList(container)) {
                         boolean[] result={false};
                         if(!withArrayList(container,false,()->result[0]=item.expected.isEmpty()?((List<?>)container).isEmpty():listProjectionCurrent(item,listImage(container,null)))) {

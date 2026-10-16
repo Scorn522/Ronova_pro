@@ -12,16 +12,9 @@ final class FieldWriteBoundary {
             "canUpdate","isAddedToWorld","dead","f_20890_","deathTime","f_20919_","value","f_135391_","remove","f_58859_");
     private static final Set<String> OWNERS=Set.of("net/minecraft/world/entity/Entity","net/minecraft/world/entity/LivingEntity",
             "net/minecraft/network/syncher/SynchedEntityData$DataItem");
-    private static final Set<String> SOURCE_CARRIERS=Set.of("java/util/concurrent/atomic/AtomicReference","java/util/concurrent/CopyOnWriteArrayList");
-    private static final Set<String> INSTALLED_CARRIERS=java.util.concurrent.ConcurrentHashMap.newKeySet();
-    static boolean sourceCarrier(String name){return name!=null&&SOURCE_CARRIERS.contains(name);}
-    static boolean sourceCarriersInstalled(){return INSTALLED_CARRIERS.containsAll(SOURCE_CARRIERS);}
     static byte[] transform(ClassLoader loader,byte[] bytes) {return transform(loader,null,bytes);}
     static byte[] transform(ClassLoader loader,Module module,byte[] bytes) {
         ClassNode node=new ClassNode();new ClassReader(bytes).accept(node,0);boolean changed=false;
-        boolean carrier=loader==null&&sourceCarrier(node.name);
-        if(carrier&&node.version!=Opcodes.V17)throw new IllegalStateException("SOURCE_CARRIER_LAYOUT_UNAVAILABLE:"+node.name);
-        if(carrier)return sourceCarrier(loader,node);
         // Core initializes its own policy maps before publishing guards. Its internal constructors are not
         // third-party writer sites; instrumenting them re-enters partially initialized policy classes.
         if(module!=null&&ModGroupBoundary.ids(module).contains("ronova_pro"))return null;
@@ -41,7 +34,6 @@ final class FieldWriteBoundary {
             for(int position=0;position<original.length;position++) {
                 AbstractInsnNode insn=original[position];
                 if(!(insn instanceof FieldInsnNode field)||(field.getOpcode()!=Opcodes.PUTFIELD&&field.getOpcode()!=Opcodes.PUTSTATIC))continue;
-                if(carrier&&(!field.owner.equals(node.name)||!field.name.equals(node.name.endsWith("/AtomicReference")?"value":"array")))continue;
                 // Only the actual uninitialized receiver is ineligible for a bridge call.
                 // Writes to existing objects remain guarded even before this/super initialization.
                 if(constructor!=null&&constructor.uninitializedWrites().contains(field))continue;
@@ -124,40 +116,6 @@ final class FieldWriteBoundary {
             }
         }
         if(!changed)return null;ControlClassWriter writer=new ControlClassWriter(loader,node);node.accept(writer);
-        byte[] result=writer.toByteArray();if(carrier)INSTALLED_CARRIERS.add(node.name);return result;
-    }
-    /** Plain AtomicReference.set and COW setArray do not pass through Unsafe. */
-    private static byte[] sourceCarrier(ClassLoader loader,ClassNode node){
-        String source="dev/ronova/pro/bootstrap/SourceMapBridge";int stores=0;
-        String slot=node.name.endsWith("/AtomicReference")?"value":"array";
-        for(MethodNode method:node.methods){
-            AbstractInsnNode[] original=method.instructions.toArray();
-            for(AbstractInsnNode at:original){
-                if(method.name.equals("<init>")&&at.getOpcode()==Opcodes.RETURN){
-                    InsnList born=new InsnList();born.add(new VarInsnNode(Opcodes.ALOAD,0));
-                    born.add(new MethodInsnNode(Opcodes.INVOKESTATIC,source,"born","(Ljava/lang/Object;)V",false));method.instructions.insertBefore(at,born);
-                }
-                if(!(at instanceof FieldInsnNode field)||field.getOpcode()!=Opcodes.PUTFIELD||!field.owner.equals(node.name)||!field.name.equals(slot))continue;
-                int value=method.maxLocals++,receiver=method.maxLocals++,scope=method.maxLocals++,ticket=method.maxLocals++,written=method.maxLocals++,error=method.maxLocals++;
-                LabelNode start=new LabelNode(),write=new LabelNode(),end=new LabelNode(),failed=new LabelNode(),resume=new LabelNode();InsnList code=new InsnList();
-                code.add(new VarInsnNode(Opcodes.ASTORE,value));code.add(new VarInsnNode(Opcodes.ASTORE,receiver));
-                code.add(new VarInsnNode(Opcodes.ALOAD,receiver));code.add(new InsnNode(Opcodes.ICONST_1));
-                code.add(new MethodInsnNode(Opcodes.INVOKESTATIC,source,"enter","(Ljava/lang/Object;Z)Ljava/lang/Object;",false));code.add(new VarInsnNode(Opcodes.ASTORE,scope));
-                code.add(new InsnNode(Opcodes.ACONST_NULL));code.add(new VarInsnNode(Opcodes.ASTORE,ticket));code.add(new InsnNode(Opcodes.ICONST_0));code.add(new VarInsnNode(Opcodes.ISTORE,written));code.add(start);
-                code.add(new VarInsnNode(Opcodes.ALOAD,receiver));code.add(new MethodInsnNode(Opcodes.INVOKESTATIC,source,"carrierRegistered","(Ljava/lang/Object;)Z",false));code.add(new JumpInsnNode(Opcodes.IFEQ,write));
-                code.add(new VarInsnNode(Opcodes.ALOAD,receiver));code.add(new LdcInsnNode(Type.getObjectType(field.owner)));code.add(new LdcInsnNode(field.name));code.add(new LdcInsnNode(field.desc));code.add(new VarInsnNode(Opcodes.ALOAD,value));
-                code.add(new MethodInsnNode(Opcodes.INVOKESTATIC,"dev/ronova/pro/bootstrap/ControlBridge","beginFieldMutation","(Ljava/lang/Object;Ljava/lang/Class;Ljava/lang/String;Ljava/lang/String;Ljava/lang/Object;)Ljava/lang/Object;",false));code.add(new VarInsnNode(Opcodes.ASTORE,ticket));
-                code.add(new VarInsnNode(Opcodes.ALOAD,ticket));code.add(new FieldInsnNode(Opcodes.GETSTATIC,"java/lang/Boolean","FALSE","Ljava/lang/Boolean;"));code.add(new JumpInsnNode(Opcodes.IF_ACMPEQ,end));
-                code.add(write);code.add(new VarInsnNode(Opcodes.ALOAD,receiver));code.add(new VarInsnNode(Opcodes.ALOAD,value));code.add(new FieldInsnNode(Opcodes.PUTFIELD,field.owner,field.name,field.desc));
-                code.add(new InsnNode(Opcodes.ICONST_1));code.add(new VarInsnNode(Opcodes.ISTORE,written));code.add(end);
-                code.add(new VarInsnNode(Opcodes.ALOAD,scope));code.add(new VarInsnNode(Opcodes.ALOAD,ticket));code.add(new VarInsnNode(Opcodes.ILOAD,written));
-                code.add(new MethodInsnNode(Opcodes.INVOKESTATIC,"dev/ronova/pro/bootstrap/ControlBridge","finishSourceCarrier","(Ljava/lang/Object;Ljava/lang/Object;Z)V",false));code.add(new JumpInsnNode(Opcodes.GOTO,resume));
-                code.add(failed);code.add(new VarInsnNode(Opcodes.ASTORE,error));code.add(new VarInsnNode(Opcodes.ALOAD,scope));code.add(new VarInsnNode(Opcodes.ALOAD,ticket));code.add(new VarInsnNode(Opcodes.ALOAD,error));
-                code.add(new MethodInsnNode(Opcodes.INVOKESTATIC,"dev/ronova/pro/bootstrap/ControlBridge","failedSourceCarrier","(Ljava/lang/Object;Ljava/lang/Object;Ljava/lang/Throwable;)V",false));code.add(new VarInsnNode(Opcodes.ALOAD,error));code.add(new InsnNode(Opcodes.ATHROW));code.add(resume);
-                method.instructions.insertBefore(at,code);method.instructions.remove(at);method.tryCatchBlocks.add(0,new TryCatchBlockNode(start,end,failed,null));stores++;
-            }
-        }
-        if(stores==0)throw new IllegalStateException("SOURCE_CARRIER_WRITE_UNAVAILABLE:"+node.name);
-        ControlClassWriter writer=new ControlClassWriter(loader,node);node.accept(writer);byte[] result=writer.toByteArray();INSTALLED_CARRIERS.add(node.name);return result;
+        return writer.toByteArray();
     }
 }

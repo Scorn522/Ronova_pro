@@ -2985,7 +2985,7 @@ public final class ProRuntime implements AutoCloseable {
             EquipmentPolicy.initialize();
             WorldStatePolicy.initialize();
             Class<?> bridge=Class.forName("dev.ronova.pro.bootstrap.TaskBridge",false,null);
-            if(!Integer.valueOf(90).equals(bridge.getMethod("abiVersion").invoke(null)))throw new IllegalStateException("INDEX_BRIDGE_ABI_MISMATCH");
+            if(!Integer.valueOf(91).equals(bridge.getMethod("abiVersion").invoke(null)))throw new IllegalStateException("INDEX_BRIDGE_ABI_MISMATCH");
             var lookup=java.lang.invoke.MethodHandles.lookup();
             var field=lookup.findStatic(ProRuntime.class,"preventFieldWrite",java.lang.invoke.MethodType.methodType(boolean.class,Object.class,Class.class,String.class,Object.class));
             var dispatch=lookup.findStatic(ProRuntime.class,"preventDispatch",java.lang.invoke.MethodType.methodType(boolean.class,Object.class,String.class,Object.class));
@@ -3026,8 +3026,9 @@ public final class ProRuntime implements AutoCloseable {
             agent.getMethod("installIndexBoundaries").invoke(null);
             dispatchState=String.valueOf(agent.getMethod("dispatchState").invoke(null));
             indexGuardState=String.valueOf(agent.getMethod("indexGuardState").invoke(null));
+            // Missing container interception is reported by each protection/source obligation.
+            // It does not uninstall the remaining dispatch and exact field/native controls.
             productionControlsInstalled=Boolean.TRUE.equals(agent.getMethod("dispatchReady").invoke(null))
-                    &&indexGuardState.startsWith("INSTALLED")
                     &&Boolean.TRUE.equals(agent.getMethod("controlReady").invoke(null));
             for(ProRuntime runtime:sourceRuntimes())for(Module module:runtime.protectedModules)hostProtection(module,true);
             synchronized(ProRuntime.class){if(sourceRuntimes().stream().anyMatch(runtime->!runtime.closing&&runtime.hostJvmProtected))publishHostJvmProtection();}

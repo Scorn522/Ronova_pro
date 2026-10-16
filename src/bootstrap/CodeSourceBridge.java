@@ -140,7 +140,7 @@ public final class CodeSourceBridge {
         public boolean enqueue(){return writer(WALKER.getCallerClass())&&super.enqueue();}
     }
     private static final class ControlKey extends WeakReference<Object>{
-        final int hash;ControlKey previous,next;boolean executionList,executionMap,fieldGate,analysisContainer;
+        final int hash;ControlKey previous,next;boolean executionList,executionMap,fieldGate;
         ControlKey(Object value,ControlKey next){super(value,DEAD_CONTROLS);hash=System.identityHashCode(value);this.next=next;if(next!=null)next.previous=this;}
         public void clear(){if(Key.writer(WALKER.getCallerClass()))super.clear();}
         public boolean enqueue(){return Key.writer(WALKER.getCallerClass())&&super.enqueue();}
@@ -171,7 +171,6 @@ public final class CodeSourceBridge {
         boolean executionList(Object value){ControlKey key=find(value);return key!=null&&key.executionList;}
         boolean executionMap(Object value){ControlKey key=find(value);return key!=null&&key.executionMap;}
         boolean fieldGate(Object value){ControlKey key=find(value);return key!=null&&key.fieldGate;}
-        boolean analysisContainer(Object value){ControlKey key=find(value);return key!=null&&key.analysisContainer;}
         ControlKey add(Object value){
             // Authenticate before delegating: a foreign reflective call must
             // not acquire the registry's own caller identity through this wrapper.
@@ -655,7 +654,7 @@ public final class CodeSourceBridge {
     }
     static void fieldGateControls(java.util.concurrent.locks.ReentrantLock gate){
         Class<?> caller=AUTHORITY.getCallerClass();
-        if(caller!=ControlBridge.class&&!SourceMapBridge.gateConstructor(caller)||gate.getClass()!=java.util.concurrent.locks.ReentrantLock.class)
+        if(caller!=ControlBridge.class||gate.getClass()!=java.util.concurrent.locks.ReentrantLock.class)
             throw new SecurityException("ACTUAL_FIELD_GATE_OWNER_REQUIRED");
         Object sync;
         // This exact JDK package was opened before writer boundaries were
@@ -676,20 +675,6 @@ public final class CodeSourceBridge {
     static void mutationControls(Object... objects){
         if(AUTHORITY.getCallerClass().getNestHost()!=TaskBridge.class&&AUTHORITY.getCallerClass().getNestHost()!=ControlBridge.class)throw new SecurityException("ACTUAL_MUTATION_SOURCE_STATE_REQUIRED");
         protect(objects);
-    }
-    static void analysisContainerControl(Object object){
-        if(AUTHORITY.getCallerClass()!=SourceMapBridge.class)throw new SecurityException("ACTUAL_ANALYSIS_CONTAINER_BIRTH_REQUIRED");
-        synchronized(CONTROLS){reapControls();CONTROLS.add(object).analysisContainer=true;}
-    }
-    static boolean analysisContainer(Object object){
-        synchronized(CONTROLS){return CONTROLS.analysisContainer(object);}
-    }
-    static void analysisNodeControl(Object parent,Object node){
-        if(AUTHORITY.getCallerClass()!=SourceMapBridge.class)throw new SecurityException("ACTUAL_ANALYSIS_NODE_FACTORY_REQUIRED");
-        synchronized(CONTROLS){
-            if(!CONTROLS.analysisContainer(parent))throw new SecurityException("ACTUAL_ANALYSIS_PARENT_REQUIRED");
-            reapControls();CONTROLS.add(node).analysisContainer=true;
-        }
     }
     private static CodeField codeField(Class<?> declaring,String name){
         synchronized(CODE_FIELDS){for(CodeFields entry:CODE_FIELDS)if(codeMatches(entry.name(),entry.loader(),entry.bootstrap(),entry.actual(),declaring))return entry.fields().get(name);}return null;

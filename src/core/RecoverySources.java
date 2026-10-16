@@ -71,7 +71,7 @@ public final class RecoverySources implements AutoCloseable {
     private static final class GroupCursor {
         final Object value;
         List<java.lang.reflect.Field> fields=List.of();int field,element;
-        Object listStamp;long listRevision=-1,arrayRevision=-1;
+        long listRevision=-1,arrayRevision=-1;
         SourceMaps.Cursor mapCursor;
         GroupCursor(Object value){this.value=value;if(value instanceof List<?>)element=-1;}
     }
@@ -423,6 +423,7 @@ public final class RecoverySources implements AutoCloseable {
                         Object value=walk.pending.removeFirst();if(!walk.seen.add(value))continue;processing=value;
                         if(value instanceof Entity)continue;
                         if(value==null||value instanceof String||value instanceof UUID||value instanceof Number||value instanceof Boolean||value instanceof Character)continue;
+                        if(SourceMaps.removedJdkContainer(value))throw new IOException("JDK_CONTAINER_HOOKS_REMOVED:"+value.getClass().getName());
                         if(characterWrapper(value)&&runtime.groupSubject(value)==authority){
                             if(walk.pending.size()>4080){walk.seen.remove(value);walk.pending.addLast(value);break;}
                             if(!retireDescriptorStream(value,authority)){walk.seen.remove(value);walk.pending.addLast(value);walk.gap="CHARACTER_WRAPPER_RELEASE_PENDING";break;}
@@ -433,10 +434,6 @@ public final class RecoverySources implements AutoCloseable {
                         if(value.getClass().getClassLoader()==null&&!platformStreamWrapper(value)&&(value instanceof java.io.Closeable||value instanceof java.util.concurrent.ExecutorService||value instanceof Timer||value instanceof Thread))continue;
                         if(value.getClass().isArray()) {
                             walk.current=new GroupCursor(value);
-                        }
-                        else if(value.getClass()==java.util.concurrent.atomic.AtomicReference.class) {
-                            @SuppressWarnings("unchecked") var atomic=(java.util.concurrent.atomic.AtomicReference<Object>)value;Object child=atomic.get();enqueue(walk.pending,child);
-                            if(runtime.groupSubject(child)==authority)atomic.compareAndSet(child,null);continue;
                         }
                         else if(SourceMaps.supported(value)||SourceMaps.supportedSet(value)) {
                             walk.current=new GroupCursor(value);
@@ -457,6 +454,7 @@ public final class RecoverySources implements AutoCloseable {
                     }
                     if(walk.current!=null) {
                         GroupCursor cursor=walk.current;Object value=cursor.value;
+                        if(SourceMaps.removedJdkContainer(value))throw new IOException("JDK_CONTAINER_HOOKS_REMOVED:"+value.getClass().getName());
                         if(value.getClass().isArray()) {
                             int allowance=Math.min(32,remaining+1);remaining-=allowance-1;
                             retireArray(walk,authority,allowance);
@@ -471,6 +469,7 @@ public final class RecoverySources implements AutoCloseable {
                         if(walk.pending.size()>=4096){walk.paused.addLast(cursor);walk.current=null;continue;}
                         var field=cursor.fields.get(cursor.field);if(!field.trySetAccessible())throw new IOException("FIELD_INACCESSIBLE:"+field);
                         Object receiver=value instanceof Class<?>?null:value;Object child=field.get(receiver);
+                        if(SourceMaps.removedJdkContainer(child))throw new IOException("JDK_CONTAINER_HOOKS_REMOVED:"+child.getClass().getName());
                         if(!field.getType().isPrimitive())enqueue(walk.pending,child);
                         // The selected holder owns this slot. Children are disposed independently before the traversal releases them.
                         SourceMaps.retireField(runtime,field,receiver,child,()->clearField(field,receiver,child));
@@ -725,17 +724,13 @@ public final class RecoverySources implements AutoCloseable {
     }
     private int retireList(GroupWalk walk,ProRuntime.Subject authority,int limit)throws IOException,ReflectiveOperationException {
         GroupCursor cursor=walk.current;Object value=cursor.value;
-        boolean copyOnWrite=value.getClass()==java.util.concurrent.CopyOnWriteArrayList.class;
-        
-        java.lang.reflect.Field array=copyOnWrite?java.util.concurrent.CopyOnWriteArrayList.class.getDeclaredField("array"):null;
-        if(array!=null)array.setAccessible(true);
+        if(SourceMaps.removedJdkContainer(value))throw new IOException("JDK_CONTAINER_HOOKS_REMOVED:"+value.getClass().getName());
         IOException[] failure={null};int[] processed={0};Runnable action=()->{
             try {
                 List<?> list=(List<?>)value;
-                Object stamp=copyOnWrite?array.get(value):null;
-                long currentRevision=copyOnWrite?0:RecoveryRecords.arrayListRevision(value);
-                if(!copyOnWrite&&currentRevision<0)throw new IOException("ARRAY_LIST_REVISION_UNOBSERVED");
-                if(copyOnWrite?cursor.listStamp!=stamp:cursor.listRevision!=currentRevision)cursor.element=list.size()-1;
+                long currentRevision=RecoveryRecords.arrayListRevision(value);
+                if(currentRevision<0)throw new IOException("ARRAY_LIST_REVISION_UNOBSERVED");
+                if(cursor.listRevision!=currentRevision)cursor.element=list.size()-1;
                 while(cursor.element>=0&&processed[0]<limit) {
                     Object child=list.get(cursor.element);
                     if(child!=null&&!walk.seen.contains(child)){
@@ -745,18 +740,12 @@ public final class RecoverySources implements AutoCloseable {
                     if(runtime.groupSubject(child)==authority)SourceMaps.removeListIndex(list,cursor.element);
                     cursor.element--;processed[0]++;
                 }
-                if(copyOnWrite)cursor.listStamp=array.get(value);
-                else cursor.listRevision=RecoveryRecords.arrayListRevision(value)+(SourceMaps.fastList(value)?0:1); // withList publishes its own revision on return.
+                cursor.listRevision=RecoveryRecords.arrayListRevision(value)+(SourceMaps.fastList(value)?0:1); // withList publishes its own revision on return.
                 if(cursor.element<0)walk.current=null;
             }catch(IOException unavailable){failure[0]=unavailable;}
             catch(ReflectiveOperationException unavailable){failure[0]=new IOException("GROUP_LIST_VERSION_UNAVAILABLE",unavailable);}
         };
-        if(copyOnWrite) {
-            var lock=java.util.concurrent.CopyOnWriteArrayList.class.getDeclaredField("lock");lock.setAccessible(true);
-            synchronized(lock.get(value)) {action.run();}
-        }else {
-            if(!RecoveryRecords.withArrayList(value,true,action))throw new IOException("ARRAY_LIST_SCOPE_BUSY_OR_UNOBSERVED");
-        }
+        if(!RecoveryRecords.withArrayList(value,true,action))throw new IOException("ARRAY_LIST_SCOPE_BUSY_OR_UNOBSERVED");
         if(failure[0]!=null)throw failure[0];
         return processed[0];
     }
@@ -830,11 +819,8 @@ public final class RecoverySources implements AutoCloseable {
                         cursor.keys=List.copyOf(tag.getAllKeys());walk.current=cursor;
                     }else if(type==ListTag.class)walk.current=cursor;
                     else if(SCALARS.contains(type)||type==String.class||type==UUID.class||type.isEnum()||isPrimitiveCollection(value))continue;
+                    else if(SourceMaps.removedJdkContainer(value))walk.gap="JDK_CONTAINER_HOOKS_REMOVED:"+type.getName();
                     else if(SourceMaps.supported(value)||SourceMaps.supportedSet(value)||SourceMaps.supportedList(value))walk.current=cursor;
-                    else if(type==java.util.concurrent.atomic.AtomicReference.class){
-                        if(walk.pending.size()>=4096){walk.seen.remove(value);walk.pending.addLast(value);continue;}
-                        enqueue(walk.pending,((java.util.concurrent.atomic.AtomicReference<?>)value).get());
-                    }
                     else if(type.isArray()) {if(!type.getComponentType().isPrimitive())walk.current=cursor;}
                     else if(value instanceof Entity) {
                         UUID subject=runtime.recoveryTasks.subjectOf(value);if(subject!=null&&source.subjects.add(subject))epoch.incrementAndGet();
@@ -1204,6 +1190,9 @@ public final class RecoverySources implements AutoCloseable {
         return nestedSource(parent,field,kind,key,value,field.get(holder instanceof Class<?>?null:holder));
     }
     Source nestedSource(Source parent,java.lang.reflect.Field field,String kind,Object key,Object value,Object carrier)throws ReflectiveOperationException{
+        if(SourceMaps.removedJdkContainer(carrier)||SourceMaps.removedJdkContainer(value)){
+            parent.gap="JDK_CONTAINER_HOOKS_REMOVED";throw new IllegalAccessException(parent.gap);
+        }
         if(!RecoveryRecords.nestedHolder(value)||!current(parent))return null;
         for(Source ancestor=parent;ancestor!=null;ancestor=ancestor.nestedParent)if(ancestor.holder()==value)return ancestor;
         String code=code(value.getClass());if(code==null)return null;
@@ -1231,16 +1220,16 @@ public final class RecoverySources implements AutoCloseable {
         return nestedValue(carrier,kind,key);
     }
     private Object nestedValue(Object carrier,String kind,Object key)throws ReflectiveOperationException{
-        if(carrier==null||kind.equals("FIELD"))return carrier;
+        if(carrier==null)return null;
+        if(SourceMaps.removedJdkContainer(carrier))throw new IllegalAccessException("JDK_CONTAINER_HOOKS_REMOVED:"+carrier.getClass().getName());
+        if(kind.equals("FIELD"))return carrier;
         if(kind.equals("BACKING")){Object[] values=SourceMaps.valueBacking(carrier);int index=(Integer)key;return index<values.length?values[index]:null;}
         if(kind.equals("MAP")){
             Object[] value=SourceMaps.peek(carrier,key);if(value==null)throw new IllegalAccessException("NESTED_MAP_BUSY_OR_UNSUPPORTED");return value[1];
         }
-        if(kind.equals("ATOMIC")&&carrier.getClass()==java.util.concurrent.atomic.AtomicReference.class)return ((java.util.concurrent.atomic.AtomicReference<?>)carrier).get();
         if(kind.equals("ARRAY")&&carrier instanceof Object[] values){int index=(Integer)key;return index<values.length?values[index]:null;}
         if(kind.equals("LIST")&&(SourceMaps.supportedList(carrier))){
             int index=(Integer)key;
-            if(carrier.getClass()==java.util.concurrent.CopyOnWriteArrayList.class){Object[] values=((List<?>)carrier).toArray();return index<values.length?values[index]:null;}
             Object[] result={null};boolean ran=RecoveryRecords.withArrayList(carrier,false,()->{List<?> values=(List<?>)carrier;result[0]=index<values.size()?values.get(index):null;});
             if(!ran)throw new IllegalAccessException("NESTED_LIST_BUSY");return result[0];
         }
@@ -1276,12 +1265,17 @@ public final class RecoverySources implements AutoCloseable {
             try(var gate=registrationGate.enter()){
                 if(prior==null?sources.putIfAbsent(locator,source)==null:sources.replace(locator,prior,source)){restartDiagnostics.remove(locator);epoch.incrementAndGet();}
             }
-        }catch(ReflectiveOperationException|RuntimeException unavailable){restartDiagnostics.put(locator,"NESTED_LOCATION_UNAVAILABLE");}
+        }catch(ReflectiveOperationException|RuntimeException unavailable){
+            String reason=unavailable.getMessage();restartDiagnostics.put(locator,reason!=null&&reason.startsWith("JDK_CONTAINER_HOOKS_REMOVED")?reason:"NESTED_LOCATION_UNAVAILABLE");
+        }
     }
     @FunctionalInterface interface SourceQuery {boolean absent(Source source)throws ReflectiveOperationException;}
     /** A historical Set edge has no stable element index. Query every current matching holder;
      * these views grant no mutation authority and never stand in for a live source object. */
     boolean queryCurrent(Source source,SourceQuery query)throws ReflectiveOperationException{
+        if(SourceMaps.removedJdkContainer(source.nestedCarrier)){
+            source.gap="JDK_CONTAINER_HOOKS_REMOVED";throw new IllegalAccessException(source.gap);
+        }
         if(!current(source))throw new IllegalAccessException("NESTED_SOURCE_BINDING_CHANGED");
         if(!source.nestedQuery)return query.absent(source);
         return queryCurrent(source.nestedParent,parent->{
@@ -1296,6 +1290,7 @@ public final class RecoverySources implements AutoCloseable {
             final java.lang.reflect.Field field=selected;
             Object receiver=holder instanceof Class<?>?null:holder,carrier=field.get(receiver);
             if(carrier==null)return SourceMaps.replacementCovered(parent,field,null)||parent.cleared(field);
+            if(SourceMaps.removedJdkContainer(carrier))throw new IllegalAccessException("JDK_CONTAINER_HOOKS_REMOVED:"+carrier.getClass().getName());
             if(source.nestedKind.equals("SET")){
                 if(!SourceMaps.supportedSet(carrier))throw new IllegalAccessException("NESTED_SET_BACKEND_CHANGED");
                 boolean[] absent={true};
@@ -1354,6 +1349,7 @@ public final class RecoverySources implements AutoCloseable {
     }
     private void discoverCursor(HolderWalk walk,int limit)throws ReflectiveOperationException,IOException {
         HolderCursor cursor=walk.current;Object value=cursor.value;Class<?> type=value.getClass();
+        if(SourceMaps.removedJdkContainer(value))throw new IOException("JDK_CONTAINER_HOOKS_REMOVED:"+type.getName());
         if(SourceMaps.supported(value)||SourceMaps.supportedSet(value)){
             Object map=SourceMaps.supportedSet(value)?SourceMaps.setMap(value):value;
             if(cursor.map==null||cursor.map.map!=map)cursor.map=new SourceMaps.Cursor(map);
@@ -1385,13 +1381,13 @@ public final class RecoverySources implements AutoCloseable {
         }
     }
     private void discoverList(HolderWalk walk,HolderCursor cursor,int limit)throws ReflectiveOperationException,IOException {
-        Object value=cursor.value;boolean copy=value.getClass()==java.util.concurrent.CopyOnWriteArrayList.class;
-        Class<?> bridge=Class.forName("dev.ronova.pro.bootstrap.SourceMapBridge",false,null);
+        Object value=cursor.value;
+        if(SourceMaps.removedJdkContainer(value))throw new IOException("JDK_CONTAINER_HOOKS_REMOVED:"+value.getClass().getName());
         ReflectiveOperationException[] reflection={null};IOException[] failure={null};
         Runnable read=()->{
             try{
-                Object stamp=SourceMaps.listBacking(value);long revision=copy?0:RecoveryRecords.arrayListRevision(value);
-                if(!copy&&revision<0)throw new IOException("HOLDER_LIST_REVISION_UNAVAILABLE");
+                Object stamp=SourceMaps.listBacking(value);long revision=RecoveryRecords.arrayListRevision(value);
+                if(revision<0)throw new IOException("HOLDER_LIST_REVISION_UNAVAILABLE");
                 if(cursor.stamp!=stamp||cursor.revision!=revision){cursor.stamp=stamp;cursor.revision=revision;cursor.position=0;}
                 List<?> list=(List<?>)value;int processed=0;
                 while(cursor.position<list.size()&&processed++<limit){
@@ -1400,8 +1396,7 @@ public final class RecoverySources implements AutoCloseable {
                 if(cursor.position>=list.size())walk.current=null;
             }catch(ReflectiveOperationException unavailable){reflection[0]=unavailable;}catch(IOException unavailable){failure[0]=unavailable;}
         };
-        if(copy){var lock=value.getClass().getDeclaredField("lock");lock.setAccessible(true);synchronized(lock.get(value)){read.run();}}
-        else if(!RecoveryRecords.withArrayList(value,false,read))throw new IOException("HOLDER_LIST_BUSY");
+        if(!RecoveryRecords.withArrayList(value,false,read))throw new IOException("HOLDER_LIST_BUSY");
         if(reflection[0]!=null)throw reflection[0];if(failure[0]!=null)throw failure[0];
     }
     /** Keep actual record identities through the original DataFixer invocation. */

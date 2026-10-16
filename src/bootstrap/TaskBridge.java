@@ -639,7 +639,7 @@ public final class TaskBridge {
         finally { if(prior==null)AUTHORITY.remove();else AUTHORITY.set(prior); }
     }
     private TaskBridge() {}
-    public static int abiVersion(){return 90;}
+    public static int abiVersion(){return 91;}
     public static synchronized void installEquipmentAsync(Class<?> owner,java.lang.invoke.MethodHandle capture,java.lang.invoke.MethodHandle invoke){
         requirePolicyInstaller();if(guards==null||guards.owner()!=owner||equipmentAsync!=null&&equipmentAsync.owner!=owner)throw new SecurityException("EQUIPMENT_ASYNC_OWNER");
         equipmentAsync=new EquipmentAsync(owner,Objects.requireNonNull(capture).asType(java.lang.invoke.MethodType.methodType(Object.class,Object.class,Object.class,Object.class)),

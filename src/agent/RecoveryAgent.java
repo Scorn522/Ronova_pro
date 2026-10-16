@@ -13,7 +13,7 @@ public final class RecoveryAgent {
     private static JarFile bootstrap;
     private static final Set<String> installed=ConcurrentHashMap.newKeySet();
     /** True once the reflection field-write entry points carry the policy guard. */
-    private static volatile boolean reflectionGuarded,unsafeGuarded,indexGuarded;
+    private static volatile boolean reflectionGuarded,unsafeGuarded;
     private static volatile boolean eventFaultGuarded;
     public static boolean eventFaultGuarded() { return eventFaultGuarded; }
 
@@ -90,16 +90,15 @@ public final class RecoveryAgent {
     }
     private static boolean installationComplete() {
         try {
-            return installed.containsAll(JdkTaskBoundaryContract.targets())&&indexGuarded&&reflectionGuarded&&unsafeGuarded
-                    &&HandleWriteBoundary.complete()&&BackingBoundary.coreInstalled()&&HashMapBoundary.sourceInstalled()
-                    &&ConcurrentSourceBoundary.installed()&&FieldWriteBoundary.sourceCarriersInstalled()&&controlReady();
+            return installed.containsAll(JdkTaskBoundaryContract.targets())&&reflectionGuarded&&unsafeGuarded
+                    &&HandleWriteBoundary.complete()&&BackingBoundary.coreInstalled()&&controlReady();
         } catch(RuntimeException|LinkageError unavailable) { return false; }
     }
-    public static String sourceMapState() { return HashMapBoundary.sourceInstalled()&&ConcurrentSourceBoundary.installed()?"INSTALLED":"SOURCE_MAP_SCOPE_UNAVAILABLE"; }
-    public static String sourcePublicationState(){
-        return sourceMapState().equals("INSTALLED")&&reflectionGuarded&&unsafeGuarded&&HandleWriteBoundary.complete()
-                &&FieldWriteBoundary.sourceCarriersInstalled()&&installState().equals("INSTALLED_FULL")?"INSTALLED":"SOURCE_PUBLICATION_SCOPE_UNAVAILABLE";
-    }
+    public static String sourceMapState() { return "REMOVED:JDK_CONTAINER_HOOKS_UNAVAILABLE"; }
+    public static String sourcePublicationState(){return "UNAVAILABLE:JDK_CONTAINER_HOOKS_REMOVED";}
+    /** Remaining exact field writers; this does not certify ordinary JDK collection mutations. */
+    public static String sourceFieldState(){return reflectionGuarded&&unsafeGuarded&&HandleWriteBoundary.complete()
+            &&installState().equals("INSTALLED_FULL")?"INSTALLED":"SOURCE_FIELD_SCOPE_UNAVAILABLE";}
     private static volatile String installState="NOT_ATTEMPTED";
     private static synchronized void install(String argument,Instrumentation api) throws Exception {
         if(api==null)throw new IllegalArgumentException("INSTRUMENTATION_REQUIRED");
@@ -109,20 +108,9 @@ public final class RecoveryAgent {
             bootstrap=new JarFile(Path.of(argument).toAbsolutePath().normalize().toFile());
             api.appendToBootstrapClassLoaderSearch(bootstrap);
             bridge=Class.forName("dev.ronova.pro.bootstrap.TaskBridge",true,null);
-            if(!Integer.valueOf(90).equals(bridge.getMethod("abiVersion").invoke(null)))throw new IllegalStateException("TASK_BRIDGE_ABI_MISMATCH");
-            Class.forName("dev.ronova.pro.bootstrap.SourceMapBridge",true,null);
-            // Default-Map guards test UUID keys while class-loading maps are
-            // active. Resolve that type before publishing the guarded methods.
-            Class.forName("java.util.UUID",false,null);
+            if(!Integer.valueOf(91).equals(bridge.getMethod("abiVersion").invoke(null)))throw new IllegalStateException("TASK_BRIDGE_ABI_MISMATCH");
             // This classfile was first requested beneath a stopped empty-stream return.
             Class.forName("java.util.stream.IntPipeline$Head",false,null);
-            // ExternalCodeDefinitions.expandGraph iterates an IdentityHashMap's
-            // values inside transform; its first definition cannot need itself.
-            Class.forName("java.util.IdentityHashMap$ValueIterator",false,null);
-            // A guarded Map operation must not first define its own frame while
-            // libinstrument is filling that frame's class bytes through JNI.
-            for(String helper:List.of("Key","OwnerRef","Gate","Scope","Frame","ConcurrentFrame","Refused"))
-                Class.forName("dev.ronova.pro.bootstrap.SourceMapBridge$"+helper,true,null);
             for(String helper:List.of("SourcePublication","SourceIndexMutation","FastListView","FieldMutation","EquipmentInvocations"))
                 Class.forName("dev.ronova.pro.bootstrap.ControlBridge$"+helper,true,null);
             // A JNI observation uses this exact family's mutually referring metadata.
@@ -152,7 +140,7 @@ public final class RecoveryAgent {
             Class.forName("dev.ronova.pro.bootstrap.ControlBridge$ProducerFrame",false,null);
             Class.forName("dev.ronova.pro.bootstrap.EventFaultBridge",true,null);
             Class<?> control=Class.forName("dev.ronova.pro.bootstrap.ControlBridge",true,null);
-            if(!Integer.valueOf(90).equals(control.getMethod("abiVersion").invoke(null)))throw new IllegalStateException("CONTROL_BRIDGE_ABI_MISMATCH");
+            if(!Integer.valueOf(91).equals(control.getMethod("abiVersion").invoke(null)))throw new IllegalStateException("CONTROL_BRIDGE_ABI_MISMATCH");
             Module base=Object.class.getModule(),ours=RecoveryAgent.class.getModule();
             api.redefineModule(base,Set.of(bridge.getModule()),Map.of(
                     "jdk.internal.org.objectweb.asm",Set.of(ours),"jdk.internal.org.objectweb.asm.commons",Set.of(ours),
@@ -163,7 +151,6 @@ public final class RecoveryAgent {
                             Map.entry("sun.nio.cs",Set.of(bridge.getModule())),Map.entry("sun.nio.ch",Set.of(bridge.getModule())),Map.entry("jdk.internal.loader",Set.of(bridge.getModule()))),Set.of(),Map.of());
             // A Forge scanning thread may run newly transformed code immediately after addTransformer.
             // Finish the bootstrap helper's access and initialization before publishing any such call site.
-            Class.forName("dev.ronova.pro.bootstrap.SourceMapBridge$HashNodes",true,null);
             Class.forName("dev.ronova.pro.bootstrap.BackingBridge",true,null);
             Class.forName("dev.ronova.pro.bootstrap.ResourceBridge",true,null);
             Class.forName("dev.ronova.pro.bootstrap.ResourceBridge$BufferPlatform",true,null);
@@ -317,17 +304,6 @@ public final class RecoveryAgent {
                     byte[] handles=HandleWriteBoundary.transform(loader,name,bytes);if(handles!=null)return handles;
                     if(loader==null&&("java/util/concurrent/ThreadPoolExecutor".equals(name)
                             ||"java/util/concurrent/ScheduledThreadPoolExecutor".equals(name)))return BackingBoundary.transform(loader,name,bytes);
-                    if(loader==null&&(name.startsWith("java/util/ArrayList")||name.equals("java/util/AbstractCollection")||name.startsWith("java/util/IdentityHashMap"))) {
-                        // Exact collection operations are guarded by BackingBoundary. Generic JDK
-                        // field hooks also ran on lazy view caches and internal bookkeeping while
-                        // TaskBridge held its helper lock, reversing the source-ledger lock order.
-                        return BackingBoundary.transform(loader,name,bytes);
-                    }
-                    if(loader==null&&module==base&&("java/util/HashMap".equals(name)||"java/util/LinkedHashMap".equals(name)||"java/util/HashMap$Node".equals(name)||"java/util/Map".equals(name))) {
-                        return HashMapBoundary.transform(loader,name,bytes);
-                    }
-                    if(loader==null&&"java/util/concurrent/ConcurrentHashMap".equals(name))return ConcurrentSourceBoundary.transform(loader,name,bytes);
-                    if(loader==null&&FieldWriteBoundary.sourceCarrier(name))return FieldWriteBoundary.transform(loader,module,bytes);
                     if(name!=null&&FastutilIndexBoundary.targets().contains(name)) {
                         if(module!=null&&!module.canRead(bridge.getModule()))
                             api.redefineModule(module,Set.of(bridge.getModule()),Map.of(),Map.of(),Set.of(),Map.of());
@@ -478,29 +454,13 @@ public final class RecoveryAgent {
                 if(installed.contains(name))boundary(name,true);
             }
             try {
-                if(api.isModifiableClass(HashMap.class)) {
-                    api.retransformClasses(HashMap.class);
-                    indexGuarded=HashMapBoundary.installed();
-                }
-                Class<?> node=Class.forName("java.util.HashMap$Node",false,null);
-                if(api.isModifiableClass(node))api.retransformClasses(node);
-                if(api.isModifiableClass(java.util.LinkedHashMap.class))api.retransformClasses(java.util.LinkedHashMap.class);
-                if(api.isModifiableClass(Map.class))api.retransformClasses(Map.class);
-                api.retransformClasses(java.util.concurrent.ConcurrentHashMap.class);
-                api.retransformClasses(java.util.concurrent.atomic.AtomicReference.class,java.util.concurrent.CopyOnWriteArrayList.class);
-                // Both executor classes already received the backing guard in the certified
-                // pass above. A second transform would revoke that completed task installation.
-                api.retransformClasses(java.util.AbstractCollection.class,java.util.ArrayList.class,Class.forName("java.util.ArrayList$Itr",false,null),
-                    Class.forName("java.util.ArrayList$ListItr",false,null),Class.forName("java.util.ArrayList$SubList",false,null),Class.forName("java.util.ArrayList$SubList$1",false,null),java.util.IdentityHashMap.class,
-                    Class.forName("java.util.IdentityHashMap$IdentityHashMapIterator",false,null),
-                    Class.forName("java.util.IdentityHashMap$EntryIterator$Entry",false,null));
                 for(String target:HandleWriteBoundary.targets()) {Class<?> type=Class.forName(target.replace('/','.'),false,null);if(api.isModifiableClass(type))api.retransformClasses(type);}
-                if(HashMapBoundary.sourceInstalled())Class.forName("dev.ronova.pro.bootstrap.SourceMapBridge",true,null).getMethod("activate").invoke(null);
             } catch(ClassNotFoundException|UnmodifiableClassException|RuntimeException|LinkageError unavailable) {
-                indexGuarded=false;
-                report("INDEX_GUARD_RETRANSFORM_UNAVAILABLE:"+unavailable.getClass().getSimpleName());
+                report("HANDLE_FACTORY_RETRANSFORM_UNAVAILABLE:"+unavailable.getClass().getSimpleName());
             }
             report(indexGuardState());
+            report(sourceMapState());
+            report(sourcePublicationState());
             installIndexBoundaries();
             for(Class<?> type:loadedClasses())if(type.getName().replace('.','/').equals(ConsoleBoundary.TARGET)) {
                 try {
@@ -531,7 +491,7 @@ public final class RecoveryAgent {
                 report("UNSAFE_GUARD_UNAVAILABLE:"+failure.getClass().getSimpleName());
             }
             report("UNSAFE_OBJECT_PUT_CAS_ATOMIC_OBJECT_BULK:"+unsafeGuarded+":UNOBSERVED_RAW_NATIVE_AND_UNWOVEN_COMPILER_INTRINSIC_WRITERS_UNSUPPORTED");
-            report("BACKING_JDK:"+BackingBoundary.coreInstalled()+":HANDLE_FACTORIES:"+HandleWriteBoundary.installedCount()+"/"+HandleWriteBoundary.targets().size());
+            report("EXECUTOR_RELEASE_BOUNDARY:"+BackingBoundary.coreInstalled()+":JDK_CONTAINER_HOOKS:REMOVED:HANDLE_FACTORIES:"+HandleWriteBoundary.installedCount()+"/"+HandleWriteBoundary.targets().size());
             DispatchBoundary.retransformDeclared(api);
             for(Class<?> type:loadedClasses())if(type.getName().replace('.','/').equals(EventFaultBoundary.TARGET)) {
                 try {
@@ -561,7 +521,7 @@ public final class RecoveryAgent {
     /** Exact guard state, including how many write entries carry it. */
     public static String reflectionGuardState() { return ReflectionWriteBoundary.state(); }
     public static String indexGuardState() {
-        return (indexGuarded?"INSTALLED:":"UNAVAILABLE:")+HashMapBoundary.state()+";NODE="+HashMapBoundary.nodeState()+";DEFAULT="+HashMapBoundary.defaultState()+";FASTUTIL="+FastutilIndexBoundary.states();
+        return "JDK_CONTAINER_HOOKS_REMOVED;FASTUTIL="+FastutilIndexBoundary.states();
     }
     public static void installIndexBoundaries() {
         Instrumentation api=instrumentation;if(api==null)return;
