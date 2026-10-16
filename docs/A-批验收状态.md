@@ -1,5 +1,22 @@
 # Ronova Pro 当前进度
 
+## 2026-10-16：C 接续——停组策略发布、Native 返回语义与任务捕获
+
+接续 `16ae71a`，Java ABI92 / Native ABI83 / SourceMapBridge2 / Storage3 / Journal6，客户端协议 `r3-client-8`。本包按用户指定只收口这三项；整包源码写齐后统一构建，没有恢复旧容器 Hook。
+
+停组先验证完整目标和返回模式，为所有所选 Module 绑定不可变策略，再按 DefinitionBridge 策略、Bootstrap 停止门、Native 停止门的顺序发布，最后捕获根并清理。普通停止、客户端停组及启动/存档恢复均走所选模式；同模式 prepare/stop 复用固定 UUID。非法模式或目标不发布停止状态；有效目标发生发布故障时保留实际已发布围栏并跳过后续清理。
+
+Native Attach/GetEnv 将实际 API 结果和观察结果分开：JNI 槽登记或 JVMTI 包装失败记录覆盖缺口，保留原成功环境、pending Throwable 身份及原 Win32 LastError，不以观察失败伪造 JNI_ERR、Detach 或 Dispose 回滚。受限/已确认停止来源和准确受保护输出目标继续拒绝；真正交付失败的未发布 JVMTI 环境仍清理。表交换成功后才发布观察记录，失败释放未发布记录、范围和来源租约；诊断改为 JVMTI_FAILURES，不把观察失败误称为全部拒绝成功。
+
+任务字段解析、来源重捕获、克隆通知和构造回调移出 LISTENERS 全局锁；短锁只预留在途、维护注册快照及合并真实结果。来源/绑定读取同步，图解析不持长期运行时锁，避免与 TAGS 的锁顺序反转。同步取消/请求退役重入只投递既有任务收据。事件绑定 owner、session、Registration 和 epoch，能定位的丢失按实际任务/主体保留；无法定位的首次捕获失败仍全局阻断，DROPPED 只累计诊断，不重置以掩盖历史丢失。共享发布在途和未归并失败仍暂缓结清，关闭不能丢弃这些义务。
+
+统一构建 `build-c-java92-native83-policy-capture-20261016.log` **PASS，1分21秒**，21项任务中15项执行、6项保持最新，含 Native83 编译链接。Java 检查器编译退出0。Native 夹具首次编译因既有 Host 辅助函数仍用旧参数形式失败，修正为现有参数数组后仅重编夹具；原 `compile-c-java92-native83-policy-native-fixture-20261016.log` 保留。首次隔离运行缺少生产 Agent 原本开放的 sun.nio.ch 等包，`c-java92-native83-policy-capture-20261016.log` 保留；补齐同样的模块开放后，`c-java92-native83-policy-capture-access-fixed-20261016.log` **退出0**，三项 `STOP_POLICY_PUBLICATION_PASS`、`TASK_CAPTURE_SCOPE_PASS`、`NATIVE_VM_RESULTS_PASS` 全部通过。未重复主构建、已通过检查或旧矩阵。
+
+策略检查调用实际 prepare/publish，覆盖所选非默认模式、重复固定 UUID 与非法选择；使用隔离元数据和空类快照 Instrumentation 代理。任务检查在实际 receive 内阻塞解析，确认全局监视器可获取、在途结清被拒、发布后无关 owner 可用，并覆盖准确失败行保留/确认及未知丢失拒绝。Native 夹具调用真实 JVM 的 GetEnv/Attach、原 JVMTI 环境和 Windows worker，以夹具内 TLS 不可用/表交换失败覆盖原返回、pending Throwable、LastError、输出目标拒绝和失败记录释放。未安装真实 Agent/Core/Native 控制器，不能代称实际安装、游戏启动或游戏攻防通过；这些场景 **NOTRUN**。
+
+匹配候选 `distribution/candidate-c-java92-native83-policy-capture-wip-20261016`：Core2928135、prelaunch23226字节。源码、匹配 JAR 与本摘要同步 GitHub，不生成源码 ZIP。已删容器防护、未知载体及间接/原生不透明路径仍有缺口，完整 C/B 尚未完成。
+
+---
 ## 2026-10-16：C 接续——移除旧 JDK 容器广谱 Hook
 
 接续 `35fb3c8`，Java ABI91 / Native ABI82 / SourceMapBridge2 / Storage3 / Journal6，协议 `r3-client-8`。用户明确选择先彻底删除旧容器 Hook，接受对应防护暂缺；本批不做自定义 JVM，不提前补造替代覆盖。

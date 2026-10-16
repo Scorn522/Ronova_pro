@@ -46,7 +46,7 @@ final class ModGroupBoundary {
     private static final Map<Module,Set<String>> metadata=Collections.synchronizedMap(new IdentityHashMap<>());
     private static final AtomicInteger methods=new AtomicInteger();
     private static final Set<String> unresolved=ConcurrentHashMap.newKeySet();
-    private record Returns(String mode,String fixedUuid) {
+    record Returns(String mode,String fixedUuid) {
         Returns(String mode){this(mode,mode.equals("uuid-fixed")?java.util.UUID.randomUUID().toString():null);}
     }
     private static final Map<Module,Returns> returns=Collections.synchronizedMap(new IdentityHashMap<>());
@@ -54,6 +54,7 @@ final class ModGroupBoundary {
     private static final Map<Module,String> codeRetirementGaps=Collections.synchronizedMap(new IdentityHashMap<>());
     private static final ThreadLocal<Class<?>[]> batch=new ThreadLocal<>();
     static String returnMode(String mode) {
+        if(mode==null)throw new IllegalArgumentException("INVALID_RETURN_POLICY:null");
         String normalized=mode.trim().toLowerCase(java.util.Locale.ROOT);
         if(!Set.of("default","null","empty","uuid-fixed","uuid-each","invalid-id").contains(normalized))
             throw new IllegalArgumentException("INVALID_RETURN_POLICY:"+mode);
@@ -254,41 +255,62 @@ final class ModGroupBoundary {
         } catch(AnalyzerException|RuntimeException unavailable) {return false;}
         return false;
     }
-    static synchronized String stop(Instrumentation api,String[] ids,Module[] hints,String mode) {
+    static synchronized String prepare(Instrumentation api,String[] ids,Module[] hints,String mode) {
         if(api==null)return "AGENT_UNAVAILABLE";
         mode=returnMode(mode);
         String selection=validate(ids,hints);
         if(!selection.equals("READY"))return selection;
         Set<Module> selected=Collections.newSetFromMap(new IdentityHashMap<>());selected.addAll(Arrays.asList(hints));
+        Map<Module,Returns> policies=new IdentityHashMap<>();
         for(Module module:selected) {
             Returns previous=returns.get(module);
             // Repeating the same selection/publication does not start a new policy generation.
-            if(previous==null||!previous.mode().equals(mode))returns.put(module,new Returns(mode));
+            policies.put(module,previous!=null&&previous.mode().equals(mode)?previous:new Returns(mode));
         }
+        returns.putAll(policies);
+        // Bind every selected policy before the first task/native stopped publication.
+        for(Module module:selected)RecoveryAgent.publishStoppedModule(module);
+        return "READY";
+    }
+    static synchronized String stop(Instrumentation api,String[] ids,Module[] hints,String mode) {
+        String prepared=prepare(api,ids,hints,mode);
+        if(!prepared.equals("READY"))return prepared;
+        Set<Module> selected=Collections.newSetFromMap(new IdentityHashMap<>());selected.addAll(Arrays.asList(hints));
         for(int i=0;i<ids.length;i++) {
             denied.add(ids[i].trim().toLowerCase(java.util.Locale.ROOT));
             synchronized(exact){exact.add(hints[i]);}
         }
-        // Native-only/unmodifiable classes may never publish from a transformed Java body.
-        for(Module module:selected)RecoveryAgent.publishStoppedModule(module);
         return retransform(api,selected);
     }
     static String validate(String[] ids,Module[] hints) {
-        if(ids.length!=hints.length||ids.length==0)return "EMPTY_OR_MISMATCHED_SELECTION";
+        if(ids==null||hints==null||ids.length!=hints.length||ids.length==0)return "EMPTY_OR_MISMATCHED_SELECTION";
+        Set<String> selected=new HashSet<>();
+        for(String raw:ids) {
+            if(raw==null)return "INVALID_TARGET:null";
+            String id=raw.trim().toLowerCase(java.util.Locale.ROOT);
+            if(!valid(id))return "INVALID_TARGET:"+id;
+            selected.add(id);
+        }
         for(int i=0;i<ids.length;i++) {
             String id=ids[i].trim().toLowerCase(java.util.Locale.ROOT);
-            if(!valid(id)||hints[i]==null||hints[i]==Object.class.getModule())return "INVALID_TARGET:"+id;
+            if(hints[i]==null||hints[i]==Object.class.getModule())return "INVALID_TARGET:"+id;
             if(!ids(hints[i]).contains(id))return "MODULE_METADATA_MISMATCH:"+id;
-            if(!new HashSet<>(Arrays.asList(ids)).containsAll(ids(hints[i])))
+            if(!selected.containsAll(ids(hints[i])))
                 return "MULTI_MOD_MODULE_REQUIRES_ALL_IDS:"+ids(hints[i]);
         }
         return "READY";
     }
     static synchronized String stopByIds(Instrumentation api,String[] ids,String mode) {
         if(api==null)return "AGENT_UNAVAILABLE";
-        if(ids.length==0)return "EMPTY_SELECTION";
-        for(String id:ids)if(!valid(id.trim().toLowerCase(java.util.Locale.ROOT)))return "INVALID_TARGET:"+id;
-        Set<String> selected=new HashSet<>(Arrays.asList(ids));
+        mode=returnMode(mode);
+        if(ids==null||ids.length==0)return "EMPTY_SELECTION";
+        Set<String> selected=new HashSet<>();
+        for(String raw:ids) {
+            if(raw==null)return "INVALID_TARGET:null";
+            String id=raw.trim().toLowerCase(java.util.Locale.ROOT);
+            if(!valid(id))return "INVALID_TARGET:"+id;
+            selected.add(id);
+        }
         Map<String,Module> targets=new java.util.LinkedHashMap<>();
         for(Class<?> type:RecoveryAgent.loadedClasses()) {
             Set<String> owners=ids(type.getModule());
@@ -320,8 +342,11 @@ final class ModGroupBoundary {
         return "TARGETS="+denied+";RETRANSFORMED_CLASSES="+loaded+";FAILED="+failed+";METHODS="+methods.get()+";RETURNS="+policy.mode()+";UNRESOLVED="+unresolved.size()+";GAPS="+unresolved.stream().limit(8).toList();
     }
     static String state() {return "TARGETS="+denied+";METHODS="+methods.get()+";UNRESOLVED="+unresolved.size()+";GAPS="+unresolved.stream().limit(8).toList();}
-    static String mode(Module module) {Returns policy=returns.get(module);return policy==null?"default":policy.mode();}
-    static String fixedUuid(Module module) {Returns policy=returns.get(module);return policy==null?null:policy.fixedUuid();}
+    static Returns policy(Module module) {
+        Returns policy=returns.get(module);
+        if(policy==null)throw new IllegalStateException("STOPPED_RETURN_POLICY_REQUIRED");
+        return policy;
+    }
     private static boolean nativeControlled(Class<?> type,String name,String descriptor){
         if(type==null)return false;
         try{

@@ -108,7 +108,7 @@ public final class RecoveryAgent {
             bootstrap=new JarFile(Path.of(argument).toAbsolutePath().normalize().toFile());
             api.appendToBootstrapClassLoaderSearch(bootstrap);
             bridge=Class.forName("dev.ronova.pro.bootstrap.TaskBridge",true,null);
-            if(!Integer.valueOf(91).equals(bridge.getMethod("abiVersion").invoke(null)))throw new IllegalStateException("TASK_BRIDGE_ABI_MISMATCH");
+            if(!Integer.valueOf(92).equals(bridge.getMethod("abiVersion").invoke(null)))throw new IllegalStateException("TASK_BRIDGE_ABI_MISMATCH");
             // This classfile was first requested beneath a stopped empty-stream return.
             Class.forName("java.util.stream.IntPipeline$Head",false,null);
             for(String helper:List.of("SourcePublication","SourceIndexMutation","FastListView","FieldMutation","EquipmentInvocations"))
@@ -140,7 +140,7 @@ public final class RecoveryAgent {
             Class.forName("dev.ronova.pro.bootstrap.ControlBridge$ProducerFrame",false,null);
             Class.forName("dev.ronova.pro.bootstrap.EventFaultBridge",true,null);
             Class<?> control=Class.forName("dev.ronova.pro.bootstrap.ControlBridge",true,null);
-            if(!Integer.valueOf(91).equals(control.getMethod("abiVersion").invoke(null)))throw new IllegalStateException("CONTROL_BRIDGE_ABI_MISMATCH");
+            if(!Integer.valueOf(92).equals(control.getMethod("abiVersion").invoke(null)))throw new IllegalStateException("CONTROL_BRIDGE_ABI_MISMATCH");
             Module base=Object.class.getModule(),ours=RecoveryAgent.class.getModule();
             api.redefineModule(base,Set.of(bridge.getModule()),Map.of(
                     "jdk.internal.org.objectweb.asm",Set.of(ours),"jdk.internal.org.objectweb.asm.commons",Set.of(ours),
@@ -599,11 +599,11 @@ public final class RecoveryAgent {
     /** Fences task and callback publication before current body cleanup starts. */
     public static String prepareModGroup(String[] ids,Module[] modules) {
         requireModGroupCaller("dev.ronova.pro.ProRuntime");
-        if(instrumentation==null)return "AGENT_UNAVAILABLE";
-        String validation=ModGroupBoundary.validate(ids,modules);
-        if(!validation.equals("READY"))return validation;
-        for(Module module:modules)publishStoppedModule(module);
-        return "READY";
+        return ModGroupBoundary.prepare(instrumentation,ids,modules,"default");
+    }
+    public static String prepareModGroup(String[] ids,Module[] modules,String returns) {
+        requireModGroupCaller("dev.ronova.pro.ProRuntime");
+        return ModGroupBoundary.prepare(instrumentation,ids,modules,returns);
     }
     /** Stop selected Forge modules, including already loaded methods and future definitions. */
     public static String[] modGroupIds(Module module) {
@@ -612,15 +612,11 @@ public final class RecoveryAgent {
     }
     public static String stopModGroup(String[] ids,Module[] modules) {
         requireModGroupCaller("dev.ronova.pro.ProRuntime");
-        String result=ModGroupBoundary.stop(instrumentation,ids,modules,"default");
-        if(result.startsWith("TARGETS="))for(Module module:modules)publishStoppedModule(module);
-        return result;
+        return ModGroupBoundary.stop(instrumentation,ids,modules,"default");
     }
     public static String stopModGroup(String[] ids,Module[] modules,String returns) {
         requireModGroupCaller("dev.ronova.pro.ProRuntime");
-        String result=ModGroupBoundary.stop(instrumentation,ids,modules,returns);
-        if(result.startsWith("TARGETS="))for(Module module:modules)publishStoppedModule(module);
-        return result;
+        return ModGroupBoundary.stop(instrumentation,ids,modules,returns);
     }
     public static void beginModGroupBatch() {
         requireModGroupCaller("dev.ronova.pro.ProRuntime");ModGroupBoundary.beginBatch(instrumentation);
@@ -630,17 +626,11 @@ public final class RecoveryAgent {
     }
     public static String stopModIds(String[] ids) {
         requireModGroupCaller("dev.ronova.pro.ClientPresence");
-        String result=ModGroupBoundary.stopByIds(instrumentation,ids,"default");
-        if(result.startsWith("TARGETS="))for(Class<?> type:loadedClasses())
-            if(ModGroupBoundary.stopped(type.getModule()))publishStoppedModule(type.getModule());
-        return result;
+        return ModGroupBoundary.stopByIds(instrumentation,ids,"default");
     }
     public static String stopModIds(String[] ids,String returns) {
         requireModGroupCaller("dev.ronova.pro.ClientPresence");
-        String result=ModGroupBoundary.stopByIds(instrumentation,ids,returns);
-        if(result.startsWith("TARGETS="))for(Class<?> type:loadedClasses())
-            if(ModGroupBoundary.stopped(type.getModule()))publishStoppedModule(type.getModule());
-        return result;
+        return ModGroupBoundary.stopByIds(instrumentation,ids,returns);
     }
     public static String modGroupState(Module module) { return ModGroupBoundary.state(module); }
     public static String modGroupState() { return ModGroupBoundary.state()+";"+EventBusBoundary.state()
@@ -662,8 +652,9 @@ public final class RecoveryAgent {
         synchronized(ModGroupBoundary.class) {
         try {
             // Capture and publish the same policy generation before any native owner gate closes.
+            ModGroupBoundary.Returns policy=ModGroupBoundary.policy(module);
             Class.forName("dev.ronova.pro.bootstrap.DefinitionBridge",false,null).getMethod("policy",Module.class,String.class,String.class)
-                    .invoke(null,module,ModGroupBoundary.mode(module),ModGroupBoundary.fixedUuid(module));
+                    .invoke(null,module,policy.mode(),policy.fixedUuid());
             Class.forName("dev.ronova.pro.bootstrap.ControlBridge",false,null).getMethod("stopModules",Module[].class).invoke(null,(Object)new Module[]{module});
             Class.forName("dev.ronova.pro.bootstrap.NativeControl",false,null).getMethod("module",Module.class,boolean.class).invoke(null,module,true);
         }

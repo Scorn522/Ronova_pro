@@ -43,7 +43,7 @@ public final class NativeControl {
             if(!early.isEmpty()) {
                 Path actual=Path.of(early).toAbsolutePath();if(!hash(Files.readAllBytes(actual)).equals(digest))throw new IOException("EARLY_NATIVE_IMAGE_MISMATCH");dll=actual;
             }
-            System.load(dll.toString());if(abi()!=82)throw new UnsatisfiedLinkError("NATIVE_CONTROL_ABI");
+            System.load(dll.toString());if(abi()!=83)throw new UnsatisfiedLinkError("NATIVE_CONTROL_ABI");
             if(!initialize0(ControlBridge.class,DefinitionBridge.class))throw new UnsatisfiedLinkError("ACTUAL_NATIVE_BOUNDARY_INSTALL_FAILED");
             if(!initializeDefinitionDirectory0(definitionDirectoryOwner))throw new UnsatisfiedLinkError("ACTUAL_DEFINITION_DIRECTORY_CAS_UNAVAILABLE");
             libraryBoundaryPresent=libraryPresent0();available=true;return state="NATIVE_BIND_AND_JNI_FIELD_READY";
@@ -576,7 +576,7 @@ public final class NativeControl {
             +":UNRESOLVED_DELAY_IMPORTS_AND_RESOLUTION_OUTSIDE_REGISTERED_GETPROCADDRESS_ENTRIES_UNOBSERVED"
             +":HOST_CREATION=OBSERVED_CREATEPROCESS_A_W_ASUSER_A_W_WITHTOKEN_W_WITHLOGON_W"
             +":HOST_HANDLES=OBSERVED_OPEN_DUPLICATE_CLOSE_AND_INHERITANCE;EXTERNAL_TRANSFERS_AND_SAVED_ORIGINAL_POINTERS_REMAIN_GAPS"
-            +":JVMTI=ACTUAL_GETENV_ENVIRONMENT_CALLBACK_AND_DISPOSAL_CONTROL;PREEXISTING_ENVIRONMENTS_AND_SAVED_ORIGINAL_POINTERS_UNOBSERVED"
+            +":JVMTI=OBSERVED_GETENV_ENVIRONMENT_CALLBACK_AND_DISPOSAL_CONTROL;OBSERVER_FAILURES_PRESERVE_ORIGINAL_RESULTS_AND_RECORD_COVERAGE_GAPS;PREEXISTING_ENVIRONMENTS_AND_SAVED_ORIGINAL_POINTERS_UNOBSERVED"
             +":RAW_NATIVE_MEMORY_AND_LOADER_PRE_RETURN_CONTROL_REQUIRE_SELECTED_LOWER_BACKEND:"+hostKernelSummary(null); }
     private static boolean hostKernelCoreCaller(){
         Class<?> caller=CALLER.walk(frames->frames.map(StackWalker.StackFrame::getDeclaringClass).filter(type->type!=NativeControl.class).findFirst().orElse(null));
@@ -631,6 +631,8 @@ public final class NativeControl {
     public static String moduleState(Module module) {
         if(!available)return state();long[] actual=status0(module);
         long[] host=hostState0(module);long[] jvmti=jvmtiState0(module);
+        // BIND_FAILURES includes unavailable JNI slot observations. JVMTI_FAILURES
+        // includes observer/control failures even when the original API succeeded.
         return "NATIVE_BIND_EVENTS="+actual[0]+";JNI_FIELD_TABLE="+actual[1]+";WRAPPED_BINDINGS="+actual[2]+";ACTIVE_NATIVE="+actual[3]+";BIND_FAILURES="+actual[4]+";NATIVE_POINTERS="+actual[5]+";LOADED_NATIVE_IMAGES="+actual[6]
                 +";HOST_PROCESS_FAMILIES="+host[0]+";HOST_SHARED_FAMILIES="+host[1]+";HOST_UNPUBLISHED_FAMILIES="+host[2]+";HOST_HANDLE_ERRORS="+host[3]+";HOST_ACTIVE_PROCESSES="+host[4]
                 +";HOST_NATIVE_HANDLE_PUBLICATIONS_UNOBSERVED="+host[5]+";HOST_NATIVE_CREATEPROCESS_IMPORTS="+host[6]+";HOST_NATIVE_CREATEPROCESS_COVERAGE_GAP_IMAGES="+host[7]
@@ -643,7 +645,7 @@ public final class NativeControl {
                 +";HOST_CHILD_SHARED_OR_UNKNOWN_PENDING="+host[27]+";HOST_CHILD_IMPORT_GAPS="+host[28]+";HOST_CHILD_RESOURCE_OR_NONEXEC_LOADS="+host[29]
                 +";HOST_CHILD_OWN_PIN_RELEASES="+host[30]+";HOST_CHILD_APPLICATION_LOADER_LIFETIMES_UNOBSERVED="+host[31]
                 +";JVMTI_GETENV="+jvmti[0]+";JVMTI_OBSERVED_ENVIRONMENTS="+jvmti[1]+";JVMTI_CALLBACK_SLOTS="+jvmti[2]+";JVMTI_ACTIVE_CALLBACKS="+jvmti[3]
-                +";JVMTI_DISPOSED_ENVIRONMENTS="+jvmti[4]+";JVMTI_REFUSALS="+jvmti[5]+";JVMTI_OWN_TABLE="+jvmti[6]+";JVMTI_UNATTRIBUTED_CALLBACKS="+jvmti[7]+";"+hostKernelSummary(module);
+                +";JVMTI_DISPOSED_ENVIRONMENTS="+jvmti[4]+";JVMTI_FAILURES="+jvmti[5]+";JVMTI_OWN_TABLE="+jvmti[6]+";JVMTI_UNATTRIBUTED_CALLBACKS="+jvmti[7]+";"+hostKernelSummary(module);
     }
     public static String retirementGap(Module module){
         if(!controlCaller())throw new SecurityException("NATIVE_CONTROL_AGENT_REQUIRED");

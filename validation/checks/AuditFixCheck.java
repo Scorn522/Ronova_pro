@@ -4,6 +4,7 @@ import java.lang.invoke.*;
 import java.lang.reflect.*;
 import java.util.*;
 import java.util.concurrent.*;
+import java.util.function.Consumer;
 
 /** Focused source-list regression and historical metadata checks; neither certifies gameplay. */
 public final class AuditFixCheck {
@@ -13,6 +14,12 @@ public final class AuditFixCheck {
     private static void require(boolean yes,String message) {if(!yes)throw new AssertionError(message);}
     private static Object invoke(Object receiver,String name)throws Exception {var m=receiver.getClass().getDeclaredMethod(name);m.setAccessible(true);try{return m.invoke(receiver);}catch(InvocationTargetException e){if(e.getCause() instanceof Exception x)throw x;throw e;}}
     public static void main(String[] args)throws Exception {
+        if(args.length==1&&args[0].equals("policy-native-capture-fixes")){
+            stopPolicyPublication();taskCaptureScope();
+            System.load(java.nio.file.Path.of(System.getProperty("ronova.pro.audit.native")).toAbsolutePath().toString());
+            require(nativeVmResults0(),"Native VM original-result regression failed");
+            System.out.println("NATIVE_VM_RESULTS_PASS actual_production_wrappers observer_failure_preserves_result exact_output_rejection_retained fixture_only");return;
+        }
         if(args.length==1&&args[0].equals("container-scope-removal")){containerScopeRemoval();return;}
         if(args.length==1&&args[0].equals("startup-protection-bytecode")){startupReturnReplay();protectionSetterBytecode();return;}
         if(args.length==1&&args[0].equals("network-bytecode")){networkBytecode();return;}
@@ -68,6 +75,7 @@ public final class AuditFixCheck {
 
     // Actual isolated TxF preparation; no commit permit is constructed or granted.
     private static native void hostProcess0();
+    private static native boolean nativeVmResults0();
 
     // One AUDIT_HOST_THREAD_CREATE_CHECK DLL. thread-create uses unattached
     // starts; thread-end checks actual attachment/detachment without rerunning it.
@@ -593,6 +601,137 @@ public final class AuditFixCheck {
                     "held tick serialization modified a captured tick or consumed the deferred list");
         }
         System.out.println("WORLD_HELD_SAVE_PASS actual_LevelChunkTicks_ScheduledTick_NBT_vanilla_SavedTick_decode same_identity_position_old_held_replaces_pending other_type_same_position_preserved priority_trigger_minus_now_preserved repeated_save_delay_recomputed original_container_ticks_deferred_unchanged data_codec_only");
+    }
+    @SuppressWarnings("unchecked")
+    private static void stopPolicyPublication()throws Exception {
+        Class<?> agent=Class.forName("dev.ronova.pro.agent.RecoveryAgent"),group=Class.forName("dev.ronova.pro.agent.ModGroupBoundary");
+        Class<?> controls=Class.forName("dev.ronova.pro.bootstrap.ControlBridge",true,null),definitions=Class.forName("dev.ronova.pro.bootstrap.DefinitionBridge",true,null);
+        Field owner=controls.getDeclaredField("instrumentationOwner"),installed=agent.getDeclaredField("instrumentation"),stopped=controls.getDeclaredField("stoppedModules");
+        owner.setAccessible(true);installed.setAccessible(true);stopped.setAccessible(true);
+        Object oldOwner=owner.get(null),oldInstalled=installed.get(null),oldStopped=stopped.get(null);
+        Field metadata=group.getDeclaredField("metadata"),policies=group.getDeclaredField("returns"),modes=definitions.getDeclaredField("RETURNS"),fixed=definitions.getDeclaredField("FIXED"),denied=group.getDeclaredField("denied"),exact=group.getDeclaredField("exact");
+        for(Field field:List.of(metadata,policies,modes,fixed,denied,exact))field.setAccessible(true);
+        Module target=Class.forName("java.sql.Driver").getModule();String[] ids={"audit_policy"};Module[] modules={target};
+        Map<Module,Object> metadataRows=(Map<Module,Object>)metadata.get(null),policyRows=(Map<Module,Object>)policies.get(null);
+        Map<Module,String> published=(Map<Module,String>)modes.get(null);Map<Module,UUID> identifiers=(Map<Module,UUID>)fixed.get(null);
+        Object oldMetadata=metadataRows.get(target),oldPolicy=policyRows.get(target);String oldMode=published.get(target);UUID oldUuid=identifiers.get(target);
+        Set<String> deniedRows=(Set<String>)denied.get(null);Set<Module> exactRows=(Set<Module>)exact.get(null);
+        boolean oldDenied=deniedRows.contains(ids[0]),oldExact=exactRows.contains(target);
+        var api=(java.lang.instrument.Instrumentation)Proxy.newProxyInstance(AuditFixCheck.class.getClassLoader(),new Class<?>[]{java.lang.instrument.Instrumentation.class},(proxy,method,args)->{
+            if(method.getName().equals("getAllLoadedClasses"))return new Class<?>[0];
+            if(method.getReturnType()==boolean.class)return true;
+            if(method.getReturnType()==long.class)return 0L;return null;
+        });
+        Method prepare=group.getDeclaredMethod("prepare",java.lang.instrument.Instrumentation.class,String[].class,Module[].class,String.class);
+        Method stop=group.getDeclaredMethod("stop",java.lang.instrument.Instrumentation.class,String[].class,Module[].class,String.class);
+        prepare.setAccessible(true);stop.setAccessible(true);
+        try{
+            // Isolated metadata setup only; no live Agent/Core/Native control installation is granted.
+            owner.set(null,agent);installed.set(null,api);metadataRows.put(target,Set.of(ids[0]));
+            for(String mode:List.of("empty","invalid-id","uuid-fixed")){
+                require("READY".equals(prepare.invoke(null,api,ids,modules,mode)),"prepare rejected valid selected mode");
+                require(mode.equals(published.get(target))&&Arrays.asList((Module[])stopped.get(null)).contains(target),"stopped publication used stale return mode");
+                Object policy=policyRows.get(target);UUID identity=identifiers.get(target);
+                require("READY".equals(prepare.invoke(null,api,ids,modules,mode))&&policyRows.get(target)==policy,"repeated prepare changed policy generation");
+                require(((String)stop.invoke(null,api,ids,modules,mode)).startsWith("TARGETS=")&&policyRows.get(target)==policy,"stop changed prepared policy generation");
+                if(mode.equals("uuid-fixed"))require(identity!=null&&identity.equals(identifiers.get(target)),"fixed return UUID changed during handoff");
+            }
+            Object policy=policyRows.get(target),stoppedSnapshot=stopped.get(null);
+            try{prepare.invoke(null,api,ids,modules,"bad-mode");throw new AssertionError("invalid return mode accepted");}
+            catch(InvocationTargetException refused){require(refused.getCause() instanceof IllegalArgumentException,"wrong invalid-policy refusal");}
+            require(policyRows.get(target)==policy&&stopped.get(null)==stoppedSnapshot,"invalid mode published a stop");
+            require(!"READY".equals(prepare.invoke(null,api,new String[]{"missing_target"},modules,"empty"))&&policyRows.get(target)==policy,"invalid target changed policy");
+        }finally{
+            owner.set(null,oldOwner);installed.set(null,oldInstalled);stopped.set(null,oldStopped);
+            if(oldMetadata==null)metadataRows.remove(target);else metadataRows.put(target,oldMetadata);
+            if(oldPolicy==null)policyRows.remove(target);else policyRows.put(target,oldPolicy);
+            if(oldMode==null)published.remove(target);else published.put(target,oldMode);
+            if(oldUuid==null)identifiers.remove(target);else identifiers.put(target,oldUuid);
+            if(!oldDenied)deniedRows.remove(ids[0]);if(!oldExact)exactRows.remove(target);
+        }
+        System.out.println("STOP_POLICY_PUBLICATION_PASS actual_prepare_and_publish selected_mode_before_cleanup repeated_fixed_UUID invalid_selection_unchanged isolated_metadata_no_Agent_install");
+    }
+    private static volatile Object taskCaptureMonitor;
+    private static volatile CountDownLatch taskCaptureEntered,taskCaptureProceed;
+    private static volatile boolean taskCaptureThrow;
+    public static Object[] taskCaptureProbe(Object task)throws InterruptedException {
+        require(!Thread.holdsLock(taskCaptureMonitor),"task resolver still holds global owner monitor");
+        if(taskCaptureThrow)throw new IllegalStateException("AUDIT_TASK_CAPTURE_FAILURE");
+        taskCaptureEntered.countDown();require(taskCaptureProceed.await(5,TimeUnit.SECONDS),"capture fixture release missing");return null;
+    }
+    @SuppressWarnings("unchecked")
+    private static void taskCaptureScope()throws Exception {
+        Class<?> bridge=Class.forName("dev.ronova.pro.bootstrap.TaskBridge",true,null),owners=RecoveryTasks.class;
+        Field registration=bridge.getDeclaredField("registration"),installer=Class.forName("dev.ronova.pro.bootstrap.ControlBridge",true,null).getDeclaredField("observerInstaller"),sinkField=owners.getDeclaredField("SINK"),listenersField=owners.getDeclaredField("LISTENERS");
+        for(Field field:List.of(registration,installer,sinkField,listenersField))field.setAccessible(true);
+        Consumer<Object[]> sink=(Consumer<Object[]>)sinkField.get(null);
+        Class<?> registrationType=Class.forName("dev.ronova.pro.bootstrap.TaskBridge$Registration");
+        Constructor<?> constructor=registrationType.getDeclaredConstructor(Consumer.class);constructor.setAccessible(true);
+        Object current=constructor.newInstance(sink);Field epochField=registrationType.getDeclaredField("epoch");epochField.setAccessible(true);long epoch=epochField.getLong(current);
+        Object oldRegistration=registration.get(null),oldInstaller=installer.get(null);
+        Set<Object> listeners=(Set<Object>)listenersField.get(null);Set<Object> oldListeners=new HashSet<>(listeners);
+        Map<Field,Object> previous=new LinkedHashMap<>();
+        for(String name:List.of("publishedOwners","bridgeRegistration","bridgeRegistrationEpoch","unknownCaptureGap","capturePublications","delivery","captureState","acknowledgeCaptureLoss","observerMatches","inlineDetails","coverage")){
+            Field field=owners.getDeclaredField(name);field.setAccessible(true);previous.put(field,field.get(null));
+        }
+        Method emit=bridge.getDeclaredMethod("emit",registrationType,int.class,Object.class,Object.class,Object.class,Object.class);emit.setAccessible(true);
+        Method state=bridge.getMethod("captureState",Object.class),ack=bridge.getMethod("acknowledgeCaptureLoss",Object.class,Object.class,long.class,long.class);
+        Method healthy=owners.getDeclaredMethod("checkBridge",Object.class);healthy.setAccessible(true);
+        Field gap=owners.getDeclaredField("gap"),flights=owners.getDeclaredField("capturesInFlight");gap.setAccessible(true);flights.setAccessible(true);
+        Class<?> publishedType=Class.forName("dev.ronova.pro.RecoveryTasks$OwnerRegistration");
+        Constructor<?> publishedConstructor=publishedType.getDeclaredConstructor(owners,UUID.class,Object.class,long.class);publishedConstructor.setAccessible(true);
+        Object[] selected=new Object[2],published=new Object[2];Object task=new Object(),other=new Object();UUID subject=UUID.randomUUID();
+        for(int index=0;index<2;index++){
+            ProRuntime runtime=(ProRuntime)U.allocateInstance(ProRuntime.class);UUID session=UUID.randomUUID();put(runtime,"session",session);put(runtime,"moduleSubjects",new IdentityHashMap<>());
+            Object owner=U.allocateInstance(owners);selected[index]=owner;
+            put(owner,"runtime",runtime);put(owner,"captureLock",new Object());put(owner,"captureGaps",new IdentityHashMap<>());
+            put(owner,"origins",new IdentityHashMap<>());put(owner,"workerBindings",new IdentityHashMap<>());put(owner,"captureEpochs",new HashMap<>());
+            put(owner,"changes",new java.util.concurrent.atomic.AtomicLong());put(owner,"events",new ConcurrentLinkedQueue<>());put(owner,"gap","");put(owner,"transientIssue","");
+            published[index]=publishedConstructor.newInstance(owner,session,current,epoch);put(owner,"ownerRegistration",published[index]);
+            Field origins=owners.getDeclaredField("origins");origins.setAccessible(true);((Map<Object,UUID>)origins.get(owner)).put(index==0?task:other,subject);
+        }
+        Thread worker=null;java.util.concurrent.atomic.AtomicReference<Throwable> workerFailure=new java.util.concurrent.atomic.AtomicReference<>();
+        taskCaptureMonitor=listeners;taskCaptureEntered=new CountDownLatch(1);taskCaptureProceed=new CountDownLatch(1);taskCaptureThrow=false;
+        try{
+            registration.set(null,current);installer.set(null,AuditFixCheck.class);
+            synchronized(listeners){listeners.clear();listeners.addAll(Arrays.asList(selected));}
+            for(var entry:previous.entrySet())switch(entry.getKey().getName()){
+                case "publishedOwners" -> {Object array=Array.newInstance(publishedType,2);Array.set(array,0,published[0]);Array.set(array,1,published[1]);entry.getKey().set(null,array);}
+                case "bridgeRegistration" -> entry.getKey().set(null,current);
+                case "bridgeRegistrationEpoch" -> entry.getKey().setLong(null,epoch);
+                case "delivery" -> entry.getKey().set(null,bridge.getMethod("deliveringTo",Object.class));
+                case "captureState" -> entry.getKey().set(null,state);
+                case "acknowledgeCaptureLoss" -> entry.getKey().set(null,ack);
+                case "observerMatches" -> entry.getKey().set(null,bridge.getMethod("observerMatches",Object.class));
+                case "inlineDetails" -> entry.getKey().set(null,AuditFixCheck.class.getMethod("taskCaptureProbe",Object.class));
+                case "coverage" -> entry.getKey().set(null,null);
+            }
+            worker=new Thread(()->{try{emit.invoke(null,current,24,task,subject,null,new Object[]{selected[0],new Object(),null});}catch(Throwable failure){workerFailure.set(failure);}},"audit-capture-worker");
+            worker.start();require(taskCaptureEntered.await(5,TimeUnit.SECONDS),"actual capture probe was not reached");
+            synchronized(listeners){require(flights.getInt(selected[0])==1&&flights.getInt(selected[1])==0,"capture reservation crossed owner scope");
+                require(Boolean.FALSE.equals(healthy.invoke(selected[0],task)),"in-flight capture did not fence premature qualification");}
+            taskCaptureProceed.countDown();worker.join(5000);require(!worker.isAlive()&&workerFailure.get()==null,"capture worker failed or hung");
+            require(Boolean.TRUE.equals(healthy.invoke(selected[1],other)),"completed publication left unrelated owner fenced");
+            taskCaptureThrow=true;
+            emit.invoke(null,current,24,task,subject,null,new Object[]{selected[0],new Object(),null});
+            require(Boolean.FALSE.equals(healthy.invoke(selected[0],task))&&Boolean.TRUE.equals(healthy.invoke(selected[1],other))
+                    &&"".equals(gap.get(selected[1])),"known owner capture failure became global");
+            Consumer<Object[]> throwing=row->{throw new IllegalStateException("AUDIT_SINK_FAILURE");};Object failed=constructor.newInstance(throwing);registration.set(null,failed);
+            long unknownBefore=(Long)((Object[])state.invoke(null,throwing))[2];emit.invoke(null,failed,3,task,null,null,null);
+            Object[] lossState=(Object[])state.invoke(null,throwing);Object[][] losses=(Object[][])lossState[4];
+            require(losses.length==1&&losses[0][1]==task&&losses[0][8]==failed&&(Long)lossState[2]==unknownBefore,"sink failure lost exact task/registration scope");
+            require(Boolean.TRUE.equals(ack.invoke(null,throwing,failed,lossState[1],losses[0][11])),"known failed delivery could not retire its metadata");
+            registration.set(null,current);
+            require(Boolean.TRUE.equals(healthy.invoke(selected[1],other)),"diagnostic dropped count poisoned unrelated task");
+            Method lost=bridge.getDeclaredMethod("lost");lost.setAccessible(true);lost.invoke(null);
+            require(Boolean.FALSE.equals(healthy.invoke(selected[0],task))&&Boolean.FALSE.equals(healthy.invoke(selected[1],other)),"unidentified loss was forgiven");
+        }finally{
+            taskCaptureProceed.countDown();if(worker!=null)worker.join(5000);
+            for(var entry:previous.entrySet())entry.getKey().set(null,entry.getValue());
+            synchronized(listeners){listeners.clear();listeners.addAll(oldListeners);}registration.set(null,oldRegistration);installer.set(null,oldInstaller);
+            taskCaptureMonitor=null;taskCaptureThrow=false;
+        }
+        System.out.println("TASK_CAPTURE_SCOPE_PASS actual_receive_resolver_outside_global_monitor shared_inflight_fence_and_scoped_failure unrelated_owner_allowed_after_publication sink_loss_retained unknown_loss_still_refused isolated_metadata_no_Agent_install");
     }
     private static void containerScopeRemoval()throws Exception {
         Object target=new Object();int[] actions={0};Runnable action=()->actions[0]++;

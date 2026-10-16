@@ -181,10 +181,10 @@ public final class ProRuntime implements AutoCloseable {
             }return selected;
         } catch(ReflectiveOperationException unavailable) {return null;}
     }
-    private Subject prepareGroup(LinkedHashMap<String,Module> targets) {
+    private String groupMode(LinkedHashMap<String,Module> targets) {
         String id=targets.keySet().iterator().next();
         String aliases=String.join(",",new TreeSet<>(targets.keySet()));UUID key=UUID.nameUUIDFromBytes(("ronova-mod-group/1|"+aliases).getBytes(java.nio.charset.StandardCharsets.UTF_8));
-        return prepareGroup(targets,groupMode(key,stoppedReturns.getOrDefault(id,System.getProperty("ronova.pro.bootReturns."+id,System.getProperty("ronova.pro.bootReturns","default")))));
+        return groupMode(key,stoppedReturns.getOrDefault(id,System.getProperty("ronova.pro.bootReturns."+id,System.getProperty("ronova.pro.bootReturns","default"))));
     }
     private Subject prepareGroup(LinkedHashMap<String,Module> targets,String mode) {
         String aliases=String.join(",",new TreeSet<>(targets.keySet()));
@@ -1062,18 +1062,18 @@ public final class ProRuntime implements AutoCloseable {
     }
     private String stopResolved(LinkedHashMap<String,Module> targets,String returns) {
         Set<Module> modules=Collections.newSetFromMap(new IdentityHashMap<>());modules.addAll(targets.values());
-        stoppedModules.addAll(modules);
         String prepared;
         try {
             Class<?> agent=Class.forName("dev.ronova.pro.agent.RecoveryAgent",false,ClassLoader.getSystemClassLoader());
-            prepared=String.valueOf(agent.getMethod("prepareModGroup",String[].class,Module[].class).invoke(null,
-                    (Object)targets.keySet().toArray(String[]::new),(Object)targets.values().toArray(Module[]::new)));
+            prepared=String.valueOf(agent.getMethod("prepareModGroup",String[].class,Module[].class,String.class).invoke(null,
+                    (Object)targets.keySet().toArray(String[]::new),(Object)targets.values().toArray(Module[]::new),returns));
         } catch(ReflectiveOperationException unavailable) {
             coverageGap=true;return "BODIES_CLEARED=0;BLOCKS_QUEUED=0;BODY_FAILURES=1;PREPARE_UNAVAILABLE";
         }
         if(!prepared.equals("READY")) {
             coverageGap=true;return "BODIES_CLEARED=0;BLOCKS_QUEUED=0;BODY_FAILURES=1;PREPARE="+prepared;
         }
+        stoppedModules.addAll(modules);
         Subject group=prepareGroup(targets,returns);
         try {captureGroupRoots(Class.forName("dev.ronova.pro.agent.RecoveryAgent",false,ClassLoader.getSystemClassLoader()),modules,group);}
         catch(ReflectiveOperationException unavailable) {group.unresolvedSources.add("GROUP_ROOT_CAPTURE_UNAVAILABLE");coverageGap=true;}
@@ -1216,7 +1216,7 @@ public final class ProRuntime implements AutoCloseable {
     }
     public void sendModGroup(ServerPlayer player) {
         Map<String,List<String>> grouped=new LinkedHashMap<>();
-        for(String id:stoppedMods)grouped.computeIfAbsent(stoppedReturns.getOrDefault(id,System.getProperty("ronova.pro.bootReturns","default")),ignored->new ArrayList<>()).add(id);
+        for(String id:stoppedMods)grouped.computeIfAbsent(stoppedReturns.getOrDefault(id,System.getProperty("ronova.pro.bootReturns."+id,System.getProperty("ronova.pro.bootReturns","default"))),ignored->new ArrayList<>()).add(id);
         for(var entry:grouped.entrySet())ProNetwork.modGroup(player,session,String.join(",",entry.getValue()),entry.getKey());
     }
     public String modGroupState() {
@@ -2985,7 +2985,7 @@ public final class ProRuntime implements AutoCloseable {
             EquipmentPolicy.initialize();
             WorldStatePolicy.initialize();
             Class<?> bridge=Class.forName("dev.ronova.pro.bootstrap.TaskBridge",false,null);
-            if(!Integer.valueOf(91).equals(bridge.getMethod("abiVersion").invoke(null)))throw new IllegalStateException("INDEX_BRIDGE_ABI_MISMATCH");
+            if(!Integer.valueOf(92).equals(bridge.getMethod("abiVersion").invoke(null)))throw new IllegalStateException("INDEX_BRIDGE_ABI_MISMATCH");
             var lookup=java.lang.invoke.MethodHandles.lookup();
             var field=lookup.findStatic(ProRuntime.class,"preventFieldWrite",java.lang.invoke.MethodType.methodType(boolean.class,Object.class,Class.class,String.class,Object.class));
             var dispatch=lookup.findStatic(ProRuntime.class,"preventDispatch",java.lang.invoke.MethodType.methodType(boolean.class,Object.class,String.class,Object.class));
@@ -3326,7 +3326,13 @@ public final class ProRuntime implements AutoCloseable {
             for(Module module:List.copyOf(stoppedModules)) {
                 String[] ids=(String[])agent.getMethod("modGroupIds",Module.class).invoke(null,module);
                 LinkedHashMap<String,Module> targets=new LinkedHashMap<>();for(String id:ids)targets.put(id,module);
-                if(!targets.isEmpty())prepareGroup(targets);
+                if(!targets.isEmpty()) {
+                    String mode=groupMode(targets);
+                    String prepared=String.valueOf(agent.getMethod("prepareModGroup",String[].class,Module[].class,String.class).invoke(null,
+                            (Object)targets.keySet().toArray(String[]::new),(Object)targets.values().toArray(Module[]::new),mode));
+                    if(!prepared.equals("READY")){coverageGap=true;continue;}
+                    prepareGroup(targets,mode);
+                }
             }
             for(var entry:groups.entrySet()) {
                 Subject subject=subjects.get(entry.getKey());LinkedHashMap<String,Module> targets=new LinkedHashMap<>();
@@ -3336,8 +3342,11 @@ public final class ProRuntime implements AutoCloseable {
                 Set<Module> modules=Collections.newSetFromMap(new IdentityHashMap<>());modules.addAll(targets.values());
                 TreeSet<String> actual=new TreeSet<>();for(Module module:modules)actual.addAll(Arrays.asList((String[])agent.getMethod("modGroupIds",Module.class).invoke(null,module)));
                 if(!String.join(",",actual).equals(entry.getValue().aliases)) {subject.unresolvedSources.add("GROUP_MODULE_OWNERSHIP_CHANGED");continue;}
+                String mode=groupMode(subject.id,"default");
+                String prepared=String.valueOf(agent.getMethod("prepareModGroup",String[].class,Module[].class,String.class).invoke(null,
+                        (Object)targets.keySet().toArray(String[]::new),(Object)targets.values().toArray(Module[]::new),mode));
+                if(!prepared.equals("READY")){subject.unresolvedSources.add("GROUP_PREPARE:"+prepared);coverageGap=true;continue;}
                 stoppedModules.addAll(modules);for(Module module:modules)bindGroupModule(subject.id,module);
-                agent.getMethod("prepareModGroup",String[].class,Module[].class).invoke(null,(Object)targets.keySet().toArray(String[]::new),(Object)targets.values().toArray(Module[]::new));
                 captureGroupRoots(agent,modules,subject);
                 for(ServerLevel level:server.getAllLevels())for(Entity entity:level.getAllEntities())if(!(entity instanceof ServerPlayer)&&modules.contains(bodyModule(entity,modules))) {
                     groupMember(subject,bind(entity).subject);clearBody(entity);
@@ -3345,7 +3354,6 @@ public final class ProRuntime implements AutoCloseable {
                 for(ServerLevel level:server.getAllLevels())for(var block:BlockGroupPolicy.loaded(level))if(modules.contains(block.getClass().getModule())){
                     BlockGroupPolicy.release(block);groupBlock(subject,clearBlock(level,((Access.Block)block).pro$pos()));
                 }
-                String mode=groupMode(subject.id,"default");
                 agent.getMethod("stopModGroup",String[].class,Module[].class,String.class).invoke(null,(Object)targets.keySet().toArray(String[]::new),(Object)targets.values().toArray(Module[]::new),mode);
                 for(String id:targets.keySet()){stoppedMods.add(id);stoppedReturns.put(id,mode);}for(ServerPlayer player:server.getPlayerList().getPlayers())sendModGroup(player);
                 recoverySources.refreshGroupDefinitions(subject.id);recoveryRecords.qualify(subject,groups.get(subject.id).operation);

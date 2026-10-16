@@ -1,5 +1,24 @@
 # B 批实际报告：2026-10-09 代码收敛接续
 
+## 2026-10-16：C 接续——停组策略发布、Native 返回语义与任务捕获
+
+接续 `16ae71a`，Java92 / Native83 / SourceMapBridge2 / Storage3 / Journal6，协议 `r3-client-8`。本包只修用户指定的三项，源码写齐后统一构建；没有恢复旧 JDK 容器 Hook，没有生成源码 ZIP。
+
+停组完整验证目标/模式后先绑定策略，再依次发布 DefinitionBridge、Bootstrap 与 Native 停止门，最后进入根捕获和清理。启动/存档恢复和客户端停组同样传递所选模式；重复 prepare/stop 不更换固定 UUID。非法选择不发布，实际发布故障保留已生效围栏并跳过清理。
+
+Native Attach/GetEnv 的观察失败保留原 API 状态、环境、pending Throwable 和 LastError，以计数/覆盖缺口报告，不伪造失败或回滚已成功的附件/环境。准确受保护输出和受限/已确认停止来源的拒绝保留；真正的交付失败仍清理未发布 JVMTI 环境。表交换成功才发布记录；失败清理未发布记录、来源租约与范围，避免留下失效环境缓存。诊断字段使用 JVMTI_FAILURES。
+
+任务重量级字段/来源解析及克隆/构造通知移出 LISTENERS，不另持长期捕获锁；短锁预留在途并发布合并结果，处理并发绑定和 TAGS 锁顺序。同步取消/退役重入只交付既有收据。事件及失败行绑定实际 Registration/epoch、runtime/session 和 task；已知丢失在相关任务/主体范围保留，无法定位丢失保持全局阻断，DROPPED 不清零。共享发布在途、未归并失败与实际退出/ACK 等必要结清条件继续保留。
+
+主构建 `build-c-java92-native83-policy-capture-20261016.log` **首轮 PASS，1分21秒**，21项任务中15项执行、6项保持最新，含 Native83 编译链接；检查器编译退出0。Native 夹具首次因旧 Host 辅助函数调用签名失败，原 `compile-c-java92-native83-policy-native-fixture-20261016.log` 保留；适配现有参数数组后只重编夹具。首次隔离运行未设置生产 Agent 的完整模块开放，访问 sun.nio.ch 时失败，原 `c-java92-native83-policy-capture-20261016.log` 保留。按实际开放补齐后，`c-java92-native83-policy-capture-access-fixed-20261016.log` **退出0**：
+
+- `STOP_POLICY_PUBLICATION_PASS`：实际 prepare/publish，所选模式先发布、重复固定 UUID、非法模式/目标无新增停止；隔离元数据及空类快照代理，无真实 Agent 安装。
+- `TASK_CAPTURE_SCOPE_PASS`：实际 receive 解析不持全局监视器，在途结清拒绝，发布后无关 owner 可用；已知失败范围、Bootstrap 失败行保留/确认和未知丢失全局拒绝。
+- `NATIVE_VM_RESULTS_PASS`：真实 JVM GetEnv、两种 Attach、已附加与独立 worker、JVMTI 原环境；观察失败保留结果、pending Throwable、LastError，准确输出目标和已停止来源拒绝，失败包装不留记录/范围。故障注入仅在夹具内，不安装生产控制器。
+
+没有重复主构建或已通过检查，没有运行旧矩阵。真实 premain、Core/Native 安装、游戏进服和攻防效果 **NOTRUN**，不以隔离结果代称完成。候选 `distribution/candidate-c-java92-native83-policy-capture-wip-20261016`：Core2928135、prelaunch23226字节，随源码和本摘要同步 GitHub。旧容器防护与未知载体等缺口保留，完整 C/B 尚未完成。
+
+---
 ## 2026-10-16：C 接续——移除旧 JDK 容器广谱 Hook
 
 接续 `35fb3c8`，Java ABI91 / Native ABI82 / SourceMapBridge2 / Storage3 / Journal6，协议 `r3-client-8`。用户明确选择先彻底删除旧容器 Hook，接受对应防护暂缺；本批不做自定义 JVM，不提前补造替代覆盖。

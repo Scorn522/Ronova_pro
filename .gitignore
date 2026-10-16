@@ -146,3 +146,7 @@ validation/a-takeover-tasks-01/server/Pro-A-Tasks/
 /distribution/candidate-c-java91-native82-no-container-hooks-wip-20261016/*
 !/distribution/candidate-c-java91-native82-no-container-hooks-wip-20261016/ronova-pro-core-0.1.0-stage-b-dev.jar
 !/distribution/candidate-c-java91-native82-no-container-hooks-wip-20261016/ronova-pro-prelaunch.jar
+!/distribution/candidate-c-java92-native83-policy-capture-wip-20261016/
+/distribution/candidate-c-java92-native83-policy-capture-wip-20261016/*
+!/distribution/candidate-c-java92-native83-policy-capture-wip-20261016/ronova-pro-core-0.1.0-stage-b-dev.jar
+!/distribution/candidate-c-java92-native83-policy-capture-wip-20261016/ronova-pro-prelaunch.jar

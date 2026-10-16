@@ -11,8 +11,16 @@ import java.util.function.Consumer;
 /** Workers retain actual observations; bounded server batches own qualification and disposal. */
 final class RecoveryTasks implements AutoCloseable {
     private static final Set<RecoveryTasks> LISTENERS=Collections.newSetFromMap(new IdentityHashMap<>());
+    private record OwnerRegistration(RecoveryTasks owner,UUID session,Object registration,long epoch) { }
+    private static volatile OwnerRegistration[] publishedOwners=new OwnerRegistration[0];
+    private static final Object LOSS_ROUTING=new Object();
+    private static boolean routingLosses;
+    private static int capturePublications;
+    private static Object bridgeRegistration;
+    private static long bridgeRegistrationEpoch=-1;
+    private static String unknownCaptureGap="";
     private static final Consumer<Object[]> SINK=RecoveryTasks::receive;
-    private static Method currentTask,currentExecution,delivery,coverage,observerMatches,droppedEvents,uninstall,boundarySnapshot,withBoundaries,pendingDeliveries,inlineDetails,inlineClosed,
+    private static Method currentTask,currentExecution,delivery,coverage,observerMatches,droppedEvents,captureState,acknowledgeCaptureLoss,uninstall,boundarySnapshot,withBoundaries,pendingDeliveries,inlineDetails,inlineClosed,
             fenceTask,admissionState,releaseFence,requestOwnedQueueRelease,cancelOwnedQueueRelease,wakeOwnedQueue,waiterCount,waiterNodeObserved,activeInvocations,sourceOrigin,invocationState,submissionClosed,helperReferences;
     private static final String PREFIX="TASK/6";
     private static final Set<String> CF_COMPLETIONS=Set.of("UniApply","UniAccept","UniRun","UniWhenComplete","UniHandle",
@@ -35,6 +43,11 @@ final class RecoveryTasks implements AutoCloseable {
         }
     };
     private final ProRuntime runtime;
+    // Only clone metadata uses this monitor; source callbacks may already hold TAGS/GRAPH.
+    private final Object captureLock=new Object();
+    private OwnerRegistration ownerRegistration;
+    // Reserved before leaving the publication gate, including Core's direct observations.
+    private int capturesInFlight;
     private final ConcurrentLinkedQueue<Capture> events=new ConcurrentLinkedQueue<>();
     private final Map<Object,UUID> origins=Collections.synchronizedMap(new WeakIdentityMap<>());
     // A first causal origin remains useful for task lineage, but a conflicting
@@ -70,6 +83,9 @@ final class RecoveryTasks implements AutoCloseable {
     private final AtomicLong changes=new AtomicLong();
     // Accessed only under LISTENERS, the same short publication gate used by receive().
     private final Map<UUID,Long> captureEpochs=new HashMap<>();
+    private record CaptureGap(Object registration,long epoch,UUID session,Set<UUID> subjects,String reason) { }
+    // Missing event obligations retain their exact task until this observer can retire.
+    private final Map<Object,CaptureGap> captureGaps=new IdentityHashMap<>();
     private volatile String gap="",transientIssue="";
     private volatile boolean closing;
     private volatile boolean detached;
@@ -87,7 +103,7 @@ final class RecoveryTasks implements AutoCloseable {
     private final ArrayDeque<Task> policyPending=new ArrayDeque<>();
     private record Capture(int kind,Object task,Object scheduler,Object parent,Object invocation,
             ClassLoader loader,Set<UUID> subjects,long dropped,Object dependency,Object otherDependency,Object output,
-            boolean inline,Class<?> callbackDefinition,boolean hasExecutor) { }
+            boolean inline,Class<?> callbackDefinition,boolean hasExecutor,UUID session,Object registration,long registrationEpoch,long unknownLoss) { }
     private static final class Task {
         final UUID id=UUID.randomUUID();
         final Object object;
@@ -165,7 +181,8 @@ final class RecoveryTasks implements AutoCloseable {
     RecoveryTasks(ProRuntime runtime) {
         this.runtime=runtime;
         synchronized(LISTENERS) {
-            attach();LISTENERS.add(this);
+            attach();ownerRegistration=new OwnerRegistration(this,runtime.session,bridgeRegistration,bridgeRegistrationEpoch);
+            LISTENERS.add(this);publishOwners();
         }
         List<String> history=runtime.journal.history();
         for(String line:history)if(line.startsWith("TASK/")) {
@@ -263,7 +280,7 @@ final class RecoveryTasks implements AutoCloseable {
         try {
             bridge=Class.forName("dev.ronova.pro.bootstrap.TaskBridge",false,null);
             if(bridge.getClassLoader()!=null)throw new IllegalStateException("NON_BOOTSTRAP_TASK_BRIDGE");
-            if(!Integer.valueOf(91).equals(bridge.getMethod("abiVersion").invoke(null)))throw new IllegalStateException("TASK_BRIDGE_ABI_MISMATCH");
+            if(!Integer.valueOf(92).equals(bridge.getMethod("abiVersion").invoke(null)))throw new IllegalStateException("TASK_BRIDGE_ABI_MISMATCH");
             Class<?> agent=Class.forName("dev.ronova.pro.agent.RecoveryAgent",false,ClassLoader.getSystemClassLoader());
             if(!Boolean.TRUE.equals(agent.getMethod("openTaskAccess",Class.class).invoke(null,RecoveryTasks.class)))
                 throw new IllegalStateException("TASK_ACCESS_UNAVAILABLE");
@@ -271,6 +288,8 @@ final class RecoveryTasks implements AutoCloseable {
             delivery=bridge.getMethod("deliveringTo",Object.class);coverage=bridge.getMethod("coverage");
             observerMatches=bridge.getMethod("observerMatches",Object.class);
             droppedEvents=bridge.getMethod("droppedEvents");uninstall=bridge.getMethod("uninstall",Object.class);
+            captureState=bridge.getMethod("captureState",Object.class);
+            acknowledgeCaptureLoss=bridge.getMethod("acknowledgeCaptureLoss",Object.class,Object.class,long.class,long.class);
             boundarySnapshot=bridge.getMethod("boundarySnapshot",String[].class);
             withBoundaries=bridge.getMethod("withBoundaries",String[].class,long.class,Runnable.class);
             pendingDeliveries=bridge.getMethod("pendingDeliveries");
@@ -286,42 +305,180 @@ final class RecoveryTasks implements AutoCloseable {
             submissionClosed=bridge.getMethod("submissionClosed",Object.class,Object.class);
             sourceOrigin=bridge.getMethod("sourceOrigin",Object.class,Object.class,Object.class);invocationState=bridge.getMethod("invocationState",Object.class);
             bridge.getMethod("install",Consumer.class).invoke(null,SINK);
+            Object[] capture=(Object[])captureState.invoke(null,SINK);
+            if(capture==null||capture.length!=5||!(capture[1] instanceof Long epoch))throw new IllegalStateException("TASK_CAPTURE_SCOPE_UNAVAILABLE");
+            bridgeRegistration=capture[0];bridgeRegistrationEpoch=epoch;
             backend=String.valueOf(coverage.invoke(null));
         } catch(ReflectiveOperationException|RuntimeException|LinkageError unavailable) {
-            bridge=null;backend="TASK_AGENT_UNAVAILABLE:"+unavailable.getClass().getSimpleName();
+            bridge=null;bridgeRegistration=null;bridgeRegistrationEpoch=-1;backend="TASK_AGENT_UNAVAILABLE:"+unavailable.getClass().getSimpleName();
+        }
+    }
+    private static void publishOwners() {
+        publishedOwners=LISTENERS.stream().map(owner->owner.ownerRegistration).toArray(OwnerRegistration[]::new);
+    }
+    private static boolean rowScope(Object[] row,OwnerRegistration owner) {
+        return row!=null&&row.length>=11&&row[8]==owner.registration&&row[9] instanceof Long epoch&&epoch==owner.epoch;
+    }
+    private static OwnerRegistration[] reserveOwners(Object[] row) {
+        synchronized(LISTENERS) {
+            if(row!=null&&(row[8]!=bridgeRegistration||!Long.valueOf(bridgeRegistrationEpoch).equals(row[9]))) {
+                unknownCapture("TASK_CAPTURE_REGISTRATION_CHANGED");return new OwnerRegistration[0];
+            }
+            var selected=new ArrayList<OwnerRegistration>();
+            for(OwnerRegistration owner:publishedOwners) {
+                if(owner.owner.detached||row!=null&&!rowScope(row,owner))continue;
+                if(row!=null&&Integer.valueOf(24).equals(row[0])&&row[4] instanceof Object[] source
+                        &&source.length==3&&source[0]!=owner.owner)continue;
+                owner.owner.capturesInFlight++;capturePublications++;selected.add(owner);
+            }
+            return selected.toArray(OwnerRegistration[]::new);
+        }
+    }
+    private OwnerRegistration reserveOwner() {
+        synchronized(LISTENERS) {
+            if(detached)return null;
+            capturesInFlight++;capturePublications++;return ownerRegistration;
+        }
+    }
+    private static void releaseOwners(OwnerRegistration[] owners) {
+        synchronized(LISTENERS) {for(OwnerRegistration owner:owners) {owner.owner.capturesInFlight--;capturePublications--;}}
+    }
+    private static void unknownCapture(String reason) {
+        synchronized(LISTENERS) {
+            unknownCaptureGap=reason;
+            for(OwnerRegistration owner:publishedOwners)owner.owner.recordGap(reason);
         }
     }
     private static void receive(Object[] row) {
-        synchronized(LISTENERS) {
-            try {
-                if(row==null||row.length!=8||delivery==null||!Boolean.TRUE.equals(delivery.invoke(null,SINK)))return;
-                for(RecoveryTasks owner:LISTENERS)owner.capture(row);
-            } catch(ReflectiveOperationException|RuntimeException unavailable) {
-                for(RecoveryTasks owner:LISTENERS)owner.recordGap("TASK_CAPTURE_FAILED");
-            }
+        try {
+            if(delivery==null||!Boolean.TRUE.equals(delivery.invoke(null,SINK)))return;
+        } catch(ReflectiveOperationException|RuntimeException unavailable) {unknownCapture("TASK_DELIVERY_IDENTITY_UNAVAILABLE");return;}
+        if(row==null||row.length!=11||!(row[0] instanceof Integer)||!(row[7] instanceof Long)||!(row[10] instanceof Long)) {
+            unknownCapture("TASK_CAPTURE_IDENTITY_UNAVAILABLE");return;
         }
+        OwnerRegistration[] owners=reserveOwners(row);
+        boolean unlocated=false;
+        try {
+            if(Thread.holdsLock(LISTENERS)) {
+                // Our fenced cancellation/request retirement can synchronously emit while
+                // the caller owns publication. These receipts add no new source relation.
+                if(!Integer.valueOf(10).equals(row[0])&&!Integer.valueOf(16).equals(row[0]))
+                    throw new IllegalStateException("TASK_CAPTURE_REQUIRES_OUTSIDE_PUBLICATION_GATE");
+                for(OwnerRegistration published:owners)published.owner.captureReceipt(row,published);
+                return;
+            }
+            for(OwnerRegistration published:owners) {
+                RecoveryTasks owner=published.owner;
+                try {owner.capture(row,published);}
+                catch(RuntimeException|LinkageError unavailable) {unlocated|=!owner.captureFailed(row,published,"TASK_CAPTURE_FAILED");}
+            }
+            if(unlocated&&!locatedCapture(row,owners))unknownCapture("TASK_CAPTURE_SOURCE_UNLOCATABLE");
+        } finally {releaseOwners(owners);}
+    }
+    private void captureReceipt(Object[] row,OwnerRegistration published) {
+        Task task=tasks.get(row[1]);Set<UUID> related=workerBindings.get(row[1]);
+        if(task==null||related==null||related.isEmpty())return;
+        for(UUID subject:related) {
+            long prior=captureEpochs.getOrDefault(subject,0L);
+            if(prior==Long.MAX_VALUE)scopedGap(row[1],related,"TASK_CAPTURE_EPOCH_EXHAUSTED",published);
+            else captureEpochs.put(subject,prior+1);
+        }
+        events.add(new Capture((Integer)row[0],row[1],row[2],row[3],row[4],task.loader,related,(Long)row[7],null,null,null,
+                task.inline,task.callbackDefinition,false,published.session,published.registration,published.epoch,(Long)row[10]));
+        changes.incrementAndGet();
+    }
+    /** Bootstrap retains failed rows until every current owner has received the scoped gap. */
+    private static void pollCaptureLosses() {
+        synchronized(LOSS_ROUTING) {if(routingLosses)return;routingLosses=true;}
+        try {routeCaptureLosses();}
+        finally {synchronized(LOSS_ROUTING) {routingLosses=false;}}
+    }
+    private static void routeCaptureLosses() {
+        if(captureState==null)return;
+        Object[] state;
+        try {state=(Object[])captureState.invoke(null,SINK);}
+        catch(ReflectiveOperationException|RuntimeException unavailable) {unknownCapture("TASK_CAPTURE_LOSS_QUERY_UNAVAILABLE");return;}
+        if(state==null||state.length!=5||!(state[4] instanceof Object[][] losses)) {unknownCapture("TASK_CAPTURE_SCOPE_UNAVAILABLE");return;}
+        for(Object[] row:losses) {
+            if(row==null||row.length!=12||row[1]==null||!(row[11] instanceof Long sequence)) {
+                unknownCapture("BOOTSTRAP_CAPTURE_LOSS_UNKNOWN");continue;
+            }
+            OwnerRegistration[] owners=reserveOwners(row);
+            try {
+                boolean located=false;
+                for(OwnerRegistration published:owners) {
+                    located|=published.owner.captureFailed(row,published,"BOOTSTRAP_CAPTURE_LOSS");
+                }
+                if(owners.length!=0&&!located)unknownCapture("BOOTSTRAP_CAPTURE_SOURCE_UNLOCATABLE");
+                if(acknowledgeCaptureLoss==null||!Boolean.TRUE.equals(acknowledgeCaptureLoss.invoke(null,SINK,state[0],state[1],sequence)))
+                    unknownCapture("TASK_CAPTURE_LOSS_ACK_UNAVAILABLE");
+            } catch(ReflectiveOperationException|RuntimeException|LinkageError failure) {unknownCapture("TASK_CAPTURE_LOSS_ROUTING_UNAVAILABLE");}
+            finally {releaseOwners(owners);}
+        }
+    }
+    private static boolean locatedCapture(Object[] row,OwnerRegistration[] owners) {
+        synchronized(LISTENERS) {
+            for(OwnerRegistration published:owners) {
+                RecoveryTasks owner=published.owner;CaptureGap loss=owner.captureGaps.get(row[1]);
+                if(loss!=null&&!loss.subjects.isEmpty()||owner.workerBindings.containsKey(row[1]))return true;
+            }
+            return false;
+        }
+    }
+    private boolean captureFailed(Object[] row,OwnerRegistration published,String reason) {
+        if(!rowScope(row,published)||row[1]==null) {recordGap("TASK_CAPTURE_IDENTITY_UNAVAILABLE");return false;}
+        Set<UUID> related=new HashSet<>();Object object=row[1],parent=row[3];
+        Set<UUID> direct,ancestor;
+        synchronized(LISTENERS) {direct=workerBindings.get(object);ancestor=workerBindings.get(parent);}
+        if(direct!=null)related.addAll(direct);if(ancestor!=null)related.addAll(ancestor);
+        UUID origin=origins.get(object);if(origin!=null)related.add(origin);
+        if(Integer.valueOf(24).equals(row[0])&&row[2] instanceof UUID subject)related.add(subject);
+        try {
+            ProRuntime.Subject group=runtime.groupSubject(object);if(group!=null)related.add(group.id);
+            Object[] inline=inlineDetails==null?null:(Object[])inlineDetails.invoke(null,object);
+            captureSubjects(object,inline,related);
+        } catch(ReflectiveOperationException|RuntimeException|LinkageError unavailable) { /* The real task identity still scopes this gap. */ }
+        synchronized(LISTENERS) {
+            scopedGap(object,related,reason,published);
+            // A lost child row must also block its known ancestor before a merge can create that edge.
+            if(parent!=null&&parent!=object)scopedGap(parent,related,"DESCENDANT_"+reason,published);
+        }
+        return !related.isEmpty();
+    }
+    private void scopedGap(Object object,Set<UUID> related,String reason,OwnerRegistration published) {
+        if(detached||ownerRegistration!=published)return;
+        CaptureGap prior=captureGaps.get(object);Set<UUID> subjects=new HashSet<>(related);
+        if(prior!=null)subjects.addAll(prior.subjects);
+        CaptureGap next=new CaptureGap(published.registration,published.epoch,published.session,Set.copyOf(subjects),reason);
+        if(!next.equals(prior)) {captureGaps.put(object,next);changes.incrementAndGet();}
+    }
+    private boolean taskGap(Object object) {
+        CaptureGap loss=captureGaps.get(object);
+        return loss!=null&&ownerRegistration!=null&&loss.registration==ownerRegistration.registration&&loss.epoch==ownerRegistration.epoch
+                &&Objects.equals(loss.session,ownerRegistration.session);
     }
     void observed(Object object,UUID subject) {
         Objects.requireNonNull(object);Objects.requireNonNull(subject);
-        if(detached)return;
-        boolean first;
-        synchronized(origins) {
-            UUID prior=origins.get(object);
-            if(prior!=null&&!prior.equals(subject)) {
-                sharedOrigins.add(object);
-                recordGap("CONFLICTING_TASK_ORIGIN");return;
+        OwnerRegistration published=reserveOwner();if(published==null)return;
+        try {
+            boolean first;
+            synchronized(origins) {
+                UUID prior=origins.get(object);
+                if(prior!=null&&!prior.equals(subject)) {
+                    sharedOrigins.add(object);
+                    recordGap("CONFLICTING_TASK_ORIGIN");return;
+                }
+                origins.put(object,subject);first=prior==null;
             }
-            origins.put(object,subject);
-            first=prior==null;
-        }
-        if(first)synchronized(LISTENERS) {
-            for(CloneLink link:clones.getOrDefault(object,List.of())) {
+            List<CloneLink> links;
+            synchronized(captureLock) {links=first?List.copyOf(clones.getOrDefault(object,List.of())):List.of();}
+            for(CloneLink link:links) {
                 var clone=link.result.get();if(clone!=null)runtime.recoverySources.cloned(clone,subject,link.holder.get());
             }
-        }
-        // Real save/load activity, not a guessed wrapper field, supplies this causal relation.
-        try { if(sourceOrigin!=null)sourceOrigin.invoke(null,SINK,this,subject); }
-        catch(ReflectiveOperationException failure) { recordGap("EXECUTING_SOURCE_BINDING_UNAVAILABLE"); }
+            // Real save/load activity, not a guessed wrapper field, supplies this causal relation.
+            try { if(sourceOrigin!=null)sourceOrigin.invoke(null,SINK,this,subject); }
+            catch(ReflectiveOperationException failure) {recordGap("EXECUTING_SOURCE_BINDING_UNAVAILABLE");}
+        } finally {releaseOwners(new OwnerRegistration[]{published});}
     }
     UUID subjectOf(Object object) { return origins.get(object); }
     Object originLock(){return origins;}
@@ -331,14 +488,18 @@ final class RecoveryTasks implements AutoCloseable {
     }
     private void groupObserved(Object object,Object scheduler,UUID subject,Object observation) {
         if(object==null)return;
-        synchronized(LISTENERS) {
+        OwnerRegistration published=reserveOwner();if(published==null)return;
+        try {
             synchronized(origins){
                 UUID previous=origins.get(object);
                 if(previous!=null&&runtime.canonicalSubject(previous)!=runtime.canonicalSubject(subject)) {sharedOrigins.add(object);recordGap("CONFLICTING_GROUP_TASK_ORIGIN");return;}
                 origins.put(object,subject);
             }
-            capture(new Object[]{11,object,scheduler,null,observation,Thread.currentThread(),System.nanoTime(),0L});
-        }
+            Object[] row=new Object[]{11,object,scheduler,null,observation,Thread.currentThread(),System.nanoTime(),0L,
+                    published.registration,published.epoch,0L};
+            try {capture(row,published);}
+            catch(RuntimeException|LinkageError failure) {captureFailed(row,published,"GROUP_TASK_CAPTURE_FAILED");}
+        } finally {releaseOwners(new OwnerRegistration[]{published});}
     }
     void groupScheduler(Object scheduler,ProRuntime.Subject group){
         if(!(scheduler instanceof ExecutorService)&&!(scheduler instanceof java.util.Timer))return;
@@ -390,18 +551,18 @@ final class RecoveryTasks implements AutoCloseable {
             Object actual=Class.forName("dev.ronova.pro.bootstrap.TaskBridge",false,null).getMethod("realScheduler",Object.class).invoke(null,scheduler);
             if(actual!=null)scheduler=actual;
         }catch(ReflectiveOperationException unavailable){recordTransient("SCHEDULER_DELEGATE_UNAVAILABLE");return;}
-        synchronized(LISTENERS) {
-            for(Runnable object:removed) {
-                ProRuntime.Subject owner=runtime.groupSubject(object);
-                if(owner!=group) {recordGap("SCHEDULER_DRAIN_SHARED_TASK");continue;}
-                if(drainedTasks.get(object)==group){
-                    if(!acknowledgeSchedulerDrain(scheduler,object))group.unresolvedSources.add("GROUP_SCHEDULER_RESOURCES_PENDING");
-                    continue;
-                }
-                // The bootstrap retains the returned tasks until this event reaches
-                // an actual Task below, so a full capture queue can be retried.
-                groupObserved(object,scheduler,group.id,SCHEDULER_DRAIN);
+        for(Runnable object:removed) {
+            ProRuntime.Subject owner=runtime.groupSubject(object);
+            if(owner!=group) {recordGap("SCHEDULER_DRAIN_SHARED_TASK");continue;}
+            boolean drained;
+            synchronized(LISTENERS) {drained=drainedTasks.get(object)==group;}
+            if(drained){
+                if(!acknowledgeSchedulerDrain(scheduler,object))group.unresolvedSources.add("GROUP_SCHEDULER_RESOURCES_PENDING");
+                continue;
             }
+            // The bootstrap retains the returned tasks until this event reaches
+            // an actual Task below, so a full capture queue can be retried.
+            groupObserved(object,scheduler,group.id,SCHEDULER_DRAIN);
         }
     }
     private boolean acknowledgeSchedulerDrain(Object scheduler,Object object){
@@ -416,18 +577,25 @@ final class RecoveryTasks implements AutoCloseable {
     private void recordTransient(String reason) { transientIssue=reason; }
     private boolean checkBridge() {
         try {
+            if(!unknownCaptureGap.isEmpty())recordGap(unknownCaptureGap);
             if(coverage!=null)backend=String.valueOf(coverage.invoke(null));
             if(observerMatches==null||!Boolean.TRUE.equals(observerMatches.invoke(null,SINK))) {
                 recordGap("TASK_OBSERVER_NOT_OWNED");return false;
             }
-            // Poll even when no later relevant event exists to carry the loss counter.
-            if(droppedEvents==null) { recordTransient("TASK_CAPTURE_LOSS_QUERY_UNAVAILABLE");return false; }
-            if(((Long)droppedEvents.invoke(null))!=0L)recordGap("BOOTSTRAP_CAPTURE_LOSS");
+            // DROPPED is cumulative diagnostic history. Only unidentified loss is global.
+            if(captureState==null) { recordTransient("TASK_CAPTURE_LOSS_QUERY_UNAVAILABLE");return false; }
+            Object[] state=(Object[])captureState.invoke(null,SINK);
+            if(state==null||state.length!=5||ownerRegistration==null||state[0]!=ownerRegistration.registration
+                    ||!Long.valueOf(ownerRegistration.epoch).equals(state[1])) {recordGap("TASK_CAPTURE_REGISTRATION_CHANGED");return false;}
+            if(((Long)state[2])!=0L)recordGap("BOOTSTRAP_CAPTURE_LOSS_UNKNOWN");
+            if(capturePublications!=0) {recordTransient("TASK_CAPTURE_PUBLICATION_IN_FLIGHT");return false;}
+            if(((Object[][])state[4]).length!=0) {recordTransient("TASK_CAPTURE_LOSS_SCOPE_PENDING");return false;}
             return gap.isEmpty();
         } catch(ReflectiveOperationException|RuntimeException unavailable) {
             recordTransient("TASK_BRIDGE_COVERAGE_UNAVAILABLE");return false;
         }
     }
+    private boolean checkBridge(Object task) {return checkBridge()&&!taskGap(task);}
     private static final List<String> CF_BOUNDARIES=List.of(cfBoundaries());
     private static final String[] FORK_BOUNDARIES={"java/util/concurrent/ForkJoinTask","java/util/concurrent/ForkJoinTask$Aux",
             "java/util/concurrent/ForkJoinPool","java/util/concurrent/ForkJoinPool$WorkQueue","java/util/concurrent/ForkJoinWorkerThread"};
@@ -512,6 +680,7 @@ final class RecoveryTasks implements AutoCloseable {
             if(closing)return gateFailure(task,"RUNTIME_CLOSING");
             if(!runtime.journal.healthy())return gateFailure(task,"DURABLE_WRITER_NOT_HEALTHY");
             if(!gap.isEmpty())return gateFailure(task,"CAPTURE_GAP:"+gap);
+            if(taskGap(task.object))return gateFailure(task,"TASK_CAPTURE_GAP:"+captureGaps.get(task.object).reason);
             if(!observeBackend(task))return gateFailure(task,"REQUIRED_BOUNDARY_UNAVAILABLE");
             if(!events.isEmpty()||pendingDeliveries==null||((Integer)pendingDeliveries.invoke(null))!=0)return gateFailure(task,"CAPTURE_PUBLICATION_OR_MERGE_PENDING");
             Set<UUID> published=workerBindings.get(task.object);
@@ -525,9 +694,9 @@ final class RecoveryTasks implements AutoCloseable {
                 boolean[] invoked={false};
                 Runnable commit=()->{
                     try {
-                        // An emit may start after the outer check and wait on LISTENERS.
+                        // A delivery may start after the outer check and reserve publication.
                         // Recheck while the Bootstrap publication monitor excludes new deliveries.
-                        if(!events.isEmpty()||((Integer)pendingDeliveries.invoke(null))!=0) {
+                        if(!checkBridge(task.object)||!events.isEmpty()||((Integer)pendingDeliveries.invoke(null))!=0) {
                             gateFailure(task,"CAPTURE_PUBLICATION_OR_MERGE_PENDING");return;
                         }
                         action.run();invoked[0]=true;
@@ -539,16 +708,18 @@ final class RecoveryTasks implements AutoCloseable {
         }
     }
     private static boolean gateFailure(Task task,String reason) { task.gateReason=reason;return false; }
-    private void capture(Object[] row) {
+    private void capture(Object[] row,OwnerRegistration published) {
         // During shutdown keep observing accepted work and its late descendants, without granting writes.
-        if(detached)return;
+        if(detached||ownerRegistration!=published||!rowScope(row,published))return;
         Object object=row[1],parent=row[3];if(object==null)return;
         if((Integer)row[0]==25) {
             if(object instanceof net.minecraft.world.entity.Entity&&row[2] instanceof net.minecraft.world.entity.Entity clone) {
                 Class<?> holder=row[4] instanceof Class<?> type?type:null;
-                var children=clones.computeIfAbsent(object,key->new ArrayList<>());
-                children.removeIf(link->link.result.get()==null);
-                children.add(new CloneLink(new java.lang.ref.WeakReference<>(clone),new java.lang.ref.WeakReference<>(holder)));
+                synchronized(captureLock) {
+                    var children=clones.computeIfAbsent(object,key->new ArrayList<>());
+                    children.removeIf(link->link.result.get()==null);
+                    children.add(new CloneLink(new java.lang.ref.WeakReference<>(clone),new java.lang.ref.WeakReference<>(holder)));
+                }
                 UUID subject=origins.get(object);
                 if(subject!=null)runtime.recoverySources.cloned(clone,subject,holder);
             }
@@ -562,7 +733,10 @@ final class RecoveryTasks implements AutoCloseable {
         if(internalDelegate(object))return;
         Object[] inline=null;
         try { if(inlineDetails!=null)inline=(Object[])inlineDetails.invoke(null,object); }
-        catch(ReflectiveOperationException failure) { recordGap("INLINE_CAPTURE_UNAVAILABLE");return; }
+        catch(ReflectiveOperationException failure) {
+            if(!captureFailed(row,published,"INLINE_CAPTURE_UNAVAILABLE"))throw new IllegalStateException("INLINE_CAPTURE_SOURCE_UNLOCATABLE",failure);
+            return;
+        }
         // Temporary subject IDs are not recovery sources. Avoid routing this bookkeeping
         // through the global HashMap writer observer for every ordinary JDK callback.
         Set<UUID> related=new TreeSet<>();
@@ -574,10 +748,10 @@ final class RecoveryTasks implements AutoCloseable {
         // Direct captured provenance is evidence of a reference, not evidence of delegation.
         // Only registered JDK wrapper edges may be traversed; third-party delegation is learned
         // at the actual call site or from real save/copy/load activity on its execution frame.
-        if(!captureSubjects(object,inline,related)&&!related.isEmpty())recordGap("TASK_REFERENCE_CAPTURE_UNAVAILABLE");
-        if(related.isEmpty())return;
-        synchronized(workerBindings) {
-            workerBindings.put(object,Set.copyOf(related));
+        boolean complete=captureSubjects(object,inline,related);
+        if(related.isEmpty()) {
+            if(!complete)throw new IllegalStateException("TASK_CAPTURE_SOURCE_UNLOCATABLE");
+            return;
         }
         Object base=inline==null&&object.getClass().getClassLoader()==null
                 &&object.getClass().getName().equals("java.util.concurrent.CompletableFuture$CoCompletion")?completionField(object,"base"):null;
@@ -590,21 +764,33 @@ final class RecoveryTasks implements AutoCloseable {
         }
         // A waiter consumes this result. It does not produce the result it is waiting for.
         if((Integer)row[0]>=18&&(Integer)row[0]<=20&&standardCompletionSource(object)) { dependency=object;output=null; }
-        if(output!=null)synchronized(workerBindings) {
-            Set<UUID> prior=workerBindings.get(output);Set<UUID> merged=new HashSet<>(related);if(prior!=null)merged.addAll(prior);
-            workerBindings.put(output,Set.copyOf(merged));
-        }
-        for(UUID subject:related) {
-            long prior=captureEpochs.getOrDefault(subject,0L);
-            if(prior==Long.MAX_VALUE)recordGap("TASK_CAPTURE_EPOCH_EXHAUSTED");
-            else captureEpochs.put(subject,prior+1);
-        }
-        changes.incrementAndGet();
         Object invocation=(Integer)row[0]==24?((Object[])row[4])[1]:row[4];
         Object scheduler=(Integer)row[0]==24?((Object[])row[4])[2]:row[2];
-        Capture event=new Capture((Integer)row[0],object,scheduler,parent,invocation,object.getClass().getClassLoader(),Set.copyOf(related),(Long)row[7],dependency,other,output,
-                inline!=null,inline==null||inline[2]==null?null:inline[2].getClass(),completionField(object,"executor")!=null);
-        events.add(event);
+        ClassLoader loader=object.getClass().getClassLoader();
+        Class<?> callbackDefinition=inline==null||inline[2]==null?null:inline[2].getClass();
+        boolean hasExecutor=completionField(object,"executor")!=null;
+        synchronized(LISTENERS) {
+            if(detached||ownerRegistration!=published)return;
+            synchronized(workerBindings) {
+                Set<UUID> prior=workerBindings.get(object);if(prior!=null)related.addAll(prior);
+                workerBindings.put(object,Set.copyOf(related));
+                if(output!=null) {
+                    prior=workerBindings.get(output);Set<UUID> merged=new HashSet<>(related);if(prior!=null)merged.addAll(prior);
+                    workerBindings.put(output,Set.copyOf(merged));
+                }
+            }
+            if(!complete)scopedGap(object,related,"TASK_REFERENCE_CAPTURE_UNAVAILABLE",published);
+            CaptureGap loss=captureGaps.get(object);
+            if(loss!=null)scopedGap(object,related,loss.reason,published);
+            for(UUID subject:related) {
+                long prior=captureEpochs.getOrDefault(subject,0L);
+                if(prior==Long.MAX_VALUE)scopedGap(object,related,"TASK_CAPTURE_EPOCH_EXHAUSTED",published);
+                else captureEpochs.put(subject,prior+1);
+            }
+            changes.incrementAndGet();
+            events.add(new Capture((Integer)row[0],object,scheduler,parent,invocation,loader,Set.copyOf(related),(Long)row[7],dependency,other,output,
+                    inline!=null,callbackDefinition,hasExecutor,published.session,published.registration,published.epoch,(Long)row[10]));
+        }
     }
     private boolean captureSubjects(Object object,Object[] inline,Set<UUID> related) {
         boolean complete=true;
@@ -651,13 +837,15 @@ final class RecoveryTasks implements AutoCloseable {
     /** Real Entity allocation inside an observed invocation, including a plain constructor with no NBT load. */
     public static void constructed(net.minecraft.world.entity.Entity entity,net.minecraft.world.level.Level constructionLevel) {
         if(currentTask==null||currentExecution==null)return;
+        OwnerRegistration[] owners=new OwnerRegistration[0];Object task=null;
         try {
-            Object task=currentTask.invoke(null),invocation=currentExecution.invoke(null);
+            task=currentTask.invoke(null);Object invocation=currentExecution.invoke(null);
             Object[] producerInputs=ProRuntime.currentProducerInputs();
             if((task==null||invocation==null)&&producerInputs.length==0)return;
-            synchronized(LISTENERS) {
-                RecoveryTasks selected=null;UUID subject=null;
-                for(RecoveryTasks owner:LISTENERS) {
+            owners=reserveOwners(null);
+            RecoveryTasks selected=null;UUID subject=null;
+            for(OwnerRegistration published:owners) {
+                RecoveryTasks owner=published.owner;
                     if(owner.detached||owner.origins.isEmpty()&&owner.workerBindings.isEmpty())continue;
                     Object[] inline=task==null||inlineDetails==null?null:(Object[])inlineDetails.invoke(null,task);
                     Set<UUID> related=new HashSet<>();
@@ -680,23 +868,25 @@ final class RecoveryTasks implements AutoCloseable {
                         owner.changes.incrementAndGet();return;
                     }
                     selected=owner;subject=authority.id;
-                }
-                if(selected!=null&&constructionLevel instanceof net.minecraft.server.level.ServerLevel level
-                        &&level.getServer()==selected.runtime.server)
+            }
+            if(selected!=null&&constructionLevel instanceof net.minecraft.server.level.ServerLevel level
+                    &&level.getServer()==selected.runtime.server) {
                     selected.runtime.recoverySources.produced(entity,subject,null,"TASK_CONSTRUCTOR_BINDING_CAPACITY");
             }
         } catch(ReflectiveOperationException|RuntimeException|LinkageError failure) {
-            synchronized(LISTENERS) { for(RecoveryTasks owner:LISTENERS)owner.recordGap("CONSTRUCTOR_CAPTURE_UNAVAILABLE"); }
-        }
+            constructorCaptureFailed(owners,task,"CONSTRUCTOR_CAPTURE_UNAVAILABLE");
+        } finally {releaseOwners(owners);}
     }
     static boolean deniesCurrentPublication(net.minecraft.world.entity.Entity entity) {
         if(currentTask==null||currentExecution==null)return false;
+        OwnerRegistration[] owners=new OwnerRegistration[0];
         try {
             Object task=currentTask.invoke(null);Object[] producerInputs=ProRuntime.currentProducerInputs();
             if((task==null||currentExecution.invoke(null)==null)&&producerInputs.length==0)return false;
-            synchronized(LISTENERS) {
-                RecoveryTasks selected=null;UUID id=null;
-                for(RecoveryTasks owner:LISTENERS) {
+            owners=reserveOwners(null);
+            RecoveryTasks selected=null;UUID id=null;
+            for(OwnerRegistration published:owners) {
+                RecoveryTasks owner=published.owner;
                     if(owner.detached||owner.origins.isEmpty()&&owner.workerBindings.isEmpty())continue;
                     Object[] inline=task==null||inlineDetails==null?null:(Object[])inlineDetails.invoke(null,task);
                     Set<UUID> related=new HashSet<>();if(!owner.producerSubjects(task,inline,producerInputs,related))return false;
@@ -704,12 +894,12 @@ final class RecoveryTasks implements AutoCloseable {
                     ProRuntime.Subject authority=owner.runtime.groupAuthority(related);
                     if(authority==null||selected!=null)return false;
                     selected=owner;id=authority.id;
-                }
-                if(selected==null||!(((dev.ronova.pro.mixin.Access.EntityState)entity).pro$level() instanceof net.minecraft.server.level.ServerLevel realm)||realm.getServer()!=selected.runtime.server)return false;
-                UUID existing=selected.subjectOf(entity);
-                return (existing==null||selected.runtime.canonicalSubject(existing)==selected.runtime.canonicalSubject(id))&&selected.runtime.terminalSource(id);
             }
+            if(selected==null||!(((dev.ronova.pro.mixin.Access.EntityState)entity).pro$level() instanceof net.minecraft.server.level.ServerLevel realm)||realm.getServer()!=selected.runtime.server)return false;
+            UUID existing=selected.subjectOf(entity);
+            return (existing==null||selected.runtime.canonicalSubject(existing)==selected.runtime.canonicalSubject(id))&&selected.runtime.terminalSource(id);
         } catch(ReflectiveOperationException|RuntimeException|LinkageError failure) { return false; }
+        finally {releaseOwners(owners);}
     }
     private boolean producerSubjects(Object task,Object[] inline,Object[] inputs,Set<UUID> subjects) {
         boolean complete=task==null||captureSubjects(task,inline,subjects);
@@ -727,20 +917,32 @@ final class RecoveryTasks implements AutoCloseable {
     }
     static void constructionFailed() {
         if(currentTask==null)return;
+        OwnerRegistration[] owners=new OwnerRegistration[0];Object task=null;
         try {
-            Object task=currentTask.invoke(null);Object[] producerInputs=ProRuntime.currentProducerInputs();
+            task=currentTask.invoke(null);Object[] producerInputs=ProRuntime.currentProducerInputs();
             if(task==null&&producerInputs.length==0)return;
-            synchronized(LISTENERS) { for(RecoveryTasks owner:LISTENERS) {
-                Set<UUID> related=new HashSet<>();owner.producerSubjects(task,task==null||inlineDetails==null?null:(Object[])inlineDetails.invoke(null,task),producerInputs,related);
-                for(UUID id:related) {
-                    var subject=owner.runtime.subjects.get(id);
-                    if(subject!=null)subject.unresolvedSources.add("CONSTRUCTOR_SIDE_EFFECTS_UNKNOWN");
-                }
-                if(!related.isEmpty())owner.changes.incrementAndGet();
-            } }
+            owners=reserveOwners(null);
+            for(OwnerRegistration published:owners) {
+                RecoveryTasks owner=published.owner;
+                    Set<UUID> related=new HashSet<>();owner.producerSubjects(task,task==null||inlineDetails==null?null:(Object[])inlineDetails.invoke(null,task),producerInputs,related);
+                    for(UUID id:related) {
+                        var subject=owner.runtime.subjects.get(id);
+                        if(subject!=null)subject.unresolvedSources.add("CONSTRUCTOR_SIDE_EFFECTS_UNKNOWN");
+                    }
+                    if(!related.isEmpty())owner.changes.incrementAndGet();
+            }
         } catch(ReflectiveOperationException|RuntimeException unavailable) {
-            synchronized(LISTENERS) { for(RecoveryTasks owner:LISTENERS)owner.recordGap("CONSTRUCTOR_FAILURE_OBSERVER_UNAVAILABLE"); }
+            constructorCaptureFailed(owners,task,"CONSTRUCTOR_FAILURE_OBSERVER_UNAVAILABLE");
+        } finally {releaseOwners(owners);}
+    }
+    private static void constructorCaptureFailed(OwnerRegistration[] owners,Object task,String reason) {
+        if(task==null) {unknownCapture(reason);return;}
+        boolean located=false;
+        for(OwnerRegistration published:owners) {
+            located|=published.owner.captureFailed(new Object[]{11,task,null,null,null,Thread.currentThread(),System.nanoTime(),0L,
+                    published.registration,published.epoch,0L},published,reason);
         }
+        if(owners.length!=0&&!located)unknownCapture(reason+"_SOURCE_UNLOCATABLE");
     }
     /** Only an actual JDK delegate chain can identify our worker; a random field pointing at Core cannot. */
     private static boolean internalDelegate(Object object) {
@@ -791,6 +993,7 @@ final class RecoveryTasks implements AutoCloseable {
     }
     void tick(long tick) {
         transientIssue="";
+        pollCaptureLosses();
         synchronized(LISTENERS) { checkBridge(); }
         // Rotate only unresolved metadata; a permanently unknown old process must
         // not consume the first sixteen positions on every server tick.
@@ -867,6 +1070,10 @@ final class RecoveryTasks implements AutoCloseable {
     private void drain(long tick) {
         for(int budget=0;budget<DRAIN;budget++) {
             Capture event=events.poll();if(event==null)break;
+            OwnerRegistration published=ownerRegistration;
+            if(published==null||!Objects.equals(event.session,published.session)||event.registration!=published.registration||event.registrationEpoch!=published.epoch) {
+                recordGap("TASK_CAPTURE_REGISTRATION_CHANGED");continue;
+            }
             Task task=tasks.get(event.task);
             if(task==null) {
                 task=new Task(event.task,event.loader,event.inline,event.callbackDefinition);tasks.put(event.task,task);
@@ -984,7 +1191,7 @@ final class RecoveryTasks implements AutoCloseable {
                 case 4 -> task.reason="TASK_BOUNDARY_DEPTH_OVERFLOW";
                 default -> { }
             }
-            if(event.dropped!=0)gap="BOOTSTRAP_CAPTURE_LOSS";
+            if(event.unknownLoss!=0)recordGap("BOOTSTRAP_CAPTURE_LOSS_UNKNOWN");
         }
         advancePolicyFences();
     }
@@ -1007,7 +1214,7 @@ final class RecoveryTasks implements AutoCloseable {
         if(task.admissionFenced&&!task.admissionReleased||!task.forkJoin||task.subjects.isEmpty()||closing)return false;
         if(fenceTask==null||withBoundaries==null)return true;
         synchronized(LISTENERS) {
-            if(!checkBridge()||!runtime.journal.healthy()||!gap.isEmpty())return true;
+            if(!checkBridge(task.object)||!runtime.journal.healthy()||!gap.isEmpty())return true;
             try {
                 if(pendingDeliveries==null||((Integer)pendingDeliveries.invoke(null))!=0) {
                     task.gateReason="CAPTURE_PUBLICATION_PENDING";return true;
@@ -1033,7 +1240,7 @@ final class RecoveryTasks implements AutoCloseable {
                     try {
                         // withBoundaries holds the real Bootstrap publication monitor. Checking
                         // only before entering it leaves a new emit/source tail race.
-                        if(((Integer)pendingDeliveries.invoke(null))!=0) {
+                        if(!checkBridge(task.object)||((Integer)pendingDeliveries.invoke(null))!=0) {
                             task.gateReason="CAPTURE_PUBLICATION_PENDING";return;
                         }
                         Set<UUID> live=workerBindings.get(task.object);
@@ -1080,7 +1287,7 @@ final class RecoveryTasks implements AutoCloseable {
     }
     private boolean retirePolicyFence(Task task)throws ReflectiveOperationException {
         synchronized(LISTENERS) {
-            if(!checkBridge()||!gap.isEmpty()||!events.isEmpty()||pendingDeliveries==null||((Integer)pendingDeliveries.invoke(null))!=0
+            if(!checkBridge(task.object)||!gap.isEmpty()||!events.isEmpty()||pendingDeliveries==null||((Integer)pendingDeliveries.invoke(null))!=0
                     ||!observeBackend(task))return false;
             pollAdoptedInvocations(task);
             ProRuntime.Subject scope=task.policyAuthority==null?null:runtime.canonicalSubject(task.policyAuthority.id);
@@ -1158,7 +1365,7 @@ final class RecoveryTasks implements AutoCloseable {
         if(task.delegated&&!exactFuture(task.object)) { advanceDelegate(task,tick);return; }
         if(!exactFuture(task.object)) {advanceDrained(task,tick);return;}
         synchronized(LISTENERS) {
-            if(!checkBridge()||closing||!gap.isEmpty()||!observeBackend(task)) { resetWindow(task,"REQUIRED_TASK_BOUNDARY_UNAVAILABLE");return; }
+            if(!checkBridge(task.object)||closing||!gap.isEmpty()||!observeBackend(task)) { resetWindow(task,"REQUIRED_TASK_BOUNDARY_UNAVAILABLE");return; }
         }
         if(!exclusive(task)||!task.reason.isEmpty())return;
         if(!qualified(task)) { resetWindow(task,"FENCED");return; }
@@ -1249,7 +1456,7 @@ final class RecoveryTasks implements AutoCloseable {
             };
             boolean accepted;
             if(observationOnly)synchronized(LISTENERS) {
-                accepted=checkBridge()&&gap.isEmpty()&&events.isEmpty()&&((Integer)pendingDeliveries.invoke(null))==0&&observeBackend(task)
+                accepted=checkBridge(task.object)&&gap.isEmpty()&&events.isEmpty()&&((Integer)pendingDeliveries.invoke(null))==0&&observeBackend(task)
                         &&Boolean.TRUE.equals(withBoundaries.invoke(null,task.requiredBoundaries,task.backendEpoch,bound));
             } else accepted=guarded(task,bound);
             return accepted&&invoked[0];
@@ -1258,7 +1465,7 @@ final class RecoveryTasks implements AutoCloseable {
     /** Observing a shared callback's invocation never cancels or clears somebody else's callback object. */
     private void advanceDelegate(Task task,long tick)throws ReflectiveOperationException {
         synchronized(LISTENERS) {
-            if(!checkBridge()||closing||!gap.isEmpty()||!observeBackend(task)) { resetWindow(task,"DELEGATE_BOUNDARY_UNAVAILABLE");return; }
+            if(!checkBridge(task.object)||closing||!gap.isEmpty()||!observeBackend(task)) { resetWindow(task,"DELEGATE_BOUNDARY_UNAVAILABLE");return; }
         }
         if(!qualified(task))return;
         if(task.ack==null) { task.intent=intent(task);task.ack=runtime.journal.append(task.intent); }
@@ -1522,7 +1729,7 @@ final class RecoveryTasks implements AutoCloseable {
         // Retry that exact record even when no further cancellation is needed or allowed.
         task.resultCancelAck=runtime.journal.retryRejected(task.resultCancelRecord,task.resultCancelAck);
         synchronized(LISTENERS) {
-            if(!checkBridge()||closing||!gap.isEmpty()||!observeBackend(task)) { resetWindow(task,"RESULT_OBSERVER_UNAVAILABLE");return; }
+            if(!checkBridge(task.object)||closing||!gap.isEmpty()||!observeBackend(task)) { resetWindow(task,"RESULT_OBSERVER_UNAVAILABLE");return; }
         }
         finishResultCancellation(task);
         if(!qualified(task)||!exclusive(task))return;
@@ -1670,7 +1877,7 @@ final class RecoveryTasks implements AutoCloseable {
     private boolean ownerQueueAction(Object task,ProRuntime.Subject authority,long generation,String[] boundaries,long epoch,Runnable action) {
         synchronized(LISTENERS) {
             try {
-                boolean observerCurrent=checkBridge();Set<UUID> published=workerBindings.get(task);
+                boolean observerCurrent=checkBridge(task);Set<UUID> published=workerBindings.get(task);
                 if(!observerCurrent||closing||!runtime.journal.healthy()||!gap.isEmpty()||!events.isEmpty()||((Integer)pendingDeliveries.invoke(null))!=0
                         ||!runtime.sameGroup(published,authority))return false;
                 for(RecoveryTasks owner:LISTENERS)if(owner!=this&&owner.workerBindings.containsKey(task))return false;
@@ -1680,7 +1887,7 @@ final class RecoveryTasks implements AutoCloseable {
                     boolean[] invoked={false};
                     Runnable commit=()->{
                         try {
-                            if(!events.isEmpty()||((Integer)pendingDeliveries.invoke(null))!=0)return;
+                            if(!checkBridge(task)||!events.isEmpty()||((Integer)pendingDeliveries.invoke(null))!=0)return;
                             action.run();invoked[0]=true;
                         } catch(ReflectiveOperationException failure) { throw new IllegalStateException("TASK_PUBLICATION_QUERY_UNAVAILABLE",failure); }
                     };
@@ -1727,7 +1934,7 @@ final class RecoveryTasks implements AutoCloseable {
             if(retiring) {
                 // Only our registry reference is released here. No cancelled qualification authorizes field/queue writes.
                 synchronized(LISTENERS) {
-                    accepted=checkBridge()&&gap.isEmpty()&&events.isEmpty()&&((Integer)pendingDeliveries.invoke(null))==0&&observeBackend(task)
+                    accepted=checkBridge(task.object)&&gap.isEmpty()&&events.isEmpty()&&((Integer)pendingDeliveries.invoke(null))==0&&observeBackend(task)
                             &&Boolean.TRUE.equals(withBoundaries.invoke(null,task.requiredBoundaries,task.backendEpoch,release));
                 }
             } else accepted=guarded(task,release);
@@ -1892,7 +2099,7 @@ final class RecoveryTasks implements AutoCloseable {
     /** Confirm naturally completed calls without replaying callbacks or inventing cancellation authority. */
     private void advanceObserved(Task task,long tick)throws ReflectiveOperationException {
         synchronized(LISTENERS) {
-            if(!checkBridge()||closing||!gap.isEmpty()||!observeBackend(task)) { resetWindow(task,"REQUIRED_INLINE_BOUNDARY_UNAVAILABLE");return; }
+            if(!checkBridge(task.object)||closing||!gap.isEmpty()||!observeBackend(task)) { resetWindow(task,"REQUIRED_INLINE_BOUNDARY_UNAVAILABLE");return; }
         }
         if(!exclusive(task)||!task.reason.isEmpty())return;
         if(!qualified(task)) { resetWindow(task,"FENCED");return; }
@@ -1919,7 +2126,7 @@ final class RecoveryTasks implements AutoCloseable {
     }
     private void finishScope(Task task,long tick,String evidence)throws ReflectiveOperationException {
         synchronized(LISTENERS) {
-            if(!checkBridge()||closing||!gap.isEmpty()||!observeBackend(task)) { resetWindow(task,"TASK_EVIDENCE_INCOMPLETE");return; }
+            if(!checkBridge(task.object)||closing||!gap.isEmpty()||!observeBackend(task)) { resetWindow(task,"TASK_EVIDENCE_INCOMPLETE");return; }
             if(!task.adoptedInvocations.isEmpty()||((Integer)activeInvocations.invoke(null,task.object))!=0
                     ||((Integer)helperReferences.invoke(null,task.object))!=0) {
                 resetWindow(task,"WAIT_INVOCATION_AND_SUBMISSION_RESERVATIONS");return;
@@ -2019,6 +2226,11 @@ final class RecoveryTasks implements AutoCloseable {
             if(!transientIssue.isEmpty())out.add("TASK_TRANSIENT:"+transientIssue);
             Set<UUID> targets=subject==null?Set.of():runtime.groupTargets(subject);
             if(subject==null?!events.isEmpty():events.stream().anyMatch(event->!Collections.disjoint(event.subjects,targets)))out.add("TASK_EVIDENCE_PENDING_MERGE");
+            for(var entry:captureGaps.entrySet()) {
+                CaptureGap loss=entry.getValue();Task task=tasks.get(entry.getKey());
+                if(task!=null&&operation.equals(task.operation)||!Collections.disjoint(loss.subjects,targets))
+                    out.add("TASK_CAPTURE_GAP:"+(task==null?entry.getKey().getClass().getName():task.id)+":"+loss.reason);
+            }
             for(Task task:tasks.values())if(operation.equals(task.operation)||!Collections.disjoint(task.subjects,targets))out.add("TASK:"+task.id+":"+task.state+":"+task.reason);
             for(Settlement settled:settlements.values())if(operation.equals(settled.operation)) {
                 if(!settled.released||!confirmed(settled.ack))out.add("CORE_REFERENCE_RELEASE_ACK:"+settled.task);
@@ -2054,7 +2266,7 @@ final class RecoveryTasks implements AutoCloseable {
         task.state=state;
     }
     private boolean localCurrent(Task task,long tick,long captureEpoch) {
-        return task.reason.isEmpty()&&task.authority!=null
+        return !taskGap(task.object)&&task.reason.isEmpty()&&task.authority!=null
                 &&(!task.admissionFenced||task.admissionReleased&&confirmed(task.fenceReleaseAck))
                 &&task.coverageConfirmed&&qualified(task)&&exclusive(task)
                 &&task.executions.isEmpty()&&task.dispatches.isEmpty()&&task.submissions.isEmpty()
@@ -2179,6 +2391,7 @@ final class RecoveryTasks implements AutoCloseable {
                         ":adoptedInvocations="+task.adoptedInvocations.size()+":waiters="+task.waiters.size()+
                         ":waiterExitsDurable="+(waiterFactsCurrent(task)?task.waiterExitsRecorded:0)+
                         ":gate="+task.gateReason+
+                        ":captureGap="+(taskGap(task.object)?captureGaps.get(task.object).reason:"")+
                         ":definition="+task.definition.getName()+":scheduler="+(task.scheduler==null?"UNOBSERVED":task.scheduler.getClass().getName()));
             }
             for(Settlement settled:settlements.values())if(operation.equals(settled.operation))out.add(settled.task+":CORE_REFERENCES_RELEASED="+(settled.released&&confirmed(settled.ack)));
@@ -2188,6 +2401,9 @@ final class RecoveryTasks implements AutoCloseable {
     String dependencies(UUID operation,UUID subject) {
         synchronized(LISTENERS) {
             StringBuilder key=new StringBuilder(gap).append(':').append(captureEpochs.getOrDefault(subject,0L));
+            Set<UUID> targets=runtime.groupTargets(subject);
+            for(var entry:captureGaps.entrySet())if(!Collections.disjoint(entry.getValue().subjects,targets))
+                key.append("|CAPTURE_GAP:").append(System.identityHashCode(entry.getKey())).append(':').append(entry.getValue().reason);
             var rows=new java.util.TreeSet<String>();
             for(Task task:tasks.values())if(operation.equals(task.operation)||task.subjects.contains(subject))
                 rows.add(task.id+":"+task.revision+":"+task.operation+":"+task.qualification+":"+task.state+":"+task.children.size());
@@ -2210,15 +2426,23 @@ final class RecoveryTasks implements AutoCloseable {
             return;
         }
         // Ownership of this merge transfers from the stopped server to its retirement worker.
+        pollCaptureLosses();
         drain(System.nanoTime()/50_000_000L);
         finishResultCancellationsForClose();
         synchronized(LISTENERS) {
+            if(capturePublications!=0)throw new IOException("TASK_CAPTURE_PUBLICATION_IN_FLIGHT");
             if(!events.isEmpty())throw new IOException("TASK_RETIREMENT_EVENTS_PENDING");
             try {
                 if(bridge!=null&&((Integer)pendingDeliveries.invoke(null))!=0)throw new IOException("TASK_CAPTURE_PUBLICATION_IN_FLIGHT");
+                if(bridge!=null) {
+                    Object[] state=captureState==null?null:(Object[])captureState.invoke(null,SINK);
+                    if(state==null||state.length!=5)throw new IOException("TASK_CAPTURE_SCOPE_UNAVAILABLE");
+                    if(((Object[][])state[4]).length!=0)throw new IOException("TASK_CAPTURE_LOSS_SCOPE_PENDING");
+                }
             } catch(ReflectiveOperationException failure) { throw new IOException("TASK_CAPTURE_PUBLICATION_QUERY_UNAVAILABLE",failure); }
             checkBridge();
             for(Task task:tasks.values()) {
+                if(taskGap(task.object))throw new IOException("TASK_RETIREMENT_GAP:"+captureGaps.get(task.object).reason);
                 try { pollAdoptedInvocations(task); }
                 catch(ReflectiveOperationException failure) { throw new IOException("SOURCE_INVOCATION_RETIREMENT_UNAVAILABLE",failure); }
                 if(!task.adoptedInvocations.isEmpty())throw new IOException("SOURCE_INVOCATIONS_PENDING:"+task.id);
@@ -2301,6 +2525,7 @@ final class RecoveryTasks implements AutoCloseable {
                     throw new IOException("TASK_EXIT_OR_START_PRECLUSION_PENDING:"+task.id);
             }
             if(!tasks.isEmpty()&&!gap.isEmpty())throw new IOException("TASK_RETIREMENT_GAP:"+gap);
+            for(CaptureGap loss:captureGaps.values())if(!loss.subjects.isEmpty())throw new IOException("TASK_RETIREMENT_GAP:"+loss.reason);
             int writes=32;boolean receiptsReady=true;
             for(Task task:tasks.values()) {
                 if(task.retiredRevision!=task.revision) {
@@ -2322,19 +2547,20 @@ final class RecoveryTasks implements AutoCloseable {
             if(!confirmed(retirementAck))throw new IOException("TASK_OBSERVER_RELEASE_INTENT_ACK_PENDING");
             // Publication is excluded here: a late ENTER/SUBMIT before this point changes the epoch above.
             LISTENERS.remove(this);
+            publishOwners();
             if(LISTENERS.isEmpty()&&bridge!=null) {
                 try {
                     if(uninstall==null||!Boolean.TRUE.equals(uninstall.invoke(null,SINK))) {
-                        LISTENERS.add(this);throw new IOException("TASK_OBSERVER_DETACH_UNCONFIRMED");
+                        LISTENERS.add(this);publishOwners();throw new IOException("TASK_OBSERVER_DETACH_UNCONFIRMED");
                     }
                 } catch(ReflectiveOperationException|RuntimeException unavailable) {
-                    LISTENERS.add(this);throw new IOException("TASK_OBSERVER_DETACH_UNCONFIRMED",unavailable);
+                    LISTENERS.add(this);publishOwners();throw new IOException("TASK_OBSERVER_DETACH_UNCONFIRMED",unavailable);
                 }
-                bridge=null;
+                bridge=null;bridgeRegistration=null;bridgeRegistrationEpoch=-1;
             }
             detached=true;
             // Every collection is owned by this observer. External queues, delegates and pools are untouched.
-            events.clear();tasks.clear();producers.clear();dependents.clear();childrenByParent.clear();synchronized(origins){origins.clear();sharedOrigins.clear();}workerBindings.clear();captureEpochs.clear();
+            events.clear();tasks.clear();producers.clear();dependents.clear();childrenByParent.clear();synchronized(origins){origins.clear();sharedOrigins.clear();}workerBindings.clear();captureEpochs.clear();captureGaps.clear();
             windows.clear();waiting.clear();policyPending.clear();
             retirementFact=PREFIX+"\tOBSERVER_RELEASED\t"+runtime.session+"\t"+epoch;
             retirementFactAck=runtime.journal.append(retirementFact);

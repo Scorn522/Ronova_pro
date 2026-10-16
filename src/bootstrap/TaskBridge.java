@@ -26,6 +26,9 @@ public final class TaskBridge {
     static final ThreadLocal<java.util.ArrayDeque<Object[]>> SOURCE_DELIVERIES=new ThreadLocal<>();
     static final ThreadLocal<Overflow> OVERFLOW_DEPTH=new ThreadLocal<>();
     static final java.util.concurrent.atomic.AtomicLong DROPPED=new java.util.concurrent.atomic.AtomicLong();
+    // Diagnostic loss never resets. Only failures with no real event identity veto every observer.
+    static final java.util.concurrent.atomic.AtomicLong UNKNOWN_LOSS=new java.util.concurrent.atomic.AtomicLong();
+    static long registrationEpoch;
     static volatile Registration registration;
     static volatile String coverage="AGENT_NOT_READY";
     static final java.util.Set<String> certified=new java.util.HashSet<>();
@@ -639,7 +642,7 @@ public final class TaskBridge {
         finally { if(prior==null)AUTHORITY.remove();else AUTHORITY.set(prior); }
     }
     private TaskBridge() {}
-    public static int abiVersion(){return 91;}
+    public static int abiVersion(){return 92;}
     public static synchronized void installEquipmentAsync(Class<?> owner,java.lang.invoke.MethodHandle capture,java.lang.invoke.MethodHandle invoke){
         requirePolicyInstaller();if(guards==null||guards.owner()!=owner||equipmentAsync!=null&&equipmentAsync.owner!=owner)throw new SecurityException("EQUIPMENT_ASYNC_OWNER");
         equipmentAsync=new EquipmentAsync(owner,Objects.requireNonNull(capture).asType(java.lang.invoke.MethodType.methodType(Object.class,Object.class,Object.class,Object.class)),
@@ -669,11 +672,12 @@ public final class TaskBridge {
     /** No Core call occurs under either task/source metadata monitor. */
     private static void captureEquipmentAsync(Object task,Object scheduler,Object parent,Object callback){
         EquipmentAsync installation=equipmentAsync;if(installation==null||task==null||callback==null||DELIVERING.get()!=null)return;
+        Registration observer=registration;
         synchronized(EQUIPMENT_ASYNC_LOCK){reapEquipmentAsync();if(EQUIPMENT_ASYNC_TASKS.containsKey(new EventKey(task,null)))return;}
         try{
             Object ticket=(Object)installation.capture.invokeExact(task,scheduler,parent);if(ticket==null)return;
             synchronized(EQUIPMENT_ASYNC_LOCK){reapEquipmentAsync();if(equipmentAsync==installation&&!EQUIPMENT_ASYNC_TASKS.containsKey(new EventKey(task,null)))bindEquipmentAsync(task,callback,new AsyncBinding(installation,ticket));}
-        }catch(Throwable unavailable){lost(unavailable);}
+        }catch(Throwable unavailable){lostTask(observer,11,task,scheduler,parent,null,unavailable);}
     }
     private static void captureEquipmentSubmission(Object task,Object scheduler,Object parent){
         // Completion callbacks are paired at their real constructor return with
@@ -846,14 +850,14 @@ public final class TaskBridge {
     }
     /** The caller releases this token at the last actual result write, before callbacks run. */
     public static Object beginTaskPublication(Object result) {
-        Publication token=null;
+        Publication token=null;Registration observer=registration;
         try {
             var callback=publicationGate;
             token=new Publication(callback==null?null:(AutoCloseable)callback.invokeExact(result,currentTask()));
             if(!resultPublicationAllowed(result)){token.close();return Boolean.FALSE;}
             return token;
         } catch(Throwable failure) {
-            if(token!=null)token.close();lost();return Boolean.FALSE;
+            if(token!=null)token.close();lostTask(observer,13,result,null,null,null,failure);return Boolean.FALSE;
         }
     }
     public static void endTaskPublication(Object token) {
@@ -954,16 +958,17 @@ public final class TaskBridge {
                         .contains(frame.getDeclaringClass().getName())).orElse(false));
     }
     public static Object beginWait(Object task) {
+        Registration observer=registration;
         try {
             if(task==null||!waitBoundary())return null;
-            Wait wait=new Wait(task,registration);
+            Wait wait=new Wait(task,observer);
             synchronized(TaskBridge.class) {
-                if(waiterEntries>=ADMISSION_LIMIT)lost();
+                if(waiterEntries>=ADMISSION_LIMIT)lostTask(observer,18,task,null,currentTask(),wait,null);
                 else { WAITERS.computeIfAbsent(task,key->new java.util.ArrayList<>()).add(wait);waiterEntries++;wait.tracked=true; }
             }
             CURRENT_WAIT.set(wait);
             emit(wait.owner,18,task,null,currentTask(),wait);return wait;
-        } catch(Throwable unavailable) { lost();return null; }
+        } catch(Throwable unavailable) {lostTask(observer,18,task,null,null,null,unavailable);return null;}
     }
     public static void endWait(Object token) {
         try {
@@ -971,11 +976,11 @@ public final class TaskBridge {
             synchronized(TaskBridge.class) {
                 if(wait.tracked) {
                     var entries=WAITERS.get(wait.task);
-                    if(entries==null||!entries.remove(wait))lost();else { waiterEntries--;if(entries.isEmpty())WAITERS.remove(wait.task); }
+                    if(entries==null||!entries.remove(wait))lostTask(wait.owner,19,wait.task,null,currentTask(),wait,null);else { waiterEntries--;if(entries.isEmpty())WAITERS.remove(wait.task); }
                 }
                 wait.closed=true;
                 if(wait.node!=null) {
-                    if(EXITED_WAIT_NODES.size()>=65536)lost();
+                    if(EXITED_WAIT_NODES.size()>=65536)lostTask(wait.owner,19,wait.task,null,currentTask(),wait,null);
                     else EXITED_WAIT_NODES.put(wait.node,new java.lang.ref.WeakReference<>(wait.task));
                 }
             }
@@ -984,7 +989,9 @@ public final class TaskBridge {
                 wait.thread=null;wait.node=null;wait.task=null;
                 if(wait.previous==null)CURRENT_WAIT.remove();else CURRENT_WAIT.set(wait.previous);wait.previous=null;
             }
-        } catch(Throwable unavailable) { lost(); }
+        } catch(Throwable unavailable) {
+            if(token instanceof Wait wait)lostTask(wait.owner,19,wait.task,null,null,wait,unavailable);else lost(unavailable);
+        }
     }
     public static synchronized int waiterCount(Object task) { var entries=WAITERS.get(task);return entries==null?0:entries.size(); }
     public static synchronized boolean waiterNodeObserved(Object task,Object node) {
@@ -992,6 +999,7 @@ public final class TaskBridge {
         var exited=EXITED_WAIT_NODES.get(node);return exited!=null&&exited.get()==task;
     }
     public static void waitNode(Object node) {
+        Wait observed=CURRENT_WAIT.get();
         try {
             Wait wait=CURRENT_WAIT.get();if(wait==null||node==null)return;
             boolean valid=WALKER.walk(frames->{
@@ -1004,8 +1012,10 @@ public final class TaskBridge {
                         ||name.equals("java.util.concurrent.CompletableFuture$Signaller")&&caller.getDeclaringClass()==java.util.concurrent.CompletableFuture.class
                             &&java.util.Set.of("waitingGet","timedGet").contains(caller.getMethodName());
             });
-            if(valid)synchronized(TaskBridge.class) { if(wait.node!=null&&wait.node!=node)lost();else wait.node=node; }
-        } catch(Throwable unavailable) { lost(); }
+            if(valid)synchronized(TaskBridge.class) { if(wait.node!=null&&wait.node!=node)lostTask(wait.owner,18,wait.task,null,null,wait,null);else wait.node=node; }
+        } catch(Throwable unavailable) {
+            if(observed!=null)lostTask(observed.owner,18,observed.task,null,null,observed,unavailable);else lost(unavailable);
+        }
     }
     static boolean waitBoundary() {
         return WALKER.walk(frames->frames.dropWhile(frame->frame.getDeclaringClass()==TaskBridge.class).findFirst().map(frame->{
@@ -1043,7 +1053,9 @@ public final class TaskBridge {
                 var field=request.queue.getClass().getDeclaredField("owner");
                 if(field.trySetAccessible())java.util.concurrent.locks.LockSupport.unpark((Thread)field.get(request.queue));
             }
-        } catch(ReflectiveOperationException unavailable) { lost(); }
+        } catch(ReflectiveOperationException unavailable) {
+            if(token instanceof QueueRelease request)lostTask(request.owner,16,request.task,request.queue,null,request,unavailable);else lost(unavailable);
+        }
     }
     static void retireQueueRequest(QueueRelease request) {
         request.retired=true;
@@ -1055,6 +1067,7 @@ public final class TaskBridge {
     }
     /** Called at verified queue-owner safe points, never on the server in place of the owner. */
     public static void serviceOwnedQueue(Object queue,Thread owner) {
+        java.util.List<QueueRelease> observed=null;
         try {
             boolean relevant=false;for(Object active:queuesWithRelease)if(active==queue){relevant=true;break;}
             if(!relevant)return;
@@ -1063,6 +1076,7 @@ public final class TaskBridge {
             synchronized(TaskBridge.class) {
                 var entries=QUEUE_RELEASES.get(queue);if(entries==null)return;
                 pending=new java.util.ArrayList<>(entries.subList(0,Math.min(8,entries.size())));
+                observed=pending;
                 // Rotate visited work so a busy or revoked first entry cannot starve later requests.
                 for(QueueRelease item:pending) { entries.remove(item);entries.add(item); }
             }
@@ -1099,7 +1113,10 @@ public final class TaskBridge {
                     if(retired)emit(request.owner,16,request.task,queue,null,request);
                 }
             }
-        } catch(Throwable unavailable) { lost(); }
+        } catch(Throwable unavailable) {
+            if(observed==null||observed.isEmpty())lost(unavailable);
+            else for(QueueRelease request:observed)lostTask(request.owner,17,request.task,queue,null,request,unavailable);
+        }
     }
     static boolean queueBoundary() {
         return WALKER.walk(frames->frames.dropWhile(frame->frame.getDeclaringClass()==TaskBridge.class).findFirst()
@@ -1143,8 +1160,10 @@ public final class TaskBridge {
     /** Identity, not the consumer class or a wrapping counter, separates observer lifetimes. */
     static final class Registration {
         final Consumer<Object[]> sink;
+        final long epoch;
+        final Map<Long,Object[]> captureLosses=new java.util.LinkedHashMap<>();
         int delivering;
-        Registration(Consumer<Object[]> sink){this.sink=sink;}
+        Registration(Consumer<Object[]> sink){this.sink=sink;this.epoch=++registrationEpoch;}
     }
     public static String coverage(){return coverage;}
     public static void coverage(String value){coverage=Objects.requireNonNull(value);}
@@ -1156,13 +1175,14 @@ public final class TaskBridge {
             if(current.sink!=value)throw new IllegalStateException("TASK_OBSERVER_ALREADY_INSTALLED");
             return;
         }
+        if(registrationEpoch==Long.MAX_VALUE)throw new IllegalStateException("TASK_REGISTRATION_EPOCH_EXHAUSTED");
         registration=new Registration(value);observerInstaller=caller;
     }
     /** Only the installed owner may detach. Detachment never fabricates an execution exit. */
     public static synchronized boolean uninstall(Object expected) {
         Registration current=registration;
         if(installingCaller()!=observerInstaller)return false;
-        if(current==null||current.sink!=expected||current.delivering!=0)return false;
+        if(current==null||current.sink!=expected||current.delivering!=0||!current.captureLosses.isEmpty())return false;
         for(Admission admission:ADMISSIONS.values())if(admission.owner==current&&admission.fenced)return false;
         for(var requests:QUEUE_RELEASES.values())for(QueueRelease request:requests)if(request.owner==current)return false;
         registration=null;return true;
@@ -1175,6 +1195,20 @@ public final class TaskBridge {
         Registration current=registration;
         return current!=null&&current.sink==expected&&DELIVERING.get()==current;
     }
+    /** Loss rows retain their real event identity until Core routes them to its published owners. */
+    public static synchronized Object[] captureState(Object expected) {
+        Registration current=registration;
+        if(current==null||current.sink!=expected)return null;
+        Object[][] losses=new Object[current.captureLosses.size()][];int index=0;
+        for(Object[] row:current.captureLosses.values())losses[index++]=row.clone();
+        return new Object[]{current,current.epoch,UNKNOWN_LOSS.get(),DROPPED.get(),losses};
+    }
+    public static synchronized boolean acknowledgeCaptureLoss(Object expected,Object identity,long epoch,long sequence) {
+        Registration current=registration;
+        if(current==null||current.sink!=expected||current!=identity||current.epoch!=epoch
+                ||installingCaller()!=observerInstaller)return false;
+        return current.captureLosses.remove(sequence)!=null;
+    }
     /** Ordinary cancellation is unchanged. Cancellation and actual exit are distinct events. */
     public static boolean cancelState(java.lang.invoke.VarHandle handle,Object task,int expected,int update) {
         boolean changed=handle.compareAndSet(task,expected,update);
@@ -1182,31 +1216,33 @@ public final class TaskBridge {
         return changed;
     }
     public static void body(Object task) {
+        Registration current=registration;
         try {
-            Registration current=registration;
             if(task!=null&&boundary(false))emit(current,BODY,task,null,currentTask(),currentExecution());
-        } catch(Throwable unavailable){lost();}
+        } catch(Throwable unavailable){lostTask(current,BODY,task,null,null,null,unavailable);}
     }
     public static void created(Object task) {
+        Registration current=registration;
         try {
-            Registration current=registration;
             if(task!=null&&boundary(false)){
                 taskRelation(task,null,currentTask());
                 inheritEquipmentCompletion(task);
                 emit(current,11,task,null,currentTask(),null);
             }
-        } catch(Throwable unavailable){lost();}
+        } catch(Throwable unavailable){lostTask(current,11,task,null,null,null,unavailable);}
     }
     public static void completionMode(Object task,int mode) {
+        Registration current=registration;
         try {
-            if(registration!=null&&task!=null&&boundary(false))emit(registration,13,task,Integer.valueOf(mode),currentTask(),null);
-        } catch(Throwable unavailable){lost();}
+            if(current!=null&&task!=null&&boundary(false))emit(current,13,task,Integer.valueOf(mode),currentTask(),null);
+        } catch(Throwable unavailable){lostTask(current,13,task,Integer.valueOf(mode),null,null,unavailable);}
     }
     public static void delegated(Object wrapper,Object delegate) {
+        Registration current=registration;
         try {
             if(wrapper!=null&&delegate!=null&&boundary(false)){taskRelation(delegate,null,wrapper);inheritEquipmentDelegate(wrapper,delegate);}
-            if(wrapper!=null&&delegate!=null&&boundary(false))emit(registration,21,delegate,wrapper,wrapper,null);
-        } catch(Throwable unavailable) { lost(); }
+            if(wrapper!=null&&delegate!=null&&boundary(false))emit(current,21,delegate,wrapper,wrapper,null);
+        } catch(Throwable unavailable) {lostTask(current,21,delegate,wrapper,wrapper,null,unavailable);}
     }
     /** The production source observer binds a real save/load to the actual nested execution frames. */
     public static void sourceOrigin(Object expected,Object owner,Object subject) {
@@ -1227,8 +1263,9 @@ public final class TaskBridge {
         // evidence until that delivery returns; ordinary observer-created tasks stay suppressed.
         var queue=SOURCE_DELIVERIES.get();
         if(queue==null) { queue=new java.util.ArrayDeque<>();SOURCE_DELIVERIES.set(queue); }
-        if(queue.size()>=MAX_DEPTH*2) { lost();return; }
-        queue.addLast(new Object[]{kind,task,scheduler,parent,execution,Thread.currentThread(),System.nanoTime(),DROPPED.get()});
+        Object[] row=captureRow(current,kind,task,scheduler,parent,execution);
+        if(queue.size()>=MAX_DEPTH*2) { lost(current,row,null);return; }
+        queue.addLast(row);
     }
     public static synchronized long[] invocationState(Object token) {
         if(!(token instanceof Frame frame))return new long[]{-1,0,0,0};
@@ -1238,13 +1275,14 @@ public final class TaskBridge {
 
     /** One actual platform stage invocation, including its synchronous fast path. No synthetic Future is executed. */
     public static Object beginInline(Object source,Object other,Object callback) {
+        Inline task=null;Registration observer=registration;
         try {
-            if(registration==null||DELIVERING.get()!=null||!inlineBoundary())return null;
-            Inline task=new Inline(source,other,callback);
+            if(observer==null||DELIVERING.get()!=null||!inlineBoundary())return null;
+            task=new Inline(source,other,callback);
             captureEquipmentAsync(task,null,currentTask(),callback);
             task.frame=enterFrame(task,false);
             return task;
-        } catch(Throwable unavailable){lost();return null;}
+        } catch(Throwable unavailable){lostTask(observer,ENTER,task,null,null,null,unavailable);return null;}
     }
     public static void endInline(Object token,Object output) {
         try {
@@ -1256,7 +1294,9 @@ public final class TaskBridge {
                 task.source=null;task.other=null;task.callback=null;task.output=null;task.frame=null;task.thread=null;
                 task.closed=true;
             }
-        } catch(Throwable unavailable){lost();}
+        } catch(Throwable unavailable){
+            if(token instanceof Inline task&&task.frame instanceof Frame frame)lostFrame(frame,unavailable);else lost(unavailable);
+        }
     }
     /** Snapshot is queried synchronously by the installed observer during ENTER/EXIT publication. */
     public static Object[] inlineDetails(Object token) {
@@ -1278,7 +1318,8 @@ public final class TaskBridge {
 
     /** Opaque token is returned only at a registered JDK entry and closed in its finally. */
     public static Object enter(Object task) {
-        try{return boundary(false)?enterFrame(task,false):null;}catch(Throwable unavailable){lost();return null;}
+        Registration current=registration;
+        try{return boundary(false)?enterFrame(task,false):null;}catch(Throwable unavailable){lostTask(current,ENTER,task,null,null,null,unavailable);return null;}
     }
     public static Object definedTaskEnter(Object task,String selector){
         if(task==null||!producerSite()||!DefinedTaskContracts.matches(task,selector))return null;
@@ -1291,10 +1332,11 @@ public final class TaskBridge {
     public static void definedTaskExit(Object token){
         if(!producerSite())return;
         try{exitFrame(token);}catch(Throwable unavailable){
-            lost();if(token instanceof Frame frame&&frame.thread==Thread.currentThread()&&CURRENT.get()==frame){releaseAdmission(frame);restore(frame);}
+            lostFrame(token,unavailable);if(token instanceof Frame frame&&frame.thread==Thread.currentThread()&&CURRENT.get()==frame){releaseAdmission(frame);restore(frame);}
         }
     }
     public static Object enterDelegate(Object wrapper,Object task) {
+        Registration current=registration;
         try {
             if(wrapper==null||!boundary(false))return null;
             inheritEquipmentDelegate(wrapper,task);
@@ -1302,15 +1344,16 @@ public final class TaskBridge {
             if(token instanceof Frame frame)frame.delegateOwner=wrapper;
             emit(registration,21,task,wrapper,wrapper,null);
             return token;
-        } catch(Throwable unavailable) { lost();return null; }
+        } catch(Throwable unavailable) {lostTask(current,21,task,wrapper,wrapper,null,unavailable);return null;}
     }
     public static Object enterDispatch(Object scheduler,Object task) {
+        Registration current=registration;
         try {
             if(!boundary(false))return null;
             Object token=enterFrame(task,true);
             if(token instanceof Frame frame)frame.scheduler=scheduler;
             return token;
-        }catch(Throwable unavailable){lost();return null;}
+        }catch(Throwable unavailable){lostTask(current,DISPATCH_ENTER,task,scheduler,null,null,unavailable);return null;}
     }
     static Object enterFrame(Object task,boolean dispatch) {
         Registration current=registration;
@@ -1323,9 +1366,9 @@ public final class TaskBridge {
         Frame parent=currentFrame(current);
         Overflow overflow=OVERFLOW_DEPTH.get();
         if(overflow!=null&&overflow.registration!=current) { OVERFLOW_DEPTH.remove();overflow=null; }
-        if(overflow!=null){lost();overflow.depth=Math.addExact(overflow.depth,1);return overflow;}
+        if(overflow!=null){lostTask(current,OVERFLOW,task,null,parent==null?null:parent.task,null,null);overflow.depth=Math.addExact(overflow.depth,1);return overflow;}
         if(parent!=null&&parent.depth>=MAX_DEPTH) {
-            lost();
+            lostTask(current,OVERFLOW,task,null,parent.task,null,null);
             overflow=new Overflow(current);OVERFLOW_DEPTH.set(overflow);
             emit(current,OVERFLOW,task,null,parent.task,null);return overflow;
         }
@@ -1340,9 +1383,9 @@ public final class TaskBridge {
                     boolean nested=OWN_LEDGER_MUTATION.get()!=null;OWN_LEDGER_MUTATION.set(true);
                     try {ADMISSIONS.put(task,admission);}finally {if(!nested)OWN_LEDGER_MUTATION.remove();}
                 }
-                if(admission==null)lost();
+                if(admission==null)lostTask(current,dispatch?DISPATCH_ENTER:ENTER,task,null,parent==null?null:parent.task,frame,null);
                 else if(!dispatch&&admission.fenced) { if(admission.denied<Long.MAX_VALUE)admission.denied++;frame.blocked=true; }
-                else if(admission.active==Integer.MAX_VALUE)lost();
+                else if(admission.active==Integer.MAX_VALUE)lostTask(current,dispatch?DISPATCH_ENTER:ENTER,task,null,parent==null?null:parent.task,frame,null);
                 else { admission.active++;frame.admitted=true; }
             }
         }
@@ -1357,7 +1400,7 @@ public final class TaskBridge {
         return frame;
     }
     public static void exit(Object token) {
-        try{if(boundary(false))exitFrame(token);}catch(Throwable unavailable){lost();
+        try{if(boundary(false))exitFrame(token);}catch(Throwable unavailable){lostFrame(token,unavailable);
             if(token instanceof Frame frame&&frame.thread==Thread.currentThread()&&CURRENT.get()==frame) { releaseAdmission(frame);restore(frame); }
         }
     }
@@ -1384,7 +1427,7 @@ public final class TaskBridge {
     static synchronized void releaseAdmission(Frame frame) {
         if(!frame.admitted)return;
         Admission admission=ADMISSIONS.get(frame.task);
-        if(admission==null||admission.active<=0) { lost();return; }
+        if(admission==null||admission.active<=0) {lostTask(frame.registration,frame.dispatch?DISPATCH_EXIT:EXIT,frame.task,null,logicalParent(frame),frame,null);return;}
         frame.admitted=false;
         if(--admission.active==0&&!admission.fenced) {
             boolean nested=OWN_LEDGER_MUTATION.get()!=null;OWN_LEDGER_MUTATION.set(true);
@@ -1400,7 +1443,7 @@ public final class TaskBridge {
             releaseAdmission(frame);
             emit(frame.registration,12,frame.task,null,logicalParent(frame),frame);
             frame.task=null;frame.delegateOwner=null;frame.scheduler=null;frame.previous=null;frame.thread=null;frame.sources=NO_SOURCES;
-        } catch(Throwable unavailable){lost();}
+        } catch(Throwable unavailable){lostFrame(token,unavailable);}
     }
     static void restore(Frame frame) {
         if(frame.previous==null)CURRENT.remove();
@@ -1415,7 +1458,8 @@ public final class TaskBridge {
         return parent!=null&&(parent.registration==frame.registration||parent.registration==null)?parent.task:null;
     }
     public static void submitted(Object scheduler,Object task) {
-        try{submit(scheduler,task);}catch(Throwable unavailable){lost();}
+        Registration current=registration;
+        try{submit(scheduler,task);}catch(Throwable unavailable){lostTask(current,SUBMIT,task,scheduler,null,null,unavailable);}
     }
     static Object scheduler(Object scheduler,Object task) {
         if(scheduler==task&&task instanceof java.util.concurrent.ForkJoinTask<?>) {
@@ -1434,9 +1478,8 @@ public final class TaskBridge {
     }
     /** Publication spans the entire platform submission, including rejection/CallerRuns. */
     public static Object beginSubmission(Object scheduler,Object task) {
-        Submission token=null;
+        Submission token=null;Registration current=registration;
         try {
-            Registration current=registration;
             if(task==null||DELIVERING.get()!=null||!boundary(true))return null;
             Frame frame=currentFrame(current);
             token=new Submission(task,scheduler(scheduler,task),frame==null?null:frame.task,current);
@@ -1447,7 +1490,7 @@ public final class TaskBridge {
             taskRelation(task,token.scheduler,token.parent);
             captureEquipmentSubmission(task,token.scheduler,token.parent);
             synchronized(TaskBridge.class) {
-                if(submissionEntries>=ADMISSION_LIMIT)lost();
+                if(submissionEntries>=ADMISSION_LIMIT)lostTask(current,SUBMIT_ENTER,task,token.scheduler,token.parent,token,null);
                 else {
                     boolean nested=OWN_LEDGER_MUTATION.get()!=null;OWN_LEDGER_MUTATION.set(true);
                     try {SUBMISSIONS.merge(task,1,Integer::sum);}finally {if(!nested)OWN_LEDGER_MUTATION.remove();}
@@ -1458,7 +1501,7 @@ public final class TaskBridge {
         } catch(SchedulerRetired refused){throw refused;}
         catch(Throwable unavailable){
             if(token!=null&&token.pool!=null)synchronized(CREATION_OWNERS){schedulerSources(token.scheduler,List.of(),true);}
-            lost();return token;
+            lostTask(current,SUBMIT_ENTER,task,token==null?scheduler:token.scheduler,token==null?null:token.parent,token,unavailable);return token;
         }
     }
     public static void endSubmission(Object value) {
@@ -1467,7 +1510,7 @@ public final class TaskBridge {
             synchronized(TaskBridge.class) {
                 if(token.tracked) {
                     Integer count=SUBMISSIONS.get(token.task);
-                    if(count==null||count<=0)lost();
+                    if(count==null||count<=0)lostTask(token.registration,SUBMIT_EXIT,token.task,token.scheduler,token.parent,token,null);
                     else {
                         boolean nested=OWN_LEDGER_MUTATION.get()!=null;OWN_LEDGER_MUTATION.set(true);
                         try {if(count==1)SUBMISSIONS.remove(token.task);else SUBMISSIONS.put(token.task,count-1);}
@@ -1478,13 +1521,13 @@ public final class TaskBridge {
                 token.ended=true;
             }
             emit(token.registration,SUBMIT_EXIT,token.task,token.scheduler,token.parent,token);
-        } catch(Throwable unavailable){lost();}
+        } catch(Throwable unavailable){lostTask(token.registration,SUBMIT_EXIT,token.task,token.scheduler,token.parent,token,unavailable);}
         finally{
             token.ended=true;
             try{
                 if(token.schedulerTracked)synchronized(CREATION_OWNERS){
                     EventKey key=new EventKey(token.pool,null);Integer count=SCHEDULER_SUBMISSIONS.get(key);
-                    if(count==null||count<=0)lost();else if(count==1)SCHEDULER_SUBMISSIONS.remove(key);else SCHEDULER_SUBMISSIONS.put(key,count-1);
+                    if(count==null||count<=0)lostTask(token.registration,SUBMIT_EXIT,token.task,token.scheduler,token.parent,token,null);else if(count==1)SCHEDULER_SUBMISSIONS.remove(key);else SCHEDULER_SUBMISSIONS.put(key,count-1);
                     token.schedulerTracked=false;
                 }
             }finally{token.task=null;token.scheduler=null;token.parent=null;token.owner=null;token.pool=null;}
@@ -1521,8 +1564,14 @@ public final class TaskBridge {
     public static String firstCaptureLoss(){return firstLossSite;}
     static void lost(){lost(null);}
     static void lost(Throwable failure){
+        incrementLoss(UNKNOWN_LOSS);diagnosticLoss(failure);
+    }
+    static long incrementLoss(java.util.concurrent.atomic.AtomicLong counter) {
+        for(;;) {long prior=counter.get();if(prior==Long.MAX_VALUE)return prior;if(counter.compareAndSet(prior,prior+1))return prior+1;}
+    }
+    static long diagnosticLoss(Throwable failure){
         for(;;) {
-            long n=DROPPED.get();if(n==Long.MAX_VALUE||!DROPPED.compareAndSet(n,n+1)) {if(n==Long.MAX_VALUE)return;continue;}
+            long n=DROPPED.get();if(n==Long.MAX_VALUE||!DROPPED.compareAndSet(n,n+1)) {if(n==Long.MAX_VALUE)return n;continue;}
             if(n==0) {
                 try {
                     String site=WALKER.walk(frames->frames.skip(2).findFirst().map(frame->
@@ -1531,8 +1580,32 @@ public final class TaskBridge {
                     System.err.println("RONOVA_TASK_CAPTURE_LOSS_AT:"+firstLossSite);
                 } catch(Throwable diagnosticFailure) {firstLossSite="DIAGNOSTIC_UNAVAILABLE";}
             }
-            return;
+            return n+1;
         }
+    }
+    static void lost(Registration expected,Object[] row,Throwable failure) {
+        long sequence=diagnosticLoss(failure);
+        synchronized(TaskBridge.class) {
+            if(expected==null||row==null||row.length!=11||row[1]==null
+                    ||row[8]!=expected||!(row[9] instanceof Long epoch)||epoch!=expected.epoch
+                    ||sequence==Long.MAX_VALUE||expected.captureLosses.size()>=ADMISSION_LIMIT) {
+                incrementLoss(UNKNOWN_LOSS);return;
+            }
+            Object[] lost=java.util.Arrays.copyOf(row,12);lost[11]=sequence;
+            expected.captureLosses.put(sequence,lost);
+        }
+    }
+    static void lostTask(Registration expected,int kind,Object task,Object scheduler,Object parent,Object execution,Throwable failure) {
+        try {lost(expected,captureRow(expected,kind,task,scheduler,parent,execution),failure);}
+        catch(Throwable unavailable) {lost(failure);}
+    }
+    static void lostFrame(Object token,Throwable failure) {
+        if(token instanceof Frame frame)lostTask(frame.registration,frame.dispatch?DISPATCH_EXIT:EXIT,frame.task,frame.scheduler,logicalParent(frame),frame,failure);
+        else lost(failure);
+    }
+    static Object[] captureRow(Registration expected,int kind,Object task,Object scheduler,Object parent,Object execution) {
+        return new Object[]{kind,task,scheduler,parent,execution,Thread.currentThread(),System.nanoTime(),DROPPED.get(),
+                expected,expected==null?-1L:expected.epoch,UNKNOWN_LOSS.get()};
     }
     static void emit(Registration expected,int kind,Object task,Object scheduler,Object parent,Object execution) {
         synchronized(TaskBridge.class) {
@@ -1540,16 +1613,18 @@ public final class TaskBridge {
             expected.delivering++;
         }
         DELIVERING.set(expected);
-        try {expected.sink.accept(new Object[]{kind,task,scheduler,parent,execution,Thread.currentThread(),System.nanoTime(),DROPPED.get()});}
-        catch(Throwable unavailable){lost(unavailable);}
+        Object[] row=null;
+        try {row=captureRow(expected,kind,task,scheduler,parent,execution);expected.sink.accept(row);}
+        catch(Throwable unavailable){lost(expected,row,unavailable);}
         finally {
             try {
                 for(int budget=0;budget<MAX_DEPTH*2;budget++) {
                     var queue=SOURCE_DELIVERIES.get();if(queue==null||queue.isEmpty())break;
                     if(registration!=expected)break;
-                    try { expected.sink.accept(queue.removeFirst()); }catch(Throwable failure) { lost(failure); }
+                    Object[] source=queue.removeFirst();
+                    try { expected.sink.accept(source); }catch(Throwable failure) { lost(expected,source,failure); }
                 }
-                var queue=SOURCE_DELIVERIES.get();if(queue!=null&&!queue.isEmpty())lost();
+                var queue=SOURCE_DELIVERIES.get();if(queue!=null)while(!queue.isEmpty())lost(expected,queue.removeFirst(),null);
             } finally {
                 SOURCE_DELIVERIES.remove();DELIVERING.remove();
                 synchronized(TaskBridge.class) { expected.delivering--; }

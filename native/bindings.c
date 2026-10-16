@@ -178,10 +178,12 @@ static void native_thread_java_observed(NativeThread *state){
 /* A valid current JNIEnv slot is still a control target during ThreadEnd.
  * Recording it does not reopen the Java lifecycle or manufacture attachment. */
 static int native_thread_jni_observed(NativeThread *state,JNIEnv *env){
-    if(!env)return 0;if(!state)state=native_thread();if(!state)return 0;
+    if(!env)return 0;if(!state)state=native_thread();if(!state){InterlockedIncrement(&native_failures);return 0;}
+    /* The VM attachment is real even when its exact slot cannot be retained. */
+    native_thread_java_observed(state);
     if(state->jniRange.linked&&state->jniRange.address!=(const void*)env)native_private_unregister(&state->jniRange);
     if(!native_private_register(&state->jniRange,env,sizeof(*env))){InterlockedIncrement(&native_failures);return 0;}
-    native_thread_java_observed(state);return 1;
+    return 1;
 }
 static void native_thread_callback_enter(NativeThread *state){state->callbackHolds++;}
 static void native_refuse(JNIEnv *env,const char *message){
@@ -1960,7 +1962,7 @@ static int native_tooling_observe(jvmtiEnv *api,JNIEnv *env,void *caller,int own
     NativeToolingEnv *record=calloc(1,sizeof(*record));struct jvmtiInterface_1_ *shadow=(struct jvmtiInterface_1_*)VirtualAlloc(NULL,sizeof(*shadow),MEM_COMMIT|MEM_RESERVE,PAGE_READWRITE);
     if(!record||!shadow){free(record);if(shadow)host_real_virtual_free(shadow,0,MEM_RELEASE);return 0;}
     record->api=api;record->original=original;record->shadow=shadow;record->own=own;record->mutation=(SRWLOCK)SRWLOCK_INIT;
-    if(!own&&!native_tooling_capture(env,caller,&record->owners,NULL,&record->unknown)){free(record);host_real_virtual_free(shadow,0,MEM_RELEASE);return 0;}
+    if(!own&&!native_tooling_capture(env,caller,&record->owners,NULL,&record->unknown)){native_owner_links_free(record->owners);free(record);host_real_virtual_free(shadow,0,MEM_RELEASE);return 0;}
     if(record->owners&&env&&native_original.NewGlobalRef){jobjectArray lease=native_tooling_writers(env,record->owners);
         if(lease){record->sourceLease=(jobjectArray)native_original.NewGlobalRef(env,lease);native_original.DeleteLocalRef(env,lease);}
         if(!record->sourceLease){native_owner_links_free(record->owners);free(record);host_real_virtual_free(shadow,0,MEM_RELEASE);return 0;}}
@@ -1985,8 +1987,17 @@ static int native_tooling_observe(jvmtiEnv *api,JNIEnv *env,void *caller,int own
     native_tooling_outputs_install(shadow);
     DWORD previous;if(!host_real_virtual_protect(shadow,sizeof(*shadow),PAGE_READONLY,&previous)){if(record->sourceLease)native_original.DeleteGlobalRef(env,record->sourceLease);native_owner_links_free(record->owners);free(record);host_real_virtual_free(shadow,0,MEM_RELEASE);return 0;}
     if(!native_private_register(&record->apiRange,api,sizeof(*api))){if(record->sourceLease)native_original.DeleteGlobalRef(env,record->sourceLease);native_owner_links_free(record->owners);free(record);host_real_virtual_free(shadow,0,MEM_RELEASE);return 0;}
-    AcquireSRWLockExclusive(&native_tooling_records);record->next=native_tooling_environments;__atomic_store_n(&native_tooling_environments,record,__ATOMIC_RELEASE);ReleaseSRWLockExclusive(&native_tooling_records);
-    if(!native_tooling_exchange((void *volatile*)api,(void*)original,shadow)){InterlockedExchange(&record->closing,1);InterlockedIncrement(&native_tooling_failures);return 0;}return 1;
+    /* A dispatcher which sees the installed table waits for this directory
+     * lock. Publish only after the native-only exchange succeeds: snapshots
+     * retain published records forever, and an unwrapped environment may be
+     * disposed through its original table without notifying this directory. */
+    AcquireSRWLockExclusive(&native_tooling_records);
+    int installed=native_tooling_exchange((void *volatile*)api,(void*)original,shadow);
+    if(installed){record->next=native_tooling_environments;__atomic_store_n(&native_tooling_environments,record,__ATOMIC_RELEASE);}
+    ReleaseSRWLockExclusive(&native_tooling_records);
+    if(!installed){native_private_unregister(&record->apiRange);if(record->sourceLease)native_original.DeleteGlobalRef(env,record->sourceLease);
+        native_owner_links_free(record->owners);free(record);host_real_virtual_free(shadow,0,MEM_RELEASE);return 0;}
+    return 1;
 }
 /* JNI 17 Attach is a no-op for an attached thread; Detach may send ThreadEnd
  * while the originating native routine and its OS worker are still running.
@@ -1994,13 +2005,33 @@ static int native_tooling_observe(jvmtiEnv *api,JNIEnv *env,void *caller,int own
  * on a successful Attach outside the real end/detach dispatch.
  * https://docs.oracle.com/en/java/javase/17/docs/specs/jni/invocation.html
  */
-static int native_vm_current_env_observed(void){
+static JNIEnv *native_vm_current_env_observed(void){
     JNIEnv *env=NULL;jint status=native_vm_original.GetEnv(native_vm,(void**)&env,JNI_VERSION_1_8);
-    if(status!=JNI_OK)return 1; /* No attachment is created by this observation. */
-    return env&&native_thread_jni_observed(native_tls==TLS_OUT_OF_INDEXES?NULL:(NativeThread*)TlsGetValue(native_tls),env);
+    if(status!=JNI_OK)return NULL; /* No attachment is created by this observation. */
+    if(env)native_thread_jni_observed(native_tls==TLS_OUT_OF_INDEXES?NULL:(NativeThread*)TlsGetValue(native_tls),env);
+    else InterlockedIncrement(&native_failures);
+    return env;
 }
-static jint native_vm_output_admission(void **result,int restricted){
+/* These observations can enter Java to capture sources. Their exception is
+ * bookkeeping failure, while a Throwable already pending belongs to the
+ * original invocation and must be restored with the same identity. */
+static jthrowable native_vm_observation_begin(JNIEnv *env){
+    if(!env)return NULL;const struct JNINativeInterface_ *api=native_original.ExceptionOccurred?&native_original:*env;
+    jthrowable pending=api->ExceptionOccurred(env);if(pending)api->ExceptionClear(env);return pending;
+}
+static int native_vm_observation_end(JNIEnv *env,jthrowable pending){
+    if(!env)return 0;const struct JNINativeInterface_ *api=native_original.ExceptionCheck?&native_original:*env;
+    int failed=api->ExceptionCheck(env);if(failed)api->ExceptionClear(env);
+    if(pending){api->Throw(env,pending);api->DeleteLocalRef(env,pending);}return failed;
+}
+static int native_vm_output_alias(void **result,const void *api){
+    if(!result||!api)return 0;uintptr_t first=(uintptr_t)result;
+    return sizeof(*result)-1>UINTPTR_MAX-first||native_private_overlap(first,first+sizeof(*result)-1,api,sizeof(void*));
+}
+static jint native_vm_output_admission(void **result,int restricted,JNIEnv *env){
     if(!result)return JNI_OK;
+    /* A known current VM slot stays protected if recording it failed. */
+    if(native_vm_output_alias(result,env))return JNI_ERR;
     if(!native_tooling_output_lock(restricted))return JNI_ERR;
     NativeToolingOutputSpan span={result,NULL,sizeof(*result)};
     jvmtiError status=native_tooling_output_check_locked(&span,1);
@@ -2008,6 +2039,7 @@ static jint native_vm_output_admission(void **result,int restricted){
 }
 static jint native_vm_output_publish(void **result,void *value,int restricted,jint status){
     if(!result)return status;
+    if(status==JNI_OK&&native_vm_output_alias(result,value))return JNI_ERR;
     NativeToolingOutputUse use={.restricted=restricted};NativeToolingOutputSpan span={result,&value,sizeof(value)};
     return native_tooling_output_commit(&use,&span,1)==JVMTI_ERROR_NONE?status:JNI_ERR;
 }
@@ -2015,14 +2047,14 @@ static jint native_vm_attach_call(JavaVM *vm,void **result,void *arguments,int d
     jint (JNICALL *original)(JavaVM*,void**,void*)=daemon?native_vm_original.AttachCurrentThreadAsDaemon:native_vm_original.AttachCurrentThread;
     if(vm!=native_vm||!original)return JNI_ERR;
     DWORD incoming=GetLastError();int restricted=native_tooling_restricted();
-    if(!restricted&&!native_vm_current_env_observed()){SetLastError(incoming);return JNI_ERR;}
-    if(native_vm_output_admission(result,restricted)!=JNI_OK){SetLastError(incoming);return JNI_ERR;}
+    JNIEnv *env=restricted?NULL:native_vm_current_env_observed();
+    if(native_vm_output_admission(result,restricted,env)!=JNI_OK){SetLastError(incoming);return JNI_ERR;}
     if(restricted){jint status=native_vm_output_publish(result,NULL,1,JNI_ERR);SetLastError(incoming);return status;}
     void *value=NULL;SetLastError(incoming);
     jint status=original(vm,result?&value:NULL,arguments);DWORD error=GetLastError();
     /* Attachment is a real effect even if the caller concurrently retires its
      * output address. Never undo it with an invented Detach rollback. */
-    if(status==JNI_OK&&value&&!native_thread_jni_observed(native_tls==TLS_OUT_OF_INDEXES?NULL:(NativeThread*)TlsGetValue(native_tls),(JNIEnv*)value)){status=JNI_ERR;value=NULL;}
+    if(status==JNI_OK&&value)native_thread_jni_observed(native_tls==TLS_OUT_OF_INDEXES?NULL:(NativeThread*)TlsGetValue(native_tls),(JNIEnv*)value);
     status=native_vm_output_publish(result,value,0,status);SetLastError(error);return status;
 }
 static jint JNICALL native_vm_attach(JavaVM *vm,void **result,void *arguments){return native_vm_attach_call(vm,result,arguments,0);}
@@ -2039,25 +2071,32 @@ static jint JNICALL native_vm_detach(JavaVM *vm){
 }
 static jint JNICALL native_tooling_getenv(JavaVM *vm,void **result,jint version){
     if(vm!=native_vm||!native_vm_original.GetEnv)return JNI_ERR;
-    int restricted=native_tooling_restricted();
-    if(!restricted&&!native_vm_current_env_observed())return JNI_ERR;
-    if(native_vm_output_admission(result,restricted)!=JNI_OK)return JNI_ERR;
-    if(restricted){InterlockedIncrement(&native_tooling_failures);return native_vm_output_publish(result,NULL,1,JNI_ERR);}
+    DWORD incoming=GetLastError();int restricted=native_tooling_restricted();
+    JNIEnv *env=restricted?NULL:native_vm_current_env_observed();
+    if(native_vm_output_admission(result,restricted,env)!=JNI_OK){SetLastError(incoming);return JNI_ERR;}
+    if(restricted){InterlockedIncrement(&native_tooling_failures);jint status=native_vm_output_publish(result,NULL,1,JNI_ERR);SetLastError(incoming);return status;}
     void *caller=__builtin_return_address(0);int tooling=(version&JVMTI_VERSION_MASK_INTERFACE_TYPE)==JVMTI_VERSION_INTERFACE_JVMTI;
-    if(tooling&&native_tooling_stopped(native_tooling_jni(),caller)){InterlockedIncrement(&native_tooling_failures);return native_vm_output_publish(result,NULL,0,JNI_ERR);}
-    void *value=NULL;jint status=native_vm_original.GetEnv(vm,result?&value:NULL,version);DWORD error=GetLastError();
-    if(status==JNI_OK&&!tooling&&value){
-        if(!native_thread_jni_observed(native_tls==TLS_OUT_OF_INDEXES?NULL:(NativeThread*)TlsGetValue(native_tls),(JNIEnv*)value)){value=NULL;status=JNI_ERR;}SetLastError(error);}
+    if(tooling){jthrowable pending=native_vm_observation_begin(env);int stopped=native_tooling_stopped(env,caller);
+        int failed=native_vm_observation_end(env,pending);if(failed)InterlockedIncrement(&native_tooling_failures);
+        if(stopped){InterlockedIncrement(&native_tooling_failures);jint status=native_vm_output_publish(result,NULL,0,JNI_ERR);SetLastError(incoming);return status;}}
+    void *value=NULL;SetLastError(incoming);
+    jint status=native_vm_original.GetEnv(vm,result?&value:NULL,version);DWORD error=GetLastError();
+    if(status==JNI_OK&&!tooling&&value)native_thread_jni_observed(native_tls==TLS_OUT_OF_INDEXES?NULL:(NativeThread*)TlsGetValue(native_tls),(JNIEnv*)value);
+    const struct jvmtiInterface_1_ *unpublished=NULL;
     if(status==JNI_OK&&tooling&&value){jvmtiEnv *api=(jvmtiEnv*)value;
-        if(!native_tooling_observe(api,native_tooling_jni(),caller,0)){NativeToolingEnv *record=native_tooling_environment(api);const struct jvmtiInterface_1_ *original=record?record->original:*api;
-            if(record){AcquireSRWLockExclusive(&record->mutation);native_tooling_dispose_idle(record,0);ReleaseSRWLockExclusive(&record->mutation);}
-            else original->DisposeEnvironment(api);
-            value=NULL;status=JNI_ERR;InterlockedIncrement(&native_tooling_failures);}
+        unpublished=*api;jthrowable pending=native_vm_observation_begin(env);
+        int observed=native_tooling_observe(api,env,caller,0),failed=native_vm_observation_end(env,pending);
+        /* A live original environment is still the VM's successful result.
+         * A failed observer records degraded coverage, never a Dispose rollback. */
+        if(!observed||failed)InterlockedIncrement(&native_tooling_failures);
     }
     jint published=native_vm_output_publish(result,value,0,status);
     if(published!=JNI_OK&&status==JNI_OK&&tooling&&value){
+        jthrowable pending=native_vm_observation_begin(env);
         NativeToolingEnv *record=native_tooling_environment((jvmtiEnv*)value);
         if(record){AcquireSRWLockExclusive(&record->mutation);native_tooling_dispose_idle(record,0);ReleaseSRWLockExclusive(&record->mutation);}
+        else if(unpublished&&unpublished->DisposeEnvironment((jvmtiEnv*)value)!=JVMTI_ERROR_NONE)InterlockedIncrement(&native_tooling_failures);
+        if(native_vm_observation_end(env,pending))InterlockedIncrement(&native_tooling_failures);
     }
     SetLastError(error);return published;
 }
