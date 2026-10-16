@@ -14,12 +14,17 @@ public final class AuditFixCheck {
     private static void require(boolean yes,String message) {if(!yes)throw new AssertionError(message);}
     private static Object invoke(Object receiver,String name)throws Exception {var m=receiver.getClass().getDeclaredMethod(name);m.setAccessible(true);try{return m.invoke(receiver);}catch(InvocationTargetException e){if(e.getCause() instanceof Exception x)throw x;throw e;}}
     public static void main(String[] args)throws Exception {
+        if(args.length==1&&args[0].equals("root-retry-lifecycle-fixes")){definitionRetryLifecycle();nativeInstallLifecycle();return;}
+        if(args.length==1&&args[0].equals("definition-retry")){definitionRetryLifecycle();return;}
+        if(args.length==1&&args[0].equals("native-install-lifecycle")){nativeInstallLifecycle();return;}
+        if(args.length==1&&args[0].equals("external-root-candidates")){externalRootCandidates();return;}
         if(args.length==1&&args[0].equals("policy-native-capture-fixes")){
             stopPolicyPublication();taskCaptureScope();
             System.load(java.nio.file.Path.of(System.getProperty("ronova.pro.audit.native")).toAbsolutePath().toString());
             require(nativeVmResults0(),"Native VM original-result regression failed");
             System.out.println("NATIVE_VM_RESULTS_PASS actual_production_wrappers observer_failure_preserves_result exact_output_rejection_retained fixture_only");return;
         }
+        if(args.length==1&&args[0].equals("task-lazy-capture")){taskLazyCapture();return;}
         if(args.length==1&&args[0].equals("container-scope-removal")){containerScopeRemoval();return;}
         if(args.length==1&&args[0].equals("startup-protection-bytecode")){startupReturnReplay();protectionSetterBytecode();return;}
         if(args.length==1&&args[0].equals("network-bytecode")){networkBytecode();return;}
@@ -603,6 +608,115 @@ public final class AuditFixCheck {
         System.out.println("WORLD_HELD_SAVE_PASS actual_LevelChunkTicks_ScheduledTick_NBT_vanilla_SavedTick_decode same_identity_position_old_held_replaces_pending other_type_same_position_preserved priority_trigger_minus_now_preserved repeated_save_delay_recomputed original_container_ticks_deferred_unchanged data_codec_only");
     }
     @SuppressWarnings("unchecked")
+    private static final class RootCandidateSource {static Object value(){return null;}}
+    private static final class RootCandidateCaller {static Object get(){return RootCandidateSource.value();}}
+    @SuppressWarnings("unchecked")
+    private static void externalRootCandidates()throws Exception {
+        Class<?> definitions=Class.forName("dev.ronova.pro.agent.ExternalCodeDefinitions"),runtime=Class.forName("dev.ronova.pro.agent.ExternalCodeRuntime"),agent=Class.forName("dev.ronova.pro.agent.RecoveryAgent"),group=Class.forName("dev.ronova.pro.agent.ModGroupBoundary");
+        Class<?> controls=Class.forName("dev.ronova.pro.bootstrap.ControlBridge",true,null),nativeControl=Class.forName("dev.ronova.pro.bootstrap.NativeControl",true,null),codeSource=Class.forName("dev.ronova.pro.bootstrap.CodeSourceBridge",true,null);
+        Field controller=controls.getDeclaredField("instrumentationOwner"),owner=nativeControl.getDeclaredField("definitionDirectoryOwner"),directory=definitions.getDeclaredField("DIRECTORY"),scopes=definitions.getDeclaredField("sourceScopes"),metadata=group.getDeclaredField("metadata"),producers=agent.getDeclaredField("producerModules"),sourceBridge=agent.getDeclaredField("codeSourceBridge"),sourceAgent=codeSource.getDeclaredField("agent");
+        for(Field field:List.of(controller,owner,directory,scopes,metadata,producers,sourceBridge,sourceAgent))field.setAccessible(true);
+        Object oldController=controller.get(null),oldOwner=owner.get(null),oldScopes=scopes.get(null),oldSourceBridge=sourceBridge.get(null),oldSourceAgent=sourceAgent.get(null);
+        var slot=(java.util.concurrent.atomic.AtomicReference<Object>)directory.get(null);Object oldDirectory=slot.get();
+        Map<Module,Object> moduleMetadata=(Map<Module,Object>)metadata.get(null);Map<Module,Boolean> producerRows=(Map<Module,Boolean>)producers.get(null);
+        Module sql=Class.forName("java.sql.Driver").getModule(),ordinary=AuditFixCheck.class.getModule();Object oldMetadata=moduleMetadata.get(sql);Boolean oldProducer=producerRows.get(sql);
+        Class<?> scopesType=scopes.getType(),directoryType=oldDirectory.getClass();Constructor<?> scopeConstructor=scopesType.getDeclaredConstructor(List.class,Set.class,Set.class),directoryConstructor=directoryType.getDeclaredConstructor(List.class,List.class,List.class,List.class);
+        scopeConstructor.setAccessible(true);directoryConstructor.setAccessible(true);
+        Method references=definitions.getDeclaredMethod("references",String.class,byte[].class),observe=definitions.getDeclaredMethod("observeSource",ClassLoader.class,String.class,Module.class),candidate=definitions.getDeclaredMethod("executionSourcesObserved",ClassLoader.class,String.class),producer=agent.getDeclaredMethod("producerModule",Module.class);
+        Method prepare=runtime.getDeclaredMethod("prepare",Module.class,ClassLoader.class,String.class,Class.class,byte[].class,boolean.class,boolean.class);
+        for(Method method:List.of(references,observe,candidate,producer,prepare))method.setAccessible(true);
+        String callerName=RootCandidateCaller.class.getName().replace('.','/'),sourceName=RootCandidateSource.class.getName().replace('.','/');ClassLoader loader=new ClassLoader(null){};
+        byte[] bytes;try(var input=AuditFixCheck.class.getResourceAsStream("/"+callerName+".class")){bytes=Objects.requireNonNull(input).readAllBytes();}
+        try{
+            controller.set(null,agent);owner.set(null,definitions);sourceBridge.set(null,codeSource);sourceAgent.set(null,agent);scopes.set(null,scopeConstructor.newInstance(List.of(),Set.of(),Set.of()));slot.set(directoryConstructor.newInstance(List.of(),List.of(),List.of(),List.of()));
+            Object header=references.invoke(null,callerName,bytes);require(header!=null&&((Set<?>)invoke(header,"references")).contains(sourceName),"lightweight class reference decoder lost real call owner");
+            Method retain=definitions.getDeclaredMethod("referenceOnly",ClassLoader.class,String.class,Class.class,Module.class,byte[].class,byte[].class,header.getClass());retain.setAccessible(true);
+            require(Boolean.FALSE.equals(candidate.invoke(null,loader,callerName)),"unrelated class inherited source state before discovery");
+            retain.invoke(null,loader,callerName,null,ordinary,bytes,bytes,header);
+            List<?> rows=(List<?>)invoke(slot.get(),"definitions");require(rows.size()==1,"pre-source caller was not retained for later promotion");Object definition=rows.get(0);
+            Field light=definition.getClass().getDeclaredField("referenceOnly"),analysis=definition.getClass().getDeclaredField("analysis");light.setAccessible(true);analysis.setAccessible(true);
+            require(light.getBoolean(definition)&&analysis.get(definition)==null,"reference-only miss eagerly built an instruction graph");
+            byte[] malformed={0,0,0,0};Object skipped=prepare.invoke(null,ordinary,loader,"audit/Unrelated",null,malformed,false,false);
+            require(invoke(skipped,"image")==null&&invoke(skipped,"bytes")==malformed,"noncandidate reached full class parser");
+            observe.invoke(null,loader,sourceName,sql);
+            require(Boolean.TRUE.equals(candidate.invoke(null,loader,callerName))&&Boolean.FALSE.equals(candidate.invoke(null,new ClassLoader(null){},"audit/Unrelated")),"later actual source did not promote retained caller, or polluted unrelated class");
+            moduleMetadata.put(sql,Set.of());producerRows.put(sql,Boolean.FALSE);require(Boolean.FALSE.equals(producer.invoke(null,sql)),"empty metadata was classified as producer");
+            moduleMetadata.put(sql,Set.of("audit_source"));require(Boolean.TRUE.equals(producer.invoke(null,sql))&&Boolean.TRUE.equals(producerRows.get(sql)),"early negative cache hid a later confirmed producer");
+        }finally{
+            slot.set(oldDirectory);scopes.set(null,oldScopes);owner.set(null,oldOwner);controller.set(null,oldController);sourceBridge.set(null,oldSourceBridge);sourceAgent.set(null,oldSourceAgent);
+            if(oldMetadata==null)moduleMetadata.remove(sql);else moduleMetadata.put(sql,oldMetadata);
+            if(oldProducer==null)producerRows.remove(sql);else producerRows.put(sql,oldProducer);
+        }
+        System.out.println("EXTERNAL_ROOT_CANDIDATES_PASS actual_header_and_reference_only_retention no_ASM_for_explicit_miss later_source_admits_prior_caller unrelated_class_fast_pass early_negative_cache_rechecked isolated_metadata_no_Native_layout");
+    }
+    @SuppressWarnings("unchecked")
+    private static void definitionRetryLifecycle()throws Exception {
+        Class<?> definitions=Class.forName("dev.ronova.pro.agent.ExternalCodeDefinitions"),agent=Class.forName("dev.ronova.pro.agent.RecoveryAgent");
+        Class<?> controls=Class.forName("dev.ronova.pro.bootstrap.ControlBridge",true,null),nativeControl=Class.forName("dev.ronova.pro.bootstrap.NativeControl",true,null);
+        Field controller=controls.getDeclaredField("instrumentationOwner"),directoryOwner=nativeControl.getDeclaredField("definitionDirectoryOwner"),directory=definitions.getDeclaredField("DIRECTORY");
+        for(Field field:List.of(controller,directoryOwner,directory))field.setAccessible(true);
+        Object oldController=controller.get(null),oldOwner=directoryOwner.get(null);
+        var slot=(java.util.concurrent.atomic.AtomicReference<Object>)directory.get(null);Object oldDirectory=slot.get();
+        Class<?> directoryType=Class.forName("dev.ronova.pro.agent.ExternalCodeDefinitions$Directory"),referenceType=Class.forName("dev.ronova.pro.agent.ExternalCodeDefinitions$Ref"),refreshType=Class.forName("dev.ronova.pro.agent.ExternalCodeDefinitions$Refresh");
+        Constructor<?> row=directoryType.getDeclaredConstructor(List.class,List.class,List.class,List.class),reference=referenceType.getDeclaredConstructor(Object.class),refresh=refreshType.getDeclaredConstructor(Class.class,Module[].class);
+        for(Constructor<?> constructor:List.of(row,reference,refresh))constructor.setAccessible(true);
+        Method merge=definitions.getDeclaredMethod("mergeRefreshes",List.class,List.class),work=definitions.getDeclaredMethod("work",List.class,boolean.class,Set.class),run=definitions.getDeclaredMethod("run",java.lang.instrument.Instrumentation.class);
+        Method continuing=directoryType.getDeclaredMethod("continuing"),active=directoryType.getDeclaredMethod("active"),actual=refreshType.getDeclaredMethod("actual"),owners=refreshType.getDeclaredMethod("owners");
+        for(Method method:List.of(merge,work,run,continuing,active,actual,owners))method.setAccessible(true);
+        Class<?> first=AuditFixCheck.class,second=Class.forName("java.sql.Driver");Module base=Object.class.getModule(),sql=second.getModule(),logging=Class.forName("java.util.logging.Logger").getModule();
+        Object firstRef=reference.newInstance(first),secondRef=reference.newInstance(second);
+        Object oldFirst=refresh.newInstance(first,new Module[]{base}),oldSecond=refresh.newInstance(second,new Module[]{sql}),newFirst=refresh.newInstance(first,new Module[]{logging});
+        Thread worker=null;var failure=new java.util.concurrent.atomic.AtomicReference<Throwable>();
+        try{
+            controller.set(null,agent);directoryOwner.set(null,definitions);
+            slot.set(row.newInstance(List.of(),List.of(),List.of(firstRef,secondRef),List.of(oldFirst,oldSecond)));
+            List<?> merged=(List<?>)merge.invoke(null,List.of(oldFirst,oldSecond),List.of(newFirst));
+            Object combined=merged.stream().filter(job->{try{return actual.invoke(job)==first;}catch(Exception e){throw new IllegalStateException(e);}}).findFirst().orElseThrow();
+            require(Arrays.asList((Module[])owners.invoke(combined)).containsAll(List.of(base,logging)),"refresh retry lost a prior source owner");
+            work.invoke(null,merged,true,Set.of(first));Object pending=slot.get();
+            require(((List<?>)continuing.invoke(pending)).equals(List.of(secondRef)),"successful refresh erased another unresolved continuation");
+            List<?> pendingJobs=(List<?>)active.invoke(pending);require(pendingJobs.size()==1&&actual.invoke(pendingJobs.get(0))==second,"unresolved source owner obligation was discarded");
+            slot.set(row.newInstance(List.of(),List.of(firstRef),List.of(),List.of()));
+            var attempts=new java.util.concurrent.atomic.AtomicInteger();
+            var api=(java.lang.instrument.Instrumentation)Proxy.newProxyInstance(AuditFixCheck.class.getClassLoader(),new Class<?>[]{java.lang.instrument.Instrumentation.class},(proxy,method,args)->{
+                if(method.getName().equals("retransformClasses")){attempts.incrementAndGet();return null;}
+                return method.getReturnType()==boolean.class?true:method.getName().equals("getAllLoadedClasses")?new Class<?>[0]:null;
+            });
+            worker=new Thread(()->{try{run.invoke(null,api);}catch(Throwable error){failure.set(error);}},"audit-definition-retry");worker.setDaemon(true);worker.start();
+            long deadline=System.nanoTime()+TimeUnit.SECONDS.toNanos(5);
+            while(System.nanoTime()<deadline&&failure.get()==null&&attempts.get()<2){
+                java.util.concurrent.locks.LockSupport.parkNanos(2_000_000L);
+            }
+            require(attempts.get()>=2&&failure.get()==null&&((List<?>)continuing.invoke(slot.get())).contains(firstRef),"unresolved definition did not retry without a new change event");
+        }finally{
+            if(worker!=null){worker.interrupt();worker.join(5000);require(!worker.isAlive(),"retry fixture worker did not stop");}
+            slot.set(oldDirectory);directoryOwner.set(null,oldOwner);controller.set(null,oldController);
+        }
+        System.out.println("DEFINITION_RETRY_PASS actual_worker_retries_unresolved_without_new_event prior_source_owners_merged success_removes_only_completed isolated_metadata_proxy_no_VM_retransform");
+    }
+    private static void nativeInstallLifecycle()throws Exception {
+        Class<?> control=Class.forName("dev.ronova.pro.bootstrap.NativeControl",true,null);Map<Field,Object> saved=new LinkedHashMap<>();
+        for(String name:List.of("available","state","installMode","installRetryable","nativeHandoffRetryable","installing","nativeLoadAttempted","nativeLoaded","nativeBoundaryInstalled","nativeImageSelector","nativeImageFinalizer","definitionDirectoryOwner")){
+            Field field=control.getDeclaredField(name);field.setAccessible(true);saved.put(field,field.get(null));
+        }
+        Method attempt=control.getDeclaredMethod("installAttempt",java.nio.file.Path.class);attempt.setAccessible(true);
+        java.nio.file.Path folder=java.nio.file.Files.createTempDirectory("ronova-install-retry-"),empty=folder.resolve("empty-bootstrap.jar");
+        try{
+            for(var entry:saved.entrySet())switch(entry.getKey().getName()){
+                case "available","installRetryable","nativeHandoffRetryable","installing","nativeLoadAttempted","nativeLoaded","nativeBoundaryInstalled" -> entry.getKey().setBoolean(null,false);
+                case "state","installMode" -> entry.getKey().set(null,"NOT_ATTEMPTED");
+            }
+            attempt.invoke(null,folder.resolve("not-yet.jar"));
+            require(Boolean.TRUE.equals(control.getMethod("installRetryable").invoke(null))&&"FAILED".equals(control.getMethod("installMode").invoke(null)),"pre-load IO failure was not retryable");
+            try(var output=new java.util.jar.JarOutputStream(java.nio.file.Files.newOutputStream(empty))){}
+            attempt.invoke(null,empty);
+            require(Boolean.FALSE.equals(control.getMethod("installRetryable").invoke(null))&&Boolean.FALSE.equals(control.getMethod("available").invoke(null)),"absent native payload was reported ready or blindly retryable");
+        }finally{
+            for(var entry:saved.entrySet())entry.getKey().set(null,entry.getValue());
+            java.nio.file.Files.deleteIfExists(empty);java.nio.file.Files.deleteIfExists(folder);
+        }
+        System.out.println("NATIVE_INSTALL_CLASSIFICATION_PASS actual_preload_IO_retry absent_payload_permanent no_library_loaded no_native_install");
+    }
     private static void stopPolicyPublication()throws Exception {
         Class<?> agent=Class.forName("dev.ronova.pro.agent.RecoveryAgent"),group=Class.forName("dev.ronova.pro.agent.ModGroupBoundary");
         Class<?> controls=Class.forName("dev.ronova.pro.bootstrap.ControlBridge",true,null),definitions=Class.forName("dev.ronova.pro.bootstrap.DefinitionBridge",true,null);
@@ -686,7 +800,7 @@ public final class AuditFixCheck {
             Object owner=U.allocateInstance(owners);selected[index]=owner;
             put(owner,"runtime",runtime);put(owner,"captureLock",new Object());put(owner,"captureGaps",new IdentityHashMap<>());
             put(owner,"origins",new IdentityHashMap<>());put(owner,"workerBindings",new IdentityHashMap<>());put(owner,"captureEpochs",new HashMap<>());
-            put(owner,"changes",new java.util.concurrent.atomic.AtomicLong());put(owner,"events",new ConcurrentLinkedQueue<>());put(owner,"gap","");put(owner,"transientIssue","");
+            put(owner,"changes",new java.util.concurrent.atomic.AtomicLong());put(owner,"events",new ConcurrentLinkedQueue<>());put(owner,"pendingCaptures",new ConcurrentLinkedQueue<>());put(owner,"pendingRoots",new IdentityHashMap<>());put(owner,"gap","");put(owner,"transientIssue","");
             published[index]=publishedConstructor.newInstance(owner,session,current,epoch);put(owner,"ownerRegistration",published[index]);
             Field origins=owners.getDeclaredField("origins");origins.setAccessible(true);((Map<Object,UUID>)origins.get(owner)).put(index==0?task:other,subject);
         }
@@ -732,6 +846,137 @@ public final class AuditFixCheck {
             taskCaptureMonitor=null;taskCaptureThrow=false;
         }
         System.out.println("TASK_CAPTURE_SCOPE_PASS actual_receive_resolver_outside_global_monitor shared_inflight_fence_and_scoped_failure unrelated_owner_allowed_after_publication sink_loss_retained unknown_loss_still_refused isolated_metadata_no_Agent_install");
+    }
+    private static final class TaskCaptureHolder implements Runnable,java.util.function.Function<Object,Object> {
+        Object captured;
+        TaskCaptureHolder(Object captured){this.captured=captured;}
+        @Override public void run(){throw new AssertionError("capture executed the callback");}
+        @Override public Object apply(Object input){throw new AssertionError("capture executed the callback");}
+    }
+    @SuppressWarnings("unchecked")
+    private static void taskLazyCapture()throws Exception {
+        Class<?> owners=RecoveryTasks.class,bridge=Class.forName("dev.ronova.pro.bootstrap.TaskBridge",true,null);
+        Class<?> registrationType=Class.forName("dev.ronova.pro.bootstrap.TaskBridge$Registration",true,null);
+        Field registration=bridge.getDeclaredField("registration"),installer=Class.forName("dev.ronova.pro.bootstrap.ControlBridge",true,null).getDeclaredField("observerInstaller"),sinkField=owners.getDeclaredField("SINK"),listenersField=owners.getDeclaredField("LISTENERS");
+        for(Field field:List.of(registration,installer,sinkField,listenersField))field.setAccessible(true);
+        Consumer<Object[]> sink=(Consumer<Object[]>)sinkField.get(null);
+        Constructor<?> registrationConstructor=registrationType.getDeclaredConstructor(Consumer.class);registrationConstructor.setAccessible(true);
+        Object current=registrationConstructor.newInstance(sink),oldRegistration=registration.get(null),oldInstaller=installer.get(null);
+        Field registrationEpoch=registrationType.getDeclaredField("epoch");registrationEpoch.setAccessible(true);long epoch=registrationEpoch.getLong(current);
+        Set<Object> listeners=(Set<Object>)listenersField.get(null);Set<Object> oldListeners=new HashSet<>(listeners);
+        Map<Field,Object> previous=new LinkedHashMap<>();
+        for(String name:List.of("publishedOwners","bridgeRegistration","bridgeRegistrationEpoch","unknownCaptureGap","capturePublications","delivery","captureState","acknowledgeCaptureLoss","observerMatches","inlineDetails","coverage")) {
+            Field field=owners.getDeclaredField(name);field.setAccessible(true);previous.put(field,field.get(null));
+        }
+        Field unknownField=bridge.getDeclaredField("UNKNOWN_LOSS"),droppedField=bridge.getDeclaredField("DROPPED"),lossSite=bridge.getDeclaredField("firstLossSite");
+        for(Field field:List.of(unknownField,droppedField,lossSite))field.setAccessible(true);
+        var unknown=(java.util.concurrent.atomic.AtomicLong)unknownField.get(null);var dropped=(java.util.concurrent.atomic.AtomicLong)droppedField.get(null);
+        long priorUnknown=unknown.get(),priorDropped=dropped.get();Object priorLossSite=lossSite.get(null);
+        require(priorUnknown==0,"lazy capture fixture requires an isolated observer with no unidentified loss");
+        Method emit=bridge.getDeclaredMethod("emit",registrationType,int.class,Object.class,Object.class,Object.class,Object.class);emit.setAccessible(true);
+        Method state=bridge.getMethod("captureState",Object.class),resolve=owners.getDeclaredMethod("resolveCaptures",int.class),healthy=owners.getDeclaredMethod("checkBridge",Object.class),routeLosses=owners.getDeclaredMethod("routeCaptureLosses");
+        Method producer=owners.getDeclaredMethod("producerSubjects",Object.class,Object[].class,Object[].class,Set.class);
+        for(Method method:List.of(resolve,healthy,routeLosses,producer))method.setAccessible(true);
+        Field gap=owners.getDeclaredField("gap");gap.setAccessible(true);
+        Class<?> publishedType=Class.forName("dev.ronova.pro.RecoveryTasks$OwnerRegistration");
+        Constructor<?> publishedConstructor=publishedType.getDeclaredConstructor(owners,UUID.class,Object.class,long.class);publishedConstructor.setAccessible(true);
+        Object[] selected=new Object[2],published=new Object[2];UUID sourceSubject=UUID.randomUUID();Object source=new Object(),other=new Object();
+        Map<Object,Set<UUID>>[] bindings=new Map[2];ConcurrentLinkedQueue<Object>[] events=new ConcurrentLinkedQueue[2];
+        ConcurrentLinkedQueue<Object>[] pending=new ConcurrentLinkedQueue[2];Map<Object,Integer>[] roots=new Map[2];
+        for(int index=0;index<2;index++) {
+            ProRuntime runtime=(ProRuntime)U.allocateInstance(ProRuntime.class);UUID session=UUID.randomUUID();put(runtime,"session",session);put(runtime,"moduleSubjects",new IdentityHashMap<>());
+            Object owner=U.allocateInstance(owners);selected[index]=owner;
+            put(owner,"runtime",runtime);put(owner,"captureLock",new Object());put(owner,"captureGaps",new IdentityHashMap<>());
+            Map<Object,UUID> origins=new IdentityHashMap<>();origins.put(index==0?source:other,sourceSubject);put(owner,"origins",origins);
+            bindings[index]=new IdentityHashMap<>();events[index]=new ConcurrentLinkedQueue<>();pending[index]=new ConcurrentLinkedQueue<>();roots[index]=new IdentityHashMap<>();
+            put(owner,"workerBindings",bindings[index]);put(owner,"events",events[index]);put(owner,"pendingCaptures",pending[index]);put(owner,"pendingRoots",roots[index]);
+            put(owner,"captureEpochs",new HashMap<>());put(owner,"changes",new java.util.concurrent.atomic.AtomicLong());put(owner,"gap","");put(owner,"transientIssue","");
+            published[index]=publishedConstructor.newInstance(owner,session,current,epoch);put(owner,"ownerRegistration",published[index]);
+        }
+        try {
+            registration.set(null,current);installer.set(null,owners);
+            synchronized(listeners){listeners.clear();listeners.addAll(Arrays.asList(selected));}
+            for(var entry:previous.entrySet())switch(entry.getKey().getName()) {
+                case "publishedOwners" -> {Object array=Array.newInstance(publishedType,2);Array.set(array,0,published[0]);Array.set(array,1,published[1]);entry.getKey().set(null,array);}
+                case "bridgeRegistration" -> entry.getKey().set(null,current);
+                case "bridgeRegistrationEpoch" -> entry.getKey().setLong(null,epoch);
+                case "capturePublications" -> entry.getKey().setInt(null,0);
+                case "unknownCaptureGap" -> entry.getKey().set(null,"");
+                case "delivery" -> entry.getKey().set(null,bridge.getMethod("deliveringTo",Object.class));
+                case "captureState" -> entry.getKey().set(null,state);
+                case "acknowledgeCaptureLoss" -> entry.getKey().set(null,bridge.getMethod("acknowledgeCaptureLoss",Object.class,Object.class,long.class,long.class));
+                case "observerMatches" -> entry.getKey().set(null,bridge.getMethod("observerMatches",Object.class));
+                case "inlineDetails" -> entry.getKey().set(null,bridge.getMethod("inlineDetails",Object.class));
+                case "coverage" -> entry.getKey().set(null,null);
+            }
+            TaskCaptureHolder holder=new TaskCaptureHolder(source);
+            emit.invoke(null,current,1,holder,null,null,new Object());
+            Object consumed=holder.captured;holder.captured=null;
+            require(consumed==source&&bindings[0].isEmpty()&&events[0].isEmpty()&&pending[0].size()==1,"ordinary capture resolved a provenance graph before lazy resolution");
+            require(Boolean.FALSE.equals(healthy.invoke(selected[0],holder))&&Boolean.FALSE.equals(healthy.invoke(selected[1],other)),"unknown callback graph qualified a source before its owner's bounded resolution");
+            Set<UUID> constructorSubjects=new HashSet<>();
+            require(Boolean.TRUE.equals(producer.invoke(selected[0],holder,null,new Object[0],constructorSubjects))&&constructorSubjects.equals(Set.of(sourceSubject))
+                    &&bindings[0].isEmpty()&&events[0].isEmpty(),"constructor/publication enforcement lost ENTER source after the callback moved it to a local and cleared its field");
+            resolve.invoke(selected[0],1);
+            require(Set.of(sourceSubject).equals(bindings[0].get(holder))&&events[0].size()==1,"real lazy resolver did not discover the captured source field");
+            require(Boolean.FALSE.equals(healthy.invoke(selected[0],holder))&&Boolean.FALSE.equals(healthy.invoke(selected[1],other)),"one runtime qualified a shared root, or an unresolved owner qualified an unknown source");
+            resolve.invoke(selected[1],1);
+            require(Boolean.TRUE.equals(healthy.invoke(selected[0],holder))&&Boolean.TRUE.equals(healthy.invoke(selected[1],other))&&roots[0].isEmpty()&&roots[1].isEmpty(),"resolved unrelated observer retained a shared-root fence");
+            events[0].clear();events[1].clear();
+            emit.invoke(null,current,24,holder,sourceSubject,null,new Object[]{selected[0],new Object(),null});
+            require(Boolean.FALSE.equals(healthy.invoke(selected[0],holder))&&Boolean.TRUE.equals(healthy.invoke(selected[1],other)),"owner-targeted source capture poisoned a runtime with no unresolved receipt");
+            resolve.invoke(selected[0],1);events[0].clear();
+
+            Field callable=FutureTask.class.getDeclaredField("callable");callable.setAccessible(true);
+            TaskCaptureHolder futureCallback=new TaskCaptureHolder(source);FutureTask<Object> future=new FutureTask<>(futureCallback,null);
+            emit.invoke(null,current,3,future,null,null,null);futureCallback.captured=null;callable.set(future,null);
+            resolve.invoke(selected[0],1);resolve.invoke(selected[1],1);
+            require(Set.of(sourceSubject).equals(bindings[0].get(future))&&events[0].size()==1,"cleared FutureTask callable lost the real callback source");
+            events[0].clear();events[1].clear();
+
+            Class<?> completionType=Class.forName("java.util.concurrent.CompletableFuture$UniApply",true,null),uniType=completionType.getSuperclass();
+            Constructor<?> completionConstructor=completionType.getDeclaredConstructor(Executor.class,CompletableFuture.class,CompletableFuture.class,java.util.function.Function.class);completionConstructor.setAccessible(true);
+            CompletableFuture<Object> completionInput=new CompletableFuture<>(),completionOutput=new CompletableFuture<>();
+            TaskCaptureHolder completionCallback=new TaskCaptureHolder(source);Object completion=completionConstructor.newInstance(null,completionOutput,completionInput,completionCallback);
+            emit.invoke(null,current,11,completion,null,null,null);completionCallback.captured=null;
+            for(Field field:List.of(completionType.getDeclaredField("fn"),uniType.getDeclaredField("src"),uniType.getDeclaredField("dep"))) {field.setAccessible(true);field.set(completion,null);}
+            resolve.invoke(selected[0],1);resolve.invoke(selected[1],1);Object completionEvent=events[0].poll();
+            require(Set.of(sourceSubject).equals(bindings[0].get(completion))&&completionEvent!=null&&invoke(completionEvent,"dependency")==completionInput&&invoke(completionEvent,"output")==completionOutput,
+                    "cleared CompletableFuture callback/dependency/output operands lost their actual lineage");
+            events[1].clear();
+
+            Class<?> inlineType=Class.forName("dev.ronova.pro.bootstrap.TaskBridge$Inline",true,null);
+            Constructor<?> inlineConstructor=inlineType.getDeclaredConstructor(Object.class,Object.class,Object.class);inlineConstructor.setAccessible(true);
+            CompletableFuture<Object> inlineInput=new CompletableFuture<>(),inlineOther=new CompletableFuture<>(),inlineOutput=new CompletableFuture<>();
+            TaskCaptureHolder inlineCallback=new TaskCaptureHolder(source);Object inline=inlineConstructor.newInstance(inlineInput,inlineOther,inlineCallback),invocation=new Object();
+            emit.invoke(null,current,1,inline,null,null,invocation);inlineCallback.captured=null;put(inline,"output",inlineOutput);emit.invoke(null,current,2,inline,null,null,invocation);
+            for(String name:List.of("source","other","callback","output","frame","thread"))put(inline,name,null);put(inline,"closed",true);
+            resolve.invoke(selected[0],2);resolve.invoke(selected[1],2);Object entered=events[0].poll(),exited=events[0].poll();
+            require(Set.of(sourceSubject).equals(bindings[0].get(inline))&&entered!=null&&exited!=null&&(Integer)invoke(entered,"kind")==1&&(Integer)invoke(exited,"kind")==2
+                    &&invoke(entered,"dependency")==inlineInput&&invoke(entered,"otherDependency")==inlineOther&&invoke(entered,"output")==null
+                    &&invoke(exited,"output")==inlineOutput&&invoke(exited,"callbackDefinition")==inlineCallback.getClass(),"closed Inline token lost transient operands or actual ENTER/EXIT ordering");
+            events[1].clear();
+
+            TaskCaptureHolder lostCallback=new TaskCaptureHolder(source);FutureTask<Object> lostFuture=new FutureTask<>(lostCallback,null);
+            emit.invoke(null,current,3,lostFuture,null,null,null);lostCallback.captured=null;callable.set(lostFuture,null);
+            Method lost=bridge.getDeclaredMethod("lost",registrationType,Object[].class,Throwable.class);lost.setAccessible(true);
+            Object[] lostRow={3,lostFuture,null,null,null,Thread.currentThread(),System.nanoTime(),dropped.get(),current,epoch,unknown.get()};
+            lost.invoke(null,current,lostRow,new IllegalStateException("AUDIT_KNOWN_TASK_LOSS"));
+            require(((Object[][])((Object[])state.invoke(null,sink))[4]).length==1&&unknown.get()==priorUnknown,"known failed delivery became unidentified before routing");
+            routeLosses.invoke(null);
+            resolve.invoke(selected[1],1);
+            require(((Object[][])((Object[])state.invoke(null,sink))[4]).length==0&&Boolean.FALSE.equals(healthy.invoke(selected[0],lostFuture))
+                    &&Boolean.TRUE.equals(healthy.invoke(selected[1],other))&&"".equals(gap.get(selected[1]))&&unknown.get()==priorUnknown,
+                    "known loss forgot queued callback operands, failed ACK, or poisoned an unrelated runtime");
+            resolve.invoke(selected[0],1);
+            Method unidentified=bridge.getDeclaredMethod("lost");unidentified.setAccessible(true);unidentified.invoke(null);
+            require(unknown.get()==priorUnknown+1&&Boolean.FALSE.equals(healthy.invoke(selected[0],holder))&&Boolean.FALSE.equals(healthy.invoke(selected[1],other)),"unidentified loss was forgiven by lazy routing");
+        } finally {
+            for(var entry:previous.entrySet())entry.getKey().set(null,entry.getValue());
+            synchronized(listeners){listeners.clear();listeners.addAll(oldListeners);}registration.set(null,oldRegistration);installer.set(null,oldInstaller);
+            unknown.set(priorUnknown);dropped.set(priorDropped);lossSite.set(null,priorLossSite);
+        }
+        System.out.println("TASK_LAZY_CAPTURE_PASS actual_receive_and_bounded_resolver provenance_graph_deferred shallow_callback_operands_retained FutureTask_CF_Inline_operands_survive_clear ENTER_EXIT_order constructor_source_before_effect_after_field_clear shared_pending_root_fence unrelated_owner_allowed known_loss_scoped_and_acknowledged unidentified_loss_refused isolated_metadata_no_Agent_install");
     }
     private static void containerScopeRemoval()throws Exception {
         Object target=new Object();int[] actions={0};Runnable action=()->actions[0]++;

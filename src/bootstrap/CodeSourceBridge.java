@@ -296,7 +296,32 @@ public final class CodeSourceBridge {
         return codeMethodsPresent;
     }
     public static Object executionPlan(Object[][] rows){requireAgent();return ExecutionFlow.plan(rows);}
-    private static List<StackWalker.StackFrame> executionStack(){
+    private record ExecutionFrames(StackWalker.StackFrame current,StackWalker.StackFrame parent,int depth){
+        boolean isEmpty(){return current==null;}
+        int size(){return depth;}
+        StackWalker.StackFrame get(int index){
+            if(index==0)return current;if(index==1)return parent;throw new IndexOutOfBoundsException(index);
+        }
+    }
+    private static final class ExecutionFramesReader implements java.util.function.Function<java.util.stream.Stream<StackWalker.StackFrame>,ExecutionFrames>{
+        public ExecutionFrames apply(java.util.stream.Stream<StackWalker.StackFrame> frames){
+            StackWalker.StackFrame first=null,parent=null;int depth=0;
+            var cursor=frames.iterator();
+            while(cursor.hasNext()){
+                StackWalker.StackFrame frame=cursor.next();
+                if(depth==0){
+                    Class<?> type=frame.getDeclaringClass();
+                    if(type.getClassLoader()==null&&type.getNestHost()==CodeSourceBridge.class)continue;
+                    first=frame;
+                }else if(depth==1)parent=frame;
+                depth++;
+            }
+            return new ExecutionFrames(first,parent,depth);
+        }
+    }
+    private static final ExecutionFramesReader EXECUTION_FRAMES=new ExecutionFramesReader();
+    private static ExecutionFrames executionStack(){return WALKER.walk(EXECUTION_FRAMES);}
+    private static List<StackWalker.StackFrame> executionRetirementStack(){
         return WALKER.walk(frames->frames.dropWhile(frame->{
             Class<?> type=frame.getDeclaringClass();
             // Resolving a foreign nest host can define another class while
@@ -308,21 +333,21 @@ public final class CodeSourceBridge {
         return NativeControl.executionRootAllowed()?executionEnter():null;
     }
     public static Object executionEnter(){
-        List<StackWalker.StackFrame> frames=executionStack();if(frames.isEmpty())return null;
+        ExecutionFrames frames=executionStack();if(frames.isEmpty())return null;
         StackWalker.StackFrame current=frames.get(0);
         Object plan=NativeControl.executionPlan(current),token=ExecutionFlow.enter(plan,current,frames.size(),frames.size()>1?frames.get(1):null);
         if(ExecutionFlow.nativeExitRequired(token)&&!NativeControl.executionWatch(current,plan,token)){ExecutionFlow.watchFailed(token);return null;}
         return token;
     }
     public static void executionBefore(Object token,int instruction){
-        if(token==null)return;List<StackWalker.StackFrame> frames=executionStack();if(!frames.isEmpty())ExecutionFlow.before(token,instruction,frames.get(0),frames.size());
+        if(token==null)return;ExecutionFrames frames=executionStack();if(!frames.isEmpty())ExecutionFlow.before(token,instruction,frames.get(0),frames.size());
     }
     /** An exact original SAM instruction may continue the current consumer on this same thread. */
     public static Object executionEquipmentCallback(Object token,int instruction,Object callback,Object first,Object second,String contract){
         Object handoff=null;
         try{
             if(token!=null){
-                List<StackWalker.StackFrame> frames=executionStack();
+                ExecutionFrames frames=executionStack();
                 if(!frames.isEmpty()){
                     StackWalker.StackFrame caller=frames.get(0);Object plan=NativeControl.executionPlan(caller);
                     handoff=ExecutionFlow.beginDefinedCallback(token,instruction,plan,callback,first,second,contract,caller,frames.size());
@@ -334,22 +359,22 @@ public final class CodeSourceBridge {
         finally{try{ExecutionFlow.endDefinedCallback(handoff);}catch(Throwable unavailable){TaskBridge.lost(unavailable);}}
     }
     public static void executionAfterCall(Object token,int instruction){
-        if(token==null)return;List<StackWalker.StackFrame> frames=executionStack();if(!frames.isEmpty())ExecutionFlow.afterCall(token,instruction,frames.get(0),frames.size());
+        if(token==null)return;ExecutionFrames frames=executionStack();if(!frames.isEmpty())ExecutionFlow.afterCall(token,instruction,frames.get(0),frames.size());
     }
     public static void executionCaught(Object token,int instruction){
-        if(token==null)return;List<StackWalker.StackFrame> frames=executionStack();if(!frames.isEmpty())ExecutionFlow.caught(token,instruction,frames.get(0),frames.size());
+        if(token==null)return;ExecutionFrames frames=executionStack();if(!frames.isEmpty())ExecutionFlow.caught(token,instruction,frames.get(0),frames.size());
     }
     public static void executionExit(Object token,boolean normal){
-        if(token==null)return;List<StackWalker.StackFrame> frames=executionStack();if(!frames.isEmpty())ExecutionFlow.exit(token,normal,frames.get(0),frames.size());
+        if(token==null)return;ExecutionFrames frames=executionStack();if(!frames.isEmpty())ExecutionFlow.exit(token,normal,frames.get(0),frames.size());
     }
     public static void executionArgument(Object token,int slot,Object actual){
-        if(token==null)return;List<StackWalker.StackFrame> frames=executionStack();if(!frames.isEmpty())ExecutionFlow.argument(token,slot,actual,frames.get(0),frames.size());
+        if(token==null)return;ExecutionFrames frames=executionStack();if(!frames.isEmpty())ExecutionFlow.argument(token,slot,actual,frames.get(0),frames.size());
     }
     public static void executionConstructor(Object token,Object receiver){
-        if(token==null)return;List<StackWalker.StackFrame> frames=executionStack();if(!frames.isEmpty())ExecutionFlow.constructor(token,receiver,frames.get(0),frames.size());
+        if(token==null)return;ExecutionFrames frames=executionStack();if(!frames.isEmpty())ExecutionFlow.constructor(token,receiver,frames.get(0),frames.size());
     }
     public static void executionUninitializedWrite(Object token,int instruction){
-        if(token==null)return;List<StackWalker.StackFrame> frames=executionStack();if(!frames.isEmpty())ExecutionFlow.uninitializedWrite(token,instruction,frames.get(0),frames.size());
+        if(token==null)return;ExecutionFrames frames=executionStack();if(!frames.isEmpty())ExecutionFlow.uninitializedWrite(token,instruction,frames.get(0),frames.size());
     }
     static boolean executionPopped(Object token,boolean normal){
         if(AUTHORITY.getCallerClass()!=NativeControl.class||!NativeControl.executionPopPermit(token))throw new SecurityException("ACTUAL_EXECUTION_POP_REQUIRED");
@@ -358,7 +383,7 @@ public final class CodeSourceBridge {
     static Object[] executionRetirementFrame(Class<?> declaring,String selector,int location,Object plan,Module owner){
         if(AUTHORITY.getCallerClass()!=NativeControl.class||!NativeControl.codeRetirementFramePermit(declaring,location,plan,owner))
             throw new SecurityException("ACTUAL_CODE_RETIREMENT_FRAME_REQUIRED");
-        List<StackWalker.StackFrame> frames=executionStack();int at=0;
+        List<StackWalker.StackFrame> frames=executionRetirementStack();int at=0;
         while(at<frames.size()&&frames.get(at).getDeclaringClass()==NativeControl.class)at++;
         if(at==frames.size())return new Object[]{null,"EXECUTION_FRAME_UNOBSERVED"};
         StackWalker.StackFrame actual=frames.get(at);
@@ -367,20 +392,20 @@ public final class CodeSourceBridge {
         return ExecutionFlow.retirementFrame(plan,actual,frames.size()-at,owner);
     }
     public static void executionReference(Object token,int instruction,Object actual){
-        if(token==null)return;List<StackWalker.StackFrame> frames=executionStack();if(!frames.isEmpty())ExecutionFlow.reference(token,instruction,actual,frames.get(0),frames.size());
+        if(token==null)return;ExecutionFrames frames=executionStack();if(!frames.isEmpty())ExecutionFlow.reference(token,instruction,actual,frames.get(0),frames.size());
     }
     public static void executionInitialized(Object token,int instruction,Object actual,Class<?> declaring){
-        if(token==null)return;List<StackWalker.StackFrame> frames=executionStack();if(!frames.isEmpty())ExecutionFlow.initialized(token,instruction,actual,declaring,frames.get(0),frames.size());
+        if(token==null)return;ExecutionFrames frames=executionStack();if(!frames.isEmpty())ExecutionFlow.initialized(token,instruction,actual,declaring,frames.get(0),frames.size());
     }
     public static void executionHeapBefore(Object token,int instruction,Class<?> symbolic,Object receiver,int index){
-        if(token==null)return;List<StackWalker.StackFrame> frames=executionStack();if(!frames.isEmpty())ExecutionFlow.heapBefore(token,instruction,symbolic,receiver,index,frames.get(0),frames.size());
+        if(token==null)return;ExecutionFrames frames=executionStack();if(!frames.isEmpty())ExecutionFlow.heapBefore(token,instruction,symbolic,receiver,index,frames.get(0),frames.size());
     }
     public static Object executionUnsafeBefore(Object token,int instruction,Object accessor,Object receiver,long offset,long length,Object proposed,Object source,long sourceOffset){
-        List<StackWalker.StackFrame> frames=executionStack();if(frames.isEmpty())throw new IllegalStateException("ACTUAL_UNSAFE_CALL_SITE_REQUIRED");
+        ExecutionFrames frames=executionStack();if(frames.isEmpty())throw new IllegalStateException("ACTUAL_UNSAFE_CALL_SITE_REQUIRED");
         return ExecutionFlow.unsafeBefore(token,instruction,accessor,receiver,offset,length,proposed,source,sourceOffset,frames.get(0),frames.size());
     }
     public static void executionUnsafeAfter(Object token,int instruction,Object receipt,boolean written){
-        List<StackWalker.StackFrame> frames=executionStack();if(frames.isEmpty())throw new IllegalStateException("ACTUAL_UNSAFE_CALL_SITE_REQUIRED");
+        ExecutionFrames frames=executionStack();if(frames.isEmpty())throw new IllegalStateException("ACTUAL_UNSAFE_CALL_SITE_REQUIRED");
         ExecutionFlow.unsafeAfter(token,instruction,receipt,written,frames.get(0),frames.size());
     }
     public static void executionUnsafeFailed(Object token,int instruction,Object receipt,Throwable original){
@@ -426,7 +451,7 @@ public final class CodeSourceBridge {
         ExecutionFlow.platformObserved(token,sources);
     }
     public static void executionHeapAfter(Object token,int instruction,Object reference){
-        if(token==null)return;List<StackWalker.StackFrame> frames=executionStack();if(!frames.isEmpty())ExecutionFlow.heapAfter(token,instruction,reference,frames.get(0),frames.size());
+        if(token==null)return;ExecutionFrames frames=executionStack();if(!frames.isEmpty())ExecutionFlow.heapAfter(token,instruction,reference,frames.get(0),frames.size());
     }
     static Class<?> executionFieldOwner(Class<?> symbolic,String name,String descriptor){
         if(AUTHORITY.getCallerClass().getNestHost()!=ExecutionFlow.class)throw new SecurityException("ACTUAL_EXECUTION_SOURCE_STATE_REQUIRED");

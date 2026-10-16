@@ -1,5 +1,27 @@
 # B 批实际报告：2026-10-09 代码收敛接续
 
+## 2026-10-16：C 接续——来源候选、延迟解析与失败续接
+
+接续 `f996c18`，Java93 / Native84 / SourceMapBridge2 / Storage3 / Journal6，协议 `r3-client-8`。整包源码完成后才统一构建；没有恢复容器 Hook、写自身外观、注册武器、部署驱动或生成源码 ZIP。
+
+类加载未命中先保存轻量类头、常量池调用引用及原字节；只对来源/控制/注册目标建立执行图。实际 producer/contributor 登记后，前期调用者可精确重变换提升，跨接口/父类合同保留候选而不授来源权。来源登记使用实际 loader/module/name，producer 负结果不再终身缓存；主要 emitted image 读取/回放/Native 处理用不可变目录，保留现有 tree 事务锁。内部转换错误的非法字节硬拒绝限于确认 producer、control carrier 或精确目标。
+
+任务入口保留直接事实、浅层回调引用和 JDK/Inline 会清空的真实操作数，来源/包装图移到有界 drain。构造/发布门消费同一快照，仍在原效果前同步判断；未解析图及共享根不提前结清。policy 使用独立32项 tick/关闭预算；已知丢失保持范围，未知丢失拒绝保留。定义刷新失败保留未完成 continuation 与旧/新 owner 并集，自动退避重试；成功只移除对应项，单 helper 或整批异常不丢来源义务。
+
+Native 自身未改写 class 事件在 JNI 前返回，已改写事件先筛候选再复制字节，未知/缺名不跳过。安装有 FULL/DEGRADED/FAILED 和明确可重试阶段；只恢复尚未发布的准备或独立目录，不重装表/Hook。Java 可用链继续启动，依赖 Native 的路径按实际状态不可用。执行栈只保存两帧和准确深度；物理调用点/递归/BCI 与退役核对未删除，未声称已完成 Native token 替代。
+
+`build-c-java93-native84-root-lazy-20261016.log` **首轮 PASS，1分19秒**，21项任务中15项执行、6项保持最新，含 Native84 编译链接；检查器编译退出0。仅执行四项相关入口：
+
+- `c-java93-native84-task-lazy-capture-20261016.log` **退出0，TASK_LAZY_CAPTURE_PASS**：实际 receive/resolver，回调字段清空后仍保留来源，FutureTask/CF/Inline 清空后的操作数及顺序、构造前来源、未解析共享根、丢失范围/ACK 与未知拒绝。
+- `c-java93-native84-definition-retry-20261016.log` **退出0，DEFINITION_RETRY_PASS**：实际 worker 在代理 Instrumentation 下无新事件重试未安装的 flow，旧/新来源 owner 并集保留、只移除已完成项；没有实际 VM retransform。
+- `c-java93-native84-native-install-lifecycle-20261016.log` **退出0，NATIVE_INSTALL_CLASSIFICATION_PASS**：实际准备期缺文件 IO 可重试，真实空 payload 不报 ready；没有加载 DLL 或安装控制器。
+- 类筛选初次隔离运行因缺 Agent.codeSourceBridge 启动字段失败，原 `c-java93-native84-external-root-candidates-20261016.log` 保留；仅补齐夹具并重编检查器，`c-java93-native84-external-root-candidates-fixture-fixed-20261016.log` **退出0，EXTERNAL_ROOT_CANDIDATES_PASS**：真实编译类头/referenceOnly、非候选坏字节不进 ASM、后续来源提升候选、无关类直通及旧负缓存重新发现。
+
+主构建及已通过入口没有重复，旧矩阵没有运行。上述隔离检查不代表真实 Agent/Core/Native 安装、实际 VM 重变换、游戏进服/攻防或性能通过；这些 **NOTRUN**。Native 部分安装的实际阶段恢复亦未运行。匹配候选 `distribution/candidate-c-java93-native84-root-lazy-wip-20261016`：Core2960410、prelaunch23226字节，随源码与本摘要同步 GitHub。
+
+类头/常量池保留仍为输入长度相关成本，回调浅层引用读取仍同步；启动批次、物理栈的 Native token、全池队列和 certification/readback 快照等剩余收敛未标完成。容器防护与未知载体边界保留，完整 C/B 尚未全部完成。
+
+---
 ## 2026-10-16：C 接续——停组策略发布、Native 返回语义与任务捕获
 
 接续 `16ae71a`，Java92 / Native83 / SourceMapBridge2 / Storage3 / Journal6，协议 `r3-client-8`。本包只修用户指定的三项，源码写齐后统一构建；没有恢复旧 JDK 容器 Hook，没有生成源码 ZIP。

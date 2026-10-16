@@ -68,6 +68,7 @@ static Binding *native_bindings;
 static NativeLibrary *native_libraries;
 static DWORD native_tls=TLS_OUT_OF_INDEXES;
 static volatile LONG native_events,native_jni_ready,native_boundary_ready,native_failures;
+static volatile LONG native_initialization_attempted,native_handoff_attempted;
 static volatile LONG native_describe_recorded;
 static jclass native_controller;
 static jmethodID native_control_gate;
@@ -1176,7 +1177,7 @@ static HMODULE native_control_image(void){
 }
 static uintptr_t native_tooling_image_begin,native_tooling_image_end;
 static NativePrivateRange native_tooling_image_range,native_tooling_vm_range;
-static jmethodID native_tooling_image_query,native_tooling_thread_query,native_tooling_frame_query;
+static jmethodID native_tooling_image_query,native_tooling_candidate_query,native_tooling_thread_query,native_tooling_frame_query;
 static jmethodID native_tooling_heap_target,native_tooling_definitions_query;
 static jobject native_tooling_deferred;
 static HANDLE native_tooling_retirement_event;
@@ -1436,17 +1437,32 @@ static jobject native_tooling_declaration(JNIEnv *env,jclass actual,jobject load
 }
 static int native_tooling_image(JNIEnv *env,jvmtiEnv *api,jclass actual,jobject loader,const char *name,jobject domain,
         jint originalLength,const unsigned char *originalBytes,jint length,const unsigned char *bytes,OwnerLink *owners,int unknown,jboolean changed,jint *newLength,unsigned char **newBytes){
+    /* Our own event supplies no changed output. Its Java callback only proved
+     * this tuple and returned the same bytes; root/source capture belongs to
+     * the separate definition/ClassPrepare paths. Do not allocate or cross JNI
+     * for that no-op, including unknown, hidden and protected class names. */
+    if(!changed)return 1;
     if(!native_jni_ready||!native_tooling_image_query||!env)return 1;
     NativeThread *state=native_thread();if(!state||length<0||originalLength<0||!bytes||!originalBytes)return 0;
-    state->control++;jbyteArray original=native_original.NewByteArray(env,originalLength);
-    if(original)native_original.SetByteArrayRegion(env,original,0,originalLength,(const jbyte*)originalBytes);
-    jbyteArray input=originalLength==length&&originalBytes==bytes?original:native_original.NewByteArray(env,length);
-    if(input&&input!=original)native_original.SetByteArrayRegion(env,input,0,length,(const jbyte*)bytes);
+    state->control++;jbyteArray original=NULL,input=NULL,result=NULL;int ready=0;
     jstring key=name?native_original.NewStringUTF(env,name):NULL;jobjectArray writers=native_tooling_sources(env,owners,unknown);
     jobject declaration=native_tooling_declaration(env,actual,loader,name);
+    if(!declaration||!writers||native_original.ExceptionCheck(env))goto done;
+    /* The exact Java registration directory may exclude a changed unrelated
+     * image before copying either byte array. Missing names or unknown source
+     * holds still take the complete path. A selector failure is not a verdict. */
+    if(!unknown&&name&&native_tooling_candidate_query){
+        jboolean selected=native_original.CallStaticBooleanMethod(env,native_controller,native_tooling_candidate_query,declaration,loader,key,actual,writers);
+        if(native_original.ExceptionCheck(env)){native_original.ExceptionClear(env);InterlockedIncrement(&native_tooling_failures);}
+        else if(!selected){ready=1;goto done;}
+    }
+    original=native_original.NewByteArray(env,originalLength);
+    if(original)native_original.SetByteArrayRegion(env,original,0,originalLength,(const jbyte*)originalBytes);
+    input=originalLength==length&&originalBytes==bytes?original:native_original.NewByteArray(env,length);
+    if(input&&input!=original)native_original.SetByteArrayRegion(env,input,0,length,(const jbyte*)bytes);
     NativeToolingImage proof={declaration,loader,domain,key,actual,original,input,writers,changed,1,state->toolingImage};state->toolingImage=&proof;
-    jbyteArray result=declaration&&original&&input&&writers&&!native_original.ExceptionCheck(env)?(jbyteArray)native_original.CallStaticObjectMethod(env,native_controller,native_tooling_image_query,declaration,loader,key,actual,domain,original,input,writers,changed):NULL;
-    state->toolingImage=proof.previous;int ready=!native_original.ExceptionCheck(env)&&proof.phase==2&&result;
+    result=original&&input&&!native_original.ExceptionCheck(env)?(jbyteArray)native_original.CallStaticObjectMethod(env,native_controller,native_tooling_image_query,declaration,loader,key,actual,domain,original,input,writers,changed):NULL;
+    state->toolingImage=proof.previous;ready=!native_original.ExceptionCheck(env)&&proof.phase==2&&result;
     if(ready){jsize count=native_original.GetArrayLength(env,result);jbyte *contents=native_original.GetByteArrayElements(env,result,NULL);
         ready=contents!=NULL;
         if(contents){if(count!=length||memcmp(contents,bytes,(size_t)length)){
@@ -1454,6 +1470,7 @@ static int native_tooling_image(JNIEnv *env,jvmtiEnv *api,jclass actual,jobject 
                 if(ready){memcpy(image,contents,(size_t)count);if(*newBytes)(*api)->Deallocate(api,*newBytes);*newBytes=image;*newLength=count;}
             }native_original.ReleaseByteArrayElements(env,result,contents,JNI_ABORT);}
     }
+done:
     if(result)native_original.DeleteLocalRef(env,result);if(writers)native_original.DeleteLocalRef(env,writers);
     if(declaration)native_original.DeleteLocalRef(env,declaration);if(input&&input!=original)native_original.DeleteLocalRef(env,input);
     if(key)native_original.DeleteLocalRef(env,key);if(original)native_original.DeleteLocalRef(env,original);state->control--;
@@ -2201,10 +2218,17 @@ JNIEXPORT void JNICALL Agent_OnUnload(JavaVM *vm){
 }
 
 static jint native_initialize(JavaVM *vm){
-    if(native_events)return JNI_OK;if((*vm)->GetEnv(vm,(void**)&native_ti,JVMTI_VERSION_1_2)!=JNI_OK)return JNI_ERR;native_vm=vm;
-    if(native_tls==TLS_OUT_OF_INDEXES)native_tls=TlsAlloc();if(native_tls==TLS_OUT_OF_INDEXES)return JNI_ERR;
+    if(native_events)return JNI_OK;
+    /* A failed OnLoad may already have published the own JVMTI table or VM
+     * dispatcher. Never reacquire/rewrap it on a later JNI_OnLoad handoff. */
+    if(InterlockedCompareExchange(&native_initialization_attempted,1,0))return JNI_ERR;
+    if(native_vm&&native_vm!=vm)return JNI_ERR;
+    if(!native_ti&&(*vm)->GetEnv(vm,(void**)&native_ti,JVMTI_VERSION_1_2)!=JNI_OK){InterlockedExchange(&native_initialization_attempted,0);return JNI_ERR;}native_vm=vm;
+    if(native_tls==TLS_OUT_OF_INDEXES)native_tls=TlsAlloc();
+    if(native_tls==TLS_OUT_OF_INDEXES){InterlockedExchange(&native_initialization_attempted,0);return JNI_ERR;}
     jvmtiCapabilities caps;memset(&caps,0,sizeof(caps));caps.can_generate_native_method_bind_events=1;caps.can_generate_all_class_hook_events=1;caps.can_retransform_classes=1;
-    if((*native_ti)->AddCapabilities(native_ti,&caps)!=JVMTI_ERROR_NONE||!native_tooling_install(vm,native_ti))return JNI_ERR;
+    if((*native_ti)->AddCapabilities(native_ti,&caps)!=JVMTI_ERROR_NONE){InterlockedExchange(&native_initialization_attempted,0);return JNI_ERR;}
+    if(!native_tooling_install(vm,native_ti))return JNI_ERR;
     jvmtiEventCallbacks callbacks;memset(&callbacks,0,sizeof(callbacks));callbacks.NativeMethodBind=native_binding;
     callbacks.ThreadStart=native_thread_start;callbacks.ThreadEnd=native_thread_end;
     callbacks.ClassFileLoadHook=native_tooling_own_image;callbacks.ClassPrepare=code_class_prepared;callbacks.FramePop=code_frame_popped;callbacks.FieldModification=heap_field_modified;callbacks.SingleStep=code_retirement_step;
@@ -2234,7 +2258,17 @@ JNIEXPORT jboolean JNICALL Java_dev_ronova_pro_bootstrap_NativeControl_initializ
      * may have failed after that publication; a repeated handoff must retain
      * that failure rather than report a complete boundary. */
     if(native_jni_ready)return native_boundary_ready?JNI_TRUE:JNI_FALSE;
-    if(!native_events)return JNI_FALSE;struct JNINativeInterface_ *table=NULL;if((*native_ti)->GetJNIFunctionTable(native_ti,&table)!=JVMTI_ERROR_NONE)return JNI_FALSE;native_original=*table;
+    if(!native_events||InterlockedCompareExchange(&native_handoff_attempted,0,0))return JNI_FALSE;
+    struct JNINativeInterface_ *table=NULL;jvmtiError acquired=(*native_ti)->GetJNIFunctionTable(native_ti,&table);
+    if(acquired!=JVMTI_ERROR_NONE||!table){
+        // Only this allocation failure precedes all controller preparation,
+        // native registration and JNI table publication in this handoff.
+        if(acquired==JVMTI_ERROR_OUT_OF_MEMORY){jfieldID retry=(*env)->GetStaticFieldID(env,type,"nativeHandoffRetryable","Z");
+            if(retry)(*env)->SetStaticBooleanField(env,type,retry,JNI_TRUE);}
+        return JNI_FALSE;
+    }
+    if(InterlockedCompareExchange(&native_handoff_attempted,1,0)){(*native_ti)->Deallocate(native_ti,(unsigned char*)table);return JNI_FALSE;}
+    native_original=*table;
     native_controller=(jclass)native_original.NewGlobalRef(env,type);native_control_gate=control;
     native_library_gate=(*env)->GetStaticMethodID(env,type,"libraryBoundaryCaller","(Ljava/lang/String;)Z");
     jclass task=(jclass)(*env)->NewGlobalRef(env,tasks),definition=(jclass)(*env)->NewGlobalRef(env,definitions);
@@ -2266,8 +2300,9 @@ JNIEXPORT jboolean JNICALL Java_dev_ronova_pro_bootstrap_NativeControl_initializ
     native_tooling_deferred=toolingDeferred?native_original.NewGlobalRef(env,toolingDeferred):NULL;
     if(toolingDeferred)native_original.DeleteLocalRef(env,toolingDeferred);if(toolingBoolean)native_original.DeleteLocalRef(env,toolingBoolean);
     native_tooling_image_query=native_original.GetStaticMethodID(env,type,"jvmtiImage","(Ljava/lang/Module;Ljava/lang/ClassLoader;Ljava/lang/String;Ljava/lang/Class;Ljava/security/ProtectionDomain;[B[B[Ljava/lang/Module;Z)[B");
+    native_tooling_candidate_query=native_original.GetStaticMethodID(env,type,"jvmtiImageCandidate","(Ljava/lang/Module;Ljava/lang/ClassLoader;Ljava/lang/String;Ljava/lang/Class;[Ljava/lang/Module;)Z");
     native_tooling_definitions_query=native_original.GetStaticMethodID(env,type,"jvmtiDefinitionsChanged","([Ljava/lang/Class;)Z");
-    if(!native_tooling_thread_query||!native_tooling_frame_query||!native_tooling_heap_target||!native_tooling_deferred||!native_tooling_image_query||!native_tooling_definitions_query||!native_bind_controller(env,type)
+    if(!native_tooling_thread_query||!native_tooling_frame_query||!native_tooling_heap_target||!native_tooling_deferred||!native_tooling_image_query||!native_tooling_candidate_query||!native_tooling_definitions_query||!native_bind_controller(env,type)
             ||(*native_ti)->SetEventNotificationMode(native_ti,JVMTI_ENABLE,JVMTI_EVENT_CLASS_FILE_LOAD_HOOK,NULL)!=JVMTI_ERROR_NONE){(*native_ti)->Deallocate(native_ti,(unsigned char*)table);return JNI_FALSE;}
 #define INSTALL_NATIVE_FIELD(NAME) table->Set##NAME##Field=native_set_##NAME;table->SetStatic##NAME##Field=native_static_##NAME;
     INSTALL_NATIVE_FIELD(Object) INSTALL_NATIVE_FIELD(Boolean) INSTALL_NATIVE_FIELD(Byte) INSTALL_NATIVE_FIELD(Char) INSTALL_NATIVE_FIELD(Short) INSTALL_NATIVE_FIELD(Int) INSTALL_NATIVE_FIELD(Long) INSTALL_NATIVE_FIELD(Float) INSTALL_NATIVE_FIELD(Double)

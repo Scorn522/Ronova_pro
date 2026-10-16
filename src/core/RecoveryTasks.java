@@ -42,6 +42,32 @@ final class RecoveryTasks implements AutoCloseable {
             return result.toArray(Field[]::new);
         }
     };
+    /** Only platform operands which the JDK clears before a later server tick. */
+    private static final ClassValue<Field[]> TRANSIENT_TASK_FIELDS=new ClassValue<>() {
+        @Override protected Field[] computeValue(Class<?> type) {
+            var result=new ArrayList<Field>();
+            for(Class<?> current=type;current!=null&&current!=Object.class;current=current.getSuperclass()) {
+                if(!knownDelegate(current))continue;
+                for(Field field:current.getDeclaredFields())if(!Modifier.isStatic(field.getModifiers())
+                        &&!field.getType().isPrimitive()&&(jdkDelegateField(current,field)
+                        ||current.getName().startsWith("java.util.concurrent.CompletableFuture$")&&field.getName().equals("executor"))) {
+                    try {field.trySetAccessible();}catch(RuntimeException unavailable) { /* Retried at the real operand. */ }
+                    result.add(field);
+                }
+            }
+            return result.toArray(Field[]::new);
+        }
+    };
+    /** Shallow callback operands only; no wrapper/source graph is followed on the execution thread. */
+    private static final ClassValue<Field[]> CALLBACK_TASK_FIELDS=new ClassValue<>() {
+        @Override protected Field[] computeValue(Class<?> type) {
+            if(type.getClassLoader()==null||type.isArray()||type.isEnum()||type==Class.class
+                    ||Thread.class.isAssignableFrom(type)||Executor.class.isAssignableFrom(type))return new Field[0];
+            var result=new ArrayList<Field>();
+            for(Field field:CAPTURE_FIELDS.get(type))if(field.getDeclaringClass().getClassLoader()!=null)result.add(field);
+            return result.toArray(Field[]::new);
+        }
+    };
     private final ProRuntime runtime;
     // Only clone metadata uses this monitor; source callbacks may already hold TAGS/GRAPH.
     private final Object captureLock=new Object();
@@ -49,6 +75,9 @@ final class RecoveryTasks implements AutoCloseable {
     // Reserved before leaving the publication gate, including Core's direct observations.
     private int capturesInFlight;
     private final ConcurrentLinkedQueue<Capture> events=new ConcurrentLinkedQueue<>();
+    private final ConcurrentLinkedQueue<PendingCapture> pendingCaptures=new ConcurrentLinkedQueue<>();
+    // Exact root identities only. Publication and removal share LISTENERS with destructive gates.
+    private final Map<Object,Integer> pendingRoots=new IdentityHashMap<>();
     private final Map<Object,UUID> origins=Collections.synchronizedMap(new WeakIdentityMap<>());
     // A first causal origin remains useful for task lineage, but a conflicting
     // observation cannot also serve as exclusive ownership for destructive graph writes.
@@ -104,6 +133,48 @@ final class RecoveryTasks implements AutoCloseable {
     private record Capture(int kind,Object task,Object scheduler,Object parent,Object invocation,
             ClassLoader loader,Set<UUID> subjects,long dropped,Object dependency,Object otherDependency,Object output,
             boolean inline,Class<?> callbackDefinition,boolean hasExecutor,UUID session,Object registration,long registrationEpoch,long unknownLoss) { }
+    private record TaskOperands(Object object,Field[] fields,Object[] values,boolean complete,boolean callback) {
+        Object value(String name) {
+            for(int i=0;i<fields.length;i++)if(fields[i].getName().equals(name))return values[i];
+            return null;
+        }
+        int index(Field field) {
+            for(int i=0;i<fields.length;i++)if(fields[i].equals(field))return i;
+            return -1;
+        }
+    }
+    private record CaptureRoots(Object[] inline,TaskOperands task,TaskOperands base,List<TaskOperands> callbacks) {
+        TaskOperands operands(Object object) {
+            if(task!=null&&task.object==object)return task;if(base!=null&&base.object==object)return base;
+            for(TaskOperands retained:callbacks)if(retained.object==object)return retained;return null;
+        }
+        TaskOperands retained(Object object,Field field) {
+            if(task!=null&&task.object==object&&task.index(field)>=0)return task;
+            if(base!=null&&base.object==object&&base.index(field)>=0)return base;
+            for(TaskOperands retained:callbacks)if(retained.object==object&&retained.index(field)>=0)return retained;return null;
+        }
+        boolean callback(Object object) {for(TaskOperands retained:callbacks)if(retained.object==object&&retained.callback)return true;return false;}
+        boolean complete() {
+            if(task!=null&&!task.complete||base!=null&&!base.complete)return false;
+            for(TaskOperands retained:callbacks)if(!retained.complete)return false;return true;
+        }
+    }
+    /** A failed resolution becomes unknown only after every actual owner has tried this delivery. */
+    private static final class CaptureDelivery {
+        int remaining;
+        boolean located,failed;
+        CaptureDelivery(int remaining) {this.remaining=remaining;}
+        void resolved(boolean located,boolean failed) {
+            boolean unknown;
+            synchronized(this) {
+                this.located|=located;this.failed|=failed;
+                unknown=--remaining==0&&this.failed&&!this.located;
+            }
+            if(unknown)unknownCapture("TASK_CAPTURE_SOURCE_UNLOCATABLE");
+        }
+    }
+    private record PendingCapture(Capture event,OwnerRegistration owner,CaptureRoots roots,
+            Object[] identities,CaptureDelivery delivery,String failure) { }
     private static final class Task {
         final UUID id=UUID.randomUUID();
         final Object object;
@@ -280,7 +351,7 @@ final class RecoveryTasks implements AutoCloseable {
         try {
             bridge=Class.forName("dev.ronova.pro.bootstrap.TaskBridge",false,null);
             if(bridge.getClassLoader()!=null)throw new IllegalStateException("NON_BOOTSTRAP_TASK_BRIDGE");
-            if(!Integer.valueOf(92).equals(bridge.getMethod("abiVersion").invoke(null)))throw new IllegalStateException("TASK_BRIDGE_ABI_MISMATCH");
+            if(!Integer.valueOf(93).equals(bridge.getMethod("abiVersion").invoke(null)))throw new IllegalStateException("TASK_BRIDGE_ABI_MISMATCH");
             Class<?> agent=Class.forName("dev.ronova.pro.agent.RecoveryAgent",false,ClassLoader.getSystemClassLoader());
             if(!Boolean.TRUE.equals(agent.getMethod("openTaskAccess",Class.class).invoke(null,RecoveryTasks.class)))
                 throw new IllegalStateException("TASK_ACCESS_UNAVAILABLE");
@@ -357,35 +428,29 @@ final class RecoveryTasks implements AutoCloseable {
             unknownCapture("TASK_CAPTURE_IDENTITY_UNAVAILABLE");return;
         }
         OwnerRegistration[] owners=reserveOwners(row);
-        boolean unlocated=false;
+        CaptureDelivery captured=new CaptureDelivery(owners.length);
         try {
             if(Thread.holdsLock(LISTENERS)) {
                 // Our fenced cancellation/request retirement can synchronously emit while
                 // the caller owns publication. These receipts add no new source relation.
                 if(!Integer.valueOf(10).equals(row[0])&&!Integer.valueOf(16).equals(row[0]))
                     throw new IllegalStateException("TASK_CAPTURE_REQUIRES_OUTSIDE_PUBLICATION_GATE");
-                for(OwnerRegistration published:owners)published.owner.captureReceipt(row,published);
+                for(OwnerRegistration published:owners)published.owner.captureReceipt(row,published,captured);
                 return;
             }
             for(OwnerRegistration published:owners) {
                 RecoveryTasks owner=published.owner;
-                try {owner.capture(row,published);}
-                catch(RuntimeException|LinkageError unavailable) {unlocated|=!owner.captureFailed(row,published,"TASK_CAPTURE_FAILED");}
+                try {owner.capture(row,published,captured);}
+                catch(RuntimeException|LinkageError unavailable) {owner.deferCaptureFailure(row,published,captured,"TASK_CAPTURE_FAILED");}
             }
-            if(unlocated&&!locatedCapture(row,owners))unknownCapture("TASK_CAPTURE_SOURCE_UNLOCATABLE");
         } finally {releaseOwners(owners);}
     }
-    private void captureReceipt(Object[] row,OwnerRegistration published) {
+    private void captureReceipt(Object[] row,OwnerRegistration published,CaptureDelivery captured) {
         Task task=tasks.get(row[1]);Set<UUID> related=workerBindings.get(row[1]);
-        if(task==null||related==null||related.isEmpty())return;
-        for(UUID subject:related) {
-            long prior=captureEpochs.getOrDefault(subject,0L);
-            if(prior==Long.MAX_VALUE)scopedGap(row[1],related,"TASK_CAPTURE_EPOCH_EXHAUSTED",published);
-            else captureEpochs.put(subject,prior+1);
-        }
-        events.add(new Capture((Integer)row[0],row[1],row[2],row[3],row[4],task.loader,related,(Long)row[7],null,null,null,
-                task.inline,task.callbackDefinition,false,published.session,published.registration,published.epoch,(Long)row[10]));
-        changes.incrementAndGet();
+        if(task==null||related==null||related.isEmpty()) {captured.resolved(false,false);return;}
+        Capture event=new Capture((Integer)row[0],row[1],row[2],row[3],row[4],task.loader,related,(Long)row[7],null,null,null,
+                task.inline,task.callbackDefinition,false,published.session,published.registration,published.epoch,(Long)row[10]);
+        publishPending(event,published,null,captured,"");
     }
     /** Bootstrap retains failed rows until every current owner has received the scoped gap. */
     private static void pollCaptureLosses() {
@@ -416,15 +481,6 @@ final class RecoveryTasks implements AutoCloseable {
             finally {releaseOwners(owners);}
         }
     }
-    private static boolean locatedCapture(Object[] row,OwnerRegistration[] owners) {
-        synchronized(LISTENERS) {
-            for(OwnerRegistration published:owners) {
-                RecoveryTasks owner=published.owner;CaptureGap loss=owner.captureGaps.get(row[1]);
-                if(loss!=null&&!loss.subjects.isEmpty()||owner.workerBindings.containsKey(row[1]))return true;
-            }
-            return false;
-        }
-    }
     private boolean captureFailed(Object[] row,OwnerRegistration published,String reason) {
         if(!rowScope(row,published)||row[1]==null) {recordGap("TASK_CAPTURE_IDENTITY_UNAVAILABLE");return false;}
         Set<UUID> related=new HashSet<>();Object object=row[1],parent=row[3];
@@ -435,6 +491,13 @@ final class RecoveryTasks implements AutoCloseable {
         if(Integer.valueOf(24).equals(row[0])&&row[2] instanceof UUID subject)related.add(subject);
         try {
             ProRuntime.Subject group=runtime.groupSubject(object);if(group!=null)related.add(group.id);
+            // A preceding valid receipt may still own the only callback reference after
+            // a platform finally cleared the task. Known loss keeps that real scope.
+            for(PendingCapture pending:pendingCaptures)if(pending.event.task==object||pending.event.task==parent) {
+                related.addAll(pending.event.subjects);
+                CaptureRoots roots=pending.roots;
+                if(roots!=null)captureSubjects(pending.event.task,roots.inline,related,roots);
+            }
             Object[] inline=inlineDetails==null?null:(Object[])inlineDetails.invoke(null,object);
             captureSubjects(object,inline,related);
         } catch(ReflectiveOperationException|RuntimeException|LinkageError unavailable) { /* The real task identity still scopes this gap. */ }
@@ -497,8 +560,9 @@ final class RecoveryTasks implements AutoCloseable {
             }
             Object[] row=new Object[]{11,object,scheduler,null,observation,Thread.currentThread(),System.nanoTime(),0L,
                     published.registration,published.epoch,0L};
-            try {capture(row,published);}
-            catch(RuntimeException|LinkageError failure) {captureFailed(row,published,"GROUP_TASK_CAPTURE_FAILED");}
+            CaptureDelivery captured=new CaptureDelivery(1);
+            try {capture(row,published,captured);}
+            catch(RuntimeException|LinkageError failure) {deferCaptureFailure(row,published,captured,"GROUP_TASK_CAPTURE_FAILED");}
         } finally {releaseOwners(new OwnerRegistration[]{published});}
     }
     void groupScheduler(Object scheduler,ProRuntime.Subject group){
@@ -595,7 +659,27 @@ final class RecoveryTasks implements AutoCloseable {
             recordTransient("TASK_BRIDGE_COVERAGE_UNAVAILABLE");return false;
         }
     }
-    private boolean checkBridge(Object task) {return checkBridge()&&!taskGap(task);}
+    private boolean checkBridge(Object task) {
+        synchronized(LISTENERS) {
+            if(!checkBridge()||taskGap(task))return false;
+            // Until this owner's arbitrary callback fields are resolved, its source set
+            // may still acquire another edge. Exact root absence cannot qualify a write.
+            if(!pendingCaptures.isEmpty()) {recordTransient("TASK_SOURCE_RESOLUTION_PENDING");return false;}
+            // A different runtime may not have resolved this shared root yet. Its raw
+            // receipt must not disappear from the ownership gate while its graph is read.
+            if(rootPending(task)) {
+                recordTransient("TASK_ROOT_RESOLUTION_PENDING");return false;
+            }
+            return true;
+        }
+    }
+    private static boolean rootPending(Object task) {
+        synchronized(LISTENERS) {
+            for(RecoveryTasks owner:LISTENERS)if(owner.pendingRoots.containsKey(task))return true;
+            return false;
+        }
+    }
+    private boolean pendingTask(Object task) {synchronized(LISTENERS){return pendingRoots.containsKey(task);}}
     private static final List<String> CF_BOUNDARIES=List.of(cfBoundaries());
     private static final String[] FORK_BOUNDARIES={"java/util/concurrent/ForkJoinTask","java/util/concurrent/ForkJoinTask$Aux",
             "java/util/concurrent/ForkJoinPool","java/util/concurrent/ForkJoinPool$WorkQueue","java/util/concurrent/ForkJoinWorkerThread"};
@@ -682,7 +766,7 @@ final class RecoveryTasks implements AutoCloseable {
             if(!gap.isEmpty())return gateFailure(task,"CAPTURE_GAP:"+gap);
             if(taskGap(task.object))return gateFailure(task,"TASK_CAPTURE_GAP:"+captureGaps.get(task.object).reason);
             if(!observeBackend(task))return gateFailure(task,"REQUIRED_BOUNDARY_UNAVAILABLE");
-            if(!events.isEmpty()||pendingDeliveries==null||((Integer)pendingDeliveries.invoke(null))!=0)return gateFailure(task,"CAPTURE_PUBLICATION_OR_MERGE_PENDING");
+            if(capturePending()||pendingDeliveries==null||((Integer)pendingDeliveries.invoke(null))!=0)return gateFailure(task,"CAPTURE_PUBLICATION_OR_MERGE_PENDING");
             Set<UUID> published=workerBindings.get(task.object);
             if(published==null||!runtime.sameGroup(published,task.authority))return gateFailure(task,"PUBLISHED_TASK_OWNERSHIP_CHANGED");
             for(RecoveryTasks owner:LISTENERS)if(owner!=this&&owner.workerBindings.containsKey(task.object))
@@ -696,7 +780,7 @@ final class RecoveryTasks implements AutoCloseable {
                     try {
                         // A delivery may start after the outer check and reserve publication.
                         // Recheck while the Bootstrap publication monitor excludes new deliveries.
-                        if(!checkBridge(task.object)||!events.isEmpty()||((Integer)pendingDeliveries.invoke(null))!=0) {
+                        if(!checkBridge(task.object)||capturePending()||((Integer)pendingDeliveries.invoke(null))!=0) {
                             gateFailure(task,"CAPTURE_PUBLICATION_OR_MERGE_PENDING");return;
                         }
                         action.run();invoked[0]=true;
@@ -708,10 +792,10 @@ final class RecoveryTasks implements AutoCloseable {
         }
     }
     private static boolean gateFailure(Task task,String reason) { task.gateReason=reason;return false; }
-    private void capture(Object[] row,OwnerRegistration published) {
+    private void capture(Object[] row,OwnerRegistration published,CaptureDelivery captured) {
         // During shutdown keep observing accepted work and its late descendants, without granting writes.
-        if(detached||ownerRegistration!=published||!rowScope(row,published))return;
-        Object object=row[1],parent=row[3];if(object==null)return;
+        if(detached||ownerRegistration!=published||!rowScope(row,published)||row[1]==null) {captured.resolved(false,false);return;}
+        Object object=row[1],parent=row[3];
         if((Integer)row[0]==25) {
             if(object instanceof net.minecraft.world.entity.Entity&&row[2] instanceof net.minecraft.world.entity.Entity clone) {
                 Class<?> holder=row[4] instanceof Class<?> type?type:null;
@@ -723,83 +807,187 @@ final class RecoveryTasks implements AutoCloseable {
                 UUID subject=origins.get(object);
                 if(subject!=null)runtime.recoverySources.cloned(clone,subject,holder);
             }
+            captured.resolved(false,false);
             return;
         }
-        if((Integer)row[0]==24&&(!(row[4] instanceof Object[] origin)||origin.length!=3||origin[0]!=this))return;
+        if((Integer)row[0]==24&&(!(row[4] instanceof Object[] origin)||origin.length!=3||origin[0]!=this)) {captured.resolved(false,false);return;}
+        if(internalRoot(object)) {captured.resolved(false,false);return;}
         // Before any real provenance exists there is no task relation to resolve. Bootstrap
         // still retains actual running frames; a later source event adopts them normally.
         ProRuntime.Subject group=runtime.groupSubject(object);
-        if(origins.isEmpty()&&workerBindings.isEmpty()&&group==null&&(Integer)row[0]!=24)return;
-        if(internalDelegate(object))return;
+        if(origins.isEmpty()&&workerBindings.isEmpty()&&group==null&&(Integer)row[0]!=24) {captured.resolved(false,false);return;}
         Object[] inline=null;
+        String failure="";
         try { if(inlineDetails!=null)inline=(Object[])inlineDetails.invoke(null,object); }
-        catch(ReflectiveOperationException failure) {
-            if(!captureFailed(row,published,"INLINE_CAPTURE_UNAVAILABLE"))throw new IllegalStateException("INLINE_CAPTURE_SOURCE_UNLOCATABLE",failure);
-            return;
-        }
+        catch(ReflectiveOperationException unavailable) {failure="INLINE_CAPTURE_UNAVAILABLE";}
         // Temporary subject IDs are not recovery sources. Avoid routing this bookkeeping
         // through the global HashMap writer observer for every ordinary JDK callback.
         Set<UUID> related=new TreeSet<>();
         if(group!=null)related.add(group.id);
         if((Integer)row[0]==24&&row[2] instanceof UUID subject)related.add(subject);
+        UUID origin=origins.get(object);if(origin!=null)related.add(origin);
         Set<UUID> existing=workerBindings.get(object),ancestor=workerBindings.get(parent);
         if(existing!=null)related.addAll(existing);
         if(ancestor!=null)related.addAll(ancestor);
-        // Direct captured provenance is evidence of a reference, not evidence of delegation.
-        // Only registered JDK wrapper edges may be traversed; third-party delegation is learned
-        // at the actual call site or from real save/copy/load activity on its execution frame.
-        boolean complete=captureSubjects(object,inline,related);
-        if(related.isEmpty()) {
-            if(!complete)throw new IllegalStateException("TASK_CAPTURE_SOURCE_UNLOCATABLE");
-            return;
-        }
-        Object base=inline==null&&object.getClass().getClassLoader()==null
-                &&object.getClass().getName().equals("java.util.concurrent.CompletableFuture$CoCompletion")?completionField(object,"base"):null;
-        Object edge=base==null?object:base;
-        Object dependency=inline==null?completionField(edge,"src"):inline[0];
-        Object other=inline==null?completionField(edge,"snd"):inline[1],output=inline==null?completionField(edge,"dep"):inline[3];
-        Object inputs=inline==null?completionField(object,"srcs"):null;
-        if(inputs instanceof CompletableFuture<?>[] array) {
-            dependency=array.clone();
-        }
+        // Retain platform operands and each actual callback's shallow reference fields:
+        // a callback can move a source to a local and clear its field before the tick.
+        // Wrapper targets and subject/source graphs remain owned by the server drain.
+        TaskOperands operands=inline==null?taskOperands(object):null;
+        Object base=operands==null?null:operands.value("base");
+        TaskOperands baseOperands=base==null?null:taskOperands(base);
+        TaskOperands edge=baseOperands==null?operands:baseOperands;
+        Object dependency=inline==null?edge==null?null:edge.value("src"):inline[0];
+        Object other=inline==null?edge==null?null:edge.value("snd"):inline[1],output=inline==null?edge==null?null:edge.value("dep"):inline[3];
+        Object inputs=operands==null?null:operands.value("srcs");
+        if(inputs instanceof CompletableFuture<?>[])dependency=inputs;
         // A waiter consumes this result. It does not produce the result it is waiting for.
         if((Integer)row[0]>=18&&(Integer)row[0]<=20&&standardCompletionSource(object)) { dependency=object;output=null; }
         Object invocation=(Integer)row[0]==24?((Object[])row[4])[1]:row[4];
         Object scheduler=(Integer)row[0]==24?((Object[])row[4])[2]:row[2];
         ClassLoader loader=object.getClass().getClassLoader();
         Class<?> callbackDefinition=inline==null||inline[2]==null?null:inline[2].getClass();
-        boolean hasExecutor=completionField(object,"executor")!=null;
+        boolean hasExecutor=operands!=null&&operands.value("executor")!=null;
+        Capture event=new Capture((Integer)row[0],object,scheduler,parent,invocation,loader,Set.copyOf(related),(Long)row[7],dependency,other,output,
+                inline!=null,callbackDefinition,hasExecutor,published.session,published.registration,published.epoch,(Long)row[10]);
+        publishPending(event,published,captureRoots(object,inline,operands,baseOperands),captured,failure);
+    }
+    private static TaskOperands taskOperands(Object object) {
+        Field[] fields=TRANSIENT_TASK_FIELDS.get(object.getClass());if(fields.length==0)return null;
+        return readOperands(object,fields,false);
+    }
+    private static TaskOperands readOperands(Object object,Field[] fields,boolean callback) {
+        Object[] values=new Object[fields.length];boolean complete=true;
+        for(int i=0;i<fields.length;i++)try {
+            Field field=fields[i];
+            if(field.canAccess(object)||field.trySetAccessible())values[i]=field.get(object);else complete=false;
+        } catch(IllegalAccessException|RuntimeException unavailable) {complete=false;}
+        return new TaskOperands(object,fields,values,complete,callback);
+    }
+    private static CaptureRoots captureRoots(Object object,Object[] inline,TaskOperands task,TaskOperands base) {
+        var retained=new ArrayList<TaskOperands>();var pending=new ArrayDeque<Object>();
+        if(inline==null)pending.add(object);else if(inline[2]!=null)pending.add(inline[2]);
+        Set<Object> seen=Collections.newSetFromMap(new IdentityHashMap<>());
+        while(!pending.isEmpty()) {
+            Object current=pending.removeFirst();if(!seen.add(current)||internalRoot(current))continue;
+            TaskOperands platform=task!=null&&task.object==current?task:base!=null&&base.object==current?base:taskOperands(current);
+            if(platform!=null) {
+                if(platform!=task&&platform!=base)retained.add(platform);
+                for(int i=0;i<platform.fields.length;i++)if(platform.values[i]!=null&&switch(platform.fields[i].getName()) {
+                    case "callable","task","runnable","fn","base" -> true;
+                    default -> false;
+                })pending.addLast(platform.values[i]);
+            }
+            Field[] fields=CALLBACK_TASK_FIELDS.get(current.getClass());
+            if(fields.length!=0)retained.add(readOperands(current,fields,true));
+            // A custom field's value is retained as one operand. Never descend into it here.
+        }
+        return new CaptureRoots(inline,task,base,List.copyOf(retained));
+    }
+    private void deferCaptureFailure(Object[] row,OwnerRegistration published,CaptureDelivery captured,String reason) {
+        Object object=row[1];
+        if(object==null||!rowScope(row,published)) {captured.resolved(false,true);return;}
+        Set<UUID> related=new TreeSet<>();UUID origin=origins.get(object);if(origin!=null)related.add(origin);
+        if(Integer.valueOf(24).equals(row[0])&&row[2] instanceof UUID subject)related.add(subject);
+        Set<UUID> known=workerBindings.get(object),ancestor=workerBindings.get(row[3]);
+        if(known!=null)related.addAll(known);if(ancestor!=null)related.addAll(ancestor);
+        Object invocation=row[4],scheduler=row[2];
+        if(Integer.valueOf(24).equals(row[0])&&row[4] instanceof Object[] source&&source.length==3) {invocation=source[1];scheduler=source[2];}
+        Capture event=new Capture((Integer)row[0],object,scheduler,row[3],invocation,object.getClass().getClassLoader(),Set.copyOf(related),(Long)row[7],null,null,null,
+                false,null,false,published.session,published.registration,published.epoch,(Long)row[10]);
+        publishPending(event,published,new CaptureRoots(null,null,null,List.of()),captured,reason);
+    }
+    private void publishPending(Capture event,OwnerRegistration published,CaptureRoots roots,CaptureDelivery captured,String failure) {
+        Set<Object> identities=Collections.newSetFromMap(new IdentityHashMap<>());
+        identities.add(event.task);if(event.parent!=null)identities.add(event.parent);if(event.output!=null)identities.add(event.output);
+        if(roots!=null) {
+            if(roots.inline!=null)for(Object value:roots.inline)if(value!=null)identities.add(value);
+            for(TaskOperands operands:new TaskOperands[]{roots.task,roots.base})if(operands!=null)
+                for(Object value:operands.values)if(value!=null)identities.add(value);
+            for(TaskOperands operands:roots.callbacks)for(Object value:operands.values)if(value!=null)identities.add(value);
+        }
         synchronized(LISTENERS) {
-            if(detached||ownerRegistration!=published)return;
+            if(detached||ownerRegistration!=published) {captured.resolved(false,false);return;}
+            for(Object identity:identities)pendingRoots.merge(identity,1,Integer::sum);
+            for(UUID subject:event.subjects)advanceCaptureEpoch(event.task,event.subjects,subject,published);
+            pendingCaptures.add(new PendingCapture(event,published,roots,identities.toArray(),captured,failure));
+            changes.incrementAndGet();
+        }
+    }
+    private void advanceCaptureEpoch(Object object,Set<UUID> related,UUID subject,OwnerRegistration published) {
+        long prior=captureEpochs.getOrDefault(subject,0L);
+        if(prior==Long.MAX_VALUE)scopedGap(object,related,"TASK_CAPTURE_EPOCH_EXHAUSTED",published);
+        else captureEpochs.put(subject,prior+1);
+    }
+    private boolean capturePending() {return pendingCaptures.peek()!=null||events.peek()!=null;}
+    /** Root resolution never runs on the task callback or under TAGS/GRAPH/LISTENERS. */
+    private void resolveCaptures(int budget) {
+        for(int count=0;count<budget;count++) {
+            PendingCapture pending=pendingCaptures.peek();if(pending==null)return;
+            boolean located=false,failed=!pending.failure.isEmpty();
+            try {located=resolveCapture(pending);}
+            catch(RuntimeException|LinkageError unavailable) {
+                Capture event=pending.event;
+                located=captureFailed(new Object[]{event.kind,event.task,event.scheduler,event.parent,event.invocation,null,0L,event.dropped,
+                        event.registration,event.registrationEpoch,event.unknownLoss},pending.owner,"TASK_CAPTURE_FAILED");failed=true;
+            } finally {
+                synchronized(LISTENERS) {
+                    for(Object identity:pending.identities) {
+                        Integer countAt=pendingRoots.get(identity);
+                        if(countAt!=null) {if(countAt==1)pendingRoots.remove(identity);else pendingRoots.put(identity,countAt-1);}
+                    }
+                    pendingCaptures.poll();
+                }
+                pending.delivery.resolved(located,failed);
+            }
+        }
+    }
+    private boolean resolveCapture(PendingCapture pending) {
+        Capture event=pending.event;OwnerRegistration published=pending.owner;Object object=event.task;
+        if(detached||ownerRegistration!=published) {recordGap("TASK_CAPTURE_REGISTRATION_CHANGED");return false;}
+        CaptureRoots roots=pending.roots;
+        if(roots!=null&&internalDelegate(object,roots))return false;
+        Set<UUID> related=new TreeSet<>(event.subjects);
+        Set<UUID> known=workerBindings.get(object),ancestor=workerBindings.get(event.parent);
+        if(known!=null)related.addAll(known);if(ancestor!=null)related.addAll(ancestor);
+        boolean complete=roots==null||captureSubjects(object,roots.inline,related,roots)&&roots.complete();
+        if(related.isEmpty()) {
+            if(!complete)throw new IllegalStateException("TASK_CAPTURE_SOURCE_UNLOCATABLE");
+            return false;
+        }
+        synchronized(LISTENERS) {
+            if(detached||ownerRegistration!=published)return false;
             synchronized(workerBindings) {
                 Set<UUID> prior=workerBindings.get(object);if(prior!=null)related.addAll(prior);
                 workerBindings.put(object,Set.copyOf(related));
-                if(output!=null) {
-                    prior=workerBindings.get(output);Set<UUID> merged=new HashSet<>(related);if(prior!=null)merged.addAll(prior);
-                    workerBindings.put(output,Set.copyOf(merged));
+                if(event.output!=null) {
+                    prior=workerBindings.get(event.output);Set<UUID> merged=new HashSet<>(related);if(prior!=null)merged.addAll(prior);
+                    workerBindings.put(event.output,Set.copyOf(merged));
                 }
             }
             if(!complete)scopedGap(object,related,"TASK_REFERENCE_CAPTURE_UNAVAILABLE",published);
+            if(!pending.failure.isEmpty())scopedGap(object,related,pending.failure,published);
             CaptureGap loss=captureGaps.get(object);
             if(loss!=null)scopedGap(object,related,loss.reason,published);
-            for(UUID subject:related) {
-                long prior=captureEpochs.getOrDefault(subject,0L);
-                if(prior==Long.MAX_VALUE)scopedGap(object,related,"TASK_CAPTURE_EPOCH_EXHAUSTED",published);
-                else captureEpochs.put(subject,prior+1);
-            }
+            for(UUID subject:related)if(!event.subjects.contains(subject))advanceCaptureEpoch(object,related,subject,published);
             changes.incrementAndGet();
-            events.add(new Capture((Integer)row[0],object,scheduler,parent,invocation,loader,Set.copyOf(related),(Long)row[7],dependency,other,output,
-                    inline!=null,callbackDefinition,hasExecutor,published.session,published.registration,published.epoch,(Long)row[10]));
+            events.add(new Capture(event.kind,object,event.scheduler,event.parent,event.invocation,event.loader,Set.copyOf(related),event.dropped,
+                    event.dependency,event.otherDependency,event.output,event.inline,event.callbackDefinition,event.hasExecutor,
+                    event.session,event.registration,event.registrationEpoch,event.unknownLoss));
         }
+        return true;
     }
     private boolean captureSubjects(Object object,Object[] inline,Set<UUID> related) {
+        return captureSubjects(object,inline,related,null);
+    }
+    private boolean captureSubjects(Object object,Object[] inline,Set<UUID> related,CaptureRoots roots) {
         boolean complete=true;
         ArrayDeque<Object> pending=new ArrayDeque<>();
         if(inline==null)pending.add(object);else for(int i=0;i<3;i++)if(inline[i]!=null)pending.add(inline[i]);
         Set<Object> seen=Collections.newSetFromMap(new IdentityHashMap<>());
         while(!pending.isEmpty()) {
             Object current=pending.removeFirst();if(!seen.add(current))continue;
-            UUID origin=capturedOrigin(current);if(origin!=null) { related.add(origin);continue; }
+            UUID origin=roots!=null&&roots.callback(current)?origins.get(current):capturedOrigin(current);
+            if(origin!=null) { related.add(origin);continue; }
             Set<UUID> known=workerBindings.get(current);if(known!=null)related.addAll(known);
             Class<?> type=current.getClass();
             if(type==CompletableFuture[].class) {
@@ -817,12 +1005,16 @@ final class RecoveryTasks implements AutoCloseable {
             boolean delegate=knownDelegate(type);
             Field[] captureFields=CAPTURE_FIELDS.get(type);
             for(Field field:captureFields) {
-                try { if(field.trySetAccessible()) {
-                    Object value=field.get(current);if(value==null)continue;
-                    UUID direct=capturedOrigin(value);if(direct!=null)related.add(direct);
-                    Set<UUID> bound=workerBindings.get(value);if(bound!=null)related.addAll(bound);
-                    if(delegate&&jdkDelegateField(field.getDeclaringClass(),field))pending.addLast(value);
-                } else complete=false; }
+                try {
+                    TaskOperands observed=roots==null?null:roots.retained(current,field);
+                    int saved=observed==null?-1:observed.index(field);
+                    if(saved>=0||field.canAccess(current)||field.trySetAccessible()) {
+                        Object value=saved>=0?observed.values[saved]:field.get(current);if(value==null)continue;
+                        UUID direct=capturedOrigin(value);if(direct!=null)related.add(direct);
+                        Set<UUID> bound=workerBindings.get(value);if(bound!=null)related.addAll(bound);
+                        if(delegate&&jdkDelegateField(field.getDeclaringClass(),field))pending.addLast(value);
+                    } else complete=false;
+                }
                 catch(IllegalAccessException|RuntimeException unavailable) { complete=false; }
             }
         }
@@ -846,7 +1038,7 @@ final class RecoveryTasks implements AutoCloseable {
             RecoveryTasks selected=null;UUID subject=null;
             for(OwnerRegistration published:owners) {
                 RecoveryTasks owner=published.owner;
-                    if(owner.detached||owner.origins.isEmpty()&&owner.workerBindings.isEmpty())continue;
+                    if(owner.detached||owner.origins.isEmpty()&&owner.workerBindings.isEmpty()&&!owner.pendingTask(task))continue;
                     Object[] inline=task==null||inlineDetails==null?null:(Object[])inlineDetails.invoke(null,task);
                     Set<UUID> related=new HashSet<>();
                     if(!owner.producerSubjects(task,inline,producerInputs,related)) {
@@ -887,7 +1079,7 @@ final class RecoveryTasks implements AutoCloseable {
             RecoveryTasks selected=null;UUID id=null;
             for(OwnerRegistration published:owners) {
                 RecoveryTasks owner=published.owner;
-                    if(owner.detached||owner.origins.isEmpty()&&owner.workerBindings.isEmpty())continue;
+                    if(owner.detached||owner.origins.isEmpty()&&owner.workerBindings.isEmpty()&&!owner.pendingTask(task))continue;
                     Object[] inline=task==null||inlineDetails==null?null:(Object[])inlineDetails.invoke(null,task);
                     Set<UUID> related=new HashSet<>();if(!owner.producerSubjects(task,inline,producerInputs,related))return false;
                     if(related.isEmpty())continue;
@@ -902,7 +1094,16 @@ final class RecoveryTasks implements AutoCloseable {
         finally {releaseOwners(owners);}
     }
     private boolean producerSubjects(Object task,Object[] inline,Object[] inputs,Set<UUID> subjects) {
-        boolean complete=task==null||captureSubjects(task,inline,subjects);
+        boolean complete=true,captured=false;
+        if(task!=null) {
+            // Constructor/publication enforcement happens before its original effect. A
+            // queued ENTER must still supply its actual Inline/JDK operands at this point.
+            for(PendingCapture pending:pendingCaptures)if(pending.event.task==task&&pending.roots!=null) {
+                CaptureRoots roots=pending.roots;subjects.addAll(pending.event.subjects);
+                complete&=captureSubjects(task,inline==null?roots.inline:inline,subjects,roots)&&roots.complete();captured=true;
+            }
+            if(!captured)complete=captureSubjects(task,inline,subjects);
+        }
         Set<UUID> directSubjects=new HashSet<>(subjects);
         for(Object input:inputs)if(input instanceof ProRuntime.ProducerOrigin origin&&origin.runtime()==runtime&&origin.complete())
             directSubjects.add(origin.subject());
@@ -945,33 +1146,28 @@ final class RecoveryTasks implements AutoCloseable {
         if(owners.length!=0&&!located)unknownCapture(reason+"_SOURCE_UNLOCATABLE");
     }
     /** Only an actual JDK delegate chain can identify our worker; a random field pointing at Core cannot. */
-    private static boolean internalDelegate(Object object) {
+    private static boolean internalRoot(Object object) {
+        Class<?> host=object.getClass().getNestHost();
+        return (object instanceof Runnable||object instanceof Callable<?>)&&(host==ProRuntime.class||host==IntentJournal.class
+                ||host==RecoveryStorage.class||host==RecoveryTasks.class||host==RecoveryRecords.class);
+    }
+    private static boolean internalDelegate(Object object,CaptureRoots roots) {
         Object current=object;
         for(int depth=0;depth<4&&current!=null;depth++) {
-            Class<?> type=current.getClass(),host=type.getNestHost();
-            if((current instanceof Runnable||current instanceof Callable<?>)&&(host==ProRuntime.class||host==IntentJournal.class
-                    ||host==RecoveryStorage.class||host==RecoveryTasks.class||host==RecoveryRecords.class))return true;
-            try {
-                Field delegate;
-                if(exactFuture(current))delegate=FutureTask.class.getDeclaredField("callable");
+            Class<?> type=current.getClass();if(internalRoot(current))return true;
+            {
+                String delegate;
+                if(exactFuture(current))delegate="callable";
                 else if(type.getClassLoader()==null&&type.getName().equals("java.util.concurrent.Executors$RunnableAdapter"))
-                    delegate=type.getDeclaredField("task");
+                    delegate="task";
                 else return false;
-                if(!delegate.trySetAccessible())return false;
-                current=delegate.get(current);
-            } catch(ReflectiveOperationException|RuntimeException unavailable) { return false; }
+                TaskOperands operands=roots.operands(current);
+                if(operands==null)operands=taskOperands(current);
+                if(operands==null||!operands.complete)return false;
+                current=operands.value(delegate);
+            }
         }
         return false;
-    }
-    private static Object completionField(Object object,String name) {
-        Class<?> type=object.getClass();
-        if(type.getClassLoader()!=null||!type.getName().startsWith("java.util.concurrent.CompletableFuture$"))return null;
-        for(Class<?> c=type;c!=null&&c.getName().startsWith("java.util.concurrent.CompletableFuture$");c=c.getSuperclass()) {
-            try { Field field=c.getDeclaredField(name);if(field.trySetAccessible())return field.get(object); }
-            catch(NoSuchFieldException absent) { }
-            catch(ReflectiveOperationException|RuntimeException unavailable) { return null; }
-        }
-        return null;
     }
     private static boolean knownDelegate(Class<?> type) {
         if(type.getClassLoader()!=null||!"java.base".equals(type.getModule().getName()))return false;
@@ -1034,6 +1230,8 @@ final class RecoveryTasks implements AutoCloseable {
         }
         settleScopes(tick);
         retireCoreReferences(tick);
+        // Policy owns a separate tick budget; receiving and resolving roots only enqueue it.
+        advancePolicyFences();
         // Keep completed children sampled while any linked parent is building its current fact.
         boolean done=!windows.isEmpty(),progressing=false;
         synchronized(LISTENERS) {
@@ -1068,6 +1266,7 @@ final class RecoveryTasks implements AutoCloseable {
         if(!task.queued&&!windows.contains(task)) { task.queued=true;waiting.addLast(task); }
     }
     private void drain(long tick) {
+        resolveCaptures(DRAIN);
         for(int budget=0;budget<DRAIN;budget++) {
             Capture event=events.poll();if(event==null)break;
             OwnerRegistration published=ownerRegistration;
@@ -1193,13 +1392,12 @@ final class RecoveryTasks implements AutoCloseable {
             }
             if(event.unknownLoss!=0)recordGap("BOOTSTRAP_CAPTURE_LOSS_UNKNOWN");
         }
-        advancePolicyFences();
     }
     private void queuePolicy(Task task) {
         if(task.forkJoin&&!task.policyQueued) { task.policyQueued=true;policyPending.addLast(task); }
     }
     private void advancePolicyFences() {
-        for(int budget=Math.min(DRAIN,policyPending.size());budget>0;budget--) {
+        for(int budget=Math.min(SAMPLE_BUDGET,policyPending.size());budget>0;budget--) {
             Task task=policyPending.removeFirst();task.policyQueued=false;
             if(tasks.get(task.object)!=task)continue;
             try {
@@ -1220,8 +1418,8 @@ final class RecoveryTasks implements AutoCloseable {
                     task.gateReason="CAPTURE_PUBLICATION_PENDING";return true;
                 }
             } catch(ReflectiveOperationException unavailable) { return true; }
-            // Completed captures have already published ownership, even if their event rows
-            // are beyond this drain budget. Do not add a whole-queue-empty admission gate.
+            // Resolved roots have already published ownership, even if their merge rows
+            // are beyond this drain budget. checkBridge(task) excludes unresolved aliases.
             Set<UUID> published=workerBindings.get(task.object);
             if(published==null)return true;
             Set<UUID> established=new HashSet<>(task.subjects);established.addAll(published);
@@ -1287,7 +1485,7 @@ final class RecoveryTasks implements AutoCloseable {
     }
     private boolean retirePolicyFence(Task task)throws ReflectiveOperationException {
         synchronized(LISTENERS) {
-            if(!checkBridge(task.object)||!gap.isEmpty()||!events.isEmpty()||pendingDeliveries==null||((Integer)pendingDeliveries.invoke(null))!=0
+            if(!checkBridge(task.object)||!gap.isEmpty()||capturePending()||pendingDeliveries==null||((Integer)pendingDeliveries.invoke(null))!=0
                     ||!observeBackend(task))return false;
             pollAdoptedInvocations(task);
             ProRuntime.Subject scope=task.policyAuthority==null?null:runtime.canonicalSubject(task.policyAuthority.id);
@@ -1456,7 +1654,7 @@ final class RecoveryTasks implements AutoCloseable {
             };
             boolean accepted;
             if(observationOnly)synchronized(LISTENERS) {
-                accepted=checkBridge(task.object)&&gap.isEmpty()&&events.isEmpty()&&((Integer)pendingDeliveries.invoke(null))==0&&observeBackend(task)
+                accepted=checkBridge(task.object)&&gap.isEmpty()&&!capturePending()&&((Integer)pendingDeliveries.invoke(null))==0&&observeBackend(task)
                         &&Boolean.TRUE.equals(withBoundaries.invoke(null,task.requiredBoundaries,task.backendEpoch,bound));
             } else accepted=guarded(task,bound);
             return accepted&&invoked[0];
@@ -1878,7 +2076,7 @@ final class RecoveryTasks implements AutoCloseable {
         synchronized(LISTENERS) {
             try {
                 boolean observerCurrent=checkBridge(task);Set<UUID> published=workerBindings.get(task);
-                if(!observerCurrent||closing||!runtime.journal.healthy()||!gap.isEmpty()||!events.isEmpty()||((Integer)pendingDeliveries.invoke(null))!=0
+                if(!observerCurrent||closing||!runtime.journal.healthy()||!gap.isEmpty()||capturePending()||((Integer)pendingDeliveries.invoke(null))!=0
                         ||!runtime.sameGroup(published,authority))return false;
                 for(RecoveryTasks owner:LISTENERS)if(owner!=this&&owner.workerBindings.containsKey(task))return false;
                 if(!authority.commitGate.tryLock())return false;
@@ -1887,7 +2085,7 @@ final class RecoveryTasks implements AutoCloseable {
                     boolean[] invoked={false};
                     Runnable commit=()->{
                         try {
-                            if(!checkBridge(task)||!events.isEmpty()||((Integer)pendingDeliveries.invoke(null))!=0)return;
+                            if(!checkBridge(task)||capturePending()||((Integer)pendingDeliveries.invoke(null))!=0)return;
                             action.run();invoked[0]=true;
                         } catch(ReflectiveOperationException failure) { throw new IllegalStateException("TASK_PUBLICATION_QUERY_UNAVAILABLE",failure); }
                     };
@@ -1923,7 +2121,7 @@ final class RecoveryTasks implements AutoCloseable {
         if(!task.admissionReleased) {
             Runnable release=()->{
                 try {
-                    if(!events.isEmpty()||pendingDeliveries==null||((Integer)pendingDeliveries.invoke(null))!=0)return;
+                    if(capturePending()||pendingDeliveries==null||((Integer)pendingDeliveries.invoke(null))!=0)return;
                     boolean ready=task.policyFenced?policyReleaseReady(task):retiring&&!task.completion?forkRetirementReady(task):
                             (task.completion?completionFieldsAbsent(task,true)&&completionStacksAbsent(task):forkCapturesAbsent(task))
                                     &&((Integer)helperReferences.invoke(null,task.object))==0;
@@ -1934,7 +2132,7 @@ final class RecoveryTasks implements AutoCloseable {
             if(retiring) {
                 // Only our registry reference is released here. No cancelled qualification authorizes field/queue writes.
                 synchronized(LISTENERS) {
-                    accepted=checkBridge(task.object)&&gap.isEmpty()&&events.isEmpty()&&((Integer)pendingDeliveries.invoke(null))==0&&observeBackend(task)
+                    accepted=checkBridge(task.object)&&gap.isEmpty()&&!capturePending()&&((Integer)pendingDeliveries.invoke(null))==0&&observeBackend(task)
                             &&Boolean.TRUE.equals(withBoundaries.invoke(null,task.requiredBoundaries,task.backendEpoch,release));
                 }
             } else accepted=guarded(task,release);
@@ -2132,7 +2330,7 @@ final class RecoveryTasks implements AutoCloseable {
                 resetWindow(task,"WAIT_INVOCATION_AND_SUBMISSION_RESERVATIONS");return;
             }
             if(!waiterFactsCurrent(task)) { resetWindow(task,"WAIT_WAITER_FACT_ACK");return; }
-            if(!events.isEmpty()) { resetWindow(task,"TASK_EVIDENCE_PENDING_MERGE");return; }
+            if(capturePending()) { resetWindow(task,"TASK_EVIDENCE_PENDING_MERGE");return; }
             // Live facts are sufficient; do not emit a LOCAL_FACT proof record.
             task.state="LOCAL_TASK_SCOPE";
         }
@@ -2141,7 +2339,7 @@ final class RecoveryTasks implements AutoCloseable {
      * Cycles cannot manufacture success: every member must have current exit/reference facts and the required durable action records. */
     private void settleScopes(long tick) {
         synchronized(LISTENERS) {
-            if(!checkBridge()||closing||!gap.isEmpty()||!events.isEmpty())return;
+            if(!checkBridge()||closing||!gap.isEmpty()||capturePending())return;
             try { if(((Integer)pendingDeliveries.invoke(null))!=0)return; }
             catch(ReflectiveOperationException unavailable) { return; }
             Set<Task> active=Collections.newSetFromMap(new IdentityHashMap<>());active.addAll(windows);
@@ -2173,7 +2371,7 @@ final class RecoveryTasks implements AutoCloseable {
                 if(settled.record==null)settled.record=PREFIX+"\tCORE_RELEASED\t"+settled.task+"\t"+settled.operation+"\t"+runtime.session+"\tOWNED_STRONG_GRAPH_CLEARED";
                 settled.ack=settled.ack==null?runtime.journal.append(settled.record):runtime.journal.retryRejected(settled.record,settled.ack);
             }
-            if(!checkBridge()||closing||!gap.isEmpty()||!events.isEmpty())return;
+            if(!checkBridge()||closing||!gap.isEmpty()||capturePending())return;
             try {
                 if(((Integer)pendingDeliveries.invoke(null))!=0)return;
                 Map<UUID,List<Task>> groups=new LinkedHashMap<>();
@@ -2225,7 +2423,7 @@ final class RecoveryTasks implements AutoCloseable {
             if(!gap.isEmpty())out.add(gap);
             if(!transientIssue.isEmpty())out.add("TASK_TRANSIENT:"+transientIssue);
             Set<UUID> targets=subject==null?Set.of():runtime.groupTargets(subject);
-            if(subject==null?!events.isEmpty():events.stream().anyMatch(event->!Collections.disjoint(event.subjects,targets)))out.add("TASK_EVIDENCE_PENDING_MERGE");
+            if(!pendingCaptures.isEmpty()||(subject==null?!events.isEmpty():events.stream().anyMatch(event->!Collections.disjoint(event.subjects,targets))))out.add("TASK_EVIDENCE_PENDING_MERGE");
             for(var entry:captureGaps.entrySet()) {
                 CaptureGap loss=entry.getValue();Task task=tasks.get(entry.getKey());
                 if(task!=null&&operation.equals(task.operation)||!Collections.disjoint(loss.subjects,targets))
@@ -2266,7 +2464,7 @@ final class RecoveryTasks implements AutoCloseable {
         task.state=state;
     }
     private boolean localCurrent(Task task,long tick,long captureEpoch) {
-        return !taskGap(task.object)&&task.reason.isEmpty()&&task.authority!=null
+        return !rootPending(task.object)&&!taskGap(task.object)&&task.reason.isEmpty()&&task.authority!=null
                 &&(!task.admissionFenced||task.admissionReleased&&confirmed(task.fenceReleaseAck))
                 &&task.coverageConfirmed&&qualified(task)&&exclusive(task)
                 &&task.executions.isEmpty()&&task.dispatches.isEmpty()&&task.submissions.isEmpty()
@@ -2372,7 +2570,7 @@ final class RecoveryTasks implements AutoCloseable {
         synchronized(LISTENERS) {
             checkBridge();long now=Integer.toUnsignedLong(runtime.server.getTickCount());
             var out=new ArrayList<String>();out.add("TASK_BACKEND:"+backend);
-            if(!events.isEmpty())out.add("CURRENT_TASK_EVIDENCE_PENDING_SERVER_MERGE");
+            if(capturePending())out.add("CURRENT_TASK_EVIDENCE_PENDING_SERVER_MERGE");
             if(!gap.isEmpty())out.add("TASK_GAP:"+gap);
             if(!transientIssue.isEmpty())out.add("TASK_TRANSIENT:"+transientIssue);
             var selected=new ArrayList<Task>();
@@ -2401,6 +2599,7 @@ final class RecoveryTasks implements AutoCloseable {
     String dependencies(UUID operation,UUID subject) {
         synchronized(LISTENERS) {
             StringBuilder key=new StringBuilder(gap).append(':').append(captureEpochs.getOrDefault(subject,0L));
+            if(!pendingCaptures.isEmpty())key.append("|ROOTS_PENDING:").append(changes.get());
             Set<UUID> targets=runtime.groupTargets(subject);
             for(var entry:captureGaps.entrySet())if(!Collections.disjoint(entry.getValue().subjects,targets))
                 key.append("|CAPTURE_GAP:").append(System.identityHashCode(entry.getKey())).append(':').append(entry.getValue().reason);
@@ -2428,10 +2627,11 @@ final class RecoveryTasks implements AutoCloseable {
         // Ownership of this merge transfers from the stopped server to its retirement worker.
         pollCaptureLosses();
         drain(System.nanoTime()/50_000_000L);
+        advancePolicyFences();
         finishResultCancellationsForClose();
         synchronized(LISTENERS) {
             if(capturePublications!=0)throw new IOException("TASK_CAPTURE_PUBLICATION_IN_FLIGHT");
-            if(!events.isEmpty())throw new IOException("TASK_RETIREMENT_EVENTS_PENDING");
+            if(capturePending())throw new IOException("TASK_RETIREMENT_EVENTS_PENDING");
             try {
                 if(bridge!=null&&((Integer)pendingDeliveries.invoke(null))!=0)throw new IOException("TASK_CAPTURE_PUBLICATION_IN_FLIGHT");
                 if(bridge!=null) {
@@ -2442,6 +2642,7 @@ final class RecoveryTasks implements AutoCloseable {
             } catch(ReflectiveOperationException failure) { throw new IOException("TASK_CAPTURE_PUBLICATION_QUERY_UNAVAILABLE",failure); }
             checkBridge();
             for(Task task:tasks.values()) {
+                if(rootPending(task.object))throw new IOException("TASK_ROOT_RESOLUTION_PENDING:"+task.id);
                 if(taskGap(task.object))throw new IOException("TASK_RETIREMENT_GAP:"+captureGaps.get(task.object).reason);
                 try { pollAdoptedInvocations(task); }
                 catch(ReflectiveOperationException failure) { throw new IOException("SOURCE_INVOCATION_RETIREMENT_UNAVAILABLE",failure); }
@@ -2560,7 +2761,7 @@ final class RecoveryTasks implements AutoCloseable {
             }
             detached=true;
             // Every collection is owned by this observer. External queues, delegates and pools are untouched.
-            events.clear();tasks.clear();producers.clear();dependents.clear();childrenByParent.clear();synchronized(origins){origins.clear();sharedOrigins.clear();}workerBindings.clear();captureEpochs.clear();captureGaps.clear();
+            events.clear();pendingCaptures.clear();pendingRoots.clear();tasks.clear();producers.clear();dependents.clear();childrenByParent.clear();synchronized(origins){origins.clear();sharedOrigins.clear();}workerBindings.clear();captureEpochs.clear();captureGaps.clear();
             windows.clear();waiting.clear();policyPending.clear();
             retirementFact=PREFIX+"\tOBSERVER_RELEASED\t"+runtime.session+"\t"+epoch;
             retirementFactAck=runtime.journal.append(retirementFact);

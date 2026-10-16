@@ -9,6 +9,13 @@ public final class NativeControl {
     private static volatile boolean libraryBoundaryReady;
     private static volatile boolean libraryBoundaryPresent;
     private static volatile String state="NOT_ATTEMPTED";
+    private static final Object INSTALL_LOCK=new Object();
+    private static volatile String installMode="NOT_ATTEMPTED";
+    private static volatile boolean installRetryable;
+    // Set by initialize0 only for an allocation failure before controller prep.
+    private static volatile boolean nativeHandoffRetryable;
+    private static boolean installing,nativeLoadAttempted,nativeLoaded,nativeBoundaryInstalled;
+    private static java.lang.reflect.Method nativeImageSelector,nativeImageFinalizer;
     private static Class<?> definitionDirectoryOwner;
     private NativeControl() {}
     private static final StackWalker CALLER=StackWalker.getInstance(StackWalker.Option.RETAIN_CLASS_REFERENCE);
@@ -18,18 +25,63 @@ public final class NativeControl {
         try {return caller==Class.forName("dev.ronova.pro.agent.RecoveryAgent",false,ClassLoader.getSystemClassLoader());}
         catch(ClassNotFoundException missing){return false;}
     }
-    public static synchronized String install(Path bootstrapJar) {
+    public static String install(Path bootstrapJar) {
         if(!controlCaller())throw new SecurityException("NATIVE_CONTROL_AGENT_REQUIRED");
-        if(!state.equals("NOT_ATTEMPTED"))return state;
+        synchronized(INSTALL_LOCK){
+            if(installing||available||!installMode.equals("NOT_ATTEMPTED")&&!installRetryable)return state;
+            installing=true;installRetryable=false;installMode="INSTALLING";
+        }
+        try{return installAttempt(bootstrapJar);}
+        finally{synchronized(INSTALL_LOCK){installing=false;}}
+    }
+    private static String installAttempt(Path bootstrapJar){
         try{
-            Class<?> agent=Class.forName("dev.ronova.pro.agent.RecoveryAgent",false,ClassLoader.getSystemClassLoader());
-            definitionDirectoryOwner=Class.forName("dev.ronova.pro.agent.ExternalCodeDefinitions",false,agent.getClassLoader());
-        }catch(ClassNotFoundException missing){return state="OBJECT_CLONE_JNI_UNAVAILABLE:ClassNotFoundException";}
-        if(!System.getProperty("os.name","").startsWith("Windows")||!System.getProperty("os.arch","").equals("amd64"))
-            return state="OBJECT_CLONE_JNI_UNSUPPORTED_PLATFORM";
+            if(nativeImageSelector==null||nativeImageFinalizer==null){
+                Class<?> agent=Class.forName("dev.ronova.pro.agent.RecoveryAgent",false,ClassLoader.getSystemClassLoader());
+                definitionDirectoryOwner=Class.forName("dev.ronova.pro.agent.ExternalCodeDefinitions",false,agent.getClassLoader());
+                nativeImageSelector=agent.getMethod("nativeImageCandidate",Module.class,ClassLoader.class,String.class,Class.class,Module[].class);
+                nativeImageFinalizer=agent.getMethod("nativeFinalImage",Module.class,ClassLoader.class,String.class,Class.class,ProtectionDomain.class,byte[].class,byte[].class,Module[].class,boolean.class);
+            }
+            if(!System.getProperty("os.name","").startsWith("Windows")||!System.getProperty("os.arch","").equals("amd64"))
+                return installFailure("OBJECT_CLONE_JNI_UNSUPPORTED_PLATFORM",false);
+            if(!nativeLoaded){
+                Path dll=nativeImage(bootstrapJar);
+                if(dll==null)return installFailure("OBJECT_CLONE_JNI_PAYLOAD_ABSENT",false);
+                nativeLoadAttempted=true;
+                System.load(dll.toString());nativeLoaded=true;
+                if(abi()!=84)throw new UnsatisfiedLinkError("NATIVE_CONTROL_ABI");
+            }
+            if(!nativeBoundaryInstalled){
+                nativeHandoffRetryable=false;
+                if(!initialize0(ControlBridge.class,DefinitionBridge.class))
+                    return installFailure("OBJECT_CLONE_JNI_UNAVAILABLE:ACTUAL_NATIVE_BOUNDARY_INSTALL_FAILED",nativeHandoffRetryable);
+                nativeBoundaryInstalled=true;
+            }
+            // This stage publishes one immutable CAS directory. Its native
+            // implementation cleans an unsuccessful record and accepts the
+            // already-published exact owner, so only this stage is resumed.
+            if(!initializeDefinitionDirectory0(definitionDirectoryOwner))
+                return installFailure("OBJECT_CLONE_JNI_UNAVAILABLE:ACTUAL_DEFINITION_DIRECTORY_CAS_PENDING",true);
+            libraryBoundaryPresent=libraryPresent0();state="NATIVE_BIND_AND_JNI_FIELD_READY";
+            installMode="FULL";available=true;return state;
+        }catch(ClassNotFoundException|NoSuchMethodException failure){
+            return installFailure("OBJECT_CLONE_JNI_UNAVAILABLE:"+failure.getClass().getSimpleName()+":"+failure.getMessage(),false);
+        }catch(IOException failure){
+            return installFailure("OBJECT_CLONE_JNI_UNAVAILABLE:"+failure.getClass().getSimpleName()+":"+failure.getMessage(),
+                    !nativeLoadAttempted&&!(failure instanceof java.util.zip.ZipException));
+        }catch(RuntimeException|LinkageError failure){
+            return installFailure("OBJECT_CLONE_JNI_UNAVAILABLE:"+failure.getClass().getSimpleName()+":"+failure.getMessage(),false);
+        }catch(OutOfMemoryError failure){
+            return installFailure("OBJECT_CLONE_JNI_UNAVAILABLE:OutOfMemoryError",!nativeLoadAttempted||nativeBoundaryInstalled||nativeHandoffRetryable);
+        }
+    }
+    private static String installFailure(String reason,boolean retryable){
+        available=false;state=reason;installMode=nativeLoadAttempted?"DEGRADED":"FAILED";installRetryable=retryable;return state;
+    }
+    private static Path nativeImage(Path bootstrapJar)throws IOException{
         try(java.util.jar.JarFile payload=new java.util.jar.JarFile(bootstrapJar.toFile())) {
             var entry=payload.getJarEntry("ronova-native/windows-x86_64/ronova-pro-control.dll");
-            if(entry==null)return state="OBJECT_CLONE_JNI_PAYLOAD_ABSENT";
+            if(entry==null)return null;
             byte[] bytes;try(InputStream input=payload.getInputStream(entry)) { bytes=input.readAllBytes(); }
             String digest=hash(bytes);
             Path directory=Path.of(System.getProperty("user.dir","."),"ronova-pro","native",digest).toAbsolutePath();Files.createDirectories(directory);
@@ -41,19 +93,18 @@ public final class NativeControl {
             }
             String early=System.getProperty("ronova.pro.control.native","");
             if(!early.isEmpty()) {
-                Path actual=Path.of(early).toAbsolutePath();if(!hash(Files.readAllBytes(actual)).equals(digest))throw new IOException("EARLY_NATIVE_IMAGE_MISMATCH");dll=actual;
+                Path actual=Path.of(early).toAbsolutePath();if(!hash(Files.readAllBytes(actual)).equals(digest))throw new UnsatisfiedLinkError("EARLY_NATIVE_IMAGE_MISMATCH");dll=actual;
             }
-            System.load(dll.toString());if(abi()!=83)throw new UnsatisfiedLinkError("NATIVE_CONTROL_ABI");
-            if(!initialize0(ControlBridge.class,DefinitionBridge.class))throw new UnsatisfiedLinkError("ACTUAL_NATIVE_BOUNDARY_INSTALL_FAILED");
-            if(!initializeDefinitionDirectory0(definitionDirectoryOwner))throw new UnsatisfiedLinkError("ACTUAL_DEFINITION_DIRECTORY_CAS_UNAVAILABLE");
-            libraryBoundaryPresent=libraryPresent0();available=true;return state="NATIVE_BIND_AND_JNI_FIELD_READY";
-        } catch(IOException|RuntimeException|LinkageError failure) { return state="OBJECT_CLONE_JNI_UNAVAILABLE:"+failure.getClass().getSimpleName()+":"+failure.getMessage(); }
+            return dll;
+        }
     }
     private static String hash(byte[] bytes) {
         try { return HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256").digest(bytes)); }
         catch(NoSuchAlgorithmException impossible) { throw new AssertionError(impossible); }
     }
     public static boolean available() { return available; }
+    public static String installMode(){return installMode;}
+    public static boolean installRetryable(){return installRetryable;}
     static java.util.UUID returnIdentifier(){
         if(CALLER.getCallerClass()!=DefinitionBridge.class)throw new SecurityException("DEFINITION_RETURN_FACTORY_REQUIRED");
         if(!available)throw new IllegalStateException("NATIVE_RETURN_IDENTIFIER_UNAVAILABLE:"+state);
@@ -565,7 +616,7 @@ public final class NativeControl {
         if(!available||token==0)return "HOST_PROCESS_CREATION_UNOBSERVED";
         String gap=processRetire0(process,token);return gap==null?"HOST_PROCESS_DISPOSITION_UNAVAILABLE":gap;
     }
-    public static String state() { return state+":NATIVE_LIBRARY_BOUNDARY="+(libraryBoundaryReady?"READY":"UNAVAILABLE")
+    public static String state() { return state+":INSTALL_MODE="+installMode+":INSTALL_RETRYABLE="+installRetryable+":NATIVE_LIBRARY_BOUNDARY="+(libraryBoundaryReady?"READY":"UNAVAILABLE")
             +":HOST_PROCESS_BOUNDARY="+(available&&hostReady0()?"JDK_PROCESSIMPL_CREATEPROCESSW_BOUND":"AWAITING_ACTUAL_JDK_PROCESSIMPL_CREATEPROCESSW_BIND")
             +":HOST_NATIVE_CREATE_SCOPE=REGISTERED_EXACT_CREATEPROCESSA_W_NORMAL_OR_RESOLVED_DELAY_IMPORTS_AND_OBSERVED_GETPROCADDRESS_RESULTS_AFTER_OS_LOAD_RETURN"
             +":VERIFIED_RIP_RELATIVE_DELAY_IAT_CALLS_USE_CURRENT_BINDING_DYNAMIC_POINTERS_RETAIN_RESOLUTION_SOURCES"
@@ -620,12 +671,17 @@ public final class NativeControl {
         if(!jvmtiDefinitionCompletion0(actuals))throw new SecurityException("ACTUAL_JVMTI_DEFINITION_COMPLETION_SCOPE_REQUIRED");
         return ControlBridge.nativeDefinitionsChanged(actuals);
     }
+    private static boolean jvmtiImageCandidate(Module module,ClassLoader loader,String name,Class<?> actual,Module[] writers){
+        java.lang.reflect.Method selector=nativeImageSelector;if(selector==null)return true;
+        try{return Boolean.TRUE.equals(selector.invoke(null,module,loader,name,actual,writers));}
+        catch(ReflectiveOperationException failure){throw new IllegalStateException("NATIVE_IMAGE_SELECTOR_UNAVAILABLE",failure);}
+    }
     private static byte[] jvmtiImage(Module module,ClassLoader loader,String name,Class<?> actual,ProtectionDomain domain,byte[] original,byte[] bytes,Module[] writers,boolean changed){
         if(!jvmtiBoundary0(module,loader,name,actual,domain,original,bytes,writers,changed))throw new SecurityException("ACTUAL_NATIVE_CLASS_FILE_CALLBACK_SCOPE_REQUIRED");
         try{
-            Class<?> agent=Class.forName("dev.ronova.pro.agent.RecoveryAgent",false,ClassLoader.getSystemClassLoader());
-            return (byte[])agent.getMethod("nativeFinalImage",Module.class,ClassLoader.class,String.class,Class.class,ProtectionDomain.class,byte[].class,byte[].class,Module[].class,boolean.class)
-                    .invoke(null,module,loader,name,actual,domain,original,bytes,writers,changed);
+            java.lang.reflect.Method finalizer=nativeImageFinalizer;
+            if(finalizer==null)throw new IllegalStateException("NATIVE_FINAL_IMAGE_UNBOUND");
+            return (byte[])finalizer.invoke(null,module,loader,name,actual,domain,original,bytes,writers,changed);
         }catch(ReflectiveOperationException failure){throw new IllegalStateException("NATIVE_FINAL_IMAGE_UNAVAILABLE",failure);}
     }
     public static String moduleState(Module module) {

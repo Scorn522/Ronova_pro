@@ -19,10 +19,11 @@ final class ExternalCodeDefinitions {
     private static final Method COMPARE=compareMethod();
     private static final ThreadLocal<BootstrapLookup> BOOTSTRAP_LOOKUP=new ThreadLocal<>();
     private static final ThreadLocal<Resolution> RESOLUTION=new ThreadLocal<>();
-    // Monotonic for this runtime: once a real producer/contributor has been
-    // observed, later graphs always resolve their actual callers. This flag
-    // grants no ownership and never certifies an operation or cleared source.
-    private static volatile boolean sourceObserved;
+    private record SourceScope(Ref<ClassLoader> loader,boolean bootstrap,String name,Ref<Module> declaration,Set<String> methods){}
+    private record SourceScopes(List<SourceScope> sources,Set<String> candidates,Set<String> methods){}
+    private static volatile SourceScopes sourceScopes=new SourceScopes(List.of(),Set.of(),Set.of());
+    /** Header/reference retention for misses, without an ASM reader or instruction graph. */
+    record ReferenceHeader(String name,Map<String,Integer> declarations,int concreteMethods,Set<String> references,Set<String> calls){}
     private static final class Candidate {
         final Definition definition;
         final Candidate next;
@@ -108,12 +109,15 @@ final class ExternalCodeDefinitions {
         private volatile ExternalCodeFlow.Image analysis;
         final byte[] semanticBytes;
         final Map<String,Integer> declarations;final int declarationCount;
-        final Map<String,Module[][]> applied;final Set<String> references;final byte[] bytes;final Ref<byte[]> emitted;volatile Ref<Class<?>> actual;
+        final Map<String,Module[][]> applied;final Set<String> references,calls;final byte[] bytes;final Ref<byte[]> emitted;volatile Ref<Class<?>> actual;
         final Map<String,Module[]> fields;final Object[][] values;
         final String[] creationSites;
         final Object execution;
-        final int concreteMethods;final boolean contributors;
+        final int concreteMethods;final boolean contributors,referenceOnly;
         Definition(ClassLoader loader,String name,Class<?> actual,Module declaration,ExternalCodeFlow.Image image,ExternalCodeFlow.Image analysis,byte[] semanticBytes,Map<String,Module[][]> applied,byte[] bytes,Map<String,Module[]> fields,Object[][] values,boolean hidden,String[] creationSites,Object execution){
+            this(loader,name,actual,declaration,image,analysis,semanticBytes,applied,bytes,fields,values,hidden,creationSites,execution,null);
+        }
+        Definition(ClassLoader loader,String name,Class<?> actual,Module declaration,ExternalCodeFlow.Image image,ExternalCodeFlow.Image analysis,byte[] semanticBytes,Map<String,Module[][]> applied,byte[] bytes,Map<String,Module[]> fields,Object[][] values,boolean hidden,String[] creationSites,Object execution,ReferenceHeader reference){
             this.loader=new Ref<>(loader);this.declaration=new Ref<>(declaration);this.bootstrap=loader==null;this.hidden=hidden;this.boundHidden=hidden&&actual!=null;this.name=name;this.actual=new Ref<>(actual);this.analysis=analysis;this.applied=applied;this.emitted=new Ref<>(bytes);this.bytes=bytes.clone();
             this.semanticBytes=analysis==null?semanticBytes.clone():null;
             // The emitted tree is used only for method declarations. Retain
@@ -122,18 +126,22 @@ final class ExternalCodeDefinitions {
             // Temporary String-keyed declaration tables carry no recovery
             // source. Do not route each header through the observed Map writer.
             Map<String,Integer> headers=new TreeMap<>();
-            for(MethodNode method:image.node().methods)headers.put(method.name+method.desc,method.access&0xffff);
-            this.declarations=Map.copyOf(headers);this.declarationCount=image.node().methods.size();
+            if(reference==null)for(MethodNode method:image.node().methods)headers.put(method.name+method.desc,method.access&0xffff);
+            else headers.putAll(reference.declarations());
+            this.declarations=Map.copyOf(headers);this.declarationCount=reference==null?image.node().methods.size():reference.declarations().size();
             Map<String,Module[]> declared=new LinkedHashMap<>();for(var field:fields.entrySet())declared.put(field.getKey(),field.getValue().clone());this.fields=Map.copyOf(declared);
             this.values=new Object[values.length][];for(int i=0;i<values.length;i++){this.values[i]=values[i].clone();this.values[i][3]=((Module[])values[i][3]).clone();}
             this.creationSites=creationSites.clone();
             this.execution=execution;
-            this.concreteMethods=(int)image.node().methods.stream().filter(method->(method.access&(Opcodes.ACC_ABSTRACT|Opcodes.ACC_NATIVE))==0).count();
+            this.concreteMethods=reference==null?(int)image.node().methods.stream().filter(method->(method.access&(Opcodes.ACC_ABSTRACT|Opcodes.ACC_NATIVE))==0).count():reference.concreteMethods();
             this.contributors=analysis!=null&&ExternalCodeFlow.hasContributors(analysis);
-            Set<String> referenced=new LinkedHashSet<>();
-            if(analysis!=null){
+            this.referenceOnly=reference!=null;
+            Set<String> referenced=new LinkedHashSet<>(),calls=new LinkedHashSet<>();
+            if(reference!=null){referenced.addAll(reference.references());calls.addAll(reference.calls());}
+            else if(analysis!=null){
                 for(MethodNode method:analysis.node().methods)for(AbstractInsnNode instruction:method.instructions.toArray())if(instruction instanceof MethodInsnNode call){
                     referenced.add(call.owner);
+                    calls.add(call.owner+'#'+call.name+call.desc);
                 }
             }else{
                 // Constant-pool method references are a conservative superset
@@ -142,15 +150,16 @@ final class ExternalCodeDefinitions {
                 var reader=new jdk.internal.org.objectweb.asm.ClassReader(this.semanticBytes);char[] buffer=new char[reader.getMaxStringLength()];
                 for(int i=1;i<reader.getItemCount();i++){
                     int at=reader.getItem(i);if(at==0)continue;int tag=reader.readByte(at-1);if(tag!=10&&tag!=11)continue;
-                    referenced.add(reader.readClass(at,buffer));
+                    String owner=reader.readClass(at,buffer);referenced.add(owner);
+                    int member=reader.getItem(reader.readUnsignedShort(at+2));calls.add(owner+'#'+reader.readUTF8(member,buffer)+reader.readUTF8(member+2,buffer));
                 }
             }
-            this.references=Set.copyOf(referenced);
-            List<Object> controls=new ArrayList<>(Arrays.asList(DIRECTORY,WORKER,LOADED,COMPARE,this,this.loader,this.declaration,this.actual,this.bytes,this.semanticBytes,this.emitted,this.applied,this.references,this.fields,this.values,this.creationSites,this.declarations));
+            this.references=Set.copyOf(referenced);this.calls=Set.copyOf(calls);
+            List<Object> controls=new ArrayList<>(Arrays.asList(DIRECTORY,WORKER,LOADED,COMPARE,this,this.loader,this.declaration,this.actual,this.bytes,this.semanticBytes,this.emitted,this.applied,this.references,this.calls,this.fields,this.values,this.creationSites,this.declarations));
             for(Module[][] rows:this.applied.values()){controls.add(rows);Collections.addAll(controls,rows);}
             for(Module[] owners:this.fields.values())controls.add(owners);for(Object[] row:this.values){controls.add(row);controls.add(row[3]);}
             ControlImages.protect(controls.toArray());
-            ExternalCodeImages.protectDefinitionMetadata(this.declarations,this.references);
+            ExternalCodeImages.protectDefinitionMetadata(this.declarations,this.references,this.calls);
             if(analysis!=null)ExternalCodeImages.protectExecution(analysis,this.declarations);
         }
         boolean loader(ClassLoader candidate){return bootstrap==(candidate==null)&&loader.get()==candidate;}
@@ -216,6 +225,110 @@ final class ExternalCodeDefinitions {
             throw new IllegalStateException("EXTERNAL_DEFINITION_DIRECTORY_CAS",cause);
         }catch(ReflectiveOperationException failure){throw new IllegalStateException("EXTERNAL_DEFINITION_DIRECTORY_CAS",failure);}
     }
+    static ReferenceHeader references(String expected,byte[] bytes){
+        if(bytes==null)return null;
+        try(var input=new java.io.DataInputStream(new java.io.ByteArrayInputStream(bytes))){
+            if(input.readInt()!=0xcafebabe)return null;
+            input.readUnsignedShort();input.readUnsignedShort();int count=input.readUnsignedShort();
+            String[] strings=new String[count];int[] classes=new int[count],owners=new int[count],members=new int[count],memberNames=new int[count],memberDescriptors=new int[count];
+            for(int i=1;i<count;i++)switch(input.readUnsignedByte()){
+                case 1->strings[i]=input.readUTF();
+                case 7->classes[i]=input.readUnsignedShort();
+                case 10,11->{owners[i]=input.readUnsignedShort();members[i]=input.readUnsignedShort();}
+                case 12->{memberNames[i]=input.readUnsignedShort();memberDescriptors[i]=input.readUnsignedShort();}
+                case 3,4,9,17,18->input.skipNBytes(4);
+                case 5,6->{input.skipNBytes(8);i++;}
+                case 8,16,19,20->input.skipNBytes(2);
+                case 15->input.skipNBytes(3);
+                default->{return null;}
+            }
+            input.readUnsignedShort();String name=strings[classes[input.readUnsignedShort()]];
+            if(name==null||expected!=null&&!expected.equals(name))return null;
+            input.readUnsignedShort();input.skipNBytes(2L*input.readUnsignedShort());
+            int fields=input.readUnsignedShort();for(int i=0;i<fields;i++){input.skipNBytes(6);skipAttributes(input);}
+            int methods=input.readUnsignedShort(),concrete=0;Map<String,Integer> declarations=new TreeMap<>();
+            for(int i=0;i<methods;i++){
+                int access=input.readUnsignedShort();String method=strings[input.readUnsignedShort()],descriptor=strings[input.readUnsignedShort()];
+                if(method==null||descriptor==null||declarations.put(method+descriptor,access)!=null)return null;
+                if((access&(Opcodes.ACC_ABSTRACT|Opcodes.ACC_NATIVE))==0)concrete++;
+                skipAttributes(input);
+            }
+            skipAttributes(input);if(input.available()!=0)return null;
+            Set<String> references=new LinkedHashSet<>(),calls=new LinkedHashSet<>();
+            for(int i=1;i<count;i++)if(owners[i]!=0){String reference=strings[classes[owners[i]]],method=strings[memberNames[members[i]]],descriptor=strings[memberDescriptors[members[i]]];if(reference==null||method==null||descriptor==null)return null;references.add(reference);calls.add(reference+'#'+method+descriptor);}
+            return new ReferenceHeader(name,Map.copyOf(declarations),concrete,Set.copyOf(references),Set.copyOf(calls));
+        }catch(java.io.IOException|IndexOutOfBoundsException malformed){return null;}
+    }
+    private static void skipAttributes(java.io.DataInputStream input)throws java.io.IOException{
+        int count=input.readUnsignedShort();for(int i=0;i<count;i++){input.readUnsignedShort();input.skipNBytes(Integer.toUnsignedLong(input.readInt()));}
+    }
+    static void referenceOnly(ClassLoader loader,String name,Class<?> actual,Module declaration,byte[] bytes,byte[] semanticBytes,ReferenceHeader reference){
+        if(reference==null||name==null||!name.equals(reference.name()))return;
+        // The exact input and method-reference names remain available for a
+        // later real producer binding. No emitted VM layout or source row is
+        // claimed for this lightweight directory entry.
+        Definition observed=new Definition(loader,name,actual,declaration,null,null,semanticBytes,Map.of(),bytes,Map.of(),new Object[0][],false,new String[0],null,reference);
+        publish(observed,true);
+    }
+    private static void observeSource(ClassLoader loader,String name,Module declaration){
+        for(;;){
+            SourceScopes before=sourceScopes;List<SourceScope> sources=new ArrayList<>();boolean present=false;
+            Set<String> contracts=name==null?Set.of():sourceContracts(loader,name);
+            for(SourceScope source:before.sources()){
+                if(!source.bootstrap()&&source.loader().get()==null||source.declaration().get()==null)continue;
+                if(source.bootstrap()==(loader==null)&&source.loader().get()==loader&&source.name().equals(name)&&source.declaration().get()==declaration){
+                    Set<String> merged=new HashSet<>(source.methods());merged.addAll(contracts);
+                    sources.add(new SourceScope(source.loader(),source.bootstrap(),source.name(),source.declaration(),Set.copyOf(merged)));present=true;
+                }else sources.add(source);
+            }
+            if(!present&&name!=null)sources.add(new SourceScope(new Ref<>(loader),loader==null,name,new Ref<>(declaration),contracts));
+            Set<String> candidates=new HashSet<>(),methods=new HashSet<>();for(SourceScope source:sources){candidates.add(source.name());methods.addAll(source.methods());}
+            List<Definition> definitions=definitions();boolean changed;
+            do{
+                changed=false;
+                for(Definition definition:definitions)if(!candidates.contains(definition.name)&&(!Collections.disjoint(definition.references,candidates)||!Collections.disjoint(definition.calls,methods)))changed|=candidates.add(definition.name);
+            }while(changed);
+            if((present||name==null)&&sources.size()==before.sources().size()&&candidates.equals(before.candidates())&&methods.equals(before.methods()))return;
+            SourceScopes next=new SourceScopes(List.copyOf(sources),Set.copyOf(candidates),Set.copyOf(methods));
+            List<Object> controls=new ArrayList<>(Arrays.asList(next,next.sources(),next.candidates(),next.methods()));
+            for(SourceScope source:sources){controls.add(source);controls.add(source.loader());controls.add(source.declaration());controls.add(source.methods());}
+            ControlImages.protect(controls.toArray());
+            synchronized(ExternalCodeDefinitions.class){if(sourceScopes!=before)continue;sourceScopes=next;return;}
+        }
+    }
+    private static Set<String> sourceContracts(ClassLoader loader,String name){
+        List<Definition> definitions=definitions();Definition source=null;
+        for(int i=definitions.size()-1;i>=0;i--){Definition candidate=definitions.get(i);if(candidate.loader(loader)&&candidate.name.equals(name)){source=candidate;break;}}
+        if(source==null)return Set.of();
+        Set<String> names=new HashSet<>();names.add(name);Class<?> actual=source.actual.get();
+        if(actual!=null){
+            Set<Class<?>> visited=Collections.newSetFromMap(new IdentityHashMap<>());ArrayDeque<Class<?>> pending=new ArrayDeque<>();pending.add(actual);
+            while(!pending.isEmpty()){
+                Class<?> type=pending.removeFirst();if(!visited.add(type))continue;names.add(type.getName().replace('.','/'));
+                Class<?> parent=type.getSuperclass();if(parent!=null)pending.add(parent);Collections.addAll(pending,type.getInterfaces());
+            }
+        }
+        Set<String> methods=new HashSet<>();
+        for(String member:source.declarations.keySet())if(!member.startsWith("<")&&member.charAt(member.length()-1)!='V')
+            for(String owner:names)methods.add(owner+'#'+member);
+        return Set.copyOf(methods);
+    }
+    static boolean executionSourcesObserved(ClassLoader loader,String name){
+        // Names only admit a candidate. expand still requires the actual
+        // initiated class, declaration and native body match across loaders.
+        return name!=null&&sourceScopes.candidates().contains(name);
+    }
+    static boolean executionSourcesObserved(Module declaration,ClassLoader loader,String name,ReferenceHeader reference){
+        if(RecoveryAgent.producerModule(declaration)||executionSourcesObserved(loader,name))return true;
+        return reference!=null&&(!Collections.disjoint(reference.references(),sourceScopes.candidates())||!Collections.disjoint(reference.calls(),sourceScopes.methods()));
+    }
+    static void moduleObserved(Module module){
+        if(!RecoveryAgent.producerModule(module))return;
+        for(Definition definition:definitions())if(definition.declaration.get()==module){
+            observeSource(definition.loader.get(),definition.name,module);
+            Class<?> actual=definition.actual.get();if(actual!=null)changed(actual);
+        }
+    }
     static void accepted(ClassLoader loader,String name,Class<?> actual,Module declaration,byte[] bytes,byte[] semanticBytes,Map<String,Module[][]> rows,ExternalCodeFlow.Image semantic,Map<String,Module[][]> applied,Map<String,Module[]> fields,Object[][] values,boolean hidden,String[] creationSites,Object execution){
         if(name==null)return;
         ClassNode header=new ClassNode();new jdk.internal.org.objectweb.asm.ClassReader(bytes).accept(header,
@@ -234,7 +347,6 @@ final class ExternalCodeDefinitions {
         ControlImages.protect(DIRECTORY,WORKER,COMPARE,next,definitions,changes,continuing,active);return next;
     }
     private static boolean publish(Definition replacement,boolean emitted){
-        if(replacement.contributors||RecoveryAgent.producerModule(replacement.declaration.get()))sourceObserved=true;
         for(;;){
             Directory before=DIRECTORY.get();List<Definition> definitions=new ArrayList<>(before.definitions());
             if(!emitted&&definitions.stream().anyMatch(entry->entry.boundHidden&&entry.actual.get()==replacement.actual.get()))return false;
@@ -245,7 +357,11 @@ final class ExternalCodeDefinitions {
                     ||entry.hidden&&!entry.boundHidden&&entry.emitted.get()==null);
             definitions.add(replacement);
             Directory after=directory(List.copyOf(definitions),before.changes(),before.continuing(),before.active());
-            if(compareDirectory(before,after))return true;
+            if(compareDirectory(before,after)){
+                if(replacement.contributors||RecoveryAgent.producerModule(replacement.declaration.get()))observeSource(replacement.loader.get(),replacement.name,replacement.declaration.get());
+                else if(!Collections.disjoint(replacement.references,sourceScopes.candidates())||!Collections.disjoint(replacement.calls,sourceScopes.methods()))observeSource(null,null,null);
+                return true;
+            }
         }
     }
     static void defined(Class<?> actual,byte[] bytes){
@@ -270,14 +386,14 @@ final class ExternalCodeDefinitions {
     }
     static void prepared(Class<?> actual){
         if(actual==null||actual.isHidden())return;
-        if(RecoveryAgent.producerModule(RecoveryAgent.logicalModule(actual)))sourceObserved=true;
         String name=actual.getName().replace('.','/');
-        boolean observed=false;
+        boolean observed=false,source=RecoveryAgent.producerModule(RecoveryAgent.logicalModule(actual));
         for(Definition entry:definitions())if(!entry.hidden&&entry.loader(actual.getClassLoader())&&entry.name.equals(name)){
             Class<?> prior=entry.actual.get();if(prior!=null&&prior!=actual)continue;
-            Ref<Class<?>> accepted=new Ref<>(actual);ControlImages.protect(accepted);entry.actual=accepted;observed=true;
+            Ref<Class<?>> accepted=new Ref<>(actual);ControlImages.protect(accepted);entry.actual=accepted;observed=true;source|=entry.contributors;
         }
-        if(observed)changed(actual);
+        if(source)observeSource(actual.getClassLoader(),name,RecoveryAgent.logicalModule(actual));
+        if(observed&&executionSourcesObserved(actual.getClassLoader(),actual.getName().replace('.','/')))changed(actual);
     }
     static void changed(Class<?> actual){
         if(!eligible(actual))return;
@@ -304,20 +420,37 @@ final class ExternalCodeDefinitions {
                 ||!Objects.equals(actual.getProtectionDomain().getCodeSource(),RecoveryAgent.class.getProtectionDomain().getCodeSource());
     }
     private static void run(Instrumentation api){
+        long retryDelay=100_000_000L,retryAt=0;
+        Set<Class<?>> reported=Collections.newSetFromMap(new IdentityHashMap<>());
         for(;;){
             Directory before=DIRECTORY.get();
             if(before.changes().isEmpty()){
-                java.util.concurrent.locks.LockSupport.park(ExternalCodeDefinitions.class);
+                if(before.continuing().isEmpty())java.util.concurrent.locks.LockSupport.park(ExternalCodeDefinitions.class);
+                else {
+                    long remaining=retryAt-System.nanoTime();
+                    if(remaining>0)java.util.concurrent.locks.LockSupport.parkNanos(ExternalCodeDefinitions.class,remaining);
+                    else remaining=0;
+                    if(remaining==0)before=DIRECTORY.get();
+                    else {if(Thread.interrupted())return;continue;}
+                }
                 if(Thread.interrupted())return;
-                continue;
+                if(before.changes().isEmpty()&&before.continuing().isEmpty())continue;
             }
-            Directory taken=directory(before.definitions(),List.of(),before.changes(),List.of());
+            boolean discovery=!before.changes().isEmpty();
+            List<Ref<Class<?>>> pending=new ArrayList<>(before.continuing());
+            for(Ref<Class<?>> next:before.changes())if(pending.stream().noneMatch(prior->prior.get()==next.get()))pending.add(next);
+            Directory taken=directory(before.definitions(),List.of(),List.copyOf(pending),before.active());
             if(!compareDirectory(before,taken))continue;
             Set<Class<?>> changes=Collections.newSetFromMap(new IdentityHashMap<>());
             for(Ref<Class<?>> change:taken.continuing()){Class<?> actual=change.get();if(actual!=null)changes.add(actual);}
+            Set<Class<?>> completed=Collections.newSetFromMap(new IdentityHashMap<>());
+            List<Refresh> pendingJobs=taken.active();
             try{
-                List<Refresh> jobs=refreshes(changes);
-                work(jobs,false);
+                List<Refresh> jobs=refreshes(changes,completed);
+                // An unavailable body may emit no new job. Its old source
+                // owners still have an unresolved publication obligation.
+                pendingJobs=mergeRefreshes(pendingJobs,jobs);
+                work(pendingJobs,false,Set.of());
                 for(Refresh job:jobs){
                     String gap=job.actual().getName()+":EXTERNAL_CALLER_REFRESH_PENDING";
                     for(Module owner:job.owners())ModGroupBoundary.externalGap(owner,gap);
@@ -326,23 +459,52 @@ final class ExternalCodeDefinitions {
                         api.retransformClasses(job.actual());
                         if(!refreshed(job.actual()))throw new IllegalStateException("EXTERNAL_CALLER_FLOW_NOT_INSTALLED");
                         for(Module owner:job.owners())ModGroupBoundary.externalResolved(owner,gap);
+                        completed.add(job.actual());reported.remove(job.actual());
                     }catch(UnmodifiableClassException|RuntimeException|LinkageError failure){
-                        // Keep the same operation pending; a later actual definition change can retry it.
-                        System.err.println("RONOVA_EXTERNAL_CALLER_REFRESH_FAILED:"+job.actual().getName()+":"+failure.getClass().getSimpleName());
+                        // A failed refresh retains its exact continuation and owner obligations.
+                        if(reported.add(job.actual()))System.err.println("RONOVA_EXTERNAL_CALLER_REFRESH_FAILED:"+job.actual().getName()+":"+failure.getClass().getSimpleName());
                     }
                 }
             }catch(RuntimeException|LinkageError failure){
+                // The batch never published all of its pending jobs. Retain
+                // its seed continuations as well as any prior owner ledger.
+                completed.clear();
                 for(Class<?> actual:changes){
                     Module owner=RecoveryAgent.logicalModule(actual);
-                    if(RecoveryAgent.producerModule(owner))ModGroupBoundary.failed(owner,actual.getName()+":EXTERNAL_FLOW_CONTINUATION",failure);
+                    if(RecoveryAgent.producerModule(owner))ModGroupBoundary.externalGap(owner,actual.getName()+":EXTERNAL_FLOW_CONTINUATION_PENDING");
                 }
-            }finally{work(List.of(),true);}
+            }finally{
+                for(Class<?> actual:completed)ModGroupBoundary.externalResolved(RecoveryAgent.logicalModule(actual),actual.getName()+":EXTERNAL_FLOW_CONTINUATION_PENDING");
+                for(Refresh prior:taken.active())if(completed.contains(prior.actual()))
+                    for(Module owner:prior.owners())ModGroupBoundary.externalResolved(owner,prior.actual().getName()+":EXTERNAL_CALLER_REFRESH_PENDING");
+                work(pendingJobs,true,completed);reported.removeAll(completed);
+            }
+            if(DIRECTORY.get().continuing().isEmpty()){retryDelay=100_000_000L;retryAt=0;}
+            else {
+                if(discovery)retryDelay=100_000_000L;
+                retryAt=System.nanoTime()+retryDelay;
+                retryDelay=Math.min(5_000_000_000L,retryDelay*2);
+            }
         }
     }
-    private static void work(List<Refresh> jobs,boolean finished){
+    private static List<Refresh> mergeRefreshes(List<Refresh> prior,List<Refresh> current){
+        Map<Class<?>,Set<Module>> owners=new IdentityHashMap<>();List<Class<?>> order=new ArrayList<>();
+        for(List<Refresh> batch:List.of(prior,current))for(Refresh job:batch){
+            Set<Module> selected=owners.get(job.actual());
+            if(selected==null){selected=Collections.newSetFromMap(new IdentityHashMap<>());owners.put(job.actual(),selected);order.add(job.actual());}
+            Collections.addAll(selected,job.owners());
+        }
+        List<Refresh> combined=new ArrayList<>();
+        for(Class<?> actual:order){Refresh job=new Refresh(actual,owners.get(actual).toArray(Module[]::new));ControlImages.protect(job,job.owners());combined.add(job);}
+        return List.copyOf(combined);
+    }
+    private static void work(List<Refresh> jobs,boolean finished,Set<Class<?>> completed){
         for(;;){
             Directory before=DIRECTORY.get();
-            Directory after=directory(before.definitions(),before.changes(),finished?List.of():before.continuing(),jobs);
+            List<Ref<Class<?>>> pending=before.continuing();
+            if(finished)pending=pending.stream().filter(reference->reference.get()!=null&&!completed.contains(reference.get())).toList();
+            List<Refresh> active=jobs.stream().filter(job->!completed.contains(job.actual())).toList();
+            Directory after=directory(before.definitions(),before.changes(),pending,active);
             if(compareDirectory(before,after))return;
         }
     }
@@ -360,18 +522,35 @@ final class ExternalCodeDefinitions {
         }
         return selected;
     }
-    private static List<Refresh> refreshes(Set<Class<?>> changes){
+    private static List<Refresh> refreshes(Set<Class<?>> changes,Set<Class<?>> completed){
         List<Definition> definitions=definitions();
         Resolution outer=RESOLUTION.get();RESOLUTION.set(new Resolution());
         BootstrapLookup previous=BOOTSTRAP_LOOKUP.get();BOOTSTRAP_LOOKUP.set(new BootstrapLookup(definitions));
-        try{return refreshes(changes,definitions);}
+        try{return refreshes(changes,definitions,completed);}
         finally{
             if(previous==null)BOOTSTRAP_LOOKUP.remove();else BOOTSTRAP_LOOKUP.set(previous);
             if(outer==null)RESOLUTION.remove();else RESOLUTION.set(outer);
         }
     }
-    private static List<Refresh> refreshes(Set<Class<?>> changes,List<Definition> definitions){
+    private static List<Refresh> refreshes(Set<Class<?>> changes,List<Definition> definitions,Set<Class<?>> completed){
         Set<Class<?>> candidates=Collections.newSetFromMap(new IdentityHashMap<>());candidates.addAll(changes);
+        Set<Module> batchOwners=Collections.newSetFromMap(new IdentityHashMap<>());Set<String> changedMethods=new HashSet<>();
+        for(Class<?> changed:changes){
+            Module declaration=RecoveryAgent.logicalModule(changed);if(RecoveryAgent.producerModule(declaration))batchOwners.add(declaration);
+            String name=changed.getName().replace('.','/');
+            for(SourceScope source:sourceScopes.sources())if(source.bootstrap()==(changed.getClassLoader()==null)&&source.loader().get()==changed.getClassLoader()&&source.name().equals(name))changedMethods.addAll(source.methods());
+            for(Definition definition:definitions)if(definition.actual.get()==changed){
+                addOwners(batchOwners,definition.applied);if(definition.contributors)addOwners(batchOwners,definition.analysis().rows());
+                for(Module[] owners:definition.fields.values())Collections.addAll(batchOwners,owners);
+                for(Object[] value:definition.values)Collections.addAll(batchOwners,(Module[])value[3]);
+            }
+        }
+        // A real producer override may be invoked through its actual interface
+        // or parent declaration. Match the method selector, not Object's common
+        // constructor owner, before retaining those callers as candidates.
+        if(!changedMethods.isEmpty())for(Definition definition:definitions){
+            Class<?> actual=definition.actual.get();if(eligible(actual)&&!Collections.disjoint(definition.calls,changedMethods))candidates.add(actual);
+        }
         // Invert the same actual initiated-class/hierarchy edges once for this
         // immutable batch. Repeated full directory scans made a long chain
         // quadratic, and restarted private loader lookups at every iteration.
@@ -395,7 +574,7 @@ final class ExternalCodeDefinitions {
                 for(Class<?> member:hierarchy)readers.computeIfAbsent(member,ignored->Collections.newSetFromMap(new IdentityHashMap<>())).add(actual);
             }
         }
-        ArrayDeque<Class<?>> propagation=new ArrayDeque<>(changes);
+        ArrayDeque<Class<?>> propagation=new ArrayDeque<>(candidates);
         while(!propagation.isEmpty())for(Class<?> actual:readers.getOrDefault(propagation.removeFirst(),Set.of()))
             if(candidates.add(actual))propagation.addLast(actual);
         for(;;){
@@ -409,20 +588,47 @@ final class ExternalCodeDefinitions {
         }
         List<Refresh> jobs=new ArrayList<>();Map<Class<?>,Bound> bound=new IdentityHashMap<>();Set<Class<?>> unavailable=Collections.newSetFromMap(new IdentityHashMap<>());
         for(Class<?> actual:candidates){
+            try{
+            // A pre-source miss has no published Native image yet. Promote
+            // this exact actual caller through the existing transform before
+            // asking codeVersion to bind it, rather than treating null as clean.
+            boolean promote=false;String actualName=actual.getName().replace('.','/');List<Definition> currentDefinitions=definitions();
+            for(int i=currentDefinitions.size()-1;i>=0;i--){Definition definition=currentDefinitions.get(i);
+                if(definition.actual.get()==actual&&definition.loader(actual.getClassLoader())&&definition.name.equals(actualName)){promote=definition.referenceOnly;break;}
+            }
+            if(promote){
+                try{RecoveryAgent.promoteExternalDefinition(actual);}
+                catch(UnmodifiableClassException|RuntimeException|LinkageError failure){
+                    ModGroupBoundary.externalGap(RecoveryAgent.logicalModule(actual),actual.getName()+":EXTERNAL_REFERENCE_PROMOTION_PENDING");
+                    jobs.add(pendingRefresh(actual,batchOwners));
+                    continue;
+                }
+                BOOTSTRAP_LOOKUP.set(new BootstrapLookup(definitions()));bound.clear();unavailable.clear();
+                ModGroupBoundary.externalResolved(RecoveryAgent.logicalModule(actual),actual.getName()+":EXTERNAL_REFERENCE_PROMOTION_PENDING");
+            }
             Bound current=bind(actual,bound,unavailable);
             if(current==null){
                 Module owner=RecoveryAgent.logicalModule(actual);
                 if(RecoveryAgent.producerModule(owner))ModGroupBoundary.externalGap(owner,actual.getName()+":EXTERNAL_FLOW_DEFINITION_UNRESOLVED");
+                jobs.add(pendingRefresh(actual,batchOwners));
                 continue;
             }
             ModGroupBoundary.externalResolved(RecoveryAgent.logicalModule(actual),actual.getName()+":EXTERNAL_FLOW_DEFINITION_UNRESOLVED");
             Map<String,Module[][]> rows=expand(actual.getClassLoader(),actual,current.graph());
-            if(sameRows(current.definition().applied,rows,actual))continue;
+            if(sameRows(current.definition().applied,rows,actual)){completed.add(actual);continue;}
             Set<Module> owners=Collections.newSetFromMap(new IdentityHashMap<>());
             addOwners(owners,current.definition().applied);addOwners(owners,rows);
             Refresh job=new Refresh(actual,owners.toArray(Module[]::new));ControlImages.protect(job,job.owners());jobs.add(job);
+            }catch(RuntimeException|LinkageError failure){
+                // One unresolved helper must not discard the already-known
+                // source batch when another candidate completed successfully.
+                jobs.add(pendingRefresh(actual,batchOwners));
+            }
         }
         return List.copyOf(jobs);
+    }
+    private static Refresh pendingRefresh(Class<?> actual,Set<Module> owners){
+        Refresh job=new Refresh(actual,owners.toArray(Module[]::new));ControlImages.protect(job,job.owners());return job;
     }
     private static boolean related(Class<?> owner,Set<Class<?>> candidates){
         if(owner==null)return false;
@@ -491,17 +697,16 @@ final class ExternalCodeDefinitions {
         for(Module[][] method:rows.values())for(Module[] site:method)for(Module owner:site)if(owner==module)return true;
         return false;
     }
-    // A live source-bearing declaration/patch is retained eagerly. Ordinary
-    // zero-seed definitions still retain their original bytes and references;
-    // Definition.analysis() resolves their body when a later producer binds.
-    static boolean executionSourcesObserved(){return sourceObserved;}
+    private static boolean executionSourcesObserved(ClassLoader loader,Class<?> actual,ExternalCodeFlow.Image root){
+        if(executionSourcesObserved(loader,root.node().name)||actual!=null&&RecoveryAgent.producerModule(RecoveryAgent.logicalModule(actual)))return true;
+        Set<String> candidates=sourceScopes.candidates(),methods=sourceScopes.methods();
+        for(MethodNode method:root.node().methods)for(AbstractInsnNode instruction:method.instructions.toArray())
+            if(instruction instanceof MethodInsnNode call&&(candidates.contains(call.owner)||methods.contains(call.owner+'#'+call.name+call.desc)))return true;
+        return false;
+    }
     static Map<String,Module[][]> expand(ClassLoader loader,Class<?> actual,ExternalCodeFlow.Image root){
         if(root==null)return Map.of();
-        // Before any producer or contributing instruction exists, walking every
-        // vanilla return chain can only rediscover empty source rows. Preserve
-        // a source-bearing current image and all later real definition changes;
-        // prepared/changed still refresh callers when a producer is first bound.
-        if(!sourceObserved&&!ExternalCodeFlow.hasContributors(root))return Map.of();
+        if(!ExternalCodeFlow.hasContributors(root)&&!executionSourcesObserved(loader,actual,root))return Map.of();
         // A graph resolves against one real bootstrap class snapshot. Enumerating
         // the entire VM for every descriptor stalls installation; a later graph
         // gets a fresh snapshot, including classes loaded since this analysis.

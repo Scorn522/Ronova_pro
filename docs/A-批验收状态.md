@@ -1,5 +1,22 @@
 # Ronova Pro 当前进度
 
+## 2026-10-16：C 接续——来源候选、延迟解析与失败续接
+
+接续 `f996c18`，Java ABI93 / Native ABI84 / SourceMapBridge2 / Storage3 / Journal6，协议 `r3-client-8`。本包先写齐所有源码再统一构建；继续保留上一包的停组策略顺序、原 Native 返回语义与准确丢失范围，没有恢复旧容器 Hook。
+
+类加载先按实际 producer、受控 image、已注册合同和来源引用筛选。未命中只解码类头/常量池调用引用并保留原字节，不先进入 ExternalCodeRuntime/ClassReader 建立执行图；之后出现真实 producer/contributor 时，保留的调用者可按实际 loader/VM body 提升。跨接口/父类返回按方法合同保留候选，候选名称不授予来源权。删除全局 sourceObserved 单向开关，来源登记绑定实际 loader/module/name；producerModule 只缓存确认的 true，早期缺少元数据可重新发现。已编码 image 使用不可变目录，主要选择、回放及 Native/执行图路径不持全局 image 锁；原 tree 事务锁仍保留。
+
+普通任务回调保存真实根、直接来源、准确 JDK/Inline 瞬时操作数及一层回调引用字段，不解析来源/包装图；图解析移到每次最多256条的 drain，policy 单独使用32项 tick 预算，关闭工作线程也显式推进这一步。浅层引用保住回调把来源移到局部变量并清空字段的情况，构造/发布前的实际来源判定消费同一快照，仍同步执行。未解析的本 runtime 图与跨 runtime 共享根继续阻止过早结清；已知失败保持相关范围，未知丢失仍全局拒绝。
+
+定义刷新失败不再清空全部 continuation：保留未完成类及源 owner 的并集，无新事件也会以100毫秒至5秒间隔重试，真实新变化可唤醒。成功只移除对应完成项；单个 helper 提升/解析失败和整批异常均保留来源义务。重复失败日志按待处理类压缩，未把失败当完成。Native 自身未改写的 class 事件在 C 层直接返回，改写事件先做轻量候选判断再复制 byte[]，未知来源/缺名仍走完整路径。安装显式区分 FULL/DEGRADED/FAILED，只重试发布前 IO/表获取 OOM 或独立目录恢复，不重装已发布 Hook；Java 可用路径不因 Native 缺失而全局终止。普通 executionStack 不再留存完整帧列表，只保存当前/父帧与准确深度；物理遍历、BCI、递归及 retirement 核对仍保留。
+
+统一构建 `build-c-java93-native84-root-lazy-20261016.log` **首轮 PASS，1分19秒**，21项任务中15项执行、6项保持最新，含 Native84 编译链接；检查器编译退出0。四项现有 AuditFixCheck 定向入口通过：`TASK_LAZY_CAPTURE_PASS`、`DEFINITION_RETRY_PASS`、`NATIVE_INSTALL_CLASSIFICATION_PASS`、`EXTERNAL_ROOT_CANDIDATES_PASS`。前三项首轮退出0；类筛选夹具初次缺少启动期 Agent.codeSourceBridge 字段，原 `c-java93-native84-external-root-candidates-20261016.log` 保留；补齐隔离桥接字段后仅重编检查器并重跑该入口，`c-java93-native84-external-root-candidates-fixture-fixed-20261016.log` 退出0。主构建及已通过入口均未重复，未运行旧矩阵。
+
+检查实际覆盖回调清空后的浅层来源、FutureTask/CF/Inline 操作数、ENTER/EXIT 顺序、构造前判定、共享待解析根、丢失路由/ACK；实际 worker 在 Instrumentation 代理下无新事件重试并保留旧 owner，成功只移除对应项；真实缺文件 IO 可重试而缺 payload 不报就绪；真实类头引用保留、非候选不进入 ASM、后发现来源和早期负缓存重新判定。均为隔离检查，未安装真实 Agent/Core/Native 控制器、未执行实际 VM retransform，不能代称 premain 安装或游戏效果。游戏进服、性能及 Native 实际阶段恢复 **NOTRUN**。
+
+匹配候选 `distribution/candidate-c-java93-native84-root-lazy-wip-20261016`：Core2960410、prelaunch23226字节，随源码和本摘要同步 GitHub，无源码 ZIP。未命中保留仍需遍历类头/常量池，不能声称所有 class 均为 O(1)；浅层回调引用读取仍同步。启动重变换减量、物理栈查询的 Native token 替代、全池队列定位和 certification/readback 快照等尚未整体改写，已删容器防护及未知载体缺口保留；完整 C/B 不标完成。
+
+---
 ## 2026-10-16：C 接续——停组策略发布、Native 返回语义与任务捕获
 
 接续 `16ae71a`，Java ABI92 / Native ABI83 / SourceMapBridge2 / Storage3 / Journal6，客户端协议 `r3-client-8`。本包按用户指定只收口这三项；整包源码写齐后统一构建，没有恢复旧容器 Hook。

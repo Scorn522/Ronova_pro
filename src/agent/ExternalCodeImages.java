@@ -30,7 +30,8 @@ final class ExternalCodeImages {
     private static final KeyIndex<History> TREES=new KeyIndex<>();
     private static final KeyIndex<Key> PARENTS=new KeyIndex<>();
     private static final KeyIndex<History> WRITERS=new KeyIndex<>();
-    private static final List<Encoded> ENCODED=new ArrayList<>();
+    private record ImageDirectory(List<Encoded> images,Map<String,List<Encoded>> names){}
+    private static volatile ImageDirectory ENCODED=new ImageDirectory(List.of(),Map.of());
     private static final Map<Module,Set<String>> GAPS=new IdentityHashMap<>();
     private static final List<Library> LIBRARIES=new ArrayList<>();
     private static final ThreadLocal<List<String>> DISPOSITION_FAILURES=new ThreadLocal<>();
@@ -121,11 +122,34 @@ final class ExternalCodeImages {
     record ExecutionSources(ExternalCodeFlow.Image image,Map<String,Module[]> fields,Object[][] values){}
     private record Library(String name,WeakReference<ClassLoader> loader,boolean bootstrap,WeakReference<Module> module){}
     private ExternalCodeImages(){}
+    private static List<Encoded> images(){return ENCODED.images();}
+    static boolean recorded(ClassLoader loader,String name){
+        if(name==null)return false;
+        for(Encoded image:ENCODED.names().getOrDefault(name,List.of()))
+            if(image.bootstrap()==(loader==null)&&image.loader().get()==loader)return true;
+        return false;
+    }
+    private static void store(Encoded image){
+        for(;;){
+            ImageDirectory before=ENCODED;List<Encoded> images=new ArrayList<>();
+            for(Encoded prior:before.images())if(prior.bootstrap()||prior.loader().get()!=null)images.add(prior);
+            images.add(image);Map<String,List<Encoded>> grouped=new HashMap<>();
+            for(Encoded entry:images)grouped.computeIfAbsent(entry.name(),ignored->new ArrayList<>()).add(entry);
+            Map<String,List<Encoded>> names=new HashMap<>();for(var entry:grouped.entrySet())names.put(entry.getKey(),List.copyOf(entry.getValue()));
+            ImageDirectory next=new ImageDirectory(List.copyOf(images),Map.copyOf(names));
+            List<Object> controls=new ArrayList<>(Arrays.asList(next,next.images(),next.names(),image,image.loader()));controls.addAll(next.names().values());
+            ControlImages.protect(controls.toArray());
+            // Completed images are immutable. Parsing, replay, hashing and
+            // Native/bridge publication happen outside this publication lock.
+            synchronized(ExternalCodeImages.class){if(ENCODED!=before)continue;ENCODED=next;return;}
+        }
+    }
     static synchronized void expect(String name,ClassLoader loader,Module module){
         for(Library library:LIBRARIES)if(library.name().equals(name)&&library.bootstrap()==(loader==null)&&library.loader().get()==loader){if(library.module().get()!=module)throw new IllegalStateException("ASM_LIBRARY_MODULE_CHANGED");return;}
         LIBRARIES.add(new Library(name,new Ref<>(loader),loader==null,new Ref<>(module)));ControlImages.protect(LIBRARIES,IDS,IDS.table,TREES,TREES.table,PARENTS,PARENTS.table,WRITERS,WRITERS.table,ENCODED,GAPS);
     }
     private static synchronized long id(Object object){reap();Key key=new Key(object,false);Long known=IDS.get(key);if(known!=null)return known;long next=++sequence;IDS.put(new Key(object,true),next);return next;}
+    private static synchronized long nextIdentity(){return ++sequence;}
     private static void reap(){for(Key key;(key=(Key)DEAD.poll())!=null;){IDS.remove(key);TREES.remove(key);PARENTS.remove(key);WRITERS.remove(key);}}
     private static Class<?> library(String name,ClassLoader loader)throws ClassNotFoundException{
         Class<?> type=Class.forName(name,false,loader);Module expected;
@@ -179,7 +203,7 @@ final class ExternalCodeImages {
     }
     static synchronized void observed(Object tree,Module module){
         Snapshot snapshot=snapshot(tree);Encoded origin=null;byte[] digest=hash(canonical(snapshot.bytes()));
-        for(int i=ENCODED.size()-1;i>=0;i--){Encoded encoded=ENCODED.get(i);if(encoded.loader().get()==module.getClassLoader()&&encoded.bootstrap()==(module.getClassLoader()==null)&&encoded.name().equals(snapshot.node().name)&&MessageDigest.isEqual(encoded.digest(),digest)){origin=encoded;break;}}
+        List<Encoded> encodedImages=images();for(int i=encodedImages.size()-1;i>=0;i--){Encoded encoded=encodedImages.get(i);if(encoded.loader().get()==module.getClassLoader()&&encoded.bootstrap()==(module.getClassLoader()==null)&&encoded.name().equals(snapshot.node().name)&&MessageDigest.isEqual(encoded.digest(),digest)){origin=encoded;break;}}
         if(origin!=null){identities(tree,origin.snapshot().methods());snapshot=snapshot(tree);}
         History history=new History(module,snapshot);if(origin!=null)history.patches.addAll(origin.patches());TREES.put(new Key(tree,true),history);parents(tree);
     }
@@ -262,7 +286,7 @@ final class ExternalCodeImages {
         }catch(ReflectiveOperationException failure){throw new IllegalStateException("ACTUAL_TREE_COPY_IDENTITIES_UNAVAILABLE",failure);}
     }
     /** Opaque native callbacks replace complete changed bodies; untouched bodies keep the exact input history. */
-    static synchronized void nativeEncoded(ClassLoader loader,String name,byte[] original,byte[] bytes,Module[] writers){
+    static void nativeEncoded(ClassLoader loader,String name,byte[] original,byte[] bytes,Module[] writers){
         if(ControlImages.sameBytes(canonical(original),canonical(bytes)))return;
         Encoded prior=selected(loader,name,original);
         Snapshot before=prior==null?nativeSnapshot(original,null):prior.snapshot();
@@ -270,8 +294,7 @@ final class ExternalCodeImages {
         List<Patch> patches=new ArrayList<>();if(prior!=null)patches.addAll(prior.patches());
         Module[] actual=writers.clone();patches.add(new Patch(actual,before,after,actual));
         Encoded image=new Encoded(new Ref<>(loader),loader==null,name,hash(canonical(bytes)),after,List.copyOf(patches));
-        ENCODED.removeIf(value->!value.bootstrap()&&value.loader().get()==null);ENCODED.add(image);
-        protect(image,image.digest(),actual,before,after,patches);
+        protect(image,image.digest(),actual,before,after,patches);store(image);
     }
     private static byte[] nativeMethodImage(MethodNode method){
         ClassNode node=new ClassNode();node.version=Opcodes.V17;node.access=Opcodes.ACC_PUBLIC;node.name="NativeCallbackBody";node.superName="java/lang/Object";node.methods.add(copyMethod(method));
@@ -284,11 +307,11 @@ final class ExternalCodeImages {
             String key=method.name+method.desc;Body prior=previous==null?null:previous.methods().get(key);
             if(prior!=null&&ControlImages.sameBytes(canonical(nativeMethodImage(prior.method())),canonical(nativeMethodImage(method)))){bodies.put(key,prior);continue;}
             IdentityHashMap<AbstractInsnNode,Long> identities=new IdentityHashMap<>();
-            for(AbstractInsnNode instruction:method.instructions.toArray())if(instruction.getOpcode()>=0)identities.put(instruction,++sequence);
+            for(AbstractInsnNode instruction:method.instructions.toArray())if(instruction.getOpcode()>=0)identities.put(instruction,nextIdentity());
             IdentityHashMap<LabelNode,Long> labels=new IdentityHashMap<>();long next=0;
             for(AbstractInsnNode instruction=method.instructions.getLast();instruction!=null;instruction=instruction.getPrevious())if(instruction.getOpcode()>=0)next=identities.get(instruction);else if(instruction instanceof LabelNode label)labels.put(label,next);
             List<Instruction> instructions=new ArrayList<>();for(AbstractInsnNode instruction:method.instructions.toArray())if(instruction.getOpcode()>=0)instructions.add(new Instruction(identities.get(instruction),instruction,content(instruction,labels),labels));
-            List<Handler> handlers=new ArrayList<>();for(TryCatchBlockNode handler:method.tryCatchBlocks)handlers.add(new Handler(++sequence,labels.get(handler.start),labels.get(handler.end),labels.get(handler.handler),handler.type));
+            List<Handler> handlers=new ArrayList<>();for(TryCatchBlockNode handler:method.tryCatchBlocks)handlers.add(new Handler(nextIdentity(),labels.get(handler.start),labels.get(handler.end),labels.get(handler.handler),handler.type));
             bodies.put(key,new Body(method,List.copyOf(instructions),List.copyOf(handlers)));
         }
         return new Snapshot(bytes.clone(),node,Map.copyOf(bodies));
@@ -297,9 +320,8 @@ final class ExternalCodeImages {
         History history=WRITERS.get(new Key(writer,false));if(history==null||history.patches.isEmpty())return new Module[0];
         Module module=history.module.get();if(module==null)return new Module[0];
         if(!ControlImages.sameBytes(canonical(history.current.bytes()),canonical(bytes))){for(Patch patch:history.patches)for(Module owner:patch.owners())gap(owner,"POST_TRANSFORM_CODE_CHANGED_UNOBSERVED");return new Module[0];}
-        ENCODED.removeIf(image->!image.bootstrap()&&image.loader().get()==null);
         Encoded image=new Encoded(new Ref<>(module.getClassLoader()),module.getClassLoader()==null,history.current.node().name,hash(canonical(bytes)),history.current,List.copyOf(history.patches));
-        ENCODED.add(image);protect(image.digest());
+        protect(image.digest());store(image);
         Set<Module> sources=Collections.newSetFromMap(new IdentityHashMap<>());for(Patch patch:history.patches)sources.addAll(Arrays.asList(patch.owners()));return sources.toArray(Module[]::new);
     }
     private static Snapshot snapshot(Object tree){
@@ -354,13 +376,14 @@ final class ExternalCodeImages {
         if(code instanceof MultiANewArrayInsnNode value)return prefix+value.desc+":"+value.dims;
         return prefix;
     }
-    static synchronized byte[] transform(ClassLoader loader,String name,Class<?> type,byte[] bytes){
+    static byte[] transform(ClassLoader loader,String name,Class<?> type,byte[] bytes){
         return transform(loader,name,type,bytes,false);
     }
     private static Encoded selected(ClassLoader loader,String name,byte[] bytes){
         if(name==null)return null;byte[] digest=null;
-        for(int i=ENCODED.size()-1;i>=0;i--){
-            Encoded image=ENCODED.get(i);
+        List<Encoded> candidates=ENCODED.names().getOrDefault(name,List.of());
+        for(int i=candidates.size()-1;i>=0;i--){
+            Encoded image=candidates.get(i);
             if(image.bootstrap()!=(loader==null)||image.loader().get()!=loader||!image.name().equals(name))continue;
             // Canonicalize the current bytes only when this exact loader/name
             // has a recorded image to compare. No match is reused by a later
@@ -450,7 +473,7 @@ final class ExternalCodeImages {
         // subroutine expansion until prepare() has attached their source rows.
         ClassWriter writer=node.methods.stream().anyMatch(ExternalCodeRuntime::legacy)?new ClassWriter(ClassWriter.COMPUTE_MAXS):new ControlClassWriter(loader,node);
         node.accept(writer);byte[] result=writer.toByteArray();
-        ENCODED.add(new Encoded(new Ref<>(loader),loader==null,node.name,hash(canonical(result)),new Snapshot(result,node,Map.copyOf(bodies)),patches));return result;
+        store(new Encoded(new Ref<>(loader),loader==null,node.name,hash(canonical(result)),new Snapshot(result,node,Map.copyOf(bodies)),patches));return result;
     }
     private static byte[] classMetadata(ClassNode node){
         ClassNode copy=new ClassNode();classMetadataFrom(node,copy);ClassWriter writer=new ClassWriter(0);copy.accept(writer);return writer.toByteArray();
@@ -490,20 +513,20 @@ final class ExternalCodeImages {
         for(Module module:contributors)if(module!=origin&&ModGroupBoundary.stopped(module))stopped.add(module);
         if(stopped.isEmpty())return new Object[]{tree,contributors.clone(),Boolean.FALSE,Boolean.FALSE,Boolean.FALSE};
         for(Module module:stopped)if(history.patches.stream().noneMatch(patch->Arrays.asList(patch.owners()).contains(module))){gap(module,original.node().name+":FOREIGN_MIXIN_PATCH_UNOBSERVED");return null;}
-        ClassLoader loader=origin.getClassLoader();Encoded input=new Encoded(new Ref<>(loader),loader==null,original.node().name,hash(canonical(original.bytes())),original,List.copyOf(history.patches));ENCODED.add(input);
+        ClassLoader loader=origin.getClassLoader();Encoded input=new Encoded(new Ref<>(loader),loader==null,original.node().name,hash(canonical(original.bytes())),original,List.copyOf(history.patches));store(input);
         List<String> previous=DISPOSITION_FAILURES.get(),failures=new ArrayList<>();DISPOSITION_FAILURES.set(failures);
         try{
             byte[] restored=transform(loader,original.node().name,null,original.bytes(),true);
             if(restored==null||!failures.isEmpty())return null;
             boolean metadataChanged=!ControlImages.sameBytes(metadata(original.bytes()),metadata(restored));
             if(bodyOnly&&metadataChanged){for(Module module:stopped)gap(module,original.node().name+":MIXIN_PREPARED_METADATA_REPLAY_PENDING");return null;}
-            Encoded image=ENCODED.get(ENCODED.size()-1);Object replacement=parseTree(tree.getClass().getClassLoader(),restored);identities(replacement,image.snapshot().methods());
+            Encoded image=selected(loader,original.node().name,restored);if(image==null)throw new IllegalStateException("RESTORED_MIXIN_IMAGE_UNOBSERVED");Object replacement=parseTree(tree.getClass().getClassLoader(),restored);identities(replacement,image.snapshot().methods());
             Snapshot current=snapshot(replacement);History replayed=new History(origin,current);
             for(Patch patch:history.patches)if(Arrays.stream(patch.owners()).noneMatch(ModGroupBoundary::stopped))replayed.patches.add(patch);
             TREES.put(new Key(replacement,true),replayed);parents(replacement);
             Set<Module> remaining=Collections.newSetFromMap(new IdentityHashMap<>());remaining.add(origin);
             for(Module module:contributors)if(!stopped.contains(module))remaining.add(module);
-            ENCODED.add(new Encoded(new Ref<>(loader),loader==null,current.node().name,hash(canonical(current.bytes())),current,List.copyOf(replayed.patches)));
+            store(new Encoded(new Ref<>(loader),loader==null,current.node().name,hash(canonical(current.bytes())),current,List.copyOf(replayed.patches)));
             return new Object[]{replacement,remaining.toArray(Module[]::new),Boolean.TRUE,metadataChanged,
                     !ControlImages.sameBytes(mixinSchedule(original.bytes()),mixinSchedule(restored))};
         }catch(ReflectiveOperationException|RuntimeException unavailable){for(Module module:stopped)gap(module,original.node().name+":FOREIGN_MIXIN_REPLAY_FAILED:"+unavailable.getClass().getSimpleName());return null;}
@@ -667,17 +690,16 @@ final class ExternalCodeImages {
         byte[] bytes=(byte[])writer.getMethod("toByteArray").invoke(output);ClassNode node=new ClassNode();new ClassReader(bytes).accept(node,0);
         if(method?node.methods.size()!=1:node.fields.size()!=1)throw new IllegalStateException("ACTUAL_SINGLE_MEMBER_IMAGE_REQUIRED");return node;
     }
-    static synchronized ExecutionSources executionSources(ClassLoader loader,String name,byte[] bytes,boolean declaredProducer){
+    static ExecutionSources executionSources(ClassLoader loader,String name,byte[] bytes,boolean declaredProducer){
         if(name==null)return new ExecutionSources(null,Map.of(),new Object[0][]);
         Encoded selected=selected(loader,name,bytes);
-        if(selected==null&&!declaredProducer&&!ExternalCodeDefinitions.executionSourcesObserved()){
+        if(selected==null&&!declaredProducer){
             // There is no source row to propagate yet. accepted() already keeps
             // these exact semantic bytes and constant-pool caller references,
             // and prepared/changed refreshes later real producer bindings.
             ClassNode header=new ClassNode();new ClassReader(bytes).accept(header,
                     ClassReader.SKIP_CODE|ClassReader.SKIP_DEBUG|ClassReader.SKIP_FRAMES);
-            if(!ExternalCodeDefinitions.executionSourcesObserved())
-                return new ExecutionSources(new ExternalCodeFlow.Image(new Object(),header,Map.of(),Map.of()),Map.of(),new Object[0][]);
+            return new ExecutionSources(new ExternalCodeFlow.Image(new Object(),header,Map.of(),Map.of()),Map.of(),new Object[0][]);
         }
         Map<String,Module[]> fields=new LinkedHashMap<>();
         for(var entry:fieldOwners(selected).entrySet()){
@@ -813,8 +835,8 @@ final class ExternalCodeImages {
         }
         return result;
     }
-    static synchronized boolean runtimeSource(Module module){
-        for(Encoded image:ENCODED)for(Patch patch:image.patches())for(Module source:patch.owners())if(source==module)return true;return false;
+    static boolean runtimeSource(Module module){
+        for(Encoded image:images())for(Patch patch:image.patches())for(Module source:patch.owners())if(source==module)return true;return false;
     }
     private static Map<String,FieldNode> fields(ClassNode node){
         Map<String,FieldNode> result=new LinkedHashMap<>();for(FieldNode field:node.fields)result.put(field.name+'\u0000'+field.desc,field);return result;
@@ -997,18 +1019,21 @@ final class ExternalCodeImages {
     }
     static Class<?>[] affected(Class<?>[] classes,Module[] modules){
         Set<Module> selected=Collections.newSetFromMap(new IdentityHashMap<>());selected.addAll(Arrays.asList(modules));Set<Class<?>> result=Collections.newSetFromMap(new IdentityHashMap<>());
-        synchronized(ExternalCodeImages.class){
-            for(Class<?> type:classes)for(Encoded image:ENCODED)if(image.bootstrap()==(type.getClassLoader()==null)&&image.loader().get()==type.getClassLoader()&&image.name().equals(type.getName().replace('.','/'))
-                    &&image.patches().stream().anyMatch(patch->Arrays.stream(patch.owners()).anyMatch(selected::contains))){result.add(type);break;}
-        }
+        List<Encoded> images=images();
+        for(Class<?> type:classes)for(Encoded image:images)if(image.bootstrap()==(type.getClassLoader()==null)&&image.loader().get()==type.getClassLoader()&&image.name().equals(type.getName().replace('.','/'))
+                &&image.patches().stream().anyMatch(patch->Arrays.stream(patch.owners()).anyMatch(selected::contains))){result.add(type);break;}
         result.addAll(Arrays.asList(ExternalCodeDefinitions.affected(classes,modules)));return result.toArray(Class<?>[]::new);
     }
-    static synchronized void failed(Module[] modules,String detail){for(Module module:modules)gap(module,detail);}
+    static void failed(Module[] modules,String detail){for(Module module:modules)gap(module,detail);}
     static synchronized void mixinDependency(Object tree,Module origin,Module[] contributors){
         String target;try{target=String.valueOf(get(tree,"name"));}catch(ReflectiveOperationException failure){throw new IllegalStateException("ACTUAL_MIXIN_TARGET_UNOBSERVED",failure);}
         for(Module contributor:contributors)if(contributor!=origin&&ModGroupBoundary.stopped(contributor))gap(contributor,target+":FOREIGN_MIXIN_PAYLOAD_REPLAY_PENDING");
     }
-    private static void gap(Module module,String detail){List<String> failures=DISPOSITION_FAILURES.get();if(failures!=null)failures.add(detail);if(module==null)return;GAPS.computeIfAbsent(module,ignored->new LinkedHashSet<>()).add(detail);ModGroupBoundary.externalGap(module,detail);}
+    private static void gap(Module module,String detail){
+        List<String> failures=DISPOSITION_FAILURES.get();if(failures!=null)failures.add(detail);if(module==null)return;
+        synchronized(GAPS){GAPS.computeIfAbsent(module,ignored->new LinkedHashSet<>()).add(detail);}
+        ModGroupBoundary.externalGap(module,detail);
+    }
     private static byte[] canonical(byte[] bytes){ClassNode node=new ClassNode();new ClassReader(bytes).accept(node,ClassReader.SKIP_DEBUG|ClassReader.SKIP_FRAMES);ClassWriter writer=new ClassWriter(0);node.accept(writer);return writer.toByteArray();}
     private static byte[] hash(byte[] bytes){return RecoveryAgent.externalCodeDigest(bytes);}
     private static void addChildren(ArrayDeque<Object> pending,Object... values){for(Object value:values)if(value!=null)pending.add(value);}
