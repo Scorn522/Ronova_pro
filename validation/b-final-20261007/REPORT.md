@@ -1,5 +1,16 @@
 # B 批实际报告：2026-10-09 代码收敛接续
 
+## 2026-10-15：C 接续——自定义包装回调与双参数组合
+
+接续 `a7e1a47`，Java89 / Native81 / Storage3 / Journal6，协议 `r3-client-8`。本包源码全部写齐后才构建，Native/驱动源码未改。
+
+ExecutionBoundary 在八种准确原 SAM 接口调用处交接原 callback/参数；CodeSourceBridge 从当前 VM 取得 Plan，ExecutionFlow 比对当前 Frame、原指令、Call 和实际 operands，再用一次同步 handoff 接真实 callee 的参数与原来源 Cell。缺 hook/错身份保留 UNKNOWN 并禁止正常回填；finally 清理，不借其它外层任务或创建新的 Scope。Core 只接当前合法 parent consumer，逐当前 root/owner、来源与物理调用链复核。BiFunction/BiConsumer 标准 andThen 的准确工厂及私有组合体逐原回调接续，原顺序、实参、中间值与异常保留。
+
+`build-c-java89-native81-defined-bi-20261015.log` **首轮 PASS，1分17秒**，21项任务中14项执行、7项保持最新，Java89 编译完成，Native81 为原未改产物。`compile-c-java89-native81-defined-bi-20261015.log` **退出0**；`c-java89-native81-defined-bi-bytecode-20261015.log` 的现有 `equipment-defined-bi-bytecode` **退出0**，输出 `EQUIPMENT_DEFINED_CALLBACK_BYTECODE_PASS` 和 `EQUIPMENT_BI_COMPOSITION_BYTECODE_PASS`。前者是实际 RunnableAdapter.call 的生产 weave/writer、隔离 alias 加载及 token=null fallback，核对一次原 callback、原 result 和 Throwable；后者仅本次两类 JDK 双参数组合体，核对四处 Bridge 调用、实际双参数/null/中间值、void、顺序和 RuntimeException/Error 身份。Core/Native handles 未安装，无人工 Plan/Scope，不代表真实 java.base 重变换、带授权来源 handoff 或游戏效果通过。
+
+上述实际安装、Core/Native 授权与游戏场景 **NOTRUN**；未重跑旧矩阵，旧失败记录不变。候选 `distribution/candidate-c-java89-native81-defined-bi-wip-20261015`：Core2958026、prelaunch23309字节，随源码与本摘要同步 GitHub。未知具体类调用、反射/MH、未知键语义/执行器及不透明原生状态仍未泛化覆盖，完整 C/B 未宣称完成。VS Code Gradle 导入已在本机 settings 选择 Java17，未观察重新导入结果；该绝对机器路径不上传。
+
+---
 ## 2026-10-16：C 接续——异步能力与复杂载体
 
 接续 `02c61a0`，Java88 / Native81 / Storage3 / Journal6，协议 `r3-client-8`。三个既有6.1 Sol max子代理分别完成真实任务与JDK回调交接、Native特殊调用/四类接口、复杂载体图；主线程接齐Core弱上下文、worker局部Scope、派生链、原保护门和Bootstrap安装。整包源码写齐后统一构建，自身外观、武器注册、驱动部署及源码ZIP暂缓。

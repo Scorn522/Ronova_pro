@@ -16,6 +16,7 @@ final class ExecutionFlow {
         }
     }
     private static final ThreadLocal<Frame> CURRENT=new ThreadLocal<>();
+    private static final ThreadLocal<CallbackHandoff> DEFINED_CALLBACKS=new ThreadLocal<>();
     private static final Sources NONE=new Sources(new Module[0],false);
     private static final Sources UNKNOWN=new Sources(new Module[0],true);
     private static final int CONSTRUCTOR_SITE=Integer.MIN_VALUE;
@@ -253,13 +254,24 @@ final class ExecutionFlow {
         Cell returned;Sources observed=NONE;boolean normal,partial;
         Call(Frame caller,int instruction,int width,Cell[] arguments,Sources direct){this.caller=caller;this.instruction=instruction;this.width=width;this.arguments=arguments;this.direct=direct;CodeSourceBridge.executionControls(this,arguments);}
     }
+    private static final class CallbackHandoff {
+        final CallbackHandoff previous=DEFINED_CALLBACKS.get();final Thread thread=Thread.currentThread();
+        final Frame caller;final Call call;final String selector;final Object[] arguments;
+        boolean consumed,closed;
+        CallbackHandoff(Frame caller,String selector,Object callback,Object first,Object second,int count){
+            this.caller=caller;this.call=caller.call;this.selector=selector;
+            arguments=count==0?new Object[]{callback}:count==1?new Object[]{callback,first}:new Object[]{callback,first,second};
+            CodeSourceBridge.executionControls(this,arguments);
+        }
+    }
     private static final class Frame {
         final Frame parent;final Thread thread=Thread.currentThread();final Class<?> declaring;final Method method;final int depth;final Sources declaration,entry;final Cell[] locals;final Alias initializedReceiver;
         final List<Cell> stack=new TraceList<>();final List<Control> controls=new TraceList<>();final Call incoming;
+        final CallbackHandoff handoff;int handoffArguments;boolean handoffRejected;
         final List<Deferred> deferred=new TraceList<>();
         Sources active=NONE,thrown=NONE;Call call;Cell returned;Cell[] operands;HeapUse heap;int instruction=-1;boolean closed;
-        Frame(Class<?> declaring,Method method,int depth,Module declaration,Call incoming){
-            this.parent=CURRENT.get();this.declaring=declaring;this.method=method;this.depth=depth;this.declaration=declaration==null?NONE:new Sources(new Module[]{declaration},false);this.incoming=incoming;locals=new Cell[method.locals];
+        Frame(Class<?> declaring,Method method,int depth,Module declaration,Call incoming,CallbackHandoff handoff){
+            this.parent=CURRENT.get();this.declaring=declaring;this.method=method;this.depth=depth;this.declaration=declaration==null?NONE:new Sources(new Module[]{declaration},false);this.incoming=incoming;this.handoff=handoff;locals=new Cell[method.locals];
             entry=incoming==null?NONE:incoming.direct;
             int slot=0;for(int i=0;i<method.arguments.length;i++){
                 int width=method.arguments[i];Cell input=incoming!=null&&i<incoming.arguments.length?incoming.arguments[i]:new Cell(UNKNOWN,width);
@@ -310,7 +322,7 @@ final class ExecutionFlow {
     static Object enter(Object supplied,StackWalker.StackFrame caller,int depth,StackWalker.StackFrame parent){
         bridge(CALLER.getCallerClass());if(!(supplied instanceof Plan plan))return null;
         Method method=plan.methods.get(caller.getMethodName()+caller.getDescriptor());if(method==null||!Objects.equals(method.sites.get(caller.getByteCodeIndex()),-1))return null;
-        Frame current=CURRENT.get();Call incoming=null;
+        Frame current=CURRENT.get();Call incoming=null;CallbackHandoff handoff=null;
         if(current!=null&&current.call!=null&&parent!=null&&parent.getDeclaringClass()==current.declaring
                 &&(parent.getMethodName()+parent.getDescriptor()).equals(current.method.selector)
                 &&Objects.equals(current.method.sites.get(parent.getByteCodeIndex()),current.call.instruction)
@@ -318,8 +330,24 @@ final class ExecutionFlow {
             boolean shape=true;for(int i=0;i<method.arguments.length;i++)if(current.call.arguments[i].width()!=method.arguments[i])shape=false;
             if(shape)incoming=current.call;
         }
+        if(incoming==null){handoff=claimDefinedCallback(current,method,caller);if(handoff!=null)incoming=handoff.call;}
         Module declaration=DefinitionBridge.module(caller.getDeclaringClass());if(!ControlBridge.producer(declaration))declaration=null;
-        Frame next=new Frame(caller.getDeclaringClass(),method,depth,declaration,incoming);CURRENT.set(next);return next;
+        Frame next=new Frame(caller.getDeclaringClass(),method,depth,declaration,incoming,handoff);CURRENT.set(next);return next;
+    }
+    private static CallbackHandoff claimDefinedCallback(Frame current,Method method,StackWalker.StackFrame caller){
+        CallbackHandoff handoff=DEFINED_CALLBACKS.get();
+        if(handoff==null||handoff.closed||handoff.consumed||handoff.thread!=Thread.currentThread()
+                ||current==null||current.closed||current.thread!=Thread.currentThread()||current!=handoff.caller||current.call!=handoff.call
+                ||!method.selector.equals(handoff.selector)||method.constructor||!caller.getDeclaringClass().isInstance(handoff.arguments[0])
+                ||method.arguments.length!=handoff.call.arguments.length)return null;
+        for(int index=0;index<method.arguments.length;index++)if(method.arguments[index]!=1||handoff.call.arguments[index].width()!=1)return null;
+        handoff.consumed=true;return handoff;
+    }
+    private static boolean handoffConfirmed(Frame frame){
+        return frame.handoff==null||!frame.handoff.closed&&!frame.handoffRejected&&frame.handoffArguments==frame.handoff.arguments.length;
+    }
+    private static void rejectHandoff(Frame frame){
+        frame.handoffRejected=true;frame.active=join(frame.active,UNKNOWN);frame.thrown=join(frame.thrown,UNKNOWN);
     }
     private static Frame frame(Object token,StackWalker.StackFrame caller,int depth){
         if(!(token instanceof Frame frame)||frame.closed||frame.thread!=Thread.currentThread()||CURRENT.get()!=frame||frame.depth!=depth
@@ -338,7 +366,52 @@ final class ExecutionFlow {
     }
     static void argument(Object token,int slot,Object actual,StackWalker.StackFrame caller,int depth){
         bridge(CALLER.getCallerClass());Frame frame=site(token,-2-slot,caller,depth);if(frame==null||slot<0||slot>=frame.locals.length||frame.locals[slot]==null)return;
+        if(frame.handoff!=null&&!frame.handoffRejected){
+            CallbackHandoff handoff=frame.handoff;int index=frame.handoffArguments;
+            if(handoff.closed||handoff.thread!=Thread.currentThread()||DEFINED_CALLBACKS.get()!=handoff
+                    ||frame.parent!=handoff.caller||handoff.caller.call!=handoff.call||index>=handoff.arguments.length||slot!=index||actual!=handoff.arguments[index])rejectHandoff(frame);
+            else frame.handoffArguments++;
+        }
         Cell previous=frame.locals[slot];Alias alias=previous.alias()==null?new Alias():previous.alias();bind(alias,actual);frame.locals[slot]=new Cell(previous.sources(),previous.width(),alias);
+    }
+    /** The plan comes from the unchanged current VM method, not from the supplied token. */
+    static boolean definedCallback(Object token,int instruction,Object actual,Object callback,Object first,Object second,String contract,StackWalker.StackFrame caller,int depth){
+        bridge(CALLER.getCallerClass());
+        if(!(actual instanceof Plan plan)||contract==null||callback==null)return false;
+        Frame frame=site(token,instruction,caller,depth);
+        if(frame==null||instruction<0||instruction>=frame.method.operations.length||frame.method.selector.startsWith("<")
+                ||plan.methods.get(frame.method.selector)!=frame.method||frame.instruction!=instruction
+                ||frame.call==null||frame.call.instruction!=instruction)return false;
+        int[] operation=frame.method.operations[instruction];String[] target=frame.method.fields[instruction];
+        if(operation==null||operation.length==0||target==null||target.length!=3
+                ||!contract.equals(DefinedTaskContracts.callbackContract(operation[0],target[0],target[1],target[2]))
+                ||!DefinedTaskContracts.callbackReceiver(callback,contract))return false;
+        int arguments=switch(contract){case "runnable","callable","supplier"->0;case "bifunction","biconsumer"->2;default->1;};
+        Cell[] operands=frame.call.arguments;
+        if(operands.length!=arguments+1||!callbackOperand(operands[0],callback))return false;
+        if(arguments==0)return first==null&&second==null;
+        return callbackOperand(operands[1],first)&&(arguments==1?second==null:callbackOperand(operands[2],second));
+    }
+    static Object beginDefinedCallback(Object token,int instruction,Object actual,Object callback,Object first,Object second,String contract,StackWalker.StackFrame caller,int depth){
+        bridge(CALLER.getCallerClass());
+        if(!definedCallback(token,instruction,actual,callback,first,second,contract,caller,depth))return null;
+        Frame frame=(Frame)token;String[] target=frame.method.fields[instruction];
+        CallbackHandoff handoff=new CallbackHandoff(frame,target[1]+target[2],callback,first,second,frame.call.arguments.length-1);
+        DEFINED_CALLBACKS.set(handoff);return handoff;
+    }
+    static void endDefinedCallback(Object token){
+        bridge(CALLER.getCallerClass());
+        if(!(token instanceof CallbackHandoff handoff)||handoff.closed||handoff.thread!=Thread.currentThread()||DEFINED_CALLBACKS.get()!=handoff)return;
+        handoff.closed=true;
+        if(handoff.previous==null)DEFINED_CALLBACKS.remove();else DEFINED_CALLBACKS.set(handoff.previous);
+        Arrays.fill(handoff.arguments,null);
+    }
+    private static boolean callbackOperand(Cell operand,Object actual){
+        if(operand==null||operand.width()!=1||operand.alias()==null)return false;
+        WeakReference<Object> expected=operand.alias().actual;
+        // ACONST_NULL has a reference cell but no object to retain. All live
+        // reference values must still match the alias observed at their real read.
+        return expected==null?actual==null:expected.get()==actual;
     }
     static void constructor(Object token,Object receiver,StackWalker.StackFrame caller,int depth){
         bridge(CALLER.getCallerClass());Frame frame=site(token,CONSTRUCTOR_SITE,caller,depth);if(frame==null)return;bind(frame.initializedReceiver,receiver);
@@ -1374,8 +1447,9 @@ final class ExecutionFlow {
     static void before(Object token,int instruction,StackWalker.StackFrame caller,int depth){
         bridge(CALLER.getCallerClass());Frame frame=frame(token,caller,depth);if(frame==null)return;
         if(instruction<0||instruction>=frame.method.operations.length||!Objects.equals(frame.method.sites.get(caller.getByteCodeIndex()),instruction))return;
+        if(!handoffConfirmed(frame))rejectHandoff(frame);
         int[] operation=frame.method.operations[instruction];int opcode=operation[0],operand=operation[1],consumed=operation[2],width=operation[3],end=operation[4];
-        Sources direct=join(frame.method.sources[instruction],controls(frame,instruction),frame.entry,frame.declaration);
+        Sources direct=join(frame.method.sources[instruction],controls(frame,instruction),frame.entry,frame.declaration,frame.handoffRejected?UNKNOWN:NONE);
         finishHeap(frame,false,null);frame.instruction=instruction;frame.returned=null;frame.operands=null;
         if(opcode>=21&&opcode<=25){
             Cell value=frame.locals[operand];Alias alias=value==null?null:value.alias();if(opcode==25&&alias==null){alias=new Alias();if(value!=null)frame.locals[operand]=new Cell(value.sources(),value.width(),alias);}
@@ -1434,7 +1508,7 @@ final class ExecutionFlow {
     }
     private static void close(Frame frame,boolean normal){
         frame.closed=true;
-        if(normal&&frame.incoming!=null&&frame.parent==frame.incoming.caller&&frame.parent.call==frame.incoming){
+        if(normal&&handoffConfirmed(frame)&&frame.incoming!=null&&frame.parent==frame.incoming.caller&&frame.parent.call==frame.incoming){
             frame.incoming.returned=frame.returned;frame.incoming.normal=true;frame.incoming.partial=frame.method.constructor&&(frame.initializedReceiver==null||frame.initializedReceiver.actual==null);
         }
         if(!normal&&frame.incoming!=null&&frame.parent==frame.incoming.caller&&frame.parent.call==frame.incoming)
@@ -1446,7 +1520,7 @@ final class ExecutionFlow {
     // that live thread-local first; actual frame results still require the bridge.
     static boolean hasFrame(){Frame frame=CURRENT.get();if(frame==null)return false;bridge(CALLER.getCallerClass());return true;}
     static Module[] sources(){Frame frame=CURRENT.get();if(frame==null)return new Module[0];bridge(CALLER.getCallerClass());return frame.closed?new Module[0]:frame.active.modules().clone();}
-    static boolean unknown(){Frame frame=CURRENT.get();if(frame==null)return false;bridge(CALLER.getCallerClass());return !frame.closed&&frame.active.unknown();}
+    static boolean unknown(){Frame frame=CURRENT.get();if(frame==null)return false;bridge(CALLER.getCallerClass());return !frame.closed&&(frame.active.unknown()||!handoffConfirmed(frame));}
     static Module[] frameSources(StackWalker.StackFrame caller){
         Frame current=CURRENT.get();if(current==null)return null;
         // This entry is called directly by the real CodeSourceBridge for every

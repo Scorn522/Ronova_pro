@@ -318,6 +318,22 @@ public final class CodeSourceBridge {
     public static void executionBefore(Object token,int instruction){
         if(token==null)return;List<StackWalker.StackFrame> frames=executionStack();if(!frames.isEmpty())ExecutionFlow.before(token,instruction,frames.get(0),frames.size());
     }
+    /** An exact original SAM instruction may continue the current consumer on this same thread. */
+    public static Object executionEquipmentCallback(Object token,int instruction,Object callback,Object first,Object second,String contract){
+        Object handoff=null;
+        try{
+            if(token!=null){
+                List<StackWalker.StackFrame> frames=executionStack();
+                if(!frames.isEmpty()){
+                    StackWalker.StackFrame caller=frames.get(0);Object plan=NativeControl.executionPlan(caller);
+                    handoff=ExecutionFlow.beginDefinedCallback(token,instruction,plan,callback,first,second,contract,caller,frames.size());
+                }
+            }
+        }catch(Throwable unavailable){TaskBridge.lost(unavailable);}
+        if(handoff==null)return TaskBridge.invokeEquipmentCallback(callback,first,second,contract);
+        try{return TaskBridge.invokeDefinedEquipmentCallback(callback,first,second,contract);}
+        finally{try{ExecutionFlow.endDefinedCallback(handoff);}catch(Throwable unavailable){TaskBridge.lost(unavailable);}}
+    }
     public static void executionAfterCall(Object token,int instruction){
         if(token==null)return;List<StackWalker.StackFrame> frames=executionStack();if(!frames.isEmpty())ExecutionFlow.afterCall(token,instruction,frames.get(0),frames.size());
     }

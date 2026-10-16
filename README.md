@@ -1,7 +1,8 @@
 # Ronova Pro
 
-主工程：`D:\桌面\ronova_GPT`。Java ABI88 / Native ABI81 / Storage3 / Journal6，客户端协议 `r3-client-8`。
+主工程：`D:\桌面\ronova_GPT`。Java ABI89 / Native ABI81 / Storage3 / Journal6，客户端协议 `r3-client-8`。
 Java 17；用户态 GNU C23 / GNU C++23；独立 Windows 驱动及管理工具 C17。
+自定义业务包装中的八种标准 SAM 调用沿当前真实方法、原指令与实际 callback/参数接续当前能力消费者；同步交接复用原调用的来源和返回关系。BiFunction/BiConsumer 的标准 andThen 接各原回调，保持原参数、中间结果、顺序和异常。未知具体类调用、反射/MH 与原生不透明路径继续保留边界。
 当前接续补齐手动冻结区域的实际 section/palette 写入判断、字段图原子恢复与已知共享来源保留，并修正 Netty 停源拒绝抢在原 promise 校验之前的误伤。未知载体与未观察底层写入仍按状态页保留边界。
 停组后的原 Netty WriteTask 保留发送来源直到 run/cancel 的 finally；拒绝写入分步执行消息释放、promise 终结及原 flush，异常不跳过后续收尾。清理资格绑定实际对象关系、字段/数组槽、准确调用链和实际递归层，不向用户回调提供写权；停组任务在原回收位置丢弃，不再送回共享对象池。实际运行结果仍以状态页为准。
 冻结区域的原版位存储、实际 backing 数组、调色板值表及 section/Data 替换接入同一当前世界目标判断，允许冻结格内容不变的邻居写入和原版扩容。活跃效果的真实 Optional/FactorData 连接和字段也接入原保护门，原版 tick 与准确读取回填保留。Netty 原版执行器的真实拒绝分支补 release、失败通知与取消的异常收尾；无法确认未入队的任务保留待结清。

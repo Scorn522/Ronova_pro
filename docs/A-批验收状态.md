@@ -1,5 +1,16 @@
 # Ronova Pro 当前进度
 
+## 2026-10-15：C 接续——自定义包装回调与双参数组合
+
+接续 `a7e1a47`，Java ABI89 / Native ABI81 / Storage3 / Journal6，协议 `r3-client-8`。本包接齐源码后统一构建；Native 和驱动源码未改。
+
+自定义业务方法中的 Runnable、Callable、Supplier、Function、Consumer、Predicate、BiFunction、BiConsumer 原接口调用接当前能力消费者。交接核当前 VM Plan、原指令和实际 callback/参数；同步 handoff 只消费当前原 Call 一次，callee 的真实参数 hook 逐项确认后复用原来源 Cell，并沿原 Call 回填返回/异常。缺失或不匹配保留 UNKNOWN，不搜索外层任务、不新建异步票据或扩大原动作作用域。标准 BiFunction.andThen(Function) 与 BiConsumer.andThen(BiConsumer) 接准确原工厂及私有组合体，保留原参数、中间结果、次数、顺序和 Throwable。
+
+`build-c-java89-native81-defined-bi-20261015.log` **首轮 PASS，1分17秒**，21项任务中14项执行、7项保持最新；Native81 使用原未改产物。检查器编译退出0，现有 `equipment-defined-bi-bytecode` **退出0**：`EQUIPMENT_DEFINED_CALLBACK_BYTECODE_PASS`、`EQUIPMENT_BI_COMPOSITION_BYTECODE_PASS`。实际 RunnableAdapter.call 经生产 ExecutionBoundary/ControlClassWriter 织入后隔离加载，token=null 普通分支保留一次原回调、原结果和 Throwable；两类实际 JDK 双参数组合体的四处 Bridge 调用保留参数、null、中间值、顺序及 RuntimeException/Error 身份。未安装 Core/Native 授权、未发布人工 Plan/Scope，不能代称真实 java.base 安装、带授权 handoff 或游戏保护通过；这些场景 **NOTRUN**。未重复旧矩阵，旧失败记录保留。
+
+匹配候选 `distribution/candidate-c-java89-native81-defined-bi-wip-20261015`：Core2958026、prelaunch23309字节，随源码与既有摘要同步 GitHub。未知具体类调用、反射/MH、未知执行器/键语义与原生不透明状态仍有边界，完整 C/B 尚未完成。另已在本机忽略的 VS Code settings 中将 Gradle 导入 JDK 指到现有 Java17；未观察编辑器重新导入结果。
+
+---
 ## 2026-10-16：C 接续——异步能力与复杂自定义载体
 
 接续已推送的 `02c61a0`，Java ABI88 / Native ABI81 / Storage3 / Journal6，协议 `r3-client-8`。本批源码全部写齐后统一构建；自身外观、武器注册、驱动部署和源码 ZIP 继续暂缓。

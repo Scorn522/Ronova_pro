@@ -38,5 +38,33 @@ final class DefinedTaskContracts {
         List<Class<?>> contracts=METHODS.get(selector);if(contracts==null)return false;
         for(Class<?> contract:contracts)if(contract.isInstance(receiver))return true;return false;
     }
+    /** Exact original interface instructions, rather than a name supplied by the caller. */
+    static String callbackContract(int opcode,String owner,String name,String descriptor){
+        if(opcode!=185)return null;
+        return switch(owner){
+            case "java/lang/Runnable"->name.equals("run")&&descriptor.equals("()V")?"runnable":null;
+            case "java/util/concurrent/Callable"->name.equals("call")&&descriptor.equals("()Ljava/lang/Object;")?"callable":null;
+            case "java/util/function/Supplier"->name.equals("get")&&descriptor.equals("()Ljava/lang/Object;")?"supplier":null;
+            case "java/util/function/Function"->name.equals("apply")&&descriptor.equals("(Ljava/lang/Object;)Ljava/lang/Object;")?"function":null;
+            case "java/util/function/Consumer"->name.equals("accept")&&descriptor.equals("(Ljava/lang/Object;)V")?"consumer":null;
+            case "java/util/function/BiFunction"->name.equals("apply")&&descriptor.equals("(Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;")?"bifunction":null;
+            case "java/util/function/BiConsumer"->name.equals("accept")&&descriptor.equals("(Ljava/lang/Object;Ljava/lang/Object;)V")?"biconsumer":null;
+            case "java/util/function/Predicate"->name.equals("test")&&descriptor.equals("(Ljava/lang/Object;)Z")?"predicate":null;
+            default->null;
+        };
+    }
+    static boolean callbackReceiver(Object receiver,String contract){
+        return receiver!=null&&switch(contract){
+            case "runnable"->receiver instanceof Runnable;
+            case "callable"->receiver instanceof Callable<?>;
+            case "supplier"->receiver instanceof Supplier<?>;
+            case "function"->receiver instanceof Function<?,?>;
+            case "consumer"->receiver instanceof Consumer<?>;
+            case "bifunction"->receiver instanceof BiFunction<?,?,?>;
+            case "biconsumer"->receiver instanceof BiConsumer<?,?>;
+            case "predicate"->receiver instanceof Predicate<?>;
+            default->false;
+        };
+    }
     static void publish(){ControlBridge.controlPublication(METHODS,new Object[]{TYPES,METHODS});}
 }

@@ -50,6 +50,11 @@ public final class TaskBridge {
         final Class<?> owner;final java.lang.invoke.MethodHandle capture,invoke;
         EquipmentAsync(Class<?> owner,java.lang.invoke.MethodHandle capture,java.lang.invoke.MethodHandle invoke){this.owner=owner;this.capture=capture;this.invoke=invoke;}
     }
+    private static volatile EquipmentDefined equipmentDefined;
+    private static final class EquipmentDefined {
+        final Class<?> owner;final java.lang.invoke.MethodHandle invoke;
+        EquipmentDefined(Class<?> owner,java.lang.invoke.MethodHandle invoke){this.owner=owner;this.invoke=invoke;}
+    }
     /** Shared by the real wrapper/delegate identities; only a leaf may claim it once. */
     private static final class AsyncBinding {
         final EquipmentAsync installation;Object ticket;boolean claimed;
@@ -634,11 +639,15 @@ public final class TaskBridge {
         finally { if(prior==null)AUTHORITY.remove();else AUTHORITY.set(prior); }
     }
     private TaskBridge() {}
-    public static int abiVersion(){return 88;}
+    public static int abiVersion(){return 89;}
     public static synchronized void installEquipmentAsync(Class<?> owner,java.lang.invoke.MethodHandle capture,java.lang.invoke.MethodHandle invoke){
         requirePolicyInstaller();if(guards==null||guards.owner()!=owner||equipmentAsync!=null&&equipmentAsync.owner!=owner)throw new SecurityException("EQUIPMENT_ASYNC_OWNER");
         equipmentAsync=new EquipmentAsync(owner,Objects.requireNonNull(capture).asType(java.lang.invoke.MethodType.methodType(Object.class,Object.class,Object.class,Object.class)),
                 Objects.requireNonNull(invoke).asType(java.lang.invoke.MethodType.methodType(Object.class,Object.class,Object.class,Object.class,Object.class,String.class)));
+    }
+    public static synchronized void installEquipmentDefinedDelegate(Class<?> owner,java.lang.invoke.MethodHandle invoke){
+        requirePolicyInstaller();if(guards==null||guards.owner()!=owner||equipmentDefined!=null&&equipmentDefined.owner!=owner)throw new SecurityException("EQUIPMENT_DEFINED_OWNER");
+        equipmentDefined=new EquipmentDefined(owner,Objects.requireNonNull(invoke).asType(java.lang.invoke.MethodType.methodType(Object.class,Object.class,Object.class,Object.class,String.class)));
     }
     private static void reapEquipmentAsync(){
         EventKey stale;while((stale=(EventKey)EQUIPMENT_ASYNC_QUEUE.poll())!=null){EQUIPMENT_ASYNC_TASKS.remove(stale);EQUIPMENT_ASYNC_CALLBACKS.remove(stale);}
@@ -715,6 +724,15 @@ public final class TaskBridge {
         try{return (Object)binding.installation.invoke.invokeExact(binding.ticket,callback,first,second,contract);}
         catch(Throwable original){throw TaskBridge.<RuntimeException>equipmentAsyncFailure(original);}
         finally{binding.ticket=null;}
+    }
+    /** The execution bridge has already matched this original SAM site and its actual operands. */
+    public static Object invokeDefinedEquipmentCallback(Object callback,Object first,Object second,String contract){
+        if(WALKER.getCallerClass()!=CodeSourceBridge.class)throw new SecurityException("ACTUAL_DEFINED_CALLBACK_BRIDGE_REQUIRED");
+        requireInvocation(callback);
+        EquipmentDefined installation=equipmentDefined;
+        if(installation==null)return invokeEquipmentOriginal(callback,first,second,contract);
+        try{return (Object)installation.invoke.invokeExact(callback,first,second,contract);}
+        catch(Throwable original){throw TaskBridge.<RuntimeException>equipmentAsyncFailure(original);}
     }
     @SuppressWarnings("unchecked") private static <E extends Throwable> RuntimeException equipmentAsyncFailure(Throwable original)throws E{throw (E)original;}
     @SuppressWarnings("unchecked") private static Object invokeEquipmentOriginal(Object callback,Object first,Object second,String contract){

@@ -28,7 +28,7 @@ public final class ControlBridge {
         }
     };
     private ControlBridge() { }
-    public static int abiVersion(){return 88;}
+    public static int abiVersion(){return 89;}
     public static long arrayRevision(Object value){if(!recoveryWriter())throw new SecurityException("RECOVERY_ARRAY_READER_REQUIRED");return CodeSourceBridge.executionArrayRevision(value);}
 
     public static synchronized void install(Class<?> agent,ClassFileTransformer[] transformers) throws ReflectiveOperationException {
@@ -259,6 +259,7 @@ public final class ControlBridge {
     // Shared by the Java fallback and the live JVMTI frame reader.
     static boolean controlWriterFrame(Class<?> type,String method){
         String name=type.getName();
+        if(type==CodeSourceBridge.class&&method.equals("executionEquipmentCallback"))return false;
         if(type==NativeControl.class&&(method.equals("controlWriterCaller")||method.equals("controlWriter0")
                 ||method.equals("heapPolicyChanged")||method.equals("heapPolicyChanged0")
                 ||method.equals("jvmtiDefinitionsChanged")||method.equals("jvmtiDefinitionCompletion0")
@@ -898,8 +899,8 @@ public final class ControlBridge {
             "resourceReleaseAllowed","lifeResult","dispatchAllowed","dispatchDeniedResult","equipmentActionSourceAllowed","equipmentCarrierSourceAllowed","beginEquipmentInvocation","equipmentInvocationDenied","equipmentInvocationResult","endEquipmentInvocation","failedEquipmentInvocation","taskEffectAllowed",
             "beginEquipmentSlotRead","equipmentSlotFieldRead","equipmentSlotArrayRead","equipmentSlotContainerRead","equipmentSlotSelectorRead","equipmentSlotUnresolved","observeEquipmentSlot","failedEquipmentSlotRead",
             "capabilityAccept","capabilitySupply","capabilityApply","capabilityTest","capabilityDerived",
-            "capabilityComposed","beginEquipmentSlotCall","endEquipmentSlotCall","failedEquipmentSlotCall","beginEquipmentSlotMethod","endEquipmentSlotMethod","failedEquipmentSlotMethod",
-            "invokeEquipmentCallback","invokeEquipmentOriginal","resultPublicationAllowed");
+            "capabilityComposed","capabilityComposedBi","beginEquipmentSlotCall","endEquipmentSlotCall","failedEquipmentSlotCall","beginEquipmentSlotMethod","endEquipmentSlotMethod","failedEquipmentSlotMethod",
+            "invokeEquipmentCallback","invokeEquipmentOriginal","invokeDefinedEquipmentCallback","executionEquipmentCallback","resultPublicationAllowed");
     static boolean controlCaller() {
         // The query omits guard entry points, preserving the real ledger writer.
         Class<?> caller=NativeControl.available()?NativeControl.controlWriterCaller():WALKER.walk(CONTROL_WRITER_CALLER);
@@ -2305,7 +2306,8 @@ public final class ControlBridge {
             java.lang.invoke.MethodType.methodType(Object.class,Object.class,Object.class,Object.class,String.class),
             java.lang.invoke.MethodType.methodType(boolean.class,Object.class,Object.class,Object.class,String.class),
             java.lang.invoke.MethodType.methodType(void.class,Object.class,Object.class,String.class),
-            java.lang.invoke.MethodType.methodType(Object.class,Object.class,Object.class,String.class)};
+            java.lang.invoke.MethodType.methodType(Object.class,Object.class,Object.class,String.class),
+            java.lang.invoke.MethodType.methodType(Object.class,Object.class,Object.class,Object.class,String.class)};
         if(callbacks==null||callbacks.length!=types.length)throw new IllegalArgumentException("EQUIPMENT_CALLBACK_HANDLES");
         var next=callbacks.clone();for(int at=0;at<next.length;at++)next[at]=Objects.requireNonNull(next[at]).asType(types[at]);capabilityCallbacks=next;
     }
@@ -2335,6 +2337,11 @@ public final class ControlBridge {
         var callbacks=capabilityCallbacks;
         if(callbacks==null)return switch(contract){case "function"->((java.util.function.Function<Object,Object>)callback).apply(value);case "consumer"->{((java.util.function.Consumer<Object>)callback).accept(value);yield null;}case "predicate"->Boolean.valueOf(((java.util.function.Predicate<Object>)callback).test(value));default->throw new IllegalArgumentException("EQUIPMENT_CALLBACK_CONTRACT");};
         try{return (Object)callbacks[5].invokeExact(callback,value,contract);}catch(Throwable failure){throw ControlBridge.<RuntimeException>capabilityFailure(failure);}
+    }
+    @SuppressWarnings("unchecked") public static Object capabilityComposedBi(Object callback,Object first,Object second,String contract){
+        var callbacks=capabilityCallbacks;
+        if(callbacks==null)return switch(contract){case "bifunction"->((java.util.function.BiFunction<Object,Object,Object>)callback).apply(first,second);case "biconsumer"->{((java.util.function.BiConsumer<Object,Object>)callback).accept(first,second);yield null;}default->throw new IllegalArgumentException("EQUIPMENT_CALLBACK_CONTRACT");};
+        try{return (Object)callbacks[6].invokeExact(callback,first,second,contract);}catch(Throwable failure){throw ControlBridge.<RuntimeException>capabilityFailure(failure);}
     }
     private static volatile java.lang.invoke.MethodHandle[] equipmentSlots;
     public static synchronized void installEquipmentSlots(Class<?> owner,java.lang.invoke.MethodHandle[] callbacks){

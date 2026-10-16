@@ -2858,7 +2858,7 @@ public final class ProRuntime implements AutoCloseable {
             EquipmentPolicy.initialize();
             WorldStatePolicy.initialize();
             Class<?> bridge=Class.forName("dev.ronova.pro.bootstrap.TaskBridge",false,null);
-            if(!Integer.valueOf(88).equals(bridge.getMethod("abiVersion").invoke(null)))throw new IllegalStateException("INDEX_BRIDGE_ABI_MISMATCH");
+            if(!Integer.valueOf(89).equals(bridge.getMethod("abiVersion").invoke(null)))throw new IllegalStateException("INDEX_BRIDGE_ABI_MISMATCH");
             var lookup=java.lang.invoke.MethodHandles.lookup();
             var field=lookup.findStatic(ProRuntime.class,"preventFieldWrite",java.lang.invoke.MethodType.methodType(boolean.class,Object.class,Class.class,String.class,Object.class));
             var dispatch=lookup.findStatic(ProRuntime.class,"preventDispatch",java.lang.invoke.MethodType.methodType(boolean.class,Object.class,String.class,Object.class));
@@ -3021,11 +3021,14 @@ public final class ProRuntime implements AutoCloseable {
             lookup.findStatic(EquipmentPolicy.class,"capabilityApply",java.lang.invoke.MethodType.methodType(Object.class,Object.class,Object.class,Object.class,String.class)),
             lookup.findStatic(EquipmentPolicy.class,"capabilityTest",java.lang.invoke.MethodType.methodType(boolean.class,Object.class,Object.class,Object.class,String.class)),
             lookup.findStatic(EquipmentPolicy.class,"capabilityDerived",java.lang.invoke.MethodType.methodType(void.class,Object.class,Object.class,String.class)),
-            lookup.findStatic(EquipmentPolicy.class,"capabilityComposed",java.lang.invoke.MethodType.methodType(Object.class,Object.class,Object.class,String.class))};
+            lookup.findStatic(EquipmentPolicy.class,"capabilityComposed",java.lang.invoke.MethodType.methodType(Object.class,Object.class,Object.class,String.class)),
+            lookup.findStatic(EquipmentPolicy.class,"capabilityComposedBi",java.lang.invoke.MethodType.methodType(Object.class,Object.class,Object.class,Object.class,String.class))};
         Class.forName("dev.ronova.pro.bootstrap.ControlBridge",false,null).getMethod("installCapabilityCallbacks",Class.class,java.lang.invoke.MethodHandle[].class).invoke(null,ProRuntime.class,(Object)capabilityCallbacks);
         var asyncCapture=lookup.findStatic(EquipmentPolicy.class,"captureAsync",java.lang.invoke.MethodType.methodType(Object.class,Object.class,Object.class,Object.class));
         var asyncInvoke=lookup.findStatic(EquipmentPolicy.class,"invokeAsync",java.lang.invoke.MethodType.methodType(Object.class,Object.class,Object.class,Object.class,Object.class,String.class));
         Class.forName("dev.ronova.pro.bootstrap.TaskBridge",false,null).getMethod("installEquipmentAsync",Class.class,java.lang.invoke.MethodHandle.class,java.lang.invoke.MethodHandle.class).invoke(null,ProRuntime.class,asyncCapture,asyncInvoke);
+        var definedInvoke=lookup.findStatic(EquipmentPolicy.class,"invokeDefinedCallback",java.lang.invoke.MethodType.methodType(Object.class,Object.class,Object.class,Object.class,String.class));
+        Class.forName("dev.ronova.pro.bootstrap.TaskBridge",false,null).getMethod("installEquipmentDefinedDelegate",Class.class,java.lang.invoke.MethodHandle.class).invoke(null,ProRuntime.class,definedInvoke);
     }
     private static UnsafeMapping unsafeFields() {
         try {

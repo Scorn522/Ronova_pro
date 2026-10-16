@@ -19,6 +19,7 @@ public final class AuditFixCheck {
         if(args.length==1&&args[0].equals("equipment-slot-bytecode")){equipmentSlotBytecode();capabilityBytecode();return;}
         if(args.length==1&&args[0].equals("capability-callback-bytecode")){capabilityCallbackBytecode();return;}
         if(args.length==1&&args[0].equals("equipment-helper-composition-bytecode")){equipmentSlotBytecode();equipmentSlotHelperBytecode();equipmentFunctionBytecode();return;}
+        if(args.length==1&&args[0].equals("equipment-defined-bi-bytecode")){equipmentDefinedCallbackBytecode();equipmentBiCompositionBytecode();return;}
         if(args.length==1&&args[0].equals("equipment-async-carrier-bytecode")){equipmentAsyncCarrierBytecode();return;}
         if(args.length==3&&args[0].equals("mod-group-returns")){modGroupReturns(args[1],args[2]);return;}
         if(args.length==2&&args[0].equals("network-preconnect")){networkPreconnect(args[1]);return;}
@@ -1439,24 +1440,119 @@ public final class AuditFixCheck {
         require(callbacks.get(null)==null,"composition body check installed callback authority");
         System.out.println("EQUIPMENT_FUNCTION_COMPOSITION_BYTECODE_PASS isolated_actual_JDK_factories_and_hidden_bodies eleven_Bridge_calls callbacks_uninstalled original_order_intermediate_identity_short_circuit_RuntimeException_Error_identity_preserved no_actual_java_base_retransform_or_equipment_authority_claim");
     }
+    /** The production execution weaver on one real original SAM body, with no published execution plan. */
+    @SuppressWarnings("unchecked") private static void equipmentDefinedCallbackBytecode()throws Exception{
+        Class<?> tasks=Class.forName("dev.ronova.pro.bootstrap.TaskBridge",true,null),controls=Class.forName("dev.ronova.pro.bootstrap.ControlBridge",true,null),nativeControl=Class.forName("dev.ronova.pro.bootstrap.NativeControl",true,null);
+        Field async=tasks.getDeclaredField("equipmentAsync"),defined=tasks.getDeclaredField("equipmentDefined"),callbacks=controls.getDeclaredField("capabilityCallbacks");async.setAccessible(true);defined.setAccessible(true);callbacks.setAccessible(true);
+        require(!(Boolean)nativeControl.getMethod("available").invoke(null)&&async.get(null)==null&&defined.get(null)==null&&callbacks.get(null)==null,"defined body fallback requires uninstalled native/Core callback authority");
+        String originalName="java/util/concurrent/Executors$RunnableAdapter",selector="call()Ljava/lang/Object;";Class<?> original=Class.forName(originalName.replace('/','.'),false,null);byte[] bytes;
+        require(original.getClassLoader()==null&&original.getModule()==Object.class.getModule(),"defined callback body must be the actual java.base RunnableAdapter");
+        try(var input=original.getResourceAsStream("Executors$RunnableAdapter.class")){require(input!=null,"actual defined RunnableAdapter bytes unavailable");bytes=input.readAllBytes();}
+        var before=new org.objectweb.asm.tree.ClassNode();new org.objectweb.asm.ClassReader(bytes).accept(before,0);int instructions=0,originalCallbacks=0;
+        for(var method:before.methods)if((method.name+method.desc).equals(selector))for(var instruction:method.instructions){
+            if(instruction.getOpcode()>=0)instructions++;
+            if(instruction instanceof org.objectweb.asm.tree.MethodInsnNode call&&call.getOpcode()==org.objectweb.asm.Opcodes.INVOKEINTERFACE&&call.itf&&call.owner.equals("java/lang/Runnable")&&call.name.equals("run")&&call.desc.equals("()V"))originalCallbacks++;
+        }
+        require(instructions>0&&originalCallbacks==1,"actual RunnableAdapter.call must retain one original Runnable SAM site");
+        Module[][] sources=new Module[instructions][];Arrays.setAll(sources,ignored->new Module[0]);
+        Class<?> visitor=Class.forName("jdk.internal.org.objectweb.asm.ClassVisitor"),reader=Class.forName("jdk.internal.org.objectweb.asm.ClassReader"),writer=Class.forName("jdk.internal.org.objectweb.asm.ClassWriter"),nodeType=Class.forName("jdk.internal.org.objectweb.asm.tree.ClassNode");
+        Object node=nodeType.getConstructor().newInstance(),input=reader.getConstructor(byte[].class).newInstance((Object)bytes);reader.getMethod("accept",visitor,int.class).invoke(input,node,0);
+        Class<?> boundary=Class.forName("dev.ronova.pro.agent.ExecutionBoundary");Method weave=boundary.getDeclaredMethod("weave",nodeType,Map.class,Map.class,Module.class);weave.setAccessible(true);
+        Object woven=weave.invoke(null,node,Map.of(selector,sources),Map.of(),original.getModule());Method present=woven.getClass().getDeclaredMethod("present");present.setAccessible(true);
+        require((Boolean)present.invoke(woven),"production execution weaver skipped the actual RunnableAdapter.call body");
+        Class<?> productionWriter=Class.forName("dev.ronova.pro.agent.ControlClassWriter");Constructor<?> createWriter=productionWriter.getDeclaredConstructor(ClassLoader.class,nodeType);createWriter.setAccessible(true);
+        Object output=createWriter.newInstance(null,node);nodeType.getMethod("accept",visitor).invoke(node,output);byte[] changed=(byte[])writer.getMethod("toByteArray").invoke(output);
+        var actual=new org.objectweb.asm.tree.ClassNode();new org.objectweb.asm.ClassReader(changed).accept(actual,0);int hooks=0;
+        require(equipmentAsyncCallbackSites(actual)==0,"defined callback weaver retained the original unwrapped Runnable SAM call");
+        for(var method:actual.methods)for(var instruction:method.instructions)if(instruction instanceof org.objectweb.asm.tree.MethodInsnNode call&&call.owner.equals("dev/ronova/pro/bootstrap/CodeSourceBridge")&&call.name.equals("executionEquipmentCallback")){
+            require((method.name+method.desc).equals(selector)&&call.getOpcode()==org.objectweb.asm.Opcodes.INVOKESTATIC&&call.desc.equals("(Ljava/lang/Object;ILjava/lang/Object;Ljava/lang/Object;Ljava/lang/Object;Ljava/lang/String;)Ljava/lang/Object;"),"defined callback hook changed the actual original SAM site/signature");hooks++;
+        }
+        require(hooks==1,"actual defined RunnableAdapter must contain one execution callback hook");
+        // Reparse the production writer's computed frames before the identity-only remap.
+        node=nodeType.getConstructor().newInstance();input=reader.getConstructor(byte[].class).newInstance((Object)changed);reader.getMethod("accept",visitor,int.class).invoke(input,node,0);nodeType.getField("nestHostClass").set(node,null);
+        String alias="dev.ronova.pro.validation.CheckedDefinedRunnableAdapter";
+        Class<?> remapper=Class.forName("jdk.internal.org.objectweb.asm.commons.Remapper"),simple=Class.forName("jdk.internal.org.objectweb.asm.commons.SimpleRemapper"),classRemapper=Class.forName("jdk.internal.org.objectweb.asm.commons.ClassRemapper");
+        Object renamedOutput=writer.getConstructor(int.class).newInstance(0),rename=simple.getConstructor(String.class,String.class).newInstance(originalName,alias.replace('.','/'));
+        Object mapping=classRemapper.getConstructor(visitor,remapper).newInstance(renamedOutput,rename);nodeType.getMethod("accept",visitor).invoke(node,mapping);byte[] renamed=(byte[])writer.getMethod("toByteArray").invoke(renamedOutput);
+        Class<?> checked=new ClassLoader(AuditFixCheck.class.getClassLoader()){
+            Class<?> defineBody(){Class<?> result=defineClass(alias,renamed,0,renamed.length);resolveClass(result);return result;}
+        }.defineBody();
+        require(checked.getClassLoader()!=null&&checked.getNestHost()==checked&&Callable.class.isAssignableFrom(checked),"defined RunnableAdapter must remain an isolated original Callable body");checked.getDeclaredMethods();
+        Constructor<?> constructor=checked.getDeclaredConstructor(Runnable.class,Object.class);constructor.setAccessible(true);int[] calls={0};Object expected=new Object();
+        Callable<Object> ordinary=(Callable<Object>)constructor.newInstance((Runnable)()->calls[0]++,expected);
+        require(ordinary.call()==expected&&calls[0]==1,"defined execution token-null fallback changed original Runnable count/result identity");
+        calls[0]=0;RuntimeException originalFailure=new IllegalStateException("actual_defined_runnable_failure");
+        Callable<Object> failed=(Callable<Object>)constructor.newInstance((Runnable)()->{calls[0]++;throw originalFailure;},expected);
+        try{failed.call();throw new AssertionError("defined execution fallback lost the original Runnable failure");}
+        catch(RuntimeException failure){require(failure==originalFailure,"defined execution fallback replaced original Throwable identity");}
+        require(calls[0]==1,"defined execution fallback repeated the failing original Runnable");
+        require(!(Boolean)nativeControl.getMethod("available").invoke(null)&&async.get(null)==null&&defined.get(null)==null&&callbacks.get(null)==null,"defined body fallback installed native/Core authority");
+        System.out.println("EQUIPMENT_DEFINED_CALLBACK_BYTECODE_PASS production_ExecutionBoundary_weave_ControlClassWriter isolated_actual_JDK_Executors_RunnableAdapter_call original_SAM_site_once empty_method_sources native_Core_uninstalled_no_published_Plan_token_null_fallback original_callback_result_Throwable_identity no_live_defined_authority_or_game_runtime_claim");
+    }
+    /** Only this batch's actual Bi composition bodies; no old unary composition matrix. */
+    @SuppressWarnings("unchecked") private static void equipmentBiCompositionBytecode()throws Exception{
+        Class<?> bridge=Class.forName("dev.ronova.pro.bootstrap.ControlBridge",true,null);Field callbacks=bridge.getDeclaredField("capabilityCallbacks");callbacks.setAccessible(true);
+        require(callbacks.get(null)==null,"Bi composition body check requires uninstalled Bridge callbacks");
+        Class<?> boundary=Class.forName("dev.ronova.pro.agent.EquipmentFunctionBoundary");Method transform=boundary.getDeclaredMethod("transform",ClassLoader.class,String.class,byte[].class);transform.setAccessible(true);
+        Class<?> function=equipmentFunctionAlias(java.util.function.BiFunction.class,transform,1,1),consumer=equipmentFunctionAlias(java.util.function.BiConsumer.class,transform,0,2);
+        Object left=new Object(),right=new Object(),middle=new Object(),output=new Object();List<String> order=new ArrayList<>();
+        java.util.function.BiFunction<Object,Object,Object> first=(one,two)->{require(one==left&&two==right,"BiFunction changed original arguments");order.add("first");return middle;};
+        java.util.function.Function<Object,Object> after=value->{require(value==middle,"BiFunction.andThen changed actual intermediate identity");order.add("after");return output;};
+        var chained=(java.util.function.BiFunction<Object,Object,Object>)equipmentFunctionCombination(function,"andThen",first,after);
+        require(chained.apply(left,right)==output&&order.equals(List.of("first","after")),"BiFunction.andThen changed callback order/count/result");
+        order.clear();java.util.function.BiFunction<Object,Object,Object> nullFirst=(one,two)->{require(one==null&&two==right,"BiFunction changed null/second arguments");order.add("first");return null;};
+        java.util.function.Function<Object,Object> nullAfter=value->{require(value==null,"BiFunction replaced the actual null intermediate");order.add("after");return null;};
+        var nullChained=(java.util.function.BiFunction<Object,Object,Object>)equipmentFunctionCombination(function,"andThen",nullFirst,nullAfter);
+        require(nullChained.apply(null,right)==null&&order.equals(List.of("first","after")),"BiFunction.andThen changed null intermediate/return/count");
+        order.clear();java.util.function.BiConsumer<Object,Object> accept=(one,two)->{require(one==left&&two==right,"BiConsumer changed original arguments");order.add("first");};
+        java.util.function.BiConsumer<Object,Object> next=(one,two)->{require(one==left&&two==right,"BiConsumer changed second callback arguments");order.add("after");};
+        var accepted=(java.util.function.BiConsumer<Object,Object>)equipmentFunctionCombination(consumer,"andThen",accept,next);accepted.accept(left,right);
+        require(order.equals(List.of("first","after")),"BiConsumer.andThen changed callback order/count/void behavior");
+        order.clear();java.util.function.BiConsumer<Object,Object> nullAccept=(one,two)->{require(one==left&&two==null,"BiConsumer changed first/null arguments");order.add("first");};
+        java.util.function.BiConsumer<Object,Object> nullNext=(one,two)->{require(one==left&&two==null,"BiConsumer changed second callback null argument");order.add("after");};
+        var nullAccepted=(java.util.function.BiConsumer<Object,Object>)equipmentFunctionCombination(consumer,"andThen",nullAccept,nullNext);nullAccepted.accept(left,null);
+        require(order.equals(List.of("first","after")),"BiConsumer.andThen changed null argument/count/void behavior");
+
+        RuntimeException original=new IllegalStateException("actual_bi_composed_callback_failure");Error originalError=new AssertionError("actual_bi_composed_callback_error");
+        java.util.function.BiFunction<Object,Object,Object> failed=(one,two)->{require(one==left&&two==right,"failed BiFunction changed original arguments");order.add("failed");throw original;};
+        java.util.function.Function<Object,Object> failedAfter=value->{require(value==middle,"failed BiFunction after changed actual intermediate");order.add("failedAfter");throw originalError;};
+        var chainFailed=(java.util.function.BiFunction<Object,Object,Object>)equipmentFunctionCombination(function,"andThen",failed,after);
+        equipmentComposedFailure(()->chainFailed.apply(left,right),original,order,"failed");
+        var chainLastFailed=(java.util.function.BiFunction<Object,Object,Object>)equipmentFunctionCombination(function,"andThen",first,failedAfter);
+        equipmentComposedFailure(()->chainLastFailed.apply(left,right),originalError,order,"first","failedAfter");
+        java.util.function.BiConsumer<Object,Object> failedAccept=(one,two)->{require(one==left&&two==right,"failed BiConsumer changed original arguments");order.add("failed");throw original;};
+        java.util.function.BiConsumer<Object,Object> failedNext=(one,two)->{require(one==left&&two==right,"failed BiConsumer after changed original arguments");order.add("failedAfter");throw originalError;};
+        var acceptFailed=(java.util.function.BiConsumer<Object,Object>)equipmentFunctionCombination(consumer,"andThen",failedAccept,next);
+        equipmentComposedFailure(()->acceptFailed.accept(left,right),original,order,"failed");
+        var acceptLastFailed=(java.util.function.BiConsumer<Object,Object>)equipmentFunctionCombination(consumer,"andThen",accept,failedNext);
+        equipmentComposedFailure(()->acceptLastFailed.accept(left,right),originalError,order,"first","failedAfter");
+        require(callbacks.get(null)==null,"Bi composition body check installed callback authority");
+        System.out.println("EQUIPMENT_BI_COMPOSITION_BYTECODE_PASS isolated_actual_JDK_BiFunction_andThen_Function_BiConsumer_andThen_BiConsumer_factories_and_private_hidden_bodies four_Bridge_calls callbacks_uninstalled actual_two_arguments_intermediate_null_void_order_count_RuntimeException_Error_identity_preserved no_actual_java_base_retransform_or_equipment_authority_claim");
+    }
     private static Class<?> equipmentFunctionAlias(Class<?> original,Method transform,int expectedHooks)throws Exception{
+        return equipmentFunctionAlias(original,transform,expectedHooks,0);
+    }
+    private static Class<?> equipmentFunctionAlias(Class<?> original,Method transform,int expectedHooks,int expectedBiHooks)throws Exception{
         String originalName=original.getName().replace('.','/'),aliasName="dev.ronova.pro.validation.CheckedComposed"+original.getSimpleName(),aliasInternal=aliasName.replace('.','/');byte[] bytes;
         try(var input=original.getResourceAsStream(original.getSimpleName()+".class")){require(input!=null,"actual "+original.getName()+" bytes unavailable");bytes=input.readAllBytes();}
         byte[] changed=(byte[])transform.invoke(null,null,originalName,bytes);require(changed!=null,"actual composition interface was not transformed: "+original.getName());
-        var node=new org.objectweb.asm.tree.ClassNode();new org.objectweb.asm.ClassReader(changed).accept(node,0);int hooks=0;
+        var node=new org.objectweb.asm.tree.ClassNode();new org.objectweb.asm.ClassReader(changed).accept(node,0);int hooks=0,biHooks=0;
         require(node.name.equals(originalName)&&node.interfaces.isEmpty(),"actual function interface identity/layout changed");
         node.name=aliasInternal;node.interfaces.add(originalName);
-        if(node.signature!=null)node.signature+="L"+originalName+(original==java.util.function.Function.class?"<TT;TR;>":"<TT;>")+";";
+        if(node.signature!=null)node.signature+="L"+originalName+(original==java.util.function.Function.class?"<TT;TR;>":original==java.util.function.BiFunction.class?"<TT;TU;TR;>":original==java.util.function.BiConsumer.class?"<TT;TU;>":"<TT;>")+";";
         for(var method:node.methods)for(var instruction:method.instructions){
             if(instruction instanceof org.objectweb.asm.tree.MethodInsnNode call&&call.owner.equals("dev/ronova/pro/bootstrap/ControlBridge")&&call.name.equals("capabilityComposed")){
                 require(call.getOpcode()==org.objectweb.asm.Opcodes.INVOKESTATIC&&call.desc.equals("(Ljava/lang/Object;Ljava/lang/Object;Ljava/lang/String;)Ljava/lang/Object;"),"composition hook signature changed");hooks++;
+            }
+            if(instruction instanceof org.objectweb.asm.tree.MethodInsnNode call&&call.owner.equals("dev/ronova/pro/bootstrap/ControlBridge")&&call.name.equals("capabilityComposedBi")){
+                require(call.getOpcode()==org.objectweb.asm.Opcodes.INVOKESTATIC&&call.desc.equals("(Ljava/lang/Object;Ljava/lang/Object;Ljava/lang/Object;Ljava/lang/String;)Ljava/lang/Object;"),"Bi composition hook signature changed");biHooks++;
             }
             if(instruction instanceof org.objectweb.asm.tree.InvokeDynamicInsnNode indy&&indy.bsmArgs.length==3&&indy.bsmArgs[1] instanceof org.objectweb.asm.Handle implementation&&implementation.getOwner().equals(originalName)){
                 indy.bsmArgs[1]=new org.objectweb.asm.Handle(implementation.getTag(),aliasInternal,implementation.getName(),implementation.getDesc(),implementation.isInterface());
                 if(implementation.getTag()==org.objectweb.asm.Opcodes.H_INVOKEINTERFACE){String captured="(L"+originalName+";";require(indy.desc.startsWith(captured),"composition factory did not capture its original this");indy.desc="(L"+aliasInternal+";"+indy.desc.substring(captured.length());}
             }
         }
-        require(hooks==expectedHooks,"missing actual composition callback hook: "+original.getName()+" "+hooks);
+        require(hooks==expectedHooks&&biHooks==expectedBiHooks,"missing actual composition callback hook: "+original.getName()+" unary="+hooks+" bi="+biHooks);
         // Original method descriptors and callback targets stay JDK interfaces.
         // Only the private implementation owner and its captured this become aliases.
         var writer=new org.objectweb.asm.ClassWriter(0);node.accept(writer);byte[] renamed=writer.toByteArray();
@@ -1471,9 +1567,11 @@ public final class AuditFixCheck {
             if(method.isDefault())return InvocationHandler.invokeDefault(proxy,method,args==null?new Object[0]:args);
             if(contract==java.util.function.Function.class)return ((java.util.function.Function<Object,Object>)first).apply(args[0]);
             if(contract==java.util.function.Consumer.class){((java.util.function.Consumer<Object>)first).accept(args[0]);return null;}
+            if(contract==java.util.function.BiFunction.class)return ((java.util.function.BiFunction<Object,Object,Object>)first).apply(args[0],args[1]);
+            if(contract==java.util.function.BiConsumer.class){((java.util.function.BiConsumer<Object,Object>)first).accept(args[0],args[1]);return null;}
             if(contract==java.util.function.Predicate.class)return Boolean.valueOf(((java.util.function.Predicate<Object>)first).test(args[0]));throw new AssertionError(contract);
         });
-        Method factory=operation.equals("negate")?alias.getMethod(operation):alias.getMethod(operation,contract);
+        Method factory=operation.equals("negate")?alias.getMethod(operation):alias.getMethod(operation,contract==java.util.function.BiFunction.class?java.util.function.Function.class:contract);
         Object composed=operation.equals("negate")?factory.invoke(receiver):factory.invoke(receiver,other);
         require(contract.isInstance(composed)&&composed.getClass().isHidden()&&composed.getClass().getNestHost()==alias,"composition did not execute the isolated original factory/hidden body");return composed;
     }

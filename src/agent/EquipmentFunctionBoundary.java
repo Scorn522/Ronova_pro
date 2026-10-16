@@ -9,9 +9,10 @@ final class EquipmentFunctionBoundary {
     private static final String PREFIX="java/util/function/",BRIDGE="dev/ronova/pro/bootstrap/ControlBridge";
     private static final String META="(Ljava/lang/invoke/MethodHandles$Lookup;Ljava/lang/String;Ljava/lang/invoke/MethodType;Ljava/lang/invoke/MethodType;Ljava/lang/invoke/MethodHandle;Ljava/lang/invoke/MethodType;)Ljava/lang/invoke/CallSite;";
     private static final String HOOK="(Ljava/lang/Object;Ljava/lang/Object;Ljava/lang/String;)Ljava/lang/Object;";
+    private static final String BI_HOOK="(Ljava/lang/Object;Ljava/lang/Object;Ljava/lang/Object;Ljava/lang/String;)Ljava/lang/Object;";
     private EquipmentFunctionBoundary(){ }
 
-    static boolean target(String name){return (PREFIX+"Function").equals(name)||(PREFIX+"Consumer").equals(name)||(PREFIX+"Predicate").equals(name)||(PREFIX+"Supplier").equals(name);}
+    static boolean target(String name){return (PREFIX+"Function").equals(name)||(PREFIX+"Consumer").equals(name)||(PREFIX+"Predicate").equals(name)||(PREFIX+"Supplier").equals(name)||(PREFIX+"BiFunction").equals(name)||(PREFIX+"BiConsumer").equals(name);}
     static byte[] transform(ClassLoader loader,String name,byte[] bytes){
         if(loader!=null||!target(name))return null;
         ClassNode node=new ClassNode();new ClassReader(bytes).accept(node,0);
@@ -29,6 +30,10 @@ final class EquipmentFunctionBoundary {
             compose(node,"andThen","lambda$andThen$1","function",true,2,new int[]{Opcodes.ALOAD,Opcodes.ALOAD,Opcodes.ALOAD,Opcodes.INVOKEINTERFACE,Opcodes.INVOKEINTERFACE,Opcodes.ARETURN},new int[]{1,0,2},new int[0]);
         }else if(name.equals(PREFIX+"Consumer")){
             compose(node,"andThen","lambda$andThen$0","consumer",true,2,new int[]{Opcodes.ALOAD,Opcodes.ALOAD,Opcodes.INVOKEINTERFACE,Opcodes.ALOAD,Opcodes.ALOAD,Opcodes.INVOKEINTERFACE,Opcodes.RETURN},new int[]{0,2,1,2},new int[0]);
+        }else if(name.equals(PREFIX+"BiFunction")){
+            composeBi(node,true);
+        }else if(name.equals(PREFIX+"BiConsumer")){
+            composeBi(node,false);
         }else {
             compose(node,"and","lambda$and$0","predicate",true,2,new int[]{Opcodes.ALOAD,Opcodes.ALOAD,Opcodes.INVOKEINTERFACE,Opcodes.IFEQ,Opcodes.ALOAD,Opcodes.ALOAD,Opcodes.INVOKEINTERFACE,Opcodes.IFEQ,Opcodes.ICONST_1,Opcodes.GOTO,Opcodes.ICONST_0,Opcodes.IRETURN},new int[]{0,2,1,2},new int[]{10,10,11});
             compose(node,"or","lambda$or$2","predicate",true,2,new int[]{Opcodes.ALOAD,Opcodes.ALOAD,Opcodes.INVOKEINTERFACE,Opcodes.IFNE,Opcodes.ALOAD,Opcodes.ALOAD,Opcodes.INVOKEINTERFACE,Opcodes.IFEQ,Opcodes.ICONST_1,Opcodes.GOTO,Opcodes.ICONST_0,Opcodes.IRETURN},new int[]{0,2,1,2},new int[]{8,10,11});
@@ -57,6 +62,33 @@ final class EquipmentFunctionBoundary {
         String callbackName=contract.equals("function")?"apply":contract.equals("consumer")?"accept":"test";
         String result=contract.equals("function")?"Ljava/lang/Object;":contract.equals("consumer")?"V":"Z";
         String callbackDescriptor="(Ljava/lang/Object;)"+result,parameter=argument?"L"+node.name+";":"";
+        MethodNode helper=composition(node,factoryName,helperName,callbackName,callbackDescriptor,parameter,"("+parameter+"Ljava/lang/Object;)"+result);
+        shape(helper,shape,locals,targets);List<MethodInsnNode> calls=new ArrayList<>();
+        for(AbstractInsnNode instruction:helper.instructions)if(instruction instanceof MethodInsnNode call){
+            if(call.getOpcode()!=Opcodes.INVOKEINTERFACE||!call.itf||!call.owner.equals(node.name)||!call.name.equals(callbackName)||!call.desc.equals(callbackDescriptor))throw unresolved("HELPER_CALLBACK:"+helper.name);calls.add(call);
+        }
+        if(calls.size()!=count)throw unresolved("HELPER_CALLBACK_COUNT:"+helper.name);
+        for(MethodInsnNode call:calls)weaveCallback(helper,call,contract,result,false);
+    }
+    private static void composeBi(ClassNode node,boolean function){
+        String contract=function?"bifunction":"biconsumer",callbackName=function?"apply":"accept",result=function?"Ljava/lang/Object;":"V";
+        String parameter="L"+(function?PREFIX+"Function":node.name)+";",callbackDescriptor="(Ljava/lang/Object;Ljava/lang/Object;)"+result;
+        MethodNode helper=composition(node,"andThen","lambda$andThen$0",callbackName,callbackDescriptor,parameter,"("+parameter+"Ljava/lang/Object;Ljava/lang/Object;)"+result);
+        shape(helper,function?new int[]{Opcodes.ALOAD,Opcodes.ALOAD,Opcodes.ALOAD,Opcodes.ALOAD,Opcodes.INVOKEINTERFACE,Opcodes.INVOKEINTERFACE,Opcodes.ARETURN}:
+                new int[]{Opcodes.ALOAD,Opcodes.ALOAD,Opcodes.ALOAD,Opcodes.INVOKEINTERFACE,Opcodes.ALOAD,Opcodes.ALOAD,Opcodes.ALOAD,Opcodes.INVOKEINTERFACE,Opcodes.RETURN},
+                function?new int[]{1,0,2,3}:new int[]{0,2,3,1,2,3},new int[0]);
+        List<MethodInsnNode> calls=new ArrayList<>();
+        for(AbstractInsnNode instruction:helper.instructions)if(instruction instanceof MethodInsnNode call)calls.add(call);
+        if(calls.size()!=2)throw unresolved("HELPER_CALLBACK_COUNT:"+helper.name);
+        for(int at=0;at<calls.size();at++){
+            MethodInsnNode call=calls.get(at);boolean unary=function&&at==1;
+            if(call.getOpcode()!=Opcodes.INVOKEINTERFACE||!call.itf||!call.owner.equals(unary?PREFIX+"Function":node.name)||!call.name.equals(unary?"apply":callbackName)
+                    ||!call.desc.equals(unary?"(Ljava/lang/Object;)Ljava/lang/Object;":callbackDescriptor))throw unresolved("HELPER_CALLBACK:"+helper.name+":"+at);
+            weaveCallback(helper,call,unary?"function":contract,result,!unary);
+        }
+    }
+    private static MethodNode composition(ClassNode node,String factoryName,String helperName,String callbackName,String callbackDescriptor,String parameter,String helperDescriptor){
+        boolean argument=!parameter.isEmpty();
         MethodNode factory=method(node,factoryName,"("+parameter+")L"+node.name+";");
         if((factory.access&Opcodes.ACC_PUBLIC)==0||(factory.access&(Opcodes.ACC_STATIC|Opcodes.ACC_ABSTRACT|Opcodes.ACC_NATIVE))!=0)throw unresolved("FACTORY_ACCESS:"+factoryName);
         List<AbstractInsnNode> factoryCode=code(factory);int[] factoryOps=argument?new int[]{Opcodes.ALOAD,Opcodes.INVOKESTATIC,Opcodes.POP,Opcodes.ALOAD,Opcodes.ALOAD,Opcodes.INVOKEDYNAMIC,Opcodes.ARETURN}:new int[]{Opcodes.ALOAD,Opcodes.INVOKEDYNAMIC,Opcodes.ARETURN};
@@ -67,24 +99,19 @@ final class EquipmentFunctionBoundary {
                 ||bootstrap.getTag()!=Opcodes.H_INVOKESTATIC||bootstrap.isInterface()||!bootstrap.getOwner().equals("java/lang/invoke/LambdaMetafactory")||!bootstrap.getName().equals("metafactory")||!bootstrap.getDesc().equals(META)
                 ||indy.bsmArgs.length!=3||!(indy.bsmArgs[0] instanceof Type sam)||!sam.getDescriptor().equals(callbackDescriptor)||!(indy.bsmArgs[1] instanceof Handle implementation)
                 ||!(indy.bsmArgs[2] instanceof Type instantiated)||!instantiated.getDescriptor().equals(callbackDescriptor))throw unresolved("FACTORY_METAFACTORY:"+factoryName);
-        String helperDescriptor="("+parameter+"Ljava/lang/Object;)"+result;
         if(implementation.getTag()!=Opcodes.H_INVOKEINTERFACE||!implementation.isInterface()||!implementation.getOwner().equals(node.name)||!implementation.getName().equals(helperName)||!implementation.getDesc().equals(helperDescriptor))
             throw unresolved("FACTORY_IMPLEMENTATION:"+factoryName);
         MethodNode helper=method(node,implementation.getName(),implementation.getDesc());
         if((helper.access&(Opcodes.ACC_PRIVATE|Opcodes.ACC_SYNTHETIC))!=(Opcodes.ACC_PRIVATE|Opcodes.ACC_SYNTHETIC)||(helper.access&(Opcodes.ACC_STATIC|Opcodes.ACC_ABSTRACT|Opcodes.ACC_NATIVE))!=0)throw unresolved("HELPER_ACCESS:"+helper.name);
-        shape(helper,shape,locals,targets);List<MethodInsnNode> calls=new ArrayList<>();
-        for(AbstractInsnNode instruction:helper.instructions)if(instruction instanceof MethodInsnNode call){
-            if(call.getOpcode()!=Opcodes.INVOKEINTERFACE||!call.itf||!call.owner.equals(node.name)||!call.name.equals(callbackName)||!call.desc.equals(callbackDescriptor))throw unresolved("HELPER_CALLBACK:"+helper.name);calls.add(call);
-        }
-        if(calls.size()!=count)throw unresolved("HELPER_CALLBACK_COUNT:"+helper.name);
-        for(MethodInsnNode call:calls){
-            // The original operand stack holds callback,value. Compose's second
-            // callback consumes the first one's real result; no callback is replayed.
-            helper.instructions.insertBefore(call,new LdcInsnNode(contract));
-            MethodInsnNode hook=new MethodInsnNode(Opcodes.INVOKESTATIC,BRIDGE,"capabilityComposed",HOOK,false);helper.instructions.set(call,hook);
-            if(result.equals("V"))helper.instructions.insert(hook,new InsnNode(Opcodes.POP));
-            else if(result.equals("Z")){InsnList unbox=new InsnList();unbox.add(new TypeInsnNode(Opcodes.CHECKCAST,"java/lang/Boolean"));unbox.add(new MethodInsnNode(Opcodes.INVOKEVIRTUAL,"java/lang/Boolean","booleanValue","()Z",false));helper.instructions.insert(hook,unbox);}
-        }
+        return helper;
+    }
+    private static void weaveCallback(MethodNode helper,MethodInsnNode call,String contract,String result,boolean bi){
+        // Preserve the original callback and arguments on the operand stack. A
+        // Function after BiFunction consumes the actual first result exactly once.
+        helper.instructions.insertBefore(call,new LdcInsnNode(contract));
+        MethodInsnNode hook=new MethodInsnNode(Opcodes.INVOKESTATIC,BRIDGE,bi?"capabilityComposedBi":"capabilityComposed",bi?BI_HOOK:HOOK,false);helper.instructions.set(call,hook);
+        if(result.equals("V"))helper.instructions.insert(hook,new InsnNode(Opcodes.POP));
+        else if(result.equals("Z")){InsnList unbox=new InsnList();unbox.add(new TypeInsnNode(Opcodes.CHECKCAST,"java/lang/Boolean"));unbox.add(new MethodInsnNode(Opcodes.INVOKEVIRTUAL,"java/lang/Boolean","booleanValue","()Z",false));helper.instructions.insert(hook,unbox);}
     }
     private static IllegalStateException unresolved(String detail){return new IllegalStateException("EQUIPMENT_FUNCTION_COMPOSITION_LAYOUT:"+detail);}
 }

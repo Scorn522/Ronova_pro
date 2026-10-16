@@ -1011,6 +1011,11 @@ public final class EquipmentPolicy {
                 }
             }
         }
+        return invokeCapabilityCallback(callback,first,second,contract,lease);
+        }catch(Throwable failure){original=failure;throw EquipmentPolicy.<RuntimeException>callbackFailure(failure);}
+        finally{try{closeConsumer(lease,original);}finally{closeAsyncScope(scope,original);}}
+    }
+    @SuppressWarnings("unchecked") private static Object invokeCapabilityCallback(Object callback,Object first,Object second,String contract,CapabilityConsumer lease)throws Exception{
         return switch(contract){
             case "function"->invokeJdkFunction((java.util.function.Function<Object,Object>)callback,first,lease);
             case "consumer"->{invokeJdkConsumer((java.util.function.Consumer<Object>)callback,first,lease);yield null;}
@@ -1021,8 +1026,6 @@ public final class EquipmentPolicy {
             case "bifunction"->invokeAsyncBiFunction((java.util.function.BiFunction<Object,Object,Object>)callback,first,second,lease);
             case "biconsumer"->{invokeAsyncBiConsumer((java.util.function.BiConsumer<Object,Object>)callback,first,second,lease);yield null;}
             default->throw new IllegalArgumentException("EQUIPMENT_ASYNC_CONTRACT");};
-        }catch(Throwable failure){original=failure;throw EquipmentPolicy.<RuntimeException>callbackFailure(failure);}
-        finally{try{closeConsumer(lease,original);}finally{closeAsyncScope(scope,original);}}
     }
     private static void closeAsyncScope(Scope scope,Throwable original){
         if(scope==null)return;
@@ -1064,9 +1067,12 @@ public final class EquipmentPolicy {
     private static boolean composedEntry(StackWalker.StackFrame frame,String contract){
         Class<?> type=frame.getDeclaringClass();String name=frame.getMethodName(),descriptor=frame.getDescriptor();
         return switch(contract){
-            case "function"->type==java.util.function.Function.class&&names(name,"lambda$compose$0","lambda$andThen$1")&&descriptor.equals("(Ljava/util/function/Function;Ljava/lang/Object;)Ljava/lang/Object;");
+            case "function"->type==java.util.function.Function.class&&names(name,"lambda$compose$0","lambda$andThen$1")&&descriptor.equals("(Ljava/util/function/Function;Ljava/lang/Object;)Ljava/lang/Object;")
+                    ||type==java.util.function.BiFunction.class&&name.equals("lambda$andThen$0")&&descriptor.equals("(Ljava/util/function/Function;Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;");
             case "consumer"->type==java.util.function.Consumer.class&&name.equals("lambda$andThen$0")&&descriptor.equals("(Ljava/util/function/Consumer;Ljava/lang/Object;)V");
             case "predicate"->type==java.util.function.Predicate.class&&(names(name,"lambda$and$0","lambda$or$2")&&descriptor.equals("(Ljava/util/function/Predicate;Ljava/lang/Object;)Z")||name.equals("lambda$negate$1")&&descriptor.equals("(Ljava/lang/Object;)Z"));
+            case "bifunction"->type==java.util.function.BiFunction.class&&name.equals("lambda$andThen$0")&&descriptor.equals("(Ljava/util/function/Function;Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;");
+            case "biconsumer"->type==java.util.function.BiConsumer.class&&name.equals("lambda$andThen$0")&&descriptor.equals("(Ljava/util/function/BiConsumer;Ljava/lang/Object;Ljava/lang/Object;)V");
             default->false;};
     }
     @SuppressWarnings("unchecked") public static Object capabilityComposed(Object callback,Object value,String contract){
@@ -1086,6 +1092,32 @@ public final class EquipmentPolicy {
             case "predicate"->Boolean.valueOf(invokeJdkPredicate((java.util.function.Predicate<Object>)callback,value,lease));
             default->throw new IllegalArgumentException("EQUIPMENT_CALLBACK_CONTRACT");};
         }catch(Throwable failure){original=failure;throw EquipmentPolicy.<RuntimeException>callbackFailure(failure);}finally{closeConsumer(lease,original);}
+    }
+    public static Object capabilityComposedBi(Object callback,Object first,Object second,String contract){
+        if(!contract.equals("bifunction")&&!contract.equals("biconsumer"))throw new IllegalArgumentException("EQUIPMENT_CALLBACK_CONTRACT");
+        CapabilityConsumer parent=CAP_CONSUMERS.get(),lease=null;
+        if(parent!=null&&parent.delegationDepth<16&&consumerCurrent(parent)){
+            var frames=capabilityFrames();
+            if(!frames.isEmpty()&&composedEntry(frames.get(0),contract)&&consumerFrame(parent,frames.get(0))&&sourceAllowed(parent.action)&&scopePath(parent.action,frames)){
+                lease=new CapabilityConsumer(parent.action,parent.optional,callback,first,new CallbackOrigin(parent.root,parent.links,parent.lifecycle),"composed-"+contract,asyncBoundary(contract),asyncDescriptor(contract),parent,parent);CAP_CONSUMERS.set(lease);
+            }
+        }
+        Throwable original=null;try{return invokeCapabilityCallback(callback,first,second,contract,lease);}
+        catch(Throwable failure){original=failure;throw EquipmentPolicy.<RuntimeException>callbackFailure(failure);}finally{closeConsumer(lease,original);}
+    }
+    /** Only the exact original SAM operand proven by the current producer Plan reaches this entry. */
+    public static Object invokeDefinedCallback(Object callback,Object first,Object second,String contract){
+        if(!asyncBridgeCaller("invokeDefinedEquipmentCallback"))throw new SecurityException("ACTUAL_DEFINED_EQUIPMENT_CALLBACK_REQUIRED");
+        CapabilityConsumer parent=CAP_CONSUMERS.get(),lease=null;
+        if(parent!=null&&parent.delegationDepth<16&&consumerCurrent(parent)){
+            var frames=capabilityFrames();
+            if(!frames.isEmpty()&&consumerFrame(parent,frames.get(0))&&scopePath(parent.action,frames)
+                    &&sourceAllowed(parent.action,callback.getClass(),frames.get(0).getDeclaringClass())){
+                lease=new CapabilityConsumer(parent.action,parent.optional,callback,first,new CallbackOrigin(parent.root,parent.links,parent.lifecycle),"defined-"+contract,asyncBoundary(contract),asyncDescriptor(contract),parent,parent);CAP_CONSUMERS.set(lease);
+            }
+        }
+        Throwable original=null;try{return invokeCapabilityCallback(callback,first,second,contract,lease);}
+        catch(Throwable failure){original=failure;throw EquipmentPolicy.<RuntimeException>callbackFailure(failure);}finally{closeConsumer(lease,original);}
     }
     private static boolean consumerFrame(CapabilityConsumer lease,StackWalker.StackFrame requested){
         if(!consumerCurrent(lease))return false;

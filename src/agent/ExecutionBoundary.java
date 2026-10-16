@@ -153,8 +153,15 @@ final class ExecutionBoundary {
             int receiver=-1;
             if(at instanceof MethodInsnNode call&&call.name.equals("<init>"))receiver=constructorReceiver(method,call,before);
             else if(at instanceof MethodInsnNode call){UnsafeCall unsafe=unsafeCall(call);if(unsafe!=null)unsafe(method,call,unsafe,token,ordinal,before,after,sites);}
+            String callback=at instanceof MethodInsnNode call?callbackContract(call):null;
+            if(callback!=null)definedCallback(method,(MethodInsnNode)at,callback,token,ordinal,before,after);
             before.add(actual);
             carry(before,carried.get(at),carried);method.instructions.insertBefore(at,before);
+            AbstractInsnNode emitted=at;
+            if(callback!=null){
+                emitted=new MethodInsnNode(Opcodes.INVOKESTATIC,BRIDGE,"executionEquipmentCallback","(Ljava/lang/Object;ILjava/lang/Object;Ljava/lang/Object;Ljava/lang/Object;Ljava/lang/String;)Ljava/lang/Object;",false);
+                carried.put(emitted,carried.get(at));method.instructions.set(at,emitted);
+            }
             if(at instanceof MethodInsnNode||at instanceof InvokeDynamicInsnNode){
                 if(receiver>=0){MethodInsnNode invoked=(MethodInsnNode)at;after.add(new VarInsnNode(Opcodes.ALOAD,token));after.add(new LdcInsnNode(ordinal));after.add(new VarInsnNode(Opcodes.ALOAD,receiver));after.add(new LdcInsnNode(Type.getObjectType(invoked.owner)));
                     call(after,"executionInitialized","(Ljava/lang/Object;ILjava/lang/Object;Ljava/lang/Class;)V",ordinal,sites);
@@ -167,7 +174,7 @@ final class ExecutionBoundary {
                 String descriptor=at instanceof MethodInsnNode call?call.desc:((InvokeDynamicInsnNode)at).desc;
                 if(reference(Type.getReturnType(descriptor)))after.add(reference(token,ordinal,"executionReference",sites));
             }
-            if(after.size()!=0){carry(after,carried.get(at),carried);method.instructions.insert(at,after);}
+            if(after.size()!=0){carry(after,carried.get(at),carried);method.instructions.insert(emitted,after);}
             ordinal++;
         }
         // A handler target can also have a valid ordinary predecessor carrying
@@ -187,6 +194,31 @@ final class ExecutionBoundary {
         return new MethodData(plan.selector,plan.locals,plan.arguments,plan.operations,plan.sources,plan.fields,plan.constructor,plan.retirementSafe,plan.callbackSafe,List.copyOf(sites));
     }
     private static boolean reference(Type type){return type.getSort()==Type.OBJECT||type.getSort()==Type.ARRAY;}
+    private static String callbackContract(MethodInsnNode call){
+        if(call.getOpcode()!=Opcodes.INVOKEINTERFACE||!call.itf)return null;
+        return switch(call.owner+"#"+call.name+call.desc){
+            case "java/lang/Runnable#run()V"->"runnable";
+            case "java/util/concurrent/Callable#call()Ljava/lang/Object;"->"callable";
+            case "java/util/function/Supplier#get()Ljava/lang/Object;"->"supplier";
+            case "java/util/function/Function#apply(Ljava/lang/Object;)Ljava/lang/Object;"->"function";
+            case "java/util/function/Consumer#accept(Ljava/lang/Object;)V"->"consumer";
+            case "java/util/function/BiFunction#apply(Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;"->"bifunction";
+            case "java/util/function/BiConsumer#accept(Ljava/lang/Object;Ljava/lang/Object;)V"->"biconsumer";
+            case "java/util/function/Predicate#test(Ljava/lang/Object;)Z"->"predicate";
+            default->null;
+        };
+    }
+    private static void definedCallback(MethodNode method,MethodInsnNode original,String contract,int token,int instruction,InsnList before,InsnList after){
+        Type[] arguments=Type.getArgumentTypes(original.desc);int[] slots=new int[arguments.length];
+        for(int index=arguments.length-1;index>=0;index--){slots[index]=method.maxLocals++;before.add(new VarInsnNode(Opcodes.ASTORE,slots[index]));}
+        int receiver=method.maxLocals++;before.add(new VarInsnNode(Opcodes.ASTORE,receiver));
+        before.add(new VarInsnNode(Opcodes.ALOAD,token));before.add(new LdcInsnNode(instruction));before.add(new VarInsnNode(Opcodes.ALOAD,receiver));
+        for(int index=0;index<2;index++)before.add(index<slots.length?new VarInsnNode(Opcodes.ALOAD,slots[index]):new InsnNode(Opcodes.ACONST_NULL));
+        before.add(new LdcInsnNode(contract));
+        Type result=Type.getReturnType(original.desc);
+        if(result.getSort()==Type.VOID)after.add(new InsnNode(Opcodes.POP));
+        else if(result.getSort()==Type.BOOLEAN){after.add(new TypeInsnNode(Opcodes.CHECKCAST,"java/lang/Boolean"));after.add(new MethodInsnNode(Opcodes.INVOKEVIRTUAL,"java/lang/Boolean","booleanValue","()Z",false));}
+    }
     private static UnsafeCall unsafeCall(MethodInsnNode call){
         if(call.getOpcode()!=Opcodes.INVOKEVIRTUAL||!(call.owner.equals("sun/misc/Unsafe")||call.owner.equals("jdk/internal/misc/Unsafe")))return null;
         if(call.name.equals("setMemory")&&call.desc.equals("(Ljava/lang/Object;JJB)V"))return new UnsafeCall("Byte",0,1,2);
