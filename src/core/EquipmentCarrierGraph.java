@@ -50,10 +50,36 @@ final class EquipmentCarrierGraph {
     }
     static final class View {
         final IdentityHashMap<Object,Node> nodes=new IdentityHashMap<>();
+        private final List<FieldRead> roots=new ArrayList<>();
+        private final List<EquipmentCarrierLayouts.ArrayImage> arrays=new ArrayList<>();
+        private final Set<EquipmentCarrierLayouts.ArrayImage> retainedArrays=Collections.newSetFromMap(new IdentityHashMap<>());
+        private final IdentityHashMap<Object[],EquipmentCarrierLayouts.ArrayImage> ownArrays=new IdentityHashMap<>();
+        private int arraySlots;
         Node node(Object value){return nodes.get(value);}
         boolean contains(Object value){return nodes.containsKey(value);}
         List<ItemStack> stacks(){List<ItemStack> result=new ArrayList<>();for(Object value:nodes.keySet())if(value instanceof ItemStack stack&&stack!=ItemStack.EMPTY)result.add(stack);return result;}
+        void watch(Object receiver,Slot slot){roots.add(new FieldRead(receiver,slot));}
+        void remember(EquipmentCarrierLayouts.ArrayImage image){
+            if(!retainedArrays.add(image))return;
+            if(image.values.length>MAX_GRAPH*4-arraySlots)throw new IllegalStateException("EQUIPMENT_CARRIER_ARRAY_SLOT_CAPACITY");arraySlots+=image.values.length;
+            arrays.add(image);
+        }
+        EquipmentCarrierLayouts.ArrayImage image(Object[] actual){
+            EquipmentCarrierLayouts.ArrayImage before=ownArrays.get(actual);if(before!=null)return before;
+            if(actual.length>MAX_GRAPH*4-arraySlots)throw new IllegalStateException("EQUIPMENT_CARRIER_ARRAY_SLOT_CAPACITY");
+            var result=new EquipmentCarrierLayouts.ArrayImage(actual);ownArrays.put(actual,result);remember(result);return result;
+        }
+        View stable(){
+            for(FieldRead edge:roots)check(edge.receiver,edge.slot);
+            for(Node node:nodes.values())for(Slot slot:node.fields)check(node.value,slot);
+            for(var array:arrays)if(!array.current())throw new IllegalStateException("EQUIPMENT_CARRIER_ARRAY_PATH_CHANGED");
+            return this;
+        }
+        private static void check(Object receiver,Slot slot){
+            if(!EquipmentCarrierLayouts.sameValue(slot.type,slot.value,read(receiver,slot.field)))throw new IllegalStateException("EQUIPMENT_CARRIER_FIELD_PATH_CHANGED:"+slot.field.getName());
+        }
     }
+    private record FieldRead(Object receiver,Slot slot) { }
     private record Pending(Object value,int role) { }
     static final class Observation {
         final WeakReference<Object> dispatcher,provider,request,optional;final Object direction;boolean retained;
@@ -96,32 +122,40 @@ final class EquipmentCarrierGraph {
 
     static View capabilities(ItemStack root){
         View view=new View();if(root==null||root==ItemStack.EMPTY)return view;
-        if(Boolean.TRUE.equals(value(root,CapabilityProvider.class,"initialized"))){Object dispatcher=value(root,CapabilityProvider.class,"capabilities");if(dispatcher!=null)walk(view,root,dispatcher,METADATA|(Boolean.TRUE.equals(value(root,CapabilityProvider.class,"valid"))?EXPOSED:0),false);}
+        List<Slot> rootFields=fields(root);Slot initialized=find(rootFields,CapabilityProvider.class,"initialized");view.watch(root,initialized);
+        if(Boolean.TRUE.equals(initialized.value)){
+            Slot dispatcher=find(rootFields,CapabilityProvider.class,"capabilities"),valid=find(rootFields,CapabilityProvider.class,"valid");view.watch(root,dispatcher);view.watch(root,valid);
+            if(dispatcher.value!=null)walk(view,root,dispatcher.value,METADATA|(Boolean.TRUE.equals(valid.value)?EXPOSED:0),false);
+        }
         if(root.getClass()!=ItemStack.class){Node node=node(view,root,DATA|STACK);node.callable=true;
-            for(Slot slot:fields(root))if(slot.field.getDeclaringClass()!=ItemStack.class&&slot.field.getDeclaringClass()!=CapabilityProvider.class){slots(node,List.of(slot));if(!slot.type.isPrimitive()&&slot.value!=null)walk(view,root,slot.value,DATA,false);}}
-        return view;
+            for(Slot slot:rootFields)if(slot.field.getDeclaringClass()!=ItemStack.class&&slot.field.getDeclaringClass()!=CapabilityProvider.class){slots(node,List.of(slot));if(!slot.type.isPrimitive()&&slot.value!=null)walk(view,root,slot.value,DATA,false);}}
+        return view.stable();
     }
     static View nbt(ItemStack root){
         View view=new View();if(root==null||root==ItemStack.EMPTY)return view;
         for(Slot slot:fields(root))if(slot.field.getDeclaringClass()==ItemStack.class&&Set.of("tag","f_41590_","capNBT").contains(slot.field.getName())
                 ||slot.field.getDeclaringClass()==CapabilityProvider.class&&slot.field.getName().equals("lazyData"))
-            if(slot.value!=null)walk(view,root,slot.value,DATA,false);
-        return view;
+            {view.watch(root,slot);if(slot.value!=null)walk(view,root,slot.value,DATA,false);}
+        return view.stable();
     }
-    static View candidate(ItemStack root,Object candidate){View view=new View();if(candidate!=null)walk(view,root,candidate,DATA,false);return view;}
+    static View candidate(ItemStack root,Object candidate){View view=new View();if(candidate!=null)walk(view,root,candidate,DATA,false);return view.stable();}
     static View curatives(Object root){
         if(!(root instanceof List<?>))throw new IllegalStateException("CURATIVE_LIST_ACTUAL_LIST_REQUIRED");
-        View view=new View();walk(view,null,root,DATA,true);return view;
+        View view=new View();walk(view,null,root,DATA,true);return view.stable();
     }
     private static Node node(View view,Object value,int role){
         Node result=view.nodes.get(value);if(result==null){if(view.nodes.size()==MAX_GRAPH)throw new IllegalStateException("EQUIPMENT_CARRIER_GRAPH_CAPACITY");result=new Node(value,role);view.nodes.put(value,result);}else result.roles|=role;return result;
     }
-    private static void slots(Node node,List<Slot> slots){for(Slot slot:slots){boolean found=false;for(Slot prior:node.fields)if(prior.field.equals(slot.field)){found=true;break;}if(!found)node.fields.add(slot);}}
+    private static void slots(Node node,List<Slot> slots){for(Slot slot:slots){boolean found=false;for(Slot prior:node.fields)if(prior.field.equals(slot.field)){
+        if(!EquipmentCarrierLayouts.sameValue(slot.type,prior.value,slot.value))throw new IllegalStateException("EQUIPMENT_CARRIER_MIXED_FIELD_IMAGE:"+slot.field.getName());found=true;break;
+    }if(!found)node.fields.add(slot);}}
     private static void enqueue(ArrayDeque<Pending> pending,Object value,int role){if(value!=null){if(pending.size()>=MAX_GRAPH)throw new IllegalStateException("EQUIPMENT_CARRIER_GRAPH_CAPACITY");pending.addLast(new Pending(value,role));}}
     private static void array(View view,ArrayDeque<Pending> pending,Object value,int from,int to,int stride,int role,boolean children){
         if(value==null||!value.getClass().isArray()||from<0||to<from||to>Array.getLength(value)||stride<=0)throw new IllegalStateException("EQUIPMENT_CARRIER_ACTUAL_ARRAY_RANGE_REQUIRED");
         Node carrier=node(view,value,role);carrier.spans.add(new Span(from,to,stride,role));
-        if(children&&!value.getClass().getComponentType().isPrimitive())for(int at=from;at<to;at+=stride)enqueue(pending,Array.get(value,at),role);
+        if(children&&!value.getClass().getComponentType().isPrimitive()){
+            var image=view.image((Object[])value);for(int at=from;at<to;at+=stride)enqueue(pending,image.at(at),role);
+        }
     }
     private static void walk(View view,ItemStack root,Object first,int initialRole,boolean curative){
         ArrayDeque<Pending> pending=new ArrayDeque<>();IdentityHashMap<Object,Integer> visited=new IdentityHashMap<>();enqueue(pending,first,initialRole);
@@ -133,14 +167,14 @@ final class EquipmentCarrierGraph {
             if(type==CapabilityDispatcher.class){
                 Node current=node(view,actual,METADATA);List<Slot> fields=fields(actual);slots(current,fields);
                 for(String name:List.of("caps","writers")){Object entries=find(fields,CapabilityDispatcher.class,name).value;
-                    if(entries!=null){array(view,pending,entries,0,Array.getLength(entries),1,METADATA,false);for(Object provider:(Object[])entries)enqueue(pending,provider,DATA|EXPOSED);}}
+                    if(entries!=null){array(view,pending,entries,0,Array.getLength(entries),1,METADATA,false);for(Object provider:view.image((Object[])entries).all())enqueue(pending,provider,DATA|EXPOSED);}}
                 Object names=find(fields,CapabilityDispatcher.class,"names").value;if(names!=null)array(view,pending,names,0,Array.getLength(names),1,METADATA,false);
                 enqueue(pending,find(fields,CapabilityDispatcher.class,"listeners").value,METADATA);
                 if((role&(DATA|EXPOSED))!=0)for(Observation observation:observations(actual))enqueue(pending,observation.optional.get(),METADATA);
                 continue;
             }
             if(type==LazyOptional.class){
-                List<Slot> fields=fields(actual);if(find(fields,LazyOptional.class,"supplier").value==null)continue;
+                List<Slot> fields=fields(actual);Slot supplier=find(fields,LazyOptional.class,"supplier");view.watch(actual,supplier);if(supplier.value==null)continue;
                 Node current=node(view,actual,METADATA);slots(current,fields);
                 Object resolved=find(fields,LazyOptional.class,"resolved").value;
                 if(resolved!=null){Node holder=node(view,resolved,METADATA);List<Slot> holderFields=fields(resolved);slots(holder,holderFields);
@@ -156,8 +190,9 @@ final class EquipmentCarrierGraph {
                 for(EquipmentCarrierLayouts.Slot slot:layout.slots()){
                     Object receiver=slot.receiver();Node carrier=node(view,receiver,role);List<Slot> fields=read.computeIfAbsent(receiver,EquipmentCarrierGraph::fields);
                     Slot exact=find(fields,slot.field().getDeclaringClass(),slot.field().getName());
-                    if(exact.offset!=slot.offset()||exact.width!=slot.width())throw new IllegalStateException("EQUIPMENT_CARRIER_LAYOUT_FIELD_CHANGED");slots(carrier,List.of(exact));covered.add(exact.field);
+                    if(exact.offset!=slot.offset()||exact.width!=slot.width()||!EquipmentCarrierLayouts.sameValue(exact.type,exact.value,slot.value()))throw new IllegalStateException("EQUIPMENT_CARRIER_LAYOUT_FIELD_CHANGED");slots(carrier,List.of(exact));covered.add(exact.field);
                 }
+                for(var image:layout.images())view.remember(image);
                 for(EquipmentCarrierLayouts.Range range:layout.arrays())array(view,pending,range.array(),range.from(),range.to(),range.stride(),role,false);
                 for(EquipmentCarrierLayouts.Edge edge:layout.children())if(edge.storage()){if(edge.value()!=null&&!borrowed(edge.value()))node(view,edge.value(),role);}else if((role&METADATA)==0)enqueue(pending,edge.value(),DATA);
                 if(layout.complete())continue;
@@ -173,7 +208,7 @@ final class EquipmentCarrierGraph {
         Node current=node(view,actual,role);slots(current,fields);boolean observable=false;
         if(actual instanceof ItemStack stack){
             for(Slot slot:fields){Class<?> declaring=slot.field.getDeclaringClass();String name=slot.field.getName();
-                if(declaring==CapabilityProvider.class){if(name.equals("capabilities")&&Boolean.TRUE.equals(value(stack,CapabilityProvider.class,"initialized")))enqueue(pending,slot.value,METADATA|(Boolean.TRUE.equals(value(stack,CapabilityProvider.class,"valid"))?EXPOSED:0));else if(name.equals("lazyData"))enqueue(pending,slot.value,DATA);continue;}
+                if(declaring==CapabilityProvider.class){if(name.equals("capabilities")&&Boolean.TRUE.equals(find(fields,CapabilityProvider.class,"initialized").value))enqueue(pending,slot.value,METADATA|(Boolean.TRUE.equals(find(fields,CapabilityProvider.class,"valid").value)?EXPOSED:0));else if(name.equals("lazyData"))enqueue(pending,slot.value,DATA);continue;}
                 if(!slot.type.isPrimitive())enqueue(pending,slot.value,DATA);
             }
         }else for(Slot slot:fields)if(!slot.type.isPrimitive()){

@@ -4,6 +4,7 @@ import dev.ronova.pro.mixin.SaveFinallyPlugin;
 import java.util.*;
 import org.objectweb.asm.Handle;
 import org.objectweb.asm.Opcodes;
+import org.objectweb.asm.Type;
 import org.objectweb.asm.tree.*;
 
 /** Native Forge metadata operations; supplier and listener callbacks keep their original authority. */
@@ -14,6 +15,7 @@ public final class EquipmentCapabilityWeaver {
     private static final String SUPPLIER="net/minecraftforge/common/util/NonNullSupplier",CONSUMER="net/minecraftforge/common/util/NonNullConsumer";
     private static final String FUNCTION="net/minecraftforge/common/util/NonNullFunction",PREDICATE="net/minecraftforge/common/util/NonNullPredicate";
     private static final String POLICY="dev/ronova/pro/EquipmentPolicy";
+    private static final String BRIDGE="dev/ronova/pro/bootstrap/ControlBridge";
     private EquipmentCapabilityWeaver(){ }
 
     public static void apply(ClassNode type){
@@ -187,7 +189,9 @@ public final class EquipmentCapabilityWeaver {
                 &&call.owner.equals("net/minecraftforge/common/capabilities/ICapabilityProvider")&&call.name.equals("getCapability")&&call.desc.equals(method.desc)){
             if(original!=null)throw new IllegalStateException("EQUIPMENT_CAPABILITY_QUERY_AMBIGUOUS");original=call;
         }
-        if(original==null||!load(previous(original),Opcodes.ALOAD,2)||!load(previous(previous(original)),Opcodes.ALOAD,1))
+        AbstractInsnNode providerLoad=original==null?null:previous(previous(previous(original)));
+        if(original==null||!load(previous(original),Opcodes.ALOAD,2)||!load(previous(previous(original)),Opcodes.ALOAD,1)
+                ||!(providerLoad instanceof VarInsnNode actualProvider)||actualProvider.getOpcode()!=Opcodes.ALOAD)
             throw new IllegalStateException("EQUIPMENT_CAPABILITY_QUERY_ARGUMENT_LAYOUT");
         int token=prepare(type,method),provider=method.maxLocals++,request=method.maxLocals++,direction=method.maxLocals++,result=method.maxLocals++;
         LabelNode start=new LabelNode();InsnList head=initialize(token,start);
@@ -201,6 +205,7 @@ public final class EquipmentCapabilityWeaver {
         InsnList observed=new InsnList();observed.add(new InsnNode(Opcodes.DUP));observed.add(new VarInsnNode(Opcodes.ASTORE,result));
         observed.add(new VarInsnNode(Opcodes.ALOAD,token));observed.add(new VarInsnNode(Opcodes.ALOAD,provider));observed.add(new VarInsnNode(Opcodes.ALOAD,result));
         observed.add(new MethodInsnNode(Opcodes.INVOKESTATIC,POLICY,"capabilityQueryObserved","(Ljava/lang/Object;Ljava/lang/Object;Ljava/lang/Object;)V",false));method.instructions.insert(original,observed);
+        queryDelegate(method,original,((VarInsnNode)providerLoad).var,provider,request,direction,result);
         for(AbstractInsnNode instruction:method.instructions.toArray())if(instruction.getOpcode()==Opcodes.ARETURN){
             InsnList close=new InsnList();close.add(new InsnNode(Opcodes.DUP));close.add(new VarInsnNode(Opcodes.ALOAD,token));close.add(new InsnNode(Opcodes.SWAP));
             close.add(new MethodInsnNode(Opcodes.INVOKESTATIC,POLICY,"capabilityQueryExit","(Ljava/lang/Object;Ljava/lang/Object;)V",false));method.instructions.insertBefore(instruction,close);
@@ -212,6 +217,54 @@ public final class EquipmentCapabilityWeaver {
         method.instructions.add(new MethodInsnNode(Opcodes.INVOKESTATIC,POLICY,"capabilityQueryFailed","(Ljava/lang/Object;Ljava/lang/Throwable;)V",false));
         method.instructions.add(new VarInsnNode(Opcodes.ALOAD,failure));method.instructions.add(new InsnNode(Opcodes.ATHROW));
         method.tryCatchBlocks.add(new TryCatchBlockNode(start,end,handler,"java/lang/Throwable"));method.maxStack=Math.max(method.maxStack+3,6);
+    }
+    private static void frameLocal(List<Object> locals,int slot,Object value){
+        int index=0,at=0;
+        while(index<locals.size()&&at<slot){Object prior=locals.get(index++);at+=prior==Opcodes.LONG||prior==Opcodes.DOUBLE?2:1;}
+        if(at>slot)throw new IllegalStateException("EQUIPMENT_CAPABILITY_QUERY_FRAME_SLOT");
+        while(at<slot){locals.add(Opcodes.TOP);at++;index++;}
+        if(index==locals.size())locals.add(value);
+        else {
+            if(locals.get(index)==Opcodes.LONG||locals.get(index)==Opcodes.DOUBLE)throw new IllegalStateException("EQUIPMENT_CAPABILITY_QUERY_FRAME_WIDTH");
+            locals.set(index,value);
+        }
+    }
+    /** The one actual provider dispatch gets the same temporary delegate witness
+     * as a carrier business call. The provider is never invoked by an observer. */
+    private static void queryDelegate(MethodNode method,MethodInsnNode original,int originalProvider,int provider,int request,int direction,int result){
+        final String contract="net/minecraftforge/common/capabilities/ICapabilityProvider",capability="net/minecraftforge/common/capabilities/Capability",side="net/minecraft/core/Direction";
+        FrameNode incoming=null;for(AbstractInsnNode prior=original.getPrevious();prior!=null;prior=prior.getPrevious())if(prior instanceof FrameNode frame){incoming=frame;break;}
+        if(incoming==null||incoming.type!=Opcodes.F_NEW)throw new IllegalStateException("EQUIPMENT_CAPABILITY_QUERY_CALL_FRAME");
+        int token=method.maxLocals++,failure=method.maxLocals++;
+        List<Object> caught=new ArrayList<>(incoming.local);
+        frameLocal(caught,originalProvider,contract);frameLocal(caught,provider,contract);frameLocal(caught,request,capability);frameLocal(caught,direction,side);
+        frameLocal(caught,result,Opcodes.TOP);frameLocal(caught,token,"java/lang/Object");
+        List<Object> normal=new ArrayList<>(caught);frameLocal(normal,result,OPTIONAL);
+        Object[] caughtLocals=caught.toArray(),normalLocals=normal.toArray();
+        LabelNode start=new LabelNode(),end=new LabelNode(),handler=new LabelNode(),observed=new LabelNode(),resume=new LabelNode();
+        InsnList before=new InsnList();before.add(new VarInsnNode(Opcodes.ASTORE,direction));before.add(new VarInsnNode(Opcodes.ASTORE,request));before.add(new VarInsnNode(Opcodes.ASTORE,provider));
+        before.add(new VarInsnNode(Opcodes.ALOAD,provider));before.add(new InsnNode(Opcodes.ICONST_5));before.add(new TypeInsnNode(Opcodes.ANEWARRAY,"java/lang/Object"));
+        before.add(new InsnNode(Opcodes.DUP));before.add(new InsnNode(Opcodes.ICONST_0));before.add(new LdcInsnNode(Type.getObjectType(contract)));before.add(new InsnNode(Opcodes.AASTORE));
+        before.add(new InsnNode(Opcodes.DUP));before.add(new InsnNode(Opcodes.ICONST_1));before.add(new LdcInsnNode(original.name));before.add(new InsnNode(Opcodes.AASTORE));
+        before.add(new InsnNode(Opcodes.DUP));before.add(new InsnNode(Opcodes.ICONST_2));before.add(new LdcInsnNode(original.desc));before.add(new InsnNode(Opcodes.AASTORE));
+        before.add(new InsnNode(Opcodes.DUP));before.add(new InsnNode(Opcodes.ICONST_3));before.add(new LdcInsnNode(original.getOpcode()));before.add(new MethodInsnNode(Opcodes.INVOKESTATIC,"java/lang/Integer","valueOf","(I)Ljava/lang/Integer;",false));before.add(new InsnNode(Opcodes.AASTORE));
+        before.add(new InsnNode(Opcodes.DUP));before.add(new InsnNode(Opcodes.ICONST_4));before.add(new InsnNode(Opcodes.ICONST_2));before.add(new TypeInsnNode(Opcodes.ANEWARRAY,"java/lang/Object"));
+        before.add(new InsnNode(Opcodes.DUP));before.add(new InsnNode(Opcodes.ICONST_0));before.add(new VarInsnNode(Opcodes.ALOAD,request));before.add(new InsnNode(Opcodes.AASTORE));
+        before.add(new InsnNode(Opcodes.DUP));before.add(new InsnNode(Opcodes.ICONST_1));before.add(new VarInsnNode(Opcodes.ALOAD,direction));before.add(new InsnNode(Opcodes.AASTORE));before.add(new InsnNode(Opcodes.AASTORE));
+        before.add(new LdcInsnNode("carrier-delegate"));before.add(new MethodInsnNode(Opcodes.INVOKESTATIC,BRIDGE,"beginEquipmentInvocation","(Ljava/lang/Object;Ljava/lang/Object;Ljava/lang/String;)Ljava/lang/Object;",false));
+        before.add(new VarInsnNode(Opcodes.ASTORE,token));before.add(new VarInsnNode(Opcodes.ALOAD,provider));before.add(new VarInsnNode(Opcodes.ALOAD,request));before.add(new VarInsnNode(Opcodes.ALOAD,direction));before.add(start);
+        method.instructions.insertBefore(original,before);
+        InsnList after=new InsnList();after.add(new VarInsnNode(Opcodes.ASTORE,result));after.add(new VarInsnNode(Opcodes.ALOAD,token));after.add(new JumpInsnNode(Opcodes.IFNULL,observed));
+        after.add(new VarInsnNode(Opcodes.ALOAD,token));after.add(new LdcInsnNode("carrier-delegate-result"));after.add(new VarInsnNode(Opcodes.ALOAD,result));
+        after.add(new MethodInsnNode(Opcodes.INVOKESTATIC,BRIDGE,"equipmentInvocationResult","(Ljava/lang/Object;Ljava/lang/String;Ljava/lang/Object;)Ljava/lang/Object;",false));after.add(new InsnNode(Opcodes.POP));
+        after.add(new VarInsnNode(Opcodes.ALOAD,token));after.add(new MethodInsnNode(Opcodes.INVOKESTATIC,BRIDGE,"endEquipmentInvocation","(Ljava/lang/Object;)V",false));
+        after.add(observed);after.add(new FrameNode(Opcodes.F_NEW,normalLocals.length,normalLocals,0,new Object[0]));after.add(end);after.add(new JumpInsnNode(Opcodes.GOTO,resume));
+        after.add(handler);after.add(new FrameNode(Opcodes.F_NEW,caughtLocals.length,caughtLocals,1,new Object[]{"java/lang/Throwable"}));after.add(new VarInsnNode(Opcodes.ASTORE,failure));
+        after.add(new VarInsnNode(Opcodes.ALOAD,token));after.add(new VarInsnNode(Opcodes.ALOAD,failure));after.add(new MethodInsnNode(Opcodes.INVOKESTATIC,BRIDGE,"failedEquipmentInvocation","(Ljava/lang/Object;Ljava/lang/Throwable;)V",false));
+        after.add(new VarInsnNode(Opcodes.ALOAD,failure));after.add(new InsnNode(Opcodes.ATHROW));
+        after.add(resume);after.add(new FrameNode(Opcodes.F_NEW,normalLocals.length,normalLocals,0,new Object[0]));after.add(new VarInsnNode(Opcodes.ALOAD,result));
+        method.instructions.insert(original,after);method.tryCatchBlocks.add(0,new TryCatchBlockNode(start,end,handler,"java/lang/Throwable"));
+        method.maxStack=Math.max(method.maxStack+4,10);
     }
     private static void finish(ClassNode type,MethodNode method,int token,LabelNode start){
         // Append after the original handlers, particularly getValue's monitor exit.

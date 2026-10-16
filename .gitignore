@@ -162,3 +162,7 @@ validation/a-takeover-tasks-01/server/Pro-A-Tasks/
 /distribution/candidate-c-java95-native85-recovery-scheduling-wip-20261016/*
 !/distribution/candidate-c-java95-native85-recovery-scheduling-wip-20261016/ronova-pro-core-0.1.0-stage-b-dev.jar
 !/distribution/candidate-c-java95-native85-recovery-scheduling-wip-20261016/ronova-pro-prelaunch.jar
+!/distribution/candidate-c-java96-native86-unknown-carriers-wip-20261016/
+/distribution/candidate-c-java96-native86-unknown-carriers-wip-20261016/*
+!/distribution/candidate-c-java96-native86-unknown-carriers-wip-20261016/ronova-pro-core-0.1.0-stage-b-dev.jar
+!/distribution/candidate-c-java96-native86-unknown-carriers-wip-20261016/ronova-pro-prelaunch.jar

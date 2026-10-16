@@ -1,5 +1,24 @@
 # B 批实际报告：2026-10-09 代码收敛接续
 
+## 2026-10-16：C 接续——未知载体、真实委托与槽位定义版本
+
+接续 `e7dfaac`，Java ABI96 / Native ABI86 / SourceMapBridge2 / Storage3 / Journal6，协议 `r3-client-8`。本包补实际可定位的未知 Java 载体路径，先写齐生产源码后统一构建；不恢复 JDK 容器广谱 Hook，不做自身外观、武器或源码 ZIP。
+
+未知 wrapper、能力值和自定义子类继续沿实际实例字段取图。布局 children、字段和数组读取使用同一份原始值，完成时复核根 ItemStack 的能力/tag字段、节点字段及实际用过的数组槽；字段替换、脱链和构图中混入旧 child 明确拒绝。新增 ArrayDeque 环形逻辑槽、ConcurrentHashMap 普通/树节点的准确 key/value 路径，不把任意闲置容量当 payload。成功 store 的原观察器仍可在容器半写时重建图：Deque 保留真实发布/移除/grow 前态，CHM 沿当前 table、nextTable 与 ForwardingNode 目标取并集，Reservation 保留结构但不伪造值，树旋转期间保留实际 root/first 可达节点；不等待原方法自己释放的锁，不重放 getter/iterator/supplier。
+
+已声明载体及物品动作中的原非 SAM 业务调用捕获实际 receiver、参数与原返回，原 invoke 只执行一次，异常清理保留原 Throwable 和原 catch。当前 Scope、来源、持有根、准确参数、实际 CP/BCI、物理深度和 Method/ConstMethod/CP 版本共同约束接续。元数据不可用的已选择调用保留为不合格调用，不能回退借用隐式 data lease；结果只作原观察，不把临时返回对象登记为持有根。自定义 SAM 只按实际接口参数签名判别 callback，普通同名业务重载不因 Object 可赋值关系被误伤；数据字段保留，callback 不自动借 data-method 权。实际 Forge provider 查询接同一单次原调用交接。
+
+槽位 helper 支持 canonical getter 的 root/helper 角色复用、自然 super/递归交接与自定义容器覆写中的真实 super.get；无匹配原 SlotCall 的嵌套 getter 仍未决。读地址绑定保留实际 getter 当前定义，标准 get 的 Query 同时保留真实特殊/虚分派合同和当前 body 版本，读取前后失配即失效。Native 提供只读 frame/callSite/methodImage；最终代码有 Execution 观测时，解析器只消费已匹配整个实际 VM image 的 protected Plan 所对应的固定观测段，校验准确 bridge、token local、ordinal、原 local/opcode 与 selector，遇未知调用/分支不穿过。Slot 与 Action 同方法共用原槽位见证，避免同一原 invoke 被二次包裹。
+
+`build-c-java96-native86-unknown-carriers-20261016.log` 首轮 **PASS，1分15秒**，含 Native86 编译链接；检查准备时定位并收窄 SAM 重载误判后，必要最终构建 `build-c-java96-native86-unknown-carriers-final-20261016.log` **PASS，47秒**，Native86/Agent/Bootstrap 保持最新，Core 已重新生成。Java 检查器及隔离 JNI 夹具编译均退出0。没有重跑旧矩阵或已通过的无关场景。
+
+`equipment-carrier-delegate-bytecode` 首轮退出0：真实非 SAM 多方法接口原调用一次、引用/null/long/void 结果、long/double 参数、原 RuntimeException/Error/catch 身份、策略未装直通、最终 Slot→Action→Execution 单见证；同 mode 的实际 Forge provider/dispatcher/optional 字节码以原 frame、COMPUTE_MAXS 通过 JVM 校验。`carrier-call-sites` 首轮退出0：实际 VM 的 CP/BCI、递归外层及错 selector/opcode/不兼容 receiver 拒绝、callee 实际 tuple、一次真实 RedefineClasses 后的 image 变化、最终观测段解析与元数据不可用。它使用自己的早期 OnLoad、JVMTI 环境、读取者和 Plan 登记，不声称安装了实际 Core 授权；同 Class 的另一个 receiver 由 callee tuple 匹配区分，不把元数据查询冒称对象授权。
+
+`unknown-carrier-graph` 初次因未初始化 Minecraft 注册表退出，补初始化后又在缺少 ModLauncher 事件构造器变换的 Forge NetworkEvent 处退出；两份原日志均保留。本夹具只使用数据图：确认实际 Bootstrap 已完成 vanilla 注册表/快照后，仅识别这一准确网络初始化缺失并显式输出 NETWORK_NOT_INITIALIZED，其他异常继续失败。`c-java96-native86-unknown-carrier-graph-data-20261016.log` 最终 **退出0**，覆盖 wrapper→CHM→可变字段及脱链，字段/数组/table 混图拒绝，Deque 环绕/闲置/半写，CHM 迁移/Reservation/树写实际并集，以及 SAM/重载区分、getter/supplier 零重放。这里只替换 FIELDS/READ 元数据 reader，生产 Graph/Layout 算法原样执行，不提供 Native/Core 写权，不代称 Forge 网络或游戏启动通过。
+
+匹配候选 `distribution/candidate-c-java96-native86-unknown-carriers-wip-20261016`：Core3039833、prelaunch23226字节。源码、候选及既有摘要同步 GitHub。真实完整 Agent/Core/Native 授权攻防、进服、存档重启及性能 **NOTRUN**；未解析的间接/反射/原生状态、缺少持久根的临时载体、未知槽位/键语义及已删容器方法防护仍有边界，完整 C/B 不标全部完成。
+
+---
 ## 2026-10-16：C 接续——任务增量调度、资源绑定与停组无锁交接
 
 接续 `f86c94e`，Java ABI95 / Native ABI85 / SourceMapBridge2 / Storage3 / Journal6，协议 `r3-client-8`。按问题总整理收口 P1-05/06/07/08/11/18 及相关热路径；先写齐本包源码，再统一构建。未恢复旧 JDK 容器 Hook，未做自身外观、武器注册或源码 ZIP。

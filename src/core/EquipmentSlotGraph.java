@@ -9,11 +9,19 @@ import net.minecraft.world.item.ItemStack;
 
 /** Actual reads of one naturally executed slot getter; no entity heap search or getter replay. */
 final class EquipmentSlotGraph {
-    sealed interface Read permits FieldRead,ArrayRead,ListRead,MapRead { Object receiver();Object value(); }
+    sealed interface Read permits FieldRead,ArrayRead,ListRead,MapRead,ContainerRead { Object receiver();Object value(); }
     record FieldRead(Object receiver,Field field,Object value) implements Read { }
     record ArrayRead(Object array,int index,Object value) implements Read { public Object receiver(){return array;} }
     record ListRead(Object list,int index,Object value) implements Read { public Object receiver(){return list;} }
     record MapRead(Object map,Object key,Object value) implements Read { public Object receiver(){return map;} }
+    private record MethodImage(long method,long constantMethod,long constants,long length) {
+        static MethodImage of(long[] values){return values!=null&&values.length==4&&values[0]!=0&&values[1]!=0&&values[2]!=0&&values[3]>0?new MethodImage(values[0],values[1],values[2],values[3]):null;}
+    }
+    private record Definition(Class<?> declaring,String name,String descriptor,MethodImage image) {
+        boolean current(){return image!=null&&image.equals(methodImage(declaring,name,descriptor));}
+    }
+    private record Query(boolean map,Class<?> symbolic,String name,String descriptor,int opcode,Class<?> caller,Class<?> body,MethodImage image) { }
+    private record ContainerRead(Object receiver,Object key,Object value,Query query) implements Read { }
     record FieldUse(Object receiver,Field field,long offset,int width,int mask,boolean terminal) { }
     record ArrayUse(Object array,int from,int to,int stride,int mask,boolean terminal) { }
     static final class View {
@@ -41,12 +49,13 @@ final class EquipmentSlotGraph {
     private static final String C="java.util.Collections$",I="java.util.ImmutableCollections$",G="com.google.common.collect.";
     private static final EquipmentSlot[] SIX={EquipmentSlot.MAINHAND,EquipmentSlot.OFFHAND,EquipmentSlot.FEET,EquipmentSlot.LEGS,EquipmentSlot.CHEST,EquipmentSlot.HEAD};
     private static final Map<LivingEntity,State> STATES=Collections.synchronizedMap(new WeakIdentityMap<>());
-    private static final MethodHandle READ,STATIC,METHOD;private static final Object UNSAFE;private static final Method BASE,SCALE,STATIC_BASE,STATIC_OFFSET;
+    private static final MethodHandle READ,STATIC,METHOD,IMAGE;private static final Object UNSAFE;private static final Method BASE,SCALE,STATIC_BASE,STATIC_OFFSET;
     static {
         try {Class<?> bridge=Class.forName("dev.ronova.pro.bootstrap.CarrierBridge",false,null);var lookup=MethodHandles.publicLookup();
             READ=lookup.findStatic(bridge,"read",MethodType.methodType(Object.class,Object.class,Field.class));
             STATIC=lookup.findStatic(bridge,"staticValue",MethodType.methodType(Object.class,Class.class,String.class,String.class));
             METHOD=lookup.findStatic(bridge,"method",MethodType.methodType(Class.class,Object.class,Class.class,String.class,String.class,int.class,Class.class));
+            IMAGE=lookup.findStatic(bridge,"methodImage",MethodType.methodType(long[].class,Class.class,String.class,String.class));
             Class<?> type=Class.forName("sun.misc.Unsafe",false,ClassLoader.getPlatformClassLoader());Field singleton=type.getDeclaredField("theUnsafe");singleton.setAccessible(true);UNSAFE=singleton.get(null);
             BASE=type.getMethod("arrayBaseOffset",Class.class);SCALE=type.getMethod("arrayIndexScale",Class.class);
             STATIC_BASE=type.getMethod("staticFieldBase",Field.class);STATIC_OFFSET=type.getMethod("staticFieldOffset",Field.class);
@@ -61,24 +70,28 @@ final class EquipmentSlotGraph {
         boolean same(Object actual){return alive()&&(primitive?samePrimitive(scalar,actual):reference.get()==actual);}
     }
     private static final class HeldRead {
-        final int kind,index;final WeakReference<Object> receiver,key;final boolean nullKey;final Field field;final Value value;
-        HeldRead(Read read){receiver=new WeakReference<>(read.receiver());field=read instanceof FieldRead f?f.field:null;index=read instanceof ArrayRead a?a.index:read instanceof ListRead l?l.index:-1;
-            Object actualKey=read instanceof MapRead m?m.key:null;key=new WeakReference<>(actualKey);nullKey=actualKey==null;
-            kind=read instanceof FieldRead?0:read instanceof ArrayRead?1:read instanceof ListRead?2:3;
+        final int kind,index;final WeakReference<Object> receiver,key;final boolean nullKey;final Field field;final Value value;final Query query;
+        HeldRead(Read read){receiver=new WeakReference<>(read.receiver());field=read instanceof FieldRead f?f.field:null;query=read instanceof ContainerRead c?c.query:null;
+            index=read instanceof ArrayRead a?a.index:read instanceof ListRead l?l.index:read instanceof ContainerRead c&&!c.query.map&&c.key instanceof Integer i?i.intValue():-1;
+            Object actualKey=read instanceof MapRead m?m.key:read instanceof ContainerRead c&&c.query.map?c.key:null;key=new WeakReference<>(actualKey);nullKey=actualKey==null;
+            kind=read instanceof FieldRead?0:read instanceof ArrayRead?1:read instanceof ListRead||query!=null&&!query.map?2:3;
             value=new Value(read.value(),field!=null?field.getType().isPrimitive():read instanceof ArrayRead a&&a.array.getClass().getComponentType().isPrimitive());}
         Object current(Uses uses,boolean terminal){Object holder=receiver.get();if(holder==null)throw unsupported("DETACHED_READ");
             if(kind==0)return uses.field(holder,field,terminal);
             if(kind==1)return uses.array(holder,index,terminal);
-            if(kind==2)return list(uses,holder,index,terminal,new IdentityHashMap<>());
-            Object actualKey=key.get();if(actualKey==null&&!nullKey)throw unsupported("DETACHED_KEY");return map(uses,holder,actualKey,terminal,new IdentityHashMap<>());
+            Object result;
+            if(kind==2)result=list(uses,holder,index,terminal,new IdentityHashMap<>(),query);
+            else {Object actualKey=key.get();if(actualKey==null&&!nullKey)throw unsupported("DETACHED_KEY");result=map(uses,holder,actualKey,terminal,new IdentityHashMap<>(),query);}
+            if(query!=null&&!query.image.equals(methodImage(query.body,query.name,query.descriptor)))throw unsupported("QUERY_DEFINITION_CHANGED");return result;
         }
-        boolean sameAddress(HeldRead other){return kind==other.kind&&receiver.get()!=null&&receiver.get()==other.receiver.get()&&(kind==0?field.equals(other.field):kind==3?key.get()==other.key.get():index==other.index);}
+        boolean sameAddress(HeldRead other){return kind==other.kind&&Objects.equals(query,other.query)&&receiver.get()!=null&&receiver.get()==other.receiver.get()&&(kind==0?field.equals(other.field):kind==3?key.get()==other.key.get():index==other.index);}
     }
     private static final class Binding {
-        final List<HeldRead> reads;final int terminal;
-        Binding(List<Read> reads,int terminal){List<HeldRead> copy=new ArrayList<>();for(Read read:reads)copy.add(new HeldRead(read));this.reads=List.copyOf(copy);this.terminal=terminal;}
-        ItemStack resolve(Uses uses){HeldRead selected=reads.get(terminal);Object result=null;
+        final List<HeldRead> reads;final int terminal;final Definition definition;
+        Binding(List<Read> reads,int terminal,Definition definition){List<HeldRead> copy=new ArrayList<>();for(Read read:reads)copy.add(new HeldRead(read));this.reads=List.copyOf(copy);this.terminal=terminal;this.definition=definition;}
+        ItemStack resolve(Uses uses){if(definition!=null&&!definition.current())throw unsupported("GETTER_DEFINITION_CHANGED");HeldRead selected=reads.get(terminal);Object result=null;
             for(HeldRead read:reads){boolean actual=read.sameAddress(selected);Object value=read.current(uses,actual);if(actual){if(!(value instanceof ItemStack))throw unsupported("SLOT_VALUE");result=value;}else if(!read.value.same(value))throw unsupported("CHANGED_READ");}
+            if(definition!=null&&!definition.current())throw unsupported("GETTER_DEFINITION_CHANGED");
             if(!(result instanceof ItemStack stack))throw unsupported("MISSING_TERMINAL");return stack;
         }
     }
@@ -101,8 +114,17 @@ final class EquipmentSlotGraph {
     static void publish(LivingEntity entity,long generation){synchronized(STATES){if(generation<=0){STATES.remove(entity);return;}State state=STATES.get(entity);if(state==null||state.generation!=generation)STATES.put(entity,new State(generation));}}
     static void forget(LivingEntity entity,long generation,EquipmentSlot slot){synchronized(STATES){State state=STATES.get(entity);int at=ordinal(slot);if(state!=null&&state.generation==generation&&at>=0)state.bindings[at]=null;}}
     static boolean observe(LivingEntity entity,long generation,EquipmentSlot slot,ItemStack result,List<Read> reads){
+        return observe(entity,generation,slot,result,reads,null);
+    }
+    static boolean observe(LivingEntity entity,long generation,EquipmentSlot slot,ItemStack result,List<Read> reads,Class<?> declaring,String name,String descriptor,long[] image){
+        MethodImage actual=MethodImage.of(image);
+        if(declaring==null||name==null||descriptor==null||actual==null){forget(entity,generation,slot);return false;}
+        return observe(entity,generation,slot,result,reads,new Definition(declaring,name,descriptor,actual));
+    }
+    private static boolean observe(LivingEntity entity,long generation,EquipmentSlot slot,ItemStack result,List<Read> reads,Definition definition){
         int at=ordinal(slot);if(entity==null||at<0||result==null||reads==null||reads.isEmpty()||reads.size()>LIMIT||ProRuntime.liveStateGeneration(entity)!=generation)return false;
         try {
+            if(definition!=null&&!definition.current())throw unsupported("GETTER_DEFINITION_CHANGED");
             IdentityHashMap<Object,Boolean> rooted=new IdentityHashMap<>();rooted.put(entity,Boolean.TRUE);List<HeldRead> held=new ArrayList<>();int terminal=-1;
             for(int index=0;index<reads.size();index++){
                 Read read=reads.get(index);if(read==null||read.receiver()==null)throw unsupported("NULL_READ");HeldRead actual=new HeldRead(read);held.add(actual);
@@ -112,7 +134,7 @@ final class EquipmentSlotGraph {
                 if(connected&&value==result){if(terminal>=0&&!actual.sameAddress(held.get(terminal)))throw unsupported("AMBIGUOUS_TERMINAL");terminal=index;}
                 if(connected&&value!=null&&!(value instanceof ItemStack)&&!scalar(value)&&!borrowed(value))rooted.put(value,Boolean.TRUE);
             }
-            if(terminal<0)throw unsupported("NO_ROOTED_SLOT");Binding binding=new Binding(reads,terminal);Uses uses=new Uses(1<<at);if(binding.resolve(uses)!=result)throw unsupported("RETURN_CHANGED");
+            if(terminal<0)throw unsupported("NO_ROOTED_SLOT");Binding binding=new Binding(reads,terminal,definition);Uses uses=new Uses(1<<at);if(binding.resolve(uses)!=result)throw unsupported("RETURN_CHANGED");
             synchronized(STATES){State state=STATES.get(entity);if(state==null||state.generation!=generation)return false;state.bindings[at]=binding;}return true;
         }catch(Unresolved failure){forget(entity,generation,slot);return false;}
     }
@@ -153,14 +175,46 @@ final class EquipmentSlotGraph {
         if(selected.getType().isPrimitive()?!samePrimitive(current,result):current!=result)throw unsupported("FIELD_VALUE");return new FieldRead(holder,selected,result);
     }
     static boolean containerSupported(Object value,boolean map){try{return queryBase(value,map)!=null;}catch(Unresolved unavailable){return false;}}
+    static boolean containerSupported(Object receiver,boolean map,Class<?> symbolic,String name,String descriptor,int opcode,Class<?> caller){
+        try{return query(receiver,map,symbolic,name,descriptor,opcode,caller)!=null;}catch(Unresolved unavailable){return false;}
+    }
+    static Read containerRead(Object receiver,Object key,Object value,boolean map,Class<?> symbolic,String name,String descriptor,int opcode,Class<?> caller){
+        Query query=query(receiver,map,symbolic,name,descriptor,opcode,caller);
+        if(query==null||!map&&!(key instanceof Integer))throw unsupported("QUERY_CONTRACT");
+        return new ContainerRead(receiver,key,value,query);
+    }
+    private static Query query(Object receiver,boolean map,Class<?> symbolic,String name,String descriptor,int opcode,Class<?> caller){
+        if(receiver==null||symbolic==null||caller==null||!(map?receiver instanceof Map<?,?>:receiver instanceof List<?>)||!"get".equals(name)
+                ||!(map?"(Ljava/lang/Object;)Ljava/lang/Object;":"(I)Ljava/lang/Object;").equals(descriptor)||opcode!=182&&opcode!=183&&opcode!=185)return null;
+        Class<?> actual=dispatch(receiver,symbolic,name,descriptor,opcode,caller);
+        MethodImage image=actual==null?null:methodImage(actual,name,descriptor);
+        Query query=image==null?null:new Query(map,symbolic,name,descriptor,opcode,caller,actual,image);
+        return query!=null&&queryBase(receiver,query)!=null?query:null;
+    }
+    private static MethodImage methodImage(Class<?> declaring,String name,String descriptor){
+        try{return MethodImage.of((long[])IMAGE.invokeExact(declaring,name,descriptor));}
+        catch(RuntimeException failure){throw unsupported("METHOD_IMAGE");}catch(Error failure){throw failure;}catch(Throwable failure){throw unsupported("METHOD_IMAGE");}
+    }
+    private static Class<?> dispatch(Object receiver,Class<?> symbolic,String name,String descriptor,int opcode,Class<?> caller){
+        try{return (Class<?>)METHOD.invokeExact(receiver,symbolic,name,descriptor,opcode,caller);}
+        catch(RuntimeException failure){throw unsupported("QUERY_DISPATCH");}catch(Error failure){throw failure;}catch(Throwable failure){throw unsupported("QUERY_DISPATCH");}
+    }
+    /** The original super/virtual contract is retained; reading its storage never runs an override. */
+    private static Class<?> queryBase(Object receiver,Query query){
+        if(receiver==null||!(query.map?receiver instanceof Map<?,?>:receiver instanceof List<?>)||!EquipmentCarrierLayouts.known(query.body)
+                ||!query.image.equals(methodImage(query.body,query.name,query.descriptor))
+                ||dispatch(receiver,query.symbolic,query.name,query.descriptor,query.opcode,query.caller)!=query.body)return null;
+        for(Class<?> at=receiver.getClass();at!=null;at=at.getSuperclass())if(EquipmentCarrierLayouts.known(at))
+            return (query.map?Map.class.isAssignableFrom(at):List.class.isAssignableFrom(at))&&query.body.isAssignableFrom(at)?at:null;
+        return null;
+    }
     /** Resolve the public virtual query, without running a container or key method. */
     private static Class<?> queryBase(Object receiver,boolean map){
         if(receiver==null||!(map?receiver instanceof Map<?,?>:receiver instanceof List<?>))return null;
         Class<?> base=null;for(Class<?> at=receiver.getClass();at!=null;at=at.getSuperclass())if(EquipmentCarrierLayouts.known(at)){base=at;break;}
         if(base==null||!(map?Map.class.isAssignableFrom(base):List.class.isAssignableFrom(base)))return null;
         Class<?> contract=map?Map.class:List.class;String descriptor=map?"(Ljava/lang/Object;)Ljava/lang/Object;":"(I)Ljava/lang/Object;";Class<?> actual;
-        try{actual=(Class<?>)METHOD.invokeExact(receiver,contract,"get",descriptor,185,EquipmentSlotGraph.class);}
-        catch(RuntimeException failure){throw unsupported("QUERY_DISPATCH");}catch(Error failure){throw failure;}catch(Throwable failure){throw unsupported("QUERY_DISPATCH");}
+        actual=dispatch(receiver,contract,"get",descriptor,185,EquipmentSlotGraph.class);
         // A custom override must take the original helper trace. Only an actual
         // supported platform body may use the corresponding standard storage.
         return actual!=null&&EquipmentCarrierLayouts.known(actual)&&actual.isAssignableFrom(base)?base:null;
@@ -181,8 +235,9 @@ final class EquipmentSlotGraph {
         Object terminal(Object receiver,String owner,String name,boolean terminal){Class<?> declaring=declaring(receiver.getClass(),owner);for(var slot:EquipmentCarrierGraph.fields(receiver))if(slot.field().getDeclaringClass()==declaring&&slot.field().getName().equals(name))return field(receiver,slot.field(),terminal);throw unsupported("TERMINAL_FIELD");}
         Object array(Object array,int index,boolean terminal){if(array==null||!array.getClass().isArray()||index<0||index>=Array.getLength(array))throw unsupported("ARRAY_INDEX");if(++count>LIMIT)throw unsupported("READ_CAPACITY");Object value=replacement!=null&&replacement.declaring==null&&replacement.receiver==array&&replacement.index==index?replacement.value:Array.get(array,index);arrays.add(new ArrayUse(array,index,index+1,1,mask,terminal));return value;}
     }
-    private static Object list(Uses uses,Object receiver,int index,boolean terminal,IdentityHashMap<Object,Boolean> path){
-        Class<?> type=queryBase(receiver,false);if(type==null||path.put(receiver,Boolean.TRUE)!=null||path.size()>LIMIT)throw unsupported("LIST_IMPLEMENTATION");
+    private static Object list(Uses uses,Object receiver,int index,boolean terminal,IdentityHashMap<Object,Boolean> path){return list(uses,receiver,index,terminal,path,null);}
+    private static Object list(Uses uses,Object receiver,int index,boolean terminal,IdentityHashMap<Object,Boolean> path,Query query){
+        Class<?> type=query==null?queryBase(receiver,false):queryBase(receiver,query);if(type==null||path.put(receiver,Boolean.TRUE)!=null||path.size()>LIMIT)throw unsupported("LIST_IMPLEMENTATION");
         String name=type.getName();try{
             if(index<0)throw unsupported("LIST_INDEX");
             if(name.equals("java.util.ArrayList")){int size=integer(uses.get(receiver,name,"size"));if(index>=size)throw unsupported("LIST_INDEX");return uses.array(uses.get(receiver,name,"elementData"),index,terminal);}
@@ -206,8 +261,9 @@ final class EquipmentSlotGraph {
             throw unsupported("LIST_LAYOUT");
         }finally{path.remove(receiver);}
     }
-    private static Object map(Uses uses,Object receiver,Object key,boolean terminal,IdentityHashMap<Object,Boolean> path){
-        Class<?> type=queryBase(receiver,true);if(type==null)throw unsupported("MAP_IMPLEMENTATION");
+    private static Object map(Uses uses,Object receiver,Object key,boolean terminal,IdentityHashMap<Object,Boolean> path){return map(uses,receiver,key,terminal,path,null);}
+    private static Object map(Uses uses,Object receiver,Object key,boolean terminal,IdentityHashMap<Object,Boolean> path,Query query){
+        Class<?> type=query==null?queryBase(receiver,true):queryBase(receiver,query);if(type==null)throw unsupported("MAP_IMPLEMENTATION");
         if(path.put(receiver,Boolean.TRUE)!=null||path.size()>LIMIT)throw unsupported("MAP_CYCLE");String name=type.getName();try{
             if(type==EnumMap.class){Object keyType=uses.get(receiver,name,"keyType");if(!(key instanceof Enum<?> actual)||key.getClass()!=keyType&&key.getClass().getSuperclass()!=keyType)return null;
                 Object value=uses.array(uses.get(receiver,name,"vals"),enumOrdinal(uses,actual),terminal);return value==uses.constant(EnumMap.class,"NULL")?null:value;}

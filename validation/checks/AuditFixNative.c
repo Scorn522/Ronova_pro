@@ -18,11 +18,13 @@ JNIEXPORT jint JNICALL Agent_OnLoad(JavaVM *vm,char *options,void *reserved){
     jint status=(*vm)->GetEnv(vm,(void**)&audit_physical_early,JVMTI_VERSION_1_2);
     jvmtiError error=JVMTI_ERROR_NONE;memset(&requested,0,sizeof(requested));memset(&actual,0,sizeof(actual));
     requested.can_get_bytecodes=1;requested.can_generate_frame_pop_events=1;
+    requested.can_redefine_classes=options&&!strcmp(options,"carrier-sites");
     if(status==JNI_OK&&audit_physical_early){
         error=(*audit_physical_early)->AddCapabilities(audit_physical_early,&requested);
         if(error==JVMTI_ERROR_NONE)error=(*audit_physical_early)->GetCapabilities(audit_physical_early,&actual);
     }
-    if(status!=JNI_OK||!audit_physical_early||error!=JVMTI_ERROR_NONE||!actual.can_get_bytecodes||!actual.can_generate_frame_pop_events){
+    if(status!=JNI_OK||!audit_physical_early||error!=JVMTI_ERROR_NONE||!actual.can_get_bytecodes||!actual.can_generate_frame_pop_events
+            ||requested.can_redefine_classes&&!actual.can_redefine_classes){
         fprintf(stderr,"PHYSICAL_FIXTURE_ONLOAD_FAILED jni=%d jvmti=%d bytecodes=%u framePop=%u\n",
                 status,(int)error,actual.can_get_bytecodes,actual.can_generate_frame_pop_events);
         if(audit_physical_early)(*audit_physical_early)->DisposeEnvironment(audit_physical_early);
@@ -177,6 +179,68 @@ failed:
     snprintf(evidence,sizeof(evidence),"physical setup %s jni=%d jvmti=%d phase=%d bytecodes=%u framePop=%u early=%d",
             failure,status,(int)error,(int)phase,actual.can_get_bytecodes,actual.can_generate_frame_pop_events,early);
     Java_dev_ronova_pro_AuditFixCheck_physicalStop0(env,type);audit_physical_failure(env,evidence);
+}
+/* The carrier check admits only this same fixture-owned environment and image.
+ * All frame, CP, method-version and observer-plan comparisons are production
+ * readers. This registration supplies no live Core or equipment authorization. */
+JNIEXPORT void JNICALL Java_dev_ronova_pro_AuditFixCheck_carrierSiteSetup0(JNIEnv *env,jclass type,jclass controls,jclass sources){
+    if(native_controls||code_images){audit_physical_failure(env,"carrier fixture requires an uninstalled image registry");return;}
+    Java_dev_ronova_pro_AuditFixCheck_physicalSetup0(env,type,sources);if((*env)->ExceptionCheck(env))return;
+    jvmtiCapabilities capability;memset(&capability,0,sizeof(capability));
+    if((*native_ti)->GetCapabilities(native_ti,&capability)!=JVMTI_ERROR_NONE||!capability.can_redefine_classes){
+        Java_dev_ronova_pro_AuditFixCheck_physicalStop0(env,type);audit_physical_failure(env,"carrier fixture requires -agentpath DLL=carrier-sites");return;
+    }
+    native_controls=(jclass)native_original.NewGlobalRef(env,controls);
+    native_control_gate=native_original.GetStaticMethodID(env,type,"carrierReader","()Z");
+    if(!native_controls||!native_control_gate){
+        if(native_controls)native_original.DeleteGlobalRef(env,native_controls);native_controls=NULL;native_control_gate=NULL;
+        Java_dev_ronova_pro_AuditFixCheck_physicalStop0(env,type);audit_physical_failure(env,"carrier fixture bridge registration failed");
+    }
+}
+JNIEXPORT void JNICALL Java_dev_ronova_pro_AuditFixCheck_carrierSiteStop0(JNIEnv *env,jclass type){
+    InterlockedExchange(&code_available,0);native_control_gate=NULL;
+    if(native_controls){native_original.DeleteGlobalRef(env,native_controls);native_controls=NULL;}
+    Java_dev_ronova_pro_AuditFixCheck_physicalStop0(env,type);
+}
+JNIEXPORT jint JNICALL Java_dev_ronova_pro_AuditFixCheck_carrierSiteDepth0(JNIEnv *env,jclass type,jclass declaring,jstring name,jstring descriptor){
+    return Java_dev_ronova_pro_bootstrap_NativeControl_carrierCallbackDepth0(env,type,declaring,name,descriptor);
+}
+JNIEXPORT jlongArray JNICALL Java_dev_ronova_pro_AuditFixCheck_carrierSiteFrame0(JNIEnv *env,jclass type,jclass declaring,jstring name,jstring descriptor,jint bottom){
+    return Java_dev_ronova_pro_bootstrap_NativeControl_carrierFrame0(env,type,declaring,name,descriptor,bottom);
+}
+JNIEXPORT jlongArray JNICALL Java_dev_ronova_pro_AuditFixCheck_carrierSiteImage0(JNIEnv *env,jclass type,jclass declaring,jstring name,jstring descriptor){
+    return Java_dev_ronova_pro_bootstrap_NativeControl_carrierMethodImage0(env,type,declaring,name,descriptor);
+}
+JNIEXPORT jclass JNICALL Java_dev_ronova_pro_AuditFixCheck_carrierSiteMethod0(JNIEnv *env,jclass type,jobject receiver,jclass symbolic,jstring name,jstring descriptor,jint opcode,jclass caller){
+    return Java_dev_ronova_pro_bootstrap_NativeControl_carrierMethod0(env,type,receiver,symbolic,name,descriptor,opcode,caller);
+}
+JNIEXPORT jlongArray JNICALL Java_dev_ronova_pro_AuditFixCheck_carrierSiteCapture0(JNIEnv *env,jclass type,jobject receiver,jclass symbolic,jstring name,jstring descriptor,jint opcode,jclass caller,jstring callerName,jstring callerDescriptor,jint bottom){
+    return Java_dev_ronova_pro_bootstrap_NativeControl_carrierCallSite0(env,type,receiver,symbolic,name,descriptor,opcode,caller,callerName,callerDescriptor,bottom);
+}
+JNIEXPORT void JNICALL Java_dev_ronova_pro_AuditFixCheck_carrierSiteMetadata0(JNIEnv *env,jclass type,jboolean available){
+    (void)env;(void)type;InterlockedExchange(&code_available,available==JNI_TRUE);
+}
+JNIEXPORT jboolean JNICALL Java_dev_ronova_pro_AuditFixCheck_carrierSiteRegister0(JNIEnv *env,jclass type,jclass actual,jbyteArray bytes,jobject plan){
+    jobject loader=NULL;char *signature=NULL;jstring name=NULL;jobjectArray keys=NULL,rows=NULL;int valid=actual&&bytes&&plan;
+    if(valid)valid=(*native_ti)->GetClassLoader(native_ti,actual,&loader)==JVMTI_ERROR_NONE
+            &&(*native_ti)->GetClassSignature(native_ti,actual,&signature,NULL)==JVMTI_ERROR_NONE&&signature;
+    if(valid){size_t length=strlen(signature);valid=length>2&&signature[0]=='L'&&signature[length-1]==';';
+        if(valid){signature[length-1]=0;name=native_original.NewStringUTF(env,signature+1);}}
+    jclass objectType=valid?native_original.FindClass(env,"java/lang/Object"):NULL;
+    if(objectType){keys=native_original.NewObjectArray(env,0,objectType,NULL);rows=native_original.NewObjectArray(env,0,objectType,NULL);native_original.DeleteLocalRef(env,objectType);}
+    valid=valid&&name&&keys&&rows&&!native_original.ExceptionCheck(env);
+    if(valid){InterlockedExchange(&code_available,1);valid=Java_dev_ronova_pro_bootstrap_NativeControl_codeLayout0(env,type,loader,name,bytes,keys,rows,JNI_FALSE,plan);}
+    if(rows)native_original.DeleteLocalRef(env,rows);if(keys)native_original.DeleteLocalRef(env,keys);if(name)native_original.DeleteLocalRef(env,name);
+    if(signature)(*native_ti)->Deallocate(native_ti,(unsigned char*)signature);if(loader)native_original.DeleteLocalRef(env,loader);return valid?JNI_TRUE:JNI_FALSE;
+}
+JNIEXPORT void JNICALL Java_dev_ronova_pro_AuditFixCheck_carrierSiteRedefine0(JNIEnv *env,jclass type,jclass actual,jbyteArray bytes){
+    (void)type;NativeToolingEnv *tooling=native_tooling_environment(native_ti);
+    if(!tooling||!actual||!bytes){audit_physical_failure(env,"carrier fixture redefine arguments unavailable");return;}
+    jsize length=native_original.GetArrayLength(env,bytes);jbyte *body=native_original.GetByteArrayElements(env,bytes,NULL);
+    jvmtiError error=JVMTI_ERROR_INTERNAL;
+    if(body){jvmtiClassDefinition definition={actual,length,(const unsigned char*)body};error=tooling->original->RedefineClasses(native_ti,1,&definition);
+        native_original.ReleaseByteArrayElements(env,bytes,body,JNI_ABORT);}
+    if(error!=JVMTI_ERROR_NONE){char message[96];snprintf(message,sizeof(message),"carrier fixture actual redefine failed jvmti=%d",(int)error);audit_physical_failure(env,message);}
 }
 JNIEXPORT void JNICALL Java_dev_ronova_pro_AuditFixCheck_physicalBind0(JNIEnv *env,jclass type,jobject token){
     (void)type;jmethodID method=NULL;jlocation location=-1;jint depth=0,bottom=0;jthread thread=NULL;

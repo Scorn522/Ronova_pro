@@ -1610,6 +1610,19 @@ final class ExecutionFlow {
             }
         }return null;
     }
+    /** Read-only comparison after Native has matched this plan to the whole actual VM image. */
+    static boolean carrierInstruction(Object actual,String selector,int location,int instruction,int opcode,int local,String owner,String name,String descriptor){
+        if(CALLER.getCallerClass()!=NativeControl.class)throw new SecurityException("ACTUAL_CARRIER_INSTRUCTION_READER_REQUIRED");
+        if(!(actual instanceof Plan plan)||selector==null)return false;
+        Method method=plan.methods.get(selector);
+        if(method==null||instruction<0||instruction>=method.operations.length||!Objects.equals(method.sites.get(location),instruction))return false;
+        // The execution token is appended exactly after the pre-observer locals.
+        if(opcode==-1)return local==method.locals;
+        int[] operation=method.operations[instruction];if(operation==null||operation.length<2||operation[0]!=opcode)return false;
+        if(opcode>=21&&opcode<=25||opcode==58)return local>=0&&local<method.locals&&operation[1]==local;
+        if(opcode<182||opcode>185||owner==null||name==null||descriptor==null)return false;
+        String[] target=method.fields[instruction];return target!=null&&target.length==3&&owner.equals(target[0])&&name.equals(target[1])&&descriptor.equals(target[2]);
+    }
     /** Only the native reader supplies a plan after matching its whole actual VM method image. */
     static boolean callbackAdapter(Object actual,String selector,int location,int opcode,String owner,String name,String descriptor){
         if(CALLER.getCallerClass()!=NativeControl.class)throw new SecurityException("ACTUAL_CALLBACK_ADAPTER_READER_REQUIRED");

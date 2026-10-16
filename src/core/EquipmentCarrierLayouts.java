@@ -13,17 +13,26 @@ import java.util.Set;
 /** Actual standard storage reached from one capability value; no container methods are invoked. */
 final class EquipmentCarrierLayouts {
     record Edge(Object value,boolean storage) { }
-    record Slot(Object receiver,Field field,long offset,int width,boolean structural) { }
+    record Slot(Object receiver,Field field,long offset,int width,boolean structural,Object value) { }
     /** Bounds describe logical slots, not the unused capacity of the actual array. */
     record Range(Object array,int from,int to,int stride,boolean structural) { }
     /** elements is a list-value snapshot only, and must never be registered as a carrier. */
-    record Layout(boolean complete,boolean shared,List<Edge> children,List<Slot> slots,List<Range> arrays,Object[] elements) { }
+    record Layout(boolean complete,boolean shared,List<Edge> children,List<Slot> slots,List<Range> arrays,Object[] elements,List<ArrayImage> images) { }
+    /** Every child read and the final relationship check use the same actual array-slot image. */
+    static final class ArrayImage {
+        private static final java.lang.invoke.VarHandle ELEMENT=MethodHandles.arrayElementVarHandle(Object[].class);
+        final Object[] array,values;final java.util.BitSet used=new java.util.BitSet();
+        ArrayImage(Object[] array){this.array=array;values=array.clone();}
+        Object at(int index){used.set(index);return values[index];}
+        Object[] all(){used.set(0,values.length);return values;}
+        boolean current(){for(int at=used.nextSetBit(0);at>=0;at=used.nextSetBit(at+1))if(ELEMENT.getVolatile(array,at)!=values[at])return false;return true;}
+    }
 
     private static final int LIMIT=4096;
     private static final String C="java.util.Collections$",I="java.util.ImmutableCollections$",G="com.google.common.collect.",A="java.util.concurrent.atomic.";
     private static final Set<String> JDK=Set.of(
             "java.util.ArrayList","java.util.ArrayList$SubList","java.util.LinkedList","java.util.Arrays$ArrayList",
-            "java.util.HashMap","java.util.LinkedHashMap","java.util.IdentityHashMap","java.util.EnumMap","java.util.HashSet","java.util.LinkedHashSet",
+            "java.util.HashMap","java.util.LinkedHashMap","java.util.IdentityHashMap","java.util.EnumMap","java.util.HashSet","java.util.LinkedHashSet","java.util.ArrayDeque","java.util.concurrent.ConcurrentHashMap",
             I+"ListN",I+"List12",I+"SubList",I+"SetN",I+"Set12",I+"MapN",I+"Map1",
             C+"SingletonList",C+"SingletonSet",C+"SingletonMap",C+"EmptyList",C+"EmptySet",C+"EmptyMap",C+"CopiesList",
             C+"UnmodifiableCollection",C+"UnmodifiableList",C+"UnmodifiableRandomAccessList",C+"UnmodifiableSet",C+"UnmodifiableMap",
@@ -59,9 +68,10 @@ final class EquipmentCarrierLayouts {
         Builder result=new Builder(value);Item[] sequence=result.container(value,false);
         Object[] elements=null;if(sequence!=null){elements=new Object[sequence.length];for(int at=0;at<sequence.length;at++)elements[at]=sequence[at].value;}
         List<Slot> slots=new ArrayList<>();for(Meta meta:result.metadata.values()){
-            meta.stable();for(Row row:meta.rows)if(row.recorded)slots.add(new Slot(meta.receiver,row.field,row.offset,row.width,!row.payload));
+            meta.stable();for(Row row:meta.rows)if(row.recorded)slots.add(new Slot(meta.receiver,row.field,row.offset,row.width,!row.payload,row.value));
         }
-        return new Layout(result.complete,result.shared,List.copyOf(result.edges),List.copyOf(slots),List.copyOf(result.ranges),elements);
+        for(ArrayImage image:result.images.values())if(!image.current())throw unsupported("CHANGED_ARRAY_SLOT");
+        return new Layout(result.complete,result.shared,List.copyOf(result.edges),List.copyOf(slots),List.copyOf(result.ranges),elements,List.copyOf(result.images.values()));
     }
     private static Object[][] fields(Object receiver){
         try{return (Object[][])FIELDS.invokeExact(receiver);}catch(RuntimeException|Error failure){throw failure;}catch(Throwable failure){throw new IllegalStateException("EQUIPMENT_CARRIER_FIELDS_UNAVAILABLE",failure);}
@@ -92,6 +102,7 @@ final class EquipmentCarrierLayouts {
         if(type==double.class)return first instanceof Double a&&second instanceof Double b&&Double.doubleToRawLongBits(a)==Double.doubleToRawLongBits(b);
         return false;
     }
+    static boolean sameValue(Class<?> type,Object first,Object second){return type.isPrimitive()?samePrimitive(type,first,second):first==second;}
 
     private static final class Row {
         final Field field;final long offset;final int width;final Object value;boolean payload,recorded;
@@ -125,6 +136,7 @@ final class EquipmentCarrierLayouts {
     private static final class Builder {
         final Object root;
         final IdentityHashMap<Object,Meta> metadata=new IdentityHashMap<>();
+        final IdentityHashMap<Object[],ArrayImage> images=new IdentityHashMap<>();int arraySlots;
         final IdentityHashMap<Object,Boolean> visited=new IdentityHashMap<>(),storage=new IdentityHashMap<>(),payload=new IdentityHashMap<>();
         final List<Edge> edges=new ArrayList<>();final List<Range> ranges=new ArrayList<>();boolean complete=true,shared;
         Builder(Object root){this.root=root;}
@@ -147,13 +159,22 @@ final class EquipmentCarrierLayouts {
             if(ranges.size()>=LIMIT)throw unsupported("RANGE_CAPACITY");ranges.add(new Range(array,from,to,stride,structural));
         }
         Object[] array(Object value){if(!(value instanceof Object[] actual))throw unsupported("REFERENCE_ARRAY");return actual;}
+        ArrayImage image(Object[] actual){
+            ArrayImage before=images.get(actual);if(before!=null)return before;
+            if(actual.length>LIMIT*16-arraySlots)throw unsupported("ARRAY_SLOT_CAPACITY");arraySlots+=actual.length;
+            ArrayImage result=new ArrayImage(actual);images.put(actual,result);return result;
+        }
+        Object entry(Object[] actual,int index){return image(actual).at(index);}
+        Object[] entries(Object[] actual){return image(actual).all();}
         Item[] arrayItems(Object value,int count){
             Object[] array=array(value);bound(count);if(count>array.length)throw unsupported("ARRAY_LOGICAL_SIZE");
             if(array.length!=0)store(array);if(count==0)range(array,0,0,1,false);
-            Item[] items=new Item[count];for(int at=0;at<count;at++)items[at]=new Item(array[at],null,null,array,at);return items;
+            Object[] snapshot=count==0?null:image(array).values;
+            Item[] items=new Item[count];for(int at=0;at<count;at++)items[at]=new Item(snapshot[at],null,null,array,at);return items;
         }
         Item fieldItem(Meta owner,String declaring,String... names){Row row=owner.row(declaring,names);return new Item(row.value,owner,row,null,-1);}
-        void emit(Item[] items){for(Item item:items){data(item.value);if(item.field!=null)item.field.payload=true;else range(item.array,item.index,item.index+1,1,false);}}
+        void observe(Item item){if(item.array!=null&&entry((Object[])item.array,item.index)!=item.value)throw unsupported("MIXED_ARRAY_SLOT");}
+        void emit(Item[] items){for(Item item:items){observe(item);data(item.value);if(item.field!=null)item.field.payload=true;else range(item.array,item.index,item.index+1,1,false);}}
         void child(Object object,boolean setKeys){
             if(object==null)return;Class<?> base=base(object.getClass());
             if(base==null){complete=false;data(object);return;}if(sharedValue(object,base))return;store(object);
@@ -168,6 +189,8 @@ final class EquipmentCarrierLayouts {
             String name=type.getName();Meta value=meta(object);
             if(listName(name)){Item[] items=list(object,type,new IdentityHashMap<>());if(items==null){complete=false;return null;}emit(items);return items;}
             if(named(name,"java.util.HashMap","java.util.LinkedHashMap")){hashMap(value,setKeys);return null;}
+            if(name.equals("java.util.concurrent.ConcurrentHashMap")){concurrentMap(value,setKeys);return null;}
+            if(name.equals("java.util.ArrayDeque")){deque(value);return null;}
             if(name.equals("java.util.IdentityHashMap")){identityMap(value,setKeys);return null;}
             if(name.equals("java.util.EnumMap")){enumMap(value,setKeys);return null;}
             if(named(name,"java.util.HashSet","java.util.LinkedHashSet")){Object map=value.get("java.util.HashSet","map");
@@ -178,9 +201,9 @@ final class EquipmentCarrierLayouts {
             }
             if(named(name,I+"SetN",G+"RegularImmutableSet")){
                 Object[] elements=array(value.get(name,"elements"));int count=0;
-                range(elements,0,elements.length,1,true);for(Object entry:elements)if(entry!=null){data(entry);count++;}
+                range(elements,0,elements.length,1,true);for(Object entry:entries(elements))if(entry!=null){data(entry);count++;}
                 if(name.equals(I+"SetN")&&count!=number(value.get(name,"size")))throw unsupported("SET_SIZE");
-                if(name.equals(G+"RegularImmutableSet")){Object table=value.get(name,"table");if(table!=null){Object[] actual=array(table);range(actual,0,actual.length,1,true);for(Object entry:actual)if(entry!=null)data(entry);}}
+                if(name.equals(G+"RegularImmutableSet")){Object table=value.get(name,"table");if(table!=null){Object[] actual=array(table);range(actual,0,actual.length,1,true);for(Object entry:entries(actual))if(entry!=null)data(entry);}}
                 return null;
             }
             if(named(name,I+"Map1",C+"SingletonMap",G+"SingletonImmutableBiMap")){
@@ -199,7 +222,7 @@ final class EquipmentCarrierLayouts {
                 if(named(name,A+"AtomicReference",A+"AtomicInteger",A+"AtomicLong",A+"AtomicBoolean")){Row actual=value.row(name,"value");actual.payload=true;if(name.equals(A+"AtomicReference"))data(actual.value);return null;}
                 if(named(name,A+"AtomicReferenceArray",A+"AtomicIntegerArray",A+"AtomicLongArray")){
                     Object actual=value.get(name,"array");int length=java.lang.reflect.Array.getLength(actual);range(actual,0,length,1,false);
-                    if(name.equals(A+"AtomicReferenceArray"))for(Object entry:array(actual))data(entry);return null;
+                    if(name.equals(A+"AtomicReferenceArray"))for(Object entry:entries(array(actual)))data(entry);return null;
                 }
                 if(named(name,A+"AtomicMarkableReference",A+"AtomicStampedReference")){
                     Object pair=value.get(name,"pair");if(pair==null||!jdk(pair.getClass(),name+"$Pair"))throw unsupported("ATOMIC_PAIR");store(pair);Meta p=meta(pair);
@@ -290,7 +313,7 @@ final class EquipmentCarrierLayouts {
         }
         void hashMap(Meta value,boolean keys){
             Object table=value.get("java.util.HashMap","table");bound(number(value.get("java.util.HashMap","size")));List<Object> pending=new ArrayList<>();
-            if(table!=null){Object[] buckets=array(table);range(buckets,0,buckets.length,1,true);for(Object head:buckets)if(head!=null)pending.add(head);}
+            if(table!=null){Object[] buckets=array(table);range(buckets,0,buckets.length,1,true);for(Object head:entries(buckets))if(head!=null)pending.add(head);}
             if(base(value.receiver.getClass())==java.util.LinkedHashMap.class){Object head=value.get("java.util.LinkedHashMap","head"),tail=value.get("java.util.LinkedHashMap","tail");if(head!=null)pending.add(head);if(tail!=null)pending.add(tail);}
             IdentityHashMap<Object,Boolean> nodes=new IdentityHashMap<>();
             for(int at=0;at<pending.size();at++){
@@ -306,10 +329,63 @@ final class EquipmentCarrierLayouts {
             }
         }
         void enqueue(List<Object> pending,IdentityHashMap<Object,Boolean> seen,Object value){if(value!=null&&!seen.containsKey(value)){if(pending.size()>=LIMIT*8)throw unsupported("LINK_CAPACITY");pending.add(value);}}
+        void deque(Meta value){
+            String owner="java.util.ArrayDeque";Object[] array=array(value.get(owner,"elements"));
+            int head=number(value.get(owner,"head")),tail=number(value.get(owner,"tail"));
+            if(array.length==0||head<0||head>=array.length||tail<0||tail>=array.length)throw unsupported("DEQUE_INDEX");
+            Object tailValue=entry(array,tail);
+            // The original bodies publish/clear array slots separately from their head/tail stores.
+            // head == tail with an occupied slot is the full ring immediately before grow().
+            int count=bound(head==tail&&tailValue!=null?array.length:tail>=head?tail-head:array.length-head+tail);store(array);
+            if(count==0)range(array,head,head,1,false);
+            Item[] items=new Item[count];int index=head;
+            for(int at=0;at<count;at++){
+                Object item=entry(array,index);
+                items[at]=new Item(item,null,null,array,index);if(++index==array.length)index=0;
+            }
+            emit(items);
+            if(count!=array.length&&tailValue!=null)emit(new Item[]{new Item(tailValue,null,null,array,tail)});
+            int beforeHead=head==0?array.length-1:head-1;
+            if(count!=array.length&&beforeHead!=tail){Object pending=entry(array,beforeHead);if(pending!=null)emit(new Item[]{new Item(pending,null,null,array,beforeHead)});}
+        }
+        void concurrentMap(Meta value,boolean keys){
+            String owner="java.util.concurrent.ConcurrentHashMap",nodeOwner=owner+"$Node";
+            Object table=value.get(owner,"table"),next=value.get(owner,"nextTable");
+            // Resize/compute callbacks observe the real intermediate stores. Retain both published
+            // tables and every forwarding target, without replaying or waiting for the original body.
+            List<Object> pending=new ArrayList<>();if(table!=null)pending.add(table);if(next!=null)pending.add(next);
+            IdentityHashMap<Object,Boolean> seen=new IdentityHashMap<>();
+            for(int at=0;at<pending.size();at++){
+                Object node=pending.get(at);if(seen.put(node,Boolean.TRUE)!=null)continue;
+                if(seen.size()>LIMIT)throw unsupported("CONCURRENT_MAP_NODE_CAPACITY");
+                Class<?> type=node.getClass();
+                if(type.isArray()){
+                    if(!jdk(type.getComponentType(),nodeOwner))throw unsupported("CONCURRENT_MAP_TABLE_TYPE");
+                    Object[] buckets=array(node);range(buckets,0,buckets.length,1,true);
+                    for(Object head:entries(buckets))enqueue(pending,seen,head);continue;
+                }
+                if(jdk(type,owner+"$ForwardingNode")){
+                    store(node);Meta forwarding=meta(node);enqueue(pending,seen,forwarding.get(owner+"$ForwardingNode","nextTable"));continue;
+                }
+                if(jdk(type,owner+"$ReservationNode")){
+                    store(node);Meta reservation=meta(node);enqueue(pending,seen,reservation.get(nodeOwner,"next"));continue;
+                }
+                if(!jdk(type,nodeOwner)&&!jdk(type,owner+"$TreeNode")&&!jdk(type,owner+"$TreeBin"))throw unsupported("CONCURRENT_MAP_NODE");
+                store(node);Meta entry=meta(node);
+                if(jdk(type,owner+"$TreeBin")){
+                    enqueue(pending,seen,entry.get(owner+"$TreeBin","root"));enqueue(pending,seen,entry.get(owner+"$TreeBin","first"));continue;
+                }
+                Object key=entry.get(nodeOwner,"key"),payload=entry.get(nodeOwner,"val");
+                if(number(entry.get(nodeOwner,"hash"))<0)throw unsupported("CONCURRENT_MAP_NODE_HASH");
+                data(key);if(!keys)emit(new Item[]{fieldItem(entry,nodeOwner,"val")});
+                enqueue(pending,seen,entry.get(nodeOwner,"next"));
+                if(jdk(type,owner+"$TreeNode"))for(String link:new String[]{"parent","left","right","prev"})enqueue(pending,seen,entry.get(owner+"$TreeNode",link));
+            }
+        }
         void identityMap(Meta value,boolean keys){
             bound(number(value.get("java.util.IdentityHashMap","size")));Object[] table=array(value.get("java.util.IdentityHashMap","table"));if((table.length&1)!=0)throw unsupported("IDENTITY_TABLE");range(table,0,table.length,1,true);
             Object empty=staticValue(java.util.IdentityHashMap.class,"NULL_KEY","Ljava/lang/Object;");
-            for(int at=0;at<table.length;at+=2){Object key=table[at],entry=table[at+1];if(key==null)continue;
+            for(int at=0;at<table.length;at+=2){Object key=entry(table,at),entry=entry(table,at+1);if(key==null)continue;
                 if(key!=empty)data(key);if(!keys)data(entry);
             }
         }
@@ -322,11 +398,11 @@ final class EquipmentCarrierLayouts {
             // vals is this map's actual data array. The VM-wide enum universe
             // remains borrowed; it is never registered as an owned array.
             range(values,0,values.length,1,false);
-            for(int at=0;at<values.length;at++)if(values[at]!=null){data(actual[at]);if(!keys&&values[at]!=nullValue)data(values[at]);}
+            for(int at=0;at<values.length;at++){Object entry=entry(values,at);if(entry!=null){data(actual[at]);if(!keys&&entry!=nullValue)data(entry);}}
         }
         void immutableMap(Meta value){
             Object[] table=array(value.get(I+"MapN","table"));if((table.length&1)!=0)throw unsupported("IMMUTABLE_MAP_TABLE");range(table,0,table.length,1,true);int count=0;
-            for(int at=0;at<table.length;at+=2){if(table[at]!=null){count++;data(table[at]);data(table[at+1]);}else if(table[at+1]!=null)throw unsupported("IMMUTABLE_MAP_PAIR");}
+            for(int at=0;at<table.length;at+=2){Object key=entry(table,at),payload=entry(table,at+1);if(key!=null){count++;data(key);data(payload);}else if(payload!=null)throw unsupported("IMMUTABLE_MAP_PAIR");}
             if(count!=number(value.get(I+"MapN","size")))throw unsupported("IMMUTABLE_MAP_SIZE");
         }
         void guavaEntry(Object object){
@@ -335,9 +411,9 @@ final class EquipmentCarrierLayouts {
             store(object);Meta entry=meta(object);data(entry.get(G+"ImmutableEntry","key"));emit(new Item[]{fieldItem(entry,G+"ImmutableEntry","value")});
         }
         void guavaMap(Meta value){
-            Object[] entries=array(value.get(G+"RegularImmutableMap","entries"));bound(entries.length);range(entries,0,entries.length,1,true);for(Object entry:entries)guavaEntry(entry);
+            Object[] entries=array(value.get(G+"RegularImmutableMap","entries"));bound(entries.length);range(entries,0,entries.length,1,true);for(Object entry:entries(entries))guavaEntry(entry);
             Object table=value.get(G+"RegularImmutableMap","table");if(table!=null){
-                Object[] actual=array(table);range(actual,0,actual.length,1,true);List<Object> pending=new ArrayList<>();for(Object entry:actual)if(entry!=null)pending.add(entry);IdentityHashMap<Object,Boolean> seen=new IdentityHashMap<>();
+                Object[] actual=array(table);range(actual,0,actual.length,1,true);List<Object> pending=new ArrayList<>();for(Object entry:entries(actual))if(entry!=null)pending.add(entry);IdentityHashMap<Object,Boolean> seen=new IdentityHashMap<>();
                 for(int at=0;at<pending.size();at++){
                     Object entry=pending.get(at);if(seen.put(entry,Boolean.TRUE)!=null)continue;if(seen.size()>LIMIT)throw unsupported("GUAVA_BUCKET_CAPACITY");guavaEntry(entry);
                     if(guava(entry.getClass(),G+"ImmutableMapEntry$NonTerminalImmutableMapEntry"))enqueue(pending,seen,meta(entry).get(G+"ImmutableMapEntry$NonTerminalImmutableMapEntry","nextInKeyBucket"));
@@ -347,7 +423,7 @@ final class EquipmentCarrierLayouts {
         void guavaEntriesList(Object object){
             if(object==null)throw unsupported("GUAVA_ENTRY_LIST");Class<?> type=base(object.getClass());if(type==null||!listName(type.getName()))throw unsupported("GUAVA_ENTRY_LIST_TYPE");store(object);
             Item[] entries=list(object,type,new IdentityHashMap<>());if(entries==null)throw unsupported("GUAVA_ENTRY_LIST_LAYOUT");
-            for(Item item:entries){if(item.field!=null)item.field.payload=false;else range(item.array,item.index,item.index+1,1,true);guavaEntry(item.value);}
+            for(Item item:entries){observe(item);if(item.field!=null)item.field.payload=false;else range(item.array,item.index,item.index+1,1,true);guavaEntry(item.value);}
         }
     }
 }

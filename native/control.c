@@ -3,7 +3,7 @@
 #include <bcrypt.h>
 // Preserve Object.clone itself, including Cloneable checks; never substitute a Java ancestor body.
 JNIEXPORT jint JNICALL Java_dev_ronova_pro_bootstrap_NativeControl_abi(JNIEnv *env, jclass type) {
-    (void)env; (void)type; return 85;
+    (void)env; (void)type; return 86;
 }
 JNIEXPORT jobject JNICALL Java_dev_ronova_pro_bootstrap_NativeControl_returnIdentifier0(JNIEnv *env,jclass type) {
     (void)type;
@@ -139,6 +139,9 @@ static int native_bind_controller(JNIEnv *env,jclass controller){
         {"carrierFields0","(Ljava/lang/Object;)[[Ljava/lang/Object;",(void*)Java_dev_ronova_pro_bootstrap_NativeControl_carrierFields0},
         {"carrierRead0","(Ljava/lang/Object;Ljava/lang/reflect/Field;)[Ljava/lang/Object;",(void*)Java_dev_ronova_pro_bootstrap_NativeControl_carrierRead0},
         {"carrierMethod0","(Ljava/lang/Object;Ljava/lang/Class;Ljava/lang/String;Ljava/lang/String;ILjava/lang/Class;)Ljava/lang/Class;",(void*)Java_dev_ronova_pro_bootstrap_NativeControl_carrierMethod0},
+        {"carrierMethodImage0","(Ljava/lang/Class;Ljava/lang/String;Ljava/lang/String;)[J",(void*)Java_dev_ronova_pro_bootstrap_NativeControl_carrierMethodImage0},
+        {"carrierFrame0","(Ljava/lang/Class;Ljava/lang/String;Ljava/lang/String;I)[J",(void*)Java_dev_ronova_pro_bootstrap_NativeControl_carrierFrame0},
+        {"carrierCallSite0","(Ljava/lang/Object;Ljava/lang/Class;Ljava/lang/String;Ljava/lang/String;ILjava/lang/Class;Ljava/lang/String;Ljava/lang/String;I)[J",(void*)Java_dev_ronova_pro_bootstrap_NativeControl_carrierCallSite0},
         {"carrierStaticValue0","(Ljava/lang/Class;Ljava/lang/String;Ljava/lang/String;)[Ljava/lang/Object;",(void*)Java_dev_ronova_pro_bootstrap_NativeControl_carrierStaticValue0},
         {"carrierCallbackDepth0","(Ljava/lang/Class;Ljava/lang/String;Ljava/lang/String;)I",(void*)Java_dev_ronova_pro_bootstrap_NativeControl_carrierCallbackDepth0},
         {"carrierCallback0","(Ljava/lang/Object;Ljava/lang/Class;Ljava/lang/String;Ljava/lang/String;ILjava/lang/Class;Ljava/lang/String;Ljava/lang/String;I)Z",(void*)Java_dev_ronova_pro_bootstrap_NativeControl_carrierCallback0},

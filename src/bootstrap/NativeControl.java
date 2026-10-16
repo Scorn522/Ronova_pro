@@ -49,7 +49,7 @@ public final class NativeControl {
                 if(dll==null)return installFailure("OBJECT_CLONE_JNI_PAYLOAD_ABSENT",false);
                 nativeLoadAttempted=true;
                 System.load(dll.toString());nativeLoaded=true;
-                if(abi()!=85)throw new UnsatisfiedLinkError("NATIVE_CONTROL_ABI");
+                if(abi()!=86)throw new UnsatisfiedLinkError("NATIVE_CONTROL_ABI");
             }
             if(!nativeBoundaryInstalled){
                 nativeHandoffRetryable=false;
@@ -335,6 +335,18 @@ public final class NativeControl {
         if(CALLER.getCallerClass()!=CarrierBridge.class)throw new SecurityException("ACTUAL_CARRIER_BRIDGE_REQUIRED");
         return available?carrierMethod0(receiver,symbolic,name,descriptor,opcode,caller):null;
     }
+    static long[] carrierMethodImage(Class<?> declaring,String name,String descriptor){
+        if(CALLER.getCallerClass()!=CarrierBridge.class)throw new SecurityException("ACTUAL_CARRIER_BRIDGE_REQUIRED");
+        return available?carrierMethodImage0(declaring,name,descriptor):null;
+    }
+    static long[] carrierFrame(Class<?> declaring,String name,String descriptor,int bottomDepth){
+        if(CALLER.getCallerClass()!=CarrierBridge.class)throw new SecurityException("ACTUAL_CARRIER_BRIDGE_REQUIRED");
+        return available?carrierFrame0(declaring,name,descriptor,bottomDepth):null;
+    }
+    static long[] carrierCallSite(Object receiver,Class<?> symbolic,String name,String descriptor,int opcode,Class<?> caller,String callerMethod,String callerDescriptor,int bottomDepth){
+        if(CALLER.getCallerClass()!=CarrierBridge.class)throw new SecurityException("ACTUAL_CARRIER_BRIDGE_REQUIRED");
+        return available?carrierCallSite0(receiver,symbolic,name,descriptor,opcode,caller,callerMethod,callerDescriptor,bottomDepth):null;
+    }
     static Object[] carrierStaticValue(Class<?> declaring,String name,String descriptor){
         if(CALLER.getCallerClass()!=CarrierBridge.class)throw new SecurityException("ACTUAL_CARRIER_BRIDGE_REQUIRED");
         return available?carrierStaticValue0(declaring,name,descriptor):null;
@@ -351,6 +363,9 @@ public final class NativeControl {
     private static boolean carrierReader(){return ControlBridge.coreWriter();}
     private static boolean carrierAdapter(Object plan,String selector,int location,int opcode,String owner,String name,String descriptor){
         return ExecutionFlow.callbackAdapter(plan,selector,location,opcode,owner,name,descriptor);
+    }
+    private static boolean carrierInstruction(Object plan,String selector,int location,int instruction,int opcode,int local,String owner,String name,String descriptor){
+        return ExecutionFlow.carrierInstruction(plan,selector,location,instruction,opcode,local,owner,name,descriptor);
     }
     static boolean arrayCopyInternalBoundary(){return CALLER.getCallerClass()==ControlBridge.class&&arrayCopyInternalBoundary0();}
     static boolean arrayCopyReadBoundary(Object source,int from,int length){return CALLER.getCallerClass()==ControlBridge.class&&arrayCopyReadBoundary0(source,from,length);}
@@ -863,6 +878,9 @@ public final class NativeControl {
     private static native Object[][] carrierFields0(Object receiver);
     private static native Object[] carrierRead0(Object receiver,java.lang.reflect.Field field);
     private static native Class<?> carrierMethod0(Object receiver,Class<?> symbolic,String name,String descriptor,int opcode,Class<?> caller);
+    private static native long[] carrierMethodImage0(Class<?> declaring,String name,String descriptor);
+    private static native long[] carrierFrame0(Class<?> declaring,String name,String descriptor,int bottomDepth);
+    private static native long[] carrierCallSite0(Object receiver,Class<?> symbolic,String name,String descriptor,int opcode,Class<?> caller,String callerMethod,String callerDescriptor,int bottomDepth);
     private static native Object[] carrierStaticValue0(Class<?> declaring,String name,String descriptor);
     private static native int carrierCallbackDepth0(Class<?> declaring,String name,String descriptor);
     private static native boolean carrierCallback0(Object callback,Class<?> callee,String name,String descriptor,int calleeBottomDepth,

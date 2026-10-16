@@ -28,6 +28,23 @@ public final class CarrierBridge {
         Objects.requireNonNull(descriptor,"descriptor");Objects.requireNonNull(caller,"caller");
         return NativeControl.carrierMethod(receiver,symbolic,name,descriptor,opcode,caller);
     }
+    /** Fresh current Java definition: Method, ConstMethod, pool, code length; no method is invoked. */
+    public static long[] methodImage(Class<?> declaring,String name,String descriptor){
+        core();Objects.requireNonNull(declaring,"declaring");Objects.requireNonNull(name,"name");Objects.requireNonNull(descriptor,"descriptor");
+        return NativeControl.carrierMethodImage(declaring,name,descriptor);
+    }
+    /** Fresh read-only physical identity: bottom depth, BCI, Method, ConstMethod, pool, code length. */
+    public static long[] frame(Class<?> declaring,String name,String descriptor,int bottomDepth){
+        core();Objects.requireNonNull(declaring,"declaring");Objects.requireNonNull(name,"name");Objects.requireNonNull(descriptor,"descriptor");
+        return bottomDepth>0?NativeControl.carrierFrame(declaring,name,descriptor,bottomDepth):null;
+    }
+    /** Same frame tuple at the original invoke immediately after this actual instrumentation hook. */
+    public static long[] callSite(Object receiver,Class<?> symbolic,String name,String descriptor,int opcode,
+                                 Class<?> caller,String callerMethod,String callerDescriptor,int callerBottomDepth){
+        core();Objects.requireNonNull(symbolic,"symbolic");Objects.requireNonNull(name,"name");Objects.requireNonNull(descriptor,"descriptor");
+        Objects.requireNonNull(caller,"caller");Objects.requireNonNull(callerMethod,"callerMethod");Objects.requireNonNull(callerDescriptor,"callerDescriptor");
+        return callerBottomDepth>0?NativeControl.carrierCallSite(receiver,symbolic,name,descriptor,opcode,caller,callerMethod,callerDescriptor,callerBottomDepth):null;
+    }
     /** Exact initialized platform sentinels; this does not enumerate a static payload graph. */
     public static Object staticValue(Class<?> declaring,String name,String descriptor){
         core();Objects.requireNonNull(declaring,"declaring");Objects.requireNonNull(name,"name");Objects.requireNonNull(descriptor,"descriptor");

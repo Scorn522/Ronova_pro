@@ -80,6 +80,9 @@ final class EquipmentActionBoundary {
         if(data!=null)data.transformed=true;return result;
     }
     private static void weave(MethodNode method,String operation) {
+        AbstractInsnNode[] original=method.instructions.toArray();
+        boolean slotTrace=false;
+        for(AbstractInsnNode instruction:original)if(instruction instanceof MethodInsnNode call&&slotEntry(call)){slotTrace=true;break;}
         int arguments=method.maxLocals++,lease=method.maxLocals++,failure=method.maxLocals++;
         Type[] types=Type.getArgumentTypes(method.desc);Type result=Type.getReturnType(method.desc);
         InsnList entry=new InsnList();entry.add(new LdcInsnNode(types.length));entry.add(new TypeInsnNode(Opcodes.ANEWARRAY,"java/lang/Object"));
@@ -110,11 +113,81 @@ final class EquipmentActionBoundary {
             InsnList close=new InsnList();close.add(new VarInsnNode(Opcodes.ALOAD,lease));close.add(new MethodInsnNode(Opcodes.INVOKESTATIC,BRIDGE,"endEquipmentInvocation","(Ljava/lang/Object;)V",false));
             method.instructions.insertBefore(instruction,close);
         }
+        // Only the already selected body supplies sites. Never wrap observers
+        // inserted above, platform helpers, constructors or lambda factories.
+        // SlotBoundary already owns every natural call in this exact helper.
+        // A second delegate envelope would separate its witness from the invoke.
+        if(!slotTrace&&(operation.equals("carrier-call")||operation.startsWith("item-")))
+            for(AbstractInsnNode instruction:original)if(instruction instanceof MethodInsnNode call&&business(call))delegate(method,call);
         method.instructions.add(end);method.instructions.add(handler);method.instructions.add(new VarInsnNode(Opcodes.ASTORE,failure));
         method.instructions.add(new VarInsnNode(Opcodes.ALOAD,lease));method.instructions.add(new VarInsnNode(Opcodes.ALOAD,failure));
         method.instructions.add(new MethodInsnNode(Opcodes.INVOKESTATIC,BRIDGE,"failedEquipmentInvocation","(Ljava/lang/Object;Ljava/lang/Throwable;)V",false));
         method.instructions.add(new VarInsnNode(Opcodes.ALOAD,failure));method.instructions.add(new InsnNode(Opcodes.ATHROW));
         method.tryCatchBlocks.add(new TryCatchBlockNode(start,end,handler,"java/lang/Throwable"));
+    }
+    private static boolean slotEntry(MethodInsnNode call) {
+        return call.getOpcode()==Opcodes.INVOKESTATIC&&call.owner.equals(BRIDGE)
+                &&(call.name.equals("beginEquipmentSlotRead")&&call.desc.equals("(Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;")
+                ||call.name.equals("beginEquipmentSlotMethod")&&call.desc.equals("(Ljava/lang/Object;Ljava/lang/Class;Ljava/lang/String;Ljava/lang/String;[Ljava/lang/Object;)Ljava/lang/Object;"));
+    }
+    private static boolean business(MethodInsnNode call) {
+        String owner=call.owner;
+        return !call.name.startsWith("<")&&!owner.startsWith("[")&&!owner.startsWith("java/")&&!owner.startsWith("javax/")
+                &&!owner.startsWith("jdk/")&&!owner.startsWith("sun/")&&!owner.startsWith("com/sun/")
+                &&!owner.startsWith("dev/ronova/pro/bootstrap/")&&!owner.startsWith("dev/ronova/pro/agent/")
+                &&!owner.startsWith("dev/ronova/pro/mixin/")&&!owner.equals("dev/ronova/pro/EquipmentPolicy");
+    }
+    private static int local(MethodNode method,Type type) {
+        int result=method.maxLocals;method.maxLocals+=type.getSize();return result;
+    }
+    private static void load(InsnList code,Type type,int local) { code.add(new VarInsnNode(type.getOpcode(Opcodes.ILOAD),local)); }
+    private static void store(InsnList code,Type type,int local) { code.add(new VarInsnNode(type.getOpcode(Opcodes.ISTORE),local)); }
+    private static void boxedArguments(InsnList code,Type[] types,int[] locals) {
+        code.add(new LdcInsnNode(types.length));code.add(new TypeInsnNode(Opcodes.ANEWARRAY,"java/lang/Object"));
+        for(int at=0;at<types.length;at++) {
+            code.add(new InsnNode(Opcodes.DUP));code.add(new LdcInsnNode(at));load(code,types[at],locals[at]);
+            ControlClassWriter.box(code,types[at]);code.add(new InsnNode(Opcodes.AASTORE));
+        }
+    }
+    /** Keep the exact original invoke; the envelope never executes the delegate. */
+    private static void delegate(MethodNode method,MethodInsnNode original) {
+        Type[] types=Type.getArgumentTypes(original.desc);Type result=Type.getReturnType(original.desc);
+        boolean statik=original.getOpcode()==Opcodes.INVOKESTATIC;int[] args=new int[types.length];
+        for(int at=0;at<types.length;at++)args[at]=local(method,types[at]);
+        int receiver=statik?-1:local(method,Type.getType(Object.class)),token=local(method,Type.getType(Object.class));
+        int returned=result.getSort()==Type.VOID?-1:local(method,result),failure=local(method,Type.getType(Throwable.class));
+        LabelNode start=new LabelNode(),end=new LabelNode(),handler=new LabelNode(),observed=new LabelNode(),resume=new LabelNode();
+        InsnList before=new InsnList();
+        for(int at=types.length-1;at>=0;at--)store(before,types[at],args[at]);
+        if(!statik)before.add(new VarInsnNode(Opcodes.ASTORE,receiver));
+        before.add(statik?new InsnNode(Opcodes.ACONST_NULL):new VarInsnNode(Opcodes.ALOAD,receiver));
+        before.add(new InsnNode(Opcodes.ICONST_5));before.add(new TypeInsnNode(Opcodes.ANEWARRAY,"java/lang/Object"));
+        before.add(new InsnNode(Opcodes.DUP));before.add(new InsnNode(Opcodes.ICONST_0));before.add(new LdcInsnNode(Type.getObjectType(original.owner)));before.add(new InsnNode(Opcodes.AASTORE));
+        before.add(new InsnNode(Opcodes.DUP));before.add(new InsnNode(Opcodes.ICONST_1));before.add(new LdcInsnNode(original.name));before.add(new InsnNode(Opcodes.AASTORE));
+        before.add(new InsnNode(Opcodes.DUP));before.add(new InsnNode(Opcodes.ICONST_2));before.add(new LdcInsnNode(original.desc));before.add(new InsnNode(Opcodes.AASTORE));
+        before.add(new InsnNode(Opcodes.DUP));before.add(new InsnNode(Opcodes.ICONST_3));before.add(new LdcInsnNode(original.getOpcode()));ControlClassWriter.box(before,Type.INT_TYPE);before.add(new InsnNode(Opcodes.AASTORE));
+        before.add(new InsnNode(Opcodes.DUP));before.add(new InsnNode(Opcodes.ICONST_4));boxedArguments(before,types,args);before.add(new InsnNode(Opcodes.AASTORE));
+        before.add(new LdcInsnNode("carrier-delegate"));
+        before.add(new MethodInsnNode(Opcodes.INVOKESTATIC,BRIDGE,"beginEquipmentInvocation","(Ljava/lang/Object;Ljava/lang/Object;Ljava/lang/String;)Ljava/lang/Object;",false));
+        // Native validates this straight local-reload segment against the next
+        // original invoke. No callback, branch or second invocation is inserted.
+        before.add(new VarInsnNode(Opcodes.ASTORE,token));
+        if(!statik)before.add(new VarInsnNode(Opcodes.ALOAD,receiver));for(int at=0;at<types.length;at++)load(before,types[at],args[at]);
+        before.add(start);method.instructions.insertBefore(original,before);
+        InsnList after=new InsnList();if(returned>=0)store(after,result,returned);
+        after.add(new VarInsnNode(Opcodes.ALOAD,token));after.add(new JumpInsnNode(Opcodes.IFNULL,observed));
+        after.add(new VarInsnNode(Opcodes.ALOAD,token));after.add(new LdcInsnNode("carrier-delegate-result"));
+        if(returned<0)after.add(new InsnNode(Opcodes.ACONST_NULL));else {load(after,result,returned);ControlClassWriter.box(after,result);}
+        after.add(new MethodInsnNode(Opcodes.INVOKESTATIC,BRIDGE,"equipmentInvocationResult","(Ljava/lang/Object;Ljava/lang/String;Ljava/lang/Object;)Ljava/lang/Object;",false));after.add(new InsnNode(Opcodes.POP));
+        after.add(new VarInsnNode(Opcodes.ALOAD,token));after.add(new MethodInsnNode(Opcodes.INVOKESTATIC,BRIDGE,"endEquipmentInvocation","(Ljava/lang/Object;)V",false));
+        after.add(observed);after.add(end);after.add(new JumpInsnNode(Opcodes.GOTO,resume));
+        // Keep this cleanup inside the original call's own try regions, so its
+        // original Throwable still reaches those handlers after token cleanup.
+        after.add(handler);after.add(new VarInsnNode(Opcodes.ASTORE,failure));after.add(new VarInsnNode(Opcodes.ALOAD,token));after.add(new VarInsnNode(Opcodes.ALOAD,failure));
+        after.add(new MethodInsnNode(Opcodes.INVOKESTATIC,BRIDGE,"failedEquipmentInvocation","(Ljava/lang/Object;Ljava/lang/Throwable;)V",false));
+        after.add(new VarInsnNode(Opcodes.ALOAD,failure));after.add(new InsnNode(Opcodes.ATHROW));
+        after.add(resume);if(returned>=0)load(after,result,returned);method.instructions.insert(original,after);
+        method.tryCatchBlocks.add(0,new TryCatchBlockNode(start,end,handler,"java/lang/Throwable"));
     }
     static void retransformDeclared(Instrumentation api) {
         for(Class<?> type:RecoveryAgent.loadedClasses()) {

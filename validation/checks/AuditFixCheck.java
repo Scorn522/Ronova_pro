@@ -14,11 +14,13 @@ public final class AuditFixCheck {
     private static void require(boolean yes,String message) {if(!yes)throw new AssertionError(message);}
     private static Object invoke(Object receiver,String name)throws Exception {var m=receiver.getClass().getDeclaredMethod(name);m.setAccessible(true);try{return m.invoke(receiver);}catch(InvocationTargetException e){if(e.getCause() instanceof Exception x)throw x;throw e;}}
     public static void main(String[] args)throws Exception {
+        if(args.length==1&&args[0].equals("unknown-carrier-graph")){unknownCarrierGraph();return;}
         if(args.length==1&&args[0].equals("event-image-composition")){eventImageComposition();return;}
         if(args.length==1&&args[0].equals("scoped-transform-failure")){scopedTransformFailure();return;}
         if(args.length==1&&args[0].equals("startup-batches")){startupBatch();return;}
         if(args.length==1&&args[0].equals("retirement-readback")){retirementReadback();return;}
         if(args.length==1&&args[0].equals("physical-token")){physicalToken();return;}
+        if(args.length==1&&args[0].equals("carrier-call-sites")){carrierCallSites();return;}
         if(args.length==1&&args[0].equals("queue-locations")){queueLocations();return;}
         if(args.length==1&&args[0].equals("root-retry-lifecycle-fixes")){definitionRetryLifecycle();nativeInstallLifecycle();return;}
         if(args.length==1&&args[0].equals("definition-retry")){definitionRetryLifecycle();return;}
@@ -37,6 +39,7 @@ public final class AuditFixCheck {
         if(args.length==1&&args[0].equals("network-bytecode")){networkBytecode();return;}
         if(args.length==1&&args[0].equals("resource-bytecode")){resourceBytecode();return;}
         if(args.length==1&&args[0].equals("custom-carrier-bytecode")){carrierBytecode();capabilityBytecode();return;}
+        if(args.length==1&&args[0].equals("equipment-carrier-delegate-bytecode")){carrierDelegateBytecode();capabilityBytecode();return;}
         if(args.length==1&&args[0].equals("equipment-slot-bytecode")){equipmentSlotBytecode();capabilityBytecode();return;}
         if(args.length==1&&args[0].equals("capability-callback-bytecode")){capabilityCallbackBytecode();return;}
         if(args.length==1&&args[0].equals("equipment-helper-composition-bytecode")){equipmentSlotBytecode();equipmentSlotHelperBytecode();equipmentFunctionBytecode();return;}
@@ -83,6 +86,156 @@ public final class AuditFixCheck {
         storage.close();var nativeReleased=storageWork.getDeclaredField("nativeReleased");nativeReleased.setAccessible(true);var resourcesConfirmed=storageWork.getDeclaredField("resourcesConfirmed");resourcesConfirmed.setAccessible(true);
         require(worker.isTerminated()&&!nativeReleased.getBoolean(restored)&&!resourcesConfirmed.getBoolean(restored),"shutdown fabricated a historic transaction settlement");
         System.out.println("STORAGE_SHUTDOWN_METADATA_PASS no_current_handle historic_unknown_preserved worker_closed");
+    }
+
+    private interface UnknownCarrierFunction {Object apply(Object value);}
+    private interface UnknownCarrierBusiness {Object read();void write(Object value);}
+    private static final class UnknownCarrierLeaf {int amount=7;Object extra;}
+    private static final class UnknownCarrierValue implements UnknownCarrierFunction {
+        final UnknownCarrierLeaf payload=new UnknownCarrierLeaf();
+        final Object captured=new UnknownCarrierLeaf();
+        final java.util.function.Supplier<Object> callback=()->{unknownCarrierCalls++;return captured;};
+        final Thread borrowed=new Thread();
+        public Object apply(Object value){unknownCarrierCalls++;return payload;}
+        Object apply(String value){unknownCarrierCalls++;return value;}
+        int amount(){unknownCarrierCalls++;return payload.amount;}
+    }
+    private static final class UnknownCarrierBusinessValue implements UnknownCarrierBusiness {
+        Object payload;
+        public Object read(){unknownCarrierCalls++;return payload;}
+        public void write(Object value){unknownCarrierCalls++;payload=value;}
+    }
+    private static final class UnknownCarrierWrapper {Object value;UnknownCarrierWrapper(Object value){this.value=value;}}
+    private static final class UnknownCarrierKey {public int hashCode(){return 1;}}
+    private static int unknownCarrierCalls,unknownCarrierMutationAfter;
+    private static Object unknownCarrierMutationReceiver;
+    private static Runnable unknownCarrierMutation;
+    /** Metadata seam only: real Java declarations, VM offsets and current volatile field reads. */
+    private static Object[][] unknownCarrierFields(Object receiver)throws Exception {
+        if(receiver==unknownCarrierMutationReceiver&&--unknownCarrierMutationAfter==0){
+            Runnable mutation=unknownCarrierMutation;unknownCarrierMutationReceiver=null;unknownCarrierMutation=null;mutation.run();
+        }
+        List<Object[]> fields=new ArrayList<>();
+        for(Class<?> type=receiver.getClass();type!=null&&type!=Object.class;type=type.getSuperclass())for(Field field:type.getDeclaredFields()){
+            if(Modifier.isStatic(field.getModifiers()))continue;Class<?> fieldType=field.getType();
+            int width=!fieldType.isPrimitive()?U.arrayIndexScale(Object[].class):fieldType==boolean.class||fieldType==byte.class?1:fieldType==char.class||fieldType==short.class?2:fieldType==long.class||fieldType==double.class?8:4;
+            fields.add(new Object[]{field,type,field.getName(),fieldType.descriptorString(),fieldType,U.objectFieldOffset(field),width,unknownCarrierRead(receiver,field)});
+        }
+        return fields.toArray(Object[][]::new);
+    }
+    private static Object unknownCarrierRead(Object receiver,Field field){
+        long offset=U.objectFieldOffset(field);Class<?> type=field.getType();
+        if(!type.isPrimitive())return U.getObjectVolatile(receiver,offset);
+        if(type==boolean.class)return U.getBooleanVolatile(receiver,offset);if(type==byte.class)return U.getByteVolatile(receiver,offset);
+        if(type==char.class)return U.getCharVolatile(receiver,offset);if(type==short.class)return U.getShortVolatile(receiver,offset);
+        if(type==int.class)return U.getIntVolatile(receiver,offset);if(type==long.class)return U.getLongVolatile(receiver,offset);
+        if(type==float.class)return U.getFloatVolatile(receiver,offset);return U.getDoubleVolatile(receiver,offset);
+    }
+    private static long unknownCarrierOffset(Class<?> type,String name)throws Exception{return U.objectFieldOffset(type.getDeclaredField(name));}
+    private static void unknownCarrierChanged(Object receiver,int after,Runnable mutation){unknownCarrierMutationReceiver=receiver;unknownCarrierMutationAfter=after;unknownCarrierMutation=mutation;}
+    private static void unknownCarrierMixedImage(Runnable observe,String path){
+        try{observe.run();throw new AssertionError("mixed carrier graph accepted: "+path);}
+        catch(IllegalStateException expected){require(expected.getMessage().contains("PATH_CHANGED")||expected.getMessage().contains("LAYOUT_FIELD_CHANGED")||expected.getMessage().contains("MIXED_FIELD_IMAGE"),"wrong mixed-graph rejection: "+expected);}
+        finally{unknownCarrierMutationReceiver=null;unknownCarrierMutation=null;}
+    }
+    private static void unknownCarrierGraph()throws Exception {
+        net.minecraft.SharedConstants.tryDetectVersion();
+        try {net.minecraft.server.Bootstrap.bootStrap();}
+        catch(ExceptionInInitializerError unavailable) {
+            Throwable cause=unavailable;while(cause.getCause()!=null)cause=cause.getCause();
+            boolean network=Arrays.stream(unavailable.getStackTrace()).anyMatch(frame->frame.getClassName().equals("net.minecraftforge.network.NetworkHooks")&&frame.getMethodName().equals("init"));
+            if(!network||!(cause instanceof NoSuchMethodException)||!"net.minecraftforge.network.NetworkEvent.<init>()".equals(cause.getMessage()))throw unavailable;
+            // Vanilla registries and the Forge vanilla snapshot precede networking
+            // in this Bootstrap body. This data-only fixture uses neither network
+            // events nor the absent ModLauncher event-constructor transformation.
+            require(net.minecraft.world.item.ItemStack.EMPTY!=null,"fixture registry initialization failed");
+            System.out.println("GRAPH_FIXTURE_FORGE_NETWORK_NOT_INITIALIZED data_only_no_network_or_game_startup_claim");
+        }
+        Field policy=EquipmentPolicy.class.getDeclaredField("initialized");policy.setAccessible(true);require(!policy.getBoolean(null),"graph metadata fixture requires uninstalled equipment policy");
+        Class.forName(EquipmentCarrierLayouts.class.getName(),true,EquipmentCarrierLayouts.class.getClassLoader());
+        Map<Field,Object> readers=new LinkedHashMap<>();
+        MethodHandle fields=MethodHandles.lookup().findStatic(AuditFixCheck.class,"unknownCarrierFields",MethodType.methodType(Object[][].class,Object.class));
+        MethodHandle read=MethodHandles.lookup().findStatic(AuditFixCheck.class,"unknownCarrierRead",MethodType.methodType(Object.class,Object.class,Field.class));
+        for(Class<?> type:List.of(EquipmentCarrierGraph.class,EquipmentCarrierLayouts.class))for(String name:List.of("FIELDS","READ")){
+            Field field=type.getDeclaredField(name);field.setAccessible(true);readers.put(field,field.get(null));
+        }
+        unknownCarrierCalls=0;
+        try {
+            for(Field field:readers.keySet())U.putObjectVolatile(U.staticFieldBase(field),U.staticFieldOffset(field),field.getName().equals("FIELDS")?fields:read);
+            UnknownCarrierValue value=new UnknownCarrierValue();ConcurrentHashMap<String,Object> map=new ConcurrentHashMap<>();map.put("payload",value);
+            UnknownCarrierWrapper wrapper=new UnknownCarrierWrapper(map);EquipmentCarrierGraph.View graph=EquipmentCarrierGraph.candidate(null,wrapper);
+            require(graph.contains(wrapper)&&graph.contains(map)&&graph.contains(value)&&graph.contains(value.payload),"unknown wrapper to actual CHM to mutable business fields was not retained");
+            require(graph.node(value.payload).fields.stream().anyMatch(slot->slot.field().getName().equals("amount"))
+                    &&!graph.contains(value.callback)&&!graph.contains(value.borrowed),"ordinary scalar storage or borrowed callback/thread boundary changed");
+            map.remove("payload");require(!EquipmentCarrierGraph.candidate(null,wrapper).contains(value),"detached actual CHM business value retained ownership");map.put("payload",value);
+            UnknownCarrierLeaf replacement=new UnknownCarrierLeaf();
+            unknownCarrierChanged(value.payload,1,()->wrapper.value=replacement);
+            unknownCarrierMixedImage(()->EquipmentCarrierGraph.candidate(null,wrapper),"custom field detached during child traversal");wrapper.value=map;
+            Object[] array={value.payload};wrapper.value=array;
+            unknownCarrierChanged(value.payload,1,()->array[0]=replacement);
+            unknownCarrierMixedImage(()->EquipmentCarrierGraph.candidate(null,wrapper),"actual array slot detached during child traversal");wrapper.value=map;
+            long table=unknownCarrierOffset(ConcurrentHashMap.class,"table");Object oldTable=U.getObjectVolatile(map,table);
+            ConcurrentHashMap<String,Object> other=new ConcurrentHashMap<>();other.put("replacement",replacement);Object otherTable=U.getObjectVolatile(other,table);
+            try {
+                unknownCarrierChanged(map,2,()->U.putObjectVolatile(map,table,otherTable));
+                unknownCarrierMixedImage(()->EquipmentCarrierGraph.candidate(null,wrapper),"layout child image versus newly read actual table field");
+            } finally {U.putObjectVolatile(map,table,oldTable);}
+            unknownCarrierDeque();unknownCarrierConcurrent(map,value,replacement);
+            require(EquipmentPolicy.functionalCallbackMethod(value,UnknownCarrierValue.class,"apply","(Ljava/lang/Object;)Ljava/lang/Object;")
+                    &&!EquipmentPolicy.functionalCallbackMethod(value,UnknownCarrierValue.class,"apply","(Ljava/lang/String;)Ljava/lang/Object;")
+                    &&!EquipmentPolicy.functionalCallbackMethod(value,UnknownCarrierValue.class,"amount","()I"),"custom SAM classification borrowed authority for an ordinary overload/data method");
+            UnknownCarrierBusinessValue business=new UnknownCarrierBusinessValue();business.payload=value.payload;
+            require(!EquipmentPolicy.functionalCallbackMethod(business,UnknownCarrierBusinessValue.class,"read","()Ljava/lang/Object;")
+                    &&!EquipmentPolicy.functionalCallbackMethod(business,UnknownCarrierBusinessValue.class,"write","(Ljava/lang/Object;)V")
+                    &&EquipmentCarrierGraph.candidate(null,business).contains(value.payload),"multi-method business interface lost actual data-field coverage");
+            require(unknownCarrierCalls==0,"graph/classification replayed a business getter or supplier callback");
+        } finally {
+            unknownCarrierMutationReceiver=null;unknownCarrierMutation=null;
+            for(var saved:readers.entrySet())U.putObjectVolatile(U.staticFieldBase(saved.getKey()),U.staticFieldOffset(saved.getKey()),saved.getValue());
+        }
+        System.out.println("UNKNOWN_CARRIER_GRAPH_PASS actual_wrapper_CHM_mutable_fields detached_field_array_layout_images_refused Deque_ring_unused_excluded intermediate_publication_removal_preserved CHM_resize_forwarding_reservation_tree_write_reachable_union custom_SAM_overload_business_methods_distinguished no_getter_supplier_replay metadata_reader_fixture_only_no_game_authority");
+    }
+    private static void unknownCarrierDeque()throws Exception {
+        ArrayDeque<Object> deque=new ArrayDeque<>(8);for(int at=0;at<6;at++)deque.addLast(new UnknownCarrierLeaf());for(int at=0;at<5;at++)deque.removeFirst();
+        for(int at=0;at<4;at++)deque.addLast(new UnknownCarrierLeaf());
+        long elements=unknownCarrierOffset(ArrayDeque.class,"elements"),headOffset=unknownCarrierOffset(ArrayDeque.class,"head"),tailOffset=unknownCarrierOffset(ArrayDeque.class,"tail");
+        Object[] array=(Object[])U.getObjectVolatile(deque,elements);int head=U.getIntVolatile(deque,headOffset),tail=U.getIntVolatile(deque,tailOffset);
+        require(tail<head,"actual Deque fixture did not wrap its ring");int idle=(tail+1)%array.length;Object unrelated=new UnknownCarrierLeaf();array[idle]=unrelated;
+        EquipmentCarrierGraph.View graph=EquipmentCarrierGraph.candidate(null,deque);
+        require(!graph.contains(unrelated)&&!graph.node(array).contains(idle),"unused actual ring capacity was classified as held payload");
+        for(int at=head;at!=tail;at=(at+1)%array.length)require(graph.contains(array[at]),"wrapped actual Deque element was lost");
+        Object pending=new UnknownCarrierLeaf(),removed=array[head];
+        try {
+            array[tail]=pending;graph=EquipmentCarrierGraph.candidate(null,deque);require(graph.contains(pending)&&graph.contains(removed)&&!graph.contains(unrelated),"addLast array publication before tail store lost payload or swept unused slots");
+            array[tail]=null;array[head]=null;graph=EquipmentCarrierGraph.candidate(null,deque);require(!graph.contains(removed)&&!graph.contains(unrelated),"poll array clear before head store retained removed payload or swept unused slots");
+        } finally {array[tail]=null;array[head]=removed;array[idle]=null;}
+        ArrayDeque<Object> full=new ArrayDeque<>(3);Object[] fullArray=(Object[])U.getObjectVolatile(full,elements);for(int at=0;at<fullArray.length-1;at++)full.addLast(new UnknownCarrierLeaf());
+        int oldTail=U.getIntVolatile(full,tailOffset);fullArray[oldTail]=pending;U.putIntVolatile(full,tailOffset,U.getIntVolatile(full,headOffset));
+        try {graph=EquipmentCarrierGraph.candidate(null,full);for(Object held:fullArray)require(graph.contains(held),"full ring immediately before grow was reported empty");}
+        finally {U.putIntVolatile(full,tailOffset,oldTail);fullArray[oldTail]=null;}
+    }
+    private static void unknownCarrierConcurrent(ConcurrentHashMap<String,Object> map,Object value,Object moved)throws Exception {
+        Class<?> type=ConcurrentHashMap.class,nodeType=Class.forName("java.util.concurrent.ConcurrentHashMap$Node",false,null);
+        long tableOffset=unknownCarrierOffset(type,"table"),nextOffset=unknownCarrierOffset(type,"nextTable"),controlOffset=unknownCarrierOffset(type,"sizeCtl");
+        Object[] table=(Object[])U.getObjectVolatile(map,tableOffset);Object oldNext=U.getObjectVolatile(map,nextOffset);int oldControl=U.getIntVolatile(map,controlOffset);
+        ConcurrentHashMap<String,Object> destination=new ConcurrentHashMap<>();destination.put("moved",moved);Object next=U.getObjectVolatile(destination,tableOffset);
+        Class<?> forwardingType=Class.forName("java.util.concurrent.ConcurrentHashMap$ForwardingNode",false,null),reservationType=Class.forName("java.util.concurrent.ConcurrentHashMap$ReservationNode",false,null);
+        Object forwarding=U.allocateInstance(forwardingType),reservation=U.allocateInstance(reservationType);
+        U.putObjectVolatile(forwarding,unknownCarrierOffset(forwardingType,"nextTable"),next);U.putIntVolatile(forwarding,unknownCarrierOffset(nodeType,"hash"),-1);U.putIntVolatile(reservation,unknownCarrierOffset(nodeType,"hash"),-3);
+        int forward=-1,reserve=-1;for(int at=0;at<table.length;at++)if(table[at]==null){if(forward<0)forward=at;else{reserve=at;break;}}require(reserve>=0,"actual CHM fixture needs two empty buckets");
+        try {
+            table[forward]=forwarding;table[reserve]=reservation;U.putObjectVolatile(map,nextOffset,next);U.putIntVolatile(map,controlOffset,-2);
+            EquipmentCarrierGraph.View graph=EquipmentCarrierGraph.candidate(null,map);
+            require(graph.contains(value)&&graph.contains(moved)&&graph.contains(forwarding)&&graph.contains(reservation),"actual CHM resize/forwarding/reservation prefix lost reachable data or structure");
+            U.putObjectVolatile(map,nextOffset,null);graph=EquipmentCarrierGraph.candidate(null,map);require(graph.contains(moved),"forwarding target was lost after direct nextTable field changed");
+        } finally {table[forward]=null;table[reserve]=null;U.putObjectVolatile(map,nextOffset,oldNext);U.putIntVolatile(map,controlOffset,oldControl);}
+        require(!EquipmentCarrierGraph.candidate(null,map).contains(moved),"retired forwarding/nextTable path retained a detached value");
+        ConcurrentHashMap<Object,Object> tree=new ConcurrentHashMap<>(64);List<Object> held=new ArrayList<>();
+        for(int at=0;at<10;at++){Object payload=new UnknownCarrierLeaf();held.add(payload);tree.put(new UnknownCarrierKey(),payload);}
+        Object treeBin=null;for(Object node:(Object[])U.getObjectVolatile(tree,tableOffset))if(node!=null&&node.getClass().getName().endsWith("$TreeBin"))treeBin=node;
+        require(treeBin!=null,"actual colliding CHM did not produce a TreeBin");long lock=unknownCarrierOffset(treeBin.getClass(),"lockState");int original=U.getIntVolatile(treeBin,lock);
+        try {U.putIntVolatile(treeBin,lock,1);EquipmentCarrierGraph.View graph=EquipmentCarrierGraph.candidate(null,tree);for(Object payload:held)require(graph.contains(payload),"TreeBin writer prefix lost existing root/first payload");}
+        finally {U.putIntVolatile(treeBin,lock,original);}
     }
 
     /** The production composition must retain all four protections on the actual Forge dispatcher image. */
@@ -332,6 +485,150 @@ public final class AuditFixCheck {
             require(PhysicalBridge.site(PhysicalBody.normalToken)==0&&PhysicalBridge.frame(PhysicalBody.throwingToken)==0,"popped physical token remained usable");
         } finally {physicalStop0();PHYSICAL_POPPED.clear();}
         System.out.println("PHYSICAL_TOKEN_PASS actual_JVMTI_sites recursive_outer_and_other_thread_refused captured_version_mismatch_refused actual_normal_exceptional_FramePop fixture_owned_registration");
+    }
+    private static native void carrierSiteSetup0(Class<?> controls,Class<?> sources);
+    private static native void carrierSiteStop0();
+    private static native int carrierSiteDepth0(Class<?> declaring,String name,String descriptor);
+    private static native long[] carrierSiteFrame0(Class<?> declaring,String name,String descriptor,int bottom);
+    private static native long[] carrierSiteImage0(Class<?> declaring,String name,String descriptor);
+    private static native Class<?> carrierSiteMethod0(Object receiver,Class<?> symbolic,String name,String descriptor,int opcode,Class<?> caller);
+    private static native long[] carrierSiteCapture0(Object receiver,Class<?> symbolic,String name,String descriptor,int opcode,Class<?> caller,String callerName,String callerDescriptor,int bottom);
+    private static native void carrierSiteMetadata0(boolean available);
+    private static native boolean carrierSiteRegister0(Class<?> actual,byte[] bytes,Object plan);
+    private static native void carrierSiteRedefine0(Class<?> actual,byte[] bytes);
+    private static final Object CARRIER_SITE_ROOT=new Object();
+    private static final ThreadLocal<CarrierSiteCapture> CARRIER_SITES=new ThreadLocal<>();
+    private static boolean CARRIER_SITE_ACTIVE,CARRIER_SITE_OBSERVED,CARRIER_SITE_NEW_VERSION;
+    private static Method CARRIER_SITE_CALL;private static String CARRIER_SITE_CALL_DESCRIPTOR;
+    private static MethodHandle CARRIER_SITE_INSTRUCTION;private static Object CARRIER_SITE_WRONG_RECEIVER;
+    private static long[] CARRIER_SITE_LAST,CARRIER_SITE_OLD;private static int CARRIER_SITE_BEGINS,CARRIER_SITE_ENDS,CARRIER_SITE_ENTRIES;
+    private record CarrierSiteCapture(CarrierSiteCapture previous,Object receiver,Class<?> declaring,String name,String descriptor,Object[] arguments,long[] site,long[] image) { }
+    private static boolean carrierReader(){return CARRIER_SITE_ACTIVE;}
+    private static boolean carrierInstruction(Object plan,String selector,int location,int instruction,int opcode,int local,String owner,String name,String descriptor)throws Throwable {
+        return (boolean)CARRIER_SITE_INSTRUCTION.invokeExact(plan,selector,location,instruction,opcode,local,owner,name,descriptor);
+    }
+    private static boolean carrierSiteVersion(long[] frame,long[] image){
+        if(frame==null||frame.length!=6||image==null||image.length!=4)return false;
+        for(int at=0;at<4;at++)if(frame[at+2]!=image[at])return false;return true;
+    }
+    private static boolean carrierSiteTuple(CarrierSiteCapture capture,Object receiver,Object[] arguments){
+        if(capture==null||capture.receiver!=receiver||capture.arguments.length!=arguments.length)return false;
+        for(int at=0;at<arguments.length;at++){Object left=capture.arguments[at],right=arguments[at];
+            if(left instanceof Integer a&&right instanceof Integer b){if(a.intValue()!=b.intValue())return false;}
+            else if(left instanceof Long a&&right instanceof Long b){if(a.longValue()!=b.longValue())return false;}
+            else if(left instanceof Double a&&right instanceof Double b){if(Double.doubleToRawLongBits(a)!=Double.doubleToRawLongBits(b))return false;}
+            else if(left!=right)return false;
+        }return true;
+    }
+    private static Object carrierSiteBegin(Object parent,Object receiver,Class<?> symbolic,String name,String descriptor,int opcode,Object[] arguments){
+        Class<?> caller=CARRIER_SITE_CALL.getDeclaringClass();String callerName=CARRIER_SITE_CALL.getName(),callerDescriptor=CARRIER_SITE_CALL_DESCRIPTOR;
+        int bottom=carrierSiteDepth0(caller,callerName,callerDescriptor);require(bottom>0,"actual carrier caller depth unavailable");
+        long[] before=carrierSiteFrame0(caller,callerName,callerDescriptor,bottom);
+        if(CARRIER_SITE_OBSERVED){
+            carrierSiteMetadata0(false);
+            try {require(carrierSiteCapture0(receiver,symbolic,name,descriptor,opcode,caller,callerName,callerDescriptor,bottom)==null,"observer tail accepted unavailable actual image metadata");}
+            finally {carrierSiteMetadata0(true);}
+        }
+        long[] site=carrierSiteCapture0(receiver,symbolic,name,descriptor,opcode,caller,callerName,callerDescriptor,bottom);
+        require(site!=null&&site.length==6&&before!=null&&site[0]==bottom&&site[1]>before[1]&&carrierSiteVersion(site,Arrays.copyOfRange(before,2,6)),"original carrier invoke CP/BCI unavailable");
+        long[] again=carrierSiteCapture0(receiver,symbolic,name,descriptor,opcode,caller,callerName,callerDescriptor,bottom);
+        require(again!=site&&Arrays.equals(again,site),"carrier metadata was cached or changed while caller suspended");
+        require(carrierSiteCapture0(new Object(),symbolic,name,descriptor,opcode,caller,callerName,callerDescriptor,bottom)==null,"incompatible receiver matched original dispatch");
+        require(carrierSiteCapture0(receiver,symbolic,"missing",descriptor,opcode,caller,callerName,callerDescriptor,bottom)==null,"wrong selector matched original CP call");
+        require(carrierSiteCapture0(receiver,symbolic,name,descriptor,opcode==185?182:185,caller,callerName,callerDescriptor,bottom)==null,"wrong opcode matched original CP call");
+        require(carrierSiteFrame0(caller,"missing",callerDescriptor,bottom)==null&&carrierSiteFrame0(caller,callerName,callerDescriptor,0)==null,"wrong physical selector/depth described a carrier frame");
+        CarrierSiteCapture previous=CARRIER_SITES.get();
+        if(previous!=null){
+            require(previous.site[0]!=site[0],"recursive physical frames shared bottom identity");
+            require(carrierSiteCapture0(receiver,symbolic,name,descriptor,opcode,caller,callerName,callerDescriptor,(int)previous.site[0])==null,"recursive inner hook borrowed suspended outer invoke");
+        }
+        if(CARRIER_SITE_NEW_VERSION)require(!carrierSiteVersion(site,Arrays.copyOfRange(CARRIER_SITE_OLD,2,6)),"redefined caller retained old physical method image");
+        Class<?> actual=carrierSiteMethod0(receiver,symbolic,name,descriptor,opcode,caller);
+        long[] image=actual==null?null:carrierSiteImage0(actual,name,descriptor);
+        require(image!=null&&image.length==4,"current actual Java method image unavailable");
+        CarrierSiteCapture capture=new CarrierSiteCapture(previous,receiver,actual,name,descriptor,arguments.clone(),site,image);
+        CARRIER_SITES.set(capture);CARRIER_SITE_LAST=site;CARRIER_SITE_BEGINS++;return capture;
+    }
+    private static void carrierSiteEnd(Object token,Object result){
+        CarrierSiteCapture capture=CARRIER_SITES.get();require(token==capture&&result!=null,"carrier original return lost its exact call");
+        CARRIER_SITES.set(capture.previous);CARRIER_SITE_ENDS++;
+    }
+    private static void carrierSiteEntered(Object receiver,Object[] arguments){
+        CarrierSiteCapture capture=CARRIER_SITES.get();require(carrierSiteTuple(capture,receiver,arguments),"callee lost original receiver/operand tuple");
+        require(receiver.getClass()==CARRIER_SITE_WRONG_RECEIVER.getClass()&&!carrierSiteTuple(capture,CARRIER_SITE_WRONG_RECEIVER,arguments),"different same-Class receiver borrowed original operands");
+        Class<?> caller=CARRIER_SITE_CALL.getDeclaringClass();String callerName=CARRIER_SITE_CALL.getName();
+        require(Arrays.equals(capture.site,carrierSiteFrame0(caller,callerName,CARRIER_SITE_CALL_DESCRIPTOR,(int)capture.site[0])),"callee caller no longer at exact original invoke");
+        int bottom=carrierSiteDepth0(capture.declaring,capture.name,capture.descriptor);
+        require(carrierSiteVersion(carrierSiteFrame0(capture.declaring,capture.name,capture.descriptor,bottom),capture.image)
+                &&Arrays.equals(capture.image,carrierSiteImage0(capture.declaring,capture.name,capture.descriptor)),"callee physical definition differs from original dispatch");CARRIER_SITE_ENTRIES++;
+    }
+    public static final class CarrierSiteTarget {
+        public Object carrierValue(int depth){
+            carrierSiteEntered(this,new Object[]{depth});
+            if(depth>0)try {return CARRIER_SITE_CALL.invoke(null,this,depth-1);}catch(ReflectiveOperationException failure){throw new AssertionError(failure);}
+            return this;
+        }
+    }
+    private static byte[] carrierSitePlainBody(){
+        String body="dev/ronova/pro/CarrierSitePlain",target=CarrierSiteTarget.class.getName().replace('.','/'),bridge="dev/ronova/pro/bootstrap/ControlBridge";
+        var writer=new jdk.internal.org.objectweb.asm.ClassWriter(jdk.internal.org.objectweb.asm.ClassWriter.COMPUTE_FRAMES|jdk.internal.org.objectweb.asm.ClassWriter.COMPUTE_MAXS);
+        writer.visit(61,0x0031,body,null,"java/lang/Object",null);
+        var code=writer.visitMethod(0x0009,"call","(L"+target+";I)Ljava/lang/Object;",null,null);code.visitCode();
+        code.visitVarInsn(25,0);code.visitVarInsn(25,0);code.visitLdcInsn(jdk.internal.org.objectweb.asm.Type.getType("L"+target+";"));code.visitLdcInsn("carrierValue");code.visitLdcInsn("(I)Ljava/lang/Object;");code.visitIntInsn(17,182);
+        code.visitInsn(4);code.visitTypeInsn(189,"java/lang/Object");code.visitInsn(89);code.visitInsn(3);code.visitVarInsn(21,1);code.visitMethodInsn(184,"java/lang/Integer","valueOf","(I)Ljava/lang/Integer;",false);code.visitInsn(83);
+        code.visitMethodInsn(184,bridge,"beginEquipmentSlotCall","(Ljava/lang/Object;Ljava/lang/Object;Ljava/lang/Class;Ljava/lang/String;Ljava/lang/String;I[Ljava/lang/Object;)Ljava/lang/Object;",false);
+        code.visitVarInsn(58,2);code.visitVarInsn(25,0);code.visitVarInsn(21,1);code.visitMethodInsn(182,target,"carrierValue","(I)Ljava/lang/Object;",false);
+        code.visitVarInsn(58,3);code.visitVarInsn(25,2);code.visitVarInsn(25,3);code.visitMethodInsn(184,bridge,"endEquipmentSlotCall","(Ljava/lang/Object;Ljava/lang/Object;)V",false);
+        code.visitVarInsn(25,3);code.visitInsn(176);code.visitMaxs(0,0);code.visitEnd();writer.visitEnd();return writer.toByteArray();
+    }
+    private static byte[] carrierSiteChangedBody(byte[] original){
+        var node=new jdk.internal.org.objectweb.asm.tree.ClassNode();new jdk.internal.org.objectweb.asm.ClassReader(original).accept(node,0);
+        for(var method:node.methods)if(method.name.equals("call"))method.instructions.insert(new jdk.internal.org.objectweb.asm.tree.InsnNode(0));
+        var writer=new jdk.internal.org.objectweb.asm.ClassWriter(0);node.accept(writer);return writer.toByteArray();
+    }
+    /** Actual VM readers with fixture-owned admission; no live Core grant is installed. */
+    private static void carrierCallSites()throws Exception {
+        System.load(java.nio.file.Path.of(System.getProperty("ronova.pro.audit.native")).toAbsolutePath().toString());
+        Class<?> controls=Class.forName("dev.ronova.pro.bootstrap.ControlBridge",true,null),sources=Class.forName("dev.ronova.pro.bootstrap.CodeSourceBridge",true,null),nativeControl=Class.forName("dev.ronova.pro.bootstrap.NativeControl",true,null);
+        Field slots=controls.getDeclaredField("equipmentSlots");slots.setAccessible(true);Object oldSlots=slots.get(null);
+        MethodType predicate=MethodType.methodType(boolean.class,Object.class,String.class,int.class,int.class,int.class,int.class,String.class,String.class,String.class);
+        CARRIER_SITE_INSTRUCTION=MethodHandles.privateLookupIn(nativeControl,MethodHandles.lookup()).findStatic(nativeControl,"carrierInstruction",predicate);
+        MethodType[] types={MethodType.methodType(Object.class,Object.class,Object.class),MethodType.methodType(void.class,Object.class,Object.class,Class.class,String.class,String.class,Object.class),
+                MethodType.methodType(void.class,Object.class,Object.class,int.class,Object.class),MethodType.methodType(void.class,Object.class,Object.class,Object.class,Object.class,boolean.class),
+                MethodType.methodType(void.class,Object.class,Object.class,String.class,String.class,Object.class),MethodType.methodType(void.class,Object.class),MethodType.methodType(void.class,Object.class,Object.class),MethodType.methodType(void.class,Object.class,Throwable.class),
+                MethodType.methodType(Object.class,Object.class,Object.class,Class.class,String.class,String.class,int.class,Object[].class),MethodType.methodType(void.class,Object.class,Object.class),MethodType.methodType(void.class,Object.class,Throwable.class),
+                MethodType.methodType(Object.class,Object.class,Class.class,String.class,String.class,Object[].class),MethodType.methodType(void.class,Object.class,Object.class),MethodType.methodType(void.class,Object.class,Throwable.class)};
+        MethodHandle[] callbacks=new MethodHandle[types.length];for(int at=0;at<types.length;at++)callbacks[at]=types[at].returnType()==void.class?MethodHandles.empty(types[at]):MethodHandles.dropArguments(MethodHandles.constant(Object.class,CARRIER_SITE_ROOT),0,types[at].parameterArray());
+        callbacks[8]=MethodHandles.lookup().findStatic(AuditFixCheck.class,"carrierSiteBegin",types[8]);callbacks[9]=MethodHandles.lookup().findStatic(AuditFixCheck.class,"carrierSiteEnd",types[9]);
+        CARRIER_SITE_ACTIVE=true;carrierSiteSetup0(controls,sources);
+        try {
+            slots.set(null,callbacks);byte[] plain=carrierSitePlainBody();
+            Class<?> caller=new ClassLoader(AuditFixCheck.class.getClassLoader()){Class<?> body(){Class<?> actual=defineClass(null,plain,0,plain.length);resolveClass(actual);return actual;}}.body();
+            CARRIER_SITE_CALL=caller.getMethod("call",CarrierSiteTarget.class,int.class);CARRIER_SITE_CALL_DESCRIPTOR=MethodType.methodType(Object.class,CarrierSiteTarget.class,int.class).toMethodDescriptorString();
+            require(carrierSiteImage0(caller,"missing",CARRIER_SITE_CALL_DESCRIPTOR)==null&&carrierSiteFrame0(caller,"call",CARRIER_SITE_CALL_DESCRIPTOR,0)==null,"unavailable ordinary metadata became a carrier definition");
+            CarrierSiteTarget target=new CarrierSiteTarget();CARRIER_SITE_WRONG_RECEIVER=new CarrierSiteTarget();
+            require(CARRIER_SITE_CALL.invoke(null,target,2)==target&&CARRIER_SITE_BEGINS==3&&CARRIER_SITE_ENDS==3&&CARRIER_SITE_ENTRIES==3&&CARRIER_SITES.get()==null,"recursive original carrier path was replayed or not drained");
+            CARRIER_SITE_OLD=CARRIER_SITE_LAST;long[] image=carrierSiteImage0(caller,"call",CARRIER_SITE_CALL_DESCRIPTOR);
+            carrierSiteRedefine0(caller,carrierSiteChangedBody(plain));
+            require(!Arrays.equals(image,carrierSiteImage0(caller,"call",CARRIER_SITE_CALL_DESCRIPTOR)),"actual redefinition retained old current method image");
+            CARRIER_SITE_NEW_VERSION=true;require(CARRIER_SITE_CALL.invoke(null,target,0)==target,"redefined original call changed return");CARRIER_SITE_NEW_VERSION=false;
+            Object[] combined=carrierDelegateCombinedBody();Class<?> combinedType=(Class<?>)combined[0];
+            var constructor=Class.forName("dev.ronova.pro.bootstrap.ExecutionFlow$Plan",true,null).getDeclaredConstructor(Object[][].class);constructor.setAccessible(true);Object plan=constructor.newInstance((Object)combined[2]);
+            require(carrierSiteRegister0(combinedType,(byte[])combined[1],plan),"fixture actual final execution image registration failed");
+            Object marker=new Object();long count=0x100000003L;double fraction=-2.5;
+            EquipmentDelegateBusiness business=new EquipmentDelegateBusiness(){
+                public Object route(Object value,long wide,double number){carrierSiteEntered(this,new Object[]{value,wide,number});return value;}
+                public long measure(long wide,double number){throw new AssertionError("unused measure replayed");}
+                public void emit(Object value){throw new AssertionError("unused emit replayed");}
+            };
+            CARRIER_SITE_WRONG_RECEIVER=U.allocateInstance(business.getClass());CARRIER_SITE_CALL=combinedType.getMethod("forward",EquipmentDelegateBusiness.class,Object.class,long.class,double.class);
+            CARRIER_SITE_CALL_DESCRIPTOR=MethodType.methodType(Object.class,EquipmentDelegateBusiness.class,Object.class,long.class,double.class).toMethodDescriptorString();CARRIER_SITE_OBSERVED=true;
+            int before=CARRIER_SITE_ENTRIES;require(CARRIER_SITE_CALL.invoke(combinedType.getConstructor().newInstance(),business,marker,count,fraction)==marker&&CARRIER_SITE_ENTRIES==before+1&&CARRIER_SITES.get()==null,"final slot/action/execution composition lost or replayed original business call");
+            require(CARRIER_SITE_BEGINS==CARRIER_SITE_ENDS&&CARRIER_SITE_BEGINS==CARRIER_SITE_ENTRIES,"carrier call lifecycle did not close exactly once");
+        } finally {
+            slots.set(null,oldSlots);carrierSiteStop0();CARRIER_SITE_ACTIVE=false;CARRIER_SITE_OBSERVED=false;CARRIER_SITE_NEW_VERSION=false;CARRIER_SITES.remove();CARRIER_SITE_CALL=null;CARRIER_SITE_INSTRUCTION=null;
+        }
+        System.out.println("CARRIER_CALL_SITES_PASS actual_VM_CP_BCI recursive_outer_site_wrong_selector_opcode_incompatible_receiver_refused exact_callee_operands actual_redefine_changes_image final_slot_action_execution_observers missing_metadata_unresolved fixture_owned_registration_no_live_Core_authorization");
     }
     private static void queueLocations()throws Exception {
         Class<?> bridge=Class.forName("dev.ronova.pro.bootstrap.TaskBridge",false,null);
@@ -2114,6 +2411,150 @@ public final class AuditFixCheck {
         };
         Class<?> actual=Class.forName(target,false,loader);require(actual.getClassLoader()==loader,"actual handler class was not defined");actual.getDeclaredMethods();
         System.out.println("CARRIER_BYTECODE_VERIFY_PASS actual_Forge_ItemStackHandler_instance_bodies JVM_verifier_only no_action_or_game_runtime_claim");
+    }
+    public interface EquipmentDelegateBusiness {
+        Object route(Object value,long count,double fraction);
+        long measure(long count,double fraction);
+        void emit(Object value);
+    }
+    public static final class EquipmentDelegateBody {
+        public Object forward(EquipmentDelegateBusiness business,Object value,long count,double fraction){return business.route(value,count,fraction);}
+        public long wide(EquipmentDelegateBusiness business,long count,double fraction){return business.measure(count,fraction);}
+        public void fire(EquipmentDelegateBusiness business,Object value){business.emit(value);}
+        public Object caught(EquipmentDelegateBusiness business,Object value,long count,double fraction){
+            try{return business.route(value,count,fraction);}catch(RuntimeException original){return original;}
+        }
+    }
+    /** Exercise the production wrapper around real non-SAM interface calls.
+     * Core callbacks stay uninstalled; this does not fabricate equipment authority. */
+    private static void carrierDelegateBytecode()throws Exception{
+        Class<?> bridge=Class.forName("dev.ronova.pro.bootstrap.ControlBridge",true,null);
+        Field installed=bridge.getDeclaredField("equipmentInvocations");installed.setAccessible(true);
+        require(installed.get(null)==null,"delegate body fallback requires uninstalled Core invocation handles");
+        Class<?> boundary=Class.forName("dev.ronova.pro.agent.EquipmentActionBoundary");
+        Class<?> visitor=Class.forName("jdk.internal.org.objectweb.asm.ClassVisitor"),nodeType=Class.forName("jdk.internal.org.objectweb.asm.tree.ClassNode");
+        Class<?> methodType=Class.forName("jdk.internal.org.objectweb.asm.tree.MethodNode"),readerType=Class.forName("jdk.internal.org.objectweb.asm.ClassReader");
+        Method weave=boundary.getDeclaredMethod("weave",methodType,String.class);weave.setAccessible(true);
+        Class<?> writerType=Class.forName("dev.ronova.pro.agent.ControlClassWriter");
+        Constructor<?> writerConstructor=writerType.getDeclaredConstructor(ClassLoader.class,nodeType);writerConstructor.setAccessible(true);
+        String originalName=EquipmentDelegateBody.class.getName().replace('.','/');Object node=nodeType.getConstructor().newInstance();
+        try(var input=EquipmentDelegateBody.class.getResourceAsStream("/"+originalName+".class")){
+            require(input!=null,"actual delegate body bytes unavailable");
+            Object reader=readerType.getConstructor(byte[].class).newInstance((Object)input.readAllBytes());readerType.getMethod("accept",visitor,int.class).invoke(reader,node,0);
+        }
+        int bodies=0;for(Object method:(List<?>)nodeType.getField("methods").get(node)){
+            String name=(String)methodType.getField("name").get(method);if(name.startsWith("<"))continue;
+            weave.invoke(null,method,"carrier-call");bodies++;
+        }
+        require(bodies==4,"actual delegate body selection changed");Object writer=writerConstructor.newInstance(AuditFixCheck.class.getClassLoader(),node);
+        nodeType.getMethod("accept",visitor).invoke(node,writer);
+        byte[] bytes=(byte[])Class.forName("jdk.internal.org.objectweb.asm.ClassWriter").getMethod("toByteArray").invoke(writer);
+        var actual=new org.objectweb.asm.tree.ClassNode();new org.objectweb.asm.ClassReader(bytes).accept(actual,0);
+        String business=EquipmentDelegateBusiness.class.getName().replace('.','/');int invokes=0,observations=0;
+        for(var method:actual.methods)if(!method.name.startsWith("<")){
+            int original=0,observed=0;
+            for(var instruction:method.instructions)if(instruction instanceof org.objectweb.asm.tree.MethodInsnNode call){
+                if(call.owner.equals(business)){require(call.getOpcode()==org.objectweb.asm.Opcodes.INVOKEINTERFACE,"original custom interface dispatch was replaced");original++;}
+                if(call.owner.equals("dev/ronova/pro/bootstrap/ControlBridge")&&call.name.equals("beginEquipmentInvocation")
+                        &&call.getPrevious() instanceof org.objectweb.asm.tree.LdcInsnNode phase&&phase.cst.equals("carrier-delegate")){
+                    observed++;boolean reached=false;
+                    for(var next=call.getNext();next!=null;next=next.getNext()){
+                        if(next.getOpcode()<0)continue;
+                        if(next instanceof org.objectweb.asm.tree.MethodInsnNode target){require(target.owner.equals(business),"business call witness was followed by another invocation");reached=true;break;}
+                        require(next instanceof org.objectweb.asm.tree.VarInsnNode,"business call witness lost its straight local reload segment");
+                    }
+                    require(reached,"business call witness lost its original invoke");
+                }
+            }
+            require(original==1&&observed==1,"actual business call was missed or duplicated:"+method.name);invokes+=original;observations+=observed;
+        }
+        actual.nestHostClass=null;actual.nestMembers=null;actual.innerClasses.clear();actual.outerClass=null;actual.outerMethod=null;actual.outerMethodDesc=null;
+        String alias="dev.ronova.pro.CheckedCarrierDelegateBody";var remapped=new org.objectweb.asm.ClassWriter(0);
+        actual.accept(new org.objectweb.asm.commons.ClassRemapper(remapped,new org.objectweb.asm.commons.SimpleRemapper(originalName,alias.replace('.','/'))));
+        byte[] isolated=remapped.toByteArray();Class<?> checked=new ClassLoader(AuditFixCheck.class.getClassLoader()){
+            Class<?> defineBody(){Class<?> result=defineClass(alias,isolated,0,isolated.length);resolveClass(result);return result;}
+        }.defineBody();Object receiver=checked.getConstructor().newInstance();
+        Method forward=checked.getMethod("forward",EquipmentDelegateBusiness.class,Object.class,long.class,double.class),wide=checked.getMethod("wide",EquipmentDelegateBusiness.class,long.class,double.class),fire=checked.getMethod("fire",EquipmentDelegateBusiness.class,Object.class);
+        Object input=new Object(),output=new Object();Object[] returned={output};long count=0x100000003L,measured=0xfedcba9876543210L;double fraction=-2.5D;int[] calls=new int[3];Throwable[] failure=new Throwable[1];
+        EquipmentDelegateBusiness callback=new EquipmentDelegateBusiness(){
+            private void fail(){if(failure[0] instanceof RuntimeException thrown)throw thrown;if(failure[0] instanceof Error thrown)throw thrown;}
+            public Object route(Object value,long actualCount,double actualFraction){calls[0]++;require(value==input&&actualCount==count&&Double.doubleToRawLongBits(actualFraction)==Double.doubleToRawLongBits(fraction),"custom route operands changed");fail();return returned[0];}
+            public long measure(long actualCount,double actualFraction){calls[1]++;require(actualCount==count&&Double.doubleToRawLongBits(actualFraction)==Double.doubleToRawLongBits(fraction),"custom wide operands changed");fail();return measured;}
+            public void emit(Object value){calls[2]++;require(value==input,"custom void operand changed");fail();}
+        };
+        require(forward.invoke(receiver,callback,input,count,fraction)==output&&calls[0]==1,"custom delegate return identity/count changed");
+        returned[0]=null;require(forward.invoke(receiver,callback,input,count,fraction)==null&&calls[0]==2,"custom delegate null return/count changed");returned[0]=output;
+        require(((Long)wide.invoke(receiver,callback,count,fraction))==measured&&calls[1]==1,"custom delegate wide result/count changed");
+        require(fire.invoke(receiver,callback,input)==null&&calls[2]==1,"custom delegate void result/count changed");
+        List<Method> methods=List.of(forward,wide,fire);Object[][] arguments={{callback,input,count,fraction},{callback,count,fraction},{callback,input}};
+        for(Throwable original:List.of(new IllegalStateException("actual_custom_delegate_failure"),new AssertionError("actual_custom_delegate_error"))){
+            failure[0]=original;
+            for(int at=0;at<methods.size();at++){
+                int before=calls[at];try{methods.get(at).invoke(receiver,arguments[at]);throw new AssertionError("custom delegate lost its original Throwable");}
+                catch(InvocationTargetException thrown){require(thrown.getCause()==original,"custom delegate replaced its original Throwable");}
+                require(calls[at]==before+1,"failing custom delegate ran more or less than once");
+            }
+        }
+        RuntimeException original=new IllegalStateException("actual_custom_delegate_caught");failure[0]=original;int before=calls[0];
+        require(checked.getMethod("caught",EquipmentDelegateBusiness.class,Object.class,long.class,double.class).invoke(receiver,callback,input,count,fraction)==original&&calls[0]==before+1,"delegate cleanup bypassed the original catch handler");
+        Object[] combined=carrierDelegateCombinedBody();Class<?> combinedType=(Class<?>)combined[0];
+        var combinedImage=new org.objectweb.asm.tree.ClassNode();new org.objectweb.asm.ClassReader((byte[])combined[1]).accept(combinedImage,0);
+        int slotCalls=0,carrierEntries=0,delegateSites=0,executionCalls=0;
+        for(var method:combinedImage.methods)if(method.name.equals("forward"))for(var instruction:method.instructions){
+            if(instruction instanceof org.objectweb.asm.tree.LdcInsnNode phase&&phase.cst.equals("carrier-delegate"))delegateSites++;
+            if(instruction instanceof org.objectweb.asm.tree.MethodInsnNode call){
+                if(call.owner.equals("dev/ronova/pro/bootstrap/ControlBridge")&&call.name.equals("beginEquipmentSlotCall"))slotCalls++;
+                if(call.owner.equals("dev/ronova/pro/bootstrap/ControlBridge")&&call.name.equals("beginEquipmentInvocation"))carrierEntries++;
+                if(call.owner.equals("dev/ronova/pro/bootstrap/CodeSourceBridge")&&call.name.equals("executionBefore"))executionCalls++;
+            }
+        }
+        require(slotCalls==1&&carrierEntries==1&&delegateSites==0&&executionCalls>0&&((Object[][])combined[2]).length==4,
+                "final Slot/Action/Execution composition duplicated or lost the original call witness");
+        failure[0]=null;before=calls[0];Object combinedReceiver=combinedType.getConstructor().newInstance();
+        require(combinedType.getMethod("forward",EquipmentDelegateBusiness.class,Object.class,long.class,double.class)
+                .invoke(combinedReceiver,callback,input,count,fraction)==output&&calls[0]==before+1,"final combined body changed the original business invocation");
+        require(installed.get(null)==null,"isolated custom delegate check installed Core authority");
+        System.out.println("EQUIPMENT_CARRIER_DELEGATE_BYTECODE_PASS production_EquipmentActionBoundary_and_ControlClassWriter isolated_actual_non_SAM_interface_body original_invokes="+invokes+" observations="+observations+" reference_long_double_void_arguments_results_once original_RuntimeException_Error_and_catch_identity Bridge_uninstalled_null_token_fallback final_Slot_Action_Execution_single_witness no_live_equipment_or_native_delegation_authority_claim");
+    }
+    /** Final combined image and its actual emitted offsets, also consumed by
+     * the Native carrier-call-site fixture without generating another matrix. */
+    public static Object[] carrierDelegateCombinedBody()throws Exception{
+        String originalName=EquipmentDelegateBody.class.getName().replace('.','/'),alias="dev.ronova.pro.CheckedCarrierDelegateCombinedBody";
+        var renamed=new org.objectweb.asm.tree.ClassNode();
+        try(var input=EquipmentDelegateBody.class.getResourceAsStream("/"+originalName+".class")){
+            require(input!=null,"actual combined delegate body bytes unavailable");new org.objectweb.asm.ClassReader(input.readAllBytes()).accept(renamed,0);
+        }
+        renamed.nestHostClass=null;renamed.nestMembers=null;renamed.innerClasses.clear();renamed.outerClass=null;renamed.outerMethod=null;renamed.outerMethodDesc=null;
+        var remapped=new org.objectweb.asm.ClassWriter(0);renamed.accept(new org.objectweb.asm.commons.ClassRemapper(remapped,new org.objectweb.asm.commons.SimpleRemapper(originalName,alias.replace('.','/'))));
+        byte[] image=remapped.toByteArray();
+        Class<?> visitor=Class.forName("jdk.internal.org.objectweb.asm.ClassVisitor"),nodeType=Class.forName("jdk.internal.org.objectweb.asm.tree.ClassNode"),instructionType=Class.forName("jdk.internal.org.objectweb.asm.tree.AbstractInsnNode");
+        Class<?> methodType=Class.forName("jdk.internal.org.objectweb.asm.tree.MethodNode"),readerType=Class.forName("jdk.internal.org.objectweb.asm.ClassReader"),writerType=Class.forName("dev.ronova.pro.agent.ControlClassWriter");
+        Constructor<?> readerConstructor=readerType.getConstructor(byte[].class),writerConstructor=writerType.getDeclaredConstructor(ClassLoader.class,nodeType);writerConstructor.setAccessible(true);
+        Method read=readerType.getMethod("accept",visitor,int.class),accept=nodeType.getMethod("accept",visitor),write=Class.forName("jdk.internal.org.objectweb.asm.ClassWriter").getMethod("toByteArray");
+        Object node=nodeType.getConstructor().newInstance();read.invoke(readerConstructor.newInstance((Object)image),node,0);
+        Method slot=Class.forName("dev.ronova.pro.agent.EquipmentSlotBoundary").getDeclaredMethod("weave",String.class,methodType,boolean.class);slot.setAccessible(true);
+        for(Object method:(List<?>)nodeType.getField("methods").get(node))if(methodType.getField("name").get(method).equals("forward"))slot.invoke(null,alias.replace('.','/'),method,true);
+        Object writer=writerConstructor.newInstance(AuditFixCheck.class.getClassLoader(),node);accept.invoke(node,writer);image=(byte[])write.invoke(writer);
+        // The real pipeline writes between passes. Re-read their recomputed
+        // limits/frames before ExecutionBoundary's operand analysis as well.
+        node=nodeType.getConstructor().newInstance();read.invoke(readerConstructor.newInstance((Object)image),node,0);
+        Method action=Class.forName("dev.ronova.pro.agent.EquipmentActionBoundary").getDeclaredMethod("weave",methodType,String.class);action.setAccessible(true);
+        for(Object method:(List<?>)nodeType.getField("methods").get(node))if(!((String)methodType.getField("name").get(method)).startsWith("<"))action.invoke(null,method,"carrier-call");
+        writer=writerConstructor.newInstance(AuditFixCheck.class.getClassLoader(),node);accept.invoke(node,writer);image=(byte[])write.invoke(writer);
+        node=nodeType.getConstructor().newInstance();read.invoke(readerConstructor.newInstance((Object)image),node,0);
+        Map<String,Module[][]> direct=new LinkedHashMap<>();Method opcode=instructionType.getMethod("getOpcode");
+        for(Object method:(List<?>)nodeType.getField("methods").get(node)){
+            String name=(String)methodType.getField("name").get(method);if(name.startsWith("<"))continue;
+            int count=0;for(Object instruction:(Iterable<?>)methodType.getField("instructions").get(method))if((int)opcode.invoke(instruction)>=0)count++;
+            Module[][] rows=new Module[count][];Arrays.setAll(rows,ignored->new Module[0]);direct.put(name+(String)methodType.getField("desc").get(method),rows);
+        }
+        Method execution=Class.forName("dev.ronova.pro.agent.ExecutionBoundary").getDeclaredMethod("weave",nodeType,Map.class,Map.class,Module.class);execution.setAccessible(true);
+        Object woven=execution.invoke(null,node,direct,Map.of(),AuditFixCheck.class.getModule());
+        writer=writerConstructor.newInstance(AuditFixCheck.class.getClassLoader(),node);accept.invoke(node,writer);byte[] finished=(byte[])write.invoke(writer);
+        Method layout=woven.getClass().getDeclaredMethod("layout");layout.setAccessible(true);Object[][] positions=(Object[][])layout.invoke(woven);
+        Class<?> result=new ClassLoader(AuditFixCheck.class.getClassLoader()){
+            Class<?> defineBody(){Class<?> type=defineClass(alias,finished,0,finished.length);resolveClass(type);return type;}
+        }.defineBody();return new Object[]{result,finished,positions};
     }
     /** Verify the slot read hooks on the actual game getter, without constructing an entity. */
     private static void equipmentSlotBytecode()throws Exception{

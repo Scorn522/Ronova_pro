@@ -16,7 +16,7 @@ final class EquipmentSlotBoundary {
     private static final String SLOT="net/minecraft/world/entity/EquipmentSlot",STACK="net/minecraft/world/item/ItemStack",BRIDGE="dev/ronova/pro/bootstrap/ControlBridge";
     private static final String TOKEN="Ljava/lang/Object;";
     private static final class Getter {
-        final WeakReference<Class<?>> owner;final String name,descriptor;final boolean helper;volatile boolean transformed;
+        final WeakReference<Class<?>> owner;final String name,descriptor;volatile boolean helper,transformed,transformedHelper;
         Getter(Class<?> actual,String name,String descriptor,boolean helper){owner=new WeakReference<>(actual);this.name=name;this.descriptor=descriptor;this.helper=helper;}
     }
     private static volatile Getter[] getters=new Getter[0];
@@ -25,7 +25,15 @@ final class EquipmentSlotBoundary {
     private static synchronized Getter declare(Class<?> actual,String name,String descriptor,boolean helper){
         List<Getter> living=new ArrayList<>();Getter found=null;
         for(Getter getter:getters)if(getter.owner.get()!=null){living.add(getter);if(getter.owner.get()==actual&&getter.name.equals(name)&&getter.descriptor.equals(descriptor))found=getter;}
-        if(found!=null){if(found.helper!=helper)throw new IllegalStateException("EQUIPMENT_SLOT_METHOD_ROLE_CONFLICT:"+actual.getName()+"#"+name+descriptor);return found;}
+        if(found!=null){
+            if(found.helper!=helper){
+                if(!DESCRIPTOR.equals(descriptor)||!name.equals("getItemBySlot")&&!name.equals("m_6844_"))throw new IllegalStateException("EQUIPMENT_SLOT_METHOD_ROLE_CONFLICT:"+actual.getName()+"#"+name+descriptor);
+                // A canonical getter's root hook also services an exact nested
+                // helper call. Upgrade a helper-only body once; never double-weave it.
+                if(!helper){found.helper=false;found.transformed=false;}
+            }
+            return found;
+        }
         Getter added=new Getter(actual,name,descriptor,helper);living.add(added);Getter[] next=living.toArray(Getter[]::new);
         ControlImages.protect(next,added,added.owner);getters=next;return added;
     }
@@ -52,29 +60,31 @@ final class EquipmentSlotBoundary {
         if(!helper&&(Modifier.isStatic(access)||Modifier.isPrivate(access)))throw new IllegalStateException("EQUIPMENT_SLOT_VIRTUAL_GETTER_REQUIRED:"+actual.getName());
         Getter getter=declare(actual,name,descriptor,helper);
         synchronized(getter){
-            if(getter.transformed)return;
+            if(getter.transformed&&getter.transformedHelper==getter.helper)return;
             try{api.retransformClasses(actual);}
             catch(java.lang.instrument.UnmodifiableClassException failure){getter.transformed=false;throw new IllegalStateException("EQUIPMENT_SLOT_INSTALL_FAILED:"+actual.getName(),failure);}
             catch(RuntimeException|Error failure){getter.transformed=false;throw failure;}
-            if(!getter.transformed)throw new IllegalStateException("EQUIPMENT_SLOT_TRANSFORM_MISSING:"+actual.getName());
+            if(!getter.transformed||getter.transformedHelper!=getter.helper)throw new IllegalStateException("EQUIPMENT_SLOT_TRANSFORM_MISSING:"+actual.getName());
         }
     }
     static void transformFailed(Class<?> actual){if(actual!=null)for(Getter getter:getters)if(getter.owner.get()==actual)getter.transformed=false;}
     /** This pass must precede dispatch/action fallbacks, which are not natural returns. */
     static byte[] transform(ClassLoader loader,String name,Class<?> actual,byte[] bytes){
         if(actual==null||name==null||actual.getClassLoader()!=loader||!actual.getName().replace('.','/').equals(name))return null;
-        List<Getter> selected=new ArrayList<>();for(Getter getter:getters)if(getter.owner.get()==actual){getter.transformed=false;selected.add(getter);}
+        List<Getter> selected=new ArrayList<>();java.util.IdentityHashMap<Getter,Boolean> roles=new java.util.IdentityHashMap<>();
+        for(Getter getter:getters)if(getter.owner.get()==actual){getter.transformed=false;selected.add(getter);roles.put(getter,getter.helper);}
         if(selected.isEmpty())return null;
         ClassNode node=new ClassNode();new ClassReader(bytes).accept(node,0);
         for(Getter getter:selected){
+            boolean helper=roles.get(getter);
             MethodNode found=null;for(MethodNode method:node.methods)if(getter.name.equals(method.name)&&getter.descriptor.equals(method.desc)){if(found!=null)throw new IllegalStateException("EQUIPMENT_SLOT_AMBIGUOUS_BODY:"+name);found=method;}
             if(found==null)throw new IllegalStateException("EQUIPMENT_SLOT_BODY_MISSING:"+name);
             if(found.name.startsWith("<")||(found.access&(Opcodes.ACC_NATIVE|Opcodes.ACC_ABSTRACT))!=0
-                    ||!getter.helper&&(found.access&(Opcodes.ACC_STATIC|Opcodes.ACC_PRIVATE))!=0)throw new IllegalStateException("EQUIPMENT_SLOT_BODY_UNSUPPORTED:"+name);
-            if(getter.helper)weave(node.name,found,true);else weave(found);
+                    ||!helper&&(found.access&(Opcodes.ACC_STATIC|Opcodes.ACC_PRIVATE))!=0)throw new IllegalStateException("EQUIPMENT_SLOT_BODY_UNSUPPORTED:"+name);
+            if(helper)weave(node.name,found,true);else weave(found);
         }
         ControlClassWriter writer=new ControlClassWriter(loader,node);node.accept(writer);byte[] result=writer.toByteArray();
-        for(Getter getter:selected)getter.transformed=true;return result;
+        for(Getter getter:selected){getter.transformedHelper=roles.get(getter);getter.transformed=true;}return result;
     }
     private static void call(InsnList code,String name,String descriptor){code.add(new MethodInsnNode(Opcodes.INVOKESTATIC,BRIDGE,name,descriptor,false));}
     private static int local(MethodNode method,Type type){int at=method.maxLocals;method.maxLocals+=type.getSize();if(method.maxLocals>65535)throw new IllegalStateException("EQUIPMENT_SLOT_LOCAL_LIMIT");return at;}
