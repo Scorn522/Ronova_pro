@@ -1516,7 +1516,7 @@ static int native_memory_read_sources(NativeMemoryWrite *read,OwnerLink **source
 /* Internal CNG/file-I/O range lifetime only. This is not a public address-to-ownership
  * adapter. Missing stack/JNI/provider storage stays uncovered, with no row.
  * Hash objects remain opaque; original CNG operations alone mutate them. */
-struct NativeHostCryptoSpan {NativeMemoryAllocation *allocation;uint64_t generation;int writing;};
+struct NativeHostCryptoSpan {NativeMemoryAllocation *allocation;uint64_t generation,address,bytes;int writing;};
 static int native_memory_crypto_restricted(void){
     NativeThread *state=native_tls==TLS_OUT_OF_INDEXES?NULL:(NativeThread*)TlsGetValue(native_tls);
     return host_loader_callout()||(state&&(state->heapCallback||state->toolingRestricted||state->vmDetaching||state->vmThreadEnding
@@ -1550,7 +1550,7 @@ static NativeHostCryptoSpan *native_memory_crypto_span(uint64_t address,uint64_t
     if(ready&&native_owner_stopped(*observed))ready=0;
     NativeHostCryptoSpan *span=ready?(NativeHostCryptoSpan*)calloc(1,sizeof(*span)):NULL;
     if(span){
-        span->allocation=allocation;span->generation=allocation->generation;span->writing=mode==2;
+        span->allocation=allocation;span->generation=allocation->generation;span->address=address;span->bytes=bytes;span->writing=mode==2;
         int locked=restricted?TryAcquireSRWLockExclusive(&native_memory_records):(AcquireSRWLockExclusive(&native_memory_records),1);
         if(locked){
             InterlockedIncrement(&allocation->users);InterlockedIncrement(span->writing?&allocation->writers:&allocation->reading);
@@ -1562,16 +1562,60 @@ static NativeHostCryptoSpan *native_memory_crypto_span(uint64_t address,uint64_t
     }else *denied=1;
     LeaveCriticalSection(&allocation->gate);return span;
 }
-static void native_memory_crypto_span_end(NativeHostCryptoSpan *span){
-    if(!span)return;NativeMemoryAllocation *allocation=span->allocation;int restricted=native_memory_crypto_restricted();
+static int native_memory_crypto_span_complete(NativeHostCryptoSpan *span,int restricted){
+    if(!span)return 1;NativeMemoryAllocation *allocation=span->allocation;
     /* Row identities are immutable tombstones. Counter-only release needs no
      * allocation gate, and the held users count prevents actual retirement. */
-    if(restricted){if(!TryAcquireSRWLockShared(&native_memory_records)){InterlockedIncrement(&native_failures);return;}}
+    if(restricted){if(!TryAcquireSRWLockShared(&native_memory_records))return 0;}
     else AcquireSRWLockShared(&native_memory_records);
     if(allocation->generation==span->generation){
         InterlockedDecrement(span->writing?&allocation->writers:&allocation->reading);InterlockedDecrement(&allocation->users);
-    }else {InterlockedExchange(&allocation->unknownUse,1);InterlockedIncrement(&native_failures);}
-    ReleaseSRWLockShared(&native_memory_records);free(span);
+    }else {InterlockedExchange(&allocation->unknownUse,1);InterlockedIncrement(&native_failures);ReleaseSRWLockShared(&native_memory_records);return 0;}
+    ReleaseSRWLockShared(&native_memory_records);free(span);return 1;
+}
+static void native_memory_crypto_span_end(NativeHostCryptoSpan *span){
+    if(!native_memory_crypto_span_complete(span,native_memory_crypto_restricted()))InterlockedIncrement(&native_failures);
+}
+static int native_memory_crypto_span_covers(NativeHostCryptoSpan *span,uint64_t address,uint64_t bytes){
+    return span&&span->writing&&address>=span->address&&bytes<=span->bytes&&address-span->address<=span->bytes-bytes;
+}
+static void *native_memory_crypto_span_identity(NativeHostCryptoSpan *span,uint64_t *generation){
+    if(generation)*generation=span?span->generation:0;return span?span->allocation:NULL;
+}
+static int native_memory_crypto_span_current(void *identity,uint64_t generation,uint64_t address,uint64_t bytes,int restricted){
+    if(!identity)return 0;
+    if(restricted){if(!TryAcquireSRWLockShared(&native_memory_records))return -1;}
+    else AcquireSRWLockShared(&native_memory_records);
+    NativeMemoryAllocation *row=native_memory_find(address,bytes,0);
+    int current=row==identity&&row->generation==generation;
+    ReleaseSRWLockShared(&native_memory_records);return current;
+}
+/* Only the two documented result words of this already-admitted OVERLAPPED
+ * may be published. Neither a raw caller address nor public status bits grant
+ * a new write. The original row/generation and current private ranges must
+ * still agree, and no OS call or Java transition crosses these short gates. */
+static int native_memory_crypto_span_overlapped(NativeHostCryptoSpan *span,LPOVERLAPPED target,ULONG_PTR high,ULONG_PTR status){
+    if(!native_memory_crypto_span_covers(span,(uint64_t)(uintptr_t)target,sizeof(*target)))return 0;
+    if(host_memory_range(target,sizeof(*target),0,1))return 0;
+    if(!TryAcquireSRWLockExclusive(&native_private_gate))return 0;
+    NativeMemoryAllocation *allocation=span->allocation;int copied=0,locked=0,records=0;
+    __try {
+        if(host_memory_output_locked(target,sizeof(*target)))__leave;
+        locked=TryEnterCriticalSection(&allocation->gate)!=0;if(!locked)__leave;
+        records=TryAcquireSRWLockShared(&native_memory_records)!=0;if(!records)__leave;
+        if(!allocation->alive||allocation->generation!=span->generation||!allocation->users||!allocation->writers)__leave;
+        if((uint64_t)(uintptr_t)target<allocation->address||sizeof(*target)>allocation->bytes
+                ||(uint64_t)(uintptr_t)target-allocation->address>allocation->bytes-sizeof(*target))__leave;
+        __try {
+            __atomic_store_n(&target->InternalHigh,high,__ATOMIC_RELAXED);
+            __atomic_store_n(&target->Internal,status,__ATOMIC_RELEASE);copied=1;
+        } __except(EXCEPTION_EXECUTE_HANDLER){copied=0;}
+    } __finally {
+        if(records)ReleaseSRWLockShared(&native_memory_records);
+        if(locked)LeaveCriticalSection(&allocation->gate);
+        ReleaseSRWLockExclusive(&native_private_gate);
+    }
+    return copied;
 }
 static void native_memory_crypto_span_pending(NativeHostCryptoSpan *span){
     if(!span)return;

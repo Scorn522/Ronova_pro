@@ -1,5 +1,21 @@
 # Ronova Pro 当前进度
 
+## 2026-10-17：C 接续——异步完成与私有请求状态
+
+接续 `91b1eab`，仅主工程 `D:\桌面\ronova_GPT`。Java105 / Native97 / Object SDK3（保留1/2）/ SourceMapBridge2 / Storage3 / Journal6，协议 `r3-client-8`。整包写齐后统一构建。
+
+补入 GetOverlappedResult/Ex、CancelIoEx、IOCP 创建/单次与批量取回/人工投递、完成通知模式共8个实际 Host 入口。已观察 Heap OVERLAPPED 使用内核消费的私有副本，绑定真实文件对象、分配代次及本次请求；公开 Internal、人工 Post 和取消成功均不赋予完成权。真实终态才回写 InternalHigh/Internal 并一次归还准确缓冲区、状态块及句柄使用，提交尚未返回时不提前结清。查询、取消和实际端口消费者核对当前真实调用图像及完整来源，不借深层 Core 帧。
+
+IOCP 保存实际端口对象和文件首次 key，沿成功结果累积通知模式。内核私有指针只在私有临时输出中读取，返回原公开 OVERLAPPED；迟到旧 packet 不结清同地址新请求，人工公开 packet 不释放存储。等待不持 ledger 锁或长期复制端口句柄，保留原关闭唤醒、超时、失败完成及 Win32/CRT 错误状态。线程池收尾只检查本次私有请求，不扫描 JVM 或替用户消费端口。
+
+统一构建 `build-c-java105-native97-async-final-20261017.log` **PASS，15秒**，本包 Java/Native 检查入口编译退出0。初次并行夹具编译遇输出目录未创建，脚本自行创建后通过；初次构建和运行脚本将普通 stderr 提示当异常，按真实退出码处理后继续，原中断记录保留。没有因旧编译警告扩大修改范围。
+
+`c-java105-native97-core-async-final-20261017.log` **退出0，正常 JVM 结束**：真实 named Core 使用本包生产 ProMod/ProRuntime 启动绑定，不供给 owner/image/producer 元数据；不同 system-loader 实际 DLL 的完成查询与取消均拒绝，深层 Core 帧没有借权。实际8MiB写、带16字节偏移的读和取消候选读共观察3次 ERROR_IO_PENDING；GetOverlappedResult/Ex、IOCP 原公开指针/key/count、人工 Post 原值、真实 alias、通知模式、空队列 timeout、控制输出前拒绝且 VM 槽/count/OVERLAPPED 不变、最终 HeapFree/Close/HeapDestroy 与原回滚均通过，Java 原文件字节保留。
+
+本次内核完成快于后续探测，`held_probes=0`、`completed_before_probe=2`、`public_Internal_CAS=0`，没有实测仍挂起时的公开状态伪造/提前释放拒绝；首代需要真实 dequeue，旧 packet 跨代场景 **NOT_OBSERVED**。取消候选实际自然完成，真实 ERROR_OPERATION_ABORTED 场景未出现；没有把取消请求当作完成。只跑新增异步路径，没有重跑旧 CNG/C++/Storage 矩阵或完整游戏。
+
+候选为 `distribution/candidate-c-java105-native97-async-state-wip-20261017` 的匹配双 JAR，随源码同步 GitHub。未观察的栈/Java OVERLAPPED 保留原调用，真实 pending 继续未决；任意原始调用、CPU 私有字段语义和未适配 C++ 对象没有被推定覆盖。完整游戏进服、同存档重启未运行，完整 C/B 未标完成。
+
 ## 2026-10-17：C 接续——KTM/TxF 句柄与事务文件私有状态
 
 接续 `77d122f`，仅主工程 `D:\桌面\ronova_GPT`。Java105 / Native96 / Object SDK3（保留1/2）/ SourceMapBridge2 / Storage3 / Journal6，协议 `r3-client-8`。整包源码写齐后统一构建。

@@ -2720,6 +2720,219 @@ done:
     fprintf(stdout,"HOST_TRANSACTION_PASS actual_KtmW32_kernel32 IAT_and_exact_GPA actual_GUID_Open_query_alias failed_async_original_access_error query_reconciles_active foreign_image_known_transaction_mutation_refused observed_Heap_IO_buffers synchronous_write_seek_readback_truncate_flush file_alias_shared_position protected_ReadFile_output_refused_without_position_change original_CloseSource_duplicate original_alias_close synchronous_Rollback_shared_outcome no_commit_permit_bypass\n");
     fflush(stdout);return JNI_TRUE;
 }
+typedef BOOL (WINAPI *LoadTxResult)(HANDLE,LPOVERLAPPED,LPDWORD,BOOL);
+typedef BOOL (WINAPI *LoadTxResultEx)(HANDLE,LPOVERLAPPED,LPDWORD,DWORD,BOOL);
+typedef BOOL (WINAPI *LoadTxCancel)(HANDLE,LPOVERLAPPED);
+typedef HANDLE (WINAPI *LoadTxPort)(HANDLE,HANDLE,ULONG_PTR,DWORD);
+typedef BOOL (WINAPI *LoadTxQueue)(HANDLE,LPDWORD,PULONG_PTR,LPOVERLAPPED*,DWORD);
+typedef BOOL (WINAPI *LoadTxQueueEx)(HANDLE,LPOVERLAPPED_ENTRY,ULONG,PULONG,DWORD,BOOL);
+typedef BOOL (WINAPI *LoadTxPost)(HANDLE,DWORD,ULONG_PTR,LPOVERLAPPED);
+typedef BOOL (WINAPI *LoadTxNotify)(HANDLE,UCHAR);
+extern LoadTxResult __imp_GetOverlappedResult;
+extern LoadTxCancel __imp_CancelIoEx;
+extern LoadTxPort __imp_CreateIoCompletionPort;
+extern LoadTxQueue __imp_GetQueuedCompletionStatus;
+extern LoadTxPost __imp_PostQueuedCompletionStatus;
+extern LoadTxNotify __imp_SetFileCompletionNotificationModes;
+JNIEXPORT jboolean JNICALL Java_dev_ronova_pro_AuditFixCheck_hostTransactionAsyncForeign0(JNIEnv *env,jclass check,jlong file,jlong overlapped){
+    (void)check;
+    if(!file||!overlapped||!load_private_entry((void*)__imp_GetOverlappedResult)||!load_private_entry((void*)__imp_CancelIoEx))
+        return load_thread_fail(env,"TX_ASYNC_FOREIGN_ACTUAL_IAT_REQUIRED")?JNI_TRUE:JNI_FALSE;
+    DWORD count=0x524e4153;SetLastError(0);
+    BOOL result=GetOverlappedResult((HANDLE)(uintptr_t)file,(LPOVERLAPPED)(uintptr_t)overlapped,&count,FALSE);DWORD error=GetLastError();
+    if(result||error!=ERROR_ACCESS_DENIED||count!=0x524e4153)
+        return load_thread_fail(env,"TX_ASYNC_FOREIGN_KNOWN_COMPLETION_ADMITTED")?JNI_TRUE:JNI_FALSE;
+    SetLastError(0);result=CancelIoEx((HANDLE)(uintptr_t)file,(LPOVERLAPPED)(uintptr_t)overlapped);error=GetLastError();
+    if(result||error!=ERROR_ACCESS_DENIED)
+        return load_thread_fail(env,"TX_ASYNC_FOREIGN_KNOWN_CANCEL_ADMITTED")?JNI_TRUE:JNI_FALSE;
+    fprintf(stdout,"HOST_TRANSACTION_ASYNC_FOREIGN_PASS actual_distinct_image known_completion_and_cancel_refused deep_Core_frame_grants_no_role\n");
+    fflush(stdout);return JNI_TRUE;
+}
+/* A pending return can race actual completion. Successful free is accepted only
+ * when a real nowait result already proves that this request is terminal. */
+static int load_tx_async_buffer_probe(HANDLE heap,BYTE **buffer,HANDLE file,LPOVERLAPPED op,
+        LoadTxResult result,DWORD expected,int allowCancelled,DWORD *error){
+    if(!HeapFree(heap,0,*buffer))return 1;
+    *buffer=NULL;DWORD count=0;BOOL completed=result(file,op,&count,FALSE);*error=GetLastError();
+    if(completed&&count==expected)return 2;
+    if(!completed&&allowCancelled&&*error==ERROR_OPERATION_ABORTED)return 3;
+    return 0;
+}
+JNIEXPORT jboolean JNICALL Java_dev_ronova_pro_AuditFixCheck_hostTransactionAsync0(JNIEnv *env,jclass check,jstring tempFile){
+    const DWORD bytes=8u*1024u*1024u,readBytes=8u*1024u*1024u-16u,fakeBytes=0x524e4153;
+    const ULONG_PTR key=(ULONG_PTR)UINT64_C(0x524f4e4f5641494f),sentinelKey=(ULONG_PTR)UINT64_C(0x53454e54494e454c);
+    HANDLE transaction=INVALID_HANDLE_VALUE,file=INVALID_HANDLE_VALUE,port=NULL,portAlias=NULL,heap=NULL,eventA=NULL,eventB=NULL;
+    BYTE *input=NULL,*output=NULL;OVERLAPPED *opA=NULL,*opB=NULL;wchar_t *path=NULL;const char *failure=NULL;DWORD error=0;
+    unsigned pendingStarts=0,heldProbes=0,completedBeforeProbe=0,forgedInternal=0,incomplete=0,oldAcrossGeneration=0;
+    int activeA=0,activeB=0,seedPacketQueued=0,cancelled=0,rolledBack=0;unsigned generationA=0;
+    LoadTxResult result=NULL;LoadTxResultEx resultEx=NULL;LoadTxCancel cancel=NULL;LoadTxQueue queue=NULL;
+    LoadTxQueueEx queueEx=NULL;LoadTxPost post=NULL;LoadTxRollback rollback=NULL;LoadMemoryTarget protectedOutput={0};int protectedObserved=0;
+    if((*env)->ExceptionCheck(env))return JNI_FALSE;
+    HMODULE kernel=GetModuleHandleW(L"kernel32.dll"),ktm=GetModuleHandleW(L"KtmW32.dll");
+    if(!tempFile||!kernel||!ktm){failure="TX_ASYNC_ACTUAL_PATH_AND_PROVIDERS";goto done;}
+    jsize length=(*env)->GetStringLength(env,tempFile);
+    if(length<=0||length>=32767||(path=(wchar_t*)calloc((size_t)length+1,sizeof(*path)))==NULL){failure="TX_ASYNC_ACTUAL_PATH_STORAGE";goto done;}
+    (*env)->GetStringRegion(env,tempFile,0,length,(jchar*)path);if((*env)->ExceptionCheck(env))goto done;
+    const char *names[]={"GetOverlappedResult","GetOverlappedResultEx","CancelIoEx","CreateIoCompletionPort",
+        "GetQueuedCompletionStatus","GetQueuedCompletionStatusEx","PostQueuedCompletionStatus","SetFileCompletionNotificationModes"};
+    void *entries[8]={0};
+    for(unsigned i=0;i<8;i++){entries[i]=(void*)GetProcAddress(kernel,names[i]);
+        if(!load_private_entry(entries[i])){failure="TX_ASYNC_EIGHT_EXACT_GPA_NOT_CONTROLLED";goto done;}}
+    void *imports[]={(void*)__imp_GetOverlappedResult,(void*)__imp_CancelIoEx,(void*)__imp_CreateIoCompletionPort,
+        (void*)__imp_GetQueuedCompletionStatus,(void*)__imp_PostQueuedCompletionStatus,(void*)__imp_SetFileCompletionNotificationModes,
+        (void*)__imp_ReadFile,(void*)__imp_WriteFile,(void*)__imp_CreateTransaction,(void*)__imp_CloseHandle};
+    for(unsigned i=0;i<sizeof(imports)/sizeof(imports[0]);i++)if(!load_private_entry(imports[i])){
+        failure="TX_ASYNC_ACTUAL_IAT_NOT_CONTROLLED";goto done;}
+    result=(LoadTxResult)entries[0];resultEx=(LoadTxResultEx)entries[1];cancel=(LoadTxCancel)entries[2];
+    LoadTxPort createPort=(LoadTxPort)entries[3];queue=(LoadTxQueue)entries[4];queueEx=(LoadTxQueueEx)entries[5];post=(LoadTxPost)entries[6];
+    LoadTxFile createFile=(LoadTxFile)GetProcAddress(kernel,"CreateFileTransactedW");rollback=(LoadTxRollback)GetProcAddress(ktm,"RollbackTransaction");
+    if(!load_private_entry((void*)createFile)||!load_private_entry((void*)rollback)){failure="TX_ASYNC_ACTUAL_FILE_AND_ROLLBACK_GPA";goto done;}
+    JavaVM *vm=NULL;
+    if((*env)->GetJavaVM(env,&vm)!=JNI_OK||!vm||!*vm
+            ||!load_memory_target(&protectedOutput,(void*)&(*vm)->GetEnv,sizeof((*vm)->GetEnv),MEM_PRIVATE,(void*)*vm)){
+        failure="TX_ASYNC_ACTUAL_CONTROL_OUTPUT";goto done;}
+    protectedObserved=1;
+    heap=HeapCreate(0,0,0);
+    if(heap){input=(BYTE*)HeapAlloc(heap,0,bytes);output=(BYTE*)HeapAlloc(heap,0,bytes);
+        opA=(OVERLAPPED*)HeapAlloc(heap,HEAP_ZERO_MEMORY,sizeof(*opA));opB=(OVERLAPPED*)HeapAlloc(heap,HEAP_ZERO_MEMORY,sizeof(*opB));}
+    eventA=CreateEventW(NULL,TRUE,FALSE,NULL);eventB=CreateEventW(NULL,TRUE,FALSE,NULL);
+    if(!input||!output||!opA||!opB||!eventA||!eventB){failure="TX_ASYNC_ACTUAL_HEAP_BUFFERS_OV_AND_MANUAL_EVENTS";goto done;}
+    for(DWORD i=0;i<bytes;i++)input[i]=(BYTE)(17u+37u*i);memcpy(input,protectedOutput.before,protectedOutput.bytes);
+    memset(output,0xa5,bytes);opA->hEvent=eventA;opB->hEvent=eventB;
+    transaction=CreateTransaction(NULL,NULL,0,0,0,30000,L"Ronova actual Core asynchronous rollback fixture");
+    if(transaction==INVALID_HANDLE_VALUE){failure="TX_ASYNC_ORIGINAL_CREATE";goto done;}
+    file=createFile(path,GENERIC_READ|GENERIC_WRITE,0,NULL,OPEN_EXISTING,FILE_ATTRIBUTE_NORMAL|FILE_FLAG_OVERLAPPED,NULL,transaction,NULL,NULL);
+    if(file==INVALID_HANDLE_VALUE){failure="TX_ASYNC_ORIGINAL_OVERLAPPED_FILE";goto done;}
+    port=CreateIoCompletionPort(INVALID_HANDLE_VALUE,NULL,0,1);
+    if(!port||!DuplicateHandle(GetCurrentProcess(),port,GetCurrentProcess(),&portAlias,0,FALSE,DUPLICATE_SAME_ACCESS)
+            ||createPort(file,port,key,0)!=port||!SetFileCompletionNotificationModes(file,FILE_SKIP_SET_EVENT_ON_HANDLE)){
+        failure="TX_ASYNC_REAL_IOCP_ALIAS_ASSOCIATION_AND_NOTIFICATION";goto done;}
+    if(!PostQueuedCompletionStatus(portAlias,fakeBytes,sentinelKey,opA)){failure="TX_ASYNC_ORIGINAL_SENTINEL_POST";goto done;}
+    OVERLAPPED_ENTRY packet={0};ULONG removed=0;
+    if(!queueEx(port,&packet,1,&removed,5000,FALSE)||removed!=1||packet.lpOverlapped!=opA
+            ||packet.dwNumberOfBytesTransferred!=fakeBytes||packet.lpCompletionKey!=sentinelKey){
+        failure="TX_ASYNC_SENTINEL_ORIGINAL_PUBLIC_VALUES";goto done;}
+    DWORD count=0;SetLastError(0);BOOL started=WriteFile(file,input,bytes,&count,opA);error=GetLastError();
+    if(!started&&error!=ERROR_IO_PENDING){failure="TX_ASYNC_ORIGINAL_LARGE_WRITE";goto done;}
+    activeA=1;generationA=1;seedPacketQueued=1;if(!started)pendingStarts++;
+    jmethodID foreign=(*env)->GetStaticMethodID(env,check,"hostTransactionAsyncForeign","(JJ)Z");
+    if(!foreign||!(*env)->CallStaticBooleanMethod(env,check,foreign,(jlong)(uintptr_t)file,(jlong)(uintptr_t)opA)||(*env)->ExceptionCheck(env)){
+        failure="TX_ASYNC_ACTUAL_FOREIGN_COMPLETION_CANCEL";goto done;}
+    /* IOCP can defer the status-block update until dequeue. Never wait here
+     * for a result that requires this same thread to dequeue its packet. */
+    count=0;BOOL completed=resultEx(file,opA,&count,0,FALSE);error=GetLastError();
+    if(completed&&count!=bytes){failure="TX_ASYNC_ORIGINAL_WRITE_RESULT_COUNT";goto done;}
+    if(completed&&started)activeA=0;
+    else {
+        if(!completed){if(error!=ERROR_IO_INCOMPLETE&&error!=WAIT_TIMEOUT){failure="TX_ASYNC_ORIGINAL_WRITE_NOWAIT_RESULT";goto done;}incomplete++;}
+        DWORD got=0;ULONG_PTR gotKey=0;LPOVERLAPPED gotOp=NULL;
+        if(!GetQueuedCompletionStatus(portAlias,&got,&gotKey,&gotOp,10000)||gotOp!=opA||gotKey!=key||got!=bytes){
+            failure="TX_ASYNC_ORIGINAL_WRITE_REAL_PACKET";goto done;}
+        seedPacketQueued=0;activeA=0;
+        if(!resultEx(file,opA,&count,0,FALSE)||count!=bytes){failure="TX_ASYNC_WRITE_RESULT_AFTER_PACKET";goto done;}
+    }
+    OVERLAPPED before=*opB;count=0x524e4153;SetLastError(0);
+    BOOL admitted=ReadFile(file,protectedOutput.address,(DWORD)protectedOutput.bytes,&count,opB);error=GetLastError();
+    if(admitted||error!=ERROR_ACCESS_DENIED||count!=0x524e4153||memcmp(&before,opB,sizeof(before))||!load_memory_unchanged(&protectedOutput)){
+        failure="TX_ASYNC_PROTECTED_OUTPUT_CHANGED_OR_ORIGINAL_ISSUED";goto done;}
+    memset(opA,0,sizeof(*opA));opA->hEvent=eventA;opA->Offset=16;ResetEvent(eventA);
+    count=0;SetLastError(0);started=ReadFile(file,output,readBytes,&count,opA);error=GetLastError();
+    if(!started&&error!=ERROR_IO_PENDING){failure="TX_ASYNC_ORIGINAL_REUSED_OV_READ";goto done;}
+    activeA=1;generationA=2;int readPending=!started;if(readPending)pendingStarts++;
+    if(seedPacketQueued){
+        DWORD got=0;ULONG_PTR gotKey=0;LPOVERLAPPED gotOp=NULL;
+        if(!queue(portAlias,&got,&gotKey,&gotOp,10000)||gotOp!=opA||gotKey!=key||got!=bytes
+                ||opA->Offset!=16||opA->OffsetHigh||opA->hEvent!=eventA){
+            failure="TX_ASYNC_OLD_PACKET_RETIRED_OR_OVERWROTE_NEW_GENERATION";goto done;}
+        seedPacketQueued=0;oldAcrossGeneration=1;
+    }
+    if(readPending){
+        // Do not overwrite a status that the real completion already published.
+        if(InterlockedCompareExchange64((volatile LONG64*)&opA->Internal,0,STATUS_PENDING)==STATUS_PENDING)forgedInternal++;
+        int probe=load_tx_async_buffer_probe(heap,&output,file,opA,result,readBytes,0,&error);
+        if(!probe){failure="TX_ASYNC_PUBLIC_STATUS_OR_OLD_PACKET_RELEASED_STILL_PENDING_BUFFER";goto done;}
+        if(probe==1)heldProbes++;else {completedBeforeProbe++;activeA=0;}
+        count=0;completed=result(file,opA,&count,FALSE);error=GetLastError();
+        if(completed){if(count!=readBytes){failure="TX_ASYNC_FORGED_PUBLIC_INTERNAL_BECAME_RESULT";goto done;}activeA=0;}
+        else if(error==ERROR_IO_INCOMPLETE||error==WAIT_TIMEOUT)incomplete++;
+        else {failure="TX_ASYNC_REUSED_OV_NOWAIT_RESULT";goto done;}
+        if(!post(portAlias,fakeBytes,key,opA)){failure="TX_ASYNC_PUBLIC_OV_FAKE_POST";goto done;}
+    }
+    int sawRead=0,sawFake=!readPending;
+    for(unsigned i=0;i<(readPending?2u:1u);i++){
+        memset(&packet,0,sizeof(packet));removed=0;
+        if(!queueEx(port,&packet,1,&removed,10000,FALSE)||removed!=1||packet.lpOverlapped!=opA||packet.lpCompletionKey!=key){
+            failure="TX_ASYNC_REUSED_OV_REAL_OR_PUBLIC_POST_PACKET";goto done;}
+        if(packet.dwNumberOfBytesTransferred==fakeBytes&&!sawFake){
+            sawFake=1;
+            if(activeA&&output){int probe=load_tx_async_buffer_probe(heap,&output,file,opA,result,readBytes,0,&error);
+                if(!probe){failure="TX_ASYNC_PUBLIC_POST_RELEASED_STILL_PENDING_BUFFER";goto done;}
+                if(probe==1)heldProbes++;else {completedBeforeProbe++;activeA=0;}}
+        }else if(packet.dwNumberOfBytesTransferred==readBytes&&!sawRead){sawRead=1;activeA=0;}
+        else {failure="TX_ASYNC_PACKET_COUNT_OR_GENERATION_CHANGED";goto done;}
+    }
+    count=0;
+    if(!sawRead||!sawFake||!resultEx(file,opA,&count,0,FALSE)||count!=readBytes||output&&memcmp(output,input+16,readBytes)){
+        failure="TX_ASYNC_REAL_READ_COMPLETION_OR_BYTES";goto done;}
+    if(!output)output=(BYTE*)HeapAlloc(heap,0,bytes);
+    if(!output){failure="TX_ASYNC_CANCEL_ACTUAL_OUTPUT_STORAGE";goto done;}
+    memset(opB,0,sizeof(*opB));opB->hEvent=eventB;ResetEvent(eventB);count=0;SetLastError(0);
+    started=ReadFile(file,output,bytes,&count,opB);error=GetLastError();
+    if(!started&&error!=ERROR_IO_PENDING){failure="TX_ASYNC_ORIGINAL_CANCEL_CANDIDATE_READ";goto done;}
+    activeB=1;int cancelPending=!started;if(cancelPending)pendingStarts++;
+    SetLastError(0);BOOL requested=cancel(file,opB);DWORD cancelError=GetLastError();
+    if(!requested&&cancelError!=ERROR_NOT_FOUND){failure="TX_ASYNC_ORIGINAL_CANCEL_REQUEST";goto done;}
+    if(cancelPending){int probe=load_tx_async_buffer_probe(heap,&output,file,opB,result,bytes,1,&error);
+        if(!probe){failure="TX_ASYNC_CANCEL_REQUEST_RELEASED_STILL_PENDING_BUFFER";goto done;}
+        if(probe==1)heldProbes++;else {completedBeforeProbe++;activeB=0;if(probe==3)cancelled=1;}}
+    DWORD got=0;ULONG_PTR gotKey=0;LPOVERLAPPED gotOp=NULL;SetLastError(0);
+    BOOL dequeued=queue(portAlias,&got,&gotKey,&gotOp,10000);error=GetLastError();
+    if(gotOp!=opB||gotKey!=key||!dequeued&&error!=ERROR_OPERATION_ABORTED||dequeued&&got!=bytes){
+        failure="TX_ASYNC_CANCEL_REAL_PACKET_PUBLIC_RESULT";goto done;}
+    activeB=0;cancelled=!dequeued;count=0;SetLastError(0);completed=resultEx(file,opB,&count,0,FALSE);error=GetLastError();
+    if(cancelled?completed||error!=ERROR_OPERATION_ABORTED:!completed||count!=bytes||output&&memcmp(output,input,bytes)){
+        failure="TX_ASYNC_CANCEL_RESULT_DID_NOT_MATCH_REAL_PACKET";goto done;}
+    gotOp=(LPOVERLAPPED)(uintptr_t)1;SetLastError(0);
+    if(queue(port,&got,&gotKey,&gotOp,0)||GetLastError()!=WAIT_TIMEOUT||gotOp!=NULL){failure="TX_ASYNC_EMPTY_QUEUE_TIMEOUT_BECAME_COMPLETION";goto done;}
+done:
+    error=GetLastError();
+    if((activeA||activeB)&&file!=INVALID_HANDLE_VALUE&&cancel){
+        if(activeA&&opA)cancel(file,opA);if(activeB&&opB)cancel(file,opB);
+        // Bounded real dequeues only. Unresolved work retains its actual storage.
+        for(unsigned i=0;i<6&&(activeA||activeB)&&queue&&port;i++){
+            DWORD ignored=0;ULONG_PTR ignoredKey=0;LPOVERLAPPED ignoredOp=NULL;queue(port,&ignored,&ignoredKey,&ignoredOp,1000);
+            if(activeA&&opA){DWORD actual=0;BOOL ready=resultEx(file,opA,&actual,0,FALSE);DWORD why=GetLastError();
+                if(ready||why==ERROR_OPERATION_ABORTED)activeA=0;}
+            if(activeB&&opB){DWORD actual=0;BOOL ready=resultEx(file,opB,&actual,0,FALSE);DWORD why=GetLastError();
+                if(ready||why==ERROR_OPERATION_ABORTED)activeB=0;}
+        }
+    }
+    if(!activeA&&!activeB){
+        if(file!=INVALID_HANDLE_VALUE){if(CloseHandle(file))file=INVALID_HANDLE_VALUE;else if(!failure){failure="TX_ASYNC_COMPLETED_FILE_CLOSE_BUSY";error=GetLastError();}}
+        if(portAlias&&!CloseHandle(portAlias)&&!failure){failure="TX_ASYNC_COMPLETED_PORT_ALIAS_CLOSE";error=GetLastError();}
+        if(port&&!CloseHandle(port)&&!failure){failure="TX_ASYNC_COMPLETED_PORT_CLOSE";error=GetLastError();}
+        if(file==INVALID_HANDLE_VALUE&&transaction!=INVALID_HANDLE_VALUE&&rollback){
+            if(rollback(transaction))rolledBack=1;else if(!failure){failure="TX_ASYNC_ORIGINAL_ROLLBACK";error=GetLastError();}}
+        if(transaction!=INVALID_HANDLE_VALUE&&!CloseHandle(transaction)&&!failure){failure="TX_ASYNC_ORIGINAL_TRANSACTION_CLOSE";error=GetLastError();}
+        if(input){if(HeapFree(heap,0,input))input=NULL;else if(!failure){failure="TX_ASYNC_COMPLETED_INPUT_FREE_BUSY";error=GetLastError();}}
+        if(output){if(HeapFree(heap,0,output))output=NULL;else if(!failure){failure="TX_ASYNC_COMPLETED_OUTPUT_FREE_BUSY";error=GetLastError();}}
+        if(opA){if(HeapFree(heap,0,opA))opA=NULL;else if(!failure){failure="TX_ASYNC_COMPLETED_OV_A_FREE_BUSY";error=GetLastError();}}
+        if(opB){if(HeapFree(heap,0,opB))opB=NULL;else if(!failure){failure="TX_ASYNC_COMPLETED_OV_B_FREE_BUSY";error=GetLastError();}}
+        if(eventA&&!CloseHandle(eventA)&&!failure){failure="TX_ASYNC_EVENT_A_CLOSE";error=GetLastError();}
+        if(eventB&&!CloseHandle(eventB)&&!failure){failure="TX_ASYNC_EVENT_B_CLOSE";error=GetLastError();}
+        if(heap&&!input&&!output&&!opA&&!opB&&!HeapDestroy(heap)&&!failure){failure="TX_ASYNC_ACTUAL_HEAP_DESTROY";error=GetLastError();}
+    }else if(!failure)failure="TX_ASYNC_REAL_COMPLETION_STILL_UNRESOLVED";
+    free(path);
+    if(protectedObserved&&!load_memory_unchanged(&protectedOutput)){fprintf(stderr,"HOST_TRANSACTION_ASYNC_FAILED control_output_changed\n");fflush(stderr);return JNI_FALSE;}
+    if((*env)->ExceptionCheck(env)&&!failure)failure="TX_ASYNC_UNEXPECTED_JNI_EXCEPTION";
+    if(!failure&&!rolledBack)failure="TX_ASYNC_ORIGINAL_ROLLBACK_NOT_COMPLETED";
+    if(failure){fprintf(stderr,"HOST_TRANSACTION_ASYNC_FAILED stage=%s win32=%lu activeA=%d activeB=%d generationA=%u seedPacket=%d\n",
+            failure,(unsigned long)error,activeA,activeB,generationA,seedPacketQueued);return load_thread_fail(env,failure)?JNI_TRUE:JNI_FALSE;}
+    fprintf(stdout,"HOST_TRANSACTION_ASYNC_PASS actual_Core_TxF_Heap_public_OV_private_system_completion IAT_exact_eight_GPA manual_events_IOCP_alias original_public_packet_values protected_output_foreign_completion_cancel_refused actual_8MiB_write_read_cancel rollback original_free_close pending_starts=%u held_probes=%u completed_before_probe=%u public_Internal_CAS=%u incomplete_or_timeout=%u old_packet_cross_generation=%s actual_cancel=%s pending_evidence=%s\n",
+            pendingStarts,heldProbes,completedBeforeProbe,forgedInternal,incomplete,oldAcrossGeneration?"observed":"not_observed_first_generation_required_dequeue",
+            cancelled?"operation_aborted":"completed_normally",pendingStarts?"actual_IO_PENDING_return":"pending_not_observed");
+    fflush(stdout);return JNI_TRUE;
+}
 JNIEXPORT void JNICALL Java_dev_ronova_pro_AuditFixCheck_hostWin32Allocations0(JNIEnv *env,jclass check){
     (void)check;load_win32_allocation_check(env);
 }

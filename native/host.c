@@ -61,7 +61,10 @@ enum {
     HOST_TX_CREATE=130,HOST_TX_OPEN=131,HOST_TX_COMMIT=132,HOST_TX_ROLLBACK=133,
     HOST_TX_ID=134,HOST_TX_INFO=135,HOST_TX_SET_INFO=136,HOST_TX_COMMIT_ASYNC=137,HOST_TX_ROLLBACK_ASYNC=138,
     HOST_TX_FILE_W=139,HOST_TX_FILE_A=140,HOST_TX_READ=141,HOST_TX_WRITE=142,
-    HOST_TX_SEEK=143,HOST_TX_TRUNCATE=144,HOST_TX_FLUSH=145,HOST_KIND_COUNT=146
+    HOST_TX_SEEK=143,HOST_TX_TRUNCATE=144,HOST_TX_FLUSH=145,
+    HOST_TX_OVERLAPPED=146,HOST_TX_OVERLAPPED_EX=147,HOST_TX_CANCEL_IO=148,
+    HOST_TX_IOCP_CREATE=149,HOST_TX_IOCP_GET=150,HOST_TX_IOCP_GET_EX=151,
+    HOST_TX_IOCP_POST=152,HOST_TX_IOCP_NOTIFY=153,HOST_KIND_COUNT=154
 };
 static int host_is_create(int kind){return kind==HOST_CREATE_W||kind==HOST_CREATE_A
         ||kind>=HOST_CREATE_USER_W&&kind<=HOST_CREATE_LOGON_W;}
@@ -1110,8 +1113,10 @@ static uint64_t host_native_handle(HostImport *entry,void *caller,uintptr_t *arg
 #include "host_crypto.c"
 #include "host_transactions.c"
 #include "host_transaction_io.c"
+#include "host_completion_port.c"
 static int host_native_errors_required(int kind){
     return host_is_crypto(kind)||host_is_transaction(kind)||host_is_transaction_io(kind)
+            ||host_is_transaction_completion(kind)||host_is_completion_port(kind)
             ||kind==HOST_CLOSE||kind==HOST_DUPLICATE||kind==HOST_HANDLE_FLAGS;
 }
 static uint64_t host_native_failure(HostImport *entry,DWORD error,DWORD incoming,
@@ -1139,6 +1144,8 @@ static uint64_t host_native_dispatch(HostImport *entry,void *caller,uintptr_t *a
         uint64_t result=0;
         if((entry->kind==HOST_CLOSE||entry->kind==HOST_DUPLICATE||entry->kind==HOST_HANDLE_FLAGS)
                 &&host_transaction_handle(entry,caller,arguments,&result))return result;
+        if((entry->kind==HOST_CLOSE||entry->kind==HOST_DUPLICATE||entry->kind==HOST_HANDLE_FLAGS)
+                &&host_completion_port_handle(entry,caller,arguments,&result))return result;
         return host_native_handle(entry,caller,arguments);
     }
     if(host_is_module_load(entry->kind))return host_native_module_load(entry,caller,arguments);
@@ -1156,6 +1163,8 @@ static uint64_t host_native_dispatch(HostImport *entry,void *caller,uintptr_t *a
     if(host_is_crypto(entry->kind))return host_native_crypto(entry,caller,arguments);
     if(host_is_transaction(entry->kind))return host_native_transaction(entry,caller,arguments);
     if(host_is_transaction_io(entry->kind))return host_native_transaction_io(entry,caller,arguments);
+    if(host_is_transaction_completion(entry->kind))return host_native_transaction_completion(entry,caller,arguments);
+    if(host_is_completion_port(entry->kind))return host_native_completion_port(entry,caller,arguments);
     SetLastError(ERROR_INVALID_FUNCTION);return 0;
 }
 static uint64_t host_native_call_body(HostImport *entry,void *caller,uintptr_t *arguments){
@@ -1257,6 +1266,10 @@ static unsigned host_import_arguments(int kind){
         case HOST_TX_SET_INFO:case HOST_TX_READ:case HOST_TX_WRITE:return 5;
         case HOST_TX_FILE_W:case HOST_TX_FILE_A:return 10;
         case HOST_TX_SEEK:return 4;
+        case HOST_TX_OVERLAPPED:case HOST_TX_IOCP_CREATE:case HOST_TX_IOCP_POST:return 4;
+        case HOST_TX_OVERLAPPED_EX:case HOST_TX_IOCP_GET:return 5;
+        case HOST_TX_CANCEL_IO:case HOST_TX_IOCP_NOTIFY:return 2;
+        case HOST_TX_IOCP_GET_EX:return 6;
         case HOST_LOAD_LIBRARY_A:case HOST_LOAD_LIBRARY_W:return 1;
         case HOST_LOAD_LIBRARY_EX_A:case HOST_LOAD_LIBRARY_EX_W:return 3;
         case HOST_WRITE_PROCESS_MEMORY:case HOST_VIRTUAL_PROTECT_EX:case HOST_READ_PROCESS_MEMORY:return 5;
@@ -1370,7 +1383,9 @@ static const char *host_api_names[HOST_KIND_COUNT]={NULL,"CreateProcessW","GetPr
         "BCryptOpenAlgorithmProvider","BCryptCreateHash","BCryptHashData","BCryptFinishHash","BCryptDestroyHash","BCryptCloseAlgorithmProvider",
         "CreateTransaction","OpenTransaction","CommitTransaction","RollbackTransaction","GetTransactionId","GetTransactionInformation",
         "SetTransactionInformation","CommitTransactionAsync","RollbackTransactionAsync","CreateFileTransactedW","CreateFileTransactedA",
-        "ReadFile","WriteFile","SetFilePointerEx","SetEndOfFile","FlushFileBuffers"};
+        "ReadFile","WriteFile","SetFilePointerEx","SetEndOfFile","FlushFileBuffers",
+        "GetOverlappedResult","GetOverlappedResultEx","CancelIoEx","CreateIoCompletionPort",
+        "GetQueuedCompletionStatus","GetQueuedCompletionStatusEx","PostQueuedCompletionStatus","SetFileCompletionNotificationModes"};
 static void host_windows_targets(void **targets){
     host_memory_prepare();
     HMODULE kernel=GetModuleHandleW(L"kernel32.dll"),advapi=GetModuleHandleW(L"advapi32.dll"),bcrypt=GetModuleHandleW(L"bcrypt.dll"),

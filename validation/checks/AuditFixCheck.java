@@ -19,6 +19,10 @@ public final class AuditFixCheck {
             System.load(java.nio.file.Path.of(System.getProperty("ronova.pro.audit.thread.native")).toAbsolutePath().toString());
             hostTransactionState();return;
         }
+        if(args.length==1&&args[0].equals("core-native-async")){
+            System.load(java.nio.file.Path.of(System.getProperty("ronova.pro.audit.thread.native")).toAbsolutePath().toString());
+            hostTransactionAsync();return;
+        }
         if(args.length==1&&args[0].equals("core-native-consumers")){
             hostThreadCreate();require(hostCngHash0(),"actual BCrypt lifecycle failed");hostTransactionState();storageNative();return;
         }
@@ -968,11 +972,19 @@ public final class AuditFixCheck {
     private static native boolean hostCngHash0();
     private static native boolean hostTransactionState0(String tempFile);
     private static native boolean hostTransactionForeign0(long actual);
+    private static native boolean hostTransactionAsync0(String tempFile);
+    private static native boolean hostTransactionAsyncForeign0(long file,long overlapped);
     private static boolean hostTransactionForeign(long actual)throws Exception {
         Class<?> foreign=Class.forName(AuditFixCheck.class.getName(),true,ClassLoader.getSystemClassLoader());
         require(foreign!=AuditFixCheck.class,"transaction foreign caller must use the actual system-loader image");
         var call=foreign.getDeclaredMethod("hostTransactionForeign0",long.class);call.setAccessible(true);
         return Boolean.TRUE.equals(call.invoke(null,actual));
+    }
+    private static boolean hostTransactionAsyncForeign(long file,long overlapped)throws Exception {
+        Class<?> foreign=Class.forName(AuditFixCheck.class.getName(),true,ClassLoader.getSystemClassLoader());
+        require(foreign!=AuditFixCheck.class,"asynchronous foreign caller must use the actual system-loader image");
+        var call=foreign.getDeclaredMethod("hostTransactionAsyncForeign0",long.class,long.class);call.setAccessible(true);
+        return Boolean.TRUE.equals(call.invoke(null,file,overlapped));
     }
     private static void hostTransactionState()throws Exception {
         var file=java.nio.file.Files.createTempFile("ronova-core-transaction-",".dat").toAbsolutePath();
@@ -983,6 +995,21 @@ public final class AuditFixCheck {
             require(Arrays.equals(original,java.nio.file.Files.readAllBytes(file)),"native transaction rollback changed the original file");
             System.out.println("HOST_TRANSACTION_FILE_PASS actual_Java_owned_temp_path original_bytes_preserved_after_native_rollback");
         } finally {java.nio.file.Files.deleteIfExists(file);}
+    }
+    private static void hostTransactionAsync()throws Exception {
+        var file=java.nio.file.Files.createTempFile("ronova-core-async-",".dat").toAbsolutePath();
+        byte[] original="Ronova actual Core asynchronous transaction: rollback preserves these original bytes.\n".getBytes(java.nio.charset.StandardCharsets.UTF_8);
+        Throwable failed=null;
+        try {
+            java.nio.file.Files.write(file,original);
+            require(hostTransactionAsync0(file.toString()),"actual asynchronous KTM/TxF completion lifecycle failed");
+            require(Arrays.equals(original,java.nio.file.Files.readAllBytes(file)),"asynchronous native rollback changed the original file");
+            System.out.println("HOST_TRANSACTION_ASYNC_FILE_PASS actual_Java_owned_path original_bytes_preserved_after_native_rollback");
+        } catch(Exception|Error error){failed=error;throw error;}
+        finally {
+            try {java.nio.file.Files.deleteIfExists(file);}
+            catch(java.io.IOException cleanup){if(failed!=null)failed.addSuppressed(cleanup);else throw cleanup;}
+        }
     }
     private static void coreNativeState(String jar)throws Exception {
         var audit=java.nio.file.Path.of(System.getProperty("ronova.pro.audit.thread.native")).toAbsolutePath();
@@ -1010,10 +1037,12 @@ public final class AuditFixCheck {
         var producer=bridge.getDeclaredMethod("producer",Module.class);producer.setAccessible(true);
         require(Boolean.FALSE.equals(producer.invoke(null,module)),"Core was relabelled as an external producer");
         Class<?> actual=Class.forName(AuditFixCheck.class.getName(),true,loader);
-        boolean transactions=System.getProperty("ronova.pro.audit.thread.phase","").equals("transactions");
-        actual.getMethod("main",String[].class).invoke(null,(Object)new String[]{transactions?"core-native-transactions":"core-native-consumers"});
+        String phase=System.getProperty("ronova.pro.audit.thread.phase","");
+        boolean transactions=phase.equals("transactions"),async=phase.equals("async");
+        actual.getMethod("main",String[].class).invoke(null,(Object)new String[]{async?"core-native-async":transactions?"core-native-transactions":"core-native-consumers"});
         require(Boolean.FALSE.equals(producer.invoke(null,module)),"Native consumers changed Core producer identity");
-        System.out.println(transactions?"CORE_NATIVE_TRANSACTIONS_PASS actual_named_ProMod_ProRuntime startup_binding foreign_caller_refused original_transaction_lifetimes foreign_image_transaction_mutation_refused no_supplied_metadata"
+        System.out.println(async?"CORE_NATIVE_ASYNC_PASS actual_named_ProMod_ProRuntime startup_binding actual_file_heap_overlapped_IOCP original_completion_and_cancellation foreign_image_completion_cancel_refused no_supplied_metadata"
+                :transactions?"CORE_NATIVE_TRANSACTIONS_PASS actual_named_ProMod_ProRuntime startup_binding foreign_caller_refused original_transaction_lifetimes foreign_image_transaction_mutation_refused no_supplied_metadata"
                 :"CORE_NATIVE_STATE_PASS actual_named_ProMod_ProRuntime startup_binding foreign_caller_refused full_native_loader_binding SDK_receipts_nonzero no_supplied_owner_or_producer_rows original_crypto_transaction_and_storage_lifetimes foreign_image_transaction_mutation_refused");
     }
     private static final class HostThreadCreatePayload { }

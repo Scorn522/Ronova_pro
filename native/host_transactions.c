@@ -96,8 +96,9 @@ static void host_transaction_merge_group(HostTransactionGroup *group,const GUID 
     if(group->uncertain)InterlockedExchange(&other->uncertain,1);
     group->uses=group->pins=0;group->parent=other;
 }
-static void host_transaction_use_end(HostTransactionUse *use,OwnerLink *contributors,int uncertain){
-    if(!use)return;HostTransactionErrors saved=host_transaction_errors();int restricted=host_transaction_restricted();
+static int host_transaction_use_release(HostTransactionUse *use,OwnerLink *contributors,int uncertain,int completed){
+    if(!use)return 1;HostTransactionErrors saved=host_transaction_errors();int restricted=completed||host_transaction_restricted();
+    if(completed&&use->uncertain){host_transaction_restore(saved);return 0;}
     if(uncertain){
         use->uncertain=1;
         if(use->object)InterlockedExchange(&use->object->uncertain,1);
@@ -106,17 +107,17 @@ static void host_transaction_use_end(HostTransactionUse *use,OwnerLink *contribu
             if(group&&!native_owner_merge(&group->contributors,contributors))host_transaction_gap(NULL,1);
             ReleaseSRWLockExclusive(&host_transaction_records);
         }
-        host_transaction_gap(contributors,restricted);host_transaction_restore(saved);return;
+        host_transaction_gap(contributors,restricted);host_transaction_restore(saved);return 0;
     }
     HANDLE stable=__atomic_load_n(&use->stable,__ATOMIC_ACQUIRE);
     if(stable&&!host_real_close(stable)){
         use->uncertain=1;if(use->object)InterlockedExchange(&use->object->uncertain,1);
-        host_transaction_gap(contributors,restricted);host_transaction_restore(saved);return;
+        host_transaction_gap(contributors,restricted);host_transaction_restore(saved);return 0;
     }
     __atomic_store_n(&use->stable,NULL,__ATOMIC_RELEASE);
     if(!host_transaction_lock(restricted)){
-        use->uncertain=1;if(use->object)InterlockedExchange(&use->object->uncertain,1);
-        host_transaction_gap(contributors,restricted);host_transaction_restore(saved);return;
+        if(!completed){use->uncertain=1;if(use->object)InterlockedExchange(&use->object->uncertain,1);host_transaction_gap(contributors,restricted);}
+        host_transaction_restore(saved);return 0;
     }
     HostTransactionGroup *group=host_transaction_group(use->group);
     if(use->object&&!native_owner_merge(&use->object->contributors,contributors))InterlockedExchange(&use->object->uncertain,1);
@@ -125,7 +126,10 @@ static void host_transaction_use_end(HostTransactionUse *use,OwnerLink *contribu
     if(use->active){if(use->object&&use->object->uses)use->object->uses--;if(group&&group->uses)group->uses--;}
     if(use->closing){if(use->alias)use->alias->closing=0;if(use->object)use->object->closing=0;}
     HostTransactionUse **link=&host_transaction_uses;while(*link&&*link!=use)link=&(*link)->next;if(*link)*link=use->next;
-    ReleaseSRWLockExclusive(&host_transaction_records);free(use);host_transaction_restore(saved);
+    ReleaseSRWLockExclusive(&host_transaction_records);free(use);host_transaction_restore(saved);return 1;
+}
+static void host_transaction_use_end(HostTransactionUse *use,OwnerLink *contributors,int uncertain){
+    (void)host_transaction_use_release(use,contributors,uncertain,0);
 }
 static int host_transaction_sources(HostImport *entry,void *caller,OwnerLink **owners,int *unknown){
     NativeThread *state=native_tls==TLS_OUT_OF_INDEXES?NULL:(NativeThread*)TlsGetValue(native_tls);
@@ -173,6 +177,7 @@ static int host_transaction_use_begin(HostImport *entry,void *caller,HANDLE valu
     }
     NativeThread *state=native_tls==TLS_OUT_OF_INDEXES?NULL:(NativeThread*)TlsGetValue(native_tls);
     int eligible=native_state_caller_eligible(state,caller,*owners,*unknown);
+    int completion=entry->kind>=HOST_TX_OVERLAPPED&&entry->kind<=HOST_TX_CANCEL_IO;
     int cleanup=(entry->kind==HOST_CLOSE||entry->kind==HOST_TX_ROLLBACK)&&eligible&&host_memory_cleanup_scope(entry,state);
     if(!host_transaction_lock(restricted)){*error=ERROR_BUSY;host_transaction_use_end(use,NULL,0);return 0;}
     group=host_transaction_group(use->group);
@@ -182,9 +187,9 @@ static int host_transaction_use_begin(HostImport *entry,void *caller,HANDLE valu
     else if(row->uncertain||group&&group->uncertain)*error=ERROR_INVALID_DATA;
     else if((native_owner_stopped(*owners)||native_owner_stopped(row->owners)||native_owner_stopped(row->contributors)
             ||group&&(native_owner_stopped(group->owners)||native_owner_stopped(group->contributors)))&&!cleanup)*error=ERROR_ACCESS_DENIED;
-    else if(row->uses||row->pins!=1||group&&(group->uses||group->pins!=1))*error=ERROR_BUSY;
+    else if(!completion&&(row->uses||row->pins!=1||group&&(group->uses||group->pins!=1)))*error=ERROR_BUSY;
     else if(row->file&&entry->kind!=HOST_CLOSE&&entry->kind!=HOST_DUPLICATE&&entry->kind!=HOST_HANDLE_FLAGS
-            &&group&&(group->terminal||group->pending))*error=ERROR_TRANSACTION_NOT_ACTIVE;
+            &&!completion&&group&&(group->terminal||group->pending))*error=ERROR_TRANSACTION_NOT_ACTIVE;
     else if(!row->file&&group&&group->pending&&entry->kind!=HOST_TX_INFO&&entry->kind!=HOST_TX_ID
             &&entry->kind!=HOST_CLOSE&&entry->kind!=HOST_DUPLICATE&&entry->kind!=HOST_HANDLE_FLAGS)*error=ERROR_BUSY;
     else if((entry->kind==HOST_TX_FILE_W||entry->kind==HOST_TX_FILE_A)&&group&&group->terminal)*error=ERROR_TRANSACTION_NOT_ACTIVE;
@@ -196,6 +201,12 @@ static int host_transaction_io_begin(HostImport *entry,void *caller,HANDLE value
         HostTransactionUse **hold,DWORD *error){return host_transaction_use_begin(entry,caller,value,1,owners,unknown,hold,error);}
 static HANDLE host_transaction_io_handle(HostTransactionUse *hold,HANDLE original){return hold?hold->stable:original;}
 static void host_transaction_io_end(HostTransactionUse *hold,OwnerLink *contributors,int uncertain){host_transaction_use_end(hold,contributors,uncertain);}
+static int host_transaction_io_release(HostTransactionUse *hold,OwnerLink *contributors){return host_transaction_use_release(hold,contributors,0,1);}
+static void *host_transaction_file_identity(HostTransactionUse *hold,uint64_t *generation){
+    if(generation)*generation=0;
+    if(!hold||!hold->active||!hold->object||!hold->object->file)return NULL;
+    if(generation)*generation=hold->object->generation;return hold->object;
+}
 
 /* A read-only real query uses the same-access witness, never an escalated
  * handle. An Open with insufficient query access still contributes its actual
