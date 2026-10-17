@@ -66,6 +66,9 @@ typedef struct NativeThread {
     int storageOwned,vmAttached,javaEnded,javaCleaning;
     NativePrivateRange jniRange;
 } NativeThread;
+/* Actual dynamic TLS/FLS receipts are native state contributions, independent
+ * of whether this OS thread currently has a Java attachment. */
+static int host_tls_capture(NativeThread*,OwnerLink**,int*);
 static jvmtiEnv *native_ti;
 static JavaVM *native_vm;
 static struct JNIInvokeInterface_ native_vm_original;
@@ -231,9 +234,19 @@ static int native_caller_stopped(void *address){
     int stopped=!captured||native_owner_stopped(sources)!=NULL;native_owner_links_free(sources);
     return stopped;
 }
-static int native_stopped(JNIEnv *env){NativeThread *state=native_thread();if(!state)return 0;if(env)native_thread_jni_observed(state,env);for(unsigned i=0;i<state->depth;i++)if(native_owner_stopped(state->stack[i]->owners))return 1;for(NativeLibraryScope *scope=state->library;scope;scope=scope->previous)if(native_owner_stopped(scope->library->owners))return 1;for(NativeToolingScope *scope=state->tooling;scope;scope=scope->previous)if(native_owner_stopped(scope->owners))return 1;return code_current_stopped(env);}
+static int native_stopped(JNIEnv *env){
+    NativeThread *state=native_thread();OwnerLink *retained=NULL;
+    int captured=host_tls_capture(state,&retained,NULL),stopped=!captured||native_owner_stopped(retained)!=NULL;
+    native_owner_links_free(retained);if(stopped)return 1;
+    if(!state)return 0;if(env)native_thread_jni_observed(state,env);
+    for(unsigned i=0;i<state->depth;i++)if(native_owner_stopped(state->stack[i]->owners))return 1;
+    for(NativeLibraryScope *scope=state->library;scope;scope=scope->previous)if(native_owner_stopped(scope->library->owners))return 1;
+    for(NativeToolingScope *scope=state->tooling;scope;scope=scope->previous)if(native_owner_stopped(scope->owners))return 1;
+    return code_current_stopped(env);
+}
 static jweak native_origin(NativeThread *state){if(!state)return NULL;if(state->tooling&&state->depth<=state->tooling->depth&&state->tooling->origin)return state->tooling->origin;return state->depth?state->stack[state->depth-1]->origin:state->library?state->library->library->origin:NULL;}
 static int native_capture_scope_sources(JNIEnv *env,NativeThread *state,OwnerLink **owners,int *unknown){
+    if(!host_tls_capture(state,owners,unknown))return 0;
     if(!state)return 1;if(env)native_thread_jni_observed(state,env);for(unsigned i=0;i<state->depth;i++){if(!native_owner_merge(owners,state->stack[i]->owners))return 0;if(unknown&&state->stack[i]->hostUnknown)*unknown=1;}
     for(NativeRegistration *scope=state->registration;scope;scope=scope->previous){if(!native_owner_merge(owners,scope->owners))return 0;if(unknown&&scope->unknown)*unknown=1;}
     for(NativeLibraryScope *scope=state->library;scope;scope=scope->previous)if(!native_owner_merge(owners,scope->library->owners))return 0;for(NativeToolingScope *scope=state->tooling;scope;scope=scope->previous){if(!native_owner_merge(owners,scope->owners))return 0;if(scope->unknown&&unknown)*unknown=1;}return code_current_sources_query(env,owners,unknown);
@@ -1175,6 +1188,11 @@ typedef struct NativeToolingInvocation {
  * Their CPU data accesses cannot be reconstructed from an empty Binding stack. */
 static int native_private_execution_unknown(NativeThread *state){
     if(!state)return 0;
+    /* An actual restricted FLS callback has a retained tooling scope, without
+     * a JVMTI invocation record. Its source identities are still complete;
+     * only its native CPU data contribution is opaque. */
+    if(state->toolingRestricted)for(NativeToolingScope *scope=state->tooling;scope;scope=scope->previous)
+        if(native_has_producer(scope->owners))return 1;
     for(NativeToolingInvocation *call=state->toolingInvocation;call;call=call->previous)
         if(call->slot&&native_has_producer(call->slot->owners))return 1;
     if(state->hostWorker&&native_has_producer(state->hostWorker->owners))return 1;
@@ -1286,6 +1304,7 @@ static int native_tooling_load_borrow(NativeThread *state,OwnerLink *owners,void
 static int native_tooling_capture(JNIEnv *env,void *caller,OwnerLink **owners,jweak *origin,int *unknown){
     NativeThread *state=native_thread();int valid=host_module_capture(state,caller,owners,NULL,NULL,unknown)
             &&native_capture_image_owners(caller,owners);
+    if(!state||!native_jni_ready||!env)valid=valid&&host_tls_capture(state,owners,unknown);
     if(state){
         if(native_jni_ready&&env)valid=valid&&native_capture_scope_sources(env,state,owners,unknown);
         else {
@@ -1606,7 +1625,7 @@ static DWORD WINAPI native_tooling_retirement_worker(void *argument){
     (void)argument;JNIEnv *env=NULL;
     for(;;){
         DWORD workerWait=WaitForSingleObject(native_tooling_retirement_event,
-                host_thread_workers_pending()||host_module_exits_pending()||native_tooling_definitions_pending_any()?1000:INFINITE);
+                host_thread_workers_pending()||host_tls_pending()||host_module_exits_pending()||native_tooling_definitions_pending_any()?1000:INFINITE);
         if(workerWait!=WAIT_OBJECT_0&&workerWait!=WAIT_TIMEOUT)break;
         if(InterlockedCompareExchange(&native_tooling_shutdown,0,0))break;
         int definitionsReaped=0;
@@ -1617,6 +1636,7 @@ static DWORD WINAPI native_tooling_retirement_worker(void *argument){
             if(!native_tooling_retirement_jni(&env)){InterlockedIncrement(&native_tooling_failures);break;}
             host_module_releases_reap(&env);if(!env)break;
             host_thread_workers_reap(&env);if(!env)break;
+            host_tls_reap(&env);if(!env)break;
             host_module_loads_reap(&env);if(!env)break;
             if(!definitionsReaped){native_tooling_definitions_reap(env);definitionsReaped=1;
                 if(!native_tooling_retirement_jni(&env)){InterlockedIncrement(&native_tooling_failures);break;}}

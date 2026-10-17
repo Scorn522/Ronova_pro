@@ -49,7 +49,7 @@ public final class NativeControl {
                 if(dll==null)return installFailure("OBJECT_CLONE_JNI_PAYLOAD_ABSENT",false);
                 nativeLoadAttempted=true;
                 System.load(dll.toString());nativeLoaded=true;
-                if(abi()!=89)throw new UnsatisfiedLinkError("NATIVE_CONTROL_ABI");
+                if(abi()!=90)throw new UnsatisfiedLinkError("NATIVE_CONTROL_ABI");
             }
             if(!nativeBoundaryInstalled){
                 nativeHandoffRetryable=false;
@@ -753,6 +753,8 @@ public final class NativeControl {
                 +";HOST_CHILD_LOAD_RECEIPTS="+host[24]+";HOST_CHILD_OWN_PINS="+host[25]+";HOST_CHILD_SOURCE_HOLDS="+host[26]
                 +";HOST_CHILD_SHARED_OR_UNKNOWN_PENDING="+host[27]+";HOST_CHILD_IMPORT_GAPS="+host[28]+";HOST_CHILD_RESOURCE_OR_NONEXEC_LOADS="+host[29]
                 +";HOST_CHILD_OWN_PIN_RELEASES="+host[30]+";HOST_CHILD_APPLICATION_LOADER_LIFETIMES_UNOBSERVED="+host[31]
+                +";HOST_TLS_FLS_SLOTS="+host[32]+";HOST_TLS_FLS_VALUES="+host[33]+";HOST_TLS_FLS_ACTIVE="+host[34]
+                +";HOST_TLS_FLS_LIFECYCLE_GAPS="+host[35]+";HOST_TLS_FLS_SOURCE_HOLDS="+host[36]
                 +";JVMTI_GETENV="+jvmti[0]+";JVMTI_OBSERVED_ENVIRONMENTS="+jvmti[1]+";JVMTI_CALLBACK_SLOTS="+jvmti[2]+";JVMTI_ACTIVE_CALLBACKS="+jvmti[3]
                 +";JVMTI_DISPOSED_ENVIRONMENTS="+jvmti[4]+";JVMTI_FAILURES="+jvmti[5]+";JVMTI_OWN_TABLE="+jvmti[6]+";JVMTI_UNATTRIBUTED_CALLBACKS="+jvmti[7]+";"+hostKernelSummary(module);
     }
@@ -761,6 +763,8 @@ public final class NativeControl {
         if(!available)return "";
         if(jvmtiDefinitionsPending0(module))return "JVMTI_DEFINITION_CONTINUATION_PENDING";
         long[] host=hostState0(module);long[] jvmti=jvmtiState0(module);
+        if(host[32]!=0||host[33]!=0||host[34]!=0||host[35]!=0||host[36]!=0)
+            return "HOST_TLS_FLS_RETIREMENT_PENDING:slots="+host[32]+":values="+host[33]+":active="+host[34]+":gaps="+host[35]+":sourceHolds="+host[36];
         if(host[21]!=0)return "HOST_NATIVE_WORKER_RETIREMENT_PENDING:holds="+host[21]+":exitPending="+host[22]+":lifecycleGaps="+host[23];
         if(host[25]!=0||host[26]!=0)return "HOST_CHILD_OWN_RETIREMENT_PENDING:pins="+host[25]+":sourceHolds="+host[26]+":sharedOrUnknown="+host[27]+":importGaps="+host[28];
         if(host[28]!=0)return "HOST_CHILD_IMPORT_CONTROL_UNAVAILABLE:images="+host[28];

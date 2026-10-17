@@ -717,8 +717,9 @@ static int audit_private_native_aliases_collected(JNIEnv *env,NativeMemoryAlloca
 }
 JNIEXPORT jboolean JNICALL Java_dev_ronova_pro_AuditFixCheck_privateNativeState0(JNIEnv *env,jclass type,jobjectArray modules){
     const char *failure=NULL;NativeThread thread={0};DWORD fixtureTls=TLS_OUT_OF_INDEXES;int initialized=0,denied=0;
-    NativeHostMemoryCall *call=NULL;NativeMemoryAllocation *first=NULL,*allocation=NULL,*imageAllocation=NULL;
-    HANDLE heap=NULL;void *block=NULL;jobject view=NULL;Owner *owner=NULL;OwnerLink selected={0};
+    NativeHostMemoryCall *call=NULL,*probe=NULL,*pendingDestroy=NULL;NativeMemoryAllocation *first=NULL,*allocation=NULL,*imageAllocation=NULL;
+    NativeHostMemoryContext *heapContext=NULL;OwnerLink *observedSources=NULL;
+    HANDLE heap=NULL;void *block=NULL,*sharedBlock=NULL;jobject view=NULL,borrowerModule=NULL;Owner *owner=NULL,*borrower=NULL;OwnerLink selected={0},borrowed={0};
     HostImage image={0};HostStaticMemory parsed={0};jlong binding[2]={0};
     HANDLE (WINAPI *createHeap)(DWORD,SIZE_T,SIZE_T)=NULL;
     LPVOID (WINAPI *allocate)(HANDLE,DWORD,SIZE_T)=NULL;
@@ -741,17 +742,59 @@ JNIEXPORT jboolean JNICALL Java_dev_ronova_pro_AuditFixCheck_privateNativeState0
     PRIVATE_REQUIRE(native_controller&&native_controls&&native_memory_gate&&createHeap&&allocate&&resize&&release&&destroyHeap,"private tracker fixture original entries unavailable");
     jobject module=native_original.GetObjectArrayElement(env,modules,0);owner=native_owner(env,module);if(module)native_original.DeleteLocalRef(env,module);
     PRIVATE_REQUIRE(owner,"private tracker fixture actual module unavailable");owner->producer=1;selected.owner=owner;
+    jclass objectClass=native_original.FindClass(env,"java/lang/Object"),classClass=native_original.FindClass(env,"java/lang/Class");
+    jmethodID getModule=classClass?native_original.GetMethodID(env,classClass,"getModule","()Ljava/lang/Module;"):NULL;
+    if(objectClass&&getModule)borrowerModule=native_original.CallObjectMethod(env,objectClass,getModule);
+    if(objectClass)native_original.DeleteLocalRef(env,objectClass);if(classClass)native_original.DeleteLocalRef(env,classClass);
+    borrower=borrowerModule?native_owner(env,borrowerModule):NULL;
+    PRIVATE_REQUIRE(borrower&&borrower!=owner,"private tracker fixture distinct actual borrower module unavailable");borrower->producer=1;borrowed.owner=borrower;
     NativeToolingSlot slot={0};slot.owners=&selected;NativeToolingInvocation invocation={0};invocation.slot=&slot;
     HostThreadWorker worker={0};worker.owners=&selected;
     PRIVATE_REQUIRE(!native_private_execution_unknown(&thread),"ordinary empty native scope acquired private CPU opacity");
     thread.toolingInvocation=&invocation;PRIVATE_REQUIRE(native_private_execution_unknown(&thread),"actual tooling invocation lost private CPU opacity");thread.toolingInvocation=NULL;
     thread.hostWorker=&worker;PRIVATE_REQUIRE(native_private_execution_unknown(&thread),"actual Host worker lost private CPU opacity");thread.hostWorker=NULL;
+    NativeToolingScope restrictedScope={&selected,NULL,0,0,NULL};thread.tooling=&restrictedScope;thread.toolingRestricted=1;
+    PRIVATE_REQUIRE(native_private_execution_unknown(&thread),"actual restricted FLS scope lost private CPU opacity");
+    thread.tooling=NULL;thread.toolingRestricted=0;
     Binding business={0};business.owners=&selected;thread.stack[0]=&business;thread.depth=1;
     PRIVATE_REQUIRE(audit_private_native_sources(env,native_mutation_sources_from(env,&thread,NULL,0),modules),"actual business native contribution lost its known owner or private CPU marker");
     thread.depth=0;thread.stack[0]=NULL;
     call=native_memory_host_prepare(env,NATIVE_MEMORY_HOST_CRT,(void*)release,0,0x1234,8,NATIVE_MEMORY_HOST_FREE,&selected,0,&denied);
     PRIVATE_REQUIRE(!call&&!denied&&!native_memory_allocations,"numeric pointer manufactured a native allocation lifetime");
-    heap=createHeap(0,0,0);PRIVATE_REQUIRE(heap,"actual private heap unavailable");
+    call=native_memory_host_prepare(env,NATIVE_MEMORY_HOST_HEAP,(void*)release,0,0,0,NATIVE_MEMORY_HOST_CONTEXT_CREATE,&selected,0,&denied);
+    PRIVATE_REQUIRE(call&&!denied&&!native_memory_host_contexts&&!native_memory_allocations,"HeapCreate preparation manufactured a heap or payload before its actual result");
+    heap=createHeap(0,0,0);native_memory_host_complete(env,call,(uint64_t)(uintptr_t)heap,0,heap!=NULL,0);call=NULL;
+    heapContext=native_memory_host_context((void*)release,(uintptr_t)heap,0);
+    PRIVATE_REQUIRE(heap&&heapContext&&heapContext->created&&heapContext->observed&&heapContext->sources&&heapContext->sources->owner==owner
+            &&!heapContext->sources->next&&!native_memory_allocations,"actual HeapCreate lost its independent creator incarnation or manufactured child geometry");
+    call=native_memory_host_prepare(env,NATIVE_MEMORY_HOST_HEAP,(void*)release,(uintptr_t)heap,0,16,NATIVE_MEMORY_HOST_ALLOCATE,&borrowed,0,&denied);
+    PRIVATE_REQUIRE(call&&!denied,"actual borrower heap allocation admission unavailable");
+    int sourceUnknown=0,creatorSeen=0,borrowerSeen=0,sourceCount=0;
+    PRIVATE_REQUIRE(native_memory_host_sources(call,&observedSources,&sourceUnknown),"heap creator source capture unavailable");
+    for(OwnerLink *source=observedSources;source;source=source->next){creatorSeen+=source->owner==owner;borrowerSeen+=source->owner==borrower;sourceCount++;}
+    PRIVATE_REQUIRE(!sourceUnknown&&creatorSeen==1&&borrowerSeen==1&&sourceCount==2,"borrower did not retain exact HeapCreate creator sources before original allocation");
+    owner->stopped=1;PRIVATE_REQUIRE(native_owner_stopped(observedSources)==owner,"stopped HeapCreate creator escaped the actual allocation source gate");owner->stopped=0;
+    native_owner_links_free(observedSources);observedSources=NULL;
+    sharedBlock=allocate(heap,0,16);native_memory_host_complete(env,call,(uint64_t)(uintptr_t)sharedBlock,16,sharedBlock!=NULL,0);call=NULL;
+    NativeMemoryAllocation *sharedAllocation=native_memory_find((uint64_t)(uintptr_t)sharedBlock,16,1);
+    PRIVATE_REQUIRE(sharedBlock&&sharedAllocation&&sharedAllocation->hostContextEpoch==heapContext->epoch&&!sharedAllocation->unknownUse
+            &&native_owner_matches(env,sharedAllocation->sources,borrowerModule),"actual shared heap block lost its borrower/context generation");
+    call=native_memory_host_prepare(env,NATIVE_MEMORY_HOST_HEAP,(void*)release,(uintptr_t)heap,0,0,NATIVE_MEMORY_HOST_CONTEXT_FREE,&selected,0,&denied);
+    PRIVATE_REQUIRE(call&&!denied,"actual shared heap destroy source admission unavailable");
+    sourceUnknown=0;PRIVATE_REQUIRE(native_memory_host_sources(call,&observedSources,&sourceUnknown),"shared heap destroy sources unavailable");
+    borrower->stopped=1;
+    PRIVATE_REQUIRE(!sourceUnknown&&native_owner_stopped(observedSources)==borrower&&native_owner_matches(env,observedSources,borrowerModule),"HeapDestroy omitted a stopped shared block contributor");
+    borrower->stopped=0;native_owner_links_free(observedSources);observedSources=NULL;
+    native_memory_host_complete(env,call,0,0,0,0);call=NULL;
+    PRIVATE_REQUIRE(!heapContext->changing&&sharedAllocation->alive,"declined shared HeapDestroy changed the actual old lifetime");
+    call=native_memory_host_prepare(env,NATIVE_MEMORY_HOST_HEAP,(void*)release,(uintptr_t)heap,(uint64_t)(uintptr_t)sharedBlock,0,NATIVE_MEMORY_HOST_FREE,&borrowed,0,&denied);
+    PRIVATE_REQUIRE(call&&!denied&&native_memory_host_known(call)&&heapContext->users==1,"actual shared HeapFree context lease unavailable");
+    owner->stopped=1;PRIVATE_REQUIRE(!native_memory_host_cleanup(call),"stopped heap creator admitted cleanup of an active borrower's block");
+    borrower->stopped=1;PRIVATE_REQUIRE(native_memory_host_cleanup(call),"fully observed stopped heap creators lost their actual release cleanup");owner->stopped=borrower->stopped=0;
+    int destroyDenied=0;probe=native_memory_host_prepare(env,NATIVE_MEMORY_HOST_HEAP,(void*)release,(uintptr_t)heap,0,0,NATIVE_MEMORY_HOST_CONTEXT_FREE,&selected,0,&destroyDenied);
+    PRIVATE_REQUIRE(!probe&&destroyDenied&&!heapContext->changing&&heapContext->users==1,"in-flight actual HeapFree permitted HeapDestroy");
+    BOOL freed=release(heap,0,sharedBlock);native_memory_host_complete(env,call,0,0,freed,freed);call=NULL;if(freed)sharedBlock=NULL;
+    PRIVATE_REQUIRE(freed&&!sharedAllocation->alive&&!heapContext->users&&!heapContext->changing,"actual shared HeapFree did not finish its exact context lease");
     call=native_memory_host_prepare(env,NATIVE_MEMORY_HOST_HEAP,(void*)release,(uintptr_t)heap,0,64,NATIVE_MEMORY_HOST_ALLOCATE,&selected,0,&denied);
     PRIVATE_REQUIRE(call&&!denied,"actual heap allocation context admission unavailable");
     block=allocate(heap,0,64);native_memory_host_complete(env,call,(uint64_t)(uintptr_t)block,64,block!=NULL,0);call=NULL;
@@ -761,6 +804,8 @@ JNIEXPORT jboolean JNICALL Java_dev_ronova_pro_AuditFixCheck_privateNativeState0
     uint64_t oldGeneration=allocation->generation;
     call=native_memory_host_prepare(env,NATIVE_MEMORY_HOST_HEAP,(void*)release,(uintptr_t)heap,(uint64_t)(uintptr_t)block,UINT64_MAX,NATIVE_MEMORY_HOST_REALLOCATE,&selected,0,&denied);
     PRIVATE_REQUIRE(call&&!denied,"actual failed realloc admission unavailable");
+    destroyDenied=0;probe=native_memory_host_prepare(env,NATIVE_MEMORY_HOST_HEAP,(void*)release,(uintptr_t)heap,0,0,NATIVE_MEMORY_HOST_CONTEXT_FREE,&selected,0,&destroyDenied);
+    PRIVATE_REQUIRE(!probe&&destroyDenied&&heapContext->users==1&&!heapContext->changing,"in-flight actual HeapReAlloc permitted HeapDestroy");
     void *resized=resize(heap,0,block,(SIZE_T)-1);
     native_memory_host_complete(env,call,(uint64_t)(uintptr_t)resized,UINT64_MAX,resized!=NULL,0);call=NULL;if(resized)block=resized;
     PRIVATE_REQUIRE(!resized&&allocation->alive&&allocation->generation==oldGeneration&&!allocation->changing&&!allocation->users,"failed original realloc retired or held its old lifetime");
@@ -788,6 +833,40 @@ JNIEXPORT jboolean JNICALL Java_dev_ronova_pro_AuditFixCheck_privateNativeState0
     EnterCriticalSection(&allocation->gate);retired=native_memory_retire_allocation(env,allocation,&selected);LeaveCriticalSection(&allocation->gate);
     if(retired)block=NULL;native_memory_reap_references(env,allocation);
     PRIVATE_REQUIRE(retired&&!allocation->alive&&!allocation->hostReleasePin,"exact private stopped allocation did not call its actual HeapFree and retire");
+    owner->stopped=0;
+    call=native_memory_host_prepare(env,NATIVE_MEMORY_HOST_HEAP,(void*)release,(uintptr_t)heap,0,16,NATIVE_MEMORY_HOST_ALLOCATE,&selected,0,&denied);
+    PRIVATE_REQUIRE(call&&!denied,"actual destroy target allocation admission unavailable");
+    block=allocate(heap,0,16);native_memory_host_complete(env,call,(uint64_t)(uintptr_t)block,16,block!=NULL,0);call=NULL;
+    NativeMemoryAllocation *destroyedAllocation=native_memory_find((uint64_t)(uintptr_t)block,16,1);NativeHostMemoryContext *destroyedContext=heapContext;
+    PRIVATE_REQUIRE(block&&destroyedAllocation&&destroyedAllocation->hostContextEpoch==destroyedContext->epoch,"actual destroy target generation unavailable");
+    pendingDestroy=native_memory_host_prepare(env,NATIVE_MEMORY_HOST_HEAP,(void*)release,(uintptr_t)heap,0,0,NATIVE_MEMORY_HOST_CONTEXT_FREE,&selected,0,&denied);
+    PRIVATE_REQUIRE(pendingDestroy&&!denied&&destroyedContext->changing,"actual HeapDestroy context admission unavailable");
+    BOOL destroyed=destroyHeap(heap);
+    if(!destroyed){native_memory_host_complete(env,pendingDestroy,0,0,0,0);pendingDestroy=NULL;PRIVATE_REQUIRE(0,"actual HeapDestroy failed");}
+    heap=NULL;block=NULL;
+    call=native_memory_host_prepare(env,NATIVE_MEMORY_HOST_HEAP,(void*)release,0,0,0,NATIVE_MEMORY_HOST_CONTEXT_CREATE,&selected,0,&denied);
+    PRIVATE_REQUIRE(call&&!denied,"replacement actual HeapCreate admission unavailable");
+    heap=createHeap(0,0,0);native_memory_host_complete(env,call,(uint64_t)(uintptr_t)heap,0,heap!=NULL,0);call=NULL;
+    heapContext=native_memory_host_context((void*)release,(uintptr_t)heap,0);
+    PRIVATE_REQUIRE(heap&&heapContext&&heapContext!=destroyedContext&&heapContext->epoch!=destroyedContext->epoch&&heapContext->created,
+            "replacement actual HeapCreate reused an older context incarnation");
+    call=native_memory_host_prepare(env,NATIVE_MEMORY_HOST_HEAP,(void*)release,(uintptr_t)heap,0,16,NATIVE_MEMORY_HOST_ALLOCATE,&selected,0,&denied);
+    PRIVATE_REQUIRE(call&&!denied,"replacement actual heap block admission unavailable");
+    block=allocate(heap,0,16);native_memory_host_complete(env,call,(uint64_t)(uintptr_t)block,16,block!=NULL,0);call=NULL;
+    allocation=native_memory_find((uint64_t)(uintptr_t)block,16,1);
+    PRIVATE_REQUIRE(block&&allocation&&allocation->hostContextEpoch==heapContext->epoch&&!allocation->unknownUse,"replacement actual heap block lost its new incarnation or inherited an older retiring overlap");
+    native_memory_host_complete(env,pendingDestroy,0,0,1,1);pendingDestroy=NULL;
+    PRIVATE_REQUIRE(!destroyedAllocation->alive&&destroyedContext->retired&&!destroyedContext->changing
+            &&allocation->alive&&!heapContext->retired&&!heapContext->changing&&!heapContext->users
+            &&native_memory_host_context((void*)release,(uintptr_t)heap,0)==heapContext,"late actual HeapDestroy completion retired a newer heap/block incarnation");
+    call=native_memory_host_prepare(env,NATIVE_MEMORY_HOST_HEAP,(void*)release,(uintptr_t)heap,(uint64_t)(uintptr_t)block,0,NATIVE_MEMORY_HOST_FREE,&selected,0,&denied);
+    PRIVATE_REQUIRE(call&&!denied,"replacement actual HeapFree admission unavailable");
+    freed=release(heap,0,block);native_memory_host_complete(env,call,0,0,freed,freed);call=NULL;if(freed)block=NULL;
+    PRIVATE_REQUIRE(freed&&!allocation->alive,"replacement actual HeapFree failed");
+    call=native_memory_host_prepare(env,NATIVE_MEMORY_HOST_HEAP,(void*)release,(uintptr_t)heap,0,0,NATIVE_MEMORY_HOST_CONTEXT_FREE,&selected,0,&denied);
+    PRIVATE_REQUIRE(call&&!denied,"replacement actual HeapDestroy admission unavailable");
+    destroyed=destroyHeap(heap);native_memory_host_complete(env,call,0,0,destroyed,destroyed);call=NULL;if(destroyed)heap=NULL;
+    PRIVATE_REQUIRE(destroyed&&heapContext->retired&&!heapContext->changing,"replacement actual HeapDestroy did not retire its exact context");owner->stopped=1;
     image.handle=native_image((void*)&audit_private_native_static);image.live=1;
     PRIVATE_REQUIRE(image.handle&&host_static_parse(&image,&parsed),"actual fixture PE writable-storage parse failed");
     int containsStatic=0,containsCode=0,executable=0;
@@ -826,15 +905,17 @@ done:
     if(initialized){
         if(native_original.ExceptionCheck(env))native_original.ExceptionClear(env);
         if(call)native_memory_host_abort(env,call);
+        if(probe)native_memory_host_abort(env,probe);if(pendingDestroy)native_memory_host_abort(env,pendingDestroy);
+        native_owner_links_free(observedSources);if(borrowerModule)native_original.DeleteLocalRef(env,borrowerModule);
         while(thread.memoryWrite)native_memory_write_end(&thread,thread.memoryWrite,0);
         if(view)native_original.DeleteLocalRef(env,view);
-        if(block&&heap&&release)release(heap,0,block);if(heap&&destroyHeap)destroyHeap(heap);
+        if(sharedBlock&&heap&&release)release(heap,0,sharedBlock);if(block&&heap&&release)release(heap,0,block);if(heap&&destroyHeap)destroyHeap(heap);
         while(parsed.spans){HostStaticSpan *span=parsed.spans;parsed.spans=span->next;free(span);}
         while(native_memory_allocations){NativeMemoryAllocation *entry=native_memory_allocations;native_memory_allocations=entry->next;
             native_memory_released(env,entry);native_memory_reap_references(env,entry);
             native_owner_links_free(entry->sources);native_owner_links_free(entry->readers);native_owner_links_free(entry->preserved);
             while(entry->interests){NativeMemoryInterest *interest=entry->interests;entry->interests=interest->next;free(interest);}DeleteCriticalSection(&entry->gate);free(entry);}
-        while(native_memory_host_contexts){NativeHostMemoryContext *entry=native_memory_host_contexts;native_memory_host_contexts=entry->next;free(entry);}
+        while(native_memory_host_contexts){NativeHostMemoryContext *entry=native_memory_host_contexts;native_memory_host_contexts=entry->next;native_owner_links_free(entry->sources);free(entry);}native_memory_host_context_epoch=0;
         while(native_memory_images){NativeMemoryImageState *entry=native_memory_images;native_memory_images=entry->next;free(entry);}
         native_owner_links_free(native_memory_unknown);native_memory_unknown=NULL;
         while(native_owners){Owner *entry=native_owners;native_owners=entry->next;if(entry->module)native_original.DeleteWeakGlobalRef(env,entry->module);free(entry);}

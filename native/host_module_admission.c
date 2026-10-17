@@ -93,6 +93,7 @@ static int host_module_exit_keep_sources(NativeThread *state,HostLibraryLoad *re
         ReleaseSRWLockExclusive(&host_records);if(ready)return 1;
     }
     if(native_tooling_load_borrow(state,retained->owners,&retained->toolingAnchor))return retained->leaseComplete=1;
+    if(host_tls_source_borrow(state,retained->owners,&retained->tlsAnchor))return retained->leaseComplete=1;
     return 0;
 }
 static void __attribute__((noreturn)) host_native_module_exit(HostImport *entry,void *caller,uintptr_t *arguments){
@@ -216,6 +217,7 @@ static void host_module_releases_reap(JNIEnv **environment){
         if(retained->origin){native_original.DeleteWeakGlobalRef(env,retained->origin);retained->origin=NULL;}
         if(retained->sourceWorker){host_thread_worker_load_drop(retained->sourceWorker);retained->sourceWorker=NULL;}
         if(retained->toolingAnchor){native_thread_worker_heap_drop(retained->toolingAnchor);retained->toolingAnchor=NULL;}
+        if(retained->tlsAnchor){host_tls_source_drop(retained->tlsAnchor);retained->tlsAnchor=NULL;}
         AcquireSRWLockExclusive(&host_imports);
         if(retained->sourceParent){InterlockedDecrement(&retained->sourceParent->borrowers);retained->sourceParent=NULL;}
         if(release->callImage){

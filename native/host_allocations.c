@@ -6,11 +6,12 @@ typedef LPVOID (WINAPI *HostHeapAlloc)(HANDLE,DWORD,SIZE_T);
 typedef LPVOID (WINAPI *HostHeapReAlloc)(HANDLE,DWORD,LPVOID,SIZE_T);
 typedef BOOL (WINAPI *HostHeapFree)(HANDLE,DWORD,LPVOID);
 typedef BOOL (WINAPI *HostHeapDestroy)(HANDLE);
+typedef HANDLE (WINAPI *HostHeapCreate)(DWORD,SIZE_T,SIZE_T);
 typedef LPVOID (WINAPI *HostVirtualAlloc)(LPVOID,SIZE_T,DWORD,DWORD);
 typedef LPVOID (WINAPI *HostVirtualAllocEx)(HANDLE,LPVOID,SIZE_T,DWORD,DWORD);
 
 static int host_is_allocation(int kind){
-    return kind>=HOST_HEAP_ALLOC&&kind<=HOST_VIRTUAL_ALLOC_EX||kind==HOST_HEAP_DESTROY;
+    return kind>=HOST_HEAP_ALLOC&&kind<=HOST_VIRTUAL_ALLOC_EX||kind==HOST_HEAP_DESTROY||kind==HOST_HEAP_CREATE;
 }
 static uint64_t host_allocation_original(HostImport *entry,HANDLE process,const uintptr_t *a){
     switch(entry->kind){
@@ -18,6 +19,7 @@ static uint64_t host_allocation_original(HostImport *entry,HANDLE process,const 
         case HOST_HEAP_REALLOC:return (uintptr_t)((HostHeapReAlloc)entry->original)((HANDLE)a[0],(DWORD)a[1],(LPVOID)a[2],(SIZE_T)a[3]);
         case HOST_HEAP_FREE:return ((HostHeapFree)entry->original)((HANDLE)a[0],(DWORD)a[1],(LPVOID)a[2]);
         case HOST_HEAP_DESTROY:return ((HostHeapDestroy)entry->original)((HANDLE)a[0]);
+        case HOST_HEAP_CREATE:return (uintptr_t)((HostHeapCreate)entry->original)((DWORD)a[0],(SIZE_T)a[1],(SIZE_T)a[2]);
         case HOST_VIRTUAL_ALLOC:return (uintptr_t)((HostVirtualAlloc)entry->original)((LPVOID)a[0],(SIZE_T)a[1],(DWORD)a[2],(DWORD)a[3]);
         case HOST_VIRTUAL_ALLOC_EX:return (uintptr_t)((HostVirtualAllocEx)entry->original)(process,(LPVOID)a[1],(SIZE_T)a[2],(DWORD)a[3],(DWORD)a[4]);
         default:SetLastError(ERROR_INVALID_FUNCTION);return 0;
@@ -35,7 +37,7 @@ static uint64_t host_native_allocation(HostImport *entry,void *caller,uintptr_t 
     JNIEnv *env=host_memory_environment(restricted);NativeHostMemoryCall *tracking=NULL;
     HANDLE process=NULL;DWORD error=0;uint64_t result=0;int returned=0,denied=0;
     int heap=entry->kind==HOST_HEAP_ALLOC||entry->kind==HOST_HEAP_REALLOC
-            ||entry->kind==HOST_HEAP_FREE||entry->kind==HOST_HEAP_DESTROY;
+            ||entry->kind==HOST_HEAP_FREE||entry->kind==HOST_HEAP_DESTROY||entry->kind==HOST_HEAP_CREATE;
     int cleanup=entry->kind==HOST_HEAP_FREE&&host_memory_cleanup_scope(entry,state);
     int local=entry->kind!=HOST_VIRTUAL_ALLOC_EX,guard=0;
     unsigned first=entry->kind==HOST_VIRTUAL_ALLOC_EX?1:0;
@@ -71,12 +73,14 @@ static uint64_t host_native_allocation(HostImport *entry,void *caller,uintptr_t 
         if(!error&&heap){
             int operation=entry->kind==HOST_HEAP_ALLOC?NATIVE_MEMORY_HOST_ALLOCATE:
                     entry->kind==HOST_HEAP_REALLOC?NATIVE_MEMORY_HOST_REALLOCATE:
-                    entry->kind==HOST_HEAP_DESTROY?NATIVE_MEMORY_HOST_CONTEXT_FREE:NATIVE_MEMORY_HOST_FREE;
-            tracking=native_memory_host_prepare(env,NATIVE_MEMORY_HOST_HEAP,release,arguments[0],
-                    entry->kind==HOST_HEAP_ALLOC||entry->kind==HOST_HEAP_DESTROY?0:(uint64_t)(uintptr_t)address,
+                    entry->kind==HOST_HEAP_DESTROY?NATIVE_MEMORY_HOST_CONTEXT_FREE:
+                    entry->kind==HOST_HEAP_CREATE?NATIVE_MEMORY_HOST_CONTEXT_CREATE:NATIVE_MEMORY_HOST_FREE;
+            tracking=native_memory_host_prepare(env,NATIVE_MEMORY_HOST_HEAP,release,entry->kind==HOST_HEAP_CREATE?0:arguments[0],
+                    entry->kind==HOST_HEAP_ALLOC||entry->kind==HOST_HEAP_DESTROY||entry->kind==HOST_HEAP_CREATE?0:(uint64_t)(uintptr_t)address,
                     bytes,operation,owners,unknown,&denied);
             if(denied)error=ERROR_BUSY;
-            else if(cleanup&&!tracking&&(native_owner_stopped(owners)||unknown&&(restricted||native_has_producer(owners))))
+            else if(!native_memory_host_sources(tracking,&owners,&unknown))error=ERROR_NOT_ENOUGH_MEMORY;
+            else if(cleanup&&!native_memory_host_cleanup(tracking)&&(native_owner_stopped(owners)||unknown&&(restricted||native_has_producer(owners))))
                 error=native_owner_stopped(owners)?ERROR_ACCESS_DENIED:ERROR_INVALID_DATA;
         }
         if(!error){
@@ -92,7 +96,7 @@ static uint64_t host_native_allocation(HostImport *entry,void *caller,uintptr_t 
                     if(heap){ReleaseSRWLockExclusive(&native_private_gate);locked=0;}}
             }
             __try {
-                int retiring=cleanup&&tracking&&host_memory_cleanup_scope(entry,state);
+                int retiring=cleanup&&native_memory_host_cleanup(tracking)&&host_memory_cleanup_scope(entry,state);
                 if(!error&&native_owner_stopped(owners)&&!retiring)error=ERROR_ACCESS_DENIED;
                 else if(!error&&unknown&&(restricted||native_has_producer(owners))&&!retiring)error=ERROR_INVALID_DATA;
                 if(!error){SetLastError(incoming);result=host_allocation_original(entry,process,arguments);error=GetLastError();returned=1;}

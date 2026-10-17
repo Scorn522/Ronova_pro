@@ -7,7 +7,7 @@ struct HostLibraryLoad {
     NativeLibrary *parentLibrary;
     HostLibraryLoad *parentLoad,*sourceParent,*previousScope;
     struct HostThreadWorker *sourceWorker;
-    void *toolingAnchor;
+    void *toolingAnchor,*tlsAnchor;
     OwnerLink *owners;jobjectArray sourceLease;jweak origin;
     HMODULE actual,sparePin;DWORD flags,error;
     NativeToolingScope scope;
@@ -21,6 +21,8 @@ static int host_thread_worker_load_borrow(NativeThread*,OwnerLink*,struct HostTh
 static void host_thread_worker_load_drop(struct HostThreadWorker*);
 static int native_tooling_load_borrow(NativeThread*,OwnerLink*,void**);
 static void native_thread_worker_heap_drop(void*);
+static int host_tls_source_borrow(NativeThread*,OwnerLink*,void**);
+static void host_tls_source_drop(void*);
 
 static int host_module_sources_cover(OwnerLink *retained,OwnerLink *actual){
     for(;actual;actual=actual->next){OwnerLink *found=retained;
@@ -199,6 +201,7 @@ static int host_module_borrow_load(NativeThread *state,HostLibraryLoad *load){
     ReleaseSRWLockExclusive(&host_imports);
     if(!ready&&host_thread_worker_load_borrow(state,load->owners,&load->sourceWorker))ready=load->leaseComplete=1;
     if(!ready&&native_tooling_load_borrow(state,load->owners,&load->toolingAnchor))ready=load->leaseComplete=1;
+    if(!ready&&host_tls_source_borrow(state,load->owners,&load->tlsAnchor))ready=load->leaseComplete=1;
     return ready;
 }
 static int host_module_keep_sources(NativeThread *state,HostLibraryLoad *load){
@@ -341,9 +344,10 @@ static void host_module_loads_reap(JNIEnv **environment){
         if(load->origin)native_original.DeleteWeakGlobalRef(env,load->origin);
         if(load->sourceWorker)host_thread_worker_load_drop(load->sourceWorker);
         if(load->toolingAnchor)native_thread_worker_heap_drop(load->toolingAnchor);
+        if(load->tlsAnchor)host_tls_source_drop(load->tlsAnchor);
         free(load->preparedImage);
         AcquireSRWLockExclusive(&host_imports);
-        load->preparedImage=NULL;load->sourceLease=NULL;load->origin=NULL;load->sourceWorker=NULL;load->toolingAnchor=NULL;
+        load->preparedImage=NULL;load->sourceLease=NULL;load->origin=NULL;load->sourceWorker=NULL;load->toolingAnchor=NULL;load->tlsAnchor=NULL;
         if(load->sourceParent){InterlockedDecrement(&load->sourceParent->borrowers);load->sourceParent=NULL;}
         load->retired=1;load->releasing=0;ReleaseSRWLockExclusive(&host_imports);
         native_thread_worker_wake();
@@ -357,7 +361,7 @@ static void host_module_loads_state(JNIEnv *env,jobject module,jlong *values){
         if(load->actual){values[24]++;if(!load->publicCarrier)values[31]++; /* app ref lifetime not observed */}
         if(load->sparePin)values[25]++;
         if(load->resource||load->nonExecutable)values[29]++;
-        if(load->calling||load->borrowers||load->sourceLease||load->sourceParent||load->sourceWorker||load->toolingAnchor)values[26]++;
+        if(load->calling||load->borrowers||load->sourceLease||load->sourceParent||load->sourceWorker||load->toolingAnchor||load->tlsAnchor)values[26]++;
         if(!load->retired&&(load->unknown||!load->leaseComplete||load->image&&(load->image->opaque
                 ||!host_module_producers_retired(load->owners,load->unknown))))values[27]++;
         if(load->actual&&!load->resource&&!load->nonExecutable&&!load->publicCarrier&&(!load->image||load->image->failed||!load->image->checked))values[28]++;

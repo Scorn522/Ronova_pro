@@ -932,6 +932,8 @@ public final class AuditFixCheck {
     private static native boolean hostMemoryRead0();
     private static native void hostWin32Allocations0();
     private static native boolean hostCrtAllocations0();
+    private static native boolean hostCppPrivate0();
+    private static native boolean hostTlsPrivate0();
     private static native void hostRawUnsafe0();
     private static native void hostModuleRelease0(String controlDll);
     private static native void hostModuleReleaseThread0(String controlDll);
@@ -942,6 +944,13 @@ public final class AuditFixCheck {
     private static void hostThreadCreate(){
         System.load(java.nio.file.Path.of(System.getProperty("ronova.pro.audit.thread.native")).toAbsolutePath().toString());
         String phase=System.getProperty("ronova.pro.audit.thread.phase","thread-create");
+        if(phase.equals("pool-tls-cpp")){
+            hostWin32Allocations0();
+            require(hostCrtAllocations0(),"CRT release source admission failed");
+            require(hostTlsPrivate0(),"actual dynamic TLS/FLS boundary failed");
+            require(hostCppPrivate0(),"actual C++ allocation-function boundary failed");
+            return;
+        }
         if(phase.equals("private-allocations")){
             hostWin32Allocations0();
             require(hostCrtAllocations0(),"actual CRT allocation regression failed");

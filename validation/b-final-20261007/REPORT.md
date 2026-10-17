@@ -1,5 +1,25 @@
 # B 批实际报告：2026-10-09 代码收敛接续
 
+## 2026-10-17：C 接续——独立堆、动态 TLS/FLS 与 C++ 分配状态
+
+接续 `23c286b`，主工程仍为 `D:\桌面\ronova_GPT`。本包 Java ABI100 / Native ABI90 / SourceMapBridge2 / Storage3 / Journal6，协议 `r3-client-8`。三个实现分工完成后统一构建；没有恢复 JDK 容器广谱 Hook，没有添加自身外观、武器或源码 ZIP。
+
+实际 HeapCreate 保存创建者与独立不可变世代；HeapAlloc/ReAlloc/Free/Destroy 的在途调用绑定该世代，块发布完成后才解除上下文占用。成功销毁后的晚返回、实际 HANDLE/地址复用及未知首次观察不把旧来源授予新堆。实际释放前合并准确创建者与读者；Heap/CRT/C++ 的卸载清理例外必须持有当前块，来源完整且全部相关创建者/读者已经停止，活跃共享来源不能被连带释放。HeapDestroy 没有此例外，也不自动销毁猜测独占的池。
+
+动态 TlsAlloc/Set/Get/Free、FlsAlloc/Set/Get/Free 及实际可用的 TlsGetValue2 接受控模块 IAT/GPA。真实 OS 线程 witness、私有 FLS sentinel 与槽世代区分生命周期；Ronova 内部索引不能被外部读写或释放。成功 NULL 与错误分开，Get2 保留原 LastError。读贡献跨清槽、释放索引和 JVM detach 保留，后续 worker/load 借用完整真实来源 lease。实际 FLS 回调按创建者和全部已观察 writer 保留来源，不按 data 指针猜对象或 fiber；正常回调调用一次，停源抑制并保留缺口，SEH 原异常继续。同一实际回调的槽 Get/Set 可接原 API，递归 Free 不借权。来源完整与 CPU 字节不透明分开，FLS 原生数据贡献仍有未知标记，不以此污染准确 allocator 归属。
+
+已加载 MSVC 运行库实际导出的 scalar/array new/delete 及明确 nothrow/sized ABI 接精确实现 provider、scalar/array 类别与代次。共址导出按实际名称和地址双重匹配，未知裸地址不猜参数数目；原函数、零长行为、errno/doserrno/LastError、原异常和 new_handler 保留。普通 throwing-new 的策略拒绝使用 Ronova 非继续 SEH `0xE0520001`，不返回 NULL 冒充成功，也不伪装 std::bad_alloc；nothrow 拒绝为 NULL。只记录实际存储函数完成，不调用猜测析构器，不以 malloc/free 替代，也不自动 delete。
+
+必要结果：`build-c-java100-native90-pool-tls-cpp-20261017.log` 首轮 **PASS，51秒**；Java 与两个既有 Native 夹具编译退出0。`c-java100-native90-pool-state-20261017.log` 首轮 **退出0**：真实 HeapCreate/Alloc/ReAlloc/Free/Destroy、创建者加实际 java.base 借用者、在途 Free/Realloc 阻 Destroy、旧 Destroy 晚完成不退役新 heap、活读/视图阻释放及共享来源清理限制。OS 是否复用数值 HANDLE 由实际返回决定，夹具不伪造；注册/控制 gate 和模块 scope 为隔离 metadata seam，不是 Core 授权。
+
+`c-java100-native90-host-pool-tls-cpp-20261017.log` 首轮 **退出0**，真实 premain/Bootstrap/Native90 达到 `INSTALLED_FULL`。实际 Heap IAT/GPA、原异常及失败保旧；ucrtbase/msvcrt 两套 CRT；TLS 不同内核线程、真实 fiber 切换/DeleteFiber、每个非空 FLS 值的原回调一次、FlsFree、NULL 成功与 Get2 实际 GPA 错误状态均通过。msvcrt scalar/array 两组真实 named GPA 完成 small/zero 分配及配对 delete，skip=0；保留实际 provider 错误存储。这是普通来源的真实 API 检查，没有制造 producer/Core 权限，没有 C++ 对象析构完成声明。
+
+收尾补齐“没有 JVMTI invocation record 的真实 FLS restricted scope”原生数据未知标记后，只增量编译该 DLL/JAR，`build-c-java100-native90-pool-tls-cpp-callback-20261017.log` **PASS，24秒**；只重编并复查受影响的既有内存 mode，`c-java100-native90-pool-callback-state-20261017.log` **退出0**。未重复已通过且未受该 producer 数据分支影响的普通 Host 检查，没有跑旧矩阵。
+
+匹配候选 `distribution/candidate-c-java100-native90-pool-tls-cpp-wip-20261017`：Core **3109666**、prelaunch **23226** 字节。自定义 arena 内部子分配、静态/内联或类专属/debug/aligned C++ 分配、未知对象布局、编译器静态 TLS、直接 TEB/CPU/原始调用仍未解析；FLS 缺少公开 callback 完成屏障，无法闭合的 provider/source 继续保留并报告 gap，释放槽索引不宣称对象已析构。真实 Core/producer 集成、游戏进服与存档重启 **NOTRUN**，不宣称整个 C/B 已全部完成。
+
+---
+
 ## 2026-10-17：C 接续——文件首次 Native 绑定与客户端异常分派
 
 接续 `915440d`，Java ABI99 / Native ABI89 / SourceMapBridge2 / Storage3 / Journal6，协议 `r3-client-8`。本包完整处理文件入口的前置布防/首次绑定，以及客户端分派的晚加载、Core 绑定和失败收尾；源码写齐后统一构建，不恢复容器 Hook，不做自身外观、武器注册或 ZIP。

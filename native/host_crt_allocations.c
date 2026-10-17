@@ -155,13 +155,14 @@ static uint64_t host_native_crt_allocation(HostImport *entry,void *caller,uintpt
                 call=native_memory_host_prepare(env,NATIVE_MEMORY_HOST_CRT,(void*)target->release,0,address,0,
                         replacing?NATIVE_MEMORY_HOST_REALLOCATE:NATIVE_MEMORY_HOST_FREE,owners,unknown,&denied);
                 if(denied)refusal=ERROR_BUSY;
+                else if(!native_memory_host_sources(call,&owners,&unknown))refusal=ERROR_NOT_ENOUGH_MEMORY;
             }
         }
         /* An original DLL unload may release its own already tracked block.
          * The real scope alone never authorizes an unknown pointer or a new
          * allocation: the exact provider/context/generation admission must
          * also have succeeded, including all current alias/user checks. */
-        int cleanupKnown=cleanup&&call&&host_memory_cleanup_scope(entry,state);
+        int cleanupKnown=cleanup&&native_memory_host_cleanup(call)&&host_memory_cleanup_scope(entry,state);
         if(!refusal&&native_owner_stopped(owners)&&!cleanupKnown)refusal=ERROR_ACCESS_DENIED;
         else if(!refusal&&unknown&&(restricted||native_has_producer(owners))&&!cleanupKnown)refusal=ERROR_INVALID_DATA;
         if(refusal){result=host_crt_allocation_refuse(&incoming,refusal);returned=host_crt_allocation_result(&incoming);}

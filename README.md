@@ -1,10 +1,12 @@
 # Ronova Pro
 
-主工程：`D:\桌面\ronova_GPT`。Java ABI99 / Native ABI89 / Storage3 / Journal6，客户端协议 `r3-client-8`。
+主工程：`D:\桌面\ronova_GPT`。Java ABI100 / Native ABI90 / Storage3 / Journal6，客户端协议 `r3-client-8`。
 Java 17；用户态 GNU C23 / GNU C++23；独立 Windows 驱动及管理工具 C17。
 未知业务载体沿真实实例字段、实际容器槽位和原委托调用接续；构图最终复核根字段、实际子对象与已用数组槽，脱离路径不沿用。ArrayDeque 支持环形逻辑槽及原更新中间态，ConcurrentHashMap 保留实际双表迁移、转发及树节点；不调用 getter/迭代器重放数据。自定义槽位的 helper、super.get 和持久绑定核实际调用点、物理方法版本及当前 getter 定义；失配保持未决。原业务调用执行一次，只有当前准确持有的数据方法接续已有动作，未知回调和临时返回对象不自动取得写权。
 自定义 Map 键只在真实槽位查询前声明当前准确的 Java 键方法，记录自然 hashCode/equals/compareTo 的结果、实际读取依赖及方法版本；后续定位直接读存储，不重放键方法。键依赖与实体槽位根分开，写入、未知调用、依赖或定义变化使旧语义失效。已观察的原生分配与 DirectBuffer 借用视图按真实分配代次关联，活视图阻止误释放和完整回滚；地址向 Native 暴露后保留不透明使用，未知裸地址不补造来源。
 Native 私有存储接入已观察模块实际消费的 HeapAlloc/ReAlloc/Free/Destroy、VirtualAlloc/Ex 与 CRT malloc/calloc/realloc/free，按真实 provider、heap context 和分配代次保留来源、读写租约及 DirectBuffer 借用。失败重分配保留旧块，同址成功也换代；原异常和 errno/doserrno/LastError 保留。已观察 DLL 的可写非执行静态段作为借用存储，活视图阻止卸载准备，归还额外 pin 不冒充实际卸载，原映射确认不在才退役。实际 Native binding、回调及工作线程的数据贡献保留已知模块并附 CPU 私有状态未知标记；不以未知字节撤销猜测 C++ 对象语义。Native 全局入口发布前初始化直接依赖的来源桥，避免首次初始化的 Unsafe 回入。
+实际 HeapCreate 接独立堆创建者与不可变世代，Alloc/ReAlloc/Free/Destroy 的在途调用保留准确上下文；成功块登记后才放开销毁，晚到的旧 Destroy 不退役新世代。原释放前合并创建者及读者，卸载例外只允许完整、独占已停来源的准确块。动态 TLS/FLS 按真实槽世代、OS 线程及 FLS context 保留值来源和读取贡献；NULL 成功、TlsGetValue2 的错误状态、实际 FLS 回调与停止门分开处理。读取关系延续到后续 worker/load，清槽和 detach 不洗掉来源；无法证明终结的回调保持来源与 provider pin 并报告缺口。
+已加载 MSVC 运行库实际导出的 scalar/array new/delete 及明确的 nothrow/sized ABI 接原 provider 和独立存储类别；同址导出按精确名称与地址双重选参，保留原函数、错误状态与异常，不以 malloc/free 代替。这里只管理实际观察到的存储生命周期，不猜对象析构，不自动 delete。自定义 arena 内部子分配、静态/内联或类专属分配器、编译器静态 TLS、直接 TEB/CPU 访问及未知 C++ 布局仍不解析。
 文件 Native 入口以实际 bootstrap 声明、方法版本和 operation 建立前置目录；BOUND 与尚未确认原函数的 ARMED_VM_ENTRY 分开，首次真实 NativeMethodBind 捕获新本体后发布门禁，分类失败不发布裸入口。客户端异常分派只在完整组合正文被实际 VM 接受后就绪，晚加载 EventBus 接真实 ClassPrepare；Core 绑定准确 loader/module/lookup，未选事件沿原 dispatcher 与原 Throwable 返回，清理失败保留原异常。
 任务按 operation 增量入窗，恢复链用当前/历史轮转队列，存储工作用 ready/deadline 调度并接续 worker 完成及新保存读回。资源绑定缓存实际布局，队列、锁、委托或资格变化即失效；运行中的读回及关闭失败仍阻止释放。停组按模块在锁外串行发布，回调只标记续接，控制入口等待所选最新策略完成。Forge EventBus 组合注册、监听、注销和异常边界；普通来源观察失败按来源保留缺口，不污染全局控制状态，明确受控目标继续硬拒绝。
 停组先绑定所选返回策略，再发布停止入口并清理；同模式重复交接保留固定 UUID。Native Attach/GetEnv 的观察失败记录覆盖缺口，保留原成功结果、环境与异常，不以观察失败伪造 API 失败或回滚附件。普通任务回调保存真实根、直接来源、浅层回调引用及会被平台清空的瞬时操作数，来源图在有界 drain 中解析，policy 使用独立 tick/关闭预算；未解析关系暂缓结清，实际构造/发布前的来源判定仍同步执行。已定位丢失按任务、会话与注册代次保留，无法定位的丢失仍阻断全局结清。

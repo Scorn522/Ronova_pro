@@ -11,7 +11,7 @@ typedef struct HostThreadWorker {
     void *start,*argument;int kind,unknown,wrapped;
     OwnerLink *owners;jobjectArray sourceLease;HMODULE image,pin;
     HostCrtThreadTarget *crt;NativeLibrary *library;void *sourceAnchor;struct HostThreadWorker *sourceParent;
-    HostLibraryLoad *sourceLoad;
+    HostLibraryLoad *sourceLoad;void *sourceTlsAnchor;
     NativeThread *thread;NativeToolingScope scope;HANDLE monitor,monitorExtra;
     volatile LONG calling,created,started,returned,exited,closed,releasing;
     volatile LONG lifecycleGap,cleanupGap;LONG borrowers;DWORD error;
@@ -33,6 +33,8 @@ static int native_tooling_retirement_jni(JNIEnv**);
 static jobjectArray native_tooling_sources(JNIEnv*,OwnerLink*,int);
 static int native_thread_worker_heap_borrow(NativeThread*,OwnerLink*,void*,void**,HMODULE*);
 static void native_thread_worker_heap_drop(void*);
+static int host_tls_source_borrow(NativeThread*,OwnerLink*,void**);
+static void host_tls_source_drop(void*);
 
 static int host_is_local_worker_create(int kind){
     return kind==HOST_CREATE_THREAD||kind==HOST_BEGIN_THREAD||kind==HOST_BEGIN_THREAD_EX;
@@ -180,7 +182,8 @@ static HostThreadWorker *host_thread_worker_prepare(HostImport *entry,NativeThre
             if(!host_thread_worker_keep_sources(env,worker)){
                 worker->error=ERROR_NOT_ENOUGH_MEMORY;*refused=1;return worker;
             }
-        }else if(!child&&!host_thread_worker_borrow_sources(state,worker)){
+        }else if(!child&&!host_thread_worker_borrow_sources(state,worker)
+                &&!host_tls_source_borrow(state,worker->owners,&worker->sourceTlsAnchor)){
             worker->lifecycleGap=1;return worker;
         }
     }
@@ -300,7 +303,7 @@ static int host_thread_workers_pending(void){
     for(HostThreadWorker *worker=host_thread_worker_head();worker;worker=worker->next)
         if(!worker->closed&&!worker->cleanupGap
                 &&(worker->calling||worker->wrapped&&(worker->monitor||worker->exited||!worker->created)
-                ||!worker->created&&(worker->pin||worker->sourceLease||worker->sourceParent||worker->sourceAnchor||worker->sourceLoad))){pending=1;break;}
+                ||!worker->created&&(worker->pin||worker->sourceLease||worker->sourceParent||worker->sourceAnchor||worker->sourceLoad||worker->sourceTlsAnchor))){pending=1;break;}
     ReleaseSRWLockExclusive(&host_records);return pending;
 }
 /* Only the existing attached daemon calls this. It never waits for a worker,
@@ -377,6 +380,7 @@ static void host_thread_workers_reap(JNIEnv **environment){
         env=*environment;
         if(worker->sourceLease)native_original.DeleteGlobalRef(env,worker->sourceLease);
         if(worker->sourceAnchor)native_thread_worker_heap_drop(worker->sourceAnchor);
+        if(worker->sourceTlsAnchor){host_tls_source_drop(worker->sourceTlsAnchor);worker->sourceTlsAnchor=NULL;}
         if(worker->sourceLoad){AcquireSRWLockExclusive(&host_imports);
             InterlockedDecrement(&worker->sourceLoad->borrowers);worker->sourceLoad=NULL;
             ReleaseSRWLockExclusive(&host_imports);native_thread_worker_wake();}

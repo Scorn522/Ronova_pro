@@ -1204,6 +1204,70 @@ allocated_done:
 JNIEXPORT jboolean JNICALL Java_dev_ronova_pro_AuditFixCheck_hostCrtAllocations0(JNIEnv *env,jclass check){
     (void)check;return load_crt_allocation_check(env)?JNI_TRUE:JNI_FALSE;
 }
+typedef void *(__cdecl *LoadCppNew)(size_t);
+typedef void (__cdecl *LoadCppDelete)(void*);
+JNIEXPORT jboolean JNICALL Java_dev_ronova_pro_AuditFixCheck_hostCppPrivate0(JNIEnv *env,jclass check){
+    (void)check;HMODULE image=GetModuleHandleW(L"msvcrt.dll");
+    if(!image)return load_thread_fail(env,"HOST_CPP_LOADED_MSVCRT_ABSENT")?JNI_TRUE:JNI_FALSE;
+    const char *names[2][2]={{"??2@YAPEAX_K@Z","??3@YAXPEAX@Z"},{"??_U@YAPEAX_K@Z","??_V@YAXPEAX@Z"}};
+    LoadCrtErrno error=(LoadCrtErrno)GetProcAddress(image,"_errno");LoadCrtDosErrno dos=(LoadCrtDosErrno)GetProcAddress(image,"__doserrno");
+    HMODULE errorImage=NULL,dosImage=NULL;
+    if(!error||!dos||!GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS|GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,(LPCSTR)error,&errorImage)
+            ||!GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS|GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,(LPCSTR)dos,&dosImage)
+            ||errorImage!=image||dosImage!=image)return load_thread_fail(env,"HOST_CPP_PROVIDER_ERROR_ACCESSORS")?JNI_TRUE:JNI_FALSE;
+    int *actualError=error();unsigned long *actualDos=dos();
+    if(!actualError||!actualDos)return load_thread_fail(env,"HOST_CPP_PROVIDER_ERROR_STORAGE")?JNI_TRUE:JNI_FALSE;
+    int savedError=*actualError;unsigned long savedDos=*actualDos;DWORD savedWindows=GetLastError();
+    unsigned completed=0,skipped=0,covered=0;const char *failure=NULL;DWORD exception=0;
+    for(unsigned kind=0;kind<2&&!failure;kind++){
+        LoadCppNew allocate=(LoadCppNew)GetProcAddress(image,names[kind][0]);
+        LoadCppDelete release=(LoadCppDelete)GetProcAddress(image,names[kind][1]);
+        if(!allocate||!release){
+            fprintf(stdout,"HOST_CPP_PRIVATE_SKIP provider=msvcrt.dll kind=%s missing_new=%d missing_delete=%d\n",kind?"array":"scalar",!allocate,!release);skipped++;continue;
+        }
+        if(!load_private_entry((void*)allocate)||!load_private_entry((void*)release)){failure="HOST_CPP_ACTUAL_NAMED_GPA_NOT_CONTROLLED";break;}
+        __try {
+            *actualError=EDOM;*actualDos=0x524e0090;SetLastError(0x524e0091);release(NULL);
+            DWORD nullWindows=GetLastError();
+            if(*actualError!=EDOM||*actualDos!=0x524e0090||nullWindows!=0x524e0091)failure="HOST_CPP_DELETE_NULL_PROVIDER_ERRORS_CHANGED";
+        } __except(EXCEPTION_EXECUTE_HANDLER){exception=GetExceptionCode();failure="HOST_CPP_DELETE_NULL_NATIVE_EXCEPTION";}
+        for(unsigned zero=0;zero<2&&!failure;zero++){
+            void *block=NULL;uintptr_t returned=0;int newError=0,deleteError=0;unsigned long newDos=0,deleteDos=0;DWORD newWindows=0,deleteWindows=0;
+            __try {
+                *actualError=EDOM;*actualDos=0x524e0090;SetLastError(0x524e0091);
+                block=allocate(zero?0:32);newWindows=GetLastError();newError=*actualError;newDos=*actualDos;returned=(uintptr_t)block;
+                if(!block)failure="HOST_CPP_ORIGINAL_SMALL_OR_ZERO_RETURNED_NULL";
+                else if(!zero){
+                    volatile unsigned char *bytes=(volatile unsigned char*)block;
+                    for(unsigned i=0;i<32;i++)bytes[i]=(unsigned char)(i^0xa6);
+                    for(unsigned i=0;i<32;i++)if(bytes[i]!=(unsigned char)(i^0xa6)){failure="HOST_CPP_RETURNED_SMALL_BYTES_CHANGED";break;}
+                }
+                /* A zero request has no promised writable byte. Only its real
+                 * nonnull storage result and corresponding delete are used. */
+                if(block){void *retiring=block;block=NULL;
+                    *actualError=EDOM;*actualDos=0x524e0090;SetLastError(0x524e0091);
+                    release(retiring);deleteWindows=GetLastError();deleteError=*actualError;deleteDos=*actualDos;
+                    if(deleteWindows&&deleteWindows==deleteDos&&deleteError!=EDOM)failure="HOST_CPP_PAIRED_DELETE_REPORTED_FAILURE";
+                }
+            } __except(EXCEPTION_EXECUTE_HANDLER){exception=GetExceptionCode();failure="HOST_CPP_ALLOCATION_OR_DELETE_NATIVE_EXCEPTION";}
+            if(block){void *retiring=block;block=NULL;
+                __try {release(retiring);} __except(EXCEPTION_EXECUTE_HANDLER){exception=GetExceptionCode();failure="HOST_CPP_PAIRED_DELETE_CLEANUP_NATIVE_EXCEPTION";}
+            }
+            /* Successful new/delete need not define LastError. Report their
+             * actual immediate states; only the no-op delete(NULL) is checked
+             * against fixed sentinels. No impossible allocation is requested. */
+            fprintf(failure?stderr:stdout,"HOST_CPP_PRIVATE_RESULT provider=msvcrt.dll kind=%s bytes=%u returned=%llx new_errno=%d new_doserrno=%lu new_LastError=%lu delete_errno=%d delete_doserrno=%lu delete_LastError=%lu storage_only=1\n",
+                    kind?"array":"scalar",zero?0:32,(unsigned long long)returned,newError,newDos,(unsigned long)newWindows,deleteError,deleteDos,(unsigned long)deleteWindows);
+        }
+        if(!failure){completed++;covered|=1u<<kind;}
+    }
+    if(!failure&&!completed)failure="HOST_CPP_NO_REAL_NEW_DELETE_PAIR_EXECUTED";
+    if(!failure&&(error()!=actualError||dos()!=actualDos))failure="HOST_CPP_PROVIDER_ERROR_STORAGE_CHANGED";
+    if(failure)fprintf(stderr,"HOST_CPP_PRIVATE_FAILED stage=%s nativeException=%08lx completed_pairs=%u skipped_pairs=%u\n",failure,(unsigned long)exception,completed,skipped);
+    else fprintf(stdout,"HOST_CPP_PRIVATE_PASS provider=msvcrt.dll actual_named_GPA completed_pairs=%u covered_kind_mask=%u skipped_pairs=%u small_storage_write_read zero_request_paired_delete provider_errno_doserrno_delete_null_LastError no_object_destruction_claim\n",completed,covered,skipped);
+    fflush(failure?stderr:stdout);*actualError=savedError;*actualDos=savedDos;SetLastError(savedWindows);
+    if(failure){load_thread_fail(env,failure);return JNI_FALSE;}return JNI_TRUE;
+}
 /* Native55 selects only this phase. No producer registration is manufactured:
  * an ordinary observed profiler tests ThreadEnd dispatch and Host sources, not
  * the producer-only start wrapper, source lease or image retirement. */
@@ -2073,6 +2137,97 @@ static int load_win32_allocation_check(JNIEnv *env){
     if(failure){fprintf(stderr,"HOST_ALLOCATION_FAILED stage=%s win32=%lu\n",failure,(unsigned long)saved);return load_thread_fail(env,failure);}
     fprintf(stderr,"HOST_ALLOCATION_ACTUAL heap=IAT/dynamic realloc=failure/same-address exception=original virtual=current-process/commit/release\n");
     return 1;
+}
+extern DWORD (WINAPI *__imp_TlsAlloc)(void);
+extern BOOL (WINAPI *__imp_TlsSetValue)(DWORD,LPVOID);
+extern LPVOID (WINAPI *__imp_TlsGetValue)(DWORD);
+extern BOOL (WINAPI *__imp_TlsFree)(DWORD);
+extern DWORD (WINAPI *__imp_FlsAlloc)(PFLS_CALLBACK_FUNCTION);
+extern BOOL (WINAPI *__imp_FlsSetValue)(DWORD,PVOID);
+extern PVOID (WINAPI *__imp_FlsGetValue)(DWORD);
+extern BOOL (WINAPI *__imp_FlsFree)(DWORD);
+extern HANDLE (WINAPI *__imp_HeapCreate)(DWORD,SIZE_T,SIZE_T);
+typedef struct LoadTlsPrivateCase {
+    DWORD tls,fls;void *parentFiber;volatile LONG callbacks,error;int threadValue,fiberValue;
+} LoadTlsPrivateCase;
+typedef struct LoadTlsPrivateValue {LoadTlsPrivateCase *test;int marker;} LoadTlsPrivateValue;
+static VOID WINAPI load_tls_private_callback(PVOID data){
+    LoadTlsPrivateValue *value=(LoadTlsPrivateValue*)data;
+    if(!value||!value->test)return;
+    if(value->marker!=71&&value->marker!=93)InterlockedOr(&value->test->error,1);
+    InterlockedIncrement(&value->test->callbacks);
+}
+static VOID WINAPI load_tls_private_fiber(PVOID data){
+    LoadTlsPrivateValue *value=(LoadTlsPrivateValue*)data;LoadTlsPrivateCase *test=value->test;
+    if(FlsGetValue(test->fls)!=NULL||!FlsSetValue(test->fls,value)||FlsGetValue(test->fls)!=value)
+        InterlockedOr(&test->error,2);
+    test->fiberValue=1;SwitchToFiber(test->parentFiber);
+    InterlockedOr(&test->error,4);SwitchToFiber(test->parentFiber);
+}
+static DWORD WINAPI load_tls_private_thread(PVOID data){
+    LoadTlsPrivateCase *test=(LoadTlsPrivateCase*)data;
+    LoadTlsPrivateValue local={test,71},fiberLocal={test,93};void *other=NULL;
+    SetLastError(0x524e0100);
+    if(TlsGetValue(test->tls)!=NULL||GetLastError()!=ERROR_SUCCESS
+            ||!TlsSetValue(test->tls,&local)||TlsGetValue(test->tls)!=&local)InterlockedOr(&test->error,8);
+    test->threadValue=1;test->parentFiber=ConvertThreadToFiber(NULL);
+    if(!test->parentFiber){InterlockedOr(&test->error,16);return 1;}
+    if(FlsGetValue(test->fls)!=NULL||!FlsSetValue(test->fls,&local))InterlockedOr(&test->error,32);
+    other=CreateFiber(0,load_tls_private_fiber,&fiberLocal);
+    if(other){
+        SwitchToFiber(other);
+        if(!test->fiberValue||FlsGetValue(test->fls)!=&local)InterlockedOr(&test->error,64);
+        DeleteFiber(other);
+        if(test->callbacks!=1)InterlockedOr(&test->error,128);
+    }else InterlockedOr(&test->error,256);
+    if(!FlsFree(test->fls)||test->callbacks!=2)InterlockedOr(&test->error,512);
+    test->fls=FLS_OUT_OF_INDEXES;
+    if(!TlsSetValue(test->tls,NULL)||!ConvertFiberToThread())InterlockedOr(&test->error,1024);
+    return test->error?1:0;
+}
+JNIEXPORT jboolean JNICALL Java_dev_ronova_pro_AuditFixCheck_hostTlsPrivate0(JNIEnv *env,jclass check){
+    (void)check;const char *failure=NULL;DWORD incoming=GetLastError();
+    LoadTlsPrivateCase *test=(LoadTlsPrivateCase*)HeapAlloc(GetProcessHeap(),HEAP_ZERO_MEMORY,sizeof(*test));
+    if(!test)return load_thread_fail(env,"HOST_TLS_FIXTURE_STORAGE");
+    test->tls=TLS_OUT_OF_INDEXES;test->fls=FLS_OUT_OF_INDEXES;HANDLE thread=NULL;int running=0;
+    void *imports[]={(void*)__imp_HeapCreate,(void*)__imp_TlsAlloc,(void*)__imp_TlsSetValue,(void*)__imp_TlsGetValue,
+        (void*)__imp_TlsFree,(void*)__imp_FlsAlloc,(void*)__imp_FlsSetValue,(void*)__imp_FlsGetValue,(void*)__imp_FlsFree};
+    for(unsigned i=0;i<sizeof(imports)/sizeof(imports[0]);i++)if(!load_private_entry(imports[i])){
+        failure="HOST_POOL_TLS_FLS_ACTUAL_IAT_ENTRY";goto tls_done;}
+    HMODULE kernel=GetModuleHandleW(L"kernel32.dll");
+    void *(WINAPI *get2)(DWORD)=kernel?(void *(WINAPI*)(DWORD))GetProcAddress(kernel,"TlsGetValue2"):NULL;
+    if(get2&&!load_private_entry((void*)get2)){failure="HOST_TLS_GET2_ACTUAL_GPA_ENTRY";goto tls_done;}
+    test->tls=TlsAlloc();test->fls=FlsAlloc(load_tls_private_callback);
+    if(test->tls==TLS_OUT_OF_INDEXES||test->fls==FLS_OUT_OF_INDEXES){failure="HOST_TLS_FLS_ACTUAL_SLOT_ALLOCATION";goto tls_done;}
+    if(!TlsSetValue(test->tls,test)){failure="HOST_TLS_ACTUAL_SET";goto tls_done;}
+    SetLastError(0x524e0100);
+    if(TlsGetValue(test->tls)!=test||GetLastError()!=ERROR_SUCCESS){failure="HOST_TLS_NON_NULL_ORIGINAL_RESULT_ERROR";goto tls_done;}
+    if(get2){SetLastError(0x524e0100);if(get2(test->tls)!=test||GetLastError()!=0x524e0100){failure="HOST_TLS_GET2_LAST_ERROR";goto tls_done;}}
+    thread=CreateThread(NULL,0,load_tls_private_thread,test,0,NULL);
+    if(!thread||WaitForSingleObject(thread,10000)!=WAIT_OBJECT_0){
+        /* An uncompleted worker keeps its heap payload/slots. Report this
+         * failure without freeing its storage or forcing thread termination. */
+        failure="HOST_TLS_ACTUAL_THREAD_COMPLETION";
+        running=thread!=NULL;goto tls_done;
+    }
+    if(test->error||!test->threadValue||!test->fiberValue||test->callbacks!=2){
+        fprintf(stderr,"HOST_TLS_FLS_FAILED flags=%ld callbacks=%ld\n",test->error,test->callbacks);
+        failure="HOST_TLS_THREAD_FIBER_ORIGINAL_VALUE_CALLBACK";goto tls_done;}
+    if(TlsGetValue(test->tls)!=test||!TlsSetValue(test->tls,NULL)){failure="HOST_TLS_THREAD_VALUE_ISOLATION";goto tls_done;}
+    SetLastError(0x524e0100);
+    if(TlsGetValue(test->tls)!=NULL||GetLastError()!=ERROR_SUCCESS){failure="HOST_TLS_NULL_IS_SUCCESS";goto tls_done;}
+    if(get2){SetLastError(0x524e0100);if(get2(test->tls)!=NULL||GetLastError()!=0x524e0100){failure="HOST_TLS_GET2_NULL_ERROR";goto tls_done;}}
+tls_done:
+    if(thread)CloseHandle(thread);
+    if(!running){
+        if(test->fls!=FLS_OUT_OF_INDEXES)FlsFree(test->fls);
+        if(test->tls!=TLS_OUT_OF_INDEXES)TlsFree(test->tls);
+        HeapFree(GetProcessHeap(),0,test);
+    }
+    SetLastError(incoming);
+    if(failure){load_thread_fail(env,failure);return JNI_FALSE;}
+    fprintf(stdout,"HOST_TLS_FLS_PASS actual_IAT separate_kernel_threads actual_fiber_switch_DeleteFiber callback_once_per_nonnull_FLS FlsFree NULL_success TlsGetValue2=%s no_Core_producer_authority\n",get2?"actual_GPA_error_preserved":"not_exported");
+    return JNI_TRUE;
 }
 JNIEXPORT void JNICALL Java_dev_ronova_pro_AuditFixCheck_hostWin32Allocations0(JNIEnv *env,jclass check){
     (void)check;load_win32_allocation_check(env);

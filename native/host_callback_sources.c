@@ -61,6 +61,7 @@ static int host_callback_caller_locked(NativeThread *state,void *caller,OwnerLin
     if(!ready){*error=ERROR_NOT_ENOUGH_MEMORY;return 0;}return 1;
 }
 static int host_callback_scopes_locked(NativeThread *state,OwnerLink **owners,int *unknown,DWORD *error){
+    if(!host_tls_capture(state,owners,unknown)){*error=ERROR_NOT_ENOUGH_MEMORY;return 0;}
     for(unsigned i=0;i<state->depth;i++){
         Binding *binding=state->stack[i];
         if(!binding){*error=ERROR_INVALID_DATA;return 0;}
