@@ -2455,6 +2455,34 @@ done:
     if(failure)return load_thread_fail(env,failure);
     fprintf(stdout,"HOST_GNU_CPP_PASS actual_shared_libstdcxx_20_exact_named_ABIs scalar_array_nothrow_sized_aligned sized_aligned real_Cpp23_class_ctor_dtor_array_cookie_virtual_dispatch own_objects_only no_Core_producer_authority no_opaque_class_destructor_inference\n");fflush(stdout);return JNI_TRUE;
 }
+/* The ordinary JNI payload calls an independent real C++23 PMR consumer.
+ * Any SDK coverage is reported from real receipts; original-call success alone
+ * does not certify the separately supplied-source isolated SDK seam. */
+JNIEXPORT jboolean JNICALL Java_dev_ronova_pro_AuditFixCheck_hostCustomAllocatorFields0(JNIEnv *env,jclass check,jstring fixturePath){
+    (void)check;HMODULE module=load_allocator_provider(env,fixturePath);const char *failure=NULL;
+    if(!module)return load_thread_fail(env,"HOST_CUSTOM_FIELDS_EXPLICIT_FIXTURE_LOAD");
+    int (__cdecl *bind)(HMODULE)=(void*)GetProcAddress(module,"audit_allocator_fields_bind");
+    int (__cdecl *run)(void)=(void*)GetProcAddress(module,"audit_allocator_fields_run");
+    uint64_t (__cdecl *current)(unsigned)=(void*)GetProcAddress(module,"audit_allocator_fields_current");
+    int (__cdecl *finish)(void)=(void*)GetProcAddress(module,"audit_allocator_fields_finish");
+    int completed=1;uint64_t coverage=0,context=0,object=0,field=0,buffer=0;DWORD exception=0;
+    if(!bind||!run||!current||!finish){failure="HOST_CUSTOM_FIELDS_ACTUAL_EXPORTS";goto done;}
+    fprintf(stderr,"HOST_CUSTOM_FIELDS_STAGE real_HeapCreate_backed_standard_PMR_pool_Cpp23_consumer\n");fflush(stderr);
+    __try {
+        completed=0;
+        if(!bind(NULL)||!run())failure="HOST_CUSTOM_FIELDS_ORIGINAL_CONSTRUCT_WRITE_VIRTUAL_CALL";
+        if(!failure){coverage=current(18);context=current(12);object=current(0);field=current(2);buffer=current(3);}
+        completed=finish();
+        if(!completed&&!failure)failure="HOST_CUSTOM_FIELDS_ORIGINAL_LIFETIME_RETAINED";
+    } __except(EXCEPTION_EXECUTE_HANDLER){exception=GetExceptionCode();failure="HOST_CUSTOM_FIELDS_REAL_NATIVE_EXCEPTION";}
+done:
+    if(completed&&!FreeLibrary(module)&&!failure)failure="HOST_CUSTOM_FIELDS_APPLICATION_REFERENCE_RETURN";
+    if(failure){fprintf(stderr,"HOST_CUSTOM_FIELDS_FAILED exception=%08lx\n",(unsigned long)exception);return load_thread_fail(env,failure);}
+    fprintf(stdout,"HOST_CUSTOM_FIELDS_PASS actual_HeapCreate_HeapAlloc_HeapFree_standard_unsynchronized_pool_original_allocate_deallocate Cpp23_constructor_scalar_write_owned_payload_virtual_read_destructor ctx=%llu object=%llu field=%llu buffer=%llu coverage=%s no_fabricated_Core_source\n",
+            (unsigned long long)context,(unsigned long long)object,(unsigned long long)field,(unsigned long long)buffer,
+            coverage==3&&context&&object&&field&&buffer?"observed":"uncovered");
+    fflush(stdout);return JNI_TRUE;
+}
 JNIEXPORT void JNICALL Java_dev_ronova_pro_AuditFixCheck_hostWin32Allocations0(JNIEnv *env,jclass check){
     (void)check;load_win32_allocation_check(env);
 }

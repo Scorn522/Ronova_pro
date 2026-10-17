@@ -1,5 +1,26 @@
 # Ronova Pro 当前进度
 
+## 2026-10-17：C 接续——通用分配器接入与 C++ 字段语义
+
+接续 `5cc4543`，仅主工程 `D:\桌面\ronova_GPT`。Java ABI103 / Native ABI93 / SourceMapBridge2 / Storage3 / Journal6，协议 `r3-client-8`。本轮先写齐通用分配器、字段语义及实际 Storage 消费者，再统一构建；没有恢复容器广谱 Hook，没有自身外观、武器注册或源码 ZIP。
+
+新增 `ronova_allocator_state.h/.hpp` 与 CUSTOM 分配类别：真实 caller image、完整来源、context 和独立世代约束 allocate/free/realloc/reset/destroy；没有客户端 owner 列表或清理回调。初次分配必须绑定本次原调用实际观察的 Heap/Virtual/CRT backing，后续只能沿仍存活的准确 backing 或明确父子回执接子块。裸地址、旧父代次、越界及存活兄弟重叠不取得回执；父块和 bulk 操作检查全部后代的活借用、typed lifetime 与在途操作。失败重分配保旧，成功同址也换代，异常或缺失完成继续未决；不会自动释放 CUSTOM 块。默认 PMR 包装器未取得实际 context 时保持原调用，已受控的失败不降级；成功分配后的登记丢失保留 gap，原释放执行一次并保留实际错误状态。
+
+对象 SDK ABI2 保留 ABI1，新增实际标量/枚举成员、嵌套对象及 owned/borrowed buffer 关系。字段回执绑定对象、分配代次与本次构造，明确边界的原赋值只执行一次；pointer、handle、STL/vptr、原子表示及未知类布局不推断为普通字段。外部 buffer 必须已有真实 allocation row，owned 还需相同完整创建来源；活关系阻止原始释放，结束关系后才执行原析构和配对释放。恢复统一检查准确对象与目标代次、全部创建者/读者停止及本次 selection；borrowed 排除同样约束普通已观察行，成功恢复后更新对应字段 epoch。
+
+生产 Storage identity 的两个真实 bool 已接 typed 字段；字符串仅关联公开的 data/size 外部只读缓冲区，原 reserve、增长、析构和释放继续由字符串实现负责，不复制私有表示。SDK 缺失或零回执仍明确为未覆盖。
+
+整包 `build-c-java103-native93-allocator-fields-20261017.log` 首轮 **PASS，1分22秒**：Native93、Storage、Agent/Bootstrap/Core 和重混淆 JAR 均构建成功。实际 C++23 PMR 消费者、Java 检查器与两个既有 Native 夹具编译退出0。两个 Native 夹具的最初命令曾因新输出目录尚未创建而退出，补建目录后成功，原日志保留。
+
+`c-java103-native93-object-v1-20261017.log` **退出0**，仅复查直接受影响的 ABI1：实际 CRT 分配、非零 SDK 回执、字段快照与所选恢复、borrowed 排除、活借用阻析构、原始 free/realloc 拒绝，以及原 C destroy 后配对释放均通过。
+
+`c-java103-native93-host-custom-fields-20261017.log` **退出0，正常 JVM 结束**：实际 premain/Bootstrap/Native93 为 INSTALLED_FULL；真实 HeapCreate/Alloc/Free 支撑标准 unsynchronized_pool_resource，C++ 私有成员原赋值、owned payload 原修改、虚调用、原析构、pool.release 和 HeapDestroy 完成，实际 Storage identity 结果也通过。该普通来源的 context/object/field/buffer 回执均为0，明确报告 coverage=uncovered；不以原调用成功冒充受控语义覆盖。
+
+新隔离路径首轮 `c-java103-native93-custom-fields-state-20261017.log` 失败：夹具在 toolingRestricted 状态通过已拦截 GetProcAddress 解析 SDK getter，被现有 ERROR_BUSY 正确拒绝，尚未进入 SDK。只改夹具准备顺序，在安装 IAT 前缓存实际 getter 地址，随后仍由真实 fixture caller 和明确供给的准确 image/source metadata 调用 SDK；未改生产门禁。仅重编两个受影响夹具，`c-java103-native93-custom-fields-getter-20261017.log` **退出0**：真实标准 PMR/Heap backing、非零 CUSTOM 分配及 typed/scalar/owned 回执、跨 provider 拒绝、活借用/typed 阻实际原 free/reset/realloc、准确标量恢复与 epoch 更新且 payload 不变、原 C++ 析构和实际 pool/Heap 收尾均通过。这里是隔离来源登记 seam，不是实际 Core producer 发现或游戏权限证明；已通过的 ABI1 和普通 Host 未重复运行，没有跑旧矩阵。
+
+匹配候选 `distribution/candidate-c-java103-native93-allocator-fields-wip-20261017` 的两份 JAR 随源码、SDK 与既有报告同步 GitHub。未接入的自定义/静态/内联分配器、不支持的 backing、未声明对象字段、外部私有状态和裸 CPU 调用仍有边界；真实 Core producer 集成、游戏进服和同存档重启 **NOTRUN**，完整 C/B 不标全部完成。
+
+---
 ## 2026-10-17：C 接续——mimalloc、CRT 对齐分配与未适配 C++ 存储
 
 接续 `d7bf44e`，主工程 `D:\桌面\ronova_GPT`。Java ABI102 / Native ABI92 / SourceMapBridge2 / Storage3 / Journal6，协议 `r3-client-8`。本轮先写齐分配器、C++ 和调用衔接源码，再统一编译；没有恢复容器 Hook，没有自身外观、武器注册或源码 ZIP。

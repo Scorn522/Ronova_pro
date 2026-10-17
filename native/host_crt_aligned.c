@@ -85,6 +85,7 @@ static uint64_t host_native_crt_aligned(HostImport *entry,void *caller,uintptr_t
         return host_crt_aligned_refuse(entry->kind,&incoming,ERROR_INVALID_DATA);
     entry=consumed;OwnerLink *owners=NULL;int unknown=0;
     NativeHostCppOriginalScope *cppScope=host_crt_cpp_scope(entry,state,caller);
+    NativeHostArenaOriginalScope *customScope=host_memory_arena_scope(entry,state,caller);
     if(!host_entry_sources_query(entry,state,caller,&owners,NULL,1,&unknown)){
         DWORD error=GetLastError();native_owner_links_free(owners);return host_crt_aligned_refuse(entry->kind,&incoming,error);}
     JNIEnv *env=host_memory_environment(restricted);int kind=entry->kind;
@@ -99,7 +100,7 @@ static uint64_t host_native_crt_aligned(HostImport *entry,void *caller,uintptr_t
         else {bytes=a[replacing?1:0];alignment=a[replacing?2:1];if(offsetApi)offset=a[replacing?3:2];}
     }
     int cleanup=address&&(releasing||replacing&&!bytes)&&(host_memory_cleanup_scope(entry,state)||host_crt_cpp_cleanup_scope(cppScope,state));
-    NativeHostMemoryCall *call=NULL;uint64_t result=0;int originalStarted=0,returnedNormally=0,rawPass=0;
+    NativeHostMemoryCall *call=NULL;uint64_t result=0;int originalStarted=0,returnedNormally=0,rawPass=0,customBacking=0;
     HostCrtThreadErrors returned=incoming;
     __try {
         DWORD refusal=0;
@@ -113,7 +114,10 @@ static uint64_t host_native_crt_aligned(HostImport *entry,void *caller,uintptr_t
                 else {hit=host_memory_output_locked((const void*)(uintptr_t)address,1);
                     if(hit)refusal=hit>0?ERROR_ACCESS_DENIED:ERROR_INVALID_DATA;ReleaseSRWLockExclusive(&native_private_gate);}}
             if(!refusal){int denied=0;
-                call=native_memory_host_cpp_backing_prepare(env,cppScope,(void*)target->release,0,address,
+                if(customScope&&!observing){call=native_memory_host_custom_backing_prepare(env,customScope,NATIVE_MEMORY_HOST_CRT,
+                        (void*)target->release,0,address,replacing?NATIVE_MEMORY_HOST_REALLOCATE:NATIVE_MEMORY_HOST_FREE,owners,unknown,&denied);
+                    customBacking=call!=NULL;}
+                if(!call&&!denied)call=native_memory_host_cpp_backing_prepare(env,cppScope,(void*)target->release,0,address,
                     observing?NATIVE_MEMORY_HOST_OBSERVE:replacing?NATIVE_MEMORY_HOST_REALLOCATE:NATIVE_MEMORY_HOST_FREE,owners,unknown,&denied);
                 if(denied)refusal=ERROR_BUSY;else if(!native_memory_host_sources(call,&owners,&unknown))refusal=ERROR_NOT_ENOUGH_MEMORY;}
         }
@@ -142,6 +146,7 @@ static uint64_t host_native_crt_aligned(HostImport *entry,void *caller,uintptr_t
                     int released=releasing||zeroRelease;
                     int ambiguous=replacing&&address&&!bytes&&!result&&!zeroRelease;
                     if(ambiguous)native_memory_host_abort(env,call);
+                    else if(customBacking)native_memory_host_backing_complete(env,call,bytes,releasing||result!=0||released,released);
                     else native_memory_host_complete(env,call,result,bytes,releasing||result!=0||released,released);
                     call=NULL;
                 }
@@ -150,6 +155,8 @@ static uint64_t host_native_crt_aligned(HostImport *entry,void *caller,uintptr_t
                     result,bytes,owners,unknown||overflow||(replacing&&address!=0));
             if(result&&!observing&&!releasing&&cppScope)native_memory_host_cpp_backing_allocated(env,cppScope,entry->original,
                     (void*)target->release,0,result,bytes,owners,unknown||overflow);
+            if(result&&!observing&&!releasing&&customScope)native_memory_host_custom_backing_allocated(customScope,NATIVE_MEMORY_HOST_CRT,
+                    (void*)target->release,0,result);
         }
     } __finally {
         if(!rawPass){

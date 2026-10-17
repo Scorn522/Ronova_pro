@@ -11,7 +11,7 @@ typedef struct NativeHostCppOriginalScope {
     NativeHostMemoryCall *call;DWORD thread;int cleanup,operation;
     struct NativeHostCppOriginalScope *previous;
 } NativeHostCppOriginalScope;
-enum { NATIVE_MEMORY_HOST_HEAP=1,NATIVE_MEMORY_HOST_VIRTUAL=2,NATIVE_MEMORY_HOST_CRT=3,NATIVE_MEMORY_HOST_IMAGE=4,NATIVE_MEMORY_HOST_CPP=5,NATIVE_MEMORY_HOST_ARENA=6,NATIVE_MEMORY_HOST_OTHER=7 };
+enum { NATIVE_MEMORY_HOST_HEAP=1,NATIVE_MEMORY_HOST_VIRTUAL=2,NATIVE_MEMORY_HOST_CRT=3,NATIVE_MEMORY_HOST_IMAGE=4,NATIVE_MEMORY_HOST_CPP=5,NATIVE_MEMORY_HOST_ARENA=6,NATIVE_MEMORY_HOST_OTHER=7,NATIVE_MEMORY_HOST_CUSTOM=8 };
 enum { NATIVE_MEMORY_HOST_ALLOCATE=0,NATIVE_MEMORY_HOST_REALLOCATE=1,NATIVE_MEMORY_HOST_FREE=2,NATIVE_MEMORY_HOST_DECOMMIT=3,NATIVE_MEMORY_HOST_CONTEXT_FREE=4,NATIVE_MEMORY_HOST_CONTEXT_CREATE=5 };
 enum { NATIVE_MEMORY_HOST_ARENA_RESET=6,NATIVE_MEMORY_HOST_ARENA_UNKNOWN=7,NATIVE_MEMORY_HOST_OBSERVE=8 };
 enum { NATIVE_MEMORY_HOST_CONTEXT_DETACH=9,NATIVE_MEMORY_HOST_THREAD_DETACH=10,NATIVE_MEMORY_HOST_CONTEXT_OBSERVE=11 };
@@ -91,6 +91,14 @@ static void native_memory_host_cpp_allocated(JNIEnv*,NativeHostCppOriginalScope*
 static NativeHostMemoryCall *native_memory_host_cpp_backing_prepare(JNIEnv*,NativeHostCppOriginalScope*,void *release,
         uintptr_t context,uint64_t address,int operation,OwnerLink*,int unknown,int *denied);
 static void native_memory_host_cpp_scope_end(NativeHostCppOriginalScope*);
+/* Only a Host wrapper whose actual caller/consumer matched the current custom
+ * original scope tags a freshly returned Heap/Virtual/CRT backing generation.
+ * The free bridge consumes that exact retained backing and child generations.
+ * Other families and unrelated pointers return NULL/denied==0 unchanged. */
+static void native_memory_host_custom_backing_allocated(NativeHostArenaOriginalScope*,int family,void *release,
+        uintptr_t context,uint64_t address);
+static NativeHostMemoryCall *native_memory_host_custom_backing_prepare(JNIEnv*,NativeHostArenaOriginalScope*,int family,
+        void *release,uintptr_t context,uint64_t address,int operation,OwnerLink*,int unknown,int *denied);
 /* Only the same thread's currently executing real provider function may pair
  * its own observed Windows backing call with this allocator lease. */
 static void native_memory_host_backing_allocated(JNIEnv*,NativeHostArenaOriginalScope*,void *allocator,void *release,

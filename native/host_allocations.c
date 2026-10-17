@@ -36,7 +36,7 @@ static uint64_t host_native_allocation(HostImport *entry,void *caller,uintptr_t 
     }
     JNIEnv *env=host_memory_environment(restricted);NativeHostMemoryCall *tracking=NULL;
     NativeHostArenaOriginalScope *arena=host_memory_arena_scope(entry,state,caller);
-    HANDLE process=NULL;DWORD error=0;uint64_t result=0;int returned=0,denied=0;
+    HANDLE process=NULL;DWORD error=0;uint64_t result=0;int returned=0,denied=0,customBacking=0;
     int heap=entry->kind==HOST_HEAP_ALLOC||entry->kind==HOST_HEAP_REALLOC
             ||entry->kind==HOST_HEAP_FREE||entry->kind==HOST_HEAP_DESTROY||entry->kind==HOST_HEAP_CREATE;
     int cleanup=entry->kind==HOST_HEAP_FREE&&host_memory_cleanup_scope(entry,state);
@@ -76,7 +76,11 @@ static uint64_t host_native_allocation(HostImport *entry,void *caller,uintptr_t 
                     entry->kind==HOST_HEAP_REALLOC?NATIVE_MEMORY_HOST_REALLOCATE:
                     entry->kind==HOST_HEAP_DESTROY?NATIVE_MEMORY_HOST_CONTEXT_FREE:
                     entry->kind==HOST_HEAP_CREATE?NATIVE_MEMORY_HOST_CONTEXT_CREATE:NATIVE_MEMORY_HOST_FREE;
-            tracking=native_memory_host_prepare(env,NATIVE_MEMORY_HOST_HEAP,release,entry->kind==HOST_HEAP_CREATE?0:arguments[0],
+            if(arena&&(operation==NATIVE_MEMORY_HOST_FREE||operation==NATIVE_MEMORY_HOST_REALLOCATE)){
+                tracking=native_memory_host_custom_backing_prepare(env,arena,NATIVE_MEMORY_HOST_HEAP,release,arguments[0],
+                        (uint64_t)(uintptr_t)address,operation,owners,unknown,&denied);customBacking=tracking!=NULL;
+            }
+            if(!tracking&&!denied)tracking=native_memory_host_prepare(env,NATIVE_MEMORY_HOST_HEAP,release,entry->kind==HOST_HEAP_CREATE?0:arguments[0],
                     entry->kind==HOST_HEAP_ALLOC||entry->kind==HOST_HEAP_DESTROY||entry->kind==HOST_HEAP_CREATE?0:(uint64_t)(uintptr_t)address,
                     bytes,operation,owners,unknown,&denied);
             if(denied)error=ERROR_BUSY;
@@ -105,7 +109,9 @@ static uint64_t host_native_allocation(HostImport *entry,void *caller,uintptr_t 
         }
         if(tracking){
             NativeHostMemoryCall *finished=tracking;tracking=NULL;
-            native_memory_host_complete(env,finished,entry->kind==HOST_HEAP_FREE||entry->kind==HOST_HEAP_DESTROY?0:result,bytes,returned&&result!=0,
+            if(customBacking)native_memory_host_backing_complete(env,finished,bytes,returned&&result!=0,
+                    returned&&result!=0&&entry->kind==HOST_HEAP_FREE);
+            else native_memory_host_complete(env,finished,entry->kind==HOST_HEAP_FREE||entry->kind==HOST_HEAP_DESTROY?0:result,bytes,returned&&result!=0,
                     returned&&result!=0&&(entry->kind==HOST_HEAP_FREE||entry->kind==HOST_HEAP_DESTROY));
         }else if(returned&&result&&heap){
             /* No allocation/context token means no captured heap epoch. A late
@@ -114,6 +120,8 @@ static uint64_t host_native_allocation(HostImport *entry,void *caller,uintptr_t 
         }
         if(returned&&result&&entry->kind!=HOST_HEAP_FREE&&entry->kind!=HOST_HEAP_DESTROY)
             InterlockedExchange(&entry->image->privateOpaque,1);
+        if(returned&&result&&arena&&(entry->kind==HOST_HEAP_ALLOC||entry->kind==HOST_HEAP_REALLOC))
+            native_memory_host_custom_backing_allocated(arena,NATIVE_MEMORY_HOST_HEAP,release,arguments[0],result);
         if(returned&&result&&local&&!heap){
             DWORD type=(DWORD)arguments[first+2];
             if((type&MEM_RESERVE)||(!(type&(MEM_RESET|MEM_RESET_UNDO))&&!address)){
@@ -122,6 +130,7 @@ static uint64_t host_native_allocation(HostImport *entry,void *caller,uintptr_t 
                 if(!geometry&&!pages&&base==(const void*)(uintptr_t)result){
                     if(arena)native_memory_host_backing_allocated(env,arena,entry->original,release,result,extent,owners,unknown);
                     else native_memory_host_allocated(env,NATIVE_MEMORY_HOST_VIRTUAL,entry->original,release,0,0,result,extent,owners,unknown);
+                    if(arena)native_memory_host_custom_backing_allocated(arena,NATIVE_MEMORY_HOST_VIRTUAL,release,0,result);
                 }
                 else native_memory_host_unobserved(owners);
             }

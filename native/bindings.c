@@ -2388,6 +2388,7 @@ JNIEXPORT void JNICALL Java_dev_ronova_pro_bootstrap_NativeControl_module0(JNIEn
 #include "buffer.c"
 #include "memory.c"
 #include "host_object_state.c"
+#include "host_allocator_state.c"
 JNIEXPORT jlongArray JNICALL Java_dev_ronova_pro_bootstrap_NativeControl_status0(JNIEnv *env,jclass type,jobject module){
     (void)type;jlong values[7]={native_events,native_jni_ready,0,0,native_failures,0,0};
     AcquireSRWLockShared(&native_records);

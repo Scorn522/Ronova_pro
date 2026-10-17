@@ -1368,3 +1368,157 @@ other_done:
 #undef OTHER_REQUIRE
     return failure?JNI_FALSE:JNI_TRUE;
 }
+
+/* The source/image registration below is supplied by this isolated seam.
+ * The external DLL owns the actual std::pmr pool, Windows backing, polymorphic
+ * object, fields and destructors. SDK receipts and all original calls are real;
+ * this is not evidence that live Core discovery admitted an ordinary DLL. */
+JNIEXPORT jboolean JNICALL Java_dev_ronova_pro_AuditFixCheck_privateCustomAllocatorState0(JNIEnv *env,jclass type,jstring path){
+    const char *failure=NULL;int initialized=0,ran=0,finished=0,denied=0;DWORD fixtureTls=TLS_OUT_OF_INDEXES;
+    HMODULE fixture=NULL,backendPin=NULL,backend=native_image((void*)Java_dev_ronova_pro_AuditFixCheck_privateCustomAllocatorState0);
+    const jchar *characters=NULL;jobject module=NULL;Owner owner={0};OwnerLink selected={.owner=&owner};
+    NativeThread thread={0};NativeLibrary library={0};Binding binding={0};HostImage *image=NULL;
+    NativeHostMemoryCall *probe=NULL;NativeAllocatorContext *context=NULL;
+    NativeAllocatorReceipt *objectReceipt=NULL,*payloadReceipt=NULL;NativeMemoryAllocation *objectRow=NULL,*payloadRow=NULL;
+    uint64_t contextToken=0,contextEpoch=0,objectToken=0,objectGeneration=0,payloadToken=0,payloadGeneration=0,fieldEpoch=0;
+    int (__cdecl *bind)(HMODULE)=NULL;int (__cdecl *run)(void)=NULL;int (__cdecl *hold)(int)=NULL;
+    int (__cdecl *attempt)(void)=NULL;int (__cdecl *finish)(void)=NULL;uint64_t (__cdecl *current)(unsigned)=NULL;
+    unsigned char payloadBefore[32],payloadAfter[32];
+#define CUSTOM_REQUIRE(CONDITION,MESSAGE) do{if(!(CONDITION)){failure=(MESSAGE);goto custom_done;}}while(0)
+    CUSTOM_REQUIRE(path&&backend&&!native_controller&&!native_vm&&native_tls==TLS_OUT_OF_INDEXES&&!native_memory_allocations
+            &&!native_allocator_contexts&&!native_allocator_receipts&&!native_allocator_calls&&!native_object_states
+            &&!host_images&&!native_libraries&&!native_tooling_pin,"custom allocator seam requires an uninstalled isolated backend");
+    characters=(*env)->GetStringChars(env,path,NULL);
+    CUSTOM_REQUIRE(characters,"custom allocator fixture path unavailable");fixture=LoadLibraryW((LPCWSTR)characters);
+    (*env)->ReleaseStringChars(env,path,characters);characters=NULL;
+    CUSTOM_REQUIRE(fixture,"actual external custom allocator/typed-field fixture did not load");
+    bind=(int (__cdecl*)(HMODULE))GetProcAddress(fixture,"audit_allocator_fields_bind");
+    run=(int (__cdecl*)(void))GetProcAddress(fixture,"audit_allocator_fields_run");
+    current=(uint64_t (__cdecl*)(unsigned))GetProcAddress(fixture,"audit_allocator_fields_current");
+    hold=(int (__cdecl*)(int))GetProcAddress(fixture,"audit_allocator_fields_hold");
+    attempt=(int (__cdecl*)(void))GetProcAddress(fixture,"audit_allocator_fields_attempt_free");
+    finish=(int (__cdecl*)(void))GetProcAddress(fixture,"audit_allocator_fields_finish");
+    CUSTOM_REQUIRE(bind&&run&&current&&hold&&attempt&&finish,"actual fixture exports unavailable");
+    native_original=**env;initialized=1;fixtureTls=TlsAlloc();native_tls=fixtureTls;
+    CUSTOM_REQUIRE(fixtureTls!=TLS_OUT_OF_INDEXES&&TlsSetValue(fixtureTls,&thread),"custom allocator fixture TLS unavailable");
+    CUSTOM_REQUIRE(GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS,
+            (LPCWSTR)Java_dev_ronova_pro_AuditFixCheck_privateCustomAllocatorState0,&backendPin)&&backendPin==backend,
+            "custom allocator seam actual control image pin unavailable");
+    IMAGE_DOS_HEADER *backendDos=(IMAGE_DOS_HEADER*)backend;
+    IMAGE_NT_HEADERS64 *backendNt=(IMAGE_NT_HEADERS64*)((unsigned char*)backend+backendDos->e_lfanew);
+    native_tooling_pin=backendPin;native_tooling_image_begin=(uintptr_t)backend;
+    native_tooling_image_end=native_tooling_image_begin+backendNt->OptionalHeader.SizeOfImage;
+    jclass classType=native_original.FindClass(env,"java/lang/Class");
+    jmethodID getModule=classType?native_original.GetMethodID(env,classType,"getModule","()Ljava/lang/Module;"):NULL;
+    if(getModule)module=native_original.CallObjectMethod(env,type,getModule);
+    if(classType)native_original.DeleteLocalRef(env,classType);
+    owner.module=module?native_original.NewWeakGlobalRef(env,module):NULL;owner.producer=1;
+    CUSTOM_REQUIRE(owner.module&&!native_original.ExceptionCheck(env),"custom allocator fixture actual Java module unavailable");
+    library.handle=fixture;library.owners=&selected;library.jni=JNI_TRUE;library.alive=library.complete=1;
+    binding.library=&library;binding.owners=&selected;thread.stack[0]=&binding;thread.depth=1;thread.toolingRestricted=1;
+    native_libraries=&library;
+    /* Resolve the two actual SDK getters before this isolated restricted
+     * callback installs GPA admission. GetApi itself still runs afterwards in
+     * the registered fixture image and must capture its real source scope. */
+    CUSTOM_REQUIRE(bind(backend),"actual fixture SDK getter addresses unavailable");
+    CUSTOM_REQUIRE(host_observe_image_scope(fixture,NULL)&&library.hostImage,"actual mapped fixture imports were not observed");
+    image=library.hostImage;
+    int ranActual=run();ran=1;
+    if(!ranActual){
+        fprintf(stderr,"PRIVATE_CUSTOM_ACTUAL_FAILED stage=%llu ctx=%llu epoch=%llu objectReceipt=%llu objectGen=%llu payloadReceipt=%llu payloadGen=%llu typedRow=%llu scalar=%llu owned=%llu coverage=%llu pending=%llu constructors=%llu destructors=%llu originalDeallocations=%llu lastError=%lu\n",
+                (unsigned long long)current(21),(unsigned long long)current(12),(unsigned long long)current(13),
+                (unsigned long long)current(8),(unsigned long long)current(9),(unsigned long long)current(10),(unsigned long long)current(11),
+                (unsigned long long)current(0),(unsigned long long)current(2),(unsigned long long)current(3),(unsigned long long)current(18),
+                (unsigned long long)current(17),(unsigned long long)current(15),(unsigned long long)current(16),(unsigned long long)current(20),
+                (unsigned long)GetLastError());fflush(stderr);
+    }
+    CUSTOM_REQUIRE(ranActual,"actual custom allocator/typed field SDK did not produce covered original operations");
+    contextToken=current(12);contextEpoch=current(13);objectToken=current(8);objectGeneration=current(9);
+    payloadToken=current(10);payloadGeneration=current(11);fieldEpoch=current(14);
+    context=native_allocator_context_find(contextToken);objectReceipt=native_allocator_receipt_find(objectToken);
+    payloadReceipt=native_allocator_receipt_find(payloadToken);
+    objectRow=objectReceipt?objectReceipt->allocation:NULL;payloadRow=payloadReceipt?payloadReceipt->allocation:NULL;
+    CUSTOM_REQUIRE(contextToken&&contextEpoch&&objectToken&&objectGeneration&&payloadToken&&payloadGeneration
+            &&current(18)==3&&current(2)&&current(3)&&current(5)==42&&current(15)==1&&!current(16)
+            &&context&&context->provider==fixture&&context->epoch==contextEpoch&&native_allocator_current(objectReceipt)
+            &&native_allocator_current(payloadReceipt)&&objectRow&&payloadRow&&objectRow!=payloadRow
+            &&objectRow->hostFamily==NATIVE_MEMORY_HOST_CUSTOM&&payloadRow->hostFamily==NATIVE_MEMORY_HOST_CUSTOM
+            &&objectRow->generation==objectGeneration&&payloadRow->generation==payloadGeneration
+            &&objectRow->typedObjects&&payloadRow->typedObjects&&!objectRow->unknownUse&&!payloadRow->unknownUse
+            &&objectRow->hostCustomParent&&payloadRow->hostCustomParent,"nonzero real custom/typed receipts lost their exact provider or backing generation");
+    CUSTOM_REQUIRE(!native_allocator_state_api.free_begin(payloadToken,payloadGeneration)&&native_allocator_current(payloadReceipt),
+            "a different actual provider consumed a custom allocator receipt");
+    CUSTOM_REQUIRE(hold(1)&&attempt()&&current(20)==0&&native_allocator_current(payloadReceipt)&&payloadRow->users>0,
+            "live typed-buffer alias reached an original PMR deallocate or changed its receipt");
+    probe=native_memory_host_custom_prepare(env,(void*)fixture,(uintptr_t)contextToken,contextEpoch,NULL,0,NULL,0,
+            NATIVE_MEMORY_HOST_ARENA_RESET,&selected,&denied);
+    CUSTOM_REQUIRE(!probe&&denied&&objectRow->alive&&payloadRow->alive&&context->epoch==contextEpoch,
+            "custom pool reset admission ignored an actual live alias/typed object");
+    CUSTOM_REQUIRE(hold(0),"actual typed-buffer alias could not close");
+    probe=native_memory_host_custom_prepare(env,(void*)fixture,(uintptr_t)contextToken,contextEpoch,objectRow,objectGeneration,NULL,0,
+            NATIVE_MEMORY_HOST_REALLOCATE,&selected,&denied);
+    CUSTOM_REQUIRE(!probe&&denied&&objectRow->alive&&objectRow->generation==objectGeneration,
+            "raw custom realloc bypassed an actual constructed-object lifetime");
+    CUSTOM_REQUIRE(native_memory_read(current(6),payloadBefore,sizeof(payloadBefore)),"actual owned payload bytes unavailable");
+    uint64_t scalar=current(4);NativeMemoryRange *range=NULL;
+    EnterCriticalSection(&objectRow->gate);
+    for(NativeMemoryRange *entry=objectRow->ranges;entry;entry=entry->next)
+        if(objectRow->address+entry->start==scalar&&entry->length==sizeof(uint64_t)){range=entry;break;}
+    owner.stopped=1;
+    int restored=range&&native_object_state_restorable(objectRow,range,&selected)&&native_memory_restore_range(objectRow,range,&selected);
+    owner.stopped=0;LeaveCriticalSection(&objectRow->gate);
+    CUSTOM_REQUIRE(restored&&current(5)==7&&current(14)>fieldEpoch&&native_memory_read(current(6),payloadAfter,sizeof(payloadAfter))
+            &&!memcmp(payloadBefore,payloadAfter,sizeof(payloadBefore))&&current(19)==7+32*64+496,
+            "actual typed scalar restore failed, lost its epoch, or copied an owned payload/object representation");
+    CUSTOM_REQUIRE(finish(),"actual destructor/custom deallocate/pool release/HeapDestroy failed to close");finished=1;
+    CUSTOM_REQUIRE(context->retired&&!native_allocator_current(objectReceipt)&&!native_allocator_current(payloadReceipt)
+            &&!objectRow->alive&&!payloadRow->alive&&!objectRow->typedObjects&&!payloadRow->typedObjects
+            &&!native_allocator_calls&&!native_object_states&&!native_object_state_calls,
+            "actual custom allocator/object closure left a current receipt, typed lifetime or original lease");
+    fprintf(stdout,"PRIVATE_CUSTOM_ALLOCATOR_STATE_PASS supplied_exact_image_source actual_external_PMR_pool observed_Heap_backing nonzero_custom_and_typed_receipts cross_provider_refused live_borrow_and_typed_block_original_free_reset_realloc exact_scalar_restore_epoch payload_unchanged actual_destructor_pool_release_HeapDestroy no_Core_discovery_claim\n");fflush(stdout);
+custom_done:
+    if(characters)(*env)->ReleaseStringChars(env,path,characters);
+    if(initialized){
+        if(native_original.ExceptionCheck(env))native_original.ExceptionClear(env);owner.stopped=0;
+        if(probe)native_memory_host_cancel(probe);
+        if(ran&&!finished&&hold&&finish){hold(0);finished=finish();}
+        while(native_allocator_calls){NativeAllocatorCall *entry=native_allocator_calls;native_allocator_calls=entry->next;
+            if(thread.hostArenaOriginal==&entry->scope)thread.hostArenaOriginal=entry->scope.previous;
+            native_memory_host_abort(env,entry->memory);free(entry);}
+        for(HostImage *item=host_images;item;item=item->next){
+            for(HostImport *entry=item->imports;entry;entry=entry->next)
+                if(entry->slotOwned&&entry->slot&&__atomic_load_n(entry->slot,__ATOMIC_ACQUIRE)==entry->entry)
+                    host_exchange_import(entry,entry->entry,entry->original);
+            item->live=0;
+        }
+        /* Failure disposal clears only this fixture's metadata. Successful
+         * assertions above require the real original operations to close it. */
+        while(native_object_state_calls){NativeObjectStateCall *entry=native_object_state_calls;native_object_state_calls=entry->next;
+            native_owner_links_free(entry->write.sources);native_memory_image_release(entry->write.image);free(entry);}
+        while(native_object_states){NativeObjectState *entry=native_object_states;native_object_states=entry->next;native_object_state_dispose(entry);}
+        while(native_memory_allocations){NativeMemoryAllocation *entry=native_memory_allocations;native_memory_allocations=entry->next;
+            native_memory_released(env,entry);native_memory_reap_references(env,entry);native_owner_links_free(entry->sources);
+            native_owner_links_free(entry->readers);native_owner_links_free(entry->preserved);
+            while(entry->interests){NativeMemoryInterest *interest=entry->interests;entry->interests=interest->next;free(interest);}
+            DeleteCriticalSection(&entry->gate);free(entry);}
+        while(native_allocator_receipts){NativeAllocatorReceipt *entry=native_allocator_receipts;native_allocator_receipts=entry->next;free(entry);}
+        while(native_allocator_contexts){NativeAllocatorContext *entry=native_allocator_contexts;native_allocator_contexts=entry->next;
+            while(entry->anchors){NativeHostCustomAnchor *anchor=entry->anchors;entry->anchors=anchor->next;free(anchor);}
+            native_owner_links_free(entry->sources);if(entry->pin)host_real_free_library(entry->pin);free(entry);}
+        while(native_memory_arena_contexts){NativeHostArenaContext *entry=native_memory_arena_contexts;native_memory_arena_contexts=entry->next;native_owner_links_free(entry->sources);free(entry);}
+        while(native_memory_arena_providers){NativeHostArenaProvider *entry=native_memory_arena_providers;native_memory_arena_providers=entry->next;free(entry);}
+        while(native_memory_host_contexts){NativeHostMemoryContext *entry=native_memory_host_contexts;native_memory_host_contexts=entry->next;native_owner_links_free(entry->sources);free(entry);}
+        native_memory_host_context_epoch=0;native_allocator_sequence=0;native_owner_links_free(native_memory_unknown);native_memory_unknown=NULL;
+        host_images=NULL;native_libraries=NULL;
+        native_tooling_pin=NULL;native_tooling_image_begin=native_tooling_image_end=0;
+        if(backendPin)host_real_free_library(backendPin);
+        if(owner.module)native_original.DeleteWeakGlobalRef(env,owner.module);if(module)native_original.DeleteLocalRef(env,module);
+        native_private_unregister(&thread.jniRange);
+        if(fixtureTls!=TLS_OUT_OF_INDEXES){TlsSetValue(fixtureTls,NULL);TlsFree(fixtureTls);}native_tls=TLS_OUT_OF_INDEXES;
+        memset(&native_original,0,sizeof(native_original));
+    }
+    if(fixture)host_real_free_library(fixture);
+    if(failure)audit_physical_failure(env,failure);
+#undef CUSTOM_REQUIRE
+    return failure?JNI_FALSE:JNI_TRUE;
+}

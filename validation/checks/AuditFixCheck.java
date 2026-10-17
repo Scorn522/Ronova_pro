@@ -64,6 +64,10 @@ public final class AuditFixCheck {
             System.load(java.nio.file.Path.of(System.getProperty("ronova.pro.audit.native")).toAbsolutePath().toString());
             require(privateOtherState0(),"allocator context or C++ original-call lifetime failed");return;
         }
+        if(args.length==1&&args[0].equals("private-custom-allocator-fields-seam")){
+            System.load(java.nio.file.Path.of(System.getProperty("ronova.pro.audit.native")).toAbsolutePath().toString());
+            require(privateCustomAllocatorState0(System.getProperty("ronova.pro.audit.allocatorFields")),"custom allocator or typed field lifetime failed");return;
+        }
         if(args.length==1&&args[0].equals("buffer-wrap")){bufferWrap();return;}
         if(args.length==1&&args[0].equals("buffer-font")){bufferFont();return;}
         if(args.length==1&&args[0].equals("native-image-srg")){nativeImageSrg();return;}
@@ -945,6 +949,8 @@ public final class AuditFixCheck {
     private static native boolean hostGnuCpp0(String providerPath,String classDllPath);
     private static native boolean hostCrtAligned0();
     private static native boolean privateOtherState0();
+    private static native boolean privateCustomAllocatorState0(String fixtureDllPath);
+    private static native boolean hostCustomAllocatorFields0(String fixtureDllPath);
     private static native void hostRawUnsafe0();
     private static native void hostModuleRelease0(String controlDll);
     private static native void hostModuleReleaseThread0(String controlDll);
@@ -955,6 +961,20 @@ public final class AuditFixCheck {
     private static void hostThreadCreate(){
         System.load(java.nio.file.Path.of(System.getProperty("ronova.pro.audit.thread.native")).toAbsolutePath().toString());
         String phase=System.getProperty("ronova.pro.audit.thread.phase","thread-create");
+        if(phase.equals("allocator-fields")){
+            require(hostCustomAllocatorFields0(System.getProperty("ronova.pro.audit.allocatorFields")),"actual custom allocator and typed field consumer failed");
+            require(StorageNative.available()&&StorageNative.abi0()==3,"actual C++ storage consumer DLL unavailable");
+            var file=java.nio.file.Path.of(System.getProperty("java.io.tmpdir"),"ronova-typed-identity-"+UUID.randomUUID()+".dat");
+            try{
+                java.nio.file.Files.createFile(file);
+                try(var stream=new java.io.FileInputStream(file.toFile())){
+                    require(StorageNative.identity(stream.getFD(),file.toString())!=null,"typed C++ identity changed original result");
+                }
+                System.out.println("HOST_TYPED_STORAGE_IDENTITY_PASS actual_private_bool_fields public_string_buffers original_result_destructor no_producer_coverage_claim");
+            }catch(java.io.IOException failure){throw new AssertionError("actual typed C++ storage consumer failed",failure);}
+            finally{try{java.nio.file.Files.deleteIfExists(file);}catch(java.io.IOException failure){throw new AssertionError("actual identity fixture close failed",failure);}}
+            return;
+        }
         if(phase.equals("gnu-cpp")){
             require(hostGnuCpp0(System.getProperty("ronova.pro.audit.gnuCpp"),System.getProperty("ronova.pro.audit.cppClass")),"actual GNU C++ boundary failed");
             return;
