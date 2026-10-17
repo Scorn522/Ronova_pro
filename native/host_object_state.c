@@ -44,37 +44,105 @@ static NativeObjectStateErrors native_object_state_errors(void){
 static void native_object_state_errors_restore(NativeObjectStateErrors incoming){_doserrno=incoming.dos;errno=incoming.crt;SetLastError(incoming.windows);}
 #define NATIVE_OBJECT_RETURN(value) do {native_object_state_errors_restore(incoming);return (value);}while(0)
 
-/* Source queries must not replace a real pending Java exception. The SDK's
- * caller, its runtime scopes and TLS/FLS retain the provenance; no provider
- * supplied source list, cleanup callback or ambient bypass is accepted. */
+static int native_state_core_sources(OwnerLink *actual,OwnerLink *complete){
+    int core=0;
+    for(OwnerLink *entry=actual;entry;entry=entry->next){
+        OwnerLink *found=complete;while(found&&found->owner!=entry->owner)found=found->next;
+        if(!found)return 0;
+        if(InterlockedCompareExchange(&entry->owner->coreState,0,0))core=1;
+    }
+    return core;
+}
+/* Both directories are held. A Core frame in a different DLL is not a
+ * relationship to this caller. Only its real binding/library/load can qualify
+ * the observed image, with every contributor retained in the complete set. */
+static int native_state_core_caller_locked(NativeThread *state,void *caller,OwnerLink *sources){
+    uintptr_t address=(uintptr_t)caller;HostImage *image=NULL;
+    for(HostImage *entry=host_images;entry;entry=entry->next){
+        uintptr_t base=(uintptr_t)entry->handle;
+        if(!caller||address<base||address-base>=entry->size||!host_callback_image_current_locked(state,entry))continue;
+        if(image&&image!=entry)return 0;image=entry;
+    }
+    if(!image||!image->checked||image->failed)return 0;
+    uintptr_t base=(uintptr_t)image->handle;
+    for(unsigned i=state->depth;i>0;i--){Binding *binding=state->stack[i-1];
+        uintptr_t original=binding?(uintptr_t)binding->original:0;
+        if(!binding||binding->hostUnknown||original<base||original-base>=image->size)continue;
+        if((binding->hostImage==image||host_callback_library_current_locked(state,binding->library,image)
+                    ||host_module_load_current(binding->hostLoad,image))
+                &&native_state_core_sources(binding->owners,sources))return 1;
+    }
+    for(NativeLibraryScope *scope=state->library;scope;scope=scope->previous)
+        if(host_callback_library_current_locked(state,scope->library,image)
+                &&native_state_core_sources(scope->library->owners,sources))return 1;
+    NativeLibrary *worker=host_thread_worker_library(state,image->handle);
+    if(worker&&host_callback_library_current_locked(state,worker,image)
+            &&native_state_core_sources(worker->owners,sources))return 1;
+    if(image->loads){
+        OwnerLink *actual=NULL;HostLibraryLoad *selected=NULL;int unknown=0;
+        int ready=host_module_select_locked(image,state,NULL,&actual,&selected,&unknown)==1
+                &&!unknown&&selected&&selected->leaseComplete&&host_module_load_current(selected,image)
+                &&native_state_core_sources(selected->owners,sources);
+        native_owner_links_free(actual);if(ready)return 1;
+    }
+    NativeLibrary *selected=NULL;
+    for(NativeLibrary *library=native_libraries;library;library=library->next)
+        if(library->hostImage==image&&host_library_current(library,image->handle)){
+            if(selected&&selected!=library)return 0;selected=library;
+        }
+    return selected&&native_state_core_sources(selected->owners,sources);
+}
+/* Shared with actual Host state consumers. This performs no Java query and
+ * grants no operation/target/free authority. The caller still checks stopped
+ * sources, provider/type, exact row generation and its actual original call. */
+static int native_state_caller_eligible(NativeThread *state,void *caller,OwnerLink *sources,int unknown){
+    if(!state||!caller||!sources||unknown)return 0;
+    int restricted=state->heapCallback||state->toolingRestricted||state->vmDetaching||state->vmThreadEnding
+            ||state->hostUnloadImage||state->hostRelease||state->hostLoad&&state->hostLoad->calling||host_loader_callout();
+    if(restricted){if(!TryAcquireSRWLockShared(&host_imports))return 0;}
+    else AcquireSRWLockShared(&host_imports);
+    if(restricted){if(!TryAcquireSRWLockShared(&native_records)){ReleaseSRWLockShared(&host_imports);return 0;}}
+    else AcquireSRWLockShared(&native_records);
+    OwnerLink *actual=NULL;DWORD error=ERROR_INVALID_DATA;
+    int ready=host_callback_caller_locked(state,caller,&actual,&unknown,&error)
+            &&!unknown&&host_module_sources_cover(sources,actual)
+            &&(native_has_producer(sources)||native_state_core_caller_locked(state,caller,sources));
+    ReleaseSRWLockShared(&native_records);ReleaseSRWLockShared(&host_imports);
+    native_owner_links_free(actual);return ready;
+}
+/* Source queries must not replace a real pending Java exception. Keep the
+ * complete actual carrier/consumer set used by Host allocation rows; removing
+ * non-producer contributors makes exact real-world ownership incomparable. */
 static int native_object_state_sources(void *caller,OwnerLink **sources,int *unknown,JNIEnv **environment){
     NativeThread *state=native_tls==TLS_OUT_OF_INDEXES?NULL:(NativeThread*)TlsGetValue(native_tls);
     int restricted=state&&(state->heapCallback||state->toolingRestricted||state->vmDetaching||state->vmThreadEnding
-            ||state->hostUnloadImage||state->hostRelease||state->hostLoad&&state->hostLoad->calling);
+            ||state->hostUnloadImage||state->hostRelease||state->hostLoad&&state->hostLoad->calling)||host_loader_callout();
     JNIEnv *env=host_memory_environment(restricted);if(environment)*environment=env;
     if(!state){*unknown=1;return 0;}
+    if(restricted||!env){if(environment)*environment=NULL;}
+    if(restricted||!env){if(!TryAcquireSRWLockShared(&host_imports)){*unknown=1;return 0;}}
+    else AcquireSRWLockShared(&host_imports);
+    if(restricted||!env){if(!TryAcquireSRWLockShared(&native_records)){ReleaseSRWLockShared(&host_imports);*unknown=1;return 0;}}
+    else AcquireSRWLockShared(&native_records);
+    DWORD error=ERROR_INVALID_DATA;
+    int ready=host_callback_caller_locked(state,caller,sources,unknown,&error);
+    if(ready)ready=host_callback_scopes_locked(state,sources,unknown,&error);
+    for(unsigned i=0;i<state->depth;i++)if(state->stack[i]&&state->stack[i]->hostUnknown)*unknown=1;
+    for(NativeRegistration *scope=state->registration;scope&&ready;scope=scope->previous){
+        ready=native_owner_merge(sources,scope->owners);if(scope->unknown)*unknown=1;
+    }
+    ReleaseSRWLockShared(&native_records);ReleaseSRWLockShared(&host_imports);
     if(restricted||!env){
-        if(environment)*environment=NULL;
-        if(!TryAcquireSRWLockShared(&host_imports)){*unknown=1;return 0;}
-        if(!TryAcquireSRWLockShared(&native_records)){ReleaseSRWLockShared(&host_imports);*unknown=1;return 0;}
-        DWORD error=ERROR_INVALID_DATA;
-        int ready=host_callback_caller_locked(state,caller,sources,unknown,&error);
-        if(ready)ready=host_callback_scopes_locked(state,sources,unknown,&error);
-        for(unsigned i=0;i<state->depth;i++)if(state->stack[i]&&state->stack[i]->hostUnknown)*unknown=1;
-        for(NativeRegistration *scope=state->registration;scope&&ready;scope=scope->previous){
-            ready=native_owner_merge(sources,scope->owners);if(scope->unknown)*unknown=1;
-        }
-        host_producers(sources);
-        ReleaseSRWLockShared(&native_records);ReleaseSRWLockShared(&host_imports);
-        if(!ready||!*sources)*unknown=1;
-        return ready;
+        if(!ready||!*sources||*unknown||!native_state_caller_eligible(state,caller,*sources,*unknown)){*unknown=1;return 0;}
+        return 1;
     }
     jthrowable pending=env?native_original.ExceptionOccurred(env):NULL;
     if(pending)native_original.ExceptionClear(env);
-    int ready=host_capture_query(env,state,caller,sources,unknown);
+    if(ready)ready=host_capture_all_query(env,state,caller,sources,unknown);
     if(env&&native_original.ExceptionCheck(env)){native_original.ExceptionClear(env);ready=0;}
     if(pending){native_original.Throw(env,pending);native_original.DeleteLocalRef(env,pending);}
-    if(!ready||!*sources)*unknown=1;return ready;
+    if(!ready||!*sources||*unknown||!native_state_caller_eligible(state,caller,*sources,*unknown)){*unknown=1;return 0;}
+    return 1;
 }
 static int native_object_state_range(uint64_t address,uint64_t bytes){
     if(!address||!bytes||bytes>SIZE_MAX||bytes-1>UINTPTR_MAX-(uintptr_t)address)return 0;

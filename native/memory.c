@@ -1513,6 +1513,65 @@ static int native_memory_read_sources(NativeMemoryWrite *read,OwnerLink **source
         if(start<range->start+range->length&&range->start<start+read->length)ready=native_memory_revision_sources(sources,range->revision);
     return ready;
 }
+/* Internal CNG range lifetime only. This is not a public address-to-ownership
+ * adapter. Missing stack/JNI/provider storage stays uncovered, with no row.
+ * Hash objects remain opaque; original CNG operations alone mutate them. */
+struct NativeHostCryptoSpan {NativeMemoryAllocation *allocation;uint64_t generation;int writing;};
+static int native_memory_crypto_restricted(void){
+    NativeThread *state=native_tls==TLS_OUT_OF_INDEXES?NULL:(NativeThread*)TlsGetValue(native_tls);
+    return host_loader_callout()||(state&&(state->heapCallback||state->toolingRestricted||state->vmDetaching||state->vmThreadEnding
+            ||state->hostUnloadImage||state->hostRelease||state->hostLoad&&state->hostLoad->calling));
+}
+static void native_memory_crypto_unobserved(OwnerLink *owners,int restricted){
+    if(restricted){if(!TryAcquireSRWLockExclusive(&native_memory_records)){InterlockedIncrement(&native_failures);return;}}
+    else AcquireSRWLockExclusive(&native_memory_records);
+    if(!native_owner_merge(&native_memory_unknown,owners))InterlockedIncrement(&native_failures);
+    ReleaseSRWLockExclusive(&native_memory_records);
+}
+static NativeHostCryptoSpan *native_memory_crypto_span(uint64_t address,uint64_t bytes,OwnerLink *owners,int mode,
+        OwnerLink **observed,int *unknown,int *denied){
+    if(!address||!bytes)return NULL;
+    NativeMemoryAllocation *allocation=NULL;*denied=0;int restricted=native_memory_crypto_restricted();
+    if(restricted){if(!TryAcquireSRWLockShared(&native_memory_records)){*denied=1;return NULL;}}
+    else AcquireSRWLockShared(&native_memory_records);
+    allocation=native_memory_find(address,bytes,0);
+    if(!allocation&&native_memory_find(address,1,0))*denied=1;
+    ReleaseSRWLockShared(&native_memory_records);
+    if(*denied)return NULL;
+    if(!allocation){*unknown=1;return NULL;}
+    if(restricted&&!TryEnterCriticalSection(&allocation->gate)){*denied=1;return NULL;}
+    if(!restricted)EnterCriticalSection(&allocation->gate);
+    int ready=allocation->alive&&!allocation->sealed&&!allocation->retiring&&!allocation->changing&&!allocation->restoring
+            &&!allocation->writers&&address>=allocation->address&&bytes<=allocation->bytes&&address-allocation->address<=allocation->bytes-bytes;
+    if(mode)ready=ready&&!allocation->users&&!allocation->reading&&!native_memory_buffer_aliases(NULL,allocation);
+    NativeMemoryWrite read={0};read.allocation=allocation;read.address=address;read.length=bytes;read.generation=allocation->generation;
+    if(ready&&!native_memory_read_sources(&read,observed)){*unknown=1;ready=0;}
+    if(ready&&native_owner_stopped(*observed))ready=0;
+    NativeHostCryptoSpan *span=ready?(NativeHostCryptoSpan*)calloc(1,sizeof(*span)):NULL;
+    if(span){
+        span->allocation=allocation;span->generation=allocation->generation;span->writing=mode==2;
+        int locked=restricted?TryAcquireSRWLockExclusive(&native_memory_records):(AcquireSRWLockExclusive(&native_memory_records),1);
+        if(locked){
+            InterlockedIncrement(&allocation->users);InterlockedIncrement(span->writing?&allocation->writers:&allocation->reading);
+            if(!native_owner_merge(&allocation->readers,owners)||!owners)InterlockedExchange(&allocation->unknownReaders,1);
+            if(mode)InterlockedExchange(&allocation->opaque,1);
+            ReleaseSRWLockExclusive(&native_memory_records);
+            *unknown|=read.opaque||allocation->unknownUse||allocation->unknownReaders;
+        }else {free(span);span=NULL;*denied=1;}
+    }else *denied=1;
+    LeaveCriticalSection(&allocation->gate);return span;
+}
+static void native_memory_crypto_span_end(NativeHostCryptoSpan *span){
+    if(!span)return;NativeMemoryAllocation *allocation=span->allocation;int restricted=native_memory_crypto_restricted();
+    /* Row identities are immutable tombstones. Counter-only release needs no
+     * allocation gate, and the held users count prevents actual retirement. */
+    if(restricted){if(!TryAcquireSRWLockShared(&native_memory_records)){InterlockedIncrement(&native_failures);return;}}
+    else AcquireSRWLockShared(&native_memory_records);
+    if(allocation->generation==span->generation){
+        InterlockedDecrement(span->writing?&allocation->writers:&allocation->reading);InterlockedDecrement(&allocation->users);
+    }else {InterlockedExchange(&allocation->unknownUse,1);InterlockedIncrement(&native_failures);}
+    ReleaseSRWLockShared(&native_memory_records);free(span);
+}
 JNIEXPORT jlong JNICALL Java_dev_ronova_pro_bootstrap_NativeControl_memoryWriteBegin0(JNIEnv *env,jclass type,jlong address,jlong length,jobjectArray contributors,jboolean reading,jboolean snapshot){
     if(!native_memory_authority(env,type)){native_refuse(env,"ACTUAL_NATIVE_MEMORY_WRITER_REQUIRED");return 0;}
     NativeThread *state=native_thread();if(!state||length<0){native_refuse(env,"NATIVE_MEMORY_SCOPE_UNAVAILABLE");return 0;}

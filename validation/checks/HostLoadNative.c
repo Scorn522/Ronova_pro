@@ -2,6 +2,7 @@
  * failing and support DLLs from this source; no backend registry is fabricated. */
 #include <jni.h>
 #include <windows.h>
+#include <bcrypt.h>
 #include <stdint.h>
 #include <limits.h>
 #include <stdio.h>
@@ -2459,7 +2460,15 @@ done:
  * Any SDK coverage is reported from real receipts; original-call success alone
  * does not certify the separately supplied-source isolated SDK seam. */
 JNIEXPORT jboolean JNICALL Java_dev_ronova_pro_AuditFixCheck_hostCustomAllocatorFields0(JNIEnv *env,jclass check,jstring fixturePath){
-    (void)check;HMODULE module=load_allocator_provider(env,fixturePath);const char *failure=NULL;
+    jobject owner=(*env)->GetModule(env,check);jclass moduleType=owner?(*env)->GetObjectClass(env,owner):NULL;
+    jmethodID moduleName=moduleType?(*env)->GetMethodID(env,moduleType,"getName","()Ljava/lang/String;"):NULL;
+    jstring name=moduleName?(*env)->CallObjectMethod(env,owner,moduleName):NULL;
+    const char *text=name?(*env)->GetStringUTFChars(env,name,NULL):NULL;
+    int requireCore=text&&!strcmp(text,"ronova_pro");
+    if(text)(*env)->ReleaseStringUTFChars(env,name,text);
+    if(name)(*env)->DeleteLocalRef(env,name);if(moduleType)(*env)->DeleteLocalRef(env,moduleType);if(owner)(*env)->DeleteLocalRef(env,owner);
+    if((*env)->ExceptionCheck(env))return JNI_FALSE;
+    HMODULE module=load_allocator_provider(env,fixturePath);const char *failure=NULL;
     if(!module)return load_thread_fail(env,"HOST_CUSTOM_FIELDS_EXPLICIT_FIXTURE_LOAD");
     int (__cdecl *bind)(HMODULE)=(void*)GetProcAddress(module,"audit_allocator_fields_bind");
     int (__cdecl *run)(void)=(void*)GetProcAddress(module,"audit_allocator_fields_run");
@@ -2476,6 +2485,8 @@ JNIEXPORT jboolean JNICALL Java_dev_ronova_pro_AuditFixCheck_hostCustomAllocator
         if(!failure){coverage=current(18);context=current(12);object=current(0);field=current(2);buffer=current(3);}
         if(!failure&&(!containersRun()||!containersMutate()))failure="HOST_CUSTOM_FIELDS_ORIGINAL_STD_ALLOCATOR_VECTOR_STRING_MUTATIONS";
         if(!failure){standard=current(22);vector=current(24);string=current(25);stale=current(30);}
+        if(!failure&&requireCore&&(coverage!=3||!context||!object||!field||!buffer||!standard||!vector||!string||stale!=4))
+            failure="HOST_BOUND_CORE_REAL_STATE_RECEIPTS_MISSING";
         completed=finish();
         if(!completed&&!failure)failure="HOST_CUSTOM_FIELDS_ORIGINAL_LIFETIME_RETAINED";
     } __except(EXCEPTION_EXECUTE_HANDLER){exception=GetExceptionCode();failure="HOST_CUSTOM_FIELDS_REAL_NATIVE_EXCEPTION";}
@@ -2487,6 +2498,70 @@ done:
             coverage==3&&context&&object&&field&&buffer?"observed":"uncovered",
             (unsigned long long)standard,(unsigned long long)vector,(unsigned long long)string,(unsigned long long)stale,
             standard&&vector&&string&&stale==4?"observed":"uncovered");
+    fflush(stdout);return JNI_TRUE;
+}
+JNIEXPORT jboolean JNICALL Java_dev_ronova_pro_AuditFixCheck_hostCngHash0(JNIEnv *env,jclass check){
+    (void)check;HMODULE provider=LoadLibraryExW(L"bcrypt.dll",NULL,LOAD_LIBRARY_SEARCH_SYSTEM32);
+    if(!provider)return load_thread_fail(env,"CNG_ACTUAL_PROVIDER_LOAD")?JNI_TRUE:JNI_FALSE;
+    typedef NTSTATUS (WINAPI *Open)(BCRYPT_ALG_HANDLE*,LPCWSTR,LPCWSTR,ULONG);
+    typedef NTSTATUS (WINAPI *Create)(BCRYPT_ALG_HANDLE,BCRYPT_HASH_HANDLE*,PUCHAR,ULONG,PUCHAR,ULONG,ULONG);
+    typedef NTSTATUS (WINAPI *Data)(BCRYPT_HASH_HANDLE,PUCHAR,ULONG,ULONG);
+    typedef NTSTATUS (WINAPI *Finish)(BCRYPT_HASH_HANDLE,PUCHAR,ULONG,ULONG);
+    typedef NTSTATUS (WINAPI *Destroy)(BCRYPT_HASH_HANDLE);
+    typedef NTSTATUS (WINAPI *Close)(BCRYPT_ALG_HANDLE,ULONG);
+    const char *names[]={"BCryptOpenAlgorithmProvider","BCryptCreateHash","BCryptHashData","BCryptFinishHash","BCryptDestroyHash","BCryptCloseAlgorithmProvider"};
+    void *entries[6]={0};const char *failure=NULL;
+    for(unsigned i=0;i<6;i++){entries[i]=(void*)GetProcAddress(provider,names[i]);if(!load_private_entry(entries[i])){failure="CNG_ACTUAL_GPA_NOT_CONTROLLED";break;}}
+    Open open=(Open)entries[0];Create create=(Create)entries[1];Data data=(Data)entries[2];
+    Finish finish=(Finish)entries[3];Destroy destroy=(Destroy)entries[4];Close close=(Close)entries[5];
+    static const BYTE expected[32]={0xba,0x78,0x16,0xbf,0x8f,0x01,0xcf,0xea,0x41,0x41,0x40,0xde,0x5d,0xae,0x22,0x23,
+        0xb0,0x03,0x61,0xa3,0x96,0x17,0x7a,0x9c,0xb4,0x10,0xff,0x61,0xf2,0x00,0x15,0xad};
+    BYTE input[]={'a','b','c'},digest[32];BCRYPT_ALG_HANDLE algorithm=NULL;BCRYPT_HASH_HANDLE hash=NULL;
+    HANDLE heap=NULL;PUCHAR external=NULL;int externalHeld=0;
+    for(unsigned kind=0;kind<2&&!failure;kind++){
+        NTSTATUS status=kind?open(&algorithm,BCRYPT_SHA256_ALGORITHM,NULL,BCRYPT_HASH_REUSABLE_FLAG)
+                :BCryptOpenAlgorithmProvider(&algorithm,BCRYPT_SHA256_ALGORITHM,NULL,0);
+        if(status<0||!algorithm){failure="CNG_ORIGINAL_OPEN";break;}
+        status=kind?create(algorithm,&hash,NULL,0,NULL,0,0):BCryptCreateHash(algorithm,&hash,NULL,0,NULL,0,0);
+        if(status<0||!hash){failure="CNG_ORIGINAL_CREATE";break;}
+        for(unsigned round=0;round<(kind?2u:1u);round++){
+            status=kind?data(hash,input,sizeof(input),0):BCryptHashData(hash,input,sizeof(input),0);
+            if(status<0){failure="CNG_ORIGINAL_HASH_DATA";break;}
+            memset(digest,0xa5,sizeof(digest));status=kind?finish(hash,digest,sizeof(digest),0):BCryptFinishHash(hash,digest,sizeof(digest),0);
+            if(status<0||memcmp(digest,expected,sizeof(digest))){failure="CNG_ORIGINAL_DIGEST_OR_REUSABLE_STATE";break;}
+        }
+        if(failure)break;
+        status=kind?destroy(hash):BCryptDestroyHash(hash);if(status<0){failure="CNG_ORIGINAL_DESTROY";break;}hash=NULL;
+        status=kind?close(algorithm,0):BCryptCloseAlgorithmProvider(algorithm,0);if(status<0){failure="CNG_ORIGINAL_CLOSE";break;}algorithm=NULL;
+    }
+    if(!failure){
+        ULONG bytes=0,copied=0;NTSTATUS status=open(&algorithm,BCRYPT_SHA256_ALGORITHM,NULL,0);
+        if(status<0||!algorithm)failure="CNG_EXTERNAL_ORIGINAL_OPEN";
+        if(!failure&&(BCryptGetProperty(algorithm,BCRYPT_OBJECT_LENGTH,(PUCHAR)&bytes,sizeof(bytes),&copied,0)<0
+                ||copied!=sizeof(bytes)||!bytes))failure="CNG_EXTERNAL_ORIGINAL_OBJECT_LENGTH";
+        if(!failure){heap=HeapCreate(0,0,0);if(heap)external=(PUCHAR)HeapAlloc(heap,0,bytes);
+            if(!external)failure="CNG_EXTERNAL_ACTUAL_HEAP_ALLOCATION";}
+        if(!failure){status=create(algorithm,&hash,external,bytes,NULL,0,0);
+            if(status<0||!hash)failure="CNG_EXTERNAL_ORIGINAL_CREATE";else externalHeld=1;}
+        if(!failure&&HeapFree(heap,0,external)){
+            // The provider may still refer to a wrongly released object. Stop
+            // without dereferencing it again or invoking its destructor.
+            external=NULL;hash=NULL;algorithm=NULL;externalHeld=0;failure="CNG_LIVE_EXTERNAL_OBJECT_FREE_ADMITTED";
+        }
+        if(!failure){status=data(hash,input,sizeof(input),0);
+            if(status<0||finish(hash,digest,sizeof(digest),0)<0||memcmp(digest,expected,sizeof(digest)))failure="CNG_EXTERNAL_ORIGINAL_HASH";}
+        if(!failure){status=destroy(hash);if(status<0)failure="CNG_EXTERNAL_ORIGINAL_DESTROY";
+            else {hash=NULL;externalHeld=0;}}
+        if(!failure){if(!HeapFree(heap,0,external))failure="CNG_DESTROYED_EXTERNAL_OBJECT_FREE_REFUSED";else external=NULL;}
+        if(!failure){if(close(algorithm,0)<0)failure="CNG_EXTERNAL_ORIGINAL_CLOSE";else algorithm=NULL;}
+    }
+    if(hash&&BCryptDestroyHash(hash)>=0){hash=NULL;externalHeld=0;}
+    if(algorithm)BCryptCloseAlgorithmProvider(algorithm,0);
+    if(external&&!externalHeld&&HeapFree(heap,0,external))external=NULL;
+    if(heap&&!external&&!externalHeld)HeapDestroy(heap);
+    if(!FreeLibrary(provider)&&!failure)failure="CNG_APPLICATION_REFERENCE_RETURN";
+    if(failure)return load_thread_fail(env,failure)?JNI_TRUE:JNI_FALSE;
+    fprintf(stdout,"HOST_CNG_HASH_PASS actual_bcrypt_provider IAT_and_exact_six_GPA original_SHA256_abc inherited_reusable_flag two_finish_rounds actual_external_Heap_buffer live_hash_free_refused Destroy_success_then_original_free actual_destroy_close no_private_hash_byte_undo\n");
     fflush(stdout);return JNI_TRUE;
 }
 JNIEXPORT void JNICALL Java_dev_ronova_pro_AuditFixCheck_hostWin32Allocations0(JNIEnv *env,jclass check){

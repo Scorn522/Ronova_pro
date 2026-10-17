@@ -5,6 +5,7 @@
 #include <string.h>
 #include <stdarg.h>
 #include <stdio.h>
+#include <errno.h>
 #include "private_memory.c"
 #define malloc native_private_malloc
 #define calloc native_private_calloc
@@ -13,7 +14,7 @@
 #define _strdup native_private_strdup
 #define VirtualAlloc native_private_virtual_alloc
 
-typedef struct Owner { jweak module; volatile LONG stopped,producer,kernelProtected; struct Owner *next; } Owner;
+typedef struct Owner { jweak module; volatile LONG stopped,producer,kernelProtected,coreState; struct Owner *next; } Owner;
 typedef struct OwnerLink {Owner *owner;struct OwnerLink *next;} OwnerLink;
 #include "host_memory_tracking.h"
 typedef struct HostLibraryLoad HostLibraryLoad;
@@ -71,6 +72,11 @@ typedef struct NativeThread {
 /* Actual dynamic TLS/FLS receipts are native state contributions, independent
  * of whether this OS thread currently has a Java attachment. */
 static int host_tls_capture(NativeThread*,OwnerLink**,int*);
+/* Complete actual sources qualify native state only through a producer or
+ * this caller image's observed relationship to the exactly bound Core. The
+ * implementation follows the Host directories; Host consumers may call this
+ * declaration before host_object_state.c is included in this translation unit. */
+static int native_state_caller_eligible(NativeThread*,void*,OwnerLink*,int);
 static jvmtiEnv *native_ti;
 static JavaVM *native_vm;
 static struct JNIInvokeInterface_ native_vm_original;
@@ -221,6 +227,7 @@ static int native_owner_merge(OwnerLink **head,OwnerLink *source){for(;source;so
 static Owner *native_owner_stopped(OwnerLink *head){for(;head;head=head->next)if(InterlockedCompareExchange(&head->owner->stopped,0,0))return head->owner;return NULL;}
 static int native_owner_matches(JNIEnv *env,OwnerLink *head,jobject module){if(!module)return 1;for(;head;head=head->next)if(native_original.IsSameObject(env,head->owner->module,module))return 1;return 0;}
 static int native_has_producer(OwnerLink *head){for(;head;head=head->next)if(InterlockedCompareExchange(&head->owner->producer,0,0))return 1;return 0;}
+static int native_has_core_state(OwnerLink *head){for(;head;head=head->next)if(InterlockedCompareExchange(&head->owner->coreState,0,0))return 1;return 0;}
 static HMODULE native_image(void *address){HMODULE image=NULL;if(address)GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS|GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,(LPCSTR)address,&image);return image;}
 static HMODULE native_observe_image(void *address){
     /* Registered JDK handles come only from their actual JVM_LoadLibrary
@@ -450,6 +457,14 @@ static void JNICALL native_binding(jvmtiEnv *api,JNIEnv *env,jthread thread,jmet
         // has not installed code into this method. Only real RegisterNatives
         // submission carries installer provenance.
         if(!binding->library&&registration)binding->library=registration->loading;
+        /* A first direct Core JNI call needs the same real entry/TLS scope as
+         * a producer. Tie it to its already observed current library image;
+         * an unrelated Core frame or a module name cannot create this edge. */
+        if(!binding->hostImage&&!binding->hostUnknown&&native_has_core_state(binding->owners)
+                &&binding->library&&binding->library->hostImage
+                &&host_library_current(binding->library,image)
+                &&binding->library->hostImage->handle==image)
+            binding->hostImage=binding->library->hostImage;
         jweak origin=aliased?aliased->origin:binding->library?binding->library->origin:registration?registration->origin:childLoad?childLoad->origin:NULL;
         jclass actual=origin?(jclass)native_original.NewLocalRef(env,origin):(jclass)native_original.NewLocalRef(env,type);
         if(actual){binding->origin=native_original.NewWeakGlobalRef(env,actual);native_original.DeleteLocalRef(env,actual);}
@@ -2378,6 +2393,28 @@ JNIEXPORT jboolean JNICALL Java_dev_ronova_pro_bootstrap_NativeControl_initializ
     InterlockedExchange(&native_boundary_ready,1);return JNI_TRUE;
 }
 JNIEXPORT void JNICALL Java_dev_ronova_pro_bootstrap_NativeControl_module0(JNIEnv *env,jclass type,jobject module,jboolean stopped){(void)type;if(!native_controller||!native_original.CallStaticBooleanMethod(env,native_controller,native_control_gate)){native_refuse(env,"NATIVE_CONTROL_AGENT_REQUIRED");return;}AcquireSRWLockExclusive(&native_records);Owner *owner=native_owner(env,module);if(owner){InterlockedExchange(&owner->producer,1);if(stopped)InterlockedExchange(&owner->stopped,1);}if(!owner)InterlockedIncrement(&native_failures);ReleaseSRWLockExclusive(&native_records);if(stopped)native_tooling_retire(env,module);}
+JNIEXPORT jboolean JNICALL Java_dev_ronova_pro_bootstrap_NativeControl_coreStateOwner0(JNIEnv *env,jclass type,jclass actual){
+    DWORD incoming=GetLastError();int crt=errno;unsigned long dos=_doserrno;jboolean result=JNI_FALSE;
+    jobject module=NULL;
+    if(native_jni_ready&&native_controller&&actual&&!native_original.ExceptionCheck(env)
+            &&native_original.IsSameObject(env,type,native_controller)){
+        jmethodID gate=native_original.GetStaticMethodID(env,native_controller,"coreStateOwnerCaller","(Ljava/lang/Class;)Z");
+        if(gate&&native_original.CallStaticBooleanMethod(env,native_controller,gate,actual)&&!native_original.ExceptionCheck(env)){
+            /* The VM supplies this authenticated class's actual module. This
+             * does not invoke module0 or assign the Core a producer identity. */
+            module=native_original.GetModule(env,actual);
+            if(module&&!native_original.ExceptionCheck(env)){
+                AcquireSRWLockExclusive(&native_records);Owner *owner=native_owner(env,module);
+                if(owner&&!InterlockedCompareExchange(&owner->stopped,0,0)){
+                    InterlockedExchange(&owner->coreState,1);result=JNI_TRUE;
+                }
+                ReleaseSRWLockExclusive(&native_records);
+            }
+        }
+    }
+    if(module)native_original.DeleteLocalRef(env,module);
+    _doserrno=dos;errno=crt;SetLastError(incoming);return result;
+}
 #include "sources.c"
 #include "code.c"
 #include "heap.c"

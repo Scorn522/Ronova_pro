@@ -1,6 +1,6 @@
 # Ronova Pro
 
-主工程：`D:\桌面\ronova_GPT`。Java ABI104 / Native ABI94 / Storage3 / Journal6，客户端协议 `r3-client-8`。
+主工程：`D:\桌面\ronova_GPT`。Java ABI105 / Native ABI95 / Storage3 / Journal6，客户端协议 `r3-client-8`。
 Java 17；用户态 GNU C23 / GNU C++23；独立 Windows 驱动及管理工具 C17。
 未知业务载体沿真实实例字段、实际容器槽位和原委托调用接续；构图最终复核根字段、实际子对象与已用数组槽，脱离路径不沿用。ArrayDeque 支持环形逻辑槽及原更新中间态，ConcurrentHashMap 保留实际双表迁移、转发及树节点；不调用 getter/迭代器重放数据。自定义槽位的 helper、super.get 和持久绑定核实际调用点、物理方法版本及当前 getter 定义；失配保持未决。原业务调用执行一次，只有当前准确持有的数据方法接续已有动作，未知回调和临时返回对象不自动取得写权。
 自定义 Map 键只在真实槽位查询前声明当前准确的 Java 键方法，记录自然 hashCode/equals/compareTo 的结果、实际读取依赖及方法版本；后续定位直接读存储，不重放键方法。键依赖与实体槽位根分开，写入、未知调用、依赖或定义变化使旧语义失效。已观察的原生分配与 DirectBuffer 借用视图按真实分配代次关联，活视图阻止误释放和完整回滚；地址向 Native 暴露后保留不透明使用，未知裸地址不补造来源。
@@ -17,6 +17,9 @@ Windows x64 编译器静态 TLS 读取实际 PE TLS directory、index 与当前�
 显式 C/C++ 对象适配接口见 `native/include/ronova_object_state.h/.hpp`，ABI3 保留 ABI1/2。标量/枚举、定长数组、嵌套对象和 owned/borrowed buffer 绑定准确对象及分配代次；string/vector 只采用公开的 data/size/capacity，变更前关闭旧视图，原调用正常或异常返回后按实际存活形状重绑。活借用拒绝变更，旧视图不能冒领新视图的历史；capacity 不视为已构造元素，inline 数据保持借用，不复制 STL/vptr 或重放 resize、所有权及析构。只对全部相关来源已停止且本次选中的当前明确字段允许恢复，无法恢复的历史和来源继续保留。`opaque/use` 对真实句柄及外部状态只登记排除和活借用；标量 `mutate` 包围原操作一次。多序列关闭只对已经成功的同代关闭允许重试，关闭后不再使用。
 
 Storage 的身份查询和实际事务接入真实标准分配器、公开字符串序列及独立生命周期元数据。先关闭序列，再在同次调用执行原析构和完成回执；实际释放已执行但未确认时保留元数据，不重复析构或 delete。句柄、阶段、偏移和提交结果与外部状态耦合，保持不透明，不用内存恢复重放磁盘操作；原路径、身份、哈希和事务调用保留。事务保活回调在槽位锁外运行，回来核对同一 owner、token 和槽位版本；真实释放完成后才发布退休、归还容量。SDK 缺失或回执为0仍是未覆盖。未声明字段、非合作外部状态与裸 CPU/原始调用继续保留边界。
+实际 Core 原生状态沿已确认的 ProMod/ProRuntime 同 loader、module 和 CodeSource 绑定发布独立 owner，Core 不作为外部 producer。SDK 保留 Host 分配使用的完整载体及执行来源，资格来自真实已观察 caller 图像的库、绑定或加载关系；共享图像 unknown 不丢弃，不凭深层 Core 栈帧借权，也不回填旧的未知分配。
+
+Storage 实际使用的六个 BCrypt 哈希入口按公开 ABI 接真实导入及解析结果，记录成功返回的 provider/hash 句柄、代次、来源、在途使用和原销毁结果。已观察 external hashObject 持准确分配代次的租约，活哈希拒绝释放，真实 DestroyHash 成功后归还；已知起点越界拒绝，未知缓冲区保留原调用和不透明缺口。私有哈希内容不复制或回放，不自动销毁外部句柄；普通与 reusable 的实际 flags、NTSTATUS、输出及错误状态沿原调用保留。实际检查结果见既有进度与报告。
 文件 Native 入口以实际 bootstrap 声明、方法版本和 operation 建立前置目录；BOUND 与尚未确认原函数的 ARMED_VM_ENTRY 分开，首次真实 NativeMethodBind 捕获新本体后发布门禁，分类失败不发布裸入口。客户端异常分派只在完整组合正文被实际 VM 接受后就绪，晚加载 EventBus 接真实 ClassPrepare；Core 绑定准确 loader/module/lookup，未选事件沿原 dispatcher 与原 Throwable 返回，清理失败保留原异常。
 任务按 operation 增量入窗，恢复链用当前/历史轮转队列，存储工作用 ready/deadline 调度并接续 worker 完成及新保存读回。资源绑定缓存实际布局，队列、锁、委托或资格变化即失效；运行中的读回及关闭失败仍阻止释放。停组按模块在锁外串行发布，回调只标记续接，控制入口等待所选最新策略完成。Forge EventBus 组合注册、监听、注销和异常边界；普通来源观察失败按来源保留缺口，不污染全局控制状态，明确受控目标继续硬拒绝。
 停组先绑定所选返回策略，再发布停止入口并清理；同模式重复交接保留固定 UUID。Native Attach/GetEnv 的观察失败记录覆盖缺口，保留原成功结果、环境与异常，不以观察失败伪造 API 失败或回滚附件。普通任务回调保存真实根、直接来源、浅层回调引用及会被平台清空的瞬时操作数，来源图在有界 drain 中解析，policy 使用独立 tick/关闭预算；未解析关系暂缓结清，实际构造/发布前的来源判定仍同步执行。已定位丢失按任务、会话与注册代次保留，无法定位的丢失仍阻断全局结清。

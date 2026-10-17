@@ -14,6 +14,10 @@ public final class AuditFixCheck {
     private static void require(boolean yes,String message) {if(!yes)throw new AssertionError(message);}
     private static Object invoke(Object receiver,String name)throws Exception {var m=receiver.getClass().getDeclaredMethod(name);m.setAccessible(true);try{return m.invoke(receiver);}catch(InvocationTargetException e){if(e.getCause() instanceof Exception x)throw x;throw e;}}
     public static void main(String[] args)throws Exception {
+        if(args.length==2&&args[0].equals("core-native-state")){coreNativeState(args[1]);return;}
+        if(args.length==1&&args[0].equals("core-native-consumers")){
+            hostThreadCreate();require(hostCngHash0(),"actual BCrypt lifecycle failed");storageNative();return;
+        }
         if(args.length==1&&args[0].equals("unknown-carrier-graph")){unknownCarrierGraph();return;}
         if(args.length==1&&args[0].equals("unknown-map-key-semantics")){unknownMapKeySemantics();return;}
         if(args.length==1&&args[0].equals("event-image-composition")){eventImageComposition();return;}
@@ -957,6 +961,32 @@ public final class AuditFixCheck {
     private static native void hostMemory0(String controlDll);
     private static native void hostMemoryRelease0(String controlDll);
     private static native void hostDefinitionsChanged0(ClassLoader loader);
+    private static native boolean hostCngHash0();
+    private static void coreNativeState(String jar)throws Exception {
+        var finder=java.lang.module.ModuleFinder.of(java.nio.file.Path.of(jar));
+        require(finder.findAll().size()==1&&finder.find("ronova_pro").isPresent(),"one actual named Core module required");
+        var configuration=ModuleLayer.boot().configuration().resolve(finder,java.lang.module.ModuleFinder.of(),Set.of("ronova_pro"));
+        var controller=ModuleLayer.defineModulesWithOneLoader(configuration,List.of(ModuleLayer.boot()),ClassLoader.getSystemClassLoader());
+        var layer=controller.layer();var module=layer.findModule("ronova_pro").orElseThrow();
+        controller.addReads(module,AuditFixCheck.class.getModule());
+        controller.addOpens(module,"dev.ronova.pro",AuditFixCheck.class.getModule());
+        var loader=layer.findLoader("ronova_pro");
+        Class<?> mod=Class.forName("dev.ronova.pro.ProMod",false,loader),runtime=Class.forName("dev.ronova.pro.ProRuntime",false,loader);
+        require(mod.getModule()==module&&runtime.getModule()==module&&mod.getClassLoader()==loader,"Core classes escaped actual module");
+        var agent=Class.forName("dev.ronova.pro.agent.RecoveryAgent",false,ClassLoader.getSystemClassLoader());
+        try {agent.getMethod("bindModGroupCallers",Class.class,Class.class).invoke(null,mod,runtime);throw new AssertionError("foreign Core binding caller admitted");}
+        catch(InvocationTargetException denied){require(denied.getCause() instanceof SecurityException,"foreign Core binding failed for another reason");}
+        // Run the same real ProMod startup body used by its constructor. No
+        // producer rows, NativeLibrary objects, image owners or scopes are supplied.
+        var bind=mod.getDeclaredMethod("bindControlOwner");bind.setAccessible(true);bind.invoke(null);
+        var bridge=Class.forName("dev.ronova.pro.bootstrap.ControlBridge",false,null);
+        var producer=bridge.getDeclaredMethod("producer",Module.class);producer.setAccessible(true);
+        require(Boolean.FALSE.equals(producer.invoke(null,module)),"Core was relabelled as an external producer");
+        Class<?> actual=Class.forName(AuditFixCheck.class.getName(),true,loader);
+        actual.getMethod("main",String[].class).invoke(null,(Object)new String[]{"core-native-consumers"});
+        require(Boolean.FALSE.equals(producer.invoke(null,module)),"Native consumers changed Core producer identity");
+        System.out.println("CORE_NATIVE_STATE_PASS actual_named_ProMod_ProRuntime startup_binding foreign_caller_refused full_native_loader_binding SDK_receipts_nonzero no_supplied_owner_or_producer_rows original_crypto_and_storage_lifetimes");
+    }
     private static final class HostThreadCreatePayload { }
     private static void hostThreadCreate(){
         System.load(java.nio.file.Path.of(System.getProperty("ronova.pro.audit.thread.native")).toAbsolutePath().toString());

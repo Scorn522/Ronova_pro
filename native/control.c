@@ -3,7 +3,7 @@
 #include <bcrypt.h>
 // Preserve Object.clone itself, including Cloneable checks; never substitute a Java ancestor body.
 JNIEXPORT jint JNICALL Java_dev_ronova_pro_bootstrap_NativeControl_abi(JNIEnv *env, jclass type) {
-    (void)env; (void)type; return 94;
+    (void)env; (void)type; return 95;
 }
 JNIEXPORT jobject JNICALL Java_dev_ronova_pro_bootstrap_NativeControl_returnIdentifier0(JNIEnv *env,jclass type) {
     (void)type;
@@ -174,6 +174,7 @@ static int native_bind_controller(JNIEnv *env,jclass controller){
         {"libraryPresent0","()Z",(void*)Java_dev_ronova_pro_bootstrap_NativeControl_libraryPresent0},
         {"libraryEnd0","(JJZ)V",(void*)Java_dev_ronova_pro_bootstrap_NativeControl_libraryEnd0},
         {"module0","(Ljava/lang/Module;Z)V",(void*)host_module0},
+        {"coreStateOwner0","(Ljava/lang/Class;)Z",(void*)Java_dev_ronova_pro_bootstrap_NativeControl_coreStateOwner0},
         {"processPrepare0","(Ljava/lang/Class;)Z",(void*)Java_dev_ronova_pro_bootstrap_NativeControl_processPrepare0},
         {"processCreateBegin0","([J)J",(void*)Java_dev_ronova_pro_bootstrap_NativeControl_processCreateBegin0},
         {"processCreateEnd0","(JJ[J)V",(void*)Java_dev_ronova_pro_bootstrap_NativeControl_processCreateEnd0},

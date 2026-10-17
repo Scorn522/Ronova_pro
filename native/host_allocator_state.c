@@ -28,6 +28,8 @@ static uint64_t native_allocator_next(void){
 }
 static int native_allocator_caller(void *caller,HMODULE *provider,OwnerLink **sources,JNIEnv **env,int entering){
     int unknown=0;*provider=native_image(caller);
+    /* The common SDK query keeps every real contributor and qualifies this
+     * exact observed caller as a producer or an actually bound Core image. */
     int ready=*provider&&native_object_state_sources(caller,sources,&unknown,env)&&!unknown&&*sources;
     return ready&&(!entering||!native_owner_stopped(*sources));
 }

@@ -125,7 +125,7 @@ static HostStaticTlsThread *host_static_tls_thread_locked(void){
  * registered Binding/load/callback/worker. No address or module name supplies
  * owners here. The return value describes observation, never call admission. */
 static int host_static_tls_observed_locked(NativeThread *state,HostImage *image,OwnerLink *owners,int unknown){
-    if(!image||!native_has_producer(owners))return 1;
+    if(!image||(!native_has_producer(owners)&&!native_has_core_state(owners)))return 1;
     InterlockedExchange(&image->privateOpaque,1);
     if(host_static_tls_restricted(state))return 0;
     HostStaticTlsImage *entry=host_static_tls_image_locked(image,1);if(!entry)return 0;
@@ -175,7 +175,7 @@ static int host_static_tls_observed_locked(NativeThread *state,HostImage *image,
 }
 static int host_static_tls_observe(NativeThread *state,HostImage *image,OwnerLink *owners,int unknown){
     DWORD incoming=GetLastError();
-    if(!image||!native_has_producer(owners)){SetLastError(incoming);return 1;}
+    if(!image||(!native_has_producer(owners)&&!native_has_core_state(owners))){SetLastError(incoming);return 1;}
     InterlockedExchange(&image->privateOpaque,1);
     /* DllMain/TLS and restricted JVMTI callbacks must not enter the loader,
      * call JNI, or wait on directory locks. A later real normal-context scope

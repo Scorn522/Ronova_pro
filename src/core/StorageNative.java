@@ -17,6 +17,10 @@ final class StorageNative {
     private StorageNative() { }
     static synchronized boolean available() {
         if(attempted)return available;
+        // A real bound Core must publish its native-state role before the
+        // first adapted allocation. A pending publication is retryable and
+        // never turns an earlier unknown allocation into observed storage.
+        if(!coreStateReady())return false;
         attempted=true;
         String configured=System.getProperty("ronova.pro.storage.native","");
         if(!System.getProperty("os.name","").startsWith("Windows")||!System.getProperty("os.arch","").equals("amd64")) { reason="WINDOWS_X64_NTFS_REQUIRED";return false; }
@@ -27,6 +31,19 @@ final class StorageNative {
             reason=available?"AVAILABLE_RUNTIME_TXF_CHECK_REQUIRED":"NATIVE_ABI_MISMATCH";
         } catch(IOException|LinkageError|RuntimeException ex) { reason="NATIVE_UNAVAILABLE:"+ex.getClass().getSimpleName()+":"+ex.getMessage(); }
         return available;
+    }
+    private static boolean coreStateReady(){
+        try{
+            Class<?> control=Class.forName("dev.ronova.pro.bootstrap.NativeControl",false,null);
+            if(Boolean.TRUE.equals(control.getMethod("coreStateReady").invoke(null)))return true;
+            reason="CORE_NATIVE_STATE_OWNER_PENDING";return false;
+        }catch(ClassNotFoundException outside){
+            if(!"ronova_pro".equals(StorageNative.class.getModule().getName()))return true;
+            reason="CORE_NATIVE_STATE_OWNER_PENDING";return false;
+        }
+        catch(ReflectiveOperationException|RuntimeException|LinkageError unavailable){
+            reason="CORE_NATIVE_STATE_OWNER_PENDING:"+unavailable.getClass().getSimpleName();return false;
+        }
     }
     private static Path bundled()throws IOException {
         byte[] bytes;

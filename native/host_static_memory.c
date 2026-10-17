@@ -61,7 +61,7 @@ static void host_static_image_observed(HostImage *image){
         if(library->hostImage==image&&library->handle==image->handle&&InterlockedCompareExchange(&library->alive,0,0)
                 &&!InterlockedCompareExchange(&library->closing,0,0))ready=ready&&native_owner_merge(&owners,library->owners);
     ReleaseSRWLockShared(&native_records);
-    if(!native_has_producer(owners)){native_owner_links_free(owners);return;}
+    if(!native_has_producer(owners)&&!native_has_core_state(owners)){native_owner_links_free(owners);return;}
     /* Publish once without making hot JNI contribution capture read mutable
      * parsing/lifetime fields. CPU accesses remain opaque even with no PE span. */
     InterlockedExchange(&image->privateOpaque,1);
@@ -115,7 +115,7 @@ static void host_static_library_returned(NativeLibrary *library,JNIEnv *env){
  * in allocation-creator ownership or grants a native memory operation. */
 static int host_private_binding_unknown(Binding *binding){
     if(!binding||binding->unsafeOperation||binding->fileOperation||binding->threadOperation||binding->arraycopyOperation
-            ||!native_has_producer(binding->owners))return 0;
+            ||(!native_has_producer(binding->owners)&&!native_has_core_state(binding->owners)))return 0;
     HostImage *image=binding->hostImage;
     return !image||!__atomic_load_n(&image->privateMemory,__ATOMIC_ACQUIRE)
             ||InterlockedCompareExchange(&image->privateOpaque,0,0)!=0;

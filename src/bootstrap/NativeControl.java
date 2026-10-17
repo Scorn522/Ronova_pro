@@ -17,6 +17,8 @@ public final class NativeControl {
     private static boolean installing,nativeLoadAttempted,nativeLoaded,nativeBoundaryInstalled;
     private static java.lang.reflect.Method nativeImageSelector,nativeImageFinalizer;
     private static Class<?> definitionDirectoryOwner;
+    private static volatile Class<?> coreStateOwner;
+    private static volatile boolean coreStateRegistered;
     private NativeControl() {}
     private static final StackWalker CALLER=StackWalker.getInstance(StackWalker.Option.RETAIN_CLASS_REFERENCE);
     private static boolean controlCaller() {
@@ -49,7 +51,7 @@ public final class NativeControl {
                 if(dll==null)return installFailure("OBJECT_CLONE_JNI_PAYLOAD_ABSENT",false);
                 nativeLoadAttempted=true;
                 System.load(dll.toString());nativeLoaded=true;
-                if(abi()!=94)throw new UnsatisfiedLinkError("NATIVE_CONTROL_ABI");
+                if(abi()!=95)throw new UnsatisfiedLinkError("NATIVE_CONTROL_ABI");
             }
             if(!nativeBoundaryInstalled){
                 nativeHandoffRetryable=false;
@@ -63,7 +65,10 @@ public final class NativeControl {
             if(!initializeDefinitionDirectory0(definitionDirectoryOwner))
                 return installFailure("OBJECT_CLONE_JNI_UNAVAILABLE:ACTUAL_DEFINITION_DIRECTORY_CAS_PENDING",true);
             libraryBoundaryPresent=libraryPresent0();state="NATIVE_BIND_AND_JNI_FIELD_READY";
-            installMode="FULL";available=true;return state;
+            installMode="FULL";available=true;
+            if(coreStateOwner!=null)try{retryCoreStateOwner();}
+                catch(ReflectiveOperationException pending){coreStateRegistered=false;}
+            return state;
         }catch(ClassNotFoundException|NoSuchMethodException failure){
             return installFailure("OBJECT_CLONE_JNI_UNAVAILABLE:"+failure.getClass().getSimpleName()+":"+failure.getMessage(),false);
         }catch(IOException failure){
@@ -719,6 +724,45 @@ public final class NativeControl {
         if(!controlCaller())throw new SecurityException("NATIVE_CONTROL_AGENT_REQUIRED");
         if(available){module0(module,stopped);if(stopped)retireCode0(module);}
     }
+    private static Class<?> coreStateAgent()throws ClassNotFoundException{
+        return Class.forName("dev.ronova.pro.agent.RecoveryAgent",false,ClassLoader.getSystemClassLoader());
+    }
+    private static Class<?> boundCoreStateOwner(Class<?> actual)throws ReflectiveOperationException{
+        return (Class<?>)coreStateAgent().getMethod("nativeStateOwner",Class.class).invoke(null,actual);
+    }
+    /** Only the agent's already authenticated ProMod binding publishes this role. */
+    public static boolean coreStateOwner(Class<?> actual)throws ReflectiveOperationException{
+        if(CALLER.getCallerClass()!=coreStateAgent()||actual==null||boundCoreStateOwner(actual)!=actual
+                ||coreStateOwner!=null&&coreStateOwner!=actual)throw new SecurityException("ACTUAL_CORE_NATIVE_STATE_OWNER_REQUIRED");
+        coreStateOwner=actual;
+        if(!available)return false;
+        boolean registered=coreStateOwner0(actual);
+        if(registered)coreStateRegistered=true;
+        return registered;
+    }
+    private static boolean retryCoreStateOwner()throws ReflectiveOperationException{
+        return Boolean.TRUE.equals(coreStateAgent().getMethod("retryNativeStateOwner").invoke(null));
+    }
+    private static boolean coreStateOwnerCaller(Class<?> actual){
+        if(actual==null||actual!=coreStateOwner)return false;
+        Class<?> publisher=CALLER.walk(frames->frames.map(StackWalker.StackFrame::getDeclaringClass)
+                .filter(type->type!=NativeControl.class).findFirst().orElse(null));
+        try{return publisher==coreStateAgent()&&boundCoreStateOwner(actual)==actual;}
+        catch(ReflectiveOperationException unavailable){return false;}
+    }
+    /** Ordinary outside consumers keep their uncovered path; a bound Core waits for its real role. */
+    public static boolean coreStateReady()throws ReflectiveOperationException{
+        Class<?> caller=CALLER.getCallerClass();
+        // A name can withhold first use while startup is incomplete. It never
+        // publishes the role, which still requires the actual ProMod binding.
+        boolean candidate="ronova_pro".equals(caller.getModule().getName());
+        Class<?> actual;
+        try{actual=boundCoreStateOwner(caller);}
+        catch(ClassNotFoundException absent){return !candidate;}
+        if(actual==null)return !candidate;
+        if(coreStateRegistered&&coreStateOwner==actual)return true;
+        return available&&retryCoreStateOwner();
+    }
     /** Invoked by the native wrapper only after the actual VM API returned NONE. */
     private static boolean jvmtiDefinitionsChanged(Class<?>[] actuals){
         if(!jvmtiDefinitionCompletion0(actuals))throw new SecurityException("ACTUAL_JVMTI_DEFINITION_COMPLETION_SCOPE_REQUIRED");
@@ -943,6 +987,7 @@ public final class NativeControl {
     private static native boolean libraryPresent0();
     private static native void libraryEnd0(long token,long handle,boolean success);
     private static native void module0(Module module,boolean stopped);
+    private static native boolean coreStateOwner0(Class<?> actual);
     private static native boolean processPrepare0(Class<?> process);
     private static native long processCreateBegin0(long[] handles)throws IOException;
     private static native void processCreateEnd0(long token,long handle,long[] handles);

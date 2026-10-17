@@ -38,13 +38,7 @@ public final class ProMod {
         // Zero-argument startup: the player supplies no Ronova JVM argument. The mod extracts its own agent and
         // bootstrap payloads and has a short-lived helper attach them to this exact process.
         ProBootstrap.install();
-        try {
-            Class.forName("dev.ronova.pro.agent.RecoveryAgent",false,ClassLoader.getSystemClassLoader())
-                    .getMethod("bindModGroupCallers",Class.class,Class.class)
-                    .invoke(null,ProMod.class,ProRuntime.class);
-        } catch(ReflectiveOperationException unavailable) {
-            LOG.warn("RONOVA_MOD_GROUP_AUTHORITY_UNAVAILABLE",unavailable);
-        }
+        bindControlOwner();
         net.minecraftforge.fml.DistExecutor.unsafeRunWhenOn(net.minecraftforge.api.distmarker.Dist.CLIENT,()->ClientFaults::install);
         ProNetwork.init();
         var bus=MinecraftForge.EVENT_BUS;
@@ -57,6 +51,15 @@ public final class ProMod {
         bus.addListener(EventPriority.LOWEST,this::joined);
         bus.addListener(this::participant);
         bus.addListener(this::playerClone);
+    }
+    private static void bindControlOwner(){
+        try {
+            Class.forName("dev.ronova.pro.agent.RecoveryAgent",false,ClassLoader.getSystemClassLoader())
+                    .getMethod("bindModGroupCallers",Class.class,Class.class)
+                    .invoke(null,ProMod.class,ProRuntime.class);
+        } catch(ReflectiveOperationException unavailable) {
+            LOG.warn("RONOVA_MOD_GROUP_AUTHORITY_UNAVAILABLE",unavailable);
+        }
     }
     private void starting(ServerStartingEvent e) {
         try { ProRuntime.start(e.getServer());ProRuntime.declareDispatchTargets(); }

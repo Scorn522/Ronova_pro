@@ -185,7 +185,7 @@ static int host_module_binding_enter(Binding *binding){
     AcquireSRWLockShared(&host_imports);
     int ready=image->live&&!image->releasing&&(image->pin||binding->library&&host_library_current(binding->library,image->handle));
     if(ready)InterlockedIncrement(&image->active);ReleaseSRWLockShared(&host_imports);
-    if(ready&&native_has_producer(binding->owners)){
+    if(ready&&(native_has_producer(binding->owners)||native_has_core_state(binding->owners))){
         DWORD error=GetLastError();NativeThread *state=native_tls==TLS_OUT_OF_INDEXES?NULL:(NativeThread*)TlsGetValue(native_tls);
         OwnerLink *sources=NULL;int unknown=binding->hostUnknown;
         int captured=native_owner_merge(&sources,binding->owners)&&host_tls_capture(state,&sources,&unknown);

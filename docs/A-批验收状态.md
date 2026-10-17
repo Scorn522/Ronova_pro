@@ -1,5 +1,19 @@
 # Ronova Pro 当前进度
 
+## 2026-10-17：C 接续——实际 Core 来源与 BCrypt 原生状态
+
+接续 `556f387`，主工程 `D:\桌面\ronova_GPT`。Java105 / Native95 / Object SDK3（保留1/2）/ SourceMapBridge2 / Storage3 / Journal6，协议 `r3-client-8`。本包源码写齐后统一构建。
+
+实际 ProMod/ProRuntime 的既有 loader、module、CodeSource 绑定发布独立 native-state owner，不将 Core 标作外部 producer。首次 Native 未就绪保持 pending，Storage 不锁定 attempted，可沿原绑定重试；普通独立消费者保留未覆盖行为。SDK 查询保留 Host 分配使用的完整来源和 unknown，资格核对当前真实 caller 图像及其库、绑定、加载关系，不能借深层 Core 帧取得资格。准确 Core JNI entry 补入真实 HostImage scope，静态 PE/TLS 观察沿同一角色接续，不回填旧未知分配。
+
+新增六个真实 BCrypt 哈希入口，IAT 与精确 GPA 共用 provider、handle 代次、完整来源、在途调用及关闭门。目标检查独立于新建资格；未知调用方不能绕过已知句柄。原成功才登记，原 Destroy/Close 成功才退休，不自动销毁或重放哈希私有内容。已观察 external hashObject 持准确 allocation generation 的 users/reading，活哈希阻释放，真实 DestroyHash 后归还；已知起点越界不降级未覆盖。未知 stack/JNI/provider 缓冲区保留原调用及不透明缺口。原 flags、NTSTATUS、输出、异常及错误状态保留；登记失败不改写原成功。loader/受限回调只 Try 目录锁，冲突保留未决句柄和租约。
+
+`build-c-java105-native95-core-cng-20261017.log` 首轮 **PASS，1分9秒**；复用 Java、两个 Native 夹具和实际 C++23 消费者编译退出0。`c-java105-native95-core-state-20261017.log` **退出0，正常 JVM 结束**：本地真实 named Core 加载本包未修改生产 ProMod/ProRuntime，运行同一 ProMod 启动绑定体；外部直接绑定被拒，Core producer 身份仍 false，没有供给 owner、image、NativeLibrary 或 source metadata。实际 Native loader/binding 链取得非零 PMR/std allocator、typed/scalar/buffer、vector/string 回执，4个旧视图拒绝；生产身份查询和真实双文件 TxF、双槽、第三请求 busy、foreign Ticket/token 拒绝、原文件保留及 admitted=0 通过。该路径未启动完整 Forge。
+
+同一 Core 运行中，六个 BCrypt GPA 为真实 Host entry，IAT 与 GPA 原 SHA256、Open 继承 reusable flag 的两次 Finish 通过；真实 Heap 外部 hashObject 的活哈希释放被拒，Destroy 成功后原 HeapFree 成功。`c-java105-native95-custom-state-20261017.log` **退出0**：既有明确供给来源 seam 的非零 SDK、活 view/借用/typed 阻释放及原析构继续通过。`c-java105-native95-ordinary-host-20261017.log` **退出0，正常 JVM 结束**：普通来源回执仍0，不冒认 Core。没有重跑旧矩阵。
+
+匹配候选为 `distribution/candidate-c-java105-native95-core-cng-wip-20261017` 的两份 JAR，随源码和既有摘要同步 GitHub。未适配的原生私有语义、非合作分配器和裸 CPU/原始调用仍有缺口；完整游戏进服与同存档重启 **NOTRUN**，完整 C/B 未标全部完成。自身外观、武器注册、源码 ZIP 未做。
+
 ## 2026-10-17：C 接续——实际 Storage 事务与拒绝后的生命周期
 
 接续 `5316bcf`，仅主工程。Java104 / Native94 / Object SDK3（保留1/2）/ Storage3 / Journal6 不变，未改接口布局。写齐本包后统一构建，没有恢复容器 Hook、添加外观或武器、生成源码 ZIP。

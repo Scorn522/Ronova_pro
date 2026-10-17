@@ -168,7 +168,7 @@ public final class RecoveryAgent {
             bootstrap=new JarFile(nativeBootstrapPath.toFile());
             api.appendToBootstrapClassLoaderSearch(bootstrap);
             bridge=Class.forName("dev.ronova.pro.bootstrap.TaskBridge",true,null);
-            if(!Integer.valueOf(104).equals(bridge.getMethod("abiVersion").invoke(null)))throw new IllegalStateException("TASK_BRIDGE_ABI_MISMATCH");
+            if(!Integer.valueOf(105).equals(bridge.getMethod("abiVersion").invoke(null)))throw new IllegalStateException("TASK_BRIDGE_ABI_MISMATCH");
             // This classfile was first requested beneath a stopped empty-stream return.
             Class.forName("java.util.stream.IntPipeline$Head",false,null);
             for(String helper:List.of("SourcePublication","SourceIndexMutation","FastListView","FieldMutation","EquipmentInvocations"))
@@ -200,7 +200,7 @@ public final class RecoveryAgent {
             Class.forName("dev.ronova.pro.bootstrap.ControlBridge$ProducerFrame",false,null);
             Class.forName("dev.ronova.pro.bootstrap.EventFaultBridge",true,null);
             Class<?> control=Class.forName("dev.ronova.pro.bootstrap.ControlBridge",true,null);
-            if(!Integer.valueOf(104).equals(control.getMethod("abiVersion").invoke(null)))throw new IllegalStateException("CONTROL_BRIDGE_ABI_MISMATCH");
+            if(!Integer.valueOf(105).equals(control.getMethod("abiVersion").invoke(null)))throw new IllegalStateException("CONTROL_BRIDGE_ABI_MISMATCH");
             Module base=Object.class.getModule(),ours=RecoveryAgent.class.getModule();
             api.redefineModule(base,Set.of(bridge.getModule()),Map.of(
                     "jdk.internal.org.objectweb.asm",Set.of(ours),"jdk.internal.org.objectweb.asm.commons",Set.of(ours),
@@ -822,6 +822,8 @@ public final class RecoveryAgent {
                 ||!java.util.Objects.equals(mod.getProtectionDomain().getCodeSource(),runtime.getProtectionDomain().getCodeSource())
                 ||modGroupRuntime!=null&&modGroupRuntime!=runtime)throw new SecurityException("MOD_GROUP_OWNER_BINDING");
         modGroupRuntime=runtime;
+        try {publishNativeStateOwner();}
+        catch(ReflectiveOperationException unavailable){throw new IllegalStateException("CORE_NATIVE_STATE_BINDING_UNAVAILABLE",unavailable);}
         try{
             Class<?> fault=Class.forName("dev.ronova.pro.bootstrap.EventFaultBridge",true,null);
             fault.getMethod("bindCore",Class.class).invoke(null,runtime);
@@ -831,6 +833,29 @@ public final class RecoveryAgent {
             Instrumentation api=instrumentation;
             if(api!=null&&!eventFaultGuarded(bus)&&api.isModifiableClass(bus)){api.retransformClasses(bus);eventFaultAccepted(bus);}
         }catch(ReflectiveOperationException|UnmodifiableClassException unavailable){throw new IllegalStateException("CLIENT_EVENT_DISPATCH_BINDING",unavailable);}
+    }
+    private static boolean nativeStateControlCaller(Class<?> caller){
+        try{return caller==Class.forName("dev.ronova.pro.bootstrap.NativeControl",false,null);}
+        catch(ClassNotFoundException absent){return false;}
+    }
+    /** The bootstrap reads the actual Core identity already bound by ProMod. */
+    public static Class<?> nativeStateOwner(Class<?> actual){
+        if(!nativeStateControlCaller(CALLER.getCallerClass()))throw new SecurityException("ACTUAL_NATIVE_STATE_CONTROL_REQUIRED");
+        Class<?> runtime=modGroupRuntime;
+        if(runtime==null||actual==null||actual.getModule()!=runtime.getModule()||actual.getClassLoader()!=runtime.getClassLoader()
+                ||!actual.getName().startsWith("dev.ronova.pro.")
+                ||!Objects.equals(actual.getProtectionDomain().getCodeSource(),runtime.getProtectionDomain().getCodeSource()))return null;
+        return runtime;
+    }
+    private static boolean publishNativeStateOwner()throws ReflectiveOperationException{
+        Class<?> runtime=modGroupRuntime;
+        return runtime!=null&&Boolean.TRUE.equals(Class.forName("dev.ronova.pro.bootstrap.NativeControl",false,null)
+                .getMethod("coreStateOwner",Class.class).invoke(null,runtime));
+    }
+    /** Retry only that same real binding after Native installation or at first use. */
+    public static boolean retryNativeStateOwner()throws ReflectiveOperationException{
+        if(!nativeStateControlCaller(CALLER.getCallerClass()))throw new SecurityException("ACTUAL_NATIVE_STATE_CONTROL_REQUIRED");
+        return publishNativeStateOwner();
     }
     /** Fences task and callback publication before current body cleanup starts. */
     public static String prepareModGroup(String[] ids,Module[] modules) {

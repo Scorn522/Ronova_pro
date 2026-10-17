@@ -55,7 +55,9 @@ enum {
     HOST_MI_HEAP_REALLOC=112,HOST_MI_HEAP_MALLOC_ALIGNED=113,HOST_MI_HEAP_REALLOC_ALIGNED=114,
     HOST_MI_HEAP_GET_DEFAULT=115,HOST_MI_HEAP_GET_BACKING=116,HOST_MI_HEAP_SET_DEFAULT=117,
     HOST_MI_COLLECT=118,HOST_MI_HEAP_COLLECT=119,HOST_MI_HEAP_NEW_IN_ARENA=120,
-    HOST_MI_ZALLOC=121,HOST_MI_HEAP_ZALLOC=122,HOST_MI_THREAD_DONE=123,HOST_KIND_COUNT=124
+    HOST_MI_ZALLOC=121,HOST_MI_HEAP_ZALLOC=122,HOST_MI_THREAD_DONE=123,
+    HOST_CNG_OPEN=124,HOST_CNG_CREATE_HASH=125,HOST_CNG_HASH_DATA=126,HOST_CNG_FINISH_HASH=127,
+    HOST_CNG_DESTROY_HASH=128,HOST_CNG_CLOSE=129,HOST_KIND_COUNT=130
 };
 static int host_is_create(int kind){return kind==HOST_CREATE_W||kind==HOST_CREATE_A
         ||kind>=HOST_CREATE_USER_W&&kind<=HOST_CREATE_LOGON_W;}
@@ -637,7 +639,7 @@ static NativeLibrary *host_thread_worker_library(NativeThread *state,HMODULE ima
 /* Scope entry already owns the provider/source relationship. This resolves
  * only that observed image's current-thread static TLS, never other threads. */
 static void host_static_tls_current(NativeThread *state,HMODULE module,OwnerLink *owners,int unknown){
-    if(!module||!native_has_producer(owners))return;
+    if(!module||(!native_has_producer(owners)&&!native_has_core_state(owners)))return;
     DWORD error=GetLastError();HostImage *image=NULL;
     int restricted=host_static_tls_restricted(state);
     if(restricted){if(!TryAcquireSRWLockShared(&host_imports)){SetLastError(error);return;}}
@@ -1101,8 +1103,10 @@ static uint64_t host_native_handle(HostImport *entry,void *caller,uintptr_t *arg
 #include "host_cpp_allocations.c"
 #include "host_arena_allocations.c"
 #include "host_other_allocations.c"
+#include "host_crypto.c"
 static uint64_t host_native_failure(HostImport *entry,DWORD error,DWORD incoming,
         const HostCrtThreadErrors *crtBefore,const HostCrtThreadErrors *cppBefore,const HostCrtThreadErrors *arenaBefore,const HostCrtThreadErrors *otherBefore){
+    if(host_is_crypto(entry->kind)){SetLastError(incoming);return (uint32_t)host_crypto_refusal(error);}
     if(host_is_other_allocation(entry->kind))return host_other_refuse(entry->kind,otherBefore,error);
     if(host_is_crt_aligned(entry->kind))return host_crt_aligned_refuse(entry->kind,crtBefore,error);
     if(host_is_arena_allocation(entry->kind))return host_arena_refuse(entry->kind,arenaBefore,error);
@@ -1131,6 +1135,7 @@ static uint64_t host_native_dispatch(HostImport *entry,void *caller,uintptr_t *a
     if(host_is_cpp_allocation(entry->kind))return host_native_cpp_allocation(entry,caller,arguments);
     if(host_is_arena_allocation(entry->kind))return host_native_arena_allocation(entry,caller,arguments);
     if(host_is_other_allocation(entry->kind))return host_native_other_allocation(entry,caller,arguments);
+    if(host_is_crypto(entry->kind))return host_native_crypto(entry,caller,arguments);
     SetLastError(ERROR_INVALID_FUNCTION);return 0;
 }
 static uint64_t host_native_call_body(HostImport *entry,void *caller,uintptr_t *arguments){
@@ -1138,6 +1143,8 @@ static uint64_t host_native_call_body(HostImport *entry,void *caller,uintptr_t *
      * none of this returning dispatcher's epilogue can run for that call. */
     if(entry->kind==HOST_FREE_LIBRARY_EXIT_THREAD)host_native_module_exit(entry,caller,arguments);
     DWORD incoming=GetLastError();int aligned=host_is_crt_aligned(entry->kind);
+    int crypto=host_is_crypto(entry->kind);HostCryptoErrors cryptoBefore={0},cryptoAfter={0};
+    if(crypto){cryptoBefore=host_crypto_errors();cryptoAfter=cryptoBefore;}
     int crt=host_is_crt_allocation(entry->kind)||aligned,crtReady=0;
     int cpp=host_is_cpp_allocation(entry->kind),cppReady=0;
     int arena=host_is_arena_allocation(entry->kind),arenaReady=0;
@@ -1150,36 +1157,43 @@ static uint64_t host_native_call_body(HostImport *entry,void *caller,uintptr_t *
     if(arena){arenaReady=host_arena_errors(entry,&arenaBefore);arenaAfter=arenaBefore;}
     if(other){otherReady=host_other_errors(entry,&otherBefore);otherAfter=otherBefore;}
     NativeThread *state=native_tls==TLS_OUT_OF_INDEXES?NULL:(NativeThread*)TlsGetValue(native_tls);
-    int restricted=state&&(state->heapCallback||state->toolingRestricted||state->vmDetaching||state->vmThreadEnding||state->hostUnloadImage||state->hostRelease
-            ||state->hostLoad&&state->hostLoad->calling);
+    int restricted=crypto&&host_loader_callout()||(state&&(state->heapCallback||state->toolingRestricted||state->vmDetaching||state->vmThreadEnding||state->hostUnloadImage||state->hostRelease
+            ||state->hostLoad&&state->hostLoad->calling));
     if(restricted){
         if(!TryAcquireSRWLockShared(&host_imports)){
+            if(crypto)host_crypto_restore(cryptoBefore);
             return host_native_failure(entry,ERROR_BUSY,incoming,&crtBefore,&cppBefore,&arenaBefore,&otherBefore);}
         if(!TryAcquireSRWLockShared(&native_records)){ReleaseSRWLockShared(&host_imports);
+            if(crypto)host_crypto_restore(cryptoBefore);
             return host_native_failure(entry,ERROR_BUSY,incoming,&crtBefore,&cppBefore,&arenaBefore,&otherBefore);}
     }else {AcquireSRWLockShared(&host_imports);AcquireSRWLockShared(&native_records);}
     int associated=host_entry_association(entry,state,NULL,NULL);
     if(associated==1)InterlockedIncrement(&entry->image->active);
     ReleaseSRWLockShared(&native_records);ReleaseSRWLockShared(&host_imports);
     if(associated!=1){DWORD error=associated?ERROR_INVALID_DATA:ERROR_MOD_NOT_FOUND;
+        if(crypto)host_crypto_restore(cryptoBefore);
         return host_native_failure(entry,error,incoming,&crtBefore,&cppBefore,&arenaBefore,&otherBefore);}
     uint64_t result=0;DWORD error=incoming;int returned=0;
     int callback=state&&(!crt||crtReady)&&(!cpp||cppReady)&&(!arena||arenaReady)&&(!other||otherReady);if(callback)native_thread_callback_enter(state);
     __try {
+        if(crypto)host_crypto_restore(cryptoBefore);
         if(crt)host_crt_allocation_restore(&crtBefore);else if(cpp)host_cpp_restore(&cppBefore);else if(arena)host_arena_restore(&arenaBefore);else if(other)host_other_restore(&otherBefore);else SetLastError(incoming);
         result=host_native_dispatch(entry,caller,arguments);error=GetLastError();
         if(crtReady)crtAfter=host_crt_allocation_result(&crtBefore);
         if(cppReady)cppAfter=host_cpp_result(&cppBefore);returned=1;
         if(arenaReady)arenaAfter=host_arena_result(&arenaBefore);
         if(otherReady)otherAfter=host_other_result(&otherBefore);
+        if(crypto)cryptoAfter=host_crypto_errors();
     } __finally {
         DWORD interrupted=GetLastError();if(crtReady&&!returned)crtAfter=host_crt_allocation_result(&crtBefore);
         if(cppReady&&!returned)cppAfter=host_cpp_result(&cppBefore);
         if(arenaReady&&!returned)arenaAfter=host_arena_result(&arenaBefore);
         if(otherReady&&!returned)otherAfter=host_other_result(&otherBefore);
+        if(crypto&&!returned)cryptoAfter=host_crypto_errors();
         if(InterlockedDecrement(&entry->image->active)==0&&InterlockedCompareExchange(&entry->image->retiring,0,0))native_thread_worker_wake();
         if(callback)native_thread_callback_leave(state);
         if(crtReady)host_crt_allocation_restore(&crtAfter);else if(cppReady)host_cpp_restore(&cppAfter);else if(arenaReady)host_arena_restore(&arenaAfter);else if(otherReady)host_other_restore(&otherAfter);else SetLastError(returned?error:interrupted);
+        if(crypto)host_crypto_restore(cryptoAfter);
     }
     return result;
 }
@@ -1187,16 +1201,19 @@ static uint64_t host_native_call(HostImport *entry,void *caller,uintptr_t *argum
     /* The terminal API already owns its separate heap-resident OS-end hold. */
     if(entry->kind==HOST_FREE_LIBRARY_EXIT_THREAD||!host_loader_callout())
         return host_native_call_body(entry,caller,arguments);
-    DWORD incoming=GetLastError();NativeThread *state=native_thread();
+    DWORD incoming=GetLastError();int crypto=host_is_crypto(entry->kind);
+    HostCryptoErrors cryptoBefore={0},cryptoAfter={0};if(crypto){cryptoBefore=host_crypto_errors();cryptoAfter=cryptoBefore;}
+    NativeThread *state=native_thread();
     if(!state){HostCrtThreadErrors unavailable={0};unavailable.windowsBefore=incoming;
+        if(crypto)host_crypto_restore(cryptoBefore);
         return host_native_failure(entry,ERROR_NOT_ENOUGH_MEMORY,incoming,&unavailable,&unavailable,&unavailable,&unavailable);}
     /* DLL_THREAD_DETACH can run after JVMTI ThreadEnd. GetEnv may still return
      * an environment there, but entering Java/JVMTI under the loader lock can
      * deadlock JVM shutdown. Reuse the existing no-JNI, try-lock source path. */
     uint64_t result=0;native_thread_callback_enter(state);state->toolingRestricted++;
-    __try {SetLastError(incoming);result=host_native_call_body(entry,caller,arguments);}
-    __finally {DWORD outgoing=GetLastError();state->toolingRestricted--;
-        native_thread_callback_leave(state);SetLastError(outgoing);}
+    __try {if(crypto)host_crypto_restore(cryptoBefore);SetLastError(incoming);result=host_native_call_body(entry,caller,arguments);}
+    __finally {DWORD outgoing=GetLastError();if(crypto)cryptoAfter=host_crypto_errors();state->toolingRestricted--;
+        native_thread_callback_leave(state);SetLastError(outgoing);if(crypto)host_crypto_restore(cryptoAfter);}
     return result;
 }
 static unsigned host_import_arguments(int kind){
@@ -1209,6 +1226,10 @@ static unsigned host_import_arguments(int kind){
         case HOST_CREATE_REMOTE_THREAD_EX:return 8;
         case HOST_BEGIN_THREAD:return 3;
         case HOST_BEGIN_THREAD_EX:return 6;
+        case HOST_CNG_OPEN:case HOST_CNG_HASH_DATA:case HOST_CNG_FINISH_HASH:return 4;
+        case HOST_CNG_CREATE_HASH:return 7;
+        case HOST_CNG_DESTROY_HASH:return 1;
+        case HOST_CNG_CLOSE:return 2;
         case HOST_LOAD_LIBRARY_A:case HOST_LOAD_LIBRARY_W:return 1;
         case HOST_LOAD_LIBRARY_EX_A:case HOST_LOAD_LIBRARY_EX_W:return 3;
         case HOST_WRITE_PROCESS_MEMORY:case HOST_VIRTUAL_PROTECT_EX:case HOST_READ_PROCESS_MEMORY:return 5;
@@ -1318,10 +1339,11 @@ static const char *host_api_names[HOST_KIND_COUNT]={NULL,"CreateProcessW","GetPr
         "mi_malloc","mi_calloc","mi_realloc","mi_free","mi_usable_size","mi_malloc_aligned","mi_realloc_aligned",
         "mi_heap_new","mi_heap_delete","mi_heap_destroy","mi_heap_malloc","mi_heap_calloc","mi_heap_realloc",
         "mi_heap_malloc_aligned","mi_heap_realloc_aligned","mi_heap_get_default","mi_heap_get_backing","mi_heap_set_default",
-        "mi_collect","mi_heap_collect","mi_heap_new_in_arena","mi_zalloc","mi_heap_zalloc","mi_thread_done"};
+        "mi_collect","mi_heap_collect","mi_heap_new_in_arena","mi_zalloc","mi_heap_zalloc","mi_thread_done",
+        "BCryptOpenAlgorithmProvider","BCryptCreateHash","BCryptHashData","BCryptFinishHash","BCryptDestroyHash","BCryptCloseAlgorithmProvider"};
 static void host_windows_targets(void **targets){
     host_memory_prepare();
-    HMODULE kernel=GetModuleHandleW(L"kernel32.dll"),advapi=GetModuleHandleW(L"advapi32.dll");
+    HMODULE kernel=GetModuleHandleW(L"kernel32.dll"),advapi=GetModuleHandleW(L"advapi32.dll"),bcrypt=GetModuleHandleW(L"bcrypt.dll");
     HostGetProcAddress resolve=__atomic_load_n(&host_windows_resolver,__ATOMIC_ACQUIRE);
     if(!resolve&&kernel){
         resolve=(HostGetProcAddress)GetProcAddress(kernel,"GetProcAddress");
@@ -1335,7 +1357,7 @@ static void host_windows_targets(void **targets){
     for(int kind=1;kind<HOST_KIND_COUNT;kind++){
         if(host_is_crt_thread_create(kind)||host_is_crt_allocation(kind)||host_is_crt_aligned(kind)
                 ||host_is_cpp_allocation(kind)||host_is_arena_allocation(kind)||host_is_other_allocation(kind)){targets[kind]=NULL;continue;}
-        HMODULE module=kind>=HOST_CREATE_USER_W&&kind<=HOST_CREATE_LOGON_W?advapi:kernel;
+        HMODULE module=host_is_crypto(kind)?bcrypt:kind>=HOST_CREATE_USER_W&&kind<=HOST_CREATE_LOGON_W?advapi:kernel;
         targets[kind]=module&&resolve?(void*)resolve(module,host_api_names[kind]):NULL;
         if(targets[kind])__atomic_store_n(&host_windows_api[kind],targets[kind],__ATOMIC_RELEASE);
     }
