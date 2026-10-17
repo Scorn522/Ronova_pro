@@ -63,6 +63,7 @@ typedef struct NativeThread {
     HostLibraryLoad *hostLoad;struct HostImage *hostUnloadImage;
     struct HostModuleRelease *hostRelease;
     NativeHostArenaOriginalScope *hostArenaOriginal;
+    NativeHostCppOriginalScope *hostCppOriginal;
     unsigned callbackHolds,vmDetaching,vmThreadEnding;
     int storageOwned,vmAttached,javaEnded,javaCleaning;
     NativePrivateRange jniRange;
@@ -1055,7 +1056,7 @@ static int native_thread_java_pending(const NativeThread *state){
 static int native_thread_module_exit_reaped(NativeThread *state){
     if(!state)return 1;
     if(state->hostWorker)return 1; /* the existing worker still owns this state */
-    if(!state->storageOwned||state->callbackHolds||state->tooling||state->library||state->hostLoad||state->hostRelease||state->hostArenaOriginal
+    if(!state->storageOwned||state->callbackHolds||state->tooling||state->library||state->hostLoad||state->hostRelease||state->hostArenaOriginal||state->hostCppOriginal
             ||state->heapCallback||state->heapWorkerAnchor||state->toolingCallbackEnvironment||state->toolingImage
             ||state->control||state->sourceCapture||state->unsafeInstalling||state->unsafeInstall||state->bufferAllocation
             ||native_thread_java_pending(state))return 0;
@@ -1093,7 +1094,7 @@ static void native_thread_native_end(NativeThread *state){
 }
 static void native_thread_try_release(NativeThread *state){
     if(!state||!state->storageOwned||!state->javaEnded||state->callbackHolds||state->hostWorker
-            ||state->tooling||state->hostArenaOriginal||state->heapCallback||state->heapWorkerAnchor
+            ||state->tooling||state->hostArenaOriginal||state->hostCppOriginal||state->heapCallback||state->heapWorkerAnchor
             ||state->control||state->sourceCapture||state->unsafeInstalling||state->bufferAllocation
             ||native_thread_java_pending(state))return;
     if(native_tls!=TLS_OUT_OF_INDEXES&&(NativeThread*)TlsGetValue(native_tls)==state&&!TlsSetValue(native_tls,NULL)){
@@ -1112,7 +1113,7 @@ static void native_thread_callback_leave(NativeThread *state){
  * the actual event thread. An omitted detach or abandoned callback stays open. */
 static int native_thread_worker_os_end(JNIEnv *env,NativeThread *state){
     (void)env;
-    if(!state||!state->hostWorker||state->callbackHolds||state->hostArenaOriginal||state->heapCallback||state->heapWorkerAnchor||state->library
+    if(!state||!state->hostWorker||state->callbackHolds||state->hostArenaOriginal||state->hostCppOriginal||state->heapCallback||state->heapWorkerAnchor||state->library
             ||state->toolingCallbackEnvironment||state->toolingImage||!host_thread_worker_scope_idle(state)
             ||state->control||state->sourceCapture||state->unsafeInstalling||state->bufferAllocation
             ||native_thread_java_pending(state))return 0;

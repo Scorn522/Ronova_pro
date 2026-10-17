@@ -248,6 +248,8 @@ static void host_module_return(HostLibraryLoad *load,HMODULE actual,DWORD error)
     load->nonExecutable=(load->flags&DONT_RESOLVE_DLL_REFERENCES)!=0||!dll;
     if(load->nonExecutable){if(!host_real_free_library(pin))load->sparePin=pin;return;}
     host_arena_discover(actual);host_arena_discover_imports(actual);
+    host_other_discover(actual);host_other_discover_imports(actual);
+    host_cpp_discover(actual);host_cpp_discover_imports(actual);
     void *targets[HOST_KIND_COUNT]={0};host_windows_targets(targets);
     int publicCarrier=0;for(int kind=1;kind<HOST_KIND_COUNT&&!publicCarrier;kind++)
         if(targets[kind])publicCarrier=native_image(targets[kind])==actual;

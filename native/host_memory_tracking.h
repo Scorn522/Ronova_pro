@@ -6,9 +6,15 @@ typedef struct NativeHostArenaOriginalScope {
     HMODULE image;void *original,*release,*entry;NativeHostMemoryCall *call;
     DWORD thread;int cleanup;struct NativeHostArenaOriginalScope *previous;
 } NativeHostArenaOriginalScope;
-enum { NATIVE_MEMORY_HOST_HEAP=1,NATIVE_MEMORY_HOST_VIRTUAL=2,NATIVE_MEMORY_HOST_CRT=3,NATIVE_MEMORY_HOST_IMAGE=4,NATIVE_MEMORY_HOST_CPP=5,NATIVE_MEMORY_HOST_ARENA=6 };
+typedef struct NativeHostCppOriginalScope {
+    HMODULE image;void *original,*release,*entry;uintptr_t context;
+    NativeHostMemoryCall *call;DWORD thread;int cleanup,operation;
+    struct NativeHostCppOriginalScope *previous;
+} NativeHostCppOriginalScope;
+enum { NATIVE_MEMORY_HOST_HEAP=1,NATIVE_MEMORY_HOST_VIRTUAL=2,NATIVE_MEMORY_HOST_CRT=3,NATIVE_MEMORY_HOST_IMAGE=4,NATIVE_MEMORY_HOST_CPP=5,NATIVE_MEMORY_HOST_ARENA=6,NATIVE_MEMORY_HOST_OTHER=7 };
 enum { NATIVE_MEMORY_HOST_ALLOCATE=0,NATIVE_MEMORY_HOST_REALLOCATE=1,NATIVE_MEMORY_HOST_FREE=2,NATIVE_MEMORY_HOST_DECOMMIT=3,NATIVE_MEMORY_HOST_CONTEXT_FREE=4,NATIVE_MEMORY_HOST_CONTEXT_CREATE=5 };
 enum { NATIVE_MEMORY_HOST_ARENA_RESET=6,NATIVE_MEMORY_HOST_ARENA_UNKNOWN=7,NATIVE_MEMORY_HOST_OBSERVE=8 };
+enum { NATIVE_MEMORY_HOST_CONTEXT_DETACH=9,NATIVE_MEMORY_HOST_THREAD_DETACH=10,NATIVE_MEMORY_HOST_CONTEXT_OBSERVE=11 };
 
 /* Post-success only. Owners are borrowed for this call and copied by the tracker.
  * bytes==UINT64_MAX means an actual nonnull result whose extent is unknown.
@@ -24,6 +30,9 @@ static void native_memory_host_allocated(JNIEnv*,int family,void *allocator,void
  * admission across the one original call. NULL with denied==0 keeps an unknown
  * original pointer/API unchanged. denied==1 names a known busy/retired/control
  * allocation. The wrapper must complete or abort on real exceptional unwind. */
+/* OBSERVE takes a read-only user lease only for the exact family, release and
+ * context. An observed foreign pointer is left unchanged; completion never
+ * retires or changes the generation. */
 static NativeHostMemoryCall *native_memory_host_prepare(JNIEnv*,int family,void *release,uintptr_t context,
         uint64_t address,uint64_t bytes,int operation,OwnerLink *owners,int unknown,int *denied);
 /* A heap lease can protect an actual call with an unknown block pointer. It is
@@ -62,6 +71,26 @@ static NativeHostMemoryCall *native_memory_host_arena_prepare(JNIEnv*,void *rele
         int operation,OwnerLink *owners,int unknown,int *denied);
 static void native_memory_host_arena_complete(JNIEnv*,NativeHostMemoryCall*,uint64_t address,uint64_t bytes,
         uintptr_t context,int completed,int released);
+/* mimalloc heap handles are actual opaque provider returns. Safe heap deletion
+ * migrates their surviving blocks without replacing a block generation.
+ * A result context UINTPTR_MAX means ownership could not be observed; zero
+ * means a known block was actually abandoned by safe delete/thread_done. */
+static NativeHostMemoryCall *native_memory_host_other_prepare(JNIEnv*,void *release,uint64_t address,uintptr_t context,
+        int operation,OwnerLink*,int unknown,int *denied);
+static void native_memory_host_other_complete(JNIEnv*,NativeHostMemoryCall*,uint64_t address,uint64_t bytes,
+        uintptr_t context,int completed,int released);
+static uintptr_t native_memory_host_other_context(NativeHostMemoryCall*);
+/* These calls are made only after the Host wrapper matched the actual CRT
+ * caller and consumer image to this thread's current real C++ original scope.
+ * The inner returned CRT row can be promoted once to the exact outer new
+ * result. A nested free borrows only its retained outer delete generation. */
+static void native_memory_host_cpp_backing_allocated(JNIEnv*,NativeHostCppOriginalScope*,void *allocator,void *release,
+        uintptr_t context,uint64_t address,uint64_t bytes,OwnerLink*,int unknown);
+static void native_memory_host_cpp_allocated(JNIEnv*,NativeHostCppOriginalScope*,void *allocator,void *release,
+        uintptr_t context,uint64_t address,uint64_t bytes,OwnerLink*,int unknown);
+static NativeHostMemoryCall *native_memory_host_cpp_backing_prepare(JNIEnv*,NativeHostCppOriginalScope*,void *release,
+        uintptr_t context,uint64_t address,int operation,OwnerLink*,int unknown,int *denied);
+static void native_memory_host_cpp_scope_end(NativeHostCppOriginalScope*);
 /* Only the same thread's currently executing real provider function may pair
  * its own observed Windows backing call with this allocator lease. */
 static void native_memory_host_backing_allocated(JNIEnv*,NativeHostArenaOriginalScope*,void *allocator,void *release,

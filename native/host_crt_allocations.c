@@ -104,6 +104,21 @@ static uint64_t host_crt_allocation_original(HostImport *entry,const uintptr_t *
     }
 }
 
+/* A C++ original may use this CRT through its own observed IAT. The retained
+ * call scope and the actual executing caller must both identify that exact
+ * C++ implementation. A callback from another image gets no nested lease. */
+static NativeHostCppOriginalScope *host_crt_cpp_scope(HostImport *entry,NativeThread *state,void *caller){
+    NativeHostCppOriginalScope *scope=state?state->hostCppOriginal:NULL;
+    if(!scope||scope->thread!=GetCurrentThreadId()||!entry||!entry->image
+            ||entry->image->handle!=scope->image||native_image(caller)!=scope->image
+            ||native_image(scope->original)!=scope->image||native_image(scope->release)!=scope->image)return NULL;
+    return scope;
+}
+static int host_crt_cpp_cleanup_scope(NativeHostCppOriginalScope *scope,NativeThread *state){
+    return scope&&scope->cleanup&&scope->entry&&scope->call
+            &&host_memory_cleanup_scope((HostImport*)scope->entry,state);
+}
+
 static uint64_t host_native_crt_allocation(HostImport *entry,void *caller,uintptr_t *arguments){
     HostCrtThreadErrors incoming;int errorsReady=host_crt_allocation_errors(entry,&incoming);
     HostCrtAllocationTarget *target=host_crt_allocation_target(entry->original,entry->kind);
@@ -115,6 +130,7 @@ static uint64_t host_native_crt_allocation(HostImport *entry,void *caller,uintpt
     if(consumed->kind!=entry->kind||consumed->original!=entry->original)
         return host_crt_allocation_refuse(&incoming,ERROR_INVALID_DATA);
     entry=consumed;OwnerLink *owners=NULL;int unknown=0;
+    NativeHostCppOriginalScope *cppScope=host_crt_cpp_scope(entry,state,caller);
     if(!host_entry_sources_query(entry,state,caller,&owners,NULL,1,&unknown)){
         DWORD error=GetLastError();native_owner_links_free(owners);return host_crt_allocation_refuse(&incoming,error);
     }
@@ -130,8 +146,8 @@ static uint64_t host_native_crt_allocation(HostImport *entry,void *caller,uintpt
         if(count&&width>SIZE_MAX/count){bytes=UINT64_MAX;extentUnknown=1;}
         else bytes=(uint64_t)(count*width);
     }
-    int cleanup=address&&(releasing||replacing&&!bytes)&&host_memory_cleanup_scope(entry,state);
-    NativeHostMemoryCall *call=NULL;uint64_t result=0;int originalReturned=0,rawPass=0;
+    int cleanup=address&&(releasing||replacing&&!bytes)&&(host_memory_cleanup_scope(entry,state)||host_crt_cpp_cleanup_scope(cppScope,state));
+    NativeHostMemoryCall *call=NULL;uint64_t result=0;int originalStarted=0,originalReturned=0,rawPass=0;
     HostCrtThreadErrors returned=incoming;
     __try {
         DWORD refusal=0;
@@ -152,7 +168,7 @@ static uint64_t host_native_crt_allocation(HostImport *entry,void *caller,uintpt
                     ReleaseSRWLockExclusive(&native_private_gate);}
             }
             if(!refusal){int denied=0;
-                call=native_memory_host_prepare(env,NATIVE_MEMORY_HOST_CRT,(void*)target->release,0,address,0,
+                call=native_memory_host_cpp_backing_prepare(env,cppScope,(void*)target->release,0,address,
                         replacing?NATIVE_MEMORY_HOST_REALLOCATE:NATIVE_MEMORY_HOST_FREE,owners,unknown,&denied);
                 if(denied)refusal=ERROR_BUSY;
                 else if(!native_memory_host_sources(call,&owners,&unknown))refusal=ERROR_NOT_ENOUGH_MEMORY;
@@ -162,7 +178,8 @@ static uint64_t host_native_crt_allocation(HostImport *entry,void *caller,uintpt
          * The real scope alone never authorizes an unknown pointer or a new
          * allocation: the exact provider/context/generation admission must
          * also have succeeded, including all current alias/user checks. */
-        int cleanupKnown=cleanup&&native_memory_host_cleanup(call)&&host_memory_cleanup_scope(entry,state);
+        int cleanupKnown=cleanup&&native_memory_host_cleanup(call)
+                &&(host_memory_cleanup_scope(entry,state)||host_crt_cpp_cleanup_scope(cppScope,state));
         if(!refusal&&native_owner_stopped(owners)&&!cleanupKnown)refusal=ERROR_ACCESS_DENIED;
         else if(!refusal&&unknown&&(restricted||native_has_producer(owners))&&!cleanupKnown)refusal=ERROR_INVALID_DATA;
         if(refusal){result=host_crt_allocation_refuse(&incoming,refusal);returned=host_crt_allocation_result(&incoming);}
@@ -176,13 +193,13 @@ static uint64_t host_native_crt_allocation(HostImport *entry,void *caller,uintpt
             native_memory_host_unobserved(owners);native_owner_links_free(owners);owners=NULL;
             InterlockedExchange(&entry->image->privateOpaque,1);
             rawPass=1;host_crt_allocation_restore(&incoming);
-            result=host_crt_allocation_original(entry,arguments);
+            originalStarted=1;result=host_crt_allocation_original(entry,arguments);
         }else {
             /* The actual CRT owns zero-size behavior, overflow/failure, new
              * handlers and all four original calling contracts. No allocation
              * or private-directory lock is held across these external calls. */
             host_crt_allocation_restore(&incoming);
-            result=host_crt_allocation_original(entry,arguments);
+            originalStarted=1;result=host_crt_allocation_original(entry,arguments);
             returned=host_crt_allocation_result(&incoming);originalReturned=1;
             if(result&&!releasing)InterlockedExchange(&entry->image->privateOpaque,1);
             if(call){
@@ -193,6 +210,8 @@ static uint64_t host_native_crt_allocation(HostImport *entry,void *caller,uintpt
                 native_memory_host_allocated(env,NATIVE_MEMORY_HOST_CRT,entry->original,(void*)target->release,0,0,
                         result,bytes,owners,unknown||extentUnknown||(replacing&&address!=0));
             }
+            if(result&&!releasing&&cppScope)native_memory_host_cpp_backing_allocated(env,cppScope,entry->original,
+                    (void*)target->release,0,result,bytes,owners,unknown||extentUnknown);
             /* A post-success observation failure records a gap in memory.c.
              * It never changes this result or frees the caller's allocation. */
         }
@@ -202,7 +221,7 @@ static uint64_t host_native_crt_allocation(HostImport *entry,void *caller,uintpt
          * until an actual normal completion proves a resize/release. */
         if(!rawPass){
             if(!originalReturned)returned=host_crt_allocation_result(&incoming);
-            if(call)native_memory_host_abort(env,call);
+            if(call){if(originalStarted)native_memory_host_abort(env,call);else native_memory_host_cancel(call);}
             native_owner_links_free(owners);host_crt_allocation_restore(&returned);
         }
     }

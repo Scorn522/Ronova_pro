@@ -1239,3 +1239,132 @@ done:
 #undef STATIC_ARENA_REQUIRE
     return failure?JNI_FALSE:JNI_TRUE;
 }
+
+/* Supplied heap contexts exercise the production completion/alias seam, not
+ * mimalloc provider discovery. Physical bytes come from these real routines. */
+static void *audit_other_cpp_allocate(size_t bytes){return HeapAlloc(GetProcessHeap(),0,bytes);}
+static void audit_other_cpp_release(void *pointer){audit_static_arena_release(pointer);}
+JNIEXPORT jboolean JNICALL Java_dev_ronova_pro_AuditFixCheck_privateOtherState0(JNIEnv *env,jclass type){
+    const char *failure=NULL;int initialized=0,denied=0;DWORD fixtureTls=TLS_OUT_OF_INDEXES;
+    NativeThread thread={0};Owner owner={0};OwnerLink selected={.owner=&owner};
+    NativeHostMemoryCall *call=NULL,*outer=NULL,*nested=NULL;NativeHostArenaProvider *provider=NULL;
+    NativeHostArenaContext *heap=NULL;NativeMemoryAllocation *row=NULL,*cppRow=NULL;
+    NativeHostCppOriginalScope cpp={0};void *block=NULL,*cppBlock=NULL;jobject view=NULL,module=NULL;jlong binding[2]={0};
+    uintptr_t context=0x41,backing=0x52;uint64_t generation=0,epoch=0;
+#define OTHER_REQUIRE(CONDITION,MESSAGE) do{if(!(CONDITION)){failure=(MESSAGE);goto other_done;}}while(0)
+    OTHER_REQUIRE(!native_controller&&!native_vm&&native_tls==TLS_OUT_OF_INDEXES&&!native_memory_allocations
+            &&!native_memory_arena_contexts&&!native_memory_arena_providers,"other allocator seam requires an uninstalled isolated controller");
+    native_original=**env;initialized=1;fixtureTls=TlsAlloc();native_tls=fixtureTls;owner.producer=1;
+    OTHER_REQUIRE(fixtureTls!=TLS_OUT_OF_INDEXES&&TlsSetValue(fixtureTls,&thread),"other allocator seam actual TLS unavailable");
+    jclass classType=native_original.FindClass(env,"java/lang/Class");
+    jmethodID getModule=classType?native_original.GetMethodID(env,classType,"getModule","()Ljava/lang/Module;"):NULL;
+    if(getModule)module=native_original.CallObjectMethod(env,type,getModule);
+    if(classType)native_original.DeleteLocalRef(env,classType);
+    owner.module=module?native_original.NewWeakGlobalRef(env,module):NULL;
+    OTHER_REQUIRE(owner.module&&!native_original.ExceptionCheck(env),"other allocator seam actual source module unavailable");
+    call=native_memory_host_other_prepare(env,(void*)audit_static_arena_release,0,0,NATIVE_MEMORY_HOST_CONTEXT_CREATE,&selected,0,&denied);
+    OTHER_REQUIRE(call&&!denied,"other allocator heap create lease unavailable");
+    native_memory_host_other_complete(env,call,0,0,context,1,0);call=NULL;
+    provider=native_memory_arena_provider((void*)audit_static_arena_release,0);heap=native_memory_arena_context(provider,context,0);
+    call=native_memory_host_other_prepare(env,(void*)audit_static_arena_release,0,context,NATIVE_MEMORY_HOST_ALLOCATE,&selected,0,&denied);
+    OTHER_REQUIRE(provider&&heap&&heap->created&&call&&!denied,"other allocator actual-context completion unavailable");
+    block=HeapAlloc(GetProcessHeap(),0,64);
+    native_memory_host_other_complete(env,call,(uint64_t)(uintptr_t)block,64,context,block!=NULL,0);call=NULL;
+    row=native_memory_find((uint64_t)(uintptr_t)block,64,1);
+    OTHER_REQUIRE(block&&row&&row->hostFamily==NATIVE_MEMORY_HOST_OTHER&&!row->unknownUse,"other allocator lost exact live context storage");
+    generation=row->generation;epoch=row->hostContextEpoch;
+    view=native_original.NewDirectByteBuffer(env,block,64);
+    OTHER_REQUIRE(view&&native_memory_buffer_observe(env,view,NULL,(uint64_t)(uintptr_t)block,64,binding)&&binding[0],"other allocator real JNI alias unavailable");
+    call=native_memory_host_other_prepare(env,(void*)audit_static_arena_release,0,context,NATIVE_MEMORY_HOST_CONTEXT_FREE,&selected,0,&denied);
+    OTHER_REQUIRE(!call&&denied&&row->alive&&row->generation==generation&&!heap->retired&&!provider->changing,
+            "live borrowed other-allocator alias permitted destructive heap release");
+    InterlockedIncrement(&row->typedObjects);
+    call=native_memory_host_other_prepare(env,(void*)audit_static_arena_release,0,context,NATIVE_MEMORY_HOST_CONTEXT_DETACH,&selected,0,&denied);
+    OTHER_REQUIRE(call&&!denied,"safe heap delete incorrectly rejected surviving alias/object storage");
+    native_memory_host_other_complete(env,call,0,0,backing,1,0);call=NULL;
+    OTHER_REQUIRE(row->alive&&row->generation==generation&&row->hostContext==backing&&row->hostContextEpoch!=epoch
+            &&row->typedObjects==1&&heap->retired&&!row->unknownUse
+            &&native_memory_buffer_use(env,view,binding[0],binding[1],(uint64_t)(uintptr_t)block,64,1),
+            "safe heap delete retired storage, changed block generation, or invalidated its actual borrowed view");
+    OTHER_REQUIRE(native_memory_buffer_use(env,view,binding[0],binding[1],(uint64_t)(uintptr_t)block,64,0),"migrated view could not release its exact user lease");
+    call=native_memory_host_other_prepare(env,(void*)audit_static_arena_release,0,0,NATIVE_MEMORY_HOST_CONTEXT_CREATE,&selected,0,&denied);
+    OTHER_REQUIRE(call&&!denied,"reused heap handle create lease unavailable");
+    native_memory_host_other_complete(env,call,0,0,context,1,0);call=NULL;
+    heap=native_memory_arena_context(provider,context,0);
+    OTHER_REQUIRE(heap&&heap->epoch!=epoch&&row->hostContext==backing,"reused heap handle retained an earlier heap incarnation");
+    call=native_memory_host_other_prepare(env,(void*)audit_static_arena_release,0,context,NATIVE_MEMORY_HOST_CONTEXT_FREE,&selected,0,&denied);
+    OTHER_REQUIRE(call&&!denied,"a migrated alias was incorrectly attributed to a reused private heap");
+    native_memory_host_other_complete(env,call,0,0,context,1,1);call=NULL;
+    OTHER_REQUIRE(row->alive&&row->generation==generation,"new private heap destruction released previously migrated storage");
+    call=native_memory_host_other_prepare(env,(void*)audit_static_arena_release,0,0,NATIVE_MEMORY_HOST_THREAD_DETACH,&selected,0,&denied);
+    OTHER_REQUIRE(call&&!denied,"non-destructive thread teardown rejected surviving storage");
+    native_memory_host_other_complete(env,call,0,0,0,1,0);call=NULL;
+    OTHER_REQUIRE(row->alive&&row->generation==generation&&!row->hostContext&&!row->hostContextEpoch&&row->typedObjects==1,
+            "thread teardown destroyed abandoned storage or retained a dead heap epoch");
+    native_original.DeleteLocalRef(env,view);view=NULL;
+    OTHER_REQUIRE(audit_private_native_aliases_collected(env,row),"released other allocator alias remained reachable");
+    call=native_memory_host_other_prepare(env,(void*)audit_static_arena_release,(uint64_t)(uintptr_t)block,0,NATIVE_MEMORY_HOST_FREE,&selected,0,&denied);
+    OTHER_REQUIRE(!call&&denied&&row->alive,"typed storage lost its raw-free guard after heap/thread migration");
+    InterlockedDecrement(&row->typedObjects);
+    call=native_memory_host_other_prepare(env,(void*)audit_static_arena_release,(uint64_t)(uintptr_t)block,0,NATIVE_MEMORY_HOST_REALLOCATE,&selected,0,&denied);
+    OTHER_REQUIRE(call&&!denied,"abandoned block could not acquire its exact realloc lease");
+    native_memory_host_other_complete(env,call,0,0,0,0,0);call=NULL;
+    OTHER_REQUIRE(row->alive&&row->generation==generation,"failed other-allocator realloc retired its old generation");
+    call=native_memory_host_other_prepare(env,(void*)audit_static_arena_release,(uint64_t)(uintptr_t)block,0,NATIVE_MEMORY_HOST_FREE,&selected,0,&denied);
+    OTHER_REQUIRE(call&&!denied,"canonical free could not release an actually abandoned block");
+    audit_static_arena_release(block);block=NULL;native_memory_host_other_complete(env,call,0,0,0,1,1);call=NULL;
+
+    cpp.image=native_image((void*)audit_other_cpp_allocate);cpp.original=(void*)audit_other_cpp_allocate;
+    cpp.release=(void*)audit_other_cpp_release;cpp.context=1;cpp.thread=GetCurrentThreadId();cpp.operation=NATIVE_MEMORY_HOST_ALLOCATE;
+    thread.hostCppOriginal=&cpp;cppBlock=audit_other_cpp_allocate(64);
+    native_memory_host_allocated(env,NATIVE_MEMORY_HOST_CRT,(void*)audit_other_cpp_allocate,(void*)audit_static_arena_release,0,0,
+            (uint64_t)(uintptr_t)cppBlock,64,&selected,0);
+    cppRow=native_memory_find((uint64_t)(uintptr_t)cppBlock,64,1);
+    OTHER_REQUIRE(cppBlock&&cppRow&&!cppRow->unknownUse,"C++ nested storage seam actual CRT return unavailable");
+    generation=cppRow->generation;
+    native_memory_host_cpp_backing_allocated(env,&cpp,(void*)audit_other_cpp_allocate,(void*)audit_static_arena_release,0,
+            (uint64_t)(uintptr_t)cppBlock,64,&selected,0);
+    native_memory_host_cpp_allocated(env,&cpp,(void*)audit_other_cpp_allocate,(void*)audit_other_cpp_release,1,
+            (uint64_t)(uintptr_t)cppBlock,64,&selected,0);
+    OTHER_REQUIRE(cppRow->hostFamily==NATIVE_MEMORY_HOST_CPP&&cppRow->generation==generation&&!cppRow->unknownUse
+            &&cppRow->hostStorageRelease==(void*)audit_static_arena_release&&cppRow->release==(void*)audit_other_cpp_release
+            &&!native_memory_private(env,cppRow,&selected),"C++ nested storage was duplicated, lost its provider pair, or gained automatic raw-delete permission");
+    native_memory_host_cpp_scope_end(&cpp);thread.hostCppOriginal=NULL;
+    outer=native_memory_host_prepare(env,NATIVE_MEMORY_HOST_CPP,(void*)audit_other_cpp_release,1,(uint64_t)(uintptr_t)cppBlock,0,
+            NATIVE_MEMORY_HOST_FREE,&selected,0,&denied);
+    OTHER_REQUIRE(outer&&!denied,"C++ exact outer delete lease unavailable");
+    cpp.original=(void*)audit_other_cpp_release;cpp.operation=NATIVE_MEMORY_HOST_FREE;cpp.call=outer;thread.hostCppOriginal=&cpp;
+    nested=native_memory_host_cpp_backing_prepare(env,&cpp,(void*)audit_other_cpp_allocate,0,(uint64_t)(uintptr_t)cppBlock,
+            NATIVE_MEMORY_HOST_FREE,&selected,0,&denied);
+    OTHER_REQUIRE(!nested&&denied&&cppRow->alive&&cppRow->users==1&&cppRow->changing==1,"C++ outer scope authorized a mismatched actual backing provider");
+    nested=native_memory_host_cpp_backing_prepare(env,&cpp,(void*)audit_static_arena_release,0,(uint64_t)(uintptr_t)cppBlock,
+            NATIVE_MEMORY_HOST_FREE,&selected,0,&denied);
+    OTHER_REQUIRE(nested&&!denied&&nested->holds&&nested->holds->borrowed&&cppRow->users==1&&cppRow->changing==1,
+            "C++ actual nested CRT free could not borrow its exact outer generation");
+    audit_static_arena_release(cppBlock);cppBlock=NULL;native_memory_host_complete(env,nested,0,0,1,1);nested=NULL;
+    native_memory_host_complete(env,outer,0,0,1,1);outer=NULL;cpp.call=NULL;
+    OTHER_REQUIRE(!cppRow->alive&&cppRow->generation!=generation&&!cppRow->users&&!cppRow->changing,
+            "C++ nested actual free did not retire exactly once or leaked an outer lease");
+    fprintf(stdout,"PRIVATE_OTHER_STATE_SEAM_PASS supplied_mimalloc_heap_completions real_storage_and_JNI_alias alias_blocks_destroy safe_delete_migrates_same_generation reused_heap_isolated thread_done_abandons typed_rawfree_denied failed_realloc_keeps_old exact_CPP_promote_and_nested_CRT_borrow no_provider_discovery_claim\n");fflush(stdout);
+other_done:
+    if(initialized){
+        if(native_original.ExceptionCheck(env))native_original.ExceptionClear(env);
+        native_memory_host_cpp_scope_end(&cpp);thread.hostCppOriginal=NULL;
+        if(nested)native_memory_host_cancel(nested);if(outer)native_memory_host_cancel(outer);if(call)native_memory_host_cancel(call);
+        if(view)native_original.DeleteLocalRef(env,view);
+        if(block)audit_static_arena_release(block);if(cppBlock)audit_static_arena_release(cppBlock);
+        while(native_memory_allocations){NativeMemoryAllocation *entry=native_memory_allocations;native_memory_allocations=entry->next;
+            native_memory_released(env,entry);native_memory_reap_references(env,entry);
+            native_owner_links_free(entry->sources);native_owner_links_free(entry->readers);native_owner_links_free(entry->preserved);
+            DeleteCriticalSection(&entry->gate);free(entry);}
+        while(native_memory_arena_contexts){NativeHostArenaContext *entry=native_memory_arena_contexts;native_memory_arena_contexts=entry->next;native_owner_links_free(entry->sources);free(entry);}
+        while(native_memory_arena_providers){NativeHostArenaProvider *entry=native_memory_arena_providers;native_memory_arena_providers=entry->next;free(entry);}
+        native_memory_host_context_epoch=0;native_owner_links_free(native_memory_unknown);native_memory_unknown=NULL;
+        if(owner.module)native_original.DeleteWeakGlobalRef(env,owner.module);if(module)native_original.DeleteLocalRef(env,module);
+        if(fixtureTls!=TLS_OUT_OF_INDEXES){TlsSetValue(fixtureTls,NULL);TlsFree(fixtureTls);}native_tls=TLS_OUT_OF_INDEXES;
+        memset(&native_original,0,sizeof(native_original));
+    }
+    if(failure)audit_physical_failure(env,failure);
+#undef OTHER_REQUIRE
+    return failure?JNI_FALSE:JNI_TRUE;
+}

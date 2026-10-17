@@ -60,6 +60,10 @@ public final class AuditFixCheck {
         if(args.length==1&&args[0].equals("private-native-state")){privateNativeState();return;}
         if(args.length==1&&args[0].equals("private-native-state-seams")){privateNativeStateSeams(true);return;}
         if(args.length==1&&args[0].equals("private-object-state-seam")){privateNativeStateSeams(false);return;}
+        if(args.length==1&&args[0].equals("private-other-state-seams")){
+            System.load(java.nio.file.Path.of(System.getProperty("ronova.pro.audit.native")).toAbsolutePath().toString());
+            require(privateOtherState0(),"allocator context or C++ original-call lifetime failed");return;
+        }
         if(args.length==1&&args[0].equals("buffer-wrap")){bufferWrap();return;}
         if(args.length==1&&args[0].equals("buffer-font")){bufferFont();return;}
         if(args.length==1&&args[0].equals("native-image-srg")){nativeImageSrg();return;}
@@ -937,6 +941,10 @@ public final class AuditFixCheck {
     private static native boolean hostCppPrivate0();
     private static native boolean hostTlsPrivate0();
     private static native boolean hostArenaAllocations0();
+    private static native boolean hostMimalloc0(String providerPath);
+    private static native boolean hostGnuCpp0(String providerPath,String classDllPath);
+    private static native boolean hostCrtAligned0();
+    private static native boolean privateOtherState0();
     private static native void hostRawUnsafe0();
     private static native void hostModuleRelease0(String controlDll);
     private static native void hostModuleReleaseThread0(String controlDll);
@@ -947,6 +955,16 @@ public final class AuditFixCheck {
     private static void hostThreadCreate(){
         System.load(java.nio.file.Path.of(System.getProperty("ronova.pro.audit.thread.native")).toAbsolutePath().toString());
         String phase=System.getProperty("ronova.pro.audit.thread.phase","thread-create");
+        if(phase.equals("gnu-cpp")){
+            require(hostGnuCpp0(System.getProperty("ronova.pro.audit.gnuCpp"),System.getProperty("ronova.pro.audit.cppClass")),"actual GNU C++ boundary failed");
+            return;
+        }
+        if(phase.equals("other-allocators-cpp")){
+            require(hostCrtAligned0(),"actual CRT aligned-allocation boundary failed");
+            require(hostMimalloc0(System.getProperty("ronova.pro.audit.mimalloc")),"actual mimalloc boundary failed");
+            require(hostGnuCpp0(System.getProperty("ronova.pro.audit.gnuCpp"),System.getProperty("ronova.pro.audit.cppClass")),"actual GNU C++ boundary failed");
+            return;
+        }
         if(phase.equals("arena-static-object")){
             System.load(java.nio.file.Path.of(System.getProperty("ronova.pro.audit.jemalloc","jemalloc.dll")).toAbsolutePath().toString());
             require(hostArenaAllocations0(),"actual jemalloc arena boundary failed");

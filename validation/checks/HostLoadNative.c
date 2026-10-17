@@ -2294,6 +2294,167 @@ JNIEXPORT jboolean JNICALL Java_dev_ronova_pro_AuditFixCheck_hostArenaAllocation
     fprintf(stdout,"HOST_ARENA_PASS actual_LWJGL_jemalloc_16_named_GPA malloc_calloc_realloc_failure rallocx_xallocx_extent actual_arena_lookup reset_six_argument_byMib_destroy paired_free no_Core_producer_authority\n");fflush(stdout);
     return JNI_TRUE;
 }
+/* Local provider files are explicit inputs. Altered search path resolves only
+ * their existing sibling runtime dependencies; no process PATH is changed. */
+static HMODULE load_allocator_provider(JNIEnv *env,jstring providerPath){
+    if(!providerPath)return NULL;jsize length=(*env)->GetStringLength(env,providerPath);
+    const jchar *text=(*env)->GetStringChars(env,providerPath,NULL);if(!text)return NULL;
+    wchar_t *path=(wchar_t*)calloc((size_t)length+1,sizeof(wchar_t));
+    if(path)for(jsize index=0;index<length;index++)path[index]=(wchar_t)text[index];
+    (*env)->ReleaseStringChars(env,providerPath,text);if(!path)return NULL;
+    HMODULE module=LoadLibraryExW(path,NULL,LOAD_WITH_ALTERED_SEARCH_PATH);free(path);return module;
+}
+/* Actual ordinary calls against fixed upstream mimalloc v2.1.7. This fixture
+ * owns every returned allocation/heap. Producer-only alias/typed gates remain
+ * the separate production-tracker seam; no Core identity is manufactured. */
+JNIEXPORT jboolean JNICALL Java_dev_ronova_pro_AuditFixCheck_hostMimalloc0(JNIEnv *env,jclass check,jstring providerPath){
+    (void)check;HMODULE module=load_allocator_provider(env,providerPath);
+    if(!module)return load_thread_fail(env,"HOST_MIMALLOC_EXPLICIT_PROVIDER_LOAD");
+    const char *names[]={"mi_malloc","mi_calloc","mi_realloc","mi_free","mi_usable_size","mi_malloc_aligned","mi_realloc_aligned",
+        "mi_heap_new","mi_heap_delete","mi_heap_destroy","mi_heap_malloc","mi_heap_calloc","mi_heap_realloc","mi_heap_malloc_aligned",
+        "mi_heap_realloc_aligned","mi_heap_get_default","mi_heap_get_backing","mi_heap_set_default","mi_collect","mi_heap_collect",
+        "mi_heap_new_in_arena","mi_zalloc","mi_heap_zalloc","mi_thread_done"};
+    void *functions[24]={0};const char *failure=NULL;void *heap=NULL,*savedDefault=NULL;unsigned char *block=NULL;int defaultChanged=0;
+    for(unsigned index=0;index<24;index++){
+        functions[index]=(void*)GetProcAddress(module,names[index]);
+        if(!load_private_entry(functions[index])){failure="HOST_MIMALLOC_24_EXACT_NAMED_GPA";goto done;}
+    }
+    void *(__cdecl *allocate)(size_t)=(void*)functions[0];
+    void *(__cdecl *allocateZero)(size_t,size_t)=(void*)functions[1];
+    void *(__cdecl *resize)(void*,size_t)=(void*)functions[2];
+    void (__cdecl *release)(void*)=(void*)functions[3];
+    size_t (__cdecl *usable)(const void*)=(void*)functions[4];
+    void *(__cdecl *aligned)(size_t,size_t)=(void*)functions[5];
+    void *(__cdecl *resizeAligned)(void*,size_t,size_t)=(void*)functions[6];
+    void *(__cdecl *newHeap)(void)=(void*)functions[7];
+    void (__cdecl *deleteHeap)(void*)=(void*)functions[8];
+    void (__cdecl *destroyHeap)(void*)=(void*)functions[9];
+    void *(__cdecl *heapAllocate)(void*,size_t)=(void*)functions[10];
+    void *(__cdecl *heapZero)(void*,size_t,size_t)=(void*)functions[11];
+    void *(__cdecl *heapResize)(void*,void*,size_t)=(void*)functions[12];
+    void *(__cdecl *heapAligned)(void*,size_t,size_t)=(void*)functions[13];
+    void *(__cdecl *heapResizeAligned)(void*,void*,size_t,size_t)=(void*)functions[14];
+    void *(__cdecl *getDefault)(void)=(void*)functions[15];
+    void *(__cdecl *getBacking)(void)=(void*)functions[16];
+    void *(__cdecl *setDefault)(void*)=(void*)functions[17];
+    void (__cdecl *collect)(_Bool)=(void*)functions[18];
+    void (__cdecl *collectHeap)(void*,_Bool)=(void*)functions[19];
+    void *(__cdecl *newInArena)(int)=(void*)functions[20];
+    void *(__cdecl *zalloc)(size_t)=(void*)functions[21];
+    void *(__cdecl *heapZalloc)(void*,size_t)=(void*)functions[22];
+    void (__cdecl *threadDone)(void)=(void*)functions[23];
+    fprintf(stderr,"HOST_MIMALLOC_STAGE real_global_allocations\n");fflush(stderr);
+    block=allocate(64);if(!block||usable(block)<64){failure="HOST_MIMALLOC_REAL_EXTENT";goto done;}block[7]=0x5c;
+    void *changed=resize(block,SIZE_MAX);
+    if(changed){block=changed;failure="HOST_MIMALLOC_IMPOSSIBLE_REALLOC_RETURN";goto done;}
+    if(block[7]!=0x5c){failure="HOST_MIMALLOC_FAILED_REALLOC_OLD_BYTES";goto done;}
+    changed=resize(block,128);if(!changed){failure="HOST_MIMALLOC_REAL_REALLOC";goto done;}block=changed;
+    if(block[7]!=0x5c){failure="HOST_MIMALLOC_REAL_REALLOC_BYTES";goto done;}release(block);block=NULL;
+    block=allocateZero(4,16);if(!block){failure="HOST_MIMALLOC_REAL_CALLOC";goto done;}
+    for(unsigned index=0;index<64;index++)if(block[index]){failure="HOST_MIMALLOC_REAL_CALLOC_ZERO";goto done;}release(block);block=NULL;
+    block=zalloc(32);if(!block){failure="HOST_MIMALLOC_REAL_ZALLOC";goto done;}
+    for(unsigned index=0;index<32;index++)if(block[index]){failure="HOST_MIMALLOC_REAL_ZALLOC_ZERO";goto done;}release(block);block=NULL;
+    block=aligned(64,64);if(!block||(uintptr_t)block%64){failure="HOST_MIMALLOC_REAL_ALIGNED";goto done;}block[7]=0x3d;
+    changed=resizeAligned(block,128,64);if(!changed){failure="HOST_MIMALLOC_REAL_ALIGNED_REALLOC";goto done;}block=changed;
+    if((uintptr_t)block%64||block[7]!=0x3d){failure="HOST_MIMALLOC_ALIGNED_REALLOC_BYTES";goto done;}release(block);block=NULL;
+    savedDefault=getDefault();if(!savedDefault||!getBacking()){failure="HOST_MIMALLOC_ACTUAL_DEFAULT_BACKING";goto done;}
+    heap=newHeap();if(!heap){failure="HOST_MIMALLOC_REAL_HEAP_NEW";goto done;}
+    if(setDefault(heap)!=savedDefault){defaultChanged=1;failure="HOST_MIMALLOC_SET_DEFAULT_RETURN";goto done;}defaultChanged=1;
+    block=allocate(64);if(!block||getDefault()!=heap){failure="HOST_MIMALLOC_DEFAULT_HEAP_ALLOCATION";goto done;}block[7]=0x71;
+    if(setDefault(savedDefault)!=heap){failure="HOST_MIMALLOC_RESTORE_DEFAULT_RETURN";goto done;}defaultChanged=0;
+    fprintf(stderr,"HOST_MIMALLOC_STAGE real_heap_delete_migration\n");fflush(stderr);
+    deleteHeap(heap);heap=NULL;
+    if(block[7]!=0x71||usable(block)<64){failure="HOST_MIMALLOC_HEAP_DELETE_DID_NOT_PRESERVE_BLOCK";goto done;}release(block);block=NULL;
+    heap=newInArena(0);if(!heap){failure="HOST_MIMALLOC_REAL_HEAP_NONE_ARENA";goto done;}
+    block=heapZero(heap,4,16);if(!block){failure="HOST_MIMALLOC_REAL_HEAP_CALLOC";goto done;}
+    for(unsigned index=0;index<64;index++)if(block[index]){failure="HOST_MIMALLOC_REAL_HEAP_CALLOC_ZERO";goto done;}
+    changed=heapResize(heap,block,128);if(!changed){failure="HOST_MIMALLOC_REAL_HEAP_REALLOC";goto done;}block=changed;release(block);block=NULL;
+    block=heapZalloc(heap,32);if(!block){failure="HOST_MIMALLOC_REAL_HEAP_ZALLOC";goto done;}
+    for(unsigned index=0;index<32;index++)if(block[index]){failure="HOST_MIMALLOC_REAL_HEAP_ZALLOC_ZERO";goto done;}release(block);block=NULL;
+    block=heapAligned(heap,64,64);if(!block||(uintptr_t)block%64){failure="HOST_MIMALLOC_REAL_HEAP_ALIGNED";goto done;}block[7]=0x43;
+    changed=heapResizeAligned(heap,block,128,64);if(!changed){failure="HOST_MIMALLOC_REAL_HEAP_ALIGNED_REALLOC";goto done;}block=changed;
+    if((uintptr_t)block%64||block[7]!=0x43){failure="HOST_MIMALLOC_HEAP_ALIGNED_REALLOC_BYTES";goto done;}release(block);block=NULL;
+    block=heapAllocate(heap,64);if(!block){failure="HOST_MIMALLOC_REAL_HEAP_DESTROY_STORAGE";goto done;}
+    collectHeap(heap,1);fprintf(stderr,"HOST_MIMALLOC_STAGE real_heap_destroy\n");fflush(stderr);
+    destroyHeap(heap);heap=NULL;block=NULL;collect(1);release(NULL);threadDone();
+done:
+    if(defaultChanged&&savedDefault&&functions[17])((void *(__cdecl*)(void*))functions[17])(savedDefault);
+    if(block&&functions[3])((void (__cdecl*)(void*))functions[3])(block);
+    if(heap&&functions[9])((void (__cdecl*)(void*))functions[9])(heap);
+    if(!FreeLibrary(module)&&!failure)failure="HOST_MIMALLOC_APPLICATION_REFERENCE_RETURN";
+    if(failure)return load_thread_fail(env,failure);
+    fprintf(stdout,"HOST_MIMALLOC_PASS actual_fixed_upstream_v2_1_7_24_named_GPA real_malloc_calloc_zalloc_realloc_failure aligned_heap_returns heap_delete_preserves_live_blocks heap_destroy collect_thread_done paired_free no_Core_producer_authority\n");fflush(stdout);return JNI_TRUE;
+}
+static void *load_gnu_allocate(void **functions,unsigned kind,const void *nothrow){
+    if(kind<2)return ((void *(__cdecl*)(size_t))functions[kind])(128);
+    if(kind<4)return ((void *(__cdecl*)(size_t,const void*))functions[kind])(128,nothrow);
+    if(kind<6)return ((void *(__cdecl*)(size_t,size_t))functions[kind])(128,64);
+    return ((void *(__cdecl*)(size_t,size_t,const void*))functions[kind])(128,64,nothrow);
+}
+static void load_gnu_delete(void **functions,unsigned kind,void *pointer,const void *nothrow){
+    if(kind<10)((void (__cdecl*)(void*))functions[kind])(pointer);
+    else if(kind<12)((void (__cdecl*)(void*,const void*))functions[kind])(pointer,nothrow);
+    else if(kind<14)((void (__cdecl*)(void*,size_t))functions[kind])(pointer,128);
+    else if(kind<16)((void (__cdecl*)(void*,size_t))functions[kind])(pointer,64);
+    else if(kind<18)((void (__cdecl*)(void*,size_t,const void*))functions[kind])(pointer,64,nothrow);
+    else ((void (__cdecl*)(void*,size_t,size_t))functions[kind])(pointer,128,64);
+}
+/* Twenty exact Windows GNU Itanium ABI exports from an installed shared
+ * libstdc++, followed by owned classes compiled against that same DLL. */
+JNIEXPORT jboolean JNICALL Java_dev_ronova_pro_AuditFixCheck_hostGnuCpp0(JNIEnv *env,jclass check,jstring providerPath,jstring classPath){
+    (void)check;HMODULE provider=load_allocator_provider(env,providerPath),classes=NULL;const char *failure=NULL;
+    if(!provider)return load_thread_fail(env,"HOST_GNU_CPP_EXPLICIT_PROVIDER_LOAD");
+    const char *names[]={"_Znwy","_Znay","_ZnwyRKSt9nothrow_t","_ZnayRKSt9nothrow_t",
+        "_ZnwySt11align_val_t","_ZnaySt11align_val_t","_ZnwySt11align_val_tRKSt9nothrow_t","_ZnaySt11align_val_tRKSt9nothrow_t",
+        "_ZdlPv","_ZdaPv","_ZdlPvRKSt9nothrow_t","_ZdaPvRKSt9nothrow_t","_ZdlPvy","_ZdaPvy",
+        "_ZdlPvSt11align_val_t","_ZdaPvSt11align_val_t","_ZdlPvSt11align_val_tRKSt9nothrow_t","_ZdaPvSt11align_val_tRKSt9nothrow_t",
+        "_ZdlPvySt11align_val_t","_ZdaPvySt11align_val_t"};
+    void *functions[20]={0};const void *nothrow=NULL;unsigned allocationKinds[]={0,1,2,3,0,1,4,5,6,7,4,5};
+    for(unsigned index=0;index<20;index++){
+        functions[index]=(void*)GetProcAddress(provider,names[index]);
+        if(!load_private_entry(functions[index])){failure="HOST_GNU_CPP_20_EXACT_NAMED_GPA";goto done;}
+    }
+    nothrow=(const void*)GetProcAddress(provider,"_ZSt7nothrow");
+    if(!nothrow){failure="HOST_GNU_CPP_ACTUAL_NOTHROW_OBJECT";goto done;}
+    fprintf(stderr,"HOST_GNU_CPP_STAGE real_twenty_named_ABIs\n");fflush(stderr);
+    for(unsigned pair=0;pair<12;pair++){
+        unsigned char *block=NULL;DWORD exception=0;
+        __try {
+            block=(unsigned char*)load_gnu_allocate(functions,allocationKinds[pair],nothrow);
+            if(!block)failure="HOST_GNU_CPP_ORIGINAL_SMALL_NEW_NULL";
+            else if(pair>=6&&(uintptr_t)block%64)failure="HOST_GNU_CPP_ORIGINAL_ALIGNED_NEW";
+            if(!failure)for(unsigned index=0;index<128;index++)block[index]=(unsigned char)(index^0xa6);
+            if(!failure)for(unsigned index=0;index<128;index++)if(block[index]!=(unsigned char)(index^0xa6)){failure="HOST_GNU_CPP_ORIGINAL_NEW_BYTES";break;}
+            if(block){void *retiring=block;block=NULL;load_gnu_delete(functions,pair+8,retiring,nothrow);}
+            if(!failure)load_gnu_delete(functions,pair+8,NULL,nothrow);
+        } __except(EXCEPTION_EXECUTE_HANDLER){exception=GetExceptionCode();failure="HOST_GNU_CPP_REAL_ABI_NATIVE_EXCEPTION";}
+        if(block){void *retiring=block;block=NULL;load_gnu_delete(functions,pair+8,retiring,nothrow);}
+        if(failure){fprintf(stderr,"HOST_GNU_CPP_FAILED pair=%u exception=%08lx\n",pair,(unsigned long)exception);goto done;}
+    }
+    classes=load_allocator_provider(env,classPath);if(!classes){failure="HOST_GNU_CPP_CLASS_DLL_LOAD";goto done;}
+    void *(__cdecl *create)(unsigned)=(void*)GetProcAddress(classes,"audit_gnu_class_create");
+    uint64_t (__cdecl *value)(void*,unsigned)=(void*)GetProcAddress(classes,"audit_gnu_class_value");
+    void (__cdecl *destroy)(void*,unsigned)=(void*)GetProcAddress(classes,"audit_gnu_class_destroy");
+    void (__cdecl *counts)(uint64_t*,uint64_t*)=(void*)GetProcAddress(classes,"audit_gnu_class_counts");
+    if(!create||!value||!destroy||!counts){failure="HOST_GNU_CPP_REAL_CLASS_EXPORTS";goto done;}
+    fprintf(stderr,"HOST_GNU_CPP_STAGE real_Cpp23_class_expressions\n");fflush(stderr);
+    unsigned expectedCounts[]={1,3,1,2};uint64_t expectedValues[]={37,111,53,106};
+    for(unsigned kind=0;kind<4;kind++){
+        uint64_t beforeCreated=0,beforeDestroyed=0,created=0,destroyed=0;counts(&beforeCreated,&beforeDestroyed);
+        void *object=create(kind);counts(&created,&destroyed);
+        int correct=object&&created==beforeCreated+expectedCounts[kind]&&destroyed==beforeDestroyed
+                &&value(object,kind)==expectedValues[kind]&&(kind<2||(uintptr_t)object%64==0);
+        if(object)destroy(object,kind);counts(&created,&destroyed);
+        if(!correct||created!=beforeCreated+expectedCounts[kind]||destroyed!=beforeDestroyed+expectedCounts[kind]){
+            failure="HOST_GNU_CPP_REAL_CTOR_VIRTUAL_ARRAY_COOKIE_DTOR";goto done;
+        }
+    }
+done:
+    if(classes&&!FreeLibrary(classes)&&!failure)failure="HOST_GNU_CPP_CLASS_APPLICATION_REFERENCE_RETURN";
+    if(!FreeLibrary(provider)&&!failure)failure="HOST_GNU_CPP_PROVIDER_APPLICATION_REFERENCE_RETURN";
+    if(failure)return load_thread_fail(env,failure);
+    fprintf(stdout,"HOST_GNU_CPP_PASS actual_shared_libstdcxx_20_exact_named_ABIs scalar_array_nothrow_sized_aligned sized_aligned real_Cpp23_class_ctor_dtor_array_cookie_virtual_dispatch own_objects_only no_Core_producer_authority no_opaque_class_destructor_inference\n");fflush(stdout);return JNI_TRUE;
+}
 JNIEXPORT void JNICALL Java_dev_ronova_pro_AuditFixCheck_hostWin32Allocations0(JNIEnv *env,jclass check){
     (void)check;load_win32_allocation_check(env);
 }
@@ -2404,5 +2565,51 @@ JNIEXPORT jlong JNICALL Java_dev_ronova_pro_AuditFixCheck_hostLoadCachedCreate0(
     (void)env;(void)type;DWORD error=0;
     int created=load_child((void*)(uintptr_t)pointer,ansi?1:0,&error);
     return ((jlong)created<<32)|(jlong)(uint32_t)error;
+}
+#endif
+
+#ifdef AUDIT_HOST_THREAD_CREATE_CHECK
+JNIEXPORT jboolean JNICALL Java_dev_ronova_pro_AuditFixCheck_hostCrtAligned0(JNIEnv *env,jclass type){
+    (void)type;HMODULE provider=GetModuleHandleW(L"ucrtbase.dll");
+    if(!provider)return load_thread_fail(env,"ALIGNED_CRT_ACTUAL_PROVIDER_ABSENT")?JNI_TRUE:JNI_FALSE;
+    const char *names[]={"_aligned_malloc","_aligned_offset_malloc","_aligned_realloc","_aligned_offset_realloc",
+        "_aligned_recalloc","_aligned_offset_recalloc","_aligned_free","_aligned_msize"};
+    void *entries[8]={0};
+    for(unsigned i=0;i<8;i++){
+        entries[i]=(void*)GetProcAddress(provider,names[i]);
+        if(!load_private_entry(entries[i]))return load_thread_fail(env,names[i])?JNI_TRUE:JNI_FALSE;
+    }
+    void *(__cdecl *allocate)(size_t,size_t)=entries[0];
+    void *(__cdecl *offsetAllocate)(size_t,size_t,size_t)=entries[1];
+    void *(__cdecl *resize)(void*,size_t,size_t)=entries[2];
+    void *(__cdecl *offsetResize)(void*,size_t,size_t,size_t)=entries[3];
+    void *(__cdecl *rezero)(void*,size_t,size_t,size_t)=entries[4];
+    void *(__cdecl *offsetRezero)(void*,size_t,size_t,size_t,size_t)=entries[5];
+    void (__cdecl *release)(void*)=entries[6];
+    size_t (__cdecl *extent)(void*,size_t,size_t)=entries[7];
+    BYTE *plain=allocate(32,64),*offset=offsetAllocate(32,64,8);const char *failure=NULL;
+    if(!plain||!offset){failure="ALIGNED_CRT_ACTUAL_ALLOCATION";goto done;}
+    if((uintptr_t)plain%64||((uintptr_t)offset+8)%64||extent(plain,64,0)<32||extent(offset,64,8)<32){failure="ALIGNED_CRT_SIZE_ALIGNMENT";goto done;}
+    memset(plain,0x5a,32);memset(offset,0x7b,32);
+    BYTE *failed=resize(plain,SIZE_MAX,64);
+    if(failed){plain=failed;failure="ALIGNED_CRT_FAILED_RESIZE_RESULT";goto done;}
+    for(unsigned i=0;i<32;i++)if(plain[i]!=0x5a){failure="ALIGNED_CRT_FAILED_RESIZE_OLD_BYTES";goto done;}
+    BYTE *next=resize(plain,64,64);if(!next){failure="ALIGNED_CRT_RESIZE";goto done;}plain=next;
+    next=offsetResize(offset,64,64,8);if(!next){failure="ALIGNED_CRT_OFFSET_RESIZE";goto done;}offset=next;
+    size_t plainBefore=extent(plain,64,0),offsetBefore=extent(offset,64,8);
+    if(plainBefore<64||offsetBefore<64||plainBefore==SIZE_MAX||offsetBefore==SIZE_MAX){failure="ALIGNED_CRT_PRE_RECALLOC_ACTUAL_EXTENT";goto done;}
+    next=rezero(plain,2,64,64);if(!next){failure="ALIGNED_CRT_RECALLOC";goto done;}plain=next;
+    next=offsetRezero(offset,2,64,64,8);if(!next){failure="ALIGNED_CRT_OFFSET_RECALLOC";goto done;}offset=next;
+    for(unsigned i=0;i<32;i++)if(plain[i]!=0x5a||offset[i]!=0x7b){failure="ALIGNED_CRT_RESIZE_ORIGINAL_BYTES";goto done;}
+    /* Recalloc zeros the newly allocated extent. The allocator can retain
+     * more than the preceding request's 64 bytes; those old usable bytes do
+     * not become a zero-initialized extension merely because of that request. */
+    for(size_t i=plainBefore;i<128;i++)if(plain[i]){failure="ALIGNED_CRT_RECALLOC_ZEROED_EXTENSION";goto done;}
+    for(size_t i=offsetBefore;i<128;i++)if(offset[i]){failure="ALIGNED_CRT_OFFSET_RECALLOC_ZEROED_EXTENSION";goto done;}
+done:
+    if(plain)release(plain);if(offset)release(offset);release(NULL);
+    if(failure)return load_thread_fail(env,failure)?JNI_TRUE:JNI_FALSE;
+    fprintf(stdout,"HOST_CRT_ALIGNED_PASS actual_ucrtbase_8_named_GPA alignment_offset_read_extent failed_resize_old_bytes resize_recalloc paired_aligned_free no_object_layout_claim\n");
+    return JNI_TRUE;
 }
 #endif

@@ -1,5 +1,27 @@
 # B 批实际报告：2026-10-09 代码收敛接续
 
+## 2026-10-17：C 接续——mimalloc、CRT 对齐分配与未适配 C++ 存储
+
+接续 `d7bf44e`，主工程 `D:\桌面\ronova_GPT`。Java ABI102 / Native ABI92 / SourceMapBridge2 / Storage3 / Journal6，协议 `r3-client-8`。本轮先写齐分配器、C++ 和调用衔接源码，再统一编译；没有恢复容器 Hook，没有自身外观、武器注册或源码 ZIP。
+
+新增实际 mimalloc v2 的24个公共分配/heap 入口，按精确公开名称与实现地址接 IAT/GPA；只发现实际观察 image 及其已解析相关导入，不枚举全进程模块。provider 在途租约和 heap 世代区分真实创建、查询、delete、destroy 与 thread_done。safe delete 迁移存活块到实际 backing heap，不更换块代次，不使 alias 或 typed object 失效；thread_done 只把实际线程已观察 context 的存活块置为 abandoned。只有已观察创建的准确 heap 才能按成功 destroy 退役子块，未知堆不伪记释放。失败 realloc 保旧块，成功以后才用实际 usable/contains 观察返回范围与所在 heap；不拿未知输入指针反查分配器私有布局。mimalloc v3 与其它未识别接口继续 opaque。
+
+CRT 的8个 `_aligned_*` ABI 使用原实现的 `_aligned_free`，保留 alignment、offset、recalloc 的独立参数和原异常/错误状态。大小查询为精确只读租约，不退役或污染其它 provider 的行。失败重分配保留旧代，无法证明的零长/无效参数结果继续未决，不伪造原释放。
+
+C++ 增加 GNU Win64 的20个实际公开 ABI，并补 MSVC aligned/nothrow/sized-aligned 变体。scalar/array 与每个有效 alignment 保留独立配对 context，同址导出按准确名称选择参数，原操作符、构造/析构表达式与 array cookie 不被替换。实际 new 内部 CRT 存储可在同线程、准确 provider 原调用 scope 内提升为同代 CPP 行；原 delete 内部的实际 CRT free 只借用外层持有的准确分配代次。外部 free/realloc 不能借此处置 CPP 行，活 alias、typed object、读写和来源门禁继续生效。CPP scope 纳入线程终结守卫，正常和异常路径都归还。未接适配器的字段语义仍 opaque，不把 vptr/STL 或任意对象表示标为 BYTE_STATE，也不自动调用未知析构器。
+
+整包 `build-c-java102-native92-other-allocators-cpp-20261017.log` **首轮 PASS，1分23秒**，包含 Native92、Storage、Agent/Bootstrap/Core 与重混淆主包；Java 检查器、两个既有 Native 夹具编译退出0。本地 GNU C++23 对象夹具使用现有 Git shared libstdc++，`-nostdlib++` 保留真实 DLL 导入；最初缺少 bundled header 的本地夹具编译失败，补头路径/配置后成功，没有用静态 libc++ 代替测试目标。
+
+`c-java102-native92-other-state-20261017.log` **退出0**：复用既有隔离夹具，只跑新 mode；真实分配和 JNI alias 阻 destroy、safe delete 迁移保代次/视图、复用 heap 与旧块隔离、thread_done 保活、typed raw-free 拒绝、失败 realloc 保旧，以及同代 CPP 提升和原内部 free 的精确租约通过。context 完成结果由 seam 供给，此项不是实际 provider 发现或 Core 权限证明。
+
+`c-java102-native92-host-other-cpp-20261017.log` **退出0，正常 JVM 结束**：本包 premain/Bootstrap/Native92 为 INSTALLED_FULL。实际 ucrtbase 的8个 aligned named GPA、失败扩容保旧字节、offset/alignment、recalloc 和配对 free；固定上游 mimalloc v2.1.7 的24个 named GPA、真实 global/heap/对齐分配、delete 保活迁移、destroy/collect/thread_done；本机真实 GNU shared runtime 的20个 named ABI、12组配对调用及自有 C++23 类构造、数组 cookie、虚调用和原析构均通过。没有制造 Core/producer 许可；普通对象原调用通过不冒称任意对象字段已覆盖。
+
+收尾另修 C++ 错误 TLS 来源错配：公开 ABI 名称只作分类，实际消费的 FirstThunk 地址及其实现导出决定 CRT；已有 Host thunk 只有当前 live consumer、准确 IAT slot、kind、entry 和 original 一致才可还原。名义 DLL 名称不授予错误状态来源，缺失或歧义保留 gap。最终增量 `build-c-java102-native92-cpp-actual-iat-final-20261017.log` **PASS，41秒**；仅复查受影响 GNU 路径，`c-java102-native92-cpp-actual-iat-final-20261017.log` **退出0**，20个真实 named ABI 与 C++23 对象原构造/数组/虚析构继续通过，JVM 正常退出。CRT、mimalloc 和独立状态 seam 未重复运行。
+
+匹配候选为 `distribution/candidate-c-java102-native92-other-allocators-cpp-wip-20261017`，源码、两份 JAR 和本摘要同步 GitHub。尚未识别/静态/内联/类专属分配器、未适配对象字段与外部私有状态仍有缺口；本机未提供的 MSVC aligned 导出未作运行通过声明。真实 Core producer 集成、游戏进服和同存档重启 **NOTRUN**，完整 C/B 不标全部完成。未重跑旧矩阵。
+
+---
+
 ## 2026-10-17：C 接续——arena 子分配、静态 TLS 与明确对象状态
 
 接续 `ee1d416`，主工程 `D:\桌面\ronova_GPT`，Java ABI101 / Native ABI91 / SourceMapBridge2 / Storage3 / Journal6，协议 `r3-client-8`。本包完成真实 jemalloc 子分配与 bulk 生命周期、Windows x64 编译器静态 TLS，以及显式 C/C++ 对象状态适配；没有恢复容器广谱 Hook，没有增加自身外观、武器或源码 ZIP。

@@ -377,6 +377,7 @@ static uint64_t host_native_memory_release(HostImport *entry,void *caller,uintpt
     NativeHostArenaOriginalScope *arena=host_memory_arena_scope(entry,state,caller);
     NativeHostArenaOriginalScope loaderScope={0};NativeHostMemoryCall *loaderCall=NULL;
     if(!arena){loaderCall=host_arena_loader_scope(entry,state,caller,owners,unknown,&loaderScope);
+        if(!loaderCall)loaderCall=host_other_loader_scope(entry,state,caller,owners,unknown,&loaderScope);
         if(loaderCall)arena=&loaderScope;}
     int local=entry->kind!=HOST_VIRTUAL_FREE_EX;
     unsigned originalFirst=entry->kind==HOST_VIRTUAL_FREE_EX?1:0;
