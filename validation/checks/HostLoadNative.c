@@ -3,6 +3,7 @@
 #include <jni.h>
 #include <windows.h>
 #include <stdint.h>
+#include <limits.h>
 #include <stdio.h>
 typedef BOOL (WINAPI *LoadCreateA)(LPCSTR,LPSTR,LPSECURITY_ATTRIBUTES,LPSECURITY_ATTRIBUTES,BOOL,DWORD,LPVOID,LPCSTR,LPSTARTUPINFOA,LPPROCESS_INFORMATION);
 typedef BOOL (WINAPI *LoadCreateW)(LPCWSTR,LPWSTR,LPSECURITY_ATTRIBUTES,LPSECURITY_ATTRIBUTES,BOOL,DWORD,LPVOID,LPCWSTR,LPSTARTUPINFOW,LPPROCESS_INFORMATION);
@@ -2227,6 +2228,70 @@ tls_done:
     SetLastError(incoming);
     if(failure){load_thread_fail(env,failure);return JNI_FALSE;}
     fprintf(stdout,"HOST_TLS_FLS_PASS actual_IAT separate_kernel_threads actual_fiber_switch_DeleteFiber callback_once_per_nonnull_FLS FlsFree NULL_success TlsGetValue2=%s no_Core_producer_authority\n",get2?"actual_GPA_error_preserved":"not_exported");
+    return JNI_TRUE;
+}
+/* Ordinary-source original ABI check. Producer-only tracker gates are covered
+ * separately by AuditFixNative; this does not fabricate Core permission. */
+JNIEXPORT jboolean JNICALL Java_dev_ronova_pro_AuditFixCheck_hostArenaAllocations0(JNIEnv *env,jclass check){
+    (void)check;HMODULE module=GetModuleHandleW(L"jemalloc.dll");
+    if(!module)return load_thread_fail(env,"HOST_ARENA_ACTUAL_LWJGL_MODULE");
+    const char *names[]={"je_malloc","je_calloc","je_realloc","je_free","je_mallocx","je_rallocx","je_xallocx",
+        "je_dallocx","je_sdallocx","je_sallocx","je_malloc_usable_size","je_aligned_alloc","je_posix_memalign",
+        "je_mallctl","je_mallctlbymib","je_mallctlnametomib"};
+    void *functions[16];for(unsigned i=0;i<16;i++){
+        functions[i]=(void*)GetProcAddress(module,names[i]);
+        if(!load_private_entry(functions[i]))return load_thread_fail(env,"HOST_ARENA_EXACT_NAMED_GPA");
+    }
+    void *(__cdecl *allocate)(size_t)=(void*)functions[0];
+    void *(__cdecl *allocateZero)(size_t,size_t)=(void*)functions[1];
+    void *(__cdecl *resize)(void*,size_t)=(void*)functions[2];
+    void (__cdecl *release)(void*)=(void*)functions[3];
+    void *(__cdecl *allocateX)(size_t,int)=(void*)functions[4];
+    void *(__cdecl *resizeX)(void*,size_t,int)=(void*)functions[5];
+    size_t (__cdecl *expandX)(void*,size_t,size_t,int)=(void*)functions[6];
+    void (__cdecl *releaseX)(void*,int)=(void*)functions[7];
+    void (__cdecl *sizedRelease)(void*,size_t,int)=(void*)functions[8];
+    size_t (__cdecl *sizeX)(const void*,int)=(void*)functions[9];
+    size_t (__cdecl *usable)(const void*)=(void*)functions[10];
+    void *(__cdecl *aligned)(size_t,size_t)=(void*)functions[11];
+    int (__cdecl *posix)(void**,size_t,size_t)=(void*)functions[12];
+    int (__cdecl *control)(const char*,void*,size_t*,void*,size_t)=(void*)functions[13];
+    int (__cdecl *byMib)(const size_t*,size_t,void*,size_t*,void*,size_t)=(void*)functions[14];
+    int (__cdecl *toMib)(const char*,size_t*,size_t*)=(void*)functions[15];
+    unsigned arena=0;size_t length=sizeof(arena);char command[80];
+    fprintf(stderr,"HOST_ARENA_STAGE real_arenas_create\n");fflush(stderr);
+    if(control("arenas.create",&arena,&length,NULL,0)||length!=sizeof(arena)||arena>=2047)
+        return load_thread_fail(env,"HOST_ARENA_REAL_CREATE");
+    int flags=(int)((arena+1u)<<20)|0x100; /* MALLOCX_ARENA / TCACHE_NONE */
+    fprintf(stderr,"HOST_ARENA_STAGE real_suballocations arena=%u\n",arena);fflush(stderr);
+    unsigned char *block=allocateX(128,flags);
+    if(!block||sizeX(block,0)<128||usable(block)<128)return load_thread_fail(env,"HOST_ARENA_REAL_EXTENT");
+    block[7]=0x5c;
+    if(resize(block,SIZE_MAX)!=NULL||block[7]!=0x5c)return load_thread_fail(env,"HOST_ARENA_FAILED_REALLOC_OLD_BYTES");
+    unsigned char *grown=resizeX(block,512,flags);
+    if(!grown||grown[7]!=0x5c)return load_thread_fail(env,"HOST_ARENA_REAL_RALLOCX");
+    block=grown;if(expandX(block,512,0,flags)<512)return load_thread_fail(env,"HOST_ARENA_REAL_XALLOCX");
+    unsigned found=UINT_MAX;length=sizeof(found);void *address=block;
+    if(control("arenas.lookup",&found,&length,&address,sizeof(address))||found!=arena)
+        return load_thread_fail(env,"HOST_ARENA_ACTUAL_RETURNED_ARENA");
+    releaseX(block,flags);block=allocateX(64,flags);
+    if(!block)return load_thread_fail(env,"HOST_ARENA_REAL_SDALLOCX_STORAGE");
+    sizedRelease(block,64,flags);
+    block=allocateX(64,flags);if(!block)return load_thread_fail(env,"HOST_ARENA_REAL_RESET_STORAGE");
+    snprintf(command,sizeof(command),"arena.%u.reset",arena);
+    fprintf(stderr,"HOST_ARENA_STAGE real_reset\n");fflush(stderr);
+    if(control(command,NULL,NULL,NULL,0))return load_thread_fail(env,"HOST_ARENA_REAL_RESET");
+    block=allocateX(64,flags);if(!block)return load_thread_fail(env,"HOST_ARENA_REAL_POST_RESET");releaseX(block,flags);
+    snprintf(command,sizeof(command),"arena.%u.destroy",arena);size_t mib[8],mibLength=8;
+    fprintf(stderr,"HOST_ARENA_STAGE real_byMib_destroy\n");fflush(stderr);
+    if(toMib(command,mib,&mibLength)||byMib(mib,mibLength,NULL,NULL,NULL,0))
+        return load_thread_fail(env,"HOST_ARENA_SIX_ARGUMENT_BYMIB_DESTROY");
+    block=allocateZero(4,8);if(!block)return load_thread_fail(env,"HOST_ARENA_CALLOC");
+    for(unsigned i=0;i<32;i++)if(block[i])return load_thread_fail(env,"HOST_ARENA_CALLOC_ORIGINAL_ZERO");release(block);
+    block=allocate(16);if(!block)return load_thread_fail(env,"HOST_ARENA_MALLOC");release(block);release(NULL);
+    block=aligned(64,128);if(!block||(uintptr_t)block%64)return load_thread_fail(env,"HOST_ARENA_ALIGNED_ALLOC");release(block);
+    void *result=NULL;if(posix(&result,64,128)||!result||(uintptr_t)result%64)return load_thread_fail(env,"HOST_ARENA_POSIX_MEMALIGN");release(result);
+    fprintf(stdout,"HOST_ARENA_PASS actual_LWJGL_jemalloc_16_named_GPA malloc_calloc_realloc_failure rallocx_xallocx_extent actual_arena_lookup reset_six_argument_byMib_destroy paired_free no_Core_producer_authority\n");fflush(stdout);
     return JNI_TRUE;
 }
 JNIEXPORT void JNICALL Java_dev_ronova_pro_AuditFixCheck_hostWin32Allocations0(JNIEnv *env,jclass check){

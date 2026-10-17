@@ -929,3 +929,313 @@ done:
 #undef PRIVATE_REQUIRE
     return failure?JNI_FALSE:JNI_TRUE;
 }
+
+/* Isolated explicit-object SDK seam. The fixture supplies its own source/image
+ * registration; the allocation, bytes, SDK receipts, leases and original CRT
+ * calls are real production paths. storage.cpp is the real C++ consumer. This
+ * C adapter does not assert knowledge of any foreign C++ or exception ABI. */
+typedef struct AuditObjectState {uint64_t plain,borrowed;LONG destroyed;} AuditObjectState;
+static __declspec(noinline) void audit_object_original_destroy(AuditObjectState *object,volatile LONG *calls){
+    object->destroyed=1;InterlockedIncrement(calls);
+}
+JNIEXPORT jboolean JNICALL Java_dev_ronova_pro_AuditFixCheck_hostObjectState0(JNIEnv *env,jclass type){
+    const char *failure=NULL;int initialized=0,denied=0,destructorReturned=0;
+    DWORD fixtureTls=TLS_OUT_OF_INDEXES;NativeThread thread={0};Owner owner={0};OwnerLink selected={.owner=&owner};
+    HostImage image={0};NativeLibrary library={0};Binding binding={0};
+    HMODULE fixturePin=NULL;
+    jobject module=NULL;jclass classType=NULL;const ronova_object_state_api_v1 *api=NULL;
+    AuditObjectState *block=NULL;NativeMemoryAllocation *allocation=NULL;NativeHostMemoryCall *call=NULL,*probe=NULL;
+    uint64_t object=0,generation=0,plain=0,borrowed=0,write=0,alias=0,destroy=0;
+    volatile LONG originalDestructors=0;unsigned originalFrees=0;
+    void *(__cdecl *allocate)(size_t)=NULL;void (__cdecl *release)(void*)=NULL;
+    const uint64_t before=0x1029384756abcdefULL,after=0xa1b2c3d4e5f6071ULL,untouched=0x8877665544332211ULL;
+#define OBJECT_REQUIRE(CONDITION,MESSAGE) do{if(!(CONDITION)){failure=(MESSAGE);goto object_done;}}while(0)
+    OBJECT_REQUIRE(!native_controller&&!native_vm&&native_tls==TLS_OUT_OF_INDEXES&&!native_memory_allocations
+            &&!native_object_states&&!native_object_state_calls&&!native_owners&&!host_images&&!native_libraries&&!native_tooling_pin,
+            "object seam requires an uninstalled isolated controller");
+    native_original=**env;initialized=1;fixtureTls=TlsAlloc();native_tls=fixtureTls;
+    OBJECT_REQUIRE(fixtureTls!=TLS_OUT_OF_INDEXES&&TlsSetValue(fixtureTls,&thread),"object seam actual TLS unavailable");
+    classType=native_original.FindClass(env,"java/lang/Class");
+    jmethodID getModule=classType?native_original.GetMethodID(env,classType,"getModule","()Ljava/lang/Module;"):NULL;
+    module=getModule?native_original.CallObjectMethod(env,type,getModule):NULL;
+    if(classType){native_original.DeleteLocalRef(env,classType);classType=NULL;}
+    owner.module=module?native_original.NewWeakGlobalRef(env,module):NULL;owner.producer=1;
+    OBJECT_REQUIRE(owner.module&&!native_original.ExceptionCheck(env),"object seam actual Java module unavailable");
+    image.handle=native_image((void*)Java_dev_ronova_pro_AuditFixCheck_hostObjectState0);image.live=1;
+    IMAGE_DOS_HEADER *dos=(IMAGE_DOS_HEADER*)image.handle;
+    IMAGE_NT_HEADERS64 *nt=dos?(IMAGE_NT_HEADERS64*)((unsigned char*)dos+dos->e_lfanew):NULL;
+    OBJECT_REQUIRE(dos&&dos->e_magic==IMAGE_DOS_SIGNATURE&&nt&&nt->Signature==IMAGE_NT_SIGNATURE
+            &&nt->OptionalHeader.Magic==IMAGE_NT_OPTIONAL_HDR64_MAGIC,"object seam actual PE image unavailable");
+    OBJECT_REQUIRE(GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS,
+            (LPCWSTR)Java_dev_ronova_pro_AuditFixCheck_hostObjectState0,&fixturePin)&&fixturePin==image.handle,
+            "object seam actual control image pin unavailable");
+    native_tooling_pin=fixturePin;
+    image.size=nt->OptionalHeader.SizeOfImage;native_tooling_image_begin=(uintptr_t)image.handle;
+    native_tooling_image_end=native_tooling_image_begin+image.size;
+    library.handle=image.handle;library.hostImage=&image;library.owners=&selected;library.jni=JNI_TRUE;library.alive=library.complete=1;
+    binding.library=&library;binding.owners=&selected;thread.stack[0]=&binding;thread.depth=1;
+    host_images=&image;native_libraries=&library;
+    api=RonovaObjectStateGetApi(RONOVA_OBJECT_STATE_ABI);
+    OBJECT_REQUIRE(api&&api->abi==RONOVA_OBJECT_STATE_ABI&&api->size==sizeof(*api),"object SDK actual function table unavailable");
+    OBJECT_REQUIRE(TlsSetValue(fixtureTls,NULL)&&!RonovaObjectStateGetApi(RONOVA_OBJECT_STATE_ABI)
+            &&TlsSetValue(fixtureTls,&thread),"object SDK guessed a source or dereferenced absent native thread state");
+    HMODULE crt=GetModuleHandleW(L"msvcrt.dll");
+    allocate=crt?(void *(__cdecl*)(size_t))GetProcAddress(crt,"malloc"):NULL;
+    release=crt?(void (__cdecl*)(void*))GetProcAddress(crt,"free"):NULL;
+    OBJECT_REQUIRE(allocate&&release,"object seam actual CRT provider unavailable");
+    block=(AuditObjectState*)allocate(sizeof(*block));OBJECT_REQUIRE(block,"object seam original CRT allocation failed");
+    block->plain=before;block->borrowed=untouched;block->destroyed=0;
+    native_memory_host_allocated(env,NATIVE_MEMORY_HOST_CRT,(void*)allocate,(void*)release,0,0,
+            (uint64_t)(uintptr_t)block,sizeof(*block),&selected,0);
+    allocation=native_memory_find((uint64_t)(uintptr_t)block,sizeof(*block),1);
+    OBJECT_REQUIRE(allocation&&allocation->alive&&allocation->opaque&&!allocation->unknownUse,
+            "object seam actual CRT result lost its exact allocation generation");
+    errno=EAGAIN;SetLastError(0x524e0b01);object=api->constructed((uintptr_t)block,sizeof(*block));
+    DWORD constructedWindows=GetLastError();int constructedErrno=errno;LONG constructedTyped=allocation->typedObjects;
+    if(!object||constructedErrno!=EAGAIN||constructedWindows!=0x524e0b01||constructedTyped!=1){
+        fprintf(stderr,"HOST_OBJECT_STATE_CONSTRUCT_ACTUAL token=%llu typed=%ld errno=%d lastError=%lu allocation=%p generation=%llu alive=%ld opaque=%ld unknownUse=%ld unknownReaders=%ld controlImage=%p fixtureImage=%p\n",
+                (unsigned long long)object,(long)constructedTyped,constructedErrno,(unsigned long)constructedWindows,(void*)allocation,
+                (unsigned long long)allocation->generation,(long)allocation->alive,(long)allocation->opaque,
+                (long)allocation->unknownUse,(long)allocation->unknownReaders,(void*)native_control_image(),(void*)image.handle);fflush(stderr);
+    }
+    OBJECT_REQUIRE(object&&constructedErrno==EAGAIN&&constructedWindows==0x524e0b01&&constructedTyped==1,
+            "object SDK constructed was uncovered, changed original errors, or lost typed lifetime");
+    generation=api->generation(object);
+    OBJECT_REQUIRE(generation==allocation->generation&&api->allocation(object)==(uint64_t)(uintptr_t)allocation,
+            "object SDK receipt did not carry the actual allocation row and generation");
+    plain=api->span(object,generation,(uintptr_t)&block->plain,sizeof(block->plain),RONOVA_OBJECT_BYTES);
+    borrowed=api->span(object,generation,(uintptr_t)&block->borrowed,sizeof(block->borrowed),RONOVA_OBJECT_BORROWED_OBJECT);
+    OBJECT_REQUIRE(plain&&borrowed&&!api->write_begin(object,generation+1,plain),
+            "object SDK lost an explicit field or admitted another allocation generation");
+    write=api->write_begin(object,generation,plain);
+    OBJECT_REQUIRE(write&&allocation->users==1&&allocation->writers==1,"object SDK actual field writer lease unavailable");
+    block->plain=after;int written=api->write_end(write,1);write=0;
+    NativeMemoryRange *range=allocation->ranges;
+    OBJECT_REQUIRE(written&&range&&range->revision&&range->revision->complete&&range->revision->image
+            &&!memcmp(range->revision->image->before,&before,sizeof(before))
+            &&!memcmp(range->revision->image->after,&after,sizeof(after))&&block->borrowed==untouched,
+            "object SDK did not record the real before/after bytes or copied a borrowed object representation");
+    OBJECT_REQUIRE(!native_object_state_restorable(allocation,range,&selected),"object SDK authorized undo while an actual creator/reader was live");
+    owner.stopped=1;EnterCriticalSection(&allocation->gate);
+    int qualified=native_object_state_restorable(allocation,range,&selected);
+    int restored=qualified&&native_memory_restore_range(allocation,range,&selected);
+    NativeMemoryRange borrowedRange={0};borrowedRange.start=(uint64_t)(uintptr_t)&block->borrowed-allocation->address;
+    borrowedRange.length=sizeof(block->borrowed);
+    int borrowedQualified=native_object_state_restorable(allocation,&borrowedRange,&selected);
+    LeaveCriticalSection(&allocation->gate);owner.stopped=0;
+    OBJECT_REQUIRE(restored&&!borrowedQualified&&block->plain==before&&block->borrowed==untouched&&allocation->opaque,
+            "object SDK selected plain restore failed, widened borrowing, or cleared raw-layout opacity");
+    probe=native_memory_host_prepare(env,NATIVE_MEMORY_HOST_CRT,(void*)release,0,(uint64_t)(uintptr_t)block,0,
+            NATIVE_MEMORY_HOST_FREE,&selected,0,&denied);
+    OBJECT_REQUIRE(!probe&&denied&&block->destroyed==0&&!native_memory_private(env,allocation,&selected),
+            "raw free or automatic cleanup skipped the actual constructed object destructor");
+    alias=api->borrow_begin(object,generation,borrowed);
+    OBJECT_REQUIRE(alias&&allocation->users==1&&allocation->reading==1&&!api->destroy_begin(object,generation),
+            "object SDK admitted destruction while an actual borrowed-object lease was live");
+    probe=native_memory_host_prepare(env,NATIVE_MEMORY_HOST_CRT,(void*)release,0,(uint64_t)(uintptr_t)block,sizeof(*block)*2,
+            NATIVE_MEMORY_HOST_REALLOCATE,&selected,0,&denied);
+    OBJECT_REQUIRE(!probe&&denied&&block->borrowed==untouched&&originalDestructors==0,
+            "an actual borrowed object permitted raw reallocation or guessed destruction");
+    jlong active[42]={0};host_object_state_summary(env,module,active);
+    OBJECT_REQUIRE(active[39]==1&&active[40]>=1&&active[41]>=1,"active object/borrow/refused-destroy state was not retained as pending");
+    int unborrowed=api->borrow_end(alias);alias=0;
+    OBJECT_REQUIRE(unborrowed&&!allocation->users&&!allocation->reading,"actual object alias lease did not close");
+    destroy=api->destroy_begin(object,generation);
+    OBJECT_REQUIRE(destroy&&!allocation->users&&!allocation->changing&&allocation->typedObjects==1,
+            "object destructor boundary held an allocation lease across its own original free");
+    audit_object_original_destroy(block,&originalDestructors);destructorReturned=1;
+    OBJECT_REQUIRE(originalDestructors==1&&block->destroyed==1,"original explicit object destruction did not run exactly once");
+    int closed=api->destroy_end(destroy,1);destroy=0;
+    OBJECT_REQUIRE(closed&&!allocation->typedObjects,"actual destructor receipt did not release this allocation generation's typed lifetime");
+    object=0;call=native_memory_host_prepare(env,NATIVE_MEMORY_HOST_CRT,(void*)release,0,(uint64_t)(uintptr_t)block,0,
+            NATIVE_MEMORY_HOST_FREE,&selected,0,&denied);
+    OBJECT_REQUIRE(call&&!denied,"original CRT free remained blocked after the real object destructor completed");
+    release(block);block=NULL;originalFrees++;
+    native_memory_host_complete(env,call,0,0,1,1);call=NULL;
+    jlong closedState[42]={0};host_object_state_summary(env,module,closedState);
+    OBJECT_REQUIRE(!allocation->alive&&allocation->generation!=generation&&originalDestructors==1&&originalFrees==1
+            &&!closedState[39]&&!closedState[40]&&!closedState[41]&&!native_object_states&&!native_object_state_calls,
+            "closed object was still live/pending or original CRT free failed to retire the exact allocation");
+    fprintf(stdout,"HOST_OBJECT_STATE_SEAM_PASS isolated_source_image_registration actual_CRT_allocation nonzero_SDK_receipt exact_row_generation provider_errors real_before_after_and_selected_plain_restore borrowed_object_not_memcpy live_borrow_blocks_destroy raw_free_realloc_denied actual_C_destroy_then_original_free no_foreign_Cplusplus_ABI_claim\n");fflush(stdout);
+object_done:
+    if(initialized){
+        if(native_original.ExceptionCheck(env))native_original.ExceptionClear(env);
+        owner.stopped=0;
+        if(call)native_memory_host_abort(env,call);if(probe)native_memory_host_abort(env,probe);
+        if(api&&write)api->write_end(write,0);if(api&&alias)api->borrow_end(alias);if(api&&destroy)api->destroy_end(destroy,0);
+        /* Only failure teardown drains fixture-owned registration metadata.
+         * No successful assertion relies on this teardown to retire an object. */
+        while(native_object_state_calls){NativeObjectStateCall *entry=native_object_state_calls;native_object_state_calls=entry->next;
+            native_owner_links_free(entry->write.sources);native_memory_image_release(entry->write.image);free(entry);}
+        while(native_object_states){NativeObjectState *entry=native_object_states;native_object_states=entry->next;native_object_state_dispose(entry);}
+        if(block&&release){if(!destructorReturned)audit_object_original_destroy(block,&originalDestructors);release(block);}
+        while(native_memory_allocations){NativeMemoryAllocation *entry=native_memory_allocations;native_memory_allocations=entry->next;
+            native_memory_released(env,entry);native_memory_reap_references(env,entry);
+            native_owner_links_free(entry->sources);native_owner_links_free(entry->readers);native_owner_links_free(entry->preserved);
+            while(entry->interests){NativeMemoryInterest *interest=entry->interests;entry->interests=interest->next;free(interest);}DeleteCriticalSection(&entry->gate);free(entry);}
+        native_owner_links_free(native_memory_unknown);native_memory_unknown=NULL;
+        host_images=NULL;native_libraries=NULL;native_tooling_image_begin=native_tooling_image_end=0;native_tooling_pin=NULL;
+        if(fixturePin)host_real_free_library(fixturePin);
+        if(owner.module)native_original.DeleteWeakGlobalRef(env,owner.module);
+        if(module)native_original.DeleteLocalRef(env,module);if(classType)native_original.DeleteLocalRef(env,classType);
+        if(fixtureTls!=TLS_OUT_OF_INDEXES){TlsSetValue(fixtureTls,NULL);TlsFree(fixtureTls);}native_tls=TLS_OUT_OF_INDEXES;
+        memset(&native_original,0,sizeof(native_original));
+    }
+    if(failure)audit_physical_failure(env,failure);
+#undef OBJECT_REQUIRE
+    return failure?JNI_FALSE:JNI_TRUE;
+}
+
+/* Real compiler TLS requires the fixture's -fno-emulated-tls build. Only this
+ * DLL's image/source registration is fixture-owned. The production PE/TEB
+ * reader, borrowed storage gates and actual OS-thread witness are unchanged. */
+static _Thread_local volatile uint64_t audit_static_tls_word=UINT64_C(0x71932a4b5c6d8e0f);
+typedef struct AuditStaticTlsPeer {
+    HostImage *image;OwnerLink *owners;HANDLE ready,release;
+    uint64_t address,initial;int observed;
+} AuditStaticTlsPeer;
+static DWORD WINAPI audit_static_tls_peer(void *argument){
+    AuditStaticTlsPeer *peer=(AuditStaticTlsPeer*)argument;NativeThread state={0};
+    peer->address=(uint64_t)(uintptr_t)&audit_static_tls_word;peer->initial=audit_static_tls_word;
+    peer->observed=host_static_tls_observe(&state,peer->image,peer->owners,0);
+    SetEvent(peer->ready);WaitForSingleObject(peer->release,INFINITE);return 0;
+}
+static HostStaticTlsSpan *audit_static_tls_span(HostStaticTlsImage *image,uint64_t address){
+    for(HostStaticTlsSpan *span=image?image->spans:NULL;span;span=span->next)
+        if(!span->closed&&address>=span->address&&sizeof(uint64_t)<=span->bytes&&address-span->address<=span->bytes-sizeof(uint64_t))return span;
+    return NULL;
+}
+/* This provider-shaped release uses only fixture-owned HeapAlloc storage.
+ * Supplying arena completions below exercises the production tracker seam;
+ * it is not evidence that jemalloc discovery/control exports were executed. */
+static void audit_static_arena_release(void *pointer){if(pointer)HeapFree(GetProcessHeap(),0,pointer);}
+JNIEXPORT jboolean JNICALL Java_dev_ronova_pro_AuditFixCheck_hostStaticTlsArena0(JNIEnv *env,jclass type){
+    const char *failure=NULL;int initialized=0,denied=0,joined=0;DWORD fixtureTls=TLS_OUT_OF_INDEXES;
+    NativeThread thread={0};Owner *owner=NULL;OwnerLink selected={0};HostImage image={0};
+    AuditStaticTlsPeer peer={0};HANDLE peerHandle=NULL;HostStaticTlsImage *tls=NULL;
+    HostStaticTlsSpan *mainSpan=NULL,*peerSpan=NULL;NativeMemoryAllocation *mainAllocation=NULL,*peerAllocation=NULL,*arenaAllocation=NULL;
+    NativeHostMemoryCall *call=NULL;NativeHostArenaProvider *provider=NULL;NativeHostArenaContext *arena=NULL;
+    jobject view=NULL,module=NULL;jlong binding[2]={0},oldToken=0;uint64_t oldGeneration=0,oldEpoch=0;
+    void *block=NULL;uintptr_t context=18;uint64_t originalWord=audit_static_tls_word;
+#define STATIC_ARENA_REQUIRE(CONDITION,MESSAGE) do{if(!(CONDITION)){failure=(MESSAGE);goto done;}}while(0)
+    STATIC_ARENA_REQUIRE(!native_controller&&!native_vm&&native_tls==TLS_OUT_OF_INDEXES&&!native_memory_allocations
+            &&!native_memory_images&&!native_memory_arena_contexts&&!native_memory_arena_providers&&!native_owners
+            &&!host_static_tls_images&&!host_static_tls_threads,"static TLS/arena fixture requires an uninstalled controller");
+    native_original=**env;initialized=1;fixtureTls=TlsAlloc();native_tls=fixtureTls;
+    STATIC_ARENA_REQUIRE(fixtureTls!=TLS_OUT_OF_INDEXES&&TlsSetValue(fixtureTls,&thread),"static TLS/arena fixture thread context unavailable");
+    native_controller=(jclass)native_original.NewGlobalRef(env,type);native_controls=(jclass)native_original.NewGlobalRef(env,type);
+    native_memory_gate=native_original.GetStaticMethodID(env,type,"memoryRecoveryCaller","()Z");
+    jclass classClass=native_original.FindClass(env,"java/lang/Class");
+    jmethodID getModule=classClass?native_original.GetMethodID(env,classClass,"getModule","()Ljava/lang/Module;"):NULL;
+    if(getModule)module=native_original.CallObjectMethod(env,type,getModule);
+    if(classClass)native_original.DeleteLocalRef(env,classClass);
+    owner=module?native_owner(env,module):NULL;if(owner){owner->producer=1;selected.owner=owner;}
+    image.handle=native_image((void*)Java_dev_ronova_pro_AuditFixCheck_hostStaticTlsArena0);image.live=1;
+    STATIC_ARENA_REQUIRE(native_controller&&native_controls&&native_memory_gate&&owner&&image.handle&&host_handle_identity_ready(),
+            "static TLS/arena fixture source/image or real handle comparator unavailable");
+    audit_static_tls_word=UINT64_C(0xa6b7c8d9e0f12345);
+    STATIC_ARENA_REQUIRE(host_static_tls_observe(&thread,&image,&selected,0),"actual PE64/current TEB static TLS observation failed");
+    tls=host_static_tls_image_locked(&image,0);mainSpan=audit_static_tls_span(tls,(uint64_t)(uintptr_t)&audit_static_tls_word);
+    mainAllocation=native_memory_find((uint64_t)(uintptr_t)&audit_static_tls_word,sizeof(uint64_t),0);
+    STATIC_ARENA_REQUIRE(tls&&tls->present&&tls->templateBytes&&mainSpan&&mainAllocation
+            &&mainSpan->address!=tls->templateAddress&&mainAllocation->imageTag==mainSpan
+            &&mainAllocation->hostFamily==NATIVE_MEMORY_HOST_IMAGE&&mainAllocation->opaque&&!mainAllocation->release,
+            "static TLS template replaced the actual current borrowed instance or gained free authority");
+    peer.image=&image;peer.owners=&selected;peer.ready=CreateEventW(NULL,TRUE,FALSE,NULL);peer.release=CreateEventW(NULL,TRUE,FALSE,NULL);
+    if(peer.ready&&peer.release)peerHandle=CreateThread(NULL,0,audit_static_tls_peer,&peer,0,NULL);
+    STATIC_ARENA_REQUIRE(peerHandle&&WaitForSingleObject(peer.ready,5000)==WAIT_OBJECT_0&&peer.observed
+            &&peer.initial==originalWord&&audit_static_tls_word==UINT64_C(0xa6b7c8d9e0f12345)
+            &&peer.address!=(uint64_t)(uintptr_t)&audit_static_tls_word,"actual OS threads shared a compiler TLS instance or initialization value");
+    peerSpan=audit_static_tls_span(tls,peer.address);peerAllocation=native_memory_find(peer.address,sizeof(uint64_t),0);
+    STATIC_ARENA_REQUIRE(peerSpan&&peerSpan!=mainSpan&&peerSpan->thread!=mainSpan->thread&&peerAllocation
+            &&peerAllocation!=mainAllocation&&peerAllocation->imageTag==peerSpan,"independent current-thread TLS observation reused another thread tag");
+    view=native_original.NewDirectByteBuffer(env,(void*)(uintptr_t)peer.address,sizeof(uint64_t));
+    STATIC_ARENA_REQUIRE(view&&native_memory_buffer_observe(env,view,NULL,peer.address,sizeof(uint64_t),binding)&&binding[0]
+            &&!host_static_image_prepare(&image,env)&&mainAllocation->alive&&peerAllocation->alive
+            &&!mainAllocation->retiring&&!peerAllocation->retiring,"peer TLS alias failed to block/rollback aggregate image preparation");
+    native_original.DeleteLocalRef(env,view);view=NULL;
+    STATIC_ARENA_REQUIRE(audit_private_native_aliases_collected(env,peerAllocation)&&host_static_image_prepare(&image,env)
+            &&mainAllocation->retiring&&peerAllocation->retiring,"quiescent observed TLS instances did not all join image preparation");
+    host_static_image_cancel(&image,env);
+    STATIC_ARENA_REQUIRE(!mainAllocation->retiring&&!peerAllocation->retiring,"cancelled image preparation left a TLS instance sealed");
+    SetEvent(peer.release);joined=WaitForSingleObject(peerHandle,5000)==WAIT_OBJECT_0;
+    STATIC_ARENA_REQUIRE(joined,"actual compiler TLS peer did not reach OS-thread termination");
+    host_static_tls_reap(&env);
+    STATIC_ARENA_REQUIRE(peerSpan->closed&&!peerAllocation->alive&&!mainSpan->closed&&mainAllocation->alive
+            &&audit_static_tls_word==UINT64_C(0xa6b7c8d9e0f12345),"signaled peer OS thread retired another thread's TLS or changed its bytes");
+
+    /* Arena observations below deliberately supply completion results. The
+     * physical backing is real fixture storage; provider discovery and real
+     * jemalloc reset are covered by the separate Host allocator fixture. */
+    call=native_memory_host_arena_prepare(env,(void*)audit_static_arena_release,0,0,NATIVE_MEMORY_HOST_CONTEXT_CREATE,&selected,0,&denied);
+    STATIC_ARENA_REQUIRE(call&&!denied,"arena create tracker seam refused its initial lease");
+    native_memory_host_arena_complete(env,call,0,0,context,1,0);call=NULL;
+    provider=native_memory_arena_provider((void*)audit_static_arena_release,0);arena=native_memory_arena_context(provider,context,0);
+    call=native_memory_host_arena_prepare(env,(void*)audit_static_arena_release,0,0,NATIVE_MEMORY_HOST_ALLOCATE,&selected,0,&denied);
+    STATIC_ARENA_REQUIRE(provider&&arena&&arena->created&&call&&!denied,"arena context/allocate completion seam unavailable");
+    block=HeapAlloc(GetProcessHeap(),0,64);native_memory_host_arena_complete(env,call,(uint64_t)(uintptr_t)block,64,context,block!=NULL,0);call=NULL;
+    arenaAllocation=native_memory_find((uint64_t)(uintptr_t)block,64,1);
+    STATIC_ARENA_REQUIRE(block&&arenaAllocation&&arenaAllocation->hostFamily==NATIVE_MEMORY_HOST_ARENA
+            &&arenaAllocation->hostContextEpoch==arena->epoch,"arena allocation seam lost its context incarnation");
+    oldToken=(jlong)(uintptr_t)arenaAllocation;oldGeneration=arenaAllocation->generation;oldEpoch=arena->epoch;
+    view=native_original.NewDirectByteBuffer(env,block,64);
+    STATIC_ARENA_REQUIRE(view&&native_memory_buffer_observe(env,view,NULL,(uint64_t)(uintptr_t)block,64,binding)&&binding[0],"arena borrowed alias seam unavailable");
+    call=native_memory_host_arena_prepare(env,(void*)audit_static_arena_release,0,context,NATIVE_MEMORY_HOST_ARENA_RESET,&selected,0,&denied);
+    STATIC_ARENA_REQUIRE(!call&&denied&&arenaAllocation->alive&&arena->epoch==oldEpoch&&!arena->retired&&!provider->changing,
+            "live borrowed arena alias permitted reset or changed its context generation");
+    native_original.DeleteLocalRef(env,view);view=NULL;
+    STATIC_ARENA_REQUIRE(audit_private_native_aliases_collected(env,arenaAllocation),"released arena alias remained reachable in completion seam");
+    call=native_memory_host_arena_prepare(env,(void*)audit_static_arena_release,0,context,NATIVE_MEMORY_HOST_ARENA_RESET,&selected,0,&denied);
+    STATIC_ARENA_REQUIRE(call&&!denied,"arena reset failure completion seam unavailable");
+    native_memory_host_arena_complete(env,call,0,0,context,0,0);call=NULL;
+    STATIC_ARENA_REQUIRE(arenaAllocation->alive&&arenaAllocation->generation==oldGeneration&&arena->epoch==oldEpoch&&!arena->retired&&!provider->changing,
+            "failed arena reset completion retired or held its prior generation");
+    call=native_memory_host_arena_prepare(env,(void*)audit_static_arena_release,0,context,NATIVE_MEMORY_HOST_ARENA_RESET,&selected,0,&denied);
+    STATIC_ARENA_REQUIRE(call&&!denied,"arena reset success completion seam unavailable");
+    native_memory_host_arena_complete(env,call,0,0,context,1,1);call=NULL;
+    arena=native_memory_arena_context(provider,context,0);
+    STATIC_ARENA_REQUIRE(!arenaAllocation->alive&&arena&&arena->epoch!=oldEpoch&&!arena->retired,
+            "successful arena reset completion reused its former context generation");
+    call=native_memory_host_arena_prepare(env,(void*)audit_static_arena_release,0,0,NATIVE_MEMORY_HOST_ALLOCATE,&selected,0,&denied);
+    STATIC_ARENA_REQUIRE(call&&!denied,"replacement arena allocation completion seam unavailable");
+    native_memory_host_arena_complete(env,call,(uint64_t)(uintptr_t)block,64,context,1,0);call=NULL;
+    NativeMemoryAllocation *replacement=native_memory_find((uint64_t)(uintptr_t)block,64,1);
+    view=native_original.NewDirectByteBuffer(env,block,64);
+    STATIC_ARENA_REQUIRE(replacement&&replacement!=arenaAllocation&&replacement->hostContextEpoch==arena->epoch
+            &&view&&native_memory_buffer_observe(env,view,NULL,(uint64_t)(uintptr_t)block,64,binding)&&binding[0]
+            &&!native_memory_buffer_use(env,view,oldToken,oldGeneration,(uint64_t)(uintptr_t)block,64,1),
+            "same-address arena replacement accepted a stale buffer generation");
+done:
+    if(peer.release)SetEvent(peer.release);
+    if(peerHandle){if(!joined)WaitForSingleObject(peerHandle,INFINITE);CloseHandle(peerHandle);}
+    if(peer.ready)CloseHandle(peer.ready);if(peer.release)CloseHandle(peer.release);
+    if(initialized){
+        if(native_original.ExceptionCheck(env))native_original.ExceptionClear(env);
+        if(call)native_memory_host_cancel(call);
+        if(view)native_original.DeleteLocalRef(env,view);if(module)native_original.DeleteLocalRef(env,module);
+        while(host_static_tls_threads){HostStaticTlsThread *entry=host_static_tls_threads;host_static_tls_threads=entry->next;
+            if(entry->monitor)host_real_close(entry->monitor);free(entry);}
+        while(host_static_tls_images){HostStaticTlsImage *entry=host_static_tls_images;host_static_tls_images=entry->next;
+            while(entry->spans){HostStaticTlsSpan *span=entry->spans;entry->spans=span->next;native_owner_links_free(span->owners);free(span);}
+            native_owner_links_free(entry->owners);free(entry);}
+        while(native_memory_allocations){NativeMemoryAllocation *entry=native_memory_allocations;native_memory_allocations=entry->next;
+            native_memory_released(env,entry);native_memory_reap_references(env,entry);
+            native_owner_links_free(entry->sources);native_owner_links_free(entry->readers);native_owner_links_free(entry->preserved);
+            while(entry->interests){NativeMemoryInterest *interest=entry->interests;entry->interests=interest->next;free(interest);}DeleteCriticalSection(&entry->gate);free(entry);}
+        if(block)audit_static_arena_release(block);
+        while(native_memory_arena_contexts){NativeHostArenaContext *entry=native_memory_arena_contexts;native_memory_arena_contexts=entry->next;native_owner_links_free(entry->sources);free(entry);}
+        while(native_memory_arena_providers){NativeHostArenaProvider *entry=native_memory_arena_providers;native_memory_arena_providers=entry->next;free(entry);}native_memory_host_context_epoch=0;
+        while(native_memory_images){NativeMemoryImageState *entry=native_memory_images;native_memory_images=entry->next;free(entry);}
+        native_owner_links_free(native_memory_unknown);native_memory_unknown=NULL;
+        while(native_owners){Owner *entry=native_owners;native_owners=entry->next;if(entry->module)native_original.DeleteWeakGlobalRef(env,entry->module);free(entry);}
+        native_private_unregister(&thread.jniRange);
+        if(native_controller)native_original.DeleteGlobalRef(env,native_controller);if(native_controls)native_original.DeleteGlobalRef(env,native_controls);
+        native_controller=native_controls=NULL;native_memory_gate=NULL;
+        if(fixtureTls!=TLS_OUT_OF_INDEXES){TlsSetValue(fixtureTls,NULL);TlsFree(fixtureTls);}native_tls=TLS_OUT_OF_INDEXES;
+        memset(&native_original,0,sizeof(native_original));
+    }
+    audit_static_tls_word=originalWord;
+    if(failure)audit_physical_failure(env,failure);
+#undef STATIC_ARENA_REQUIRE
+    return failure?JNI_FALSE:JNI_TRUE;
+}

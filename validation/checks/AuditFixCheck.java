@@ -58,6 +58,8 @@ public final class AuditFixCheck {
         if(args.length==1&&args[0].equals("buffer-release")){bufferRelease();return;}
         if(args.length==1&&args[0].equals("opaque-native-state")){opaqueNativeState();return;}
         if(args.length==1&&args[0].equals("private-native-state")){privateNativeState();return;}
+        if(args.length==1&&args[0].equals("private-native-state-seams")){privateNativeStateSeams(true);return;}
+        if(args.length==1&&args[0].equals("private-object-state-seam")){privateNativeStateSeams(false);return;}
         if(args.length==1&&args[0].equals("buffer-wrap")){bufferWrap();return;}
         if(args.length==1&&args[0].equals("buffer-font")){bufferFont();return;}
         if(args.length==1&&args[0].equals("native-image-srg")){nativeImageSrg();return;}
@@ -934,6 +936,7 @@ public final class AuditFixCheck {
     private static native boolean hostCrtAllocations0();
     private static native boolean hostCppPrivate0();
     private static native boolean hostTlsPrivate0();
+    private static native boolean hostArenaAllocations0();
     private static native void hostRawUnsafe0();
     private static native void hostModuleRelease0(String controlDll);
     private static native void hostModuleReleaseThread0(String controlDll);
@@ -944,6 +947,19 @@ public final class AuditFixCheck {
     private static void hostThreadCreate(){
         System.load(java.nio.file.Path.of(System.getProperty("ronova.pro.audit.thread.native")).toAbsolutePath().toString());
         String phase=System.getProperty("ronova.pro.audit.thread.phase","thread-create");
+        if(phase.equals("arena-static-object")){
+            System.load(java.nio.file.Path.of(System.getProperty("ronova.pro.audit.jemalloc","jemalloc.dll")).toAbsolutePath().toString());
+            require(hostArenaAllocations0(),"actual jemalloc arena boundary failed");
+            require(StorageNative.available()&&StorageNative.abi0()==3,"actual C++ storage consumer DLL unavailable");
+            try{
+                var file=java.nio.file.Files.createTempFile("ronova-object-state-",".dat");
+                try(var stream=new java.io.FileInputStream(file.toFile())){
+                    require(StorageNative.identity(stream.getFD(),file.toString())!=null,"C++ identity object changed original result");
+                }finally{java.nio.file.Files.deleteIfExists(file);}
+                System.out.println("HOST_CPP_STORAGE_IDENTITY_PASS actual_Cplusplus_constructor_original_identity_destructor no_producer_SDK_coverage_claim");
+            }catch(java.io.IOException failure){throw new AssertionError("actual C++ storage consumer failed",failure);}
+            return;
+        }
         if(phase.equals("pool-tls-cpp")){
             hostWin32Allocations0();
             require(hostCrtAllocations0(),"CRT release source admission failed");
@@ -2099,6 +2115,21 @@ public final class AuditFixCheck {
     private static final RuntimeException OPAQUE_NATIVE_FAILURE=new RuntimeException("opaque-native-original");
     private static native boolean opaqueNativeState0(Object action,Module[] modules,Throwable original);
     private static native boolean privateNativeState0(Module[] modules);
+    private static native boolean hostStaticTlsArena0();
+    private static native boolean hostObjectState0();
+    private static void privateNativeStateSeams(boolean includeTls){
+        System.load(java.nio.file.Path.of(System.getProperty("ronova.pro.audit.native")).toAbsolutePath().toString());
+        opaqueNativeModules=new Module[]{AuditFixCheck.class.getModule()};opaqueNativeFixture=true;
+        try{
+            if(includeTls){
+                require(hostStaticTlsArena0(),"actual compiler TLS and arena tracker completion seam failed");
+                System.out.println("PRIVATE_STATIC_TLS_ARENA_SEAMS_PASS actual_PE_template_and_current_TEB_instance_distinct independent_actual_OS_thread_TLS peer_alias_blocks_whole_image_prepare seal_cancel peer_OS_signal_retires_only_peer arena_tracker_supplied_completion_seam live_alias_blocks_reset failed_reset_preserves_epoch successful_reset_new_epoch stale_alias_pair_refused no_real_arena_control_claim no_image_unmap_claim fixture_owned_sources_no_global_install");
+            }
+            require(hostObjectState0(),"isolated native object SDK lifecycle seam failed");
+            System.out.println("PRIVATE_OBJECT_STATE_SEAM_PASS fixture_owned_allocation production_SDK_write_borrow_destructor_gates no_game_discovery_claim");
+        }
+        finally{opaqueNativeFixture=false;opaqueNativeModules=null;}
+    }
     private static void privateNativeState(){
         System.load(java.nio.file.Path.of(System.getProperty("ronova.pro.audit.native")).toAbsolutePath().toString());
         opaqueNativeModules=new Module[]{AuditFixCheck.class.getModule()};opaqueNativeFixture=true;

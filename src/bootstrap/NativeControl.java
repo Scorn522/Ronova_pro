@@ -49,7 +49,7 @@ public final class NativeControl {
                 if(dll==null)return installFailure("OBJECT_CLONE_JNI_PAYLOAD_ABSENT",false);
                 nativeLoadAttempted=true;
                 System.load(dll.toString());nativeLoaded=true;
-                if(abi()!=90)throw new UnsatisfiedLinkError("NATIVE_CONTROL_ABI");
+                if(abi()!=91)throw new UnsatisfiedLinkError("NATIVE_CONTROL_ABI");
             }
             if(!nativeBoundaryInstalled){
                 nativeHandoffRetryable=false;
@@ -755,6 +755,8 @@ public final class NativeControl {
                 +";HOST_CHILD_OWN_PIN_RELEASES="+host[30]+";HOST_CHILD_APPLICATION_LOADER_LIFETIMES_UNOBSERVED="+host[31]
                 +";HOST_TLS_FLS_SLOTS="+host[32]+";HOST_TLS_FLS_VALUES="+host[33]+";HOST_TLS_FLS_ACTIVE="+host[34]
                 +";HOST_TLS_FLS_LIFECYCLE_GAPS="+host[35]+";HOST_TLS_FLS_SOURCE_HOLDS="+host[36]
+                +";HOST_STATIC_TLS_INSTANCES="+host[37]+";HOST_STATIC_TLS_GAPS="+host[38]
+                +";HOST_CPP_OBJECTS="+host[39]+";HOST_CPP_OBJECT_ACTIVE="+host[40]+";HOST_CPP_OBJECT_GAPS="+host[41]
                 +";JVMTI_GETENV="+jvmti[0]+";JVMTI_OBSERVED_ENVIRONMENTS="+jvmti[1]+";JVMTI_CALLBACK_SLOTS="+jvmti[2]+";JVMTI_ACTIVE_CALLBACKS="+jvmti[3]
                 +";JVMTI_DISPOSED_ENVIRONMENTS="+jvmti[4]+";JVMTI_FAILURES="+jvmti[5]+";JVMTI_OWN_TABLE="+jvmti[6]+";JVMTI_UNATTRIBUTED_CALLBACKS="+jvmti[7]+";"+hostKernelSummary(module);
     }
@@ -763,6 +765,8 @@ public final class NativeControl {
         if(!available)return "";
         if(jvmtiDefinitionsPending0(module))return "JVMTI_DEFINITION_CONTINUATION_PENDING";
         long[] host=hostState0(module);long[] jvmti=jvmtiState0(module);
+        if(host[37]!=0||host[38]!=0)return "HOST_STATIC_TLS_RETIREMENT_PENDING:instances="+host[37]+":gaps="+host[38];
+        if(host[39]!=0||host[40]!=0||host[41]!=0)return "HOST_CPP_OBJECT_RETIREMENT_PENDING:objects="+host[39]+":active="+host[40]+":gaps="+host[41];
         if(host[32]!=0||host[33]!=0||host[34]!=0||host[35]!=0||host[36]!=0)
             return "HOST_TLS_FLS_RETIREMENT_PENDING:slots="+host[32]+":values="+host[33]+":active="+host[34]+":gaps="+host[35]+":sourceHolds="+host[36];
         if(host[21]!=0)return "HOST_NATIVE_WORKER_RETIREMENT_PENDING:holds="+host[21]+":exitPending="+host[22]+":lifecycleGaps="+host[23];

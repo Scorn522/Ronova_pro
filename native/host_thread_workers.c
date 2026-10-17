@@ -222,6 +222,7 @@ static int host_thread_worker_enter(HostThreadWorker *worker){
     if(!ready){AcquireSRWLockExclusive(&host_records);worker->error=ERROR_INVALID_STATE;
         worker->lifecycleGap=1;if(state&&state!=prepared)worker->cleanupGap=1;
         ReleaseSRWLockExclusive(&host_records);}
+    if(ready)host_static_tls_current(state,worker->image,worker->owners,worker->unknown);
     native_thread_worker_wake();
     if(crt)host_crt_thread_restore(&errors,errors.before,errors.dosBefore,incoming);else SetLastError(incoming);
     return ready&&!native_owner_stopped(worker->owners);

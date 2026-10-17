@@ -1,5 +1,29 @@
 # B 批实际报告：2026-10-09 代码收敛接续
 
+## 2026-10-17：C 接续——arena 子分配、静态 TLS 与明确对象状态
+
+接续 `ee1d416`，主工程 `D:\桌面\ronova_GPT`，Java ABI101 / Native ABI91 / SourceMapBridge2 / Storage3 / Journal6，协议 `r3-client-8`。本包完成真实 jemalloc 子分配与 bulk 生命周期、Windows x64 编译器静态 TLS，以及显式 C/C++ 对象状态适配；没有恢复容器广谱 Hook，没有增加自身外观、武器或源码 ZIP。
+
+LWJGL jemalloc 的16个实际 `je_*` 导出按准确名称、实现 image 和 ABI 接 IAT/GPA。成功分配以后读取实际 sallocx extent 和 arenas.lookup，不拿未知输入指针反查来源。provider 在途 lease、真实 arena index 与独立 epoch 约束分配、同址重分配和 reset/destroy；失败保旧代，成功才退休，活 DirectBuffer、写入和 typed object 阻破坏。mallctlbymib 使用六参数，MIB 由实际 nametomib 解析。只发现实际观察模块和已经解析的相关导入，不扫描全进程模块，不猜静态 CRT errno/TLS。真实子块完整包含于已观察 backing 时，子块保留准确代次，backing 丧失独立自动回收权；部分重叠与其它 arena 子块冲突继续未决。
+
+原 provider 的准确调用 scope 连接实际内部 Windows backing 释放，复用已持有的同代 lease，其余受影响块仍检查活读写、视图、typed object 和来源；失败不冒充释放。停组 private cleanup 的实际 je_free 也携带已选中且已封闭的准确块，未制造 HostImport。真实 OS loader callout 的同 provider backing 收尾独立取在途 lease，并对全部影响行取门禁；没有真实 loader-query 回执时不授予此 scope。Host 返回式入口与共享 Native 环境查询在 loader callout 内沿既有无 JNI、try-lock 来源分派，避免 DLL_THREAD_DETACH 持加载器锁进入 JVM。
+
+静态 TLS 从真实 PE64 TLS directory、DWORD index 和当前 x64 TEB vector 定位当前实例；初始化模板不是线程实例，不使用动态 TlsGetValue 代替。每线程/每 image incarnation 是独立 borrowed tag，全部已观察实例加入 image prepare/cancel，活 alias 阻卸载；准确 OS monitor signal 只退休该线程实例，不释放 TLS 字节。正常 Binding、Host、worker 和 RunAgentThread 入口接观察；受限回调、不支持布局和不可读/变化链保留 gap。直接 CPU 访问仍 opaque。
+
+新增 `native/include/ronova_object_state.h/.hpp` 显式适配器：实际构造后绑定已有 allocation row/generation、pinned provider 和不可变原来源；普通字节字段、借用对象、写入、借用及实际析构分开记账。所有 caller 前门 noinline；无实际线程上下文时未覆盖，受限分支不附加 JVM。只有完整的同 provider/来源能声明 byte span；未知状态不被清除。真实 before/after 进入既有 revision，仅全部创建者/读者已停且属于本次 selection 的明确字节范围可恢复。活借用/写入阻析构，typed lifetime 阻原始 free/realloc/自动释放；真实析构完成后才解除，失败继续保留。Storage identity 的真实 C++ placement construction、两个普通 decision 字段和原析构已接入；string/wstring 本体为 borrowed，不复制其表示，不猜外部 buffer 所有权。SDK 缺失或回执为0不算覆盖。
+
+构建：整包 `build-c-java101-native91-arena-static-object-isolated-20261017.log` **PASS，50秒**。实际故障收口后最终 `build-c-java101-native91-loader-environment-final-20261017.log` **PASS，39秒**，匹配 Native/JAR 同步更新。Java 检查器、两种既有 Native 夹具编译退出0。最初复用输出目录出现并行文件写入冲突，改用本轮独立输出；原失败日志保留，没有删除工作源码或借用其它 checkout 的结果。
+
+`c-java101-native91-state-seams-20261017.log` 的 TLS/arena 部分 **通过**：真实 compiler TLS 模板/当前实例分离、两个实际 OS 线程、peer live alias 阻整 image prepare、seal/cancel、准确 OS signal 只退休 peer；arena tracker 的 supplied-completion seam 覆盖活 alias 拒 reset、失败保 epoch、成功换代及同址旧 token 拒绝。此命令后续对象夹具首次因 control-image pin 准备不足失败，整条命令不标 PASS。修 fixture pin 与 caller 前门后，仅单独续跑对象：`c-java101-native91-object-final-20261017.log` **退出0**，非零 SDK receipt、真实 CRT 分配、准确 row/generation、原错误状态、真实字节快照与所选 plain restore、borrowed 排除、活借用阻析构、原始 free/realloc 拒绝、真实 C destroy 再配对原 free 均通过。这里的来源/image 登记为隔离 metadata seam，不冒称真实游戏权限或外部 C++ ABI 析构。
+
+真实运行 `c-java101-native91-host-arena-loader-backing-final-20261017.log` **退出0，正常结束且无 jemalloc 页释放错误**：本包 premain/Bootstrap/Native91 为 INSTALLED_FULL，实际本地 LWJGL 3.3.1 jemalloc 16个 named GPA、malloc/calloc、失败 realloc 保旧字节、rallocx/xallocx、sallocx/usable、实际 arena lookup、reset、六参 byMib destroy 和配对释放通过；实际 Storage C++ identity 原结果也通过。没有伪造 Core/producer 许可，identity 成功不冒称 SDK 已观察此普通来源对象。
+
+保留失败过程：首次真实 jemalloc 的内部 backing 释放被外层持有/retiring 误拒，测试阻塞后仅结束该测试进程；补精确嵌套 lease 后各调用返回，但退出又卡住。Attach/SA 未完整展开，最终读取实际 Native 栈并结合 PDB/准确 HostImport，定位 jemalloc IAT 的 TlsGetValue 在 DLL_THREAD_DETACH 进入 code_current_sources_query/JVM，修 loader callout 分派后能退出；中间一次退出0仍有三次 VirtualFree 错误，不标完整通过。补真实 loader backing scope 后，上述最终同命令正常退出且错误消失。旧失败和栈日志均保留；已通过且未受影响的隔离路径不重复跑，没有跑旧矩阵。
+
+匹配候选 `distribution/candidate-c-java101-native91-arena-static-object-wip-20261017` 随源码、SDK 和既有摘要同步 GitHub。任意未接入的自定义 allocator、非合作 C++ 对象/异常/vtable 语义、STL 外部私有 buffer、未知或受限静态 TLS 及裸 CPU/原始调用仍有缺口；真实 Core producer 集成、游戏进服和存档重启 **NOTRUN**，完整 C/B 不标全部完成。
+
+---
+
 ## 2026-10-17：C 接续——独立堆、动态 TLS/FLS 与 C++ 分配状态
 
 接续 `23c286b`，主工程仍为 `D:\桌面\ronova_GPT`。本包 Java ABI100 / Native ABI90 / SourceMapBridge2 / Storage3 / Journal6，协议 `r3-client-8`。三个实现分工完成后统一构建；没有恢复 JDK 容器广谱 Hook，没有添加自身外观、武器或源码 ZIP。

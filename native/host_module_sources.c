@@ -184,7 +184,16 @@ static int host_module_binding_enter(Binding *binding){
     HostImage *image=binding->hostImage;if(!image)return 1;
     AcquireSRWLockShared(&host_imports);
     int ready=image->live&&!image->releasing&&(image->pin||binding->library&&host_library_current(binding->library,image->handle));
-    if(ready)InterlockedIncrement(&image->active);ReleaseSRWLockShared(&host_imports);return ready;
+    if(ready)InterlockedIncrement(&image->active);ReleaseSRWLockShared(&host_imports);
+    if(ready&&native_has_producer(binding->owners)){
+        DWORD error=GetLastError();NativeThread *state=native_tls==TLS_OUT_OF_INDEXES?NULL:(NativeThread*)TlsGetValue(native_tls);
+        OwnerLink *sources=NULL;int unknown=binding->hostUnknown;
+        int captured=native_owner_merge(&sources,binding->owners)&&host_tls_capture(state,&sources,&unknown);
+        if(captured)(void)host_static_tls_observe(state,image,sources,unknown);
+        else InterlockedExchange(&image->privateOpaque,1);
+        native_owner_links_free(sources);SetLastError(error);
+    }
+    return ready;
 }
 static void host_module_binding_leave(Binding *binding){
     if(binding->hostImage&&InterlockedDecrement(&binding->hostImage->active)==0
@@ -238,6 +247,7 @@ static void host_module_return(HostLibraryLoad *load,HMODULE actual,DWORD error)
     dll=dll&&nt->Signature==IMAGE_NT_SIGNATURE&&(nt->FileHeader.Characteristics&IMAGE_FILE_DLL)!=0;
     load->nonExecutable=(load->flags&DONT_RESOLVE_DLL_REFERENCES)!=0||!dll;
     if(load->nonExecutable){if(!host_real_free_library(pin))load->sparePin=pin;return;}
+    host_arena_discover(actual);host_arena_discover_imports(actual);
     void *targets[HOST_KIND_COUNT]={0};host_windows_targets(targets);
     int publicCarrier=0;for(int kind=1;kind<HOST_KIND_COUNT&&!publicCarrier;kind++)
         if(targets[kind])publicCarrier=native_image(targets[kind])==actual;

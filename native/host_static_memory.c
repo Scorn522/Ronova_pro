@@ -23,6 +23,7 @@ static int host_static_range(HMODULE image,uint64_t address,uint64_t bytes){
         cursor=base+region.RegionSize;
     }return 1;
 }
+#include "host_static_tls.c"
 static int host_static_parse(HostImage *image,HostStaticMemory *memory){
     IMAGE_DOS_HEADER dos={0};IMAGE_NT_HEADERS64 nt={0};
     if(!host_static_copy(image->handle,0,&dos,sizeof(dos),sizeof(dos))||dos.e_magic!=IMAGE_DOS_SIGNATURE||dos.e_lfanew<=0)return 0;
@@ -73,24 +74,32 @@ static void host_static_image_observed(HostImage *image){
     JNIEnv *env=host_static_environment();
     for(HostStaticSpan *span=memory->spans;span;span=span->next)
         native_memory_image_span(env,image,span->address,span->bytes,owners,unknown||memory->failed);
+    NativeThread *state=native_tls==TLS_OUT_OF_INDEXES?NULL:(NativeThread*)TlsGetValue(native_tls);
+    host_static_tls_observed_locked(state,image,owners,unknown||memory->failed);
     native_owner_links_free(owners);
 }
 static int host_static_image_prepare(HostImage *image,JNIEnv *env){
     if(image&&InterlockedCompareExchange(&image->active,0,0))return 0;
-    return !image||!image->privateMemory||image->privateMemory->closed||native_memory_image_prepare(env,image);
+    if(!image)return 1;
+    if(image->privateMemory&&!image->privateMemory->closed&&!native_memory_image_prepare(env,image))return 0;
+    if(host_static_tls_image_prepare(image,env))return 1;
+    if(image->privateMemory&&!image->privateMemory->closed)native_memory_image_cancel(env,image);
+    return 0;
 }
 static void host_static_image_cancel(HostImage *image,JNIEnv *env){
     if(image&&image->privateMemory&&!image->privateMemory->closed)native_memory_image_cancel(env,image);
+    if(image)host_static_tls_image_cancel(image,env);
 }
 static void host_static_image_closed(HostImage *image,JNIEnv *env){
-    if(!image||!image->privateMemory||image->privateMemory->closed)return;
-    image->privateMemory->closed=1;native_memory_image_retire(env,image);
+    if(!image)return;
+    if(image->privateMemory&&!image->privateMemory->closed){image->privateMemory->closed=1;native_memory_image_retire(env,image);}
+    host_static_tls_image_closed(image,env);
 }
 /* host_imports is held. Returning our pin or a JVM loader reference does not
  * prove unmapping. An unchanged or same-base replacement image stays sealed;
  * only absence of the exact old MEM_IMAGE mapping retires its borrowed rows. */
 static void host_static_image_released(HostImage *image,JNIEnv *env){
-    if(!image||image->live||!image->privateMemory||image->privateMemory->closed)return;
+    if(!image||image->live)return;
     MEMORY_BASIC_INFORMATION region={0};
     if(VirtualQuery(image->handle,&region,sizeof(region))!=sizeof(region))return;
     if(region.State!=MEM_FREE&&region.Type==MEM_IMAGE&&region.AllocationBase==image->handle)return;

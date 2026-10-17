@@ -35,6 +35,7 @@ static uint64_t host_native_allocation(HostImport *entry,void *caller,uintptr_t 
         DWORD error=GetLastError();native_owner_links_free(owners);SetLastError(error);return 0;
     }
     JNIEnv *env=host_memory_environment(restricted);NativeHostMemoryCall *tracking=NULL;
+    NativeHostArenaOriginalScope *arena=host_memory_arena_scope(entry,state,caller);
     HANDLE process=NULL;DWORD error=0;uint64_t result=0;int returned=0,denied=0;
     int heap=entry->kind==HOST_HEAP_ALLOC||entry->kind==HOST_HEAP_REALLOC
             ||entry->kind==HOST_HEAP_FREE||entry->kind==HOST_HEAP_DESTROY||entry->kind==HOST_HEAP_CREATE;
@@ -118,8 +119,10 @@ static uint64_t host_native_allocation(HostImport *entry,void *caller,uintptr_t 
             if((type&MEM_RESERVE)||(!(type&(MEM_RESET|MEM_RESET_UNDO))&&!address)){
                 const void *base=NULL;SIZE_T extent=0;int pages=0;
                 int geometry=host_memory_allocation_span((const void*)(uintptr_t)result,&base,&extent,&pages);
-                if(!geometry&&!pages&&base==(const void*)(uintptr_t)result)
-                    native_memory_host_allocated(env,NATIVE_MEMORY_HOST_VIRTUAL,entry->original,release,0,0,result,extent,owners,unknown);
+                if(!geometry&&!pages&&base==(const void*)(uintptr_t)result){
+                    if(arena)native_memory_host_backing_allocated(env,arena,entry->original,release,result,extent,owners,unknown);
+                    else native_memory_host_allocated(env,NATIVE_MEMORY_HOST_VIRTUAL,entry->original,release,0,0,result,extent,owners,unknown);
+                }
                 else native_memory_host_unobserved(owners);
             }
         }

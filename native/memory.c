@@ -7,12 +7,15 @@ typedef struct NativeMemoryRange {uint64_t start,length;NativeMemoryRevision *re
 typedef struct NativeBufferAlias {jweak buffer;uint64_t address,bytes,generation;LONG users;int borrowed;struct NativeBufferAlias *next;} NativeBufferAlias;
 typedef struct NativeHostMemoryContext {void *release;uintptr_t context;uint64_t epoch;LONG users,changing;int observed,created,retired,uncertain,unknown;OwnerLink *sources;struct NativeHostMemoryContext *next;} NativeHostMemoryContext;
 typedef struct NativeMemoryImageState {void *tag;int retiring,retired;struct NativeMemoryImageState *next;} NativeMemoryImageState;
-typedef struct NativeMemoryAllocation {uint64_t address,bytes,generation,writeEpoch;jobject allocator;jweak bufferRoot,bufferAction;void *release;OwnerLink *sources,*readers,*preserved;NativeMemoryRange *ranges;NativeMemoryInterest *interests;NativeBufferAlias *aliases;int hostFamily;void *hostAllocator,*imageTag;uintptr_t hostContext,hostFreeFlags;uint64_t hostContextEpoch;HMODULE hostReleasePin;CRITICAL_SECTION gate;volatile LONG alive,writers,reading,changing,users,sealed,retiring,unknownReaders,unknownUse,opaque,releaseFailed,managed,restoring;struct NativeMemoryAllocation *next;} NativeMemoryAllocation;
+typedef struct NativeMemoryAllocation {uint64_t address,bytes,generation,writeEpoch;jobject allocator;jweak bufferRoot,bufferAction;void *release;OwnerLink *sources,*readers,*preserved;NativeMemoryRange *ranges;NativeMemoryInterest *interests;NativeBufferAlias *aliases;int hostFamily;void *hostAllocator,*imageTag,*hostBackingProvider;uintptr_t hostContext,hostFreeFlags;uint64_t hostContextEpoch;HMODULE hostReleasePin;CRITICAL_SECTION gate;volatile LONG alive,writers,reading,changing,users,sealed,retiring,unknownReaders,unknownUse,opaque,releaseFailed,managed,restoring,typedObjects;struct NativeMemoryAllocation *next;} NativeMemoryAllocation;
 typedef struct NativeMemoryCall {NativeMemoryAllocation *allocation,*prepared;OwnerLink *sources;jobject allocator;jweak bufferRoot;void *release;uint64_t address,bytes,generation;int locked,admitted,known,unknown,managed,cleanup;} NativeMemoryCall;
 typedef struct NativeMemoryWrite {NativeMemoryAllocation *allocation;OwnerLink *sources,*observed;NativeMemoryImage *image;uint64_t address,length,generation;int locked,written,reading,detached,unobserved,opaque,uncertain,unknown,admitted,initializing;struct NativeMemoryWrite *previous,*root;} NativeMemoryWrite;
 typedef struct NativeBufferIoWrite {NativeMemoryWrite write;uint64_t epoch;jobject receipt,group;struct NativeBufferIoWrite *next;} NativeBufferIoWrite;
-typedef struct NativeHostMemoryHold {NativeMemoryAllocation *allocation;uint64_t generation;struct NativeHostMemoryHold *next;} NativeHostMemoryHold;
-struct NativeHostMemoryCall {int family,operation,unknown,admissionUnknown;void *release;uintptr_t context;uint64_t address,bytes,contextEpoch;OwnerLink *sources,*admissions;NativeHostMemoryContext *heap,*preparedHeap;NativeHostMemoryHold *holds;};
+typedef struct NativeHostMemoryHold {NativeMemoryAllocation *allocation;uint64_t generation;int observing,borrowed;struct NativeHostMemoryHold *next;} NativeHostMemoryHold;
+typedef struct NativeHostArenaProvider {void *release;LONG users,changing;int uncertain;struct NativeHostArenaProvider *next;} NativeHostArenaProvider;
+typedef struct NativeHostArenaContext {NativeHostArenaProvider *provider;uintptr_t context;uint64_t epoch;int retired,uncertain,created,unknown;OwnerLink *sources;struct NativeHostArenaContext *next;} NativeHostArenaContext;
+struct NativeHostMemoryCall {int family,operation,unknown,admissionUnknown;void *release;uintptr_t context;uint64_t address,bytes,contextEpoch;OwnerLink *sources,*admissions;NativeHostMemoryContext *heap,*preparedHeap;NativeHostMemoryHold *holds;NativeHostArenaProvider *arenaProvider;NativeHostArenaContext *arena;int arenaExclusive,backingLease,retirement;void *backingProvider;NativeMemoryAllocation *backingAllocation;NativeHostMemoryCall *arenaOuter;};
+static int native_object_state_restorable(NativeMemoryAllocation*,NativeMemoryRange*,OwnerLink*);
 static SRWLOCK native_memory_records=SRWLOCK_INIT;
 static NativeMemoryAllocation *native_memory_allocations;
 static OwnerLink *native_memory_unknown;
@@ -20,6 +23,8 @@ static NativeBufferIoWrite *native_buffer_io_writes;
 static NativeHostMemoryContext *native_memory_host_contexts;
 static uint64_t native_memory_host_context_epoch;
 static NativeMemoryImageState *native_memory_images;
+static NativeHostArenaProvider *native_memory_arena_providers;
+static NativeHostArenaContext *native_memory_arena_contexts;
 static void native_memory_released(JNIEnv*,NativeMemoryAllocation*);
 static void native_memory_release_provider(NativeMemoryAllocation*);
 static void native_memory_reap_references(JNIEnv*,NativeMemoryAllocation*);
@@ -252,6 +257,37 @@ static NativeMemoryImageState *native_memory_image_state(void *tag,int create){
     if(!create)return NULL;NativeMemoryImageState *entry=(NativeMemoryImageState*)calloc(1,sizeof(*entry));if(!entry)return NULL;
     entry->tag=tag;entry->next=native_memory_images;native_memory_images=entry;return entry;
 }
+/* These contexts describe public jemalloc arena indices actually returned by
+ * arenas.create/arenas.lookup. They never describe a backing page subdivision.
+ * The provider gate covers the gap between an allocator return and lookup:
+ * no observed bulk command can discard that pointer before it is published. */
+static NativeHostArenaProvider *native_memory_arena_provider(void *release,int create){
+    for(NativeHostArenaProvider *entry=native_memory_arena_providers;entry;entry=entry->next)
+        if(entry->release==release)return entry;
+    if(!create||!release)return NULL;
+    NativeHostArenaProvider *entry=(NativeHostArenaProvider*)calloc(1,sizeof(*entry));if(!entry)return NULL;
+    entry->release=release;entry->next=native_memory_arena_providers;native_memory_arena_providers=entry;return entry;
+}
+static NativeHostArenaContext *native_memory_arena_context(NativeHostArenaProvider *provider,uintptr_t context,int create){
+    if(!provider||!context)return NULL;
+    for(NativeHostArenaContext *entry=native_memory_arena_contexts;entry;entry=entry->next)
+        if(!entry->retired&&entry->provider==provider&&entry->context==context)return entry;
+    if(!create||native_memory_host_context_epoch==UINT64_MAX)return NULL;
+    NativeHostArenaContext *entry=(NativeHostArenaContext*)calloc(1,sizeof(*entry));if(!entry)return NULL;
+    entry->provider=provider;entry->context=context;entry->epoch=++native_memory_host_context_epoch;
+    entry->next=native_memory_arena_contexts;native_memory_arena_contexts=entry;return entry;
+}
+static void native_memory_arena_uncertain_locked(NativeHostArenaProvider *provider,uintptr_t context){
+    if(!provider)return;if(!context)provider->uncertain=1;
+    for(NativeHostArenaContext *arena=native_memory_arena_contexts;arena;arena=arena->next)
+        if(arena->provider==provider&&(!context||arena->context==context)&&!arena->retired)arena->uncertain=1;
+    for(NativeMemoryAllocation *allocation=native_memory_allocations;allocation;allocation=allocation->next)
+        if(allocation->alive&&allocation->hostFamily==NATIVE_MEMORY_HOST_ARENA&&allocation->release==provider->release
+                &&(!context||allocation->hostContext==context)){
+            InterlockedExchange(&allocation->unknownUse,1);InterlockedExchange(&allocation->releaseFailed,1);
+            InterlockedExchange(&allocation->sealed,1);InterlockedExchange(&allocation->retiring,1);
+        }
+}
 static void native_memory_release_provider(NativeMemoryAllocation *allocation){
     HMODULE pin=NULL;
     if(TryEnterCriticalSection(&allocation->gate)){
@@ -263,20 +299,27 @@ static void native_memory_release_provider(NativeMemoryAllocation *allocation){
     if(pin&&!host_real_free_library(pin))InterlockedIncrement(&native_failures);
 }
 static void native_memory_host_record(JNIEnv *env,int family,void *allocator,void *release,uintptr_t context,uintptr_t flags,
-        uint64_t address,uint64_t bytes,OwnerLink *owners,int unknown,uint64_t contextEpoch,void *imageTag){
+        uint64_t address,uint64_t bytes,OwnerLink *owners,int unknown,uint64_t contextEpoch,void *imageTag,void *backingProvider){
     if(!address)return;NativeMemoryAllocation *entry=(NativeMemoryAllocation*)calloc(1,sizeof(*entry));
     if(!entry){native_memory_unmapped(owners);return;}InitializeCriticalSection(&entry->gate);
     entry->hostFamily=family;entry->hostAllocator=allocator;entry->release=release;entry->hostContext=context;entry->hostFreeFlags=flags;entry->imageTag=imageTag;
+    entry->hostBackingProvider=backingProvider;
     entry->address=address;entry->bytes=bytes==UINT64_MAX||bytes>UINT64_MAX-address?0:bytes;entry->generation=1;entry->opaque=entry->alive=1;
     if(unknown||!owners||bytes==UINT64_MAX||bytes>UINT64_MAX-address||!native_owner_merge(&entry->sources,owners))entry->unknownUse=1;
     if(family!=NATIVE_MEMORY_HOST_IMAGE){
         if(!release||!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS,(LPCWSTR)release,&entry->hostReleasePin))entry->unknownUse=1;
     }
-    int accepted=1;NativeHostMemoryContext *heap=NULL;AcquireSRWLockExclusive(&native_memory_records);
+    int accepted=1,arenaResult=0;NativeHostMemoryContext *heap=NULL;AcquireSRWLockExclusive(&native_memory_records);
     if(family==NATIVE_MEMORY_HOST_HEAP){
         heap=native_memory_host_context(release,context,0);
         if(!heap||!heap->observed||heap->changing||heap->uncertain||!contextEpoch||contextEpoch!=heap->epoch)accepted=0;
         else entry->hostContextEpoch=contextEpoch;
+    }else if(family==NATIVE_MEMORY_HOST_ARENA){
+        NativeHostArenaProvider *provider=native_memory_arena_provider(release,0);
+        NativeHostArenaContext *arena=native_memory_arena_context(provider,context,0);
+        if(!provider||!arena||!contextEpoch||arena->epoch!=contextEpoch)entry->unknownUse=1;
+        else {entry->hostContextEpoch=contextEpoch;if(provider->uncertain||arena->uncertain)entry->unknownUse=1;
+            else arenaResult=provider->users>0&&entry->hostReleasePin!=NULL;}
     }else if(family==NATIVE_MEMORY_HOST_IMAGE){
         NativeMemoryImageState *image=native_memory_image_state(imageTag,1);
         if(!image||image->retiring||image->retired)accepted=0;
@@ -291,6 +334,19 @@ static void native_memory_host_record(JNIEnv *env,int family,void *allocator,voi
         // on the strength of a guessed physical allocator relationship.
         for(NativeMemoryAllocation *old=native_memory_allocations;old;old=old->next)if(old->alive&&entry->bytes&&old->bytes
                 &&address<old->address+old->bytes&&old->address<address+entry->bytes){
+            /* This child is an actual successful je_* result with its exact
+             * live provider, actual sallocx extent and arenas.lookup epoch.
+             * It may be wholly inside a separately observed backing storage
+             * call. Keep that child's own free capability; the parent loses
+             * independent reclamation authority. Neither a partial overlap
+             * nor another arena child receives this exception. */
+            if(arenaResult&&(old->hostFamily==NATIVE_MEMORY_HOST_HEAP||old->hostFamily==NATIVE_MEMORY_HOST_VIRTUAL
+                        ||old->hostFamily==NATIVE_MEMORY_HOST_CRT)&&address>=old->address&&entry->bytes<=old->bytes
+                    &&address-old->address<=old->bytes-entry->bytes){
+                /* Bit 2 is only the known backing relationship; OR retains
+                 * every pre-existing ordinary unknown-use bit. */
+                InterlockedOr(&old->unknownUse,2);InterlockedExchange(&old->retiring,1);continue;
+            }
             /* An actual independent Windows heap may reuse payload pages
              * after the older original Destroy returned but before its token
              * finishes retiring rows. Those distinct incarnations are not a
@@ -314,12 +370,12 @@ static void native_memory_host_record(JNIEnv *env,int family,void *allocator,voi
 }
 static void native_memory_host_allocated(JNIEnv *env,int family,void *allocator,void *release,uintptr_t context,uintptr_t flags,
         uint64_t address,uint64_t bytes,OwnerLink *owners,int unknown){
-    native_memory_host_record(env,family,allocator,release,context,flags,address,bytes,owners,unknown,0,NULL);
+    native_memory_host_record(env,family,allocator,release,context,flags,address,bytes,owners,unknown,0,NULL,NULL);
 }
 /* records is held and no original API is running under this short gate. */
 static int native_memory_host_hold(JNIEnv *env,NativeHostMemoryCall *call,NativeMemoryAllocation *allocation){
     if(!TryEnterCriticalSection(&allocation->gate))return 0;
-    int ready=allocation->alive&&!allocation->sealed&&!allocation->retiring&&!allocation->changing&&!allocation->users
+    int ready=allocation->alive&&!allocation->sealed&&!allocation->retiring&&!allocation->changing&&!allocation->users&&!allocation->typedObjects
             &&!allocation->writers&&!allocation->reading&&!native_memory_buffer_aliases(env,allocation);
     NativeHostMemoryHold *hold=ready?(NativeHostMemoryHold*)calloc(1,sizeof(*hold)):NULL;
     if(hold){hold->allocation=allocation;hold->generation=allocation->generation;hold->next=call->holds;call->holds=hold;
@@ -329,7 +385,7 @@ static int native_memory_host_hold(JNIEnv *env,NativeHostMemoryCall *call,Native
 static void native_memory_host_drop_locked(NativeHostMemoryCall *call,int uncertain){
     for(NativeHostMemoryHold *hold=call->holds;hold;hold=hold->next){NativeMemoryAllocation *allocation=hold->allocation;
         if(uncertain){InterlockedExchange(&allocation->unknownUse,1);InterlockedExchange(&allocation->releaseFailed,1);InterlockedExchange(&allocation->retiring,1);}
-        InterlockedDecrement(&allocation->changing);InterlockedDecrement(&allocation->users);
+        if(!hold->borrowed){if(!hold->observing)InterlockedDecrement(&allocation->changing);InterlockedDecrement(&allocation->users);}
     }
     if(call->heap){
         NativeHostMemoryContext *heap=call->heap;call->heap=NULL;
@@ -338,6 +394,11 @@ static void native_memory_host_drop_locked(NativeHostMemoryCall *call,int uncert
         /* Failed first observation has no heap lifetime to carry into a later
          * reused numeric handle. Concurrent successful calls set observed. */
         if(!heap->observed&&!heap->users&&!heap->changing)heap->retired=1;
+    }
+    if(call->arenaProvider){
+        if(uncertain&&call->arenaExclusive)native_memory_arena_uncertain_locked(call->arenaProvider,call->context);
+        if(call->arenaExclusive)call->arenaProvider->changing=0;else call->arenaProvider->users--;
+        call->arenaProvider=NULL;
     }
 }
 static void native_memory_host_dispose(NativeHostMemoryCall *call){
@@ -352,7 +413,9 @@ static int native_memory_host_cleanup(NativeHostMemoryCall *call){
     if(call->heap&&(call->heap->retired||call->heap->uncertain||call->contextEpoch!=call->heap->epoch))ready=0;
     for(NativeHostMemoryHold *hold=call->holds;ready&&hold;hold=hold->next){
         NativeMemoryAllocation *allocation=hold->allocation;
-        if(!allocation->alive||allocation->generation!=hold->generation||!allocation->sources||allocation->unknownUse
+        LONG unknownUse=allocation->unknownUse;
+        if(call->backingLease&&allocation->hostBackingProvider==call->backingProvider)unknownUse&=~2;
+        if(!allocation->alive||allocation->generation!=hold->generation||!allocation->sources||unknownUse
                 ||allocation->unknownReaders||allocation->releaseFailed||allocation->managed||allocation->hostFamily==NATIVE_MEMORY_HOST_IMAGE){ready=0;break;}
         for(OwnerLink *source=allocation->sources;source;source=source->next)
             if(!InterlockedCompareExchange(&source->owner->stopped,0,0)){ready=0;break;}
@@ -473,7 +536,7 @@ static void native_memory_host_complete(JNIEnv *env,NativeHostMemoryCall *call,u
         if(call->heap){AcquireSRWLockExclusive(&native_memory_records);call->heap->observed=1;ReleaseSRWLockExclusive(&native_memory_records);}
         /* Keep the context user until registration finishes. Otherwise a
          * successful destroy could fall between return and block publication. */
-        native_memory_host_record(env,call->family,NULL,call->release,call->context,0,returned,bytes,sources,unknown,call->contextEpoch,NULL);
+        native_memory_host_record(env,call->family,NULL,call->release,call->context,0,returned,bytes,sources,unknown,call->contextEpoch,NULL,NULL);
     }
     else if(completed&&call->family==NATIVE_MEMORY_HOST_HEAP&&call->operation==NATIVE_MEMORY_HOST_FREE&&!call->holds)native_memory_unmapped(sources);
     AcquireSRWLockExclusive(&native_memory_records);
@@ -486,9 +549,234 @@ static void native_memory_host_abort(JNIEnv *env,NativeHostMemoryCall *call){
     (void)env;if(!call)return;AcquireSRWLockExclusive(&native_memory_records);native_memory_host_drop_locked(call,1);ReleaseSRWLockExclusive(&native_memory_records);
     native_memory_unmapped(call->sources);native_memory_host_dispose(call);
 }
+static void native_memory_host_cancel(NativeHostMemoryCall *call){
+    if(!call)return;AcquireSRWLockExclusive(&native_memory_records);native_memory_host_drop_locked(call,0);
+    ReleaseSRWLockExclusive(&native_memory_records);native_memory_host_dispose(call);
+}
+static int native_memory_arena_observe_hold(NativeHostMemoryCall *call,NativeMemoryAllocation *allocation){
+    if(!TryEnterCriticalSection(&allocation->gate))return 0;
+    int ready=allocation->alive&&!allocation->sealed&&!allocation->retiring&&!allocation->changing;
+    NativeHostMemoryHold *hold=ready?(NativeHostMemoryHold*)calloc(1,sizeof(*hold)):NULL;
+    if(hold){hold->allocation=allocation;hold->generation=allocation->generation;hold->observing=1;
+        hold->next=call->holds;call->holds=hold;InterlockedIncrement(&allocation->users);}
+    LeaveCriticalSection(&allocation->gate);return hold!=NULL;
+}
+static NativeHostMemoryCall *native_memory_host_arena_prepare(JNIEnv *env,void *release,uint64_t address,uintptr_t context,
+        int operation,OwnerLink *owners,int unknown,int *denied){
+    *denied=0;NativeHostMemoryCall *call=(NativeHostMemoryCall*)calloc(1,sizeof(*call));
+    if(!call){*denied=1;native_memory_unmapped(owners);return NULL;}
+    call->family=NATIVE_MEMORY_HOST_ARENA;call->operation=operation;call->release=release;call->address=address;
+    call->context=context;call->unknown=call->admissionUnknown=unknown||!owners;
+    if(!native_owner_merge(&call->sources,owners))call->unknown=call->admissionUnknown=1;
+    int exclusive=operation==NATIVE_MEMORY_HOST_CONTEXT_FREE||operation==NATIVE_MEMORY_HOST_CONTEXT_CREATE
+            ||operation==NATIVE_MEMORY_HOST_ARENA_RESET||operation==NATIVE_MEMORY_HOST_ARENA_UNKNOWN;
+    int bulk=operation==NATIVE_MEMORY_HOST_CONTEXT_FREE||operation==NATIVE_MEMORY_HOST_ARENA_RESET
+            ||operation==NATIVE_MEMORY_HOST_ARENA_UNKNOWN;
+    int ready=1;AcquireSRWLockExclusive(&native_memory_records);
+    NativeHostArenaProvider *provider=native_memory_arena_provider(release,1);
+    if(!provider||provider->changing||exclusive&&provider->users)ready=0;
+    else {call->arenaProvider=provider;call->arenaExclusive=exclusive;
+        if(exclusive)provider->changing=1;else provider->users++;
+        if(provider->uncertain)call->unknown=1;
+    }
+    if(ready&&context){
+        call->arena=native_memory_arena_context(provider,context,0);
+        if(call->arena){call->contextEpoch=call->arena->epoch;
+            if(!native_owner_merge(&call->sources,call->arena->sources))call->unknown=call->admissionUnknown=1;
+            call->unknown|=call->arena->uncertain||call->arena->unknown;
+            call->admissionUnknown|=call->arena->unknown;
+        }
+    }
+    for(NativeMemoryAllocation *allocation=native_memory_allocations;ready&&allocation;allocation=allocation->next){
+        if(!allocation->alive)continue;
+        int own=allocation->hostFamily==NATIVE_MEMORY_HOST_ARENA&&allocation->release==release;
+        int match=bulk?own&&(!context||!allocation->hostContext||allocation->hostContext==context)
+                :address&&allocation->address==address;
+        if(!match)continue;
+        int observing=operation==NATIVE_MEMORY_HOST_OBSERVE;
+        if(!observing&&(allocation->managed||allocation->hostFamily==NATIVE_MEMORY_HOST_IMAGE)){ready=0;break;}
+        if(observing?!native_memory_arena_observe_hold(call,allocation):!native_memory_host_hold(env,call,allocation)){ready=0;break;}
+        if(!own){
+            /* Do not attach an unknown provider to this row. Close its old
+             * views only after its real current users have denied admission. */
+            InterlockedExchange(&allocation->unknownUse,1);InterlockedExchange(&allocation->releaseFailed,1);
+            InterlockedExchange(&allocation->retiring,1);call->unknown=1;
+            NativeHostMemoryHold *foreign=call->holds;call->holds=foreign->next;
+            if(!foreign->observing)InterlockedDecrement(&allocation->changing);InterlockedDecrement(&allocation->users);free(foreign);
+            break;
+        }
+        if(!bulk){call->context=allocation->hostContext;call->contextEpoch=allocation->hostContextEpoch;
+            call->arena=native_memory_arena_context(provider,call->context,0);
+            if(!call->arena||call->arena->epoch!=call->contextEpoch||call->arena->uncertain)call->unknown=1;
+        }
+        if(!native_memory_creator_sources(allocation,&call->admissions)||!native_owner_merge(&call->admissions,allocation->readers))call->admissionUnknown=1;
+        call->admissionUnknown|=allocation->unknownUse||allocation->unknownReaders||allocation->releaseFailed;
+        if(!bulk)break;
+    }
+    if(ready&&address&&!call->holds)call->unknown=1;
+    if(!ready){*denied=1;native_memory_host_drop_locked(call,0);}
+    ReleaseSRWLockExclusive(&native_memory_records);
+    if(!ready){native_memory_host_dispose(call);return NULL;}return call;
+}
+static void native_memory_host_arena_complete(JNIEnv *env,NativeHostMemoryCall *call,uint64_t address,uint64_t bytes,
+        uintptr_t context,int completed,int released){
+    if(!call)return;NativeHostArenaProvider *provider=call->arenaProvider;
+    int unknown=call->unknown;OwnerLink *sources=NULL;
+    if(!native_owner_merge(&sources,call->sources))unknown=1;
+    if(call->operation==NATIVE_MEMORY_HOST_ARENA_UNKNOWN){
+        /* No successful/failed opaque command is evidence that a particular
+         * child was freed. Close the provider views and retain that gap. */
+        AcquireSRWLockExclusive(&native_memory_records);native_memory_arena_uncertain_locked(provider,0);
+        ReleaseSRWLockExclusive(&native_memory_records);
+    }else if(completed){
+        for(NativeHostMemoryHold *hold=call->holds;hold;hold=hold->next){
+            NativeMemoryAllocation *allocation=hold->allocation;EnterCriticalSection(&allocation->gate);
+            /* A nested real backing release may already have retired the old
+             * row. Its retained outer lease still carries realloc provenance. */
+            if(call->operation==NATIVE_MEMORY_HOST_REALLOCATE&&address&&!native_owner_merge(&sources,allocation->sources))unknown=1;
+            if(!hold->observing&&allocation->alive&&allocation->generation==hold->generation){
+                int bulk=call->operation==NATIVE_MEMORY_HOST_CONTEXT_FREE||call->operation==NATIVE_MEMORY_HOST_ARENA_RESET;
+                int exact=!bulk||allocation->hostContext==call->context&&allocation->hostContextEpoch==call->contextEpoch;
+                AcquireSRWLockExclusive(&native_memory_records);
+                if(exact&&(released||call->operation==NATIVE_MEMORY_HOST_REALLOCATE&&address))native_memory_released(env,allocation);
+                else if(bulk){InterlockedExchange(&allocation->unknownUse,1);InterlockedExchange(&allocation->releaseFailed,1);
+                    InterlockedExchange(&allocation->sealed,1);InterlockedExchange(&allocation->retiring,1);}
+                ReleaseSRWLockExclusive(&native_memory_records);
+            }
+            LeaveCriticalSection(&allocation->gate);
+        }
+        if(call->operation==NATIVE_MEMORY_HOST_CONTEXT_FREE||call->operation==NATIVE_MEMORY_HOST_ARENA_RESET){
+            AcquireSRWLockExclusive(&native_memory_records);
+            if(call->arena&&call->arena->epoch==call->contextEpoch)call->arena->retired=1;
+            if(call->operation==NATIVE_MEMORY_HOST_ARENA_RESET&&call->context){
+                NativeHostArenaContext *next=native_memory_arena_context(provider,call->context,1);
+                if(next&&call->arena){next->created=call->arena->created;next->unknown=call->arena->unknown;
+                    if(!native_owner_merge(&next->sources,call->arena->sources))next->unknown=1;}
+                if(!next)native_memory_arena_uncertain_locked(provider,call->context);
+            }
+            ReleaseSRWLockExclusive(&native_memory_records);
+        }else if(call->operation==NATIVE_MEMORY_HOST_CONTEXT_CREATE){
+            AcquireSRWLockExclusive(&native_memory_records);
+            NativeHostArenaContext *old=native_memory_arena_context(provider,context,0);
+            if(old){native_memory_arena_uncertain_locked(provider,context);old->retired=1;}
+            NativeHostArenaContext *next=native_memory_arena_context(provider,context,1);
+            if(next){next->created=1;next->unknown=unknown;if(!native_owner_merge(&next->sources,sources))next->unknown=1;}
+            else native_memory_arena_uncertain_locked(provider,0);
+            ReleaseSRWLockExclusive(&native_memory_records);
+        }else if(address&&(call->operation==NATIVE_MEMORY_HOST_ALLOCATE||call->operation==NATIVE_MEMORY_HOST_REALLOCATE)){
+            uint64_t epoch=0;AcquireSRWLockExclusive(&native_memory_records);
+            NativeHostArenaContext *arena=native_memory_arena_context(provider,context,1);
+            if(arena){epoch=arena->epoch;if(!native_owner_merge(&sources,arena->sources))unknown=1;unknown|=arena->unknown||arena->uncertain;}
+            else unknown=1;
+            ReleaseSRWLockExclusive(&native_memory_records);
+            native_memory_host_record(env,NATIVE_MEMORY_HOST_ARENA,NULL,call->release,context,0,address,bytes,sources,unknown,epoch,NULL,NULL);
+        }
+    }
+    AcquireSRWLockExclusive(&native_memory_records);native_memory_host_drop_locked(call,0);ReleaseSRWLockExclusive(&native_memory_records);
+    for(NativeHostMemoryHold *hold=call->holds;hold;hold=hold->next)if(!hold->allocation->alive)native_memory_reap_references(env,hold->allocation);
+    native_owner_links_free(sources);native_memory_host_dispose(call);
+}
+static int native_memory_host_backing_scope(NativeHostArenaOriginalScope *scope){
+    NativeThread *state=native_tls==TLS_OUT_OF_INDEXES?NULL:(NativeThread*)TlsGetValue(native_tls);
+    NativeHostMemoryCall *outer=scope?scope->call:NULL;
+    return state&&state->hostArenaOriginal==scope&&scope->thread==GetCurrentThreadId()&&outer
+            &&outer->family==NATIVE_MEMORY_HOST_ARENA&&outer->arenaProvider
+            &&outer->arenaProvider->release==scope->release
+            &&(outer->arenaExclusive?outer->arenaProvider->changing:outer->arenaProvider->users>0);
+}
+static void native_memory_host_backing_allocated(JNIEnv *env,NativeHostArenaOriginalScope *scope,void *allocator,void *release,
+        uint64_t address,uint64_t bytes,OwnerLink *owners,int unknown){
+    AcquireSRWLockShared(&native_memory_records);int paired=native_memory_host_backing_scope(scope);
+    ReleaseSRWLockShared(&native_memory_records);
+    native_memory_host_record(env,NATIVE_MEMORY_HOST_VIRTUAL,allocator,release,0,0,address,bytes,owners,unknown,0,NULL,paired?scope->release:NULL);
+}
+/* Only a real provider call can reuse the destructive generation that it
+ * already holds. Every other affected allocation obtains the ordinary hold.
+ * A backing-only retiring flag is not a general unknown-state exception. */
+static int native_memory_host_backing_hold(JNIEnv *env,NativeHostMemoryCall *call,NativeMemoryAllocation *allocation,int parent){
+    NativeHostMemoryHold *outer=NULL;
+    for(NativeHostMemoryHold *held=call->arenaOuter->holds;held;held=held->next)
+        if(held->allocation==allocation&&held->generation==allocation->generation&&!held->observing){outer=held;break;}
+    if(!outer&&!parent)return native_memory_host_hold(env,call,allocation);
+    if(!TryEnterCriticalSection(&allocation->gate))return 0;
+    int ownRetirement=outer&&call->arenaOuter->retirement;
+    int ready=allocation->alive&&!allocation->writers&&!allocation->reading&&!allocation->typedObjects&&!allocation->managed
+            &&!native_memory_buffer_aliases(env,allocation);
+    if(outer)ready=ready&&allocation->changing==1&&allocation->users==(ownRetirement?0:1)
+            &&(!allocation->sealed||ownRetirement);
+    else ready=ready&&!allocation->sealed&&!allocation->changing&&!allocation->users
+            &&(!allocation->retiring||(allocation->unknownUse&2)&&allocation->hostBackingProvider==call->backingProvider);
+    NativeHostMemoryHold *hold=ready?(NativeHostMemoryHold*)calloc(1,sizeof(*hold)):NULL;
+    if(hold){hold->allocation=allocation;hold->generation=allocation->generation;hold->borrowed=outer!=NULL;
+        hold->next=call->holds;call->holds=hold;
+        if(!hold->borrowed){InterlockedIncrement(&allocation->users);InterlockedIncrement(&allocation->changing);}}
+    LeaveCriticalSection(&allocation->gate);return hold!=NULL;
+}
+static NativeHostMemoryCall *native_memory_host_backing_prepare(JNIEnv *env,NativeHostArenaOriginalScope *scope,void *release,
+        uint64_t address,uint64_t bytes,int operation,OwnerLink *owners,int unknown,int *denied){
+    *denied=0;NativeHostMemoryCall *call=(NativeHostMemoryCall*)calloc(1,sizeof(*call));
+    if(!call){*denied=1;return NULL;}
+    call->family=NATIVE_MEMORY_HOST_VIRTUAL;call->operation=operation;call->release=release;
+    call->unknown=call->admissionUnknown=unknown||!owners;
+    if(!native_owner_merge(&call->sources,owners))call->unknown=call->admissionUnknown=1;
+    int ready=1;AcquireSRWLockExclusive(&native_memory_records);
+    if(!native_memory_host_backing_scope(scope))ready=0;
+    NativeMemoryAllocation *parent=NULL;
+    for(NativeMemoryAllocation *row=native_memory_allocations;ready&&row;row=row->next)
+        if(row->alive&&row->hostFamily==NATIVE_MEMORY_HOST_VIRTUAL&&row->release==release&&row->hostBackingProvider==scope->release
+                &&row->bytes&&(operation==NATIVE_MEMORY_HOST_FREE?row->address==address:
+                    address>=row->address&&bytes&&bytes<=row->bytes&&address-row->address<=row->bytes-bytes)){parent=row;break;}
+    if(!parent){ReleaseSRWLockExclusive(&native_memory_records);native_memory_host_dispose(call);return NULL;}
+    call->backingLease=1;call->backingProvider=scope->release;call->arenaOuter=scope->call;call->backingAllocation=parent;
+    call->address=operation==NATIVE_MEMORY_HOST_FREE?parent->address:address;call->bytes=operation==NATIVE_MEMORY_HOST_FREE?parent->bytes:bytes;
+    uint64_t end=call->address+call->bytes;
+    for(NativeMemoryAllocation *row=native_memory_allocations;ready&&row;row=row->next){
+        if(!row->alive)continue;
+        int affected=row==parent||(row->bytes?row->address<end&&call->address<row->address+row->bytes:
+                row->address>=call->address&&row->address<end);
+        if(!affected)continue;
+        if(row->hostFamily==NATIVE_MEMORY_HOST_IMAGE||!native_memory_host_backing_hold(env,call,row,row==parent)){ready=0;break;}
+        if(!native_memory_creator_sources(row,&call->admissions)||!native_owner_merge(&call->admissions,row->readers))call->admissionUnknown=1;
+        LONG unknownUse=row->unknownUse;
+        if(row==parent)unknownUse&=~2;
+        call->admissionUnknown|=unknownUse!=0||row->unknownReaders||row->releaseFailed;
+        if(row!=parent&&row->hostFamily==NATIVE_MEMORY_HOST_ARENA&&row->release!=scope->release)call->admissionUnknown=1;
+    }
+    if(!ready){*denied=1;native_memory_host_drop_locked(call,0);}
+    ReleaseSRWLockExclusive(&native_memory_records);
+    if(!ready){native_memory_host_dispose(call);return NULL;}return call;
+}
+static void native_memory_host_backing_complete(JNIEnv *env,NativeHostMemoryCall *call,uint64_t bytes,int completed,int released){
+    if(!call)return;if(!call->backingLease){native_memory_host_complete(env,call,0,bytes,completed,released);return;}
+    if(completed)for(NativeHostMemoryHold *hold=call->holds;hold;hold=hold->next){
+        NativeMemoryAllocation *allocation=hold->allocation;EnterCriticalSection(&allocation->gate);
+        if(allocation->alive&&allocation->generation==hold->generation){
+            AcquireSRWLockExclusive(&native_memory_records);
+            if(released&&allocation->bytes&&allocation->address>=call->address&&allocation->bytes<=call->bytes
+                    &&allocation->address-call->address<=call->bytes-allocation->bytes)native_memory_released(env,allocation);
+            else if(allocation==call->backingAllocation){
+                allocation->generation++;allocation->writeEpoch++;InterlockedExchange(&allocation->opaque,1);
+                NativeMemoryRange *range=allocation->ranges;allocation->ranges=NULL;
+                while(range){NativeMemoryRange *next=range->next;native_memory_revision_release(range->revision);free(range);range=next;}
+                if(env)native_memory_buffer_aliases_clear(env,allocation);
+            }else if(!hold->borrowed){
+                /* A partial decommit proves invalid views, not a logical
+                 * allocator free. The outer held generation gets its own
+                 * actual success/failure completion and is left untouched. */
+                InterlockedExchange(&allocation->retiring,1);InterlockedExchange(&allocation->unknownUse,1);
+                InterlockedExchange(&allocation->releaseFailed,1);
+            }
+            ReleaseSRWLockExclusive(&native_memory_records);
+        }
+        LeaveCriticalSection(&allocation->gate);
+    }
+    AcquireSRWLockExclusive(&native_memory_records);native_memory_host_drop_locked(call,0);ReleaseSRWLockExclusive(&native_memory_records);
+    for(NativeHostMemoryHold *hold=call->holds;hold;hold=hold->next)if(!hold->allocation->alive)native_memory_reap_references(env,hold->allocation);
+    native_memory_host_dispose(call);
+}
 static void native_memory_image_span(JNIEnv *env,void *imageTag,uint64_t address,uint64_t bytes,OwnerLink *owners,int unknown){
     if(!imageTag||!address||!bytes)return;
-    native_memory_host_record(env,NATIVE_MEMORY_HOST_IMAGE,NULL,NULL,0,0,address,bytes,owners,unknown,0,imageTag);
+    native_memory_host_record(env,NATIVE_MEMORY_HOST_IMAGE,NULL,NULL,0,0,address,bytes,owners,unknown,0,imageTag,NULL);
 }
 static int native_memory_image_busy(JNIEnv *env,void *imageTag){
     if(!imageTag)return 1;int busy=0;AcquireSRWLockShared(&native_memory_records);
@@ -1017,11 +1305,16 @@ static int native_memory_private(JNIEnv *env,NativeMemoryAllocation *allocation,
      * expression. Only an actual observed delete retires those allocations. */
     if((!allocation->allocator&&!allocation->hostFamily)||allocation->hostFamily==NATIVE_MEMORY_HOST_IMAGE||allocation->hostFamily==NATIVE_MEMORY_HOST_CPP||!allocation->release||InterlockedCompareExchange(&allocation->managed,0,0)||!native_memory_selected(allocation->sources,selected)
             ||InterlockedCompareExchange(&allocation->unknownReaders,0,0)||InterlockedCompareExchange(&allocation->unknownUse,0,0)
-            ||InterlockedCompareExchange(&allocation->releaseFailed,0,0)||InterlockedCompareExchange(&allocation->sealed,0,0))return 0;
+            ||InterlockedCompareExchange(&allocation->releaseFailed,0,0)||InterlockedCompareExchange(&allocation->sealed,0,0)
+            ||InterlockedCompareExchange(&allocation->typedObjects,0,0))return 0;
     if(native_memory_buffer_aliases(env,allocation))return 0;
     if(allocation->hostFamily==NATIVE_MEMORY_HOST_HEAP){
         NativeHostMemoryContext *heap=native_memory_host_context(allocation->release,allocation->hostContext,0);
         if(!heap||heap->epoch!=allocation->hostContextEpoch||!heap->observed||heap->changing||heap->uncertain)return 0;
+    }else if(allocation->hostFamily==NATIVE_MEMORY_HOST_ARENA){
+        NativeHostArenaProvider *provider=native_memory_arena_provider(allocation->release,0);
+        NativeHostArenaContext *arena=native_memory_arena_context(provider,allocation->hostContext,0);
+        if(!provider||provider->changing||provider->uncertain||!arena||arena->uncertain||arena->epoch!=allocation->hostContextEpoch)return 0;
     }
     if(allocation->readers&&!native_memory_selected(allocation->readers,selected))return 0;
     for(NativeMemoryInterest *interest=allocation->interests;interest;interest=interest->next){
@@ -1039,12 +1332,21 @@ static int native_memory_retire_allocation(JNIEnv *env,NativeMemoryAllocation *a
     int ready=InterlockedCompareExchange(&allocation->alive,0,0)&&native_memory_private(env,allocation,selected)
             &&!InterlockedCompareExchange(&allocation->users,0,0)&&!InterlockedCompareExchange(&allocation->writers,0,0)
             &&!InterlockedCompareExchange(&allocation->reading,0,0)&&!InterlockedCompareExchange(&allocation->changing,0,0);
-    NativeHostMemoryContext *heap=NULL;
+    NativeHostMemoryContext *heap=NULL;NativeHostArenaProvider *arenaProvider=NULL;
     if(ready){
         if(allocation->hostFamily==NATIVE_MEMORY_HOST_HEAP){heap=native_memory_host_context(allocation->release,allocation->hostContext,0);heap->users++;}
+        else if(allocation->hostFamily==NATIVE_MEMORY_HOST_ARENA){arenaProvider=native_memory_arena_provider(allocation->release,0);arenaProvider->users++;}
         InterlockedExchange(&allocation->sealed,1);InterlockedIncrement(&allocation->changing);
     }
     ReleaseSRWLockExclusive(&native_memory_records);if(!ready)return 0;
+    NativeHostMemoryHold arenaHold={0};NativeHostMemoryCall arenaCall={0};
+    if(arenaProvider){
+        arenaHold.allocation=allocation;arenaHold.generation=allocation->generation;
+        arenaCall.family=NATIVE_MEMORY_HOST_ARENA;arenaCall.operation=NATIVE_MEMORY_HOST_FREE;
+        arenaCall.release=allocation->release;arenaCall.context=allocation->hostContext;arenaCall.contextEpoch=allocation->hostContextEpoch;
+        arenaCall.address=allocation->address;arenaCall.bytes=allocation->bytes;arenaCall.sources=allocation->sources;
+        arenaCall.holds=&arenaHold;arenaCall.arenaProvider=arenaProvider;arenaCall.retirement=1;
+    }
     // No allocator runs under a tracker mutex. Sealing shares admission's
     // lookup lock, and this exact row remains stable while its original free runs.
     LeaveCriticalSection(&allocation->gate);
@@ -1054,6 +1356,8 @@ static int native_memory_retire_allocation(JNIEnv *env,NativeMemoryAllocation *a
             ready=((BOOL (WINAPI*)(HANDLE,DWORD,LPVOID))allocation->release)((HANDLE)allocation->hostContext,(DWORD)allocation->hostFreeFlags,(LPVOID)(uintptr_t)allocation->address)!=FALSE;
         }else if(allocation->hostFamily==NATIVE_MEMORY_HOST_VIRTUAL){
             ready=((BOOL (WINAPI*)(LPVOID,SIZE_T,DWORD))allocation->release)((LPVOID)(uintptr_t)allocation->address,0,MEM_RELEASE)!=FALSE;
+        }else if(allocation->hostFamily==NATIVE_MEMORY_HOST_ARENA){
+            host_arena_release_scoped_original(allocation->release,allocation->address,&arenaCall);ready=1;
         }else if(allocation->hostFamily==NATIVE_MEMORY_HOST_CRT){
             ((void (__cdecl*)(void*))allocation->release)((void*)(uintptr_t)allocation->address);ready=1;
         }else{
@@ -1063,9 +1367,10 @@ static int native_memory_retire_allocation(JNIEnv *env,NativeMemoryAllocation *a
         returned=1;
     } __finally {
         EnterCriticalSection(&allocation->gate);AcquireSRWLockExclusive(&native_memory_records);
-        if(returned&&ready)native_memory_released(env,allocation);
+        if(returned&&ready){if(allocation->alive)native_memory_released(env,allocation);}
         else {InterlockedExchange(&allocation->releaseFailed,1);InterlockedExchange(&allocation->unknownUse,1);}
         if(heap)heap->users--;
+        if(arenaProvider)arenaProvider->users--;
         InterlockedDecrement(&allocation->changing);ReleaseSRWLockExclusive(&native_memory_records);
         /* A native exception keeps propagating. Its caller will not execute
          * the normal gate release, so do not strand that gate on unwind. */
@@ -1324,7 +1629,7 @@ JNIEXPORT jlongArray JNICALL Java_dev_ronova_pro_bootstrap_NativeControl_restore
                     NativeMemoryRange *range=*link;uint64_t next=range->start+range->length;remaining--;
                     if(native_memory_targets(range->revision,selected)){
                         if(!InterlockedCompareExchange(&allocation->managed,0,0)&&!InterlockedCompareExchange(&allocation->releaseFailed,0,0)
-                                &&!InterlockedCompareExchange(&allocation->opaque,0,0)&&!native_memory_buffer_aliases(env,allocation)
+                                &&(!InterlockedCompareExchange(&allocation->opaque,0,0)||native_object_state_restorable(allocation,range,selected))&&!native_memory_buffer_aliases(env,allocation)
                                 &&!InterlockedCompareExchange(&allocation->users,0,0)&&!InterlockedCompareExchange(&allocation->writers,0,0)&&!InterlockedCompareExchange(&allocation->reading,0,0)
                                 &&!InterlockedCompareExchange(&allocation->changing,0,0)&&native_memory_restore_range(allocation,range,selected))values[3]+=(jlong)range->length;
                         if(native_memory_targets(range->revision,selected))values[2]++;

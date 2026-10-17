@@ -62,6 +62,7 @@ typedef struct NativeThread {
     struct HostThreadWorker *hostWorker;
     HostLibraryLoad *hostLoad;struct HostImage *hostUnloadImage;
     struct HostModuleRelease *hostRelease;
+    NativeHostArenaOriginalScope *hostArenaOriginal;
     unsigned callbackHolds,vmDetaching,vmThreadEnding;
     int storageOwned,vmAttached,javaEnded,javaCleaning;
     NativePrivateRange jniRange;
@@ -1054,7 +1055,7 @@ static int native_thread_java_pending(const NativeThread *state){
 static int native_thread_module_exit_reaped(NativeThread *state){
     if(!state)return 1;
     if(state->hostWorker)return 1; /* the existing worker still owns this state */
-    if(!state->storageOwned||state->callbackHolds||state->tooling||state->library||state->hostLoad||state->hostRelease
+    if(!state->storageOwned||state->callbackHolds||state->tooling||state->library||state->hostLoad||state->hostRelease||state->hostArenaOriginal
             ||state->heapCallback||state->heapWorkerAnchor||state->toolingCallbackEnvironment||state->toolingImage
             ||state->control||state->sourceCapture||state->unsafeInstalling||state->unsafeInstall||state->bufferAllocation
             ||native_thread_java_pending(state))return 0;
@@ -1092,7 +1093,7 @@ static void native_thread_native_end(NativeThread *state){
 }
 static void native_thread_try_release(NativeThread *state){
     if(!state||!state->storageOwned||!state->javaEnded||state->callbackHolds||state->hostWorker
-            ||state->tooling||state->heapCallback||state->heapWorkerAnchor
+            ||state->tooling||state->hostArenaOriginal||state->heapCallback||state->heapWorkerAnchor
             ||state->control||state->sourceCapture||state->unsafeInstalling||state->bufferAllocation
             ||native_thread_java_pending(state))return;
     if(native_tls!=TLS_OUT_OF_INDEXES&&(NativeThread*)TlsGetValue(native_tls)==state&&!TlsSetValue(native_tls,NULL)){
@@ -1111,7 +1112,7 @@ static void native_thread_callback_leave(NativeThread *state){
  * the actual event thread. An omitted detach or abandoned callback stays open. */
 static int native_thread_worker_os_end(JNIEnv *env,NativeThread *state){
     (void)env;
-    if(!state||!state->hostWorker||state->callbackHolds||state->heapCallback||state->heapWorkerAnchor||state->library
+    if(!state||!state->hostWorker||state->callbackHolds||state->hostArenaOriginal||state->heapCallback||state->heapWorkerAnchor||state->library
             ||state->toolingCallbackEnvironment||state->toolingImage||!host_thread_worker_scope_idle(state)
             ||state->control||state->sourceCapture||state->unsafeInstalling||state->bufferAllocation
             ||native_thread_java_pending(state))return 0;
@@ -1559,7 +1560,9 @@ static void JNICALL native_tooling_NativeMethodBind(NativeToolingSlot *slot,jvmt
 }
 static void JNICALL native_tooling_agent(jvmtiEnv *api,JNIEnv *env,void *argument){
     NativeToolingSlot *slot=(NativeToolingSlot*)argument;NativeToolingInvocation invocation;
-    if(native_tooling_callback_begin(slot,api,&invocation)){((jvmtiStartFunction)slot->callback)(api,env,(void*)slot->argument);native_tooling_callback_end(&invocation);}
+    if(native_tooling_callback_begin(slot,api,&invocation)){
+        host_static_tls_current(invocation.thread,slot->image,slot->owners,slot->unknown);
+        ((jvmtiStartFunction)slot->callback)(api,env,(void*)slot->argument);native_tooling_callback_end(&invocation);}
     else native_tooling_slot_retire(slot);
 }
 static NativeToolingSlot *native_tooling_slot(JNIEnv *env,NativeToolingEnv *record,void *callback,void *wrapper,unsigned arguments,OwnerLink *writers,jweak origin,int unknown,int agent){
@@ -1625,7 +1628,7 @@ static DWORD WINAPI native_tooling_retirement_worker(void *argument){
     (void)argument;JNIEnv *env=NULL;
     for(;;){
         DWORD workerWait=WaitForSingleObject(native_tooling_retirement_event,
-                host_thread_workers_pending()||host_tls_pending()||host_module_exits_pending()||native_tooling_definitions_pending_any()?1000:INFINITE);
+                host_thread_workers_pending()||host_tls_pending()||host_static_tls_pending()||host_module_exits_pending()||native_tooling_definitions_pending_any()?1000:INFINITE);
         if(workerWait!=WAIT_OBJECT_0&&workerWait!=WAIT_TIMEOUT)break;
         if(InterlockedCompareExchange(&native_tooling_shutdown,0,0))break;
         int definitionsReaped=0;
@@ -1637,6 +1640,7 @@ static DWORD WINAPI native_tooling_retirement_worker(void *argument){
             host_module_releases_reap(&env);if(!env)break;
             host_thread_workers_reap(&env);if(!env)break;
             host_tls_reap(&env);if(!env)break;
+            host_static_tls_reap(&env);if(!env)break;
             host_module_loads_reap(&env);if(!env)break;
             if(!definitionsReaped){native_tooling_definitions_reap(env);definitionsReaped=1;
                 if(!native_tooling_retirement_jni(&env)){InterlockedIncrement(&native_tooling_failures);break;}}
@@ -2382,6 +2386,7 @@ JNIEXPORT void JNICALL Java_dev_ronova_pro_bootstrap_NativeControl_module0(JNIEn
 #include "thread.c"
 #include "buffer.c"
 #include "memory.c"
+#include "host_object_state.c"
 JNIEXPORT jlongArray JNICALL Java_dev_ronova_pro_bootstrap_NativeControl_status0(JNIEnv *env,jclass type,jobject module){
     (void)type;jlong values[7]={native_events,native_jni_ready,0,0,native_failures,0,0};
     AcquireSRWLockShared(&native_records);

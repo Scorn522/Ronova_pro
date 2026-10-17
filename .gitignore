@@ -183,3 +183,8 @@ validation/a-takeover-tasks-01/server/Pro-A-Tasks/
 /distribution/candidate-c-java100-native90-pool-tls-cpp-wip-20261017/*
 !/distribution/candidate-c-java100-native90-pool-tls-cpp-wip-20261017/ronova-pro-core-0.1.0-stage-b-dev.jar
 !/distribution/candidate-c-java100-native90-pool-tls-cpp-wip-20261017/ronova-pro-prelaunch.jar
+
+!/distribution/candidate-c-java101-native91-arena-static-object-wip-20261017/
+/distribution/candidate-c-java101-native91-arena-static-object-wip-20261017/*
+!/distribution/candidate-c-java101-native91-arena-static-object-wip-20261017/ronova-pro-core-0.1.0-stage-b-dev.jar
+!/distribution/candidate-c-java101-native91-arena-static-object-wip-20261017/ronova-pro-prelaunch.jar

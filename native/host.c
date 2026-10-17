@@ -35,7 +35,12 @@ enum {
     HOST_CPP_NEW=55,HOST_CPP_NEW_ARRAY=56,HOST_CPP_DELETE=57,HOST_CPP_DELETE_ARRAY=58,
     HOST_TLS_GET2=59,HOST_CPP_NEW_NOTHROW=60,HOST_CPP_NEW_ARRAY_NOTHROW=61,
     HOST_CPP_DELETE_NOTHROW=62,HOST_CPP_DELETE_ARRAY_NOTHROW=63,
-    HOST_CPP_DELETE_SIZED=64,HOST_CPP_DELETE_ARRAY_SIZED=65,HOST_KIND_COUNT=66
+    HOST_CPP_DELETE_SIZED=64,HOST_CPP_DELETE_ARRAY_SIZED=65,
+    HOST_ARENA_MALLOC=66,HOST_ARENA_CALLOC=67,HOST_ARENA_REALLOC=68,HOST_ARENA_FREE=69,
+    HOST_ARENA_MALLOCX=70,HOST_ARENA_RALLOCX=71,HOST_ARENA_XALLOCX=72,
+    HOST_ARENA_DALLOCX=73,HOST_ARENA_SDALLOCX=74,HOST_ARENA_SALLOCX=75,HOST_ARENA_USABLE_SIZE=76,
+    HOST_ARENA_ALIGNED_ALLOC=77,HOST_ARENA_POSIX_MEMALIGN=78,HOST_ARENA_MALLCTL=79,
+    HOST_ARENA_MALLCTLBYMIB=80,HOST_ARENA_MALLCTLNAMETOMIB=81,HOST_KIND_COUNT=82
 };
 static int host_is_create(int kind){return kind==HOST_CREATE_W||kind==HOST_CREATE_A
         ||kind>=HOST_CREATE_USER_W&&kind<=HOST_CREATE_LOGON_W;}
@@ -43,6 +48,16 @@ static int host_is_handle(int kind){return kind>=HOST_CLOSE&&kind<=HOST_TERMINAT
 static int host_is_thread_admission(int kind){return kind>=HOST_CREATE_THREAD&&kind<=HOST_BEGIN_THREAD_EX;}
 static HostCompareHandles host_compare_handles;
 static HostGetProcAddress host_windows_resolver;
+typedef BOOLEAN (NTAPI *HostLoaderCallout)(void);
+static HostLoaderCallout host_loader_callout_query;
+/* Resolved before publishing IAT entries. No loader or JVM query is made on
+ * the callout path itself. Missing platform support uses the restricted path.
+ * Prototype: phnt/ntrtl.h, RtlIsThreadWithinLoaderCallout. */
+static int host_loader_callout(void){
+    DWORD incoming=GetLastError();
+    HostLoaderCallout query=__atomic_load_n(&host_loader_callout_query,__ATOMIC_ACQUIRE);
+    int result=!query||query()!=FALSE;SetLastError(incoming);return result;
+}
 static void *host_windows_api[HOST_KIND_COUNT];
 static void *host_exit_thread_original;
 static void __attribute__((noreturn)) host_real_exit_thread(DWORD code){
@@ -184,6 +199,7 @@ typedef struct HostImage {
     int releasing,pinReleased,opaque;
     struct HostStaticMemory *privateMemory;
     volatile LONG privateOpaque;
+    volatile LONG staticTlsUnobserved;
     volatile LONG retiring;
     volatile LONG active;
     HostLibraryLoad *loads;
@@ -211,6 +227,12 @@ static void host_static_image_cancel(HostImage*,JNIEnv*);
 static void host_static_image_closed(HostImage*,JNIEnv*);
 static void host_static_image_released(HostImage*,JNIEnv*);
 static int host_private_binding_unknown(Binding*);
+static int host_static_tls_observe(NativeThread*,HostImage*,OwnerLink*,int);
+static void host_object_state_summary(JNIEnv*,jobject,jlong*);
+static void host_arena_discover(HMODULE);
+static void host_arena_discover_imports(HMODULE);
+static NativeHostMemoryCall *host_arena_loader_scope(HostImport*,NativeThread*,void*,OwnerLink*,int,NativeHostArenaOriginalScope*);
+static void host_arena_loader_scope_close(NativeThread*,NativeHostArenaOriginalScope*,NativeHostMemoryCall*);
 static void host_windows_targets(void**);
 static HostLibraryLoad *host_thread_worker_child(NativeThread*,HMODULE);
 static int native_tooling_retirement_jni(JNIEnv**);
@@ -591,6 +613,20 @@ static void host_producers(OwnerLink **owners){
 static NativeLibrary *host_thread_worker_library(NativeThread *state,HMODULE image);
 #include "host_module_sources.c"
 #include "host_static_memory.c"
+/* Scope entry already owns the provider/source relationship. This resolves
+ * only that observed image's current-thread static TLS, never other threads. */
+static void host_static_tls_current(NativeThread *state,HMODULE module,OwnerLink *owners,int unknown){
+    if(!module||!native_has_producer(owners))return;
+    DWORD error=GetLastError();HostImage *image=NULL;
+    int restricted=host_static_tls_restricted(state);
+    if(restricted){if(!TryAcquireSRWLockShared(&host_imports)){SetLastError(error);return;}}
+    else AcquireSRWLockShared(&host_imports);
+    for(HostImage *entry=host_images;entry;entry=entry->next)
+        if(entry->live&&!entry->releasing&&entry->handle==module){image=entry;break;}
+    ReleaseSRWLockShared(&host_imports);
+    if(image)(void)host_static_tls_observe(state,image,owners,unknown);
+    SetLastError(error);
+}
 static int host_capture_caller(NativeThread *state,void *caller,OwnerLink **owners){
     HostImage *child=NULL;if(!host_module_capture(state,caller,owners,&child,NULL,NULL))return 0;
     if(child&&state&&(state->depth||state->library||state->tooling||state->hostLoad||state->hostWorker))return 1;
@@ -756,6 +792,7 @@ static int host_entry_sources_query(HostImport *entry,NativeThread *state,void *
     if(!unknown&&unobserved&&native_has_producer(*owners))ready=0;
     if(!retainSources)host_producers(owners);
     if(!ready){SetLastError(associated?ERROR_INVALID_DATA:ERROR_MOD_NOT_FOUND);return 0;}
+    if(entry->image)(void)host_static_tls_observe(state,entry->image,*owners,unobserved);
     return 1;
 }
 static int host_entry_sources(HostImport *entry,NativeThread *state,void *caller,OwnerLink **owners,NativeLibrary **selected,int retainSources){
@@ -789,6 +826,9 @@ static void *host_import_entry(HostImport *entry);
 static int host_target_kind(HostImage *image,void *actual);
 static int host_target_matches(HostImage*,void*,int);
 static int host_cpp_named_target_kind(void*,const char*);
+static int host_arena_named_target_kind(void*,const char*);
+static void host_arena_discover(HMODULE);
+static void host_arena_discover_imports(HMODULE);
 static void host_refresh_targets(HostImage *image);
 static FARPROC WINAPI host_native_resolve(HMODULE module,LPCSTR name,HostImport *entry,void *caller){
     DWORD incoming=GetLastError();
@@ -801,10 +841,12 @@ static FARPROC WINAPI host_native_resolve(HMODULE module,LPCSTR name,HostImport 
     if(associated!=1){SetLastError(associated?ERROR_INVALID_DATA:ERROR_MOD_NOT_FOUND);return NULL;}
     SetLastError(incoming);FARPROC actual=((HostGetProcAddress)entry->original)(module,name);
     DWORD error=GetLastError();
+    if(actual&&(uintptr_t)name>0xffff&&!strncmp(name,"je_",3))host_arena_discover(module);
     host_refresh_targets(entry->image);
     int kind=host_target_kind(entry->image,(void*)actual);
     if(actual&&(uintptr_t)name>0xffff){
         int cpp=host_cpp_named_target_kind((void*)actual,name);if(cpp)kind=cpp;
+        int arena=host_arena_named_target_kind((void*)actual,name);if(arena)kind=arena;
     }
     if(!actual||!kind){host_module_mark_export(module,(void*)actual);SetLastError(error);return actual;}
     /* Windows APIs are selected by the actual returned address. C++ exports
@@ -871,7 +913,7 @@ static HostProcess *host_object_record(HANDLE value,int *role){
 static int host_thread_worker_internal_handle(HANDLE value);
 static int host_tls_internal_handle(HANDLE);
 static int host_internal_handle(HANDLE value){
-    if(!value)return 0;if(value==host_worker_handle||host_thread_worker_internal_handle(value)||host_module_exit_internal_handle(value)||host_tls_internal_handle(value))return 1;
+    if(!value)return 0;if(value==host_worker_handle||host_thread_worker_internal_handle(value)||host_module_exit_internal_handle(value)||host_tls_internal_handle(value)||host_static_tls_internal_handle(value))return 1;
     for(HostProcess *process=host_processes;process;process=process->next)
         if(value==process->monitor||value==process->threadMonitor||value==process->job
                 ||value==process->failedProcess||value==process->failedThread)return 1;
@@ -1031,8 +1073,10 @@ static uint64_t host_native_handle(HostImport *entry,void *caller,uintptr_t *arg
 #include "host_crt_allocations.c"
 #include "host_tls.c"
 #include "host_cpp_allocations.c"
+#include "host_arena_allocations.c"
 static uint64_t host_native_failure(HostImport *entry,DWORD error,DWORD incoming,
-        const HostCrtThreadErrors *crtBefore,const HostCrtThreadErrors *cppBefore){
+        const HostCrtThreadErrors *crtBefore,const HostCrtThreadErrors *cppBefore,const HostCrtThreadErrors *arenaBefore){
+    if(host_is_arena_allocation(entry->kind))return host_arena_refuse(entry->kind,arenaBefore,error);
     if(host_is_cpp_allocation(entry->kind))return host_cpp_refuse(entry->kind,cppBefore,error);
     if(host_is_crt_allocation(entry->kind))return host_crt_allocation_refuse(crtBefore,error);
     if(host_is_tls(entry->kind))return host_tls_failure(entry->kind,error,incoming);
@@ -1055,45 +1099,67 @@ static uint64_t host_native_dispatch(HostImport *entry,void *caller,uintptr_t *a
     if(host_is_crt_allocation(entry->kind))return host_native_crt_allocation(entry,caller,arguments);
     if(host_is_tls(entry->kind))return host_native_tls(entry,caller,arguments);
     if(host_is_cpp_allocation(entry->kind))return host_native_cpp_allocation(entry,caller,arguments);
+    if(host_is_arena_allocation(entry->kind))return host_native_arena_allocation(entry,caller,arguments);
     SetLastError(ERROR_INVALID_FUNCTION);return 0;
 }
-static uint64_t host_native_call(HostImport *entry,void *caller,uintptr_t *arguments){
+static uint64_t host_native_call_body(HostImport *entry,void *caller,uintptr_t *arguments){
     /* A terminal entry owns a heap-resident call hold until OS termination;
      * none of this returning dispatcher's epilogue can run for that call. */
     if(entry->kind==HOST_FREE_LIBRARY_EXIT_THREAD)host_native_module_exit(entry,caller,arguments);
     DWORD incoming=GetLastError();int crt=host_is_crt_allocation(entry->kind),crtReady=0;
     int cpp=host_is_cpp_allocation(entry->kind),cppReady=0;
+    int arena=host_is_arena_allocation(entry->kind),arenaReady=0;
     HostCrtThreadErrors crtBefore={0},crtAfter={0},cppBefore={0},cppAfter={0};
+    HostCrtThreadErrors arenaBefore={0},arenaAfter={0};
     if(crt){crtReady=host_crt_allocation_errors(entry,&crtBefore);crtAfter=crtBefore;}
     if(cpp){cppReady=host_cpp_errors(entry,&cppBefore);cppAfter=cppBefore;}
+    if(arena){arenaReady=host_arena_errors(entry,&arenaBefore);arenaAfter=arenaBefore;}
     NativeThread *state=native_tls==TLS_OUT_OF_INDEXES?NULL:(NativeThread*)TlsGetValue(native_tls);
     int restricted=state&&(state->heapCallback||state->toolingRestricted||state->vmDetaching||state->vmThreadEnding||state->hostUnloadImage||state->hostRelease
             ||state->hostLoad&&state->hostLoad->calling);
     if(restricted){
         if(!TryAcquireSRWLockShared(&host_imports)){
-            return host_native_failure(entry,ERROR_BUSY,incoming,&crtBefore,&cppBefore);}
+            return host_native_failure(entry,ERROR_BUSY,incoming,&crtBefore,&cppBefore,&arenaBefore);}
         if(!TryAcquireSRWLockShared(&native_records)){ReleaseSRWLockShared(&host_imports);
-            return host_native_failure(entry,ERROR_BUSY,incoming,&crtBefore,&cppBefore);}
+            return host_native_failure(entry,ERROR_BUSY,incoming,&crtBefore,&cppBefore,&arenaBefore);}
     }else {AcquireSRWLockShared(&host_imports);AcquireSRWLockShared(&native_records);}
     int associated=host_entry_association(entry,state,NULL,NULL);
     if(associated==1)InterlockedIncrement(&entry->image->active);
     ReleaseSRWLockShared(&native_records);ReleaseSRWLockShared(&host_imports);
     if(associated!=1){DWORD error=associated?ERROR_INVALID_DATA:ERROR_MOD_NOT_FOUND;
-        return host_native_failure(entry,error,incoming,&crtBefore,&cppBefore);}
+        return host_native_failure(entry,error,incoming,&crtBefore,&cppBefore,&arenaBefore);}
     uint64_t result=0;DWORD error=incoming;int returned=0;
-    int callback=state&&(!crt||crtReady)&&(!cpp||cppReady);if(callback)native_thread_callback_enter(state);
+    int callback=state&&(!crt||crtReady)&&(!cpp||cppReady)&&(!arena||arenaReady);if(callback)native_thread_callback_enter(state);
     __try {
-        if(crt)host_crt_allocation_restore(&crtBefore);else if(cpp)host_cpp_restore(&cppBefore);else SetLastError(incoming);
+        if(crt)host_crt_allocation_restore(&crtBefore);else if(cpp)host_cpp_restore(&cppBefore);else if(arena)host_arena_restore(&arenaBefore);else SetLastError(incoming);
         result=host_native_dispatch(entry,caller,arguments);error=GetLastError();
         if(crtReady)crtAfter=host_crt_allocation_result(&crtBefore);
         if(cppReady)cppAfter=host_cpp_result(&cppBefore);returned=1;
+        if(arenaReady)arenaAfter=host_arena_result(&arenaBefore);
     } __finally {
         DWORD interrupted=GetLastError();if(crtReady&&!returned)crtAfter=host_crt_allocation_result(&crtBefore);
         if(cppReady&&!returned)cppAfter=host_cpp_result(&cppBefore);
+        if(arenaReady&&!returned)arenaAfter=host_arena_result(&arenaBefore);
         if(InterlockedDecrement(&entry->image->active)==0&&InterlockedCompareExchange(&entry->image->retiring,0,0))native_thread_worker_wake();
         if(callback)native_thread_callback_leave(state);
-        if(crtReady)host_crt_allocation_restore(&crtAfter);else if(cppReady)host_cpp_restore(&cppAfter);else SetLastError(returned?error:interrupted);
+        if(crtReady)host_crt_allocation_restore(&crtAfter);else if(cppReady)host_cpp_restore(&cppAfter);else if(arenaReady)host_arena_restore(&arenaAfter);else SetLastError(returned?error:interrupted);
     }
+    return result;
+}
+static uint64_t host_native_call(HostImport *entry,void *caller,uintptr_t *arguments){
+    /* The terminal API already owns its separate heap-resident OS-end hold. */
+    if(entry->kind==HOST_FREE_LIBRARY_EXIT_THREAD||!host_loader_callout())
+        return host_native_call_body(entry,caller,arguments);
+    DWORD incoming=GetLastError();NativeThread *state=native_thread();
+    if(!state){HostCrtThreadErrors unavailable={0};unavailable.windowsBefore=incoming;
+        return host_native_failure(entry,ERROR_NOT_ENOUGH_MEMORY,incoming,&unavailable,&unavailable,&unavailable);}
+    /* DLL_THREAD_DETACH can run after JVMTI ThreadEnd. GetEnv may still return
+     * an environment there, but entering Java/JVMTI under the loader lock can
+     * deadlock JVM shutdown. Reuse the existing no-JNI, try-lock source path. */
+    uint64_t result=0;native_thread_callback_enter(state);state->toolingRestricted++;
+    __try {SetLastError(incoming);result=host_native_call_body(entry,caller,arguments);}
+    __finally {DWORD outgoing=GetLastError();state->toolingRestricted--;
+        native_thread_callback_leave(state);SetLastError(outgoing);}
     return result;
 }
 static unsigned host_import_arguments(int kind){
@@ -1125,6 +1191,14 @@ static unsigned host_import_arguments(int kind){
         case HOST_CPP_NEW_NOTHROW:case HOST_CPP_NEW_ARRAY_NOTHROW:
         case HOST_CPP_DELETE_NOTHROW:case HOST_CPP_DELETE_ARRAY_NOTHROW:
         case HOST_CPP_DELETE_SIZED:case HOST_CPP_DELETE_ARRAY_SIZED:return 2;
+        case HOST_ARENA_MALLOC:case HOST_ARENA_FREE:case HOST_ARENA_USABLE_SIZE:return 1;
+        case HOST_ARENA_CALLOC:case HOST_ARENA_REALLOC:case HOST_ARENA_MALLOCX:
+        case HOST_ARENA_DALLOCX:case HOST_ARENA_SALLOCX:case HOST_ARENA_ALIGNED_ALLOC:return 2;
+        case HOST_ARENA_RALLOCX:case HOST_ARENA_SDALLOCX:case HOST_ARENA_POSIX_MEMALIGN:
+        case HOST_ARENA_MALLCTLNAMETOMIB:return 3;
+        case HOST_ARENA_XALLOCX:return 4;
+        case HOST_ARENA_MALLCTL:return 5;
+        case HOST_ARENA_MALLCTLBYMIB:return 6;
         case HOST_TLS_GET:case HOST_TLS_GET2:case HOST_TLS_FREE:
         case HOST_FLS_ALLOC:case HOST_FLS_GET:case HOST_FLS_FREE:
         case HOST_CPP_NEW:case HOST_CPP_NEW_ARRAY:case HOST_CPP_DELETE:case HOST_CPP_DELETE_ARRAY:return 1;
@@ -1176,7 +1250,10 @@ static const char *host_api_names[HOST_KIND_COUNT]={NULL,"CreateProcessW","GetPr
         "??2@YAPEAX_K@Z","??_U@YAPEAX_K@Z","??3@YAXPEAX@Z","??_V@YAXPEAX@Z","TlsGetValue2",
         "??2@YAPEAX_KAEBUnothrow_t@std@@@Z","??_U@YAPEAX_KAEBUnothrow_t@std@@@Z",
         "??3@YAXPEAXAEBUnothrow_t@std@@@Z","??_V@YAXPEAXAEBUnothrow_t@std@@@Z",
-        "??3@YAXPEAX_K@Z","??_V@YAXPEAX_K@Z"};
+        "??3@YAXPEAX_K@Z","??_V@YAXPEAX_K@Z",
+        "je_malloc","je_calloc","je_realloc","je_free","je_mallocx","je_rallocx","je_xallocx",
+        "je_dallocx","je_sdallocx","je_sallocx","je_malloc_usable_size","je_aligned_alloc","je_posix_memalign",
+        "je_mallctl","je_mallctlbymib","je_mallctlnametomib"};
 static void host_windows_targets(void **targets){
     host_memory_prepare();
     HMODULE kernel=GetModuleHandleW(L"kernel32.dll"),advapi=GetModuleHandleW(L"advapi32.dll");
@@ -1185,10 +1262,13 @@ static void host_windows_targets(void **targets){
         resolve=(HostGetProcAddress)GetProcAddress(kernel,"GetProcAddress");
         if(resolve)__atomic_store_n(&host_windows_resolver,resolve,__ATOMIC_RELEASE);
     }
+    if(resolve){HMODULE ntdll=GetModuleHandleW(L"ntdll.dll");
+        HostLoaderCallout query=ntdll?(HostLoaderCallout)resolve(ntdll,"RtlIsThreadWithinLoaderCallout"):NULL;
+        if(query)__atomic_store_n(&host_loader_callout_query,query,__ATOMIC_RELEASE);}
     if(resolve&&kernel){void *exit=(void*)resolve(kernel,"ExitThread");
         if(exit)__atomic_store_n(&host_exit_thread_original,exit,__ATOMIC_RELEASE);}
     for(int kind=1;kind<HOST_KIND_COUNT;kind++){
-        if(host_is_crt_thread_create(kind)||host_is_crt_allocation(kind)||host_is_cpp_allocation(kind)){targets[kind]=NULL;continue;}
+        if(host_is_crt_thread_create(kind)||host_is_crt_allocation(kind)||host_is_cpp_allocation(kind)||host_is_arena_allocation(kind)){targets[kind]=NULL;continue;}
         HMODULE module=kind>=HOST_CREATE_USER_W&&kind<=HOST_CREATE_LOGON_W?advapi:kernel;
         targets[kind]=module&&resolve?(void*)resolve(module,host_api_names[kind]):NULL;
         if(targets[kind])__atomic_store_n(&host_windows_api[kind],targets[kind],__ATOMIC_RELEASE);
@@ -1213,11 +1293,13 @@ static int host_target_kind(HostImage *image,void *actual){
     int crtKind=host_crt_thread_target_kind(actual);if(crtKind)return crtKind;
     crtKind=host_crt_allocation_target_kind(actual);if(crtKind)return crtKind;
     crtKind=host_cpp_target_kind(actual);if(crtKind)return crtKind;
+    crtKind=host_arena_target_kind(actual);if(crtKind)return crtKind;
     if(actual)for(int kind=1;kind<HOST_KIND_COUNT;kind++)
         if(actual==__atomic_load_n(&image->targets[kind],__ATOMIC_ACQUIRE))return kind;
     return 0;
 }
 static int host_target_matches(HostImage *image,void *actual,int kind){
+    if(host_is_arena_allocation(kind))return host_arena_target_matches(actual,kind);
     return host_is_cpp_allocation(kind)?host_cpp_target_matches(actual,kind):host_target_kind(image,actual)==kind;
 }
 static HostImport *host_controlled_entry(HostImage *image,void *actual,int kind){
@@ -1239,6 +1321,7 @@ static int host_declared_kind(unsigned char *base,ULONGLONG name,DWORD size,int 
 static void host_install_slot(HostImage *image,void *volatile *slot,int declared,int delayed){
     void *actual=__atomic_load_n(slot,__ATOMIC_ACQUIRE),*original=actual;int kind=host_target_kind(image,actual);
     if(host_is_cpp_allocation(declared))kind=host_cpp_target_matches(actual,declared)?declared:0;
+    if(host_is_arena_allocation(declared))kind=host_arena_target_matches(actual,declared)?declared:0;
     HostImport *known=NULL;
     for(int candidate=1;candidate<HOST_KIND_COUNT&&!known;candidate++)known=host_controlled_entry(image,actual,candidate);
     if(known){kind=known->kind;original=known->original;}
@@ -1257,7 +1340,7 @@ static void host_install_slot(HostImage *image,void *volatile *slot,int declared
         /* A C++ spelling in an application's own/static runtime is not an
          * observed provider export. Keep that private-storage gap without
          * relabeling its allocator or installing a guessed calling contract. */
-        if(host_is_cpp_allocation(declared)&&delayed!=1){InterlockedExchange(&image->privateOpaque,1);return;}
+        if((host_is_cpp_allocation(declared)||host_is_arena_allocation(declared))&&delayed!=1){InterlockedExchange(&image->privateOpaque,1);return;}
         image->loadWindow=1;
         if(delayed!=1){image->failed=1;return;}
     }
@@ -1561,6 +1644,7 @@ static void host_image_imports(HostImage *image){
 }
 static int host_observe_image_scope(HMODULE handle,NativeLibraryScope *loading){
     if(!handle)return 0;
+    host_arena_discover(handle);host_arena_discover_imports(handle);
     /* Resolve outside the ledgers. JVM_LoadLibrary has returned before an early
      * observation; no DLL loader notification or guessed file owner is used. */
     void *targets[HOST_KIND_COUNT]={0};host_windows_targets(targets);(void)host_handle_identity_ready();
@@ -2028,7 +2112,7 @@ JNIEXPORT jlongArray JNICALL Java_dev_ronova_pro_bootstrap_NativeControl_hostSta
     (void)type;if(!native_controller||!native_original.CallStaticBooleanMethod(env,native_controller,native_control_gate)){
         native_refuse(env,"NATIVE_CONTROL_AGENT_REQUIRED");return NULL;
     }
-    jlong values[37]={0};values[18]=__atomic_load_n(&host_compare_handles,__ATOMIC_ACQUIRE)!=NULL;
+    jlong values[42]={0};values[18]=__atomic_load_n(&host_compare_handles,__ATOMIC_ACQUIRE)!=NULL;
     AcquireSRWLockExclusive(&host_records);host_prune(env);
     for(HostProcess *record=host_processes;record;record=record->next){
         if(!native_owner_matches(env,record->owners,module))continue;host_collect(record);
@@ -2054,5 +2138,7 @@ JNIEXPORT jlongArray JNICALL Java_dev_ronova_pro_bootstrap_NativeControl_hostSta
     host_module_loads_state(env,module,values);
     host_module_releases_state(env,module,values);
     host_tls_state(env,module,values);
-    jlongArray result=native_original.NewLongArray(env,37);if(result)native_original.SetLongArrayRegion(env,result,0,37,values);return result;
+    host_static_tls_state(env,module,values);
+    host_object_state_summary(env,module,values);
+    jlongArray result=native_original.NewLongArray(env,42);if(result)native_original.SetLongArrayRegion(env,result,0,42,values);return result;
 }

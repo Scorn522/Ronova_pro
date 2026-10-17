@@ -2,8 +2,13 @@
 #ifndef RONOVA_HOST_MEMORY_TRACKING_H
 #define RONOVA_HOST_MEMORY_TRACKING_H
 typedef struct NativeHostMemoryCall NativeHostMemoryCall;
-enum { NATIVE_MEMORY_HOST_HEAP=1,NATIVE_MEMORY_HOST_VIRTUAL=2,NATIVE_MEMORY_HOST_CRT=3,NATIVE_MEMORY_HOST_IMAGE=4,NATIVE_MEMORY_HOST_CPP=5 };
+typedef struct NativeHostArenaOriginalScope {
+    HMODULE image;void *original,*release,*entry;NativeHostMemoryCall *call;
+    DWORD thread;int cleanup;struct NativeHostArenaOriginalScope *previous;
+} NativeHostArenaOriginalScope;
+enum { NATIVE_MEMORY_HOST_HEAP=1,NATIVE_MEMORY_HOST_VIRTUAL=2,NATIVE_MEMORY_HOST_CRT=3,NATIVE_MEMORY_HOST_IMAGE=4,NATIVE_MEMORY_HOST_CPP=5,NATIVE_MEMORY_HOST_ARENA=6 };
 enum { NATIVE_MEMORY_HOST_ALLOCATE=0,NATIVE_MEMORY_HOST_REALLOCATE=1,NATIVE_MEMORY_HOST_FREE=2,NATIVE_MEMORY_HOST_DECOMMIT=3,NATIVE_MEMORY_HOST_CONTEXT_FREE=4,NATIVE_MEMORY_HOST_CONTEXT_CREATE=5 };
+enum { NATIVE_MEMORY_HOST_ARENA_RESET=6,NATIVE_MEMORY_HOST_ARENA_UNKNOWN=7,NATIVE_MEMORY_HOST_OBSERVE=8 };
 
 /* Post-success only. Owners are borrowed for this call and copied by the tracker.
  * bytes==UINT64_MAX means an actual nonnull result whose extent is unknown.
@@ -42,7 +47,29 @@ static void native_memory_host_complete(JNIEnv*,NativeHostMemoryCall*,uint64_t r
 /* Missing/exceptional completion keeps the old row uncertain and closes new
  * admissions; it does not claim that the original call failed or released it. */
 static void native_memory_host_abort(JNIEnv*,NativeHostMemoryCall*);
+/* Admission was refused before any original call ran; keep the old lifetime. */
+static void native_memory_host_cancel(NativeHostMemoryCall*);
 static void native_memory_host_unobserved(OwnerLink *owners);
+
+/* The exact loaded allocator's free export identifies one provider. Every
+ * observed call leases it until the actual call and result observation finish;
+ * a bulk command additionally leases the affected actual arena generation.
+ * context is arena index+1 (zero means no observed arena). Pointer operations
+ * obtain their context only from an existing exact row, never by asking an
+ * allocator to inspect an unknown incoming pointer. Unknown controls close the
+ * provider's old views without pretending that their allocations were freed. */
+static NativeHostMemoryCall *native_memory_host_arena_prepare(JNIEnv*,void *release,uint64_t address,uintptr_t context,
+        int operation,OwnerLink *owners,int unknown,int *denied);
+static void native_memory_host_arena_complete(JNIEnv*,NativeHostMemoryCall*,uint64_t address,uint64_t bytes,
+        uintptr_t context,int completed,int released);
+/* Only the same thread's currently executing real provider function may pair
+ * its own observed Windows backing call with this allocator lease. */
+static void native_memory_host_backing_allocated(JNIEnv*,NativeHostArenaOriginalScope*,void *allocator,void *release,
+        uint64_t address,uint64_t bytes,OwnerLink*,int unknown);
+static NativeHostMemoryCall *native_memory_host_backing_prepare(JNIEnv*,NativeHostArenaOriginalScope*,void *release,
+        uint64_t address,uint64_t bytes,int operation,OwnerLink*,int unknown,int *denied);
+static void native_memory_host_backing_complete(JNIEnv*,NativeHostMemoryCall*,uint64_t bytes,int completed,int released);
+static void host_arena_release_scoped_original(void *release,uint64_t address,NativeHostMemoryCall*);
 
 /* Exact observed image incarnation; these opaque borrowed spans are never freed
  * independently. Retire follows the real image lifetime, not a numeric HMODULE. */
