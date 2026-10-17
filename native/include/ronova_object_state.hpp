@@ -17,8 +17,8 @@ namespace object_state_detail {
 /* errno belongs to the caller's CRT provider. Preserve it here as well as the
  * control DLL's own errno so different providers retain their real TLS state. */
 struct errors {
-    DWORD windows=GetLastError();int crt=errno;
-    ~errors() noexcept {errno=crt;SetLastError(windows);}
+    DWORD windows=GetLastError();int crt=errno;unsigned long dos=_doserrno;
+    ~errors() noexcept {_doserrno=dos;errno=crt;SetLastError(windows);}
 };
 inline const ronova_object_state_api_v1 *resolve() noexcept {
     errors saved;
@@ -65,7 +65,7 @@ public:
 template<class T> class buffer_field {
     friend class object_state;
     object_state *owner_=nullptr;T *address_=nullptr;std::size_t size_=0;
-    uint64_t object_=0,generation_=0,token_=0,binding_=0;
+    uint64_t object_=0,generation_=0,token_=0,binding_=0;bool released_=false;
     uint64_t sequence_=0;const void *sequenceAddress_=nullptr;
     void (*publicShape_)(const void*,uintptr_t&,uint64_t&,uint64_t&) noexcept=nullptr;
 public:
@@ -79,9 +79,22 @@ template<class C> class sequence_field {
     static_assert(object_state_detail::sequence_traits<C>::supported,
             "Use basic_string/vector of non-atomic scalar elements; vector<bool> and class/handle representations are excluded.");
     object_state *owner_=nullptr;C *address_=nullptr;
-    uint64_t object_=0,generation_=0,token_=0,binding_=0;
+    uint64_t object_=0,generation_=0,token_=0,binding_=0;bool released_=false;
 public:
     sequence_field() noexcept=default;
+    uint64_t receipt()const noexcept{return token_;}
+    bool covered()const noexcept{return token_!=0;}
+};
+
+/* A real member whose representation carries ownership, an external handle,
+ * or other opaque state. This adds an exclusion and a live borrow only. It
+ * never copies the representation or invents its construction/destruction. */
+template<class T> class opaque_field {
+    friend class object_state;
+    object_state *owner_=nullptr;T *address_=nullptr;
+    uint64_t object_=0,generation_=0,token_=0,binding_=0;
+public:
+    opaque_field() noexcept=default;
     uint64_t receipt()const noexcept{return token_;}
     bool covered()const noexcept{return token_!=0;}
 };
@@ -160,6 +173,13 @@ public:
         if(reinterpret_cast<uintptr_t>(&object)!=address_||sizeof(Owner)!=bytes_)return {};
         return scalar(object.*member);
     }
+    template<class T> opaque_field<T> opaque(T& value) noexcept {
+        static_assert(!std::is_volatile_v<T>,"Expose a live non-volatile opaque member.");
+        object_state_detail::errors saved;opaque_field<T> result;
+        if(!contains(&value,sizeof(T)))return result;
+        result.owner_=this;result.address_=&value;result.object_=object_;result.generation_=generation_;result.binding_=binding_;
+        result.token_=borrowed_object(&value,sizeof(T));return result;
+    }
     template<class T> object_state nested(T& object) noexcept {
         object_state_detail::errors saved;
         auto token=typed_&&covered()&&contains(&object,sizeof(T))?typed_->nested(object_,generation_,reinterpret_cast<uintptr_t>(&object),sizeof(T)):0;
@@ -174,7 +194,7 @@ public:
         object_state_detail::errors saved;
         return covered()?api_->span(object_,generation_,reinterpret_cast<uintptr_t>(address),length,RONOVA_OBJECT_BYTES):0;
     }
-    uint64_t borrowed_object(void *address,std::size_t length) noexcept {
+    uint64_t borrowed_object(const void *address,std::size_t length) noexcept {
         object_state_detail::errors saved;
         return covered()?api_->span(object_,generation_,reinterpret_cast<uintptr_t>(address),length,RONOVA_OBJECT_BORROWED_OBJECT):0;
     }
@@ -210,8 +230,26 @@ public:
         borrow_scope(borrow_scope&& other) noexcept:api_(other.api_),token_(std::exchange(other.token_,0)){}
         ~borrow_scope() noexcept {object_state_detail::errors saved;if(token_)api_->borrow_end(token_);}
         bool observed()const noexcept {return token_!=0;}
+        bool complete() noexcept {
+            object_state_detail::errors saved;
+            return token_&&api_->borrow_end(std::exchange(token_,0))!=0;
+        }
     };
     borrow_scope borrowing(uint64_t span) noexcept {return borrow_scope(*this,span);}
+    template<class T> borrow_scope borrowing(const opaque_field<T>& field) noexcept {
+        bool current=field.owner_==this&&field.object_==object_&&field.generation_==generation_&&field.binding_==binding_
+                &&field.address_&&contains(field.address_,sizeof(T));
+        return borrowing(current?field.token_:0);
+    }
+    template<class T,class F> bool use(const opaque_field<T>& field,F&& original) {
+        if(field.owner_!=this||field.object_!=object_||field.generation_!=generation_||field.binding_!=binding_
+                ||!field.address_||!contains(field.address_,sizeof(T)))return false;
+        if(!covered()){if(constrained_)return false;std::forward<F>(original)();return true;}
+        auto borrow=borrowing(field);if(!borrow.observed())return false;
+        // The caller performs its one original operation. Ownership and an OS
+        // operation's result remain with that operation, never byte undo.
+        std::forward<F>(original)();return borrow.complete();
+    }
 
     class destroy_scope {
         object_state *owner_=nullptr;uint64_t token_=0;
@@ -241,6 +279,17 @@ public:
         auto write=writing(field.token_);if(!write.observed())return false;
         *field.address_=value;return write.complete();
     }
+    template<class T,class F> bool mutate(const scalar_field<T>& field,F&& original) {
+        static_assert(object_state_detail::scalar<T>);
+        if(field.owner_!=this||field.object_!=object_||field.generation_!=generation_||field.binding_!=binding_
+                ||!field.address_||!contains(field.address_,sizeof(T)))return false;
+        if(!covered()){if(constrained_)return false;std::forward<F>(original)();return true;}
+        if(!typed_||!field.token_)return false;
+        auto write=writing(field.token_);if(!write.observed())return false;
+        // Keep this member's +=, increment or other original scalar operation intact.
+        // Exceptional exit closes the write as incomplete in write_scope.
+        std::forward<F>(original)();return write.complete();
+    }
     template<class T> buffer_field<T> owned_buffer(std::span<T> values) noexcept {
         static_assert(object_state_detail::scalar<T>);return buffer(values,RONOVA_BUFFER_OWNED);
     }
@@ -250,14 +299,15 @@ public:
     template<class T> bool release(buffer_field<T>& buffer) noexcept {
         object_state_detail::errors saved;
         if(buffer.owner_!=this||buffer.object_!=object_||buffer.generation_!=generation_||buffer.binding_!=binding_)return false;
-        if(!covered()){if(constrained_)return false;buffer.token_=0;buffer.owner_=nullptr;return true;}
+        if(buffer.released_)return true;
+        if(!covered()){if(constrained_)return false;buffer.token_=0;buffer.released_=true;return true;}
         if(!typed_||!buffer.token_||!typed_->buffer_end(object_,generation_,buffer.token_))return false;
-        buffer.token_=0;buffer.owner_=nullptr;return true;
+        buffer.token_=0;buffer.released_=true;return true;
     }
     template<class T> bool assign(const buffer_field<T>& buffer,std::span<const T> values) noexcept {
         static_assert(object_state_detail::scalar<T>);object_state_detail::errors saved;
         if(buffer.owner_!=this||buffer.object_!=object_||buffer.generation_!=generation_||buffer.binding_!=binding_
-                ||buffer.size_!=values.size()||(!values.empty()&&!buffer.address_))return false;
+                ||buffer.released_||buffer.size_!=values.size()||(!values.empty()&&!buffer.address_))return false;
         if(!covered()){if(constrained_)return false;for(std::size_t i=0;i<values.size();i++)buffer.address_[i]=values[i];return true;}
         if(!typed_||!buffer.token_)return false;
         auto store=[&]() noexcept {
@@ -291,7 +341,8 @@ public:
     }
     template<class C> buffer_field<typename C::value_type> view(const sequence_field<C>& sequence) noexcept {
         object_state_detail::errors saved;buffer_field<typename C::value_type> result;
-        if(sequence.owner_!=this||sequence.object_!=object_||sequence.generation_!=generation_||sequence.binding_!=binding_||!sequence.address_)return result;
+        if(sequence.owner_!=this||sequence.object_!=object_||sequence.generation_!=generation_||sequence.binding_!=binding_
+                ||sequence.released_||!sequence.address_)return result;
         result.owner_=this;result.object_=object_;result.generation_=generation_;result.binding_=binding_;
         if(covered()){
             if(!sequences_||!sequence.token_)return result;
@@ -309,7 +360,8 @@ public:
         return result;
     }
     template<class C,class F> bool mutate(sequence_field<C>& sequence,F&& original) {
-        if(sequence.owner_!=this||sequence.object_!=object_||sequence.generation_!=generation_||sequence.binding_!=binding_||!sequence.address_)return false;
+        if(sequence.owner_!=this||sequence.object_!=object_||sequence.generation_!=generation_||sequence.binding_!=binding_
+                ||sequence.released_||!sequence.address_)return false;
         if(!covered()){if(constrained_)return false;std::forward<F>(original)();return true;}
         if(!sequences_||!sequence.token_)return false;
         uint64_t mutation=0;
@@ -329,9 +381,12 @@ public:
     template<class C> bool release(sequence_field<C>& sequence) noexcept {
         object_state_detail::errors saved;
         if(sequence.owner_!=this||sequence.object_!=object_||sequence.generation_!=generation_||sequence.binding_!=binding_)return false;
-        if(!covered()){if(constrained_)return false;sequence.token_=0;sequence.owner_=nullptr;return true;}
+        // A later relation may refuse during multi-string retirement. Only an
+        // already completed close is repeatable; a missing receipt is no close.
+        if(sequence.released_)return true;
+        if(!covered()){if(constrained_)return false;sequence.token_=0;sequence.released_=true;return true;}
         if(!sequences_||!sequence.token_||!sequences_->sequence_end(object_,generation_,sequence.token_))return false;
-        sequence.token_=0;sequence.owner_=nullptr;return true;
+        sequence.token_=0;sequence.released_=true;return true;
     }
     template<class T,std::size_t N> std::array<scalar_field<T>,N> fixed(std::array<T,N>& values) noexcept {
         static_assert(object_state_detail::scalar<T>);std::array<scalar_field<T>,N> result;

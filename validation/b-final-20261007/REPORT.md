@@ -1,5 +1,19 @@
 # B 批实际报告：2026-10-09 代码收敛接续
 
+## 2026-10-17：C 接续——实际 Storage 事务与拒绝后的生命周期
+
+接续 `5316bcf`，仅主工程。Java104 / Native94 / Object SDK3（保留1/2）/ Storage3 / Journal6 不变，未改接口布局。写齐本包后统一构建，没有恢复容器 Hook、添加外观或武器、生成源码 ZIP。
+
+Transaction/Hash 的实际句柄、阶段、偏移和提交回执按 opaque/use 接入，避免独立字节恢复重放外部操作；四个配置字符串接真实 allocator_adapter、公开序列和当前视图借用。关闭只对已成功的同代关系幂等，旧视图拒绝再用。身份查询及事务的独立元数据保留原 owner/token 和真实析构阶段；全序列关闭后同次执行原析构及完成回执。root 使用真实 std::allocator，原释放未执行可重试，已执行但未确认仅重试收尾；实际存储与 context 收口后才发布退休和归还 admission。身份查询拒绝节点由后续入口锁外重试。
+
+到期保活在 slots 锁外调用 Java，LocalRef 固定原 owner，回来核对同槽 revision/token/owner；旧回调不处置移交后的状态。该锁域由源码核对，没有冒称执行了重入回调检查。SDK 补 opaque/use、scalar mutate、显式 borrow 完成，并保留 errno/_doserrno/LastError。
+
+`build-c-java104-native94-storage-state-20261017.log` 首轮 **PASS，1分14秒**；本包 C++、Java 与两个复用 Native 入口编译退出0。`c-java104-native94-storage-opaque-20261017.log` **退出0**：明确供给 image/source 的既有实际夹具通过非零 opaque 借用、原回调一次、借用拒绝标量修改与析构、部分序列关闭重试及原析构收口。`c-java104-native94-storage-transactions-20261017.log` **退出0**：真实双文件 TxF、双槽容量、第三请求 ERROR_BUSY、错误 Ticket/token 拒绝、准确 owner 仍可继续、无许可回滚、原文件不变和 admitted=0。
+
+`c-java104-native94-storage-host-20261017.log` **退出0，正常 JVM 结束**：本包 premain/Bootstrap/Host 为 INSTALLED_FULL，原 C++ 消费者及生产身份查询结果通过；普通来源回执仍0，coverage=uncovered，不当作 Core producer 覆盖。未跑旧矩阵；游戏进服、同存档重启及实际 Core producer 集成 **NOTRUN**。未合作的分配器、外部状态和裸 CPU 字段语义仍有缺口，完整 C/B 未全部完成。
+
+匹配候选为 `distribution/candidate-c-java104-native94-storage-state-wip-20261017` 的两份 JAR，随本包源码和既有状态/报告同步 GitHub。
+
 ## 2026-10-17：C 接续——非 PMR 分配器与公开序列字段
 
 接续 `f047d36`，仅主工程 `D:\桌面\ronova_GPT`。Java ABI104 / Native ABI94 / Object SDK3（保留1/2）/ SourceMapBridge2 / Storage3 / Journal6，协议 `r3-client-8`。先写齐分配器、字段、实际 Storage 和必要夹具源码，再统一构建；没有自身外观、武器注册、容器广谱 Hook 或源码 ZIP。

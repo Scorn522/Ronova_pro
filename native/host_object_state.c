@@ -37,11 +37,11 @@ static NativeObjectStateCall *native_object_state_calls;
 static NativeObjectStateMutation *native_object_state_mutations;
 static uint64_t native_object_state_sequence;
 
-typedef struct NativeObjectStateErrors {DWORD windows;int crt;} NativeObjectStateErrors;
+typedef struct NativeObjectStateErrors {DWORD windows;int crt;unsigned long dos;} NativeObjectStateErrors;
 static NativeObjectStateErrors native_object_state_errors(void){
-    NativeObjectStateErrors result;result.windows=GetLastError();result.crt=errno;return result;
+    NativeObjectStateErrors result;result.windows=GetLastError();result.crt=errno;result.dos=_doserrno;return result;
 }
-static void native_object_state_errors_restore(NativeObjectStateErrors incoming){errno=incoming.crt;SetLastError(incoming.windows);}
+static void native_object_state_errors_restore(NativeObjectStateErrors incoming){_doserrno=incoming.dos;errno=incoming.crt;SetLastError(incoming.windows);}
 #define NATIVE_OBJECT_RETURN(value) do {native_object_state_errors_restore(incoming);return (value);}while(0)
 
 /* Source queries must not replace a real pending Java exception. The SDK's

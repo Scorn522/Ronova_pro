@@ -1227,12 +1227,19 @@ public final class AuditFixCheck {
         }
     }
 
+    private static long[] storagePrepare(RecoveryStorage.Ticket ticket) {
+        long[] state=StorageNative.prepare0(ticket);
+        long deadline=System.nanoTime()+TimeUnit.SECONDS.toNanos(10);
+        while(state[0]==7&&state[1]>0&&System.nanoTime()<deadline)state=StorageNative.advance0(ticket,state[1]);
+        return state;
+    }
     private static void storageNative()throws Exception {
         require(StorageNative.available()&&StorageNative.abi0()==3,"actual storage DLL unavailable: "+StorageNative.reason());
         byte[] original=new byte[33001],candidate=new byte[65537];
         for(int i=0;i<original.length;i++)original[i]=(byte)(i*13);
         for(int i=0;i<candidate.length;i++)candidate[i]=(byte)(i*31+7);
         var file=java.nio.file.Files.createTempFile(java.nio.file.Path.of(".").toAbsolutePath().normalize(),"storage-2023-",".bin");
+        java.nio.file.Path secondFile=null;
         try {
             java.nio.file.Files.write(file,original);
             String identity;
@@ -1248,29 +1255,80 @@ public final class AuditFixCheck {
             var workType=Class.forName("dev.ronova.pro.RecoveryStorage$Work");var workConstructor=workType.getDeclaredConstructor(descriptor);workConstructor.setAccessible(true);
             var ticketConstructor=RecoveryStorage.Ticket.class.getDeclaredConstructor(RecoveryStorage.class,workType,RecoverySources.Source.class,RecoveryImage.Encoded.class);ticketConstructor.setAccessible(true);
             require(StorageNative.prepare0(null)[0]==0,"foreign storage request admitted");
-            for(boolean valid:new boolean[]{false,true}) {
-                Object description=descriptorConstructor.newInstance("STORAGE/2",UUID.randomUUID(),UUID.randomUUID(),UUID.randomUUID(),1L,"source","code",1L,identity,baseline,valid?expected:"0".repeat(64),baseline,UUID.randomUUID(),"win32-ntfs-txf/2",null);
+            {
+                Object description=descriptorConstructor.newInstance("STORAGE/2",UUID.randomUUID(),UUID.randomUUID(),UUID.randomUUID(),1L,"source","code",1L,identity,baseline,"0".repeat(64),baseline,UUID.randomUUID(),"win32-ntfs-txf/2",null);
                 Object work=workConstructor.newInstance(description);
                 try(var builder=new RecoveryImage.Builder()) {
                     builder.write(candidate);
                     try(var image=builder.finish()) {
                         var ticket=(RecoveryStorage.Ticket)ticketConstructor.newInstance(owner,work,source,image);
                         put(work,"ticket",ticket);put(work,"preparing",true);
-                        long[] state=StorageNative.prepare0(ticket);
                         try {
-                            long deadline=System.nanoTime()+TimeUnit.SECONDS.toNanos(10);
-                            while(state[0]==7&&state[1]>0&&System.nanoTime()<deadline)state=StorageNative.advance0(ticket,state[1]);
-                            require(state[0]==(valid?1:0),"candidate preparation returned "+Arrays.toString(state));
+                            long[] state=storagePrepare(ticket);
+                            require(state[0]==0,"invalid candidate preparation returned "+Arrays.toString(state));
                         } finally {
-                            if(ticket.token>0){long[] retired=StorageNative.finish0(ticket,ticket.token,null);require(retired[0]==(valid?2:0)&&retired[1]==1,"unpermitted transaction did not retire: "+Arrays.toString(retired));}
+                            if(ticket.token>0){long[] retired=StorageNative.finish0(ticket,ticket.token,null);require(retired[0]==0&&retired[1]==1,"invalid candidate did not retire: "+Arrays.toString(retired));}
                         }
                     }
                 }
                 require(Arrays.equals(original,java.nio.file.Files.readAllBytes(file)),"unpermitted candidate changed the real file");
             }
+            secondFile=java.nio.file.Files.createTempFile(file.getParent(),"storage-second-",".bin");
+            java.nio.file.Files.write(secondFile,original);
+            String secondIdentity;
+            try(var stream=new java.io.FileInputStream(secondFile.toFile())){secondIdentity=StorageNative.identity(stream.getFD(),secondFile.toString());}
+            require(secondIdentity!=null,"second actual NTFS identity unavailable");
+            var tickets=new RecoveryStorage.Ticket[3];
+            try(var builder=new RecoveryImage.Builder()) {
+                builder.write(candidate);
+                try(var image=builder.finish()) {
+                    for(int i=0;i<tickets.length;i++) {
+                        var actualSource=(RecoverySources.Source)U.allocateInstance(RecoverySources.Source.class);
+                        put(actualSource,"owner",sources);put(actualSource,"path",i==1?secondFile:file);
+                        Object description=descriptorConstructor.newInstance("STORAGE/2",UUID.randomUUID(),UUID.randomUUID(),UUID.randomUUID(),1L,"source","code",1L,i==1?secondIdentity:identity,baseline,expected,baseline,UUID.randomUUID(),"win32-ntfs-txf/2",null);
+                        Object work=workConstructor.newInstance(description);
+                        var actualOwner=i==2?(RecoveryStorage)U.allocateInstance(RecoveryStorage.class):owner;
+                        tickets[i]=(RecoveryStorage.Ticket)ticketConstructor.newInstance(actualOwner,work,actualSource,image);
+                        put(work,"ticket",tickets[i]);put(work,"preparing",true);
+                    }
+                    try {
+                        for(int i=0;i<2;i++) {
+                            long[] state=storagePrepare(tickets[i]);
+                            require(state[0]==1&&tickets[i].token>0,"two-file transaction preparation returned "+Arrays.toString(state));
+                        }
+                        require(tickets[0].token!=tickets[1].token,"two actual transactions shared a token");
+                        long[] busy=StorageNative.prepare0(tickets[2]);
+                        require(busy[0]==7&&busy[1]==0&&busy[2]==170&&tickets[2].token==0,"third transaction exceeded two-slot capacity: "+Arrays.toString(busy));
+                        long[] foreign=StorageNative.advance0(tickets[2],tickets[0].token);
+                        require(foreign[0]==0&&foreign[2]==1168,"foreign Ticket consumed another token: "+Arrays.toString(foreign));
+                        long[] foreignFinish=StorageNative.finish0(tickets[2],tickets[0].token,null);
+                        require(foreignFinish[1]==0,"foreign Ticket retired another transaction: "+Arrays.toString(foreignFinish));
+                        for(int i=0;i<2;i++)require(StorageNative.advance0(tickets[i],tickets[i].token)[0]==1,"foreign request removed an exact owner slot");
+                        long[] live=StorageNative.maintain0();
+                        require(live[0]==1&&live[2]==2,"live original owners lost their two admissions: "+Arrays.toString(live));
+                    } finally {
+                        try {
+                            if(tickets[0].token>0) {
+                                long[] retired=StorageNative.finish0(tickets[0],tickets[0].token,null);
+                                require(retired[0]==2&&retired[1]==1,"first unpermitted transaction did not retire: "+Arrays.toString(retired));
+                            }
+                        } finally {
+                            if(tickets[1].token>0) {
+                                long[] retired=StorageNative.finish0(tickets[1],tickets[1].token,null);
+                                require(retired[0]==2&&retired[1]==1,"second unpermitted transaction did not retire: "+Arrays.toString(retired));
+                            }
+                        }
+                    }
+                }
+            }
+            require(Arrays.equals(original,java.nio.file.Files.readAllBytes(file))
+                    &&Arrays.equals(original,java.nio.file.Files.readAllBytes(secondFile)),"two-slot unpermitted transactions changed an original file");
             long[] maintenance=StorageNative.maintain0();require(maintenance[0]==1&&maintenance[2]==0,"native storage handles retained: "+Arrays.toString(maintenance));
-            System.out.println("STORAGE_NATIVE_PASS actual_dll foreign_request_refused candidate_hash_refused multi_chunk_hash staged_readback no_permit_rollback original_preserved handles_retired");
-        } finally {java.nio.file.Files.deleteIfExists(file);}
+            System.out.println("STORAGE_NATIVE_PASS actual_dll foreign_request_refused candidate_hash_refused multi_chunk_hash staged_readback two_actual_files two_slot_capacity third_busy foreign_ticket_token_refused exact_owner_slots_preserved no_permit_rollback originals_preserved admitted_zero handles_retired");
+        } finally {
+            try{if(secondFile!=null)java.nio.file.Files.deleteIfExists(secondFile);}
+            finally{java.nio.file.Files.deleteIfExists(file);}
+        }
     }
 
     // Actual JNI calls and OS permissions; no retirement/source permission is manufactured here.

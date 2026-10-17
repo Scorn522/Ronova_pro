@@ -28,40 +28,89 @@ struct IdentityState {
     explicit IdentityState(ronova::allocator_state& allocations)
             :requested(ronova::allocator_adapter<wchar_t>(allocations)),identity(ronova::allocator_adapter<char>(allocations)){}
 };
-struct IdentityOwner {
+struct IdentityLifetime {
     // The real std::allocator adapter outlives both strings, their temporary
     // copies in identity(), and every original deallocation they perform.
+    recovery_storage::RootAllocation<IdentityState> root;
     ronova::allocator_state allocations;
     IdentityState *value=nullptr;
     ronova::object_state observed;
     ronova::scalar_field<bool> valid,identified;
     ronova::sequence_field<IdentityPath> requested;
     ronova::sequence_field<IdentityText> identity;
-    IdentityOwner() {
-        // An actual imported CRT allocation gives Host its real allocation
-        // generation. Placement construction itself grants no storage rights.
-        void *storage=std::malloc(sizeof(IdentityState));
-        if(!storage)throw std::bad_alloc();
-        try {value=::new(storage) IdentityState(allocations);}
-        catch(...) {std::free(storage);throw;}
+    bool payloadConstructed=false,dtorDone=false,objectClosed=false;
+    IdentityLifetime *next=nullptr;
+    void initialize() {
+        // This root is a real std::allocator allocation using its original
+        // operator new/delete. Placement construction grants no storage rights.
+        value=root.allocate();
+        ::new(static_cast<void*>(value)) IdentityState(allocations);payloadConstructed=true;
         observed.constructed(value,sizeof(*value));
         valid=observed.scalar(value->decisions.valid);
         identified=observed.scalar(value->decisions.identified);
         requested=observed.sequence(value->requested);
         identity=observed.sequence(value->identity);
     }
+    bool retire() noexcept {
+        if(payloadConstructed&&!dtorDone) {
+            // This private lifetime has left identity0's active path. Close
+            // all old views before acquiring a same-call destruction receipt;
+            // a refused relation leaves the actual object available to retry.
+            if(!observed.release(requested)||!observed.release(identity))return false;
+            auto destruction=observed.destroying();
+            bool covered=observed.covered();
+            if(covered&&!destruction.admitted())return false;
+            value->~IdentityState();dtorDone=true;
+            objectClosed=!covered||destruction.complete();
+        }
+        // The payload has no live members after its real destructor. A failed
+        // completion stays unresolved; neither a second dtor nor guessed free
+        // can finish it. Closing allocator state cannot replay refused frees.
+        if(payloadConstructed&&!objectClosed)return false;
+        if(!allocations.close()||!root.release())return false;
+        value=nullptr;return true;
+    }
+};
+static SRWLOCK identity_pending_lock=SRWLOCK_INIT;
+static IdentityLifetime *identity_pending=nullptr;
+static void park_identity(IdentityLifetime *lifetime) noexcept {
+    // The node already exists. Refusal requires no allocation or callback.
+    AcquireSRWLockExclusive(&identity_pending_lock);
+    lifetime->next=identity_pending;identity_pending=lifetime;
+    ReleaseSRWLockExclusive(&identity_pending_lock);
+}
+static void retry_identity() noexcept {
+    ronova::object_state_detail::errors incoming;
+    AcquireSRWLockExclusive(&identity_pending_lock);
+    auto pending=std::exchange(identity_pending,nullptr);
+    ReleaseSRWLockExclusive(&identity_pending_lock);
+    // Retry only this detached snapshot, outside the registry lock. The SDK
+    // still requires this actual caller's original provider and source set.
+    while(pending) {
+        auto lifetime=pending;pending=lifetime->next;lifetime->next=nullptr;
+        if(lifetime->retire())delete lifetime;
+        else park_identity(lifetime);
+    }
+}
+struct IdentityOwner {
+    IdentityLifetime *lifetime;
+    IdentityOwner():lifetime(new IdentityLifetime) {
+        try {lifetime->initialize();}
+        catch(...) {
+            // Keep both the original construction exception and the complete
+            // metadata node if raw-storage retirement is refused or uncertain.
+            ronova::object_state_detail::errors original;
+            if(lifetime->retire())delete lifetime;
+            else park_identity(lifetime);
+            throw;
+        }
+    }
+    IdentityOwner(const IdentityOwner&)=delete;
+    IdentityOwner& operator=(const IdentityOwner&)=delete;
     ~IdentityOwner() noexcept {
-        auto destruction=observed.destroying();
-        // A real outstanding lease retains the still-constructed object. It
-        // cannot be silently freed under the SDK's active borrower/writer.
-        if(observed.covered()&&!destruction.admitted())return;
-        // Close public sequence relationships before the original STL
-        // destructors release their own allocations.
-        if(!observed.release(requested)||!observed.release(identity))return;
-        value->~IdentityState();
-        if(!allocations.close())return;
-        if(observed.covered()&&!destruction.complete())return;
-        std::free(value);
+        ronova::object_state_detail::errors incoming;
+        if(lifetime->retire())delete lifetime;
+        else park_identity(lifetime);
     }
 };
 }
@@ -69,6 +118,7 @@ struct IdentityOwner {
 // Borrow the live Java stream handle: no path-open and no ownership transfer.
 extern "C" JNIEXPORT jstring JNICALL
 Java_dev_ronova_pro_StorageNative_identity0(JNIEnv* env,jclass,jobject descriptor,jstring path) try {
+    retry_identity();
     if(!descriptor||!path)return nullptr;
     if(!recovery_storage::exact(env,descriptor,"java/io/FileDescriptor"))return nullptr;
     auto type=env->GetObjectClass(descriptor);
@@ -78,7 +128,7 @@ Java_dev_ronova_pro_StorageNative_identity0(JNIEnv* env,jclass,jobject descripto
     if(!handle||handle==INVALID_HANDLE_VALUE)return nullptr;
     jsize count=env->GetStringLength(path);
     if(count<3||count>4096)return nullptr;
-    IdentityOwner state;auto& value=*state.value;
+    IdentityOwner owner;auto& state=*owner.lifetime;auto& value=*state.value;
     if(!state.observed.mutate(state.requested,[&]{value.requested.reserve(count);}))return nullptr;
     bool admitted=false,valid=true;
     {
