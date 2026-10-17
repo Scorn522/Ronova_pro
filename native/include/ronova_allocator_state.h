@@ -28,12 +28,15 @@ enum ronova_allocator_bulk_operation {
  * adapter's default context. A receipt is not a raw memory permission.
  *
  * allocate_begin must precede the original allocation. With parent==0 its
- * successful result needs a real Host-observed Heap/Virtual/CRT backing return
+ * successful result needs a real Host-observed Heap/Virtual/CRT/CPP/ARENA/OTHER
+ * backing return with its actual provider/release/context incarnation
  * from this original scope, or an exact still-live backing already retained
  * by this context. An explicit parent is a current same-provider receipt.
  * Every child must fit its exact parent generation without a live sibling
  * overlap. Unknown raw addresses produce no receipt. allocated is the
  * post-success shorthand ONLY for an explicit parent receipt.
+ * A real nonnull zero-count result may retain a zero-byte lifetime receipt;
+ * it grants no byte extent. A NULL zero-count result has no storage receipt.
  *
  * free/realloc/bulk begin refuse live aliases, typed objects and current users.
  * Run the original destructive operation only after a nonzero begin receipt.
@@ -44,7 +47,9 @@ enum ronova_allocator_bulk_operation {
  *
  * RESET reports a real pool reset, retires that context's member generations
  * and changes its context generation. DESTROY reports real destruction and
- * closes the context. Neither operation frees an unrelated backing context.
+ * closes the context. An empty standard-allocator adapter can close its own
+ * actual shared state without reporting destruction of an upstream allocator.
+ * Neither operation frees an unrelated backing context.
  * A separate backing receipt must surround the actual backing release.
  * CUSTOM storage is never automatically reclaimed by Ronova.
  */

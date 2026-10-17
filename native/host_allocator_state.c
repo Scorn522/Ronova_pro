@@ -64,7 +64,7 @@ static __declspec(noinline) uint64_t native_allocator_context(uintptr_t actual){
         NativeAllocatorContext *context=(NativeAllocatorContext*)calloc(1,sizeof(*context));int denied=0;
         uint64_t token=context?native_allocator_next():0;
         NativeHostMemoryCall *call=token?native_memory_host_allocator_prepare(env,NATIVE_MEMORY_HOST_CUSTOM,(void*)provider,0,0,
-                NATIVE_MEMORY_HOST_CONTEXT_CREATE,sources,0,&denied):NULL;
+                NATIVE_MEMORY_HOST_CONTEXT_CREATE,sources,0,&denied,NULL):NULL;
         if(call){native_memory_host_arena_complete(env,call,0,0,(uintptr_t)token,1,0);
             AcquireSRWLockShared(&native_memory_records);
             NativeHostArenaContext *heap=native_memory_arena_context(native_memory_arena_provider((void*)provider,0),(uintptr_t)token,0);
@@ -162,7 +162,7 @@ static NativeAllocatorCall *native_allocator_end_call(uint64_t token,int operati
     ReleaseSRWLockExclusive(&native_allocator_state_records);native_owner_links_free(sources);return call;
 }
 static NativeMemoryAllocation *native_allocator_parent(NativeAllocatorCall *call,uint64_t address,uint64_t bytes,uint64_t *generation){
-    NativeMemoryAllocation *found=NULL;if(!native_object_state_range(address,bytes))return NULL;
+    NativeMemoryAllocation *found=NULL;if(!address||bytes&&!native_object_state_range(address,bytes))return NULL;
     AcquireSRWLockShared(&native_memory_records);
     if(call->parent&&call->parent->alive&&call->parent->generation==call->parentGeneration)found=call->parent;
     if(!found){
@@ -221,7 +221,10 @@ static uint64_t native_allocator_allocation_end(uint64_t token,uintptr_t address
     if(outcome==RONOVA_ALLOCATOR_FAILED&&!uncertain)result=call->receipt?call->receipt->token:0;
     else if(operation==NATIVE_MEMORY_HOST_REALLOCATE&&outcome==RONOVA_ALLOCATOR_RELEASED&&!address&&!uncertain)
         native_allocator_retire(env,call->memory);
-    else if(outcome==RONOVA_ALLOCATOR_SUCCESS&&!uncertain){
+    else if(outcome==RONOVA_ALLOCATOR_SUCCESS&&!uncertain&&!address&&!bytes&&operation==NATIVE_MEMORY_HOST_ALLOCATE){
+        /* A real zero-count standard allocator may return NULL. It exposes no
+         * storage extent and creates no receipt, but is not an unknown free. */
+    }else if(outcome==RONOVA_ALLOCATOR_SUCCESS&&!uncertain){
         uint64_t parentGeneration=0;NativeMemoryAllocation *parent=native_allocator_parent(call,address,bytes,&parentGeneration);
         NativeAllocatorReceipt *receipt=parent?(NativeAllocatorReceipt*)calloc(1,sizeof(*receipt)):NULL;
         uint64_t next=receipt?native_allocator_next():0;

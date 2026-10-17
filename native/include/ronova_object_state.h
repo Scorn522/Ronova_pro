@@ -10,6 +10,7 @@ extern "C" {
 
 #define RONOVA_OBJECT_STATE_ABI 1u
 #define RONOVA_OBJECT_STATE_ABI_V2 2u
+#define RONOVA_OBJECT_STATE_ABI_V3 3u
 enum ronova_object_span_kind {
     /* Only explicitly exposed, independently byte-restorable fields. Never a
      * vptr, STL object, ownership handle, or an inferred class representation. */
@@ -87,6 +88,33 @@ typedef struct ronova_object_state_api_v2 {
     int (*buffer_end)(uint64_t object,uint64_t generation,uint64_t buffer);
     uint64_t (*epoch)(uint64_t object,uint64_t generation,uint64_t field);
 } ronova_object_state_api_v2;
+
+enum ronova_object_sequence_kind {RONOVA_SEQUENCE_STRING=1,RONOVA_SEQUENCE_VECTOR=2};
+/* ABI 3 observes only public data(), size(), capacity() of scalar-element
+ * basic_string/vector instances. capacity describes storage, never live
+ * elements or a byte image of the representation. Inline data remains borrowed.
+ * sequence is also its representation's borrow receipt; sequence_view verifies
+ * the actual public shape and returns its current live-element receipt (zero
+ * for an empty sequence). A mismatching shape closes old views and stays pending.
+ *
+ * mutation_begin retires that old element receipt and ends the old storage
+ * relation BEFORE the caller runs its one original operation. It holds object
+ * metadata, not a storage free/realloc lease. mutation_end observes the actual
+ * surviving public shape, on normal return (completed=1) or exception (0).
+ * Neither outcome replays resize or ownership; missing post-operation storage
+ * is explicit pending state. All old element receipts stay retired even when
+ * data()/capacity() happen to be unchanged. End the sequence before real dtor.
+ */
+typedef struct ronova_object_state_api_v3 {
+    ronova_object_state_api_v2 base;
+    uint64_t (*sequence)(uint64_t object,uint64_t generation,uintptr_t representation,uint64_t representation_bytes,
+            uintptr_t data,uint64_t size,uint64_t capacity,uint32_t scalar_kind,uint32_t element_width,uint32_t kind);
+    uint64_t (*sequence_view)(uint64_t object,uint64_t generation,uint64_t sequence,
+            uintptr_t data,uint64_t size,uint64_t capacity);
+    uint64_t (*mutation_begin)(uint64_t object,uint64_t generation,uint64_t sequence);
+    int (*mutation_end)(uint64_t mutation,uintptr_t data,uint64_t size,uint64_t capacity,int completed);
+    int (*sequence_end)(uint64_t object,uint64_t generation,uint64_t sequence);
+} ronova_object_state_api_v3;
 
 typedef const ronova_object_state_api_v1 *(*ronova_object_state_get_api)(uint32_t abi);
 

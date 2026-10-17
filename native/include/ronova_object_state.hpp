@@ -6,6 +6,9 @@
 #include <cerrno>
 #include <cstddef>
 #include <span>
+#include <array>
+#include <string>
+#include <vector>
 #include <type_traits>
 #include <utility>
 
@@ -21,7 +24,9 @@ inline const ronova_object_state_api_v1 *resolve() noexcept {
     errors saved;
     auto module=GetModuleHandleW(L"ronova-pro-control.dll");
     auto get=module?reinterpret_cast<ronova_object_state_get_api>(GetProcAddress(module,"RonovaObjectStateGetApi")):nullptr;
-    auto api=get?get(RONOVA_OBJECT_STATE_ABI_V2):nullptr;
+    auto api=get?get(RONOVA_OBJECT_STATE_ABI_V3):nullptr;
+    if(api&&api->abi==RONOVA_OBJECT_STATE_ABI_V3&&api->size>=sizeof(ronova_object_state_api_v3))return api;
+    api=get?get(RONOVA_OBJECT_STATE_ABI_V2):nullptr;
     if(api&&api->abi==RONOVA_OBJECT_STATE_ABI_V2&&api->size>=sizeof(ronova_object_state_api_v2))return api;
     api=get?get(RONOVA_OBJECT_STATE_ABI):nullptr;
     return api&&api->abi==RONOVA_OBJECT_STATE_ABI&&api->size>=sizeof(*api)?api:nullptr;
@@ -38,6 +43,13 @@ template<class T> constexpr uint32_t scalar_kind() noexcept {
     else if constexpr(std::is_floating_point_v<T>)return RONOVA_FIELD_FLOAT;
     else return std::is_signed_v<T>?RONOVA_FIELD_SIGNED:RONOVA_FIELD_UNSIGNED;
 }
+template<class C> struct sequence_traits {static constexpr bool supported=false;};
+template<class T,class Traits,class Allocator> struct sequence_traits<std::basic_string<T,Traits,Allocator>> {
+    static constexpr bool supported=scalar<T>;static constexpr uint32_t kind=RONOVA_SEQUENCE_STRING;
+};
+template<class T,class Allocator> struct sequence_traits<std::vector<T,Allocator>> {
+    static constexpr bool supported=scalar<T>&&!std::is_same_v<T,bool>;static constexpr uint32_t kind=RONOVA_SEQUENCE_VECTOR;
+};
 }
 
 class object_state;
@@ -54,16 +66,30 @@ template<class T> class buffer_field {
     friend class object_state;
     object_state *owner_=nullptr;T *address_=nullptr;std::size_t size_=0;
     uint64_t object_=0,generation_=0,token_=0,binding_=0;
+    uint64_t sequence_=0;const void *sequenceAddress_=nullptr;
+    void (*publicShape_)(const void*,uintptr_t&,uint64_t&,uint64_t&) noexcept=nullptr;
 public:
     buffer_field() noexcept=default;
     uint64_t receipt()const noexcept{return token_;}
     std::size_t size()const noexcept{return size_;}
     bool covered()const noexcept{return token_!=0;}
 };
+template<class C> class sequence_field {
+    friend class object_state;
+    static_assert(object_state_detail::sequence_traits<C>::supported,
+            "Use basic_string/vector of non-atomic scalar elements; vector<bool> and class/handle representations are excluded.");
+    object_state *owner_=nullptr;C *address_=nullptr;
+    uint64_t object_=0,generation_=0,token_=0,binding_=0;
+public:
+    sequence_field() noexcept=default;
+    uint64_t receipt()const noexcept{return token_;}
+    bool covered()const noexcept{return token_!=0;}
+};
 
 class object_state {
     const ronova_object_state_api_v1 *api_=nullptr;
     const ronova_object_state_api_v2 *typed_=nullptr;
+    const ronova_object_state_api_v3 *sequences_=nullptr;
     uint64_t object_=0,allocation_=0,generation_=0,binding_=0;
     uintptr_t address_=0;std::size_t bytes_=0;
     bool constrained_=false;
@@ -75,6 +101,7 @@ class object_state {
             uint64_t token,void *address,std::size_t bytes,bool constrained) noexcept
             :api_(api),typed_(typed),object_(token),binding_(1),address_(reinterpret_cast<uintptr_t>(address)),bytes_(bytes),constrained_(constrained) {
         allocation_=token?api_->allocation(token):0;generation_=token?api_->generation(token):0;
+        sequences_=api&&api->abi==RONOVA_OBJECT_STATE_ABI_V3?reinterpret_cast<const ronova_object_state_api_v3*>(api):nullptr;
     }
     template<class T> buffer_field<T> buffer(std::span<T> values,uint32_t relation) noexcept {
         object_state_detail::errors saved;buffer_field<T> result;
@@ -88,7 +115,7 @@ public:
     object_state() noexcept=default;
     object_state(const object_state&)=delete;
     object_state& operator=(const object_state&)=delete;
-    object_state(object_state&& other) noexcept:api_(other.api_),typed_(other.typed_),
+    object_state(object_state&& other) noexcept:api_(other.api_),typed_(other.typed_),sequences_(other.sequences_),
             object_(std::exchange(other.object_,0)),allocation_(std::exchange(other.allocation_,0)),
             generation_(std::exchange(other.generation_,0)),binding_(other.binding_),
             address_(std::exchange(other.address_,0)),bytes_(std::exchange(other.bytes_,0)),constrained_(other.constrained_) {other.binding_++;}
@@ -101,8 +128,11 @@ public:
         if(object_||address_||!object||!bytes||binding_==UINT64_MAX)return false;
         address_=reinterpret_cast<uintptr_t>(object);bytes_=bytes;binding_++;
         api_=actualApi&&((actualApi->abi==RONOVA_OBJECT_STATE_ABI&&actualApi->size>=sizeof(*actualApi))
-                ||(actualApi->abi==RONOVA_OBJECT_STATE_ABI_V2&&actualApi->size>=sizeof(ronova_object_state_api_v2)))?actualApi:nullptr;
-        typed_=api_&&api_->abi==RONOVA_OBJECT_STATE_ABI_V2?reinterpret_cast<const ronova_object_state_api_v2*>(api_):nullptr;
+                ||(actualApi->abi==RONOVA_OBJECT_STATE_ABI_V2&&actualApi->size>=sizeof(ronova_object_state_api_v2))
+                ||(actualApi->abi==RONOVA_OBJECT_STATE_ABI_V3&&actualApi->size>=sizeof(ronova_object_state_api_v3)))?actualApi:nullptr;
+        typed_=api_&&(api_->abi==RONOVA_OBJECT_STATE_ABI_V2||api_->abi==RONOVA_OBJECT_STATE_ABI_V3)
+                ?reinterpret_cast<const ronova_object_state_api_v2*>(api_):nullptr;
+        sequences_=api_&&api_->abi==RONOVA_OBJECT_STATE_ABI_V3?reinterpret_cast<const ronova_object_state_api_v3*>(api_):nullptr;
         object_=api_?api_->constructed(reinterpret_cast<uintptr_t>(object),bytes):0;
         allocation_=object_?api_->allocation(object_):0;
         generation_=object_?api_->generation(object_):0;
@@ -230,8 +260,86 @@ public:
                 ||buffer.size_!=values.size()||(!values.empty()&&!buffer.address_))return false;
         if(!covered()){if(constrained_)return false;for(std::size_t i=0;i<values.size();i++)buffer.address_[i]=values[i];return true;}
         if(!typed_||!buffer.token_)return false;
-        auto write=writing(buffer.token_);if(!write.observed())return false;
-        for(std::size_t i=0;i<values.size();i++)buffer.address_[i]=values[i];return write.complete();
+        auto store=[&]() noexcept {
+            auto write=writing(buffer.token_);if(!write.observed())return false;
+            for(std::size_t i=0;i<values.size();i++)buffer.address_[i]=values[i];return write.complete();
+        };
+        if(buffer.sequence_){
+            if(!sequences_||!buffer.publicShape_||!buffer.sequenceAddress_)return false;
+            auto inspection=borrowing(buffer.sequence_);if(!inspection.observed())return false;
+            uintptr_t data=0;uint64_t size=0,capacity=0;buffer.publicShape_(buffer.sequenceAddress_,data,size,capacity);
+            if(sequences_->sequence_view(object_,generation_,buffer.sequence_,data,size,capacity)!=buffer.token_
+                    ||data!=reinterpret_cast<uintptr_t>(buffer.address_)||size!=buffer.size_)return false;
+            return store();
+        }
+        return store();
+    }
+    template<class C> sequence_field<C> sequence(C& value) noexcept {
+        using T=typename C::value_type;
+        static_assert(object_state_detail::sequence_traits<C>::supported);
+        object_state_detail::errors saved;sequence_field<C> result;
+        if(!contains(&value,sizeof(C)))return result;
+        result.owner_=this;result.address_=&value;result.object_=object_;result.generation_=generation_;result.binding_=binding_;
+        if(covered()&&sequences_){
+            auto representation=borrowed_object(&value,sizeof(C));auto inspection=borrowing(representation);
+            if(!inspection.observed())return result;
+            result.token_=sequences_->sequence(object_,generation_,reinterpret_cast<uintptr_t>(&value),sizeof(C),
+                    reinterpret_cast<uintptr_t>(value.data()),value.size(),value.capacity(),object_state_detail::scalar_kind<T>(),sizeof(T),
+                    object_state_detail::sequence_traits<C>::kind);
+        }
+        return result;
+    }
+    template<class C> buffer_field<typename C::value_type> view(const sequence_field<C>& sequence) noexcept {
+        object_state_detail::errors saved;buffer_field<typename C::value_type> result;
+        if(sequence.owner_!=this||sequence.object_!=object_||sequence.generation_!=generation_||sequence.binding_!=binding_||!sequence.address_)return result;
+        result.owner_=this;result.object_=object_;result.generation_=generation_;result.binding_=binding_;
+        if(covered()){
+            if(!sequences_||!sequence.token_)return result;
+            auto inspection=borrowing(sequence.token_);if(!inspection.observed())return result;
+            auto data=sequence.address_->data();auto size=sequence.address_->size();auto capacity=sequence.address_->capacity();
+            result.token_=sequences_->sequence_view(object_,generation_,sequence.token_,reinterpret_cast<uintptr_t>(data),size,capacity);
+            if(result.token_){
+                result.address_=data;result.size_=size;result.sequence_=sequence.token_;result.sequenceAddress_=sequence.address_;
+                result.publicShape_=[](const void *address,uintptr_t& actualData,uint64_t& actualSize,uint64_t& actualCapacity) noexcept {
+                    auto& value=*static_cast<const C*>(address);actualData=reinterpret_cast<uintptr_t>(value.data());
+                    actualSize=value.size();actualCapacity=value.capacity();
+                };
+            }
+        }else {result.address_=sequence.address_->data();result.size_=sequence.address_->size();}
+        return result;
+    }
+    template<class C,class F> bool mutate(sequence_field<C>& sequence,F&& original) {
+        if(sequence.owner_!=this||sequence.object_!=object_||sequence.generation_!=generation_||sequence.binding_!=binding_||!sequence.address_)return false;
+        if(!covered()){if(constrained_)return false;std::forward<F>(original)();return true;}
+        if(!sequences_||!sequence.token_)return false;
+        uint64_t mutation=0;
+        {object_state_detail::errors saved;mutation=sequences_->mutation_begin(object_,generation_,sequence.token_);}
+        if(!mutation)return false;
+        try {std::forward<F>(original)();}
+        catch(...) {
+            object_state_detail::errors originalErrors;
+            sequences_->mutation_end(mutation,reinterpret_cast<uintptr_t>(sequence.address_->data()),
+                    sequence.address_->size(),sequence.address_->capacity(),0);
+            throw;
+        }
+        object_state_detail::errors originalErrors;
+        return sequences_->mutation_end(mutation,reinterpret_cast<uintptr_t>(sequence.address_->data()),
+                sequence.address_->size(),sequence.address_->capacity(),1)!=0;
+    }
+    template<class C> bool release(sequence_field<C>& sequence) noexcept {
+        object_state_detail::errors saved;
+        if(sequence.owner_!=this||sequence.object_!=object_||sequence.generation_!=generation_||sequence.binding_!=binding_)return false;
+        if(!covered()){if(constrained_)return false;sequence.token_=0;sequence.owner_=nullptr;return true;}
+        if(!sequences_||!sequence.token_||!sequences_->sequence_end(object_,generation_,sequence.token_))return false;
+        sequence.token_=0;sequence.owner_=nullptr;return true;
+    }
+    template<class T,std::size_t N> std::array<scalar_field<T>,N> fixed(std::array<T,N>& values) noexcept {
+        static_assert(object_state_detail::scalar<T>);std::array<scalar_field<T>,N> result;
+        for(std::size_t i=0;i<N;i++)result[i]=scalar(values[i]);return result;
+    }
+    template<class T,std::size_t N> std::array<scalar_field<T>,N> fixed(T (&values)[N]) noexcept {
+        static_assert(object_state_detail::scalar<T>);std::array<scalar_field<T>,N> result;
+        for(std::size_t i=0;i<N;i++)result[i]=scalar(values[i]);return result;
     }
 };
 }

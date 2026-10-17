@@ -2463,24 +2463,30 @@ JNIEXPORT jboolean JNICALL Java_dev_ronova_pro_AuditFixCheck_hostCustomAllocator
     if(!module)return load_thread_fail(env,"HOST_CUSTOM_FIELDS_EXPLICIT_FIXTURE_LOAD");
     int (__cdecl *bind)(HMODULE)=(void*)GetProcAddress(module,"audit_allocator_fields_bind");
     int (__cdecl *run)(void)=(void*)GetProcAddress(module,"audit_allocator_fields_run");
+    int (__cdecl *containersRun)(void)=(void*)GetProcAddress(module,"audit_allocator_fields_containers_run");
+    int (__cdecl *containersMutate)(void)=(void*)GetProcAddress(module,"audit_allocator_fields_containers_mutate");
     uint64_t (__cdecl *current)(unsigned)=(void*)GetProcAddress(module,"audit_allocator_fields_current");
     int (__cdecl *finish)(void)=(void*)GetProcAddress(module,"audit_allocator_fields_finish");
-    int completed=1;uint64_t coverage=0,context=0,object=0,field=0,buffer=0;DWORD exception=0;
-    if(!bind||!run||!current||!finish){failure="HOST_CUSTOM_FIELDS_ACTUAL_EXPORTS";goto done;}
+    int completed=1;uint64_t coverage=0,context=0,object=0,field=0,buffer=0,standard=0,vector=0,string=0,stale=0;DWORD exception=0;
+    if(!bind||!run||!containersRun||!containersMutate||!current||!finish){failure="HOST_CUSTOM_FIELDS_ACTUAL_EXPORTS";goto done;}
     fprintf(stderr,"HOST_CUSTOM_FIELDS_STAGE real_HeapCreate_backed_standard_PMR_pool_Cpp23_consumer\n");fflush(stderr);
     __try {
         completed=0;
         if(!bind(NULL)||!run())failure="HOST_CUSTOM_FIELDS_ORIGINAL_CONSTRUCT_WRITE_VIRTUAL_CALL";
         if(!failure){coverage=current(18);context=current(12);object=current(0);field=current(2);buffer=current(3);}
+        if(!failure&&(!containersRun()||!containersMutate()))failure="HOST_CUSTOM_FIELDS_ORIGINAL_STD_ALLOCATOR_VECTOR_STRING_MUTATIONS";
+        if(!failure){standard=current(22);vector=current(24);string=current(25);stale=current(30);}
         completed=finish();
         if(!completed&&!failure)failure="HOST_CUSTOM_FIELDS_ORIGINAL_LIFETIME_RETAINED";
     } __except(EXCEPTION_EXECUTE_HANDLER){exception=GetExceptionCode();failure="HOST_CUSTOM_FIELDS_REAL_NATIVE_EXCEPTION";}
 done:
     if(completed&&!FreeLibrary(module)&&!failure)failure="HOST_CUSTOM_FIELDS_APPLICATION_REFERENCE_RETURN";
     if(failure){fprintf(stderr,"HOST_CUSTOM_FIELDS_FAILED exception=%08lx\n",(unsigned long)exception);return load_thread_fail(env,failure);}
-    fprintf(stdout,"HOST_CUSTOM_FIELDS_PASS actual_HeapCreate_HeapAlloc_HeapFree_standard_unsynchronized_pool_original_allocate_deallocate Cpp23_constructor_scalar_write_owned_payload_virtual_read_destructor ctx=%llu object=%llu field=%llu buffer=%llu coverage=%s no_fabricated_Core_source\n",
+    fprintf(stdout,"HOST_CUSTOM_FIELDS_PASS actual_HeapCreate_HeapAlloc_HeapFree_standard_unsynchronized_pool_original_allocate_deallocate Cpp23_constructor_scalar_write_owned_payload_virtual_read_destructor ctx=%llu object=%llu field=%llu buffer=%llu coverage=%s real_std_allocator_original_allocate_deallocate vector_basic_string_resize_reserve_reallocation_shrink std_context=%llu vector_view=%llu string_view=%llu rejected_old_views=%llu std_allocator_coverage=%s no_named_CPP_backing_inference no_fabricated_Core_source\n",
             (unsigned long long)context,(unsigned long long)object,(unsigned long long)field,(unsigned long long)buffer,
-            coverage==3&&context&&object&&field&&buffer?"observed":"uncovered");
+            coverage==3&&context&&object&&field&&buffer?"observed":"uncovered",
+            (unsigned long long)standard,(unsigned long long)vector,(unsigned long long)string,(unsigned long long)stale,
+            standard&&vector&&string&&stale==4?"observed":"uncovered");
     fflush(stdout);return JNI_TRUE;
 }
 JNIEXPORT void JNICALL Java_dev_ronova_pro_AuditFixCheck_hostWin32Allocations0(JNIEnv *env,jclass check){

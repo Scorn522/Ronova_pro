@@ -1,5 +1,25 @@
 # Ronova Pro 当前进度
 
+## 2026-10-17：C 接续——非 PMR 分配器与公开序列字段
+
+接续 `f047d36`，仅主工程 `D:\桌面\ronova_GPT`。Java ABI104 / Native ABI94 / Object SDK3（保留1/2）/ SourceMapBridge2 / Storage3 / Journal6，协议 `r3-client-8`。先写齐分配器、字段、实际 Storage 和必要夹具源码，再统一构建；没有自身外观、武器注册、容器广谱 Hook 或源码 ZIP。
+
+新增 `allocator_state` 与 `allocator_adapter<T,Upstream>`，支持真实 raw-pointer 标准分配器；复制和 rebind 共享实际状态，等价还要求同上游，原 allocate/deallocate/construct/destroy 及异常按实际契约接续，不创建替代清理函数。标准 bad_alloc 保留旧 context/块，未约定的异常继续未决；零元素结果仅有实际生命周期，没有字节访问权，也不伪造一字节请求。CPP、jemalloc 和 mimalloc 的准确已观察 backing 接 CUSTOM 子块目录；父块释放、Heap/arena/heap bulk 检查准确后代的借用、typed lifetime 和在途操作，内层物理释放与外层 SDK 完成配对，safe-delete 迁移保留子代。未观察地址不反查私有 allocator 布局。
+
+Object SDK3 采用实际 string/vector 的公开 data/size/capacity，变更前关闭旧视图和 storage 关系，原方法一次，正常或异常完成后按真实存活形状重绑；定长数组逐个登记真实标量。capacity 不冒充已构造元素，inline 数据仍借用，不复制 STL/vptr 或重放 resize/析构。视图查询与写入先核实际形状和准确回执，未登记的同址长度变化拒绝旧视图写入。历史版本带独立 objectView；同源也不能跨 view 合并，整条恢复链须匹配当前 view，旧历史及来源保持 pending。
+
+生产 Storage 的两种字符字符串使用同一实际 allocator_state，状态在原字符串析构后关闭；公开序列管理 reserve、增长、读取及析构关系，原 bool 判定继续接字段门。原 identity 函数体保留，仅将两个 allocator 模板参数接入签名；requested 的实际读取借用在已获准的 identity 变更作用域内覆盖原业务调用。
+
+整包首轮 `build-c-java104-native94-allocator-containers-20261017.log` **43秒失败**：新 allocator_prepare 签名增加 outer 参数，但 context 创建调用遗漏该参数；实际新 context 没有外层租约，补 NULL 后只续编受影响 Native 与对应 JAR。`build-c-java104-native94-allocator-containers-final-20261017.log` **PASS，37秒**；C++23 实际消费者、Java 检查器与两个既有 Native 夹具编译退出0，原编译失败日志保留。
+
+`c-java104-native94-custom-containers-state-20261017.log` **退出0**：同一实际夹具取得非零 PMR/CUSTOM、标准分配器共享状态、private scalar、vector/string view 回执；实际标准上游 backing 是 CRT，未冒称 named C++/je/mi 运行。活 view 拒绝原 reserve/resize 且原调用计数不增；归还后真实 grow/shrink、旧分配/物理 backing 退役、原分配释放配对及旧 view 拒绝通过。不同 objectView 的实际 revision 链拒绝恢复，当前元素不变且来源/history 保留；同址同容量绕过适配器缩短 vector 后，旧长度 assign 同样拒绝且现存元素不变。真实 HeapDestroy 被活自定义后代挡住，原 heap 仍有效；标量所选恢复、payload 不变、原析构、pool.release、HeapDestroy 和两 context 收尾通过。来源及 image 为明确供给的隔离 metadata seam，不是实际 Core producer 发现证明。
+
+`c-java104-native94-object-v1-20261017.log` **退出0**：直接受影响的 ABI1 字段快照、所选恢复、borrowed 排除、借用/析构和准确原始释放门继续通过。`c-java104-native94-host-allocator-containers-20261017.log` **退出0，正常 JVM 结束**：本包 premain/Bootstrap/Native94 为 INSTALLED_FULL，真实 PMR 和非 PMR std::allocator 的 vector/string grow/shrink 原调用、析构，以及生产 Storage identity 原结果通过；该普通来源回执均0，明确 coverage=uncovered，不以原调用成功冒充受控语义覆盖。没有跑旧矩阵，未重复已通过路径。
+
+匹配候选 `distribution/candidate-c-java104-native94-allocator-containers-wip-20261017` 的两份 JAR 随源码、SDK 和既有报告同步 GitHub。这些入口接明确适配器和已观察事实，不自动推断任意第三方 allocator、私有对象表示或裸 CPU 状态；本机没有把新增 CUSTOM 桥对各 named CPP/je/mi provider 全部作实际运行通过声明。真实 Core producer 集成、游戏进服和同存档重启 **NOTRUN**，完整 C/B 不标全部完成。
+
+---
+
 ## 2026-10-17：C 接续——通用分配器接入与 C++ 字段语义
 
 接续 `5cc4543`，仅主工程 `D:\桌面\ronova_GPT`。Java ABI103 / Native ABI93 / SourceMapBridge2 / Storage3 / Journal6，协议 `r3-client-8`。本轮先写齐通用分配器、字段语义及实际 Storage 消费者，再统一构建；没有恢复容器广谱 Hook，没有自身外观、武器注册或源码 ZIP。

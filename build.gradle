@@ -113,7 +113,7 @@ tasks.register('recoveryAgentJar',Jar) {
 }
 tasks.register('compileStorageNative',Exec) {
     onlyIf { System.getProperty('os.name').startsWith('Windows') && System.getProperty('os.arch') == 'amd64' }
-    inputs.files('native/storage.cpp','native/storage_transaction.hpp','native/include/ronova_object_state.h','native/include/ronova_object_state.hpp','native/build.ps1')
+    inputs.files('native/storage.cpp','native/storage_transaction.hpp','native/include/ronova_allocator_state.h','native/include/ronova_allocator_state.hpp','native/include/ronova_object_state.h','native/include/ronova_object_state.hpp','native/build.ps1')
     outputs.file(layout.buildDirectory.file('native/ronova-pro-storage.dll'))
     doFirst {
         def jdk=javaToolchains.launcherFor { languageVersion = JavaLanguageVersion.of(17) }.get().metadata.installationPath.asFile

@@ -377,6 +377,7 @@ static uint64_t host_native_arena_allocation(HostImport *entry,void *caller,uint
         DWORD error=GetLastError();native_owner_links_free(owners);return host_arena_refuse(entry->kind,&incoming,error);
     }
     JNIEnv *env=host_memory_environment(restricted);uintptr_t actual[6]={0};
+    NativeHostArenaOriginalScope *custom=host_memory_arena_scope(entry,state,caller);
     unsigned argumentCount=entry->kind==HOST_ARENA_MALLCTLBYMIB?6:entry->kind==HOST_ARENA_MALLCTL?5:entry->kind==HOST_ARENA_XALLOCX?4:
             entry->kind==HOST_ARENA_RALLOCX||entry->kind==HOST_ARENA_SDALLOCX||entry->kind==HOST_ARENA_POSIX_MEMALIGN||entry->kind==HOST_ARENA_MALLCTLNAMETOMIB?3:
             entry->kind==HOST_ARENA_CALLOC||entry->kind==HOST_ARENA_REALLOC||entry->kind==HOST_ARENA_MALLOCX||entry->kind==HOST_ARENA_DALLOCX
@@ -421,13 +422,17 @@ static uint64_t host_native_arena_allocation(HostImport *entry,void *caller,uint
     if(operation==NATIVE_MEMORY_HOST_ARENA_UNKNOWN)context=0;
     if(!refusal&&kind==HOST_ARENA_REALLOC&&address&&!actual[1])zeroMode=host_arena_zero_frees(provider);
     int cleanup=address&&(releasing||kind==HOST_ARENA_REALLOC&&!actual[1]&&zeroMode==1)&&host_memory_cleanup_scope(entry,state);
-    NativeHostMemoryCall *call=NULL;uint64_t result=0;int originalReturned=0,rawPass=0;
+    NativeHostMemoryCall *call=NULL;uint64_t result=0;int originalReturned=0,rawPass=0,customBacking=0;
     HostCrtThreadErrors returned=incoming;
     __try {
         if(!refusal&&native_owner_stopped(owners)&&!cleanup)refusal=ERROR_ACCESS_DENIED;
         else if(!refusal&&unknown&&(restricted||native_has_producer(owners))&&!cleanup)refusal=ERROR_INVALID_DATA;
         if(!refusal){int denied=0;
-            call=native_memory_host_arena_prepare(env,(void*)provider->release,address,context,operation,owners,unknown,&denied);
+            if(custom&&(address&&!query||operation==NATIVE_MEMORY_HOST_CONTEXT_FREE||operation==NATIVE_MEMORY_HOST_ARENA_RESET||operation==NATIVE_MEMORY_HOST_ARENA_UNKNOWN)){
+                call=native_memory_host_custom_backing_prepare(env,custom,NATIVE_MEMORY_HOST_ARENA,(void*)provider->release,context,
+                        address,operation,owners,unknown,&denied);customBacking=call&&operation==NATIVE_MEMORY_HOST_FREE;
+            }
+            if(!call&&!denied)call=native_memory_host_arena_prepare(env,(void*)provider->release,address,context,operation,owners,unknown,&denied);
             if(denied)refusal=ERROR_BUSY;else if(!native_memory_host_sources(call,&owners,&unknown))refusal=ERROR_NOT_ENOUGH_MEMORY;
         }
         int cleanupKnown=cleanup&&native_memory_host_cleanup(call)&&host_memory_cleanup_scope(entry,state);
@@ -471,7 +476,9 @@ static uint64_t host_native_arena_allocation(HostImport *entry,void *caller,uint
                 }
             }
             if(pointer)InterlockedExchange(&entry->image->privateOpaque,1);
-            if(call){native_memory_host_arena_complete(env,call,pointer,bytes,arena,completed,released);call=NULL;}
+            if(call){if(customBacking)native_memory_host_backing_complete(env,call,bytes,completed,released);
+                else native_memory_host_arena_complete(env,call,pointer,bytes,arena,completed,released);call=NULL;}
+            if(pointer&&custom)native_memory_host_custom_backing_allocated(custom,NATIVE_MEMORY_HOST_ARENA,(void*)provider->release,arena,pointer);
         }
     } __finally {
         if(!rawPass){if(!originalReturned)returned=host_arena_result(&incoming);

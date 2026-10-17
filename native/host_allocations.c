@@ -76,9 +76,9 @@ static uint64_t host_native_allocation(HostImport *entry,void *caller,uintptr_t 
                     entry->kind==HOST_HEAP_REALLOC?NATIVE_MEMORY_HOST_REALLOCATE:
                     entry->kind==HOST_HEAP_DESTROY?NATIVE_MEMORY_HOST_CONTEXT_FREE:
                     entry->kind==HOST_HEAP_CREATE?NATIVE_MEMORY_HOST_CONTEXT_CREATE:NATIVE_MEMORY_HOST_FREE;
-            if(arena&&(operation==NATIVE_MEMORY_HOST_FREE||operation==NATIVE_MEMORY_HOST_REALLOCATE)){
+            if(arena&&(operation==NATIVE_MEMORY_HOST_FREE||operation==NATIVE_MEMORY_HOST_REALLOCATE||operation==NATIVE_MEMORY_HOST_CONTEXT_FREE)){
                 tracking=native_memory_host_custom_backing_prepare(env,arena,NATIVE_MEMORY_HOST_HEAP,release,arguments[0],
-                        (uint64_t)(uintptr_t)address,operation,owners,unknown,&denied);customBacking=tracking!=NULL;
+                        (uint64_t)(uintptr_t)address,operation,owners,unknown,&denied);customBacking=tracking!=NULL&&operation==NATIVE_MEMORY_HOST_FREE;
             }
             if(!tracking&&!denied)tracking=native_memory_host_prepare(env,NATIVE_MEMORY_HOST_HEAP,release,entry->kind==HOST_HEAP_CREATE?0:arguments[0],
                     entry->kind==HOST_HEAP_ALLOC||entry->kind==HOST_HEAP_DESTROY||entry->kind==HOST_HEAP_CREATE?0:(uint64_t)(uintptr_t)address,

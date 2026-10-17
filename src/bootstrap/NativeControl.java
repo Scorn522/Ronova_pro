@@ -49,7 +49,7 @@ public final class NativeControl {
                 if(dll==null)return installFailure("OBJECT_CLONE_JNI_PAYLOAD_ABSENT",false);
                 nativeLoadAttempted=true;
                 System.load(dll.toString());nativeLoaded=true;
-                if(abi()!=93)throw new UnsatisfiedLinkError("NATIVE_CONTROL_ABI");
+                if(abi()!=94)throw new UnsatisfiedLinkError("NATIVE_CONTROL_ABI");
             }
             if(!nativeBoundaryInstalled){
                 nativeHandoffRetryable=false;

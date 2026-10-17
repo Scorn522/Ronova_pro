@@ -92,8 +92,12 @@ static NativeHostMemoryCall *native_memory_host_cpp_backing_prepare(JNIEnv*,Nati
         uintptr_t context,uint64_t address,int operation,OwnerLink*,int unknown,int *denied);
 static void native_memory_host_cpp_scope_end(NativeHostCppOriginalScope*);
 /* Only a Host wrapper whose actual caller/consumer matched the current custom
- * original scope tags a freshly returned Heap/Virtual/CRT backing generation.
+ * original scope tags a freshly returned Heap/Virtual/CRT/CPP/ARENA/OTHER
+ * backing generation with its exact physical release, context and epoch.
  * The free bridge consumes that exact retained backing and child generations.
+ * Real bulk operations use their ordinary family completion and include every
+ * exact cooperative descendant. A FREE bridge uses backing_complete. Known
+ * parents cannot fall through a refused realloc/decommit to a foreign row.
  * Other families and unrelated pointers return NULL/denied==0 unchanged. */
 static void native_memory_host_custom_backing_allocated(NativeHostArenaOriginalScope*,int family,void *release,
         uintptr_t context,uint64_t address);

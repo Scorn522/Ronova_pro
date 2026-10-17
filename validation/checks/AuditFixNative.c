@@ -1378,11 +1378,16 @@ JNIEXPORT jboolean JNICALL Java_dev_ronova_pro_AuditFixCheck_privateCustomAlloca
     HMODULE fixture=NULL,backendPin=NULL,backend=native_image((void*)Java_dev_ronova_pro_AuditFixCheck_privateCustomAllocatorState0);
     const jchar *characters=NULL;jobject module=NULL;Owner owner={0};OwnerLink selected={.owner=&owner};
     NativeThread thread={0};NativeLibrary library={0};Binding binding={0};HostImage *image=NULL;
-    NativeHostMemoryCall *probe=NULL;NativeAllocatorContext *context=NULL;
+    NativeHostMemoryCall *probe=NULL;NativeAllocatorContext *context=NULL,*standardContext=NULL;
     NativeAllocatorReceipt *objectReceipt=NULL,*payloadReceipt=NULL;NativeMemoryAllocation *objectRow=NULL,*payloadRow=NULL;
+    NativeAllocatorReceipt *oldVector=NULL,*oldString=NULL,*newVector=NULL,*newString=NULL;
+    int standardBacking=0;
     uint64_t contextToken=0,contextEpoch=0,objectToken=0,objectGeneration=0,payloadToken=0,payloadGeneration=0,fieldEpoch=0;
     int (__cdecl *bind)(HMODULE)=NULL;int (__cdecl *run)(void)=NULL;int (__cdecl *hold)(int)=NULL;
     int (__cdecl *attempt)(void)=NULL;int (__cdecl *finish)(void)=NULL;uint64_t (__cdecl *current)(unsigned)=NULL;
+    int (__cdecl *containersRun)(void)=NULL;int (__cdecl *containersHold)(int)=NULL;int (__cdecl *containersMutate)(void)=NULL;
+    int (__cdecl *attemptHeapDestroy)(void)=NULL;
+    int (__cdecl *containersShapeMismatch)(void)=NULL;
     unsigned char payloadBefore[32],payloadAfter[32];
 #define CUSTOM_REQUIRE(CONDITION,MESSAGE) do{if(!(CONDITION)){failure=(MESSAGE);goto custom_done;}}while(0)
     CUSTOM_REQUIRE(path&&backend&&!native_controller&&!native_vm&&native_tls==TLS_OUT_OF_INDEXES&&!native_memory_allocations
@@ -1398,7 +1403,14 @@ JNIEXPORT jboolean JNICALL Java_dev_ronova_pro_AuditFixCheck_privateCustomAlloca
     hold=(int (__cdecl*)(int))GetProcAddress(fixture,"audit_allocator_fields_hold");
     attempt=(int (__cdecl*)(void))GetProcAddress(fixture,"audit_allocator_fields_attempt_free");
     finish=(int (__cdecl*)(void))GetProcAddress(fixture,"audit_allocator_fields_finish");
-    CUSTOM_REQUIRE(bind&&run&&current&&hold&&attempt&&finish,"actual fixture exports unavailable");
+    containersRun=(int (__cdecl*)(void))GetProcAddress(fixture,"audit_allocator_fields_containers_run");
+    containersHold=(int (__cdecl*)(int))GetProcAddress(fixture,"audit_allocator_fields_containers_hold");
+    containersMutate=(int (__cdecl*)(void))GetProcAddress(fixture,"audit_allocator_fields_containers_mutate");
+    attemptHeapDestroy=(int (__cdecl*)(void))GetProcAddress(fixture,"audit_allocator_fields_attempt_heap_destroy");
+    containersShapeMismatch=(int (__cdecl*)(void))GetProcAddress(fixture,"audit_allocator_fields_containers_shape_mismatch");
+    CUSTOM_REQUIRE(bind&&run&&current&&hold&&attempt&&finish&&containersRun&&containersHold&&containersMutate&&attemptHeapDestroy,
+            "actual fixture exports unavailable");
+    CUSTOM_REQUIRE(containersShapeMismatch,"actual public-shape mismatch fixture export unavailable");
     native_original=**env;initialized=1;fixtureTls=TlsAlloc();native_tls=fixtureTls;
     CUSTOM_REQUIRE(fixtureTls!=TLS_OUT_OF_INDEXES&&TlsSetValue(fixtureTls,&thread),"custom allocator fixture TLS unavailable");
     CUSTOM_REQUIRE(GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS,
@@ -1448,8 +1460,56 @@ JNIEXPORT jboolean JNICALL Java_dev_ronova_pro_AuditFixCheck_privateCustomAlloca
             &&objectRow->hostCustomParent&&payloadRow->hostCustomParent,"nonzero real custom/typed receipts lost their exact provider or backing generation");
     CUSTOM_REQUIRE(!native_allocator_state_api.free_begin(payloadToken,payloadGeneration)&&native_allocator_current(payloadReceipt),
             "a different actual provider consumed a custom allocator receipt");
+    CUSTOM_REQUIRE(containersRun(),"actual non-PMR std allocator/vector/string mutation failed");
+    standardContext=native_allocator_context_find(current(22));oldVector=native_allocator_receipt_find(current(26));
+    oldString=native_allocator_receipt_find(current(27));
+    CUSTOM_REQUIRE(standardContext&&standardContext->provider==fixture&&standardContext->epoch==current(23)
+            &&native_allocator_current(oldVector)&&native_allocator_current(oldString)&&oldVector!=oldString
+            &&oldVector->context==standardContext&&oldString->context==standardContext&&current(24)&&current(25)
+            &&current(32)==16&&current(33)==64&&!current(34)
+            &&oldVector->allocation->hostCustomParent&&oldString->allocation->hostCustomParent
+            &&oldVector->allocation->typedObjects&&oldString->allocation->typedObjects,
+            "real standard allocator receipts/public container views lost exact shared state or typed storage");
+    NativeMemoryAllocation *vectorBacking=oldVector->allocation->hostCustomParent,*stringBacking=oldString->allocation->hostCustomParent;
+    CUSTOM_REQUIRE((vectorBacking->hostFamily==NATIVE_MEMORY_HOST_CRT||vectorBacking->hostFamily==NATIVE_MEMORY_HOST_CPP)
+            &&(stringBacking->hostFamily==NATIVE_MEMORY_HOST_CRT||stringBacking->hostFamily==NATIVE_MEMORY_HOST_CPP)
+            &&vectorBacking->alive&&stringBacking->alive&&vectorBacking->release&&stringBacking->release
+            &&vectorBacking->generation==oldVector->allocation->hostCustomParentGeneration
+            &&stringBacking->generation==oldString->allocation->hostCustomParentGeneration,
+            "actual std allocator backing was not an exact observed CRT/C++ generation");
+    standardBacking=(vectorBacking->hostFamily==NATIVE_MEMORY_HOST_CPP?1:2)|(stringBacking->hostFamily==NATIVE_MEMORY_HOST_CPP?1:2);
+    uint64_t vectorCalls=current(28),stringCalls=current(29);
+    CUSTOM_REQUIRE(containersHold(1)&&!containersMutate()&&current(28)==vectorCalls&&current(29)==stringCalls
+            &&native_allocator_current(oldVector)&&native_allocator_current(oldString)&&!current(34),
+            "active public container views reached original reserve/resize or changed allocator receipts");
+    CUSTOM_REQUIRE(containersHold(0)&&containersMutate()&&current(28)==vectorCalls+2&&current(29)==stringCalls+2
+            &&current(30)==4&&current(31)==3&&current(32)==4&&current(33)==3&&!current(34)
+            &&!native_allocator_current(oldVector)&&!native_allocator_current(oldString)
+            &&!oldVector->allocation->alive&&!oldString->allocation->alive&&!vectorBacking->alive&&!stringBacking->alive,
+            "real grow/shrink failed to retire old std storage, reject stale views, or preserve exact original calls");
+    newVector=native_allocator_receipt_find(current(26));newString=native_allocator_receipt_find(current(27));
+    CUSTOM_REQUIRE(native_allocator_current(newVector)&&native_allocator_current(newString)&&newVector!=oldVector&&newString!=oldString
+            &&newVector->context==standardContext&&newString->context==standardContext&&!standardContext->retired
+            &&!newVector->allocation->unknownUse&&!newString->allocation->unknownUse,
+            "current public container views failed to rebind to live std allocator generations");
+    NativeMemoryAllocation *elementRow=newVector->allocation;NativeMemoryRange *elementRange=NULL;
+    EnterCriticalSection(&elementRow->gate);
+    for(NativeMemoryRange *entry=elementRow->ranges;entry;entry=entry->next)
+        if(entry->start==0&&entry->length==4*sizeof(uint32_t)){elementRange=entry;break;}
+    uint32_t elementsBefore[4],elementsAfter[4];
+    int elementHistory=elementRange&&elementRange->revision&&elementRange->revision->objectView
+            &&elementRange->revision->previous&&elementRange->revision->previous->objectView
+            &&elementRange->revision->objectView!=elementRange->revision->previous->objectView;
+    int elementRead=native_memory_read(elementRow->address,elementsBefore,sizeof(elementsBefore));owner.stopped=1;
+    int elementRestored=elementRange&&native_memory_restore_range(elementRow,elementRange,&selected);owner.stopped=0;
+    int elementUnchanged=native_memory_read(elementRow->address,elementsAfter,sizeof(elementsAfter))
+            &&!memcmp(elementsBefore,elementsAfter,sizeof(elementsBefore));LeaveCriticalSection(&elementRow->gate);
+    CUSTOM_REQUIRE(elementHistory&&elementRead&&!elementRestored&&elementUnchanged&&!elementRow->unknownUse,
+            "a new public element view claimed old lifetime history or poisoned unrelated current storage");
     CUSTOM_REQUIRE(hold(1)&&attempt()&&current(20)==0&&native_allocator_current(payloadReceipt)&&payloadRow->users>0,
             "live typed-buffer alias reached an original PMR deallocate or changed its receipt");
+    CUSTOM_REQUIRE(attemptHeapDestroy()&&native_allocator_current(payloadReceipt)&&objectRow->alive&&payloadRow->alive,
+            "actual HeapDestroy bypassed cooperative descendants and their live typed alias");
     probe=native_memory_host_custom_prepare(env,(void*)fixture,(uintptr_t)contextToken,contextEpoch,NULL,0,NULL,0,
             NATIVE_MEMORY_HOST_ARENA_RESET,&selected,&denied);
     CUSTOM_REQUIRE(!probe&&denied&&objectRow->alive&&payloadRow->alive&&context->epoch==contextEpoch,
@@ -1470,13 +1530,23 @@ JNIEXPORT jboolean JNICALL Java_dev_ronova_pro_AuditFixCheck_privateCustomAlloca
     CUSTOM_REQUIRE(restored&&current(5)==7&&current(14)>fieldEpoch&&native_memory_read(current(6),payloadAfter,sizeof(payloadAfter))
             &&!memcmp(payloadBefore,payloadAfter,sizeof(payloadBefore))&&current(19)==7+32*64+496,
             "actual typed scalar restore failed, lost its epoch, or copied an owned payload/object representation");
+    CUSTOM_REQUIRE(containersShapeMismatch()&&current(32)==2&&current(33)==3,
+            "an unwrapped public resize let a stale wider element view write outside the current lifetime");
     CUSTOM_REQUIRE(finish(),"actual destructor/custom deallocate/pool release/HeapDestroy failed to close");finished=1;
     CUSTOM_REQUIRE(context->retired&&!native_allocator_current(objectReceipt)&&!native_allocator_current(payloadReceipt)
+            &&standardContext->retired&&!native_allocator_current(newVector)&&!native_allocator_current(newString)
+            &&!newVector->allocation->alive&&!newString->allocation->alive
             &&!objectRow->alive&&!payloadRow->alive&&!objectRow->typedObjects&&!payloadRow->typedObjects
             &&!native_allocator_calls&&!native_object_states&&!native_object_state_calls,
             "actual custom allocator/object closure left a current receipt, typed lifetime or original lease");
-    fprintf(stdout,"PRIVATE_CUSTOM_ALLOCATOR_STATE_PASS supplied_exact_image_source actual_external_PMR_pool observed_Heap_backing nonzero_custom_and_typed_receipts cross_provider_refused live_borrow_and_typed_block_original_free_reset_realloc exact_scalar_restore_epoch payload_unchanged actual_destructor_pool_release_HeapDestroy no_Core_discovery_claim\n");fflush(stdout);
+    fprintf(stdout,"PRIVATE_CUSTOM_ALLOCATOR_STATE_PASS supplied_exact_image_source actual_external_PMR_pool observed_Heap_backing real_nonPMR_std_allocator shared_rebind_state std_backing=%s nonzero_custom_and_typed_receipts live_views_block_original_reserve_resize stale_views_refused original_reallocation_delete_pair live_descendants_block_actual_HeapDestroy cross_provider_refused live_borrow_and_typed_block_original_free_reset_realloc exact_scalar_restore_epoch payload_unchanged actual_destructor_pool_release_HeapDestroy no_Core_discovery_claim\n",
+            standardBacking==1?"CPP":standardBacking==2?"CRT":"CPP_and_CRT");fflush(stdout);
 custom_done:
+    if(failure&&ran&&!finished&&current){fprintf(stderr,"PRIVATE_CUSTOM_CONTAINER_FAILED stage=%llu ctx=%llu epoch=%llu vectorReceipt=%llu stringReceipt=%llu vectorView=%llu stringView=%llu vectorCalls=%llu stringCalls=%llu stale=%llu growth=%llu pending=%llu error=%lu reason=%s\n",
+            (unsigned long long)current(21),(unsigned long long)current(22),(unsigned long long)current(23),
+            (unsigned long long)current(26),(unsigned long long)current(27),(unsigned long long)current(24),(unsigned long long)current(25),
+            (unsigned long long)current(28),(unsigned long long)current(29),(unsigned long long)current(30),
+            (unsigned long long)current(31),(unsigned long long)current(34),(unsigned long)GetLastError(),failure);fflush(stderr);}
     if(characters)(*env)->ReleaseStringChars(env,path,characters);
     if(initialized){
         if(native_original.ExceptionCheck(env))native_original.ExceptionClear(env);owner.stopped=0;

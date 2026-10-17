@@ -4,15 +4,16 @@
  * opaque. Only observed allocations and actual adapter calls enter this path. */
 #include "include/ronova_object_state.h"
 enum {NATIVE_OBJECT_SCALAR=3,NATIVE_OBJECT_BORROWED_BUFFER=4,NATIVE_OBJECT_OWNED_BUFFER=5};
+typedef struct NativeObjectStateSequence NativeObjectStateSequence;
 
 typedef struct NativeObjectStateSpan {
     uint64_t token,address,bytes,generation,epoch;NativeMemoryAllocation *allocation;
-    unsigned kind,scalarKind,width,uses;int closed;struct NativeObjectStateSpan *next;
+    unsigned kind,scalarKind,width,uses;int closed;NativeObjectStateSequence *sequence;struct NativeObjectStateSpan *next;
 } NativeObjectStateSpan;
 typedef struct NativeObjectState {
     uint64_t token,address,bytes,generation,destroyToken;NativeMemoryAllocation *allocation;
     HMODULE provider,providerPin;DWORD destroyThread;
-    OwnerLink *sources,*providerSources;NativeObjectStateSpan *spans;unsigned references,uses;
+    OwnerLink *sources,*providerSources;NativeObjectStateSpan *spans;NativeObjectStateSequence *sequences;unsigned references,uses;
     int destroyRequested,destroying,retired,uncertain;struct NativeObjectState *parent,*next;
 } NativeObjectState;
 typedef struct NativeObjectStateCall {
@@ -20,9 +21,20 @@ typedef struct NativeObjectStateCall {
     NativeObjectState *object;NativeObjectStateSpan *span;NativeMemoryWrite write;
     struct NativeObjectStateCall *next;
 } NativeObjectStateCall;
+struct NativeObjectStateSequence {
+    uint64_t token,address,bytes,data,size,capacity,storageBytes,targetGeneration,epoch;
+    unsigned kind,scalarKind,width;int closed,bound,mutating,pending,typedHeld;
+    NativeMemoryAllocation *target;NativeObjectStateSpan *representation,*view;
+    struct NativeObjectStateSequence *next;
+};
+typedef struct NativeObjectStateMutation {
+    uint64_t token,epoch;DWORD thread;NativeObjectState *object;NativeObjectStateSequence *sequence;
+    struct NativeObjectStateMutation *next;
+} NativeObjectStateMutation;
 static SRWLOCK native_object_state_records=SRWLOCK_INIT;
 static NativeObjectState *native_object_states;
 static NativeObjectStateCall *native_object_state_calls;
+static NativeObjectStateMutation *native_object_state_mutations;
 static uint64_t native_object_state_sequence;
 
 typedef struct NativeObjectStateErrors {DWORD windows;int crt;} NativeObjectStateErrors;
@@ -86,6 +98,8 @@ static uint64_t native_object_state_next_locked(void){return native_object_state
 static void native_object_state_release(NativeObjectState*);
 static void native_object_state_dispose(NativeObjectState *object){
     NativeObjectStateSpan *span=object->spans;while(span){NativeObjectStateSpan *next=span->next;free(span);span=next;}
+    NativeObjectStateSequence *sequence=object->sequences;
+    while(sequence){NativeObjectStateSequence *next=sequence->next;free(sequence);sequence=next;}
     HMODULE pin=object->providerPin;NativeObjectState *parent=object->parent;
     native_owner_links_free(object->sources);native_owner_links_free(object->providerSources);free(object);
     if(pin&&!host_real_free_library(pin))InterlockedIncrement(&native_failures);
@@ -133,6 +147,26 @@ static int native_object_state_span_current(NativeObjectState *object,NativeObje
     NativeMemoryAllocation *target=span->allocation;
     return !span->closed&&native_object_state_current(object)&&InterlockedCompareExchange(&target->alive,0,0)
             &&target->generation==span->generation&&native_object_state_contains(target->address,target->bytes,span->address,span->bytes);
+}
+static int native_object_state_sequence_current(NativeObjectState *object,NativeObjectStateSequence *sequence){
+    if(sequence->closed||sequence->mutating||sequence->pending||!sequence->bound||!native_object_state_current(object))return 0;
+    if(!sequence->storageBytes)return !sequence->size&&sequence->kind==RONOVA_SEQUENCE_VECTOR;
+    NativeMemoryAllocation *target=sequence->target;
+    return target&&sequence->typedHeld&&target->alive&&target->generation==sequence->targetGeneration
+            &&native_object_state_contains(target->address,target->bytes,sequence->data,sequence->storageBytes);
+}
+/* records are held. New SDK aliases cannot inspect a representation or its old
+ * element lifetime while its one original public container operation runs. */
+static int native_object_state_mutating_range(NativeMemoryAllocation *allocation,uint64_t address,uint64_t bytes){
+    for(NativeObjectState *object=native_object_states;object;object=object->next)if(!object->retired)
+        for(NativeObjectStateSequence *sequence=object->sequences;sequence;sequence=sequence->next)
+            if(!sequence->closed&&sequence->mutating){
+                if(object->allocation==allocation&&object->generation==allocation->generation
+                        &&native_object_state_overlap(sequence->address,sequence->bytes,address,bytes))return 1;
+                if(sequence->target==allocation&&sequence->targetGeneration==allocation->generation&&sequence->storageBytes
+                        &&native_object_state_overlap(sequence->data,sequence->storageBytes,address,bytes))return 1;
+            }
+    return 0;
 }
 static void native_object_state_lock_pair(NativeMemoryAllocation *owner,NativeMemoryAllocation *target){
     if((uintptr_t)owner<=(uintptr_t)target){EnterCriticalSection(&owner->gate);if(target!=owner)EnterCriticalSection(&target->gate);}
@@ -274,6 +308,10 @@ static uint64_t native_object_state_add_typed(uint64_t token,uint64_t generation
                 if(ready&&owned)for(NativeObjectState *other=native_object_states;other;other=other->next)
                     if(!other->retired&&other->allocation==target&&other->generation==target->generation
                             &&native_object_state_overlap(other->address,other->bytes,address,bytes)){ready=0;break;}
+                if(ready&&owned)for(NativeObjectState *other=native_object_states;ready&&other;other=other->next)
+                    for(NativeObjectStateSequence *sequence=other->sequences;sequence;sequence=sequence->next)
+                        if(!sequence->closed&&sequence->target==target&&sequence->targetGeneration==target->generation&&sequence->storageBytes
+                                &&native_object_state_overlap(sequence->data,sequence->storageBytes,address,bytes)){ready=0;break;}
                 if(ready&&(result=native_object_state_next_locked())){
                     span->token=result;span->next=object->spans;object->spans=span;
                     if(buffer)InterlockedIncrement(&target->typedObjects);span=NULL;
@@ -334,7 +372,7 @@ static __declspec(noinline) int native_object_state_buffer_end(uint64_t token,ui
     NativeObjectState *object=generation?native_object_state_acquire(token,generation):NULL;NativeObjectStateSpan *span=NULL;int ready=0;
     if(object){
         AcquireSRWLockShared(&native_object_state_records);
-        for(span=object->spans;span;span=span->next)if(span->token==spanToken&&!span->closed&&native_object_state_buffer_span(span))break;
+        for(span=object->spans;span;span=span->next)if(span->token==spanToken&&!span->closed&&!span->sequence&&native_object_state_buffer_span(span))break;
         ReleaseSRWLockShared(&native_object_state_records);
         if(span){NativeMemoryAllocation *owner=object->allocation,*target=span->allocation;native_object_state_lock_pair(owner,target);
             native_object_state_contribute(owner,sources,unknown);if(target!=owner)native_object_state_contribute(target,sources,unknown);
@@ -364,6 +402,217 @@ static __declspec(noinline) uint64_t native_object_state_epoch(uint64_t token,ui
     }
     native_owner_links_free(sources);NATIVE_OBJECT_RETURN(result);
 }
+static int native_object_state_sequence_shape(NativeObjectStateSequence *sequence,uintptr_t data,uint64_t size,uint64_t capacity,
+        uint64_t *storageBytes,uint64_t *elementBytes){
+    if(size>capacity||!native_object_state_scalar_width(sequence->scalarKind,sequence->width))return 0;
+    uint64_t count=capacity;
+    if(sequence->kind==RONOVA_SEQUENCE_STRING){if(capacity==UINT64_MAX)return 0;count++;}
+    else if(sequence->kind!=RONOVA_SEQUENCE_VECTOR)return 0;
+    if(count>SIZE_MAX/sequence->width||size>SIZE_MAX/sequence->width)return 0;
+    *storageBytes=count*sequence->width;*elementBytes=size*sequence->width;
+    return !*storageBytes||native_object_state_range(data,*storageBytes);
+}
+static NativeObjectStateSequence *native_object_state_find_sequence(NativeObjectState *object,uint64_t token){
+    for(NativeObjectStateSequence *sequence=object->sequences;sequence;sequence=sequence->next)
+        if(sequence->token==token&&!sequence->closed)return sequence;
+    return NULL;
+}
+/* The public capacity extent is used only to pair real backing storage. Only
+ * [data,data+size) contains scalar elements; reserved storage and terminators
+ * never acquire a snapshot. A contained public inline buffer stays borrowed. */
+static int native_object_state_bind_sequence(NativeObjectState *object,NativeObjectStateSequence *sequence,
+        uintptr_t data,uint64_t size,uint64_t capacity,HMODULE provider,OwnerLink *sources,int unknown,int initial,int newRepresentation){
+    uint64_t storageBytes=0,elementBytes=0;
+    if(!native_object_state_sequence_shape(sequence,data,size,capacity,&storageBytes,&elementBytes))return 0;
+    NativeMemoryAllocation *owner=object->allocation,*target=NULL;
+    if(storageBytes){AcquireSRWLockShared(&native_memory_records);target=native_memory_find(data,storageBytes,0);ReleaseSRWLockShared(&native_memory_records);if(!target)return 0;}
+    NativeMemoryAllocation *locked=target?target:owner;native_object_state_lock_pair(owner,locked);
+    native_object_state_contribute(owner,sources,unknown);if(target&&target!=owner)native_object_state_contribute(target,sources,unknown);
+    native_object_state_observed(object,sources,unknown);
+    int ready=native_object_state_current(object)&&native_object_state_provider(object,provider,sources,unknown)
+            &&!owner->sealed&&!owner->retiring&&!owner->changing&&!owner->restoring&&!owner->unknownUse&&!owner->unknownReaders;
+    if(target)ready=ready&&target->alive&&!target->sealed&&!target->retiring&&!target->changing&&!target->restoring
+            &&!target->writers&&!target->unknownUse&&!target->unknownReaders&&!target->releaseFailed&&target->sources
+            &&native_object_state_contains(target->address,target->bytes,data,storageBytes);
+    int owned=target&&target!=owner&&!target->managed&&target->hostFamily!=NATIVE_MEMORY_HOST_IMAGE
+            &&native_memory_same_sources(target->sources,object->providerSources);
+    NativeObjectStateSpan *view=ready&&elementBytes?(NativeObjectStateSpan*)calloc(1,sizeof(*view)):NULL;
+    if(elementBytes&&!view)ready=0;
+    AcquireSRWLockExclusive(&native_object_state_records);
+    ready=ready&&!sequence->closed&&(initial?native_object_state_admitting(object):sequence->mutating);
+    if(ready&&initial)for(NativeObjectStateSequence *old=object->sequences;old;old=old->next)
+        if(!old->closed&&old->address==sequence->address&&old->bytes==sequence->bytes){
+            int same=native_object_state_sequence_current(object,old)&&old->kind==sequence->kind
+                    &&old->scalarKind==sequence->scalarKind&&old->width==sequence->width&&old->data==data&&old->size==size&&old->capacity==capacity;
+            if(same){sequence->token=old->token;ReleaseSRWLockExclusive(&native_object_state_records);
+                free(view);native_object_state_unlock_pair(owner,locked);return 2;}
+            ready=0;break;
+        }
+    if(ready&&initial&&target)for(NativeObjectState *other=native_object_states;ready&&other;other=other->next)
+        for(NativeObjectStateSpan *span=other->spans;span;span=span->next)
+            if(!span->closed&&!span->sequence&&span->kind==NATIVE_OBJECT_OWNED_BUFFER&&span->allocation==target
+                    &&span->generation==target->generation&&native_object_state_overlap(span->address,span->bytes,data,storageBytes)){ready=0;break;}
+    if(ready&&owned)for(NativeObjectState *other=native_object_states;other;other=other->next)
+        if(!other->retired&&other->allocation==target&&other->generation==target->generation
+                &&native_object_state_overlap(other->address,other->bytes,data,storageBytes)){owned=0;break;}
+    if(ready&&initial&&newRepresentation){sequence->representation->token=native_object_state_next_locked();ready=sequence->representation->token!=0;}
+    if(ready&&view){view->token=native_object_state_next_locked();ready=view->token!=0;}
+    if(ready){
+        if(initial){
+            sequence->token=sequence->representation->token;sequence->representation->sequence=sequence;
+            if(newRepresentation){sequence->representation->next=object->spans;object->spans=sequence->representation;}
+            sequence->next=object->sequences;object->sequences=sequence;
+        }
+        sequence->data=data;sequence->size=size;sequence->capacity=capacity;sequence->storageBytes=storageBytes;
+        sequence->target=target;sequence->targetGeneration=target?target->generation:0;sequence->typedHeld=target!=NULL;
+        sequence->view=view;sequence->bound=1;sequence->mutating=0;sequence->pending=0;sequence->epoch++;
+        sequence->representation->epoch++;
+        if(target)InterlockedIncrement(&target->typedObjects);
+        if(view){
+            view->address=data;view->bytes=elementBytes;view->generation=target->generation;view->allocation=target;
+            view->kind=owned?NATIVE_OBJECT_OWNED_BUFFER:NATIVE_OBJECT_BORROWED_BUFFER;
+            view->scalarKind=sequence->scalarKind;view->width=sequence->width;view->epoch=1;view->sequence=sequence;
+            view->next=object->spans;object->spans=view;view=NULL;
+        }
+    }
+    ReleaseSRWLockExclusive(&native_object_state_records);free(view);native_object_state_unlock_pair(owner,locked);return ready;
+}
+static __declspec(noinline) uint64_t native_object_state_sequence_register(uint64_t token,uint64_t generation,
+        uintptr_t address,uint64_t bytes,uintptr_t data,uint64_t size,uint64_t capacity,uint32_t scalarKind,uint32_t width,uint32_t kind){
+    NativeObjectStateErrors incoming=native_object_state_errors();OwnerLink *sources=NULL;int unknown=0;
+    void *caller=__builtin_return_address(0);HMODULE provider=native_image(caller);native_object_state_sources(caller,&sources,&unknown,NULL);
+    NativeObjectState *object=generation?native_object_state_acquire(token,generation):NULL;NativeObjectStateSequence *sequence=NULL;uint64_t result=0;
+    int newRepresentation=0;
+    if(object&&native_object_state_range(address,bytes)&&native_object_state_contains(object->address,object->bytes,address,bytes)
+            &&native_object_state_provider(object,provider,sources,unknown)&&!native_owner_stopped(sources)){
+        AcquireSRWLockShared(&native_object_state_records);
+        for(NativeObjectStateSequence *old=object->sequences;old;old=old->next)
+            if(!old->closed&&old->address==address&&old->bytes==bytes){
+                if(native_object_state_sequence_current(object,old)&&old->kind==kind&&old->scalarKind==scalarKind&&old->width==width
+                        &&old->data==data&&old->size==size&&old->capacity==capacity)result=old->token;
+                sequence=old;break;
+            }
+        ReleaseSRWLockShared(&native_object_state_records);
+        if(!sequence){
+            sequence=(NativeObjectStateSequence*)calloc(1,sizeof(*sequence));
+            if(sequence){
+                sequence->address=address;sequence->bytes=bytes;sequence->kind=kind;sequence->scalarKind=scalarKind;sequence->width=width;
+                AcquireSRWLockShared(&native_object_state_records);
+                for(NativeObjectStateSpan *span=object->spans;span;span=span->next)
+                    if(!span->closed&&!span->sequence&&span->kind==RONOVA_OBJECT_BORROWED_OBJECT&&span->address==address&&span->bytes==bytes){sequence->representation=span;break;}
+                ReleaseSRWLockShared(&native_object_state_records);
+                if(!sequence->representation){
+                    sequence->representation=(NativeObjectStateSpan*)calloc(1,sizeof(*sequence->representation));newRepresentation=1;
+                    if(sequence->representation){sequence->representation->address=address;sequence->representation->bytes=bytes;
+                        sequence->representation->allocation=object->allocation;sequence->representation->generation=generation;
+                        sequence->representation->kind=RONOVA_OBJECT_BORROWED_OBJECT;sequence->representation->epoch=1;}
+                }
+                int bound=sequence->representation?native_object_state_bind_sequence(object,sequence,data,size,capacity,provider,sources,unknown,1,newRepresentation):0;
+                if(bound)result=sequence->token;
+                if(bound!=1){if(newRepresentation)free(sequence->representation);free(sequence);sequence=NULL;}
+            }
+        }
+    }
+    if(object){
+        if(!result){AcquireSRWLockExclusive(&native_object_state_records);object->uncertain=1;ReleaseSRWLockExclusive(&native_object_state_records);native_memory_unmapped(sources);}
+        native_object_state_release(object);
+    }
+    native_owner_links_free(sources);NATIVE_OBJECT_RETURN(result);
+}
+static __declspec(noinline) uint64_t native_object_state_sequence_view(uint64_t token,uint64_t generation,uint64_t sequenceToken,
+        uintptr_t data,uint64_t size,uint64_t capacity){
+    NativeObjectStateErrors incoming=native_object_state_errors();OwnerLink *sources=NULL;int unknown=0;
+    void *caller=__builtin_return_address(0);HMODULE provider=native_image(caller);native_object_state_sources(caller,&sources,&unknown,NULL);
+    NativeObjectState *object=generation?native_object_state_acquire(token,generation):NULL;uint64_t result=0;int mismatch=0;
+    if(object){AcquireSRWLockExclusive(&native_object_state_records);NativeObjectStateSequence *sequence=native_object_state_find_sequence(object,sequenceToken);
+        if(sequence&&native_object_state_sequence_current(object,sequence)&&native_object_state_admitting(object)
+                &&native_object_state_provider(object,provider,sources,unknown)){
+            if(sequence->data!=data||sequence->size!=size||sequence->capacity!=capacity){
+                if(sequence->view){sequence->view->closed=1;sequence->view->epoch++;}sequence->view=NULL;
+                sequence->pending=1;sequence->epoch++;sequence->representation->epoch++;object->uncertain=1;mismatch=1;
+            }else if(sequence->view)result=sequence->view->token;
+        }
+        ReleaseSRWLockExclusive(&native_object_state_records);native_object_state_release(object);}
+    if(mismatch)native_memory_unmapped(sources);
+    native_owner_links_free(sources);NATIVE_OBJECT_RETURN(result);
+}
+static __declspec(noinline) uint64_t native_object_state_mutation_begin(uint64_t token,uint64_t generation,uint64_t sequenceToken){
+    NativeObjectStateErrors incoming=native_object_state_errors();OwnerLink *sources=NULL;int unknown=0;JNIEnv *env=NULL;
+    void *caller=__builtin_return_address(0);HMODULE provider=native_image(caller);native_object_state_sources(caller,&sources,&unknown,&env);
+    NativeObjectState *object=generation?native_object_state_acquire(token,generation):NULL;NativeObjectStateSequence *sequence=NULL;
+    NativeObjectStateMutation *mutation=NULL;uint64_t result=0;
+    if(object){
+        AcquireSRWLockShared(&native_object_state_records);sequence=native_object_state_find_sequence(object,sequenceToken);ReleaseSRWLockShared(&native_object_state_records);
+        if(sequence){NativeMemoryAllocation *owner=object->allocation,*capturedTarget=sequence->target,*target=capturedTarget?capturedTarget:owner;
+            native_object_state_lock_pair(owner,target);native_object_state_contribute(owner,sources,unknown);
+            if(target!=owner)native_object_state_contribute(target,sources,unknown);native_object_state_observed(object,sources,unknown);
+            int ready=sequence->target==capturedTarget&&native_object_state_sequence_current(object,sequence)&&native_object_state_provider(object,provider,sources,unknown)
+                    &&!native_owner_stopped(sources)&&!native_owner_stopped(object->sources)
+                    &&!owner->users&&!owner->writers&&!owner->reading&&!owner->changing&&!owner->restoring&&!owner->sealed&&!owner->retiring
+                    &&!owner->unknownUse&&!owner->unknownReaders
+                    &&!target->users&&!target->writers&&!target->reading&&!target->changing&&!target->restoring&&!target->sealed&&!target->retiring
+                    &&!target->unknownUse&&!target->unknownReaders&&!native_owner_stopped(target->sources)&&!native_owner_stopped(target->readers)
+                    &&!native_memory_buffer_aliases(env,owner)&&(target==owner||!native_memory_buffer_aliases(env,target));
+            if(ready)mutation=(NativeObjectStateMutation*)calloc(1,sizeof(*mutation));
+            if(mutation){AcquireSRWLockExclusive(&native_object_state_records);
+                ready=native_object_state_admitting(object)&&!object->uses&&!sequence->mutating&&!sequence->pending&&!sequence->closed
+                        &&(!sequence->view||!sequence->view->uses);
+                if(ready&&(result=native_object_state_next_locked())){
+                    if(sequence->view){sequence->view->closed=1;sequence->view->epoch++;}sequence->view=NULL;
+                    if(sequence->typedHeld){InterlockedDecrement(&sequence->target->typedObjects);sequence->typedHeld=0;}
+                    sequence->bound=0;sequence->mutating=1;sequence->epoch++;sequence->representation->epoch++;
+                    mutation->token=result;mutation->epoch=sequence->epoch;mutation->thread=GetCurrentThreadId();mutation->object=object;mutation->sequence=sequence;
+                    mutation->next=native_object_state_mutations;native_object_state_mutations=mutation;object->uses++;mutation=NULL;
+                }
+                ReleaseSRWLockExclusive(&native_object_state_records);free(mutation);
+            }
+            native_object_state_unlock_pair(owner,target);
+        }
+        if(!result)native_object_state_release(object);
+    }
+    native_owner_links_free(sources);NATIVE_OBJECT_RETURN(result);
+}
+static __declspec(noinline) int native_object_state_mutation_end(uint64_t token,uintptr_t data,uint64_t size,uint64_t capacity,int completed){
+    NativeObjectStateErrors incoming=native_object_state_errors();OwnerLink *sources=NULL;int unknown=0;NativeObjectStateMutation *mutation=NULL;
+    void *caller=__builtin_return_address(0);HMODULE provider=native_image(caller);native_object_state_sources(caller,&sources,&unknown,NULL);
+    AcquireSRWLockExclusive(&native_object_state_records);NativeObjectStateMutation **link=&native_object_state_mutations;
+    while(*link){NativeObjectStateMutation *entry=*link;
+        if(entry->token==token&&entry->thread==GetCurrentThreadId()&&entry->sequence->mutating&&entry->epoch==entry->sequence->epoch
+                &&native_object_state_provider(entry->object,provider,sources,unknown)){mutation=entry;*link=entry->next;break;}link=&entry->next;
+    }
+    ReleaseSRWLockExclusive(&native_object_state_records);
+    if(!mutation){native_owner_links_free(sources);NATIVE_OBJECT_RETURN(0);}
+    NativeObjectState *object=mutation->object;NativeObjectStateSequence *sequence=mutation->sequence;
+    /* completed describes the original outcome, never permission to replay it.
+     * Both normal and exceptional operations have a real surviving shape. */
+    (void)completed;int ready=native_object_state_bind_sequence(object,sequence,data,size,capacity,provider,sources,unknown,0,0);
+    AcquireSRWLockExclusive(&native_object_state_records);
+    if(!ready){sequence->mutating=0;sequence->pending=1;sequence->bound=0;object->uncertain=1;sequence->epoch++;}
+    if(object->uses)object->uses--;ReleaseSRWLockExclusive(&native_object_state_records);
+    if(!ready)native_memory_unmapped(sources);free(mutation);native_object_state_release(object);native_owner_links_free(sources);NATIVE_OBJECT_RETURN(ready);
+}
+static __declspec(noinline) int native_object_state_sequence_end(uint64_t token,uint64_t generation,uint64_t sequenceToken){
+    NativeObjectStateErrors incoming=native_object_state_errors();OwnerLink *sources=NULL;int unknown=0;JNIEnv *env=NULL;
+    void *caller=__builtin_return_address(0);HMODULE provider=native_image(caller);native_object_state_sources(caller,&sources,&unknown,&env);
+    NativeObjectState *object=generation?native_object_state_acquire(token,generation):NULL;int ready=0;
+    if(object){AcquireSRWLockShared(&native_object_state_records);NativeObjectStateSequence *sequence=native_object_state_find_sequence(object,sequenceToken);ReleaseSRWLockShared(&native_object_state_records);
+        if(sequence){NativeMemoryAllocation *owner=object->allocation,*capturedTarget=sequence->target;
+            int capturedHeld=sequence->typedHeld;NativeMemoryAllocation *target=capturedHeld?capturedTarget:owner;
+            native_object_state_lock_pair(owner,target);
+            ready=sequence->target==capturedTarget&&sequence->typedHeld==capturedHeld
+                    &&native_object_state_current(object)&&native_object_state_provider(object,provider,sources,unknown)
+                    &&!target->users&&!target->writers&&!target->reading&&!target->changing&&!target->restoring&&!native_memory_buffer_aliases(env,target)
+                    &&(!sequence->typedHeld||target->alive&&target->generation==sequence->targetGeneration&&target->typedObjects>0);
+            AcquireSRWLockExclusive(&native_object_state_records);ready=ready&&!object->uses&&!sequence->closed&&!sequence->mutating;
+            if(ready){if(sequence->view){sequence->view->closed=1;sequence->view->epoch++;}sequence->view=NULL;
+                if(sequence->typedHeld){InterlockedDecrement(&target->typedObjects);sequence->typedHeld=0;}
+                sequence->closed=1;sequence->bound=0;sequence->epoch++;sequence->representation->epoch++;}
+            ReleaseSRWLockExclusive(&native_object_state_records);native_object_state_unlock_pair(owner,target);
+        }
+        native_object_state_release(object);
+    }
+    native_owner_links_free(sources);NATIVE_OBJECT_RETURN(ready);
+}
 static uint64_t native_object_state_begin(uint64_t token,uint64_t generation,uint64_t spanToken,int borrowing,void *caller){
     NativeObjectStateErrors incoming=native_object_state_errors();OwnerLink *sources=NULL;int unknown=0;JNIEnv *env=NULL;
     HMODULE provider=native_image(caller);
@@ -378,7 +627,9 @@ static uint64_t native_object_state_begin(uint64_t token,uint64_t generation,uin
         if(owner!=allocation)native_object_state_contribute(allocation,sources,unknown);native_object_state_observed(object,sources,unknown);
         AcquireSRWLockShared(&native_object_state_records);
         int borrowed=span&&!borrowing&&native_object_state_excluded(allocation,span->address,span->bytes);
-        int admitted=span&&!span->closed&&native_object_state_admitting(object);
+        int admitted=span&&!span->closed&&native_object_state_admitting(object)
+                &&(!span->sequence||native_object_state_sequence_current(object,span->sequence))
+                &&!native_object_state_mutating_range(allocation,span->address,span->bytes);
         ReleaseSRWLockShared(&native_object_state_records);
         int ready=admitted&&native_object_state_span_current(object,span)&&!InterlockedCompareExchange(&allocation->sealed,0,0)
                 &&!InterlockedCompareExchange(&allocation->retiring,0,0)&&!InterlockedCompareExchange(&allocation->changing,0,0)
@@ -398,6 +649,7 @@ static uint64_t native_object_state_begin(uint64_t token,uint64_t generation,uin
             call->object=object;call->span=span;call->borrowing=borrowing;call->thread=GetCurrentThreadId();
             call->write.allocation=allocation;call->write.address=span->address;call->write.length=span->bytes;
             call->write.generation=span->generation;call->write.sources=sources;sources=NULL;call->write.unknown=unknown;
+            call->write.objectView=span->sequence?span->token:0;
             if(!borrowing){call->epoch=++allocation->writeEpoch;call->write.image=native_memory_image(&call->write);ready=call->write.image!=NULL;}
             if(ready){
                 AcquireSRWLockExclusive(&native_object_state_records);
@@ -467,6 +719,16 @@ static int native_object_state_destroy_relations(JNIEnv *env,NativeObjectState *
     for(NativeObjectState *entry=native_object_states;entry;entry=entry->next){
         if(entry->retired||!native_object_state_descends(entry,object))continue;
         if(!native_object_state_current(entry)||entry->uses||(entry!=object&&entry->destroying))return 0;
+        for(NativeObjectStateSequence *sequence=entry->sequences;sequence;sequence=sequence->next){
+            if(sequence->closed)continue;if(sequence->mutating||completing)return 0;
+            if(sequence->typedHeld){
+                NativeMemoryAllocation *target=sequence->target;int locked=target==object->allocation;
+                if(!locked&&!TryEnterCriticalSection(&target->gate))return 0;
+                int ready=target->alive&&target->generation==sequence->targetGeneration&&!target->users&&!target->writers
+                        &&!target->reading&&!target->changing&&!target->restoring&&!native_memory_buffer_aliases(env,target);
+                if(!locked)LeaveCriticalSection(&target->gate);if(!ready)return 0;
+            }
+        }
         for(NativeObjectStateSpan *span=entry->spans;span;span=span->next){
             if(span->closed||!native_object_state_buffer_span(span))continue;
             if(completing)return 0;
@@ -544,7 +806,8 @@ static int native_object_state_selected_sources(OwnerLink *sources,OwnerLink *se
     }return 1;
 }
 static int native_object_state_restorable(NativeMemoryAllocation *allocation,NativeMemoryRange *range,OwnerLink *selected){
-    int covered=0,blocked=0,relevant=0;uint64_t address=allocation->address+range->start;
+    int covered=0,blocked=0,relevant=0,tagged=0;uint64_t address=allocation->address+range->start;
+    for(NativeMemoryRevision *revision=range->revision;revision;revision=revision->previous)if(revision->objectView){tagged=1;break;}
     /* A provider declaration cannot turn an opaque live outside object into
      * writable state. Every actual creator and reader must already be stopped
      * and included in this exact cleanup selection. */
@@ -552,6 +815,13 @@ static int native_object_state_restorable(NativeMemoryAllocation *allocation,Nat
     for(NativeObjectState *object=native_object_states;object;object=object->next){
         if(object->retired)continue;
         int touches=object->allocation==allocation&&native_object_state_overlap(object->address,object->bytes,address,range->length);
+        for(NativeObjectStateSequence *sequence=object->sequences;sequence;sequence=sequence->next)
+            if(!sequence->closed&&sequence->target==allocation&&sequence->targetGeneration==allocation->generation&&sequence->storageBytes
+                    &&native_object_state_overlap(sequence->data,sequence->storageBytes,address,range->length)){
+                touches=1;
+                if(!native_object_state_sequence_current(object,sequence)){blocked=1;break;}
+            }
+        if(blocked){relevant=1;break;}
         for(NativeObjectStateSpan *span=object->spans;!touches&&span;span=span->next)
             touches=!span->closed&&span->allocation==allocation&&native_object_state_overlap(span->address,span->bytes,address,range->length);
         if(!touches)continue;relevant=1;
@@ -572,12 +842,19 @@ static int native_object_state_restorable(NativeMemoryAllocation *allocation,Nat
             if(!native_object_state_span_current(object,span)||span->uses||span->kind==RONOVA_OBJECT_BORROWED_OBJECT
                     ||span->kind==NATIVE_OBJECT_BORROWED_BUFFER){blocked=1;break;}
             if((span->kind==RONOVA_OBJECT_BYTES||span->kind==NATIVE_OBJECT_SCALAR||span->kind==NATIVE_OBJECT_OWNED_BUFFER)
-                    &&native_object_state_contains(span->address,span->bytes,address,range->length))covered=1;
+                    &&native_object_state_contains(span->address,span->bytes,address,range->length)){
+                if(span->sequence){
+                    if(!native_object_state_sequence_current(object,span->sequence)||span->sequence->view!=span){blocked=1;break;}
+                    for(NativeMemoryRevision *revision=range->revision;revision;revision=revision->previous)
+                        if(revision->objectView!=span->token){blocked=1;break;}
+                    if(blocked)break;covered=1;
+                }else if(!tagged)covered=1;
+            }
         }
         if(blocked)break;
     }
     ReleaseSRWLockShared(&native_object_state_records);
-    if(!relevant)return !InterlockedCompareExchange(&allocation->opaque,0,0)||InterlockedCompareExchange(&allocation->managed,0,0);
+    if(!relevant)return !tagged&&(!InterlockedCompareExchange(&allocation->opaque,0,0)||InterlockedCompareExchange(&allocation->managed,0,0));
     return covered&&!blocked&&selected&&allocation->sources&&!allocation->unknownUse&&!allocation->unknownReaders
             &&native_object_state_selected_sources(allocation->sources,selected)
             &&native_object_state_selected_sources(allocation->readers,selected);
@@ -600,6 +877,8 @@ static void host_object_state_summary(JNIEnv *env,jobject module,jlong values[42
         int gap=!current||object->uncertain||object->destroyRequested||object->destroying;
         for(NativeObjectStateSpan *span=object->spans;!gap&&span;span=span->next)
             if(!span->closed&&!native_object_state_span_current(object,span))gap=1;
+        for(NativeObjectStateSequence *sequence=object->sequences;!gap&&sequence;sequence=sequence->next)
+            if(!sequence->closed&&!native_object_state_sequence_current(object,sequence))gap=1;
         if(gap)values[41]++;
     }
     ReleaseSRWLockShared(&native_object_state_records);
@@ -618,12 +897,22 @@ static const ronova_object_state_api_v2 native_object_state_api_v2={
         native_object_state_destroy_begin,native_object_state_destroy_end},
     native_object_state_field,native_object_state_nested,native_object_state_buffer,native_object_state_buffer_end,native_object_state_epoch
 };
+static const ronova_object_state_api_v3 native_object_state_api_v3={
+    {{sizeof(ronova_object_state_api_v3),RONOVA_OBJECT_STATE_ABI_V3,
+        native_object_state_constructed,native_object_state_allocation,native_object_state_generation,native_object_state_span,
+        native_object_state_write_begin,native_object_state_write_end,native_object_state_borrow_begin,native_object_state_borrow_end,
+        native_object_state_destroy_begin,native_object_state_destroy_end},
+        native_object_state_field,native_object_state_nested,native_object_state_buffer,native_object_state_buffer_end,native_object_state_epoch},
+    native_object_state_sequence_register,native_object_state_sequence_view,native_object_state_mutation_begin,
+    native_object_state_mutation_end,native_object_state_sequence_end
+};
 __declspec(dllexport) __declspec(noinline) const ronova_object_state_api_v1 *RonovaObjectStateGetApi(uint32_t abi){
     NativeObjectStateErrors incoming=native_object_state_errors();OwnerLink *sources=NULL;int unknown=0;
-    int ready=(abi==RONOVA_OBJECT_STATE_ABI||abi==RONOVA_OBJECT_STATE_ABI_V2)
+    int ready=(abi==RONOVA_OBJECT_STATE_ABI||abi==RONOVA_OBJECT_STATE_ABI_V2||abi==RONOVA_OBJECT_STATE_ABI_V3)
             &&native_object_state_sources(__builtin_return_address(0),&sources,&unknown,NULL)
             &&!native_owner_stopped(sources);
     native_owner_links_free(sources);
-    NATIVE_OBJECT_RETURN(!ready?NULL:abi==RONOVA_OBJECT_STATE_ABI?&native_object_state_api:&native_object_state_api_v2.base);
+    NATIVE_OBJECT_RETURN(!ready?NULL:abi==RONOVA_OBJECT_STATE_ABI?&native_object_state_api:
+            abi==RONOVA_OBJECT_STATE_ABI_V2?&native_object_state_api_v2.base:&native_object_state_api_v3.base.base);
 }
 #undef NATIVE_OBJECT_RETURN

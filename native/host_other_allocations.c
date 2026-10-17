@@ -258,6 +258,7 @@ static uint64_t host_native_other_allocation(HostImport *entry,void *caller,uint
     if(!host_entry_sources_query(entry,state,caller,&owners,NULL,1,&unknown)){
         DWORD error=GetLastError();native_owner_links_free(owners);return host_other_refuse(entry->kind,&incoming,error);}
     JNIEnv *env=host_memory_environment(restricted);int kind=entry->kind;
+    NativeHostArenaOriginalScope *custom=host_memory_arena_scope(entry,state,caller);
     int heapAllocation=kind>=HOST_MI_HEAP_MALLOC&&kind<=HOST_MI_HEAP_REALLOC_ALIGNED||kind==HOST_MI_HEAP_ZALLOC;
     int replacing=kind==HOST_MI_REALLOC||kind==HOST_MI_REALLOC_ALIGNED||kind==HOST_MI_HEAP_REALLOC||kind==HOST_MI_HEAP_REALLOC_ALIGNED;
     int releasing=kind==HOST_MI_FREE,query=kind==HOST_MI_USABLE_SIZE;
@@ -273,7 +274,7 @@ static uint64_t host_native_other_allocation(HostImport *entry,void *caller,uint
             replacing?NATIVE_MEMORY_HOST_REALLOCATE:releasing?NATIVE_MEMORY_HOST_FREE:NATIVE_MEMORY_HOST_ALLOCATE;
     uintptr_t backing=0;int backingObserved=0;
     int cleanup=address&&releasing&&host_memory_cleanup_scope(entry,state);
-    NativeHostMemoryCall *call=NULL;uint64_t result=0;int originalReturned=0,rawPass=0;
+    NativeHostMemoryCall *call=NULL;uint64_t result=0;int originalReturned=0,rawPass=0,customBacking=0;
     HostCrtThreadErrors returned=incoming;
     __try {
         DWORD refusal=0;
@@ -290,7 +291,11 @@ static uint64_t host_native_other_allocation(HostImport *entry,void *caller,uint
             if(destroying&&backingObserved&&context==backing)operation=NATIVE_MEMORY_HOST_CONTEXT_DETACH;
         }
         if(!refusal){int denied=0;
-            call=native_memory_host_other_prepare(env,(void*)provider->release,address,context,operation,owners,unknown,&denied);
+            if(custom&&(address&&!query||operation==NATIVE_MEMORY_HOST_CONTEXT_FREE||operation==NATIVE_MEMORY_HOST_ARENA_UNKNOWN)){
+                call=native_memory_host_custom_backing_prepare(env,custom,NATIVE_MEMORY_HOST_OTHER,(void*)provider->release,context,
+                        address,operation,owners,unknown,&denied);customBacking=call&&operation==NATIVE_MEMORY_HOST_FREE;
+            }
+            if(!call&&!denied)call=native_memory_host_other_prepare(env,(void*)provider->release,address,context,operation,owners,unknown,&denied);
             if(denied)refusal=ERROR_BUSY;else if(!native_memory_host_sources(call,&owners,&unknown))refusal=ERROR_NOT_ENOUGH_MEMORY;
         }
         int cleanupKnown=cleanup&&native_memory_host_cleanup(call)&&host_memory_cleanup_scope(entry,state);
@@ -324,7 +329,10 @@ static uint64_t host_native_other_allocation(HostImport *entry,void *caller,uint
                  * failure. A NULL result never proves that its old block died. */
             }
             if(pointer)InterlockedExchange(&entry->image->privateOpaque,1);
-            if(call){native_memory_host_other_complete(env,call,pointer,bytes,actualContext,completed,released);call=NULL;}
+            if(call){if(customBacking)native_memory_host_backing_complete(env,call,bytes,completed,released);
+                else native_memory_host_other_complete(env,call,pointer,bytes,actualContext,completed,released);call=NULL;}
+            if(pointer&&custom&&actualContext!=UINTPTR_MAX)native_memory_host_custom_backing_allocated(custom,NATIVE_MEMORY_HOST_OTHER,
+                    (void*)provider->release,actualContext,pointer);
         }
     }__finally {
         if(!rawPass){if(!originalReturned)returned=host_other_result(&incoming);

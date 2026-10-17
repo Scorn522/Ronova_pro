@@ -199,7 +199,9 @@ static bool path(JNIEnv* env,jobject request,std::wstring& value) {
     env->ReleaseStringChars(text,chars);env->DeleteLocalRef(text);
     return ok&&((value[0]>=L'A'&&value[0]<=L'Z')||(value[0]>=L'a'&&value[0]<=L'z'))&&value[1]==L':'&&value[2]==L'\\';
 }
-static bool identity(HANDLE file,const std::wstring& requested,std::string& out) {
+template<class PathAllocator,class TextAllocator>
+static bool identity(HANDLE file,const std::basic_string<wchar_t,std::char_traits<wchar_t>,PathAllocator>& requested,
+        std::basic_string<char,std::char_traits<char>,TextAllocator>& out) {
     BY_HANDLE_FILE_INFORMATION info{};FILE_ID_INFO id{};wchar_t fs[32],final_path[4104];
     if(GetFileType(file)!=FILE_TYPE_DISK||!GetFileInformationByHandle(file,&info)||info.nNumberOfLinks!=1
         ||(info.dwFileAttributes&(FILE_ATTRIBUTE_DIRECTORY|FILE_ATTRIBUTE_REPARSE_POINT|FILE_ATTRIBUTE_ENCRYPTED|FILE_ATTRIBUTE_SPARSE_FILE|FILE_ATTRIBUTE_COMPRESSED))

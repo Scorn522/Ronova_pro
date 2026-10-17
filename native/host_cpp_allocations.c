@@ -378,10 +378,11 @@ static uint64_t host_native_cpp_allocation(HostImport *entry,void *caller,uintpt
         DWORD error=GetLastError();native_owner_links_free(owners);return host_cpp_refuse(entry->kind,&incoming,error);
     }
     JNIEnv *env=host_memory_environment(restricted);int allocating=host_cpp_is_new(entry->kind);
+    NativeHostArenaOriginalScope *custom=host_memory_arena_scope(entry,state,caller);
     uint64_t address=allocating?0:(uint64_t)arguments[0],bytes=allocating?(uint64_t)(size_t)arguments[0]:0;
     int contextReady=0;uintptr_t context=host_cpp_context(entry->kind,arguments,&contextReady);
     int cleanup=address&&!allocating&&host_memory_cleanup_scope(entry,state);
-    NativeHostMemoryCall *call=NULL;uint64_t result=0;int originalStarted=0,originalReturned=0,rawPass=0,scoped=0;
+    NativeHostMemoryCall *call=NULL;uint64_t result=0;int originalStarted=0,originalReturned=0,rawPass=0,scoped=0,customBacking=0;
     NativeHostCppOriginalScope scope={0};
     HostCrtThreadErrors returned=incoming;
     __try {
@@ -404,8 +405,10 @@ static uint64_t host_native_cpp_allocation(HostImport *entry,void *caller,uintpt
                     ReleaseSRWLockExclusive(&native_private_gate);}
             }
             if(!refusal){int denied=0;
-                call=native_memory_host_prepare(env,NATIVE_MEMORY_HOST_CPP,target->release,context,address,0,
-                        NATIVE_MEMORY_HOST_FREE,owners,unknown,&denied);
+                if(custom){call=native_memory_host_custom_backing_prepare(env,custom,NATIVE_MEMORY_HOST_CPP,target->release,context,address,
+                            NATIVE_MEMORY_HOST_FREE,owners,unknown,&denied);customBacking=call!=NULL;}
+                if(!call&&!denied)call=native_memory_host_prepare(env,NATIVE_MEMORY_HOST_CPP,target->release,context,address,0,
+                            NATIVE_MEMORY_HOST_FREE,owners,unknown,&denied);
                 if(denied)refusal=ERROR_BUSY;
                 else if(!native_memory_host_sources(call,&owners,&unknown))refusal=ERROR_NOT_ENOUGH_MEMORY;
             }
@@ -444,7 +447,10 @@ static uint64_t host_native_cpp_allocation(HostImport *entry,void *caller,uintpt
                 InterlockedExchange(&entry->image->privateOpaque,1);
                 native_memory_host_cpp_allocated(env,scoped?&scope:NULL,entry->original,target->release,context,
                         result,bytes,owners,unknown||!contextReady);
-            }else if(call){scope.call=NULL;native_memory_host_complete(env,call,0,0,1,1);call=NULL;}
+                if(custom&&contextReady)native_memory_host_custom_backing_allocated(custom,NATIVE_MEMORY_HOST_CPP,target->release,context,result);
+            }else if(call){scope.call=NULL;
+                if(customBacking)native_memory_host_backing_complete(env,call,0,1,1);
+                else native_memory_host_complete(env,call,0,0,1,1);call=NULL;}
         }
     } __finally {
         if(!rawPass){
