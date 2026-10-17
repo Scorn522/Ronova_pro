@@ -3,6 +3,7 @@
 #include <jni.h>
 #include <windows.h>
 #include <bcrypt.h>
+#include <ktmw32.h>
 #include <stdint.h>
 #include <limits.h>
 #include <stdio.h>
@@ -2562,6 +2563,161 @@ JNIEXPORT jboolean JNICALL Java_dev_ronova_pro_AuditFixCheck_hostCngHash0(JNIEnv
     if(!FreeLibrary(provider)&&!failure)failure="CNG_APPLICATION_REFERENCE_RETURN";
     if(failure)return load_thread_fail(env,failure)?JNI_TRUE:JNI_FALSE;
     fprintf(stdout,"HOST_CNG_HASH_PASS actual_bcrypt_provider IAT_and_exact_six_GPA original_SHA256_abc inherited_reusable_flag two_finish_rounds actual_external_Heap_buffer live_hash_free_refused Destroy_success_then_original_free actual_destroy_close no_private_hash_byte_undo\n");
+    fflush(stdout);return JNI_TRUE;
+}
+typedef HANDLE (WINAPI *LoadTxCreate)(LPSECURITY_ATTRIBUTES,LPGUID,DWORD,DWORD,DWORD,DWORD,LPWSTR);
+typedef HANDLE (WINAPI *LoadTxOpen)(DWORD,LPGUID);
+typedef BOOL (WINAPI *LoadTxId)(HANDLE,LPGUID);
+typedef BOOL (WINAPI *LoadTxInformation)(HANDLE,PDWORD,PDWORD,PDWORD,PDWORD,DWORD,LPWSTR);
+typedef BOOL (WINAPI *LoadTxRollback)(HANDLE);
+typedef HANDLE (WINAPI *LoadTxFile)(LPCWSTR,DWORD,DWORD,LPSECURITY_ATTRIBUTES,DWORD,DWORD,HANDLE,HANDLE,PUSHORT,PVOID);
+typedef BOOL (WINAPI *LoadTxRead)(HANDLE,LPVOID,DWORD,LPDWORD,LPOVERLAPPED);
+typedef BOOL (WINAPI *LoadTxWrite)(HANDLE,LPCVOID,DWORD,LPDWORD,LPOVERLAPPED);
+typedef BOOL (WINAPI *LoadTxSeek)(HANDLE,LARGE_INTEGER,PLARGE_INTEGER,DWORD);
+typedef BOOL (WINAPI *LoadTxFileOnly)(HANDLE);
+extern LoadTxCreate __imp_CreateTransaction;
+extern LoadTxId __imp_GetTransactionId;
+extern LoadTxInformation __imp_GetTransactionInformation;
+extern LoadTxRollback __imp_RollbackTransaction;
+extern LoadTxRollback __imp_CommitTransactionAsync;
+extern LoadTxRead __imp_ReadFile;
+extern LoadTxWrite __imp_WriteFile;
+extern LoadTxSeek __imp_SetFilePointerEx;
+extern LoadTxFileOnly __imp_SetEndOfFile;
+extern LoadTxFileOnly __imp_FlushFileBuffers;
+/* This entry is loaded by the real system loader from a distinct copy of this
+ * DLL before Core binding. A deeper Core frame cannot authorize its image. */
+JNIEXPORT jboolean JNICALL Java_dev_ronova_pro_AuditFixCheck_hostTransactionForeign0(JNIEnv *env,jclass check,jlong actual){
+    (void)check;
+    if(!actual||!load_private_entry((void*)__imp_RollbackTransaction))
+        return load_thread_fail(env,"TX_FOREIGN_ACTUAL_IAT_REQUIRED")?JNI_TRUE:JNI_FALSE;
+    SetLastError(0);BOOL result=RollbackTransaction((HANDLE)(uintptr_t)actual);DWORD error=GetLastError();
+    if(result||error!=ERROR_ACCESS_DENIED){
+        fprintf(stderr,"HOST_TRANSACTION_FOREIGN_FAILED result=%d win32=%lu\n",result!=FALSE,(unsigned long)error);
+        return load_thread_fail(env,"TX_FOREIGN_KNOWN_TRANSACTION_MUTATION_ADMITTED")?JNI_TRUE:JNI_FALSE;
+    }
+    fprintf(stdout,"HOST_TRANSACTION_FOREIGN_PASS actual_distinct_system_loader_image known_transaction_rollback_refused deep_Core_frame_grants_no_image_role\n");
+    fflush(stdout);return JNI_TRUE;
+}
+JNIEXPORT jboolean JNICALL Java_dev_ronova_pro_AuditFixCheck_hostTransactionState0(JNIEnv *env,jclass check,jstring tempFile){
+    HMODULE provider=NULL,kernel=GetModuleHandleW(L"kernel32.dll");wchar_t *path=NULL;
+    HANDLE transaction=INVALID_HANDLE_VALUE,query=INVALID_HANDLE_VALUE,file=INVALID_HANDLE_VALUE,alias=NULL,moved=NULL,heap=NULL;
+    BYTE *input=NULL,*output=NULL;const char *failure=NULL;DWORD failureError=0;int rolledBack=0;
+    LoadTxRollback rollback=NULL;LoadClose close=NULL;LoadMemoryTarget protectedOutput={0};int protectedObserved=0;
+    if((*env)->ExceptionCheck(env))return JNI_FALSE;
+    if(!tempFile||!kernel){failure="TX_ACTUAL_TEMP_FILE_PATH_REQUIRED";goto done;}
+    jsize length=(*env)->GetStringLength(env,tempFile);
+    if(length<=0||length>=32767){failure="TX_ACTUAL_TEMP_FILE_PATH_LENGTH";goto done;}
+    path=(wchar_t*)calloc((size_t)length+1,sizeof(*path));
+    if(!path){failure="TX_ACTUAL_TEMP_FILE_PATH_STORAGE";goto done;}
+    (*env)->GetStringRegion(env,tempFile,0,length,(jchar*)path);if((*env)->ExceptionCheck(env))goto done;
+    provider=LoadLibraryExW(L"KtmW32.dll",NULL,LOAD_LIBRARY_SEARCH_SYSTEM32);
+    if(!provider){failure="TX_ACTUAL_KTM_PROVIDER_LOAD";goto done;}
+    const char *transactionNames[]={"CreateTransaction","OpenTransaction","GetTransactionId","GetTransactionInformation","RollbackTransaction"};
+    const char *fileNames[]={"CreateFileTransactedW","ReadFile","WriteFile","SetFilePointerEx","SetEndOfFile","FlushFileBuffers","DuplicateHandle","CloseHandle"};
+    void *transactionEntries[5]={0},*fileEntries[8]={0};
+    for(unsigned i=0;i<5;i++){transactionEntries[i]=(void*)GetProcAddress(provider,transactionNames[i]);
+        if(!load_private_entry(transactionEntries[i])){failure="TX_ACTUAL_KTM_EXACT_GPA_NOT_CONTROLLED";goto done;}}
+    for(unsigned i=0;i<8;i++){fileEntries[i]=(void*)GetProcAddress(kernel,fileNames[i]);
+        if(!load_private_entry(fileEntries[i])){failure="TX_ACTUAL_FILE_EXACT_GPA_NOT_CONTROLLED";goto done;}}
+    void *imports[]={(void*)__imp_CreateTransaction,(void*)__imp_GetTransactionId,(void*)__imp_GetTransactionInformation,
+        (void*)__imp_RollbackTransaction,(void*)__imp_ReadFile,(void*)__imp_WriteFile,(void*)__imp_SetFilePointerEx,
+        (void*)__imp_SetEndOfFile,(void*)__imp_FlushFileBuffers,(void*)__imp_DuplicateHandle,(void*)__imp_CloseHandle};
+    for(unsigned i=0;i<sizeof(imports)/sizeof(imports[0]);i++)if(!load_private_entry(imports[i])){
+        failure="TX_ACTUAL_KTM_OR_FILE_IAT_NOT_CONTROLLED";goto done;}
+    LoadTxOpen open=(LoadTxOpen)transactionEntries[1];LoadTxId id=(LoadTxId)transactionEntries[2];
+    LoadTxInformation information=(LoadTxInformation)transactionEntries[3];rollback=(LoadTxRollback)transactionEntries[4];
+    LoadTxFile createFile=(LoadTxFile)fileEntries[0];LoadTxRead read=(LoadTxRead)fileEntries[1];
+    LoadTxSeek seek=(LoadTxSeek)fileEntries[3];LoadTxFileOnly flush=(LoadTxFileOnly)fileEntries[5];
+    LoadDuplicate duplicate=(LoadDuplicate)fileEntries[6];close=(LoadClose)fileEntries[7];
+    transaction=CreateTransaction(NULL,NULL,0,0,0,30000,L"Ronova actual Core rollback fixture");
+    if(transaction==INVALID_HANDLE_VALUE){failure="TX_ORIGINAL_CREATE";goto done;}
+    GUID original={0},reopened={0};DWORD outcome=0,timeout=0;
+    if(!id(transaction,&original)){failure="TX_ORIGINAL_GUID";goto done;}
+    query=open(TRANSACTION_QUERY_INFORMATION,&original);
+    if(query==INVALID_HANDLE_VALUE||!GetTransactionId(query,&reopened)||memcmp(&original,&reopened,sizeof(original))){
+        failure="TX_ORIGINAL_OPEN_SAME_GUID";goto done;}
+    if(!information(query,&outcome,NULL,NULL,&timeout,0,NULL)||outcome!=TransactionOutcomeUndetermined){
+        failure="TX_ORIGINAL_QUERY_ACTIVE";goto done;}
+    if(!load_private_entry((void*)__imp_CommitTransactionAsync)){failure="TX_ASYNC_ACTUAL_IAT_REQUIRED";goto done;}
+    SetLastError(0);
+    if(CommitTransactionAsync(query)||GetLastError()!=ERROR_ACCESS_DENIED){failure="TX_ASYNC_QUERY_ONLY_ACCESS_ORIGINAL_ERROR";goto done;}
+    outcome=0;
+    if(!information(query,&outcome,NULL,NULL,NULL,0,NULL)||outcome!=TransactionOutcomeUndetermined){
+        failure="TX_FAILED_ASYNC_QUERY_RECONCILIATION";goto done;}
+    jmethodID foreign=(*env)->GetStaticMethodID(env,check,"hostTransactionForeign","(J)Z");
+    if(!foreign||!(*env)->CallStaticBooleanMethod(env,check,foreign,(jlong)(uintptr_t)transaction)||(*env)->ExceptionCheck(env)){
+        failure="TX_ACTUAL_FOREIGN_CALLER_CALLBACK";goto done;}
+    outcome=0;
+    if(!GetTransactionInformation(transaction,&outcome,NULL,NULL,NULL,0,NULL)||outcome!=TransactionOutcomeUndetermined){
+        failure="TX_FOREIGN_REFUSAL_CHANGED_ORIGINAL_TRANSACTION";goto done;}
+    heap=HeapCreate(0,0,0);if(heap){input=(BYTE*)HeapAlloc(heap,0,64);output=(BYTE*)HeapAlloc(heap,0,64);}
+    if(!input||!output){failure="TX_ACTUAL_HEAP_IO_BUFFERS";goto done;}
+    for(unsigned i=0;i<32;i++)input[i]=(BYTE)(0x31+i);memset(output,0xa5,64);
+    file=createFile(path,GENERIC_READ|GENERIC_WRITE,0,NULL,OPEN_EXISTING,FILE_ATTRIBUTE_NORMAL,NULL,transaction,NULL,NULL);
+    if(file==INVALID_HANDLE_VALUE){failure="TX_ORIGINAL_TRANSACTED_FILE_OPEN";goto done;}
+    DWORD count=0;LARGE_INTEGER zero={0},position={0},end={0};end.QuadPart=32;
+    if(!WriteFile(file,input,32,&count,NULL)||count!=32){failure="TX_ORIGINAL_SYNCHRONOUS_WRITE";goto done;}
+    if(!seek(file,zero,&position,FILE_BEGIN)||position.QuadPart){failure="TX_ORIGINAL_SEEK_BEGIN";goto done;}
+    if(!DuplicateHandle(GetCurrentProcess(),file,GetCurrentProcess(),&alias,0,FALSE,DUPLICATE_SAME_ACCESS)){
+        failure="TX_ORIGINAL_FILE_ALIAS";goto done;}
+    count=0;
+    if(!ReadFile(alias,output,12,&count,NULL)||count!=12||memcmp(input,output,12)
+            ||!SetFilePointerEx(file,zero,&position,FILE_CURRENT)||position.QuadPart!=12){
+        failure="TX_FILE_ALIAS_SHARED_POSITION";goto done;}
+    if(!seek(alias,zero,NULL,FILE_BEGIN)){failure="TX_ORIGINAL_ALIAS_SEEK_OPTIONAL_OUTPUT";goto done;}
+    count=0;
+    if(!read(file,output,32,&count,NULL)||count!=32||memcmp(input,output,32)){
+        failure="TX_ORIGINAL_SYNCHRONOUS_READBACK";goto done;}
+    if(!SetFilePointerEx(alias,end,NULL,FILE_BEGIN)||!SetEndOfFile(file)||!flush(alias)){
+        failure="TX_ORIGINAL_TRUNCATE_FLUSH";goto done;}
+    JavaVM *vm=NULL;
+    if((*env)->GetJavaVM(env,&vm)!=JNI_OK||!vm||!*vm
+            ||!load_memory_target(&protectedOutput,(void*)&(*vm)->GetEnv,sizeof((*vm)->GetEnv),MEM_PRIVATE,(void*)*vm)){
+        failure="TX_ACTUAL_PROTECTED_VM_SHADOW_OUTPUT";goto done;}
+    protectedObserved=1;
+    /* Copy the slot's current bytes into our own file first. A broken admission
+     * cannot replace the live function pointer with a different value. */
+    memcpy(input,protectedOutput.before,protectedOutput.bytes);count=0;
+    if(!seek(file,zero,NULL,FILE_BEGIN)||!WriteFile(file,input,(DWORD)protectedOutput.bytes,&count,NULL)
+            ||count!=protectedOutput.bytes||!seek(file,zero,NULL,FILE_BEGIN)){
+        failure="TX_PROTECTED_OUTPUT_SAME_VALUE_INPUT";goto done;}
+    count=0x524e5458;SetLastError(0);
+    BOOL accepted=read(alias,protectedOutput.address,(DWORD)protectedOutput.bytes,&count,NULL);DWORD refusedError=GetLastError();
+    if(accepted||refusedError!=ERROR_ACCESS_DENIED||count!=0x524e5458||!load_memory_unchanged(&protectedOutput)){
+        failure="TX_PROTECTED_READ_OUTPUT_NOT_REFUSED_BEFORE_ORIGINAL";goto done;}
+    if(!SetFilePointerEx(file,zero,&position,FILE_CURRENT)||position.QuadPart){
+        failure="TX_PROTECTED_READ_REFUSAL_ADVANCED_SHARED_POSITION";goto done;}
+    if(!CloseHandle(alias)){failure="TX_ORIGINAL_ALIAS_CLOSE";goto done;}alias=NULL;
+    BOOL transferred=duplicate(GetCurrentProcess(),file,GetCurrentProcess(),&moved,0,FALSE,DUPLICATE_SAME_ACCESS|DUPLICATE_CLOSE_SOURCE);
+    /* DUPLICATE_CLOSE_SOURCE closes the original even when duplication fails. */
+    file=INVALID_HANDLE_VALUE;
+    if(!transferred||!moved){failure="TX_ORIGINAL_CLOSE_SOURCE_DUPLICATE";goto done;}
+    if(!FlushFileBuffers(moved)||!close(moved)){failure="TX_ORIGINAL_TRANSFERRED_FILE_FLUSH_CLOSE";goto done;}moved=NULL;
+    if(!rollback(transaction)){failure="TX_ORIGINAL_SYNCHRONOUS_ROLLBACK";goto done;}rolledBack=1;
+    outcome=0;
+    if(!GetTransactionInformation(query,&outcome,NULL,NULL,NULL,0,NULL)||outcome!=TransactionOutcomeAborted){
+        failure="TX_REOPENED_QUERY_DID_NOT_SHARE_ROLLBACK_OUTCOME";goto done;}
+done:
+    failureError=GetLastError();
+    if(alias&&!CloseHandle(alias)&&!failure){failure="TX_ALIAS_CLEANUP_CLOSE";failureError=GetLastError();}
+    if(file!=INVALID_HANDLE_VALUE&&!CloseHandle(file)&&!failure){failure="TX_FILE_CLEANUP_CLOSE";failureError=GetLastError();}
+    if(moved&&!CloseHandle(moved)&&!failure){failure="TX_TRANSFER_CLEANUP_CLOSE";failureError=GetLastError();}
+    if(transaction!=INVALID_HANDLE_VALUE&&!rolledBack&&rollback&&!rollback(transaction)&&!failure){failure="TX_CLEANUP_ROLLBACK";failureError=GetLastError();}
+    if(query!=INVALID_HANDLE_VALUE&&!CloseHandle(query)&&!failure){failure="TX_QUERY_HANDLE_CLOSE";failureError=GetLastError();}
+    if(transaction!=INVALID_HANDLE_VALUE&&!CloseHandle(transaction)&&!failure){failure="TX_ORIGINAL_TRANSACTION_CLOSE";failureError=GetLastError();}
+    if(input){if(HeapFree(heap,0,input))input=NULL;else if(!failure){failure="TX_INPUT_BUFFER_RETURN";failureError=GetLastError();}}
+    if(output){if(HeapFree(heap,0,output))output=NULL;else if(!failure){failure="TX_OUTPUT_BUFFER_RETURN";failureError=GetLastError();}}
+    if(heap&&!input&&!output&&!HeapDestroy(heap)&&!failure){failure="TX_ACTUAL_HEAP_DESTROY";failureError=GetLastError();}
+    if(provider&&!FreeLibrary(provider)&&!failure){failure="TX_KTM_APPLICATION_REFERENCE_RETURN";failureError=GetLastError();}
+    free(path);
+    if(protectedObserved&&!load_memory_unchanged(&protectedOutput)){
+        fprintf(stderr,"HOST_TRANSACTION_FAILED protected_VM_shadow_changed\n");fflush(stderr);return JNI_FALSE;
+    }
+    if((*env)->ExceptionCheck(env)&&!failure)failure="TX_UNEXPECTED_JNI_EXCEPTION";
+    if(failure){fprintf(stderr,"HOST_TRANSACTION_FAILED stage=%s win32=%lu\n",failure,(unsigned long)failureError);
+        return load_thread_fail(env,failure)?JNI_TRUE:JNI_FALSE;}
+    fprintf(stdout,"HOST_TRANSACTION_PASS actual_KtmW32_kernel32 IAT_and_exact_GPA actual_GUID_Open_query_alias failed_async_original_access_error query_reconciles_active foreign_image_known_transaction_mutation_refused observed_Heap_IO_buffers synchronous_write_seek_readback_truncate_flush file_alias_shared_position protected_ReadFile_output_refused_without_position_change original_CloseSource_duplicate original_alias_close synchronous_Rollback_shared_outcome no_commit_permit_bypass\n");
     fflush(stdout);return JNI_TRUE;
 }
 JNIEXPORT void JNICALL Java_dev_ronova_pro_AuditFixCheck_hostWin32Allocations0(JNIEnv *env,jclass check){

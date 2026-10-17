@@ -1,5 +1,19 @@
 # B 批实际报告：2026-10-09 代码收敛接续
 
+## 2026-10-17：C 接续——KTM/TxF 句柄与事务文件私有状态
+
+接续 `77d122f`，仅主工程 `D:\桌面\ronova_GPT`。Java105 / Native96 / Object SDK3（保留1/2）/ SourceMapBridge2 / Storage3 / Journal6，协议 `r3-client-8`。整包源码写齐后统一构建。
+
+补入11个 KTM/TxF 原生入口及5类同步事务文件 I/O。真实成功才登记事务、文件和句柄代次，GUID 连接实际重开，Open 消费与前置检查相同的私有快照，不能在门后改指针重定向已知事务。内核对象比对和同权限内部句柄固定当前准确目标；应用 Close/Duplicate/Flags 沿原结果更新，CloseSource 即使原返回 FALSE 也保留其真实关闭语义，最后应用别名真关闭后同步归还内部引用，不推迟系统隐式回滚。原 Win32 调用不跨 ledger 锁，元数据失败不改写原成功，loader/受限路径只 Try。
+
+已知目标独立核完整来源、实际 caller 图像和在途状态，深层 Core 帧不能授予外部 DLL 事务资格。已知事务文件的 read/write/count/OVERLAPPED/seek 输出接准确缓冲区代次；原始输出拒绝控制区、活借用或 typed 对象，输入合并实际已观察贡献。普通未知文件句柄保原调用及控制区保护，不接管既有 IoBridge 租约。文件位置、句柄、阶段与磁盘状态保持不透明，不做字节撤销、自动提交/回滚/取消。实际 IO_PENDING 或异常未返回保留在途句柄和存储；异步事务 pending 与立即失败分开，Undetermined 只结清已返回的同步失败，不能冒充异步完成，terminal 依实际 outcome 接续。
+
+`build-c-java105-native96-txf-state-20261017.log` 首轮 **PASS，1分10秒**，复用 Java/Native 夹具编译退出0。`c-java105-native96-core-txf-state-20261017.log` **退出0，正常 JVM 结束**：真实 named Core 绑定和非零 SDK/CNG 原生命周期继续通过；不同实际 system-loader DLL 的已知事务回滚被拒，随后 Core 查询仍 active。真实 GUID query alias、Heap I/O buffer、同步读写/定位/截断/刷新、文件 duplicate 的共享位置、控制槽 ReadFile 输出拒绝且 count/位置不变、CloseSource 转移与原关闭、同步回滚共享 outcome 均通过，Java 临时文件原字节保留。生产双文件 TxF、双槽/第三 busy、foreign Ticket/token 拒绝和 no-permit 回滚/收尾也通过，没有绕过生产 commit permit。
+
+收尾补异步状态区分，最终增量 `build-c-java105-native96-txf-async-final-20261017.log` **PASS，25秒**。新增检查夹具首次编译遗漏 CommitTransactionAsync IAT 声明，补声明后编译退出0，原失败日志保留。`c-java105-native96-txf-async-final-20261017.log` **退出0，正常 JVM 结束**：query-only 真实句柄的异步提交保留原 ERROR_ACCESS_DENIED，真实 Undetermined 查询后事务仍可继续原 I/O 与回滚；准确外部来源拒绝及控制输出保护继续通过。最终只复查受影响的事务分支，没有重复 CNG/C++ SDK/Storage 已通过链或旧矩阵；成功异步请求的真实完成场景未运行。
+
+匹配候选为 `distribution/candidate-c-java105-native96-txf-state-wip-20261017` 的两份 JAR，随源码和既有摘要同步 GitHub。未观察的 OVERLAPPED 完成、非合作私有对象语义与原始调用仍有缺口；完整游戏进服、同存档重启 **NOTRUN**，完整 C/B 未标全部完成。自身外观、武器注册和源码 ZIP 未做。
+
 ## 2026-10-17：C 接续——实际 Core 来源与 BCrypt 原生状态
 
 接续 `556f387`，主工程 `D:\桌面\ronova_GPT`。Java105 / Native95 / Object SDK3（保留1/2）/ SourceMapBridge2 / Storage3 / Journal6，协议 `r3-client-8`。本包源码写齐后统一构建。

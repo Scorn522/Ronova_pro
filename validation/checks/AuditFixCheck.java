@@ -15,8 +15,12 @@ public final class AuditFixCheck {
     private static Object invoke(Object receiver,String name)throws Exception {var m=receiver.getClass().getDeclaredMethod(name);m.setAccessible(true);try{return m.invoke(receiver);}catch(InvocationTargetException e){if(e.getCause() instanceof Exception x)throw x;throw e;}}
     public static void main(String[] args)throws Exception {
         if(args.length==2&&args[0].equals("core-native-state")){coreNativeState(args[1]);return;}
+        if(args.length==1&&args[0].equals("core-native-transactions")){
+            System.load(java.nio.file.Path.of(System.getProperty("ronova.pro.audit.thread.native")).toAbsolutePath().toString());
+            hostTransactionState();return;
+        }
         if(args.length==1&&args[0].equals("core-native-consumers")){
-            hostThreadCreate();require(hostCngHash0(),"actual BCrypt lifecycle failed");storageNative();return;
+            hostThreadCreate();require(hostCngHash0(),"actual BCrypt lifecycle failed");hostTransactionState();storageNative();return;
         }
         if(args.length==1&&args[0].equals("unknown-carrier-graph")){unknownCarrierGraph();return;}
         if(args.length==1&&args[0].equals("unknown-map-key-semantics")){unknownMapKeySemantics();return;}
@@ -962,7 +966,30 @@ public final class AuditFixCheck {
     private static native void hostMemoryRelease0(String controlDll);
     private static native void hostDefinitionsChanged0(ClassLoader loader);
     private static native boolean hostCngHash0();
+    private static native boolean hostTransactionState0(String tempFile);
+    private static native boolean hostTransactionForeign0(long actual);
+    private static boolean hostTransactionForeign(long actual)throws Exception {
+        Class<?> foreign=Class.forName(AuditFixCheck.class.getName(),true,ClassLoader.getSystemClassLoader());
+        require(foreign!=AuditFixCheck.class,"transaction foreign caller must use the actual system-loader image");
+        var call=foreign.getDeclaredMethod("hostTransactionForeign0",long.class);call.setAccessible(true);
+        return Boolean.TRUE.equals(call.invoke(null,actual));
+    }
+    private static void hostTransactionState()throws Exception {
+        var file=java.nio.file.Files.createTempFile("ronova-core-transaction-",".dat").toAbsolutePath();
+        byte[] original="Ronova actual Core transaction fixture: the original file survives native synchronous rollback.\n".getBytes(java.nio.charset.StandardCharsets.UTF_8);
+        try {
+            java.nio.file.Files.write(file,original);
+            require(hostTransactionState0(file.toString()),"actual KTM/TxF native lifecycle failed");
+            require(Arrays.equals(original,java.nio.file.Files.readAllBytes(file)),"native transaction rollback changed the original file");
+            System.out.println("HOST_TRANSACTION_FILE_PASS actual_Java_owned_temp_path original_bytes_preserved_after_native_rollback");
+        } finally {java.nio.file.Files.deleteIfExists(file);}
+    }
     private static void coreNativeState(String jar)throws Exception {
+        var audit=java.nio.file.Path.of(System.getProperty("ronova.pro.audit.thread.native")).toAbsolutePath();
+        var foreign=audit.getParent().resolve("foreign").resolve("audit-host-foreign.dll");
+        java.nio.file.Files.createDirectories(foreign.getParent());
+        java.nio.file.Files.copy(audit,foreign,java.nio.file.StandardCopyOption.REPLACE_EXISTING);
+        System.load(foreign.toString());
         var finder=java.lang.module.ModuleFinder.of(java.nio.file.Path.of(jar));
         require(finder.findAll().size()==1&&finder.find("ronova_pro").isPresent(),"one actual named Core module required");
         var configuration=ModuleLayer.boot().configuration().resolve(finder,java.lang.module.ModuleFinder.of(),Set.of("ronova_pro"));
@@ -983,9 +1010,11 @@ public final class AuditFixCheck {
         var producer=bridge.getDeclaredMethod("producer",Module.class);producer.setAccessible(true);
         require(Boolean.FALSE.equals(producer.invoke(null,module)),"Core was relabelled as an external producer");
         Class<?> actual=Class.forName(AuditFixCheck.class.getName(),true,loader);
-        actual.getMethod("main",String[].class).invoke(null,(Object)new String[]{"core-native-consumers"});
+        boolean transactions=System.getProperty("ronova.pro.audit.thread.phase","").equals("transactions");
+        actual.getMethod("main",String[].class).invoke(null,(Object)new String[]{transactions?"core-native-transactions":"core-native-consumers"});
         require(Boolean.FALSE.equals(producer.invoke(null,module)),"Native consumers changed Core producer identity");
-        System.out.println("CORE_NATIVE_STATE_PASS actual_named_ProMod_ProRuntime startup_binding foreign_caller_refused full_native_loader_binding SDK_receipts_nonzero no_supplied_owner_or_producer_rows original_crypto_and_storage_lifetimes");
+        System.out.println(transactions?"CORE_NATIVE_TRANSACTIONS_PASS actual_named_ProMod_ProRuntime startup_binding foreign_caller_refused original_transaction_lifetimes foreign_image_transaction_mutation_refused no_supplied_metadata"
+                :"CORE_NATIVE_STATE_PASS actual_named_ProMod_ProRuntime startup_binding foreign_caller_refused full_native_loader_binding SDK_receipts_nonzero no_supplied_owner_or_producer_rows original_crypto_transaction_and_storage_lifetimes foreign_image_transaction_mutation_refused");
     }
     private static final class HostThreadCreatePayload { }
     private static void hostThreadCreate(){

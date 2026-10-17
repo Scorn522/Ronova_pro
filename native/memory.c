@@ -1513,7 +1513,7 @@ static int native_memory_read_sources(NativeMemoryWrite *read,OwnerLink **source
         if(start<range->start+range->length&&range->start<start+read->length)ready=native_memory_revision_sources(sources,range->revision);
     return ready;
 }
-/* Internal CNG range lifetime only. This is not a public address-to-ownership
+/* Internal CNG/file-I/O range lifetime only. This is not a public address-to-ownership
  * adapter. Missing stack/JNI/provider storage stays uncovered, with no row.
  * Hash objects remain opaque; original CNG operations alone mutate them. */
 struct NativeHostCryptoSpan {NativeMemoryAllocation *allocation;uint64_t generation;int writing;};
@@ -1544,6 +1544,7 @@ static NativeHostCryptoSpan *native_memory_crypto_span(uint64_t address,uint64_t
     int ready=allocation->alive&&!allocation->sealed&&!allocation->retiring&&!allocation->changing&&!allocation->restoring
             &&!allocation->writers&&address>=allocation->address&&bytes<=allocation->bytes&&address-allocation->address<=allocation->bytes-bytes;
     if(mode)ready=ready&&!allocation->users&&!allocation->reading&&!native_memory_buffer_aliases(NULL,allocation);
+    if(mode==2)ready=ready&&!allocation->typedObjects;
     NativeMemoryWrite read={0};read.allocation=allocation;read.address=address;read.length=bytes;read.generation=allocation->generation;
     if(ready&&!native_memory_read_sources(&read,observed)){*unknown=1;ready=0;}
     if(ready&&native_owner_stopped(*observed))ready=0;
@@ -1571,6 +1572,12 @@ static void native_memory_crypto_span_end(NativeHostCryptoSpan *span){
         InterlockedDecrement(span->writing?&allocation->writers:&allocation->reading);InterlockedDecrement(&allocation->users);
     }else {InterlockedExchange(&allocation->unknownUse,1);InterlockedIncrement(&native_failures);}
     ReleaseSRWLockShared(&native_memory_records);free(span);
+}
+static void native_memory_crypto_span_pending(NativeHostCryptoSpan *span){
+    if(!span)return;
+    // The outstanding users lease retains this exact row incarnation. Only an
+    // observed completion could release it; unknown completion stays opaque.
+    InterlockedExchange(&span->allocation->opaque,1);InterlockedOr(&span->allocation->unknownUse,1);
 }
 JNIEXPORT jlong JNICALL Java_dev_ronova_pro_bootstrap_NativeControl_memoryWriteBegin0(JNIEnv *env,jclass type,jlong address,jlong length,jobjectArray contributors,jboolean reading,jboolean snapshot){
     if(!native_memory_authority(env,type)){native_refuse(env,"ACTUAL_NATIVE_MEMORY_WRITER_REQUIRED");return 0;}
