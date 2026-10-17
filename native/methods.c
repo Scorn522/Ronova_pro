@@ -7,15 +7,21 @@ static int native_binding_current(jmethodID method,void *target,unsigned kind){
     int found=0;AcquireSRWLockShared(&native_records);
     for(Binding *binding=native_bindings;binding;binding=binding->next)
         if(binding->method==method&&binding->entry==target&&InterlockedCompareExchange(&binding->current,0,0)
+                &&InterlockedCompareExchange(&binding->valid,0,0)
                 &&(!kind||kind==1&&binding->fileOperation||kind==2&&binding->threadOperation||kind==3&&binding->unsafeOperation||kind==4&&binding->arraycopyOperation)){found=1;break;}
     ReleaseSRWLockShared(&native_records);return found;
 }
 static int native_binding_resolved(jmethodID method,void *target){
     if(!target)return 0;if(native_binding_current(method,target,0))return 1;
     HMODULE image=native_image(target);
-    // Registered VM natives need their matching actual export, including
-    // System.arraycopy, rather than an unresolved native-call stub.
+    // An address in the VM alone is not an observed implementation. It may be
+    // HotSpot's lazy-lookup sentinel. Only actual registrar/export identities
+    // already retained for this method can be used as a seed's original.
     return image&&(image!=code_vm_layout.image||native_thread_vm_target(method,target)||native_unsafe_vm_target(method,target)||native_arraycopy_vm_target(method,target));
+}
+static const char *native_binding_unobserved(void *target){
+    if(!target)return "UNBOUND_ENTRY";
+    return native_image(target)==code_vm_layout.image?"VM_ENTRY_UNCONFIRMED":"IMPLEMENTATION_UNOBSERVABLE";
 }
 static int native_binding_seed_target(JNIEnv *env,NativeThread *state,jclass declaring,jmethodID method,void **target,void **replacement){
     NativeBindingSeed *seed=state->bindingSeed;
@@ -42,7 +48,7 @@ static int native_binding_pending(jclass type,const char *name,const char *signa
 static int native_binding_seed_one(JNIEnv *env,NativeThread *state,jclass type,jmethodID method,const char *name,const char *signature,unsigned kind){
     void *current=NULL;uintptr_t version[3]={0};if(!code_vm_native_binding(env,method,&current,version))return native_binding_pending(type,name,signature,kind,"METHOD_LAYOUT_UNAVAILABLE");
     if(native_binding_current(method,current,kind))return 0;
-    if(!native_binding_resolved(method,current))return native_binding_pending(type,name,signature,kind,current?"UNRESOLVED_ENTRY":"UNBOUND_ENTRY");
+    if(!native_binding_resolved(method,current))return native_binding_pending(type,name,signature,kind,native_binding_unobserved(current));
     NativeBindingSeed seed={.method=method,.declaring=type,.previous=state->bindingSeed};memcpy(seed.version,version,sizeof(version));state->bindingSeed=&seed;
     JNINativeMethod registration={(char*)name,(char*)signature,(void*)native_binding_rebinding};
     jint installed=native_original.RegisterNatives(env,type,&registration,1);state->bindingSeed=seed.previous;

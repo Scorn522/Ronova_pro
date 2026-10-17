@@ -17,6 +17,8 @@ public final class AuditFixCheck {
         if(args.length==1&&args[0].equals("unknown-carrier-graph")){unknownCarrierGraph();return;}
         if(args.length==1&&args[0].equals("unknown-map-key-semantics")){unknownMapKeySemantics();return;}
         if(args.length==1&&args[0].equals("event-image-composition")){eventImageComposition();return;}
+        if(args.length==1&&args[0].equals("file-client-entries")){fileClientEntries();return;}
+        if(args.length==1&&args[0].equals("client-dispatch-entry")){clientDispatchEntry();return;}
         if(args.length==1&&args[0].equals("scoped-transform-failure")){scopedTransformFailure();return;}
         if(args.length==1&&args[0].equals("startup-batches")){startupBatch();return;}
         if(args.length==1&&args[0].equals("retirement-readback")){retirementReadback();return;}
@@ -416,7 +418,7 @@ public final class AuditFixCheck {
             entries.set(null,Array.newInstance(entries.getType().getComponentType(),0));
             changed=(byte[])compose.invoke(null,loader,name,actual,original);
             require(changed!=null&&changed!=original,"shared Forge dispatcher image was not composed");
-            require(ready.getBoolean(null),"composed EventBus image did not publish its boundary result");
+            require(ready.getBoolean(null)==oldReady,"unaccepted transformed bytes published a live EventBus boundary");
             var node=new org.objectweb.asm.tree.ClassNode();new org.objectweb.asm.ClassReader(changed).accept(node,0);
             String bridge="dev/ronova/pro/bootstrap/ControlBridge",fault="dev/ronova/pro/bootstrap/EventFaultBridge";
             require(eventHookCount(node,"addToListeners","(Ljava/lang/Object;Ljava/lang/Class;Lnet/minecraftforge/eventbus/api/IEventListener;Lnet/minecraftforge/eventbus/api/EventPriority;)V",bridge,"modOwnerAllowed","(Ljava/lang/Object;)Z")==1
@@ -425,7 +427,7 @@ public final class AuditFixCheck {
             String post="(Lnet/minecraftforge/eventbus/api/Event;Lnet/minecraftforge/eventbus/api/IEventBusInvokeDispatcher;)Z";
             require(eventHookCount(node,"post",post,bridge,"modListenerAllowed","(Ljava/lang/Object;)Z")==1,
                     "shared dispatcher composition lost or duplicated the stopped-listener gate");
-            require(eventHookCount(node,"post",post,fault,"dispatch","(Ljava/lang/Object;Ljava/lang/Object;Ljava/lang/Object;)Z")==1
+            require(eventHookCount(node,"post",post,fault,"dispatch","(Ljava/lang/Class;Ljava/lang/Object;Ljava/lang/Object;Ljava/lang/Object;)Z")==1
                     &&eventHookCount(node,"post",post,"net/minecraftforge/eventbus/api/IEventBusInvokeDispatcher","invoke","(Lnet/minecraftforge/eventbus/api/IEventListener;Lnet/minecraftforge/eventbus/api/Event;)V")==1,
                     "exception boundary or its original dispatcher fallback was lost during composition");
             require(eventHookCount(node,"unregister","(Ljava/lang/Object;)V",bridge,"listenerRemovalAllowed","(Ljava/lang/Object;)Z")==1,
@@ -450,6 +452,58 @@ public final class AuditFixCheck {
         for(var body:node.methods)if(body.name.equals(method)&&body.desc.equals(descriptor))for(var instruction:body.instructions)
             if(instruction instanceof org.objectweb.asm.tree.MethodInsnNode call&&call.owner.equals(owner)&&call.name.equals(called)&&call.desc.equals(calledDescriptor))count++;
         return count;
+    }
+    private static long fileCount(String state,String part){
+        String token=":"+part+"=";int begin=state.indexOf(token);require(begin>=0,"file state lacks "+part+": "+state);
+        begin+=token.length();int end=state.indexOf(':',begin);return Long.parseLong(state.substring(begin,end<0?state.length():end));
+    }
+    public static final class FileClientEvent extends net.minecraftforge.eventbus.api.Event {public FileClientEvent(){}}
+    private static void fileClientEntries()throws Exception {
+        Class<?> agent=Class.forName("dev.ronova.pro.agent.RecoveryAgent");
+        Method files=agent.getMethod("fileBoundaryState");String before=(String)files.invoke(null);
+        require(before.startsWith("NATIVE_FILE_BOUNDARY_READY")&&fileCount(before,"PENDING")==0,"file declaration coverage unavailable: "+before);
+        java.nio.file.Path directory=java.nio.file.Path.of(System.getProperty("ronova.pro.audit.directory"));
+        java.nio.file.Files.createDirectories(directory);java.nio.file.Path path=java.nio.file.Files.createTempFile(directory,"native-first-call-",".bin");
+        try {
+            try(var output=new java.io.FileOutputStream(path.toFile())){output.write(0x42);output.write(new byte[]{0x17,0x6c});}
+            try(var input=new java.io.FileInputStream(path.toFile())){
+                require(input.read()==0x42&&input.read()==0x17&&input.read()==0x6c&&input.read()==-1,"first native stream read lost its real result");
+                require(input.getChannel().position()==3,"first native stream read duplicated its original body");
+            }
+            try(var file=new java.io.RandomAccessFile(path.toFile(),"rw")){
+                file.seek(1);require(file.read()==0x17&&file.getFilePointer()==2,"first RAF native read result/position changed");
+                file.write(0x7d);require(file.getFilePointer()==3,"first RAF native write ran more than once");
+                file.setLength(2);require(file.length()==2,"native setLength/length did not use the actual descriptor");
+                Throwable failure=null;try{file.seek(-1);}catch(java.io.IOException original){failure=original;}
+                require(failure!=null,"original invalid native file request did not throw IOException");
+            }
+            String after=(String)files.invoke(null);
+            require(after.startsWith("NATIVE_FILE_BOUNDARY_READY")&&fileCount(after,"PENDING")==0
+                    &&fileCount(after,"TOTAL")==fileCount(before,"TOTAL")&&fileCount(after,"BOUND")>fileCount(before,"BOUND")
+                    &&fileCount(after,"ARMED_VM_ENTRY")<fileCount(before,"ARMED_VM_ENTRY"),"real first calls did not publish guarded bindings: "+before+" -> "+after);
+            System.out.println("FILE_FIRST_BIND_PASS before="+before+" after="+after+" actual_stream_RAF_results_positions_lengths_original_exception_no_IO_probe_at_install");
+        } finally {java.nio.file.Files.deleteIfExists(path);}
+        clientDispatchEntry();
+    }
+    private static void clientDispatchEntry()throws Exception {
+        Class<?> agent=Class.forName("dev.ronova.pro.agent.RecoveryAgent");
+        Class<?> busClass=Class.forName("net.minecraftforge.eventbus.EventBus",true,AuditFixCheck.class.getClassLoader());
+        Method ready=agent.getMethod("eventFaultGuarded",Class.class);
+        require(Boolean.TRUE.equals(ready.invoke(null,busClass)),"late actual EventBus ClassPrepare was not accepted");
+        var seen=new java.util.concurrent.atomic.AtomicInteger();var dispatched=new java.util.concurrent.atomic.AtomicInteger();
+        RuntimeException expected=new RuntimeException("original event listener");
+        var bus=net.minecraftforge.eventbus.api.BusBuilder.builder().setExceptionHandler((b,event,listeners,index,error)->{
+            if(error!=expected)error.printStackTrace();
+            require(error==expected,"original Forge exception handler received a different Throwable");
+        }).build();
+        java.util.function.Consumer<FileClientEvent> listener=event->{seen.incrementAndGet();if(seen.get()==2)throw expected;};
+        bus.addListener(net.minecraftforge.eventbus.api.EventPriority.NORMAL,false,FileClientEvent.class,listener);
+        var event=new FileClientEvent();
+        bus.post(event,(actual,value)->{if(!(actual instanceof net.minecraftforge.eventbus.api.EventPriority))dispatched.incrementAndGet();actual.invoke(value);});
+        Throwable thrown=null;try{bus.post(new FileClientEvent(),(actual,value)->{if(!(actual instanceof net.minecraftforge.eventbus.api.EventPriority))dispatched.incrementAndGet();actual.invoke(value);});}catch(RuntimeException original){thrown=original;}
+        require(seen.get()==2&&dispatched.get()==2&&thrown==expected,"unselected actual EventBus dispatch/Throwable was replaced or duplicated");
+        bus.unregister(listener);
+        System.out.println("CLIENT_DISPATCH_PASS actual_late_Forge_EventBus_ClassPrepare accepted_exact_class original_listener_once original_Throwable handler_absent_fallback no_Core_or_GL_install_claim");
     }
     private static final class ScopedTransformBody {static int value(){return 7;}}
     /** One observed producer failure must not acquire the refusal authority of a selected/control image. */

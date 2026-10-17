@@ -7,6 +7,17 @@ enum { NATIVE_FILE_CREATE_SOCKET=9,NATIVE_FILE_MAPPING_DUPLICATE=10 };
 static jclass native_file_types[NATIVE_FILE_TYPES],native_file_bridge,native_file_duplicate_type;
 static jmethodID native_file_begin_query,native_file_end_query,native_io_begin_query,native_io_end_query,native_file_duplicate_end_query;
 static jfieldID native_file_duplicate_returned,native_file_duplicate_succeeded;
+/* An armed declaration owns no original function address. The only body it
+ * can acquire is the actual NativeMethodBind event's target, before HotSpot
+ * publishes that target or enters the first invocation. Keep old immutable
+ * versions so a later redefinition cannot lend its selector to an old one. */
+typedef struct NativeFileDeclaration {
+    jmethodID method;uintptr_t version[3];unsigned type,operation,argument;
+    char *name,*signature;struct NativeFileDeclaration *next;
+} NativeFileDeclaration;
+static SRWLOCK native_file_declarations_lock=SRWLOCK_INIT;
+static NativeFileDeclaration *native_file_declarations;
+enum { NATIVE_FILE_BOUND=0,NATIVE_FILE_ARMED_VM_ENTRY=1,NATIVE_FILE_PENDING=2,NATIVE_FILE_TOTAL=3 };
 static unsigned native_file_descriptor_argument(const char *signature){
     if(strncmp(signature,"(Ljava/io/FileDescriptor;",sizeof("(Ljava/io/FileDescriptor;")-1)==0)return 2;
     if(strncmp(signature,"(ZLjava/io/FileDescriptor;",sizeof("(ZLjava/io/FileDescriptor;")-1)==0)return 3;
@@ -31,54 +42,128 @@ static int native_file_accepts(unsigned type,jint modifiers,const char *name,con
     if(type>=NATIVE_SOCKET_DISPATCHER)return native_file_descriptor_argument(signature)!=0;
     return !(modifiers&0x0008);
 }
-
-static int native_file_seed_one(JNIEnv *env,NativeThread *state,unsigned type,jmethodID method){
-    jint modifiers=0;char *name=NULL,*signature=NULL;int remaining=1;
-    if((*native_ti)->GetMethodModifiers(native_ti,method,&modifiers)!=JVMTI_ERROR_NONE)return 1;
-    if(!(modifiers&0x0100))return 0;
-    if((*native_ti)->GetMethodName(native_ti,method,&name,&signature,NULL)!=JVMTI_ERROR_NONE)goto done;
-    if(!native_file_accepts(type,modifiers,name,signature)){remaining=0;goto done;}
-    remaining=native_binding_seed_one(env,state,native_file_types[type],method,name,signature,1);
-done:
-    if(name)(*native_ti)->Deallocate(native_ti,(unsigned char*)name);if(signature)(*native_ti)->Deallocate(native_ti,(unsigned char*)signature);return remaining;
+static unsigned native_file_operation(unsigned type,jint modifiers,const char *name,const char *signature){
+    return native_file_socket_creation(type,modifiers,name,signature)?NATIVE_FILE_CREATE_SOCKET
+            :native_file_mapping_duplicate(type,modifiers,name,signature)?NATIVE_FILE_MAPPING_DUPLICATE
+            :type==NATIVE_FILE_DISPATCHER?(strcmp(name,"close0")==0?4:3)
+            :type==NATIVE_SOCKET_DISPATCHER&&strcmp(name,"close0")==0?7
+            :type>=NATIVE_ASYNC_SOCKET?8
+            :type==NATIVE_SOCKET_NET&&strcmp(name,"accept")==0
+                    &&strcmp(signature,"(Ljava/io/FileDescriptor;Ljava/io/FileDescriptor;[Ljava/net/InetSocketAddress;)I")==0?8
+            :type>=NATIVE_SOCKET_DISPATCHER?3
+            :type==NATIVE_FILE_DESCRIPTOR?(strcmp(name,"close0")==0?4:strcmp(name,"sync")==0?5:3)
+            :type==NATIVE_FILE_CHANNEL&&strcmp(name,"unmap0")==0?6
+            :type==NATIVE_FILE_CHANNEL&&strcmp(name,"transferTo0")==0
+                    &&strcmp(signature,"(Ljava/io/FileDescriptor;JJLjava/io/FileDescriptor;)J")==0?8
+            :strcmp(name,"open0")==0?2:1;
 }
-JNIEXPORT jint JNICALL Java_dev_ronova_pro_bootstrap_NativeControl_fileBindings0(JNIEnv *env,jclass controller){
-    (void)controller;
-    if(!native_jni_ready||!native_control_gate||!native_original.CallStaticBooleanMethod(env,native_controller,native_control_gate)){
-        native_refuse(env,"NATIVE_FILE_INSTALL_AGENT_REQUIRED");return -1;
+static unsigned native_file_argument(unsigned type,jint modifiers,const char *name,const char *signature){
+    unsigned argument=native_file_mapping_duplicate(type,modifiers,name,signature)?1
+            :type>=NATIVE_SOCKET_DISPATCHER?native_file_descriptor_argument(signature):type==NATIVE_FILE_DISPATCHER?2:1;
+    return argument?argument:1;
+}
+static int native_file_snapshot(JNIEnv *env,unsigned type,jmethodID method,void **target,uintptr_t version[3]){
+    jclass declaring=NULL;jboolean obsolete=JNI_TRUE;
+    int ready=type<NATIVE_FILE_TYPES&&native_file_types[type]
+            &&(*native_ti)->GetMethodDeclaringClass(native_ti,method,&declaring)==JVMTI_ERROR_NONE
+            &&native_original.IsSameObject(env,declaring,native_file_types[type])
+            &&(*native_ti)->IsMethodObsolete(native_ti,method,&obsolete)==JVMTI_ERROR_NONE&&!obsolete
+            &&code_vm_native_binding(env,method,target,version);
+    if(declaring)native_original.DeleteLocalRef(env,declaring);return ready&&!native_original.ExceptionCheck(env);
+}
+static NativeFileDeclaration *native_file_arm(unsigned type,jmethodID method,jint modifiers,const char *name,const char *signature,const uintptr_t version[3]){
+    NativeFileDeclaration *found=NULL;
+    AcquireSRWLockShared(&native_file_declarations_lock);
+    for(NativeFileDeclaration *entry=native_file_declarations;entry;entry=entry->next)
+        if(entry->method==method&&entry->type==type&&!memcmp(entry->version,version,sizeof(entry->version))
+                &&!strcmp(entry->name,name)&&!strcmp(entry->signature,signature)){found=entry;break;}
+    ReleaseSRWLockShared(&native_file_declarations_lock);if(found)return found;
+    NativeFileDeclaration *entry=(NativeFileDeclaration*)calloc(1,sizeof(*entry));if(!entry)return NULL;
+    entry->method=method;entry->type=type;memcpy(entry->version,version,sizeof(entry->version));
+    entry->operation=native_file_operation(type,modifiers,name,signature);entry->argument=native_file_argument(type,modifiers,name,signature);
+    entry->name=_strdup(name);entry->signature=_strdup(signature);
+    if(!entry->name||!entry->signature){free(entry->name);free(entry->signature);free(entry);return NULL;}
+    AcquireSRWLockExclusive(&native_file_declarations_lock);
+    for(NativeFileDeclaration *actual=native_file_declarations;actual;actual=actual->next)
+        if(actual->method==method&&actual->type==type&&!memcmp(actual->version,version,sizeof(actual->version))
+                &&!strcmp(actual->name,name)&&!strcmp(actual->signature,signature)){found=actual;break;}
+    if(!found){entry->next=native_file_declarations;native_file_declarations=entry;found=entry;entry=NULL;}
+    ReleaseSRWLockExclusive(&native_file_declarations_lock);
+    if(entry){free(entry->name);free(entry->signature);free(entry);}return found;
+}
+static int native_file_bind_events_ready(void){
+    /* native_events is published only after SetEventCallbacks and enabling
+     * NativeMethodBind on our protected JVMTI environment both succeeded. */
+    return InterlockedCompareExchange(&native_events,0,0)&&native_ti&&native_definitions
+            &&InterlockedCompareExchange(&native_jni_ready,0,0)&&InterlockedCompareExchange(&native_boundary_ready,0,0)
+            &&InterlockedCompareExchange(&native_tooling_ready,0,0)&&!InterlockedCompareExchange(&native_tooling_shutdown,0,0);
+}
+static void native_file_seed_one(JNIEnv *env,NativeThread *state,unsigned type,jmethodID method,int install,jlong values[4]){
+    jint modifiers=0;char *name=NULL,*signature=NULL;void *current=NULL;uintptr_t version[3]={0};unsigned status=NATIVE_FILE_PENDING;int accepted=1;
+    if((*native_ti)->GetMethodModifiers(native_ti,method,&modifiers)!=JVMTI_ERROR_NONE)goto done;
+    if(!(modifiers&0x0100)){accepted=0;goto done;}
+    if((*native_ti)->GetMethodName(native_ti,method,&name,&signature,NULL)!=JVMTI_ERROR_NONE)goto done;
+    if(!native_file_accepts(type,modifiers,name,signature)){accepted=0;goto done;}
+    if(!native_file_snapshot(env,type,method,&current,version)||!native_file_arm(type,method,modifiers,name,signature,version))goto done;
+    if(!install)goto done;
+    if(native_binding_current(method,current,1)){status=NATIVE_FILE_BOUND;goto done;}
+    if(native_binding_resolved(method,current)){
+        if(!native_binding_seed_one(env,state,native_file_types[type],method,name,signature,1))status=NATIVE_FILE_BOUND;
+        goto done;
     }
-    NativeThread *state=native_thread();if(!state)return -1;state->control++;jint remaining=0;
+    /* No sentinel address is guessed, registered or called. This state only
+     * promises an exact armed declaration plus the enabled pre-publication
+     * callback. Its current VM body is deliberately still unconfirmed. */
+    if(current&&native_image(current)==code_vm_layout.image&&native_file_bind_events_ready())status=NATIVE_FILE_ARMED_VM_ENTRY;
+done:
+    if(accepted){values[status]++;values[NATIVE_FILE_TOTAL]++;}
+    if(name)(*native_ti)->Deallocate(native_ti,(unsigned char*)name);if(signature)(*native_ti)->Deallocate(native_ti,(unsigned char*)signature);
+}
+static void native_file_bindings(JNIEnv *env,NativeThread *state,int install,jlong values[4]){
     for(unsigned i=0;i<NATIVE_FILE_TYPES&&!native_original.ExceptionCheck(env);i++){
         jmethodID *methods=NULL;jint count=0;
-        if(!native_file_types[i]||(*native_ti)->GetClassMethods(native_ti,native_file_types[i],&count,&methods)!=JVMTI_ERROR_NONE){remaining++;continue;}
-        for(jint j=0;j<count&&!native_original.ExceptionCheck(env);j++)remaining+=native_file_seed_one(env,state,i,methods[j]);
+        if(!native_file_types[i]||(*native_ti)->GetClassMethods(native_ti,native_file_types[i],&count,&methods)!=JVMTI_ERROR_NONE){
+            values[NATIVE_FILE_PENDING]++;values[NATIVE_FILE_TOTAL]++;continue;
+        }
+        for(jint j=0;j<count&&!native_original.ExceptionCheck(env);j++)native_file_seed_one(env,state,i,methods[j],install,values);
         if(methods)(*native_ti)->Deallocate(native_ti,(unsigned char*)methods);
     }
-    state->control--;return remaining;
+}
+static int native_file_install_allowed(JNIEnv *env,jclass controller){
+    if(!native_jni_ready||!native_controller||!native_original.IsSameObject(env,controller,native_controller)
+            ||!native_control_gate||!native_original.CallStaticBooleanMethod(env,native_controller,native_control_gate)){
+        native_refuse(env,"NATIVE_FILE_INSTALL_AGENT_REQUIRED");return 0;
+    }
+    return !native_original.ExceptionCheck(env);
+}
+JNIEXPORT jint JNICALL Java_dev_ronova_pro_bootstrap_NativeControl_fileBindings0(JNIEnv *env,jclass controller){
+    if(!native_file_install_allowed(env,controller))return -1;
+    NativeThread *state=native_thread();if(!state)return -1;state->control++;jlong values[4]={0};native_file_bindings(env,state,1,values);state->control--;
+    /* Preserve the old entry's meaning: an armed VM entry is not a published
+     * original-function wrapper and therefore still counts as unresolved. */
+    return (jint)(values[NATIVE_FILE_ARMED_VM_ENTRY]+values[NATIVE_FILE_PENDING]);
+}
+JNIEXPORT jlongArray JNICALL Java_dev_ronova_pro_bootstrap_NativeControl_fileBindingState0(JNIEnv *env,jclass controller){
+    if(!native_file_install_allowed(env,controller))return NULL;
+    NativeThread *state=native_thread();if(!state)return NULL;state->control++;jlong values[4]={0};native_file_bindings(env,state,1,values);
+    jlongArray result=!native_original.ExceptionCheck(env)?native_original.NewLongArray(env,4):NULL;
+    if(result)native_original.SetLongArrayRegion(env,result,0,4,values);state->control--;return result;
 }
 
-static void native_file_classify(JNIEnv *env,jclass type,Binding *binding,const char *name){
+static int native_file_classify(JNIEnv *env,jclass type,Binding *binding,const char *name){
     unsigned matched=NATIVE_FILE_TYPES;for(unsigned i=0;i<NATIVE_FILE_TYPES;i++)if(native_file_types[i]&&native_original.IsSameObject(env,type,native_file_types[i])){matched=i;break;}
-    if(matched==NATIVE_FILE_TYPES)return;
-    jint modifiers=0;if((*native_ti)->GetMethodModifiers(native_ti,binding->method,&modifiers)!=JVMTI_ERROR_NONE||!native_file_accepts(matched,modifiers,name,binding->signature))return;
-    binding->fileMethod=_strdup(name);
-    if(!binding->fileMethod){native_refuse(env,"NATIVE_FILE_METHOD_CAPTURE_FAILED");return;}
-    binding->fileArgument=native_file_mapping_duplicate(matched,modifiers,name,binding->signature)?1
-            :matched>=NATIVE_SOCKET_DISPATCHER?native_file_descriptor_argument(binding->signature):matched==NATIVE_FILE_DISPATCHER?2:1;
-    if(!binding->fileArgument)binding->fileArgument=1;
-    binding->fileOperation=native_file_socket_creation(matched,modifiers,name,binding->signature)?NATIVE_FILE_CREATE_SOCKET
-            :native_file_mapping_duplicate(matched,modifiers,name,binding->signature)?NATIVE_FILE_MAPPING_DUPLICATE
-            :matched==NATIVE_FILE_DISPATCHER?(strcmp(name,"close0")==0?4:3)
-            :matched==NATIVE_SOCKET_DISPATCHER&&strcmp(name,"close0")==0?7
-            :matched>=NATIVE_ASYNC_SOCKET?8
-            :matched==NATIVE_SOCKET_NET&&strcmp(name,"accept")==0
-                    &&strcmp(binding->signature,"(Ljava/io/FileDescriptor;Ljava/io/FileDescriptor;[Ljava/net/InetSocketAddress;)I")==0?8
-            :matched>=NATIVE_SOCKET_DISPATCHER?3
-            :matched==NATIVE_FILE_DESCRIPTOR?(strcmp(name,"close0")==0?4:strcmp(name,"sync")==0?5:3)
-            :matched==NATIVE_FILE_CHANNEL&&strcmp(name,"unmap0")==0?6
-            :matched==NATIVE_FILE_CHANNEL&&strcmp(name,"transferTo0")==0
-                    &&strcmp(binding->signature,"(Ljava/io/FileDescriptor;JJLjava/io/FileDescriptor;)J")==0?8
-            :strcmp(name,"open0")==0?2:1;
+    if(matched==NATIVE_FILE_TYPES)return 1;
+    if(!name||!binding->signature){native_refuse(env,"NATIVE_FILE_METHOD_CAPTURE_FAILED");return 0;}
+    jint modifiers=0;void *current=NULL;uintptr_t version[3]={0};
+    if((*native_ti)->GetMethodModifiers(native_ti,binding->method,&modifiers)!=JVMTI_ERROR_NONE){native_refuse(env,"NATIVE_FILE_DECLARATION_UNAVAILABLE");return 0;}
+    if(!native_file_accepts(matched,modifiers,name,binding->signature))return 1;
+    NativeFileDeclaration *entry=native_file_snapshot(env,matched,binding->method,&current,version)
+            ?native_file_arm(matched,binding->method,modifiers,name,binding->signature,version):NULL;
+    if(!entry){native_refuse(env,"NATIVE_FILE_DECLARATION_UNAVAILABLE");return 0;}
+    binding->fileMethod=_strdup(entry->name);
+    if(!binding->fileMethod){native_refuse(env,"NATIVE_FILE_METHOD_CAPTURE_FAILED");return 0;}
+    binding->fileArgument=entry->argument;binding->fileOperation=entry->operation;
+    return !native_original.ExceptionCheck(env);
 }
 static int native_file_prepare(JNIEnv *env){
     NativeThread *state=native_thread();if(!state)return 0;state->control++;
@@ -110,6 +195,9 @@ static int native_file_prepare(JNIEnv *env){
     if(duplicate)native_original.DeleteLocalRef(env,duplicate);
     ready=ready&&native_file_bridge&&native_file_begin_query&&native_file_end_query&&native_io_begin_query&&native_io_end_query&&native_file_duplicate_end_query
             &&native_file_duplicate_type&&native_file_duplicate_returned&&native_file_duplicate_succeeded&&!native_original.ExceptionCheck(env);
+    /* Register the actual declarations without resolving or invoking their
+     * I/O. A later bind refreshes a changed version from its own event. */
+    if(ready){jlong declarations[4]={0};native_file_bindings(env,state,0,declarations);ready=!native_original.ExceptionCheck(env);}
     state->control--;return ready;
 }
 static void native_file_clear(JNIEnv *env,NativeFileFrame *use){

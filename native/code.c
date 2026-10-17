@@ -861,6 +861,9 @@ static void JNICALL code_class_prepared(jvmtiEnv *ti,JNIEnv *env,jthread thread,
         // installation is certified; no external code image is invented.
         if(!candidate&&!loader&&code_prepare_target_count
                 &&bsearch(&signature,code_prepare_targets,code_prepare_target_count,sizeof(*code_prepare_targets),code_prepare_target_order))candidate=1;
+        // A Forge dispatcher can first load after premain. Forward this exact
+        // prepare; Java still requires its own final returned body and loader.
+        if(!candidate&&signature&&!strcmp(signature,"Lnet/minecraftforge/eventbus/EventBus;"))candidate=1;
         ReleaseSRWLockShared(&code_records);
     }
     if(signature)(*ti)->Deallocate(ti,(unsigned char*)signature);if(loader)native_original.DeleteLocalRef(env,loader);

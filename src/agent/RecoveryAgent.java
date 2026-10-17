@@ -26,7 +26,20 @@ public final class RecoveryAgent {
     /** True once the reflection field-write entry points carry the policy guard. */
     private static volatile boolean reflectionGuarded,unsafeGuarded;
     private static volatile boolean eventFaultGuarded;
-    public static boolean eventFaultGuarded() { return eventFaultGuarded; }
+    private record EventFaultImage(java.lang.ref.WeakReference<Class<?>> actual,boolean initial,boolean valid,boolean accepted){}
+    private static final Map<ClassLoader,EventFaultImage> eventFaultImages=Collections.synchronizedMap(new WeakHashMap<>());
+    private static final ThreadLocal<Map<ClassLoader,EventFaultImage>> eventFaultReturns=ThreadLocal.withInitial(WeakHashMap::new);
+    private static volatile Class<?> clientEventBus;
+    public static boolean eventFaultGuarded() {Class<?> actual=clientEventBus;return actual==null?eventFaultGuarded:eventFaultGuarded(actual);}
+    public static boolean eventFaultGuarded(Class<?> actual) {
+        if(actual==null||!actual.getName().equals("net.minecraftforge.eventbus.EventBus"))return false;
+        synchronized(eventFaultImages){EventFaultImage image=eventFaultImages.get(actual.getClassLoader());
+            return image!=null&&image.valid()&&image.accepted()&&image.actual().get()==actual;}
+    }
+    public static String eventFaultState(){
+        Class<?> actual=clientEventBus;if(actual!=null)return eventFaultGuarded(actual)?"DISPATCH_READY":"DISPATCH_PENDING";
+        synchronized(eventFaultImages){return eventFaultImages.isEmpty()?"WAITING_FOR_EVENT_BUS":eventFaultGuarded?"DISPATCH_READY:CORE_NOT_BOUND":"DISPATCH_PENDING";}
+    }
 
     private static volatile Instrumentation instrumentation;
     private static Class<?> bridge;
@@ -155,7 +168,7 @@ public final class RecoveryAgent {
             bootstrap=new JarFile(nativeBootstrapPath.toFile());
             api.appendToBootstrapClassLoaderSearch(bootstrap);
             bridge=Class.forName("dev.ronova.pro.bootstrap.TaskBridge",true,null);
-            if(!Integer.valueOf(98).equals(bridge.getMethod("abiVersion").invoke(null)))throw new IllegalStateException("TASK_BRIDGE_ABI_MISMATCH");
+            if(!Integer.valueOf(99).equals(bridge.getMethod("abiVersion").invoke(null)))throw new IllegalStateException("TASK_BRIDGE_ABI_MISMATCH");
             // This classfile was first requested beneath a stopped empty-stream return.
             Class.forName("java.util.stream.IntPipeline$Head",false,null);
             for(String helper:List.of("SourcePublication","SourceIndexMutation","FastListView","FieldMutation","EquipmentInvocations"))
@@ -187,7 +200,7 @@ public final class RecoveryAgent {
             Class.forName("dev.ronova.pro.bootstrap.ControlBridge$ProducerFrame",false,null);
             Class.forName("dev.ronova.pro.bootstrap.EventFaultBridge",true,null);
             Class<?> control=Class.forName("dev.ronova.pro.bootstrap.ControlBridge",true,null);
-            if(!Integer.valueOf(98).equals(control.getMethod("abiVersion").invoke(null)))throw new IllegalStateException("CONTROL_BRIDGE_ABI_MISMATCH");
+            if(!Integer.valueOf(99).equals(control.getMethod("abiVersion").invoke(null)))throw new IllegalStateException("CONTROL_BRIDGE_ABI_MISMATCH");
             Module base=Object.class.getModule(),ours=RecoveryAgent.class.getModule();
             api.redefineModule(base,Set.of(bridge.getModule()),Map.of(
                     "jdk.internal.org.objectweb.asm",Set.of(ours),"jdk.internal.org.objectweb.asm.commons",Set.of(ours),
@@ -489,11 +502,11 @@ public final class RecoveryAgent {
                 else if(name.equals("java/lang/reflect/Field")||name.equals("sun/misc/Unsafe")||name.equals("jdk/internal/misc/Unsafe")
                         ||HandleWriteBoundary.targets().contains(name)&&!name.equals("java/lang/invoke/MethodHandles")&&!name.equals("java/lang/invoke/MethodHandles$Lookup"))writers.add(loaded);
                 else if(loader==null&&startupPlatformTarget(name))platform.add(loaded);
+                else if(name.equals(EventFaultBoundary.TARGET))events.add(loaded);
                 else if(name.equals(CommandBoundary.TARGET)||loader!=null&&!producerModule(loaded.getModule())
                         &&(CodeSourceBoundary.TARGETS.contains(name)||NetworkBoundary.TARGETS.contains(name)||ClientBoundary.TARGETS.contains(name)||BufferBoundary.wrapTarget(name)))sources.add(loaded);
                 else if(FastutilIndexBoundary.targets().contains(name)||SectionKeyBoundary.targets().contains(name))indices.add(loaded);
                 else if(name.equals(ConsoleBoundary.TARGET))consoles.add(loaded);
-                else if(name.equals(EventFaultBoundary.TARGET))events.add(loaded);
             }
             bridge.getMethod("boundaryFutureTargets",String[].class).invoke(null,(Object)futureTasks.toArray(String[]::new));
             for(ModuleLayer layer:sourceLayers)codeSourceBridge.getMethod("seedLayer",ModuleLayer.class).invoke(null,layer);
@@ -526,15 +539,13 @@ public final class RecoveryAgent {
             DispatchBoundary.retransformDeclared(api,startup);
             for(Class<?> type:events) {
                 try {
-                    control.getMethod("installEventBoundary",Class.class).invoke(null,type);
-                    eventFaultGuarded=false;api.retransformClasses(type);
+                    api.retransformClasses(type);eventFaultAccepted(type);
                 }
-                catch(ReflectiveOperationException failure){throw new IllegalStateException("EVENT_CONTROL_BINDING",failure);}
                 catch(UnmodifiableClassException|RuntimeException|LinkageError failure) {
                     eventFaultGuarded=false;report("CLIENT_FAULT_DISPATCH_UNAVAILABLE:"+failure.getClass().getSimpleName());
                 }
             }
-            report("CLIENT_FAULT_DISPATCH:"+eventFaultGuarded);
+            report("CLIENT_FAULT_DISPATCH:"+eventFaultState());
             report(loadedTaskBoundariesReady()?
                     "JDK_FUTURE_WORKER_SCHEDULED_FORKJOIN_CF_DEFERRED_AND_STAGE_INVOCATIONS":"PARTIAL_TASK_BOUNDARIES");
             if(!NativeBindingBoundary.observedBindings().isEmpty())
@@ -570,7 +581,8 @@ public final class RecoveryAgent {
         byte[] registration=EventBusBoundary.transform(name,bytes),current=registration==null?bytes:registration;
         byte[] fault=EventFaultBoundary.transform(loader,current);if(fault!=null)current=fault;
         byte[] declared=DispatchBoundary.transform(loader,name,actual,current);if(declared!=null)current=declared;
-        eventFaultGuarded=true;return current==bytes?null:current;
+        if(!EventFaultBoundary.verify(current))throw new IllegalStateException("EVENT_DISPATCH_IMAGE_INCOMPLETE");
+        return current==bytes?null:current;
     }
     private static byte[] failedTransform(Module module,String name,byte[] input,Throwable failure,boolean control,boolean required) {
         ModGroupBoundary.failed(module,String.valueOf(name),failure);
@@ -600,6 +612,10 @@ public final class RecoveryAgent {
                     "java/util/Timer","java/util/TimerThread","java/lang/invoke/MethodHandles","java/lang/invoke/MethodHandles$Lookup").contains(name);
     }
     private static void platformTransforming(ClassLoader loader,String name,Class<?> actual){
+        if(EventFaultBoundary.TARGET.equals(name)){
+            eventFaultImages.put(loader,new EventFaultImage(new java.lang.ref.WeakReference<>(actual),actual==null,false,false));
+            eventFaultReturns.get().remove(loader);eventFaultGuarded=false;
+        }
         if(!platformGuardTarget(loader,name))return;
         platformImages.put(name,new PlatformImage(actual,false,false));platformReturns.get().remove(name);
         if(name.equals("java/lang/reflect/Field"))reflectionGuarded=false;
@@ -608,6 +624,12 @@ public final class RecoveryAgent {
     }
     /** This receipt describes only the image our last Java transformer actually returned. */
     private static void platformReturned(ClassLoader loader,String name,Class<?> actual,byte[] returned){
+        if(EventFaultBoundary.TARGET.equals(name)){
+            boolean valid=false;
+            try{valid=returned!=null&&EventFaultBoundary.verify(returned);}catch(RuntimeException|LinkageError unavailable){}
+            EventFaultImage image=new EventFaultImage(new java.lang.ref.WeakReference<>(actual),actual==null,valid,false);
+            eventFaultImages.put(loader,image);eventFaultReturns.get().put(loader,image);
+        }
         if(!platformGuardTarget(loader,name))return;
         boolean valid=returned!=null&&returned.length>=4&&returned[0]==(byte)0xca&&returned[1]==(byte)0xfe
                 &&returned[2]==(byte)0xba&&returned[3]==(byte)0xbe;
@@ -623,9 +645,24 @@ public final class RecoveryAgent {
         PlatformImage image=new PlatformImage(actual,valid,false);
         platformImages.put(name,image);platformReturns.get().put(name,image);
     }
+    private static void eventFaultAccepted(Class<?> actual){
+        if(actual==null||!actual.getName().equals("net.minecraftforge.eventbus.EventBus"))return;
+        ClassLoader loader=actual.getClassLoader();EventFaultImage returned=eventFaultReturns.get().remove(loader);
+        synchronized(eventFaultImages){
+            EventFaultImage current=eventFaultImages.get(loader);
+            // A first definition may prepare on another thread. An existing
+            // Class's replacement always needs that API thread's own return.
+            if(returned==null&&current!=null&&current.initial())returned=current;
+            if(returned==null||returned!=current||!returned.valid()
+                    ||!returned.initial()&&returned.actual().get()!=actual)return;
+            eventFaultImages.put(loader,new EventFaultImage(new java.lang.ref.WeakReference<>(actual),false,true,true));
+            if(clientEventBus==null||clientEventBus==actual)eventFaultGuarded=true;
+        }
+    }
     /** A successful API return or exact ClassPrepare consumes this thread's returned-image receipt. */
     private static void platformAccepted(Class<?> actual){
         if(actual==null)return;String name=actual.getName().replace('.','/');ClassLoader loader=actual.getClassLoader();
+        if(EventFaultBoundary.TARGET.equals(name))eventFaultAccepted(actual);
         if(!platformGuardTarget(loader,name))return;
         PlatformImage returned=platformReturns.get().remove(name);
         // ClassPrepare can run on another thread after a load returned. Only a
@@ -658,6 +695,12 @@ public final class RecoveryAgent {
         }return true;
     }
     private static void platformRejected(Class<?> actual){
+        if(actual!=null&&actual.getName().equals("net.minecraftforge.eventbus.EventBus")){
+            ClassLoader loader=actual.getClassLoader();EventFaultImage returned=eventFaultReturns.get().remove(loader);
+            synchronized(eventFaultImages){if(returned!=null&&eventFaultImages.get(loader)==returned)
+                eventFaultImages.put(loader,new EventFaultImage(new java.lang.ref.WeakReference<>(actual),false,false,false));}
+            eventFaultGuarded=false;
+        }
         String name=actual.getName().replace('.','/');if(!platformGuardTarget(actual.getClassLoader(),name))return;
         PlatformImage returned=platformReturns.get().remove(name);
         if(returned!=null)platformImages.replace(name,returned,new PlatformImage(actual,false,false));
@@ -684,6 +727,10 @@ public final class RecoveryAgent {
     public static String nativeBindingState() {
         try { return String.valueOf(Class.forName("dev.ronova.pro.bootstrap.NativeControl",false,null).getMethod("state").invoke(null)); }
         catch(ReflectiveOperationException unavailable) { return NativeBindingBoundary.backendState(); }
+    }
+    public static String fileBoundaryState(){
+        try{return String.valueOf(Class.forName("dev.ronova.pro.bootstrap.NativeControl",false,null).getMethod("fileBoundaryInstalled").invoke(null));}
+        catch(ReflectiveOperationException unavailable){return "NATIVE_FILE_BINDINGS_UNAVAILABLE";}
     }
     /** Whether the reflection field-write guard is installed on this JVM. */
     public static boolean unsafeFieldWriteGuarded() { return unsafeGuarded; }
@@ -775,6 +822,15 @@ public final class RecoveryAgent {
                 ||!java.util.Objects.equals(mod.getProtectionDomain().getCodeSource(),runtime.getProtectionDomain().getCodeSource())
                 ||modGroupRuntime!=null&&modGroupRuntime!=runtime)throw new SecurityException("MOD_GROUP_OWNER_BINDING");
         modGroupRuntime=runtime;
+        try{
+            Class<?> fault=Class.forName("dev.ronova.pro.bootstrap.EventFaultBridge",true,null);
+            fault.getMethod("bindCore",Class.class).invoke(null,runtime);
+            Class<?> bus=Class.forName("net.minecraftforge.eventbus.EventBus",false,runtime.getClassLoader());
+            clientEventBus=bus;
+            Class.forName("dev.ronova.pro.bootstrap.ControlBridge",false,null).getMethod("installEventBoundary",Class.class).invoke(null,bus);
+            Instrumentation api=instrumentation;
+            if(api!=null&&!eventFaultGuarded(bus)&&api.isModifiableClass(bus)){api.retransformClasses(bus);eventFaultAccepted(bus);}
+        }catch(ReflectiveOperationException|UnmodifiableClassException unavailable){throw new IllegalStateException("CLIENT_EVENT_DISPATCH_BINDING",unavailable);}
     }
     /** Fences task and callback publication before current body cleanup starts. */
     public static String prepareModGroup(String[] ids,Module[] modules) {

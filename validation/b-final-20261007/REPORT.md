@@ -1,5 +1,26 @@
 # B 批实际报告：2026-10-09 代码收敛接续
 
+## 2026-10-17：C 接续——文件首次 Native 绑定与客户端异常分派
+
+接续 `915440d`，Java ABI99 / Native ABI89 / SourceMapBridge2 / Storage3 / Journal6，协议 `r3-client-8`。本包完整处理文件入口的前置布防/首次绑定，以及客户端分派的晚加载、Core 绑定和失败收尾；源码写齐后统一构建，不恢复容器 Hook，不做自身外观、武器注册或 ZIP。
+
+先纠正此前剩余项的表述：日志里的77个入口不是77个没写的函数。运行中部分文件 native Method 当前指向尚未确认本体的 VM 地址，不能猜它们的符号、注册该地址或执行文件 API 来逼迫解析。现在为13个真实 bootstrap 文件/通道类型的每个所选 native 声明保留准确 Class、Method/ConstMethod/ConstantPool 版本、name/signature、operation 与参数位置。NativeMethodBind 在首次真实调用之前，用事件给出的新 target 完成文件分类和受控入口发布；目录/元数据/分配失败拒绝发布裸原入口，失效 binding 不计 BOUND。已有可观察原本体继续用原 seed 机制，未知 VM 体只记 ARMED_VM_ENTRY，不当作已经取得原函数。
+
+新 `fileBindingState0` 返回 BOUND、ARMED_VM_ENTRY、PENDING、TOTAL。ARMED 需要准确声明目录和当前真实 NativeMethodBind callback/event/backend 可用，未观察原 body 的事实保留；旧 `fileBindings0` 继续返回未发布总数，不把77直接改成0。首次绑定事件读取的 Method 元数据可能仍是旧地址，原调用本体始终取事件 target，不拿旧 stub 替换它，也不新增 I/O 探针。
+
+EventBus 的注册/停组/异常/注销保护组合为同一实际正文，新桥带准确 EventBus Class。Agent 只在最终返回正文完整、实际 API 成功或准确 ClassPrepare 后确认，不在 transformer 返回时提前报已安装；按真实 loader 与弱 Class 保留回执，重变换/定义变化使旧就绪失效。晚加载的这一准确 Forge 类型通过现有 ClassPrepare 转发，未加载时报告 WAITING_FOR_EVENT_BUS。Core 绑定准确 runtime 后确认其实际可见 EventBus 并补必要重变换；ClientFaults 注册固定私有 static 回调所用的自身完整 Lookup，实际 module/loader/codeSource、bus 与共享 API 身份必须一致。就绪动态查询，避免首次 false 被永久缓存，另一 loader 的同名类不能借此 Core 回调。
+
+客户端未选事件保留原 dispatcher、原返回和 Throwable。所选着色器注册的回调装饰纳入原 abort 范围；嵌套同一 shader list 的新资源归父 scope，其他 list 不连带清除。清理逐项继续，失败 suppressed 保存在原异常，清理失败重抛原 Throwable；绘制事件状态恢复也不替换原异常。publication/supplier 使用同一 recoverable cause/suppressed 规则，非可恢复错误不吞掉。没有增加 UI、皮肤或渲染外观功能。
+
+`build-c-java99-native89-file-client-20261017.log` **首轮 PASS，29秒**，包括 Native89 编译链接及 Agent/Bootstrap/Core。检查器编译退出0。仅运行本包直接相关检查：`event-image-composition` **首轮退出0**，使用实际 Forge EventBus 字节码验证四个保护组合、新四参桥、原 invoke 回退、二次织入不重复，以及 ASM/JVM 校验；它不声称安装 Core 或真实游戏许可。
+
+实际 premain 的文件部分通过：`c-java99-native89-file-client-prepared-20261017.log` 中启动为 **BOUND=11、ARMED_VM_ENTRY=77、PENDING=0、TOTAL=88**；实际 FileInputStream/FileOutputStream/RandomAccessFile 的读写、seek/length/setLength 和原 IOException 后，变为 **BOUND=19、ARMED_VM_ENTRY=69、PENDING=0**。结果、文件位置和长度核对原调用一次，临时文件按原关闭路径清除；首次绑定确实生成文件 operation 的当前 wrapper。其后同命令的客户端夹具构造失败，所以不能把该命令整体标 PASS；文件子检查通过后没有再重复文件读写。
+
+客户端真实检查 `c-java99-native89-client-dispatch-final-20261017.log` **退出0**：真实 Native89/premain、实际晚初始化 Forge EventBus 的 ClassPrepare、准确 Class 就绪、实际监听一次、原异常与原 Forge exception handler 身份，以及无 Core handler 时的原调用回退。前面的失败日志保留：最初在 Class.forName(false) 只加载未准备时过早查询 ClassPrepare；随后夹具事件缺 Forge 要求的 public 无参构造；最后重复发布同一 Event 触发原 phase 限制，并误把 EventPriority phase marker 计作业务监听。只修夹具协议并单独续跑客户端，未改生产异常来凑通过。没有重跑旧矩阵。
+
+匹配候选 `distribution/candidate-c-java99-native89-file-client-wip-20261017`：Core3093793、prelaunch23226字节，随源码与既有摘要同步 GitHub。启动日志有 INSTALLED_FULL，但77个 ARMED 不等于77个原函数已被调用或解析；本包完成前置布防与首次绑定交接。真实 Core 客户端/GL 异常隔离、进服、存档重启 **NOTRUN**。任意裸 CPU/原始 syscall、自定义 arena/TLS/C++ 状态及未知共享 loader 引用仍沿此前边界保留，完整 C/B 尚未宣称全部完成。
+
+---
 ## 2026-10-16：C 接续——实际 Native 私有分配与 DLL 静态存储
 
 接续 `89ad335`，Java ABI98 / Native ABI88 / SourceMapBridge2 / Storage3 / Journal6，协议 `r3-client-8`。本包先补可观察 Native 私有状态，生产源码整包写齐后统一构建；不恢复 JDK 容器广谱 Hook，不增加自身外观、武器或源码 ZIP。

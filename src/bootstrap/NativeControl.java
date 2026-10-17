@@ -49,7 +49,7 @@ public final class NativeControl {
                 if(dll==null)return installFailure("OBJECT_CLONE_JNI_PAYLOAD_ABSENT",false);
                 nativeLoadAttempted=true;
                 System.load(dll.toString());nativeLoaded=true;
-                if(abi()!=88)throw new UnsatisfiedLinkError("NATIVE_CONTROL_ABI");
+                if(abi()!=89)throw new UnsatisfiedLinkError("NATIVE_CONTROL_ABI");
             }
             if(!nativeBoundaryInstalled){
                 nativeHandoffRetryable=false;
@@ -437,8 +437,10 @@ public final class NativeControl {
     public static String fileBoundaryInstalled(){
         if(!controlCaller())throw new SecurityException("NATIVE_FILE_INSTALL_AGENT_REQUIRED");
         if(!available)return "NATIVE_FILE_BINDINGS_UNAVAILABLE";
-        int remaining=fileBindings0();
-        return remaining==0?"NATIVE_FILE_CURRENT_BINDINGS_READY":"NATIVE_FILE_CURRENT_BINDINGS_PENDING:"+remaining;
+        long[] bindings=fileBindingState0();
+        if(bindings==null||bindings.length!=4)return "NATIVE_FILE_BINDINGS_UNAVAILABLE";
+        String state=":BOUND="+bindings[0]+":ARMED_VM_ENTRY="+bindings[1]+":PENDING="+bindings[2]+":TOTAL="+bindings[3];
+        return (bindings[2]==0?"NATIVE_FILE_BOUNDARY_READY":"NATIVE_FILE_CURRENT_BINDINGS_PENDING")+state;
     }
     static boolean threadOperationBoundary(Thread thread,Module[] sources,int operation){
         return CALLER.getCallerClass()==ControlBridge.class&&available&&threadOperationBoundary0(thread,sources,operation);
@@ -912,6 +914,7 @@ public final class NativeControl {
     private static native boolean mappingDuplicateFrame0(long[] identity,int phase);
     private static native boolean ioOperationBoundary0(Class<?> declaring,String method,long[] arguments,Object[] references,Module[] sources);
     private static native int fileBindings0();
+    private static native long[] fileBindingState0();
     private static native boolean bufferAllocationBoundary0();
     private static native boolean bufferAddressBoundary0(Object buffer,Module[] sources);
     private static native long[] bindBufferStorage0(java.nio.Buffer buffer,Object action,long address,long bytes);
