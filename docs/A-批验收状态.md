@@ -1,5 +1,17 @@
 # Ronova Pro 当前进度
 
+## 2026-10-18：V1.5 三项收尾，仅重建候选
+
+按用户明确收尾范围，启动入口 `PrelaunchMain` 与 `ModGroupBoundary` 共用递归元数据读取：遍历顶层 JAR 的内嵌子 JAR 及更深层后代，将各自 `META-INF/mods.toml` 的 modId 合并到同一外层实际文件。没有外层 descriptor 的嵌套载体也会读取；原文件绑定、别名展开与整组策略继续复用。
+
+删除四个 `ronova_object_state` / `ronova_allocator_state` 头文件和两个未编译的 `host_object_state.c` / `host_allocator_state.c` 实现；独立 `ronova_allocator_adapter.hpp` 已不存在。未恢复合作式 SDK 或私有语义猜测后端。
+
+`objectModule` 在 producer 定义命中时不创建查询键，未命中时一次锁域读取全部真实来源表。普通未命中的 `beginFieldMutation` 复用一个身份键和首次来源解析，不再重复四次创建弱引用；策略调用后仍用同一键重读真实来源，必要时进入原 gate 并重新判断。没有跨调用缓存来源、负结果或许可。
+
+源码收尾后统一执行 `jar` / `reobfJar`，49 秒成功、退出 0。首次沙箱内 Gradle 无法加载用户级 native-platform.dll，尚未进入编译；取得正常构建缓存访问后完成本次构建，没有源码修补或追加构建。日志为 `.work/v1.5-whole-mod-20261018/final-three-build.log`。候选双 JAR 已更新到 `distribution/v1.5-whole-mod`：Core 3,231,087 字节，prelaunch 51,052 字节，配套版本仍为 Java105 / Native99 / Storage3 / Journal7。
+
+未知自定义语义、未观察 Native 入口、第三方不透明格式和未部署驱动按 V1.5 继续如实报告 GAP/PARTIAL；不据此扩写后端。本轮未运行起服、实机、夹具或检查任务。
+
 ## 2026-10-18：A/B/C/D 生产源码集中收尾，停止运行检查
 
 按用户最新执行安排，旧 Forge 起服进程已终止；本轮后续不运行 `runServer`、起服轮询、实机、`validation/checks` 或隔离夹具。先把生产调用接齐，再进行一次统一候选构建。旧启动失败与局部通过各保留原范围，不升级为本候选通过。

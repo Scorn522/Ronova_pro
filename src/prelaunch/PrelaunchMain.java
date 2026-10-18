@@ -21,6 +21,7 @@ import java.util.Collections;
 import java.util.Objects;
 import java.util.jar.JarFile;
 import dev.ronova.pro.persistence.ModCarriers;
+import dev.ronova.pro.launch.ModMetadata;
 
 /** Launches the game JVM only after its early Ronova agent and saved target set are ready. */
 public final class PrelaunchMain {
@@ -136,17 +137,8 @@ public final class PrelaunchMain {
         Properties files=new Properties();Path mods=directory.resolve("mods");if(!Files.isDirectory(mods))return files;
         try(var paths=Files.list(mods)){
             for(Path file:paths.filter(path->Files.isRegularFile(path)&&path.getFileName().toString().toLowerCase(java.util.Locale.ROOT).endsWith(".jar")).toList()){
-                try(JarFile jar=new JarFile(file.toFile())){
-                    var entry=jar.getJarEntry("META-INF/mods.toml");if(entry==null)continue;
-                    String text;try(InputStream input=jar.getInputStream(entry)){text=new String(input.readNBytes(1024*1024),StandardCharsets.UTF_8);}
-                    TreeSet<String> ids=new TreeSet<>();boolean mod=false;
-                    for(String line:text.split("\\R")){
-                        String part=line.strip();if(part.startsWith("[")){mod=part.matches("\\[\\[mods]]\\s*(?:#.*)?");continue;}
-                        if(mod){var match=java.util.regex.Pattern.compile("^modId\\s*=\\s*['\"]([a-zA-Z0-9_.-]+)['\"]").matcher(part);
-                            if(match.find())ids.add(match.group(1).toLowerCase(java.util.Locale.ROOT));}
-                    }
-                    if(!ids.isEmpty())files.setProperty(file.toAbsolutePath().normalize().toString(),String.join(",",ids));
-                }
+                Set<String> ids=ModMetadata.ids(file);
+                if(!ids.isEmpty())files.setProperty(file.toAbsolutePath().normalize().toString(),String.join(",",new TreeSet<>(ids)));
             }
         }
         return files;

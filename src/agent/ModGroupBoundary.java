@@ -12,8 +12,7 @@ import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicInteger;
-import java.util.regex.Matcher;
-import java.util.regex.Pattern;
+import dev.ronova.pro.launch.ModMetadata;
 import jdk.internal.org.objectweb.asm.ClassReader;
 import jdk.internal.org.objectweb.asm.ClassWriter;
 import jdk.internal.org.objectweb.asm.Opcodes;
@@ -42,8 +41,6 @@ import jdk.internal.org.objectweb.asm.tree.analysis.SourceValue;
 final class ModGroupBoundary {
     static final String MOD_CONTAINER="net/minecraftforge/fml/javafmlmod/FMLModContainer";
     private static volatile boolean creationGuarded;
-    private static final Pattern MOD_ID=Pattern.compile("^\\s*modId\\s*=\\s*['\"]([a-zA-Z0-9_.-]+)['\"]");
-    private static final Pattern TABLE=Pattern.compile("^\\s*\\[\\[([^]]+)]]\\s*(?:#.*)?$");
     private static final Set<String> denied=ConcurrentHashMap.newKeySet();
     private static final Set<Module> exact=Collections.newSetFromMap(new IdentityHashMap<>());
     private static final Set<Module> protectedGroups=Collections.newSetFromMap(new IdentityHashMap<>());
@@ -110,17 +107,7 @@ final class ModGroupBoundary {
         if(!module.isNamed())return Set.of();
         try(InputStream in=module.getResourceAsStream("META-INF/mods.toml")) {
             if(in==null)return Set.of();
-            String content=new String(in.readNBytes(1024*1024),StandardCharsets.UTF_8);
-            Set<String> ids=new HashSet<>();boolean modEntry=false;
-            for(String line:content.split("\\R")) {
-                Matcher table=TABLE.matcher(line);
-                if(table.matches()) {modEntry=table.group(1).trim().equals("mods");continue;}
-                if(line.stripLeading().startsWith("[")) {modEntry=false;continue;}
-                if(modEntry) {
-                    Matcher matcher=MOD_ID.matcher(line);
-                    if(matcher.find())ids.add(matcher.group(1).toLowerCase(java.util.Locale.ROOT));
-                }
-            }
+            Set<String> ids=ModMetadata.ids(in);
             if(ids.isEmpty())return Set.of();
             known=Set.copyOf(ids);metadata.put(module,known);return known;
         } catch(Exception unavailable) {return Set.of();}
@@ -130,12 +117,7 @@ final class ModGroupBoundary {
         String file=sourceFile(domain.getCodeSource().getLocation());if(file==null)return;
         Set<String> owners=fileOwners.get(file);
         if(owners==null)try{
-            var path=java.nio.file.Path.of(file);Set<String> discovered;
-            if(java.nio.file.Files.isDirectory(path))try(InputStream input=java.nio.file.Files.newInputStream(path.resolve("META-INF/mods.toml"))){discovered=parseIds(input);}
-            else try(var jar=new java.util.jar.JarFile(path.toFile())){
-                var entry=jar.getJarEntry("META-INF/mods.toml");if(entry==null)return;
-                try(InputStream input=jar.getInputStream(entry)){discovered=parseIds(input);}
-            }
+            Set<String> discovered=ModMetadata.ids(java.nio.file.Path.of(file));
             if(discovered.isEmpty())return;owners=Set.copyOf(discovered);fileOwners.put(file,owners);
         }catch(java.io.IOException|RuntimeException unavailable){return;}
         String prior=moduleFiles.putIfAbsent(module,file);
@@ -155,15 +137,6 @@ final class ModGroupBoundary {
             if(path.matches("^/[A-Za-z]:/.*"))path=path.substring(1);
             return java.nio.file.Path.of(path).toAbsolutePath().normalize().toString();
         }catch(java.net.URISyntaxException|RuntimeException unavailable){return null;}
-    }
-    private static Set<String> parseIds(InputStream input)throws java.io.IOException{
-        Set<String> ids=new HashSet<>();boolean mod=false;
-        for(String line:new String(input.readNBytes(1024*1024),StandardCharsets.UTF_8).split("\\R")){
-            Matcher table=TABLE.matcher(line);if(table.matches()){mod=table.group(1).trim().equals("mods");continue;}
-            if(line.stripLeading().startsWith("[")){mod=false;continue;}
-            if(mod){Matcher id=MOD_ID.matcher(line);if(id.find())ids.add(id.group(1).toLowerCase(java.util.Locale.ROOT));}
-        }
-        return ids;
     }
     static Module[] modules(String[] requested){
         Set<String> selected=new HashSet<>();if(requested!=null)for(String id:requested)if(id!=null)selected.add(id.trim().toLowerCase(java.util.Locale.ROOT));

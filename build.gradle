@@ -11,12 +11,12 @@ java { toolchain.languageVersion = JavaLanguageVersion.of(17) }
 sourceSets {
     // Source folders are grouped by payload; package declarations keep binary names unchanged.
     main {
-        java.setSrcDirs(['src/core', 'src/journal'])
+        java.setSrcDirs(['src/core', 'src/journal', 'src/shared'])
         resources.setSrcDirs(['src/resources'])
     }
-    prelaunch { java.setSrcDirs(['src/prelaunch', 'src/journal']) }
+    prelaunch { java.setSrcDirs(['src/prelaunch', 'src/journal', 'src/shared']) }
     bootstrap { java.setSrcDirs(['src/bootstrap']) }
-    agent { java.setSrcDirs(['src/agent']) }
+    agent { java.setSrcDirs(['src/agent', 'src/shared']) }
     stateChecks {
         java.setSrcDirs(['validation/checks'])
         compileClasspath += sourceSets.main.output + sourceSets.main.compileClasspath + sourceSets.bootstrap.output

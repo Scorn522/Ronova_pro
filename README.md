@@ -3,9 +3,9 @@
 主工程：`D:\桌面\ronova_GPT`。当前开发方向以 [V1.5 设计方案](docs/design/Ronova-Pro-设计方案-V1.5.md) 为准：实际文件／Module 归组，整 Mod 停用、保护与存量清理。
 
 - 控制链为游戏 JVM 创建前的 prelaunch 参数交接、main 前 premain、Bootstrap、JVMTI／Native。晚附加单独报告为运行期接续。
-- `/ronova_pro mod stop|protect|status <modid[,modid...]>` 展开同一实际文件的别名；共享 ClassLoader 不作为整组依据。停止策略先发布，随后遍历全方法生成合法入口返回，并共用限额清理实体、BlockEntity、订阅、任务和恢复引用。
+- `/ronova_pro mod stop|protect|status <modid[,modid...]>` 展开同一实际文件的别名，包括递归内嵌 JAR 声明的 modId；共享 ClassLoader 不作为整组依据。停止策略先发布，随后遍历全方法生成合法入口返回，并共用限额清理实体、BlockEntity、订阅、任务和恢复引用。
 - 本地选集保存在游戏目录的 `ronova-prelaunch.properties`，下次引导自动读取。远端服务器的客户端规则须由本机预先授权；客户端实际结果与服务器结果分别报告。
-- Native 活动路径只保留整组控制、JNI／JVMTI、NativeMethodBind、关键线程／句柄和控制范围边界。CRT／STL／第三方分配器字段账本、合作式 allocator/object SDK 和私有字节恢复已退出活动构建。Storage 使用直接 RAII、真实 NTFS 身份与 TxF 事务。
+- Native 活动路径只保留整组控制、JNI／JVMTI、NativeMethodBind、关键线程／句柄和控制范围边界。CRT／STL／第三方分配器字段账本、合作式 allocator/object SDK 和私有字节恢复已退出活动构建，残留的 SDK 头文件及未编译实现已删除。Storage 使用直接 RAII、真实 NTFS 身份与 TxF 事务。
 - 不恢复 JDK 容器广谱 Hook，不安装 getter／Function 组合的见证链。已知恢复载体按实际 backing 身份／CAS 清理；未知私有语义和逃逸调用继续明确报告未覆盖。
 
 Java 17；用户态 GNU C23／GNU C++23；Windows 驱动源码与管理工具 C17。内部兼容接口为 Java ABI105／Native ABI99／Storage3／Journal7；客户端协议为 `v1.5-whole-mod-clock`。接口数字不代表能力完成比例。
@@ -23,6 +23,7 @@ Java 17；用户态 GNU C23／GNU C++23；Windows 驱动源码与管理工具 C1
 | `src/bootstrap/` | JVM 公共桥和 Native 接线源码 |
 | `src/prelaunch/` | 游戏启动前的引导入口 |
 | `src/journal/` | 共用持久日志 |
+| `src/shared/` | 引导、Agent 与 Core 共用的嵌套 Mod 元数据读取 |
 | `src/resources/` | Mod 配置、Mixin 和资源 |
 | `native/`、`native/driver/` | 用户态原生代码、Windows 驱动源码和构建工具 |
 | `validation/` | 现有夹具、检查源码与原始运行记录 |

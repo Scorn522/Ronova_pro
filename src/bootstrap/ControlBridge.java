@@ -387,7 +387,9 @@ public final class ControlBridge {
     static boolean modProtected(Module module){for(Module actual:protectedModules)if(actual==module)return true;return false;}
     public static boolean protectedModClass(Class<?> type){return type!=null&&modProtected(DefinitionBridge.module(type));}
     private static boolean protectedMutationAllowed(Object target,Class<?> declaring){
-        Module owner=objectModule(target==null?declaring:target);
+        return protectedMutationAllowed(target,declaring,objectModule(target==null?declaring:target));
+    }
+    private static boolean protectedMutationAllowed(Object target,Class<?> declaring,Module owner){
         if(!modProtected(owner)&&!(declaring!=null&&modProtected(DefinitionBridge.module(declaring))))return true;
         if(coreWriter())return true;
         // The nearest actual Mod frame owns the effect. Shared Java/Forge
@@ -754,10 +756,13 @@ public final class ControlBridge {
         synchronized(CREATION_OWNERS){reapCreationOwners();createdBy(result,new Module[]{module},true);}
     }
     public static Module objectModule(Object object) {
-        return objectModule(object,new EventKey(object,null));
+        return objectModule(object,null);
     }
     static Module objectModule(Object object,EventKey key) {
-        if(object!=null){Module definition=DefinitionBridge.module(object instanceof Class<?> type?type:object.getClass());if(producer(definition))return definition;}
+        if(object==null)return null;
+        Module definition=DefinitionBridge.module(object instanceof Class<?> type?type:object.getClass());
+        if(producer(definition))return definition;
+        if(key==null)key=new EventKey(object,null);
         synchronized(CREATION_OWNERS) {
             if(CREATION_UNKNOWN.contains(key))return null;
             ThreadOrigin thread=THREAD_ORIGINS.get(key);
@@ -765,11 +770,8 @@ public final class ControlBridge {
             Set<Module> owners=TASK_OWNERS.get(key);
             if(owners!=null) {if(owners.size()!=1)return null;return owners.iterator().next();}
             Set<Module> sources=CREATION_SOURCES.get(key);if(sources!=null){if(sources.size()!=1)return null;return sources.iterator().next();}
+            Module origin=CREATION_OWNERS.get(key);return origin!=null?origin:definition;
         }
-        // Reuse only the identity key. The fallback still reads the actual
-        // current registration after the declaration query, under its monitor.
-        Module origin=null;if(object!=null)synchronized(CREATION_OWNERS){if(!CREATION_UNKNOWN.contains(key))origin=CREATION_OWNERS.get(key);}
-        return origin!=null?origin:object instanceof Class<?> type?DefinitionBridge.module(type):object==null?null:DefinitionBridge.module(object.getClass());
     }
     static Module singleThreadSource(EventKey key,ThreadOrigin thread){
         // CREATION_OWNERS is held. The caller only consumes a singleton, so
@@ -1725,10 +1727,13 @@ public final class ControlBridge {
     public static Object beginOwnStaticFieldMutation(double value,String signature){return staticFieldMutation(Double.valueOf(value),WALKER.getCallerClass(),signature);}
     public static Object beginStaticFieldMutation(double value,Class<?> symbolic,String signature){return staticFieldMutation(Double.valueOf(value),symbolic,signature);}
     private static boolean fieldMutationReceiptRequired(Object target,Class<?> declaring){
+        return fieldMutationReceiptRequired(target,declaring,objectModule(target));
+    }
+    private static boolean fieldMutationReceiptRequired(Object target,Class<?> declaring,Module owner){
         // A policy for another Mod is not a policy for this receiver. Keep
         // exact protected/stopped targets and live stopped callers on the
         // original gated path, without serializing unrelated JVM writes.
-        Module owner=objectModule(target),declaration=declaring==null?null:DefinitionBridge.module(declaring);
+        Module declaration=declaring==null?null:DefinitionBridge.module(declaring);
         if(modProtected(owner)||modStopped(owner)||modProtected(declaration)||modStopped(declaration)
                 ||stoppedInvocation())return true;
         Guards current=guards;
@@ -1753,11 +1758,13 @@ public final class ControlBridge {
         Class<?> declaring=actualFieldOwner(symbolic,name,descriptor);
         if(declaring==null||declaring==Void.class){lost();return Boolean.FALSE;}
         Object target=receiver==null?declaring:receiver;
-        if(!fieldMutationReceiptRequired(target,declaring)){
-            if(!fieldWriteAllowed(target,declaring,name,value))return Boolean.FALSE;
+        EventKey identity=new EventKey(target,null);Module owner=objectModule(target,identity);
+        if(!fieldMutationReceiptRequired(target,declaring,owner)){
+            if(!fieldWriteAllowed(target,declaring,name,value,owner,true))return Boolean.FALSE;
             // Re-read the actual target after the live policy query. A newly
             // selected receiver or publication must use its existing gate.
-            if(!fieldMutationReceiptRequired(target,declaring))return null;
+            // Reuse the lookup key, not a cached ownership or permission verdict.
+            if(!fieldMutationReceiptRequired(target,declaring,objectModule(target,identity)))return null;
         }
         java.util.concurrent.locks.ReentrantLock gate=fieldGate(target);gate.lock();
         Object receipt=memoryReceipt(gate,target);
@@ -2179,12 +2186,15 @@ public final class ControlBridge {
         return staticFieldWriteAllowed(actual,name,value);
     }
     public static boolean fieldWriteAllowed(Object receiver,Class<?> declaring,String name,Object value) {
+        return fieldWriteAllowed(receiver,declaring,name,value,null,false);
+    }
+    private static boolean fieldWriteAllowed(Object receiver,Class<?> declaring,String name,Object value,Module owner,boolean ownerResolved) {
         if(commandRetirementWrite(receiver,declaring,name,value))return true;
         if(CodeSourceBridge.fieldGateMetadata(receiver))return fieldGateMutationAllowed();
-        if(!protectedMutationAllowed(receiver,declaring))return false;
+        if(!(ownerResolved?protectedMutationAllowed(receiver,declaring,owner):protectedMutationAllowed(receiver,declaring)))return false;
         if(!CodeSourceBridge.fieldAllowed(receiver,declaring,name)&&!coreWriter())return false;
         if(!ResourceBridge.fieldMutationAllowed(receiver,declaring))return false;
-        if((modStopped(objectModule(receiver==null?declaring:receiver))||stoppedInvocation())&&!coreWriter()&&!ClientBridge.cleanupField(receiver,declaring,name)
+        if((modStopped(ownerResolved?owner:objectModule(receiver==null?declaring:receiver))||stoppedInvocation())&&!coreWriter()&&!ClientBridge.cleanupField(receiver,declaring,name)
                 &&!NetworkBridge.retirementFieldAllowed(receiver,declaring,name,value))return false;
         Guards current=guards;var guard=current==null?null:current.field();
         if(FIELD_POLICY_ACTIVE.get()!=null) {

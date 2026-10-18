@@ -1,5 +1,16 @@
 # B 批实际报告：2026-10-09 代码收敛接续
 
+## 2026-10-18：嵌套 Mod、废 SDK 和身份查询收尾
+
+本轮仅实现三项明确收尾：Prelaunch/Agent 递归读取内嵌 JAR 的 Mod 别名并归入外层实际文件；删除六个未编译的合作式 SDK 文件；普通字段写入复用一个身份查询键和首次来源结果，保留策略调用后的来源重读与 gated 路径。源码收尾后 `jar` / `reobfJar` 统一构建成功，49 秒、退出 0；未运行起服、实机、夹具或检查任务。V1.5 允许的未知语义和不可用后端继续报告 GAP/PARTIAL，不计作新增 SDK 的理由。
+
+首次沙箱调用在编译前因 Gradle native-platform.dll 加载失败退出；取得正常构建缓存访问后同一源码完成构建，无编译失败修补或追加构建。原日志保留在 `.work/v1.5-whole-mod-20261018/final-three-build.log`。当前 `distribution/v1.5-whole-mod` 的双 JAR：
+
+| 候选 | 字节 | SHA-256 |
+| --- | ---: | --- |
+| `ronova-pro-core-1.5.0-dev.jar` | 3231087 | `acb49687739eeb195a2a7c5f2b0c2ece8e42065a621fc3b9aae542c287fa4643` |
+| `ronova-pro-prelaunch.jar` | 51052 | `b9122df7a3caed70dd6514016aa3bfebbfe7b66608effd3a24cd4cba29ffbfdc` |
+
 ## 2026-10-18：按新安排仅交付 A/B/C/D 生产候选
 
 用户撤销本轮后续运行检查安排，要求源码全部写齐后仅作统一编译。已终止旧 Forge 进程（PID 128892，对应会话退出 1）；此后未运行起服、实机或夹具，也不再轮询旧起服进度。本节记录源码及候选交付，不能作为整组效果通过报告。
