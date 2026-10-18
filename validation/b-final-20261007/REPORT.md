@@ -1,5 +1,19 @@
 # B 批实际报告：2026-10-09 代码收敛接续
 
+## 2026-10-18：V1.5 整 Mod 生产包与真实 Forge 场景
+
+本轮接续主工程 `e4ba753`，候选 `1.5.0-dev`，协议 `v1.5-whole-mod`。生产源码先整包写齐，之后统一编译 Core/Agent/Bootstrap/prelaunch、GNU C23 Native 与 GNU C++23 Storage。当前双 JAR 集中在 `distribution/v1.5-whole-mod`；WorldFixture 只置于本地真实起服场景，不是交付 Mod。
+
+已完成活动链收敛：实际文件/Module 归组与批量命令、全方法入口返回、在途发布门禁、共用存量清理队列、双端独立结果及保存选集交接；直接 NTFS TxF/句柄实现替代 Storage SDK 包装。Native 私有分配器/对象 SDK、CRT/STL 字段租约及 Java getter/Function 见证链退出活动安装，未观察的私有语义不伪造成功。
+
+实际检查目录：`.work/v1.5-whole-mod-20261018/server`，使用本机已有 JDK17、Forge 1.20.1-47.4.23 libraries 和新建隔离世界。用户明确授权原有 `ronova-pro-isolated-fixture.jar` / WorldFixture 的 `mod-group` 分支作为真实目标 Mod；两个 modid 共用一个真实文件。未运行 metadata seam 检查、`validation/checks` 或独立 C++ 消费者。
+
+集中构建日志为 `.work/v1.5-whole-mod-20261018/unified-build.log`。首次完整编译补齐缺失 LabelNode 导入后成功；后续只因真实起服故障续编相关部分。实际曾遇到中文目录 bootstrap JAR 原生重开失败、Fastutil selector 循环加载、ASM 导出前类校验、JDK 全局引用扫描、arraycopy 重扫 PE 导入表，以及错误使用不存在的独立 System.arraycopy 导出而导致的安装递归；分别改为临时目录载荷、选择器先初始化、延迟 ASM 筛选器、真实边界筛选、固定准确槽核对和注册绑定发布前准备。失败记录保留。
+
+后续真实栈另定位两处旧路径：已返回空值的内存账本调用仍预先捕获来源，现已删除空调用及其专用包装；Class.newReflectionData 的准确实例缓存 CAS 虽已识别，却被后续 represented 控制对象检查反复拒绝，现沿真实字段/调用链保留其缓存写入，并继续检查停组来源。普通 ASM 树原先在解析时两次 serialize/snapshot，现冻结真实 parser 输入、Module 和 member parent，按实际变换/元数据消费者惰性物化，使用一致 canonical 基线，未捕获变化保留 unknown patch/gap。该完整修正续编成功。
+
+当前实际场景仍在收尾，尚不将 premain/ModLauncher 启动升级为目标停用、世界清理或保存重启通过。客户端 GUI 与真实驱动未在本次头部场景运行，外部旧活栈及未观察私有状态保持未覆盖范围。
+
 ## 2026-10-18：C 接续——NT 内存传输与私有字段存储
 
 接续 `2ea6410`，仅主工程 `D:\桌面\ronova_GPT`。Java105 / Native99 / Object SDK3（保留1/2）/ SourceMapBridge2 / Storage3 / Journal6，协议 `r3-client-8`。整包源码写齐后统一构建。

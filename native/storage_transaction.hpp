@@ -6,55 +6,13 @@
 #include <map>
 #include <algorithm>
 #include <array>
+#include <atomic>
+#include <cstdint>
 #include <expected>
 #include <span>
 #include <string_view>
-#include "include/ronova_allocator_state.hpp"
-#include "include/ronova_object_state.hpp"
 
 namespace recovery_storage {
-
-// Storage's two real consumers keep this node outside the payload lifetime.
-// It wraps one original std::allocator allocation, not an allocator provider or
-// an object representation. Only the caller knows when the actual dtor ran.
-template<class T> class RootAllocation {
-    ronova::allocator_state state_;
-    T* value_=nullptr;
-    bool allocated_=false,entered_=false,returned_=false,called_=false,closed_=false;
-    struct Upstream {
-        using value_type=T;RootAllocation* actual=nullptr;
-        T* allocate(std::size_t count){return std::allocator<T>{}.allocate(count);}
-        void deallocate(T* pointer,std::size_t count) noexcept {
-            actual->entered_=true;std::allocator<T>{}.deallocate(pointer,count);actual->returned_=true;
-        }
-        bool operator==(const Upstream& other)const noexcept{return actual==other.actual;}
-    };
-    using Allocator=ronova::allocator_adapter<T,Upstream>;
-public:
-    RootAllocation()=default;
-    RootAllocation(const RootAllocation&)=delete;
-    RootAllocation& operator=(const RootAllocation&)=delete;
-    T* allocate() {
-        if(allocated_||closed_)throw std::bad_alloc();
-        Allocator allocator(state_,Upstream{this});value_=allocator.allocate(1);allocated_=true;return value_;
-    }
-    bool release() noexcept {
-        if(closed_)return true;
-        if(allocated_&&!called_) {
-            entered_=returned_=false;Allocator allocator(state_,Upstream{this});allocator.deallocate(value_,1);
-            if(!entered_)return false; // No original deallocate: a later admitted retry is possible.
-            called_=true;
-            if(!returned_)return false;
-        }
-        // Once the actual deallocate ran, only retry metadata/context closure.
-        // This proves that the sole adapter record closed, including uncovered
-        // records whose receipt was always zero; zero is not a free receipt.
-        if(called_&&!returned_)return false;
-        if(!state_.close())return false;
-        closed_=true;value_=nullptr;return true;
-    }
-};
-
 struct Api {
     HMODULE module=nullptr;
     decltype(&CreateTransaction) create=nullptr;
@@ -118,81 +76,29 @@ struct Hash {
         return out;
     }
 };
-// These fields describe live OS/JNI resources and their coupled progress. A
-// previous phase/offset is not a previous file position or BCrypt hash state.
-// Borrow this actual subobject; never snapshot or replay its representation.
-struct TransactionControl {
+static std::atomic<int> admitted{0};
+// One actual TxF operation and its resumable file/hash preparation.
+struct Transaction {
     enum Phase { CandidateHash, Open, BaselineHash, Write, Flush, ExpectedHash, ClosePrepared, Ready } phase=CandidateHash;
     Hash hashing;
     HANDLE handle=INVALID_HANDLE_VALUE,file=INVALID_HANDLE_VALUE;
     jobject request=nullptr;jlong token=0;
     ULONGLONG expires=0;bool finalized=false;jlong outcome=0,error=0;
-    jlong image_size=0;
-    ULONGLONG offset=0;
-};
-using TransactionPath=std::basic_string<wchar_t,std::char_traits<wchar_t>,ronova::allocator_adapter<wchar_t>>;
-using TransactionText=std::basic_string<char,std::char_traits<char>,ronova::allocator_adapter<char>>;
-struct TransactionObservation;
-struct Transaction:TransactionControl {
-    TransactionPath requested;
-    TransactionText expected_id,baseline,expected;
-    TransactionObservation* tracking;
-    Transaction(const ronova::allocator_state& allocations,TransactionObservation* actual)
-        :requested(ronova::allocator_adapter<wchar_t>(allocations)),
-        expected_id(ronova::allocator_adapter<char>(allocations)),baseline(ronova::allocator_adapter<char>(allocations)),
-        expected(ronova::allocator_adapter<char>(allocations)),tracking(actual){}
-    // Exceptional process/JNI unwind only. Normal paths use explicit close receipts below.
+    jlong image_size=0;ULONGLONG offset=0;
+    std::wstring requested;
+    std::string expected_id,baseline,expected;
+    bool counted=false,retiring=false,handles_closed=false;
+    // Normal JNI paths retain failed OS closes under the same token. This
+    // destructor is the final ordinary RAII cleanup during process teardown.
     ~Transaction(){if(file!=INVALID_HANDLE_VALUE)CloseHandle(file);
-        if(handle!=INVALID_HANDLE_VALUE){if(!finalized)api().rollback(handle);CloseHandle(handle);}}
+        if(handle!=INVALID_HANDLE_VALUE){if(!finalized)api().rollback(handle);CloseHandle(handle);}
+        if(counted)admitted.fetch_sub(1);}
 };
-struct TransactionObservation {
-    RootAllocation<Transaction> root;
-    ronova::allocator_state allocations;
-    ronova::object_state object;
-    ronova::opaque_field<TransactionControl> control;
-    ronova::sequence_field<TransactionPath> requested;
-    ronova::sequence_field<TransactionText> expected_id,baseline,expected;
-    // Slot identity and actual completion witnesses outlive the payload. In
-    // particular, a failed final receipt must not resurrect a destroyed object.
-    jobject owner=nullptr;jlong token=0,outcome=0,error=0;
-    ULONGLONG expires=0;
-    bool counted=false,bound=false,retiring=false,handles_closed=false;
-    bool payload_destroyed=false,destroy_completed=false,raw_freed=false,context_closed=false;
-    std::shared_ptr<TransactionObservation> unresolved;
-    void bind(Transaction& tx) noexcept {
-        object.constructed(&tx,sizeof(tx));control=object.opaque(static_cast<TransactionControl&>(tx));
-        requested=object.sequence(tx.requested);expected_id=object.sequence(tx.expected_id);
-        baseline=object.sequence(tx.baseline);expected=object.sequence(tx.expected);bound=true;
-    }
-    void observed(const Transaction& tx) noexcept {
-        owner=tx.request;token=tx.token;outcome=tx.outcome;error=tx.error;expires=tx.expires;
-    }
-};
-struct TransactionDelete {
-    std::shared_ptr<TransactionObservation> tracking;
-    void operator()(Transaction* tx)const noexcept;
-};
-using TransactionPtr=std::unique_ptr<Transaction,TransactionDelete>;
+using TransactionPtr=std::unique_ptr<Transaction>;
 struct TransactionSlot {TransactionPtr value;std::uint64_t revision=0;};
 static SRWLOCK slots_lock=SRWLOCK_INIT;
 static std::array<TransactionSlot,2> slots;
-static std::atomic<int> admitted{0};
 static std::atomic<jlong> next_token{1};
-static TransactionPtr allocate_transaction() {
-    auto tracking=std::make_shared<TransactionObservation>();
-    auto pointer=tracking->root.allocate();
-    try{std::construct_at(pointer,tracking->allocations,tracking.get());}
-    catch(...){if(!tracking->root.release())tracking->unresolved=tracking;throw;}
-    return TransactionPtr(pointer,TransactionDelete{std::move(tracking)});
-}
-template<class F> static bool use_control(Transaction& tx,F&& original) {
-    auto& tracking=*tx.tracking;
-    if(tracking.payload_destroyed||tracking.raw_freed)return false;
-    bool used;
-    if(tracking.bound)used=tracking.object.use(tracking.control,std::forward<F>(original));
-    else {std::forward<F>(original)();used=true;}
-    tracking.observed(tx);return used;
-}
 static jlongArray result(JNIEnv* env,jlong status,jlong token=0,jlong error=0) {
     if(env->ExceptionCheck())return nullptr;
     jlong values[3]={status,token,error};auto out=env->NewLongArray(3);
@@ -200,81 +106,38 @@ static jlongArray result(JNIEnv* env,jlong status,jlong token=0,jlong error=0) {
 }
 static TransactionPtr take(JNIEnv* env,jobject owner,jlong token) {
     AcquireSRWLockExclusive(&slots_lock);TransactionPtr found;
-    for(auto& slot:slots)if(slot.value) {
-        const auto& actual=*slot.value.get_deleter().tracking;
-        if(actual.token==token&&env->IsSameObject(actual.owner,owner)){found=std::move(slot.value);++slot.revision;break;}
+    for(auto& slot:slots)if(slot.value&&slot.value->token==token&&env->IsSameObject(slot.value->request,owner)) {
+        found=std::move(slot.value);++slot.revision;break;
     }
     ReleaseSRWLockExclusive(&slots_lock);return found;
 }
-// Closing a handle and committing a transaction are independent observations. Neither JNI
-// return success nor a missing registry slot is substituted for a resource-close receipt.
-static bool remember_retirement(JNIEnv* env,const TransactionObservation& tx) {
-    if(!tx.owner)return false;
-    // The original Java failure must not suppress the actual close receipt.
+// Real handle closure and commit outcome are independent results. The Java
+// ticket needs the former to release its encoded image after an expiry sweep.
+static bool remember_retirement(JNIEnv* env,const Transaction& tx) {
+    if(!tx.request)return false;
     jthrowable pending=env->ExceptionOccurred();if(pending)env->ExceptionClear();
-    auto type=env->GetObjectClass(tx.owner);
+    auto type=env->GetObjectClass(tx.request);
     auto method=type?env->GetMethodID(type,"nativeRetired","(JJZJ)V"):nullptr;
     if(type)env->DeleteLocalRef(type);
-    if(method)env->CallVoidMethod(tx.owner,method,tx.token,tx.outcome,JNI_TRUE,tx.error);
+    if(method)env->CallVoidMethod(tx.request,method,tx.token,tx.outcome,JNI_TRUE,tx.error);
     bool recorded=method&&!env->ExceptionCheck();
     if(pending){if(env->ExceptionCheck())env->ExceptionClear();env->Throw(pending);env->DeleteLocalRef(pending);}
     return recorded;
 }
 static bool retain_for_retirement(TransactionPtr& tx,bool active=false) {
-    auto& actual=*tx.get_deleter().tracking;
-    actual.retiring|=!active;
-    ULONGLONG expires=GetTickCount64()+1000;bool updated=true;
-    if(active)updated=use_control(*tx,[&]{tx->expires=expires;});
-    actual.retiring|=!updated;actual.expires=expires;
+    tx->retiring|=!active;tx->expires=GetTickCount64()+1000;
     AcquireSRWLockExclusive(&slots_lock);
-    // An admitted transaction owns one of two positions, including while outside the lock.
-    // Thus its position cannot have been consumed by a third admission.
+    // Each admitted operation owns one of the two positions, including while
+    // temporarily taken out for JNI/OS work. No third operation can take it.
     for(auto& slot:slots)if(!slot.value){slot.value=std::move(tx);++slot.revision;break;}
-    ReleaseSRWLockExclusive(&slots_lock);
-    return updated;
-}
-static bool destroy_storage(Transaction* tx,TransactionObservation& actual) noexcept {
-    if(!actual.payload_destroyed) {
-        // Retirement owns this payload exclusively and never resumes drive.
-        // Close relations first so a refused later relation leaves no destroy
-        // scope spanning a JNI return or a different OS thread.
-        if(actual.bound&&(!actual.object.release(actual.requested)||!actual.object.release(actual.expected_id)
-                ||!actual.object.release(actual.baseline)||!actual.object.release(actual.expected)))return false;
-        bool covered=actual.object.covered();auto destruction=actual.object.destroying();
-        if(covered&&!destruction.admitted())return false;
-        tx->~Transaction();actual.payload_destroyed=true;
-        actual.destroy_completed=!covered||destruction.complete();
-    }
-    if(!actual.destroy_completed)return false;
-    if(!actual.context_closed)actual.context_closed=actual.allocations.close();
-    if(!actual.context_closed)return false;
-    if(!actual.raw_freed) {
-        actual.raw_freed=actual.root.release();
-    }
-    return actual.raw_freed;
+    ReleaseSRWLockExclusive(&slots_lock);return !tx;
 }
 static bool release(JNIEnv* env,TransactionPtr& tx) {
-    if(!tx)return true;auto actual=tx.get_deleter().tracking;actual->retiring=true;
-    if(!destroy_storage(tx.get(),*actual)||(actual->owner&&!remember_retirement(env,*actual))) {
-        retain_for_retirement(tx);return false;
-    }
-    if(actual->owner)env->DeleteGlobalRef(actual->owner);actual->owner=nullptr;
-    (void)tx.release();if(actual->counted){actual->counted=false;admitted.fetch_sub(1);}return true;
-}
-inline void TransactionDelete::operator()(Transaction* tx)const noexcept {
-    if(!tx)return;
-    // StageCleanup normally transfers a JNI-owned transaction back to its
-    // slot. Early allocation failures have no Java reference or OS handles.
-    if(!tracking->owner&&destroy_storage(tx,*tracking)) {
-        if(tracking->counted){tracking->counted=false;admitted.fetch_sub(1);}return;
-    }
-    TransactionPtr retained(tx,*this);retain_for_retirement(retained);
-    if(retained) {
-        // The two-admission invariant supplies a slot during normal operation.
-        // At static teardown retain the same metadata/storage identity instead
-        // of recursively invoking a refused deleter or reusing its address.
-        tracking->unresolved=tracking;(void)retained.release();
-    }
+    if(!tx)return true;
+    tx->retiring=true;
+    if(tx->request&&!remember_retirement(env,*tx)){retain_for_retirement(tx);return false;}
+    if(tx->request)env->DeleteGlobalRef(tx->request);
+    tx->request=nullptr;tx.reset();return true;
 }
 static bool close_file(Transaction& tx) {
     if(tx.file==INVALID_HANDLE_VALUE)return true;
@@ -282,37 +145,27 @@ static bool close_file(Transaction& tx) {
     tx.file=INVALID_HANDLE_VALUE;return true;
 }
 static bool finish_handles(JNIEnv* env,TransactionPtr& tx) {
-    auto& actual=*tx.get_deleter().tracking;actual.retiring=true;
-    if(!actual.handles_closed) {
-        bool closed=false;
-        bool observed=use_control(*tx,[&]{
-            if(auto hash=tx->hashing.close();!hash){tx->error=hash.error();return;}
-            if(tx->file==INVALID_HANDLE_VALUE&&(tx->handle==INVALID_HANDLE_VALUE||CloseHandle(tx->handle))) {
-                tx->handle=INVALID_HANDLE_VALUE;closed=true;return;
-            }
-            tx->error=GetLastError();
-        });
-        actual.handles_closed=closed;
-        if(!observed||!closed){retain_for_retirement(tx);return false;}
+    tx->retiring=true;
+    if(!tx->handles_closed) {
+        if(!close_file(*tx)){retain_for_retirement(tx);return false;}
+        if(auto hash=tx->hashing.close();!hash){tx->error=hash.error();retain_for_retirement(tx);return false;}
+        if(tx->handle!=INVALID_HANDLE_VALUE&&!CloseHandle(tx->handle)) {
+            tx->error=GetLastError();retain_for_retirement(tx);return false;
+        }
+        tx->handle=INVALID_HANDLE_VALUE;tx->handles_closed=true;
     }
     return release(env,tx);
 }
 static bool rollback_and_retire(JNIEnv* env,TransactionPtr& tx) {
-    auto& actual=*tx.get_deleter().tracking;actual.retiring=true;
-    if(actual.handles_closed)return release(env,tx);
-    // Keep even failed-to-close file handles. An attempted close is not a close receipt.
-    bool closed=false;
-    bool observed=use_control(*tx,[&]{
-        if(!close_file(*tx))return;
-        closed=true;
-        if(!tx->finalized) {
-            tx->finalized=true;
-            if(tx->handle==INVALID_HANDLE_VALUE)tx->outcome=0; // never allocated, not a fictitious rollback
-            else if(api().rollback(tx->handle))tx->outcome=2;
-            else {tx->outcome=3;tx->error=GetLastError();}
-        }
-    });
-    if(!observed||!closed){retain_for_retirement(tx);return false;}
+    tx->retiring=true;
+    if(tx->handles_closed)return release(env,tx);
+    if(!close_file(*tx)){retain_for_retirement(tx);return false;}
+    if(!tx->finalized) {
+        tx->finalized=true;
+        if(tx->handle==INVALID_HANDLE_VALUE)tx->outcome=0;
+        else if(api().rollback(tx->handle))tx->outcome=2;
+        else {tx->outcome=3;tx->error=GetLastError();}
+    }
     return finish_handles(env,tx);
 }
 static bool live_owner(JNIEnv* env,jobject request) {
@@ -327,35 +180,27 @@ static jlong reap_expired(JNIEnv* env) {
         jobject owner=nullptr;jlong token=0;std::uint64_t revision=0;bool callback=false;
         AcquireSRWLockExclusive(&slots_lock);
         auto& slot=slots[i];
-        if(slot.value) {
-            auto& actual=*slot.value.get_deleter().tracking;
-            if(now>=actual.expires) {
-                revision=slot.revision;token=actual.token;
-                callback=!actual.retiring&&!actual.payload_destroyed;
-                if(callback)owner=env->NewLocalRef(actual.owner);
-                else {expired[i]=std::move(slot.value);++slot.revision;}
-            }
+        if(slot.value&&now>=slot.value->expires) {
+            revision=slot.revision;token=slot.value->token;callback=!slot.value->retiring;
+            if(callback)owner=env->NewLocalRef(slot.value->request);
+            else {expired[i]=std::move(slot.value);++slot.revision;}
         }
         ReleaseSRWLockExclusive(&slots_lock);
         if(callback&&owner) {
-            // Keep the original token visible while Java executes. A take or
-            // subsequent reinsert changes revision, so this callback cannot
-            // expire or renew the next state of the same transaction.
+            // Java runs outside the registry lock. A concurrent take/reinsert
+            // changes revision, so it cannot renew the next token state.
             bool live=live_owner(env,owner);
             AcquireSRWLockExclusive(&slots_lock);
             auto& current=slots[i];
-            if(current.value&&current.revision==revision) {
-                auto& actual=*current.value.get_deleter().tracking;
-                if(actual.token==token&&env->IsSameObject(actual.owner,owner)) {
-                    if(live&&!env->ExceptionCheck()){actual.expires=now+1000;++current.revision;}
-                    else {expired[i]=std::move(current.value);++current.revision;}
-                }
+            if(current.value&&current.revision==revision&&current.value->token==token
+                    &&env->IsSameObject(current.value->request,owner)) {
+                if(live&&!env->ExceptionCheck()){current.value->expires=now+1000;++current.revision;}
+                else {expired[i]=std::move(current.value);++current.revision;}
             }
             ReleaseSRWLockExclusive(&slots_lock);env->DeleteLocalRef(owner);
         }
         if(env->ExceptionCheck())break;
     }
-    // No Root permit is involved in rollback; no registry lock spans OS I/O.
     for(auto& tx:expired)if(tx&&rollback_and_retire(env,tx))reaped++;
     return reaped;
 }
@@ -382,9 +227,7 @@ static bool path(JNIEnv* env,jobject request,std::wstring& value) {
     env->ReleaseStringChars(text,chars);env->DeleteLocalRef(text);
     return ok&&((value[0]>=L'A'&&value[0]<=L'Z')||(value[0]>=L'a'&&value[0]<=L'z'))&&value[1]==L':'&&value[2]==L'\\';
 }
-template<class PathAllocator,class TextAllocator>
-static bool identity(HANDLE file,const std::basic_string<wchar_t,std::char_traits<wchar_t>,PathAllocator>& requested,
-        std::basic_string<char,std::char_traits<char>,TextAllocator>& out) {
+static bool identity(HANDLE file,const std::wstring& requested,std::string& out) {
     BY_HANDLE_FILE_INFORMATION info{};FILE_ID_INFO id{};wchar_t fs[32],final_path[4104];
     if(GetFileType(file)!=FILE_TYPE_DISK||!GetFileInformationByHandle(file,&info)||info.nNumberOfLinks!=1
         ||(info.dwFileAttributes&(FILE_ATTRIBUTE_DIRECTORY|FILE_ATTRIBUTE_REPARSE_POINT|FILE_ATTRIBUTE_ENCRYPTED|FILE_ATTRIBUTE_SPARSE_FILE|FILE_ATTRIBUTE_COMPRESSED))
@@ -506,45 +349,21 @@ static jlong drive_actual(JNIEnv* env,Transaction& tx) {
     }
     return 7;
 }
-template<class C> struct ConfigurationRead {
-    ronova::object_state::borrow_scope representation;
-    ronova::buffer_field<typename C::value_type> current;
-    ronova::object_state::borrow_scope elements;
-    ConfigurationRead(ronova::object_state& object,const ronova::sequence_field<C>& sequence)
-        :representation(object.borrowing(sequence.receipt())),current(object.view(sequence)),elements(object.borrowing(current.receipt())){}
-    bool admitted(bool covered)const noexcept{return !covered||(representation.observed()&&current.covered()&&elements.observed());}
-};
 static jlong drive(JNIEnv* env,Transaction& tx) {
-    auto& actual=*tx.tracking;
-    if(actual.retiring||actual.payload_destroyed)return 6;
-    ConfigurationRead path(actual.object,actual.requested);
-    ConfigurationRead id(actual.object,actual.expected_id);
-    ConfigurationRead baseline(actual.object,actual.baseline);
-    ConfigurationRead expected(actual.object,actual.expected);
-    bool covered=actual.object.covered();
-    if(!path.admitted(covered)||!id.admitted(covered)||!baseline.admitted(covered)||!expected.admitted(covered)) {
-        actual.retiring=true;actual.error=ERROR_BUSY;return 6;
-    }
-    // Configuration is assigned exactly once. A recovered empty configuration
-    // cannot reconstruct a running transaction or replay its earlier phase.
+    if(tx.retiring)return 6;
     if(tx.requested.empty()||tx.expected_id.empty()||tx.baseline.empty()||tx.expected.empty()) {
-        actual.retiring=true;return 0;
+        tx.retiring=true;return 0;
     }
-    jlong status=6;
-    if(!use_control(tx,[&]{status=drive_actual(env,tx);})) {
-        actual.retiring=true;if(!actual.error)actual.error=ERROR_BUSY;return 6;
-    }
-    return status;
+    return drive_actual(env,tx);
 }
 static jlongArray advance_owned(JNIEnv* env,TransactionPtr& tx,bool& retained) {
-    auto actual=tx.get_deleter().tracking;
-    jlong status=drive(env,*tx),token=actual->token,error=actual->error;
+    jlong status=drive(env,*tx),token=tx->token,error=tx->error;
     auto response=result(env,status,token,error);if(!response)return nullptr;
     if(status==1||status==7) {
         if(!retain_for_retirement(tx,true)) {
-            jlong refused[3]={6,token,ERROR_BUSY};env->SetLongArrayRegion(response,0,3,refused);
+            jlong failed[3]={6,token,ERROR_BUSY};env->SetLongArrayRegion(response,0,3,failed);
         }
-        retained=true;
+        retained=!tx;
     }
     return response;
 }
@@ -559,7 +378,6 @@ Java_dev_ronova_pro_StorageNative_prepare0(JNIEnv* env,jclass,jobject request) t
     reap_expired(env);
     int previous=admitted.fetch_add(1);if(previous>=static_cast<int>(slots.size())){admitted.fetch_sub(1);return result(env,7,0,ERROR_BUSY);}
     bool transferred=false;struct Admission{bool& transferred;~Admission(){if(!transferred)admitted.fetch_sub(1);}} admission{transferred};
-    bool retained=false;
     std::wstring requested;std::string expected_id,baseline,expected;
     if(!path(env,request,requested)||!string(env,request,"fileIdentity",expected_id)
         ||!string(env,request,"baselineHash",baseline)||!string(env,request,"expectedHash",expected))return result(env,0);
@@ -567,28 +385,19 @@ Java_dev_ronova_pro_StorageNative_prepare0(JNIEnv* env,jclass,jobject request) t
     if(type)env->DeleteLocalRef(type);
     if(!getter)return nullptr;jlong size=env->CallLongMethod(request,getter);
     if(env->ExceptionCheck()||size<1)return result(env,0);
-    auto tx=allocate_transaction();auto actual=tx.get_deleter().tracking;
-    actual->counted=true;transferred=true;
+    auto tx=std::make_unique<Transaction>();tx->counted=true;transferred=true;
+    bool retained=false;StageCleanup cleanup{env,tx,retained};
     tx->token=next_token.fetch_add(1);
-    actual->observed(*tx);
     if(tx->token<=0||tx->token==std::numeric_limits<jlong>::max())return result(env,6);
-    tx->request=env->NewGlobalRef(request);actual->observed(*tx);if(!tx->request)return nullptr;
-    actual->bind(*tx);
-    StageCleanup cleanup{env,tx,retained};
-    if(!actual->object.mutate(actual->requested,[&]{tx->requested.assign(requested.data(),requested.size());})
-        ||!actual->object.mutate(actual->expected_id,[&]{tx->expected_id.assign(expected_id.data(),expected_id.size());})
-        ||!actual->object.mutate(actual->baseline,[&]{tx->baseline.assign(baseline.data(),baseline.size());})
-        ||!actual->object.mutate(actual->expected,[&]{tx->expected.assign(expected.data(),expected.size());})
-        ||!use_control(*tx,[&]{tx->image_size=size;}))return result(env,6,actual->token,ERROR_BUSY);
+    tx->request=env->NewGlobalRef(request);if(!tx->request)return nullptr;
+    tx->requested=std::move(requested);tx->expected_id=std::move(expected_id);
+    tx->baseline=std::move(baseline);tx->expected=std::move(expected);tx->image_size=size;
     auto request_type=env->GetObjectClass(request);
     auto allocated=request_type?env->GetMethodID(request_type,"nativeAllocated","(J)V"):nullptr;
     if(request_type)env->DeleteLocalRef(request_type);
     if(!allocated)return nullptr;
-    if(!use_control(*tx,[&]{env->CallVoidMethod(request,allocated,tx->token);}))return result(env,6,actual->token,ERROR_BUSY);
-    if(env->ExceptionCheck())return nullptr;
-    std::expected<void,jlong> opened;
-    if(!use_control(*tx,[&]{opened=tx->hashing.open();}))return result(env,6,actual->token,ERROR_BUSY);
-    if(!opened)return result(env,6,actual->token,opened.error());
+    env->CallVoidMethod(request,allocated,tx->token);if(env->ExceptionCheck())return nullptr;
+    if(auto opened=tx->hashing.open();!opened)return result(env,6,tx->token,opened.error());
     return advance_owned(env,tx,retained);
 } catch(...) {
     if(!env->ExceptionCheck()){auto error=env->FindClass("java/lang/IllegalStateException");if(error){env->ThrowNew(error,"Native transaction preparation unavailable");env->DeleteLocalRef(error);}}
@@ -599,14 +408,10 @@ extern "C" JNIEXPORT jlongArray JNICALL
 Java_dev_ronova_pro_StorageNative_advance0(JNIEnv* env,jclass,jobject request,jlong token) try {
     using namespace recovery_storage;
     if(!exact(env,request,"dev/ronova/pro/RecoveryStorage$Ticket"))return result(env,0,token);
-    auto tx=take(env,request,token);
-    if(!tx)return result(env,0,token,ERROR_NOT_FOUND);
+    auto tx=take(env,request,token);if(!tx)return result(env,0,token,ERROR_NOT_FOUND);
     bool retained=false;StageCleanup cleanup{env,tx,retained};
-    auto actual=tx.get_deleter().tracking;
-    if(actual->retiring||actual->payload_destroyed)return result(env,0,token,actual->error);
-    bool live=false;
-    if(!use_control(*tx,[&]{live=!tx->finalized&&live_owner(env,tx->request);}))return result(env,6,token,ERROR_BUSY);
-    if(!live)return result(env,0,token);
+    if(tx->retiring)return result(env,0,token,tx->error);
+    if(tx->finalized||!live_owner(env,tx->request))return result(env,0,token);
     return advance_owned(env,tx,retained);
 } catch(...) {
     if(!env->ExceptionCheck()){auto error=env->FindClass("java/lang/IllegalStateException");if(error){env->ThrowNew(error,"Native transaction continuation unavailable");env->DeleteLocalRef(error);}}
@@ -617,44 +422,31 @@ Java_dev_ronova_pro_StorageNative_finish0(JNIEnv* env,jclass,jobject request,jlo
     using namespace recovery_storage;
     auto tx=take(env,request,token);
     if(!tx) {
-        // An expiry sweep may already have closed this exact token. Query only its receipt;
-        // never treat arbitrary absence as rollback, and never enter a new transaction here.
+        // An expiry sweep may have closed this exact operation. Absence alone
+        // is never treated as rollback and never creates another transaction.
         if(!request||!exact(env,request,"dev/ronova/pro/RecoveryStorage$Ticket"))return result(env,0);
         auto type=env->GetObjectClass(request);auto query=env->GetMethodID(type,"nativeRetirement","(J)[J");env->DeleteLocalRef(type);
         return query?static_cast<jlongArray>(env->CallObjectMethod(request,query,token)):result(env,0);
     }
-    auto actual=tx.get_deleter().tracking;
-    if(actual->retiring||actual->payload_destroyed) {
-        bool released=rollback_and_retire(env,tx);
-        return result(env,actual->outcome,released?1:0,actual->error);
+    bool retained=false;StageCleanup cleanup{env,tx,retained};
+    if(!close_file(*tx)) {
+        jlong error=tx->error;retain_for_retirement(tx);return result(env,0,0,error);
     }
-    bool closed=false;
-    if(!use_control(*tx,[&]{closed=close_file(*tx);})||!closed) {
-        jlong error=actual->error?actual->error:ERROR_BUSY;retain_for_retirement(tx);return result(env,0,0,error);
+    bool allowed=false;
+    if(!tx->retiring&&!tx->finalized&&tx->phase==Transaction::Ready&&permit
+        &&exact(env,permit,"dev/ronova/pro/RecoveryStorage$Permit")) {
+        auto type=env->GetObjectClass(permit);auto valid=env->GetMethodID(type,"beginCommitFor","(Ldev/ronova/pro/RecoveryStorage$Ticket;)Z");env->DeleteLocalRef(type);
+        if(valid)allowed=env->CallBooleanMethod(permit,valid,request)==JNI_TRUE&&!env->ExceptionCheck();
     }
-    bool observed=use_control(*tx,[&]{
-        bool allowed=false;
-        if(!tx->finalized&&tx->phase==Transaction::Ready&&permit
-            &&exact(env,permit,"dev/ronova/pro/RecoveryStorage$Permit")) {
-            auto type=env->GetObjectClass(permit);auto valid=env->GetMethodID(type,"beginCommitFor","(Ldev/ronova/pro/RecoveryStorage$Ticket;)Z");env->DeleteLocalRef(type);
-            if(valid)allowed=env->CallBooleanMethod(permit,valid,request)==JNI_TRUE&&!env->ExceptionCheck();
-        }
-        if(!tx->finalized) {
-            tx->finalized=true;
-            if(tx->handle==INVALID_HANDLE_VALUE)tx->outcome=0;
-            else if(allowed) {if(api().commit(tx->handle))tx->outcome=1;else{tx->outcome=3;tx->error=GetLastError();}}
-            else {if(api().rollback(tx->handle))tx->outcome=2;else{tx->outcome=3;tx->error=GetLastError();}}
-        }
-    });
-    if(!observed) {
-        bool released=rollback_and_retire(env,tx);
-        return result(env,actual->outcome,released?1:0,actual->error?actual->error:ERROR_BUSY);
+    if(!tx->finalized) {
+        tx->finalized=true;
+        if(tx->handle==INVALID_HANDLE_VALUE)tx->outcome=0;
+        else if(allowed) {if(api().commit(tx->handle))tx->outcome=1;else{tx->outcome=3;tx->error=GetLastError();}}
+        else {if(api().rollback(tx->handle))tx->outcome=2;else{tx->outcome=3;tx->error=GetLastError();}}
     }
-    jlong status=actual->outcome,error=actual->error;
-    bool released=finish_handles(env,tx);
-    return result(env,status,released?1:0,error);
+    jlong status=tx->outcome,error=tx->error;
+    bool released=finish_handles(env,tx);return result(env,status,released?1:0,error);
 }
-
 // Called periodically even when no new storage preparation is submitted. Optional backend:
 // unsupported TxF never becomes a startup dependency or a fallback ordinary overwrite.
 extern "C" JNIEXPORT jlongArray JNICALL

@@ -112,6 +112,17 @@
     "IndexHooks$Movement"
   ],
   "client": [
+    "ClientModGroupHooks$ParticlesAccess",
+    "ClientModGroupHooks$SoundManagerAccess",
+    "ClientModGroupHooks$SoundAccess",
+    "ClientModGroupHooks$LevelAccess",
+    "ClientModGroupHooks$StorageAccess",
+    "ClientModGroupHooks$Particles",
+    "ClientModGroupHooks$Sounds",
+    "ClientModGroupHooks$Blocks",
+    "ClientModGroupHooks$BlockAdmission",
+    "ClientModGroupHooks$BlockRemoval",
+    "ClientModGroupHooks$EntityRemoval",
     "ClientWorldHooks$World",
     "ClientWorldHooks$TimePacket",
     "ClientWorldHooks$BlockTick",

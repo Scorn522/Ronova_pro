@@ -29,9 +29,8 @@ static CodeImage **code_name_buckets;
 static CodeImage *code_hidden_images;
 static size_t code_image_bucket_count,code_image_count;
 static CodeClass *code_classes;
-static volatile LONG code_available,code_pop_available,code_pop_failures,code_sourced;
-static jmethodID code_prepared_callback,code_pop_callback,code_root_gate;
-static jmethodID code_retirement_query;
+static volatile LONG code_available,code_pop_available,code_pop_failures;
+static jmethodID code_prepared_callback;
 static jclass code_bridge;
 static char **code_prepare_targets;static unsigned code_prepare_target_count;
 static jobject code_control_registry;
@@ -353,9 +352,6 @@ static int code_prepare(JNIEnv *env){
     // Heap/JNI observers can run as soon as their hooks are published, before
     // the first producer class supplies a code image.
     if(!code_prepared_callback)code_prepared_callback=native_original.GetStaticMethodID(env,native_controller,"codePrepared","(Ljava/lang/Class;)V");
-    if(!code_pop_callback)code_pop_callback=native_original.GetStaticMethodID(env,native_controller,"executionPopped","(Ljava/lang/Object;Z)Z");
-    if(!code_retirement_query)code_retirement_query=native_original.GetStaticMethodID(env,native_controller,"codeRetirementFrame","(Ljava/lang/Class;Ljava/lang/String;ILjava/lang/Object;Ljava/lang/Module;)[Ljava/lang/Object;");
-    if(!code_root_gate)code_root_gate=native_original.GetStaticMethodID(env,native_controller,"executionRootCaller","()Z");
     if(!code_bridge||!code_control_registry){
         jclass bridge=native_original.FindClass(env,"dev/ronova/pro/bootstrap/CodeSourceBridge");
         jclass map=native_original.FindClass(env,"dev/ronova/pro/bootstrap/CodeSourceBridge$ControlRegistry");jobject registry=NULL;jclass actual=NULL;
@@ -375,7 +371,7 @@ static int code_prepare(JNIEnv *env){
         if(actual)native_original.DeleteLocalRef(env,actual);if(registry)native_original.DeleteLocalRef(env,registry);
         if(bridge)native_original.DeleteLocalRef(env,bridge);if(map)native_original.DeleteLocalRef(env,map);
     }
-    return code_bridge&&code_prepared_callback&&code_pop_callback&&code_retirement_query&&code_root_gate
+    return code_bridge&&code_prepared_callback
             &&code_control_registry&&code_control_backing&&!native_original.ExceptionCheck(env);
 }
 /* Inspect this invocation's actual Java/native method frames without a Java
@@ -436,53 +432,31 @@ JNIEXPORT jboolean JNICALL Java_dev_ronova_pro_bootstrap_NativeControl_codeLayou
     if(!code_available)return JNI_FALSE;CodeImage *image=(CodeImage*)calloc(1,sizeof(*image));if(!image)return JNI_FALSE;
     image->bootstrap=loader==NULL;image->hidden=hidden==JNI_TRUE;image->loader=loader?native_original.NewWeakGlobalRef(env,loader):NULL;const char *text=native_original.GetStringUTFChars(env,name,NULL);if(text){image->name=_strdup(text);native_original.ReleaseStringUTFChars(env,name,text);}
     image->emitted=image->hidden?native_original.NewWeakGlobalRef(env,bytes):NULL;
-    image->execution=execution?native_original.NewWeakGlobalRef(env,execution):NULL;
+    (void)keys;(void)rows;(void)execution;
     image->length=(uint32_t)native_original.GetArrayLength(env,bytes);image->bytes=(unsigned char*)malloc(image->length);if(image->bytes)native_original.GetByteArrayRegion(env,bytes,0,image->length,(jbyte*)image->bytes);
-    int valid=image->name&&image->bytes&&(!loader||image->loader)&&(!image->hidden||image->emitted)&&(!execution||image->execution)&&!native_original.ExceptionCheck(env);CodeCursor cursor={image->bytes,image->bytes?image->bytes+image->length:NULL,valid};
+    int valid=image->name&&image->bytes&&(!loader||image->loader)&&(!image->hidden||image->emitted)&&!native_original.ExceptionCheck(env);CodeCursor cursor={image->bytes,image->bytes?image->bytes+image->length:NULL,valid};
     valid=valid&&code_u(&cursor,4)==0xcafebabe;code_u(&cursor,2);code_u(&cursor,2);unsigned count=code_u(&cursor,2);valid=valid&&code_pool(&cursor,count,&image->pool);code_u(&cursor,2);unsigned self=code_u(&cursor,2);code_u(&cursor,2);
     char *declared=NULL;if(valid&&self<image->pool.count&&image->pool.entries[self]&&image->pool.entries[self][0]==7)declared=code_utf(&image->pool,code_be(image->pool.entries[self]+1,2));valid=valid&&declared&&!strcmp(declared,image->name);free(declared);
     image->pool.self=self;image->pool.hidden=image->hidden;
     valid=valid&&code_skip(&cursor,code_u(&cursor,2)*2)&&code_members(&cursor,image,0)&&code_members(&cursor,image,1)&&code_class_attributes(&cursor,&image->pool)&&code_methods_index(image);
-    jsize total=native_original.GetArrayLength(env,keys);valid=valid&&total==native_original.GetArrayLength(env,rows);
-    AcquireSRWLockExclusive(&native_records);
-    for(jsize i=0;valid&&i<total;i++){
-        jstring key=(jstring)native_original.GetObjectArrayElement(env,keys,i);const char *value=key?native_original.GetStringUTFChars(env,key,NULL):NULL;CodeMethod *method=image->methods;while(method&&(!value||strcmp(method->key,value)))method=method->next;
-        if(value)native_original.ReleaseStringUTFChars(env,key,value);if(key)native_original.DeleteLocalRef(env,key);jobjectArray owners=(jobjectArray)native_original.GetObjectArrayElement(env,rows,i);
-        unsigned instructions=method?method->instructions:0;valid=method&&method->offsets&&owners&&instructions==(unsigned)native_original.GetArrayLength(env,owners)&&!method->owners;
-        if(valid){method->owners=(OwnerLink**)calloc(instructions,sizeof(*method->owners));method->unknown=(unsigned char*)calloc(instructions,sizeof(*method->unknown));valid=method->owners&&method->unknown;}
-        for(unsigned j=0;valid&&j<instructions;j++){jobjectArray source=(jobjectArray)native_original.GetObjectArrayElement(env,owners,j);valid=source!=NULL;jsize n=source?native_original.GetArrayLength(env,source):0;
-            for(jsize k=0;valid&&k<n;k++){jobject module=native_original.GetObjectArrayElement(env,source,k);
-                if(!module)method->unknown[j]=1;
-                else {Owner *owner=native_owner(env,module);valid=owner&&native_owner_add(&method->owners[j],owner);native_original.DeleteLocalRef(env,module);}}
-            if(method->owners[j]||method->unknown[j]){method->sourced=1;image->sourced=1;}
-            if(source)native_original.DeleteLocalRef(env,source);
-        }if(owners)native_original.DeleteLocalRef(env,owners);
-    }
-    ReleaseSRWLockExclusive(&native_records);valid=valid&&!native_original.ExceptionCheck(env);
+    valid=valid&&!native_original.ExceptionCheck(env);
     if(!valid){code_image_free(env,image);native_refuse(env,"ACTUAL_CODE_LAYOUT_UNAVAILABLE");return JNI_FALSE;}
     image->hash=code_image_hash(image->bytes,image->length);
     AcquireSRWLockExclusive(&code_records);code_image_publish(image);
-    // Set before the image can become executing VM code. Published owner
-    // arrays do not change; keep a positive presence even after owner GC/stop.
-    if(image->sourced)InterlockedExchange(&code_sourced,1);
     ReleaseSRWLockExclusive(&code_records);return JNI_TRUE;
 }
 static int code_method_relevant(JNIEnv *env,jmethodID method,jobject module){
-    if(!InterlockedCompareExchange(&code_sourced,0,0))return 0;
-    jclass declaring=NULL;jobject loader=NULL;char *signature=NULL,*name=NULL,*descriptor=NULL;int relevant=0;
-    if((*native_ti)->GetMethodDeclaringClass(native_ti,method,&declaring)==JVMTI_ERROR_NONE&&(*native_ti)->GetClassLoader(native_ti,declaring,&loader)==JVMTI_ERROR_NONE
-            &&(*native_ti)->GetClassSignature(native_ti,declaring,&signature,NULL)==JVMTI_ERROR_NONE&&(*native_ti)->GetMethodName(native_ti,method,&name,&descriptor,NULL)==JVMTI_ERROR_NONE){
-        // Published instruction-owner arrays are immutable. Empty images and
-        // methods cannot satisfy the existing owner predicate; positive rows
-        // still use actual class matching, live owner checks and VM validation.
-        AcquireSRWLockShared(&code_records);CodeCandidates candidates=code_candidates(signature);
-        for(CodeImage *image=code_candidate_next(&candidates);image&&!relevant;image=code_candidate_next(&candidates))if(image->sourced&&code_class_matches(env,image,declaring,loader,signature)){
-            CodeMethod *entry=code_method(image,name,descriptor);if(!entry||!entry->sourced||!entry->owners)continue;
-            for(unsigned i=0;i<entry->instructions&&!relevant;i++)if((native_owner_matches(env,entry->owners[i],module)&&entry->owners[i])
-                    ||!module&&entry->unknown&&entry->unknown[i])relevant=1;
-        }ReleaseSRWLockShared(&code_records);
+    jclass declaring=NULL;jobject actual=NULL;int relevant=0;
+    if(native_ti&&method&&(*native_ti)->GetMethodDeclaringClass(native_ti,method,&declaring)==JVMTI_ERROR_NONE&&declaring)
+        actual=native_original.GetModule(env,declaring);
+    if(actual){AcquireSRWLockShared(&native_records);
+        for(Owner *owner=native_owners;owner;owner=owner->next)
+            if(native_original.IsSameObject(env,owner->module,actual)
+                    &&(!module||native_original.IsSameObject(env,owner->module,module))
+                    &&(InterlockedCompareExchange(&owner->producer,0,0)||InterlockedCompareExchange(&owner->stopped,0,0))){relevant=1;break;}
+        ReleaseSRWLockShared(&native_records);native_original.DeleteLocalRef(env,actual);
     }
-    if(signature)(*native_ti)->Deallocate(native_ti,(unsigned char*)signature);if(name)(*native_ti)->Deallocate(native_ti,(unsigned char*)name);if(descriptor)(*native_ti)->Deallocate(native_ti,(unsigned char*)descriptor);if(loader)native_original.DeleteLocalRef(env,loader);if(declaring)native_original.DeleteLocalRef(env,declaring);return relevant;
+    if(declaring)native_original.DeleteLocalRef(env,declaring);return relevant;
 }
 JNIEXPORT jlongArray JNICALL Java_dev_ronova_pro_bootstrap_NativeControl_codeState0(JNIEnv *env,jclass type,jobject module){
     (void)type;if(!native_jni_ready||!native_original.CallStaticBooleanMethod(env,native_controller,native_control_gate)){native_refuse(env,"ACTUAL_CODE_STATE_AGENT_REQUIRED");return NULL;}
@@ -875,45 +849,19 @@ JNIEXPORT jboolean JNICALL Java_dev_ronova_pro_bootstrap_NativeControl_preparedC
     (void)controller;NativeThread *state=native_thread();return state&&state->prepared
             &&code_caller(env)&&native_original.IsSameObject(env,type,state->prepared);
 }
-/* A result is used only after actual frame bytecodes and referenced constants match this version. */
+/* Whole-Mod source identity comes from the live declaring Class and Module. */
 static int code_frame_sources_checked(JNIEnv *env,jmethodID method,jlocation location,OwnerLink **owners,int *known,int *unknown,CodeFailure *failure){
-    if(!code_available||location<0)return 1;jclass declaring=NULL;jobject loader=NULL;char *signature=NULL,*name=NULL,*descriptor=NULL;unsigned char *bytes=NULL;jint length=0;CodePool pool={0};CodeVMMethod version={0};int valid=1;
-    jvmtiError error=(*native_ti)->GetMethodDeclaringClass(native_ti,method,&declaring);
-    if(error!=JVMTI_ERROR_NONE){valid=code_failed(failure,"declaring_class",error);goto done;}
-    error=(*native_ti)->GetClassLoader(native_ti,declaring,&loader);
-    if(error!=JVMTI_ERROR_NONE){valid=code_failed(failure,"class_loader",error);goto done;}
-    error=(*native_ti)->GetClassSignature(native_ti,declaring,&signature,NULL);
-    if(error!=JVMTI_ERROR_NONE){valid=code_failed(failure,"class_signature",error);goto done;}
-    error=(*native_ti)->GetMethodName(native_ti,method,&name,&descriptor,NULL);
-    if(error!=JVMTI_ERROR_NONE){valid=code_failed(failure,"method_name",error);goto done;}
-    AcquireSRWLockShared(&code_records);CodeCandidates images=code_candidates(signature),scan=images;int candidate=0;
-    for(CodeImage *image=code_candidate_next(&scan);image&&!candidate;image=code_candidate_next(&scan))if(code_class_matches(env,image,declaring,loader,signature)){
-        CodeMethod *entry=code_method(image,name,descriptor);if(entry&&entry->owners)candidate=1;
-    }ReleaseSRWLockShared(&code_records);
-    if(!candidate)goto done;*known=1;
-    if(!code_vm_snapshot_diagnostic(env,method,&version,&pool,name,descriptor,failure)){valid=0;goto done;}
-    error=(*native_ti)->GetBytecodes(native_ti,method,&length,&bytes);
-    if(error!=JVMTI_ERROR_NONE){valid=code_failed(failure,"get_bytecodes",error);goto done;}
-    valid=0;AcquireSRWLockShared(&code_records);
-    scan=code_candidates(signature);scan.ceiling=images.ceiling;
-    unsigned candidates=0,ownerless=0;
-    for(CodeImage *image=code_candidate_next(&scan);image&&!valid;image=code_candidate_next(&scan))if(code_class_matches(env,image,declaring,loader,signature)){
-        CodeMethod *entry=code_method(image,name,descriptor);if(!entry)continue;if(!entry->owners){ownerless++;continue;}candidates++;
-        CodeFailure attempted;if(failure)code_failure_init(&attempted);CodeFailure *detail=failure?&attempted:NULL;
-        unsigned ordinal=0;
-        if(code_equivalent_query(image,entry,bytes,length,&pool,&version,location,&ordinal,detail)){
-            if(!code_vm_unchanged(method,&version))code_failed(detail,"frame_version_changed",JVMTI_ERROR_NONE);
-            else if(!(valid=native_owner_merge(owners,entry->owners[ordinal])))code_failed(detail,"owner_merge",JVMTI_ERROR_NONE);
-            else if(entry->unknown&&entry->unknown[ordinal]&&unknown)*unknown=1;
-        }
-        // Historical candidates normally differ. Report only the final failure,
-        // choosing the candidate that matched the longest instruction prefix.
-        if(!valid&&failure&&(!failure->stage||attempted.instruction>failure->instruction))*failure=attempted;
-    }ReleaseSRWLockShared(&code_records);
-    if(!valid&&failure){failure->candidates=candidates;failure->ownerless=ownerless;code_failed(failure,"no_owned_image",JVMTI_ERROR_NONE);}
-done:
-    free(version.handlers);code_pool_free(&pool);if(bytes)(*native_ti)->Deallocate(native_ti,bytes);
-    if(signature)(*native_ti)->Deallocate(native_ti,(unsigned char*)signature);if(name)(*native_ti)->Deallocate(native_ti,(unsigned char*)name);if(descriptor)(*native_ti)->Deallocate(native_ti,(unsigned char*)descriptor);if(loader)native_original.DeleteLocalRef(env,loader);if(declaring)native_original.DeleteLocalRef(env,declaring);return valid;
+    (void)location;(void)unknown;if(known)*known=0;
+    jclass declaring=NULL;jobject module=NULL;int ready=0;
+    jvmtiError error=native_ti&&method?(*native_ti)->GetMethodDeclaringClass(native_ti,method,&declaring):JVMTI_ERROR_INVALID_METHODID;
+    if(error!=JVMTI_ERROR_NONE||!declaring)return code_failed(failure,"declaring_class",error);
+    module=native_original.GetModule(env,declaring);
+    if(module){AcquireSRWLockExclusive(&native_records);Owner *owner=native_owner(env,module);
+        ready=owner&&native_owner_add(owners,owner);ReleaseSRWLockExclusive(&native_records);
+        native_original.DeleteLocalRef(env,module);
+    }
+    native_original.DeleteLocalRef(env,declaring);
+    if(known)*known=ready;return ready?1:code_failed(failure,"declaring_module",JVMTI_ERROR_NONE);
 }
 static int code_frame_sources(JNIEnv *env,jmethodID method,jlocation location,OwnerLink **owners,int *known){
     return code_frame_sources_checked(env,method,location,owners,known,NULL,NULL);
@@ -932,34 +880,7 @@ static int code_trace(jthread thread,jvmtiFrameInfo **frames,jint *count){
     return code_trace_query(thread,frames,count,NULL);
 }
 static jobject code_frame_plan(JNIEnv *env,jmethodID method,jlocation location){
-    if(!code_available||location<0)return NULL;
-    jclass declaring=NULL;jobject loader=NULL,result=NULL;char *signature=NULL,*name=NULL,*descriptor=NULL;
-    unsigned char *bytes=NULL;jint length=0,access=0;CodePool pool={0};CodeVMMethod version={0};
-    if((*native_ti)->GetMethodDeclaringClass(native_ti,method,&declaring)!=JVMTI_ERROR_NONE
-            ||(*native_ti)->GetClassLoader(native_ti,declaring,&loader)!=JVMTI_ERROR_NONE
-            ||(*native_ti)->GetClassSignature(native_ti,declaring,&signature,NULL)!=JVMTI_ERROR_NONE
-            ||(*native_ti)->GetMethodName(native_ti,method,&name,&descriptor,NULL)!=JVMTI_ERROR_NONE
-            ||(*native_ti)->GetMethodModifiers(native_ti,method,&access)!=JVMTI_ERROR_NONE)goto done;
-    int candidate=0;AcquireSRWLockShared(&code_records);CodeCandidates scan=code_candidates(signature);
-    for(CodeImage *image=code_candidate_next(&scan);image&&!candidate;image=code_candidate_next(&scan))
-        if(image->execution&&!native_original.IsSameObject(env,image->execution,NULL)&&code_class_matches(env,image,declaring,loader,signature))candidate=1;
-    ReleaseSRWLockShared(&code_records);if(!candidate)goto done;
-    if(!code_vm_snapshot(env,method,&version,&pool,name,descriptor)||(*native_ti)->GetBytecodes(native_ti,method,&length,&bytes)!=JVMTI_ERROR_NONE)goto done;
-    AcquireSRWLockShared(&code_records);
-    scan=code_candidates(signature);
-    for(CodeImage *image=code_candidate_next(&scan);image&&!result;image=code_candidate_next(&scan)){
-        if(!image->execution||!code_class_matches(env,image,declaring,loader,signature))continue;
-        CodeMethod *entry=code_method(image,name,descriptor);if(!entry||entry->access!=(unsigned)access)continue;
-        unsigned ordinal=0;
-        if(code_equivalent(image,entry,bytes,length,&pool,&version,location,&ordinal)&&code_vm_unchanged(method,&version))
-            result=native_original.NewLocalRef(env,image->execution);
-    }
-    ReleaseSRWLockShared(&code_records);
-done:
-    free(version.handlers);code_pool_free(&pool);if(bytes)(*native_ti)->Deallocate(native_ti,bytes);
-    if(signature)(*native_ti)->Deallocate(native_ti,(unsigned char*)signature);if(name)(*native_ti)->Deallocate(native_ti,(unsigned char*)name);
-    if(descriptor)(*native_ti)->Deallocate(native_ti,(unsigned char*)descriptor);if(loader)native_original.DeleteLocalRef(env,loader);
-    if(declaring)native_original.DeleteLocalRef(env,declaring);return result;
+    (void)env;(void)method;(void)location;return NULL;
 }
 /* A hot hook may only describe its first real caller. In particular a
  * recursive/deeper matching method, reflective adapter or virtual callback
@@ -996,10 +917,6 @@ static int code_execution_matches(JNIEnv *env,jmethodID method,jclass declaring,
     if(actual)native_original.DeleteLocalRef(env,actual);if(key)(*native_ti)->Deallocate(native_ti,(unsigned char*)key);
     if(signature)(*native_ti)->Deallocate(native_ti,(unsigned char*)signature);return same&&!native_original.ExceptionCheck(env);
 }
-static int code_execution_version(CodeExit *entry){
-    CodeVMMethod version={0};version.method=entry->physicalVersion[0];version.constantMethod=entry->physicalVersion[1];version.constants=entry->physicalVersion[2];
-    return entry->physical&&entry->physicalLength&&code_vm_unchanged(entry->method,&version);
-}
 static jclass code_field_owner(JNIEnv *env,jclass type,const char *name,const char *descriptor,int *ready){
     if(!type||!*ready)return NULL;
     jfieldID *fields=NULL;jint count=0;jclass result=NULL;
@@ -1034,116 +951,21 @@ JNIEXPORT jclass JNICALL Java_dev_ronova_pro_bootstrap_NativeControl_codeFieldOw
     if(!ready&&result){native_original.DeleteLocalRef(env,result);result=NULL;}return result;
 }
 JNIEXPORT jboolean JNICALL Java_dev_ronova_pro_bootstrap_NativeControl_executionRootAllowed0(JNIEnv *env,jclass type){
-    if(!native_jni_ready||!code_root_gate||!native_original.IsSameObject(env,type,native_controller))return JNI_FALSE;
-    NativeThread *state=native_thread();if(!state||state->control)return JNI_FALSE;
-    // The existing native control scope is allocation-free and belongs to this
-    // real thread. Recursive Object construction during the callback returns here.
-    state->control++;
-    jboolean result=native_original.CallStaticBooleanMethod(env,native_controller,code_root_gate);
-    state->control--;return native_original.ExceptionCheck(env)?JNI_FALSE:result;
+    (void)env;(void)type;return JNI_FALSE;
 }
-JNIEXPORT jobject JNICALL Java_dev_ronova_pro_bootstrap_NativeControl_executionPlan0(JNIEnv *env,jclass type,jclass declaring,jstring name,jstring descriptor,jint location){
-    (void)type;if(!code_caller(env)){
-        native_refuse(env,"ACTUAL_CODE_FRAME_BRIDGE_REQUIRED");return NULL;
-    }
-    if(!code_available||!declaring||!name||!descriptor||location<0)return NULL;
-    jobject result=NULL;jmethodID method=NULL;jlocation at=-1;jint depth=0,bottom=0;
-    const char *key=native_original.GetStringUTFChars(env,name,NULL),*desc=key?native_original.GetStringUTFChars(env,descriptor,NULL):NULL;
-    if(key&&desc&&code_execution_frame(env,&method,&at,&depth,&bottom)&&at==location
-            &&code_execution_matches(env,method,declaring,key,desc))result=code_frame_plan(env,method,at);
-    if(key)native_original.ReleaseStringUTFChars(env,name,key);if(desc)native_original.ReleaseStringUTFChars(env,descriptor,desc);
-    return result;
-}
-JNIEXPORT jboolean JNICALL Java_dev_ronova_pro_bootstrap_NativeControl_executionWatch0(JNIEnv *env,jclass controller,jclass declaring,jstring name,jstring descriptor,jint location,jobject plan,jobject token){
-    (void)controller;if(!code_caller(env)){
-        native_refuse(env,"ACTUAL_CODE_FRAME_BRIDGE_REQUIRED");return JNI_FALSE;
-    }
-    NativeThread *state=native_thread();jboolean result=JNI_FALSE;
-    if(!state||!code_pop_available||!code_pop_callback||!declaring||!name||!descriptor||location<0||!plan||!token)goto failed;
-    jthread thread=NULL;jmethodID method=NULL;jlocation at=-1;jint depth=0,bottom=0;
-    const char *key=native_original.GetStringUTFChars(env,name,NULL),*desc=key?native_original.GetStringUTFChars(env,descriptor,NULL):NULL;
-    if(key&&desc&&(*native_ti)->GetCurrentThread(native_ti,&thread)==JVMTI_ERROR_NONE
-            &&code_execution_frame(env,&method,&at,&depth,&bottom)&&at==location&&code_execution_matches(env,method,declaring,key,desc)){
-        CodePool pool={0};CodeVMMethod version={0};
-        int versioned=code_vm_snapshot(env,method,&version,&pool,key,desc);
-        jobject recorded=versioned?code_frame_plan(env,method,at):NULL;
-        int matched=recorded&&native_original.IsSameObject(env,recorded,plan)&&code_vm_unchanged(method,&version);
-        if(recorded)native_original.DeleteLocalRef(env,recorded);
-        /* One token belongs to one invocation. Re-registering an outer token
-         * for a recursive call must not create a second physical authority. */
-        for(CodeExit *entry=state->execution;matched&&entry;entry=entry->previous)
-            if(native_original.IsSameObject(env,entry->token,token)||entry->bottom==bottom)matched=0;
-        if(matched){
-            CodeExit *entry=(CodeExit*)calloc(1,sizeof(*entry));
-            if(entry){
-                entry->method=method;entry->bottom=bottom;entry->token=native_original.NewGlobalRef(env,token);
-                entry->physicalVersion[0]=version.method;entry->physicalVersion[1]=version.constantMethod;entry->physicalVersion[2]=version.constants;
-                entry->physicalLength=version.codeLength;entry->physical=1;
-                jmethodID current=NULL;jlocation currentAt=-1;jint total=0;
-                int currentFrame=(*native_ti)->GetFrameCount(native_ti,thread,&total)==JVMTI_ERROR_NONE&&total-depth==bottom
-                        &&(*native_ti)->GetFrameLocation(native_ti,thread,depth,&current,&currentAt)==JVMTI_ERROR_NONE
-                        &&current==method&&currentAt==at&&code_execution_version(entry);
-                if(entry->token&&currentFrame&&(*native_ti)->NotifyFramePop(native_ti,thread,depth)==JVMTI_ERROR_NONE){
-                    entry->previous=state->execution;state->execution=entry;result=JNI_TRUE;
-                }else{if(entry->token)native_original.DeleteGlobalRef(env,entry->token);free(entry);}
-            }
-        }
-        free(version.handlers);code_pool_free(&pool);
-    }
-    if(key)native_original.ReleaseStringUTFChars(env,name,key);if(desc)native_original.ReleaseStringUTFChars(env,descriptor,desc);
-    if(thread)native_original.DeleteLocalRef(env,thread);
-failed:
-    if(!result)InterlockedIncrement(&code_pop_failures);return result;
-}
-JNIEXPORT jlong JNICALL Java_dev_ronova_pro_bootstrap_NativeControl_executionSite0(JNIEnv *env,jclass controller,jobject token){
-    if(!native_jni_ready||!native_ti||!native_controller||!token||!native_original.IsSameObject(env,controller,native_controller))return 0;
-    NativeThread *state=native_tls==TLS_OUT_OF_INDEXES?NULL:(NativeThread*)TlsGetValue(native_tls);
-    if(!state||!code_pop_available)return 0;
-    CodeExit *entry=state->execution;
-    while(entry&&!native_original.IsSameObject(env,entry->token,token))entry=entry->previous;
-    if(!entry||!code_execution_version(entry))return 0;
-    jmethodID method=NULL;jlocation at=-1;jint depth=0,bottom=0;
-    if(!code_execution_frame(env,&method,&at,&depth,&bottom)||method!=entry->method||bottom!=entry->bottom
-            ||at<0||(uint64_t)at>=entry->physicalLength||!code_execution_version(entry))return 0;
-    return (jlong)(((uint64_t)(uint32_t)bottom<<32)|((uint64_t)(uint32_t)at+1));
-}
-/* Source readers and a defined callback may inspect a suspended watched
- * frame. Its retained bottom is only an address into this live stack: the VM
- * must independently return the same method/version and current instruction. */
-JNIEXPORT jlong JNICALL Java_dev_ronova_pro_bootstrap_NativeControl_executionFrameSite0(JNIEnv *env,jclass controller,jobject token){
-    if(!native_jni_ready||!native_ti||!native_controller||!token||!native_original.IsSameObject(env,controller,native_controller)||!code_caller(env))return 0;
-    NativeThread *state=native_tls==TLS_OUT_OF_INDEXES?NULL:(NativeThread*)TlsGetValue(native_tls);
-    if(!state||!code_pop_available)return 0;
-    CodeExit *entry=state->execution;
-    while(entry&&!native_original.IsSameObject(env,entry->token,token))entry=entry->previous;
-    if(!entry||!code_execution_version(entry))return 0;
-    jmethodID method=NULL;jlocation at=-1;jint total=0;
-    if((*native_ti)->GetFrameCount(native_ti,NULL,&total)!=JVMTI_ERROR_NONE||total<entry->bottom
-            ||(*native_ti)->GetFrameLocation(native_ti,NULL,total-entry->bottom,&method,&at)!=JVMTI_ERROR_NONE
-            ||method!=entry->method||at<0||(uint64_t)at>=entry->physicalLength||!code_execution_version(entry))return 0;
-    return (jlong)(((uint64_t)(uint32_t)entry->bottom<<32)|((uint64_t)(uint32_t)at+1));
-}
+
+
+
 static int code_exit_dispatch(JNIEnv *env,NativeThread *state,CodeExit *entry,jboolean normal){
-    if(!entry->token){SecureZeroMemory(entry,sizeof(*entry));free(entry);return 1;}
-    jthrowable pending=native_original.ExceptionOccurred(env);if(pending)native_original.ExceptionClear(env);
-    jobject previous=state->popped;int previouslyObserved=state->poppedObserved;
-    state->popped=entry->token;state->poppedObserved=!entry->physical||code_execution_version(entry);state->control++;
-    jboolean closed=native_original.CallStaticBooleanMethod(env,native_controller,code_pop_callback,entry->token,state->poppedObserved?normal:JNI_FALSE);
-    state->control--;state->popped=previous;state->poppedObserved=previouslyObserved;
-    if(native_original.ExceptionCheck(env)){native_original.ExceptionClear(env);InterlockedIncrement(&code_pop_failures);closed=JNI_FALSE;}
-    else if(!closed)InterlockedIncrement(&code_pop_failures);
-    if(pending){native_original.Throw(env,pending);native_original.DeleteLocalRef(env,pending);}
-    native_original.DeleteGlobalRef(env,entry->token);SecureZeroMemory(entry,sizeof(*entry));free(entry);return closed==JNI_TRUE;
+    (void)env;(void)state;(void)normal;SecureZeroMemory(entry,sizeof(*entry));free(entry);return 1;
 }
 static void JNICALL code_frame_popped(jvmtiEnv *ti,JNIEnv *env,jthread thread,jmethodID method,jboolean exceptional){
-    (void)ti;if(!native_jni_ready||!code_pop_callback||native_tls==TLS_OUT_OF_INDEXES)return;
+    (void)ti;if(!native_jni_ready||native_tls==TLS_OUT_OF_INDEXES)return;
     jint bottom=0;if((*native_ti)->GetFrameCount(native_ti,thread,&bottom)!=JVMTI_ERROR_NONE){InterlockedIncrement(&code_pop_failures);return;}
     NativeThread *state=(NativeThread*)TlsGetValue(native_tls);int closed=1;
     if(state){
-        // A watcher may legitimately belong to an outer constructor while a
-        // framework wait returns. A watcher at a deeper/equal different frame
-        // cannot: keep that lost source completion visible instead of closing
-        // an unrelated recursive invocation's token.
+        // A pending VM return belongs to one actual method invocation. A
+        // different recursive frame cannot complete that return receipt.
         for(CodeExit *entry=state->execution;entry;entry=entry->previous)
             if(entry->bottom>bottom||(entry->bottom==bottom&&entry->method!=method)){InterlockedIncrement(&code_pop_failures);closed=0;break;}
         CodeExit **slot=&state->execution;
@@ -1164,11 +986,7 @@ static void code_thread_end(JNIEnv *env,NativeThread *state){
     }
 }
 #include "code_retirement.c"
-JNIEXPORT jint JNICALL Java_dev_ronova_pro_bootstrap_NativeControl_executionPopPermit0(JNIEnv *env,jclass controller,jobject token){
-    (void)controller;NativeThread *state=native_thread();
-    return state&&state->popped&&code_caller(env)
-            &&native_original.IsSameObject(env,state->popped,token)?state->poppedObserved?1:2:0;
-}
+
 static void code_source_failure(JNIEnv *env,CodeFailure *failure,jmethodID method,jlocation location,int known){
     jclass declaring=NULL;char *signature=NULL,*name=NULL,*descriptor=NULL;jboolean obsolete=JNI_FALSE;jvmtiError obsoleteError=JVMTI_ERROR_NONE;
     if(method){
@@ -1199,11 +1017,7 @@ static int code_current_sources_query(JNIEnv *env,OwnerLink **owners,int *unknow
     if(!native_capture_network_sources(env,state,owners,unknown)){
         code_failed(&failure,"scoped_sources",JVMTI_ERROR_NONE);code_source_failure(env,&failure,NULL,-1,0);return 0;
     }
-    if(!code_available)return 1;
-    // With no published instruction owner, every frame relevance predicate
-    // is false. Actual Java scope/native binding/library capture still runs;
-    // plans, bytecode validation and heap observations do not use this shortcut.
-    if(!InterlockedCompareExchange(&code_sourced,0,0))return 1;
+    if(!native_ti)return 1;
     state->control++;jthread thread=NULL;jvmtiFrameInfo *frames=NULL;jint depth=0;int valid=1;
     jvmtiError error=(*native_ti)->GetCurrentThread(native_ti,&thread);
     if(error!=JVMTI_ERROR_NONE)valid=code_failed(&failure,"current_thread",error);

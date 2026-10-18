@@ -1149,12 +1149,11 @@ public final class TaskBridge {
     public static int abiVersion(){return 105;}
     public static synchronized void installEquipmentAsync(Class<?> owner,java.lang.invoke.MethodHandle capture,java.lang.invoke.MethodHandle invoke){
         requirePolicyInstaller();if(guards==null||guards.owner()!=owner||equipmentAsync!=null&&equipmentAsync.owner!=owner)throw new SecurityException("EQUIPMENT_ASYNC_OWNER");
-        equipmentAsync=new EquipmentAsync(owner,Objects.requireNonNull(capture).asType(java.lang.invoke.MethodType.methodType(Object.class,Object.class,Object.class,Object.class)),
-                Objects.requireNonNull(invoke).asType(java.lang.invoke.MethodType.methodType(Object.class,Object.class,Object.class,Object.class,Object.class,String.class)));
+        equipmentAsync=null;
     }
     public static synchronized void installEquipmentDefinedDelegate(Class<?> owner,java.lang.invoke.MethodHandle invoke){
         requirePolicyInstaller();if(guards==null||guards.owner()!=owner||equipmentDefined!=null&&equipmentDefined.owner!=owner)throw new SecurityException("EQUIPMENT_DEFINED_OWNER");
-        equipmentDefined=new EquipmentDefined(owner,Objects.requireNonNull(invoke).asType(java.lang.invoke.MethodType.methodType(Object.class,Object.class,Object.class,Object.class,String.class)));
+        equipmentDefined=null;
     }
     private static void reapEquipmentAsync(){
         EventKey stale;while((stale=(EventKey)EQUIPMENT_ASYNC_QUEUE.poll())!=null){EQUIPMENT_ASYNC_TASKS.remove(stale);EQUIPMENT_ASYNC_CALLBACKS.remove(stale);}
@@ -1227,20 +1226,13 @@ public final class TaskBridge {
     /** The original callback position, after the ordinary source/stop task guard. */
     public static Object invokeEquipmentCallback(Object callback,Object first,Object second,String contract){
         requireInvocation(callback);
-        AsyncBinding binding=equipmentAsync!=null&&equipmentAsyncCaller(contract)?claimEquipmentAsync(callback):null;
-        if(binding==null)return invokeEquipmentOriginal(callback,first,second,contract);
-        try{return (Object)binding.installation.invoke.invokeExact(binding.ticket,callback,first,second,contract);}
-        catch(Throwable original){throw TaskBridge.<RuntimeException>equipmentAsyncFailure(original);}
-        finally{binding.ticket=null;}
+        return invokeEquipmentOriginal(callback,first,second,contract);
     }
     /** The execution bridge has already matched this original SAM site and its actual operands. */
     public static Object invokeDefinedEquipmentCallback(Object callback,Object first,Object second,String contract){
         if(WALKER.getCallerClass()!=CodeSourceBridge.class)throw new SecurityException("ACTUAL_DEFINED_CALLBACK_BRIDGE_REQUIRED");
         requireInvocation(callback);
-        EquipmentDefined installation=equipmentDefined;
-        if(installation==null)return invokeEquipmentOriginal(callback,first,second,contract);
-        try{return (Object)installation.invoke.invokeExact(callback,first,second,contract);}
-        catch(Throwable original){throw TaskBridge.<RuntimeException>equipmentAsyncFailure(original);}
+        return invokeEquipmentOriginal(callback,first,second,contract);
     }
     @SuppressWarnings("unchecked") private static <E extends Throwable> RuntimeException equipmentAsyncFailure(Throwable original)throws E{throw (E)original;}
     @SuppressWarnings("unchecked") private static Object invokeEquipmentOriginal(Object callback,Object first,Object second,String contract){
@@ -1728,7 +1720,6 @@ public final class TaskBridge {
         try {
             if(task!=null&&boundary(false)){
                 taskRelation(task,null,currentTask());
-                inheritEquipmentCompletion(task);
                 emit(current,11,task,null,currentTask(),null);
             }
         } catch(Throwable unavailable){lostTask(current,11,task,null,null,null,unavailable);}
@@ -1742,7 +1733,7 @@ public final class TaskBridge {
     public static void delegated(Object wrapper,Object delegate) {
         Registration current=registration;
         try {
-            if(wrapper!=null&&delegate!=null&&boundary(false)){taskRelation(delegate,null,wrapper);inheritEquipmentDelegate(wrapper,delegate);}
+            if(wrapper!=null&&delegate!=null&&boundary(false)){taskRelation(delegate,null,wrapper);}
             if(wrapper!=null&&delegate!=null&&boundary(false))emit(current,21,delegate,wrapper,wrapper,null);
         } catch(Throwable unavailable) {lostTask(current,21,delegate,wrapper,wrapper,null,unavailable);}
     }
@@ -1781,7 +1772,6 @@ public final class TaskBridge {
         try {
             if(observer==null||DELIVERING.get()!=null||!inlineBoundary())return null;
             task=new Inline(source,other,callback);
-            captureEquipmentAsync(task,null,currentTask(),callback);
             task.frame=enterFrame(task,false);
             return task;
         } catch(Throwable unavailable){lostTask(observer,ENTER,task,null,null,null,unavailable);return null;}
@@ -1841,7 +1831,6 @@ public final class TaskBridge {
         Registration current=registration;
         try {
             if(wrapper==null||!boundary(false))return null;
-            inheritEquipmentDelegate(wrapper,task);
             Object token=enterFrame(task,false);
             if(token instanceof Frame frame)frame.delegateOwner=wrapper;
             emit(registration,21,task,wrapper,wrapper,null);
@@ -1975,7 +1964,6 @@ public final class TaskBridge {
         if(task==null||DELIVERING.get()!=null||!boundary(true))return;
         Frame frame=currentFrame(current);
         taskRelation(task,scheduler(scheduler,task),frame==null?null:frame.task);
-        captureEquipmentSubmission(task,scheduler(scheduler,task),frame==null?null:frame.task);
         emit(current,SUBMIT,task,scheduler(scheduler,task),frame==null?null:frame.task,frame);
     }
     /** Publication spans the entire platform submission, including rejection/CallerRuns. */
@@ -1990,7 +1978,6 @@ public final class TaskBridge {
                 SCHEDULER_SUBMISSIONS.merge(new EventKey(token.pool,CREATION_QUEUE),1,Integer::sum);token.schedulerTracked=true;
             }
             taskRelation(task,token.scheduler,token.parent);
-            captureEquipmentSubmission(task,token.scheduler,token.parent);
             synchronized(TaskBridge.class) {
                 if(submissionEntries>=ADMISSION_LIMIT)lostTask(current,SUBMIT_ENTER,task,token.scheduler,token.parent,token,null);
                 else {

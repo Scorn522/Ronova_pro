@@ -4,7 +4,7 @@ import java.lang.reflect.*;
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
 
-/** Exact memory-map backends. An unavailable observer never becomes an ordinary overwrite. */
+/** Actual selected source containers. Unknown key methods are never used to remove an entry. */
 final class SourceMaps {
     private record Owner(java.lang.ref.WeakReference<RecoverySources.Source> source,Field field,
                          java.lang.ref.WeakReference<Object> map) { }
@@ -17,15 +17,22 @@ final class SourceMaps {
     private static final ThreadLocal<Set<Object>> NESTED_OBSERVATIONS=new ThreadLocal<>();
     /** Exact retained list removal may shift another selected element before clearing the final slot. */
     static void removeListIndex(List<?> list,int index)throws ReflectiveOperationException{
-        if(removedJdkContainer(list))throw new IllegalStateException("JDK_CONTAINER_HOOKS_REMOVED");
         if(!supportedList(list))throw new IllegalArgumentException("ACTUAL_SOURCE_LIST_REQUIRED");
+        if(!fastList(list)){
+            if(!with(list,()->list.remove(index)))throw new IllegalStateException("SOURCE_LIST_BUSY");
+            changed(list);return;
+        }
         RetiringList previous=RETIRING_LIST.get();RETIRING_LIST.set(new RetiringList(list,listBacking(list),list.toArray()));
         try{list.remove(index);}finally{if(previous==null)RETIRING_LIST.remove();else RETIRING_LIST.set(previous);}
     }
     /** Remove every occurrence of this exact identity under the carrier's existing write scope. */
     static boolean removeListIdentity(List<?> list,Object expected)throws ReflectiveOperationException{
-        if(removedJdkContainer(list))throw new IllegalStateException("JDK_CONTAINER_HOOKS_REMOVED");
         if(!supportedList(list))throw new IllegalArgumentException("ACTUAL_SOURCE_LIST_REQUIRED");
+        if(!fastList(list)){
+            boolean[] removed={false};
+            if(!with(list,()->removed[0]=list.removeIf(value->value==expected)))throw new IllegalStateException("SOURCE_LIST_BUSY");
+            if(removed[0])changed(list);return removed[0];
+        }
         RetiringList previous=RETIRING_LIST.get();RETIRING_LIST.set(new RetiringList(list,listBacking(list),list.toArray()));
         try{return list.removeIf(value->value==expected);}
         finally{if(previous==null)RETIRING_LIST.remove();else RETIRING_LIST.set(previous);}
@@ -57,9 +64,10 @@ final class SourceMaps {
     static boolean scopedFastutil(Object value){return primitiveMap(value)||fastList(value)||fastSet(value);}
     static boolean scopedList(Object value){return value!=null&&(value.getClass()==ArrayList.class||fastList(value));}
     static boolean supportedList(Object value){return scopedList(value)||value!=null&&value.getClass()==java.util.concurrent.CopyOnWriteArrayList.class;}
-    /** These layouts remain recognizable, but their former global writer scopes have been removed. */
+    /** Retained name for callers: only an unsupported bootstrap container lacks a direct backend. */
     static boolean removedJdkContainer(Object value){return value!=null&&value.getClass().getClassLoader()==null
-            &&(value instanceof Map<?,?>||value instanceof Collection<?>||value instanceof java.util.concurrent.atomic.AtomicReference<?>);}
+            &&(value instanceof Map<?,?>||value instanceof Collection<?>||value instanceof java.util.concurrent.atomic.AtomicReference<?>)
+            &&!supported(value)&&!supportedSet(value)&&!supportedList(value)&&value.getClass()!=java.util.concurrent.atomic.AtomicReference.class;}
     static boolean supportedKey(Object key){return key==null||key instanceof String||key instanceof UUID||key instanceof Integer||key instanceof Long;}
     static String encodeKey(Object key){if(!supportedKey(key))throw new IllegalArgumentException("SOURCE_KEY_TYPE");return key==null?"null:":key.getClass().getName()+":"+key;}
     static Object decodeKey(String encoded){
@@ -167,7 +175,7 @@ final class SourceMaps {
         if(outer){seen=Collections.newSetFromMap(new IdentityHashMap<>());NESTED_OBSERVATIONS.set(seen);}
         if(!seen.add(carrier))return;
         try{
-            if(removedJdkContainer(carrier))throw new IllegalAccessException("JDK_CONTAINER_HOOKS_REMOVED");
+            if(removedJdkContainer(carrier))throw new IllegalAccessException("JDK_CONTAINER_BACKEND_UNSUPPORTED");
             if(RecoveryRecords.nestedHolder(carrier))observeChild(source,field,carrier,"FIELD",null,carrier);
             else if(supported(carrier)){
                 List<Map.Entry<Object,Object>> rows=entries(carrier);if(rows==null)throw new IllegalAccessException("NESTED_MAP_BUSY");
@@ -180,8 +188,7 @@ final class SourceMaps {
             else if(carrier instanceof Object[] values){for(int i=0;i<values.length;i++)observeChild(source,field,carrier,"ARRAY",i,values[i]);}
             else if(supportedList(carrier)){
                 Object[][] snapshot={null};
-                if(scopedList(carrier)){if(!RecoveryRecords.withArrayList(carrier,false,()->snapshot[0]=((List<?>)carrier).toArray()))throw new IllegalAccessException("NESTED_LIST_BUSY");}
-                else snapshot[0]=((List<?>)carrier).toArray();
+                if(!with(carrier,()->snapshot[0]=((List<?>)carrier).toArray()))throw new IllegalAccessException("NESTED_LIST_BUSY");
                 for(int i=0;i<snapshot[0].length;i++)observeChild(source,field,carrier,"LIST",i,snapshot[0][i]);
             }
             source.nestedRegistrationGaps.remove(location);
@@ -423,7 +430,7 @@ final class SourceMaps {
                 needed=true;if(removedJdkContainer(owner.map.get()))removed=true;
             }
         } }
-        return removed?"JDK_CONTAINER_HOOKS_REMOVED":!needed||fieldObserverAvailable()?"":"SOURCE_FIELD_OBSERVER_UNAVAILABLE";
+        return removed?"JDK_CONTAINER_BACKEND_UNSUPPORTED":!needed||fieldObserverAvailable()?"":"SOURCE_FIELD_OBSERVER_UNAVAILABLE";
     }
     static void close(RecoverySources sources) {
         synchronized(OWNERS) {
@@ -479,7 +486,7 @@ final class SourceMaps {
         } catch(ReflectiveOperationException|RuntimeException|LinkageError missing) { return false; }
     }
     static String unavailable(Object map) {
-        return removedJdkContainer(map)?"JDK_CONTAINER_HOOKS_REMOVED":"SOURCE_MAP_BUSY_OR_UNOBSERVED";
+        return removedJdkContainer(map)?"JDK_CONTAINER_BACKEND_UNSUPPORTED":"SOURCE_MAP_BUSY_OR_UNOBSERVED";
     }
     static List<Map.Entry<Object,Object>> entries(Object map) {
         if(!supported(map)&&!fastSet(map))return null;
@@ -495,7 +502,14 @@ final class SourceMaps {
                 for(int i=0;i<=n;i++)if(primitiveOccupied(map,keys,i,n))rows.add(new AbstractMap.SimpleImmutableEntry<>(primitiveKey(map,keys,i),values[i]));
             }))return null;return rows;}catch(ReflectiveOperationException unavailable){return null;}
         }
-        return null;
+        var rows=new ArrayList<Map.Entry<Object,Object>>();
+        try{
+            if(!with(map,()->{
+                // The receiver is an exact JDK map; these are its own entries, not supplied getters.
+                for(var row:((Map<?,?>)map).entrySet())rows.add(new AbstractMap.SimpleImmutableEntry<>(row.getKey(),row.getValue()));
+            }))return null;
+            return rows;
+        }catch(ReflectiveOperationException|ConcurrentModificationException unavailable){return null;}
     }
     static Object[] peek(Object map,Object key) {
         if(!supported(map))return null;
@@ -503,11 +517,18 @@ final class SourceMaps {
             Object[][] result={null};try{if(!with(map,()->{Map<?,?> actual=(Map<?,?>)map;boolean present=actual.containsKey(key);result[0]=new Object[]{present,present?actual.get(key):null};}))return null;}
             catch(ReflectiveOperationException unavailable){return null;}return result[0];
         }
-        return null;
+        if(!supportedKey(key))return null;
+        List<Map.Entry<Object,Object>> rows=entries(map);if(rows==null)return null;
+        for(var row:rows)if(key==row.getKey()||key!=null&&key.equals(row.getKey()))return new Object[]{true,row.getValue()};
+        return new Object[]{false,null};
     }
     static long revision(Object map) {
         if(scopedFastutil(map))try{return (long)Class.forName("dev.ronova.pro.bootstrap.ControlBridge",false,null).getMethod("sourceIndexRevision",Object.class).invoke(null,map);}
         catch(ReflectiveOperationException unavailable){return -1;}
+        try{
+            if(hashBacked(map)||map!=null&&map.getClass()==ArrayList.class)return Integer.toUnsignedLong((Integer)field(map,"modCount"));
+            if(supportedSet(map))return revision(setMap(map));
+        }catch(ReflectiveOperationException unavailable){return -1;}
         return removedJdkContainer(map)?-1:0;
     }
     static final class Cursor {
@@ -523,12 +544,33 @@ final class SourceMaps {
     @FunctionalInterface interface Visitor {
         boolean entry(Object key,Object value,Object node,Cursor cursor)throws ReflectiveOperationException,java.io.IOException;
     }
-    /** Only the retained exact Fastutil boundaries provide a consistent traversal. */
+    private record MapRow(Object key,Object value) { }
+    /** Traverse only the existing exact backends; every removal rechecks the actual selected identity. */
     static boolean visit(Object map,Cursor cursor,int budget,Visitor visitor)throws ReflectiveOperationException,java.io.IOException {
         if(cursor.map!=map||!supported(map)&&!fastSet(map))throw new IllegalArgumentException("ACTUAL_MAP_CURSOR_REQUIRED");
         if(fastSet(map))return visitSet(map,cursor,budget,visitor);
         if(primitiveMap(map))return visitPrimitive(map,cursor,budget,visitor);
-        return false;
+        java.io.IOException[] failure={null};
+        boolean ran=with(map,()->{
+            long version=revision(map);if(version<0)throw new IllegalAccessException("SOURCE_MAP_REVISION_UNAVAILABLE");
+            if(cursor.root==null||cursor.revision!=version){
+                List<Map.Entry<Object,Object>> rows=entries(map);if(rows==null)throw new IllegalAccessException("SOURCE_MAP_BUSY");
+                Object[] snapshot=new Object[rows.size()];int i=0;
+                for(var row:rows)snapshot[i++]=new MapRow(row.getKey(),row.getValue());
+                cursor.reset(snapshot,version);
+            }
+            int remaining=budget;
+            while(remaining-->0&&cursor.bucket<cursor.root.length){
+                MapRow row=(MapRow)cursor.root[cursor.bucket];cursor.next=row;cursor.removed=false;
+                try{if(!visitor.entry(row.key,row.value,row,cursor))break;}
+                catch(java.io.IOException unavailable){failure[0]=unavailable;break;}
+                long after=revision(map);
+                if(!cursor.removed&&cursor.revision!=after){cursor.reset(null,after);return;}
+                cursor.revision=after;cursor.bucket++;
+            }
+            if(cursor.bucket>=cursor.root.length)cursor.complete=true;
+        });
+        if(failure[0]!=null)throw failure[0];return ran;
     }
     private static Object primitiveKey(Object map,Object keys,int index){
         if(map.getClass()==it.unimi.dsi.fastutil.longs.Long2ObjectOpenHashMap.class)return Long.valueOf(((long[])keys)[index]);
@@ -589,15 +631,21 @@ final class SourceMaps {
     private static boolean removeSetIdentity(Cursor cursor,Object key)throws ReflectiveOperationException{
         Object set=cursor.map;Object[] keys=(Object[])field(set,"key");int n=(Integer)field(set,"n"),at=cursor.bucket;
         if(keys!=cursor.root||revision(set)!=cursor.revision||at>n||!setOccupied(set,keys,at,n)||keys[at]!=key)return false;
+        // OpenHashSet shifts and can rehash every surviving key during removeEntry.
+        // Its layout stores no cached hash for an unknown object's implementation.
+        for(int i=0;i<n;i++)if(i!=at&&keys[i]!=null&&!supportedKey(keys[i]))
+            throw new IllegalStateException("SOURCE_SET_KEY_METHOD_UNAVAILABLE");
         Method remove=set.getClass().getDeclaredMethod(at==n?"removeNullEntry":"removeEntry",at==n?new Class<?>[0]:new Class<?>[]{int.class});remove.setAccessible(true);
         if(!Boolean.TRUE.equals(at==n?remove.invoke(set):remove.invoke(set,at)))return false;
         Object[] after=(Object[])field(set,"key");int end=(Integer)field(set,"n");
         for(int i=0;i<=end;i++)if(setOccupied(set,after,i,end)&&after[i]==key)throw new IllegalStateException("SOURCE_SET_REMOVAL_READBACK_FAILED");
         cursor.removed=true;return true;
     }
-    /** Only the retained Fastutil set has an observed identity-removal boundary. */
+    /** Remove only the visited identity; unknown object-key hash/equals methods stay uncalled. */
     static boolean removeIdentityVisited(Cursor cursor,Object key)throws ReflectiveOperationException {
-        return fastSet(cursor.map)&&removeSetIdentity(cursor,key);
+        if(fastSet(cursor.map))return removeSetIdentity(cursor,key);
+        if(cursor.next instanceof MapRow row&&row.key==key)return removeJdkRow(cursor,row);
+        return false;
     }
     static void removeVisited(Cursor cursor,Object target,ProRuntime runtime,ProRuntime.Subject group)throws ReflectiveOperationException {
         if(fastSet(cursor.map)){
@@ -619,7 +667,51 @@ final class SourceMaps {
                 cursor.removed=true;
             }finally{RecoverySources.releaseRecordGraph();}return;
         }
+        if(supported(cursor.map)&&target instanceof MapRow row){
+            if(!RecoverySources.tryRecordGraph())throw new IllegalStateException("GROUP_RECORD_GRAPH_BUSY");
+            try{
+                boolean selectedKey=runtime.groupSubject(row.key)==group||member(row.key,runtime,group);
+                boolean selectedValue=runtime.groupSubject(row.value)==group||member(row.value,runtime,group);
+                if(!selectedKey&&!selectedValue)return;
+                if(selectedKey)validateRecordKey(row.key,runtime,group);
+                if(selectedValue)validateRecordKey(row.value,runtime,group);
+                removeJdkRow(cursor,row);
+            }finally{RecoverySources.releaseRecordGraph();}return;
+        }
         throw new IllegalStateException(unavailable(cursor.map));
+    }
+    @SuppressWarnings("unchecked") private static boolean removeJdkRow(Cursor cursor,MapRow row)throws ReflectiveOperationException{
+        if(hashBacked(cursor.map)){
+            for(var actual:((Map<?,?>)cursor.map).entrySet())if(actual.getKey()==row.key&&actual.getValue()==row.value){
+                // removeNode consumes the node's cached hash. Both comparisons use our pure
+                // identity matcher, so no method of a supplied key or value runs during unlink.
+                int hash=(Integer)field(actual,"hash");
+                Method remove=HashMap.class.getDeclaredMethod("removeNode",int.class,Object.class,Object.class,boolean.class,boolean.class);
+                if(!remove.trySetAccessible())throw new IllegalAccessException("SOURCE_MAP_IDENTITY_REMOVE_UNAVAILABLE");
+                Object removed=remove.invoke(cursor.map,hash,new IdentityMatch(row.key),new IdentityMatch(row.value),true,true);
+                if(removed==null)return false;
+                if(removed!=actual)throw new IllegalStateException("SOURCE_MAP_IDENTITY_REMOVE_CHANGED");
+                cursor.removed=true;cursor.revision=revision(cursor.map);changed(cursor.map);return true;
+            }
+            return false;
+        }
+        if(!supportedKey(row.key))throw new IllegalStateException("SOURCE_MAP_KEY_METHOD_UNAVAILABLE");
+        Map<Object,Object> map=(Map<Object,Object>)cursor.map;boolean[] removed={false};
+        if(row.value==null)removed[0]=map.remove(row.key,null);
+        else map.computeIfPresent(row.key,(key,value)->{
+            if(value!=row.value)return value;
+            removed[0]=true;return null;
+        });
+        if(removed[0]){
+            cursor.removed=true;cursor.revision=revision(map);changed(map);
+        }
+        return removed[0];
+    }
+    private static final class IdentityMatch {
+        private final Object expected;
+        IdentityMatch(Object expected){this.expected=expected;}
+        @Override public boolean equals(Object value){return value==expected;}
+        @Override public int hashCode(){return System.identityHashCode(expected);}
     }
     private static Object field(Object owner,String name)throws ReflectiveOperationException {
         Field field=slot(owner.getClass(),name);return field.get(owner);
@@ -654,6 +746,15 @@ final class SourceMaps {
                 if(thrown[0]!=null)throw thrown[0];return ran;
             }catch(InvocationTargetException failure){if(failure.getCause() instanceof RuntimeException error)throw error;if(failure.getCause() instanceof Error error)throw error;throw failure;}
         }
+        if(hashBacked(map)||map!=null&&(map.getClass()==ConcurrentHashMap.class||map.getClass()==ArrayList.class
+                ||map.getClass()==java.util.concurrent.atomic.AtomicReference.class)){
+            synchronized(map){action.run();}return true;
+        }
+        if(map!=null&&map.getClass()==java.util.concurrent.CopyOnWriteArrayList.class){
+            // This is the list's actual JDK writer lock, so identity selection and remove share it.
+            Object lock=field(map,"lock");synchronized(lock){action.run();}return true;
+        }
+        if(supportedSet(map))return with(setMap(map),action);
         return false;
     }
 }

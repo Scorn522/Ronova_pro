@@ -56,9 +56,9 @@ public final class ClientPresentation {
             if(ClientPresence.replacementDenied(this,id,null))ci.cancel();
         }
         @Inject(method="putNonPlayerEntity",at=@At("RETURN"))
-        private void published(int id,Entity entity,CallbackInfo ci) {ClientPresence.bindLocal(entity);}
+        private void published(int id,Entity entity,CallbackInfo ci) {ClientPresence.bindLocal(entity);dev.ronova.pro.ClientModGroups.observed(entity);}
         @Inject(method="addPlayer",at=@At("RETURN"))
-        private void player(int id,net.minecraft.client.player.AbstractClientPlayer entity,CallbackInfo ci) {ClientPresence.bindLocal(entity);}
+        private void player(int id,net.minecraft.client.player.AbstractClientPlayer entity,CallbackInfo ci) {ClientPresence.bindLocal(entity);dev.ronova.pro.ClientModGroups.observed(entity);}
     }
     @Mixin(net.minecraft.world.level.entity.TransientEntitySectionManager.class) public abstract static class StoragePublication {
         @Inject(method="addEntity",at=@At("HEAD"),cancellable=true)
@@ -69,7 +69,7 @@ public final class ClientPresentation {
     @Mixin(EntityRenderDispatcher.class) public abstract static class Draw {
         @Inject(method="render",at=@At("HEAD"),cancellable=true)
         private void render(Entity entity,double x,double y,double z,float rotation,float partial,PoseStack pose,MultiBufferSource buffers,int light,CallbackInfo ci) {
-            if(ClientPresence.renderDenied(entity))ci.cancel();
+            if(ClientPresence.renderDenied(entity)||dev.ronova.pro.ClientModGroups.stopped(((EntityRenderDispatcher)(Object)this).getRenderer(entity)))ci.cancel();
         }
     }
     @Mixin(EntityRenderer.class) public abstract static class NameHud {
@@ -81,7 +81,7 @@ public final class ClientPresentation {
     @Mixin(Minecraft.class) public abstract static class Screens {
         @Inject(method="setScreen",at=@At("HEAD"),cancellable=true)
         private void screen(Screen screen,CallbackInfo ci) {
-            if(screen instanceof DeathScreen&&Minecraft.getInstance().isSameThread()&&ClientPresence.protectedPlayer())ci.cancel();
+            if(dev.ronova.pro.ClientModGroups.stopped(screen)||screen instanceof DeathScreen&&Minecraft.getInstance().isSameThread()&&ClientPresence.protectedPlayer())ci.cancel();
         }
     }
     @Mixin(net.minecraft.world.entity.LivingEntity.class) public abstract static class Health {

@@ -30,9 +30,8 @@ static int host_is_memory_write(int kind){
 static int host_is_memory_release(int kind){
     return kind>=HOST_VIRTUAL_FREE&&kind<=HOST_UNMAP_VIEW_EX;
 }
-/* A Host worker need not be attached to Java. Never attach it just to record
- * a native allocation; the tracker retires generations without a JNIEnv and
- * defers only JNI reference disposal until a safe attached observation. */
+/* A Host worker need not be attached to Java. Source capture never attaches
+ * a thread while the loader or VM callback restricts Java transitions. */
 static JNIEnv *host_memory_environment(int restricted){
     JNIEnv *env=NULL;
     if(!restricted&&!host_loader_callout()&&native_vm&&native_vm_original.GetEnv
@@ -48,19 +47,6 @@ static int host_memory_cleanup_scope(HostImport *entry,NativeThread *state){
                 &&InterlockedCompareExchange(&scope->library->alive,0,0)
                 &&InterlockedCompareExchange(&scope->library->closing,0,0))return 1;
     return 0;
-}
-static NativeHostArenaOriginalScope *host_memory_arena_scope(HostImport *entry,NativeThread *state,void *caller){
-    NativeHostArenaOriginalScope *scope=state?state->hostArenaOriginal:NULL;
-    if(!scope||!scope->call||scope->thread!=GetCurrentThreadId()||!entry||!entry->image
-            ||entry->image->handle!=scope->image||native_image(caller)!=scope->image
-            ||native_image(scope->original)!=scope->image||native_image(scope->release)!=scope->image)return NULL;
-    return scope;
-}
-static int host_memory_arena_cleanup_scope(NativeHostArenaOriginalScope *scope,NativeThread *state){
-    return scope&&scope->cleanup&&(!scope->entry||host_memory_cleanup_scope((HostImport*)scope->entry,state));
-}
-static int host_memory_arena_cleanup(NativeHostArenaOriginalScope *scope,NativeThread *state){
-    return host_memory_arena_cleanup_scope(scope,state)&&native_memory_host_cleanup(scope->call);
 }
 static int host_memory_overlaps(uintptr_t first,uintptr_t last,const void *allocation,SIZE_T size){
     if(!allocation||!size)return 0;uintptr_t base=(uintptr_t)allocation;
@@ -333,61 +319,23 @@ static BOOL host_memory_release_original(HostImport *entry,HANDLE process,const 
         default:SetLastError(ERROR_INVALID_FUNCTION);return FALSE;
     }
 }
-static NativeHostMemoryCall *host_memory_release_tracking(HostImport *entry,const uintptr_t *arguments,
-        JNIEnv *env,OwnerLink *owners,int unknown,int *denied,uint64_t *affected,NativeHostArenaOriginalScope *arena){
-    if(entry->kind!=HOST_VIRTUAL_FREE&&entry->kind!=HOST_VIRTUAL_FREE_EX)return NULL;
-    unsigned first=entry->kind==HOST_VIRTUAL_FREE_EX?1:0;
-    const void *address=(const void*)arguments[first];SIZE_T bytes=(SIZE_T)arguments[first+1];
-    DWORD type=(DWORD)arguments[first+2];int operation=NATIVE_MEMORY_HOST_FREE;
-    if(type!=MEM_RELEASE){
-        operation=NATIVE_MEMORY_HOST_DECOMMIT;
-        if(type==MEM_DECOMMIT&&bytes){
-            DWORD page=__atomic_load_n(&host_memory_page_size,__ATOMIC_ACQUIRE);
-            uintptr_t raw=(uintptr_t)address;if(!page||bytes>UINTPTR_MAX-raw)return NULL;
-            uintptr_t start=raw-raw%page,end=raw+bytes;
-            uintptr_t tail=end%page? page-end%page:0;
-            if(tail>UINTPTR_MAX-end)return NULL;
-            address=(const void*)start;bytes=(SIZE_T)(end+tail-start);
-        }else {
-            const void *base=NULL;int pages=0;
-            if(host_memory_allocation_span(address,&base,&bytes,&pages)||pages)return NULL;
-            address=base;
-        }
-    }
-    *affected=bytes;void *release=host_real_memory_target(HOST_VIRTUAL_FREE,"VirtualFree");
-    if(arena&&(type==MEM_RELEASE||type==MEM_DECOMMIT)){
-        NativeHostMemoryCall *backing=native_memory_host_backing_prepare(env,arena,release,(uint64_t)(uintptr_t)address,
-                bytes,operation,owners,unknown,denied);
-        if(backing||*denied)return backing;
-    }
-    return native_memory_host_prepare(env,NATIVE_MEMORY_HOST_VIRTUAL,release,0,(uint64_t)(uintptr_t)address,
-            bytes,operation,owners,unknown,denied);
-}
 static uint64_t host_native_memory_release(HostImport *entry,void *caller,uintptr_t *arguments){
     DWORD incoming=GetLastError();OwnerLink *owners=NULL;int unknown=0;
     NativeThread *state=native_tls==TLS_OUT_OF_INDEXES?NULL:(NativeThread*)TlsGetValue(native_tls);
-    int restricted=state&&(state->heapCallback||state->toolingRestricted||state->vmDetaching||state->vmThreadEnding||state->hostUnloadImage||state->hostRelease
-            ||state->hostLoad&&state->hostLoad->calling);
+    int restricted=host_loader_callout()||(state&&(state->heapCallback||state->toolingRestricted||state->vmDetaching
+            ||state->vmThreadEnding||state->hostUnloadImage||state->hostRelease||state->hostLoad&&state->hostLoad->calling));
     if(!restricted)entry=host_consumed_entry(entry,state,caller);
     if(!host_entry_sources_query(entry,state,caller,&owners,NULL,1,&unknown)){
         DWORD error=GetLastError();native_owner_links_free(owners);SetLastError(error);return FALSE;
     }
-    DWORD error=0;HANDLE process=NULL;BOOL result=FALSE;int returned=0,denied=0;
-    JNIEnv *env=host_memory_environment(restricted);NativeHostMemoryCall *tracking=NULL;uint64_t affected=0;
-    NativeHostArenaOriginalScope *arena=host_memory_arena_scope(entry,state,caller);
-    NativeHostArenaOriginalScope loaderScope={0};NativeHostMemoryCall *loaderCall=NULL;
-    if(!arena){loaderCall=host_arena_loader_scope(entry,state,caller,owners,unknown,&loaderScope);
-        if(!loaderCall)loaderCall=host_other_loader_scope(entry,state,caller,owners,unknown,&loaderScope);
-        if(loaderCall)arena=&loaderScope;}
+    DWORD error=0;HANDLE process=NULL;BOOL result=FALSE;int returned=0;
     int local=entry->kind!=HOST_VIRTUAL_FREE_EX;
-    unsigned originalFirst=entry->kind==HOST_VIRTUAL_FREE_EX?1:0;
-    DWORD releaseType=(DWORD)arguments[originalFirst+2];
-    int cleanup=(entry->kind==HOST_VIRTUAL_FREE||entry->kind==HOST_VIRTUAL_FREE_EX)
-            &&(releaseType==MEM_RELEASE&&host_memory_cleanup_scope(entry,state)
-                ||(releaseType==MEM_RELEASE||releaseType==MEM_DECOMMIT)&&host_memory_arena_cleanup(arena,state));
+    /* Only the genuine current unload body may release ordinary resources of
+     * its stopped image. This relation grants no control-memory permission. */
+    int cleanup=host_memory_cleanup_scope(entry,state)&&entry->image&&native_image(caller)==entry->image->handle;
     __try {
         if(native_owner_stopped(owners)&&!cleanup)error=ERROR_ACCESS_DENIED;
-        else if(unknown&&(restricted||native_has_producer(owners))&&!cleanup)error=ERROR_INVALID_DATA;
+        else if(unknown&&(restricted||native_has_producer(owners)))error=ERROR_INVALID_DATA;
         if(!error&&!local){
             HostCompareHandles compare=__atomic_load_n(&host_compare_handles,__ATOMIC_ACQUIRE);
             if(!compare&&!restricted&&host_handle_identity_ready())compare=__atomic_load_n(&host_compare_handles,__ATOMIC_ACQUIRE);
@@ -395,51 +343,25 @@ static uint64_t host_native_memory_release(HostImport *entry,void *caller,uintpt
             else if(!host_real_duplicate(GetCurrentProcess(),(HANDLE)arguments[0],GetCurrentProcess(),&process,0,FALSE,DUPLICATE_SAME_ACCESS))error=GetLastError();
             else local=compare(process,GetCurrentProcess())!=0;
         }
-        /* A fixed SAME_ACCESS alias establishes the actual target object.
-         * Remote addresses never acquire local allocation ownership. */
         int hit=!error&&local?host_memory_release_range(entry,arguments,restricted):0;
         if(!error&&hit)error=hit>0?ERROR_ACCESS_DENIED:restricted?ERROR_BUSY:ERROR_INVALID_DATA;
         if(!error&&local){
-            tracking=host_memory_release_tracking(entry,arguments,env,owners,unknown,&denied,&affected,arena);
-            if(denied)error=ERROR_BUSY;
-            else if(arena&&!native_memory_host_sources(tracking,&owners,&unknown))error=ERROR_NOT_ENOUGH_MEMORY;
-        }
-        int retiring=cleanup&&local&&tracking&&(host_memory_cleanup_scope(entry,state)
-                ||host_memory_arena_cleanup(arena,state)&&native_memory_host_cleanup(tracking));
-        if(!error&&native_owner_stopped(owners)&&!retiring)error=ERROR_ACCESS_DENIED;
-        else if(!error&&unknown&&(restricted||native_has_producer(owners))&&!retiring)error=ERROR_INVALID_DATA;
-        if(!error&&local){
-            int locked=restricted?TryAcquireSRWLockExclusive(&native_private_gate):
-                    (AcquireSRWLockExclusive(&native_private_gate),1);
+            int locked=restricted?TryAcquireSRWLockExclusive(&native_private_gate):(AcquireSRWLockExclusive(&native_private_gate),1);
             if(!locked)error=ERROR_BUSY;
             else __try {
                 hit=host_memory_release_locked(entry,arguments);
                 if(hit)error=hit>0?ERROR_ACCESS_DENIED:restricted?ERROR_BUSY:ERROR_INVALID_DATA;
-                else if(native_owner_stopped(owners)&&!(retiring&&(host_memory_cleanup_scope(entry,state)
-                        ||host_memory_arena_cleanup_scope(arena,state))))error=ERROR_ACCESS_DENIED;
+                else if(native_owner_stopped(owners)&&!(cleanup&&host_memory_cleanup_scope(entry,state)))error=ERROR_ACCESS_DENIED;
                 else {SetLastError(incoming);result=host_memory_release_original(entry,process,arguments);error=GetLastError();returned=1;}
             } __finally {ReleaseSRWLockExclusive(&native_private_gate);}
         }else if(!error){
             if(native_owner_stopped(owners))error=ERROR_ACCESS_DENIED;
             else {SetLastError(incoming);result=host_memory_release_original(entry,process,arguments);error=GetLastError();returned=1;}
         }
-        if(tracking){
-            NativeHostMemoryCall *finished=tracking;tracking=NULL;
-            unsigned first=entry->kind==HOST_VIRTUAL_FREE_EX?1:0;
-            if(arena)native_memory_host_backing_complete(env,finished,affected,returned&&result,
-                    returned&&result&&(DWORD)arguments[first+2]==MEM_RELEASE);
-            else native_memory_host_complete(env,finished,0,affected,returned&&result,
-                    returned&&result&&(DWORD)arguments[first+2]==MEM_RELEASE);
-        }else if(returned&&result&&local&&(entry->kind==HOST_VIRTUAL_FREE||entry->kind==HOST_VIRTUAL_FREE_EX))
-            native_memory_host_unobserved(owners);
     } __finally {
-        DWORD interrupted=GetLastError();if(tracking)native_memory_host_abort(env,tracking);
-        host_arena_loader_scope_close(state,&loaderScope,loaderCall);
+        DWORD interrupted=GetLastError();
         if(process&&!host_real_close(process))InterlockedIncrement(&native_failures);
-        native_owner_links_free(owners);SetLastError(returned?error:error?error:interrupted);
+        native_owner_links_free(owners);SetLastError(returned||error?error:interrupted);
     }
-    /* Win32 has no allocation-incarnation pin for unrelated code replacing a
-     * mapping outside this gate. The guarantee is allocation/publication by
-     * this DLL, not atomicity with raw stores, syscalls or VM disposal. */
     return (uint64_t)result;
 }

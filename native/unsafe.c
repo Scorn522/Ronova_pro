@@ -2,7 +2,6 @@
  * entries and still require the Java call-site and VM writer paths. */
 typedef struct NativeUnsafeEntry {jmethodID method;void *original;unsigned operation;struct NativeUnsafeEntry *next;} NativeUnsafeEntry;
 static NativeUnsafeEntry *native_unsafe_entries;
-static int native_memory_observed(uint64_t address,uint64_t length);
 typedef jboolean (JNICALL *NativeReferenceCAS)(JNIEnv*,jobject,jobject,jlong,jobject,jobject);
 typedef struct NativeDefinitionDirectory {
     jclass owner; jobject directory,worker,unsafe; jlong offset;
@@ -118,23 +117,21 @@ static int native_unsafe_network_retirement(JNIEnv *env,NativeThread *state,Bind
 }
 static int native_unsafe_begin(JNIEnv *env,NativeThread *state,Binding *binding,unsigned char *frame){
     unsigned depth=state->depth-1;NativeUnsafeFrame *use=&state->unsafeFrames[depth];memset(use,0,sizeof(*use));
-    if(binding->unsafeOperation>=UNSAFE_ALLOCATE&&binding->unsafeOperation<=UNSAFE_FREE)return native_memory_call_begin(env,state,binding,frame,use);
+    if(binding->unsafeOperation>=UNSAFE_ALLOCATE&&binding->unsafeOperation<=UNSAFE_FREE)return native_memory_call_begin(env,state,binding,frame);
     NativeUnsafeMutation mutation;memset(&mutation,0,sizeof(mutation));
     native_unsafe_destination(binding,frame,&mutation.receiver,&mutation.offset,&mutation.length);
-    // Standalone heap getters have no source-result consumer. Executed reads,
-    // buffer reads and copies own their actual observation outside this leaf.
-    // Raw reads of a registered live allocation still need the lease below.
-    // An unregistered mapping has no allocation, reader record or result
-    // consumer at this leaf; the old receipt only allocated/freed an empty
-    // scope. Check the exact current range before collecting any sources.
-    // Executed reads and outer buffer/copy windows keep their own observation.
+    /* Heap access keeps the existing Java control gate. A raw getter needs
+     * only the control-range fence; private allocation leases are disabled. */
     if(binding->unsafeOperation==UNSAFE_READ&&mutation.receiver)return 1;
     if(binding->unsafeOperation==UNSAFE_READ){
         const char *kind=binding->unsafeKind;
         uint64_t width=strcmp(kind,"Boolean")==0||strcmp(kind,"Byte")==0?1
                 :strcmp(kind,"Short")==0||strcmp(kind,"Char")==0?2
                 :strcmp(kind,"Int")==0||strcmp(kind,"Float")==0?4:8;
-        if(!native_memory_observed((uint64_t)mutation.offset,width))return 1;
+        int restricted=host_loader_callout()||state->heapCallback||state->toolingRestricted||state->vmDetaching||state->vmThreadEnding;
+        int hit=host_memory_range((void*)(uintptr_t)mutation.offset,(SIZE_T)width,0,restricted);
+        if(hit)native_refuse(env,hit>0?"NATIVE_CONTROL_MEMORY_READ_DENIED":"NATIVE_CONTROL_RANGE_UNAVAILABLE");
+        return !hit;
     }
     mutation.bulk=binding->unsafeOperation>=UNSAFE_SET&&binding->unsafeOperation<=UNSAFE_SWAP?JNI_TRUE:JNI_FALSE;
     mutation.reading=binding->unsafeOperation==UNSAFE_READ?JNI_TRUE:JNI_FALSE;
@@ -178,7 +175,6 @@ static int native_unsafe_begin(JNIEnv *env,NativeThread *state,Binding *binding,
 }
 static void native_unsafe_end(JNIEnv *env,NativeThread *state,Binding *binding,unsigned char *frame){
     NativeUnsafeFrame *use=&state->unsafeFrames[state->depth-1];
-    if(use->memoryCall){native_memory_call_end(env,state,binding,frame,use);return;}
     if(!use->token)return;
     uint64_t returned;memcpy(&returned,frame+native_unsafe_save(binding)+96,sizeof(returned));int applied=1;
     if(native_original.ExceptionCheck(env))applied=0;

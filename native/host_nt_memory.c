@@ -1,12 +1,15 @@
 /* Actual ntdll Nt/Zw memory transfers, plus the already observed Win32 read/
- * write entries. Included after host_crypto.c and host_memory.c. Remote
- * addresses never identify a local allocation; only a SAME_ACCESS alias of
+ * write entries. These are source/control-range fences, without private
+ * allocation observation. Only a SAME_ACCESS alias of
  * the supplied process object decides which endpoint belongs to this JVM.
  * https://learn.microsoft.com/en-us/windows/win32/api/handleapi/nf-handleapi-compareobjecthandles
  * https://learn.microsoft.com/en-us/windows/win32/api/memoryapi/nf-memoryapi-readprocessmemory
  * https://learn.microsoft.com/en-us/windows/win32/api/memoryapi/nf-memoryapi-writeprocessmemory
  * https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-erref/87fba13e-bf06-450e-83b1-9241dc81e781
  */
+typedef struct HostNtCrtErrors {DWORD windows;int crt;unsigned long dos;} HostNtCrtErrors;
+static HostNtCrtErrors host_nt_crt_errors(void){HostNtCrtErrors value={GetLastError(),errno,_doserrno};return value;}
+static void host_nt_crt_restore(HostNtCrtErrors value){_doserrno=value.dos;errno=value.crt;SetLastError(value.windows);}
 typedef LONG (NTAPI *HostNtMemoryTransfer)(HANDLE,PVOID,PVOID,SIZE_T,PSIZE_T);
 typedef LONG (NTAPI *HostNtGetLastStatus)(void);
 typedef void (NTAPI *HostNtSetLastStatus)(LONG);
@@ -17,7 +20,7 @@ typedef struct HostNtMemoryProvider {
 static HostNtMemoryProvider *volatile host_nt_memory_provider;
 
 typedef struct HostNtThreadErrors {
-    HostCryptoErrors crt;LONG status;
+    HostNtCrtErrors crt;LONG status;
     HostNtGetLastStatus getStatus;HostNtSetLastStatus setStatus;int ready;
 } HostNtThreadErrors;
 static int host_is_nt_memory(int kind){return kind>=HOST_NT_READ&&kind<=HOST_ZW_WRITE;}
@@ -34,7 +37,7 @@ static int host_nt_errors_ready(void){
     HostNtMemoryProvider *provider=host_nt_memory_current();return provider&&provider->getStatus&&provider->setStatus;
 }
 static HostNtThreadErrors host_nt_errors(void){
-    HostNtThreadErrors saved={0};saved.crt=host_crypto_errors();
+    HostNtThreadErrors saved={0};saved.crt=host_nt_crt_errors();
     HostNtMemoryProvider *provider=host_nt_memory_current();
     if(provider){saved.getStatus=provider->getStatus;saved.setStatus=provider->setStatus;
         saved.ready=saved.getStatus&&saved.setStatus;if(saved.ready)saved.status=saved.getStatus();}
@@ -43,14 +46,14 @@ static HostNtThreadErrors host_nt_errors(void){
 static HostNtThreadErrors host_nt_result(const HostNtThreadErrors *incoming){
     /* Use the same retained actual ntdll helpers. Return NTSTATUS and the
      * thread's LastNtStatus are independent values, including on refusal. */
-    HostNtThreadErrors saved=*incoming;saved.crt=host_crypto_errors();
+    HostNtThreadErrors saved=*incoming;saved.crt=host_nt_crt_errors();
     if(saved.ready)saved.status=saved.getStatus();SetLastError(saved.crt.windows);return saved;
 }
 static void host_nt_restore(const HostNtThreadErrors *saved){
     /* The real ntdll setter restores LastNtStatus and its associated Win32
      * mapping; restore the separately captured Win32 value after it. No TEB
      * offset, guessed TLS layout or return-status substitution is used. */
-    if(saved->ready)saved->setStatus(saved->status);host_crypto_restore(saved->crt);
+    if(saved->ready)saved->setStatus(saved->status);host_nt_crt_restore(saved->crt);
 }
 static LONG host_nt_refusal_status(DWORD error){
     /* STATUS_DEVICE_BUSY is 0x80000011, a warning with NT_SUCCESS == false.
@@ -71,12 +74,12 @@ static HostNtMemoryProvider *host_nt_memory_publish(HMODULE provider,HostGetProc
     HostNtMemoryProvider *known=host_nt_memory_current();
     if(known)return known->image==provider?known:NULL;
     if(!provider||!resolve)return NULL;
-    HostCryptoErrors incoming=host_crypto_errors();HMODULE image=GetModuleHandleW(L"ntdll.dll");
-    if(provider!=image){host_crypto_restore(incoming);return NULL;}
+    HostNtCrtErrors incoming=host_nt_crt_errors();HMODULE image=GetModuleHandleW(L"ntdll.dll");
+    if(provider!=image){host_nt_crt_restore(incoming);return NULL;}
     HostNtGetLastStatus getStatus=(HostNtGetLastStatus)resolve(image,"RtlGetLastNtStatus");
     HostNtSetLastStatus setStatus=(HostNtSetLastStatus)resolve(image,"RtlSetLastWin32ErrorAndNtStatusFromNtStatus");
     if(!getStatus||!setStatus||native_image((void*)getStatus)!=image||native_image((void*)setStatus)!=image){
-        host_crypto_restore(incoming);return NULL;
+        host_nt_crt_restore(incoming);return NULL;
     }
     /* Initial target discovery runs before these entries are published. Once
      * the actual helpers are available, retain their state across pinning and
@@ -112,8 +115,8 @@ static void host_nt_memory_targets(HostGetProcAddress resolve){
     if(!resolve)return;
     HostNtMemoryProvider *known=host_nt_memory_current();
     if(known)return;
-    HostCryptoErrors incoming=host_crypto_errors();HMODULE image=GetModuleHandleW(L"ntdll.dll");
-    host_nt_memory_publish(image,resolve);host_crypto_restore(incoming);
+    HostNtCrtErrors incoming=host_nt_crt_errors();HMODULE image=GetModuleHandleW(L"ntdll.dll");
+    host_nt_memory_publish(image,resolve);host_nt_crt_restore(incoming);
 }
 static int host_nt_memory_target_matches(void *actual,int kind){
     HostNtMemoryProvider *provider=host_nt_memory_current();
@@ -187,7 +190,7 @@ static uint64_t host_native_memory_transfer(HostImport *entry,void *caller,uintp
     if(consumed->kind!=kind||consumed->original!=entry->original)return host_nt_transfer_refuse(native,&incoming,ERROR_INVALID_DATA);
     entry=consumed;OwnerLink *owners=NULL;int unknown=0,local=0,reading=host_nt_memory_reading(kind);
     DWORD error=0;HANDLE process=NULL;uint64_t result=0;int called=0,returned=0,finished=0,capturedState=0;
-    NativeHostTransferCall *call=NULL;HostNtTransferRanges ranges={0};
+    HostNtTransferRanges ranges={0};(void)callbackEntered;
     __try {
         /* Restricted/loader calls use only the already captured C scopes and
          * Try locks. No new Java attachment or source inference is introduced. */
@@ -215,26 +218,14 @@ static uint64_t host_native_memory_transfer(HostImport *entry,void *caller,uintp
                 error=GetLastError();if(!error)error=ERROR_INVALID_HANDLE;
             }else local=compare(process,GetCurrentProcess())!=0;
         }
-        int observed=0,control=0;
+        int control=0;
         if(!error){
             ranges=host_nt_transfer_ranges(reading,local,a);
             control=host_nt_transfer_control(&ranges,restricted);
-            observed=control>0?1:native_memory_host_transfer_probe(ranges.dst,ranges.dstBytes,ranges.src,ranges.srcBytes,
-                    ranges.out,ranges.outBytes,restricted);
-            if((control||observed>0)&&unknown)error=ERROR_INVALID_DATA;
-            else if(control)error=control>0?ERROR_ACCESS_DENIED:restricted?ERROR_BUSY:ERROR_INVALID_DATA;
-            else if(observed<0)error=restricted?ERROR_BUSY:ERROR_INVALID_DATA;
+            if(control)error=control>0?ERROR_ACCESS_DENIED:restricted?ERROR_BUSY:ERROR_INVALID_DATA;
         }
-        if(!error){int denied=0;
-            call=native_memory_host_transfer_begin_caller(ranges.dst,ranges.dstBytes,ranges.src,ranges.srcBytes,
-                    ranges.out,ranges.outBytes,owners,unknown,restricted,&denied,callbackEntered,caller);
-            if(denied||observed>0&&!call)error=ERROR_BUSY;
-            else if(call&&unknown)error=ERROR_INVALID_DATA;
-            else if(call&&reading&&!local&&(SIZE_T)a[3])native_memory_host_transfer_input_unknown(call);
-        }
-        /* Both data endpoints and the optional count share one admission.
-         * The count remains the actual caller pointer, including NULL and
-         * aliases into source/destination. It is never cleared or reread. */
+        /* The count remains the actual caller pointer, including NULL and
+         * aliases into source/destination. No output is cleared or reread. */
         if(!error){
             control=host_nt_transfer_control(&ranges,restricted);
             if(control)error=control>0?ERROR_ACCESS_DENIED:restricted?ERROR_BUSY:ERROR_INVALID_DATA;
@@ -264,13 +255,9 @@ static uint64_t host_native_memory_transfer(HostImport *entry,void *caller,uintp
         }
         if(error){result=host_nt_transfer_refuse(native,&incoming,error);outgoing=host_nt_result(&incoming);finished=1;}
     } __finally {
-        /* A failure status can still have partial data/count writes. Only
-         * real invocation/normal return are reported to the paired lease;
-         * neither success nor a caller output grants completion authority. */
+        /* Retain original partial writes and errors. Native no longer records
+         * byte images, allocator ownership or field completion receipts. */
         if(!finished&&called&&!capturedState)outgoing=host_nt_result(&incoming);
-        if(called&&entry->image&&(!reading&&!local||!call&&(ranges.dstBytes||ranges.outBytes)
-                ||call&&native_memory_host_transfer_output_unobserved(call)))InterlockedExchange(&entry->image->privateOpaque,1);
-        if(call)native_memory_host_transfer_end(call,called,returned);
         if(process&&!host_real_close(process))InterlockedIncrement(&native_failures);
         native_owner_links_free(owners);host_nt_restore(&outgoing);
     }
@@ -281,9 +268,7 @@ static uint64_t host_native_nt_memory(HostImport *entry,void *caller,uintptr_t *
 }
 static uint64_t host_native_win32_memory_transfer(HostImport *entry,void *caller,uintptr_t *arguments,int callbackEntered){
     if(!host_nt_errors_ready()){
-        /* Unsupported status observation keeps the existing Win32 control
-         * path, with an explicit gap, instead of inventing LastNtStatus. */
-        if(entry->image)InterlockedExchange(&entry->image->privateOpaque,1);
+        /* The existing Win32 control fence does not invent LastNtStatus. */
         if(entry->kind==HOST_READ_PROCESS_MEMORY)return host_native_memory_read(entry,caller,arguments);
         if(entry->kind==HOST_WRITE_PROCESS_MEMORY)return host_native_memory(entry,caller,arguments);
     }

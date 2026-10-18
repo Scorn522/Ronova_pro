@@ -108,9 +108,11 @@ final class ExternalCodeImages {
     }
     private static final class History {
         final WeakReference<Module> module;
+        byte[] input;
         Snapshot current;
         final List<Patch> patches=new ArrayList<>();
         History(Module module,Snapshot current){this.module=new Ref<>(module);this.current=current;}
+        History(Module module,byte[] input){this.module=new Ref<>(module);this.input=input.clone();}
     }
     private static final class Capture {
         final Object input,root;final History history;final Snapshot before;final Module[] owners,writers;
@@ -201,11 +203,35 @@ final class ExternalCodeImages {
         Object output=writer.getConstructor(int.class).newInstance(0);accept.invoke(tree,output);
         return (byte[])writer.getMethod("toByteArray").invoke(output);
     }
-    static synchronized void observed(Object tree,Module module){
-        Snapshot snapshot=snapshot(tree);Encoded origin=null;byte[] digest=hash(canonical(snapshot.bytes()));
-        List<Encoded> encodedImages=images();for(int i=encodedImages.size()-1;i>=0;i--){Encoded encoded=encodedImages.get(i);if(encoded.loader().get()==module.getClassLoader()&&encoded.bootstrap()==(module.getClassLoader()==null)&&encoded.name().equals(snapshot.node().name)&&MessageDigest.isEqual(encoded.digest(),digest)){origin=encoded;break;}}
-        if(origin!=null){identities(tree,origin.snapshot().methods());snapshot=snapshot(tree);}
-        History history=new History(module,snapshot);if(origin!=null)history.patches.addAll(origin.patches());TREES.put(new Key(tree,true),history);parents(tree);
+    static synchronized void observed(Object tree,Module module,byte[] bytes){
+        // ClassReader already proved the exact observed input. Keep that root
+        // and its real member parents; ordinary parsing needs no writer pass
+        // or instruction identity graph.
+        History history=new History(module,bytes);ControlImages.protect(history,history.module,history.input,history.patches);
+        TREES.put(new Key(tree,true),history);parents(tree);
+    }
+    static byte[] canonicalImage(Object tree){return canonical(image(tree));}
+    static synchronized byte[] baseline(Object tree){
+        History history=TREES.get(new Key(tree,false));
+        return history==null?null:canonical(history.current==null?history.input:history.current.bytes());
+    }
+    private static Snapshot materialize(Object tree,History history){
+        if(history.current!=null)return history.current;
+        byte[] input=history.input,bytes=image(tree);Module module=history.module.get();
+        String name=new ClassReader(input).getClassName();
+        Encoded origin=module==null?null:selected(module.getClassLoader(),name,input);
+        Snapshot before=origin==null?nativeSnapshot(input,null,0):origin.snapshot();
+        if(origin==null)protect(before.bytes(),before.node(),before.methods());
+        if(origin!=null)history.patches.addAll(origin.patches());
+        boolean unchanged=ControlImages.sameBytes(canonical(input),canonical(bytes));
+        if(unchanged)identities(tree,before.methods());
+        Snapshot current=snapshot(tree,bytes);
+        if(!unchanged){
+            history.patches.add(new Patch(NO_MODULES,before,current));
+            gap(module,name+":PRE_CAPTURE_TREE_CHANGED_UNOBSERVED");
+            if(origin!=null)for(Patch patch:origin.patches())for(Module owner:patch.owners())gap(owner,name+":PRE_CAPTURE_TREE_CHANGED_UNOBSERVED");
+        }
+        history.current=current;history.input=null;return current;
     }
     private static void identities(Object tree,Map<String,Body> bodies){
         try{
@@ -230,7 +256,7 @@ final class ExternalCodeImages {
         if(history==null){
             for(Module owner:owners)gap(owner,"TRANSFORM_INPUT_SOURCE_UNOBSERVED");return null;
         }
-        Snapshot before=snapshot(root);
+        Snapshot before=history.current==null?materialize(root,history):snapshot(root);
         if(!ControlImages.sameBytes(canonical(history.current.bytes()),canonical(before.bytes())))history.patches.add(new Patch(new Module[0],history.current,before));
         Capture capture=new Capture(input,root,history,before,owners.clone(),writers.clone());ControlImages.protect(capture,capture.owners,capture.writers);return capture;
     }
@@ -267,6 +293,7 @@ final class ExternalCodeImages {
             ClassLoader loader=tree.getClass().getClassLoader();Class<?> writer=library("org.objectweb.asm.ClassWriter",loader);
             if(writer.isInstance(visitor)){WRITERS.put(new Key(visitor,true),history);return;}
             Class<?> node=library("org.objectweb.asm.tree.ClassNode",loader);if(node.isInstance(visitor)){
+                materialize(tree,history);
                 transfer(tree,visitor);History next=new History(history.module.get(),snapshot(visitor));next.patches.addAll(history.patches);TREES.put(new Key(visitor,true),next);parents(visitor);
             }
         }catch(ClassNotFoundException failure){throw new IllegalStateException(failure);}
@@ -301,7 +328,10 @@ final class ExternalCodeImages {
         ClassWriter writer=new ClassWriter(0);node.accept(writer);return writer.toByteArray();
     }
     private static Snapshot nativeSnapshot(byte[] bytes,Snapshot previous){
-        ClassNode node=new ClassNode();new ClassReader(bytes).accept(node,ClassReader.SKIP_DEBUG|ClassReader.SKIP_FRAMES);
+        return nativeSnapshot(bytes,previous,ClassReader.SKIP_DEBUG|ClassReader.SKIP_FRAMES);
+    }
+    private static Snapshot nativeSnapshot(byte[] bytes,Snapshot previous,int parsing){
+        ClassNode node=new ClassNode();new ClassReader(bytes).accept(node,parsing);
         Map<String,Body> bodies=new TreeMap<>();
         for(MethodNode method:node.methods){
             String key=method.name+method.desc;Body prior=previous==null?null:previous.methods().get(key);
@@ -317,15 +347,27 @@ final class ExternalCodeImages {
         return new Snapshot(bytes.clone(),node,Map.copyOf(bodies));
     }
     static synchronized Module[] encoded(Object writer,byte[] bytes){
-        History history=WRITERS.get(new Key(writer,false));if(history==null||history.patches.isEmpty())return new Module[0];
+        History history=WRITERS.get(new Key(writer,false));if(history==null)return new Module[0];
         Module module=history.module.get();if(module==null)return new Module[0];
-        if(!ControlImages.sameBytes(canonical(history.current.bytes()),canonical(bytes))){for(Patch patch:history.patches)for(Module owner:patch.owners())gap(owner,"POST_TRANSFORM_CODE_CHANGED_UNOBSERVED");return new Module[0];}
-        Encoded image=new Encoded(new Ref<>(module.getClassLoader()),module.getClassLoader()==null,history.current.node().name,hash(canonical(bytes)),history.current,List.copyOf(history.patches));
+        Snapshot current=history.current;List<Patch> patches=history.patches;
+        if(current==null){
+            // A writer can consume a parsed, already encoded Mod image without
+            // another transform transaction. Retain its actual prior sources
+            // without creating an ordinary tree's instruction graph.
+            Encoded origin=selected(module.getClassLoader(),new ClassReader(history.input).getClassName(),history.input);
+            if(origin==null)return new Module[0];current=origin.snapshot();patches=origin.patches();
+        }
+        if(patches.isEmpty())return new Module[0];
+        if(!ControlImages.sameBytes(canonical(current.bytes()),canonical(bytes))){for(Patch patch:patches)for(Module owner:patch.owners())gap(owner,"POST_TRANSFORM_CODE_CHANGED_UNOBSERVED");return new Module[0];}
+        Encoded image=new Encoded(new Ref<>(module.getClassLoader()),module.getClassLoader()==null,current.node().name,hash(canonical(bytes)),current,List.copyOf(patches));
         protect(image.digest());store(image);
-        Set<Module> sources=Collections.newSetFromMap(new IdentityHashMap<>());for(Patch patch:history.patches)sources.addAll(Arrays.asList(patch.owners()));return sources.toArray(Module[]::new);
+        Set<Module> sources=Collections.newSetFromMap(new IdentityHashMap<>());for(Patch patch:patches)sources.addAll(Arrays.asList(patch.owners()));return sources.toArray(Module[]::new);
     }
     private static Snapshot snapshot(Object tree){
-        byte[] bytes=image(tree);ClassNode node=new ClassNode();new ClassReader(bytes).accept(node,0);
+        return snapshot(tree,image(tree));
+    }
+    private static Snapshot snapshot(Object tree,byte[] bytes){
+        ClassNode node=new ClassNode();new ClassReader(bytes).accept(node,0);
         try{
             OpcodeReader opcodes=new OpcodeReader();
             Map<String,Body> bodies=new TreeMap<>();List<?> externalMethods=list(tree,"methods");
@@ -508,6 +550,7 @@ final class ExternalCodeImages {
     /** The caller supplies the real payload origins, so an unrecorded foreign edit never disappears from provenance. */
     static synchronized Object[] mixinPayload(Object tree,Module origin,Module[] contributors,boolean bodyOnly){
         History history=TREES.get(new Key(tree,false));if(history==null||history.module.get()!=origin)return null;
+        materialize(tree,history);
         Snapshot original=snapshot(tree);if(!ControlImages.sameBytes(canonical(original.bytes()),canonical(history.current.bytes())))return null;
         Set<Module> stopped=Collections.newSetFromMap(new IdentityHashMap<>());
         for(Module module:contributors)if(module!=origin&&ModGroupBoundary.stopped(module))stopped.add(module);
@@ -548,6 +591,7 @@ final class ExternalCodeImages {
     }
     static synchronized Module[] mixinSelection(Object tree,Module origin,Module[] contributors){
         History history=TREES.get(new Key(tree,false));if(history==null||history.module.get()!=origin)return contributors.clone();
+        materialize(tree,history);
         Snapshot actual=snapshot(tree);if(!ControlImages.sameBytes(canonical(actual.bytes()),canonical(history.current.bytes())))return contributors.clone();
         Set<Module> selected=Collections.newSetFromMap(new IdentityHashMap<>());selected.add(origin);
         for(Module contributor:contributors){
@@ -563,6 +607,7 @@ final class ExternalCodeImages {
     static synchronized Map<String,Module[]> mixinMetadata(Object tree,Module origin,Module[] contributors){
         History history=TREES.get(new Key(tree,false));
         if(history==null||history.module.get()!=origin)return Map.of("*",contributors.clone());
+        materialize(tree,history);
         byte[] bytes=image(tree);protect(bytes);
         Map<String,String> recorded=history.current.metadata(),current;
         if(ControlImages.sameBytes(bytes,history.current.bytes())){
@@ -637,6 +682,7 @@ final class ExternalCodeImages {
     static synchronized Object[] memberMetadata(Object member){
         Key parent=PARENTS.get(new Key(member,false));Object tree=parent==null?null:parent.get();History history=tree==null?null:TREES.get(new Key(tree,false));
         if(history==null||history.module.get()==null)return null;
+        materialize(tree,history);
         try{
             // The observed parent retains the actual member identities. Its
             // method/field lists determine the kind without inventing a new

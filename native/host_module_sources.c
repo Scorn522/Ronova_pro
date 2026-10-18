@@ -185,14 +185,6 @@ static int host_module_binding_enter(Binding *binding){
     AcquireSRWLockShared(&host_imports);
     int ready=image->live&&!image->releasing&&(image->pin||binding->library&&host_library_current(binding->library,image->handle));
     if(ready)InterlockedIncrement(&image->active);ReleaseSRWLockShared(&host_imports);
-    if(ready&&(native_has_producer(binding->owners)||native_has_core_state(binding->owners))){
-        DWORD error=GetLastError();NativeThread *state=native_tls==TLS_OUT_OF_INDEXES?NULL:(NativeThread*)TlsGetValue(native_tls);
-        OwnerLink *sources=NULL;int unknown=binding->hostUnknown;
-        int captured=native_owner_merge(&sources,binding->owners)&&host_tls_capture(state,&sources,&unknown);
-        if(captured)(void)host_static_tls_observe(state,image,sources,unknown);
-        else InterlockedExchange(&image->privateOpaque,1);
-        native_owner_links_free(sources);SetLastError(error);
-    }
     return ready;
 }
 static void host_module_binding_leave(Binding *binding){
@@ -247,9 +239,6 @@ static void host_module_return(HostLibraryLoad *load,HMODULE actual,DWORD error)
     dll=dll&&nt->Signature==IMAGE_NT_SIGNATURE&&(nt->FileHeader.Characteristics&IMAGE_FILE_DLL)!=0;
     load->nonExecutable=(load->flags&DONT_RESOLVE_DLL_REFERENCES)!=0||!dll;
     if(load->nonExecutable){if(!host_real_free_library(pin))load->sparePin=pin;return;}
-    host_arena_discover(actual);host_arena_discover_imports(actual);
-    host_other_discover(actual);host_other_discover_imports(actual);
-    host_cpp_discover(actual);host_cpp_discover_imports(actual);
     void *targets[HOST_KIND_COUNT]={0};host_windows_targets(targets);
     int publicCarrier=0;for(int kind=1;kind<HOST_KIND_COUNT&&!publicCarrier;kind++)
         if(targets[kind])publicCarrier=native_image(targets[kind])==actual;
@@ -269,7 +258,6 @@ static void host_module_return(HostLibraryLoad *load,HMODULE actual,DWORD error)
     HMODULE spare=NULL;if(!image->pin)image->pin=pin;else spare=pin;
     load->image=image;load->imageNext=image->loads;image->loads=load;
     if(!image->checked)host_image_imports(image);
-    host_static_image_observed(image);
     InterlockedExchange(&image->retiring,host_module_image_sources_retired_locked(image));
     ReleaseSRWLockExclusive(&host_imports);
     /* This spare belongs only to Ronova. The surviving directory pin retains
@@ -296,10 +284,6 @@ static int host_module_image_release_ready_locked(HostImage *image){
 static void host_module_loads_reap(JNIEnv **environment){
     if(!environment||!*environment)return;NativeThread *state=native_thread();if(!state)return;
     native_thread_callback_enter(state);
-    AcquireSRWLockExclusive(&host_imports);
-    for(HostImage *image=host_images;image;image=image->next)
-        if(!image->live)host_static_image_released(image,*environment);
-    ReleaseSRWLockExclusive(&host_imports);
     for(;;){HostLibraryLoad *load=NULL;HMODULE pin=NULL;
         AcquireSRWLockExclusive(&host_imports);
         for(HostLibraryLoad *candidate=host_library_loads;candidate;candidate=candidate->next)
@@ -315,7 +299,7 @@ static void host_module_loads_reap(JNIEnv **environment){
     for(;;){HostImage *image=NULL;HMODULE pin=NULL;OwnerLink *sources=NULL;int oldLive=0;
         AcquireSRWLockExclusive(&host_imports);
         for(HostImage *candidate=host_images;candidate;candidate=candidate->next)
-            if(host_module_image_release_ready_locked(candidate)&&host_static_image_prepare(candidate,*environment)){image=candidate;break;}
+            if(host_module_image_release_ready_locked(candidate)){image=candidate;break;}
         if(image){
             int ready=1;for(HostLibraryLoad *load=image->loads;load&&ready;load=load->imageNext)
                 ready=native_owner_merge(&sources,load->owners);
@@ -325,7 +309,7 @@ static void host_module_loads_reap(JNIEnv **environment){
                     jni=library->hostImage==image&&host_library_current(library,image->handle);
                 ReleaseSRWLockShared(&native_records);
                 if(!jni)image->live=0; /* logical tombstone before our own release */
-            }else {host_static_image_cancel(image,*environment);image->opaque=1;image=NULL;InterlockedIncrement(&native_failures);}
+            }else {image->opaque=1;image=NULL;InterlockedIncrement(&native_failures);}
         }
         ReleaseSRWLockExclusive(&host_imports);
         if(!image){native_owner_links_free(sources);break;}
@@ -336,7 +320,6 @@ static void host_module_loads_reap(JNIEnv **environment){
         AcquireSRWLockExclusive(&host_imports);
         if(released){image->pin=NULL;image->pinReleased=1;}else {image->live=oldLive;image->opaque=1;
             for(HostLibraryLoad *load=image->loads;load;load=load->imageNext)load->error=error;}
-        if(released&&!image->live)host_static_image_released(image,*environment);else host_static_image_cancel(image,*environment);
         image->releasing=0;host_image_private_slots_locked(image);InterlockedExchange(&image->retiring,0);ReleaseSRWLockExclusive(&host_imports);native_owner_links_free(sources);
         if(!native_tooling_retirement_jni(environment)){native_thread_callback_leave(state);return;}
         if(!released)break;

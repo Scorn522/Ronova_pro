@@ -3,7 +3,7 @@ plugins {
     id 'net.minecraftforge.gradle' version '6.0.54'
     id 'org.spongepowered.mixin' version '0.7-SNAPSHOT'
 }
-version = '0.1.0-stage-b-dev'
+version = '1.5.0-dev'
 group = 'dev.ronova.pro'
 base { archivesName = 'ronova-pro-core' }
 java { toolchain.languageVersion = JavaLanguageVersion.of(17) }
@@ -87,7 +87,7 @@ tasks.named('compileAgentJava',JavaCompile).configure {
 tasks.register('compileControlNative',Exec) {
     inputs.file('native/host_nt_memory.c')
     onlyIf { System.getProperty('os.name').startsWith('Windows') }
-    inputs.files('native/control.c','native/bindings.c','native/carrier.c','native/private_memory.c','native/tooling_output_gate.c','native/tooling_outputs.c','native/jni_output_gate.c','native/jni_outputs.c','native/tooling_extensions.c','native/tooling_definitions.c','native/tooling_heap.c','native/tooling_worker_lease.c','native/arrays.c','native/arraycopy.c','native/sources.c','native/code.c','native/code_retirement.c','native/vm_metadata.c','native/host.c','native/host_memory.c','native/host_allocations.c','native/host_crt_allocations.c','native/host_crt_memory.c','native/host_crt_aligned.c','native/host_other_allocations.c','native/host_cpp_allocations.c','native/host_arena_allocations.c','native/host_object_state.c','native/host_allocator_state.c','native/host_crypto.c','native/host_transactions.c','native/host_transaction_io.c','native/host_completion_port.c','native/include/ronova_allocator_state.h','native/include/ronova_allocator_state.hpp','native/include/ronova_object_state.h','native/include/ronova_object_state.hpp','native/host_tls.c','native/host_static_tls.c','native/host_memory_tracking.h','native/host_static_memory.c','native/control_ranges.c','native/host_thread_creation.c','native/host_thread_workers.c','native/host_crt_thread_creation.c','native/host_callback_sources.c','native/host_module_admission.c','native/host_module_sources.c','native/host_kernel.c','native/driver/ronova_host_protocol.h','native/heap.c','native/unsafe.c','native/memory.c','native/file.c','native/methods.c','native/thread.c','native/buffer.c','native/build-control.ps1')
+    inputs.files('native/control.c','native/bindings.c','native/carrier.c','native/private_memory.c','native/tooling_output_gate.c','native/tooling_outputs.c','native/jni_output_gate.c','native/jni_outputs.c','native/tooling_extensions.c','native/tooling_definitions.c','native/tooling_heap.c','native/tooling_worker_lease.c','native/arrays.c','native/arraycopy.c','native/sources.c','native/code.c','native/code_retirement.c','native/vm_metadata.c','native/host.c','native/host_memory.c','native/host_transactions.c','native/host_transaction_io.c','native/host_completion_port.c','native/host_tls.c','native/control_ranges.c','native/host_thread_creation.c','native/host_thread_workers.c','native/host_crt_thread_creation.c','native/host_callback_sources.c','native/host_module_admission.c','native/host_module_sources.c','native/host_state_sources.c','native/host_kernel.c','native/driver/ronova_host_protocol.h','native/heap.c','native/unsafe.c','native/memory.c','native/file.c','native/methods.c','native/thread.c','native/buffer.c','native/build-control.ps1')
     outputs.file(layout.buildDirectory.file('control-native/ronova-native/windows-x86_64/ronova-pro-control.dll'))
     doFirst {
         def jdk=javaToolchains.launcherFor { languageVersion = JavaLanguageVersion.of(17) }.get().metadata.installationPath.asFile
@@ -114,7 +114,7 @@ tasks.register('recoveryAgentJar',Jar) {
 }
 tasks.register('compileStorageNative',Exec) {
     onlyIf { System.getProperty('os.name').startsWith('Windows') && System.getProperty('os.arch') == 'amd64' }
-    inputs.files('native/storage.cpp','native/storage_transaction.hpp','native/include/ronova_allocator_state.h','native/include/ronova_allocator_state.hpp','native/include/ronova_object_state.h','native/include/ronova_object_state.hpp','native/build.ps1')
+    inputs.files('native/storage.cpp','native/storage_transaction.hpp','native/build.ps1')
     outputs.file(layout.buildDirectory.file('native/ronova-pro-storage.dll'))
     doFirst {
         def jdk=javaToolchains.launcherFor { languageVersion = JavaLanguageVersion.of(17) }.get().metadata.installationPath.asFile

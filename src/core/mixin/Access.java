@@ -119,6 +119,7 @@ public final class Access {
         @Accessor("entityManager") PersistentEntitySectionManager<Entity> pro$manager();
         @Accessor("entityTickList") EntityTickList pro$ticks();
         @Accessor("players") List<ServerPlayer> pro$players();
+        @Accessor("dragonParts") Int2ObjectMap<net.minecraftforge.entity.PartEntity<?>> pro$parts();
     }
     @Mixin(net.minecraft.server.players.PlayerList.class) public interface Players {
         @Accessor("players") List<ServerPlayer> pro$players();

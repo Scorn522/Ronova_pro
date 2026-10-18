@@ -35,8 +35,7 @@ public final class ProMod {
         feedback.put(operation,new Feedback(source.getEntity() instanceof ServerPlayer p?p.getUUID():null,result,runtime.server.getTickCount()+10L,false));
     }
     public ProMod() {
-        // Zero-argument startup: the player supplies no Ronova JVM argument. The mod extracts its own agent and
-        // bootstrap payloads and has a short-lived helper attach them to this exact process.
+        // The launcher supplies premain automatically. A late attachment is reported as runtime continuation.
         ProBootstrap.install();
         bindControlOwner();
         net.minecraftforge.fml.DistExecutor.unsafeRunWhenOn(net.minecraftforge.api.distmarker.Dist.CLIENT,()->ClientFaults::install);

@@ -1182,12 +1182,6 @@ public final class ResourceBridge {
             }
         }catch(IllegalAccessException failure){throw new IllegalStateException("BUFFER_ORIGINAL_CLEANUP_UNAVAILABLE",failure);}
         finally{if(observing==null)FILE_OBSERVING.remove();else FILE_OBSERVING.set(observing);}
-        if(action.getClass()==BufferPlatform.DEALLOCATOR){
-            BufferRegistration previous=BUFFER_REGISTERING.get();BUFFER_REGISTERING.set(new BufferRegistration(buffer,storage));
-            try{long[] binding=NativeControl.bindBufferStorage(buffer,action,storage.address,storage.bytes);
-                synchronized(STREAMS){storage.memoryToken=binding[0];storage.memoryGeneration=binding[1];}}
-            finally{if(previous==null)BUFFER_REGISTERING.remove();else BUFFER_REGISTERING.set(previous);}
-        }
         resourceCreated(action);return new BufferCleanup(storage);
     }
     public static void installBufferWrap(Class<?> actualAgent){
@@ -1352,18 +1346,7 @@ public final class ResourceBridge {
     }
     /** An observed view can borrow an existing allocation, never create one from its address. STREAMS is held. */
     private static void observeBufferStorage(Buffer buffer,BufferView view){
-        if(view.memoryObserved)return;
-        BufferObservation previous=BUFFER_OBSERVING_STORAGE.get(),scope=new BufferObservation(buffer,view,view.storage.original);
-        BUFFER_OBSERVING_STORAGE.set(scope);
-        try{
-            long[] binding=NativeControl.observeBufferStorage(buffer,scope.action,view.address,view.bytes);
-            // Even an absent binding belongs to this observation. A later allocation
-            // at the same numeric address must not turn this old view into its alias.
-            view.memoryObserved=true;view.memoryToken=binding[0];view.memoryGeneration=binding[1];
-        }catch(RuntimeException|LinkageError|OutOfMemoryError unavailable){
-            if(unavailable instanceof IllegalStateException&&"BUFFER_NATIVE_STORAGE_OBSERVATION_CHANGED".equals(unavailable.getMessage()))throw (IllegalStateException)unavailable;
-            view.memoryObserved=true;view.storage.unknownUse=true;
-        }finally{if(previous==null)BUFFER_OBSERVING_STORAGE.remove();else BUFFER_OBSERVING_STORAGE.set(previous);}
+        view.memoryObserved=true;
     }
     private static boolean currentBufferView(Buffer buffer,BufferView view){
         try{
@@ -1689,8 +1672,7 @@ public final class ResourceBridge {
                 }
                 IO_BUFFER_WRITE.set(write);
                 BufferStorage storage=found.view.storage;
-                if(storage.memoryToken!=0&&storage.original!=null)write.token=NativeControl.ioBufferWrite(write,storage.original,storage.memoryToken,storage.memoryGeneration,address,bytes,sources);
-                if(write.token==0)synchronized(STREAMS){storage.unknownUse=true;}
+                synchronized(STREAMS){bufferSources(storage,sources);}
             }
             return writes;
         }catch(RuntimeException|Error failure){
@@ -1908,42 +1890,20 @@ public final class ResourceBridge {
         synchronized(STREAMS){return BUFFERS.containsKey(new Key(value,false))||BUFFER_ACTIONS.containsKey(new Key(value,false));}
     }
     private static String preserveBuffer(BufferStorage storage,FileRecord requested,Set<Module> selection,long version){
-        BufferRestore previous=BUFFER_RESTORING.get(),scope;
         synchronized(STREAMS){
             if(storage.cleaned)return "";
             if(storage.sealed||storage.cleaning||storage.restoring||storage.active!=0||storage.observing!=0)return "BUFFER_OPERATIONS_EXIT_PENDING";
             if(version!=storage.viewsVersion)return "BUFFER_VIEW_OBSERVATION_PENDING";
-            if(storage.failed||storage.escaped||storage.unknownUse)return "BUFFER_STORAGE_LIFETIME_UNRESOLVED";
-            if(storage.bytes==0){requested.preserved=true;return "";}
-            if(storage.memoryToken==0||storage.original==null)return "BUFFER_NATIVE_STORAGE_ASSOCIATION_UNAVAILABLE";
-            if(!storage.memorySelection.equals(selection)){storage.memorySelection.clear();storage.memorySelection.addAll(selection);storage.memoryCursor=0;}
-            scope=new BufferRestore(storage,selection.toArray(Module[]::new),storage.memoryCursor,8);storage.restoring=true;requested.preserved=false;
-        }
-        BUFFER_RESTORING.set(scope);
-        try{
-            long[] result=NativeControl.restoreBufferStorage(storage.original,storage.memoryToken,storage.memoryGeneration,scope.modules,scope.cursor,scope.budget);
-            synchronized(STREAMS){
-                storage.memoryCursor=result[0];
-                if(result[3]!=0&&result[1]==0){requested.preserved=true;return "";}
-                return result[3]==0?"BUFFER_SOURCE_RESTORE_PENDING":"BUFFER_SOURCE_RESTORE_UNRESOLVED";
-            }
-        }finally{
-            if(previous==null)BUFFER_RESTORING.remove();else BUFFER_RESTORING.set(previous);
-            synchronized(STREAMS){storage.restoring=false;STREAMS.notifyAll();}
+            if(storage.failed||storage.escaped||storage.unknownUse)return "BUFFER_SHARED_STORAGE_LIFETIME_UNKNOWN_RETAINED";
+            // A known live outside view retains its real allocation and original Cleaner.
+            // Preserved means its lifetime was retained, never that its bytes were restored.
+            requested.preserved=true;
+            return "";
         }
     }
-    /** STREAMS is held; this is the original cleaner's actual retirement, not a separate lifetime probe. */
+    /** Actual Java view/operation lifetimes govern the original Cleaner release. */
     private static String prepareBufferRelease(BufferStorage storage,Set<Module> selection){
-        if(storage.memoryToken==0||storage.original==null)return "";
-        BufferRestore previous=BUFFER_RESTORING.get(),scope=new BufferRestore(storage,selection.toArray(Module[]::new),0,0);
-        storage.restoring=true;BUFFER_RESTORING.set(scope);
-        try{
-            long[] result=NativeControl.restoreBufferStorage(storage.original,storage.memoryToken,storage.memoryGeneration,scope.modules,0,0);
-            return result[3]!=0&&result[1]==0?"":"BUFFER_BORROWED_NATIVE_VIEW_PENDING";
-        }finally{
-            if(previous==null)BUFFER_RESTORING.remove();else BUFFER_RESTORING.set(previous);
-            storage.restoring=false;STREAMS.notifyAll();
-        }
+        return storage.active!=0||storage.observing!=0?"BUFFER_OPERATIONS_EXIT_PENDING":"";
     }
     private static String releaseBuffer(Object value,Predicate<Object> selected)throws ReflectiveOperationException {
         BufferStorage storage;FileRecord requested;List<Buffer> views=new ArrayList<>();Set<Module> selection=FILE_SELECTION.get();long version;boolean preserve;

@@ -19,7 +19,15 @@ final class CommandBoundary {
                 installed=true;return null;
             }
         boolean changed=false;
-        for(MethodNode method:node.methods)for(AbstractInsnNode insn:method.instructions.toArray())
+        for(MethodNode method:node.methods){
+            if(method.name.equals("register")&&method.desc.equals("(Lcom/mojang/brigadier/builder/LiteralArgumentBuilder;)Lcom/mojang/brigadier/tree/LiteralCommandNode;"))
+                for(AbstractInsnNode at:method.instructions.toArray())if(at.getOpcode()==Opcodes.ARETURN){
+                    InsnList registration=new InsnList();registration.add(new InsnNode(Opcodes.DUP));
+                    registration.add(new VarInsnNode(Opcodes.ALOAD,0));registration.add(new InsnNode(Opcodes.SWAP));
+                    registration.add(new MethodInsnNode(Opcodes.INVOKESTATIC,BRIDGE,"modCommandRegistered","(Ljava/lang/Object;Ljava/lang/Object;)V",false));
+                    method.instructions.insertBefore(at,registration);changed=true;
+                }
+            for(AbstractInsnNode insn:method.instructions.toArray())
             if(insn instanceof MethodInsnNode call&&call.getOpcode()==Opcodes.INVOKEINTERFACE
                     &&call.owner.equals("com/mojang/brigadier/Command")&&call.name.equals("run")) {
                 InsnList gate=new InsnList();LabelNode allowed=new LabelNode(),done=new LabelNode();
@@ -33,6 +41,7 @@ final class CommandBoundary {
                 method.instructions.insert(call,done);
                 changed=true;
             }
+        }
         if(!changed)return null;
         ControlClassWriter writer=new ControlClassWriter(loader,node);node.accept(writer);
         installed=true;return writer.toByteArray();

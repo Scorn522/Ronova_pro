@@ -214,51 +214,38 @@ public final class NativeControl {
     // Enter native code before creating a StackWalker result or a Java guard value:
     // either allocation can itself invoke the instrumented Object constructor.
     static boolean executionRootAllowed(){return available&&executionRootAllowed0();}
-    private static boolean executionRootCaller(){
-        return CALLER.walk(frames->{
-            var entries=frames.dropWhile(frame->frame.getDeclaringClass()==NativeControl.class).iterator();
-            if(!entries.hasNext())return false;StackWalker.StackFrame entry=entries.next();
-            if(entry.getDeclaringClass()!=CodeSourceBridge.class||!entry.getMethodName().equals("executionRootEnter"))return false;
-            if(!entries.hasNext())return false;StackWalker.StackFrame root=entries.next();
-            if(root.getDeclaringClass()!=Object.class||!root.getMethodName().equals("<init>"))return false;
-            while(entries.hasNext()){
-                Class<?> actual=entries.next().getDeclaringClass().getNestHost();
-                if(actual==CodeSourceBridge.class||actual==ExecutionFlow.class)return false;
-            }
-            return true;
-        });
-    }
+
     static Object executionPlan(StackWalker.StackFrame frame){
         if(CALLER.getCallerClass()!=CodeSourceBridge.class)throw new SecurityException("ACTUAL_CODE_FRAME_BRIDGE_REQUIRED");
-        return available?executionPlan0(frame.getDeclaringClass(),frame.getMethodName(),frame.getDescriptor(),frame.getByteCodeIndex()):null;
+        return null; // V1.5 has no execution-plan witness backend.
     }
     static boolean executionWatch(StackWalker.StackFrame frame,Object plan,Object token){
         if(CALLER.getCallerClass()!=CodeSourceBridge.class)throw new SecurityException("ACTUAL_CODE_FRAME_BRIDGE_REQUIRED");
-        return available&&executionWatch0(frame.getDeclaringClass(),frame.getMethodName(),frame.getDescriptor(),frame.getByteCodeIndex(),plan,token);
+        return false; // V1.5 has no execution-plan witness backend.
     }
     static long executionSite(Object token){
         if(CALLER.getCallerClass()!=CodeSourceBridge.class)throw new SecurityException("ACTUAL_CODE_FRAME_BRIDGE_REQUIRED");
-        return available&&token!=null?executionSite0(token):0;
+        return 0; // V1.5 has no execution-plan witness backend.
     }
     static long executionFrameSite(Object token){
         if(CALLER.getCallerClass()!=CodeSourceBridge.class)throw new SecurityException("ACTUAL_CODE_FRAME_BRIDGE_REQUIRED");
-        return available&&token!=null?executionFrameSite0(token):0;
+        return 0; // V1.5 has no execution-plan witness backend.
     }
-    private static boolean executionPopped(Object token,boolean normal){return CodeSourceBridge.executionPopped(token,normal);}
-    private static Object[] codeRetirementFrame(Class<?> declaring,String selector,int location,Object plan,Module owner){
-        return CodeSourceBridge.executionRetirementFrame(declaring,selector,location,plan,owner);
-    }
+
+
     static boolean codeRetirementFramePermit(Class<?> declaring,int location,Object plan,Module owner){
-        return CALLER.getCallerClass()==CodeSourceBridge.class&&available&&codeRetirementFramePermit0(declaring,location,plan,owner);
+        return false;
     }
-    static int executionPopPermit(Object token){return CALLER.getCallerClass()==CodeSourceBridge.class&&available?executionPopPermit0(token):0;}
+    static int executionPopPermit(Object token){
+        return 0;
+    }
     static Class<?> codeFieldOwner(Class<?> symbolic,String name,String descriptor){
         if(CALLER.getCallerClass()!=CodeSourceBridge.class)throw new SecurityException("ACTUAL_CODE_FIELD_BRIDGE_REQUIRED");
         return available?codeFieldOwner0(symbolic,name,descriptor):null;
     }
     static boolean heapWatch(Object holder,Class<?> declaring,String name,String descriptor){
         if(CALLER.getCallerClass()!=CodeSourceBridge.class)throw new SecurityException("ACTUAL_CODE_FIELD_BRIDGE_REQUIRED");
-        return available&&heapWatch0(holder,declaring,name,descriptor);
+        return false; // Per-field write watches are disabled in V1.5.
     }
     static Object[] heapReadField(Object holder,Class<?> declaring,String name,String descriptor){
         if(CALLER.getCallerClass()!=CodeSourceBridge.class)throw new SecurityException("ACTUAL_CODE_FIELD_BRIDGE_REQUIRED");
@@ -296,10 +283,8 @@ public final class NativeControl {
         if(!available)throw new HeapImageUnavailable("HEAP_ARRAY_IMAGE_UNAVAILABLE");
         return heapArrayBits0(array,start,length);
     }
-    private static void heapModified(Object holder,Class<?> declaring,String name,String descriptor,Class<?> writer,String method,String methodDescriptor,int instruction,Object plan,Module[] contributors){
-        CodeSourceBridge.executionFieldModified(holder,declaring,name,descriptor,writer,method,methodDescriptor,instruction,plan,contributors);
-    }
-    static boolean heapEventPermit(Object holder,Class<?> declaring){return CALLER.getCallerClass()==CodeSourceBridge.class&&available&&heapEventPermit0(holder,declaring);}
+
+    static boolean heapEventPermit(Object holder,Class<?> declaring){return false;}
     private static void codePrepared(Class<?> actual){CodeSourceBridge.classPrepared(actual);}
     static boolean preparedClass(Class<?> actual){return CALLER.getCallerClass()==CodeSourceBridge.class&&available&&preparedClass0(actual);}
     static boolean sourceCapture(){return CALLER.getCallerClass()==ControlBridge.class&&sourceCapture0();}
@@ -309,8 +294,8 @@ public final class NativeControl {
         return sourceQueryStopped0();
     }
     private static Module[] sourceQueryFrame(Class<?> declaring,String name,String descriptor,int location,int depth){
-        if(!ControlBridge.sourceQueryActive())throw new SecurityException("ACTUAL_SOURCE_QUERY_FRAME_REQUIRED");
-        return ExecutionFlow.sourceQueryFrame(declaring,name,descriptor,location,depth);
+        Module module=declaring==null?null:DefinitionBridge.module(declaring);
+        return module==null?new Module[0]:new Module[]{module};
     }
     static int networkBoundaryDepth(Class<?> boundary,String method){
         if(CALLER.getCallerClass()!=NetworkBridge.class)throw new SecurityException("ACTUAL_NETWORK_BOUNDARY_QUERY_REQUIRED");
@@ -367,12 +352,13 @@ public final class NativeControl {
     }
     private static boolean carrierReader(){return ControlBridge.coreWriter();}
     private static boolean carrierAdapter(Object plan,String selector,int location,int opcode,String owner,String name,String descriptor){
-        return ExecutionFlow.callbackAdapter(plan,selector,location,opcode,owner,name,descriptor);
+        return false;
     }
     private static boolean carrierInstruction(Object plan,String selector,int location,int instruction,int opcode,int local,String owner,String name,String descriptor){
-        return ExecutionFlow.carrierInstruction(plan,selector,location,instruction,opcode,local,owner,name,descriptor);
+        return false;
     }
-    static boolean arrayCopyInternalBoundary(){return CALLER.getCallerClass()==ControlBridge.class&&arrayCopyInternalBoundary0();}
+    // A read-only observation of the current native query scope grants no write authority.
+    static boolean arrayCopyInternalBoundary(){return arrayCopyInternalBoundary0();}
     static boolean arrayCopyReadBoundary(Object source,int from,int length){return CALLER.getCallerClass()==ControlBridge.class&&arrayCopyReadBoundary0(source,from,length);}
     static boolean arrayCopyBoundary(Object source,int from,int length,Object target,int to,int prefix,Object read){return CALLER.getCallerClass()==ControlBridge.class&&arrayCopyBoundary0(source,from,length,target,to,prefix,read);}
     static boolean fileOperationBoundary(Object receiver,Class<?> declaring,String method,Module[] sources,int operation,long address,long length){
@@ -389,51 +375,39 @@ public final class NativeControl {
     static boolean bufferAllocationBoundary(){return CALLER.getCallerClass()==ResourceBridge.class&&bufferAllocationBoundary0();}
     static boolean bufferAddressBoundary(Object buffer,Module[] sources){return CALLER.getCallerClass()==ResourceBridge.class&&bufferAddressBoundary0(buffer,sources);}
     static long[] bindBufferStorage(java.nio.Buffer buffer,Object action,long address,long bytes){
-        if(CALLER.getCallerClass()!=ResourceBridge.class||!ResourceBridge.bufferBindingActive(buffer,action,address,bytes))throw new SecurityException("ACTUAL_BUFFER_STORAGE_BINDING_REQUIRED");
-        return available?bindBufferStorage0(buffer,action,address,bytes):new long[]{0,0};
+        if(CALLER.getCallerClass()!=ResourceBridge.class)throw new SecurityException("ACTUAL_RESOURCE_BRIDGE_REQUIRED");
+        return new long[]{0,0}; // Private allocation identities are not tracked in V1.5.
     }
-    private static boolean bufferBindingCaller(java.nio.Buffer buffer,Object action,long address,long bytes){return ResourceBridge.bufferBindingActive(buffer,action,address,bytes);}
+
     static long[] observeBufferStorage(java.nio.Buffer buffer,Object action,long address,long bytes){
-        if(CALLER.getCallerClass()!=ResourceBridge.class||!ResourceBridge.bufferStorageActive(buffer,action,address,bytes))throw new SecurityException("ACTUAL_BUFFER_STORAGE_OBSERVATION_REQUIRED");
-        return available?observeBufferStorage0(buffer,action,address,bytes):new long[]{0,0};
+        if(CALLER.getCallerClass()!=ResourceBridge.class)throw new SecurityException("ACTUAL_RESOURCE_BRIDGE_REQUIRED");
+        return new long[]{0,0}; // Private allocation identities are not tracked in V1.5.
     }
-    private static boolean bufferStorageCaller(java.nio.Buffer buffer,Object action,long address,long bytes){return ResourceBridge.bufferStorageActive(buffer,action,address,bytes);}
+
     static boolean bufferStorageUse(java.nio.Buffer buffer,long token,long generation,long address,long bytes,boolean retain){
-        if(CALLER.getCallerClass()!=ResourceBridge.class||!ResourceBridge.bufferStorageUseActive(buffer,token,generation,address,bytes,retain))throw new SecurityException("ACTUAL_BUFFER_STORAGE_USE_REQUIRED");
-        return available&&bufferStorageUse0(buffer,token,generation,address,bytes,retain);
+        if(CALLER.getCallerClass()!=ResourceBridge.class)throw new SecurityException("ACTUAL_RESOURCE_BRIDGE_REQUIRED");
+        return false;
     }
-    private static boolean bufferStorageUseCaller(java.nio.Buffer buffer,long token,long generation,long address,long bytes,boolean retain){
-        return ResourceBridge.bufferStorageUseActive(buffer,token,generation,address,bytes,retain);
-    }
+
     static void exposeBufferStorage(java.nio.Buffer buffer,long token,long generation,long address,long bytes,Module[] sources){
-        if(CALLER.getCallerClass()!=ResourceBridge.class||!ResourceBridge.bufferStorageExposureActive(buffer,token,generation,address,bytes,sources))throw new SecurityException("ACTUAL_BUFFER_STORAGE_EXPOSURE_REQUIRED");
-        if(available)exposeBufferStorage0(buffer,token,generation,address,bytes,sources);
+        if(CALLER.getCallerClass()!=ResourceBridge.class)throw new SecurityException("ACTUAL_RESOURCE_BRIDGE_REQUIRED");
     }
-    private static boolean bufferStorageExposureCaller(java.nio.Buffer buffer,long token,long generation,long address,long bytes,Module[] sources){
-        return ResourceBridge.bufferStorageExposureActive(buffer,token,generation,address,bytes,sources);
-    }
+
     static long[] restoreBufferStorage(Object action,long token,long generation,Module[] modules,long cursor,int budget){
-        if(CALLER.getCallerClass()!=ResourceBridge.class||!ResourceBridge.bufferRestoreActive(action,token,generation,modules,cursor,budget))
-            throw new SecurityException("ACTUAL_BUFFER_SOURCE_RESTORE_REQUIRED");
-        if(!available)return new long[]{0,1,0,1};
-        return restoreBufferStorage0(action,token,generation,modules,cursor,budget);
+        if(CALLER.getCallerClass()!=ResourceBridge.class)throw new SecurityException("ACTUAL_RESOURCE_BRIDGE_REQUIRED");
+        throw new UnsupportedOperationException("PRIVATE_BUFFER_REPLAY_DISABLED_V1_5");
     }
-    private static boolean bufferRestoreCaller(Object action,long token,long generation,Module[] modules,long cursor,int budget){
-        return ResourceBridge.bufferRestoreActive(action,token,generation,modules,cursor,budget);
-    }
+
     static long ioBufferWrite(Object receipt,Object action,long allocation,long generation,long address,long bytes,Module[] sources){
-        if(CALLER.getCallerClass()!=ResourceBridge.class||!ResourceBridge.ioBufferWriteActive(receipt,action,allocation,generation,address,bytes,sources))throw new SecurityException("ACTUAL_IO_BUFFER_WRITE_REQUIRED");
-        return available?ioBufferWrite0(receipt,action,allocation,generation,address,bytes,sources):0;
+        if(CALLER.getCallerClass()!=ResourceBridge.class)throw new SecurityException("ACTUAL_RESOURCE_BRIDGE_REQUIRED");
+        return 0;
     }
-    private static boolean ioBufferWriteCaller(Object receipt,Object action,long allocation,long generation,long address,long bytes,Module[] sources){
-        return ResourceBridge.ioBufferWriteActive(receipt,action,allocation,generation,address,bytes,sources);
-    }
-    private static Object ioBufferWriteGroup(Object receipt){return ResourceBridge.ioBufferWriteGroup(receipt);}
+
+
     static void ioBufferWritten(Object receipt,long token,long bytes,boolean completed){
-        if(CALLER.getCallerClass()!=ResourceBridge.class||!ResourceBridge.ioBufferWrittenActive(receipt,token,bytes,completed))throw new SecurityException("ACTUAL_IO_BUFFER_WRITE_COMPLETION_REQUIRED");
-        ioBufferWritten0(receipt,token,bytes,completed);
+        if(CALLER.getCallerClass()!=ResourceBridge.class)throw new SecurityException("ACTUAL_RESOURCE_BRIDGE_REQUIRED");
     }
-    private static boolean ioBufferWrittenCaller(Object receipt,long token,long bytes,boolean completed){return ResourceBridge.ioBufferWrittenActive(receipt,token,bytes,completed);}
+
     static long[] ioReadVector(Object operation,long address,int count,boolean windows){
         if(CALLER.getCallerClass()!=IoBridge.class||!IoBridge.ioVectorActive(operation,address,count,windows))throw new SecurityException("ACTUAL_IO_VECTOR_REQUIRED");
         if(!available)throw new IllegalStateException("NATIVE_IO_VECTOR_UNAVAILABLE");return ioReadVector0(operation,address,count,windows);
@@ -465,14 +439,9 @@ public final class NativeControl {
         String creation=ControlBridge.creationSourceGap(module);if(!creation.isEmpty())return creation;
         String heap=CodeSourceBridge.executionRetirementGap(module);if(!heap.isEmpty())return heap;
         if(!available)return "EXTERNAL_CODE_VM_BACKEND_UNAVAILABLE";long[] frames=codeState0(module);
-        long[] memory=memoryState0(module);
-        if(memory==null||memory.length<5)return "EXTERNAL_NATIVE_MEMORY_BACKEND_UNAVAILABLE";
-        if(memory[0]!=0||memory[1]!=0||memory[2]!=0||memory[3]!=0)return "EXTERNAL_NATIVE_MEMORY_PENDING:allocations="+memory[0]+":ranges="+memory[1]+":active="+memory[2]+":unmapped="+memory[3]+":sharedReads="+memory[4];
-        long[] heapState=heapState0();if(heapState==null||heapState.length<2||heapState[0]==0)return "EXTERNAL_HEAP_EVENT_BACKEND_UNAVAILABLE";
-        if(heapState[1]!=0)return "EXTERNAL_HEAP_EVENTS_UNOBSERVED:events="+heapState[1];
         if(frames==null||frames.length<5||frames[0]==0)return "EXTERNAL_CODE_VM_BYTECODES_UNAVAILABLE";
-        if(frames.length<5||frames[3]==0)return "EXTERNAL_EXECUTION_POP_BACKEND_UNAVAILABLE";
-        if(frames[4]!=0)return "EXTERNAL_EXECUTION_POP_UNOBSERVED:events="+frames[4];
+        if(frames.length<5||frames[3]==0)return "EXTERNAL_VM_FRAME_POP_BACKEND_UNAVAILABLE";
+        if(frames[4]!=0)return "EXTERNAL_VM_FRAME_POP_UNOBSERVED:events="+frames[4];
         if(frames.length<19)return "EXTERNAL_CODE_RETIREMENT_BACKEND_UNAVAILABLE";
         if(frames[16]!=0)return "EXTERNAL_CODE_OWN_SUSPENSION_PENDING:threads="+frames[16];
         boolean active=frames[1]!=0||frames[2]!=0||frames[9]!=0||frames[18]!=0;
@@ -799,8 +768,7 @@ public final class NativeControl {
                 +";HOST_CHILD_OWN_PIN_RELEASES="+host[30]+";HOST_CHILD_APPLICATION_LOADER_LIFETIMES_UNOBSERVED="+host[31]
                 +";HOST_TLS_FLS_SLOTS="+host[32]+";HOST_TLS_FLS_VALUES="+host[33]+";HOST_TLS_FLS_ACTIVE="+host[34]
                 +";HOST_TLS_FLS_LIFECYCLE_GAPS="+host[35]+";HOST_TLS_FLS_SOURCE_HOLDS="+host[36]
-                +";HOST_STATIC_TLS_INSTANCES="+host[37]+";HOST_STATIC_TLS_GAPS="+host[38]
-                +";HOST_CPP_OBJECTS="+host[39]+";HOST_CPP_OBJECT_ACTIVE="+host[40]+";HOST_CPP_OBJECT_GAPS="+host[41]
+                +";HOST_CONTROL_OPERATION_GAPS="+host[39]+";PRIVATE_STORAGE_TRACKING=DISABLED_V1_5"
                 +";JVMTI_GETENV="+jvmti[0]+";JVMTI_OBSERVED_ENVIRONMENTS="+jvmti[1]+";JVMTI_CALLBACK_SLOTS="+jvmti[2]+";JVMTI_ACTIVE_CALLBACKS="+jvmti[3]
                 +";JVMTI_DISPOSED_ENVIRONMENTS="+jvmti[4]+";JVMTI_FAILURES="+jvmti[5]+";JVMTI_OWN_TABLE="+jvmti[6]+";JVMTI_UNATTRIBUTED_CALLBACKS="+jvmti[7]+";"+hostKernelSummary(module);
     }
@@ -809,8 +777,7 @@ public final class NativeControl {
         if(!available)return "";
         if(jvmtiDefinitionsPending0(module))return "JVMTI_DEFINITION_CONTINUATION_PENDING";
         long[] host=hostState0(module);long[] jvmti=jvmtiState0(module);
-        if(host[37]!=0||host[38]!=0)return "HOST_STATIC_TLS_RETIREMENT_PENDING:instances="+host[37]+":gaps="+host[38];
-        if(host[39]!=0||host[40]!=0||host[41]!=0)return "HOST_CPP_OBJECT_RETIREMENT_PENDING:objects="+host[39]+":active="+host[40]+":gaps="+host[41];
+        if(host[39]!=0)return "HOST_CONTROL_OPERATION_UNOBSERVED:groups="+host[39];
         if(host[32]!=0||host[33]!=0||host[34]!=0||host[35]!=0||host[36]!=0)
             return "HOST_TLS_FLS_RETIREMENT_PENDING:slots="+host[32]+":values="+host[33]+":active="+host[34]+":gaps="+host[35]+":sourceHolds="+host[36];
         if(host[21]!=0)return "HOST_NATIVE_WORKER_RETIREMENT_PENDING:holds="+host[21]+":exitPending="+host[22]+":lifecycleGaps="+host[23];
@@ -878,14 +845,10 @@ public final class NativeControl {
         if(CALLER.getCallerClass()!=ControlBridge.class)throw new SecurityException("ACTUAL_MEMORY_READ_BOUNDARY_REQUIRED");
         return memoryReadSources0(token);
     }
-    private static boolean memoryRecoveryCaller(){return ControlBridge.recoveryWriter();}
+
     public static long[] restoreMemory(Module[] modules,long cursor,long offset,int budget){
         if(!ControlBridge.recoveryWriter())throw new SecurityException("NATIVE_MEMORY_RECOVERY_CORE_REQUIRED");
-        if(modules==null||offset<0||budget<=0)throw new IllegalArgumentException("NATIVE_MEMORY_RECOVERY_SCOPE_REQUIRED");
-        for(Module module:modules)if(module==null||!ControlBridge.modStopped(module))throw new SecurityException("ACTUAL_STOPPED_MEMORY_SOURCES_REQUIRED");
-        if(modules.length==0)return new long[]{0,0,0,0,1};
-        if(!available)throw new IllegalStateException("NATIVE_MEMORY_RECOVERY_UNAVAILABLE");
-        return restoreMemory0(modules,cursor,offset,budget);
+        throw new UnsupportedOperationException("PRIVATE_MEMORY_REPLAY_DISABLED_V1_5");
     }
     public static boolean restoreRecoveredField(java.lang.reflect.Field field,Object receiver,Object expected,Object incoming){
         if(!ControlBridge.recoveryWriter())throw new SecurityException("RECOVERY_FIELD_WRITER_REQUIRED");
@@ -921,26 +884,17 @@ public final class NativeControl {
     private static native Object controlTable0();
     private static native Module[] codeFrame0(Class<?> declaring,String method,String descriptor,int location);
     private static native boolean executionRootAllowed0();
-    private static native Object executionPlan0(Class<?> declaring,String method,String descriptor,int location);
-    private static native boolean executionWatch0(Class<?> declaring,String method,String descriptor,int location,Object plan,Object token);
-    private static native long executionSite0(Object token);
-    private static native long executionFrameSite0(Object token);
     private static native boolean platformPrepareTargets0(String[] names);
     private static native boolean platformQueueQuiescent0(Class<?> pool,Class<?> queue);
-    private static native int executionPopPermit0(Object token);
     private static native Class<?> codeFieldOwner0(Class<?> symbolic,String name,String descriptor);
-    private static native boolean heapWatch0(Object holder,Class<?> declaring,String name,String descriptor);
     private static native void heapPolicyChanged0(Object object);
     private static native Object[] heapReadField0(Object holder,Class<?> declaring,String name,String descriptor);
     private static native byte[] codeDigest0(byte[] bytes);
     private static native byte[] heapArrayImage0(Object array,long start,int length);
     private static native long heapArrayBits0(Object array,long start,int length);
     private static native boolean restoreHeapArrayBytes0(Object array,long start,byte[] expected,byte[] incoming);
-    private static native long[] heapState0();
-    private static native boolean heapEventPermit0(Object holder,Class<?> declaring);
     private static native long[] codeState0(Module module);
     private static native void retireCode0(Module module);
-    private static native boolean codeRetirementFramePermit0(Class<?> declaring,int location,Object plan,Module owner);
     private static native boolean preparedClass0(Class<?> actual);
     private static native boolean sourceCapture0();
     private static native boolean sourceQueryStopped0();
@@ -969,13 +923,6 @@ public final class NativeControl {
     private static native long[] fileBindingState0();
     private static native boolean bufferAllocationBoundary0();
     private static native boolean bufferAddressBoundary0(Object buffer,Module[] sources);
-    private static native long[] bindBufferStorage0(java.nio.Buffer buffer,Object action,long address,long bytes);
-    private static native long[] observeBufferStorage0(java.nio.Buffer buffer,Object action,long address,long bytes);
-    private static native boolean bufferStorageUse0(java.nio.Buffer buffer,long token,long generation,long address,long bytes,boolean retain);
-    private static native void exposeBufferStorage0(java.nio.Buffer buffer,long token,long generation,long address,long bytes,Module[] sources);
-    private static native long[] restoreBufferStorage0(Object action,long token,long generation,Module[] modules,long cursor,int budget);
-    private static native long ioBufferWrite0(Object receipt,Object action,long allocation,long generation,long address,long bytes,Module[] sources);
-    private static native void ioBufferWritten0(Object receipt,long token,long bytes,boolean completed);
     private static native long[] ioReadVector0(Object operation,long address,int count,boolean windows);
     private static native boolean threadOperationBoundary0(Thread thread,Module[] sources,int operation);
     private static native boolean threadOperationFinishing0(Object token,boolean completed);
@@ -1022,8 +969,6 @@ public final class NativeControl {
     private static native void memoryWriteEnd0(long token,boolean written);
     private static native Module[] memoryReadSources0(long token);
     private static native void memoryWriteContributors0(long token,Module[] contributors);
-    private static native long[] restoreMemory0(Module[] modules,long cursor,long offset,int budget);
     private static native boolean unsafeCopyBoundary0(Object source,long sourceOffset,Object receiver,long offset,long length);
-    private static native long[] memoryState0(Module module);
     private static native Object clone0(Object source)throws CloneNotSupportedException;
 }

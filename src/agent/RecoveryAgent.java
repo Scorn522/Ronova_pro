@@ -59,11 +59,13 @@ public final class RecoveryAgent {
     private record CandidateContract(Class<?> owner,String method,String descriptor){}
     private static volatile CandidateContract[] candidateContracts=new CandidateContract[0];
     private static long definitionEpoch;
+    private static volatile String startupMode="NOT_STARTED";
     private RecoveryAgent() { }
     public static void premain(String argument,Instrumentation api) {
+        startupMode="PREMAIN";
         start(argument,api,"PREMAIN");
         String actual=installState();
-        if(!actual.equals("INSTALLED_FULL")) { report("AGENT_PREMAIN_BACKEND_UNAVAILABLE:"+actual);return; }
+        if(!actual.equals("INSTALLED_FULL"))throw new IllegalStateException("AGENT_PREMAIN_BACKEND_UNAVAILABLE:"+actual);
         report("AGENT_PREMAIN_READY:"+actual);
     }
     /**
@@ -76,8 +78,10 @@ public final class RecoveryAgent {
      * successful backend install from a successful attach call.
      */
     public static void agentmain(String argument,Instrumentation api) {
+        if(!startupMode.equals("PREMAIN"))startupMode="RUNTIME_CONTINUATION";
         start(argument,api,"ATTACH");
     }
+    public static String startupStage(){return startupMode+(Boolean.getBoolean("ronova.pro.prelaunchPrepared")?":PRELAUNCH_PREPARED":":PRELAUNCH_NOT_INTEGRATED");}
     private static synchronized void start(String argument,Instrumentation api,String mode) {
         if(!installState.equals("NOT_ATTEMPTED")) {
             boolean retryNative=nativeRetryable();
@@ -133,7 +137,9 @@ public final class RecoveryAgent {
         if(actual.startsWith("FAILED:"))return actual+":NATIVE="+nativeInstallMode()+":NATIVE_RETRYABLE="+nativeRetryable();
         String failure=controlFailure;
         if(failure!=null)return actual.startsWith("INSTALLING:")?actual+":TRANSFORM_FAILED:"+failure:"INSTALLED_PARTIAL:TRANSFORM_FAILED:"+failure;
-        if(actual.equals("INSTALLED_FULL")&&!installationComplete())return "INSTALLED_PARTIAL:CURRENT_BOUNDARY_UNAVAILABLE:NATIVE="+nativeInstallMode();
+        if(actual.equals("INSTALLED_FULL")&&!installationComplete())return "INSTALLED_PARTIAL:CURRENT_BOUNDARY_UNAVAILABLE:NATIVE="+nativeInstallMode()
+                +":PLATFORM_PENDING="+platformImages.entrySet().stream().filter(entry->!entry.getValue().accepted()).map(Map.Entry::getKey).sorted().toList()
+                +":REFLECTION="+reflectionGuarded+":UNSAFE="+unsafeGuarded+":CONTROL="+controlReady();
         if(actual.startsWith("INSTALLED_PARTIAL"))return installationComplete()?"INSTALLED_FULL":actual+":NATIVE="+nativeInstallMode()+":NATIVE_RETRYABLE="+nativeRetryable();
         return actual;
     }
@@ -173,10 +179,6 @@ public final class RecoveryAgent {
             Class.forName("java.util.stream.IntPipeline$Head",false,null);
             for(String helper:List.of("SourcePublication","SourceIndexMutation","FastListView","FieldMutation","EquipmentInvocations"))
                 Class.forName("dev.ronova.pro.bootstrap.ControlBridge$"+helper,true,null);
-            // A JNI observation uses this exact family's mutually referring metadata.
-            // Define its direct member classes without initializing them before that
-            // observation can recursively request its own ArrayChange/receipt bytes.
-            Class.forName("dev.ronova.pro.bootstrap.ExecutionFlow",false,null).getDeclaredClasses();
             // Array-change completion iterates this exact TreeMap tail view.
             // Define its view/value/entry iterator chain before JNI can fill
             // those class bytes through the same guarded array-completion path.
@@ -192,7 +194,7 @@ public final class RecoveryAgent {
             for(String helper:List.of("PacketEntry","Deferred","Cleanup","Submission"))
                 Class.forName("dev.ronova.pro.bootstrap.NetworkBridge$"+helper,false,null);
             Class.forName("dev.ronova.pro.bootstrap.NetworkCleanup",false,null).getDeclaredClasses();
-            for(String helper:List.of("Helper","EquipmentAsync","AsyncBinding","EquipmentAsyncFields","EquipmentDefined"))
+            for(String helper:List.of("Helper"))
                 Class.forName("dev.ronova.pro.bootstrap.TaskBridge$"+helper,false,null);
             Class.forName("dev.ronova.pro.bootstrap.CodeSourceBridge$LedgerMap",false,null);
             Class.forName("dev.ronova.pro.bootstrap.CodeSourceBridge$FrameMethods",false,null);
@@ -209,6 +211,7 @@ public final class RecoveryAgent {
                             Map.entry("java.util",Set.of(bridge.getModule())),Map.entry("java.util.concurrent.locks",Set.of(bridge.getModule(),ours)),Map.entry("java.io",Set.of(bridge.getModule())),Map.entry("java.net",Set.of(bridge.getModule())),
                             Map.entry("java.nio",Set.of(bridge.getModule())),Map.entry("jdk.internal.ref",Set.of(bridge.getModule())),
                             Map.entry("sun.nio.cs",Set.of(bridge.getModule())),Map.entry("sun.nio.ch",Set.of(bridge.getModule())),Map.entry("jdk.internal.loader",Set.of(bridge.getModule()))),Set.of(),Map.of());
+            prepareStartupSelectors();
             // A Forge scanning thread may run newly transformed code immediately after addTransformer.
             // Finish the bootstrap helper's access and initialization before publishing any such call site.
             Class.forName("dev.ronova.pro.bootstrap.BackingBridge",true,null);
@@ -258,29 +261,30 @@ public final class RecoveryAgent {
                     // implementation is not an external definition to be taken over.
                     if(module==ours&&loader==RecoveryAgent.class.getClassLoader()&&domain!=null
                             &&java.util.Objects.equals(domain.getCodeSource(),RecoveryAgent.class.getProtectionDomain().getCodeSource()))return null;
-                    if(name==null||!JdkTaskBoundaryContract.registered(name))platformTransforming(loader,name,type);
                     Module origin=definitionOrigin(type,loader,name),declaration=origin==null?module:origin;
-                    boolean producer=producerModule(declaration),watched=watchedDefinition(type);
                     boolean recorded=ExternalCodeImages.recorded(loader,name);
+                    boolean watched=watchedDefinition(type);
                     boolean promoted=type!=null&&externalPromotion.get()==type;
-                    ExternalCodeDefinitions.ReferenceHeader references=producer||recorded||promoted?null:ExternalCodeDefinitions.references(name,bytes);
-                    boolean sourceCandidate=producer||origin!=null||recorded||watched||promoted
-                            ||ExternalCodeDefinitions.executionSourcesObserved(declaration,loader,name,references);
+                    if(ordinaryPlatformClass(module,loader,name,type)&&origin==null&&!recorded&&!watched&&!promoted&&!confirmedContract(type))return null;
+                    if(name==null||!JdkTaskBoundaryContract.registered(name))platformTransforming(loader,name,type);
+                    ModGroupBoundary.observeDefinition(declaration,domain);
+                    boolean producer=producerModule(declaration);
+                    boolean sourceCandidate=producer||origin!=null||recorded||watched||promoted;
                     boolean control=controlImages.critical(module,loader,name,type);
-                    boolean contract=contractCandidate(loader,name,type,references);
-                    boolean candidate=sourceCandidate||control||contract||boundaryCandidate(loader,name,bytes);
-                    if(!candidate){ExternalCodeDefinitions.referenceOnly(loader,name,type,declaration,bytes,bytes,references);platformReturned(loader,name,type,null);return null;}
+                    boolean contract=contractCandidate(loader,name,type,null)||contractBytecodeCandidate(bytes);
+                    boolean boundary=boundaryCandidate(loader,name,bytes);
+                    boolean writer=!platformModule(module,loader)&&!producer&&actualWriteSites(bytes);
+                    if(!sourceCandidate&&!control&&!contract&&!boundary&&!writer)return null;
                     try {
                     if(origin!=null&&module!=null&&!module.canRead(bridge.getModule()))
                         api.redefineModule(module,Set.of(bridge.getModule()),Map.of(),Map.of(),Set.of(),Map.of());
                     byte[] external=recorded?ExternalCodeImages.transform(loader,name,type,bytes):null;
                     byte[] input=external==null?bytes:external;
                     ExternalCodeRuntime.Source source=sourceCandidate?ExternalCodeRuntime.prepare(declaration,loader,name,type,input,false,true):null;
-                    byte[] result=apply(declaration,loader,name,type,domain,source==null?input:source.bytes(),source!=null&&source.present());
+                    byte[] result=apply(declaration,loader,name,type,domain,source==null?input:source.bytes(),source!=null&&source.present(),writer);
                     if(result==null)result=source==null?input:source.bytes();
                     if(origin!=null)result=DefinitionBoundary.generated(loader,result,true);
                     if(source!=null&&(source.present()||source.image()!=null))result=ExternalCodeRuntime.finish(loader,name,type,source,result);
-                    else ExternalCodeDefinitions.referenceOnly(loader,name,type,declaration,result,input,references==null?ExternalCodeDefinitions.references(name,input):references);
                     recordDefinition(type,result==null?bytes:result);
                     platformReturned(loader,name,type,result==null?bytes:result);return result;
                     }catch(RuntimeException|LinkageError failure){
@@ -289,7 +293,7 @@ public final class RecoveryAgent {
                                 control||ModGroupBoundary.stopped(declaration)||watched||promoted||confirmedContract(type));
                     }
                 }
-                private byte[] apply(Module module,ClassLoader loader,String name,Class<?> type,ProtectionDomain domain,byte[] bytes,boolean externalSources) {
+                private byte[] apply(Module module,ClassLoader loader,String name,Class<?> type,ProtectionDomain domain,byte[] bytes,boolean externalSources,boolean actualWriter) {
                     try {
                     // Forge's discovery loader is active before its module resources and frame types exist.
                     // It does not own world effects; touching it here creates a false partial install.
@@ -298,14 +302,6 @@ public final class RecoveryAgent {
                         if(module!=null&&!module.canRead(bridge.getModule()))
                             api.redefineModule(module,Set.of(bridge.getModule()),Map.of(),Map.of(),Set.of(),Map.of());
                         registerProducer(module);publishStoppedModule(module);return stopped;
-                    }
-                    if(loader==null&&module==base&&"java/util/Optional".equals(name)){
-                        if(!module.canRead(bridge.getModule()))api.redefineModule(module,Set.of(bridge.getModule()),Map.of(),Map.of(),Set.of(),Map.of());
-                        return EquipmentOptionalBoundary.transform(loader,name,bytes);
-                    }
-                    if(loader==null&&module==base&&EquipmentFunctionBoundary.target(name)){
-                        if(!module.canRead(bridge.getModule()))api.redefineModule(module,Set.of(bridge.getModule()),Map.of(),Map.of(),Set.of(),Map.of());
-                        return EquipmentFunctionBoundary.transform(loader,name,bytes);
                     }
                     if(BufferBoundary.wrapTarget(name)&&loader!=null&&!producerModule(module)){
                         if(module!=null&&!module.canRead(bridge.getModule()))
@@ -353,6 +349,11 @@ public final class RecoveryAgent {
                     }
                     byte[] defining=DefinitionBoundary.platform(loader,name,bytes);
                     if(defining!=null){byte[] handle=HandleWriteBoundary.transform(loader,name,defining);return handle==null?defining:handle;}
+                    byte[] container=ModGroupBoundary.container(loader,name,bytes);
+                    if(container!=null){
+                        if(module!=null&&!module.canRead(bridge.getModule()))api.redefineModule(module,Set.of(bridge.getModule()),Map.of(),Map.of(),Set.of(),Map.of());
+                        return container;
+                    }
                     if(EventBusBoundary.TARGET.equals(name)) {
                         if(module!=null&&!module.canRead(bridge.getModule()))
                             api.redefineModule(module,Set.of(bridge.getModule()),Map.of(),Map.of(),Set.of(),Map.of());
@@ -360,8 +361,11 @@ public final class RecoveryAgent {
                     }
                     byte[] command=CommandBoundary.transform(loader,name,bytes);
                     if(command!=null) {
-                        if(module!=null&&!module.canRead(bridge.getModule()))
-                            api.redefineModule(module,Set.of(bridge.getModule()),Map.of(),Map.of(),Set.of(),Map.of());
+                        if(module!=null){
+                            Map<String,Set<Module>> openings=new HashMap<>();
+                            for(String part:module.getPackages())if(part.startsWith("com.mojang.brigadier"))openings.put(part,Set.of(bridge.getModule()));
+                            api.redefineModule(module,Set.of(bridge.getModule()),Map.of(),openings,Set.of(),Map.of());
+                        }
                         return command;
                     }
                     byte[] instrumented=InstrumentationBoundary.transform(loader,name,bytes);
@@ -397,11 +401,9 @@ public final class RecoveryAgent {
                     byte[] initial=console==null?bytes:console;
                     if(console!=null&&module!=null&&!module.canRead(bridge.getModule()))
                         api.redefineModule(module,Set.of(bridge.getModule()),Map.of(),Map.of(),Set.of(),Map.of());
-                    byte[] slots=EquipmentSlotBoundary.transform(loader,name,type,initial);if(slots!=null)initial=slots;
                     byte[] dispatch=DispatchBoundary.transform(loader,name,type,initial);
                     byte[] current=dispatch==null?initial:dispatch;
-                    byte[] equipment=EquipmentActionBoundary.transform(loader,name,type,current);
-                    if(equipment!=null)current=equipment;
+                    byte[] equipment=EquipmentActionBoundary.transform(loader,name,type,current);if(equipment!=null)current=equipment;
                     if(loader==null) {
                         if(current!=bytes&&module!=null&&!module.canRead(bridge.getModule()))
                             api.redefineModule(module,Set.of(bridge.getModule()),Map.of(),Map.of(),Set.of(),Map.of());
@@ -413,9 +415,8 @@ public final class RecoveryAgent {
                     byte[] nativeClone=CloneBoundary.transform(loader,current);
                     if(nativeClone!=null)current=nativeClone;
                     boolean declaredSource=type!=null&&watching.contains(type);
-                    boolean application=name.startsWith("net/minecraft/")
-                            ||producerModule(module)
-                            ||declaredSource||externalSources||directEntityReference(bytes)||directMutationReference(bytes);
+                    boolean application=producerModule(module)||actualWriter
+                            ||declaredSource||externalSources||directMutationReference(bytes);
                     if(!application) {
                         if(current!=bytes&&module!=null&&module.isNamed()&&!module.canRead(bridge.getModule()))
                             api.redefineModule(module,Set.of(bridge.getModule()),Map.of(),Map.of(),Set.of(),Map.of());
@@ -427,6 +428,7 @@ public final class RecoveryAgent {
                     // Native entries are enumerated, never rewritten: swapping a body would change behaviour
                     // without a real backend, which is worse than reporting the gap honestly.
                     NativeBindingBoundary.observe(name,bytes);
+                    byte[] entries=ModGroupBoundary.entries(loader,module,name,current);if(entries!=null)current=entries;
                     byte[] fields=FieldWriteBoundary.transform(loader,module,current);
                     if(fields!=null)current=fields;
                     byte[] backings=BackingBoundary.transform(loader,module,name,current);if(backings!=null)current=backings;
@@ -437,10 +439,8 @@ public final class RecoveryAgent {
                         api.redefineModule(module,Set.of(bridge.getModule()),Map.of(),Map.of(),Set.of(),Map.of());
                     return transformed;
                     }catch(ReflectiveOperationException failure) {
-                        EquipmentActionBoundary.transformFailed(type);
                         throw new IllegalStateException("CODE_SOURCE_BOUNDARY_BINDING_FAILED:"+name,failure);
                     }catch(RuntimeException|LinkageError failure) {
-                        EquipmentActionBoundary.transformFailed(type);
                         throw failure;
                     }
                 }
@@ -456,6 +456,7 @@ public final class RecoveryAgent {
             control.getMethod("install",Class.class,ClassFileTransformer[].class).invoke(null,RecoveryAgent.class,
                     new ClassFileTransformer[]{controlImages,taskTransformer,objectTransformer});
             ControlImages.protect(nativeFinalTransformer);
+            ModGroupBoundary.protectControls();
             resourceBridge=Class.forName("dev.ronova.pro.bootstrap.ResourceBridge",true,null);
             resourceBridge.getMethod("installBufferWrap",Class.class).invoke(null,RecoveryAgent.class);
             definitionBridge=Class.forName("dev.ronova.pro.bootstrap.DefinitionBridge",true,null);
@@ -503,7 +504,7 @@ public final class RecoveryAgent {
                         ||HandleWriteBoundary.targets().contains(name)&&!name.equals("java/lang/invoke/MethodHandles")&&!name.equals("java/lang/invoke/MethodHandles$Lookup"))writers.add(loaded);
                 else if(loader==null&&startupPlatformTarget(name))platform.add(loaded);
                 else if(name.equals(EventFaultBoundary.TARGET))events.add(loaded);
-                else if(name.equals(CommandBoundary.TARGET)||loader!=null&&!producerModule(loaded.getModule())
+                else if(name.equals(CommandBoundary.TARGET)||name.equals(ModGroupBoundary.MOD_CONTAINER)||loader!=null&&!producerModule(loaded.getModule())
                         &&(CodeSourceBoundary.TARGETS.contains(name)||NetworkBoundary.TARGETS.contains(name)||ClientBoundary.TARGETS.contains(name)||BufferBoundary.wrapTarget(name)))sources.add(loaded);
                 else if(FastutilIndexBoundary.targets().contains(name)||SectionKeyBoundary.targets().contains(name))indices.add(loaded);
                 else if(name.equals(ConsoleBoundary.TARGET))consoles.add(loaded);
@@ -519,7 +520,6 @@ public final class RecoveryAgent {
             retransformStartup(api,instrumentationClasses,"INSTRUMENTATION",true);
             protectInstrumentation(api);
             control.getMethod("installed").invoke(null);
-            ExternalCodeDefinitions.start(api);
             // The agent/bridge were loaded before our transformer, so seed their actual images once.
             retransformStartup(api,controls,"CONTROL_IMAGES",true);
             report("INSTRUMENTATION_REMOVAL_AND_PUBLICATION_GUARD:"+controlReady());
@@ -552,6 +552,20 @@ public final class RecoveryAgent {
                 report("NATIVE_ENTRIES_OBSERVED:"+NativeBindingBoundary.observedBindings().size()
                         +":"+NativeBindingBoundary.backendState());
             javaInstallationFinished=true;
+    }
+    private static void prepareStartupSelectors()throws ClassNotFoundException{
+        // Native candidate classification reads these selectors too. Resolve
+        // their classes and first selector invocations before its load hook can
+        // classify a dependency while that same selector is still being linked.
+        ClassLoader loader=RecoveryAgent.class.getClassLoader();
+        for(String helper:List.of("JdkTaskBoundaryContract","FastutilIndexBoundary","SectionKeyBoundary","HandleWriteBoundary",
+                "ResourceBoundary","IoBoundary","BufferBoundary","NativeLibraryBoundary","CodeSourceBoundary",
+                "NetworkBoundary","ClientBoundary","ModGroupBoundary","ControlImages$Ref","ControlImages$Image"))
+            Class.forName("dev.ronova.pro.agent."+helper,true,loader);
+        FastutilIndexBoundary.targets();
+        SectionKeyBoundary.targets();
+        HandleWriteBoundary.targets();
+        futureTaskBoundaries();
     }
     private static Set<String> futureTaskBoundaries(){
         Set<String> names=new HashSet<>(JdkTaskBoundaryContract.certificationTargets());
@@ -604,11 +618,20 @@ public final class RecoveryAgent {
                 ||name.equals("java/lang/reflect/Field"))
                 ||name.equals("sun/misc/Unsafe")&&(loader==null||loader==ClassLoader.getPlatformClassLoader());
     }
+    private static boolean platformModule(Module module,ClassLoader loader){
+        return (loader==null||loader==ClassLoader.getPlatformClassLoader())&&module!=null&&module.isNamed()
+                &&module.getClassLoader()==loader&&module.getLayer()==ModuleLayer.boot();
+    }
+    private static boolean ordinaryPlatformClass(Module module,ClassLoader loader,String name,Class<?> actual){
+        return name!=null&&platformModule(module,loader)&&!platformGuardTarget(loader,name)&&!startupPlatformTarget(name)
+                &&!name.equals("jdk/internal/misc/Unsafe")&&!name.equals(InstrumentationBoundary.MANAGER)&&!name.equals(InstrumentationBoundary.API)
+                &&!controlImages.critical(module,loader,name,actual);
+    }
     private static boolean startupPlatformTarget(String name){
         return ResourceBoundary.CHARACTER_WRAPPERS.contains(name)||ResourceBoundary.TARGETS.contains(name)
                 ||BufferBoundary.TARGETS.contains(name)||IoBoundary.TARGETS.contains(name)||NativeLibraryBoundary.TARGETS.contains(name)
-                ||CodeSourceBoundary.TARGETS.contains(name)||EquipmentFunctionBoundary.target(name)
-                ||Set.of("java/lang/ClassLoader","java/lang/Thread","java/lang/ref/Reference","java/util/Optional",
+                ||CodeSourceBoundary.TARGETS.contains(name)
+                ||Set.of("java/lang/ClassLoader","java/lang/Thread","java/lang/ref/Reference",
                     "java/util/Timer","java/util/TimerThread","java/lang/invoke/MethodHandles","java/lang/invoke/MethodHandles$Lookup").contains(name);
     }
     private static void platformTransforming(ClassLoader loader,String name,Class<?> actual){
@@ -781,31 +804,28 @@ public final class RecoveryAgent {
                 ||caller.getClassLoader()!=runtime.getClassLoader()||caller.getModule()!=runtime.getModule()
                 ||!Objects.equals(caller.getProtectionDomain().getCodeSource(),runtime.getProtectionDomain().getCodeSource()))
             throw new SecurityException("EQUIPMENT_CARRIER_DECLARATION_OWNER");
-        Objects.requireNonNull(actual);Instrumentation api=instrumentation;
-        if(api==null)throw new IllegalStateException("EQUIPMENT_CARRIER_AGENT_UNAVAILABLE");
-        controlImages.declare(actual);
-        EquipmentActionBoundary.installCarrier(api,actual);
+        Objects.requireNonNull(actual);
     }
     public static void declareEquipmentSlotGetter(Class<?> actual,String method,String descriptor){
         Class<?> caller=CALLER.getCallerClass(),runtime=modGroupRuntime;
         if(runtime==null||!caller.getName().equals("dev.ronova.pro.EquipmentPolicy")||caller.getClassLoader()!=runtime.getClassLoader()
                 ||caller.getModule()!=runtime.getModule()||!Objects.equals(caller.getProtectionDomain().getCodeSource(),runtime.getProtectionDomain().getCodeSource()))
             throw new SecurityException("EQUIPMENT_SLOT_DECLARATION_OWNER");
-        Objects.requireNonNull(actual);controlImages.declare(actual);EquipmentSlotBoundary.install(instrumentation,actual,method,descriptor);
+        Objects.requireNonNull(actual);
     }
     public static void declareEquipmentSlotHelper(Class<?> actual,String method,String descriptor){
         Class<?> caller=CALLER.getCallerClass(),runtime=modGroupRuntime;
         if(runtime==null||!caller.getName().equals("dev.ronova.pro.EquipmentPolicy")||caller.getClassLoader()!=runtime.getClassLoader()
                 ||caller.getModule()!=runtime.getModule()||!Objects.equals(caller.getProtectionDomain().getCodeSource(),runtime.getProtectionDomain().getCodeSource()))
             throw new SecurityException("EQUIPMENT_SLOT_HELPER_DECLARATION_OWNER");
-        Objects.requireNonNull(actual);controlImages.declare(actual);EquipmentSlotBoundary.installHelper(instrumentation,actual,method,descriptor);
+        Objects.requireNonNull(actual);
     }
     public static void declareEquipmentSlotKey(Class<?> actual,String method,String descriptor){
         Class<?> caller=CALLER.getCallerClass(),runtime=modGroupRuntime;
         if(runtime==null||!caller.getName().equals("dev.ronova.pro.EquipmentPolicy")||caller.getClassLoader()!=runtime.getClassLoader()
                 ||caller.getModule()!=runtime.getModule()||!Objects.equals(caller.getProtectionDomain().getCodeSource(),runtime.getProtectionDomain().getCodeSource()))
             throw new SecurityException("EQUIPMENT_SLOT_KEY_DECLARATION_OWNER");
-        Objects.requireNonNull(actual);controlImages.declare(actual);EquipmentSlotBoundary.installKey(instrumentation,actual,method,descriptor);
+        Objects.requireNonNull(actual);
     }
     /** The declaration state, so a caller can tell "covered" from "nothing declared yet". */
     public static String dispatchState() {
@@ -871,6 +891,20 @@ public final class RecoveryAgent {
         requireModGroupCaller("dev.ronova.pro.ProRuntime");
         return ModGroupBoundary.ids(module).toArray(String[]::new);
     }
+    public static Module[] modGroupModules(String[] ids){
+        requireModGroupCaller("dev.ronova.pro.ProRuntime");return ModGroupBoundary.modules(ids);
+    }
+    public static String protectModGroup(String[] ids,Module[] modules){
+        requireModGroupCaller("dev.ronova.pro.ProRuntime");return ModGroupBoundary.protect(instrumentation,ids,modules);
+    }
+    static void publishProtectedModules(Module[] modules){
+        try{Class.forName("dev.ronova.pro.bootstrap.ControlBridge",false,null).getMethod("protectModules",Module[].class).invoke(null,(Object)modules);}
+        catch(ReflectiveOperationException failure){throw new IllegalStateException("MOD_GROUP_PROTECTION_PUBLICATION_FAILED",failure);}
+    }
+    static void publishGroupGate(Module[] modules){
+        try{Class.forName("dev.ronova.pro.bootstrap.ControlBridge",false,null).getMethod("stopModules",Module[].class).invoke(null,(Object)modules);}
+        catch(ReflectiveOperationException failure){throw new IllegalStateException("MOD_GROUP_GATE_PUBLICATION_FAILED",failure);}
+    }
     public static String stopModGroup(String[] ids,Module[] modules) {
         requireModGroupCaller("dev.ronova.pro.ProRuntime");
         return ModGroupBoundary.stop(instrumentation,ids,modules,"default");
@@ -893,21 +927,32 @@ public final class RecoveryAgent {
         requireModGroupCaller("dev.ronova.pro.ClientPresence");
         return ModGroupBoundary.stopByIds(instrumentation,ids,returns);
     }
+    public static String protectModIds(String[] ids){
+        requireModGroupCaller("dev.ronova.pro.ClientPresence");return ModGroupBoundary.protectByIds(instrumentation,ids);
+    }
     public static String modGroupState(Module module) { return ModGroupBoundary.state(module); }
     public static String modGroupState() { return ModGroupBoundary.state()+";"+EventBusBoundary.state()
             +";COMMAND_GATE="+(CommandBoundary.installed()?"INSTALLED":"NOT_INSTALLED"); }
     private static void requireModGroupCaller(String expected) {
-        Class<?> caller=CALLER
-                .walk(frames->frames.skip(2).findFirst().map(StackWalker.StackFrame::getDeclaringClass).orElse(null));
+        var call=CALLER.walk(frames->frames.skip(1).limit(2).toList());
+        Class<?> caller=call.size()==2?call.get(1).getDeclaringClass():null;
         Class<?> runtime=modGroupRuntime;
         if(runtime==null||caller==null)throw new SecurityException("MOD_GROUP_CONTROL_UNBOUND");
+        String entry=call.get(0).getMethodName();
+        if(Set.of("modGroupModules","stopModIds","protectModIds").contains(entry)&&boundCoreClass(caller,"dev.ronova.pro.ClientModGroups"))return;
         Class<?> authorized;
         try {
             authorized=expected.equals("dev.ronova.pro.ProRuntime")?runtime:
                     Class.forName("dev.ronova.pro.ClientPresence",false,runtime.getClassLoader());
         } catch(ClassNotFoundException unavailable) {throw new SecurityException("MOD_GROUP_CLIENT_UNAVAILABLE",unavailable);}
-        if(caller!=authorized||!authorized.getName().equals(expected)||authorized.getModule()!=runtime.getModule())
+        if(caller!=authorized||!boundCoreClass(authorized,expected))
             throw new SecurityException("MOD_GROUP_CONTROL_CALLER");
+    }
+    private static boolean boundCoreClass(Class<?> actual,String name){
+        Class<?> runtime=modGroupRuntime;if(runtime==null||actual==null||!actual.getName().equals(name)
+                ||actual.getModule()!=runtime.getModule()||actual.getClassLoader()!=runtime.getClassLoader()
+                ||!Objects.equals(actual.getProtectionDomain().getCodeSource(),runtime.getProtectionDomain().getCodeSource()))return false;
+        try{return Class.forName(name,false,runtime.getClassLoader())==actual;}catch(ClassNotFoundException unavailable){return false;}
     }
     static void publishStoppedModule(Module module) {
         ModGroupBoundary.Returns policy=ModGroupBoundary.beginPublication(module);if(policy==null)return;
@@ -928,6 +973,12 @@ public final class RecoveryAgent {
     public static boolean nativeImageCandidate(Module module,ClassLoader loader,String name,Class<?> actual,Module[] writers){
         requireNativeImageCaller("jvmtiImageCandidate");
         if(name==null)return true;
+        if(ordinaryPlatformClass(module,loader,name,actual)&&definitionOrigin(actual,loader,name)==null
+                &&!ExternalCodeImages.recorded(loader,name)&&!watchedDefinition(actual)&&!confirmedContract(actual)
+                &&(actual==null||externalPromotion.get()!=actual)){
+            if(writers!=null)for(Module writer:writers)if(writer!=null&&producerModule(writer))return true;
+            return false;
+        }
         if(writers!=null)for(Module writer:writers)if(writer==null||producerModule(writer))return true;
         if(producerModule(module)||controlImages.critical(module,loader,name,actual)||ExternalCodeImages.recorded(loader,name)
                 ||ExternalCodeDefinitions.executionSourcesObserved(loader,name)||watchedDefinition(actual)||confirmedContract(actual))return true;
@@ -987,7 +1038,12 @@ public final class RecoveryAgent {
         name=new jdk.internal.org.objectweb.asm.ClassReader(bytes).getClassName();
         ExternalCodeRuntime.Source source=ExternalCodeRuntime.prepare(module,loader,name,null,bytes,hidden);
         byte[] current=DefinitionBoundary.generated(loader,source.bytes());
-        byte[] fields=FieldWriteBoundary.transform(loader,module,current);if(fields!=null)current=fields;
+        byte[] stopped=ModGroupBoundary.transform(loader,module,name,null,current);
+        if(stopped!=null){current=stopped;publishStoppedModule(module);}
+        else{
+            byte[] entries=ModGroupBoundary.entries(loader,module,name,current);if(entries!=null)current=entries;
+            byte[] fields=FieldWriteBoundary.transform(loader,module,current);if(fields!=null)current=fields;
+        }
         NativeBindingBoundary.observe(name,bytes);
         return ExternalCodeRuntime.finish(loader,name,null,source,current);
         } catch(RuntimeException|LinkageError failure) {
@@ -1007,14 +1063,15 @@ public final class RecoveryAgent {
     public static void sourceModuleRead(Module module) {
         Class<?> caller=CALLER.getCallerClass();
         if(caller!=codeSourceBridge)throw new SecurityException("ACTUAL_CODE_SOURCE_BRIDGE_REQUIRED");
-        if(producerModule(module)) {registerProducer(module);ExternalCodeDefinitions.moduleObserved(module);if(ModGroupBoundary.stopped(module))publishStoppedModule(module);}
+        if(producerModule(module)) {registerProducer(module);ExternalCodeDefinitions.moduleObserved(module);ModGroupBoundary.protectedModule(module);if(ModGroupBoundary.stopped(module))publishStoppedModule(module);}
     }
     private static void requireCodeSourceCaller(){
         Class<?> caller=CALLER.walk(frames->frames.skip(2).findFirst().map(StackWalker.StackFrame::getDeclaringClass).orElse(null));
         if(caller!=codeSourceBridge)throw new SecurityException("ACTUAL_CODE_SOURCE_BRIDGE_REQUIRED");
     }
-    public static byte[] externalTreeImage(Object tree){requireCodeSourceCaller();return ExternalCodeImages.image(tree);}
-    public static void externalTreeObserved(Object tree,Module module){requireCodeSourceCaller();ExternalCodeImages.observed(tree,module);}
+    public static byte[] externalTreeImage(Object tree){requireCodeSourceCaller();return ExternalCodeImages.canonicalImage(tree);}
+    public static byte[] externalTreeBaseline(Object tree){requireCodeSourceCaller();return ExternalCodeImages.baseline(tree);}
+    public static void externalTreeObserved(Object tree,Module module,byte[] bytes){requireCodeSourceCaller();ExternalCodeImages.observed(tree,module,bytes);}
     public static Object externalCodeBegin(Object tree,Module[] owners,Module[] writers){requireCodeSourceCaller();return ExternalCodeImages.begin(tree,owners,writers);}
     public static void externalCodeEnd(Object token,Object tree,Module[] consumers){requireCodeSourceCaller();ExternalCodeImages.end(token,tree,consumers);}
     public static void externalTreeCopied(Object tree,Object visitor){requireCodeSourceCaller();ExternalCodeImages.copied(tree,visitor);}
@@ -1077,6 +1134,16 @@ public final class RecoveryAgent {
         if(CALLER.getCallerClass()!=ExternalCodeRuntime.class)throw new SecurityException("ACTUAL_EXTERNAL_CODE_WEAVER_REQUIRED");
         try{return codeSourceBridge.getMethod("executionPlan",Object[][].class).invoke(null,(Object)rows);}
         catch(ReflectiveOperationException failure){throw new IllegalStateException("EXTERNAL_EXECUTION_LAYOUT_PUBLICATION_FAILED",failure);}
+    }
+    static void publishMethodRoots(ClassLoader loader,String name,Class<?> actual,Map<String,Module[]> roots){
+        if(CALLER.getCallerClass()!=ExternalCodeRuntime.class)throw new SecurityException("ACTUAL_EXTERNAL_CODE_WEAVER_REQUIRED");
+        try{codeSourceBridge.getMethod("codeMethodRoots",ClassLoader.class,String.class,Class.class,String[].class,Module[][].class)
+                .invoke(null,loader,name.replace('/','.'),actual,roots.keySet().toArray(String[]::new),roots.values().toArray(Module[][]::new));}
+        catch(ReflectiveOperationException failure){throw new IllegalStateException("EXTERNAL_METHOD_ROOT_PUBLICATION_FAILED",failure);}
+    }
+    static Module[] methodRootSources(Class<?> type){
+        try{return (Module[])codeSourceBridge.getMethod("methodRootSources",Class.class).invoke(null,type);}
+        catch(ReflectiveOperationException failure){throw new IllegalStateException("EXTERNAL_METHOD_ROOT_QUERY_UNAVAILABLE",failure);}
     }
     static void publishExternalCode(ClassLoader loader,String name,Class<?> actual,byte[] bytes,String[] methods,Module[][][] owners,Map<String,Module[]> fields,Object[][] values,boolean hidden,Object execution,Module declaration){
         Class<?> caller=CALLER.getCallerClass();
@@ -1179,19 +1246,53 @@ public final class RecoveryAgent {
         }
         return false;
     }
+    private static boolean contractBytecodeCandidate(byte[] bytes){
+        for(CandidateContract entry:candidateContracts)if(containsAscii(bytes,entry.method())&&containsAscii(bytes,entry.descriptor()))return true;
+        return false;
+    }
+    /** A streaming opcode check selects real stores without retaining a reference/source graph. */
+    private static boolean actualWriteSites(byte[] bytes){
+        return WriteSites.contains(bytes);
+    }
+    // Keep ASM subclasses out of the premain class verifier. The module export
+    // is installed inside premain, before this selector is first invoked.
+    private static final class WriteSites {
+    static boolean contains(byte[] bytes){
+        boolean[] writes={false};
+        new jdk.internal.org.objectweb.asm.ClassReader(bytes).accept(new jdk.internal.org.objectweb.asm.ClassVisitor(jdk.internal.org.objectweb.asm.Opcodes.ASM8){
+            @Override public void visitPermittedSubclassExperimental(String name){}
+            @Override public jdk.internal.org.objectweb.asm.MethodVisitor visitMethod(int access,String name,String descriptor,String signature,String[] exceptions){
+                return new jdk.internal.org.objectweb.asm.MethodVisitor(jdk.internal.org.objectweb.asm.Opcodes.ASM8){
+                    @Override public void visitFieldInsn(int opcode,String owner,String name,String descriptor){
+                        if(opcode==jdk.internal.org.objectweb.asm.Opcodes.PUTFIELD||opcode==jdk.internal.org.objectweb.asm.Opcodes.PUTSTATIC)writes[0]=true;
+                    }
+                    @Override public void visitInsn(int opcode){
+                        if(opcode>=jdk.internal.org.objectweb.asm.Opcodes.IASTORE&&opcode<=jdk.internal.org.objectweb.asm.Opcodes.SASTORE)writes[0]=true;
+                    }
+                    @Override public void visitMethodInsn(int opcode,String owner,String name,String descriptor,boolean itf){
+                        if(opcode==jdk.internal.org.objectweb.asm.Opcodes.INVOKESTATIC
+                                &&(owner.equals("java/lang/System")&&name.equals("arraycopy")
+                                ||owner.equals("java/util/Arrays")&&Set.of("fill","sort","parallelSort","setAll","parallelSetAll").contains(name)))writes[0]=true;
+                    }
+                };
+            }
+        },jdk.internal.org.objectweb.asm.ClassReader.SKIP_DEBUG|jdk.internal.org.objectweb.asm.ClassReader.SKIP_FRAMES);
+        return writes[0];
+    }
+    }
     /** Eligibility only: exact boundaries and cheap constant-pool byte screens precede ASM. */
     private static boolean boundaryCandidate(ClassLoader loader,String name,byte[] bytes){
         if(name==null)return false;
-        if(EventBusBoundary.TARGET.equals(name)||CommandBoundary.TARGET.equals(name)||EventFaultBoundary.TARGET.equals(name)
+        if(EventBusBoundary.TARGET.equals(name)||CommandBoundary.TARGET.equals(name)||ModGroupBoundary.MOD_CONTAINER.equals(name)||EventFaultBoundary.TARGET.equals(name)
                 ||CodeSourceBoundary.TARGETS.contains(name)||NetworkBoundary.TARGETS.contains(name)||ClientBoundary.TARGETS.contains(name)
                 ||BufferBoundary.wrapTarget(name)||FastutilIndexBoundary.targets().contains(name)||SectionKeyBoundary.targets().contains(name)
                 ||HandleWriteBoundary.targets().contains(name)||"sun/misc/Unsafe".equals(name)||"java/lang/reflect/Field".equals(name))return true;
         if(loader==null)return ResourceBoundary.TARGETS.contains(name)||ResourceBoundary.CHARACTER_WRAPPERS.contains(name)
                 ||IoBoundary.TARGETS.contains(name)||BufferBoundary.TARGETS.contains(name)||NativeLibraryBoundary.TARGETS.contains(name)
-                ||EquipmentFunctionBoundary.target(name)||Set.of("java/util/Optional","java/lang/Thread","java/util/Timer","java/util/TimerThread",
+                ||Set.of("java/lang/Thread","java/util/Timer","java/util/TimerThread",
                     "java/lang/ClassLoader","java/lang/ref/Reference","jdk/internal/misc/Unsafe","sun/instrument/TransformerManager","sun/instrument/InstrumentationImpl",
                     "java/util/concurrent/ThreadPoolExecutor","java/util/concurrent/ScheduledThreadPoolExecutor").contains(name);
-        return name.startsWith("net/minecraft/")||directEntityReference(bytes)||mutationCandidate(bytes)
+        return directMutationReference(bytes)
                 ||containsAscii(bytes,"clone")&&containsAscii(bytes,"()Ljava/lang/Object;");
     }
     private static boolean mutationCandidate(byte[] bytes){
@@ -1224,10 +1325,12 @@ public final class RecoveryAgent {
         return BackingBoundary.actualMutationCalls(bytes);
     }
     private static boolean containsAscii(byte[] bytes,String value) {
-        byte[] needle=value.getBytes(java.nio.charset.StandardCharsets.US_ASCII);
-        outer:for(int i=0;i<=bytes.length-needle.length;i++) {
-            if(bytes[i]!=needle[0])continue;
-            for(int j=1;j<needle.length;j++)if(bytes[i+j]!=needle[j])continue outer;
+        // All callers supply fixed ASCII class/method markers. Encoding each
+        // marker would reenter the guarded System.arraycopy during class definition.
+        int size=value.length();
+        outer:for(int i=0;i<=bytes.length-size;i++) {
+            if(bytes[i]!=value.charAt(0))continue;
+            for(int j=1;j<size;j++)if(bytes[i+j]!=value.charAt(j))continue outer;
             return true;
         }
         return false;
@@ -1243,6 +1346,8 @@ public final class RecoveryAgent {
         producerModules.put(module,Boolean.TRUE);return true;
     }
     public static void openBackingAccess(Class<?> core,Class<?>[] carriers) {
+        Class<?> caller=CALLER.getCallerClass();
+        if(core==null||!boundCoreClass(core,core.getName())||caller!=core&&caller!=RecoveryAgent.class)throw new SecurityException("ACTUAL_BACKING_CORE_REQUIRED");
         Instrumentation api=instrumentation;if(api==null)throw new IllegalStateException("AGENT_NOT_INSTALLED");
         api.redefineModule(Object.class.getModule(),Set.of(),Map.of(),Map.of("java.util",Set.of(core.getModule()),"java.util.concurrent",Set.of(core.getModule()),"java.io",Set.of(core.getModule()),"sun.nio.ch",Set.of(core.getModule())),Set.of(),Map.of());
         Map<Module,Map<String,Set<Module>>> openings=new IdentityHashMap<>();

@@ -22,15 +22,20 @@ public final class BlockGroupPolicy {
     private BlockGroupPolicy() { }
 
     static List<BlockEntity> loaded(ServerLevel level) {
+        Set<BlockEntity> found=Collections.newSetFromMap(new IdentityHashMap<>());
+        for(LevelChunk chunk:loadedChunks(level))found.addAll(chunk.getBlockEntities().values());
+        return List.copyOf(found);
+    }
+    static List<LevelChunk> loadedChunks(ServerLevel level) {
         Access.Tracking map=(Access.Tracking)level.getChunkSource().chunkMap;
         Set<ChunkHolder> holders=Collections.newSetFromMap(new IdentityHashMap<>());
         holders.addAll(map.pro$updatingChunks().values());
         holders.addAll(map.pro$visibleChunks().values());
         holders.addAll(map.pro$pendingChunks().values());
-        Set<BlockEntity> found=Collections.newSetFromMap(new IdentityHashMap<>());
+        Set<LevelChunk> found=Collections.newSetFromMap(new IdentityHashMap<>());
         for(ChunkHolder holder:holders) {
             LevelChunk chunk=holder.getFullChunk();
-            if(chunk!=null)found.addAll(chunk.getBlockEntities().values());
+            if(chunk!=null)found.add(chunk);
         }
         return List.copyOf(found);
     }

@@ -21,14 +21,20 @@ final class EventBusBoundary {
         boolean registration=false,dispatch=false;
         for(MethodNode method:node.methods) {
             if(method.name.equals("addToListeners")&&method.desc.equals("(Ljava/lang/Object;Ljava/lang/Class;Lnet/minecraftforge/eventbus/api/IEventListener;Lnet/minecraftforge/eventbus/api/EventPriority;)V")) {
+                // Register only after the real bus accepted the listener. A stop racing
+                // this return immediately unregisters this exact owner from this bus.
+                for(AbstractInsnNode at:method.instructions.toArray())if(at.getOpcode()==Opcodes.RETURN){
+                    InsnList registered=new InsnList();registered.add(new VarInsnNode(Opcodes.ALOAD,0));
+                    registered.add(new VarInsnNode(Opcodes.ALOAD,1));registered.add(new VarInsnNode(Opcodes.ALOAD,3));
+                    registered.add(new MethodInsnNode(Opcodes.INVOKESTATIC,BRIDGE,"modListenerRegistered",
+                            "(Ljava/lang/Object;Ljava/lang/Object;Ljava/lang/Object;)V",false));
+                    method.instructions.insertBefore(at,registered);
+                }
                 LabelNode allowed=new LabelNode();InsnList code=new InsnList();
                 code.add(new VarInsnNode(Opcodes.ALOAD,1));
                 code.add(new MethodInsnNode(Opcodes.INVOKESTATIC,"dev/ronova/pro/bootstrap/ControlBridge","modOwnerAllowed","(Ljava/lang/Object;)Z",false));
                 code.add(new JumpInsnNode(Opcodes.IFNE,allowed));code.add(new InsnNode(Opcodes.RETURN));
                 code.add(allowed);code.add(new FrameNode(Opcodes.F_SAME,0,null,0,null));
-                code.add(new VarInsnNode(Opcodes.ALOAD,1));code.add(new VarInsnNode(Opcodes.ALOAD,3));
-                code.add(new MethodInsnNode(Opcodes.INVOKESTATIC,BRIDGE,"modListenerRegistered",
-                        "(Ljava/lang/Object;Ljava/lang/Object;)V",false));
                 method.instructions.insert(code);registration=true;
             }
             if(method.name.equals("post")&&method.desc.equals("(Lnet/minecraftforge/eventbus/api/Event;Lnet/minecraftforge/eventbus/api/IEventBusInvokeDispatcher;)Z")) {

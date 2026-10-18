@@ -314,20 +314,14 @@ final class ExternalCodeDefinitions {
         return Set.copyOf(methods);
     }
     static boolean executionSourcesObserved(ClassLoader loader,String name){
-        // Names only admit a candidate. expand still requires the actual
-        // initiated class, declaration and native body match across loaders.
-        return name!=null&&sourceScopes.candidates().contains(name);
+        return name!=null&&ExternalCodeImages.recorded(loader,name);
     }
     static boolean executionSourcesObserved(Module declaration,ClassLoader loader,String name,ReferenceHeader reference){
         if(RecoveryAgent.producerModule(declaration)||executionSourcesObserved(loader,name))return true;
-        return reference!=null&&(!Collections.disjoint(reference.references(),sourceScopes.candidates())||!Collections.disjoint(reference.calls(),sourceScopes.methods()));
+        return false;
     }
     static void moduleObserved(Module module){
-        if(!RecoveryAgent.producerModule(module))return;
-        for(Definition definition:definitions())if(definition.declaration.get()==module){
-            observeSource(definition.loader.get(),definition.name,module);
-            Class<?> actual=definition.actual.get();if(actual!=null)changed(actual);
-        }
+        // Actual Module registration is the source root; no getter-call graph is expanded.
     }
     static void accepted(ClassLoader loader,String name,Class<?> actual,Module declaration,byte[] bytes,byte[] semanticBytes,Map<String,Module[][]> rows,ExternalCodeFlow.Image semantic,Map<String,Module[][]> applied,Map<String,Module[]> fields,Object[][] values,boolean hidden,String[] creationSites,Object execution){
         if(name==null)return;
@@ -335,7 +329,8 @@ final class ExternalCodeDefinitions {
                 jdk.internal.org.objectweb.asm.ClassReader.SKIP_CODE|jdk.internal.org.objectweb.asm.ClassReader.SKIP_DEBUG|jdk.internal.org.objectweb.asm.ClassReader.SKIP_FRAMES);
         ExternalCodeFlow.Image image=new ExternalCodeFlow.Image(new Object(),header,Map.of(),Map.of());
         if(!image.node().name.equals(name))throw new IllegalStateException("EXTERNAL_DEFINITION_IMAGE_NAME_CHANGED");
-        if(semantic==null||!semantic.node().name.equals(name))throw new IllegalStateException("EXTERNAL_DEFINITION_SEMANTIC_IMAGE_CHANGED");
+        if(semantic==null)semantic=image;
+        if(!semantic.node().name.equals(name))throw new IllegalStateException("EXTERNAL_DEFINITION_SEMANTIC_IMAGE_CHANGED");
         ExternalCodeFlow.Image retained=ExternalCodeFlow.hasContributors(semantic)?semantic:null;
         Definition replacement=new Definition(loader,name,actual,declaration,image,retained,semanticBytes,applied,bytes,fields,values,hidden,creationSites,execution);
         publish(replacement,true);
@@ -358,8 +353,6 @@ final class ExternalCodeDefinitions {
             definitions.add(replacement);
             Directory after=directory(List.copyOf(definitions),before.changes(),before.continuing(),before.active());
             if(compareDirectory(before,after)){
-                if(replacement.contributors||RecoveryAgent.producerModule(replacement.declaration.get()))observeSource(replacement.loader.get(),replacement.name,replacement.declaration.get());
-                else if(!Collections.disjoint(replacement.references,sourceScopes.candidates())||!Collections.disjoint(replacement.calls,sourceScopes.methods()))observeSource(null,null,null);
                 return true;
             }
         }
@@ -378,9 +371,8 @@ final class ExternalCodeDefinitions {
         new jdk.internal.org.objectweb.asm.ClassReader(emitted.bytes).accept(header,
                 jdk.internal.org.objectweb.asm.ClassReader.SKIP_CODE|jdk.internal.org.objectweb.asm.ClassReader.SKIP_DEBUG|jdk.internal.org.objectweb.asm.ClassReader.SKIP_FRAMES);
         ExternalCodeFlow.Image image=new ExternalCodeFlow.Image(new Object(),header,Map.of(),Map.of());
-        ExternalCodeFlow.Image emittedAnalysis=emitted.analysis();
-        ExternalCodeFlow.Image analysis=new ExternalCodeFlow.Image(new Object(),emittedAnalysis.node(),emittedAnalysis.rows(),emittedAnalysis.comparisons());
-        Definition accepted=new Definition(actual.getClassLoader(),emitted.name,actual,RecoveryAgent.logicalModule(actual),image,analysis,null,emitted.applied,emitted.bytes,emitted.fields,emitted.values,true,emitted.creationSites,emitted.execution);
+        Definition accepted=new Definition(actual.getClassLoader(),emitted.name,actual,RecoveryAgent.logicalModule(actual),image,null,
+                emitted.semanticBytes==null?emitted.bytes:emitted.semanticBytes,Map.of(),emitted.bytes,emitted.fields,emitted.values,true,emitted.creationSites,null);
         RecoveryAgent.bindExternalDefinition(actual,bytes,accepted.applied.keySet().toArray(String[]::new),accepted.fields,accepted.values,accepted.creationSites);
         if(publish(accepted,false))changed(actual);
     }
@@ -392,10 +384,10 @@ final class ExternalCodeDefinitions {
             Class<?> prior=entry.actual.get();if(prior!=null&&prior!=actual)continue;
             Ref<Class<?>> accepted=new Ref<>(actual);ControlImages.protect(accepted);entry.actual=accepted;observed=true;source|=entry.contributors;
         }
-        if(source)observeSource(actual.getClassLoader(),name,RecoveryAgent.logicalModule(actual));
         if(observed&&executionSourcesObserved(actual.getClassLoader(),actual.getName().replace('.','/')))changed(actual);
     }
     static void changed(Class<?> actual){
+        if(WORKER.get()==null)return;
         if(!eligible(actual))return;
         Ref<Class<?>> next=new Ref<>(actual);ControlImages.protect(next);
         for(;;){

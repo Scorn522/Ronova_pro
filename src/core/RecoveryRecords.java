@@ -1,16 +1,14 @@
 package dev.ronova.pro;
 
-import dev.ronova.pro.persistence.JournalLineage;
 import java.lang.ref.WeakReference;
 import java.lang.reflect.*;
-import java.nio.charset.StandardCharsets;
 import java.util.*;
 import java.util.concurrent.*;
 import java.util.concurrent.atomic.*;
 import net.minecraft.nbt.CompoundTag;
 import net.minecraft.world.entity.Entity;
 
-/** One memory-source work owner; carrier adapters share policies, scans, replay and retirement. */
+/** Actual memory-source cleanup under the current group policy. */
 final class RecoveryRecords implements AutoCloseable {
     private final CopyOnWriteArrayList<FieldRead> fieldReads=new CopyOnWriteArrayList<>();
     private final Map<Object,Map<Class<?>,Map<String,FieldRead>>> writerFields=Collections.synchronizedMap(new WeakIdentityMap<>());
@@ -59,33 +57,6 @@ final class RecoveryRecords implements AutoCloseable {
     private final Map<UUID,Policy> policies=new LinkedHashMap<>();
     private record Policy(ProRuntime.Subject subject,UUID operation,long generation) { }
     private final Map<UUID,Edge> edges=new LinkedHashMap<>();
-    private final List<Historical> historical=new ArrayList<>();
-    private long historyCursor;
-    private static final class Historical {
-        final UUID id,operation,subject,session;
-        final String source,code,field,kind,key,prefix;
-        String before,expected;
-        boolean imageApplied;
-        boolean current;
-        long sampled=-1;
-        String reason="REFERENCE_RESTART_PENDING",record;
-        CompletableFuture<Void> ack;
-        Historical(String[] row) {
-            id=UUID.fromString(row[2]);operation=UUID.fromString(row[3]);subject=UUID.fromString(row[4]);session=UUID.fromString(row[6]);
-            if(Long.parseLong(row[5])<1)throw new IllegalArgumentException("REFERENCE_QUALIFICATION");
-            source=untext(row[7]);code=untext(row[8]);field=untext(row[9]);kind=row[10];key=untext(row[11]);
-            prefix=row[0];
-            before=row.length==14?row[12]:"";
-            expected=row.length==14?row[13]:"";
-            if(row.length==14&&(!row[12].isEmpty()&&!row[12].matches("[a-f0-9]{64}")||!expected.isEmpty()&&!expected.matches("[a-f0-9]{64}")))throw new IllegalArgumentException("REFERENCE_IMAGE_HASH");
-            if(!(Set.of("ATOMIC","COPY_ON_WRITE_LIST","ENTITY_MAP").contains(kind)
-                    ||prefix.equals("RECORD/5")&&Set.of("ARRAY_LIST","OBJECT_ARRAY").contains(kind)
-                    ||prefix.equals("RECORD/6")&&kind.equals("HASH_SET")
-                    ||prefix.equals("RECORD/3")&&kind.equals("DIRECT_FIELD")
-                    ||prefix.equals("RECORD/4")&&kind.equals("UUID_SELECTOR"))||!code.matches("[a-f0-9]{64}"))throw new IllegalArgumentException("REFERENCE_ADAPTER");
-            for(int i:new int[]{7,8,9,11})if(!text(untext(row[i])).equals(row[i]))throw new IllegalArgumentException("REFERENCE_ENCODING");
-        }
-    }
     private final Map<RecoverySources.Source,Set<String>> gaps=new IdentityHashMap<>();
     private final Map<RecoverySources.Source,Long> scanned=new IdentityHashMap<>();
     private final Map<RecoverySources.Source,ReferenceScan> scans=new IdentityHashMap<>();
@@ -95,6 +66,7 @@ final class RecoveryRecords implements AutoCloseable {
         final Set<String> issues=new TreeSet<>();
         Set<String> completedIssues=Set.of();
         final Map<Field,WeakReference<Object>> containers=new HashMap<>();
+        final Map<Field,WeakReference<Object>> listBackings=new HashMap<>();
         final Map<Field,Long> listRevisions=new HashMap<>();
         final Map<Field,Long> mapRevisions=new HashMap<>(),arrayRevisions=new HashMap<>();
         int fieldIndex,listIndex;
@@ -121,64 +93,21 @@ final class RecoveryRecords implements AutoCloseable {
         Thread thread=new Thread(r,"ronova-pro-memory-sources");thread.setDaemon(true);return thread;
     },new ThreadPoolExecutor.AbortPolicy());
     private static final class Edge {
-        final UUID id=UUID.randomUUID();final Policy policy;final RecoverySources.Source source;final Field field;
-        final Object key;Object target;final String kind,intent,prefix;
-        String beforeImage,expectedImage,imageRecord;
+        final UUID id=UUID.randomUUID();volatile Policy policy;final RecoverySources.Source source;final Field field;
+        final Object key;Object target;final String kind;
         final WeakReference<Object> objectIdentity,containerIdentity;
         Object object,container;
         SourceMaps.Cursor removalCursor;
         volatile boolean running,attempted,applied,observed,released;
-        volatile String reason="",fact,release;
-        CompletableFuture<Void> ack,factAck,releaseAck,imageAck;
-        Edge(Policy policy,RecoverySources.Source source,Field field,Object key,Object container,Object object,Object target,String kind,UUID session) {
+        volatile String reason="";
+        Edge(Policy policy,RecoverySources.Source source,Field field,Object key,Object container,Object object,Object target,String kind) {
             this.policy=policy;this.source=source;this.field=field;this.key=key;this.container=container;this.object=object;this.target=target;this.kind=kind;
-            prefix=kind.equals("HASH_SET")?"RECORD/6":Set.of("ARRAY_LIST","OBJECT_ARRAY").contains(kind)?"RECORD/5":kind.equals("UUID_SELECTOR")?"RECORD/4":kind.equals("DIRECT_FIELD")?"RECORD/3":"RECORD/2";
             objectIdentity=new WeakReference<>(object);containerIdentity=new WeakReference<>(container);
-            beforeImage=Set.of("COPY_ON_WRITE_LIST","ARRAY_LIST","HASH_SET").contains(kind)?listImage(container,null):"";
-            expectedImage=Set.of("COPY_ON_WRITE_LIST","ARRAY_LIST","HASH_SET").contains(kind)?listImage(container,object):"";
-            intent=prefix+"\tEDGE_INTENT\t"+id+"\t"+policy.operation+"\t"+policy.subject.id+"\t"+policy.generation+"\t"+session+"\t"+
-                    text(source.locator)+"\t"+text(source.code)+"\t"+text(field.getDeclaringClass().getName()+"#"+field.getName())+"\t"+kind+"\t"+text(key==null&&!kind.equals("ENTITY_MAP")?"":SourceMaps.encodeKey(key))+"\t"+beforeImage+"\t"+expectedImage;
         }
         Object receiver()throws IllegalAccessException {Object holder=source.holder();if(holder==null)throw new IllegalAccessException("HOLDER_RELEASE_UNOBSERVED");return holder instanceof Class<?>?null:holder;}
     }
     RecoveryRecords(ProRuntime runtime,RecoverySources sources) {
         this.runtime=runtime;
-        Map<UUID,Historical> originals=new LinkedHashMap<>();
-        for(String record:runtime.journal.history())if(record.startsWith("RECORD/"))try {
-            String[] row=record.split("\t",-1);
-            if(row.length<3||!Set.of("RECORD/1","RECORD/2","RECORD/3","RECORD/4","RECORD/5","RECORD/6").contains(row[0]))
-                throw new IllegalArgumentException("MEMORY_HISTORY_VERSION");
-            boolean legacy=row[0].equals("RECORD/1");
-            if(legacy&&row[1].equals("INTENT")) {
-                if(row.length!=11)throw new IllegalArgumentException("MEMORY_INTENT_ARITY");
-                String[] normalized=Arrays.copyOf(row,14);
-                normalized[1]="EDGE_INTENT";normalized[10]="ENTITY_MAP";normalized[11]=row[10];normalized[12]="";normalized[13]="";
-                row=normalized;
-            }
-            if(row[1].equals("EDGE_INTENT")) {
-                if(row.length!=12&&row.length!=14)throw new IllegalArgumentException("REFERENCE_INTENT_ARITY");
-                Historical item=new Historical(row);
-                Historical old=originals.putIfAbsent(item.id,item);
-                if(old!=null)throw new IllegalArgumentException("MEMORY_OPERATION_REDEFINED");
-                historical.add(item);sources.expect(item.source,item.code,item.subject,0);
-            } else if(row[1].equals("EDGE_IMAGE")) {
-                if(row.length!=6||!row[4].matches("[a-f0-9]{64}")||!row[5].matches("[a-f0-9]{64}"))throw new IllegalArgumentException("REFERENCE_IMAGE_RECORD");
-                Historical selected=originals.get(UUID.fromString(row[2]));
-                if(selected==null||!selected.operation.equals(UUID.fromString(row[3]))||!selected.prefix.equals(row[0])
-                        ||!Set.of("COPY_ON_WRITE_LIST","ARRAY_LIST","HASH_SET").contains(selected.kind))throw new IllegalArgumentException("REFERENCE_IMAGE_OWNER");
-                selected.before=row[4];selected.expected=row[5];selected.imageApplied=false;
-            } else if(legacy&&Set.of("FACT","RELEASED").contains(row[1])) {
-                if(row.length!=(row[1].equals("FACT")?5:4)||!originals.containsKey(UUID.fromString(row[2])))throw new IllegalArgumentException("MEMORY_LEGACY_FACT");
-            } else if(row[0].equals("RECORD/2")&&row[1].equals("RESTART_QUERY")) {
-                if(row.length!=5||!originals.containsKey(UUID.fromString(row[2])))throw new IllegalArgumentException("MEMORY_LEGACY_RESTART");
-                UUID.fromString(row[3]);
-            } else {
-                if(row.length!=5||!Set.of("EDGE_FACT","EDGE_RELEASED","EDGE_RESTART").contains(row[1]))throw new IllegalArgumentException("REFERENCE_FACT");
-                Historical selected=originals.get(UUID.fromString(row[2]));
-                if(selected==null||!selected.operation.equals(UUID.fromString(row[3]))||!selected.prefix.equals(row[0]))throw new IllegalArgumentException("REFERENCE_FACT_OWNER");
-                if(row[1].equals("EDGE_FACT"))selected.imageApplied=row[4].equals("EXACT_OWNED_EDGE_REMOVED_AND_ABSENT")||row[4].equals("EDGE_REMOVED_CURRENT_DUPLICATE_OR_REINSERTION_PENDING");
-            }
-        } catch(RuntimeException malformed) { gap="MEMORY_HISTORY_QUERY_ONLY:"+malformed.getMessage();runtime.journal.refuseWrites(gap); }
     }
 
     void qualify(ProRuntime.Subject subject,UUID operation) {
@@ -187,7 +116,8 @@ final class RecoveryRecords implements AutoCloseable {
         if(closing||!subject.terminal)return;
         Policy prior=policies.get(subject.id);
         if(prior!=null&&prior.generation==subject.generation)return;
-        policies.put(subject.id,new Policy(subject,operation,subject.generation));
+        Policy current=new Policy(subject,operation,subject.generation);policies.put(subject.id,current);
+        for(Edge edge:edges.values())if(!edge.running&&runtime.canonicalSubject(edge.policy.subject.id)==subject)edge.policy=current;
         // Resolve actual earlier reads now that the body has a subject; no global class scan.
         for(FieldRead read:fieldReads) {
             Object holder=read.holder.get(),value=read.value();if(holder==null||value==null)continue;
@@ -338,7 +268,6 @@ final class RecoveryRecords implements AutoCloseable {
                 key.append("|CONSUMED:").append(read.field.getDeclaringClass().getName()).append('#').append(read.field.getName());
         for(Edge edge:edges.values())if(edge.policy.operation.equals(operation))key.append('|').append(edge.id).append(':')
             .append(edge.attempted).append(':').append(edge.applied).append(':').append(edge.observed).append(':').append(edge.released);
-        for(Historical item:historical)if(item.operation.equals(operation))key.append('|').append(item.id).append(':').append(item.current);
         return key.toString();
     }
     long epoch() { return epoch.get(); }
@@ -354,7 +283,6 @@ final class RecoveryRecords implements AutoCloseable {
     }
     void tick(long tick) {
         if(closing)return;
-        queryHistorical(tick);
         var sources=new ArrayList<>(runtime.recoverySources.registered());
         for(int i=0;i<Math.min(32,sources.size());i++) {
             var source=sources.get((int)Math.floorMod(cursor++,sources.size()));
@@ -365,20 +293,9 @@ final class RecoveryRecords implements AutoCloseable {
             Set<String> previous=gaps.put(source,Set.copyOf(issues));if(previous!=null&&!previous.equals(issues))epoch.incrementAndGet();
         }
         List<Edge> active=new ArrayList<>(edges.values());
-        for(Edge edge:active) {
-            edge.ack=runtime.journal.retryRejected(edge.intent,edge.ack);
-            if(confirmed(edge.ack)&&edge.imageRecord!=null)
-                edge.imageAck=edge.imageAck==null?runtime.journal.append(edge.imageRecord):runtime.journal.retryRejected(edge.imageRecord,edge.imageAck);
-            if(confirmed(edge.ack)&&(edge.imageRecord==null||confirmed(edge.imageAck))&&edge.fact!=null)
-                edge.factAck=edge.factAck==null?runtime.journal.append(edge.fact):runtime.journal.retryRejected(edge.fact,edge.factAck);
-            edge.releaseAck=runtime.journal.retryRejected(edge.release,edge.releaseAck);
-            if(edge.running)continue;
-            if(edge.released) {
-                if(edge.release==null) { edge.release=edge.prefix+"\tEDGE_RELEASED\t"+edge.id+"\t"+edge.policy.operation+"\tOWNED_FIELDS_CLEARED_AFTER_FRAME_EXIT";edge.releaseAck=runtime.journal.append(edge.release); }
-            }
-        }
+        for(Edge edge:active)if(!edge.running){Policy current=policy(edge.policy.subject.id);if(current!=null)edge.policy=current;}
         int budget=32;
-        // Keep every durable obligation; a busy earlier edge must not monopolize the next tick.
+        // A busy earlier source must not monopolize the next tick.
         for(int visited=0;visited<active.size()&&budget>0;visited++) {
             Edge edge=active.get((int)Math.floorMod(edgeCursor++,active.size()));
             if(edge.running||edge.released)continue;
@@ -418,7 +335,7 @@ final class RecoveryRecords implements AutoCloseable {
                 scan.issues.add("REFERENCE_FIELD_MUTABLE_REPLACEMENT_COVERAGE_UNPROVEN:"+field.getName());
             WeakReference<Object> previousContainer=scan.containers.get(field);
             if(previousContainer==null||previousContainer.get()!=container) {
-                scan.containers.put(field,new WeakReference<>(container));scan.listRevisions.remove(field);scan.mapRevisions.remove(field);scan.arrayRevisions.remove(field);scanned.remove(source);
+                scan.containers.put(field,new WeakReference<>(container));scan.listRevisions.remove(field);scan.listBackings.remove(field);scan.mapRevisions.remove(field);scan.arrayRevisions.remove(field);scanned.remove(source);
             }
             if(container!=scan.container){
                 scan.container=container;scan.map=null;scan.list=null;scan.listIndex=0;
@@ -432,7 +349,7 @@ final class RecoveryRecords implements AutoCloseable {
                 nested(source,field,"FIELD",null,container,scan.issues);scan.finishField();continue;
             }
             if(SourceMaps.removedJdkContainer(container)){
-                scan.issues.add("JDK_CONTAINER_HOOKS_REMOVED:"+field.getName());scan.finishField();continue;
+                scan.issues.add("JDK_CONTAINER_BACKEND_UNSUPPORTED:"+field.getName());scan.finishField();continue;
             }
             if(container instanceof Object[] values) {
                 if(values.length==0){scan.finishField();continue;}
@@ -452,11 +369,20 @@ final class RecoveryRecords implements AutoCloseable {
                 } finally {ArrayAccess.END_READ.invoke(null,ticket);}
                 if(field.get(isStatic?null:actualHolder)!=container){scan.container=null;scanned.remove(source);break;}
                 if(scan.listIndex==values.length)scan.finishField();else break;
-            } else if(SourceMaps.scopedList(container)) {
+            } else if(container.getClass()==AtomicReference.class){
+                Object value=((AtomicReference<?>)container).get();
+                if(nestedHolder(value)&&ownedTarget(value,runtime,true)==null)nested(source,field,"ATOMIC",null,value,scan.issues);
+                else if(unsupportedWrapper(value))scan.issues.add("REFERENCE_WRAPPER_PROFILE_UNSUPPORTED:"+value.getClass().getName());
+                else capture(source,field,null,container,value,"ATOMIC",scan.issues);
+                scan.finishField();
+            } else if(SourceMaps.supportedList(container)) {
                 ReferenceScan active=scan;int limit=Math.min(32,remaining);int[] used={0};boolean[] done={false};
                 boolean ran=withArrayList(container,false,()->{
                     long revision=arrayListRevision(container);
-                    if(!Objects.equals(active.listRevisions.put(field,revision),revision)) {
+                    Object backing;
+                    try{backing=SourceMaps.listBacking(container);}catch(ReflectiveOperationException unavailable){throw new IllegalStateException("REFERENCE_LIST_BACKING_UNAVAILABLE",unavailable);}
+                    WeakReference<Object> prior=active.listBackings.put(field,new WeakReference<>(backing));
+                    if(!Objects.equals(active.listRevisions.put(field,revision),revision)||prior==null||prior.get()!=backing) {
                         active.listIndex=0;scanned.remove(source);
                     }
                     List<?> list=(List<?>)container;
@@ -464,7 +390,7 @@ final class RecoveryRecords implements AutoCloseable {
                         Object value=list.get(active.listIndex++);used[0]++;
                         if(nestedHolder(value)&&ownedTarget(value,runtime,true)==null)nested(source,field,"LIST",active.listIndex-1,value,active.issues);
                         else if(unsupportedWrapper(value))active.issues.add("REFERENCE_WRAPPER_PROFILE_UNSUPPORTED:"+value.getClass().getName());
-                        else capture(source,field,null,container,value,"ARRAY_LIST",active.issues);
+                        else capture(source,field,null,container,value,container.getClass()==CopyOnWriteArrayList.class?"COPY_ON_WRITE_LIST":"ARRAY_LIST",active.issues);
                     }
                     done[0]=active.listIndex==list.size();
                 });
@@ -558,6 +484,8 @@ final class RecoveryRecords implements AutoCloseable {
             if(revision!=null) {
                 boolean[] same={false};
                 if(!withArrayList(actual,false,()->same[0]=revision.longValue()==arrayListRevision(actual))||!same[0])return false;
+                WeakReference<Object> backing=scan.listBackings.get(entry.getKey());
+                if(backing==null||backing.get()!=SourceMaps.listBacking(actual))return false;
             }
         }
         return true;
@@ -565,9 +493,8 @@ final class RecoveryRecords implements AutoCloseable {
     private void captureSelector(Policy policy,RecoverySources.Source source,Selector selector,Entity output,Set<String> issues)throws ReflectiveOperationException {
         for(Edge edge:edges.values())if(edge.policy==policy&&!edge.released&&edge.target==output&&edge.source==source&&edge.kind.equals("UUID_SELECTOR")
                 &&edge.field.equals(selector.read.field)&&edge.objectIdentity.get()==selector.read.value())return;
-        Edge edge=new Edge(policy,source,selector.read.field,selector.value,source.holder(),selector.read.value(),output,"UUID_SELECTOR",runtime.session);
-        if(!IntentJournal.frameFits(edge.intent)) {issues.add("REFERENCE_DESCRIPTOR_LIMIT:"+selector.read.field.getName());return;}
-        edge.ack=runtime.journal.append(edge.intent);edges.put(edge.id,edge);epoch.incrementAndGet();
+        Edge edge=new Edge(policy,source,selector.read.field,selector.value,source.holder(),selector.read.value(),output,"UUID_SELECTOR");
+        edges.put(edge.id,edge);epoch.incrementAndGet();
         if(runtime.server.isSameThread())advance(edge);
     }
     private void capture(RecoverySources.Source source,Field field,Object key,Object container,Object value,String kind,Set<String> issues) {
@@ -576,9 +503,8 @@ final class RecoveryRecords implements AutoCloseable {
         if(policy==null||!source.subjects.contains(subject)||!policy.subject.terminal||policy.subject.generation!=policy.generation)return;
         for(Edge old:edges.values())if(old.policy==policy&&old.target==target&&old.kind.equals(kind)&&old.source==source&&old.field.equals(field)&&old.containerIdentity.get()==container
                 &&old.objectIdentity.get()==value&&Objects.equals(old.key,key)&&!old.released)return;
-        Edge edge=new Edge(policy,source,field,key,container,value,target,kind,runtime.session);
-        if(!IntentJournal.frameFits(edge.intent)) {issues.add("REFERENCE_DESCRIPTOR_LIMIT:"+field.getName());return;}
-        edge.ack=runtime.journal.append(edge.intent);edges.put(edge.id,edge);epoch.incrementAndGet();
+        Edge edge=new Edge(policy,source,field,key,container,value,target,kind);
+        edges.put(edge.id,edge);epoch.incrementAndGet();
         if(kind.equals("DIRECT_FIELD")&&runtime.server.isSameThread())try {advance(edge);}
         catch(ReflectiveOperationException|RuntimeException pending) {edge.reason="DIRECT_FIELD_DISPOSITION_PENDING:"+pending.getClass().getSimpleName();}
     }
@@ -648,10 +574,10 @@ final class RecoveryRecords implements AutoCloseable {
     }
     private static boolean removedContainerEdge(String kind,Object container){
         return !kind.equals("DIRECT_FIELD")&&!kind.equals("UUID_SELECTOR")
-                &&(SourceMaps.removedJdkContainer(container)||kind.equals("ATOMIC")||kind.equals("COPY_ON_WRITE_LIST"));
+                &&SourceMaps.removedJdkContainer(container);
     }
     private void advance(Edge edge)throws ReflectiveOperationException {
-        if(removedContainerEdge(edge.kind,edge.container)){edge.reason="JDK_CONTAINER_HOOKS_REMOVED";return;}
+        if(removedContainerEdge(edge.kind,edge.container)){edge.reason="JDK_CONTAINER_BACKEND_UNSUPPORTED";return;}
         if(edge.kind.equals("HASH_SET")&&SourceMaps.supportedSet(edge.container)){
             if(!SourceMaps.with(SourceMaps.setMap(edge.container),()->advanceLocked(edge)))edge.reason="REFERENCE_SET_SCOPE_BUSY_OR_UNOBSERVED";
         }else if(edge.kind.equals("OBJECT_ARRAY")&&edge.container instanceof Object[] values) {
@@ -659,11 +585,11 @@ final class RecoveryRecords implements AutoCloseable {
             if(index<0||index>=values.length){edge.reason="REFERENCE_ARRAY_INDEX_CHANGED";return;}
             Object ticket=ArrayAccess.BEGIN.invoke(null,values,index,1);
             if(Boolean.FALSE.equals(ticket)){edge.reason="REFERENCE_ARRAY_BUSY";return;}
-            boolean before=edge.applied;
+            edge.applied=false;
             try {
                 advanceLocked(edge);
-            }finally {ArrayAccess.FINISH.invoke(null,ticket,!before&&edge.applied);}
-        }else if(edge.kind.equals("ARRAY_LIST")&&edge.container!=null) {
+            }finally {ArrayAccess.FINISH.invoke(null,ticket,edge.applied);}
+        }else if((edge.kind.equals("ARRAY_LIST")||edge.kind.equals("COPY_ON_WRITE_LIST"))&&edge.container!=null) {
             ReflectiveOperationException[] failure={null};
             boolean ran=withArrayList(edge.container,true,()->{
                 try{advanceLocked(edge);}catch(ReflectiveOperationException unavailable){failure[0]=unavailable;}
@@ -675,48 +601,26 @@ final class RecoveryRecords implements AutoCloseable {
         } else advanceLocked(edge);
     }
     private void advanceLocked(Edge edge)throws ReflectiveOperationException {
-        edge.ack=runtime.journal.retryRejected(edge.intent,edge.ack);
-        if(edge.fact!=null) {
-            if(!confirmed(edge.ack)) { edge.reason="DURABLE_INTENT_ACK_"+ackState(edge.ack);return; }
-            if(edge.imageRecord!=null){edge.imageAck=edge.imageAck==null?runtime.journal.append(edge.imageRecord):runtime.journal.retryRejected(edge.imageRecord,edge.imageAck);if(!confirmed(edge.imageAck)){edge.reason="REFERENCE_IMAGE_PUBLICATION_PENDING";return;}}
-            edge.reason="";
-            edge.factAck=edge.factAck==null?runtime.journal.append(edge.fact):runtime.journal.retryRejected(edge.fact,edge.factAck);
-            if(confirmed(edge.factAck)) { edge.released=true;epoch.incrementAndGet(); }
-            return;
-        }
         if(SourceMaps.disposedField(edge.source,edge.field)) {
-            if(edge.kind.equals("DIRECT_FIELD")||edge.kind.equals("UUID_SELECTOR")||absent(edge,edge.container,edge.object)){recordFact(edge,true);return;}
+            if(edge.kind.equals("DIRECT_FIELD")||edge.kind.equals("UUID_SELECTOR")||absent(edge,edge.container,edge.object)){releaseObservedReference(edge);return;}
             // A cleared holder does not erase the old alias. Continue the captured
             // exact-container obligation instead of waiting forever on detachment.
         }
         if(!ownerCurrent(edge)) {edge.reason="REFERENCE_OWNER_CHANGED";return;}
-        // ACK records the durable obligation; exact idempotent memory sources may be unlinked before it arrives.
-        // A FACT is held in memory until the INTENT ACK is confirmed, preserving the on-disk record order.
-        if(edge.attempted) {
-            boolean absent=absent(edge,edge.container,edge.object);
-            if(absent)recordFact(edge,true);else if(edge.applied)edge.reason="EXACT_EDGE_REINSERTED_QUERY_PENDING";
-            else edge.reason="EFFECT_QUERY_REQUIRED";
-            return;
-        }
+        if(absent(edge,edge.container,edge.object)){releaseObservedReference(edge);return;}
+        // Identity-conditional memory cleanup is idempotent under the current group policy.
         if(edge.kind.equals("ENTITY_MAP"))removeMap(edge);else remove(edge);
         boolean absent=absent(edge,edge.container,edge.object);
-        if(edge.applied&&!edge.expectedImage.isEmpty()&&!edge.expectedImage.equals(listImage(edge.container,null))) {
-            edge.reason="REFERENCE_PROJECTED_IMAGE_CHANGED_QUERY_REQUIRED";return;
-        }
-        if(absent)recordFact(edge,true);else if(edge.applied)edge.reason="EXACT_EDGE_REINSERTED_QUERY_PENDING";
+        if(absent)releaseObservedReference(edge);else if(edge.reason.isEmpty())edge.reason="REFERENCE_IDENTITY_PRESENT";
     }
-    private void recordFact(Edge edge,boolean absent) {
-        edge.observed=absent;edge.reason="";
-        edge.fact=edge.prefix+"\tEDGE_FACT\t"+edge.id+"\t"+edge.policy.operation+"\t"+
-                (absent?(edge.applied?"EXACT_OWNED_EDGE_REMOVED_AND_ABSENT":"EXACT_EDGE_ABSENCE_OBSERVED"):"EDGE_REMOVED_CURRENT_DUPLICATE_OR_REINSERTION_PENDING");
-        if(confirmed(edge.ack)&&(edge.imageRecord==null||confirmed(edge.imageAck)))edge.factAck=runtime.journal.append(edge.fact);
-        else edge.reason="DURABLE_INTENT_ACK_"+ackState(edge.ack);
-        if(absent){edge.object=null;edge.target=null;edge.container=null;}
+    private void releaseObservedReference(Edge edge) {
+        edge.observed=true;edge.released=true;edge.reason="";
+        edge.object=null;edge.target=null;edge.container=null;
         epoch.incrementAndGet();
     }
     /** Remove the captured identity under its actual supported map write scope. */
     @SuppressWarnings("unchecked") private void removeMap(Edge edge)throws ReflectiveOperationException {
-        if(edge.applied)return;
+        if(edge.released)return;
         boolean[] locks={false,false,false};
         boolean[] removed={false};
         try {
@@ -745,9 +649,10 @@ final class RecoveryRecords implements AutoCloseable {
             if(locks[1])edge.policy.subject.commitGate.unlock();
             if(locks[0])RecoverySources.releaseRecordGraph();
         }
+        if(removed[0]&&!SourceMaps.primitiveMap(edge.container))SourceMaps.changed(edge.container);
     }
     @SuppressWarnings("unchecked") private void remove(Edge edge)throws ReflectiveOperationException {
-        if(edge.applied)return; // Query an uncertain or already observed effect; do not replay it.
+        if(edge.released)return;
         boolean graph=edge.target instanceof CompoundTag;
         if(graph&&!RecoverySources.tryRecordGraph())return;
         try {
@@ -779,7 +684,6 @@ final class RecoveryRecords implements AutoCloseable {
                             edge.applied=elements.compareAndSet(edge.container,(Integer)edge.key,edge.object,null);
                         }
                         case "HASH_SET" -> {
-                            if(!prepareListImage(edge,(Collection<?>)edge.container))return;
                             Object backend=SourceMaps.setMap(edge.container);
                             if(edge.removalCursor==null||edge.removalCursor.map!=backend)edge.removalCursor=new SourceMaps.Cursor(backend);
                             try{SourceMaps.visit(backend,edge.removalCursor,32,(key,value,node,position)->{
@@ -787,9 +691,13 @@ final class RecoveryRecords implements AutoCloseable {
                                 edge.attempted=true;edge.applied=SourceMaps.removeIdentityVisited(position,edge.object);return false;
                             });}catch(java.io.IOException unavailable){edge.reason="REFERENCE_SET_SCAN_UNAVAILABLE";}
                         }
-                        case "ARRAY_LIST" -> {
+                        case "ATOMIC" -> {
+                            var atomic=(AtomicReference<Object>)edge.container;
+                            edge.attempted=true;edge.applied=atomic.compareAndSet(edge.object,null);
+                            if(edge.applied)SourceMaps.changed(edge.container);
+                        }
+                        case "ARRAY_LIST", "COPY_ON_WRITE_LIST" -> {
                             var list=(List<Object>)edge.container;
-                            if(!prepareListImage(edge,list))return;
                             if(ownedTarget(edge.object,runtime,true)!=edge.target) { edge.reason="REFERENCE_WRAPPER_TARGET_CHANGED";return; }
                             edge.attempted=true;edge.applied=SourceMaps.removeListIdentity(list,edge.object);
                         }
@@ -800,14 +708,15 @@ final class RecoveryRecords implements AutoCloseable {
         } finally { if(graph)RecoverySources.releaseRecordGraph(); }
     }
     private boolean absent(Edge edge,Object container,Object object) {
-        if(removedContainerEdge(edge.kind,container)){edge.reason="JDK_CONTAINER_HOOKS_REMOVED";return false;}
+        if(removedContainerEdge(edge.kind,container)){edge.reason="JDK_CONTAINER_BACKEND_UNSUPPORTED";return false;}
         return switch(edge.kind) {
             case "DIRECT_FIELD", "UUID_SELECTOR" -> {
                 try {yield edge.field.get(edge.receiver())!=object;}
                 catch(IllegalAccessException unavailable) {edge.reason="DIRECT_FIELD_READ_UNAVAILABLE";yield false;}
             }
             case "OBJECT_ARRAY" -> ((Object[])container)[(Integer)edge.key]!=object;
-            case "ARRAY_LIST" -> {
+            case "ATOMIC" -> ((AtomicReference<?>)container).get()!=object;
+            case "ARRAY_LIST", "COPY_ON_WRITE_LIST" -> {
                 boolean found=false;for(Object value:(List<?>)container)if(value==object){found=true;break;}
                 yield !found;
             }
@@ -826,77 +735,6 @@ final class RecoveryRecords implements AutoCloseable {
             default -> false;
         };
     }
-    private void queryHistorical(long tick) {
-        for(int i=0;i<Math.min(128,historical.size());i++) {
-            Historical item=historical.get((int)Math.floorMod(historyCursor++,historical.size()));
-            boolean prior=item.current;item.current=false;item.sampled=tick;
-            try {
-                var source=runtime.recoverySources.resolve(item.source,item.code);
-                if(source==null) { item.reason="REGISTERED_REFERENCE_SOURCE_NOT_LOADED";continue; }
-                if(!runtime.journal.processEnded(item.session)) { item.reason="PRIOR_PROCESS_REFERENCES_UNPROVEN";continue; }
-                if(!runtime.recoverySources.queryCurrent(source,actual->historicalAbsent(item,actual)))continue;
-                item.record=item.prefix+"\tEDGE_RESTART\t"+item.id+"\t"+item.operation+"\tCURRENT_LOCATION_ABSENT_PRIOR_PROCESS_ENDED";
-                item.ack=item.ack==null?runtime.journal.append(item.record):runtime.journal.retryRejected(item.record,item.ack);
-                item.current=confirmed(item.ack);item.reason=item.current?"":"REFERENCE_RESTART_ACK_PENDING";
-            } catch(ReflectiveOperationException|RuntimeException unavailable) { item.reason="REFERENCE_RESTART_QUERY_UNAVAILABLE:"+unavailable.getClass().getSimpleName(); }
-            finally { if(prior!=item.current)epoch.incrementAndGet(); }
-        }
-    }
-    private boolean historicalAbsent(Historical item,RecoverySources.Source source)throws ReflectiveOperationException{
-                if(item.kind.equals("ATOMIC")||item.kind.equals("COPY_ON_WRITE_LIST")){item.reason="JDK_CONTAINER_HOOKS_REMOVED";return false;}
-                int split=item.field.lastIndexOf('#');if(split<0)throw new IllegalArgumentException("FIELD");
-                Object actualHolder=source.holder();boolean absent=false;
-                if(actualHolder==null) {
-                    if(!source.disposed()) { item.reason="HOLDER_RELEASE_UNOBSERVED";return false; }
-                    absent=true;
-                } else {
-                    Class<?> holder=actualHolder instanceof Class<?> type?type:actualHolder.getClass(),declaring=null;
-                    for(Class<?> type=holder;type!=null;type=type.getSuperclass())if(type.getName().equals(item.field.substring(0,split))) { declaring=type;break; }
-                    if(declaring==null) { item.reason="REFERENCE_DEFINITION_CHANGED";return false; }
-                    Field field=declaring.getDeclaredField(item.field.substring(split+1));
-                    boolean direct=item.kind.equals("DIRECT_FIELD")||item.kind.equals("UUID_SELECTOR");
-                    if(!field.trySetAccessible()) { item.reason="REFERENCE_FIELD_UNSUPPORTED";return false; }
-                    Object container=field.get(actualHolder instanceof Class<?>?null:actualHolder);
-                    if(removedContainerEdge(item.kind,container)){item.reason="JDK_CONTAINER_HOOKS_REMOVED";return false;}
-                    SourceMaps.observeField(source,field,container);
-                    if(!direct&&!SourceMaps.replacementCovered(source,field,container)){item.reason="REFERENCE_FIELD_PUBLICATION_UNAVAILABLE";return false;}
-                    if(container==null&&(source.cleared(field)||SourceMaps.replacementCovered(source,field,container)))absent=true;
-                    else if(direct)absent=container==null;
-                    else if(item.kind.equals("OBJECT_ARRAY")&&container instanceof Object[] values) {
-                        if(!item.key.startsWith("java.lang.Integer:"))throw new IllegalArgumentException("ARRAY_INDEX");
-                        int index=Integer.parseInt(item.key.substring("java.lang.Integer:".length()));
-                        if(index<0)throw new IllegalArgumentException("ARRAY_INDEX");
-                        if(index>=values.length)absent=true;
-                        else {
-                            Object ticket=ArrayAccess.READ.invoke(null,values);
-                            if(Boolean.FALSE.equals(ticket)){item.reason="REFERENCE_ARRAY_QUERY_PENDING";return false;}
-                            try{absent=values[index]==null;}finally{ArrayAccess.END_READ.invoke(null,ticket);}
-                        }
-                    }
-                    else if(item.kind.equals("ARRAY_LIST")&&container!=null&&SourceMaps.scopedList(container)) {
-                        boolean[] result={false};
-                        if(!withArrayList(container,false,()->result[0]=item.expected.isEmpty()?((List<?>)container).isEmpty():listProjectionCurrent(item,listImage(container,null)))) {
-                            item.reason="REFERENCE_ARRAY_LIST_QUERY_PENDING";return false;
-                        }
-                        absent=result[0];
-                    }
-                    else if(item.kind.equals("HASH_SET")&&SourceMaps.supportedSet(container)){
-                        boolean[] result={false};Object current=container;
-                        if(!SourceMaps.with(SourceMaps.setMap(container),()->result[0]=item.expected.isEmpty()?((Set<?>)current).isEmpty():listProjectionCurrent(item,listImage(current,null)))){
-                            item.reason="REFERENCE_SET_QUERY_PENDING";return false;
-                        }
-                        absent=result[0];
-                    }
-                    else if(item.kind.equals("ENTITY_MAP")&&container instanceof Map<?,?>) {
-                        Object key=SourceMaps.decodeKey(item.key);
-                        Object[] observed=SourceMaps.peek(container,key);
-                        if(observed==null) { item.reason="SOURCE_MAP_QUERY_PENDING";return false; }
-                        absent=!Boolean.TRUE.equals(observed[0]);
-                    }
-                }
-                if(!absent) { item.reason="ORIGINAL_REFERENCE_LOCATION_PRESENT_FRESH_PROVENANCE_REQUIRED";return false; }
-                return true;
-    }
     List<String> remaining(UUID operation,UUID subject) {
         List<String> out=new ArrayList<>();
         if(!gap.isEmpty())out.add(gap);
@@ -907,22 +745,17 @@ final class RecoveryRecords implements AutoCloseable {
             else if(scalarType(read.field.getType()))
                 out.add("SCALAR_PRODUCER_CONSUMPTION_REQUIRES_DISPOSITION:"+read.field.getDeclaringClass().getName()+"#"+read.field.getName());
         }
-        long now=Integer.toUnsignedLong(runtime.server.getTickCount());
-        for(Historical item:historical)if(item.operation.equals(operation)&&(!item.current||item.sampled<0||now-item.sampled>10))
-            out.add("REFERENCE_RESTART:"+item.id+":"+item.reason);
         for(var source:runtime.recoverySources.registered())if(!Collections.disjoint(source.subjects,runtime.groupTargets(subject))) {
             try {if(!scanCurrent(source))out.add("REFERENCE_HOLDER_SCAN_PENDING");}
             catch(ReflectiveOperationException|RuntimeException unavailable){out.add("REFERENCE_HOLDER_SCAN_UNAVAILABLE");}
             out.addAll(gaps.getOrDefault(source,Set.of()));
         }
         for(Edge edge:edges.values())if(edge.policy.operation.equals(operation)) {
-            if(!confirmed(edge.ack))out.add("REFERENCE_EDGE_DURABLE_INTENT_ACK:"+edge.id+":"+ackState(edge.ack));
-            if(!edge.released||!edge.observed||!confirmed(edge.releaseAck)||!confirmed(edge.factAck))out.add("REFERENCE_EDGE:"+edge.id+":"+edge.reason);
+            if(edge.running||!edge.released||!edge.observed)out.add("REFERENCE_EDGE:"+edge.id+":"+edge.reason);
             else try {
                 if(edge.source.disposed()&&edge.source.holder()==null)continue;
                 Object container=edge.containerIdentity.get(),object=edge.objectIdentity.get();
-                // The acknowledged FACT already established absence in this original
-                // container. New field contents have their own scan and obligations.
+                // Recheck the original identity after its actual absence was observed.
                 if(container==null)continue;
                 if(!runtime.recoverySources.current(edge.source))out.add("REFERENCE_OWNER_CHANGED:"+edge.id);
                 else if(object!=null&&!queryAbsent(edge,container,object))out.add("REFERENCE_REINSERTED_OR_QUERY_PENDING:"+edge.id);
@@ -934,14 +767,13 @@ final class RecoveryRecords implements AutoCloseable {
         List<String> rows=new ArrayList<>();
         for(Edge edge:edges.values())if(edge.policy.operation.equals(operation))
             rows.add("MEMORY_EDGE:"+edge.id+":"+edge.kind+":"+(edge.released?"RELEASED":edge.applied?"APPLIED":edge.attempted?"EFFECT_QUERY_REQUIRED":"PENDING")+":"+edge.reason);
-        for(Historical item:historical)if(item.operation.equals(operation))rows.add("MEMORY_RESTART:"+item.id+":"+item.current+":"+item.reason);
         return List.copyOf(rows);
     }
     private boolean queryAbsent(Edge edge,Object container,Object object)throws ReflectiveOperationException {
         if(edge.kind.equals("HASH_SET")){
             boolean[] absent={false};return SourceMaps.with(SourceMaps.setMap(container),()->absent[0]=absent(edge,container,object))&&absent[0];
         }
-        if(edge.kind.equals("ARRAY_LIST")) {
+        if(edge.kind.equals("ARRAY_LIST")||edge.kind.equals("COPY_ON_WRITE_LIST")) {
             boolean[] absent={false};
             return withArrayList(container,false,()->absent[0]=absent(edge,container,object))&&absent[0];
         }
@@ -951,70 +783,6 @@ final class RecoveryRecords implements AutoCloseable {
             try{return absent(edge,container,object);}finally{ArrayAccess.END_READ.invoke(null,ticket);}
         }
         return absent(edge,container,object);
-    }
-    private static boolean confirmed(CompletableFuture<Void> ack) { return ack!=null&&ack.isDone()&&!ack.isCompletedExceptionally()&&!ack.isCancelled(); }
-    private static String ackState(CompletableFuture<Void> ack) {
-        if(ack==null||!ack.isDone())return "PENDING";
-        return ack.isCompletedExceptionally()||ack.isCancelled()?"UNCONFIRMED":"CONFIRMED";
-    }
-    private static String text(String value) { return JournalLineage.encodeText(value); }
-    private static String untext(String value) { return JournalLineage.decodeText(value); }
-    /** Later durable removals from this same registered list may extend an earlier preserved image. */
-    private boolean listProjectionCurrent(Historical item,String actual) {
-        if(actual.isEmpty()||item.expected.isEmpty())return false;
-        if(item.expected.equals(actual))return true;
-        ArrayDeque<String> pending=new ArrayDeque<>();Set<String> seen=new HashSet<>();
-        pending.add(item.expected);
-        while(!pending.isEmpty()) {
-            String step=pending.removeFirst();if(!seen.add(step))continue;
-            for(Historical next:historical) {
-                if(!next.imageApplied||!next.kind.equals(item.kind)
-                        ||!next.source.equals(item.source)||!next.code.equals(item.code)||!next.field.equals(item.field)
-                        ||!next.before.equals(step)||next.expected.isEmpty())continue;
-                if(next.expected.equals(actual))return true;
-                pending.addLast(next.expected);
-            }
-        }
-        return false;
-    }
-    /** Full ordered NBT image; omit every occurrence of the captured identity in its intended projection. */
-    private static String listImage(Object container,Object removed) {
-        boolean set=SourceMaps.supportedSet(container);
-        if(container==null||!set&&container.getClass()!=CopyOnWriteArrayList.class&&!SourceMaps.scopedList(container))return "";
-        Object[] values=((Collection<?>)container).toArray();
-        StringBuilder canonical=new StringBuilder(set?"NBT-SET/1\n":"NBT-LIST/1\n");boolean skipped=false;
-        List<String> hashes=set?new ArrayList<>():null;
-        for(Object value:values) {
-            if(removed!=null&&value==removed) { skipped=true;continue; }
-            if(!(value instanceof CompoundTag tag)||value.getClass()!=CompoundTag.class)return "";
-            try {String hash=RecoveryImage.semanticHash(tag);if(set)hashes.add(hash);else canonical.append(hash).append('\n');}
-            catch(java.io.IOException unsupported) { return ""; }
-        }
-        if(removed!=null&&!skipped)return "";
-        if(set){Collections.sort(hashes);for(String hash:hashes)canonical.append(hash).append('\n');}
-        return RecoveryImage.hash(canonical.toString().getBytes(StandardCharsets.UTF_8));
-    }
-    /** Capture the current preserved projection under the carrier's real write scope. */
-    private boolean prepareListImage(Edge edge,Collection<?> list) {
-        if(edge.beforeImage.isEmpty())return true;
-        boolean present=false;for(Object value:list)if(value==edge.object){present=true;break;}
-        if(!present)return true;
-        String actual=listImage(list,null);
-        if(edge.beforeImage.equals(actual))return true;
-        String projected=listImage(list,edge.object);
-        // An opaque neighbor prevents image-based restart closure; it does not
-        // prevent unlinking this exact observed identity from memory.
-        if(actual.isEmpty()||projected.isEmpty()){edge.beforeImage="";edge.expectedImage="";return true;}
-        edge.beforeImage=actual;edge.expectedImage=projected;
-        edge.imageRecord=edge.prefix+"\tEDGE_IMAGE\t"+edge.id+"\t"+edge.policy.operation+"\t"+actual+"\t"+projected;
-        edge.imageAck=null;epoch.incrementAndGet();return true;
-    }
-    private static final class ArrayListAccess {
-        static final Method READ=method("withListRead",Object.class,Runnable.class),WRITE=method("withList",Object.class,Runnable.class),REVISION=method("listRevision",Object.class);
-        private static Method method(String name,Class<?>... parameters){
-            try{return Class.forName("dev.ronova.pro.bootstrap.SourceMapBridge",false,null).getMethod(name,parameters);}
-            catch(ReflectiveOperationException unavailable){throw new ExceptionInInitializerError(unavailable);}
-        }
     }
     private static final class ArrayAccess {
         static final java.lang.reflect.Method REVISION=arrayRevisionMethod();
@@ -1028,34 +796,18 @@ final class RecoveryRecords implements AutoCloseable {
         }
     }
     static boolean withArrayList(Object list,boolean write,Runnable action)throws ReflectiveOperationException {
-        if(!SourceMaps.scopedList(list))return false;
-        if(SourceMaps.fastList(list))return SourceMaps.with(list,action::run);
-        return Boolean.TRUE.equals((write?ArrayListAccess.WRITE:ArrayListAccess.READ).invoke(null,list,action));
+        if(!SourceMaps.supportedList(list))return false;
+        return SourceMaps.with(list,action::run);
     }
     static long arrayListRevision(Object list) {
-        try {long revision=SourceMaps.fastList(list)?SourceMaps.revision(list):(Long)ArrayListAccess.REVISION.invoke(null,list);if(revision<0)throw new IllegalStateException("REFERENCE_ARRAY_LIST_UNOBSERVED");return revision;}
-        catch(ReflectiveOperationException unavailable){throw new IllegalStateException("REFERENCE_ARRAY_LIST_REVISION_UNAVAILABLE",unavailable);}
+        long revision=SourceMaps.revision(list);if(revision<0)throw new IllegalStateException("REFERENCE_ARRAY_LIST_UNOBSERVED");return revision;
     }
     @Override public void close()throws java.io.IOException {
         closing=true;worker.shutdown();if(!worker.isTerminated())throw new java.io.IOException("REFERENCE_WORKER_EXIT_PENDING");
         for(Edge edge:edges.values())if(edge.running)throw new java.io.IOException("REFERENCE_WORKER_FRAME_PENDING");
-        boolean pending=false;
         for(Edge edge:edges.values()) {
-            edge.ack=runtime.journal.retryRejected(edge.intent,edge.ack);
-            if(!confirmed(edge.ack)) { pending=true;continue; }
-            if(edge.imageRecord!=null){edge.imageAck=edge.imageAck==null?runtime.journal.append(edge.imageRecord):runtime.journal.retryRejected(edge.imageRecord,edge.imageAck);if(!confirmed(edge.imageAck)){pending=true;continue;}}
-            if(edge.fact==null) {
-                edge.fact=edge.prefix+"\tEDGE_FACT\t"+edge.id+"\t"+edge.policy.operation+"\t"+
-                        (edge.applied?"REMOVAL_EXECUTED_CURRENT_QUERY_RETAINED":"NOT_EXECUTED_AT_STOP");
-                edge.factAck=runtime.journal.append(edge.fact);
-            } else edge.factAck=edge.factAck==null?runtime.journal.append(edge.fact):runtime.journal.retryRejected(edge.fact,edge.factAck);
-            if(!confirmed(edge.factAck)) { pending=true;continue; }
-            edge.object=null;edge.target=null;edge.container=null;edge.released=true;
-            if(edge.release==null) { edge.release=edge.prefix+"\tEDGE_RELEASED\t"+edge.id+"\t"+edge.policy.operation+"\tOWNED_OBSERVER_FIELDS_CLEARED_AT_STOP";edge.releaseAck=runtime.journal.append(edge.release); }
-            else edge.releaseAck=runtime.journal.retryRejected(edge.release,edge.releaseAck);
-            if(!confirmed(edge.releaseAck))pending=true;
+            edge.object=null;edge.target=null;edge.container=null;
         }
-        if(pending)throw new java.io.IOException("REFERENCE_RETIREMENT_ACK_PENDING");
         edges.clear();policies.clear();gaps.clear();scanned.clear();scans.clear();fieldReads.clear();writerFields.clear();creationReads.clear();selectors.clear();
     }
 }

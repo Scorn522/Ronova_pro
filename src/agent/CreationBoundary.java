@@ -113,7 +113,7 @@ final class CreationBoundary {
                     @Override public SourceValue copyOperation(AbstractInsnNode instruction,SourceValue value) { return value; }
                 };
                 Frame<SourceValue>[] frames=new Analyzer<>(interpreter).analyze(node.name,method);
-                identities.put(method,identitySites(method,instructions,frames,loader,node,hierarchy));
+
                 for(int i=0;i<instructions.length;i++) {
                     if(!(instructions[i] instanceof MethodInsnNode call)||call.getOpcode()!=Opcodes.INVOKESPECIAL||!call.name.equals("<init>")
                             ||frames[i]==null)continue;
@@ -200,53 +200,7 @@ final class CreationBoundary {
     private static void producer(MethodNode method,List<Site> sites,boolean factory,List<IdentitySite> identities,java.util.function.Predicate<String> observedType) {
         if(method.name.startsWith("<")||(method.access&(Opcodes.ACC_NATIVE|Opcodes.ACC_ABSTRACT))!=0)return;
         boolean allocates=factory||sites.stream().anyMatch(site->site.method.equals(method.name+method.desc));
-        List<AbstractInsnNode> reads=new ArrayList<>();
-        for(AbstractInsnNode i:method.instructions.toArray()) {
-            if(i instanceof FieldInsnNode f&&(f.getOpcode()==Opcodes.GETFIELD||f.getOpcode()==Opcodes.GETSTATIC)&&observedType.test(f.desc)
-                    &&(allocates||f.desc.startsWith("L")&&!f.desc.equals("Ljava/util/UUID;")))reads.add(i);
-            else if(i instanceof MethodInsnNode call&&(call.owner.equals("java/util/Map")||call.owner.equals("java/util/HashMap")||call.owner.equals("java/util/concurrent/ConcurrentHashMap"))
-                    &&call.name.equals("get")&&call.desc.equals("(Ljava/lang/Object;)Ljava/lang/Object;"))reads.add(i);
-        }
-        if(!factory&&reads.isEmpty()&&sites.stream().noneMatch(site->site.method.equals(method.name+method.desc)))return;
-        int receiver=method.maxLocals++,key=method.maxLocals++;
-        int result=method.maxLocals;method.maxLocals+=2;
-        Map<FieldInsnNode,Integer> fieldReceivers=new IdentityHashMap<>();
-        for(AbstractInsnNode read:reads) {
-            int readReceiver=receiver;
-            if(read instanceof FieldInsnNode field&&identities.stream().anyMatch(site->site.field==field)) {
-                readReceiver=method.maxLocals++;fieldReceivers.put(field,readReceiver);
-            }
-            InsnList before=new InsnList();
-            if(read instanceof MethodInsnNode)before.add(new VarInsnNode(Opcodes.ASTORE,key));
-            if(read instanceof FieldInsnNode field&&field.getOpcode()==Opcodes.GETSTATIC)before.add(new LdcInsnNode(Type.getObjectType(field.owner)));
-            else before.add(new InsnNode(Opcodes.DUP));
-            before.add(new VarInsnNode(Opcodes.ASTORE,readReceiver));
-            if(read instanceof MethodInsnNode)before.add(new VarInsnNode(Opcodes.ALOAD,key));
-            method.instructions.insertBefore(read,before);
-            Type readType=read instanceof FieldInsnNode field?Type.getType(field.desc):Type.getType(Object.class);
-            InsnList after=new InsnList();after.add(new VarInsnNode(readType.getOpcode(Opcodes.ISTORE),result));
-            after.add(new VarInsnNode(Opcodes.ALOAD,readReceiver));
-            if(read instanceof FieldInsnNode field) {
-                after.add(new LdcInsnNode(Type.getObjectType(field.owner)));after.add(new LdcInsnNode(field.name));after.add(new LdcInsnNode(field.desc));
-            }
-            after.add(new VarInsnNode(readType.getOpcode(Opcodes.ILOAD),result));ControlClassWriter.box(after,readType);
-            LabelNode site=new LabelNode();after.add(site);
-            after.add(new MethodInsnNode(Opcodes.INVOKESTATIC,"dev/ronova/pro/bootstrap/ControlBridge",read instanceof FieldInsnNode?"producerFieldInput":"producerInput",
-                    read instanceof FieldInsnNode?"(Ljava/lang/Object;Ljava/lang/Class;Ljava/lang/String;Ljava/lang/String;Ljava/lang/Object;)V":"(Ljava/lang/Object;Ljava/lang/Object;)V",false));
-            after.add(new VarInsnNode(readType.getOpcode(Opcodes.ILOAD),result));
-            method.instructions.insert(read,after);sites.add(new Site(method.name+method.desc,site));
-        }
-        for(IdentitySite identity:identities)if(fieldReceivers.containsKey(identity.field)) {
-            int object=method.maxLocals++,uuid=method.maxLocals++;
-            InsnList before=new InsnList();before.add(new VarInsnNode(Opcodes.ASTORE,uuid));before.add(new VarInsnNode(Opcodes.ASTORE,object));
-            before.add(new VarInsnNode(Opcodes.ALOAD,object));before.add(new VarInsnNode(Opcodes.ALOAD,uuid));method.instructions.insertBefore(identity.call,before);
-            InsnList after=new InsnList();after.add(new VarInsnNode(Opcodes.ALOAD,object));after.add(new VarInsnNode(Opcodes.ALOAD,fieldReceivers.get(identity.field)));
-            after.add(new LdcInsnNode(Type.getObjectType(identity.field.owner)));after.add(new LdcInsnNode(identity.field.name));
-            after.add(new VarInsnNode(Opcodes.ALOAD,uuid));after.add(new InsnNode(identity.nullable?Opcodes.ICONST_1:Opcodes.ICONST_0));
-            LabelNode site=new LabelNode();after.add(site);after.add(new MethodInsnNode(Opcodes.INVOKESTATIC,"dev/ronova/pro/bootstrap/ControlBridge","producerIdentityAssigned",
-                    "(Ljava/lang/Object;Ljava/lang/Object;Ljava/lang/Class;Ljava/lang/String;Ljava/lang/Object;Z)V",false));
-            method.instructions.insert(identity.call,after);sites.add(new Site(method.name+method.desc,site));
-        }
+        if(!allocates)return;
         int token=method.maxLocals++,error=method.maxLocals++;
         LabelNode enterSite=new LabelNode(),start=new LabelNode(),end=new LabelNode(),handler=new LabelNode();
         InsnList enter=new InsnList();enter.add(enterSite);enter.add(new MethodInsnNode(Opcodes.INVOKESTATIC,"dev/ronova/pro/bootstrap/ControlBridge","producerEnter","()Ljava/lang/Object;",false));

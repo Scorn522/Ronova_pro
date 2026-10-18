@@ -1,8 +1,11 @@
 /* System.arraycopy has its own VM entry and array contract. It is not Unsafe. */
 typedef void (JNICALL *NativeSystemArrayCopy)(JNIEnv*,jclass,jobject,jint,jobject,jint,jint);
 static jclass native_arraycopy_class;
-static jmethodID native_arraycopy_method,native_arraycopy_component,native_arraycopy_internal_query,native_arraycopy_read_query,native_arraycopy_begin_query;
+static jmethodID native_arraycopy_method,native_arraycopy_component,native_arraycopy_internal_query,native_arraycopy_required_query,native_arraycopy_read_query,native_arraycopy_begin_query;
 static NativeSystemArrayCopy native_arraycopy_vm;
+static void *native_arraycopy_import_target;
+static uintptr_t native_arraycopy_import_slot;
+static unsigned char native_arraycopy_import_code[6];
 static const char native_arraycopy_signature[]="(Ljava/lang/Object;ILjava/lang/Object;II)V";
 typedef struct NativeArrayCopyContext {
     jobject source,target,read;jint from,to,length,prefix;unsigned phase;struct NativeArrayCopyContext *previous;
@@ -18,7 +21,7 @@ static int native_arraycopy_rva_read(HMODULE image,DWORD imageSize,ULONGLONG rva
     return rva<=imageSize&&length<=imageSize-rva&&rva<=UINTPTR_MAX-base
             &&native_arraycopy_image_read(image,base+(uintptr_t)rva,value,length);
 }
-static int native_arraycopy_vm_import(void *target){
+static int native_arraycopy_vm_import_prepare(void *target){
     HMODULE image=native_java_image;uintptr_t base=(uintptr_t)image,address=(uintptr_t)target;
     unsigned char code[6];IMAGE_DOS_HEADER dos;IMAGE_NT_HEADERS64 nt;
     if(!image||!native_arraycopy_vm||!native_arraycopy_image_read(image,address,code,sizeof(code))
@@ -57,21 +60,49 @@ static int native_arraycopy_vm_import(void *target){
                 ||!native_arraycopy_rva_read(image,imageSize,lookup.u1.AddressOfData+sizeof(WORD),name,sizeof(name))
                 ||memcmp(name,"JVM_ArrayCopy",sizeof(name)))return 0;
         void *current=NULL;
-        return native_arraycopy_rva_read(image,imageSize,slotRva,&current,sizeof(current))&&current==(void*)native_arraycopy_vm;
+        if(!native_arraycopy_rva_read(image,imageSize,slotRva,&current,sizeof(current))||current!=(void*)native_arraycopy_vm)return 0;
+        native_arraycopy_import_slot=slot;memcpy(native_arraycopy_import_code,code,sizeof(code));
+        __atomic_store_n(&native_arraycopy_import_target,target,__ATOMIC_RELEASE);return 1;
     }
     return 0;
+}
+static int native_arraycopy_vm_import(void *target){
+    /* The PE directory establishes this exact thunk and slot once. Every call
+     * still checks its live instruction bytes and destination before selecting
+     * the VM export; a replaced binding or import cannot reuse that verdict. */
+    void *prepared=__atomic_load_n(&native_arraycopy_import_target,__ATOMIC_ACQUIRE);
+    if(!prepared||target!=prepared)return 0;
+    unsigned char code[sizeof(native_arraycopy_import_code)];void *current=NULL;
+    return native_arraycopy_image_read(native_java_image,(uintptr_t)target,code,sizeof(code))
+            &&!memcmp(code,native_arraycopy_import_code,sizeof(code))
+            &&native_arraycopy_image_read(native_java_image,native_arraycopy_import_slot,&current,sizeof(current))
+            &&current==(void*)native_arraycopy_vm;
 }
 static int native_arraycopy_vm_target(jmethodID method,void *target){
     return native_arraycopy_method&&method==native_arraycopy_method&&native_arraycopy_vm
             &&(target==(void*)native_arraycopy_vm||native_arraycopy_vm_import(target));
 }
 static void *native_arraycopy_internal_target(void){return (void*)native_arraycopy_vm;}
+static void native_arraycopy_prepare_binding(JNIEnv *env,jclass type,jmethodID method,void *target){
+    // registerNatives supplies a linker thunk directly. Inspect that exact
+    // callback target before native_records is held or its wrapper published.
+    if(native_arraycopy_class&&method==native_arraycopy_method&&target
+            &&target!=(void*)native_arraycopy_vm
+            &&!__atomic_load_n(&native_arraycopy_import_target,__ATOMIC_ACQUIRE)
+            &&native_original.IsSameObject(env,type,native_arraycopy_class))
+        native_arraycopy_vm_import_prepare(target);
+}
 static void native_arraycopy_classify(JNIEnv *env,jclass type,Binding *binding){
     if(native_arraycopy_class&&binding->method==native_arraycopy_method
             &&native_original.IsSameObject(env,type,native_arraycopy_class))binding->arraycopyOperation=1;
 }
 static int native_arraycopy_prepare(JNIEnv *env){
     NativeThread *state=native_thread();if(!state)return 0;state->control++;
+    // Resolve the VM target before publishing the class/method used by the
+    // already active NativeMethodBind callback, including initializer work.
+    HMODULE image=native_vm_getenv_image(native_vm);
+    if(image)native_arraycopy_vm=(NativeSystemArrayCopy)GetProcAddress(image,"JVM_ArrayCopy");
+    native_java_image=GetModuleHandleW(L"java.dll");
     jclass type=native_original.FindClass(env,"java/lang/System"),classType=NULL;jint modifiers=0;
     if(type&&native_bootstrap_class(env,type,"Ljava/lang/System;")){
         native_arraycopy_class=(jclass)native_original.NewGlobalRef(env,type);
@@ -82,11 +113,10 @@ static int native_arraycopy_prepare(JNIEnv *env){
     if(classType)native_arraycopy_component=native_original.GetMethodID(env,classType,"getComponentType","()Ljava/lang/Class;");
     if(classType)native_original.DeleteLocalRef(env,classType);
     if(!native_original.ExceptionCheck(env))native_arraycopy_internal_query=native_original.GetStaticMethodID(env,native_controls,"nativeArrayCopyInternal","()Z");
+    if(!native_original.ExceptionCheck(env))native_arraycopy_required_query=native_original.GetStaticMethodID(env,native_controls,"nativeArrayCopyRequired","(Ljava/lang/Object;Ljava/lang/Object;)Z");
     if(!native_original.ExceptionCheck(env))native_arraycopy_read_query=native_original.GetStaticMethodID(env,native_controls,"beginNativeArrayCopyRead","(Ljava/lang/Object;II)Ljava/lang/Object;");
     if(!native_original.ExceptionCheck(env))native_arraycopy_begin_query=native_original.GetStaticMethodID(env,native_controls,"beginNativeArrayCopy","(Ljava/lang/Object;IILjava/lang/Object;IILjava/lang/Object;[Ljava/lang/Module;)Ljava/lang/Object;");
-    HMODULE image=native_vm_getenv_image(native_vm);
-    if(image)native_arraycopy_vm=(NativeSystemArrayCopy)GetProcAddress(image,"JVM_ArrayCopy");
-    int ready=native_arraycopy_class&&native_arraycopy_method&&native_arraycopy_component&&native_arraycopy_internal_query&&native_arraycopy_read_query&&native_arraycopy_begin_query&&native_arraycopy_vm
+    int ready=native_arraycopy_class&&native_arraycopy_method&&native_arraycopy_component&&native_arraycopy_internal_query&&native_arraycopy_required_query&&native_arraycopy_read_query&&native_arraycopy_begin_query&&native_arraycopy_vm
             &&(*native_ti)->GetMethodModifiers(native_ti,native_arraycopy_method,&modifiers)==JVMTI_ERROR_NONE
             &&(modifiers&0x0100)&&(modifiers&0x0008)&&!native_original.ExceptionCheck(env);
     state->control--;return ready;
@@ -197,6 +227,15 @@ static void JNICALL native_arraycopy_dispatch(JNIEnv *env,jclass type,jobject so
     jsize sourceLength=native_original.GetArrayLength(env,source),targetLength=native_original.GetArrayLength(env,target);
     if(native_original.ExceptionCheck(env))goto finish;
     if(from<0||to<0||length<0||from>sourceLength-length||to>targetLength-length||length==0){actual(env,type,source,from,target,to,length);goto finish;}
+    if(vmImplementation){
+        state->control++;state->arraycopyQuery++;
+        jboolean required=native_original.CallStaticBooleanMethod(env,native_controls,native_arraycopy_required_query,source,target);
+        state->arraycopyQuery--;state->control--;
+        if(native_original.ExceptionCheck(env))goto finish;
+        /* Ordinary arrays have no backing policy or history to capture. The
+         * current invocation and both real objects still select this path. */
+        if(!required){actual(env,type,source,from,target,to,length);goto finish;}
+    }
     state->arraycopy=&copy;scoped=1;
     contributors=native_mutation_sources(env,state);
     if(!contributors||native_original.ExceptionCheck(env))goto finish;

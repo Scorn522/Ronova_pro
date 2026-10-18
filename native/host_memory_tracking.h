@@ -1,3 +1,5 @@
+/* Historical private-allocation/SDK reference. Not included by production
+ * control.c/bindings.c in V1.5; no API in this file is installed or exported. */
 /* Shared only by the observed Host allocator wrappers and memory.c. */
 #ifndef RONOVA_HOST_MEMORY_TRACKING_H
 #define RONOVA_HOST_MEMORY_TRACKING_H

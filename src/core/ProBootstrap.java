@@ -8,15 +8,8 @@ import java.util.*;
 import java.util.jar.*;
 
 /**
- * Zero-argument startup.
- *
- * The player drops the release JAR into mods and starts Forge normally. This class finds the agent and bootstrap
- * payloads that ship inside that same JAR, verifies their digest, extracts them into a Ronova-owned cache
- * directory, and has a short-lived helper attach the agent to this exact process. No launcher profile, system
- * setting or hand-written JVM argument is involved, and nothing outside the Ronova cache directory is touched.
- *
- * A missing or unverifiable payload is reported with its exact reason. The mod never silently continues as a
- * weaker "core only" install and never claims the early backend is present when it is not.
+ * Detects the prelaunch/premain installation and offers runtime continuation for an unintegrated launcher.
+ * Attaching after Forge started cannot provide pre-JVM or before-main coverage.
  */
 public final class ProBootstrap {
     private static final String CACHE_DIRECTORY="ronova-pro/bootstrap";
@@ -28,8 +21,8 @@ public final class ProBootstrap {
 
     public static synchronized String state() {
         String actual=agentState();
-        String current=(state.equals("ATTACHED")||state.equals("ALREADY_INSTALLED"))&&!actual.equals("INSTALLED_FULL")?"UNAVAILABLE":state;
-        return current+":AGENT="+actual+(detail.isEmpty()?"":":HANDOVER="+detail)
+        String current=(state.equals("ATTACHED")||state.equals("ALREADY_INSTALLED")||state.endsWith("_READY"))&&!actual.equals("INSTALLED_FULL")?"UNAVAILABLE":state;
+        return current+":STAGE="+startupStage()+":AGENT="+actual+(detail.isEmpty()?"":":HANDOVER="+detail)
                 +(ProRuntime.productionControlsInstalled()?"":":CORE_CONTROLS="+ProRuntime.dispatchState());
     }
     public static synchronized boolean available() {
@@ -40,7 +33,7 @@ public final class ProBootstrap {
     public static synchronized void install() {
         try {
             String actual=agentState();
-            if(actual.equals("INSTALLED_FULL")) { state="ALREADY_INSTALLED";detail="";return; }
+            if(actual.equals("INSTALLED_FULL")) { state=startupStage().startsWith("PREMAIN")?"PREMAIN_READY":"RUNTIME_CONTINUATION_READY";detail="";return; }
             // Installing, partial and failed agents retain their existing hooks. A second attach cannot repair
             // those hooks, and a timed-out helper may still have an installation running in the target JVM.
             if(!actual.equals("NOT_ATTEMPTED")&&!actual.equals("NOT_PRESENT")) { fail(actual);return; }
@@ -56,7 +49,7 @@ public final class ProBootstrap {
             String outcome=handOver(agent,bootstrap);
             actual=agentState();
             if(!actual.equals("INSTALLED_FULL")) { fail(outcome+":AGENT="+actual);return; }
-            state="ATTACHED";
+            state="RUNTIME_CONTINUATION_READY";
             detail=agent.getFileName().toString();
         } catch(ReflectiveOperationException|IOException|RuntimeException|LinkageError unavailable) {
             fail(unavailable.getClass().getSimpleName()+":"+String.valueOf(unavailable.getMessage()));
@@ -71,6 +64,38 @@ public final class ProBootstrap {
         catch(ReflectiveOperationException|RuntimeException|LinkageError unavailable) {
             return "UNAVAILABLE:"+unavailable.getClass().getSimpleName()+":"+String.valueOf(unavailable.getMessage());
         }
+    }
+    private static String startupStage(){
+        try{return String.valueOf(Class.forName("dev.ronova.pro.agent.RecoveryAgent",false,ClassLoader.getSystemClassLoader()).getMethod("startupStage").invoke(null));}
+        catch(ReflectiveOperationException|RuntimeException|LinkageError unavailable){return "PRELAUNCH_NOT_INTEGRATED:RUNTIME_CONTINUATION";}
+    }
+    /** Persists the user's complete local selection, including an intentionally empty set. */
+    public static synchronized void saveSelection(String[] stopped,String[] protectedIds,Map<String,String> returnModes)throws IOException{
+        Class<?> caller=StackWalker.getInstance(StackWalker.Option.RETAIN_CLASS_REFERENCE).getCallerClass();
+        if(caller!=ProRuntime.class)throw new SecurityException("ACTUAL_PRO_RUNTIME_REQUIRED");
+        Path directory=Path.of(System.getProperty("ronova.pro.gameDirectory",System.getProperty("user.dir","."))).toAbsolutePath().normalize();
+        Path file=directory.resolve("ronova-prelaunch.properties");Properties selection=new Properties();
+        if(Files.isRegularFile(file))try(var reader=Files.newBufferedReader(file,java.nio.charset.StandardCharsets.UTF_8)){selection.load(reader);}
+        selection.setProperty("stop",selectionIds(stopped));selection.setProperty("protect",selectionIds(protectedIds));
+        for(String key:new HashSet<>(selection.stringPropertyNames()))if(key.startsWith("returns."))selection.remove(key);
+        if(returnModes!=null)for(var entry:returnModes.entrySet()){
+            String id=selectionIds(new String[]{entry.getKey()}),mode=entry.getValue();
+            if(id.isEmpty()||!Set.of("default","null","empty","uuid-fixed","uuid-each","invalid-id").contains(mode))throw new IOException("INVALID_SAVED_RETURN_POLICY:"+id);
+            selection.setProperty("returns."+id,mode);
+        }
+        Files.createDirectories(directory);Path pending=Files.createTempFile(directory,"ronova-selection-",".tmp");
+        try{
+            try(var writer=Files.newBufferedWriter(pending,java.nio.charset.StandardCharsets.UTF_8)){selection.store(writer,"Local Ronova selection for the next game JVM");}
+            try{Files.move(pending,file,StandardCopyOption.ATOMIC_MOVE,StandardCopyOption.REPLACE_EXISTING);}
+            catch(AtomicMoveNotSupportedException unsupported){Files.move(pending,file,StandardCopyOption.REPLACE_EXISTING);}
+        }finally{Files.deleteIfExists(pending);}
+    }
+    private static String selectionIds(String[] values)throws IOException{
+        TreeSet<String> ids=new TreeSet<>();if(values!=null)for(String raw:values){
+            if(raw==null)throw new IOException("INVALID_SAVED_MOD_ID:null");String id=raw.trim().toLowerCase(Locale.ROOT);
+            if(!id.matches("[a-z0-9_.-]{2,64}")||Set.of("ronova_pro","minecraft","forge","java").contains(id))throw new IOException("INVALID_SAVED_MOD_ID:"+id);ids.add(id);
+        }
+        return String.join(",",ids);
     }
 
     /**

@@ -63,8 +63,7 @@ final class EquipmentActionBoundary {
         return false;
     }
     static byte[] transform(ClassLoader loader,String name,Class<?> actual,byte[] bytes) {
-        Carrier data=carrier(actual);
-        if(name==null||entries.length==0&&data==null||loader==null)return null;
+        if(name==null||entries.length==0||loader==null)return null;
         ClassNode node=new ClassNode();new ClassReader(bytes).accept(node,0);boolean changed=false;
         for(MethodNode method:node.methods) {
             if(method.name.startsWith("<")||(method.access&(Opcodes.ACC_STATIC|Opcodes.ACC_ABSTRACT|Opcodes.ACC_NATIVE))!=0)continue;
@@ -72,17 +71,15 @@ final class EquipmentActionBoundary {
             for(Entry entry:entries)if(entry.method.equals(method.name)&&entry.descriptor.equals(method.desc)
                     &&((method.access&Opcodes.ACC_PRIVATE)==0||entry.owner.getName().replace('.','/').equals(name)&&entry.owner.getClassLoader()==loader)
                     &&matches(entry,loader,name,actual,node)){selected=entry;break;}
-            if(selected==null&&data==null)continue;
-            weave(method,selected==null?"carrier-call":selected.operation);changed=true;
+            if(selected==null)continue;
+            weave(method,selected.operation);changed=true;
         }
-        if(!changed){if(data!=null)data.transformed=true;return null;}
+        if(!changed)return null;
         ControlClassWriter writer=new ControlClassWriter(loader,node);node.accept(writer);byte[] result=writer.toByteArray();
-        if(data!=null)data.transformed=true;return result;
+        return result;
     }
     private static void weave(MethodNode method,String operation) {
         AbstractInsnNode[] original=method.instructions.toArray();
-        boolean slotTrace=false;
-        for(AbstractInsnNode instruction:original)if(instruction instanceof MethodInsnNode call&&slotEntry(call)){slotTrace=true;break;}
         int arguments=method.maxLocals++,lease=method.maxLocals++,failure=method.maxLocals++;
         Type[] types=Type.getArgumentTypes(method.desc);Type result=Type.getReturnType(method.desc);
         InsnList entry=new InsnList();entry.add(new LdcInsnNode(types.length));entry.add(new TypeInsnNode(Opcodes.ANEWARRAY,"java/lang/Object"));
@@ -113,12 +110,6 @@ final class EquipmentActionBoundary {
             InsnList close=new InsnList();close.add(new VarInsnNode(Opcodes.ALOAD,lease));close.add(new MethodInsnNode(Opcodes.INVOKESTATIC,BRIDGE,"endEquipmentInvocation","(Ljava/lang/Object;)V",false));
             method.instructions.insertBefore(instruction,close);
         }
-        // Only the already selected body supplies sites. Never wrap observers
-        // inserted above, platform helpers, constructors or lambda factories.
-        // SlotBoundary already owns every natural call in this exact helper.
-        // A second delegate envelope would separate its witness from the invoke.
-        if(!slotTrace&&(operation.equals("carrier-call")||operation.startsWith("item-")))
-            for(AbstractInsnNode instruction:original)if(instruction instanceof MethodInsnNode call&&business(call))delegate(method,call);
         method.instructions.add(end);method.instructions.add(handler);method.instructions.add(new VarInsnNode(Opcodes.ASTORE,failure));
         method.instructions.add(new VarInsnNode(Opcodes.ALOAD,lease));method.instructions.add(new VarInsnNode(Opcodes.ALOAD,failure));
         method.instructions.add(new MethodInsnNode(Opcodes.INVOKESTATIC,BRIDGE,"failedEquipmentInvocation","(Ljava/lang/Object;Ljava/lang/Throwable;)V",false));

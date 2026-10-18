@@ -12,7 +12,7 @@ import net.minecraftforge.network.*;
 import net.minecraftforge.network.simple.SimpleChannel;
 
 public final class ProNetwork {
-    static final String WIRE_VERSION="r3-client-8";
+    static final String WIRE_VERSION="v1.5-whole-mod";
     static final SimpleChannel CHANNEL=NetworkRegistry.newSimpleChannel(new ResourceLocation("ronova_pro","presence"),
             ()->WIRE_VERSION,v->v.equals(WIRE_VERSION)||v.equals(NetworkRegistry.ABSENT),v->v.equals(WIRE_VERSION)||v.equals(NetworkRegistry.ABSENT));
     public record Probe(UUID session,UUID operation,UUID challenge,String dimension,int entityId,UUID entityUuid) {}
@@ -28,7 +28,8 @@ public final class ProNetwork {
     record HudPolicy(UUID session,long scope,String dimension,long revision,UUID hud,boolean protectedNow,boolean terminal) {}
     record Terminal(UUID session,long scope,String dimension,long revision,int entityId,UUID entityUuid,boolean terminal) {}
     record PolicyReset(UUID session,long scope,String dimension) {}
-    record ModGroup(UUID session,String ids,String returns) {}
+    record ModGroup(UUID session,String ids,String returns,boolean protect) {}
+    record ModGroupResult(UUID session,String ids,boolean protect,String state) {}
     record WorldArea(UUID rule,BlockPos low,BlockPos high,boolean clock,long gameTime) {
         boolean contains(BlockPos pos){return pos.getX()>=low.getX()&&pos.getX()<=high.getX()&&pos.getY()>=low.getY()&&pos.getY()<=high.getY()&&pos.getZ()>=low.getZ()&&pos.getZ()<=high.getZ();}
     }
@@ -72,8 +73,8 @@ public final class ProNetwork {
             .decoder(b->new HudPolicy(b.readUUID(),b.readLong(),b.readUtf(256),b.readLong(),b.readUUID(),b.readBoolean(),b.readBoolean()))
             .consumerMainThread((p,c)->DistExecutor.unsafeRunWhenOn(Dist.CLIENT,()->()->ClientPresence.hudPolicy(p,c.get().getNetworkManager()))).add();
         CHANNEL.messageBuilder(ModGroup.class,7,NetworkDirection.PLAY_TO_CLIENT)
-            .encoder((p,b)->{b.writeUUID(p.session);b.writeUtf(p.ids,2048);b.writeUtf(p.returns,32);})
-            .decoder(b->new ModGroup(b.readUUID(),b.readUtf(2048),b.readUtf(32)))
+            .encoder((p,b)->{b.writeUUID(p.session);b.writeUtf(p.ids,2048);b.writeUtf(p.returns,32);b.writeBoolean(p.protect);})
+            .decoder(b->new ModGroup(b.readUUID(),b.readUtf(2048),b.readUtf(32),b.readBoolean()))
             .consumerMainThread((p,c)->DistExecutor.unsafeRunWhenOn(Dist.CLIENT,()->()->ClientPresence.modGroup(p,c.get().getNetworkManager()))).add();
 
         CHANNEL.messageBuilder(WorldPolicy.class,8,NetworkDirection.PLAY_TO_CLIENT)
@@ -95,6 +96,10 @@ public final class ProNetwork {
             .encoder((p,b)->{b.writeUUID(p.session);b.writeUUID(p.operation);b.writeUUID(p.challenge);b.writeLong(p.scope);b.writeUtf(p.dimension,256);b.writeUUID(p.owner);b.writeUUID(p.entry);b.writeLong(p.sequence);b.writeBoolean(p.absent);})
             .decoder(b->new PresentationReply(b.readUUID(),b.readUUID(),b.readUUID(),b.readLong(),b.readUtf(256),b.readUUID(),b.readUUID(),b.readLong(),b.readBoolean()))
             .consumerMainThread((p,c)->{ServerPlayer player=c.get().getSender();if(player!=null){ProRuntime runtime=ProRuntime.get(player.server);if(runtime!=null)runtime.presentationReply(player,p);}}).add();
+        CHANNEL.messageBuilder(ModGroupResult.class,11,NetworkDirection.PLAY_TO_SERVER)
+            .encoder((p,b)->{b.writeUUID(p.session);b.writeUtf(p.ids,2048);b.writeBoolean(p.protect);b.writeUtf(p.state,4096);})
+            .decoder(b->new ModGroupResult(b.readUUID(),b.readUtf(2048),b.readBoolean(),b.readUtf(4096)))
+            .consumerMainThread((p,c)->{ServerPlayer player=c.get().getSender();if(player!=null){ProRuntime runtime=ProRuntime.get(player.server);if(runtime!=null)runtime.modGroupResult(player,p);}}).add();
     }
     static boolean presentationProbe(ServerPlayer player,UUID session,UUID operation,UUID challenge,long scope,String dimension,UUID owner,UUID entry){
         if(!present(player)||scope<=0)return false;
@@ -134,9 +139,12 @@ public final class ProNetwork {
         if(!present(player)||hud==null)return false;
         CHANNEL.send(PacketDistributor.PLAYER.with(()->player),new HudPolicy(session,scope,dimension,revision,hud,protect,terminal));return true;
     }
-    static void modGroup(ServerPlayer player,UUID session,String ids,String returns) {
+    static void modGroup(ServerPlayer player,UUID session,String ids,String returns,boolean protect) {
         if(present(player)&&session!=null&&!ids.isBlank())
-            CHANNEL.send(PacketDistributor.PLAYER.with(()->player),new ModGroup(session,ids,returns));
+            CHANNEL.send(PacketDistributor.PLAYER.with(()->player),new ModGroup(session,ids,returns,protect));
+    }
+    static void modGroupResult(ModGroup message,String state){
+        CHANNEL.sendToServer(new ModGroupResult(message.session(),message.ids(),message.protect(),state.length()>4096?state.substring(0,4096):state));
     }
     static boolean world(ServerPlayer player,UUID session,long scope,String dimension,long revision,WorldControl controls){
         if(!present(player))return false;

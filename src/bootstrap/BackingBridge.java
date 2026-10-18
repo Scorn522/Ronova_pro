@@ -43,7 +43,7 @@ public final class BackingBridge {
         // The native caller still owns its exact receiver gate and write history.
         return policy==null||!known(array)?2:1;
     }
-    private static boolean known(Object value) {
+    static boolean known(Object value) {
         if(ControlBridge.controlled(value))return true;
         if(value!=null&&value.getClass().isArray()&&!ControlBridge.arrayWriteAllowed(value))return true;
         Policy current=policy;if(current==null)return false;

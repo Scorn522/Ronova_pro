@@ -50,7 +50,7 @@ static uint64_t host_transaction_generation;
 static int host_transaction_lock(int restricted){
     return restricted?TryAcquireSRWLockExclusive(&host_transaction_records):(AcquireSRWLockExclusive(&host_transaction_records),1);
 }
-static void host_transaction_gap(OwnerLink *owners,int restricted){native_memory_crypto_unobserved(owners,restricted);}
+static void host_transaction_gap(OwnerLink *owners,int restricted){host_source_gap(owners,restricted);}
 static HostTransactionGroup *host_transaction_group(HostTransactionGroup *group){
     while(group&&group->parent)group=group->parent;return group;
 }

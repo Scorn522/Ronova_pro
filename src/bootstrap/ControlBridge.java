@@ -297,6 +297,8 @@ public final class ControlBridge {
         invokingModule();ORIGIN_WALKER.walk(STOPPED_CALL);controlCaller();
     }
     static volatile Module[] stoppedModules=new Module[0];
+    static volatile Module[] protectedModules=new Module[0];
+    private static final ThreadLocal<SourceQuery> METHOD_ROOT_QUERY=new ThreadLocal<>();
     static final class ThreadIo {
         final Thread caller=Thread.currentThread();final ThreadOrigin origin;final boolean clearing;boolean closed;
         ThreadIo(ThreadOrigin origin,boolean clearing){this.origin=origin;this.clearing=clearing;}
@@ -339,16 +341,63 @@ public final class ControlBridge {
         Module module=objectModule(owner);
         return !modStopped(module)&&(!stoppedInvocation()||IoBridge.retirementCloseOwner(owner)||ResourceBridge.bufferCleanupOwner(owner));
     }
-    public static synchronized void stopModules(Module[] modules) {
-        Class<?> caller=WALKER.walk(frames->frames.skip(1).findFirst().map(StackWalker.StackFrame::getDeclaringClass).orElse(null));
+    public static boolean modMethodAllowed(Class<?> declaring,Object receiver){
+        if(declaring==null)return false;
+        if(stoppedModules.length!=0&&(modStopped(DefinitionBridge.module(declaring))||modStopped(objectModule(receiver))||stoppedInvocation()))return false;
+        Module owner=DefinitionBridge.module(declaring),target=objectModule(receiver);
+        if(modProtected(owner)||modProtected(target)){
+            Module caller=ORIGIN_WALKER.walk(frames->{
+                var cursor=frames.iterator();boolean body=false;
+                while(cursor.hasNext()){
+                    Class<?> actual=cursor.next().getDeclaringClass();if(actual.getNestHost()==ControlBridge.class)continue;
+                    if(!body&&actual==declaring){body=true;continue;}
+                    Module source=DefinitionBridge.module(actual);if(producer(source))return source;
+                }return null;
+            });
+            if(caller!=null&&caller!=owner&&caller!=target)return false;
+        }
+        return protectedMutationAllowed(receiver,declaring);
+    }
+    private static void requireModGroupAgent() {
+        Class<?> caller=WALKER.walk(frames->frames.dropWhile(frame->frame.getDeclaringClass()==ControlBridge.class)
+                .findFirst().map(StackWalker.StackFrame::getDeclaringClass).orElse(null));
         try {
             if(caller!=Class.forName("dev.ronova.pro.agent.RecoveryAgent",false,ClassLoader.getSystemClassLoader()))
                 throw new SecurityException("MOD_GROUP_AGENT_REQUIRED");
         } catch(ClassNotFoundException missing) {throw new SecurityException("MOD_GROUP_AGENT_UNAVAILABLE",missing);}
-        Module[] existing=stoppedModules;
-        java.util.ArrayList<Module> next=new java.util.ArrayList<>(java.util.Arrays.asList(existing));
-        for(Module module:modules)if(module!=null&&!next.contains(module))next.add(module);
-        if(next.size()!=existing.length){NativeControl.heapPolicyChanged(null);stoppedModules=next.toArray(Module[]::new);}
+    }
+    public static void stopModules(Module[] modules) {
+        requireModGroupAgent();
+        synchronized(ControlBridge.class){
+            Module[] existing=stoppedModules;
+            java.util.ArrayList<Module> next=new java.util.ArrayList<>(java.util.Arrays.asList(existing));
+            for(Module module:modules)if(module!=null&&!next.contains(module))next.add(module);
+            if(next.size()!=existing.length){Module[] policy=next.toArray(Module[]::new);controlPublication(policy,new Object[0]);stoppedModules=policy;NativeControl.heapPolicyChanged(null);}
+        }
+        retireModRegistrations(modules);
+    }
+    public static void protectModules(Module[] modules) {
+        requireModGroupAgent();
+        synchronized(ControlBridge.class){
+            var next=new java.util.ArrayList<Module>(java.util.Arrays.asList(protectedModules));
+            for(Module module:modules)if(module!=null&&!next.contains(module))next.add(module);
+            Module[] policy=next.toArray(Module[]::new);controlPublication(policy,new Object[0]);protectedModules=policy;
+        }
+    }
+    static boolean modProtected(Module module){for(Module actual:protectedModules)if(actual==module)return true;return false;}
+    public static boolean protectedModClass(Class<?> type){return type!=null&&modProtected(DefinitionBridge.module(type));}
+    private static boolean protectedMutationAllowed(Object target,Class<?> declaring){
+        Module owner=objectModule(target==null?declaring:target);
+        if(!modProtected(owner)&&!(declaring!=null&&modProtected(DefinitionBridge.module(declaring))))return true;
+        if(coreWriter())return true;
+        // The nearest actual Mod frame owns the effect. Shared Java/Forge
+        // machinery may carry that call, but an outer unrelated Mod cannot
+        // borrow authority from a deeper protected callback.
+        Module source=ORIGIN_WALKER.walk(frames->frames.map(frame->DefinitionBridge.module(frame.getDeclaringClass())).filter(ControlBridge::producer).findFirst().orElse(null));
+        if(source!=null)return source==owner||declaring!=null&&source==DefinitionBridge.module(declaring);
+        Module[] roots=invokingSources();
+        for(Module actual:roots)if(producer(actual)&&actual!=owner&&(declaring==null||actual!=DefinitionBridge.module(declaring)))return false;
+        return !sourceUnknown();
     }
     static boolean hasStoppedModules(){return stoppedModules.length!=0;}
     static boolean modStopped(Module module) {
@@ -363,6 +412,11 @@ public final class ControlBridge {
             if(ClientBridge.stoppedSource())return true;
             for(Module source:retainQuerySources(CodeSourceBridge.executionSources()))if(modStopped(source))return true;
             for(Module source:query.partial)if(modStopped(source))return true;
+            if(CodeSourceBridge.hasMethodRoots()&&METHOD_ROOT_QUERY.get()!=query){
+                METHOD_ROOT_QUERY.set(query);
+                try{if(ORIGIN_WALKER.walk(STOPPED_CALL))return true;}
+                finally{METHOD_ROOT_QUERY.remove();}
+            }
             // The outer stop query can resize its Java walker just like a
             // reentrant one. The installed reader observes the same actual
             // stack and dynamic frames without copying a Java frame batch.
@@ -556,17 +610,6 @@ public final class ControlBridge {
         ProducerFrame producer=PRODUCERS.get();if(producer!=null&&producer.overflow)return true;
         Frame task=CURRENT.get();return task!=null&&!task.exited&&task.sourcesUnknown;
     }
-    static Module[] mutationSources(Object receiver){
-        SourceQuery query=SOURCE_QUERIES.get();if(query!=null)return query.partial;
-        Module[] scoped=scopedSources();if(scoped.length!=0)return scoped;
-        // Ordinary stores keep their real gate/policy, but need no historical
-        // provenance work before this receiver or execution has been observed.
-        // Producer methods and changed shared code carry ExecutionFlow frames;
-        // native writes pass their captured contributors through their own path.
-        if(CodeSourceBridge.executionMutationTracked(receiver)
-                ||SourceMapBridge.holderRegistered(receiver)||SourceMapBridge.carrierRegistered(receiver))return frameSources();
-        return NO_SOURCES;
-    }
     static Module[] frameSources(){
         SourceQuery active=SOURCE_QUERIES.get();if(active!=null)return active.partial;
         SourceQuery query=beginSourceQuery(NO_SOURCES);
@@ -661,6 +704,7 @@ public final class ControlBridge {
     public static synchronized boolean nativeHeapTargetAllowed(Object object,Module[] actualSources){
         if(object==null||actualSources==null||actualSources.length==0
                 ||controlled(object)||ownState(object instanceof Class<?> type?type:object.getClass()))return false;
+        if(!protectedMutationAllowed(object,object instanceof Class<?> type?type:object.getClass()))return false;
         for(Module source:actualSources)if(source==null||modStopped(source))return false;
         synchronized(CREATION_OWNERS){
             if(objectSourceUnknown(object))return false;
@@ -713,6 +757,7 @@ public final class ControlBridge {
         return objectModule(object,new EventKey(object,null));
     }
     static Module objectModule(Object object,EventKey key) {
+        if(object!=null){Module definition=DefinitionBridge.module(object instanceof Class<?> type?type:object.getClass());if(producer(definition))return definition;}
         synchronized(CREATION_OWNERS) {
             if(CREATION_UNKNOWN.contains(key))return null;
             ThreadOrigin thread=THREAD_ORIGINS.get(key);
@@ -721,7 +766,6 @@ public final class ControlBridge {
             if(owners!=null) {if(owners.size()!=1)return null;return owners.iterator().next();}
             Set<Module> sources=CREATION_SOURCES.get(key);if(sources!=null){if(sources.size()!=1)return null;return sources.iterator().next();}
         }
-        if(object!=null){Module definition=DefinitionBridge.module(object instanceof Class<?> type?type:object.getClass());if(producer(definition))return definition;}
         // Reuse only the identity key. The fallback still reads the actual
         // current registration after the declaration query, under its monitor.
         Module origin=null;if(object!=null)synchronized(CREATION_OWNERS){if(!CREATION_UNKNOWN.contains(key))origin=CREATION_OWNERS.get(key);}
@@ -887,7 +931,7 @@ public final class ControlBridge {
     static final Set<String> EXTERNAL_GUARD_ENTRIES=Set.of(
             "nativeDefinitionsChanged","deliverDefinitionsChanged",
             "controlCaller","controlWriterAllowed","controlled","criticalEntry","referenceRetirementAllowed","controlMutationAllowed","fieldGateMutationAllowed","inheritControl",
-            "fieldWriteAllowed","staticFieldWriteAllowed","reflectFieldWrite",
+            "fieldWriteAllowed","staticFieldWriteAllowed","reflectFieldWrite","modMethodAllowed","protectedMutationAllowed","protectedModClass","modOwnerAllowed","modStopped","modProtected",
             // Field-write entry wrappers are still live at the policy query;
             // they must not lend their own controller identity to that write.
             "beginFieldMutation","staticFieldMutation","beginOwnStaticFieldMutation","beginStaticFieldMutation",
@@ -895,7 +939,7 @@ public final class ControlBridge {
             "indexDenied","indexRemovalAllowed","indexWriteAllowed","beginIndexArrayWrite","beginIndexArrayRemoval","beginIndexStructure","endIndexMutation",
             "registerConsoleInput","beginConsoleCommand","endConsoleCommand","consoleDispatchTrusted",
             "clearProtectedMap","unsafeWriteAllowed","unsafeMemoryAllowed","networkRetirementWriteAllowed","networkRetirementOwnerAllowed","networkRetirementActive",
-            "nativeArrayElementAllowed","nativePrimitiveArrayPolicy","nativeArrayPointerAllowed","nativeArrayCopyInternal","nativeRegistrationAllowed","nativeRegistrationTargetAllowed","nativeHeapTargetAllowed","arrayWriteAllowed",
+            "nativeArrayElementAllowed","nativePrimitiveArrayPolicy","nativeArrayPointerAllowed","nativeArrayCopyInternal","nativeArrayCopyRequired","nativeRegistrationAllowed","nativeRegistrationTargetAllowed","nativeHeapTargetAllowed","arrayWriteAllowed",
             "resourceReleaseAllowed","lifeResult","dispatchAllowed","dispatchDeniedResult","equipmentActionSourceAllowed","equipmentCarrierSourceAllowed","beginEquipmentInvocation","equipmentInvocationDenied","equipmentInvocationResult","endEquipmentInvocation","failedEquipmentInvocation","taskEffectAllowed",
             "beginEquipmentSlotRead","equipmentSlotFieldRead","equipmentSlotArrayRead","equipmentSlotContainerRead","equipmentSlotSelectorRead","equipmentSlotUnresolved","observeEquipmentSlot","failedEquipmentSlotRead",
             "capabilityAccept","capabilitySupply","capabilityApply","capabilityTest","capabilityDerived",
@@ -1360,6 +1404,10 @@ public final class ControlBridge {
     }
     public static boolean networkRetirementActive(){return NetworkBridge.retirementActive();}
     static boolean unsafeWriteAllowed(Object receiver,long offset,Object value,int resourceWidth) {
+        if(receiver!=null&&value==null&&stoppedModules.length!=0){
+            var exact=ResourceBridge.exactField(receiver,offset,resourceWidth);
+            if(exact!=null&&commandRetirementWrite(receiver,exact.getDeclaringClass(),exact.getName(),value))return true;
+        }
         // The exact controller gate must also operate while its caller's
         // business module is stopping. Its existing control-writer check is
         // authoritative; it is not a business field or backing-policy target.
@@ -1369,16 +1417,18 @@ public final class ControlBridge {
                 &&!ResourceBridge.unsafeMutationAllowed(receiver,offset,resourceWidth))return false;
         boolean targetStopped=modStopped(objectModule(receiver));
         boolean ownMirror=receiver instanceof Class<?> owner&&ownState(owner);
-        boolean reflectionCache=receiver instanceof Class<?>&&(targetStopped||ownMirror)&&classReflectionWrite(receiver,offset,resourceWidth);
+        boolean reflectionCache=receiver instanceof Class<?>&&(targetStopped||ownMirror||modProtected(objectModule(receiver)))&&classReflectionWrite(receiver,offset,resourceWidth);
+        if(!reflectionCache&&!protectedMutationAllowed(receiver,receiver instanceof Class<?> type?type:receiver==null?null:receiver.getClass()))return false;
         // Stopping a represented class must not turn Class.newReflectionData's
         // own cache CAS into a permanently false retry. Its exact JDK/instance
         // field proof excludes that target attribution only; the real caller's
-        // stopped sources and all following receiver policies still apply.
+        // stopped sources still apply. The validated Class instance cache is
+        // separate from the represented controller's protected static state.
         if(((targetStopped&&!reflectionCache)||stoppedInvocation())&&!coreWriter()
                 &&!NetworkBridge.retirementWriteAllowed(receiver,offset,value,resourceWidth))return false;
         if(ownMirror&&!reflectionCache||receiver!=null&&ownState(receiver.getClass()))return false;
         if(receiver==null)return true; // Raw-address writes have no exact object binding here.
-        if(!controlMutationAllowed(receiver)||!BackingBridge.offsetAllowed(receiver,offset,value))return false;
+        if(!reflectionCache&&(!controlMutationAllowed(receiver)||!BackingBridge.offsetAllowed(receiver,offset,value)))return false;
         Guards current=guards;
         if(current==null)return true;
         for(UnsafeField field:current.unsafeFields())if(field.declaring().isInstance(receiver))
@@ -1411,6 +1461,7 @@ public final class ControlBridge {
         return raw;
     }
     public static boolean unsafeMemoryAllowed(Object receiver,long offset,long length) {
+        if(!protectedMutationAllowed(receiver,receiver instanceof Class<?> type?type:receiver==null?null:receiver.getClass()))return false;
         if(!CodeSourceBridge.fieldRangeAllowed(receiver,offset,length)&&!coreWriter())return false;
         if(!ResourceBridge.unsafeMutationAllowed(receiver,offset,length))return false;
         if((modStopped(objectModule(receiver))||stoppedInvocation())&&!coreWriter())return false;
@@ -1455,19 +1506,27 @@ public final class ControlBridge {
         Class<?> caller=NativeControl.controlWriterCaller();
         return caller!=null&&!caller.isHidden()&&controlWriterAllowed(caller);
     }
+    public static boolean nativeArrayCopyRequired(Object source,Object target){
+        if(!NativeControl.arrayCopyInternalBoundary())throw new SecurityException("ACTUAL_NATIVE_ARRAYCOPY_QUERY_REQUIRED");
+        if(stoppedInvocation()||controlled(source)||controlled(target))return true;
+        Module sourceModule=objectModule(source),targetModule=objectModule(target);
+        if(modStopped(sourceModule)||modStopped(targetModule)||modProtected(sourceModule)||modProtected(targetModule))return true;
+        return BackingBridge.known(source)||BackingBridge.known(target);
+    }
     public static int nativePrimitiveArrayPolicy(Object array){return BackingBridge.nativePrimitiveArrayPolicy(array);}
     public static boolean nativeArrayPointerAllowed(Object array){
         return arrayWriteAllowed(array)&&BackingBridge.nativePointerAllowed(array);
     }
-    static boolean arrayWriteAllowed(Object array){return !(controlled(array)&&!controlCaller())&&!((modStopped(objectModule(array))||stoppedInvocation())&&!coreWriter());}
+    static boolean arrayWriteAllowed(Object array){return protectedMutationAllowed(array,array==null?null:array.getClass())&&!(controlled(array)&&!controlCaller())&&!((modStopped(objectModule(array))||stoppedInvocation())&&!coreWriter());}
     static boolean arrayWriteAllowed(Object array,int index,Object value){
-        return !(controlled(array)&&!controlCaller())&&(!((modStopped(objectModule(array))||stoppedInvocation())&&!coreWriter())
+        return protectedMutationAllowed(array,array==null?null:array.getClass())&&!(controlled(array)&&!controlCaller())&&(!((modStopped(objectModule(array))||stoppedInvocation())&&!coreWriter())
                 ||NetworkBridge.retirementArrayAllowed(array,index,value));
     }
     public static boolean nativeRegistrationTargetAllowed(Class<?> type){
         // A public JNI registration is a write to this exact declaring class.
         // No caller may replace a controller's entry points through RegisterNatives.
         if(type==null||ownState(type)||modStopped(DefinitionBridge.module(type))||stoppedInvocation())return false;
+        if(!protectedMutationAllowed(type,type))return false;
         if(type.getClassLoader()==null)return ORIGIN_WALKER.walk(frames->frames.filter(StackWalker.StackFrame::isNativeMethod)
                 .findFirst().map(frame->frame.getDeclaringClass()==type
                         &&(frame.getMethodName().equals("registerNatives")||frame.getMethodName().equals("initIDs"))).orElse(false));
@@ -1562,11 +1621,11 @@ public final class ControlBridge {
         }
     }
     static final class FieldMutation {
-        final java.util.concurrent.locks.ReentrantLock gate;final Object source,receiver;
+        final java.util.concurrent.locks.ReentrantLock gate;final Object receiver;
         final Object queueMutation;
-        final Thread thread=Thread.currentThread();final SourcePublication publication;boolean closed,retirementQualified;
-        FieldMutation(java.util.concurrent.locks.ReentrantLock gate,Object source,Object receiver){
-            this.gate=gate;this.source=source;this.receiver=receiver;
+        final Thread thread=Thread.currentThread();final SourcePublication publication;boolean closed;
+        FieldMutation(java.util.concurrent.locks.ReentrantLock gate,Object receiver){
+            this.gate=gate;this.receiver=receiver;
             publication=SourceMapBridge.holderRegistered(receiver)||SourceMapBridge.carrierRegistered(receiver)?new SourcePublication(receiver):null;
             Class<?> type=receiver==null?null:receiver.getClass();
             boolean queue=receiver instanceof java.util.concurrent.ForkJoinPool||receiver instanceof java.util.concurrent.ForkJoinTask<?>[]
@@ -1575,7 +1634,6 @@ public final class ControlBridge {
             queueMutation=queue?TaskBridge.externalQueueMutationBegin(receiver):null;
         }
         java.util.concurrent.locks.ReentrantLock gate(){return gate;}
-        Object source(){return source;}
         Object receiver(){return receiver;}
         void close(){
             if(closed)return;
@@ -1634,27 +1692,8 @@ public final class ControlBridge {
         final Object source,read,destination;final Module[] before;final long offset,length;final Thread thread=Thread.currentThread();final MemoryCopy previous=memoryCopy();boolean closed;
         MemoryCopy(Object source,long offset,long length,Object read,Object destination,Module[] before){this.source=source;this.offset=offset;this.length=length;this.read=read;this.destination=destination;this.before=before;CodeSourceBridge.mutationControls(this,before,MEMORY_COPIES);memoryCopy(this);}
     }
-    static final Map<Thread,UnsafeMutation> UNSAFE_MUTATIONS=new IdentityHashMap<>();
-    static UnsafeMutation unsafeMutation(){synchronized(UNSAFE_MUTATIONS){return UNSAFE_MUTATIONS.get(Thread.currentThread());}}
-    static void unsafeMutation(UnsafeMutation mutation){synchronized(UNSAFE_MUTATIONS){if(mutation==null)UNSAFE_MUTATIONS.remove(Thread.currentThread());else UNSAFE_MUTATIONS.put(Thread.currentThread(),mutation);}}
-    static final class UnsafeMutation {
-        final Object receiver;final long offset,length;final FieldMutation receipt;final UnsafeMutation root,previous;final Module[] contributors;
-        final int writesAtStart;int completedWrites;boolean written,closed,retirementQualified,retirementOnly=true;
-        UnsafeMutation(Object receiver,long offset,long length,FieldMutation receipt,UnsafeMutation previous,UnsafeMutation root,Module[] contributors){
-            this.receiver=receiver;this.offset=offset;this.length=length;this.receipt=receipt;this.previous=previous;this.root=root==null?this:root;this.contributors=contributors;writesAtStart=this.root.completedWrites;
-            CodeSourceBridge.mutationControls(this,contributors,UNSAFE_MUTATIONS);
-        }
-    }
-    private static Object retirementReceipt(Object token,boolean qualified){
-        if(qualified){if(token instanceof UnsafeMutation mutation)mutation.retirementQualified=true;else if(token instanceof FieldMutation mutation)mutation.retirementQualified=true;}
-        return token;
-    }
     static Object memoryReceipt(java.util.concurrent.locks.ReentrantLock gate,Object receiver){
-        try{return new FieldMutation(gate,CodeSourceBridge.executionMemoryBefore(receiver,invokingSources()),receiver);}
-        catch(RuntimeException|Error failure){gate.unlock();throw failure;}
-    }
-    static Object fieldReceipt(java.util.concurrent.locks.ReentrantLock gate,Object receiver,Class<?> declaring,String name,String descriptor,boolean instruction){
-        try{return new FieldMutation(gate,CodeSourceBridge.executionFieldMemoryBefore(receiver,declaring,name,descriptor,mutationSources(receiver),instruction),receiver);}
+        try{return new FieldMutation(gate,receiver);}
         catch(RuntimeException|Error failure){gate.unlock();throw failure;}
     }
     /** A selected field mutation holds the same short gate as the target's policy publication. */
@@ -1688,8 +1727,8 @@ public final class ControlBridge {
         if(declaring==null||declaring==Void.class){lost();return Boolean.FALSE;}
         Object target=receiver==null?declaring:receiver;
         java.util.concurrent.locks.ReentrantLock gate=fieldGate(target);gate.lock();
-        Object receipt=fieldReceipt(gate,target,declaring,name,descriptor,true);
-        try {if(fieldWriteAllowed(target,declaring,name,value))return retirementReceipt(receipt,NetworkBridge.retirementActive()&&NetworkBridge.retirementFieldAllowed(target,declaring,name,value));}
+        Object receipt=memoryReceipt(gate,target);
+        try {if(fieldWriteAllowed(target,declaring,name,value))return receipt;}
         catch(RuntimeException|Error failure){fieldMutationFailed(receipt,failure);throw failure;}
         finishFieldMutation(receipt,false);return Boolean.FALSE;
     }
@@ -1702,11 +1741,8 @@ public final class ControlBridge {
             Throwable failure=null;
             try{
                 // A failed copy can already have changed its destination. Retain
-                // writers seen during the source window before closing either end.
-                Module[] sources=copySources(copy);
-                if(copy.destination instanceof RawMemoryMutation write)NativeControl.memoryWriteContributors(write.token,sources);
-                else if(copy.destination instanceof UnsafeMutation write)CodeSourceBridge.executionMemoryContributors(write.receipt.source(),sources);
-                else if(copy.destination instanceof FieldMutation write)CodeSourceBridge.executionMemoryContributors(write.source(),sources);
+                // the actual source roots before closing either end.
+                if(copy.destination instanceof RawMemoryMutation write)NativeControl.memoryWriteContributors(write.token,copySources(copy));
             }catch(RuntimeException|Error unavailable){failure=unavailable;}
             failure=finishMutationRetaining(copy.destination,written&&failure==null,failure);
             failure=finishMutationRetaining(copy.read,written,failure);copy.closed=true;
@@ -1714,37 +1750,14 @@ public final class ControlBridge {
             if(failure instanceof RuntimeException exception)throw exception;if(failure instanceof Error error)throw error;
         }else if(token instanceof HeapMemoryRead read){
             if(read.closed)return;if(read.thread!=Thread.currentThread()||read.gate!=null&&!read.gate.isHeldByCurrentThread())throw new IllegalMonitorStateException("HEAP_MEMORY_READ_THREAD_REQUIRED");
-            try{CodeSourceBridge.executionByteMemoryReadEnd(read.record);}finally{read.closed=true;if(read.gate!=null)read.gate.unlock();}
+            read.closed=true;if(read.gate!=null)read.gate.unlock();
         }else if(token instanceof RawMemoryMutation mutation){
             if(mutation.closed)return;if(mutation.thread!=Thread.currentThread())throw new IllegalMonitorStateException("RAW_MEMORY_MUTATION_THREAD_REQUIRED");
             NativeControl.memoryWriteEnd(mutation.token,written);mutation.closed=true;
-        }else if(token instanceof UnsafeMutation mutation){
-            if(mutation.closed)return;
-            if(unsafeMutation()!=mutation||!mutation.receipt.gate().isHeldByCurrentThread())throw new IllegalMonitorStateException("UNSAFE_MUTATION_THREAD_AND_ORDER_REQUIRED");
-            try{
-                if(written){
-                    if(mutation.root.completedWrites==mutation.writesAtStart){mutation.root.completedWrites++;mutation.root.retirementOnly&=mutation.retirementQualified;}
-                    mutation.root.written=true;
-                    CodeSourceBridge.executionMemoryContributors(mutation.receipt.source(),mutation.contributors);
-                }
-            }finally{
-                mutation.closed=true;
-                unsafeMutation(mutation.previous);
-                if(mutation.root==mutation)try{
-                    try{
-                        if(mutation.written&&mutation.completedWrites>0&&mutation.retirementOnly)CodeSourceBridge.executionMemoryRetirement(mutation.receipt.source());
-                        CodeSourceBridge.executionMemoryAfter(mutation.receipt.source(),written||mutation.written);
-                    }
-                    finally{if(written||mutation.written)SourceMapBridge.holderChanged(mutation.receipt.receiver());}
-                }finally{mutation.receipt.close();}
-            }
         }else if(token instanceof FieldMutation mutation){
             if(mutation.closed)return;
             if(!mutation.gate().isHeldByCurrentThread())throw new IllegalMonitorStateException("FIELD_MUTATION_THREAD_REQUIRED");
-            try{
-                try{if(written&&mutation.retirementQualified)CodeSourceBridge.executionMemoryRetirement(mutation.source());CodeSourceBridge.executionMemoryAfter(mutation.source(),written);}
-                finally{if(written)SourceMapBridge.holderChanged(mutation.receiver());}
-            }finally{mutation.close();}
+            try{if(written)SourceMapBridge.holderChanged(mutation.receiver());}finally{mutation.close();}
         }else if(token instanceof java.util.concurrent.locks.ReentrantLock gate)gate.unlock();
     }
     static Throwable finishMutationRetaining(Object token,boolean written,Throwable original){
@@ -1762,8 +1775,7 @@ public final class ControlBridge {
         if(WALKER.getCallerClass()!=BackingBridge.class&&!coreWriter()&&!NativeControl.memoryMutationBoundary(receiver))
             throw new SecurityException("ACTUAL_MEMORY_MUTATION_BOUNDARY_REQUIRED");
         java.util.concurrent.locks.ReentrantLock gate=fieldGate(receiver);gate.lock();
-        try{return retirementReceipt(new FieldMutation(gate,CodeSourceBridge.executionArrayMemoryBefore(receiver,start,length,mutationSources(receiver)),receiver),
-                length==1&&NetworkBridge.retirementActive()&&NetworkBridge.retirementArrayAllowed(receiver,start,Array.get(receiver,start)));}
+        try{return new FieldMutation(gate,receiver);}
         catch(RuntimeException|Error failure){gate.unlock();throw failure;}
     }
     static Module[] mutationSources(Module[] nativeSources){
@@ -1775,16 +1787,14 @@ public final class ControlBridge {
     public static Object beginNativeArrayMutation(Object receiver,int start,int length,Module[] contributors){
         if(!NativeControl.memoryMutationBoundary(receiver))throw new SecurityException("ACTUAL_NATIVE_ARRAY_MUTATION_REQUIRED");
         java.util.concurrent.locks.ReentrantLock gate=fieldGate(receiver);gate.lock();
-        try{return new FieldMutation(gate,CodeSourceBridge.executionArrayMemoryBefore(receiver,start,length,mutationSources(contributors)),receiver);}
+        try{return new FieldMutation(gate,receiver);}
         catch(RuntimeException|Error failure){gate.unlock();throw failure;}
     }
     public static Object beginNativeArrayCopyRead(Object source,int from,int length){
         if(!NativeControl.arrayCopyReadBoundary(source,from,length))throw new SecurityException("ACTUAL_NATIVE_ARRAYCOPY_READ_REQUIRED");
-        long[] layout=ResourceBridge.arrayLayout(source.getClass());
-        if(layout==null)throw new IllegalStateException("NATIVE_ARRAYCOPY_SOURCE_LAYOUT_UNAVAILABLE");
-        // Start before the native snapshot. Keep the existing read-window
-        // protocol without a source lock or a second source/destination order.
-        return new HeapMemoryRead(null,CodeSourceBridge.executionByteMemoryReadBefore(source,layout[0]+(long)from*layout[1],(long)length*layout[1]));
+        // Whole-Mod roots belong to the real source object; no retired byte
+        // receipt or array layout is needed to retain these contributors.
+        return new HeapMemoryRead(null,objectSources(source));
     }
     public static Object beginNativeArrayCopy(Object source,int from,int length,Object target,int to,int prefix,Object read,Module[] contributors){
         if(!NativeControl.arrayCopyBoundary(source,from,length,target,to,prefix,read))throw new SecurityException("ACTUAL_NATIVE_ARRAYCOPY_REQUIRED");
@@ -1792,14 +1802,11 @@ public final class ControlBridge {
         long[] layout=ResourceBridge.arrayLayout(source.getClass());
         if(layout==null)throw new IllegalStateException("NATIVE_ARRAYCOPY_SOURCE_LAYOUT_UNAVAILABLE");
         Module[] existing=readSources(read);
-        Set<Module> combined=Collections.newSetFromMap(new IdentityHashMap<>());
-        Collections.addAll(combined,mutationSources(contributors));Collections.addAll(combined,existing);
         java.util.concurrent.locks.ReentrantLock gate=fieldGate(target);gate.lock();FieldMutation destination=null;
         try{
-            destination=new FieldMutation(gate,CodeSourceBridge.executionArrayMemoryBefore(target,to,prefix,combined.toArray(new Module[0])),target);
-            // The source window is the exact requested range. On a partial
-            // reference copy its suffix sources are retained conservatively;
-            // only the compatible destination prefix receives write history.
+            destination=new FieldMutation(gate,target);
+            // Keep the source roots and real destination gate paired through
+            // this VM copy, including its compatible prefix on failure.
             return new MemoryCopy(source,layout[0]+(long)from*layout[1],(long)length*layout[1],read,destination,existing);
         }catch(RuntimeException|Error failure){
             if(destination==null)gate.unlock();else finishMutationRetaining(destination,false,failure);
@@ -1810,7 +1817,7 @@ public final class ControlBridge {
     public static Object beginNativeFieldMutation(Object receiver,Class<?> declaring,String name,String descriptor,Module[] contributors){
         if(!NativeControl.memoryMutationBoundary(receiver))throw new SecurityException("ACTUAL_NATIVE_FIELD_MUTATION_REQUIRED");
         java.util.concurrent.locks.ReentrantLock gate=fieldGate(receiver);gate.lock();
-        try{return new FieldMutation(gate,CodeSourceBridge.executionFieldMemoryBefore(receiver,declaring,name,descriptor,mutationSources(contributors),false),receiver);}
+        try{return new FieldMutation(gate,receiver);}
         catch(RuntimeException|Error failure){gate.unlock();throw failure;}
     }
     public static Object beginNativeUnsafeMutation(Object receiver,long offset,long length,Object proposed,String kind,boolean bulk,Module[] contributors){
@@ -1821,10 +1828,10 @@ public final class ControlBridge {
         // actual write policy before admitting it; avoid collecting sources
         // merely to discard them inside unsafeReceipt.
         if(CodeSourceBridge.fieldGateMetadata(receiver))return (bulk?unsafeMemoryAllowed(receiver,offset,bytes):fieldGateMutationAllowed())?null:Boolean.FALSE;
-        Object token=unsafeReceipt(receiver,offset,bytes,mutationSources(contributors),!bulk&&referenceKind(kind));
+        Object token=unsafeReceipt(receiver,offset,bytes,NO_SOURCES,!bulk&&referenceKind(kind));
         try{
             if(bulk?unsafeMemoryAllowed(receiver,offset,bytes):unsafeWriteAllowed(receiver,offset,proposed,kind))
-                return retirementReceipt(token,!bulk&&NetworkBridge.retirementActive()&&NetworkBridge.retirementWriteAllowed(receiver,offset,proposed,(int)bytes));
+                return token;
         }catch(RuntimeException|Error failure){fieldMutationFailed(token,failure);throw failure;}
         finishFieldMutation(token,false);return Boolean.FALSE;
     }
@@ -1834,7 +1841,7 @@ public final class ControlBridge {
     }
     public static Object beginNativeUnsafeCopy(Object source,long sourceOffset,Object receiver,long offset,long length,Module[] contributors){
         if(!NativeControl.unsafeCopyBoundary(source,sourceOffset,receiver,offset,length))throw new SecurityException("ACTUAL_NATIVE_UNSAFE_COPY_REQUIRED");
-        return copyReceipt(source,sourceOffset,receiver,offset,length,mutationSources(contributors));
+        return copyReceipt(source,sourceOffset,receiver,offset,length,source==null||receiver==null?mutationSources(contributors):NO_SOURCES);
     }
     static Object beginExecutedUnsafeMutation(Object accessor,Object receiver,long offset,long length,Object proposed,Object source,long sourceOffset,String owner,String operation,String kind,boolean bulk,Module[] contributors){
         if(WALKER.getCallerClass()!=CodeSourceBridge.class)throw new SecurityException("ACTUAL_EXECUTED_UNSAFE_MUTATION_REQUIRED");
@@ -1844,13 +1851,13 @@ public final class ControlBridge {
         }catch(ClassNotFoundException unavailable){throw new IllegalStateException("ACTUAL_UNSAFE_WRITE_UNAVAILABLE",unavailable);}
         if(accessor.getClass()!=actual)throw new SecurityException("ACTUAL_UNSAFE_RECEIVER_REQUIRED");
         long bytes=bulk?length:ResourceBridge.unsafeWidth(kind);
-        if(operation.equals("copyMemory")||operation.equals("copySwapMemory"))return copyReceipt(source,sourceOffset,receiver,offset,bytes,mutationSources(contributors));
+        if(operation.equals("copyMemory")||operation.equals("copySwapMemory"))return copyReceipt(source,sourceOffset,receiver,offset,bytes,source==null||receiver==null?mutationSources(contributors):NO_SOURCES);
         if(operation.startsWith("get")&&!operation.startsWith("getAnd"))return readReceipt(receiver,offset,bytes,receiver==null?mutationSources(contributors):null);
         if(receiver==null)return (bulk?unsafeMemoryAllowed(null,offset,bytes):BackingBridge.nativeWriteAllowed(null,offset,proposed,operation,kind))?rawReceipt(offset,bytes,mutationSources(contributors)):Boolean.FALSE;
-        Object token=unsafeReceipt(receiver,offset,bytes,mutationSources(contributors),!bulk&&referenceKind(kind));
+        Object token=unsafeReceipt(receiver,offset,bytes,NO_SOURCES,!bulk&&referenceKind(kind));
         try{
             if(bulk?unsafeMemoryAllowed(receiver,offset,bytes):BackingBridge.nativeWriteAllowed(receiver,offset,proposed,operation,kind))
-                return retirementReceipt(token,!bulk&&NetworkBridge.retirementActive()&&NetworkBridge.retirementWriteAllowed(receiver,offset,proposed,(int)bytes));
+                return token;
         }catch(RuntimeException|Error failure){fieldMutationFailed(token,failure);throw failure;}
         finishFieldMutation(token,false);return Boolean.FALSE;
     }
@@ -1859,7 +1866,7 @@ public final class ControlBridge {
         Class<?> declaring=field.getDeclaringClass();boolean statik=java.lang.reflect.Modifier.isStatic(field.getModifiers());
         if(!statik&&(receiver==null||!declaring.isInstance(receiver)))return null;
         Object target=statik?declaring:receiver;java.util.concurrent.locks.ReentrantLock gate=fieldGate(target);gate.lock();
-        return fieldReceipt(gate,target,declaring,field.getName(),field.getType().descriptorString(),false);
+        return memoryReceipt(gate,target);
     }
     static void requireUnsafeWriter(){
         Class<?> caller,actual,internal;
@@ -1870,7 +1877,7 @@ public final class ControlBridge {
     }
     static Object unsafeReceipt(Object receiver,long offset,long length){
         if(NativeControl.unsafeControlScope()||CodeSourceBridge.fieldGateMetadata(receiver))return null;
-        return unsafeReceipt(receiver,offset,length,receiver==null?invokingSources():mutationSources(receiver));
+        return unsafeReceipt(receiver,offset,length,receiver==null?invokingSources():NO_SOURCES);
     }
     static Object unsafeReceipt(Object receiver,long offset,long length,Module[] contributors){
         return unsafeReceipt(receiver,offset,length,contributors,false);
@@ -1879,23 +1886,8 @@ public final class ControlBridge {
     static Object unsafeReceipt(Object receiver,long offset,long length,Module[] contributors,boolean reference){
         if(receiver==null)return rawReceipt(offset,length,contributors);
         if(CodeSourceBridge.fieldGateMetadata(receiver))return null;
-        UnsafeMutation previous=unsafeMutation();
-        if(sameUnsafeSpan(previous,receiver,offset,length)){
-            UnsafeMutation use=new UnsafeMutation(receiver,offset,length,previous.receipt,previous,previous.root,contributors);
-            unsafeMutation(use);return use;
-        }
         java.util.concurrent.locks.ReentrantLock gate=fieldGate(receiver);gate.lock();
-        try{
-            Object observed=CodeSourceBridge.executionByteMemoryBefore(receiver,offset,length,contributors,reference);
-            FieldMutation receipt=new FieldMutation(gate,observed,receiver);
-            // An unobserved Java heap span has no source receipt to combine
-            // across the VarHandle/Unsafe adapters. Keep its real receiver gate
-            // and publication callback without creating a controller-owned
-            // thread directory entry for every ordinary AtomicBoolean CAS.
-            if(observed==null&&contributors.length==0)return receipt;
-            UnsafeMutation use=new UnsafeMutation(receiver,offset,length,receipt,previous,null,contributors);unsafeMutation(use);return use;
-        }
-        catch(RuntimeException|Error failure){gate.unlock();throw failure;}
+        return memoryReceipt(gate,receiver);
     }
     static Object bufferDataBefore(Object destination,long address,long bytes,Object source,long sourceOffset,long sourceBytes,boolean copy,Module[] contributors){
         if(WALKER.getCallerClass()!=ResourceBridge.class)throw new SecurityException("ACTUAL_BUFFER_DATA_OPERATION_REQUIRED");
@@ -1926,9 +1918,9 @@ public final class ControlBridge {
         if(CodeSourceBridge.fieldGateMetadata(receiver))return null;
         for(MemoryCopy copy=memoryCopy();copy!=null;copy=copy.previous)
             if(!copy.closed&&copy.source==receiver&&offset>=copy.offset&&bytes<=copy.length&&offset-copy.offset<=copy.length-bytes)
-                return new HeapMemoryRead(null,CodeSourceBridge.executionByteMemoryReadBefore(receiver,offset,bytes));
+                return new HeapMemoryRead(null,objectSources(receiver));
         java.util.concurrent.locks.ReentrantLock gate=fieldGate(receiver);gate.lock();
-        try{return new HeapMemoryRead(gate,CodeSourceBridge.executionByteMemoryReadBefore(receiver,offset,bytes));}
+        try{return new HeapMemoryRead(gate,objectSources(receiver));}
         catch(RuntimeException|Error failure){gate.unlock();throw failure;}
     }
     static Module[] executedUnsafeReadSources(Object token){
@@ -1955,10 +1947,14 @@ public final class ControlBridge {
         try{
             if(source==null&&NativeControl.available()){
                 long token=NativeControl.memoryCopyReadBegin(sourceOffset,sourceBytes,contributors);if(token!=0)read=new RawMemoryMutation(token,true);
-            }else if(source!=null)read=new HeapMemoryRead(null,CodeSourceBridge.executionByteMemoryReadBefore(source,sourceOffset,sourceBytes));
+            }else if(source!=null)read=new HeapMemoryRead(null,objectSources(source));
             Module[] existing=readSources(read);
-            Set<Module> combined=Collections.newSetFromMap(new IdentityHashMap<>());Collections.addAll(combined,contributors);Collections.addAll(combined,existing);
-            destination=unsafeReceipt(receiver,offset,bytes,combined.toArray(new Module[0]));
+            Module[] destinationSources=NO_SOURCES;
+            if(receiver==null){
+                Set<Module> combined=Collections.newSetFromMap(new IdentityHashMap<>());Collections.addAll(combined,contributors);Collections.addAll(combined,existing);
+                destinationSources=combined.toArray(new Module[0]);
+            }
+            destination=unsafeReceipt(receiver,offset,bytes,destinationSources);
             if(!unsafeMemoryAllowed(receiver,offset,bytes)){
                 Object deniedDestination=destination,deniedRead=read;destination=null;read=null;
                 Throwable failure=finishMutationRetaining(deniedDestination,false,null);failure=finishMutationRetaining(deniedRead,false,failure);
@@ -1992,9 +1988,6 @@ public final class ControlBridge {
         }catch(ClassNotFoundException unavailable){return false;}
         return caller!=null&&caller.getClassLoader()==null&&HandleWriters.roots.contains(caller.getNestHost());
     }
-    static boolean sameUnsafeSpan(UnsafeMutation use,Object receiver,long offset,long length){
-        return use!=null&&!use.closed&&use.receiver==receiver&&use.offset==offset&&use.length==length&&use.receipt.gate().isHeldByCurrentThread();
-    }
     public static boolean unsafeControlScope(){
         if(!NativeControl.unsafeControlScope())return false;
         Class<?> caller=actualMemoryCaller();
@@ -2007,13 +2000,13 @@ public final class ControlBridge {
         requireUnsafeWriter();return unsafeReceipt(receiver,offset,length);
     }
     public static Object beginUnsafeMutation(Object receiver,long offset,String kind){
-        requireUnsafeWriter();return NativeControl.unsafeControlScope()||CodeSourceBridge.fieldGateMetadata(receiver)?null:unsafeReceipt(receiver,offset,ResourceBridge.unsafeWidth(kind),receiver==null?invokingSources():mutationSources(receiver),referenceKind(kind));
+        requireUnsafeWriter();return NativeControl.unsafeControlScope()||CodeSourceBridge.fieldGateMetadata(receiver)?null:unsafeReceipt(receiver,offset,ResourceBridge.unsafeWidth(kind),receiver==null?invokingSources():NO_SOURCES,referenceKind(kind));
     }
     public static Object beginUnsafeRead(Object receiver,long offset,String kind){
         requireUnsafeWriter();return receiver!=null||NativeControl.unsafeControlScope()?null:rawReceipt(offset,ResourceBridge.unsafeWidth(kind),invokingSources(),true);
     }
     public static Object beginUnsafeCopy(Object source,long sourceOffset,Object receiver,long offset,long length){
-        requireUnsafeWriter();return NativeControl.unsafeControlScope()?null:copyReceipt(source,sourceOffset,receiver,offset,length,invokingSources());
+        requireUnsafeWriter();return NativeControl.unsafeControlScope()?null:copyReceipt(source,sourceOffset,receiver,offset,length,source==null||receiver==null?invokingSources():NO_SOURCES);
     }
     static final class HandleWriters {
         static final Set<Class<?>> roots=roots();
@@ -2026,7 +2019,7 @@ public final class ControlBridge {
         }
     }
     public static Object beginHandleMutation(Object receiver,long offset,String kind){
-        requireHandleWriter(actualMemoryCaller());return NativeControl.unsafeControlScope()||CodeSourceBridge.fieldGateMetadata(receiver)?null:unsafeReceipt(receiver,offset,ResourceBridge.unsafeWidth(kind),receiver==null?invokingSources():mutationSources(receiver),referenceKind(kind));
+        requireHandleWriter(actualMemoryCaller());return NativeControl.unsafeControlScope()||CodeSourceBridge.fieldGateMetadata(receiver)?null:unsafeReceipt(receiver,offset,ResourceBridge.unsafeWidth(kind),receiver==null?invokingSources():NO_SOURCES,referenceKind(kind));
     }
     public static Object beginHandleRead(Object receiver,long offset,String kind){
         requireHandleWriter(actualMemoryCaller());return receiver!=null||NativeControl.unsafeControlScope()?null:rawReceipt(offset,ResourceBridge.unsafeWidth(kind),invokingSources(),true);
@@ -2064,7 +2057,7 @@ public final class ControlBridge {
         java.util.concurrent.locks.ReentrantLock gate=fieldGate(array);if(!gate.tryLock())return Boolean.FALSE;
         try {
             if(resume&&previousRevision!=CodeSourceBridge.executionArrayRevision(array))start=0;
-            FieldMutation mutation=new FieldMutation(gate,CodeSourceBridge.executionArrayMemoryBefore(array,start,length,invokingSources()),array);
+            FieldMutation mutation=new FieldMutation(gate,array);
             return new RecoveryArrayMutation(array,mutation,start);
         }catch(RuntimeException|Error failure){gate.unlock();throw failure;}
     }
@@ -2077,7 +2070,6 @@ public final class ControlBridge {
         if(!coreWriter()||!(token instanceof RecoveryArrayMutation mutation)||!mutation.mutation().gate().isHeldByCurrentThread())
             throw new SecurityException("ACTUAL_RECOVERY_ARRAY_MUTATION_REQUIRED");
         try {
-            CodeSourceBridge.executionMemoryAfter(mutation.mutation().source(),written);
             if(written)SourceMapBridge.holderChanged(mutation.array());
             return CodeSourceBridge.executionArrayRevision(mutation.array());
         }finally {mutation.mutation().close();}
@@ -2133,7 +2125,9 @@ public final class ControlBridge {
         return staticFieldWriteAllowed(actual,name,value);
     }
     public static boolean fieldWriteAllowed(Object receiver,Class<?> declaring,String name,Object value) {
+        if(commandRetirementWrite(receiver,declaring,name,value))return true;
         if(CodeSourceBridge.fieldGateMetadata(receiver))return fieldGateMutationAllowed();
+        if(!protectedMutationAllowed(receiver,declaring))return false;
         if(!CodeSourceBridge.fieldAllowed(receiver,declaring,name)&&!coreWriter())return false;
         if(!ResourceBridge.fieldMutationAllowed(receiver,declaring))return false;
         if((modStopped(objectModule(receiver==null?declaring:receiver))||stoppedInvocation())&&!coreWriter()&&!ClientBridge.cleanupField(receiver,declaring,name)
@@ -2159,7 +2153,9 @@ public final class ControlBridge {
     }
     public static boolean reflectFieldWrite(java.lang.reflect.Field field,Object receiver,Object value) {
         if(java.lang.reflect.Modifier.isStatic(field.getModifiers()))receiver=field.getDeclaringClass();
+        if(commandRetirementWrite(receiver,field.getDeclaringClass(),field.getName(),value))return true;
         if(CodeSourceBridge.fieldGateMetadata(receiver))return fieldGateMutationAllowed();
+        if(!protectedMutationAllowed(receiver,field.getDeclaringClass()))return false;
         if(!CodeSourceBridge.fieldAllowed(receiver,field.getDeclaringClass(),field.getName())&&!coreWriter())return false;
         if(!ResourceBridge.fieldMutationAllowed(receiver,field.getDeclaringClass()))return false;
         if((modStopped(objectModule(receiver==null?field.getDeclaringClass():receiver))||stoppedInvocation())&&!coreWriter()&&!ClientBridge.cleanupField(receiver,field.getDeclaringClass(),field.getName())
@@ -2465,6 +2461,26 @@ public final class ControlBridge {
         @Override public int hashCode(){return hash;}
         @Override public boolean equals(Object other){return this==other||other instanceof EventKey key&&get()!=null&&get()==key.get();}
     }
+    record EventRegistration(java.lang.ref.WeakReference<Object> bus,java.lang.ref.WeakReference<Object> owner,Module module) { }
+    record CommandRegistration(java.lang.ref.WeakReference<Object> dispatcher,java.lang.ref.WeakReference<Object> node,Module module) { }
+    static final java.util.ArrayList<EventRegistration> EVENT_REGISTRATIONS=new java.util.ArrayList<>();
+    static final java.util.ArrayList<CommandRegistration> COMMAND_REGISTRATIONS=new java.util.ArrayList<>();
+    static final java.util.Map<Module,String> REGISTRATION_FAILURES=new java.util.IdentityHashMap<>();
+    public static void modListenerRegistered(Object bus,Object owner,Object listener) {
+        if(bus==null||owner==null||listener==null)return;
+        Class<?> caller=WALKER.getCallerClass();
+        if(!caller.getName().equals("net.minecraftforge.eventbus.EventBus")||!caller.isInstance(bus))return;
+        Module module=objectModule(owner);
+        synchronized(EVENT_OWNERS) {
+            EventKey stale;while((stale=(EventKey)EVENT_QUEUE.poll())!=null)EVENT_OWNERS.remove(stale);
+            EVENT_OWNERS.put(new EventKey(listener,EVENT_QUEUE),module);
+            EVENT_REGISTRATIONS.removeIf(entry->entry.bus().get()==null||entry.owner().get()==null);
+            boolean present=false;for(var entry:EVENT_REGISTRATIONS)if(entry.bus().get()==bus&&entry.owner().get()==owner){present=true;break;}
+            if(!present)EVENT_REGISTRATIONS.add(new EventRegistration(new java.lang.ref.WeakReference<>(bus),new java.lang.ref.WeakReference<>(owner),module));
+        }
+        if(modStopped(module))retireModRegistrations(new Module[]{module});
+    }
+    /** Compatibility for old images: it supplies dispatch ownership only. */
     public static void modListenerRegistered(Object owner,Object listener) {
         if(owner==null||listener==null)return;
         Module module=owner instanceof Class<?> type?type.getModule():owner.getClass().getModule();
@@ -2478,6 +2494,112 @@ public final class ControlBridge {
         Module owner;
         synchronized(EVENT_OWNERS){owner=EVENT_OWNERS.get(new EventKey(listener,null));}
         return !modStopped(owner)&&!modStopped(listener.getClass().getModule());
+    }
+    public static void modCommandRegistered(Object dispatcher,Object node){
+        if(dispatcher==null||node==null)return;
+        Class<?> caller=WALKER.getCallerClass();
+        if(!caller.getName().equals("com.mojang.brigadier.CommandDispatcher")||!caller.isInstance(dispatcher))return;
+        Module source=invokingModule();
+        if(source==null)return;
+        synchronized(EVENT_OWNERS){
+            COMMAND_REGISTRATIONS.removeIf(entry->entry.dispatcher().get()==null||entry.node().get()==null);
+            COMMAND_REGISTRATIONS.add(new CommandRegistration(new java.lang.ref.WeakReference<>(dispatcher),new java.lang.ref.WeakReference<>(node),source));
+        }
+        if(modStopped(source))retireModRegistrations(new Module[]{source});
+    }
+    private static void retireModRegistrations(Module[] modules){
+        var selected=java.util.Collections.newSetFromMap(new java.util.IdentityHashMap<Module,Boolean>());
+        java.util.Collections.addAll(selected,modules);
+        java.util.ArrayList<EventRegistration> listeners=new java.util.ArrayList<>();
+        java.util.ArrayList<CommandRegistration> commands=new java.util.ArrayList<>();
+        synchronized(EVENT_OWNERS){
+            for(var entry:EVENT_REGISTRATIONS)if(selected.contains(entry.module()))listeners.add(entry);
+            for(var entry:COMMAND_REGISTRATIONS)if(selected.contains(entry.module()))commands.add(entry);
+            for(Module module:selected)REGISTRATION_FAILURES.remove(module);
+        }
+        // No global/source/bridge monitor is held over the real framework operation.
+        for(var entry:listeners){
+            Object bus=entry.bus().get(),owner=entry.owner().get();
+            try{
+                if(bus!=null&&owner!=null){
+                    var unregister=bus.getClass().getMethod("unregister",Object.class);
+                    if(!unregister.getDeclaringClass().getName().equals("net.minecraftforge.eventbus.EventBus"))throw new IllegalStateException("EVENT_BUS_OVERRIDE_UNCONTROLLED");
+                    unregister.invoke(bus,owner);
+                }
+                synchronized(EVENT_OWNERS){EVENT_REGISTRATIONS.remove(entry);}
+            }catch(ReflectiveOperationException|RuntimeException failure){registrationFailure(entry.module(),"EVENT_UNREGISTER:"+failure.getClass().getSimpleName());}
+        }
+        for(var entry:commands){
+            Object dispatcher=entry.dispatcher().get(),node=entry.node().get();
+            try{
+                if(dispatcher!=null&&node!=null)retireCommandNode(dispatcher,node,entry.module());
+                synchronized(EVENT_OWNERS){COMMAND_REGISTRATIONS.remove(entry);}
+            }catch(ReflectiveOperationException|RuntimeException failure){registrationFailure(entry.module(),"COMMAND_UNREGISTER:"+failure.getClass().getSimpleName());}
+        }
+    }
+    private static void retireCommandNode(Object dispatcher,Object node,Module owner)throws ReflectiveOperationException{
+        ClassLoader loader=dispatcher.getClass().getClassLoader();
+        Class<?> nodeType=Class.forName("com.mojang.brigadier.tree.CommandNode",false,loader);
+        if(!nodeType.isInstance(node))throw new IllegalStateException("ACTUAL_COMMAND_NODE_REQUIRED");
+        Class<?> dispatcherType=Class.forName("com.mojang.brigadier.CommandDispatcher",false,loader);
+        Object root=commandField(dispatcherType,dispatcher,"root");
+        retireCommandBranch(nodeType,root,node,owner,new java.util.IdentityHashMap<>());
+    }
+    private static boolean retireCommandBranch(Class<?> nodeType,Object parent,Object selected,Module owner,java.util.IdentityHashMap<Object,Boolean> seen)throws ReflectiveOperationException{
+        if(parent==null||seen.put(parent,Boolean.TRUE)!=null)return false;
+        var children=commandIndex(nodeType,parent,"children").values();
+        boolean found=false;
+        for(Object child:children.toArray()){
+            if(child==selected){
+                clearCommandShares(nodeType,child,owner,new java.util.IdentityHashMap<>());
+                // Retain a mixed branch carrying external commands. Remove only
+                // the exact leaf from each real Brigadier index.
+                if(commandIndex(nodeType,child,"children").isEmpty()&&commandField(nodeType,child,"command")==null)
+                    for(String name:new String[]{"children","literals","arguments"}){
+                        var index=commandIndex(nodeType,parent,name);
+                        index.values().removeIf(value->value==child);
+                    }
+                found=true;
+            }else found|=retireCommandBranch(nodeType,child,selected,owner,seen);
+        }
+        return found;
+    }
+    private static boolean clearCommandShares(Class<?> nodeType,Object node,Module owner,java.util.IdentityHashMap<Object,Boolean> seen)throws ReflectiveOperationException{
+        if(seen.put(node,Boolean.TRUE)!=null)return false;boolean changed=false;
+        Object command=commandField(nodeType,node,"command");
+        if(command!=null&&objectModule(command)==owner){
+            var field=nodeType.getDeclaredField("command");if(!field.trySetAccessible())throw new IllegalAccessException("command");field.set(node,null);
+            if(field.get(node)!=null)throw new IllegalStateException("COMMAND_CALLBACK_RELEASE_INCOMPLETE");changed=true;
+        }
+        for(Object child:commandIndex(nodeType,node,"children").values().toArray())if(clearCommandShares(nodeType,child,owner,seen)){
+            changed=true;
+            if(commandIndex(nodeType,child,"children").isEmpty()&&commandField(nodeType,child,"command")==null)
+                for(String name:new String[]{"children","literals","arguments"})commandIndex(nodeType,node,name).values().removeIf(value->value==child);
+        }
+        return changed;
+    }
+    private static boolean commandRetirementWrite(Object receiver,Class<?> declaring,String name,Object value){
+        if(receiver==null||value!=null||declaring==null||!name.equals("command")||!declaring.getName().equals("com.mojang.brigadier.tree.CommandNode")||stoppedModules.length==0)return false;
+        if(!ORIGIN_WALKER.walk(frames->frames.anyMatch(frame->frame.getDeclaringClass()==ControlBridge.class&&frame.getMethodName().equals("clearCommandShares"))))return false;
+        try{return modStopped(objectModule(commandField(declaring,receiver,name)));}
+        catch(ReflectiveOperationException unavailable){return false;}
+    }
+    private static Object commandField(Class<?> type,Object receiver,String name)throws ReflectiveOperationException{
+        var field=type.getDeclaredField(name);if(!field.trySetAccessible())throw new IllegalAccessException(name);return field.get(receiver);
+    }
+    private static java.util.Map<?,?> commandIndex(Class<?> type,Object receiver,String name)throws ReflectiveOperationException{
+        Object value=commandField(type,receiver,name);
+        if(!(value instanceof java.util.Map<?,?> map)||value.getClass().getClassLoader()!=null)throw new IllegalStateException("ACTUAL_BRIGADIER_INDEX_UNAVAILABLE");
+        return map;
+    }
+    private static void registrationFailure(Module module,String failure){synchronized(EVENT_OWNERS){REGISTRATION_FAILURES.merge(module,failure,(left,right)->left.contains(right)?left:left+","+right);}}
+    public static String modRegistrationState(Module module){
+        synchronized(EVENT_OWNERS){
+            String failure=REGISTRATION_FAILURES.get(module);
+            long pending=EVENT_REGISTRATIONS.stream().filter(entry->entry.module()==module&&entry.bus().get()!=null&&entry.owner().get()!=null).count()
+                    +COMMAND_REGISTRATIONS.stream().filter(entry->entry.module()==module&&entry.node().get()!=null).count();
+            return "REGISTRATIONS="+pending+(failure==null?"":";REGISTRATION_PARTIAL="+failure);
+        }
     }
     static void reapCreationOwners() {
         EventKey stale;while((stale=(EventKey)CREATION_QUEUE.poll())!=null) {

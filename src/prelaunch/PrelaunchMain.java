@@ -13,6 +13,9 @@ import java.util.Base64;
 import java.util.HexFormat;
 import java.util.List;
 import java.util.Properties;
+import java.util.Map;
+import java.util.Set;
+import java.util.TreeMap;
 import java.util.TreeSet;
 import java.util.jar.JarFile;
 
@@ -22,29 +25,52 @@ public final class PrelaunchMain {
     private PrelaunchMain() { }
 
     public static void main(String[] arguments) throws Exception {
-        if(arguments.length<4 || !arguments[0].equals("--java") || !arguments[2].equals("--core"))
-            throw new IllegalArgumentException("Usage: prelaunch --java <java-or-javaw.exe> --core <ronova.jar> [game JVM args...]");
-        Path java=Path.of(arguments[1]).toAbsolutePath().normalize();
-        Path core=Path.of(arguments[3]).toAbsolutePath().normalize();
-        Path directory=Path.of(System.getProperty("user.dir")).toAbsolutePath().normalize();
+        Path working=Path.of(System.getProperty("user.dir")).toAbsolutePath().normalize();
+        Path java=Path.of(ProcessHandle.current().info().command().orElseThrow(()->new IOException("GAME_JAVA_UNKNOWN"))).toAbsolutePath().normalize();
+        Path core=Path.of(PrelaunchMain.class.getProtectionDomain().getCodeSource().getLocation().toURI()).toAbsolutePath().normalize();
+        int first=0;
+        while(first<arguments.length&&(arguments[first].equals("--java")||arguments[first].equals("--core"))){
+            String option=arguments[first++];if(first==arguments.length)throw new IllegalArgumentException("MISSING_PRELAUNCH_OPTION:"+option);
+            Path supplied=working.resolve(arguments[first++]).toAbsolutePath().normalize();if(option.equals("--java"))java=supplied;else core=supplied;
+        }
+        List<String> game=new ArrayList<>(Arrays.asList(arguments).subList(first,arguments.length));
+        if(game.isEmpty()){
+            Path saved=working.resolve("ronova-launch.args");
+            if(!Files.isRegularFile(saved))throw new IOException("GAME_LAUNCH_ARGUMENTS_NOT_CONFIGURED:ronova-launch.args");
+            game.addAll(RestartTargets.expand(working,List.of("@"+saved)));
+        }
+        Path directory=RestartTargets.gameDirectory(working,game);
         if(!Files.isRegularFile(java)||!Files.isRegularFile(core))throw new IOException("GAME_JAVA_OR_RONOVA_JAR_MISSING");
         Properties selection=targets(directory.resolve("ronova-prelaunch.properties"));
         RestartTargets.Selection restarted;
-        try{restarted=RestartTargets.read(directory,Arrays.asList(arguments).subList(4,arguments.length));}
+        try{restarted=RestartTargets.read(working,game);}
         catch(IOException unavailable){throw new IOException("RONOVA_PRELAUNCH_DURABLE_RESTORE_UNAVAILABLE:"+unavailable.getMessage(),unavailable);}
         TreeSet<String> selectedIds=new TreeSet<>(restarted.modes().keySet());
         for(String id:selection.getProperty("stop","").split(","))if(!id.isEmpty())selectedIds.add(id);
-        String selected=String.join(",",selectedIds);
-        String protectedIds=selection.getProperty("protect","");
-        String remoteAllowed=selection.getProperty("allow_remote_stop","");
+        Properties files=modFiles(directory);
+        Map<String,String> modes=new TreeMap<>();
         String returns=selection.getProperty("returns","default");
+        for(String id:selectedIds)modes.put(id,selection.getProperty("returns."+id,restarted.modes().getOrDefault(id,returns)));
+        expandGroups(selectedIds,modes,files);
+        TreeSet<String> protectedSet=new TreeSet<>();for(String id:selection.getProperty("protect","").split(","))if(!id.isEmpty())protectedSet.add(id);
+        expandGroups(protectedSet,null,files);
+        String selected=String.join(",",selectedIds);
+        String protectedIds=String.join(",",protectedSet);
+        String remoteAllowed=selection.getProperty("allow_remote_stop","");
+        String remoteProtected=selection.getProperty("allow_remote_protect","");
         Path cache=directory.resolve("ronova-pro/bootstrap-prelaunch");Files.createDirectories(cache);
-        Path agent=extract(core,cache,"ronova-pro-agent.jar");
-        Path bootstrap=extract(core,cache,"ronova-pro-bootstrap.jar");
+        Path fileIndex=cache.resolve("mod-files.properties");
+        try(var writer=Files.newBufferedWriter(fileIndex,StandardCharsets.UTF_8)){files.store(writer,"Actual local Mod files prepared before the game JVM");}
+        // HotSpot 17's Windows Instrumentation native search path cannot consume every Unicode game path.
+        // Keep local rules/index in the game directory and load payloads from the system temporary cache.
+        Path payloadCache=Path.of(System.getProperty("java.io.tmpdir")).toAbsolutePath().normalize().resolve("ronova-pro/bootstrap-prelaunch");
+        Files.createDirectories(payloadCache);
+        Path agent=extract(core,payloadCache,"ronova-pro-agent.jar");
+        Path bootstrap=extract(core,payloadCache,"ronova-pro-bootstrap.jar");
         Path nativeControl=null,nativeStorage=null;
         if(System.getProperty("os.name","").startsWith("Windows")&&System.getProperty("os.arch","").equals("amd64")) {
-            nativeControl=extract(bootstrap,cache,"ronova-native/windows-x86_64/ronova-pro-control.dll","ronova-pro-control.dll");
-            nativeStorage=extract(core,cache,"ronova-pro-storage.dll");
+            nativeControl=extract(bootstrap,payloadCache,"ronova-native/windows-x86_64/ronova-pro-control.dll","ronova-pro-control.dll");
+            nativeStorage=extract(core,payloadCache,"ronova-pro-storage.dll");
         }
         String encoded=Base64.getUrlEncoder().withoutPadding()
                 .encodeToString(bootstrap.toString().getBytes(StandardCharsets.UTF_8));
@@ -53,30 +79,71 @@ public final class PrelaunchMain {
         // the original game arguments below retain their own disabled entries.
         command.add("-XX:+UnlockDiagnosticVMOptions");
         command.add("-XX:DisableIntrinsic="+DISABLED_WRITER_INTRINSICS);
-        if(!selected.isEmpty())command.add("-Dronova.pro.bootStop="+selected);
+        command.add("-Dronova.pro.prelaunchPrepared=true");
+        command.add("-Dronova.pro.gameDirectory="+directory);
+        command.add("-Dronova.pro.modFiles="+fileIndex);
+        command.add("-Dronova.pro.bootStop="+selected);
         if(!selected.isEmpty())command.add("-Dronova.pro.bootReturns="+returns);
         for(String id:selectedIds){
-            String mode=selection.getProperty("returns."+id,restarted.modes().getOrDefault(id,returns));
+            String mode=modes.get(id);
             command.add("-Dronova.pro.bootReturns."+id+"="+mode);
         }
         if(restarted.realm()!=null){command.add("-Dronova.pro.bootRealm="+restarted.realm());command.add("-Dronova.pro.bootWorld="+restarted.world());}
-        if(!protectedIds.isEmpty())command.add("-Dronova.pro.bootProtect="+protectedIds);
+        command.add("-Dronova.pro.bootProtect="+protectedIds);
         if(!remoteAllowed.isEmpty())command.add("-Dronova.pro.clientAllowedStop="+remoteAllowed);
+        if(!remoteProtected.isEmpty())command.add("-Dronova.pro.clientAllowedProtect="+remoteProtected);
         if(nativeControl!=null){command.add("-Dronova.pro.control.native="+nativeControl);command.add("-agentpath:"+nativeControl);}
         if(nativeStorage!=null)command.add("-Dronova.pro.storage.native="+nativeStorage);
         command.add("-javaagent:"+agent+"=base64:"+encoded);
-        for(int i=4;i<arguments.length;i++)command.add(arguments[i]);
+        command.addAll(game);
         // The child premain publishes its actual ready/partial/failed state. This process has only prepared
         // payloads and launch arguments; individual controls decide whether their actual backend is usable.
         System.out.println("RONOVA_PRELAUNCH_PREPARED targets="+(selected.isEmpty()?"NONE":selected));
-        ProcessBuilder launch=new ProcessBuilder(command).directory(directory.toFile()).inheritIO();
-        if(!selected.isEmpty())launch.environment().put("RONOVA_PRO_BOOT_STOP",selected);
-        if(!protectedIds.isEmpty())launch.environment().put("RONOVA_PRO_BOOT_PROTECT",protectedIds);
+        ProcessBuilder launch=new ProcessBuilder(command).directory(working.toFile()).inheritIO();
+        launch.environment().put("RONOVA_PRO_BOOT_STOP",selected);
+        launch.environment().put("RONOVA_PRO_BOOT_PROTECT",protectedIds);
         Process child=launch.start();
         System.out.println("RONOVA_GAME_PID="+child.pid());
         int code=child.waitFor();
         if(code!=0)System.err.println("RONOVA_GAME_EXIT="+code);
         System.exit(code);
+    }
+
+    private static Properties modFiles(Path directory)throws IOException{
+        Properties files=new Properties();Path mods=directory.resolve("mods");if(!Files.isDirectory(mods))return files;
+        try(var paths=Files.list(mods)){
+            for(Path file:paths.filter(path->Files.isRegularFile(path)&&path.getFileName().toString().toLowerCase(java.util.Locale.ROOT).endsWith(".jar")).toList()){
+                try(JarFile jar=new JarFile(file.toFile())){
+                    var entry=jar.getJarEntry("META-INF/mods.toml");if(entry==null)continue;
+                    String text;try(InputStream input=jar.getInputStream(entry)){text=new String(input.readNBytes(1024*1024),StandardCharsets.UTF_8);}
+                    TreeSet<String> ids=new TreeSet<>();boolean mod=false;
+                    for(String line:text.split("\\R")){
+                        String part=line.strip();if(part.startsWith("[")){mod=part.matches("\\[\\[mods]]\\s*(?:#.*)?");continue;}
+                        if(mod){var match=java.util.regex.Pattern.compile("^modId\\s*=\\s*['\"]([a-zA-Z0-9_.-]+)['\"]").matcher(part);
+                            if(match.find())ids.add(match.group(1).toLowerCase(java.util.Locale.ROOT));}
+                    }
+                    if(!ids.isEmpty())files.setProperty(file.toAbsolutePath().normalize().toString(),String.join(",",ids));
+                }
+            }
+        }
+        return files;
+    }
+    private static void expandGroups(TreeSet<String> selected,Map<String,String> modes,Properties files)throws IOException{
+        boolean changed;
+        do{
+            changed=false;
+            for(String path:files.stringPropertyNames()){
+                TreeSet<String> aliases=new TreeSet<>(Arrays.asList(files.getProperty(path).split(",")));
+                if(java.util.Collections.disjoint(selected,aliases))continue;
+                if(!java.util.Collections.disjoint(aliases,Set.of("ronova_pro","minecraft","forge","java")))throw new IOException("RESERVED_MOD_IN_SHARED_FILE:"+path);
+                String mode=null;
+                if(modes!=null)for(String id:aliases)if(selected.contains(id)){
+                    String candidate=modes.get(id);if(mode!=null&&!mode.equals(candidate))throw new IOException("SHARED_MOD_FILE_RETURN_CONFLICT:"+path);mode=candidate;
+                }
+                changed|=selected.addAll(aliases);
+                if(modes!=null)for(String id:aliases)modes.put(id,mode);
+            }
+        }while(changed);
     }
 
     private static String writerIntrinsics(){
@@ -101,7 +168,7 @@ public final class PrelaunchMain {
         Properties properties=new Properties();
         try(var reader=Files.newBufferedReader(configuration,StandardCharsets.UTF_8)){properties.load(reader);}
         Properties selected=new Properties();
-        for(String action:List.of("stop","protect","allow_remote_stop"))
+        for(String action:List.of("stop","protect","allow_remote_stop","allow_remote_protect"))
             selected.setProperty(action,normalize(properties.getProperty(action,"")));
         String returns=properties.getProperty("returns","default").trim().toLowerCase(java.util.Locale.ROOT);
         if(!List.of("default","null","empty","uuid-fixed","uuid-each","invalid-id").contains(returns))

@@ -89,10 +89,12 @@ public final class ClientPresence {
         boolean integrated=Minecraft.getInstance().getSingleplayerServer()!=null;
         Set<String> selected=new HashSet<>();
         if(!integrated) {
-            String configured=System.getProperty("ronova.pro.bootStop","")+","
-                    +System.getProperty("ronova.pro.clientAllowedStop","")+","
-                    +System.getenv().getOrDefault("RONOVA_PRO_BOOT_STOP","");
+            String configured=System.getProperty(message.protect()?"ronova.pro.bootProtect":"ronova.pro.bootStop","")+","
+                    +System.getProperty(message.protect()?"ronova.pro.clientAllowedProtect":"ronova.pro.clientAllowedStop","")+","
+                    +System.getenv().getOrDefault(message.protect()?"RONOVA_PRO_BOOT_PROTECT":"RONOVA_PRO_BOOT_STOP","");
             for(String id:configured.split(","))if(!id.isBlank())selected.add(id.trim().toLowerCase(Locale.ROOT));
+            for(String id:List.copyOf(selected))net.minecraftforge.fml.ModList.get().getMods().stream().filter(info->info.getModId().equals(id)).findFirst()
+                .ifPresent(info->{if(info.getOwningFile()!=null)for(var alias:info.getOwningFile().getMods())selected.add(alias.getModId());});
         }
         List<String> accepted=new ArrayList<>();
         for(String raw:message.ids().split(",")) {
@@ -100,19 +102,13 @@ public final class ClientPresence {
             if((integrated||selected.contains(id))&&net.minecraftforge.fml.ModList.get().getModContainerById(id).isPresent())
                 accepted.add(id);
         }
-        if(accepted.isEmpty())return;
+        if(accepted.isEmpty()){if(known!=null)ProNetwork.modGroupResult(message,"LOCAL_AUTHORIZATION_REQUIRED");return;}
         if(known==null){
-            for(String id:accepted)pendingModGroups.put(id,new ProNetwork.ModGroup(message.session(),id,message.returns()));
+            String ids=String.join(",",accepted);pendingModGroups.put(ids+":"+message.protect(),new ProNetwork.ModGroup(message.session(),ids,message.returns(),message.protect()));
             return;
         }
-        try {
-            Class<?> agent=Class.forName("dev.ronova.pro.agent.RecoveryAgent",false,ClassLoader.getSystemClassLoader());
-            String result=String.valueOf(agent.getMethod("stopModIds",String[].class,String.class).invoke(null,
-                    (Object)accepted.toArray(String[]::new),message.returns()));
-            LOG.log(System.Logger.Level.INFO,"RONOVA_CLIENT_MOD_GROUP "+result);
-        } catch(ReflectiveOperationException unavailable) {
-            LOG.log(System.Logger.Level.WARNING,"RONOVA_CLIENT_MOD_GROUP_UNAVAILABLE "+unavailable.getClass().getSimpleName());
-        }
+        installControls();
+        ClientModGroups.apply(new ProNetwork.ModGroup(message.session(),String.join(",",accepted),message.returns(),message.protect()),true);
     }
 
     /** Runs on the client thread and invalidates all connection-owned state on transport replacement. */
@@ -121,6 +117,7 @@ public final class ClientPresence {
         if(!mc.isSameThread())throw new IllegalStateException("CLIENT_THREAD_REQUIRED");
         Object active=mc.getConnection()==null?null:mc.getConnection().getConnection();
         if(connection!=active) {
+            ClientModGroups.disconnected();
             connection=active;hudPolicies.clear();localBodies.clear();watchSession=null;watches.clear();presentationWatches.clear();retiredChallenges.clear();challengeOverflow=false;
             policy.connection(active);terminalPolicy.connection(active);pendingModGroups.clear();policyOverflowReported=false;awaitingScope=false;awaitingAfterScope=-1;
             worldAppliedScope=-1;lastResetScope=-1;lastResetDimension=null;
@@ -250,6 +247,7 @@ public final class ClientPresence {
         }catch(ReflectiveOperationException|RuntimeException unavailable){LOG.log(System.Logger.Level.WARNING,"CLIENT_CONTROL_INSTALL_UNAVAILABLE",unavailable);}
     }
     public static void bindLocal(net.minecraft.world.entity.Entity entity) {
+        if(ClientModGroups.protectedObject(entity)&&!controlsInstalled)installControls();
         if(!(entity instanceof net.minecraft.world.entity.LivingEntity living))return;
         var raw=(Access.EntityState)entity;
         if(!lifePolicy(raw.pro$id(),raw.pro$uuid())) {removeLocal(entity);return;}
@@ -274,16 +272,16 @@ public final class ClientPresence {
     private static boolean currentBody(LocalBody body) {
         if(body==null)return false;
         var entity=body.entity().get();if(entity==null||localBodies.get(entity)!=body)return false;
-        boolean current=Minecraft.getInstance().isSameThread()?lifePolicy(body.id(),body.uuid()):
-                !awaitingScope&&(policy.denies(connection,policy.dimension(),body.id(),body.uuid())||policy.noHeal(connection,policy.dimension(),body.id(),body.uuid()));
+        boolean current=ClientModGroups.protectedObject(entity)|| (Minecraft.getInstance().isSameThread()?lifePolicy(body.id(),body.uuid()):
+                !awaitingScope&&(policy.denies(connection,policy.dimension(),body.id(),body.uuid())||policy.noHeal(connection,policy.dimension(),body.id(),body.uuid())));
         if(!current) {removeLocal(entity);return false;}
         return ((Access.EntityState)entity).pro$level()==world;
     }
     private static boolean lifePolicy(int id,UUID uuid) {
-        return !awaitingScope&&(removalDenied(id,uuid)||policy.noHeal(connection,levelDimension(Minecraft.getInstance()),id,uuid));
+        return groupProtected(id,uuid)||!awaitingScope&&(removalDenied(id,uuid)||policy.noHeal(connection,levelDimension(Minecraft.getInstance()),id,uuid));
     }
     private static boolean protectedBody(LocalBody body) {
-        return policy.denies(connection,policy.dimension(),body.id(),body.uuid());
+        return ClientModGroups.protectedObject(body.entity().get())||policy.denies(connection,policy.dimension(),body.id(),body.uuid());
     }
     private static boolean healthDenied(LocalBody body,float value) {
         boolean protection=protectedBody(body),noHeal=policy.noHeal(connection,policy.dimension(),body.id(),body.uuid());
@@ -301,6 +299,10 @@ public final class ClientPresence {
         return healthDenied(body,value);
     }
     public static boolean clientField(Object receiver,Class<?> declaring,String field,Object value) {
+        if(receiver instanceof BlockEntity block&&declaring==BlockEntity.class&&ClientModGroups.protectedObject(block)){
+            var raw=(Access.Block)block;
+            if(switch(field){case "remove","f_58859_"->Boolean.TRUE.equals(value);case "level","f_58857_"->value!=raw.pro$level();case "worldPosition","f_58858_"->!Objects.equals(value,raw.pro$pos());default->false;})return true;
+        }
         LocalBody body=localBodies.get(receiver);
         if(currentBody(body)&&localBodies.containsKey(body.entity.get())) {
             var entity=body.entity.get();
@@ -459,6 +461,37 @@ public final class ClientPresence {
             mc.hitResult=net.minecraft.world.phys.BlockHitResult.miss(hit.getLocation(),net.minecraft.core.Direction.UP,BlockPos.containing(hit.getLocation()));
         // Minecraft.player remains owned by the actual respawn/disconnect handoff; presence includes that root.
     }
+    static void retireGroupBody(Entity entity){
+        Minecraft mc=context();var raw=(Access.EntityState)entity;
+        if(mc.level==null||raw.pro$level()!=mc.level||entity==mc.player)return;
+        var level=mc.level;removeLocal(entity);
+        try{if(level.getEntity(raw.pro$id())==entity)level.removeEntity(raw.pro$id(),Entity.RemovalReason.DISCARDED);}
+        finally{
+            // A stopped override cannot keep the actual current lookup/section/tick shares alive.
+            var manager=(dev.ronova.pro.mixin.ClientModGroupHooks.StorageAccess)((ClientStorage)level).pro$clientEntityStorage();
+            var lookup=(Access.Lookup)manager.pro$lookup();lookup.pro$ids().values().removeIf(value->value==entity);lookup.pro$uuids().values().removeIf(value->value==entity);
+            var sections=(Access.Sections)manager.pro$sections();
+            for(var section:sections.pro$all().values()){
+                var values=(Access.Group)((Access.Section)section).pro$storage();values.pro$all().removeIf(value->value==entity);
+                for(var list:values.pro$classes().values())list.removeIf(value->value==entity);
+            }
+            var client=(dev.ronova.pro.mixin.ClientModGroupHooks.LevelAccess)level;
+            var ticks=(Access.Ticks)client.pro$ticks();ticks.pro$ensureActiveIsNotIterated();
+            ticks.pro$active().values().removeIf(value->value==entity);ticks.pro$passive().values().removeIf(value->value==entity);
+            client.pro$players().removeIf(value->value==entity);
+            client.pro$parts().values().removeIf(value->value==entity);
+            Entity vehicle=raw.pro$vehicle();
+            if(vehicle!=null){var parent=(Access.EntityState)vehicle;parent.pro$passengers(com.google.common.collect.ImmutableList.copyOf(parent.pro$passengers().stream().filter(value->value!=entity).toList()));raw.pro$vehicle(null);}
+            for(Entity child:raw.pro$passengers())if(((Access.EntityState)child).pro$vehicle()==entity)((Access.EntityState)child).pro$vehicle(null);
+            raw.pro$passengers(com.google.common.collect.ImmutableList.of());
+            raw.pro$callback(net.minecraft.world.level.entity.EntityInLevelCallback.NULL);raw.pro$removal(Entity.RemovalReason.DISCARDED);raw.pro$added(false);
+            if(mc.getCameraEntity()==entity)mc.setCameraEntity(mc.player);
+            if(mc.gameRenderer.getMainCamera().getEntity()==entity)mc.gameRenderer.getMainCamera().reset();
+            if(mc.crosshairPickEntity==entity)mc.crosshairPickEntity=null;
+            if(mc.getEntityRenderDispatcher().crosshairPickEntity==entity)mc.getEntityRenderDispatcher().crosshairPickEntity=null;
+            if(mc.hitResult instanceof net.minecraft.world.phys.EntityHitResult hit&&hit.getEntity()==entity)mc.hitResult=null;
+        }
+    }
     private static void applyTerminalMirrors(Minecraft mc) {
         if(awaitingScope||mc.level==null)return;
         for(ClientPolicyState.Address address:terminalPolicy.activeAddresses(connection,levelDimension(mc)))
@@ -473,6 +506,7 @@ public final class ClientPresence {
         }
     }
     public static boolean publicationDenied(Object level,int id,Entity entity) {
+        if(ClientModGroups.stopped(entity))return true;
         Minecraft mc=context();if(level!=mc.level||mc.level==null||entity==null)return false;
         var raw=(Access.EntityState)entity;
         String dimension=levelDimension(mc);UUID uuid=raw.pro$uuid();
@@ -482,6 +516,7 @@ public final class ClientPresence {
     /** Stops direct manager re-publication before lookup, section and ticking callbacks acquire the body. */
     public static boolean storagePublicationDenied(Object storage,net.minecraft.world.level.entity.EntityAccess incoming) {
         if(!(incoming instanceof Entity entity))return false;
+        if(ClientModGroups.stopped(entity))return true;
         Minecraft mc=Minecraft.getInstance();if(mc.isSameThread())context();
         Object active=world;
         if(active!=mc.level||!(active instanceof net.minecraft.client.multiplayer.ClientLevel level)||awaitingScope
@@ -491,6 +526,7 @@ public final class ClientPresence {
         return mc.isSameThread()&&replacementDenied(level,raw.pro$id(),entity);
     }
     public static boolean renderDenied(net.minecraft.world.entity.Entity entity) {
+        if(ClientModGroups.stopped(entity))return true;
         Minecraft mc=context();if(awaitingScope||mc.level==null||entity==null)return false;
         var raw=(Access.EntityState)entity;
         return terminalPolicy.denies(connection,levelDimension(mc),raw.pro$id(),raw.pro$uuid());
@@ -715,7 +751,16 @@ public final class ClientPresence {
     /** Unknown, disconnected, wrong-dimension, pending-scope and reused-id objects are never treated as protected. */
     public static boolean removalDenied(int entityId,UUID entityUuid) {
         Minecraft mc=context();
-        return !awaitingScope&&mc.level!=null&&policy.denies(connection,levelDimension(mc),entityId,entityUuid);
+        if(mc.level!=null){Entity entity=mc.level.getEntity(entityId);if(entity!=null&&ClientModGroups.stopped(entity))return false;}
+        return groupProtected(entityId,entityUuid)||!awaitingScope&&mc.level!=null&&policy.denies(connection,levelDimension(mc),entityId,entityUuid);
+    }
+    private static boolean groupProtected(int id,UUID uuid){
+        var level=Minecraft.getInstance().level;if(level==null)return false;Entity entity=level.getEntity(id);
+        return entity!=null&&Objects.equals(((Access.EntityState)entity).pro$uuid(),uuid)&&ClientModGroups.protectedObject(entity);
+    }
+    public static boolean groupRemovalDenied(Entity entity){
+        Minecraft mc=Minecraft.getInstance();if(mc.isSameThread())context();
+        return entity!=null&&!awaitingScope&&world!=null&&world==mc.level&&((Access.EntityState)entity).pro$level()==world&&ClientModGroups.protectedObject(entity);
     }
     /** Uses the mixin's actual entity identity fields and verifies the direct id lookup before trusting it. */
     public static UUID identityOf(int entityId) {
@@ -746,6 +791,7 @@ public final class ClientPresence {
     @SubscribeEvent public static void tick(TickEvent.ClientTickEvent event) {
         if(event.phase!=TickEvent.Phase.END)return;
         Minecraft mc=context();tick++;
+        ClientModGroups.tick(mc);
         worldFrames.entrySet().removeIf(entry->{
             if(activeWorld(mc,mc.level)&&selectedWorldObject(mc,entry.getKey()))return false;
             if(entry.getValue().visual!=null)entry.getValue().visual.close();return true;

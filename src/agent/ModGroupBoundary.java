@@ -21,6 +21,7 @@ import jdk.internal.org.objectweb.asm.Type;
 import jdk.internal.org.objectweb.asm.tree.ClassNode;
 import jdk.internal.org.objectweb.asm.tree.InsnList;
 import jdk.internal.org.objectweb.asm.tree.InsnNode;
+import jdk.internal.org.objectweb.asm.tree.LabelNode;
 import jdk.internal.org.objectweb.asm.tree.AbstractInsnNode;
 import jdk.internal.org.objectweb.asm.tree.JumpInsnNode;
 import jdk.internal.org.objectweb.asm.tree.LookupSwitchInsnNode;
@@ -39,10 +40,16 @@ import jdk.internal.org.objectweb.asm.tree.analysis.SourceValue;
 
 /** A whole Forge module is the unit of suppression; shared jars are intentionally included. */
 final class ModGroupBoundary {
+    static final String MOD_CONTAINER="net/minecraftforge/fml/javafmlmod/FMLModContainer";
+    private static volatile boolean creationGuarded;
     private static final Pattern MOD_ID=Pattern.compile("^\\s*modId\\s*=\\s*['\"]([a-zA-Z0-9_.-]+)['\"]");
     private static final Pattern TABLE=Pattern.compile("^\\s*\\[\\[([^]]+)]]\\s*(?:#.*)?$");
     private static final Set<String> denied=ConcurrentHashMap.newKeySet();
     private static final Set<Module> exact=Collections.newSetFromMap(new IdentityHashMap<>());
+    private static final Set<Module> protectedGroups=Collections.newSetFromMap(new IdentityHashMap<>());
+    private static final Set<String> bootProtected=ConcurrentHashMap.newKeySet();
+    private static final Map<String,Set<String>> fileOwners=new ConcurrentHashMap<>();
+    private static final Map<Module,String> moduleFiles=Collections.synchronizedMap(new IdentityHashMap<>());
     private static final Map<Module,Set<String>> metadata=Collections.synchronizedMap(new IdentityHashMap<>());
     private static final AtomicInteger methods=new AtomicInteger();
     private static final Set<String> unresolved=ConcurrentHashMap.newKeySet();
@@ -78,7 +85,19 @@ final class ModGroupBoundary {
             id=id.trim().toLowerCase(java.util.Locale.ROOT);
             if(valid(id))denied.add(id);
         }
+        String protectedIds=System.getProperty("ronova.pro.bootProtect","")+","+System.getenv().getOrDefault("RONOVA_PRO_BOOT_PROTECT","");
+        for(String raw:protectedIds.split(",")){String id=raw.trim().toLowerCase(java.util.Locale.ROOT);if(valid(id))bootProtected.add(id);}
+        String index=System.getProperty("ronova.pro.modFiles","");
+        if(!index.isEmpty())try(var reader=java.nio.file.Files.newBufferedReader(java.nio.file.Path.of(index),StandardCharsets.UTF_8)){
+            java.util.Properties files=new java.util.Properties();files.load(reader);
+            for(String file:files.stringPropertyNames()){
+                Set<String> owners=new HashSet<>();for(String id:files.getProperty(file).split(","))if(id.matches("[a-z0-9_.-]{2,64}"))owners.add(id);
+                if(!owners.isEmpty())fileOwners.put(file,Set.copyOf(owners));
+            }
+        }catch(java.io.IOException unavailable){throw new IllegalStateException("PRELAUNCH_MOD_FILES_UNAVAILABLE",unavailable);}
     }
+    static void protectControls(){ControlImages.protect(denied,exact,protectedGroups,bootProtected,fileOwners,moduleFiles,metadata,returns,
+            publishing,published,groupGaps,codeRetirementGaps,unresolved,batch,methods);}
     private ModGroupBoundary() {}
     private static boolean valid(String id) {
         return id.matches("[a-z0-9_.-]{2,64}") && !Set.of("ronova_pro","minecraft","forge","java").contains(id);
@@ -86,6 +105,9 @@ final class ModGroupBoundary {
     static Set<String> ids(Module module) {
         if(module==null)return Set.of();
         Set<String> known=metadata.get(module);if(known!=null)return known;
+        // A shared unnamed module is a loader-wide identity, not a Mod file.
+        // Its resource lookup can return another Mod's metadata.
+        if(!module.isNamed())return Set.of();
         try(InputStream in=module.getResourceAsStream("META-INF/mods.toml")) {
             if(in==null)return Set.of();
             String content=new String(in.readNBytes(1024*1024),StandardCharsets.UTF_8);
@@ -102,6 +124,78 @@ final class ModGroupBoundary {
             if(ids.isEmpty())return Set.of();
             known=Set.copyOf(ids);metadata.put(module,known);return known;
         } catch(Exception unavailable) {return Set.of();}
+    }
+    static void observeDefinition(Module module,java.security.ProtectionDomain domain){
+        if(module==null||!module.isNamed()||domain==null||domain.getCodeSource()==null)return;
+        String file=sourceFile(domain.getCodeSource().getLocation());if(file==null)return;
+        Set<String> owners=fileOwners.get(file);
+        if(owners==null)try{
+            var path=java.nio.file.Path.of(file);Set<String> discovered;
+            if(java.nio.file.Files.isDirectory(path))try(InputStream input=java.nio.file.Files.newInputStream(path.resolve("META-INF/mods.toml"))){discovered=parseIds(input);}
+            else try(var jar=new java.util.jar.JarFile(path.toFile())){
+                var entry=jar.getJarEntry("META-INF/mods.toml");if(entry==null)return;
+                try(InputStream input=jar.getInputStream(entry)){discovered=parseIds(input);}
+            }
+            if(discovered.isEmpty())return;owners=Set.copyOf(discovered);fileOwners.put(file,owners);
+        }catch(java.io.IOException|RuntimeException unavailable){return;}
+        String prior=moduleFiles.putIfAbsent(module,file);
+        if(prior!=null&&!prior.equals(file)){Set<String> combined=new HashSet<>(metadata.getOrDefault(module,Set.of()));combined.addAll(owners);owners=Set.copyOf(combined);}
+        metadata.put(module,owners);
+        if(!Collections.disjoint(owners,bootProtected))protectDiscovered(module);
+        if(stopped(module))RecoveryAgent.publishStoppedModule(module);
+    }
+    private static String sourceFile(java.net.URL source){
+        if(source==null)return null;
+        try{
+            if(source.getProtocol().equals("file"))return java.nio.file.Path.of(source.toURI()).toAbsolutePath().normalize().toString();
+            String path=java.net.URLDecoder.decode(source.getPath(),StandardCharsets.UTF_8);
+            int bang=path.indexOf('!');if(bang>=0)path=path.substring(0,bang);
+            int union=path.lastIndexOf('#');if(union>=0)path=path.substring(0,union);
+            if(path.startsWith("file:"))return java.nio.file.Path.of(java.net.URI.create(path)).toAbsolutePath().normalize().toString();
+            if(path.matches("^/[A-Za-z]:/.*"))path=path.substring(1);
+            return java.nio.file.Path.of(path).toAbsolutePath().normalize().toString();
+        }catch(java.net.URISyntaxException|RuntimeException unavailable){return null;}
+    }
+    private static Set<String> parseIds(InputStream input)throws java.io.IOException{
+        Set<String> ids=new HashSet<>();boolean mod=false;
+        for(String line:new String(input.readNBytes(1024*1024),StandardCharsets.UTF_8).split("\\R")){
+            Matcher table=TABLE.matcher(line);if(table.matches()){mod=table.group(1).trim().equals("mods");continue;}
+            if(line.stripLeading().startsWith("[")){mod=false;continue;}
+            if(mod){Matcher id=MOD_ID.matcher(line);if(id.find())ids.add(id.group(1).toLowerCase(java.util.Locale.ROOT));}
+        }
+        return ids;
+    }
+    static Module[] modules(String[] requested){
+        Set<String> selected=new HashSet<>();if(requested!=null)for(String id:requested)if(id!=null)selected.add(id.trim().toLowerCase(java.util.Locale.ROOT));
+        Set<Module> result=Collections.newSetFromMap(new IdentityHashMap<>());
+        synchronized(metadata){for(var entry:metadata.entrySet())if(!Collections.disjoint(entry.getValue(),selected))result.add(entry.getKey());}
+        for(Class<?> type:RecoveryAgent.loadedClasses())if(!Collections.disjoint(ids(type.getModule()),selected))result.add(type.getModule());
+        return result.toArray(Module[]::new);
+    }
+    static boolean protectedModule(Module module){
+        if(module==null)return false;
+        synchronized(protectedGroups){if(protectedGroups.contains(module))return true;}
+        if(Collections.disjoint(ids(module),bootProtected))return false;
+        protectDiscovered(module);return true;
+    }
+    private static void protectDiscovered(Module module){
+        if(ids(module).stream().anyMatch(id->!valid(id))){gap(module,"RESERVED_MOD_IN_PROTECTED_SHARED_MODULE:"+ids(module));return;}
+        synchronized(protectedGroups){if(!protectedGroups.add(module))return;}
+        try{RecoveryAgent.publishProtectedModules(new Module[]{module});}
+        catch(RuntimeException failure){synchronized(protectedGroups){protectedGroups.remove(module);}throw failure;}
+    }
+    static String protect(Instrumentation api,String[] ids,Module[] hints){
+        if(api==null)return "AGENT_UNAVAILABLE;FAILED=1";
+        String validation=validate(ids,hints);if(!validation.equals("READY"))return validation+";FAILED=1";
+        Set<Module> selected=Collections.newSetFromMap(new IdentityHashMap<>());selected.addAll(Arrays.asList(hints));
+        RecoveryAgent.publishProtectedModules(selected.toArray(Module[]::new));
+        synchronized(protectedGroups){protectedGroups.addAll(selected);}
+        int failures=0;
+        for(Class<?> type:RecoveryAgent.loadedClasses())if(selected.contains(type.getModule())&&!type.isArray()&&!type.isPrimitive()){
+            if(!api.isModifiableClass(type)){gap(type.getModule(),type.getName()+":PROTECTED_CLASS_UNMODIFIABLE");failures++;continue;}
+            try{api.retransformClasses(type);}catch(UnmodifiableClassException|RuntimeException|LinkageError unavailable){gap(type.getModule(),type.getName()+":PROTECT_TRANSFORM_UNAVAILABLE");failures++;}
+        }
+        return (failures==0?"PROTECTED":"PROTECTED_PARTIAL")+";FAILED="+failures;
     }
     static boolean stopped(Module module) {
         if(module==null)return false;
@@ -137,19 +231,7 @@ final class ModGroupBoundary {
                 changed=true;continue;
             }
             if(method.name.equals("<init>")) {
-                boolean modCarrier=node.visibleAnnotations!=null&&node.visibleAnnotations.stream()
-                        .anyMatch(annotation->annotation.desc.equals("Lnet/minecraftforge/fml/common/Mod;"));
-                if(modCarrier) {
-                    // Forge still needs its inert @Mod carrier; ordinary business allocations are refused.
-                    if(shortConstructor(node,method))changed=true;
-                    else gap(module,name+"#"+method.name+method.desc+":MOD_CARRIER_PREFIX_UNCONTROLLED");
-                } else {
-                    InsnList rejected=new InsnList();
-                    rejected.add(new TypeInsnNode(Opcodes.NEW,"java/lang/IllegalStateException"));
-                    rejected.add(new InsnNode(Opcodes.DUP));rejected.add(new LdcInsnNode("RONOVA_MOD_GROUP_CREATION_REFUSED"));
-                    rejected.add(new MethodInsnNode(Opcodes.INVOKESPECIAL,"java/lang/IllegalStateException","<init>","(Ljava/lang/String;)V",false));
-                    rejected.add(new InsnNode(Opcodes.ATHROW));replace(method,rejected);changed=true;
-                }
+                rejectConstructor(method);changed=true;
                 continue;
             }
             if((method.access&Opcodes.ACC_ABSTRACT)!=0)continue;
@@ -163,6 +245,58 @@ final class ModGroupBoundary {
         // Replaced bodies are straight-line returns. Existing constructors keep their original frames.
         // Recomputing unrelated Forge hierarchy here would make a mod stop depend on loader resources.
         ClassWriter writer=new ClassWriter(ClassWriter.COMPUTE_MAXS);node.accept(writer);return writer.toByteArray();
+    }
+    static byte[] container(ClassLoader loader,String name,byte[] bytes){
+        if(!MOD_CONTAINER.equals(name))return null;
+        ClassNode node=new ClassNode();new ClassReader(bytes).accept(node,0);
+        if(node.fields.stream().noneMatch(field->field.name.equals("modClass")&&field.desc.equals("Ljava/lang/Class;")))throw new IllegalStateException("ACTUAL_FORGE_MOD_CLASS_UNAVAILABLE");
+        for(MethodNode method:node.methods)if(method.name.equals("constructMod")&&method.desc.equals("()V")){
+            for(AbstractInsnNode at:method.instructions.toArray())if(at instanceof MethodInsnNode call&&call.owner.equals("dev/ronova/pro/bootstrap/ControlBridge")&&call.name.equals("modOwnerAllowed")){creationGuarded=true;return null;}
+            InsnList gate=new InsnList();LabelNode allowed=new LabelNode();gate.add(new VarInsnNode(Opcodes.ALOAD,0));
+            gate.add(new jdk.internal.org.objectweb.asm.tree.FieldInsnNode(Opcodes.GETFIELD,node.name,"modClass","Ljava/lang/Class;"));
+            gate.add(new MethodInsnNode(Opcodes.INVOKESTATIC,"dev/ronova/pro/bootstrap/ControlBridge","modOwnerAllowed","(Ljava/lang/Object;)Z",false));
+            gate.add(new JumpInsnNode(Opcodes.IFNE,allowed));gate.add(new InsnNode(Opcodes.RETURN));gate.add(allowed);method.instructions.insert(gate);
+            ControlClassWriter writer=new ControlClassWriter(loader,node);node.accept(writer);creationGuarded=true;return writer.toByteArray();
+        }
+        throw new IllegalStateException("ACTUAL_FORGE_CONSTRUCT_MOD_ENTRY_UNAVAILABLE");
+    }
+    private static void rejectConstructor(MethodNode method){
+        InsnList rejected=new InsnList();rejected.add(new TypeInsnNode(Opcodes.NEW,"java/lang/IllegalStateException"));
+        rejected.add(new InsnNode(Opcodes.DUP));rejected.add(new LdcInsnNode("RONOVA_MOD_GROUP_CREATION_REFUSED"));
+        rejected.add(new MethodInsnNode(Opcodes.INVOKESPECIAL,"java/lang/IllegalStateException","<init>","(Ljava/lang/String;)V",false));
+        rejected.add(new InsnNode(Opcodes.ATHROW));replace(method,rejected);
+    }
+    /** Every real body reads the current group policy, including private/bridge/synthetic bodies. */
+    static byte[] entries(ClassLoader loader,Module module,String name,byte[] bytes){
+        if(loader==null||!RecoveryAgent.producerModule(module))return null;
+        ClassNode node=new ClassNode();new ClassReader(bytes).accept(node,0);boolean changed=false;
+        for(MethodNode method:node.methods){
+            if((method.access&(Opcodes.ACC_ABSTRACT|Opcodes.ACC_NATIVE))!=0||method.instructions.size()==0)continue;
+            boolean exists=false;for(AbstractInsnNode at:method.instructions.toArray())if(at instanceof MethodInsnNode call
+                    &&call.owner.equals("dev/ronova/pro/bootstrap/ControlBridge")&&call.name.equals("modMethodAllowed")){exists=true;break;}
+            if(exists)continue;
+            InsnList gate=new InsnList();LabelNode allowed=new LabelNode();gate.add(new LdcInsnNode(Type.getObjectType(node.name)));
+            if((method.access&Opcodes.ACC_STATIC)==0&&!method.name.equals("<init>"))gate.add(new VarInsnNode(Opcodes.ALOAD,0));
+            else gate.add(new InsnNode(Opcodes.ACONST_NULL));
+            gate.add(new MethodInsnNode(Opcodes.INVOKESTATIC,"dev/ronova/pro/bootstrap/ControlBridge","modMethodAllowed","(Ljava/lang/Class;Ljava/lang/Object;)Z",false));
+            gate.add(new JumpInsnNode(Opcodes.IFNE,allowed));
+            if(method.name.equals("<init>")){
+                MethodNode refusal=new MethodNode();rejectConstructor(refusal);gate.add(refusal.instructions);
+            }else{
+                Type result=Type.getReturnType(method.desc);
+                switch(result.getSort()){
+                    case Type.VOID -> gate.add(new InsnNode(Opcodes.RETURN));
+                    case Type.BOOLEAN,Type.BYTE,Type.CHAR,Type.SHORT,Type.INT -> {gate.add(new InsnNode(Opcodes.ICONST_0));gate.add(new InsnNode(Opcodes.IRETURN));}
+                    case Type.LONG -> {gate.add(new InsnNode(Opcodes.LCONST_0));gate.add(new InsnNode(Opcodes.LRETURN));}
+                    case Type.FLOAT -> {gate.add(new InsnNode(Opcodes.FCONST_0));gate.add(new InsnNode(Opcodes.FRETURN));}
+                    case Type.DOUBLE -> {gate.add(new InsnNode(Opcodes.DCONST_0));gate.add(new InsnNode(Opcodes.DRETURN));}
+                    default -> {gate.add(new InsnNode(Opcodes.ACONST_NULL));gate.add(new InsnNode(Opcodes.ARETURN));}
+                }
+            }
+            gate.add(allowed);method.instructions.insert(gate);changed=true;
+        }
+        if(!changed)return null;
+        ControlClassWriter writer=new ControlClassWriter(loader,node);node.accept(writer);return writer.toByteArray();
     }
     private static void replace(MethodNode method,InsnList code) {
         method.instructions=code;method.tryCatchBlocks.clear();method.localVariables=null;
@@ -231,35 +365,6 @@ final class ModGroupBoundary {
     }
     replace(method,code);
     }
-    private static boolean shortConstructor(ClassNode owner,MethodNode method) {
-        try {
-            SourceInterpreter interpreter=new SourceInterpreter(Opcodes.ASM8) { };
-            AbstractInsnNode[] code=method.instructions.toArray();
-            Frame<SourceValue>[] frames=new Analyzer<>(interpreter).analyze(owner.name,method);
-            for(int index=0;index<code.length;index++)if(code[index] instanceof MethodInsnNode call
-                    &&call.getOpcode()==Opcodes.INVOKESPECIAL&&call.name.equals("<init>")
-                    &&(call.owner.equals(owner.superName)||call.owner.equals(owner.name))&&frames[index]!=null) {
-                int arguments=Type.getArgumentTypes(call.desc).length;
-                Frame<SourceValue> frame=frames[index];
-                if(frame.getStackSize()<arguments+1)continue;
-                SourceValue receiver=frame.getStack(frame.getStackSize()-arguments-1);
-                if(receiver.insns.size()!=1||!(receiver.insns.iterator().next() instanceof VarInsnNode load)
-                        ||load.getOpcode()!=Opcodes.ALOAD||load.var!=0)continue;
-                boolean branch=false;
-                for(int i=0;i<index;i++)if(code[i] instanceof JumpInsnNode||code[i] instanceof TableSwitchInsnNode
-                        ||code[i] instanceof LookupSwitchInsnNode) {branch=true;break;}
-                if(branch)continue;
-                for(AbstractInsnNode next=call.getNext();next!=null;) {
-                    AbstractInsnNode remove=next;next=next.getNext();method.instructions.remove(remove);
-                }
-                method.instructions.add(new InsnNode(Opcodes.RETURN));
-                method.tryCatchBlocks.clear();method.localVariables=null;
-                method.visibleLocalVariableAnnotations=null;method.invisibleLocalVariableAnnotations=null;
-                return true;
-            }
-        } catch(AnalyzerException|RuntimeException unavailable) {return false;}
-        return false;
-    }
     static String prepare(Instrumentation api,String[] ids,Module[] hints,String mode) {
         if(api==null)return "AGENT_UNAVAILABLE";
         mode=returnMode(mode);
@@ -275,8 +380,11 @@ final class ModGroupBoundary {
                 if(previous!=null&&previous.mode().equals(mode))policies.put(module,previous);
             }
             returns.putAll(policies);
+            for(Module module:selected)denied.addAll(ids(module));
+            synchronized(exact){exact.addAll(selected);}
         }
         // Bind every selected policy before the first task/native stopped publication.
+        RecoveryAgent.publishGroupGate(selected.toArray(Module[]::new));
         return publishSelected(selected);
     }
     static String stop(Instrumentation api,String[] ids,Module[] hints,String mode) {
@@ -343,6 +451,8 @@ final class ModGroupBoundary {
         for(int i=0;i<ids.length;i++) {
             String id=ids[i].trim().toLowerCase(java.util.Locale.ROOT);
             if(hints[i]==null||hints[i]==Object.class.getModule())return "INVALID_TARGET:"+id;
+            if(!hints[i].isNamed())return "SHARED_UNNAMED_MODULE_UNRESOLVED:"+id;
+            if(ids(hints[i]).stream().anyMatch(owner->!valid(owner)))return "RESERVED_MOD_IN_SHARED_MODULE:"+ids(hints[i]);
             if(!ids(hints[i]).contains(id))return "MODULE_METADATA_MISMATCH:"+id;
             if(!selected.containsAll(ids(hints[i])))
                 return "MULTI_MOD_MODULE_REQUIRES_ALL_IDS:"+ids(hints[i]);
@@ -361,15 +471,29 @@ final class ModGroupBoundary {
             if(!valid(id))return "INVALID_TARGET:"+id;
             selected.add(id);
         }
-        Map<String,Module> targets=new java.util.LinkedHashMap<>();
-        for(Class<?> type:RecoveryAgent.loadedClasses()) {
-            Set<String> owners=ids(type.getModule());
+        java.util.ArrayList<String> aliases=new java.util.ArrayList<>();java.util.ArrayList<Module> targets=new java.util.ArrayList<>();
+        for(Module module:modules(ids)) {
+            Set<String> owners=ids(module);
             if(Collections.disjoint(owners,selected))continue;
             if(!selected.containsAll(owners))return "CLIENT_SHARED_MODULE_NOT_FULLY_AUTHORIZED:"+owners;
-            for(String owner:owners)targets.put(owner,type.getModule());
+            for(String owner:owners){aliases.add(owner);targets.add(module);}
         }
         if(targets.isEmpty())return "MOD_GROUP_NOT_LOADED";
-        return stop(api,targets.keySet().toArray(String[]::new),targets.values().toArray(Module[]::new),mode);
+        return stop(api,aliases.toArray(String[]::new),targets.toArray(Module[]::new),mode);
+    }
+    static String protectByIds(Instrumentation api,String[] ids){
+        if(api==null)return "AGENT_UNAVAILABLE;FAILED=1";
+        if(ids==null||ids.length==0)return "EMPTY_SELECTION;FAILED=1";
+        for(String raw:ids)if(raw==null||!valid(raw.trim().toLowerCase(java.util.Locale.ROOT)))return "INVALID_TARGET:"+raw+";FAILED=1";
+        Set<String> selected=new HashSet<>();for(String id:ids)selected.add(id.trim().toLowerCase(java.util.Locale.ROOT));
+        java.util.ArrayList<String> aliases=new java.util.ArrayList<>();java.util.ArrayList<Module> targets=new java.util.ArrayList<>();
+        for(Module module:modules(ids)){
+            Set<String> owners=ids(module);
+            if(!selected.containsAll(owners))return "CLIENT_SHARED_MODULE_NOT_FULLY_AUTHORIZED:"+owners+";FAILED=1";
+            for(String owner:owners){aliases.add(owner);targets.add(module);}
+        }
+        if(targets.isEmpty())return "MOD_GROUP_NOT_LOADED;FAILED=1";
+        return protect(api,aliases.toArray(String[]::new),targets.toArray(Module[]::new));
     }
     private static String retransform(Instrumentation api,Set<Module> selected) {
         int loaded=0,failed=0;
@@ -382,6 +506,8 @@ final class ModGroupBoundary {
         for(Class<?> type:snapshot) {
             if(type.isArray()||type.isPrimitive())continue;
             Module module=RecoveryAgent.logicalModule(type);boolean contribution=external.contains(type);if((!selected.contains(module)||!stopped(module))&&!contribution)continue;
+            if(contribution&&!selected.contains(module))for(Module source:RecoveryAgent.methodRootSources(type))if(source!=null&&selected.contains(source))
+                gap(source,type.getName()+":EXTERNAL_OLD_FRAME_SOURCE_UNOBSERVED");
             if(!api.isModifiableClass(type)) {
                 if(type.isHidden()&&RecoveryAgent.definition(type)!=null)continue;
                 if(contribution)ExternalCodeImages.failed(selected.toArray(Module[]::new),type.getName()+":EXTERNAL_CLASS_UNMODIFIABLE");else gap(module,type.getName()+":UNMODIFIABLE");failed++;continue;
@@ -400,7 +526,7 @@ final class ModGroupBoundary {
         String publication=publishSelected(selected);if(!publication.equals("READY"))return publication;
         }
     }
-    static String state() {return "TARGETS="+denied+";METHODS="+methods.get()+";UNRESOLVED="+unresolved.size()+";GAPS="+unresolved.stream().limit(8).toList();}
+    static String state() {return "TARGETS="+denied+";METHODS="+methods.get()+";MOD_CONSTRUCTION_GATE="+(creationGuarded?"INSTALLED":"WAITING_FOR_FORGE_CONTAINER")+";UNRESOLVED="+unresolved.size()+";GAPS="+unresolved.stream().limit(8).toList();}
     static Returns policy(Module module) {
         Returns policy=returns.get(module);
         if(policy==null)throw new IllegalStateException("STOPPED_RETURN_POLICY_REQUIRED");
@@ -457,7 +583,11 @@ final class ModGroupBoundary {
         refreshNativeGaps(module);
         String continuation=ExternalCodeDefinitions.pending(module);
         Set<String> gaps=groupGaps.getOrDefault(module,Set.of());Returns policy=returns.get(module);
-        return "MODS="+ids(module)+";STATE="+(stopped(module)?gaps.isEmpty()&&continuation.isEmpty()?"STOPPED":"STOPPED_PARTIAL":"ACTIVE")
-                +";RETURNS="+(policy==null?"default":policy.mode())+";UNRESOLVED="+(gaps.size()+(continuation.isEmpty()?0:1))+";GAPS="+gaps.stream().limit(8).toList()+";FLOW_CONTINUATION="+continuation;
+        String registrations;
+        try{registrations=String.valueOf(Class.forName("dev.ronova.pro.bootstrap.ControlBridge",false,null).getMethod("modRegistrationState",Module.class).invoke(null,module));}
+        catch(ReflectiveOperationException unavailable){registrations="REGISTRATION_PARTIAL=QUERY_UNAVAILABLE";}
+        boolean registrationGap=registrations.contains("PARTIAL");
+        return "MODS="+ids(module)+";STATE="+(stopped(module)?gaps.isEmpty()&&continuation.isEmpty()&&!registrationGap?"STOPPED":"STOPPED_PARTIAL":protectedModule(module)?gaps.isEmpty()?"PROTECTED":"PROTECTED_PARTIAL":"ACTIVE")
+                +";RETURNS="+(policy==null?"default":policy.mode())+";UNRESOLVED="+(gaps.size()+(continuation.isEmpty()?0:1)+(registrationGap?1:0))+";GAPS="+gaps.stream().limit(8).toList()+";FLOW_CONTINUATION="+continuation+";"+registrations;
     }
 }

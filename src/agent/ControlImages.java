@@ -39,6 +39,7 @@ final class ControlImages implements ClassFileTransformer {
     }
     boolean critical(Module module,ClassLoader loader,String name,Class<?> type) {
         if(name==null)return false;
+        if(ModGroupBoundary.protectedModule(module))return true;
         if(type!=null)for(var entry:declared)if(entry.get()==type)return true;
         if(name.startsWith("dev/ronova/pro/agent/")||name.startsWith("dev/ronova/pro/bootstrap/"))
             return loader==null||loader==RecoveryAgent.class.getClassLoader();
@@ -51,7 +52,7 @@ final class ControlImages implements ClassFileTransformer {
                 ||name.startsWith("java/io/FileOutputStream$")||name.startsWith("java/io/RandomAccessFile$")
                 ||name.equals("java/io/FileCleanable")||name.equals("sun/nio/ch/FileChannelImpl")||name.startsWith("sun/nio/ch/FileChannelImpl$")
                 ||name.equals("java/lang/reflect/Field")||HandleWriteBoundary.targets().contains(name);
-        return CodeSourceBoundary.TARGETS.contains(name)||NetworkBoundary.TARGETS.contains(name)||ClientBoundary.TARGETS.contains(name)||BufferBoundary.wrapTarget(name)||EventFaultBoundary.TARGET.equals(name)||name.equals("sun/misc/Unsafe")||FastutilIndexBoundary.targets().contains(name)||SectionKeyBoundary.targets().contains(name)
+        return ModGroupBoundary.MOD_CONTAINER.equals(name)||CodeSourceBoundary.TARGETS.contains(name)||NetworkBoundary.TARGETS.contains(name)||ClientBoundary.TARGETS.contains(name)||BufferBoundary.wrapTarget(name)||EventFaultBoundary.TARGET.equals(name)||name.equals("sun/misc/Unsafe")||FastutilIndexBoundary.targets().contains(name)||SectionKeyBoundary.targets().contains(name)
                 ||name.startsWith("net/minecraft/world/level/entity/")||name.startsWith("net/minecraft/server/level/ChunkMap")
                 ||Set.of("net/minecraft/world/entity/Entity","net/minecraft/world/entity/LivingEntity",
                     "net/minecraft/server/level/ServerLevel","net/minecraft/server/level/ServerPlayer",

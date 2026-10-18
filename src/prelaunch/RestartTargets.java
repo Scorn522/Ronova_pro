@@ -66,7 +66,11 @@ final class RestartTargets {
         }
         return value;
     }
-    private static List<String> expand(Path directory,List<String> args)throws IOException {
+    static Path gameDirectory(Path working,List<String> args)throws IOException{
+        String selected=option(expand(working,args),"--gameDir");
+        return selected==null?working:working.resolve(selected).toAbsolutePath().normalize();
+    }
+    static List<String> expand(Path directory,List<String> args)throws IOException {
         List<String> result=new ArrayList<>();boolean enabled=true;
         for(String arg:args){
             if(enabled&&arg.startsWith("@")&&!arg.startsWith("@@")){

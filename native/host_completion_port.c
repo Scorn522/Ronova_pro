@@ -14,11 +14,6 @@ static void host_transaction_io_end(HostTransactionUse*,OwnerLink*,int);
 static void *host_transaction_file_identity(HostTransactionUse*,uint64_t*);
 static int host_transaction_io_packet(void*,ULONG_PTR,LPOVERLAPPED*);
 
-typedef struct NativeHostCryptoSpan NativeHostCryptoSpan;
-static NativeHostCryptoSpan *native_memory_crypto_span(uint64_t,uint64_t,OwnerLink*,int,OwnerLink**,int*,int*);
-static void native_memory_crypto_span_end(NativeHostCryptoSpan*);
-static void native_memory_crypto_unobserved(OwnerLink*,int);
-
 typedef struct HostCompletionErrors {DWORD windows;int crt;unsigned long dos;} HostCompletionErrors;
 static HostCompletionErrors host_completion_errors(void){
     HostCompletionErrors value;value.windows=GetLastError();value.crt=errno;value.dos=_doserrno;return value;
@@ -56,7 +51,7 @@ static uint64_t host_completion_generation;
 static int host_completion_lock(int restricted){
     return restricted?TryAcquireSRWLockExclusive(&host_completion_records):(AcquireSRWLockExclusive(&host_completion_records),1);
 }
-static void host_completion_gap(OwnerLink *owners,int restricted){native_memory_crypto_unobserved(owners,restricted);}
+static void host_completion_gap(OwnerLink *owners,int restricted){host_source_gap(owners,restricted);}
 static HostCompletionAlias *host_completion_alias(HANDLE value){
     for(HostCompletionPort *port=host_completion_ports;port;port=port->next)
         for(HostCompletionAlias *alias=port->aliases;alias;alias=alias->next)
@@ -352,8 +347,8 @@ static uint64_t host_completion_associate(HostImport *entry,void *caller,uintptr
 typedef struct HostCompletionResult {DWORD bytes;ULONG_PTR key;LPOVERLAPPED op;ULONG removed;} HostCompletionResult;
 static uint64_t host_completion_dequeue(HostImport *entry,void *caller,uintptr_t *a){
     HostCompletionErrors incoming=host_completion_errors(),outgoing=incoming;int restricted=host_completion_restricted();
-    int multiple=entry->kind==HOST_TX_IOCP_GET_EX,unknown=0,dataUnknown=0,called=0,returned=0;BOOL result=FALSE;
-    OwnerLink *owners=NULL,*observed=NULL;HostCompletionUse *use=NULL;NativeHostCryptoSpan *spans[3]={0};DWORD error=0;
+    int multiple=entry->kind==HOST_TX_IOCP_GET_EX,unknown=0,called=0,returned=0;BOOL result=FALSE;
+    OwnerLink *owners=NULL;HostCompletionUse *use=NULL;DWORD error=0;
     HostCompletionResult *stage=NULL;LPOVERLAPPED_ENTRY entries=NULL;SIZE_T arrayBytes=0;
     HostCompletionOutput outputs[3];unsigned outputCount=0;
     if(multiple){
@@ -371,11 +366,6 @@ static uint64_t host_completion_dequeue(HostImport *entry,void *caller,uintptr_t
             if(!error)error=ERROR_INVALID_DATA;
         }
         if(!error)error=host_completion_outputs(outputs,outputCount,restricted,0);
-        if(!error&&use&&use->port->owned)for(unsigned i=0;i<outputCount&&!error;i++)if(outputs[i].address&&outputs[i].bytes){
-            int denied=0;spans[i]=native_memory_crypto_span((uint64_t)(uintptr_t)outputs[i].address,outputs[i].bytes,
-                    owners,2,&observed,&dataUnknown,&denied);if(denied)error=ERROR_BUSY;
-        }
-        if(!error&&native_owner_stopped(observed))error=ERROR_ACCESS_DENIED;
         if(!error){stage=(HostCompletionResult*)calloc(1,sizeof(*stage));if(!stage)error=ERROR_NOT_ENOUGH_MEMORY;}
         if(!error&&multiple&&arrayBytes&&a[1]){entries=(LPOVERLAPPED_ENTRY)calloc(1,arrayBytes);if(!entries)error=ERROR_NOT_ENOUGH_MEMORY;}
         if(!error){
@@ -400,7 +390,7 @@ static uint64_t host_completion_dequeue(HostImport *entry,void *caller,uintptr_t
                 else if(result){result=FALSE;error=ERROR_INVALID_DATA;host_completion_gap(owners,restricted);}
             }else if(stage->op)host_transaction_io_packet(tag,stage->key,&stage->op);
             if(!error)error=host_completion_outputs(outputs,outputCount,restricted,0);
-            if(!error&&(native_owner_stopped(owners)||native_owner_stopped(observed)))error=ERROR_ACCESS_DENIED;
+            if(!error&&(native_owner_stopped(owners)))error=ERROR_ACCESS_DENIED;
             if(!error){
                 int locked=restricted?TryAcquireSRWLockExclusive(&native_private_gate):(AcquireSRWLockExclusive(&native_private_gate),1);
                 if(!locked)error=ERROR_BUSY;
@@ -421,10 +411,8 @@ static uint64_t host_completion_dequeue(HostImport *entry,void *caller,uintptr_t
         }else outgoing.windows=error;
     } __finally {
         if(called&&!returned){outgoing=host_completion_errors();host_completion_gap(owners,restricted);}
-        for(unsigned i=0;i<3;i++)native_memory_crypto_span_end(spans[i]);
-        if(dataUnknown&&use&&use->port->owned)host_completion_gap(owners,restricted);
-        host_completion_use_end(use,called?observed:NULL,called&&!returned);
-        free(entries);free(stage);native_owner_links_free(observed);native_owner_links_free(owners);host_completion_restore(outgoing);
+        host_completion_use_end(use,called?owners:NULL,called&&!returned);
+        free(entries);free(stage);native_owner_links_free(owners);host_completion_restore(outgoing);
     }
     return result;
 }

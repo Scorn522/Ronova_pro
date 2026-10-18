@@ -482,7 +482,6 @@ static uint64_t host_native_tls(HostImport *entry,void *caller,uintptr_t *argume
                      * subsequent index reuse. It is retired only with the real
                      * OS thread / actual FLS-context lifecycle. CPU value flow
                      * after returning the opaque pointer is still unobserved. */
-                    if(result)InterlockedExchange(&entry->image->privateOpaque,1);
                     HostTlsSources *observed=fls?&fiber->observed:&thread->observed;
                     HostTlsSources before=*observed;*observed=exposure;exposure=before;
                 }else if(freeing){slot->live=0;

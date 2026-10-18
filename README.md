@@ -1,59 +1,18 @@
 # Ronova Pro
 
-主工程：`D:\桌面\ronova_GPT`。Java ABI105 / Native ABI99 / Storage3 / Journal6，客户端协议 `r3-client-8`。
-Java 17；用户态 GNU C23 / GNU C++23；独立 Windows 驱动及管理工具 C17。
-未知业务载体沿真实实例字段、实际容器槽位和原委托调用接续；构图最终复核根字段、实际子对象与已用数组槽，脱离路径不沿用。ArrayDeque 支持环形逻辑槽及原更新中间态，ConcurrentHashMap 保留实际双表迁移、转发及树节点；不调用 getter/迭代器重放数据。自定义槽位的 helper、super.get 和持久绑定核实际调用点、物理方法版本及当前 getter 定义；失配保持未决。原业务调用执行一次，只有当前准确持有的数据方法接续已有动作，未知回调和临时返回对象不自动取得写权。
-自定义 Map 键只在真实槽位查询前声明当前准确的 Java 键方法，记录自然 hashCode/equals/compareTo 的结果、实际读取依赖及方法版本；后续定位直接读存储，不重放键方法。键依赖与实体槽位根分开，写入、未知调用、依赖或定义变化使旧语义失效。已观察的原生分配与 DirectBuffer 借用视图按真实分配代次关联，活视图阻止误释放和完整回滚；地址向 Native 暴露后保留不透明使用，未知裸地址不补造来源。
-Native 私有存储接入已观察模块实际消费的 HeapAlloc/ReAlloc/Free/Destroy、VirtualAlloc/Ex 与 CRT malloc/calloc/realloc/free，按真实 provider、heap context 和分配代次保留来源、读写租约及 DirectBuffer 借用。失败重分配保留旧块，同址成功也换代；原异常和 errno/doserrno/LastError 保留。已观察 DLL 的可写非执行静态段作为借用存储，活视图阻止卸载准备，归还额外 pin 不冒充实际卸载，原映射确认不在才退役。实际 Native binding、回调及工作线程的数据贡献保留已知模块并附 CPU 私有状态未知标记；不以未知字节撤销猜测 C++ 对象语义。Native 全局入口发布前初始化直接依赖的来源桥，避免首次初始化的 Unsafe 回入。
-CRT 的实际字节/宽字符复制、重叠移动、填充及 secure 变体接准确 provider 和函数签名；只接实际存在的导出。本机 UCRT 有7个对应入口，非 secure 的 wmemcpy/wmemmove/wmemset 没有导出，未列为已覆盖。已观察私有存储的原调用保留来源、存储代次和读写使用；同块移动合并角色，活借用及 typed 对象拒绝原始写入。准确活跃的 SDK 修改体按当前线程、provider、完整来源及原目标接续，新存储只沿本次实际分配关系绑定，不扩大原修改范围。错误路径依原函数实际可能触及的范围接续，保留返回值、参数错误处理及 CRT 错误状态。未观察普通存储保原调用；复制字节不授予 C++ 字段、构造、析构或字节回滚权限，内联 CPU 写入仍未覆盖。
-实际 ntdll Nt/ZwReadVirtualMemory、Nt/ZwWriteVirtualMemory 与 Win32 Read/WriteProcessMemory 共用本地数据源、目标和可选计数输出的准确存储使用。process 依 SAME_ACCESS 实际对象副本判定，远程地址不套本地 row；同块角色和输出别名一次接入。控制范围、typed 生命周期和停止来源分别判断，NTSTATUS 不混作 BOOL，返回状态与线程 LastNtStatus 各自保留。原输出不暂存、不预清或重放；失败及异常仍保留可能部分效果，数据贡献不能授予任意私有字段或字节回滚语义。
+主工程：`D:\桌面\ronova_GPT`。当前开发方向以 [V1.5 设计方案](docs/design/Ronova-Pro-设计方案-V1.5.md) 为准：实际文件／Module 归组，整 Mod 停用、保护与存量清理。
 
-实际 HeapCreate 接独立堆创建者与不可变世代，Alloc/ReAlloc/Free/Destroy 的在途调用保留准确上下文；成功块登记后才放开销毁，晚到的旧 Destroy 不退役新世代。原释放前合并创建者及读者，卸载例外只允许完整、独占已停来源的准确块。动态 TLS/FLS 按真实槽世代、OS 线程及 FLS context 保留值来源和读取贡献；NULL 成功、TlsGetValue2 的错误状态、实际 FLS 回调与停止门分开处理。读取关系延续到后续 worker/load，清槽和 detach 不洗掉来源；无法证明终结的回调保持来源与 provider pin 并报告缺口。
-已加载 MSVC 运行库实际导出的 scalar/array new/delete 及明确的 nothrow/sized ABI 接原 provider 和独立存储类别；同址导出按精确名称与地址双重选参，保留原函数、错误状态与异常，不以 malloc/free 代替。LWJGL jemalloc 的16个实际 `je_*` 导出接入同一分配目录，以真实返回范围和 `arenas.lookup` 结果登记子块；reset/destroy、失败重分配和同址换代绑定准确 provider/arena 世代。只发现实际观察模块及其已经解析的相关导入，不枚举全进程模块。
+- 控制链为游戏 JVM 创建前的 prelaunch 参数交接、main 前 premain、Bootstrap、JVMTI／Native。晚附加单独报告为运行期接续。
+- `/ronova_pro mod stop|protect|status <modid[,modid...]>` 展开同一实际文件的别名；共享 ClassLoader 不作为整组依据。停止策略先发布，随后遍历全方法生成合法入口返回，并共用限额清理实体、BlockEntity、订阅、任务和恢复引用。
+- 本地选集保存在游戏目录的 `ronova-prelaunch.properties`，下次引导自动读取。远端服务器的客户端规则须由本机预先授权；客户端实际结果与服务器结果分别报告。
+- Native 活动路径只保留整组控制、JNI／JVMTI、NativeMethodBind、关键线程／句柄和控制范围边界。CRT／STL／第三方分配器字段账本、合作式 allocator/object SDK 和私有字节恢复已退出活动构建。Storage 使用直接 RAII、真实 NTFS 身份与 TxF 事务。
+- 不恢复 JDK 容器广谱 Hook，不安装 getter／Function 组合的见证链。已知恢复载体按实际 backing 身份／CAS 清理；未知私有语义和逃逸调用继续明确报告未覆盖。
 
-Windows x64 编译器静态 TLS 读取实际 PE TLS directory、index 与当前线程 TEB vector，模板不作为线程实例。每线程实例是独立借用 span，活视图阻 image 卸载，真实 OS 线程结束只退役该线程的记录；受限回调和无法确认的布局保留缺口。Windows loader callout 内的返回式 Host 调用沿既有无 JNI、try-lock 来源分派，避免 DLL 线程卸载持加载器锁时进入 JVM。直接 CPU 访问仍不透明。
+Java 17；用户态 GNU C23／GNU C++23；Windows 驱动源码与管理工具 C17。内部兼容接口仍为 Java ABI105／Native ABI99／Storage3／Journal6；客户端协议改为 `v1.5-whole-mod`。接口数字不代表能力完成比例。
 
-已观察的 mimalloc v2 公共分配和 heap API 使用独立 provider 与 heap 世代；safe delete 迁移存活块，实际创建的 heap destroy 才按真实结果退役子块。CRT 的8个 `_aligned_*` 入口配对实际 `_aligned_free`，extent 查询不改变分配代次。GNU Win64 和 MSVC 的 scalar/array、nothrow、sized 与 aligned new/delete 按实际公开符号与准确参数接入；同一原始 C++ 调用内部的 CRT 分配、释放使用窄的原调用 lease，保留原对象构造与析构。没有适配器的对象保留其存储生命周期保护，未知字段、vptr、STL 状态与任意类自定义/内联 allocator 不推断为可回滚字节或可代调用析构器。
+当前工作包先写齐生产源码再统一编译，只检查真实整 Mod 效果；不运行 `validation/checks` 自证检查或独立 C++ 消费者夹具。构建与实际效果结论见 [当前状态](docs/A-批验收状态.md) 和 [实际报告](validation/b-final-20261007/REPORT.md)，旧结果不覆盖本版。
 
-未知分配器可通过 `native/include/ronova_allocator_state.h/.hpp` 接真实 context、allocate/free/realloc 和 bulk 完成边界；`ronova::allocator_resource` 包装 PMR，`allocator_adapter<T,Upstream>` 包装真实 raw-pointer 标准分配器，复制及 rebind 共用实际 `allocator_state`，原上游调用执行一次。子块只绑定当前准确代次的已观察 backing 或明确父子回执，不接受裸地址自授所有权。Heap/Virtual/CRT 以及已观察的 C++、jemalloc、mimalloc backing 接同一生命周期目录，父级释放与批量销毁检查自定义后代的借用、typed lifetime 和在途操作；safe delete 迁移保留子代。失败保留旧代，不自动调用未知释放函数。未接入或不支持的分配器仍保持未覆盖。
-
-显式 C/C++ 对象适配接口见 `native/include/ronova_object_state.h/.hpp`，ABI3 保留 ABI1/2。标量/枚举、定长数组、嵌套对象和 owned/borrowed buffer 绑定准确对象及分配代次；string/vector 只采用公开的 data/size/capacity，变更前关闭旧视图，原调用正常或异常返回后按实际存活形状重绑。活借用拒绝变更，旧视图不能冒领新视图的历史；capacity 不视为已构造元素，inline 数据保持借用，不复制 STL/vptr 或重放 resize、所有权及析构。只对全部相关来源已停止且本次选中的当前明确字段允许恢复，无法恢复的历史和来源继续保留。`opaque/use` 对真实句柄及外部状态只登记排除和活借用；标量 `mutate` 包围原操作一次。多序列关闭只对已经成功的同代关闭允许重试，关闭后不再使用。
-
-Storage 的身份查询和实际事务接入真实标准分配器、公开字符串序列及独立生命周期元数据。先关闭序列，再在同次调用执行原析构和完成回执；实际释放已执行但未确认时保留元数据，不重复析构或 delete。句柄、阶段、偏移和提交结果与外部状态耦合，保持不透明，不用内存恢复重放磁盘操作；原路径、身份、哈希和事务调用保留。事务保活回调在槽位锁外运行，回来核对同一 owner、token 和槽位版本；真实释放完成后才发布退休、归还容量。SDK 缺失或回执为0仍是未覆盖。未声明字段、非合作外部状态与裸 CPU/原始调用继续保留边界。
-实际 Core 原生状态沿已确认的 ProMod/ProRuntime 同 loader、module 和 CodeSource 绑定发布独立 owner，Core 不作为外部 producer。SDK 保留 Host 分配使用的完整载体及执行来源，资格来自真实已观察 caller 图像的库、绑定或加载关系；共享图像 unknown 不丢弃，不凭深层 Core 栈帧借权，也不回填旧的未知分配。
-
-Storage 实际使用的六个 BCrypt 哈希入口按公开 ABI 接真实导入及解析结果，记录成功返回的 provider/hash 句柄、代次、来源、在途使用和原销毁结果。已观察 external hashObject 持准确分配代次的租约，活哈希拒绝释放，真实 DestroyHash 成功后归还；已知起点越界拒绝，未知缓冲区保留原调用和不透明缺口。私有哈希内容不复制或回放，不自动销毁外部句柄；普通与 reusable 的实际 flags、NTSTATUS、输出及错误状态沿原调用保留。实际检查结果见既有进度与报告。
-
-Storage 的 KTM/TxF 原生状态接真实事务创建、GUID 重开、信息查询与设置、同步/异步提交和回滚、事务文件打开，以及同步读写、定位、截断和刷新。原成功才登记句柄代次；内核对象比对与同权限内部句柄固定本次实际目标，GUID 重开消费与前置检查相同的快照。应用别名共享原文件位置，Close/Duplicate/Flags 沿真实结果接续；最后实际别名关闭时同步归还内部引用，避免推迟系统隐式回滚。已知目标独立检查实际调用图像、完整来源和在途使用，不能凭深层 Core 帧借权。已知事务文件 I/O 持准确缓冲区代次，拒绝控制区、活借用或 typed 对象的原始输出；普通未知文件句柄保留原调用和控制区保护，不接管既有 IoBridge 租约。已观察 OVERLAPPED 分配使用独立的内核请求状态，完成查询、取消与 IOCP 绑定实际文件及请求代次；真实终结后才回写公开状态并归还缓冲区和句柄使用。公开 Internal、人工 Post 消息和取消请求不能充当完成凭据，旧端口消息不能结清复用地址的新请求。OS 状态不做字节恢复或自动重放；未观察的 OVERLAPPED、原始调用和任意 C++ 私有对象语义继续保留缺口。
-
-文件 Native 入口以实际 bootstrap 声明、方法版本和 operation 建立前置目录；BOUND 与尚未确认原函数的 ARMED_VM_ENTRY 分开，首次真实 NativeMethodBind 捕获新本体后发布门禁，分类失败不发布裸入口。客户端异常分派只在完整组合正文被实际 VM 接受后就绪，晚加载 EventBus 接真实 ClassPrepare；Core 绑定准确 loader/module/lookup，未选事件沿原 dispatcher 与原 Throwable 返回，清理失败保留原异常。
-任务按 operation 增量入窗，恢复链用当前/历史轮转队列，存储工作用 ready/deadline 调度并接续 worker 完成及新保存读回。资源绑定缓存实际布局，队列、锁、委托或资格变化即失效；运行中的读回及关闭失败仍阻止释放。停组按模块在锁外串行发布，回调只标记续接，控制入口等待所选最新策略完成。Forge EventBus 组合注册、监听、注销和异常边界；普通来源观察失败按来源保留缺口，不污染全局控制状态，明确受控目标继续硬拒绝。
-停组先绑定所选返回策略，再发布停止入口并清理；同模式重复交接保留固定 UUID。Native Attach/GetEnv 的观察失败记录覆盖缺口，保留原成功结果、环境与异常，不以观察失败伪造 API 失败或回滚附件。普通任务回调保存真实根、直接来源、浅层回调引用及会被平台清空的瞬时操作数，来源图在有界 drain 中解析，policy 使用独立 tick/关闭预算；未解析关系暂缓结清，实际构造/发布前的来源判定仍同步执行。已定位丢失按任务、会话与注册代次保留，无法定位的丢失仍阻断全局结清。
-类加载按实际来源关系筛选，未命中保留轻量类头/引用及原字节供后续提升，不先建立完整执行图；来源发现与实际 loader/module 关联，失效的负缓存不再永久阻止发现。定义刷新失败保留续接与受影响来源，自动重试，成功才解除对应缺口。Native 未改写的自身类事件在跨 JNI 前返回；安装结果区分 FULL/DEGRADED/FAILED，只重试尚未发布或可独立恢复的阶段，不重复安装已发布的表与 Hook。构建与相关检查的实际结果见既有状态页。
-初装各目标组共用一次真实类快照，批量转换已加载目标，不强制加载可选任务/句柄类；晚加载按真实返回 image 和精确 ClassPrepare 认证，Native 恢复仅补未完成目标。热执行 hook 在已建立 watcher 时查询实际 JVMTI 方法/版本、BCI 和物理深度，失效 token 不回退授权；未建立 watcher 的普通方法保留真实栈遍历。ForkJoin 用池级存量采样、真实写入回执与准确任务位置索引，扩容、外部字段/数组写和旧 writer 帧未退出时不报缺席。能力快照只在安装 epoch 改变时重算；CF 弱链快照复用时仍读实际链头及每条 next，最终结清继续核对当前字段、队列、退出与 ACK。
-本版按用户选择删除旧 JDK 容器广谱 Hook：HashMap/Node/LinkedHashMap/Map、ArrayList 及其视图/迭代器、IdentityHashMap、ConcurrentHashMap、AtomicReference、CopyOnWriteArrayList 和 AbstractCollection 不再接旧变换、构造观察或操作追踪。保留 premain、Bootstrap、JVMTI/Native、线程/任务/类定义等根入口及明确的游戏/Fastutil 目标。普通容器方法写入、来源回填冻结与依赖这些作用域的清理暂时缺失，明确报告 JDK_CONTAINER_HOOKS_REMOVED；以下既有能力描述只在保留路径范围内成立，不能理解为 Native 已补齐被删防护。
-启动交接复用当前真实 Agent 状态，安装中与失败后的已有部分 hook 不重复安装；预启动仅报告准备完成，保存的停组目标与非默认返回策略按实际所选服务端世界读回。保护与禁疗共用准确当前对象、代次、身份和世界资格；吸收值、着火、自定义 setter 覆写与对应字段/Unsafe/JNI 写门接同一判定。
-自定义业务包装中的八种标准 SAM 调用沿当前真实方法、原指令与实际 callback/参数接续当前能力消费者；同步交接复用原调用的来源和返回关系。BiFunction/BiConsumer 的标准 andThen 接各原回调，保持原参数、中间结果、顺序和异常。未知具体类调用、反射/MH 与原生不透明路径继续保留边界。
-当前接续补齐手动冻结区域的实际 section/palette 写入判断、字段图原子恢复与已知共享来源保留，并修正 Netty 停源拒绝抢在原 promise 校验之前的误伤。未知载体与未观察底层写入仍按状态页保留边界。
-停组后的原 Netty WriteTask 保留发送来源直到 run/cancel 的 finally；拒绝写入分步执行消息释放、promise 终结及原 flush，异常不跳过后续收尾。清理资格绑定实际对象关系、字段/数组槽、准确调用链和实际递归层，不向用户回调提供写权；停组任务在原回收位置丢弃，不再送回共享对象池。实际运行结果仍以状态页为准。
-冻结区域的原版位存储、实际 backing 数组、调色板值表及 section/Data 替换接入同一当前世界目标判断，允许冻结格内容不变的邻居写入和原版扩容。活跃效果的真实 Optional/FactorData 连接和字段也接入原保护门，原版 tick 与准确读取回填保留。Netty 原版执行器的真实拒绝分支补 release、失败通知与取消的异常收尾；无法确认未入队的任务保留待结清。
-标准全局方块状态表的正向列表、反向编号及其数组也纳入冻结判断；原版 rehash、删除与迭代器搬移按本次实际键值接续，冻结映射在副作用前拒绝，半写仅按准确旧值 CAS 收尾。效果的标准解药列表复用已有 ItemStack/NBT 保护，包含常见 JDK/Guava 不可变及单元素列表，实际 provider 覆写的返回值只在原 getter 一次发布。默认满队列拒绝支持真实 LinkedBlockingQueue 和标准有界 MPSC 两种实现，按活跃原读取/offer/REJECT 链接入原收尾；自定义队列/handler 不取得该资格。Windows JDK 的实际 Net.socket0 创建入口补入 Native 来源和停组判断，未解析的旧入口仍保持 pending。
-装备与解药物品的能力图继续沿实际 provider 私有实例字段、自然解析的 LazyOptional 值和真实 getCapability 返回值接续，包含嵌套 ItemStack/NBT、常见列表、映射、包装容器及实际存储。自定义载体的真实实例方法接当前物品动作链，能力失效或 provider 脱链后解除对应关系；不主动调用 getter、序列化器或 supplier 重放能力，回调不自动继承物品动作许可。只读字段与布局来自当前 VM，未解析字段类型明确报错；世界、实体、全局定义和执行回调保持借用边界。文件映射复制保留实际父描述符、原生返回、新描述符发布及异常副本收尾。未知原生私有状态和未解析原生入口仍保留边界。
-能力供应、消费、映射、筛选与失效监听沿原 callback/value 单次执行；Forge 和 Java Optional 的非空派生关系只在同一当前动作内接续。失效监听保留原 Set.forEach，分别绑定真实外层分派消费者和内层 listener；发布门仍在供应者返回后开启。VM 按真实 CP/BCI、版本、来源与最多16个物理帧接直接业务链，二次函数入口只允许准确纯转发适配，未知回调、反射/MH/动态间接链不借权。全局共享 EMPTY 不登记派生 owner，回退函数原样运行。自定义槽位仍沿自然 getter 实际读过的位置复核；标准 MapN、Guava Map、HashMap 树桶及 EnumMap 的当前字段、查询路径和值数组也已接入，支持准确 Enum/Integer/String 键语义，不调用任意 key 方法。未知自定义 getter/容器、键语义或原生状态继续保留边界。
-自定义槽位 getter 的同步 Java helper 接在原调用前后，记录原 receiver、参数、返回及正常读取，不重放 getter；支持真实虚分派、private/static、祖先 super 和直接接口 super 的实际 Java 方法。最终仍按原实体、槽位和当前实际存储复核，未知平台方法、构造器、native、歧义或角色冲突保持 unresolved。JDK Function/Consumer/Predicate 的标准组合在真实私有实现体中逐原回调接续，保留中间值、短路、异常和原次数；委托沿当前已确认能力回调的物理链，未知组合及未接入的异步链不继承。
-当前合法能力回调提交的标准执行器、Future/ForkJoin 包装及 CompletableFuture 回调可沿原实际任务和 callback 单次接续。worker 新建自身作用域，只接原装备的 ItemStack/NBT/能力数据，不继承换槽、实体或世界权限；执行前与写入时复核当前装备、代次、世界、dispatcher 和实际 optional 链，失效、脱链、换装或停止来源不借旧许可。票据只保留弱对象关系，不持原 Scope 或提交线程，原异常和 Future 完成路径保持。兼任 callback 的真实数据容器仍追踪实际存储；继承标准 get 的自定义 List/Map 子类只在 VM 确认其真实实现后按既有父布局读取，未知覆写/键语义仍沿原 trace 或保持 unresolved。
-本轮新增旧运行帧的准确退役与来源收尾、GameMode/Item 真实覆写动作接续，以及手动冻结区域的标准方块写入阻断。Windows 当前游戏进程的外部新建/复制危险句柄保护使用独立命令 `/ronova_pro host protect-jvm true`，`false` 撤销；沿实际玩家/控制台资格，各运行实例只撤销自己的选择，显示实际驱动回执，命令不会安装或加载驱动。旧帧仅对无未知清理责任的可退出子集强退；未知 finally/锁、未观察的机器码/系统调用、既有句柄和未知自定义载体继续保留边界。
-当前源码包含连接前队列逐次发送来源及 EventLoop 接续、独立禁疗、已观察 Host 效果的短提交门，以及原生 Unsafe 写入/free/realloc 的准确控制范围拒绝。外部 JVMTI/堆回调暂时移除借来的内部计数，结束后恢复。活跃效果、FoodData、标准身体的当前六槽装备及其真实 ItemStack/NBT 接入实际写入防护；换装、物品使用、食用、真实攻击与延后挖掘按准确原业务动作交接，拒绝取出时返回 EMPTY，避免留下物品副本。挖掘续接绑定实际玩家、GameMode、世界、目标坐标与当前工具，普通回调不能借用；JNI 数组副本保留获取时的已知及未知来源，提交时并入原检查。FoodData 防写保留自然消耗，不等于免饿。区域禁生成接入底层管理器准入。未观察的原生状态和未接入的正常动作仍保留边界。实际构建、网络及游戏结果以
-[当前进度](docs/A-批验收状态.md) 和 [实际报告](validation/b-final-20261007/REPORT.md) 为准。自身外观及武器注册暂缓，完整 C/B 尚未完成。
-
-禁疗复用现有管理命令，目标为单个实体选择器或 UUID：
-
-```text
-/ronova_pro no-heal <目标> true
-/ronova_pro no-heal <目标> false
-```
-
-单独禁疗拒绝实际升血，正常伤害继续生效；可与 `protect` 组合，单独关闭禁疗保留防护，`release` 撤销两者。服务端与客户端使用同版 JAR；旧 `r3-client-7` 不解码新增策略字段。
+对应候选：[Core](distribution/v1.5-whole-mod/ronova-pro-core-1.5.0-dev.jar)、[prelaunch](distribution/v1.5-whole-mod/ronova-pro-prelaunch.jar)。候选构建成功与实际世界效果分别按状态页记录。
 
 ## 目录
 

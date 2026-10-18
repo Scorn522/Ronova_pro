@@ -118,12 +118,9 @@ final class RecoveryTasks implements AutoCloseable {
     private final Map<UUID,PriorTask> priorTasks=new LinkedHashMap<>();
     private final ArrayDeque<PriorTask> priorPending=new ArrayDeque<>();
     private final Set<UUID> priorReleased=new HashSet<>(),priorObserversReleased=new HashSet<>();
-    private final Map<UUID,CompletableFuture<Void>> priorProcessFacts=new HashMap<>();
     private static final class Settlement {
         final UUID task,operation,subject;
         final long generation;
-        String record;
-        CompletableFuture<Void> ack;
         boolean released;
         Settlement(Task task) {
             this.task=task.id;operation=task.operation;subject=task.authority.id;generation=task.qualification;
@@ -224,9 +221,7 @@ final class RecoveryTasks implements AutoCloseable {
         boolean delegated,dispatchObserved,dispatchExitObserved;
         final Map<Object,Boolean> adoptedInvocations=new IdentityHashMap<>();
         final Set<Object> delegateOwners=Collections.newSetFromMap(new IdentityHashMap<>());
-        long waiterExits,waiterExitsRecorded;
-        String waiterFactRecord;
-        CompletableFuture<Void> waiterFactAck;
+        long waiterExits;
         final Class<?> callbackDefinition;
         final Set<Object> completionSources=Collections.newSetFromMap(new IdentityHashMap<>());
         final Map<Object,CompletionCursor> completionReleaseCursors=new IdentityHashMap<>();
@@ -245,16 +240,10 @@ final class RecoveryTasks implements AutoCloseable {
         final Set<Object> completionOutputs=Collections.newSetFromMap(new IdentityHashMap<>());
         final Map<Field,Object> forkCaptureEdges=new LinkedHashMap<>();
         boolean forkCaptureBound;
-        String preclusionRecord;
-        CompletableFuture<Void> preclusionAck;
-        final Map<String,CompletableFuture<Void>> queueRecords=new LinkedHashMap<>();
-        long nextQueueReceipt,queueReceiptsDurable;
         final Map<Object,Object> ownedQueueRequests=new IdentityHashMap<>();
         final Map<Object,Long> ownedQueueEpochs=new IdentityHashMap<>();
         final Set<Object> servicedOwnerQueues=Collections.newSetFromMap(new IdentityHashMap<>());
         long forkQueueReadbackEpoch=-1;
-        String admissionRecord,callbackReleaseRecord,fenceReleaseRecord;
-        CompletableFuture<Void> admissionAck,callbackReleaseAck,fenceReleaseAck;
         final Set<UUID> subjects=new HashSet<>();
         final Set<Object> executions=Collections.newSetFromMap(new IdentityHashMap<>());
         final Set<Object> dispatches=Collections.newSetFromMap(new IdentityHashMap<>());
@@ -273,13 +262,9 @@ final class RecoveryTasks implements AutoCloseable {
         boolean coverageConfirmed,backendImageReady;
         boolean callableReleased;
         String[] requiredBoundaries=new String[0];
-        String state="OBSERVED",reason="",gateReason="",intent,releaseIntent;
-        CompletableFuture<Void> ack,releaseAck;
+        String state="OBSERVED",reason="",gateReason="";
         boolean entered,body,cancelAccepted,queueRemoved,exitObserved;
         boolean queued;
-        String retirementRecord;
-        CompletableFuture<Void> retirementAck;
-        long retiredRevision=-1;
         Task(Object object,ClassLoader loader,boolean inline,Class<?> callbackDefinition) {
             this.object=object;definition=object.getClass();this.loader=loader;this.inline=inline;this.callbackDefinition=callbackDefinition;
             completion=exactCompletion(object);
@@ -307,8 +292,13 @@ final class RecoveryTasks implements AutoCloseable {
                     PriorTask prior=new PriorTask(UUID.fromString(row[2]),UUID.fromString(row[3]),UUID.fromString(row[6]));
                     PriorTask previous=priorTasks.putIfAbsent(prior.id,prior);
                     if(previous!=null&&!previous.equals(prior))runtime.journal.refuseWrites("CONFLICTING_TASK_HISTORY_QUERY_ONLY");
+                } else if((row[1].equals("RESULT_CANCEL_INTENT")||row[1].equals("RESULT_CANCELLED"))&&row.length==6){
+                    // Completion can run callbacks. Keep its original task/process result chain
+                    // even though ordinary task retirement no longer emits a per-task INTENT.
+                    PriorTask prior=new PriorTask(UUID.fromString(row[2]),UUID.fromString(row[3]),UUID.fromString(row[4]));
+                    PriorTask previous=priorTasks.putIfAbsent(prior.id,prior);
+                    if(previous!=null&&!previous.equals(prior))runtime.journal.refuseWrites("CONFLICTING_TASK_RESULT_HISTORY_QUERY_ONLY");
                 } else if(row[1].equals("OBSERVER_RELEASED"))priorObserversReleased.add(UUID.fromString(row[2]));
-                else if(row[0].equals("TASK/1"))gap="LEGACY_TASK_OBLIGATIONS_QUERY_ONLY";
             } catch(RuntimeException invalid) { runtime.journal.refuseWrites("INVALID_TASK_HISTORY_QUERY_ONLY"); }
         }
         for(String line:history)if(line.startsWith("TASK/")&&validHistory(line)) {
@@ -328,11 +318,6 @@ final class RecoveryTasks implements AutoCloseable {
     }
     private static String encode(String value) {
         return JournalLineage.encodeText(value);
-    }
-    private String intent(Task task) {
-        return PREFIX+"\tINTENT\t"+task.id+"\t"+task.operation+"\t"+task.authority.id+"\t"+task.qualification+
-                "\t"+runtime.session+"\t"+(task.inline?"CF_STAGE_INVOCATION":task.result?"CF_RESULT_OBSERVATION":task.completion?"CF_COMPLETION_OBSERVATION":task.forkJoin?"FORKJOIN_ADMISSION":task.delegated&&!exactFuture(task.object)?"DELEGATED_INVOCATION":exactFuture(task.object)?"EXACT_FUTURE":"PLAIN_QUEUE_DRAIN")+"\t"+encode(task.definition.getName())+
-                "\t"+encode(task.callbackDefinition==null?"":task.callbackDefinition.getName());
     }
     private static boolean encoded(String value) {
         return encode(JournalLineage.decodeText(value)).equals(value);
@@ -817,7 +802,6 @@ final class RecoveryTasks implements AutoCloseable {
             task.gateReason="";
             if(!checkBridge())return gateFailure(task,"TASK_OBSERVER_QUERY_UNAVAILABLE");
             if(closing)return gateFailure(task,"RUNTIME_CLOSING");
-            if(!runtime.journal.healthy())return gateFailure(task,"DURABLE_WRITER_NOT_HEALTHY");
             if(!gap.isEmpty())return gateFailure(task,"CAPTURE_GAP:"+gap);
             if(taskGap(task.object))return gateFailure(task,"TASK_CAPTURE_GAP:"+captureGaps.get(task.object).reason);
             if(!observeBackend(task))return gateFailure(task,"REQUIRED_BOUNDARY_UNAVAILABLE");
@@ -1252,10 +1236,7 @@ final class RecoveryTasks implements AutoCloseable {
             PriorTask prior=priorPending.removeFirst();
             if(priorReleased.contains(prior.id))continue;
             if(priorObserversReleased.contains(prior.session)||runtime.journal.processEnded(prior.session)) {
-                String fact=PREFIX+"\tPRIOR_PROCESS_ENDED\t"+prior.id+"\t"+prior.operation+"\t"+prior.session+"\tRUNTIME_REFERENCES_ONLY_CALLBACK_EFFECTS_UNCHANGED";
-                var ack=priorProcessFacts.get(prior.id);
-                ack=ack==null?runtime.journal.append(fact):runtime.journal.retryRejected(fact,ack);
-                priorProcessFacts.put(prior.id,ack);if(confirmed(ack))priorReleased.add(prior.id);
+                priorReleased.add(prior.id);
             }
             if(!priorReleased.contains(prior.id))priorPending.addLast(prior);
         }
@@ -1284,15 +1265,7 @@ final class RecoveryTasks implements AutoCloseable {
         retireCoreReferences(tick);
         // Policy owns a separate tick budget; receiving and resolving roots only enqueue it.
         advancePolicyFences();
-        // Keep completed children sampled while any linked parent is building its current fact.
-        boolean done=!windows.isEmpty(),progressing=false;
-        synchronized(LISTENERS) {
-            for(Task task:windows) {
-                done&=currentFact(task,tick,0L);
-                progressing|=task.ack!=null&&!task.ack.isDone()||task.releaseAck!=null&&!task.releaseAck.isDone();
-            }
-        }
-        if(done&&!waiting.isEmpty()||!progressing&&!windows.isEmpty())yieldWindow(tick);
+        if(!windows.isEmpty())yieldWindow(tick);
     }
     private void admitComponents(Collection<Task> roots) {
         var pending=new ArrayDeque<Task>();pending.addAll(roots);
@@ -1328,8 +1301,7 @@ final class RecoveryTasks implements AutoCloseable {
             Task task=tasks.get(event.task);
             if(task==null) {
                 task=new Task(event.task,event.loader,event.inline,event.callbackDefinition);tasks.put(event.task,task);
-                UUID prior=retiredObjects.remove(event.task);
-                if(prior!=null)runtime.journal.append(PREFIX+"\tREOBSERVED\t"+task.id+"\t"+prior+"\t"+runtime.session+"\tNEW_EXECUTION_OBLIGATION");
+                retiredObjects.remove(event.task);
                 for(Task child:childrenByParent.getOrDefault(event.task,Set.of()))link(task,child,tick);
             }
             if(task.loader!=event.loader||task.definition!=event.task.getClass()) { task.reason="DEFINITION_BINDING_CHANGED";continue; }
@@ -1416,12 +1388,11 @@ final class RecoveryTasks implements AutoCloseable {
                     if(task.ownedQueueRequests.get(event.scheduler)!=event.invocation) { task.reason="OWNER_QUEUE_RECEIPT_BINDING_MISMATCH";break; }
                     task.servicedOwnerQueues.add(event.scheduler);
                     if(event.kind==15)task.queueRemoved=true;
-                    queueReceipt(task,event.kind==15?"QUEUE_REFERENCE_REMOVED":"OWNED_QUEUE_ABSENCE_OBSERVED",
-                            event.kind==15?"ACTUAL_QUEUE_OWNER_REMOVED_EXACT_TASK":"AT_OWNER_SAFE_POINT_ONLY");
+                    queueChanged(task);
                 }
                 case 16 -> {
                     if(task.ownedQueueRequests.remove(event.scheduler,event.invocation)) {
-                        task.ownedQueueEpochs.remove(event.scheduler);queueReceipt(task,"OWNED_QUEUE_REQUEST_RETIRED","BOOTSTRAP_REQUEST_REGISTRY_REFERENCE_REMOVED");
+                        task.ownedQueueEpochs.remove(event.scheduler);queueChanged(task);
                     }
                     else task.reason="OWNER_QUEUE_RETIREMENT_BINDING_MISMATCH";
                 }
@@ -1464,7 +1435,7 @@ final class RecoveryTasks implements AutoCloseable {
         if(task.admissionFenced&&!task.admissionReleased||!task.forkJoin||task.subjects.isEmpty()||closing)return false;
         if(fenceTask==null||withBoundaries==null)return true;
         synchronized(LISTENERS) {
-            if(!checkBridge(task.object)||!runtime.journal.healthy()||!gap.isEmpty())return true;
+            if(!checkBridge(task.object)||!gap.isEmpty())return true;
             try {
                 if(pendingDeliveries==null||((Integer)pendingDeliveries.invoke(null))!=0) {
                     task.gateReason="CAPTURE_PUBLICATION_PENDING";return true;
@@ -1499,14 +1470,11 @@ final class RecoveryTasks implements AutoCloseable {
                         fenced[0]=Boolean.TRUE.equals(fenceTask.invoke(null,SINK,task.object));
                         if(fenced[0]) {
                             task.policyFenced=true;task.policyAuthority=subject;task.admissionFenced=true;
-                            if(task.admissionReleased) { task.fenceReleaseRecord=null;task.fenceReleaseAck=null; }
                             task.admissionReleased=false;
                         }
                     } catch(ReflectiveOperationException failure){throw new IllegalStateException("POLICY_FENCE_UNAVAILABLE",failure);}
                 }));
                 if(!authorized)task.gateReason="REQUIRED_TASK_BOUNDARY_UNAVAILABLE";
-                if(fenced[0])runtime.journal.append("TASK_POLICY/1\tADMISSION_FENCED\t"+runtime.session+"\t"+encode(task.definition.getName())
-                        +"\t"+subject.id+"\t"+(oldGeneration?"POLICY_TERMINAL_NEWER_GENERATION":"EXACT_ENGINE_DENIAL")+"\tFENCE_INSTALLED");
                 return true;
             } catch(ReflectiveOperationException|RuntimeException unavailable) {
                 task.gateReason="POLICY_FENCE_PENDING:"+unavailable.getClass().getSimpleName();return true;
@@ -1584,14 +1552,14 @@ final class RecoveryTasks implements AutoCloseable {
             if(task.reason.equals("SHARED_TASK_MULTIPLE_GROUPS"))task.reason="";
             if(task.authority!=null&&task.authority!=subject) {
                 if(runtime.canonicalSubject(task.authority.id)==subject&&task.operation!=null){
-                    // Keep the original operation, generation, intent and ACK. The durable group
-                    // membership authorizes continuing that same retirement, rather than recoding it.
+                    // Keep the original operation while the current group policy
+                    // adopts the same actual task and its outstanding invocations.
                     if(task.reason.equals("SHARED_TASK_MULTIPLE_SUBJECTS")||task.reason.equals("OLD_TASK_INTENT_QUERY_ONLY"))task.reason="";
                     enqueue(task);continue;
                 }
                 task.reason="SHARED_TASK_MULTIPLE_SUBJECTS";continue;
             }
-            if(task.ack!=null&&task.qualification!=subject.generation) { task.reason="OLD_TASK_INTENT_QUERY_ONLY";continue; }
+            if(task.resultCancelRecord!=null&&task.qualification!=subject.generation) { task.reason="OLD_TASK_RESULT_QUERY_ONLY";continue; }
             if(task.authority==subject&&task.operation!=null&&task.qualification==subject.generation)continue;
             task.authority=subject;assignOperation(task,operation);task.qualification=subject.generation;task.resources=null;
             enqueue(task);
@@ -1612,12 +1580,11 @@ final class RecoveryTasks implements AutoCloseable {
     private boolean qualified(Task task){
         if(task.authority==null)return false;
         ProRuntime.Subject scope=runtime.canonicalSubject(task.authority.id);
-        return scope!=null&&scope.terminal&&(scope==task.authority?scope.generation==task.qualification:runtime.groupDurable(scope.id)&&runtime.sameGroup(task.subjects,scope));
+        return scope!=null&&scope.terminal&&runtime.sameGroup(task.subjects,scope)
+                &&(scope!=task.authority||scope.generation==task.qualification);
     }
     private void advance(Task task,long tick)throws ReflectiveOperationException {
         pollAdoptedInvocations(task);
-        refreshQueueReceipts(task);
-        flushWaiterFacts(task);
         if(task.result) { advanceResult(task,tick);return; }
         if(task.inline) { advanceObserved(task,tick);return; }
         if(task.forkJoin) { advanceForkJoin(task,tick);return; }
@@ -1628,12 +1595,6 @@ final class RecoveryTasks implements AutoCloseable {
         }
         if(!exclusive(task)||!task.reason.isEmpty())return;
         if(!qualified(task)) { resetWindow(task,"FENCED");return; }
-        if(task.ack==null) {
-            task.intent=intent(task);
-            task.ack=runtime.journal.append(task.intent);
-        }
-        task.ack=runtime.journal.retryRejected(task.intent,task.ack);
-        if(!confirmed(task.ack)) { resetWindow(task,"WAIT_ACK");return; }
         Future<?> future=(Future<?>)task.object;
         waitersReleased(task); // Observe original waiter-node bindings before cancellation unlinks them.
         if(!task.cancelAccepted) {
@@ -1647,12 +1608,6 @@ final class RecoveryTasks implements AutoCloseable {
             resetWindow(task,"WAIT_ACTUAL_EXECUTION_AND_CALLBACK_EXIT");return;
         }
         if(((Integer)activeInvocations.invoke(null,task.object))!=0) { resetWindow(task,"WAIT_BOOTSTRAP_INVOCATION_RETIREMENT");return; }
-        if(task.releaseAck==null) {
-            task.releaseIntent=PREFIX+"\tRESOURCE_RELEASE\t"+task.id+"\t"+task.operation+"\t"+runtime.session;
-            task.releaseAck=runtime.journal.append(task.releaseIntent);
-        }
-        task.releaseAck=runtime.journal.retryRejected(task.releaseIntent,task.releaseAck);
-        if(!confirmed(task.releaseAck)) { resetWindow(task,"WAIT_RESOURCE_RELEASE_ACK");return; }
         final boolean[] queueConfirmed={false};
         if(!queueGuarded(task,()->{
             try {
@@ -1724,21 +1679,12 @@ final class RecoveryTasks implements AutoCloseable {
             if(!checkBridge(task.object)||closing||!gap.isEmpty()||!observeBackend(task)) { resetWindow(task,"DELEGATE_BOUNDARY_UNAVAILABLE");return; }
         }
         if(!qualified(task))return;
-        if(task.ack==null) { task.intent=intent(task);task.ack=runtime.journal.append(task.intent); }
-        task.ack=runtime.journal.retryRejected(task.intent,task.ack);
-        if(!confirmed(task.ack)) { resetWindow(task,"WAIT_ACK");return; }
         if(!task.entered||!task.exitObserved||!task.executions.isEmpty()||!task.adoptedInvocations.isEmpty()
                 ||((Integer)activeInvocations.invoke(null,task.object))!=0||!waitersReleased(task)) {
             resetWindow(task,"WAIT_DELEGATED_INVOCATION_EXIT");return;
         }
         if(task.delegateOwners.isEmpty()) { resetWindow(task,"ACTUAL_DELEGATE_OWNER_UNOBSERVED");return; }
         task.callableReleased=true; // this invocation's execution reservations, not the shared callback object
-        if(task.releaseAck==null) {
-            task.releaseIntent=PREFIX+"\tCAPTURE_RELEASE_OBSERVED\t"+task.id+"\t"+task.operation+"\t"+runtime.session+
-                    "\tDELEGATE_INVOCATION_RESERVATIONS_RETIRED_SHARED_OBJECT_UNMODIFIED";
-            task.releaseAck=runtime.journal.append(task.releaseIntent);
-        } else task.releaseAck=runtime.journal.retryRejected(task.releaseIntent,task.releaseAck);
-        if(!confirmed(task.releaseAck)) { resetWindow(task,"WAIT_DELEGATE_RESERVATION_ACK");return; }
         finishScope(task,tick,"DELEGATED_INVOCATION_EXIT_OBSERVED\tEXECUTION_RESERVATIONS_RETIRED_SHARED_CALLBACK_NOT_DISPOSED");
     }
     /** The actual JDK state transition also signals join/get waiters and cannot dispatch to a Mod override. */
@@ -1756,24 +1702,13 @@ final class RecoveryTasks implements AutoCloseable {
                 cancelOwnedQueueRelease.invoke(null,SINK,request.getValue());
             else wakeOwnedQueue.invoke(null,SINK,request.getValue());
         }
-        refreshQueueReceipts(task);
-        if(task.blockedEntryObserved) {
-            if(task.preclusionRecord==null) {
-                task.preclusionRecord=PREFIX+"\tSTART_PRECLUDED\t"+task.id+"\t"+runtime.session+"\tEXACT_EXECUTION_ENTRY\tOTHER_INVOCATIONS_REQUIRE_EXIT";
-                task.preclusionAck=runtime.journal.append(task.preclusionRecord);
-            } else task.preclusionAck=runtime.journal.retryRejected(task.preclusionRecord,task.preclusionAck);
-        }
         if(task.admissionReleased&&task.admissionFenced) {
-            task.fenceReleaseAck=runtime.journal.retryRejected(task.fenceReleaseRecord,task.fenceReleaseAck);
             if(task.scheduler instanceof ThreadPoolExecutor)releaseCompletionExecutorQueue(task);
             if(task.completion)finishReleasedCompletion(task,tick);else finishReleasedForkJoin(task,tick);return;
         }
         if(!task.admissionFenced&&task.completion&&completionReleased(task)) { advanceObserved(task,tick);return; }
         if(!exclusive(task)||!task.reason.isEmpty())return;
         if(!qualified(task)) { resetWindow(task,"FENCED");return; }
-        if(task.ack==null) { task.intent=intent(task);task.ack=runtime.journal.append(task.intent); }
-        task.ack=runtime.journal.retryRejected(task.intent,task.ack);
-        if(!confirmed(task.ack)) { resetWindow(task,"WAIT_ACK");return; }
         if(!task.admissionFenced||!task.cancelAccepted) {
             waitersReleased(task);
             Method cancel=forkCancellation();
@@ -1782,7 +1717,7 @@ final class RecoveryTasks implements AutoCloseable {
                     task.admissionFenced=Boolean.TRUE.equals(fenceTask.invoke(null,SINK,task.object));
                     if(task.admissionFenced) {
                         // A previous policy-only registry release is not this new disposal cycle.
-                        if(task.admissionReleased) {task.admissionReleased=false;task.fenceReleaseRecord=null;task.fenceReleaseAck=null;}
+                        if(task.admissionReleased)task.admissionReleased=false;
                         cancel.invoke(task.object);
                         task.cancelAccepted=((ForkJoinTask<?>)task.object).isCancelled();
                         task.policyFenced=false;task.policyAuthority=null; // existing qualified disposal now owns this fence
@@ -1790,11 +1725,6 @@ final class RecoveryTasks implements AutoCloseable {
                 } catch(ReflectiveOperationException failure) { throw new IllegalStateException(failure); }
             })||!task.admissionFenced) { resetWindow(task,"TASK_ADMISSION_GATE_UNAVAILABLE");return; }
         }
-        if(task.admissionRecord==null) {
-            task.admissionRecord=PREFIX+"\tADMISSION_FENCED\t"+task.id+"\t"+runtime.session+"\tEXACT_OBJECT\tRUNNING_INVOCATIONS_NOT_INTERRUPTED";
-            task.admissionAck=runtime.journal.append(task.admissionRecord);
-        } else task.admissionAck=runtime.journal.retryRejected(task.admissionRecord,task.admissionAck);
-        if(!confirmed(task.admissionAck)) { resetWindow(task,"WAIT_ADMISSION_FACT_ACK");return; }
         long[] admissions=(long[])admissionState.invoke(null,SINK,task.object);
         if(!task.admissionReleased&&(admissions[0]!=1||admissions[1]!=0)) { resetWindow(task,"WAIT_ADMITTED_INVOCATIONS_EXIT");return; }
         if(!task.executions.isEmpty()||!task.dispatches.isEmpty()||!task.submissions.isEmpty()||!task.workerReferences.isEmpty()) {
@@ -1802,11 +1732,6 @@ final class RecoveryTasks implements AutoCloseable {
         }
         if(!waitersReleased(task)) { resetWindow(task,task.waiterCoverageGap?"WAITER_CAPTURE_UNPROVEN":"WAIT_ACTUAL_WAITER_EXIT");return; }
         if(((Integer)activeInvocations.invoke(null,task.object))!=0) { resetWindow(task,"WAIT_EXECUTION_OR_PERIODIC_RESUBMISSION_RETIREMENT");return; }
-        if(task.releaseAck==null) {
-            task.releaseIntent=PREFIX+"\tRESOURCE_RELEASE\t"+task.id+"\t"+task.operation+"\t"+runtime.session;
-            task.releaseAck=runtime.journal.append(task.releaseIntent);
-        } else task.releaseAck=runtime.journal.retryRejected(task.releaseIntent,task.releaseAck);
-        if(!confirmed(task.releaseAck)) { resetWindow(task,"WAIT_RESOURCE_RELEASE_ACK");return; }
         if(task.scheduler instanceof ForkJoinPool)releaseSharedForkQueues(task);
         if(task.scheduler instanceof ForkJoinPool)requestOwnerQueues(task);
         if(task.completion&&task.scheduler instanceof ThreadPoolExecutor)releaseCompletionExecutorQueue(task);
@@ -1835,17 +1760,10 @@ final class RecoveryTasks implements AutoCloseable {
         // Exact callbacks were removed from every observed publication stack, under a fenced entry.
         // This is start-preclusion evidence even when no invocation ever existed to emit EXIT.
         if(!task.entered&&task.executions.isEmpty()&&task.dispatches.isEmpty())task.queueRemoved=true;
-        if(task.callbackReleaseRecord==null) {
-            task.callbackReleaseRecord=PREFIX+"\tCALLBACK_FIELDS_RELEASED\t"+task.id+"\t"+runtime.session+"\tEXACT_NODE_FIELDS_AND_SOURCE_STACKS\t"+
-                    (task.dependentResultPending?"DEPENDENT_RESULT_UNCHANGED_PENDING":"DEPENDENT_RESULT_NOT_MUTATED");
-            task.callbackReleaseAck=runtime.journal.append(task.callbackReleaseRecord);
-        } else task.callbackReleaseAck=runtime.journal.retryRejected(task.callbackReleaseRecord,task.callbackReleaseAck);
-        if(!confirmed(task.callbackReleaseAck)) { resetWindow(task,"WAIT_CF_REFERENCE_FACT_ACK");return; }
         if(!releaseAdmissionResource(task,false)) { resetWindow(task,"WAIT_ADMISSION_RESOURCE_RELEASE");return; }
         finishReleasedCompletion(task,tick);
     }
     private void releaseCompletionExecutorQueue(Task task)throws ReflectiveOperationException {
-        if(task.queueRecords.size()>=64) { task.gateReason="WAIT_QUEUE_RECEIPT_BUDGET";return; }
         queueGuarded(task,()->{
             try {
                 long[] admission=(long[])admissionState.invoke(null,SINK,task.object);
@@ -1858,7 +1776,7 @@ final class RecoveryTasks implements AutoCloseable {
                 int removed=0;
                 while(removed<4096&&((BlockingQueue<?>)observed).remove(task.object))removed++;
                 if(removed!=0) {
-                    task.queueRemoved=true;queueReceipt(task,"QUEUE_REFERENCE_REMOVED","EXACT_CF_NODE_FROM_EXECUTOR_QUEUE_COUNT="+removed);
+                    task.queueRemoved=true;queueChanged(task);
                 }
             } catch(ReflectiveOperationException failure) { throw new IllegalStateException(failure); }
         });
@@ -1883,12 +1801,6 @@ final class RecoveryTasks implements AutoCloseable {
             if(!forkCapturesAbsent(task)||!forkQueueReadbackCurrent(task)) { resetWindow(task,"FORKJOIN_CAPTURE_READBACK_PENDING");return; }
             task.callbackFieldsReleased=true;
         }
-        if(task.callbackReleaseRecord==null) {
-            task.callbackReleaseRecord=PREFIX+"\tCALLBACK_FIELDS_RELEASED\t"+task.id+"\t"+runtime.session+
-                    "\tEXACT_OWNED_CAPTURE_EDGES_UNLINKED\tSHARED_OBJECTS_UNMODIFIED";
-            task.callbackReleaseAck=runtime.journal.append(task.callbackReleaseRecord);
-        } else task.callbackReleaseAck=runtime.journal.retryRejected(task.callbackReleaseRecord,task.callbackReleaseAck);
-        if(!confirmed(task.callbackReleaseAck))return;
         task.forkCaptureEdges.replaceAll((field,value)->null);
         if(!releaseAdmissionResource(task,false))return;
         finishReleasedForkJoin(task,tick);
@@ -1942,7 +1854,7 @@ final class RecoveryTasks implements AutoCloseable {
         return queues;
     }
     private void finishReleasedForkJoin(Task task,long tick)throws ReflectiveOperationException {
-        if(!confirmed(task.fenceReleaseAck)||!confirmed(task.callbackReleaseAck)||!task.queueRecords.isEmpty())return;
+        if(!task.admissionReleased||!task.callbackFieldsReleased||!task.ownedQueueRequests.isEmpty())return;
         if(!forkQueuesAbsent(task)||!forkCapturesAbsent(task)||((Integer)helperReferences.invoke(null,task.object))!=0
                 ||!waitersReleased(task)||!forkQueueReadbackCurrent(task)) { resetWindow(task,"FORKJOIN_REFERENCE_REASSERTION_OR_EXIT_PENDING");return; }
         if(task.entered&&!task.exitObserved||!task.entered&&!task.queueRemoved&&!task.blockedEntryObserved) {
@@ -1968,7 +1880,7 @@ final class RecoveryTasks implements AutoCloseable {
             for(Task parent:task.parents)if(parent.inline) {
                 factory=true;if(!parent.exitObserved||!Boolean.TRUE.equals(inlineClosed.invoke(null,parent.object)))return false;
             }
-            return factory&&task.queueRemoved&&confirmed(task.callbackReleaseAck)&&task.admissionReleased;
+            return factory&&task.queueRemoved&&task.callbackFieldsReleased&&task.admissionReleased;
         }
         if(!(task.scheduler instanceof ThreadPoolExecutor)||!task.queueRemoved&&!task.dispatchExitObserved)return false;
         boolean[] absent={false};
@@ -1984,9 +1896,9 @@ final class RecoveryTasks implements AutoCloseable {
     }
     private void finishReleasedCompletion(Task task,long tick)throws ReflectiveOperationException {
         refreshDependentResult(task);
-        if(!confirmed(task.fenceReleaseAck)) { resetWindow(task,"WAIT_FENCE_RELEASE_FACT_ACK");return; }
+        if(!task.admissionReleased)return;
         if(task.dependentResultPending) { resetWindow(task,"CF_CALLBACK_PRECLUDED_DEPENDENT_RESULT_PENDING");return; }
-        if(!task.queueRecords.isEmpty()||!confirmed(task.callbackReleaseAck)) { resetWindow(task,"WAIT_CF_RESOURCE_FACT_ACK");return; }
+        if(!task.callbackFieldsReleased||!task.ownedQueueRequests.isEmpty())return;
         if(!completionOwnerReleased(task)) { resetWindow(task,"CF_CALLBACK_CLEARED_QUEUE_AND_WORKER_OWNERS_PENDING");return; }
         task.callableReleased=true;
         finishScope(task,tick,"CF_CALLBACK_FIELDS_AND_SOURCE_STACKS_RELEASED\tKNOWN_EXECUTOR_QUEUE_WORKER_AND_WAITERS_RETIRED");
@@ -2000,9 +1912,6 @@ final class RecoveryTasks implements AutoCloseable {
         }
         finishResultCancellation(task);
         if(!qualified(task)||!exclusive(task))return;
-        if(task.ack==null) { task.intent=intent(task);task.ack=runtime.journal.append(task.intent); }
-        task.ack=runtime.journal.retryRejected(task.intent,task.ack);
-        if(!confirmed(task.ack)) { resetWindow(task,"WAIT_ACK");return; }
         if(readField(CompletableFuture.class,"result",task.object)==null) {
             cancelOwnedResult(task);
             if(readField(CompletableFuture.class,"result",task.object)==null) { resetWindow(task,"DEPENDENT_RESULT_NOT_TERMINAL");waitersReleased(task);return; }
@@ -2010,11 +1919,6 @@ final class RecoveryTasks implements AutoCloseable {
         if(task.resultCancelRecord!=null&&!confirmed(task.resultCancelAck)) { resetWindow(task,"RESULT_CANCEL_FACT_ACK_PENDING");return; }
         if(!waitersReleased(task)) { resetWindow(task,task.waiterCoverageGap?"WAITER_CAPTURE_UNPROVEN":"WAIT_RESULT_WAITER_EXIT");return; }
         task.callableReleased=true;
-        if(task.releaseAck==null) {
-            task.releaseIntent=PREFIX+"\tRESULT_WAITERS_RELEASE_OBSERVED\t"+task.id+"\t"+runtime.session+"\tACTUAL_WAIT_EXITS_AND_NODE_READBACK\tRESULT_NOT_MUTATED";
-            task.releaseAck=runtime.journal.append(task.releaseIntent);
-        } else task.releaseAck=runtime.journal.retryRejected(task.releaseIntent,task.releaseAck);
-        if(!confirmed(task.releaseAck)) { resetWindow(task,"WAIT_RESULT_WAITER_FACT_ACK");return; }
         finishScope(task,tick,"RESULT_TERMINAL_OBSERVED\tWAITER_INTERVALS_EXITED_NO_RESULT_EFFECT_CLAIM");
     }
     private void cancelOwnedResult(Task task)throws ReflectiveOperationException {
@@ -2059,16 +1963,8 @@ final class RecoveryTasks implements AutoCloseable {
         drain.invoke(task.object);
         task.resultDrainPending=false;task.resultCancellationValue=null;
     }
-    private void flushWaiterFacts(Task task) {
-        task.waiterFactAck=runtime.journal.retryRejected(task.waiterFactRecord,task.waiterFactAck);
-        if(task.waiterFactAck!=null&&!confirmed(task.waiterFactAck))return;
-        if(task.waiterExitsRecorded==task.waiterExits)return;
-        task.waiterFactRecord=PREFIX+"\tWAITER_EXITS_OBSERVED\t"+task.id+"\t"+runtime.session+"\tfrom="+
-                (task.waiterExitsRecorded+1)+"\tthrough="+task.waiterExits;
-        task.waiterExitsRecorded=task.waiterExits;task.waiterFactAck=runtime.journal.append(task.waiterFactRecord);
-    }
     private static boolean waiterFactsCurrent(Task task) {
-        return task.waiterExits==task.waiterExitsRecorded&&(task.waiterExits==0||confirmed(task.waiterFactAck));
+        return task.waiters.isEmpty()&&!task.waiterCoverageGap;
     }
     private static final ClassValue<ConcurrentMap<String,Field>> READ_FIELDS=new ClassValue<>() {
         @Override protected ConcurrentMap<String,Field> computeValue(Class<?> type) { return new ConcurrentHashMap<>(); }
@@ -2145,18 +2041,8 @@ final class RecoveryTasks implements AutoCloseable {
         }
         return !task.waiterCoverageGap&&!live&&task.waiters.isEmpty()&&((Integer)waiterCount.invoke(null,task.object))==0;
     }
-    private void refreshQueueReceipts(Task task) {
-        var pending=task.queueRecords.entrySet().iterator();
-        while(pending.hasNext()) {
-            var entry=pending.next();entry.setValue(runtime.journal.retryRejected(entry.getKey(),entry.getValue()));
-            if(confirmed(entry.getValue())) { task.queueReceiptsDurable++;pending.remove(); }
-        }
-        // Only the in-memory ACK cache is evicted. The original resource facts stay in the durable journal.
-    }
-    private void queueReceipt(Task task,String kind,String fact) {
-        if(task.nextQueueReceipt==Long.MAX_VALUE) { recordGap("TASK_RESOURCE_RECEIPT_SEQUENCE_EXHAUSTED");return; }
-        String record=PREFIX+"\t"+kind+"\t"+task.id+"\t"+runtime.session+"\t"+fact+"\t"+task.nextQueueReceipt++;
-        task.queueRecords.put(record,runtime.journal.append(record));
+    private void queueChanged(Task task) {
+        changed(task,Integer.toUnsignedLong(runtime.server.getTickCount()));changes.incrementAndGet();
     }
     private void requestOwnerQueues(Task task)throws ReflectiveOperationException {
         Object[] observed=locatedForkQueues(task);
@@ -2171,7 +2057,7 @@ final class RecoveryTasks implements AutoCloseable {
                 if(!Objects.equals(task.ownedQueueEpochs.get(queue),task.backendEpoch))cancelOwnedQueueRelease.invoke(null,SINK,task.ownedQueueRequests.get(queue));
                 continue;
             }
-            if(task.queueRecords.size()+2*task.ownedQueueRequests.size()>=62)return;
+            if(task.ownedQueueRequests.size()>=32)return;
             guarded(task,()->{
                 try {
                     String[] boundaries=task.requiredBoundaries.clone();long epoch=task.backendEpoch;
@@ -2187,7 +2073,7 @@ final class RecoveryTasks implements AutoCloseable {
         synchronized(LISTENERS) {
             try {
                 boolean observerCurrent=checkBridge(task);Set<UUID> published=workerBindings.get(task);
-                if(!observerCurrent||closing||!runtime.journal.healthy()||!gap.isEmpty()||capturePending()||((Integer)pendingDeliveries.invoke(null))!=0
+                if(!observerCurrent||closing||!gap.isEmpty()||capturePending()||((Integer)pendingDeliveries.invoke(null))!=0
                         ||!runtime.sameGroup(published,authority))return false;
                 for(RecoveryTasks owner:LISTENERS)if(owner!=this&&owner.workerBindings.containsKey(task))return false;
                 if(!authority.commitGate.tryLock())return false;
@@ -2211,9 +2097,9 @@ final class RecoveryTasks implements AutoCloseable {
             if(!standardCompletionSource(output)||readField(CompletableFuture.class,"result",output)==null) { task.dependentResultPending=true;return; }
         task.dependentResultPending=false;
     }
-    /** Shutdown may finish a durable, already-cleared disposal without authorizing another mutation. */
+    /** Shutdown may finish retiring the actual already-cleared task references. */
     private boolean forkRetirementReady(Task task)throws ReflectiveOperationException {
-        return task.forkJoin&&!task.completion&&forkQueuesAbsent(task)&&task.callbackFieldsReleased&&confirmed(task.callbackReleaseAck)
+        return task.forkJoin&&!task.completion&&forkQueuesAbsent(task)&&task.callbackFieldsReleased
                 &&task.executions.isEmpty()&&task.dispatches.isEmpty()&&task.submissions.isEmpty()
                 &&task.workerReferences.isEmpty()&&task.adoptedInvocations.isEmpty()
                 &&((Integer)activeInvocations.invoke(null,task.object))==0
@@ -2222,13 +2108,6 @@ final class RecoveryTasks implements AutoCloseable {
     }
     private boolean releaseAdmissionResource(Task task,boolean retiring)throws ReflectiveOperationException {
         if(!task.ownedQueueRequests.isEmpty())return false;
-        if(task.fenceReleaseRecord==null) {
-            task.fenceReleaseRecord=PREFIX+"\tFENCE_RELEASE_INTENT\t"+task.id+"\t"+runtime.session+"\t"+
-                    (task.policyFenced?"POLICY_FENCE_REGISTRY_ONLY":"CLEARED_OWNED_CAPTURE_EDGES")+"\tNO_RUNNING_ADMISSIONS";
-            task.fenceReleaseAck=runtime.journal.append(task.fenceReleaseRecord);
-        }
-        task.fenceReleaseAck=runtime.journal.retryRejected(task.fenceReleaseRecord,task.fenceReleaseAck);
-        if(!confirmed(task.fenceReleaseAck))return false;
         if(!task.admissionReleased) {
             Runnable release=()->{
                 try {
@@ -2248,18 +2127,15 @@ final class RecoveryTasks implements AutoCloseable {
                 }
             } else accepted=guarded(task,release);
             if(!accepted||!task.admissionReleased)return false;
-            task.fenceReleaseRecord=PREFIX+"\tFENCE_RELEASED\t"+task.id+"\t"+runtime.session+"\tREGISTRY_REFERENCE_REMOVED\t"+
-                    (task.policyFenced?"POLICY_FENCE_ONLY_TASK_OBLIGATIONS_UNCHANGED":"OWNED_CAPTURE_EDGES_CLEARED");
-            task.fenceReleaseAck=runtime.journal.append(task.fenceReleaseRecord);
         }
-        return confirmed(task.fenceReleaseAck);
+        return task.admissionReleased;
     }
     /** Only external submission queues use this queue lock; worker-owned deques are never treated as externally owned. */
     private void releaseSharedForkQueues(Task task)throws ReflectiveOperationException {
         Object[] observed=locatedForkQueues(task);
         if(observed==null){task.gateReason="FORKJOIN_QUEUE_LOCATION_PENDING";return;}
         for(Object queue:observed) {
-            if(task.queueRecords.size()+2*task.ownedQueueRequests.size()>=64||task.nextQueueReceipt==Long.MAX_VALUE)return;
+            if(task.ownedQueueRequests.size()>=32)return;
             if(queue==null||queue.getClass()!=ForkQueueAccess.TYPE||ForkQueueAccess.OWNER.get(queue)!=null)continue;
             // Never wait for a shared queue while holding Root, publication or certificate gates.
             if(!(boolean)ForkQueueAccess.SOURCE.compareAndSet(queue,0,1))continue;
@@ -2277,7 +2153,7 @@ final class RecoveryTasks implements AutoCloseable {
                         // We hold the real shared-queue lock. The verified helper's owned path skips reacquiring it.
                         if(Boolean.TRUE.equals(ForkQueueAccess.REMOVE.invoke(queue,task.object,true))) {
                             task.queueRemoved=true;
-                            queueReceipt(task,"QUEUE_REFERENCE_REMOVED","SHARED_FORKJOIN_SUBMISSION_QUEUE_ONLY");
+                            queueChanged(task);
                         }
                     } catch(ReflectiveOperationException failure) { throw new IllegalStateException(failure); }
                 });
@@ -2420,10 +2296,8 @@ final class RecoveryTasks implements AutoCloseable {
         if(!qualified(task)) {resetWindow(task,"FENCED");return;}
         if(!task.executions.isEmpty()||!task.dispatches.isEmpty()||!task.submissions.isEmpty()||!task.workerReferences.isEmpty()
                 ||!task.adoptedInvocations.isEmpty()||((Integer)activeInvocations.invoke(null,task.object))!=0) {resetWindow(task,"WAIT_DRAINED_RUNNABLE_ACTUAL_EXIT");return;}
-        if(task.ack==null) {task.intent=intent(task);task.ack=runtime.journal.append(task.intent);}
-        task.ack=runtime.journal.retryRejected(task.intent,task.ack);if(!confirmed(task.ack)) {resetWindow(task,"WAIT_ACK");return;}
-        if(task.releaseAck==null) {task.releaseIntent=PREFIX+"\tCAPTURE_RELEASE_OBSERVED\t"+task.id+"\t"+task.operation+"\t"+runtime.session+"\t"+(timer?"TIMER_QUEUE_REMOVED_CANCELLED_STATE_ACTUAL_INVOCATION_EXIT":"PRIVATE_EXECUTOR_ACTUAL_DRAIN_AND_TERMINATION");task.releaseAck=runtime.journal.append(task.releaseIntent);}
-        task.releaseAck=runtime.journal.retryRejected(task.releaseIntent,task.releaseAck);if(!confirmed(task.releaseAck)) {resetWindow(task,"WAIT_DRAIN_RESOURCE_ACK");return;}
+
+
         if(task.queue==null)task.queue=taskQueue(task);
         if(task.queue==null){resetWindow(task,"DRAINED_RUNNABLE_QUEUE_OWNER_UNOBSERVED");return;}
         task.callableReleased=true;finishScope(task,tick,(task.entered?"EXIT_OBSERVED":"START_PRECLUDED")+"\t"+(timer?"ACTUAL_TIMER_QUEUE_REMOVAL_AND_CANCELLED_STATE":"ACTUAL_PRIVATE_QUEUE_DRAIN_AND_POOL_TERMINATION"));
@@ -2441,24 +2315,11 @@ final class RecoveryTasks implements AutoCloseable {
         }
         if(!exclusive(task)||!task.reason.isEmpty())return;
         if(!qualified(task)) { resetWindow(task,"FENCED");return; }
-        if(task.ack==null) {
-            task.intent=intent(task);
-            task.ack=runtime.journal.append(task.intent);
-        }
-        task.ack=runtime.journal.retryRejected(task.intent,task.ack);
-        if(!confirmed(task.ack)) { resetWindow(task,"WAIT_ACK");return; }
         task.callableReleased=task.inline?Boolean.TRUE.equals(inlineClosed.invoke(null,task.object)):completionReleased(task);
         if(!task.entered||!task.exitObserved||!task.executions.isEmpty()||!task.adoptedInvocations.isEmpty()||!task.callableReleased) {
             resetWindow(task,task.inline?"WAIT_INLINE_INVOCATION_EXIT_AND_CAPTURE_RELEASE":
                     task.asynchronousCompletion||task.scheduler!=null?"CF_ASYNC_QUEUE_AND_WORKER_OWNERS_PENDING":"WAIT_CF_DIRECT_EXIT_REFERENCES_AND_STACK_UNLINK");return;
         }
-        if(task.releaseAck==null) {
-            task.releaseIntent=PREFIX+"\tCAPTURE_RELEASE_OBSERVED\t"+task.id+"\t"+task.operation+"\t"+runtime.session+
-                    "\t"+(task.inline?"INLINE_TOKEN_DIRECT_FIELDS_CLEARED_OTHER_OWNERS_UNPROVEN":"CF_DIRECT_FIELDS_CLEARED_SOURCE_STACK_ABSENT_OTHER_OWNERS_UNPROVEN");
-            task.releaseAck=runtime.journal.append(task.releaseIntent);
-        }
-        task.releaseAck=runtime.journal.retryRejected(task.releaseIntent,task.releaseAck);
-        if(!confirmed(task.releaseAck)) { resetWindow(task,"WAIT_CAPTURE_FACT_ACK");return; }
         finishScope(task,tick,task.inline?"INLINE_INVOCATION_EXIT_OBSERVED\tTOKEN_DIRECT_FIELDS_CLEARED_NO_CALLBACK_EFFECT_CLAIM":
                 "CF_DIRECT_EXIT_OBSERVED\tCALLBACK_FIELDS_CLEARED_SOURCE_STACK_ABSENT_NO_CALLBACK_EFFECT_CLAIM");
     }
@@ -2469,14 +2330,14 @@ final class RecoveryTasks implements AutoCloseable {
                     ||((Integer)helperReferences.invoke(null,task.object))!=0) {
                 resetWindow(task,"WAIT_INVOCATION_AND_SUBMISSION_RESERVATIONS");return;
             }
-            if(!waiterFactsCurrent(task)) { resetWindow(task,"WAIT_WAITER_FACT_ACK");return; }
+            if(!waiterFactsCurrent(task)) { resetWindow(task,"WAIT_ACTUAL_WAITER_EXIT");return; }
             if(capturePending()) { resetWindow(task,"TASK_EVIDENCE_PENDING_MERGE");return; }
             // Live facts are sufficient; do not emit a LOCAL_FACT proof record.
             task.state="LOCAL_TASK_SCOPE";
         }
     }
     /** One graph pass after local sampling, rather than a complete descendant traversal per task.
-     * Cycles cannot manufacture success: every member must have current exit/reference facts and the required durable action records. */
+     * Cycles cannot manufacture success: every member must have current exit/reference facts. */
     private void settleScopes(long tick) {
         synchronized(LISTENERS) {
             if(!checkBridge()||closing||!gap.isEmpty()||capturePending())return;
@@ -2503,14 +2364,10 @@ final class RecoveryTasks implements AutoCloseable {
         if(existing==null) { existing=Collections.newSetFromMap(new IdentityHashMap<>());index.put(value,existing); }
         existing.add(task);return true;
     }
-    /** Release our strong graph only after the whole connected scope has actual durable exit facts.
+    /** Release our strong graph only after the connected scope has actual exit/reference facts.
      * Weak provenance survives for late callbacks. Its collection is never used as release evidence. */
     private void retireCoreReferences(long tick) {
         synchronized(LISTENERS) {
-            for(Settlement settled:settlements.values())if(settled.released) {
-                if(settled.record==null)settled.record=PREFIX+"\tCORE_RELEASED\t"+settled.task+"\t"+settled.operation+"\t"+runtime.session+"\tOWNED_STRONG_GRAPH_CLEARED";
-                settled.ack=settled.ack==null?runtime.journal.append(settled.record):runtime.journal.retryRejected(settled.record,settled.ack);
-            }
             if(!checkBridge()||closing||!gap.isEmpty()||capturePending())return;
             try {
                 if(((Integer)pendingDeliveries.invoke(null))!=0)return;
@@ -2540,7 +2397,7 @@ final class RecoveryTasks implements AutoCloseable {
                             task.delegateOwners.clear();task.servicedOwnerQueues.clear();task.forkCaptureEdges.clear();
                             task.forkQueueReadbackEpoch=-1;
                             task.children.clear();task.parents.clear();
-                            Settlement settled=settlements.get(task.id);settled.released=true;settled.record=null;settled.ack=null;
+                            Settlement settled=settlements.get(task.id);settled.released=true;
                         }
                         for(var index:List.of(producers,dependents,childrenByParent)) {
                             for(var iterator=index.entrySet().iterator();iterator.hasNext();) {
@@ -2549,8 +2406,7 @@ final class RecoveryTasks implements AutoCloseable {
                             }
                         }
                     }))continue;
-                    // No release fact is emitted from this stack while 'group' still retains Task/object.
-                    // The following server tick writes metadata-only receipts after this frame returned.
+
                 }
             } catch(ReflectiveOperationException failure) { recordTransient("CORE_TASK_REFERENCE_RELEASE_QUERY_UNAVAILABLE"); }
         }
@@ -2575,9 +2431,8 @@ final class RecoveryTasks implements AutoCloseable {
             }
             for(Task task:tasks.values())if(operation.equals(task.operation)||!Collections.disjoint(task.subjects,targets))out.add("TASK:"+task.id+":"+task.state+":"+task.reason);
             for(Settlement settled:settlements.values())if(operation.equals(settled.operation)) {
-                if(!settled.released||!confirmed(settled.ack))out.add("CORE_REFERENCE_RELEASE_ACK:"+settled.task);
-                // The durable release is a past fact. New activity creates new work;
-                // unrelated changes to the global boundary inventory cannot undo it.
+                if(!settled.released)out.add("CORE_REFERENCES_PENDING:"+settled.task);
+                // New activity creates another actual task cleanup obligation.
             }
             for(PriorTask prior:priorTasks.values())if(operation.equals(prior.operation)&&!priorReleased.contains(prior.id))
                 out.add("PRIOR_TASK_PROCESS_OR_RELEASE_UNPROVEN:"+prior.id);
@@ -2609,11 +2464,11 @@ final class RecoveryTasks implements AutoCloseable {
     }
     private boolean localCurrent(Task task,long tick,long captureEpoch) {
         return !rootPending(task.object)&&!taskGap(task.object)&&task.reason.isEmpty()&&task.authority!=null
-                &&(!task.admissionFenced||task.admissionReleased&&confirmed(task.fenceReleaseAck))
+                &&(!task.admissionFenced||task.admissionReleased)
                 &&capabilityCurrent(task)&&qualified(task)&&exclusive(task)
                 &&task.executions.isEmpty()&&task.dispatches.isEmpty()&&task.submissions.isEmpty()
                 &&task.workerReferences.isEmpty()&&task.adoptedInvocations.isEmpty()&&task.waiters.isEmpty()&&!task.waiterCoverageGap&&waiterFactsCurrent(task)&&task.callableReleased
-                &&confirmed(task.ack)&&confirmed(task.releaseAck)&&(task.inline||task.forkJoin||task.result||task.delegated||task.queue!=null)
+                &&(task.inline||task.forkJoin||task.result||task.delegated||task.queue!=null)
                 &&(!task.resultCancellationAttempted||!task.resultDrainPending&&confirmed(task.resultCancelAck))
                 &&(task.result||(task.entered?task.exitObserved:task.queueRemoved||task.dispatchExitObserved||task.forkJoin&&task.blockedEntryObserved))
                 &&invocationReferencesReleased(task)&&retirementReferencesCurrent(task);
@@ -2730,17 +2585,16 @@ final class RecoveryTasks implements AutoCloseable {
                 out.add(task.id+":"+visible+":"+task.reason+":kind="+(task.inline?"CF_STAGE_INVOCATION":task.result?"CF_RESULT":task.completion?"CF_COMPLETION":task.delegated?"DELEGATED_INVOCATION":"TASK")+":active="+task.executions.size()+
                         ":callbacks="+task.dispatches.size()+":children="+task.children.size()+
                         ":currentScope="+current+":admissionFenced="+task.admissionFenced+
-                        ":startPrecludedDurable="+confirmed(task.preclusionAck)+":callbackFieldsCleared="+task.callbackFieldsReleased+
-                        ":sharedForkQueueReceipts="+(task.queueReceiptsDurable+task.queueRecords.values().stream().filter(RecoveryTasks::confirmed).count())+
-                        ":admissionRegistryReleased="+(task.admissionReleased&&confirmed(task.fenceReleaseAck))+
+                        ":startPrecluded="+task.blockedEntryObserved+":callbackFieldsCleared="+task.callbackFieldsReleased+
+                        ":admissionRegistryReleased="+task.admissionReleased+
                         ":dependentResultPending="+task.dependentResultPending+":ownerQueueRequests="+task.ownedQueueRequests.size()+
                         ":adoptedInvocations="+task.adoptedInvocations.size()+":waiters="+task.waiters.size()+
-                        ":waiterExitsDurable="+(waiterFactsCurrent(task)?task.waiterExitsRecorded:0)+
+                        ":waiterExits="+task.waiterExits+
                         ":gate="+task.gateReason+
                         ":captureGap="+(taskGap(task.object)?captureGaps.get(task.object).reason:"")+
                         ":definition="+task.definition.getName()+":scheduler="+(task.scheduler==null?"UNOBSERVED":task.scheduler.getClass().getName()));
             }
-            for(Settlement settled:settlements.values())if(operation.equals(settled.operation))out.add(settled.task+":CORE_REFERENCES_RELEASED="+(settled.released&&confirmed(settled.ack)));
+            for(Settlement settled:settlements.values())if(operation.equals(settled.operation))out.add(settled.task+":CORE_REFERENCES_RELEASED="+settled.released);
             out.addAll(remaining(operation));return List.copyOf(out);
         }
     }
@@ -2795,17 +2649,12 @@ final class RecoveryTasks implements AutoCloseable {
                 try { pollAdoptedInvocations(task); }
                 catch(ReflectiveOperationException failure) { throw new IOException("SOURCE_INVOCATION_RETIREMENT_UNAVAILABLE",failure); }
                 if(!task.adoptedInvocations.isEmpty())throw new IOException("SOURCE_INVOCATIONS_PENDING:"+task.id);
-                flushWaiterFacts(task);
-                if(!waiterFactsCurrent(task))throw new IOException("TASK_WAITER_FACT_ACK_PENDING:"+task.id);
+                if(!waiterFactsCurrent(task))throw new IOException("TASK_WAITER_EXIT_PENDING:"+task.id);
                 for(Object request:List.copyOf(task.ownedQueueRequests.values())) {
                     try { cancelOwnedQueueRelease.invoke(null,SINK,request); }
                     catch(ReflectiveOperationException failure) { throw new IOException("OWNER_QUEUE_REQUEST_RETIREMENT_UNAVAILABLE",failure); }
                 }
                 if(!task.ownedQueueRequests.isEmpty())throw new IOException("OWNER_QUEUE_REQUEST_RETIREMENT_PENDING:"+task.id);
-                task.preclusionAck=runtime.journal.retryRejected(task.preclusionRecord,task.preclusionAck);
-                task.admissionAck=runtime.journal.retryRejected(task.admissionRecord,task.admissionAck);
-                task.callbackReleaseAck=runtime.journal.retryRejected(task.callbackReleaseRecord,task.callbackReleaseAck);
-                task.fenceReleaseAck=runtime.journal.retryRejected(task.fenceReleaseRecord,task.fenceReleaseAck);
                 if(task.policyFenced) {
                     try { if(!retirePolicyFence(task))throw new IOException("TASK_POLICY_FENCE_RETIREMENT_PENDING:"+task.id); }
                     catch(ReflectiveOperationException failure) { throw new IOException("TASK_POLICY_FENCE_RETIREMENT_UNAVAILABLE",failure); }
@@ -2817,11 +2666,6 @@ final class RecoveryTasks implements AutoCloseable {
                     } catch(ReflectiveOperationException failure) { throw new IOException("TASK_FENCE_RETIREMENT_QUERY_UNAVAILABLE",failure); }
                 }
                 if(task.admissionFenced&&!task.admissionReleased)throw new IOException("TASK_ADMISSION_FENCE_RESOURCE_PENDING:"+task.id);
-                if(task.admissionReleased&&!confirmed(task.fenceReleaseAck))throw new IOException("TASK_ADMISSION_RELEASE_ACK_PENDING:"+task.id);
-                if(task.preclusionRecord!=null&&!confirmed(task.preclusionAck)||task.admissionRecord!=null&&!confirmed(task.admissionAck)
-                        ||task.callbackReleaseRecord!=null&&!confirmed(task.callbackReleaseAck))throw new IOException("TASK_PARTIAL_EFFECT_FACT_ACK_PENDING:"+task.id);
-                refreshQueueReceipts(task);
-                if(!task.queueRecords.isEmpty())throw new IOException("TASK_QUEUE_RELEASE_ACK_PENDING:"+task.id);
                 if(!task.executions.isEmpty()||!task.dispatches.isEmpty()||!task.submissions.isEmpty()||!task.workerReferences.isEmpty())
                     throw new IOException("TASK_ACTUAL_EXIT_PENDING:"+task.id);
                 try { if(((Integer)activeInvocations.invoke(null,task.object))!=0)throw new IOException("TASK_BOOTSTRAP_INVOCATIONS_PENDING:"+task.id); }
@@ -2862,7 +2706,7 @@ final class RecoveryTasks implements AutoCloseable {
                 }
                 if(!exactFuture(task.object)){
                     try{
-                        if(!drainedDispositionCurrent(task)||!observeBackend(task)||!task.callableReleased||!confirmed(task.releaseAck))
+                        if(!drainedDispositionCurrent(task)||!observeBackend(task)||!task.callableReleased)
                             throw new IOException("TASK_DRAIN_RETIREMENT_PENDING:"+task.id);
                     }catch(ReflectiveOperationException failure){throw new IOException("TASK_DRAIN_RETIREMENT_QUERY_UNAVAILABLE",failure);}
                     continue;
@@ -2875,17 +2719,6 @@ final class RecoveryTasks implements AutoCloseable {
             }
             if(!tasks.isEmpty()&&!gap.isEmpty())throw new IOException("TASK_RETIREMENT_GAP:"+gap);
             for(CaptureGap loss:captureGaps.values())if(!loss.subjects.isEmpty())throw new IOException("TASK_RETIREMENT_GAP:"+loss.reason);
-            int writes=32;boolean receiptsReady=true;
-            for(Task task:tasks.values()) {
-                if(task.retiredRevision!=task.revision) {
-                    if(writes--<=0) { receiptsReady=false;continue; }
-                    task.retirementRecord=PREFIX+"\tRETIREMENT_OBSERVED\t"+task.id+"\t"+runtime.session+
-                            "\t"+(task.result?"RESULT_AND_WAITERS_OBSERVED":task.entered?"EXIT_OBSERVED":task.dispatchExitObserved?"DISPATCH_EXIT_OBSERVED":"START_PRECLUDED")+"\trevision="+task.revision;
-                    task.retirementAck=runtime.journal.append(task.retirementRecord);task.retiredRevision=task.revision;
-                } else task.retirementAck=runtime.journal.retryRejected(task.retirementRecord,task.retirementAck);
-                if(!confirmed(task.retirementAck))receiptsReady=false;
-            }
-            if(!receiptsReady)throw new IOException("TASK_RETIREMENT_FACTS_ACK_PENDING");
             long epoch=changes.get();
             if(retirementAck==null||retirementEpoch!=epoch) {
                 // This intent authorizes releasing our own observer references, never a shared pool or task.

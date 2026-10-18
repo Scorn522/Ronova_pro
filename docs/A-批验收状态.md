@@ -1,5 +1,19 @@
 # Ronova Pro 当前进度
 
+## 2026-10-18：按 V1.5 收敛为整 Mod 控制
+
+主工程仍为 `D:\桌面\ronova_GPT`，本轮接续 `e4ba753`，版本 `1.5.0-dev`，客户端协议 `v1.5-whole-mod`。以下历史记录保留各自候选与场景范围，其中旧 allocator/object SDK、CRT/STL 字段账本与隔离 seam 的结论不代表本版活动能力。
+
+本轮整包生产实现包括：启动前自动参数交接和已保存多 Mod 选集；按实际文件与 Module 展开别名的 stop/protect/status；先发布策略再全方法入口返回；存量实体、BlockEntity、订阅、任务、恢复引用与客户端载体的共用限额收尾。共享加载器不作为归组依据，客户端范围与服务端结果独立报告。
+
+Storage 已去除 IdentityLifetime、RootAllocation 与自发回执包装，使用直接 RAII、真实 NTFS 身份和 TxF。Native 活动构建去除合作式 SDK、CRT/STL/第三方分配器与静态 TLS 字段账本，保留整组控制、JNI/JVMTI、NativeMethodBind、实际线程/句柄和自身控制范围。旧 SDK 文件作为未编译历史源码保留，不能计入当前覆盖。
+
+生产包完整编写后已统一构建 Core、Agent、Bootstrap、prelaunch、用户态 Native 和 Storage。真实 Forge 启动暴露的中文 bootstrap 载荷路径、selector 类循环、ASM 导出前校验、普通类全局引用图、数组复制导入表重扫及绑定准备顺序，均沿实际失败路径修正。另移除给已退役内存账本捕获来源的空工作；准确 JDK Class 反射缓存 CAS 不再被表示类的控制对象判断拒绝；普通 ASM 树只冻结已核输入、Module 与父子关系，在真实变换消费时才物化。原始失败不改写为通过。
+
+用户已明确授权在真实 Forge 1.20.1 / 47.4.23 服务端使用 `-Dronova.pro.validation=true -Dronova.pro.fixture=mod-group` 和已有 WorldFixture JAR。当前正在该实际世界场景收尾，不能将 premain 完整或 ModLauncher 启动当成停组效果通过。没有运行 `validation/checks` 自证检查或独立 C++ 消费者夹具。
+
+本版不宣称任意非合作原生私有语义、未观察调用或外部旧活栈已完全控制；这些范围保持实际 gap/partial。自身外观与武器注册未加入本轮，完整 B/C 未统一标为完成。
+
 ## 2026-10-18：C 接续——NT 内存传输与私有字段存储
 
 接续 `2ea6410`，仅主工程 `D:\桌面\ronova_GPT`。Java105 / Native99 / Object SDK3（保留1/2）/ SourceMapBridge2 / Storage3 / Journal6，协议 `r3-client-8`。整包源码写齐后统一构建。

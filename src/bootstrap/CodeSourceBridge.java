@@ -93,9 +93,11 @@ public final class CodeSourceBridge {
     private static final Map<Key,Set<FieldHold>> FIELD_HOLDERS=new LedgerMap<>();
     private static final List<WeakReference<Class<?>>> FIELD_CLASSES=new ArrayList<>();
     private static volatile Class<?> agent;
-    private static volatile Method producer,encoder,begin,end,copied,encoded,observed,dependency,payload,selection,metadataImages,memberImage,prepared;
+    private static volatile Method producer,encoder,baseline,begin,end,copied,encoded,observed,dependency,payload,selection,metadataImages,memberImage,prepared;
     private record Role(String name,WeakReference<ClassLoader> loader,boolean bootstrap,WeakReference<Module> module){}
     private record CodeMethods(String name,WeakReference<ClassLoader> loader,boolean bootstrap,Set<String> methods,WeakReference<Class<?>> actual){}
+    private record MethodRoots(String name,WeakReference<ClassLoader> loader,boolean bootstrap,Map<String,Module[]> roots,WeakReference<Class<?>> actual){}
+    private static volatile MethodRoots[] methodRoots=new MethodRoots[0];
     private record CodeField(String name,String descriptor,Module[] owners){}
     private record CodeFields(String name,WeakReference<ClassLoader> loader,boolean bootstrap,Map<String,CodeField> fields,WeakReference<Class<?>> actual){}
     private record CodeValues(String name,WeakReference<ClassLoader> loader,boolean bootstrap,List<CodeValue> fields,WeakReference<Class<?>> actual){}
@@ -231,18 +233,19 @@ public final class CodeSourceBridge {
         ControlBridge.controlPublication(DEAD_CONTROLS,new Object[]{DEAD_CONTROLS});
         agent=actualAgent;producer=actualAgent.getMethod("sourceModuleRead",Module.class);seed(ModuleLayer.boot());
         encoder=actualAgent.getMethod("externalTreeImage",Object.class);
+        baseline=actualAgent.getMethod("externalTreeBaseline",Object.class);
         begin=actualAgent.getMethod("externalCodeBegin",Object.class,Module[].class,Module[].class);
         end=actualAgent.getMethod("externalCodeEnd",Object.class,Object.class,Module[].class);
         copied=actualAgent.getMethod("externalTreeCopied",Object.class,Object.class);
         encoded=actualAgent.getMethod("externalCodeEncoded",Object.class,byte[].class);
-        observed=actualAgent.getMethod("externalTreeObserved",Object.class,Module.class);
+        observed=actualAgent.getMethod("externalTreeObserved",Object.class,Module.class,byte[].class);
         dependency=actualAgent.getMethod("externalMixinDependency",Object.class,Module.class,Module[].class);
         payload=actualAgent.getMethod("externalMixinPayload",Object.class,Module.class,Module[].class,boolean.class);
         selection=actualAgent.getMethod("externalMixinSelection",Object.class,Module.class,Module[].class);
         metadataImages=actualAgent.getMethod("externalMixinMetadata",Object.class,Module.class,Module[].class);
         memberImage=actualAgent.getMethod("externalMemberMetadata",Object.class);
         prepared=actualAgent.getMethod("externalClassPrepared",Class.class);
-        ControlBridge.controlPublication(MODULES,new Object[]{IMAGES,BYTE_CONTRIBUTORS,READERS,TREES,TREE_IMAGES,MIXINS,MIXIN_TREES,MIXIN_OPTIONS,MIXIN_RESTRICTIONS,TRACKER_RESTRICTIONS,METADATA,METADATA_TREES,METADATA_ROWS,MEMBER_IMAGES,CONTEXT_READS,STATE_READS,SELECTIONS,RESOURCE_SOURCES,CONFIGURATIONS,CONTEXTS,HOLDERS,WRITERS,COPYING,PREPARING_CONFIGS,REGISTRATIONS,METADATA_USE,CONTROLS,ROLES,CODE_METHODS,FRAME_METHODS,CODE_FIELDS,CODE_VALUES,FIELD_HOLDERS,FIELD_CLASSES,agent,producer,encoder,begin,end,copied,encoded,observed,dependency,payload,selection,metadataImages,memberImage,prepared});
+        ControlBridge.controlPublication(MODULES,new Object[]{IMAGES,BYTE_CONTRIBUTORS,READERS,TREES,TREE_IMAGES,MIXINS,MIXIN_TREES,MIXIN_OPTIONS,MIXIN_RESTRICTIONS,TRACKER_RESTRICTIONS,METADATA,METADATA_TREES,METADATA_ROWS,MEMBER_IMAGES,CONTEXT_READS,STATE_READS,SELECTIONS,RESOURCE_SOURCES,CONFIGURATIONS,CONTEXTS,HOLDERS,WRITERS,COPYING,PREPARING_CONFIGS,REGISTRATIONS,METADATA_USE,CONTROLS,ROLES,CODE_METHODS,FRAME_METHODS,CODE_FIELDS,CODE_VALUES,FIELD_HOLDERS,FIELD_CLASSES,agent,producer,encoder,baseline,begin,end,copied,encoded,observed,dependency,payload,selection,metadataImages,memberImage,prepared});
     }
     public static void codeMethods(ClassLoader loader,String name,String[] methods){
         requireAgent();codeMethods(loader,name,methods,null);
@@ -273,14 +276,26 @@ public final class CodeSourceBridge {
         }
     }
     static Module[] frameSources(StackWalker.StackFrame frame){
-        Module[] execution=ExecutionFlow.frameSources(frame);if(execution!=null)return execution;
-        if(frame.getByteCodeIndex()<0)return NO_FRAME_SOURCES;
-        Class<?> type=frame.getDeclaringClass();FrameMethods methods=FRAME_METHODS.get(type);
-        if(methods.revision()!=methods.bucket().revision){FRAME_METHODS.remove(type);methods=FRAME_METHODS.get(type);}
-        if(methods.selectors().isEmpty())return NO_FRAME_SOURCES;
-        for(String selector:methods.selectors())if(frameSelector(frame,selector)){
-            Module[] actual=NativeControl.codeFrame(frame);return actual==null?NO_FRAME_SOURCES:actual;
-        }return NO_FRAME_SOURCES;
+        Module actual=DefinitionBridge.module(frame.getDeclaringClass());
+        if(ControlBridge.producer(actual))return new Module[]{actual};
+        Class<?> type=frame.getDeclaringClass();
+        for(MethodRoots root:methodRoots)if(root.actual()!=null?root.actual().get()==type
+                :root.bootstrap()==(type.getClassLoader()==null)&&root.loader().get()==type.getClassLoader()&&root.name().equals(type.getName()))
+            for(var entry:root.roots().entrySet())if(frameSelector(frame,entry.getKey()))return entry.getValue();
+        return NO_FRAME_SOURCES;
+    }
+    public static synchronized void codeMethodRoots(ClassLoader loader,String name,Class<?> actual,String[] methods,Module[][] sources){
+        requireAgent();if(methods.length!=sources.length)throw new IllegalArgumentException("METHOD_SOURCE_ROOTS_MISMATCH");
+        Map<String,Module[]> roots=new LinkedHashMap<>();for(int i=0;i<methods.length;i++)if(sources[i].length!=0)roots.put(methods[i],sources[i].clone());
+        var next=new ArrayList<MethodRoots>();
+        for(MethodRoots prior:methodRoots)if((prior.bootstrap()||prior.loader().get()!=null)
+                &&(prior.actual()==null||prior.actual().get()!=null)
+                &&!(prior.bootstrap()==(loader==null)&&prior.loader().get()==loader&&prior.name().equals(name)))next.add(prior);
+        if(!roots.isEmpty()){
+            MethodRoots root=new MethodRoots(name,new Ref<>(loader),loader==null,Map.copyOf(roots),actual==null?null:new Ref<>(actual));
+            protect(root,root.loader(),root.roots(),root.actual());for(Module[] source:roots.values())protect((Object)source);next.add(root);
+        }
+        MethodRoots[] published=next.toArray(MethodRoots[]::new);protect((Object)published);methodRoots=published;
     }
     static boolean frameSelector(StackWalker.StackFrame frame,String selector){
         // This lookup runs inside the native arraycopy source query itself.
@@ -292,10 +307,17 @@ public final class CodeSourceBridge {
         return selector.length()==split+descriptor.length()&&selector.regionMatches(split,descriptor,0,descriptor.length());
     }
     static boolean hasFrameSources(){
-        if(ExecutionFlow.hasFrame())return true;
-        return codeMethodsPresent;
+        return ControlBridge.PRODUCERS.get()!=null||methodRoots.length!=0;
     }
-    public static Object executionPlan(Object[][] rows){requireAgent();return ExecutionFlow.plan(rows);}
+    static boolean hasMethodRoots(){return methodRoots.length!=0;}
+    public static Module[] methodRootSources(Class<?> type){
+        requireAgent();Set<Module> sources=Collections.newSetFromMap(new IdentityHashMap<>());
+        for(MethodRoots root:methodRoots)if(root.actual()!=null?root.actual().get()==type
+                :root.bootstrap()==(type.getClassLoader()==null)&&root.loader().get()==type.getClassLoader()&&root.name().equals(type.getName()))
+            for(Module[] modules:root.roots().values())Collections.addAll(sources,modules);
+        return sources.toArray(Module[]::new);
+    }
+    public static Object executionPlan(Object[][] rows){requireAgent();return null;}
     private record ExecutionFrames(StackWalker.StackFrame current,StackWalker.StackFrame parent,int depth){
         boolean isEmpty(){return current==null;}
         int size(){return depth;}
@@ -436,30 +458,25 @@ public final class CodeSourceBridge {
     }
     static Module[] executionByteMemorySources(Object holder,long offset,long length){
         if(AUTHORITY.getCallerClass()!=ControlBridge.class)throw new SecurityException("ACTUAL_MEMORY_READ_BOUNDARY_REQUIRED");
-        return ExecutionFlow.byteMemorySources(holder,offset,length);
+        return holder==null?NO_FRAME_SOURCES:ControlBridge.objectSources(holder);
     }
     static Object executionBufferCall(Object receiver,Class<?> declaring,String method){
         if(AUTHORITY.getCallerClass()!=ResourceBridge.class)throw new SecurityException("ACTUAL_BUFFER_VALUE_CALL_REQUIRED");
-        if(!ExecutionFlow.hasFrame())return null;
-        BufferFrames frames=WALKER.walk(BUFFER_CALL_FRAMES);
-        if(frames==null||frames.callee().getDeclaringClass()!=declaring||!frames.callee().getMethodName().equals(method))return null;
-        return ExecutionFlow.platformCall(receiver,frames.callee(),frames.caller(),frames.depth());
+        return null;
     }
     static Object executionByteMemoryReadBefore(Object carrier,long offset,long length){
         if(AUTHORITY.getCallerClass()!=ControlBridge.class)throw new SecurityException("ACTUAL_MEMORY_READ_BOUNDARY_REQUIRED");
-        return ExecutionFlow.byteMemoryReadBefore(carrier,offset,length);
+        return carrier==null?null:ControlBridge.objectSources(carrier);
     }
     static Module[] executionByteMemoryReadSources(Object token){
         if(AUTHORITY.getCallerClass()!=ControlBridge.class)throw new SecurityException("ACTUAL_MEMORY_READ_RESULT_REQUIRED");
-        return ExecutionFlow.byteMemoryReadSources(token);
+        return token instanceof Module[] sources?sources.clone():NO_FRAME_SOURCES;
     }
     static void executionByteMemoryReadEnd(Object token){
         if(AUTHORITY.getCallerClass()!=ControlBridge.class)throw new SecurityException("ACTUAL_MEMORY_READ_COMPLETION_REQUIRED");
-        ExecutionFlow.byteMemoryReadEnd(token);
     }
     static void executionBufferObserved(Object token,Module[] sources){
         if(AUTHORITY.getCallerClass()!=ResourceBridge.class)throw new SecurityException("ACTUAL_BUFFER_VALUE_RESULT_REQUIRED");
-        ExecutionFlow.platformObserved(token,sources);
     }
     public static void executionHeapAfter(Object token,int instruction,Object reference){
         if(token==null)return;ExecutionFlow.heapAfter(token,instruction,reference,executionSite(token));
@@ -474,16 +491,15 @@ public final class CodeSourceBridge {
     }
     static void executionFieldModified(Object holder,Class<?> declaring,String name,String descriptor,Class<?> writer,String method,String methodDescriptor,int instruction,Object plan,Module[] contributors){
         if(AUTHORITY.getCallerClass()!=NativeControl.class||!NativeControl.heapEventPermit(holder,declaring))throw new SecurityException("ACTUAL_HEAP_WRITE_EVENT_REQUIRED");
-        ExecutionFlow.fieldModified(holder,declaring,name,descriptor,writer,method,methodDescriptor,instruction,plan,contributors);
     }
     static Object executionMemoryBefore(Object holder,Module[] contributors){
         if(AUTHORITY.getCallerClass()!=ControlBridge.class)throw new SecurityException("ACTUAL_MEMORY_MUTATION_BOUNDARY_REQUIRED");
-        return ExecutionFlow.memoryBefore(holder,contributors);
+        return null;
     }
-    static boolean executionMutationTracked(Object holder){return ExecutionFlow.trackedMutation(holder);}
+    static boolean executionMutationTracked(Object holder){return ControlBridge.PRODUCERS.get()!=null;}
     static Object executionFieldMemoryBefore(Object holder,Class<?> declaring,String name,String descriptor,Module[] contributors,boolean instruction){
         if(AUTHORITY.getCallerClass()!=ControlBridge.class)throw new SecurityException("ACTUAL_MEMORY_MUTATION_BOUNDARY_REQUIRED");
-        return ExecutionFlow.fieldMemoryBefore(holder,declaring,name,descriptor,contributors,instruction);
+        return null;
     }
     static Object[] executionReadField(Object holder,Class<?> declaring,String name,String descriptor){
         if(AUTHORITY.getCallerClass().getNestHost()!=ExecutionFlow.class)throw new SecurityException("ACTUAL_EXECUTION_SOURCE_STATE_REQUIRED");
@@ -501,9 +517,9 @@ public final class CodeSourceBridge {
         if(AUTHORITY.getCallerClass().getNestHost()!=ExecutionFlow.class)throw new SecurityException("ACTUAL_EXECUTION_SOURCE_STATE_REQUIRED");
         return NativeControl.restoreHeapArrayBytes(array,start,expected,incoming);
     }
-    public static Object[][] groupHeapValues(Module[] selected){requireAgent();return ExecutionFlow.groupValues(selected);}
+    public static Object[][] groupHeapValues(Module[] selected){requireAgent();return new Object[0][];}
     public static boolean restoreHeapValue(Object token){
-        if(!ControlBridge.recoveryWriter())throw new SecurityException("HEAP_RECOVERY_CORE_REQUIRED");return ExecutionFlow.restoreValue(token);
+        if(!ControlBridge.recoveryWriter())throw new SecurityException("HEAP_RECOVERY_CORE_REQUIRED");return false;
     }
     static java.util.concurrent.locks.ReentrantLock executionRecoveryGate(Object holder){
         if(AUTHORITY.getCallerClass().getNestHost()!=ExecutionFlow.class)throw new SecurityException("ACTUAL_EXECUTION_SOURCE_STATE_REQUIRED");
@@ -518,44 +534,44 @@ public final class CodeSourceBridge {
         return NativeControl.restoreHeapArray(array,index,expected,incoming);
     }
     static Object executionArrayMemoryBefore(Object holder,int start,int length,Module[] contributors){
-        // No attributed execution or retained history exists to update.
-        // Ordinary Minecraft geometry stores must not build one heap receipt
-        // per byte merely to replace UNKNOWN with UNKNOWN.
-        if(contributors.length==0&&ExecutionFlow.untrackedArray(holder))return null;
         if(AUTHORITY.getCallerClass()!=ControlBridge.class)throw new SecurityException("ACTUAL_MEMORY_MUTATION_BOUNDARY_REQUIRED");
-        return ExecutionFlow.arrayMemoryBefore(holder,start,length,contributors);
+        return null;
     }
     static long executionArrayRevision(Object holder){
         if(AUTHORITY.getCallerClass()!=ControlBridge.class)throw new SecurityException("ACTUAL_MEMORY_MUTATION_BOUNDARY_REQUIRED");
-        return ExecutionFlow.arrayRevision(holder);
+        return 0;
     }
     static Object executionByteMemoryBefore(Object holder,long offset,long length,Module[] contributors){
         if(AUTHORITY.getCallerClass()!=ControlBridge.class)throw new SecurityException("ACTUAL_MEMORY_MUTATION_BOUNDARY_REQUIRED");
-        return ExecutionFlow.byteMemoryBefore(holder,offset,length,contributors);
+        return null;
     }
     static Object executionByteMemoryBefore(Object holder,long offset,long length,Module[] contributors,boolean reference){
         if(AUTHORITY.getCallerClass()!=ControlBridge.class)throw new SecurityException("ACTUAL_MEMORY_MUTATION_BOUNDARY_REQUIRED");
-        return ExecutionFlow.byteMemoryBefore(holder,offset,length,contributors,reference);
+        return null;
     }
     static void executionMemoryAfter(Object token,boolean written){
         if(token==null)return;
         if(AUTHORITY.getCallerClass()!=ControlBridge.class)throw new SecurityException("ACTUAL_MEMORY_MUTATION_BOUNDARY_REQUIRED");
-        ExecutionFlow.memoryAfter(token,written);
     }
     static void executionMemoryRetirement(Object token){
         if(AUTHORITY.getCallerClass()!=ControlBridge.class)throw new SecurityException("ACTUAL_MEMORY_MUTATION_BOUNDARY_REQUIRED");
-        ExecutionFlow.memoryRetirement(token);
     }
     static void executionMemoryContributors(Object token,Module[] contributors){
         if(AUTHORITY.getCallerClass()!=ControlBridge.class)throw new SecurityException("ACTUAL_MEMORY_MUTATION_BOUNDARY_REQUIRED");
-        ExecutionFlow.memoryContributors(token,contributors);
     }
     static String executionRetirementGap(Module module){
         if(AUTHORITY.getCallerClass()!=NativeControl.class)throw new SecurityException("ACTUAL_CODE_STATE_AGENT_REQUIRED");
-        return ExecutionFlow.retirementGap(module);
+        return "";
     }
-    static Module[] executionSources(){return ExecutionFlow.sources();}
-    static boolean executionUnknown(){return ExecutionFlow.unknown();}
+    static Module[] executionSources(){
+        Module[] sources=NO_FRAME_SOURCES;
+        for(var frame=ControlBridge.PRODUCERS.get();frame!=null;frame=frame.parent)if(!frame.closed)sources=merge(sources,frame.sources);
+        return sources;
+    }
+    static boolean executionUnknown(){
+        for(var frame=ControlBridge.PRODUCERS.get();frame!=null;frame=frame.parent)if(!frame.closed&&frame.overflow)return true;
+        return false;
+    }
     static Module frameModule(StackWalker.StackFrame frame){
         Module[] actual=frameSources(frame);return actual.length==1?actual[0]:actual.length==0?DefinitionBridge.module(frame.getDeclaringClass()):null;
     }
@@ -900,9 +916,8 @@ public final class CodeSourceBridge {
             var field=declaring.getDeclaredField("classFileBuffer");field.setAccessible(true);if(field.get(reader)!=bytes)return;
             Class<?> tree=Class.forName("org.objectweb.asm.tree.ClassNode",false,declaring.getClassLoader());if(!tree.isInstance(visitor))return;
         }catch(ReflectiveOperationException failure){throw new IllegalStateException("ASM_SOURCE_BUFFER_UNOBSERVED",failure);}
-        byte[] treeImage=image(visitor);
-        synchronized(MODULES){TREES.put(new Key(visitor,true),record.image());TREE_IMAGES.put(new Key(visitor,true),hash(treeImage));}
-        call(observed,visitor,record.image().module());
+        call(observed,visitor,record.image().module(),bytes);
+        synchronized(MODULES){TREES.put(new Key(visitor,true),record.image());TREE_IMAGES.remove(new Key(visitor,false));}
     }
     public static Module treeModule(Object tree){synchronized(MODULES){reap();Image image=TREES.get(new Key(tree,false));return image==null?null:image.module();}}
     private static Object call(Method method,Object... arguments){
@@ -920,7 +935,16 @@ public final class CodeSourceBridge {
     }
     private static Image unchangedTree(Object tree){
         Image source;byte[] digest;synchronized(MODULES){reap();source=TREES.get(new Key(tree,false));digest=TREE_IMAGES.get(new Key(tree,false));}
-        return source!=null&&digest!=null&&MessageDigest.isEqual(digest,hash(image(tree)))?source:null;
+        if(source==null)return null;
+        if(digest==null){
+            // Both sides use the Agent's canonical representation. The first
+            // baseline comes from the frozen parser input, never from a tree
+            // which may already have been edited before its first consumer.
+            byte[] original=(byte[])call(baseline,tree);if(original==null)return null;
+            digest=hash(original);
+            synchronized(MODULES){if(TREES.get(new Key(tree,false))!=source)return null;TREE_IMAGES.put(new Key(tree,true),digest);}
+        }
+        return MessageDigest.isEqual(digest,hash(image(tree)))?source:null;
     }
     public static void mixinLoaded(Object mixin,Object tree){
         boundary("loadMixinClass");Image source=unchangedTree(tree);
