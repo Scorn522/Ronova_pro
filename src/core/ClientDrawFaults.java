@@ -90,6 +90,7 @@ public final class ClientDrawFaults {
         }
         disabled.add(key);ClientFaults.report(key.phase(),String.valueOf(key.definition()),failure);
         if(key.phase().equals("screen")&&source instanceof Screen screen)failedScreen(screen);
+        ClientModGroups.isolateFault(source);
     }
     private static void failedScreen(Screen screen) {
         Minecraft mc=Minecraft.getInstance();
@@ -167,6 +168,7 @@ public final class ClientDrawFaults {
             if(!ClientFaults.recoverable(failure))throwUnchecked(failure);
             ClientFaults.report("screen-input",screenName+" / "+title,failure);
             if(screen!=null) {failedInputs.add(screen);failedScreen(screen);}
+            ClientModGroups.isolateFault(screen);
         }
     }
     @SuppressWarnings("unchecked") private static <T extends Throwable> void throwUnchecked(Throwable failure)throws T {throw (T)failure;}
@@ -241,6 +243,7 @@ public final class ClientDrawFaults {
             disabledItems.computeIfAbsent(scope.key.item(),ignored->new HashSet<>()).add(scope.key.model());
             ClientFaults.report("item-render",net.minecraft.core.registries.BuiltInRegistries.ITEM.getKey(scope.key.item())
                     +" / "+(scope.key.model()==null?"null":scope.key.model().getName()),failure);
+            ClientModGroups.isolateFault(scope.key.item());ClientModGroups.isolateFault(scope.key.model());
             return true;
         } catch(Throwable cleanup) {
             if(cleanup!=failure)failure.addSuppressed(cleanup);return false;

@@ -156,15 +156,19 @@ public final class NativeControl {
     }
     public static boolean codeLayout(ClassLoader loader,String name,byte[] bytes,String[] methods,Module[][][] owners){
         if(!controlCaller())throw new SecurityException("ACTUAL_CODE_LAYOUT_AGENT_REQUIRED");
-        return available&&codeLayout0(loader,name,bytes,methods,owners,false,null);
+        return available&&codeLayout0(loader,name,bytes,methods,owners,false,null,null);
     }
     public static boolean codeLayout(ClassLoader loader,String name,byte[] bytes,String[] methods,Module[][][] owners,boolean hidden){
         if(!controlCaller())throw new SecurityException("ACTUAL_CODE_LAYOUT_AGENT_REQUIRED");
-        return available&&codeLayout0(loader,name,bytes,methods,owners,hidden,null);
+        return available&&codeLayout0(loader,name,bytes,methods,owners,hidden,null,null);
     }
     public static boolean codeLayout(ClassLoader loader,String name,byte[] bytes,String[] methods,Module[][][] owners,boolean hidden,Object execution){
         if(!controlCaller())throw new SecurityException("ACTUAL_CODE_LAYOUT_AGENT_REQUIRED");
-        return available&&codeLayout0(loader,name,bytes,methods,owners,hidden,execution);
+        return available&&codeLayout0(loader,name,bytes,methods,owners,hidden,execution,null);
+    }
+    public static boolean codeLayout(ClassLoader loader,String name,byte[] bytes,String[] methods,Module[][][] owners,boolean hidden,Object execution,Module declaration){
+        if(!controlCaller())throw new SecurityException("ACTUAL_CODE_LAYOUT_AGENT_REQUIRED");
+        return available&&codeLayout0(loader,name,bytes,methods,owners,hidden,execution,declaration);
     }
     public static boolean codeDefinition(Class<?> actual,byte[] bytes){
         if(!controlCaller())throw new SecurityException("ACTUAL_CODE_DEFINITION_AGENT_REQUIRED");
@@ -295,6 +299,8 @@ public final class NativeControl {
     }
     private static Module[] sourceQueryFrame(Class<?> declaring,String name,String descriptor,int location,int depth){
         Module module=declaring==null?null:DefinitionBridge.module(declaring);
+        // The native caller matches injected roots against this real frame's
+        // method version. A current Java selector must not label an old body.
         return module==null?new Module[0]:new Module[]{module};
     }
     static int networkBoundaryDepth(Class<?> boundary,String method){
@@ -361,8 +367,8 @@ public final class NativeControl {
     static boolean arrayCopyInternalBoundary(){return arrayCopyInternalBoundary0();}
     static boolean arrayCopyReadBoundary(Object source,int from,int length){return CALLER.getCallerClass()==ControlBridge.class&&arrayCopyReadBoundary0(source,from,length);}
     static boolean arrayCopyBoundary(Object source,int from,int length,Object target,int to,int prefix,Object read){return CALLER.getCallerClass()==ControlBridge.class&&arrayCopyBoundary0(source,from,length,target,to,prefix,read);}
-    static boolean fileOperationBoundary(Object receiver,Class<?> declaring,String method,Module[] sources,int operation,long address,long length){
-        return CALLER.getCallerClass()==ResourceBridge.class&&fileOperationBoundary0(receiver,declaring,method,sources,operation,address,length);
+    static boolean fileOperationBoundary(Object receiver,Class<?> declaring,String method,Module[] sources,int operation,long address,long length,String path){
+        return CALLER.getCallerClass()==ResourceBridge.class&&fileOperationBoundary0(receiver,declaring,method,sources,operation,address,length,path);
     }
     static boolean fileOperationFinishing(Object token){return CALLER.getCallerClass()==ResourceBridge.class&&fileOperationFinishing0(token);}
     static boolean mappingDuplicateFrame(long[] identity,int phase){
@@ -774,7 +780,7 @@ public final class NativeControl {
     }
     public static String retirementGap(Module module){
         if(!controlCaller())throw new SecurityException("NATIVE_CONTROL_AGENT_REQUIRED");
-        if(!available)return "";
+        if(!available)return "NATIVE_CONTROL_BACKEND_UNAVAILABLE";
         if(jvmtiDefinitionsPending0(module))return "JVMTI_DEFINITION_CONTINUATION_PENDING";
         long[] host=hostState0(module);long[] jvmti=jvmtiState0(module);
         if(host[39]!=0)return "HOST_CONTROL_OPERATION_UNOBSERVED:groups="+host[39];
@@ -874,7 +880,7 @@ public final class NativeControl {
     private static native boolean initialize0(Class<?> tasks,Class<?> definitions);
     private static native boolean initializeDefinitionDirectory0(Class<?> owner);
     private static native boolean compareDefinitionReference0(Object slot,Object expected,Object next);
-    private static native boolean codeLayout0(ClassLoader loader,String name,byte[] bytes,String[] methods,Module[][][] owners,boolean hidden,Object execution);
+    private static native boolean codeLayout0(ClassLoader loader,String name,byte[] bytes,String[] methods,Module[][][] owners,boolean hidden,Object execution,Module declaration);
     private static native boolean codeDefinition0(Class<?> actual,byte[] bytes);
     private static native String[] codeVersion0(Class<?> actual,byte[] bytes);
     private static native String[] codeMethodVersion0(Class<?> actual,byte[] bytes,String method);
@@ -915,7 +921,7 @@ public final class NativeControl {
     private static native boolean arrayCopyInternalBoundary0();
     private static native boolean arrayCopyReadBoundary0(Object source,int from,int length);
     private static native boolean arrayCopyBoundary0(Object source,int from,int length,Object target,int to,int prefix,Object read);
-    private static native boolean fileOperationBoundary0(Object receiver,Class<?> declaring,String method,Module[] sources,int operation,long address,long length);
+    private static native boolean fileOperationBoundary0(Object receiver,Class<?> declaring,String method,Module[] sources,int operation,long address,long length,String path);
     private static native boolean fileOperationFinishing0(Object token);
     private static native boolean mappingDuplicateFrame0(long[] identity,int phase);
     private static native boolean ioOperationBoundary0(Class<?> declaring,String method,long[] arguments,Object[] references,Module[] sources);

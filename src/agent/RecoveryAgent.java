@@ -284,7 +284,7 @@ public final class RecoveryAgent {
                     byte[] result=apply(declaration,loader,name,type,domain,source==null?input:source.bytes(),source!=null&&source.present(),writer);
                     if(result==null)result=source==null?input:source.bytes();
                     if(origin!=null)result=DefinitionBoundary.generated(loader,result,true);
-                    if(source!=null&&(source.present()||source.image()!=null))result=ExternalCodeRuntime.finish(loader,name,type,source,result);
+                    if(source!=null&&(source.present()||source.image()!=null||origin!=null))result=ExternalCodeRuntime.finish(loader,name,type,source,result);
                     recordDefinition(type,result==null?bytes:result);
                     platformReturned(loader,name,type,result==null?bytes:result);return result;
                     }catch(RuntimeException|LinkageError failure){
@@ -982,7 +982,7 @@ public final class RecoveryAgent {
         if(writers!=null)for(Module writer:writers)if(writer==null||producerModule(writer))return true;
         if(producerModule(module)||controlImages.critical(module,loader,name,actual)||ExternalCodeImages.recorded(loader,name)
                 ||ExternalCodeDefinitions.executionSourcesObserved(loader,name)||watchedDefinition(actual)||confirmedContract(actual))return true;
-        return actual!=null&&definitionOrigin(actual,loader,name)!=null;
+        return definitionOrigin(actual,loader,name)!=null;
     }
     private static void requireNativeImageCaller(String method){
         Class<?> nativeControl;
@@ -998,7 +998,7 @@ public final class RecoveryAgent {
         // Ordinary group-external images keep the original chain. Control carriers must
         // retain their actual guards even when a changed callback has unknown/non-Mod writers.
         boolean producer=Arrays.stream(writers).anyMatch(RecoveryAgent::producerModule);
-        Module origin=actual==null?null:definitionOrigin(actual,loader,name),declaration=origin==null?module:origin;
+        Module origin=definitionOrigin(actual,loader,name),declaration=origin==null?module:origin;
         if(name==null&&actual!=null&&!actual.isHidden())name=actual.getName().replace('.','/');
         boolean control=controlImages.critical(module,loader,name,actual);
         boolean registered=ExternalCodeImages.recorded(loader,name)||ExternalCodeDefinitions.executionSourcesObserved(loader,name)||watchedDefinition(actual)||confirmedContract(actual);
@@ -1150,7 +1150,7 @@ public final class RecoveryAgent {
         if(caller!=ExternalCodeRuntime.class)throw new SecurityException("ACTUAL_EXTERNAL_CODE_WEAVER_REQUIRED");
         try{
             Class<?> nativeControl=Class.forName("dev.ronova.pro.bootstrap.NativeControl",false,null);
-            boolean installed=Boolean.TRUE.equals(nativeControl.getMethod("codeLayout",ClassLoader.class,String.class,byte[].class,String[].class,Module[][][].class,boolean.class,Object.class).invoke(null,loader,name,bytes,methods,owners,hidden,execution));
+            boolean installed=Boolean.TRUE.equals(nativeControl.getMethod("codeLayout",ClassLoader.class,String.class,byte[].class,String[].class,Module[][][].class,boolean.class,Object.class,Module.class).invoke(null,loader,name,bytes,methods,owners,hidden,execution,declaration));
             if(!hidden){
                 codeSourceBridge.getMethod("codeMethods",ClassLoader.class,String.class,String[].class).invoke(null,loader,name.replace('/','.'),methods);
                 codeSourceBridge.getMethod("codeFields",ClassLoader.class,String.class,String[].class,Module[][].class).invoke(null,loader,name.replace('/','.'),fields.keySet().toArray(String[]::new),fields.values().toArray(Module[][]::new));
@@ -1158,14 +1158,17 @@ public final class RecoveryAgent {
             }
             if(actual!=null){controlImages.declare(actual);if(!fields.isEmpty()||values.length!=0)codeSourceBridge.getMethod("codeClass",Class.class).invoke(null,actual);}
             if(!installed)for(Module[][] method:owners)for(Module[] site:method)for(Module module:site)ModGroupBoundary.externalGap(module,name+":EXTERNAL_CODE_VM_BACKEND_UNAVAILABLE");
-            if(!installed&&execution!=null&&producerModule(declaration))ModGroupBoundary.externalGap(declaration,name+":EXTERNAL_EXECUTION_VM_BACKEND_UNAVAILABLE");
+            if(!installed&&producerModule(declaration))ModGroupBoundary.externalGap(declaration,name+":EXTERNAL_DEFINITION_VM_BACKEND_UNAVAILABLE");
         }catch(ReflectiveOperationException failure){throw new IllegalStateException("EXTERNAL_CODE_VM_LAYOUT_PUBLICATION_FAILED",failure);}
     }
-    static void bindExternalDefinition(Class<?> actual,byte[] bytes,String[] methods,Map<String,Module[]> fields,Object[][] values,String[] creationSites){
+    static void bindExternalDefinition(Class<?> actual,byte[] bytes,Map<String,Module[]> roots,Map<String,Module[]> fields,Object[][] values,String[] creationSites){
         if(CALLER.getCallerClass()!=ExternalCodeDefinitions.class)throw new SecurityException("ACTUAL_CODE_DEFINITION_REGISTRY_REQUIRED");
         try{
             boolean installed=Boolean.TRUE.equals(Class.forName("dev.ronova.pro.bootstrap.NativeControl",false,null).getMethod("codeDefinition",Class.class,byte[].class).invoke(null,actual,bytes));
+            String[] methods=roots.keySet().toArray(String[]::new);
             codeSourceBridge.getMethod("codeMethods",Class.class,String[].class).invoke(null,actual,methods);
+            codeSourceBridge.getMethod("codeMethodRoots",ClassLoader.class,String.class,Class.class,String[].class,Module[][].class)
+                    .invoke(null,actual.getClassLoader(),actual.getName(),actual,methods,roots.values().toArray(Module[][]::new));
             codeSourceBridge.getMethod("codeFields",Class.class,String[].class,Module[][].class).invoke(null,actual,fields.keySet().toArray(String[]::new),fields.values().toArray(Module[][]::new));
             codeSourceBridge.getMethod("codeValues",Class.class,Object[][].class).invoke(null,actual,(Object)values);
             Class.forName("dev.ronova.pro.bootstrap.ControlBridge",false,null).getMethod("registerDefinitionCreationSites",Class.class,String[].class).invoke(null,actual,(Object)creationSites);

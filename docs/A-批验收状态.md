@@ -1,6 +1,23 @@
 # Ronova Pro 当前进度
 
+## 2026-10-18：A/B/C/D 生产源码集中收尾，停止运行检查
+
+按用户最新执行安排，旧 Forge 起服进程已终止；本轮后续不运行 `runServer`、起服轮询、实机、`validation/checks` 或隔离夹具。先把生产调用接齐，再进行一次统一候选构建。旧启动失败与局部通过各保留原范围，不升级为本候选通过。
+
+- A/B：已声明 holder 及变更增量回到原整组游标，私有容器整份处置、混合载体保留组外份额；SavedData 真实首读字节/文件身份经实际解码、DataFixer、holder 与缓存绑定进入原 Snapshot，私有整图复用原存储投影。任务纳入已归属但尚未 submit 的 Future/CF 和迟到后继，私有调度器/线程/资源退役沿原整组意图，未知释放不另起调用重放。恢复链按依赖变化重开 20 tick 稳定窗口，采样间隔不超过 10 tick。
+- C：实际外部方法贡献并入原 CodeImage，动态/隐藏类沿真实定义作用域归源；JVMTI 的效果检查包含环境、当前调用与真实来源。事件故障按本地明确选集触发整组隔离；客户端、网络登记、监听器、multipart 和导航索引沿真实所有权清理。世界原始时间/天气与实际数据链接补入原字段/offset/内存策略，共享 backing 的维度范围单独显示，区域实体范围不扩大。
+- 热路径：`fieldMutationReceiptRequired` 去掉全 JVM 的 guards/非空选集判断，只有实际受保护、停用、受控目标、来源载体、关键资源/队列或活跃发布进入原锁与回执。原即时写入策略保留；`actualFieldOwner` 按真实 symbolic Class、字段名和描述符缓存结构解析，不缓存许可结论。
+- D：升级/更换/卸载交接复用原世界 writer，新增 Journal7 的实际载体绑定和交接事实；旧 Journal1–6 原字节、operation/generation/key/attempt 与未知效果保留。实际载体变化需要明确 prelaunch handoff，缺席组仍能查询；不自动转换第三方不透明格式，不将卸载文件当成资源/存储已结清。发行仍为匹配 Core/prelaunch 双 JAR。
+
+上述生产源码和调用接线已收齐。统一构建首轮发现 prelaunch 两处包名遮蔽，续编发现 Bootstrap 一处局部变量重名；仅修这三处编译错误后，最终 `jar` / `reobfJar` 构建成功（42 秒、退出 0）。Core、Agent、Bootstrap、prelaunch 和用户态 Native 载荷配套；Storage 源码未再变更，使用同一构建图中的已有产物。没有为构建补跑任何测试，构建后也未启动游戏。
+
+当前双 JAR 已更新到 `distribution/v1.5-whole-mod`：Core 3,226,617 字节，prelaunch 48,190 字节；Java105 / Native99 / Storage3 / Journal7，客户端协议 `v1.5-whole-mod-clock`。SavedData 独立读回会准确重定位剩余列表路径并接回新代快照；旧单体存储并入整组时，只有原效果已闭合且同源、同真实文件的后继读回成立才沿原 key 接续，未知事务不被新组成功掩盖。
+
+自身外观、武器注册、合作式 SDK、CRT/STL 细粒度账本及源码 ZIP 均不新增。未匹配旧活栈、未观察原生调用、任意非合作私有语义以及尚不可用的 Host 后端仍有实际边界，源码交付和效果验收分开记录；本轮没有世界加载、停组、防护或保存重启的运行通过结果。
+
 ## 2026-10-18：按 V1.5 收敛为整 Mod 控制
+
+以下为停止运行检查前的历史过程，当前执行安排和候选结论以本页首节为准。
 
 主工程仍为 `D:\桌面\ronova_GPT`，本轮接续 `e4ba753`，版本 `1.5.0-dev`，客户端协议 `v1.5-whole-mod`。以下历史记录保留各自候选与场景范围，其中旧 allocator/object SDK、CRT/STL 字段账本与隔离 seam 的结论不代表本版活动能力。
 
@@ -10,9 +27,11 @@ Storage 已去除 IdentityLifetime、RootAllocation 与自发回执包装，使�
 
 生产包完整编写后已统一构建 Core、Agent、Bootstrap、prelaunch、用户态 Native 和 Storage。真实 Forge 启动暴露的中文 bootstrap 载荷路径、selector 类循环、ASM 导出前校验、普通类全局引用图、数组复制导入表重扫及绑定准备顺序，均沿实际失败路径修正。另移除给已退役内存账本捕获来源的空工作；准确 JDK Class 反射缓存 CAS 不再被表示类的控制对象判断拒绝；普通 ASM 树只冻结已核输入、Module 与父子关系，在真实变换消费时才物化。原始失败不改写为通过。
 
-用户已明确授权在真实 Forge 1.20.1 / 47.4.23 服务端使用 `-Dronova.pro.validation=true -Dronova.pro.fixture=mod-group` 和已有 WorldFixture JAR。当前正在该实际世界场景收尾，不能将 premain 完整或 ModLauncher 启动当成停组效果通过。没有运行 `validation/checks` 自证检查或独立 C++ 消费者夹具。
+用户曾明确授权在真实 Forge 1.20.1 / 47.4.23 服务端使用 `-Dronova.pro.validation=true -Dronova.pro.fixture=mod-group` 和已有 WorldFixture JAR。随后用户要求停止全部运行检查，该场景已终止；不能将 premain 完整或 ModLauncher 启动当成停组效果通过。没有运行 `validation/checks` 自证检查或独立 C++ 消费者夹具。
 
 授权后实机继续定位普通 ASM 复制与 Mixin 元数据承接的强制序列化、无策略普通字段/数组的逐写锁，已收敛为冻结输入和实际父属的粗根来源，以及保留原写入策略的无回执通行；真实控制、来源载体、资源、队列、发布作用域及活策略仍走原门禁。首次通行暴露 PUTSTATIC 的空值拒绝约定，已正确适配。随后实机已过 177+5 个 Mixin 准备并进入 `Minecraft.server.Main`，暴露 JOML 46.0 类中新增 Class 常量不合法；共用写出器对旧类最低设为 49.0，保留原边界。修正续编成功，正在重开实际场景，尚无世界停组/保存重启通过结果；`ForkJoinTask$Aux` 的实际待验收状态保留。
+
+随后 `f627327` 已继续通过游戏注册表初始化，但真实 EventBus 6.2.33 在完整性检查报 `EVENT_DISPATCH_IMAGE_INCOMPLETE` 后退出；原因是注入器已使用三参监听注册回调，校验器仍查旧双参。现共用正确描述符并核对实际参数与成功返回，保留分派保护。另修正 Brigadier 同名合并注册的节点身份，注销失败保留登记与 gap。该批修复统一编译成功（35 秒），已重开同一授权实机场景，结果待收尾。
 
 本版不宣称任意非合作原生私有语义、未观察调用或外部旧活栈已完全控制；这些范围保持实际 gap/partial。自身外观与武器注册未加入本轮，完整 B/C 未统一标为完成。
 

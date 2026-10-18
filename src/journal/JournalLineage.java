@@ -16,7 +16,7 @@ import java.util.*;
 
 /** The same durable bytes are read by the early launcher and the in-world writer. */
 public final class JournalLineage {
-    public static final int VERSION=6,MAX_FRAME=65536;
+    public static final int VERSION=7,MAX_FRAME=65536;
     private static final int SINGLE=0,FIRST=1,NEXT=2,FIRST_HEADER=37,NEXT_HEADER=5;
     public record History(UUID realm,List<String> records) {public History{records=List.copyOf(records);}}
     private JournalLineage() {}
@@ -99,7 +99,7 @@ public final class JournalLineage {
             if(first) {
                 String header=new String(value,StandardCharsets.UTF_8);records.add(header);
                 String[] fields=header.split("\t",-1);
-                segmented=fields.length==3&&fields[0].equals("HEADER")&&fields[1].equals(Integer.toString(VERSION));
+                segmented=fields.length==3&&fields[0].equals("HEADER")&&Integer.parseInt(fields[1])>=6&&Integer.parseInt(fields[1])<=VERSION;
                 first=false;continue;
             }
             if(!segmented) {records.add(new String(value,StandardCharsets.UTF_8));continue;}

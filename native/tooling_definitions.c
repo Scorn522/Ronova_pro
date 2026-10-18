@@ -81,7 +81,8 @@ static int native_tooling_definitions_snapshot(JNIEnv *env,NativeToolingDefiniti
     if(targets&&!native_original.ExceptionCheck(env))call->targets=(jobjectArray)native_original.NewGlobalRef(env,targets);
     if(targets)native_original.DeleteLocalRef(env,targets);
     if(!call->targets||native_original.ExceptionCheck(env))return 0;
-    if(!native_tooling_capture(env,caller,&call->owners,NULL,&call->unknown))call->unknown=1;
+    if(!native_tooling_capture(env,caller,&call->owners,NULL,&call->unknown)||!native_owner_merge(&call->owners,call->environment->owners))call->unknown=1;
+    call->unknown|=call->environment->unknown;
     call->ready=1;return 1;
 }
 static void native_tooling_definitions_exception(JNIEnv *env,jthrowable failure){
@@ -164,7 +165,7 @@ static jvmtiError native_tooling_definition_operation(NativeToolingEnv *record,j
     DWORD incoming=GetLastError();
     NativeThread *state=native_thread();JNIEnv *env=native_tooling_definitions_env(state);
     jthrowable failure=env?native_original.ExceptionOccurred(env):NULL;if(failure)native_original.ExceptionClear(env);
-    int stopped=env?native_tooling_stopped(env,caller):native_tooling_definitions_stopped(state);
+    int stopped=native_owner_stopped(record->owners)||(env?native_tooling_stopped(env,caller):native_tooling_definitions_stopped(state));
     NativeToolingDefinitionCall *call=!stopped&&env&&count>0?calloc(1,sizeof(*call)):NULL;
     if(call){call->environment=record;call->count=count;call->thread=state;call->previous=state->definitionCall;state->definitionCall=call;native_thread_callback_enter(state);state->control++;
         native_tooling_definitions_snapshot(env,call,definitions,types,redefine,caller);

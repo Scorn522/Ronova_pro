@@ -45,7 +45,7 @@ final class WorldControl {
     }
     private static final class Rule {
         final UUID id;final Area area;final boolean freeze,clock,archive;final long until,gameTime;
-        final Map<Entity,Boolean> bodies=new IdentityHashMap<>();
+        final Map<Entity,Boolean> bodies=Collections.synchronizedMap(new IdentityHashMap<>());
         Rule(Area area,boolean freeze,boolean clock,long until){this(UUID.randomUUID(),area,freeze,clock,until,false);}
         Rule(UUID id,Area area,boolean freeze,boolean clock,long until,boolean archive){this.id=id;this.area=area;this.freeze=freeze;this.clock=clock;this.until=until;this.archive=archive;this.gameTime=area.level().getGameTime();}
     }
@@ -57,23 +57,26 @@ final class WorldControl {
         BlockPos position(short packed){return ProtoChunk.unpackOffsetCoordinates(packed,chunk.getSectionYFromSectionIndex(section),chunk.getPos());}
     }
     private final Map<UUID,Rule> rules=new LinkedHashMap<>();
+    private volatile List<Rule> activeRules=List.of();
+    private volatile List<ServerLevel> levels=List.of();
     private volatile List<Area> spawnAreas=List.of();
     private volatile List<Area> frozenAreas=List.of(),mutationAreas=List.of();
     private volatile Set<ServerLevel> clockLevels=Set.of();
+    private volatile String clockUnknown="";
     private final Map<LevelTicks<?>,List<Held>> held=new IdentityHashMap<>();
     private final Map<LevelChunk,Map<ShortList,PostProcess>> postProcessing=new IdentityHashMap<>();
     private final Map<LevelChunk,UpgradeData> upgrades=new IdentityHashMap<>();
     private final ThreadLocal<Entity> moving=new ThreadLocal<>();
-    private long tick,revision=1;
+    private long tick;private volatile long revision=1;
     long revision(){return revision;}
     List<ProNetwork.WorldArea> clientAreas(ServerLevel level){
         List<ProNetwork.WorldArea> result=new ArrayList<>();
-        for(Rule rule:rules.values())if(rule.freeze&&rule.area.level()==level)result.add(new ProNetwork.WorldArea(rule.id,rule.area.low(),rule.area.high(),rule.clock,rule.gameTime));
+        for(Rule rule:activeRules)if(rule.freeze&&rule.area.level()==level)result.add(new ProNetwork.WorldArea(rule.id,rule.area.low(),rule.area.high(),rule.clock,rule.gameTime));
         return List.copyOf(result);
     }
     List<ProNetwork.WorldBody> clientBodies(ServerLevel level){
         Set<ProNetwork.WorldBody> result=new LinkedHashSet<>();
-        for(Rule rule:rules.values())if(rule.freeze&&rule.area.level()==level)for(Entity entity:rule.bodies.keySet()){
+        for(Rule rule:activeRules)if(rule.freeze&&rule.area.level()==level)for(Entity entity:bodySnapshot(rule)){
             Access.EntityState state=(Access.EntityState)entity;
             if(state.pro$level()==level&&level.getEntity(state.pro$uuid())==entity)result.add(new ProNetwork.WorldBody(state.pro$id(),state.pro$uuid()));
         }
@@ -86,23 +89,58 @@ final class WorldControl {
     UUID rule(ServerLevel level,BlockPos from,BlockPos to,int duration,boolean freeze,boolean clock){
         if(duration<1)throw new IllegalArgumentException("WORLD_RULE_DURATION_REQUIRED");Rule rule=new Rule(area(level,from,to),freeze,clock,tick+(long)duration);
         if(freeze)for(Entity entity:level.getAllEntities())if(rule.area.contains(((Access.EntityState)entity).pro$blockPosition()))rule.bodies.put(entity,true);
-        rules.put(rule.id,rule);publishAreas();revision++;return rule.id;
+        policyChange(level.getServer(),()->{
+            if(clock&&WorldStatePolicy.clockChain(level)==null)throw new IllegalStateException("WORLD_CLOCK_BACKING_UNSUPPORTED:"+level.dimension().location());
+            rules.put(rule.id,rule);publishAreas();revision++;
+        });return rule.id;
     }
-    boolean resume(UUID id){Rule rule=rules.get(id);if(rule==null||rule.archive||rules.remove(id)==null)return false;publishAreas();revision++;return true;}
+    boolean resume(UUID id){Rule rule=rules.get(id);if(rule==null||rule.archive)return false;policyChange(rule.area.level().getServer(),()->{rules.remove(id);publishAreas();revision++;});return true;}
+    private static List<Entity> bodySnapshot(Rule rule){synchronized(rule.bodies){return List.copyOf(rule.bodies.keySet());}}
+    /** Only policy and real backing metadata run under these existing field gates. */
+    private void policyChange(MinecraftServer server,Runnable change){
+        ProRuntime runtime=ProRuntime.get(server);if(runtime==null)throw new IllegalStateException("WORLD_RUNTIME_UNAVAILABLE");
+        List<AutoCloseable> gates=new ArrayList<>();Set<Object> locked=Collections.newSetFromMap(new IdentityHashMap<>());
+        List<ServerLevel> current=new ArrayList<>();for(ServerLevel level:server.getAllLevels())current.add(level);
+        try{
+            for(ServerLevel level:current)if(locked.add(level))gates.add(runtime.worldPolicyGate(this,level));
+            boolean added;
+            do{
+                added=false;
+                for(ServerLevel level:current){List<Object> chain=WorldStatePolicy.clockChain(level);if(chain==null)continue;
+                    for(Object carrier:chain)if(locked.add(carrier)){gates.add(runtime.worldPolicyGate(this,carrier));added=true;}}
+            }while(added);
+            levels=List.copyOf(current);change.run();
+        }finally{
+            RuntimeException failure=null;
+            for(int i=gates.size()-1;i>=0;i--)try{gates.get(i).close();}catch(Exception unavailable){if(failure==null)failure=new IllegalStateException("WORLD_POLICY_GATE_RELEASE_FAILED",unavailable);else failure.addSuppressed(unavailable);}
+            if(failure!=null)throw failure;
+        }
+    }
     private void publishAreas(){
+        activeRules=List.copyOf(rules.values());
         spawnAreas=rules.values().stream().filter(rule->!rule.freeze).map(rule->rule.area).toList();
         frozenAreas=rules.values().stream().filter(rule->rule.freeze).map(rule->rule.area).toList();
         // Archive's private pause holds simulation while its checked apply path writes
         // history. It does not confer the user's separate region-write lock.
         mutationAreas=rules.values().stream().filter(rule->rule.freeze&&!rule.archive).map(rule->rule.area).toList();
         Set<ServerLevel> clocks=Collections.newSetFromMap(new IdentityHashMap<>());
-        for(Rule rule:rules.values())if(rule.freeze&&rule.clock)clocks.add(rule.area.level());
+        Set<String> unknown=new TreeSet<>();
+        for(Rule rule:activeRules)if(rule.freeze&&rule.clock){
+            List<Object> selected=WorldStatePolicy.clockChain(rule.area.level());clocks.add(rule.area.level());
+            if(selected==null)unknown.add(rule.area.level().dimension().location().toString());
+            for(ServerLevel level:levels){List<Object> chain=WorldStatePolicy.clockChain(level);
+                if(chain==null){unknown.add(level.dimension().location().toString());continue;}
+                if(WorldStatePolicy.sharedClock(selected,chain))clocks.add(level);
+            }
+        }
         clockLevels=Collections.unmodifiableSet(clocks);
+        clockUnknown=String.join(",",unknown);
     }
     void archive(UUID id,ServerLevel level,BlockPos low,BlockPos high,boolean active){
-        if(!active){Rule rule=rules.get(id);if(rule!=null&&rule.archive){rules.remove(id);publishAreas();revision++;}return;}
+        if(!active){Rule rule=rules.get(id);if(rule!=null&&rule.archive)policyChange(level.getServer(),()->{rules.remove(id);publishAreas();revision++;});return;}
         if(rules.containsKey(id))return;Rule rule=new Rule(id,area(level,low,high),true,false,Long.MAX_VALUE,true);
-        for(Entity entity:level.getAllEntities())if(rule.area.contains(((Access.EntityState)entity).pro$blockPosition()))rule.bodies.put(entity,true);rules.put(id,rule);publishAreas();revision++;
+        for(Entity entity:level.getAllEntities())if(rule.area.contains(((Access.EntityState)entity).pro$blockPosition()))rule.bodies.put(entity,true);
+        policyChange(level.getServer(),()->{rules.put(id,rule);publishAreas();revision++;});
     }
     List<ScheduledTick<?>> heldTicks(LevelTicks<?> container,BlockPos low,BlockPos high,boolean remove){
         List<Held> queue=held.get(container);if(queue==null)return List.of();List<ScheduledTick<?>> result=new ArrayList<>();
@@ -147,7 +185,15 @@ final class WorldControl {
             return result;
         };
     }
-    boolean clock(ServerLevel level){return clockLevels.contains(level);}
+    boolean clock(ServerLevel level){
+        if(clockLevels.contains(level))return true;
+        List<Object> chain=null;
+        for(Rule rule:activeRules)if(rule.freeze&&rule.clock){
+            if(rule.area.level().getServer()!=level.getServer())continue;
+            if(chain==null)chain=WorldStatePolicy.clockChain(level);
+            if(WorldStatePolicy.sharedClock(chain,WorldStatePolicy.clockChain(rule.area.level())))return true;
+        }return false;
+    }
     boolean frozen(Level level,BlockPos pos){for(Area area:frozenAreas)if(area.level()==level&&area.contains(pos))return true;return false;}
     boolean mutationDenied(Level level,BlockPos pos){for(Area area:mutationAreas)if(area.level()==level&&area.contains(pos))return true;return false;}
     boolean mutationLocked(Level level,BlockPos low,BlockPos high){
@@ -195,6 +241,15 @@ final class WorldControl {
         return false;
     }
     boolean stateMutationDenied(WorldStatePolicy.Query query){
+        if(WorldStatePolicy.clockCandidate(query.receiver)){
+            for(Rule rule:activeRules)if(rule.freeze&&rule.clock){
+                List<Object> selected=WorldStatePolicy.clockChain(rule.area.level());
+                if(WorldStatePolicy.clockMatches(query,selected==null?List.of(rule.area.level()):selected))return true;
+                for(ServerLevel level:levels){List<Object> chain=WorldStatePolicy.clockChain(level);
+                    if(WorldStatePolicy.sharedClock(selected,chain)&&WorldStatePolicy.clockMatches(query,chain))return true;}
+            }
+            return false;
+        }
         for(Area area:mutationAreas){
             ServerLevel level=area.level();Access.Tracking tracking=(Access.Tracking)level.getChunkSource().chunkMap;
             for(ChunkHolder holder:tracking.pro$visibleChunks().values()){
@@ -348,9 +403,9 @@ final class WorldControl {
     boolean frozen(Entity entity){
         Access.EntityState state=(Access.EntityState)entity;
         if(moving.get()==entity||state.pro$level()==null||state.pro$level().isClientSide)return false;
-        for(Rule rule:rules.values())if(rule.freeze&&rule.area.level()==state.pro$level()){
+        for(Rule rule:activeRules)if(rule.freeze&&rule.area.level()==state.pro$level()){
             if(rule.bodies.containsKey(entity))return true;
-            if(rule.area.contains(state.pro$blockPosition())){rule.bodies.put(entity,true);revision++;return true;}
+            if(rule.area.contains(state.pro$blockPosition()))return true;
         }return false;
     }
     boolean spawnDenied(ServerLevel level,Entity entity){
@@ -382,16 +437,17 @@ final class WorldControl {
         if(chunk!=null)chunk.setUnsaved(true);return true;
     }
     void tick(MinecraftServer server){
-        tick++;if(rules.values().removeIf(rule->tick>=rule.until)){publishAreas();revision++;}
+        tick++;boolean expired=activeRules.stream().anyMatch(rule->tick>=rule.until);
+        if(expired||!clockLevels.isEmpty()&&levelsChanged(server))policyChange(server,()->{rules.values().removeIf(rule->tick>=rule.until);publishAreas();revision++;});
         resumePostProcessing(server);
-        for(Rule rule:rules.values())if(rule.freeze){
-            for(var iterator=rule.bodies.entrySet().iterator();iterator.hasNext();){
+        for(Rule rule:activeRules)if(rule.freeze){
+            synchronized(rule.bodies){for(var iterator=rule.bodies.entrySet().iterator();iterator.hasNext();){
                 var body=iterator.next();Entity entity=body.getKey();Access.EntityState state=(Access.EntityState)entity;
                 if(state.pro$removal()!=null){iterator.remove();revision++;continue;}
                 boolean visible=state.pro$level()==rule.area.level()&&rule.area.level().getEntity(state.pro$uuid())==entity;
                 // The same captured player may leave and return to this dimension while the rule lives.
                 if(body.getValue()!=visible){body.setValue(visible);revision++;}
-            }
+            }}
             for(Entity entity:rule.area.level().getAllEntities())if(!rule.bodies.containsKey(entity)&&rule.area.contains(((Access.EntityState)entity).pro$blockPosition())){rule.bodies.put(entity,true);revision++;}
         }
         for(var association:held.entrySet()){
@@ -406,6 +462,11 @@ final class WorldControl {
             }
         }
         held.values().removeIf(List::isEmpty);
+    }
+    private boolean levelsChanged(MinecraftServer server){
+        int index=0;List<ServerLevel> prior=levels;
+        for(ServerLevel level:server.getAllLevels())if(index>=prior.size()||prior.get(index++)!=level)return true;
+        return index!=prior.size();
     }
     boolean teleport(Entity entity,ServerLevel destination,Vec3 position){
         if(!Double.isFinite(position.x)||!Double.isFinite(position.y)||!Double.isFinite(position.z)||!Level.isInSpawnableBounds(BlockPos.containing(position)))throw new IllegalArgumentException("WORLD_TELEPORT_OUT_OF_BOUNDS");
@@ -430,6 +491,8 @@ final class WorldControl {
             if(hit<nearest){nearest=hit;selected=entity;}
         }return selected;
     }
-    String state(){return "WORLD_RULES="+rules.size()+";DEFERRED_TICKS="+held.values().stream().mapToLong(List::size).sum();}
-    Object[] controlObjects(){return new Object[]{this,rules,held,postProcessing,upgrades,moving,spawnAreas,frozenAreas,mutationAreas,clockLevels};}
+    String state(){return "WORLD_RULES="+rules.size()+";DEFERRED_TICKS="+held.values().stream().mapToLong(List::size).sum()
+            +";CLOCK_DIMENSIONS="+clockLevels.stream().map(level->level.dimension().location().toString()).sorted().toList()
+            +";CLOCK_BACKING_UNSUPPORTED="+(clockUnknown.isEmpty()?"NONE":clockUnknown);}
+    Object[] controlObjects(){return new Object[]{this,rules,activeRules,levels,held,postProcessing,upgrades,moving,spawnAreas,frozenAreas,mutationAreas,clockLevels};}
 }

@@ -8,6 +8,8 @@ import jdk.internal.org.objectweb.asm.tree.*;
 /** Keeps a mod-owned listener from executing through Forge's shared dispatcher. */
 final class EventBusBoundary {
     static final String TARGET="net/minecraftforge/eventbus/EventBus";
+    static final String ADD_LISTENER="(Ljava/lang/Object;Ljava/lang/Class;Lnet/minecraftforge/eventbus/api/IEventListener;Lnet/minecraftforge/eventbus/api/EventPriority;)V";
+    static final String REGISTERED="(Ljava/lang/Object;Ljava/lang/Object;Ljava/lang/Object;)V";
     private static final String BRIDGE="dev/ronova/pro/bootstrap/ControlBridge";
     private static volatile boolean installed;
     private EventBusBoundary() {}
@@ -20,14 +22,13 @@ final class EventBusBoundary {
                 return null;
         boolean registration=false,dispatch=false;
         for(MethodNode method:node.methods) {
-            if(method.name.equals("addToListeners")&&method.desc.equals("(Ljava/lang/Object;Ljava/lang/Class;Lnet/minecraftforge/eventbus/api/IEventListener;Lnet/minecraftforge/eventbus/api/EventPriority;)V")) {
+            if(method.name.equals("addToListeners")&&method.desc.equals(ADD_LISTENER)) {
                 // Register only after the real bus accepted the listener. A stop racing
                 // this return immediately unregisters this exact owner from this bus.
                 for(AbstractInsnNode at:method.instructions.toArray())if(at.getOpcode()==Opcodes.RETURN){
                     InsnList registered=new InsnList();registered.add(new VarInsnNode(Opcodes.ALOAD,0));
                     registered.add(new VarInsnNode(Opcodes.ALOAD,1));registered.add(new VarInsnNode(Opcodes.ALOAD,3));
-                    registered.add(new MethodInsnNode(Opcodes.INVOKESTATIC,BRIDGE,"modListenerRegistered",
-                            "(Ljava/lang/Object;Ljava/lang/Object;Ljava/lang/Object;)V",false));
+                    registered.add(new MethodInsnNode(Opcodes.INVOKESTATIC,BRIDGE,"modListenerRegistered",REGISTERED,false));
                     method.instructions.insertBefore(at,registered);
                 }
                 LabelNode allowed=new LabelNode();InsnList code=new InsnList();

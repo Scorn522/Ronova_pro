@@ -28,18 +28,27 @@ final class ExternalCodeRuntime {
         CreationBoundary.Weaving creations=source.hidden()?CreationBoundary.defined(loader,name,bytes,true):null;
         byte[] result=bytes;
         if(creations!=null){ClassWriter writer=new ControlClassWriter(loader,creations.node);creations.node.accept(writer);result=writer.toByteArray();}
-        RecoveryAgent.publishExternalCode(loader,name,actual,result,new String[0],new Module[0][][],
+        Map<String,Module[]> roots=methodRoots(source.owners());
+        // One source union per emitted method. This is a whole-Mod root on an
+        // actual body, not an instruction permission or an execution receipt.
+        Module[][][] contributors=new Module[roots.size()][][];int at=0;
+        for(Module[] modules:roots.values())contributors[at++]=new Module[][]{modules};
+        RecoveryAgent.publishExternalCode(loader,name,actual,result,roots.keySet().toArray(String[]::new),contributors,
                 source.fields(),source.values(),source.hidden(),null,source.declaration());
-        Map<String,Module[]> roots=new LinkedHashMap<>();
-        for(var entry:source.owners().entrySet()){
-            Set<Module> modules=Collections.newSetFromMap(new IdentityHashMap<>());for(Module[] row:entry.getValue())Collections.addAll(modules,row);
-            if(!modules.isEmpty())roots.put(entry.getKey(),modules.toArray(Module[]::new));
-        }
         RecoveryAgent.publishMethodRoots(loader,name,actual,roots);
         boolean suppressed=ModGroupBoundary.stopped(source.declaration());
         ExternalCodeDefinitions.accepted(loader,name,actual,source.declaration(),result,suppressed?result:source.bytes(),
                 Map.of(),suppressed?ExternalCodeImages.acceptedExecution(result,Map.of()):source.image(),Map.of(),
                 source.fields(),source.values(),source.hidden(),creations==null?new String[0]:creations.locations(),null);
         return result;
+    }
+    static Map<String,Module[]> methodRoots(Map<String,Module[][]> methods){
+        Map<String,Module[]> roots=new LinkedHashMap<>();
+        for(var entry:methods.entrySet()){
+            Set<Module> modules=Collections.newSetFromMap(new IdentityHashMap<>());
+            for(Module[] row:entry.getValue())if(row==null)modules.add(null);else Collections.addAll(modules,row);
+            if(!modules.isEmpty())roots.put(entry.getKey(),modules.toArray(Module[]::new));
+        }
+        return roots;
     }
 }

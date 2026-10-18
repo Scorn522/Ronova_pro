@@ -180,7 +180,7 @@ public final class ProMod {
             .then(Commands.literal("time-stop").then(Commands.argument("ticks",IntegerArgumentType.integer(1)).executes(c->{
                 var level=c.getSource().getLevel();UUID id=ProRuntime.get(c.getSource().getServer()).worldRule(level,
                         new net.minecraft.core.BlockPos(-30000000,level.getMinBuildHeight(),-30000000),new net.minecraft.core.BlockPos(30000000,level.getMaxBuildHeight()-1,30000000),IntegerArgumentType.getInteger(c,"ticks"),true,true);
-                c.getSource().sendSuccess(()->Component.literal("当前维度时停："+id+"；region resume 可提前恢复。"),false);return 1;
+                c.getSource().sendSuccess(()->Component.literal("实际共享时钟时停："+id+"；region status 列出受影响维度，region resume 可提前恢复。"),false);return 1;
             })))
             .then(Commands.literal("ray").then(Commands.argument("distance",DoubleArgumentType.doubleArg(0.01)).executes(c->{
                 UUID id=ProRuntime.get(c.getSource().getServer()).clearRay(c.getSource().getEntityOrException(),DoubleArgumentType.getDouble(c,"distance"));
@@ -196,6 +196,11 @@ public final class ProMod {
                 c.getSource().sendSuccess(()->Component.literal("身体处置已受理："+id),false);return 1;
             })))
             .then(Commands.literal("mod")
+                .then(Commands.literal("retire").then(Commands.argument("ids",StringArgumentType.greedyString()).executes(c->{
+                    String result=ProRuntime.get(c.getSource().getServer()).stopModGroup(StringArgumentType.getString(c,"ids"));
+                    c.getSource().sendSuccess(()->Component.literal(result+";HANDOFF=RETIREMENT_REQUESTED;NEXT_JVM_REQUIRES_EXPLICIT_ARTIFACT_HANDOFF"),false);
+                    return result.startsWith("GROUP_FAILURES=")?result.startsWith("GROUP_FAILURES=0;")?1:0:result.contains(";FAILED=0")&&result.contains("BODY_FAILURES=0")?1:0;
+                })))
                 .then(Commands.literal("stop").then(Commands.argument("ids",StringArgumentType.greedyString()).executes(c->{
                     String result=ProRuntime.get(c.getSource().getServer()).stopModGroup(StringArgumentType.getString(c,"ids"));
                     c.getSource().sendSuccess(()->Component.literal(result),false);

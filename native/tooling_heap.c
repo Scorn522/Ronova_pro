@@ -151,9 +151,9 @@ static jvmtiError JNICALL native_tooling_SetTag(jvmtiEnv *api,jobject object,jlo
     NativeToolingEnv *record=native_tooling_environment(api);if(!record)return JVMTI_ERROR_INVALID_ENVIRONMENT;
     TOOLING_USE(record);
     void *caller=__builtin_return_address(0);JNIEnv *env=native_tooling_jni();
-    if(record->own&&!native_tooling_internal(caller)||native_tooling_stopped(env,caller))return native_tooling_error(JVMTI_ERROR_ACCESS_DENIED);
+    if(record->own&&!native_tooling_internal(caller)||native_tooling_effect_stopped(record,env,caller))return native_tooling_error(JVMTI_ERROR_ACCESS_DENIED);
     OwnerLink *owners=NULL;int unknown=0;
-    if(!native_tooling_capture(env,caller,&owners,NULL,&unknown)){native_owner_links_free(owners);return native_tooling_error(JVMTI_ERROR_ACCESS_DENIED);}
+    if(!native_tooling_capture(env,caller,&owners,NULL,&unknown)||!native_owner_merge(&owners,record->owners)){native_owner_links_free(owners);return native_tooling_error(JVMTI_ERROR_ACCESS_DENIED);}unknown|=record->unknown;
     jvmtiError result=JVMTI_ERROR_NONE;
     if(native_has_producer(owners))result=native_tooling_heap_target_gate(env,object,owners,unknown);
     native_owner_links_free(owners);if(result!=JVMTI_ERROR_NONE)return native_tooling_error(result);
@@ -571,13 +571,14 @@ static jvmtiError native_tooling_heap_snapshot(JNIEnv *env,NativeToolingHeapCall
 static jvmtiError native_tooling_heap_prepare(NativeToolingEnv *record,JNIEnv *env,void *caller,const void *data,int follow,
         const jvmtiHeapCallbacks *callbacks,const void *const *legacy,NativeToolingHeapCall *call){
     memset(call,0,sizeof(*call));call->environment=record;call->data=data;
-    if(record->own&&!native_tooling_internal(caller)||native_tooling_stopped(env,caller))return JVMTI_ERROR_ACCESS_DENIED;
+    if(record->own&&!native_tooling_internal(caller)||native_tooling_effect_stopped(record,env,caller))return JVMTI_ERROR_ACCESS_DENIED;
     jvmtiHeapCallbacks supplied={0};
     if(callbacks){SIZE_T copied=0;
         if(!host_real_read_process_memory(GetCurrentProcess(),callbacks,&supplied,sizeof(supplied),&copied)||copied!=sizeof(supplied))return JVMTI_ERROR_ILLEGAL_ARGUMENT;}
     OwnerLink *sources=NULL;jweak origin=NULL;int unknown=0;
-    if(!native_tooling_capture(env,caller,&sources,&origin,&unknown)){
+    if(!native_tooling_capture(env,caller,&sources,&origin,&unknown)||!native_owner_merge(&sources,record->owners)){
         if(origin)native_original.DeleteWeakGlobalRef(env,origin);native_owner_links_free(sources);return JVMTI_ERROR_ACCESS_DENIED;}
+    unknown|=record->unknown;
     jvmtiError result=JVMTI_ERROR_NONE;
 #define TOOLING_HEAP_SLOT(INDEX,POINTER) \
     if(result==JVMTI_ERROR_NONE)result=native_tooling_heap_slot(env,call,INDEX,(void*)(POINTER),sources,origin,unknown)

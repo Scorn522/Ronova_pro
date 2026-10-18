@@ -12,7 +12,7 @@ import net.minecraftforge.network.*;
 import net.minecraftforge.network.simple.SimpleChannel;
 
 public final class ProNetwork {
-    static final String WIRE_VERSION="v1.5-whole-mod";
+    static final String WIRE_VERSION="v1.5-whole-mod-clock";
     static final SimpleChannel CHANNEL=NetworkRegistry.newSimpleChannel(new ResourceLocation("ronova_pro","presence"),
             ()->WIRE_VERSION,v->v.equals(WIRE_VERSION)||v.equals(NetworkRegistry.ABSENT),v->v.equals(WIRE_VERSION)||v.equals(NetworkRegistry.ABSENT));
     public record Probe(UUID session,UUID operation,UUID challenge,String dimension,int entityId,UUID entityUuid) {}
@@ -34,7 +34,7 @@ public final class ProNetwork {
         boolean contains(BlockPos pos){return pos.getX()>=low.getX()&&pos.getX()<=high.getX()&&pos.getY()>=low.getY()&&pos.getY()<=high.getY()&&pos.getZ()>=low.getZ()&&pos.getZ()<=high.getZ();}
     }
     record WorldBody(int id,UUID uuid) {}
-    record WorldPolicy(UUID session,long scope,String dimension,long revision,long gameTime,long dayTime,boolean daylight,int page,int pages,List<WorldArea> areas,List<WorldBody> bodies) {}
+    record WorldPolicy(UUID session,long scope,String dimension,long revision,long gameTime,long dayTime,boolean daylight,boolean clock,int page,int pages,List<WorldArea> areas,List<WorldBody> bodies) {}
     private ProNetwork() {}
     public static void init() {
         CHANNEL.messageBuilder(Probe.class,0,NetworkDirection.PLAY_TO_CLIENT)
@@ -79,11 +79,11 @@ public final class ProNetwork {
 
         CHANNEL.messageBuilder(WorldPolicy.class,8,NetworkDirection.PLAY_TO_CLIENT)
             .encoder((p,b)->{
-                b.writeUUID(p.session);b.writeLong(p.scope);b.writeUtf(p.dimension,256);b.writeLong(p.revision);b.writeLong(p.gameTime);b.writeLong(p.dayTime);b.writeBoolean(p.daylight);b.writeVarInt(p.page);b.writeVarInt(p.pages);
+                b.writeUUID(p.session);b.writeLong(p.scope);b.writeUtf(p.dimension,256);b.writeLong(p.revision);b.writeLong(p.gameTime);b.writeLong(p.dayTime);b.writeBoolean(p.daylight);b.writeBoolean(p.clock);b.writeVarInt(p.page);b.writeVarInt(p.pages);
                 b.writeCollection(p.areas,(buffer,area)->{buffer.writeUUID(area.rule);buffer.writeBlockPos(area.low);buffer.writeBlockPos(area.high);buffer.writeBoolean(area.clock);buffer.writeLong(area.gameTime);});
                 b.writeCollection(p.bodies,(buffer,body)->{buffer.writeVarInt(body.id);buffer.writeUUID(body.uuid);});
             })
-            .decoder(b->new WorldPolicy(b.readUUID(),b.readLong(),b.readUtf(256),b.readLong(),b.readLong(),b.readLong(),b.readBoolean(),b.readVarInt(),b.readVarInt(),
+            .decoder(b->new WorldPolicy(b.readUUID(),b.readLong(),b.readUtf(256),b.readLong(),b.readLong(),b.readLong(),b.readBoolean(),b.readBoolean(),b.readVarInt(),b.readVarInt(),
                 b.readList(buffer->new WorldArea(buffer.readUUID(),buffer.readBlockPos(),buffer.readBlockPos(),buffer.readBoolean(),buffer.readLong())),
                 b.readList(buffer->new WorldBody(buffer.readVarInt(),buffer.readUUID()))))
             .consumerMainThread((p,c)->DistExecutor.unsafeRunWhenOn(Dist.CLIENT,()->()->ClientPresence.worldPolicy(p,c.get().getNetworkManager()))).add();
@@ -154,7 +154,7 @@ public final class ProNetwork {
         long gameTime=level.getGameTime(),dayTime=level.getDayTime();boolean daylight=level.getGameRules().getBoolean(net.minecraft.world.level.GameRules.RULE_DAYLIGHT);
         for(int page=0;page<pages;page++){
             long offset=(long)page*pageSize;int a=(int)Math.min(offset,areas.size()),b=(int)Math.min(offset,bodies.size());
-            CHANNEL.send(PacketDistributor.PLAYER.with(()->player),new WorldPolicy(session,scope,dimension,revision,gameTime,dayTime,daylight,page,pages,
+            CHANNEL.send(PacketDistributor.PLAYER.with(()->player),new WorldPolicy(session,scope,dimension,revision,gameTime,dayTime,daylight,controls.clock(level),page,pages,
                     areas.subList(a,(int)Math.min(offset+pageSize,areas.size())),bodies.subList(b,(int)Math.min(offset+pageSize,bodies.size()))));
         }
         return true;

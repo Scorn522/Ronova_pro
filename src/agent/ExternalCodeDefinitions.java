@@ -373,7 +373,8 @@ final class ExternalCodeDefinitions {
         ExternalCodeFlow.Image image=new ExternalCodeFlow.Image(new Object(),header,Map.of(),Map.of());
         Definition accepted=new Definition(actual.getClassLoader(),emitted.name,actual,RecoveryAgent.logicalModule(actual),image,null,
                 emitted.semanticBytes==null?emitted.bytes:emitted.semanticBytes,Map.of(),emitted.bytes,emitted.fields,emitted.values,true,emitted.creationSites,null);
-        RecoveryAgent.bindExternalDefinition(actual,bytes,accepted.applied.keySet().toArray(String[]::new),accepted.fields,accepted.values,accepted.creationSites);
+        Map<String,Module[]> roots=ExternalCodeRuntime.methodRoots(emitted.analysis==null?Map.of():emitted.analysis.rows());
+        RecoveryAgent.bindExternalDefinition(actual,bytes,roots,accepted.fields,accepted.values,accepted.creationSites);
         if(publish(accepted,false))changed(actual);
     }
     static void prepared(Class<?> actual){

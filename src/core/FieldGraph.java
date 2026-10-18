@@ -13,7 +13,7 @@ final class FieldGraph {
     private enum Mode { CAPTURE, CLEAR, RESTORE }
     private static final Object UNREAD=new Object();
     private static final class Slot {
-        final Field field;final int element;Object value=UNREAD,expected=UNREAD;String pending="";boolean applied,preserved;
+        final Field field;final int element;Object value=UNREAD,expected=UNREAD;String pending="";boolean applied,preserved,retiredSource;
         Slot(Field field,int element){this.field=field;this.element=element;}
     }
     private static final class Node {
@@ -46,6 +46,7 @@ final class FieldGraph {
         for(Body body:image.bodies.values())if(!bodyCurrent(body)){image.failure="FIELD_GRAPH_BODY_VERSION_CHANGED";return false;}
         try{
             for(Node node:image.nodes.values())for(Slot slot:node.slots){
+                if(slot.retiredSource)continue;
                 slot.expected=image.roots.contains(node.receiver)?UNREAD:read(node,slot);slot.applied=false;slot.preserved=false;slot.pending="";
             }
         }catch(ReflectiveOperationException|RuntimeException unavailable){image.failure="FIELD_GRAPH_RESTORE_BASELINE:"+unavailable.getClass().getSimpleName()+":"+String.valueOf(unavailable.getMessage());return false;}
@@ -106,7 +107,7 @@ final class FieldGraph {
         List<Node> nodes=new ArrayList<>(image.nodes.values());
         image.writing=nodes;
         runtime.graphControls(this,image.writing);
-        if(nodes.stream().anyMatch(node->!node.pending.isEmpty()||node.slots.stream().anyMatch(slot->slot.value==UNREAD))){image.state="CAPTURE_INCOMPLETE";return;}
+        if(nodes.stream().anyMatch(node->!node.pending.isEmpty()||node.slots.stream().anyMatch(slot->slot.value==UNREAD&&!slot.retiredSource))){image.state="CAPTURE_INCOMPLETE";return;}
         image.state=image.mode==Mode.CLEAR?"BODY_RETIREMENT":"CAPTURED";
     }
     private static Object read(Node node,Slot slot)throws ReflectiveOperationException{return slot.field==null?Array.get(node.receiver,slot.element):GraphFields.read(slot.field,node.statics?null:node.receiver);}
@@ -136,7 +137,9 @@ final class FieldGraph {
             if(image.mode==Mode.CLEAR&&!node.resourceReleased){String resource=runtime.graphRelease(this,image.roots,node.receiver);if(!resource.isEmpty()){node.pending=resource;incomplete=true;image.nodeCursor++;image.slotCursor=0;continue;}node.resourceReleased=true;node.pending="";}
             if(image.mode==Mode.RESTORE&&runtime.graphLifetime(this,node.receiver)){node.pending="FIELD_GRAPH_RESOURCE_HISTORY_RESTORE_PENDING";incomplete=true;image.nodeCursor++;image.slotCursor=0;continue;}
             while(budget-->0&&image.slotCursor<node.slots.size()){
-                Slot slot=node.slots.get(image.slotCursor++);Object desired=image.mode==Mode.CLEAR?GraphFields.zero(slot.field==null?node.receiver.getClass().getComponentType():slot.field.getType()):slot.value;
+                Slot slot=node.slots.get(image.slotCursor++);
+                if(slot.retiredSource){slot.preserved=true;continue;}
+                Object desired=image.mode==Mode.CLEAR?GraphFields.zero(slot.field==null?node.receiver.getClass().getComponentType():slot.field.getType()):slot.value;
                 if(!node.statics&&!runtime.graphOwns(this,image.roots,node.receiver)){slot.pending="FIELD_GRAPH_SHARED_ORIGIN_RETAINED";slot.preserved=true;continue;}
                 // Inherited/interface statics remain part of the field image, but the
                 // declared-static command only selects declarations on the actual roots.
@@ -174,13 +177,18 @@ final class FieldGraph {
             boolean selected=false;
             for(Node node:List.copyOf(image.nodes.values())){
                 if(runtime.graphSubject(this,node.receiver)==group){image.nodes.remove(node.receiver);image.scanning.remove(node);if(image.writing!=null)image.writing.remove(node);selected=true;}
-                else for(Slot slot:node.slots)if(slot.value!=UNREAD&&slot.value!=null&&runtime.graphSubject(this,slot.value)==group||slot.expected!=UNREAD&&slot.expected!=null&&runtime.graphSubject(this,slot.expected)==group){slot.value=null;slot.expected=null;slot.pending="FIELD_GRAPH_SOURCE_RETIRED";selected=true;}
+                else for(Slot slot:node.slots)if(slot.value!=UNREAD&&slot.value!=null&&runtime.graphSubject(this,slot.value)==group||slot.expected!=UNREAD&&slot.expected!=null&&runtime.graphSubject(this,slot.expected)==group){slot.value=null;slot.expected=null;slot.retiredSource=true;slot.preserved=true;slot.pending="FIELD_GRAPH_SOURCE_RETIRED";selected=true;}
             }
             if(image.roots.removeIf(root->runtime.groupSubject(root)==group))selected=true;
             image.statics.removeIf(type->runtime.graphSubject(this,type)==group);
             image.bodies.keySet().removeIf(root->runtime.groupSubject(root)==group);
             image.removals.keySet().removeIf(root->runtime.groupSubject(root)==group);
-            if(selected){image.state="SOURCE_RETIRED";image.stopped=true;image.nodeCursor=0;image.slotCursor=0;}
+            if(selected){
+                // A mixed image retains its other selected bodies and their real work.
+                // The retired source's saved references can never be replayed again.
+                image.nodeCursor=0;image.slotCursor=0;
+                if(image.roots.isEmpty()){image.state="SOURCE_RETIRED";image.stopped=true;}
+            }
         }
     }
     String state(UUID id){Image image=images.get(id);if(image==null)return "未找到字段图。";long slots=image.writing==null?image.nodes.values().stream().mapToLong(node->node.slots.size()).sum():image.writing.stream().mapToLong(node->node.slots.size()).sum();

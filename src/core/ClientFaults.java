@@ -77,6 +77,7 @@ public final class ClientFaults {
             if(!scope.abort(failure))throw failure;
             disabledListeners.add(listener);
             report("shader-registration",listener.getClass().getName(),failure);
+            ClientModGroups.isolateFault(listener);
             return true;
         } finally {
             if(previous==null)registration.remove();else registration.set(previous);
@@ -122,6 +123,7 @@ public final class ClientFaults {
             catch(Throwable cleanup) { if(cleanup!=failure)failure.addSuppressed(cleanup);throw ClientFaults.<RuntimeException>raise(failure); }
             disabledListeners.add(listener);
             report("shader-publication",consumer.getClass().getName(),failure);
+            ClientModGroups.isolateFault(consumer);ClientModGroups.isolateFault(listener);
         }
     }
 
@@ -172,7 +174,7 @@ public final class ClientFaults {
                 try { return supplier.get(); }
                 catch(Throwable failure) {
                     if(!recoverable(failure))throw ClientFaults.<RuntimeException>raise(failure);
-                    failed=true;report("shader-supplier",supplier.getClass().getName(),failure);return null;
+                    failed=true;report("shader-supplier",supplier.getClass().getName(),failure);ClientModGroups.isolateFault(supplier);return null;
                 }
             }
         };
@@ -194,7 +196,7 @@ public final class ClientFaults {
             ((ShaderState)shader).ronova$clearFailedDraw();
             BufferUploader.reset();
         } catch(Throwable cleanup) { if(cleanup!=failure)failure.addSuppressed(cleanup);return false; }
-        report("shader-draw",shader.getClass().getName(),failure);return true;
+        report("shader-draw",shader.getClass().getName(),failure);ClientModGroups.isolateFault(shader);return true;
     }
     static boolean recoverable(Throwable failure) {
         Set<Throwable> seen=Collections.newSetFromMap(new IdentityHashMap<>());

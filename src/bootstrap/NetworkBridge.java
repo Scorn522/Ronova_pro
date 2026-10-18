@@ -163,12 +163,17 @@ public final class NetworkBridge {
     }
     public static void channelCreated(Object channel,Object address){
         var frame=boundary();if(!frame.getMethodName().equals("<init>"))throw new SecurityException("ACTUAL_CHANNEL_CREATION_REQUIRED");
-        Module[] owners=ControlBridge.invokingSources();synchronized(CHANNELS){reap();record(CHANNELS,channel,owners);}
+        Module[] owners=ControlBridge.invokingSources();if(ControlBridge.sourceUnknown())owners=union(owners,new Module[]{null});
+        synchronized(CHANNELS){reap();record(CHANNELS,channel,owners);}
+        if(stopped(owners)||ControlBridge.stoppedEffects())throw new SecurityException("STOPPED_MOD_NETWORK_REGISTRATION");
     }
     public static void routePublished(Object instance){
         var frame=boundary();if(!frame.getMethodName().equals("createInstance"))throw new SecurityException("ACTUAL_CHANNEL_REGISTRATION_REQUIRED");
         @SuppressWarnings("unchecked") Map<?,?> registry=(Map<?,?>)field(null,frame.getDeclaringClass(),"instances");
-        synchronized(CHANNELS){for(Registry prior:REGISTRIES)if(prior.type()==frame.getDeclaringClass()&&prior.instances().get()==registry)return;REGISTRIES.add(new Registry(frame.getDeclaringClass(),new Ref<>(registry)));}
+        synchronized(CHANNELS){boolean known=false;for(Registry prior:REGISTRIES)if(prior.type()==frame.getDeclaringClass()&&prior.instances().get()==registry){known=true;break;}
+            if(!known)REGISTRIES.add(new Registry(frame.getDeclaringClass(),new Ref<>(registry)));}
+        Module[] owners;synchronized(CHANNELS){owners=channel(instance);}
+        if(retirable(owners))removeChannel(new Registry(frame.getDeclaringClass(),new Ref<>(registry)),instance);
     }
     public static void wrapperCreated(Object wrapper,Object instance){
         if(!boundary().getMethodName().equals("<init>"))throw new SecurityException("ACTUAL_CHANNEL_WRAPPER_REQUIRED");
@@ -177,15 +182,33 @@ public final class NetworkBridge {
     public static void handlerCreated(Object handler,Object codec,Object messageClass,Object encoder,Object decoder,Object consumer){
         if(!boundary().getMethodName().equals("<init>"))throw new SecurityException("ACTUAL_MESSAGE_REGISTRATION_REQUIRED");
         Module[] owners=union(ControlBridge.invokingSources(),origins(messageClass),origins(encoder),origins(decoder),origins(consumer));
+        if(ControlBridge.sourceUnknown())owners=union(owners,new Module[]{null});
         synchronized(CHANNELS){reap();record(HANDLERS,handler,owners);WRAPPERS.put(new Key(handler,true),new Ref<>(codec));}
+        if(stopped(owners)||ControlBridge.stoppedEffects())throw new SecurityException("STOPPED_MOD_NETWORK_REGISTRATION");
     }
     private static Module[] handler(Object object){return HANDLERS.getOrDefault(new Key(object,false),new Module[0]);}
     private static Object messageHandler(Object wrapper,Object message){
-        if(message==null)return null;Object codec=field(wrapper,"indexedCodec"),types=field(codec,"types");
-        return types instanceof Map<?,?> map?map.get(message.getClass()):null;
+        if(message==null)return null;Object codec=field(wrapper,"indexedCodec");
+        synchronized(codec){Object types=field(codec,"types");return types instanceof Map<?,?> map?map.get(message.getClass()):null;}
     }
     private static Module[] message(Object wrapper,Object handler,Module[] origins){return union(channel(wrapper),handler(handler),origins);}
-    public static boolean channelAllowed(Object instance){boundary();synchronized(CHANNELS){return !stopped(channel(instance));}}
+    public static boolean registrationAllowed(Object owner){
+        var frame=boundary();String name=frame.getDeclaringClass().getName();
+        if(!(name.equals("net.minecraftforge.network.NetworkRegistry")&&frame.getMethodName().equals("createInstance")&&owner==null
+                ||name.equals("net.minecraftforge.network.simple.IndexedMessageCodec")&&frame.getMethodName().equals("addCodecIndex")&&owner!=null&&frame.getDeclaringClass().isInstance(owner)))
+            throw new SecurityException("ACTUAL_NETWORK_REGISTRATION_REQUIRED");
+        Module[] modules;synchronized(CHANNELS){modules=channel(owner);}
+        return !stopped(modules)&&!ControlBridge.stoppedEffects();
+    }
+    public static void handlerPublished(Object codec,Object handler){
+        var frame=boundary();if(!frame.getDeclaringClass().getName().equals("net.minecraftforge.network.simple.IndexedMessageCodec")
+                ||!frame.getMethodName().equals("addCodecIndex")||codec==null||!frame.getDeclaringClass().isInstance(codec)
+                ||!Thread.holdsLock(codec))throw new SecurityException("ACTUAL_CODEC_PUBLICATION_REQUIRED");
+        Module[] modules;synchronized(CHANNELS){Ref<Object> owner=WRAPPERS.get(new Key(handler,false));
+            if(owner==null||owner.get()!=codec)throw new SecurityException("ACTUAL_MESSAGE_CODEC_REQUIRED");modules=handler(handler);}
+        if(retirable(modules))removeHandler(codec,handler,modules);
+    }
+    public static boolean channelAllowed(Object instance){boundary();Module[] modules;synchronized(CHANNELS){modules=channel(instance);}return !stopped(modules)&&!ControlBridge.stoppedEffects();}
     public static boolean messageAllowed(Object wrapper,Object message){boundary();Module[] origins=origins(message);Object handler=messageHandler(wrapper,message);boolean stopped;synchronized(CHANNELS){stopped=stopped(message(wrapper,handler,origins));}return !stopped&&!ControlBridge.stoppedEffects();}
     public static boolean codecAllowed(Object handler){boundary();boolean stopped;synchronized(CHANNELS){Ref<Object> codec=WRAPPERS.get(new Key(handler,false));stopped=stopped(handler(handler))||stopped(codec==null?null:channel(codec.get()));}return !stopped&&!ControlBridge.stoppedEffects();}
     public static Object enter(Object owner){
@@ -818,8 +841,86 @@ public final class NetworkBridge {
         ((java.util.concurrent.Executor)executor).execute(deferred);
     }
     @SuppressWarnings("unchecked") private static <T extends Throwable> void raise(Throwable failure)throws T{throw (T)failure;}
+    private static boolean retirable(Module[] modules){
+        if(modules==null||modules.length==0)return false;
+        for(Module module:modules)if(module==null||!ControlBridge.modStopped(module))return false;return true;
+    }
+    private static boolean selected(Module[] sources,Module[] selected){
+        for(Module source:sources)for(Module module:selected)if(source==module)return true;return false;
+    }
+    private static Map<?,?> registryMap(Registry registry){
+        Map<?,?> map=registry.instances().get();
+        if(map==null)return null;
+        if(field(null,registry.type(),"instances")!=map||map.getClass().getClassLoader()!=null
+                ||!map.getClass().getName().equals("java.util.Collections$SynchronizedMap"))
+            throw new IllegalStateException("NETWORK_REGISTERED_CHANNEL_MAP_CHANGED");
+        return map;
+    }
+    private static long removeChannel(Registry registry,Object instance){
+        Map<?,?> map=registryMap(registry);if(map==null)return 0;long removed=0;
+        // Forge publishes all accesses through this actual synchronized map.
+        // No source callback or bridge-global monitor is held during its mutation.
+        synchronized(map){if(field(null,registry.type(),"instances")!=map)throw new IllegalStateException("NETWORK_REGISTERED_CHANNEL_MAP_CHANGED");
+            for(var cursor=map.entrySet().iterator();cursor.hasNext();)if(cursor.next().getValue()==instance){cursor.remove();removed++;}}
+        return removed;
+    }
+    private static Map<?,?> codecMap(Object codec,String name,String implementation){
+        Object value=field(codec,name);
+        try{if(value instanceof Map<?,?> map&&map.getClass()==Class.forName(implementation,false,codec.getClass().getClassLoader()))return map;}
+        catch(ClassNotFoundException unavailable){throw new IllegalStateException("NETWORK_CODEC_MAP_IMPLEMENTATION_UNAVAILABLE",unavailable);}
+        throw new IllegalStateException("NETWORK_CODEC_MAP_CHANGED:"+name);
+    }
+    private static boolean containsIdentity(Map<?,?> map,Object handler){for(Object value:map.values())if(value==handler)return true;return false;}
+    private static boolean removeIdentity(Map<?,?> map,Object handler){
+        boolean removed=false;for(var cursor=map.entrySet().iterator();cursor.hasNext();)if(cursor.next().getValue()==handler){cursor.remove();removed=true;}return removed;
+    }
+    private static boolean removeHandler(Object codec,Object handler,Module[] observed){
+        // addCodecIndex and its two lookup methods use this same actual codec
+        // monitor. A mixed channel keeps every unrelated message registration.
+        synchronized(codec){
+            synchronized(CHANNELS){Ref<Object> owner=WRAPPERS.get(new Key(handler,false));
+                if(owner==null||owner.get()!=codec||HANDLERS.get(new Key(handler,false))!=observed||!retirable(observed))return false;}
+            Map<?,?> types=codecMap(codec,"types","it.unimi.dsi.fastutil.objects.Object2ObjectArrayMap");
+            Map<?,?> indices=codecMap(codec,"indicies","it.unimi.dsi.fastutil.shorts.Short2ObjectArrayMap");
+            boolean removed=removeIdentity(types,handler);removed=removeIdentity(indices,handler)||removed;return removed;
+        }
+    }
+    private static List<Object[]> channelRows(Module[] selected){
+        List<Object[]> rows=new ArrayList<>();synchronized(CHANNELS){
+            for(var entry:CHANNELS.entrySet()){Object value=entry.getKey().get();if(value!=null&&selected(entry.getValue(),selected))rows.add(new Object[]{value,entry.getValue()});}}
+        return rows;
+    }
+    private static List<Object[]> handlerRows(Module[] selected){
+        List<Object[]> rows=new ArrayList<>();synchronized(CHANNELS){
+            for(var entry:HANDLERS.entrySet()){Object value=entry.getKey().get();Ref<Object> owner=WRAPPERS.get(new Key(value,false));Object codec=owner==null?null:owner.get();
+                if(value!=null&&codec!=null&&selected(entry.getValue(),selected))rows.add(new Object[]{value,codec,entry.getValue()});}}
+        return rows;
+    }
+    private static long[] retireRegistrations(Module[] selected){
+        List<Registry> registries;synchronized(CHANNELS){registries=List.copyOf(REGISTRIES);}
+        long channels=0,handlers=0,pending=0;
+        for(Object[] row:channelRows(selected))if(retirable((Module[])row[1]))for(Registry registry:registries)
+            try{channels+=removeChannel(registry,row[0]);}catch(RuntimeException unavailable){pending++;}
+        for(Object[] row:handlerRows(selected))if(retirable((Module[])row[2]))
+            try{if(removeHandler(row[1],row[0],(Module[])row[2]))handlers++;}catch(RuntimeException unavailable){pending++;}
+        // Provenance remains bound to the old objects until their real lifetime
+        // ends, so old references and inflight calls cannot regain admission.
+        return new long[]{channels,handlers,pending};
+    }
+    private static long registered(Module module){
+        List<Registry> registries;synchronized(CHANNELS){registries=List.copyOf(REGISTRIES);}long count=0;
+        try{
+            for(Object[] row:channelRows(new Module[]{module}))for(Registry registry:registries){Map<?,?> map=registryMap(registry);if(map!=null)synchronized(map){if(containsIdentity(map,row[0]))count++;}}
+            for(Object[] row:handlerRows(new Module[]{module}))synchronized(row[1]){
+                Map<?,?> types=codecMap(row[1],"types","it.unimi.dsi.fastutil.objects.Object2ObjectArrayMap");
+                Map<?,?> indices=codecMap(row[1],"indicies","it.unimi.dsi.fastutil.shorts.Short2ObjectArrayMap");
+                if(containsIdentity(types,row[0])||containsIdentity(indices,row[0]))count++;
+            }
+            return count;
+        }catch(RuntimeException unavailable){return -1;}
+    }
     public static String retire(Module[] selected){
-        agent();List<QueueRef> queues;synchronized(CHANNELS){reap();queues=List.copyOf(QUEUES.values());}
+        agent();long[] registrations=retireRegistrations(selected);List<QueueRef> queues;synchronized(CHANNELS){reap();queues=List.copyOf(QUEUES.values());}
         long removed=0,pending=0;for(QueueRef association:queues){Queue<?> queue=association.queue().get();Object connection=association.connection().get();if(queue==null||connection==null)continue;
             if(queue.getClass()!=java.util.concurrent.ConcurrentLinkedQueue.class||field(connection,association.type(),association.field())!=queue){pending++;continue;}
             var cursor=queue.iterator();while(cursor.hasNext()){
@@ -839,15 +940,15 @@ public final class NetworkBridge {
                     }
                 }
             }
-        }synchronized(CHANNELS){dropped+=removed;unobservedQueues=pending;return "DROPPED="+dropped+";QUEUED_UNOBSERVED="+unobservedQueues;}
+        }synchronized(CHANNELS){dropped+=removed;unobservedQueues=pending;return "DROPPED="+dropped+";QUEUED_UNOBSERVED="+unobservedQueues+";CHANNELS_REMOVED="+registrations[0]+";HANDLERS_REMOVED="+registrations[1]+";REGISTRATION_UNOBSERVED="+registrations[2];}
     }
     public static String state(){synchronized(CHANNELS){return "NETWORK_DROPPED="+dropped+";NETWORK_QUEUED_UNOBSERVED="+unobservedQueues;}}
-    public static String retirementGap(Module module){agent();synchronized(CHANNELS){
+    public static String retirementGap(Module module){agent();long registrations=registered(module);synchronized(CHANNELS){
         reap();long active=ACTIVE.stream().filter(scope->Arrays.stream(scope.modules).anyMatch(source->source==module)).count();
         long writes=WRITES.values().stream().filter(write->Arrays.stream(write.modules()).anyMatch(source->source==module)).count();
         long queued=HOLDERS.values().stream().filter(entry->entry.published&&!entry.claimed&&!entry.closed&&(unknown(entry.modules)||Arrays.stream(entry.modules).anyMatch(source->source==module))).count();
         long unknownActive=ACTIVE.stream().filter(scope->unknown(scope.modules)).count();
-        return active!=0||writes!=0||queued!=0||unknownActive!=0||unobservedQueues!=0?"NETWORK_RETIREMENT_PENDING:active="+active+":writes="+writes+":queued="+queued+":unknownActive="+unknownActive+":queueUnobserved="+unobservedQueues:"";
+        return active!=0||writes!=0||queued!=0||unknownActive!=0||unobservedQueues!=0||registrations!=0?"NETWORK_RETIREMENT_PENDING:active="+active+":writes="+writes+":queued="+queued+":unknownActive="+unknownActive+":queueUnobserved="+unobservedQueues+":registrations="+(registrations<0?"unknown":Long.toString(registrations)):"";
     }}
     public static Object[] controlObjects(){agent();return new Object[]{CHANNELS,HANDLERS,PACKETS,BUFFERS,WRAPPERS,HOLDERS,QUEUES,WRITES,ROLES,REGISTRIES,DEAD,CURRENT,ACTIVE,CLEANING,SUBMITTING};}
     private static void reap(){for(Key key;(key=(Key)DEAD.poll())!=null;){CHANNELS.remove(key);HANDLERS.remove(key);PACKETS.remove(key);BUFFERS.remove(key);WRAPPERS.remove(key);HOLDERS.remove(key);QUEUES.remove(key);WRITES.remove(key);}}

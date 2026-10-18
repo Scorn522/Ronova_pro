@@ -45,6 +45,12 @@ final class SourceMaps {
             catch(ReflectiveOperationException unavailable){throw new ExceptionInInitializerError(unavailable);}
         }
     }
+    /** Publish the real holder before a field/source registration becomes visible. */
+    static void observeHolder(Object holder){
+        if(holder==null)return;
+        try{Publications.OBSERVE.invoke(null,holder);}
+        catch(ReflectiveOperationException unavailable){throw new IllegalStateException("SOURCE_HOLDER_SCOPE_UNAVAILABLE",unavailable);}
+    }
     static void retireField(ProRuntime runtime,Field field,Object receiver,Object expected,Action action)throws ReflectiveOperationException {
         Object holder=receiver==null?field.getDeclaringClass():receiver;ProRuntime.Subject group=runtime.groupSubject(holder);
         if(group==null||!group.terminal)throw new IllegalStateException("GROUP_FIELD_AUTHORITY_CHANGED");
@@ -646,6 +652,17 @@ final class SourceMaps {
         if(fastSet(cursor.map))return removeSetIdentity(cursor,key);
         if(cursor.next instanceof MapRow row&&row.key==key)return removeJdkRow(cursor,row);
         return false;
+    }
+    /** All original children have been retained by the caller before this exact private backend is cleared. */
+    static boolean clearPrivate(Cursor cursor,Object carrier,ProRuntime runtime,ProRuntime.Subject group)throws ReflectiveOperationException {
+        boolean[] cleared={false};
+        return with(cursor.map,()->{
+            if(!group.terminal||runtime.groupSubject(carrier)!=group||!cursor.complete)return;
+            if(revision(cursor.map)!=cursor.revision){cursor.reset(null,revision(cursor.map));return;}
+            if(fastSet(cursor.map))((Set<?>)cursor.map).clear();else ((Map<?,?>)cursor.map).clear();
+            if(fastSet(cursor.map)?!((Set<?>)cursor.map).isEmpty():!((Map<?,?>)cursor.map).isEmpty())throw new IllegalStateException("GROUP_PRIVATE_CONTAINER_CLEAR_READBACK_FAILED");
+            changed(carrier);cleared[0]=true;
+        })&&cleared[0];
     }
     static void removeVisited(Cursor cursor,Object target,ProRuntime runtime,ProRuntime.Subject group)throws ReflectiveOperationException {
         if(fastSet(cursor.map)){

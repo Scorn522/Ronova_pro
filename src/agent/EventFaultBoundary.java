@@ -69,8 +69,7 @@ final class EventFaultBoundary {
         if(bytes==null)return false;
         ClassNode node=new ClassNode();new ClassReader(bytes).accept(node,0);
         if(!TARGET.equals(node.name)||!faultSites(node))return false;
-        MethodNode post=method(node,"post",POST),add=method(node,"addToListeners",
-                "(Ljava/lang/Object;Ljava/lang/Class;Lnet/minecraftforge/eventbus/api/IEventListener;Lnet/minecraftforge/eventbus/api/EventPriority;)V");
+        MethodNode post=method(node,"post",POST),add=method(node,"addToListeners",EventBusBoundary.ADD_LISTENER);
         if(post==null||add==null)return false;
         MethodInsnNode allowed=one(post,CONTROL,"modListenerAllowed","(Ljava/lang/Object;)Z");
         MethodInsnNode dispatch=one(post,BRIDGE,"dispatch",DISPATCH);
@@ -78,10 +77,13 @@ final class EventFaultBoundary {
                 ||post.instructions.indexOf(allowed)>=post.instructions.indexOf(dispatch)
                 ||post.instructions.indexOf(gate.label)<=post.instructions.indexOf(dispatch))return false;
         MethodInsnNode owner=one(add,CONTROL,"modOwnerAllowed","(Ljava/lang/Object;)Z");
-        MethodInsnNode registered=one(add,CONTROL,"modListenerRegistered","(Ljava/lang/Object;Ljava/lang/Object;)V");
+        MethodInsnNode registered=one(add,CONTROL,"modListenerRegistered",EventBusBoundary.REGISTERED);
         return owner!=null&&registered!=null&&returnGate(owner,1)
                 &&add.instructions.indexOf(owner)<add.instructions.indexOf(registered)
-                &&load(previous(registered),3)&&load(previous(previous(registered)),1);
+                &&registered.getOpcode()==Opcodes.INVOKESTATIC
+                &&load(previous(registered),3)&&load(previous(previous(registered)),1)
+                &&load(previous(previous(previous(registered))),0)
+                &&next(registered)!=null&&next(registered).getOpcode()==Opcodes.RETURN;
     }
     private static boolean faultSites(ClassNode node) {
         MethodNode post=method(node,"post",POST),remove=method(node,"unregister","(Ljava/lang/Object;)V");

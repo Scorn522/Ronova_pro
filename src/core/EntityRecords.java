@@ -151,6 +151,9 @@ public final class EntityRecords {
         if(inSections()) result.add("SECTION");
         if(ticks.pro$active().values().stream().anyMatch(e->e==entity)
                 || ticks.pro$passive().values().stream().anyMatch(e->e==entity)) result.add("TICK");
+        if(((dev.ronova.pro.mixin.BlockGroupHooks.NavigationAccess)level).pro$navigating().stream().anyMatch(value->value==entity))result.add("NAVIGATION");
+        if(server.pro$parts().values().stream().anyMatch(value->value==entity
+                ||value!=null&&((dev.ronova.pro.mixin.BlockGroupHooks.PartAccess)value).pro$parent()==entity))result.add("MULTIPART");
         var iterated=ticks.pro$iterated();
         if(iterated!=null&&iterated.values().stream().anyMatch(e->e==entity))result.add("TICK_ITERATION_PENDING");
         for(Object v:tracking.pro$tracked().values())
@@ -227,6 +230,18 @@ public final class EntityRecords {
             step(()->{ticks.pro$ensureActiveIsNotIterated();var iterated=ticks.pro$iterated();var active=ticks.pro$active();if(active!=iterated)removeKeysWhere(active,entity);},current);
         if(ticks.pro$passive().getClass()==it.unimi.dsi.fastutil.ints.Int2ObjectLinkedOpenHashMap.class)
             step(()->{var iterated=ticks.pro$iterated();var passive=ticks.pro$passive();if(passive!=iterated)removeKeysWhere(passive,entity);},current);
+        step(()->((dev.ronova.pro.mixin.BlockGroupHooks.NavigationAccess)level).pro$navigating().removeIf(value->value==entity),current);
+        var parts=server.pro$parts();
+        for(int key:parts.keySet().toIntArray()){
+            var part=parts.get(key);if(part==null||part!=entity&&((dev.ronova.pro.mixin.BlockGroupHooks.PartAccess)part).pro$parent()!=entity)continue;
+            step(()->{
+                var state=(Access.EntityState)part;
+                state.pro$removal(Entity.RemovalReason.DISCARDED);state.pro$canUpdate(false);state.pro$added(false);state.pro$callback(EntityInLevelCallback.NULL);
+                if(state.pro$removal()==null||state.pro$canUpdate())throw new IllegalStateException("MULTIPART_BODY_WRITE_REFUSED");
+                if(parts.get(key)==part)parts.remove(key);
+            },current);
+            if(!current(current))return;
+        }
         if(sections.pro$all().getClass()==it.unimi.dsi.fastutil.longs.Long2ObjectOpenHashMap.class)
         for(var entry:new ArrayList<>(sections.pro$all().entrySet())) {
             Object row=entry.getValue();
@@ -249,7 +264,7 @@ public final class EntityRecords {
     public boolean slotsRemaining(Entity entity) {
         return lookup.pro$ids().values().stream().anyMatch(value->value==entity)
                 || lookup.pro$uuids().values().stream().anyMatch(value->value==entity)
-                || remaining().stream().anyMatch(gap->Set.of("LOOKUP_ID","LOOKUP_UUID","SECTION","TICK","TICK_ITERATION_PENDING","TRACKING","KNOWN_UUID").contains(gap));
+                 || remaining().stream().anyMatch(gap->Set.of("LOOKUP_ID","LOOKUP_UUID","SECTION","TICK","TICK_ITERATION_PENDING","TRACKING","KNOWN_UUID","NAVIGATION","MULTIPART").contains(gap));
     }
     private static void removeKeysWhere(Map<?,?> map,Object target) {
         if(map==null||map.isEmpty())return;

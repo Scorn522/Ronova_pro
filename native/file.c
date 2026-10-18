@@ -179,7 +179,7 @@ static int native_file_prepare(JNIEnv *env){
     jclass bridge=!native_original.ExceptionCheck(env)?native_original.FindClass(env,"dev/ronova/pro/bootstrap/ResourceBridge"):NULL;
     if(bridge&&native_bootstrap_class(env,bridge,"Ldev/ronova/pro/bootstrap/ResourceBridge;")){
         native_file_bridge=(jclass)native_original.NewGlobalRef(env,bridge);
-        native_file_begin_query=native_original.GetStaticMethodID(env,bridge,"nativeFileOperation","(Ljava/lang/Object;Ljava/lang/Class;Ljava/lang/String;[Ljava/lang/Module;IJJ)Ljava/lang/Object;");
+        native_file_begin_query=native_original.GetStaticMethodID(env,bridge,"nativeFileOperation","(Ljava/lang/Object;Ljava/lang/Class;Ljava/lang/String;[Ljava/lang/Module;IJJLjava/lang/String;)Ljava/lang/Object;");
         native_file_end_query=native_original.GetStaticMethodID(env,bridge,"nativeFileOperationFinished","(Ljava/lang/Object;)V");
         native_io_begin_query=native_original.GetStaticMethodID(env,bridge,"nativeIoOperation","(Ljava/lang/Class;Ljava/lang/String;[J[Ljava/lang/Object;[Ljava/lang/Module;)Ljava/lang/Object;");
         native_io_end_query=native_original.GetStaticMethodID(env,bridge,"nativeIoFinished","(Ljava/lang/Object;Z)V");
@@ -205,6 +205,7 @@ static void native_file_clear(JNIEnv *env,NativeFileFrame *use){
     if(use->token)native_original.DeleteGlobalRef(env,use->token);
     if(use->declaring)native_original.DeleteGlobalRef(env,use->declaring);
     if(use->method)native_original.DeleteGlobalRef(env,use->method);
+    if(use->path)native_original.DeleteGlobalRef(env,use->path);
     if(use->sources)native_original.DeleteGlobalRef(env,use->sources);
     if(use->references)native_original.DeleteGlobalRef(env,use->references);
     if(use->arguments)native_original.DeleteGlobalRef(env,use->arguments);
@@ -258,6 +259,10 @@ static int native_file_begin(JNIEnv *env,NativeThread *state,Binding *binding,jo
     if(binding->fileOperation==7)use->address=(jlong)(jint)native_unsafe_argument(binding,frame,2);
     if(binding->fileOperation==NATIVE_FILE_MAPPING_DUPLICATE)use->address=(jlong)native_unsafe_argument(binding,frame,2);
     use->declaring=(jclass)native_original.NewGlobalRef(env,binding->type);
+    if(use->operation==2&&!native_original.ExceptionCheck(env)){
+        jobject path=(jobject)(uintptr_t)native_unsafe_argument(binding,frame,2);
+        if(path)use->path=(jstring)native_original.NewGlobalRef(env,path);
+    }
     if(!native_original.ExceptionCheck(env))use->method=(jstring)native_file_keep(env,native_original.NewStringUTF(env,binding->fileMethod));
     if(!native_original.ExceptionCheck(env))use->sources=(jobjectArray)native_file_keep(env,native_mutation_sources(env,state));
     int ready=use->receiver&&use->declaring&&use->method&&use->sources&&!native_original.ExceptionCheck(env);
@@ -265,8 +270,23 @@ static int native_file_begin(JNIEnv *env,NativeThread *state,Binding *binding,jo
     if(ready){
         NativeFileFrame *previous=state->filePermit;state->filePermit=use;
         jobject token=use->operation==8?native_original.CallStaticObjectMethod(env,native_file_bridge,native_io_begin_query,use->declaring,use->method,use->arguments,use->references,use->sources)
-                :native_original.CallStaticObjectMethod(env,native_file_bridge,native_file_begin_query,receiver,use->declaring,use->method,use->sources,use->operation,use->address,use->length);
-        use->token=native_file_keep(env,token);
+                :native_original.CallStaticObjectMethod(env,native_file_bridge,native_file_begin_query,receiver,use->declaring,use->method,use->sources,use->operation,use->address,use->length,use->path);
+        use->token=token&&!native_original.ExceptionCheck(env)?native_original.NewGlobalRef(env,token):NULL;
+        if(token&&!use->token){
+            // Java may already hold its final mutation scope. Keep the actual
+            // local token alive while returning that scope, even when JNI
+            // cannot retain a global reference for the original invocation.
+            jthrowable failure=native_original.ExceptionOccurred(env);if(failure)native_original.ExceptionClear(env);
+            use->token=token;use->finishing=1;
+            if(use->operation==8)native_original.CallStaticVoidMethod(env,native_file_bridge,native_io_end_query,token,JNI_FALSE);
+            else if(use->operation==NATIVE_FILE_MAPPING_DUPLICATE)native_original.CallStaticVoidMethod(env,native_file_bridge,native_file_duplicate_end_query,token,(jlong)0,JNI_FALSE);
+            else native_original.CallStaticVoidMethod(env,native_file_bridge,native_file_end_query,token);
+            use->token=NULL;use->finishing=0;
+            if(native_original.ExceptionCheck(env)){native_original.ExceptionClear(env);InterlockedIncrement(&native_failures);}
+            if(failure){native_original.Throw(env,failure);native_original.DeleteLocalRef(env,failure);}
+            else native_refuse(env,"NATIVE_FILE_SCOPE_RETENTION_UNAVAILABLE");
+        }
+        if(token)native_original.DeleteLocalRef(env,token);
         state->filePermit=previous;ready=!native_original.ExceptionCheck(env);
         if(ready&&use->operation==NATIVE_FILE_MAPPING_DUPLICATE)
             ready=use->token&&native_original.IsInstanceOf(env,use->token,native_file_duplicate_type);
@@ -313,11 +333,11 @@ JNIEXPORT jboolean JNICALL Java_dev_ronova_pro_bootstrap_NativeControl_ioOperati
     return use&&!use->finishing&&use->operation==8&&native_original.IsSameObject(env,use->declaring,declaring)&&native_original.IsSameObject(env,use->method,method)
             &&native_original.IsSameObject(env,use->arguments,arguments)&&native_original.IsSameObject(env,use->references,references)&&native_original.IsSameObject(env,use->sources,sources)?JNI_TRUE:JNI_FALSE;
 }
-JNIEXPORT jboolean JNICALL Java_dev_ronova_pro_bootstrap_NativeControl_fileOperationBoundary0(JNIEnv *env,jclass type,jobject receiver,jclass declaring,jstring method,jobjectArray sources,jint operation,jlong address,jlong length){
+JNIEXPORT jboolean JNICALL Java_dev_ronova_pro_bootstrap_NativeControl_fileOperationBoundary0(JNIEnv *env,jclass type,jobject receiver,jclass declaring,jstring method,jobjectArray sources,jint operation,jlong address,jlong length,jstring path){
     (void)type;NativeThread *state=native_thread();NativeFileFrame *use=state?state->filePermit:NULL;
     return use&&!use->finishing&&use->operation==operation&&use->address==address&&use->length==length&&native_original.IsSameObject(env,use->receiver,receiver)
             &&native_original.IsSameObject(env,use->declaring,declaring)&&native_original.IsSameObject(env,use->method,method)
-            &&native_original.IsSameObject(env,use->sources,sources)?JNI_TRUE:JNI_FALSE;
+            &&native_original.IsSameObject(env,use->sources,sources)&&native_original.IsSameObject(env,use->path,path)?JNI_TRUE:JNI_FALSE;
 }
 JNIEXPORT jboolean JNICALL Java_dev_ronova_pro_bootstrap_NativeControl_fileOperationFinishing0(JNIEnv *env,jclass type,jobject token){
     (void)type;NativeThread *state=native_thread();NativeFileFrame *use=state?state->filePermit:NULL;

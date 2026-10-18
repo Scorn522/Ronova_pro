@@ -143,13 +143,15 @@ public final class BlockGroupPolicy {
         Level level=((Access.Chunk)chunk).pro$level();
         if(!(level instanceof ServerLevel server))return false;
         ProRuntime runtime=ProRuntime.get(server.getServer());
-        return runtime!=null&&runtime.modStopped(entity.getClass().getModule());
+        if(runtime==null)return false;
+        var subject=runtime.groupSubject(entity);
+        return subject!=null&&subject.terminal;
     }
 
     public static void published(BlockEntity entity) {
         Level level=((Access.Block)entity).pro$level();
         if(!(level instanceof ServerLevel server))return;
         ProRuntime runtime=ProRuntime.get(server.getServer());
-        if(runtime!=null&&runtime.modProtected(entity.getClass().getModule()))protect(runtime,entity);
+        if(runtime!=null&&runtime.groupObjectProtected(entity))protect(runtime,entity);
     }
 }

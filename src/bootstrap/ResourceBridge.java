@@ -33,6 +33,8 @@ public final class ResourceBridge {
     private static final HashMap<Key,BufferStorage> BUFFER_ACTIONS=new HashMap<>(),BUFFER_CLEANERS=new HashMap<>();
     private static final ThreadLocal<BufferOperation> BUFFER_OPERATIONS=new ThreadLocal<>();
     private static final ThreadLocal<FileOperation> FILE_OPERATIONS=new ThreadLocal<>();
+    private record PlannedFileMutation(Class<?> owner,java.lang.invoke.MethodHandle begin,java.lang.invoke.MethodHandle end){}
+    private static volatile PlannedFileMutation plannedFileMutation;
     private static final ThreadLocal<MappingDuplicate> MAPPING_DUPLICATING=new ThreadLocal<>();
     private static final IdentityHashMap<FileDescriptor,MappingDuplicateNative> MAPPING_DUPLICATE_PENDING=new IdentityHashMap<>();
     private static final ThreadLocal<BufferStorage> BUFFER_CLEANING=new ThreadLocal<>();
@@ -50,6 +52,7 @@ public final class ResourceBridge {
     private static final ThreadLocal<IoBufferWrite> IO_BUFFER_WRITE=new ThreadLocal<>();
     private static final HashMap<Class<?>,Layout> LAYOUTS=new HashMap<>();
     private static final HashMap<Key,ProcessRecord> PROCESSES=new HashMap<>();
+    private static final IdentityHashMap<Thread,ReleasePhase> RELEASE_PHASES=new IdentityHashMap<>();
     private static final HashMap<Key,WeakReference<PipeRecord>> PROCESS_VIEWS=new HashMap<>();
     private static final ThreadLocal<ProcessRecord> PROCESS_CLEANUP=new ThreadLocal<>();
     private static final ThreadLocal<Boolean> FILE_OBSERVING=new ThreadLocal<>();
@@ -151,9 +154,27 @@ public final class ResourceBridge {
     static class FileRecord {
         final java.util.concurrent.locks.ReentrantLock observation=new java.util.concurrent.locks.ReentrantLock();
         Future<String> release;
-        boolean retired,sealed,unknownUse,preserved;
+        ReleasePhase releasePhase;
+        boolean retired,sealed,unknownUse,preserved,releaseStarted;
         int active,observing;
     }
+    /** The phase of the one existing closer Future, never release authority. */
+    private static final class ReleasePhase {boolean effects,pending,uncertain;}
+    private static FutureTask<String> releaseTask(Callable<String> action,ReleasePhase phase){
+        ControlBridge.controlPublication(STREAMS,new Object[]{RELEASE_PHASES,phase});
+        return new FutureTask<>(()->{
+            Thread thread=Thread.currentThread();ReleasePhase previous;
+            synchronized(STREAMS){previous=RELEASE_PHASES.put(thread,phase);}
+            try{return action.call();}
+            catch(Exception|Error failure){releaseUncertain();throw failure;}
+            finally{synchronized(STREAMS){if(previous==null)RELEASE_PHASES.remove(thread);else RELEASE_PHASES.put(thread,previous);}}
+        });
+    }
+    static void releaseEffectStarted(){synchronized(STREAMS){ReleasePhase phase=RELEASE_PHASES.get(Thread.currentThread());if(phase!=null){phase.effects=true;phase.pending=false;}}}
+    static String releasePending(String gap){synchronized(STREAMS){ReleasePhase phase=RELEASE_PHASES.get(Thread.currentThread());if(phase!=null&&!phase.effects&&!phase.uncertain)phase.pending=true;}return gap;}
+    private static void releaseUncertain(){synchronized(STREAMS){ReleasePhase phase=RELEASE_PHASES.get(Thread.currentThread());if(phase!=null){phase.effects=true;phase.pending=false;phase.uncertain=true;}}}
+    private static boolean releaseMayContinue(){synchronized(STREAMS){ReleasePhase phase=RELEASE_PHASES.get(Thread.currentThread());return phase!=null&&phase.pending&&!phase.effects;}}
+    static void releaseStepCompleted(){synchronized(STREAMS){ReleasePhase phase=RELEASE_PHASES.get(Thread.currentThread());if(phase!=null&&!phase.uncertain){phase.effects=false;phase.pending=false;}}}
     private static final class WrapperRecord extends FileRecord {
         final WeakReference<Object> lock;
         final Map<Field,WeakReference<Object>> delegates=new LinkedHashMap<>();
@@ -216,7 +237,7 @@ public final class ResourceBridge {
         if(record==null)return "CHARACTER_WRAPPER_CONSTRUCTOR_UNOBSERVED";
         Object lock=record.lock.get();if(lock==null)return "CHARACTER_WRAPPER_LOCK_UNOBSERVED";
         synchronized(lock){
-            long version;synchronized(STREAMS){if(record.observing!=0)return "CHARACTER_WRAPPER_EXPOSURE_PENDING";version=record.exposureVersion;}
+            long version;synchronized(STREAMS){if(record.observing!=0)return releasePending("CHARACTER_WRAPPER_EXPOSURE_PENDING");version=record.exposureVersion;}
             if(!selected.test(value))return "CHARACTER_WRAPPER_OWNERSHIP_CHANGED";
             Field lockField=value instanceof Reader?CharacterWrappers.READER_LOCK:CharacterWrappers.WRITER_LOCK;
             if(lockField.get(value)!=lock)return "CHARACTER_WRAPPER_LOCK_CHANGED";
@@ -227,8 +248,9 @@ public final class ResourceBridge {
                 if(actual!=null&&actual!=original&&!member.getName().equals("lcb"))return "CHARACTER_WRAPPER_DELEGATE_CHANGED";
                 if(actual!=null)children.add(actual);
             }
-            synchronized(STREAMS){if(record.observing!=0||record.exposureVersion!=version)return "CHARACTER_WRAPPER_EXPOSURE_CHANGED";record.sealed=true;record.children=children.toArray();}
+            synchronized(STREAMS){if(record.observing!=0||record.exposureVersion!=version)return releasePending("CHARACTER_WRAPPER_EXPOSURE_CHANGED");record.sealed=true;record.children=children.toArray();}
             // Never call close/flush: a delegate may also serve a surviving source.
+            releaseEffectStarted();
             for(Field member:record.delegates.keySet()){member.set(value,null);if(member.get(value)!=null)return "CHARACTER_WRAPPER_DETACH_READBACK_FAILED";}
             for(Field member:value.getClass().getDeclaredFields())if(member.getName().equals("closed")&&member.getType()==boolean.class){member.setAccessible(true);member.setBoolean(value,true);}
             // Reader/Writer.lock commonly is the delegate itself. Retain no hidden endpoint alias.
@@ -408,9 +430,39 @@ public final class ResourceBridge {
         final Class<?> declaring;
         final String method;
         final Module[] sources;
+        PlannedFileMutation planned;Object plannedToken;
         boolean closed;
         FileOperation(FileRecord record,Class<?> declaring,String method,Module[] sources){
             this.record=record;this.declaring=declaring;this.method=method;this.sources=sources;
+        }
+    }
+    /** Core installs its existing Capture/Subject final mutation boundary. */
+    public static void installPlannedFileMutation(Class<?> owner,java.lang.invoke.MethodHandle begin,java.lang.invoke.MethodHandle end){
+        if(WALKER.getCallerClass()!=owner||owner!=ControlBridge.policyInstaller||ControlBridge.guards==null||ControlBridge.guards.owner()!=owner)
+            throw new SecurityException("PLANNED_FILE_MUTATION_CORE_REQUIRED");
+        if(!begin.type().equals(java.lang.invoke.MethodType.methodType(Object.class,Object.class,String.class,int.class))
+                ||!end.type().equals(java.lang.invoke.MethodType.methodType(void.class,Object.class)))throw new IllegalArgumentException("PLANNED_FILE_MUTATION_SIGNATURE");
+        PlannedFileMutation replacement=new PlannedFileMutation(owner,begin,end);
+        ControlBridge.controlPublication(STREAMS,new Object[]{replacement,owner,begin,end});plannedFileMutation=replacement;
+    }
+    public static boolean plannedFileMutationReady(){
+        return plannedFileMutation!=null&&NativeControl.fileBoundaryInstalled().startsWith("NATIVE_FILE_BOUNDARY_READY:");
+    }
+    private static Object plannedFileOperation(Object original,Object endpoint,Class<?> declaring,String method,Module[] sources,int operation,String path)throws IOException{
+        PlannedFileMutation guard=plannedFileMutation;if(guard==null)return original;
+        FileOperation token=original instanceof FileOperation actual?actual:new FileOperation(null,declaring,method,sources);
+        boolean temporary=original==null;
+        // Publish/allocate the existing scope before Core takes any commit
+        // gates. Only the one actual JNI effect retains the returned token.
+        if(temporary)FILE_OPERATIONS.set(token);
+        try{
+            Object held=(Object)guard.begin.invokeExact(endpoint,path,operation);
+            if(held==null){if(temporary)finishFileOperation(token);return original;}
+            token.planned=guard;token.plannedToken=held;return token;
+        }catch(Throwable failure){
+            try{finishFileOperation(token);}catch(RuntimeException|Error cleanup){if(cleanup!=failure)failure.addSuppressed(cleanup);}
+            if(failure instanceof IOException io)throw io;if(failure instanceof RuntimeException runtime)throw runtime;if(failure instanceof Error error)throw error;
+            throw new IOException("PLANNED_FILE_MUTATION_UNAVAILABLE",failure);
         }
     }
     private static final class NativeFilePair {
@@ -455,13 +507,13 @@ public final class ResourceBridge {
         Object processHandle;PipeRecord[] pipes;long pipelineHandle=-1;FileDescriptor pipelineDescriptor;
         String gap="PROCESS_CONSTRUCTION_PENDING";
         volatile boolean handleClosed;
-        boolean retired;Future<String> release;
+        boolean retired,destroyRequested,cleanerStarted,cleanerFinished;Future<String> release;ReleasePhase releasePhase;
         final java.util.concurrent.locks.ReentrantLock observation=new java.util.concurrent.locks.ReentrantLock();
         ProcessRecord(long handle,Runnable action){this.handle=handle;originalAction=action;}
     }
     private static final class PipeRecord {
         final Object view,stream;final FileDescriptor descriptor;final byte[] buffer;
-        volatile boolean unknownExposure;boolean released;
+        volatile boolean unknownExposure;boolean released,viewCloseStarted;
         PipeRecord(Object view,Object stream,FileDescriptor descriptor,byte[] buffer){this.view=view;this.stream=stream;this.descriptor=descriptor;this.buffer=buffer;}
     }
     public static void processStart()throws IOException {
@@ -555,13 +607,19 @@ public final class ResourceBridge {
         try{
             if(record.retired)return true;
             if(record.release==null){
-                try{FutureTask<String> future=new FutureTask<>(action);record.release=future;CLOSER.execute(future);}
+                try{record.releasePhase=new ReleasePhase();FutureTask<String> future=releaseTask(action,record.releasePhase);record.release=future;CLOSER.execute(future);}
                 catch(RejectedExecutionException full){record.release=null;throw new IOException("RESOURCE_DISPOSITION_CAPACITY",full);}
                 return false;
             }
             if(!record.release.isDone())return false;
-            Future<String> result=record.release;record.release=null;
-            try{String gap=result.get();if(!gap.isEmpty())throw new IOException(gap);record.retired=true;return true;}
+            // Once called, retain this exact result for later observation.
+            // An exit/close may already have happened even when its outcome is
+            // pending or exceptional; a later tick cannot submit it anew.
+            Future<String> result=record.release;
+            try{String gap=result.get();if(!gap.isEmpty()){
+                    if(record.releasePhase.pending&&!record.releasePhase.effects)record.release=null;
+                    throw new IOException(gap);
+                }record.retired=true;return true;}
             catch(InterruptedException interrupted){Thread.currentThread().interrupt();throw new IOException("PROCESS_RELEASE_OBSERVATION_INTERRUPTED",interrupted);}
             catch(ExecutionException failed){throw new IOException("PROCESS_RELEASE_FAILED",failed.getCause());}
         }finally{record.observation.unlock();}
@@ -573,34 +631,43 @@ public final class ResourceBridge {
         try{
             if(!selected.test(process))return "PROCESS_QUALIFICATION_CHANGED";
             if(field(PROCESS_TYPE,"handle").getLong(process)!=record.handle||field(PROCESS_TYPE,"processHandle").get(process)!=record.processHandle)return "PROCESS_ORIGINAL_ASSOCIATION_CHANGED";
-            String hostGap=NativeControl.retireProcess(process,record.hostToken);if(!hostGap.isEmpty())return hostGap;
-            if(record.handleClosed)return record.retired?"":"PROCESS_HANDLE_CLOSED_BEFORE_PIPE_RELEASE";
-            process.destroyForcibly();if(process.isAlive())return "PROCESS_EXIT_PENDING";
+            // This advances/queries the same captured Host token. A pending
+            // Host result never manufactures another Java process handle.
+            String hostGap=NativeControl.retireProcess(process,record.hostToken);if(!hostGap.isEmpty())return releasePending(hostGap);
+            if(record.handleClosed){
+                if(record.cleanerFinished&&record.pipes!=null&&Arrays.stream(record.pipes).allMatch(pipe->pipe==null||pipe.released)){record.retired=true;return "";}
+                return record.retired?"":"PROCESS_HANDLE_CLOSED_BEFORE_PIPE_RELEASE";
+            }
+            if(!record.destroyRequested){record.destroyRequested=true;releaseEffectStarted();process.destroyForcibly();releaseStepCompleted();}
+            if(process.isAlive())return releasePending("PROCESS_EXIT_PENDING");
             String gap=record.gap;
-            if(record.pipelineHandle!=-1&&(record.pipelineDescriptor==null||record.pipelineDescriptor.valid()||!FD_CLOSED.getBoolean(record.pipelineDescriptor)||FD_HANDLE.getLong(record.pipelineDescriptor)!=-1))gap="PROCESS_PIPELINE_PARENT_ENDPOINT_RELEASE_PENDING";
+            if(!gap.isEmpty())return gap;
+            if(record.pipelineHandle!=-1&&(record.pipelineDescriptor==null||record.pipelineDescriptor.valid()||!FD_CLOSED.getBoolean(record.pipelineDescriptor)||FD_HANDLE.getLong(record.pipelineDescriptor)!=-1))return releasePending("PROCESS_PIPELINE_PARENT_ENDPOINT_RELEASE_PENDING");
             if(record.pipes!=null)for(PipeRecord pipe:record.pipes){
                 if(pipe==null||pipe.released)continue;
-                if(pipe.unknownExposure||!selected.test(pipe.view)||!selected.test(pipe.stream)){gap="PROCESS_PIPE_SHARED_OR_UNQUALIFIED";continue;}
-                String remaining=release(pipe.stream,selected);if(!remaining.isEmpty()){gap=remaining;continue;}
+                if(pipe.unknownExposure||!selected.test(pipe.view)||!selected.test(pipe.stream))return "PROCESS_PIPE_SHARED_OR_UNQUALIFIED";
+                String remaining=release(pipe.stream,selected);if(!remaining.isEmpty())return remaining;
                 if(pipe.view.getClass()==BufferedInputStream.class){
                     Object current=field(FilterInputStream.class,"in").get(pipe.view);
-                    if(current!=null&&current!=pipe.stream){gap="PROCESS_BUFFERED_PIPE_ASSOCIATION_CHANGED";continue;}
-                    ((BufferedInputStream)pipe.view).close();
-                    if(field(FilterInputStream.class,"in").get(pipe.view)!=null||field(BufferedInputStream.class,"buf").get(pipe.view)!=null){gap="PROCESS_BUFFERED_INPUT_RELEASE_PENDING";continue;}
+                    if(current!=null&&current!=pipe.stream)return "PROCESS_BUFFERED_PIPE_ASSOCIATION_CHANGED";
+                    if(!pipe.viewCloseStarted){pipe.viewCloseStarted=true;releaseEffectStarted();((BufferedInputStream)pipe.view).close();releaseStepCompleted();}
+                    if(field(FilterInputStream.class,"in").get(pipe.view)!=null||field(BufferedInputStream.class,"buf").get(pipe.view)!=null)return releasePending("PROCESS_BUFFERED_INPUT_RELEASE_PENDING");
                 }else if(pipe.view.getClass()==BufferedOutputStream.class){
                     synchronized(pipe.view){
-                        if(field(FilterOutputStream.class,"out").get(pipe.view)!=pipe.stream||field(BufferedOutputStream.class,"buf").get(pipe.view)!=pipe.buffer){gap="PROCESS_BUFFERED_PIPE_ASSOCIATION_CHANGED";continue;}
-                        field(BufferedOutputStream.class,"count").setInt(pipe.view,0);((BufferedOutputStream)pipe.view).close();
-                        if(!field(FilterOutputStream.class,"closed").getBoolean(pipe.view)){gap="PROCESS_BUFFERED_OUTPUT_RELEASE_PENDING";continue;}
+                        if(!pipe.viewCloseStarted){
+                            if(field(FilterOutputStream.class,"out").get(pipe.view)!=pipe.stream||field(BufferedOutputStream.class,"buf").get(pipe.view)!=pipe.buffer)return "PROCESS_BUFFERED_PIPE_ASSOCIATION_CHANGED";
+                            pipe.viewCloseStarted=true;releaseEffectStarted();field(BufferedOutputStream.class,"count").setInt(pipe.view,0);((BufferedOutputStream)pipe.view).close();releaseStepCompleted();
+                        }
+                        if(!field(FilterOutputStream.class,"closed").getBoolean(pipe.view))return releasePending("PROCESS_BUFFERED_OUTPUT_RELEASE_PENDING");
                     }
                 }
-                if(pipe.descriptor.valid()){gap="PROCESS_ORIGINAL_PIPE_RELEASE_PENDING";continue;}
-                if(pipe.buffer!=null)Arrays.fill(pipe.buffer,(byte)0);pipe.released=true;
+                if(pipe.descriptor.valid())return releasePending("PROCESS_ORIGINAL_PIPE_RELEASE_PENDING");
+                if(pipe.buffer!=null){releaseEffectStarted();Arrays.fill(pipe.buffer,(byte)0);}pipe.released=true;releaseStepCompleted();
             }
-            if(!gap.isEmpty())return gap;
             if(record.cleaner==null)return "PROCESS_CLEANER_ASSOCIATION_UNOBSERVED";
-            record.cleaner.clean();if(record.handleClosed){record.retired=true;return "";}return "PROCESS_NATIVE_HANDLE_RELEASE_PENDING";
-        }catch(ReflectiveOperationException|IOException|RuntimeException failed){return "PROCESS_RELEASE_FAILED:"+failed.getClass().getSimpleName()+":"+failed.getMessage();}
+            if(!record.cleanerStarted){record.cleanerStarted=true;releaseEffectStarted();record.cleaner.clean();record.cleanerFinished=true;releaseStepCompleted();}
+            if(record.handleClosed){record.retired=true;return "";}return releasePending("PROCESS_NATIVE_HANDLE_RELEASE_PENDING");
+        }catch(ReflectiveOperationException|IOException|RuntimeException failed){releaseUncertain();return "PROCESS_RELEASE_FAILED:"+failed.getClass().getSimpleName()+":"+failed.getMessage();}
     }
     private static void reap(){
         for(int i=0;i<32;i++){Key key=(Key)RETIRED.poll();if(key==null)return;STREAMS.remove(key);WRAPPERS.remove(key);CHANNELS.remove(key);ATTACHMENTS.remove(key);PROCESSES.remove(key);PROCESS_VIEWS.remove(key);BUFFERS.remove(key);BUFFER_CLEANERS.remove(key);BUFFER_ACTIONS.remove(key);}
@@ -944,8 +1011,8 @@ public final class ResourceBridge {
         IoBridge.nativeReturned(token,completed);
     }
     /** Entered only while the actual JNI binding keeps this receiver and source tuple live. */
-    public static Object nativeFileOperation(Object value,Class<?> declaring,String method,Module[] sources,int operation,long address,long length)throws IOException {
-        if(!NativeControl.fileOperationBoundary(value,declaring,method,sources,operation,address,length))throw new SecurityException("ACTUAL_NATIVE_FILE_OPERATION_REQUIRED");
+    public static Object nativeFileOperation(Object value,Class<?> declaring,String method,Module[] sources,int operation,long address,long length,String path)throws IOException {
+        if(!NativeControl.fileOperationBoundary(value,declaring,method,sources,operation,address,length,path))throw new SecurityException("ACTUAL_NATIVE_FILE_OPERATION_REQUIRED");
         if(operation==10)return nativeMappingDuplicate(value,declaring,method,sources,address);
         if(operation==9){
             if(!ControlBridge.recoveryWriter()){
@@ -966,12 +1033,17 @@ public final class ResourceBridge {
                 if(!ControlBridge.taskEffectAllowed(null,"file-open"))throw new FileNotFoundException("RONOVA_TERMINAL_FILE_OPEN_REFUSED");
                 synchronized(STREAMS){if(fileRecord(value)!=null)throw new FileNotFoundException("FILE_DESCRIPTOR_REOPEN_REFUSED");}
             }
-            return null;
+            try{return plannedFileOperation(null,value,declaring,method,sources,operation,path);}
+            catch(FileNotFoundException failure){throw failure;}
+            catch(IOException failure){FileNotFoundException denied=new FileNotFoundException(failure.getMessage());denied.initCause(failure);throw denied;}
         }
         if(operation==4&&IoBridge.closingDescriptor((FileDescriptor)value))return null;
         if(operation==4&&!ControlBridge.recoveryWriter())for(Module source:sources)if(source!=null&&ControlBridge.modStopped(source))throw new IOException("RONOVA_TERMINAL_FILE_CLOSE_REFUSED");
         if(operation==4&&!ControlBridge.recoveryWriter()&&(!ControlBridge.taskEffectAllowed(value,"file-close")||!descriptorReleaseAllowed((FileDescriptor)value)))throw new IOException("RONOVA_FILE_DESCRIPTOR_CLOSE_REFUSED");
-        try{return fileOperation(value,declaring,method,sources);}
+        try{
+            Object token=fileOperation(value,declaring,method,sources);
+            return operation==1||operation==3?plannedFileOperation(token,value,declaring,method,sources,operation,null):token;
+        }
         catch(IOException failure){
             if(operation!=5)throw failure;
             SyncFailedException sync=new SyncFailedException(failure.getMessage());sync.initCause(failure);throw sync;
@@ -1016,13 +1088,22 @@ public final class ResourceBridge {
     }
     private static void finishFileOperation(FileOperation token){
         if(token.closed)return;
-        if(FILE_OPERATIONS.get()!=token)throw new SecurityException("ACTUAL_FILE_OPERATION_ORDER_REQUIRED");
+        boolean current=FILE_OPERATIONS.get()==token;
         try{
+            if(!current)throw new SecurityException("ACTUAL_FILE_OPERATION_ORDER_REQUIRED");
             synchronized(STREAMS){
                 token.closed=true;
                 if(token.record!=null){token.record.active--;if(token.record instanceof ChannelRecord record)releaseChannelAlias(record);}
             }
-        }finally{if(token.previous==null)FILE_OPERATIONS.remove();else FILE_OPERATIONS.set(token.previous);}
+        }finally{
+            if(current){if(token.previous==null)FILE_OPERATIONS.remove();else FILE_OPERATIONS.set(token.previous);}
+            if(token.plannedToken!=null){
+                Object held=token.plannedToken;PlannedFileMutation guard=token.planned;token.plannedToken=null;
+                try{guard.end.invokeExact(held);}
+                catch(RuntimeException|Error failure){throw failure;}
+                catch(Throwable failure){throw new IllegalStateException("PLANNED_FILE_MUTATION_FINISH",failure);}
+            }
+        }
     }
     static Module[] currentFileSources(){
         FileOperation token=FILE_OPERATIONS.get();return token==null||token.closed?null:token.sources;
@@ -1118,13 +1199,13 @@ public final class ResourceBridge {
         synchronized(STREAMS){
             DescriptorRecord record=ATTACHMENTS.get(new Key(descriptor,false));
             if(record!=null){
-                if(record.active!=0||record.observing!=0)return "IO_DESCRIPTOR_OPERATION_PENDING";
+                if(record.active!=0||record.observing!=0)return releasePending("IO_DESCRIPTOR_OPERATION_PENDING");
                 if(record.unknownUse)return "IO_DESCRIPTOR_SOURCE_UNOBSERVED";
                 for(Module source:record.nativeSources)if(!modules.contains(source))return "SHARED";
                 for(var reference:record.aliases){Object value=reference.get();if(value!=null)views.add(value);}
                 for(var reference:record.channels){Object value=reference.get();if(value!=null)views.add(value);}
             }
-            for(BufferStorage storage:BUFFER_ACTIONS.values())if(storage.descriptor==descriptor&&!storage.cleaned)return "IO_MAPPING_RELEASE_PENDING";
+            for(BufferStorage storage:BUFFER_ACTIONS.values())if(storage.descriptor==descriptor&&!storage.cleaned)return releasePending("IO_MAPPING_RELEASE_PENDING");
         }
         for(Object view:views)if(!selected.test(view))return "SHARED";
         synchronized(STREAMS){DescriptorRecord record=ATTACHMENTS.get(new Key(descriptor,false));Set<Module> selection=FILE_SELECTION.get();if(record!=null&&selection==modules&&selection!=null&&ControlBridge.coreResourceCallback(selected))try{List<Object> aliases=kernelFileAliases(record,descriptor);if(aliases!=null){FileKernelCandidate candidate=new FileKernelCandidate(descriptor,record,selection,selected,aliases);if(kernelFileQualified(candidate))IO_KERNEL_SELECTION.set(candidate);}}catch(ReflectiveOperationException|IOException|RuntimeException unavailable){record.kernelResult="HOST_KERNEL_FILE_SCOPE_UNAVAILABLE:"+unavailable.getClass().getSimpleName();}}
@@ -1892,8 +1973,8 @@ public final class ResourceBridge {
     private static String preserveBuffer(BufferStorage storage,FileRecord requested,Set<Module> selection,long version){
         synchronized(STREAMS){
             if(storage.cleaned)return "";
-            if(storage.sealed||storage.cleaning||storage.restoring||storage.active!=0||storage.observing!=0)return "BUFFER_OPERATIONS_EXIT_PENDING";
-            if(version!=storage.viewsVersion)return "BUFFER_VIEW_OBSERVATION_PENDING";
+            if(storage.sealed||storage.cleaning||storage.restoring||storage.active!=0||storage.observing!=0)return releasePending("BUFFER_OPERATIONS_EXIT_PENDING");
+            if(version!=storage.viewsVersion)return releasePending("BUFFER_VIEW_OBSERVATION_PENDING");
             if(storage.failed||storage.escaped||storage.unknownUse)return "BUFFER_SHARED_STORAGE_LIFETIME_UNKNOWN_RETAINED";
             // A known live outside view retains its real allocation and original Cleaner.
             // Preserved means its lifetime was retained, never that its bytes were restored.
@@ -1903,7 +1984,7 @@ public final class ResourceBridge {
     }
     /** Actual Java view/operation lifetimes govern the original Cleaner release. */
     private static String prepareBufferRelease(BufferStorage storage,Set<Module> selection){
-        return storage.active!=0||storage.observing!=0?"BUFFER_OPERATIONS_EXIT_PENDING":"";
+        return storage.active!=0||storage.observing!=0?releasePending("BUFFER_OPERATIONS_EXIT_PENDING"):"";
     }
     private static String releaseBuffer(Object value,Predicate<Object> selected)throws ReflectiveOperationException {
         BufferStorage storage;FileRecord requested;List<Buffer> views=new ArrayList<>();Set<Module> selection=FILE_SELECTION.get();long version;boolean preserve;
@@ -1911,11 +1992,12 @@ public final class ResourceBridge {
             requested=fileRecord(value);storage=requested instanceof BufferView view?view.storage:(BufferStorage)requested;
             if(storage.cleaned)return "";
             if(!storage.created||!storage.gap.isEmpty()&&!storage.gap.equals("BUFFER_MAPPING_DESCRIPTOR_RETAINED"))return storage.gap;
-            if(storage.failed||storage.escaped||storage.unknownUse||storage.observing!=0)return "BUFFER_STORAGE_LIFETIME_UNRESOLVED";
+            if(storage.failed||storage.escaped||storage.unknownUse)return "BUFFER_STORAGE_LIFETIME_UNRESOLVED";
+            if(storage.observing!=0)return releasePending("BUFFER_STORAGE_LIFETIME_UNRESOLVED");
             if(selection==null||storage.sources.isEmpty())return "BUFFER_STORAGE_SOURCES_UNOBSERVED";
             version=storage.viewsVersion;
             for(var reference:storage.views){Buffer buffer=reference.get();if(buffer!=null){
-                BufferView view=BUFFERS.get(new Key(buffer,false));if(view==null||!view.constructed||view.unknownUse||view.observing!=0)return "BUFFER_VIEW_OBSERVATION_PENDING";views.add(buffer);
+                BufferView view=BUFFERS.get(new Key(buffer,false));if(view==null||!view.constructed||view.unknownUse)return "BUFFER_VIEW_OBSERVATION_PENDING";if(view.observing!=0)return releasePending("BUFFER_VIEW_OBSERVATION_PENDING");views.add(buffer);
             }}
             // A real outside view or Util cache keeps the allocation alive;
             // it does not keep the stopped source's recorded byte revisions.
@@ -1923,12 +2005,13 @@ public final class ResourceBridge {
         }
         if(!preserve)for(Buffer buffer:views)if(!selected.test(buffer)){preserve=true;break;}
         synchronized(STREAMS){
-            if(storage.observing!=0||version!=storage.viewsVersion)return "BUFFER_VIEW_OBSERVATION_PENDING";
+            if(storage.observing!=0||version!=storage.viewsVersion)return releasePending("BUFFER_VIEW_OBSERVATION_PENDING");
             preserve|=storage.runtimeManaged||!selection.containsAll(storage.sources);
-            if(storage.active!=0||storage.cleaning||storage.restoring)return "BUFFER_OPERATIONS_EXIT_PENDING";
+            if(storage.active!=0||storage.cleaning||storage.restoring)return releasePending("BUFFER_OPERATIONS_EXIT_PENDING");
             if(!preserve){String pending=prepareBufferRelease(storage,selection);if(!pending.isEmpty())return pending;storage.sealed=true;requested.preserved=false;}
         }
         if(preserve)return preserveBuffer(storage,requested,selection,version);
+        releaseEffectStarted();
         if(storage.original==null){bufferCleanupResult(storage,true);return storage.gap;}
         if((Long)CodeSourceBridge.controlField(storage.addressField,storage.original)==0&&storage.descriptor!=null&&storage.descriptor.valid()){
             var close=FileDescriptor.class.getDeclaredMethod("close");close.setAccessible(true);close.invoke(storage.descriptor);bufferCleanupResult(storage,true);return storage.gap;
@@ -2133,18 +2216,24 @@ public final class ResourceBridge {
             if(record.retired)return true;
             if(record.release==null){
                 try{
-                    FutureTask<String> future=new FutureTask<>(action);record.release=future;CLOSER.execute(future);
+                    record.releasePhase=new ReleasePhase();FutureTask<String> future=releaseTask(action,record.releasePhase);record.release=future;CLOSER.execute(future);
                 }
                 catch(RejectedExecutionException full){record.release=null;throw new IOException("RESOURCE_DISPOSITION_CAPACITY",full);}
                 return false;
             }
             if(!record.release.isDone())return false;
             try{
-                String remaining=record.release.get();record.release=null;
-                if(!remaining.isEmpty())throw new IOException(remaining);
+                String remaining=record.release.get();
+                if(!remaining.isEmpty()){
+                    if(record.releasePhase.pending&&!record.releasePhase.effects)record.release=null;
+                    throw new IOException(remaining);
+                }
+                // A known preservation result may be reconsidered by a later
+                // group selection; a real close remains recorded as retired.
+                record.release=null;
                 record.retired=!record.preserved;return true;
             }catch(InterruptedException interrupted){Thread.currentThread().interrupt();throw new IOException("RESOURCE_RELEASE_OBSERVATION_INTERRUPTED",interrupted);}
-            catch(ExecutionException failed){record.release=null;throw new IOException("RESOURCE_RELEASE_FAILED:"+failed.getCause().getClass().getSimpleName(),failed.getCause());}
+            catch(ExecutionException failed){throw new IOException("RESOURCE_RELEASE_FAILED:"+failed.getCause().getClass().getSimpleName(),failed.getCause());}
         }finally{record.observation.unlock();}
     }
     public static String releaseProcess(Process process,Predicate<Object> selected,Module[] modules){
@@ -2176,12 +2265,13 @@ public final class ResourceBridge {
             if(buffer)return releaseBuffer(stream,selected);
             if(IoBridge.resource(stream))return IoBridge.release(stream,selected,FILE_SELECTION.get());
             return fileChannel(stream)?releaseChannel(stream,selected):releaseStream(stream,selected);
-        }catch(ReflectiveOperationException|IOException|RuntimeException failure){return "RESOURCE_RELEASE_FAILED:"+failure.getClass().getSimpleName()+":"+failure.getMessage();}
+        }catch(ReflectiveOperationException|IOException|RuntimeException failure){releaseUncertain();return "RESOURCE_RELEASE_FAILED:"+failure.getClass().getSimpleName()+":"+failure.getMessage();}
     }
     /** An unpublished copy never borrows the parent's close or allocation authority. */
     private static String releaseMappingDuplicate(FileDescriptor descriptor,MappingDuplicateNative call,Predicate<Object> selected)throws ReflectiveOperationException,IOException {
         MappingDuplicate scope=call.scope;
-        if(scope.target!=descriptor||!scope.closed)return "MAPPING_DUPLICATE_FRAME_EXIT_PENDING";
+        if(scope.target!=descriptor)return "MAPPING_DUPLICATE_FRAME_EXIT_PENDING";
+        if(!scope.closed)return releasePending("MAPPING_DUPLICATE_FRAME_EXIT_PENDING");
         if(!call.nativeSucceeded||call.returned==-1)return "MAPPING_DUPLICATE_NATIVE_RESULT_UNOBSERVED";
         Set<Module> selection=FILE_SELECTION.get();
         if(selection==null||call.sources.length==0)return "MAPPING_DUPLICATE_SOURCE_GROUP_UNOBSERVED";
@@ -2200,7 +2290,7 @@ public final class ResourceBridge {
             if(!descriptorReleaseAllowed(descriptor))return "MAPPING_DUPLICATE_SHARED_TARGET_PENDING";
             String pending=ioDescriptorRetirement(descriptor,selected,selection);if(!pending.isEmpty())return pending;
             sealIoDescriptor(descriptor,selection);
-            Method close=FileDescriptor.class.getDeclaredMethod("close");close.setAccessible(true);close.invoke(descriptor);
+            Method close=FileDescriptor.class.getDeclaredMethod("close");close.setAccessible(true);releaseEffectStarted();close.invoke(descriptor);
             if(FD_HANDLE.getLong(descriptor)!=-1)return "MAPPING_DUPLICATE_ORIGINAL_CLOSE_PENDING";
             synchronized(STREAMS){
                 DescriptorRecord record=ATTACHMENTS.get(new Key(descriptor,false));if(record!=null)record.retired=true;
@@ -2313,7 +2403,7 @@ public final class ResourceBridge {
             if(channel!=null&&!selected.test(channel))return preserve(record);
             synchronized(STREAMS){
                 if(record.unknownUse)return "STREAM_USE_SOURCE_UNOBSERVED";
-                if(record.observing!=0)return "STREAM_SOURCE_OBSERVATION_PENDING";
+                if(record.observing!=0)return releasePending("STREAM_SOURCE_OBSERVATION_PENDING");
                 if(!selected.test(stream))return preserve(record);
                 if(channel!=null){
                     ChannelRecord attached=CHANNELS.get(new Key(channel,false));
@@ -2323,11 +2413,11 @@ public final class ResourceBridge {
                     attached.sealed=true;
                 }
                 record.sealed=true;
-                if(record.active!=0)return "STREAM_IO_EXIT_PENDING";
+                if(record.active!=0)return releasePending("STREAM_IO_EXIT_PENDING");
             }
             // Closing the channel may call back into its parent. Close the view before that callback,
             // then remove only this parent from the original descriptor's closeAll list.
-            layout.closed.setBoolean(stream,true);
+            if(!layout.closed.getBoolean(stream)){releaseEffectStarted();layout.closed.setBoolean(stream,true);}
             if(channel!=null){
                 ChannelRecord attached;synchronized(STREAMS){attached=CHANNELS.get(new Key(channel,false));}
                 String pending=closeChannel(channel,attached);if(!pending.isEmpty())return pending;
@@ -2364,7 +2454,7 @@ public final class ResourceBridge {
             }
             synchronized(STREAMS){
                 if(record.unknownUse)return "FILE_CHANNEL_USE_SOURCE_UNOBSERVED";
-                if(record.observing!=0)return "FILE_CHANNEL_SOURCE_OBSERVATION_PENDING";
+                if(record.observing!=0)return releasePending("FILE_CHANNEL_SOURCE_OBSERVATION_PENDING");
                 if(!selected.test(channel))return preserve(record);
                 if(!record.cleanupFinished&&record.cleanup.get()==null)return "FILE_CHANNEL_CLEANUP_UNOBSERVED";
                 record.sealed=true;record.detachDescriptor=true;
@@ -2378,14 +2468,17 @@ public final class ResourceBridge {
     }
     private static String closePrivateDescriptor(FileDescriptor descriptor,DescriptorView view,Predicate<Object> selected)throws ReflectiveOperationException,IOException {
         for(Object stream:view.streams)if(!LAYOUTS.containsKey(stream.getClass())&&stream.getClass()!=PIPE_INPUT)return "DESCRIPTOR_USER_CLOSE_DELEGATION_UNRESOLVED";
+        boolean close;
         synchronized(STREAMS){
             // Admission and the retirement seal meet at the same resource records.
             DescriptorRecord descriptorRecord=ATTACHMENTS.get(new Key(descriptor,false));
-            if(descriptorRecord==null||descriptorRecord.unknownUse||descriptorRecord.observing!=0)return "FILE_DESCRIPTOR_SOURCE_OBSERVATION_PENDING";
+            if(descriptorRecord==null||descriptorRecord.unknownUse)return "FILE_DESCRIPTOR_SOURCE_OBSERVATION_PENDING";
+            if(descriptorRecord.observing!=0)return releasePending("FILE_DESCRIPTOR_SOURCE_OBSERVATION_PENDING");
             if(!descriptorRecord.nativeSources.isEmpty()&&(FILE_SELECTION.get()==null||!FILE_SELECTION.get().containsAll(descriptorRecord.nativeSources)))return "FILE_DESCRIPTOR_SHARED_DURING_RETIREMENT";
             for(Object value:views(view)){
                 FileRecord record=fileRecord(value);
-                if(record==null||record.unknownUse||record.observing!=0)return "FILE_RESOURCE_SOURCE_OBSERVATION_PENDING";
+                if(record==null||record.unknownUse)return "FILE_RESOURCE_SOURCE_OBSERVATION_PENDING";
+                if(record.observing!=0)return releasePending("FILE_RESOURCE_SOURCE_OBSERVATION_PENDING");
             }
             // Re-evaluate after any source publication which preceded the seal.
             for(Object value:views(view))if(!selected.test(value))return "FILE_RESOURCE_SHARED_DURING_RETIREMENT";
@@ -2393,32 +2486,40 @@ public final class ResourceBridge {
             catch(IllegalAccessException|RuntimeException unavailable){descriptorRecord.kernelResult="HOST_KERNEL_FILE_SCOPE_UNAVAILABLE:"+unavailable.getClass().getSimpleName();}
             ATTACHMENTS.get(new Key(descriptor,false)).sealed=true;
             for(Object value:views(view)){FileRecord record=fileRecord(value);record.sealed=true;record.preserved=false;}
+            if(descriptorRecord.active!=0)return releasePending("FILE_DESCRIPTOR_IO_EXIT_PENDING");
+            for(Object value:views(view))if(fileRecord(value).active!=0)return releasePending("FILE_RESOURCE_IO_EXIT_PENDING");
+            close=!descriptorRecord.releaseStarted;descriptorRecord.releaseStarted=true;
         }
-        IOException failure=null;
-        for(Object stream:view.streams)try{((Closeable)stream).close();}catch(IOException thrown){if(failure==null)failure=thrown;else failure.addSuppressed(thrown);}
+        if(close){releaseEffectStarted();
+        IOException failure=null;String remaining="";
+        for(Object stream:view.streams)try{((Closeable)stream).close();}catch(IOException thrown){releaseUncertain();if(failure==null)failure=thrown;else failure.addSuppressed(thrown);}
         for(Object channel:view.channels)try{
             ChannelRecord record;synchronized(STREAMS){record=CHANNELS.get(new Key(channel,false));}
-            String pending=closeChannel(channel,record);if(!pending.isEmpty()&&failure==null)failure=new IOException(pending);
-        }catch(IOException thrown){if(failure==null)failure=thrown;else failure.addSuppressed(thrown);}
+            String pending=closeChannel(channel,record);if(!pending.isEmpty()&&remaining.isEmpty())remaining=pending;
+        }catch(IOException thrown){releaseUncertain();if(failure==null)failure=thrown;else failure.addSuppressed(thrown);}
         if(descriptor.valid()){
-            var close=FileDescriptor.class.getDeclaredMethod("close");close.setAccessible(true);
+            var originalClose=FileDescriptor.class.getDeclaredMethod("close");originalClose.setAccessible(true);
             var all=FileDescriptor.class.getDeclaredMethod("closeAll",Closeable.class);all.setAccessible(true);
-            Closeable releaser=()->{try{close.invoke(descriptor);}catch(ReflectiveOperationException thrown){throw new IOException("DESCRIPTOR_NATIVE_CLOSE_FAILED",thrown);}};
+            Closeable releaser=()->{try{originalClose.invoke(descriptor);}catch(ReflectiveOperationException thrown){throw new IOException("DESCRIPTOR_NATIVE_CLOSE_FAILED",thrown);}};
             all.invoke(descriptor,releaser);
         }
         if(failure!=null)throw failure;
-        synchronized(STREAMS){
-            if(ATTACHMENTS.get(new Key(descriptor,false)).active!=0)return "FILE_DESCRIPTOR_IO_EXIT_PENDING";
-            for(Object value:views(view))if(fileRecord(value).active!=0)return "FILE_RESOURCE_IO_EXIT_PENDING";
+        releaseStepCompleted();
+        if(!remaining.isEmpty())return releasePending(remaining);
         }
-        for(Object stream:view.streams){StreamRecord record;synchronized(STREAMS){record=STREAMS.get(new Key(stream,false));}if(!record.layout.closed.getBoolean(stream))return "STREAM_CLOSE_PENDING";}
-        return !descriptor.valid()?"":"FILE_DESCRIPTOR_NATIVE_RELEASE_PENDING";
+        synchronized(STREAMS){
+            if(ATTACHMENTS.get(new Key(descriptor,false)).active!=0)return releasePending("FILE_DESCRIPTOR_IO_EXIT_PENDING");
+            for(Object value:views(view))if(fileRecord(value).active!=0)return releasePending("FILE_RESOURCE_IO_EXIT_PENDING");
+        }
+        for(Object stream:view.streams){StreamRecord record;synchronized(STREAMS){record=STREAMS.get(new Key(stream,false));}if(!record.layout.closed.getBoolean(stream))return releasePending("STREAM_CLOSE_PENDING");}
+        return !descriptor.valid()?"":releasePending("FILE_DESCRIPTOR_NATIVE_RELEASE_PENDING");
     }
     private static String closeChannel(Object channel,ChannelRecord record)throws IOException {
-        ((Channel)channel).close();
-        if(((Channel)channel).isOpen())return "FILE_CHANNEL_CLOSE_PENDING";
-        if(!record.closeCompleted)return "FILE_CHANNEL_CLOSE_INCOMPLETE";
-        synchronized(STREAMS){return record.active==0?"":"FILE_CHANNEL_IO_EXIT_PENDING";}
+        boolean close;synchronized(STREAMS){close=!record.releaseStarted;record.releaseStarted=true;}
+        if(close){releaseEffectStarted();((Channel)channel).close();releaseStepCompleted();}
+        if(((Channel)channel).isOpen())return releasePending("FILE_CHANNEL_CLOSE_PENDING");
+        if(!record.closeCompleted)return releasePending("FILE_CHANNEL_CLOSE_INCOMPLETE");
+        synchronized(STREAMS){return record.active==0?"":releasePending("FILE_CHANNEL_IO_EXIT_PENDING");}
     }
     private static boolean identityContains(List<Object> values,Object target){for(Object value:values)if(value==target)return true;return false;}
 }

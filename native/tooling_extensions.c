@@ -120,8 +120,8 @@ static void *native_tooling_extension_entry(NativeToolingSlot *slot,const Native
 static NativeToolingSlot *native_tooling_extension_slot(JNIEnv *env,NativeToolingEnv *record,jvmtiExtensionEvent callback,
         const NativeToolingExtensionSignature *signature,OwnerLink *writers,jweak origin,int unknown){
     NativeToolingSlot *slot=calloc(1,sizeof(*slot));if(!slot)return NULL;
-    slot->environment=record;slot->callback=(void*)callback;slot->unknown=unknown;
-    int ready=native_owner_merge(&slot->owners,writers)&&native_capture_image_owners((void*)callback,&slot->owners);
+    slot->environment=record;slot->callback=(void*)callback;slot->unknown=unknown||record->unknown;
+    int ready=native_owner_merge(&slot->owners,record->owners)&&native_owner_merge(&slot->owners,writers)&&native_capture_image_owners((void*)callback,&slot->owners);
     if(origin&&env&&native_original.NewWeakGlobalRef){slot->origin=native_original.NewWeakGlobalRef(env,origin);if(!slot->origin)ready=0;}
     if(slot->owners&&env&&native_original.NewGlobalRef){jobjectArray lease=native_tooling_writers(env,slot->owners);
         if(lease){slot->sourceLease=(jobjectArray)native_original.NewGlobalRef(env,lease);native_original.DeleteLocalRef(env,lease);}ready=ready&&slot->sourceLease;}
@@ -155,13 +155,13 @@ static jvmtiError JNICALL native_tooling_extension(jvmtiEnv *api,jint index,jvmt
     TOOLING_USE(record);
     JNIEnv *env=native_tooling_jni();void *caller=__builtin_return_address(0);
     if(record->own){if(!native_tooling_internal(caller))return native_tooling_error(JVMTI_ERROR_ACCESS_DENIED);return record->original->SetExtensionEventCallback(api,index,callback);}
-    int stopped=native_tooling_stopped(env,caller);
+    int stopped=native_tooling_effect_stopped(record,env,caller);
     if(callback&&(stopped||native_tooling_internal((void*)callback)))return native_tooling_error(JVMTI_ERROR_ACCESS_DENIED);
     NativeToolingExtension *extension=NULL;NativeToolingExtensionSignature signature={0};
     OwnerLink *owners=NULL;jweak origin=NULL;int unknown=0;
     if(callback){
         jvmtiError result=native_tooling_extension_signature(record,index,&signature);if(result!=JVMTI_ERROR_NONE)return result;
-        int ready=native_tooling_capture(env,caller,&owners,&origin,&unknown)&&native_capture_image_owners((void*)callback,&owners);
+        int ready=native_tooling_capture(env,caller,&owners,&origin,&unknown)&&native_owner_merge(&owners,record->owners)&&native_capture_image_owners((void*)callback,&owners);unknown|=record->unknown;
         if(!ready){if(origin)native_original.DeleteWeakGlobalRef(env,origin);native_owner_links_free(owners);return native_tooling_error(JVMTI_ERROR_OUT_OF_MEMORY);}
         if(!signature.supported&&native_has_producer(owners)){
             if(origin)native_original.DeleteWeakGlobalRef(env,origin);native_owner_links_free(owners);return native_tooling_error(JVMTI_ERROR_NOT_AVAILABLE);

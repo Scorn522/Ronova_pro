@@ -1,6 +1,29 @@
 # B 批实际报告：2026-10-09 代码收敛接续
 
+## 2026-10-18：按新安排仅交付 A/B/C/D 生产候选
+
+用户撤销本轮后续运行检查安排，要求源码全部写齐后仅作统一编译。已终止旧 Forge 进程（PID 128892，对应会话退出 1）；此后未运行起服、实机或夹具，也不再轮询旧起服进度。本节记录源码及候选交付，不能作为整组效果通过报告。
+
+生产改动集中接入 SavedData 首读与真实保存、声明 holder 增量/共享份额、未 submit Future/CF 与后继、私有资源退役、外部方法与动态/隐藏定义归属、Native/JVMTI 效果门、整组事件/网络/UI/绘制清理及世界原始时间字段。过滤保存的真实 native 截断/写入与当前组代次共用效果定序，未知关闭沿原结果保留。`ControlBridge` 普通字段不再因 Ronova 自保或全局选集非空而逐次加锁建回执，字段声明解析按真实 Class 缓存，原作用域与写入策略保留。
+
+D 沿原 writer 增加 Journal7 载体与 upgrade/replace/uninstall 交接，旧日志及未决 key/attempt 不改写，匹配文件变化必须显式交接。未绑定旧载体、私有数据格式变化、未匹配旧栈和不可用后端继续报告缺口；不把手工换文件写成运行中卸载成功。
+
+全部生产代码接齐后统一构建。前两轮编译分别发现 prelaunch 的两处 `java` 局部变量遮蔽包名和 ResourceBridge 的一处 `close` 变量重名；修正后最终 `jar` / `reobfJar` 成功（42 秒，退出 0）。构建日志为 `.work/v1.5-whole-mod-20261018/abcd-production-build.log`，包含前述失败与续编。没有运行任何检查任务。现有 Mixin 映射、弃用及 Native 比较范围警告保留，未因警告扩跑检查。
+
+本次统一构建产出 Core、Agent、Bootstrap、prelaunch、用户态 Native，Storage 源码未再变更且任务复用已有匹配产物；没有构建或加载 SYS。当前配套候选在 `distribution/v1.5-whole-mod`，版本 `1.5.0-dev`，Java105 / Native99 / Storage3 / Journal7，协议 `v1.5-whole-mod-clock`：
+
+| 候选 | 字节 | SHA-256 |
+| --- | ---: | --- |
+| `ronova-pro-core-1.5.0-dev.jar` | 3226617 | `409db8d624f327621e76e507e26839059651c88a66d32fc0a904619563e13465` |
+| `ronova-pro-prelaunch.jar` | 48190 | `15d5c146d5502fb62ed1c549fd4abaa241706a2a4741695064dab548a2f8ef64` |
+
+Storage 同组后继保留原工作 key：必须同真实 source/code/文件身份，原效果和资源已闭合，且当前后继准确覆盖原移除范围或承接其实际 expected 图像。最终提交同时复核当前 canonical 作用组和准确保存范围；原未知事务不因新组读回成功而结清。独立读回通过原 Snapshot 精确剪除与 List 重定位接回下一代保存基线，重复查询不推进代次。
+
+构建后仅更新匹配候选与本报告，没有运行 WorldFixture、游戏客户端或实际驱动。尚无本候选的世界加载、整组停用/保护、保存或重启通过结果。
+
 ## 2026-10-18：V1.5 整 Mod 生产包与真实 Forge 场景
+
+以下保留停止检查前的过程记录，当前候选不继承这些运行结论。
 
 本轮接续主工程 `e4ba753`，候选 `1.5.0-dev`，协议 `v1.5-whole-mod`。生产源码先整包写齐，之后统一编译 Core/Agent/Bootstrap/prelaunch、GNU C23 Native 与 GNU C++23 Storage。当前双 JAR 集中在 `distribution/v1.5-whole-mod`；WorldFixture 只置于本地真实起服场景，不是交付 Mod。
 
@@ -14,7 +37,9 @@
 
 授权后的真实栈还定位普通树复制/元数据承接的 canonical/内容序列化及普通字段/数组逐写锁；现以冻结 parser 输入、实际父属和已有真实成员来源承接粗根，不声明当前字节未改，真实变换与回放仍走原检查。无策略且非控制、来源载体、资源、队列或发布目标可省回执，原字段/数组策略仍执行；首次 PUTSTATIC 空值约定错误已修正。实机已过 Core 177 与目标 5 个 Mixin 准备，进入 `Minecraft.server.Main` 后报 JOML `AxisAngle4f.readExternal` 的非法常量池类型；实际输入为 classfile 46.0，新增 Class 常量要求 49，共用写出器仅提升旧版本至 49.0。修正续编成功，当前候选继续重开真实场景；未运行独立消费者。
 
-当前实际场景仍在收尾，尚不将 premain/ModLauncher/Minecraft Main 启动升级为目标停用、世界清理或保存重启通过。`ForkJoinTask$Aux` 待验收未伪造为就绪。客户端 GUI 与真实驱动未在本次头部场景运行，外部旧活栈及未观察私有状态保持未覆盖范围。
+`f627327` 后续已过游戏注册表初始化，真实 EventBus 6.2.33 在变换检查报 `EVENT_DISPATCH_IMAGE_INCOMPLETE` 后退出，未进入世界。实际 JAR 字节码显示三参注册注入正确，完整性校验仍查旧双参；现统一描述符并校验准确 bus/owner/listener 与成功 RETURN，保留原分派和拒绝行为。同期修正 Brigadier 同名注册合并到旧节点时的实际挂载身份，未找到注销节点不再丢登记或误报完成。该批生产源码统一编译成功（35 秒），同一真实 Forge 场景已重开。
+
+该实际场景随后按用户新安排终止，尚不将 premain/ModLauncher/Minecraft Main 启动升级为目标停用、世界清理或保存重启通过。`ForkJoinTask$Aux` 待验收未伪造为就绪。客户端 GUI 与真实驱动未在本次头部场景运行，外部旧活栈及未观察私有状态保持未覆盖范围。
 
 ## 2026-10-18：C 接续——NT 内存传输与私有字段存储
 

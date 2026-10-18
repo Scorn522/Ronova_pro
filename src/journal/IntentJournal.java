@@ -31,7 +31,7 @@ public final class IntentJournal implements AutoCloseable {
     public IntentJournal(Path directory) throws IOException {
         Files.createDirectories(directory);
         // Retain every earlier file verbatim and hold its writer lock for this session.
-        // V3 adds durable subject/work and resource-retirement semantics; old commands are never recoded.
+        // V7 adds actual Mod carrier/handoff semantics; V6 logical frames and all old commands remain verbatim.
         try {
             for(int version=1;version<=VERSION;version++) {
                 var channel=FileChannel.open(directory.resolve("intent-v"+version+".log"),

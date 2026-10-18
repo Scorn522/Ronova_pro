@@ -515,14 +515,22 @@ public final class IoBridge {
         synchronized(LOCK){if(version!=connection.version)return "IO_SOURCE_CHANGED";ResourceBridge.sealIoDescriptor(connection.descriptor,modules);connection.sealed=true;connection.preserved=false;}
         Connection previous=CLOSING.get();CLOSING.set(connection);
         try{
-            if(!connection.closeStarted){
+            boolean close=false;
+            synchronized(LOCK){if(!connection.closeStarted){
+                if(!(root instanceof Channel)&&root.getClass()!=NIO_SOCKET)return "IO_ORIGINAL_CLOSE_UNAVAILABLE";
+                connection.closeStarted=true;close=true;
+            }}
+            if(close){
+                ResourceBridge.releaseEffectStarted();
                 if(root instanceof Channel channel)channel.close();
-                else if(root.getClass()==NIO_SOCKET)invoke(IMPL_CLOSE,root);
-                else return "IO_ORIGINAL_CLOSE_UNAVAILABLE";
-                synchronized(LOCK){connection.closeStarted=true;}
+                else invoke(IMPL_CLOSE,root);
+                // The recorded phase prevents a later poll from invoking the
+                // original close again; only its actual completion is queried.
+                ResourceBridge.releaseStepCompleted();
             }
         }finally{if(previous==null)CLOSING.remove();else CLOSING.set(previous);}
-        synchronized(LOCK){return !connection.closed?"IO_NATIVE_CLOSE_PENDING":connection.active!=0||connection.requests!=0?"IO_OPERATIONS_EXIT_PENDING":"";}
+        String remaining;synchronized(LOCK){remaining=!connection.closed?"IO_NATIVE_CLOSE_PENDING":connection.active!=0||connection.requests!=0?"IO_OPERATIONS_EXIT_PENDING":"";}
+        return remaining.isEmpty()?"":ResourceBridge.releasePending(remaining);
     }
     public static void taskCreated(Object task,Class<?> declaring){
         platform(declaring,"<init>");if(!TASKS.contains(task.getClass()))throw new SecurityException("ACTUAL_ASYNC_TASK_REQUIRED");

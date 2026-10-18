@@ -373,6 +373,23 @@ final class RecoveryImage {
         if(selected.target)image=new CompoundTag();else prune(image,selected);
         return new Filtered(image,locate(image,identities));
     }
+    /** Rebase only an already committed projection's exact original paths. */
+    static Filtered filterPaths(CompoundTag input,List<Selection> all,Set<List<Step>> removed)throws IOException {
+        validate(input);CompoundTag image=copy(input);PathNode selected=new PathNode();
+        for(List<Step> path:removed){
+            if(!(resolve(image,path) instanceof CompoundTag))throw new IOException("RECORD_NOT_COMPOUND");
+            PathNode node=selected;node.include(true);
+            for(Step step:path){node=node.children.computeIfAbsent(step,ignored->new PathNode());node.include(true);}
+            node.target=true;
+        }
+        Map<CompoundTag,UUID> identities=new IdentityHashMap<>();
+        for(Selection selection:all){
+            if(!(resolve(image,selection.path()) instanceof CompoundTag compound))throw new IOException("RECORD_NOT_COMPOUND");
+            identities.put(compound,selection.subject());
+        }
+        if(selected.target)image=new CompoundTag();else prune(image,selected);
+        return new Filtered(image,locate(image,identities));
+    }
     private record CopyFrame(Cursor source,Tag target) { }
     private static CompoundTag copy(CompoundTag root)throws IOException {
         CompoundTag result=new CompoundTag();ArrayDeque<CopyFrame> frames=new ArrayDeque<>();

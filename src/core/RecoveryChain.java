@@ -27,7 +27,8 @@ final class RecoveryChain {
         CompletableFuture<Void> ack;
         String state="WAIT_ORIGINAL_INTENT_ACK";
         List<String> remaining=List.of("INITIAL_QUERY_PENDING");
-        long last=-1;
+        long last=-1,stableSince=-1;
+        String stableDependencies;
         boolean restarted,bodyRetired;
         Work(UUID id,UUID subject,long generation,UUID session,String dimension,UUID entity,UUID incarnation,String hash) {
             this.id=id;this.subject=subject;this.generation=generation;this.session=session;
@@ -106,6 +107,7 @@ final class RecoveryChain {
         if(previous!=null&&previous.authority==authority&&previous.generation==generation&&previous.terminal==terminal)return;
         Qualification next=new Qualification(authority,generation,terminal);qualifications.put(subject,next);
         for(Work item:bySubject.getOrDefault(subject,List.of())) {
+            item.stableSince=-1;item.stableDependencies=null;
             boolean selected=next.terminal&&item.generation==next.generation;
             if(selected) { history.remove(item);active.add(item); }
             else { active.remove(item);history.add(item); }
@@ -141,12 +143,19 @@ final class RecoveryChain {
     private void sample(Work item,long tick) {
         item.ack=runtime.journal.retryRejected(item.intent,item.ack);
         List<String> remaining=remaining(item);
+        if(remaining.isEmpty()){
+            String dependencies=dependencies(item);
+            if(item.last<0||tick<item.last||tick-item.last>10||!Objects.equals(item.stableDependencies,dependencies)){
+                item.stableSince=tick;item.stableDependencies=dependencies;
+            }
+            if(tick-item.stableSince<20)remaining.add("KNOWN_SOURCE_STABILITY_WINDOW_PENDING");
+        }else {item.stableSince=-1;item.stableDependencies=null;}
         item.last=tick;
         item.remaining=List.copyOf(remaining);
         item.state=remaining.isEmpty()?"KNOWN_RECOVERY_CHAIN_SETTLED":"RECOVERY_SOURCE_PENDING";
     }
-    // Live aggregator only: no stability window, success receipt, or invalidation receipt.
-    // Queries retain live readback, but never qualify/discover work or create chain receipts.
+    // The window retains current dependency versions only. It creates no success/field/task receipts.
+    // Queries retain live readback, but never qualify/discover work or advance the sampling window.
     private List<String> remaining(Work item) {
         List<String> remaining=new ArrayList<>();
         var authority=runtime.subjects.get(item.subject);
@@ -184,9 +193,23 @@ final class RecoveryChain {
             if(members.size()>1||related.generation==item.generation)result.add(related.id);
         return result;
     }
+    private String dependencies(Work item){
+        var authority=runtime.canonicalSubject(item.subject);
+        StringBuilder key=new StringBuilder().append(authority==null?0:authority.generation).append(':')
+                .append(authority!=null&&authority.terminal).append(':').append(new TreeSet<>(runtime.groupTargets(item.subject)))
+                .append('|').append(runtime.recoverySources.dependencies(item.subject));
+        for(UUID operation:new TreeSet<>(operations(item)))key.append('|').append(operation).append(':')
+                .append(runtime.recoveryTasks.dependencies(operation,item.subject)).append(':')
+                .append(runtime.recoveryRecords.dependencies(operation,item.subject)).append(':')
+                .append(runtime.recoveryStorage.dependencies(operation));
+        return key.toString();
+    }
     List<String> status(UUID operation) {
         Work item=work.get(operation);if(item==null)return List.of("NO_VERSIONED_KNOWN_RECOVERY_CHAIN");
         List<String> remaining=remaining(item);
+        long now=Integer.toUnsignedLong(runtime.server.getTickCount());
+        if(remaining.isEmpty()&&(item.stableSince<0||now<item.last||now-item.last>10||now-item.stableSince<20
+                ||!Objects.equals(item.stableDependencies,dependencies(item))))remaining.add("KNOWN_SOURCE_STABILITY_WINDOW_PENDING");
         String visible=remaining.isEmpty()?"KNOWN_RECOVERY_CHAIN_SETTLED":"RECOVERY_SOURCE_PENDING";
         List<String> result=new ArrayList<>();
         result.add(visible.equals("KNOWN_RECOVERY_CHAIN_SETTLED")?"已知恢复链已处置":"恢复源仍待处理");

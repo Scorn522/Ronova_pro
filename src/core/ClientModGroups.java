@@ -20,22 +20,26 @@ public final class ClientModGroups {
     private static final ArrayDeque<Object> stock=new ArrayDeque<>();
     private static ClientLevel world;
     private static boolean bootLoaded,rescan;
-    private static java.lang.reflect.Method origins;
+    private static java.lang.reflect.Method origins,unknownOrigin,moduleQuery;
     private static final class Run {
         final ProNetwork.ModGroup message;final Set<Module> modules;
         int cleared,protectedCount,failed;String code;boolean pending=true;
         final Map<net.minecraft.client.sounds.ChannelAccess.ChannelHandle,SoundInstance> audio=new IdentityHashMap<>();
         Run(ProNetwork.ModGroup message,Module[] modules,String code){this.message=message;this.modules=Set.of(modules);this.code=code;
-            if(!code.contains("FAILED=0")&&!code.contains("GROUP_FAILURES=0"))failed++;}
+            if(code.contains("MODULE_POLICY_PARTIAL")||!code.contains("FAILED=0")&&!code.contains("GROUP_FAILURES=0"))failed++;}
         String state(){return "CODE="+code+";STOCK="+(pending?"PENDING":"ENUMERATED")+";CLEARED="+cleared+";PROTECTED="+protectedCount+";FAILED="+failed;}
     }
     private ClientModGroups(){}
     private static Class<?> agent()throws ReflectiveOperationException{return Class.forName("dev.ronova.pro.agent.RecoveryAgent",false,ClassLoader.getSystemClassLoader());}
     private static Module owner(Object value,Set<Module> modules){
-        if(value==null||modules.isEmpty())return null;Module direct=(value instanceof Class<?> type?type:value.getClass()).getModule();
-        if(modules.contains(direct))return direct;
-        try{if(origins==null)origins=Class.forName("dev.ronova.pro.bootstrap.ControlBridge",false,null).getMethod("creationSources",Object.class);
-            for(Module source:(Module[])origins.invoke(null,value))if(modules.contains(source))return source;
+        if(value==null||modules.isEmpty())return null;
+        try{if(moduleQuery==null)moduleQuery=Class.forName("dev.ronova.pro.bootstrap.DefinitionBridge",false,null).getMethod("module",Class.class);
+            Module direct=(Module)moduleQuery.invoke(null,value instanceof Class<?> type?type:value.getClass());if(modules.contains(direct))return direct;
+            if(origins==null){Class<?> bridge=Class.forName("dev.ronova.pro.bootstrap.ControlBridge",false,null);origins=bridge.getMethod("creationSources",Object.class);unknownOrigin=bridge.getMethod("objectSourceUnknown",Object.class);}
+            if(Boolean.TRUE.equals(unknownOrigin.invoke(null,value)))return null;
+            Module[] sources=(Module[])origins.invoke(null,value);if(sources.length==0)return null;
+            for(Module source:sources)if(source==null||!modules.contains(source))return null;
+            return sources[0];
         }catch(ReflectiveOperationException unavailable){/* An unobserved origin grants no authority over a shared carrier. */}
         return null;
     }
@@ -48,8 +52,13 @@ public final class ClientModGroups {
             String[] ids=message.ids().split(",");Class<?> agent=agent();
             String result=message.protect()?String.valueOf(agent.getMethod("protectModIds",String[].class).invoke(null,(Object)ids)):
                 String.valueOf(agent.getMethod("stopModIds",String[].class,String.class).invoke(null,(Object)ids,message.returns()));
-            Module[] modules=(Module[])agent.getMethod("modGroupModules",String[].class).invoke(null,(Object)ids);
-            if(modules.length==0)throw new IllegalStateException("CLIENT_MODULES_NOT_BOUND");
+            Module[] actual=(Module[])agent.getMethod("modGroupModules",String[].class).invoke(null,(Object)ids);
+            List<Module> applied=new ArrayList<>();
+            for(Module module:actual){String state=String.valueOf(agent.getMethod("modGroupState",Module.class).invoke(null,module));
+                if(state.contains(message.protect()?";STATE=PROTECTED":";STATE=STOPPED"))applied.add(module);}
+            Module[] modules=applied.toArray(Module[]::new);
+            if(modules.length==0)throw new IllegalStateException("CLIENT_MODULE_POLICY_NOT_PUBLISHED:"+result);
+            if(modules.length!=actual.length)result+=";MODULE_POLICY_PARTIAL;FAILED=1";
             if(message.protect())protectedModules.addAll(Arrays.asList(modules));
             else{stopped.addAll(Arrays.asList(modules));protectedModules.removeAll(Arrays.asList(modules));}
             Run run=new Run(reply?message:new ProNetwork.ModGroup(message.session(),message.ids(),message.returns(),message.protect()),modules,result);
@@ -61,6 +70,29 @@ public final class ClientModGroups {
         }
     }
     static void disconnected(){runs.entrySet().removeIf(entry->entry.getKey().startsWith("REMOTE:"));stock.clear();world=null;rescan=true;}
+    /** Local opt-in fault isolation uses the same real Mod selection and stop path. */
+    static void isolateFault(Object source){
+        if(source==null||System.getProperty("ronova.pro.clientIsolateMods","").isBlank())return;
+        Minecraft mc=Minecraft.getInstance();
+        if(!mc.isSameThread()){mc.execute(()->isolateFault(source));return;}
+        if(stopped(source))return;
+        Set<String> allowed=new LinkedHashSet<>();
+        for(String raw:System.getProperty("ronova.pro.clientIsolateMods","").split(",")){
+            String id=raw.trim().toLowerCase(Locale.ROOT);if(id.matches("[a-z][a-z0-9_]{1,63}"))allowed.add(id);
+        }
+        Set<String> targets=new LinkedHashSet<>();
+        try{
+            Class<?> api=agent();
+            Module eventOwner=(Module)Class.forName("dev.ronova.pro.bootstrap.ControlBridge",false,null).getMethod("eventListenerModule",Object.class).invoke(null,source);
+            for(var info:net.minecraftforge.fml.ModList.get().getMods())if(allowed.contains(info.getModId())){
+                Set<String> aliases=new LinkedHashSet<>();aliases.add(info.getModId());
+                if(info.getOwningFile()!=null)for(var alias:info.getOwningFile().getMods())aliases.add(alias.getModId());
+                Module[] modules=(Module[])api.getMethod("modGroupModules",String[].class).invoke(null,(Object)aliases.toArray(String[]::new));
+                if(owner(source,new HashSet<>(Arrays.asList(modules)))!=null||eventOwner!=null&&Arrays.asList(modules).contains(eventOwner))targets.addAll(aliases);
+            }
+            if(!targets.isEmpty())apply(new ProNetwork.ModGroup(new UUID(0,0),String.join(",",targets),"default",false),false);
+        }catch(ReflectiveOperationException|RuntimeException|LinkageError failure){System.err.println("RONOVA_CLIENT_GROUP_FAULT_ISOLATION_FAILED:"+failure);}
+    }
     private static void boot(){
         if(bootLoaded)return;bootLoaded=true;
         for(boolean protect:new boolean[]{false,true}){

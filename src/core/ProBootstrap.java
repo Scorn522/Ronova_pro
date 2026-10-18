@@ -71,12 +71,20 @@ public final class ProBootstrap {
     }
     /** Persists the user's complete local selection, including an intentionally empty set. */
     public static synchronized void saveSelection(String[] stopped,String[] protectedIds,Map<String,String> returnModes)throws IOException{
-        Class<?> caller=StackWalker.getInstance(StackWalker.Option.RETAIN_CLASS_REFERENCE).getCallerClass();
+        saveSelection(stopped,protectedIds,returnModes,Map.of(),StackWalker.getInstance(StackWalker.Option.RETAIN_CLASS_REFERENCE).getCallerClass());
+    }
+    public static synchronized void saveSelection(String[] stopped,String[] protectedIds,Map<String,String> returnModes,Map<String,String> carriers)throws IOException{
+        saveSelection(stopped,protectedIds,returnModes,carriers,StackWalker.getInstance(StackWalker.Option.RETAIN_CLASS_REFERENCE).getCallerClass());
+    }
+    private static void saveSelection(String[] stopped,String[] protectedIds,Map<String,String> returnModes,Map<String,String> carriers,Class<?> caller)throws IOException{
         if(caller!=ProRuntime.class)throw new SecurityException("ACTUAL_PRO_RUNTIME_REQUIRED");
         Path directory=Path.of(System.getProperty("ronova.pro.gameDirectory",System.getProperty("user.dir","."))).toAbsolutePath().normalize();
         Path file=directory.resolve("ronova-prelaunch.properties");Properties selection=new Properties();
         if(Files.isRegularFile(file))try(var reader=Files.newBufferedReader(file,java.nio.charset.StandardCharsets.UTF_8)){selection.load(reader);}
         selection.setProperty("stop",selectionIds(stopped));selection.setProperty("protect",selectionIds(protectedIds));
+        Set<String> current=new HashSet<>();current.addAll(Arrays.asList(stopped));current.addAll(Arrays.asList(protectedIds));
+        for(String key:new HashSet<>(selection.stringPropertyNames()))if(key.startsWith("carrier.")&&!current.contains(key.substring("carrier.".length()))&& !selection.getProperty(key).equals("ABSENT"))selection.remove(key);
+        for(String id:current)if(carriers.containsKey(id))selection.setProperty("carrier."+id,carriers.get(id));
         for(String key:new HashSet<>(selection.stringPropertyNames()))if(key.startsWith("returns."))selection.remove(key);
         if(returnModes!=null)for(var entry:returnModes.entrySet()){
             String id=selectionIds(new String[]{entry.getKey()}),mode=entry.getValue();
@@ -86,8 +94,8 @@ public final class ProBootstrap {
         Files.createDirectories(directory);Path pending=Files.createTempFile(directory,"ronova-selection-",".tmp");
         try{
             try(var writer=Files.newBufferedWriter(pending,java.nio.charset.StandardCharsets.UTF_8)){selection.store(writer,"Local Ronova selection for the next game JVM");}
-            try{Files.move(pending,file,StandardCopyOption.ATOMIC_MOVE,StandardCopyOption.REPLACE_EXISTING);}
-            catch(AtomicMoveNotSupportedException unsupported){Files.move(pending,file,StandardCopyOption.REPLACE_EXISTING);}
+            try(var channel=java.nio.channels.FileChannel.open(pending,java.nio.file.StandardOpenOption.WRITE)){channel.force(true);}
+            Files.move(pending,file,StandardCopyOption.ATOMIC_MOVE,StandardCopyOption.REPLACE_EXISTING);
         }finally{Files.deleteIfExists(pending);}
     }
     private static String selectionIds(String[] values)throws IOException{

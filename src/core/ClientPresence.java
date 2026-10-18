@@ -49,6 +49,8 @@ public final class ClientPresence {
     private static volatile Object world;
     private static boolean challengeOverflow,policyOverflowReported;
     private static List<ProNetwork.WorldArea> worldAreas=List.of();
+    private static volatile boolean worldClock;
+    private static boolean applyingWorldClock;
     private static final Set<ProNetwork.WorldBody> worldBodies=new HashSet<>();
     private static final Map<Object,WorldFrame> worldFrames=new WeakIdentityMap<>();
     private static final Map<BlockPos,ClientWorldVisuals.Frame> terrainFrames=new HashMap<>();
@@ -236,6 +238,7 @@ public final class ClientPresence {
     private static void installControls() {
         if(controlsInstalled)return;
         try {
+            WorldStatePolicy.initializeClient(net.minecraft.client.multiplayer.ClientLevel.class);
             var lookup=java.lang.invoke.MethodHandles.lookup();
             ProRuntime.installClientControls(lookup.findStatic(ClientPresence.class,"clientField",java.lang.invoke.MethodType.methodType(boolean.class,Object.class,Class.class,String.class,Object.class)),
                     lookup.findStatic(ClientPresence.class,"clientDispatch",java.lang.invoke.MethodType.methodType(boolean.class,Object.class,String.class,Object.class)),
@@ -245,6 +248,34 @@ public final class ClientPresence {
             ProRuntime.registerClientControlObjects(ClientWorldVisuals.controlObjects());
             controlsInstalled=true;
         }catch(ReflectiveOperationException|RuntimeException unavailable){LOG.log(System.Logger.Level.WARNING,"CLIENT_CONTROL_INSTALL_UNAVAILABLE",unavailable);}
+    }
+    static boolean policyThread(){return Minecraft.getInstance().isSameThread();}
+    private static final class WorldClockGate implements AutoCloseable {
+        private final List<AutoCloseable> gates=new ArrayList<>();
+        WorldClockGate(Level level){this(level,worldClock);}
+        WorldClockGate(Level level,boolean clock){
+            if(!clock||!controlsInstalled||level==null)return;
+            Set<Object> locked=Collections.newSetFromMap(new IdentityHashMap<>());
+            try{
+                locked.add(level);gates.add(ProRuntime.clientPolicyGate(level));
+                boolean added;
+                do{added=false;List<Object> chain=WorldStatePolicy.clientClockChain(level);
+                    if(chain==null)throw new IllegalStateException("CLIENT_WORLD_CLOCK_BACKING_UNSUPPORTED");
+                    for(Object value:chain)if(locked.add(value)){gates.add(ProRuntime.clientPolicyGate(value));added=true;}
+                }while(added);
+            }catch(RuntimeException|Error failure){try{close();}catch(RuntimeException release){failure.addSuppressed(release);}throw failure;}
+        }
+        public void close(){
+            RuntimeException failure=null;
+            for(int i=gates.size()-1;i>=0;i--)try{gates.get(i).close();}catch(Exception unavailable){if(failure==null)failure=new IllegalStateException("CLIENT_WORLD_POLICY_GATE_RELEASE_FAILED",unavailable);else failure.addSuppressed(unavailable);}
+            gates.clear();if(failure!=null)throw failure;
+        }
+    }
+    static boolean worldClockQuery(WorldStatePolicy.Query query){
+        if(!worldClock)return false;Minecraft mc=Minecraft.getInstance();
+        if(applyingWorldClock&&mc.isSameThread()||!activeWorld(mc,mc.level))return false;
+        List<Object> actual=WorldStatePolicy.clientClockChain(mc.level);
+        return WorldStatePolicy.clockMatches(query,actual==null?List.of(mc.level):actual);
     }
     public static void bindLocal(net.minecraft.world.entity.Entity entity) {
         if(ClientModGroups.protectedObject(entity)&&!controlsInstalled)installControls();
@@ -299,6 +330,7 @@ public final class ClientPresence {
         return healthDenied(body,value);
     }
     public static boolean clientField(Object receiver,Class<?> declaring,String field,Object value) {
+        if(WorldStatePolicy.clientClockFieldDenied(receiver,declaring,field,value))return true;
         if(receiver instanceof BlockEntity block&&declaring==BlockEntity.class&&ClientModGroups.protectedObject(block)){
             var raw=(Access.Block)block;
             if(switch(field){case "remove","f_58859_"->Boolean.TRUE.equals(value);case "level","f_58857_"->value!=raw.pro$level();case "worldPosition","f_58858_"->!Objects.equals(value,raw.pro$pos());default->false;})return true;
@@ -464,33 +496,66 @@ public final class ClientPresence {
     static void retireGroupBody(Entity entity){
         Minecraft mc=context();var raw=(Access.EntityState)entity;
         if(mc.level==null||raw.pro$level()!=mc.level||entity==mc.player)return;
-        var level=mc.level;removeLocal(entity);
-        try{if(level.getEntity(raw.pro$id())==entity)level.removeEntity(raw.pro$id(),Entity.RemovalReason.DISCARDED);}
-        finally{
-            // A stopped override cannot keep the actual current lookup/section/tick shares alive.
+        var level=mc.level;Entity originalVehicle=raw.pro$vehicle();List<Entity> originalPassengers=List.copyOf(raw.pro$passengers());
+        List<Throwable> failures=new ArrayList<>();removeLocal(entity);
+        clientGroupStep(failures,()->{if(level.getEntity(raw.pro$id())==entity)level.removeEntity(raw.pro$id(),Entity.RemovalReason.DISCARDED);});
+        // Each real store is independent of a throwing target lifecycle or a
+        // damaged neighboring structure. Keep the original opposite edges.
+        clientGroupStep(failures,()->{
             var manager=(dev.ronova.pro.mixin.ClientModGroupHooks.StorageAccess)((ClientStorage)level).pro$clientEntityStorage();
-            var lookup=(Access.Lookup)manager.pro$lookup();lookup.pro$ids().values().removeIf(value->value==entity);lookup.pro$uuids().values().removeIf(value->value==entity);
+            var lookup=(Access.Lookup)manager.pro$lookup();
+            clientGroupStep(failures,()->removeClientIdentity(lookup.pro$ids().values(),entity));
+            clientGroupStep(failures,()->removeClientIdentity(lookup.pro$uuids().values(),entity));
             var sections=(Access.Sections)manager.pro$sections();
             for(var section:sections.pro$all().values()){
-                var values=(Access.Group)((Access.Section)section).pro$storage();values.pro$all().removeIf(value->value==entity);
-                for(var list:values.pro$classes().values())list.removeIf(value->value==entity);
+                clientGroupStep(failures,()->{var values=(Access.Group)((Access.Section)section).pro$storage();
+                    clientGroupStep(failures,()->removeClientIdentity(values.pro$all(),entity));
+                    for(var list:values.pro$classes().values())clientGroupStep(failures,()->removeClientIdentity(list,entity));});
             }
+        });
+        clientGroupStep(failures,()->{
             var client=(dev.ronova.pro.mixin.ClientModGroupHooks.LevelAccess)level;
             var ticks=(Access.Ticks)client.pro$ticks();ticks.pro$ensureActiveIsNotIterated();
-            ticks.pro$active().values().removeIf(value->value==entity);ticks.pro$passive().values().removeIf(value->value==entity);
-            client.pro$players().removeIf(value->value==entity);
-            client.pro$parts().values().removeIf(value->value==entity);
-            Entity vehicle=raw.pro$vehicle();
-            if(vehicle!=null){var parent=(Access.EntityState)vehicle;parent.pro$passengers(com.google.common.collect.ImmutableList.copyOf(parent.pro$passengers().stream().filter(value->value!=entity).toList()));raw.pro$vehicle(null);}
-            for(Entity child:raw.pro$passengers())if(((Access.EntityState)child).pro$vehicle()==entity)((Access.EntityState)child).pro$vehicle(null);
-            raw.pro$passengers(com.google.common.collect.ImmutableList.of());
-            raw.pro$callback(net.minecraft.world.level.entity.EntityInLevelCallback.NULL);raw.pro$removal(Entity.RemovalReason.DISCARDED);raw.pro$added(false);
-            if(mc.getCameraEntity()==entity)mc.setCameraEntity(mc.player);
-            if(mc.gameRenderer.getMainCamera().getEntity()==entity)mc.gameRenderer.getMainCamera().reset();
-            if(mc.crosshairPickEntity==entity)mc.crosshairPickEntity=null;
-            if(mc.getEntityRenderDispatcher().crosshairPickEntity==entity)mc.getEntityRenderDispatcher().crosshairPickEntity=null;
-            if(mc.hitResult instanceof net.minecraft.world.phys.EntityHitResult hit&&hit.getEntity()==entity)mc.hitResult=null;
+            clientGroupStep(failures,()->{if(ticks.pro$active()!=ticks.pro$iterated())removeClientIdentity(ticks.pro$active().values(),entity);});
+            clientGroupStep(failures,()->{if(ticks.pro$passive()!=ticks.pro$iterated())removeClientIdentity(ticks.pro$passive().values(),entity);});
+            if(ticks.pro$iterated()!=null&&ticks.pro$iterated().values().stream().anyMatch(value->value==entity))throw new IllegalStateException("CLIENT_GROUP_TICK_ITERATION_PENDING");
+        });
+        var client=(dev.ronova.pro.mixin.ClientModGroupHooks.LevelAccess)level;
+        clientGroupStep(failures,()->removeClientIdentity(client.pro$players(),entity));
+        clientGroupStep(failures,()->{
+            var parts=client.pro$parts();for(int key:parts.keySet().toIntArray()){
+                var part=parts.get(key);if(part==null||part!=entity&&((dev.ronova.pro.mixin.BlockGroupHooks.PartAccess)part).pro$parent()!=entity)continue;
+                clientGroupStep(failures,()->{var state=(Access.EntityState)part;state.pro$removal(Entity.RemovalReason.DISCARDED);state.pro$canUpdate(false);state.pro$added(false);
+                    state.pro$callback(net.minecraft.world.level.entity.EntityInLevelCallback.NULL);
+                    if(state.pro$removal()==null)throw new IllegalStateException("CLIENT_MULTIPART_BODY_WRITE_REFUSED");if(parts.get(key)==part)parts.remove(key);});
+            }
+        });
+        Set<Entity> vehicles=Collections.newSetFromMap(new IdentityHashMap<>());if(originalVehicle!=null)vehicles.add(originalVehicle);if(raw.pro$vehicle()!=null)vehicles.add(raw.pro$vehicle());
+        for(Entity vehicle:vehicles)clientGroupStep(failures,()->{var parent=(Access.EntityState)vehicle;
+            parent.pro$passengers(com.google.common.collect.ImmutableList.copyOf(parent.pro$passengers().stream().filter(value->value!=entity).toList()));});
+        Set<Entity> passengers=Collections.newSetFromMap(new IdentityHashMap<>());passengers.addAll(originalPassengers);passengers.addAll(raw.pro$passengers());
+        for(Entity child:passengers)clientGroupStep(failures,()->{if(((Access.EntityState)child).pro$vehicle()==entity)((Access.EntityState)child).pro$vehicle(null);});
+        clientGroupStep(failures,()->raw.pro$vehicle(null));clientGroupStep(failures,()->raw.pro$passengers(com.google.common.collect.ImmutableList.of()));
+        clientGroupStep(failures,()->raw.pro$callback(net.minecraft.world.level.entity.EntityInLevelCallback.NULL));
+        clientGroupStep(failures,()->raw.pro$removal(Entity.RemovalReason.DISCARDED));clientGroupStep(failures,()->raw.pro$canUpdate(false));clientGroupStep(failures,()->raw.pro$added(false));
+        clientGroupStep(failures,()->{if(raw.pro$removal()==null||raw.pro$canUpdate()||raw.pro$vehicle()!=null||!raw.pro$passengers().isEmpty())throw new IllegalStateException("CLIENT_GROUP_BODY_WRITE_REFUSED");});
+        clientGroupStep(failures,()->{if(mc.getCameraEntity()==entity)mc.setCameraEntity(mc.player);});
+        clientGroupStep(failures,()->{if(mc.gameRenderer.getMainCamera().getEntity()==entity)mc.gameRenderer.getMainCamera().reset();});
+        clientGroupStep(failures,()->{if(mc.crosshairPickEntity==entity)mc.crosshairPickEntity=null;});
+        clientGroupStep(failures,()->{if(mc.getEntityRenderDispatcher().crosshairPickEntity==entity)mc.getEntityRenderDispatcher().crosshairPickEntity=null;});
+        clientGroupStep(failures,()->{if(mc.hitResult instanceof net.minecraft.world.phys.EntityHitResult hit&&hit.getEntity()==entity)
+            mc.hitResult=net.minecraft.world.phys.BlockHitResult.miss(hit.getLocation(),net.minecraft.core.Direction.UP,BlockPos.containing(hit.getLocation()));});
+        if(!failures.isEmpty()){
+            IllegalStateException failure=new IllegalStateException("CLIENT_GROUP_BODY_CLEANUP_PARTIAL",failures.get(0));
+            for(int i=1;i<failures.size();i++)failure.addSuppressed(failures.get(i));throw failure;
         }
+    }
+    private static void clientGroupStep(List<Throwable> failures,Runnable action){
+        try{action.run();}catch(RuntimeException|LinkageError failure){failures.add(failure);}
+    }
+    private static void removeClientIdentity(Collection<?> values,Object target){
+        values.removeIf(value->value==target);
+        for(Object value:values)if(value==target)throw new IllegalStateException("CLIENT_GROUP_RECORD_REMOVAL_REFUSED");
     }
     private static void applyTerminalMirrors(Minecraft mc) {
         if(awaitingScope||mc.level==null)return;
@@ -537,7 +602,12 @@ public final class ClientPresence {
     }
     public static boolean interactionDenied(net.minecraft.world.entity.Entity entity) {return renderDenied(entity);}
     private static String levelDimension(Minecraft mc) { return mc.level==null?null:mc.level.dimension().location().toString(); }
-    private static void clearWorldPolicy(){ClientWorldVisuals.clearFrames();worldAreas=List.of();worldBodies.clear();worldFrames.clear();terrainFrames.clear();weatherFrames.clear();worldRuleClocks.clear();rendererClock=null;weatherVertices=null;worldMirrorScope=-1;}
+    private static void clearWorldPolicy(){
+        ClientWorldVisuals.clearFrames();
+        try(var ignored=new WorldClockGate(Minecraft.getInstance().level)){
+            worldAreas=List.of();worldClock=false;worldBodies.clear();worldFrames.clear();terrainFrames.clear();weatherFrames.clear();worldRuleClocks.clear();rendererClock=null;weatherVertices=null;worldMirrorScope=-1;
+        }
+    }
     private static void clearWorldPages(){worldPages.clear();gatheringWorldRevision=-1;}
     public static void beginWorldHandoff(Object listener){
         Minecraft mc=context();if(mc.getConnection()!=listener)return;
@@ -553,29 +623,35 @@ public final class ClientPresence {
         if(packet.revision()!=gatheringWorldRevision){clearWorldPages();gatheringWorldRevision=packet.revision();}
         if(!worldPages.isEmpty()){
             ProNetwork.WorldPolicy first=worldPages.values().iterator().next();
-            if(first.pages()!=packet.pages()||first.gameTime()!=packet.gameTime()||first.dayTime()!=packet.dayTime()||first.daylight()!=packet.daylight()){clearWorldPages();gatheringWorldRevision=packet.revision();}
+            if(first.pages()!=packet.pages()||first.gameTime()!=packet.gameTime()||first.dayTime()!=packet.dayTime()||first.daylight()!=packet.daylight()||first.clock()!=packet.clock()){clearWorldPages();gatheringWorldRevision=packet.revision();}
         }
         worldPages.put(packet.page(),packet);if(worldPages.size()!=packet.pages())return;
         List<ProNetwork.WorldArea> areas=new ArrayList<>();List<ProNetwork.WorldBody> bodies=new ArrayList<>();
         for(int page=0;page<packet.pages();page++){ProNetwork.WorldPolicy part=worldPages.get(page);if(part==null)return;areas.addAll(part.areas());bodies.addAll(part.bodies());}
-        worldRevision=packet.revision();pendingWorld=new ProNetwork.WorldPolicy(packet.session(),packet.scope(),packet.dimension(),packet.revision(),packet.gameTime(),packet.dayTime(),packet.daylight(),0,1,List.copyOf(areas),List.copyOf(bodies));
-        clearWorldPages();applyPendingWorld(mc);installControls();
+        worldRevision=packet.revision();pendingWorld=new ProNetwork.WorldPolicy(packet.session(),packet.scope(),packet.dimension(),packet.revision(),packet.gameTime(),packet.dayTime(),packet.daylight(),packet.clock(),0,1,List.copyOf(areas),List.copyOf(bodies));
+        clearWorldPages();installControls();applyPendingWorld(mc);
     }
     private static void applyPendingWorld(Minecraft mc){
         ProNetwork.WorldPolicy packet=pendingWorld;
         if(packet==null||awaitingScope||mc.level==null||connection==null||!Objects.equals(policy.session(),packet.session())
                 ||policy.scope()!=packet.scope()||!Objects.equals(levelDimension(mc),packet.dimension()))return;
-        boolean wasClock=worldAreas.stream().anyMatch(ProNetwork.WorldArea::clock);
-        worldAreas=List.copyOf(packet.areas());worldBodies.clear();worldBodies.addAll(packet.bodies());worldMirrorScope=packet.scope();
+        if(!controlsInstalled){installControls();if(!controlsInstalled)return;}
+        boolean wasClock=worldClock;var level=mc.level;
         float receivedClock=mc.levelRenderer.getTicks()+mc.getFrameTime();
-        Set<UUID> currentRules=new HashSet<>();for(ProNetwork.WorldArea area:worldAreas){currentRules.add(area.rule());worldRuleClocks.putIfAbsent(area.rule(),receivedClock);}
-        worldRuleClocks.keySet().retainAll(currentRules);
-        boolean clock=worldAreas.stream().anyMatch(ProNetwork.WorldArea::clock);
+        boolean clock=packet.clock();
+        try(var ignored=new WorldClockGate(level,clock||wasClock)){
+            if(mc.level!=level||pendingWorld!=packet)return;
+            applyingWorldClock=true;
+            try{if(clock||wasClock)WorldStatePolicy.applyClientClock(level,packet.gameTime(),packet.dayTime());}
+            finally{applyingWorldClock=false;}
+            worldAreas=List.copyOf(packet.areas());worldBodies.clear();worldBodies.addAll(packet.bodies());worldMirrorScope=packet.scope();worldClock=clock;
+            Set<UUID> currentRules=new HashSet<>();for(ProNetwork.WorldArea area:worldAreas){currentRules.add(area.rule());worldRuleClocks.putIfAbsent(area.rule(),receivedClock);}
+            worldRuleClocks.keySet().retainAll(currentRules);
+        }catch(ReflectiveOperationException unavailable){throw new IllegalStateException("CLIENT_WORLD_CLOCK_POLICY_UNAVAILABLE",unavailable);}
         if(!clock)rendererClock=null;
         else if(!wasClock)rendererClock=receivedClock;
         if(clock||wasClock){
-            mc.level.setGameTime(packet.gameTime());mc.level.setDayTime(packet.dayTime());
-            mc.level.getGameRules().getRule(net.minecraft.world.level.GameRules.RULE_DAYLIGHT).set(packet.daylight(),null);
+            level.getGameRules().getRule(net.minecraft.world.level.GameRules.RULE_DAYLIGHT).set(packet.daylight(),null);
         }
         worldFrames.entrySet().removeIf(entry->{
             if(selectedWorldObject(mc,entry.getKey()))return false;
@@ -593,7 +669,7 @@ public final class ClientPresence {
     private static boolean activeWorld(Minecraft mc,Level level){return level!=null&&!awaitingScope&&connection!=null&&level==mc.level&&worldMirrorScope==policy.scope()&&Objects.equals(policy.dimension(),levelDimension(mc));}
     private static boolean selectedWorldPosition(BlockPos pos){for(ProNetwork.WorldArea area:worldAreas)if(area.contains(pos))return true;return false;}
     public static boolean worldFrozen(Level level,BlockPos pos){Minecraft mc=context();return pos!=null&&activeWorld(mc,level)&&selectedWorldPosition(pos);}
-    public static boolean worldClockFrozen(Level level){Minecraft mc=context();return activeWorld(mc,level)&&worldAreas.stream().anyMatch(ProNetwork.WorldArea::clock);}
+    public static boolean worldClockFrozen(Level level){Minecraft mc=context();return activeWorld(mc,level)&&worldClock;}
     private static boolean selectedEntity(Minecraft mc,Entity entity){
         if(entity==null)return false;Access.EntityState state=(Access.EntityState)entity;
         if(state.pro$level()!=mc.level||mc.level==null||(mc.level.getEntity(state.pro$id())!=entity&&mc.player!=entity))return false;

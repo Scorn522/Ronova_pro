@@ -34,7 +34,7 @@ final class RecoveryTasks implements AutoCloseable {
         final Method retireTimer,timerEnded,schedulerDisposition,retireScheduler,schedulerEnded,realScheduler,drainAccepted,timerTaskRetired;
         ResourceMethods(Class<?> definition)throws ReflectiveOperationException {
             this.definition=definition;
-            retireTimer=definition.getMethod("retireTimer",Object.class,Module[].class);timerEnded=definition.getMethod("timerResourceEnded",Object.class,Module[].class);
+            retireTimer=definition.getMethod("retireTimer",Object.class,Module[].class,boolean.class);timerEnded=definition.getMethod("timerResourceEnded",Object.class,Module[].class);
             schedulerDisposition=definition.getMethod("schedulerDisposition",Object.class,Module[].class);retireScheduler=definition.getMethod("retireScheduler",Object.class,Module[].class);
             schedulerEnded=definition.getMethod("schedulerResourceEnded",Object.class);realScheduler=definition.getMethod("realScheduler",Object.class);
             drainAccepted=definition.getMethod("schedulerDrainAccepted",Object.class,Object.class);timerTaskRetired=definition.getMethod("timerTaskRetired",Object.class);
@@ -552,11 +552,11 @@ final class RecoveryTasks implements AutoCloseable {
             boolean first;
             synchronized(origins) {
                 UUID prior=origins.get(object);
-                if(prior!=null&&!prior.equals(subject)) {
+                if(prior!=null&&!prior.equals(subject)&&runtime.canonicalSubject(prior)!=runtime.canonicalSubject(subject)) {
                     sharedOrigins.add(object);
-                    recordGap("CONFLICTING_TASK_ORIGIN");return;
+                    synchronized(workerBindings){Set<UUID> related=new HashSet<>(workerBindings.getOrDefault(object,Set.of()));related.add(prior);related.add(subject);workerBindings.put(object,Set.copyOf(related));}
                 }
-                origins.put(object,subject);first=prior==null;
+                if(prior==null)origins.put(object,subject);first=prior==null;
             }
             List<CloneLink> links;
             synchronized(captureLock) {links=first?List.copyOf(clones.getOrDefault(object,List.of())):List.of();}
@@ -574,14 +574,23 @@ final class RecoveryTasks implements AutoCloseable {
     void groupObserved(Object object,Object scheduler,UUID subject) {
         groupObserved(object,scheduler,subject,null);
     }
+    void groupSource(Object object,ProRuntime.Subject group)throws ReflectiveOperationException{
+        if(runtime.groupSubject(object)!=group)return;
+        synchronized(LISTENERS){if(tasks.containsKey(object)||pendingRoots.containsKey(object)||retiredObjects.containsKey(object))return;}
+        Object scheduler=bridge.getMethod("taskScheduler",Object.class).invoke(null,object);
+        groupObserved(object,scheduler,group.id);
+    }
     private void groupObserved(Object object,Object scheduler,UUID subject,Object observation) {
         if(object==null)return;
         OwnerRegistration published=reserveOwner();if(published==null)return;
         try {
             synchronized(origins){
                 UUID previous=origins.get(object);
-                if(previous!=null&&runtime.canonicalSubject(previous)!=runtime.canonicalSubject(subject)) {sharedOrigins.add(object);recordGap("CONFLICTING_GROUP_TASK_ORIGIN");return;}
-                origins.put(object,subject);
+                if(previous!=null&&runtime.canonicalSubject(previous)!=runtime.canonicalSubject(subject)) {
+                    sharedOrigins.add(object);
+                    synchronized(workerBindings){Set<UUID> related=new HashSet<>(workerBindings.getOrDefault(object,Set.of()));related.add(previous);related.add(subject);workerBindings.put(object,Set.copyOf(related));}
+                }
+                if(previous==null)origins.put(object,subject);
             }
             Object[] row=new Object[]{11,object,scheduler,null,observation,Thread.currentThread(),System.nanoTime(),0L,
                     published.registration,published.epoch,0L};
@@ -616,13 +625,14 @@ final class RecoveryTasks implements AutoCloseable {
             try{
                 boolean ended;
                 if(scheduler instanceof java.util.Timer){
-                    @SuppressWarnings("unchecked") List<Runnable> removed=(List<Runnable>)methods.retireTimer.invoke(null,scheduler,(Object)modules);
+                    @SuppressWarnings("unchecked") List<Runnable> removed=(List<Runnable>)methods.retireTimer.invoke(null,scheduler,(Object)modules,runtime.groupDurable(group.id));
                     schedulerDrained(scheduler,removed,group);
                     ended=Boolean.TRUE.equals(methods.timerEnded.invoke(null,scheduler,(Object)modules));
                 }else{
                     String disposition=(String)methods.schedulerDisposition.invoke(null,scheduler,(Object)modules);
                     if(disposition.equals("SHARED")){pending.remove(scheduler);continue;}
                     if(!disposition.equals("PRIVATE"))continue;
+                    if(!runtime.groupDurable(group.id))continue;
                     @SuppressWarnings("unchecked") List<Runnable> removed=(List<Runnable>)methods.retireScheduler.invoke(null,scheduler,(Object)modules);
                     schedulerDrained(scheduler,removed,group);
                     ended=Boolean.TRUE.equals(methods.schedulerEnded.invoke(null,scheduler));
@@ -773,10 +783,14 @@ final class RecoveryTasks implements AutoCloseable {
             else {Object queue=resources.queue;if(queue==null||!supportedQueue(queue))return false;required=FUTURE_QUEUE_BOUNDARIES.get(queue.getClass().getName());}
         } else {
             if(boundarySnapshot==null||!exactFuture(task.object))return false;
-            Object queue=resources.queue;if(queue==null||!supportedQueue(queue))return false;
+            Object queue=resources.queue;
+            if(task.object.getClass()==FutureTask.class&&task.scheduler==null){required=List.of(FUTURE_BOUNDARIES);}
+            else {
+            if(queue==null||!supportedQueue(queue))return false;
             boolean scheduled=task.object.getClass()!=FutureTask.class;
             if(scheduled&&(task.scheduler==null||task.scheduler.getClass()!=ScheduledThreadPoolExecutor.class))return false;
             required=(scheduled?SCHEDULED_QUEUE_BOUNDARIES:FUTURE_QUEUE_BOUNDARIES).get(queue.getClass().getName());
+            }
         }
         boolean same=task.backendRequirements.equals(required);
         if(!same) {task.backendRequirements=required;task.requiredBoundaries=required.toArray(String[]::new);task.backendImage=null;}
@@ -958,6 +972,11 @@ final class RecoveryTasks implements AutoCloseable {
         else captureEpochs.put(subject,prior+1);
     }
     private boolean capturePending() {return pendingCaptures.peek()!=null||events.peek()!=null;}
+    private boolean capturePending(Set<UUID> targets){
+        for(PendingCapture pending:pendingCaptures)if(pending.event.subjects.isEmpty()||!Collections.disjoint(pending.event.subjects,targets))return true;
+        for(Capture event:events)if(event.subjects.isEmpty()||!Collections.disjoint(event.subjects,targets))return true;
+        return false;
+    }
     /** Root resolution never runs on the task callback or under TAGS/GRAPH/LISTENERS. */
     private void resolveCaptures(int budget) {
         for(int count=0;count<budget;count++) {
@@ -1365,8 +1384,9 @@ final class RecoveryTasks implements AutoCloseable {
                 case 10 -> { /* A normal caller's cancel is not our disposal receipt. */ }
                 case 11 -> {
                     task.creationObserved=true;task.asynchronousCompletion|=event.hasExecutor;
+                    ProRuntime.Subject owner=runtime.groupAuthority(event.subjects);
+                    if(task.result&&owner!=null&&runtime.groupSubject(task.object)==owner)task.ownedResult=true;
                     if(event.invocation==SCHEDULER_DRAIN){
-                        ProRuntime.Subject owner=runtime.groupAuthority(event.subjects);
                         if(owner==null||runtime.groupSubject(task.object)!=owner)recordGap("SCHEDULER_DRAIN_GROUP_CHANGED");
                         else{
                             drainedTasks.put(task.object,owner);task.queueRemoved=true;
@@ -1599,10 +1619,17 @@ final class RecoveryTasks implements AutoCloseable {
         waitersReleased(task); // Observe original waiter-node bindings before cancellation unlinks them.
         if(!task.cancelAccepted) {
             // false is deliberate: never interrupt a shared worker.
-            if(!queueGuarded(task,()->task.cancelAccepted=future.cancel(false)||future.isCancelled())) {
+            Runnable cancel=()->task.cancelAccepted=future.cancel(false)||future.isCancelled();
+            if(!(task.scheduler==null?guarded(task,cancel):queueGuarded(task,cancel))) {
                 resetWindow(task,"CANCEL_GATE_REVOKED");return;
             }
             if(!task.cancelAccepted&&!future.isDone()) { resetWindow(task,"CANCEL_UNCONFIRMED");return; }
+        }
+        if(task.scheduler==null){
+            // Cancellation and waiter wakeup do not require an invented queue owner.
+            // Completion still needs the actual publication/queue reference to be located.
+            task.callableReleased=callableReleased(task.object);waitersReleased(task);
+            resetWindow(task,"FUTURE_QUEUE_OWNER_UNOBSERVED");return;
         }
         if(!task.executions.isEmpty()||!task.dispatches.isEmpty()||!task.submissions.isEmpty()||!task.workerReferences.isEmpty()) {
             resetWindow(task,"WAIT_ACTUAL_EXECUTION_AND_CALLBACK_EXIT");return;
@@ -1924,12 +1951,12 @@ final class RecoveryTasks implements AutoCloseable {
     private void cancelOwnedResult(Task task)throws ReflectiveOperationException {
         if(!task.ownedResult||task.object.getClass()!=CompletableFuture.class)return;
         Set<Task> actual=producers.getOrDefault(task.object,Set.of());
-        if(actual.isEmpty())return;
+        if(actual.isEmpty()&&(!task.creationObserved||runtime.groupSubject(task.object)!=runtime.canonicalSubject(task.authority.id)))return;
         for(Task producer:actual)if(producer.authority==null||runtime.canonicalSubject(producer.authority.id)!=runtime.canonicalSubject(task.authority.id)||!qualified(producer)
                 ||!producer.executions.isEmpty()||!producer.dispatches.isEmpty()
                 ||!(producer.inline&&Boolean.TRUE.equals(inlineClosed.invoke(null,producer.object))
                     ||producer.completion&&producer.admissionReleased&&producer.callbackFieldsReleased))return;
-        if(task.resultCancelRecord==null)task.resultCancelRecord=PREFIX+"\tRESULT_CANCEL_INTENT\t"+task.id+"\t"+task.operation+"\t"+runtime.session+"\tEXACT_OBSERVED_RESULT_ALL_PRODUCERS_CLOSED";
+        if(task.resultCancelRecord==null)task.resultCancelRecord=PREFIX+"\tRESULT_CANCEL_INTENT\t"+task.id+"\t"+task.operation+"\t"+runtime.session+"\tEXACT_GROUP_CREATED_RESULT_OR_ALL_OBSERVED_PRODUCERS_CLOSED";
         task.resultCancelAck=task.resultCancelAck==null?runtime.journal.append(task.resultCancelRecord):runtime.journal.retryRejected(task.resultCancelRecord,task.resultCancelAck);
         if(!confirmed(task.resultCancelAck)||task.resultCancellationAttempted)return;
         var lookup=java.lang.invoke.MethodHandles.privateLookupIn(CompletableFuture.class,java.lang.invoke.MethodHandles.lookup());
@@ -2423,7 +2450,7 @@ final class RecoveryTasks implements AutoCloseable {
             if(!gap.isEmpty())out.add(gap);
             if(!transientIssue.isEmpty())out.add("TASK_TRANSIENT:"+transientIssue);
             Set<UUID> targets=subject==null?Set.of():runtime.groupTargets(subject);
-            if(!pendingCaptures.isEmpty()||(subject==null?!events.isEmpty():events.stream().anyMatch(event->!Collections.disjoint(event.subjects,targets))))out.add("TASK_EVIDENCE_PENDING_MERGE");
+            if(subject==null?capturePending():capturePending(targets))out.add("TASK_EVIDENCE_PENDING_MERGE");
             for(var entry:captureGaps.entrySet()) {
                 CaptureGap loss=entry.getValue();Task task=tasks.get(entry.getKey());
                 if(task!=null&&operation.equals(task.operation)||!Collections.disjoint(loss.subjects,targets))
@@ -2600,13 +2627,14 @@ final class RecoveryTasks implements AutoCloseable {
     }
     String dependencies(UUID operation,UUID subject) {
         synchronized(LISTENERS) {
-            StringBuilder key=new StringBuilder(gap).append(':').append(captureEpochs.getOrDefault(subject,0L));
-            if(!pendingCaptures.isEmpty())key.append("|ROOTS_PENDING:").append(changes.get());
             Set<UUID> targets=runtime.groupTargets(subject);
+            StringBuilder key=new StringBuilder(gap);
+            for(UUID target:new TreeSet<>(targets))key.append(':').append(target).append(':').append(captureEpochs.getOrDefault(target,0L));
+            if(capturePending(targets))key.append("|ROOTS_PENDING");
             for(var entry:captureGaps.entrySet())if(!Collections.disjoint(entry.getValue().subjects,targets))
                 key.append("|CAPTURE_GAP:").append(System.identityHashCode(entry.getKey())).append(':').append(entry.getValue().reason);
             var rows=new java.util.TreeSet<String>();
-            for(Task task:tasks.values())if(operation.equals(task.operation)||task.subjects.contains(subject))
+            for(Task task:tasks.values())if(operation.equals(task.operation)||!Collections.disjoint(task.subjects,targets))
                 rows.add(task.id+":"+task.revision+":"+task.operation+":"+task.qualification+":"+task.state+":"+task.children.size());
             for(String row:rows)key.append('|').append(row);
             return key.toString();

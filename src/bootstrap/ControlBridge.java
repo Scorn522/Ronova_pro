@@ -1725,11 +1725,20 @@ public final class ControlBridge {
     public static Object beginOwnStaticFieldMutation(double value,String signature){return staticFieldMutation(Double.valueOf(value),WALKER.getCallerClass(),signature);}
     public static Object beginStaticFieldMutation(double value,Class<?> symbolic,String signature){return staticFieldMutation(Double.valueOf(value),symbolic,signature);}
     private static boolean fieldMutationReceiptRequired(Object target,Class<?> declaring){
-        if(guards!=null||stoppedModules.length!=0||protectedModules.length!=0)return true;
+        // A policy for another Mod is not a policy for this receiver. Keep
+        // exact protected/stopped targets and live stopped callers on the
+        // original gated path, without serializing unrelated JVM writes.
+        Module owner=objectModule(target),declaration=declaring==null?null:DefinitionBridge.module(declaring);
+        if(modProtected(owner)||modStopped(owner)||modProtected(declaration)||modStopped(declaration)
+                ||stoppedInvocation())return true;
+        Guards current=guards;
+        if(current!=null)for(UnsafeField field:current.unsafeFields())
+            if(field.declaring().isInstance(target))return true;
         if(ownState(declaring)||ownState(target.getClass())||controlled(target))return true;
         if(SourceMapBridge.holderRegistered(target)||SourceMapBridge.carrierRegistered(target))return true;
-        if(target instanceof Map<?,?>||target instanceof Collection<?>||primitiveSourceIndex(target)
-                ||ResourceBridge.critical(target)||target!=declaring&&ResourceBridge.critical(declaring))return true;
+        if(CodeSourceBridge.fieldMutationTracked(declaring))return true;
+        if(BackingBridge.known(target)||ResourceBridge.critical(target)
+                ||target!=declaring&&ResourceBridge.critical(declaring))return true;
         Class<?> type=target.getClass();
         if(target instanceof java.util.concurrent.ForkJoinPool||target instanceof java.util.concurrent.ForkJoinTask<?>[]
                 ||type.getClassLoader()==null&&(type.getName().equals("java.util.concurrent.ForkJoinPool$WorkQueue")
@@ -1746,9 +1755,9 @@ public final class ControlBridge {
         Object target=receiver==null?declaring:receiver;
         if(!fieldMutationReceiptRequired(target,declaring)){
             if(!fieldWriteAllowed(target,declaring,name,value))return Boolean.FALSE;
-            // Never retain an empty-policy verdict. A first policy publication
-            // during the query returns this write to the existing gated path.
-            if(guards==null&&stoppedModules.length==0&&protectedModules.length==0)return null;
+            // Re-read the actual target after the live policy query. A newly
+            // selected receiver or publication must use its existing gate.
+            if(!fieldMutationReceiptRequired(target,declaring))return null;
         }
         java.util.concurrent.locks.ReentrantLock gate=fieldGate(target);gate.lock();
         Object receipt=memoryReceipt(gate,target);
@@ -1792,8 +1801,7 @@ public final class ControlBridge {
     public static Object beginMemoryMutation(Object receiver) {
         if(WALKER.getCallerClass()!=BackingBridge.class&&!coreWriter()&&!NativeControl.memoryMutationBoundary(receiver))
             throw new SecurityException("ACTUAL_MEMORY_MUTATION_BOUNDARY_REQUIRED");
-        if(receiver!=null&&!fieldMutationReceiptRequired(receiver,receiver.getClass())
-                &&guards==null&&stoppedModules.length==0&&protectedModules.length==0)return null;
+        if(receiver!=null&&!fieldMutationReceiptRequired(receiver,receiver.getClass()))return null;
         java.util.concurrent.locks.ReentrantLock gate=fieldGate(receiver);gate.lock();
         return memoryReceipt(gate,receiver);
     }
@@ -1802,8 +1810,7 @@ public final class ControlBridge {
             throw new SecurityException("ACTUAL_MEMORY_MUTATION_BOUNDARY_REQUIRED");
         // BackingBridge still checks the actual element immediately before its
         // original store; a null receipt only omits an unneeded receiver lock.
-        if(receiver!=null&&!fieldMutationReceiptRequired(receiver,receiver.getClass())
-                &&guards==null&&stoppedModules.length==0&&protectedModules.length==0)return null;
+        if(receiver!=null&&!fieldMutationReceiptRequired(receiver,receiver.getClass()))return null;
         java.util.concurrent.locks.ReentrantLock gate=fieldGate(receiver);gate.lock();
         try{return new FieldMutation(gate,receiver);}
         catch(RuntimeException|Error failure){gate.unlock();throw failure;}
@@ -1898,8 +1905,7 @@ public final class ControlBridge {
         Object target=statik?declaring:receiver;
         // The reflection boundary still invokes reflectFieldWrite with the
         // actual proposed value immediately before its original FieldAccessor.
-        if(!fieldMutationReceiptRequired(target,declaring)
-                &&guards==null&&stoppedModules.length==0&&protectedModules.length==0)return null;
+        if(!fieldMutationReceiptRequired(target,declaring))return null;
         java.util.concurrent.locks.ReentrantLock gate=fieldGate(target);gate.lock();
         return memoryReceipt(gate,target);
     }
@@ -2122,21 +2128,34 @@ public final class ControlBridge {
         if(guards==null||WALKER.getCallerClass().getNestHost()!=guards.owner())throw new SecurityException("POLICY_GATE_OWNER");
         endFieldMutation(token);
     }
-    static final ClassValue<java.util.concurrent.ConcurrentHashMap<String,Class<?>>> FIELD_DECLARING=
+    // ClassValue ties declaration metadata to the symbolic Class identity and its unload lifetime.
+    // Separate name/descriptor indexes reuse the woven operands without allocating a joined signature.
+    static final ClassValue<java.util.concurrent.ConcurrentHashMap<String,java.util.concurrent.ConcurrentHashMap<String,Class<?>>>> FIELD_DECLARING=
             new ClassValue<>() {
-                @Override protected java.util.concurrent.ConcurrentHashMap<String,Class<?>> computeValue(Class<?> type) {
-                    return new java.util.concurrent.ConcurrentHashMap<>();
+                @Override protected java.util.concurrent.ConcurrentHashMap<String,java.util.concurrent.ConcurrentHashMap<String,Class<?>>> computeValue(Class<?> type) {
+                    var fields=new java.util.concurrent.ConcurrentHashMap<String,java.util.concurrent.ConcurrentHashMap<String,Class<?>>>();
+                    fieldDeclaringControls(this,fields);return fields;
                 }
             };
+    private static void fieldDeclaringControls(Object... roots){
+        // This cache needs only its own weak control identities and backing publications.
+        try{CodeSourceBridge.agentControls(roots);}
+        catch(RuntimeException|Error failure){controlCaptureHealthy=false;throw failure;}
+    }
     static Class<?> actualFieldOwner(Class<?> symbolic,String name,String descriptor) {
         if(symbolic==null||name==null||descriptor==null)return null;
-        String key=name+'\u0000'+descriptor;
-        var fields=FIELD_DECLARING.get(symbolic);Class<?> known=fields.get(key);
+        var fields=FIELD_DECLARING.get(symbolic);var descriptors=fields.get(name);
+        if(descriptors==null){
+            var created=new java.util.concurrent.ConcurrentHashMap<String,Class<?>>();
+            // Protect the exact map and its future backing publications before another caller can see it.
+            fieldDeclaringControls(created);
+            var raced=fields.putIfAbsent(name,created);descriptors=raced==null?created:raced;
+        }
+        Class<?> known=descriptors.get(descriptor);
         if(known!=null)return known;
-        return fields.computeIfAbsent(key,ignored->{
-            Class<?> declaring=findFieldOwner(symbolic,name,descriptor);
-            return declaring==null?Void.class:declaring;
-        });
+        // Resolve outside the cache's mutation scope; reflective failures publish no answer.
+        Class<?> declaring=findFieldOwner(symbolic,name,descriptor),resolved=declaring==null?Void.class:declaring;
+        Class<?> raced=descriptors.putIfAbsent(descriptor,resolved);return raced==null?resolved:raced;
     }
     static Class<?> findFieldOwner(Class<?> type,String name,String descriptor) {
         if(type==null)return null;
@@ -2518,7 +2537,7 @@ public final class ControlBridge {
     /** Compatibility for old images: it supplies dispatch ownership only. */
     public static void modListenerRegistered(Object owner,Object listener) {
         if(owner==null||listener==null)return;
-        Module module=owner instanceof Class<?> type?type.getModule():owner.getClass().getModule();
+        Module module=objectModule(owner);
         synchronized(EVENT_OWNERS) {
             EventKey stale;while((stale=(EventKey)EVENT_QUEUE.poll())!=null)EVENT_OWNERS.remove(stale);
             EVENT_OWNERS.put(new EventKey(listener,EVENT_QUEUE),module);
@@ -2528,7 +2547,11 @@ public final class ControlBridge {
         if(listener==null)return true;
         Module owner;
         synchronized(EVENT_OWNERS){owner=EVENT_OWNERS.get(new EventKey(listener,null));}
-        return !modStopped(owner)&&!modStopped(listener.getClass().getModule());
+        return !modStopped(owner)&&!modStopped(DefinitionBridge.module(listener.getClass()));
+    }
+    public static Module eventListenerModule(Object listener){
+        if(listener==null)return null;
+        synchronized(EVENT_OWNERS){return EVENT_OWNERS.get(new EventKey(listener,null));}
     }
     public static void modCommandRegistered(Object dispatcher,Object node){
         if(dispatcher==null||node==null)return;
@@ -2536,11 +2559,35 @@ public final class ControlBridge {
         if(!caller.getName().equals("com.mojang.brigadier.CommandDispatcher")||!caller.isInstance(dispatcher))return;
         Module source=invokingModule();
         if(source==null)return;
+        Object mounted=node;
+        try{mounted=registeredCommandNode(dispatcher,node);}
+        catch(ReflectiveOperationException|RuntimeException failure){
+            // Retain the unresolved registration; a returned builder node is not proof of publication.
+            registrationFailure(source,"COMMAND_REGISTER:"+failure.getClass().getSimpleName()+":"+failure.getMessage());
+        }
         synchronized(EVENT_OWNERS){
-            COMMAND_REGISTRATIONS.removeIf(entry->entry.dispatcher().get()==null||entry.node().get()==null);
-            COMMAND_REGISTRATIONS.add(new CommandRegistration(new java.lang.ref.WeakReference<>(dispatcher),new java.lang.ref.WeakReference<>(node),source));
+            COMMAND_REGISTRATIONS.removeIf(entry->entry.dispatcher().get()==null);
+            boolean present=false;
+            for(var entry:COMMAND_REGISTRATIONS)if(entry.dispatcher().get()==dispatcher&&entry.node().get()==mounted&&entry.module()==source){present=true;break;}
+            if(!present)COMMAND_REGISTRATIONS.add(new CommandRegistration(new java.lang.ref.WeakReference<>(dispatcher),new java.lang.ref.WeakReference<>(mounted),source));
         }
         if(modStopped(source))retireModRegistrations(new Module[]{source});
+    }
+    private static Object registeredCommandNode(Object dispatcher,Object returned)throws ReflectiveOperationException{
+        ClassLoader loader=dispatcher.getClass().getClassLoader();
+        Class<?> dispatcherType=Class.forName("com.mojang.brigadier.CommandDispatcher",false,loader);
+        Class<?> nodeType=Class.forName("com.mojang.brigadier.tree.CommandNode",false,loader);
+        Object root=commandField(dispatcherType,dispatcher,"root");
+        var children=commandIndex(nodeType,root,"children");
+        for(Object child:children.values())if(child==returned)return child;
+        // Brigadier register returns the new literal even when addChild merged it into an old node.
+        // Read the known literal operand without calling a potentially overridden node getter again.
+        Class<?> literalType=Class.forName("com.mojang.brigadier.tree.LiteralCommandNode",false,loader);
+        if(returned.getClass()!=literalType)throw new IllegalStateException("COMMAND_REGISTRATION_NODE_NOT_ATTACHED");
+        Object literal=commandField(literalType,returned,"literal");
+        Object mounted=literal instanceof String name?children.get(name):null;
+        if(!nodeType.isInstance(mounted))throw new IllegalStateException("COMMAND_REGISTRATION_NODE_NOT_ATTACHED");
+        return mounted;
     }
     private static void retireModRegistrations(Module[] modules){
         var selected=java.util.Collections.newSetFromMap(new java.util.IdentityHashMap<Module,Boolean>());
@@ -2567,9 +2614,12 @@ public final class ControlBridge {
         for(var entry:commands){
             Object dispatcher=entry.dispatcher().get(),node=entry.node().get();
             try{
-                if(dispatcher!=null&&node!=null)retireCommandNode(dispatcher,node,entry.module());
+                if(dispatcher!=null){
+                    if(node==null)throw new IllegalStateException("COMMAND_REGISTERED_NODE_UNAVAILABLE");
+                    retireCommandNode(dispatcher,node,entry.module());
+                }
                 synchronized(EVENT_OWNERS){COMMAND_REGISTRATIONS.remove(entry);}
-            }catch(ReflectiveOperationException|RuntimeException failure){registrationFailure(entry.module(),"COMMAND_UNREGISTER:"+failure.getClass().getSimpleName());}
+            }catch(ReflectiveOperationException|RuntimeException failure){registrationFailure(entry.module(),"COMMAND_UNREGISTER:"+failure.getClass().getSimpleName()+":"+failure.getMessage());}
         }
     }
     private static void retireCommandNode(Object dispatcher,Object node,Module owner)throws ReflectiveOperationException{
@@ -2578,7 +2628,8 @@ public final class ControlBridge {
         if(!nodeType.isInstance(node))throw new IllegalStateException("ACTUAL_COMMAND_NODE_REQUIRED");
         Class<?> dispatcherType=Class.forName("com.mojang.brigadier.CommandDispatcher",false,loader);
         Object root=commandField(dispatcherType,dispatcher,"root");
-        retireCommandBranch(nodeType,root,node,owner,new java.util.IdentityHashMap<>());
+        if(!retireCommandBranch(nodeType,root,node,owner,new java.util.IdentityHashMap<>()))
+            throw new IllegalStateException("COMMAND_REGISTERED_NODE_NOT_ATTACHED");
     }
     private static boolean retireCommandBranch(Class<?> nodeType,Object parent,Object selected,Module owner,java.util.IdentityHashMap<Object,Boolean> seen)throws ReflectiveOperationException{
         if(parent==null||seen.put(parent,Boolean.TRUE)!=null)return false;
@@ -2632,7 +2683,7 @@ public final class ControlBridge {
         synchronized(EVENT_OWNERS){
             String failure=REGISTRATION_FAILURES.get(module);
             long pending=EVENT_REGISTRATIONS.stream().filter(entry->entry.module()==module&&entry.bus().get()!=null&&entry.owner().get()!=null).count()
-                    +COMMAND_REGISTRATIONS.stream().filter(entry->entry.module()==module&&entry.node().get()!=null).count();
+                    +COMMAND_REGISTRATIONS.stream().filter(entry->entry.module()==module&&entry.dispatcher().get()!=null).count();
             return "REGISTRATIONS="+pending+(failure==null?"":";REGISTRATION_PARTIAL="+failure);
         }
     }

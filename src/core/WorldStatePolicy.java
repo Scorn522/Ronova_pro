@@ -1,11 +1,13 @@
 package dev.ronova.pro;
 
 import dev.ronova.pro.mixin.Access;
+import java.lang.invoke.*;
 import java.lang.reflect.*;
 import java.nio.ByteOrder;
 import java.util.*;
 import net.minecraft.core.IdMap;
 import net.minecraft.core.IdMapper;
+import net.minecraft.server.level.ServerLevel;
 import it.unimi.dsi.fastutil.Hash;
 import it.unimi.dsi.fastutil.HashCommon;
 import it.unimi.dsi.fastutil.objects.AbstractObject2IntFunction;
@@ -19,6 +21,8 @@ import net.minecraft.world.level.ChunkPos;
 import net.minecraft.world.level.block.Block;
 import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.level.chunk.*;
+import net.minecraft.world.level.storage.DerivedLevelData;
+import net.minecraft.world.level.storage.PrimaryLevelData;
 
 /** Read the current world chain; neither a captured graph nor the caller grants a write. */
 final class WorldStatePolicy {
@@ -44,7 +48,12 @@ final class WorldStatePolicy {
     private static Field REVERSE_N,REVERSE_SIZE,ITERATOR_OWNER,ITERATOR_LAST,ITERATOR_POS,ITERATOR_WRAPPED,WRAPPED_DATA,WRAPPED_SIZE;
     private static Object IDENTITY_STRATEGY;
     private static Object VM_UNSAFE;private static Method RESTORE_REFERENCE,RESTORE_INT;
-    private static Map<Class<?>,List<Slot>> FIELDS=Map.of();
+    private static volatile Map<Class<?>,List<Slot>> FIELDS=Map.of();
+    private static volatile Set<Field> CLOCK_FIELDS=Set.of();
+    private static Field LEVEL_DATA,SERVER_DATA,DERIVED_CLOCK;
+    private static volatile Class<?> CLIENT_LEVEL,CLIENT_DATA;
+    private static Field CLIENT_LEVEL_DATA,CLIENT_GAME_TIME,CLIENT_DAY_TIME;
+    private static volatile MethodHandle CLIENT_QUERY;
     private static long LONG_BASE,INT_BASE,REFERENCE_BASE;private static int REFERENCE_WIDTH;
     private record Anchor(Class<?> owner,String method,int bci) { }
     private static final StackWalker WALKER=StackWalker.getInstance(StackWalker.Option.RETAIN_CLASS_REFERENCE);
@@ -71,7 +80,8 @@ final class WorldStatePolicy {
         Class<?> unsafeType=Class.forName("jdk.internal.misc.Unsafe",false,null);
         Class<?>[] carriers={ChunkAccess.class,LevelChunk.class,LevelChunkSection.class,PalettedContainer.class,DATA,SimpleBitStorage.class,ZeroBitStorage.class,
                 SingleValuePalette.class,LinearPalette.class,HashMapPalette.class,GlobalPalette.class,CrudeIncrementalIntIdentityHashBiMap.class,
-                IdMapper.class,ArrayList.class,Object2IntOpenCustomHashMap.class,AbstractObject2IntFunction.class,ITERATOR,ObjectArrayList.class,unsafeType};
+                IdMapper.class,ArrayList.class,Object2IntOpenCustomHashMap.class,AbstractObject2IntFunction.class,ITERATOR,ObjectArrayList.class,unsafeType,
+                Level.class,ServerLevel.class,PrimaryLevelData.class,DerivedLevelData.class};
         Class.forName("dev.ronova.pro.agent.RecoveryAgent",false,ClassLoader.getSystemClassLoader()).getMethod("openBackingAccess",Class.class,Class[].class)
                 .invoke(null,WorldStatePolicy.class,(Object)carriers);
         Object unsafe=unsafeType.getMethod("getUnsafe").invoke(null);Method offset=unsafeType.getMethod("objectFieldOffset",Field.class);
@@ -93,6 +103,14 @@ final class WorldStatePolicy {
         REVERSE_N=named(Object2IntOpenCustomHashMap.class,"n");REVERSE_SIZE=named(Object2IntOpenCustomHashMap.class,"size");
         ITERATOR_OWNER=typed(ITERATOR,Object2IntOpenCustomHashMap.class);ITERATOR_LAST=named(ITERATOR,"last");ITERATOR_POS=named(ITERATOR,"pos");ITERATOR_WRAPPED=typed(ITERATOR,ObjectArrayList.class);
         WRAPPED_DATA=typed(ObjectArrayList.class,Object[].class);WRAPPED_SIZE=named(ObjectArrayList.class,"size");
+        LEVEL_DATA=named(Level.class,"levelData","f_46442_");SERVER_DATA=named(ServerLevel.class,"serverLevelData","f_8549_");
+        DERIVED_CLOCK=named(DerivedLevelData.class,"wrapped","f_78077_");
+        CLOCK_FIELDS=Set.of(LEVEL_DATA,SERVER_DATA,DERIVED_CLOCK,
+                named(PrimaryLevelData.class,"gameTime","f_78450_"),named(PrimaryLevelData.class,"dayTime","f_78451_"),
+                named(PrimaryLevelData.class,"clearWeatherTime","f_78457_"),named(PrimaryLevelData.class,"raining","f_78458_"),
+                named(PrimaryLevelData.class,"rainTime","f_78459_"),named(PrimaryLevelData.class,"thundering","f_78460_"),named(PrimaryLevelData.class,"thunderTime","f_78461_"),
+                named(Level.class,"oRainLevel","f_46437_"),named(Level.class,"rainLevel","f_46438_"),
+                named(Level.class,"oThunderLevel","f_46439_"),named(Level.class,"thunderLevel","f_46440_"));
         IDENTITY_STRATEGY=net.minecraft.Util.identityStrategy();
         Map<Class<?>,List<Slot>> fields=new HashMap<>();
         for(Class<?> type:carriers){
@@ -104,6 +122,30 @@ final class WorldStatePolicy {
         }
         FIELDS=Map.copyOf(fields);initialized=true;
     }
+    static synchronized void initializeClient(Class<?> levelType)throws ReflectiveOperationException{
+        Class<?> presence=Class.forName("dev.ronova.pro.ClientPresence",false,WorldStatePolicy.class.getClassLoader());
+        if(WALKER.getCallerClass()!=presence||levelType==null||!levelType.getName().equals("net.minecraft.client.multiplayer.ClientLevel")
+                ||levelType.getSuperclass()!=Level.class||levelType.getModule()!=Level.class.getModule())throw new SecurityException("ACTUAL_CLIENT_WORLD_REQUIRED");
+        if(CLIENT_QUERY!=null){if(CLIENT_LEVEL!=levelType)throw new SecurityException("CLIENT_WORLD_CLASS_CHANGED");return;}
+        initialize();
+        Class<?> dataType=Class.forName(levelType.getName()+"$ClientLevelData",false,levelType.getClassLoader());
+        if(dataType.getEnclosingClass()!=levelType||dataType.getModule()!=levelType.getModule())throw new SecurityException("ACTUAL_CLIENT_WORLD_DATA_REQUIRED");
+        Class.forName("dev.ronova.pro.agent.RecoveryAgent",false,ClassLoader.getSystemClassLoader()).getMethod("openBackingAccess",Class.class,Class[].class)
+                .invoke(null,WorldStatePolicy.class,(Object)new Class<?>[]{levelType,dataType});
+        Field data=named(levelType,"clientLevelData","f_104563_");if(data.getType()!=dataType)throw new NoSuchFieldException("CLIENT_WORLD_DATA_TYPE_CHANGED");
+        Field game=named(dataType,"gameTime","f_104837_"),day=named(dataType,"dayTime","f_104838_"),rain=named(dataType,"raining","f_104839_");
+        if(game.getType()!=long.class||day.getType()!=long.class||rain.getType()!=boolean.class)throw new NoSuchFieldException("CLIENT_WORLD_CLOCK_TYPES_CHANGED");
+        Set<Field> selected=new HashSet<>(CLOCK_FIELDS);Collections.addAll(selected,data,game,day,rain);
+        Method offset=VM_UNSAFE.getClass().getMethod("objectFieldOffset",Field.class);Map<Class<?>,List<Slot>> fields=new HashMap<>(FIELDS);
+        for(Class<?> type:new Class<?>[]{levelType,dataType}){
+            List<Slot> mapped=new ArrayList<>();for(Class<?> owner=type;owner!=null&&owner!=Object.class;owner=owner.getSuperclass())
+                for(Field field:owner.getDeclaredFields())if(!Modifier.isStatic(field.getModifiers())&&selected.contains(field)){
+                    field.setAccessible(true);mapped.add(new Slot(field,((Number)offset.invoke(VM_UNSAFE,field)).longValue(),width(field.getType())));}
+            fields.put(type,List.copyOf(mapped));
+        }
+        CLIENT_LEVEL_DATA=data;CLIENT_GAME_TIME=game;CLIENT_DAY_TIME=day;CLOCK_FIELDS=Set.copyOf(selected);FIELDS=Map.copyOf(fields);CLIENT_DATA=dataType;CLIENT_LEVEL=levelType;
+        CLIENT_QUERY=MethodHandles.lookup().findStatic(presence,"worldClockQuery",MethodType.methodType(boolean.class,Query.class));
+    }
     private static Field typed(Class<?> owner,Class<?> type)throws ReflectiveOperationException{
         Field found=null;for(Field field:owner.getDeclaredFields())if(!Modifier.isStatic(field.getModifiers())&&field.getType()==type){if(found!=null)throw new NoSuchFieldException("WORLD_STATE_AMBIGUOUS_FIELD:"+owner+":"+type);found=field;}
         if(found==null)throw new NoSuchFieldException("WORLD_STATE_FIELD:"+owner+":"+type);found.setAccessible(true);return found;
@@ -113,6 +155,7 @@ final class WorldStatePolicy {
         throw new NoSuchFieldException(owner+":"+Arrays.toString(names));
     }
     private static boolean selected(Field field){
+        if(CLOCK_FIELDS.contains(field))return true;
         Class<?> owner=field.getDeclaringClass(),type=field.getType();
         if(owner==ChunkAccess.class)return type==LevelChunkSection[].class||type==ChunkPos.class||type==LevelHeightAccessor.class;
         if(owner==LevelChunk.class)return type==Level.class;
@@ -132,9 +175,65 @@ final class WorldStatePolicy {
         // frozen cell. Any remaining frozen BlockState still makes its actual
         // table a candidate; ordinary Object[] traffic stays outside the world walk.
         if(type==Object[].class){for(Object item:(Object[])value)if(item instanceof BlockState)return true;return false;}
-        return FIELDS.containsKey(type);
+        return FIELDS.containsKey(type)||clockCandidate(value);
     }
-    static boolean known(Object value){return candidate(value)&&ProRuntime.worldStateQuery(new Query(Kind.KNOWN,value,null,-1,null,0,0));}
+    private static List<Slot> slots(Object receiver){
+        List<Slot> exact=FIELDS.get(receiver.getClass());if(exact!=null)return exact;
+        Class<?> carrier=CLIENT_LEVEL!=null&&CLIENT_LEVEL.isInstance(receiver)?CLIENT_LEVEL:CLIENT_DATA!=null&&CLIENT_DATA.isInstance(receiver)?CLIENT_DATA
+                :receiver instanceof ServerLevel?ServerLevel.class:receiver instanceof Level?Level.class
+                :receiver instanceof PrimaryLevelData?PrimaryLevelData.class:receiver instanceof DerivedLevelData?DerivedLevelData.class:null;
+        return carrier==null?List.of():FIELDS.getOrDefault(carrier,List.of());
+    }
+    static boolean clockCandidate(Object receiver){return initialized&&(receiver instanceof Level||receiver instanceof PrimaryLevelData||receiver instanceof DerivedLevelData||CLIENT_DATA!=null&&CLIENT_DATA.isInstance(receiver));}
+    static List<Object> clientClockChain(Level level){
+        Class<?> client=CLIENT_LEVEL,data=CLIENT_DATA;if(client==null||data==null||level==null||level.getClass()!=client)return null;
+        Object inherited=read(level,LEVEL_DATA,null),actual=read(level,CLIENT_LEVEL_DATA,null);
+        if(inherited==null||actual==null||inherited.getClass()!=data||actual.getClass()!=data)return null;
+        return inherited==actual?List.of(level,actual):List.of(level,inherited,actual);
+    }
+    static void applyClientClock(Level level,long game,long day)throws ReflectiveOperationException{
+        List<Object> chain=clientClockChain(level);if(chain==null)throw new IllegalStateException("CLIENT_WORLD_CLOCK_BACKING_UNSUPPORTED");
+        for(Object value:chain)if(!(value instanceof Level)){CLIENT_GAME_TIME.setLong(value,game);CLIENT_DAY_TIME.setLong(value,day);}
+    }
+    static boolean clientClockFieldDenied(Object receiver,Class<?> declaring,String name,Object next){
+        return CLIENT_QUERY!=null&&(CLIENT_LEVEL.isInstance(receiver)||CLIENT_DATA.isInstance(receiver))&&fieldDenied(receiver,declaring,name,next);
+    }
+    private static boolean query(Query query){
+        MethodHandle client=CLIENT_QUERY;
+        if(client!=null&&(CLIENT_LEVEL.isInstance(query.receiver)||CLIENT_DATA.isInstance(query.receiver)))try{if((boolean)client.invokeExact(query))return true;}
+        catch(Throwable failure){if(failure instanceof RuntimeException runtime)throw runtime;if(failure instanceof Error error)throw error;throw new IllegalStateException("CLIENT_WORLD_CLOCK_QUERY_UNAVAILABLE",failure);}
+        return ProRuntime.worldStateQuery(query);
+    }
+    /** The clock getters in DerivedLevelData delegate to wrapped, not worldData. */
+    static List<Object> clockChain(ServerLevel level){
+        if(!initialized||level.getClass()!=ServerLevel.class)return null;
+        List<Object> result=new ArrayList<>();Set<Object> seen=Collections.newSetFromMap(new IdentityHashMap<>());result.add(level);seen.add(level);
+        Object[] heads={read(level,LEVEL_DATA,null),read(level,SERVER_DATA,null)};
+        for(Object head:heads){
+            Set<Object> path=Collections.newSetFromMap(new IdentityHashMap<>());Object current=head;
+            for(;;){
+                if(current==null||current==UNKNOWN||!path.add(current))return null;
+                if(seen.add(current))result.add(current);
+                if(current.getClass()==PrimaryLevelData.class)break;
+                if(current.getClass()!=DerivedLevelData.class)return null;
+                current=read(current,DERIVED_CLOCK,null);
+            }
+        }
+        return List.copyOf(result);
+    }
+    static boolean sharedClock(List<Object> first,List<Object> second){
+        if(first==null||second==null)return false;
+        for(Object left:first)if(!(left instanceof Level))for(Object right:second)if(left==right)return true;return false;
+    }
+    static boolean clockMatches(Query query,List<Object> scope){
+        if(scope==null)return false;boolean linked=false;for(Object member:scope)if(member==query.receiver){linked=true;break;}if(!linked)return false;
+        if(query.kind==Kind.KNOWN)return true;
+        if(query.kind==Kind.FIELD)return CLOCK_FIELDS.contains(query.field);
+        if(query.kind==Kind.OFFSET||query.kind==Kind.MEMORY)for(Slot slot:slots(query.receiver))
+            if(CLOCK_FIELDS.contains(slot.field)&&overlap(query.offset,query.length,slot.offset,slot.width))return true;
+        return false;
+    }
+    static boolean known(Object value){return candidate(value)&&query(new Query(Kind.KNOWN,value,null,-1,null,0,0));}
     static boolean arrayDenied(Object array,int index,Object next){
         if(!candidate(array)||!array.getClass().isArray()||index<0||index>=Array.getLength(array))return false;
         if(shiftRestoring(array,index,next)||shiftWrite(array,index,next))return false;
@@ -143,10 +242,10 @@ final class WorldStatePolicy {
     }
     static boolean fieldDenied(Object receiver,Class<?> declaring,String name,Object next){
         if(!candidate(receiver)||declaring==null)return false;
-        for(Slot slot:FIELDS.getOrDefault(receiver.getClass(),List.of()))if(slot.field.getDeclaringClass()==declaring&&slot.field.getName().equals(name)){
+        for(Slot slot:slots(receiver))if(slot.field.getDeclaringClass()==declaring&&slot.field.getName().equals(name)){
             if(rehashWrite(receiver,slot.field,next))return false;
             if(same(read(receiver,slot.field,null),next,slot.field.getType()))return false;
-            return ProRuntime.worldStateQuery(new Query(Kind.FIELD,receiver,slot.field,-1,next,slot.offset,slot.width));
+            return query(new Query(Kind.FIELD,receiver,slot.field,-1,next,slot.offset,slot.width));
         }return false;
     }
     static boolean offsetDenied(Object receiver,long offset,Object next){
@@ -163,17 +262,17 @@ final class WorldStatePolicy {
             return ProRuntime.worldStateQuery(new Query(Kind.OFFSET,receiver,null,-1,next,offset,REFERENCE_WIDTH));
         }
         if(receiver instanceof long[]||receiver instanceof int[])return scalar(next)?ProRuntime.worldStateQuery(new Query(Kind.OFFSET,receiver,null,-1,next,offset,scalarWidth(next))):memoryDenied(receiver,offset,scalarWidth(next));
-        int length=scalarWidth(next);for(Slot slot:FIELDS.getOrDefault(receiver.getClass(),List.of()))if(overlap(offset,length,slot.offset,slot.width)){
+        int length=scalarWidth(next);for(Slot slot:slots(receiver))if(overlap(offset,length,slot.offset,slot.width)){
             if(slot.field.getType().isPrimitive()&&scalar(next)){
                 Object prior=read(receiver,slot.field,null);if(prior==UNKNOWN)return true;
                 long bits=patch(scalarBits(prior),slot.offset,slot.width,offset,length,scalarBits(next));
                 if(fieldDenied(receiver,slot.field.getDeclaringClass(),slot.field.getName(),boxed(bits,slot.field.getType())))return true;
             }else if(offset==slot.offset&&!slot.field.getType().isPrimitive()){
                 if(fieldDenied(receiver,slot.field.getDeclaringClass(),slot.field.getName(),next))return true;
-            }else if(ProRuntime.worldStateQuery(new Query(Kind.MEMORY,receiver,slot.field,-1,null,offset,length)))return true;
+            }else if(query(new Query(Kind.MEMORY,receiver,slot.field,-1,null,offset,length)))return true;
         }return false;
     }
-    static boolean memoryDenied(Object receiver,long offset,long length){return length>0&&candidate(receiver)&&ProRuntime.worldStateQuery(new Query(Kind.MEMORY,receiver,null,-1,null,offset,length));}
+    static boolean memoryDenied(Object receiver,long offset,long length){return length>0&&candidate(receiver)&&query(new Query(Kind.MEMORY,receiver,null,-1,null,offset,length));}
     static boolean storageDenied(SimpleBitStorage storage,int index,int value){
         if(!initialized||storage.getClass()!=SimpleBitStorage.class)return false;
         Access.StateBits raw=(Access.StateBits)storage;int word=raw.pro$cell(index),shift=(index-word*raw.pro$perLong())*storage.getBits();long mask=raw.pro$mask();long[] data=raw.pro$words();

@@ -93,6 +93,10 @@ public final class CodeSourceBridge {
     }
     private static final List<CodeFields> CODE_FIELDS=new ArrayList<>();
     private static final List<CodeValues> CODE_VALUES=new ArrayList<>();
+    // Existing registration records only. A miss never creates a bucket, and
+    // every lookup still matches the actual Class/loader identity below.
+    private static final Map<String,List<CodeFields>> CODE_FIELD_INDEX=new LedgerMap<>();
+    private static final Map<String,List<CodeValues>> CODE_VALUE_INDEX=new LedgerMap<>();
     private static final Map<Key,Set<FieldHold>> FIELD_HOLDERS=new LedgerMap<>();
     private static final List<WeakReference<Class<?>>> FIELD_CLASSES=new ArrayList<>();
     private static volatile Class<?> agent;
@@ -248,7 +252,7 @@ public final class CodeSourceBridge {
         metadataImages=actualAgent.getMethod("externalMixinMetadata",Object.class,Module.class,Module[].class);
         memberImage=actualAgent.getMethod("externalMemberMetadata",Object.class);
         prepared=actualAgent.getMethod("externalClassPrepared",Class.class);
-        ControlBridge.controlPublication(MODULES,new Object[]{IMAGES,BYTE_CONTRIBUTORS,READERS,TREES,TREE_INPUTS,TREE_PARENTS,TREE_IMAGES,MIXINS,MIXIN_TREES,MIXIN_OPTIONS,MIXIN_RESTRICTIONS,TRACKER_RESTRICTIONS,METADATA,METADATA_TREES,METADATA_ROWS,MEMBER_IMAGES,CONTEXT_READS,STATE_READS,SELECTIONS,RESOURCE_SOURCES,CONFIGURATIONS,CONTEXTS,HOLDERS,WRITERS,COPYING,PREPARING_CONFIGS,REGISTRATIONS,METADATA_USE,CONTROLS,ROLES,CODE_METHODS,FRAME_METHODS,CODE_FIELDS,CODE_VALUES,FIELD_HOLDERS,FIELD_CLASSES,agent,producer,encoder,baseline,begin,end,copied,encoded,observed,dependency,payload,selection,metadataImages,memberImage,prepared});
+        ControlBridge.controlPublication(MODULES,new Object[]{IMAGES,BYTE_CONTRIBUTORS,READERS,TREES,TREE_INPUTS,TREE_PARENTS,TREE_IMAGES,MIXINS,MIXIN_TREES,MIXIN_OPTIONS,MIXIN_RESTRICTIONS,TRACKER_RESTRICTIONS,METADATA,METADATA_TREES,METADATA_ROWS,MEMBER_IMAGES,CONTEXT_READS,STATE_READS,SELECTIONS,RESOURCE_SOURCES,CONFIGURATIONS,CONTEXTS,HOLDERS,WRITERS,COPYING,PREPARING_CONFIGS,REGISTRATIONS,METADATA_USE,CONTROLS,ROLES,CODE_METHODS,FRAME_METHODS,CODE_FIELDS,CODE_VALUES,CODE_FIELD_INDEX,CODE_VALUE_INDEX,FIELD_HOLDERS,FIELD_CLASSES,agent,producer,encoder,baseline,begin,end,copied,encoded,observed,dependency,payload,selection,metadataImages,memberImage,prepared});
     }
     public static void codeMethods(ClassLoader loader,String name,String[] methods){
         requireAgent();codeMethods(loader,name,methods,null);
@@ -279,13 +283,30 @@ public final class CodeSourceBridge {
         }
     }
     static Module[] frameSources(StackWalker.StackFrame frame){
-        Module actual=DefinitionBridge.module(frame.getDeclaringClass());
-        if(ControlBridge.producer(actual))return new Module[]{actual};
-        Class<?> type=frame.getDeclaringClass();
+        if(codeMethodsPresent&&frame.getByteCodeIndex()>=0){
+            boolean candidate=false;Class<?> type=frame.getDeclaringClass();
+            synchronized(CODE_METHODS){
+                MethodBucket bucket=CODE_METHODS.get(type.getName());
+                if(bucket!=null)for(CodeMethods entry:bucket.entries)if(codeMatches(entry.name(),entry.loader(),entry.bootstrap(),entry.actual(),type))
+                    for(String selector:entry.methods())if(frameSelector(frame,selector)){candidate=true;break;}
+            }
+            if(candidate){Module[] observed=NativeControl.codeFrame(frame);if(observed!=null&&observed.length!=0)return frameDeclaration(type,observed);}
+        }
+        return frameSources(frame.getDeclaringClass(),frame.getMethodName(),frame.getDescriptor());
+    }
+    static Module[] frameSources(Class<?> type,String name,String descriptor){
+        if(type==null)return NO_FRAME_SOURCES;
+        Module[] roots=NO_FRAME_SOURCES;
         for(MethodRoots root:methodRoots)if(root.actual()!=null?root.actual().get()==type
                 :root.bootstrap()==(type.getClassLoader()==null)&&root.loader().get()==type.getClassLoader()&&root.name().equals(type.getName()))
-            for(var entry:root.roots().entrySet())if(frameSelector(frame,entry.getKey()))return entry.getValue();
-        return NO_FRAME_SOURCES;
+            for(var entry:root.roots().entrySet())if(frameSelector(name,descriptor,entry.getKey())){roots=entry.getValue();break;}
+        return frameDeclaration(type,roots);
+    }
+    private static Module[] frameDeclaration(Class<?> type,Module[] roots){
+        Module actual=DefinitionBridge.module(type);
+        if(!ControlBridge.producer(actual))return roots;
+        for(Module module:roots)if(module==actual)return roots;
+        Module[] combined=new Module[roots.length+1];for(int i=0;i<roots.length;i++)combined[i]=roots[i];combined[roots.length]=actual;return combined;
     }
     public static synchronized void codeMethodRoots(ClassLoader loader,String name,Class<?> actual,String[] methods,Module[][] sources){
         requireAgent();if(methods.length!=sources.length)throw new IllegalArgumentException("METHOD_SOURCE_ROOTS_MISMATCH");
@@ -301,12 +322,14 @@ public final class CodeSourceBridge {
         MethodRoots[] published=next.toArray(MethodRoots[]::new);protect((Object)published);methodRoots=published;
     }
     static boolean frameSelector(StackWalker.StackFrame frame,String selector){
+        return frameSelector(frame.getMethodName(),frame.getDescriptor(),selector);
+    }
+    private static boolean frameSelector(String name,String descriptor,String selector){
         // This lookup runs inside the native arraycopy source query itself.
         // Concatenating the walked name/descriptor would copy String bytes and
         // recursively request the same sources before this lookup can finish.
-        String name=frame.getMethodName();int split=name.length();
+        int split=name.length();
         if(selector.length()<=split||selector.charAt(split)!='('||!selector.regionMatches(0,name,0,split))return false;
-        String descriptor=frame.getDescriptor();
         return selector.length()==split+descriptor.length()&&selector.regionMatches(split,descriptor,0,descriptor.length());
     }
     static boolean hasFrameSources(){
@@ -595,9 +618,9 @@ public final class CodeSourceBridge {
         synchronized(CODE_FIELDS){
             for(int i=0;i<CODE_FIELDS.size();i++){
                 CodeFields prior=CODE_FIELDS.get(i);if(codeSelector(prior.name(),prior.loader(),prior.bootstrap(),prior.actual(),loader,name,actual)){
-                    Map<String,CodeField> merged=new LedgerMap<>(prior.fields());merged.putAll(fields);CodeFields entry=new CodeFields(name,prior.loader(),prior.bootstrap(),Map.copyOf(merged),prior.actual());protect(entry,entry.fields());CODE_FIELDS.set(i,entry);return;
+                    Map<String,CodeField> merged=new LedgerMap<>(prior.fields());merged.putAll(fields);CodeFields entry=new CodeFields(name,prior.loader(),prior.bootstrap(),Map.copyOf(merged),prior.actual());protect(entry,entry.fields());CODE_FIELDS.set(i,entry);indexCodeFields(name);return;
                 }
-            }CodeFields entry=new CodeFields(name,new Ref<>(loader),loader==null,Map.copyOf(fields),actual==null?null:new Ref<>(actual));protect(entry,entry.loader(),entry.fields(),entry.actual());CODE_FIELDS.add(entry);
+            }CodeFields entry=new CodeFields(name,new Ref<>(loader),loader==null,Map.copyOf(fields),actual==null?null:new Ref<>(actual));protect(entry,entry.loader(),entry.fields(),entry.actual());CODE_FIELDS.add(entry);indexCodeFields(name);
         }
     }
     public static void codeValues(ClassLoader loader,String name,Object[][] rows){
@@ -619,8 +642,16 @@ public final class CodeSourceBridge {
                 CodeValue value=new CodeValue(field,descriptor,expected,baseline,sources);values.add(value);protect(value,sources);
             }
             CodeValues entry=new CodeValues(name,new Ref<>(loader),loader==null,List.copyOf(values),actual==null?null:new Ref<>(actual));protect(entry,entry.loader(),entry.fields(),entry.actual());
-            if(position<0)CODE_VALUES.add(entry);else CODE_VALUES.set(position,entry);
+            if(position<0)CODE_VALUES.add(entry);else CODE_VALUES.set(position,entry);indexCodeValues(name);
         }
+    }
+    private static void indexCodeFields(String name){
+        List<CodeFields> rows=new ArrayList<>();for(CodeFields entry:CODE_FIELDS)if(entry.name().equals(name))rows.add(entry);
+        List<CodeFields> bucket=List.copyOf(rows);protect(bucket);CODE_FIELD_INDEX.put(name,bucket);
+    }
+    private static void indexCodeValues(String name){
+        List<CodeValues> rows=new ArrayList<>();for(CodeValues entry:CODE_VALUES)if(entry.name().equals(name))rows.add(entry);
+        List<CodeValues> bucket=List.copyOf(rows);protect(bucket);CODE_VALUE_INDEX.put(name,bucket);
     }
     private static boolean codeMatches(String name,WeakReference<ClassLoader> loader,boolean bootstrap,WeakReference<Class<?>> exact,Class<?> actual){
         return exact!=null?exact.get()==actual:!actual.isHidden()&&name.equals(actual.getName())&&bootstrap==(actual.getClassLoader()==null)&&loader.get()==actual.getClassLoader();
@@ -732,7 +763,19 @@ public final class CodeSourceBridge {
         protect(objects);
     }
     private static CodeField codeField(Class<?> declaring,String name){
-        synchronized(CODE_FIELDS){for(CodeFields entry:CODE_FIELDS)if(codeMatches(entry.name(),entry.loader(),entry.bootstrap(),entry.actual(),declaring))return entry.fields().get(name);}return null;
+        synchronized(CODE_FIELDS){List<CodeFields> bucket=CODE_FIELD_INDEX.get(declaring.getName());if(bucket!=null)for(CodeFields entry:bucket)
+            if(codeMatches(entry.name(),entry.loader(),entry.bootstrap(),entry.actual(),declaring))return entry.fields().get(name);}return null;
+    }
+    static boolean fieldMutationTracked(Class<?> declaring){
+        if(declaring==null)return false;
+        // These are actual recorded code-field roots, including fields added
+        // to an external class. Its defining Module alone cannot identify them.
+        String name=declaring.getName();
+        synchronized(CODE_FIELDS){List<CodeFields> bucket=CODE_FIELD_INDEX.get(name);if(bucket!=null)for(CodeFields entry:bucket)
+            if(!entry.fields().isEmpty()&&codeMatches(entry.name(),entry.loader(),entry.bootstrap(),entry.actual(),declaring))return true;}
+        synchronized(CODE_VALUES){List<CodeValues> bucket=CODE_VALUE_INDEX.get(name);if(bucket!=null)for(CodeValues entry:bucket)
+            if(!entry.fields().isEmpty()&&codeMatches(entry.name(),entry.loader(),entry.bootstrap(),entry.actual(),declaring))return true;}
+        return false;
     }
     static boolean fieldAllowed(Object receiver,Class<?> declaring,String name){
         CodeField source=codeField(declaring,name);if(source==null)return true;
@@ -807,9 +850,9 @@ public final class CodeSourceBridge {
     }
     static void classPrepared(Class<?> actual){
         if(!NativeControl.preparedClass(actual))throw new SecurityException("ACTUAL_VM_CLASS_PREPARATION_REQUIRED");
+        DefinitionBridge.prepared(actual);
         Method callback=prepared;if(callback!=null)call(callback,actual);
-        boolean fields=false;synchronized(CODE_FIELDS){for(CodeFields entry:CODE_FIELDS)if(codeMatches(entry.name(),entry.loader(),entry.bootstrap(),entry.actual(),actual)){fields=true;break;}}
-        if(!fields)synchronized(CODE_VALUES){for(CodeValues entry:CODE_VALUES)if(codeMatches(entry.name(),entry.loader(),entry.bootstrap(),entry.actual(),actual)){fields=true;break;}}
+        boolean fields=fieldMutationTracked(actual);
         if(fields)synchronized(MODULES){for(var reference:FIELD_CLASSES)if(reference.get()==actual)return;FIELD_CLASSES.add(new Ref<>(actual));}
     }
     public static void seedLayer(ModuleLayer layer){requireAgent();seed(layer);}

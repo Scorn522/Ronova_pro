@@ -29,7 +29,7 @@ final class RecoveryStorage implements AutoCloseable {
     private String gap="";
     private final java.util.concurrent.atomic.AtomicLong changes=new java.util.concurrent.atomic.AtomicLong();
     record Status(UUID id,UUID operation,String state,String reason,boolean nativeReleased,boolean transientReleased) { }
-    private record KnownSave(String code,long generation,String identity,String baseline) { }
+    private record KnownSave(String code,long generation,String identity,String baseline,Set<List<RecoveryImage.Step>> paths) { }
     private record Save(UUID subject,long qualification,String source,String code,long generation) { }
     private record Descriptor(String protocol,UUID id,UUID operation,UUID subject,long qualification,String source,String code,
             long saveGeneration,String identity,String baseline,String expected,String preserved,UUID session,String backend,String origins) {
@@ -53,6 +53,7 @@ final class RecoveryStorage implements AutoCloseable {
         final UUID id,operation,subject;
         final long qualification,saveGeneration;
         final String source,code;
+        final Set<List<RecoveryImage.Step>> paths;
         volatile ProRuntime.Subject authority;
         RecoverySources.Snapshot snapshot;
         volatile Descriptor descriptor;
@@ -69,6 +70,7 @@ final class RecoveryStorage implements AutoCloseable {
         volatile boolean queryClosePending;
         IOException queryCloseFailure;
         boolean originalIntent,commitPossible;
+        volatile boolean effectClosed;
         volatile boolean preparing;
         CompletableFuture<Void> intentAck;
         String transaction;
@@ -83,19 +85,22 @@ final class RecoveryStorage implements AutoCloseable {
         UUID supersededBy;
         volatile long lastQuery=-1;
         String preparedSources;
-        Work(UUID id,UUID operation,ProRuntime.Subject authority,RecoverySources.Snapshot snapshot) {
+        Work(UUID id,UUID operation,ProRuntime.Subject authority,RecoverySources.Snapshot snapshot,Set<List<RecoveryImage.Step>> paths) {
             this.id=id;this.operation=operation;this.authority=authority;this.subject=authority.id;
             qualification=authority.generation;this.snapshot=snapshot;source=snapshot.source.locator;code=snapshot.source.code;saveGeneration=snapshot.generation;
+            this.paths=paths;
         }
         Work(Descriptor descriptor) {
             this.descriptor=descriptor;id=descriptor.id;operation=descriptor.operation;subject=descriptor.subject;
             qualification=descriptor.qualification;source=descriptor.source;code=descriptor.code;saveGeneration=descriptor.saveGeneration;
+            paths=descriptor.origins==null?null:Set.copyOf(decodePaths(descriptor.origins));
             authority=null;state="RESTART_QUERY";originalIntent=true;
             nativeReleased=false;
         }
         Work(UUID id,Work original) {
             this.id=id;operation=original.operation;subject=original.subject;qualification=original.qualification;
             saveGeneration=original.saveGeneration;source=original.source;code=original.code;
+            paths=original.paths;
             authority=original.authority;snapshot=original.snapshot;
         }
     }
@@ -135,7 +140,7 @@ final class RecoveryStorage implements AutoCloseable {
         private void nativeAllocated(long value) { token=value;work.nativeReleased=false; }
         private void nativeTransaction(String value) {
             if(value==null||!value.matches("[0-9a-f]{32}"))throw new IllegalArgumentException("INVALID_TRANSACTION_ID");
-            work.transaction=value;work.transactionSession=source.owner.runtimeSession();
+            work.transaction=value;work.transactionSession=source.owner.runtimeSession();work.effectClosed=false;
         }
         private synchronized long[] nativeRetirement(long token) {
             long[] result=retirements.get(token);return result==null?new long[]{0,0,0}:result.clone();
@@ -155,6 +160,7 @@ final class RecoveryStorage implements AutoCloseable {
             Work w=ticket.work;
             return w.authority.commitGate.isHeldByCurrentThread()&&ticket.source.gate.isHeldByCurrentThread()
                     &&!owner.closing&&w.authority.terminal&&w.authority.generation==w.qualification
+                    &&owner.runtime.canonicalSubject(w.subject)==w.authority&&owner.currentPaths(w,ticket.source)
                     &&(w.restartRetry?ticket.source.owner.current(ticket.source)&&ticket.source.writers==0
                         &&ticket.source.generation==w.reboundGeneration:ticket.source.current(w.snapshot))
                     &&Objects.equals(w.preparedSources,ticket.source.owner.dependencies(w.subject))
@@ -210,6 +216,7 @@ final class RecoveryStorage implements AutoCloseable {
                             String detail=untext(p[3]);
                             if(detail.startsWith("SUPERSEDED_BEFORE_NATIVE_COMMIT|"))w.supersededBy=UUID.fromString(detail.substring(detail.indexOf('|')+1));
                         }
+                        case "SUPERSEDED" -> w.supersededBy=UUID.fromString(untext(p[3]));
                         case "READBACK" -> { w.readbackEverConfirmed=true;w.state="RESTART_QUERY";w.reason="HISTORICAL_READBACK_REQUIRES_CURRENT_QUERY"; }
                         case "RESOURCES" -> w.resourcesConfirmed=true;
                         case "RESULT", "ROLLBACK", "PREPARE_FAILED" -> { /* Preserve historical meaning; no implicit write permission. */ }
@@ -232,14 +239,23 @@ final class RecoveryStorage implements AutoCloseable {
             RecoverySources.Snapshot snapshot=source.snapshot;
             if(snapshot==null||Collections.disjoint(source.subjects,targets))continue;
             Save key=new Save(subject.id,subject.generation,source.locator,source.code,snapshot.generation);
+            Set<List<RecoveryImage.Step>> paths=selectedPaths(snapshot,targets);
             boolean exists=bySave.getOrDefault(key,List.of()).stream().anyMatch(w->
-                    w.descriptor==null?w.snapshot==snapshot:w.descriptor.identity.equals(snapshot.identity)&&w.descriptor.baseline.equals(snapshot.hash));
+                    Objects.equals(w.paths,paths)&&(w.descriptor==null?w.snapshot==snapshot:w.descriptor.identity.equals(snapshot.identity)&&w.descriptor.baseline.equals(snapshot.hash)));
             if(!exists) {
                 // Retain every actual obligation and its original durable intent.
-                UUID id=UUID.randomUUID();Work item=new Work(id,operation,subject,snapshot);
+                UUID id=UUID.randomUUID();Work item=new Work(id,operation,subject,snapshot,paths);
                 work.put(id,item);index(item);changes.incrementAndGet();
             }
         }
+    }
+    private static Set<List<RecoveryImage.Step>> selectedPaths(RecoverySources.Snapshot snapshot,Set<UUID> targets){
+        Set<List<RecoveryImage.Step>> paths=new HashSet<>();
+        for(var selection:snapshot.selections)if(targets.contains(selection.subject()))paths.add(selection.path());
+        return Set.copyOf(paths);
+    }
+    private boolean currentPaths(Work item,RecoverySources.Source source){
+        return item.paths!=null&&source.snapshot!=null&&item.paths.equals(selectedPaths(source.snapshot,runtime.groupTargets(item.subject)));
     }
     void tick(long tick) {
         if(closing)return;
@@ -296,9 +312,8 @@ final class RecoveryStorage implements AutoCloseable {
             if(work.get(newer.id)!=newer)continue;
             // A newly confirmed save can retire a fenced private candidate before
             // its next slow retry. advance() still rechecks the actual successor.
-            for(Work older:bySubject.getOrDefault(newer.subject,List.of()))
-                if(older!=newer&&older.qualification==newer.qualification&&older.source.equals(newer.source)
-                        &&older.saveGeneration<newer.saveGeneration) {
+            for(UUID member:runtime.groupTargets(newer.subject))for(Work older:bySubject.getOrDefault(member,List.of()))
+                if(relatedSuccessor(older,newer)) {
                     if(older.running)older.wakeAfterRun=true;
                     else if(!older.queuedReady)schedule(older,tick,tick);
                 }
@@ -324,20 +339,21 @@ final class RecoveryStorage implements AutoCloseable {
             long[] retired=w.ticket.nativeRetirement(w.ticket.token);
             if(retired[1]!=1) { w.reason="NATIVE_RESOURCE_RETIREMENT_PENDING";return; }
             w.nativeReleased=true;
+            if(retired[0]==1||retired[0]==2)w.effectClosed=true;
         }
+        if(w.descriptor!=null&&!w.preparing)confirmClosedEffect(w);
         Work newer=successor(w);
-        if(newer!=null&&!w.readbackEverConfirmed&&!w.commitPossible&&w.nativeReleased&&!w.queryClosePending
-                &&(w.descriptor==null||w.descriptor.session.equals(runtime.session))) {
+        if(newer!=null&&!w.readbackEverConfirmed&&w.effectClosed&&w.nativeReleased&&!w.queryClosePending) {
             release(w);
             if(w.descriptor==null) {
                 // Only an unpersisted preparation cache is removed. It never had write authority.
                 if(work.remove(w.id,w))unindex(w);changes.incrementAndGet();return;
             }
-            ack(fact("NONCOMMIT",w,"SUPERSEDED_BEFORE_NATIVE_COMMIT|"+newer.id));
-            ack(fact("RESOURCES",w,"UNCOMMITTED_PREPARATION_REFERENCES_RELEASED"));
-            w.resourcesConfirmed=true;w.supersededBy=newer.id;w.state="SUPERSEDED_WITHOUT_EXECUTION";return;
+            ack(fact("SUPERSEDED",w,newer.id.toString()));
+            ack(fact("RESOURCES",w,"CLOSED_ORIGINAL_EFFECT_REFERENCES_RELEASED"));
+            w.resourcesConfirmed=true;w.supersededBy=newer.id;w.state="SUPERSEDED_AFTER_CLOSED_EFFECT";return;
         }
-        if(w.state.equals("FENCED")) { release(w);return; }
+        if(w.state.equals("FENCED")) { release(w);discardUnpublished(w);return; }
         if(w.preparing) { continuePreparation(w);return; }
         if(w.state.equals("READBACK_CONFIRMED")) {
             query(w);return;
@@ -349,29 +365,29 @@ final class RecoveryStorage implements AutoCloseable {
         if(source==null) { w.state="WAIT_SOURCE";w.reason="ORIGINAL_SOURCE_NOT_LOADED";return; }
         boolean current;
         try(var storageGate=source.gate.enter()) {
-            current=w.restartRetry?source.writers==0&&source.generation==w.reboundGeneration&&sources.current(source):source.current(snapshot);
+            current=(w.restartRetry?source.writers==0&&source.generation==w.reboundGeneration&&sources.current(source):source.current(snapshot))&&currentPaths(w,source);
         }
-        if(!current) { w.state="FENCED";w.reason="SAVE_GENERATION_OR_OWNER_CHANGED";release(w);return; }
+        if(!current) { w.state="FENCED";w.reason="SAVE_GENERATION_OR_OWNER_CHANGED";release(w);discardUnpublished(w);return; }
         try(var authorityGate=w.authority.commitGate.enter()) {
-            current=!closing&&w.authority.terminal&&w.authority.generation==w.qualification;
+            current=!closing&&w.authority.terminal&&w.authority.generation==w.qualification&&runtime.canonicalSubject(w.subject)==w.authority;
         }
-        if(!current) { w.state="FENCED";w.reason="QUALIFICATION_CHANGED";release(w);return; }
+        if(!current) { w.state="FENCED";w.reason="QUALIFICATION_CHANGED";release(w);discardUnpublished(w);return; }
         if(!prepareIntent(w))return;
         if(w.descriptor.baseline.equals(w.descriptor.expected)) { query(w);return; }
         if(!prepareKnownSources(w)) { w.state="WAIT_SOURCE_INTENTS";w.reason="KNOWN_SAVE_OBLIGATIONS_NOT_ALL_DURABLE";return; }
         RecoveryImage.Encoded image=loadImage(w.descriptor);
-        Ticket ticket=new Ticket(this,w,source,image);w.ticket=ticket;w.transientReleased=false;w.resourcesConfirmed=false;w.preparing=true;
+        Ticket ticket=new Ticket(this,w,source,image);w.ticket=ticket;w.transientReleased=false;w.resourcesConfirmed=false;w.effectClosed=false;w.preparing=true;
         continuePreparation(w);
     }
     private void continuePreparation(Work w)throws IOException {
         Ticket ticket=w.ticket;RecoverySources.Source source=ticket.source;
         boolean current;
         try(var binding=source.gate.enter()) {
-            current=w.restartRetry?source.writers==0&&source.generation==w.reboundGeneration&&sources.current(source):source.current(w.snapshot);
+            current=(w.restartRetry?source.writers==0&&source.generation==w.reboundGeneration&&sources.current(source):source.current(w.snapshot))&&currentPaths(w,source);
         }
         ProRuntime.Subject authority=w.authority;
         if(authority!=null)try(var qualification=authority.commitGate.enter()) {
-            current&=!closing&&authority.terminal&&authority.generation==w.qualification;
+            current&=!closing&&authority.terminal&&authority.generation==w.qualification&&runtime.canonicalSubject(w.subject)==authority;
         } else current=false;
         if(!current) { retire(w,"SAVE_GENERATION_OR_QUALIFICATION_CHANGED");w.state="FENCED";w.reason="SAVE_GENERATION_OR_QUALIFICATION_CHANGED";return; }
         if(!ticket.ready) {
@@ -409,6 +425,7 @@ final class RecoveryStorage implements AutoCloseable {
             w.preparing=false;
             if(result==null||result.length!=3)throw new IOException("INVALID_NATIVE_FINISH_RESULT");
             w.nativeReleased=result[1]==1;
+            if(w.nativeReleased&&(result[0]==1||result[0]==2))w.effectClosed=true;
             w.state=result[0]==1?"COMMIT_QUERY_REQUIRED":result[0]==2?"ROLLBACK_CONFIRMED":"EFFECT_UNKNOWN";
             w.reason="NATIVE_RESULT:"+Arrays.toString(result);ack(fact("RESULT",w,w.reason));
             if(result[0]==2) {
@@ -435,6 +452,7 @@ final class RecoveryStorage implements AutoCloseable {
         long[] result=StorageNative.finish0(ticket,ticket.token,null);
         if(result!=null&&result.length==3) {
             w.nativeReleased=result[1]==1;
+            if(w.nativeReleased&&(result[0]==1||result[0]==2))w.effectClosed=true;
             if(result[0]==2) { w.commitPossible=false;ack(fact("ROLLBACK",w,reason)); }
             else if(result[0]==1) { w.commitPossible=true;w.state="COMMIT_QUERY_REQUIRED"; }
             else if(ticket.commitEntered) { w.commitPossible=true;w.state="EFFECT_UNKNOWN"; }
@@ -451,6 +469,7 @@ final class RecoveryStorage implements AutoCloseable {
                         ||transaction[0]==4&&w.transactionSession!=null&&runtime.journal.processEnded(w.transactionSession));
             } else w.nativeReleased=!w.commitPossible&&runtime.journal.processEnded(d.session);
         }
+        confirmClosedEffect(w);
         RecoverySources.Source source=sources.resolve(d.source,d.code);
         if(source==null) { w.state="WAIT_SOURCE";w.reason="REGISTERED_SOURCE_NOT_LOADED_OR_CODE_CHANGED";return; }
         RecoveryImage.Encoded actual=null;
@@ -479,6 +498,9 @@ final class RecoveryStorage implements AutoCloseable {
                 boolean changed=!w.state.equals("READBACK_CONFIRMED"),released=w.resourcesConfirmed;
                 if(changed)ack(fact("READBACK",w,"IDENTITY_EXPECTED_IMAGE_AND_FULL_PROJECTION_CONFIRMED"));
                 w.readbackEverConfirmed=true;w.state="READBACK_CONFIRMED";w.reason="TASK_MEMORY_SOURCE_AND_RESOURCES_STILL_SEPARATE";
+                RecoverySources.Snapshot original=w.snapshot==null?source.snapshot:w.snapshot;
+                if(w.paths!=null&&original!=null&&original.generation==d.saveGeneration&&original.identity.equals(d.identity)&&original.hash.equals(d.baseline))
+                    sources.projectedReadback(source,original,d.identity,actual,w.paths);
                 if(w.nativeReleased&&w.queryNativeClosed&&!w.resourcesConfirmed) { release(w);ack(fact("RESOURCES",w,"EXECUTOR_BUFFER_AND_NATIVE_HANDLES_RELEASED"));w.resourcesConfirmed=true; }
                 w.lastQuery=Integer.toUnsignedLong(runtime.server.getTickCount());
                 if(changed||!released&&w.resourcesConfirmed)confirmedReadbacks.add(w);
@@ -502,20 +524,28 @@ final class RecoveryStorage implements AutoCloseable {
      * A crash in the first source's commit cannot discard the other already-known saves. */
     private boolean prepareKnownSources(Work current)throws IOException {
         String dependencies=sources.dependencies(current.subject);int budget=16;
+        for(UUID member:runtime.groupTargets(current.subject))for(Work older:bySubject.getOrDefault(member,List.of()))
+            if(older!=current&&sameSource(older,current)&&older.saveGeneration<=current.saveGeneration
+                    &&(older.saveGeneration<current.saveGeneration||!older.subject.equals(current.subject)||!Objects.equals(older.paths,current.paths))){
+                confirmClosedEffect(older);
+                if(!older.effectClosed||!older.nativeReleased||older.preparing){
+                    older.retryAt=0;schedulingChanges.add(older);return false;
+                }
+            }
         List<Work> related=bySubject.getOrDefault(current.subject,List.of());
-        for(Work item:related)if(item.qualification==current.qualification&&!item.originalIntent&&item.snapshot!=null&&item.snapshot.source.current(item.snapshot)) {
+        for(Work item:related)if(item.qualification==current.qualification&&!item.originalIntent&&item.snapshot!=null&&item.snapshot.source.current(item.snapshot)&&currentPaths(item,item.snapshot.source)) {
             if(budget--==0||!prepareIntent(item))return false;
         }
         Map<String,Set<KnownSave>> captured=new HashMap<>();
         for(Work item:related)if(item.qualification==current.qualification&&item.originalIntent) {
             Descriptor descriptor=item.descriptor;
             captured.computeIfAbsent(descriptor.source,key->new HashSet<>()).add(
-                    new KnownSave(descriptor.code,descriptor.saveGeneration,descriptor.identity,descriptor.baseline));
+                    new KnownSave(descriptor.code,descriptor.saveGeneration,descriptor.identity,descriptor.baseline,item.paths));
         }
         for(RecoverySources.Source source:sources.registered()) {
             RecoverySources.Snapshot image=source.snapshot;
             if(image!=null&&!Collections.disjoint(source.subjects,runtime.groupTargets(current.subject))
-                    &&!captured.getOrDefault(source.locator,Set.of()).contains(new KnownSave(source.code,image.generation,image.identity,image.hash)))return false;
+                    &&!captured.getOrDefault(source.locator,Set.of()).contains(new KnownSave(source.code,image.generation,image.identity,image.hash,selectedPaths(image,runtime.groupTargets(current.subject)))))return false;
         }
         if(!sources.dependencies(current.subject).equals(dependencies))return false;
         current.preparedSources=dependencies;return true;
@@ -526,6 +556,7 @@ final class RecoveryStorage implements AutoCloseable {
                 RecoverySources.Snapshot snapshot=w.snapshot;if(snapshot==null)throw new IOException("SAVE_SNAPSHOT_NOT_AVAILABLE");
                 RecoveryImage.Projection projection;
                 Set<UUID> targets=runtime.groupTargets(w.subject);
+                if(!Objects.equals(w.paths,selectedPaths(snapshot,targets)))throw new IOException("SAVE_REMOVAL_SCOPE_CHANGED");
                 try(RecoveryImage.Encoded baseline=snapshot.bytes()) {
                     if(snapshot.selections.stream().anyMatch(selection->targets.contains(selection.subject())))projection=RecoveryImage.project(baseline,snapshot.selections,targets);
                     else {
@@ -572,7 +603,7 @@ final class RecoveryStorage implements AutoCloseable {
         if(!cannotCommit)return;
         ack(fact("NONCOMMIT",w,"ORIGINAL_TRANSACTION_CANNOT_LATER_COMMIT"));w.commitPossible=false;
         ProRuntime.Subject authority=w.authority;
-        if(authority==null||!authority.terminal||authority.generation!=w.qualification) { w.reason="NONCOMMIT_CONFIRMED_CURRENT_QUALIFICATION_REQUIRED";return; }
+        if(authority==null||!authority.terminal||authority.generation!=w.qualification||runtime.canonicalSubject(w.subject)!=authority) { w.reason="NONCOMMIT_CONFIRMED_CURRENT_QUALIFICATION_REQUIRED";return; }
         try(var qualification=authority.commitGate.enter();var binding=source.gate.enter()) {
             if(closing||!authority.terminal||authority.generation!=w.qualification||!sources.current(source)||source.writers!=0)return;
             w.reboundGeneration=source.generation;
@@ -586,6 +617,7 @@ final class RecoveryStorage implements AutoCloseable {
         for(Work item:byOperation.getOrDefault(operation,List.of()))key.append('|').append(item.id).append(':')
             .append(item.saveGeneration).append(':').append(item.state).append(':').append(item.commitPossible)
             .append(':').append(item.nativeReleased).append(':').append(item.transientReleased).append(':').append(item.resourcesConfirmed)
+            .append(':').append(item.effectClosed)
             .append(':').append(item.supersededBy);
         return key.toString();
     }
@@ -641,23 +673,64 @@ final class RecoveryStorage implements AutoCloseable {
         } catch(IOException|IllegalArgumentException invalid) { throw new IllegalArgumentException("ORIGINAL_PATHS_INVALID",invalid); }
     }
     private boolean superseded(Work old) {
-        if(old.running||!old.nativeReleased||!old.transientReleased||!old.resourcesConfirmed||old.queryClosePending||old.queryInput!=null||!old.queryNativeClosed)return false;
+        if(old.running||!old.effectClosed||!old.nativeReleased||!old.transientReleased||!old.resourcesConfirmed||old.queryClosePending||old.queryInput!=null||!old.queryNativeClosed)return false;
         Work newer=successor(old);
         return newer!=null&&(old.readbackEverConfirmed||newer.id.equals(old.supersededBy));
     }
     private Work successor(Work old) {
         long now=Integer.toUnsignedLong(runtime.server.getTickCount());
-        for(Work newer:bySubject.getOrDefault(old.subject,List.of()))if(newer!=old&&newer.qualification==old.qualification
-                &&newer.source.equals(old.source)&&newer.saveGeneration>old.saveGeneration&&newer.state.equals("READBACK_CONFIRMED")
+        for(UUID member:runtime.groupTargets(old.subject))for(Work newer:bySubject.getOrDefault(member,List.of()))if(relatedSuccessor(old,newer)&&newer.state.equals("READBACK_CONFIRMED")
                 &&!newer.running&&newer.resourcesConfirmed&&newer.nativeReleased&&newer.transientReleased&&!newer.queryClosePending&&newer.queryInput==null&&newer.queryNativeClosed
                 &&newer.lastQuery>=0&&now>=newer.lastQuery&&now-newer.lastQuery<=10)return newer;
         return null;
+    }
+    private static String fileIdentity(Work item){return item.descriptor!=null?item.descriptor.identity:item.snapshot==null?null:item.snapshot.identity;}
+    private static boolean sameSource(Work first,Work second){
+        String identity=fileIdentity(first);
+        return identity!=null&&identity.equals(fileIdentity(second))&&first.source.equals(second.source)&&first.code.equals(second.code);
+    }
+    private boolean relatedSuccessor(Work old,Work newer){
+        if(old==newer||!sameSource(old,newer)||newer.saveGeneration<old.saveGeneration)return false;
+        ProRuntime.Subject group=runtime.canonicalSubject(old.subject);
+        if(group==null||!group.terminal||group!=runtime.canonicalSubject(newer.subject)||newer.qualification!=group.generation)return false;
+        if(old.subject.equals(newer.subject)&&(old.qualification!=newer.qualification
+                ||newer.saveGeneration==old.saveGeneration&&Objects.equals(old.paths,newer.paths)))return false;
+        if(old.paths!=null&&newer.paths!=null){
+            boolean covered=true;
+            for(var original:old.paths){boolean found=false;
+                for(var replacement:newer.paths)if(replacement.size()<=original.size()&&original.subList(0,replacement.size()).equals(replacement)){found=true;break;}
+                if(!found){covered=false;break;}
+            }
+            if(covered)return true;
+        }
+        // A confirmed image may become the next actual baseline after its
+        // deleted list entries have been relocated. No old index is reused.
+        return old.readbackEverConfirmed&&old.descriptor!=null&&newer.descriptor!=null&&old.descriptor.expected.equals(newer.descriptor.baseline);
+    }
+    /** Exact original transaction query; a later group image never closes an unknown old effect. */
+    private void confirmClosedEffect(Work item){
+        if(item.effectClosed||item.preparing)return;
+        if(item.descriptor==null){item.effectClosed=item.nativeReleased&&!item.originalIntent&&item.intentAck==null;return;}
+        if(item.transaction==null){
+            item.effectClosed=!item.commitPossible&&item.nativeReleased
+                    &&(item.descriptor.session.equals(runtime.session)||runtime.journal.processEnded(item.descriptor.session));
+            return;
+        }
+        long[] result=StorageNative.queryTransaction0(item.transaction);
+        item.queryNativeClosed=result!=null&&result.length==3&&result[1]==1;
+        if(item.queryNativeClosed&&(result[0]==1||result[0]==2
+                ||result[0]==4&&item.transactionSession!=null&&runtime.journal.processEnded(item.transactionSession)))item.effectClosed=true;
+    }
+    private void discardUnpublished(Work item){
+        if(item.descriptor==null&&!item.originalIntent&&item.intentAck==null&&item.nativeReleased&&item.transientReleased
+                &&!item.queryClosePending&&item.queryInput==null&&work.remove(item.id,item)){unindex(item);changes.incrementAndGet();}
     }
     List<String> remaining(UUID operation) {
         List<String> out=new ArrayList<>();if(!gap.isEmpty())out.add(gap);
         for(Work item:byOperation.getOrDefault(operation,List.of())) {
             if(superseded(item))continue;
             if(!item.state.equals("READBACK_CONFIRMED"))out.add("STORAGE:"+item.id+":"+item.state+":"+item.reason);
+            if(item.commitPossible&&!item.effectClosed)out.add("STORAGE_ORIGINAL_TRANSACTION_TERMINAL_PENDING:"+item.id);
             long now=Integer.toUnsignedLong(runtime.server.getTickCount());
             if(item.lastQuery<0||now<item.lastQuery||now-item.lastQuery>10)out.add("STORAGE_READBACK_EXPIRED:"+item.id);
             if(item.running||!item.nativeReleased||!item.transientReleased||!item.resourcesConfirmed||item.queryClosePending||item.queryInput!=null||!item.queryNativeClosed)

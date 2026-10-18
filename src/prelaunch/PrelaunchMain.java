@@ -17,7 +17,10 @@ import java.util.Map;
 import java.util.Set;
 import java.util.TreeMap;
 import java.util.TreeSet;
+import java.util.Collections;
+import java.util.Objects;
 import java.util.jar.JarFile;
+import dev.ronova.pro.persistence.ModCarriers;
 
 /** Launches the game JVM only after its early Ronova agent and saved target set are ready. */
 public final class PrelaunchMain {
@@ -28,10 +31,17 @@ public final class PrelaunchMain {
         Path working=Path.of(System.getProperty("user.dir")).toAbsolutePath().normalize();
         Path java=Path.of(ProcessHandle.current().info().command().orElseThrow(()->new IOException("GAME_JAVA_UNKNOWN"))).toAbsolutePath().normalize();
         Path core=Path.of(PrelaunchMain.class.getProtectionDomain().getCodeSource().getLocation().toURI()).toAbsolutePath().normalize();
-        int first=0;
-        while(first<arguments.length&&(arguments[first].equals("--java")||arguments[first].equals("--core"))){
+        int first=0;Map<String,String> handoffs=new TreeMap<>();String handoffWorld=null;
+        while(first<arguments.length&&(arguments[first].equals("--java")||arguments[first].equals("--core")
+                ||arguments[first].equals("--handoff-world")||arguments[first].startsWith("--handoff-"))){
             String option=arguments[first++];if(first==arguments.length)throw new IllegalArgumentException("MISSING_PRELAUNCH_OPTION:"+option);
-            Path supplied=working.resolve(arguments[first++]).toAbsolutePath().normalize();if(option.equals("--java"))java=supplied;else core=supplied;
+            String value=arguments[first++];
+            if(option.equals("--handoff-world")){handoffWorld=value;continue;}
+            if(option.startsWith("--handoff-")){
+                String action=option.substring("--handoff-".length());if(!Set.of("upgrade","replace","uninstall").contains(action))throw new IllegalArgumentException("UNKNOWN_HANDOFF_ACTION:"+action);
+                for(String id:normalize(value).split(",")){if(id.isEmpty())throw new IllegalArgumentException("EMPTY_HANDOFF_SELECTION");String old=handoffs.putIfAbsent(id,action);if(old!=null&&!old.equals(action))throw new IllegalArgumentException("CONFLICTING_HANDOFF_ACTION:"+id);}continue;
+            }
+            Path supplied=working.resolve(value).toAbsolutePath().normalize();if(option.equals("--java"))java=supplied;else core=supplied;
         }
         List<String> game=new ArrayList<>(Arrays.asList(arguments).subList(first,arguments.length));
         if(game.isEmpty()){
@@ -45,9 +55,20 @@ public final class PrelaunchMain {
         RestartTargets.Selection restarted;
         try{restarted=RestartTargets.read(working,game);}
         catch(IOException unavailable){throw new IOException("RONOVA_PRELAUNCH_DURABLE_RESTORE_UNAVAILABLE:"+unavailable.getMessage(),unavailable);}
+        if(handoffWorld!=null)restarted=RestartTargets.readWorld(directory.resolve(handoffWorld));
         TreeSet<String> selectedIds=new TreeSet<>(restarted.modes().keySet());
         for(String id:selection.getProperty("stop","").split(","))if(!id.isEmpty())selectedIds.add(id);
         Properties files=modFiles(directory);
+        TreeSet<String> carrierIds=new TreeSet<>(selectedIds);carrierIds.addAll(handoffs.keySet());
+        for(String id:selection.getProperty("protect","").split(","))if(!id.isEmpty())carrierIds.add(id);
+        Map<String,String> carriers=ModCarriers.capture(files,carrierIds);
+        Set<String> handed=new TreeSet<>(handoffs.keySet());
+        for(var group:restarted.groups().values())if(!Collections.disjoint(group.aliases(),handoffs.keySet()))handed.addAll(group.aliases());
+        restarted=ModHandoff.apply(restarted,handoffs,carriers);ModHandoff.requireBindings(restarted,carriers);
+        for(String id:carrierIds){String expected=selection.getProperty("carrier."+id);
+            boolean same="ABSENT".equals(expected)?!carriers.containsKey(id):Objects.equals(expected,carriers.get(id));
+            if(expected!=null&&!same&&!handed.contains(id))throw new IOException("SAVED_MOD_CARRIER_CHANGED_HANDOFF_REQUIRED:"+id);}
+        if(!handed.isEmpty())saveCarrierSelection(directory,handed,carriers);
         Map<String,String> modes=new TreeMap<>();
         String returns=selection.getProperty("returns","default");
         for(String id:selectedIds)modes.put(id,selection.getProperty("returns."+id,restarted.modes().getOrDefault(id,returns)));
@@ -58,6 +79,7 @@ public final class PrelaunchMain {
         String protectedIds=String.join(",",protectedSet);
         String remoteAllowed=selection.getProperty("allow_remote_stop","");
         String remoteProtected=selection.getProperty("allow_remote_protect","");
+        String isolated=selection.getProperty("isolate","");
         Path cache=directory.resolve("ronova-pro/bootstrap-prelaunch");Files.createDirectories(cache);
         Path fileIndex=cache.resolve("mod-files.properties");
         try(var writer=Files.newBufferedWriter(fileIndex,StandardCharsets.UTF_8)){files.store(writer,"Actual local Mod files prepared before the game JVM");}
@@ -82,6 +104,7 @@ public final class PrelaunchMain {
         command.add("-Dronova.pro.prelaunchPrepared=true");
         command.add("-Dronova.pro.gameDirectory="+directory);
         command.add("-Dronova.pro.modFiles="+fileIndex);
+        if(!isolated.isEmpty()){command.add("-Dronova.pro.clientIsolateMods="+isolated);command.add("-Dronova.pro.isolateMods="+isolated);}
         command.add("-Dronova.pro.bootStop="+selected);
         if(!selected.isEmpty())command.add("-Dronova.pro.bootReturns="+returns);
         for(String id:selectedIds){
@@ -128,6 +151,17 @@ public final class PrelaunchMain {
         }
         return files;
     }
+    private static void saveCarrierSelection(Path directory,Set<String> ids,Map<String,String> actual)throws IOException{
+        Path target=directory.resolve("ronova-prelaunch.properties");Properties values=new Properties();
+        if(Files.isRegularFile(target))try(var reader=Files.newBufferedReader(target,StandardCharsets.UTF_8)){values.load(reader);}
+        for(String id:ids)values.setProperty("carrier."+id,actual.getOrDefault(id,"ABSENT"));
+        Path pending=Files.createTempFile(directory,"ronova-handoff-",".tmp");
+        try{
+            try(var writer=Files.newBufferedWriter(pending,StandardCharsets.UTF_8)){values.store(writer,"Local selection and completed artifact handoff");}
+            try(var file=java.nio.channels.FileChannel.open(pending,java.nio.file.StandardOpenOption.WRITE)){file.force(true);}
+            Files.move(pending,target,StandardCopyOption.ATOMIC_MOVE,StandardCopyOption.REPLACE_EXISTING);
+        }finally{Files.deleteIfExists(pending);}
+    }
     private static void expandGroups(TreeSet<String> selected,Map<String,String> modes,Properties files)throws IOException{
         boolean changed;
         do{
@@ -168,8 +202,11 @@ public final class PrelaunchMain {
         Properties properties=new Properties();
         try(var reader=Files.newBufferedReader(configuration,StandardCharsets.UTF_8)){properties.load(reader);}
         Properties selected=new Properties();
-        for(String action:List.of("stop","protect","allow_remote_stop","allow_remote_protect"))
+        for(String action:List.of("stop","protect","allow_remote_stop","allow_remote_protect","isolate"))
             selected.setProperty(action,normalize(properties.getProperty(action,"")));
+        for(String key:properties.stringPropertyNames())if(key.startsWith("carrier.")){
+            String id=key.substring("carrier.".length());if(!normalize(id).equals(id))throw new IOException("INVALID_CARRIER_MOD_ID:"+id);selected.setProperty(key,properties.getProperty(key));
+        }
         String returns=properties.getProperty("returns","default").trim().toLowerCase(java.util.Locale.ROOT);
         if(!List.of("default","null","empty","uuid-fixed","uuid-each","invalid-id").contains(returns))
             throw new IOException("INVALID_RETURN_POLICY:"+returns);
@@ -184,8 +221,7 @@ public final class PrelaunchMain {
         TreeSet<String> names=new TreeSet<>();
         for(String item:selection.split(",")) {
             String name=item.trim().toLowerCase(java.util.Locale.ROOT);if(name.isEmpty())continue;
-            if(!name.matches("[a-z0-9_.-]{2,64}")||name.equals("ronova_pro"))
-                throw new IOException("INVALID_OR_OWN_MOD_ID:"+name);
+            ModCarriers.validId(name);
             names.add(name);
         }
         return String.join(",",names);

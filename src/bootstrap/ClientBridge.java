@@ -1127,7 +1127,13 @@ public final class ClientBridge {
         for(Collection<?> list:lists)retireListeners(list);
     }
     private static void retireListeners(Collection<?> listeners){
-        if(SourceMapBridge.withList(listeners,()->listeners.removeIf(listener->exclusive(sources(listener)))))return;
+        // These are the actual lists obtained from the framework owner. Their
+        // ordinary JDK implementation needs no retired global container hook.
+        // A custom collection may run arbitrary removal callbacks, so retain it.
+        Class<?> type=listeners.getClass();
+        if(type==ArrayList.class||type==LinkedList.class||type==java.util.concurrent.CopyOnWriteArrayList.class){
+            listeners.removeIf(listener->!sourceUnknown(listener)&&exclusive(sources(listener)));return;
+        }
         synchronized(SOURCES){
             if(!REQUESTED.isEmpty())FAILURES.put(new Key(listeners,true),union(FAILURES.get(new Key(listeners,false)),REQUESTED.toArray(Module[]::new)));
         }
@@ -1552,8 +1558,10 @@ public final class ClientBridge {
             synchronized(SOURCES){SOUNDS.put(new Key(engine,true),new SoundRegistry(new Ref<>(instances),new Ref<>(listeners)));}
             Set<Object> queued=Collections.newSetFromMap(new IdentityHashMap<>());
             queued.addAll(((Map<?,?>)field(engine,type,"queuedSounds")).keySet());queued.addAll((Collection<?>)field(engine,type,"queuedTickableSounds"));
-            for(Object sound:queued)if(stopped(sources(sound)))removeSoundRows(engine,type,sound);
+            for(Object sound:queued){Module[] owners=sources(sound);if(!stopped(owners))continue;
+                try{removeSoundRows(engine,type,sound);}catch(ReflectiveOperationException|RuntimeException unavailable){uiFailure(sound,owners,unavailable);}}
             for(var entry:new ArrayList<>(instances.entrySet())){Object sound=entry.getKey();Module[] owners=sources(sound);if(!stopped(owners))continue;
+                try{
                 Object handle=entry.getValue();Class<?> handleType=actualBase(handle,"net.minecraft.client.sounds.ChannelAccess$ChannelHandle");if(handleType==null||handle.getClass()!=handleType)throw new IllegalStateException("ACTUAL_SOUND_HANDLE_CHANGED");
                 Object channel=field(handle,handleType,"channel");Class<?> channelType=channel==null?null:actualBase(channel,"com.mojang.blaze3d.audio.Channel");
                 if(channel!=null&&(channelType==null||channel.getClass()!=channelType))throw new IllegalStateException("ACTUAL_SOUND_CHANNEL_CHANGED");
@@ -1566,13 +1574,14 @@ public final class ClientBridge {
                 synchronized(SOURCES){stop=SOUND_STOPS.get(new Key(handle,false));if(stop==null){stop=new SoundStop(handle,channel,access,handleType,channelType,accessType,selected,source,initialized,sharedChannel,library,libraryType,context);SOUND_STOPS.put(new Key(handle,true),stop);CodeSourceBridge.contributionControl(stop);CodeSourceBridge.contributionControl(stop.modules);}}
                 stop.shared=sharedChannel;if(sharedChannel)stop.pending="CLIENT_SHARED_SOUND_CHANNEL_RETAINED";requestSoundStop(stop);
                 if(instances.get(sound)==handle)instances.remove(sound);removeSoundRows(engine,type,sound);
+                }catch(ReflectiveOperationException|RuntimeException unavailable){uiFailure(sound,owners,unavailable);}
             }
             List<SoundStop> pending;synchronized(SOURCES){pending=new ArrayList<>(SOUND_STOPS.values());}
-            for(SoundStop stop:pending){requestSoundStop(stop);if(!stop.stopped.get())continue;
+            for(SoundStop stop:pending)try{requestSoundStop(stop);if(!stop.stopped.get())continue;
                 Object current=field(stop.handle,stop.handleType,"channel");boolean released=(Boolean)field(stop.handle,stop.handleType,"stopped");Collection<?> handles=(Collection<?>)field(stop.access,stop.accessType,"channels");
                 if(current==null&&released&&!handles.contains(stop.handle)&&(stop.channel==null||stop.deleted.get()))synchronized(SOURCES){SOUND_STOPS.remove(new Key(stop.handle,false));}
-            }
-        }catch(ReflectiveOperationException|RuntimeException unavailable){synchronized(SOURCES){FAILURES.put(new Key(engine,true),ControlBridge.invokingSources());}throw new IllegalStateException("CLIENT_SOUND_RETIREMENT_UNAVAILABLE",unavailable);}
+            }catch(ReflectiveOperationException|RuntimeException unavailable){stop.pending="CLIENT_SOUND_RETIREMENT_UNAVAILABLE:"+unavailable.getClass().getSimpleName();}
+        }catch(ReflectiveOperationException|RuntimeException unavailable){synchronized(SOURCES){FAILURES.put(new Key(engine,true),union(ControlBridge.invokingSources(),REQUESTED.toArray(Module[]::new)));}}
     }
     private static boolean retiredSoundSources(Module[] modules){if(modules.length==0)return false;synchronized(SOURCES){for(Module module:modules)if(!REQUESTED.contains(module)&&!ControlBridge.modStopped(module))return false;}return true;}
     private static boolean soundIdentity(SoundStop stop)throws ReflectiveOperationException{return field(stop.access,stop.accessType,"library")==stop.library&&((Number)field(stop.library,stop.libraryType,"context")).longValue()==stop.context
@@ -1845,12 +1854,12 @@ public final class ClientBridge {
         long sounds=SOUND_STOPS.values().stream().filter(row->Arrays.stream(row.modules).anyMatch(source->source==module)).count();
         String soundState="",reloadState="";
         for(SoundRegistry registry:SOUNDS.values()){Collection<?> listeners=registry.listeners().get();if(listeners!=null){
-            Module[] unavailable=FAILURES.get(new Key(listeners,false));if(unavailable!=null&&Arrays.stream(unavailable).anyMatch(source->source==module))soundState="JDK_CONTAINER_HOOKS_REMOVED";
+            Module[] unavailable=FAILURES.get(new Key(listeners,false));if(unavailable!=null&&Arrays.stream(unavailable).anyMatch(source->source==module))soundState="CLIENT_LISTENER_COLLECTION_LAYOUT_UNSUPPORTED";
             for(Object listener:listeners)if(Arrays.stream(sources(listener)).anyMatch(source->source==module))sounds++;
         }}
         RELOAD_WORK.entrySet().removeIf(entry->entry.getValue().future().isDone());long reloads=RELOAD_WORK.values().stream().filter(row->Arrays.stream(row.modules()).anyMatch(source->source==module)).count();
         for(Ref<Collection<?>> reference:RELOAD_LISTENERS.values()){Collection<?> listeners=reference.get();if(listeners!=null){
-            Module[] unavailable=FAILURES.get(new Key(listeners,false));if(unavailable!=null&&Arrays.stream(unavailable).anyMatch(source->source==module))reloadState="JDK_CONTAINER_HOOKS_REMOVED";
+            Module[] unavailable=FAILURES.get(new Key(listeners,false));if(unavailable!=null&&Arrays.stream(unavailable).anyMatch(source->source==module))reloadState="CLIENT_LISTENER_COLLECTION_LAYOUT_UNSUPPORTED";
             for(Object listener:listeners)if(Arrays.stream(sources(listener)).anyMatch(source->source==module))reloads++;
         }}
         long ui=0;for(var entry:UI_OWNERS.entrySet()){Object owner=entry.getKey().get();if(owner==null)continue;

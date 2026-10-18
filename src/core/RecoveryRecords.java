@@ -38,7 +38,7 @@ final class RecoveryRecords implements AutoCloseable {
         @Override protected Map<String,Field> computeValue(Class<?> type) {
             Map<String,Field> fields=new HashMap<>();
             for(Class<?> owner=type;owner!=null&&owner!=Object.class;owner=owner.getSuperclass())for(Field field:owner.getDeclaredFields())
-                if(field.trySetAccessible())fields.putIfAbsent(field.getName()+":"+field.getType().descriptorString(),field);
+                fields.putIfAbsent(field.getName()+":"+field.getType().descriptorString(),field);
             return Map.copyOf(fields);
         }
     };
@@ -139,12 +139,13 @@ final class RecoveryRecords implements AutoCloseable {
         if(Modifier.isStatic(field.getModifiers())!=(receiver instanceof Class<?>))return null;
         if(receiver instanceof Class<?>)receiver=field.getDeclaringClass();
         Object value=packet[4];
-        try {if(!sameFieldValue(field,field.get(receiver instanceof Class<?>?null:receiver),value))return null;}
-        catch(IllegalAccessException unavailable){return null;}
+        try {if(!field.trySetAccessible()||!sameFieldValue(field,field.get(receiver instanceof Class<?>?null:receiver),value))return null;}
+        catch(IllegalAccessException|RuntimeException unavailable){return null;}
         FieldRead read=fieldRead(receiver,field.getDeclaringClass(),name);
         FieldRead previous=read;
         if(read!=null&&!sameFieldValue(field,read.value(),value))read=null;
         if(read==null) {
+            SourceMaps.observeHolder(receiver);
             synchronized(fieldReads) {
                 fieldReads.removeIf(old->old.holder.get()==null||old.value()==null&&old.consumers.isEmpty());
                 read=new FieldRead(field,receiver,value);fieldReads.add(read);

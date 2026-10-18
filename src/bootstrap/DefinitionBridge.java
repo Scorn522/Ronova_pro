@@ -28,7 +28,7 @@ public final class DefinitionBridge {
             while(cursor.hasNext()) {
                 var frame=cursor.next();Class<?> type=frame.getDeclaringClass();
                 if(type.getNestHost()==DefinitionBridge.class)continue;
-                if(type==MethodHandles.class||type==MethodHandles.Lookup.class){platform=true;continue;}
+                if(type==MethodHandles.class||type==MethodHandles.Lookup.class||type==ClassLoader.class){platform=true;continue;}
                 if(!platform)return null;
                 if(handleProxy&&java.lang.reflect.Proxy.isProxyClass(type)){handleProxy=false;continue;}
                 // These are the VM's actual reflection and method-handle adapters.
@@ -172,7 +172,7 @@ public final class DefinitionBridge {
         // A borrowed platform Lookup does not turn a Mod's explicit definition
         // into trusted platform code. Use this actual API consumer, not an older
         // Mod frame underneath unrelated library execution.
-        if(lookupClass!=null&&(owner==null||!ControlBridge.producer(owner))) {
+        if((lookupClass!=null||host instanceof ClassLoader)&&(owner==null||!ControlBridge.producer(owner))) {
             Class<?> consumer=WALKER.walk(LOOKUP_CONSUMER);
             if(consumer!=null&&ControlBridge.producer(module(consumer)))owner=module(consumer);
         }
@@ -228,6 +228,15 @@ public final class DefinitionBridge {
             boolean matches=scope.loader==actual.getClassLoader()&&(name.equals(scope.name)||actual.isHidden()&&name.startsWith(scope.name+"/0x"));
             if(matches)accepted(actual,scope);else throw new SecurityException("ACTUAL_DEFINITION_SCOPE_REQUIRED");
         }
+    }
+    /** ClassPrepare runs before a hidden initializer. Only the already verified
+     * VM callback may join this real current definition scope to its Class. */
+    static void prepared(Class<?> actual){
+        if(WALKER.getCallerClass()!=CodeSourceBridge.class)throw new SecurityException("ACTUAL_VM_CLASS_PREPARATION_REQUIRED");
+        Scope scope;synchronized(CURRENT){scope=CURRENT.get(Thread.currentThread());}
+        if(scope==null||scope.module==null||scope.loader!=actual.getClassLoader())return;
+        String name=actual.getName().replace('.','/');
+        if(name.equals(scope.name)||actual.isHidden()&&name.startsWith(scope.name+"/0x"))accepted(actual,scope);
     }
     public static void after(Object token) {
         Scope scope=scope(token);leave(scope);

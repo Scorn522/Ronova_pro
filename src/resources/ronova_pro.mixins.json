@@ -61,6 +61,8 @@
     "WorldControlHooks$PlayerMovement",
     "BlockGroupHooks$Body",
     "BlockGroupHooks$Holder",
+    "BlockGroupHooks$PartAccess",
+    "BlockGroupHooks$NavigationAccess",
     "ConnectionHooks",
     "IndexHooks$Lookup",
     "IndexHooks$Ticking",

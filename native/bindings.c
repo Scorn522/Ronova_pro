@@ -37,7 +37,7 @@ typedef struct CodeExit {
 } CodeExit;
 typedef struct NativeUnsafeFrame {jobject token;uint64_t expected;} NativeUnsafeFrame;
 enum { UNSAFE_PUT=1,UNSAFE_CAS,UNSAFE_EXCHANGE,UNSAFE_SET,UNSAFE_COPY,UNSAFE_SWAP,UNSAFE_ALLOCATE,UNSAFE_REALLOCATE,UNSAFE_FREE,UNSAFE_READ };
-typedef struct NativeFileFrame {jobject receiver,token;jclass declaring;jstring method;jobjectArray sources,references;jlongArray arguments;jint operation;jlong address,length;int finishing;} NativeFileFrame;
+typedef struct NativeFileFrame {jobject receiver,token;jclass declaring;jstring method,path;jobjectArray sources,references;jlongArray arguments;jint operation;jlong address,length;int finishing;} NativeFileFrame;
 typedef struct NativeBindingSeed {jmethodID method;jclass declaring;uintptr_t version[3];int captured;struct NativeBindingSeed *previous;} NativeBindingSeed;
 typedef struct NativeThreadFrame {jobject receiver,token;jobjectArray sources;jint operation;int finishing,completed,skipped,tokenGlobal;} NativeThreadFrame;
 typedef struct NativeUnsafeMutation {jobject receiver,source;jstring kind;jlong offset,length,sourceOffset;jboolean bulk,reading,copy;struct NativeUnsafeMutation *previous;} NativeUnsafeMutation;
@@ -1311,6 +1311,11 @@ static int native_tooling_stopped(JNIEnv *env,void *caller){
     for(NativeToolingScope *p=state?state->tooling:NULL;p;p=p->previous)if(native_owner_stopped(p->owners))return 1;
     return native_jni_ready&&env&&native_stopped(env);
 }
+static int native_tooling_effect_stopped(NativeToolingEnv *record,JNIEnv *env,void *caller){
+    /* Passing an actual environment through another caller does not erase its
+     * acquisition source. These owners live for the retained environment. */
+    return native_owner_stopped(record->owners)||native_tooling_stopped(env,caller);
+}
 /* The context is an extra first Win64 argument. Each VM callback contains its
  * immutable slot directly, so a replaced callback never borrows the new table's
  * provenance. All public JDK 17 event arguments occupy integer ABI slots. */
@@ -1553,11 +1558,11 @@ static void JNICALL native_tooling_agent(jvmtiEnv *api,JNIEnv *env,void *argumen
 }
 static NativeToolingSlot *native_tooling_slot(JNIEnv *env,NativeToolingEnv *record,void *callback,void *wrapper,unsigned arguments,OwnerLink *writers,jweak origin,int unknown,int agent){
     NativeToolingSlot *slot=calloc(1,sizeof(*slot));if(!slot)return NULL;
-    slot->environment=record;slot->callback=callback;slot->unknown=unknown;slot->agent=agent;
-    int ready=native_owner_merge(&slot->owners,writers)&&native_capture_image_owners(callback,&slot->owners);
+    slot->environment=record;slot->callback=callback;slot->unknown=unknown||record->unknown;slot->agent=agent;
+    int ready=native_owner_merge(&slot->owners,record->owners)&&native_owner_merge(&slot->owners,writers)&&native_capture_image_owners(callback,&slot->owners);
     if(origin&&env&&native_original.NewWeakGlobalRef)slot->origin=native_original.NewWeakGlobalRef(env,origin);
     if(slot->owners&&env&&native_original.NewGlobalRef){jobjectArray lease=native_tooling_writers(env,slot->owners);
-        if(lease){slot->sourceLeaseComplete=!unknown&&host_module_sources_complete(env,lease);
+        if(lease){slot->sourceLeaseComplete=!slot->unknown&&host_module_sources_complete(env,lease);
             slot->sourceLease=(jobjectArray)native_original.NewGlobalRef(env,lease);native_original.DeleteLocalRef(env,lease);}ready=ready&&slot->sourceLease;}
     slot->image=native_image(callback);
     if(slot->image&&!GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS,(LPCSTR)callback,&slot->pin))ready=0;
@@ -1709,8 +1714,8 @@ static jvmtiError JNICALL native_tooling_set_callbacks(jvmtiEnv *api,const jvmti
     void *caller=__builtin_return_address(0);if(record->own){if(!native_tooling_internal(caller))return native_tooling_error(JVMTI_ERROR_ACCESS_DENIED);return record->original->SetEventCallbacks(api,callbacks,size);}
     if(size<0)return JVMTI_ERROR_ILLEGAL_ARGUMENT;
     JNIEnv *env=native_tooling_jni();OwnerLink *owners=NULL;jweak origin=NULL;int unknown=0;
-    if(!callbacks&&native_tooling_stopped(env,caller)&&!native_tooling_cessation(record,-1))return native_tooling_error(JVMTI_ERROR_ACCESS_DENIED);
-    if(callbacks&&(native_tooling_stopped(env,caller)||!native_tooling_capture(env,caller,&owners,&origin,&unknown))){native_owner_links_free(owners);return native_tooling_error(JVMTI_ERROR_ACCESS_DENIED);}
+    if(!callbacks&&native_tooling_effect_stopped(record,env,caller)&&!native_tooling_cessation(record,-1))return native_tooling_error(JVMTI_ERROR_ACCESS_DENIED);
+    if(callbacks&&(native_tooling_effect_stopped(record,env,caller)||!native_tooling_capture(env,caller,&owners,&origin,&unknown))){native_owner_links_free(owners);return native_tooling_error(JVMTI_ERROR_ACCESS_DENIED);}
     NativeToolingVersion *version=calloc(1,sizeof(*version));jvmtiEventCallbacks submitted;memset(&submitted,0,sizeof(submitted));
     SIZE_T copied=0;size_t length=size<(jint)sizeof(submitted)?(size_t)size:sizeof(submitted);
     int ready=version&&(!callbacks||!length||host_real_read_process_memory(GetCurrentProcess(),callbacks,&submitted,length,&copied)&&copied==length);
@@ -1740,14 +1745,14 @@ static jvmtiError JNICALL native_tooling_mode(jvmtiEnv *api,jvmtiEventMode mode,
     NativeToolingEnv *record=native_tooling_environment(api);if(!record)return native_tooling_restricted()?JVMTI_ERROR_NOT_AVAILABLE:JVMTI_ERROR_INVALID_ENVIRONMENT;
     TOOLING_USE(record);
     void *caller=__builtin_return_address(0);
-    if(record->own&&!native_tooling_internal(caller)||native_tooling_stopped(native_tooling_jni(),caller)
+    if(record->own&&!native_tooling_internal(caller)||native_tooling_effect_stopped(record,native_tooling_jni(),caller)
             &&(mode!=JVMTI_DISABLE||!native_tooling_cessation(record,event)))return native_tooling_error(JVMTI_ERROR_ACCESS_DENIED);
     return record->original->SetEventNotificationMode(api,mode,event,thread);
 }
 static jvmtiError JNICALL native_tooling_dispose(jvmtiEnv *api){
     NativeToolingEnv *record=native_tooling_environment(api);if(!record)return native_tooling_restricted()?JVMTI_ERROR_NOT_AVAILABLE:JVMTI_ERROR_INVALID_ENVIRONMENT;
     if(record->own)return native_tooling_error(JVMTI_ERROR_ACCESS_DENIED);
-    if(native_tooling_stopped(native_tooling_jni(),__builtin_return_address(0))&&!native_tooling_cessation(record,-1))return native_tooling_error(JVMTI_ERROR_ACCESS_DENIED);
+    if(native_tooling_effect_stopped(record,native_tooling_jni(),__builtin_return_address(0))&&!native_tooling_cessation(record,-1))return native_tooling_error(JVMTI_ERROR_ACCESS_DENIED);
     AcquireSRWLockExclusive(&record->mutation);
     jvmtiError result=native_tooling_dispose_idle(record,0);
     ReleaseSRWLockExclusive(&record->mutation);return result;
@@ -1756,21 +1761,21 @@ static jvmtiError JNICALL native_tooling_add_capabilities(jvmtiEnv *api,const jv
     NativeToolingEnv *record=native_tooling_environment(api);if(!record)return native_tooling_restricted()?JVMTI_ERROR_NOT_AVAILABLE:JVMTI_ERROR_INVALID_ENVIRONMENT;
     TOOLING_USE(record);
     void *caller=__builtin_return_address(0);
-    if(record->own&&!native_tooling_internal(caller)||native_tooling_stopped(native_tooling_jni(),caller))return native_tooling_error(JVMTI_ERROR_ACCESS_DENIED);
+    if(record->own&&!native_tooling_internal(caller)||native_tooling_effect_stopped(record,native_tooling_jni(),caller))return native_tooling_error(JVMTI_ERROR_ACCESS_DENIED);
     return record->original->AddCapabilities(api,capabilities);
 }
 static jvmtiError JNICALL native_tooling_relinquish(jvmtiEnv *api,const jvmtiCapabilities *capabilities){
     NativeToolingEnv *record=native_tooling_environment(api);if(!record)return native_tooling_restricted()?JVMTI_ERROR_NOT_AVAILABLE:JVMTI_ERROR_INVALID_ENVIRONMENT;
     TOOLING_USE(record);
     if(record->own)return native_tooling_error(JVMTI_ERROR_ACCESS_DENIED);
-    if(native_tooling_stopped(native_tooling_jni(),__builtin_return_address(0))&&!native_tooling_cessation(record,-1))return native_tooling_error(JVMTI_ERROR_ACCESS_DENIED);
+    if(native_tooling_effect_stopped(record,native_tooling_jni(),__builtin_return_address(0))&&!native_tooling_cessation(record,-1))return native_tooling_error(JVMTI_ERROR_ACCESS_DENIED);
     return record->original->RelinquishCapabilities(api,capabilities);
 }
 static jvmtiError JNICALL native_tooling_set_jni(jvmtiEnv *api,const jniNativeInterface *table){
     NativeToolingEnv *record=native_tooling_environment(api);if(!record)return native_tooling_restricted()?JVMTI_ERROR_NOT_AVAILABLE:JVMTI_ERROR_INVALID_ENVIRONMENT;
     TOOLING_USE(record);
     void *caller=__builtin_return_address(0);
-    if(record->own&&!native_tooling_internal(caller)||native_tooling_stopped(native_tooling_jni(),caller))return native_tooling_error(JVMTI_ERROR_ACCESS_DENIED);
+    if(record->own&&!native_tooling_internal(caller)||native_tooling_effect_stopped(record,native_tooling_jni(),caller))return native_tooling_error(JVMTI_ERROR_ACCESS_DENIED);
     if(!table)return JVMTI_ERROR_NULL_POINTER;
     if(InterlockedCompareExchange(&native_guarded_ready,0,0)){
         jniNativeInterface incoming;SIZE_T copied=0;
@@ -1788,7 +1793,7 @@ static jvmtiError JNICALL native_tooling_set_jni(jvmtiEnv *api,const jniNativeIn
 static jvmtiError JNICALL native_tooling_generate(jvmtiEnv *api,jvmtiEvent event){
     NativeToolingEnv *record=native_tooling_environment(api);if(!record)return native_tooling_restricted()?JVMTI_ERROR_NOT_AVAILABLE:JVMTI_ERROR_INVALID_ENVIRONMENT;
     TOOLING_USE(record);
-    if(record->own&&!native_tooling_internal(__builtin_return_address(0))||native_tooling_stopped(native_tooling_jni(),__builtin_return_address(0)))return native_tooling_error(JVMTI_ERROR_ACCESS_DENIED);
+    if(record->own&&!native_tooling_internal(__builtin_return_address(0))||native_tooling_effect_stopped(record,native_tooling_jni(),__builtin_return_address(0)))return native_tooling_error(JVMTI_ERROR_ACCESS_DENIED);
     return record->original->GenerateEvents(api,event);
 }
 #define COMMA ,
@@ -1797,12 +1802,17 @@ static jvmtiError JNICALL native_tooling_##NAME(jvmtiEnv *api,DECL){ \
     NativeToolingEnv *record=native_tooling_environment(api);if(!record)return native_tooling_restricted()?JVMTI_ERROR_NOT_AVAILABLE:JVMTI_ERROR_INVALID_ENVIRONMENT; \
     TOOLING_USE(record); \
     void *caller=__builtin_return_address(0); \
-    if(record->own&&!native_tooling_internal(caller)||native_tooling_stopped(native_tooling_jni(),caller) \
+    if(record->own&&!native_tooling_internal(caller)||native_tooling_effect_stopped(record,native_tooling_jni(),caller) \
             &&(!(CLEARING)||!native_tooling_cessation(record,-1)))return native_tooling_error(JVMTI_ERROR_ACCESS_DENIED); \
     return record->original->NAME(api,CALL); \
 }
 TOOLING_ENV_MUTATION(SetNativeMethodPrefix,0,const char *prefix,prefix)
 TOOLING_ENV_MUTATION(SetNativeMethodPrefixes,0,jint count COMMA char **prefixes,count COMMA prefixes)
+/* These change the VM's future class search itself. They use the same actual
+ * environment/caller gate as module mutations, including before Java control
+ * installation; an ordinary JPLIS premain call keeps the VM's own contract. */
+TOOLING_ENV_MUTATION(AddToBootstrapClassLoaderSearch,0,const char *segment,segment)
+TOOLING_ENV_MUTATION(AddToSystemClassLoaderSearch,0,const char *segment,segment)
 TOOLING_ENV_MUTATION(SetFieldModificationWatch,0,jclass type COMMA jfieldID field,type COMMA field)
 TOOLING_ENV_MUTATION(ClearFieldModificationWatch,1,jclass type COMMA jfieldID field,type COMMA field)
 TOOLING_ENV_MUTATION(SetFieldAccessWatch,0,jclass type COMMA jfieldID field,type COMMA field)
@@ -1825,6 +1835,7 @@ static jvmtiError JNICALL native_tooling_SetEnvironmentLocalStorage(jvmtiEnv *ap
         NativeToolingEnv *record=state->toolingCallbackEnvironment;
         if(!record||record->api!=api)return JVMTI_ERROR_INVALID_ENVIRONMENT;
         if(record->closing||record->disposed||native_tooling_shutdown)return JVMTI_ERROR_NOT_AVAILABLE;
+        if(native_owner_stopped(record->owners))return JVMTI_ERROR_ACCESS_DENIED;
         uintptr_t address=(uintptr_t)caller;
         if(record->own&&(address<native_tooling_image_begin||address>=native_tooling_image_end))return JVMTI_ERROR_ACCESS_DENIED;
         for(NativeToolingScope *scope=state->tooling;scope;scope=scope->previous)
@@ -1835,7 +1846,7 @@ static jvmtiError JNICALL native_tooling_SetEnvironmentLocalStorage(jvmtiEnv *ap
     }
     NativeToolingEnv *record=native_tooling_environment(api);if(!record)return JVMTI_ERROR_INVALID_ENVIRONMENT;
     TOOLING_USE(record);
-    if(record->own&&!native_tooling_internal(caller)||native_tooling_stopped(native_tooling_jni(),caller))return native_tooling_error(JVMTI_ERROR_ACCESS_DENIED);
+    if(record->own&&!native_tooling_internal(caller)||native_tooling_effect_stopped(record,native_tooling_jni(),caller))return native_tooling_error(JVMTI_ERROR_ACCESS_DENIED);
     return record->original->SetEnvironmentLocalStorage(api,data);
 }
 #include "tooling_output_gate.c"
@@ -1844,9 +1855,9 @@ static jvmtiError JNICALL native_tooling_SetEnvironmentLocalStorage(jvmtiEnv *ap
 /* Reuse the actual Thread/Runnable/scheduler policy. The same frame identity
  * that proves a JNI thread call proves this JVMTI call, without Java publication
  * of a fabricated producer or a borrowed deeper controller frame. */
-static jvmtiError native_tooling_thread_begin(JNIEnv *env,jthread thread,jint operation,void *caller,NativeThreadFrame *frame){
+static jvmtiError native_tooling_thread_begin(NativeToolingEnv *record,JNIEnv *env,jthread thread,jint operation,void *caller,NativeThreadFrame *frame){
     memset(frame,0,sizeof(*frame));
-    if(native_tooling_stopped(env,caller))return native_tooling_error(JVMTI_ERROR_ACCESS_DENIED);
+    if(native_tooling_effect_stopped(record,env,caller))return native_tooling_error(JVMTI_ERROR_ACCESS_DENIED);
     if(!native_jni_ready)return JVMTI_ERROR_NONE;
     NativeThread *state=native_thread();if(!env||!state||!native_tooling_thread_query)return native_tooling_error(JVMTI_ERROR_NOT_AVAILABLE);
     if(native_original.ExceptionCheck(env))return native_tooling_error(JVMTI_ERROR_ACCESS_DENIED);
@@ -1854,7 +1865,7 @@ static jvmtiError native_tooling_thread_begin(JNIEnv *env,jthread thread,jint op
     if(!thread){jvmtiError result=(*native_ti)->GetCurrentThread(native_ti,&current);if(result!=JVMTI_ERROR_NONE)return result;thread=current;}
     if(!thread)return JVMTI_ERROR_INVALID_THREAD;
     OwnerLink *owners=NULL;jweak origin=NULL;int unknown=0;
-    int ready=native_tooling_capture(env,caller,&owners,&origin,&unknown);
+    int ready=native_tooling_capture(env,caller,&owners,&origin,&unknown)&&native_owner_merge(&owners,record->owners);unknown|=record->unknown;
     if(origin)native_original.DeleteWeakGlobalRef(env,origin);
     frame->operation=operation;frame->receiver=native_original.NewGlobalRef(env,thread);
     if(current)native_original.DeleteLocalRef(env,current);
@@ -1916,7 +1927,7 @@ static jvmtiError JNICALL native_tooling_##NAME(jvmtiEnv *api,jthread thread DEC
     TOOLING_USE(record); \
     void *caller=__builtin_return_address(0);if(record->own&&!native_tooling_internal(caller))return native_tooling_error(JVMTI_ERROR_ACCESS_DENIED); \
     JNIEnv *env=native_tooling_jni();NativeToolingFrame observed={0};jvmtiError result=(FRAME_DEPTH)>=0?native_tooling_frame(env,thread,(FRAME_DEPTH),caller,&observed):JVMTI_ERROR_NONE; \
-    if(result!=JVMTI_ERROR_NONE)return result;NativeThreadFrame frame;result=native_tooling_thread_begin(env,thread,OPERATION,caller,&frame); \
+    if(result!=JVMTI_ERROR_NONE)return result;NativeThreadFrame frame;result=native_tooling_thread_begin(record,env,thread,OPERATION,caller,&frame); \
     if(result==JVMTI_ERROR_NONE&&(FRAME_DEPTH)>=0)result=native_tooling_frame_current(thread,(FRAME_DEPTH),&observed); \
     if(result==JVMTI_ERROR_NONE)result=record->original->NAME(api,thread CALL);native_tooling_thread_end_call(env,&frame,result);return result; \
 }
@@ -1941,7 +1952,7 @@ TOOLING_THREAD_EFFECT(SetLocalDouble,3,depth,COMMA jint depth COMMA jint slot CO
 static jvmtiError native_tooling_thread_list(jvmtiEnv *api,jint count,const jthread *threads,jvmtiError *results,int resume,void *caller){
     NativeToolingEnv *record=native_tooling_environment(api);if(!record)return native_tooling_restricted()?JVMTI_ERROR_NOT_AVAILABLE:JVMTI_ERROR_INVALID_ENVIRONMENT;
     TOOLING_USE(record);
-    if(record->own&&!native_tooling_internal(caller)||native_tooling_stopped(native_tooling_jni(),caller))return native_tooling_error(JVMTI_ERROR_ACCESS_DENIED);
+    if(record->own&&!native_tooling_internal(caller)||native_tooling_effect_stopped(record,native_tooling_jni(),caller))return native_tooling_error(JVMTI_ERROR_ACCESS_DENIED);
     if(count<0)return JVMTI_ERROR_ILLEGAL_ARGUMENT;if(!threads||!results)return JVMTI_ERROR_NULL_POINTER;
     if(!count)return resume?record->original->ResumeThreadList(api,count,threads,results):record->original->SuspendThreadList(api,count,threads,results);
     /* This destination is supplied by the caller. Check it before applying any
@@ -1958,7 +1969,7 @@ static jvmtiError native_tooling_thread_list(jvmtiEnv *api,jint count,const jthr
     jvmtiError result=JVMTI_ERROR_NONE;
     if(!host_real_read_process_memory(GetCurrentProcess(),threads,snapshot,length,&copied)||copied!=length)result=JVMTI_ERROR_ILLEGAL_ARGUMENT;
     if(result==JVMTI_ERROR_NONE){for(jint i=0;i<count;i++){
-            effects[i]=native_tooling_thread_begin(env,snapshot[i],resume?5:4,caller,&frames[i]);
+            effects[i]=native_tooling_thread_begin(record,env,snapshot[i],resume?5:4,caller,&frames[i]);
             if(effects[i]==JVMTI_ERROR_NONE)allowed[selected++]=snapshot[i];
         }
         jvmtiError *partial=(jvmtiError*)calloc((size_t)(selected?selected:1),sizeof(*partial));
@@ -1988,10 +1999,10 @@ static jvmtiError JNICALL native_tooling_run_agent(jvmtiEnv *api,jthread thread,
     TOOLING_USE(record);
     JNIEnv *env=native_tooling_jni();void *caller=__builtin_return_address(0);OwnerLink *owners=NULL;jweak origin=NULL;int unknown=0;
     if(!callback)return JVMTI_ERROR_NULL_POINTER;
-    if(record->own&&!native_tooling_internal(caller)||native_tooling_stopped(env,caller)||!native_tooling_capture(env,caller,&owners,&origin,&unknown)){native_owner_links_free(owners);return native_tooling_error(JVMTI_ERROR_ACCESS_DENIED);}
+    if(record->own&&!native_tooling_internal(caller)||native_tooling_effect_stopped(record,env,caller)||!native_tooling_capture(env,caller,&owners,&origin,&unknown)){native_owner_links_free(owners);return native_tooling_error(JVMTI_ERROR_ACCESS_DENIED);}
     NativeToolingSlot *slot=native_tooling_slot(env,record,(void*)callback,NULL,3,owners,origin,unknown,1);
     if(origin)native_original.DeleteWeakGlobalRef(env,origin);native_owner_links_free(owners);if(!slot)return native_tooling_error(JVMTI_ERROR_OUT_OF_MEMORY);
-    NativeThreadFrame frame;jvmtiError result=native_tooling_thread_begin(env,thread,1,caller,&frame);
+    NativeThreadFrame frame;jvmtiError result=native_tooling_thread_begin(record,env,thread,1,caller,&frame);
     slot->argument=argument;if(result==JVMTI_ERROR_NONE)result=record->original->RunAgentThread(api,thread,native_tooling_agent,slot,priority);
     native_tooling_thread_end_call(env,&frame,result);
     if(result!=JVMTI_ERROR_NONE)native_tooling_slot_retire(slot);return result;
@@ -2022,6 +2033,7 @@ static int native_tooling_observe(jvmtiEnv *api,JNIEnv *env,void *caller,int own
     shadow->SetJNIFunctionTable=native_tooling_set_jni;shadow->RedefineClasses=native_tooling_redefine;shadow->RetransformClasses=native_tooling_retransform;
     shadow->GenerateEvents=native_tooling_generate;shadow->RunAgentThread=native_tooling_run_agent;shadow->SetExtensionEventCallback=native_tooling_extension;
     shadow->SetEnvironmentLocalStorage=native_tooling_SetEnvironmentLocalStorage;shadow->SetNativeMethodPrefix=native_tooling_SetNativeMethodPrefix;shadow->SetNativeMethodPrefixes=native_tooling_SetNativeMethodPrefixes;
+    shadow->AddToBootstrapClassLoaderSearch=native_tooling_AddToBootstrapClassLoaderSearch;shadow->AddToSystemClassLoaderSearch=native_tooling_AddToSystemClassLoaderSearch;
     shadow->SetFieldModificationWatch=native_tooling_SetFieldModificationWatch;shadow->ClearFieldModificationWatch=native_tooling_ClearFieldModificationWatch;
     shadow->SetFieldAccessWatch=native_tooling_SetFieldAccessWatch;shadow->ClearFieldAccessWatch=native_tooling_ClearFieldAccessWatch;
     shadow->SetBreakpoint=native_tooling_SetBreakpoint;shadow->ClearBreakpoint=native_tooling_ClearBreakpoint;shadow->NotifyFramePop=native_tooling_NotifyFramePop;shadow->SetTag=native_tooling_SetTag;

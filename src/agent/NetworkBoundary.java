@@ -28,6 +28,11 @@ final class NetworkBoundary {
         String packetField=name.equals(HOLDER)?uniqueField(node,PACKET):null,listenerField=name.equals(HOLDER)?uniqueField(node,LISTENER):null;
         for(MethodNode method:node.methods){
             if((method.access&(Opcodes.ACC_ABSTRACT|Opcodes.ACC_NATIVE))!=0)continue;
+            // The codec's two real maps publish under this same receiver as
+            // whole-group retirement. Readers must see that publication too.
+            if(name.equals(CODEC)&&Set.of("addCodecIndex","findMessageType","findIndex").contains(method.name)){
+                method.access|=Opcodes.ACC_SYNCHRONIZED;changed=true;
+            }
             Type[] args=Type.getArgumentTypes(method.desc);int[] vars=locals(method,args);Type result=Type.getReturnType(method.desc);
             if(method.name.equals("<init>")){
                 if(name.equals(INSTANCE)&&args.length==4){returns(method,code-> {code.add(new VarInsnNode(Opcodes.ALOAD,0));code.add(new VarInsnNode(Opcodes.ALOAD,vars[0]));call(code,"channelCreated","(Ljava/lang/Object;Ljava/lang/Object;)V");});changed=true;}
@@ -43,7 +48,12 @@ final class NetworkBoundary {
             }
             if(connection!=null)connectionCalls(method,connection);
             if(name.equals(REGISTRY)&&method.name.equals("createInstance")&&result.getDescriptor().equals("L"+INSTANCE+";")){
+                registrationGate(method,false);
                 returns(method,code->{code.add(new InsnNode(Opcodes.DUP));call(code,"routePublished","(Ljava/lang/Object;)V");});changed=true;
+            }
+            if(name.equals(CODEC)&&method.name.equals("addCodecIndex")&&result.getDescriptor().equals("L"+HANDLER+";")){
+                registrationGate(method,true);
+                returns(method,code->{code.add(new InsnNode(Opcodes.DUP));code.add(new VarInsnNode(Opcodes.ALOAD,0));code.add(new InsnNode(Opcodes.SWAP));call(code,"handlerPublished","(Ljava/lang/Object;Ljava/lang/Object;)V");});changed=true;
             }
             if(name.equals(INSTANCE)&&Set.of("dispatch","dispatchGatherLogin","dispatchLoginPacket","dispatchEvent","addListener","addGatherListener","registerObject").contains(method.name)){
                 InsnList guard=gate(0,"channelAllowed");if(result.getSort()==Type.BOOLEAN){guard.add(new InsnNode(Opcodes.ICONST_1));guard.add(new InsnNode(Opcodes.IRETURN));}else guard.add(new InsnNode(Opcodes.RETURN));endGate(guard);method.instructions.insert(guard);
@@ -420,6 +430,14 @@ final class NetworkBoundary {
         // These action-local handlers must precede any original Netty handler;
         // only the merged failure escapes after the exact cleanup scope closes.
         method.tryCatchBlocks.add(0,new TryCatchBlockNode(start,end,handler,"java/lang/Throwable"));
+    }
+    private static void registrationGate(MethodNode method,boolean receiver){
+        InsnList code=new InsnList();LabelNode allowed=new LabelNode();
+        code.add(receiver?new VarInsnNode(Opcodes.ALOAD,0):new InsnNode(Opcodes.ACONST_NULL));
+        call(code,"registrationAllowed","(Ljava/lang/Object;)Z");code.add(new JumpInsnNode(Opcodes.IFNE,allowed));
+        code.add(new TypeInsnNode(Opcodes.NEW,"java/lang/SecurityException"));code.add(new InsnNode(Opcodes.DUP));
+        code.add(new LdcInsnNode("STOPPED_MOD_NETWORK_REGISTRATION"));code.add(new MethodInsnNode(Opcodes.INVOKESPECIAL,"java/lang/SecurityException","<init>","(Ljava/lang/String;)V",false));
+        code.add(new InsnNode(Opcodes.ATHROW));code.add(allowed);method.instructions.insert(code);
     }
     private static InsnList gate(int value,String operation){InsnList code=new InsnList();code.add(new VarInsnNode(Opcodes.ALOAD,value));call(code,operation,"(Ljava/lang/Object;)Z");code.add(new JumpInsnNode(Opcodes.IFNE,new LabelNode()));return code;}
     private static void endGate(InsnList code){for(AbstractInsnNode at:code.toArray())if(at instanceof JumpInsnNode jump&&jump.getOpcode()==Opcodes.IFNE){code.add(jump.label);return;}}

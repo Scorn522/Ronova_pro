@@ -179,6 +179,7 @@ public final class TaskBridge {
             retiring=SCHEDULER_RETIREMENTS.get(key);
             if(retiring==null){retiring=new SchedulerRetirement(selected);SCHEDULER_RETIREMENTS.put(key,retiring);}
             if(retiring.finished)return List.copyOf(retiring.removed);
+            if(retiring.resultUnknown)throw new IllegalStateException("SCHEDULER_DRAIN_RESULT_UNOBSERVED");
             // The same monitor admits platform submissions. Seal the pool here,
             // but never hold this metadata monitor across shutdown callbacks.
             retiring.invoking=true;
@@ -496,6 +497,9 @@ public final class TaskBridge {
         return retireTimer(value,new Module[]{module});
     }
     public static java.util.List<Runnable> retireTimer(Object value,Module[] modules)throws ReflectiveOperationException {
+        return retireTimer(value,modules,true);
+    }
+    public static java.util.List<Runnable> retireTimer(Object value,Module[] modules,boolean retirePrivate)throws ReflectiveOperationException {
         if(!coreWriter()||value==null||value.getClass()!=java.util.Timer.class)throw new SecurityException("GROUP_TIMER_CORE_REQUIRED");
         Set<Module> selected=selectedSchedulerModules(modules);if(selected.isEmpty())throw new SecurityException("GROUP_TIMER_SOURCES_REQUIRED");
         for(Module source:selected)if(!modStopped(source))throw new SecurityException("STOPPED_TIMER_SOURCES_REQUIRED");
@@ -532,7 +536,7 @@ public final class TaskBridge {
                 exclusive=schedulerDisposition(List.of(value),selected).equals("PRIVATE");
                 if(TimerPlatform.SIZE.getInt(queue)!=0){exclusive=false;SHARED_SCHEDULERS.add(new EventKey(value,CREATION_QUEUE));}
             }
-            if(exclusive){
+            if(exclusive&&retirePrivate){
                 ((java.util.Timer)value).cancel();
                 Thread thread=(Thread)ThreadPlatform.TIMER_THREAD.get(value);
                 synchronized(CREATION_OWNERS){RETIRED_THREADS.add(new EventKey(thread,CREATION_QUEUE));}
@@ -635,13 +639,27 @@ public final class TaskBridge {
         if(!coreWriter())throw new SecurityException("GROUP_CORE_REQUIRED");
         var selected=java.util.Collections.newSetFromMap(new java.util.IdentityHashMap<Module,Boolean>());selected.addAll(java.util.Arrays.asList(modules));
         var rows=new java.util.ArrayList<Object[]>();
+        var seen=Collections.newSetFromMap(new IdentityHashMap<Object,Boolean>());
         synchronized(CREATION_OWNERS) {
             reapCreationOwners();for(var entry:TASK_OWNERS.entrySet()) {
                 Object task=entry.getKey().get();if(task==null||entry.getValue().isEmpty()||!selected.containsAll(entry.getValue()))continue;
-                var scheduler=TASK_SCHEDULERS.get(entry.getKey());rows.add(new Object[]{task,scheduler==null?null:scheduler.get()});
+                var scheduler=TASK_SCHEDULERS.get(entry.getKey());rows.add(new Object[]{task,scheduler==null?null:scheduler.get()});seen.add(task);
+            }
+            // A directly-created Future can have waiters without ever entering a pool.
+            for(var entry:CREATION_SOURCES.entrySet()){
+                Object task=entry.getKey().get();
+                if(task==null||seen.contains(task)||CREATION_UNKNOWN.contains(entry.getKey())||entry.getValue().isEmpty()
+                        ||!selected.containsAll(entry.getValue())||!(task.getClass()==java.util.concurrent.FutureTask.class
+                        ||task.getClass()==java.util.concurrent.CompletableFuture.class||task instanceof java.util.concurrent.ForkJoinTask<?>))continue;
+                Set<Module> uses=TASK_OWNERS.get(entry.getKey());if(uses!=null&&!selected.containsAll(uses))continue;
+                var scheduler=TASK_SCHEDULERS.get(entry.getKey());rows.add(new Object[]{task,scheduler==null?null:scheduler.get()});seen.add(task);
             }
         }
         return rows.toArray(Object[][]::new);
+    }
+    public static Object taskScheduler(Object task){
+        if(!coreWriter())throw new SecurityException("GROUP_CORE_REQUIRED");
+        synchronized(CREATION_OWNERS){reapCreationOwners();var scheduler=TASK_SCHEDULERS.get(new EventKey(task,null));return scheduler==null?null:scheduler.get();}
     }
 
 

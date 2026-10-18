@@ -12,10 +12,20 @@ import org.spongepowered.asm.mixin.injection.Inject;
 import org.spongepowered.asm.mixin.injection.Redirect;
 import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
 import org.spongepowered.asm.mixin.injection.callback.CallbackInfoReturnable;
+import org.spongepowered.asm.mixin.gen.Accessor;
 
 /** The block holder, rather than the ticker list, decides actual protection. */
 public final class BlockGroupHooks {
     private BlockGroupHooks() { }
+
+    @Mixin(value=net.minecraftforge.entity.PartEntity.class,remap=false)
+    public interface PartAccess {
+        @Accessor("parent") net.minecraft.world.entity.Entity pro$parent();
+    }
+    @Mixin(net.minecraft.server.level.ServerLevel.class)
+    public interface NavigationAccess {
+        @Accessor("navigatingMobs") java.util.Set<net.minecraft.world.entity.Mob> pro$navigating();
+    }
 
     @Mixin(BlockEntity.class)
     public abstract static class Body {

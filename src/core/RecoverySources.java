@@ -21,6 +21,39 @@ public final class RecoverySources implements AutoCloseable {
     private static final Map<FileOutputStream,Capture> OPEN=Collections.synchronizedMap(new IdentityHashMap<>());
     private record LoadedHolder(Set<UUID> subjects,Set<UUID> unlocated){}
     private static final Map<SavedData,Map<RecoverySources,LoadedHolder>> LOADED_HOLDERS=Collections.synchronizedMap(new WeakIdentityMap<>());
+    private static final java.lang.ref.ReferenceQueue<Object> READ_QUEUE=new java.lang.ref.ReferenceQueue<>();
+    private static final Map<ReadKey,ReadImage> READ_IMAGES=new HashMap<>();
+    private static final class ReadKey extends java.lang.ref.WeakReference<Object>{
+        final int hash;
+        ReadKey(Object value,java.lang.ref.ReferenceQueue<Object> queue){super(value,queue);hash=System.identityHashCode(value);}
+        @Override public int hashCode(){return hash;}
+        @Override public boolean equals(Object other){return this==other||other instanceof ReadKey key&&get()!=null&&get()==key.get();}
+    }
+    /** The bytes and file identity come only from one completed real input stream. */
+    private static final class ReadImage implements AutoCloseable{
+        final Path path;final String identity;final RecoveryImage.Encoded bytes;final List<RecoveryImage.Selection> selections;final Object input;
+        ReadImage(Path path,String identity,RecoveryImage.Encoded bytes,List<RecoveryImage.Selection> selections)throws IOException{
+            this(path,identity,bytes,selections,new Object());
+        }
+        private ReadImage(Path path,String identity,RecoveryImage.Encoded bytes,List<RecoveryImage.Selection> selections,Object input)throws IOException{
+            this.path=path;this.identity=identity;this.bytes=bytes.retain();this.selections=List.copyOf(selections);this.input=input;
+        }
+        ReadImage copy()throws IOException{return new ReadImage(path,identity,bytes,selections,input);}
+        @Override public void close(){bytes.close();}
+    }
+    private static void reapReadImages(){
+        ReadKey key;while((key=(ReadKey)READ_QUEUE.poll())!=null){ReadImage image=READ_IMAGES.remove(key);if(image!=null)image.close();}
+    }
+    private static void rememberRead(Object value,ReadImage image)throws IOException{
+        synchronized(READ_IMAGES){reapReadImages();ReadImage previous=READ_IMAGES.put(new ReadKey(value,READ_QUEUE),image.copy());if(previous!=null)previous.close();}
+    }
+    private static void forwardRead(Object from,Object to){
+        if(from==null||to==null||from==to)return;
+        synchronized(READ_IMAGES){
+            reapReadImages();ReadImage image=READ_IMAGES.get(new ReadKey(from,null));if(image==null)return;
+            try{rememberRead(to,image);}catch(IOException unavailable){throw new IllegalStateException("SAVED_DATA_INPUT_IMAGE_RETIRED",unavailable);}
+        }
+    }
     private static final Map<CompoundTag,Map<RecoverySources,Map<Object,UUID>>> MIGRATIONS=Collections.synchronizedMap(new WeakIdentityMap<>());
     private static final java.util.concurrent.locks.ReentrantReadWriteLock GRAPH=new java.util.concurrent.locks.ReentrantReadWriteLock();
     private static final Map<CompoundTag,Integer> SAVING=new IdentityHashMap<>();
@@ -30,6 +63,75 @@ public final class RecoverySources implements AutoCloseable {
     private static volatile boolean graphGap;
     private static final ThreadLocal<SavedData> HOLDER=new ThreadLocal<>();
     private static final ThreadLocal<Integer> CAPTURE_DEPTH=ThreadLocal.withInitial(()->0);
+    private static final Map<Thread,FileEffect> FILE_EFFECTS=new IdentityHashMap<>();
+    private record FileQualification(ProRuntime.Subject authority,long generation,boolean terminal) { }
+    private static final class FileEffect implements AutoCloseable{
+        final Capture capture;final boolean opening;final Thread thread=Thread.currentThread();final FileEffect previous;
+        FileEffect(Capture capture,boolean opening){
+            this.capture=capture;this.opening=opening;synchronized(FILE_EFFECTS){previous=FILE_EFFECTS.get(thread);}
+            ProRuntime.registerSourceControlObjects(FILE_EFFECTS,this,capture,capture.qualifications);
+            synchronized(FILE_EFFECTS){if(FILE_EFFECTS.get(thread)!=previous)throw new IllegalStateException("SAVE_EFFECT_SCOPE_CHANGED");FILE_EFFECTS.put(thread,this);}
+        }
+        @Override public void close(){synchronized(FILE_EFFECTS){if(FILE_EFFECTS.get(thread)!=this)throw new IllegalStateException("SAVE_EFFECT_SCOPE_CHANGED");if(previous==null)FILE_EFFECTS.remove(thread);else FILE_EFFECTS.put(thread,previous);}}
+    }
+    private static final class PlannedFileMutation{
+        final Thread thread=Thread.currentThread();final FileEffect effect;final ProRuntime.Subject[] locked;int acquired;boolean closed;
+        PlannedFileMutation(FileEffect effect){this.effect=effect;locked=new ProRuntime.Subject[effect.capture.qualifications.size()];ProRuntime.registerSourceControlObjects(this,locked);}
+        void release(){if(closed)return;closed=true;for(int i=acquired-1;i>=0;i--)locked[i].commitGate.unlock();}
+    }
+    private static final class FileMutationAccess{
+        static final Class<?> BRIDGE=bridge();
+        static final java.lang.reflect.Method READY=readyMethod();
+        static{ProRuntime.registerSourceControlObjects(READY);}
+        private static Class<?> bridge(){try{return Class.forName("dev.ronova.pro.bootstrap.ResourceBridge",false,null);}catch(ClassNotFoundException unavailable){throw new ExceptionInInitializerError(unavailable);}}
+        private static java.lang.reflect.Method readyMethod(){try{return BRIDGE.getMethod("plannedFileMutationReady");}catch(ReflectiveOperationException unavailable){throw new ExceptionInInitializerError(unavailable);}}
+        static boolean ready(){try{return Boolean.TRUE.equals(READY.invoke(null));}catch(ReflectiveOperationException|RuntimeException|LinkageError unavailable){return false;}}
+    }
+    private static void requireFileMutationCallback(){
+        Class<?> caller=StackWalker.getInstance(StackWalker.Option.RETAIN_CLASS_REFERENCE).walk(frames->frames
+                .dropWhile(frame->frame.getDeclaringClass().getNestHost()==RecoverySources.class).findFirst().orElseThrow().getDeclaringClass());
+        if(caller.getNestHost()!=FileMutationAccess.BRIDGE)throw new SecurityException("ACTUAL_NATIVE_FILE_EFFECT_REQUIRED");
+    }
+    private static boolean originalSaveConstructor(){
+        return StackWalker.getInstance(StackWalker.Option.RETAIN_CLASS_REFERENCE).walk(frames->{
+            boolean constructor=false;var cursor=frames.iterator();while(cursor.hasNext()){
+                var frame=cursor.next();Class<?> type=frame.getDeclaringClass();
+                if(type==FileOutputStream.class&&frame.getMethodName().equals("<init>")){constructor=true;continue;}
+                if(!constructor||type.getClassLoader()==null&&type.getModule()==Object.class.getModule())continue;
+                return type==RecoverySources.class&&frame.getMethodName().equals("open");
+            }return false;
+        });
+    }
+    /** Installed only at the verified JNI open/write effect, paired with its original finally. */
+    static Object beginPlannedFileMutation(Object endpoint,String path,int operation)throws IOException{
+        requireFileMutationCallback();FileEffect effect;synchronized(FILE_EFFECTS){effect=FILE_EFFECTS.get(Thread.currentThread());}
+        if(effect==null)return null;Capture capture=effect.capture;
+        if(operation==2){
+            if(!effect.opening||endpoint==null||endpoint.getClass()!=FileOutputStream.class||path==null||!originalSaveConstructor()
+                    ||!capture.source.path.equals(Path.of(path).toAbsolutePath().normalize()))return null;
+        }else if(operation==1||operation==3){
+            if(effect.opening||endpoint!=capture.stream&&endpoint!=capture.descriptor)return null;
+        }else return null;
+        PlannedFileMutation scope=new PlannedFileMutation(effect);
+        try{
+            for(FileQualification expected:capture.qualifications){
+                ProRuntime.Subject authority=expected.authority;
+                if(!authority.commitGate.tryLock())throw new IOException("SAVE_FINAL_POLICY_BUSY");scope.locked[scope.acquired++]=authority;
+                if(capture.source.owner.runtime.canonicalSubject(authority.id)!=authority||authority.generation!=expected.generation||authority.terminal!=expected.terminal)
+                    throw new IOException("SAVE_FINAL_POLICY_CHANGED");
+                if(expected.terminal&&!capture.source.owner.runtime.groupDurable(authority.id))throw new IOException("SAVE_ORIGINAL_GROUP_INTENT_ACK_PENDING");
+            }
+            Source source=capture.source;
+            if(source.owner.closed||source.owner.sources.get(source.locator)!=source||source.generation!=capture.generation||source.writers!=1
+                    ||!Objects.equals(source.liveDefinition,definition(capture.holder instanceof Class<?> type?type:capture.holder.getClass(),false)))
+                throw new IOException("SAVE_FINAL_SOURCE_BINDING_CHANGED");
+            capture.possibleEffect=true;if(effect.opening)capture.openEffects++;else capture.writeEffects++;return scope;
+        }catch(IOException|RuntimeException|Error refused){capture.error=String.valueOf(refused.getMessage());scope.release();throw refused;}
+    }
+    static void endPlannedFileMutation(Object value){
+        requireFileMutationCallback();if(!(value instanceof PlannedFileMutation scope)||scope.thread!=Thread.currentThread())throw new SecurityException("ACTUAL_SAVE_EFFECT_SCOPE_REQUIRED");
+        scope.release();
+    }
     private final ProRuntime runtime;
     private final ProRuntime.CommitGate registrationGate=new ProRuntime.CommitGate();
     private final Map<String,Source> sources=new ConcurrentHashMap<>();
@@ -46,6 +148,7 @@ public final class RecoverySources implements AutoCloseable {
     private final Map<Source,HolderWalk> holderWalks=new IdentityHashMap<>();
     private final Map<Source,Map<UUID,GroupWalk>> groupWalks=Collections.synchronizedMap(new IdentityHashMap<>());
     private final Map<UUID,Long> groupWalkCursors=new HashMap<>();
+    private final ThreadLocal<Source> retiringSource=new ThreadLocal<>();
     private final java.util.concurrent.ConcurrentLinkedQueue<LoadRoot> groupRoots=new java.util.concurrent.ConcurrentLinkedQueue<>();
     private final Map<Object,Set<UUID>> queuedGroupRoots=Collections.synchronizedMap(new WeakIdentityMap<>());
     private record LoadRoot(Object value,UUID subject) { }
@@ -80,7 +183,7 @@ public final class RecoverySources implements AutoCloseable {
         final ArrayDeque<Object> pending=new ArrayDeque<>();
         GroupCursor current;
         final ArrayDeque<GroupCursor> paused=new ArrayDeque<>();
-        String gap="";boolean complete;
+        String gap="";volatile boolean complete,changed;
         final boolean rootObserved;
         GroupWalk(Source source,UUID subject) {this.source=source;this.subject=subject;Object root=source.holder();rootObserved=root!=null;if(root!=null)pending.add(root);else gap="HOLDER_RELEASE_UNOBSERVED";}
     }
@@ -119,9 +222,11 @@ public final class RecoverySources implements AutoCloseable {
         volatile long generation;
         volatile int writers;
         volatile Snapshot snapshot;
+        private Object inputObservation;
         volatile String gap="SAVE_NOT_OBSERVED";
         Source(RecoverySources owner,String locator,String code,Path path,Object holder) {
             this.owner=owner;this.locator=locator;this.code=code;this.path=path;
+            SourceMaps.observeHolder(holder);
             this.holderIdentity=new java.lang.ref.WeakReference<>(holder);
             if(holder instanceof Closeable||holder instanceof java.util.concurrent.ExecutorService||holder instanceof Timer||holder instanceof Process||holder instanceof Thread)resource=holder;
             liveDefinition=holder==null?null:definition(holder instanceof Class<?> type?type:holder.getClass(),false);
@@ -161,7 +266,45 @@ public final class RecoverySources implements AutoCloseable {
         return manager instanceof CacheOwner owner&&owner.pro$cacheView()==cache&&cache.get(source.cacheKey)==holder;
     }
     long epoch() { return epoch.get(); }
-    void mapChanged(Source source) {source.mutations.incrementAndGet();epoch.incrementAndGet();}
+    void mapChanged(Source source) {
+        source.mutations.incrementAndGet();epoch.incrementAndGet();
+        synchronized(groupWalks){
+            Map<UUID,GroupWalk> walks=groupWalks.get(source);
+            if(walks!=null&&retiringSource.get()!=source)for(GroupWalk walk:walks.values())walk.changed=true;
+        }
+        joinTerminalGroups(source);
+    }
+    private void joinTerminalGroups(Source source){
+        for(UUID id:source.subjects){ProRuntime.Subject group=runtime.canonicalSubject(id);
+            if(group!=null&&group.terminal){bindPrivateSavedDataImage(source,group);registerGroupWalk(source,group.id,false);}
+        }
+    }
+    private void bindPrivateSavedDataImage(Source source,ProRuntime.Subject group){
+        Snapshot image=source.snapshot;Object holder=source.holder();
+        if(image==null||!(holder instanceof SavedData)||source.cache()==null||runtime.groupSubject(holder)!=group)return;
+        List<RecoveryImage.Selection> selections=wholeImage(group,image.selections);
+        if(selections==image.selections)return;
+        try{
+            RecoveryImage.Encoded retained;
+            try(var gate=source.gate.enter()){
+                if(source.snapshot!=image||source.writers!=0||!current(source))return;
+                retained=image.bytes();
+            }
+            try(RecoveryImage.Encoded bytes=retained){
+            Snapshot replacement=new Snapshot(source,image.generation,image.identity,bytes,selections);
+            try(var gate=source.gate.enter()){
+                if(source.snapshot!=image||source.writers!=0||!current(source)){replacement.release();return;}
+                source.snapshot=replacement;source.mutations.incrementAndGet();epoch.incrementAndGet();
+            }
+            image.release();
+            }
+        }catch(IOException unavailable){source.gap="SAVED_DATA_INPUT_IMAGE_UNAVAILABLE";epoch.incrementAndGet();}
+    }
+    private static List<RecoveryImage.Selection> wholeImage(ProRuntime.Subject group,List<RecoveryImage.Selection> selections){
+        for(var selection:selections)if(!group.targets.contains(selection.subject()))return selections;
+        for(var selection:selections)if(selection.path().isEmpty()&&group.targets.contains(selection.subject()))return selections;
+        return List.of(new RecoveryImage.Selection(group.id,List.of()));
+    }
     String dependencies(UUID subject) {
         Set<UUID> targets=runtime.groupTargets(subject);
         StringBuilder key=new StringBuilder(gap).append(':').append(graphGap).append(':').append(new TreeSet<>(targets));
@@ -169,8 +312,14 @@ public final class RecoverySources implements AutoCloseable {
             Snapshot image=source.snapshot;
             key.append('|').append(source.locator).append(':').append(source.code).append(':').append(source.generation)
                 .append(':').append(source.mutations.get()).append(':').append(source.writers).append(':').append(source.gap)
+                .append(':').append(source.groupDisposed)
                 .append(':').append(new TreeSet<>(source.unlocatedReads))
                 .append(':').append(image==null?"none":image.identity+":"+image.hash);
+        }
+        synchronized(groupWalks){
+            var walks=new TreeSet<String>();for(var rows:groupWalks.values())for(GroupWalk walk:rows.values())if(targets.contains(walk.subject))
+                walks.add(walk.source.locator+':'+walk.complete+':'+walk.changed+':'+walk.gap);
+            for(String walk:walks)key.append("|WALK:").append(walk);
         }
         return key.toString();
     }
@@ -256,6 +405,7 @@ public final class RecoverySources implements AutoCloseable {
         }catch(ReflectiveOperationException unavailable){return "NESTED_LOCATION_UNAVAILABLE";}
     }
     void maintainResources() {
+        synchronized(READ_IMAGES){reapReadImages();}
         List<String> pending=new ArrayList<>(expected);
         for(int i=0;i<Math.min(4,pending.size());i++) {
             String entry=pending.get((int)Math.floorMod(restartCursor++,pending.size()));
@@ -387,7 +537,7 @@ public final class RecoverySources implements AutoCloseable {
         synchronized(groupWalks) {
             Map<UUID,GroupWalk> groups=groupWalks.computeIfAbsent(source,key->new HashMap<>());
             GroupWalk prior=groups.get(group);
-            if(prior==null||newRoot&&prior.complete) {
+            if(prior==null||(newRoot||prior.changed)&&prior.complete) {
                 groups.put(group,new GroupWalk(source,group));source.groupDisposed=false;
             }
         }
@@ -397,6 +547,7 @@ public final class RecoverySources implements AutoCloseable {
         retireExternalFields(authority);
         retireExternalHeapValues(authority);
         retireMappingDuplicates(authority);
+        for(Source source:registered())if(!Collections.disjoint(source.subjects,authority.targets))joinTerminalGroups(source);
         List<GroupWalk> walks;
         synchronized(groupWalks) {walks=groupWalks.values().stream().flatMap(groups->groups.values().stream())
                 .filter(w->runtime.canonicalSubject(w.subject)==authority&&!w.complete).toList();}
@@ -408,6 +559,7 @@ public final class RecoverySources implements AutoCloseable {
             GroupWalk walk=walks.get((start+i)%walks.size());visited=i+1;
             if(!walk.rootObserved)continue;
             walk.gap="";
+            retiringSource.set(walk.source);
             Object processing=null;
             int quota=Math.min(budget,share),remaining=quota;
             try {
@@ -415,7 +567,11 @@ public final class RecoverySources implements AutoCloseable {
                     processing=null;
                     if(walk.current==null) {
                         if(walk.pending.isEmpty()) {
-                            if(walk.paused.isEmpty()){walk.complete=walk.gap.isEmpty();break;}
+                             if(walk.paused.isEmpty()){
+                                 if(walk.changed){walk.changed=false;walk.seen.clear();Object root=walk.source.holder();if(root!=null)walk.pending.add(root);else walk.gap="HOLDER_RELEASE_UNOBSERVED";}
+                                 else walk.complete=walk.gap.isEmpty();
+                                 break;
+                             }
                             walk.current=walk.paused.removeFirst();
                         }else {
                         Object value=walk.pending.removeFirst();if(!walk.seen.add(value))continue;processing=value;
@@ -428,7 +584,7 @@ public final class RecoverySources implements AutoCloseable {
                             Object[] children=(Object[])Class.forName("dev.ronova.pro.bootstrap.ResourceBridge",false,null).getMethod("wrapperChildren",Object.class).invoke(null,value);
                             for(Object child:children)enqueue(walk.pending,child);continue;
                         }
-                        if(!retireResource(value,authority)) {walk.gap="RESOURCE_RELEASE_PENDING:"+value.getClass().getName();walk.seen.remove(value);walk.pending.addLast(value);break;}
+                        if(!retireResource(value,authority)) {walk.gap="RESOURCE_RELEASE_PENDING:"+value.getClass().getName();walk.seen.remove(value);walk.pending.addLast(value);if(!walk.paused.isEmpty())walk.current=walk.paused.removeFirst();break;}
                         if(value.getClass().getClassLoader()==null&&!platformStreamWrapper(value)&&(value instanceof java.io.Closeable||value instanceof java.util.concurrent.ExecutorService||value instanceof Timer||value instanceof Thread))continue;
                         if(value.getClass().isArray()) {
                             walk.current=new GroupCursor(value);
@@ -442,7 +598,7 @@ public final class RecoverySources implements AutoCloseable {
                             if(walk.pending.size()>=4096){walk.seen.remove(value);walk.pending.addFirst(value);break;}
                             var atomic=(java.util.concurrent.atomic.AtomicReference<Object>)value;Object child=atomic.get();
                             enqueue(walk.pending,child);
-                            if(runtime.groupSubject(child)==authority){
+                             if(runtime.groupSubject(value)==authority||runtime.groupSubject(child)==authority){
                                 atomic.compareAndSet(child,null);
                                 if(atomic.get()==child)throw new IOException("GROUP_ATOMIC_CLEAR_READBACK_FAILED");
                                 SourceMaps.changed(value);
@@ -451,7 +607,7 @@ public final class RecoverySources implements AutoCloseable {
                         }else {
                             if(value instanceof Map<?,?>||value instanceof Collection<?>)throw new IOException("GROUP_CONTAINER_BACKEND_UNSUPPORTED:"+value.getClass().getName());
                             boolean statik=value instanceof Class<?>;Class<?> type=statik?(Class<?>)value:value.getClass();
-                            if(runtime.groupSubject(value)!=authority)continue;
+                             if(type.getClassLoader()==null&&!platformStreamWrapper(value))continue;
                             GroupCursor cursor=new GroupCursor(value);cursor.fields=new ArrayList<>();
                             for(Class<?> owner=type;owner!=null&&owner!=Object.class&&(owner.getClassLoader()!=null||platformStreamWrapper(value));owner=statik?null:owner.getSuperclass())
                                 for(var field:owner.getDeclaredFields())if(java.lang.reflect.Modifier.isStatic(field.getModifiers())==statik
@@ -477,13 +633,20 @@ public final class RecoverySources implements AutoCloseable {
                         if(walk.pending.size()>=4096){walk.paused.addLast(cursor);walk.current=null;continue;}
                         var field=cursor.fields.get(cursor.field);if(!field.trySetAccessible())throw new IOException("FIELD_INACCESSIBLE:"+field);
                         Object receiver=value instanceof Class<?>?null:value;Object child=field.get(receiver);
-                        if(SourceMaps.removedJdkContainer(child))throw new IOException("JDK_CONTAINER_BACKEND_UNSUPPORTED:"+child.getClass().getName());
                         if(!field.getType().isPrimitive())enqueue(walk.pending,child);
-                        // The selected holder owns this slot. Children are disposed independently before the traversal releases them.
-                        SourceMaps.retireField(runtime,field,receiver,child,()->clearField(field,receiver,child));
-                        walk.source.cleared(field,receiver==null?field.getDeclaringClass():receiver);
-                        runtime.recoveryRecords.groupFieldCleared(field,receiver==null?field.getDeclaringClass():receiver);
-                        walk.source.mutations.incrementAndGet();cursor.field++;
+                         Source fieldSource=value==walk.source.holder()?walk.source:observedHolder(value,walk.subject);
+                         if(fieldSource==null)throw new IOException("GROUP_FIELD_HOLDER_UNAVAILABLE");
+                         SourceMaps.observeField(fieldSource,field,child);
+                         boolean own=runtime.groupSubject(value)==authority;
+                         if(own||!field.getType().isPrimitive()&&runtime.groupSubject(child)==authority){
+                             // A shared holder loses only the selected identity. Its other fields remain live.
+                             if(own)SourceMaps.retireField(runtime,field,receiver,child,()->clearField(field,receiver,child));
+                             else clearField(field,receiver,child);
+                             walk.source.cleared(field,receiver==null?field.getDeclaringClass():receiver);
+                             runtime.recoveryRecords.groupFieldCleared(field,receiver==null?field.getDeclaringClass():receiver);
+                             walk.source.mutations.incrementAndGet();
+                         }
+                         cursor.field++;
                         }
                         // Process discovered children before resuming a large
                         // parent, so its bounded pending queue can drain.
@@ -500,9 +663,14 @@ public final class RecoverySources implements AutoCloseable {
                     }
                 }
             }catch(ReflectiveOperationException|IOException|RuntimeException unavailable) {
-                if(processing!=null&&walk.current==null) {walk.seen.remove(processing);walk.pending.addFirst(processing);}
+                if(processing!=null&&walk.current==null) {walk.seen.remove(processing);walk.pending.addLast(processing);if(!walk.paused.isEmpty())walk.current=walk.paused.removeFirst();}
+                else if(walk.current!=null&&!walk.current.fields.isEmpty()&&walk.current.field<walk.current.fields.size()){
+                    // A failed slot remains pending, while the other real fields get a turn.
+                    GroupCursor cursor=walk.current;var failed=cursor.fields.remove(cursor.field);cursor.fields.add(failed);
+                    if(!walk.pending.isEmpty()){walk.paused.addLast(cursor);walk.current=null;}
+                }
                 walk.gap="GROUP_DISPOSITION:"+unavailable.getMessage();
-            }finally{budget-=quota-Math.max(0,remaining);}
+            }finally{retiringSource.remove();budget-=quota-Math.max(0,remaining);}
         }
         groupWalkCursors.put(authority.id,(long)(start+Math.max(1,visited))%walks.size());
     }
@@ -587,7 +755,10 @@ public final class RecoverySources implements AutoCloseable {
         // endpoint is handled separately, so a shared endpoint is never closed
         // by a wrapper close() and buffered output is not flushed on retirement.
         if(platformStreamWrapper(value))return true;
+        if(value.getClass()==java.util.concurrent.FutureTask.class||value.getClass()==java.util.concurrent.CompletableFuture.class
+                ||value instanceof java.util.concurrent.ForkJoinTask<?>){runtime.recoveryTasks.groupSource(value,authority);return true;}
         if(value instanceof Thread thread) {
+            if(thread.isAlive()&&!runtime.groupDurable(authority.id))return false;
             Class<?> bridge=Class.forName("dev.ronova.pro.bootstrap.TaskBridge",false,null);
             Object scheduler=bridge.getMethod("threadScheduler",Thread.class).invoke(null,thread);
             if(scheduler!=null)runtime.recoveryTasks.groupScheduler(scheduler,authority);
@@ -601,6 +772,7 @@ public final class RecoverySources implements AutoCloseable {
             String disposition=(String)bridge.getMethod("schedulerDisposition",Object.class,Module[].class).invoke(null,value,(Object)modules);
             if(disposition.equals("SHARED"))return true;
             if(!disposition.equals("PRIVATE"))throw new IOException("SCHEDULER_"+disposition);
+            if(!runtime.groupDurable(authority.id))return false;
             @SuppressWarnings("unchecked") List<Runnable> removed=(List<Runnable>)bridge.getMethod("retireScheduler",Object.class,Module[].class).invoke(null,value,(Object)modules);
             runtime.recoveryTasks.schedulerDrained(value,removed,authority);
             return Boolean.TRUE.equals(bridge.getMethod("schedulerResourceEnded",Object.class).invoke(null,value));
@@ -608,7 +780,7 @@ public final class RecoverySources implements AutoCloseable {
         if(value.getClass()==Timer.class){
             Class<?> bridge=Class.forName("dev.ronova.pro.bootstrap.TaskBridge",false,null);
             Module[] modules=runtime.groupModules(authority);
-            @SuppressWarnings("unchecked") List<Runnable> removed=(List<Runnable>)bridge.getMethod("retireTimer",Object.class,Module[].class).invoke(null,value,(Object)modules);
+            @SuppressWarnings("unchecked") List<Runnable> removed=(List<Runnable>)bridge.getMethod("retireTimer",Object.class,Module[].class,boolean.class).invoke(null,value,(Object)modules,runtime.groupDurable(authority.id));
             runtime.recoveryTasks.schedulerDrained(value,removed,authority);
             return Boolean.TRUE.equals(bridge.getMethod("timerResourceEnded",Object.class,Module[].class).invoke(null,value,(Object)modules));
         }
@@ -647,6 +819,7 @@ public final class RecoverySources implements AutoCloseable {
                 ||type==FilterInputStream.class||type==FilterOutputStream.class;
     }
     private boolean retireProcess(Process process,ProRuntime.Subject authority)throws IOException,ReflectiveOperationException {
+        if(!runtime.groupDurable(authority.id))return false;
         Class<?> bridge=Class.forName("dev.ronova.pro.bootstrap.ResourceBridge",false,null);
         java.util.function.Predicate<Object> selected=value->runtime.groupSubject(value)==authority;
         long generation=authority.generation;
@@ -658,6 +831,7 @@ public final class RecoverySources implements AutoCloseable {
         catch(java.lang.reflect.InvocationTargetException failed){if(failed.getCause() instanceof IOException unavailable)throw unavailable;throw failed;}
     }
     private boolean retireDescriptorStream(Object stream,ProRuntime.Subject authority)throws ReflectiveOperationException,IOException{
+        if(!runtime.groupDurable(authority.id))return false;
         Class<?> bridge=Class.forName("dev.ronova.pro.bootstrap.ResourceBridge",false,null);
         java.util.function.Predicate<Object> selected=value->runtime.groupSubject(value)==authority;
         long generation=authority.generation;
@@ -673,13 +847,15 @@ public final class RecoverySources implements AutoCloseable {
     }
     private void retireMap(GroupWalk walk,ProRuntime.Subject authority,int limit)throws IOException,ReflectiveOperationException {
         GroupCursor cursor=walk.current;Object map=SourceMaps.supportedSet(cursor.value)?SourceMaps.setMap(cursor.value):cursor.value;
+        boolean own=runtime.groupSubject(cursor.value)==authority;
         if(cursor.mapCursor==null||cursor.mapCursor.map!=map)cursor.mapCursor=new SourceMaps.Cursor(map);
         if(!SourceMaps.visit(map,cursor.mapCursor,limit,(key,value,node,position)->{
             if(walk.pending.size()>4094)return false;
             enqueue(walk.pending,key);enqueue(walk.pending,value);
-            SourceMaps.removeVisited(position,node,runtime,authority);return true;
+            if(!own)SourceMaps.removeVisited(position,node,runtime,authority);return true;
         }))throw new IOException("GROUP_MAP_BUSY");
         if(SourceMaps.supportedSet(cursor.value)&&SourceMaps.setMap(cursor.value)!=map){cursor.mapCursor=null;throw new IOException("GROUP_SET_BACKING_CHANGED");}
+        if(own&&cursor.mapCursor.complete&&!SourceMaps.clearPrivate(cursor.mapCursor,cursor.value,runtime,authority))throw new IOException("GROUP_PRIVATE_CONTAINER_CHANGED_OR_BUSY");
         if(cursor.mapCursor.complete)walk.current=null;
     }
     private int retireArray(GroupWalk walk,ProRuntime.Subject authority,int limit)throws IOException,ReflectiveOperationException {
@@ -703,7 +879,7 @@ public final class RecoverySources implements AutoCloseable {
                         if(!Objects.equals(java.lang.reflect.Array.get(value,index),zero(component)))throw new IOException("GROUP_ARRAY_CLEAR_READBACK_FAILED");}
                 }else {
                     if(child!=null&&!walk.seen.contains(child))enqueue(walk.pending,child);
-                    if(runtime.groupSubject(child)==authority){elements.compareAndSet(value,index,child,null);
+                     if(runtime.groupSubject(value)==authority||runtime.groupSubject(child)==authority){elements.compareAndSet(value,index,child,null);
                         if(java.lang.reflect.Array.get(value,index)==child)throw new IOException("GROUP_ARRAY_CLEAR_READBACK_FAILED");}
                 }
                 cursor.element++;processed++;
@@ -732,7 +908,7 @@ public final class RecoverySources implements AutoCloseable {
                         if(walk.pending.size()>=4096)break;
                         enqueue(walk.pending,child);
                     }
-                    if(runtime.groupSubject(child)==authority)SourceMaps.removeListIndex(list,cursor.element);
+                     if(runtime.groupSubject(value)==authority||runtime.groupSubject(child)==authority)SourceMaps.removeListIndex(list,cursor.element);
                     cursor.element--;processed[0]++;
                 }
                 cursor.listRevision=RecoveryRecords.arrayListRevision(value);cursor.listStamp=SourceMaps.listBacking(value);
@@ -875,6 +1051,36 @@ public final class RecoverySources implements AutoCloseable {
     Source resolve(String locator,String code) {
         Source source=sources.get(locator);return source!=null&&source.code.equals(code)&&bound(source)?source:null;
     }
+    /** The caller has independently reopened, read and closed this exact file after its original commit. */
+    boolean projectedReadback(Source source,Snapshot original,String identity,RecoveryImage.Encoded actual,
+            Set<List<RecoveryImage.Step>> removedPaths)throws IOException{
+        if(source==null||original==null||actual==null||source.owner!=this||original.source!=source||removedPaths==null)return false;
+        if(!Objects.equals(identity,original.identity)||original.hash.equals(actual.hash()))return false;
+        Set<List<RecoveryImage.Step>> known=new HashSet<>();for(var selection:original.selections)known.add(selection.path());
+        if(!known.containsAll(removedPaths))return false;
+        Snapshot baseline;RecoveryImage.Encoded previous;
+        try(var gate=source.gate.enter()){
+            baseline=source.snapshot;
+            if(baseline==null||baseline.generation!=original.generation||!baseline.hash.equals(original.hash)
+                    ||!baseline.identity.equals(original.identity)||!source.current(baseline))return false;
+            previous=baseline.bytes();
+        }
+        final RecoveryImage.Filtered filtered;
+        try(previous){
+            filtered=RecoveryImage.filterPaths(RecoveryImage.decode(previous),baseline.selections,removedPaths);
+            try(RecoveryImage.Encoded expected=RecoveryImage.encode(filtered.image(),RecoveryImage.compressed(previous))){
+                if(!expected.hash().equals(actual.hash()))return false;
+            }
+        }
+        try(var gate=source.gate.enter()){
+            if(source.snapshot!=baseline||!source.current(baseline))return false;
+            long generation=Math.max(source.generation,generationFloors.getOrDefault(source.locator,0L))+1;
+            Snapshot replacement=new Snapshot(source,generation,identity,actual,filtered.remaining());
+            source.snapshot=replacement;source.generation=generation;source.mutations.incrementAndGet();epoch.incrementAndGet();
+        }
+        baseline.release();
+        return true;
+    }
     boolean acceptRead(String locator,String expectedCode,Path path) {
         String[] parts=locator.split("\\|",3);
         if(parts.length!=3||parts[0].equals("MEMORY")||!Path.of(parts[2]).equals(path)||!expected.contains(locator+"\n"+expectedCode))return false;
@@ -924,6 +1130,11 @@ public final class RecoverySources implements AutoCloseable {
                 runtime.recoverySources.liveReadObserved(observed.path,ending,bytes,decoded);
                 runtime.recoveryStorage.readObserved(observed.path,ending,bytes,decoded);
             }
+            if(observed.identity.equals(ending)&&observed.savedData){
+                Map<CompoundTag,UUID> identities=new IdentityHashMap<>();
+                synchronized(TAGS){for(var entry:TAGS.entrySet())if(!AMBIGUOUS.contains(entry.getKey()))identities.put(entry.getKey(),entry.getValue().subject);}
+                try(ReadImage image=new ReadImage(observed.path,ending,bytes,RecoveryImage.locate(decoded,identities))){rememberRead(decoded,image);}
+            }
         } finally {observed.bytes.close();}
     }
     private void liveReadObserved(Path path,String identity,RecoveryImage.Encoded bytes,CompoundTag decoded)throws IOException {
@@ -945,10 +1156,12 @@ public final class RecoverySources implements AutoCloseable {
     private static final class Input extends FileInputStream {
         final Path path;
         final String identity;
+        final boolean savedData;
         final RecoveryImage.Builder bytes=new RecoveryImage.Builder();
         boolean retainedDone;
         Input(File file)throws FileNotFoundException {
             super(file);path=file.toPath().toAbsolutePath().normalize();String captured=null;
+            savedData=StackWalker.getInstance(StackWalker.Option.RETAIN_CLASS_REFERENCE).walk(frames->frames.anyMatch(frame->frame.getDeclaringClass()==DimensionDataStorage.class));
             try { captured=StorageNative.identity(getFD(),path.toString()); }catch(IOException|RuntimeException|LinkageError unavailable) { }
             identity=captured;
         }
@@ -1160,13 +1373,13 @@ public final class RecoverySources implements AutoCloseable {
     Source observedHolder(Object holder,UUID subject) {
         if(closed||holder==null)return null;
         for(Source source:sources.values())if(source.holder()==holder) {
-            if(source.subjects.add(subject))epoch.incrementAndGet();return source;
+            if(source.subjects.add(subject))epoch.incrementAndGet();joinTerminalGroups(source);return source;
         }
         Class<?> type=holder instanceof Class<?> clazz?clazz:holder.getClass();
         String code=code(type);if(code==null)return null;
         try(var gate=registrationGate.enter()) {
             for(Source source:sources.values())if(source.holder()==holder) {
-                if(source.subjects.add(subject))epoch.incrementAndGet();return source;
+                if(source.subjects.add(subject))epoch.incrementAndGet();joinTerminalGroups(source);return source;
             }
             String locator=holder instanceof Class<?>?"MEMORY|"+type.getName()+"|"+code:
                     "MEMORY_OBJECT|"+type.getName()+"|"+UUID.randomUUID();
@@ -1177,7 +1390,7 @@ public final class RecoverySources implements AutoCloseable {
                 locator="MEMORY_OBJECT|"+type.getName()+"|"+UUID.randomUUID();
             }
             Source source=new Source(this,locator,code,null,holder);source.subjects.add(subject);source.gap="";
-            sources.put(locator,source);epoch.incrementAndGet();return source;
+            sources.put(locator,source);epoch.incrementAndGet();joinTerminalGroups(source);return source;
         }
     }
     /** A nested source keeps its exact object after detachment; its durable locator follows the original parent slot on restart. */
@@ -1200,14 +1413,14 @@ public final class RecoverySources implements AutoCloseable {
             }else if(nestedValue(carrier,kind,key)!=value)return null;
             for(Source source:sources.values())if(source.nestedParent==parent&&field.equals(source.nestedField)
                     &&kind.equals(source.nestedKind)&&Objects.equals(key,source.nestedKey)&&source.holder()==value&&source.nestedCarrier==carrier){
-                if(source.subjects.addAll(parent.subjects))epoch.incrementAndGet();return source;
+                if(source.subjects.addAll(parent.subjects))epoch.incrementAndGet();joinTerminalGroups(source);return source;
             }
             String selector=field.getDeclaringClass().getName()+"#"+field.getName();
             String locator="NESTED|"+dev.ronova.pro.persistence.JournalLineage.encodeText(parent.locator)+"|"+
                     dev.ronova.pro.persistence.JournalLineage.encodeText(parent.code)+"|"+dev.ronova.pro.persistence.JournalLineage.encodeText(selector)+"|"+
                     kind+"|"+dev.ronova.pro.persistence.JournalLineage.encodeText(key==null&&!kind.equals("MAP")?"":SourceMaps.encodeKey(key))+"|"+UUID.randomUUID();
             Source source=new Source(this,locator,code,null,value);source.nestedRetained=value;source.nestedCarrier=carrier;source.nestedParent=parent;source.nestedField=field;source.nestedKind=kind;source.nestedKey=key;
-            source.subjects.addAll(parent.subjects);source.gap="";sources.put(locator,source);epoch.incrementAndGet();return source;
+            source.subjects.addAll(parent.subjects);source.gap="";sources.put(locator,source);epoch.incrementAndGet();joinTerminalGroups(source);return source;
         }
     }
     private Object nestedValue(Source parent,java.lang.reflect.Field field,String kind,Object key)throws ReflectiveOperationException{
@@ -1405,7 +1618,7 @@ public final class RecoverySources implements AutoCloseable {
     public static CompoundTag updateSavedData(net.minecraft.util.datafix.DataFixTypes type,com.mojang.datafixers.DataFixer fixer,CompoundTag input,int before,int after){
         Map<RecoverySources,Map<Object,UUID>> origins;
         GRAPH.writeLock().lock();try{origins=imageOrigins(input,true);}catch(IOException failure){markRelatedGap(input,"MIGRATION_INPUT_UNRESOLVED:"+failure.getMessage());throw new IllegalStateException(failure);}finally{GRAPH.writeLock().unlock();}
-        CompoundTag result=type.update(fixer,input,before,after);if(origins.isEmpty()||result==null)return result;
+        CompoundTag result=type.update(fixer,input,before,after);forwardRead(input,result);if(origins.isEmpty()||result==null)return result;
         GRAPH.writeLock().lock();
         try{
             Map<RecoverySources,Map<Object,UUID>> located=imageOrigins(result,false),missing=new IdentityHashMap<>();
@@ -1425,7 +1638,7 @@ public final class RecoverySources implements AutoCloseable {
         finally{GRAPH.writeLock().unlock();}
     }
     public static CompoundTag savedDataPart(CompoundTag image,String key){
-        CompoundTag result=image.getCompound(key);forwardMigration(image,result);return result;
+        CompoundTag result=image.getCompound(key);forwardMigration(image,result);forwardRead(image,result);return result;
     }
     private static void forwardMigration(CompoundTag from,CompoundTag to){
         synchronized(MIGRATIONS){
@@ -1457,6 +1670,7 @@ public final class RecoverySources implements AutoCloseable {
             owner.gap="SAVED_DATA_READER_SOURCE_UNRESOLVED:"+failure.getMessage();owner.epoch.incrementAndGet();throw new IllegalStateException(owner.gap,failure);
         }finally{GRAPH.writeLock().unlock();}
         SavedData result=reader.apply(consumed);
+        forwardRead(input,result);
         if(result==null||result==net.minecraftforge.common.util.DummySavedData.DUMMY||selections.isEmpty()&&unlocated.isEmpty())return result;
         Set<UUID> subjects=new HashSet<>(unlocated);for(var selection:selections)subjects.add(selection.subject());
         synchronized(LOADED_HOLDERS){
@@ -1473,6 +1687,24 @@ public final class RecoverySources implements AutoCloseable {
         LoadedHolder record;
         synchronized(LOADED_HOLDERS){Map<RecoverySources,LoadedHolder> origins=LOADED_HOLDERS.get(actual);record=origins==null?null:origins.get(this);}
         if(record!=null){boolean changed=source.subjects.addAll(record.subjects());changed|=source.unlocatedReads.addAll(record.unlocated());if(changed){source.mutations.incrementAndGet();epoch.incrementAndGet();}}
+        ProRuntime.Subject group=runtime.groupSubject(actual);if(group!=null&&source.subjects.add(group.id))epoch.incrementAndGet();
+        ReadImage observed=null;
+        synchronized(READ_IMAGES){reapReadImages();ReadImage image=READ_IMAGES.get(new ReadKey(actual,null));
+            if(image!=null&&source.inputObservation!=image.input&&source.writers==0&&Objects.equals(source.path,image.path))try{observed=image.copy();}catch(IOException unavailable){source.gap="SAVED_DATA_INPUT_IMAGE_UNAVAILABLE";}
+        }
+        if(observed!=null)try(ReadImage image=observed){
+            Snapshot prior=source.snapshot;String hash=image.bytes.hash();
+            if(source.inputObservation!=image.input&&source.writers==0&&(prior==null||!prior.identity.equals(image.identity)||!prior.hash.equals(hash))){
+                long generation=Math.max(source.generation,generationFloors.getOrDefault(source.locator,0L))+1;
+                List<RecoveryImage.Selection> selections=group==null?image.selections:wholeImage(group,image.selections);
+                Snapshot snapshot=new Snapshot(source,generation,image.identity,image.bytes,selections);
+                source.generation=generation;source.snapshot=snapshot;source.gap="";
+                for(var selection:image.selections)source.subjects.add(selection.subject());
+                epoch.incrementAndGet();if(prior!=null)prior.release();
+            }
+            if(source.writers==0)source.inputObservation=image.input;
+        }catch(IOException unavailable){source.gap="SAVED_DATA_INPUT_IMAGE_UNAVAILABLE";epoch.incrementAndGet();}
+        joinTerminalGroups(source);
     }
     /** Observe the actual DimensionDataStorage cache replacement, including ordinary load completion. */
     public static Object cachePut(DimensionDataStorage manager,File directory,Map<Object,Object> cache,Object key,Object value) {
@@ -1529,8 +1761,13 @@ public final class RecoverySources implements AutoCloseable {
         if(runtime==null||directory==null||directory.getClass()!=File.class||!savedDataKey(name))return;
         RecoverySources owner=runtime.recoverySources;
         Path path=directory.toPath().toAbsolutePath().normalize().resolve(name+".dat");
-        String code=code(holder.getClass());if(code==null) { owner.gap="SOURCE_CODE_IDENTITY_UNAVAILABLE";return; }
         String locator="SAVED_DATA|"+holder.getClass().getName()+"|"+path;
+        Source known=owner.sources.get(locator);
+        String live=definition(holder.getClass(),false);
+        if(known!=null&&known.holder()==holder&&live!=null&&live.equals(known.liveDefinition))try(var gate=owner.registrationGate.enter()){
+            if(!owner.closed&&owner.sources.get(locator)==known&&cache.get(name)==holder){known.cached(cache,name,manager);owner.loadedHolder(known,holder);return;}
+        }
+        String code=code(holder.getClass());if(code==null) { owner.gap="SOURCE_CODE_IDENTITY_UNAVAILABLE";return; }
         try(var storageGate=owner.registrationGate.enter()) {
             if(owner.closed||cache.get(name)!=holder)return;
             Source prior=owner.sources.get(locator);
@@ -1573,15 +1810,30 @@ public final class RecoverySources implements AutoCloseable {
             FileNotFoundException refused=new FileNotFoundException("RONOVA_SAVE_PREOPEN_REFUSED:"+failure.getMessage());refused.initCause(failure);throw refused;
         }
         try {
-            FileOutputStream stream=new FileOutputStream(file);
+            FileOutputStream stream;
+            if(capture==null)stream=new FileOutputStream(file);
+            else{
+                if(!FileMutationAccess.ready()){capture.error="SAVE_FINAL_NATIVE_FILE_BOUNDARY_UNAVAILABLE";throw new FileNotFoundException(capture.error);}
+                try(FileEffect effect=new FileEffect(capture,true)){stream=new FileOutputStream(file);}
+            }
             if(capture!=null) {
-                capture.stream=stream;
+                capture.stream=stream;capture.possibleEffect=true;
+                if(capture.openEffects==0){
+                    capture.error="SAVE_NATIVE_OPEN_BOUNDARY_NOT_OBSERVED";
+                    try{stream.close();capture.closed=true;}catch(IOException close){capture.error+="/OUTPUT_HANDLE_CLOSE_UNCONFIRMED";}
+                    throw new FileNotFoundException(capture.error);
+                }
+                try{capture.descriptor=stream.getFD();}catch(IOException unavailable){capture.error="OUTPUT_DESCRIPTOR_UNAVAILABLE";}
                 try { capture.identity=StorageNative.identity(stream.getFD(),capture.source.path.toString()); }
                 catch(IOException|RuntimeException|LinkageError unavailable) { capture.error="OUTPUT_HANDLE_IDENTITY_UNAVAILABLE"; }
                 OPEN.put(stream,capture);
             }
             return stream;
-        } catch(FileNotFoundException|RuntimeException|Error failure) {
+        } catch(IOException failure){
+            if(capture!=null)capture.finish(false);
+            if(failure instanceof FileNotFoundException refused)throw refused;
+            FileNotFoundException refused=new FileNotFoundException("RONOVA_SAVE_PREOPEN_REFUSED:"+failure.getMessage());refused.initCause(failure);throw refused;
+        } catch(RuntimeException|Error failure) {
             if(capture!=null)capture.finish(false);
             throw failure;
         }
@@ -1604,7 +1856,7 @@ public final class RecoverySources implements AutoCloseable {
     private static void writeCaptured(Capture capture)throws IOException {
         boolean success=false;
         int depth=CAPTURE_DEPTH.get();CAPTURE_DEPTH.set(depth+1);
-        try {
+        try(FileEffect effect=new FileEffect(capture,false)) {
             try(OutputStream output=capture.output()) {capture.planned.writeTo(output);}
             success=true;
         }
@@ -1661,11 +1913,20 @@ public final class RecoverySources implements AutoCloseable {
         final List<RecoveryImage.Selection> selections;
         final String semantic;
         final RecoveryImage.Encoded planned;
+        final Map<UUID,FileQualification> qualifications=new TreeMap<>();
         List<RecoveryImage.Selection> observed;
         int depth=CAPTURE_DEPTH.get();CAPTURE_DEPTH.set(depth+1);
         try {
-            observed=RecoveryImage.locate(image,identities);Set<UUID> removed=new HashSet<>();
-            for(var selection:observed)if(owner.runtime.terminalSource(selection.subject()))removed.add(selection.subject());
+            observed=RecoveryImage.locate(image,identities);
+            ProRuntime.Subject imageGroup=owner.runtime.groupSubject(holderIdentity);
+            if(imageGroup!=null&&(holderIdentity instanceof SavedData&&source.cache()!=null||owner.runtime.groupSubject(image)==imageGroup))observed=wholeImage(imageGroup,observed);
+            if(imageGroup!=null)qualifications.put(imageGroup.id,new FileQualification(imageGroup,imageGroup.generation,imageGroup.terminal));
+            Set<UUID> removed=new HashSet<>();
+            for(var selection:observed){ProRuntime.Subject authority=owner.runtime.canonicalSubject(selection.subject());
+                if(authority==null)throw new IOException("SAVE_SUBJECT_POLICY_UNOBSERVED");
+                qualifications.putIfAbsent(authority.id,new FileQualification(authority,authority.generation,authority.terminal));
+                if(authority.terminal)removed.add(selection.subject());
+            }
             RecoveryImage.Filtered filtered=RecoveryImage.filter(image,observed,removed);
             selections=filtered.remaining();semantic=RecoveryImage.semanticHash(filtered.image());planned=RecoveryImage.encode(filtered.image(),compressed);
         }catch(IOException failure) {source.gap=failure.getMessage();owner.epoch.incrementAndGet();throw new IllegalStateException(failure);}
@@ -1685,7 +1946,7 @@ public final class RecoverySources implements AutoCloseable {
                 other.generation++;other.gap="PATH_WRITTEN_BY_OTHER_SOURCE";
             }
             if(!owner.bound(source)) {source.writers--;planned.close();throw new IllegalStateException("SAVE_SOURCE_BINDING_CHANGED");}
-            return new Capture(source,source.generation,selections,semantic,planned);
+            return new Capture(source,source.generation,selections,semantic,planned,holderIdentity,qualifications);
         }
     }
     private static Class<?> caller() {
@@ -1732,9 +1993,10 @@ public final class RecoverySources implements AutoCloseable {
         final Source source;final long generation;final List<RecoveryImage.Selection> selections;final String semantic;
         final RecoveryImage.Encoded planned;
         final RecoveryImage.Builder bytes=new RecoveryImage.Builder();
-        FileOutputStream stream;String identity,error="";boolean closed,finished;
-        Capture(Source source,long generation,List<RecoveryImage.Selection> selections,String semantic,RecoveryImage.Encoded planned) {
-            this.source=source;this.generation=generation;this.selections=selections;this.semantic=semantic;this.planned=planned;
+        final Object holder;final List<FileQualification> qualifications;
+        FileOutputStream stream;FileDescriptor descriptor;String identity,error="";boolean closed,finished,possibleEffect;long openEffects,writeEffects;
+        Capture(Source source,long generation,List<RecoveryImage.Selection> selections,String semantic,RecoveryImage.Encoded planned,Object holder,Map<UUID,FileQualification> qualifications) {
+            this.source=source;this.generation=generation;this.selections=selections;this.semantic=semantic;this.planned=planned;this.holder=holder;this.qualifications=List.copyOf(qualifications.values());
         }
         OutputStream output() {
             return new FilterOutputStream(stream) {
@@ -1742,8 +2004,12 @@ public final class RecoverySources implements AutoCloseable {
                     if(!error.isEmpty())return;
                     bytes.write(data,off,len);
                 }
-                @Override public void write(int value)throws IOException { out.write(value);retain(new byte[]{(byte)value},0,1); }
-                @Override public void write(byte[] data,int off,int len)throws IOException { out.write(data,off,len);retain(data,off,len); }
+                private void written(long before)throws IOException{
+                    possibleEffect=true;
+                    if(writeEffects==before){error="SAVE_NATIVE_WRITE_BOUNDARY_NOT_OBSERVED";throw new IOException(error);}
+                }
+                @Override public void write(int value)throws IOException { long before=writeEffects;out.write(value);written(before);retain(new byte[]{(byte)value},0,1); }
+                @Override public void write(byte[] data,int off,int len)throws IOException { long before=writeEffects;out.write(data,off,len);if(len>0)written(before);retain(data,off,len); }
                 @Override public void close()throws IOException {
                     try {
                         String end=StorageNative.identity(stream.getFD(),source.path.toString());
@@ -1761,7 +2027,7 @@ public final class RecoverySources implements AutoCloseable {
             Snapshot next=null;String failureReason="";
             // Decode, hash and compare the image without holding any source/qualification commit gate.
             try {
-                if(!success)throw new IOException("ORIGINAL_SAVE_FAILED");
+                if(!success)throw new IOException((possibleEffect?"ORIGINAL_SAVE_POSSIBLE_PARTIAL_EFFECT:":"")+(error.isEmpty()?"ORIGINAL_SAVE_FAILED":error));
                 if(!closed)throw new IOException("OUTPUT_CLOSE_NOT_OBSERVED");
                 if(identity==null)throw new IOException(StorageNative.reason());
                 if(!error.isEmpty())throw new IOException(error);
