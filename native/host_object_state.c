@@ -18,7 +18,7 @@ typedef struct NativeObjectState {
 } NativeObjectState;
 typedef struct NativeObjectStateCall {
     uint64_t token,epoch,spanEpoch;DWORD thread;int borrowing;
-    NativeObjectState *object;NativeObjectStateSpan *span;NativeMemoryWrite write;
+    NativeObjectState *object;NativeObjectStateSpan *span;NativeMemoryWrite write;NativeHostBytesContext hostBody;
     struct NativeObjectStateCall *next;
 } NativeObjectStateCall;
 struct NativeObjectStateSequence {
@@ -29,6 +29,7 @@ struct NativeObjectStateSequence {
 };
 typedef struct NativeObjectStateMutation {
     uint64_t token,epoch;DWORD thread;NativeObjectState *object;NativeObjectStateSequence *sequence;
+    NativeHostBytesContext hostBody;
     struct NativeObjectStateMutation *next;
 } NativeObjectStateMutation;
 static SRWLOCK native_object_state_records=SRWLOCK_INIT;
@@ -235,6 +236,75 @@ static int native_object_state_mutating_range(NativeMemoryAllocation *allocation
                         &&native_object_state_overlap(sequence->data,sequence->storageBytes,address,bytes))return 1;
             }
     return 0;
+}
+/* These are internal matches to already running original SDK bodies. A
+ * borrowed receipt never authorizes writes. The real CRT return address and
+ * complete current sources must still match the provider; a nested registered
+ * callback, different JNI entry or changed load/tooling scope cannot borrow it.
+ * Memory records may be held by the caller, so this directory is only tried. */
+static uint64_t native_object_state_host_bytes_birth(OwnerLink *sources,int unknown){
+    if(unknown||!sources||native_owner_stopped(sources)||!TryAcquireSRWLockShared(&native_object_state_records))return 0;
+    uint64_t token=0;
+    for(NativeObjectStateMutation *mutation=native_object_state_mutations;mutation;mutation=mutation->next){
+        NativeObjectState *object=mutation->object;NativeObjectStateSequence *sequence=mutation->sequence;
+        if(mutation->thread!=GetCurrentThreadId()||!native_memory_host_bytes_context_current(&mutation->hostBody,1)
+                ||!native_object_state_current(object)||!native_object_state_admitting(object)||object->uncertain
+                ||!sequence->mutating||sequence->closed||sequence->pending||sequence->epoch!=mutation->epoch
+                ||!native_memory_same_sources(object->providerSources,sources))continue;
+        if(token){token=0;break;}token=mutation->token;
+    }
+    ReleaseSRWLockShared(&native_object_state_records);return token;
+}
+static int native_object_state_host_bytes_query(NativeMemoryAllocation *row,uint64_t address,uint64_t bytes,
+        OwnerLink *sources,int unknown,int restricted,int callbackEntered,HMODULE provider,NativeHostBytesDelegate *result){
+    (void)restricted;if(!provider||unknown||!sources||!TryAcquireSRWLockShared(&native_object_state_records))return 0;
+    int matched=0;
+    for(NativeObjectStateCall *call=native_object_state_calls;call&&!matched;call=call->next){
+        NativeObjectState *object=call->object;NativeMemoryWrite *write=&call->write;
+        if(call->borrowing||call->thread!=GetCurrentThreadId()||!native_memory_host_bytes_context_current(&call->hostBody,callbackEntered)
+                ||!native_object_state_provider(object,provider,sources,unknown)||!native_object_state_admitting(object)||object->uncertain
+                ||native_owner_stopped(object->sources)
+                ||!native_object_state_span_current(object,call->span)||call->spanEpoch!=call->span->epoch
+                ||write->allocation!=row||write->generation!=row->generation||call->epoch!=row->writeEpoch
+                ||!native_object_state_contains(write->address,write->length,address,bytes))continue;
+        result->identity=call;result->write=write;result->token=call->token;result->kind=1;matched=1;
+    }
+    for(NativeObjectStateMutation *mutation=native_object_state_mutations;mutation&&!matched;mutation=mutation->next){
+        NativeObjectState *object=mutation->object;NativeObjectStateSequence *sequence=mutation->sequence;
+        if(mutation->thread!=GetCurrentThreadId()||!native_memory_host_bytes_context_current(&mutation->hostBody,callbackEntered)
+                ||!native_object_state_provider(object,provider,sources,unknown)||!native_object_state_current(object)
+                ||!native_object_state_admitting(object)||object->uncertain||!sequence->mutating||sequence->closed||sequence->pending
+                ||native_owner_stopped(object->sources)
+                ||sequence->epoch!=mutation->epoch)continue;
+        int representation=row==object->allocation&&row->generation==object->generation
+                &&native_object_state_contains(sequence->address,sequence->bytes,address,bytes);
+        int oldStorage=row==sequence->target&&row->generation==sequence->targetGeneration&&sequence->storageBytes
+                &&native_object_state_contains(sequence->data,sequence->storageBytes,address,bytes);
+        /* This tag was set only when an actual observed allocator published
+         * the row during this same original mutation. It grants no admission
+         * exception: new storage must still pass the ordinary raw-write gates. */
+        int newStorage=row->hostMutationBirth==mutation->token&&row->hostMutationBirthGeneration==row->generation
+                &&!row->unknownUse&&!row->unknownReaders&&native_memory_same_sources(row->sources,object->providerSources);
+        if(!representation&&!oldStorage&&!newStorage)continue;
+        result->identity=mutation;result->token=mutation->token;result->kind=representation?2:3;matched=1;
+    }
+    ReleaseSRWLockShared(&native_object_state_records);return matched;
+}
+static int native_object_state_host_bytes_contribute(NativeHostBytesDelegate *delegated,OwnerLink **sources,OwnerLink **objectSources,int unknown,int restricted){
+    (void)restricted;if(!TryAcquireSRWLockExclusive(&native_object_state_records))return 0;int ready=0;
+    if(delegated->kind==1){
+        for(NativeObjectStateCall *call=native_object_state_calls;call;call=call->next)
+            if(call==delegated->identity&&call->token==delegated->token&&!call->borrowing&&call->thread==GetCurrentThreadId()){
+                native_memory_host_bytes_publish(&call->write.sources,sources);native_memory_host_bytes_publish(&call->object->sources,objectSources);
+                if(unknown){call->write.unknown=1;call->write.uncertain=1;call->object->uncertain=1;}ready=1;break;
+            }
+    }else for(NativeObjectStateMutation *mutation=native_object_state_mutations;mutation;mutation=mutation->next)
+        if(mutation==delegated->identity&&mutation->token==delegated->token&&mutation->thread==GetCurrentThreadId()
+                &&mutation->sequence->mutating&&mutation->sequence->epoch==mutation->epoch){
+            native_memory_host_bytes_publish(&mutation->object->sources,objectSources);
+            if(unknown)mutation->object->uncertain=1;ready=1;break;
+        }
+    ReleaseSRWLockExclusive(&native_object_state_records);return ready;
 }
 static void native_object_state_lock_pair(NativeMemoryAllocation *owner,NativeMemoryAllocation *target){
     if((uintptr_t)owner<=(uintptr_t)target){EnterCriticalSection(&owner->gate);if(target!=owner)EnterCriticalSection(&target->gate);}
@@ -630,6 +700,7 @@ static __declspec(noinline) uint64_t native_object_state_mutation_begin(uint64_t
                     if(sequence->typedHeld){InterlockedDecrement(&sequence->target->typedObjects);sequence->typedHeld=0;}
                     sequence->bound=0;sequence->mutating=1;sequence->epoch++;sequence->representation->epoch++;
                     mutation->token=result;mutation->epoch=sequence->epoch;mutation->thread=GetCurrentThreadId();mutation->object=object;mutation->sequence=sequence;
+                    native_memory_host_bytes_context(&mutation->hostBody);
                     mutation->next=native_object_state_mutations;native_object_state_mutations=mutation;object->uses++;mutation=NULL;
                 }
                 ReleaseSRWLockExclusive(&native_object_state_records);free(mutation);
@@ -715,6 +786,7 @@ static uint64_t native_object_state_begin(uint64_t token,uint64_t generation,uin
         if(ready)call=(NativeObjectStateCall*)calloc(1,sizeof(*call));
         if(call){
             call->object=object;call->span=span;call->borrowing=borrowing;call->thread=GetCurrentThreadId();
+            native_memory_host_bytes_context(&call->hostBody);
             call->write.allocation=allocation;call->write.address=span->address;call->write.length=span->bytes;
             call->write.generation=span->generation;call->write.sources=sources;sources=NULL;call->write.unknown=unknown;
             call->write.objectView=span->sequence?span->token:0;

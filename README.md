@@ -1,10 +1,12 @@
 # Ronova Pro
 
-主工程：`D:\桌面\ronova_GPT`。Java ABI105 / Native ABI97 / Storage3 / Journal6，客户端协议 `r3-client-8`。
+主工程：`D:\桌面\ronova_GPT`。Java ABI105 / Native ABI98 / Storage3 / Journal6，客户端协议 `r3-client-8`。
 Java 17；用户态 GNU C23 / GNU C++23；独立 Windows 驱动及管理工具 C17。
 未知业务载体沿真实实例字段、实际容器槽位和原委托调用接续；构图最终复核根字段、实际子对象与已用数组槽，脱离路径不沿用。ArrayDeque 支持环形逻辑槽及原更新中间态，ConcurrentHashMap 保留实际双表迁移、转发及树节点；不调用 getter/迭代器重放数据。自定义槽位的 helper、super.get 和持久绑定核实际调用点、物理方法版本及当前 getter 定义；失配保持未决。原业务调用执行一次，只有当前准确持有的数据方法接续已有动作，未知回调和临时返回对象不自动取得写权。
 自定义 Map 键只在真实槽位查询前声明当前准确的 Java 键方法，记录自然 hashCode/equals/compareTo 的结果、实际读取依赖及方法版本；后续定位直接读存储，不重放键方法。键依赖与实体槽位根分开，写入、未知调用、依赖或定义变化使旧语义失效。已观察的原生分配与 DirectBuffer 借用视图按真实分配代次关联，活视图阻止误释放和完整回滚；地址向 Native 暴露后保留不透明使用，未知裸地址不补造来源。
 Native 私有存储接入已观察模块实际消费的 HeapAlloc/ReAlloc/Free/Destroy、VirtualAlloc/Ex 与 CRT malloc/calloc/realloc/free，按真实 provider、heap context 和分配代次保留来源、读写租约及 DirectBuffer 借用。失败重分配保留旧块，同址成功也换代；原异常和 errno/doserrno/LastError 保留。已观察 DLL 的可写非执行静态段作为借用存储，活视图阻止卸载准备，归还额外 pin 不冒充实际卸载，原映射确认不在才退役。实际 Native binding、回调及工作线程的数据贡献保留已知模块并附 CPU 私有状态未知标记；不以未知字节撤销猜测 C++ 对象语义。Native 全局入口发布前初始化直接依赖的来源桥，避免首次初始化的 Unsafe 回入。
+CRT 的实际字节/宽字符复制、重叠移动、填充及 secure 变体接准确 provider 和函数签名；只接实际存在的导出。本机 UCRT 有7个对应入口，非 secure 的 wmemcpy/wmemmove/wmemset 没有导出，未列为已覆盖。已观察私有存储的原调用保留来源、存储代次和读写使用；同块移动合并角色，活借用及 typed 对象拒绝原始写入。准确活跃的 SDK 修改体按当前线程、provider、完整来源及原目标接续，新存储只沿本次实际分配关系绑定，不扩大原修改范围。错误路径依原函数实际可能触及的范围接续，保留返回值、参数错误处理及 CRT 错误状态。未观察普通存储保原调用；复制字节不授予 C++ 字段、构造、析构或字节回滚权限，内联 CPU 写入仍未覆盖。
+
 实际 HeapCreate 接独立堆创建者与不可变世代，Alloc/ReAlloc/Free/Destroy 的在途调用保留准确上下文；成功块登记后才放开销毁，晚到的旧 Destroy 不退役新世代。原释放前合并创建者及读者，卸载例外只允许完整、独占已停来源的准确块。动态 TLS/FLS 按真实槽世代、OS 线程及 FLS context 保留值来源和读取贡献；NULL 成功、TlsGetValue2 的错误状态、实际 FLS 回调与停止门分开处理。读取关系延续到后续 worker/load，清槽和 detach 不洗掉来源；无法证明终结的回调保持来源与 provider pin 并报告缺口。
 已加载 MSVC 运行库实际导出的 scalar/array new/delete 及明确的 nothrow/sized ABI 接原 provider 和独立存储类别；同址导出按精确名称与地址双重选参，保留原函数、错误状态与异常，不以 malloc/free 代替。LWJGL jemalloc 的16个实际 `je_*` 导出接入同一分配目录，以真实返回范围和 `arenas.lookup` 结果登记子块；reset/destroy、失败重分配和同址换代绑定准确 provider/arena 世代。只发现实际观察模块及其已经解析的相关导入，不枚举全进程模块。
 

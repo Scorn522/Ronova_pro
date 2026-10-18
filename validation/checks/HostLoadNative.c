@@ -7,6 +7,9 @@
 #include <stdint.h>
 #include <limits.h>
 #include <stdio.h>
+#include <string.h>
+#include <wchar.h>
+#include <errno.h>
 typedef BOOL (WINAPI *LoadCreateA)(LPCSTR,LPSTR,LPSECURITY_ATTRIBUTES,LPSECURITY_ATTRIBUTES,BOOL,DWORD,LPVOID,LPCSTR,LPSTARTUPINFOA,LPPROCESS_INFORMATION);
 typedef BOOL (WINAPI *LoadCreateW)(LPCWSTR,LPWSTR,LPSECURITY_ATTRIBUTES,LPSECURITY_ATTRIBUTES,BOOL,DWORD,LPVOID,LPCWSTR,LPSTARTUPINFOW,LPPROCESS_INFORMATION);
 extern LoadCreateA __imp_CreateProcessA;
@@ -1766,7 +1769,11 @@ static int load_memory_target(LoadMemoryTarget *target,void *address,SIZE_T byte
             ||allocation&&region.AllocationBase!=allocation)return 0;
     uintptr_t offset=(uintptr_t)address-(uintptr_t)region.BaseAddress;
     if(offset>=region.RegionSize||bytes>region.RegionSize-offset)return 0;
-    target->address=address;target->bytes=bytes;target->protect=region.Protect;memcpy(target->before,address,bytes);return 1;
+    target->address=address;target->bytes=bytes;target->protect=region.Protect;
+    /* The observed API must not also produce its own reference snapshot.
+     * With -fno-builtin, memcpy is a real controlled import and can refuse a
+     * control-table read. Inspect the actual stable bytes directly instead. */
+    for(SIZE_T i=0;i<bytes;i++)target->before[i]=((volatile const BYTE*)address)[i];return 1;
 }
 static int load_memory_unchanged(const LoadMemoryTarget *target){
     MEMORY_BASIC_INFORMATION region={0};
@@ -2457,6 +2464,305 @@ done:
     if(failure)return load_thread_fail(env,failure);
     fprintf(stdout,"HOST_GNU_CPP_PASS actual_shared_libstdcxx_20_exact_named_ABIs scalar_array_nothrow_sized_aligned sized_aligned real_Cpp23_class_ctor_dtor_array_cookie_virtual_dispatch own_objects_only no_Core_producer_authority no_opaque_class_destructor_inference\n");fflush(stdout);return JNI_TRUE;
 }
+/* This phase consumes the system UCRT's exact byte exports and the payload's
+ * real import slots. Indirect volatile calls keep these actions out of the
+ * compiler's memcpy/memset expansion path. No backend table is supplied. */
+typedef void *(__cdecl *LoadBytesCopy)(void*,const void*,size_t);
+typedef void *(__cdecl *LoadBytesFill)(void*,int,size_t);
+typedef int (__cdecl *LoadBytesSecure)(void*,size_t,const void*,size_t);
+typedef int (__cdecl *LoadWideSecure)(wchar_t*,size_t,const wchar_t*,size_t);
+typedef void (__cdecl *LoadBytesInvalid)(const wchar_t*,const wchar_t*,const wchar_t*,unsigned,uintptr_t);
+typedef LoadBytesInvalid (__cdecl *LoadBytesSetInvalid)(LoadBytesInvalid);
+extern LoadBytesCopy __imp_memcpy,__imp_memmove;
+extern LoadBytesFill __imp_memset;
+extern LoadBytesSecure __imp_memcpy_s,__imp_memmove_s;
+extern LoadWideSecure __imp_wmemcpy_s,__imp_wmemmove_s;
+typedef struct LoadBytesEntries {void *entries[2][10];int *error;LoadBytesSetInvalid setInvalid;} LoadBytesEntries;
+static const char *load_bytes_names[]={"memcpy","memmove","memset","memcpy_s","memmove_s",
+    "wmemcpy","wmemmove","wmemset","wmemcpy_s","wmemmove_s"};
+static volatile LONG load_bytes_invalid_calls;
+static void __cdecl load_bytes_invalid_handler(const wchar_t *expression,const wchar_t *function,const wchar_t *file,unsigned line,uintptr_t reserved){
+    (void)expression;(void)function;(void)file;(void)line;(void)reserved;
+    InterlockedIncrement(&load_bytes_invalid_calls);
+}
+static int load_bytes_secure(unsigned kind){return kind==3||kind==4||kind==8||kind==9;}
+static int load_bytes_wide(unsigned kind){return kind>=5;}
+static int load_bytes_available(unsigned kind){return kind<5||kind>7;}
+static __declspec(noinline) uintptr_t load_bytes_call(const LoadBytesEntries *entries,unsigned mode,unsigned kind,
+        void *destination,size_t destinationSize,const void *source,unsigned value,size_t count){
+    void *actual=entries->entries[mode][kind];
+    switch(kind){
+    case 0:case 1:{LoadBytesCopy volatile call=(LoadBytesCopy)actual;return (uintptr_t)call(destination,source,count);}
+    case 2:{LoadBytesFill volatile call=(LoadBytesFill)actual;return (uintptr_t)call(destination,(int)value,count);}
+    case 3:case 4:{LoadBytesSecure volatile call=(LoadBytesSecure)actual;return (uintptr_t)call(destination,destinationSize,source,count);}
+    case 8:case 9:{LoadWideSecure volatile call=(LoadWideSecure)actual;return (uintptr_t)call(destination,destinationSize,source,count);}
+    default:return UINTPTR_MAX;
+    }
+}
+/* The slot must really be an import of this exact CRT contract. The current
+ * slot value is a Host thunk, so its current address alone cannot identify the
+ * original provider. Inspect only this already loaded payload's PE imports. */
+static int load_bytes_ucrt_import(const char *name,void **slot){
+    HMODULE image=NULL;
+    if(!GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS|GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+            (LPCSTR)load_bytes_ucrt_import,&image))return 0;
+    BYTE *base=(BYTE*)image;IMAGE_DOS_HEADER *dos=(IMAGE_DOS_HEADER*)base;
+    if(dos->e_magic!=IMAGE_DOS_SIGNATURE)return 0;
+    IMAGE_NT_HEADERS *nt=(IMAGE_NT_HEADERS*)(base+dos->e_lfanew);
+    if(nt->Signature!=IMAGE_NT_SIGNATURE)return 0;
+    DWORD rva=nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_IMPORT].VirtualAddress;if(!rva)return 0;
+    for(IMAGE_IMPORT_DESCRIPTOR *provider=(IMAGE_IMPORT_DESCRIPTOR*)(base+rva);provider->Name;provider++){
+        const char *dll=(const char*)(base+provider->Name);
+        if(_stricmp(dll,"ucrtbase.dll")&&_stricmp(dll,"api-ms-win-crt-string-l1-1-0.dll"))continue;
+        if(!provider->OriginalFirstThunk||!provider->FirstThunk)continue;
+        IMAGE_THUNK_DATA *names=(IMAGE_THUNK_DATA*)(base+provider->OriginalFirstThunk);
+        IMAGE_THUNK_DATA *values=(IMAGE_THUNK_DATA*)(base+provider->FirstThunk);
+        for(;names->u1.AddressOfData;names++,values++){
+            if(IMAGE_SNAP_BY_ORDINAL(names->u1.Ordinal))continue;
+            IMAGE_IMPORT_BY_NAME *import=(IMAGE_IMPORT_BY_NAME*)(base+names->u1.AddressOfData);
+            if(!strcmp((const char*)import->Name,name))return (void**)&values->u1.Function==slot;
+        }
+    }
+    return 0;
+}
+static const char *load_bytes_entries(LoadBytesEntries *entries){
+    HMODULE provider=GetModuleHandleW(L"ucrtbase.dll");if(!provider)return "CRT_BYTES_ACTUAL_UCRTBASE_ABSENT";
+    void **slots[]={(void**)&__imp_memcpy,(void**)&__imp_memmove,(void**)&__imp_memset,(void**)&__imp_memcpy_s,(void**)&__imp_memmove_s,
+        NULL,NULL,NULL,(void**)&__imp_wmemcpy_s,(void**)&__imp_wmemmove_s};
+    for(unsigned kind=0;kind<10;kind++){
+        entries->entries[1][kind]=(void*)GetProcAddress(provider,load_bytes_names[kind]);
+        if(!load_bytes_available(kind)){
+            if(entries->entries[1][kind])return "CRT_BYTES_NONSECURE_WIDE_EXPORT_PRESENT_WITHOUT_ACTUAL_IAT_COVERAGE";
+            continue;
+        }
+        entries->entries[0][kind]=*slots[kind];
+        if(!load_bytes_ucrt_import(load_bytes_names[kind],slots[kind]))return "CRT_BYTES_ACTUAL_UCRT_IAT_PROVIDER";
+        if(!load_private_entry(entries->entries[0][kind])||!load_private_entry(entries->entries[1][kind]))return "CRT_BYTES_SEVEN_EXACT_IAT_AND_GPA_NOT_CONTROLLED";
+    }
+    LoadCrtErrno error=(LoadCrtErrno)GetProcAddress(provider,"_errno");
+    entries->error=error?error():NULL;
+    entries->setInvalid=(LoadBytesSetInvalid)GetProcAddress(provider,"_set_thread_local_invalid_parameter_handler");
+    return entries->error&&entries->setInvalid?NULL:"CRT_BYTES_REAL_ERRNO_AND_THREAD_INVALID_HANDLER";
+}
+static const char *load_bytes_normal(const LoadBytesEntries *entries,BYTE *scratch){
+    for(unsigned mode=0;mode<2;mode++)for(unsigned kind=0;kind<10;kind++){
+        if(!load_bytes_available(kind))continue;
+        union {uint64_t alignment;BYTE bytes[512];} expected;
+        for(unsigned i=0;i<512;i++)scratch[i]=expected.bytes[i]=(BYTE)(0x19u+29u*i);
+        BYTE *bytes=scratch+32,*input=scratch+160,*want=expected.bytes+32;
+        wchar_t *wide=(wchar_t*)(scratch+256),*wideInput=(wchar_t*)(scratch+384),*wideWant=(wchar_t*)(expected.bytes+256);
+        for(unsigned i=0;i<32;i++){wide[i]=wideWant[i]=(wchar_t)(0x2301u+17u*i);wideInput[i]=(wchar_t)(0x1201u+23u*i);}
+        for(unsigned i=0;i<64;i++)expected.bytes[384+i]=scratch[384+i];
+        void *destination=NULL;const void *source=NULL;size_t count=0,size=0;unsigned fill=0;
+        switch(kind){
+        case 0:case 3:destination=bytes+8;source=input+3;count=13;size=32;for(unsigned i=0;i<count;i++)want[8+i]=input[3+i];break;
+        case 1:case 4:destination=bytes+9;source=bytes+3;count=19;size=48;for(unsigned i=0;i<count;i++)want[9+i]=bytes[3+i];break;
+        case 2:destination=bytes+5;count=21;fill=0x1d3;for(unsigned i=0;i<count;i++)want[5+i]=(BYTE)fill;break;
+        case 8:destination=wide+4;source=wideInput+2;count=7;size=24;for(unsigned i=0;i<count;i++)wideWant[4+i]=wideInput[2+i];break;
+        case 9:destination=wide+5;source=wide+1;count=13;size=27;for(unsigned i=0;i<count;i++)wideWant[5+i]=wide[1+i];break;
+        }
+        *entries->error=0x298;SetLastError(0x524e0098);
+        uintptr_t result=load_bytes_call(entries,mode,kind,destination,size,source,fill,count);DWORD windows=GetLastError();
+        if(result!=(load_bytes_secure(kind)?0:(uintptr_t)destination)||*entries->error!=0x298||windows!=0x524e0098)
+            return "CRT_BYTES_ORIGINAL_RETURN_ERRNO_OR_LASTERROR";
+        for(unsigned i=0;i<512;i++)if(scratch[i]!=expected.bytes[i])return "CRT_BYTES_ORIGINAL_COPY_OVERLAP_FILL_WIDE_COUNT_OR_CANARY";
+    }
+    return NULL;
+}
+static const char *load_bytes_invalid(const LoadBytesEntries *entries,BYTE *scratch){
+    unsigned kinds[]={3,4,8,9};
+    for(unsigned mode=0;mode<2;mode++)for(unsigned selected=0;selected<4;selected++)for(unsigned nullSource=0;nullSource<2;nullSource++){
+        unsigned kind=kinds[selected];size_t unit=load_bytes_wide(kind)?sizeof(wchar_t):1;
+        BYTE expected[128];for(unsigned i=0;i<128;i++)scratch[i]=expected[i]=(BYTE)(0xa3u+7u*i);
+        void *destination=scratch+16;size_t size=nullSource?9:7,count=nullSource?3:8;
+        const void *source=nullSource?NULL:scratch+80;
+        if(kind==3||kind==8)for(size_t i=0;i<size*unit;i++)expected[16+i]=0;
+        InterlockedExchange(&load_bytes_invalid_calls,0);*entries->error=0x298;SetLastError(0x524e0098);
+        uintptr_t result=load_bytes_call(entries,mode,kind,destination,size,source,0,count);DWORD windows=GetLastError();
+        int expectedError=nullSource?EINVAL:ERANGE;
+        if(result!=(uintptr_t)expectedError||*entries->error!=expectedError||windows!=0x524e0098||load_bytes_invalid_calls!=1)
+            return "CRT_BYTES_SECURE_ORIGINAL_ERROR_ERRNO_HANDLER_ONCE";
+        for(unsigned i=0;i<128;i++)if(scratch[i]!=expected[i])return "CRT_BYTES_SECURE_MEMCPY_DESTSIZE_CLEAR_OR_MEMMOVE_UNCHANGED";
+    }
+    return NULL;
+}
+static const char *load_bytes_refused(const LoadBytesEntries *entries,void *address,size_t bytes,DWORD expectedError){
+    if(!address||!bytes||bytes>64||bytes%sizeof(wchar_t))return "CRT_BYTES_ACTUAL_TARGET_GEOMETRY";
+    int expectedErrno=expectedError==ERROR_BUSY?EBUSY:EACCES;
+    union {uint64_t alignment;BYTE bytes[96];} input;
+    BYTE before[64],saved[96];for(unsigned i=0;i<96;i++)input.bytes[i]=(BYTE)(0x45u+13u*i);
+    for(size_t i=0;i<bytes;i++){before[i]=((BYTE*)address)[i];input.bytes[16+i]=before[i];}
+    for(unsigned i=0;i<96;i++)saved[i]=input.bytes[i];
+    for(unsigned mode=0;mode<2;mode++)for(unsigned kind=0;kind<10;kind++){
+        if(!load_bytes_available(kind))continue;
+        size_t unit=load_bytes_wide(kind)?sizeof(wchar_t):1,count=bytes/unit;unsigned fill=before[0];
+        if(kind==2)count=1;
+        InterlockedExchange(&load_bytes_invalid_calls,0);*entries->error=0x298;SetLastError(0x524e0098);
+        uintptr_t result=UINTPTR_MAX;DWORD exception=0;
+        __try {result=load_bytes_call(entries,mode,kind,address,bytes/unit,input.bytes+16,fill,count);}
+        __except(EXCEPTION_EXECUTE_HANDLER){exception=GetExceptionCode();}
+        DWORD windows=GetLastError();int crt=*entries->error;
+        if(exception||result!=(load_bytes_secure(kind)?expectedErrno:0)||windows!=expectedError
+                ||crt!=expectedErrno||load_bytes_invalid_calls){
+            fprintf(stderr,"CRT_BYTES_REFUSAL_FAILED api=%s path=%s result=%llu win32=%lu errno=%d handler=%ld exception=%08lx\n",
+                    load_bytes_names[kind],mode?"GPA":"IAT",(unsigned long long)result,(unsigned long)windows,crt,load_bytes_invalid_calls,(unsigned long)exception);
+            return "CRT_BYTES_CONTROL_TYPED_OR_LIVE_BORROW_REFUSAL_CONTRACT";
+        }
+        for(size_t i=0;i<bytes;i++)if(((BYTE*)address)[i]!=before[i])return "CRT_BYTES_REFUSED_TARGET_CHANGED";
+        for(unsigned i=0;i<96;i++)if(input.bytes[i]!=saved[i])return "CRT_BYTES_REFUSED_INPUT_OR_CANARY_CHANGED";
+    }
+    /* Unlike move_s's invalid-argument path, copy_s would clear destSize even
+     * when count is only one element. That real write must be rejected before
+     * the original handler or clear can affect this protected/borrowed target. */
+    for(unsigned mode=0;mode<2;mode++)for(unsigned kind=3;kind<=8;kind+=5){
+        size_t unit=load_bytes_wide(kind)?sizeof(wchar_t):1;
+        InterlockedExchange(&load_bytes_invalid_calls,0);*entries->error=0x298;SetLastError(0x524e0098);
+        uintptr_t result=load_bytes_call(entries,mode,kind,address,bytes/unit,NULL,0,1);DWORD windows=GetLastError();
+        if(result!=(uintptr_t)expectedErrno||*entries->error!=expectedErrno||windows!=expectedError||load_bytes_invalid_calls)
+            return "CRT_BYTES_PROTECTED_SECURE_ERROR_DESTSIZE_CLEAR_NOT_REFUSED";
+        for(size_t i=0;i<bytes;i++)if(((BYTE*)address)[i]!=before[i])return "CRT_BYTES_PROTECTED_SECURE_ERROR_CLEARED_TARGET";
+    }
+    return NULL;
+}
+static const char *load_bytes_zero(const LoadBytesEntries *entries,const LoadMemoryTarget *target){
+    for(unsigned mode=0;mode<2;mode++)for(unsigned kind=0;kind<10;kind++)for(unsigned numeric=0;numeric<2;numeric++){
+        if(!load_bytes_available(kind))continue;
+        void *destination=numeric?(void*)(uintptr_t)1:target->address;
+        InterlockedExchange(&load_bytes_invalid_calls,0);*entries->error=0x298;SetLastError(0x524e0098);
+        uintptr_t result=load_bytes_call(entries,mode,kind,destination,SIZE_MAX,(void*)(uintptr_t)3,0x5432,0);
+        DWORD windows=GetLastError();int crt=*entries->error;LONG handler=load_bytes_invalid_calls;
+        uintptr_t expected=load_bytes_secure(kind)?0:(uintptr_t)destination;int unchanged=load_memory_unchanged(target);
+        if(result!=expected||crt!=0x298||windows!=0x524e0098||handler||!unchanged){
+            fprintf(stderr,"CRT_BYTES_ZERO_FAILED api=%s path=%s target=%s result=%llu expected=%llu errno=%d windows=%lu handler=%ld unchanged=%d\n",
+                    load_bytes_names[kind],mode?"GPA":"IAT",numeric?"numeric":"VM_shadow",(unsigned long long)result,
+                    (unsigned long long)expected,crt,(unsigned long)windows,handler,unchanged);
+            return "CRT_BYTES_ORIGINAL_ZERO_COUNT_NUMERIC_POINTER_CONTRACT";
+        }
+    }
+    return NULL;
+}
+/* This DLL copy is loaded by the system loader before the real Core binding.
+ * Its own imports/GPA results are consumed while a deeper Core frame is live. */
+JNIEXPORT jboolean JNICALL Java_dev_ronova_pro_AuditFixCheck_hostCrtBytesForeign0(JNIEnv *env,jclass check,jlong address,jlong bytes,jint mode){
+    (void)check;LoadBytesEntries entries={0};const char *failure=load_bytes_entries(&entries);
+    if(!failure&&(bytes<=0||bytes>64||mode<0||mode>1))failure="CRT_BYTES_FOREIGN_ACTUAL_ARGUMENTS";
+    LoadBytesInvalid previous=NULL;int handler=0;
+    if(!failure){previous=entries.setInvalid(load_bytes_invalid_handler);handler=1;
+        if(!mode)failure=load_bytes_refused(&entries,(void*)(uintptr_t)address,(size_t)bytes,ERROR_BUSY);
+        else {
+            BYTE before[64];for(size_t i=0;i<(size_t)bytes;i++)before[i]=((BYTE*)(uintptr_t)address)[i];
+            *entries.error=0x298;SetLastError(0x524e0098);
+            uintptr_t result=load_bytes_call(&entries,0,2,(void*)(uintptr_t)address,0,NULL,0x6b,(size_t)bytes);
+            DWORD windows=GetLastError();
+            if(result!=(uintptr_t)address||*entries.error!=0x298||windows!=0x524e0098)failure="CRT_BYTES_FOREIGN_ALIVE_ORIGINAL_FILL";
+            for(size_t i=0;i<(size_t)bytes&&!failure;i++)if(((BYTE*)(uintptr_t)address)[i]!=0x6b)failure="CRT_BYTES_FOREIGN_ALIVE_FILL_BYTES";
+            result=load_bytes_call(&entries,1,0,(void*)(uintptr_t)address,0,before,0,(size_t)bytes);
+            if(result!=(uintptr_t)address&&!failure)failure="CRT_BYTES_FOREIGN_ALIVE_ORIGINAL_RESTORE";
+            for(size_t i=0;i<(size_t)bytes&&!failure;i++)if(((BYTE*)(uintptr_t)address)[i]!=before[i])failure="CRT_BYTES_FOREIGN_ALIVE_RESTORED_BYTES";
+        }
+    }
+    if(handler&&entries.setInvalid(previous)!=load_bytes_invalid_handler&&!failure)failure="CRT_BYTES_FOREIGN_INVALID_HANDLER_RESTORE";
+    if(failure)return load_thread_fail(env,failure)?JNI_TRUE:JNI_FALSE;
+    fprintf(stdout,"HOST_CRT_BYTES_FOREIGN_PASS actual_distinct_system_loader_image mode=%s deeper_Core_frame_no_raw_override\n",mode?"plain_Heap_alive_original_write_and_restore":"typed_or_live_borrow_refused");
+    fflush(stdout);return JNI_TRUE;
+}
+JNIEXPORT jboolean JNICALL Java_dev_ronova_pro_AuditFixCheck_hostCrtBytes0(JNIEnv *env,jclass check,jstring fixturePath){
+    LoadBytesEntries entries={0};const char *failure=load_bytes_entries(&entries);HANDLE heap=NULL;BYTE *scratch=NULL;
+    HMODULE fixture=NULL;JavaVM *vm=NULL;LoadMemoryTarget target={0};int targetObserved=0,handler=0,live=0,held=0,privateLive=0;
+    LoadBytesInvalid previous=NULL;DWORD exception=0;
+    int (__cdecl *bind)(HMODULE)=NULL;
+    int (__cdecl *run)(void)=NULL;
+    int (__cdecl *containersRun)(void)=NULL;
+    int (__cdecl *hold)(int)=NULL;int (__cdecl *finish)(void)=NULL;
+    uint64_t (__cdecl *current)(unsigned)=NULL;
+    int (__cdecl *privateCreate)(void)=NULL;int (__cdecl *privateApply)(unsigned)=NULL;int (__cdecl *privateFinish)(void)=NULL;
+    uint64_t (__cdecl *privateCurrent)(unsigned)=NULL;
+    if(failure)goto done;
+    fprintf(stdout,"HOST_CRT_BYTES_NOT_AVAILABLE provider=ucrtbase.dll APIs=wmemcpy,wmemmove,wmemset no_actual_exports no_imports_no_fallback_calls\n");
+    if((*env)->GetJavaVM(env,&vm)!=JNI_OK||!vm||!*vm
+            ||!load_memory_target(&target,(void*)&(*vm)->GetEnv,sizeof((*vm)->GetEnv),MEM_PRIVATE,(void*)*vm)){
+        failure="CRT_BYTES_ACTUAL_VM_SHADOW_GETENV_SLOT";goto done;
+    }
+    targetObserved=1;heap=HeapCreate(0,0,0);if(heap)scratch=(BYTE*)HeapAlloc(heap,0,512);
+    if(!scratch){failure="CRT_BYTES_ACTUAL_HEAP_STORAGE";goto done;}
+    previous=entries.setInvalid(load_bytes_invalid_handler);handler=1;
+    __try {
+        failure=load_bytes_normal(&entries,scratch);if(!failure)failure=load_bytes_invalid(&entries,scratch);
+        if(!failure)failure=load_bytes_refused(&entries,target.address,target.bytes,ERROR_ACCESS_DENIED);
+        if(!failure)failure=load_bytes_zero(&entries,&target);
+        if(failure)__leave;
+        fixture=load_allocator_provider(env,fixturePath);if(!fixture){failure="CRT_BYTES_ACTUAL_CPP_FIXTURE_LOAD";__leave;}
+        bind=(void*)GetProcAddress(fixture,"audit_allocator_fields_bind");run=(void*)GetProcAddress(fixture,"audit_allocator_fields_run");
+        containersRun=(void*)GetProcAddress(fixture,"audit_allocator_fields_containers_run");
+        hold=(void*)GetProcAddress(fixture,"audit_allocator_fields_hold");finish=(void*)GetProcAddress(fixture,"audit_allocator_fields_finish");
+        current=(void*)GetProcAddress(fixture,"audit_allocator_fields_current");
+        privateCreate=(void*)GetProcAddress(fixture,"audit_crt_private_create");privateApply=(void*)GetProcAddress(fixture,"audit_crt_private_apply");
+        privateFinish=(void*)GetProcAddress(fixture,"audit_crt_private_finish");privateCurrent=(void*)GetProcAddress(fixture,"audit_crt_private_current");
+        if(!bind||!run||!containersRun||!hold||!finish||!current||!privateCreate||!privateApply||!privateFinish||!privateCurrent){failure="CRT_BYTES_ACTUAL_CPP_EXPORTS";__leave;}
+        if(!privateCreate()){failure="CRT_BYTES_NONSDK_PRIVATE_CLASS_REAL_OPERATOR_NEW";__leave;}privateLive=1;
+        for(unsigned kind=0;kind<10&&!failure;kind++){
+            BYTE expectedBytes[24];wchar_t expectedWide[12];uint64_t expectedScalar=UINT64_C(0x1122334455667788),byteSum=0,wideSum=0;
+            for(unsigned i=0;i<24;i++)expectedBytes[i]=(BYTE)(0x10+i);
+            for(unsigned i=0;i<12;i++)expectedWide[i]=(wchar_t)(0x140+i);
+            switch(kind){
+            case 0:case 3:expectedScalar=UINT64_C(0x1020304050607080);break;
+            case 1:for(unsigned i=0;i<9;i++)expectedBytes[3+i]=(BYTE)(0x10+i);break;
+            case 2:for(unsigned i=0;i<7;i++)expectedBytes[4+i]=0x3c;break;
+            case 4:for(unsigned i=0;i<10;i++)expectedBytes[2+i]=(BYTE)(0x10+i);break;
+            case 5:for(unsigned i=0;i<4;i++)expectedWide[2+i]=(wchar_t)(0x101u*(i+1)+0x11u*i);break;
+            case 6:for(unsigned i=0;i<6;i++)expectedWide[3+i]=(wchar_t)(0x140+i);break;
+            case 7:for(unsigned i=0;i<5;i++)expectedWide[2+i]=0x3535;break;
+            case 8:for(unsigned i=0;i<4;i++)expectedWide[1+i]=(wchar_t)(0x101u*(i+1)+0x11u*i);break;
+            case 9:for(unsigned i=0;i<7;i++)expectedWide[2+i]=(wchar_t)(0x140+i);break;
+            }
+            for(unsigned i=0;i<24;i++)byteSum+=(uint64_t)(i+1)*expectedBytes[i];
+            for(unsigned i=0;i<12;i++)wideSum+=(uint64_t)(i+1)*expectedWide[i];
+            if(!privateApply(kind)||privateCurrent(0)!=expectedScalar||privateCurrent(1)!=byteSum||privateCurrent(2)!=wideSum
+                    ||privateCurrent(3)!=UINT64_C(0x193a5c7e9fb1d2f4)||privateCurrent(4)!=UINT64_C(0x4f2d1b9e7c5a3816))failure="CRT_BYTES_NONSDK_PRIVATE_SCALAR_ARRAY_OR_CANARY";
+        }
+        if(failure)__leave;
+        if(!privateFinish()){failure="CRT_BYTES_NONSDK_PRIVATE_CLASS_REAL_DELETE";__leave;}privateLive=0;
+        if(!bind(NULL)){failure="CRT_BYTES_REAL_CORE_ALLOCATOR_FIELDS_BIND";__leave;}live=1;
+        if(!run()){failure="CRT_BYTES_REAL_CORE_ALLOCATOR_FIELDS_START";__leave;}
+        if(current(18)!=3||!current(0)||!current(2)||!current(3)){failure="CRT_BYTES_REAL_CORE_TYPED_RECEIPTS_REQUIRED";__leave;}
+        jmethodID foreign=(*env)->GetStaticMethodID(env,check,"hostCrtBytesForeign","(JJI)Z");
+        if(!foreign){failure="CRT_BYTES_ACTUAL_SYSTEM_LOADER_FORWARDER";__leave;}
+        // Ordinary observed Heap storage has no typed-object declaration or
+        // live alias. A foreign alive source may contribute a real raw write.
+        if(!(*env)->CallStaticBooleanMethod(env,check,foreign,(jlong)(uintptr_t)scratch,(jlong)32,(jint)1)||(*env)->ExceptionCheck(env)){
+            failure="CRT_BYTES_FOREIGN_PLAIN_HEAP_ALIVE_COMMON_WRITE";__leave;
+        }
+        {BYTE before[32];for(unsigned i=0;i<32;i++)before[i]=scratch[i];
+            if(load_bytes_call(&entries,0,3,scratch,sizeof(before),before,0,sizeof(before))){failure="CRT_BYTES_CORE_PLAIN_HEAP_COMMON_WRITE";__leave;}
+            for(unsigned i=0;i<32;i++)if(scratch[i]!=before[i]){failure="CRT_BYTES_CORE_PLAIN_HEAP_ORIGINAL_BYTES";break;}}
+        for(unsigned selection=0;selection<2&&!failure;selection++){
+            void *address=(void*)(uintptr_t)current(selection?4:6);size_t bytes=selection?sizeof(uint64_t):(size_t)current(7);
+            if(!address||!hold(selection?2:1)){failure="CRT_BYTES_REAL_TYPED_BORROW_BEGIN";break;}held=1;
+            failure=load_bytes_refused(&entries,address,bytes,ERROR_BUSY);
+            if(!failure&&(!(*env)->CallStaticBooleanMethod(env,check,foreign,(jlong)(uintptr_t)address,(jlong)bytes,(jint)0)||(*env)->ExceptionCheck(env)))failure="CRT_BYTES_FOREIGN_REAL_TYPED_BORROW";
+            if(!hold(0)){failure="CRT_BYTES_REAL_TYPED_BORROW_RETURN";break;}held=0;
+            // Returning an alias preserves the real typed-object declaration.
+            // Only the SDK's accurate original-operation scope may write it.
+            if(!failure)failure=load_bytes_refused(&entries,address,bytes,ERROR_BUSY);
+            if(!failure&&(!(*env)->CallStaticBooleanMethod(env,check,foreign,(jlong)(uintptr_t)address,(jlong)bytes,(jint)0)||(*env)->ExceptionCheck(env)))failure="CRT_BYTES_FOREIGN_TYPED_WRITE_AFTER_BORROW_RETURN";
+        }
+        if(!failure&&(!containersRun()||current(28)!=1||current(29)!=1||current(32)!=16||current(33)!=64))failure="CRT_BYTES_REAL_SDK_ORIGINAL_MUTATION_AFTER_BORROW_RETURN";
+        if(!failure&&(!finish()))failure="CRT_BYTES_REAL_TYPED_ORIGINAL_DESTRUCTOR_RELEASE";else if(!failure)live=0;
+    } __except(EXCEPTION_EXECUTE_HANDLER){exception=GetExceptionCode();failure="CRT_BYTES_ACTUAL_NATIVE_EXCEPTION";}
+done:
+    if(held&&hold)hold(0);
+    if(live&&finish&&!(*env)->ExceptionCheck(env)&&finish())live=0;
+    if(privateLive&&privateFinish&&privateFinish())privateLive=0;
+    if(handler&&entries.setInvalid(previous)!=load_bytes_invalid_handler&&!failure)failure="CRT_BYTES_ORIGINAL_THREAD_INVALID_HANDLER_RESTORE";
+    if(targetObserved&&!load_memory_unchanged(&target)&&!failure)failure="CRT_BYTES_VM_SHADOW_CHANGED";
+    if(scratch&&!HeapFree(heap,0,scratch)&&!failure)failure="CRT_BYTES_ORIGINAL_HEAP_FREE";
+    if(heap&&!HeapDestroy(heap)&&!failure)failure="CRT_BYTES_ORIGINAL_HEAP_DESTROY";
+    if(fixture&&!live&&!privateLive&&!FreeLibrary(fixture)&&!failure)failure="CRT_BYTES_CPP_APPLICATION_REFERENCE_RETURN";
+    if(failure){fprintf(stderr,"HOST_CRT_BYTES_FAILED stage=%s exception=%08lx\n",failure,(unsigned long)exception);return load_thread_fail(env,failure)?JNI_TRUE:JNI_FALSE;}
+    fprintf(stdout,"HOST_CRT_BYTES_PASS actual_ucrtbase_seven_exact_IAT_GPA ordinary_Heap_storage copy_same_allocation_overlap_move_byte_fill_secure_wchar_counts secure_original_ERRNO_single_returning_thread_invalid_handler memcpy_s_destSize_clear_memmove_s_unchanged input_canaries_preserved real_VM_GetEnv_shadow_write_refused zero_count_numeric_pointer_original_contract nonsdk_trivial_private_class_actual_operator_new_private_scalar_byte_wchar_getters_real_secure_wide_copy_move_memset_0x35_byte_pattern_original_delete plain_Heap_foreign_Core_alive_common_write real_Core_SDK_payload_and_scalar_Core_foreign_raw_refused_during_and_after_borrow SDK_original_container_mutation_and_destructor_release NOT_AVAILABLE_wmemcpy_wmemmove_wmemset_no_actual_exports\n");
+    fflush(stdout);return JNI_TRUE;
+}
+
 /* The ordinary JNI payload calls an independent real C++23 PMR consumer.
  * Any SDK coverage is reported from real receipts; original-call success alone
  * does not certify the separately supplied-source isolated SDK seam. */

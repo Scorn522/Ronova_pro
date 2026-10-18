@@ -1,5 +1,23 @@
 # B 批实际报告：2026-10-09 代码收敛接续
 
+## 2026-10-18：C 接续——CRT 原生内存入口与非 SDK 私有存储
+
+接续 `f718bbf`，仅主工程 `D:\桌面\ronova_GPT`。Java105 / Native98 / Object SDK3（保留1/2）/ SourceMapBridge2 / Storage3 / Journal6，协议 `r3-client-8`。整包源码写齐后统一构建。
+
+补入 memcpy/memmove/memset、宽字符版本和两类 secure copy/move 共10种 CRT 签名的准确导出适配；仅存在真实导出时接入。本机 UCRT 实际导出其中7种，非 secure 的 wmemcpy/wmemmove/wmemset 无导出，不计覆盖，不伪造入口。目标按实际 provider、准确名称及地址建立，不将同址 memcpy/memmove 或不同宽度/参数 ABI 混为首个符号。已观察范围持准确 storage row/generation 的双端使用，合法同块重叠移动合并读写角色；新增租约不跨原调用持有目录或 row 锁。未观察普通双端直接保留原函数，不进 Java、不补造归属。
+
+读取实际 creator/revision/此前 raw-copy 贡献，真实调用后将不完整贡献传到后续读取与复制，保留未知及不透明状态，不授予任意 C++ 字段、构造析构或字节恢复权限。活借用、typed 对象和控制范围继续拒绝未获准确语义授权的原始写；两端范围的任何部分命中已观察存储都不降级未知。secure 错误按原函数可能触及的范围接续，copy_s 原清零与 move_s 原无写错误分开；零访问原合同不因指针数值误拒。非零宽字符范围溢出直接拒绝，不声称保留该无效调用的原故障/handler行为。
+
+准确活跃的 SDK 写入和 sequence 原修改体，沿当前线程、真实 provider、完整来源、原边界和准确 row/generation 接续 CRT 内部动作；新分配只记录本次实际出生关系，不赋予额外写权，不把原合法修改误记为未知 raw 写。借用期间及归还后 typed 对象的任意 raw 写仍拒绝；既有未知不会因此清除。
+
+统一生产构建 `build-c-java105-native98-crt-bytes-20261018.log` **PASS，1分24秒**；Java 检查入口、真实 Host DLL 及既有 C++ 夹具编译退出0。Zig 无现成 `ucrt` 导入库，使用 `HostLoadUcrtBytes.def` 为系统真实7个导出生成导入描述，不含替代实现。只跑本次直接相关路径；旧编译警告未扩改。
+
+`c-java105-native98-core-bytes-final-20261018.log` **退出0，正常 JVM 结束**：实际 named Core 沿本包 ProMod/ProRuntime 启动绑定，不供给 owner/producer 元数据；7个真实 UCRT 入口的 IAT/GPA、同块重叠移动、填充、secure 宽字符计数、原返回/errno/LastError、参数错误处理一次执行、copy_s 全容量清零和 move_s 错误不写均通过。真实 VM GetEnv 控制槽写入在原调用前拒绝，零长度数字指针保留原合同；非 SDK C++ 私有类的实际 operator new、标量/字节/宽字符 getter 读回和原 delete 通过。独立 system-loader DLL 对普通 Heap 的合法写保留，对 SDK payload/scalar 活借用期间及归还后的 raw 写均拒绝，深层 Core 不借权；SDK 原容器初次修改、析构及 HeapFree/HeapDestroy 通过。
+
+初次检查的基准快照自身调用受控 memcpy 读取控制表，未取得原字节；改用直接逐字节读取。随后将检查的精确错误期望区分为控制区 ACCESS_DENIED/EACCES 与 typed/lifetime 冲突 BUSY/EBUSY。原中断日志保留，没有为检查放宽生产防护，也没有重跑旧矩阵。未加载驱动或启动完整游戏。
+
+候选为 `distribution/candidate-c-java105-native98-crt-bytes-wip-20261018` 的匹配双 JAR。仅观察到的实际 CRT 调用被纳入；内联/直接 CPU、未观察的原始调用、任意非合作 C++ 字段与所有权语义仍有缺口，完整 C/B 未标完成。自身外观、武器注册、源码 ZIP 及完整游戏/存档重启未做。
+
 ## 2026-10-17：C 接续——异步完成与私有请求状态
 
 接续 `91b1eab`，仅主工程 `D:\桌面\ronova_GPT`。Java105 / Native97 / Object SDK3（保留1/2）/ SourceMapBridge2 / Storage3 / Journal6，协议 `r3-client-8`。整包写齐后统一构建。

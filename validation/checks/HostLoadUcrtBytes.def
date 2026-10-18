@@ -1,0 +1,11 @@
+; Import descriptors for the actual system UCRT exports used by HostLoadNative.
+; No implementation is supplied; all calls resolve to the loaded ucrtbase.dll.
+LIBRARY ucrtbase.dll
+EXPORTS
+    memcpy
+    memmove
+    memset
+    memcpy_s
+    memmove_s
+    wmemcpy_s
+    wmemmove_s

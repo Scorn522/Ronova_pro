@@ -2,6 +2,7 @@
 #ifndef RONOVA_HOST_MEMORY_TRACKING_H
 #define RONOVA_HOST_MEMORY_TRACKING_H
 typedef struct NativeHostMemoryCall NativeHostMemoryCall;
+typedef struct NativeHostBytesCall NativeHostBytesCall;
 typedef struct NativeHostArenaOriginalScope {
     HMODULE image;void *original,*release,*entry;NativeHostMemoryCall *call;
     DWORD thread;int cleanup;struct NativeHostArenaOriginalScope *previous;
@@ -59,6 +60,30 @@ static void native_memory_host_abort(JNIEnv*,NativeHostMemoryCall*);
 /* Admission was refused before any original call ran; keep the old lifetime. */
 static void native_memory_host_cancel(NativeHostMemoryCall*);
 static void native_memory_host_unobserved(OwnerLink *owners);
+
+/* Only actual observed CRT byte entries use these private spans. A zero byte
+ * count has no numeric-pointer ownership meaning. Probe returns 0 only when
+ * neither nonempty range touches observed storage, 1 on any intersection,
+ * and -1 when its directory cannot be queried. Begin captures both exact
+ * generations and all source-byte contributors in one short admission; an
+ * observed partial/out-of-bounds span cannot fall through as unknown memory.
+ * The original runs with counter leases alone, including secure CRT callbacks.
+ * Unknown byte provenance remains unknown and never supplies an object/field,
+ * constructor/destructor, allocator, or byte-rollback capability. */
+static int native_memory_host_bytes_probe(uint64_t dst,uint64_t dstBytes,uint64_t src,uint64_t srcBytes,int restricted);
+static NativeHostBytesCall *native_memory_host_bytes_begin(uint64_t dst,uint64_t dstBytes,uint64_t src,uint64_t srcBytes,
+        OwnerLink *owners,int unknown,int restricted,int *denied);
+/* caller is the actual return address, callbackEntered the actual enclosing
+ * Host dispatch hold. Only this form can delegate into an already active,
+ * exactly covered SDK mutator or original VM JNI writer. */
+static NativeHostBytesCall *native_memory_host_bytes_begin_caller(uint64_t dst,uint64_t dstBytes,uint64_t src,uint64_t srcBytes,
+        OwnerLink *owners,int unknown,int restricted,int *denied,int callbackEntered,void *caller);
+static int native_memory_host_bytes_output_unobserved(NativeHostBytesCall*);
+/* returned means the original really returned, including a secure CRT errno.
+ * called with no return records possible partial effects. An unavailable Try
+ * completion retains an explicitly uncertain lease; it cannot change the real
+ * original result/errno or claim rollback. */
+static void native_memory_host_bytes_end(NativeHostBytesCall*,int called,int returned);
 
 /* The exact loaded allocator's free export identifies one provider. Every
  * observed call leases it until the actual call and result observation finish;
