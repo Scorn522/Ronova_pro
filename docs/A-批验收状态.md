@@ -12,6 +12,8 @@ Storage 已去除 IdentityLifetime、RootAllocation 与自发回执包装，使�
 
 用户已明确授权在真实 Forge 1.20.1 / 47.4.23 服务端使用 `-Dronova.pro.validation=true -Dronova.pro.fixture=mod-group` 和已有 WorldFixture JAR。当前正在该实际世界场景收尾，不能将 premain 完整或 ModLauncher 启动当成停组效果通过。没有运行 `validation/checks` 自证检查或独立 C++ 消费者夹具。
 
+授权后实机继续定位普通 ASM 复制与 Mixin 元数据承接的强制序列化、无策略普通字段/数组的逐写锁，已收敛为冻结输入和实际父属的粗根来源，以及保留原写入策略的无回执通行；真实控制、来源载体、资源、队列、发布作用域及活策略仍走原门禁。首次通行暴露 PUTSTATIC 的空值拒绝约定，已正确适配。随后实机已过 177+5 个 Mixin 准备并进入 `Minecraft.server.Main`，暴露 JOML 46.0 类中新增 Class 常量不合法；共用写出器对旧类最低设为 49.0，保留原边界。修正续编成功，正在重开实际场景，尚无世界停组/保存重启通过结果；`ForkJoinTask$Aux` 的实际待验收状态保留。
+
 本版不宣称任意非合作原生私有语义、未观察调用或外部旧活栈已完全控制；这些范围保持实际 gap/partial。自身外观与武器注册未加入本轮，完整 B/C 未统一标为完成。
 
 ## 2026-10-18：C 接续——NT 内存传输与私有字段存储

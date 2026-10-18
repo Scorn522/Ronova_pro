@@ -10,6 +10,9 @@ final class ControlClassWriter extends ClassWriter {
     private final Map<String,Shape> shapes=new HashMap<>();
     ControlClassWriter(ClassLoader loader,ClassNode node) {
         super(COMPUTE_FRAMES|COMPUTE_MAXS);this.loader=loader;
+        // Boundary calls carry actual declaring Class literals. Their LDC
+        // encoding requires classfile 49 even for an older input library.
+        if((node.version&0xFFFF)<Opcodes.V1_5)node.version=Opcodes.V1_5;
         shapes.put(node.name,new Shape(node.superName,node.interfaces.toArray(String[]::new),(node.access&Opcodes.ACC_INTERFACE)!=0));
     }
     private Shape shape(String name) {

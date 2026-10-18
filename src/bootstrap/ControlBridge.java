@@ -1702,7 +1702,9 @@ public final class ControlBridge {
         int split=signature.lastIndexOf('\0');
         if(split<0)throw new IllegalArgumentException("ACTUAL_FIELD_SIGNATURE_REQUIRED");
         Object token=beginFieldMutation(null,symbolic,signature.substring(0,split),signature.substring(split+1),value);
-        return token==Boolean.FALSE?null:token;
+        // PUTSTATIC's adapter uses null for refusal; an allowed write with
+        // no mutation scope must still carry its existing non-null sentinel.
+        return token==Boolean.FALSE?null:token==null?Boolean.TRUE:token;
     }
     public static Object beginOwnStaticFieldMutation(Object value,String signature){return staticFieldMutation(value,WALKER.getCallerClass(),signature);}
     public static Object beginStaticFieldMutation(Object value,Class<?> symbolic,String signature){return staticFieldMutation(value,symbolic,signature);}
@@ -1722,10 +1724,32 @@ public final class ControlBridge {
     public static Object beginStaticFieldMutation(float value,Class<?> symbolic,String signature){return staticFieldMutation(Float.valueOf(value),symbolic,signature);}
     public static Object beginOwnStaticFieldMutation(double value,String signature){return staticFieldMutation(Double.valueOf(value),WALKER.getCallerClass(),signature);}
     public static Object beginStaticFieldMutation(double value,Class<?> symbolic,String signature){return staticFieldMutation(Double.valueOf(value),symbolic,signature);}
+    private static boolean fieldMutationReceiptRequired(Object target,Class<?> declaring){
+        if(guards!=null||stoppedModules.length!=0||protectedModules.length!=0)return true;
+        if(ownState(declaring)||ownState(target.getClass())||controlled(target))return true;
+        if(SourceMapBridge.holderRegistered(target)||SourceMapBridge.carrierRegistered(target))return true;
+        if(target instanceof Map<?,?>||target instanceof Collection<?>||primitiveSourceIndex(target)
+                ||ResourceBridge.critical(target)||target!=declaring&&ResourceBridge.critical(declaring))return true;
+        Class<?> type=target.getClass();
+        if(target instanceof java.util.concurrent.ForkJoinPool||target instanceof java.util.concurrent.ForkJoinTask<?>[]
+                ||type.getClassLoader()==null&&(type.getName().equals("java.util.concurrent.ForkJoinPool$WorkQueue")
+                ||type.getName().equals("[Ljava.util.concurrent.ForkJoinPool$WorkQueue;")))return true;
+        // A publication may hold an incoming object's gate even before that
+        // object becomes a registered source holder. Keep all such scopes gated.
+        synchronized(SOURCE_PUBLICATIONS){if(!SOURCE_PUBLICATIONS.isEmpty())return true;}
+        synchronized(SOURCE_INDEX_MUTATIONS){if(!SOURCE_INDEX_MUTATIONS.isEmpty())return true;}
+        return false;
+    }
     public static Object beginFieldMutation(Object receiver,Class<?> symbolic,String name,String descriptor,Object value) {
         Class<?> declaring=actualFieldOwner(symbolic,name,descriptor);
         if(declaring==null||declaring==Void.class){lost();return Boolean.FALSE;}
         Object target=receiver==null?declaring:receiver;
+        if(!fieldMutationReceiptRequired(target,declaring)){
+            if(!fieldWriteAllowed(target,declaring,name,value))return Boolean.FALSE;
+            // Never retain an empty-policy verdict. A first policy publication
+            // during the query returns this write to the existing gated path.
+            if(guards==null&&stoppedModules.length==0&&protectedModules.length==0)return null;
+        }
         java.util.concurrent.locks.ReentrantLock gate=fieldGate(target);gate.lock();
         Object receipt=memoryReceipt(gate,target);
         try {if(fieldWriteAllowed(target,declaring,name,value))return receipt;}
@@ -1768,12 +1792,18 @@ public final class ControlBridge {
     public static Object beginMemoryMutation(Object receiver) {
         if(WALKER.getCallerClass()!=BackingBridge.class&&!coreWriter()&&!NativeControl.memoryMutationBoundary(receiver))
             throw new SecurityException("ACTUAL_MEMORY_MUTATION_BOUNDARY_REQUIRED");
+        if(receiver!=null&&!fieldMutationReceiptRequired(receiver,receiver.getClass())
+                &&guards==null&&stoppedModules.length==0&&protectedModules.length==0)return null;
         java.util.concurrent.locks.ReentrantLock gate=fieldGate(receiver);gate.lock();
         return memoryReceipt(gate,receiver);
     }
     public static Object beginArrayMutation(Object receiver,int start,int length){
         if(WALKER.getCallerClass()!=BackingBridge.class&&!coreWriter()&&!NativeControl.memoryMutationBoundary(receiver))
             throw new SecurityException("ACTUAL_MEMORY_MUTATION_BOUNDARY_REQUIRED");
+        // BackingBridge still checks the actual element immediately before its
+        // original store; a null receipt only omits an unneeded receiver lock.
+        if(receiver!=null&&!fieldMutationReceiptRequired(receiver,receiver.getClass())
+                &&guards==null&&stoppedModules.length==0&&protectedModules.length==0)return null;
         java.util.concurrent.locks.ReentrantLock gate=fieldGate(receiver);gate.lock();
         try{return new FieldMutation(gate,receiver);}
         catch(RuntimeException|Error failure){gate.unlock();throw failure;}
@@ -1865,7 +1895,12 @@ public final class ControlBridge {
         if(WALKER.getCallerClass()!=java.lang.reflect.Field.class)throw new SecurityException("ACTUAL_REFLECTION_WRITE_REQUIRED");
         Class<?> declaring=field.getDeclaringClass();boolean statik=java.lang.reflect.Modifier.isStatic(field.getModifiers());
         if(!statik&&(receiver==null||!declaring.isInstance(receiver)))return null;
-        Object target=statik?declaring:receiver;java.util.concurrent.locks.ReentrantLock gate=fieldGate(target);gate.lock();
+        Object target=statik?declaring:receiver;
+        // The reflection boundary still invokes reflectFieldWrite with the
+        // actual proposed value immediately before its original FieldAccessor.
+        if(!fieldMutationReceiptRequired(target,declaring)
+                &&guards==null&&stoppedModules.length==0&&protectedModules.length==0)return null;
+        java.util.concurrent.locks.ReentrantLock gate=fieldGate(target);gate.lock();
         return memoryReceipt(gate,target);
     }
     static void requireUnsafeWriter(){

@@ -45,6 +45,9 @@ public final class CodeSourceBridge {
     private static final Map<Key,Module[]> BYTE_CONTRIBUTORS=new LedgerMap<>();
     private static final Map<Key,Reader> READERS=new LedgerMap<>();
     private static final Map<Key,Image> TREES=new LedgerMap<>();
+    /** Frozen parser roots for ordinary copies; no current-image assertion. */
+    private static final Map<Key,byte[]> TREE_INPUTS=new LedgerMap<>();
+    private static final Map<Key,WeakReference<Object>> TREE_PARENTS=new LedgerMap<>();
     private static final Map<Key,byte[]> TREE_IMAGES=new LedgerMap<>();
     private static final Map<Key,Image> MIXINS=new LedgerMap<>();
     private static final Map<Key,WeakReference<Object>> MIXIN_TREES=new LedgerMap<>();
@@ -245,7 +248,7 @@ public final class CodeSourceBridge {
         metadataImages=actualAgent.getMethod("externalMixinMetadata",Object.class,Module.class,Module[].class);
         memberImage=actualAgent.getMethod("externalMemberMetadata",Object.class);
         prepared=actualAgent.getMethod("externalClassPrepared",Class.class);
-        ControlBridge.controlPublication(MODULES,new Object[]{IMAGES,BYTE_CONTRIBUTORS,READERS,TREES,TREE_IMAGES,MIXINS,MIXIN_TREES,MIXIN_OPTIONS,MIXIN_RESTRICTIONS,TRACKER_RESTRICTIONS,METADATA,METADATA_TREES,METADATA_ROWS,MEMBER_IMAGES,CONTEXT_READS,STATE_READS,SELECTIONS,RESOURCE_SOURCES,CONFIGURATIONS,CONTEXTS,HOLDERS,WRITERS,COPYING,PREPARING_CONFIGS,REGISTRATIONS,METADATA_USE,CONTROLS,ROLES,CODE_METHODS,FRAME_METHODS,CODE_FIELDS,CODE_VALUES,FIELD_HOLDERS,FIELD_CLASSES,agent,producer,encoder,baseline,begin,end,copied,encoded,observed,dependency,payload,selection,metadataImages,memberImage,prepared});
+        ControlBridge.controlPublication(MODULES,new Object[]{IMAGES,BYTE_CONTRIBUTORS,READERS,TREES,TREE_INPUTS,TREE_PARENTS,TREE_IMAGES,MIXINS,MIXIN_TREES,MIXIN_OPTIONS,MIXIN_RESTRICTIONS,TRACKER_RESTRICTIONS,METADATA,METADATA_TREES,METADATA_ROWS,MEMBER_IMAGES,CONTEXT_READS,STATE_READS,SELECTIONS,RESOURCE_SOURCES,CONFIGURATIONS,CONTEXTS,HOLDERS,WRITERS,COPYING,PREPARING_CONFIGS,REGISTRATIONS,METADATA_USE,CONTROLS,ROLES,CODE_METHODS,FRAME_METHODS,CODE_FIELDS,CODE_VALUES,FIELD_HOLDERS,FIELD_CLASSES,agent,producer,encoder,baseline,begin,end,copied,encoded,observed,dependency,payload,selection,metadataImages,memberImage,prepared});
     }
     public static void codeMethods(ClassLoader loader,String name,String[] methods){
         requireAgent();codeMethods(loader,name,methods,null);
@@ -916,10 +919,21 @@ public final class CodeSourceBridge {
             var field=declaring.getDeclaredField("classFileBuffer");field.setAccessible(true);if(field.get(reader)!=bytes)return;
             Class<?> tree=Class.forName("org.objectweb.asm.tree.ClassNode",false,declaring.getClassLoader());if(!tree.isInstance(visitor))return;
         }catch(ReflectiveOperationException failure){throw new IllegalStateException("ASM_SOURCE_BUFFER_UNOBSERVED",failure);}
-        call(observed,visitor,record.image().module(),bytes);
-        synchronized(MODULES){TREES.put(new Key(visitor,true),record.image());TREE_IMAGES.remove(new Key(visitor,false));}
+        byte[] input=bytes.clone();protect((Object)input);
+        call(observed,visitor,record.image().module(),input);
+        synchronized(MODULES){TREES.put(new Key(visitor,true),record.image());TREE_INPUTS.put(new Key(visitor,true),input);TREE_IMAGES.remove(new Key(visitor,false));}
+        rememberTreeParents(visitor);
     }
     public static Module treeModule(Object tree){synchronized(MODULES){reap();Image image=TREES.get(new Key(tree,false));return image==null?null:image.module();}}
+    private static void rememberTreeParents(Object tree){
+        Ref<Object> parent=new Ref<>(tree);protect(parent);
+        synchronized(MODULES){for(String kind:List.of("methods","fields"))for(Object member:(List<?>)field(tree,kind))
+            TREE_PARENTS.put(new Key(member,true),parent);}
+    }
+    private static Object treeRoot(Object tree){
+        synchronized(MODULES){if(TREES.containsKey(new Key(tree,false)))return tree;
+            WeakReference<Object> parent=TREE_PARENTS.get(new Key(tree,false));return parent==null?null:parent.get();}
+    }
     private static Object call(Method method,Object... arguments){
         boolean serializing=method!=producer;Thread thread=Thread.currentThread();if(serializing)synchronized(COPYING){COPYING.merge(thread,1,Integer::sum);}
         try{return method.invoke(null,arguments);}catch(java.lang.reflect.InvocationTargetException failure){
@@ -947,7 +961,8 @@ public final class CodeSourceBridge {
         return MessageDigest.isEqual(digest,hash(image(tree)))?source:null;
     }
     public static void mixinLoaded(Object mixin,Object tree){
-        boundary("loadMixinClass");Image source=unchangedTree(tree);
+        boundary("loadMixinClass");Image source;synchronized(MODULES){source=TREES.get(new Key(tree,false));}
+        // Loading carries observed roots; it does not certify current bytes.
         if(source!=null){Module[] sources=merge(source.sources(),configurationSources(field(mixin,"parent")));protect((Object)sources);
             synchronized(MODULES){MIXINS.put(new Key(mixin,true),new Image(source.module(),source.digest(),sources));MIXIN_TREES.put(new Key(mixin,true),new Ref<>(tree));}}
     }
@@ -955,11 +970,14 @@ public final class CodeSourceBridge {
         if(source==null||ControlBridge.modStopped(source.module())||Arrays.stream(source.sources()).noneMatch(module->module!=source.module()&&ControlBridge.modStopped(module)))return new Replayed(tree,false,false);
         Object[] replay=(Object[])call(payload,tree,source.module(),source.sources(),bodyOnly);if(replay==null)return new Replayed(tree,false,false);
         Object replacement=replay[0];Module[] sources=((Module[])replay[1]).clone();protect((Object)sources);byte[] digest=hash(image(replacement));
-        Image restored=new Image(source.module(),digest,sources);synchronized(MODULES){TREES.put(new Key(replacement,true),restored);TREE_IMAGES.put(new Key(replacement,true),digest);}
+        Image restored=new Image(source.module(),digest,sources);synchronized(MODULES){TREES.put(new Key(replacement,true),restored);TREE_INPUTS.remove(new Key(replacement,false));TREE_IMAGES.put(new Key(replacement,true),digest);}
+        rememberTreeParents(replacement);
         return new Replayed(replacement,Boolean.TRUE.equals(replay[3]),Boolean.TRUE.equals(replay[4]));
     }
     public static Object mixinBytes(Object mixin,Object tree){
-        boundary("loadMixinClass");Object replacement=replayedTree(tree,unchangedTree(tree),false).tree();mixinLoaded(mixin,replacement);return replacement;
+        boundary("loadMixinClass");Image source;synchronized(MODULES){source=TREES.get(new Key(tree,false));}
+        Object replacement=needsReplay(source)?replayedTree(tree,unchangedTree(tree),false).tree():tree;
+        mixinLoaded(mixin,replacement);return replacement;
     }
     public static void mixinPrepare(Object mixin){
         Class<?> type=boundary("createContextFor");
@@ -1204,16 +1222,18 @@ public final class CodeSourceBridge {
     }
     public static void classInfoCreated(Object info,Object tree){
         Class<?> type=boundary("<init>");if(info==null||info.getClass()!=type)throw new SecurityException("ACTUAL_CLASS_INFO_CONSTRUCTOR_REQUIRED");
-        Image source=unchangedTree(tree);if(source==null)return;
+        Image source;synchronized(MODULES){reap();source=TREES.get(new Key(tree,false));}if(source==null)return;
         Module[] sources=source.sources().clone();protect((Object)sources);
-        @SuppressWarnings("unchecked") Map<String,Module[]> raw=(Map<String,Module[]>)call(metadataImages,tree,source.module(),sources);
-        // This private String-key draft is frozen and protected before publication.
-        Map<String,Image> rows=new TreeMap<>();for(var entry:raw.entrySet()){Module[] owners=entry.getValue().clone();protect((Object)owners);rows.put(entry.getKey(),new Image(source.module(),source.digest(),owners));}rows=Map.copyOf(rows);protect(rows);
+        // This is the observed input's whole-root provenance, not a claim
+        // about current tree bytes or a per-member/frame image. Replay still
+        // requires its independent unchangedTree and actual patch capture.
+        Image root=new Image(source.module(),source.digest(),sources);Map<String,Image> rows=Map.of("*",root);protect(root,rows);
         synchronized(MODULES){
-            METADATA.put(new Key(info,true),new Image(source.module(),source.digest(),sources));METADATA_TREES.put(new Key(info,true),new Ref<>(tree));METADATA_ROWS.put(new Key(info,true),rows);
+            METADATA.put(new Key(info,true),root);METADATA_TREES.put(new Key(info,true),new Ref<>(tree));METADATA_ROWS.put(new Key(info,true),rows);
             for(String set:List.of("methods","initialisers","fields"))for(Object member:(Set<?>)field(info,set)){
-                String key=(set.equals("fields")?"F":"M")+field(member,"memberName")+'\u0000'+field(member,"memberDesc");
-                Image image=rows.getOrDefault(key,rows.get("*"));if(image!=null)MEMBER_IMAGES.put(new Key(member,true),image);
+                Image previous=MEMBER_IMAGES.get(new Key(member,false)),actual=root;
+                if(previous!=null){Module[] owners=merge(sources,previous.sources());protect((Object)owners);actual=new Image(root.module(),root.digest(),owners);}
+                MEMBER_IMAGES.put(new Key(member,true),actual);
             }
         }
     }
@@ -1234,11 +1254,18 @@ public final class CodeSourceBridge {
     }
     public static void metadataMemberCopied(Object member,Object original){
         Class<?> type=boundary("<init>");if(!type.isInstance(member))throw new SecurityException("ACTUAL_MIXIN_MEMBER_COPY_REQUIRED");
-        synchronized(MODULES){Image source=MEMBER_IMAGES.get(new Key(original,false));if(source!=null)MEMBER_IMAGES.put(new Key(member,true),source);}
+        synchronized(MODULES){Image source=MEMBER_IMAGES.get(new Key(original,false));if(source!=null){
+            Image previous=MEMBER_IMAGES.get(new Key(member,false));
+            if(previous!=null){Module[] owners=merge(source.sources(),previous.sources());protect((Object)owners);source=new Image(source.module(),source.digest(),owners);}
+            MEMBER_IMAGES.put(new Key(member,true),source);}}
     }
     public static void metadataMemberCreated(Object member,Object info,Object node){
         Class<?> type=boundary("<init>");if(!type.isInstance(member)||field(member,"this$0")!=info)throw new SecurityException("ACTUAL_MIXIN_MEMBER_CONSTRUCTOR_REQUIRED");
-        Object[] actual=(Object[])call(memberImage,node);Image source=actual==null?null:new Image((Module)actual[0],new byte[0],((Module[])actual[1]).clone());
+        // Inheriting actual parent/member provenance does not require a frame
+        // image or serialization of this member (or its enclosing class).
+        Object root=treeRoot(node);Image source;
+        synchronized(MODULES){source=MEMBER_IMAGES.get(new Key(node,false));if(source==null&&root!=null)source=TREES.get(new Key(root,false));
+            if(source==null)source=METADATA.get(new Key(info,false));}
         MetadataUse scope=METADATA_USE.get();Image context=null;
         if(scope!=null){
             Object mixin=scope.context()==null?scope.mixin():field(scope.context(),"mixin");synchronized(MODULES){context=scope.context()==null?null:CONTEXTS.get(new Key(scope.context(),false));if(context==null&&mixin!=null)context=MIXINS.get(new Key(mixin,false));}
@@ -1246,7 +1273,9 @@ public final class CodeSourceBridge {
         if(source==null){if(context==null)return;source=context;}
         Module[] writers=ControlBridge.invokingSources();if(context!=null)writers=merge(writers,context.sources());
         Module[] sources=merge(source.sources(),writers);protect((Object)sources);Image created=new Image(source.module(),source.digest(),sources);
-        synchronized(MODULES){MEMBER_IMAGES.put(new Key(member,true),created);}
+        synchronized(MODULES){Image previous=MEMBER_IMAGES.get(new Key(member,false));
+            if(previous!=null){Module[] owners=merge(created.sources(),previous.sources());protect((Object)owners);created=new Image(created.module(),created.digest(),owners);}
+            MEMBER_IMAGES.put(new Key(member,true),created);}
     }
     public static void metadataHeaderChanged(Object info){
         boundary("addInterface");Module[] writers=ControlBridge.invokingSources();MetadataUse scope=METADATA_USE.get();
@@ -1335,7 +1364,7 @@ public final class CodeSourceBridge {
         for(Object mixin:(SortedSet<?>)mixins){
             Image source;WeakReference<Object> raw;synchronized(MODULES){source=MIXINS.get(new Key(mixin,false));raw=MIXIN_TREES.get(new Key(mixin,false));}
             if(source==null)continue;Object tree=raw==null?null:raw.get();
-            Module[] contributors=tree==null?source.sources():(Module[])call(selection,tree,source.module(),source.sources());
+            Module[] contributors=tree==null||!needsReplay(source)?source.sources():(Module[])call(selection,tree,source.module(),source.sources());
             Module[] sources=merge(contributors,configurationSources(field(mixin,"parent")));protect((Object)sources);
             selected.put(new Key(mixin,false),new Image(source.module(),source.digest(),sources));
         }
@@ -1343,12 +1372,20 @@ public final class CodeSourceBridge {
     }
     public static void treeCopied(Object tree,Object visitor){
         boundary("accept");if(copying())return;
-        call(copied,tree,visitor);Image source=unchangedTree(tree);if(source==null)return;
+        Image source;byte[] input;synchronized(MODULES){source=TREES.get(new Key(tree,false));input=TREE_INPUTS.get(new Key(tree,false));}if(source==null)return;
         try{
             Class<?> writer=Class.forName("org.objectweb.asm.ClassWriter",false,tree.getClass().getClassLoader());
-            if(writer.isInstance(visitor)){synchronized(MODULES){WRITERS.put(new Key(visitor,true),source);}return;}
+            if(writer.isInstance(visitor)){call(copied,tree,visitor);synchronized(MODULES){WRITERS.put(new Key(visitor,true),source);}return;}
             Class<?> node=Class.forName("org.objectweb.asm.tree.ClassNode",false,tree.getClass().getClassLoader());
-            if(node.isInstance(visitor)){byte[] digest=hash(image(visitor));synchronized(MODULES){TREES.put(new Key(visitor,true),source);TREE_IMAGES.put(new Key(visitor,true),digest);}}
+            if(node.isInstance(visitor)){
+                // A real transform/replay keeps its actual patch identities.
+                // An ordinary copy inherits only the frozen input and parent
+                // roots; later capture still compares against that original.
+                if(input==null)call(copied,tree,visitor);else call(observed,visitor,source.module(),input);
+                synchronized(MODULES){TREES.put(new Key(visitor,true),source);TREE_IMAGES.remove(new Key(visitor,false));
+                    if(input==null)TREE_INPUTS.remove(new Key(visitor,false));else TREE_INPUTS.put(new Key(visitor,true),input);}
+                rememberTreeParents(visitor);
+            }
         }catch(ClassNotFoundException failure){throw new IllegalStateException("ASM_COPY_ROLE_UNAVAILABLE",failure);}
     }
     public static byte[] writerBytes(Object writer,byte[] bytes){
@@ -1404,7 +1441,9 @@ public final class CodeSourceBridge {
     }
     private static Object capture(Object tree,Module[] sources,Module[] writers,Object context){
         Image original;synchronized(MODULES){original=TREES.get(new Key(tree,false));}
-        Module[] actual=sources.clone(),authors=writers.clone();Ref<Object> consumer=new Ref<>(context);CodeCapture record=new CodeCapture(call(begin,tree,actual,authors),original,actual,consumer);protect(record,actual,authors,consumer);return record;
+        Module[] actual=sources.clone(),authors=writers.clone();Ref<Object> consumer=new Ref<>(context);Object token=call(begin,tree,actual,authors);
+        if(token!=null){Object root=treeRoot(tree);if(root!=null)synchronized(MODULES){TREE_INPUTS.remove(new Key(root,false));}}
+        CodeCapture record=new CodeCapture(token,original,actual,consumer);protect(record,actual,authors,consumer);return record;
     }
     public static void transformerContext(Object holder,Object implementation,Object service){
         boundary("<init>");
@@ -1431,11 +1470,12 @@ public final class CodeSourceBridge {
         byte[] digest=hash(image(tree));
         Module[] sources=merge(source.sources(),used);protect((Object)sources);
         synchronized(MODULES){
-            Image current=new Image(source.module(),digest,sources);TREES.put(new Key(tree,true),current);TREE_IMAGES.put(new Key(tree,true),digest);
+            Image current=new Image(source.module(),digest,sources);TREES.put(new Key(tree,true),current);TREE_INPUTS.remove(new Key(tree,false));TREE_IMAGES.put(new Key(tree,true),digest);
             for(var entry:METADATA_TREES.entrySet())if(entry.getValue().get()==tree){
                 Image previous=METADATA.get(entry.getKey());if(previous!=null){Module[] merged=merge(previous.sources(),record.sources());protect((Object)merged);METADATA.put(entry.getKey(),new Image(previous.module(),digest,merged));}
             }
         }
+        rememberTreeParents(tree);
     }
     public static void codeControls(Object[] objects){requireAgent();protectControls(objects);}
     public static Object[] imageControlFields(Object holder,java.lang.reflect.Field[] fields){
@@ -1559,5 +1599,5 @@ public final class CodeSourceBridge {
         throw new NoSuchFieldException(type.getName()+":"+name);
     }
     private static byte[] hash(byte[] bytes){byte[] digest=NativeControl.codeDigest(bytes);protect((Object)digest);return digest;}
-    private static void reap(){for(Key key;(key=(Key)DEAD.poll())!=null;){MODULES.remove(key);IMAGES.remove(key);BYTE_CONTRIBUTORS.remove(key);READERS.remove(key);TREES.remove(key);TREE_IMAGES.remove(key);MIXINS.remove(key);MIXIN_TREES.remove(key);MIXIN_OPTIONS.remove(key);MIXIN_RESTRICTIONS.remove(key);TRACKER_RESTRICTIONS.remove(key);METADATA.remove(key);METADATA_TREES.remove(key);METADATA_ROWS.remove(key);MEMBER_IMAGES.remove(key);CONTEXT_READS.remove(key);STATE_READS.remove(key);SELECTIONS.remove(key);RESOURCE_SOURCES.remove(key);CONFIGURATIONS.remove(key);CONTEXTS.remove(key);HOLDERS.remove(key);WRITERS.remove(key);FIELD_HOLDERS.remove(key);}}
+    private static void reap(){for(Key key;(key=(Key)DEAD.poll())!=null;){MODULES.remove(key);IMAGES.remove(key);BYTE_CONTRIBUTORS.remove(key);READERS.remove(key);TREES.remove(key);TREE_INPUTS.remove(key);TREE_PARENTS.remove(key);TREE_IMAGES.remove(key);MIXINS.remove(key);MIXIN_TREES.remove(key);MIXIN_OPTIONS.remove(key);MIXIN_RESTRICTIONS.remove(key);TRACKER_RESTRICTIONS.remove(key);METADATA.remove(key);METADATA_TREES.remove(key);METADATA_ROWS.remove(key);MEMBER_IMAGES.remove(key);CONTEXT_READS.remove(key);STATE_READS.remove(key);SELECTIONS.remove(key);RESOURCE_SOURCES.remove(key);CONFIGURATIONS.remove(key);CONTEXTS.remove(key);HOLDERS.remove(key);WRITERS.remove(key);FIELD_HOLDERS.remove(key);}}
 }

@@ -12,7 +12,9 @@
 
 后续真实栈另定位两处旧路径：已返回空值的内存账本调用仍预先捕获来源，现已删除空调用及其专用包装；Class.newReflectionData 的准确实例缓存 CAS 虽已识别，却被后续 represented 控制对象检查反复拒绝，现沿真实字段/调用链保留其缓存写入，并继续检查停组来源。普通 ASM 树原先在解析时两次 serialize/snapshot，现冻结真实 parser 输入、Module 和 member parent，按实际变换/元数据消费者惰性物化，使用一致 canonical 基线，未捕获变化保留 unknown patch/gap。该完整修正续编成功。
 
-当前实际场景仍在收尾，尚不将 premain/ModLauncher 启动升级为目标停用、世界清理或保存重启通过。客户端 GUI 与真实驱动未在本次头部场景运行，外部旧活栈及未观察私有状态保持未覆盖范围。
+授权后的真实栈还定位普通树复制/元数据承接的 canonical/内容序列化及普通字段/数组逐写锁；现以冻结 parser 输入、实际父属和已有真实成员来源承接粗根，不声明当前字节未改，真实变换与回放仍走原检查。无策略且非控制、来源载体、资源、队列或发布目标可省回执，原字段/数组策略仍执行；首次 PUTSTATIC 空值约定错误已修正。实机已过 Core 177 与目标 5 个 Mixin 准备，进入 `Minecraft.server.Main` 后报 JOML `AxisAngle4f.readExternal` 的非法常量池类型；实际输入为 classfile 46.0，新增 Class 常量要求 49，共用写出器仅提升旧版本至 49.0。修正续编成功，当前候选继续重开真实场景；未运行独立消费者。
+
+当前实际场景仍在收尾，尚不将 premain/ModLauncher/Minecraft Main 启动升级为目标停用、世界清理或保存重启通过。`ForkJoinTask$Aux` 待验收未伪造为就绪。客户端 GUI 与真实驱动未在本次头部场景运行，外部旧活栈及未观察私有状态保持未覆盖范围。
 
 ## 2026-10-18：C 接续——NT 内存传输与私有字段存储
 
