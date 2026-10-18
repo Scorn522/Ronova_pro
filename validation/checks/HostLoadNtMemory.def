@@ -1,0 +1,8 @@
+LIBRARY ntdll.dll
+EXPORTS
+NtReadVirtualMemory
+NtWriteVirtualMemory
+ZwReadVirtualMemory
+ZwWriteVirtualMemory
+RtlGetLastNtStatus
+RtlSetLastWin32ErrorAndNtStatusFromNtStatus

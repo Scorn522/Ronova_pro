@@ -3,6 +3,7 @@
 #define RONOVA_HOST_MEMORY_TRACKING_H
 typedef struct NativeHostMemoryCall NativeHostMemoryCall;
 typedef struct NativeHostBytesCall NativeHostBytesCall;
+typedef struct NativeHostTransferCall NativeHostTransferCall;
 typedef struct NativeHostArenaOriginalScope {
     HMODULE image;void *original,*release,*entry;NativeHostMemoryCall *call;
     DWORD thread;int cleanup;struct NativeHostArenaOriginalScope *previous;
@@ -84,6 +85,26 @@ static int native_memory_host_bytes_output_unobserved(NativeHostBytesCall*);
  * completion retains an explicitly uncertain lease; it cannot change the real
  * original result/errno or claim rollback. */
 static void native_memory_host_bytes_end(NativeHostBytesCall*,int called,int returned);
+
+/* One actual Nt/Zw/Win32 process-memory transfer. All supplied ranges are
+ * local: the wrapper passes a remote endpoint as 0/0, never its numeric remote
+ * address. The optional local SIZE_T output is a separate provider write, not
+ * evidence that the requested data interval was fully copied. Probe/begin use
+ * the same observed-partial-range rules as the private CRT byte boundary.
+ * Every distinct row is admitted once, even when data and count overlap. */
+static int native_memory_host_transfer_probe(uint64_t dst,uint64_t dstBytes,uint64_t src,uint64_t srcBytes,
+        uint64_t output,uint64_t outputBytes,int restricted);
+static NativeHostTransferCall *native_memory_host_transfer_begin_caller(uint64_t dst,uint64_t dstBytes,uint64_t src,uint64_t srcBytes,
+        uint64_t output,uint64_t outputBytes,OwnerLink *owners,int unknown,int restricted,int *denied,int callbackEntered,void *caller);
+/* Query only after a real call and before end. Missing local outputs or an
+ * unobserved data source remain a wrapper image gap, with no invented row. */
+static int native_memory_host_transfer_output_unobserved(NativeHostTransferCall*);
+/* The real process identity establishes an opaque remote input. It is not a
+ * local numeric range or an unknown caller/consumer of the count output. */
+static void native_memory_host_transfer_input_unknown(NativeHostTransferCall*);
+/* returned means the actual function returned, including failure NTSTATUS or
+ * FALSE. Neither status nor a byte-count value is guessed or read here. */
+static void native_memory_host_transfer_end(NativeHostTransferCall*,int called,int returned);
 
 /* The exact loaded allocator's free export identifies one provider. Every
  * observed call leases it until the actual call and result observation finish;

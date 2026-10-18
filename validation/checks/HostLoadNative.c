@@ -7,6 +7,7 @@
 #include <stdint.h>
 #include <limits.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <wchar.h>
 #include <errno.h>
@@ -2760,6 +2761,238 @@ done:
     if(fixture&&!live&&!privateLive&&!FreeLibrary(fixture)&&!failure)failure="CRT_BYTES_CPP_APPLICATION_REFERENCE_RETURN";
     if(failure){fprintf(stderr,"HOST_CRT_BYTES_FAILED stage=%s exception=%08lx\n",failure,(unsigned long)exception);return load_thread_fail(env,failure)?JNI_TRUE:JNI_FALSE;}
     fprintf(stdout,"HOST_CRT_BYTES_PASS actual_ucrtbase_seven_exact_IAT_GPA ordinary_Heap_storage copy_same_allocation_overlap_move_byte_fill_secure_wchar_counts secure_original_ERRNO_single_returning_thread_invalid_handler memcpy_s_destSize_clear_memmove_s_unchanged input_canaries_preserved real_VM_GetEnv_shadow_write_refused zero_count_numeric_pointer_original_contract nonsdk_trivial_private_class_actual_operator_new_private_scalar_byte_wchar_getters_real_secure_wide_copy_move_memset_0x35_byte_pattern_original_delete plain_Heap_foreign_Core_alive_common_write real_Core_SDK_payload_and_scalar_Core_foreign_raw_refused_during_and_after_borrow SDK_original_container_mutation_and_destructor_release NOT_AVAILABLE_wmemcpy_wmemmove_wmemset_no_actual_exports\n");
+    fflush(stdout);return JNI_TRUE;
+}
+
+/* Four exact ntdll exports plus the existing Win32 entries. This phase uses
+ * actual allocation/handle returns and the real bound Core/foreign images. */
+typedef LONG (NTAPI *LoadNtMemoryCopy)(HANDLE,PVOID,PVOID,SIZE_T,PSIZE_T);
+typedef BOOL (WINAPI *LoadNtWin32Read)(HANDLE,LPCVOID,LPVOID,SIZE_T,SIZE_T*);
+typedef LONG (NTAPI *LoadNtLastStatus)(void);
+typedef void (NTAPI *LoadNtSetStatus)(LONG);
+extern LoadNtMemoryCopy __imp_NtReadVirtualMemory,__imp_NtWriteVirtualMemory;
+extern LoadNtMemoryCopy __imp_ZwReadVirtualMemory,__imp_ZwWriteVirtualMemory;
+extern LoadNtWin32Read __imp_ReadProcessMemory;
+typedef struct LoadNtMemoryEntries {
+    void *entries[2][6];LoadNtLastStatus lastStatus;LoadNtSetStatus setStatus;int *error;unsigned long *dosError;
+} LoadNtMemoryEntries;
+typedef struct LoadNtMemoryResult {LONG status,lastStatus;BOOL success;DWORD windows;int error;unsigned long dosError;} LoadNtMemoryResult;
+static const char *load_nt_memory_names[]={"NtReadVirtualMemory","NtWriteVirtualMemory","ZwReadVirtualMemory","ZwWriteVirtualMemory","ReadProcessMemory","WriteProcessMemory"};
+static int load_nt_memory_read(unsigned kind){return kind==0||kind==2||kind==4;}
+static void load_nt_memory_snapshot(BYTE *destination,const void *source,size_t bytes){
+    for(size_t i=0;i<bytes;i++)((volatile BYTE*)destination)[i]=((const volatile BYTE*)source)[i];
+}
+static int load_nt_memory_equal(const void *first,const void *second,size_t bytes){
+    for(size_t i=0;i<bytes;i++)if(((const volatile BYTE*)first)[i]!=((const volatile BYTE*)second)[i])return 0;
+    return 1;
+}
+static void load_nt_memory_size_bytes(BYTE *destination,SIZE_T value){
+    for(unsigned i=0;i<sizeof(value);i++)destination[i]=(BYTE)(value>>(8*i));
+}
+static const char *load_nt_memory_entries(LoadNtMemoryEntries *entries){
+    HMODULE nt=GetModuleHandleW(L"ntdll.dll"),kernel=GetModuleHandleW(L"kernel32.dll");
+    if(!nt||!kernel)return "NT_MEMORY_ACTUAL_SYSTEM_PROVIDERS";
+    void *imports[]={(void*)__imp_NtReadVirtualMemory,(void*)__imp_NtWriteVirtualMemory,(void*)__imp_ZwReadVirtualMemory,(void*)__imp_ZwWriteVirtualMemory,
+        (void*)__imp_ReadProcessMemory,(void*)__imp_WriteProcessMemory};
+    for(unsigned kind=0;kind<6;kind++){
+        entries->entries[0][kind]=imports[kind];
+        entries->entries[1][kind]=(void*)GetProcAddress(kind<4?nt:kernel,load_nt_memory_names[kind]);
+        if(!load_private_entry(entries->entries[0][kind])||!load_private_entry(entries->entries[1][kind]))return "NT_MEMORY_FOUR_NT_ZW_TWO_WIN32_REAL_IAT_GPA";
+    }
+    entries->lastStatus=(LoadNtLastStatus)GetProcAddress(nt,"RtlGetLastNtStatus");
+    entries->setStatus=(LoadNtSetStatus)GetProcAddress(nt,"RtlSetLastWin32ErrorAndNtStatusFromNtStatus");
+    // These are the payload's actual imported CRT TLS accessors, not a guess
+    // that every system provider shares ucrtbase's or msvcrt's errno storage.
+    entries->error=_errno();entries->dosError=__doserrno();
+    return entries->lastStatus&&entries->setStatus&&entries->error&&entries->dosError?NULL:"NT_MEMORY_REAL_TEB_AND_MODULE_CRT_ACCESSORS";
+}
+static LoadNtMemoryResult load_nt_memory_seed(const LoadNtMemoryEntries *entries){
+    entries->setStatus((LONG)0xc000000d);SetLastError(0x524e0099);*entries->error=0x299;*entries->dosError=0x524e1999;
+    LoadNtMemoryResult before={0};before.windows=GetLastError();before.lastStatus=entries->lastStatus();
+    before.error=*entries->error;before.dosError=*entries->dosError;return before;
+}
+static __declspec(noinline) LoadNtMemoryResult load_nt_memory_call(const LoadNtMemoryEntries *entries,unsigned mode,unsigned kind,
+        HANDLE process,void *remote,void *buffer,SIZE_T bytes,SIZE_T *copied){
+    LoadNtMemoryResult result={0};void *actual=entries->entries[mode][kind];
+    if(kind<4){LoadNtMemoryCopy volatile call=(LoadNtMemoryCopy)actual;result.status=call(process,remote,buffer,bytes,copied);result.success=result.status>=0;}
+    else if(kind==4){LoadNtWin32Read volatile call=(LoadNtWin32Read)actual;result.success=call(process,remote,buffer,bytes,copied);}
+    else {LoadMemoryWrite volatile call=(LoadMemoryWrite)actual;result.success=call(process,remote,buffer,bytes,copied);}
+    result.windows=GetLastError();result.lastStatus=entries->lastStatus();result.error=*entries->error;result.dosError=*entries->dosError;return result;
+}
+static int load_nt_memory_original_errors(unsigned kind,const LoadNtMemoryResult *before,const LoadNtMemoryResult *after){
+    return before->error==after->error&&before->dosError==after->dosError
+            &&(kind>=4||before->windows==after->windows&&before->lastStatus==after->lastStatus);
+}
+static const char *load_nt_memory_failed(const char *stage,unsigned mode,unsigned kind,const LoadNtMemoryResult *actual,SIZE_T copied){
+    fprintf(stderr,"HOST_NT_MEMORY_FAILED stage=%s api=%s path=%s status=%08lx success=%d count=%llu windows=%lu lastNtStatus=%08lx errno=%d doserrno=%lu\n",
+            stage,load_nt_memory_names[kind],mode?"GPA":"IAT",(unsigned long)actual->status,actual->success!=FALSE,(unsigned long long)copied,
+            (unsigned long)actual->windows,(unsigned long)actual->lastStatus,actual->error,actual->dosError);
+    return stage;
+}
+static const char *load_nt_memory_normal(const LoadNtMemoryEntries *entries,HANDLE process,BYTE *scratch){
+    for(unsigned mode=0;mode<2;mode++)for(unsigned kind=0;kind<6;kind++)for(unsigned scenario=0;scenario<3;scenario++){
+        BYTE expected[512];for(unsigned i=0;i<512;i++)((volatile BYTE*)scratch)[i]=expected[i]=(BYTE)(0x29u+19u*i);
+        BYTE *source=scratch+16,*destination=scratch+160;SIZE_T *copied=scenario==1?NULL:(SIZE_T*)(scratch+(scenario==2?168:320));
+        if(scenario==2){load_nt_memory_size_bytes(source+8,32);load_nt_memory_size_bytes(expected+24,32);}
+        for(unsigned i=0;i<32;i++)expected[160+i]=source[i];
+        if(copied){*copied=(SIZE_T)-1;load_nt_memory_size_bytes(expected+(scenario==2?168:320),32);}
+        LoadNtMemoryResult before=load_nt_memory_seed(entries);
+        LoadNtMemoryResult result=load_nt_memory_call(entries,mode,kind,scenario?process:GetCurrentProcess(),
+                load_nt_memory_read(kind)?source:destination,load_nt_memory_read(kind)?destination:source,32,copied);
+        if(!result.success||copied&&*copied!=32||!load_nt_memory_original_errors(kind,&before,&result)||!load_nt_memory_equal(scratch,expected,512))
+            return load_nt_memory_failed("NT_MEMORY_ORIGINAL_SAME_ROW_COPY_COUNT_NULL_OR_ALIAS",mode,kind,&result,copied?*copied:0);
+    }
+    // The zero data length does not suppress the original SIZE_T output.
+    for(unsigned mode=0;mode<2;mode++)for(unsigned kind=0;kind<6;kind++){
+        BYTE expected[512];for(unsigned i=0;i<512;i++)((volatile BYTE*)scratch)[i]=expected[i]=(BYTE)(0x61u+11u*i);
+        SIZE_T *copied=(SIZE_T*)(scratch+320);*copied=(SIZE_T)-1;load_nt_memory_size_bytes(expected+320,0);
+        LoadNtMemoryResult before=load_nt_memory_seed(entries);
+        LoadNtMemoryResult result=load_nt_memory_call(entries,mode,kind,process,scratch+16,scratch+160,0,copied);
+        if(!result.success||*copied||!load_nt_memory_original_errors(kind,&before,&result)||!load_nt_memory_equal(scratch,expected,512))
+            return load_nt_memory_failed("NT_MEMORY_ORIGINAL_ZERO_DATA_WITH_REAL_COUNT_OUTPUT",mode,kind,&result,*copied);
+    }
+    return NULL;
+}
+static const char *load_nt_memory_refused(const LoadNtMemoryEntries *entries,void *address,size_t bytes,DWORD expectedError,int control,BYTE *scratch){
+    if(!address||!bytes||bytes>64||(uintptr_t)address%sizeof(SIZE_T))return "NT_MEMORY_REAL_REFUSED_TARGET_GEOMETRY";
+    BYTE protectedBefore[64];load_nt_memory_snapshot(protectedBefore,address,bytes);
+    LONG expectedStatus=expectedError==ERROR_BUSY?(LONG)0x80000011:(LONG)0xc0000022;
+    for(unsigned mode=0;mode<2;mode++)for(unsigned kind=0;kind<6;kind++)for(unsigned scenario=0;scenario<(control?4u:2u);scenario++){
+        BYTE expected[512];for(unsigned i=0;i<512;i++)((volatile BYTE*)scratch)[i]=(BYTE)(0x45u+13u*i);
+        for(size_t i=0;i<bytes;i++)((volatile BYTE*)scratch)[16+i]=protectedBefore[i];
+        SIZE_T *copied=scenario?(SIZE_T*)address:(SIZE_T*)(scratch+320);if(!scenario)*copied=(SIZE_T)-1;
+        load_nt_memory_snapshot(expected,scratch,512);
+        void *remote=scenario?(load_nt_memory_read(kind)?scratch+16:scratch+160):(load_nt_memory_read(kind)?scratch+16:address);
+        void *buffer=scenario?(load_nt_memory_read(kind)?scratch+160:scratch+16):(load_nt_memory_read(kind)?address:scratch+16);
+        LoadNtMemoryResult before=load_nt_memory_seed(entries);
+        LoadNtMemoryResult result=load_nt_memory_call(entries,mode,kind,scenario==2?NULL:GetCurrentProcess(),remote,buffer,scenario==3?0:bytes,copied);
+        int refused=kind<4?result.status==expectedStatus&&result.status<0&&result.windows==before.windows:
+                !result.success&&result.windows==expectedError;
+        if(!refused||result.lastStatus!=before.lastStatus||result.error!=before.error||result.dosError!=before.dosError
+                ||!load_nt_memory_equal(address,protectedBefore,bytes)||!load_nt_memory_equal(scratch,expected,512))
+            return load_nt_memory_failed(scenario==2?"NT_MEMORY_PROTECTED_COUNT_BEFORE_INVALID_HANDLE":scenario==3?"NT_MEMORY_ZERO_DATA_PROTECTED_COUNT":scenario?"NT_MEMORY_TYPED_OR_CONTROL_COUNT_REFUSAL":"NT_MEMORY_TYPED_OR_CONTROL_DATA_REFUSAL",
+                    mode,kind,&result,(SIZE_T)-1);
+    }
+    return NULL;
+}
+static const char *load_nt_memory_partial(const LoadNtMemoryEntries *entries,BYTE *scratch){
+    SYSTEM_INFO system={0};GetSystemInfo(&system);if(system.dwPageSize<64)return "NT_MEMORY_REAL_PAGE_SIZE";
+    BYTE *pages=(BYTE*)VirtualAlloc(NULL,(SIZE_T)system.dwPageSize*2,MEM_COMMIT|MEM_RESERVE,PAGE_READWRITE);
+    if(!pages)return "NT_MEMORY_REAL_TWO_PAGE_STORAGE";
+    const char *failure=NULL;DWORD previous=0;BYTE *edge=pages+system.dwPageSize-16;
+    for(unsigned kind=0;kind<6&&!failure;kind++){
+        if(!VirtualProtect(pages+system.dwPageSize,system.dwPageSize,PAGE_READWRITE,&previous)){failure="NT_MEMORY_REAL_PARTIAL_PAGE_RESET";break;}
+        for(unsigned i=0;i<32;i++)((volatile BYTE*)edge)[i]=(BYTE)(0x31+i);
+        if(!VirtualProtect(pages+system.dwPageSize,system.dwPageSize,PAGE_NOACCESS,&previous)){failure="NT_MEMORY_REAL_PARTIAL_PAGE_NOACCESS";break;}
+        BYTE expected[512];for(unsigned i=0;i<512;i++)((volatile BYTE*)scratch)[i]=(BYTE)(0x91u+7u*i);
+        SIZE_T *copied=(SIZE_T*)(scratch+320);*copied=(SIZE_T)-1;load_nt_memory_snapshot(expected,scratch,512);
+        LoadNtMemoryResult before=load_nt_memory_seed(entries);
+        LoadNtMemoryResult result=load_nt_memory_call(entries,1,kind,GetCurrentProcess(),edge,load_nt_memory_read(kind)?scratch+160:scratch+16,32,copied);
+        unsigned changed=0;for(unsigned i=0;i<(load_nt_memory_read(kind)?32u:16u);i++){
+            BYTE actual=load_nt_memory_read(kind)?scratch[160+i]:edge[i];BYTE prior=load_nt_memory_read(kind)?expected[160+i]:(BYTE)(0x31+i);changed+=actual!=prior;
+        }
+        fprintf(stdout,"HOST_NT_MEMORY_ORIGINAL_FAILURE api=%s status=%08lx success=%d count=%llu changed_destination_bytes=%u windows=%lu lastNtStatus=%08lx errno=%d doserrno=%lu no_required_partial_copy_claim\n",
+                load_nt_memory_names[kind],(unsigned long)result.status,result.success!=FALSE,(unsigned long long)*copied,changed,
+                (unsigned long)result.windows,(unsigned long)result.lastStatus,result.error,result.dosError);
+        if(result.success||*copied!=(SIZE_T)-1&&*copied>32||!load_nt_memory_original_errors(kind,&before,&result)){
+            failure=load_nt_memory_failed("NT_MEMORY_REAL_NOACCESS_ORIGINAL_FAILURE_CONTRACT",1,kind,&result,*copied);break;
+        }
+        for(unsigned i=0;i<512;i++)if((i<160||i>=192||!load_nt_memory_read(kind))&&(i<320||i>=320+sizeof(SIZE_T))&&scratch[i]!=expected[i]){
+            failure="NT_MEMORY_ORIGINAL_FAILURE_CHANGED_INPUT_OR_CANARY";break;
+        }
+    }
+    if(!VirtualFree(pages,0,MEM_RELEASE)&&!failure)failure="NT_MEMORY_ORIGINAL_PARTIAL_STORAGE_RELEASE";
+    return failure;
+}
+JNIEXPORT jboolean JNICALL Java_dev_ronova_pro_AuditFixCheck_hostNtMemoryForeign0(JNIEnv *env,jclass check,jlong address,jlong bytes,jint mode){
+    (void)check;LoadNtMemoryEntries entries={0};const char *failure=load_nt_memory_entries(&entries);HANDLE heap=NULL;BYTE *scratch=NULL;
+    if(!failure&&(!address||bytes<=0||bytes>64||mode<0||mode>1))failure="NT_MEMORY_FOREIGN_REAL_ARGUMENTS";
+    if(!failure){heap=HeapCreate(0,0,0);if(heap)scratch=(BYTE*)HeapAlloc(heap,0,512);if(!scratch)failure="NT_MEMORY_FOREIGN_REAL_HEAP";}
+    if(!failure&&!mode)failure=load_nt_memory_refused(&entries,(void*)(uintptr_t)address,(size_t)bytes,ERROR_BUSY,0,scratch);
+    if(!failure&&mode){
+        BYTE beforeBytes[64],changed[64],observed[64];load_nt_memory_snapshot(beforeBytes,(void*)(uintptr_t)address,(size_t)bytes);
+        for(size_t i=0;i<(size_t)bytes;i++)changed[i]=(BYTE)(beforeBytes[i]^0x5a);
+        SIZE_T copied=0;LoadNtMemoryResult before=load_nt_memory_seed(&entries);
+        LoadNtMemoryResult result=load_nt_memory_call(&entries,0,1,GetCurrentProcess(),(void*)(uintptr_t)address,changed,(SIZE_T)bytes,&copied);
+        if(!result.success||copied!=(SIZE_T)bytes||!load_nt_memory_original_errors(1,&before,&result))failure=load_nt_memory_failed("NT_MEMORY_FOREIGN_ALIVE_ORIGINAL_NT_WRITE",0,1,&result,copied);
+        if(!failure){before=load_nt_memory_seed(&entries);result=load_nt_memory_call(&entries,1,0,GetCurrentProcess(),(void*)(uintptr_t)address,observed,(SIZE_T)bytes,&copied);
+            if(!result.success||copied!=(SIZE_T)bytes||!load_nt_memory_original_errors(0,&before,&result)||!load_nt_memory_equal(observed,changed,(size_t)bytes))failure=load_nt_memory_failed("NT_MEMORY_FOREIGN_ALIVE_REAL_READBACK",1,0,&result,copied);}
+        before=load_nt_memory_seed(&entries);result=load_nt_memory_call(&entries,1,5,GetCurrentProcess(),(void*)(uintptr_t)address,beforeBytes,(SIZE_T)bytes,&copied);
+        if((!result.success||copied!=(SIZE_T)bytes||!load_nt_memory_original_errors(5,&before,&result)||!load_nt_memory_equal((void*)(uintptr_t)address,beforeBytes,(size_t)bytes))&&!failure)
+            failure=load_nt_memory_failed("NT_MEMORY_FOREIGN_ALIVE_WIN32_RESTORE",1,5,&result,copied);
+    }
+    if(scratch&&!HeapFree(heap,0,scratch)&&!failure)failure="NT_MEMORY_FOREIGN_ORIGINAL_FREE";
+    if(heap&&!HeapDestroy(heap)&&!failure)failure="NT_MEMORY_FOREIGN_ORIGINAL_HEAP_DESTROY";
+    if(failure)return load_thread_fail(env,failure)?JNI_TRUE:JNI_FALSE;
+    fprintf(stdout,"HOST_NT_MEMORY_FOREIGN_PASS actual_distinct_system_loader_image mode=%s deeper_Core_frame_no_raw_override\n",mode?"plain_Heap_alive_NT_write_readback_Win32_restore":"typed_data_and_count_refused");
+    fflush(stdout);return JNI_TRUE;
+}
+JNIEXPORT jboolean JNICALL Java_dev_ronova_pro_AuditFixCheck_hostNtMemory0(JNIEnv *env,jclass check,jstring fixturePath){
+    LoadNtMemoryEntries entries={0};const char *failure=load_nt_memory_entries(&entries);HANDLE heap=NULL,process=NULL;BYTE *scratch=NULL;
+    HMODULE fixture=NULL;JavaVM *vm=NULL;LoadMemoryTarget target={0};int live=0,held=0,privateLive=0,targetObserved=0;DWORD exception=0;
+    int (__cdecl *bind)(HMODULE)=NULL;int (__cdecl *run)(void)=NULL;int (__cdecl *hold)(int)=NULL;int (__cdecl *finish)(void)=NULL;
+    int (__cdecl *containersRun)(void)=NULL;uint64_t (__cdecl *current)(unsigned)=NULL;
+    int (__cdecl *privateCreate)(void)=NULL;int (__cdecl *privateApply)(unsigned)=NULL;int (__cdecl *privateFinish)(void)=NULL;
+    uint64_t (__cdecl *privateCurrent)(unsigned)=NULL;
+    if(failure)goto done;
+    if((*env)->GetJavaVM(env,&vm)!=JNI_OK||!vm||!*vm
+            ||!load_memory_target(&target,(void*)&(*vm)->GetEnv,sizeof((*vm)->GetEnv),MEM_PRIVATE,(void*)*vm)){
+        failure="NT_MEMORY_ACTUAL_VM_SHADOW_GETENV_SLOT";goto done;
+    }
+    targetObserved=1;heap=HeapCreate(0,0,0);if(heap)scratch=(BYTE*)HeapAlloc(heap,0,512);
+    if(!scratch||!DuplicateHandle(GetCurrentProcess(),GetCurrentProcess(),GetCurrentProcess(),&process,PROCESS_VM_OPERATION|PROCESS_VM_READ|PROCESS_VM_WRITE,FALSE,0)){
+        failure="NT_MEMORY_REAL_HEAP_AND_DUPLICATE_VM_HANDLE";goto done;
+    }
+    __try {
+        failure=load_nt_memory_normal(&entries,process,scratch);
+        if(!failure)failure=load_nt_memory_refused(&entries,target.address,target.bytes,ERROR_ACCESS_DENIED,1,scratch);
+        if(!failure)failure=load_nt_memory_partial(&entries,scratch);
+        if(failure)__leave;
+        fixture=load_allocator_provider(env,fixturePath);if(!fixture){failure="NT_MEMORY_ACTUAL_CPP_FIXTURE_LOAD";__leave;}
+        bind=(void*)GetProcAddress(fixture,"audit_allocator_fields_bind");run=(void*)GetProcAddress(fixture,"audit_allocator_fields_run");
+        hold=(void*)GetProcAddress(fixture,"audit_allocator_fields_hold");finish=(void*)GetProcAddress(fixture,"audit_allocator_fields_finish");
+        containersRun=(void*)GetProcAddress(fixture,"audit_allocator_fields_containers_run");current=(void*)GetProcAddress(fixture,"audit_allocator_fields_current");
+        privateCreate=(void*)GetProcAddress(fixture,"audit_crt_private_create");privateApply=(void*)GetProcAddress(fixture,"audit_nt_private_apply");
+        privateFinish=(void*)GetProcAddress(fixture,"audit_crt_private_finish");privateCurrent=(void*)GetProcAddress(fixture,"audit_crt_private_current");
+        if(!bind||!run||!hold||!finish||!containersRun||!current||!privateCreate||!privateApply||!privateFinish||!privateCurrent){failure="NT_MEMORY_ACTUAL_CPP_EXPORTS";__leave;}
+        if(!privateCreate()){failure="NT_MEMORY_NONSDK_PRIVATE_CLASS_REAL_NEW";__leave;}privateLive=1;
+        uint64_t expectedBytes=0,expectedWide=0;
+        for(unsigned i=0;i<24;i++)expectedBytes+=(uint64_t)(i+1)*(i>=4&&i<20?0xa0+i-4:0x10+i);
+        for(unsigned i=0;i<12;i++)expectedWide+=(uint64_t)(i+1)*(0x140+i);
+        for(unsigned kind=0;kind<6&&!failure;kind++)if(!privateApply(kind)||privateCurrent(0)!=UINT64_C(0x1020304050607080)
+                ||privateCurrent(1)!=expectedBytes||privateCurrent(2)!=expectedWide||privateCurrent(3)!=UINT64_C(0x193a5c7e9fb1d2f4)||privateCurrent(4)!=UINT64_C(0x4f2d1b9e7c5a3816))
+            failure="NT_MEMORY_NONSDK_PRIVATE_SCALAR_BYTES_REAL_API_READBACK_GETTERS";
+        if(failure)__leave;
+        if(!privateFinish()){failure="NT_MEMORY_NONSDK_PRIVATE_CLASS_REAL_DELETE";__leave;}privateLive=0;
+        if(!bind(NULL)){failure="NT_MEMORY_REAL_CORE_ALLOCATOR_FIELDS_BIND";__leave;}live=1;
+        if(!run()||current(18)!=3||!current(0)||!current(2)||!current(3)){failure="NT_MEMORY_REAL_CORE_TYPED_RECEIPTS";__leave;}
+        jmethodID foreign=(*env)->GetStaticMethodID(env,check,"hostNtMemoryForeign","(JJI)Z");
+        if(!foreign){failure="NT_MEMORY_REAL_SYSTEM_LOADER_FORWARDER";__leave;}
+        if(!(*env)->CallStaticBooleanMethod(env,check,foreign,(jlong)(uintptr_t)scratch,(jlong)32,(jint)1)||(*env)->ExceptionCheck(env)){
+            failure="NT_MEMORY_PLAIN_HEAP_FOREIGN_COMMON_WRITE";__leave;}
+        for(unsigned selected=0;selected<2&&!failure;selected++){
+            void *address=(void*)(uintptr_t)current(selected?4:6);size_t bytes=selected?sizeof(uint64_t):(size_t)current(7);
+            if(!address||!hold(selected?2:1)){failure="NT_MEMORY_REAL_TYPED_BORROW_BEGIN";break;}held=1;
+            failure=load_nt_memory_refused(&entries,address,bytes,ERROR_BUSY,0,scratch);
+            if(!failure&&(!(*env)->CallStaticBooleanMethod(env,check,foreign,(jlong)(uintptr_t)address,(jlong)bytes,(jint)0)||(*env)->ExceptionCheck(env)))failure="NT_MEMORY_FOREIGN_TYPED_BORROW";
+            if(!hold(0)){failure="NT_MEMORY_REAL_TYPED_BORROW_RETURN";break;}held=0;
+            if(!failure)failure=load_nt_memory_refused(&entries,address,bytes,ERROR_BUSY,0,scratch);
+            if(!failure&&(!(*env)->CallStaticBooleanMethod(env,check,foreign,(jlong)(uintptr_t)address,(jlong)bytes,(jint)0)||(*env)->ExceptionCheck(env)))failure="NT_MEMORY_FOREIGN_TYPED_AFTER_BORROW";
+        }
+        if(!failure&&(!containersRun()||current(28)!=1||current(29)!=1||current(32)!=16||current(33)!=64))failure="NT_MEMORY_REAL_SDK_ORIGINAL_MUTATION_CONTINUES";
+        if(!failure&&!finish())failure="NT_MEMORY_REAL_TYPED_ORIGINAL_DESTRUCTOR_RELEASE";else if(!failure)live=0;
+    } __except(EXCEPTION_EXECUTE_HANDLER){exception=GetExceptionCode();failure="NT_MEMORY_ACTUAL_NATIVE_EXCEPTION";}
+done:
+    if(held&&hold)hold(0);
+    if(live&&finish&&!(*env)->ExceptionCheck(env)&&finish())live=0;
+    if(privateLive&&privateFinish&&privateFinish())privateLive=0;
+    if(targetObserved&&!load_memory_unchanged(&target)&&!failure)failure="NT_MEMORY_ACTUAL_VM_SHADOW_CHANGED";
+    if(scratch&&!HeapFree(heap,0,scratch)&&!failure)failure="NT_MEMORY_ORIGINAL_HEAP_FREE";
+    if(heap&&!HeapDestroy(heap)&&!failure)failure="NT_MEMORY_ORIGINAL_HEAP_DESTROY";
+    if(process&&!CloseHandle(process)&&!failure)failure="NT_MEMORY_ORIGINAL_PROCESS_ALIAS_CLOSE";
+    if(fixture&&!live&&!privateLive&&!FreeLibrary(fixture)&&!failure)failure="NT_MEMORY_CPP_APPLICATION_REFERENCE_RETURN";
+    if(failure){fprintf(stderr,"HOST_NT_MEMORY_END_FAILED stage=%s exception=%08lx\n",failure,(unsigned long)exception);return load_thread_fail(env,failure)?JNI_TRUE:JNI_FALSE;}
+    fprintf(stdout,"HOST_NT_MEMORY_PASS actual_ntdll_four_Nt_Zw_named_IAT_GPA_two_Win32_entries real_duplicate_and_pseudo_current_process same_Heap_row_nonoverlap_src_dst_count NULL_count legal_count_data_alias zero_data_retains_count_output original_failure_partial_effects_reported control_VM_shadow_data_count_invalid_handle_preflight_refused NT_non_success_status_preserves_LastError_LastNtStatus_module_errno_doserrno Win32_error_contract real_nonSDK_private_new_scalar_bytes_actual_API_readback_getters_delete real_SDK_payload_scalar_Core_foreign_typed_data_count_borrow_and_after_refused plain_Heap_foreign_alive_write SDK_original_mutation_and_release no_supplied_metadata\n");
     fflush(stdout);return JNI_TRUE;
 }
 

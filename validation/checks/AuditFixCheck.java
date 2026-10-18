@@ -19,6 +19,10 @@ public final class AuditFixCheck {
             System.load(java.nio.file.Path.of(System.getProperty("ronova.pro.audit.thread.native")).toAbsolutePath().toString());
             require(hostCrtBytes0(System.getProperty("ronova.pro.audit.allocatorFields")),"actual CRT byte operations failed");return;
         }
+        if(args.length==1&&args[0].equals("core-native-nt-memory")){
+            System.load(java.nio.file.Path.of(System.getProperty("ronova.pro.audit.thread.native")).toAbsolutePath().toString());
+            require(hostNtMemory0(System.getProperty("ronova.pro.audit.allocatorFields")),"actual NT and Win32 memory endpoints failed");return;
+        }
         if(args.length==1&&args[0].equals("core-native-transactions")){
             System.load(java.nio.file.Path.of(System.getProperty("ronova.pro.audit.thread.native")).toAbsolutePath().toString());
             hostTransactionState();return;
@@ -968,6 +972,14 @@ public final class AuditFixCheck {
     private static native boolean privateCustomAllocatorState0(String fixtureDllPath);
     private static native boolean hostCustomAllocatorFields0(String fixtureDllPath);
     private static native boolean hostCrtBytes0(String fixtureDllPath);
+    private static native boolean hostNtMemory0(String fixtureDllPath);
+    private static native boolean hostNtMemoryForeign0(long address,long bytes,int mode);
+    private static boolean hostNtMemoryForeign(long address,long bytes,int mode)throws Exception {
+        Class<?> foreign=Class.forName(AuditFixCheck.class.getName(),true,ClassLoader.getSystemClassLoader());
+        require(foreign!=AuditFixCheck.class,"NT memory foreign caller must use the actual system-loader image");
+        var call=foreign.getDeclaredMethod("hostNtMemoryForeign0",long.class,long.class,int.class);call.setAccessible(true);
+        return Boolean.TRUE.equals(call.invoke(null,address,bytes,mode));
+    }
     private static native boolean hostCrtBytesForeign0(long address,long bytes,int mode);
     private static boolean hostCrtBytesForeign(long address,long bytes,int mode)throws Exception {
         Class<?> foreign=Class.forName(AuditFixCheck.class.getName(),true,ClassLoader.getSystemClassLoader());
@@ -1050,10 +1062,11 @@ public final class AuditFixCheck {
         require(Boolean.FALSE.equals(producer.invoke(null,module)),"Core was relabelled as an external producer");
         Class<?> actual=Class.forName(AuditFixCheck.class.getName(),true,loader);
         String phase=System.getProperty("ronova.pro.audit.thread.phase","");
-        boolean transactions=phase.equals("transactions"),async=phase.equals("async"),bytes=phase.equals("bytes");
-        actual.getMethod("main",String[].class).invoke(null,(Object)new String[]{bytes?"core-native-bytes":async?"core-native-async":transactions?"core-native-transactions":"core-native-consumers"});
+        boolean transactions=phase.equals("transactions"),async=phase.equals("async"),bytes=phase.equals("bytes"),ntMemory=phase.equals("nt-memory");
+        actual.getMethod("main",String[].class).invoke(null,(Object)new String[]{ntMemory?"core-native-nt-memory":bytes?"core-native-bytes":async?"core-native-async":transactions?"core-native-transactions":"core-native-consumers"});
         require(Boolean.FALSE.equals(producer.invoke(null,module)),"Native consumers changed Core producer identity");
-        System.out.println(bytes?"CORE_NATIVE_BYTES_PASS actual_named_ProMod_ProRuntime startup_binding distinct_system_loader_foreign_image actual_CRT_byte_entries no_supplied_owner_or_producer_metadata"
+        System.out.println(ntMemory?"CORE_NATIVE_NT_MEMORY_PASS actual_named_ProMod_ProRuntime startup_binding distinct_system_loader_foreign_image actual_Nt_Zw_Win32_memory_endpoints no_supplied_owner_or_producer_metadata"
+                :bytes?"CORE_NATIVE_BYTES_PASS actual_named_ProMod_ProRuntime startup_binding distinct_system_loader_foreign_image actual_CRT_byte_entries no_supplied_owner_or_producer_metadata"
                 :async?"CORE_NATIVE_ASYNC_PASS actual_named_ProMod_ProRuntime startup_binding actual_file_heap_overlapped_IOCP original_completion_and_cancellation foreign_image_completion_cancel_refused no_supplied_metadata"
                 :transactions?"CORE_NATIVE_TRANSACTIONS_PASS actual_named_ProMod_ProRuntime startup_binding foreign_caller_refused original_transaction_lifetimes foreign_image_transaction_mutation_refused no_supplied_metadata"
                 :"CORE_NATIVE_STATE_PASS actual_named_ProMod_ProRuntime startup_binding foreign_caller_refused full_native_loader_binding SDK_receipts_nonzero no_supplied_owner_or_producer_rows original_crypto_transaction_and_storage_lifetimes foreign_image_transaction_mutation_refused");

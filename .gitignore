@@ -225,3 +225,8 @@ validation/a-takeover-tasks-01/server/Pro-A-Tasks/
 /distribution/candidate-c-java105-native98-crt-bytes-wip-20261018/*
 !/distribution/candidate-c-java105-native98-crt-bytes-wip-20261018/ronova-pro-core-0.1.0-stage-b-dev.jar
 !/distribution/candidate-c-java105-native98-crt-bytes-wip-20261018/ronova-pro-prelaunch.jar
+
+!/distribution/candidate-c-java105-native99-nt-memory-wip-20261018/
+/distribution/candidate-c-java105-native99-nt-memory-wip-20261018/*
+!/distribution/candidate-c-java105-native99-nt-memory-wip-20261018/ronova-pro-core-0.1.0-stage-b-dev.jar
+!/distribution/candidate-c-java105-native99-nt-memory-wip-20261018/ronova-pro-prelaunch.jar

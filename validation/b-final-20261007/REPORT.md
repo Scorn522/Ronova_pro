@@ -1,5 +1,23 @@
 # B 批实际报告：2026-10-09 代码收敛接续
 
+## 2026-10-18：C 接续——NT 内存传输与私有字段存储
+
+接续 `2ea6410`，仅主工程 `D:\桌面\ronova_GPT`。Java105 / Native99 / Object SDK3（保留1/2）/ SourceMapBridge2 / Storage3 / Journal6，协议 `r3-client-8`。整包源码写齐后统一构建。
+
+实际 ntdll NtReadVirtualMemory/NtWriteVirtualMemory 及 Zw 别名按真实 provider、准确符号和地址接入，同址 Nt/Zw 不混淆读写及 NTSTATUS/BOOL。已有 Win32 Read/WriteProcessMemory 接同一多端存储处理，固定实际 process 对象副本后才决定远程端是否属于本 JVM；远程数值地址不制造本地归属。本地 data src/dst 和可选 SIZE_T count 输出保留准确 row/generation；同块读写和 count 别名一次准入，不互相误拒。
+
+控制范围和 count 输出在副作用前判断；计数不借 typed SDK 权限。读取 creator/revision/raw-copy 贡献并保留未知，真正原调用之外只持计数租约，复用既有私有控制注册 gate 串行最后检查与一次非 alertable 原复制。NT 拒绝返回准确非成功状态，Win32 继续原 BOOL/LastError；线程 LastNtStatus 与返回 NTSTATUS 独立保存，不硬编码 TEB 偏移。原 count 指针不暂存、不预清、不复读，真实失败和异常仍记录可能部分效果，不把返回或 count 值当作完成/所有权权限。
+
+统一生产构建 `build-c-java105-native99-nt-memory-20261018.log` **PASS，1分11秒**；真实 Host/C++ DLL 及 Java 入口编译退出0。Host 检查初次编译遗漏 ReadProcessMemory 函数指针声明，补齐后通过，生产代码没有为检查放宽。构建中的旧 Mixin/格式警告及一次 daemon socket type-tag 日志保留，任务正常完成；只运行新增 nt-memory 分支，没有重跑旧矩阵。
+
+`c-java105-native99-core-nt-memory-20261018.log` **一次运行退出0，正常 JVM 结束**：真实 named Core 沿本包 ProMod/ProRuntime 启动绑定，无供给 owner/producer 元数据。4个实际 Nt/Zw 和2个 Win32 入口的 IAT/GPA、实际 SAME_ACCESS 进程副本及当前进程 pseudo handle、同 Heap row 源/目标/count、NULL count、合法 data/count 别名、零数据长度原 count 输出均通过。VM GetEnv 控制槽的数据和 count 写入在副作用前拒绝，无效 handle 不能抢过本地 count 保护。NT 非成功拒绝保留原 LastError/LastNtStatus/本模块 CRT；Win32 原错误合同保留。
+
+真实两页 NOACCESS 场景中，Nt/ZwWriteVirtualMemory 与 WriteProcessMemory 均失败但实际 count=16、目标改变15字节；Nt/ZwReadVirtualMemory 和 ReadProcessMemory 本次 count=0、改变0字节。原 NT STATUS_PARTIAL_COPY 与 Win32 ERROR_PARTIAL_COPY、count 和已有部分效果原样保留，没有把失败当成无副作用。非 SDK C++ 私有类的实际 new、6类传输修改/读回、getter 和原 delete 通过。独立 system-loader DLL 对普通 Heap 的真实写入允许；Core/foreign 对 SDK payload/scalar 活借用及归还后的 data/count raw 写均准确拒绝，深层 Core 不借权。原 SDK 容器修改、析构和 HeapFree/HeapDestroy 通过。
+
+本次未运行远程进程传输、并发竞争/受限收尾 Try 失败场景或真实驱动；这些路径不计实测通过。源代码保留无法发布时的未知及准确在途租约，不改已发生的原返回。
+
+候选为 `distribution/candidate-c-java105-native99-nt-memory-wip-20261018` 的匹配双 JAR。只扩实际传输入口及准确存储关系；直接 syscall、CPU/内联字段访问、其他未观察入口和任意非合作 C++ 字段类型/所有权语义仍未推定覆盖。自身外观、武器注册、源码 ZIP 及完整游戏/存档重启未做，完整 C/B 未标完成。
+
 ## 2026-10-18：C 接续——CRT 原生内存入口与非 SDK 私有存储
 
 接续 `f718bbf`，仅主工程 `D:\桌面\ronova_GPT`。Java105 / Native98 / Object SDK3（保留1/2）/ SourceMapBridge2 / Storage3 / Journal6，协议 `r3-client-8`。整包源码写齐后统一构建。
