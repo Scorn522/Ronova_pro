@@ -89,7 +89,7 @@ final class ModGroupBoundary {
             java.util.Properties files=new java.util.Properties();files.load(reader);
             for(String file:files.stringPropertyNames()){
                 Set<String> owners=new HashSet<>();for(String id:files.getProperty(file).split(","))if(id.matches("[a-z0-9_.-]{2,64}"))owners.add(id);
-                if(!owners.isEmpty())fileOwners.put(file,Set.copyOf(owners));
+                fileOwners.put(file,Set.copyOf(owners));
             }
         }catch(java.io.IOException unavailable){throw new IllegalStateException("PRELAUNCH_MOD_FILES_UNAVAILABLE",unavailable);}
     }
@@ -109,20 +109,34 @@ final class ModGroupBoundary {
             if(in==null)return Set.of();
             Set<String> ids=ModMetadata.ids(in);
             if(ids.isEmpty())return Set.of();
-            known=Set.copyOf(ids);metadata.put(module,known);return known;
+            return rememberIds(module,ids);
         } catch(Exception unavailable) {return Set.of();}
+    }
+    private static Set<String> rememberIds(Module module,Set<String> observed){
+        synchronized(metadata){
+            Set<String> prior=metadata.get(module);
+            if(prior!=null&&prior.containsAll(observed))return prior;
+            Set<String> combined=new HashSet<>(observed);if(prior!=null)combined.addAll(prior);
+            Set<String> known=Set.copyOf(combined);metadata.put(module,known);return known;
+        }
     }
     static void observeDefinition(Module module,java.security.ProtectionDomain domain){
         if(module==null||!module.isNamed()||domain==null||domain.getCodeSource()==null)return;
         String file=sourceFile(domain.getCodeSource().getLocation());if(file==null)return;
         Set<String> owners=fileOwners.get(file);
         if(owners==null)try{
-            Set<String> discovered=ModMetadata.ids(java.nio.file.Path.of(file));
-            if(discovered.isEmpty())return;owners=Set.copyOf(discovered);fileOwners.put(file,owners);
+            var path=java.nio.file.Path.of(file);boolean archive=java.nio.file.Files.isRegularFile(path);
+            Set<String> discovered=ModMetadata.ids(path);owners=Set.copyOf(discovered);
+            // A successfully read archive can have no Mod aliases. Reuse that
+            // fact instead of recursively opening it for every class definition.
+            // Failed reads and early Module reader misses remain retryable.
+            if(archive||!owners.isEmpty()){
+                Set<String> prior=fileOwners.putIfAbsent(file,owners);if(prior!=null)owners=prior;
+            }
         }catch(java.io.IOException|RuntimeException unavailable){return;}
-        String prior=moduleFiles.putIfAbsent(module,file);
-        if(prior!=null&&!prior.equals(file)){Set<String> combined=new HashSet<>(metadata.getOrDefault(module,Set.of()));combined.addAll(owners);owners=Set.copyOf(combined);}
-        metadata.put(module,owners);
+        if(owners.isEmpty())return;
+        moduleFiles.putIfAbsent(module,file);
+        owners=rememberIds(module,owners);
         if(!Collections.disjoint(owners,bootProtected))protectDiscovered(module);
         if(stopped(module))RecoveryAgent.publishStoppedModule(module);
     }
@@ -130,10 +144,16 @@ final class ModGroupBoundary {
         if(source==null)return null;
         try{
             if(source.getProtocol().equals("file"))return java.nio.file.Path.of(source.toURI()).toAbsolutePath().normalize().toString();
-            String path=java.net.URLDecoder.decode(source.getPath(),StandardCharsets.UTF_8);
-            int bang=path.indexOf('!');if(bang>=0)path=path.substring(0,bang);
-            int union=path.lastIndexOf('#');if(union>=0)path=path.substring(0,union);
+            String path=source.getPath();
+            int bang=path.indexOf("!/");if(bang>=0)path=path.substring(0,bang);
+            // A jar:file URI must retain escaping until Path decodes it. A '+',
+            // space or encoded '#' in the physical filename is not form data.
             if(path.startsWith("file:"))return java.nio.file.Path.of(java.net.URI.create(path)).toAbsolutePath().normalize().toString();
+            path=java.net.URLDecoder.decode(path.replace("+","%2B"),StandardCharsets.UTF_8);
+            if(source.getProtocol().equals("union")){
+                int union=path.lastIndexOf('#');
+                if(union>=0&&path.substring(union+1).matches("[0-9]+"))path=path.substring(0,union);
+            }
             if(path.matches("^/[A-Za-z]:/.*"))path=path.substring(1);
             return java.nio.file.Path.of(path).toAbsolutePath().normalize().toString();
         }catch(java.net.URISyntaxException|RuntimeException unavailable){return null;}

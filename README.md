@@ -7,6 +7,7 @@
 - 本地选集保存在游戏目录的 `ronova-prelaunch.properties`，下次引导自动读取。远端服务器的客户端规则须由本机预先授权；客户端实际结果与服务器结果分别报告。
 - Native 活动路径只保留整组控制、JNI／JVMTI、NativeMethodBind、关键线程／句柄和控制范围边界。CRT／STL／第三方分配器字段账本、合作式 allocator/object SDK 和私有字节恢复已退出活动构建，残留的 SDK 头文件及未编译实现已删除。Storage 使用直接 RAII、真实 NTFS 身份与 TxF 事务。
 - 不恢复 JDK 容器广谱 Hook，不安装 getter／Function 组合的见证链。已知恢复载体按实际 backing 身份／CAS 清理；未知私有语义和逃逸调用继续明确报告未覆盖。
+- SYS 保留源码与可选接线，当前暂缓部署和扩展；继续集中处理 premain、Bootstrap、JVMTI/Native 的启动与整 Mod 攻防。
 
 Java 17；用户态 GNU C23／GNU C++23；Windows 驱动源码与管理工具 C17。内部兼容接口为 Java ABI105／Native ABI99／Storage3／Journal7；客户端协议为 `v1.5-whole-mod-clock`。接口数字不代表能力完成比例。
 

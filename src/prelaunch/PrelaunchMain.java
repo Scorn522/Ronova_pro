@@ -138,7 +138,9 @@ public final class PrelaunchMain {
         try(var paths=Files.list(mods)){
             for(Path file:paths.filter(path->Files.isRegularFile(path)&&path.getFileName().toString().toLowerCase(java.util.Locale.ROOT).endsWith(".jar")).toList()){
                 Set<String> ids=ModMetadata.ids(file);
-                if(!ids.isEmpty())files.setProperty(file.toAbsolutePath().normalize().toString(),String.join(",",new TreeSet<>(ids)));
+                // An empty value records a completed archive scan, not an early
+                // Module reader miss; the Agent can reuse it during class loading.
+                files.setProperty(file.toAbsolutePath().normalize().toString(),String.join(",",new TreeSet<>(ids)));
             }
         }
         return files;

@@ -1428,14 +1428,30 @@ public final class ProRuntime implements AutoCloseable {
         }
         for(var entry:grouped.entrySet()) {
             try {
-                Module[] modules=selectionModules(entry.getValue());
-                if(modules.length==0)throw new IllegalStateException("MOD_DEFINITION_NOT_BOUND");
                 Class<?> agent=Class.forName("dev.ronova.pro.agent.RecoveryAgent",false,ClassLoader.getSystemClassLoader());
-                for(Module module:modules)for(String alias:(String[])agent.getMethod("modGroupIds",Module.class).invoke(null,module)){
-                    if(Set.of("ronova_pro","minecraft","forge","java").contains(alias))throw new IllegalStateException("RESERVED_MOD_IN_SHARED_MODULE:"+alias);
-                    entry.getValue().putIfAbsent(alias,module);
-                    if(entry.getValue().get(alias)==null)entry.getValue().put(alias,module);
-                }
+                java.lang.reflect.Method groupIds=agent.getMethod("modGroupIds",Module.class);
+                Set<Module> complete=Collections.newSetFromMap(new IdentityHashMap<>());
+                boolean expanded;
+                do{
+                    expanded=false;
+                    for(Module module:selectionModules(entry.getValue())){
+                        if(complete.add(module))expanded=true;
+                        for(String alias:(String[])groupIds.invoke(null,module)){
+                            if(Set.of("ronova_pro","minecraft","forge","java").contains(alias))throw new IllegalStateException("RESERVED_MOD_IN_SHARED_MODULE:"+alias);
+                            Object instance=modList.getModContainerById(alias).map(container->container.getMod()).orElse(null);
+                            Module actual=instance==null?null:instance.getClass().getModule();
+                            Module prior=entry.getValue().get(alias);
+                            if(!entry.getValue().containsKey(alias)||prior==null||actual!=null&&prior!=actual){
+                                entry.getValue().put(alias,actual==null?module:actual);expanded=true;
+                            }
+                        }
+                    }
+                    // An outer jar can reveal an inner alias after the first
+                    // lookup. Resolve that alias's real Module before publishing
+                    // the group, including when its constructor was suppressed.
+                }while(expanded);
+                Module[] modules=complete.toArray(Module[]::new);
+                if(modules.length==0)throw new IllegalStateException("MOD_DEFINITION_NOT_BOUND");
                 if(entry.getValue().values().stream().anyMatch(Objects::isNull))throw new IllegalStateException("MOD_DEFINITION_NOT_BOUND:"+entry.getValue().keySet());
                 GroupSelection next=new GroupSelection(entry.getValue(),modules,String.valueOf(entry.getKey().getFilePath()),null);
                 // Files can share an indivisible actual Module; merge those groups,
