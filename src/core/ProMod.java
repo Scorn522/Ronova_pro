@@ -38,6 +38,12 @@ public final class ProMod {
         // The launcher supplies premain automatically. A late attachment is reported as runtime continuation.
         ProBootstrap.install();
         bindControlOwner();
+        try {
+            Class<?> bridge=Class.forName("dev.ronova.pro.bootstrap.EventBusBridge",true,null);
+            java.lang.invoke.MethodHandles.publicLookup().findStatic(bridge,"install",
+                    java.lang.invoke.MethodType.methodType(void.class,Class.class,Class.class))
+                    .invokeExact((Class<?>)ProMod.class,(Class<?>)MinecraftForge.class);
+        }catch(Throwable failure){throw new IllegalStateException("RONOVA_FORGE_BUS_PROTECTION_UNAVAILABLE",failure);}
         net.minecraftforge.fml.DistExecutor.unsafeRunWhenOn(net.minecraftforge.api.distmarker.Dist.CLIENT,()->ClientFaults::install);
         ProNetwork.init();
         var bus=MinecraftForge.EVENT_BUS;

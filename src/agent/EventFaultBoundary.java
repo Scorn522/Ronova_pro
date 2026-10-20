@@ -8,13 +8,14 @@ final class EventFaultBoundary {
     static final String TARGET="net/minecraftforge/eventbus/EventBus";
     private static final String BRIDGE="dev/ronova/pro/bootstrap/EventFaultBridge";
     private static final String CONTROL="dev/ronova/pro/bootstrap/ControlBridge";
+    private static final String CONTINUITY="dev/ronova/pro/bootstrap/EventBusBridge";
     private static final String POST="(Lnet/minecraftforge/eventbus/api/Event;Lnet/minecraftforge/eventbus/api/IEventBusInvokeDispatcher;)Z";
     private static final String DISPATCH="(Ljava/lang/Class;Ljava/lang/Object;Ljava/lang/Object;Ljava/lang/Object;)Z";
     private static final String INVOKE="(Lnet/minecraftforge/eventbus/api/IEventListener;Lnet/minecraftforge/eventbus/api/Event;)V";
     static byte[] transform(ClassLoader loader,byte[] bytes) {
         ClassNode node=new ClassNode();new ClassReader(bytes).accept(node,0);
         if(!TARGET.equals(node.name))throw new IllegalArgumentException("EVENT_FAULT_DEFINITION");
-        int existingDispatch=0,existingRemoval=0;
+        int existingDispatch=0,existingRemoval=0,existingContinuity=0;
         for(MethodNode method:node.methods)for(AbstractInsnNode instruction:method.instructions.toArray())if(instruction instanceof MethodInsnNode call) {
             if(method.name.equals("post")&&method.desc.equals(POST)&&call.owner.equals(BRIDGE)&&call.name.equals("dispatch")) {
                 if(!call.desc.equals(DISPATCH))throw new IllegalStateException("EVENT_FAULT_DISPATCH_CONTRACT");
@@ -22,14 +23,24 @@ final class EventFaultBoundary {
             }
             if(method.name.equals("unregister")&&method.desc.equals("(Ljava/lang/Object;)V")&&call.owner.equals(CONTROL)
                     &&call.name.equals("listenerRemovalAllowed")&&call.desc.equals("(Ljava/lang/Object;)Z"))existingRemoval++;
+            if(method.name.equals("post")&&method.desc.equals(POST)&&call.owner.equals(CONTINUITY)&&call.name.equals("dispatchBus")){
+                if(!call.desc.equals("(Ljava/lang/Object;)Ljava/lang/Object;"))throw new IllegalStateException("EVENT_CONTINUITY_CONTRACT");
+                existingContinuity++;
+            }
         }
-        if(existingDispatch>1||existingRemoval>1)throw new IllegalStateException("EVENT_FAULT_DUPLICATE_BOUNDARY");
-        if(existingDispatch==1&&existingRemoval==1) {
+        if(existingDispatch>1||existingRemoval>1||existingContinuity>1)throw new IllegalStateException("EVENT_FAULT_DUPLICATE_BOUNDARY");
+        if(existingDispatch==1&&existingRemoval==1&&existingContinuity==1) {
             if(!faultSites(node))throw new IllegalStateException("EVENT_FAULT_CHANGED_BOUNDARY");
             return null;
         }
         int replaced=existingDispatch,removal=existingRemoval;
         for(MethodNode method:node.methods) {
+            if(existingContinuity==0&&method.name.equals("post")&&method.desc.equals(POST)){
+                InsnList code=new InsnList();code.add(new VarInsnNode(Opcodes.ALOAD,0));
+                code.add(new MethodInsnNode(Opcodes.INVOKESTATIC,CONTINUITY,"dispatchBus","(Ljava/lang/Object;)Ljava/lang/Object;",false));
+                code.add(new TypeInsnNode(Opcodes.CHECKCAST,TARGET));code.add(new VarInsnNode(Opcodes.ASTORE,0));
+                method.instructions.insert(code);
+            }
             if(existingRemoval==0&&method.name.equals("unregister")&&method.desc.equals("(Ljava/lang/Object;)V")) {
                 InsnList code=new InsnList();LabelNode allowed=new LabelNode();code.add(new VarInsnNode(Opcodes.ALOAD,1));
                 code.add(new MethodInsnNode(Opcodes.INVOKESTATIC,CONTROL,"listenerRemovalAllowed","(Ljava/lang/Object;)Z",false));
@@ -88,6 +99,10 @@ final class EventFaultBoundary {
     private static boolean faultSites(ClassNode node) {
         MethodNode post=method(node,"post",POST),remove=method(node,"unregister","(Ljava/lang/Object;)V");
         if(post==null||remove==null)return false;
+        MethodInsnNode continuity=one(post,CONTINUITY,"dispatchBus","(Ljava/lang/Object;)Ljava/lang/Object;");
+        if(continuity==null||continuity.getOpcode()!=Opcodes.INVOKESTATIC||!load(previous(continuity),0)
+                ||!(next(continuity) instanceof TypeInsnNode cast)||cast.getOpcode()!=Opcodes.CHECKCAST||!cast.desc.equals(TARGET)
+                ||!store(next(cast),0))return false;
         MethodInsnNode dispatch=one(post,BRIDGE,"dispatch",DISPATCH);
         MethodInsnNode original=one(post,"net/minecraftforge/eventbus/api/IEventBusInvokeDispatcher","invoke",INVOKE);
         MethodInsnNode removal=one(remove,CONTROL,"listenerRemovalAllowed","(Ljava/lang/Object;)Z");

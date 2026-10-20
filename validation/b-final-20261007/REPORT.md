@@ -1,5 +1,35 @@
 # B 批实际报告：2026-10-09 代码收敛接续
 
+## 2026-10-20：活动 JNI 表与平台／客户端收尾
+
+接续 `b2bb9f9`，完成当前六项生产工作包。实际范围见同日 A 批状态页；没有重新引入容器广谱 Hook、合作式 SDK、SYS 部署、自身外观或武器注册。
+
+生产统一 `jar` / `reobfJar` 编译成功。组合命令末尾的 `compileStateChecksJava` 因历史 ASM 访问参数缺失失败，已补齐必要编译参数并单独完成检查入口编译；原日志 `build.log`、`check-compile.log` 均保留。没有因该检查编译问题重新编译生产源码。
+
+本次用户明确授权小检查，运行结果如下，均未启动游戏：
+
+| 实际检查 | 结果与范围 |
+| --- | --- |
+| `known-container-cleanup` | PASS；实际 Vector/Stack、CLQ/Deque、LBQ、EnumMap、Regular/JumboEnumSet、PriorityQueue 清理。混合份额邻居、EnumMap null、位图及并发新入条目保留，不调用目标 comparator/hashCode/equals。 |
+| `platform-control-writes` | PASS；真实 Class mirror 的 VM 头部／实例字段拒绝与静态字段准入，直接毒化临时类 ReflectionData 后原始 VM 字段仍可读取。此分支检查生产准入与实际存储，不单独声称已安装拦截。 |
+| `installed-platform-writes` | PASS，退出 0；实际 premain 安装后，真实 Unsafe 对 Class.name、Class.reflectionData、ReflectionData.declaredFields 的覆写被拒；真实静态 int 写和正常 JDK ReflectionData CAS 保留。 |
+| `jni-live-table` | PASS；真实 premain、实际 `JNIEnv/*env`，整表尾部 VirtualProtect／WriteProcessMemory 被拒；用独立检查进程的原始系统入口损坏 GetMethodID/GetFieldID 后，实际 JNI 查询触发恢复与 VM 表发布；只读页权限恢复，合法非受控 GetVersion 保留。无伪造 Owner、table identity 或 ready 状态。 |
+
+JNI 检查复用 `AuditFixNative.c` 的 `RONOVA_LIVE_JNI_ONLY` 分支，仅编译本次真实 JVM/Windows 操作；没有将副本控制后端、历史 seam 或旧矩阵编入本次检查 DLL。所有主动损坏均在独立检查 JVM 中，检查出口恢复原槽位和页权限。
+
+保留的前置失败：初次检查编译缺 ASM 导出；独立 Java 准入检查最初缺少生产已有的模块开放，随后发现临时类未初始化导致静态初值覆盖了检查写入，修正检查准备后通过。JNI 首次用中文构建路径直连，在 JDK `appendToBootstrapClassLoaderSearch` 处报 IllegalArgumentException；同一构建产物暂存纯英文路径后 `AGENT_PREMAIN_READY:INSTALLED_FULL` 并通过。不把这次暂存当作生产中文启动路径的修复。
+
+实际日志位于 `.work/v1.5-hardening-20261020`：`known-container-cleanup.log`、`platform-control-writes-complete.log`、`installed-platform.stdout.log`／`stderr.log`、`jni-live-table-staged.stdout.log`／`stderr.log`，此前失败日志同目录保留。
+
+候选 Java105 / Native99 / Storage3 / Journal7：
+
+| 候选 | 字节 | SHA-256 |
+| --- | ---: | --- |
+| `ronova-pro-core-1.5.0-dev.jar` | 3287932 | `f37c80c20dae260a90129f50ce03d9b0b6ba8da13372988c6ba309af51f35a80` |
+| `ronova-pro-prelaunch.jar` | 51042 | `0b32b1e0d08e7af35afe97335d0b9d688c5c7d661913ce77e965901d6856503f` |
+
+prelaunch 源码与产物未变化；Core 包含本轮 Agent、Bootstrap、Native 与客户端改动。网络协议已更新为 `v1.5-whole-mod-retry`，客户端／服务端需同步升级。Forge 总线漂移和客户端资源的本候选游戏内效果未运行；共享 PriorityQueue 非尾叶需目标比较器、未知私有语义等继续保留具体 GAP/PARTIAL。
+
 ## 2026-10-20：三个 P0 与 SuperSteve 两条具体漏口
 
 接续 `1542cfc`。本轮实现已知容器整组直接清理、实体当前载体重定位与原对象类型恢复、在途旧方法及线程／任务来源的效果边界接续；补入 Class$ReflectionData 防投毒和原始 VM 声明读取，以及实际 InstrumentationImpl/JPLISAgent/JvmtiEnv 结构保护。没有恢复广谱容器 Hook，没有新增 SDK、隔离夹具或微批次验证。

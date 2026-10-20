@@ -153,7 +153,7 @@ final class SourceMaps {
         if(groupSet(value))try {backend=setMap(value);Publications.CARRIER.invoke(null,backend);}
         catch(ReflectiveOperationException unavailable){source.gap="SOURCE_SET_BACKING_UNAVAILABLE";backend=null;}
         synchronized(OWNERS) {
-            if(groupMap(backend)||KnownContainers.sequence(backend)||fastSet(backend)||fastList(backend)||backend!=null&&(backend.getClass()==ArrayList.class
+            if(groupMap(backend)||KnownContainers.supported(backend)||fastSet(backend)||fastList(backend)||backend!=null&&(backend.getClass()==ArrayList.class
                     ||backend.getClass()==java.util.concurrent.CopyOnWriteArrayList.class
                     ||backend.getClass()==java.util.concurrent.atomic.AtomicReference.class||backend instanceof Object[])) {
                 var next=new ArrayList<Owner>();
@@ -232,6 +232,7 @@ final class SourceMaps {
         if(fastList(value))return field(value,"a");
         if(value!=null&&value.getClass()==ArrayList.class)return field(value,"elementData");
         if(value!=null&&value.getClass()==java.util.concurrent.CopyOnWriteArrayList.class)return field(value,"array");
+        if(KnownContainers.supported(value))return KnownContainers.arrayBacking(value);
         return null;
     }
     static Object[] valueBacking(Object value)throws ReflectiveOperationException{
@@ -513,7 +514,7 @@ final class SourceMaps {
         return removedJdkContainer(map)?"JDK_CONTAINER_BACKEND_UNSUPPORTED":"SOURCE_MAP_BUSY_OR_UNOBSERVED";
     }
     static List<Map.Entry<Object,Object>> entries(Object map) {
-        if(KnownContainers.map(map)){
+        if(KnownContainers.map(map)||KnownContainers.enumSet(map)){
             var rows=new ArrayList<Map.Entry<Object,Object>>();
             try{if(!with(map,()->{KnownContainers.Image image=KnownContainers.snapshot(map);
                 for(KnownContainers.Row row:image.rows)rows.add(new AbstractMap.SimpleImmutableEntry<>(row.key,row.value));
@@ -568,10 +569,11 @@ final class SourceMaps {
         Object[] root;Object next,primitiveKeys;
         KnownContainers.Image known;
         int bucket;long revision=-1;
+        String gap="";
         boolean complete,removed,setElements;
         Cursor(Object map){this.map=map;}
         private void reset(Object[] root,long revision){
-            this.root=root;bucket=0;next=null;this.revision=revision;complete=false;removed=false;known=null;
+            this.root=root;bucket=0;next=null;this.revision=revision;complete=false;removed=false;known=null;gap="";
         }
     }
     @FunctionalInterface interface Visitor {
@@ -580,7 +582,7 @@ final class SourceMaps {
     private record MapRow(Object key,Object value) { }
     /** Traverse only the existing exact backends; every removal rechecks the actual selected identity. */
     static boolean visit(Object map,Cursor cursor,int budget,Visitor visitor)throws ReflectiveOperationException,java.io.IOException {
-        if(cursor.map!=map||!groupMap(map)&&!fastSet(map)&&!KnownContainers.sequence(map))throw new IllegalArgumentException("ACTUAL_MAP_CURSOR_REQUIRED");
+        if(cursor.map!=map||!groupMap(map)&&!fastSet(map)&&!KnownContainers.supported(map))throw new IllegalArgumentException("ACTUAL_MAP_CURSOR_REQUIRED");
         if(KnownContainers.supported(map))return visitKnown(map,cursor,budget,visitor);
         if(fastSet(map))return visitSet(map,cursor,budget,visitor);
         if(primitiveMap(map))return visitPrimitive(map,cursor,budget,visitor);
@@ -714,7 +716,7 @@ final class SourceMaps {
             if(KnownContainers.supported(cursor.map)){
                 if(cursor.known==null||!KnownContainers.unchanged(cursor.known))return;
                 for(KnownContainers.Row row:cursor.known.rows)if(!(cursor.setElements?privateElement(row.key,runtime,group):privateEntry(row.key,row.value,runtime,group)))return;
-                KnownContainers.clear(cursor.known);changed(carrier);cleared[0]=true;return;
+                cleared[0]=KnownContainers.clear(cursor.known);changed(carrier);return;
             }
             List<Map.Entry<Object,Object>> rows=entries(cursor.map);if(rows==null)return;
             for(var row:rows)if(!(cursor.setElements?privateElement(row.getKey(),runtime,group):privateEntry(row.getKey(),row.getValue(),runtime,group)))return;
@@ -769,12 +771,27 @@ final class SourceMaps {
         throw new IllegalStateException(unavailable(cursor.map));
     }
     private static boolean removeKnown(Cursor cursor,KnownContainers.Row row)throws ReflectiveOperationException{
-        if(cursor.known==null||!KnownContainers.remove(cursor.known,row))return false;
+        if(cursor.known==null)return false;
+        String gap=KnownContainers.removalGap(cursor.known,row);if(!gap.isEmpty()){cursor.gap=gap;return false;}
+        RetiringList previous=RETIRING_LIST.get();Object backing=KnownContainers.arrayBacking(cursor.map);
+        if(backing!=null)RETIRING_LIST.set(new RetiringList(cursor.map,backing,cursor.known.slots));
+        boolean removed;
+        try{removed=KnownContainers.remove(cursor.known,row);}
+        finally{if(backing!=null){if(previous==null)RETIRING_LIST.remove();else RETIRING_LIST.set(previous);}}
+        if(!removed)return false;
         cursor.removed=true;cursor.revision=revision(cursor.map);changed(cursor.map);return true;
     }
     /** Creation attribution is required; an observed outside holder or source prevents whole-carrier disposal. */
     static boolean privateContainer(Object carrier,ProRuntime runtime,ProRuntime.Subject group){
         if(carrier==null||group==null||!group.terminal||runtime.groupSubject(carrier)!=group)return false;
+        if(!privateOwners(carrier,runtime,group))return false;
+        if(KnownContainers.supported(carrier))try{
+            Object backing=KnownContainers.arrayBacking(carrier);
+            if(backing!=null&&(!privateOwners(backing,runtime,group)||runtime.groupSubject(backing)!=null&&runtime.groupSubject(backing)!=group))return false;
+        }catch(ReflectiveOperationException unavailable){return false;}
+        return true;
+    }
+    private static boolean privateOwners(Object carrier,ProRuntime runtime,ProRuntime.Subject group){
         for(Owner owner:OWNERS.getOrDefault(carrier,List.of())){
             var source=owner.source.get();if(!currentOwner(owner,carrier))continue;
             if(source.owner!=runtime.recoverySources||runtime.groupSubject(source.holder())!=group)return false;
@@ -877,6 +894,7 @@ final class SourceMaps {
                 if(thrown[0]!=null)throw thrown[0];return ran;
             }catch(InvocationTargetException failure){if(failure.getCause() instanceof RuntimeException error)throw error;if(failure.getCause() instanceof Error error)throw error;throw failure;}
         }
+        if(KnownContainers.lockFree(map)||KnownContainers.blocking(map))return KnownContainers.withConcurrentScope(map,action);
         if(KnownContainers.supported(map)||hashBacked(map)||map!=null&&(map.getClass()==ConcurrentHashMap.class||map.getClass()==ArrayList.class
                 ||map.getClass()==java.util.concurrent.atomic.AtomicReference.class)){
             synchronized(map){action.run();}return true;

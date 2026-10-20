@@ -217,6 +217,7 @@ public final class RecoveryAgent {
             // Finish the bootstrap helper's access and initialization before publishing any such call site.
             Class.forName("dev.ronova.pro.bootstrap.BackingBridge",true,null);
             Class.forName("dev.ronova.pro.bootstrap.ResourceBridge",true,null);
+            Class.forName("dev.ronova.pro.bootstrap.EventBusBridge",true,null);
             Class.forName("dev.ronova.pro.bootstrap.ResourceBridge$BufferPlatform",true,null);
             Class.forName("dev.ronova.pro.bootstrap.ResourceBridge$CharacterWrappers",true,null);
             Class.forName("dev.ronova.pro.bootstrap.ResourceBridge$WrapperRecord",true,null);
@@ -851,6 +852,7 @@ public final class RecoveryAgent {
         try{
             Class<?> fault=Class.forName("dev.ronova.pro.bootstrap.EventFaultBridge",true,null);
             fault.getMethod("bindCore",Class.class).invoke(null,runtime);
+            Class.forName("dev.ronova.pro.bootstrap.EventBusBridge",true,null).getMethod("bindCore",Class.class).invoke(null,runtime);
             Class<?> bus=Class.forName("net.minecraftforge.eventbus.EventBus",false,runtime.getClassLoader());
             clientEventBus=bus;
             Class.forName("dev.ronova.pro.bootstrap.ControlBridge",false,null).getMethod("installEventBoundary",Class.class).invoke(null,bus);
@@ -1191,8 +1193,8 @@ public final class RecoveryAgent {
         if(core!=modGroupRuntime)throw new SecurityException("GROUP_FIELD_CORE_REQUIRED");
         Class<?>[] loaded=loadedClasses();
         try{
-            List<Class<?>> ready=new java.util.ArrayList<>();Class<?> unsafeType=Class.forName("sun.misc.Unsafe");var singleton=unsafeType.getDeclaredField("theUnsafe");singleton.setAccessible(true);Object unsafe=singleton.get(null);
-            var pending=unsafeType.getMethod("shouldBeInitialized",Class.class);for(Class<?> type:loaded)if(!type.isArray()&&!type.isPrimitive()&&!Boolean.TRUE.equals(pending.invoke(unsafe,type)))ready.add(type);
+            List<Class<?>> ready=new java.util.ArrayList<>();Class<?> unsafeType=Class.forName("sun.misc.Unsafe");var singleton=AgentMetadata.declaredField(unsafeType,"theUnsafe");singleton.setAccessible(true);Object unsafe=singleton.get(null);
+            var pending=AgentMetadata.declaredMethod(unsafeType,"shouldBeInitialized",Class.class);for(Class<?> type:loaded)if(!type.isArray()&&!type.isPrimitive()&&!Boolean.TRUE.equals(pending.invoke(unsafe,type)))ready.add(type);
             Object[][] rows=(Object[][])codeSourceBridge.getMethod("groupFields",Module[].class,Class[].class).invoke(null,(Object)modules,(Object)ready.toArray(Class[]::new));
             openBackingAccess(core,Arrays.stream(rows).map(row->((java.lang.reflect.Field)row[0]).getDeclaringClass()).distinct().toArray(Class[]::new));return rows;
         }catch(ReflectiveOperationException unavailable){throw new IllegalStateException("EXTERNAL_GROUP_FIELDS_UNAVAILABLE",unavailable);}
@@ -1201,7 +1203,7 @@ public final class RecoveryAgent {
         requireModGroupCaller("dev.ronova.pro.ProRuntime");
         try{
             Class<?>[] classes=(Class<?>[])codeSourceBridge.getMethod("fieldClasses").invoke(null);List<Class<?>> ready=new ArrayList<>();
-            Class<?> unsafeType=Class.forName("sun.misc.Unsafe");var singleton=unsafeType.getDeclaredField("theUnsafe");singleton.setAccessible(true);Object unsafe=singleton.get(null);var pending=unsafeType.getMethod("shouldBeInitialized",Class.class);
+            Class<?> unsafeType=Class.forName("sun.misc.Unsafe");var singleton=AgentMetadata.declaredField(unsafeType,"theUnsafe");singleton.setAccessible(true);Object unsafe=singleton.get(null);var pending=AgentMetadata.declaredMethod(unsafeType,"shouldBeInitialized",Class.class);
             for(Class<?> type:classes)if(!Boolean.TRUE.equals(pending.invoke(unsafe,type)))ready.add(type);
             return (Object[][])codeSourceBridge.getMethod("groupFields",Module[].class,Class[].class).invoke(null,(Object)modules,(Object)ready.toArray(Class[]::new));
         }
@@ -1405,8 +1407,8 @@ public final class RecoveryAgent {
         Set<Module> selected=Collections.newSetFromMap(new IdentityHashMap<>());selected.addAll(Arrays.asList(modules));
         var found=new ArrayList<Class<?>>();
         try {
-            Class<?> unsafe=Class.forName("sun.misc.Unsafe");var field=unsafe.getDeclaredField("theUnsafe");field.setAccessible(true);
-            Object access=field.get(null);var pending=unsafe.getMethod("shouldBeInitialized",Class.class);
+            Class<?> unsafe=Class.forName("sun.misc.Unsafe");var field=AgentMetadata.declaredField(unsafe,"theUnsafe");field.setAccessible(true);
+            Object access=field.get(null);var pending=AgentMetadata.declaredMethod(unsafe,"shouldBeInitialized",Class.class);
             for(Class<?> type:loadedClasses())if(!type.isArray()&&!type.isPrimitive()
                     &&selected.contains(logicalModule(type))&&!Boolean.TRUE.equals(pending.invoke(access,type)))found.add(type);
         } catch(ReflectiveOperationException unavailable) {throw new IllegalStateException("GROUP_INITIALIZATION_STATE_UNAVAILABLE",unavailable);}
@@ -1431,9 +1433,9 @@ public final class RecoveryAgent {
     public static Class<?> initializedSource(String name) {
         Instrumentation api=instrumentation;if(api==null)return null;
         try {
-            Class<?> unsafe=Class.forName("sun.misc.Unsafe");var field=unsafe.getDeclaredField("theUnsafe");
+            Class<?> unsafe=Class.forName("sun.misc.Unsafe");var field=AgentMetadata.declaredField(unsafe,"theUnsafe");
             if(!field.trySetAccessible())return null;Object access=field.get(null);
-            var pending=unsafe.getMethod("shouldBeInitialized",Class.class);Class<?> found=null;
+            var pending=AgentMetadata.declaredMethod(unsafe,"shouldBeInitialized",Class.class);Class<?> found=null;
             for(Class<?> type:loadedClasses())if(type.getName().equals(name)&&!Boolean.TRUE.equals(pending.invoke(access,type))) {
                 if(found!=null)return null;found=type;
             }
@@ -1464,13 +1466,13 @@ public final class RecoveryAgent {
     }
     private static void protectInstrumentation(Instrumentation api)throws ReflectiveOperationException {
         var roots=new ArrayList<Object>();roots.add(api);
-        for(var field:api.getClass().getDeclaredFields())if(!java.lang.reflect.Modifier.isStatic(field.getModifiers())
+        for(var field:AgentMetadata.declaredFields(api.getClass()))if(!java.lang.reflect.Modifier.isStatic(field.getModifiers())
                 &&field.getType().getName().equals("sun.instrument.TransformerManager")) {
             field.setAccessible(true);Object manager=field.get(api);if(manager==null)continue;
-            var list=manager.getClass().getDeclaredField("mTransformerList");list.setAccessible(true);
+            var list=AgentMetadata.declaredField(manager.getClass(),"mTransformerList");list.setAccessible(true);
             Object[] entries=(Object[])list.get(manager);boolean owned=false;
             for(Object entry:entries) {
-                var transformer=entry.getClass().getDeclaredField("mTransformer");transformer.setAccessible(true);
+                var transformer=AgentMetadata.declaredField(entry.getClass(),"mTransformer");transformer.setAccessible(true);
                 if(!Boolean.TRUE.equals(Class.forName("dev.ronova.pro.bootstrap.ControlBridge",false,null)
                         .getMethod("removalAllowed",ClassFileTransformer.class).invoke(null,transformer.get(entry)))) {roots.add(entry);owned=true;}
             }

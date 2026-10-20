@@ -1,5 +1,26 @@
 # Ronova Pro 当前进度
 
+## 2026-10-20：JNI 活动表、Class 镜像、总线与客户端收尾
+
+接续 `b2bb9f9`，整包补齐六项生产改动：
+
+- JNI：保护实际 `JNIEnv` 指针槽及当前 `*env` 的完整 `JNINativeInterface_`；在实际入口和退组时检查受控槽，原子恢复并同步 VM 函数表，保留合法的非受控槽。登记随真实线程 attach/detach/ThreadEnd 生命周期维护；恢复过程中处理实际页面权限。
+- Class 镜像：Unsafe 单点／批量写只接受该 mirror 的真实静态字段范围，拒绝 VM 头部、隐藏字段、Class 自身实例字段及跨越空洞的范围。仅保留实际 `Class.newReflectionData` 的缓存 CAS 例外。
+- Agent：初始化来源判断、Instrumentation transformer 管理器读取全部改经 Bootstrap `PlatformMetadata` 原始 VM 声明，不再消费可被投毒的字段反射缓存。
+- Forge 总线：保护 `MinecraftForge.EVENT_BUS` 静态根；实际 EventBus.post 在根漂移时恢复原总线并使用其监听器链完成当前分派。既有退组登记继续按每个真实 bus/owner 卸载，原总线与漂移总线的登记不合并成虚假身份。
+- 容器：增加 PriorityQueue、Vector/Stack、EnumMap、Regular/JumboEnumSet、ConcurrentLinkedQueue/Deque、LinkedBlockingQueue 的直接清理。使用真实锁、节点 CAS、序号槽和位图；并发新入的组外条目保留。共享 PriorityQueue 非尾叶删除若需要比较器，保持 `SOURCE_PRIORITY_QUEUE_REHEAPIFY_CALLBACK_REQUIRED`，不调用目标代码或破坏堆序。
+- 客户端：失败对象保留到下一 Tick，捕获失败重扫；声音/UI 跨线程交接按原对象与实际资源状态接续，已完成释放不重复执行。结果绑定当前连接、session、generation、sequence，完成后重新通知服务端；网络协议版本同步更新为 `v1.5-whole-mod-retry`。
+
+本次用户已明确允许构建后的小检查：只运行直接针对这些路径的检查，不起服、不启动 Minecraft、不运行 metadata seam 自证。原未知私有语义与未观察入口仍如实报告 GAP/PARTIAL，SYS、自身外观和武器注册继续暂缓。
+
+生产 `jar` / `reobfJar` 统一编译完成，Core、Agent、Bootstrap 与 Native 均通过。随后同次命令中的旧检查入口因缺少 ASM 导出参数编译失败；补齐该编译配置后，检查入口编译成功，未重新编译生产源码。当前 Core 为 3,287,932 字节，prelaunch 51,042 字节；Java105 / Native99 / Storage3 / Journal7 不变。
+
+小检查已完成：实际 JDK 容器直接清理 PASS；Class 镜像真实静态存储／VM 头部准入及被投毒 ReflectionData 的原始读取 PASS；安装真实 premain 后的 Unsafe Class 实例／缓存／ReflectionData 写入拒绝、正常静态写和 JDK 缓存 CAS PASS；活动 JNI 表与尾部 VirtualProtect／WriteProcessMemory 拒绝、实际改槽后的恢复、只读页同步与非受控 GetVersion 保留 PASS。JNI 检查没有伪造 Owner 或后端 ready 状态。
+
+首次直接使用中文构建路径启动独立检查 JVM，在 JDK appendToBootstrapClassLoaderSearch 处退出，尚未进入检查；改用同一产物的纯英文临时路径后，实际 premain 安装为 INSTALLED_FULL 并通过检查。未据此宣称正式启动入口的中文路径问题已修复。Java 准入检查的初次模块开放不足和未先初始化临时测试类也已修正，原日志保留。
+
+未启动 Minecraft／Forge，事件总线与客户端的游戏内效果仍未做本候选实机检查。客户端与服务端需一起更新到本候选协议。详细结果见既有实际报告，日志保留在 `.work/v1.5-hardening-20261020`。
+
 ## 2026-10-20：三个 P0 与反射／JVMTI 控制链修复
 
 接续 `1542cfc`，按整包生产代码方式实现，继续沿用 premain + Bootstrap + JVMTI/Native。没有恢复 JDK 容器广谱 Hook，没有合作式 SDK、SYS 扩展、自身外观或武器注册。

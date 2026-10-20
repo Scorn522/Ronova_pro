@@ -1484,14 +1484,31 @@ public final class ProRuntime implements AutoCloseable {
     public void sendModGroup(ServerPlayer player) {
         Map<String,List<String>> grouped=new LinkedHashMap<>();
         for(String id:stoppedMods)grouped.computeIfAbsent(stoppedReturns.getOrDefault(id,System.getProperty("ronova.pro.bootReturns."+id,System.getProperty("ronova.pro.bootReturns","default"))),ignored->new ArrayList<>()).add(id);
-        for(var entry:grouped.entrySet())ProNetwork.modGroup(player,session,String.join(",",entry.getValue()),entry.getKey(),false);
-        if(!protectedMods.isEmpty())ProNetwork.modGroup(player,session,String.join(",",protectedMods),"default",true);
+        for(var entry:grouped.entrySet())sendClientGroup(player,String.join(",",entry.getValue()),entry.getKey(),false);
+        if(!protectedMods.isEmpty())sendClientGroup(player,String.join(",",protectedMods),"default",true);
     }
     private final Map<Object,Map<String,String>> clientGroups=new WeakIdentityMap<>();
+    private static final class ClientGroupRequest {
+        final long generation;final boolean protect;long sequence=-1;
+        ClientGroupRequest(long generation,boolean protect){this.generation=generation;this.protect=protect;}
+    }
+    private final Map<Object,Map<String,ClientGroupRequest>> clientGroupRequests=new WeakIdentityMap<>();
+    private long clientGroupGeneration;
+    private void sendClientGroup(ServerPlayer player,String ids,String returns,boolean protect) {
+        if(!ProNetwork.present(player)||player.connection==null)return;
+        long generation=++clientGroupGeneration;
+        var requests=clientGroupRequests.computeIfAbsent(player.connection,ignored->new LinkedHashMap<>());
+        var states=clientGroups.computeIfAbsent(player.connection,ignored->new LinkedHashMap<>());
+        for(String id:ids.split(",")){requests.put(id,new ClientGroupRequest(generation,protect));states.put(id,"PENDING;GENERATION="+generation);}
+        ProNetwork.modGroup(player,session,generation,ids,returns,protect);
+    }
     void modGroupResult(ServerPlayer player,ProNetwork.ModGroupResult result){
         thread();if(!session.equals(result.session())||player.server!=server||player.connection==null||!server.getPlayerList().getPlayers().contains(player))return;
-        for(String id:result.ids().split(","))if((result.protect()?protectedMods:stoppedMods).contains(id))
-            clientGroups.computeIfAbsent(player.connection,ignored->new LinkedHashMap<>()).put(id,result.state());
+        for(String id:result.ids().split(","))if((result.protect()?protectedMods:stoppedMods).contains(id)) {
+            ClientGroupRequest request=clientGroupRequests.getOrDefault(player.connection,Map.of()).get(id);
+            if(request==null||request.generation!=result.generation()||request.protect!=result.protect()||result.sequence()<=request.sequence)continue;
+            request.sequence=result.sequence();clientGroups.computeIfAbsent(player.connection,ignored->new LinkedHashMap<>()).put(id,result.state());
+        }
     }
     private List<String> clientGroupStates(){
         List<String> states=new ArrayList<>();

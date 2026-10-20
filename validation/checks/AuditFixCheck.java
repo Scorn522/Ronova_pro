@@ -8,12 +8,25 @@ import java.util.function.Consumer;
 
 /** Focused source-list regression and historical metadata checks; neither certifies gameplay. */
 public final class AuditFixCheck {
+    private static native boolean jniLiveTable0();
+    private static int jniLiveBoundary(){return 73;}
+    private static void jniLiveTable()throws Exception {
+        Class<?> control=Class.forName("dev.ronova.pro.bootstrap.NativeControl",false,null);
+        require(Boolean.TRUE.equals(control.getMethod("available").invoke(null)),"actual premain NativeControl installation required");
+        System.load(java.nio.file.Path.of(System.getProperty("ronova.pro.audit.native")).toAbsolutePath().toString());
+        require(jniLiveTable0(),"actual live JNI table protection or restoration failed");
+        System.out.println("JNI_LIVE_TABLE_PASS actual_premain_backend real_env_full_table_and_tail_ranges_refused actual_GetMethodID_GetFieldID_corruption_repaired RO_publication_permissions_restored legitimate_unguarded_GetVersion_preserved no_supplied_owner_metadata");
+    }
     private static final sun.misc.Unsafe U;
     static {try {var field=sun.misc.Unsafe.class.getDeclaredField("theUnsafe");field.setAccessible(true);U=(sun.misc.Unsafe)field.get(null);}catch(Exception e){throw new ExceptionInInitializerError(e);}}
     private static void put(Object target,String name,Object value)throws Exception {var f=target.getClass().getDeclaredField(name);f.setAccessible(true);f.set(target,value);}
     private static void require(boolean yes,String message) {if(!yes)throw new AssertionError(message);}
     private static Object invoke(Object receiver,String name)throws Exception {var m=receiver.getClass().getDeclaredMethod(name);m.setAccessible(true);try{return m.invoke(receiver);}catch(InvocationTargetException e){if(e.getCause() instanceof Exception x)throw x;throw e;}}
     public static void main(String[] args)throws Exception {
+        if(args.length==1&&args[0].equals("jni-live-table")){jniLiveTable();return;}
+        if(args.length==1&&args[0].equals("platform-control-writes")){platformControlWrites();return;}
+        if(args.length==1&&args[0].equals("installed-platform-writes")){installedPlatformWrites();return;}
+        if(args.length==1&&args[0].equals("known-container-cleanup")){knownContainerCleanup();return;}
         if(args.length==2&&args[0].equals("core-native-state")){coreNativeState(args[1]);return;}
         if(args.length==1&&args[0].equals("core-native-bytes")){
             System.load(java.nio.file.Path.of(System.getProperty("ronova.pro.audit.thread.native")).toAbsolutePath().toString());
@@ -2348,6 +2361,138 @@ public final class AuditFixCheck {
             System.out.println("PRIVATE_NATIVE_STATE_PASS actual_heap_returns failed_realloc_preserved same_address_new_generation read_source_known_and_unknown live_alias_and_read_lease_block_free actual_private_HeapFree writable_PE_static_spans IMAGE_seal_cancel_retire scoped_native_CPU_unknown fixture_metadata_no_global_install");
         }
         finally{opaqueNativeFixture=false;opaqueNativeModules=null;}
+    }
+    private static final class MirrorWriteTarget { static int number=7; static Object reference=new Object(); int field; }
+    private static void installedPlatformWrites()throws Exception{
+        require(Boolean.TRUE.equals(Class.forName("dev.ronova.pro.bootstrap.NativeControl",false,null).getMethod("available").invoke(null)),
+                "actual premain backend required");
+        Class<?> metadata=Class.forName("dev.ronova.pro.bootstrap.PlatformMetadata",true,null);
+        var raw=metadata.getMethod("declaredField",Class.class,String.class);
+        require(MirrorWriteTarget.number==7,"mirror class initialization failed");
+        Class<?> target=MirrorWriteTarget.class;String name=target.getName();
+        Field nameField=(Field)raw.invoke(null,Class.class,"name");long nameOffset=U.objectFieldOffset(nameField);
+        Object originalName=U.getObject(target,nameOffset);
+        try{
+            U.putObjectVolatile(target,nameOffset,"tampered.mirror");
+            require(U.getObject(target,nameOffset)==originalName&&target.getName().equals(name),"installed Unsafe admitted Class instance write");
+        }finally{if(U.getObject(target,nameOffset)!=originalName)U.putObjectVolatile(target,nameOffset,originalName);}
+        // A fresh class must still publish its normal JDK ReflectionData CAS.
+        require(target.getDeclaredFields().length==3,"legitimate reflection cache publication failed");
+        Field cache=(Field)raw.invoke(null,Class.class,"reflectionData");long cacheOffset=U.objectFieldOffset(cache);
+        Object originalCache=U.getObject(target,cacheOffset);
+        try{
+            U.putObjectVolatile(target,cacheOffset,new java.lang.ref.SoftReference<>(null));
+            require(U.getObject(target,cacheOffset)==originalCache,"installed Unsafe admitted external Class cache overwrite");
+        }finally{if(U.getObject(target,cacheOffset)!=originalCache)U.putObjectVolatile(target,cacheOffset,originalCache);}
+        Object data=((java.lang.ref.Reference<?>)originalCache).get();
+        Field declared=(Field)raw.invoke(null,data.getClass(),"declaredFields");long declaredOffset=U.objectFieldOffset(declared);
+        Object originalFields=U.getObject(data,declaredOffset);
+        try{
+            U.putObjectVolatile(data,declaredOffset,new Field[0]);
+            require(U.getObject(data,declaredOffset)==originalFields&&target.getDeclaredFields().length==3,"installed Unsafe admitted ReflectionData poison");
+        }finally{if(U.getObject(data,declaredOffset)!=originalFields)U.putObjectVolatile(data,declaredOffset,originalFields);}
+        Field number=(Field)raw.invoke(null,target,"number");U.putInt(U.staticFieldBase(number),U.staticFieldOffset(number),23);
+        require(MirrorWriteTarget.number==23,"installed mirror guard rejected real static field write");
+        System.out.println("INSTALLED_PLATFORM_WRITES_PASS: actual Unsafe Class instance/cache/ReflectionData writes refused, real static writes and JDK cache publication preserved");
+    }
+    private static void platformControlWrites()throws Exception{
+        Class<?> control=Class.forName("dev.ronova.pro.bootstrap.ControlBridge",true,null);
+        Class<?> metadata=Class.forName("dev.ronova.pro.bootstrap.PlatformMetadata",true,null);
+        var allowed=control.getMethod("unsafeWriteAllowed",Object.class,long.class,Object.class,String.class);
+        var bulk=control.getMethod("unsafeMemoryAllowed",Object.class,long.class,long.class);
+        var fields=metadata.getMethod("declaredFields",Class.class);
+        var rawField=metadata.getMethod("declaredField",Class.class,String.class);
+        Class<?> target=MirrorWriteTarget.class;
+        require(MirrorWriteTarget.number==7,"disposable mirror class initialization failed");
+        for(long offset:new long[]{0,8,16,24})require(!(boolean)allowed.invoke(null,target,offset,0L,"Long"),"Class header admitted at "+offset);
+        for(Field field:(Field[])fields.invoke(null,Class.class))if(!Modifier.isStatic(field.getModifiers())){
+            long offset=U.objectFieldOffset(field);
+            require(!(boolean)allowed.invoke(null,target,offset,null,field.getType().isPrimitive()?"Long":"Object"),"Class instance field admitted: "+field.getName());
+        }
+        Field number=(Field)rawField.invoke(null,target,"number"),reference=(Field)rawField.invoke(null,target,"reference");
+        long numberOffset=U.staticFieldOffset(number),referenceOffset=U.staticFieldOffset(reference);
+        require((boolean)allowed.invoke(null,target,numberOffset,19,"Int"),"real static int rejected");
+        U.putInt(U.staticFieldBase(number),numberOffset,19);require(MirrorWriteTarget.number==19,"static int write failed");
+        Object next=new Object();
+        require((boolean)allowed.invoke(null,target,referenceOffset,next,"Object"),"real static reference rejected");
+        U.putObject(U.staticFieldBase(reference),referenceOffset,next);require(MirrorWriteTarget.reference==next,"static reference write failed");
+        require((boolean)bulk.invoke(null,target,numberOffset,4L),"static field bulk range rejected");
+        require(!(boolean)bulk.invoke(null,target,16L,8L),"Class hidden bulk range admitted");
+        require(!(boolean)bulk.invoke(null,target,numberOffset,Long.MAX_VALUE),"overflowing mirror range admitted");
+        // Poison a disposable class's real JDK cache and read declarations from
+        // the production raw VM reader. No fabricated source/owner metadata.
+        target.getDeclaredFields();
+        Field cache=(Field)rawField.invoke(null,Class.class,"reflectionData");
+        long cacheOffset=U.objectFieldOffset(cache);
+        Object referenceData=U.getObject(target,cacheOffset);
+        Object data=((java.lang.ref.Reference<?>)referenceData).get();
+        Field declared=(Field)rawField.invoke(null,data.getClass(),"declaredFields");
+        long declaredOffset=U.objectFieldOffset(declared);
+        Object previous=U.getObject(data,declaredOffset);
+        try{
+            require(!(boolean)allowed.invoke(null,target,cacheOffset,null,"Object"),"external Class cache CAS admitted");
+            require(!(boolean)allowed.invoke(null,data,declaredOffset,new Field[0],"Object"),"ReflectionData poison admitted");
+            U.putObject(data,declaredOffset,new Field[0]);
+            require(target.getDeclaredFields().length==0,"cache poisoning setup did not affect real reflection");
+            require(((Field[])fields.invoke(null,target)).length==3,"raw VM declarations consumed poisoned cache");
+        }finally{U.putObject(data,declaredOffset,previous);}
+        System.out.println("PLATFORM_CONTROL_WRITES_PASS: real mirror/static storage and poisoned ReflectionData; production admission checks, no installed-agent claim");
+    }
+    private static final class NoCallbacks {
+        @Override public boolean equals(Object other){throw new AssertionError("target equals callback");}
+        @Override public int hashCode(){throw new AssertionError("target hashCode callback");}
+    }
+    private enum SmallEnum { A,B,C }
+    private enum LargeEnum {
+        E00,E01,E02,E03,E04,E05,E06,E07,E08,E09,E10,E11,E12,E13,E14,E15,
+        E16,E17,E18,E19,E20,E21,E22,E23,E24,E25,E26,E27,E28,E29,E30,E31,
+        E32,E33,E34,E35,E36,E37,E38,E39,E40,E41,E42,E43,E44,E45,E46,E47,
+        E48,E49,E50,E51,E52,E53,E54,E55,E56,E57,E58,E59,E60,E61,E62,E63,E64
+    }
+    private static void knownContainerCleanup()throws Exception{
+        Object removed=new NoCallbacks(),kept=new NoCallbacks();
+        for(Collection<Object> carrier:List.<Collection<Object>>of(new Vector<>(),new Stack<>(),new ConcurrentLinkedQueue<>(),
+                new ConcurrentLinkedDeque<>(),new LinkedBlockingQueue<>())){
+            carrier.add(removed);carrier.add(kept);carrier.add(removed);
+            cleanIdentity(carrier,removed);
+            Object[] remaining=carrier.toArray();
+            require(remaining.length==1&&remaining[0]==kept,"mixed cleanup lost neighbor: "+carrier.getClass());
+            cleanAll(carrier);require(carrier.isEmpty(),"private cleanup left entries");
+        }
+        EnumMap<SmallEnum,Object> map=new EnumMap<>(SmallEnum.class);map.put(SmallEnum.A,removed);map.put(SmallEnum.B,kept);map.put(SmallEnum.C,null);
+        cleanIdentity(map,removed);require(map.size()==2&&map.get(SmallEnum.B)==kept&&map.containsKey(SmallEnum.C),"EnumMap null/neighbor lost");
+        cleanAll(map);require(map.isEmpty(),"EnumMap clear failed");
+        EnumSet<SmallEnum> small=EnumSet.allOf(SmallEnum.class);cleanIdentity(small,SmallEnum.B);
+        require(small.equals(EnumSet.of(SmallEnum.A,SmallEnum.C)),"RegularEnumSet wrong bit");
+        EnumSet<LargeEnum> large=EnumSet.allOf(LargeEnum.class);cleanIdentity(large,LargeEnum.E64);
+        require(large.size()==64&&!large.contains(LargeEnum.E64)&&large.contains(LargeEnum.E63),"JumboEnumSet wrong word");
+        cleanAll(small);cleanAll(large);require(small.isEmpty()&&large.isEmpty(),"EnumSet clear failed");
+        boolean[] armed={false};
+        PriorityQueue<Object> queue=new PriorityQueue<>((a,b)->{if(armed[0])throw new AssertionError("comparator invoked during retirement");return 0;});
+        queue.add(kept);queue.add(removed);armed[0]=true;cleanIdentity(queue,removed);
+        require(queue.size()==1&&queue.peek()==kept,"PriorityQueue tail removal failed");
+        cleanAll(queue);require(queue.isEmpty(),"PriorityQueue private clear failed");
+        ConcurrentLinkedQueue<Object> concurrent=new ConcurrentLinkedQueue<>();concurrent.add(removed);
+        var image=KnownContainers.snapshot(concurrent);concurrent.add(kept);KnownContainers.clear(image);
+        require(concurrent.size()==1&&concurrent.peek()==kept,"captured queue cleanup swallowed new publication");
+        System.out.println("KNOWN_CONTAINER_CLEANUP_PASS: actual JDK containers, identity removal, nulls, bitmaps, no user callbacks, concurrent new entry preserved");
+    }
+    private static void cleanIdentity(Object carrier,Object selected)throws ReflectiveOperationException{
+        SourceMaps.Action action=()->{
+            while(true){
+                var image=KnownContainers.snapshot(carrier);KnownContainers.Row match=null;
+                for(var row:image.rows)if(row.key==selected||row.value==selected){match=row;break;}
+                if(match==null)return;
+                require(KnownContainers.remove(image,match),"direct known-container remove refused");
+            }
+        };
+        if(KnownContainers.lockFree(carrier)||KnownContainers.blocking(carrier))require(KnownContainers.withConcurrentScope(carrier,action),"queue scope unavailable");
+        else synchronized(carrier){action.run();}
+    }
+    private static void cleanAll(Object carrier)throws ReflectiveOperationException{
+        SourceMaps.Action action=()->KnownContainers.clear(KnownContainers.snapshot(carrier));
+        if(KnownContainers.lockFree(carrier)||KnownContainers.blocking(carrier))require(KnownContainers.withConcurrentScope(carrier,action),"queue scope unavailable");
+        else synchronized(carrier){action.run();}
     }
     // Only the isolated C fixture owns these expected tuples. Production
     // allocation/alias/restore code runs unchanged, with no controller install.

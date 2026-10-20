@@ -3,6 +3,7 @@ package dev.ronova.pro;
 import java.util.*;
 import dev.ronova.pro.mixin.Access;
 import net.minecraft.client.Minecraft;
+import net.minecraft.client.multiplayer.ClientLevel;
 import net.minecraft.core.BlockPos;
 import net.minecraft.world.level.Level;
 import net.minecraft.world.entity.Entity;
@@ -104,13 +105,16 @@ public final class ClientPresence {
             if((integrated||selected.contains(id))&&net.minecraftforge.fml.ModList.get().getModContainerById(id).isPresent())
                 accepted.add(id);
         }
-        if(accepted.isEmpty()){if(known!=null)ProNetwork.modGroupResult(message,"LOCAL_AUTHORIZATION_REQUIRED");return;}
         if(known==null){
-            String ids=String.join(",",accepted);pendingModGroups.put(ids+":"+message.protect(),new ProNetwork.ModGroup(message.session(),ids,message.returns(),message.protect()));
+            String key=message.ids()+":"+message.protect();ProNetwork.ModGroup previous=pendingModGroups.get(key);
+            if(previous==null||previous.generation()<=message.generation())pendingModGroups.put(key,message);
             return;
         }
+        Set<String> denied=new LinkedHashSet<>();for(String raw:message.ids().split(",")){String id=raw.trim().toLowerCase(Locale.ROOT);if(!accepted.contains(id))denied.add(id);}
+        if(!denied.isEmpty())ProNetwork.modGroupResult(new ProNetwork.ModGroup(message.session(),message.generation(),String.join(",",denied),message.returns(),message.protect()),"FINAL=REJECTED;LOCAL_AUTHORIZATION_REQUIRED");
+        if(accepted.isEmpty())return;
         installControls();
-        ClientModGroups.apply(new ProNetwork.ModGroup(message.session(),String.join(",",accepted),message.returns(),message.protect()),true);
+        ClientModGroups.apply(new ProNetwork.ModGroup(message.session(),message.generation(),String.join(",",accepted),message.returns(),message.protect()),true);
     }
 
     /** Runs on the client thread and invalidates all connection-owned state on transport replacement. */
@@ -145,6 +149,11 @@ public final class ClientPresence {
         presentationWatches.clear();watches.clear();
     }
     private static boolean current(Object source) { context();return source!=null&&source==connection; }
+    static boolean modGroupScope(Object source,UUID session) {
+        Minecraft mc=Minecraft.getInstance();
+        return mc.isSameThread()&&source!=null&&source==connection&&mc.getConnection()!=null
+                &&mc.getConnection().getConnection()==source&&Objects.equals(policy.session(),session);
+    }
     private static Challenge challenge(ProNetwork.Probe p) { return new Challenge(p.session(),p.operation(),p.challenge()); }
     private static boolean retire(Challenge old) {
         if(retiredChallenges.contains(old))return true;
@@ -296,6 +305,13 @@ public final class ClientPresence {
             if(absorption!=null)localBodies.put(absorption,body);
             if(!BackingPolicy.captureHealthStorage(entity,raw.pro$data()))LOG.log(System.Logger.Level.WARNING,"CLIENT_LIFE_STORAGE_CAPTURE_INCOMPLETE");
         }
+    }
+    static boolean bindGroupBody(Entity entity) {
+        if(!(entity instanceof net.minecraft.world.entity.LivingEntity))return true;
+        if(localBodies.get(entity)==null)bindLocal(entity);
+        var raw=(Access.EntityState)entity;LocalBody body=localBodies.get(entity);
+        if(body==null||body.entity().get()!=entity||!currentBody(body)||body.data().get()!=raw.pro$data())return false;
+        return BackingPolicy.captureHealthStorage(entity,raw.pro$data());
     }
     private static void removeLocal(Object entity) {
         synchronized(localBodies) {localBodies.entrySet().removeIf(entry->entry.getKey()==entity||entry.getValue().entity().get()==entity);}
@@ -493,12 +509,16 @@ public final class ClientPresence {
             mc.hitResult=net.minecraft.world.phys.BlockHitResult.miss(hit.getLocation(),net.minecraft.core.Direction.UP,BlockPos.containing(hit.getLocation()));
         // Minecraft.player remains owned by the actual respawn/disconnect handoff; presence includes that root.
     }
-    static void retireGroupBody(Entity entity){
-        Minecraft mc=context();var raw=(Access.EntityState)entity;
-        if(mc.level==null||raw.pro$level()!=mc.level||entity==mc.player)return;
-        var level=mc.level;Entity originalVehicle=raw.pro$vehicle();List<Entity> originalPassengers=List.copyOf(raw.pro$passengers());
+    static final class GroupRetirement {
+        final Entity entity,vehicle;final ClientLevel level;final List<Entity> passengers;boolean lifecycleAttempted;
+        GroupRetirement(Entity entity){var raw=(Access.EntityState)entity;this.entity=entity;level=raw.pro$level() instanceof ClientLevel client?client:null;vehicle=raw.pro$vehicle();passengers=List.copyOf(raw.pro$passengers());}
+    }
+    static void retireGroupBody(GroupRetirement retirement){
+        Entity entity=retirement.entity;Minecraft mc=context();var raw=(Access.EntityState)entity;
+        if(mc.level==null||mc.level!=retirement.level||raw.pro$level()!=retirement.level||entity==mc.player)return;
+        var level=retirement.level;Entity originalVehicle=retirement.vehicle;List<Entity> originalPassengers=retirement.passengers;
         List<Throwable> failures=new ArrayList<>();removeLocal(entity);
-        clientGroupStep(failures,()->{if(level.getEntity(raw.pro$id())==entity)level.removeEntity(raw.pro$id(),Entity.RemovalReason.DISCARDED);});
+        clientGroupStep(failures,()->{if(!retirement.lifecycleAttempted&&level.getEntity(raw.pro$id())==entity){retirement.lifecycleAttempted=true;level.removeEntity(raw.pro$id(),Entity.RemovalReason.DISCARDED);}});
         // Each real store is independent of a throwing target lifecycle or a
         // damaged neighboring structure. Keep the original opposite edges.
         clientGroupStep(failures,()->{

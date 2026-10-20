@@ -1,6 +1,7 @@
 /* Companion to AuditFixCheck. Exercise production Host code against this
  * fixture DLL's real import table and real Windows children. The source/image
  * registration is fixture-owned; this does not certify game library discovery. */
+#ifndef RONOVA_LIVE_JNI_ONLY
 #define JNI_OnLoad audit_backend_on_load
 #define Agent_OnLoad audit_backend_agent_load
 #define Agent_OnUnload audit_backend_agent_unload
@@ -100,6 +101,148 @@ static void audit_physical_failure(JNIEnv *env,const char *message){
     jclass type=(*env)->FindClass(env,"java/lang/AssertionError");
     if(type){(*env)->ThrowNew(env,type,message);(*env)->DeleteLocalRef(env,type);}
 }
+#else
+#include <jni.h>
+#include <jvmti.h>
+#include <windows.h>
+#include <stdint.h>
+#include <string.h>
+JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM *vm,void *reserved){(void)vm;(void)reserved;return JNI_VERSION_1_8;}
+static void audit_physical_failure(JNIEnv *env,const char *message){
+    if((*env)->ExceptionCheck(env))return;
+    jclass type=(*env)->FindClass(env,"java/lang/AssertionError");
+    if(type){(*env)->ThrowNew(env,type,message);(*env)->DeleteLocalRef(env,type);}
+}
+#endif
+
+/* This entry runs only under the already installed production premain backend,
+ * in a separate JVM. It supplies no Owner, table identity or controller state.
+ * The bare system export deliberately simulates a saved native write path so
+ * the subsequent real guarded JNI lookup must repair actual table damage. */
+typedef BOOL (WINAPI *AuditJniProtect)(LPVOID,SIZE_T,DWORD,PDWORD);
+static AuditJniProtect audit_jni_real_protect(void){
+    HMODULE image=GetModuleHandleW(L"kernelbase.dll");if(!image)return NULL;
+    uintptr_t base=(uintptr_t)image;const IMAGE_DOS_HEADER *dos=(const IMAGE_DOS_HEADER*)image;
+    if(dos->e_magic!=IMAGE_DOS_SIGNATURE||dos->e_lfanew<=0||dos->e_lfanew>0x100000)return NULL;
+    const IMAGE_NT_HEADERS64 *nt=(const IMAGE_NT_HEADERS64*)(base+(uintptr_t)dos->e_lfanew);
+    if(nt->Signature!=IMAGE_NT_SIGNATURE||nt->OptionalHeader.Magic!=IMAGE_NT_OPTIONAL_HDR64_MAGIC)return NULL;
+    DWORD size=nt->OptionalHeader.SizeOfImage;IMAGE_DATA_DIRECTORY directory=nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_EXPORT];
+    if(directory.Size<sizeof(IMAGE_EXPORT_DIRECTORY)||directory.VirtualAddress>size||directory.Size>size-directory.VirtualAddress)return NULL;
+    const IMAGE_EXPORT_DIRECTORY *exports=(const IMAGE_EXPORT_DIRECTORY*)(base+directory.VirtualAddress);
+    if(exports->AddressOfNames>size||exports->NumberOfNames>(size-exports->AddressOfNames)/sizeof(DWORD)
+            ||exports->AddressOfNameOrdinals>size||exports->NumberOfNames>(size-exports->AddressOfNameOrdinals)/sizeof(WORD)
+            ||exports->AddressOfFunctions>size||exports->NumberOfFunctions>(size-exports->AddressOfFunctions)/sizeof(DWORD))return NULL;
+    const DWORD *names=(const DWORD*)(base+exports->AddressOfNames),*functions=(const DWORD*)(base+exports->AddressOfFunctions);
+    const WORD *ordinals=(const WORD*)(base+exports->AddressOfNameOrdinals);
+    for(DWORD i=0;i<exports->NumberOfNames;i++){
+        if(names[i]>=size||sizeof("VirtualProtect")>size-names[i]||memcmp((void*)(base+names[i]),"VirtualProtect",sizeof("VirtualProtect")))continue;
+        if(ordinals[i]>=exports->NumberOfFunctions)return NULL;DWORD target=functions[ordinals[i]];
+        if(!target||target>=size||(target>=directory.VirtualAddress&&target-directory.VirtualAddress<directory.Size))return NULL;
+        return (AuditJniProtect)(base+target);
+    }
+    return NULL;
+}
+typedef struct AuditJniPermission {void *address;SIZE_T length;DWORD previous;int changed;} AuditJniPermission;
+static int audit_jni_open(AuditJniProtect protect,const void *table,DWORD protection,AuditJniPermission *regions,unsigned *count){
+    uintptr_t at=(uintptr_t)table,last=at+sizeof(struct JNINativeInterface_);*count=0;
+    if(!protect||!at||last<at)return 0;
+    while(at<last){MEMORY_BASIC_INFORMATION memory;
+        if(*count==4||!VirtualQuery((void*)at,&memory,sizeof(memory))||memory.State!=MEM_COMMIT
+                ||(memory.Protect&(PAGE_GUARD|PAGE_NOACCESS))||memory.RegionSize>UINTPTR_MAX-(uintptr_t)memory.BaseAddress)return 0;
+        uintptr_t end=(uintptr_t)memory.BaseAddress+memory.RegionSize;if(end>last)end=last;if(end<=at)return 0;
+        AuditJniPermission *region=&regions[(*count)++];region->address=(void*)at;region->length=end-at;region->changed=0;
+        if(!protect(region->address,region->length,protection,&region->previous))return 0;region->changed=1;at=end;
+    }
+    return 1;
+}
+static int audit_jni_close(AuditJniProtect protect,AuditJniPermission *regions,unsigned count){
+    int valid=1;for(unsigned i=count;i>0;i--){AuditJniPermission *region=&regions[i-1];DWORD ignored=0;
+        if(region->changed&&!protect(region->address,region->length,region->previous,&ignored))valid=0;}
+    return valid;
+}
+static jint (JNICALL *audit_jni_version_original)(JNIEnv*);
+static jint JNICALL audit_jni_version(JNIEnv *env){return audit_jni_version_original(env);}
+static jmethodID JNICALL audit_jni_bad_method(JNIEnv *env,jclass type,const char *name,const char *descriptor){
+    (void)env;(void)type;(void)name;(void)descriptor;return NULL;
+}
+static jfieldID JNICALL audit_jni_bad_field(JNIEnv *env,jclass type,const char *name,const char *descriptor){
+    (void)env;(void)type;(void)name;(void)descriptor;return NULL;
+}
+JNIEXPORT jboolean JNICALL Java_dev_ronova_pro_AuditFixCheck_jniLiveTable0(JNIEnv *env,jclass check){
+    JavaVM *vm=NULL;jvmtiEnv *api=NULL;jniNativeInterface *copy=NULL,*published=NULL;
+    struct JNINativeInterface_ before=**env;struct JNINativeInterface_ *table=(struct JNINativeInterface_*)*env;
+    AuditJniProtect protect=audit_jni_real_protect();AuditJniPermission regions[4];unsigned count=0;
+    AuditJniPermission readonlyRegions[4];unsigned readonlyCount=0;
+    const char *failure=NULL;int changed=0,versionChanged=0;
+#define JNI_LIVE_REQUIRE(test,message) do{if(!(test)){failure=(message);goto jni_live_done;}}while(0)
+    JNI_LIVE_REQUIRE(protect&&before.GetVersion&&before.GetMethodID&&before.GetFieldID&&before.GetStaticMethodID,"JNI_LIVE_REAL_ENTRIES_REQUIRED");
+    JNI_LIVE_REQUIRE((*env)->GetJavaVM(env,&vm)==JNI_OK&&vm
+            &&(*vm)->GetEnv(vm,(void**)&api,JVMTI_VERSION_1_2)==JNI_OK&&api,"JNI_LIVE_REAL_JVMTI_REQUIRED");
+    JNIEnv *observed=NULL;
+    JNI_LIVE_REQUIRE((*vm)->GetEnv(vm,(void**)&observed,JNI_VERSION_1_8)==JNI_OK&&observed==env,"JNI_LIVE_CURRENT_ENV_IDENTITY");
+    JNI_LIVE_REQUIRE((*api)->GetJNIFunctionTable(api,&copy)==JVMTI_ERROR_NONE&&copy&&(const void*)copy!=(const void*)table,"JNI_LIVE_SNAPSHOT_IS_NOT_ACTIVE_TABLE");
+    audit_jni_version_original=before.GetVersion;copy->GetVersion=audit_jni_version;
+    versionChanged=1;JNI_LIVE_REQUIRE((*api)->SetJNIFunctionTable(api,copy)==JVMTI_ERROR_NONE,"JNI_LIVE_LEGAL_UNGUARDED_PUBLICATION");
+    JNI_LIVE_REQUIRE((*env)->GetVersion==audit_jni_version&&(*env)->GetVersion(env)==before.GetVersion(env),"JNI_LIVE_UNGUARDED_ORIGINAL_RESULT");
+    DWORD old=0;SetLastError(0);
+    BOOL protectedEnv=VirtualProtect(env,sizeof(*env),PAGE_READWRITE,&old);DWORD envError=GetLastError();
+    if(protectedEnv){DWORD ignored=0;protect(env,sizeof(*env),old,&ignored);}
+    JNI_LIVE_REQUIRE(!protectedEnv&&envError==ERROR_ACCESS_DENIED,"JNI_LIVE_ENV_SLOT_VIRTUALPROTECT_NOT_REFUSED");
+    SetLastError(0);BOOL protectedTable=VirtualProtect(table,sizeof(*table),PAGE_READWRITE,&old);DWORD tableError=GetLastError();
+    if(protectedTable){DWORD ignored=0;protect(table,sizeof(*table),old,&ignored);}
+    JNI_LIVE_REQUIRE(!protectedTable&&tableError==ERROR_ACCESS_DENIED,"JNI_LIVE_FULL_TABLE_VIRTUALPROTECT_NOT_REFUSED");
+    void *tail=(unsigned char*)table+sizeof(*table)-1;SetLastError(0);
+    BOOL protectedTail=VirtualProtect(tail,1,PAGE_READWRITE,&old);DWORD tailError=GetLastError();
+    if(protectedTail){DWORD ignored=0;protect(tail,1,old,&ignored);}
+    JNI_LIVE_REQUIRE(!protectedTail&&tailError==ERROR_ACCESS_DENIED,"JNI_LIVE_TABLE_TAIL_VIRTUALPROTECT_NOT_REFUSED");
+    SIZE_T written=0;uintptr_t word=0;memcpy(&word,(unsigned char*)table+sizeof(*table)-sizeof(word),sizeof(word));SetLastError(0);
+    BOOL write=WriteProcessMemory(GetCurrentProcess(),(unsigned char*)table+sizeof(*table)-sizeof(word),&word,sizeof(word),&written);
+    JNI_LIVE_REQUIRE(!write&&!written&&GetLastError()==ERROR_ACCESS_DENIED,"JNI_LIVE_TABLE_TAIL_WRITE_NOT_REFUSED");
+    int opened=audit_jni_open(protect,table,PAGE_READWRITE,regions,&count);
+    if(!opened){audit_jni_close(protect,regions,count);count=0;failure="JNI_LIVE_FORCE_WRITE_PAGE_OPEN";goto jni_live_done;}
+    InterlockedExchangePointer((void *volatile*)&table->GetMethodID,(void*)audit_jni_bad_method);
+    InterlockedExchangePointer((void *volatile*)&table->GetFieldID,(void*)audit_jni_bad_field);changed=1;
+    JNI_LIVE_REQUIRE(audit_jni_close(protect,regions,count),"JNI_LIVE_FORCE_WRITE_PAGE_RESTORE");count=0;
+    JNI_LIVE_REQUIRE(table->GetMethodID==audit_jni_bad_method&&table->GetFieldID==audit_jni_bad_field,"JNI_LIVE_FORCE_WRITE_NOT_OBSERVED");
+    /* A real old-protect restore may leave the global table RO. This is the
+     * exact restore/publication handoff which previously could crash HotSpot. */
+    JNI_LIVE_REQUIRE(audit_jni_open(protect,table,PAGE_READONLY,readonlyRegions,&readonlyCount),"JNI_LIVE_READONLY_TABLE_SETUP");
+    jmethodID boundary=(*env)->GetStaticMethodID(env,check,"jniLiveBoundary","()I");
+    JNI_LIVE_REQUIRE(boundary&&!(*env)->ExceptionCheck(env),"JNI_LIVE_GUARDED_LOOKUP_FAILED");
+    JNI_LIVE_REQUIRE((*env)->CallStaticIntMethod(env,check,boundary)==73&&!(*env)->ExceptionCheck(env),"JNI_LIVE_GUARDED_RESULT_CHANGED");
+    JNI_LIVE_REQUIRE((*env)->GetMethodID==before.GetMethodID&&(*env)->GetFieldID==before.GetFieldID
+            &&(*env)->GetVersion==audit_jni_version,"JNI_LIVE_CONTROLLED_REPAIR_OR_UNGUARDED_PRESERVATION");
+    MEMORY_BASIC_INFORMATION after;
+    JNI_LIVE_REQUIRE(VirtualQuery(table,&after,sizeof(after))&&after.Protect==PAGE_READONLY,"JNI_LIVE_PUBLICATION_DID_NOT_RESTORE_RO");
+    JNI_LIVE_REQUIRE((*api)->GetJNIFunctionTable(api,&published)==JVMTI_ERROR_NONE&&published
+            &&published->GetMethodID==before.GetMethodID&&published->GetFieldID==before.GetFieldID
+            &&published->GetVersion==audit_jni_version,"JNI_LIVE_REPAIRED_TABLE_NOT_PUBLISHED");
+jni_live_done:
+    /* Restore permissions and selected actual pointers even after a failed
+     * assertion. No old full-table snapshot overwrites unrelated agent slots. */
+    jthrowable pending=before.ExceptionOccurred(env);if(pending)before.ExceptionClear(env);
+    if(count&&protect){if(!audit_jni_close(protect,regions,count)&&!failure)failure="JNI_LIVE_FINAL_PAGE_RESTORE";count=0;}
+    if(readonlyCount&&protect&&!audit_jni_close(protect,readonlyRegions,readonlyCount)&&!failure)failure="JNI_LIVE_FINAL_RO_RESTORE";
+    if(changed&&protect){
+        int opened=audit_jni_open(protect,table,PAGE_READWRITE,regions,&count);
+        if(opened){InterlockedExchangePointer((void *volatile*)&table->GetMethodID,(void*)before.GetMethodID);
+            InterlockedExchangePointer((void *volatile*)&table->GetFieldID,(void*)before.GetFieldID);}
+        if((!audit_jni_close(protect,regions,count)||!opened)&&!failure)failure="JNI_LIVE_FINAL_POINTER_RESTORE";
+    }
+    if(published&&api)(*api)->Deallocate(api,(unsigned char*)published);
+    if(copy&&api)(*api)->Deallocate(api,(unsigned char*)copy);copy=NULL;
+    if(versionChanged&&api){
+        if((*api)->GetJNIFunctionTable(api,&copy)!=JVMTI_ERROR_NONE||!copy){if(!failure)failure="JNI_LIVE_FINAL_SNAPSHOT";}
+        else {copy->GetVersion=before.GetVersion;if((*api)->SetJNIFunctionTable(api,copy)!=JVMTI_ERROR_NONE&&!failure)failure="JNI_LIVE_FINAL_UNGUARDED_RESTORE";
+            (*api)->Deallocate(api,(unsigned char*)copy);}
+    }
+    if(api&&(*api)->DisposeEnvironment(api)!=JVMTI_ERROR_NONE&&!failure)failure="JNI_LIVE_FINAL_ENV_DISPOSE";
+    if(pending){before.Throw(env,pending);before.DeleteLocalRef(env,pending);}
+    if(failure)audit_physical_failure(env,failure);
+#undef JNI_LIVE_REQUIRE
+    return failure?JNI_FALSE:JNI_TRUE;
+}
+#ifndef RONOVA_LIVE_JNI_ONLY
 JNIEXPORT void JNICALL Java_dev_ronova_pro_AuditFixCheck_physicalStop0(JNIEnv *env,jclass type){
     (void)type;
     NativeToolingEnv *tooling=native_ti?native_tooling_environment(native_ti):NULL;
@@ -1592,3 +1735,4 @@ custom_done:
 #undef CUSTOM_REQUIRE
     return failure?JNI_FALSE:JNI_TRUE;
 }
+#endif /* !RONOVA_LIVE_JNI_ONLY */

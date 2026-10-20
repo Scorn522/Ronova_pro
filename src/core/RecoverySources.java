@@ -870,6 +870,7 @@ public final class RecoverySources implements AutoCloseable {
             if(cursor.mixedContents){cursor.filteringContents=true;cursor.mapCursor=new SourceMaps.Cursor(map);return;}
             if(!SourceMaps.clearPrivate(cursor.mapCursor,cursor.value,runtime,authority))throw new IOException("GROUP_PRIVATE_CONTAINER_CHANGED_OR_BUSY");
         }
+        if(cursor.mapCursor.complete&&!cursor.mapCursor.gap.isEmpty())walk.gap=walk.containerGap=cursor.mapCursor.gap;
         if(cursor.mapCursor.complete)walk.current=null;
     }
     private int retireArray(GroupWalk walk,ProRuntime.Subject authority,int limit)throws IOException,ReflectiveOperationException {

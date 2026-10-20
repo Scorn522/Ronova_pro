@@ -1371,7 +1371,7 @@ public final class ControlBridge {
     static boolean ownState(Class<?> declaring) {
         if(declaring==null)return false;Class<?> host=declaring.getClassLoader()==null?declaring.getNestHost():declaring;Guards current=guards;
         if(host==TaskBridge.class||host==BackingBridge.class||host==CarrierBridge.class||host==SourceMapBridge.class||host==NativeControl.class||host==DefinitionBridge.class||host==ResourceBridge.class||host==IoBridge.class||host==CodeSourceBridge.class||host==NetworkBridge.class||host==ClientBridge.class
-                ||host==EventFaultBridge.class||host==ControlBridge.class||host==ExecutionFlow.class||host==NetworkCleanup.class||host==PlatformMetadata.class)return true;
+                ||host==EventFaultBridge.class||host==EventBusBridge.class||host==ControlBridge.class||host==ExecutionFlow.class||host==NetworkCleanup.class||host==PlatformMetadata.class)return true;
         if(ControlBridge.owns(declaring))return true;
         return current!=null&&DefinitionBridge.module(declaring)==current.owner().getModule()&&declaring.getClassLoader()==current.owner().getClassLoader()&&declaring.getName().startsWith("dev.ronova.pro.");
     }
@@ -1398,10 +1398,10 @@ public final class ControlBridge {
         // A Class mirror also holds Class's own instance cache, separately
         // from the represented declaration and its static business fields.
         // Admit only its real JDK CAS, never an arbitrary write to that mirror.
-        if(!ORIGIN_WALKER.walk(CLASS_REFLECTION_WRITER))return false;
         var field=ResourceBridge.exactField(receiver,offset,width);
         return field!=null&&field.getDeclaringClass()==Class.class&&!java.lang.reflect.Modifier.isStatic(field.getModifiers())
-                &&field.getName().equals("reflectionData")&&field.getType()==java.lang.ref.SoftReference.class;
+                &&field.getName().equals("reflectionData")&&field.getType()==java.lang.ref.SoftReference.class
+                &&ORIGIN_WALKER.walk(CLASS_REFLECTION_WRITER);
     }
     public static boolean networkRetirementWriteAllowed(Object receiver,long offset,Object value,String kind){
         return NetworkBridge.retirementWriteAllowed(receiver,offset,value,ResourceBridge.unsafeWidth(kind));
@@ -1411,7 +1411,14 @@ public final class ControlBridge {
     }
     public static boolean networkRetirementActive(){return NetworkBridge.retirementActive();}
     static boolean unsafeWriteAllowed(Object receiver,long offset,Object value,int resourceWidth) {
+        if(EventBusBridge.restoreWrite(receiver,offset,value,resourceWidth))return true;
         if(!PlatformMetadata.memoryMutationAllowed(receiver))return false;
+        if(!EventBusBridge.memoryAllowed(receiver,offset,resourceWidth))return false;
+        boolean reflectionCache=false;
+        if(receiver instanceof Class<?> mirror&&!ResourceBridge.mirrorStaticRange(mirror,offset,resourceWidth)){
+            reflectionCache=classReflectionWrite(receiver,offset,resourceWidth);
+            if(!reflectionCache)return false;
+        }
         if(receiver!=null&&value==null&&stoppedModules.length!=0){
             var exact=ResourceBridge.exactField(receiver,offset,resourceWidth);
             if(exact!=null&&commandRetirementWrite(receiver,exact.getDeclaringClass(),exact.getName(),value))return true;
@@ -1425,7 +1432,6 @@ public final class ControlBridge {
                 &&!ResourceBridge.unsafeMutationAllowed(receiver,offset,resourceWidth))return false;
         boolean targetStopped=modStopped(objectModule(receiver));
         boolean ownMirror=receiver instanceof Class<?> owner&&ownState(owner);
-        boolean reflectionCache=receiver instanceof Class<?>&&(targetStopped||ownMirror||modProtected(objectModule(receiver)))&&classReflectionWrite(receiver,offset,resourceWidth);
         if(!reflectionCache&&!protectedMutationAllowed(receiver,receiver instanceof Class<?> type?type:receiver==null?null:receiver.getClass()))return false;
         // Stopping a represented class must not turn Class.newReflectionData's
         // own cache CAS into a permanently false retry. Its exact JDK/instance
@@ -1470,6 +1476,9 @@ public final class ControlBridge {
     }
     public static boolean unsafeMemoryAllowed(Object receiver,long offset,long length) {
         if(!PlatformMetadata.memoryMutationAllowed(receiver))return false;
+        if(!EventBusBridge.memoryAllowed(receiver,offset,length))return false;
+        // Bulk writes can never be Class.newReflectionData's exact reference CAS.
+        if(receiver instanceof Class<?> mirror&&!ResourceBridge.mirrorStaticRange(mirror,offset,length))return false;
         if(!protectedMutationAllowed(receiver,receiver instanceof Class<?> type?type:receiver==null?null:receiver.getClass()))return false;
         if(!CodeSourceBridge.fieldRangeAllowed(receiver,offset,length)&&!coreWriter())return false;
         if(!ResourceBridge.unsafeMutationAllowed(receiver,offset,length))return false;
@@ -1744,6 +1753,7 @@ public final class ControlBridge {
         if(modProtected(owner)||modStopped(owner)||modProtected(declaration)||modStopped(declaration)
                 ||stoppedInvocation())return true;
         if(PlatformMetadata.structure(target,declaring))return true;
+        if(EventBusBridge.structure(target,declaring))return true;
         Guards current=guards;
         if(current!=null)for(UnsafeField field:current.unsafeFields())
             if(field.declaring().isInstance(target))return true;
@@ -2198,6 +2208,7 @@ public final class ControlBridge {
     }
     private static boolean fieldWriteAllowed(Object receiver,Class<?> declaring,String name,Object value,Module owner,boolean ownerResolved) {
         if(!PlatformMetadata.fieldMutationAllowed(receiver,declaring,name))return false;
+        if(!EventBusBridge.fieldAllowed(declaring,name))return false;
         if(commandRetirementWrite(receiver,declaring,name,value))return true;
         if(CodeSourceBridge.fieldGateMetadata(receiver))return fieldGateMutationAllowed();
         if(!(ownerResolved?protectedMutationAllowed(receiver,declaring,owner):protectedMutationAllowed(receiver,declaring)))return false;
@@ -2226,6 +2237,7 @@ public final class ControlBridge {
     }
     public static boolean reflectFieldWrite(java.lang.reflect.Field field,Object receiver,Object value) {
         if(!PlatformMetadata.fieldMutationAllowed(receiver,field.getDeclaringClass(),field.getName()))return false;
+        if(!EventBusBridge.fieldAllowed(field.getDeclaringClass(),field.getName()))return false;
         if(java.lang.reflect.Modifier.isStatic(field.getModifiers()))receiver=field.getDeclaringClass();
         if(commandRetirementWrite(receiver,field.getDeclaringClass(),field.getName(),value))return true;
         if(CodeSourceBridge.fieldGateMetadata(receiver))return fieldGateMutationAllowed();

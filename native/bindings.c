@@ -61,7 +61,8 @@ typedef struct NativeThread {
     struct HostModuleRelease *hostRelease;
     unsigned callbackHolds,vmDetaching,vmThreadEnding;
     int storageOwned,vmAttached,javaEnded,javaCleaning;
-    NativePrivateRange jniRange;
+    NativePrivateRange jniRange,jniTableRange;
+    struct NativeThread *jniNext;int jniLinked;unsigned jniObserving,jniSynchronizing;
 } NativeThread;
 /* Actual dynamic TLS/FLS receipts are native state contributions, independent
  * of whether this OS thread currently has a Java attachment. */
@@ -175,6 +176,9 @@ static void host_module_binding_leave(Binding*);
 static int host_capture_caller(NativeThread*,void*,OwnerLink**);
 static HMODULE native_control_image(void);
 static int native_control_range(uintptr_t,uintptr_t,int);
+static int native_jni_checkpoint(NativeThread*,JNIEnv*,int);
+static int native_jni_synchronize(NativeThread*,JNIEnv*);
+static void native_jni_thread_end(NativeThread*);
 static int native_platform_range(uintptr_t,uintptr_t,int);
 static size_t native_platform_env_span(jvmtiEnv*);
 static BOOL host_real_virtual_protect(LPVOID,SIZE_T,DWORD,PDWORD);
@@ -194,9 +198,8 @@ static int native_thread_jni_observed(NativeThread *state,JNIEnv *env){
     if(!env)return 0;if(!state)state=native_thread();if(!state){InterlockedIncrement(&native_failures);return 0;}
     /* The VM attachment is real even when its exact slot cannot be retained. */
     native_thread_java_observed(state);
-    if(state->jniRange.linked&&state->jniRange.address!=(const void*)env)native_private_unregister(&state->jniRange);
-    if(!native_private_register(&state->jniRange,env,sizeof(*env))){InterlockedIncrement(&native_failures);return 0;}
-    return 1;
+    int observed=native_jni_checkpoint(state,env,0);
+    if(!observed)InterlockedIncrement(&native_failures);return observed;
 }
 static void native_thread_callback_enter(NativeThread *state){state->callbackHolds++;}
 static void native_refuse(JNIEnv *env,const char *message){
@@ -238,9 +241,11 @@ static int native_caller_stopped(void *address){
 }
 static int native_stopped(JNIEnv *env){
     NativeThread *state=native_thread();OwnerLink *retained=NULL;
+    if(state&&env&&(!native_thread_jni_observed(state,env)
+            ||(!state->control&&!state->sourceCapture&&!native_jni_synchronize(state,env))))return 1;
     int captured=host_tls_capture(state,&retained,NULL),stopped=!captured||native_owner_stopped(retained)!=NULL;
     native_owner_links_free(retained);if(stopped)return 1;
-    if(!state)return 0;if(env)native_thread_jni_observed(state,env);
+    if(!state)return 0;
     for(unsigned i=0;i<state->depth;i++)if(native_owner_stopped(state->stack[i]->owners))return 1;
     for(NativeLibraryScope *scope=state->library;scope;scope=scope->previous)if(native_owner_stopped(scope->library->owners))return 1;
     for(NativeToolingScope *scope=state->tooling;scope;scope=scope->previous)if(native_owner_stopped(scope->owners))return 1;
@@ -270,7 +275,8 @@ JNIEXPORT jboolean JNICALL Java_dev_ronova_pro_bootstrap_NativeControl_sourceCap
 }
 static uint64_t native_enter(JNIEnv *env,jobject receiver,Binding *binding,unsigned char *frame) {
     NativeThread *state=native_thread();if(!state||state->depth==128){native_refuse(env,"RONOVA_NATIVE_SCOPE_CAPACITY");return 0;}
-    native_thread_jni_observed(state,env);
+    if(!native_thread_jni_observed(state,env)
+            ||(!state->control&&!state->sourceCapture&&!native_jni_synchronize(state,env))){native_refuse(env,"RONOVA_JNI_TABLE_CONTROL_UNAVAILABLE");return 0;}
     if(binding->fileOperation)memset(&state->fileFrames[state->depth],0,sizeof(NativeFileFrame));
     if(binding->threadOperation)memset(&state->threadFrames[state->depth],0,sizeof(NativeThreadFrame));
     // Controller JNI work already has its exact native control scope. Its own
@@ -1041,7 +1047,7 @@ static void JNICALL native_nonvirtualVoid(JNIEnv *env,jobject object,jclass type
 static void JNICALL native_nonvirtualVoidV(JNIEnv *env,jobject object,jclass type,jmethodID method,va_list args){if(native_stopped(env)){native_refuse(env,"RONOVA_STOPPED_NATIVE_CALLBACK");return;}native_original.CallNonvirtualVoidMethodV(env,object,type,method,args);}
 static void JNICALL native_nonvirtualVoidA(JNIEnv *env,jobject object,jclass type,jmethodID method,const jvalue *args){if(native_stopped(env)){native_refuse(env,"RONOVA_STOPPED_NATIVE_CALLBACK");return;}native_original.CallNonvirtualVoidMethodA(env,object,type,method,args);}
 static int native_thread_java_pending(const NativeThread *state){
-    if(state->vmAttached||state->javaCleaning||state->vmDetaching||state->vmThreadEnding
+    if(state->vmAttached||state->javaCleaning||state->vmDetaching||state->vmThreadEnding||state->jniObserving||state->jniSynchronizing
             ||state->depth||state->execution||state->memoryWrite||state->filePermit||state->threadPermit
             ||state->defined||state->prepared||state->changedClass||state->created||state->mutation
             ||state->popped||state->changedHolder||state->bufferAddress||state->bufferSources||state->unobservedLibrary
@@ -1067,7 +1073,7 @@ static int native_thread_module_exit_reaped(NativeThread *state){
             ||state->heapCallback||state->heapWorkerAnchor||state->toolingCallbackEnvironment||state->toolingImage
             ||state->control||state->sourceCapture||state->unsafeInstalling||state->unsafeInstall||state->bufferAllocation
             ||native_thread_java_pending(state))return 0;
-    native_private_unregister(&state->jniRange);SecureZeroMemory(state,sizeof(*state));free(state);return 1;
+    native_jni_thread_end(state);SecureZeroMemory(state,sizeof(*state));free(state);return 1;
 }
 static void native_thread_java_end(JNIEnv *env,NativeThread *state){
     if(state->javaCleaning)return;state->javaCleaning=1;state->javaEnded=1;
@@ -1091,7 +1097,7 @@ static void native_thread_java_end(JNIEnv *env,NativeThread *state){
     native_memory_thread_end(env,state);
     state->defined=state->prepared=state->changedClass=NULL;
     state->created=state->mutation=state->popped=state->changedHolder=state->bufferAddress=state->unobservedLibrary=NULL;
-    state->bufferSources=NULL;state->vmAttached=0;state->javaCleaning=0;native_private_unregister(&state->jniRange);
+    state->bufferSources=NULL;state->vmAttached=0;state->javaCleaning=0;native_jni_thread_end(state);
 }
 static void native_thread_native_end(NativeThread *state){
     while(state->library){NativeLibraryScope *scope=state->library;state->library=scope->previous;
@@ -1106,7 +1112,7 @@ static void native_thread_try_release(NativeThread *state){
     if(native_tls!=TLS_OUT_OF_INDEXES&&(NativeThread*)TlsGetValue(native_tls)==state&&!TlsSetValue(native_tls,NULL)){
         InterlockedIncrement(&native_failures);return;
     }
-    native_thread_native_end(state);native_private_unregister(&state->jniRange);SecureZeroMemory(state,sizeof(*state));free(state);
+    native_thread_native_end(state);native_jni_thread_end(state);SecureZeroMemory(state,sizeof(*state));free(state);
 }
 static void native_thread_callback_leave(NativeThread *state){
     if(!state||!state->callbackHolds){InterlockedIncrement(&native_failures);return;}
@@ -1123,7 +1129,7 @@ static int native_thread_worker_os_end(JNIEnv *env,NativeThread *state){
             ||state->toolingCallbackEnvironment||state->toolingImage||!host_thread_worker_scope_idle(state)
             ||state->control||state->sourceCapture||state->unsafeInstalling||state->bufferAllocation
             ||native_thread_java_pending(state))return 0;
-    state->hostWorker=NULL;native_private_unregister(&state->jniRange);SecureZeroMemory(state,sizeof(*state));free(state);return 1;
+    state->hostWorker=NULL;native_jni_thread_end(state);SecureZeroMemory(state,sizeof(*state));free(state);return 1;
 }
 static void JNICALL native_thread_start(jvmtiEnv *api,JNIEnv *env,jthread thread){
     (void)api;(void)env;(void)thread;
@@ -1232,6 +1238,7 @@ static int native_tooling_restricted(void){
     NativeThread *state=native_tls==TLS_OUT_OF_INDEXES?NULL:(NativeThread*)TlsGetValue(native_tls);
     return state&&(state->heapCallback||state->toolingRestricted);
 }
+#include "jni_tables.c"
 static JNIEnv *native_tooling_jni(void){
     if(native_tooling_restricted())return NULL;
     JNIEnv *env=NULL;
@@ -1776,8 +1783,8 @@ static jvmtiError JNICALL native_tooling_relinquish(jvmtiEnv *api,const jvmtiCap
 static jvmtiError JNICALL native_tooling_set_jni(jvmtiEnv *api,const jniNativeInterface *table){
     NativeToolingEnv *record=native_tooling_environment(api);if(!record)return native_tooling_restricted()?JVMTI_ERROR_NOT_AVAILABLE:JVMTI_ERROR_INVALID_ENVIRONMENT;
     TOOLING_USE(record);
-    void *caller=__builtin_return_address(0);
-    if(record->own&&!native_tooling_internal(caller)||native_tooling_effect_stopped(record,native_tooling_jni(),caller))return native_tooling_error(JVMTI_ERROR_ACCESS_DENIED);
+    void *caller=__builtin_return_address(0);JNIEnv *env=native_tooling_jni();
+    if(record->own&&!native_tooling_internal(caller)||native_tooling_effect_stopped(record,env,caller))return native_tooling_error(JVMTI_ERROR_ACCESS_DENIED);
     if(!table)return JVMTI_ERROR_NULL_POINTER;
     if(InterlockedCompareExchange(&native_guarded_ready,0,0)){
         jniNativeInterface incoming;SIZE_T copied=0;
@@ -1787,9 +1794,11 @@ static jvmtiError JNICALL native_tooling_set_jni(jvmtiEnv *api,const jniNativeIn
         /* The VM receives exactly the private table that passed the guard.
          * Rereading the caller's mutable table could replace a guarded slot
          * between the check above and the actual global JNI publication. */
-        return record->original->SetJNIFunctionTable(api,&incoming);
+        jvmtiError result=native_jni_publish(record,env,&incoming);
+        return result==JVMTI_ERROR_NONE?result:native_tooling_error(result);
     }
-    return record->original->SetJNIFunctionTable(api,table);
+    jvmtiError result=native_jni_publish(record,env,table);
+    return result==JVMTI_ERROR_NONE?result:native_tooling_error(result);
 }
 #include "tooling_definitions.c"
 static jvmtiError JNICALL native_tooling_generate(jvmtiEnv *api,jvmtiEvent event){
@@ -2058,7 +2067,8 @@ static int native_tooling_observe(jvmtiEnv *api,JNIEnv *env,void *caller,int own
      * disposed through its original table without notifying this directory. */
     AcquireSRWLockExclusive(&native_tooling_records);
     int installed=native_tooling_exchange((void *volatile*)api,(void*)original,shadow);
-    if(installed){record->next=native_tooling_environments;__atomic_store_n(&native_tooling_environments,record,__ATOMIC_RELEASE);}
+    if(installed){if(own)native_jni_vm_original=original;
+        record->next=native_tooling_environments;__atomic_store_n(&native_tooling_environments,record,__ATOMIC_RELEASE);}
     ReleaseSRWLockExclusive(&native_tooling_records);
     if(!installed){native_private_unregister(&record->apiRange);if(record->sourceLease)native_original.DeleteGlobalRef(env,record->sourceLease);
         native_owner_links_free(record->owners);free(record);host_real_virtual_free(shadow,0,MEM_RELEASE);return 0;}
@@ -2131,7 +2141,7 @@ static jint JNICALL native_vm_detach(JavaVM *vm){
     if(native_tooling_restricted()){SetLastError(incoming);return JNI_ERR;}
     if(state)state->vmDetaching++;SetLastError(incoming);
     jint status=native_vm_original.DetachCurrentThread(vm);DWORD error=GetLastError();
-    if(state){state->vmDetaching--;native_thread_try_release(state);}
+    if(state){if(status==JNI_OK)native_jni_thread_end(state);state->vmDetaching--;native_thread_try_release(state);}
     SetLastError(error);return status;
 }
 static jint JNICALL native_tooling_getenv(JavaVM *vm,void **result,jint version){
@@ -2201,6 +2211,8 @@ static int native_tooling_install(JavaVM *vm,jvmtiEnv *api){
 }
 static void native_tooling_retire(JNIEnv *env,jobject module){
     (void)module;
+    NativeThread *state=native_thread();
+    if(env&&state&&(!native_jni_checkpoint(state,env,1)||!native_jni_synchronize(state,env)))InterlockedIncrement(&native_tooling_failures);
     AcquireSRWLockShared(&native_tooling_records);NativeToolingEnv *records=native_tooling_environments;ReleaseSRWLockShared(&native_tooling_records);
     for(NativeToolingEnv *record=records;record;record=record->next){
         if(record->own||InterlockedCompareExchange(&record->disposed,0,0))continue;
@@ -2297,6 +2309,8 @@ static int native_bootstrap_class(JNIEnv *env,jclass type,const char *expected){
 JNIEXPORT jint JNICALL Agent_OnLoad(JavaVM *vm,char *options,void *reserved){(void)options;(void)reserved;return native_initialize(vm);}
 JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM *vm,void *reserved){(void)reserved;return native_initialize(vm)==JNI_OK?JNI_VERSION_1_8:JNI_ERR;}
 JNIEXPORT jboolean JNICALL Java_dev_ronova_pro_bootstrap_NativeControl_initialize0(JNIEnv *env,jclass type,jclass tasks,jclass definitions){
+    if(native_jni_ready){NativeThread *state=native_thread();
+        if(!state||!native_thread_jni_observed(state,env)||!native_jni_synchronize(state,env))return JNI_FALSE;}
     if(!native_bootstrap_class(env,type,"Ldev/ronova/pro/bootstrap/NativeControl;")
             ||!native_bootstrap_class(env,tasks,"Ldev/ronova/pro/bootstrap/ControlBridge;")
             ||!native_bootstrap_class(env,definitions,"Ldev/ronova/pro/bootstrap/DefinitionBridge;")
@@ -2317,6 +2331,7 @@ JNIEXPORT jboolean JNICALL Java_dev_ronova_pro_bootstrap_NativeControl_initializ
     }
     if(InterlockedCompareExchange(&native_handoff_attempted,1,0)){(*native_ti)->Deallocate(native_ti,(unsigned char*)table);return JNI_FALSE;}
     native_original=*table;
+    if(!native_jni_install_table(env)||!native_thread_jni_observed(native_thread(),env)){(*native_ti)->Deallocate(native_ti,(unsigned char*)table);return JNI_FALSE;}
     native_controller=(jclass)native_original.NewGlobalRef(env,type);native_control_gate=control;
     native_library_gate=(*env)->GetStaticMethodID(env,type,"libraryBoundaryCaller","(Ljava/lang/String;)Z");
     jclass task=(jclass)(*env)->NewGlobalRef(env,tasks),definition=(jclass)(*env)->NewGlobalRef(env,definitions);
@@ -2371,6 +2386,7 @@ JNIEXPORT jboolean JNICALL Java_dev_ronova_pro_bootstrap_NativeControl_initializ
     table->RegisterNatives=native_register;table->UnregisterNatives=native_unregister;
     table->FindClass=native_find;table->GetMethodID=native_lookup_GetMethodID;table->GetStaticMethodID=native_lookup_GetStaticMethodID;table->GetFieldID=native_lookup_GetFieldID;table->GetStaticFieldID=native_lookup_GetStaticFieldID;
     table->DefineClass=native_define;native_jni_outputs_install(table);native_guarded=*table;InterlockedExchange(&native_guarded_ready,1);jvmtiError result=(*native_ti)->SetJNIFunctionTable(native_ti,table);(*native_ti)->Deallocate(native_ti,(unsigned char*)table);InterlockedExchange(&native_jni_ready,result==JVMTI_ERROR_NONE);
+    if(result==JVMTI_ERROR_NONE&&(!native_thread_jni_observed(native_thread(),env)||!native_jni_synchronize(native_thread(),env)))return JNI_FALSE;
     if(result==JVMTI_ERROR_NONE)InterlockedExchange(&native_library_present,native_library_install(env));
     if(result==JVMTI_ERROR_NONE&&!native_unsafe_install(env))return JNI_FALSE;
     if(result==JVMTI_ERROR_NONE&&!native_arraycopy_install(env))return JNI_FALSE;

@@ -20,6 +20,7 @@ public final class ClientBridge {
     private static final Map<Key,Ref<Collection<?>>> RELOAD_LISTENERS=new HashMap<>();
     private static final Map<Key,ReloadWork> RELOAD_WORK=new HashMap<>();
     private static final Map<Key,UiFields> UI_OWNERS=new HashMap<>();
+    private static final Map<Key,UiRetirement> UI_PENDING=new HashMap<>();
     private static final ThreadLocal<UiRetirement> UI_RETIRING=new ThreadLocal<>();
     private static final String SCREEN="net.minecraft.client.gui.screens.Screen",CONTAINER="net.minecraft.client.gui.components.events.AbstractContainerEventHandler";
     private static final String WIDGET="Lnet/minecraft/client/gui/components/events/GuiEventListener;",RENDERABLE="Lnet/minecraft/client/gui/components/Renderable;";
@@ -218,9 +219,12 @@ public final class ClientBridge {
         WidgetRetirement(ScreenRegistry registry,WidgetSlot slot,Object owner,Object widget){this.registry=registry;this.slot=slot;this.owner=owner;this.widget=widget;overlayProtect(this);}
     }
     private static final class SoundStop {
-        final Object handle,channel,access;final Class<?> handleType,channelType,accessType;final Module[] modules;
-        final int source;final Object initialized,library;final Class<?> libraryType;final long context;final java.util.concurrent.atomic.AtomicBoolean stopped=new java.util.concurrent.atomic.AtomicBoolean(),deleted=new java.util.concurrent.atomic.AtomicBoolean(),requested=new java.util.concurrent.atomic.AtomicBoolean();volatile boolean shared;volatile String pending="";
-        SoundStop(Object handle,Object channel,Object access,Class<?> handleType,Class<?> channelType,Class<?> accessType,Module[] modules,int source,Object initialized,boolean shared,Object library,Class<?> libraryType,long context){this.handle=handle;this.channel=channel;this.access=access;this.handleType=handleType;this.channelType=channelType;this.accessType=accessType;this.modules=modules;this.source=source;this.initialized=initialized;this.shared=shared;this.library=library;this.libraryType=libraryType;this.context=context;}
+        final Object engine,handle,channel,access;final Class<?> engineType,handleType,channelType,accessType;final Module[] modules;
+        final java.util.concurrent.Executor executor;final Map<?,?> instances;final Set<Object> sounds=Collections.newSetFromMap(new IdentityHashMap<>());
+        final int source;final Object initialized,library;final Class<?> libraryType;final long context;
+        final java.util.concurrent.atomic.AtomicBoolean stopped=new java.util.concurrent.atomic.AtomicBoolean(),deleted=new java.util.concurrent.atomic.AtomicBoolean(),requested=new java.util.concurrent.atomic.AtomicBoolean();
+        volatile boolean shared,releaseStarted,releaseCompleted;volatile String pending="";
+        SoundStop(Object engine,Class<?> engineType,Map<?,?> instances,Object handle,Object channel,Object access,Class<?> handleType,Class<?> channelType,Class<?> accessType,Module[] modules,int source,Object initialized,boolean shared,Object library,Class<?> libraryType,long context,java.util.concurrent.Executor executor){this.engine=engine;this.engineType=engineType;this.instances=instances;this.handle=handle;this.channel=channel;this.access=access;this.handleType=handleType;this.channelType=channelType;this.accessType=accessType;this.modules=modules;this.source=source;this.initialized=initialized;this.shared=shared;this.library=library;this.libraryType=libraryType;this.context=context;this.executor=executor;}
     }
     private static final class SoundRelease {
         final SoundStop stop;final SoundRelease previous=SOUND_RELEASING.get();final Thread thread=Thread.currentThread();boolean ended;
@@ -228,12 +232,12 @@ public final class ClientBridge {
     }
     private static final class ImageRecord {
         final long pointer,size;final java.util.concurrent.locks.ReentrantLock gate=new java.util.concurrent.locks.ReentrantLock();
-        Module[] exposures=new Module[0];boolean unknownExposure,closed;
+        Module[] exposures=new Module[0];boolean unknownExposure,closed,closeEntered,closeReturned;
         ImageRecord(long pointer,long size){this.pointer=pointer;this.size=size;}
     }
     private static final class TextureRetirement {
-        final Object object;final Module[] modules;final Ref<Object> manager;final TextureRegistry registry;String pending="";boolean pixelsReleased,detached;
-        TextureRetirement(Object object,Module[] modules,Object manager,TextureRegistry registry){this.object=object;this.modules=modules;this.manager=new Ref<>(manager);this.registry=registry;}
+        final Object object,originalPixels;final Module[] modules;final Ref<Object> manager;final TextureRegistry registry;final int originalId;String pending="";boolean pixelsReleased,detached,idReleaseStarted;
+        TextureRetirement(Object object,Module[] modules,Object manager,TextureRegistry registry,int originalId,Object originalPixels){this.object=object;this.modules=modules;this.manager=new Ref<>(manager);this.registry=registry;this.originalId=originalId;this.originalPixels=originalPixels;}
     }
     private static final class Scope {
         final Scope parent;Module[] sources;final Class<?> type;final String method;final Thread thread;
@@ -706,7 +710,7 @@ public final class ClientBridge {
                         if(fields.lastNarratable.get(owner)==widget)fields.lastNarratable.set(owner,null);
                         int[] after=widgetCounts(registry,widget);System.arraycopy(after,0,slot.counts,0,after.length);
                         if(Arrays.stream(after).anyMatch(count->count!=0)||fields.focused.get(owner)==widget||fields.lastNarratable.get(owner)==widget){slot.pending="CLIENT_SCREEN_WIDGET_REFERENCES_REMAIN";continue;}
-                        slot.retired=true;slot.pending="";retired++;
+                        slot.retired=true;slot.pending="";FAILURES.remove(new Key(widget,false));retired++;
                     }finally{
                         // Keep a partially completed removal at its actual remaining rows for the next frame.
                         try{int[] remaining=widgetCounts(registry,widget);for(int index=0;index<remaining.length;index++){if(remaining[index]>slot.counts[index])slot.unknown=true;slot.counts[index]=remaining[index];}}
@@ -1052,15 +1056,25 @@ public final class ClientBridge {
     private static void retirePresentation(Object owner,UiFields fields,boolean screen){
         Object target=null;Module[] modules=new Module[0];UiRetirement prior=UI_RETIRING.get();
         try{
-            target=fields.current(owner,screen);if(target==null)return;modules=sources(target);
+            target=fields.current(owner,screen);
+            synchronized(SOURCES){
+                for(var at=UI_PENDING.entrySet().iterator();at.hasNext();){var entry=at.next();UiRetirement pending=entry.getValue();
+                    if(pending.owner==owner&&pending.screen==screen&&pending.target!=target){FAILURES.remove(new Key(pending.target,false));at.remove();retired++;}}
+            }
+            if(target==null)return;modules=sources(target);
             if(!presentationRetirable(owner,fields,screen,target))return;
-            // A throwing close may already have released resources; do not replay it every frame.
-            synchronized(SOURCES){if(FAILURES.containsKey(new Key(target,false)))return;}
+            UiRetirement retirement;
+            synchronized(SOURCES){retirement=UI_PENDING.get(new Key(target,false));
+                if(retirement==null){retirement=new UiRetirement(owner,target,screen);UI_PENDING.put(new Key(target,true),retirement);CodeSourceBridge.contributionControl(retirement);}
+                if(retirement.owner!=owner||retirement.screen!=screen)return;
+                // Once the actual original setter entered its callbacks, retry only its readback.
+                if(retirement.call!=null)return;
+            }
             // Re-read the actual slot before calling its original lifecycle; unknown and shared objects stay.
             if(!presentationRetirable(owner,fields,screen,target))return;
-            UI_RETIRING.set(new UiRetirement(owner,target,screen));(screen?fields.setScreen:fields.setOverlay).invoke(owner,new Object[]{null});
-            if(fields.current(owner,screen)==target){if(presentationRetirable(owner,fields,screen,target))uiFailure(target,modules,new IllegalStateException("CLIENT_UI_ROOT_RETAINED_AFTER_SETTER"));}
-            else synchronized(SOURCES){retired++;}
+            UI_RETIRING.set(retirement);(screen?fields.setScreen:fields.setOverlay).invoke(owner,new Object[]{null});
+            if(fields.current(owner,screen)==target){if(retirement.call!=null&&presentationRetirable(owner,fields,screen,target))uiFailure(target,modules,new IllegalStateException("CLIENT_UI_ROOT_RETAINED_AFTER_SETTER"));}
+            else synchronized(SOURCES){UI_PENDING.remove(new Key(target,false));FAILURES.remove(new Key(target,false));FAILURES.remove(new Key(owner,false));retired++;}
         }catch(InvocationTargetException wrapped){
             Throwable failure=wrapped.getCause()==null?wrapped:wrapped.getCause();
             if(!uiRecoverable(failure))ClientBridge.<RuntimeException>uiRaise(failure);
@@ -1538,6 +1552,8 @@ public final class ClientBridge {
         Object bySource=field(engine,type,"instanceBySource");Class<?> multimap=Class.forName("com.google.common.collect.Multimap",false,type.getClassLoader());
         Collection<?> rows=(Collection<?>)multimap.getMethod("values").invoke(bySource);rows.removeIf(value->value==sound);
     }
+    private static Object soundHandle(Map<?,?> instances,Object sound){for(var entry:instances.entrySet())if(entry.getKey()==sound)return entry.getValue();return null;}
+    private static void removeSoundHandle(Map<?,?> instances,Object sound,Object handle){instances.entrySet().removeIf(entry->entry.getKey()==sound&&entry.getValue()==handle);}
     public static void soundListenerRegistered(Object engine,Object listener){
         var frame=boundary();if(!clientMember(frame,"net.minecraft.client.sounds.SoundEngine","addEventListener","m_120295_","(Lnet/minecraft/client/sounds/SoundEventListener;)V"))throw new SecurityException("ACTUAL_SOUND_LISTENER_REGISTRATION_REQUIRED");
         try{Map<?,?> instances=(Map<?,?>)field(engine,frame.getDeclaringClass(),"instanceToChannel");Collection<?> listeners=(Collection<?>)field(engine,frame.getDeclaringClass(),"listeners");
@@ -1559,7 +1575,8 @@ public final class ClientBridge {
             Set<Object> queued=Collections.newSetFromMap(new IdentityHashMap<>());
             queued.addAll(((Map<?,?>)field(engine,type,"queuedSounds")).keySet());queued.addAll((Collection<?>)field(engine,type,"queuedTickableSounds"));
             for(Object sound:queued){Module[] owners=sources(sound);if(!stopped(owners))continue;
-                try{removeSoundRows(engine,type,sound);}catch(ReflectiveOperationException|RuntimeException unavailable){uiFailure(sound,owners,unavailable);}}
+                try{removeSoundRows(engine,type,sound);if(soundHandle(instances,sound)==null)synchronized(SOURCES){FAILURES.remove(new Key(sound,false));}}
+                catch(ReflectiveOperationException|RuntimeException unavailable){uiFailure(sound,owners,unavailable);}}
             for(var entry:new ArrayList<>(instances.entrySet())){Object sound=entry.getKey();Module[] owners=sources(sound);if(!stopped(owners))continue;
                 try{
                 Object handle=entry.getValue();Class<?> handleType=actualBase(handle,"net.minecraft.client.sounds.ChannelAccess$ChannelHandle");if(handleType==null||handle.getClass()!=handleType)throw new IllegalStateException("ACTUAL_SOUND_HANDLE_CHANGED");
@@ -1571,55 +1588,92 @@ public final class ClientBridge {
                 for(var peer:instances.entrySet())if(sameSoundChannel(handle,peer.getValue(),channel)){Module[] peerOwners=sources(peer.getKey());shares.add(peerOwners);if(peer.getKey()!=sound&&!stopped(peerOwners))sharedChannel=true;}
                 for(Object peer:(Collection<?>)field(access,accessType,"channels"))if(peer!=handle&&sameSoundChannel(handle,peer,channel)&&!retiredSoundSources(sources(peer)))sharedChannel=true;
                 int source=channel==null?-1:((Number)field(channel,channelType,"source")).intValue();Object initialized=channel==null?null:field(channel,channelType,"initialized"),library=field(access,accessType,"library");Class<?> libraryType=actualBase(library,"com.mojang.blaze3d.audio.Library");if(libraryType==null||library.getClass()!=libraryType)throw new IllegalStateException("ACTUAL_SOUND_LIBRARY_CHANGED");long context=((Number)field(library,libraryType,"context")).longValue();Module[] selected=union(shares.toArray(Module[][]::new));SoundStop stop;
-                synchronized(SOURCES){stop=SOUND_STOPS.get(new Key(handle,false));if(stop==null){stop=new SoundStop(handle,channel,access,handleType,channelType,accessType,selected,source,initialized,sharedChannel,library,libraryType,context);SOUND_STOPS.put(new Key(handle,true),stop);CodeSourceBridge.contributionControl(stop);CodeSourceBridge.contributionControl(stop.modules);}}
-                stop.shared=sharedChannel;if(sharedChannel)stop.pending="CLIENT_SHARED_SOUND_CHANNEL_RETAINED";requestSoundStop(stop);
-                if(instances.get(sound)==handle)instances.remove(sound);removeSoundRows(engine,type,sound);
+                Object executor=field(access,accessType,"executor");if(!(executor instanceof java.util.concurrent.Executor originalExecutor))throw new IllegalStateException("ACTUAL_SOUND_EXECUTOR_REQUIRED");
+                synchronized(SOURCES){stop=SOUND_STOPS.get(new Key(handle,false));if(stop==null){stop=new SoundStop(engine,type,instances,handle,channel,access,handleType,channelType,accessType,selected,source,initialized,sharedChannel,library,libraryType,context,originalExecutor);SOUND_STOPS.put(new Key(handle,true),stop);CodeSourceBridge.contributionControl(stop);CodeSourceBridge.contributionControl(stop.modules);CodeSourceBridge.contributionControl(stop.sounds);}
+                    if(stop.engine!=engine||stop.access!=access||stop.channel!=channel||stop.executor!=originalExecutor)throw new IllegalStateException("CLIENT_ORIGINAL_SOUND_ASSOCIATION_CHANGED");stop.sounds.add(sound);}
+                stop.shared=sharedChannel;if(sharedChannel)stop.pending="CLIENT_SHARED_SOUND_CHANNEL_RETAINED";
+                removeSoundHandle(instances,sound,handle);removeSoundRows(engine,type,sound);
                 }catch(ReflectiveOperationException|RuntimeException unavailable){uiFailure(sound,owners,unavailable);}
             }
             List<SoundStop> pending;synchronized(SOURCES){pending=new ArrayList<>(SOUND_STOPS.values());}
-            for(SoundStop stop:pending)try{requestSoundStop(stop);if(!stop.stopped.get())continue;
+            for(SoundStop stop:pending)try{
+                if(!soundIdentity(stop)){stop.pending="CLIENT_ORIGINAL_SOUND_ASSOCIATION_CHANGED";continue;}
+                // Detached engine rows are retained by the original stop until their exact cleanup succeeds.
+                Map<?,?> original=(Map<?,?>)field(stop.engine,stop.engineType,"instanceToChannel");
+                for(Object sound:stop.sounds){Object replacement=soundHandle(original,sound);if(replacement==null||replacement==stop.handle){removeSoundHandle(original,sound,stop.handle);removeSoundRows(stop.engine,stop.engineType,sound);}}
                 Object current=field(stop.handle,stop.handleType,"channel");boolean released=(Boolean)field(stop.handle,stop.handleType,"stopped");Collection<?> handles=(Collection<?>)field(stop.access,stop.accessType,"channels");
-                if(current==null&&released&&!handles.contains(stop.handle)&&(stop.channel==null||stop.deleted.get()))synchronized(SOURCES){SOUND_STOPS.remove(new Key(stop.handle,false));}
+                if(!stop.requested.get()&&current==null&&released&&!handles.contains(stop.handle)&&(stop.channel==null||stop.deleted.get())){
+                    synchronized(SOURCES){SOUND_STOPS.remove(new Key(stop.handle,false));for(Object sound:stop.sounds)if(soundHandle(original,sound)==null)FAILURES.remove(new Key(sound,false));retired++;}
+                }else requestSoundStop(stop);
             }catch(ReflectiveOperationException|RuntimeException unavailable){stop.pending="CLIENT_SOUND_RETIREMENT_UNAVAILABLE:"+unavailable.getClass().getSimpleName();}
+            synchronized(SOURCES){FAILURES.remove(new Key(engine,false));}
         }catch(ReflectiveOperationException|RuntimeException unavailable){synchronized(SOURCES){FAILURES.put(new Key(engine,true),union(ControlBridge.invokingSources(),REQUESTED.toArray(Module[]::new)));}}
     }
     private static boolean retiredSoundSources(Module[] modules){if(modules.length==0)return false;synchronized(SOURCES){for(Module module:modules)if(!REQUESTED.contains(module)&&!ControlBridge.modStopped(module))return false;}return true;}
-    private static boolean soundIdentity(SoundStop stop)throws ReflectiveOperationException{return field(stop.access,stop.accessType,"library")==stop.library&&((Number)field(stop.library,stop.libraryType,"context")).longValue()==stop.context
+    private static boolean soundIdentity(SoundStop stop)throws ReflectiveOperationException{return field(stop.engine,stop.engineType,"channelAccess")==stop.access&&field(stop.engine,stop.engineType,"instanceToChannel")==stop.instances&&field(stop.handle,stop.handleType,"this$0")==stop.access
+            &&field(stop.access,stop.accessType,"executor")==stop.executor&&field(stop.access,stop.accessType,"library")==stop.library&&((Number)field(stop.library,stop.libraryType,"context")).longValue()==stop.context
             &&(stop.channel==null||((Number)field(stop.channel,stop.channelType,"source")).intValue()==stop.source&&field(stop.channel,stop.channelType,"initialized")==stop.initialized);}
     private static boolean soundContext(SoundStop stop)throws ReflectiveOperationException{Class<?> type=Class.forName("org.lwjgl.openal.ALC10",false,stop.libraryType.getClassLoader());Method member=type.getMethod("alcGetCurrentContext");if(!Modifier.isStatic(member.getModifiers())||member.getReturnType()!=long.class)throw new IllegalStateException("ACTUAL_OPENAL_CONTEXT_QUERY_REQUIRED");return stop.context!=0&&((Number)member.invoke(null)).longValue()==stop.context;}
     private static void requestSoundStop(SoundStop stop)throws ReflectiveOperationException{
-        if(stop.shared)return;if(stop.requested.get())return;if(stop.channel==null){if(field(stop.handle,stop.handleType,"channel")==null&&(Boolean)field(stop.handle,stop.handleType,"stopped")){stop.stopped.set(true);stop.requested.set(true);}return;}
-        if(!soundIdentity(stop)||field(stop.handle,stop.handleType,"channel")!=stop.channel){stop.pending="CLIENT_ORIGINAL_SOUND_CHANNEL_CHANGED";return;}
+        if(stop.requested.get())return;
+        Object current=field(stop.handle,stop.handleType,"channel");
+        if(!soundIdentity(stop)||current!=null&&current!=stop.channel){stop.pending="CLIENT_ORIGINAL_SOUND_CHANNEL_CHANGED";return;}
         if(!stop.requested.compareAndSet(false,true))return;
-        java.util.function.Consumer<Object> action=channel->{
-            if(channel!=stop.channel){stop.pending="CLIENT_ORIGINAL_SOUND_CHANNEL_CHANGED";return;}
-            try{if(!soundIdentity(stop)||!soundContext(stop)){stop.pending="CLIENT_ORIGINAL_SOUND_CONTEXT_CHANGED";return;}if(!retiredSoundSources(union(stop.modules,origins(channel),origins(stop.handle)))){stop.shared=true;stop.pending="CLIENT_SHARED_SOUND_CHANNEL_RETAINED";return;}
-                platformVoid(channel,stop.channelType,"stop");int state=((Number)clientMethod(stop.channelType,"getState","m_83683_","()I").invoke(channel)).intValue();boolean stopped=state==4116||state==4113;stop.stopped.set(stopped);stop.pending=stopped?"CLIENT_SOUND_ORIGINAL_RELEASE_PENDING":"CLIENT_SOUND_STOP_READBACK_PENDING";
-                if(stopped&&field(stop.handle,stop.handleType,"channel")==channel){platformVoid(stop.handle,stop.handleType,"release");if(field(stop.handle,stop.handleType,"channel")==null&&(Boolean)field(stop.handle,stop.handleType,"stopped")&&stop.deleted.get()){Collection<?> handles=(Collection<?>)field(stop.access,stop.accessType,"channels");handles.remove(stop.handle);if(handles.contains(stop.handle))stop.pending="CLIENT_SOUND_HANDLE_DETACH_PENDING";}}
-            }catch(Throwable unavailable){stop.pending="CLIENT_SOUND_STOP:"+unavailable.getClass().getSimpleName();stop.requested.set(false);}
+        Runnable action=()->{
+            try{
+                if(!soundIdentity(stop)||!soundContext(stop)){stop.pending="CLIENT_ORIGINAL_SOUND_CONTEXT_CHANGED";return;}
+                Object channel=field(stop.handle,stop.handleType,"channel");
+                if(channel!=null&&channel!=stop.channel){stop.pending="CLIENT_ORIGINAL_SOUND_CHANNEL_CHANGED";return;}
+                boolean sharedChannel=!retiredSoundSources(union(stop.modules,origins(stop.channel),origins(stop.handle)));
+                Map<?,?> instances=(Map<?,?>)field(stop.engine,stop.engineType,"instanceToChannel");
+                for(var peer:instances.entrySet())if(sameSoundChannel(stop.handle,peer.getValue(),stop.channel)&&!retiredSoundSources(sources(peer.getKey())))sharedChannel=true;
+                for(Object peer:(Collection<?>)field(stop.access,stop.accessType,"channels"))if(peer!=stop.handle&&sameSoundChannel(stop.handle,peer,stop.channel)&&!retiredSoundSources(sources(peer)))sharedChannel=true;
+                stop.shared=sharedChannel;if(sharedChannel){stop.pending="CLIENT_SHARED_SOUND_CHANNEL_RETAINED";return;}
+                if(stop.channel!=null&&!stop.deleted.get()&&!((java.util.concurrent.atomic.AtomicBoolean)stop.initialized).get())soundDeleteReadback(stop);
+                if(channel==stop.channel&&channel!=null&&!stop.deleted.get()&&!stop.stopped.get()){
+                    int state=((Number)clientMethod(stop.channelType,"getState","m_83683_","()I").invoke(channel)).intValue();
+                    if(state!=4116&&state!=4113){platformVoid(channel,stop.channelType,"stop");state=((Number)clientMethod(stop.channelType,"getState","m_83683_","()I").invoke(channel)).intValue();}
+                    stop.stopped.set(state==4116||state==4113);
+                }
+                if(channel==stop.channel&&channel!=null&&stop.stopped.get()){
+                    if(!stop.releaseStarted)platformVoid(stop.handle,stop.handleType,"release");
+                    else if(!stop.releaseCompleted)stop.pending="CLIENT_SOUND_ORIGINAL_RELEASE_OUTCOME_PENDING";
+                }
+                if(stop.channel!=null&&!stop.deleted.get()&&!((java.util.concurrent.atomic.AtomicBoolean)stop.initialized).get())soundDeleteReadback(stop);
+                Object after=field(stop.handle,stop.handleType,"channel");boolean released=(Boolean)field(stop.handle,stop.handleType,"stopped");
+                if(after==null&&released&&(stop.channel==null||stop.deleted.get())){
+                    Collection<?> handles=(Collection<?>)field(stop.access,stop.accessType,"channels");handles.removeIf(handle->handle==stop.handle);
+                    stop.stopped.set(true);stop.pending=handles.stream().anyMatch(handle->handle==stop.handle)?"CLIENT_SOUND_HANDLE_DETACH_PENDING":"";
+                }else if(stop.pending.isEmpty())stop.pending="CLIENT_SOUND_ORIGINAL_RELEASE_PENDING";
+            }catch(Throwable unavailable){stop.pending="CLIENT_SOUND_STOP:"+unavailable.getClass().getSimpleName();}
+            finally{stop.requested.set(false);}
         };
-        try{clientMethod(stop.handleType,"execute","m_120154_","(Ljava/util/function/Consumer;)V",java.util.function.Consumer.class).invoke(stop.handle,action);}
-        catch(ReflectiveOperationException|RuntimeException unavailable){stop.requested.set(false);throw unavailable;}
+        try{stop.executor.execute(action);}
+        catch(RuntimeException unavailable){stop.requested.set(false);throw unavailable;}
     }
     public static Object soundReleaseEntering(Object handle){
         var frame=boundary();if(!clientMember(frame,"net.minecraft.client.sounds.ChannelAccess$ChannelHandle","release","m_120156_","()V"))throw new SecurityException("ACTUAL_SOUND_HANDLE_RELEASE_REQUIRED");SoundStop stop;synchronized(SOURCES){stop=SOUND_STOPS.get(new Key(handle,false));}if(stop==null)return null;
-        try{if(stop.handleType!=frame.getDeclaringClass()||field(handle,stop.handleType,"channel")!=stop.channel||field(handle,stop.handleType,"this$0")!=stop.access||!soundIdentity(stop)){stop.pending="CLIENT_SOUND_RELEASE_ASSOCIATION_CHANGED";return null;}
-            SoundRelease scope=new SoundRelease(stop);CodeSourceBridge.contributionControl(scope);SOUND_RELEASING.set(scope);return scope;
-        }catch(ReflectiveOperationException unavailable){stop.pending="CLIENT_SOUND_RELEASE_READBACK_UNAVAILABLE";return null;}
+        try{if(stop.handleType!=frame.getDeclaringClass()||field(handle,stop.handleType,"channel")!=stop.channel||field(handle,stop.handleType,"this$0")!=stop.access||!soundIdentity(stop)){stop.pending="CLIENT_SOUND_RELEASE_ASSOCIATION_CHANGED";throw new IllegalStateException(stop.pending);}
+            SoundRelease scope=new SoundRelease(stop);CodeSourceBridge.contributionControl(scope);SOUND_RELEASING.set(scope);stop.releaseStarted=true;return scope;
+        }catch(ReflectiveOperationException unavailable){stop.pending="CLIENT_SOUND_RELEASE_READBACK_UNAVAILABLE";throw new IllegalStateException(stop.pending,unavailable);}
     }
     public static void soundReleaseExiting(Object token,boolean completed){
         var frame=boundary();if(!clientMember(frame,"net.minecraft.client.sounds.ChannelAccess$ChannelHandle","release","m_120156_","()V"))throw new SecurityException("ACTUAL_SOUND_HANDLE_RELEASE_REQUIRED");if(token==null)return;
         if(!(token instanceof SoundRelease scope)||scope.thread!=Thread.currentThread()||scope.ended||scope.stop.handleType!=frame.getDeclaringClass()||SOUND_RELEASING.get()!=scope)throw new SecurityException("ACTUAL_SOUND_RELEASE_TOKEN_REQUIRED");
-        try{if(completed&&field(scope.stop.handle,scope.stop.handleType,"channel")==null&&(Boolean)field(scope.stop.handle,scope.stop.handleType,"stopped"))scope.stop.pending=scope.stop.deleted.get()?"CLIENT_SOUND_HANDLE_DETACH_PENDING":"CLIENT_SOUND_NATIVE_DELETE_READBACK_PENDING";}
+        try{if(completed){scope.stop.releaseCompleted=true;if(field(scope.stop.handle,scope.stop.handleType,"channel")==null&&(Boolean)field(scope.stop.handle,scope.stop.handleType,"stopped"))scope.stop.pending=scope.stop.deleted.get()?"CLIENT_SOUND_HANDLE_DETACH_PENDING":"CLIENT_SOUND_NATIVE_DELETE_READBACK_PENDING";}}
         catch(ReflectiveOperationException unavailable){scope.stop.pending="CLIENT_SOUND_HANDLE_RELEASE_READBACK_UNAVAILABLE";}
         finally{scope.ended=true;if(scope.previous==null)SOUND_RELEASING.remove();else SOUND_RELEASING.set(scope.previous);}
     }
     public static void soundChannelDestroyed(Object channel){
         var frame=boundary();if(!clientMember(frame,"com.mojang.blaze3d.audio.Channel","destroy","m_83665_","()V"))throw new SecurityException("ACTUAL_SOUND_CHANNEL_DESTROY_REQUIRED");List<SoundStop> stops;synchronized(SOURCES){stops=new ArrayList<>(SOUND_STOPS.values());}
-        for(SoundStop stop:stops)if(stop.channel==channel)try{if(stop.channelType!=frame.getDeclaringClass()||!soundIdentity(stop)||!soundContext(stop)||((java.util.concurrent.atomic.AtomicBoolean)stop.initialized).get()||field(channel,stop.channelType,"stream")!=null){stop.pending="CLIENT_SOUND_NATIVE_DELETE_ASSOCIATION_CHANGED";continue;}
-            Class<?> api=Class.forName("org.lwjgl.openal.AL10",false,stop.channelType.getClassLoader());Method member=api.getMethod("alIsSource",int.class);if(!Modifier.isStatic(member.getModifiers())||member.getReturnType()!=boolean.class)throw new IllegalStateException("ACTUAL_OPENAL_SOURCE_QUERY_REQUIRED");
-            boolean exists=(Boolean)member.invoke(null,stop.source);stop.deleted.set(!exists);if(!exists)stop.stopped.set(true);stop.pending=exists?"CLIENT_SOUND_NATIVE_DELETE_READBACK_PENDING":"CLIENT_SOUND_HANDLE_DETACH_PENDING";
+        for(SoundStop stop:stops)if(stop.channel==channel)try{if(stop.channelType!=frame.getDeclaringClass()){stop.pending="CLIENT_SOUND_NATIVE_DELETE_ASSOCIATION_CHANGED";continue;}soundDeleteReadback(stop);
         }catch(ReflectiveOperationException|RuntimeException unavailable){stop.pending="CLIENT_SOUND_NATIVE_DELETE_READBACK_UNAVAILABLE";}
+    }
+    private static void soundDeleteReadback(SoundStop stop)throws ReflectiveOperationException{
+        if(!soundIdentity(stop)||!soundContext(stop)||((java.util.concurrent.atomic.AtomicBoolean)stop.initialized).get()||field(stop.channel,stop.channelType,"stream")!=null){stop.pending="CLIENT_SOUND_NATIVE_DELETE_ASSOCIATION_CHANGED";return;}
+        if(stop.deleted.get())return;
+        Class<?> api=Class.forName("org.lwjgl.openal.AL10",false,stop.channelType.getClassLoader());Method member=api.getMethod("alIsSource",int.class);if(!Modifier.isStatic(member.getModifiers())||member.getReturnType()!=boolean.class)throw new IllegalStateException("ACTUAL_OPENAL_SOURCE_QUERY_REQUIRED");
+        boolean exists=(Boolean)member.invoke(null,stop.source);stop.deleted.set(!exists);if(!exists)stop.stopped.set(true);stop.pending=exists?"CLIENT_SOUND_NATIVE_DELETE_READBACK_PENDING":"CLIENT_SOUND_HANDLE_DETACH_PENDING";
     }
     private static boolean soundCleanupField(Object receiver,Class<?> declaring,String name){
         SoundRelease scope=SOUND_RELEASING.get();if(scope==null||scope.ended||scope.thread!=Thread.currentThread())return false;SoundStop stop=scope.stop;
@@ -1634,7 +1688,7 @@ public final class ClientBridge {
         if(particle==null)return;
         for(Class<?> type=particle.getClass();type!=null;type=type.getSuperclass())if(role(type)&&type.getName().equals("net.minecraft.client.particle.Particle")){
             Object prior=RELEASING.get();RELEASING.set(particle);
-            try{resourceField(type,"removed").setBoolean(particle,true);}
+            try{resourceField(type,"removed").setBoolean(particle,true);synchronized(SOURCES){FAILURES.remove(new Key(particle,false));}}
             catch(ReflectiveOperationException unavailable){synchronized(SOURCES){FAILURES.put(new Key(particle,true),sources(particle));failed++;}}
             finally{if(prior==null)RELEASING.remove();else RELEASING.set(prior);}return;
         }
@@ -1744,28 +1798,34 @@ public final class ClientBridge {
     public static Object imageCloseEnter(Object image){
         var frame=boundary();if(!frame.getMethodName().equals("close")||!frame.getDeclaringClass().getName().equals("com.mojang.blaze3d.platform.NativeImage"))throw new SecurityException("ACTUAL_PIXEL_CLOSE_REQUIRED");
         ImageRecord record;synchronized(SOURCES){record=IMAGES.get(new Key(image,false));}if(record==null)return null;record.gate.lock();
-        try{long pointer=((Number)field(image,frame.getDeclaringClass(),"pixels")).longValue();if(record.closed?pointer!=0:pointer!=record.pointer)throw new IllegalStateException("CLIENT_ORIGINAL_PIXEL_ALLOCATION_CHANGED");return record;}
+        try{long pointer=((Number)field(image,frame.getDeclaringClass(),"pixels")).longValue();if(record.closed?pointer!=0:pointer!=record.pointer)throw new IllegalStateException("CLIENT_ORIGINAL_PIXEL_ALLOCATION_CHANGED");record.closeEntered=true;return record;}
         catch(ReflectiveOperationException|RuntimeException unavailable){record.gate.unlock();throw new IllegalStateException("CLIENT_PIXEL_RELEASE_REFUSED",unavailable);}
     }
     public static void imageCloseExit(Object image,Object token,boolean completed){
         var frame=boundary();if(!frame.getMethodName().equals("close")||!frame.getDeclaringClass().getName().equals("com.mojang.blaze3d.platform.NativeImage"))throw new SecurityException("ACTUAL_PIXEL_CLOSE_REQUIRED");
         if(token==null)return;ImageRecord record;synchronized(SOURCES){record=IMAGES.get(new Key(image,false));}
         if(record!=token||!record.gate.isHeldByCurrentThread())throw new SecurityException("ACTUAL_PIXEL_CLOSE_TOKEN_REQUIRED");
-        try{if(completed&&((Number)field(image,frame.getDeclaringClass(),"pixels")).longValue()==0)synchronized(SOURCES){record.closed=true;}}
+        try{if(completed){record.closeReturned=true;if(((Number)field(image,frame.getDeclaringClass(),"pixels")).longValue()==0)synchronized(SOURCES){record.closed=true;}}}
         catch(ReflectiveOperationException unavailable){throw new IllegalStateException("CLIENT_PIXEL_RELEASE_READBACK_UNAVAILABLE",unavailable);}
         finally{record.gate.unlock();}
     }
     private static void platformVoid(Object object,Class<?> declaring,String method)throws Throwable{
+        platformAction(object,declaring,method).invokeExact();
+    }
+    private static java.lang.invoke.MethodHandle platformAction(Object object,Class<?> declaring,String method)throws ReflectiveOperationException{
         java.lang.invoke.MethodHandles.Lookup access=java.lang.invoke.MethodHandles.privateLookupIn(declaring,java.lang.invoke.MethodHandles.lookup());
         String installed=declaring.getName().equals("net.minecraft.client.renderer.texture.AbstractTexture")&&method.equals("releaseId")?"m_117964_":method;
         if(declaring.getName().equals("com.mojang.blaze3d.vertex.BufferBuilder$RenderedBuffer")&&method.equals("release"))installed="m_231200_";
         if(declaring.getName().equals("com.mojang.blaze3d.audio.Channel")&&method.equals("stop"))installed="m_83679_";
         if(declaring.getName().equals("net.minecraft.client.sounds.ChannelAccess$ChannelHandle")&&method.equals("release"))installed="m_120156_";
-        access.findSpecial(declaring,clientMethod(declaring,method,installed,"()V").getName(),java.lang.invoke.MethodType.methodType(void.class),declaring).bindTo(object).invokeExact();
+        return access.findSpecial(declaring,clientMethod(declaring,method,installed,"()V").getName(),java.lang.invoke.MethodType.methodType(void.class),declaring).bindTo(object);
     }
     private static String releasePixels(TextureRetirement retirement,Class<?> dynamic)throws Throwable{
         Object texture=retirement.object,image=field(texture,dynamic,"pixels"),observed;ImageRecord record;boolean foreign=false;
-        synchronized(SOURCES){Ref<Object> actual=PIXELS.get(new Key(texture,false));observed=actual==null?null:actual.get();record=image==null?null:IMAGES.get(new Key(image,false));
+        synchronized(SOURCES){
+            if(image!=retirement.originalPixels){ImageRecord original=retirement.originalPixels==null?null:IMAGES.get(new Key(retirement.originalPixels,false));
+                return image==null&&original!=null&&original.closed?"":"CLIENT_ORIGINAL_TEXTURE_PIXELS_CHANGED";}
+            Ref<Object> actual=PIXELS.get(new Key(texture,false));observed=actual==null?null:actual.get();record=image==null?null:IMAGES.get(new Key(image,false));
             if(image!=observed)return "CLIENT_ORIGINAL_TEXTURE_PIXELS_CHANGED";
             if(image==null)return "";if(record==null)return "CLIENT_PIXEL_ALLOCATION_UNOBSERVED";
             if(record.unknownExposure)return "CLIENT_PIXEL_OUTSIDE_EXPOSURE_UNRESOLVED";
@@ -1775,8 +1835,15 @@ public final class ClientBridge {
             for(var peer:PIXELS.entrySet())if(peer.getValue().get()==image){Object actualTexture=peer.getKey().get();if(actualTexture!=null&&actualTexture!=texture&&!exclusive(sources(actualTexture)))foreign=true;}
         }
         if(!foreign){Class<?> imageType=actualBase(image,"com.mojang.blaze3d.platform.NativeImage");if(imageType==null||image.getClass()!=imageType)return "CLIENT_PIXEL_CLOSE_IMPLEMENTATION_UNOBSERVED";
-            Object previous=RELEASING.get();RELEASING.set(image);try{platformVoid(image,imageType,"close");}finally{if(previous==null)RELEASING.remove();else RELEASING.set(previous);}
-            synchronized(SOURCES){if(!record.closed)return "CLIENT_PIXEL_RELEASE_RECEIPT_PENDING";}
+            record.gate.lock();try{
+                long pointer=((Number)field(image,imageType,"pixels")).longValue();
+                if(record.closed){if(pointer!=0)return "CLIENT_CLOSED_PIXEL_ALLOCATION_CHANGED";}
+                else if(record.closeEntered){
+                    if(pointer!=0)return record.closeReturned?"CLIENT_PIXEL_CLOSE_READBACK_PENDING":"CLIENT_PIXEL_CLOSE_OUTCOME_PENDING";
+                    synchronized(SOURCES){record.closed=true;}
+                }else{Object previous=RELEASING.get();RELEASING.set(image);try{platformVoid(image,imageType,"close");}finally{if(previous==null)RELEASING.remove();else RELEASING.set(previous);}}
+                synchronized(SOURCES){if(!record.closed)return "CLIENT_PIXEL_RELEASE_RECEIPT_PENDING";}
+            }finally{record.gate.unlock();}
         }
         Field pixels=resourceField(dynamic,"pixels");if(pixels.get(texture)!=image)return "CLIENT_TEXTURE_PIXELS_CHANGED_DURING_RELEASE";pixels.set(texture,null);
         if(pixels.get(texture)!=null)return "CLIENT_TEXTURE_PIXEL_DETACH_PENDING";synchronized(SOURCES){PIXELS.remove(new Key(texture,false));}return "";
@@ -1786,8 +1853,14 @@ public final class ClientBridge {
         Object object=retirement.object;Class<?> base=actualBase(object,"net.minecraft.client.renderer.texture.AbstractTexture");if(base==null)return "ACTUAL_TEXTURE_BASE_UNAVAILABLE";
         Class<?> dynamic=actualBase(object,"net.minecraft.client.renderer.texture.DynamicTexture");Object previous=RELEASING.get();RELEASING.set(object);
         try{
+            int current=((Number)field(object,base,"id")).intValue();
+            if(current!=-1&&current!=retirement.originalId)return "CLIENT_ORIGINAL_TEXTURE_GPU_ID_CHANGED";
             if(dynamic!=null&&!retirement.pixelsReleased){String pending=releasePixels(retirement,dynamic);if(!pending.isEmpty())return pending;retirement.pixelsReleased=true;}
-            platformVoid(object,base,"releaseId");if(((Number)field(object,base,"id")).intValue()!=-1)return "CLIENT_GPU_ID_RELEASE_PENDING";
+            if(current!=-1){
+                if(retirement.idReleaseStarted)return "CLIENT_TEXTURE_GPU_RELEASE_OUTCOME_PENDING";
+                java.lang.invoke.MethodHandle release=platformAction(object,base,"releaseId");retirement.idReleaseStarted=true;release.invokeExact();
+            }
+            if(((Number)field(object,base,"id")).intValue()!=-1)return "CLIENT_GPU_ID_RELEASE_PENDING";
             Class<?> implementation=object.getClass().getMethod("close").getDeclaringClass();
             if(implementation!=base&&implementation!=dynamic)return "CLIENT_CUSTOM_TEXTURE_RESOURCE_RETIREMENT_PENDING";
             Class<?> http=actualBase(object,"net.minecraft.client.renderer.texture.HttpTexture");if(http!=null){Object future=field(object,http,"future");if(future instanceof java.util.concurrent.Future<?> task&&!task.isDone())return "CLIENT_TEXTURE_DOWNLOAD_EXIT_PENDING";}
@@ -1827,12 +1900,15 @@ public final class ClientBridge {
                 if(known==null||known.object().get()!=object||!exclusive(known.modules()))privateResource=false;keys.add(share.getKey());}
             if(!privateResource){mixed++;continue;}
             try{
-                TextureRetirement retirement;synchronized(SOURCES){retirement=RETIREMENTS.computeIfAbsent(new Key(object,true),ignored->new TextureRetirement(object,union(texture.modules(),origins(object)),manager,registry));}
+                Class<?> base=actualBase(object,"net.minecraft.client.renderer.texture.AbstractTexture");if(base==null)throw new IllegalStateException("ACTUAL_TEXTURE_BASE_UNAVAILABLE");
+                int originalId=((Number)field(object,base,"id")).intValue();
+                Class<?> dynamic=actualBase(object,"net.minecraft.client.renderer.texture.DynamicTexture");Object originalPixels=dynamic==null?null:field(object,dynamic,"pixels");
+                TextureRetirement retirement;synchronized(SOURCES){retirement=RETIREMENTS.computeIfAbsent(new Key(object,true),ignored->new TextureRetirement(object,union(texture.modules(),origins(object)),manager,registry,originalId,originalPixels));}
                 retirement.pending=detachTexture(retirement);
             }catch(ReflectiveOperationException|RuntimeException unavailable){synchronized(SOURCES){TextureRetirement pending=RETIREMENTS.get(new Key(object,false));if(pending!=null)pending.pending="CLIENT_TEXTURE_DETACH:"+String.valueOf(unavailable.getMessage());}}
         }
         List<TextureRetirement> pending;synchronized(SOURCES){pending=new ArrayList<>(RETIREMENTS.values());}
-        for(TextureRetirement retirement:pending)try{String gap=retirement.detached?"":detachTexture(retirement);if(gap.isEmpty())gap=releaseTexture(retirement);synchronized(SOURCES){retirement.pending=gap;if(gap.isEmpty()){RETIREMENTS.remove(new Key(retirement.object,false));retired++;}}}
+        for(TextureRetirement retirement:pending)if(retirement.manager.get()==manager&&retirement.registry==registry)try{String gap=detachTexture(retirement);if(gap.isEmpty())gap=releaseTexture(retirement);synchronized(SOURCES){retirement.pending=gap;if(gap.isEmpty()){RETIREMENTS.remove(new Key(retirement.object,false));FAILURES.remove(new Key(retirement.object,false));retired++;}}}
         catch(Throwable unavailable){synchronized(SOURCES){retirement.pending="CLIENT_TEXTURE_RELEASE:"+unavailable.getClass().getSimpleName()+":"+String.valueOf(unavailable.getMessage());}}
         synchronized(SOURCES){shared=mixed;}
     }
@@ -1853,6 +1929,7 @@ public final class ClientBridge {
         long failures=FAILURES.values().stream().filter(row->Arrays.stream(row).anyMatch(source->source==module)).count();
         long sounds=SOUND_STOPS.values().stream().filter(row->Arrays.stream(row.modules).anyMatch(source->source==module)).count();
         String soundState="",reloadState="";
+        for(SoundStop stop:SOUND_STOPS.values())if(Arrays.stream(stop.modules).anyMatch(source->source==module)&&!stop.pending.isEmpty()){soundState=stop.pending;break;}
         for(SoundRegistry registry:SOUNDS.values()){Collection<?> listeners=registry.listeners().get();if(listeners!=null){
             Module[] unavailable=FAILURES.get(new Key(listeners,false));if(unavailable!=null&&Arrays.stream(unavailable).anyMatch(source->source==module))soundState="CLIENT_LISTENER_COLLECTION_LAYOUT_UNSUPPORTED";
             for(Object listener:listeners)if(Arrays.stream(sources(listener)).anyMatch(source->source==module))sounds++;
@@ -1862,7 +1939,8 @@ public final class ClientBridge {
             Module[] unavailable=FAILURES.get(new Key(listeners,false));if(unavailable!=null&&Arrays.stream(unavailable).anyMatch(source->source==module))reloadState="CLIENT_LISTENER_COLLECTION_LAYOUT_UNSUPPORTED";
             for(Object listener:listeners)if(Arrays.stream(sources(listener)).anyMatch(source->source==module))reloads++;
         }}
-        long ui=0;for(var entry:UI_OWNERS.entrySet()){Object owner=entry.getKey().get();if(owner==null)continue;
+        long ui=UI_PENDING.values().stream().filter(row->Arrays.stream(sources(row.target)).anyMatch(source->source==module)).count();
+        for(var entry:UI_OWNERS.entrySet()){Object owner=entry.getKey().get();if(owner==null)continue;
             try{for(boolean screen:new boolean[]{true,false}){Object current=entry.getValue().current(owner,screen);if(current!=null&&Arrays.stream(sources(current)).anyMatch(source->source==module))ui++;}}
             catch(ReflectiveOperationException unavailable){ui++;}
         }
@@ -1891,6 +1969,6 @@ public final class ClientBridge {
         }
         return active!=0||textures!=0||resources!=0||sounds!=0||reloads!=0||gpu!=0||failures!=0||ui!=0||renderCalls!=0||overlays!=0||widgets!=0||toastQueued!=0||toastVisible!=0?"CLIENT_RETIREMENT_PENDING:active="+active+":textures="+textures+":resources="+resources+":sounds="+sounds+":soundState="+soundState+":reloads="+reloads+":reloadState="+reloadState+":gpu="+gpu+":gpuState="+gpuState+":ui="+ui+":renderCalls="+(renderCalls<0?"unknown":Long.toString(renderCalls))+":overlays="+(overlays<0?"unknown":Long.toString(overlays))+":overlayState="+overlayState+":widgets="+widgets+":widgetShared="+widgetShared+":widgetUnknown="+widgetUnknown+":widgetState="+widgetState+":toastQueued="+toastQueued+":toastVisible="+toastVisible+":toastShared="+toastShared+":toastUnknown="+toastUnknown+":toastState="+toastState+":shared="+shared+":releaseFailures="+failures:"";
     }}
-    public static Object[] controlObjects(){agent();List<Object> roots=new ArrayList<>(Arrays.asList(SOURCES,TEXTURES,ROLES,REQUESTED,CURRENT,RELEASING,ACTIVE,DEAD,IMAGES,PIXELS,RETIREMENTS,FAILURES,SOUNDS,SOUND_STOPS,SOUND_RELEASING,RELOAD_LISTENERS,RELOAD_WORK,UI_OWNERS,UI_RETIRING,UI_FIELDS,SCREEN_WIDGETS,SCREEN_ADDING,WIDGET_RETIRING,SCREEN_FIELDS,TOASTS,TOAST_FIELDS,OVERLAY_EVENTS,OVERLAY_REGISTRIES,OVERLAY_NAMES,OVERLAY_INITIALIZING,OVERLAY_FIELDS,RENDER_QUEUES,RENDER_REPLAY,RENDER_FIELDS));Collections.addAll(roots,GPU.controls());return roots.toArray();}
+    public static Object[] controlObjects(){agent();List<Object> roots=new ArrayList<>(Arrays.asList(SOURCES,TEXTURES,ROLES,REQUESTED,CURRENT,RELEASING,ACTIVE,DEAD,IMAGES,PIXELS,RETIREMENTS,FAILURES,SOUNDS,SOUND_STOPS,SOUND_RELEASING,RELOAD_LISTENERS,RELOAD_WORK,UI_OWNERS,UI_PENDING,UI_RETIRING,UI_FIELDS,SCREEN_WIDGETS,SCREEN_ADDING,WIDGET_RETIRING,SCREEN_FIELDS,TOASTS,TOAST_FIELDS,OVERLAY_EVENTS,OVERLAY_REGISTRIES,OVERLAY_NAMES,OVERLAY_INITIALIZING,OVERLAY_FIELDS,RENDER_QUEUES,RENDER_REPLAY,RENDER_FIELDS));Collections.addAll(roots,GPU.controls());return roots.toArray();}
     private static void reap(){for(Key key;(key=(Key)DEAD.poll())!=null;){SOURCES.remove(key);TEXTURES.remove(key);IMAGES.remove(key);PIXELS.remove(key);FAILURES.remove(key);SOUNDS.remove(key);RELOAD_LISTENERS.remove(key);UI_OWNERS.remove(key);SCREEN_WIDGETS.remove(key);TOASTS.remove(key);OVERLAY_EVENTS.remove(key);OVERLAY_REGISTRIES.remove(key);OVERLAY_NAMES.remove(key);RENDER_QUEUES.remove(key);}}
 }

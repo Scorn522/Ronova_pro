@@ -2157,6 +2157,24 @@ public final class ResourceBridge {
         }catch(ReflectiveOperationException unavailable){throw new IllegalStateException("EXTERNAL_FIELD_LAYOUT_UNAVAILABLE",unavailable);}
         return exact;
     }
+    /** Only actual represented static storage is writable through a Class mirror. */
+    static boolean mirrorStaticRange(Class<?> mirror,long offset,long length){
+        if(offset<0||length<=0||length>Long.MAX_VALUE-offset)return false;
+        long end=offset+length,cursor=offset;
+        Span[] spans=STATIC_FIELDS.get(mirror);
+        try {
+            // Cover the complete write. Header bytes and alignment holes do not
+            // become static storage merely because a later field exists.
+            while(cursor<end){
+                long next=cursor;
+                for(Span span:spans)if(span.offset<=cursor&&cursor<span.offset+span.bytes
+                        &&fieldHolder(span.field,mirror))next=Math.max(next,Math.min(end,span.offset+span.bytes));
+                if(next==cursor)return false;
+                cursor=next;
+            }
+            return true;
+        }catch(ReflectiveOperationException failure){throw new IllegalStateException("MIRROR_STATIC_LAYOUT_UNAVAILABLE",failure);}
+    }
     private static Span[] declaredSpans(Class<?> actual,boolean statik){
         try{
             List<Span> result=new ArrayList<>();
