@@ -230,6 +230,14 @@ static jmethodID JNICALL audit_jni_bad_method(JNIEnv *env,jclass type,const char
 static jfieldID JNICALL audit_jni_bad_field(JNIEnv *env,jclass type,const char *name,const char *descriptor){
     (void)env;(void)type;(void)name;(void)descriptor;return NULL;
 }
+/* No controller metadata: try to expose this thread's actual live JNI table.
+ * The wrapping case must still inspect its low-address half and refuse it. */
+JNIEXPORT jobject JNICALL Java_dev_ronova_pro_AuditFixCheck_jniBufferControlView0(JNIEnv *env,jclass check,jboolean wrapping){
+    (void)check;
+    uintptr_t table=(uintptr_t)*env;
+    return (*env)->NewDirectByteBuffer(env,wrapping?(void*)UINTPTR_MAX:(void*)table,
+            wrapping?(jlong)(table+2):(jlong)sizeof(**env));
+}
 JNIEXPORT jboolean JNICALL Java_dev_ronova_pro_AuditFixCheck_jniLiveTable0(JNIEnv *env,jclass check){
     JavaVM *vm=NULL;jvmtiEnv *api=NULL;jniNativeInterface *copy=NULL,*published=NULL;
     struct JNINativeInterface_ before=**env;struct JNINativeInterface_ *table=(struct JNINativeInterface_*)*env;

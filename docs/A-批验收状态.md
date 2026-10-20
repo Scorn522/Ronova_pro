@@ -1,5 +1,15 @@
 # Ronova Pro 当前进度
 
+## 2026-10-20：LWJGL 布局探测与 JVM 退出互锁修复
+
+接续 `4d96d68`。用户最新 PCL 日志及 11:17:40 错误报告显示，上一处 Log4j 重复加载已越过，本次失败在 LWJGL 3.3.1 的 `MemoryUtil.getPositionOffset`：其真实代码用 `NewDirectByteBuffer(-1, 219540062)` 创建布局探测视图，Ronova 将不解引用的视图创建按实际读写处理，错误返回 `NATIVE_CONTROL_RANGE_UNAVAILABLE:ADDRESS_OVERFLOW`。
+
+Native 缓冲区视图查询现在分段检查地址回绕的两侧；命中控制区仍拒绝，真实读写／页面修改继续沿原溢出拒绝路径。实测普通缓冲区读写正常，直接包裹活动 JNI 表及回绕后覆盖该表的视图均被拒绝。
+
+对应小检查还发现 JVM 销毁时，原生清理线程返回会触发 LWJGL 的线程卸载回调，在加载器锁内再次 Detach，导致退出互锁。现在只在 VM teardown 后让这个进程生命周期工作线程保持静止，与既有固定驻留的调度入口一同等待进程结束；正常运行时的清理流程不变。原生栈、无 Ronova 对照及修复前超时记录均保留。
+
+最终统一构建通过（38 秒），使用 PCL 实际 Java 17 和本地 LWJGL 的初始化／读写／保护检查通过，进程正常退出（0）。候选双 JAR 已更新到原 PCL 实例，参数准备成功，旧包已备份。没有启动游戏或 Forge，完整进游戏结果仍待实际重试。
+
 ## 2026-10-20：PCL 启动报告中的 Class 缓存递归加载修复
 
 接续 `a14799f`。用户提供的 10:47:53 错误报告显示启动交接已完成，Agent 为 `INSTALLED_FULL`；随后 JDK 发布注解缓存时，Ronova 先调用 `mirrorStaticRange` 枚举被代表类的字段，解析字段类型重入 Forge `ModuleClassLoader`，导致 Log4j `MessagePatternConverter$RenderingPatternConverter` 重复定义。

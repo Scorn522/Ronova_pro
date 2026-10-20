@@ -1,5 +1,24 @@
 # B 批实际报告：2026-10-09 代码收敛接续
 
+## 2026-10-20：PCL LWJGL 初始化误拒及退出互锁
+
+接续 `4d96d68`。最新实例日志与 `错误报告-2026-10-20_11.17.40.zip` 一致：`MemoryUtil.getPositionOffset → JNINativeInterface.nNewDirectByteBuffer` 被拒，原因明确为 `NATIVE_CONTROL_RANGE_UNAVAILABLE:ADDRESS_OVERFLOW:restricted=0:loaderQuery=ready`。实际 LWJGL 3.3.1 字节码以地址 `-1`、容量 `219540062` 构造 Buffer 布局探测对象；此调用只创建 Java 视图，未解引用原生地址。
+
+`native_buffer_control` 对回绕视图分两段查询完整覆盖范围，保留两段的控制区命中／未知拒绝；实际内存访问和页面权限 API 的溢出拒绝没有改变。复用 `AuditFixCheck` / `AuditFixNative`，直接初始化实际 LWJGL，使用其真实 JNI 接口创建布局探测及普通缓冲区，并对当前线程的真实活动 JNI 表验证直接／回绕视图均被拒绝；没有提供控制器 metadata 或 Owner。
+
+初次生产构建 46 秒成功，初始化与保护断言完成，但独立进程退出超过 50 秒，被检查驱动结束，未计完整 PASS。Java 线程现场无额外非 daemon 线程，原生现场显示 `LdrShutdownThread → lwjgl → DetachCurrentThread` 等待；不加载 Ronova、使用相同 Java/LWJGL 的退出对照为 0。[LWJGL 3.3.1 的线程卸载实现](https://github.com/LWJGL/lwjgl3/blob/3.3.1/modules/lwjgl/core/src/main/c/common_tools.c#L54-L67) 确认 DLL 回调会查询当前 JNIEnv 并 Detach。Ronova 的清理线程此前在 Agent_OnUnload 唤醒后仍带 daemon 附件返回，从而在 JVM teardown 中触发该回调。
+
+修复在 VM teardown 后保持该进程生命周期原生工作线程静止，避免再次进入 JNI 或触发 foreign DLL_THREAD_DETACH；原有固定驻留的 DLL／入口仍保留，正常清理不变。最终统一构建 38 秒通过；同一实际 Java 17.0.15／LWJGL 检查输出 `LWJGL_BUFFER_STARTUP_PASS`，进程正常退出 0。未关闭真实内存保护，也未启动游戏或 Forge。
+
+工作记录位于 `.work/pcl-lwjgl-20261020`。原游戏 PID 169924 已确认在窗口初始化前失败并结束；只读 jcmd 取栈超时、修复前检查超时及原生栈均保留。一次旧 Native 对照错误搭配新 Bootstrap，被摘要校验以 `EARLY_NATIVE_IMAGE_MISMATCH` 拒绝，该次不用于故障结论。
+
+最终双 JAR 已更新到 PCL 的原 `1.20.1-Forge_47.4.23` 实例，复制核对一致，准备脚本重新生成参数。备份为 `ronova-launch/backup-lwjgl-20261020-113356`。没有本候选游戏启动或世界效果结论。
+
+| 候选 | 字节 | SHA-256 |
+| --- | ---: | --- |
+| `ronova-pro-core-1.5.0-dev.jar` | 3296853 | `0b5276f645a451ff25504024bb3d7dcc4db8163078510e33d6023c29c5b75eb0` |
+| `ronova-pro-prelaunch.jar` | 51556 | `d6bfc76997b1a115346a1cb16fa9feb2767595d0d0a419de5c944bce1016c6ab` |
+
 ## 2026-10-20：PCL Class 缓存反射重入回归
 
 接续 `a14799f`。用户错误报告 `错误报告-2026-10-20_10.47.53.zip` 中，PCL 参数交接、Bootstrap 装载及 Native 安装成功，随后 `AGENT_PREMAIN_READY:INSTALLED_FULL`。崩溃栈为 `Class$Atomic.casAnnotationData → ControlBridge.unsafeWriteAllowed → ResourceBridge.mirrorStaticRange / declaredSpans → PlatformMetadata.declaredFields → Class.getDeclaredFields0 → ModuleClassLoader`，最终重复定义 Log4j 的 `MessagePatternConverter$RenderingPatternConverter`。

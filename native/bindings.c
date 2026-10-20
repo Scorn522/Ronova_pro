@@ -1643,7 +1643,14 @@ static DWORD WINAPI native_tooling_retirement_worker(void *argument){
         DWORD workerWait=WaitForSingleObject(native_tooling_retirement_event,
                 host_thread_workers_pending()||host_tls_pending()||host_module_exits_pending()||native_tooling_definitions_pending_any()?1000:INFINITE);
         if(workerWait!=WAIT_OBJECT_0&&workerWait!=WAIT_TIMEOUT)break;
-        if(InterlockedCompareExchange(&native_tooling_shutdown,0,0))break;
+        if(InterlockedCompareExchange(&native_tooling_shutdown,0,0)){
+            /* This daemon may still have a VM attachment. Returning now runs
+             * foreign DLL_THREAD_DETACH callbacks; LWJGL calls DetachCurrentThread
+             * there while holding the loader lock, after VM teardown began.
+             * Keep this process-lifetime worker quiescent with the pinned
+             * dispatchers until process termination, without re-entering JNI. */
+            for(;;)Sleep(INFINITE);
+        }
         int definitionsReaped=0;
         for(;;){
             if(InterlockedCompareExchange(&native_tooling_shutdown,0,0))break;

@@ -26,6 +26,7 @@ public final class AuditFixCheck {
         System.out.println("RANGE_CONTENTION_PASS actual_premain_retransformation ordinary_Unsafe_read_write_preserved real_GetEnv_calls="+calls+" no_supplied_controller_metadata");
     }
     private static native boolean jniLiveTable0();
+    private static native java.nio.ByteBuffer jniBufferControlView0(boolean wrapping);
     private static native boolean jniStoppedHookObserve0(long hook,long original);
     private static int jniLiveBoundary(){return 73;}
     private static void jniLiveTable()throws Exception {
@@ -63,6 +64,7 @@ public final class AuditFixCheck {
         if(args.length==2&&args[0].equals("range-contention")){rangeContention(args[1]);return;}
         if(args.length==2&&args[0].equals("bootstrap-search")){bootstrapSearch(args[1]);return;}
         if(args.length==1&&args[0].equals("jni-live-table")){jniLiveTable();return;}
+        if(args.length==1&&args[0].equals("lwjgl-buffer-startup")){lwjglBufferStartup();return;}
         if(args.length==1&&args[0].equals("platform-control-writes")){platformControlWrites();return;}
         if(args.length==1&&args[0].equals("installed-platform-writes")){installedPlatformWrites();return;}
         if(args.length==1&&args[0].equals("known-container-cleanup")){knownContainerCleanup();return;}
@@ -2416,6 +2418,31 @@ public final class AuditFixCheck {
         try(var input=selected.getInputStream(selected.getJarEntry(entry))){actual=input.readAllBytes();}
         require(Arrays.equals(expected,actual),"appended Bootstrap payload differs from the requested Unicode-path payload");
         System.out.println("BOOTSTRAP_SEARCH_PASS actual_boot_loader original_payload_match native_available installed_full original="+original);
+    }
+    private static void lwjglBufferStartup()throws Exception{
+        require(Boolean.TRUE.equals(Class.forName("dev.ronova.pro.bootstrap.NativeControl",false,null)
+                .getMethod("available").invoke(null)),"actual premain backend required");
+        // Initialize the real installed LWJGL library, without GLFW or a game.
+        Class.forName("org.lwjgl.system.MemoryUtil",true,AuditFixCheck.class.getClassLoader());
+        var create=Class.forName("org.lwjgl.system.jni.JNINativeInterface")
+                .getMethod("NewDirectByteBuffer",long.class,long.class);
+        var layout=(java.nio.ByteBuffer)create.invoke(null,-1L,219540062L);
+        require(layout.isDirect()&&layout.capacity()==219540062,"sentinel layout view changed");
+        layout.position(16435934);require(layout.position()==16435934,"layout view metadata update failed");
+        long address=U.allocateMemory(16);
+        try{
+            var ordinary=(java.nio.ByteBuffer)create.invoke(null,address,16L);
+            ordinary.put(0,(byte)73);
+            require(U.getByte(address)==73&&ordinary.get(0)==73,"ordinary JNI buffer access failed");
+        }finally{U.freeMemory(address);}
+        System.load(java.nio.file.Path.of(System.getProperty("ronova.pro.audit.native")).toAbsolutePath().toString());
+        for(boolean wrapping:new boolean[]{false,true}){
+            try{jniBufferControlView0(wrapping);throw new AssertionError("live JNI table buffer was exposed: wrapping="+wrapping);}
+            catch(IllegalStateException denied){
+                require("NATIVE_CONTROL_BUFFER_DENIED".equals(denied.getMessage()),"unexpected buffer refusal: "+denied);
+            }
+        }
+        System.out.println("LWJGL_BUFFER_STARTUP_PASS actual_MemoryUtil_initialized sentinel_layout_preserved ordinary_buffer_read_write protected_table_and_wrapping_view_refused");
     }
     private static final class MirrorWriteTarget { static int number=7; static Object reference=new Object(); int field; }
     @java.lang.annotation.Retention(java.lang.annotation.RetentionPolicy.RUNTIME)

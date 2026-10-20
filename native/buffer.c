@@ -2,7 +2,18 @@
 static jmethodID native_buffer_address_query,native_buffer_created_query;
 static int native_buffer_control(JNIEnv *env,const void *address,SIZE_T bytes){
     NativeThread *state=native_thread();int restricted=host_loader_callout()||(state&&(state->heapCallback||state->toolingRestricted));
-    int hit=host_memory_range(address,bytes,0,restricted);
+    /* Creating/exposing a view does not dereference its address. LWJGL uses
+     * UINTPTR_MAX with a nonzero capacity to inspect Buffer's Java layout.
+     * Check both halves of a wrapping view instead of treating that metadata
+     * operation as an overflowing memory access. Actual read/write/protection
+     * APIs keep host_memory_range's original overflow rejection. */
+    uintptr_t first=(uintptr_t)address;
+    int hit;
+    if(bytes&&(uintptr_t)(bytes-1)>UINTPTR_MAX-first){
+        SIZE_T upper=(SIZE_T)(UINTPTR_MAX-first)+1;
+        hit=host_memory_range(address,upper,0,restricted);
+        if(!hit)hit=host_memory_range(NULL,bytes-upper,0,restricted);
+    }else hit=host_memory_range(address,bytes,0,restricted);
     if(hit>0)native_refuse(env,"NATIVE_CONTROL_BUFFER_DENIED");else if(hit<0)native_range_refuse(env,restricted);return !hit;
 }
 static int native_buffer_prepare(JNIEnv *env){
