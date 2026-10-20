@@ -402,8 +402,9 @@ public final class RecoveryAgent {
                     }
                     // A declared entry point carries a receiver-level policy check, so a target that returns early
                     // or swallows its normal entry still cannot execute against a protected exact object.
-                    byte[] console=ConsoleBoundary.transform(loader,name,bytes);
-                    byte[] initial=console==null?bytes:console;
+                    byte[] compatible=ForgeFieldBoundary.TARGET.equals(name)?ForgeFieldBoundary.transform(loader,bytes):bytes;
+                    byte[] console=ConsoleBoundary.transform(loader,name,compatible);
+                    byte[] initial=console==null?compatible:console;
                     if(console!=null&&module!=null&&!module.canRead(bridge.getModule()))
                         api.redefineModule(module,Set.of(bridge.getModule()),Map.of(),Map.of(),Set.of(),Map.of());
                     byte[] dispatch=DispatchBoundary.transform(loader,name,type,initial);
@@ -510,7 +511,7 @@ public final class RecoveryAgent {
                 else if(loader==null&&startupPlatformTarget(name))platform.add(loaded);
                 else if(name.equals(EventFaultBoundary.TARGET))events.add(loaded);
                 else if(name.equals(CommandBoundary.TARGET)||name.equals(ModGroupBoundary.MOD_CONTAINER)||loader!=null&&!producerModule(loaded.getModule())
-                        &&(CodeSourceBoundary.TARGETS.contains(name)||NetworkBoundary.TARGETS.contains(name)||ClientBoundary.TARGETS.contains(name)||BufferBoundary.wrapTarget(name)))sources.add(loaded);
+                        &&(CodeSourceBoundary.TARGETS.contains(name)||ForgeFieldBoundary.TARGET.equals(name)||NetworkBoundary.TARGETS.contains(name)||ClientBoundary.TARGETS.contains(name)||BufferBoundary.wrapTarget(name)))sources.add(loaded);
                 else if(FastutilIndexBoundary.targets().contains(name)||SectionKeyBoundary.targets().contains(name))indices.add(loaded);
                 else if(name.equals(ConsoleBoundary.TARGET))consoles.add(loaded);
             }

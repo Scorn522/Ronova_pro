@@ -1,5 +1,19 @@
 # B 批实际报告：2026-10-09 代码收敛接续
 
+## 2026-10-20：ItemStack public 访问变换后的 Forge 重定向
+
+输入为用户 12:21、12:57 报告及 PCL 实际 Forge 47.4.23／coremods 5.2.4／AT 8.0.4／ASM 9.5。已核对实际阶段：AccessTransformerService 选择 BEFORE，超级史蒂夫 6.10.12f 原包的 ItemStack 全字段规则先将字段公开，Forge 后续 private 前提因此失败。没有执行压缩包内的启动脚本或加载第三方 Mod 类。
+
+生产修复位于 `ForgeFieldBoundary` 与 Agent 原变换链：只兼容 ItemStack 的准确 Item 字段／getter 对，保持 AST 可见性和其余 Forge 验证、重定向主体，以及原 Ronova 来源／写入／发布控制。没有改 SDK、Native 控制区、保护资格、容器 Hook 或第三方包。
+
+- `jar compileStateChecksJava` 成功，33 秒，生成对应候选。
+- 真实小检查读取超级史蒂夫原 AT 文件，调用原 AT 引擎，处理真实 SRG 与开发映射 ItemStack 类文件，再调用实际 Forge ASMAPI。完整 Agent／Native 安装，保留 PCL 全部 DisableIntrinsic 参数；日志后端仅在检查进程改用 SimpleLoggerContextFactory。
+- 新候选：4 处读取正确改为 getter 调用，AT 权限未被修改，原 private 路径通过；无关类、静态字段、错误描述符、错误 getter、缺失／重复 getter、重复字段及其他字段共 8 类输入均拒绝。`FORGE_ITEMSTACK_PASS`，退出 0，40.279 秒。
+- 旧候选同输入准确失败于 `ASMAPI.redirectFieldToMethod:1069`，异常与用户报告一致，退出 1，39.802 秒。
+- 首次检查超时与后续诊断栈保留在 `.work/pcl-itemstack-20261020`：当时仍在 Log4j 插件扫描，未执行到 ItemStack 变换。更换检查日志后端后完成；没有用超时记录声称生产通过，也未继续运行无关检查。
+
+已保存旧加载进程日志并结束该进程，候选双 JAR 及启动参数更新到原 PCL 实例，备份保留。没有启动游戏／Forge、初始化游戏世界或执行保存重启。12:57 报告没有新增致命异常；原先未解决的 ItemStack 冲突由本节覆盖，完整主菜单／世界验收仍未取得。
+
 ## 2026-10-20：LWJGL WindowsLibrary 原生空返回路径
 
 接续 `dcc98db`。用户报告 `错误报告-2026-10-20_11.38.50.zip` 含 `hs_err_pid141168.log`：`WinBase.nGetModuleHandle` 内 `lwjgl.dll+0x20524` 执行写入 `[rax+0x1c]`，当时 RAX 为 0。其前序指令通过 JNI 查找／调用 ThreadLocalUtil 的线程数据初始化。原报告没有保留该 JNI 调用内的 Java 异常，因此未把某个猜测异常写成已捕获事实。

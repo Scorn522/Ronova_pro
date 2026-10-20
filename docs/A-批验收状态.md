@@ -1,5 +1,15 @@
 # Ronova Pro 当前进度
 
+## 2026-10-20：超级史蒂夫 ItemStack 访问变换兼容
+
+接续 `022e716`。12:21 与 12:57 报告中的 `Field f_41589_ is not private and an instance field` 已查清：实际 AccessTransformerService 在 ModLauncher BEFORE 阶段应用超级史蒂夫的 `public-f net.minecraft.world.item.ItemStack *`，随后 Forge `field_to_method.js` 调用 ASMAPI，仍按 private 实例字段校验，因此同一合法 getter 重定向被拒绝。
+
+新增 Agent 兼容变换，仅对 ItemStack／Item 类型的 public 实例字段及准确 SRG／开发映射字段、getter 名称放宽可见性前提；继续运行 Forge 原本的静态字段、重复字段与 getter 存在／唯一性检查及实际 GETFIELD → getter 重定向。不临时修改 AST 访问标志，不关闭重定向，不改第三方 JAR。该 API 继续经过原有整组来源、写入与发布控制，没有增加可借用的 Bootstrap 放行入口。
+
+最终构建通过（33 秒）。完整 premain／Bootstrap／Native 及原写入拦截参数下，真实超级史蒂夫 AT、Forge 5.2.4 API、生产 SRG 与开发映射 ItemStack 字节码检查通过：4 处应改写读取完成重定向，public 权限保持，原 private 路径正常，8 类无效输入仍拒绝，退出 0。相同检查换回旧候选，准确复现报告原异常并退出 1。检查进程使用简单日志后端，游戏配置未更改。
+
+双 JAR 已更新到原 PCL 实例并重新准备参数，旧包已备份。替换前保存日志并结束旧加载进程；没有启动新游戏或 Forge，完整进入主菜单仍待用户实际重试。
+
 ## 2026-10-20：PCL 扫描卡顿与 Native 来源读锁误判
 
 接续 `dbed510`。12:21:03 报告与现场线程栈一致：早期扫描仍在推进，但普通 Unsafe 原子操作也创建堆写入回执、采集随后被丢弃的 Native 来源数组，原生写入结束还反复解析 Unsafe 声明类。随后 playerAnimator 的正常类文件解压因 `declaring_owner_busy` 被拒绝，Mixin 初始化失败；已保存现场并结束该失败进程。

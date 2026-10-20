@@ -68,6 +68,7 @@ public final class AuditFixCheck {
         if(args.length==1&&args[0].equals("platform-control-writes")){platformControlWrites();return;}
         if(args.length==1&&args[0].equals("installed-platform-writes")){installedPlatformWrites();return;}
         if(args.length==1&&args[0].equals("startup-memory")){startupMemory();return;}
+        if(args.length==1&&args[0].equals("forge-itemstack")){forgeItemStack();return;}
         if(args.length==1&&args[0].equals("known-container-cleanup")){knownContainerCleanup();return;}
         if(args.length==2&&args[0].equals("core-native-state")){coreNativeState(args[1]);return;}
         if(args.length==1&&args[0].equals("core-native-bytes")){
@@ -2549,6 +2550,80 @@ public final class AuditFixCheck {
         try{MethodHandles.lookup().unreflectSetter(field).invokeWithArguments(receiver,proposed);}
         catch(Throwable failure){throw new AssertionError("guarded setter invocation failed: "+field,failure);}
         require(U.getObject(receiver,offset)==before,"actual MethodHandle setter poisoned "+field);
+    }
+    private static org.objectweb.asm.tree.ClassNode itemStackTree(String property)throws Exception{
+        var archive=java.nio.file.Path.of(System.getProperty(property));
+        try(var zip=new java.util.zip.ZipFile(archive.toFile())){
+            var entry=zip.getEntry("net/minecraft/world/item/ItemStack.class");require(entry!=null,"actual ItemStack class missing: "+archive);
+            try(var input=zip.getInputStream(entry)){
+                var node=new org.objectweb.asm.tree.ClassNode();new org.objectweb.asm.ClassReader(input).accept(node,0);return node;
+            }
+        }
+    }
+    private static org.objectweb.asm.tree.FieldNode itemField(org.objectweb.asm.tree.ClassNode node,String name){
+        return node.fields.stream().filter(field->field.name.equals(name)).findFirst().orElseThrow();
+    }
+    private static long itemReads(org.objectweb.asm.tree.ClassNode node,String field,String getter){
+        long count=0;
+        for(var method:node.methods){
+            if(method.desc.equals("()Lnet/minecraft/world/item/Item;"))continue;
+            for(var at:method.instructions.toArray())if(at instanceof org.objectweb.asm.tree.FieldInsnNode read
+                    &&read.getOpcode()==180&&read.owner.equals(node.name)&&read.name.equals(field))count++;
+        }
+        return count;
+    }
+    private static long itemGetterCalls(org.objectweb.asm.tree.ClassNode node,String getter){
+        long count=0;
+        for(var method:node.methods){
+            if(method.desc.equals("()Lnet/minecraft/world/item/Item;"))continue;
+            for(var at:method.instructions.toArray())if(at instanceof org.objectweb.asm.tree.MethodInsnNode call
+                    &&call.getOpcode()==182&&call.owner.equals(node.name)&&call.name.equals(getter)
+                    &&call.desc.equals("()Lnet/minecraft/world/item/Item;"))count++;
+        }
+        return count;
+    }
+    private static void itemRedirectRefused(org.objectweb.asm.tree.ClassNode node,String field,String getter){
+        try{net.minecraftforge.coremod.api.ASMAPI.redirectFieldToMethod(node,field,getter);throw new AssertionError("invalid field redirect admitted");}
+        catch(IllegalStateException expected){/* Forge's original validation still rejects invalid trees. */}
+    }
+    private static void forgeItemStack()throws Exception{
+        var engine=net.minecraftforge.accesstransformer.AccessTransformerEngine.INSTANCE;
+        try(var archive=java.nio.file.FileSystems.newFileSystem(java.nio.file.Path.of(System.getProperty("ronova.pro.audit.superSteve")))){
+            engine.addResource(archive.getPath("/META-INF/accesstransformer.cfg"),"actual-super-steve-6.10.12f");
+        }
+        int redirected=0;
+        for(String property:new String[]{"ronova.pro.audit.forgeClient","ronova.pro.audit.mappedClient"}){
+            String field=property.endsWith("mappedClient")?"item":"f_41589_",getter=field.equals("item")?"getItem":"m_41720_";
+            var node=itemStackTree(property);var selected=itemField(node,field);
+            require(java.lang.reflect.Modifier.isPrivate(selected.access),"original game field was already non-private");
+            require(engine.transform(node,org.objectweb.asm.Type.getObjectType(node.name)),"actual Super Steve AT was not applied");
+            require(java.lang.reflect.Modifier.isPublic(selected.access)&&!java.lang.reflect.Modifier.isStatic(selected.access),"actual AT did not expose the instance field");
+            long before=itemReads(node,field,getter),calls=itemGetterCalls(node,getter);int access=selected.access;
+            require(before>0,"actual ItemStack contained no eligible field reads");
+            net.minecraftforge.coremod.api.ASMAPI.redirectFieldToMethod(node,field,getter);
+            require(selected.access==access&&java.lang.reflect.Modifier.isPublic(selected.access),"redirect changed AT visibility");
+            require(itemReads(node,field,getter)==0&&itemGetterCalls(node,getter)==calls+before,"Forge getter redirect was skipped or incomplete");
+            redirected+=before;
+        }
+        var original=itemStackTree("ronova.pro.audit.forgeClient");
+        net.minecraftforge.coremod.api.ASMAPI.redirectFieldToMethod(original,"f_41589_","m_41720_");
+        require(itemReads(original,"f_41589_","m_41720_")==0,"original private-field behavior changed");
+        for(String invalid:List.of("unrelated","static","descriptor","wrong-getter","missing-getter","duplicate-getter","duplicate-field","other-field")){
+            var node=itemStackTree("ronova.pro.audit.forgeClient");engine.transform(node,org.objectweb.asm.Type.getObjectType(node.name));
+            var field=itemField(node,"f_41589_");String name=field.name,getter="m_41720_";
+            switch(invalid){
+                case "unrelated"->node.name="audit/Unrelated";
+                case "static"->field.access|=java.lang.reflect.Modifier.STATIC;
+                case "descriptor"->field.desc="Ljava/lang/Object;";
+                case "wrong-getter"->getter="unrelatedGetter";
+                case "missing-getter"->node.methods.removeIf(method->method.name.equals("m_41720_"));
+                case "duplicate-getter"->node.methods.add(node.methods.stream().filter(method->method.name.equals("m_41720_")).findFirst().orElseThrow());
+                case "duplicate-field"->node.fields.add(field);
+                case "other-field"->name="f_41587_";
+            }
+            itemRedirectRefused(node,name,getter);
+        }
+        System.out.println("FORGE_ITEMSTACK_PASS actual_SuperSteve_AT actual_SRG_and_mapped_ItemStack original_Forge_redirect reads="+redirected+" visibility_preserved private_path_preserved eight_invalid_cases_refused no_game_classes_initialized");
     }
     private static void startupMemory()throws Exception{
         installedPlatformWrites();
