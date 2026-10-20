@@ -1411,7 +1411,7 @@ public final class ControlBridge {
         // A Class mirror also holds Class's own instance cache, separately
         // from the represented declaration and its static business fields.
         // Admit only its real JDK CAS, never an arbitrary write to that mirror.
-        var field=ResourceBridge.exactField(receiver,offset,width);
+        var field=ResourceBridge.mirrorInstanceField(receiver,offset,width);
         return classCacheFieldWrite(field);
     }
     static boolean classCacheFieldWrite(java.lang.reflect.Field field){
@@ -1434,10 +1434,13 @@ public final class ControlBridge {
         if(EventBusBridge.restoreWrite(receiver,offset,value,resourceWidth))return true;
         if(!PlatformMetadata.memoryMutationAllowed(receiver))return false;
         if(!EventBusBridge.memoryAllowed(receiver,offset,resourceWidth))return false;
-        boolean reflectionCache=false;
-        if(receiver instanceof Class<?> mirror&&!ResourceBridge.mirrorStaticRange(mirror,offset,resourceWidth)){
-            reflectionCache=classReflectionWrite(receiver,offset,resourceWidth);
-            if(!reflectionCache)return false;
+        if(receiver instanceof Class<?> mirror){
+            // Resolve Class's own cache slot and authenticate its exact JDK CAS
+            // before touching the represented class's fields. Their types may
+            // still be loading: reflecting them here re-enters ModuleClassLoader.
+            // This writes only the platform cache, never a business static field.
+            if(classReflectionWrite(receiver,offset,resourceWidth))return true;
+            if(!ResourceBridge.mirrorStaticRange(mirror,offset,resourceWidth))return false;
         }
         if(receiver!=null&&value==null&&stoppedModules.length!=0){
             var exact=ResourceBridge.exactField(receiver,offset,resourceWidth);
@@ -1452,17 +1455,14 @@ public final class ControlBridge {
                 &&!ResourceBridge.unsafeMutationAllowed(receiver,offset,resourceWidth))return false;
         boolean targetStopped=modStopped(objectModule(receiver));
         boolean ownMirror=receiver instanceof Class<?> owner&&ownState(owner);
-        if(!reflectionCache&&!protectedMutationAllowed(receiver,receiver instanceof Class<?> type?type:receiver==null?null:receiver.getClass()))return false;
-        // Stopping a represented class must not turn Class's reflection/annotation
-        // own cache CAS into a permanently false retry. Its exact JDK/instance
-        // field and call-chain check permits only JDK cache maintenance, even
-        // if an in-flight stopped caller requested the lookup. A false CAS
-        // would otherwise spin forever inside Class.annotationData().
-        if(!reflectionCache&&(targetStopped||stoppedInvocation())&&!coreWriter()
+        if(!protectedMutationAllowed(receiver,receiver instanceof Class<?> type?type:receiver==null?null:receiver.getClass()))return false;
+        // Exact JDK cache maintenance returned above, including when an in-flight
+        // stopped caller requested it. Business writes still use current policy.
+        if((targetStopped||stoppedInvocation())&&!coreWriter()
                 &&!NetworkBridge.retirementWriteAllowed(receiver,offset,value,resourceWidth))return false;
-        if(ownMirror&&!reflectionCache||receiver!=null&&ownState(receiver.getClass()))return false;
+        if(ownMirror||receiver!=null&&ownState(receiver.getClass()))return false;
         if(receiver==null)return true; // Raw-address writes have no exact object binding here.
-        if(!reflectionCache&&(!controlMutationAllowed(receiver)||!BackingBridge.offsetAllowed(receiver,offset,value)))return false;
+        if(!controlMutationAllowed(receiver)||!BackingBridge.offsetAllowed(receiver,offset,value))return false;
         Guards current=guards;
         if(current==null)return true;
         for(UnsafeField field:current.unsafeFields())if(field.declaring().isInstance(receiver))

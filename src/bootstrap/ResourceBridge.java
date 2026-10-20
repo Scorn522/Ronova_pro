@@ -2137,6 +2137,10 @@ public final class ResourceBridge {
                 ?STATIC_BASE.invoke(UNSAFE,field)==receiver
                 :receiver!=null&&field.getDeclaringClass().isInstance(receiver);
     }
+    /** Class-owned cache lookup must not resolve the represented class's field types. */
+    static Field mirrorInstanceField(Object receiver,long offset,long length){
+        return receiver instanceof Class<?>?exactField(receiver,Class.class,false,offset,length):null;
+    }
     /** Resolve storage on the actual receiver before considering a Class mirror's static storage. */
     static Field exactField(Object receiver,long offset,long length){
         if(receiver==null)return null;
@@ -2161,6 +2165,10 @@ public final class ResourceBridge {
     static boolean mirrorStaticRange(Class<?> mirror,long offset,long length){
         if(offset<0||length<=0||length>Long.MAX_VALUE-offset)return false;
         long end=offset+length,cursor=offset;
+        // A mirror instance slot cannot also be represented static storage.
+        // Reject external cache/instance writes without loading business fields.
+        for(Span span:INSTANCE_FIELDS.get(Class.class))
+            if(offset<span.offset+span.bytes&&span.offset<end)return false;
         Span[] spans=STATIC_FIELDS.get(mirror);
         try {
             // Cover the complete write. Header bytes and alignment holes do not

@@ -2420,7 +2420,8 @@ public final class AuditFixCheck {
     private static final class MirrorWriteTarget { static int number=7; static Object reference=new Object(); int field; }
     @java.lang.annotation.Retention(java.lang.annotation.RetentionPolicy.RUNTIME)
     private @interface CacheMarker { int value(); }
-    @CacheMarker(37) private static final class AnnotationTarget {}
+    @CacheMarker(37) private static final class AnnotationTarget { static AnnotationFieldType deferred; }
+    private static final class AnnotationFieldType {}
     private static Field platformField(Class<?> owner,String name)throws Exception{
         return (Field)Class.forName("dev.ronova.pro.bootstrap.PlatformMetadata",true,null)
                 .getMethod("declaredField",Class.class,String.class).invoke(null,owner,name);
@@ -2434,6 +2435,11 @@ public final class AuditFixCheck {
         Field dataField=platformField(Class.class,"annotationData"),typeField=platformField(Class.class,"annotationType");
         long dataOffset=U.objectFieldOffset(dataField),typeOffset=U.objectFieldOffset(typeField);
         Class<?> target=AnnotationTarget.class;
+        if(installed){
+            requireFieldTypeUnloaded();
+            require(target.getDeclaredMethods().length==0,"fresh method reflection failed");
+            requireFieldTypeUnloaded();
+        }
         require(U.getObject(target,dataOffset)==null,"annotation target was already cached before regression");
         require(U.getObject(CacheMarker.class,typeOffset)==null,"annotation interface was already parsed before regression");
         require(target.getAnnotations().length==1&&target.getAnnotation(CacheMarker.class).value()==37
@@ -2450,6 +2456,7 @@ public final class AuditFixCheck {
         }else U.putInt(target,countOffset,before+1);
         require(target.getAnnotations().length==1&&target.getAnnotation(CacheMarker.class).value()==37,
                 "annotation cache rebuild after invalidation failed");
+        if(installed)requireFieldTypeUnloaded();
         Object current=U.getObject(target,dataOffset);require(current!=null&&current!=first,"stale annotation data was reused");
         denyPlatformReference(target,dataField,null,installed);
         denyPlatformReference(target,platformField(Class.class,"name"),"tampered.annotation.mirror",installed);
@@ -2459,7 +2466,13 @@ public final class AuditFixCheck {
             denyPlatformReference(current,platformField(current.getClass(),field),Map.of(),installed);
         denyPlatformReference(annotationType,platformField(annotationType.getClass(),"memberTypes"),Map.of(),installed);
         require(target.getAnnotation(CacheMarker.class).value()==37,"refused poisoning changed live annotations");
+        if(installed)requireFieldTypeUnloaded();
         System.out.println("ANNOTATION_CACHE_PASS installed="+installed+" fresh_data_and_type_CAS invalidation_rebuild mirror_and_cache_poison_refused");
+    }
+    private static void requireFieldTypeUnloaded()throws Exception{
+        String name=AuditFixCheck.class.getName()+"$AnnotationFieldType";
+        for(Class<?> loaded:actualInstrumentation().getAllLoadedClasses())
+            require(!loaded.getName().equals(name),"Class cache guard eagerly resolved a represented field type: "+name);
     }
     private static void denyPlatformReference(Object receiver,Field field,Object proposed,boolean installed)throws Exception{
         Class<?> control=Class.forName("dev.ronova.pro.bootstrap.ControlBridge",true,null);

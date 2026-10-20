@@ -1,5 +1,15 @@
 # Ronova Pro 当前进度
 
+## 2026-10-20：PCL 启动报告中的 Class 缓存递归加载修复
+
+接续 `a14799f`。用户提供的 10:47:53 错误报告显示启动交接已完成，Agent 为 `INSTALLED_FULL`；随后 JDK 发布注解缓存时，Ronova 先调用 `mirrorStaticRange` 枚举被代表类的字段，解析字段类型重入 Forge `ModuleClassLoader`，导致 Log4j `MessagePatternConverter$RenderingPatternConverter` 重复定义。
+
+缓存写入现在先查 `Class.class` 自身实例布局，再验证三个既有精确 JDK CAS 调用链；合法缓存维护直接完成，不进入业务静态字段解析。外部 Class 实例字段写入按真实重叠区间拒绝，静态字段与其他写边界继续执行原策略，没有关闭控制链或恢复广谱容器 Hook。
+
+统一构建通过（33 秒）。已有实际 Agent/Native 检查新增未加载字段类型断言：首次方法反射、注解缓存建立、实际重变换后缓存重建及外部缓存投毒拒绝均通过；同一检查换回旧 Bootstrap 后准确失败于字段类型被提前加载。两次结果均保留在 `.work/pcl-class-cache-20261020`。
+
+候选双 JAR 已更新到 `distribution/v1.5-whole-mod` 和现有 PCL `1.20.1-Forge_47.4.23` 实例，旧包已备份，启动参数准备成功。没有启动游戏或 Forge；这次确认的是报告根因及对应 JVM 回归修复，游戏启动结果仍待实际重试。
+
 ## 2026-10-20：PCL2 启动前交接配置
 
 接续 `8170395`。Prelaunch 新增 `--prepare-args`，复用现有载荷提取、Mod 文件扫描、保存选集与 Native/JVM 参数准备，原子生成 Java 参数文件后直接返回。PCL2 同步执行准备脚本后，仍自行启动原 Forge 主类；账号、游戏、内存及其他 JVM 参数保留。生成文件不保存登录参数，准备失败会移除旧文件。

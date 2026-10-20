@@ -1,5 +1,23 @@
 # B 批实际报告：2026-10-09 代码收敛接续
 
+## 2026-10-20：PCL Class 缓存反射重入回归
+
+接续 `a14799f`。用户错误报告 `错误报告-2026-10-20_10.47.53.zip` 中，PCL 参数交接、Bootstrap 装载及 Native 安装成功，随后 `AGENT_PREMAIN_READY:INSTALLED_FULL`。崩溃栈为 `Class$Atomic.casAnnotationData → ControlBridge.unsafeWriteAllowed → ResourceBridge.mirrorStaticRange / declaredSpans → PlatformMetadata.declaredFields → Class.getDeclaredFields0 → ModuleClassLoader`，最终重复定义 Log4j 的 `MessagePatternConverter$RenderingPatternConverter`。
+
+修复仅涉及 Class 镜像字段判定：实例缓存查找限于 `Class.class` 布局，精确通过原有 JDK 三条 CAS 栈验证后立即放行该缓存写；不再为平台缓存访问被代表类的业务字段。外部实例字段写与 bulk 重叠写提前拒绝，真实静态字段仍走原保护策略，未放宽外部 Unsafe、反射或句柄修改。
+
+- 统一 `jar` / `reobfJar` / `compileStateChecksJava`：33 秒，退出 0。
+- `installed-platform-writes`：真实 Agent 与 Native 安装，退出 0。首次方法反射及注解查询、重变换后查询、外部缓存投毒拒绝全过程，实际 Instrumentation 类目录中的延迟字段类型始终未加载；合法静态写保持，三个 JDK 缓存 CAS 均完成。
+- 保存的旧 Bootstrap 对照同一检查：退出 1，准确命中 `Class cache guard eagerly resolved a represented field type`，发生于首次方法反射之后。没有以重跑成功替代故障定位。
+- PCL 本地部署：双 JAR 与候选一致，旧包及参数备份到 `ronova-launch/backup-class-cache-20261020-105714`；实际准备脚本成功生成新 JVM 参数。没有改动游戏主类或启动游戏。
+
+工作记录在 `.work/pcl-class-cache-20261020`，原始报告保存在 `.work/pcl-crash-20261020-104753`。原失败和旧版本对照结果保留；没有 Minecraft/Forge 启动通过或世界效果结论。
+
+| 候选 | 字节 | SHA-256 |
+| --- | ---: | --- |
+| `ronova-pro-core-1.5.0-dev.jar` | 3296813 | `a4d1fb00aeacf489ec08b76aab3588943b9acf649bb53e73f28dba927c4b8294` |
+| `ronova-pro-prelaunch.jar` | 51556 | `d6bfc76997b1a115346a1cb16fa9feb2767595d0d0a419de5c944bce1016c6ab` |
+
 ## 2026-10-20：PCL2 仅准备参数的启动交接
 
 接续 `8170395`。使用 PCL2 正式版 2.99.0.0 的实际实例 `1.20.1-Forge_47.4.23`，继续指定其 Java 17.0.15。依据 [PCL 启动实现](https://github.com/Meloong-Git/PCL/blob/main/Plain%20Craft%20Launcher%202/Modules/Minecraft/ModLaunch.vb)，实例启动前命令启用等待，JVM 参数首项加入新生成的 `@ronova-jvm.args` 绝对路径；原主类 `cpw.mods.bootstraplauncher.BootstrapLauncher`、原游戏参数与原 JVM 参数均未替换。
