@@ -211,6 +211,7 @@ public final class RecoveryAgent {
                             Map.entry("java.util",Set.of(bridge.getModule())),Map.entry("java.util.concurrent.locks",Set.of(bridge.getModule(),ours)),Map.entry("java.io",Set.of(bridge.getModule())),Map.entry("java.net",Set.of(bridge.getModule())),
                             Map.entry("java.nio",Set.of(bridge.getModule())),Map.entry("jdk.internal.ref",Set.of(bridge.getModule())),
                             Map.entry("sun.nio.cs",Set.of(bridge.getModule())),Map.entry("sun.nio.ch",Set.of(bridge.getModule())),Map.entry("jdk.internal.loader",Set.of(bridge.getModule()))),Set.of(),Map.of());
+            Class.forName("dev.ronova.pro.bootstrap.PlatformMetadata",true,null);
             prepareStartupSelectors();
             // A Forge scanning thread may run newly transformed code immediately after addTransformer.
             // Finish the bootstrap helper's access and initialization before publishing any such call site.
@@ -239,6 +240,8 @@ public final class RecoveryAgent {
             Module instrument=Instrumentation.class.getModule();
             api.redefineModule(instrument,Set.of(bridge.getModule()),Map.of(),
                     Map.of("sun.instrument",Set.of(bridge.getModule(),ours)),Set.of(),Map.of());
+            if(!Boolean.TRUE.equals(nativeControl.getMethod("protectPlatformStructures",Object.class).invoke(null,api)))
+                report("PLATFORM_CONTROL_STRUCTURES_UNAVAILABLE");
             JdkTaskBoundaryContract.enable();
             ClassFileTransformer taskTransformer=new ClassFileTransformer() {
                 @Override public byte[] transform(Module module,ClassLoader loader,String name,Class<?> type,
@@ -276,6 +279,7 @@ public final class RecoveryAgent {
                     boolean writer=!platformModule(module,loader)&&!producer&&actualWriteSites(bytes);
                     if(!sourceCandidate&&!control&&!contract&&!boundary&&!writer)return null;
                     try {
+                    if(type!=null&&recorded)ExternalCodeDefinitions.sourceContinuing(type);
                     if(origin!=null&&module!=null&&!module.canRead(bridge.getModule()))
                         api.redefineModule(module,Set.of(bridge.getModule()),Map.of(),Map.of(),Set.of(),Map.of());
                     byte[] external=recorded?ExternalCodeImages.transform(loader,name,type,bytes):null;
@@ -1086,7 +1090,7 @@ public final class RecoveryAgent {
         Class<?> caller=CALLER.getCallerClass();
         try{if(caller!=Class.forName("dev.ronova.pro.bootstrap.ControlBridge",false,null))throw new SecurityException("ACTUAL_INSTRUMENTATION_COMPLETION_REQUIRED");}
         catch(ClassNotFoundException unavailable){throw new IllegalStateException(unavailable);}
-        for(Class<?> actual:actuals){platformAccepted(actual);ExternalCodeDefinitions.changed(actual);}
+        for(Class<?> actual:actuals){platformAccepted(actual);ExternalCodeDefinitions.sourceAccepted(actual);ExternalCodeDefinitions.changed(actual);}
     }
     static String[] externalCodeVersion(Class<?> actual,byte[] bytes){
         if(CALLER.getCallerClass()!=ExternalCodeDefinitions.class)throw new SecurityException("ACTUAL_CODE_DEFINITION_REGISTRY_REQUIRED");
@@ -1144,6 +1148,12 @@ public final class RecoveryAgent {
     static Module[] methodRootSources(Class<?> type){
         try{return (Module[])codeSourceBridge.getMethod("methodRootSources",Class.class).invoke(null,type);}
         catch(ReflectiveOperationException failure){throw new IllegalStateException("EXTERNAL_METHOD_ROOT_QUERY_UNAVAILABLE",failure);}
+    }
+    static boolean bindExternalSources(Class<?> actual,byte[] bytes){
+        if(CALLER.getCallerClass()!=ExternalCodeDefinitions.class)throw new SecurityException("ACTUAL_CODE_DEFINITION_REGISTRY_REQUIRED");
+        try{return Boolean.TRUE.equals(Class.forName("dev.ronova.pro.bootstrap.NativeControl",false,null)
+                .getMethod("codeSourceDefinition",Class.class,byte[].class).invoke(null,actual,bytes));}
+        catch(ReflectiveOperationException failure){throw new IllegalStateException("EXTERNAL_METHOD_SOURCE_BINDING_UNAVAILABLE",failure);}
     }
     static void publishExternalCode(ClassLoader loader,String name,Class<?> actual,byte[] bytes,String[] methods,Module[][][] owners,Map<String,Module[]> fields,Object[][] values,boolean hidden,Object execution,Module declaration){
         Class<?> caller=CALLER.getCallerClass();

@@ -175,6 +175,8 @@ static void host_module_binding_leave(Binding*);
 static int host_capture_caller(NativeThread*,void*,OwnerLink**);
 static HMODULE native_control_image(void);
 static int native_control_range(uintptr_t,uintptr_t,int);
+static int native_platform_range(uintptr_t,uintptr_t,int);
+static size_t native_platform_env_span(jvmtiEnv*);
 static BOOL host_real_virtual_protect(LPVOID,SIZE_T,DWORD,PDWORD);
 static BOOL host_real_virtual_free(LPVOID,SIZE_T,DWORD);
 static BOOL host_real_write_process_memory(HANDLE,LPVOID,LPCVOID,SIZE_T,SIZE_T*);
@@ -2743,3 +2745,4 @@ JNIEXPORT jobject JNICALL Java_dev_ronova_pro_bootstrap_NativeControl_networkFie
     return result;
 }
 #include "carrier.c"
+#include "platform_structures.c"

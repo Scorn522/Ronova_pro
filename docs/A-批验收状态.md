@@ -1,5 +1,21 @@
 # Ronova Pro 当前进度
 
+## 2026-10-20：三个 P0 与反射／JVMTI 控制链修复
+
+接续 `1542cfc`，按整包生产代码方式实现，继续沿用 premain + Bootstrap + JVMTI/Native。没有恢复 JDK 容器广谱 Hook，没有合作式 SDK、SYS 扩展、自身外观或武器注册。
+
+- SourceMaps：在既有精确后端上补 TreeMap、IdentityHashMap、TreeSet（实际 TreeMap backing）、LinkedList、ArrayDeque 的直接遍历与整组清理。使用真实节点、槽位和对象身份，不调用目标自定义 comparator/hashCode/equals。清空已归属的私有容器前保留子图继续处理；共享载体保留组外条目，未知元素和并发结构变化继续报告缺口。
+- EntityRecords：重新定位当前 manager/tick/lookup/sections、getter、回调、分区可见性和实体索引，修复后重新发布当前载体保护，仅退掉该实体的旧关联。Binding 固定原对象和原 Class；在实体访问前恢复被切换的 `_klass`。原类型位值来自实际 Class mirror 与 VM 导出的 narrowKlass 参数，恢复比较完整字段布局、大小和引用类型，并用已校验类型的位值执行 CAS，不采信竞争期间重新读到的任意对象头。恢复失败的状态查询仍按原对象报告 GAP。
+- 在途调用：已接受的外部方法绑定实际 VM Method/ConstMethod/常量池版本，旧帧继续按原版本归源；独立线程及当前任务链的真实来源进入写入、提交、注册和 Native 效果边界。未知的已停组旧帧不借用当前新方法或历史来源并集。
+- 反射缓存：阻止外部调用者修改 `Class$ReflectionData` 内部字段及 `InstrumentationImpl` 平台状态，包括尚未停用的 Mod。关键字段、方法及构造声明读取改用原始 VM 声明入口，不消费被投毒的 ReflectionData；Core 的入口绑定也不依赖该反射缓存。
+- 原生控制链：从实际 InstrumentationImpl 的 `mNativeAgent` 定位 JPLISAgent，保护实际 normal/retransform JvmtiEnv、Ronova 自身环境及已观察环境的完整受支持结构区间，覆盖 `_next`，并接入后续 Instrumentation 构造交接。外部裸地址读、写、CAS、批量内存及现有 Host 内存边界共用该范围判定。
+
+原生私有结构适用于已确认布局的 OpenJDK 17 Win64。未知 VM 布局、未捕获或布局不兼容的实体类型、未知容器语义及未观察 Native 入口继续报告 GAP/PARTIAL，不把候选编译当作实际攻防通过。
+
+整包代码写齐后统一构建。首轮 Java 编译通过，Native 编译因 JVMTI 版本掩码常量名错误退出；按本机 JDK 17 头文件修正后，继续同一 `jar` / `reobfJar` 构建，19 秒成功、退出 0。没有执行起服、实机、测试或夹具。日志分别为 `.work/v1.5-p0-20261020/build.log`、`build-complete.log`；原有弃用、Mixin 映射及 Native 比较警告保留。
+
+候选双 JAR 已更新到 `distribution/v1.5-whole-mod`：Core 3,253,883 字节，prelaunch 51,042 字节（启动器源码本轮未变，构建产物不变）。配套 Java105 / Native99 / Storage3 / Journal7 不变。此记录只确认源码和候选编译完成，没有新增游戏启动或攻防效果通过结论。
+
 ## 2026-10-18：启动扫描与嵌套作用组收尾
 
 按用户新方向，SYS 保留源码和可选接线，暂缓部署与扩展。本轮接续 `e4928eb`，集中修复用户态启动与整组解析：

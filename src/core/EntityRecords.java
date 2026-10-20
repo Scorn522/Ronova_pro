@@ -48,6 +48,9 @@ public final class EntityRecords {
     final Class<?> definition;
     final boolean originallyTicking;
     private final Object idOwner, uuidOwner, knownOwner, sectionOwner, trackingOwner;
+    private final Object visibilityOwner,sectionKeysOwner,tickActiveOwner,tickPassiveOwner,visibilityProvider,getterOwner;
+    private final java.lang.ref.WeakReference<Object> capturedSection;
+    private final LevelCallback<Entity> levelCallbacks;
     private final Set<UUID> ownedUuids=new HashSet<>();
     private boolean lifecycleUnresolved;
     private boolean currentCheckUnresolved;
@@ -81,13 +84,18 @@ public final class EntityRecords {
                 || currentSection!=null && currentSection.getStatus().isTicking();
         idOwner=lookup.pro$ids(); uuidOwner=lookup.pro$uuids(); knownOwner=manager.pro$known();
         sectionOwner=sections.pro$all(); trackingOwner=tracking.pro$tracked();
+        visibilityOwner=manager.pro$visibility();sectionKeysOwner=sections.pro$keys();
+        tickActiveOwner=ticks.pro$active();tickPassiveOwner=ticks.pro$passive();capturedSection=new java.lang.ref.WeakReference<>(currentSection);
+        levelCallbacks=manager.pro$callbacks();visibilityProvider=sections.pro$visibility();getterOwner=manager.pro$getter();
         ownedUuids.add(uuid);
         captureAliases();
     }
     public boolean bound() {
-        Entity entity=observedEntity.get();var raw=(Access.EntityState)entity;
+        Object body=observedEntity.get();if(body!=null&&body.getClass()!=definition)return false;
+        Entity entity=(Entity)body;
+        var raw=(Access.EntityState)entity;
         return ownersCurrent()&&(entity==null?referencesReleased:
-                raw.pro$level()==level&&raw.pro$id()==id&&raw.pro$uuid().equals(uuid)&&entity.getClass().getClassLoader()==loader);
+                entity.getClass()==definition&&raw.pro$level()==level&&raw.pro$id()==id&&Objects.equals(raw.pro$uuid(),uuid));
     }
     private boolean ownersCurrent() {
         return level.getServer().isSameThread()&&level.getServer().getLevel(level.dimension())==level
@@ -95,7 +103,8 @@ public final class EntityRecords {
             && manager.pro$lookup()==lookup && manager.pro$sections()==sections
             && level.getChunkSource().chunkMap==tracking
             && lookup.pro$ids()==idOwner && lookup.pro$uuids()==uuidOwner && manager.pro$known()==knownOwner
-            && sections.pro$all()==sectionOwner && tracking.pro$tracked()==trackingOwner;
+            && sections.pro$all()==sectionOwner && sections.pro$keys()==sectionKeysOwner
+            && manager.pro$visibility()==visibilityOwner && tracking.pro$tracked()==trackingOwner;
     }
     public boolean conflict() {
         Entity entity=observedEntity.get();
@@ -340,76 +349,243 @@ public final class EntityRecords {
     }
     public boolean softRepairSupported() {
         // No virtual container callbacks are allowed to acquire the SOFT classification.
-        if(lookup.pro$uuids().getClass()!=HashMap.class || manager.pro$known().getClass()!=HashSet.class
-                || lookup.pro$ids().getClass()!=it.unimi.dsi.fastutil.ints.Int2ObjectLinkedOpenHashMap.class
-                || ticks.pro$active().getClass()!=it.unimi.dsi.fastutil.ints.Int2ObjectLinkedOpenHashMap.class
-                || sections.pro$all().getClass()!=it.unimi.dsi.fastutil.longs.Long2ObjectOpenHashMap.class) return false;
-        EntitySection<Entity> row=sections.pro$all().get(section);
-        if(row==null)return false;
-        Access.Group g=(Access.Group)((Access.Section)row).pro$storage();
-        if(g.pro$all().getClass()!=ArrayList.class || g.pro$classes().getClass()!=HashMap.class)return false;
-        for(List<Entity> list:g.pro$classes().values())if(list.getClass()!=ArrayList.class)return false;
-        return true;
+        return platformCarriers(level)&&ownersCurrent()&&platformSection(sections.pro$all().get(section));
     }
     private boolean standardTracking() {
         Class<?> type=tracking.pro$tracked().getClass();
         return type==it.unimi.dsi.fastutil.ints.Int2ObjectOpenHashMap.class
                 ||type==it.unimi.dsi.fastutil.ints.Int2ObjectLinkedOpenHashMap.class;
     }
-    /** Rebind only within the same real world/manager and exact object identity. Never publish old containers. */
-    EntityRecords repairProtectedCarrier() {
-        Entity entity=observedEntity.get();if(entity==null)return null;var raw=(Access.EntityState)entity;
-        if(raw.pro$level()!=level||raw.pro$id()!=id||!raw.pro$uuid().equals(uuid)||entity.getClass()!=definition
-                ||server.pro$manager()!=manager||server.pro$ticks()!=ticks||manager.pro$lookup()!=lookup
-                ||manager.pro$sections()!=sections||level.getChunkSource().chunkMap!=tracking)return null;
-        EntityRecords current=new EntityRecords(level,entity);
-        if(!current.bound()||current.conflict()||!current.softRepairSupported()||!current.standardTracking())return null;
-        if(!(capturedCallback instanceof Access.Callback callback)||callback.pro$entity()!=entity)return null;
-        Object tracked=current.tracking.pro$tracked().get(id);
-        if(tracked!=null&&(!(tracked instanceof Access.Tracked row)||row.pro$entity()!=entity))return null;
-        if(!current.bound())return null;
-        raw.pro$removal(null);raw.pro$canUpdate(capturedCanUpdate);raw.pro$noPhysics(capturedNoPhysics);raw.pro$added(true);
-        callback.pro$sectionKey(current.section);callback.pro$section(current.sections.pro$all().get(current.section));
-        raw.pro$callback(capturedCallback);
-        if(entity instanceof net.minecraft.world.entity.LivingEntity) {
-            ((Access.Living)entity).pro$dead(false);((Access.Living)entity).pro$deathTime(0);
-        }
-        var box=entity.getBoundingBox();
-        if(!Double.isFinite(box.getSize())||box.getXsize()<=0||box.getYsize()<=0||box.getZsize()<=0)
-            entity.setBoundingBox(capturedBox.move(raw.pro$position().subtract(capturedPosition)));
-        if(!current.repair())return null;
-        if(entity instanceof ServerPlayer player) {
-            // Keep the live protected session in the actual player registries as well as entity indices.
-            var players=(Access.Players)level.getServer().getPlayerList();
-            ServerPlayer indexed=players.pro$byUuid().get(uuid);
-            if(indexed!=null&&indexed!=player)return null;
-            if(!current.server.pro$players().contains(player))current.server.pro$players().add(player);
-            if(!players.pro$players().contains(player))players.pro$players().add(player);
-            players.pro$byUuid().putIfAbsent(uuid,player);
-        }
-        if(tracked==null)current.tracking.pro$add(entity);
-        if(!current.bound()||!current.registered())return null;
-        Object restored=current.tracking.pro$tracked().get(id);
-        if(!(restored instanceof Access.Tracked row)||row.pro$entity()!=entity)return null;
-        // Capture the repaired state, not the attacker's disabled callback/flags.
-        return new EntityRecords(level,entity);
+    private static boolean exact(Object value,Class<?> type) {return value!=null&&value.getClass()==type;}
+    /** Validate the fixed platform holders before invoking any replacement collection. */
+    private static boolean platformCarriers(ServerLevel level) {
+        Object manager=((Access.Server)level).pro$manager(),ticks=((Access.Server)level).pro$ticks();
+        Object tracking=level.getChunkSource().chunkMap;
+        if(!exact(manager,PersistentEntitySectionManager.class)||!exact(ticks,EntityTickList.class)||!exact(tracking,ChunkMap.class))return false;
+        Access.Manager m=(Access.Manager)manager;Access.Ticks t=(Access.Ticks)ticks;
+        if(!exact(m.pro$lookup(),EntityLookup.class)||!exact(m.pro$sections(),EntitySectionStorage.class)
+                ||!exact(m.pro$known(),HashSet.class)||!exact(m.pro$visibility(),it.unimi.dsi.fastutil.longs.Long2ObjectOpenHashMap.class))return false;
+        Access.Lookup l=(Access.Lookup)m.pro$lookup();Access.Sections s=(Access.Sections)m.pro$sections();
+        return exact(l.pro$ids(),it.unimi.dsi.fastutil.ints.Int2ObjectLinkedOpenHashMap.class)&&exact(l.pro$uuids(),HashMap.class)
+            &&exact(t.pro$active(),it.unimi.dsi.fastutil.ints.Int2ObjectLinkedOpenHashMap.class)
+            &&exact(t.pro$passive(),it.unimi.dsi.fastutil.ints.Int2ObjectLinkedOpenHashMap.class)
+            &&(t.pro$iterated()==null||exact(t.pro$iterated(),it.unimi.dsi.fastutil.ints.Int2ObjectLinkedOpenHashMap.class))
+            &&exact(s.pro$all(),it.unimi.dsi.fastutil.longs.Long2ObjectOpenHashMap.class)
+            &&exact(s.pro$keys(),it.unimi.dsi.fastutil.longs.LongAVLTreeSet.class)
+            &&(exact(((Access.Tracking)tracking).pro$tracked(),it.unimi.dsi.fastutil.ints.Int2ObjectOpenHashMap.class)
+                ||exact(((Access.Tracking)tracking).pro$tracked(),it.unimi.dsi.fastutil.ints.Int2ObjectLinkedOpenHashMap.class));
     }
-    public boolean repair() {
-        Entity entity=observedEntity.get();if(entity==null)return false;var raw=(Access.EntityState)entity;
-        if(!softRepairSupported())return false;
-        if(!bound() || conflict() || raw.pro$removal()!=null || SectionPos.asLong(raw.pro$blockPosition())!=section) return false;
-        EntitySection<Entity> row=sections.pro$all().get(section);
-        if(row==null) return false; // A lost owner/section is not an invitation to rebuild an unknown callback.
-        lookup.pro$ids().putIfAbsent(id,entity);
-        lookup.pro$uuids().putIfAbsent(uuid,entity);
-        manager.pro$known().add(uuid);
+    private static boolean platformSection(EntitySection<Entity> row) {
+        if(!exact(row,EntitySection.class)||!exact(((Access.Section)row).pro$storage(),net.minecraft.util.ClassInstanceMultiMap.class))return false;
         Access.Group group=(Access.Group)((Access.Section)row).pro$storage();
-        if(group.pro$all().stream().noneMatch(e->e==entity)) group.pro$all().add(entity);
-        for(var entry:group.pro$classes().entrySet())
-            if(entry.getKey().isInstance(entity) && entry.getValue().stream().noneMatch(e->e==entity))
-                entry.getValue().add(entity);
-        if(originallyTicking && ((EntitySection<Entity>)row).getStatus().isTicking()) ticks.pro$active().putIfAbsent(id,entity);
-        return registered();
+        if(group.pro$baseClass()!=Entity.class||!exact(group.pro$all(),ArrayList.class)||!exact(group.pro$classes(),HashMap.class)
+                ||group.pro$classes().get(Entity.class)!=group.pro$all())return false;
+        for(List<Entity> list:group.pro$classes().values())if(!exact(list,ArrayList.class))return false;
+        return true;
+    }
+    private boolean registeredHere(Entity entity,EntitySection<Entity> row) {
+        if(!platformSection(row)||sections.pro$all().get(section)!=row||lookup.pro$ids().get(id)!=entity
+                ||lookup.pro$uuids().get(uuid)!=entity||!manager.pro$known().contains(uuid)||!sections.pro$keys().contains(section))return false;
+        Access.Group group=(Access.Group)((Access.Section)row).pro$storage();
+        if(group.pro$all().stream().noneMatch(value->value==entity))return false;
+        for(var entry:group.pro$classes().entrySet())if(entry.getKey().isInstance(entity)&&entry.getValue().stream().noneMatch(value->value==entity))return false;
+        return true;
+    }
+    private boolean repairCurrent(BooleanSupplier authority) {return current(authority)&&bound();}
+    private boolean writeCurrent(Object holder,BooleanSupplier authority,Runnable write) {
+        return ProRuntime.withEntityRecordGate(holder,()->{
+            if(!repairCurrent(authority))return false;
+            write.run();return repairCurrent(authority);
+        });
+    }
+    private EntityRecords captureCurrent(Entity entity,BooleanSupplier authority) {
+        return ProRuntime.withEntityRecordGate(level,()->{
+            if(!current(authority)||entity.getClass()!=definition||!platformCarriers(level))return null;
+            Access.Manager m=(Access.Manager)server.pro$manager();Access.Ticks t=(Access.Ticks)server.pro$ticks();
+            Access.Lookup l=(Access.Lookup)m.pro$lookup();Access.Sections s=(Access.Sections)m.pro$sections();
+            Access.Tracking tracking=(Access.Tracking)level.getChunkSource().chunkMap;
+            return ProRuntime.withEntityRecordGate(m,()->ProRuntime.withEntityRecordGate(t,()->
+                ProRuntime.withEntityRecordGate(l,()->ProRuntime.withEntityRecordGate(s,()->ProRuntime.withEntityRecordGate(tracking,()->{
+                    if(!current(authority)||entity.getClass()!=definition||!platformCarriers(level)||server.pro$manager()!=m||server.pro$ticks()!=t
+                            ||m.pro$lookup()!=l||m.pro$sections()!=s||level.getChunkSource().chunkMap!=tracking)return null;
+                    EntitySection<Entity> row=s.pro$all().get(SectionPos.asLong(((Access.EntityState)entity).pro$blockPosition()));
+                    if(row!=null&&!platformSection(row))return null;
+                    EntityRecords captured=new EntityRecords(level,entity);
+                    return current(authority)&&captured.definition==definition&&captured.level==level&&captured.id==id
+                            &&Objects.equals(captured.uuid,uuid)&&captured.bound()?captured:null;
+                })))));
+        });
+    }
+    private static boolean getterCurrent(Access.Manager manager,Access.Lookup lookup,Access.Sections sections) {
+        Object getter=manager.pro$getter();return exact(getter,LevelEntityGetterAdapter.class)
+                &&((Access.Getter)getter).pro$lookup()==lookup&&((Access.Getter)getter).pro$sections()==sections;
+    }
+    /** Known Minecraft callback construction; no foreign callback or cached reflection image is used. */
+    private static final class CallbackLayout {
+        static final Class<?> TYPE,WORLD_TYPE;
+        static final java.lang.reflect.Constructor<?> CREATE;
+        static final java.lang.reflect.Field MANAGER,WORLD;
+        static {
+            try {
+                TYPE=Class.forName("net.minecraft.world.level.entity.PersistentEntitySectionManager$Callback",false,PersistentEntitySectionManager.class.getClassLoader());
+                WORLD_TYPE=Class.forName("net.minecraft.server.level.ServerLevel$EntityCallbacks",false,ServerLevel.class.getClassLoader());
+                openCallbackAccess(TYPE,WORLD_TYPE);
+                CREATE=PlatformAccess.declaredConstructor(TYPE,PersistentEntitySectionManager.class,EntityAccess.class,long.class,EntitySection.class);
+                MANAGER=ownerField(TYPE,PersistentEntitySectionManager.class);WORLD=ownerField(WORLD_TYPE,ServerLevel.class);
+                if(!CREATE.trySetAccessible())throw new IllegalStateException("PLATFORM_ENTITY_CALLBACK_CONSTRUCTOR_UNAVAILABLE");
+            } catch(ReflectiveOperationException failure) {throw new ExceptionInInitializerError(failure);}
+        }
+        private static java.lang.reflect.Field ownerField(Class<?> type,Class<?> owner) {
+            java.lang.reflect.Field found=null;
+            for(var field:PlatformAccess.declaredFields(type))if(!java.lang.reflect.Modifier.isStatic(field.getModifiers())&&field.getType()==owner) {
+                if(found!=null)throw new IllegalStateException("PLATFORM_ENTITY_CALLBACK_OWNER_AMBIGUOUS");found=field;
+            }
+            if(found==null||!found.trySetAccessible())throw new IllegalStateException("PLATFORM_ENTITY_CALLBACK_OWNER_UNAVAILABLE");return found;
+        }
+        static boolean world(LevelCallback<Entity> callback,ServerLevel level)throws IllegalAccessException {
+            return exact(callback,WORLD_TYPE)&&WORLD.get(callback)==level;
+        }
+        static boolean owned(EntityInLevelCallback value,Object manager,Entity entity)throws IllegalAccessException {
+            return exact(value,TYPE)&&value instanceof Access.Callback callback&&callback.pro$entity()==entity&&MANAGER.get(value)==manager;
+        }
+    }
+    private static void openCallbackAccess(Class<?>... types)throws ReflectiveOperationException {
+        Class.forName("dev.ronova.pro.agent.RecoveryAgent",false,ClassLoader.getSystemClassLoader())
+            .getMethod("openBackingAccess",Class.class,Class[].class).invoke(null,EntityRecords.class,(Object)types);
+    }
+    /** Rebind the exact body to the current platform holders in its original real world. */
+    EntityRecords repairProtectedCarrier(BooleanSupplier authority) {
+        Object body=observedEntity.get();
+        if(body==null||body.getClass()!=definition||!current(authority))return null;
+        Entity entity=(Entity)body;Access.EntityState raw=(Access.EntityState)entity;
+        if(raw.pro$level()!=level||raw.pro$id()!=id||!Objects.equals(raw.pro$uuid(),uuid)
+                ||level.getServer().getLevel(level.dimension())!=level||!platformCarriers(level))return null;
+        EntityRecords live=captureCurrent(entity,authority);
+        if(live==null||!live.repairCurrent(authority)||live.conflict())return null;
+        // Derive a missing/replaced section's state from the original world's real loaded chunk.
+        var chunk=level.getChunkSource().getChunkNow(SectionPos.x(live.section),SectionPos.z(live.section));
+        if(!exact(chunk,net.minecraft.world.level.chunk.LevelChunk.class))return null;
+        FullChunkStatus chunkStatus=chunk.getFullStatus();Visibility visibility=Visibility.fromFullChunkStatus(chunkStatus);
+        if(!visibility.isAccessible())return null;
+        BooleanSupplier current=()->current(authority)&&level.getChunkSource().getChunkNow(SectionPos.x(live.section),SectionPos.z(live.section))==chunk
+                &&chunk.getFullStatus()==chunkStatus&&SectionPos.asLong(raw.pro$blockPosition())==live.section;
+        Object tracked=live.tracking.pro$tracked().get(id);
+        if(tracked!=null&&(!(tracked instanceof Access.Tracked row)||row.pro$entity()!=entity))return null;
+        if(live.ticks.pro$active().get(id)!=null&&live.ticks.pro$active().get(id)!=entity)return null;
+        try {
+            if(!CallbackLayout.world(levelCallbacks,level))return null;
+            if(!live.writeCurrent(live.manager,current,()->{
+                if(live.manager.pro$callbacks()!=levelCallbacks)live.manager.pro$callbacks(levelCallbacks);
+                if(!getterCurrent(live.manager,live.lookup,live.sections))
+                    live.manager.pro$getter(new LevelEntityGetterAdapter<>((EntityLookup<Entity>)live.lookup,(EntitySectionStorage<Entity>)live.sections));
+            }))return null;
+            if(manager!=live.manager||sections!=live.sections||visibilityOwner!=live.visibilityOwner||visibilityProvider!=live.sections.pro$visibility()) {
+                Access.Manager liveManager=live.manager;
+                if(!live.writeCurrent(live.sections,current,()->live.sections.pro$visibility(key->liveManager.pro$visibility().get(key))))return null;
+            }
+            var visibilityMap=live.manager.pro$visibility();
+            long chunkKey=net.minecraft.world.level.ChunkPos.asLong(SectionPos.x(live.section),SectionPos.z(live.section));
+            if(!live.writeCurrent(visibilityMap,current,()->visibilityMap.put(chunkKey,visibility)))return null;
+            var sectionMap=live.sections.pro$all();
+            if(!live.writeCurrent(sectionMap,current,()->{
+                if(sectionMap.get(live.section)==null)sectionMap.putIfAbsent(live.section,new EntitySection<>(Entity.class,visibility));
+            }))return null;
+            EntitySection<Entity> row=sectionMap.get(live.section);
+            if(!platformSection(row))return null;
+            Object visibilityProvider=live.sections.pro$visibility();
+            BooleanSupplier located=()->current.getAsBoolean()&&sectionMap.get(live.section)==row&&live.manager.pro$callbacks()==levelCallbacks
+                    &&getterCurrent(live.manager,live.lookup,live.sections)&&live.sections.pro$visibility()==visibilityProvider;
+            if(!live.writeCurrent(row,located,()->row.updateChunkStatus(visibility)))return null;
+            var sectionKeys=live.sections.pro$keys();
+            if(!live.writeCurrent(sectionKeys,located,()->sectionKeys.add(live.section)))return null;
+            EntityInLevelCallback observed=raw.pro$callback(),restored=observed;
+            if(!CallbackLayout.owned(restored,live.manager,entity))
+                restored=CallbackLayout.owned(capturedCallback,live.manager,entity)?capturedCallback:
+                    (EntityInLevelCallback)CallbackLayout.CREATE.newInstance(live.manager,entity,live.section,row);
+            EntityInLevelCallback callback=restored;Access.Callback callbackState=(Access.Callback)callback;
+            if(!live.writeCurrent(callback,located,()->{callbackState.pro$sectionKey(live.section);callbackState.pro$section(row);}))return null;
+            if(!live.writeCurrent(entity,located,()->{
+                if(raw.pro$callback()!=observed||sectionMap.get(live.section)!=row)return;
+                raw.pro$removal(null);raw.pro$canUpdate(capturedCanUpdate);raw.pro$noPhysics(capturedNoPhysics);raw.pro$added(true);raw.pro$callback(callback);
+                if(entity instanceof net.minecraft.world.entity.LivingEntity) {
+                    ((Access.Living)entity).pro$dead(false);((Access.Living)entity).pro$deathTime(0);
+                }
+                var box=raw.pro$box();
+                if(!Double.isFinite(box.getSize())||box.getXsize()<=0||box.getYsize()<=0||box.getZsize()<=0)
+                    raw.pro$box(capturedBox.move(raw.pro$position().subtract(capturedPosition)));
+            })||raw.pro$callback()!=callback||raw.pro$removal()!=null)return null;
+            BooleanSupplier restoredBody=()->located.getAsBoolean()&&raw.pro$callback()==callback
+                    &&callbackState.pro$entity()==entity&&callbackState.pro$sectionKey()==live.section&&callbackState.pro$section()==row;
+            if(!live.repairCurrent(restoredBody))return null;
+            BackingPolicy.captureRepairCarriers(live,entity,row,callback);
+            if(!live.repair(restoredBody,originallyTicking||live.originallyTicking))return null;
+            if(entity instanceof ServerPlayer player&&!live.repairPlayer(player,restoredBody))return null;
+            if(tracked==null) {
+                Object trackingMap=live.tracking.pro$tracked();
+                if(!live.writeCurrent(trackingMap,restoredBody,()->{
+                    if(live.tracking.pro$tracked()==trackingMap&&live.tracking.pro$tracked().get(id)==null)live.tracking.pro$add(entity);
+                }))return null;
+            }
+            if(!live.repairCurrent(restoredBody)||!live.registeredHere(entity,row))return null;
+            Object restoredTracking=live.tracking.pro$tracked().get(id);
+            if(!(restoredTracking instanceof Access.Tracked trackingRow)||trackingRow.pro$entity()!=entity)return null;
+            // Subsequent protection captures the repaired callback, flags and current carrier identities.
+            EntityRecords result=live.captureCurrent(entity,restoredBody);
+            return result!=null&&result.repairCurrent(restoredBody)&&result.registeredHere(entity,row)?result:null;
+        } catch(ReflectiveOperationException unavailable) {return null;}
+    }
+    EntityRecords repairProtectedCarrier() {return repairProtectedCarrier(()->true);}
+    private boolean repairPlayer(ServerPlayer player,BooleanSupplier authority) {
+        var players=(Access.Players)level.getServer().getPlayerList();
+        List<ServerPlayer> local=server.pro$players(),all=players.pro$players();Map<UUID,ServerPlayer> byUuid=players.pro$byUuid();
+        if(!exact(local,ArrayList.class)||!exact(all,ArrayList.class)||!exact(byUuid,HashMap.class))return false;
+        ServerPlayer indexed=byUuid.get(uuid);if(indexed!=null&&indexed!=player)return false;
+        if(!writeCurrent(local,authority,()->{if(server.pro$players()==local&&local.stream().noneMatch(value->value==player))local.add(player);}))return false;
+        if(!writeCurrent(all,authority,()->{if(players.pro$players()==all&&all.stream().noneMatch(value->value==player))all.add(player);}))return false;
+        if(!writeCurrent(byUuid,authority,()->{if(players.pro$byUuid()==byUuid)byUuid.putIfAbsent(uuid,player);}))return false;
+        return server.pro$players()==local&&players.pro$players()==all&&players.pro$byUuid()==byUuid
+                &&byUuid.get(uuid)==player&&local.stream().anyMatch(value->value==player)&&all.stream().anyMatch(value->value==player);
+    }
+    public boolean repair() {return repair(()->true,originallyTicking);}
+    private boolean repair(BooleanSupplier authority,boolean keepTicking) {
+        Object body=observedEntity.get();if(body==null||body.getClass()!=definition)return false;
+        Entity entity=(Entity)body;Access.EntityState raw=(Access.EntityState)entity;
+        if(!repairCurrent(authority)||!softRepairSupported()||conflict()||raw.pro$removal()!=null||SectionPos.asLong(raw.pro$blockPosition())!=section)return false;
+        EntitySection<Entity> row=sections.pro$all().get(section);if(!platformSection(row))return false;
+        Access.Group group=(Access.Group)((Access.Section)row).pro$storage();
+        var ids=lookup.pro$ids();var uuids=lookup.pro$uuids();var known=manager.pro$known();var keys=sections.pro$keys();
+        if(!writeCurrent(ids,authority,()->ids.putIfAbsent(id,entity))||ids.get(id)!=entity)return false;
+        if(!writeCurrent(uuids,authority,()->uuids.putIfAbsent(uuid,entity))||uuids.get(uuid)!=entity)return false;
+        if(!writeCurrent(known,authority,()->known.add(uuid)))return false;
+        if(!writeCurrent(keys,authority,()->{if(sections.pro$all().get(section)==row)keys.add(section);}))return false;
+        List<Entity> all=group.pro$all();Map<Class<?>,List<Entity>> classes=group.pro$classes();
+        BooleanSupplier membership=()->current(authority)&&sections.pro$all().get(section)==row
+                &&((Access.Section)row).pro$storage()==group&&group.pro$all()==all&&group.pro$classes()==classes;
+        if(!writeCurrent(all,membership,()->{if(all.stream().noneMatch(value->value==entity))all.add(entity);}))return false;
+        for(var entry:new ArrayList<>(classes.entrySet()))if(entry.getKey().isInstance(entity)) {
+            List<Entity> list=entry.getValue();
+            if(!exact(list,ArrayList.class)||!writeCurrent(list,membership,()->{if(classes.get(entry.getKey())==list&&list.stream().noneMatch(value->value==entity))list.add(entity);})
+                    ||classes.get(entry.getKey())!=list)return false;
+        }
+        if(keepTicking&&(row.getStatus().isTicking()||entity instanceof ServerPlayer)) {
+            if(!repairCurrent(membership))return false;
+            ticks.pro$ensureActiveIsNotIterated();
+            var active=ticks.pro$active();
+            if(!exact(active,it.unimi.dsi.fastutil.ints.Int2ObjectLinkedOpenHashMap.class)||active==ticks.pro$iterated())return false;
+            if(!writeCurrent(active,membership,()->{if(ticks.pro$active()==active)active.putIfAbsent(id,entity);})
+                    ||ticks.pro$active()!=active||active.get(id)!=entity)return false;
+        }
+        return repairCurrent(membership)&&!conflict()&&registeredHere(entity,row);
+    }
+    /** Snapshot roots retain only this body's ownership when platform carriers are replaced. */
+    Object[] carrierRoots() {
+        return new Object[]{level,manager,lookup,ticks,sections,tracking,idOwner,uuidOwner,knownOwner,sectionOwner,trackingOwner,
+            visibilityOwner,sectionKeysOwner,tickActiveOwner,tickPassiveOwner,capturedSection.get(),capturedCallback,getterOwner,visibilityProvider,levelCallbacks};
+    }
+    boolean carrierIdentityChanged(EntityRecords next) {
+        Object[] previous=carrierRoots(),current=next.carrierRoots();
+        for(int index=0;index<previous.length;index++)if(previous[index]!=current[index])return true;
+        return false;
     }
     void releaseOwnedReferences() {
         ownedEntity=null;originalVehicle=null;originalPassengers=List.of();capturedCallback=null;referencesReleased=true;

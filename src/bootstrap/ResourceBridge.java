@@ -89,7 +89,7 @@ public final class ResourceBridge {
         static final ClassValue<Field> PARENT=new ClassValue<>(){
             protected Field computeValue(Class<?> type){
                 for(Class<?> owner=type;owner!=null;owner=owner.getSuperclass())if(TYPES.contains(owner))for(String name:List.of("att","bb"))
-                    try{Field field=owner.getDeclaredField(name);field.setAccessible(true);return field;}catch(NoSuchFieldException absent){}
+                    try{Field field=PlatformMetadata.declaredField(owner,name);field.setAccessible(true);return field;}catch(NoSuchFieldException absent){}
                 return null;
             }
         };
@@ -97,7 +97,7 @@ public final class ResourceBridge {
             protected List<Field> computeValue(Class<?> type){
                 List<Field> fields=new ArrayList<>();
                 for(Class<?> owner=type;owner!=null;owner=owner.getSuperclass())if(TYPES.contains(owner))
-                    try{Field field=owner.getDeclaredField("hb");field.setAccessible(true);fields.add(field);}catch(NoSuchFieldException absent){}
+                    try{Field field=PlatformMetadata.declaredField(owner,"hb");field.setAccessible(true);fields.add(field);}catch(NoSuchFieldException absent){}
                 return List.copyOf(fields);
             }
         };
@@ -195,7 +195,7 @@ public final class ResourceBridge {
         try{
             Field lock=value instanceof Reader?CharacterWrappers.READER_LOCK:CharacterWrappers.WRITER_LOCK;
             WrapperRecord record=new WrapperRecord(lock.get(value));
-            for(Class<?> type=value.getClass();type!=null;type=type.getSuperclass())for(Field member:type.getDeclaredFields())if(wrapperSlot(member)){
+            for(Class<?> type=value.getClass();type!=null;type=type.getSuperclass())for(Field member:PlatformMetadata.declaredFields(type))if(wrapperSlot(member)){
                 member.setAccessible(true);Object child=member.get(value);record.delegates.put(member,new WeakReference<>(child));
             }
             synchronized(STREAMS){reap();WRAPPERS.putIfAbsent(new Key(value,true),record);}
@@ -252,7 +252,7 @@ public final class ResourceBridge {
             // Never call close/flush: a delegate may also serve a surviving source.
             releaseEffectStarted();
             for(Field member:record.delegates.keySet()){member.set(value,null);if(member.get(value)!=null)return "CHARACTER_WRAPPER_DETACH_READBACK_FAILED";}
-            for(Field member:value.getClass().getDeclaredFields())if(member.getName().equals("closed")&&member.getType()==boolean.class){member.setAccessible(true);member.setBoolean(value,true);}
+            for(Field member:PlatformMetadata.declaredFields(value.getClass()))if(member.getName().equals("closed")&&member.getType()==boolean.class){member.setAccessible(true);member.setBoolean(value,true);}
             // Reader/Writer.lock commonly is the delegate itself. Retain no hidden endpoint alias.
             lockField.set(value,value);if(lockField.get(value)!=value)return "CHARACTER_WRAPPER_LOCK_DETACH_FAILED";
             return "";
@@ -492,7 +492,7 @@ public final class ResourceBridge {
     }
     private ResourceBridge(){ }
     private static Field field(Class<?> type,String name){
-        try{Field field=type.getDeclaredField(name);field.setAccessible(true);return field;}
+        try{Field field=PlatformMetadata.declaredField(type,name);field.setAccessible(true);return field;}
         catch(ReflectiveOperationException failure){throw new ExceptionInInitializerError(failure);}
     }
     private static Class<?> optionalPlatformType(String name){
@@ -2076,7 +2076,7 @@ public final class ResourceBridge {
     private static Object unsafe(){
         try{
             Class<?> type=Class.forName("sun.misc.Unsafe",true,ClassLoader.getPlatformClassLoader());
-            Field singleton=type.getDeclaredField("theUnsafe");singleton.setAccessible(true);return singleton.get(null);
+            Field singleton=PlatformMetadata.declaredField(type,"theUnsafe");singleton.setAccessible(true);return singleton.get(null);
         }catch(ReflectiveOperationException failed){throw new ExceptionInInitializerError(failed);}
     }
     private static Method layoutMethod(String name,Class<?> parameter){
@@ -2092,7 +2092,7 @@ public final class ResourceBridge {
             var offset=statik?STATIC_OFFSET:INSTANCE_OFFSET;
             int referenceBytes=((Number)ARRAY_SCALE.invoke(UNSAFE,Object[].class)).intValue();
             List<Span> result=new ArrayList<>();
-            for(Class<?> type=actual;type!=null;type=type.getSuperclass())if(platformLayout(type))for(Field field:type.getDeclaredFields()){
+            for(Class<?> type=actual;type!=null;type=type.getSuperclass())if(platformLayout(type))for(Field field:PlatformMetadata.declaredFields(type)){
                 if(java.lang.reflect.Modifier.isStatic(field.getModifiers())!=statik)continue;
                 Class<?> kind=field.getType();int bytes=kind.isPrimitive()?kind==long.class||kind==double.class?8:
                         kind==int.class||kind==float.class?4:kind==short.class||kind==char.class?2:1:referenceBytes;
@@ -2161,7 +2161,7 @@ public final class ResourceBridge {
         try{
             List<Span> result=new ArrayList<>();
             Method offset=statik?STATIC_OFFSET:INSTANCE_OFFSET;
-            for(Field field:actual.getDeclaredFields()){
+            for(Field field:PlatformMetadata.declaredFields(actual)){
                 if(java.lang.reflect.Modifier.isStatic(field.getModifiers())!=statik)continue;
                 Class<?> kind=field.getType();int bytes=kind.isPrimitive()?kind==long.class||kind==double.class?8:
                         kind==int.class||kind==float.class?4:kind==short.class||kind==char.class?2:1:unsafeWidth("Reference");

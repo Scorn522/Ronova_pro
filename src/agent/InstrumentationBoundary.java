@@ -13,6 +13,13 @@ final class InstrumentationBoundary {
         ClassNode node=new ClassNode();new ClassReader(bytes).accept(node,0);
         int removal=0,publications=0;
         for(MethodNode method:node.methods) {
+            if(name.equals(API)&&method.name.equals("<init>")){
+                for(AbstractInsnNode instruction:method.instructions.toArray())if(instruction.getOpcode()==Opcodes.RETURN){
+                    InsnList complete=new InsnList();complete.add(new VarInsnNode(Opcodes.ALOAD,0));
+                    complete.add(new MethodInsnNode(Opcodes.INVOKESTATIC,"dev/ronova/pro/bootstrap/NativeControl",
+                            "instrumentationCreated","(Ljava/lang/Object;)V",false));method.instructions.insertBefore(instruction,complete);
+                }
+            }
             if(name.equals(API)&&(method.name.equals("retransformClasses")&&method.desc.equals("([Ljava/lang/Class;)V")
                     ||method.name.equals("redefineClasses")&&method.desc.equals("([Ljava/lang/instrument/ClassDefinition;)V"))){
                 InsnList arguments=new InsnList();arguments.add(new VarInsnNode(Opcodes.ALOAD,1));

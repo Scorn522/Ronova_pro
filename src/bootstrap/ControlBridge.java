@@ -410,6 +410,7 @@ public final class ControlBridge {
         if(stoppedModules.length==0)return false;
         SourceQuery previous=SOURCE_QUERIES.get(),query=previous==null?beginSourceQuery(NO_SOURCES):previous;
         try{
+            if(TaskBridge.currentThreadStoppedSource())return true;
             if(NetworkBridge.stoppedSource())return true;
             if(ClientBridge.stoppedSource())return true;
             for(Module source:retainQuerySources(CodeSourceBridge.executionSources()))if(modStopped(source))return true;
@@ -606,6 +607,7 @@ public final class ControlBridge {
     }
     static boolean sourceUnknown(){
         if(SOURCE_QUERIES.get()!=null)return true;
+        if(TaskBridge.currentThreadSourceUnknown())return true;
         if(NetworkBridge.sourceUnknown())return true;
         if(ClientBridge.sourceUnknown())return true;
         if(CodeSourceBridge.executionUnknown())return true;
@@ -633,6 +635,7 @@ public final class ControlBridge {
     }
     static Set<Module> scopedSourceSet(){
         Set<Module> modules=addModuleSources(null,retainQuerySources(NetworkBridge.currentSources()),false);
+        modules=addModuleSources(modules,retainQuerySources(TaskBridge.currentThreadSources()),false);
         modules=addModuleSources(modules,retainQuerySources(ClientBridge.currentSources()),false);
         modules=addModuleSources(modules,retainQuerySources(IoBridge.currentSources()),false);
         modules=addModuleSources(modules,retainQuerySources(ResourceBridge.currentFileSources()),false);
@@ -1086,11 +1089,13 @@ public final class ControlBridge {
         // Actual backing publications already register replacements; a new
         // definition must not rescan all previous records into a parallel array.
         java.util.List<Object> supplied=new java.util.ArrayList<>(java.util.Arrays.asList(roots));
-        if(!sharedControlRootsPublished)
-            for(Class<?> type:java.util.List.of(ControlBridge.class,TaskBridge.class,SourceMapBridge.class,BackingBridge.class,DefinitionBridge.class,ResourceBridge.class,IoBridge.class,CodeSourceBridge.class))for(var field:type.getDeclaredFields())
+        if(!sharedControlRootsPublished){
+            java.util.Collections.addAll(supplied,PlatformMetadata.controls());
+            for(Class<?> type:java.util.List.of(ControlBridge.class,TaskBridge.class,SourceMapBridge.class,BackingBridge.class,DefinitionBridge.class,ResourceBridge.class,IoBridge.class,CodeSourceBridge.class))for(var field:PlatformMetadata.declaredFields(type))
                 if(java.lang.reflect.Modifier.isStatic(field.getModifiers())&&(java.util.Map.class.isAssignableFrom(field.getType())||java.util.Collection.class.isAssignableFrom(field.getType()))) {
                     Object value=CodeSourceBridge.controlField(field,null);if(value!=null)supplied.add(value);
                 }
+        }
         CodeSourceBridge.agentControls(supplied.toArray());
         sharedControlRootsPublished=true;
     }
@@ -1257,7 +1262,7 @@ public final class ControlBridge {
         Class<?> writer=WALKER.getCallerClass();
         if(!writer.getName().equals("it.unimi.dsi.fastutil.objects.AbstractObjectList$ObjectSubList")||view==null||writer.getClassLoader()!=view.getClass().getClassLoader())throw new SecurityException("ACTUAL_FASTUTIL_VIEW_REQUIRED");
         try{
-            var parent=writer.getDeclaredField("l");var extent=writer.getDeclaredField("to");parent.setAccessible(true);extent.setAccessible(true);
+            var parent=PlatformMetadata.declaredField(writer,"l");var extent=PlatformMetadata.declaredField(writer,"to");parent.setAccessible(true);extent.setAccessible(true);
             Object root=view;Set<Object> seen=Collections.newSetFromMap(new IdentityHashMap<>());
             while(writer.isInstance(root)){if(!seen.add(root))return null;root=parent.get(root);}
             if(root==null||!root.getClass().getName().equals("it.unimi.dsi.fastutil.objects.ObjectArrayList")||root.getClass().getClassLoader()!=writer.getClassLoader())return null;
@@ -1273,8 +1278,8 @@ public final class ControlBridge {
         String actual=iterator.getClass().getName();
         if(!Set.of(prefix+"ObjectArrayList$1",prefix+"ObjectArrayList$SubList$SubListIterator",prefix+"AbstractObjectList$ObjectSubList$RandomAccessIter").contains(actual))return null;
         try{
-            var holder=iterator.getClass().getDeclaredField(actual.endsWith("$SubListIterator")?"this$1":"this$0");holder.setAccessible(true);Object root=holder.get(iterator);
-            Class<?> view=Class.forName(prefix+"AbstractObjectList$ObjectSubList",false,caller.getClassLoader());var parent=view.getDeclaredField("l");parent.setAccessible(true);
+            var holder=PlatformMetadata.declaredField(iterator.getClass(),actual.endsWith("$SubListIterator")?"this$1":"this$0");holder.setAccessible(true);Object root=holder.get(iterator);
+            Class<?> view=Class.forName(prefix+"AbstractObjectList$ObjectSubList",false,caller.getClassLoader());var parent=PlatformMetadata.declaredField(view,"l");parent.setAccessible(true);
             Set<Object> seen=Collections.newSetFromMap(new IdentityHashMap<>());while(view.isInstance(root)){if(!seen.add(root))return null;root=parent.get(root);}
             if(root==null||!root.getClass().getName().equals(prefix+"ObjectArrayList")||root.getClass().getClassLoader()!=caller.getClassLoader())return null;
             var gate=fieldGate(root);gate.lock();Object mutation=null;
@@ -1366,7 +1371,7 @@ public final class ControlBridge {
     static boolean ownState(Class<?> declaring) {
         if(declaring==null)return false;Class<?> host=declaring.getClassLoader()==null?declaring.getNestHost():declaring;Guards current=guards;
         if(host==TaskBridge.class||host==BackingBridge.class||host==CarrierBridge.class||host==SourceMapBridge.class||host==NativeControl.class||host==DefinitionBridge.class||host==ResourceBridge.class||host==IoBridge.class||host==CodeSourceBridge.class||host==NetworkBridge.class||host==ClientBridge.class
-                ||host==EventFaultBridge.class||host==ControlBridge.class||host==ExecutionFlow.class||host==NetworkCleanup.class)return true;
+                ||host==EventFaultBridge.class||host==ControlBridge.class||host==ExecutionFlow.class||host==NetworkCleanup.class||host==PlatformMetadata.class)return true;
         if(ControlBridge.owns(declaring))return true;
         return current!=null&&DefinitionBridge.module(declaring)==current.owner().getModule()&&declaring.getClassLoader()==current.owner().getClassLoader()&&declaring.getName().startsWith("dev.ronova.pro.");
     }
@@ -1406,6 +1411,7 @@ public final class ControlBridge {
     }
     public static boolean networkRetirementActive(){return NetworkBridge.retirementActive();}
     static boolean unsafeWriteAllowed(Object receiver,long offset,Object value,int resourceWidth) {
+        if(!PlatformMetadata.memoryMutationAllowed(receiver))return false;
         if(receiver!=null&&value==null&&stoppedModules.length!=0){
             var exact=ResourceBridge.exactField(receiver,offset,resourceWidth);
             if(exact!=null&&commandRetirementWrite(receiver,exact.getDeclaringClass(),exact.getName(),value))return true;
@@ -1463,6 +1469,7 @@ public final class ControlBridge {
         return raw;
     }
     public static boolean unsafeMemoryAllowed(Object receiver,long offset,long length) {
+        if(!PlatformMetadata.memoryMutationAllowed(receiver))return false;
         if(!protectedMutationAllowed(receiver,receiver instanceof Class<?> type?type:receiver==null?null:receiver.getClass()))return false;
         if(!CodeSourceBridge.fieldRangeAllowed(receiver,offset,length)&&!coreWriter())return false;
         if(!ResourceBridge.unsafeMutationAllowed(receiver,offset,length))return false;
@@ -1736,6 +1743,7 @@ public final class ControlBridge {
         Module declaration=declaring==null?null:DefinitionBridge.module(declaring);
         if(modProtected(owner)||modStopped(owner)||modProtected(declaration)||modStopped(declaration)
                 ||stoppedInvocation())return true;
+        if(PlatformMetadata.structure(target,declaring))return true;
         Guards current=guards;
         if(current!=null)for(UnsafeField field:current.unsafeFields())
             if(field.declaring().isInstance(target))return true;
@@ -2166,7 +2174,7 @@ public final class ControlBridge {
     }
     static Class<?> findFieldOwner(Class<?> type,String name,String descriptor) {
         if(type==null)return null;
-        for(java.lang.reflect.Field field:type.getDeclaredFields())
+        for(java.lang.reflect.Field field:PlatformMetadata.declaredFields(type))
             if(field.getName().equals(name)&&field.getType().descriptorString().equals(descriptor))return type;
         // JVM field resolution searches direct superinterfaces before the superclass.
         for(Class<?> parent:type.getInterfaces()) {
@@ -2189,6 +2197,7 @@ public final class ControlBridge {
         return fieldWriteAllowed(receiver,declaring,name,value,null,false);
     }
     private static boolean fieldWriteAllowed(Object receiver,Class<?> declaring,String name,Object value,Module owner,boolean ownerResolved) {
+        if(!PlatformMetadata.fieldMutationAllowed(receiver,declaring,name))return false;
         if(commandRetirementWrite(receiver,declaring,name,value))return true;
         if(CodeSourceBridge.fieldGateMetadata(receiver))return fieldGateMutationAllowed();
         if(!(ownerResolved?protectedMutationAllowed(receiver,declaring,owner):protectedMutationAllowed(receiver,declaring)))return false;
@@ -2216,6 +2225,7 @@ public final class ControlBridge {
         return fieldWriteAllowed(declaring,declaring,name,value);
     }
     public static boolean reflectFieldWrite(java.lang.reflect.Field field,Object receiver,Object value) {
+        if(!PlatformMetadata.fieldMutationAllowed(receiver,field.getDeclaringClass(),field.getName()))return false;
         if(java.lang.reflect.Modifier.isStatic(field.getModifiers()))receiver=field.getDeclaringClass();
         if(commandRetirementWrite(receiver,field.getDeclaringClass(),field.getName(),value))return true;
         if(CodeSourceBridge.fieldGateMetadata(receiver))return fieldGateMutationAllowed();
@@ -2664,7 +2674,7 @@ public final class ControlBridge {
         if(seen.put(node,Boolean.TRUE)!=null)return false;boolean changed=false;
         Object command=commandField(nodeType,node,"command");
         if(command!=null&&objectModule(command)==owner){
-            var field=nodeType.getDeclaredField("command");if(!field.trySetAccessible())throw new IllegalAccessException("command");field.set(node,null);
+            var field=PlatformMetadata.declaredField(nodeType,"command");if(!field.trySetAccessible())throw new IllegalAccessException("command");field.set(node,null);
             if(field.get(node)!=null)throw new IllegalStateException("COMMAND_CALLBACK_RELEASE_INCOMPLETE");changed=true;
         }
         for(Object child:commandIndex(nodeType,node,"children").values().toArray())if(clearCommandShares(nodeType,child,owner,seen)){
@@ -2681,7 +2691,7 @@ public final class ControlBridge {
         catch(ReflectiveOperationException unavailable){return false;}
     }
     private static Object commandField(Class<?> type,Object receiver,String name)throws ReflectiveOperationException{
-        var field=type.getDeclaredField(name);if(!field.trySetAccessible())throw new IllegalAccessException(name);return field.get(receiver);
+        var field=PlatformMetadata.declaredField(type,name);if(!field.trySetAccessible())throw new IllegalAccessException(name);return field.get(receiver);
     }
     private static java.util.Map<?,?> commandIndex(Class<?> type,Object receiver,String name)throws ReflectiveOperationException{
         Object value=commandField(type,receiver,name);

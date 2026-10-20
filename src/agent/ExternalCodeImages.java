@@ -1070,6 +1070,14 @@ final class ExternalCodeImages {
                 &&image.patches().stream().anyMatch(patch->Arrays.stream(patch.owners()).anyMatch(selected::contains))){result.add(type);break;}
         result.addAll(Arrays.asList(ExternalCodeDefinitions.affected(classes,modules)));return result.toArray(Class<?>[]::new);
     }
+    static Module[] sources(Class<?> actual){
+        Set<Module> sources=Collections.newSetFromMap(new IdentityHashMap<>());
+        String name=actual.getName().replace('.','/');ClassLoader loader=actual.getClassLoader();
+        for(Encoded image:ENCODED.names().getOrDefault(name,List.of()))if(image.bootstrap()==(loader==null)&&image.loader().get()==loader)
+            for(Patch patch:image.patches())Collections.addAll(sources,patch.owners());
+        Collections.addAll(sources,ExternalCodeDefinitions.sourceModules(actual));
+        return sources.toArray(Module[]::new);
+    }
     static void failed(Module[] modules,String detail){for(Module module:modules)gap(module,detail);}
     static synchronized void mixinDependency(Object tree,Module origin,Module[] contributors){
         String target;try{target=String.valueOf(get(tree,"name"));}catch(ReflectiveOperationException failure){throw new IllegalStateException("ACTUAL_MIXIN_TARGET_UNOBSERVED",failure);}

@@ -1,5 +1,6 @@
-/* Actual retained control allocations. No VM-private layout or JNI table-copy
- * address participates in this directory. Results are hit / clear / unknown. */
+/* Actual retained control allocations and separately anchored platform
+ * structures. JNI table copies do not establish an environment identity.
+ * Results are hit / clear / unknown. */
 static int native_control_overlaps(uintptr_t first,uintptr_t last,const void *allocation,SIZE_T size){
     if(!allocation||!size)return 0;
     uintptr_t base=(uintptr_t)allocation,span=(uintptr_t)(size-1);
@@ -62,7 +63,7 @@ static int native_control_tooling_range(uintptr_t first,uintptr_t last,int restr
      * the VM-owned api before it can publish disposed. Only an overlapping api
      * candidate needs this hold; never read through that outside pointer. */
     for(NativeToolingEnv *record=environments;record;record=record->next){
-        if(!native_control_overlaps(first,last,record->api,sizeof(*record->api)))continue;
+        if(!native_control_overlaps(first,last,record->api,native_platform_env_span(record->api)))continue;
         if(InterlockedCompareExchange(&native_tooling_shutdown,0,0)
                 ||InterlockedCompareExchange(&record->disposed,0,0))continue;
         if(!TryAcquireSRWLockShared(&record->mutation)){
@@ -95,6 +96,8 @@ static int native_control_heap_range(uintptr_t first,uintptr_t last,int restrict
 }
 static int native_control_range(uintptr_t first,uintptr_t last,int restricted){
     if(first>last)return -1;
+    int platform=native_platform_range(first,last,restricted);
+    if(platform)return platform;
     /* Consult the same exact allocation directory used by JNI/JVMTI result
      * publication. Release its leaf lock before taking any domain lock below. */
     if(!native_control_shared(&native_private_gate,restricted))return -1;

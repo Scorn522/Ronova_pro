@@ -114,6 +114,7 @@ final class ExternalCodeDefinitions {
         final String[] creationSites;
         final Object execution;
         final int concreteMethods;final boolean contributors,referenceOnly;
+        volatile boolean acceptanceObserved;
         Definition(ClassLoader loader,String name,Class<?> actual,Module declaration,ExternalCodeFlow.Image image,ExternalCodeFlow.Image analysis,byte[] semanticBytes,Map<String,Module[][]> applied,byte[] bytes,Map<String,Module[]> fields,Object[][] values,boolean hidden,String[] creationSites,Object execution){
             this(loader,name,actual,declaration,image,analysis,semanticBytes,applied,bytes,fields,values,hidden,creationSites,execution,null);
         }
@@ -375,7 +376,7 @@ final class ExternalCodeDefinitions {
                 emitted.semanticBytes==null?emitted.bytes:emitted.semanticBytes,Map.of(),emitted.bytes,emitted.fields,emitted.values,true,emitted.creationSites,null);
         Map<String,Module[]> roots=ExternalCodeRuntime.methodRoots(emitted.analysis==null?Map.of():emitted.analysis.rows());
         RecoveryAgent.bindExternalDefinition(actual,bytes,roots,accepted.fields,accepted.values,accepted.creationSites);
-        if(publish(accepted,false))changed(actual);
+        if(publish(accepted,false)){sourceAccepted(actual);changed(actual);}
     }
     static void prepared(Class<?> actual){
         if(actual==null||actual.isHidden())return;
@@ -385,7 +386,36 @@ final class ExternalCodeDefinitions {
             Class<?> prior=entry.actual.get();if(prior!=null&&prior!=actual)continue;
             Ref<Class<?>> accepted=new Ref<>(actual);ControlImages.protect(accepted);entry.actual=accepted;observed=true;source|=entry.contributors;
         }
+        if(observed)sourceAccepted(actual);
         if(observed&&executionSourcesObserved(actual.getClassLoader(),actual.getName().replace('.','/')))changed(actual);
+    }
+    /** Called at real prepare/transform completion, never from an application effect getter. */
+    static boolean sourceAccepted(Class<?> actual){
+        return sourceAccepted(actual,true);
+    }
+    static boolean sourceContinuing(Class<?> actual){
+        return sourceAccepted(actual,false);
+    }
+    private static boolean sourceAccepted(Class<?> actual,boolean completing){
+        if(actual==null||actual.isArray()||actual.isPrimitive())return false;
+        String name=actual.getName().replace('.','/');List<Definition> definitions=definitions();
+        for(int i=definitions.size()-1;i>=0;i--){Definition definition=definitions.get(i);
+            if(definition.referenceOnly||!completing&&!definition.acceptanceObserved||!definition.loader(actual.getClassLoader())
+                    ||(actual.isHidden()?definition.actual.get()!=actual:definition.hidden||!definition.name.equals(name)))continue;
+            if(RecoveryAgent.bindExternalSources(actual,definition.bytes)){definition.acceptanceObserved=true;return true;}
+        }
+        return false;
+    }
+    static Module[] sourceModules(Class<?> actual){
+        Set<Module> sources=Collections.newSetFromMap(new IdentityHashMap<>());String name=actual.getName().replace('.','/');
+        for(Definition definition:definitions())if(definition.loader(actual.getClassLoader())
+                &&(actual.isHidden()?definition.actual.get()==actual:!definition.hidden&&definition.name.equals(name))){
+            addOwners(sources,definition.applied);
+            if(definition.analysis!=null)addOwners(sources,definition.analysis.rows());
+            for(Module[] owners:definition.fields.values())Collections.addAll(sources,owners);
+            for(Object[] value:definition.values)Collections.addAll(sources,(Module[])value[3]);
+        }
+        return sources.toArray(Module[]::new);
     }
     static void changed(Class<?> actual){
         if(WORKER.get()==null)return;
@@ -633,6 +663,7 @@ final class ExternalCodeDefinitions {
         return false;
     }
     private static boolean refreshed(Class<?> actual){
+        sourceAccepted(actual);
         BootstrapLookup previous=BOOTSTRAP_LOOKUP.get();BOOTSTRAP_LOOKUP.set(new BootstrapLookup(definitions()));
         try{
             Bound current=bind(actual,new IdentityHashMap<>(),Collections.newSetFromMap(new IdentityHashMap<>()));

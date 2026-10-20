@@ -499,13 +499,26 @@ final class ModGroupBoundary {
         for(Class<?> type:snapshot) {
             if(type.isArray()||type.isPrimitive())continue;
             Module module=RecoveryAgent.logicalModule(type);boolean contribution=external.contains(type);if((!selected.contains(module)||!stopped(module))&&!contribution)continue;
-            if(contribution&&!selected.contains(module))for(Module source:RecoveryAgent.methodRootSources(type))if(source!=null&&selected.contains(source))
-                gap(source,type.getName()+":EXTERNAL_OLD_FRAME_SOURCE_UNOBSERVED");
+            Module[] contributionSources=contribution?ExternalCodeImages.sources(type):new Module[0];
+            if(contribution&&!selected.contains(module)){
+                boolean bound=ExternalCodeDefinitions.sourceContinuing(type);
+                for(Module source:contributionSources)if(source!=null&&selected.contains(source)){
+                    String detail=type.getName()+":EXTERNAL_OLD_FRAME_SOURCE_UNOBSERVED";
+                    if(bound)externalResolved(source,detail);else gap(source,detail);
+                }
+            }
             if(!api.isModifiableClass(type)) {
                 if(type.isHidden()&&RecoveryAgent.definition(type)!=null)continue;
                 if(contribution)ExternalCodeImages.failed(selected.toArray(Module[]::new),type.getName()+":EXTERNAL_CLASS_UNMODIFIABLE");else gap(module,type.getName()+":UNMODIFIABLE");failed++;continue;
             }
-            try {api.retransformClasses(type);loaded++;}
+            try {
+                api.retransformClasses(type);loaded++;
+                if(contribution&&!ExternalCodeDefinitions.sourceAccepted(type)){
+                    for(Module source:contributionSources)if(source!=null&&selected.contains(source))
+                        gap(source,type.getName()+":EXTERNAL_ACCEPTED_DEFINITION_SOURCE_UNOBSERVED");
+                }else if(contribution)for(Module source:contributionSources)if(source!=null&&selected.contains(source))
+                    externalResolved(source,type.getName()+":EXTERNAL_ACCEPTED_DEFINITION_SOURCE_UNOBSERVED");
+            }
             catch(UnmodifiableClassException|RuntimeException|LinkageError failure) {
                 if(contribution)ExternalCodeImages.failed(selected.toArray(Module[]::new),type.getName()+":EXTERNAL_RETRANSFORM_FAILED:"+failure.getClass().getSimpleName());else gap(module,type.getName()+":"+failure.getClass().getSimpleName());failed++;
             }

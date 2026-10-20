@@ -9,6 +9,7 @@ import java.util.*;
 /** Carries actual module-reader provenance through class bytes and ASM parsing. */
 public final class CodeSourceBridge {
     private static final Module[] NO_FRAME_SOURCES=new Module[0];
+    private static final Module[] UNKNOWN_FRAME_SOURCES=new Module[]{null};
     private static final StackWalker WALKER=StackWalker.getInstance(Set.of(StackWalker.Option.RETAIN_CLASS_REFERENCE,StackWalker.Option.SHOW_HIDDEN_FRAMES));
     private static final StackWalker AUTHORITY=StackWalker.getInstance(StackWalker.Option.RETAIN_CLASS_REFERENCE);
     private record BufferFrames(StackWalker.StackFrame callee,StackWalker.StackFrame caller,int depth){}
@@ -290,17 +291,15 @@ public final class CodeSourceBridge {
                 if(bucket!=null)for(CodeMethods entry:bucket.entries)if(codeMatches(entry.name(),entry.loader(),entry.bootstrap(),entry.actual(),type))
                     for(String selector:entry.methods())if(frameSelector(frame,selector)){candidate=true;break;}
             }
-            if(candidate){Module[] observed=NativeControl.codeFrame(frame);if(observed!=null&&observed.length!=0)return frameDeclaration(type,observed);}
+            if(candidate){
+                Module[] observed=NativeControl.codeFrame(frame);
+                // A selector describes the current catalogue, not an obsolete
+                // physical method. Never replace a failed VM observation with
+                // the latest definition's roots.
+                return frameDeclaration(type,observed==null||observed.length==0?UNKNOWN_FRAME_SOURCES:observed);
+            }
         }
-        return frameSources(frame.getDeclaringClass(),frame.getMethodName(),frame.getDescriptor());
-    }
-    static Module[] frameSources(Class<?> type,String name,String descriptor){
-        if(type==null)return NO_FRAME_SOURCES;
-        Module[] roots=NO_FRAME_SOURCES;
-        for(MethodRoots root:methodRoots)if(root.actual()!=null?root.actual().get()==type
-                :root.bootstrap()==(type.getClassLoader()==null)&&root.loader().get()==type.getClassLoader()&&root.name().equals(type.getName()))
-            for(var entry:root.roots().entrySet())if(frameSelector(name,descriptor,entry.getKey())){roots=entry.getValue();break;}
-        return frameDeclaration(type,roots);
+        return frameDeclaration(frame.getDeclaringClass(),NO_FRAME_SOURCES);
     }
     private static Module[] frameDeclaration(Class<?> type,Module[] roots){
         Module actual=DefinitionBridge.module(type);
@@ -333,9 +332,9 @@ public final class CodeSourceBridge {
         return selector.length()==split+descriptor.length()&&selector.regionMatches(split,descriptor,0,descriptor.length());
     }
     static boolean hasFrameSources(){
-        return ControlBridge.PRODUCERS.get()!=null||methodRoots.length!=0;
+        return ControlBridge.PRODUCERS.get()!=null||codeMethodsPresent||methodRoots.length!=0;
     }
-    static boolean hasMethodRoots(){return methodRoots.length!=0;}
+    static boolean hasMethodRoots(){return codeMethodsPresent||methodRoots.length!=0;}
     public static Module[] methodRootSources(Class<?> type){
         requireAgent();Set<Module> sources=Collections.newSetFromMap(new IdentityHashMap<>());
         for(MethodRoots root:methodRoots)if(root.actual()!=null?root.actual().get()==type
@@ -747,7 +746,7 @@ public final class CodeSourceBridge {
         // installed. Read the real synchronizer without repeating a JVMTI
         // class-field enumeration for every ordinary receiver gate.
         try{
-            var field=java.util.concurrent.locks.ReentrantLock.class.getDeclaredField("sync");field.setAccessible(true);sync=field.get(gate);
+            var field=PlatformMetadata.declaredField(java.util.concurrent.locks.ReentrantLock.class,"sync");field.setAccessible(true);sync=field.get(gate);
         }catch(ReflectiveOperationException unavailable){throw new IllegalStateException("FIELD_GATE_SYNC_UNAVAILABLE",unavailable);}
         if(!(sync instanceof java.util.concurrent.locks.AbstractQueuedSynchronizer))throw new IllegalStateException("FIELD_GATE_SYNC_UNAVAILABLE");
         // Bind both exact identities before the gate is published. Its JDK
@@ -780,7 +779,7 @@ public final class CodeSourceBridge {
     static boolean fieldAllowed(Object receiver,Class<?> declaring,String name){
         CodeField source=codeField(declaring,name);if(source==null)return true;
         try{
-            var field=declaring.getDeclaredField(name);if(!field.getType().descriptorString().equals(source.descriptor()))return true;
+            var field=PlatformMetadata.declaredField(declaring,name);if(!field.getType().descriptorString().equals(source.descriptor()))return true;
             boolean statik=java.lang.reflect.Modifier.isStatic(field.getModifiers());Object holder=statik?declaring:receiver;
             if(holder!=null)synchronized(MODULES){
                 reap();if(statik){boolean known=false;for(var reference:FIELD_CLASSES)if(reference.get()==declaring){known=true;break;}if(!known)FIELD_CLASSES.add(new Ref<>(declaring));}
@@ -803,13 +802,13 @@ public final class CodeSourceBridge {
             }
             FIELD_CLASSES.removeIf(reference->reference.get()==null);
             for(WeakReference<Class<?>> reference:FIELD_CLASSES){Class<?> type=reference.get();if(type==null)continue;
-                for(var field:type.getDeclaredFields())if(java.lang.reflect.Modifier.isStatic(field.getModifiers())){
+                for(var field:PlatformMetadata.declaredFields(type))if(java.lang.reflect.Modifier.isStatic(field.getModifiers())){
                     CodeField source=codeField(type,field.getName());if(selectedField(source,field,modules))rows.add(new Object[]{field,null,ready.contains(type)});
                 }
             }
             for(var entry:FIELD_HOLDERS.entrySet()){
                 Object holder=entry.getKey().get();if(holder==null)continue;
-                for(Class<?> type=holder.getClass();type!=null;type=type.getSuperclass())for(var field:type.getDeclaredFields()){
+                for(Class<?> type=holder.getClass();type!=null;type=type.getSuperclass())for(var field:PlatformMetadata.declaredFields(type)){
                     if(java.lang.reflect.Modifier.isStatic(field.getModifiers()))continue;CodeField source=codeField(type,field.getName());
                     if(source!=null&&entry.getValue().contains(new FieldHold(type,field.getName(),source.descriptor()))&&selectedField(source,field,modules))rows.add(new Object[]{field,holder});
                 }
@@ -817,7 +816,7 @@ public final class CodeSourceBridge {
             synchronized(CODE_VALUES){for(CodeValues entry:CODE_VALUES)for(var reference:FIELD_CLASSES){Class<?> type=reference.get();if(type==null)continue;
                 if(!codeMatches(entry.name(),entry.loader(),entry.bootstrap(),entry.actual(),type))continue;
                 for(CodeValue value:entry.fields())if(!value.completed&&Arrays.stream(value.sources).anyMatch(modules::contains))try{
-                    var field=type.getDeclaredField(value.name);if(field.getType().descriptorString().equals(value.descriptor)&&java.lang.reflect.Modifier.isStatic(field.getModifiers()))rows.add(new Object[]{field,null,ready.contains(type),value.expected,value.baseline,value});
+                    var field=PlatformMetadata.declaredField(type,value.name);if(field.getType().descriptorString().equals(value.descriptor)&&java.lang.reflect.Modifier.isStatic(field.getModifiers()))rows.add(new Object[]{field,null,ready.contains(type),value.expected,value.baseline,value});
                 }catch(NoSuchFieldException absent){/* The removed declaration is still a schema gap, not a fabricated value reset. */}
             }}
         }return rows.toArray(Object[][]::new);
@@ -835,7 +834,7 @@ public final class CodeSourceBridge {
             CodeFields entry=null;synchronized(CODE_FIELDS){for(CodeFields candidate:CODE_FIELDS)if(codeMatches(candidate.name(),candidate.loader(),candidate.bootstrap(),candidate.actual(),type)){entry=candidate;break;}}
             if(entry==null)continue;
             for(CodeField source:entry.fields().values())try{
-                var field=type.getDeclaredField(source.name());if(java.lang.reflect.Modifier.isStatic(field.getModifiers())!=statik||!field.getType().descriptorString().equals(source.descriptor()))continue;
+                var field=PlatformMetadata.declaredField(type,source.name());if(java.lang.reflect.Modifier.isStatic(field.getModifiers())!=statik||!field.getType().descriptorString().equals(source.descriptor()))continue;
                 long[] span=ResourceBridge.fieldSpan(field,receiver);if(span==null)continue;
                 if(offset<0||length>Long.MAX_VALUE-offset)return false;
                 if(offset<span[0]+span[1]&&span[0]<offset+length&&!fieldAllowed(receiver,type,source.name()))return false;
@@ -959,7 +958,7 @@ public final class CodeSourceBridge {
         byte[] bytes=record.bytes().get();if(bytes==null||!MessageDigest.isEqual(record.image().digest(),hash(bytes)))return;
         try{
             // Verify the actual parser still holds this observed byte array.
-            var field=declaring.getDeclaredField("classFileBuffer");field.setAccessible(true);if(field.get(reader)!=bytes)return;
+            var field=PlatformMetadata.declaredField(declaring,"classFileBuffer");field.setAccessible(true);if(field.get(reader)!=bytes)return;
             Class<?> tree=Class.forName("org.objectweb.asm.tree.ClassNode",false,declaring.getClassLoader());if(!tree.isInstance(visitor))return;
         }catch(ReflectiveOperationException failure){throw new IllegalStateException("ASM_SOURCE_BUFFER_UNOBSERVED",failure);}
         byte[] input=bytes.clone();protect((Object)input);
@@ -1367,7 +1366,7 @@ public final class CodeSourceBridge {
             try{
                 Class<?> method=Class.forName("org.spongepowered.asm.mixin.transformer.ClassInfo$Method",false,type.getClassLoader());
                 Class<?> declaration=method.isInstance(member)?method:Class.forName("org.spongepowered.asm.mixin.transformer.ClassInfo$Field",false,type.getClassLoader());
-                var outer=declaration.getDeclaredField("this$0");outer.setAccessible(true);Object info=outer.get(member);Map<String,Image> rows=METADATA_ROWS.get(new Key(info,false));
+                var outer=PlatformMetadata.declaredField(declaration,"this$0");outer.setAccessible(true);Object info=outer.get(member);Map<String,Image> rows=METADATA_ROWS.get(new Key(info,false));
                 if(rows!=null){
                     String kind=method.isInstance(member)?"M":"F";Map<String,Image> next=new TreeMap<>(rows);
                     for(Object[] values:List.of(change.values(),currentValues)){
@@ -1382,9 +1381,9 @@ public final class CodeSourceBridge {
     private static Object[] memberValues(Object member,ClassLoader loader){
         try{
             Class<?> base=Class.forName("org.spongepowered.asm.mixin.transformer.ClassInfo$Member",false,loader);List<Object> values=new ArrayList<>();
-            for(String name:List.of("currentName","currentDesc","decoratedFinal","decoratedMutable","unique")){var slot=base.getDeclaredField(name);slot.setAccessible(true);values.add(slot.get(member));}
+            for(String name:List.of("currentName","currentDesc","decoratedFinal","decoratedMutable","unique")){var slot=PlatformMetadata.declaredField(base,name);slot.setAccessible(true);values.add(slot.get(member));}
             Class<?> method=Class.forName("org.spongepowered.asm.mixin.transformer.ClassInfo$Method",false,loader);
-            if(method.isInstance(member)){var conformed=method.getDeclaredField("conformed");conformed.setAccessible(true);values.add(conformed.get(member));}return values.toArray();
+            if(method.isInstance(member)){var conformed=PlatformMetadata.declaredField(method,"conformed");conformed.setAccessible(true);values.add(conformed.get(member));}return values.toArray();
         }catch(ReflectiveOperationException unavailable){throw new IllegalStateException("ACTUAL_MIXIN_MEMBER_STATE_UNAVAILABLE",unavailable);}
     }
     private static void metadataConsumed(MetadataUse scope,Image source,Object info){
@@ -1585,7 +1584,7 @@ public final class CodeSourceBridge {
         }
         if(pending!=null)while(!pending.isEmpty()){
             Object value=pending.removeFirst();if(!found.add(value)||!(value instanceof Map<?,?>||value instanceof Collection<?>))continue;
-            for(Class<?> type=value.getClass();type!=null&&type!=Object.class;type=type.getSuperclass())for(var field:type.getDeclaredFields())
+            for(Class<?> type=value.getClass();type!=null&&type!=Object.class;type=type.getSuperclass())for(var field:PlatformMetadata.declaredFields(type))
                 if(!java.lang.reflect.Modifier.isStatic(field.getModifiers())&&(field.getType().isArray()||Map.class.isAssignableFrom(field.getType())||Collection.class.isAssignableFrom(field.getType()))){
                     if(!NativeControl.available()&&!field.trySetAccessible())throw new IllegalStateException("CONTROL_BACKING_FIELD_UNAVAILABLE:"+field.getName());
                     Object child=controlField(field,value);if(child!=null)pending.add(child);
@@ -1634,11 +1633,11 @@ public final class CodeSourceBridge {
     private static String callerMethod(){return WALKER.walk(frames->frames.filter(frame->frame.getDeclaringClass().getNestHost()!=CodeSourceBridge.class).findFirst().orElseThrow()).getMethodName();}
     private static Object field(Object receiver,String name){
         if(receiver==null)return null;
-        for(Class<?> type=receiver.getClass();type!=null;type=type.getSuperclass())try{var field=type.getDeclaredField(name);field.setAccessible(true);return field.get(receiver);}catch(NoSuchFieldException ignored){}catch(IllegalAccessException failure){throw new IllegalStateException("EXTERNAL_ROLE_FIELD_UNAVAILABLE:"+name,failure);}
+        for(Class<?> type=receiver.getClass();type!=null;type=type.getSuperclass())try{var field=PlatformMetadata.declaredField(type,name);field.setAccessible(true);return field.get(receiver);}catch(NoSuchFieldException ignored){}catch(IllegalAccessException failure){throw new IllegalStateException("EXTERNAL_ROLE_FIELD_UNAVAILABLE:"+name,failure);}
         throw new IllegalStateException("EXTERNAL_ROLE_FIELD_UNAVAILABLE:"+name);
     }
     private static java.lang.reflect.Field access(Class<?> type,String name)throws NoSuchFieldException {
-        for(Class<?> current=type;current!=null;current=current.getSuperclass())try{var field=current.getDeclaredField(name);field.setAccessible(true);return field;}catch(NoSuchFieldException absent){}
+        for(Class<?> current=type;current!=null;current=current.getSuperclass())try{var field=PlatformMetadata.declaredField(current,name);field.setAccessible(true);return field;}catch(NoSuchFieldException absent){}
         throw new NoSuchFieldException(type.getName()+":"+name);
     }
     private static byte[] hash(byte[] bytes){byte[] digest=NativeControl.codeDigest(bytes);protect((Object)digest);return digest;}

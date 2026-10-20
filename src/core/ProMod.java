@@ -73,6 +73,9 @@ public final class ProMod {
         ProRuntime runtime=ProRuntime.get(e.getServer());if(runtime!=null)runtime.beginShutdown();
     }
     private void tick(TickEvent.ServerTickEvent e) {
+        if(e.phase==TickEvent.Phase.START) {
+            ProRuntime r=ProRuntime.get(e.getServer());if(r!=null)r.beforeWorldTick();
+        }
         if(e.phase==TickEvent.Phase.END) {
             ProRuntime r=ProRuntime.get(e.getServer());if(r!=null)r.tick();
         }

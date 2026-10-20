@@ -38,11 +38,12 @@ static Owner *code_retirement_declared(JNIEnv *env,jmethodID method){
     jclass declaring=NULL;jobject module=NULL;Owner *result=NULL;
     if((*native_ti)->GetMethodDeclaringClass(native_ti,method,&declaring)==JVMTI_ERROR_NONE&&declaring)
         module=native_original.GetModule(env,declaring);
-    if(module){AcquireSRWLockShared(&native_records);
+    if(module&&TryAcquireSRWLockShared(&native_records)){
         for(Owner *owner=native_owners;owner;owner=owner->next)
             if(InterlockedCompareExchange(&owner->producer,0,0)&&native_original.IsSameObject(env,owner->module,module)){result=owner;break;}
-        ReleaseSRWLockShared(&native_records);native_original.DeleteLocalRef(env,module);
+        ReleaseSRWLockShared(&native_records);
     }
+    if(module)native_original.DeleteLocalRef(env,module);
     if(declaring)native_original.DeleteLocalRef(env,declaring);return result;
 }
 static int code_retirement_candidate(JNIEnv *env,jmethodID method,jobject module){
@@ -158,10 +159,10 @@ static void code_retirement_force(JNIEnv *env,jthread thread,NativeThread *state
             ||!code_vm_snapshot(env,method,&version,&pool,name,signature))goto done;
     /* The actual declaring Mod is selected as a whole. A Plan, instruction
      * witness, leaf-body shape or individual field receipt grants no return. */
-    if(code_retirement_declared(env,method)!=owner->owner||!InterlockedCompareExchange(&owner->owner->stopped,0,0)){
+    module=native_original.GetModule(env,declaring);
+    if(!module||!native_original.IsSameObject(env,module,owner->owner->module)||!InterlockedCompareExchange(&owner->owner->stopped,0,0)){
         reason=CODE_RETIRE_FRAMEWORK;goto done;
     }
-    module=native_original.NewLocalRef(env,owner->owner->module);if(!module)goto done;
     permanent=0;
     const char *end=strrchr(signature,')');if(!end||!end[1])goto done;char result=end[1];jvalue returned;
     if(result!='V'){

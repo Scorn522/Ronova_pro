@@ -1,5 +1,24 @@
 # B 批实际报告：2026-10-09 代码收敛接续
 
+## 2026-10-20：三个 P0 与 SuperSteve 两条具体漏口
+
+接续 `1542cfc`。本轮实现已知容器整组直接清理、实体当前载体重定位与原对象类型恢复、在途旧方法及线程／任务来源的效果边界接续；补入 Class$ReflectionData 防投毒和原始 VM 声明读取，以及实际 InstrumentationImpl/JPLISAgent/JvmtiEnv 结构保护。没有恢复广谱容器 Hook，没有新增 SDK、隔离夹具或微批次验证。
+
+实体 `_klass` 恢复使用原 Class 的实际 Klass 与 VM narrowKlass 参数，并要求已观察的原对象、相容布局和真实 CAS；未知对象头、未观察来源和不能解释的私有状态不按成功处理。原生结构范围依赖受支持 OpenJDK 17 Win64 布局和实际 VM/JPLIS 对象身份。完整改动范围见同日 A 批状态页。
+
+遵守本轮安排：不运行起服、实机、测试、`validation/checks` 或独立消费者夹具。下列历史报告保留其原候选与原范围，不能替代本候选的游戏运行结果。
+
+整包统一构建的首轮 Java 编译通过；Native 发现一个 JVMTI 常量名错误，修正后继续同一 `jar` / `reobfJar` 构建成功（19 秒、退出 0）。两份实际日志保留在 `.work/v1.5-p0-20261020/build.log` 和 `build-complete.log`。没有追加运行检查，保留原有编译警告。
+
+当前 `distribution/v1.5-whole-mod` 候选为 Java105 / Native99 / Storage3 / Journal7：
+
+| 候选 | 字节 | SHA-256 |
+| --- | ---: | --- |
+| `ronova-pro-core-1.5.0-dev.jar` | 3253883 | `07298d62a629549bc6be6974d903c03c6b45e85ee25460c1111c157f499608aa` |
+| `ronova-pro-prelaunch.jar` | 51042 | `0b32b1e0d08e7af35afe97335d0b9d688c5c7d661913ce77e965901d6856503f` |
+
+prelaunch 本轮无源码变动，沿用本次构建返回的匹配产物；Core 已包含本包新 Agent、Bootstrap 与 Native DLL。尚未进行本候选游戏启动及整组攻防实机确认。
+
 ## 2026-10-18：用户态启动与嵌套 Mod 分组修复
 
 接续 `e4928eb`，成功空 JAR 扫描结果接入原索引；模块／外层文件别名改为合并发布；修正 jar/union URL 中特殊字符的物理路径解析；Core 在发现内嵌别名后继续查询其真实 Module，再执行整组策略。没有缓存早期 Module reader 的缺失，也没有缩减原写入／执行边界。

@@ -68,7 +68,7 @@ public final class TaskBridge {
     static final class ThreadOrigin {
         final Set<Module> sources=Collections.newSetFromMap(new IdentityHashMap<>());
         final java.util.concurrent.locks.ReentrantLock io=new java.util.concurrent.locks.ReentrantLock();
-        boolean unknown,interruptPending;int starting;
+        boolean unknown,interruptPending,observedStart,platformWorker;int starting;
     }
     static final class ThreadStart {
         Thread thread,caller=Thread.currentThread();final ThreadOrigin origin;boolean closed;
@@ -345,6 +345,46 @@ public final class TaskBridge {
         if(origin.unknown||origin.sources.isEmpty())return false;
         for(Module source:origin.sources)if(!modStopped(source))return false;return true;
     }
+    /** Live task invocations and independently started threads keep their real roots. */
+    static Module[] currentThreadSources(){
+        synchronized(CREATION_OWNERS){
+            Thread thread=Thread.currentThread();ThreadOrigin origin=THREAD_ORIGINS.get(new EventKey(thread,null));
+            boolean independent=origin!=null&&origin.observedStart&&!origin.platformWorker;
+            int count=0;boolean unknown=independent&&origin.unknown;
+            if(independent)for(Module source:origin.sources)if(source==null)unknown=true;else count++;
+            for(Frame frame=CURRENT.get();frame!=null;frame=frame.previous)if(frame.thread==thread&&!frame.exited&&!frame.retired){
+                unknown|=frame.sourcesUnknown;for(Module source:frame.sources)if(source==null)unknown=true;else count++;
+            }
+            if(count==0&&!unknown)return NO_SOURCES;
+            Module[] sources=new Module[count+(unknown?1:0)];int at=unknown?1:0;
+            if(independent)for(Module source:origin.sources)if(source!=null)sources[at++]=source;
+            for(Frame frame=CURRENT.get();frame!=null;frame=frame.previous)if(frame.thread==thread&&!frame.exited&&!frame.retired)
+                for(Module source:frame.sources)if(source!=null)sources[at++]=source;
+            return sources;
+        }
+    }
+    static boolean currentThreadSourceUnknown(){
+        synchronized(CREATION_OWNERS){
+            ThreadOrigin origin=THREAD_ORIGINS.get(new EventKey(Thread.currentThread(),null));
+            if(origin!=null&&origin.observedStart&&!origin.platformWorker&&(origin.unknown||origin.sources.contains(null)))return true;
+            Thread thread=Thread.currentThread();
+            for(Frame frame=CURRENT.get();frame!=null;frame=frame.previous)if(frame.thread==thread&&!frame.exited&&!frame.retired&&frame.sourcesUnknown)return true;
+            return false;
+        }
+    }
+    static boolean currentThreadStoppedSource(){
+        synchronized(CREATION_OWNERS){
+            ThreadOrigin origin=THREAD_ORIGINS.get(new EventKey(Thread.currentThread(),null));
+            Thread thread=Thread.currentThread();
+            if(origin!=null&&origin.observedStart&&!origin.platformWorker){
+                for(Module source:origin.sources)if(modStopped(source))return true;
+                if(RETIRED_THREADS.contains(new EventKey(thread,null)))return true;
+            }
+            for(Frame frame=CURRENT.get();frame!=null;frame=frame.previous)if(frame.thread==thread&&!frame.exited&&!frame.retired)
+                for(Module source:frame.sources)if(modStopped(source))return true;
+            return false;
+        }
+    }
     public static Object threadStarting(Thread thread)throws ReflectiveOperationException {
         if(WALKER.getCallerClass()!=Thread.class)throw new SecurityException("ACTUAL_THREAD_START_REQUIRED");
         return beginThreadStart(thread,null);
@@ -352,16 +392,18 @@ public final class TaskBridge {
     static Object beginThreadStart(Thread thread,Module[] nativeSources)throws ReflectiveOperationException {
         if(ThreadPlatform.STATUS.getInt(thread)!=0)return null;
         Object target=ThreadPlatform.TARGET.get(thread);boolean worker=threadWorker(thread,target);
-        Module[] sources=worker?new Module[0]:invokingSources();boolean unknown=!worker&&CodeSourceBridge.executionUnknown();
+        Module[] sources=worker?new Module[0]:invokingSources();boolean unknown=!worker&&sourceUnknown();
         boolean stopped=!worker&&stoppedInvocation();
         synchronized(CREATION_OWNERS){
             reapCreationOwners();ThreadOrigin origin=threadOrigin(thread,target);
+            if(!origin.observedStart||origin.platformWorker!=worker)NativeControl.heapPolicyChanged(thread);
+            origin.observedStart=true;origin.platformWorker=worker;
             if(!worker&&nativeSources!=null)for(Module source:nativeSources){
                 if(source==null)unknown=true;
                 else {stopped|=modStopped(source);if(producer(source))taskSource(thread,origin.sources,source);}
             }
             if(!worker&&(RETIRED_THREADS.contains(new EventKey(thread,null))||stopped))throw new IllegalThreadStateException("RONOVA_RETIRED_THREAD_START");
-            for(Module source:sources)taskSource(thread,origin.sources,source);
+            for(Module source:sources)if(source==null)unknown=true;else taskSource(thread,origin.sources,source);
             if(unknown&&!origin.unknown)NativeControl.heapPolicyChanged(thread);origin.unknown|=unknown;
             if(!worker&&allThreadSourcesStopped(origin))throw new IllegalThreadStateException("RONOVA_STOPPED_THREAD_START");
             ThreadStart token=new ThreadStart(thread,origin);origin.starting++;return token;

@@ -27,12 +27,13 @@ final class BackingPolicy {
             net.minecraft.world.level.Level.class,net.minecraft.server.level.ChunkMap.class,
             net.minecraft.world.level.entity.PersistentEntitySectionManager.class,
             net.minecraft.world.level.entity.EntityLookup.class,net.minecraft.world.level.entity.EntitySectionStorage.class,
+            net.minecraft.world.level.entity.LevelEntityGetterAdapter.class,
             net.minecraft.world.level.entity.EntitySection.class,net.minecraft.world.level.entity.EntityTickList.class,
             net.minecraft.util.ClassInstanceMultiMap.class,net.minecraft.network.syncher.SynchedEntityData.class,
             it.unimi.dsi.fastutil.ints.Int2ObjectOpenHashMap.class,it.unimi.dsi.fastutil.ints.Int2ObjectLinkedOpenHashMap.class,
             it.unimi.dsi.fastutil.longs.Long2ObjectOpenHashMap.class};
         agent.getMethod("openBackingAccess",Class.class,Class[].class).invoke(null,BackingPolicy.class,carriers);
-        Class<?> type=Class.forName("sun.misc.Unsafe");Field singleton=type.getDeclaredField("theUnsafe");singleton.setAccessible(true);unsafe=singleton.get(null);
+        Class<?> type=Class.forName("sun.misc.Unsafe");Field singleton=PlatformAccess.declaredField(type,"theUnsafe");singleton.setAccessible(true);unsafe=singleton.get(null);
         fieldOffset=type.getMethod("objectFieldOffset",Field.class);staticOffset=type.getMethod("staticFieldOffset",Field.class);
         arrayBase=type.getMethod("arrayBaseOffset",Class.class);arrayScale=type.getMethod("arrayIndexScale",Class.class);
         referenceWidth=(Integer)arrayScale.invoke(unsafe,Object[].class);
@@ -58,13 +59,22 @@ final class BackingPolicy {
         return value!=null&&(value.getClass().isArray()||value instanceof Map<?,?>||value instanceof Collection<?>
                 ||value instanceof Access.Server||value instanceof Access.Players||value instanceof Access.EntityState||value instanceof Access.Data
                 ||value instanceof Access.Callback||value instanceof Access.Tracked
-                ||value instanceof Access.Lookup||value instanceof Access.Manager||value instanceof Access.Sections||value instanceof Access.Section
+                ||value instanceof Access.Lookup||value instanceof Access.Manager||value instanceof Access.Getter||value instanceof Access.Sections||value instanceof Access.Section
                 ||value instanceof Access.Group||value instanceof Access.Ticks||value instanceof Access.Tracking);
     }
     static boolean capture(EntityRecords records,Entity entity) {
         ArrayDeque<Object> queue=new ArrayDeque<>();Collections.addAll(queue,entity,records.level,records.manager,records.lookup,records.sections,records.ticks,records.tracking);
         if(entity instanceof net.minecraft.server.level.ServerPlayer)queue.add(records.level.getServer().getPlayerList());
         return captureQueued(queue,entity);
+    }
+    /** Publish the exact current repair destinations before inserting the protected body. */
+    static boolean captureRepairCarriers(EntityRecords records,Entity entity,Object section,Object callback) {
+        ArrayDeque<Object> queue=new ArrayDeque<>();
+        Collections.addAll(queue,entity,records.level,records.manager,records.lookup,records.sections,records.ticks,records.tracking,section,callback);
+        Access.Group group=(Access.Group)((Access.Section)section).pro$storage();
+        for(var entry:group.pro$classes().entrySet())if(entry.getKey().isInstance(entity))queue.add(entry.getValue());
+        if(entity instanceof net.minecraft.server.level.ServerPlayer)queue.add(records.level.getServer().getPlayerList());
+        return captureQueued(queue,entity,section);
     }
     /** Capture only the actual health storage, without granting noHeal authority over body membership. */
     static boolean captureHealthStorage(Entity entity,Object data) {
@@ -84,14 +94,15 @@ final class BackingPolicy {
         if(receiver==null)return false;
         try {
             Field field;
-            try {field=declaring.getDeclaredField(name);}catch(NoSuchFieldException remapped){field=declaring.getDeclaredField(production);}
+            try {field=PlatformAccess.declaredField(declaring,name);}catch(NoSuchFieldException remapped){field=PlatformAccess.declaredField(declaring,production);}
             if(!accessible(field))return false;
             owner(receiver,entity);
             var fields=new HashMap<>(FIELDS.getOrDefault(receiver,Map.of()));
             fields.put(field,new WeakReference<>(field.get(receiver)));FIELDS.put(receiver,Map.copyOf(fields));return true;
         }catch(ReflectiveOperationException unavailable){return false;}
     }
-    private static boolean captureQueued(ArrayDeque<Object> queue,Entity entity) {
+    private static boolean captureQueued(ArrayDeque<Object> queue,Entity entity) {return captureQueued(queue,entity,null);}
+    private static boolean captureQueued(ArrayDeque<Object> queue,Entity entity,Object preparedSection) {
         Set<Object> seen=Collections.newSetFromMap(new IdentityHashMap<>());
         boolean complete=true;
         while(!queue.isEmpty()&&seen.size()<2048) {
@@ -102,17 +113,19 @@ final class BackingPolicy {
                 if(entity instanceof net.minecraft.server.level.ServerPlayer)expected.add(row.pro$players());
             }
             if(object instanceof Access.Players row)Collections.addAll(expected,row.pro$players(),row.pro$byUuid());
-            if(object instanceof Access.Manager row)Collections.addAll(expected,row.pro$lookup(),row.pro$sections(),row.pro$known());
+            if(object instanceof Access.Manager row)Collections.addAll(expected,row.pro$lookup(),row.pro$sections(),row.pro$known(),row.pro$getter(),row.pro$callbacks(),row.pro$visibility());
+            if(object instanceof Access.Getter row)Collections.addAll(expected,row.pro$lookup(),row.pro$sections());
             if(object instanceof Access.Lookup row)Collections.addAll(expected,row.pro$ids(),row.pro$uuids());
             if(object instanceof Access.Ticks row)Collections.addAll(expected,row.pro$active(),row.pro$passive());
             if(object instanceof Access.Tracking row)expected.add(row.pro$tracked());
             if(object instanceof Access.EntityState row)Collections.addAll(expected,row.pro$data(),row.pro$callback());
             if(object instanceof Access.Sections row) {
                 expected.add(row.pro$all());
+                expected.add(row.pro$visibility());
                 expected.add(row.pro$keys());SECTION_KEYS.put(row.pro$keys(),new WeakReference<>(row));
                 Object callback=((Access.EntityState)entity).pro$callback();
                 Object section=callback instanceof Access.Callback actual?actual.pro$section():null;
-                if(section instanceof Access.Section access&&((Access.Group)access.pro$storage()).pro$all().stream().anyMatch(value->value==entity))
+                if(section instanceof Access.Section access&&(section==preparedSection||((Access.Group)access.pro$storage()).pro$all().stream().anyMatch(value->value==entity)))
                     queue.add(section);
                 else complete=false;
             }
@@ -134,7 +147,7 @@ final class BackingPolicy {
                 Object value=field.get(object);if(value!=null)expected.add(value);
             }catch(IllegalAccessException unavailable){complete=false;}
             Map<Field,Object> observed=new HashMap<>();
-            for(Class<?> type=object.getClass();type!=null&&type!=Object.class;type=type.getSuperclass())if(inspectType(object,type))for(Field field:type.getDeclaredFields()) {
+            for(Class<?> type=object.getClass();type!=null&&type!=Object.class;type=type.getSuperclass())if(inspectType(object,type))for(Field field:PlatformAccess.declaredFields(type)) {
                 if(Modifier.isStatic(field.getModifiers()))continue;
                 if(!accessible(field)) {
                     if(carrier(object)||node(object))complete=false;
@@ -167,6 +180,7 @@ final class BackingPolicy {
         if(object instanceof net.minecraft.server.level.ServerLevel)return type==net.minecraft.server.level.ServerLevel.class;
         if(object instanceof Access.Players)return type==net.minecraft.server.players.PlayerList.class;
         if(object instanceof Access.Manager)return type==net.minecraft.world.level.entity.PersistentEntitySectionManager.class;
+        if(object instanceof Access.Getter)return type==net.minecraft.world.level.entity.LevelEntityGetterAdapter.class;
         if(object instanceof Access.Lookup)return type==net.minecraft.world.level.entity.EntityLookup.class;
         if(object instanceof Access.Sections)return type==net.minecraft.world.level.entity.EntitySectionStorage.class;
         if(object instanceof Access.Section)return type==net.minecraft.world.level.entity.EntitySection.class;
@@ -257,10 +271,34 @@ final class BackingPolicy {
             }
         }
     }
+    /** Retire this entity's detached carriers only after the current graph has acquired protection. */
+    static void carriersRebound(EntityRecords previous,EntityRecords current,Entity entity) {
+        if(!previous.carrierIdentityChanged(current))return;
+        Set<Object> retained=carrierGraph(current.carrierRoots());
+        for(Object value:carrierGraph(previous.carrierRoots()))if(!retained.contains(value))synchronized(OWNERS) {
+            var owners=OWNERS.get(value);if(owners==null)continue;
+            var remaining=owners.stream().filter(owner->owner.entity.get()!=null&&owner.entity.get()!=entity).toList();
+            if(remaining.isEmpty()){OWNERS.remove(value);FIELDS.remove(value);ARRAY_VALUES.remove(value);LINK_ARRAYS.remove(value);SECTION_KEYS.remove(value);}
+            else OWNERS.put(value,remaining);
+        }
+    }
+    private static Set<Object> carrierGraph(Object[] roots) {
+        ArrayDeque<Object> pending=new ArrayDeque<>();for(Object root:roots)if(root!=null)pending.add(root);
+        Set<Object> seen=Collections.newSetFromMap(new IdentityHashMap<>());
+        while(!pending.isEmpty()) {
+            Object value=pending.removeFirst();if(value instanceof Entity||!seen.add(value))continue;
+            for(Object field:FIELDS.getOrDefault(value,Map.of()).values())if(field instanceof WeakReference<?> ref) {
+                Object child=ref.get();if(child!=null&&!(child instanceof Entity))pending.add(child);
+            }
+            if(value instanceof Object[] array)for(Object child:array)
+                if(child!=null&&!(child instanceof Entity)&&(carrier(child)||node(child)||sectionTree(child)))pending.add(child);
+        }
+        return seen;
+    }
     private static boolean node(Object value) {return value!=null&&value.getClass().getClassLoader()==null&&(value.getClass().getName().equals("java.util.HashMap$Node")||value.getClass().getName().equals("java.util.HashMap$TreeNode"));}
     private static final ClassValue<Field[]> NODE_FIELDS=new ClassValue<>() {
         protected Field[] computeValue(Class<?> type) {
-            var result=new ArrayList<Field>();for(Class<?> c=type;c!=null&&c!=Object.class;c=c.getSuperclass())for(Field f:c.getDeclaredFields())
+            var result=new ArrayList<Field>();for(Class<?> c=type;c!=null&&c!=Object.class;c=c.getSuperclass())for(Field f:PlatformAccess.declaredFields(c))
                 if(!Modifier.isStatic(f.getModifiers())&&!f.getType().isPrimitive()&&accessible(f))result.add(f);
             return result.toArray(Field[]::new);
         }
@@ -271,7 +309,7 @@ final class BackingPolicy {
                     &&value.getClass().getName().equals("it.unimi.dsi.fastutil.longs.LongAVLTreeSet$Entry"));
     }
     private static Field[] sectionFields(Class<?> type) {
-        return Arrays.stream(type.getDeclaredFields()).filter(field->!Modifier.isStatic(field.getModifiers())&&!field.getType().isPrimitive()&&accessible(field)).toArray(Field[]::new);
+        return Arrays.stream(PlatformAccess.declaredFields(type)).filter(field->!Modifier.isStatic(field.getModifiers())&&!field.getType().isPrimitive()&&accessible(field)).toArray(Field[]::new);
     }
     private static Field[] nodeFields(Class<?> type) {return NODE_FIELDS.get(type);}
     private static boolean nodeContains(Object first,Entity entity) {
@@ -367,7 +405,7 @@ final class BackingPolicy {
             if(seen.size()>2048)throw new IllegalStateException("SECTION_TREE_CAPTURE_CAPACITY");
             var fields=new HashMap<Field,Object>();
             for(Owner owner:owners){Entity entity=owner.entity.get();if(entity!=null)owner(node,entity);}
-            for(Field field:node.getClass().getDeclaredFields())if(!Modifier.isStatic(field.getModifiers())&&accessible(field))try {
+            for(Field field:PlatformAccess.declaredFields(node.getClass()))if(!Modifier.isStatic(field.getModifiers())&&accessible(field))try {
                 Object value=field.get(node);if(field.getType().isPrimitive())fields.put(field,Boolean.TRUE);
                 else {fields.put(field,new WeakReference<>(value));if(sectionTree(value))pending.add(value);}
             }catch(IllegalAccessException unavailable){throw new IllegalStateException("SECTION_TREE_CAPTURE",unavailable);}
@@ -391,7 +429,7 @@ final class BackingPolicy {
     }
     static void controllers(Class<?> bridge)throws ReflectiveOperationException {
         var roots=new ArrayList<Object>();
-        for(Class<?> type:List.of(ProRuntime.class,RecoverySources.class,RecoveryTasks.class,BackingPolicy.class,SourceMaps.class,LiveStatePolicy.class,EquipmentPolicy.class))for(Field field:type.getDeclaredFields()) {
+        for(Class<?> type:List.of(ProRuntime.class,RecoverySources.class,RecoveryTasks.class,BackingPolicy.class,SourceMaps.class,LiveStatePolicy.class,EquipmentPolicy.class))for(Field field:PlatformAccess.declaredFields(type)) {
             if(!Modifier.isStatic(field.getModifiers())||!field.trySetAccessible())continue;
             if(Map.class.isAssignableFrom(field.getType())||Collection.class.isAssignableFrom(field.getType())||java.util.concurrent.ExecutorService.class.isAssignableFrom(field.getType())) {
                 Object value=field.get(null);if(value!=null) {
@@ -404,7 +442,7 @@ final class BackingPolicy {
     }
     static void runtimeControllers(ProRuntime runtime,Object... owners) {
         var roots=new ArrayList<Object>();
-        for(Object owner:owners)if(owner!=null)for(Class<?> type=owner.getClass();type!=null&&type!=Object.class;type=type.getSuperclass())for(Field field:type.getDeclaredFields()) {
+        for(Object owner:owners)if(owner!=null)for(Class<?> type=owner.getClass();type!=null&&type!=Object.class;type=type.getSuperclass())for(Field field:PlatformAccess.declaredFields(type)) {
             if(Modifier.isStatic(field.getModifiers())||!field.trySetAccessible())continue;
             if(Map.class.isAssignableFrom(field.getType())||Collection.class.isAssignableFrom(field.getType())||java.util.concurrent.ExecutorService.class.isAssignableFrom(field.getType()))
                 try {Object value=field.get(owner);if(value!=null)roots.add(value);}catch(IllegalAccessException unavailable){throw new IllegalStateException(unavailable);}
@@ -413,7 +451,7 @@ final class BackingPolicy {
         catch(ReflectiveOperationException unavailable){throw new IllegalStateException("RUNTIME_CONTROL_UNAVAILABLE",unavailable);}
     }
     static void resources(ProRuntime runtime,Object... owners) {
-        for(Object owner:owners)if(owner!=null)for(Class<?> type=owner.getClass();type!=null&&type!=Object.class;type=type.getSuperclass())for(Field field:type.getDeclaredFields()) {
+        for(Object owner:owners)if(owner!=null)for(Class<?> type=owner.getClass();type!=null&&type!=Object.class;type=type.getSuperclass())for(Field field:PlatformAccess.declaredFields(type)) {
             if(Modifier.isStatic(field.getModifiers())||!java.util.concurrent.ExecutorService.class.isAssignableFrom(field.getType())||!field.trySetAccessible())continue;
             try {Object executor=field.get(owner);if(executor!=null)registerResource(executor,runtime);}
             catch(IllegalAccessException unavailable) {throw new IllegalStateException("RESOURCE_BINDING_UNAVAILABLE",unavailable);}
@@ -427,7 +465,7 @@ final class BackingPolicy {
             Object value=pending.removeFirst();if(!seen.add(value))continue;
             if(!(value instanceof java.util.concurrent.ExecutorService))throw new IllegalStateException("RESOURCE_DELEGATE_TYPE");
             if(runtime==null)SHARED_RESOURCES.add(value);else RESOURCES.put(value,new WeakReference<>(runtime));
-            for(Class<?> type=value.getClass();type!=null&&type!=Object.class;type=type.getSuperclass())for(Field field:type.getDeclaredFields()) {
+            for(Class<?> type=value.getClass();type!=null&&type!=Object.class;type=type.getSuperclass())for(Field field:PlatformAccess.declaredFields(type)) {
                 if(Modifier.isStatic(field.getModifiers())||!java.util.concurrent.ExecutorService.class.isAssignableFrom(field.getType()))continue;
                 try {
                     long offset=((Number)fieldOffset.invoke(unsafe,field)).longValue();
@@ -480,7 +518,7 @@ final class BackingPolicy {
         if(LiveStatePolicy.memoryDenied(receiver,offset,length))return true;
         if(receiver instanceof Class<?> holder&&length>0) {
             final long end;try {end=Math.addExact(offset,length);}catch(ArithmeticException overflow){return true;}
-            for(Field field:holder.getDeclaredFields())if(Modifier.isStatic(field.getModifiers())&&!field.getType().isPrimitive())try {
+            for(Field field:PlatformAccess.declaredFields(holder))if(Modifier.isStatic(field.getModifiers())&&!field.getType().isPrimitive())try {
                 long at=(Long)staticOffset.invoke(unsafe,field);
                 if(offset<at+referenceWidth&&end>at&&SourceMaps.staticHolderRangeDenied(holder,field.getName()))return true;
             }catch(ReflectiveOperationException unavailable){return true;}

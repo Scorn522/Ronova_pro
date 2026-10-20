@@ -84,7 +84,7 @@ public final class RecoverySources implements AutoCloseable {
         static final java.lang.reflect.Method READY=readyMethod();
         static{ProRuntime.registerSourceControlObjects(READY);}
         private static Class<?> bridge(){try{return Class.forName("dev.ronova.pro.bootstrap.ResourceBridge",false,null);}catch(ClassNotFoundException unavailable){throw new ExceptionInInitializerError(unavailable);}}
-        private static java.lang.reflect.Method readyMethod(){try{return BRIDGE.getMethod("plannedFileMutationReady");}catch(ReflectiveOperationException unavailable){throw new ExceptionInInitializerError(unavailable);}}
+        private static java.lang.reflect.Method readyMethod(){try{return PlatformAccess.declaredMethod(BRIDGE,"plannedFileMutationReady");}catch(ReflectiveOperationException unavailable){throw new ExceptionInInitializerError(unavailable);}}
         static boolean ready(){try{return Boolean.TRUE.equals(READY.invoke(null));}catch(ReflectiveOperationException|RuntimeException|LinkageError unavailable){return false;}}
     }
     private static void requireFileMutationCallback(){
@@ -175,6 +175,7 @@ public final class RecoverySources implements AutoCloseable {
         List<java.lang.reflect.Field> fields=List.of();int field,element;
         long listRevision=-1,arrayRevision=-1;Object listStamp;
         SourceMaps.Cursor mapCursor;
+        boolean mixedContents,filteringContents,privateContents;
         GroupCursor(Object value){this.value=value;if(value instanceof List<?>)element=-1;}
     }
     private static final class GroupWalk {
@@ -183,7 +184,7 @@ public final class RecoverySources implements AutoCloseable {
         final ArrayDeque<Object> pending=new ArrayDeque<>();
         GroupCursor current;
         final ArrayDeque<GroupCursor> paused=new ArrayDeque<>();
-        String gap="";volatile boolean complete,changed;
+        String gap="",containerGap="";volatile boolean complete,changed;
         final boolean rootObserved;
         GroupWalk(Source source,UUID subject) {this.source=source;this.subject=subject;Object root=source.holder();rootObserved=root!=null;if(root!=null)pending.add(root);else gap="HOLDER_RELEASE_UNOBSERVED";}
     }
@@ -419,7 +420,7 @@ public final class RecoverySources implements AutoCloseable {
             String[] parts=locator.split("\\|",3);if(parts.length!=3)continue;
             try {
                 Class<?> agent=Class.forName("dev.ronova.pro.agent.RecoveryAgent",false,ClassLoader.getSystemClassLoader());
-                Class<?> holder=(Class<?>)agent.getMethod("initializedSource",String.class).invoke(null,parts[1]);
+                Class<?> holder=(Class<?>)PlatformAccess.declaredMethod(agent,"initializedSource",String.class).invoke(null,parts[1]);
                 if(holder==null) { restartDiagnostics.put(locator,"DEFINITION_NOT_INITIALIZED_OR_LOADER_AMBIGUOUS");continue; }
                 String actual=code(holder);
                 if(!expectedCode.equals(actual)) { restartDiagnostics.put(locator,"CODE_IDENTITY_CHANGED:expected="+expectedCode+":actual="+actual);continue; }
@@ -558,7 +559,7 @@ public final class RecoverySources implements AutoCloseable {
             if(budget<=0)break;
             GroupWalk walk=walks.get((start+i)%walks.size());visited=i+1;
             if(!walk.rootObserved)continue;
-            walk.gap="";
+            walk.gap=walk.containerGap;
             retiringSource.set(walk.source);
             Object processing=null;
             int quota=Math.min(budget,share),remaining=quota;
@@ -568,7 +569,7 @@ public final class RecoverySources implements AutoCloseable {
                     if(walk.current==null) {
                         if(walk.pending.isEmpty()) {
                              if(walk.paused.isEmpty()){
-                                 if(walk.changed){walk.changed=false;walk.seen.clear();Object root=walk.source.holder();if(root!=null)walk.pending.add(root);else walk.gap="HOLDER_RELEASE_UNOBSERVED";}
+                                 if(walk.changed){walk.changed=false;walk.seen.clear();walk.containerGap="";walk.gap="";Object root=walk.source.holder();if(root!=null)walk.pending.add(root);else walk.gap="HOLDER_RELEASE_UNOBSERVED";}
                                  else walk.complete=walk.gap.isEmpty();
                                  break;
                              }
@@ -581,7 +582,7 @@ public final class RecoverySources implements AutoCloseable {
                         if(characterWrapper(value)&&runtime.groupSubject(value)==authority){
                             if(walk.pending.size()>4080){walk.seen.remove(value);walk.pending.addLast(value);break;}
                             if(!retireDescriptorStream(value,authority)){walk.seen.remove(value);walk.pending.addLast(value);walk.gap="CHARACTER_WRAPPER_RELEASE_PENDING";break;}
-                            Object[] children=(Object[])Class.forName("dev.ronova.pro.bootstrap.ResourceBridge",false,null).getMethod("wrapperChildren",Object.class).invoke(null,value);
+                            Object[] children=(Object[])PlatformAccess.declaredMethod(Class.forName("dev.ronova.pro.bootstrap.ResourceBridge",false,null),"wrapperChildren",Object.class).invoke(null,value);
                             for(Object child:children)enqueue(walk.pending,child);continue;
                         }
                         if(!retireResource(value,authority)) {walk.gap="RESOURCE_RELEASE_PENDING:"+value.getClass().getName();walk.seen.remove(value);walk.pending.addLast(value);if(!walk.paused.isEmpty())walk.current=walk.paused.removeFirst();break;}
@@ -589,7 +590,7 @@ public final class RecoverySources implements AutoCloseable {
                         if(value.getClass().isArray()) {
                             walk.current=new GroupCursor(value);
                         }
-                        else if(SourceMaps.supported(value)||SourceMaps.supportedSet(value)) {
+                        else if(SourceMaps.groupMap(value)||SourceMaps.groupSet(value)||KnownContainers.sequence(value)) {
                             walk.current=new GroupCursor(value);
                         }
                         else if(SourceMaps.supportedList(value)) {
@@ -598,11 +599,11 @@ public final class RecoverySources implements AutoCloseable {
                             if(walk.pending.size()>=4096){walk.seen.remove(value);walk.pending.addFirst(value);break;}
                             var atomic=(java.util.concurrent.atomic.AtomicReference<Object>)value;Object child=atomic.get();
                             enqueue(walk.pending,child);
-                             if(runtime.groupSubject(value)==authority||runtime.groupSubject(child)==authority){
+                             if(child!=null&&(SourceMaps.privateContainer(value,runtime,authority)&&SourceMaps.privateElement(child,runtime,authority)||runtime.groupSubject(child)==authority)){
                                 atomic.compareAndSet(child,null);
                                 if(atomic.get()==child)throw new IOException("GROUP_ATOMIC_CLEAR_READBACK_FAILED");
                                 SourceMaps.changed(value);
-                            }
+                            }else if(SourceMaps.unresolvedElement(child,runtime,authority))walk.gap=walk.containerGap="GROUP_CONTAINER_ELEMENT_OWNERSHIP_UNRESOLVED";
                             continue;
                         }else {
                             if(value instanceof Map<?,?>||value instanceof Collection<?>)throw new IOException("GROUP_CONTAINER_BACKEND_UNSUPPORTED:"+value.getClass().getName());
@@ -610,7 +611,7 @@ public final class RecoverySources implements AutoCloseable {
                              if(type.getClassLoader()==null&&!platformStreamWrapper(value))continue;
                             GroupCursor cursor=new GroupCursor(value);cursor.fields=new ArrayList<>();
                             for(Class<?> owner=type;owner!=null&&owner!=Object.class&&(owner.getClassLoader()!=null||platformStreamWrapper(value));owner=statik?null:owner.getSuperclass())
-                                for(var field:owner.getDeclaredFields())if(java.lang.reflect.Modifier.isStatic(field.getModifiers())==statik
+                                for(var field:PlatformAccess.declaredFields(owner))if(java.lang.reflect.Modifier.isStatic(field.getModifiers())==statik
                                         &&(!platformStreamWrapper(value)||Set.of("in","out","buf","bytearr","readBuffer").contains(field.getName())))cursor.fields.add(field);
                             walk.current=cursor;
                         }
@@ -625,7 +626,7 @@ public final class RecoverySources implements AutoCloseable {
                         }else if(SourceMaps.supportedList(value)) {
                             int allowance=Math.min(32,remaining+1);remaining-=allowance-1;
                             retireList(walk,authority,allowance);
-                        }else if(SourceMaps.supported(value)||SourceMaps.supportedSet(value)) {
+                        }else if(SourceMaps.groupMap(value)||SourceMaps.groupSet(value)||KnownContainers.sequence(value)) {
                             int allowance=Math.min(32,remaining+1);remaining-=allowance-1;
                             retireMap(walk,authority,allowance);
                         }else {
@@ -697,18 +698,18 @@ public final class RecoverySources implements AutoCloseable {
     }
     private static void restoreExternalConstant(java.lang.reflect.Field field,Object[] row)throws ReflectiveOperationException {
         Class<?> bridge=Class.forName("dev.ronova.pro.bootstrap.TaskBridge",false,null);
-        Object gate=Class.forName("dev.ronova.pro.bootstrap.ControlBridge",false,null).getMethod("beginRecoveryMutation",Object.class).invoke(null,field.getDeclaringClass());
+        Object gate=PlatformAccess.declaredMethod(Class.forName("dev.ronova.pro.bootstrap.ControlBridge",false,null),"beginRecoveryMutation",Object.class).invoke(null,field.getDeclaringClass());
         if(Boolean.FALSE.equals(gate))throw new IllegalStateException("EXTERNAL_FIELD_WRITE_IN_FLIGHT");
         try{
             Object current=field.get(null),expected=row[3],baseline=row[4];
             if(!sameConstantValue(current,baseline)){
                 if(!sameConstantValue(current,expected))throw new IllegalStateException("EXTERNAL_FIELD_OUTSIDE_VALUE_PRESERVED");
-                boolean restored=Boolean.TRUE.equals(Class.forName("dev.ronova.pro.bootstrap.NativeControl",false,null)
-                        .getMethod("restoreRecoveredField",java.lang.reflect.Field.class,Object.class,Object.class,Object.class).invoke(null,field,null,current,baseline));
+                boolean restored=Boolean.TRUE.equals(PlatformAccess.declaredMethod(Class.forName("dev.ronova.pro.bootstrap.NativeControl",false,null),
+                        "restoreRecoveredField",java.lang.reflect.Field.class,Object.class,Object.class,Object.class).invoke(null,field,null,current,baseline));
                 if(!restored||!sameConstantValue(field.get(null),baseline))throw new IllegalStateException("EXTERNAL_FIELD_CONSTANT_RESTORE_PENDING");
             }
-            Class.forName("dev.ronova.pro.bootstrap.CodeSourceBridge",false,null).getMethod("constantRestored",Object.class,java.lang.reflect.Field.class).invoke(null,row[5],field);
-        }finally{Class.forName("dev.ronova.pro.bootstrap.ControlBridge",false,null).getMethod("endFieldMutation",Object.class).invoke(null,gate);}
+            PlatformAccess.declaredMethod(Class.forName("dev.ronova.pro.bootstrap.CodeSourceBridge",false,null),"constantRestored",Object.class,java.lang.reflect.Field.class).invoke(null,row[5],field);
+        }finally{PlatformAccess.declaredMethod(Class.forName("dev.ronova.pro.bootstrap.ControlBridge",false,null),"endFieldMutation",Object.class).invoke(null,gate);}
     }
     private void retireExternalHeapValues(ProRuntime.Subject authority){
         try{
@@ -716,7 +717,7 @@ public final class RecoverySources implements AutoCloseable {
             Set<String> present=new HashSet<>();for(Object[] row:rows)present.add("EXTERNAL_HEAP_VALUE:"+System.identityHashCode(row[1])+':'+row[2]);
             authority.unresolvedSources.removeIf(key->key.startsWith("EXTERNAL_HEAP_VALUE:")&&!present.contains(key));
             if(rows.length==0){externalHeapCursors.remove(authority.id);authority.unresolvedSources.remove("EXTERNAL_HEAP_DISPOSITION_PENDING");return;}
-            Class<?> bridge=Class.forName("dev.ronova.pro.bootstrap.CodeSourceBridge",false,null);var restore=bridge.getMethod("restoreHeapValue",Object.class);
+            Class<?> bridge=Class.forName("dev.ronova.pro.bootstrap.CodeSourceBridge",false,null);var restore=PlatformAccess.declaredMethod(bridge,"restoreHeapValue",Object.class);
             int start=externalHeapCursors.getOrDefault(authority.id,0)%rows.length,visited=Math.min(rows.length,256);
             for(int i=0;i<visited;i++){
                 Object[] row=rows[(start+i)%rows.length];String key="EXTERNAL_HEAP_VALUE:"+System.identityHashCode(row[1])+':'+row[2];
@@ -734,8 +735,8 @@ public final class RecoverySources implements AutoCloseable {
     }
     private Object[][] mappingDuplicateRows(ProRuntime.Subject authority)throws ReflectiveOperationException{
         if(authority==null)return new Object[0][];
-        return (Object[][])Class.forName("dev.ronova.pro.bootstrap.ResourceBridge",false,null)
-                .getMethod("mappingDuplicatePending",Module[].class).invoke(null,(Object)runtime.groupModules(authority));
+        return (Object[][])PlatformAccess.declaredMethod(Class.forName("dev.ronova.pro.bootstrap.ResourceBridge",false,null),
+                "mappingDuplicatePending",Module[].class).invoke(null,(Object)runtime.groupModules(authority));
     }
     private void retireMappingDuplicates(ProRuntime.Subject authority){
         authority.unresolvedSources.remove("MAPPING_DUPLICATE_RELEASE_PENDING");
@@ -760,29 +761,29 @@ public final class RecoverySources implements AutoCloseable {
         if(value instanceof Thread thread) {
             if(thread.isAlive()&&!runtime.groupDurable(authority.id))return false;
             Class<?> bridge=Class.forName("dev.ronova.pro.bootstrap.TaskBridge",false,null);
-            Object scheduler=bridge.getMethod("threadScheduler",Thread.class).invoke(null,thread);
+            Object scheduler=PlatformAccess.declaredMethod(bridge,"threadScheduler",Thread.class).invoke(null,thread);
             if(scheduler!=null)runtime.recoveryTasks.groupScheduler(scheduler,authority);
-            return Boolean.TRUE.equals(bridge.getMethod("retireThread",Thread.class,Module[].class).invoke(null,thread,(Object)runtime.groupModules(authority)));
+            return Boolean.TRUE.equals(PlatformAccess.declaredMethod(bridge,"retireThread",Thread.class,Module[].class).invoke(null,thread,(Object)runtime.groupModules(authority)));
         }
         if(value instanceof java.util.concurrent.ExecutorService) {
             Class<?> bridge=Class.forName("dev.ronova.pro.bootstrap.TaskBridge",false,null);
-            if(bridge.getMethod("realScheduler",Object.class).invoke(null,value)==null)
+            if(PlatformAccess.declaredMethod(bridge,"realScheduler",Object.class).invoke(null,value)==null)
                 throw new IOException("SCHEDULER_DELEGATION_UNRESOLVED:"+value.getClass().getName());
             Module[] modules=runtime.groupModules(authority);
-            String disposition=(String)bridge.getMethod("schedulerDisposition",Object.class,Module[].class).invoke(null,value,(Object)modules);
+            String disposition=(String)PlatformAccess.declaredMethod(bridge,"schedulerDisposition",Object.class,Module[].class).invoke(null,value,(Object)modules);
             if(disposition.equals("SHARED"))return true;
             if(!disposition.equals("PRIVATE"))throw new IOException("SCHEDULER_"+disposition);
             if(!runtime.groupDurable(authority.id))return false;
-            @SuppressWarnings("unchecked") List<Runnable> removed=(List<Runnable>)bridge.getMethod("retireScheduler",Object.class,Module[].class).invoke(null,value,(Object)modules);
+            @SuppressWarnings("unchecked") List<Runnable> removed=(List<Runnable>)PlatformAccess.declaredMethod(bridge,"retireScheduler",Object.class,Module[].class).invoke(null,value,(Object)modules);
             runtime.recoveryTasks.schedulerDrained(value,removed,authority);
-            return Boolean.TRUE.equals(bridge.getMethod("schedulerResourceEnded",Object.class).invoke(null,value));
+            return Boolean.TRUE.equals(PlatformAccess.declaredMethod(bridge,"schedulerResourceEnded",Object.class).invoke(null,value));
         }
         if(value.getClass()==Timer.class){
             Class<?> bridge=Class.forName("dev.ronova.pro.bootstrap.TaskBridge",false,null);
             Module[] modules=runtime.groupModules(authority);
-            @SuppressWarnings("unchecked") List<Runnable> removed=(List<Runnable>)bridge.getMethod("retireTimer",Object.class,Module[].class,boolean.class).invoke(null,value,(Object)modules,runtime.groupDurable(authority.id));
+            @SuppressWarnings("unchecked") List<Runnable> removed=(List<Runnable>)PlatformAccess.declaredMethod(bridge,"retireTimer",Object.class,Module[].class,boolean.class).invoke(null,value,(Object)modules,runtime.groupDurable(authority.id));
             runtime.recoveryTasks.schedulerDrained(value,removed,authority);
-            return Boolean.TRUE.equals(bridge.getMethod("timerResourceEnded",Object.class,Module[].class).invoke(null,value,(Object)modules));
+            return Boolean.TRUE.equals(PlatformAccess.declaredMethod(bridge,"timerResourceEnded",Object.class,Module[].class).invoke(null,value,(Object)modules));
         }
         if(value instanceof Process process&&value.getClass().getClassLoader()==null){
             return retireProcess(process,authority);
@@ -792,9 +793,9 @@ public final class RecoverySources implements AutoCloseable {
             return retireDescriptorStream(value,authority);
         }
         if(value instanceof FileDescriptor)return retireDescriptorStream(value,authority);
-        if(Boolean.TRUE.equals(Class.forName("dev.ronova.pro.bootstrap.ResourceBridge",false,null).getMethod("bufferResource",Object.class).invoke(null,value)))
+        if(Boolean.TRUE.equals(PlatformAccess.declaredMethod(Class.forName("dev.ronova.pro.bootstrap.ResourceBridge",false,null),"bufferResource",Object.class).invoke(null,value)))
             return retireDescriptorStream(value,authority);
-        if(Boolean.TRUE.equals(Class.forName("dev.ronova.pro.bootstrap.ResourceBridge",false,null).getMethod("ioResource",Object.class).invoke(null,value)))
+        if(Boolean.TRUE.equals(PlatformAccess.declaredMethod(Class.forName("dev.ronova.pro.bootstrap.ResourceBridge",false,null),"ioResource",Object.class).invoke(null,value)))
             return retireDescriptorStream(value,authority);
         if(value.getClass()==FileInputStream.class||value.getClass()==FileOutputStream.class||value.getClass()==RandomAccessFile.class||value instanceof java.nio.channels.FileChannel)
             return retireDescriptorStream(value,authority);
@@ -825,9 +826,9 @@ public final class RecoverySources implements AutoCloseable {
         long generation=authority.generation;
         java.util.concurrent.Callable<String> action=()->{
             if(!authority.terminal||authority.generation!=generation||runtime.groupSubject(process)!=authority)return "PROCESS_QUALIFICATION_CHANGED";
-            return (String)bridge.getMethod("releaseProcess",Process.class,java.util.function.Predicate.class,Module[].class).invoke(null,process,selected,(Object)runtime.groupModules(authority));
+            return (String)PlatformAccess.declaredMethod(bridge,"releaseProcess",Process.class,java.util.function.Predicate.class,Module[].class).invoke(null,process,selected,(Object)runtime.groupModules(authority));
         };
-        try{return Boolean.TRUE.equals(bridge.getMethod("retireProcess",Process.class,java.util.concurrent.Callable.class).invoke(null,process,action));}
+        try{return Boolean.TRUE.equals(PlatformAccess.declaredMethod(bridge,"retireProcess",Process.class,java.util.concurrent.Callable.class).invoke(null,process,action));}
         catch(java.lang.reflect.InvocationTargetException failed){if(failed.getCause() instanceof IOException unavailable)throw unavailable;throw failed;}
     }
     private boolean retireDescriptorStream(Object stream,ProRuntime.Subject authority)throws ReflectiveOperationException,IOException{
@@ -837,25 +838,38 @@ public final class RecoverySources implements AutoCloseable {
         long generation=authority.generation;
         java.util.concurrent.Callable<String> action=()->{
             if(!authority.terminal||authority.generation!=generation||runtime.groupSubject(stream)!=authority)return "RESOURCE_QUALIFICATION_CHANGED";
-            return (String)bridge.getMethod("release",Object.class,java.util.function.Predicate.class,Module[].class).invoke(null,stream,selected,(Object)runtime.groupModules(authority));
+            return (String)PlatformAccess.declaredMethod(bridge,"release",Object.class,java.util.function.Predicate.class,Module[].class).invoke(null,stream,selected,(Object)runtime.groupModules(authority));
         };
-        try{return Boolean.TRUE.equals(bridge.getMethod("retire",Object.class,java.util.concurrent.Callable.class).invoke(null,stream,action));}
+        try{return Boolean.TRUE.equals(PlatformAccess.declaredMethod(bridge,"retire",Object.class,java.util.concurrent.Callable.class).invoke(null,stream,action));}
         catch(java.lang.reflect.InvocationTargetException failed){
             if(failed.getCause() instanceof IOException unavailable)throw unavailable;
             throw failed;
         }
     }
     private void retireMap(GroupWalk walk,ProRuntime.Subject authority,int limit)throws IOException,ReflectiveOperationException {
-        GroupCursor cursor=walk.current;Object map=SourceMaps.supportedSet(cursor.value)?SourceMaps.setMap(cursor.value):cursor.value;
-        boolean own=runtime.groupSubject(cursor.value)==authority;
-        if(cursor.mapCursor==null||cursor.mapCursor.map!=map)cursor.mapCursor=new SourceMaps.Cursor(map);
+        GroupCursor cursor=walk.current;boolean set=SourceMaps.groupSet(cursor.value);Object map=set?SourceMaps.setMap(cursor.value):cursor.value;
+        boolean own=SourceMaps.privateContainer(cursor.value,runtime,authority);
+        Object auxiliary=KnownContainers.auxiliary(map);
+        if(auxiliary!=null&&auxiliary!=cursor.listStamp){if(walk.pending.size()>=4096)return;enqueue(walk.pending,auxiliary);cursor.listStamp=auxiliary;}
+        if(cursor.mapCursor==null||cursor.mapCursor.map!=map||cursor.privateContents!=own){
+            cursor.mapCursor=new SourceMaps.Cursor(map);cursor.mixedContents=false;cursor.filteringContents=false;cursor.privateContents=own;
+        }
+        cursor.mapCursor.setElements=set;
         if(!SourceMaps.visit(map,cursor.mapCursor,limit,(key,value,node,position)->{
             if(walk.pending.size()>4094)return false;
-            enqueue(walk.pending,key);enqueue(walk.pending,value);
-            if(!own)SourceMaps.removeVisited(position,node,runtime,authority);return true;
+            enqueue(walk.pending,key);if(!set)enqueue(walk.pending,value);
+            boolean selected=SourceMaps.selectedElement(key,runtime,authority)||!set&&SourceMaps.selectedElement(value,runtime,authority);
+            boolean privateEntry=set?SourceMaps.privateElement(key,runtime,authority):SourceMaps.privateEntry(key,value,runtime,authority);
+            if(own&&!privateEntry)cursor.mixedContents=true;
+            if(!selected&&!privateEntry&&(SourceMaps.unresolvedElement(key,runtime,authority)||!set&&SourceMaps.unresolvedElement(value,runtime,authority)))
+                walk.gap=walk.containerGap="GROUP_CONTAINER_ELEMENT_OWNERSHIP_UNRESOLVED";
+            if(!own||cursor.filteringContents)SourceMaps.removeVisited(position,node,runtime,authority,own&&SourceMaps.privateContainer(cursor.value,runtime,authority));return true;
         }))throw new IOException("GROUP_MAP_BUSY");
-        if(SourceMaps.supportedSet(cursor.value)&&SourceMaps.setMap(cursor.value)!=map){cursor.mapCursor=null;throw new IOException("GROUP_SET_BACKING_CHANGED");}
-        if(own&&cursor.mapCursor.complete&&!SourceMaps.clearPrivate(cursor.mapCursor,cursor.value,runtime,authority))throw new IOException("GROUP_PRIVATE_CONTAINER_CHANGED_OR_BUSY");
+        if(set&&SourceMaps.setMap(cursor.value)!=map){cursor.mapCursor=null;throw new IOException("GROUP_SET_BACKING_CHANGED");}
+        if(own&&cursor.mapCursor.complete&&!cursor.filteringContents){
+            if(cursor.mixedContents){cursor.filteringContents=true;cursor.mapCursor=new SourceMaps.Cursor(map);return;}
+            if(!SourceMaps.clearPrivate(cursor.mapCursor,cursor.value,runtime,authority))throw new IOException("GROUP_PRIVATE_CONTAINER_CHANGED_OR_BUSY");
+        }
         if(cursor.mapCursor.complete)walk.current=null;
     }
     private int retireArray(GroupWalk walk,ProRuntime.Subject authority,int limit)throws IOException,ReflectiveOperationException {
@@ -866,27 +880,28 @@ public final class RecoverySources implements AutoCloseable {
         if(!component.isPrimitive())count=Math.min(count,4096-walk.pending.size());
         if(count==0)return 0;
         Class<?> bridge=Class.forName("dev.ronova.pro.bootstrap.TaskBridge",false,null);
-        Object gate=Class.forName("dev.ronova.pro.bootstrap.ControlBridge",false,null).getMethod("beginRecoveryArrayMutation",Object.class,int.class,int.class,long.class).invoke(null,value,cursor.element,count,cursor.arrayRevision);
+        Object gate=PlatformAccess.declaredMethod(Class.forName("dev.ronova.pro.bootstrap.ControlBridge",false,null),"beginRecoveryArrayMutation",Object.class,int.class,int.class,long.class).invoke(null,value,cursor.element,count,cursor.arrayRevision);
         if(Boolean.FALSE.equals(gate))throw new IOException("GROUP_ARRAY_WRITE_IN_FLIGHT");
         int processed=0;boolean written=false;
         try {
-            cursor.element=(Integer)Class.forName("dev.ronova.pro.bootstrap.ControlBridge",false,null).getMethod("recoveryArrayStart",Object.class).invoke(null,gate);
+            cursor.element=(Integer)PlatformAccess.declaredMethod(Class.forName("dev.ronova.pro.bootstrap.ControlBridge",false,null),"recoveryArrayStart",Object.class).invoke(null,gate);
             var elements=component.isPrimitive()?null:java.lang.invoke.MethodHandles.arrayElementVarHandle(value.getClass());
             while(processed<count){
                 int index=cursor.element;Object child=java.lang.reflect.Array.get(value,index);
                 if(component.isPrimitive()) {
-                    if(runtime.groupSubject(value)==authority){java.lang.reflect.Array.set(value,index,zero(component));
+                    if(SourceMaps.privateContainer(value,runtime,authority)){java.lang.reflect.Array.set(value,index,zero(component));
                         if(!Objects.equals(java.lang.reflect.Array.get(value,index),zero(component)))throw new IOException("GROUP_ARRAY_CLEAR_READBACK_FAILED");}
                 }else {
                     if(child!=null&&!walk.seen.contains(child))enqueue(walk.pending,child);
-                     if(runtime.groupSubject(value)==authority||runtime.groupSubject(child)==authority){elements.compareAndSet(value,index,child,null);
+                     if(child!=null&&(SourceMaps.privateContainer(value,runtime,authority)&&SourceMaps.privateElement(child,runtime,authority)||runtime.groupSubject(child)==authority)){elements.compareAndSet(value,index,child,null);
                         if(java.lang.reflect.Array.get(value,index)==child)throw new IOException("GROUP_ARRAY_CLEAR_READBACK_FAILED");}
+                     else if(SourceMaps.unresolvedElement(child,runtime,authority))walk.gap=walk.containerGap="GROUP_CONTAINER_ELEMENT_OWNERSHIP_UNRESOLVED";
                 }
                 cursor.element++;processed++;
             }
             written=true;
         }finally {
-            try{cursor.arrayRevision=(Long)Class.forName("dev.ronova.pro.bootstrap.ControlBridge",false,null).getMethod("finishRecoveryArrayMutation",Object.class,boolean.class).invoke(null,gate,written);}
+            try{cursor.arrayRevision=(Long)PlatformAccess.declaredMethod(Class.forName("dev.ronova.pro.bootstrap.ControlBridge",false,null),"finishRecoveryArrayMutation",Object.class,boolean.class).invoke(null,gate,written);}
             catch(ReflectiveOperationException|RuntimeException unavailable){cursor.element=0;throw unavailable;}
         }
         if(cursor.element==length)walk.current=null;
@@ -908,7 +923,8 @@ public final class RecoverySources implements AutoCloseable {
                         if(walk.pending.size()>=4096)break;
                         enqueue(walk.pending,child);
                     }
-                     if(runtime.groupSubject(value)==authority||runtime.groupSubject(child)==authority)SourceMaps.removeListIndex(list,cursor.element);
+                     if(SourceMaps.privateContainer(value,runtime,authority)&&SourceMaps.privateElement(child,runtime,authority)||runtime.groupSubject(child)==authority)SourceMaps.removeListIndex(list,cursor.element);
+                     else if(SourceMaps.unresolvedElement(child,runtime,authority))walk.gap=walk.containerGap="GROUP_CONTAINER_ELEMENT_OWNERSHIP_UNRESOLVED";
                     cursor.element--;processed[0]++;
                 }
                 cursor.listRevision=RecoveryRecords.arrayListRevision(value);cursor.listStamp=SourceMaps.listBacking(value);
@@ -926,36 +942,36 @@ public final class RecoverySources implements AutoCloseable {
     }
     static void clearField(java.lang.reflect.Field field,Object receiver,Object expected)throws ReflectiveOperationException {
         Class<?> bridge=Class.forName("dev.ronova.pro.bootstrap.TaskBridge",false,null);
-        Object gate=Class.forName("dev.ronova.pro.bootstrap.ControlBridge",false,null).getMethod("beginRecoveryMutation",Object.class).invoke(null,receiver==null?field.getDeclaringClass():receiver);
+        Object gate=PlatformAccess.declaredMethod(Class.forName("dev.ronova.pro.bootstrap.ControlBridge",false,null),"beginRecoveryMutation",Object.class).invoke(null,receiver==null?field.getDeclaringClass():receiver);
         if(Boolean.FALSE.equals(gate))throw new IllegalStateException("GROUP_FIELD_WRITE_IN_FLIGHT");
-        try {clearFieldLocked(field,receiver,expected);}finally {Class.forName("dev.ronova.pro.bootstrap.ControlBridge",false,null).getMethod("endFieldMutation",Object.class).invoke(null,gate);}
+        try {clearFieldLocked(field,receiver,expected);}finally {PlatformAccess.declaredMethod(Class.forName("dev.ronova.pro.bootstrap.ControlBridge",false,null),"endFieldMutation",Object.class).invoke(null,gate);}
     }
     static boolean clearReferenceField(java.lang.reflect.Field field,Object receiver,Object expected,Runnable attempted)throws ReflectiveOperationException{
         Class<?> bridge=Class.forName("dev.ronova.pro.bootstrap.TaskBridge",false,null);
-        Object gate=Class.forName("dev.ronova.pro.bootstrap.ControlBridge",false,null).getMethod("beginRecoveryMutation",Object.class).invoke(null,receiver==null?field.getDeclaringClass():receiver);
+        Object gate=PlatformAccess.declaredMethod(Class.forName("dev.ronova.pro.bootstrap.ControlBridge",false,null),"beginRecoveryMutation",Object.class).invoke(null,receiver==null?field.getDeclaringClass():receiver);
         if(Boolean.FALSE.equals(gate))return false;
         try{attempted.run();clearFieldLocked(field,receiver,expected);return field.get(receiver)==null;}
-        finally{Class.forName("dev.ronova.pro.bootstrap.ControlBridge",false,null).getMethod("endFieldMutation",Object.class).invoke(null,gate);}
+        finally{PlatformAccess.declaredMethod(Class.forName("dev.ronova.pro.bootstrap.ControlBridge",false,null),"endFieldMutation",Object.class).invoke(null,gate);}
     }
     private static void clearFieldLocked(java.lang.reflect.Field field,Object receiver,Object expected)throws ReflectiveOperationException {
         if(field.getDeclaringClass().isHidden()){
-            boolean cleared=Boolean.TRUE.equals(Class.forName("dev.ronova.pro.bootstrap.NativeControl",false,null)
-                    .getMethod("clearRecoveredField",java.lang.reflect.Field.class,Object.class,Object.class).invoke(null,field,receiver,expected));
+            boolean cleared=Boolean.TRUE.equals(PlatformAccess.declaredMethod(Class.forName("dev.ronova.pro.bootstrap.NativeControl",false,null),
+                    "clearRecoveredField",java.lang.reflect.Field.class,Object.class,Object.class).invoke(null,field,receiver,expected));
             if(!cleared||!Objects.equals(field.get(receiver),field.getType().isPrimitive()?zero(field.getType()):null))
                 throw new IllegalStateException("HIDDEN_GROUP_FIELD_CLEAR_UNAVAILABLE_OR_CHANGED");
             return;
         }
-        Class<?> type=Class.forName("sun.misc.Unsafe");var singleton=type.getDeclaredField("theUnsafe");singleton.setAccessible(true);Object unsafe=singleton.get(null);
+        Class<?> type=Class.forName("sun.misc.Unsafe");var singleton=PlatformAccess.declaredField(type,"theUnsafe");singleton.setAccessible(true);Object unsafe=singleton.get(null);
         boolean statik=java.lang.reflect.Modifier.isStatic(field.getModifiers());
-        Object base=statik?type.getMethod("staticFieldBase",java.lang.reflect.Field.class).invoke(unsafe,field):receiver;
-        long offset=(Long)type.getMethod(statik?"staticFieldOffset":"objectFieldOffset",java.lang.reflect.Field.class).invoke(unsafe,field);
+        Object base=statik?PlatformAccess.declaredMethod(type,"staticFieldBase",java.lang.reflect.Field.class).invoke(unsafe,field):receiver;
+        long offset=(Long)PlatformAccess.declaredMethod(type,statik?"staticFieldOffset":"objectFieldOffset",java.lang.reflect.Field.class).invoke(unsafe,field);
         if(!field.getType().isPrimitive()) {
-            boolean changed=Boolean.TRUE.equals(type.getMethod("compareAndSwapObject",Object.class,long.class,Object.class,Object.class).invoke(unsafe,base,offset,expected,null));
+            boolean changed=Boolean.TRUE.equals(PlatformAccess.declaredMethod(type,"compareAndSwapObject",Object.class,long.class,Object.class,Object.class).invoke(unsafe,base,offset,expected,null));
             if(!changed&&field.get(receiver)!=null)throw new IllegalStateException("GROUP_FIELD_CLEAR_REFUSED_OR_CHANGED");
             if(field.get(receiver)!=null)throw new IllegalStateException("GROUP_FIELD_CLEAR_READBACK_FAILED");return;
         }
         Class<?> primitive=field.getType();String suffix=primitive.getName();suffix=Character.toUpperCase(suffix.charAt(0))+suffix.substring(1);
-        type.getMethod("put"+suffix+"Volatile",Object.class,long.class,primitive).invoke(unsafe,base,offset,zero(primitive));
+        PlatformAccess.declaredMethod(type,"put"+suffix+"Volatile",Object.class,long.class,primitive).invoke(unsafe,base,offset,zero(primitive));
         if(!Objects.equals(field.get(receiver),zero(primitive)))throw new IllegalStateException("GROUP_SCALAR_CLEAR_READBACK_FAILED");
     }
     /** Read-only discovery of exact observed tags in registered holders, including POJO wrappers.
@@ -991,7 +1007,7 @@ public final class RecoverySources implements AutoCloseable {
                     }else if(type==ListTag.class)walk.current=cursor;
                     else if(SCALARS.contains(type)||type==String.class||type==UUID.class||type.isEnum()||isPrimitiveCollection(value))continue;
                     else if(SourceMaps.removedJdkContainer(value))walk.gap="JDK_CONTAINER_BACKEND_UNSUPPORTED:"+type.getName();
-                    else if(SourceMaps.supported(value)||SourceMaps.supportedSet(value)||SourceMaps.supportedList(value)
+                    else if(SourceMaps.groupMap(value)||SourceMaps.groupSet(value)||SourceMaps.groupSequence(value)
                             ||type==java.util.concurrent.atomic.AtomicReference.class)walk.current=cursor;
                     else if(type.isArray()) {if(!type.getComponentType().isPrimitive())walk.current=cursor;}
                     else if(value instanceof Entity) {
@@ -1002,7 +1018,7 @@ public final class RecoverySources implements AutoCloseable {
                         if(type.getClassLoader()==null)continue;
                         cursor.fields=new ArrayList<>();walk.current=cursor;
                         for(Class<?> owner=type;owner!=null&&owner!=Object.class&&owner!=SavedData.class;owner=statik?null:owner.getSuperclass())
-                            for(var field:owner.getDeclaredFields())if(java.lang.reflect.Modifier.isStatic(field.getModifiers())==statik&&!field.getType().isPrimitive())cursor.fields.add(field);
+                            for(var field:PlatformAccess.declaredFields(owner))if(java.lang.reflect.Modifier.isStatic(field.getModifiers())==statik&&!field.getType().isPrimitive())cursor.fields.add(field);
                     }
                     }
                     }
@@ -1086,7 +1102,7 @@ public final class RecoverySources implements AutoCloseable {
         if(parts.length!=3||parts[0].equals("MEMORY")||!Path.of(parts[2]).equals(path)||!expected.contains(locator+"\n"+expectedCode))return false;
         try {
             Class<?> agent=Class.forName("dev.ronova.pro.agent.RecoveryAgent",false,ClassLoader.getSystemClassLoader());
-            Class<?> holder=(Class<?>)agent.getMethod("loadedSource",String.class).invoke(null,parts[1]);
+            Class<?> holder=(Class<?>)PlatformAccess.declaredMethod(agent,"loadedSource",String.class).invoke(null,parts[1]);
             return holder!=null&&expectedCode.equals(code(holder));
         } catch(ReflectiveOperationException|RuntimeException|LinkageError unavailable) { return false; }
     }
@@ -1407,7 +1423,7 @@ public final class RecoverySources implements AutoCloseable {
         String code=code(value.getClass());if(code==null)return null;
         try(var gate=registrationGate.enter()){
             if(kind.equals("SET")){
-                if(!SourceMaps.supportedSet(carrier))return null;
+                if(!SourceMaps.groupSet(carrier))return null;
                 List<Map.Entry<Object,Object>> rows=SourceMaps.entries(SourceMaps.setMap(carrier));if(rows==null)return null;
                 boolean found=false;for(var row:rows)if(row.getKey()==value){found=true;break;}if(!found)return null;
             }else if(nestedValue(carrier,kind,key)!=value)return null;
@@ -1439,6 +1455,7 @@ public final class RecoverySources implements AutoCloseable {
             Object[] value=SourceMaps.peek(carrier,key);if(value==null)throw new IllegalAccessException("NESTED_MAP_BUSY_OR_UNSUPPORTED");return value[1];
         }
         if(kind.equals("ARRAY")&&carrier instanceof Object[] values){int index=(Integer)key;return index<values.length?values[index]:null;}
+        if(kind.equals("SEQUENCE"))return SourceMaps.sequenceValue(carrier,(Integer)key);
         if(kind.equals("LIST")&&(SourceMaps.supportedList(carrier))){
             int index=(Integer)key;
             Object[] result={null};boolean ran=RecoveryRecords.withArrayList(carrier,false,()->{List<?> values=(List<?>)carrier;result[0]=index<values.size()?values.get(index):null;});
@@ -1465,7 +1482,7 @@ public final class RecoverySources implements AutoCloseable {
             Object holder=parent.holder();java.lang.reflect.Field field=null;
             if(holder!=null){
                 for(Class<?> type=holder instanceof Class<?> c?c:holder.getClass();type!=null;type=type.getSuperclass())
-                    if(type.getName().equals(selector.substring(0,split))){field=type.getDeclaredField(selector.substring(split+1));break;}
+                    if(type.getName().equals(selector.substring(0,split))){field=PlatformAccess.declaredField(type,selector.substring(split+1));break;}
                 if(field==null||!field.trySetAccessible())return;
             }else if(!parent.disposed())return;
             String encoded=dev.ronova.pro.persistence.JournalLineage.decodeText(parts[5]);Object key=encoded.isEmpty()?null:SourceMaps.decodeKey(encoded);
@@ -1496,14 +1513,14 @@ public final class RecoverySources implements AutoCloseable {
             String selector=dev.ronova.pro.persistence.JournalLineage.decodeText(parts[3]);int split=selector.lastIndexOf('#');
             java.lang.reflect.Field selected=null;
             for(Class<?> type=holder instanceof Class<?> c?c:holder.getClass();type!=null;type=type.getSuperclass())
-                if(type.getName().equals(selector.substring(0,split))){selected=type.getDeclaredField(selector.substring(split+1));break;}
+                if(type.getName().equals(selector.substring(0,split))){selected=PlatformAccess.declaredField(type,selector.substring(split+1));break;}
             if(selected==null||!selected.trySetAccessible())throw new IllegalAccessException("NESTED_FIELD_UNAVAILABLE");
             final java.lang.reflect.Field field=selected;
             Object receiver=holder instanceof Class<?>?null:holder,carrier=field.get(receiver);
             if(carrier==null)return SourceMaps.replacementCovered(parent,field,null)||parent.cleared(field);
             if(SourceMaps.removedJdkContainer(carrier))throw new IllegalAccessException("JDK_CONTAINER_BACKEND_UNSUPPORTED:"+carrier.getClass().getName());
             if(source.nestedKind.equals("SET")){
-                if(!SourceMaps.supportedSet(carrier))throw new IllegalAccessException("NESTED_SET_BACKEND_CHANGED");
+                if(!SourceMaps.groupSet(carrier))throw new IllegalAccessException("NESTED_SET_BACKEND_CHANGED");
                 boolean[] absent={true};
                 if(!SourceMaps.with(SourceMaps.setMap(carrier),()->{
                     List<Map.Entry<Object,Object>> rows=SourceMaps.entries(SourceMaps.setMap(carrier));
@@ -1565,14 +1582,16 @@ public final class RecoverySources implements AutoCloseable {
             if(walk.pending.size()>=4096)return;
             enqueue(walk.pending,((java.util.concurrent.atomic.AtomicReference<?>)value).get());walk.current=null;return;
         }
-        if(SourceMaps.supported(value)||SourceMaps.supportedSet(value)){
-            Object map=SourceMaps.supportedSet(value)?SourceMaps.setMap(value):value;
+        if(SourceMaps.groupMap(value)||SourceMaps.groupSet(value)||KnownContainers.sequence(value)){
+            boolean set=SourceMaps.groupSet(value);Object map=set?SourceMaps.setMap(value):value;
+            Object auxiliary=KnownContainers.auxiliary(map);
+            if(auxiliary!=null&&auxiliary!=cursor.stamp){if(walk.pending.size()>=4096)return;enqueue(walk.pending,auxiliary);cursor.stamp=auxiliary;}
             if(cursor.map==null||cursor.map.map!=map)cursor.map=new SourceMaps.Cursor(map);
             if(!SourceMaps.visit(map,cursor.map,limit,(key,child,node,position)->{
                 if(walk.pending.size()>4094)return false;
-                enqueue(walk.pending,key);enqueue(walk.pending,child);return true;
+                enqueue(walk.pending,key);if(!set)enqueue(walk.pending,child);return true;
             }))throw new IOException("HOLDER_MAP_BUSY");
-            if(SourceMaps.supportedSet(value)&&SourceMaps.setMap(value)!=map){cursor.map=null;throw new IOException("HOLDER_SET_BACKING_CHANGED");}
+            if(set&&SourceMaps.setMap(value)!=map){cursor.map=null;throw new IOException("HOLDER_SET_BACKING_CHANGED");}
             if(cursor.map.complete)walk.current=null;return;
         }
         if(SourceMaps.supportedList(value)){discoverList(walk,cursor,limit);return;}
@@ -1956,7 +1975,7 @@ public final class RecoverySources implements AutoCloseable {
             .findFirst().map(frame->{
                 try {
                     Class<?> type=frame.getDeclaringClass();
-                    var method=type.getDeclaredMethod(frame.getMethodName(),frame.getMethodType().parameterArray());
+                    var method=PlatformAccess.declaredMethod(type,frame.getMethodName(),frame.getMethodType().parameterArray());
                     return java.lang.reflect.Modifier.isStatic(method.getModifiers())?type:null;
                 } catch(ReflectiveOperationException|RuntimeException unavailable) { return null; }
             }).orElse(null));
@@ -1973,7 +1992,7 @@ public final class RecoverySources implements AutoCloseable {
     private static String definition(Class<?> type,boolean watch) {
         try {
             Class<?> agent=Class.forName("dev.ronova.pro.agent.RecoveryAgent",false,ClassLoader.getSystemClassLoader());
-            return (String)agent.getMethod(watch?"watchDefinition":"definition",Class.class).invoke(null,type);
+            return (String)PlatformAccess.declaredMethod(agent,watch?"watchDefinition":"definition",Class.class).invoke(null,type);
         } catch(ReflectiveOperationException|RuntimeException|LinkageError unavailable) { return null; }
     }
     private static void markRelatedGap(CompoundTag image,String reason) {

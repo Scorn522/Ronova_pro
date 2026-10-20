@@ -20,6 +20,30 @@ public final class NativeControl {
     private static volatile Class<?> coreStateOwner;
     private static volatile boolean coreStateRegistered;
     private NativeControl() {}
+    public static boolean captureEntityClass(Object entity,Class<?> original) {
+        if(!ControlBridge.coreWriter())throw new SecurityException("ENTITY_CLASS_CORE_REQUIRED");
+        return available&&captureEntityClass0(entity,original);
+    }
+    public static boolean restoreEntityClass(Object entity,Class<?> original) {
+        if(!ControlBridge.coreWriter())throw new SecurityException("ENTITY_CLASS_CORE_REQUIRED");
+        return available&&restoreEntityClass0(entity,original);
+    }
+    public static boolean protectPlatformStructures(Object instrumentation) {
+        if(!controlCaller())throw new SecurityException("PLATFORM_STRUCTURES_AGENT_REQUIRED");
+        return available&&protectPlatformStructures0(instrumentation);
+    }
+    public static void instrumentationCreated(Object instrumentation) {
+        if(!platformInstaller())throw new SecurityException("ACTUAL_INSTRUMENTATION_CONSTRUCTOR_REQUIRED");
+        if(available&&!protectPlatformStructures0(instrumentation))
+            throw new IllegalStateException("JPLIS_PLATFORM_STRUCTURE_UNAVAILABLE");
+    }
+    private static boolean platformInstaller() {
+        if(controlCaller())return true;
+        return CALLER.walk(frames->frames.filter(frame->frame.getDeclaringClass()!=NativeControl.class).findFirst()
+                .map(frame->frame.getDeclaringClass().getClassLoader()==null
+                        &&frame.getDeclaringClass().getName().equals("sun.instrument.InstrumentationImpl")
+                        &&frame.getMethodName().equals("<init>")).orElse(false));
+    }
     private static final StackWalker CALLER=StackWalker.getInstance(StackWalker.Option.RETAIN_CLASS_REFERENCE);
     private static boolean controlCaller() {
         Class<?> caller=CALLER.walk(frames->frames.map(StackWalker.StackFrame::getDeclaringClass).filter(type->type!=NativeControl.class).findFirst().orElse(null));
@@ -182,6 +206,10 @@ public final class NativeControl {
         if(!controlCaller())throw new SecurityException("ACTUAL_CODE_VERSION_AGENT_REQUIRED");
         if(method==null)throw new NullPointerException("method");
         return available?codeMethodVersion0(actual,bytes,method):null;
+    }
+    public static boolean codeSourceDefinition(Class<?> actual,byte[] bytes){
+        if(!controlCaller())throw new SecurityException("ACTUAL_CODE_SOURCE_DEFINITION_AGENT_REQUIRED");
+        return available&&actual!=null&&bytes!=null&&codeSourceDefinition0(actual,bytes);
     }
     public static String[] codeDeclarations(Class<?> actual){
         if(!controlCaller())throw new SecurityException("ACTUAL_CODE_DECLARATIONS_AGENT_REQUIRED");
@@ -879,11 +907,15 @@ public final class NativeControl {
     private static native Class<?> rawMemoryWriter0();
     private static native boolean initialize0(Class<?> tasks,Class<?> definitions);
     private static native boolean initializeDefinitionDirectory0(Class<?> owner);
+    private static native boolean protectPlatformStructures0(Object instrumentation);
+    private static native boolean captureEntityClass0(Object entity,Class<?> original);
+    private static native boolean restoreEntityClass0(Object entity,Class<?> original);
     private static native boolean compareDefinitionReference0(Object slot,Object expected,Object next);
     private static native boolean codeLayout0(ClassLoader loader,String name,byte[] bytes,String[] methods,Module[][][] owners,boolean hidden,Object execution,Module declaration);
     private static native boolean codeDefinition0(Class<?> actual,byte[] bytes);
     private static native String[] codeVersion0(Class<?> actual,byte[] bytes);
     private static native String[] codeMethodVersion0(Class<?> actual,byte[] bytes,String method);
+    private static native boolean codeSourceDefinition0(Class<?> actual,byte[] bytes);
     private static native String[] codeDeclarations0(Class<?> actual);
     private static native Class<?>[] loadedClasses0(boolean bootstrapOnly);
     private static native Class<?>[] bootstrapLookupClasses0();

@@ -105,6 +105,7 @@ public final class Access {
         @Accessor("levelCallback") void pro$callback(EntityInLevelCallback callback);
         @Accessor("position") net.minecraft.world.phys.Vec3 pro$position();
         @Accessor("bb") net.minecraft.world.phys.AABB pro$box();
+        @Accessor("bb") void pro$box(net.minecraft.world.phys.AABB value);
         @Accessor("canUpdate") boolean pro$canUpdate();
         @Accessor("canUpdate") void pro$canUpdate(boolean value);
         @Accessor("noPhysics") boolean pro$noPhysics();
@@ -129,6 +130,15 @@ public final class Access {
         @Accessor("visibleEntityStorage") EntityLookup<Entity> pro$lookup();
         @Accessor("sectionStorage") EntitySectionStorage<Entity> pro$sections();
         @Accessor("knownUuids") Set<UUID> pro$known();
+        @Accessor("callbacks") LevelCallback<Entity> pro$callbacks();
+        @Mutable @Accessor("callbacks") void pro$callbacks(LevelCallback<Entity> value);
+        @Accessor("entityGetter") LevelEntityGetter<Entity> pro$getter();
+        @Mutable @Accessor("entityGetter") void pro$getter(LevelEntityGetter<Entity> value);
+        @Accessor("chunkVisibility") Long2ObjectMap<Visibility> pro$visibility();
+    }
+    @Mixin(LevelEntityGetterAdapter.class) public interface Getter {
+        @Accessor("visibleEntities") EntityLookup<Entity> pro$lookup();
+        @Accessor("sectionStorage") EntitySectionStorage<Entity> pro$sections();
     }
     @Mixin(EntityLookup.class) public interface Lookup {
         @Accessor("byId") Int2ObjectMap<EntityAccess> pro$ids();
@@ -143,6 +153,8 @@ public final class Access {
     @Mixin(EntitySectionStorage.class) public interface Sections {
         @Accessor("sections") Long2ObjectMap<EntitySection<Entity>> pro$all();
         @Accessor("sectionIds") it.unimi.dsi.fastutil.longs.LongSortedSet pro$keys();
+        @Accessor("intialSectionVisibility") it.unimi.dsi.fastutil.longs.Long2ObjectFunction<Visibility> pro$visibility();
+        @Mutable @Accessor("intialSectionVisibility") void pro$visibility(it.unimi.dsi.fastutil.longs.Long2ObjectFunction<Visibility> value);
     }
     @Mixin(EntitySection.class) public interface Section {
         @Accessor("storage") ClassInstanceMultiMap<Entity> pro$storage();
@@ -150,6 +162,7 @@ public final class Access {
     @Mixin(ClassInstanceMultiMap.class) public interface Group {
         @Accessor("allInstances") List<Entity> pro$all();
         @Accessor("byClass") Map<Class<?>,List<Entity>> pro$classes();
+        @Accessor("baseClass") Class<?> pro$baseClass();
     }
     @Mixin(ChunkMap.class) public interface Tracking {
         @Accessor("entityMap") Int2ObjectMap<?> pro$tracked();
