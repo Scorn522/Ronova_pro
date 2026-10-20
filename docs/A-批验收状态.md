@@ -1,5 +1,15 @@
 # Ronova Pro 当前进度
 
+## 2026-10-20：Windows 中文路径 Bootstrap 装载修复
+
+接续 `c56fecc`，主工程继续位于 `D:\桌面\ronova_GPT`。`RecoveryAgent` 的 premain／agentmain 共用 `BootstrapSearch`：Windows 非 ASCII 绝对路径优先转换为指向同一文件的 ASCII 相对路径，并保留这个相对 `JarFile.getName()` 给 JPLIS。文件名本身包含中文或跨盘不能相对表达时，自动使用内容一致、按摘要区分的本地兼容缓存；本地路径不可用时才尝试 ASCII 临时缓存。成功的 JarFile 保持打开，失败尝试关闭；Native 接续使用实际追加的那份 payload。没有移动工程、改变游戏工作目录、修改系统代码页或放宽控制策略。
+
+生产代码写齐后统一 `jar` / `reobfJar` / 检查入口编译成功（34 秒，退出 0）。候选 Core 更新为 3,292,478 字节；prelaunch 51,042 字节，内容未变；Java105 / Native99 / Storage3 / Journal7 不变。
+
+必要小检查：直接从本工程中文绝对路径启动实际 Agent／Bootstrap，`RELATIVE` 装载路径通过；使用候选双 JAR 的正式 Prelaunch 入口，在中文工作目录、带空格的中文缓存目录中交接启动检查主类，`LOCAL_CACHE` 路径通过。两条最终检查均为 `BOOTSTRAP_SEARCH_PASS`、`INSTALLED_FULL`、退出 0，核对了 Bootstrap 类由 bootstrap loader 定义、实际持有的 payload 与原始文件一致、Native 可用。未启动 Minecraft／Forge，没有测试 SYS 或重跑上一轮攻防矩阵。
+
+保留失败：检查初版误用通用资源接口读取动态追加的 Bootstrap 类资源，返回空；改为读取 Agent 实际持有的 JarFile 后完成核对。直接检查另有一次在 Bootstrap 成功后重变换 DatagramChannelImpl 时出现 `NATIVE_CONTROL_RANGE_UNAVAILABLE`／ClassFormatError；随后单独运行通过，但本轮没有修改 Native 源码消除该问题，仍保留为未解决的启动失败记录。日志与详情见既有实际报告。
+
 ## 2026-10-20：JNI 活动表、Class 镜像、总线与客户端收尾
 
 接续 `b2bb9f9`，整包补齐六项生产改动：

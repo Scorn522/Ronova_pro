@@ -23,6 +23,7 @@ public final class AuditFixCheck {
     private static void require(boolean yes,String message) {if(!yes)throw new AssertionError(message);}
     private static Object invoke(Object receiver,String name)throws Exception {var m=receiver.getClass().getDeclaredMethod(name);m.setAccessible(true);try{return m.invoke(receiver);}catch(InvocationTargetException e){if(e.getCause() instanceof Exception x)throw x;throw e;}}
     public static void main(String[] args)throws Exception {
+        if(args.length==2&&args[0].equals("bootstrap-search")){bootstrapSearch(args[1]);return;}
         if(args.length==1&&args[0].equals("jni-live-table")){jniLiveTable();return;}
         if(args.length==1&&args[0].equals("platform-control-writes")){platformControlWrites();return;}
         if(args.length==1&&args[0].equals("installed-platform-writes")){installedPlatformWrites();return;}
@@ -2361,6 +2362,22 @@ public final class AuditFixCheck {
             System.out.println("PRIVATE_NATIVE_STATE_PASS actual_heap_returns failed_realloc_preserved same_address_new_generation read_source_known_and_unknown live_alias_and_read_lease_block_free actual_private_HeapFree writable_PE_static_spans IMAGE_seal_cancel_retire scoped_native_CPU_unknown fixture_metadata_no_global_install");
         }
         finally{opaqueNativeFixture=false;opaqueNativeModules=null;}
+    }
+    private static void bootstrapSearch(String original)throws Exception{
+        Class<?> task=Class.forName("dev.ronova.pro.bootstrap.TaskBridge",true,null);
+        Class<?> nativeControl=Class.forName("dev.ronova.pro.bootstrap.NativeControl",false,null);
+        Class<?> agent=Class.forName("dev.ronova.pro.agent.RecoveryAgent",false,ClassLoader.getSystemClassLoader());
+        require(task.getClassLoader()==null,"TaskBridge was not loaded by Bootstrap");
+        require(Boolean.TRUE.equals(nativeControl.getMethod("available").invoke(null)),"Native handoff did not use the selected payload");
+        require("INSTALLED_FULL".equals(agent.getMethod("installState").invoke(null)),"actual agent installation incomplete");
+        String entry="dev/ronova/pro/bootstrap/TaskBridge.class";byte[] expected,actual;
+        try(var jar=new java.util.jar.JarFile(original);var input=jar.getInputStream(jar.getJarEntry(entry))){expected=input.readAllBytes();}
+        Field held=agent.getDeclaredField("bootstrap");held.setAccessible(true);
+        var selected=(java.util.jar.JarFile)held.get(null);
+        require(selected!=null,"actual appended JarFile is not retained");
+        try(var input=selected.getInputStream(selected.getJarEntry(entry))){actual=input.readAllBytes();}
+        require(Arrays.equals(expected,actual),"appended Bootstrap payload differs from the requested Unicode-path payload");
+        System.out.println("BOOTSTRAP_SEARCH_PASS actual_boot_loader original_payload_match native_available installed_full original="+original);
     }
     private static final class MirrorWriteTarget { static int number=7; static Object reference=new Object(); int field; }
     private static void installedPlatformWrites()throws Exception{

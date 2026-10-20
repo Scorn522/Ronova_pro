@@ -4,6 +4,7 @@ build/
 /.vscode/settings.json
 run/
 /ronova-pro/native/
+/ronova-pro/bootstrap-search/
 *.log
 !/validation/a-final-20260928/evidence-20261001/*.log
 !/validation/a-final-20260928/evidence-20261002/*.log

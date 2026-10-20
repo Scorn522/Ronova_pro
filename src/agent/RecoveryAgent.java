@@ -170,9 +170,9 @@ public final class RecoveryAgent {
         if(!api.isRetransformClassesSupported())throw new IllegalStateException("RETRANSFORM_UNSUPPORTED");
             if(argument==null||argument.isBlank())throw new IllegalArgumentException("BOOTSTRAP_JAR_PATH_REQUIRED");
             if(argument.startsWith("base64:"))argument=new String(Base64.getUrlDecoder().decode(argument.substring(7)),java.nio.charset.StandardCharsets.UTF_8);
-            nativeBootstrapPath=Path.of(argument).toAbsolutePath().normalize();
-            bootstrap=new JarFile(nativeBootstrapPath.toFile());
-            api.appendToBootstrapClassLoaderSearch(bootstrap);
+            BootstrapSearch.Opened search=BootstrapSearch.append(api,Path.of(argument));
+            bootstrap=search.jar();nativeBootstrapPath=search.payload();
+            report("BOOTSTRAP_SEARCH_READY:"+search.route()+":"+bootstrap.getName());
             bridge=Class.forName("dev.ronova.pro.bootstrap.TaskBridge",true,null);
             if(!Integer.valueOf(105).equals(bridge.getMethod("abiVersion").invoke(null)))throw new IllegalStateException("TASK_BRIDGE_ABI_MISMATCH");
             // This classfile was first requested beneath a stopped empty-stream return.

@@ -1,5 +1,31 @@
 # B 批实际报告：2026-10-09 代码收敛接续
 
+## 2026-10-20：中文路径 Bootstrap 装载与 Prelaunch 交接
+
+接续 `c56fecc`，只修复中文路径装载，不修改 Native 控制策略。系统 ACP 当前为 65001，当前文化 ANSI 代码页为 936；OpenJDK 17 的 [JPLIS Windows 路径转换](https://github.com/openjdk/jdk17u/blob/master/src/java.instrument/windows/native/libinstrument/EncodingSupport_md.c) 按用户区域选择代码页，[appendToClassLoaderSearch](https://github.com/openjdk/jdk17u/blob/master/src/java.instrument/share/native/libinstrument/JPLISAgent.c) 将转换结果交给 VM。因此原始中文绝对路径在此环境不能直接可靠追加。
+
+`BootstrapSearch` 保留可用的 ASCII 相对 JarFile 名称；不能相对表达的中文文件名／路径使用与原 payload 内容一致的摘要缓存。本地缓存位于当前工作目录的 `ronova-pro/bootstrap-search`，已排除 Git 同步；另有 ASCII 临时目录回退。原工程、游戏目录和系统区域设置不变。成功 JarFile 保留到进程生命周期；失败尝试释放文件；Native 获取实际追加的 payload 路径。
+
+生产源码写齐后统一构建 `jar` / `reobfJar` / `compileStateChecksJava`：34 秒，退出 0。后续仅修正检查入口的资源读取方式并单独编译检查类，没有重新编译生产源码。
+
+| 检查 | 实际结果 |
+| --- | --- |
+| 中文工程目录直接 premain | `BOOTSTRAP_SEARCH_READY:RELATIVE:build\libs\ronova-pro-bootstrap.jar`；最终 `BOOTSTRAP_SEARCH_PASS`、`AGENT_PREMAIN_READY:INSTALLED_FULL`、退出 0。Agent、Bootstrap、早期 Native DLL 均直接来自 `D:\桌面\ronova_GPT`，没有手动暂存到英文工程。 |
+| 候选双 JAR 正式 Prelaunch | 工作目录为 `.work/v1.5-bootstrap-unicode-20261020/中文启动目录`，外层临时目录为 `中文缓存 space`；实际解包和 Base64 参数交接后，自动 `LOCAL_CACHE` 追加成功。检查主类确认原 payload 内容一致、bootstrap loader 定义、Native 可用，退出 0。没有启动游戏主类。 |
+
+最终日志：`.work/v1.5-bootstrap-unicode-20261020/build.log`、`direct-sequential.stdout.log`／`stderr.log`、`prelaunch-complete.stdout.log`／`stderr.log`。
+
+未隐藏的失败：初次检查在实际装载已达 INSTALLED_FULL 后，通用资源接口返回空，触发检查自身的 `Bootstrap resource absent`；修正为核对真实持有的 JarFile。`direct-complete.stderr.log` 另记录一次实际 Native 启动失败：Bootstrap 已追加、Native 已安装，但 DatagramChannelImpl 的重变换因 `NATIVE_CONTROL_RANGE_UNAVAILABLE` 引发 ClassFormatError。后续直接路径单独检查通过不等于该 Native 问题已修复；本轮 Native 源码未改变，此失败继续保留。
+
+当前候选 Java105 / Native99 / Storage3 / Journal7：
+
+| 候选 | 字节 | SHA-256 |
+| --- | ---: | --- |
+| `ronova-pro-core-1.5.0-dev.jar` | 3292478 | `37d36060c3cf5aedf5b550b66a291eb5d3223c7054fcfc3e5fd2a9828835123a` |
+| `ronova-pro-prelaunch.jar` | 51042 | `0b32b1e0d08e7af35afe97335d0b9d688c5c7d661913ce77e965901d6856503f` |
+
+Prelaunch 源码／产物本次无需修改，新 Agent 通过 Core 内嵌 payload 交接。未起服、未启动 Minecraft／Forge，未运行旧矩阵、metadata seam 或 SYS 检查；未验证其他系统代码页组合或临时目录回退。
+
 ## 2026-10-20：活动 JNI 表与平台／客户端收尾
 
 接续 `b2bb9f9`，完成当前六项生产工作包。实际范围见同日 A 批状态页；没有重新引入容器广谱 Hook、合作式 SDK、SYS 部署、自身外观或武器注册。
