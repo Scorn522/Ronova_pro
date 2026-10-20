@@ -256,7 +256,7 @@ public final class BackingBridge {
     }
     private static boolean setterAllowed(Class<?> owner,String name,Object receiver,Object value) {
         Class<?> declaring=owner;
-        while(declaring!=null)try {declaring.getDeclaredField(name);break;}catch(NoSuchFieldException absent){declaring=declaring.getSuperclass();}
+        while(declaring!=null)try {PlatformMetadata.declaredField(declaring,name);break;}catch(NoSuchFieldException absent){declaring=declaring.getSuperclass();}
         return declaring==null||ControlBridge.fieldWriteAllowed(receiver,declaring,name,value);
     }
     private static boolean staticSetterAllowed(Class<?> owner,String name,Object value) {return setterAllowed(owner,name,owner,value);}

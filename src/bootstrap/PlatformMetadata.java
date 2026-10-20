@@ -13,18 +13,23 @@ import java.util.Set;
 public final class PlatformMetadata {
     private static final MethodHandle FIELDS, METHODS, CONSTRUCTORS;
     private static final Class<?> REFLECTION_DATA, INSTRUMENTATION;
+    static final Class<?> CLASS_ATOMIC, ANNOTATION_DATA, ANNOTATION_TYPE, ANNOTATION_ACCESS;
     private static final StackWalker WALKER=StackWalker.getInstance(StackWalker.Option.RETAIN_CLASS_REFERENCE);
     private static final Set<String> CLASS_WRITERS=Set.of("privateGetDeclaredFields","privateGetPublicFields",
             "privateGetDeclaredMethods","privateGetPublicMethods","privateGetDeclaredConstructors",
             "privateGetPublicConstructors","reflectionData","newReflectionData");
     static {
         try {
+            REFLECTION_DATA=Class.forName("java.lang.Class$ReflectionData",false,null);
+            CLASS_ATOMIC=Class.forName("java.lang.Class$Atomic",false,null);
+            ANNOTATION_DATA=Class.forName("java.lang.Class$AnnotationData",false,null);
+            ANNOTATION_TYPE=Class.forName("sun.reflect.annotation.AnnotationType",false,null);
+            ANNOTATION_ACCESS=Class.forName("java.lang.System$2",false,null);
+            INSTRUMENTATION=Class.forName("sun.instrument.InstrumentationImpl",false,null);
             MethodHandles.Lookup access=MethodHandles.privateLookupIn(Class.class,MethodHandles.lookup());
             FIELDS=access.findVirtual(Class.class,"getDeclaredFields0",MethodType.methodType(Field[].class,boolean.class));
             METHODS=access.findVirtual(Class.class,"getDeclaredMethods0",MethodType.methodType(Method[].class,boolean.class));
             CONSTRUCTORS=access.findVirtual(Class.class,"getDeclaredConstructors0",MethodType.methodType(Constructor[].class,boolean.class));
-            REFLECTION_DATA=Class.forName("java.lang.Class$ReflectionData",false,null);
-            INSTRUMENTATION=Class.forName("sun.instrument.InstrumentationImpl",false,null);
         } catch(ReflectiveOperationException failure) {
             throw new ExceptionInInitializerError(failure);
         }
@@ -64,17 +69,24 @@ public final class PlatformMetadata {
     }
     static boolean structure(Object receiver,Class<?> declaring) {
         Class<?> type=receiver==null?declaring:receiver.getClass();
-        return type==REFLECTION_DATA||type==INSTRUMENTATION||declaring==REFLECTION_DATA||declaring==INSTRUMENTATION;
+        return platformStructure(type)||platformStructure(declaring);
+    }
+    private static boolean platformStructure(Class<?> type){
+        return type!=null&&(type==REFLECTION_DATA||type==ANNOTATION_DATA||type==ANNOTATION_TYPE||type==INSTRUMENTATION);
     }
     static boolean fieldMutationAllowed(Object receiver,Class<?> declaring,String name) {
-        boolean cache=declaring==Class.class&&name.equals("reflectionData");
-        return !cache&&!structure(receiver,declaring)||platformWriter(cache||declaring==REFLECTION_DATA
-                ||receiver!=null&&receiver.getClass()==REFLECTION_DATA);
+        if(declaring==Class.class){
+            try{
+                Field field=declaredField(Class.class,name);
+                if(!java.lang.reflect.Modifier.isStatic(field.getModifiers()))return ControlBridge.classCacheFieldWrite(field);
+            }catch(NoSuchFieldException missing){return false;}
+        }
+        return !structure(receiver,declaring)||platformWriter(platformStructure(declaring)?declaring:receiver.getClass());
     }
     static boolean memoryMutationAllowed(Object receiver) {
-        return !structure(receiver,null)||platformWriter(receiver.getClass()==REFLECTION_DATA);
+        return !structure(receiver,null)||platformWriter(receiver.getClass());
     }
-    private static boolean platformWriter(boolean reflection) {
+    private static boolean platformWriter(Class<?> structure) {
         // Admit the actual JDK cache publication, not an arbitrary reflective
         // invocation whose outer stack happens to contain a platform frame.
         return WALKER.walk(frames->{
@@ -87,9 +99,13 @@ public final class PlatformMetadata {
                 if(type.getClassLoader()==null&&(name.startsWith("java.lang.invoke.")||name.startsWith("java.lang.reflect.")
                         ||name.startsWith("jdk.internal.reflect.")||name.equals("jdk.internal.misc.Unsafe"))
                         ||name.equals("sun.misc.Unsafe")&&type.getClassLoader()==ClassLoader.getPlatformClassLoader())continue;
-                if(reflection)return type==Class.class&&CLASS_WRITERS.contains(frame.getMethodName())
+                if(structure==REFLECTION_DATA)return type==Class.class&&CLASS_WRITERS.contains(frame.getMethodName())
                         ||type==REFLECTION_DATA&&frame.getMethodName().equals("<init>");
-                return type==INSTRUMENTATION;
+                if(structure==ANNOTATION_DATA)return type==ANNOTATION_DATA&&frame.getMethodName().equals("<init>")
+                        &&frame.getDescriptor().equals("(Ljava/util/Map;Ljava/util/Map;I)V");
+                if(structure==ANNOTATION_TYPE)return type==ANNOTATION_TYPE&&frame.getMethodName().equals("<init>")
+                        &&frame.getDescriptor().equals("(Ljava/lang/Class;)V");
+                return structure==INSTRUMENTATION&&type==INSTRUMENTATION;
             }
             return false;
         });

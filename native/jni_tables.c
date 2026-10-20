@@ -5,7 +5,17 @@ static SRWLOCK native_jni_tables_gate=SRWLOCK_INIT;
 static NativeThread *native_jni_threads;
 static const struct jvmtiInterface_1_ *native_jni_vm_original;
 static const struct JNINativeInterface_ *native_jni_vm_table;
+static NativePrivateRange native_jni_vm_range;
 static volatile LONG native_jni_mutating,native_jni_pending;
+enum { NATIVE_JNI_SLOT_COUNT=sizeof(struct JNINativeInterface_)/sizeof(uintptr_t) };
+typedef struct NativeJniApproval {
+    struct JNINativeInterface_ table;OwnerLink *sources[NATIVE_JNI_SLOT_COUNT];
+    unsigned char revoked[NATIVE_JNI_SLOT_COUNT];
+} NativeJniApproval;
+static NativeJniApproval native_jni_approved;
+/* Validated call-local input remains alive across the actual VM publication.
+ * It is not the approved baseline until that publication succeeds. */
+static NativeJniApproval *native_jni_publishing;
 
 static int native_jni_read(const void *address,void *copy,SIZE_T length){
     SIZE_T read=0;return host_real_read_process_memory(GetCurrentProcess(),address,copy,length,&read)&&read==length;
@@ -30,25 +40,95 @@ static int native_jni_install_table(JNIEnv *env){
     /* HotSpot 17 publishes into the VM's static table, rather than into the
      * JVMTI allocation. A current heap/shadow table remains an equally real
      * active table, but supplies no static VM publication address. */
-    if(vm&&native_image((void*)table)==vm)native_jni_vm_table=table;
+    if(vm&&native_image((void*)table)==vm){
+        if(!native_private_register(&native_jni_vm_range,table,sizeof(*table)))return 0;
+        native_jni_vm_table=table;
+    }
     return 1;
 }
 static int native_jni_controlled(unsigned index){
     const uintptr_t *original=(const uintptr_t*)&native_original,*guarded=(const uintptr_t*)&native_guarded;
     return guarded[index]!=original[index];
 }
+static void native_jni_approve_initial(const struct JNINativeInterface_ *table){
+    AcquireSRWLockExclusive(&native_jni_tables_gate);native_jni_approved.table=*table;
+    ReleaseSRWLockExclusive(&native_jni_tables_gate);
+}
+static void native_jni_approval_release(NativeJniApproval *approval){
+    for(unsigned i=4;i<NATIVE_JNI_SLOT_COUNT;i++)native_owner_links_free(approval->sources[i]);
+}
+static int native_jni_approval_prepare(NativeThread *state,const struct JNINativeInterface_ *table,NativeJniApproval *approval){
+    memset(approval,0,sizeof(*approval));approval->table=*table;
+    uintptr_t *proposed=(uintptr_t*)&approval->table;const uintptr_t *original=(const uintptr_t*)&native_original;
+    int ready=1;
+    /* This may enter Host/native source directories. No JNI directory lock is
+     * held, and a nested current-env observation cannot recurse into capture. */
+    state->jniObserving++;
+    for(unsigned i=4;i<NATIVE_JNI_SLOT_COUNT&&ready;i++){
+        if(native_jni_controlled(i)||!proposed[i]||proposed[i]==original[i])continue;
+        ready=host_capture_caller(state,(void*)proposed[i],&approval->sources[i]);
+        if(ready&&native_owner_stopped(approval->sources[i])){
+            proposed[i]=original[i];native_owner_links_free(approval->sources[i]);approval->sources[i]=NULL;
+        }
+    }
+    state->jniObserving--;return ready;
+}
+static uintptr_t native_jni_expected_locked(unsigned index,uintptr_t current){
+    const uintptr_t *original=(const uintptr_t*)&native_original,*guarded=(const uintptr_t*)&native_guarded;
+    if(native_jni_controlled(index))return guarded[index];
+    if(index<4)return current; /* JNI's reserved words are not function addresses. */
+    uintptr_t *approved=(uintptr_t*)&native_jni_approved.table;
+    const NativeJniApproval *publishing=native_jni_publishing;
+    int rejectedPublication=0;
+    if(publishing&&current==((const uintptr_t*)&publishing->table)[index]){
+        if(!publishing->revoked[index]&&!native_owner_stopped(publishing->sources[index]))return current;
+        rejectedPublication=1;
+    }
+    if(rejectedPublication||current!=approved[index]||native_owner_stopped(native_jni_approved.sources[index])){
+        approved[index]=original[index];native_owner_links_free(native_jni_approved.sources[index]);native_jni_approved.sources[index]=NULL;
+        InterlockedExchange(&native_jni_pending,1);return original[index];
+    }
+    return approved[index];
+}
+static void native_jni_live_retired(NativeThread *state,const struct JNINativeInterface_ *table,unsigned char *retired){
+    const uintptr_t *targets=(const uintptr_t*)table,*original=(const uintptr_t*)&native_original;
+    memset(retired,0,NATIVE_JNI_SLOT_COUNT);state->jniObserving++;
+    for(unsigned i=4;i<NATIVE_JNI_SLOT_COUNT;i++)
+        if(!native_jni_controlled(i)&&targets[i]&&targets[i]!=original[i])retired[i]=native_caller_stopped((void*)targets[i])!=0;
+    state->jniObserving--;
+}
+/* A function can acquire a real source relationship after publication. Refresh
+ * outside the JNI directory; only an unchanged actual approved address can be
+ * revoked by this result. Captured roots remain useful during safepoints. */
+static void native_jni_revalidate(NativeThread *state){
+    if(!state||state->jniObserving||native_tooling_restricted()||!native_jni_ready)return;
+    struct JNINativeInterface_ snapshot;unsigned char retired[NATIVE_JNI_SLOT_COUNT];
+    AcquireSRWLockShared(&native_jni_tables_gate);snapshot=native_jni_approved.table;ReleaseSRWLockShared(&native_jni_tables_gate);
+    native_jni_live_retired(state,&snapshot,retired);
+    const uintptr_t *observed=(const uintptr_t*)&snapshot,*original=(const uintptr_t*)&native_original;
+    AcquireSRWLockExclusive(&native_jni_tables_gate);uintptr_t *approved=(uintptr_t*)&native_jni_approved.table;
+    for(unsigned i=4;i<NATIVE_JNI_SLOT_COUNT;i++)if(retired[i]){
+        if(native_jni_publishing&&((const uintptr_t*)&native_jni_publishing->table)[i]==observed[i])native_jni_publishing->revoked[i]=1;
+        if(approved[i]!=observed[i])continue;
+        approved[i]=original[i];native_owner_links_free(native_jni_approved.sources[i]);native_jni_approved.sources[i]=NULL;
+        InterlockedExchange(&native_jni_pending,1);
+    }
+    ReleaseSRWLockExclusive(&native_jni_tables_gate);
+}
 static void native_jni_overlay(struct JNINativeInterface_ *table){
-    uintptr_t *incoming=(uintptr_t*)table;const uintptr_t *guarded=(const uintptr_t*)&native_guarded;
-    for(unsigned i=0;i<sizeof(*table)/sizeof(uintptr_t);i++)if(native_jni_controlled(i))incoming[i]=guarded[i];
+    uintptr_t *incoming=(uintptr_t*)table;AcquireSRWLockExclusive(&native_jni_tables_gate);
+    for(unsigned i=4;i<NATIVE_JNI_SLOT_COUNT;i++)incoming[i]=native_jni_expected_locked(i,incoming[i]);
+    ReleaseSRWLockExclusive(&native_jni_tables_gate);
 }
 /* The range lock pins the actual attachment's table lifetime through these
  * native-only writes. Each pointer changes atomically, as in HotSpot's own
- * copy_jni_function_table; an unrelated slot is never written here. */
+ * copy_jni_function_table. A legal active unguarded hook remains approved; an
+ * unapproved pointer or a retired hook returns to the saved VM original. */
 static int native_jni_repair_locked(const struct JNINativeInterface_ *table,const struct JNINativeInterface_ *copy){
     if(!InterlockedCompareExchange(&native_guarded_ready,0,0)||!InterlockedCompareExchange(&native_jni_ready,0,0))return 1;
-    const uintptr_t *incoming=(const uintptr_t*)copy,*guarded=(const uintptr_t*)&native_guarded;int valid=1;
-    for(unsigned i=0;i<sizeof(*copy)/sizeof(uintptr_t);i++){
-        if(!native_jni_controlled(i)||incoming[i]==guarded[i])continue;
+    const uintptr_t *incoming=(const uintptr_t*)copy;int valid=1;
+    for(unsigned i=4;i<NATIVE_JNI_SLOT_COUNT;i++){
+        uintptr_t expected=native_jni_expected_locked(i,incoming[i]);if(incoming[i]==expected)continue;
         InterlockedExchange(&native_jni_pending,1);
         void *volatile *slot=(void *volatile*)((uintptr_t)table+i*sizeof(void*));
         MEMORY_BASIC_INFORMATION region;DWORD previous=0,ignored=0;
@@ -57,11 +137,12 @@ static int native_jni_repair_locked(const struct JNINativeInterface_ *table,cons
         int writable=(region.Protect&0xff)==PAGE_READWRITE||(region.Protect&0xff)==PAGE_WRITECOPY
                 ||(region.Protect&0xff)==PAGE_EXECUTE_READWRITE||(region.Protect&0xff)==PAGE_EXECUTE_WRITECOPY;
         if(!writable&&!host_real_virtual_protect((void*)slot,sizeof(*slot),PAGE_READWRITE,&previous)){valid=0;continue;}
-        void *actual=InterlockedCompareExchangePointer(slot,(void*)guarded[i],(void*)incoming[i]);
+        void *actual=InterlockedCompareExchangePointer(slot,(void*)expected,(void*)incoming[i]);
         if(!writable&&!host_real_virtual_protect((void*)slot,sizeof(*slot),previous,&ignored))valid=0;
         /* Another guarded publisher is harmless. An unvalidated competing
          * writer does not become this repair's expected value. */
-        if(actual!=(void*)incoming[i]&&actual!=(void*)guarded[i])valid=0;
+        if(actual!=(void*)incoming[i]&&actual!=(void*)expected
+                &&native_jni_expected_locked(i,(uintptr_t)actual)!=(uintptr_t)actual)valid=0;
     }
     return valid;
 }
@@ -136,11 +217,12 @@ static int native_jni_permissions_open(NativeJniProtection *regions,unsigned *co
     }
     return 1;
 }
-static jvmtiError native_jni_vm_set(jvmtiEnv *api,const struct jvmtiInterface_1_ *original,const jniNativeInterface *table){
+static jvmtiError native_jni_vm_set(jvmtiEnv *api,const struct jvmtiInterface_1_ *original,const jniNativeInterface *table,int *published){
+    *published=0;
     if(!native_jni_vm_table){
         /* Keep the original legal publication path when no actual static
          * target was observed. Do not guess a VM address from a shadow/copy. */
-        return original->SetJNIFunctionTable(api,table);
+        jvmtiError result=original->SetJNIFunctionTable(api,table);*published=result==JVMTI_ERROR_NONE;return result;
     }
     NativeJniProtection regions[4];unsigned count=0;
     /* An earlier raw writer may have restored the actual VM table to RO.
@@ -151,6 +233,7 @@ static jvmtiError native_jni_vm_set(jvmtiEnv *api,const struct jvmtiInterface_1_
     if(!opened){native_jni_permissions_close(regions,count);ReleaseSRWLockExclusive(&native_jni_tables_gate);return JVMTI_ERROR_NOT_AVAILABLE;}
     ReleaseSRWLockExclusive(&native_jni_tables_gate);
     jvmtiError result=original->SetJNIFunctionTable(api,table);
+    *published=result==JVMTI_ERROR_NONE;
     AcquireSRWLockExclusive(&native_jni_tables_gate);
     int closed=native_jni_permissions_close(regions,count);ReleaseSRWLockExclusive(&native_jni_tables_gate);
     return closed?result:JVMTI_ERROR_INTERNAL;
@@ -163,8 +246,8 @@ static int native_jni_sync_owned(NativeThread *state,JNIEnv *env){
     for(unsigned pass=0;pass<2&&InterlockedExchange(&native_jni_pending,0);pass++){
         struct JNINativeInterface_ copy;const struct JNINativeInterface_ *table=NULL;
         if(!native_jni_current(env)||!native_jni_snapshot(env,&table,&copy)||!native_jni_vm_original){valid=0;break;}
-        native_jni_overlay(&copy);
-        if(native_jni_vm_set(native_ti,native_jni_vm_original,&copy)!=JVMTI_ERROR_NONE){valid=0;break;}
+        native_jni_revalidate(state);native_jni_overlay(&copy);int published=0;
+        if(native_jni_vm_set(native_ti,native_jni_vm_original,&copy,&published)!=JVMTI_ERROR_NONE){valid=0;break;}
         /* A VM may change the current table pointer during publication. Only
          * the actual returned attachment may establish its replacement range. */
         if(!native_jni_checkpoint(state,env,0)){valid=0;break;}
@@ -187,13 +270,30 @@ static jvmtiError native_jni_publish(NativeToolingEnv *record,JNIEnv *env,const 
     NativeThread *state=native_thread();if(!state)return JVMTI_ERROR_OUT_OF_MEMORY;
     if(InterlockedCompareExchange(&native_jni_mutating,1,0))return JVMTI_ERROR_NOT_AVAILABLE;
     state->jniSynchronizing++;
-    /* This exact immutable table already passed the guarded-slot check. Its
-     * publication satisfies older repairs while retaining the caller's legal
-     * changes to every unguarded slot. Later repairs set pending again. */
+    NativeJniApproval candidate,previous;int committed=0,published=0;
+    if(!native_jni_approval_prepare(state,table,&candidate)){
+        native_jni_approval_release(&candidate);state->jniSynchronizing--;InterlockedExchange(&native_jni_mutating,0);return JVMTI_ERROR_NOT_AVAILABLE;
+    }
+    AcquireSRWLockExclusive(&native_jni_tables_gate);native_jni_publishing=&candidate;ReleaseSRWLockExclusive(&native_jni_tables_gate);
+    /* Actual successful VM publication, including success followed by a page
+     * restoration error, owns the new baseline. A rejected API call never does. */
     LONG pending=InterlockedExchange(&native_jni_pending,0);
-    jvmtiError result=native_jni_vm_set(record->api,record->original,table);
-    if(result!=JVMTI_ERROR_NONE){if(pending)InterlockedExchange(&native_jni_pending,1);}
-    else if(native_jni_ready&&env){
+    jvmtiError result=native_jni_vm_set(record->api,record->original,&candidate.table,&published);
+    unsigned char retired[NATIVE_JNI_SLOT_COUNT];memset(retired,0,sizeof(retired));
+    if(published)native_jni_live_retired(state,&candidate.table,retired);
+    AcquireSRWLockExclusive(&native_jni_tables_gate);
+    if(published){uintptr_t *proposed=(uintptr_t*)&candidate.table;const uintptr_t *original=(const uintptr_t*)&native_original;
+        for(unsigned i=4;i<NATIVE_JNI_SLOT_COUNT;i++)if(!native_jni_controlled(i)
+                &&(candidate.revoked[i]||retired[i]||native_owner_stopped(candidate.sources[i]))){
+            proposed[i]=original[i];native_owner_links_free(candidate.sources[i]);candidate.sources[i]=NULL;candidate.revoked[i]=0;
+            InterlockedExchange(&native_jni_pending,1);
+        }
+        previous=native_jni_approved;native_jni_approved=candidate;memset(candidate.sources,0,sizeof(candidate.sources));committed=1;
+    }
+    native_jni_publishing=NULL;ReleaseSRWLockExclusive(&native_jni_tables_gate);
+    native_jni_approval_release(&candidate);if(committed)native_jni_approval_release(&previous);
+    if(!published){if(pending||native_jni_ready)InterlockedExchange(&native_jni_pending,1);}
+    if(native_jni_ready&&env){
         if(!native_jni_checkpoint(state,env,0)||!native_jni_sync_owned(state,env)){
             InterlockedExchange(&native_jni_pending,1);result=JVMTI_ERROR_INTERNAL;
         }
@@ -203,7 +303,9 @@ static jvmtiError native_jni_publish(NativeToolingEnv *record,JNIEnv *env,const 
 static int native_jni_table_range(uintptr_t first,uintptr_t last,int restricted){
     if(restricted){if(!TryAcquireSRWLockShared(&native_jni_tables_gate))return native_range_unknown("JNI_TABLES_BUSY");}
     else AcquireSRWLockShared(&native_jni_tables_gate);
-    int hit=0,unknown=0;
+    uintptr_t vmTable=(uintptr_t)native_jni_vm_table;
+    int hit=vmTable&&sizeof(*native_jni_vm_table)-1<=UINTPTR_MAX-vmTable
+            &&first<=vmTable+sizeof(*native_jni_vm_table)-1&&vmTable<=last,unknown=0;
     for(NativeThread *state=native_jni_threads;state&&!hit;state=state->jniNext){
         const struct JNINativeInterface_ *table=NULL;
         if(!state->jniRange.linked||!native_jni_read(state->jniRange.address,&table,sizeof(table))||!table){

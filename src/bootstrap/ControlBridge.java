@@ -169,7 +169,9 @@ public final class ControlBridge {
     static final java.util.function.Function<java.util.stream.Stream<StackWalker.StackFrame>,Class<?>> CORE_CALLER=new CoreCaller();
     static final java.util.function.Function<java.util.stream.Stream<StackWalker.StackFrame>,Module[]> INVOKING_SOURCES=new InvokingSources();
     static final java.util.function.Function<java.util.stream.Stream<StackWalker.StackFrame>,Class<?>> CONTROL_WRITER_CALLER=new ControlWriterCaller();
-    static final java.util.function.Function<java.util.stream.Stream<StackWalker.StackFrame>,Boolean> CLASS_REFLECTION_WRITER=new ClassReflectionWriter();
+    static final java.util.function.Function<java.util.stream.Stream<StackWalker.StackFrame>,Boolean> CLASS_REFLECTION_WRITER=new ClassReflectionWriter(1);
+    static final java.util.function.Function<java.util.stream.Stream<StackWalker.StackFrame>,Boolean> CLASS_ANNOTATION_DATA_WRITER=new ClassReflectionWriter(2);
+    static final java.util.function.Function<java.util.stream.Stream<StackWalker.StackFrame>,Boolean> CLASS_ANNOTATION_TYPE_WRITER=new ClassReflectionWriter(3);
     static final java.util.function.Function<java.util.stream.Stream<StackWalker.StackFrame>,Boolean> FIELD_GATE_WRITER=new FieldGateWriter();
     // These queries run from Unsafe guards. Linking a lambda here can itself
     // enter the same guard through MethodType's ConcurrentHashMap lookup.
@@ -181,24 +183,35 @@ public final class ControlBridge {
         }
     }
     static final class ClassReflectionWriter implements java.util.function.Function<java.util.stream.Stream<StackWalker.StackFrame>,Boolean> {
+        final int cache;
+        ClassReflectionWriter(int cache){this.cache=cache;}
+        private static boolean frame(java.util.Iterator<StackWalker.StackFrame> cursor,Class<?> declaring,String name,String descriptor){
+            if(!cursor.hasNext())return false;var frame=cursor.next();
+            return frame.getDeclaringClass()==declaring&&frame.getMethodName().equals(name)&&frame.getDescriptor().equals(descriptor);
+        }
         public Boolean apply(java.util.stream.Stream<StackWalker.StackFrame> frames){
             var cursor=frames.iterator();StackWalker.StackFrame frame=null;
-            while(cursor.hasNext()){frame=cursor.next();if(frame.getDeclaringClass()!=TaskBridge.class&&frame.getDeclaringClass()!=ControlBridge.class)break;frame=null;}
+            while(cursor.hasNext()){frame=cursor.next();if(frame.getDeclaringClass()!=TaskBridge.class&&frame.getDeclaringClass()!=ControlBridge.class
+                    &&frame.getDeclaringClass()!=PlatformMetadata.class)break;frame=null;}
             if(frame==null||!frame.isNativeMethod()||frame.getDeclaringClass().getClassLoader()!=null
                     ||frame.getDeclaringClass().getModule()!=Class.class.getModule()
                     ||!frame.getDeclaringClass().getName().equals("jdk.internal.misc.Unsafe")
                     ||!frame.getMethodName().equals("compareAndSetReference")
                     ||!frame.getDescriptor().equals("(Ljava/lang/Object;JLjava/lang/Object;Ljava/lang/Object;)Z"))return false;
             if(!cursor.hasNext())return false;frame=cursor.next();Class<?> atomic=frame.getDeclaringClass();
-            if(atomic.getClassLoader()!=null||atomic.getNestHost()!=Class.class||!atomic.getName().equals("java.lang.Class$Atomic")
-                    ||!frame.getMethodName().equals("casReflectionData")
-                    ||!frame.getDescriptor().equals("(Ljava/lang/Class;Ljava/lang/ref/SoftReference;Ljava/lang/ref/SoftReference;)Z"))return false;
-            if(!cursor.hasNext())return false;frame=cursor.next();
-            if(frame.getDeclaringClass()!=Class.class||!frame.getMethodName().equals("newReflectionData")
-                    ||!frame.getDescriptor().equals("(Ljava/lang/ref/SoftReference;I)Ljava/lang/Class$ReflectionData;"))return false;
-            if(!cursor.hasNext())return false;frame=cursor.next();
-            return frame.getDeclaringClass()==Class.class&&frame.getMethodName().equals("reflectionData")
-                    &&frame.getDescriptor().equals("()Ljava/lang/Class$ReflectionData;");
+            if(atomic!=PlatformMetadata.CLASS_ATOMIC)return false;
+            if(cache==1)return frame.getMethodName().equals("casReflectionData")
+                    &&frame.getDescriptor().equals("(Ljava/lang/Class;Ljava/lang/ref/SoftReference;Ljava/lang/ref/SoftReference;)Z")
+                    &&frame(cursor,Class.class,"newReflectionData","(Ljava/lang/ref/SoftReference;I)Ljava/lang/Class$ReflectionData;")
+                    &&frame(cursor,Class.class,"reflectionData","()Ljava/lang/Class$ReflectionData;");
+            if(cache==2)return frame.getMethodName().equals("casAnnotationData")
+                    &&frame.getDescriptor().equals("(Ljava/lang/Class;Ljava/lang/Class$AnnotationData;Ljava/lang/Class$AnnotationData;)Z")
+                    &&frame(cursor,Class.class,"annotationData","()Ljava/lang/Class$AnnotationData;");
+            return cache==3&&frame.getMethodName().equals("casAnnotationType")
+                    &&frame.getDescriptor().equals("(Ljava/lang/Class;Lsun/reflect/annotation/AnnotationType;Lsun/reflect/annotation/AnnotationType;)Z")
+                    &&frame(cursor,Class.class,"casAnnotationType","(Lsun/reflect/annotation/AnnotationType;Lsun/reflect/annotation/AnnotationType;)Z")
+                    &&frame(cursor,PlatformMetadata.ANNOTATION_ACCESS,"casAnnotationType","(Ljava/lang/Class;Lsun/reflect/annotation/AnnotationType;Lsun/reflect/annotation/AnnotationType;)Z")
+                    &&frame(cursor,PlatformMetadata.ANNOTATION_TYPE,"getInstance","(Ljava/lang/Class;)Lsun/reflect/annotation/AnnotationType;");
         }
     }
     static final class FieldGateWriter implements java.util.function.Function<java.util.stream.Stream<StackWalker.StackFrame>,Boolean>{
@@ -1399,9 +1412,16 @@ public final class ControlBridge {
         // from the represented declaration and its static business fields.
         // Admit only its real JDK CAS, never an arbitrary write to that mirror.
         var field=ResourceBridge.exactField(receiver,offset,width);
-        return field!=null&&field.getDeclaringClass()==Class.class&&!java.lang.reflect.Modifier.isStatic(field.getModifiers())
-                &&field.getName().equals("reflectionData")&&field.getType()==java.lang.ref.SoftReference.class
-                &&ORIGIN_WALKER.walk(CLASS_REFLECTION_WRITER);
+        return classCacheFieldWrite(field);
+    }
+    static boolean classCacheFieldWrite(java.lang.reflect.Field field){
+        if(field==null||field.getDeclaringClass()!=Class.class||java.lang.reflect.Modifier.isStatic(field.getModifiers()))return false;
+        if(field.getName().equals("reflectionData")&&field.getType()==java.lang.ref.SoftReference.class)
+            return ORIGIN_WALKER.walk(CLASS_REFLECTION_WRITER);
+        if(field.getName().equals("annotationData")&&field.getType()==PlatformMetadata.ANNOTATION_DATA)
+            return ORIGIN_WALKER.walk(CLASS_ANNOTATION_DATA_WRITER);
+        return field.getName().equals("annotationType")&&field.getType()==PlatformMetadata.ANNOTATION_TYPE
+                &&ORIGIN_WALKER.walk(CLASS_ANNOTATION_TYPE_WRITER);
     }
     public static boolean networkRetirementWriteAllowed(Object receiver,long offset,Object value,String kind){
         return NetworkBridge.retirementWriteAllowed(receiver,offset,value,ResourceBridge.unsafeWidth(kind));
@@ -1433,12 +1453,12 @@ public final class ControlBridge {
         boolean targetStopped=modStopped(objectModule(receiver));
         boolean ownMirror=receiver instanceof Class<?> owner&&ownState(owner);
         if(!reflectionCache&&!protectedMutationAllowed(receiver,receiver instanceof Class<?> type?type:receiver==null?null:receiver.getClass()))return false;
-        // Stopping a represented class must not turn Class.newReflectionData's
+        // Stopping a represented class must not turn Class's reflection/annotation
         // own cache CAS into a permanently false retry. Its exact JDK/instance
-        // field proof excludes that target attribution only; the real caller's
-        // stopped sources still apply. The validated Class instance cache is
-        // separate from the represented controller's protected static state.
-        if(((targetStopped&&!reflectionCache)||stoppedInvocation())&&!coreWriter()
+        // field and call-chain check permits only JDK cache maintenance, even
+        // if an in-flight stopped caller requested the lookup. A false CAS
+        // would otherwise spin forever inside Class.annotationData().
+        if(!reflectionCache&&(targetStopped||stoppedInvocation())&&!coreWriter()
                 &&!NetworkBridge.retirementWriteAllowed(receiver,offset,value,resourceWidth))return false;
         if(ownMirror&&!reflectionCache||receiver!=null&&ownState(receiver.getClass()))return false;
         if(receiver==null)return true; // Raw-address writes have no exact object binding here.

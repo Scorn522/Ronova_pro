@@ -223,6 +223,7 @@ static int audit_jni_close(AuditJniProtect protect,AuditJniPermission *regions,u
 }
 static jint (JNICALL *audit_jni_version_original)(JNIEnv*);
 static jint JNICALL audit_jni_version(JNIEnv *env){return audit_jni_version_original(env);}
+static jint JNICALL audit_jni_unapproved_version(JNIEnv *env){return audit_jni_version_original(env);}
 static jmethodID JNICALL audit_jni_bad_method(JNIEnv *env,jclass type,const char *name,const char *descriptor){
     (void)env;(void)type;(void)name;(void)descriptor;return NULL;
 }
@@ -260,6 +261,17 @@ JNIEXPORT jboolean JNICALL Java_dev_ronova_pro_AuditFixCheck_jniLiveTable0(JNIEn
     BOOL write=WriteProcessMemory(GetCurrentProcess(),(unsigned char*)table+sizeof(*table)-sizeof(word),&word,sizeof(word),&written);
     JNI_LIVE_REQUIRE(!write&&!written&&GetLastError()==ERROR_ACCESS_DENIED,"JNI_LIVE_TABLE_TAIL_WRITE_NOT_REFUSED");
     int opened=audit_jni_open(protect,table,PAGE_READWRITE,regions,&count);
+    if(!opened){audit_jni_close(protect,regions,count);count=0;failure="JNI_LIVE_UNGUARDED_PAGE_OPEN";goto jni_live_done;}
+    InterlockedExchangePointer((void *volatile*)&table->GetVersion,(void*)audit_jni_unapproved_version);changed=1;
+    JNI_LIVE_REQUIRE(audit_jni_close(protect,regions,count),"JNI_LIVE_UNGUARDED_PAGE_RESTORE");count=0;
+    JNI_LIVE_REQUIRE(table->GetVersion==audit_jni_unapproved_version,"JNI_LIVE_UNGUARDED_FORCE_WRITE_NOT_OBSERVED");
+    jmethodID rawBoundary=(*env)->GetStaticMethodID(env,check,"jniLiveBoundary","()I");
+    JNI_LIVE_REQUIRE(rawBoundary&&!(*env)->ExceptionCheck(env)&&(*env)->GetVersion==before.GetVersion,"JNI_LIVE_UNAPPROVED_UNGUARDED_SLOT_NOT_RESTORED");
+    JNI_LIVE_REQUIRE((*api)->GetJNIFunctionTable(api,&published)==JVMTI_ERROR_NONE&&published,"JNI_LIVE_UNGUARDED_REPUBLISH_SNAPSHOT");
+    published->GetVersion=audit_jni_version;
+    JNI_LIVE_REQUIRE((*api)->SetJNIFunctionTable(api,published)==JVMTI_ERROR_NONE&&(*env)->GetVersion==audit_jni_version,"JNI_LIVE_UNGUARDED_LEGAL_REPUBLISH");
+    (*api)->Deallocate(api,(unsigned char*)published);published=NULL;
+    opened=audit_jni_open(protect,table,PAGE_READWRITE,regions,&count);
     if(!opened){audit_jni_close(protect,regions,count);count=0;failure="JNI_LIVE_FORCE_WRITE_PAGE_OPEN";goto jni_live_done;}
     InterlockedExchangePointer((void *volatile*)&table->GetMethodID,(void*)audit_jni_bad_method);
     InterlockedExchangePointer((void *volatile*)&table->GetFieldID,(void*)audit_jni_bad_field);changed=1;
@@ -287,7 +299,8 @@ jni_live_done:
     if(changed&&protect){
         int opened=audit_jni_open(protect,table,PAGE_READWRITE,regions,&count);
         if(opened){InterlockedExchangePointer((void *volatile*)&table->GetMethodID,(void*)before.GetMethodID);
-            InterlockedExchangePointer((void *volatile*)&table->GetFieldID,(void*)before.GetFieldID);}
+            InterlockedExchangePointer((void *volatile*)&table->GetFieldID,(void*)before.GetFieldID);
+            InterlockedExchangePointer((void *volatile*)&table->GetVersion,(void*)before.GetVersion);}
         if((!audit_jni_close(protect,regions,count)||!opened)&&!failure)failure="JNI_LIVE_FINAL_POINTER_RESTORE";
     }
     if(published&&api)(*api)->Deallocate(api,(unsigned char*)published);
@@ -302,6 +315,48 @@ jni_live_done:
     if(failure)audit_physical_failure(env,failure);
 #undef JNI_LIVE_REQUIRE
     return failure?JNI_FALSE:JNI_TRUE;
+}
+/* Called from the real automatic module's HookTarget after its System.load.
+ * Its JNI library/source registration and subsequent stop are production paths. */
+JNIEXPORT jlongArray JNICALL Java_audit_jni_retirement_HookTarget_install0(JNIEnv *env,jclass target){
+    (void)target;JavaVM *vm=NULL;jvmtiEnv *api=NULL;jniNativeInterface *copy=NULL,*cleanup=NULL;
+    const char *failure=NULL;int attempted=0;struct JNINativeInterface_ before=**env;jlongArray result=NULL;
+    if((*env)->GetJavaVM(env,&vm)!=JNI_OK||!vm||(*vm)->GetEnv(vm,(void**)&api,JVMTI_VERSION_1_2)!=JNI_OK||!api){failure="JNI_STOP_HOOK_REAL_ENVIRONMENT";goto hook_done;}
+    if((*api)->GetJNIFunctionTable(api,&copy)!=JVMTI_ERROR_NONE||!copy){failure="JNI_STOP_HOOK_REAL_SNAPSHOT";goto hook_done;}
+    audit_jni_version_original=before.GetVersion;copy->GetVersion=audit_jni_version;attempted=1;
+    if((*api)->SetJNIFunctionTable(api,copy)!=JVMTI_ERROR_NONE||(*env)->GetVersion!=audit_jni_version
+            ||(*env)->GetVersion(env)!=before.GetVersion(env)){failure="JNI_STOP_HOOK_LEGAL_PUBLICATION";goto hook_done;}
+    jlong pointers[]={(jlong)(uintptr_t)audit_jni_version,(jlong)(uintptr_t)before.GetVersion};
+    result=(*env)->NewLongArray(env,2);if(result)(*env)->SetLongArrayRegion(env,result,0,2,pointers);
+    if(!result||(*env)->ExceptionCheck(env))failure="JNI_STOP_HOOK_REAL_RESULT";
+hook_done:
+    if(copy&&api){(*api)->Deallocate(api,(unsigned char*)copy);copy=NULL;}
+    if(!failure&&api){
+        if((*api)->DisposeEnvironment(api)==JVMTI_ERROR_NONE)api=NULL;
+        else failure="JNI_STOP_HOOK_REAL_DISPOSE";
+    }
+    if(failure&&attempted&&api){
+        jthrowable pending=before.ExceptionOccurred(env);if(pending)before.ExceptionClear(env);
+        if((*api)->GetJNIFunctionTable(api,&cleanup)==JVMTI_ERROR_NONE&&cleanup){cleanup->GetVersion=before.GetVersion;
+            (*api)->SetJNIFunctionTable(api,cleanup);(*api)->Deallocate(api,(unsigned char*)cleanup);}
+        AuditJniProtect protect=audit_jni_real_protect();AuditJniPermission regions[4];unsigned count=0;
+        if(protect&&audit_jni_open(protect,*env,PAGE_READWRITE,regions,&count))
+            InterlockedExchangePointer((void *volatile*)&((struct JNINativeInterface_*)*env)->GetVersion,(void*)before.GetVersion);
+        if(protect)audit_jni_close(protect,regions,count);
+        if(pending){before.Throw(env,pending);before.DeleteLocalRef(env,pending);}
+    }
+    if(api&&(*api)->DisposeEnvironment(api)!=JVMTI_ERROR_NONE&&!failure)failure="JNI_STOP_HOOK_REAL_DISPOSE";
+    if(failure){audit_physical_failure(env,failure);return NULL;}return result;
+}
+/* The owner module is stopped before this live main-module method is entered.
+ * No call back into that module, native Owner injection or ready flag is used. */
+JNIEXPORT jboolean JNICALL Java_dev_ronova_pro_AuditFixCheck_jniStoppedHookObserve0(JNIEnv *env,jclass check,jlong hook,jlong original){
+    if(!hook||!original||hook==original||(*env)->GetVersion!=(void*)(uintptr_t)original
+            ||(*env)->GetVersion==(void*)(uintptr_t)hook){audit_physical_failure(env,"JNI_STOP_HOOK_STILL_CURRENT");return JNI_FALSE;}
+    jmethodID boundary=(*env)->GetStaticMethodID(env,check,"jniLiveBoundary","()I");
+    if(!boundary||(*env)->ExceptionCheck(env)||(*env)->CallStaticIntMethod(env,check,boundary)!=73
+            ||(*env)->GetVersion!=(void*)(uintptr_t)original){audit_physical_failure(env,"JNI_STOP_HOOK_ORIGINAL_BOUNDARY_UNAVAILABLE");return JNI_FALSE;}
+    return JNI_TRUE;
 }
 #ifndef RONOVA_LIVE_JNI_ONLY
 JNIEXPORT void JNICALL Java_dev_ronova_pro_AuditFixCheck_physicalStop0(JNIEnv *env,jclass type){

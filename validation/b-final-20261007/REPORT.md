@@ -1,5 +1,32 @@
 # B 批实际报告：2026-10-09 代码收敛接续
 
+## 2026-10-20：注解缓存自旋与非受控 JNI 槽位回归
+
+接续 `88986aa`。生产修复：
+
+- Class 缓存：精确放行 `Class$Atomic.casReflectionData`、`casAnnotationData`、`casAnnotationType`，分别匹配真实字段类型及完整必要调用帧／描述符。AnnotationType 链使用本机 OpenJDK 17 源码与声明中的 `Class.casAnnotationType → System$2.casAnnotationType → AnnotationType.getInstance`。合法平台缓存维护不因被代表的类或在途调用已停而返回假 CAS。
+- 镜像／结构保护：外部反射与 setter 不再能修改 Class 非静态字段；AnnotationData、AnnotationType 内部字段只允许实际 JDK 构造路径写入。BackingBridge setter 定位改为 PlatformMetadata 原始声明，避免反射过滤／缓存投毒把真实字段误当不存在。
+- JNI：保存当前批准目标与实际发布来源，初始为 guarded；只有真实 SetJNI 成功才提交，发布未返回期间的合法目标单独识别，失败不提升基准。未批准指针或已停来源恢复 original，更新批准值和 pending；退场／同步前在目录锁外刷新当前函数的实际来源，普通 JNI 入口只查已有状态。目录锁不跨 VM safepoint；实际 VM 表同时纳入独立区间保护。
+
+生产与检查源码写齐后一次运行 `jar` / `reobfJar` / `compileStateChecksJava`：59 秒、退出 0。后续只修正并单独编译检查入口的反射查找，生产候选未重编。没有启动 Minecraft／Forge。
+
+| 回归入口 | 结果与范围 |
+| --- | --- |
+| `installed-platform-writes` | PASS，实际 premain 与 NativeControl 已安装。此前未缓存的测试类及注解接口完成 getAnnotations/getAnnotation/isAnnotationPresent；真实 Instrumentation.retransformClasses 增加 classRedefinedCount 后重新发布缓存，结果保持。Class.name/classLoader/annotationData/annotationType、AnnotationData.annotations/declaredAnnotations、AnnotationType.memberTypes 的实际 Unsafe、Field.set、unreflectSetter 写入均被拒绝，正常静态字段与 ReflectionData CAS 保留。 |
+| `platform-control-writes` | PASS，独立 Bootstrap 检查。真实镜像／静态字段准入、直接递增 classRedefinedCount 后的注解重建、真实 ReflectionData 被清空后的原始 VM 元数据读取；该入口本身不安装 Native，不冒充已安装状态。 |
+| `jni-live-table` | PASS，实际 premain。完整 JNI 表／尾部保护、受控槽修复、只读页权限恢复；合法 GetVersion hook 保留，未经 SetJNI 的直接 GetVersion 改写恢复 original，之后合法再次发布仍成功。另从真实自动模块 `audit.jni.retirement` 的 JAR／mods.toml 加载独立 DLL，由目标类实际调用 System.load 和 SetJNI；经现有 ModGroupBoundary.prepare → publishStoppedModule → NativeControl.module 停止 `audit_jni_retire` 后，由未停主检查类确认 hook 已被 original 替换。没有注入 Owner、ready 或伪造停止标志；未覆盖 Forge 命令／世界清理。 |
+
+检查目标源码和实际归组元数据保留在 `validation/checks/jni-retirement`，单独打成带 Automatic-Module-Name 的 JAR，不混入主检查类路径。C 检查用 `RONOVA_LIVE_JNI_ONLY` 编译，仅消费运行中的真实生产后端；第二份 DLL 使用不同物理路径由目标模块加载。Java 运行属性为 `ronova.pro.audit.native`、`ronova.pro.audit.hook.native`、`ronova.pro.audit.modJar`。
+
+日志目录 `.work/v1.5-annotation-jni-20261020`：`build.log`、`check-native-compile.log`、`check-entry-compile.log` 与三个入口的 stdout/stderr。保留两次检查自身失败：独立入口缺少正常 premain 提供的 `sun.nio.ch` 等 opens 参数；JNI 检查把包内 modStopped 用 public getMethod 查找。分别补齐正常模块开放参数、改成 getDeclaredMethod 后，仅重跑对应失败入口。已安装注解回归没有重跑。
+
+当前候选 Java105 / Native99 / Storage3 / Journal7：
+
+| 候选 | 字节 | SHA-256 |
+| --- | ---: | --- |
+| `ronova-pro-core-1.5.0-dev.jar` | 3296245 | `bba4e4bb1ba0131c187fadb791d1797aeeb0a82830ef13290052c1a1da500f7d` |
+| `ronova-pro-prelaunch.jar` | 51042 | `0b32b1e0d08e7af35afe97335d0b9d688c5c7d661913ce77e965901d6856503f` |
+
 ## 2026-10-20：NATIVE_CONTROL_RANGE_UNAVAILABLE 因果定位与修复
 
 接续 `9d84e02`。保留此前 `direct-complete.stderr.log` 的 DatagramChannelImpl 失败。旧调用顺序为：Native initialize0 装入 Unsafe 拦截 → RecoveryAgent 第一轮 retransformStartup → libraryBoundaryInstalled/processBoundaryInstalled → host_windows_targets 才解析 `RtlIsThreadWithinLoaderCallout`。未解析时 `host_loader_callout()` 保守返回 true，把普通查询送入受限 TryAcquire 分支；真实 JNI 目录竞争因此变成重变换异常。

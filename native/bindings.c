@@ -2225,6 +2225,7 @@ static int native_tooling_install(JavaVM *vm,jvmtiEnv *api){
 static void native_tooling_retire(JNIEnv *env,jobject module){
     (void)module;
     NativeThread *state=native_thread();
+    native_jni_revalidate(state);
     if(env&&state&&(!native_jni_checkpoint(state,env,1)||!native_jni_synchronize(state,env)))InterlockedIncrement(&native_tooling_failures);
     AcquireSRWLockShared(&native_tooling_records);NativeToolingEnv *records=native_tooling_environments;ReleaseSRWLockShared(&native_tooling_records);
     for(NativeToolingEnv *record=records;record;record=record->next){
@@ -2284,6 +2285,7 @@ JNIEXPORT void JNICALL Agent_OnUnload(JavaVM *vm){
     /* The DLL and immutable thunks remain pinned: a VM dispatcher may already
      * have fetched one. No public JVMTI call proves those cached entries drained. */
     InterlockedExchange(&native_tooling_shutdown,1);InterlockedExchange(&native_tooling_ready,0);
+    native_private_unregister(&native_jni_vm_range);
     if(native_tooling_retirement_event)SetEvent(native_tooling_retirement_event);
     if(vm==native_vm&&native_vm_shadow)native_tooling_exchange((void *volatile*)vm,(void*)native_vm_shadow,(void*)&native_vm_original);
     AcquireSRWLockShared(&native_tooling_records);NativeToolingSlot *slots=native_tooling_slots;ReleaseSRWLockShared(&native_tooling_records);
@@ -2401,7 +2403,7 @@ JNIEXPORT jboolean JNICALL Java_dev_ronova_pro_bootstrap_NativeControl_initializ
     table->ExceptionDescribe=native_describe;
     table->RegisterNatives=native_register;table->UnregisterNatives=native_unregister;
     table->FindClass=native_find;table->GetMethodID=native_lookup_GetMethodID;table->GetStaticMethodID=native_lookup_GetStaticMethodID;table->GetFieldID=native_lookup_GetFieldID;table->GetStaticFieldID=native_lookup_GetStaticFieldID;
-    table->DefineClass=native_define;native_jni_outputs_install(table);native_guarded=*table;InterlockedExchange(&native_guarded_ready,1);jvmtiError result=(*native_ti)->SetJNIFunctionTable(native_ti,table);(*native_ti)->Deallocate(native_ti,(unsigned char*)table);InterlockedExchange(&native_jni_ready,result==JVMTI_ERROR_NONE);
+    table->DefineClass=native_define;native_jni_outputs_install(table);native_guarded=*table;native_jni_approve_initial(table);InterlockedExchange(&native_guarded_ready,1);jvmtiError result=(*native_ti)->SetJNIFunctionTable(native_ti,table);(*native_ti)->Deallocate(native_ti,(unsigned char*)table);InterlockedExchange(&native_jni_ready,result==JVMTI_ERROR_NONE);
     if(result==JVMTI_ERROR_NONE&&(!native_thread_jni_observed(native_thread(),env)||!native_jni_synchronize(native_thread(),env)))return JNI_FALSE;
     if(result==JVMTI_ERROR_NONE)InterlockedExchange(&native_library_present,native_library_install(env));
     if(result==JVMTI_ERROR_NONE&&!native_unsafe_install(env))return JNI_FALSE;

@@ -1,5 +1,15 @@
 # Ronova Pro 当前进度
 
+## 2026-10-20：注解缓存 CAS 回归与 JNI 非受控槽退场修复
+
+接续 `88986aa`。`Class.reflectionData`、`annotationData`、`annotationType` 的合法 CAS 分别按真实实例字段类型、Bootstrap 声明类、方法描述符和相邻调用帧放行；AnnotationType 路径包含实际 JDK 17 `System$2` 转交帧。受控／已停类和在途已停调用中的 JDK 缓存维护也能完成，避免 CAS 永假导致注解查询自旋。外部 Class 非静态字段的 Unsafe、反射与句柄写继续拒绝；AnnotationData、AnnotationType 内部字段纳入平台结构保护，setter 字段定位改用原始 VM 声明。
+
+JNI 增加当前批准表：合法 SetJNIFunctionTable 实际成功后才提交，发布过程中不持目录锁跨 VM safepoint。非受控槽遭裸写或来源停用时恢复 original，并更新批准目标、同步 VM 表；实际 VM 表自身也进入区间保护。真实来源刷新放在退场／必要同步边界，不让每次普通 JNI 调用重新捕获来源。
+
+生产一次统一构建成功（59 秒）。已安装 Native/Unsafe 下，首次注解查询、实际重变换后的缓存重建、Class／注解缓存的 Unsafe、Field.set、MethodHandle 投毒拒绝均通过。JNI 检查通过未批准 GetVersion 裸改恢复、合法活跃 hook 保留，以及真实目标模块加载 DLL、合法发布 hook、现有整组停止入口执行后恢复原始槽位。
+
+候选双 JAR 已更新，Core 3,296,245 字节，prelaunch 内容不变；具体结果及两处检查入口修正记录见既有实际报告。未起服、未启动 Minecraft／Forge，不把独立 JVM 回归等同于游戏内整组验收。
+
 ## 2026-10-20：Native 启动重变换的区间查询误拒修复
 
 接续 `9d84e02`。根因是 `RtlIsThreadWithinLoaderCallout` 的查询入口此前只在较晚的 `host_windows_targets` 初始化；第一轮平台类重变换已经启用 Unsafe 原生内存入口，空查询入口把普通线程误归为受限回调。JNI 表登记锁发生正常竞争时，受限路径的 TryAcquire 返回未知，再抛出 `NATIVE_CONTROL_RANGE_UNAVAILABLE`，最终导致重变换 ClassFormatError。

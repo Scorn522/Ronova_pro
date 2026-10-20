@@ -26,13 +26,33 @@ public final class AuditFixCheck {
         System.out.println("RANGE_CONTENTION_PASS actual_premain_retransformation ordinary_Unsafe_read_write_preserved real_GetEnv_calls="+calls+" no_supplied_controller_metadata");
     }
     private static native boolean jniLiveTable0();
+    private static native boolean jniStoppedHookObserve0(long hook,long original);
     private static int jniLiveBoundary(){return 73;}
     private static void jniLiveTable()throws Exception {
         Class<?> control=Class.forName("dev.ronova.pro.bootstrap.NativeControl",false,null);
         require(Boolean.TRUE.equals(control.getMethod("available").invoke(null)),"actual premain NativeControl installation required");
         System.load(java.nio.file.Path.of(System.getProperty("ronova.pro.audit.native")).toAbsolutePath().toString());
         require(jniLiveTable0(),"actual live JNI table protection or restoration failed");
-        System.out.println("JNI_LIVE_TABLE_PASS actual_premain_backend real_env_full_table_and_tail_ranges_refused actual_GetMethodID_GetFieldID_corruption_repaired RO_publication_permissions_restored legitimate_unguarded_GetVersion_preserved no_supplied_owner_metadata");
+        var archive=java.nio.file.Path.of(System.getProperty("ronova.pro.audit.modJar")).toAbsolutePath();
+        var finder=java.lang.module.ModuleFinder.of(archive);
+        var configuration=ModuleLayer.boot().configuration().resolve(finder,java.lang.module.ModuleFinder.of(),Set.of("audit.jni.retirement"));
+        var layer=ModuleLayer.boot().defineModulesWithOneLoader(configuration,ClassLoader.getSystemClassLoader());
+        Module module=layer.findModule("audit.jni.retirement").orElseThrow();
+        Class<?> hook=Class.forName("audit.jni.retirement.HookTarget",true,layer.findLoader(module.getName()));
+        require(hook.getModule()==module&&java.nio.file.Files.isSameFile(archive,
+                java.nio.file.Path.of(hook.getProtectionDomain().getCodeSource().getLocation().toURI())),"hook did not load from its real Mod archive");
+        long[] installed=(long[])hook.getMethod("install",String.class).invoke(null,
+                java.nio.file.Path.of(System.getProperty("ronova.pro.audit.hook.native")).toAbsolutePath().toString());
+        require(installed!=null&&installed.length==2&&installed[0]!=0&&installed[1]!=0&&installed[0]!=installed[1],"real Mod hook publication failed");
+        Class<?> boundary=Class.forName("dev.ronova.pro.agent.ModGroupBoundary");
+        Method prepare=boundary.getDeclaredMethod("prepare",java.lang.instrument.Instrumentation.class,String[].class,Module[].class,String.class);
+        prepare.setAccessible(true);
+        require("READY".equals(prepare.invoke(null,actualInstrumentation(),new String[]{"audit_jni_retire"},new Module[]{module},"default")),
+                "real Mod stop publication failed");
+        Method stopped=Class.forName("dev.ronova.pro.bootstrap.ControlBridge",false,null).getDeclaredMethod("modStopped",Module.class);
+        stopped.setAccessible(true);require((boolean)stopped.invoke(null,module),"hook module was not stopped");
+        require(jniStoppedHookObserve0(installed[0],installed[1]),"stopped Mod JNI hook survived retirement");
+        System.out.println("JNI_LIVE_TABLE_PASS real_premain full_table_protection controlled_and_uncontrolled_raw_damage_repaired legal_live_hook_preserved actual_Mod_stop_restored_original no_supplied_owner_metadata");
     }
     private static final sun.misc.Unsafe U;
     static {try {var field=sun.misc.Unsafe.class.getDeclaredField("theUnsafe");field.setAccessible(true);U=(sun.misc.Unsafe)field.get(null);}catch(Exception e){throw new ExceptionInInitializerError(e);}}
@@ -2398,6 +2418,68 @@ public final class AuditFixCheck {
         System.out.println("BOOTSTRAP_SEARCH_PASS actual_boot_loader original_payload_match native_available installed_full original="+original);
     }
     private static final class MirrorWriteTarget { static int number=7; static Object reference=new Object(); int field; }
+    @java.lang.annotation.Retention(java.lang.annotation.RetentionPolicy.RUNTIME)
+    private @interface CacheMarker { int value(); }
+    @CacheMarker(37) private static final class AnnotationTarget {}
+    private static Field platformField(Class<?> owner,String name)throws Exception{
+        return (Field)Class.forName("dev.ronova.pro.bootstrap.PlatformMetadata",true,null)
+                .getMethod("declaredField",Class.class,String.class).invoke(null,owner,name);
+    }
+    private static java.lang.instrument.Instrumentation actualInstrumentation()throws Exception{
+        Class<?> agent=Class.forName("dev.ronova.pro.agent.RecoveryAgent");
+        Field held=agent.getDeclaredField("instrumentation");held.setAccessible(true);
+        return (java.lang.instrument.Instrumentation)held.get(null);
+    }
+    private static void annotationCaches(boolean installed)throws Exception{
+        Field dataField=platformField(Class.class,"annotationData"),typeField=platformField(Class.class,"annotationType");
+        long dataOffset=U.objectFieldOffset(dataField),typeOffset=U.objectFieldOffset(typeField);
+        Class<?> target=AnnotationTarget.class;
+        require(U.getObject(target,dataOffset)==null,"annotation target was already cached before regression");
+        require(U.getObject(CacheMarker.class,typeOffset)==null,"annotation interface was already parsed before regression");
+        require(target.getAnnotations().length==1&&target.getAnnotation(CacheMarker.class).value()==37
+                &&target.isAnnotationPresent(CacheMarker.class),"fresh annotation publication failed");
+        require(CacheMarker.class.getAnnotation(java.lang.annotation.Retention.class).value()==java.lang.annotation.RetentionPolicy.RUNTIME,
+                "annotation interface cache publication failed");
+        Object first=U.getObject(target,dataOffset),annotationType=U.getObject(CacheMarker.class,typeOffset);
+        require(first!=null&&annotationType!=null,"CAS did not install both annotation caches");
+        Field countField=platformField(Class.class,"classRedefinedCount");long countOffset=U.objectFieldOffset(countField);
+        int before=U.getInt(target,countOffset);
+        if(installed){
+            actualInstrumentation().retransformClasses(target);
+            require(U.getInt(target,countOffset)>before,"actual retransformation did not invalidate annotation cache");
+        }else U.putInt(target,countOffset,before+1);
+        require(target.getAnnotations().length==1&&target.getAnnotation(CacheMarker.class).value()==37,
+                "annotation cache rebuild after invalidation failed");
+        Object current=U.getObject(target,dataOffset);require(current!=null&&current!=first,"stale annotation data was reused");
+        denyPlatformReference(target,dataField,null,installed);
+        denyPlatformReference(target,platformField(Class.class,"name"),"tampered.annotation.mirror",installed);
+        denyPlatformReference(target,platformField(Class.class,"classLoader"),null,installed);
+        denyPlatformReference(CacheMarker.class,typeField,null,installed);
+        for(String field:new String[]{"annotations","declaredAnnotations"})
+            denyPlatformReference(current,platformField(current.getClass(),field),Map.of(),installed);
+        denyPlatformReference(annotationType,platformField(annotationType.getClass(),"memberTypes"),Map.of(),installed);
+        require(target.getAnnotation(CacheMarker.class).value()==37,"refused poisoning changed live annotations");
+        System.out.println("ANNOTATION_CACHE_PASS installed="+installed+" fresh_data_and_type_CAS invalidation_rebuild mirror_and_cache_poison_refused");
+    }
+    private static void denyPlatformReference(Object receiver,Field field,Object proposed,boolean installed)throws Exception{
+        Class<?> control=Class.forName("dev.ronova.pro.bootstrap.ControlBridge",true,null);
+        long offset=U.objectFieldOffset(field);Object before=U.getObject(receiver,offset);
+        require(!(boolean)control.getMethod("unsafeWriteAllowed",Object.class,long.class,Object.class,String.class)
+                .invoke(null,receiver,offset,proposed,"Object"),"external Unsafe admission: "+field);
+        require(!(boolean)control.getMethod("reflectFieldWrite",Field.class,Object.class,Object.class)
+                .invoke(null,field,receiver,proposed),"external reflection admission: "+field);
+        if(!installed)return;
+        U.putObjectVolatile(receiver,offset,proposed);
+        require(U.getObject(receiver,offset)==before,"actual Unsafe poisoned "+field);
+        field.setAccessible(true);
+        try{field.set(receiver,proposed);}catch(IllegalAccessException denied){
+            require("RONOVA_PROTECTED_FIELD_WRITE_REFUSED".equals(denied.getMessage()),"reflection failed outside Ronova guard: "+denied);
+        }
+        require(U.getObject(receiver,offset)==before,"actual Field.set poisoned "+field);
+        try{MethodHandles.lookup().unreflectSetter(field).invokeWithArguments(receiver,proposed);}
+        catch(Throwable failure){throw new AssertionError("guarded setter invocation failed: "+field,failure);}
+        require(U.getObject(receiver,offset)==before,"actual MethodHandle setter poisoned "+field);
+    }
     private static void installedPlatformWrites()throws Exception{
         require(Boolean.TRUE.equals(Class.forName("dev.ronova.pro.bootstrap.NativeControl",false,null).getMethod("available").invoke(null)),
                 "actual premain backend required");
@@ -2428,7 +2510,8 @@ public final class AuditFixCheck {
         }finally{if(U.getObject(data,declaredOffset)!=originalFields)U.putObjectVolatile(data,declaredOffset,originalFields);}
         Field number=(Field)raw.invoke(null,target,"number");U.putInt(U.staticFieldBase(number),U.staticFieldOffset(number),23);
         require(MirrorWriteTarget.number==23,"installed mirror guard rejected real static field write");
-        System.out.println("INSTALLED_PLATFORM_WRITES_PASS: actual Unsafe Class instance/cache/ReflectionData writes refused, real static writes and JDK cache publication preserved");
+        annotationCaches(true);
+        System.out.println("INSTALLED_PLATFORM_WRITES_PASS: actual Unsafe/reflection/handles refused, all three JDK cache CAS paths and real retransformation preserved");
     }
     private static void platformControlWrites()throws Exception{
         Class<?> control=Class.forName("dev.ronova.pro.bootstrap.ControlBridge",true,null);
@@ -2471,7 +2554,8 @@ public final class AuditFixCheck {
             require(target.getDeclaredFields().length==0,"cache poisoning setup did not affect real reflection");
             require(((Field[])fields.invoke(null,target)).length==3,"raw VM declarations consumed poisoned cache");
         }finally{U.putObject(data,declaredOffset,previous);}
-        System.out.println("PLATFORM_CONTROL_WRITES_PASS: real mirror/static storage and poisoned ReflectionData; production admission checks, no installed-agent claim");
+        annotationCaches(false);
+        System.out.println("PLATFORM_CONTROL_WRITES_PASS: real mirror/static storage, annotation caches and poisoned ReflectionData; production admission checks, no installed-agent claim");
     }
     private static final class NoCallbacks {
         @Override public boolean equals(Object other){throw new AssertionError("target equals callback");}

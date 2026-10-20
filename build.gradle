@@ -19,6 +19,8 @@ sourceSets {
     agent { java.setSrcDirs(['src/agent', 'src/shared']) }
     stateChecks {
         java.setSrcDirs(['validation/checks'])
+        // Loaded from its own real Mod archive/module during the JNI stop check.
+        java.exclude('jni-retirement/**')
         compileClasspath += sourceSets.main.output + sourceSets.main.compileClasspath + sourceSets.bootstrap.output
         runtimeClasspath += sourceSets.main.output + sourceSets.main.runtimeClasspath + sourceSets.bootstrap.output
     }
