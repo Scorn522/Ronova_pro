@@ -62,7 +62,7 @@ static int host_memory_source_range(uintptr_t first,uintptr_t last,OwnerLink *so
     return 0;
 }
 static int host_memory_import_range(uintptr_t first,uintptr_t last,int restricted){
-    if(restricted){if(!TryAcquireSRWLockShared(&host_imports))return -1;}
+    if(restricted){if(!TryAcquireSRWLockShared(&host_imports))return native_range_unknown("HOST_IMPORTS_BUSY");}
     else AcquireSRWLockShared(&host_imports);
     int hit=0;
     for(HostImage *image=host_images;image&&!hit;image=image->next){
@@ -85,13 +85,14 @@ static int host_memory_import_range(uintptr_t first,uintptr_t last,int restricte
  * including a protected allocation sharing the requested page. Query each
  * directory separately; no Host lock spans the Native control-range query. */
 static int host_memory_range(const void *address,SIZE_T size,int pages,int restricted){
+    NativeThread *state=native_range_state();if(state)state->controlRangeFailure=NULL;
     /* A zero-sized protection request never authorizes a control page; leave
      * its actual success/failure on an ordinary page to the original API. */
     if(!size){if(!pages)return 0;size=1;}
     uintptr_t first=(uintptr_t)address,span=(uintptr_t)(size-1);
-    if(span>UINTPTR_MAX-first)return -1;uintptr_t last=first+span;
+    if(span>UINTPTR_MAX-first)return native_range_unknown("ADDRESS_OVERFLOW");uintptr_t last=first+span;
     if(pages){DWORD page=__atomic_load_n(&host_memory_page_size,__ATOMIC_ACQUIRE);
-        if(!page)return -1;first-=first%page;
+        if(!page)return native_range_unknown("PAGE_SIZE_UNAVAILABLE");first-=first%page;
         uintptr_t remaining=page-1-last%page;
         last=remaining>UINTPTR_MAX-last?UINTPTR_MAX:last+remaining;
     }

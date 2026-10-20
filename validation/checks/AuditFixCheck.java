@@ -8,6 +8,23 @@ import java.util.function.Consumer;
 
 /** Focused source-list regression and historical metadata checks; neither certifies gameplay. */
 public final class AuditFixCheck {
+    private static native long rangeContentionFinish0();
+    private static void rangeContention(String bootstrap)throws Exception {
+        long calls;
+        try {
+            bootstrapSearch(bootstrap);
+            long address=U.allocateMemory(16);
+            try {
+                for(int i=0;i<1024;i++){
+                    long expected=0x1234abc000L+i;
+                    U.putLong(address,expected);
+                    require(U.getLong(address)==expected,"ordinary native memory changed during JNI contention");
+                }
+            } finally {U.freeMemory(address);}
+        } finally {calls=rangeContentionFinish0();}
+        require(calls>0,"real attached JNI workers failed or did not overlap premain");
+        System.out.println("RANGE_CONTENTION_PASS actual_premain_retransformation ordinary_Unsafe_read_write_preserved real_GetEnv_calls="+calls+" no_supplied_controller_metadata");
+    }
     private static native boolean jniLiveTable0();
     private static int jniLiveBoundary(){return 73;}
     private static void jniLiveTable()throws Exception {
@@ -23,6 +40,7 @@ public final class AuditFixCheck {
     private static void require(boolean yes,String message) {if(!yes)throw new AssertionError(message);}
     private static Object invoke(Object receiver,String name)throws Exception {var m=receiver.getClass().getDeclaredMethod(name);m.setAccessible(true);try{return m.invoke(receiver);}catch(InvocationTargetException e){if(e.getCause() instanceof Exception x)throw x;throw e;}}
     public static void main(String[] args)throws Exception {
+        if(args.length==2&&args[0].equals("range-contention")){rangeContention(args[1]);return;}
         if(args.length==2&&args[0].equals("bootstrap-search")){bootstrapSearch(args[1]);return;}
         if(args.length==1&&args[0].equals("jni-live-table")){jniLiveTable();return;}
         if(args.length==1&&args[0].equals("platform-control-writes")){platformControlWrites();return;}

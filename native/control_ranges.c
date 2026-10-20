@@ -20,7 +20,7 @@ static int native_control_owner_links(uintptr_t first,uintptr_t last,OwnerLink *
     return 0;
 }
 static int native_control_bindings_range(uintptr_t first,uintptr_t last,int restricted){
-    if(!native_control_shared(&native_records,restricted))return -1;
+    if(!native_control_shared(&native_records,restricted))return native_range_unknown("BINDINGS_BUSY");
     int hit=0;
     for(Owner *owner=native_owners;owner&&!hit;owner=owner->next)
         hit=native_control_overlaps(first,last,owner,sizeof(*owner));
@@ -35,7 +35,7 @@ static int native_control_bindings_range(uintptr_t first,uintptr_t last,int rest
     ReleaseSRWLockShared(&native_records);return hit;
 }
 static int native_control_tooling_range(uintptr_t first,uintptr_t last,int restricted){
-    if(!native_control_shared(&native_tooling_records,restricted))return -1;
+    if(!native_control_shared(&native_tooling_records,restricted))return native_range_unknown("TOOLING_RECORDS_BUSY");
     int hit=0,unknown=0;
     NativeToolingEnv *environments=native_tooling_environments;
     for(NativeToolingEnv *record=environments;record&&!hit;record=record->next){
@@ -68,12 +68,12 @@ static int native_control_tooling_range(uintptr_t first,uintptr_t last,int restr
                 ||InterlockedCompareExchange(&record->disposed,0,0))continue;
         if(!TryAcquireSRWLockShared(&record->mutation)){
             if(!InterlockedCompareExchange(&native_tooling_shutdown,0,0)
-                    &&!InterlockedCompareExchange(&record->disposed,0,0))unknown=1;
+                    &&!InterlockedCompareExchange(&record->disposed,0,0)){unknown=1;native_range_unknown("TOOLING_ENV_BUSY");}
             continue;
         }
         if(!InterlockedCompareExchange(&native_tooling_shutdown,0,0)
                 &&!InterlockedCompareExchange(&record->disposed,0,0)){
-            if(InterlockedCompareExchange(&record->closing,0,0))unknown=1;
+            if(InterlockedCompareExchange(&record->closing,0,0)){unknown=1;native_range_unknown("TOOLING_ENV_CLOSING");}
             else hit=1;
         }
         ReleaseSRWLockShared(&record->mutation);
@@ -82,7 +82,7 @@ static int native_control_tooling_range(uintptr_t first,uintptr_t last,int restr
     return unknown?-1:0;
 }
 static int native_control_heap_range(uintptr_t first,uintptr_t last,int restricted){
-    if(!native_control_shared(&native_tooling_heap_records,restricted))return -1;
+    if(!native_control_shared(&native_tooling_heap_records,restricted))return native_range_unknown("HEAP_RECORDS_BUSY");
     int hit=0;
     for(NativeToolingHeapEnvironment *record=native_tooling_heap_environments;record&&!hit;record=record->next){
         hit=native_control_overlaps(first,last,record,sizeof(*record));
@@ -95,7 +95,7 @@ static int native_control_heap_range(uintptr_t first,uintptr_t last,int restrict
     ReleaseSRWLockShared(&native_tooling_heap_records);return hit;
 }
 static int native_control_range(uintptr_t first,uintptr_t last,int restricted){
-    if(first>last)return -1;
+    if(first>last)return native_range_unknown("ADDRESS_OVERFLOW");
     /* Re-read only retained live JNIEnv slots. This also covers a table
      * pointer changed since that thread's last JNI entry, without a VM scan. */
     int jni=native_jni_table_range(first,last,restricted);
@@ -104,7 +104,7 @@ static int native_control_range(uintptr_t first,uintptr_t last,int restricted){
     if(platform>0)return 1;
     /* Consult the same exact allocation directory used by JNI/JVMTI result
      * publication. Release its leaf lock before taking any domain lock below. */
-    if(!native_control_shared(&native_private_gate,restricted))return -1;
+    if(!native_control_shared(&native_private_gate,restricted))return native_range_unknown("PRIVATE_RANGES_BUSY");
     int privateHit=native_private_range_locked(first,last);
     ReleaseSRWLockShared(&native_private_gate);
     if(privateHit)return privateHit;
@@ -112,7 +112,7 @@ static int native_control_range(uintptr_t first,uintptr_t last,int restricted){
     uintptr_t begin=native_tooling_image_begin,end=native_tooling_image_end;
     if(image&&begin==(uintptr_t)image&&end>begin){
         if(first<end&&begin<=last)return 1;
-    }else unknown=1;
+    }else{unknown=1;native_range_unknown("CONTROL_IMAGE_UNAVAILABLE");}
     const struct JNIInvokeInterface_ *shadow=native_vm_shadow;
     if(native_control_overlaps(first,last,shadow,sizeof(*shadow)))return 1;
     if(shadow&&InterlockedCompareExchange(&native_tooling_ready,0,0)
@@ -125,4 +125,11 @@ static int native_control_range(uintptr_t first,uintptr_t last,int restricted){
     hit=native_control_heap_range(first,last,restricted);
     if(hit>0)return 1;if(hit<0)unknown=1;
     return unknown?-1:0;
+}
+static void native_range_refuse(JNIEnv *env,int restricted){
+    NativeThread *state=native_range_state();char message[192];
+    snprintf(message,sizeof(message),"NATIVE_CONTROL_RANGE_UNAVAILABLE:%s:restricted=%d:loaderQuery=%s",
+            state&&state->controlRangeFailure?state->controlRangeFailure:"UNSPECIFIED",restricted,
+            __atomic_load_n(&host_loader_callout_query,__ATOMIC_ACQUIRE)?"ready":"uninitialized");
+    native_refuse(env,message);
 }

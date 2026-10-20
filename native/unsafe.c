@@ -130,7 +130,7 @@ static int native_unsafe_begin(JNIEnv *env,NativeThread *state,Binding *binding,
                 :strcmp(kind,"Int")==0||strcmp(kind,"Float")==0?4:8;
         int restricted=host_loader_callout()||state->heapCallback||state->toolingRestricted||state->vmDetaching||state->vmThreadEnding;
         int hit=host_memory_range((void*)(uintptr_t)mutation.offset,(SIZE_T)width,0,restricted);
-        if(hit)native_refuse(env,hit>0?"NATIVE_CONTROL_MEMORY_READ_DENIED":"NATIVE_CONTROL_RANGE_UNAVAILABLE");
+        if(hit>0)native_refuse(env,"NATIVE_CONTROL_MEMORY_READ_DENIED");else if(hit<0)native_range_refuse(env,restricted);
         return !hit;
     }
     mutation.bulk=binding->unsafeOperation>=UNSAFE_SET&&binding->unsafeOperation<=UNSAFE_SWAP?JNI_TRUE:JNI_FALSE;

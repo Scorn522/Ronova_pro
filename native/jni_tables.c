@@ -201,14 +201,15 @@ static jvmtiError native_jni_publish(NativeToolingEnv *record,JNIEnv *env,const 
     state->jniSynchronizing--;InterlockedExchange(&native_jni_mutating,0);return result;
 }
 static int native_jni_table_range(uintptr_t first,uintptr_t last,int restricted){
-    if(restricted){if(!TryAcquireSRWLockShared(&native_jni_tables_gate))return -1;}
+    if(restricted){if(!TryAcquireSRWLockShared(&native_jni_tables_gate))return native_range_unknown("JNI_TABLES_BUSY");}
     else AcquireSRWLockShared(&native_jni_tables_gate);
     int hit=0,unknown=0;
     for(NativeThread *state=native_jni_threads;state&&!hit;state=state->jniNext){
         const struct JNINativeInterface_ *table=NULL;
-        if(!state->jniRange.linked||!native_jni_read(state->jniRange.address,&table,sizeof(table))||!table){unknown=1;continue;}
+        if(!state->jniRange.linked||!native_jni_read(state->jniRange.address,&table,sizeof(table))||!table){
+            unknown=1;native_range_unknown("JNI_ENV_UNREADABLE");continue;}
         uintptr_t address=(uintptr_t)table;
-        if(sizeof(*table)-1>UINTPTR_MAX-address){unknown=1;continue;}
+        if(sizeof(*table)-1>UINTPTR_MAX-address){unknown=1;native_range_unknown("JNI_TABLE_OVERFLOW");continue;}
         hit=first<=address+sizeof(*table)-1&&address<=last;
     }
     ReleaseSRWLockShared(&native_jni_tables_gate);return hit?1:unknown?-1:0;

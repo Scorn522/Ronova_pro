@@ -26,7 +26,7 @@ static int native_memory_control(JNIEnv *env,NativeThread *state,uint64_t addres
     int restricted=host_loader_callout()||(state&&(state->heapCallback||state->toolingRestricted||state->vmDetaching
             ||state->vmThreadEnding||state->hostUnloadImage||state->hostRelease||state->hostLoad&&state->hostLoad->calling));
     int hit=bytes>SIZE_MAX?-1:host_memory_range((void*)(uintptr_t)address,(SIZE_T)bytes,0,restricted);
-    if(hit)native_refuse(env,hit>0?"NATIVE_CONTROL_MEMORY_DENIED":"NATIVE_CONTROL_RANGE_UNAVAILABLE");
+    if(hit>0)native_refuse(env,"NATIVE_CONTROL_MEMORY_DENIED");else if(hit<0)native_range_refuse(env,restricted);
     return !hit;
 }
 static int native_memory_call_begin(JNIEnv *env,NativeThread *state,Binding *binding,unsigned char *frame){

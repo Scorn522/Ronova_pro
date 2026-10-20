@@ -63,6 +63,7 @@ typedef struct NativeThread {
     int storageOwned,vmAttached,javaEnded,javaCleaning;
     NativePrivateRange jniRange,jniTableRange;
     struct NativeThread *jniNext;int jniLinked;unsigned jniObserving,jniSynchronizing;
+    const char *controlRangeFailure;
 } NativeThread;
 /* Actual dynamic TLS/FLS receipts are native state contributions, independent
  * of whether this OS thread currently has a Java attachment. */
@@ -207,6 +208,18 @@ static void native_refuse(JNIEnv *env,const char *message){
     if(api->ExceptionCheck(env))return;
     jclass type=api->FindClass(env,"java/lang/IllegalStateException");
     if(type){api->ThrowNew(env,type,message);api->DeleteLocalRef(env,type);}
+}
+/* Failure-local diagnosis, never a second range directory or an admission
+ * override. Do not allocate or change LastError on restricted Host paths. */
+static NativeThread *native_range_state(void){
+    DWORD incoming=GetLastError();
+    NativeThread *state=native_tls==TLS_OUT_OF_INDEXES?NULL:(NativeThread*)TlsGetValue(native_tls);
+    SetLastError(incoming);return state;
+}
+static int native_range_unknown(const char *reason){
+    NativeThread *state=native_range_state();
+    if(state&&!state->controlRangeFailure)state->controlRangeFailure=reason;
+    return -1;
 }
 static Owner *native_owner(JNIEnv *env,jobject module){
     if(!module)return NULL;Owner *owner=native_owners;
@@ -2286,6 +2299,9 @@ static jint native_initialize(JavaVM *vm){
     if(!native_ti&&(*vm)->GetEnv(vm,(void**)&native_ti,JVMTI_VERSION_1_2)!=JNI_OK){InterlockedExchange(&native_initialization_attempted,0);return JNI_ERR;}native_vm=vm;
     if(native_tls==TLS_OUT_OF_INDEXES)native_tls=TlsAlloc();
     if(native_tls==TLS_OUT_OF_INDEXES){InterlockedExchange(&native_initialization_attempted,0);return JNI_ERR;}
+    /* Agent_OnLoad/JNI_OnLoad runs after the DLL loader callback. Initialize
+     * the actual callout query before any guarded VM/JNI entry is published. */
+    host_loader_callout_prepare();host_memory_prepare();
     jvmtiCapabilities caps;memset(&caps,0,sizeof(caps));caps.can_generate_native_method_bind_events=1;caps.can_generate_all_class_hook_events=1;caps.can_retransform_classes=1;
     if((*native_ti)->AddCapabilities(native_ti,&caps)!=JVMTI_ERROR_NONE){InterlockedExchange(&native_initialization_attempted,0);return JNI_ERR;}
     if(!native_tooling_install(vm,native_ti))return JNI_ERR;

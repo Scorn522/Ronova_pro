@@ -3,7 +3,7 @@ static jmethodID native_buffer_address_query,native_buffer_created_query;
 static int native_buffer_control(JNIEnv *env,const void *address,SIZE_T bytes){
     NativeThread *state=native_thread();int restricted=host_loader_callout()||(state&&(state->heapCallback||state->toolingRestricted));
     int hit=host_memory_range(address,bytes,0,restricted);
-    if(hit)native_refuse(env,hit>0?"NATIVE_CONTROL_BUFFER_DENIED":"NATIVE_CONTROL_RANGE_UNAVAILABLE");return !hit;
+    if(hit>0)native_refuse(env,"NATIVE_CONTROL_BUFFER_DENIED");else if(hit<0)native_range_refuse(env,restricted);return !hit;
 }
 static int native_buffer_prepare(JNIEnv *env){
     if(!native_file_bridge)return 0;

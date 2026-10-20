@@ -101,9 +101,18 @@ static HostCompareHandles host_compare_handles;
 static HostGetProcAddress host_windows_resolver;
 typedef BOOLEAN (NTAPI *HostLoaderCallout)(void);
 static HostLoaderCallout host_loader_callout_query;
-/* Resolved before publishing IAT entries. No loader or JVM query is made on
+/* Resolve before publishing JNI/JavaVM entries, not only before the later IAT
+ * installation: Unsafe reads already run during the first retransformation.
+ * No loader or JVM query is made on
  * the callout path itself. Missing platform support uses the restricted path.
  * Prototype: phnt/ntrtl.h, RtlIsThreadWithinLoaderCallout. */
+static void host_loader_callout_prepare(void){
+    if(__atomic_load_n(&host_loader_callout_query,__ATOMIC_ACQUIRE))return;
+    DWORD incoming=GetLastError();HMODULE ntdll=GetModuleHandleW(L"ntdll.dll");
+    HostLoaderCallout query=ntdll?(HostLoaderCallout)GetProcAddress(ntdll,"RtlIsThreadWithinLoaderCallout"):NULL;
+    if(query)__atomic_store_n(&host_loader_callout_query,query,__ATOMIC_RELEASE);
+    SetLastError(incoming);
+}
 static int host_loader_callout(void){
     DWORD incoming=GetLastError();
     HostLoaderCallout query=__atomic_load_n(&host_loader_callout_query,__ATOMIC_ACQUIRE);
@@ -1302,14 +1311,11 @@ static const char *host_api_names[HOST_KIND_COUNT]={NULL,
     "ZwReadVirtualMemory",
     "ZwWriteVirtualMemory"};
 static void host_windows_targets(void **targets){
-    host_memory_prepare();
+    host_memory_prepare();host_loader_callout_prepare();
     HMODULE kernel=GetModuleHandleW(L"kernel32.dll"),advapi=GetModuleHandleW(L"advapi32.dll"),ktm=GetModuleHandleW(L"KtmW32.dll");
     HostGetProcAddress resolve=__atomic_load_n(&host_windows_resolver,__ATOMIC_ACQUIRE);
     if(!resolve&&kernel){resolve=(HostGetProcAddress)GetProcAddress(kernel,"GetProcAddress");
         if(resolve)__atomic_store_n(&host_windows_resolver,resolve,__ATOMIC_RELEASE);}
-    if(resolve){HMODULE ntdll=GetModuleHandleW(L"ntdll.dll");
-        HostLoaderCallout query=ntdll?(HostLoaderCallout)resolve(ntdll,"RtlIsThreadWithinLoaderCallout"):NULL;
-        if(query)__atomic_store_n(&host_loader_callout_query,query,__ATOMIC_RELEASE);}
     if(resolve&&kernel){void *exit=(void*)resolve(kernel,"ExitThread");if(exit)__atomic_store_n(&host_exit_thread_original,exit,__ATOMIC_RELEASE);}
     for(int kind=1;kind<HOST_KIND_COUNT;kind++){
         if(host_is_crt_thread_create(kind)||host_is_nt_memory(kind)){targets[kind]=NULL;continue;}

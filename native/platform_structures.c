@@ -40,13 +40,14 @@ static size_t native_platform_env_span(jvmtiEnv *api){
     return api&&InterlockedCompareExchange(&native_platform_ready,0,0)?sizeof(NativePlatformEnv17):sizeof(*api);
 }
 static int native_platform_range(uintptr_t first,uintptr_t last,int restricted){
-    if(!native_control_shared(&native_platform_gate,restricted))return -1;
+    if(!native_control_shared(&native_platform_gate,restricted))return native_range_unknown("PLATFORM_AGENTS_BUSY");
     int hit=0,unknown=0;
     for(NativePlatformAgent *record=native_platform_agents;record&&!hit;record=record->next){
         hit=native_control_overlaps(first,last,(void*)record->address,sizeof(NativePlatformJplis));
         if(!hit){
             NativePlatformJplis image;
-            if(!code_vm_read(record->address,&image,sizeof(image))||image.vm!=native_vm){unknown=1;continue;}
+            if(!code_vm_read(record->address,&image,sizeof(image))||image.vm!=native_vm){
+                unknown=1;native_range_unknown("JPLIS_AGENT_UNREADABLE");continue;}
             hit=native_control_overlaps(first,last,image.normal.api,native_platform_env_span(image.normal.api))
                     ||native_control_overlaps(first,last,image.retransform.api,native_platform_env_span(image.retransform.api));
         }

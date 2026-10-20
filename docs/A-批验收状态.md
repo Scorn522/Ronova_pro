@@ -1,5 +1,15 @@
 # Ronova Pro 当前进度
 
+## 2026-10-20：Native 启动重变换的区间查询误拒修复
+
+接续 `9d84e02`。根因是 `RtlIsThreadWithinLoaderCallout` 的查询入口此前只在较晚的 `host_windows_targets` 初始化；第一轮平台类重变换已经启用 Unsafe 原生内存入口，空查询入口把普通线程误归为受限回调。JNI 表登记锁发生正常竞争时，受限路径的 TryAcquire 返回未知，再抛出 `NATIVE_CONTROL_RANGE_UNAVAILABLE`，最终导致重变换 ClassFormatError。
+
+现在在 `native_initialize` 发布 JavaVM/JNI 控制入口前初始化该查询及页面信息。真实加载回调／VM 受限上下文、平台查询不可用和控制区间写保护继续保留。区间查询失败增加具体目录／读取失败原因及 restricted、loaderQuery 状态，未把未知当成放行。
+
+生产统一构建通过。真实 JNI 并发对照中，仅恢复旧的晚初始化顺序即复现 `JNI_TABLES_BUSY:restricted=1:loaderQuery=uninitialized`；修复候选同一负载完成 21,248 次 GetEnv、1,024 次普通 Unsafe 原生读写，Agent 达到 INSTALLED_FULL。候选双 JAR 从中文工作／临时目录经正式 Prelaunch 交接，活动 JNI 表及尾部写保护、改槽自愈、页面权限恢复与合法非受控槽保留检查通过。
+
+双 JAR 位于 `distribution/v1.5-whole-mod`，Core 更新为 3,293,733 字节，prelaunch 内容不变。未起服、未启动 Minecraft／Forge；未运行 metadata seam 或全量矩阵。旧失败日志保留，具体证据与候选摘要见既有实际报告。
+
 ## 2026-10-20：Windows 中文路径 Bootstrap 装载修复
 
 接续 `c56fecc`，主工程继续位于 `D:\桌面\ronova_GPT`。`RecoveryAgent` 的 premain／agentmain 共用 `BootstrapSearch`：Windows 非 ASCII 绝对路径优先转换为指向同一文件的 ASCII 相对路径，并保留这个相对 `JarFile.getName()` 给 JPLIS。文件名本身包含中文或跨盘不能相对表达时，自动使用内容一致、按摘要区分的本地兼容缓存；本地路径不可用时才尝试 ASCII 临时缓存。成功的 JarFile 保持打开，失败尝试关闭；Native 接续使用实际追加的那份 payload。没有移动工程、改变游戏工作目录、修改系统代码页或放宽控制策略。

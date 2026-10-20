@@ -1,3 +1,64 @@
+#ifdef RONOVA_RANGE_CONTENTION_AGENT
+/* Real VM attachment traffic across premain, using only exported JNI/JVMTI.
+ * No production source is included and no controller directories are seeded. */
+#include <jni.h>
+#include <jvmti.h>
+#include <windows.h>
+#include <stdint.h>
+#include <stdio.h>
+#include <string.h>
+static JavaVM *audit_range_vm;
+static HANDLE audit_range_workers[4];
+static volatile LONG audit_range_stop,audit_range_failed;
+static LONG64 audit_range_calls[4];
+static DWORD WINAPI audit_range_worker(void *argument){
+    unsigned index=(unsigned)(uintptr_t)argument;JNIEnv *env=NULL;
+    if((*audit_range_vm)->AttachCurrentThreadAsDaemon(audit_range_vm,(void**)&env,NULL)!=JNI_OK||!env){
+        InterlockedExchange(&audit_range_failed,1);return 1;}
+    ULONGLONG until=GetTickCount64()+30000;
+    while(!InterlockedCompareExchange(&audit_range_stop,0,0)&&GetTickCount64()<until){
+        JNIEnv *current=NULL;
+        if((*audit_range_vm)->GetEnv(audit_range_vm,(void**)&current,JNI_VERSION_1_8)!=JNI_OK||current!=env){
+            InterlockedExchange(&audit_range_failed,1);break;}
+        audit_range_calls[index]++;
+        if(!(audit_range_calls[index]&15))Sleep(1);
+    }
+    if(!InterlockedCompareExchange(&audit_range_stop,0,0))InterlockedExchange(&audit_range_failed,1);
+    if((*audit_range_vm)->DetachCurrentThread(audit_range_vm)!=JNI_OK)InterlockedExchange(&audit_range_failed,1);
+    return 0;
+}
+static jlong JNICALL audit_range_finish(JNIEnv *env,jclass type){
+    (void)env;(void)type;InterlockedExchange(&audit_range_stop,1);
+    if(WaitForMultipleObjects(4,audit_range_workers,TRUE,5000)!=WAIT_OBJECT_0)return -1;
+    LONG64 total=0;
+    for(unsigned i=0;i<4;i++){
+        if(!audit_range_calls[i])InterlockedExchange(&audit_range_failed,1);
+        total+=audit_range_calls[i];CloseHandle(audit_range_workers[i]);audit_range_workers[i]=NULL;
+    }
+    return InterlockedCompareExchange(&audit_range_failed,0,0)?-1:total;
+}
+static void JNICALL audit_range_vm_init(jvmtiEnv *api,JNIEnv *env,jthread thread){
+    (void)api;(void)thread;
+    jclass check=(*env)->FindClass(env,"dev/ronova/pro/AuditFixCheck");
+    JNINativeMethod method={"rangeContentionFinish0","()J",(void*)audit_range_finish};
+    if(!check||(*env)->RegisterNatives(env,check,&method,1)!=JNI_OK){
+        fprintf(stderr,"RANGE_CONTENTION_REGISTRATION_FAILED\n");return;}
+    (*env)->DeleteLocalRef(env,check);
+    for(unsigned i=0;i<4;i++){
+        audit_range_workers[i]=CreateThread(NULL,0,audit_range_worker,(void*)(uintptr_t)i,0,NULL);
+        if(!audit_range_workers[i])InterlockedExchange(&audit_range_failed,1);
+    }
+    fprintf(stderr,"RANGE_CONTENTION_REAL_VM_WORKERS_STARTED\n");
+}
+JNIEXPORT jint JNICALL Agent_OnLoad(JavaVM *vm,char *options,void *reserved){
+    (void)options;(void)reserved;jvmtiEnv *api=NULL;audit_range_vm=vm;
+    if((*vm)->GetEnv(vm,(void**)&api,JVMTI_VERSION_1_2)!=JNI_OK||!api)return JNI_ERR;
+    jvmtiEventCallbacks callbacks;memset(&callbacks,0,sizeof(callbacks));callbacks.VMInit=audit_range_vm_init;
+    if((*api)->SetEventCallbacks(api,&callbacks,sizeof(callbacks))!=JVMTI_ERROR_NONE
+            ||(*api)->SetEventNotificationMode(api,JVMTI_ENABLE,JVMTI_EVENT_VM_INIT,NULL)!=JVMTI_ERROR_NONE)return JNI_ERR;
+    return JNI_OK;
+}
+#else
 /* Companion to AuditFixCheck. Exercise production Host code against this
  * fixture DLL's real import table and real Windows children. The source/image
  * registration is fixture-owned; this does not certify game library discovery. */
@@ -1736,3 +1797,4 @@ custom_done:
     return failure?JNI_FALSE:JNI_TRUE;
 }
 #endif /* !RONOVA_LIVE_JNI_ONLY */
+#endif /* !RONOVA_RANGE_CONTENTION_AGENT */

@@ -1,5 +1,30 @@
 # B 批实际报告：2026-10-09 代码收敛接续
 
+## 2026-10-20：NATIVE_CONTROL_RANGE_UNAVAILABLE 因果定位与修复
+
+接续 `9d84e02`。保留此前 `direct-complete.stderr.log` 的 DatagramChannelImpl 失败。旧调用顺序为：Native initialize0 装入 Unsafe 拦截 → RecoveryAgent 第一轮 retransformStartup → libraryBoundaryInstalled/processBoundaryInstalled → host_windows_targets 才解析 `RtlIsThreadWithinLoaderCallout`。未解析时 `host_loader_callout()` 保守返回 true，把普通查询送入受限 TryAcquire 分支；真实 JNI 目录竞争因此变成重变换异常。
+
+修复在 `native_initialize` 发布 VM/JNI 入口前解析实际 Windows 查询并初始化页面参数，较晚的 Host 安装复用同一初始化。真实受限上下文仍不等待锁，未解析／无法读取仍拒绝；JNI、JPLIS/JvmtiEnv、控制分配与 Host 目录保护不减少。异常保留原前缀，并补上实际失败目录、restricted 和 loaderQuery 状态。
+
+完整生产代码写齐后，`jar` / `reobfJar` / `compileStateChecksJava` 一次统一构建通过，40 秒、退出 0。只有已有 Native 常量比较及 Java deprecated/unchecked 警告。检查复用 AuditFixCheck/AuditFixNative；新 `RONOVA_RANGE_CONTENTION_AGENT` 分支仅使用实际 JNI/JVMTI/Windows API，不包含生产后端副本，不注入 Owner、ready 或目录元数据。
+
+| 检查 | 结果 |
+| --- | --- |
+| 旧顺序因果对照 | 本地对照 DLL 保留相同诊断和生产源码，仅撤回新增的早期初始化调用；Bootstrap 内嵌对应 DLL，加载真实 Agent。四条实际 attach/GetEnv 工作线程运行时，首次检查即在 java/net/Socket 重变换中复现 `NATIVE_CONTROL_RANGE_UNAVAILABLE:JNI_TABLES_BUSY:restricted=1:loaderQuery=uninitialized`，退出 1。它复现同一故障机制，不据此倒推旧日志未记录的具体目录。 |
+| 修复候选相同负载 | 真实 GetEnv 21,248 次，普通分配内存的 Unsafe 写／读 1,024 次；Bootstrap 原 payload 一致、Native 可用、INSTALLED_FULL，退出 0。对照和候选各运行一次，没有以反复重跑代替修复。 |
+| 候选双 JAR 中文 Prelaunch 与保护 | 中文工作目录及含空格的中文临时目录，正式解包和参数交接后自动 LOCAL_CACHE 追加；实际活动 JNI 表、尾部 VirtualProtect/WriteProcessMemory 拒绝、GetMethodID/GetFieldID 改槽后的恢复与 SetJNIFunctionTable 发布、只读页权限恢复和合法 GetVersion 保留全部通过，退出 0。 |
+
+日志保留于 `.work/v1.5-native-range-20261020`：`build.log`、`late-init-compile.log`、`check-native-compile.log`、`late-init.stdout.log`／`stderr.log`、`fixed.stdout.log`／`stderr.log`、`prelaunch-protection.stdout.log`／`stderr.log`。对照 DLL/Bootstrap 仅存在本地工作目录，不进入发行候选。Prelaunch 的通用 `RONOVA_GAME_PID` 文案在此次指向 AuditFixCheck 独立检查进程；没有启动游戏主类或服务端。
+
+当前候选 Java105 / Native99 / Storage3 / Journal7：
+
+| 候选 | 字节 | SHA-256 |
+| --- | ---: | --- |
+| `ronova-pro-core-1.5.0-dev.jar` | 3293733 | `ae6b6e17edb25a224e8d506ab3390fd0dc597731e82cc745bce3bd6477f0e2eb` |
+| `ronova-pro-prelaunch.jar` | 51042 | `0b32b1e0d08e7af35afe97335d0b9d688c5c7d661913ce77e965901d6856503f` |
+
+未起服、未启动 Minecraft／Forge、未运行 metadata seam／SYS 检查，不将这些局部结果提升为游戏内整 Mod 攻防或保存重启验收。
+
 ## 2026-10-20：中文路径 Bootstrap 装载与 Prelaunch 交接
 
 接续 `c56fecc`，只修复中文路径装载，不修改 Native 控制策略。系统 ACP 当前为 65001，当前文化 ANSI 代码页为 936；OpenJDK 17 的 [JPLIS Windows 路径转换](https://github.com/openjdk/jdk17u/blob/master/src/java.instrument/windows/native/libinstrument/EncodingSupport_md.c) 按用户区域选择代码页，[appendToClassLoaderSearch](https://github.com/openjdk/jdk17u/blob/master/src/java.instrument/share/native/libinstrument/JPLISAgent.c) 将转换结果交给 VM。因此原始中文绝对路径在此环境不能直接可靠追加。
