@@ -1,5 +1,11 @@
 # Ronova Pro 当前进度
 
+## 2026-10-20：PCL2 启动前交接配置
+
+接续 `8170395`。Prelaunch 新增 `--prepare-args`，复用现有载荷提取、Mod 文件扫描、保存选集与 Native/JVM 参数准备，原子生成 Java 参数文件后直接返回。PCL2 同步执行准备脚本后，仍自行启动原 Forge 主类；账号、游戏、内存及其他 JVM 参数保留。生成文件不保存登录参数，准备失败会移除旧文件。
+
+本地 `D:\MC\.minecraft\versions\1.20.1-Forge_47.4.23` 已配置，保留其指定的 Java 17，更新 Core 并将 Prelaunch 移出 mods；原配置与旧 JAR 留在实例内备份目录。正式配置前正常关闭了 PCL2。最终打包通过（21 秒），实际准备脚本成功生成 11 项 JVM 参数，原主类／游戏参数／JVM 参数读回一致。只运行参数准备，没有启动游戏、Forge 或 Native 攻防检查。
+
 ## 2026-10-20：注解缓存 CAS 回归与 JNI 非受控槽退场修复
 
 接续 `88986aa`。`Class.reflectionData`、`annotationData`、`annotationType` 的合法 CAS 分别按真实实例字段类型、Bootstrap 声明类、方法描述符和相邻调用帧放行；AnnotationType 路径包含实际 JDK 17 `System$2` 转交帧。受控／已停类和在途已停调用中的 JDK 缓存维护也能完成，避免 CAS 永假导致注解查询自旋。外部 Class 非静态字段的 Unsafe、反射与句柄写继续拒绝；AnnotationData、AnnotationType 内部字段纳入平台结构保护，setter 字段定位改用原始 VM 声明。

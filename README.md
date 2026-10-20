@@ -56,6 +56,8 @@ java -jar ronova-pro-prelaunch.jar --java <游戏java.exe> --core <当前core.ja
 
 在支持的 HotSpot JDK17 中，prelaunch 为新游戏 JVM 禁用对应 Unsafe 写入及 `System.arraycopy` 编译器内联，使其回到 Java／Native 写入守卫；用户原有的禁用清单继续累积。直接加载 Mod 的晚挂载方式不具备这项启动期约束，也不能据此声称已接管旧运行帧或任意原生机器指令写入。
 
+PCL2 可使用 `--prepare-args <文件>`：仅准备载荷、保存的 Mod 选集和 JVM 参数文件，随后返回，由 PCL2 自己启动原 Forge 主类。将 prelaunch JAR 和 [准备脚本](src/prelaunch/prepare-pcl.ps1)（复制为 `prepare.ps1`）放到实例的 `ronova-launch` 目录；实例指定 Java 17，启动前命令等待脚本结束，版本 JSON 的 JVM 参数首项加入 `@<实例绝对路径>/ronova-launch/ronova-jvm.args`。原有游戏参数、账号参数和 JVM 参数保持不变，Core 仍放在 `mods`。脚本先移除旧生成文件，准备成功后才原子发布新文件，避免准备失败时继续消费过期参数。此模式不会创建游戏进程。
+
 ## 升级、更换与卸载交接
 
 先用 `/ronova_pro mod retire <modid[,modid...]>` 沿原整组停用入口封住新效力，再正常关闭游戏。`mod status` 分别显示任务、资源、保存和持久意图；退役请求获受理不代表这些工作已经完成，也不代表运行中的 Mod 已卸载。

@@ -32,11 +32,12 @@ public final class PrelaunchMain {
         Path working=Path.of(System.getProperty("user.dir")).toAbsolutePath().normalize();
         Path java=Path.of(ProcessHandle.current().info().command().orElseThrow(()->new IOException("GAME_JAVA_UNKNOWN"))).toAbsolutePath().normalize();
         Path core=Path.of(PrelaunchMain.class.getProtectionDomain().getCodeSource().getLocation().toURI()).toAbsolutePath().normalize();
-        int first=0;Map<String,String> handoffs=new TreeMap<>();String handoffWorld=null;
+        int first=0;Map<String,String> handoffs=new TreeMap<>();String handoffWorld=null;Path preparedArguments=null;
         while(first<arguments.length&&(arguments[first].equals("--java")||arguments[first].equals("--core")
-                ||arguments[first].equals("--handoff-world")||arguments[first].startsWith("--handoff-"))){
+                ||arguments[first].equals("--prepare-args")||arguments[first].equals("--handoff-world")||arguments[first].startsWith("--handoff-"))){
             String option=arguments[first++];if(first==arguments.length)throw new IllegalArgumentException("MISSING_PRELAUNCH_OPTION:"+option);
             String value=arguments[first++];
+            if(option.equals("--prepare-args")){preparedArguments=working.resolve(value).toAbsolutePath().normalize();continue;}
             if(option.equals("--handoff-world")){handoffWorld=value;continue;}
             if(option.startsWith("--handoff-")){
                 String action=option.substring("--handoff-".length());if(!Set.of("upgrade","replace","uninstall").contains(action))throw new IllegalArgumentException("UNKNOWN_HANDOFF_ACTION:"+action);
@@ -44,6 +45,9 @@ public final class PrelaunchMain {
             }
             Path supplied=working.resolve(value).toAbsolutePath().normalize();if(option.equals("--java"))java=supplied;else core=supplied;
         }
+        // PCL's synchronous before-launch hook consumes only the generated VM
+        // options. Invalidate any earlier file before preparation can fail.
+        if(preparedArguments!=null)Files.deleteIfExists(preparedArguments);
         List<String> game=new ArrayList<>(Arrays.asList(arguments).subList(first,arguments.length));
         if(game.isEmpty()){
             Path saved=working.resolve("ronova-launch.args");
@@ -119,6 +123,22 @@ public final class PrelaunchMain {
         if(nativeControl!=null){command.add("-Dronova.pro.control.native="+nativeControl);command.add("-agentpath:"+nativeControl);}
         if(nativeStorage!=null)command.add("-Dronova.pro.storage.native="+nativeStorage);
         command.add("-javaagent:"+agent+"=base64:"+encoded);
+        if(preparedArguments!=null){
+            Files.createDirectories(preparedArguments.getParent());
+            List<String> lines=new ArrayList<>();
+            for(String argument:command.subList(1,command.size())){
+                lines.add("\""+argument.replace("\\","\\\\").replace("\"","\\\"")
+                        .replace("\r","\\r").replace("\n","\\n").replace("\t","\\t").replace("\f","\\f")+"\"");
+            }
+            Path pending=Files.createTempFile(preparedArguments.getParent(),"ronova-jvm-",".tmp");
+            try{
+                Files.write(pending,lines,StandardCharsets.UTF_8);
+                try{Files.move(pending,preparedArguments,StandardCopyOption.ATOMIC_MOVE,StandardCopyOption.REPLACE_EXISTING);}
+                catch(java.nio.file.AtomicMoveNotSupportedException unsupported){Files.move(pending,preparedArguments,StandardCopyOption.REPLACE_EXISTING);}
+            }finally{Files.deleteIfExists(pending);}
+            System.out.println("RONOVA_PRELAUNCH_ARGUMENTS_READY:"+preparedArguments);
+            return; // No child JVM and no game main in preparation-only mode.
+        }
         command.addAll(game);
         // The child premain publishes its actual ready/partial/failed state. This process has only prepared
         // payloads and launch arguments; individual controls decide whether their actual backend is usable.

@@ -1,5 +1,20 @@
 # B 批实际报告：2026-10-09 代码收敛接续
 
+## 2026-10-20：PCL2 仅准备参数的启动交接
+
+接续 `8170395`。使用 PCL2 正式版 2.99.0.0 的实际实例 `1.20.1-Forge_47.4.23`，继续指定其 Java 17.0.15。依据 [PCL 启动实现](https://github.com/Meloong-Git/PCL/blob/main/Plain%20Craft%20Launcher%202/Modules/Minecraft/ModLaunch.vb)，实例启动前命令启用等待，JVM 参数首项加入新生成的 `@ronova-jvm.args` 绝对路径；原主类 `cpw.mods.bootstraplauncher.BootstrapLauncher`、原游戏参数与原 JVM 参数均未替换。
+
+最终实现为 Prelaunch `--prepare-args` 与 `src/prelaunch/prepare-pcl.ps1`：只输出 Ronova JVM 选项，不生成账号参数回放脚本，不创建子游戏进程。PCL 忽略启动前命令退出码，因此脚本在准备前移除旧参数文件；Java 端写临时文件后原子发布，避免失败后继续用旧文件或半份配置。
+
+本地配置已备份，Core 更新到 mods，Prelaunch 和脚本位于实例 `ronova-launch`。PCL 当时正在运行，首次配置在任何写入前停止；随后正常关闭启动器后完成配置，没有强制结束进程或启动游戏。备份：`D:\MC\.minecraft\versions\1.20.1-Forge_47.4.23\ronova-launch\backup-20261020-8bcfc097`。
+
+最终 `jar` / `reobfJar` 构建通过（21 秒）；实际 Windows PowerShell 准备脚本退出 0，输出 `RONOVA_PRELAUNCH_ARGUMENTS_READY`，生成 11 项选项，含早期 Native agent、Java agent、保存选集及内联约束。配置读回确认原参数保持、等待启用、PCL 选中正确实例、Prelaunch 不再位于 mods。没有执行生成的游戏启动命令，未取得本候选游戏启动结果。工作资料位于 `.work/pcl2-setup-20261020`；此前未部署的主类适配方案已删除，最终产物不含该入口。
+
+| 候选 | 字节 | SHA-256 |
+| --- | ---: | --- |
+| `ronova-pro-core-1.5.0-dev.jar` | 3296753 | `e41232f2fdfae97758efa96600efcc7680a333687a7ef56e201fd55d5a55eaa6` |
+| `ronova-pro-prelaunch.jar` | 51556 | `d6bfc76997b1a115346a1cb16fa9feb2767595d0d0a419de5c944bce1016c6ab` |
+
 ## 2026-10-20：注解缓存自旋与非受控 JNI 槽位回归
 
 接续 `88986aa`。生产修复：
