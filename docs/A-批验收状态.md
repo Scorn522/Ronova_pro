@@ -1,5 +1,15 @@
 # Ronova Pro 当前进度
 
+## 2026-10-20：PCL 扫描卡顿与 Native 来源读锁误判
+
+接续 `dbed510`。12:21:03 报告与现场线程栈一致：早期扫描仍在推进，但普通 Unsafe 原子操作也创建堆写入回执、采集随后被丢弃的 Native 来源数组，原生写入结束还反复解析 Unsafe 声明类。随后 playerAnimator 的正常类文件解压因 `declaring_owner_busy` 被拒绝，Mixin 初始化失败；已保存现场并结束该失败进程。
+
+普通堆写入现在继续执行实时权限判断，只有实际受控／保护／停组目标、相关来源发布等情况才持有写入回执；未知 Unsafe 偏移额外检查父类的模块与来源字段，裸地址和涉及裸地址的复制仍保留来源采集及控制区检查。两种真实 Unsafe Class 身份按加载器解析后复用。Native 已发布的模块 Owner 使用不可变链原子发布，读取已有记录不再抢写锁，不等待被暂停的写线程，不把未知来源改成放行。
+
+最终构建通过（41 秒）。使用 PCL 相同 Java 17 与全部原写入拦截 JVM 参数，实际命名 Mod JAR 的四线程原子／锁／原生 ZIP／直接缓冲区操作通过；JDK 三条缓存 CAS、重变换后缓存重建、外部缓存投毒拒绝、JNI 控制表保护及停组后写入拒绝通过。换回旧候选运行完全相同检查，准确复现 `Inflater.inflateBytesBytes → declaring_owner_busy`，退出 1；新候选退出 0。此检查不代表实际游戏启动速度或进入世界验收。
+
+候选双 JAR 更新到原 PCL 实例，并仅重新准备启动参数。没有重开游戏／Forge。报告中另有超级史蒂夫 `public-f net.minecraft.world.item.ItemStack *` 与 Forge 私有字段重定向要求冲突的日志，未修改第三方 Mod；完整组合进入主菜单仍待实际重试。
+
 ## 2026-10-20：LWJGL JNI 线程环境初始化接线
 
 接续 `dcc98db`。11:38:50 报告为 `lwjgl.dll+0x20524` 写空地址 `0x1c`，上层为 `WinBase.nGetModuleHandle → WindowsLibrary.<clinit>`；对应原生代码在 JNI 取得线程数据后未检查空返回。`ThreadLocalUtil` 此前进入通用来源织入，同时其 JNI 元数据访问与控制区读保护存在冲突。旧候选的独立对照先在该类织入时失败，未将该结果冒充同一原生 PC 的复现。

@@ -1063,7 +1063,12 @@ static int code_frame_sources_checked(JNIEnv *env,jmethodID method,jlocation loc
     if(error!=JVMTI_ERROR_NONE||!declaring)return code_failed(failure,"declaring_class",error);
     module=native_original.GetModule(env,declaring);
     if(module){
-        if(TryAcquireSRWLockExclusive(&native_records)){Owner *owner=native_owner(env,module);
+        // Reading an already registered physical module does not publish
+        // anything. Its immutable record remains readable while another
+        // thread holds the writer lock (including a suspended writer).
+        Owner *published=native_owner_published(env,module);
+        if(published)ready=native_owner_add(owners,published);
+        else if(TryAcquireSRWLockExclusive(&native_records)){Owner *owner=native_owner(env,module);
             ready=owner&&native_owner_add(owners,owner);ReleaseSRWLockExclusive(&native_records);
         }else {if(unknown)*unknown=1;code_failed(failure,"declaring_owner_busy",JVMTI_ERROR_NONE);}
         native_original.DeleteLocalRef(env,module);

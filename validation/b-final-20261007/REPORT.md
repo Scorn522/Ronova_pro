@@ -2409,3 +2409,15 @@ Windows Process 原资源处置已写入源码：真实 ProcessImpl 构造、原
 本轮实际检查：Java 17 对 3 个修改后的生产文件及 2 个既有夹具文件进行了纯语法解析，5 个文件、0 个语法错误。没有进行依赖解析、类型检查、完整 Forge 构建或实机运行，不能视为编译／攻防通过。GitHub 未同步。
 
 远端接续限制：已读取 Scorn522/Ronova_pro 的 main；ProRuntime.java、RecoveryTasks.java、RecoveryStorage.java 均不同于本轮上传 fast-exec 输入。此修订只基于上传包，未覆盖不同的远端主线，也未把候选源码提升为远端当前基线。远端同步须先对当前主线合流。
+# 2026-10-20：PCL 扫描与来源锁回归修复
+
+本轮证据：用户的 `错误报告-2026-10-20_12.21.03.zip`，以及 `.work/pcl-scan-20261020` 中保留的两份真实游戏线程采样和日志。游戏并非固定栈自旋：12:13 已进入 forgeclient，12:18 在 playerAnimator 的类文件解压触发 `EXTERNAL_NATIVE_CALL_SOURCE_UNOBSERVED:...stage=declaring_owner_busy`。已结束失败进程，没有另行启动游戏。
+
+- 生产修复：堆 Unsafe 写入不再采集未消费的 Native 来源数组；未命中受控范围的对象继续实时权限检查，但跳过锁／回执；包含继承字段来源的检查，真实 Unsafe 声明类只解析一次。已有原生模块记录按不可变链原子发布，查询已有 Owner 不需争抢发布写锁。
+- 最终构建：`jar compileStateChecksJava` 成功，41 秒；原有 `host_completion_port.c` ULONG 比较警告仍在，未扩展修改范围。
+- 最终真实小检查：PCL Java 17、相同 DisableIntrinsic 参数、实际 premain／Native 与命名 Mod JAR。四线程运行真实原子操作、锁、Deflater／Inflater 和直接缓冲区写入；同时检查三个合法 JDK 缓存 CAS、重变换、缓存投毒拒绝、JNI 表视图拒绝、真实停组后缓冲区写入拒绝。`STARTUP_MEMORY_PASS`，操作段 341 ms，进程退出 0（含安装总计 18.465 秒）。
+- 修复前对照：同样参数和检查，使用 PCL 原先部署的 Agent／Bootstrap／Native，真实 `Inflater.inflateBytesBytes` 准确复现 `declaring_owner_busy`，退出 1。旧包未完成操作段，因此不计算启动加速倍数。
+- 中间检查记录保留：首次使用的旧辅助 DLL 缺少 JNI 检查符号，后改用已有正确版本；停组后的预期行为既可返回终结值，也可在实际写边界拒绝，断言修正为接受已观察到的 `RONOVA_TERMINAL_BUFFER_IO`，生产保护未因此放宽。
+
+新双 JAR 替换原 PCL 候选，旧包备份并重建参数；没有运行 Forge／Minecraft、世界或保存重启检查。另记录超级史蒂夫 ItemStack 全字段访问变换与 Forge 私有字段重定向的冲突日志，未修改第三方包。原有世界／跨重启验收边界不因本次通过而提升。
+

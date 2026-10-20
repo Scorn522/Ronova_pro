@@ -221,10 +221,17 @@ static int native_range_unknown(const char *reason){
     if(state&&!state->controlRangeFailure)state->controlRangeFailure=reason;
     return -1;
 }
-static Owner *native_owner(JNIEnv *env,jobject module){
-    if(!module)return NULL;Owner *owner=native_owners;
+static Owner *native_owner_published(JNIEnv *env,jobject module){
+    if(!module)return NULL;
+    // Owner records and their links live for the process lifetime. Module and
+    // next are initialized before publication; live policy flags stay atomic.
+    Owner *owner=(Owner*)InterlockedCompareExchangePointer((void *volatile*)&native_owners,NULL,NULL);
     while(owner&&!native_original.IsSameObject(env,owner->module,module))owner=owner->next;
-    if(!owner){owner=(Owner*)calloc(1,sizeof(*owner));if(owner){owner->module=native_original.NewWeakGlobalRef(env,module);if(!owner->module){free(owner);return NULL;}owner->next=native_owners;native_owners=owner;}}
+    return owner;
+}
+static Owner *native_owner(JNIEnv *env,jobject module){
+    if(!module)return NULL;Owner *owner=native_owner_published(env,module);
+    if(!owner){owner=(Owner*)calloc(1,sizeof(*owner));if(owner){owner->module=native_original.NewWeakGlobalRef(env,module);if(!owner->module){free(owner);return NULL;}owner->next=native_owners;InterlockedExchangePointer((void *volatile*)&native_owners,owner);}}
     return owner;
 }
 static void native_owner_links_free(OwnerLink *head){while(head){OwnerLink *next=head->next;free(head);head=next;}}

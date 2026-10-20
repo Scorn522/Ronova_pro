@@ -67,6 +67,7 @@ public final class AuditFixCheck {
         if(args.length==1&&args[0].equals("lwjgl-buffer-startup")){lwjglBufferStartup();return;}
         if(args.length==1&&args[0].equals("platform-control-writes")){platformControlWrites();return;}
         if(args.length==1&&args[0].equals("installed-platform-writes")){installedPlatformWrites();return;}
+        if(args.length==1&&args[0].equals("startup-memory")){startupMemory();return;}
         if(args.length==1&&args[0].equals("known-container-cleanup")){knownContainerCleanup();return;}
         if(args.length==2&&args[0].equals("core-native-state")){coreNativeState(args[1]);return;}
         if(args.length==1&&args[0].equals("core-native-bytes")){
@@ -2548,6 +2549,43 @@ public final class AuditFixCheck {
         try{MethodHandles.lookup().unreflectSetter(field).invokeWithArguments(receiver,proposed);}
         catch(Throwable failure){throw new AssertionError("guarded setter invocation failed: "+field,failure);}
         require(U.getObject(receiver,offset)==before,"actual MethodHandle setter poisoned "+field);
+    }
+    private static void startupMemory()throws Exception{
+        installedPlatformWrites();
+        var archive=java.nio.file.Path.of(System.getProperty("ronova.pro.audit.modJar")).toAbsolutePath();
+        var finder=java.lang.module.ModuleFinder.of(archive);
+        var configuration=ModuleLayer.boot().configuration().resolve(finder,java.lang.module.ModuleFinder.of(),Set.of("audit.jni.retirement"));
+        var layer=ModuleLayer.boot().defineModulesWithOneLoader(configuration,ClassLoader.getSystemClassLoader());
+        Module module=layer.findModule("audit.jni.retirement").orElseThrow();
+        Class<?> target=Class.forName("audit.jni.retirement.HookTarget",true,layer.findLoader(module.getName()));
+        Method work=target.getMethod("startupRoundtrip");
+        var failure=new java.util.concurrent.atomic.AtomicReference<Throwable>();
+        var start=new java.util.concurrent.CountDownLatch(1);
+        Thread[] workers=new Thread[4];long before=System.nanoTime();
+        for(int i=0;i<workers.length;i++){
+            workers[i]=new Thread(()->{
+                try{start.await();require(Integer.valueOf(16).equals(work.invoke(null)),"ordinary Mod startup work refused");}
+                catch(Throwable problem){failure.compareAndSet(null,problem);}
+            },"audit-startup-"+i);
+            workers[i].start();
+        }
+        start.countDown();for(Thread worker:workers)worker.join();
+        if(failure.get()!=null)throw new AssertionError("real concurrent Mod/JDK startup calls failed",failure.get());
+        long elapsed=(System.nanoTime()-before)/1_000_000;
+        System.load(java.nio.file.Path.of(System.getProperty("ronova.pro.audit.native")).toAbsolutePath().toString());
+        try{jniBufferControlView0(false);throw new AssertionError("live JNI control table was exposed");}
+        catch(IllegalStateException denied){require("NATIVE_CONTROL_BUFFER_DENIED".equals(denied.getMessage()),"unexpected control-table refusal: "+denied);}
+        Class<?> boundary=Class.forName("dev.ronova.pro.agent.ModGroupBoundary");
+        Method prepare=boundary.getDeclaredMethod("prepare",java.lang.instrument.Instrumentation.class,String[].class,Module[].class,String.class);
+        prepare.setAccessible(true);
+        require("READY".equals(prepare.invoke(null,actualInstrumentation(),new String[]{"audit_jni_retire"},new Module[]{module},"default")),
+                "actual Mod stop publication failed");
+        try{require(Integer.valueOf(0).equals(work.invoke(null)),"stopped Mod continued native startup work");}
+        catch(InvocationTargetException denied){
+            require(denied.getCause() instanceof IllegalStateException
+                    &&"RONOVA_TERMINAL_BUFFER_IO".equals(denied.getCause().getMessage()),"unexpected stopped-Mod refusal: "+denied.getCause());
+        }
+        System.out.println("STARTUP_MEMORY_PASS real_Mod concurrent_atomics_locks_native_zip_direct_buffer protected_Class_caches_and_JNI_table stopped_Mod_refused work_ms="+elapsed);
     }
     private static void installedPlatformWrites()throws Exception{
         require(Boolean.TRUE.equals(Class.forName("dev.ronova.pro.bootstrap.NativeControl",false,null).getMethod("available").invoke(null)),

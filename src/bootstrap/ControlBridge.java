@@ -1910,6 +1910,12 @@ public final class ControlBridge {
         // actual write policy before admitting it; avoid collecting sources
         // merely to discard them inside unsafeReceipt.
         if(CodeSourceBridge.fieldGateMetadata(receiver))return (bulk?unsafeMemoryAllowed(receiver,offset,bytes):fieldGateMutationAllowed())?null:Boolean.FALSE;
+        if(!unsafeMutationReceiptRequired(receiver)){
+            if(!(bulk?unsafeMemoryAllowed(receiver,offset,bytes):unsafeWriteAllowed(receiver,offset,proposed,kind)))return Boolean.FALSE;
+            // As with PUTFIELD, a newly selected target/publication still takes
+            // its gate. Do not retain a negative ownership or permission result.
+            if(!unsafeMutationReceiptRequired(receiver))return null;
+        }
         Object token=unsafeReceipt(receiver,offset,bytes,NO_SOURCES,!bulk&&referenceKind(kind));
         try{
             if(bulk?unsafeMemoryAllowed(receiver,offset,bytes):unsafeWriteAllowed(receiver,offset,proposed,kind))
@@ -1927,15 +1933,20 @@ public final class ControlBridge {
     }
     static Object beginExecutedUnsafeMutation(Object accessor,Object receiver,long offset,long length,Object proposed,Object source,long sourceOffset,String owner,String operation,String kind,boolean bulk,Module[] contributors){
         if(WALKER.getCallerClass()!=CodeSourceBridge.class)throw new SecurityException("ACTUAL_EXECUTED_UNSAFE_MUTATION_REQUIRED");
-        Objects.requireNonNull(accessor);Class<?> actual;
-        try{
-            actual=switch(owner){case "sun/misc/Unsafe"->Class.forName("sun.misc.Unsafe",false,ClassLoader.getPlatformClassLoader());case "jdk/internal/misc/Unsafe"->Class.forName("jdk.internal.misc.Unsafe",false,null);default->throw new SecurityException("ACTUAL_UNSAFE_DECLARATION_REQUIRED");};
-        }catch(ClassNotFoundException unavailable){throw new IllegalStateException("ACTUAL_UNSAFE_WRITE_UNAVAILABLE",unavailable);}
+        Objects.requireNonNull(accessor);Class<?> actual=switch(owner){
+            case "sun/misc/Unsafe"->UnsafeWriters.LEGACY;
+            case "jdk/internal/misc/Unsafe"->UnsafeWriters.INTERNAL;
+            default->throw new SecurityException("ACTUAL_UNSAFE_DECLARATION_REQUIRED");
+        };
         if(accessor.getClass()!=actual)throw new SecurityException("ACTUAL_UNSAFE_RECEIVER_REQUIRED");
         long bytes=bulk?length:ResourceBridge.unsafeWidth(kind);
         if(operation.equals("copyMemory")||operation.equals("copySwapMemory"))return copyReceipt(source,sourceOffset,receiver,offset,bytes,source==null||receiver==null?mutationSources(contributors):NO_SOURCES);
         if(operation.startsWith("get")&&!operation.startsWith("getAnd"))return readReceipt(receiver,offset,bytes,receiver==null?mutationSources(contributors):null);
         if(receiver==null)return (bulk?unsafeMemoryAllowed(null,offset,bytes):BackingBridge.nativeWriteAllowed(null,offset,proposed,operation,kind))?rawReceipt(offset,bytes,mutationSources(contributors)):Boolean.FALSE;
+        if(!unsafeMutationReceiptRequired(receiver)){
+            if(!(bulk?unsafeMemoryAllowed(receiver,offset,bytes):BackingBridge.nativeWriteAllowed(receiver,offset,proposed,operation,kind)))return Boolean.FALSE;
+            if(!unsafeMutationReceiptRequired(receiver))return null;
+        }
         Object token=unsafeReceipt(receiver,offset,bytes,NO_SOURCES,!bulk&&referenceKind(kind));
         try{
             if(bulk?unsafeMemoryAllowed(receiver,offset,bytes):BackingBridge.nativeWriteAllowed(receiver,offset,proposed,operation,kind))
@@ -1954,12 +1965,29 @@ public final class ControlBridge {
         java.util.concurrent.locks.ReentrantLock gate=fieldGate(target);gate.lock();
         return memoryReceipt(gate,target);
     }
+    static final class UnsafeWriters {
+        static final Class<?> LEGACY=resolve("sun.misc.Unsafe",ClassLoader.getPlatformClassLoader());
+        static final Class<?> INTERNAL=resolve("jdk.internal.misc.Unsafe",null);
+        private static Class<?> resolve(String name,ClassLoader loader){
+            try{return Class.forName(name,false,loader);}
+            catch(ClassNotFoundException unavailable){throw new ExceptionInInitializerError(unavailable);}
+        }
+        static boolean contains(Class<?> type){return type==LEGACY||type==INTERNAL;}
+    }
     static void requireUnsafeWriter(){
-        Class<?> caller,actual,internal;
-        caller=actualMemoryCaller();
-        try{actual=Class.forName("sun.misc.Unsafe",false,ClassLoader.getPlatformClassLoader());internal=Class.forName("jdk.internal.misc.Unsafe",false,null);}
-        catch(ClassNotFoundException unavailable){throw new IllegalStateException("ACTUAL_UNSAFE_WRITE_UNAVAILABLE",unavailable);}
-        if(caller!=actual&&caller!=internal)throw new SecurityException("ACTUAL_UNSAFE_WRITE_REQUIRED");
+        if(!UnsafeWriters.contains(actualMemoryCaller()))throw new SecurityException("ACTUAL_UNSAFE_WRITE_REQUIRED");
+    }
+    private static boolean unsafeMutationReceiptRequired(Object receiver){
+        Class<?> type=receiver instanceof Class<?> mirror?mirror:receiver.getClass();
+        if(fieldMutationReceiptRequired(receiver,type))return true;
+        // Unlike PUTFIELD, an Unsafe offset supplies no declaring class. An
+        // inherited protected/source field must keep its gate even if the
+        // concrete receiver belongs to an unrelated module.
+        for(Class<?> parent=type.getSuperclass();parent!=null;parent=parent.getSuperclass()){
+            Module module=DefinitionBridge.module(parent);
+            if(modProtected(module)||modStopped(module)||ownState(parent)||CodeSourceBridge.fieldMutationTracked(parent))return true;
+        }
+        return false;
     }
     static Object unsafeReceipt(Object receiver,long offset,long length){
         if(NativeControl.unsafeControlScope()||CodeSourceBridge.fieldGateMetadata(receiver))return null;
@@ -1971,7 +1999,7 @@ public final class ControlBridge {
     static boolean referenceKind(String kind){return "Object".equals(kind)||"Reference".equals(kind);}
     static Object unsafeReceipt(Object receiver,long offset,long length,Module[] contributors,boolean reference){
         if(receiver==null)return rawReceipt(offset,length,contributors);
-        if(CodeSourceBridge.fieldGateMetadata(receiver))return null;
+        if(CodeSourceBridge.fieldGateMetadata(receiver)||!unsafeMutationReceiptRequired(receiver))return null;
         java.util.concurrent.locks.ReentrantLock gate=fieldGate(receiver);gate.lock();
         return memoryReceipt(gate,receiver);
     }
@@ -2069,17 +2097,13 @@ public final class ControlBridge {
                 caller=WALKER.walk(RAW_MEMORY_CALLER);
         }
         if(caller==ResourceBridge.class||caller==CodeSourceBridge.class||caller!=null&&caller.getClassLoader()==null&&caller.getNestHost()==ExecutionFlow.class||ControlBridge.owns(caller))return true;
-        try{
-            if(caller==Class.forName("sun.misc.Unsafe",false,ClassLoader.getPlatformClassLoader())||caller==Class.forName("jdk.internal.misc.Unsafe",false,null))return true;
-        }catch(ClassNotFoundException unavailable){return false;}
+        if(UnsafeWriters.contains(caller))return true;
         return caller!=null&&caller.getClassLoader()==null&&HandleWriters.roots.contains(caller.getNestHost());
     }
     public static boolean unsafeControlScope(){
         if(!NativeControl.unsafeControlScope())return false;
         Class<?> caller=actualMemoryCaller();
-        try{
-            if(caller==Class.forName("sun.misc.Unsafe",false,ClassLoader.getPlatformClassLoader())||caller==Class.forName("jdk.internal.misc.Unsafe",false,null))return true;
-        }catch(ClassNotFoundException unavailable){throw new IllegalStateException("ACTUAL_UNSAFE_WRITE_UNAVAILABLE",unavailable);}
+        if(UnsafeWriters.contains(caller))return true;
         return caller!=null&&caller.getClassLoader()==null&&HandleWriters.roots.contains(caller.getNestHost());
     }
     public static Object beginUnsafeMutation(Object receiver,long offset,long length){
@@ -2116,8 +2140,7 @@ public final class ControlBridge {
         return ORIGIN_WALKER.walk(MEMORY_CALLER);
     }
     static void requireHandleWriter(Class<?> caller){
-        Class<?> internal;try{internal=Class.forName("jdk.internal.misc.Unsafe",false,null);}catch(ClassNotFoundException unavailable){throw new IllegalStateException("ACTUAL_UNSAFE_WRITE_UNAVAILABLE",unavailable);}
-        if(caller!=internal&&(caller==null||caller.getClassLoader()!=null||!HandleWriters.roots.contains(caller.getNestHost())))throw new SecurityException("ACTUAL_HANDLE_WRITE_REQUIRED");
+        if(caller!=UnsafeWriters.INTERNAL&&(caller==null||caller.getClassLoader()!=null||!HandleWriters.roots.contains(caller.getNestHost())))throw new SecurityException("ACTUAL_HANDLE_WRITE_REQUIRED");
     }
     public static Object beginRecoveryMutation(Object receiver) {
         if(!coreWriter())throw new SecurityException("GROUP_RECOVERY_CORE_REQUIRED");

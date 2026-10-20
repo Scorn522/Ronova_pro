@@ -145,20 +145,13 @@ static int native_unsafe_begin(JNIEnv *env,NativeThread *state,Binding *binding,
         unsigned argument=binding->unsafeOperation==UNSAFE_PUT?4:5;
         proposed=native_unsafe_box(env,binding->unsafeKind,native_unsafe_argument(binding,frame,argument));
     }
-    if(!native_original.ExceptionCheck(env)){
-        // Exact controller gates have no heap receipt; their normal Java write
-        // policy still runs below. Raw reads keep their caller contributors.
-        jboolean noContributors=mutation.reading&&mutation.receiver?JNI_TRUE:JNI_FALSE;
-        if(!mutation.bulk&&mutation.receiver&&!mutation.reading)
-            noContributors=native_original.CallStaticBooleanMethod(env,native_controller,native_unsafe_metadata_query,mutation.receiver);
-        if(!native_original.ExceptionCheck(env)){
-            if(noContributors){
-                jclass module=native_original.FindClass(env,"java/lang/Module");
-                if(module){sources=native_original.NewObjectArray(env,0,module,NULL);native_original.DeleteLocalRef(env,module);}
-            }else sources=native_mutation_sources(env,state);
-        }
-    }
-    if(mutation.kind&&sources&&!native_original.ExceptionCheck(env)){
+    // Java heap writes use the actual receiver/offset and its live policy,
+    // not native caller contributors. Only a raw endpoint consumes this array.
+    // Keep the binding's native_stopped/owner checks and every Java write gate.
+    // In particular, heap-to-raw and raw-to-heap copies still capture sources.
+    int needsSources=!mutation.receiver||(mutation.copy&&!mutation.source);
+    if(needsSources&&!native_original.ExceptionCheck(env))sources=native_mutation_sources(env,state);
+    if(mutation.kind&&(!needsSources||sources)&&!native_original.ExceptionCheck(env)){
         mutation.previous=state->unsafeMutation;state->unsafeMutation=&mutation;
         jobject token=mutation.reading?native_original.CallStaticObjectMethod(env,native_controls,native_unsafe_read_begin_query,mutation.receiver,mutation.offset,mutation.kind,sources)
                 :mutation.copy?native_original.CallStaticObjectMethod(env,native_controls,native_unsafe_copy_begin_query,mutation.source,mutation.sourceOffset,mutation.receiver,mutation.offset,mutation.length,sources)
