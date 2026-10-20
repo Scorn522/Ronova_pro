@@ -87,9 +87,52 @@ static void JNICALL host_module0(JNIEnv *env,jclass type,jobject module,jboolean
     host_module_update(env,module,stopped);
     if(stopped&&!native_original.ExceptionCheck(env))native_tooling_retire(env,module);
 }
+static jmethodID native_lwjgl_pointer_gate;
+/* LWJGL's reserved capability word is data, not a JNI function entry.
+ * Only the enrolled Java platform boundary may use this exact-word access;
+ * arbitrary Unsafe/Host reads, writes and all function slots stay fenced. */
+JNIEXPORT jobject JNICALL Java_dev_ronova_pro_bootstrap_NativeControl_lwjglJniPointer0(
+        JNIEnv *env,jclass type,jlong address,jlong value,jboolean write){
+    if(!native_controller||!native_lwjgl_pointer_gate||!native_original.IsSameObject(env,type,native_controller)
+            ||!native_original.CallStaticBooleanMethod(env,native_controller,native_lwjgl_pointer_gate)){
+        native_refuse(env,"LWJGL_PLATFORM_CONTROL_REQUIRED");return NULL;
+    }
+    NativeThread *state=native_thread();
+    if(!state||native_stopped(env)){native_refuse(env,"RONOVA_STOPPED_LWJGL_JNI_STATE");return NULL;}
+    uintptr_t at=(uintptr_t)address,result=0;int matched=0,valid=1;
+    /* The current Java call owns this attachment's lifetime. No JNI call or
+     * safepoint is made while holding the table directory. */
+    AcquireSRWLockExclusive(&native_jni_tables_gate);
+    const struct JNINativeInterface_ *table=NULL;struct JNINativeInterface_ copy;
+    if(!native_jni_snapshot(env,&table,&copy))valid=0;
+    else if(!write&&at==(uintptr_t)env){matched=1;result=(uintptr_t)table;}
+    else if(at==(uintptr_t)table+offsetof(struct JNINativeInterface_,reserved3)
+            ||native_jni_vm_table&&at==(uintptr_t)native_jni_vm_table+offsetof(struct JNINativeInterface_,reserved3)){
+        matched=1;
+        if(write){
+            MEMORY_BASIC_INFORMATION region;DWORD previous=0,ignored=0;
+            if(!VirtualQuery((void*)at,&region,sizeof(region))||region.State!=MEM_COMMIT
+                    ||(region.Protect&(PAGE_GUARD|PAGE_NOACCESS)))valid=0;
+            else{
+                DWORD protection=region.Protect&0xff;
+                int writable=protection==PAGE_READWRITE||protection==PAGE_WRITECOPY
+                        ||protection==PAGE_EXECUTE_READWRITE||protection==PAGE_EXECUTE_WRITECOPY;
+                if(!writable&&!host_real_virtual_protect((void*)at,sizeof(void*),PAGE_READWRITE,&previous))valid=0;
+                if(valid)InterlockedExchangePointer((void *volatile*)at,(void*)(uintptr_t)value);
+                if(!writable&&valid&&!host_real_virtual_protect((void*)at,sizeof(void*),previous,&ignored))valid=0;
+                result=(uintptr_t)value;
+            }
+        }else valid=native_jni_read((void*)at,&result,sizeof(result));
+    }
+    ReleaseSRWLockExclusive(&native_jni_tables_gate);
+    if(!valid){native_refuse(env,"LWJGL_JNI_POINTER_UNAVAILABLE");return NULL;}
+    if(!matched)return NULL;
+    state->control++;jobject boxed=native_unsafe_box(env,"Long",(uint64_t)result);state->control--;return boxed;
+}
 static int native_bind_controller(JNIEnv *env,jclass controller){
     static const JNINativeMethod methods[]={
         {"abi","()I",(void*)Java_dev_ronova_pro_bootstrap_NativeControl_abi},
+        {"lwjglJniPointer0","(JJZ)Ljava/lang/Long;",(void*)Java_dev_ronova_pro_bootstrap_NativeControl_lwjglJniPointer0},
         {"returnIdentifier0","()Ljava/util/UUID;",(void*)Java_dev_ronova_pro_bootstrap_NativeControl_returnIdentifier0},
         {"returnFuture0","()Ljava/util/concurrent/CompletableFuture;",(void*)Java_dev_ronova_pro_bootstrap_NativeControl_returnFuture0},
         {"controlWriter0","()Ljava/lang/Class;",(void*)Java_dev_ronova_pro_bootstrap_NativeControl_controlWriter0},
@@ -198,6 +241,7 @@ static int native_bind_controller(JNIEnv *env,jclass controller){
         {"unsafeCopyBoundary0","(Ljava/lang/Object;JLjava/lang/Object;JJ)Z",(void*)Java_dev_ronova_pro_bootstrap_NativeControl_unsafeCopyBoundary0},
         {"clone0","(Ljava/lang/Object;)Ljava/lang/Object;",(void*)Java_dev_ronova_pro_bootstrap_NativeControl_clone0},
     };
-    return native_original.RegisterNatives(env,controller,methods,(jint)(sizeof(methods)/sizeof(methods[0])))==JNI_OK
+    native_lwjgl_pointer_gate=native_original.GetStaticMethodID(env,controller,"lwjglPointerCaller","()Z");
+    return native_lwjgl_pointer_gate&&native_original.RegisterNatives(env,controller,methods,(jint)(sizeof(methods)/sizeof(methods[0])))==JNI_OK
             &&!native_original.ExceptionCheck(env);
 }

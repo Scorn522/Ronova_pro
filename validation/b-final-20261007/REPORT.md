@@ -1,5 +1,24 @@
 # B 批实际报告：2026-10-09 代码收敛接续
 
+## 2026-10-20：LWJGL WindowsLibrary 原生空返回路径
+
+接续 `dcc98db`。用户报告 `错误报告-2026-10-20_11.38.50.zip` 含 `hs_err_pid141168.log`：`WinBase.nGetModuleHandle` 内 `lwjgl.dll+0x20524` 执行写入 `[rax+0x1c]`，当时 RAX 为 0。其前序指令通过 JNI 查找／调用 ThreadLocalUtil 的线程数据初始化。原报告没有保留该 JNI 调用内的 Java 异常，因此未把某个猜测异常写成已捕获事实。
+
+源码检查发现该类的初始化读当前 JNIEnv 指针，能力操作访问 JNI 表的 reserved3；此前缺少相应平台接线，通用来源变换和控制区裸读拒绝均会干扰其约定。旧候选配套 Agent／Bootstrap／Native 在普通类路径及命名模块下的独立对照都先报告 `CODE_SOURCE_BOUNDARY_BINDING_FAILED:org/lwjgl/system/ThreadLocalUtil` 并以 ClassFormatError 退出，这说明旧路径不能完成该类加载，但不等同于重现用户的原生 PC。
+
+生产变更：复用既有 BufferBoundary／ResourceBridge 平台登记，按实际类名、加载器、模块、方法描述符与调用帧接入 ThreadLocalUtil 的三处方法，检查已知地址调用布局。Native 私有入口单独认证实际 ResourceBridge 调用，仅处理当前 JNIEnv 槽位读取及当前／VM 表的 reserved3 字；不授权 JNIEnv 写入或 JNI 函数槽读写。其他普通地址沿既有 Unsafe 守卫，已停调用与目标策略仍执行。
+
+最终生产构建 18 秒通过；必要检查使用 PCL 的实际 Java 17.0.15 和本地 LWJGL 3.3.1 原生库。最终命名模块检查输出 `LWJGL_BUFFER_STARTUP_PASS lwjgl_module=org.lwjgl`，退出 0。其顺序为 MemoryUtil 后直接初始化 WindowsLibrary，由 WinBase 原生调用首次触发 ThreadLocalUtil，未预热该类；随后实际查询 Windows 模块、加载 GLFW 库、建立／释放能力表，验证普通缓冲区读写和原布局探测。外部 JNI 槽读取、伪造 Java 平台入口、直接反射调用私有 Native 入口、直接／回绕控制表视图均被拒绝。
+
+工作记录位于 `.work/pcl-lwjgl-crash-20261020-113850`。首轮内部认证误用 Agent 专属入口、随后嵌套类直接登记反射句柄的调用位置错误均已修正，失败日志保留。之后仅修正检查对两条有效内存拒绝标签的匹配，并调整初始化顺序、输出模块名称，单独重编检查入口；未反复重建未改动的生产包。
+
+没有调用 glfwInit、创建窗口、运行 Forge 主类或启动游戏。候选已部署到原 PCL 实例，备份目录为 `ronova-launch/backup-lwjgl-thread-20261020-120011`，参数准备成功。小检查不代替完整游戏启动结论。
+
+| 候选 | 字节 | SHA-256 |
+| --- | ---: | --- |
+| `ronova-pro-core-1.5.0-dev.jar` | 3299951 | `69bfd9caddfa9a8fd863c654ed4853c0bc5fc884a6a1099a9962bc0b496e6d44` |
+| `ronova-pro-prelaunch.jar` | 51556 | `d6bfc76997b1a115346a1cb16fa9feb2767595d0d0a419de5c944bce1016c6ab` |
+
 ## 2026-10-20：PCL LWJGL 初始化误拒及退出互锁
 
 接续 `4d96d68`。最新实例日志与 `错误报告-2026-10-20_11.17.40.zip` 一致：`MemoryUtil.getPositionOffset → JNINativeInterface.nNewDirectByteBuffer` 被拒，原因明确为 `NATIVE_CONTROL_RANGE_UNAVAILABLE:ADDRESS_OVERFLOW:restricted=0:loaderQuery=ready`。实际 LWJGL 3.3.1 字节码以地址 `-1`、容量 `219540062` 构造 Buffer 布局探测对象；此调用只创建 Java 视图，未解引用原生地址。

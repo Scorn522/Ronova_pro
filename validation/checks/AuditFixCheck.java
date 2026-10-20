@@ -2422,8 +2422,36 @@ public final class AuditFixCheck {
     private static void lwjglBufferStartup()throws Exception{
         require(Boolean.TRUE.equals(Class.forName("dev.ronova.pro.bootstrap.NativeControl",false,null)
                 .getMethod("available").invoke(null)),"actual premain backend required");
-        // Initialize the real installed LWJGL library, without GLFW or a game.
+        // Load actual LWJGL libraries and JNI thread state, without initializing
+        // GLFW, creating a window or starting Forge/Minecraft.
         Class.forName("org.lwjgl.system.MemoryUtil",true,AuditFixCheck.class.getClassLoader());
+        // Preserve the crash's order: WinBase's native lookup must initialize
+        // ThreadLocalUtil through its JNI callback, without prewarming it here.
+        Class.forName("org.lwjgl.system.windows.WindowsLibrary");
+        Class<?> local=Class.forName("org.lwjgl.system.ThreadLocalUtil");
+        Class<?> windows=Class.forName("org.lwjgl.system.windows.WinBase");
+        require((long)windows.getMethod("GetModuleHandle",java.nio.ByteBuffer.class).invoke(null,(Object)null)!=0,
+                "actual Windows module lookup failed");
+        Class.forName("org.lwjgl.glfw.GLFW");
+        var missing=local.getMethod("setFunctionMissingAddresses",int.class);
+        var capabilities=local.getMethod("setCapabilities",long.class);
+        missing.invoke(null,4);
+        try{capabilities.invoke(null,0L);}
+        finally{missing.invoke(null,0);capabilities.invoke(null,0L);}
+        var current=local.getDeclaredMethod("getThreadJNIEnv");current.setAccessible(true);
+        long environment=(long)current.invoke(null);
+        try{U.getAddress(environment);throw new AssertionError("external JNI environment read was admitted");}
+        catch(IllegalStateException denied){require(Set.of("NATIVE_CONTROL_MEMORY_READ_DENIED","NATIVE_CONTROL_MEMORY_DENIED")
+                .contains(denied.getMessage()),"unexpected JNI environment refusal: "+denied);}
+        Class<?> resources=Class.forName("dev.ronova.pro.bootstrap.ResourceBridge",true,null);
+        try{resources.getMethod("lwjglPointerRead",long.class,Class.class).invoke(null,environment,local);
+            throw new AssertionError("external caller forged the LWJGL platform boundary");}
+        catch(InvocationTargetException denied){require(denied.getCause() instanceof SecurityException,"unexpected platform boundary refusal: "+denied.getCause());}
+        var nativePointer=Class.forName("dev.ronova.pro.bootstrap.NativeControl",false,null)
+                .getDeclaredMethod("lwjglJniPointer0",long.class,long.class,boolean.class);nativePointer.setAccessible(true);
+        try{nativePointer.invoke(null,environment,0L,false);throw new AssertionError("external caller bypassed the Java platform boundary");}
+        catch(InvocationTargetException denied){require(denied.getCause() instanceof IllegalStateException
+                &&"LWJGL_PLATFORM_CONTROL_REQUIRED".equals(denied.getCause().getMessage()),"unexpected native boundary refusal: "+denied.getCause());}
         var create=Class.forName("org.lwjgl.system.jni.JNINativeInterface")
                 .getMethod("NewDirectByteBuffer",long.class,long.class);
         var layout=(java.nio.ByteBuffer)create.invoke(null,-1L,219540062L);
@@ -2442,7 +2470,8 @@ public final class AuditFixCheck {
                 require("NATIVE_CONTROL_BUFFER_DENIED".equals(denied.getMessage()),"unexpected buffer refusal: "+denied);
             }
         }
-        System.out.println("LWJGL_BUFFER_STARTUP_PASS actual_MemoryUtil_initialized sentinel_layout_preserved ordinary_buffer_read_write protected_table_and_wrapping_view_refused");
+        System.out.println("LWJGL_BUFFER_STARTUP_PASS lwjgl_module="+local.getModule().getName()
+                +" actual_MemoryUtil_ThreadLocalUtil_WindowsLibrary_GLFW_loaded module_lookup capability_words sentinel_layout ordinary_read_write external_JNI_read_and_forged_bridge_and_table_views_refused");
     }
     private static final class MirrorWriteTarget { static int number=7; static Object reference=new Object(); int field; }
     @java.lang.annotation.Retention(java.lang.annotation.RetentionPolicy.RUNTIME)

@@ -45,6 +45,16 @@ public final class NativeControl {
                         &&frame.getMethodName().equals("<init>")).orElse(false));
     }
     private static final StackWalker CALLER=StackWalker.getInstance(StackWalker.Option.RETAIN_CLASS_REFERENCE);
+    static Long lwjglJniPointer(long address,long value,boolean write){
+        if(CALLER.getCallerClass()!=ResourceBridge.class)throw new SecurityException("LWJGL_PLATFORM_BRIDGE_REQUIRED");
+        if(!available)throw new IllegalStateException("LWJGL_NATIVE_CONTROL_UNAVAILABLE");
+        return lwjglJniPointer0(address,value,write);
+    }
+    private static boolean lwjglPointerCaller(){
+        return CALLER.walk(frames->frames.filter(frame->frame.getDeclaringClass()!=NativeControl.class).findFirst()
+                .map(frame->frame.getDeclaringClass()==ResourceBridge.class
+                        &&(frame.getMethodName().equals("lwjglPointerRead")||frame.getMethodName().equals("lwjglPointerWrite"))).orElse(false));
+    }
     private static boolean controlCaller() {
         Class<?> caller=CALLER.walk(frames->frames.map(StackWalker.StackFrame::getDeclaringClass).filter(type->type!=NativeControl.class).findFirst().orElse(null));
         if(ControlBridge.owns(caller))return true;
@@ -1003,6 +1013,7 @@ public final class NativeControl {
     private static native boolean memoryMutationBoundary0(Object receiver);
     private static native boolean unsafeMutationBoundary0(Object receiver,long offset,long length,String kind,boolean bulk,boolean reading);
     private static native boolean unsafeControlScope0();
+    private static native Long lwjglJniPointer0(long address,long value,boolean write);
     private static native long memoryWriteBegin0(long address,long bytes,Module[] contributors,boolean reading,boolean snapshot);
     private static native void memoryWriteEnd0(long token,boolean written);
     private static native Module[] memoryReadSources0(long token);

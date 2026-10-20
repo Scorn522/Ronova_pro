@@ -41,7 +41,7 @@ public final class ResourceBridge {
     private static final ThreadLocal<BufferAllocation> BUFFER_ALLOCATING=new ThreadLocal<>();
     private static final ThreadLocal<BufferWrapScope> BUFFER_WRAPPING=new ThreadLocal<>();
     private static final StackWalker WRAP_AUTHORITY=StackWalker.getInstance(StackWalker.Option.RETAIN_CLASS_REFERENCE);
-    private static final String BUFFER_WRAP_NAME="org.lwjgl.system.MemoryUtil",BUFFER_WRAP_DESCRIPTOR="(Ljava/lang/Class;JI)Ljava/nio/Buffer;",
+    private static final String BUFFER_WRAP_NAME="org.lwjgl.system.MemoryUtil",LWJGL_JNI_NAME="org.lwjgl.system.ThreadLocalUtil",BUFFER_WRAP_DESCRIPTOR="(Ljava/lang/Class;JI)Ljava/nio/Buffer;",
             BUFFER_SLICE_DESCRIPTOR="(Ljava/nio/ByteBuffer;JI)Ljava/nio/ByteBuffer;";
     private static final List<BufferWrapRole> BUFFER_WRAP_ROLES=new ArrayList<>();
     private static volatile Class<?> bufferWrapAgent;
@@ -298,8 +298,8 @@ public final class ResourceBridge {
         BufferAllocation(Buffer buffer){this.buffer=buffer;}
     }
     private static final class BufferWrapRole {
-        final Key loader,module;final boolean bootstrap;Key actual;
-        BufferWrapRole(ClassLoader loader,Module module){this.loader=new Key(loader,false);this.module=new Key(module,false);bootstrap=loader==null;}
+        final String name;final Key loader,module;final boolean bootstrap;Key actual;
+        BufferWrapRole(String name,ClassLoader loader,Module module){this.name=name;this.loader=new Key(loader,false);this.module=new Key(module,false);bootstrap=loader==null;}
     }
     private static final class BufferWrapScope {
         final Buffer buffer;final Class<?> requested,declaring;final BufferWrapRole role;final long address;final int capacity;final String method,descriptor;
@@ -1278,12 +1278,12 @@ public final class ResourceBridge {
     public static void expectBufferWrap(String name,ClassLoader loader,Module module){
         Class<?> caller=WRAP_AUTHORITY.walk(PLATFORM_BOUNDARY).getDeclaringClass(),agent=bufferWrapAgent;
         if(agent==null||caller.getNestHost()!=agent||!ControlBridge.owns(caller))throw new SecurityException("BUFFER_WRAP_AGENT_REQUIRED");
-        if(!BUFFER_WRAP_NAME.equals(name)||module==null)throw new IllegalArgumentException("BUFFER_WRAP_ROLE_REQUIRED");
+        if((!BUFFER_WRAP_NAME.equals(name)&&!LWJGL_JNI_NAME.equals(name))||module==null)throw new IllegalArgumentException("BUFFER_WRAP_ROLE_REQUIRED");
         synchronized(BUFFER_WRAP_ROLES){
-            for(BufferWrapRole role:BUFFER_WRAP_ROLES)if(role.bootstrap==(loader==null)&&role.loader.get()==loader){
+            for(BufferWrapRole role:BUFFER_WRAP_ROLES)if(role.name.equals(name)&&role.bootstrap==(loader==null)&&role.loader.get()==loader){
                 if(role.module.get()!=module)throw new IllegalStateException("BUFFER_WRAP_ROLE_MODULE_CHANGED");return;
             }
-            BufferWrapRole role=new BufferWrapRole(loader,module);
+            BufferWrapRole role=new BufferWrapRole(name,loader,module);
             CodeSourceBridge.resourceLayoutControls(role);CodeSourceBridge.resourceLayoutControls(role.loader);CodeSourceBridge.resourceLayoutControls(role.module);
             BUFFER_WRAP_ROLES.add(role);
         }
@@ -1293,13 +1293,42 @@ public final class ResourceBridge {
         boolean factory=method.equals("wrap")&&descriptor.equals(BUFFER_WRAP_DESCRIPTOR)||method.equals("slice")&&descriptor.equals(BUFFER_SLICE_DESCRIPTOR);
         if(!factory||type!=declaring||!type.getName().equals(BUFFER_WRAP_NAME)||!frame.getMethodName().equals(method)
                 ||!frame.getDescriptor().equals(descriptor)||module!=type.getModule())throw new SecurityException("ACTUAL_BUFFER_FACTORY_REQUIRED");
+        return bufferPlatformRole(type,module);
+    }
+    private static BufferWrapRole bufferPlatformRole(Class<?> type,Module module){
         synchronized(BUFFER_WRAP_ROLES){
-            for(BufferWrapRole role:BUFFER_WRAP_ROLES)if(role.bootstrap==(type.getClassLoader()==null)&&role.loader.get()==type.getClassLoader()&&role.module.get()==module){
+            for(BufferWrapRole role:BUFFER_WRAP_ROLES)if(role.name.equals(type.getName())&&role.bootstrap==(type.getClassLoader()==null)&&role.loader.get()==type.getClassLoader()&&role.module.get()==module){
                 if(role.actual==null){role.actual=new Key(type,false);CodeSourceBridge.resourceLayoutControls(role.actual);}
                 if(role.actual.get()!=type)throw new SecurityException("BUFFER_WRAP_ACTUAL_CLASS_CHANGED");return role;
             }
         }
         throw new SecurityException("BUFFER_WRAP_ROLE_UNREGISTERED");
+    }
+    private static void lwjglPointerBoundary(Class<?> declaring){
+        var frame=WRAP_AUTHORITY.walk(PLATFORM_BOUNDARY);Class<?> type=frame.getDeclaringClass();
+        boolean method=frame.getMethodName().equals("<clinit>")&&frame.getDescriptor().equals("()V")
+                ||frame.getMethodName().equals("setCapabilities")&&frame.getDescriptor().equals("(J)V")
+                ||frame.getMethodName().equals("setFunctionMissingAddresses")&&frame.getDescriptor().equals("(I)V");
+        if(type!=declaring||!LWJGL_JNI_NAME.equals(type.getName())||!method||DefinitionBridge.module(type)!=type.getModule())
+            throw new SecurityException("ACTUAL_LWJGL_JNI_POINTER_CALL_REQUIRED");
+        bufferPlatformRole(type,type.getModule());
+        if(!ControlBridge.taskEffectAllowed(declaring,"lwjgl-jni-state")||ControlBridge.stoppedInvocation())
+            throw new IllegalStateException("RONOVA_STOPPED_LWJGL_JNI_STATE");
+    }
+    private static final class LwjglPointers {
+        static final Method GET=layoutMethod("getAddress",long.class),PUT=layoutMethod("putAddress",long.class,long.class);
+    }
+    public static long lwjglPointerRead(long address,Class<?> declaring){
+        lwjglPointerBoundary(declaring);Long value=NativeControl.lwjglJniPointer(address,0,false);
+        if(value!=null)return value;
+        try{return ((Number)LwjglPointers.GET.invoke(UNSAFE,address)).longValue();}
+        catch(ReflectiveOperationException failure){throw new IllegalStateException("LWJGL_POINTER_READ_FAILED",failure);}
+    }
+    public static void lwjglPointerWrite(long address,long value,Class<?> declaring){
+        lwjglPointerBoundary(declaring);
+        if(NativeControl.lwjglJniPointer(address,value,true)!=null)return;
+        try{LwjglPointers.PUT.invoke(UNSAFE,address,value);}
+        catch(ReflectiveOperationException failure){throw new IllegalStateException("LWJGL_POINTER_WRITE_FAILED",failure);}
     }
     private static Span bufferWrapSpan(Field field,int bytes){
         for(Span span:INSTANCE_FIELDS.get(Buffer.class))if(span.field.equals(field)&&span.bytes==bytes)return span;
@@ -2079,9 +2108,9 @@ public final class ResourceBridge {
             Field singleton=PlatformMetadata.declaredField(type,"theUnsafe");singleton.setAccessible(true);return singleton.get(null);
         }catch(ReflectiveOperationException failed){throw new ExceptionInInitializerError(failed);}
     }
-    private static Method layoutMethod(String name,Class<?> parameter){
+    private static Method layoutMethod(String name,Class<?>... parameters){
         try{
-            Method method=UNSAFE.getClass().getMethod(name,parameter);
+            Method method=UNSAFE.getClass().getMethod(name,parameters);
             if(!method.trySetAccessible())throw new IllegalStateException("RESOURCE_LAYOUT_METHOD_UNAVAILABLE:"+name);
             CodeSourceBridge.resourceLayoutControls(method);
             return method;

@@ -8,14 +8,16 @@ import jdk.internal.org.objectweb.asm.tree.*;
 final class BufferBoundary {
     private static final String BRIDGE="dev/ronova/pro/bootstrap/ResourceBridge";
     static final String WRAP_TARGET="org/lwjgl/system/MemoryUtil";
+    private static final String JNI_TARGET="org/lwjgl/system/ThreadLocalUtil";
     private static final String WRAP_DESCRIPTOR="(Ljava/lang/Class;JI)Ljava/nio/Buffer;",
             SLICE_DESCRIPTOR="(Ljava/nio/ByteBuffer;JI)Ljava/nio/ByteBuffer;",UNSAFE="sun/misc/Unsafe";
     static final Set<String> TARGETS=targets();
-    static boolean wrapTarget(String name){return WRAP_TARGET.equals(name);}
+    static boolean wrapTarget(String name){return WRAP_TARGET.equals(name)||JNI_TARGET.equals(name);}
     static byte[] transformWrap(ClassLoader loader,String name,byte[] bytes){
         if(!wrapTarget(name))return null;
         ClassNode node=new ClassNode();new ClassReader(bytes).accept(node,0);
         if(!node.name.equals(name))throw new IllegalStateException("BUFFER_WRAP_CLASS_CHANGED");
+        if(JNI_TARGET.equals(name))return threadLocalPointers(loader,node);
         MethodNode wrap=null,slice=null;
         for(MethodNode method:node.methods){
             if(method.name.equals("wrap")&&method.desc.equals(WRAP_DESCRIPTOR)){
@@ -27,6 +29,27 @@ final class BufferBoundary {
         if(wrap==null||slice==null)throw new IllegalStateException("BUFFER_FACTORY_METHOD_UNAVAILABLE");
         MethodInsnNode wrapAllocation=wrapLayout(node,wrap,false),sliceAllocation=wrapLayout(node,slice,true);
         factoryScope(node,wrap,wrapAllocation,false);factoryScope(node,slice,sliceAllocation,true);
+        ControlClassWriter writer=new ControlClassWriter(loader,node);node.accept(writer);return writer.toByteArray();
+    }
+    private static byte[] threadLocalPointers(ClassLoader loader,ClassNode node){
+        int reads=0,writes=0;
+        for(MethodNode method:node.methods){
+            boolean cache=method.name.equals("<clinit>")&&method.desc.equals("()V"),
+                    capabilities=method.name.equals("setCapabilities")&&method.desc.equals("(J)V"),
+                    missing=method.name.equals("setFunctionMissingAddresses")&&method.desc.equals("(I)V");
+            if(!cache&&!capabilities&&!missing)continue;
+            for(AbstractInsnNode at:method.instructions.toArray())if(at instanceof MethodInsnNode call
+                    &&call.getOpcode()==Opcodes.INVOKESTATIC&&call.owner.equals(WRAP_TARGET)){
+                boolean read=call.name.equals("memGetAddress")&&call.desc.equals("(J)J"),
+                        write=call.name.equals("memPutAddress")&&call.desc.equals("(JJ)V");
+                if(!read&&!write)continue;
+                method.instructions.insertBefore(call,new LdcInsnNode(Type.getObjectType(node.name)));
+                call.owner=BRIDGE;call.name=read?"lwjglPointerRead":"lwjglPointerWrite";
+                call.desc=read?"(JLjava/lang/Class;)J":"(JJLjava/lang/Class;)V";
+                if(read)reads++;else writes++;
+            }
+        }
+        if(reads!=5||writes!=5)throw new IllegalStateException("LWJGL_JNI_POINTER_LAYOUT_CHANGED");
         ControlClassWriter writer=new ControlClassWriter(loader,node);node.accept(writer);return writer.toByteArray();
     }
     private static void factoryScope(ClassNode node,MethodNode method,MethodInsnNode allocation,boolean slice){

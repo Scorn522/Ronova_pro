@@ -1,5 +1,15 @@
 # Ronova Pro 当前进度
 
+## 2026-10-20：LWJGL JNI 线程环境初始化接线
+
+接续 `dcc98db`。11:38:50 报告为 `lwjgl.dll+0x20524` 写空地址 `0x1c`，上层为 `WinBase.nGetModuleHandle → WindowsLibrary.<clinit>`；对应原生代码在 JNI 取得线程数据后未检查空返回。`ThreadLocalUtil` 此前进入通用来源织入，同时其 JNI 元数据访问与控制区读保护存在冲突。旧候选的独立对照先在该类织入时失败，未将该结果冒充同一原生 PC 的复现。
+
+现在把实际 `ThreadLocalUtil` 的初始化、能力切换及缺失函数表操作接到明确的平台入口，校验原声明、方法描述符、实际加载器／模块与调用帧。Native 只处理当前 JNIEnv 指针的读取和当前／VM JNI 表的 reserved3 数据字；其他地址回原有受保护 Unsafe 路径，函数槽与 JNIEnv 槽位写保护不开放。接口不要求 Mod 主动提供 SDK 元数据。
+
+最终生产构建通过（18 秒）。实际 Java 17／LWJGL 的普通类路径及 `org.lwjgl` 命名模块检查通过；最终检查保留报告顺序，由 WinBase 原生调用首次初始化 ThreadLocalUtil，完成 Windows 模块查询、GLFW 库加载、能力表建立／释放，并拒绝外部 JNI 读取、伪造 Java／Native 桥调用和控制表视图，退出 0。未调用 glfwInit、未创建窗口、未启动 Forge／游戏。
+
+候选双 JAR 已替换到原 PCL 实例，旧包备份，参数准备成功；完整进入游戏仍待实际重试。失败过程与检查范围见既有实际报告。
+
 ## 2026-10-20：LWJGL 布局探测与 JVM 退出互锁修复
 
 接续 `4d96d68`。用户最新 PCL 日志及 11:17:40 错误报告显示，上一处 Log4j 重复加载已越过，本次失败在 LWJGL 3.3.1 的 `MemoryUtil.getPositionOffset`：其真实代码用 `NewDirectByteBuffer(-1, 219540062)` 创建布局探测视图，Ronova 将不解引用的视图创建按实际读写处理，错误返回 `NATIVE_CONTROL_RANGE_UNAVAILABLE:ADDRESS_OVERFLOW`。
