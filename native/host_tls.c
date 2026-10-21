@@ -77,27 +77,25 @@ static uint64_t host_tls_failure(int kind,DWORD error,DWORD incoming){
 }
 typedef struct HostTlsRefusal {
     const char *site;void *caller;HostImage *image;HostLibraryLoad *selected;
+    HostLibraryLoad *callbackLoad;
     uint64_t generation;DWORD thread,index,error;int kind,restricted,unknown,producer;
-    unsigned scopes,depth;int entryUnknown,returned,loadUnknown,tls,registration,binding,tooling,javaUnknown,leaseComplete;
+    unsigned scopes,depth;int entryUnknown,returned,loadUnknown,selectedUnknown,leaseComplete;
+    int entryQueryUnknown,entryQueryProducer,callbackSeen,callbackCaptured,callbackUnknown,callbackProducer;
+    NativeSourceRoots roots;
 } HostTlsRefusal;
 static HostTlsRefusal host_tls_refusal(HostImport *entry,int kind,DWORD index,DWORD error,const char *site,
         int restricted,int unknown,OwnerLink *owners,NativeThread *state,void *caller,
-        HostLibraryLoad *selected,int javaUnknown){
+        HostLibraryLoad *selected,const NativeSourceRoots *roots){
     HostTlsRefusal r={0};r.site=site;r.caller=caller;r.image=entry->image;r.selected=selected;
     r.thread=GetCurrentThreadId();r.index=index;r.error=error;r.kind=kind;r.restricted=restricted;
-    r.unknown=unknown;r.producer=native_has_producer(owners);r.javaUnknown=javaUnknown;r.leaseComplete=-1;
+    r.unknown=r.entryQueryUnknown=unknown;r.producer=r.entryQueryProducer=native_has_producer(owners);r.leaseComplete=-1;
+    if(roots)r.roots=*roots;
     r.entryUnknown=entry->unknown;r.returned=entry->returned;r.loadUnknown=entry->load?entry->load->unknown:0;
+    r.selectedUnknown=selected?selected->unknown:0;
     if(state){r.depth=state->depth;r.scopes=(state->heapCallback?1:0)|(state->toolingRestricted?2:0)|(state->vmDetaching?4:0)
             |(state->vmThreadEnding?8:0)|(state->hostUnloadImage?16:0)|(state->hostRelease?32:0)
             |(state->hostLoad&&state->hostLoad->calling?64:0);
-        for(NativeRegistration *p=state->registration;p;p=p->previous)r.registration|=p->unknown;
-        for(unsigned i=0;i<state->depth;i++)if(state->stack[i])r.binding|=state->stack[i]->hostUnknown;
-        for(NativeToolingScope *p=state->tooling;p;p=p->previous)r.tooling|=p->unknown;}
-    HostTlsThread *thread=host_tls_thread_current();HostTlsFiber *fiber=host_tls_fiber_current();
-    if(unknown){AcquireSRWLockShared(&host_tls_records);
-        if(thread)r.tls=(thread->ended?1:0)|(thread->gap?2:0)|(thread->observed.unknown?8:0);
-        if(fiber)r.tls|=(fiber->gap?4:0)|(fiber->observed.unknown?16:0);
-        ReleaseSRWLockShared(&host_tls_records);}
+    }
     return r;
 }
 static void host_tls_refused(const HostTlsRefusal *r){
@@ -109,14 +107,19 @@ static void host_tls_refused(const HostTlsRefusal *r){
         if(p->site==r->site&&p->kind==r->kind&&p->index==r->index&&p->generation==r->generation
                 &&p->caller==r->caller&&p->image==r->image&&p->selected==r->selected&&p->error==r->error
                 &&p->unknown==r->unknown&&p->restricted==r->restricted&&p->entryUnknown==r->entryUnknown
-                &&p->loadUnknown==r->loadUnknown&&p->tls==r->tls&&p->registration==r->registration
-                &&p->binding==r->binding&&p->tooling==r->tooling&&p->javaUnknown==r->javaUnknown
-                &&p->leaseComplete==r->leaseComplete){duplicate=1;break;}}
+                &&p->loadUnknown==r->loadUnknown&&p->selectedUnknown==r->selectedUnknown
+                &&!memcmp(&p->roots,&r->roots,sizeof(r->roots))&&p->leaseComplete==r->leaseComplete
+                &&p->entryQueryUnknown==r->entryQueryUnknown&&p->entryQueryProducer==r->entryQueryProducer
+                &&p->callbackSeen==r->callbackSeen&&p->callbackCaptured==r->callbackCaptured
+                &&p->callbackUnknown==r->callbackUnknown&&p->callbackProducer==r->callbackProducer
+                &&p->callbackLoad==r->callbackLoad){duplicate=1;break;}}
     if(!duplicate)seen[next++%128]=*r;ReleaseSRWLockExclusive(&gate);if(duplicate)return;
-    fprintf(stderr,"NATIVE_TLS_REFUSED:kind=%d:index=%lu:generation=%llu:error=%lu:site=%s:thread=%lu:caller=%p:image=%p:selected=%p:restricted=%d:unknown=%d:producer=%d:scopes=%u:depth=%u:entry_unknown=%d:returned=%d:load_unknown=%d:tls=%d:registration_unknown=%d:binding_unknown=%d:tooling_unknown=%d:java_unknown=%d:lease_complete=%d\n",
+    fprintf(stderr,"NATIVE_TLS_REFUSED:kind=%d:index=%lu:generation=%llu:error=%lu:site=%s:thread=%lu:caller=%p:image=%p:selected=%p:restricted=%d:unknown=%d:producer=%d:scopes=%u:depth=%u:entry_unknown=%d:entry_producer=%d:import_unknown=%d:returned=%d:load_unknown=%d:selected_unknown=%d:tls=%d:registration_unknown=%d:binding_unknown=%d:tooling_unknown=%d:code_unknown=%d:java_unknown=%d:callback_seen=%d:callback_captured=%d:callback_unknown=%d:callback_producer=%d:callback_load=%p:effective_unknown=%d:effective_producer=%d:lease_complete=%d\n",
             r->kind,(unsigned long)r->index,(unsigned long long)r->generation,(unsigned long)r->error,r->site,
             (unsigned long)r->thread,r->caller,r->image,r->selected,r->restricted,r->unknown,r->producer,r->scopes,r->depth,
-            r->entryUnknown,r->returned,r->loadUnknown,r->tls,r->registration,r->binding,r->tooling,r->javaUnknown,r->leaseComplete);
+            r->entryQueryUnknown,r->entryQueryProducer,r->entryUnknown,r->returned,r->loadUnknown,r->selectedUnknown,
+            r->roots.tls,r->roots.registration,r->roots.binding,r->roots.tooling,r->roots.code,r->roots.process,
+            r->callbackSeen,r->callbackCaptured,r->callbackUnknown,r->callbackProducer,r->callbackLoad,r->unknown,r->producer,r->leaseComplete);
 }
 static int host_tls_restricted(NativeThread *state){
     return state&&(state->heapCallback||state->toolingRestricted||state->vmDetaching||state->vmThreadEnding
@@ -145,10 +148,6 @@ static int host_tls_sources_new_lease(HostTlsSources *sources,HostTlsLease *leas
     HostTlsLeaseLink *p=(HostTlsLeaseLink*)calloc(1,sizeof(*p));if(!p){sources->unknown=1;return 0;}
     p->lease=lease;p->references=1;p->next=sources->leases;sources->leases=p;lease->references++;return 1;
 }
-static int host_tls_sources_lease(HostTlsSources *sources,HostTlsLease *lease){
-    if(!lease)return 1;for(HostTlsLeaseLink *p=sources->leases;p;p=p->next)if(p->lease==lease)return 1;
-    return host_tls_sources_new_lease(sources,lease);
-}
 static int host_tls_sources_add(HostTlsSources *sources,OwnerLink *owners,HostTlsLease *lease,int unknown){
     // Only the fresh lease of this admitted API invocation is added here.
     int ready=native_owner_merge(&sources->owners,owners)&&host_tls_sources_new_lease(sources,lease);
@@ -158,6 +157,7 @@ static int host_tls_sources_add(HostTlsSources *sources,OwnerLink *owners,HostTl
 }
 static int host_tls_sources_merge(HostTlsSources *to,const HostTlsSources *from){
     int ready=native_owner_merge(&to->owners,from->owners);to->unknown|=from->unknown||!ready;to->partial|=from->partial;
+    if(!ready)return 0;
     if(!from->leases)return ready;
     /* Immutable tails share their real lifetime references. Related successive
      * values/read observations no longer duplicate the complete old chain. */
@@ -165,8 +165,32 @@ static int host_tls_sources_merge(HostTlsSources *to,const HostTlsSources *from)
     for(HostTlsLeaseLink *p=from->leases;p;p=p->next)if(!to->leases||p==to->leases){
         from->leases->references++;host_tls_links_drop(to->leases);to->leases=from->leases;return ready;}
     for(HostTlsLeaseLink *p=to->leases;p;p=p->next)if(p==from->leases)return ready;
-    for(HostTlsLeaseLink *p=from->leases;p;p=p->next)if(!host_tls_sources_lease(to,p->lease))ready=0;
+    /* Tail sharing may miss when two slots already contributed equivalent
+     * lease identities through different nodes. Build one transient identity
+     * set; stage all new links before publishing any of them. */
+    SIZE_T count=0,capacity=16;
+    for(HostTlsLeaseLink *p=to->leases;p;p=p->next){if(count==SIZE_MAX/2)goto failed;count++;}
+    for(HostTlsLeaseLink *p=from->leases;p;p=p->next){if(count==SIZE_MAX/2)goto failed;count++;}
+    while(capacity<count*2){if(capacity>SIZE_MAX/2)goto failed;capacity*=2;}
+    if(capacity>SIZE_MAX/sizeof(HostTlsLease*))goto failed;
+    HostTlsLease **seen=(HostTlsLease**)calloc(capacity,sizeof(*seen));if(!seen)goto failed;
+    for(HostTlsLeaseLink *p=to->leases;p;p=p->next){
+        SIZE_T at=(((uintptr_t)p->lease>>4)*UINT64_C(11400714819323198485))&(capacity-1);
+        while(seen[at]&&seen[at]!=p->lease)at=(at+1)&(capacity-1);seen[at]=p->lease;}
+    HostTlsSources staged={0};HostTlsLeaseLink *tail=NULL;
+    for(HostTlsLeaseLink *p=from->leases;p;p=p->next){
+        SIZE_T at=(((uintptr_t)p->lease>>4)*UINT64_C(11400714819323198485))&(capacity-1);
+        while(seen[at]&&seen[at]!=p->lease)at=(at+1)&(capacity-1);
+        if(seen[at])continue;
+        if(!host_tls_sources_new_lease(&staged,p->lease)){
+            host_tls_sources_clear(&staged);free(seen);goto failed;}
+        if(!tail)tail=staged.leases;seen[at]=p->lease;
+    }
+    free(seen);
+    if(tail){tail->next=to->leases;to->leases=staged.leases;staged.leases=NULL;}
     return ready;
+failed:
+    to->unknown=1;return 0;
 }
 static int host_tls_slot_sources(HostTlsSources *to,const HostTlsSlot *slot,int operations){
     int ready=host_tls_sources_merge(to,&slot->aggregate);
@@ -249,10 +273,12 @@ static void WINAPI host_tls_fiber_end(PVOID data){
 }
 /* Called with native_records already held on several source-capture paths.
  * No reverse acquisition of native_records/host_imports/host_records occurs. */
-static int host_tls_capture(NativeThread *state,OwnerLink **owners,int *unknown){
+static int host_tls_capture_detail(NativeThread *state,OwnerLink **owners,int *unknown,int *roots){
     DWORD incoming=GetLastError();HostTlsThread *thread=host_tls_thread_current();HostTlsFiber *fiber=host_tls_fiber_current();
     int ready=1;
     AcquireSRWLockShared(&host_tls_records);
+    if(roots)*roots=(thread?((thread->ended?1:0)|(thread->gap?2:0)|(thread->observed.unknown?8:0)):0)
+            |(fiber?((fiber->gap?4:0)|(fiber->observed.unknown?16:0)):0);
     /* A TLS value's opaque data history is not an unknown caller of every
      * later JNI/OS operation on this thread. Keep all observed contributors,
      * but obtain call origins from the live Java/native/binding scopes.
@@ -265,6 +291,7 @@ static int host_tls_capture(NativeThread *state,OwnerLink **owners,int *unknown)
     if(fiber){ready=ready&&native_owner_merge(owners,fiber->observed.owners);if(unknown)*unknown|=fiber->gap;}
     ReleaseSRWLockShared(&host_tls_records);SetLastError(incoming);return ready;
 }
+static int host_tls_capture(NativeThread *state,OwnerLink **owners,int *unknown){return host_tls_capture_detail(state,owners,unknown,NULL);}
 static int host_tls_source_borrow(NativeThread *state,OwnerLink *owners,void **token){
     if(token)*token=NULL;if(!state||!token||!owners)return 0;
     DWORD incoming=GetLastError();HostTlsThread *thread=host_tls_thread_current();HostTlsFiber *fiber=host_tls_fiber_current();
@@ -335,10 +362,11 @@ static HostTlsLease *host_tls_lease_prepare(NativeThread *state,OwnerLink *owner
     AcquireSRWLockExclusive(&host_tls_records);lease->next=host_tls_leases;host_tls_leases=lease;
     ReleaseSRWLockExclusive(&host_tls_records);return lease;
 }
-static int host_tls_callback_sources(NativeThread *state,void *callback,OwnerLink **owners,int *unknown,int restricted){
-    if(!restricted)return host_capture_caller(state,callback,owners);
+static int host_tls_callback_sources(NativeThread *state,void *callback,OwnerLink **owners,int *unknown,int restricted,HostLibraryLoad **selected){
+    if(!restricted){int ready=host_capture_caller_detail(state,callback,owners,unknown,selected);
+        if(!ready){if(selected)*selected=NULL;SetLastError(ERROR_NOT_ENOUGH_MEMORY);}return ready;}
     if(!state){SetLastError(ERROR_INVALID_STATE);return 0;}
-    DWORD error=ERROR_INVALID_DATA;int ready=host_callback_caller_locked(state,callback,owners,unknown,&error);
+    DWORD error=ERROR_INVALID_DATA;int ready=host_callback_caller_load(state,callback,owners,unknown,&error,selected);
     if(!ready)SetLastError(error);return ready;
 }
 static HostTlsSlot *host_tls_slot_find(int fls,DWORD index){
@@ -422,17 +450,17 @@ static uint64_t host_native_tls(HostImport *entry,void *caller,uintptr_t *argume
     int restricted=host_tls_restricted(state),allocating=kind==HOST_TLS_ALLOC||kind==HOST_FLS_ALLOC;
     int fls=kind>=HOST_FLS_ALLOC&&kind<=HOST_FLS_FREE,setting=kind==HOST_TLS_SET||kind==HOST_FLS_SET;
     int getting=kind==HOST_TLS_GET||kind==HOST_TLS_GET2||kind==HOST_FLS_GET,freeing=kind==HOST_TLS_FREE||kind==HOST_FLS_FREE;
-    DWORD index=allocating?TLS_OUT_OF_INDEXES:(DWORD)arguments[0];OwnerLink *owners=NULL;int unknown=0,javaUnknown=-1;HostLibraryLoad *selectedLoad=NULL;
+    DWORD index=allocating?TLS_OUT_OF_INDEXES:(DWORD)arguments[0];OwnerLink *owners=NULL;int unknown=0;HostLibraryLoad *selectedLoad=NULL;NativeSourceRoots roots;
     if(!allocating&&(!fls&&(native_tls!=TLS_OUT_OF_INDEXES&&index==native_tls
             ||host_tls_thread_key!=TLS_OUT_OF_INDEXES&&index==host_tls_thread_key)
             ||fls&&host_tls_fiber_key!=FLS_OUT_OF_INDEXES&&index==host_tls_fiber_key))
         return host_tls_failure(kind,ERROR_ACCESS_DENIED,incoming);
     if(!restricted)entry=host_consumed_entry(entry,state,caller);
-    int captured=host_entry_sources_query_load(entry,state,caller,&owners,NULL,1,&unknown,&selectedLoad,&javaUnknown);
+    int captured=host_entry_sources_query_load(entry,state,caller,&owners,NULL,1,&unknown,&selectedLoad,&roots);
     DWORD queryError=GetLastError();
     // Capture the roots used by this source query before lease preparation or
     // callback/context bookkeeping can change them. Failure only adds its stage.
-    HostTlsRefusal refusal=host_tls_refusal(entry,kind,index,queryError,"source_query",restricted,unknown,owners,state,caller,selectedLoad,javaUnknown);
+    HostTlsRefusal refusal=host_tls_refusal(entry,kind,index,queryError,"source_query",restricted,unknown,owners,state,caller,selectedLoad,&roots);
     if(!captured){
         error=queryError;
         AcquireSRWLockShared(&host_tls_records);HostTlsSlot *actual=host_tls_slot_find(fls,index);
@@ -463,7 +491,15 @@ static uint64_t host_native_tls(HostImport *entry,void *caller,uintptr_t *argume
                         if(!native_thread_worker_heap_borrow(state,owners,(void*)slot->callback,&slot->providerAnchor,&slot->provider))error=GetLastError();
                     }else if(!GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS,(LPCSTR)slot->callback,&slot->pin))error=GetLastError();
                     else slot->provider=slot->pin;
-                    if(!error&&!host_tls_callback_sources(state,(void*)slot->callback,&owners,&unknown,restricted))error=GetLastError();
+                    if(!error){OwnerLink *callbackOwners=NULL;int callbackUnknown=0;
+                        refusal.callbackSeen=1;
+                        refusal.callbackCaptured=host_tls_callback_sources(state,(void*)slot->callback,&callbackOwners,&callbackUnknown,restricted,&refusal.callbackLoad);
+                        DWORD callbackError=GetLastError();refusal.callbackUnknown=callbackUnknown;
+                        refusal.callbackProducer=native_has_producer(callbackOwners);unknown|=callbackUnknown;
+                        if(!refusal.callbackCaptured){error=callbackError?callbackError:ERROR_INVALID_DATA;failure="callback_sources";}
+                        else if(!native_owner_merge(&owners,callbackOwners)){error=ERROR_NOT_ENOUGH_MEMORY;failure="callback_sources_merge";}
+                        native_owner_links_free(callbackOwners);
+                    }
                     if(!error){slot->adapter=host_tls_callback_entry(slot);if(!slot->adapter)error=GetLastError();}
                 }
             }
@@ -574,7 +610,8 @@ static uint64_t host_native_tls(HostImport *entry,void *caller,uintptr_t *argume
         }
     } __finally {
         DWORD interrupted=GetLastError();
-        if(!called){refusal.site=failure;refusal.error=error?error:ERROR_INVALID_DATA;refusal.leaseComplete=lease?lease->complete:-1;}
+        if(!called){refusal.site=failure;refusal.error=error?error:ERROR_INVALID_DATA;refusal.leaseComplete=lease?lease->complete:-1;
+            refusal.unknown=unknown;refusal.producer=native_has_producer(owners)||refusal.callbackProducer;}
         AcquireSRWLockExclusive(&host_tls_records);
         if(!called){HostTlsSlot *actual=slot?slot:host_tls_slot_find(fls,index);if(actual)refusal.generation=actual->generation;}
         if(slot&&reserved){
@@ -610,11 +647,13 @@ static uint64_t host_native_tls(HostImport *entry,void *caller,uintptr_t *argume
                     }
                 }
             }
-            if((setting||fls&&freeing)&&called&&(!returned||success)){
-                if(!host_tls_sources_add(&slot->aggregate,aggregation.owners,lease,aggregation.unknown))slot->gap=1;
+            int needsHistory=(setting||fls&&freeing)&&called&&(!returned||success),aggregateSaved=1;
+            if(needsHistory){
+                aggregateSaved=host_tls_sources_add(&slot->aggregate,aggregation.owners,lease,aggregation.unknown);
+                if(!aggregateSaved)slot->gap=1;
                 slot->aggregate.partial|=aggregation.partial;
             }
-            if(contribution&&called&&(!returned||success)){
+            if(contribution&&needsHistory&&(fls||!aggregateSaved)){
                 contribution->sources=aggregation;aggregation=(HostTlsSources){0};
                 contribution->valueReceipt=fls&&setting&&returned&&success;contribution->value=fls&&setting?arguments[1]:0;
                 contribution->next=slot->contributions;slot->contributions=contribution;contribution=NULL;

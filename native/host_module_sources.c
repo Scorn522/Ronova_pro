@@ -134,14 +134,15 @@ static int host_module_select_locked(HostImage *image,NativeThread *state,HostLi
      * Inspect this incarnation's published JNI relations as well as its loads.
      * Repeated complete runtime loads with the same exact Owner set are known,
      * but never manufacture a unique load out of multiple records. */
-    HostLibraryLoad *only=NULL;OwnerLink *baseline=NULL;int count=0,equivalent=!image->relationsGap,registrationMixed=image->relationsGap;
+    int indexGap=__atomic_load_n(&image->relationsGap,__ATOMIC_ACQUIRE);
+    HostLibraryLoad *only=NULL;OwnerLink *baseline=NULL;int count=0,equivalent=!indexGap,registrationMixed=indexGap;
     for(HostLibraryLoad *load=image->loads;load;load=load->imageNext){
         if(!host_module_load_current(load,image))continue;
         if(!count)baseline=load->owners;only=load;count++;
         if(!load->leaseComplete||load->unknown||native_has_producer(load->owners)
                 ||!host_module_sources_cover(baseline,load->owners)||!host_module_sources_cover(load->owners,baseline))equivalent=0;
     }
-    if(!count){if(unknown)*unknown|=image->relationsGap;return 0;}
+    if(!count){if(unknown)*unknown|=indexGap;return 0;}
     for(HostImageLibrary *p=__atomic_load_n(&image->libraries,__ATOMIC_ACQUIRE);p;p=p->next){
         NativeLibrary *library=p->library;
         if(library->hostImage!=image||library->handle!=image->handle||!library->jni||library->builtin

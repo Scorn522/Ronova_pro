@@ -57,11 +57,14 @@ static int host_callback_caller_load(NativeThread *state,void *caller,OwnerLink 
             selected=1;ready=ready&&native_owner_merge(owners,workerLibrary->owners);
         }
     }
-    if(!selected)for(HostImageLibrary *p=__atomic_load_n(&actual->libraries,__ATOMIC_ACQUIRE);p;p=p->next){
+    if(!selected){
+      if(unknown)*unknown|=__atomic_load_n(&actual->relationsGap,__ATOMIC_ACQUIRE);
+      for(HostImageLibrary *p=__atomic_load_n(&actual->libraries,__ATOMIC_ACQUIRE);p;p=p->next){
         NativeLibrary *library=p->library;
         if(actual->live&&library->hostImage==actual&&host_library_current(library,actual->handle)){
             selected=1;ready=ready&&native_owner_merge(owners,library->owners);
         }
+      }
     }
     if(!selected){*error=ERROR_MOD_NOT_FOUND;return 0;}
     if(!ready){*error=ERROR_NOT_ENOUGH_MEMORY;return 0;}return 1;
@@ -69,34 +72,22 @@ static int host_callback_caller_load(NativeThread *state,void *caller,OwnerLink 
 static int host_callback_caller_locked(NativeThread *state,void *caller,OwnerLink **owners,int *unknown,DWORD *error){
     return host_callback_caller_load(state,caller,owners,unknown,error,NULL);
 }
-static int host_callback_scopes_locked(NativeThread *state,OwnerLink **owners,int *unknown,DWORD *error){
-    if(!host_tls_capture(state,owners,unknown)){*error=ERROR_NOT_ENOUGH_MEMORY;return 0;}
-    for(unsigned i=0;i<state->depth;i++){
-        Binding *binding=state->stack[i];
-        if(!binding){*error=ERROR_INVALID_DATA;return 0;}
-        if(!native_owner_merge(owners,binding->owners)){*error=ERROR_NOT_ENOUGH_MEMORY;return 0;}
-    }
-    for(NativeLibraryScope *scope=state->library;scope;scope=scope->previous){
-        if(!scope->library){*error=ERROR_INVALID_DATA;return 0;}
-        if(!native_owner_merge(owners,scope->library->owners)){*error=ERROR_NOT_ENOUGH_MEMORY;return 0;}
-    }
-    for(NativeToolingScope *scope=state->tooling;scope;scope=scope->previous){
-        if(!native_owner_merge(owners,scope->owners)){*error=ERROR_NOT_ENOUGH_MEMORY;return 0;}
-        if(scope->unknown)*unknown=1;
-    }
-    return 1;
+static int host_callback_scopes_locked(NativeThread *state,OwnerLink **owners,int *unknown,DWORD *error,NativeSourceRoots *roots){
+    if(!host_tls_capture_detail(state,owners,unknown,roots?&roots->tls:NULL)){*error=ERROR_NOT_ENOUGH_MEMORY;return 0;}
+    return native_capture_active_sources(state,owners,unknown,roots,error);
 }
 static int host_callback_entry_sources(HostImport *entry,NativeThread *state,void *caller,
-        OwnerLink **owners,NativeLibrary **selected,int retainSources,int threadAdmissionOnly,int *unobserved,HostLibraryLoad **selectedLoad){
+        OwnerLink **owners,NativeLibrary **selected,int retainSources,int threadAdmissionOnly,int *unobserved,HostLibraryLoad **selectedLoad,NativeSourceRoots *roots){
     if(selected)*selected=NULL;
     if(!state||(!state->heapCallback&&!state->toolingRestricted&&!state->vmDetaching&&!state->vmThreadEnding&&!state->hostUnloadImage&&!state->hostRelease
             &&!(state->hostLoad&&state->hostLoad->calling))){
         SetLastError(ERROR_INVALID_STATE);return 0;
     }
-    int associated=host_entry_association(entry,state,owners,selected),ready=associated==1,unknown=entry->unknown||entry->image->relationsGap;
-    DWORD error=associated?ERROR_INVALID_DATA:ERROR_MOD_NOT_FOUND;
+    int unknown=entry->unknown;
+    int associated=host_entry_association_query(entry,state,owners,selected,&unknown),ready=associated==1;
+    DWORD error=associated<0?ERROR_NOT_ENOUGH_MEMORY:associated?ERROR_INVALID_DATA:ERROR_MOD_NOT_FOUND;
     if(ready)ready=host_callback_caller_load(state,caller,owners,&unknown,&error,selectedLoad);
-    if(ready)ready=host_callback_scopes_locked(state,owners,&unknown,&error);
+    if(ready)ready=host_callback_scopes_locked(state,owners,&unknown,&error,roots);
     if(unobserved)*unobserved|=unknown;
     /* A normal profiler may lack Java attribution while its actual image and
      * current library are known. New thread creation only checks stopped
@@ -107,5 +98,5 @@ static int host_callback_entry_sources(HostImport *entry,NativeThread *state,voi
         error=ERROR_INVALID_DATA;ready=0;
     }
     if(ready&&!retainSources)host_producers(owners);
-    if(!ready){if(selected)*selected=NULL;SetLastError(error);return 0;}return 1;
+    if(!ready){if(selected)*selected=NULL;if(selectedLoad)*selectedLoad=NULL;SetLastError(error);return 0;}return 1;
 }

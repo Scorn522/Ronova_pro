@@ -33,6 +33,7 @@ static int native_control_snapshot(const void *address,void *copy,size_t length)
 
 typedef struct Owner { jweak module; volatile LONG stopped,producer,kernelProtected,coreState,hostGap; struct Owner *next; } Owner;
 typedef struct OwnerLink {Owner *owner;struct OwnerLink *next;} OwnerLink;
+typedef struct NativeSourceRoots {int tls,binding,registration,tooling,code,process;} NativeSourceRoots;
 typedef struct HostLibraryLoad HostLibraryLoad;
 typedef struct NativeToolingScope {OwnerLink *owners;jweak origin;int unknown;unsigned depth;struct NativeToolingScope *previous;} NativeToolingScope;
 typedef struct NativeToolingImage NativeToolingImage;
@@ -85,6 +86,7 @@ typedef struct NativeThread {
 /* Actual dynamic TLS/FLS receipts are native state contributions, independent
  * of whether this OS thread currently has a Java attachment. */
 static int host_tls_capture(NativeThread*,OwnerLink**,int*);
+static int host_tls_capture_detail(NativeThread*,OwnerLink**,int*,int*);
 /* Complete actual sources qualify native state only through a producer or
  * this caller image's observed relationship to the exactly bound Core. The
  * implementation follows the Host directories; Host consumers may call this
@@ -289,14 +291,33 @@ static int native_stopped(JNIEnv *env){
     return code_current_stopped(env);
 }
 static jweak native_origin(NativeThread *state){if(!state)return NULL;if(state->tooling&&state->depth<=state->tooling->depth&&state->tooling->origin)return state->tooling->origin;return state->depth?state->stack[state->depth-1]->origin:state->library?state->library->library->origin:NULL;}
-static int native_capture_scope_sources_detail(JNIEnv *env,NativeThread *state,OwnerLink **owners,int *unknown,int *codeUnknown){
-    if(codeUnknown)*codeUnknown=0;
-    if(!host_tls_capture(state,owners,unknown))return 0;
-    if(!state)return 1;if(env)native_thread_jni_observed(state,env);for(unsigned i=0;i<state->depth;i++){if(!native_owner_merge(owners,state->stack[i]->owners))return 0;if(unknown&&state->stack[i]->hostUnknown)*unknown=1;}
-    for(NativeRegistration *scope=state->registration;scope;scope=scope->previous){if(!native_owner_merge(owners,scope->owners))return 0;if(unknown&&scope->unknown)*unknown=1;}
-    for(NativeLibraryScope *scope=state->library;scope;scope=scope->previous)if(!native_owner_merge(owners,scope->library->owners))return 0;for(NativeToolingScope *scope=state->tooling;scope;scope=scope->previous){if(!native_owner_merge(owners,scope->owners))return 0;if(scope->unknown&&unknown)*unknown=1;}
+static void native_source_roots_init(NativeSourceRoots *roots){
+    if(roots){memset(roots,0,sizeof(*roots));roots->code=roots->process=-1;}
+}
+/* Shared actual C scopes only. Callback callers never enter JNI or query code. */
+static int native_capture_active_sources(NativeThread *state,OwnerLink **owners,int *unknown,NativeSourceRoots *roots,DWORD *error){
+    if(!state)return 1;
+    for(unsigned i=0;i<state->depth;i++){Binding *binding=state->stack[i];
+        if(!binding){if(error)*error=ERROR_INVALID_DATA;return 0;}
+        if(roots)roots->binding|=binding->hostUnknown!=0;if(unknown)*unknown|=binding->hostUnknown!=0;
+        if(!native_owner_merge(owners,binding->owners)){if(error)*error=ERROR_NOT_ENOUGH_MEMORY;return 0;}}
+    for(NativeRegistration *p=state->registration;p;p=p->previous){
+        if(roots)roots->registration|=p->unknown!=0;if(unknown)*unknown|=p->unknown!=0;
+        if(!native_owner_merge(owners,p->owners)){if(error)*error=ERROR_NOT_ENOUGH_MEMORY;return 0;}}
+    for(NativeLibraryScope *p=state->library;p;p=p->previous){
+        if(!p->library){if(error)*error=ERROR_INVALID_DATA;return 0;}
+        if(!native_owner_merge(owners,p->library->owners)){if(error)*error=ERROR_NOT_ENOUGH_MEMORY;return 0;}}
+    for(NativeToolingScope *p=state->tooling;p;p=p->previous){
+        if(roots)roots->tooling|=p->unknown!=0;if(unknown)*unknown|=p->unknown!=0;
+        if(!native_owner_merge(owners,p->owners)){if(error)*error=ERROR_NOT_ENOUGH_MEMORY;return 0;}}
+    return 1;
+}
+static int native_capture_scope_sources_detail(JNIEnv *env,NativeThread *state,OwnerLink **owners,int *unknown,NativeSourceRoots *roots){
+    if(!host_tls_capture_detail(state,owners,unknown,roots?&roots->tls:NULL))return 0;
+    if(!state)return 1;if(env)native_thread_jni_observed(state,env);
+    if(!native_capture_active_sources(state,owners,unknown,roots,NULL))return 0;
     int missing=0,ready=code_current_sources_query(env,owners,unknown?&missing:NULL);
-    if(unknown)*unknown|=missing;if(codeUnknown)*codeUnknown=missing;return ready;
+    if(unknown)*unknown|=missing;if(roots)roots->code=missing;return ready;
 }
 static int native_capture_scope_sources(JNIEnv *env,NativeThread *state,OwnerLink **owners,int *unknown){return native_capture_scope_sources_detail(env,state,owners,unknown,NULL);}
 static int native_capture_scope_owners(JNIEnv *env,NativeThread *state,OwnerLink **owners){return native_capture_scope_sources(env,state,owners,NULL);}
