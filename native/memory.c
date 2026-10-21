@@ -6,8 +6,15 @@ typedef struct NativeMemoryWrite {
     struct NativeMemoryWrite *previous;
 } NativeMemoryWrite;
 
-static int native_memory_sources(JNIEnv *env,NativeThread *state,jobjectArray supplied,OwnerLink **sources,int *unknown){
-    if(!host_capture_query(env,state,NULL,sources,unknown))return 0;
+static int native_memory_sources(JNIEnv *env,NativeThread *state,jobjectArray supplied,OwnerLink **sources,int *unknown,int javaCaptured){
+    if(javaCaptured){
+        /* memoryWriteBegin's authenticated controller boundary has just read
+         * the live Java sources (including the actual buffer/copy operation).
+         * Retain all additional live C roots here, without calling back into
+         * Java to repeat that same walk. This is per operation, not a cache. */
+        if(!native_capture_scope_sources(env,state,sources,unknown)||!host_capture_caller(state,NULL,sources))return 0;
+        host_producers(sources);
+    }else if(!host_capture_query(env,state,NULL,sources,unknown))return 0;
     jsize count=supplied?native_original.GetArrayLength(env,supplied):0;int ready=1;
     AcquireSRWLockExclusive(&native_records);
     for(jsize i=0;i<count&&ready&&!native_original.ExceptionCheck(env);i++){
@@ -31,7 +38,7 @@ static int native_memory_control(JNIEnv *env,NativeThread *state,uint64_t addres
 }
 static int native_memory_call_begin(JNIEnv *env,NativeThread *state,Binding *binding,unsigned char *frame){
     OwnerLink *sources=NULL;int unknown=0;
-    state->control++;int ready=native_memory_sources(env,state,NULL,&sources,&unknown);state->control--;
+    state->control++;int ready=native_memory_sources(env,state,NULL,&sources,&unknown,0);state->control--;
     if(ready&&(native_owner_stopped(sources)||native_stopped(env))){native_refuse(env,"RONOVA_STOPPED_NATIVE_MEMORY_OPERATION");ready=0;}
     if(ready&&unknown&&native_has_producer(sources)){
         native_source_diagnostic(state,binding->unsafeOperation==UNSAFE_ALLOCATE?"unsafe_allocate":"unsafe_memory");
@@ -51,7 +58,7 @@ JNIEXPORT jlong JNICALL Java_dev_ronova_pro_bootstrap_NativeControl_memoryWriteB
     NativeThread *state=native_thread();if(!state||length<0){native_refuse(env,"NATIVE_MEMORY_SCOPE_UNAVAILABLE");return 0;}
     NativeMemoryWrite *scope=(NativeMemoryWrite*)calloc(1,sizeof(*scope));if(!scope){native_refuse(env,"NATIVE_MEMORY_SCOPE_CAPACITY");return 0;}
     scope->address=(uint64_t)address;scope->length=(uint64_t)length;scope->reading=reading==JNI_TRUE;
-    state->control++;int ready=native_memory_sources(env,state,contributors,&scope->sources,&scope->unknown);state->control--;
+    state->control++;int ready=native_memory_sources(env,state,contributors,&scope->sources,&scope->unknown,contributors!=NULL);state->control--;
     if(ready&&native_owner_stopped(scope->sources)){native_refuse(env,"RONOVA_STOPPED_NATIVE_MEMORY_SOURCE");ready=0;}
     if(ready)ready=native_memory_control(env,state,scope->address,scope->length);
     if(!ready){native_owner_links_free(scope->sources);free(scope);if(!native_original.ExceptionCheck(env))native_refuse(env,"NATIVE_MEMORY_SOURCES_UNAVAILABLE");return 0;}
@@ -76,7 +83,7 @@ JNIEXPORT void JNICALL Java_dev_ronova_pro_bootstrap_NativeControl_memoryWriteCo
     if(!native_memory_authority(env,type)){native_refuse(env,"ACTUAL_NATIVE_MEMORY_BOUNDARY_REQUIRED");return;}
     NativeThread *state=native_thread();NativeMemoryWrite *scope=state?state->memoryWrite:NULL;
     if(!scope||scope->reading||(jlong)(uintptr_t)scope!=token){native_refuse(env,"ACTUAL_NATIVE_MEMORY_SCOPE_REQUIRED");return;}
-    state->control++;int ready=native_memory_sources(env,state,contributors,&scope->sources,&scope->unknown);state->control--;
+    state->control++;int ready=native_memory_sources(env,state,contributors,&scope->sources,&scope->unknown,0);state->control--;
     if(!ready)native_refuse(env,"NATIVE_MEMORY_SOURCES_UNAVAILABLE");
     else if(native_owner_stopped(scope->sources))native_refuse(env,"RONOVA_STOPPED_NATIVE_MEMORY_SOURCE");
 }
