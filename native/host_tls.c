@@ -153,14 +153,16 @@ static HostTlsThread *host_tls_thread_get(int restricted){
     thread=(HostTlsThread*)calloc(1,sizeof(*thread));if(!thread){SetLastError(ERROR_NOT_ENOUGH_MEMORY);return NULL;}
     /* The actual kernel-thread handle is the terminal witness. Thread IDs and
      * a JVM detach/ThreadEnd never retire a TLS value or its read receipt. */
-    int locked=restricted?TryAcquireSRWLockExclusive(&host_records):(AcquireSRWLockExclusive(&host_records),1);
-    if(!locked){free(thread);SetLastError(ERROR_BUSY);return NULL;}
+    /* This leaf gate also spans external handle checks and their actual OS
+     * effects. A private monitor cannot be closed between allocation and
+     * publication, without waiting for unrelated process/JNI records here. */
+    (void)restricted;AcquireSRWLockExclusive(&host_tls_handles);
     HANDLE monitor=NULL;BOOL copied=host_real_duplicate(GetCurrentProcess(),GetCurrentThread(),GetCurrentProcess(),
             &monitor,SYNCHRONIZE,FALSE,0);DWORD error=copied?0:GetLastError();
     if(copied&&!TlsSetValue(host_tls_thread_key,thread)){error=GetLastError();host_real_close(monitor);copied=FALSE;}
     if(copied){AcquireSRWLockExclusive(&host_tls_records);thread->generation=++host_tls_generation;
         thread->monitor=monitor;thread->next=host_tls_threads;host_tls_threads=thread;ReleaseSRWLockExclusive(&host_tls_records);}
-    ReleaseSRWLockExclusive(&host_records);
+    ReleaseSRWLockExclusive(&host_tls_handles);
     if(!copied){free(thread);SetLastError(error?error:ERROR_INVALID_STATE);return NULL;}
     native_thread_worker_wake();return thread;
 }
@@ -292,10 +294,9 @@ static HostTlsLease *host_tls_lease_prepare(NativeThread *state,OwnerLink *owner
 }
 static int host_tls_callback_sources(NativeThread *state,void *callback,OwnerLink **owners,int *unknown,int restricted){
     if(!restricted)return host_capture_caller(state,callback,owners);
-    if(!state||!TryAcquireSRWLockShared(&host_imports)){SetLastError(ERROR_BUSY);return 0;}
-    if(!TryAcquireSRWLockShared(&native_records)){ReleaseSRWLockShared(&host_imports);SetLastError(ERROR_BUSY);return 0;}
+    if(!state){SetLastError(ERROR_INVALID_STATE);return 0;}
     DWORD error=ERROR_INVALID_DATA;int ready=host_callback_caller_locked(state,callback,owners,unknown,&error);
-    ReleaseSRWLockShared(&native_records);ReleaseSRWLockShared(&host_imports);if(!ready)SetLastError(error);return ready;
+    if(!ready)SetLastError(error);return ready;
 }
 static HostTlsSlot *host_tls_slot_find(int fls,DWORD index){
     for(HostTlsSlot *slot=host_tls_slots;slot;slot=slot->next)if(slot->live&&slot->fls==fls&&slot->index==index)return slot;return NULL;
@@ -585,7 +586,7 @@ static uint64_t host_native_tls(HostImport *entry,void *caller,uintptr_t *argume
     return called?result:host_tls_failure(kind,error?error:ERROR_INVALID_DATA,incoming);
 }
 
-/* host_records is held by the handle consumer and by monitor close below. */
+/* host_tls_handles spans the consumer's check and actual handle effect. */
 static int host_tls_internal_handle(HANDLE handle){
     int found=0;AcquireSRWLockShared(&host_tls_records);
     for(HostTlsThread *thread=host_tls_threads;thread;thread=thread->next)
@@ -602,7 +603,7 @@ static void host_tls_reap(JNIEnv **environment){
     if(!environment||!*environment)return;JNIEnv *env=*environment;
     /* No new timer or enumerator: the existing retirement daemon observes only
      * our retained actual thread handles and queued zero-reference leases. */
-    AcquireSRWLockExclusive(&host_records);AcquireSRWLockExclusive(&host_tls_records);
+    AcquireSRWLockExclusive(&host_tls_handles);AcquireSRWLockExclusive(&host_tls_records);
     __try {
     for(HostTlsThread *thread=host_tls_threads;thread;thread=thread->next){
         if(thread->releasing||thread->reaped)continue;
@@ -642,7 +643,7 @@ static void host_tls_reap(JNIEnv **environment){
         while(p){HostTlsContribution *next=p->next;host_tls_sources_clear(&p->sources);free(p);p=next;}
         slot->reaped=1;
     }
-    } __finally {ReleaseSRWLockExclusive(&host_tls_records);ReleaseSRWLockExclusive(&host_records);}
+    } __finally {ReleaseSRWLockExclusive(&host_tls_records);ReleaseSRWLockExclusive(&host_tls_handles);}
     /* Callback adapter pages and their RUNTIME_FUNCTION remain callable
      * tombstones. A failed, unpublished allocation has no OS callback receipt. */
     for(;;){HostTlsSlot *release=NULL;HMODULE pin=NULL;void *anchor=NULL;

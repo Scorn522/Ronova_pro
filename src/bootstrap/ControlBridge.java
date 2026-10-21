@@ -2155,13 +2155,12 @@ public final class ControlBridge {
         return host!=TaskBridge.class&&host!=ControlBridge.class&&host!=NativeControl.class;
     }
     static boolean rawMemoryCaller(){
-        Class<?> caller=NativeControl.available()?NativeControl.rawMemoryWriterCaller():WALKER.walk(RAW_MEMORY_CALLER);
-        // Reflection and MethodHandle implementation frames are omitted by the
-        // original walker; use its exact selection when native sees one first.
-        if(caller!=null){String name=caller.getName();
-            if(caller.isHidden()||name.startsWith("java.lang.reflect.")||name.startsWith("jdk.internal.reflect.")||name.startsWith("java.lang.invoke."))
-                caller=WALKER.walk(RAW_MEMORY_CALLER);
-        }
+        // This is caller authorization, using the same selector previously
+        // required after a native reflection/hidden-frame result. Read the
+        // current Java stack directly instead of performing a JVMTI walk and
+        // another VM transition on every scalar write/read/end. No writer or
+        // permission verdict is cached; Native source/range checks still run.
+        Class<?> caller=WALKER.walk(RAW_MEMORY_CALLER);
         if(caller==ResourceBridge.class||caller==CodeSourceBridge.class||caller!=null&&caller.getClassLoader()==null&&caller.getNestHost()==ExecutionFlow.class||ControlBridge.owns(caller))return true;
         if(UnsafeWriters.contains(caller))return true;
         return caller!=null&&caller.getClassLoader()==null&&HandleWriters.roots.contains(caller.getNestHost());

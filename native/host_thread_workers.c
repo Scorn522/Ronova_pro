@@ -66,8 +66,8 @@ static int host_thread_worker_scope_idle(const NativeThread *state){
     return state&&state->hostWorker&&(!state->tooling||state->tooling==&state->hostWorker->scope);
 }
 static NativeLibrary *host_thread_worker_library(NativeThread *state,HMODULE image){
-    /* Called with native_records held. This is the actual registration selected
-     * by this worker's creation invocation, not a synthetic JDK load scope.
+    /* The current worker retains this immutable registration. This is the
+     * actual creation invocation, not a synthetic JDK load scope.
      */
     HostThreadWorker *worker=state?state->hostWorker:NULL;
     NativeLibrary *library=worker?worker->library:NULL;

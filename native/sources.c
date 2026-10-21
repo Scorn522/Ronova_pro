@@ -209,7 +209,7 @@ JNIEXPORT jlong JNICALL Java_dev_ronova_pro_bootstrap_NativeControl_libraryBegin
         if(name){library->name=native_original.NewWeakGlobalRef(env,name);jsize length=native_original.GetStringLength(env,name);library->nameLength=length;library->path=(wchar_t*)calloc((size_t)length+1,sizeof(wchar_t));
             if(library->path)native_original.GetStringRegion(env,name,0,length,(jchar*)library->path);native_original.DeleteLocalRef(env,name);}
         ready=ready&&library->identity&&library->origin&&library->name&&library->path&&!native_original.ExceptionCheck(env)&&!native_owner_stopped(library->owners);
-        if(ready){library->alive=1;library->next=native_libraries;native_libraries=library;scope->library=library;scope->previous=state->library;state->library=scope;}
+        if(ready){library->alive=1;library->next=native_libraries;InterlockedExchangePointer((void *volatile*)&native_libraries,library);scope->library=library;scope->previous=state->library;state->library=scope;}
     }
     ReleaseSRWLockExclusive(&native_records);
     if(carrier)native_original.DeleteLocalRef(env,carrier);if(consumer)native_original.DeleteLocalRef(env,consumer);state->control--;

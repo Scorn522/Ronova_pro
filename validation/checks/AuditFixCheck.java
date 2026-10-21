@@ -2297,7 +2297,7 @@ public final class AuditFixCheck {
         require(Boolean.FALSE.equals(raw.invoke(null)),"foreign raw memory caller admitted");
         Method nativeRead=nativeControl.getDeclaredMethod("memoryReadSources0",long.class);nativeRead.setAccessible(true);
         try{nativeRead.invoke(null,0L);throw new AssertionError("foreign private native memory read admitted");}
-        catch(InvocationTargetException refused){require(refused.getCause() instanceof IllegalStateException&&"ACTUAL_NATIVE_MEMORY_READER_REQUIRED".equals(refused.getCause().getMessage()),"native raw read was not refused at caller authority: "+refused.getCause());}
+        catch(InvocationTargetException refused){require(refused.getCause() instanceof IllegalStateException&&"ACTUAL_NATIVE_MEMORY_BOUNDARY_REQUIRED".equals(refused.getCause().getMessage()),"native raw read was not refused at caller authority: "+refused.getCause());}
         long address=U.allocateMemory(8);
         try{
             U.putLong(address,0x1020304050607080L);byte[] bytes=new byte[8];long base=U.arrayBaseOffset(byte[].class);

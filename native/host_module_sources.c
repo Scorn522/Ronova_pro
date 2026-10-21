@@ -12,7 +12,8 @@ struct HostLibraryLoad {
     HMODULE actual,sparePin;DWORD flags,error;
     NativeToolingScope scope;
     volatile LONG calling,borrowers;
-    int unknown,leaseComplete,resource,nonExecutable,publicCarrier,retired,releasing,refused;
+    volatile LONG unknown,leaseComplete,retired,releasing;
+    int resource,nonExecutable,publicCarrier,refused;
     struct HostLibraryLoad *next,*imageNext;
 };
 static HostLibraryLoad *host_library_loads;
@@ -55,11 +56,13 @@ static int host_module_load_current(const HostLibraryLoad *load,HostImage *image
     return load&&load->actual&&load->image==image&&!load->resource&&!load->nonExecutable
             &&!load->retired&&image->live&&image->pin&&!image->releasing;
 }
-/* host_imports is held. Prefer actual execution provenance to every historical
- * loader of a shared image. No path/name or borrowed JDK identity is used. */
+/* Source records and links are immutable after release publication and remain
+ * tombstones. Normal writers still hold host_imports; callback readers need
+ * no directory gate. Prefer this actual execution to historical shared-image
+ * loaders, and read current lifecycle/owner flags on every invocation. */
 static int host_module_select_locked(HostImage *image,NativeThread *state,HostLibraryLoad *preferred,
         OwnerLink **owners,HostLibraryLoad **selected,int *unknown){
-    if(selected)*selected=NULL;if(!image||!image->loads)return 0;
+    if(selected)*selected=NULL;if(!image||!__atomic_load_n(&image->loads,__ATOMIC_ACQUIRE))return 0;
     if(state&&state->hostUnloadImage==image){
         if(owners&&state->tooling&&!native_owner_merge(owners,state->tooling->owners))return -1;
         if(unknown&&state->tooling)*unknown|=state->tooling->unknown;return 1;
@@ -262,9 +265,9 @@ static void host_module_return(HostLibraryLoad *load,HMODULE actual,DWORD error)
     if(!image){image=load->preparedImage;load->preparedImage=NULL;
         image->handle=actual;image->live=1;memcpy(image->targets,targets,sizeof(targets));
         image->createTarget=targets[HOST_CREATE_W];image->createATarget=targets[HOST_CREATE_A];image->resolveTarget=targets[HOST_RESOLVE];
-        image->next=host_images;host_images=image;}
+        image->next=host_images;InterlockedExchangePointer((void *volatile*)&host_images,image);}
     HMODULE spare=NULL;if(!image->pin)image->pin=pin;else spare=pin;
-    load->image=image;load->imageNext=image->loads;image->loads=load;
+    load->image=image;load->imageNext=image->loads;InterlockedExchangePointer((void *volatile*)&image->loads,load);
     if(!image->checked)host_image_imports(image);
     InterlockedExchange(&image->retiring,host_module_image_sources_retired_locked(image));
     ReleaseSRWLockExclusive(&host_imports);
@@ -275,10 +278,12 @@ static void host_module_return(HostLibraryLoad *load,HMODULE actual,DWORD error)
 }
 static void host_module_mark_export(HMODULE requested,void *actual){
     if(!actual||!requested)return;
-    AcquireSRWLockExclusive(&host_imports);
-    for(HostImage *image=host_images;image;image=image->next)
-        if(image->live&&image->pin&&image->loads&&image->handle==requested){image->opaque=1;InterlockedExchange(&image->retiring,0);}
-    ReleaseSRWLockExclusive(&host_imports);
+    for(HostImage *image=__atomic_load_n(&host_images,__ATOMIC_ACQUIRE);image;image=image->next){
+        if(image->handle!=requested)continue;
+        AcquireSRWLockExclusive(&image->calls);
+        if(image->live&&image->pin&&image->loads){image->opaque=1;InterlockedExchange(&image->retiring,0);}
+        ReleaseSRWLockExclusive(&image->calls);
+    }
 }
 static int host_module_image_release_ready_locked(HostImage *image){
     if(!image->pin||image->releasing||image->opaque||InterlockedCompareExchange(&image->active,0,0))return 0;
@@ -309,15 +314,21 @@ static void host_module_loads_reap(JNIEnv **environment){
         for(HostImage *candidate=host_images;candidate;candidate=candidate->next)
             if(host_module_image_release_ready_locked(candidate)){image=candidate;break;}
         if(image){
+            AcquireSRWLockExclusive(&image->calls);
+            if(!host_module_image_release_ready_locked(image)){
+                ReleaseSRWLockExclusive(&image->calls);image=NULL;
+            }
+        }
+        if(image){
             int ready=1;for(HostLibraryLoad *load=image->loads;load&&ready;load=load->imageNext)
                 ready=native_owner_merge(&sources,load->owners);
             if(ready){image->releasing=1;host_image_private_slots_locked(image);pin=image->pin;oldLive=image->live;
-                AcquireSRWLockShared(&native_records);int jni=0;
-                for(NativeLibrary *library=native_libraries;library&&!jni;library=library->next)
+                int jni=0;
+                for(NativeLibrary *library=__atomic_load_n(&native_libraries,__ATOMIC_ACQUIRE);library&&!jni;library=library->next)
                     jni=library->hostImage==image&&host_library_current(library,image->handle);
-                ReleaseSRWLockShared(&native_records);
                 if(!jni)image->live=0; /* logical tombstone before our own release */
-            }else {image->opaque=1;image=NULL;InterlockedIncrement(&native_failures);}
+                ReleaseSRWLockExclusive(&image->calls);
+            }else {image->opaque=1;ReleaseSRWLockExclusive(&image->calls);image=NULL;InterlockedIncrement(&native_failures);}
         }
         ReleaseSRWLockExclusive(&host_imports);
         if(!image){native_owner_links_free(sources);break;}
@@ -326,9 +337,11 @@ static void host_module_loads_reap(JNIEnv **environment){
         int released=host_real_free_library(pin)!=0;DWORD error=released?0:GetLastError();state->tooling=scope.previous;
         state->hostUnloadImage=previousImage;
         AcquireSRWLockExclusive(&host_imports);
+        AcquireSRWLockExclusive(&image->calls);
         if(released){image->pin=NULL;image->pinReleased=1;}else {image->live=oldLive;image->opaque=1;
             for(HostLibraryLoad *load=image->loads;load;load=load->imageNext)load->error=error;}
-        image->releasing=0;host_image_private_slots_locked(image);InterlockedExchange(&image->retiring,0);ReleaseSRWLockExclusive(&host_imports);native_owner_links_free(sources);
+        image->releasing=0;host_image_private_slots_locked(image);InterlockedExchange(&image->retiring,0);
+        ReleaseSRWLockExclusive(&image->calls);ReleaseSRWLockExclusive(&host_imports);native_owner_links_free(sources);
         if(!native_tooling_retirement_jni(environment)){native_thread_callback_leave(state);return;}
         if(!released)break;
     }

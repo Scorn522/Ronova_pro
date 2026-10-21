@@ -355,7 +355,7 @@ static uint64_t host_native_module_load(HostImport *entry,void *caller,uintptr_t
     }
     if(native_has_producer(load->owners)&&(load->unknown||!load->leaseComplete||!native_thread_worker_backend_ready())){
         fprintf(stderr,"RONOVA_HOST_MODULE_LOAD_REFUSED:ADMISSION:unknown=%d:retained=%d:lease=%d:backend=%d\n",
-                load->unknown,retained,load->leaseComplete,native_thread_worker_backend_ready());
+                (int)load->unknown,retained,(int)load->leaseComplete,native_thread_worker_backend_ready());
         native_source_diagnostic(state,"module_load");
         load->refused=1;host_module_publish(load);InterlockedExchange(&load->calling,0);
         native_thread_worker_wake();SetLastError(ERROR_INVALID_DATA);return 0;

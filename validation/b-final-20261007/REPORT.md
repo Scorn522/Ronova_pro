@@ -1,5 +1,13 @@
 # B 批实际报告：2026-10-09 代码收敛接续
 
+## 2026-10-21：候选 26 回调/TLS 收口与实际调用者检查
+
+接续 9c24296。attempt-22 原生崩溃保留；attempt-23 的失败日志与线程栈显示 CRT/FLS/导出入口在业务许可判断前被全局目录竞争误拒。完整发布的来源/映像记录改为原子发布后只读查询，单映像短锁维护实际调用与卸载排斥，不删除来源或停止判定。attempt-24 未再出现此前大量入口 BUSY，推进至 Render thread；剩余三次 FLS_GET preparation BUSY 来自首次线程上下文登记的全局记录锁竞争。该轮中断后没有正常退出证据且没有打开测试存档，保持未通过。
+
+剩余 TLS 监视句柄改用专用同步：分配到发布、外部消费者检查到真实 CloseHandle/DuplicateHandle/句柄修改、退役关闭均按同一顺序连续保护，不存在查询后可关闭/复用私有句柄的窗口。该锁不在持有期间进入 VM/加载器，普通 FLS 读取不再因无关进程记录竞争返回假失败。真实调用者授权则直接使用既有 Java 栈选择器，避免每个普通内存读写先转入 JVMTI 再回 Java；仍按实际调用类授权，不缓存许可，Native 来源/控制区/生命周期保护保留。
+
+candidate-25 构建通过（34 秒）。现有 live-control-writer 使用 PCL 同版 Java、实际 Agent/Bootstrap/Native 与 Unsafe 保护运行，输出 LIVE_CONTROL_WRITER_PASS actual_native foreign_caller_refused protected_array_preserved foreign_raw_reader_refused actual_unsafe_raw_copy，退出 0。检查仅更新了与现行生产拒绝消息一致的预期，没有新增 metadata seam 或消费者夹具。candidate-26 的完整包统一构建通过（20 秒）；双 JAR 已备份部署、参数重新生成，attempt-26 已按原完整 Mod 组合与真实 PCL 命令启动。当前仍没有单人世界、稳定世界 Tick 或保存退出 PASS。
+
 ## 2026-10-21：PCL 真实客户端循环修复（阶段性，世界验收未完成）
 
 基线为 41e7887，主工程 D:\桌面\ronova_GPT。本轮使用原 PCL 实例、原完整 JVM/游戏参数及原有全部 Mod，仅为 --quickPlaySingleplayer 指定独立存档副本。旧候选与参数逐轮备份；私人启动参数、原始日志、线程栈、崩溃转储、存档和第三方包均未加入公开仓库。

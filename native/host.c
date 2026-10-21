@@ -210,6 +210,10 @@ typedef struct HostProcess {
 } HostProcess;
 typedef struct HostCreation {OwnerLink *owners;HostProcess *created;struct HostCreation *previous;jweak handles;LONG64 token;int constructor;} HostCreation;
 static SRWLOCK host_records=SRWLOCK_INIT;
+/* TLS monitor allocation/publication and consuming handle calls share this
+ * gate. Its only nested directory is the leaf host_tls_records; neither path
+ * enters the VM or loader while holding it. */
+static SRWLOCK host_tls_handles=SRWLOCK_INIT;
 static CONDITION_VARIABLE host_changed=CONDITION_VARIABLE_INIT;
 static HostProcess *host_processes;
 /* Whole JVM policy, independent of every child process's Java Mod sources.
@@ -249,14 +253,21 @@ typedef struct HostImport {
     struct HostImport *next;
 } HostImport;
 typedef struct HostImage {
+    /* Leaf admission gate: never held across a source query, VM/loader call
+     * or an external API. It serializes only entry counts with unpinning. */
+    SRWLOCK calls;
     HMODULE handle;
     HMODULE pin;
     DWORD size,functionsRva,functionCount;
     HostImport *imports;
     void *createTarget,*createATarget,*resolveTarget;
     void *targets[HOST_KIND_COUNT];
-    int live,checked,failed,loadWindow,delayImports;
-    int releasing,pinReleased,opaque;
+    volatile LONG live;
+    int checked,loadWindow,delayImports;
+    volatile LONG failed;
+    volatile LONG releasing;
+    int pinReleased;
+    volatile LONG opaque;
     volatile LONG retiring;
     volatile LONG active;
     HostLibraryLoad *loads;
@@ -267,6 +278,10 @@ typedef struct HostImage {
  * never reactivates an old import entry or carries its former sources forward. */
 static SRWLOCK host_imports=SRWLOCK_INIT;
 static HostImage *host_images;
+static void host_import_publish(HostImage *image,HostImport *entry){
+    HostImport *prior=__atomic_load_n(&image->imports,__ATOMIC_ACQUIRE);
+    do {entry->next=prior;}while(!__atomic_compare_exchange_n(&image->imports,&prior,entry,0,__ATOMIC_RELEASE,__ATOMIC_ACQUIRE));
+}
 /* host_imports is held; only the current logical image incarnation may keep
  * an outside IAT address registered. Retained thunk tombstones keep no such
  * span after that incarnation closes, even if the address is later reused. */
@@ -778,7 +793,7 @@ static int host_entry_association(HostImport *entry,NativeThread *state,OwnerLin
             if(workerLibrary&&workerLibrary->hostImage==entry->image){associated=1;chosen=workerLibrary;
                 if(owners)ready=ready&&native_owner_merge(owners,workerLibrary->owners);}
         }
-        if(!associated&&!entry->library)for(NativeLibrary *library=native_libraries;library;library=library->next)
+        if(!associated&&!entry->library)for(NativeLibrary *library=__atomic_load_n(&native_libraries,__ATOMIC_ACQUIRE);library;library=library->next)
             if(library->hostImage==entry->image&&host_library_current(library,entry->image->handle)){
                 associated=1;if(chosen&&chosen!=library)mixed=1;else chosen=library;
                 if(owners)ready=ready&&native_owner_merge(owners,library->owners);
@@ -870,9 +885,9 @@ static FARPROC WINAPI host_native_resolve(HMODULE module,LPCSTR name,HostImport 
      * The callback source query below already stays out of Java/the VM;
      * retain its actual scopes and wrap the resolved boundary as usual. */
     entry=host_consumed_entry(entry,state,caller);
-    AcquireSRWLockShared(&host_imports);AcquireSRWLockShared(&native_records);
+    AcquireSRWLockExclusive(&entry->image->calls);
     int associated=host_entry_association(entry,state,NULL,NULL);
-    ReleaseSRWLockShared(&native_records);ReleaseSRWLockShared(&host_imports);
+    ReleaseSRWLockExclusive(&entry->image->calls);
     if(associated!=1){SetLastError(associated?ERROR_INVALID_DATA:ERROR_MOD_NOT_FOUND);return NULL;}
     SetLastError(incoming);FARPROC actual=((HostGetProcAddress)entry->original)(module,name);
     DWORD error=GetLastError();
@@ -884,30 +899,33 @@ static FARPROC WINAPI host_native_resolve(HMODULE module,LPCSTR name,HostImport 
     if(!actual||!kind){host_module_mark_export(module,(void*)actual);SetLastError(error);return actual;}
     /* The retained control boundaries use their actual provider export. */
     OwnerLink *owners=NULL;NativeLibrary *library=NULL;int unknown=0;
-    if(!host_entry_sources_query(entry,state,caller,&owners,&library,1,&unknown)){native_owner_links_free(owners);return NULL;}
+    if(!host_entry_sources_query(entry,state,caller,&owners,&library,1,&unknown)){
+        DWORD refusal=GetLastError();
+        fprintf(stderr,"NATIVE_EXPORT_REFUSED:kind=%d:error=%lu:thread=%lu:caller=%p:restricted=%u\n",kind,
+                (unsigned long)refusal,(unsigned long)GetCurrentThreadId(),caller,state?state->toolingRestricted:0);
+        native_owner_links_free(owners);SetLastError(refusal);return NULL;
+    }
     if(native_owner_stopped(owners)){native_owner_links_free(owners);SetLastError(ERROR_ACCESS_DENIED);return NULL;}
     HostImport *resolved=(HostImport*)calloc(1,sizeof(*resolved));
     if(resolved){
         resolved->image=entry->image;resolved->original=(void*)actual;resolved->kind=kind;
         resolved->library=library;resolved->sources=owners;resolved->returned=1;resolved->unknown=unknown;
-        AcquireSRWLockShared(&host_imports);
         (void)host_module_select_locked(entry->image,state,entry->load,&owners,&resolved->load,&unknown);
-        ReleaseSRWLockShared(&host_imports);
         resolved->sources=owners;resolved->unknown=unknown;
         if(!host_is_create(kind)||host_worker_ready())resolved->entry=host_import_entry(resolved);
     }
     if(!resolved||!resolved->entry){
-        AcquireSRWLockExclusive(&host_imports);entry->image->failed=1;ReleaseSRWLockExclusive(&host_imports);
+        InterlockedExchange(&entry->image->failed,1);
         native_owner_links_free(owners);free(resolved);SetLastError(ERROR_NOT_ENOUGH_MEMORY);return NULL;
     }
-    AcquireSRWLockExclusive(&host_imports);AcquireSRWLockShared(&native_records);
+    AcquireSRWLockExclusive(&entry->image->calls);
     associated=host_entry_association(resolved,state,NULL,NULL);
     int stopped=native_owner_stopped(resolved->sources)!=NULL;
     if(associated==1&&!stopped){
-        resolved->next=entry->image->imports;entry->image->imports=resolved;
+        host_import_publish(entry->image,resolved);
         entry->image->loadWindow=1;
     }
-    ReleaseSRWLockShared(&native_records);ReleaseSRWLockExclusive(&host_imports);
+    ReleaseSRWLockExclusive(&entry->image->calls);
     if(associated!=1||stopped){
         RtlDeleteFunctionTable(&resolved->unwind);host_real_virtual_free(resolved->entry,0,MEM_RELEASE);
         native_owner_links_free(owners);free(resolved);
@@ -1013,6 +1031,7 @@ static uint64_t host_native_handle(HostImport *entry,void *caller,uintptr_t *arg
     }else {
         AcquireSRWLockShared(&host_imports);AcquireSRWLockExclusive(&host_records);AcquireSRWLockShared(&native_records);
     }
+    AcquireSRWLockShared(&host_tls_handles);
     HANDLE value=(HANDLE)arguments[kind==HOST_DUPLICATE?1:0];
     HANDLE thread=NULL;DWORD refusal=0;
     if(threadEffect){
@@ -1037,6 +1056,7 @@ static uint64_t host_native_handle(HostImport *entry,void *caller,uintptr_t *arg
     }
     if(refusal){
         if(thread&&!host_real_close(thread))InterlockedIncrement(&native_failures);
+        ReleaseSRWLockShared(&host_tls_handles);
         ReleaseSRWLockShared(&native_records);ReleaseSRWLockExclusive(&host_records);ReleaseSRWLockShared(&host_imports);
         native_owner_links_free(owners);return host_handle_refused(kind,refusal);
     }
@@ -1056,6 +1076,7 @@ static uint64_t host_native_handle(HostImport *entry,void *caller,uintptr_t *arg
     if((!opening&&local&&host_internal_handle(value))
             ||stopped&&(!closeOnly||!alias||!host_handle_private(alias)||!host_owners_contain(alias->owners,owners))){
         if(thread&&!host_real_close(thread))InterlockedIncrement(&native_failures);
+        ReleaseSRWLockShared(&host_tls_handles);
         ReleaseSRWLockShared(&native_records);ReleaseSRWLockExclusive(&host_records);ReleaseSRWLockShared(&host_imports);
         native_owner_links_free(owners);return host_handle_refused(kind,ERROR_ACCESS_DENIED);
     }
@@ -1090,6 +1111,7 @@ static uint64_t host_native_handle(HostImport *entry,void *caller,uintptr_t *arg
         else process->lifetimeGap=process->unknown=1;
     }
     if(thread&&!host_real_close(thread))InterlockedIncrement(&native_failures);
+    ReleaseSRWLockShared(&host_tls_handles);
     ReleaseSRWLockShared(&native_records);ReleaseSRWLockShared(&host_imports);
     if(process)host_collect(process);
     WakeAllConditionVariable(&host_changed);ReleaseSRWLockExclusive(&host_records);
@@ -1116,6 +1138,11 @@ typedef struct HostCallErrors {DWORD windows;int crt;unsigned long dos;} HostCal
 static HostCallErrors host_call_errors(void){HostCallErrors value={GetLastError(),errno,_doserrno};return value;}
 static void host_call_restore(HostCallErrors value){_doserrno=value.dos;errno=value.crt;SetLastError(value.windows);}
 static uint64_t host_native_failure(HostImport *entry,DWORD error,const HostCallErrors *incoming,const HostNtThreadErrors *ntBefore){
+    if(host_is_tls(entry->kind)||entry->kind==HOST_RESOLVE||host_is_module_load(entry->kind)){
+        static volatile LONG failures;ULONG count=(ULONG)InterlockedIncrement(&failures);
+        if(count<=64||!(count&(count-1)))fprintf(stderr,"NATIVE_HOST_ENTRY_REFUSED:kind=%d:error=%lu:thread=%lu:image=%p\n",
+                entry->kind,(unsigned long)error,(unsigned long)GetCurrentThreadId(),entry->image->handle);
+    }
     if(host_is_nt_memory(entry->kind))return host_nt_refuse(ntBefore,error);
     host_call_restore(*incoming);if(host_is_memory_transfer(entry->kind))host_nt_restore(ntBefore);
     if(host_is_tls(entry->kind))return host_tls_failure(entry->kind,error,incoming->windows);
@@ -1158,15 +1185,13 @@ static uint64_t host_native_call_body(HostImport *entry,void *caller,uintptr_t *
     int transfer=host_is_memory_transfer(entry->kind);HostNtThreadErrors ntBefore={0},ntAfter={0};
     if(transfer){ntBefore=host_nt_errors();ntAfter=ntBefore;}
     NativeThread *state=native_tls==TLS_OUT_OF_INDEXES?NULL:(NativeThread*)TlsGetValue(native_tls);
-    int restricted=host_loader_callout()||(state&&(state->heapCallback||state->toolingRestricted||state->vmDetaching
-            ||state->vmThreadEnding||state->hostUnloadImage||state->hostRelease||state->hostLoad&&state->hostLoad->calling));
-    if(restricted){
-        if(!TryAcquireSRWLockShared(&host_imports))return host_native_failure(entry,ERROR_BUSY,&incoming,&ntBefore);
-        if(!TryAcquireSRWLockShared(&native_records)){ReleaseSRWLockShared(&host_imports);return host_native_failure(entry,ERROR_BUSY,&incoming,&ntBefore);}
-    }else {AcquireSRWLockShared(&host_imports);AcquireSRWLockShared(&native_records);}
+    /* Association reads only the published incarnation, immutable source
+     * records and current atomic lifecycle flags. Directory contention is not
+     * a failed Win32 call, particularly in a CRT's loader/FLS callback. */
+    AcquireSRWLockExclusive(&entry->image->calls);
     int associated=host_entry_association(entry,state,NULL,NULL);
     if(associated==1)InterlockedIncrement(&entry->image->active);
-    ReleaseSRWLockShared(&native_records);ReleaseSRWLockShared(&host_imports);
+    ReleaseSRWLockExclusive(&entry->image->calls);
     if(associated!=1)return host_native_failure(entry,associated?ERROR_INVALID_DATA:ERROR_MOD_NOT_FOUND,&incoming,&ntBefore);
     uint64_t result=0;int returned=0,callback=state!=NULL;if(callback)native_thread_callback_enter(state);
     __try {
@@ -1394,7 +1419,7 @@ static void host_install_slot(HostImage *image,void *volatile *slot,int declared
     if(!entry){image->failed=1;return;}
     entry->image=image;entry->slot=slot;entry->kind=kind?kind:declared;entry->delayed=delayed;
     if(!native_private_register(&entry->slotRange,(const void*)slot,sizeof(*slot))){free(entry);image->failed=1;return;}
-    entry->next=image->imports;image->imports=entry;
+    host_import_publish(image,entry);
     image->loadWindow=1;
     if(!kind)return; /* A declared unresolved delay entry is not an API result. */
     entry->original=original;
@@ -1708,7 +1733,7 @@ static int host_observe_image_scope(HMODULE handle,NativeLibraryScope *loading){
     if(!image){image=(HostImage*)calloc(1,sizeof(*image));if(image){
         image->handle=handle;memcpy(image->targets,targets,sizeof(targets));
         image->createTarget=targets[HOST_CREATE_W];image->createATarget=targets[HOST_CREATE_A];image->resolveTarget=targets[HOST_RESOLVE];
-        image->live=1;image->next=host_images;host_images=image;
+        image->live=1;image->next=host_images;InterlockedExchangePointer((void *volatile*)&host_images,image);
     }}
     if(image){
         if(early)loading->library->hostImage=image;
@@ -1739,7 +1764,9 @@ static void host_library_load_failed(NativeLibrary *library){
     AcquireSRWLockExclusive(&host_imports);AcquireSRWLockShared(&native_records);
     HostImage *image=library->hostImage;int closed=0;
     if(image&&image->live&&!host_image_other_live(image,library)){
+        AcquireSRWLockExclusive(&image->calls);
         image->failed=1;image->delayImports=1;image->live=0;host_image_private_slots_locked(image);closed=1;
+        ReleaseSRWLockExclusive(&image->calls);
     }
     ReleaseSRWLockShared(&native_records);
     ReleaseSRWLockExclusive(&host_imports);
@@ -1756,7 +1783,9 @@ static int host_library_releasing(NativeLibrary *library,int prepare){
      * Disable the last image entry first. Only its exact live unload scope may
      * still call it; other callers are refused without reading a retired IAT. */
     if(!shared&&image->live){
+        AcquireSRWLockExclusive(&image->calls);
         image->delayImports=host_delay_gaps(image);image->live=0;host_image_private_slots_locked(image);
+        ReleaseSRWLockExclusive(&image->calls);
     }
     ReleaseSRWLockExclusive(&host_imports);
     return 1;

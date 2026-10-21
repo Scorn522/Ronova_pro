@@ -22,14 +22,17 @@ static int host_callback_image_current_locked(NativeThread *state,HostImage *ima
         if(scope->unloading&&host_callback_library_current_locked(state,scope->library,image))return 1;
     return 0;
 }
-/* Both directories are already held shared. The range was taken from this
+/* Published directories retain their records as tombstones. Library owners
+ * are immutable at publication; current alive/complete/stopped flags remain
+ * live reads. No VM query or loader operation is used by these readers.
+ * The range was taken from this
  * observed PE image incarnation; it never resolves a new DLL, path or module.
  * Prefer the active registration for a shared caller image, as in the ordinary
  * host_capture_caller path. Otherwise retain all actual current registrations.
  */
 static int host_callback_caller_locked(NativeThread *state,void *caller,OwnerLink **owners,int *unknown,DWORD *error){
     uintptr_t address=(uintptr_t)caller;HostImage *actual=NULL;
-    for(HostImage *image=host_images;image;image=image->next){
+    for(HostImage *image=__atomic_load_n(&host_images,__ATOMIC_ACQUIRE);image;image=image->next){
         uintptr_t base=(uintptr_t)image->handle;
         if(!caller||address<base||address-base>=image->size||!host_callback_image_current_locked(state,image))continue;
         if(actual&&actual!=image){*error=ERROR_INVALID_DATA;return 0;}actual=image;
@@ -53,7 +56,7 @@ static int host_callback_caller_locked(NativeThread *state,void *caller,OwnerLin
             selected=1;ready=ready&&native_owner_merge(owners,workerLibrary->owners);
         }
     }
-    if(!selected)for(NativeLibrary *library=native_libraries;library;library=library->next)
+    if(!selected)for(NativeLibrary *library=__atomic_load_n(&native_libraries,__ATOMIC_ACQUIRE);library;library=library->next)
         if(actual->live&&library->hostImage==actual&&host_library_current(library,actual->handle)){
             selected=1;ready=ready&&native_owner_merge(owners,library->owners);
         }
@@ -84,10 +87,6 @@ static int host_callback_entry_sources(HostImport *entry,NativeThread *state,voi
             &&!(state->hostLoad&&state->hostLoad->calling))){
         SetLastError(ERROR_INVALID_STATE);return 0;
     }
-    if(!TryAcquireSRWLockShared(&host_imports)){SetLastError(ERROR_BUSY);return 0;}
-    if(!TryAcquireSRWLockShared(&native_records)){
-        ReleaseSRWLockShared(&host_imports);SetLastError(ERROR_BUSY);return 0;
-    }
     int associated=host_entry_association(entry,state,owners,selected),ready=associated==1,unknown=entry->unknown;
     DWORD error=associated?ERROR_INVALID_DATA:ERROR_MOD_NOT_FOUND;
     if(ready)ready=host_callback_caller_locked(state,caller,owners,&unknown,&error);
@@ -102,6 +101,5 @@ static int host_callback_entry_sources(HostImport *entry,NativeThread *state,voi
         error=ERROR_INVALID_DATA;ready=0;
     }
     if(ready&&!retainSources)host_producers(owners);
-    ReleaseSRWLockShared(&native_records);ReleaseSRWLockShared(&host_imports);
     if(!ready){if(selected)*selected=NULL;SetLastError(error);return 0;}return 1;
 }
