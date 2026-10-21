@@ -4,7 +4,9 @@
 
 完成实际 caller 索引缺口的按需传播与原子标志、普通 scoped owners/selectedLoad 接线及失败清空、普通/受限共用纯 C Binding/Registration/Library/Tooling 合并。租约后备合并改为临时真实指针集合与暂存链一次合并，保留共享尾链和失败引用清理；普通 TLS 正式并集提交成功便释放备用增量，失败保留，FLS 历史规则不变。实际采集过程提供入口诊断，FLS callback 查询处保存其 unknown/producer，失败使用最终有效来源；没有额外诊断扫描或重新进 VM。
 
-首次构建遇 ForgeGradle 证书校验失败，同配置重试构建通过（45 秒）。未运行助手桩/metadata seam，源码路径与编译不冒充三组故障场景已经实测。当前实际进程仍为 37：全 Mod 资源加载完成，独立常规世界 IntegratedServer 已启动，出生区块尚在生成，未有玩家入场/稳定 Tick/正常退出通过。匹配 PDB 的真实来源记录显示后续显卡 load 自身 unknown=1/leaseComplete=0；JNA 初始失败是 known/source_lease；tls=24 不单独证明调用 unknown 根。VirtualFree BUSY 仍保留。38 等待旧进程结束后部署 PCL 继续。
+首次构建遇 ForgeGradle 证书校验失败，同配置重试构建通过（45 秒）。未运行助手桩/metadata seam，源码路径与编译不冒充三组故障场景已经实测。37 全 Mod 资源加载完成，独立常规世界 IntegratedServer 已启动，出生区块最后到 5%，没有玩家入场/稳定 Tick/正常退出通过。匹配 PDB 的真实来源记录显示后续显卡 load 自身 unknown=1/leaseComplete=0；JNA 初始失败是 known/source_lease；tls=24 不单独证明调用 unknown 根。VirtualFree BUSY 仍保留。
+
+按用户“这次完了停一下”收尾：游戏窗口激活两次超时，结束已核对身份的 attempt-37 JVM，监控记录退出 -1；测试世界和现场保留，不能记为干净保存退出。候选 38 已备份部署至原 PCL 并重新生成启动参数，没有启动新进程。本轮源码/构建/部署完成，实机最终验收尚未完成，执行已暂停。
 
 ## 2026-10-21：候选 37，同一来源工作包的失败路径
 
