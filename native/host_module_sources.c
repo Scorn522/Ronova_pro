@@ -111,6 +111,17 @@ static int host_module_select_locked(HostImage *image,NativeThread *state,HostLi
         }
     }
     if(scoped)return ready?1:-1;
+    /* One complete live load is an exact observed relationship even when its
+     * owner is a runtime carrier. Do not manufacture an unknown actor merely
+     * because that known owner is not a Mod. Existing unknown input survives,
+     * and any second live load keeps the shared-consumer path below. */
+    HostLibraryLoad *only=NULL;int count=0;
+    for(HostLibraryLoad *load=image->loads;load;load=load->imageNext)
+        if(host_module_load_current(load,image)){only=load;if(++count>1)break;}
+    if(count==1&&only->leaseComplete&&!only->unknown&&!native_has_producer(only->owners)){
+        if(owners)ready=ready&&native_owner_merge(owners,only->owners);
+        if(selected)*selected=only;return ready?1:-1;
+    }
     int outside=0;
     for(HostLibraryLoad *load=image->loads;load&&!outside;load=load->imageNext)
         outside=host_module_load_current(load,image)&&load->leaseComplete&&!load->unknown&&!native_has_producer(load->owners);

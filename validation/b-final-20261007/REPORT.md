@@ -1,5 +1,11 @@
 # B 批实际报告：2026-10-09 代码收敛接续
 
+## 2026-10-21：候选 33，真实公共载体关系的错误分类
+
+attempt-32 的真实内存记录确认 jemalloc 只有一条当前加载关系：unknown=0、leaseComplete=1、所有者非 Mod，API 导入项 unknown=0；TLS 槽位却已得到 allocation_unknown=1。对应源码的 outside 分支对这种唯一完整关系无条件置 unknown，已定位到实际记录与错误分类之间的对应关系。
+
+修正仅选取这一条当前完整已知关系，保留更具体的绑定/回调优先顺序；不清零任何已有未知标记，不改变停止来源、多个当前加载、控制区或私有索引保护，也没有以 DLL 名称授权。候选 33 构建通过（32 秒），旧 Native DLL/PDB 和运行现场保留，双 JAR 与参数已备份更新，继续全部原 Mod 实跑。实际早期 TLS 索引 95 的 allocation_unknown/aggregate_unknown 已由此前的 1 变为 0，uncertain/gap 仍为 0，加载及 API 条目保持完整已知，确认修正作用于真实生产调用。attempt-32 未开世界，于 Datafixer 后结束；该轮及本轮均未记录世界/保存 PASS。
+
 ## 2026-10-21：attempt-31 致命 TLS 写入拒绝与候选 32
 
 attempt-31 已有真实 Forge/渲染/声音引擎及贴图图集完成记录，运行约 33 分钟后以 0xc0000409 退出。最后主渲染线程 kind=37（TlsSetValue，而非 FLS 分配）索引 95 的 unknown_source 拒绝紧接 jemalloc Error setting TSD；此前 VirtualFree 数据无效也保留。匹配 PDB 的转储确认 jemalloc 主动致命中止，小转储缺少 Host 堆记录，未据此猜测具体未知根。没有打开世界或干净保存退出。

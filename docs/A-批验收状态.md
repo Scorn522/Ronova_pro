@@ -1,5 +1,11 @@
 # Ronova Pro 当前进度
 
+## 2026-10-21：候选 33 修正唯一完整载体的假 unknown
+
+对 attempt-32 的真实 Host 链表及匹配 PDB 布局只读检查确认：jemalloc 实际只有一条存活加载关系，unknown=0、leaseComplete=1、来源是非 Mod 运行时模块；相关 API 导入项同样 unknown=0。但 host_module_select_locked 的公共载体分支仅因已知来源不是 Mod 而无条件输出 unknown=1，早期实际 TLS 槽位的 allocation_unknown 因此也为 1。这是代码与实际状态交叉定位，未喂入任何伪造来源记录。
+
+现在仅在没有更具体的活动绑定/回调来源、且恰好一条当前完整已知非 Mod 加载关系时，直接复用这条实际关系。不会清除传入的已有 unknown；真实未知、停止来源、第二条活动加载导致的共享歧义、私有索引及 Native/JVM 控制区判断均保留，不按 DLL 名称放行。统一构建通过（32 秒）。attempt-32 于 Datafixer 之后、测试世界未打开时结束；旧 Native 符号/现场已保存。候选 33 双 JAR 及参数备份更新到原 PCL，继续全部原 Mod 的真实客户端循环。实际早期同一 TLS 索引 95 已显示 allocation_unknown=0、aggregate_unknown=0、uncertain=0、gap=0，对应加载/API 条目仍完整已知，确认本次生产调用不再制造 unknown；这不替代后续渲染或世界结果。世界和干净保存退出尚未通过。
+
 ## 2026-10-21：attempt-31 原生终点与候选 32（仍未进世界）
 
 attempt-31 实际完成 Forge、渲染初始化、声音引擎和多个贴图图集创建，但于运行约 33 分钟后原生退出（0xc0000409 / FAST_FAIL_FATAL_APP_EXIT）。主渲染线程最后的 kind=37 是 TlsSetValue，索引 95，因 unknown_source 被拒绝，随后 jemalloc 报 Error setting TSD 并中止；此前还出现 VirtualFree 数据无效。没有 IntegratedServer/世界 Tick 或保存退出 PASS。首次短命线程的 source_lease 写入调用来自实际 JNA DLL，后续有 jemalloc/显卡/系统组件；不能把整个序列都归为显卡调用，更不能按 DLL 名称放行。
