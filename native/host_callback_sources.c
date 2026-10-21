@@ -30,7 +30,8 @@ static int host_callback_image_current_locked(NativeThread *state,HostImage *ima
  * Prefer the active registration for a shared caller image, as in the ordinary
  * host_capture_caller path. Otherwise retain all actual current registrations.
  */
-static int host_callback_caller_locked(NativeThread *state,void *caller,OwnerLink **owners,int *unknown,DWORD *error){
+static int host_callback_caller_load(NativeThread *state,void *caller,OwnerLink **owners,int *unknown,DWORD *error,HostLibraryLoad **selectedLoad){
+    if(selectedLoad)*selectedLoad=NULL;
     uintptr_t address=(uintptr_t)caller;HostImage *actual=NULL;
     for(HostImage *image=__atomic_load_n(&host_images,__ATOMIC_ACQUIRE);image;image=image->next){
         uintptr_t base=(uintptr_t)image->handle;
@@ -38,7 +39,7 @@ static int host_callback_caller_locked(NativeThread *state,void *caller,OwnerLin
         if(actual&&actual!=image){*error=ERROR_INVALID_DATA;return 0;}actual=image;
     }
     if(!actual){*error=ERROR_MOD_NOT_FOUND;return 0;}
-    if(actual->loads){int child=host_module_select_locked(actual,state,NULL,owners,NULL,unknown);
+    if(actual->loads){int child=host_module_select_locked(actual,state,NULL,owners,selectedLoad,unknown);
         if(child==1)return 1;if(child<0){*error=ERROR_NOT_ENOUGH_MEMORY;return 0;}}
     int selected=0,ready=1;
     for(unsigned i=0;i<state->depth;i++){
@@ -63,6 +64,9 @@ static int host_callback_caller_locked(NativeThread *state,void *caller,OwnerLin
     if(!selected){*error=ERROR_MOD_NOT_FOUND;return 0;}
     if(!ready){*error=ERROR_NOT_ENOUGH_MEMORY;return 0;}return 1;
 }
+static int host_callback_caller_locked(NativeThread *state,void *caller,OwnerLink **owners,int *unknown,DWORD *error){
+    return host_callback_caller_load(state,caller,owners,unknown,error,NULL);
+}
 static int host_callback_scopes_locked(NativeThread *state,OwnerLink **owners,int *unknown,DWORD *error){
     if(!host_tls_capture(state,owners,unknown)){*error=ERROR_NOT_ENOUGH_MEMORY;return 0;}
     for(unsigned i=0;i<state->depth;i++){
@@ -81,7 +85,7 @@ static int host_callback_scopes_locked(NativeThread *state,OwnerLink **owners,in
     return 1;
 }
 static int host_callback_entry_sources(HostImport *entry,NativeThread *state,void *caller,
-        OwnerLink **owners,NativeLibrary **selected,int retainSources,int threadAdmissionOnly,int *unobserved){
+        OwnerLink **owners,NativeLibrary **selected,int retainSources,int threadAdmissionOnly,int *unobserved,HostLibraryLoad **selectedLoad){
     if(selected)*selected=NULL;
     if(!state||(!state->heapCallback&&!state->toolingRestricted&&!state->vmDetaching&&!state->vmThreadEnding&&!state->hostUnloadImage&&!state->hostRelease
             &&!(state->hostLoad&&state->hostLoad->calling))){
@@ -89,7 +93,7 @@ static int host_callback_entry_sources(HostImport *entry,NativeThread *state,voi
     }
     int associated=host_entry_association(entry,state,owners,selected),ready=associated==1,unknown=entry->unknown;
     DWORD error=associated?ERROR_INVALID_DATA:ERROR_MOD_NOT_FOUND;
-    if(ready)ready=host_callback_caller_locked(state,caller,owners,&unknown,&error);
+    if(ready)ready=host_callback_caller_load(state,caller,owners,&unknown,&error,selectedLoad);
     if(ready)ready=host_callback_scopes_locked(state,owners,&unknown,&error);
     if(unobserved)*unobserved|=unknown;
     /* A normal profiler may lack Java attribution while its actual image and

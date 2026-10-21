@@ -94,11 +94,8 @@ static void host_thread_worker_load_drop(HostThreadWorker *anchor){
 static int host_thread_worker_borrow_child(NativeThread *state,HostThreadWorker *worker,void *start){
     HostLibraryLoad *load=NULL;int unknown=0;
     if(!host_module_capture(state,start,&worker->owners,NULL,&load,&unknown)||unknown||!load)return 0;
-    AcquireSRWLockExclusive(&host_imports);
-    int ready=!load->retired&&!load->releasing&&!load->unknown&&load->leaseComplete
-            &&host_module_sources_cover(load->owners,worker->owners);
-    if(ready){InterlockedIncrement(&load->borrowers);worker->sourceLoad=load;}
-    ReleaseSRWLockExclusive(&host_imports);return ready;
+    int ready=host_module_load_hold(load,worker->owners);
+    if(ready)worker->sourceLoad=load;return ready;
 }
 static int host_thread_worker_start_sources(NativeLibrary *selected,NativeThread *state,
         HMODULE image,void *start,OwnerLink **owners){
@@ -381,9 +378,7 @@ static void host_thread_workers_reap(JNIEnv **environment){
         if(worker->sourceLease)native_original.DeleteGlobalRef(env,worker->sourceLease);
         if(worker->sourceAnchor)native_thread_worker_heap_drop(worker->sourceAnchor);
         if(worker->sourceTlsAnchor){host_tls_source_drop(worker->sourceTlsAnchor);worker->sourceTlsAnchor=NULL;}
-        if(worker->sourceLoad){AcquireSRWLockExclusive(&host_imports);
-            InterlockedDecrement(&worker->sourceLoad->borrowers);worker->sourceLoad=NULL;
-            ReleaseSRWLockExclusive(&host_imports);native_thread_worker_wake();}
+        if(worker->sourceLoad){host_module_load_drop(worker->sourceLoad);worker->sourceLoad=NULL;native_thread_worker_wake();}
         AcquireSRWLockExclusive(&host_records);
         worker->pin=NULL;worker->monitor=NULL;worker->sourceLease=NULL;worker->sourceAnchor=NULL;
         if(worker->sourceParent){worker->sourceParent->borrowers--;worker->sourceParent=NULL;}

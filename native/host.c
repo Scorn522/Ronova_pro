@@ -252,6 +252,7 @@ typedef struct HostImport {
     NativePrivateRange slotRange;
     struct HostImport *next;
 } HostImport;
+typedef struct HostImageLibrary {NativeLibrary *library;struct HostImageLibrary *next;} HostImageLibrary;
 typedef struct HostImage {
     /* Leaf admission gate: never held across a source query, VM/loader call
      * or an external API. It serializes only entry counts with unpinning. */
@@ -271,6 +272,8 @@ typedef struct HostImage {
     volatile LONG retiring;
     volatile LONG active;
     HostLibraryLoad *loads;
+    HostImageLibrary *libraries;
+    int relationsGap;
     struct HostImage *next;
 } HostImage;
 /* This directory contains actual registered image incarnations. Disabled entries
@@ -704,7 +707,7 @@ static int host_capture_caller(NativeThread *state,void *caller,OwnerLink **owne
             ready=ready&&native_owner_merge(owners,library->owners);
     ReleaseSRWLockShared(&native_records);return ready;
 }
-static int host_capture_all_query(JNIEnv *env,NativeThread *state,void *caller,OwnerLink **owners,int *unknown){
+static int host_capture_all_detail(JNIEnv *env,NativeThread *state,void *caller,OwnerLink **owners,int *unknown,int *javaUnknown){
     if(!native_capture_scope_sources(env,state,owners,unknown)
             ||!host_capture_caller(state,caller,owners))return 0;
     state->control++;state->sourceCapture++;
@@ -714,13 +717,16 @@ static int host_capture_all_query(JNIEnv *env,NativeThread *state,void *caller,O
         jsize count=native_original.GetArrayLength(env,sources);AcquireSRWLockExclusive(&native_records);
         for(jsize i=0;i<count&&ready&&!native_original.ExceptionCheck(env);i++){
             jobject module=native_original.GetObjectArrayElement(env,sources,i);
-            if(!module){if(unknown)*unknown=1;else ready=0;}
+            if(!module){if(javaUnknown)*javaUnknown=1;if(unknown)*unknown=1;else ready=0;}
             else {Owner *owner=native_owner(env,module);ready=owner&&native_owner_add(owners,owner);native_original.DeleteLocalRef(env,module);}
         }
         ReleaseSRWLockExclusive(&native_records);
     }
     if(sources)native_original.DeleteLocalRef(env,sources);state->control--;
     return ready&&!native_original.ExceptionCheck(env);
+}
+static int host_capture_all_query(JNIEnv *env,NativeThread *state,void *caller,OwnerLink **owners,int *unknown){
+    return host_capture_all_detail(env,state,caller,owners,unknown,NULL);
 }
 static int host_capture_all(JNIEnv *env,NativeThread *state,void *caller,OwnerLink **owners){return host_capture_all_query(env,state,caller,owners,NULL);}
 static int host_capture_query(JNIEnv *env,NativeThread *state,void *caller,OwnerLink **owners,int *unknown){
@@ -807,21 +813,24 @@ static int host_entry_association(HostImport *entry,NativeThread *state,OwnerLin
     return !associated?0:ready?1:-1;
 }
 #include "host_callback_sources.c"
-static int host_entry_sources_query(HostImport *entry,NativeThread *state,void *caller,OwnerLink **owners,NativeLibrary **selected,int retainSources,int *unknown){
+static int host_entry_sources_query_load(HostImport *entry,NativeThread *state,void *caller,OwnerLink **owners,NativeLibrary **selected,int retainSources,int *unknown,HostLibraryLoad **selectedLoad,int *javaUnknown){
+    if(selectedLoad)*selectedLoad=NULL;
+    if(javaUnknown)*javaUnknown=-1;
     int unobserved=entry->unknown;
     if(state&&(state->heapCallback||state->toolingRestricted||state->vmDetaching||state->vmThreadEnding||state->hostUnloadImage||state->hostRelease
             ||state->hostLoad&&state->hostLoad->calling))
-        return host_callback_entry_sources(entry,state,caller,owners,selected,retainSources,host_is_thread_admission(entry->kind),unknown);
+        return host_callback_entry_sources(entry,state,caller,owners,selected,retainSources,host_is_thread_admission(entry->kind),unknown,selectedLoad);
     AcquireSRWLockShared(&host_imports);AcquireSRWLockShared(&native_records);
     int associated=host_entry_association(entry,state,owners,selected),ready=associated==1;
     if(ready&&!entry->library&&entry->image->loads)
-        ready=host_module_select_locked(entry->image,state,entry->load,NULL,NULL,&unobserved)==1;
+        ready=host_module_select_locked(entry->image,state,entry->load,NULL,selectedLoad,&unobserved)==1;
     ReleaseSRWLockShared(&native_records);
     ReleaseSRWLockShared(&host_imports);
     JNIEnv *env=NULL;
     if(ready&&native_vm&&(*native_vm)->GetEnv(native_vm,(void**)&env,JNI_VERSION_1_8)==JNI_OK){
         if(!state)state=native_thread();
-        ready=state&&host_capture_all_query(env,state,caller,owners,&unobserved);
+        if(javaUnknown)*javaUnknown=0;
+        ready=state&&host_capture_all_detail(env,state,caller,owners,&unobserved,javaUnknown);
     }else if(ready){
         /* A detached OS thread has no JNIEnv. Its actual library and active C
          * scopes remain usable; never manufacture Java execution provenance. */
@@ -841,8 +850,11 @@ static int host_entry_sources_query(HostImport *entry,NativeThread *state,void *
      * a producer's default consumption until its complete scope is known. */
     if(!unknown&&unobserved&&native_has_producer(*owners))ready=0;
     if(!retainSources)host_producers(owners);
-    if(!ready){SetLastError(associated?ERROR_INVALID_DATA:ERROR_MOD_NOT_FOUND);return 0;}
+    if(!ready){SetLastError(associated<0?ERROR_NOT_ENOUGH_MEMORY:associated?ERROR_INVALID_DATA:ERROR_MOD_NOT_FOUND);return 0;}
     return 1;
+}
+static int host_entry_sources_query(HostImport *entry,NativeThread *state,void *caller,OwnerLink **owners,NativeLibrary **selected,int retainSources,int *unknown){
+    return host_entry_sources_query_load(entry,state,caller,owners,selected,retainSources,unknown,NULL,NULL);
 }
 static int host_entry_sources(HostImport *entry,NativeThread *state,void *caller,OwnerLink **owners,NativeLibrary **selected,int retainSources){
     return host_entry_sources_query(entry,state,caller,owners,selected,retainSources,NULL);
@@ -910,7 +922,8 @@ static FARPROC WINAPI host_native_resolve(HMODULE module,LPCSTR name,HostImport 
     if(resolved){
         resolved->image=entry->image;resolved->original=(void*)actual;resolved->kind=kind;
         resolved->library=library;resolved->sources=owners;resolved->returned=1;resolved->unknown=unknown;
-        (void)host_module_select_locked(entry->image,state,entry->load,&owners,&resolved->load,&unknown);
+        int selection=host_module_select_locked(entry->image,state,entry->load,&owners,&resolved->load,&unknown);
+        if(selection<0){native_owner_links_free(owners);free(resolved);SetLastError(ERROR_NOT_ENOUGH_MEMORY);return NULL;}
         resolved->sources=owners;resolved->unknown=unknown;
         if(!host_is_create(kind)||host_worker_ready())resolved->entry=host_import_entry(resolved);
     }
@@ -1736,9 +1749,15 @@ static int host_observe_image_scope(HMODULE handle,NativeLibraryScope *loading){
         image->live=1;image->next=host_images;InterlockedExchangePointer((void *volatile*)&host_images,image);
     }}
     if(image){
-        if(early)loading->library->hostImage=image;
-        for(NativeLibrary *library=native_libraries;library;library=library->next)
-            if(host_library_current(library,handle))library->hostImage=image;
+        for(NativeLibrary *library=native_libraries;library;library=library->next){
+            if(!(early&&library==loading->library)&&!host_library_current(library,handle))continue;
+            HostImageLibrary *p=image->libraries;while(p&&p->library!=library)p=p->next;
+            if(!p){p=(HostImageLibrary*)calloc(1,sizeof(*p));
+                if(!p){image->relationsGap=1;InterlockedExchange(&image->failed,1);continue;}
+                p->library=library;p->next=image->libraries;
+                InterlockedExchangePointer((void *volatile*)&image->libraries,p);}
+            InterlockedExchangePointer((void *volatile*)&library->hostImage,image);
+        }
     }
     ReleaseSRWLockShared(&native_records);
     if(image&&!image->checked)host_image_imports(image);
@@ -2205,7 +2224,7 @@ JNIEXPORT jlongArray JNICALL Java_dev_ronova_pro_bootstrap_NativeControl_hostSta
     host_thread_workers_state(env,module,values);
     host_module_loads_state(env,module,values);
     host_module_releases_state(env,module,values);
-    host_tls_state(env,module,values);
+    if(!host_tls_state(env,module,values))return NULL;
     AcquireSRWLockShared(&native_records);
     for(Owner *owner=native_owners;owner;owner=owner->next)
         if((!module||native_original.IsSameObject(env,owner->module,module))&&InterlockedCompareExchange(&owner->hostGap,0,0))values[39]++;

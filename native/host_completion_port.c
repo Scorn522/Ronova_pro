@@ -86,7 +86,7 @@ static void host_completion_retire_close(HostCompletionPort *port,HANDLE witness
 }
 static int host_completion_sources(HostImport *entry,void *caller,OwnerLink **owners,int *unknown,int restricted){
     NativeThread *state=native_tls==TLS_OUT_OF_INDEXES?NULL:(NativeThread*)TlsGetValue(native_tls);
-    if(restricted)return host_callback_entry_sources(entry,state,caller,owners,NULL,1,0,unknown);
+    if(restricted)return host_callback_entry_sources(entry,state,caller,owners,NULL,1,0,unknown,NULL);
     return host_entry_sources_query(entry,state,caller,owners,NULL,1,unknown);
 }
 static int host_completion_eligible(void *caller,OwnerLink *owners,int unknown){

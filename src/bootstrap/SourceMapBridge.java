@@ -12,6 +12,7 @@ public final class SourceMapBridge {
     // Registration can run while a receiver gate is held, so the directory does
     // not invoke a JDK map writer or take another receiver gate.
     private static final Key[] scopes=new Key[65536];
+    private static volatile Key[] publishedScopes=scopes;
     private static final StackWalker CALLER=StackWalker.getInstance(StackWalker.Option.RETAIN_CLASS_REFERENCE);
     private static volatile String failure="";
     private static volatile java.lang.invoke.MethodHandle writeGuard;
@@ -19,7 +20,7 @@ public final class SourceMapBridge {
     private static final ThreadLocal<Boolean> QUERY=new ThreadLocal<>();
     private static final class Key extends WeakReference<Object> {
         final int hash;
-        volatile Scope scope;Key next;
+        volatile Scope scope;volatile Key next;
         Key(Object object) {
             super(object,DEAD);hash=System.identityHashCode(object);
         }
@@ -58,15 +59,17 @@ public final class SourceMapBridge {
     }
     public static boolean carrierRegistered(Object carrier){
         if(carrier==null||INTERNAL.get()!=null)return false;
-        INTERNAL.set(true);
-        try{Scope scope=scope(carrier);return scope!=null&&scope.carrier;}
-        finally{INTERNAL.remove();}
+        Scope scope=scope(carrier);return scope!=null&&scope.carrier;
     }
     static boolean holderRegistered(Object holder){
         if(holder==null||INTERNAL.get()!=null)return false;
-        INTERNAL.set(true);
-        try{Scope scope=scope(holder);return scope!=null&&scope.holder;}
-        finally{INTERNAL.remove();}
+        Scope scope=scope(holder);return scope!=null&&scope.holder;
+    }
+    // The read branch of key() only compares existing weak identities under
+    // MONITOR. It invokes no writer/observer and needs no ThreadLocal mutation.
+    static boolean registered(Object value){
+        if(value==null||INTERNAL.get()!=null)return false;
+        Scope scope=scope(value);return scope!=null&&(scope.holder||scope.carrier);
     }
     /** A completed field/Unsafe scope reports the real holder while its receiver gate is held. */
     static void holderChanged(Object holder) {
@@ -120,8 +123,9 @@ public final class SourceMapBridge {
             while(entry!=null&&entry!=dead){previous=entry;entry=entry.next;}
             if(entry==null)continue;
             if(previous!=null)previous.next=entry.next;
-            else scopes[bucket]=entry.next;
-            entry.next=null;
+            else {scopes[bucket]=entry.next;publishedScopes=scopes;}
+            // A reader may still be at this dead node. Retain its published
+            // successor; unlinking a dead weak identity grants no permission.
         }
     }
     private static void indexWriter(Class<?> caller) {
@@ -135,13 +139,21 @@ public final class SourceMapBridge {
         Scope scope=key.scope;if(scope==null)key.scope=scope=new Scope();return scope;
     }
     private static Key key(Object receiver,boolean create) {
+        int hash=System.identityHashCode(receiver),bucket=rootIndex(hash);
+        if(!create){
+            // Read the actual current registration, never a cached verdict.
+            // Roots/successors publish with release; only dead keys are unlinked.
+            Key[] published=publishedScopes;
+            for(Key entry=published[bucket];entry!=null;entry=entry.next)
+                if(entry.hash==hash&&entry.get()==receiver)return entry;
+            return null;
+        }
         synchronized(MONITOR) {
-            int hash=System.identityHashCode(receiver),bucket=rootIndex(hash);
             for(Key entry=scopes[bucket];entry!=null;entry=entry.next)
                 if(entry.hash==hash&&entry.get()==receiver)return entry;
             if(!create)return null;
             indexWriter(CALLER.getCallerClass());Key added=new Key(receiver);
-            added.next=scopes[bucket];scopes[bucket]=added;sweep(2);return added;
+            added.next=scopes[bucket];scopes[bucket]=added;publishedScopes=scopes;sweep(2);return added;
         }
     }
     // Compatibility with existing Core/Client lookups. Removed JDK writer hooks

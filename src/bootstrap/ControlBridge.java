@@ -1849,7 +1849,7 @@ public final class ControlBridge {
         if(current!=null)for(UnsafeField field:current.unsafeFields())
             if(field.declaring().isInstance(target))return true;
         if(ownState(declaring)||ownState(target.getClass())||controlled(target))return true;
-        if(SourceMapBridge.holderRegistered(target)||SourceMapBridge.carrierRegistered(target))return true;
+        if(SourceMapBridge.registered(target))return true;
         if(CodeSourceBridge.fieldMutationTracked(declaring))return true;
         if(BackingBridge.known(target)||ResourceBridge.critical(target)
                 ||target!=declaring&&ResourceBridge.critical(declaring))return true;

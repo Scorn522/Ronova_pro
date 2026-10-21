@@ -3,6 +3,7 @@
  * is released here; application HMODULE references are never consumed.
  * Included before the ordinary Host source queries. */
 struct HostLibraryLoad {
+    SRWLOCK lifetime;
     HostImage *parentImage,*image,*preparedImage;
     NativeLibrary *parentLibrary;
     HostLibraryLoad *parentLoad,*sourceParent,*previousScope;
@@ -55,6 +56,24 @@ static int host_module_image_sources_retired_locked(HostImage *image){
 static int host_module_load_current(const HostLibraryLoad *load,HostImage *image){
     return load&&load->actual&&load->image==image&&!load->resource&&!load->nonExecutable
             &&!load->retired&&image->live&&image->pin&&!image->releasing;
+}
+/* This leaf admission gate is also used when claiming retirement. It never
+ * encloses JNI, a loader operation, or a directory acquisition. Image admission
+ * serializes the retained pin with a newly admitted borrower. */
+static int host_module_load_hold(HostLibraryLoad *load,OwnerLink *owners){
+    if(!load)return 0;HostImage *image=load->image;
+    if(image)AcquireSRWLockExclusive(&image->calls);
+    AcquireSRWLockExclusive(&load->lifetime);
+    int ready=!load->retired&&!load->releasing&&!load->unknown&&load->leaseComplete
+            &&(!image||image->live&&image->pin&&!image->releasing)
+            &&!native_owner_stopped(owners)&&!native_owner_stopped(load->owners)&&host_module_sources_cover(load->owners,owners);
+    if(ready)InterlockedIncrement(&load->borrowers);
+    ReleaseSRWLockExclusive(&load->lifetime);
+    if(image)ReleaseSRWLockExclusive(&image->calls);return ready;
+}
+static void host_module_load_drop(HostLibraryLoad *load){
+    if(!load)return;AcquireSRWLockExclusive(&load->lifetime);
+    InterlockedDecrement(&load->borrowers);ReleaseSRWLockExclusive(&load->lifetime);
 }
 /* Source records and links are immutable after release publication and remain
  * tombstones. Normal writers still hold host_imports; callback readers need
@@ -111,17 +130,30 @@ static int host_module_select_locked(HostImage *image,NativeThread *state,HostLi
         }
     }
     if(scoped)return ready?1:-1;
-    /* One complete live load is an exact observed relationship even when its
-     * owner is a runtime carrier. Do not manufacture an unknown actor merely
-     * because that known owner is not a Mod. Existing unknown input survives,
-     * and any second live load keeps the shared-consumer path below. */
-    HostLibraryLoad *only=NULL;int count=0;
-    for(HostLibraryLoad *load=image->loads;load;load=load->imageNext)
-        if(host_module_load_current(load,image)){only=load;if(++count>1)break;}
-    if(count==1&&only->leaseComplete&&!only->unknown&&!native_has_producer(only->owners)){
-        if(owners)ready=ready&&native_owner_merge(owners,only->owners);
-        if(selected)*selected=only;return ready?1:-1;
+    /* Identity completeness and uniqueness of a lifetime are different facts.
+     * Inspect this incarnation's published JNI relations as well as its loads.
+     * Repeated complete runtime loads with the same exact Owner set are known,
+     * but never manufacture a unique load out of multiple records. */
+    HostLibraryLoad *only=NULL;OwnerLink *baseline=NULL;int count=0,equivalent=!image->relationsGap,registrationMixed=image->relationsGap;
+    for(HostLibraryLoad *load=image->loads;load;load=load->imageNext){
+        if(!host_module_load_current(load,image))continue;
+        if(!count)baseline=load->owners;only=load;count++;
+        if(!load->leaseComplete||load->unknown||native_has_producer(load->owners)
+                ||!host_module_sources_cover(baseline,load->owners)||!host_module_sources_cover(load->owners,baseline))equivalent=0;
     }
+    for(HostImageLibrary *p=__atomic_load_n(&image->libraries,__ATOMIC_ACQUIRE);p;p=p->next){
+        NativeLibrary *library=p->library;
+        if(library->hostImage!=image||library->handle!=image->handle||!library->jni||library->builtin
+                ||!library->alive||library->closing)continue;
+        if(owners&&!native_owner_merge(owners,library->owners))return -1;
+        if(!library->complete||!host_module_sources_cover(baseline,library->owners)||!host_module_sources_cover(library->owners,baseline))
+            registrationMixed=1,equivalent=0;
+    }
+    if(count&&equivalent){
+        if(owners&&!native_owner_merge(owners,baseline))return -1;
+        if(selected&&count==1)*selected=only;return 1;
+    }
+    if(unknown)*unknown|=registrationMixed;
     int outside=0;
     for(HostLibraryLoad *load=image->loads;load&&!outside;load=load->imageNext)
         outside=host_module_load_current(load,image)&&load->leaseComplete&&!load->unknown&&!native_has_producer(load->owners);
@@ -142,7 +174,7 @@ static int host_module_select_locked(HostImage *image,NativeThread *state,HostLi
         if(chosen&&chosen!=load)mixed=1;else chosen=load;
     }
     /* Shared/unobserved execution cannot acquire a private lifetime lease. */
-    if(unknown&&mixed)*unknown=1;if(selected&&!mixed)*selected=chosen;
+    if(unknown&&mixed)*unknown=1;if(selected&&ready&&!mixed&&!registrationMixed)*selected=chosen;
     return !found?0:ready?1:-1;
 }
 static HostImage *host_module_address_locked(void *address,HMODULE actual,int restricted){
@@ -209,11 +241,8 @@ static int host_module_borrow_load(NativeThread *state,HostLibraryLoad *load){
     HostLibraryLoad *parent=state?state->hostLoad:NULL;
     if(!parent&&state)parent=host_module_release_sources(state);
     if(!parent&&state)parent=host_thread_worker_child(state,NULL);
-    AcquireSRWLockExclusive(&host_imports);
-    int ready=parent&&!parent->retired&&!parent->releasing&&!parent->unknown&&parent->leaseComplete
-            &&host_module_sources_cover(parent->owners,load->owners);
-    if(ready){InterlockedIncrement(&parent->borrowers);load->sourceParent=parent;load->leaseComplete=1;}
-    ReleaseSRWLockExclusive(&host_imports);
+    int ready=host_module_load_hold(parent,load->owners);
+    if(ready){load->sourceParent=parent;load->leaseComplete=1;}
     if(!ready&&host_thread_worker_load_borrow(state,load->owners,&load->sourceWorker))ready=load->leaseComplete=1;
     if(!ready&&native_tooling_load_borrow(state,load->owners,&load->toolingAnchor))ready=load->leaseComplete=1;
     if(!ready&&host_tls_source_borrow(state,load->owners,&load->tlsAnchor))ready=load->leaseComplete=1;
@@ -311,12 +340,16 @@ static void host_module_loads_reap(JNIEnv **environment){
     for(;;){HostLibraryLoad *load=NULL;HMODULE pin=NULL;
         AcquireSRWLockExclusive(&host_imports);
         for(HostLibraryLoad *candidate=host_library_loads;candidate;candidate=candidate->next)
-            if(candidate->sparePin&&!candidate->calling&&!candidate->releasing){load=candidate;load->releasing=1;pin=load->sparePin;break;}
+            if(candidate->sparePin&&!candidate->calling){
+                AcquireSRWLockExclusive(&candidate->lifetime);
+                if(!candidate->releasing&&!candidate->borrowers){load=candidate;load->releasing=1;pin=load->sparePin;}
+                ReleaseSRWLockExclusive(&candidate->lifetime);if(load)break;}
         ReleaseSRWLockExclusive(&host_imports);if(!load)break;
         NativeToolingScope scope={load->owners,load->origin,load->unknown,state->depth,state->tooling};state->tooling=&scope;
         int released=host_real_free_library(pin)!=0;DWORD error=released?0:GetLastError();state->tooling=scope.previous;
         AcquireSRWLockExclusive(&host_imports);if(released)load->sparePin=NULL;else load->error=error;
-        load->releasing=0;ReleaseSRWLockExclusive(&host_imports);
+        AcquireSRWLockExclusive(&load->lifetime);load->releasing=0;ReleaseSRWLockExclusive(&load->lifetime);
+        ReleaseSRWLockExclusive(&host_imports);
         if(!native_tooling_retirement_jni(environment)){native_thread_callback_leave(state);return;}
         if(!released)break;
     }
@@ -359,11 +392,14 @@ static void host_module_loads_reap(JNIEnv **environment){
     for(;;){HostLibraryLoad *load=NULL;
         AcquireSRWLockExclusive(&host_imports);
         for(HostLibraryLoad *candidate=host_library_loads;candidate;candidate=candidate->next){
-            if(candidate->retired||candidate->releasing||candidate->calling||candidate->borrowers||candidate->sparePin)continue;
+            AcquireSRWLockExclusive(&candidate->lifetime);
+            if(candidate->retired||candidate->releasing||candidate->calling||candidate->borrowers||candidate->sparePin){
+                ReleaseSRWLockExclusive(&candidate->lifetime);continue;}
             int failed=candidate->refused||!candidate->actual;
             int done=host_module_producers_retired(candidate->owners,candidate->unknown)
                     &&(!candidate->image||!candidate->image->pin&&!candidate->image->releasing);
-            if(failed||done){candidate->releasing=1;load=candidate;break;}
+            if(failed||done){candidate->releasing=1;load=candidate;}
+            ReleaseSRWLockExclusive(&candidate->lifetime);if(load)break;
         }
         ReleaseSRWLockExclusive(&host_imports);if(!load)break;
         JNIEnv *env=*environment;
@@ -375,8 +411,9 @@ static void host_module_loads_reap(JNIEnv **environment){
         free(load->preparedImage);
         AcquireSRWLockExclusive(&host_imports);
         load->preparedImage=NULL;load->sourceLease=NULL;load->origin=NULL;load->sourceWorker=NULL;load->toolingAnchor=NULL;load->tlsAnchor=NULL;
-        if(load->sourceParent){InterlockedDecrement(&load->sourceParent->borrowers);load->sourceParent=NULL;}
-        load->retired=1;load->releasing=0;ReleaseSRWLockExclusive(&host_imports);
+        host_module_load_drop(load->sourceParent);load->sourceParent=NULL;
+        AcquireSRWLockExclusive(&load->lifetime);load->retired=1;load->releasing=0;ReleaseSRWLockExclusive(&load->lifetime);
+        ReleaseSRWLockExclusive(&host_imports);
         native_thread_worker_wake();
     }
     native_thread_callback_leave(state);
