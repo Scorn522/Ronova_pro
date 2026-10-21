@@ -1,5 +1,11 @@
 # B 批实际报告：2026-10-09 代码收敛接续
 
+## 2026-10-21：attempt-27 实际终点与候选 29（世界未通过）
+
+attempt-27 的已保存 Java/Native 栈、日志和类统计确认：后台初始化之后进入 Render thread，MinecraftForge 初始化、Ronova 客户端绘制隔离安装、贴图/字体资源处理和客户端循环均已实际发生；15584 → 18649 类是本轮实际加载统计。测试世界直到结束仍未打开，没有内置服务器或世界 Tick PASS。TLS/FLS 拒绝的实际可映射调用者为 NVIDIA 图形组件、drvstore.dll、CRYPT32.dll；未知来源/不完整租约限制保持不变，未将其视为已修复或强行放行。
+
+资源阶段实际 Worker 栈反复出现来源栈扩容进入受控 arraycopy，并等待控制对象登记锁。候选 29 将常用 Java 栈读取器初始批大小设为 32、保留隐藏帧的来源读取器设为 64，避免内部扩容触发的重复控制查询；选项、全部帧、授权和来源规则不变。统一构建通过（37 秒），没有为这项缓冲提示重复运行隔离检查。attempt-27 经正常关闭请求后进程退出 0，但未完成资源加载的 TextureManager.close 报 ConcurrentModificationException，明确不记干净退出/保存 PASS。双 JAR 已备份部署、参数重新准备，attempt-29 已启动并记录 premain INSTALLED_FULL、Native FULL，最终世界验收仍在进行。
+
 ## 2026-10-21：候选 26 回调/TLS 收口与实际调用者检查
 
 后续：attempt-26 已保存真实 JFR/Java/Native 栈，在未打开测试存档前主动结束，未取得世界验收。完整调用者复查没有替代此结果。JFR 的主要热点为 memoryWriteBegin0；同一动作在 Java 捕获当前来源后，Native 又回调 Java 重读。candidate-27 复用这次已授权边界提供的 Java 捕获，仍逐次捕获和合并 Native 独有根、未知标记与实际控制区，不缓存许可；无捕获参数及复制完成更新保留原完整读取。第一次构建在 ForgeGradle 证书检查阶段失败，同配置重试构建通过（54 秒）。实际 live-control-writer 再次输出外来调用/私有原生读取拒绝与正常裸内存复制 PASS，退出 0。双 JAR 更新并重新准备参数，attempt-27 正在使用完整原 Mod 组合加载，尚未打开世界。

@@ -1,5 +1,13 @@
 # Ronova Pro 当前进度
 
+## 2026-10-21：候选 29 实际客户端接续（未进世界）
+
+attempt-27 已实际越过后台初始化，到达 Render thread、MinecraftForge Initialized、Ronova 客户端绘制隔离安装、贴图/字体资源加载与客户端循环。线程栈和两次实际类统计确认加载从 15584 类推进到 18649 类，并非仅依据同一加载画面判断。但直到结束前，测试存档 session.lock 仍是原副本时间，没有 IntegratedServer 或世界 Tick 证据。
+
+本轮还记录到同一已退出线程上的 TLS/FLS unknown_source/source_lease 拒绝；已把可读调用地址对应到实际 NVIDIA 图形组件、drvstore.dll、CRYPT32.dll。未据此放宽未知来源或私有槽位限制，也未宣称这些调用已修复。因实际资源栈仍反复通过 StackFrameBuffer.resize → System.arraycopy → 控制对象登记锁，常用当前栈读取器改为初始 32 帧、保留隐藏帧的来源读取器初始 64 帧；仍遍历原全部帧，不缓存权限或来源。候选 29 统一构建通过（37 秒）。
+
+attempt-27 于资源尚未完成时接收正常关闭请求，启动监控记录退出 0，但日志有 TextureManager.close 的 ConcurrentModificationException，故不算干净退出，更不算世界保存验收。现场与错误均保留。候选 29 已备份更新双 JAR、重新生成参数，attempt-29 正在同一原完整 Mod 组合下实际加载，已记录 AGENT_PREMAIN_READY:INSTALLED_FULL 及 NATIVE=FULL；单人世界、稳定 Tick 和无关闭异常的最终保存退出仍未通过。
+
 ## 2026-10-21：回调读侧与 TLS 句柄同步修复（候选 26）
 
 后续实际终点：attempt-26 保存线程栈后于进入世界前主动结束；没有打开测试世界，没有取得世界 Tick/保存 PASS。JFR 与线程栈进一步定位到普通内存操作的重复 Java 来源捕获。candidate-27 将已经在本次控制器边界捕获的 Java 来源直接传入，Native 独有的当前 C/TLS/绑定/库来源仍逐次合并，停止状态和控制区检查不变；缺少该 Java 捕获时仍走完整原路径，完成复制后的贡献更新也仍重新读取。构建首次因 ForgeGradle 远端证书检查失败，原配置重试后通过（54 秒）；对应真实 live-control-writer 再次退出 0。双 JAR 已备份更新、参数重新准备，attempt-27 正在真实加载中，尚未打开测试世界。

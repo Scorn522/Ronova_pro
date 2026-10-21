@@ -159,12 +159,15 @@ public final class ControlBridge {
     }
     static boolean sourceQueryActive(){SourceQuery query=SOURCE_QUERIES.get();return WALKER.getCallerClass()==NativeControl.class&&query!=null&&query.thread==Thread.currentThread();}
     static final int MAX_DEPTH=128;
-    static final StackWalker WALKER=StackWalker.getInstance(StackWalker.Option.RETAIN_CLASS_REFERENCE);
+    // Source walks are themselves guarded callers. Start at a stable batch
+    // size so their internal frame-array growth does not re-enter the guarded
+    // arraycopy path. Both walkers still traverse every requested live frame.
+    static final StackWalker WALKER=StackWalker.getInstance(Set.of(StackWalker.Option.RETAIN_CLASS_REFERENCE),32);
     // The raw boundary crosses Java/JNI and the buffer adapters before its
     // actual writer. Avoid the default eight-frame buffer's guarded arraycopy
     // resize here; the estimate is not a traversal limit or a cached caller.
     static final StackWalker RAW_MEMORY_WALKER=StackWalker.getInstance(Set.of(StackWalker.Option.RETAIN_CLASS_REFERENCE),32);
-    static final StackWalker ORIGIN_WALKER=StackWalker.getInstance(Set.of(StackWalker.Option.RETAIN_CLASS_REFERENCE,StackWalker.Option.SHOW_HIDDEN_FRAMES));
+    static final StackWalker ORIGIN_WALKER=StackWalker.getInstance(Set.of(StackWalker.Option.RETAIN_CLASS_REFERENCE,StackWalker.Option.SHOW_HIDDEN_FRAMES),64);
     static final java.util.function.Function<java.util.stream.Stream<StackWalker.StackFrame>,Module> INVOKING=new Invoking();
     static final java.util.function.Function<java.util.stream.Stream<StackWalker.StackFrame>,Boolean> STOPPED_CALL=new StoppedCall();
     static final java.util.function.Function<java.util.stream.Stream<StackWalker.StackFrame>,Class<?>> MEMORY_CALLER=new MemoryCaller();
