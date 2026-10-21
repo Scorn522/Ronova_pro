@@ -1,5 +1,11 @@
 # B 批实际报告：2026-10-09 代码收敛接续
 
+## 2026-10-21：候选 30 栈数组保留槽位修正
+
+PCL 实际 Microsoft JDK 17 的字节码确认 START_POS=2：初始 32 槽位仅容纳 30 帧，后续 32 帧批次仍要求 34 槽位并触发 arraycopy。WALKER/RAW_MEMORY_WALKER 已改为 34，ORIGIN_WALKER 保持 64；没有改变实际栈遍历或任何来源/内存控制规则。统一构建通过（34 秒），原实例双 JAR 已备份替换、参数重新准备，attempt-30 已使用全部原有 Mod 启动。
+
+attempt-29 实际达到 LWJGL、Forge 初始化与 Ronova 绘制隔离安装，但未开测试世界；关闭请求未及时结束，更新前结束进程，不记录正常退出 PASS。此前 TLS/FLS unknown_source/source_lease 与 TextureManager.close 并发修改异常均未据此勾为修复。世界 Tick 与正常保存退出仍待真实客户端结果。
+
 ## 2026-10-21：attempt-27 实际终点与候选 29（世界未通过）
 
 attempt-27 的已保存 Java/Native 栈、日志和类统计确认：后台初始化之后进入 Render thread，MinecraftForge 初始化、Ronova 客户端绘制隔离安装、贴图/字体资源处理和客户端循环均已实际发生；15584 → 18649 类是本轮实际加载统计。测试世界直到结束仍未打开，没有内置服务器或世界 Tick PASS。TLS/FLS 拒绝的实际可映射调用者为 NVIDIA 图形组件、drvstore.dll、CRYPT32.dll；未知来源/不完整租约限制保持不变，未将其视为已修复或强行放行。

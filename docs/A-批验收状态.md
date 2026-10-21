@@ -1,5 +1,11 @@
 # Ronova Pro 当前进度
 
+## 2026-10-21：候选 30 修正实际 JDK 栈缓冲容量边界
+
+已通过 PCL 实际 Microsoft JDK 17.0.15 的 javap 核对 StackStreamFactory：帧数组保留两个槽位，初始长度 32 在继续读取时仍会扩到 34。此前候选 28/29 的 32 缓冲不能消除此分支。现将 WALKER 和 RAW_MEMORY_WALKER 的初始预估改为 34；ORIGIN_WALKER 保持 64，遍历范围、隐藏帧选项、来源及授权规则不变。
+
+候选 30 统一构建通过（34 秒），双 JAR 已备份更新到原 PCL 实例并重新生成参数。attempt-29 实际推进到 LWJGL、MinecraftForge 初始化和 Ronova 绘制隔离安装，未打开测试世界；关闭请求后未及时结束，更新前结束该世界尚未打开的进程，不记正常退出 PASS。attempt-30 已按原完整 Mod 组合及真实参数启动。TLS/FLS 拒绝与 TextureManager.close 并发修改异常仍分别保留；单人世界、稳定世界 Tick 和干净保存退出尚未通过。
+
 ## 2026-10-21：候选 29 实际客户端接续（未进世界）
 
 attempt-27 已实际越过后台初始化，到达 Render thread、MinecraftForge Initialized、Ronova 客户端绘制隔离安装、贴图/字体资源加载与客户端循环。线程栈和两次实际类统计确认加载从 15584 类推进到 18649 类，并非仅依据同一加载画面判断。但直到结束前，测试存档 session.lock 仍是原副本时间，没有 IntegratedServer 或世界 Tick 证据。
