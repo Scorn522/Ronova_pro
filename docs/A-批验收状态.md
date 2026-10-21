@@ -1,5 +1,13 @@
 # Ronova Pro 当前进度
 
+## 2026-10-21：候选 31 减少实际标量回执的重复控制登记
+
+attempt-30 的真实 35 秒 JFR 及 Java/Native 栈确认：采样中已无 StackFrameBuffer.resize，但同一早期绘制标量仍在 Buffer/Handle/Native Unsafe 边界创建 RawMemoryMutation、Scalar，并在弱控制目录登记时争用全局锁。现把这两种精确 Bootstrap 类型直接判为永久控制状态，免去每个实例的重复目录发布；不是按类名放行，也不缓存调用者或许可。现有各层 Native 作用域、来源、控制区与合法区间检查均保留。
+
+候选 31 统一构建通过（34 秒）。原 live-control-writer 增加对这两种真实控制对象的外部 Unsafe/Field.set 写入后，确认状态不变，并继续通过正常内存复制、外来调用者/私有原生读取拒绝及受保护数组检查，退出 0。首次检查已实际拒绝 Field.setBoolean，但检查未接受其 IllegalAccessException，修正该异常预期后完成复查；未放宽生产判断。
+
+attempt-30 已到 Datafixer 初始化，测试世界仍未打开；保存现场后更新候选 31，双 JAR 与参数保留旧版备份，继续原完整 Mod 组合的真实客户端循环。TLS/FLS 拒绝、资源未完成时关闭的并发异常仍独立保留，世界与干净保存退出未通过。
+
 ## 2026-10-21：候选 30 修正实际 JDK 栈缓冲容量边界
 
 已通过 PCL 实际 Microsoft JDK 17.0.15 的 javap 核对 StackStreamFactory：帧数组保留两个槽位，初始长度 32 在继续读取时仍会扩到 34。此前候选 28/29 的 32 缓冲不能消除此分支。现将 WALKER 和 RAW_MEMORY_WALKER 的初始预估改为 34；ORIGIN_WALKER 保持 64，遍历范围、隐藏帧选项、来源及授权规则不变。

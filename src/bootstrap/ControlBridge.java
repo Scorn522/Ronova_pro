@@ -1785,7 +1785,7 @@ public final class ControlBridge {
     }
     static final class RawMemoryMutation {
         final long token;final boolean reading;final Thread thread=Thread.currentThread();boolean closed;
-        RawMemoryMutation(long token,boolean reading){this.token=token;this.reading=reading;CodeSourceBridge.mutationControls(this);}
+        RawMemoryMutation(long token,boolean reading){this.token=token;this.reading=reading;}
     }
     static final class HeapMemoryRead {
         final java.util.concurrent.locks.ReentrantLock gate;final Object record;final Thread thread=Thread.currentThread();boolean closed;

@@ -1619,6 +1619,11 @@ public final class CodeSourceBridge {
     }
     static boolean controlled(Object object){
         if(object==null)return false;
+        // These exact bootstrap classes contain only controller fields and are
+        // always control state, including before/after a live operation. Their
+        // protection does not depend on publishing each scalar receipt in the
+        // weak directory. Actual native scopes and range checks are unchanged.
+        if(object instanceof ControlBridge.RawMemoryMutation||object instanceof FrameworkBuffers.Scalar)return true;
         synchronized(CONTROLS){
             if(object==CONTROLS)return true;
             // Only this exact component type can be the registry's backing.

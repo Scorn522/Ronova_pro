@@ -2290,6 +2290,18 @@ public final class AuditFixCheck {
         Object[] actual=(Object[])registered.get(null);require(actual.length>0,"actual installed transformer array absent");
         Method mutation=bridge.getDeclaredMethod("controlMutationAllowed",Object.class);mutation.setAccessible(true);
         require(Boolean.FALSE.equals(mutation.invoke(null,(Object)actual)),"foreign control array mutation admitted");
+        Class<?> rawReceipt=Class.forName("dev.ronova.pro.bootstrap.ControlBridge$RawMemoryMutation",true,null);
+        var rawConstructor=rawReceipt.getDeclaredConstructor(long.class,boolean.class);rawConstructor.setAccessible(true);
+        Class<?> scalar=Class.forName("dev.ronova.pro.bootstrap.FrameworkBuffers$Scalar",true,null);
+        var scalarConstructor=scalar.getDeclaredConstructors()[0];scalarConstructor.setAccessible(true);
+        for(Object receipt:new Object[]{rawConstructor.newInstance(0L,false),scalarConstructor.newInstance((Object)null)}){
+            require(Boolean.FALSE.equals(mutation.invoke(null,receipt)),"foreign intrinsic receipt mutation admitted");
+            Field closed=receipt.getClass().getDeclaredField("closed");closed.setAccessible(true);
+            U.putBoolean(receipt,U.objectFieldOffset(closed),true);
+            require(!closed.getBoolean(receipt),"Unsafe changed intrinsic receipt state");
+            try{closed.setBoolean(receipt,true);}catch(IllegalAccessException|SecurityException refused){ }
+            require(!closed.getBoolean(receipt),"reflection changed intrinsic receipt state");
+        }
         Object original=actual[0];
         try{Array.set(actual,0,null);}catch(SecurityException refused){ }
         require(actual[0]==original,"actual protected transformer array changed");
@@ -2304,7 +2316,7 @@ public final class AuditFixCheck {
             U.copyMemory(null,address,bytes,base,8);
             require(U.getLong(bytes,base)==0x1020304050607080L,"actual Unsafe raw-to-heap copy changed bytes");
         }finally{U.freeMemory(address);}
-        System.out.println("LIVE_CONTROL_WRITER_PASS actual_native foreign_caller_refused protected_array_preserved foreign_raw_reader_refused actual_unsafe_raw_copy");
+        System.out.println("LIVE_CONTROL_WRITER_PASS actual_native foreign_caller_refused protected_array_preserved intrinsic_receipts_preserved foreign_raw_reader_refused actual_unsafe_raw_copy");
     }
     private static void systemArraycopy()throws Exception {
         Class<?> nativeControl=Class.forName("dev.ronova.pro.bootstrap.NativeControl",true,null);

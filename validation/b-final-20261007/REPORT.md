@@ -1,5 +1,11 @@
 # B 批实际报告：2026-10-09 代码收敛接续
 
+## 2026-10-21：候选 31 实际重复控制登记热点
+
+attempt-30 的真实 35 秒 JFR 没有栈数组 resize 样本；剩余现场为早期窗口标量写入在多个实际边界创建回执，并在 RawMemoryMutation/Scalar 的弱控制目录发布中争用同一锁。现在仅对这两个实际 Bootstrap 类型直接判定为控制状态，覆盖整个实例生命周期，去掉逐实例的重复发布。普通数组/容器仍走原登记与判断，各层 Native 来源、作用域、区间保护及停组规则均未改变。
+
+完整候选构建通过（34 秒）。既有 live-control-writer 在实际 Microsoft JDK、Agent/Bootstrap/Native 和原 Unsafe 参数下，额外对这两种真实控制对象执行外部 Unsafe/反射写入，状态保持不变；正常裸内存复制及原外来调用/控制数组/私有读取检查全部通过，退出 0。首次检查因生产返回 IllegalAccessException 而非检查预期的 SecurityException 退出 1，实际写入已拒绝；仅修正检查异常预期后复查。attempt-30 到达 Datafixer 初始化，未打开测试世界。更新候选 31 后继续完整原实例实跑，未宣称世界或干净保存退出 PASS。
+
 ## 2026-10-21：候选 30 栈数组保留槽位修正
 
 PCL 实际 Microsoft JDK 17 的字节码确认 START_POS=2：初始 32 槽位仅容纳 30 帧，后续 32 帧批次仍要求 34 槽位并触发 arraycopy。WALKER/RAW_MEMORY_WALKER 已改为 34，ORIGIN_WALKER 保持 64；没有改变实际栈遍历或任何来源/内存控制规则。统一构建通过（34 秒），原实例双 JAR 已备份替换、参数重新准备，attempt-30 已使用全部原有 Mod 启动。

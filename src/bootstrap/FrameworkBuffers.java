@@ -19,10 +19,10 @@ public final class FrameworkBuffers {
         boolean tainted,closed;
         Draw(Module[] sources){this.sources=sources;CodeSourceBridge.mutationControls(this,sources,DRAW,SCALAR);}
     }
-    private static final class Scalar {
+    static final class Scalar {
         final Scalar previous=SCALAR.get();final Draw draw;final Thread thread=Thread.currentThread();
         boolean closed,checking;
-        Scalar(Draw draw){this.draw=draw;CodeSourceBridge.mutationControls(this);}
+        Scalar(Draw draw){this.draw=draw;}
     }
     private static final class Scratch {
         final Scratch previous=SCRATCH.get();final Thread thread=Thread.currentThread();final Class<?> vector;
