@@ -141,6 +141,7 @@ static int host_module_select_locked(HostImage *image,NativeThread *state,HostLi
         if(!load->leaseComplete||load->unknown||native_has_producer(load->owners)
                 ||!host_module_sources_cover(baseline,load->owners)||!host_module_sources_cover(load->owners,baseline))equivalent=0;
     }
+    if(!count){if(unknown)*unknown|=image->relationsGap;return 0;}
     for(HostImageLibrary *p=__atomic_load_n(&image->libraries,__ATOMIC_ACQUIRE);p;p=p->next){
         NativeLibrary *library=p->library;
         if(library->hostImage!=image||library->handle!=image->handle||!library->jni||library->builtin

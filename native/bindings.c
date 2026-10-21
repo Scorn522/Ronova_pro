@@ -289,12 +289,16 @@ static int native_stopped(JNIEnv *env){
     return code_current_stopped(env);
 }
 static jweak native_origin(NativeThread *state){if(!state)return NULL;if(state->tooling&&state->depth<=state->tooling->depth&&state->tooling->origin)return state->tooling->origin;return state->depth?state->stack[state->depth-1]->origin:state->library?state->library->library->origin:NULL;}
-static int native_capture_scope_sources(JNIEnv *env,NativeThread *state,OwnerLink **owners,int *unknown){
+static int native_capture_scope_sources_detail(JNIEnv *env,NativeThread *state,OwnerLink **owners,int *unknown,int *codeUnknown){
+    if(codeUnknown)*codeUnknown=0;
     if(!host_tls_capture(state,owners,unknown))return 0;
     if(!state)return 1;if(env)native_thread_jni_observed(state,env);for(unsigned i=0;i<state->depth;i++){if(!native_owner_merge(owners,state->stack[i]->owners))return 0;if(unknown&&state->stack[i]->hostUnknown)*unknown=1;}
     for(NativeRegistration *scope=state->registration;scope;scope=scope->previous){if(!native_owner_merge(owners,scope->owners))return 0;if(unknown&&scope->unknown)*unknown=1;}
-    for(NativeLibraryScope *scope=state->library;scope;scope=scope->previous)if(!native_owner_merge(owners,scope->library->owners))return 0;for(NativeToolingScope *scope=state->tooling;scope;scope=scope->previous){if(!native_owner_merge(owners,scope->owners))return 0;if(scope->unknown&&unknown)*unknown=1;}return code_current_sources_query(env,owners,unknown);
+    for(NativeLibraryScope *scope=state->library;scope;scope=scope->previous)if(!native_owner_merge(owners,scope->library->owners))return 0;for(NativeToolingScope *scope=state->tooling;scope;scope=scope->previous){if(!native_owner_merge(owners,scope->owners))return 0;if(scope->unknown&&unknown)*unknown=1;}
+    int missing=0,ready=code_current_sources_query(env,owners,unknown?&missing:NULL);
+    if(unknown)*unknown|=missing;if(codeUnknown)*codeUnknown=missing;return ready;
 }
+static int native_capture_scope_sources(JNIEnv *env,NativeThread *state,OwnerLink **owners,int *unknown){return native_capture_scope_sources_detail(env,state,owners,unknown,NULL);}
 static int native_capture_scope_owners(JNIEnv *env,NativeThread *state,OwnerLink **owners){return native_capture_scope_sources(env,state,owners,NULL);}
 static int native_capture_network_sources(JNIEnv *env,NativeThread *state,OwnerLink **owners,int *unknown){
     if(!native_jni_ready||!state||state->control||!native_network_sources)return 1;

@@ -708,16 +708,19 @@ static int host_capture_caller(NativeThread *state,void *caller,OwnerLink **owne
     ReleaseSRWLockShared(&native_records);return ready;
 }
 static int host_capture_all_detail(JNIEnv *env,NativeThread *state,void *caller,OwnerLink **owners,int *unknown,int *javaUnknown){
-    if(!native_capture_scope_sources(env,state,owners,unknown)
-            ||!host_capture_caller(state,caller,owners))return 0;
+    int codeUnknown=0,ready=native_capture_scope_sources_detail(env,state,owners,unknown,&codeUnknown);
+    // Bit 1 is the actual code/source query; bit 0 is a missing Java process
+    // source below. Record the queries already used, never repeat them for logs.
+    if(javaUnknown&&codeUnknown)*javaUnknown|=2;
+    if(!ready||!host_capture_caller(state,caller,owners))return 0;
     state->control++;state->sourceCapture++;
     jobjectArray sources=(jobjectArray)native_original.CallStaticObjectMethod(env,native_controls,native_process_sources);
-    state->sourceCapture--;int ready=sources&&!native_original.ExceptionCheck(env);
+    state->sourceCapture--;ready=sources&&!native_original.ExceptionCheck(env);
     if(ready){
         jsize count=native_original.GetArrayLength(env,sources);AcquireSRWLockExclusive(&native_records);
         for(jsize i=0;i<count&&ready&&!native_original.ExceptionCheck(env);i++){
             jobject module=native_original.GetObjectArrayElement(env,sources,i);
-            if(!module){if(javaUnknown)*javaUnknown=1;if(unknown)*unknown=1;else ready=0;}
+            if(!module){if(javaUnknown)*javaUnknown|=1;if(unknown)*unknown=1;else ready=0;}
             else {Owner *owner=native_owner(env,module);ready=owner&&native_owner_add(owners,owner);native_original.DeleteLocalRef(env,module);}
         }
         ReleaseSRWLockExclusive(&native_records);
@@ -799,11 +802,13 @@ static int host_entry_association(HostImport *entry,NativeThread *state,OwnerLin
             if(workerLibrary&&workerLibrary->hostImage==entry->image){associated=1;chosen=workerLibrary;
                 if(owners)ready=ready&&native_owner_merge(owners,workerLibrary->owners);}
         }
-        if(!associated&&!entry->library)for(NativeLibrary *library=__atomic_load_n(&native_libraries,__ATOMIC_ACQUIRE);library;library=library->next)
+        if(!associated&&!entry->library)for(HostImageLibrary *p=__atomic_load_n(&entry->image->libraries,__ATOMIC_ACQUIRE);p;p=p->next){
+            NativeLibrary *library=p->library;
             if(library->hostImage==entry->image&&host_library_current(library,entry->image->handle)){
                 associated=1;if(chosen&&chosen!=library)mixed=1;else chosen=library;
                 if(owners)ready=ready&&native_owner_merge(owners,library->owners);
             }
+        }
     }
     if(!associated&&!entry->library){
         int child=host_module_select_locked(entry->image,state,entry->load,owners,NULL,NULL);
@@ -816,14 +821,18 @@ static int host_entry_association(HostImport *entry,NativeThread *state,OwnerLin
 static int host_entry_sources_query_load(HostImport *entry,NativeThread *state,void *caller,OwnerLink **owners,NativeLibrary **selected,int retainSources,int *unknown,HostLibraryLoad **selectedLoad,int *javaUnknown){
     if(selectedLoad)*selectedLoad=NULL;
     if(javaUnknown)*javaUnknown=-1;
-    int unobserved=entry->unknown;
+    int unobserved=entry->unknown||entry->image->relationsGap;
     if(state&&(state->heapCallback||state->toolingRestricted||state->vmDetaching||state->vmThreadEnding||state->hostUnloadImage||state->hostRelease
             ||state->hostLoad&&state->hostLoad->calling))
         return host_callback_entry_sources(entry,state,caller,owners,selected,retainSources,host_is_thread_admission(entry->kind),unknown,selectedLoad);
     AcquireSRWLockShared(&host_imports);AcquireSRWLockShared(&native_records);
     int associated=host_entry_association(entry,state,owners,selected),ready=associated==1;
-    if(ready&&!entry->library&&entry->image->loads)
-        ready=host_module_select_locked(entry->image,state,entry->load,NULL,selectedLoad,&unobserved)==1;
+    if(ready&&!entry->library&&entry->image->loads){
+        int child=host_module_select_locked(entry->image,state,entry->load,NULL,selectedLoad,&unobserved);
+        if(child<0)associated=-1,ready=0;
+        // Zero means no current LoadLibrary relation. A real JNI association
+        // already established above remains valid; it is not a failed query.
+    }
     ReleaseSRWLockShared(&native_records);
     ReleaseSRWLockShared(&host_imports);
     JNIEnv *env=NULL;

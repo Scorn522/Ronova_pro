@@ -57,10 +57,12 @@ static int host_callback_caller_load(NativeThread *state,void *caller,OwnerLink 
             selected=1;ready=ready&&native_owner_merge(owners,workerLibrary->owners);
         }
     }
-    if(!selected)for(NativeLibrary *library=__atomic_load_n(&native_libraries,__ATOMIC_ACQUIRE);library;library=library->next)
+    if(!selected)for(HostImageLibrary *p=__atomic_load_n(&actual->libraries,__ATOMIC_ACQUIRE);p;p=p->next){
+        NativeLibrary *library=p->library;
         if(actual->live&&library->hostImage==actual&&host_library_current(library,actual->handle)){
             selected=1;ready=ready&&native_owner_merge(owners,library->owners);
         }
+    }
     if(!selected){*error=ERROR_MOD_NOT_FOUND;return 0;}
     if(!ready){*error=ERROR_NOT_ENOUGH_MEMORY;return 0;}return 1;
 }
@@ -91,7 +93,7 @@ static int host_callback_entry_sources(HostImport *entry,NativeThread *state,voi
             &&!(state->hostLoad&&state->hostLoad->calling))){
         SetLastError(ERROR_INVALID_STATE);return 0;
     }
-    int associated=host_entry_association(entry,state,owners,selected),ready=associated==1,unknown=entry->unknown;
+    int associated=host_entry_association(entry,state,owners,selected),ready=associated==1,unknown=entry->unknown||entry->image->relationsGap;
     DWORD error=associated?ERROR_INVALID_DATA:ERROR_MOD_NOT_FOUND;
     if(ready)ready=host_callback_caller_load(state,caller,owners,&unknown,&error,selectedLoad);
     if(ready)ready=host_callback_scopes_locked(state,owners,&unknown,&error);
