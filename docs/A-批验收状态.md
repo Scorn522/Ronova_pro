@@ -16,6 +16,12 @@ TLS 的共享槽位不再把不同线程的独立值误作冲突；Free、关闭
 
 当前不是进世界验收通过：尚无 IntegratedServer、ProRuntime 稳定世界 Tick 或正常保存退出的本轮完成结论。候选构建、阶段性同步与后续实机结果分别记录到既有实际报告。
 
+后续真实现场：attempt-19 在 OS 线程清理中发生 lwjgl_opengl.dll 访问冲突，转储确认回调参数为 -1 哨兵值。修复公共载体在回调/加载器阶段使用普通 TLS 的误拒；未知来源仍不获得私有租约，含实际 Mod 来源的槽位保留完整来源门控，停止来源和私有控制索引继续拒绝。TLS 纯记录锁不再把竞争伪造为 OS 操作失败，FLS 哨兵结束也不再等同仍在执行的线程结束。candidate-20 构建通过（45 秒）。
+
+attempt-20 的真实 JFR 诊断触发 ControlImages 全局变换锁与 ThrowableTracer 类初始化等待环；同版 Microsoft JDK 的 SA 栈已定位，普通 jcmd 未能返回。修复为锁外检查/登记保护，锁内仅发布已经保护的不可变镜像快照；无关类不再争用镜像发布锁。candidate-21 构建通过（30 秒），已更新 PCL 双 JAR 并准备原启动参数继续实跑。上述失败不计世界验收通过。
+
+attempt-21 的同一路径真实 JFR 在约 6 秒内成功启动，取得实际采样并进入 Forge 早期绘制，未再出现上述等待环；随后以 0xc0000374 原生退出，仍未开世界。真实转储进一步确认 CRT 的 FLS API 缓存不一致：FlsAlloc/FlsSetValue 已解析，FlsGetValue 却被缓存为缺失，导致 FLS 索引用于普通 TLS 查询并在退出时误释放其他库的数据。修复 host_native_resolve 在 heap/toolingRestricted 范围中无条件伪造 ERROR_BUSY/NULL；继续走现有纯 C 回调来源捕获、真实映像关系及停止来源检查，返回的控制 API 仍生成原有受控入口，不返回裸露的替代入口。
+
 ## 2026-10-20：超级史蒂夫 ItemStack 访问变换兼容
 
 接续 `022e716`。12:21 与 12:57 报告中的 `Field f_41589_ is not private and an instance field` 已查清：实际 AccessTransformerService 在 ModLauncher BEFORE 阶段应用超级史蒂夫的 `public-f net.minecraft.world.item.ItemStack *`，随后 Forge `field_to_method.js` 调用 ASMAPI，仍按 private 实例字段校验，因此同一合法 getter 重定向被拒绝。

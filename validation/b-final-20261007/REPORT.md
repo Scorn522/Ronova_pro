@@ -18,6 +18,15 @@
 
 candidate-19 的统一生产构建通过（54 秒），生成双 JAR。attempt-17 保存日志后正常退出 0，测试存档尚未打开。新候选更新到原 PCL 实例并重新准备参数后阶段性同步。当前尚未完成单人世界进入、IntegratedServer/ProRuntime 稳定 Tick 和世界正常保存退出验收，真实游戏循环继续。
 
+- attempt-19 随后原生退出 0xc0000005。Windows 实际转储定位 lwjgl_opengl.dll+0x1d696，线程清理回调的 RCX 为 -1；之前拒绝的 FLS 更新会保留 CRT 的销毁哨兵。公共载体无实际 Mod 来源的普通 TLS 操作不再仅因 restricted/unknown 进入误拒；所有部分来源继续保留且不授予私有释放权限。槽位分配、值、在途写及贡献历史含实际 Mod 来源时仍要求完整来源，私有索引和停止来源保持拒绝。纯 TLS 记录锁改为实际等待，避免正常清理被伪造为 BUSY；私有 FLS 哨兵的 ended 不替代真实内核线程终止。candidate-20 构建通过（45 秒）。
+- attempt-20 在加入真实 JFR 采样时停滞。普通附加命令超时后，同版 Microsoft JDK SA 读取到 Attach Listener 等待 ControlImages 变换锁，主线程等待 ThrowableTracer 初始化的循环；该进程尚未打开测试存档，结束后修复。ControlImages 改为保护登记在锁外执行，锁内仅交换已经受保护的不可变快照；仍保留原控制镜像和先保护后发布次序。candidate-21 统一构建通过（30 秒），更新/备份双 JAR、重建参数并继续真实客户端。
+
+本轮源码复核还确认：refreshNativeGaps 的已加载类遍历仅在实际 stopped 模块状态读取时执行，并非全部活跃 Mod 的普通启动路径；完成恢复链的事件唤醒仍未全部实现。FrameworkBuffers 使用线程局部嵌套上下文，退出恢复前值，序列化用 finally 退出，数组业务登记/来源发布立即取消快捷处理；绘制仅复用来源，原内存权限及 JNI 表保护继续执行。这些源码条件不冒充逃逸、停组或世界场景的新实测 PASS。
+
+attempt-21 的真实 JFR 在约 6 秒内启动并完成 35 秒采样，主启动线程继续进入 Forge 早期窗口；未重现 ControlImages/ThrowableTracer 等待环。随后实际退出 0xc0000374，Windows 转储和系统调试引擎确认在 DLL_THREAD_DETACH 的 CRT 清理中误释放了其他原生库的数据。转储内 STB CRT 的 API 缓存显示 FlsAlloc/FlsSetValue 有效而 FlsGetValue 为全位 1 的缺失哨兵；CRT 二进制明确在后者缺失时回退 TlsGetValue，但仍使用已分配的 FLS 索引。根因是 host_native_resolve 对 heap/toolingRestricted 无条件返回 NULL，令合法系统导出被永久缓存为缺失。删除这项无条件误拒，仍执行现有实际回调来源捕获、映像关联、停止来源判断和返回 API 受控封装；不修改第三方 DLL、不取消控制入口。这是候选后续修复，尚不代表新一轮游戏或世界通过。
+
+candidate-22 完整生产构建通过（33 秒），双 JAR 已更新至原 PCL 实例，保留旧包和参数备份并重新准备启动参数。attempt-22 使用原全套参数与全部既有 Mod 继续独立世界副本实跑，本次阶段同步不宣称已进入世界。
+
 ## 2026-10-20：ItemStack public 访问变换后的 Forge 重定向
 
 输入为用户 12:21、12:57 报告及 PCL 实际 Forge 47.4.23／coremods 5.2.4／AT 8.0.4／ASM 9.5。已核对实际阶段：AccessTransformerService 选择 BEFORE，超级史蒂夫 6.10.12f 原包的 ItemStack 全字段规则先将字段公开，Forge 后续 private 前提因此失败。没有执行压缩包内的启动脚本或加载第三方 Mod 类。

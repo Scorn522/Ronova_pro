@@ -90,7 +90,10 @@ static int host_tls_restricted(NativeThread *state){
             ||state->hostUnloadImage||state->hostRelease||state->hostLoad&&state->hostLoad->calling);
 }
 static int host_tls_lock(int restricted){
-    return restricted?TryAcquireSRWLockExclusive(&host_tls_records):(AcquireSRWLockExclusive(&host_tls_records),1);
+    /* This directory never enters the VM or loader while held. Contention is
+     * not an OS TLS failure: returning BUSY during CRT/FLS teardown can leave
+     * its destruction sentinel installed for the next OS callback. */
+    (void)restricted;AcquireSRWLockExclusive(&host_tls_records);return 1;
 }
 static int host_tls_cover(OwnerLink *retained,OwnerLink *actual){
     for(;actual;actual=actual->next){OwnerLink *p=retained;while(p&&p->owner!=actual->owner)p=p->next;if(!p)return 0;}return 1;
@@ -199,15 +202,17 @@ static void WINAPI host_tls_fiber_end(PVOID data){
 static int host_tls_capture(NativeThread *state,OwnerLink **owners,int *unknown){
     DWORD incoming=GetLastError();HostTlsThread *thread=host_tls_thread_current();HostTlsFiber *fiber=host_tls_fiber_current();
     int ready=1;
-    if(host_tls_restricted(state)){if(!TryAcquireSRWLockShared(&host_tls_records)){if(unknown)*unknown=1;SetLastError(incoming);return 0;}}
-    else AcquireSRWLockShared(&host_tls_records);
+    AcquireSRWLockShared(&host_tls_records);
     /* A TLS value's opaque data history is not an unknown caller of every
      * later JNI/OS operation on this thread. Keep all observed contributors,
      * but obtain call origins from the live Java/native/binding scopes.
      * The value gap remains in observed.unknown, TLS reports, callback scopes
      * and the complete-lease/retirement checks; it grants no private lease. */
     if(thread){ready=native_owner_merge(owners,thread->observed.owners);if(unknown)*unknown|=thread->ended||thread->gap;}
-    if(fiber){ready=ready&&native_owner_merge(owners,fiber->observed.owners);if(unknown)*unknown|=fiber->ended||fiber->gap;}
+    /* The private sentinel can run before the application's FLS callbacks.
+     * Its ended bit is not termination of the still-executing OS thread.
+     * Migrated/deleted fibers retain their separate actual lifecycle gap. */
+    if(fiber){ready=ready&&native_owner_merge(owners,fiber->observed.owners);if(unknown)*unknown|=fiber->gap;}
     ReleaseSRWLockShared(&host_tls_records);SetLastError(incoming);return ready;
 }
 static int host_tls_source_borrow(NativeThread *state,OwnerLink *owners,void **token){
@@ -388,7 +393,7 @@ static uint64_t host_native_tls(HostImport *entry,void *caller,uintptr_t *argume
     int reserved=0,called=0,returned=0,success=0,published=0;const char *failure="preparation";
     __try {
         if(native_owner_stopped(owners)){error=ERROR_ACCESS_DENIED;failure="stopped_source";}
-        else if(unknown&&(restricted||native_has_producer(owners))){error=ERROR_INVALID_DATA;failure="unknown_source";}
+        else if(unknown&&native_has_producer(owners)){error=ERROR_INVALID_DATA;failure="unknown_source";}
         if(!error&&InterlockedCompareExchange(&host_tls_ready,0,0)!=1){
             if(restricted)error=ERROR_BUSY;else if(!host_tls_prepare())error=GetLastError();}
         if(!error&&!allocating&&(!fls&&(native_tls!=TLS_OUT_OF_INDEXES&&index==native_tls
@@ -412,11 +417,12 @@ static uint64_t host_native_tls(HostImport *entry,void *caller,uintptr_t *argume
             }
             if(!error){lease=host_tls_lease_prepare(state,owners,unknown,restricted);if(!lease)error=GetLastError();
                 // A known platform-only callback does not acquire a private
-                // Mod lease by setting its own TLS value. Keep its partial
-                // lease/report, but do not turn missing private retention into
-                // a spurious OS failure. Real Mod sources and unknown callback
-                // origins still require the original complete-source gate.
-                else if(!lease->complete&&(native_has_producer(owners)||restricted&&unknown)){error=ERROR_INVALID_DATA;failure="source_lease";}}
+                // Mod lease by setting its own TLS value. Public-carrier
+                // attribution remains unknown and grants no private lifetime
+                // or retirement authority. A restricted loader/callback scope
+                // alone must not turn a CRT's own TLS into an invalid value.
+                // Actual Mod callers and actual Mod-bearing slots stay gated.
+                else if(!lease->complete&&native_has_producer(owners)){error=ERROR_INVALID_DATA;failure="source_lease";}}
         }
         if(!error){
             if(!host_tls_lock(restricted))error=ERROR_BUSY;
@@ -438,6 +444,21 @@ static uint64_t host_native_tls(HostImport *entry,void *caller,uintptr_t *argume
                         else {slot->fls=fls;slot->index=index;slot->generation=++host_tls_generation;
                             slot->live=1;slot->uncertain=slot->gap=1;slot->next=host_tls_slots;host_tls_slots=slot;published=1;}}
                     else published=1;
+                    /* Unknown public carriers may use ordinary per-context OS
+                     * storage, never a slot bearing a captured Mod source.
+                     * Check the complete observed history, not just the caller
+                     * or the current opaque pointer. Keep every partial lease
+                     * and unknown bit for reporting and retirement. */
+                    if(!error&&(unknown||lease&&!lease->complete)){
+                        int controlled=native_has_producer(slot->allocation.owners)||native_has_producer(slot->aggregate.owners);
+                        for(HostTlsContribution *p=slot->contributions;p&&!controlled;p=p->next)
+                            controlled=native_has_producer(p->sources.owners);
+                        for(HostTlsValue *p=slot->values;p&&!controlled;p=p->next)
+                            controlled=native_has_producer(p->sources.owners);
+                        for(HostTlsOperation *p=slot->operations;p&&!controlled;p=p->next)
+                            controlled=p->sources&&native_has_producer(p->sources->owners);
+                        if(controlled){error=ERROR_INVALID_DATA;failure="controlled_slot_sources";}
+                    }
                     int callbackUse=callbackSlot==slot&&(setting||getting);
                     /* An index is process-wide, its values are thread/fiber-local.
                      * Concurrent Get/Set on distinct contexts do not conflict.

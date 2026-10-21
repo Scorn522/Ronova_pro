@@ -864,7 +864,11 @@ static void host_refresh_targets(HostImage *image);
 static FARPROC WINAPI host_native_resolve(HMODULE module,LPCSTR name,HostImport *entry,void *caller){
     DWORD incoming=GetLastError();
     NativeThread *state=native_tls==TLS_OUT_OF_INDEXES?NULL:(NativeThread*)TlsGetValue(native_tls);
-    if(state&&(state->heapCallback||state->toolingRestricted)){SetLastError(ERROR_BUSY);return NULL;}
+    /* GetProcAddress is also used by the CRT inside real loader callbacks.
+     * Inventing a missing export there can mix its FlsAlloc index with a
+     * TlsGetValue fallback and free another runtime's per-thread state.
+     * The callback source query below already stays out of Java/the VM;
+     * retain its actual scopes and wrap the resolved boundary as usual. */
     entry=host_consumed_entry(entry,state,caller);
     AcquireSRWLockShared(&host_imports);AcquireSRWLockShared(&native_records);
     int associated=host_entry_association(entry,state,NULL,NULL);

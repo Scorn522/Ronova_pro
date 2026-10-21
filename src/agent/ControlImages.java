@@ -32,10 +32,16 @@ final class ControlImages implements ClassFileTransformer {
     private volatile Ref<?>[] declared=new Ref<?>[0];
     private volatile String failure;
     boolean healthy(){return failure==null;}
-    synchronized void declare(Class<?> type){
-        for(var entry:declared)if(entry.get()==type)return;
-        var next=Arrays.copyOf(declared,declared.length+1);next[next.length-1]=new Ref<>(type);
-        protect(next,next[next.length-1]);declared=next;
+    void declare(Class<?> type){
+        for(;;){
+            Ref<?>[] before=declared;
+            for(var entry:before)if(entry.get()==type)return;
+            var next=Arrays.copyOf(before,before.length+1);next[next.length-1]=new Ref<>(type);
+            // Registration can load classes. Publish only after protection is
+            // installed, without holding a transformer/class-initializer lock.
+            protect(next,next[next.length-1]);
+            synchronized(this){if(declared==before){declared=next;return;}}
+        }
     }
     boolean critical(Module module,ClassLoader loader,String name,Class<?> type) {
         if(name==null)return false;
@@ -59,19 +65,26 @@ final class ControlImages implements ClassFileTransformer {
                     "net/minecraft/world/level/Level","net/minecraft/client/multiplayer/ClientPacketListener",
                     "net/minecraft/client/multiplayer/ClientLevel").contains(name);
     }
-    @Override public synchronized byte[] transform(Module module,ClassLoader loader,String name,Class<?> type,
+    @Override public byte[] transform(Module module,ClassLoader loader,String name,Class<?> type,
             ProtectionDomain domain,byte[] bytes) {
         try {
         if(!critical(module,loader,name,type))return null;
-        var living=new ArrayList<Image>();
-        for(Image image:images) {
-            ClassLoader defining=image.loader.get();if(!image.bootstrap&&defining==null)continue;
-            living.add(image);
-            if(defining==loader&&image.bootstrap==(loader==null)&&image.name.equals(name))return image.bytes.clone();
+        for(;;){
+            Image[] before=images;
+            var living=new ArrayList<Image>();
+            for(Image image:before) {
+                ClassLoader defining=image.loader.get();if(!image.bootstrap&&defining==null)continue;
+                living.add(image);
+                if(defining==loader&&image.bootstrap==(loader==null)&&image.name.equals(name))return image.bytes.clone();
+            }
+            Image image=new Image(new Ref<>(loader),loader==null,name,bytes.clone());living.add(image);
+            Image[] next=living.toArray(Image[]::new);
+            protect(next,image,image.loader,image.bytes);
+            // Only the immutable snapshot exchange is serialized. In
+            // particular, an unrelated class must never wait here while the
+            // holder enters that class's initialization through protection.
+            synchronized(this){if(images==before){images=next;return null;}}
         }
-        Image image=new Image(new Ref<>(loader),loader==null,name,bytes.clone());living.add(image);
-        Image[] next=living.toArray(Image[]::new);protect(next,image,image.loader,image.bytes);images=next;
-        return null;
         }catch(RuntimeException|LinkageError unavailable) {
             failure=name+":"+unavailable.getClass().getSimpleName()+":"+unavailable.getMessage();
             System.err.println("RONOVA_CONTROL_IMAGE_UNAVAILABLE:"+failure);throw unavailable;
