@@ -98,7 +98,7 @@ final class EquipmentCarrierGraph {
         FIELDS=MethodHandles.publicLookup().findStatic(bridge,"fields",MethodType.methodType(Object[][].class,Object.class));
         READ=MethodHandles.publicLookup().findStatic(bridge,"read",MethodType.methodType(Object.class,Object.class,Field.class));
         Class<?> agent=Class.forName("dev.ronova.pro.agent.RecoveryAgent",false,ClassLoader.getSystemClassLoader());
-        DECLARE=MethodHandles.publicLookup().findStatic(agent,"declareEquipmentCarrier",MethodType.methodType(void.class,Class.class));
+        DECLARE=MethodHandles.publicLookup().findStatic(agent,"declareEquipmentCarrier",MethodType.methodType(boolean.class,Class.class));
         Class<?> raw=Class.forName("sun.misc.Unsafe",false,ClassLoader.getPlatformClassLoader());Field singleton=raw.getDeclaredField("theUnsafe");singleton.setAccessible(true);unsafe=singleton.get(null);
         ARRAY_BASE=raw.getMethod("arrayBaseOffset",Class.class);ARRAY_SCALE=raw.getMethod("arrayIndexScale",Class.class);
         ready=true;
@@ -257,15 +257,17 @@ final class EquipmentCarrierGraph {
         if(type.getPackageName().equals("java.util.function")||type==net.minecraftforge.common.util.NonNullSupplier.class||type==net.minecraftforge.common.util.NonNullConsumer.class||type==net.minecraftforge.common.util.NonNullFunction.class)return true;
         for(Class<?> contract:type.getInterfaces())if(function(contract))return true;return false;
     }
-    static void declare(View view){
+    static boolean declare(View view){
         for(Node node:view.nodes.values())if(node.callable)declare(node.value.getClass(),new IdentityHashMap<>());
+        for(Node node:view.nodes.values())if(node.callable&&!declared(node.value.getClass()))return false;
+        return true;
     }
     private static void declare(Class<?> type,IdentityHashMap<Class<?>,Boolean> seen){
         if(type==null||type==Object.class||type.getClassLoader()==null||borrowedType(type)||type.isInterface()&&function(type)||type==Runnable.class||type==java.util.concurrent.Callable.class||seen.put(type,Boolean.TRUE)!=null)return;
-        if(!DECLARED.containsKey(type))try{DECLARE.invokeExact(type);DECLARED.put(type,Boolean.TRUE);}catch(Throwable failure){throw failure("EQUIPMENT_CARRIER_ACTION_INSTALL_FAILED",failure);}
+        if(!DECLARED.containsKey(type))try{DECLARED.put(type,(boolean)DECLARE.invokeExact(type));}catch(Throwable failure){throw failure("EQUIPMENT_CARRIER_ACTION_INSTALL_FAILED",failure);}
         for(Class<?> contract:type.getInterfaces())declare(contract,seen);declare(type.getSuperclass(),seen);
     }
-    static boolean declared(Class<?> type){return DECLARED.containsKey(type);}
+    static boolean declared(Class<?> type){return Boolean.TRUE.equals(DECLARED.get(type));}
     static boolean providerCurrent(Object dispatcher,Object provider){
         if(dispatcher==null||dispatcher.getClass()!=CapabilityDispatcher.class||provider==null)return false;
         Object caps=value(dispatcher,CapabilityDispatcher.class,"caps");if(caps instanceof Object[] entries)for(Object actual:entries)if(actual==provider)return true;return false;

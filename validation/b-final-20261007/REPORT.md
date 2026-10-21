@@ -1,5 +1,23 @@
 # B 批实际报告：2026-10-09 代码收敛接续
 
+## 2026-10-21：PCL 真实客户端循环修复（阶段性，世界验收未完成）
+
+基线为 41e7887，主工程 D:\桌面\ronova_GPT。本轮使用原 PCL 实例、原完整 JVM/游戏参数及原有全部 Mod，仅为 --quickPlaySingleplayer 指定独立存档副本。旧候选与参数逐轮备份；私人启动参数、原始日志、线程栈、崩溃转储、存档和第三方包均未加入公开仓库。
+
+前序真实 JNI 小检查通过，输出 JNI_LIVE_TABLE_PASS：受控及非受控活动槽位的裸写修复、合法已批准钩子保留、实际停组后的原始槽位恢复。检查自己的只读页面阶段曾错误覆盖 HotSpot 共页数据，已改用实际附着线程的独立 JNI 表后复查通过；该失败保留，不算生产启动通过。
+
+真实客户端循环记录：
+
+- attempt-13 采样中早期绘制已不再落到重复来源 StackWalker，Mixin 临时数组不再逐字节进入 byteStore 回执；随后定位到 EventBus 自有 MethodHandle 更新被自己的 writer 判断拒绝，引起 JDK 布尔 CAS 重试。精确修复内部写入者身份，外部入口仍排除。
+- attempt-14 走过上述自旋，暴露 Mixin 原 synthetic Args 包在生产 GAME 模块中无路由；attempt-15 仅改前缀却重算栈图，触发缺失的可选 ASM CheckClassAdapter。最终保留原栈图及原生成器，attempt-16 已生成并使用 GAME 包下的 Args 类，进入资源重载。
+- attempt-16 在字体加载时由 jemalloc 报 Error setting TSD 后原生退出，Windows 崩溃转储保留。TLS 同一索引的跨线程 Get/Set 不再误触全槽 busy 拒绝。
+- attempt-17 到达原 Mod 构造、渲染初始化、字体资源加载和 Minecraft 客户端 Tick。真实 Native 栈抓到退役线程持有 TLS 全局锁重复扫描已结束上下文，渲染线程等待该锁；已按实际上下文建立值索引、退出完成项重复扫描，并保留在途/回调/来源释放条件。已知平台回调的部分租约不再阻止其合法 TLS 操作，实际 Mod 或未知来源的原检查仍保留。
+- 同轮还暴露 CLIENT_SCREEN_LAYOUT_CHANGED：超级史蒂夫原 JAR 的 AT 包含 public-f net.minecraft.client.gui.screens.Screen *，合法移除了三个列表字段的 final。兼容其实际 public 布局，继续验证准确字段、描述符、原基类/模块身份、实际 ArrayList 和每次列表引用身份；没有修改第三方包。
+
+审查清单对应的任务取消、直接 CF CAS/BLOCK_CLEAR、自有引用释放、真实装备声明状态、准确来源发布、FramePop 等待、当前 Native gap 替换及同步读取均已落入生产源码。退役和状态读取的两次全线程扫描合为一次，同轮重复 Mod/UUID 查询合并。恢复链完成后的事件唤醒尚未全部实现，仍做真实读回；没有将源码改动冒充相关停组、恢复、跨重启或客户端清理的实测 PASS。
+
+candidate-19 的统一生产构建通过（54 秒），生成双 JAR。attempt-17 保存日志后正常退出 0，测试存档尚未打开。新候选更新到原 PCL 实例并重新准备参数后阶段性同步。当前尚未完成单人世界进入、IntegratedServer/ProRuntime 稳定 Tick 和世界正常保存退出验收，真实游戏循环继续。
+
 ## 2026-10-20：ItemStack public 访问变换后的 Forge 重定向
 
 输入为用户 12:21、12:57 报告及 PCL 实际 Forge 47.4.23／coremods 5.2.4／AT 8.0.4／ASM 9.5。已核对实际阶段：AccessTransformerService 选择 BEFORE，超级史蒂夫 6.10.12f 原包的 ItemStack 全字段规则先将字段公开，Forge 后续 private 前提因此失败。没有执行压缩包内的启动脚本或加载第三方 Mod 类。

@@ -226,7 +226,7 @@ static void JNICALL code_retirement_step(jvmtiEnv *ti,JNIEnv *env,jthread thread
         if(remains)code_retirement_wait(request,thread,method,bottom,CODE_RETIRE_FRAMEWORK);
         else{code_retirement_event(request,thread,0);InterlockedExchange(&request->active,0);}goto done;
     }
-    if(!selected||unmapped){InterlockedExchange(&request->reason,CODE_RETIRE_SOURCE_SCOPE);goto done;}
+    if(!selected||unmapped){code_retirement_wait(request,thread,method,bottom,CODE_RETIRE_SOURCE_SCOPE);goto done;}
     OwnerLink *sources=NULL;int known=0,unknown=0,shared=0;
     if(!code_frame_sources_query(env,method,location,&sources,&known,&unknown))unknown=1;
     for(OwnerLink *entry=sources;entry;entry=entry->next)if(!InterlockedCompareExchange(&entry->owner->stopped,0,0))shared=1;
@@ -324,30 +324,47 @@ static void code_retirement_refresh_idle(JNIEnv *env,jthread thread,jvmtiFrameIn
 done:
     code_retirement_release(env,request);
 }
-JNIEXPORT void JNICALL Java_dev_ronova_pro_bootstrap_NativeControl_retireCode0(JNIEnv *env,jclass type,jobject module){
-    if(!native_jni_ready||!native_original.IsSameObject(env,type,native_controller)
-        ||!native_original.CallStaticBooleanMethod(env,native_controller,native_control_gate)){native_refuse(env,"ACTUAL_CODE_RETIREMENT_AGENT_REQUIRED");return;}
-    if(!module||!code_available||!code_pop_available||!code_suspend_available||!code_force_available||!code_step_available)return;
+static void code_retirement_scan(JNIEnv *env,jobject module,jlong *values){
+    if(!code_available)return;
     Owner *selected=NULL;AcquireSRWLockShared(&native_records);
     for(Owner *owner=native_owners;owner;owner=owner->next)if(InterlockedCompareExchange(&owner->producer,0,0)
-        &&InterlockedCompareExchange(&owner->stopped,0,0)&&native_original.IsSameObject(env,owner->module,module)){selected=owner;break;}
-    ReleaseSRWLockShared(&native_records);if(!selected)return;
-    CodeRetirementOwner *statistics=code_retirement_owner(selected);if(!statistics){InterlockedIncrement(&native_failures);return;}
+        &&InterlockedCompareExchange(&owner->stopped,0,0)&&module&&native_original.IsSameObject(env,owner->module,module)){selected=owner;break;}
+    ReleaseSRWLockShared(&native_records);
+    int retiring=selected&&code_pop_available&&code_suspend_available&&code_force_available&&code_step_available;
+    if(!values&&!retiring)return;
+    CodeRetirementOwner *statistics=retiring?code_retirement_owner(selected):NULL;
+    if(retiring&&!statistics){InterlockedIncrement(&native_failures);if(values)values[2]++;retiring=0;}
     jthread current=NULL,*threads=NULL;jint count=0;(*native_ti)->GetCurrentThread(native_ti,&current);
-    if((*native_ti)->GetAllThreads(native_ti,&count,&threads)!=JVMTI_ERROR_NONE){InterlockedIncrement64(&statistics->failures);goto done;}
+    if((*native_ti)->GetAllThreads(native_ti,&count,&threads)!=JVMTI_ERROR_NONE){
+        if(statistics)InterlockedIncrement64(&statistics->failures);if(values)values[2]++;goto done;}
     for(jint i=0;i<count;i++){
         jvmtiFrameInfo *frames=NULL;jint depth=0;
         if(code_trace(threads[i],&frames,&depth)){
-            int found=0;
+            int found=-1;
             for(jint j=0;j<depth;j++)if(code_retirement_candidate(env,frames[j].method,module)){
-                code_retirement_arm(env,threads[i],selected,frames[j].method,j,current);found=1;break;
+                if(found<0)found=j;
+                if(values){int unknown=0;
+                    if(code_retirement_observed(env,frames[j].method,frames[j].location,module,&unknown))values[1]++;
+                    if(unknown)values[2]++;
+                }else break;
             }
-            if(!found)code_retirement_refresh_idle(env,threads[i],frames,depth);
+            if(retiring){
+                if(found>=0)code_retirement_arm(env,threads[i],selected,frames[found].method,found,current);
+                else code_retirement_refresh_idle(env,threads[i],frames,depth);
+            }
+        }else if(values){
+            jint state=0;
+            if((*native_ti)->GetThreadState(native_ti,threads[i],&state)!=JVMTI_ERROR_NONE||(state&JVMTI_THREAD_STATE_ALIVE))values[2]++;
         }
         free(frames);native_original.DeleteLocalRef(env,threads[i]);
     }
 done:
     if(threads)(*native_ti)->Deallocate(native_ti,(unsigned char*)threads);if(current)native_original.DeleteLocalRef(env,current);
+}
+JNIEXPORT void JNICALL Java_dev_ronova_pro_bootstrap_NativeControl_retireCode0(JNIEnv *env,jclass type,jobject module){
+    if(!native_jni_ready||!native_original.IsSameObject(env,type,native_controller)
+        ||!native_original.CallStaticBooleanMethod(env,native_controller,native_control_gate)){native_refuse(env,"ACTUAL_CODE_RETIREMENT_AGENT_REQUIRED");return;}
+    code_retirement_scan(env,module,NULL);
 }
 static void code_retirement_state(JNIEnv *env,jobject module,jlong *values){
     values[5]=code_suspend_available;values[6]=code_force_available;values[7]=code_step_available;values[8]=code_retirement_onload;

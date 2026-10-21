@@ -758,7 +758,8 @@ public final class CodeSourceBridge {
         synchronized(CONTROLS){return CONTROLS.fieldGate(object);}
     }
     static void mutationControls(Object... objects){
-        if(AUTHORITY.getCallerClass().getNestHost()!=TaskBridge.class&&AUTHORITY.getCallerClass().getNestHost()!=ControlBridge.class)throw new SecurityException("ACTUAL_MUTATION_SOURCE_STATE_REQUIRED");
+        Class<?> caller=AUTHORITY.getCallerClass().getNestHost();
+        if(caller!=TaskBridge.class&&caller!=ControlBridge.class&&caller!=FrameworkBuffers.class)throw new SecurityException("ACTUAL_MUTATION_SOURCE_STATE_REQUIRED");
         protect(objects);
     }
     private static CodeField codeField(Class<?> declaring,String name){

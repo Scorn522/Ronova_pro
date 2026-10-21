@@ -13,8 +13,7 @@ typedef struct NativeArrayCopyContext {
 static int native_arraycopy_image_read(HMODULE image,uintptr_t address,void *value,SIZE_T length){
     if(!image||!length||length-1>UINTPTR_MAX-address||native_image((void*)address)!=image
             ||native_image((void*)(address+length-1))!=image)return 0;
-    SIZE_T copied=0;
-    return host_real_read_process_memory(GetCurrentProcess(),(void*)address,value,length,&copied)&&copied==length;
+    return native_control_snapshot((const void*)address,value,length);
 }
 static int native_arraycopy_rva_read(HMODULE image,DWORD imageSize,ULONGLONG rva,void *value,SIZE_T length){
     uintptr_t base=(uintptr_t)image;

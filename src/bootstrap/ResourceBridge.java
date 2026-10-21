@@ -281,7 +281,7 @@ public final class ResourceBridge {
         final BufferStorage storage;
         final WeakReference<Object> parent;
         final long address,bytes;
-        boolean constructed,memoryObserved;long memoryToken,memoryGeneration;
+        boolean constructed,memoryObserved,earlyDisplay;long memoryToken,memoryGeneration;
         BufferView(Buffer buffer,BufferStorage storage,Object parent)throws IllegalAccessException {
             this.storage=storage;this.parent=new WeakReference<>(parent);address=(Long)CodeSourceBridge.controlField(BufferPlatform.ADDRESS,buffer);
             int shift=buffer instanceof ByteBuffer?0:buffer instanceof CharBuffer||buffer instanceof ShortBuffer?1:
@@ -351,7 +351,7 @@ public final class ResourceBridge {
     private static final class BufferOperation {
         final Thread caller=Thread.currentThread();final Class<?> declaring;final String method;
         final List<BufferUse> uses;final BufferOperation previous=BUFFER_OPERATIONS.get();boolean closed;
-        BufferWrite write;BufferRead read;Object execution;Module[] sources;
+        BufferWrite write;BufferRead read;Object execution,framework;Module[] sources;
         Set<Module> observed;
         BufferOperation(Class<?> declaring,String method,List<BufferUse> uses){this.declaring=declaring;this.method=method;this.uses=uses;}
         void observe(Module[] sources){
@@ -1867,14 +1867,39 @@ public final class ResourceBridge {
         synchronized(STREAMS){if(lease.closed)throw new SecurityException("CLIENT_PAYLOAD_LEASE_ALREADY_CLOSED");releaseBufferUse(lease.use);lease.closed=true;lease.view.active--;lease.view.storage.active--;STREAMS.notifyAll();}
     }
 
+    static void earlyBuffer(Buffer buffer){
+        if(WALKER.getCallerClass()!=FrameworkBuffers.class)throw new SecurityException("ACTUAL_EARLY_BUFFER_OWNER_REQUIRED");
+        synchronized(STREAMS){
+            BufferView view=BUFFERS.get(new Key(buffer,false));if(view==null||buffer.getClass()!=BufferPlatform.DIRECT)return;
+            for(Module source:view.storage.sources)if(source==null||ControlBridge.producer(source))return;
+            // This is a source observation, never a storage/escape permission.
+            // Every use still executes the original complete operation below.
+            view.earlyDisplay=true;
+        }
+    }
+    static boolean earlyBufferSources(Buffer buffer){
+        if(WALKER.getCallerClass()!=FrameworkBuffers.class)throw new SecurityException("ACTUAL_EARLY_BUFFER_USE_REQUIRED");
+        synchronized(STREAMS){
+            BufferView view=BUFFERS.get(new Key(buffer,false));
+            if(view==null||!view.earlyDisplay||buffer.getClass()!=BufferPlatform.DIRECT
+                    ||view.sealed||view.storage.sealed||view.storage.cleaned||view.storage.cleaning
+                    ||view.storage.failed||view.storage.restoring)return false;
+            for(Module source:view.storage.sources)if(source==null||ControlBridge.producer(source))return false;
+            long address=(Long)CodeSourceBridge.controlField(BufferPlatform.ADDRESS,buffer);
+            int capacity=(Integer)CodeSourceBridge.controlField(BufferPlatform.CAPACITY,buffer);
+            return address==view.address&&capacity>=0&&(long)capacity==view.bytes;
+        }
+    }
     public static Object bufferOperation(Object receiver,Object[] arguments,Class<?> declaring,String method){
         platform(declaring,method);if(declaring!=FILE_CHANNEL&&!BufferPlatform.TYPES.contains(declaring))throw new SecurityException("ACTUAL_BUFFER_OPERATION_REQUIRED");
         if(FILE_OBSERVING.get()!=null)return null;FILE_OBSERVING.set(Boolean.TRUE);
+        Object framework=null;
         // This private per-call list is never a business source. Avoid registering
         // two temporary ArrayLists in the global source directory for every read.
         List<BufferUse> uses=new LinkedList<>();boolean delivered=false;
         try{
             if(ControlBridge.recoveryWriter())return null;
+            framework=FrameworkBuffers.beginBuffer(receiver,arguments,method);
             synchronized(STREAMS){
                 observeBufferUse(uses,receiver);for(Object argument:arguments)observeBufferUse(uses,argument);
                 for(BufferUse use:uses)retainBufferUse(use);
@@ -1883,6 +1908,7 @@ public final class ResourceBridge {
             if(!ControlBridge.recoveryWriter()&&!(receiver instanceof Buffer buffer&&IoBridge.finishingBuffer(buffer))&&!ControlBridge.taskEffectAllowed(receiver,"buffer-io"))throw new IllegalStateException("RONOVA_TERMINAL_BUFFER_IO");
             boolean read=BufferPlatform.READS.contains(method),write=method.startsWith("put")||method.equals("_put")||method.equals("compact");
             BufferOperation operation=new BufferOperation(declaring,method,uses);
+            operation.framework=framework;
             Module[] sources=uses.isEmpty()?null:bufferOperationSources(operation);
             for(BufferUse use:uses){
                 boolean known=ControlBridge.resourceExposedByOperation(use.buffer,sources);
@@ -1905,8 +1931,8 @@ public final class ResourceBridge {
             delivered=true;
             return operation;
         }finally{
-            synchronized(STREAMS){for(BufferUse use:uses){use.view.observing--;use.view.storage.observing--;if(!delivered)releaseBufferUse(use);}}
-            FILE_OBSERVING.remove();
+            try{synchronized(STREAMS){for(BufferUse use:uses){use.view.observing--;use.view.storage.observing--;if(!delivered)releaseBufferUse(use);}}}
+            finally{FILE_OBSERVING.remove();if(!delivered)FrameworkBuffers.finishBuffer(framework);}
         }
     }
     public static void bufferOperationFinished(Object value){
@@ -1937,6 +1963,8 @@ public final class ResourceBridge {
                 use.view.active--;use.view.storage.active--;
             }}
             if(operation.previous==null)BUFFER_OPERATIONS.remove();else BUFFER_OPERATIONS.set(operation.previous);
+            try{FrameworkBuffers.finishBuffer(operation.framework);}
+            catch(RuntimeException|Error failure){if(failed==null)failed=failure;else if(failed!=failure)failed.addSuppressed(failure);}
         }
         if(failed instanceof RuntimeException exception)throw exception;if(failed instanceof Error error)throw error;
     }

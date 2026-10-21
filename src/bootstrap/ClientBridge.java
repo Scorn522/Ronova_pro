@@ -75,11 +75,14 @@ public final class ClientBridge {
         RenderQueueFields(Class<?> type)throws ReflectiveOperationException{
             this.type=type;if(!type.getName().equals(RENDER_SYSTEM)||!role(type))throw new SecurityException("ACTUAL_RENDER_SYSTEM_REQUIRED");
             queue=uiField(type,"recordingQueue","recordingQueue","Ljava/util/concurrent/ConcurrentLinkedQueue;",true);
-            call=Class.forName(RENDER_CALL,false,type.getClassLoader());execute=call.getMethod("execute");
+            call=Class.forName(RENDER_CALL,false,type.getClassLoader());
+            Method[] declared=PlatformMetadata.declaredMethods(call);
+            if(declared.length!=1)throw new IllegalStateException("CLIENT_RENDER_CALL_CONTRACT_CHANGED");
+            execute=declared[0];
             if(!Modifier.isFinal(queue.getModifiers())||!call.isInterface()||!Modifier.isPublic(call.getModifiers())
                     ||call.getClassLoader()!=type.getClassLoader()||call.getModule()!=type.getModule()
-                    ||execute.getDeclaringClass()!=call||Modifier.isStatic(execute.getModifiers())||execute.getReturnType()!=void.class
-                    ||execute.getParameterCount()!=0||call.getDeclaredMethods().length!=1)throw new IllegalStateException("CLIENT_RENDER_CALL_CONTRACT_CHANGED");
+                    ||execute.getDeclaringClass()!=call||!Modifier.isPublic(execute.getModifiers())||Modifier.isStatic(execute.getModifiers())||execute.getReturnType()!=void.class
+                    ||execute.getParameterCount()!=0||!Set.of("execute","m_83909_").contains(execute.getName()))throw new IllegalStateException("CLIENT_RENDER_CALL_CONTRACT_CHANGED");
             overlayProtect(this,queue,execute);
         }
         boolean current(Object actual)throws IllegalAccessException{return actual!=null&&actual.getClass()==java.util.concurrent.ConcurrentLinkedQueue.class&&queue.get(null)==actual;}
@@ -189,9 +192,16 @@ public final class ClientBridge {
             children=uiField(type,"children","f_96540_","Ljava/util/List;",false);renderables=uiField(type,"renderables","f_169369_","Ljava/util/List;",false);
             narratables=uiField(type,"narratables","f_169368_","Ljava/util/List;",false);lastNarratable=uiField(type,"lastNarratable","f_169365_","Lnet/minecraft/client/gui/narration/NarratableEntry;",false);
             focused=uiField(container,"focused","f_94673_",WIDGET,false);dragging=uiField(container,"isDragging","f_94674_","Z",false);
-            if(!Modifier.isFinal(children.getModifiers())||!Modifier.isFinal(renderables.getModifiers())||!Modifier.isFinal(narratables.getModifiers())
+            // Forge's public-f Screen * AT legally removes final in this
+            // actual Mod pack. Keep the exact fields/types/base identities and
+            // live list-identity readback; final is not a runtime write guard.
+            if(!screenListLayout(children)||!screenListLayout(renderables)||!screenListLayout(narratables)
                     ||container.getModule()!=type.getModule()||!role(minecraft.getType()))throw new IllegalStateException("CLIENT_SCREEN_LAYOUT_CHANGED");
             ui=UI_FIELDS.get(minecraft.getType());overlayProtect(this,minecraft,children,renderables,narratables,focused,dragging,lastNarratable);
+        }
+        private static boolean screenListLayout(Field field){
+            int modifiers=field.getModifiers();
+            return Modifier.isFinal(modifiers)||Modifier.isPublic(modifiers);
         }
     }
     private static final class ScreenRegistry {

@@ -20,6 +20,30 @@ static NativePlatformAgent *native_platform_agents;
 static SRWLOCK native_platform_gate=SRWLOCK_INIT;
 static volatile LONG native_platform_ready;
 
+/* Anchor libinstrument in the validated JPLIS environment's real callback,
+ * including a callback already wrapped by this controller. Hold its slot
+ * lifetime while acquiring a loader reference; no loader call holds the
+ * tooling directory. A filename or a Mod-supplied address cannot seed it. */
+static void native_platform_backend(const NativePlatformEnv17 *normal,jvmtiEnv *api){
+    if(InterlockedCompareExchangePointer((void *volatile*)&native_instrument_backend,NULL,NULL)
+            ||!normal->callbacks.ClassFileLoadHook)return;
+    void *callback=(void*)normal->callbacks.ClassFileLoadHook;NativeToolingSlot *held=NULL;
+    AcquireSRWLockShared(&native_tooling_records);
+    for(NativeToolingSlot *slot=native_tooling_slots;slot;slot=slot->next)
+        if(slot->environment->api==api&&slot->entry==callback&&!slot->releasing){
+            held=slot;InterlockedIncrement(&slot->active);callback=slot->callback;break;
+        }
+    ReleaseSRWLockShared(&native_tooling_records);
+    HMODULE pin=NULL;
+    if(callback&&GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS,(LPCSTR)callback,&pin)){
+        if(pin==native_control_image()||InterlockedCompareExchangePointer((void *volatile*)&native_instrument_backend,pin,NULL))
+            host_real_free_library(pin);
+    }
+    if(held){
+        AcquireSRWLockExclusive(&native_tooling_records);InterlockedDecrement(&held->active);
+        native_tooling_slot_queue_locked(held);ReleaseSRWLockExclusive(&native_tooling_records);
+    }
+}
 static int native_platform_profile(JNIEnv *env){
     if(InterlockedCompareExchange(&native_platform_ready,0,0))return 1;
     if(!InitOnceExecuteOnce(&code_vm_once,code_vm_initialize,env,NULL)||!code_vm_layout.ready)return 0;
@@ -74,12 +98,11 @@ JNIEXPORT jboolean JNICALL Java_dev_ronova_pro_bootstrap_NativeControl_protectPl
     valid=actual&&native_bootstrap_class(env,actual,"Lsun/instrument/InstrumentationImpl;");
     jfieldID field=valid?native_original.GetFieldID(env,actual,"mNativeAgent","J"):NULL;
     uintptr_t address=field?(uintptr_t)native_original.GetLongField(env,instrumentation,field):0;
-    NativePlatformJplis image;
+    NativePlatformJplis image;NativePlatformEnv17 normal;
     valid=address&&!native_original.ExceptionCheck(env)&&code_vm_read(address,&image,sizeof(image))
             &&image.vm==native_vm&&image.normal.agent==(void*)address&&image.normal.api
             &&(!image.retransform.api||image.retransform.agent==(void*)address);
     if(valid){
-        NativePlatformEnv17 normal;
         valid=code_vm_read((uintptr_t)image.normal.api,&normal,sizeof(normal))
                 &&normal.magic==0x71ee&&normal.local==(void*)(address+offsetof(NativePlatformJplis,normal));
     }
@@ -102,6 +125,7 @@ JNIEXPORT jboolean JNICALL Java_dev_ronova_pro_bootstrap_NativeControl_protectPl
     if(!found){prepared->next=native_platform_agents;native_platform_agents=prepared;prepared=NULL;}
     else valid=native_original.IsSameObject(env,found->instrumentation,instrumentation);
     ReleaseSRWLockExclusive(&native_platform_gate);
+    if(valid)native_platform_backend(&normal,image.normal.api);
 done:
     if(prepared){if(prepared->instrumentation)native_original.DeleteGlobalRef(env,prepared->instrumentation);free(prepared);}
     if(actual)native_original.DeleteLocalRef(env,actual);state->control--;

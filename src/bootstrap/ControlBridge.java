@@ -89,8 +89,8 @@ public final class ControlBridge {
     }
     public static boolean owns(Class<?> type) {
         Class<?> agent=instrumentationOwner;
-        return agent!=null&&type!=null&&type.getClassLoader()==agent.getClassLoader()
-                &&DefinitionBridge.module(type)==agent.getModule()&&type.getName().startsWith("dev.ronova.pro.agent.")
+        return agent!=null&&type!=null&&type.getName().startsWith("dev.ronova.pro.agent.")
+                &&type.getClassLoader()==agent.getClassLoader()&&DefinitionBridge.module(type)==agent.getModule()
                 &&Objects.equals(type.getProtectionDomain().getCodeSource(),agent.getProtectionDomain().getCodeSource());
     }
     public static boolean removalAllowed(ClassFileTransformer transformer) {
@@ -129,14 +129,13 @@ public final class ControlBridge {
 
 
     static final Module[] NO_SOURCES=new Module[0];
-    private static final Module[] QUERY_UNKNOWN_SOURCES=new Module[]{null};
     private static final ThreadLocal<SourceQuery> SOURCE_QUERIES=new ThreadLocal<>();
     private static final class SourceQuery {
-        final Thread thread=Thread.currentThread();Module[] partial=QUERY_UNKNOWN_SOURCES;
+        final Thread thread=Thread.currentThread();Module[] partial=NO_SOURCES;
         void retain(Module[] incoming){
             if(incoming==null||incoming.length==0)return;int additions=0;
             for(int i=0;i<incoming.length;i++){
-                Module source=incoming[i];if(source==null)continue;boolean known=false;
+                Module source=incoming[i];boolean known=false;
                 for(Module retained:partial)if(retained==source){known=true;break;}
                 for(int j=0;j<i&&!known;j++)known=incoming[j]==source;
                 if(!known)additions++;
@@ -145,7 +144,7 @@ public final class ControlBridge {
             // A source query may be observing arraycopy itself. Its partial
             // snapshot must not perform another copy to retain the old sources.
             for(Module source:partial)next[at++]=source;
-            for(Module source:incoming){if(source==null)continue;boolean known=false;for(int i=0;i<at;i++)if(next[i]==source){known=true;break;}if(!known)next[at++]=source;}
+            for(Module source:incoming){boolean known=false;for(int i=0;i<at;i++)if(next[i]==source){known=true;break;}if(!known)next[at++]=source;}
             partial=next;CodeSourceBridge.mutationControls((Object)next);
         }
     }
@@ -283,6 +282,8 @@ public final class ControlBridge {
         if(name.equals("dev.ronova.pro.bootstrap.ResourceBridge$BufferWrapWriter"))return false;
         if(type==BackingBridge.class)return method.equals("readUnsafe");
         if(type==ResourceBridge.class)return !(method.equals("mutationAllowed")||method.equals("critical")||method.equals("fieldMutationAllowed")||method.equals("unsafeMutationAllowed")||method.equals("bufferWrapMutationAllowed"));
+        if(type==EventBusBridge.class)return !Set.of("structure","fieldAllowed","memoryAllowed","restoreWrite","writer").contains(method);
+        if(type==FrameworkBuffers.class)return !Set.of("scratch","bufferSources","modEntering").contains(method);
         if(type==SourceMapBridge.class)return !(method.equals("valueAllowed")||method.equals("internal"));
         return !name.startsWith("java.")&&!name.startsWith("jdk.")&&!name.startsWith("sun.");
     }
@@ -356,6 +357,7 @@ public final class ControlBridge {
     }
     public static boolean modMethodAllowed(Class<?> declaring,Object receiver){
         if(declaring==null)return false;
+        FrameworkBuffers.modEntering(DefinitionBridge.module(declaring));
         if(stoppedModules.length!=0&&(modStopped(DefinitionBridge.module(declaring))||modStopped(objectModule(receiver))||stoppedInvocation()))return false;
         Module owner=DefinitionBridge.module(declaring),target=objectModule(receiver);
         if(modProtected(owner)||modProtected(target)){
@@ -612,6 +614,14 @@ public final class ControlBridge {
     }
     private static Module[] invokingSources(Module[] retained){
         SourceQuery active=SOURCE_QUERIES.get();if(active!=null){active.retain(retained);return active.partial;}
+        Module[] framework=FrameworkBuffers.bufferSources();
+        if(framework!=null){
+            // The draw snapshot replaces only the repeated physical walk.
+            // Native scopes already observed at this boundary remain sources.
+            if(retained.length==0)return framework;
+            SourceQuery query=beginSourceQuery(retained);
+            try{query.retain(framework);return query.partial;}finally{endSourceQuery(query);}
+        }
         SourceQuery query=beginSourceQuery(retained);
         try{
             Module[] scoped=scopedSources();if(scoped.length!=0)return scoped;
@@ -619,7 +629,8 @@ public final class ControlBridge {
         }finally{endSourceQuery(query);}
     }
     static boolean sourceUnknown(){
-        if(SOURCE_QUERIES.get()!=null)return true;
+        SourceQuery query=SOURCE_QUERIES.get();
+        if(query!=null)for(Module source:query.partial)if(source==null)return true;
         if(TaskBridge.currentThreadSourceUnknown())return true;
         if(NetworkBridge.sourceUnknown())return true;
         if(ClientBridge.sourceUnknown())return true;
@@ -629,6 +640,7 @@ public final class ControlBridge {
     }
     static Module[] frameSources(){
         SourceQuery active=SOURCE_QUERIES.get();if(active!=null)return active.partial;
+        Module[] framework=FrameworkBuffers.bufferSources();if(framework!=null)return framework;
         SourceQuery query=beginSourceQuery(NO_SOURCES);
         try{return sourceFrameWalk();}finally{endSourceQuery(query);}
     }
@@ -673,6 +685,21 @@ public final class ControlBridge {
     }
     static Module[] nativeProcessSources(){
         if(!NativeControl.sourceCapture())throw new SecurityException("ACTUAL_NATIVE_SOURCE_CAPTURE_REQUIRED");return invokingSources();
+    }
+    private static int sourceDiagnosticScopes(){
+        Module[][] scopes={NetworkBridge.currentSources(),TaskBridge.currentThreadSources(),ClientBridge.currentSources(),
+                IoBridge.currentSources(),ResourceBridge.currentFileSources(),ResourceBridge.currentBufferSources(),CodeSourceBridge.executionSources()};
+        int bits=0;for(int i=0;i<scopes.length;i++)if(scopes[i]!=null)for(Module module:scopes[i])if(module==null){bits|=1<<i;break;}
+        return bits;
+    }
+    static int nativeProcessSourceFlags(){
+        if(!NativeControl.sourceCapture())throw new SecurityException("ACTUAL_NATIVE_SOURCE_CAPTURE_REQUIRED");
+        int flags=(SOURCE_QUERIES.get()!=null?1:0)|(TaskBridge.currentThreadSourceUnknown()?2:0)
+                |(NetworkBridge.sourceUnknown()?4:0)|(ClientBridge.sourceUnknown()?8:0)|(CodeSourceBridge.executionUnknown()?16:0);
+        Frame frame=CURRENT.get();if(frame!=null&&!frame.exited&&frame.sourcesUnknown)flags|=32;
+        flags|=sourceDiagnosticScopes()<<8;
+        SourceQuery previous=SOURCE_QUERIES.get(),query=previous==null?beginSourceQuery(NO_SOURCES):previous;
+        try{return flags|(sourceDiagnosticScopes()<<16);}finally{if(previous==null)endSourceQuery(query);}
     }
     public static Module[] creationSources(Object object){
         synchronized(CREATION_OWNERS){
@@ -981,7 +1008,8 @@ public final class ControlBridge {
                 ||caller==SourceMapBridge.class||caller==NativeControl.class||caller==ControlBridge.class
                 ||caller==ExecutionFlow.class||caller==NetworkCleanup.class)return true;
         if((caller==DefinitionBridge.class||caller==ResourceBridge.class||caller==IoBridge.class
-                ||caller==CodeSourceBridge.class||caller==NetworkBridge.class||caller==ClientBridge.class)
+                ||caller==CodeSourceBridge.class||caller==NetworkBridge.class||caller==ClientBridge.class
+                ||caller==EventBusBridge.class||caller==FrameworkBuffers.class)
                 &&caller.getModule()==DefinitionBridge.class.getModule())return true;
         if(caller.getClassLoader()==ClassLoader.getSystemClassLoader()&&caller.getName().startsWith("dev.ronova.pro.agent.")&&AGENT_WRITERS.get(caller))return true;
         // All bridge nests below are defined by the bootstrap loader. A foreign
@@ -1382,8 +1410,13 @@ public final class ControlBridge {
         BackingBridge.install(known,element,array,offset,memory);
     }
     static boolean ownState(Class<?> declaring) {
-        if(declaring==null)return false;Class<?> host=declaring.getClassLoader()==null?declaring.getNestHost():declaring;Guards current=guards;
-        if(host==TaskBridge.class||host==BackingBridge.class||host==CarrierBridge.class||host==SourceMapBridge.class||host==NativeControl.class||host==DefinitionBridge.class||host==ResourceBridge.class||host==IoBridge.class||host==CodeSourceBridge.class||host==NetworkBridge.class||host==ClientBridge.class
+        // Every controller host and the Core/Agent alternatives below require
+        // this namespace. A nest cannot cross its runtime package. Test the
+        // necessary immutable name first: ordinary arrays must not enter the
+        // guarded native Class.getNestHost0 path on every element store.
+        if(declaring==null||!declaring.getName().startsWith("dev.ronova.pro."))return false;
+        Class<?> host=declaring.getClassLoader()==null?declaring.getNestHost():declaring;Guards current=guards;
+        if(host==FrameworkBuffers.class||host==TaskBridge.class||host==BackingBridge.class||host==CarrierBridge.class||host==SourceMapBridge.class||host==NativeControl.class||host==DefinitionBridge.class||host==ResourceBridge.class||host==IoBridge.class||host==CodeSourceBridge.class||host==NetworkBridge.class||host==ClientBridge.class
                 ||host==EventFaultBridge.class||host==EventBusBridge.class||host==ControlBridge.class||host==ExecutionFlow.class||host==NetworkCleanup.class||host==PlatformMetadata.class)return true;
         if(ControlBridge.owns(declaring))return true;
         return current!=null&&DefinitionBridge.module(declaring)==current.owner().getModule()&&declaring.getClassLoader()==current.owner().getClassLoader()&&declaring.getName().startsWith("dev.ronova.pro.");
@@ -1634,12 +1667,36 @@ public final class ControlBridge {
     // The publication belongs to a real writer scope, not to replaceable ThreadLocal state.
     // A nested writer for the same receiver retains incoming locks until its outer writer exits.
     static final Map<Thread,SourcePublication> SOURCE_PUBLICATIONS=new IdentityHashMap<>();
+    private static final IdentityHashMap<Object,Integer> SOURCE_PUBLICATION_TARGETS=new IdentityHashMap<>();
+    static boolean sourcePublicationActive(){
+        synchronized(SOURCE_PUBLICATIONS){if(!SOURCE_PUBLICATIONS.isEmpty())return true;}
+        synchronized(SOURCE_INDEX_MUTATIONS){return !SOURCE_INDEX_MUTATIONS.isEmpty();}
+    }
     static final class SourcePublication {
         final Object receiver;final Thread thread=Thread.currentThread();final SourcePublication previous;
-        List<java.util.concurrent.locks.Lock> locks;boolean closed;
+        List<java.util.concurrent.locks.Lock> locks;final List<Object> incoming=new ArrayList<>();boolean closed;
         SourcePublication(Object receiver){
-            this.receiver=receiver;CodeSourceBridge.mutationControls(this,SOURCE_PUBLICATIONS);
-            synchronized(SOURCE_PUBLICATIONS){previous=SOURCE_PUBLICATIONS.put(thread,this);}
+            this.receiver=receiver;CodeSourceBridge.mutationControls(this,SOURCE_PUBLICATIONS,SOURCE_PUBLICATION_TARGETS,incoming);
+            synchronized(SOURCE_PUBLICATIONS){
+                previous=SOURCE_PUBLICATIONS.put(thread,this);SOURCE_PUBLICATION_TARGETS.merge(receiver,1,Integer::sum);
+            }
+        }
+        void reserve(Object target){
+            synchronized(SOURCE_PUBLICATIONS){
+                if(closed||thread!=Thread.currentThread())throw new IllegalMonitorStateException("SOURCE_PUBLICATION_THREAD_REQUIRED");
+                incoming.add(target);SOURCE_PUBLICATION_TARGETS.merge(target,1,Integer::sum);
+            }
+        }
+        private static void drop(Object target){
+            Integer count=SOURCE_PUBLICATION_TARGETS.get(target);
+            if(count==null)throw new IllegalStateException("SOURCE_PUBLICATION_TARGET_MISSING");
+            if(count==1)SOURCE_PUBLICATION_TARGETS.remove(target);else SOURCE_PUBLICATION_TARGETS.put(target,count-1);
+        }
+        void cancel(Object target){
+            synchronized(SOURCE_PUBLICATIONS){
+                for(int i=incoming.size()-1;i>=0;i--)if(incoming.get(i)==target){incoming.remove(i);drop(target);return;}
+                throw new IllegalStateException("SOURCE_PUBLICATION_TARGET_MISSING");
+            }
         }
         void retain(java.util.concurrent.locks.Lock lock){
             try{
@@ -1655,7 +1712,10 @@ public final class ControlBridge {
                 if(previous==null)SOURCE_PUBLICATIONS.remove(thread);else SOURCE_PUBLICATIONS.put(thread,previous);
                 closed=true;
             }
-            if(locks!=null)for(int i=locks.size()-1;i>=0;i--)locks.get(i).unlock();
+            try{if(locks!=null)for(int i=locks.size()-1;i>=0;i--)locks.get(i).unlock();}
+            finally{synchronized(SOURCE_PUBLICATIONS){
+                drop(receiver);for(Object target:incoming)drop(target);incoming.clear();
+            }}
         }
     }
     static final class FieldMutation {
@@ -1705,9 +1765,13 @@ public final class ControlBridge {
         if(incoming==null)return true;
         if(!primitiveSourceIndex(incoming)&&!(incoming instanceof Object[])
                 &&!(incoming.getClass().getClassLoader()!=null&&!(incoming instanceof Map<?,?>)&&!(incoming instanceof Collection<?>)))return false;
-        java.util.concurrent.locks.Lock gate=fieldGate(incoming);if(!gate.tryLock())return false;
-        mutation.retain(gate);
-        return true;
+        // Publish the exact incoming identity before trying its gate, so a
+        // concurrent writer cannot miss it while it is being adopted.
+        mutation.reserve(incoming);
+        java.util.concurrent.locks.Lock gate=fieldGate(incoming);
+        if(!gate.tryLock()){mutation.cancel(incoming);return false;}
+        try{mutation.retain(gate);return true;}
+        catch(RuntimeException|Error failure){mutation.cancel(incoming);throw failure;}
     }
     record RecoveryArrayMutation(Object array,FieldMutation mutation,int start){
         RecoveryArrayMutation{CodeSourceBridge.mutationControls(this);}
@@ -1786,10 +1850,9 @@ public final class ControlBridge {
         if(target instanceof java.util.concurrent.ForkJoinPool||target instanceof java.util.concurrent.ForkJoinTask<?>[]
                 ||type.getClassLoader()==null&&(type.getName().equals("java.util.concurrent.ForkJoinPool$WorkQueue")
                 ||type.getName().equals("[Ljava.util.concurrent.ForkJoinPool$WorkQueue;")))return true;
-        // A publication may hold an incoming object's gate even before that
-        // object becomes a registered source holder. Keep all such scopes gated.
-        synchronized(SOURCE_PUBLICATIONS){if(!SOURCE_PUBLICATIONS.isEmpty())return true;}
-        synchronized(SOURCE_INDEX_MUTATIONS){if(!SOURCE_INDEX_MUTATIONS.isEmpty())return true;}
+        // Include adopted incoming identities before registration, without
+        // sending unrelated objects through another thread's publication gate.
+        synchronized(SOURCE_PUBLICATIONS){if(SOURCE_PUBLICATION_TARGETS.containsKey(target))return true;}
         return false;
     }
     public static Object beginFieldMutation(Object receiver,Class<?> symbolic,String name,String descriptor,Object value) {
@@ -1798,7 +1861,10 @@ public final class ControlBridge {
         Object target=receiver==null?declaring:receiver;
         EventKey identity=new EventKey(target,null);Module owner=objectModule(target,identity);
         if(!fieldMutationReceiptRequired(target,declaring,owner)){
-            if(!fieldWriteAllowed(target,declaring,name,value,owner,true))return Boolean.FALSE;
+            // The receipt predicate just read the live stopped caller. Its
+            // final recheck below repeats that read before any store, so this
+            // advisory fast-path policy call needs no third identical walk.
+            if(!fieldWriteAllowed(target,declaring,name,value,owner,true,true))return Boolean.FALSE;
             // Re-read the actual target after the live policy query. A newly
             // selected receiver or publication must use its existing gate.
             // Reuse the lookup key, not a cached ownership or permission verdict.
@@ -2250,6 +2316,9 @@ public final class ControlBridge {
         return fieldWriteAllowed(receiver,declaring,name,value,null,false);
     }
     private static boolean fieldWriteAllowed(Object receiver,Class<?> declaring,String name,Object value,Module owner,boolean ownerResolved) {
+        return fieldWriteAllowed(receiver,declaring,name,value,owner,ownerResolved,false);
+    }
+    private static boolean fieldWriteAllowed(Object receiver,Class<?> declaring,String name,Object value,Module owner,boolean ownerResolved,boolean finalStopCheckFollows) {
         if(!PlatformMetadata.fieldMutationAllowed(receiver,declaring,name))return false;
         if(!EventBusBridge.fieldAllowed(declaring,name))return false;
         if(commandRetirementWrite(receiver,declaring,name,value))return true;
@@ -2257,7 +2326,7 @@ public final class ControlBridge {
         if(!(ownerResolved?protectedMutationAllowed(receiver,declaring,owner):protectedMutationAllowed(receiver,declaring)))return false;
         if(!CodeSourceBridge.fieldAllowed(receiver,declaring,name)&&!coreWriter())return false;
         if(!ResourceBridge.fieldMutationAllowed(receiver,declaring))return false;
-        if((modStopped(ownerResolved?owner:objectModule(receiver==null?declaring:receiver))||stoppedInvocation())&&!coreWriter()&&!ClientBridge.cleanupField(receiver,declaring,name)
+        if((modStopped(ownerResolved?owner:objectModule(receiver==null?declaring:receiver))||!finalStopCheckFollows&&stoppedInvocation())&&!coreWriter()&&!ClientBridge.cleanupField(receiver,declaring,name)
                 &&!NetworkBridge.retirementFieldAllowed(receiver,declaring,name,value))return false;
         Guards current=guards;var guard=current==null?null:current.field();
         if(FIELD_POLICY_ACTIVE.get()!=null) {

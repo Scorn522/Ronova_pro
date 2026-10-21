@@ -420,7 +420,8 @@ public final class RecoveryAgent {
                             &&domain!=null&&java.util.Objects.equals(domain.getCodeSource(),RecoveryAgent.class.getProtectionDomain().getCodeSource()))return null;
                     byte[] nativeClone=CloneBoundary.transform(loader,current);
                     if(nativeClone!=null)current=nativeClone;
-                    boolean declaredSource=type!=null&&watching.contains(type);
+                    byte[] framework=FrameworkBoundary.transform(loader,module,name,current);if(framework!=null)current=framework;
+                    boolean declaredSource=watchedDefinition(type);
                     boolean application=producerModule(module)||actualWriter
                             ||declaredSource||externalSources||directMutationReference(bytes);
                     if(!application) {
@@ -511,7 +512,7 @@ public final class RecoveryAgent {
                 else if(loader==null&&startupPlatformTarget(name))platform.add(loaded);
                 else if(name.equals(EventFaultBoundary.TARGET))events.add(loaded);
                 else if(name.equals(CommandBoundary.TARGET)||name.equals(ModGroupBoundary.MOD_CONTAINER)||loader!=null&&!producerModule(loaded.getModule())
-                        &&(CodeSourceBoundary.TARGETS.contains(name)||ForgeFieldBoundary.TARGET.equals(name)||NetworkBoundary.TARGETS.contains(name)||ClientBoundary.TARGETS.contains(name)||BufferBoundary.wrapTarget(name)))sources.add(loaded);
+                        &&(FrameworkBoundary.target(name)||CodeSourceBoundary.TARGETS.contains(name)||ForgeFieldBoundary.TARGET.equals(name)||NetworkBoundary.TARGETS.contains(name)||ClientBoundary.TARGETS.contains(name)||BufferBoundary.wrapTarget(name)))sources.add(loaded);
                 else if(FastutilIndexBoundary.targets().contains(name)||SectionKeyBoundary.targets().contains(name))indices.add(loaded);
                 else if(name.equals(ConsoleBoundary.TARGET))consoles.add(loaded);
             }
@@ -566,7 +567,7 @@ public final class RecoveryAgent {
         ClassLoader loader=RecoveryAgent.class.getClassLoader();
         for(String helper:List.of("JdkTaskBoundaryContract","FastutilIndexBoundary","SectionKeyBoundary","HandleWriteBoundary",
                 "ResourceBoundary","IoBoundary","BufferBoundary","NativeLibraryBoundary","CodeSourceBoundary",
-                "NetworkBoundary","ClientBoundary","ModGroupBoundary","ControlImages$Ref","ControlImages$Image"))
+                "NetworkBoundary","ClientBoundary","ModGroupBoundary","FrameworkBoundary","ControlImages$Ref","ControlImages$Image"))
             Class.forName("dev.ronova.pro.agent."+helper,true,loader);
         FastutilIndexBoundary.targets();
         SectionKeyBoundary.targets();
@@ -804,34 +805,38 @@ public final class RecoveryAgent {
         return EquipmentActionBoundary.declare(owner,methodName,descriptor,operation);
     }
     /** Called only for a class reached through the current equipment data graph. */
-    public static void declareEquipmentCarrier(Class<?> actual) {
+    public static boolean declareEquipmentCarrier(Class<?> actual) {
         Class<?> caller=CALLER.getCallerClass(),runtime=modGroupRuntime;
         if(runtime==null||!(caller.getName().equals("dev.ronova.pro.EquipmentPolicy")||caller.getName().equals("dev.ronova.pro.EquipmentCarrierGraph"))
                 ||caller.getClassLoader()!=runtime.getClassLoader()||caller.getModule()!=runtime.getModule()
                 ||!Objects.equals(caller.getProtectionDomain().getCodeSource(),runtime.getProtectionDomain().getCodeSource()))
             throw new SecurityException("EQUIPMENT_CARRIER_DECLARATION_OWNER");
         Objects.requireNonNull(actual);
+        return false; // Retired fine-grained carrier tracer; never report an installation.
     }
-    public static void declareEquipmentSlotGetter(Class<?> actual,String method,String descriptor){
+    public static boolean declareEquipmentSlotGetter(Class<?> actual,String method,String descriptor){
         Class<?> caller=CALLER.getCallerClass(),runtime=modGroupRuntime;
         if(runtime==null||!caller.getName().equals("dev.ronova.pro.EquipmentPolicy")||caller.getClassLoader()!=runtime.getClassLoader()
                 ||caller.getModule()!=runtime.getModule()||!Objects.equals(caller.getProtectionDomain().getCodeSource(),runtime.getProtectionDomain().getCodeSource()))
             throw new SecurityException("EQUIPMENT_SLOT_DECLARATION_OWNER");
         Objects.requireNonNull(actual);
+        return false;
     }
-    public static void declareEquipmentSlotHelper(Class<?> actual,String method,String descriptor){
+    public static boolean declareEquipmentSlotHelper(Class<?> actual,String method,String descriptor){
         Class<?> caller=CALLER.getCallerClass(),runtime=modGroupRuntime;
         if(runtime==null||!caller.getName().equals("dev.ronova.pro.EquipmentPolicy")||caller.getClassLoader()!=runtime.getClassLoader()
                 ||caller.getModule()!=runtime.getModule()||!Objects.equals(caller.getProtectionDomain().getCodeSource(),runtime.getProtectionDomain().getCodeSource()))
             throw new SecurityException("EQUIPMENT_SLOT_HELPER_DECLARATION_OWNER");
         Objects.requireNonNull(actual);
+        return false;
     }
-    public static void declareEquipmentSlotKey(Class<?> actual,String method,String descriptor){
+    public static boolean declareEquipmentSlotKey(Class<?> actual,String method,String descriptor){
         Class<?> caller=CALLER.getCallerClass(),runtime=modGroupRuntime;
         if(runtime==null||!caller.getName().equals("dev.ronova.pro.EquipmentPolicy")||caller.getClassLoader()!=runtime.getClassLoader()
                 ||caller.getModule()!=runtime.getModule()||!Objects.equals(caller.getProtectionDomain().getCodeSource(),runtime.getProtectionDomain().getCodeSource()))
             throw new SecurityException("EQUIPMENT_SLOT_KEY_DECLARATION_OWNER");
         Objects.requireNonNull(actual);
+        return false;
     }
     /** The declaration state, so a caller can tell "covered" from "nothing declared yet". */
     public static String dispatchState() {
@@ -1299,7 +1304,7 @@ public final class RecoveryAgent {
     /** Eligibility only: exact boundaries and cheap constant-pool byte screens precede ASM. */
     private static boolean boundaryCandidate(ClassLoader loader,String name,byte[] bytes){
         if(name==null)return false;
-        if(EventBusBoundary.TARGET.equals(name)||CommandBoundary.TARGET.equals(name)||ModGroupBoundary.MOD_CONTAINER.equals(name)||EventFaultBoundary.TARGET.equals(name)
+        if(FrameworkBoundary.target(name)||EventBusBoundary.TARGET.equals(name)||CommandBoundary.TARGET.equals(name)||ModGroupBoundary.MOD_CONTAINER.equals(name)||EventFaultBoundary.TARGET.equals(name)
                 ||CodeSourceBoundary.TARGETS.contains(name)||NetworkBoundary.TARGETS.contains(name)||ClientBoundary.TARGETS.contains(name)
                 ||BufferBoundary.wrapTarget(name)||FastutilIndexBoundary.targets().contains(name)||SectionKeyBoundary.targets().contains(name)
                 ||HandleWriteBoundary.targets().contains(name)||"sun/misc/Unsafe".equals(name)||"java/lang/reflect/Field".equals(name))return true;

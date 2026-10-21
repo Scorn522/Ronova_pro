@@ -18,7 +18,7 @@ static NativeJniApproval native_jni_approved;
 static NativeJniApproval *native_jni_publishing;
 
 static int native_jni_read(const void *address,void *copy,SIZE_T length){
-    SIZE_T read=0;return host_real_read_process_memory(GetCurrentProcess(),address,copy,length,&read)&&read==length;
+    return native_control_snapshot(address,copy,length);
 }
 static int native_jni_current(JNIEnv *env){
     JNIEnv *actual=NULL;
@@ -159,8 +159,34 @@ static int native_jni_observe_locked(NativeThread *state,JNIEnv *env,int restric
     if(!state->jniLinked){state->jniNext=native_jni_threads;native_jni_threads=state;state->jniLinked=1;}
     return native_jni_repair_locked(table,&copy)&&valid;
 }
+/* Every entry still reads the current slot and the complete live table. A
+ * previously registered, unchanged attachment needs no directory mutation.
+ * Hold the JNI reader gate while consulting approvals and retained ranges;
+ * publishing, detach and repair retain their exclusive writer gate. */
+static int native_jni_unchanged(NativeThread *state,JNIEnv *env,int restricted){
+    if(restricted){if(!TryAcquireSRWLockShared(&native_jni_tables_gate))return 0;}
+    else AcquireSRWLockShared(&native_jni_tables_gate);
+    struct JNINativeInterface_ copy;const struct JNINativeInterface_ *table=NULL;
+    int valid=state->jniLinked&&state->jniRange.linked&&state->jniRange.address==(const void*)env
+            &&state->jniRange.length==sizeof(*env)&&state->jniTableRange.linked
+            &&native_jni_snapshot(env,&table,&copy)&&state->jniTableRange.address==(const void*)table
+            &&state->jniTableRange.length==sizeof(*table);
+    if(valid&&InterlockedCompareExchange(&native_guarded_ready,0,0)&&InterlockedCompareExchange(&native_jni_ready,0,0)){
+        const uintptr_t *incoming=(const uintptr_t*)&copy,*guarded=(const uintptr_t*)&native_guarded;
+        const uintptr_t *approved=(const uintptr_t*)&native_jni_approved.table;
+        const NativeJniApproval *publishing=native_jni_publishing;
+        for(unsigned i=4;i<NATIVE_JNI_SLOT_COUNT&&valid;i++){
+            if(native_jni_controlled(i)){valid=incoming[i]==guarded[i];continue;}
+            if(publishing&&incoming[i]==((const uintptr_t*)&publishing->table)[i])
+                valid=!publishing->revoked[i]&&!native_owner_stopped(publishing->sources[i]);
+            else valid=incoming[i]==approved[i]&&!native_owner_stopped(native_jni_approved.sources[i]);
+        }
+    }
+    ReleaseSRWLockShared(&native_jni_tables_gate);return valid;
+}
 static int native_jni_refresh(NativeThread *state,JNIEnv *env,int all){
     int restricted=native_tooling_restricted();
+    if(!all&&native_jni_unchanged(state,env,restricted))return 1;
     if(restricted){
         if(!TryAcquireSRWLockExclusive(&native_jni_tables_gate))return 0;
     }else AcquireSRWLockExclusive(&native_jni_tables_gate);

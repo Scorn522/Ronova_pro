@@ -35,7 +35,8 @@ public final class EquipmentPolicy {
     private record Slot(Field field,long offset,int width) { }
     private static final class Owner {
         final WeakReference<LivingEntity> entity;final long generation;
-        volatile Class<?> slotType;String slotMethod;volatile boolean tracedSlots=true;
+        volatile Class<?> slotType;String slotMethod;volatile boolean tracedSlots;
+        String slotGap="",carrierGap="";
         Owner(LivingEntity entity,long generation){this.entity=new WeakReference<>(entity);this.generation=generation;}
     }
     private static final class Link {
@@ -305,9 +306,9 @@ public final class EquipmentPolicy {
         ACTION_DELEGATE=MethodHandles.publicLookup().findStatic(bridge,"equipmentActionSourceAllowed",MethodType.methodType(boolean.class,Class.class,Class.class));
         CARRIER_SOURCE=MethodHandles.publicLookup().findStatic(bridge,"equipmentCarrierSourceAllowed",MethodType.methodType(boolean.class,Class.class,Class.class,Class[].class));
         EquipmentCarrierGraph.initialize();
-        DECLARE_SLOT=MethodHandles.publicLookup().findStatic(Class.forName("dev.ronova.pro.agent.RecoveryAgent",false,ClassLoader.getSystemClassLoader()),"declareEquipmentSlotGetter",MethodType.methodType(void.class,Class.class,String.class,String.class));
-        DECLARE_SLOT_HELPER=MethodHandles.publicLookup().findStatic(Class.forName("dev.ronova.pro.agent.RecoveryAgent",false,ClassLoader.getSystemClassLoader()),"declareEquipmentSlotHelper",MethodType.methodType(void.class,Class.class,String.class,String.class));
-        DECLARE_SLOT_KEY=MethodHandles.publicLookup().findStatic(Class.forName("dev.ronova.pro.agent.RecoveryAgent",false,ClassLoader.getSystemClassLoader()),"declareEquipmentSlotKey",MethodType.methodType(void.class,Class.class,String.class,String.class));
+        DECLARE_SLOT=MethodHandles.publicLookup().findStatic(Class.forName("dev.ronova.pro.agent.RecoveryAgent",false,ClassLoader.getSystemClassLoader()),"declareEquipmentSlotGetter",MethodType.methodType(boolean.class,Class.class,String.class,String.class));
+        DECLARE_SLOT_HELPER=MethodHandles.publicLookup().findStatic(Class.forName("dev.ronova.pro.agent.RecoveryAgent",false,ClassLoader.getSystemClassLoader()),"declareEquipmentSlotHelper",MethodType.methodType(boolean.class,Class.class,String.class,String.class));
+        DECLARE_SLOT_KEY=MethodHandles.publicLookup().findStatic(Class.forName("dev.ronova.pro.agent.RecoveryAgent",false,ClassLoader.getSystemClassLoader()),"declareEquipmentSlotKey",MethodType.methodType(boolean.class,Class.class,String.class,String.class));
         Class<?> carrierBridge=Class.forName("dev.ronova.pro.bootstrap.CarrierBridge",false,null);
         CALLBACK_DEPTH=MethodHandles.publicLookup().findStatic(carrierBridge,"callbackDepth",MethodType.methodType(int.class,Class.class,String.class,String.class));
         SLOT_METHOD=MethodHandles.publicLookup().findStatic(carrierBridge,"method",MethodType.methodType(Class.class,Object.class,Class.class,String.class,String.class,int.class,Class.class));
@@ -486,10 +487,19 @@ public final class EquipmentPolicy {
             Method getter=null;for(String name:List.of("getItemBySlot","m_6844_"))try{getter=living.getClass().getMethod(name,EquipmentSlot.class);break;}catch(NoSuchMethodException ignored){ }
             if(getter==null||getter.getReturnType()!=ItemStack.class||Modifier.isStatic(getter.getModifiers()))throw new IllegalStateException("EQUIPMENT_SLOT_DEFINITION_UNRESOLVED");
             Class<?> actualType=getter.getDeclaringClass();String actualName=getter.getName();boolean traced=!Set.of(Player.class,Mob.class,ArmorStand.class).contains(actualType);
-            if(traced){EquipmentSlotGraph.publish(living,generation);DECLARE_SLOT.invokeExact(actualType,actualName,SLOT_DESCRIPTOR);}
+            if(traced){
+                traced=(boolean)DECLARE_SLOT.invokeExact(actualType,actualName,SLOT_DESCRIPTOR);
+                if(traced)EquipmentSlotGraph.publish(living,generation);
+                else owner.slotGap="CUSTOM_EQUIPMENT_SLOT_SEMANTICS_PARTIAL:"+actualType.getName();
+            }
             owner.slotMethod=actualName;owner.slotType=actualType;owner.tracedSlots=traced;
         }catch(RuntimeException|Error failure){throw failure;}catch(Throwable failure){throw new IllegalStateException("EQUIPMENT_SLOT_DEFINITION_UNRESOLVED",failure);}
         refresh(owner);
+    }
+    static String gap(Entity entity){
+        if(!initialized||!(entity instanceof LivingEntity living))return "";
+        Owner owner=OWNERS.get(living);if(owner==null)return "";
+        return owner.slotGap+(owner.slotGap.isEmpty()||owner.carrierGap.isEmpty()?"":";")+owner.carrierGap;
     }
     public static Object slotReadBegin(Object receiver,Object requested){
         if(!initialized)return null;SlotRead previous=SLOT_READS.get();
@@ -594,7 +604,7 @@ public final class EquipmentPolicy {
             try{
                 declaring=(Class<?>)SLOT_METHOD.invokeExact(receiver,symbolic,name,descriptor,opcode,frames.get(0).getDeclaringClass());
                 if(declaring==null||declaring.getClassLoader()==null){read.unresolved=true;return null;}
-                DECLARE_SLOT_HELPER.invokeExact(declaring,name,descriptor);
+                if(!(boolean)DECLARE_SLOT_HELPER.invokeExact(declaring,name,descriptor)){read.unresolved=true;return null;}
             }catch(RuntimeException|LinkageError unsupported){read.unresolved=true;return null;}
             catch(Error failure){throw failure;}catch(Throwable failure){read.unresolved=true;return null;}
         }
@@ -603,7 +613,8 @@ public final class EquipmentPolicy {
         SlotCall call=new SlotCall(read,SLOT_METHODS.get(),previous,receiver,arguments,declaring,symbolic,name,descriptor,opcode,kind,frames,site);
         if(kind==1)try{
             call.keys=EquipmentSlotGraph.prepareKeys(receiver,arguments[0],symbolic,name,descriptor,opcode,frames.get(0).getDeclaringClass());
-            for(var target:EquipmentSlotGraph.keyTargets(call.keys))DECLARE_SLOT_KEY.invokeExact(target.declaring(),target.name(),target.descriptor());
+            for(var target:EquipmentSlotGraph.keyTargets(call.keys))
+                if(!(boolean)DECLARE_SLOT_KEY.invokeExact(target.declaring(),target.name(),target.descriptor())){read.unresolved=true;return null;}
         }catch(RuntimeException|LinkageError unavailable){read.unresolved=true;return null;}
         catch(Error failure){throw failure;}catch(Throwable unavailable){read.unresolved=true;return null;}
         SLOT_CALLS.set(call);return call;
@@ -803,13 +814,14 @@ public final class EquipmentPolicy {
         link(owner,list,Kind.CURATIVE_LIST,-1,null,list);
         for(Object carrier:graph.nodes.keySet())if(carrier!=list)link(owner,carrier,Kind.CURATIVE_CARRIER,-1,null,list);
         for(ItemStack stack:graph.stacks())captureStack(owner,stack);
-        EquipmentCarrierGraph.declare(graph);
+        if(!EquipmentCarrierGraph.declare(graph))owner.carrierGap="CUSTOM_EQUIPMENT_CARRIER_CALLS_PARTIAL";
     }
     /** Traverse only real NBT storage. A HashMap node belongs only while linked from the current table. */
     private static boolean walk(Owner owner,ItemStack stack,Object expected,boolean capture,Object proposed){
         if(stack==null||stack==ItemStack.EMPTY)return false;
         EquipmentCarrierGraph.View graph=proposed==null?EquipmentCarrierGraph.nbt(stack):EquipmentCarrierGraph.candidate(stack,proposed);
-        if(capture){for(Object carrier:graph.nodes.keySet())link(owner,carrier,Kind.NBT,-1,stack);EquipmentCarrierGraph.declare(graph);}
+        if(capture){for(Object carrier:graph.nodes.keySet())link(owner,carrier,Kind.NBT,-1,stack);
+            if(!EquipmentCarrierGraph.declare(graph))owner.carrierGap="CUSTOM_EQUIPMENT_CARRIER_CALLS_PARTIAL";}
         return expected!=null&&graph.contains(expected);
     }
     private static boolean capabilityProviderType(Class<?> type){
@@ -820,7 +832,8 @@ public final class EquipmentPolicy {
     private static boolean capabilityWalk(Owner owner,ItemStack stack,Object expected,boolean capture,Object proposed){
         if(stack==null||stack==ItemStack.EMPTY)return false;
         EquipmentCarrierGraph.View graph=proposed==null?EquipmentCarrierGraph.capabilities(stack):EquipmentCarrierGraph.candidate(stack,proposed);
-        if(capture){for(Object carrier:graph.nodes.keySet())link(owner,carrier,Kind.CAPABILITY,-1,stack);EquipmentCarrierGraph.declare(graph);}
+        if(capture){for(Object carrier:graph.nodes.keySet())link(owner,carrier,Kind.CAPABILITY,-1,stack);
+            if(!EquipmentCarrierGraph.declare(graph))owner.carrierGap="CUSTOM_EQUIPMENT_CARRIER_CALLS_PARTIAL";}
         return expected!=null&&graph.contains(expected);
     }
     private static EquipmentCarrierGraph.Node heldNode(Link link,Object receiver){

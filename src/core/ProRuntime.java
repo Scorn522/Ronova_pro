@@ -175,6 +175,9 @@ public final class ProRuntime implements AutoCloseable {
         return authority==null?Set.of(id):authority.targets;
     }
     UUID groupOperation(UUID subject,UUID original) {Group group=groups.get(groupMembers.getOrDefault(subject,subject));return group==null?original:group.operation;}
+    private Map<Module,String> recoveryCodeSamples;
+    void beginRecoveryQueries(){thread();recoveryCodeSamples=new IdentityHashMap<>();}
+    void endRecoveryQueries(){recoveryCodeSamples=null;}
     List<String> groupCodeGaps(UUID id) {
         UUID root=groupMembers.getOrDefault(id,id);Subject subject=subjects.get(root);
         Group group=groups.get(root);if(group==null)return List.of();
@@ -192,7 +195,11 @@ public final class ProRuntime implements AutoCloseable {
             // module ownership monitor across that call; recheck its exact snapshot.
             for(Module module:modules) {
                 if(moduleSubjects.get(module)!=subject){gaps.add("GROUP_MODULE_AUTHORITY_CHANGED");continue;}
-                String state=String.valueOf(query.invoke(null,module));
+                String state=recoveryCodeSamples==null?null:recoveryCodeSamples.get(module);
+                if(state==null){
+                    state=String.valueOf(query.invoke(null,module));
+                    if(recoveryCodeSamples!=null)recoveryCodeSamples.put(module,state);
+                }
                 if(!state.contains(";STATE=STOPPED;"))gaps.add("GROUP_CODE:"+state);
                 if(moduleSubjects.get(module)!=subject)gaps.add("GROUP_MODULE_AUTHORITY_CHANGED");
             }
@@ -1812,7 +1819,13 @@ public final class ProRuntime implements AutoCloseable {
         try{LiveStatePolicy.publish(entity,snapshot.protectedNow()?generation:0);}
         catch(RuntimeException|LinkageError failure){String gap="LIVE_STATE_CAPTURE_UNRESOLVED:"+failure.getMessage();
             if(!binding.protectionGap.contains(gap))binding.protectionGap+=(binding.protectionGap.isEmpty()?"":";")+gap;runtime.coverageGap=true;}
-        try{EquipmentPolicy.publish(entity,snapshot.protectedNow()?generation:0);}
+        try{
+            EquipmentPolicy.publish(entity,snapshot.protectedNow()?generation:0);
+            String gap=EquipmentPolicy.gap(entity);
+            if(!gap.isEmpty()&&!binding.protectionGap.contains(gap)){
+                binding.protectionGap+=(binding.protectionGap.isEmpty()?"":";")+gap;runtime.coverageGap=true;
+            }
+        }
         catch(RuntimeException|LinkageError failure){String gap="EQUIPMENT_CAPTURE_UNRESOLVED:"+failure.getMessage();
             if(!binding.protectionGap.contains(gap))binding.protectionGap+=(binding.protectionGap.isEmpty()?"":";")+gap;runtime.coverageGap=true;}
     }
@@ -1893,7 +1906,7 @@ public final class ProRuntime implements AutoCloseable {
         publishPolicy();
     }
     private UUID queue(Binding b,BlockRecords block,String action) {
-        if(action.equals("CLEAR")||action.equals("PROTECT")) {
+        if(action.equals("CLEAR")||action.equals("BLOCK_CLEAR")||action.equals("PROTECT")) {
             thread();if(closing)throw new IllegalStateException("RUNTIME_CLOSING");
         } else writable();
         if(b!=null&&b.entity()!=null&&action.equals("CLEAR"))retainTerminalHud(b.entity(),b.subject);
@@ -2508,7 +2521,7 @@ public final class ProRuntime implements AutoCloseable {
             refreshIntentStatus(w);
             // Only a genuinely unknown effect, or a cancelled/fenced operation, stops this exact work.
             // A durability failure never freezes the memory action it was supposed to record.
-            boolean direct=w.action.equals("CLEAR");
+            boolean direct=w.action.equals("CLEAR")||w.action.equals("BLOCK_CLEAR");
             if(w.state.equals("FENCED") || w.state.equals("EFFECT_UNKNOWN")
                     || w.state.equals("ACK_FAILED") && w.executed && !direct) continue;
             try {
@@ -2556,14 +2569,7 @@ public final class ProRuntime implements AutoCloseable {
     private void executeMemoryAction(Work w) {
         if(w.executed||w.cancelled||w.state.equals("FENCED")||w.state.equals("EFFECT_UNKNOWN")
                 ||!(w.action.equals("CLEAR")||w.action.equals("BLOCK_CLEAR")))return;
-        boolean entityClear=w.action.equals("CLEAR");
-        if(!entityClear) {
-            if(w.ack==null||!w.ack.isDone())return;
-            if(w.ack.isCompletedExceptionally()) {
-                if(journal.backpressured(w.ack)) { w.reason="DURABLE_QUEUE_BUDGET_WAIT";return; }
-                w.state="ACK_FAILED";w.reason="DURABLE_ACK_NOT_CONFIRMED";return;
-            }
-        } else if(w.ack!=null&&w.ack.isCompletedExceptionally()&&!journal.backpressured(w.ack))coverageGap=true;
+        if(w.ack!=null&&w.ack.isCompletedExceptionally()&&!journal.backpressured(w.ack))coverageGap=true;
         if(!current(w)||(w.records!=null&&(!w.records.bound()||w.records.conflict()))
                 ||(w.block!=null&&!w.block.bound())) { fence(w,"FINAL_BINDING_OR_GENERATION");return; }
         if(w.records!=null)mergeTrackedParticipants(w);
@@ -3863,12 +3869,12 @@ public final class ProRuntime implements AutoCloseable {
             } else item.resourceAck=journal.retryRejected(item.resourceRecord,item.resourceAck);
             return;
         }
-        if(!item.complete())return;
+        if(!item.executed||item.dispatching||item.cancelled||item.state.equals("FENCED")||item.state.equals("EFFECT_UNKNOWN"))return;
         // These are runtime-owned references. Release after the actual final checks,
         // then persist RELEASED on the next tick; a pre-release certificate grants nothing.
-        if(item.block!=null){if(current(item)&&item.complete())item.referencesReleased=item.block.releaseOwnedReferences();return;}
+        if(item.block!=null){if(current(item))item.referencesReleased=item.block.releaseOwnedReferences();return;}
         try(var gate=item.binding.subject.commitGate.enter()) {
-            if(!current(item)||!item.complete()||!item.records.bound()||!item.records.remaining().isEmpty())return;
+            if(!current(item)||!item.records.bound()||!item.records.remaining().isEmpty())return;
             item.records.releaseOwnedReferences();item.binding.releaseOwnedReference();
             item.referencesReleased=item.records.ownedReferencesReleased();
         }

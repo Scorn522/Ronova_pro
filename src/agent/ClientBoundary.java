@@ -216,7 +216,7 @@ final class ClientBoundary {
                     ||!(code.get(index+2) instanceof VarInsnNode stored)||stored.getOpcode()!=Opcodes.ASTORE
                     ||!(code.get(index+3) instanceof VarInsnNode loaded)||loaded.getOpcode()!=Opcodes.ALOAD||loaded.var!=stored.var
                     ||!(code.get(index+4) instanceof MethodInsnNode call)||call.getOpcode()!=Opcodes.INVOKEINTERFACE
-                    ||!call.owner.equals(RENDER_CALL)||!call.name.equals("execute")||!call.desc.equals("()V"))
+                    ||!call.owner.equals(RENDER_CALL)||!Set.of("execute","m_83909_").contains(call.name)||!call.desc.equals("()V"))
                 throw new IllegalStateException("CLIENT_RENDER_QUEUE_CONSUMPTION_LAYOUT");
             poll=invoke;execute=call;
         }

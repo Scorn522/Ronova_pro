@@ -1,5 +1,21 @@
 # Ronova Pro 当前进度
 
+## 2026-10-21：真实 PCL 启动修复与直接清理收口（阶段性）
+
+继续在 D:\桌面\ronova_GPT 开发。实机使用 PCL 原实例 1.20.1-Forge_47.4.23 的真实 Java 17、完整启动参数和原有全部第三方 Mod，自动进入目标为独立存档副本。原存档和第三方 JAR 没有改写。用户已授权持续真实启动，并于本轮改为几个关联修复完成后阶段性同步 GitHub。
+
+启动链已补齐实际观察到的问题：JNI 表每次仍完整核对，正常读检查使用共享锁；Native 私有区间按实际范围建立索引；Forge 早期绘制只复用真实来源读取，保留原有内存、生命周期和逃逸检查；ASM 私有序列化临时字节数组不再逐字节创建业务回执；空任务来源与“正在查询来源”不再伪装为未知来源。保留 premain、Bootstrap、JVMTI/Native 和现有控制区保护。
+
+Mixin Args 动态类由其原生成器生成到现有 GAME 包，解决生产 ModuleClassLoader 无法路由未知 synthetic 包的问题；保持原参数描述符、计数器、生成与调用语义。仅更换类名前缀时保留原栈图，修正中途触发可选 ASM 校验类缺失的失败。
+
+TLS 的共享槽位不再把不同线程的独立值误作冲突；Free、关闭中及实际回调限制继续保留。退役改为按实际线程/FLS 上下文索引清理，已完成项退出重复扫描；纯读取不再反复唤醒没有新释放工作的清理线程。已知无 Mod 来源的平台回调不再因为没有私有 Mod 租约而被伪造为 OS 写入失败，部分保留状态仍如实报告，实际 Mod、未知来源、控制索引及停止来源判断继续生效。
+
+针对 41e7887 审查清单，已补入：自身精确 FutureTask 取消通知合并、相关任务/整组范围的待处理门控、移除无条件整窗 20 Tick 退避、CF 结果 CAS 与 BLOCK_CLEAR 脱离刷盘前置、自有引用与 observer 在实际退出后释放、退役装备声明返回真实未安装状态及自定义语义 GAP、来源发布按准确 holder/incoming 归组、同一字段动作减少重复停止来源查询、SingleStep 缺映射改为等待实际 FramePop、当前 Native gap 替换旧值、历史全局 FramePop 失败不再封锁无关组，以及 watching 的同步读取。Native 退役推进和状态读取共用一次真实线程扫描；同轮 Mod 状态和世界 UUID 扫描复用读取结果。已完成恢复链仍保留定期真实读回，事件唤醒优化尚未完成。
+
+实际证据保存在本地 .work/pcl-world-20261021。前序候选已通过真实活动 JNI 表保护/修复小检查；真实客户端已观察到 AGENT_PREMAIN_READY:INSTALLED_FULL，到达渲染初始化、原 Mod 构造、字体资源加载及客户端 Tick。attempt-14 的 Args 失败、attempt-15 的可选 ASM 类失败、attempt-16 的 jemalloc TSD 原生退出均保留；attempt-17 未在同一位置退出，但出现 CLIENT_SCREEN_LAYOUT_CHANGED。已查明超级史蒂夫的 public-f Screen *，按原字段/描述符/类身份接入其实际布局，继续核对三个列表的真实身份。
+
+当前不是进世界验收通过：尚无 IntegratedServer、ProRuntime 稳定世界 Tick 或正常保存退出的本轮完成结论。候选构建、阶段性同步与后续实机结果分别记录到既有实际报告。
+
 ## 2026-10-20：超级史蒂夫 ItemStack 访问变换兼容
 
 接续 `022e716`。12:21 与 12:57 报告中的 `Field f_41589_ is not private and an instance field` 已查清：实际 AccessTransformerService 在 ModLauncher BEFORE 阶段应用超级史蒂夫的 `public-f net.minecraft.world.item.ItemStack *`，随后 Forge `field_to_method.js` 调用 ASMAPI，仍按 private 实例字段校验，因此同一合法 getter 重定向被拒绝。

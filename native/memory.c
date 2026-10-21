@@ -33,7 +33,10 @@ static int native_memory_call_begin(JNIEnv *env,NativeThread *state,Binding *bin
     OwnerLink *sources=NULL;int unknown=0;
     state->control++;int ready=native_memory_sources(env,state,NULL,&sources,&unknown);state->control--;
     if(ready&&(native_owner_stopped(sources)||native_stopped(env))){native_refuse(env,"RONOVA_STOPPED_NATIVE_MEMORY_OPERATION");ready=0;}
-    if(ready&&unknown&&native_has_producer(sources)){native_refuse(env,"NATIVE_MEMORY_SOURCES_UNAVAILABLE");ready=0;}
+    if(ready&&unknown&&native_has_producer(sources)){
+        native_source_diagnostic(state,binding->unsafeOperation==UNSAFE_ALLOCATE?"unsafe_allocate":"unsafe_memory");
+        native_refuse(env,"NATIVE_MEMORY_SOURCES_UNAVAILABLE");ready=0;
+    }
     if(ready&&binding->unsafeOperation!=UNSAFE_ALLOCATE){
         uint64_t address=native_unsafe_argument(binding,frame,2);
         if(address)ready=native_memory_control(env,state,address,1);

@@ -110,8 +110,11 @@ public final class TaskBridge {
         synchronized(CREATION_OWNERS) {
             reapCreationOwners();EventKey key=new EventKey(task,CREATION_QUEUE);
             Set<Module> owners=TASK_OWNERS.computeIfAbsent(key,ignored->java.util.Collections.newSetFromMap(new java.util.IdentityHashMap<Module,Boolean>()));
-            // A null entry represents an actual submission with no selected producer, not an inferred owner.
-            if(actual.length==0)taskSource(task,owners,direct);else for(Module source:actual)taskSource(task,owners,source);
+            // A completed capture with no producer is an empty source set.
+            // Null is reserved for an actually incomplete capture; inserting
+            // it for ordinary platform submissions poisons every successor.
+            if(actual.length==0){if(direct!=null||sourceUnknown())taskSource(task,owners,direct);}
+            else for(Module source:actual)taskSource(task,owners,source);
             Set<Module> creation=CREATION_SOURCES.get(new EventKey(task,null));if(creation!=null)for(Module source:creation)taskSource(task,owners,source);
             Module creator=CREATION_OWNERS.get(new EventKey(task,null));if(creator!=null)taskSource(task,owners,creator);
             Module definition=DefinitionBridge.module(task.getClass());if(producer(definition))taskSource(task,owners,definition);
@@ -1766,7 +1769,15 @@ public final class TaskBridge {
     /** Ordinary cancellation is unchanged. Cancellation and actual exit are distinct events. */
     public static boolean cancelState(java.lang.invoke.VarHandle handle,Object task,int expected,int update) {
         boolean changed=handle.compareAndSet(task,expected,update);
-        if(changed){if(equipmentCancellation(task,expected,update))cancelEquipmentTask(task);emit(registration,CANCELLED,task,null,currentTask(),null);}
+        if(changed){
+            if(equipmentCancellation(task,expected,update))cancelEquipmentTask(task);
+            Registration current=registration;
+            // A qualified Core cancellation of this exact JDK task already
+            // reads the resulting state synchronously. It introduces no new
+            // callback, source or parent edge for the observer to resolve.
+            if(current==null||AUTHORITY.get()!=current||task==null||task.getClass()!=java.util.concurrent.FutureTask.class)
+                emit(current,CANCELLED,task,null,currentTask(),null);
+        }
         return changed;
     }
     public static void body(Object task) {

@@ -200,8 +200,12 @@ final class ExternalCodeImages {
         Class<?> visitor=Class.forName("org.objectweb.asm.ClassVisitor",false,loader),writer=library("org.objectweb.asm.ClassWriter",loader);
         Method accept=tree.getClass().getMethod("accept",visitor);
         if(accept.getDeclaringClass()!=node)throw new IllegalStateException("CUSTOM_TREE_SERIALIZATION_UNOBSERVED");
-        Object output=writer.getConstructor(int.class).newInstance(0);accept.invoke(tree,output);
-        return (byte[])writer.getMethod("toByteArray").invoke(output);
+        Class<?> vector=library("org.objectweb.asm.ByteVector",loader);
+        Object scope=dev.ronova.pro.bootstrap.FrameworkBuffers.serializationEnter(vector);
+        try{
+            Object output=writer.getConstructor(int.class).newInstance(0);accept.invoke(tree,output);
+            return (byte[])writer.getMethod("toByteArray").invoke(output);
+        }finally{dev.ronova.pro.bootstrap.FrameworkBuffers.serializationExit(scope);}
     }
     static synchronized void observed(Object tree,Module module,byte[] bytes){
         // ClassReader already proved the exact observed input. Keep that root

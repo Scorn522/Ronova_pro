@@ -241,6 +241,7 @@ JNIEXPORT jobject JNICALL Java_dev_ronova_pro_AuditFixCheck_jniBufferControlView
 JNIEXPORT jboolean JNICALL Java_dev_ronova_pro_AuditFixCheck_jniLiveTable0(JNIEnv *env,jclass check){
     JavaVM *vm=NULL;jvmtiEnv *api=NULL;jniNativeInterface *copy=NULL,*published=NULL;
     struct JNINativeInterface_ before=**env;struct JNINativeInterface_ *table=(struct JNINativeInterface_*)*env;
+    const struct JNINativeInterface_ *attachment=*env;struct JNINativeInterface_ *privateTable=NULL;
     AuditJniProtect protect=audit_jni_real_protect();AuditJniPermission regions[4];unsigned count=0;
     AuditJniPermission readonlyRegions[4];unsigned readonlyCount=0;
     const char *failure=NULL;int changed=0,versionChanged=0;
@@ -285,8 +286,18 @@ JNIEXPORT jboolean JNICALL Java_dev_ronova_pro_AuditFixCheck_jniLiveTable0(JNIEn
     InterlockedExchangePointer((void *volatile*)&table->GetFieldID,(void*)audit_jni_bad_field);changed=1;
     JNI_LIVE_REQUIRE(audit_jni_close(protect,regions,count),"JNI_LIVE_FORCE_WRITE_PAGE_RESTORE");count=0;
     JNI_LIVE_REQUIRE(table->GetMethodID==audit_jni_bad_method&&table->GetFieldID==audit_jni_bad_field,"JNI_LIVE_FORCE_WRITE_NOT_OBSERVED");
-    /* A real old-protect restore may leave the global table RO. This is the
-     * exact restore/publication handoff which previously could crash HotSpot. */
+    /* HotSpot's static JNI table shares pages with unrelated VM counters.
+     * Making that whole page RO races the compiler even when JNI is repaired
+     * correctly. Use a real current attachment with its own dedicated page
+     * for the read-only repair/publication case, rather than freezing VM data. */
+    privateTable=VirtualAlloc(NULL,sizeof(*table),MEM_RESERVE|MEM_COMMIT,PAGE_READWRITE);
+    JNI_LIVE_REQUIRE(privateTable,"JNI_LIVE_PRIVATE_TABLE_ALLOCATE");*privateTable=*table;
+    opened=audit_jni_open(protect,table,PAGE_READWRITE,regions,&count);
+    JNI_LIVE_REQUIRE(opened,"JNI_LIVE_GLOBAL_POINTER_RESTORE_OPEN");
+    InterlockedExchangePointer((void *volatile*)&table->GetMethodID,(void*)before.GetMethodID);
+    InterlockedExchangePointer((void *volatile*)&table->GetFieldID,(void*)before.GetFieldID);
+    JNI_LIVE_REQUIRE(audit_jni_close(protect,regions,count),"JNI_LIVE_GLOBAL_POINTER_RESTORE_CLOSE");count=0;
+    *(const struct JNINativeInterface_ **)env=privateTable;table=privateTable;
     JNI_LIVE_REQUIRE(audit_jni_open(protect,table,PAGE_READONLY,readonlyRegions,&readonlyCount),"JNI_LIVE_READONLY_TABLE_SETUP");
     jmethodID boundary=(*env)->GetStaticMethodID(env,check,"jniLiveBoundary","()I");
     JNI_LIVE_REQUIRE(boundary&&!(*env)->ExceptionCheck(env),"JNI_LIVE_GUARDED_LOOKUP_FAILED");
@@ -310,6 +321,13 @@ jni_live_done:
             InterlockedExchangePointer((void *volatile*)&table->GetFieldID,(void*)before.GetFieldID);
             InterlockedExchangePointer((void *volatile*)&table->GetVersion,(void*)before.GetVersion);}
         if((!audit_jni_close(protect,regions,count)||!opened)&&!failure)failure="JNI_LIVE_FINAL_POINTER_RESTORE";
+    }
+    if(privateTable){
+        *(const struct JNINativeInterface_ **)env=attachment;
+        JNIEnv *restored=NULL;
+        if(!vm||(*vm)->GetEnv(vm,(void**)&restored,JNI_VERSION_1_8)!=JNI_OK||restored!=env){
+            if(!failure)failure="JNI_LIVE_FINAL_ATTACHMENT_RESTORE";
+        }else if(!VirtualFree(privateTable,0,MEM_RELEASE)&&!failure)failure="JNI_LIVE_FINAL_PRIVATE_TABLE_FREE";
     }
     if(published&&api)(*api)->Deallocate(api,(unsigned char*)published);
     if(copy&&api)(*api)->Deallocate(api,(unsigned char*)copy);copy=NULL;

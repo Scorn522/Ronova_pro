@@ -11,6 +11,8 @@ typedef HMODULE (WINAPI *HostLoadLibraryExA)(LPCSTR,HANDLE,DWORD);
 typedef HMODULE (WINAPI *HostLoadLibraryExW)(LPCWSTR,HANDLE,DWORD);
 typedef BOOL (WINAPI *HostFreeLibrary)(HMODULE);
 typedef void (WINAPI *HostFreeLibraryAndExitThread)(HMODULE,DWORD);
+#include <tlhelp32.h>
+#include <wchar.h>
 
 /* A release frame retains execution sources through real detach callbacks.
  * Its embedded lease uses the existing source borrowers, but never enters the
@@ -253,6 +255,67 @@ static HMODULE host_call_module_load(HostImport *entry,const uintptr_t *a){
         default:SetLastError(ERROR_INVALID_FUNCTION);return NULL;
     }
 }
+/* Acquire a reference to an actual VM/JPLIS provider, without loading code or
+ * entering DllMain. This is not a private-library admission: opaque TLS still
+ * stays unknown and never grants a private lifetime / retirement lease. The
+ * known caller roots and all stopped-source / VM memory guards remain live. */
+static HMODULE host_existing_runtime_reference(HostImport *entry,uintptr_t *arguments,NativeThread *state){
+    if(!native_vm_original.GetEnv||state&&(state->heapCallback||state->toolingRestricted
+            ||state->vmDetaching||state->vmThreadEnding||state->hostUnloadImage||state->hostRelease
+            ||state->hostLoad&&state->hostLoad->calling))return NULL;
+    int extended=entry->kind==HOST_LOAD_LIBRARY_EX_A||entry->kind==HOST_LOAD_LIBRARY_EX_W;
+    if(extended&&(arguments[1]||arguments[2]))return NULL;
+    if(!arguments[0])return NULL;
+    WCHAR name[MAX_PATH]={0};char narrow[MAX_PATH]={0};unsigned count=0;
+    int wide=entry->kind==HOST_LOAD_LIBRARY_W||entry->kind==HOST_LOAD_LIBRARY_EX_W,complete=0;
+    __try {
+        if(wide){
+            for(;count<MAX_PATH-5;count++){WCHAR next=((const volatile WCHAR*)arguments[0])[count];if(!next){complete=1;break;}name[count]=next;}
+        }else{
+            for(;count<MAX_PATH-5;count++){char next=((const volatile char*)arguments[0])[count];if(!next){complete=1;break;}narrow[count]=next;}
+        }
+    } __except(EXCEPTION_EXECUTE_HANDLER){return NULL;}
+    if(!complete||!count)return NULL;
+    if(!wide&&!MultiByteToWideChar(CP_ACP,0,narrow,-1,name,MAX_PATH))return NULL;
+    /* Limit this equivalence to bare DLL names. Relative paths, redirection,
+     * resource mappings and search flags keep the original loader admission. */
+    for(WCHAR *at=name;*at;at++)if(*at==L'\\'||*at==L'/'||*at==L':')return NULL;
+    if(!wcschr(name,L'.'))wcscat(name,L".dll");
+    HMODULE runtime=GetModuleHandleW(name);
+    if(!host_module_process_runtime(runtime))return NULL;
+    HANDLE snapshot=CreateToolhelp32Snapshot(TH32CS_SNAPMODULE,GetCurrentProcessId());
+    if(snapshot==INVALID_HANDLE_VALUE)return NULL;
+    MODULEENTRY32W module={0};module.dwSize=sizeof(module);unsigned matches=0;HMODULE selected=NULL;
+    BOOL more=Module32FirstW(snapshot,&module);
+    while(more){
+        if(CompareStringOrdinal(module.szModule,-1,name,-1,TRUE)==CSTR_EQUAL){matches++;selected=module.hModule;}
+        more=Module32NextW(snapshot,&module);
+    }
+    DWORD error=GetLastError();CloseHandle(snapshot);
+    if(error!=ERROR_NO_MORE_FILES||matches!=1||selected!=runtime)return NULL;
+    HMODULE actual=NULL;
+    if(!GetModuleHandleExW(0,name,&actual))return NULL;
+    if(actual!=runtime){if(actual)host_real_free_library(actual);return NULL;}
+    return actual;
+}
+static void native_source_diagnostic(NativeThread *state,const char *site){
+    int scopes=0,tls=0;OwnerLink *tlsSources=NULL;JNIEnv *env=NULL;
+    if(state){
+        host_tls_capture(state,&tlsSources,&tls);native_owner_links_free(tlsSources);
+        if(state->registration&&state->registration->unknown)scopes|=1;
+        for(unsigned i=0;i<state->depth;i++)if(state->stack[i]->hostUnknown)scopes|=2;
+        for(NativeToolingScope *scope=state->tooling;scope;scope=scope->previous)if(scope->unknown)scopes|=4;
+    }
+    jint javaFlags=-1;
+    if(state&&native_process_source_flags&&native_vm_original.GetEnv(native_vm,(void**)&env,JNI_VERSION_1_8)==JNI_OK
+            &&env&&!native_original.ExceptionCheck(env)){
+        state->control++;state->sourceCapture++;
+        javaFlags=native_original.CallStaticIntMethod(env,native_controls,native_process_source_flags);
+        if(native_original.ExceptionCheck(env)){native_original.ExceptionClear(env);javaFlags=-2;}
+        state->sourceCapture--;state->control--;
+    }
+    fprintf(stderr,"RONOVA_NATIVE_SOURCE_FLAGS:site=%s:tls=%d:scopes=%d:java=%x\n",site,tls,scopes,(unsigned)javaFlags);
+}
 static uint64_t host_native_module_load(HostImport *entry,void *caller,uintptr_t *arguments){
     DWORD incoming=GetLastError();OwnerLink *owners=NULL;
     NativeThread *state=native_tls==TLS_OUT_OF_INDEXES?NULL:(NativeThread*)TlsGetValue(native_tls);
@@ -261,7 +324,8 @@ static uint64_t host_native_module_load(HostImport *entry,void *caller,uintptr_t
     entry=host_consumed_entry(entry,state,caller);
     NativeLibrary *parentLibrary=NULL;int unknown=0;
     if(!host_entry_sources_query(entry,state,caller,&owners,&parentLibrary,1,&unknown)){
-        DWORD error=GetLastError();native_owner_links_free(owners);SetLastError(error);return 0;
+        DWORD error=GetLastError();fprintf(stderr,"RONOVA_HOST_MODULE_LOAD_REFUSED:SOURCE_QUERY:error=%lu:unknown=%d\n",(unsigned long)error,unknown);
+        native_owner_links_free(owners);SetLastError(error);return 0;
     }
     if(native_owner_stopped(owners)){
         native_owner_links_free(owners);SetLastError(ERROR_ACCESS_DENIED);return 0;
@@ -282,7 +346,17 @@ static uint64_t host_native_module_load(HostImport *entry,void *caller,uintptr_t
      * an actual existing complete lease; it never attaches to invent one. */
     int retained=host_module_keep_sources(state,load);
     if(!retained)load->unknown=1;
+    HMODULE existing=host_existing_runtime_reference(entry,arguments,state);
+    if(existing){
+        load->actual=existing;load->error=incoming;load->publicCarrier=1;
+        free(load->preparedImage);load->preparedImage=NULL;
+        host_module_publish(load);InterlockedExchange(&load->calling,0);
+        native_thread_worker_wake();SetLastError(incoming);return (uint64_t)(uintptr_t)existing;
+    }
     if(native_has_producer(load->owners)&&(load->unknown||!load->leaseComplete||!native_thread_worker_backend_ready())){
+        fprintf(stderr,"RONOVA_HOST_MODULE_LOAD_REFUSED:ADMISSION:unknown=%d:retained=%d:lease=%d:backend=%d\n",
+                load->unknown,retained,load->leaseComplete,native_thread_worker_backend_ready());
+        native_source_diagnostic(state,"module_load");
         load->refused=1;host_module_publish(load);InterlockedExchange(&load->calling,0);
         native_thread_worker_wake();SetLastError(ERROR_INVALID_DATA);return 0;
     }

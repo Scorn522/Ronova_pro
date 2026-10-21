@@ -223,6 +223,14 @@ static void host_module_publish(HostLibraryLoad *load){
     AcquireSRWLockExclusive(&host_imports);load->next=host_library_loads;host_library_loads=load;
     ReleaseSRWLockExclusive(&host_imports);native_thread_worker_wake();
 }
+static int host_module_process_runtime(HMODULE image){
+    /* The invocation table came from this JNI installation. A requested name
+     * never establishes this identity or makes a third-party DLL a backend. */
+    if(image&&(HMODULE)InterlockedCompareExchangePointer((void *volatile*)&native_instrument_backend,NULL,NULL)==image)return 1;
+    return image&&native_vm&&native_vm_original.GetEnv&&native_vm_original.DestroyJavaVM
+            &&native_image((void*)native_vm_original.GetEnv)==image
+            &&native_image((void*)native_vm_original.DestroyJavaVM)==image;
+}
 static void host_module_return(HostLibraryLoad *load,HMODULE actual,DWORD error){
     load->actual=actual;load->error=error;
     if(!actual)return;
@@ -240,10 +248,10 @@ static void host_module_return(HostLibraryLoad *load,HMODULE actual,DWORD error)
     load->nonExecutable=(load->flags&DONT_RESOLVE_DLL_REFERENCES)!=0||!dll;
     if(load->nonExecutable){if(!host_real_free_library(pin))load->sparePin=pin;return;}
     void *targets[HOST_KIND_COUNT]={0};host_windows_targets(targets);
-    int publicCarrier=0;for(int kind=1;kind<HOST_KIND_COUNT&&!publicCarrier;kind++)
+    int publicCarrier=host_module_process_runtime(actual);for(int kind=1;kind<HOST_KIND_COUNT&&!publicCarrier;kind++)
         if(targets[kind])publicCarrier=native_image(targets[kind])==actual;
     if(publicCarrier){
-        /* A genuine Windows API provider is a public backend, not code owned
+        /* A genuine VM / Windows API provider is a public backend, not code owned
          * by whichever consumer just acquired another aggregate reference.
          * Its caller's imports/resolver already carry that actual source.
          * Return our observation pin now, leaving the original loader ref. */

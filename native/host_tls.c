@@ -26,23 +26,26 @@ typedef struct HostTlsSlot HostTlsSlot;
 typedef struct HostTlsActivation {HostTlsSlot *slot;struct HostTlsActivation *previous;} HostTlsActivation;
 typedef struct HostTlsThread {
     uint64_t generation;HANDLE monitor;HostTlsSources observed;
-    HostTlsActivation *activation;int ended,gap,releasing;
+    HostTlsActivation *activation;int ended,gap,releasing,reaped;
+    struct HostTlsValue *values;
     struct HostTlsThread *next;
 } HostTlsThread;
 typedef struct HostTlsFiber {
     uint64_t generation;HostTlsThread *home;HostTlsSources observed;
-    void *fiber;int actualFiber,ended,gap;
+    void *fiber;int actualFiber,ended,gap,reaped;
+    struct HostTlsValue *values;
     struct HostTlsFiber *next;
 } HostTlsFiber;
 typedef struct HostTlsValue {
     HostTlsThread *thread;HostTlsFiber *fiber;HostTlsSources sources;
+    HostTlsSlot *slot;struct HostTlsValue *contextNext;
     uintptr_t value;int initialized,uncertain,closed;
     struct HostTlsValue *next;
 } HostTlsValue;
 typedef struct HostTlsContribution {HostTlsSources sources;uintptr_t value;int valueReceipt;struct HostTlsContribution *next;} HostTlsContribution;
 typedef struct HostTlsOperation {HostTlsSources *sources;uintptr_t value;int freeing,setting;struct HostTlsOperation *next;} HostTlsOperation;
 struct HostTlsSlot {
-    uint64_t generation;DWORD index;int fls,observed,live,uncertain,gap,cleanupGap;
+    uint64_t generation;DWORD index;int fls,observed,live,uncertain,gap,cleanupGap,reaped;
     LONG busy,callbacks,borrowers;int closing;
     HostTlsSources allocation,aggregate;HostTlsValue *values;
     HostTlsContribution *contributions;HostTlsOperation *operations;
@@ -68,6 +71,19 @@ static int host_is_tls(int kind){
 static uint64_t host_tls_failure(int kind,DWORD error,DWORD incoming){
     SetLastError(kind==HOST_TLS_GET2?incoming:error);
     return kind==HOST_TLS_ALLOC||kind==HOST_FLS_ALLOC?(uint64_t)(DWORD)TLS_OUT_OF_INDEXES:0;
+}
+static void host_tls_refused(int kind,DWORD index,DWORD error,const char *site,int restricted,int unknown,OwnerLink *owners,NativeThread *state,void *caller){
+    static volatile LONG readFailures;
+    if(kind==HOST_TLS_GET||kind==HOST_TLS_GET2||kind==HOST_FLS_GET){
+        ULONG count=(ULONG)InterlockedIncrement(&readFailures);
+        if(count>8&&(count&(count-1)))return;
+    }
+    unsigned scopes=state?(state->heapCallback?1:0)|(state->toolingRestricted?2:0)|(state->vmDetaching?4:0)
+            |(state->vmThreadEnding?8:0)|(state->hostUnloadImage?16:0)|(state->hostRelease?32:0)
+            |(state->hostLoad&&state->hostLoad->calling?64:0):0;
+    fprintf(stderr,"NATIVE_TLS_REFUSED:kind=%d:index=%lu:error=%lu:site=%s:restricted=%d:unknown=%d:producer=%d:scopes=%u:depth=%u:thread=%lu:caller=%p\n",
+            kind,(unsigned long)index,(unsigned long)error,site,restricted,unknown,native_has_producer(owners),scopes,state?state->depth:0,
+            (unsigned long)GetCurrentThreadId(),caller);
 }
 static int host_tls_restricted(NativeThread *state){
     return state&&(state->heapCallback||state->toolingRestricted||state->vmDetaching||state->vmThreadEnding
@@ -185,8 +201,13 @@ static int host_tls_capture(NativeThread *state,OwnerLink **owners,int *unknown)
     int ready=1;
     if(host_tls_restricted(state)){if(!TryAcquireSRWLockShared(&host_tls_records)){if(unknown)*unknown=1;SetLastError(incoming);return 0;}}
     else AcquireSRWLockShared(&host_tls_records);
-    if(thread){ready=native_owner_merge(owners,thread->observed.owners);if(unknown)*unknown|=thread->observed.unknown||thread->ended;}
-    if(fiber){ready=ready&&native_owner_merge(owners,fiber->observed.owners);if(unknown)*unknown|=fiber->observed.unknown;}
+    /* A TLS value's opaque data history is not an unknown caller of every
+     * later JNI/OS operation on this thread. Keep all observed contributors,
+     * but obtain call origins from the live Java/native/binding scopes.
+     * The value gap remains in observed.unknown, TLS reports, callback scopes
+     * and the complete-lease/retirement checks; it grants no private lease. */
+    if(thread){ready=native_owner_merge(owners,thread->observed.owners);if(unknown)*unknown|=thread->ended||thread->gap;}
+    if(fiber){ready=ready&&native_owner_merge(owners,fiber->observed.owners);if(unknown)*unknown|=fiber->ended||fiber->gap;}
     ReleaseSRWLockShared(&host_tls_records);SetLastError(incoming);return ready;
 }
 static int host_tls_source_borrow(NativeThread *state,OwnerLink *owners,void **token){
@@ -359,14 +380,15 @@ static uint64_t host_native_tls(HostImport *entry,void *caller,uintptr_t *argume
         return host_tls_failure(kind,ERROR_ACCESS_DENIED,incoming);
     if(!restricted)entry=host_consumed_entry(entry,state,caller);
     if(!host_entry_sources_query(entry,state,caller,&owners,NULL,1,&unknown)){
-        error=GetLastError();native_owner_links_free(owners);return host_tls_failure(kind,error,incoming);}
+        error=GetLastError();host_tls_refused(kind,index,error,"source_query",restricted,unknown,owners,state,caller);
+        native_owner_links_free(owners);return host_tls_failure(kind,error,incoming);}
     HostTlsSlot *slot=NULL;HostTlsValue *value=NULL;HostTlsLease *lease=NULL;HostTlsThread *thread=NULL;HostTlsFiber *fiber=NULL;
     HostTlsSources prepared={0},aggregation={0},exposure={0};HostTlsContribution *contribution=NULL;
     HostTlsOperation operation={0};uint64_t result=allocating?(uint64_t)(DWORD)TLS_OUT_OF_INDEXES:0;
-    int reserved=0,called=0,returned=0,success=0,published=0;
+    int reserved=0,called=0,returned=0,success=0,published=0;const char *failure="preparation";
     __try {
-        if(native_owner_stopped(owners))error=ERROR_ACCESS_DENIED;
-        else if(unknown&&(restricted||native_has_producer(owners)))error=ERROR_INVALID_DATA;
+        if(native_owner_stopped(owners)){error=ERROR_ACCESS_DENIED;failure="stopped_source";}
+        else if(unknown&&(restricted||native_has_producer(owners))){error=ERROR_INVALID_DATA;failure="unknown_source";}
         if(!error&&InterlockedCompareExchange(&host_tls_ready,0,0)!=1){
             if(restricted)error=ERROR_BUSY;else if(!host_tls_prepare())error=GetLastError();}
         if(!error&&!allocating&&(!fls&&(native_tls!=TLS_OUT_OF_INDEXES&&index==native_tls
@@ -389,7 +411,12 @@ static uint64_t host_native_tls(HostImport *entry,void *caller,uintptr_t *argume
                 }
             }
             if(!error){lease=host_tls_lease_prepare(state,owners,unknown,restricted);if(!lease)error=GetLastError();
-                else if(!lease->complete&&(restricted||native_has_producer(owners)))error=ERROR_INVALID_DATA;}
+                // A known platform-only callback does not acquire a private
+                // Mod lease by setting its own TLS value. Keep its partial
+                // lease/report, but do not turn missing private retention into
+                // a spurious OS failure. Real Mod sources and unknown callback
+                // origins still require the original complete-source gate.
+                else if(!lease->complete&&(native_has_producer(owners)||restricted&&unknown)){error=ERROR_INVALID_DATA;failure="source_lease";}}
         }
         if(!error){
             if(!host_tls_lock(restricted))error=ERROR_BUSY;
@@ -412,13 +439,24 @@ static uint64_t host_native_tls(HostImport *entry,void *caller,uintptr_t *argume
                             slot->live=1;slot->uncertain=slot->gap=1;slot->next=host_tls_slots;host_tls_slots=slot;published=1;}}
                     else published=1;
                     int callbackUse=callbackSlot==slot&&(setting||getting);
-                    if(!error&&((slot->busy||slot->closing)&&!callbackUse||freeing&&slot->callbacks))error=ERROR_BUSY;
+                    /* An index is process-wide, its values are thread/fiber-local.
+                     * Concurrent Get/Set on distinct contexts do not conflict.
+                     * busy retains every in-flight operation for Free/retirement;
+                     * closing still excludes new users, except the actual FLS
+                     * callback already admitted by this slot's Free operation. */
+                    if(!error&&(slot->closing&&!callbackUse||freeing&&(slot->busy||slot->callbacks))){
+                        error=ERROR_BUSY;failure="slot_closing";}
                     if(!error){slot->busy++;if(freeing)slot->closing++;reserved=1;
                         operation.freeing=freeing;operation.setting=setting;operation.value=setting?arguments[1]:0;
                         operation.next=slot->operations;slot->operations=&operation;
                         if(setting||getting){value=host_tls_value_find(slot,thread,fiber);
                             if(!value){value=(HostTlsValue*)calloc(1,sizeof(*value));
-                                if(value){value->thread=thread;value->fiber=fiber;value->next=slot->values;slot->values=value;}
+                                if(value){
+                                    value->thread=thread;value->fiber=fiber;value->slot=slot;
+                                    value->next=slot->values;slot->values=value;
+                                    if(fls){value->contextNext=fiber->values;fiber->values=value;}
+                                    else {value->contextNext=thread->values;thread->values=value;}
+                                }
                                 else error=ERROR_NOT_ENOUGH_MEMORY;}
                         }
                         if(!error&&setting){
@@ -515,7 +553,12 @@ static uint64_t host_native_tls(HostImport *entry,void *caller,uintptr_t *argume
         host_tls_sources_clear(&prepared);host_tls_sources_clear(&aggregation);host_tls_sources_clear(&exposure);
         if(contribution)free(contribution);
         if(lease)lease->references--;ReleaseSRWLockExclusive(&host_tls_records);
-        native_owner_links_free(owners);native_thread_worker_wake();
+        if(!called)host_tls_refused(kind,index,error?error:ERROR_INVALID_DATA,failure,restricted,unknown,owners,state,caller);
+        native_owner_links_free(owners);
+        // Reads retain the old observation and introduce no zero-reference
+        // lease. New contexts already wake the daemon at publication, and its
+        // existing monitor timeout observes actual kernel-thread termination.
+        if(!getting)native_thread_worker_wake();
         SetLastError(kind==HOST_TLS_GET2?incoming:returned?error:error?error:interrupted);
     }
     return called?result:host_tls_failure(kind,error?error:ERROR_INVALID_DATA,incoming);
@@ -541,32 +584,42 @@ static void host_tls_reap(JNIEnv **environment){
     AcquireSRWLockExclusive(&host_records);AcquireSRWLockExclusive(&host_tls_records);
     __try {
     for(HostTlsThread *thread=host_tls_threads;thread;thread=thread->next){
-        if(thread->releasing)continue;
+        if(thread->releasing||thread->reaped)continue;
         if(!thread->ended){
             if(!thread->monitor)continue;DWORD status=WaitForSingleObject(thread->monitor,0);
             if(status!=WAIT_OBJECT_0){if(status==WAIT_FAILED)thread->gap=1;continue;}
             thread->ended=1;
         }
         host_tls_sources_clear(&thread->observed);
-        for(HostTlsSlot *slot=host_tls_slots;slot;slot=slot->next)
-            for(HostTlsValue *value=slot->values;value;value=value->next)
-                if(!slot->fls&&value->thread==thread&&!slot->busy){value->closed=1;host_tls_sources_clear(&value->sources);}
-        for(HostTlsFiber *fiber=host_tls_fibers;fiber;fiber=fiber->next){
-            if(fiber->home!=thread)continue;
-            if(!fiber->ended||fiber->actualFiber||fiber->gap){fiber->gap=1;continue;}
-            host_tls_sources_clear(&fiber->observed);
-            for(HostTlsSlot *slot=host_tls_slots;slot;slot=slot->next)
-                for(HostTlsValue *value=slot->values;value;value=value->next)
-                    if(slot->fls&&value->fiber==fiber&&!slot->busy&&!slot->callbacks){value->closed=1;host_tls_sources_clear(&value->sources);}
+        int pending=0;
+        for(HostTlsValue *value=thread->values;value;value=value->contextNext){
+            if(value->closed&&!value->sources.owners&&!value->sources.leases&&!value->sources.unknown)continue;
+            if(value->slot->busy){pending=1;continue;}
+            value->closed=1;host_tls_sources_clear(&value->sources);
         }
         if(thread->monitor){if(host_real_close(thread->monitor))thread->monitor=NULL;else thread->gap=1;}
+        if(!pending&&!thread->monitor)thread->reaped=1;
+    }
+    for(HostTlsFiber *fiber=host_tls_fibers;fiber;fiber=fiber->next){
+        if(fiber->reaped||!fiber->home->ended)continue;
+        // Migrated/opaque fibers retain the same explicit lifecycle gap and
+        // source leases. An ended home thread grants no fiber disposal.
+        if(!fiber->ended||fiber->actualFiber||fiber->gap){fiber->gap=1;continue;}
+        host_tls_sources_clear(&fiber->observed);int pending=0;
+        for(HostTlsValue *value=fiber->values;value;value=value->contextNext){
+            if(value->closed&&!value->sources.owners&&!value->sources.leases&&!value->sources.unknown)continue;
+            if(value->slot->busy||value->slot->callbacks){pending=1;continue;}
+            value->closed=1;host_tls_sources_clear(&value->sources);
+        }
+        if(!pending)fiber->reaped=1;
     }
     for(HostTlsSlot *slot=host_tls_slots;slot;slot=slot->next){
-        if(slot->live||slot->busy||slot->callbacks||slot->borrowers||slot->uncertain||slot->cleanupGap)continue;
+        if(slot->reaped||slot->live||slot->busy||slot->callbacks||slot->borrowers||slot->uncertain||slot->cleanupGap)continue;
         if(slot->callback&&slot->index!=TLS_OUT_OF_INDEXES||slot->pin||slot->providerAnchor)continue;
         host_tls_sources_clear(&slot->allocation);host_tls_sources_clear(&slot->aggregate);
         HostTlsContribution *p=slot->contributions;slot->contributions=NULL;
         while(p){HostTlsContribution *next=p->next;host_tls_sources_clear(&p->sources);free(p);p=next;}
+        slot->reaped=1;
     }
     } __finally {ReleaseSRWLockExclusive(&host_tls_records);ReleaseSRWLockExclusive(&host_records);}
     /* Callback adapter pages and their RUNTIME_FUNCTION remain callable

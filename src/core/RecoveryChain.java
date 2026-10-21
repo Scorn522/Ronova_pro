@@ -19,6 +19,7 @@ final class RecoveryChain {
     private final Map<UUID,Qualification> qualifications=new HashMap<>();
     private final ConcurrentLinkedQueue<UUID> qualificationChanges=new ConcurrentLinkedQueue<>();
     private final Set<UUID> queuedQualifications=ConcurrentHashMap.newKeySet();
+    private Map<Object,Set<UUID>> sampledLocations;
     private record Qualification(ProRuntime.Subject authority,long generation,boolean terminal) { }
     private static final class Work {
         final UUID id,subject,session,entity,incarnation;
@@ -121,6 +122,8 @@ final class RecoveryChain {
         Iterator<Work> cursor=ring.iterator();Work item=cursor.next();cursor.remove();ring.add(item);return item;
     }
     void tick(long tick) {
+        runtime.beginRecoveryQueries();sampledLocations=new IdentityHashMap<>();
+        try{
         for(UUID subject;(subject=qualificationChanges.poll())!=null;) {
             queuedQualifications.remove(subject);refreshQualification(subject);
         }
@@ -138,6 +141,7 @@ final class RecoveryChain {
             if(current(item)) { refreshQualification(item.subject);continue; }
             sample(item,tick);
         }
+        }finally{sampledLocations=null;runtime.endRecoveryQueries();}
     }
     static int sampleBudget(int active) {return active==0?0:Math.max(1,(active+4)/5);}
     private void sample(Work item,long tick) {
@@ -169,8 +173,13 @@ final class RecoveryChain {
                 loaded=true;
                 Access.Manager manager=(Access.Manager)((Access.Server)level).pro$manager();
                 Access.Lookup lookup=(Access.Lookup)manager.pro$lookup();
-                for(Object value:lookup.pro$ids().values())if(value instanceof Entity entity&&((Access.EntityState)entity).pro$uuid().equals(item.entity))
-                    remaining.add("RESTART_LOCATION_OCCUPIED_REQUIRES_ACTUAL_SOURCE_BINDING");
+                Object ids=lookup.pro$ids();Set<UUID> located=sampledLocations==null?null:sampledLocations.get(ids);
+                if(located==null){
+                    located=new HashSet<>();
+                    for(Object value:lookup.pro$ids().values())if(value instanceof Entity entity)located.add(((Access.EntityState)entity).pro$uuid());
+                    if(sampledLocations!=null)sampledLocations.put(ids,located);
+                }
+                if(located.contains(item.entity))remaining.add("RESTART_LOCATION_OCCUPIED_REQUIRES_ACTUAL_SOURCE_BINDING");
                 if(lookup.pro$uuids().containsKey(item.entity))remaining.add("RESTART_UUID_INDEX_PRESENT");
             }
             if(!loaded)remaining.add("ORIGINAL_WORLD_NOT_LOADED");

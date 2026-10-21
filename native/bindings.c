@@ -6,6 +6,23 @@
 #include <stdarg.h>
 #include <stdio.h>
 #include <errno.h>
+/* These are private controller snapshots, never a business-memory read API.
+ * Read every live byte on every check without a kernel round trip. SEH keeps
+ * a corrupt/unmapped table or import address a failed check, not a VM crash. */
+static int native_control_snapshot(const void *address,void *copy,size_t length){
+    if(!length)return 1;
+    if(!address||!copy||length-1>UINTPTR_MAX-(uintptr_t)address)return 0;
+    __try {
+        const volatile unsigned char *source=(const volatile unsigned char*)address;
+        unsigned char *target=(unsigned char*)copy;size_t at=0;
+        for(;length-at>=sizeof(uintptr_t);at+=sizeof(uintptr_t)){
+            uintptr_t word=*(const volatile uintptr_t*)(source+at);
+            memcpy(target+at,&word,sizeof(word));
+        }
+        for(;at<length;at++)target[at]=source[at];
+        return 1;
+    } __except(EXCEPTION_EXECUTE_HANDLER) {return 0;}
+}
 #include "private_memory.c"
 #define malloc native_private_malloc
 #define calloc native_private_calloc
@@ -90,7 +107,7 @@ static jmethodID native_library_gate;
 static jmethodID native_load_gate;
 static jclass native_library_class,native_impl_class,native_unloader_class;
 static jfieldID native_library_context,native_impl_handle,native_impl_version,native_impl_name,native_impl_builtin,native_impl_jni;
-static HMODULE native_java_image;
+static HMODULE native_java_image,native_instrument_backend;
 static volatile LONG native_library_present,native_library_ready;
 static jclass native_controls,native_definitions;
 static jmethodID native_writer_select,native_writer_raw_select;
@@ -99,7 +116,7 @@ static jmethodID native_image_query,native_defined_query,native_after_query,nati
 static jmethodID native_array_query,native_array_policy,native_pin_query,native_registration_query,native_registration_target,native_object_module;
 static jmethodID native_mutation_field,native_mutation_array,native_mutation_end;
 static jmethodID native_network_sources;
-static jmethodID native_process_sources;
+static jmethodID native_process_sources,native_process_source_flags;
 static jclass native_unsafe_class,native_unsafe_backing;
 static jobject native_unsafe_denied;
 static jmethodID native_unsafe_begin_query,native_unsafe_read_begin_query,native_unsafe_copy_begin_query,native_unsafe_read_query,native_unsafe_register,native_unsafe_metadata_query;
@@ -2379,6 +2396,7 @@ JNIEXPORT jboolean JNICALL Java_dev_ronova_pro_bootstrap_NativeControl_initializ
     native_object_module=(*env)->GetStaticMethodID(env,tasks,"objectModule","(Ljava/lang/Object;)Ljava/lang/Module;");
     native_network_sources=(*env)->GetStaticMethodID(env,tasks,"nativeNetworkSources","()[Ljava/lang/Module;");
     native_process_sources=(*env)->GetStaticMethodID(env,tasks,"nativeProcessSources","()[Ljava/lang/Module;");
+    native_process_source_flags=(*env)->GetStaticMethodID(env,tasks,"nativeProcessSourceFlags","()I");
     native_mutation_field=(*env)->GetStaticMethodID(env,tasks,"beginNativeFieldMutation","(Ljava/lang/Object;Ljava/lang/Class;Ljava/lang/String;Ljava/lang/String;[Ljava/lang/Module;)Ljava/lang/Object;");
     native_mutation_array=(*env)->GetStaticMethodID(env,tasks,"beginNativeArrayMutation","(Ljava/lang/Object;II[Ljava/lang/Module;)Ljava/lang/Object;");
     native_mutation_end=(*env)->GetStaticMethodID(env,tasks,"finishFieldMutation","(Ljava/lang/Object;Z)V");

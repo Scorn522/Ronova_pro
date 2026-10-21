@@ -77,8 +77,20 @@ final class ControlImages implements ClassFileTransformer {
             System.err.println("RONOVA_CONTROL_IMAGE_UNAVAILABLE:"+failure);throw unavailable;
         }
     }
+    private static volatile java.lang.reflect.Method controlRegistration;
+    private static java.lang.reflect.Method controlRegistration()throws ReflectiveOperationException{
+        java.lang.reflect.Method known=controlRegistration;if(known!=null)return known;
+        // Only a successful resolution of this bootstrap declaration is cached.
+        // Resolve outside the monitor: class loading may itself capture images.
+        java.lang.reflect.Method resolved=Class.forName("dev.ronova.pro.bootstrap.ControlBridge",false,null)
+                .getMethod("registerAgentControls",Object[].class);
+        synchronized(ControlImages.class){
+            if(controlRegistration==null)controlRegistration=resolved;
+            return controlRegistration;
+        }
+    }
     static void protect(Object... objects) {
-        try {Class.forName("dev.ronova.pro.bootstrap.ControlBridge",false,null).getMethod("registerAgentControls",Object[].class).invoke(null,(Object)objects);}
+        try {controlRegistration().invoke(null,(Object)objects);}
         catch(java.lang.reflect.InvocationTargetException unavailable){
             Throwable cause=unavailable.getCause();
             if(cause instanceof RuntimeException failure)throw failure;

@@ -479,17 +479,18 @@ public final class NativeControl {
     }
     public static String codeRetirementGap(Module module){
         if(!controlCaller())throw new SecurityException("ACTUAL_CODE_STATE_AGENT_REQUIRED");
-        if(available)retireCode0(module);
+        long[] frames=available?codeState0(module):null;
         String creation=ControlBridge.creationSourceGap(module);if(!creation.isEmpty())return creation;
         String heap=CodeSourceBridge.executionRetirementGap(module);if(!heap.isEmpty())return heap;
-        if(!available)return "EXTERNAL_CODE_VM_BACKEND_UNAVAILABLE";long[] frames=codeState0(module);
+        if(!available)return "EXTERNAL_CODE_VM_BACKEND_UNAVAILABLE";
         if(frames==null||frames.length<5||frames[0]==0)return "EXTERNAL_CODE_VM_BYTECODES_UNAVAILABLE";
         if(frames.length<5||frames[3]==0)return "EXTERNAL_VM_FRAME_POP_BACKEND_UNAVAILABLE";
-        if(frames[4]!=0)return "EXTERNAL_VM_FRAME_POP_UNOBSERVED:events="+frames[4];
+        // frames[4] is process-wide diagnostic history. Current requests,
+        // live frames and this owner's unmatched returns below determine pending work.
         if(frames.length<19)return "EXTERNAL_CODE_RETIREMENT_BACKEND_UNAVAILABLE";
         if(frames[16]!=0)return "EXTERNAL_CODE_OWN_SUSPENSION_PENDING:threads="+frames[16];
         boolean active=frames[1]!=0||frames[2]!=0||frames[9]!=0||frames[18]!=0;
-        if(frames[15]!=0&&(active||frames[10]!=frames[11]))return "EXTERNAL_CODE_RETIREMENT_VM_FAILURES:operations="+frames[15];
+        if(frames[15]!=0&&active)return "EXTERNAL_CODE_RETIREMENT_VM_FAILURES:operations="+frames[15];
         if(active&&(frames[5]==0||frames[6]==0||frames[7]==0))
             return "EXTERNAL_CODE_RETIREMENT_CAPABILITIES_UNAVAILABLE:suspend="+frames[5]+":earlyReturn="+frames[6]+":step="+frames[7]+":onLoad="+frames[8];
         return active?"EXTERNAL_CODE_FRAMES_PENDING:active="+frames[1]+":unmapped="+frames[2]+":requests="+frames[9]

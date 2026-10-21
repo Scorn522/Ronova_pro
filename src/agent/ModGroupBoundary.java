@@ -61,6 +61,7 @@ final class ModGroupBoundary {
     private static final Map<Module,Returns> published=new IdentityHashMap<>();
     private static final Map<Module,Set<String>> groupGaps=Collections.synchronizedMap(new IdentityHashMap<>());
     private static final Map<Module,String> codeRetirementGaps=Collections.synchronizedMap(new IdentityHashMap<>());
+    private static final Map<Module,String> nativeRetirementGaps=Collections.synchronizedMap(new IdentityHashMap<>());
     private static final ThreadLocal<Class<?>[]> batch=new ThreadLocal<>();
     static String returnMode(String mode) {
         if(mode==null)throw new IllegalArgumentException("INVALID_RETURN_POLICY:null");
@@ -94,7 +95,7 @@ final class ModGroupBoundary {
         }catch(java.io.IOException unavailable){throw new IllegalStateException("PRELAUNCH_MOD_FILES_UNAVAILABLE",unavailable);}
     }
     static void protectControls(){ControlImages.protect(denied,exact,protectedGroups,bootProtected,fileOwners,moduleFiles,metadata,returns,
-            publishing,published,groupGaps,codeRetirementGaps,unresolved,batch,methods);}
+            publishing,published,groupGaps,codeRetirementGaps,nativeRetirementGaps,unresolved,batch,methods);}
     private ModGroupBoundary() {}
     private static boolean valid(String id) {
         return id.matches("[a-z0-9_.-]{2,64}") && !Set.of("ronova_pro","minecraft","forge","java").contains(id);
@@ -565,7 +566,9 @@ final class ModGroupBoundary {
         }catch(ReflectiveOperationException unavailable){gap(module,"NETWORK_RETIREMENT_QUERY_UNAVAILABLE");}
         try{
             String retirement=String.valueOf(Class.forName("dev.ronova.pro.bootstrap.NativeControl",false,null).getMethod("retirementGap",Module.class).invoke(null,module));
-            for(String prior:Set.copyOf(gaps))if(prior.startsWith("NATIVE_RETIREMENT_PENDING:")){gaps.remove(prior);unresolved.remove(prior);}
+            String prior=nativeRetirementGaps.put(module,retirement);
+            if(prior!=null&&!prior.isEmpty()){gaps.remove(prior);unresolved.remove(prior);}
+            gaps.remove("NATIVE_RETIREMENT_QUERY_UNAVAILABLE");unresolved.remove("NATIVE_RETIREMENT_QUERY_UNAVAILABLE");
             if(!retirement.isEmpty())gap(module,retirement);
         }catch(ReflectiveOperationException unavailable){gap(module,"NATIVE_RETIREMENT_QUERY_UNAVAILABLE");}
         try{

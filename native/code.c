@@ -51,6 +51,7 @@ static void code_retirement_initialize(void);
 static int code_retirement_candidate(JNIEnv*,jmethodID,jobject);
 static int code_retirement_observed(JNIEnv*,jmethodID,jlocation,jobject,int*);
 static void code_retirement_state(JNIEnv*,jobject,jlong*);
+static void code_retirement_scan(JNIEnv*,jobject,jlong*);
 static void code_retirement_popped(JNIEnv*,jthread,jmethodID,jint,int);
 static void code_retirement_exit_observed(struct CodeRetirementOwner*,int);
 static uint32_t code_u(CodeCursor *cursor,unsigned size){
@@ -547,19 +548,10 @@ static int code_method_relevant(JNIEnv *env,jmethodID method,jobject module){ret
 static int code_method_stopped_candidate(JNIEnv *env,jmethodID method){return code_method_selected(env,method,NULL,1);}
 JNIEXPORT jlongArray JNICALL Java_dev_ronova_pro_bootstrap_NativeControl_codeState0(JNIEnv *env,jclass type,jobject module){
     (void)type;if(!native_jni_ready||!native_original.CallStaticBooleanMethod(env,native_controller,native_control_gate)){native_refuse(env,"ACTUAL_CODE_STATE_AGENT_REQUIRED");return NULL;}
-    jlong values[19]={code_available,0,0,code_pop_available,code_pop_failures};jint count=0;jthread *threads=NULL;
-    if(code_available&&(*native_ti)->GetAllThreads(native_ti,&count,&threads)==JVMTI_ERROR_NONE){
-        for(jint i=0;i<count;i++){
-            jvmtiFrameInfo *frames=NULL;jint depth=0;
-            if(code_trace(threads[i],&frames,&depth))for(jint j=0;j<depth;j++){
-                if(!code_retirement_candidate(env,frames[j].method,module))continue;int unknown=0;
-                if(code_retirement_observed(env,frames[j].method,frames[j].location,module,&unknown))values[1]++;
-                if(unknown)values[2]++;
-            }
-            else {jint state=0;if((*native_ti)->GetThreadState(native_ti,threads[i],&state)!=JVMTI_ERROR_NONE||(state&JVMTI_THREAD_STATE_ALIVE))values[2]++;}
-            free(frames);native_original.DeleteLocalRef(env,threads[i]);
-        }(*native_ti)->Deallocate(native_ti,(unsigned char*)threads);
-    }else if(code_available)values[2]++;
+    jlong values[19]={code_available,0,0,code_pop_available,code_pop_failures};
+    // The same real frame image advances retirement and reports its state.
+    // Do not enumerate the JVM once for retireCode0 and again for this query.
+    code_retirement_scan(env,module,values);
     code_retirement_state(env,module,values);
     jlongArray result=native_original.NewLongArray(env,19);if(result)native_original.SetLongArrayRegion(env,result,0,19,values);return result;
 }

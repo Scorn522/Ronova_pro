@@ -15,10 +15,34 @@ final class CodeSourceBoundary {
             "org/spongepowered/asm/service/modlauncher/ModLauncherClassTracker",
             "cpw/mods/modlauncher/TransformerHolder","cpw/mods/modlauncher/TransformingClassLoader",
             "cpw/mods/cl/JarModuleFinder$JarModuleReference","cpw/mods/jarhandling/impl/Jar$JarModuleDataProvider",
-            "java/net/URL","java/io/InputStreamReader","org/spongepowered/asm/mixin/transformer/MixinConfig","org/spongepowered/asm/mixin/Mixins");
+            "java/net/URL","java/io/InputStreamReader","org/spongepowered/asm/mixin/transformer/MixinConfig","org/spongepowered/asm/mixin/Mixins",
+            "org/spongepowered/asm/mixin/injection/invoke/arg/ArgsClassGenerator");
     static byte[] transform(ClassLoader loader,String name,byte[] bytes){
         if(!TARGETS.contains(name))return null;
         ClassNode node=new ClassNode();new ClassReader(bytes).accept(node,0);boolean changed=false;
+        if(name.equals("org/spongepowered/asm/mixin/injection/invoke/arg/ArgsClassGenerator")){
+            // ModLauncher 10 routes only declared module packages through its
+            // generation pipeline. Mixin 0.8.5's otherwise unowned synthetic
+            // package falls through to the platform loader. Keep its actual
+            // descriptor registry, generator, sharing and counter; move only
+            // the central generated class prefix into an existing common GAME
+            // package. The resulting definitions use all normal guards.
+            String before="org.spongepowered.asm.synthetic.args.Args$",
+                    after="net.minecraft.core.RonovaMixinArgs$";
+            int sites=0;
+            for(MethodNode method:node.methods)for(AbstractInsnNode at:method.instructions.toArray())
+                if(at instanceof LdcInsnNode constant&&before.equals(constant.cst)){
+                    if(!method.name.equals("getArgsClass")||!method.desc.equals("(Ljava/lang/String;Lorg/spongepowered/asm/mixin/extensibility/IMixinInfo;)Lorg/spongepowered/asm/service/ISyntheticClassInfo;"))
+                        throw new IllegalStateException("MIXIN_ARGS_NAME_LAYOUT_CHANGED");
+                    constant.cst=after;sites++;
+                }
+            if(sites!=1)throw new IllegalStateException("MIXIN_ARGS_NAME_SITE_UNAVAILABLE");
+            for(FieldNode field:node.fields)if(before.equals(field.value))field.value=after;
+            // Only a String constant changed. Retain the original verifier
+            // frames instead of resolving optional DEBUG_VERIFY ASM classes
+            // which are intentionally absent from the normal launch path.
+            ClassWriter writer=new ClassWriter(0);node.accept(writer);return writer.toByteArray();
+        }
         for(MethodNode method:node.methods){
             if(resourceOrConfig(name,method)){changed=true;continue;}
             if(name.equals("org/spongepowered/asm/mixin/transformer/MixinTargetContext")&&(method.access&(Opcodes.ACC_STATIC|Opcodes.ACC_ABSTRACT|Opcodes.ACC_NATIVE))==0){

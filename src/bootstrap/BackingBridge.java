@@ -119,6 +119,7 @@ public final class BackingBridge {
         boolean written=false;try {if(arrayAllowed(array,index,Short.valueOf(next))){values[index]=next;written=true;}}finally {ControlBridge.finishFieldMutation(gate,written);}
     }
     public static void byteStore(Object array,int index,int value) {
+        if(array instanceof byte[] bytes&&FrameworkBuffers.scratch(bytes)){bytes[index]=(byte)value;return;}
         if(array instanceof boolean[] values) {boolean prior=values[index],next=(value&1)!=0;
             Object gate=ControlBridge.beginArrayMutation(array,index,1);boolean written=false;try {if(arrayAllowed(array,index,Boolean.valueOf(next))){values[index]=next;written=true;}}finally {ControlBridge.finishFieldMutation(gate,written);}}
         else {byte[] values=(byte[])array;byte prior=values[index],next=(byte)value;

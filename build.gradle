@@ -16,7 +16,10 @@ sourceSets {
     }
     prelaunch { java.setSrcDirs(['src/prelaunch', 'src/journal', 'src/shared']) }
     bootstrap { java.setSrcDirs(['src/bootstrap']) }
-    agent { java.setSrcDirs(['src/agent', 'src/shared']) }
+    agent {
+        java.setSrcDirs(['src/agent', 'src/shared'])
+        compileClasspath += sourceSets.bootstrap.output
+    }
     stateChecks {
         java.setSrcDirs(['validation/checks'])
         // Loaded from its own real Mod archive/module during the JNI stop check.
