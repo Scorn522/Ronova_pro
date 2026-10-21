@@ -62,6 +62,8 @@ static uint64_t host_tls_generation;
 static DWORD host_tls_thread_key=TLS_OUT_OF_INDEXES,host_tls_fiber_key=FLS_OUT_OF_INDEXES;
 static volatile LONG host_tls_ready;
 static void WINAPI host_tls_fiber_end(PVOID);
+static HostTlsThread *host_tls_thread_current(void);
+static HostTlsFiber *host_tls_fiber_current(void);
 static int host_tls_source_borrow(NativeThread*,OwnerLink*,void**);
 static void host_tls_source_drop(void*);
 
@@ -72,7 +74,7 @@ static uint64_t host_tls_failure(int kind,DWORD error,DWORD incoming){
     SetLastError(kind==HOST_TLS_GET2?incoming:error);
     return kind==HOST_TLS_ALLOC||kind==HOST_FLS_ALLOC?(uint64_t)(DWORD)TLS_OUT_OF_INDEXES:0;
 }
-static void host_tls_refused(int kind,DWORD index,DWORD error,const char *site,int restricted,int unknown,OwnerLink *owners,NativeThread *state,void *caller){
+static void host_tls_refused(HostImport *entry,int kind,DWORD index,DWORD error,const char *site,int restricted,int unknown,OwnerLink *owners,NativeThread *state,void *caller){
     static volatile LONG readFailures;
     if(kind==HOST_TLS_GET||kind==HOST_TLS_GET2||kind==HOST_FLS_GET){
         ULONG count=(ULONG)InterlockedIncrement(&readFailures);
@@ -84,6 +86,20 @@ static void host_tls_refused(int kind,DWORD index,DWORD error,const char *site,i
     fprintf(stderr,"NATIVE_TLS_REFUSED:kind=%d:index=%lu:error=%lu:site=%s:restricted=%d:unknown=%d:producer=%d:scopes=%u:depth=%u:thread=%lu:caller=%p\n",
             kind,(unsigned long)index,(unsigned long)error,site,restricted,unknown,native_has_producer(owners),scopes,state?state->depth:0,
             (unsigned long)GetCurrentThreadId(),caller);
+    /* Record the actual refusal's unknown roots before this short-lived OS
+     * callback disappears. No VM entry is permitted in a restricted callback. */
+    static volatile LONG explained;LONG bit=restricted?1:2,previous;
+    do{previous=InterlockedCompareExchange(&explained,0,0);if(previous&bit)return;}
+    while(InterlockedCompareExchange(&explained,previous|bit,previous)!=previous);
+    HostTlsThread *thread=host_tls_thread_current();HostTlsFiber *fiber=host_tls_fiber_current();int tls=0,tooling=0;
+    AcquireSRWLockShared(&host_tls_records);
+    if(thread){tls|=thread->ended?1:0;tls|=thread->gap?2:0;}
+    if(fiber)tls|=fiber->gap?4:0;
+    ReleaseSRWLockShared(&host_tls_records);
+    for(NativeToolingScope *scope=state?state->tooling:NULL;scope;scope=scope->previous)tooling|=scope->unknown;
+    fprintf(stderr,"NATIVE_TLS_REFUSAL_ROOTS:entry_unknown=%d:returned=%d:load_unknown=%d:tls=%d:tooling_unknown=%d\n",
+            entry->unknown,entry->returned,entry->load?entry->load->unknown:0,tls,tooling);
+    if(!restricted)native_source_diagnostic(state,"tls_refused");
 }
 static int host_tls_restricted(NativeThread *state){
     return state&&(state->heapCallback||state->toolingRestricted||state->vmDetaching||state->vmThreadEnding
@@ -222,7 +238,9 @@ static int host_tls_source_borrow(NativeThread *state,OwnerLink *owners,void **t
     DWORD incoming=GetLastError();HostTlsThread *thread=host_tls_thread_current();HostTlsFiber *fiber=host_tls_fiber_current();
     if(!thread){SetLastError(incoming);return 0;}HostTlsBorrow *borrow=(HostTlsBorrow*)calloc(1,sizeof(*borrow));
     if(!borrow){SetLastError(incoming);return 0;}
-    if(!TryAcquireSRWLockExclusive(&host_tls_records)){free(borrow);SetLastError(incoming);return 0;}
+    /* This leaf never enters the VM or loader while held. Unrelated directory
+     * contention cannot invalidate a real callback's existing source lease. */
+    AcquireSRWLockExclusive(&host_tls_records);
     int ready=host_tls_sources_merge(&borrow->sources,&thread->observed);
     if(fiber)ready=ready&&host_tls_sources_merge(&borrow->sources,&fiber->observed);
     if(thread->activation)ready=ready&&host_tls_slot_sources(&borrow->sources,thread->activation->slot,1);
@@ -386,7 +404,7 @@ static uint64_t host_native_tls(HostImport *entry,void *caller,uintptr_t *argume
         return host_tls_failure(kind,ERROR_ACCESS_DENIED,incoming);
     if(!restricted)entry=host_consumed_entry(entry,state,caller);
     if(!host_entry_sources_query(entry,state,caller,&owners,NULL,1,&unknown)){
-        error=GetLastError();host_tls_refused(kind,index,error,"source_query",restricted,unknown,owners,state,caller);
+        error=GetLastError();host_tls_refused(entry,kind,index,error,"source_query",restricted,unknown,owners,state,caller);
         native_owner_links_free(owners);return host_tls_failure(kind,error,incoming);}
     HostTlsSlot *slot=NULL;HostTlsValue *value=NULL;HostTlsLease *lease=NULL;HostTlsThread *thread=NULL;HostTlsFiber *fiber=NULL;
     HostTlsSources prepared={0},aggregation={0},exposure={0};HostTlsContribution *contribution=NULL;
@@ -575,7 +593,7 @@ static uint64_t host_native_tls(HostImport *entry,void *caller,uintptr_t *argume
         host_tls_sources_clear(&prepared);host_tls_sources_clear(&aggregation);host_tls_sources_clear(&exposure);
         if(contribution)free(contribution);
         if(lease)lease->references--;ReleaseSRWLockExclusive(&host_tls_records);
-        if(!called)host_tls_refused(kind,index,error?error:ERROR_INVALID_DATA,failure,restricted,unknown,owners,state,caller);
+        if(!called)host_tls_refused(entry,kind,index,error?error:ERROR_INVALID_DATA,failure,restricted,unknown,owners,state,caller);
         native_owner_links_free(owners);
         // Reads retain the old observation and introduce no zero-reference
         // lease. New contexts already wake the daemon at publication, and its

@@ -1,5 +1,13 @@
 # Ronova Pro 当前进度
 
+## 2026-10-21：attempt-31 原生终点与候选 32（仍未进世界）
+
+attempt-31 实际完成 Forge、渲染初始化、声音引擎和多个贴图图集创建，但于运行约 33 分钟后原生退出（0xc0000409 / FAST_FAIL_FATAL_APP_EXIT）。主渲染线程最后的 kind=37 是 TlsSetValue，索引 95，因 unknown_source 被拒绝，随后 jemalloc 报 Error setting TSD 并中止；此前还出现 VirtualFree 数据无效。没有 IntegratedServer/世界 Tick 或保存退出 PASS。首次短命线程的 source_lease 写入调用来自实际 JNA DLL，后续有 jemalloc/显卡/系统组件；不能把整个序列都归为显卡调用，更不能按 DLL 名称放行。
+
+匹配 PDB 的真实崩溃转储确认中止栈，但小转储未包含 Host 来源记录所需的堆页。候选 32 将 TLS 来源借用中的纯叶目录 TryLock 改为同目录已有的实际等待，保留原完整租约/已停用来源检查；不会因无关竞争伪造没有租约。另仅在实际拒绝时，各记录一次受限/普通调用的 entry/load、TLS、Native tooling 未知根，普通安全上下文再读原有 Java 来源诊断；受限回调不进入 Java/VM。未知与停止来源的拒绝、私有 TLS 索引和控制区规则均未放宽。这还不是上述 unknown_source 致命问题已经修复的结论。
+
+统一构建通过（32 秒），双 JAR 已备份更新原 PCL 实例、参数重新生成，attempt-32 按全部原有 Mod 和真实启动参数继续测试世界副本。没有新增隔离夹具或合作式 SDK；世界与干净退出验收仍未完成。
+
 ## 2026-10-21：候选 31 减少实际标量回执的重复控制登记
 
 attempt-30 的真实 35 秒 JFR 及 Java/Native 栈确认：采样中已无 StackFrameBuffer.resize，但同一早期绘制标量仍在 Buffer/Handle/Native Unsafe 边界创建 RawMemoryMutation、Scalar，并在弱控制目录登记时争用全局锁。现把这两种精确 Bootstrap 类型直接判为永久控制状态，免去每个实例的重复目录发布；不是按类名放行，也不缓存调用者或许可。现有各层 Native 作用域、来源、控制区与合法区间检查均保留。
