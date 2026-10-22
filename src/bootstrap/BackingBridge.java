@@ -80,50 +80,56 @@ public final class BackingBridge {
         catch(Throwable failure){throw new IllegalStateException("BACKING_ELEMENT_GUARD",failure);}
         finally{if(active==null)POLICY_CALLBACK.remove();else POLICY_CALLBACK.set(active);}
     }
+    private static Object arrayMutation(Object array,int index,int length){
+        // A miss only omits an unneeded receipt. arrayAllowed still performs
+        // every live writer/value check immediately before the actual store;
+        // beginArrayMutation keeps its authority check whenever a gate is used.
+        return ControlBridge.arrayMutationReceiptRequired(array)?ControlBridge.beginArrayMutation(array,index,length):null;
+    }
     /** Checks Java array type/range even when policy withholds a store. */
     public static void arrayStore(Object array,int index,Object value) {
         int length=Array.getLength(array);if(index<0||index>=length)throw new ArrayIndexOutOfBoundsException(index);
         Class<?> component=array.getClass().getComponentType();
         if(!component.isPrimitive()&&value!=null&&!component.isInstance(value))throw new ArrayStoreException(value.getClass().getName());
-        Object gate=ControlBridge.beginArrayMutation(array,index,1);
+        Object gate=arrayMutation(array,index,1);
         boolean written=false;try {if(arrayAllowed(array,index,value)){Array.set(array,index,value);written=true;}}finally {ControlBridge.finishFieldMutation(gate,written);}
     }
     public static void intStore(Object array,int index,int value) {
         int[] values=(int[])array;int prior=values[index];int next=(int)value;
-        Object gate=ControlBridge.beginArrayMutation(array,index,1);
+        Object gate=arrayMutation(array,index,1);
         boolean written=false;try {if(arrayAllowed(array,index,Integer.valueOf(next))){values[index]=next;written=true;}}finally {ControlBridge.finishFieldMutation(gate,written);}
     }
     public static void longStore(Object array,int index,long value) {
         long[] values=(long[])array;long prior=values[index];long next=(long)value;
-        Object gate=ControlBridge.beginArrayMutation(array,index,1);
+        Object gate=arrayMutation(array,index,1);
         boolean written=false;try {if(arrayAllowed(array,index,Long.valueOf(next))){values[index]=next;written=true;}}finally {ControlBridge.finishFieldMutation(gate,written);}
     }
     public static void floatStore(Object array,int index,float value) {
         float[] values=(float[])array;float prior=values[index];float next=(float)value;
-        Object gate=ControlBridge.beginArrayMutation(array,index,1);
+        Object gate=arrayMutation(array,index,1);
         boolean written=false;try {if(arrayAllowed(array,index,Float.valueOf(next))){values[index]=next;written=true;}}finally {ControlBridge.finishFieldMutation(gate,written);}
     }
     public static void doubleStore(Object array,int index,double value) {
         double[] values=(double[])array;double prior=values[index];double next=(double)value;
-        Object gate=ControlBridge.beginArrayMutation(array,index,1);
+        Object gate=arrayMutation(array,index,1);
         boolean written=false;try {if(arrayAllowed(array,index,Double.valueOf(next))){values[index]=next;written=true;}}finally {ControlBridge.finishFieldMutation(gate,written);}
     }
     public static void charStore(Object array,int index,int value) {
         char[] values=(char[])array;char prior=values[index];char next=(char)value;
-        Object gate=ControlBridge.beginArrayMutation(array,index,1);
+        Object gate=arrayMutation(array,index,1);
         boolean written=false;try {if(arrayAllowed(array,index,Character.valueOf(next))){values[index]=next;written=true;}}finally {ControlBridge.finishFieldMutation(gate,written);}
     }
     public static void shortStore(Object array,int index,int value) {
         short[] values=(short[])array;short prior=values[index];short next=(short)value;
-        Object gate=ControlBridge.beginArrayMutation(array,index,1);
+        Object gate=arrayMutation(array,index,1);
         boolean written=false;try {if(arrayAllowed(array,index,Short.valueOf(next))){values[index]=next;written=true;}}finally {ControlBridge.finishFieldMutation(gate,written);}
     }
     public static void byteStore(Object array,int index,int value) {
         if(array instanceof byte[] bytes&&FrameworkBuffers.scratch(bytes)){bytes[index]=(byte)value;return;}
         if(array instanceof boolean[] values) {boolean prior=values[index],next=(value&1)!=0;
-            Object gate=ControlBridge.beginArrayMutation(array,index,1);boolean written=false;try {if(arrayAllowed(array,index,Boolean.valueOf(next))){values[index]=next;written=true;}}finally {ControlBridge.finishFieldMutation(gate,written);}}
+            Object gate=arrayMutation(array,index,1);boolean written=false;try {if(arrayAllowed(array,index,Boolean.valueOf(next))){values[index]=next;written=true;}}finally {ControlBridge.finishFieldMutation(gate,written);}}
         else {byte[] values=(byte[])array;byte prior=values[index],next=(byte)value;
-            Object gate=ControlBridge.beginArrayMutation(array,index,1);boolean written=false;try {if(arrayAllowed(array,index,Byte.valueOf(next))){values[index]=next;written=true;}}finally {ControlBridge.finishFieldMutation(gate,written);}}
+            Object gate=arrayMutation(array,index,1);boolean written=false;try {if(arrayAllowed(array,index,Byte.valueOf(next))){values[index]=next;written=true;}}finally {ControlBridge.finishFieldMutation(gate,written);}}
     }
     public static void copy(Object source,int from,Object target,int to,int count) {
         if(source==null||target==null)throw new NullPointerException();

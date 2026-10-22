@@ -2303,6 +2303,20 @@ public final class AuditFixCheck {
             require(!closed.getBoolean(receipt),"reflection changed intrinsic receipt state");
         }
         Object original=actual[0];
+        Method arrayStore=Class.forName("dev.ronova.pro.bootstrap.BackingBridge",true,null)
+                .getMethod("arrayStore",Object.class,int.class,Object.class);
+        Object[] ordinary=new Object[1];Object marker=new Object();arrayStore.invoke(null,ordinary,0,marker);
+        require(ordinary[0]==marker,"actual ordinary array store failed through receipt preflight");
+        try{arrayStore.invoke(null,actual,0,null);}catch(InvocationTargetException refused){
+            require(refused.getCause() instanceof SecurityException||refused.getCause() instanceof IllegalStateException,
+                    "protected array adapter failed outside its actual write guard: "+refused.getCause());}
+        require(actual[0]==original,"receipt preflight admitted actual control array store");
+        Method beginArray=bridge.getMethod("beginArrayMutation",Object.class,int.class,int.class);
+        for(Object array:new Object[]{ordinary,actual}){
+            try{beginArray.invoke(null,array,0,1);throw new AssertionError("foreign direct array receipt acquired controller authority");}
+            catch(InvocationTargetException refused){require(refused.getCause() instanceof SecurityException,
+                    "direct receipt API lost its caller authority check: "+refused.getCause());}
+        }
         try{Array.set(actual,0,null);}catch(SecurityException refused){ }
         require(actual[0]==original,"actual protected transformer array changed");
         Method raw=bridge.getDeclaredMethod("rawMemoryCaller");raw.setAccessible(true);
@@ -2316,7 +2330,7 @@ public final class AuditFixCheck {
             U.copyMemory(null,address,bytes,base,8);
             require(U.getLong(bytes,base)==0x1020304050607080L,"actual Unsafe raw-to-heap copy changed bytes");
         }finally{U.freeMemory(address);}
-        System.out.println("LIVE_CONTROL_WRITER_PASS actual_native foreign_caller_refused protected_array_preserved intrinsic_receipts_preserved foreign_raw_reader_refused actual_unsafe_raw_copy");
+        System.out.println("LIVE_CONTROL_WRITER_PASS actual_native foreign_caller_refused protected_array_preserved intrinsic_receipts_preserved foreign_raw_reader_refused actual_unsafe_raw_copy ordinary_array_preflight actual_control_array_store_refused direct_receipt_authority_preserved");
     }
     private static void systemArraycopy()throws Exception {
         Class<?> nativeControl=Class.forName("dev.ronova.pro.bootstrap.NativeControl",true,null);

@@ -1,5 +1,15 @@
 # Ronova Pro 当前进度
 
+## 2026-10-22：按用户要求暂停；40 未进世界，41 仅构建
+
+attempt-40 使用原 PCL 实例、原完整 Mod 集合和真实启动参数。实际达到 premain INSTALLED_FULL、Native FULL、客户端资源加载、IntegratedServer 启动和主世界出生区准备，08:44:11 最后记录出生区 0%；尚无玩家入场、ProRuntime 稳定世界 Tick 或正常保存退出通过。Bootstrap 待安装边界及 Native 来源/租约缺口仍保留，stderr 仍有 VirtualFree BUSY，不能标为已修复。
+
+真实线程栈中，早期绘制已不再等待旧 ControlRegistry 读取监视器，但任务创建仍有来源登记开销，客户端缓冲读取仍频繁进入内存控制和调用者查询。按用户“这轮进不去就停一下”，保留最后线程栈、日志和独立测试存档；窗口激活超时后，仅结束路径及原始 UTC 创建时间匹配的本轮 JVM，08:45:26 监控确认退出 -1。这是人为结束未完成的测试，不是游戏自行崩溃或干净保存退出通过。没有启动下一轮。
+
+候选 41 已完成同一热点工作包：普通数组写先查询原回执相关性，实际元素写守卫和公开回执入口的调用者权限仍保留；任务来源捕获仅在本次完整物理栈已遍历且为空时省去重复查询，部分/作用域入口继续原回退；Native 内存入口对实际最近调用类为 ResourceBridge/CodeSourceBridge 的情况使用短栈查询，未命中继续原完整 Java 选择器，保留真实来源、控制区、在途作用域和退场校验。没有来源/许可缓存或 Mod 白名单。
+
+最终双 JAR 构建成功（1 分钟），既有 AuditFixCheck 的实际数组写断言已补齐并编译，但候选 41 没有运行小检查、起服或客户端，不能沿用候选 40 的检查结果。Git 分发目录更新为候选 41；PCL 安装仍是候选 40，未部署 41，也未为 41 重建启动参数。当前执行暂停，世界验收仍未完成。
+
 ## 2026-10-22：恢复实机，候选 40 修复控制目录读取的实际锁竞争
 
 按用户“继续测试”恢复原 PCL/完整原 Mod 集合及真实 82 项参数，独立世界先备份。候选 39 实际 premain INSTALLED_FULL、Native FULL；Bootstrap 仍有 ForkJoinTask$Aux/FutureTask$WaitNode 待安装边界，未混记全平台 FULL。真实 Java 栈确认早期绘制 SimpleBufferBuilder 字段写在等待 ControlRegistry，同一时刻类变换线程持有该目录监视器，经 ExternalCodeImages.snapshot 批量登记控制身份并逐项通知 Native。匹配符号的原生读取另确认 Owner 仅 11 项、控制区 AVL 高度 18，没有把普通递归帧误记为退化树。

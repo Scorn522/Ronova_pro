@@ -131,7 +131,7 @@ public final class ControlBridge {
     static final Module[] NO_SOURCES=new Module[0];
     private static final ThreadLocal<SourceQuery> SOURCE_QUERIES=new ThreadLocal<>();
     private static final class SourceQuery {
-        final Thread thread=Thread.currentThread();Module[] partial=NO_SOURCES;
+        final Thread thread=Thread.currentThread();Module[] partial=NO_SOURCES;boolean physicalComplete;
         void retain(Module[] incoming){
             if(incoming==null||incoming.length==0)return;int additions=0;
             for(int i=0;i<incoming.length;i++){
@@ -261,6 +261,7 @@ public final class ControlBridge {
                 sources=producerRootSources(frame);if(sources.length!=0)return retainQuerySources(sources);
                 Module physical=DefinitionBridge.module(frame.getDeclaringClass());if(producer(physical))return retainQuerySources(new Module[]{physical});
             }
+            SourceQuery query=SOURCE_QUERIES.get();if(query!=null)query.physicalComplete=true;
             Frame task=CURRENT.get();
             if(task==null||task.exited||DELIVERING.get()!=null||CREATION_DELIVERY.get()!=null||PRODUCER_DELIVERY.get()!=null||OWN_LEDGER_MUTATION.get()!=null)return NO_SOURCES;
             retainQuerySources(task.sources);
@@ -619,6 +620,16 @@ public final class ControlBridge {
     static Module[] invokingSources(){
         return invokingSources(NO_SOURCES);
     }
+    record TaskInvocation(Module[] sources,boolean physicalComplete) { }
+    static TaskInvocation taskInvocation(){
+        SourceQuery active=SOURCE_QUERIES.get();if(active!=null)return new TaskInvocation(active.partial,false);
+        Module[] framework=FrameworkBuffers.bufferSources();if(framework!=null)return new TaskInvocation(framework,false);
+        SourceQuery query=beginSourceQuery(NO_SOURCES);
+        try{return new TaskInvocation(querySources(),query.physicalComplete);}finally{endSourceQuery(query);}
+    }
+    private static Module[] querySources(){
+        Module[] scoped=scopedSources();return scoped.length!=0?scoped:sourceFrameWalk();
+    }
     private static Module[] invokingSources(Module[] retained){
         SourceQuery active=SOURCE_QUERIES.get();if(active!=null){active.retain(retained);return active.partial;}
         Module[] framework=FrameworkBuffers.bufferSources();
@@ -630,10 +641,7 @@ public final class ControlBridge {
             try{query.retain(framework);return query.partial;}finally{endSourceQuery(query);}
         }
         SourceQuery query=beginSourceQuery(retained);
-        try{
-            Module[] scoped=scopedSources();if(scoped.length!=0)return scoped;
-            return sourceFrameWalk();
-        }finally{endSourceQuery(query);}
+        try{return querySources();}finally{endSourceQuery(query);}
     }
     static boolean sourceUnknown(){
         SourceQuery query=SOURCE_QUERIES.get();
@@ -987,6 +995,7 @@ public final class ControlBridge {
             // Field-write entry wrappers are still live at the policy query;
             // they must not lend their own controller identity to that write.
             "beginFieldMutation","staticFieldMutation","beginOwnStaticFieldMutation","beginStaticFieldMutation",
+            "arrayMutationReceiptRequired","taskInvocation","querySources","rawMemoryCallerClassFast",
             "beginNativeUnsafeMutation","beginExecutedUnsafeMutation","beginNativeUnsafeCopy","beginNativeFieldMutation","beginNativeArrayMutation","beginNativeArrayCopyRead","beginNativeArrayCopy",
             "indexDenied","indexRemovalAllowed","indexWriteAllowed","beginIndexArrayWrite","beginIndexArrayRemoval","beginIndexStructure","endIndexMutation",
             "registerConsoleInput","beginConsoleCommand","endConsoleCommand","consoleDispatchTrusted",
@@ -1933,6 +1942,10 @@ public final class ControlBridge {
         try{return new FieldMutation(gate,receiver);}
         catch(RuntimeException|Error failure){gate.unlock();throw failure;}
     }
+    /** Read-only preflight. It grants no writer identity or element permission. */
+    static boolean arrayMutationReceiptRequired(Object receiver){
+        return receiver==null||fieldMutationReceiptRequired(receiver,receiver.getClass());
+    }
     static Module[] mutationSources(Module[] nativeSources){
         Objects.requireNonNull(nativeSources);
         Set<Module> sources=addModuleSources(null,invokingSources(nativeSources),false);
@@ -2171,6 +2184,10 @@ public final class ControlBridge {
         if(caller==ResourceBridge.class||caller==CodeSourceBridge.class||caller!=null&&caller.getClassLoader()==null&&caller.getNestHost()==ExecutionFlow.class||ControlBridge.owns(caller))return true;
         if(UnsafeWriters.contains(caller))return true;
         return caller!=null&&caller.getClassLoader()==null&&HandleWriters.roots.contains(caller.getNestHost());
+    }
+    /** Native supplies the actual first non-bridge frame, never a claimed role. */
+    static boolean rawMemoryCallerClassFast(Class<?> caller){
+        return caller==ResourceBridge.class||caller==CodeSourceBridge.class;
     }
     public static boolean unsafeControlScope(){
         if(!NativeControl.unsafeControlScope())return false;

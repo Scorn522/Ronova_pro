@@ -105,7 +105,12 @@ public final class TaskBridge {
     }
     static void taskRelation(Object task,Object scheduler,Object parent) {
         if(task==null)return;
-        Module[] actual=invokingSources();Module direct=actual.length==1?actual[0]:actual.length==0?invokingModule():null;if(direct==null&&actual.length==0&&parent!=null)direct=objectModule(parent);
+        TaskInvocation capture=taskInvocation();Module[] actual=capture.sources();
+        // A fully traversed empty physical stack already answered this same
+        // producer question. Scoped/partial shortcuts still take the original
+        // fallback; no origin or permission is retained across task captures.
+        Module direct=actual.length==1?actual[0]:actual.length==0&&!capture.physicalComplete()?invokingModule():null;
+        if(direct==null&&actual.length==0&&parent!=null)direct=objectModule(parent);
         if(direct==null&&task.getClass().getClassLoader()!=null)direct=task.getClass().getModule();
         synchronized(CREATION_OWNERS) {
             reapCreationOwners();EventKey key=new EventKey(task,CREATION_QUEUE);

@@ -5,6 +5,42 @@ typedef struct NativeMemoryWrite {
     OwnerLink *sources;uint64_t address,length;int reading,unknown;
     struct NativeMemoryWrite *previous;
 } NativeMemoryWrite;
+static jclass native_memory_bridge;
+static jmethodID native_memory_class_gate;
+static int native_memory_prepare(JNIEnv *env){
+    if(native_memory_bridge&&native_memory_class_gate)return 1;
+    native_memory_class_gate=native_original.GetStaticMethodID(env,native_controls,"rawMemoryCallerClassFast","(Ljava/lang/Class;)Z");
+    jclass declaring=NULL;
+    if(!native_memory_gate||!native_memory_class_gate||native_original.ExceptionCheck(env)
+            ||(*native_ti)->GetMethodDeclaringClass(native_ti,native_memory_gate,&declaring)!=JVMTI_ERROR_NONE||!declaring)return 0;
+    native_memory_bridge=(jclass)native_original.NewGlobalRef(env,declaring);native_original.DeleteLocalRef(env,declaring);
+    return native_memory_bridge&&!native_original.ExceptionCheck(env);
+}
+static int native_memory_prefix_authority(JNIEnv *env){
+    NativeThread *state=native_tls==TLS_OUT_OF_INDEXES?NULL:(NativeThread*)TlsGetValue(native_tls);
+    if(!state||!native_jni_ready||!native_memory_bridge||!native_memory_class_gate
+            ||host_tls_restricted(state)||state->tooling||state->library||host_loader_callout())return 0;
+    /* A complete nearest-writer answer can fit in this C stack prefix. No Java
+     * frame objects, heap allocation or authority cache is needed. A hidden,
+     * reflective, deeper, unsupported or refused candidate takes the original
+     * unlimited Java selector; eight frames are never a source-search limit.
+     * GetStackTrace is not callback-safe, so restricted scopes stay on the
+     * original path above. */
+    jvmtiFrameInfo frames[8];jint count=0;int allowed=0;state->control++;
+    if((*native_ti)->GetStackTrace(native_ti,NULL,0,8,frames,&count)==JVMTI_ERROR_NONE){
+        for(jint i=0;i<count;i++){
+            jclass declaring=NULL;
+            if((*native_ti)->GetMethodDeclaringClass(native_ti,frames[i].method,&declaring)!=JVMTI_ERROR_NONE||!declaring)break;
+            int bridge=native_original.IsSameObject(env,declaring,native_controller)
+                    ||native_original.IsSameObject(env,declaring,native_controls)
+                    ||native_original.IsSameObject(env,declaring,native_memory_bridge);
+            if(!bridge)allowed=native_original.CallStaticBooleanMethod(env,native_controls,native_memory_class_gate,declaring)==JNI_TRUE;
+            native_original.DeleteLocalRef(env,declaring);
+            if(!bridge||native_original.ExceptionCheck(env))break;
+        }
+    }
+    state->control--;return allowed&&!native_original.ExceptionCheck(env);
+}
 
 static int native_memory_sources(JNIEnv *env,NativeThread *state,jobjectArray supplied,OwnerLink **sources,int *unknown,int javaCaptured){
     if(javaCaptured){
@@ -25,7 +61,9 @@ static int native_memory_sources(JNIEnv *env,NativeThread *state,jobjectArray su
     ReleaseSRWLockExclusive(&native_records);return ready&&!native_original.ExceptionCheck(env);
 }
 static int native_memory_authority(JNIEnv *env,jclass type){
-    return native_controller&&native_original.IsSameObject(env,type,native_controller)&&native_memory_gate
+    if(!native_controller||!native_original.IsSameObject(env,type,native_controller)||!native_memory_gate)return 0;
+    if(native_memory_prefix_authority(env))return 1;
+    return !native_original.ExceptionCheck(env)
             &&native_original.CallStaticBooleanMethod(env,native_controls,native_memory_gate)&&!native_original.ExceptionCheck(env);
 }
 static int native_memory_control(JNIEnv *env,NativeThread *state,uint64_t address,uint64_t bytes){
