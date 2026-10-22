@@ -17,7 +17,7 @@ typedef DWORD (WINAPI *HostFlsAlloc)(HostFlsCallback);
 typedef struct HostTlsLease {
     OwnerLink *owners;jobjectArray strong;HostLibraryLoad *load;
     struct HostThreadWorker *worker;void *tooling,*tls;
-    LONG references;int unknown,complete,releasing;
+    LONG references;int unknown,complete,releasing,queued;
     struct HostTlsLease *next;
 } HostTlsLease;
 typedef struct HostTlsLeaseLink {HostTlsLease *lease;LONG references;struct HostTlsLeaseLink *next;} HostTlsLeaseLink;
@@ -25,39 +25,47 @@ typedef struct HostTlsSources {OwnerLink *owners;HostTlsLeaseLink *leases;int un
 typedef struct HostTlsSlot HostTlsSlot;
 typedef struct HostTlsActivation {HostTlsSlot *slot;struct HostTlsActivation *previous;} HostTlsActivation;
 typedef struct HostTlsThread {
-    uint64_t generation;HANDLE monitor;HostTlsSources observed;
-    HostTlsActivation *activation;int ended,gap,releasing,reaped;
-    struct HostTlsValue *values;
-    struct HostTlsThread *next;
+    uint64_t generation,observedEpoch;HANDLE monitor;HostTlsSources observed;
+    HostTlsActivation *activation;int ended,gap,releasing,reaped,queued,polling;
+    struct HostTlsValue *values,*activeValues,*valuesTail;SIZE_T valueCount;
+    struct HostTlsThread *next,*activeNext,*monitorNext,**monitorLink;
 } HostTlsThread;
 typedef struct HostTlsFiber {
-    uint64_t generation;HostTlsThread *home;HostTlsSources observed;
-    void *fiber;int actualFiber,ended,gap,reaped;
-    struct HostTlsValue *values;
-    struct HostTlsFiber *next;
+    uint64_t generation,observedEpoch;HostTlsThread *home;HostTlsSources observed;
+    void *fiber;int actualFiber,ended,gap,reaped,queued;
+    struct HostTlsValue *values,*activeValues,*valuesTail;SIZE_T valueCount;
+    struct HostTlsFiber *next,*activeNext;
 } HostTlsFiber;
 typedef struct HostTlsValue {
     HostTlsThread *thread;HostTlsFiber *fiber;HostTlsSources sources;
-    HostTlsSlot *slot;struct HostTlsValue *contextNext;
+    HostTlsSlot *slot;struct HostTlsValue *contextNext,*workNext;
+    uint64_t revision,retainedRevision,retainedEpoch;
     uintptr_t value;int initialized,uncertain,closed;
     struct HostTlsValue *next;
 } HostTlsValue;
 typedef struct HostTlsContribution {HostTlsSources sources;uintptr_t value;int valueReceipt;struct HostTlsContribution *next;} HostTlsContribution;
 typedef struct HostTlsOperation {HostTlsSources *sources;uintptr_t value;int freeing,setting;struct HostTlsOperation *next;} HostTlsOperation;
 struct HostTlsSlot {
-    uint64_t generation;DWORD index;int fls,observed,live,uncertain,gap,cleanupGap,reaped;
+    uint64_t generation;DWORD index;int fls,observed,live,uncertain,gap,cleanupGap,reaped,queued,releasing;
     LONG busy,callbacks,borrowers;int closing;
     HostTlsSources allocation,aggregate;HostTlsValue *values;
     HostTlsContribution *contributions;HostTlsOperation *operations;
     HostFlsCallback callback;void *adapter;HMODULE provider,pin;void *providerAnchor;
-    RUNTIME_FUNCTION unwind;struct HostTlsSlot *next;
+    RUNTIME_FUNCTION unwind;struct HostTlsSlot *next,*activeNext,*liveNext,**liveLink;
 };
 typedef struct HostTlsBorrow {HostTlsSources sources;HostLibraryLoad *load;struct HostThreadWorker *worker;void *tooling;} HostTlsBorrow;
 static SRWLOCK host_tls_records=SRWLOCK_INIT;
 static HostTlsSlot *host_tls_slots;
 static HostTlsThread *host_tls_threads;
 static HostTlsFiber *host_tls_fibers;
-static HostTlsLease *host_tls_leases;
+static HostTlsThread *host_tls_active_threads,*host_tls_threads_tail,*host_tls_monitors;
+static HostTlsFiber *host_tls_active_fibers,*host_tls_fibers_tail;
+static HostTlsSlot *host_tls_active_slots,*host_tls_slots_tail;
+static HostTlsSlot *host_tls_live_slots;
+static HostTlsLease *host_tls_retired_leases,*host_tls_retired_tail;
+static SIZE_T host_tls_thread_count,host_tls_fiber_count,host_tls_slot_count,host_tls_polling;
+static SIZE_T host_tls_thread_scan,host_tls_fiber_scan,host_tls_slot_scan;
+static int host_tls_cleanup_retry;
 static uint64_t host_tls_generation;
 static DWORD host_tls_thread_key=TLS_OUT_OF_INDEXES,host_tls_fiber_key=FLS_OUT_OF_INDEXES;
 static volatile LONG host_tls_ready;
@@ -136,8 +144,16 @@ static int host_tls_cover(OwnerLink *retained,OwnerLink *actual){
 }
 /* All source-container operations below hold host_tls_records. They only copy
  * already captured links/leases; none enter a loader, VM, or Host directory. */
+static void host_tls_lease_drop(HostTlsLease *lease){
+    if(!--lease->references&&!lease->queued&&!lease->releasing){
+        lease->queued=1;lease->next=NULL;
+        if(host_tls_retired_tail)host_tls_retired_tail->next=lease;else host_tls_retired_leases=lease;
+        host_tls_retired_tail=lease;
+        native_thread_worker_wake();
+    }
+}
 static void host_tls_links_drop(HostTlsLeaseLink *p){
-    while(p&&!--p->references){HostTlsLeaseLink *next=p->next;p->lease->references--;free(p);p=next;}
+    while(p&&!--p->references){HostTlsLeaseLink *next=p->next;host_tls_lease_drop(p->lease);free(p);p=next;}
 }
 static void host_tls_sources_clear(HostTlsSources *sources){
     native_owner_links_free(sources->owners);sources->owners=NULL;
@@ -200,6 +216,30 @@ static int host_tls_slot_sources(HostTlsSources *to,const HostTlsSlot *slot,int 
         if(p->sources&&!host_tls_sources_merge(to,p->sources))ready=0;
     return ready;
 }
+/* Historical identities remain published for reporting/callback tombstones.
+ * These separate queues contain only contexts or slots not yet settled. */
+static void host_tls_thread_schedule(HostTlsThread *thread){
+    if(thread->queued||thread->reaped)return;thread->queued=1;thread->activeNext=NULL;
+    if(host_tls_threads_tail)host_tls_threads_tail->activeNext=thread;else host_tls_active_threads=thread;
+    host_tls_threads_tail=thread;host_tls_thread_count++;
+}
+static void host_tls_fiber_schedule(HostTlsFiber *fiber){
+    if(fiber->queued||fiber->reaped)return;fiber->queued=1;fiber->activeNext=NULL;
+    if(host_tls_fibers_tail)host_tls_fibers_tail->activeNext=fiber;else host_tls_active_fibers=fiber;
+    host_tls_fibers_tail=fiber;host_tls_fiber_count++;
+}
+static void host_tls_slot_schedule(HostTlsSlot *slot){
+    if(slot->queued||slot->reaped||slot->live)return;slot->queued=1;slot->activeNext=NULL;
+    if(host_tls_slots_tail)host_tls_slots_tail->activeNext=slot;else host_tls_active_slots=slot;
+    host_tls_slots_tail=slot;host_tls_slot_count++;
+}
+static void host_tls_slot_live(HostTlsSlot *slot,int live){
+    slot->live=live;
+    if(live&&!slot->liveLink){slot->liveNext=host_tls_live_slots;slot->liveLink=&host_tls_live_slots;
+        if(host_tls_live_slots)host_tls_live_slots->liveLink=&slot->liveNext;host_tls_live_slots=slot;}
+    else if(!live&&slot->liveLink){*slot->liveLink=slot->liveNext;
+        if(slot->liveNext)slot->liveNext->liveLink=slot->liveLink;slot->liveNext=NULL;slot->liveLink=NULL;}
+}
 static int host_tls_prepare(void){
     LONG ready=InterlockedCompareExchange(&host_tls_ready,0,0);if(ready==1)return 1;
     if(ready||InterlockedCompareExchange(&host_tls_ready,2,0)){SetLastError(ERROR_BUSY);return 0;}
@@ -233,7 +273,11 @@ static HostTlsThread *host_tls_thread_get(int restricted){
             &monitor,SYNCHRONIZE,FALSE,0);DWORD error=copied?0:GetLastError();
     if(copied&&!TlsSetValue(host_tls_thread_key,thread)){error=GetLastError();host_real_close(monitor);copied=FALSE;}
     if(copied){AcquireSRWLockExclusive(&host_tls_records);thread->generation=++host_tls_generation;
-        thread->monitor=monitor;thread->next=host_tls_threads;host_tls_threads=thread;ReleaseSRWLockExclusive(&host_tls_records);}
+        thread->monitor=monitor;thread->next=host_tls_threads;host_tls_threads=thread;
+        thread->monitorNext=host_tls_monitors;thread->monitorLink=&host_tls_monitors;
+        if(host_tls_monitors)host_tls_monitors->monitorLink=&thread->monitorNext;host_tls_monitors=thread;
+        thread->polling=1;host_tls_polling++;host_tls_thread_schedule(thread);
+        ReleaseSRWLockExclusive(&host_tls_records);}
     ReleaseSRWLockExclusive(&host_tls_handles);
     if(!copied){free(thread);SetLastError(error?error:ERROR_INVALID_STATE);return NULL;}
     native_thread_worker_wake();return thread;
@@ -257,7 +301,8 @@ static HostTlsFiber *host_tls_fiber_get(HostTlsThread *thread,int restricted){
      * address alone can never select this record for a replacement fiber. */
     if(!FlsSetValue(host_tls_fiber_key,fiber)){DWORD error=GetLastError();free(fiber);SetLastError(error);return NULL;}
     AcquireSRWLockExclusive(&host_tls_records);fiber->generation=++host_tls_generation;
-    fiber->next=host_tls_fibers;host_tls_fibers=fiber;ReleaseSRWLockExclusive(&host_tls_records);return fiber;
+    fiber->next=host_tls_fibers;host_tls_fibers=fiber;host_tls_fiber_schedule(fiber);
+    ReleaseSRWLockExclusive(&host_tls_records);return fiber;
 }
 static void WINAPI host_tls_fiber_end(PVOID data){
     DWORD incoming=GetLastError();HostTlsFiber *fiber=(HostTlsFiber*)data;
@@ -359,8 +404,7 @@ static HostTlsLease *host_tls_lease_prepare(NativeThread *state,OwnerLink *owner
     }
     /* Retain even a partial lease as an explicit gap, rather than forgetting
      * an observed source because its weak Java identity later disappears. */
-    AcquireSRWLockExclusive(&host_tls_records);lease->next=host_tls_leases;host_tls_leases=lease;
-    ReleaseSRWLockExclusive(&host_tls_records);return lease;
+    return lease;
 }
 static int host_tls_callback_sources(NativeThread *state,void *callback,OwnerLink **owners,int *unknown,int restricted,HostLibraryLoad **selected){
     if(!restricted){int ready=host_capture_caller_detail(state,callback,owners,unknown,selected);
@@ -370,7 +414,7 @@ static int host_tls_callback_sources(NativeThread *state,void *callback,OwnerLin
     if(!ready)SetLastError(error);return ready;
 }
 static HostTlsSlot *host_tls_slot_find(int fls,DWORD index){
-    for(HostTlsSlot *slot=host_tls_slots;slot;slot=slot->next)if(slot->live&&slot->fls==fls&&slot->index==index)return slot;return NULL;
+    for(HostTlsSlot *slot=host_tls_live_slots;slot;slot=slot->liveNext)if(slot->fls==fls&&slot->index==index)return slot;return NULL;
 }
 static HostTlsValue *host_tls_value_find(HostTlsSlot *slot,HostTlsThread *thread,HostTlsFiber *fiber){
     for(HostTlsValue *value=slot->values;value;value=value->next)
@@ -468,7 +512,8 @@ static uint64_t host_native_tls(HostImport *entry,void *caller,uintptr_t *argume
         host_tls_refused(&refusal);
         native_owner_links_free(owners);return host_tls_failure(kind,error,incoming);}
     HostTlsSlot *slot=NULL;HostTlsValue *value=NULL;HostTlsLease *lease=NULL;HostTlsThread *thread=NULL;HostTlsFiber *fiber=NULL;
-    HostTlsSources prepared={0},aggregation={0},exposure={0};HostTlsContribution *contribution=NULL;
+    HostTlsSources prepared={0},aggregation={0};HostTlsContribution *contribution=NULL;
+    OwnerLink *readOwners=NULL;uint64_t readRevision=0,readEpoch=0;
     HostTlsOperation operation={0};uint64_t result=allocating?(uint64_t)(DWORD)TLS_OUT_OF_INDEXES:0;
     int reserved=0,called=0,returned=0,success=0,published=0;const char *failure="preparation";
     __try {
@@ -530,7 +575,7 @@ static uint64_t host_native_tls(HostImport *entry,void *caller,uintptr_t *argume
                     if(!slot){slot=(HostTlsSlot*)calloc(1,sizeof(*slot));
                         if(!slot)error=ERROR_NOT_ENOUGH_MEMORY;
                         else {slot->fls=fls;slot->index=index;slot->generation=++host_tls_generation;
-                            slot->live=1;slot->uncertain=slot->gap=1;slot->next=host_tls_slots;host_tls_slots=slot;published=1;}}
+                            host_tls_slot_live(slot,1);slot->uncertain=slot->gap=1;slot->next=host_tls_slots;host_tls_slots=slot;published=1;}}
                     else published=1;
                     /* Unknown public carriers may use ordinary per-context OS
                      * storage, never a slot bearing a captured Mod source.
@@ -563,10 +608,14 @@ static uint64_t host_native_tls(HostImport *entry,void *caller,uintptr_t *argume
                                 if(value&&!host_tls_sources_merge(&value->sources,&slot->allocation)){
                                     host_tls_sources_clear(&value->sources);free(value);value=NULL;}
                                 if(value){
-                                    value->thread=thread;value->fiber=fiber;value->slot=slot;
+                                    value->thread=thread;value->fiber=fiber;value->slot=slot;value->revision=1;
                                     value->next=slot->values;slot->values=value;
-                                    if(fls){value->contextNext=fiber->values;fiber->values=value;}
-                                    else {value->contextNext=thread->values;thread->values=value;}
+                                    if(fls){value->contextNext=fiber->values;fiber->values=value;
+                                        if(fiber->valuesTail)fiber->valuesTail->workNext=value;else fiber->activeValues=value;
+                                        fiber->valuesTail=value;fiber->valueCount++;}
+                                    else {value->contextNext=thread->values;thread->values=value;
+                                        if(thread->valuesTail)thread->valuesTail->workNext=value;else thread->activeValues=value;
+                                        thread->valuesTail=value;thread->valueCount++;}
                                 }
                                 else error=ERROR_NOT_ENOUGH_MEMORY;}
                         }
@@ -589,10 +638,21 @@ static uint64_t host_native_tls(HostImport *entry,void *caller,uintptr_t *argume
                         }
                         if(!error&&getting){
                             HostTlsSources *observed=fls?&fiber->observed:&thread->observed;
-                            if(!host_tls_sources_merge(&exposure,observed)
-                                    ||!host_tls_sources_merge(&exposure,&value->sources))error=ERROR_NOT_ENOUGH_MEMORY;
-                            if(!slot->observed||slot->uncertain)exposure.unknown=1;
-                            if(!error&&native_owner_stopped(exposure.owners))error=ERROR_ACCESS_DENIED;
+                            uint64_t epoch=fls?fiber->observedEpoch:thread->observedEpoch;
+                            int current=!thread->ended&&!thread->gap&&(!fls||!fiber->ended&&!fiber->gap);
+                            /* Only memoize collection membership in this actual
+                             * context, never a caller permission. Observation is
+                             * monotonic until real context cleanup advances its
+                             * epoch. Pre-retaining a possible read also prevents
+                             * a reentrant API hook from replacing newer history
+                             * with the stale pre-call snapshot. Failed reads get
+                             * no membership marker and may conservatively retain
+                             * facts; the original API still runs only if allowed. */
+                            if(!current||value->retainedRevision!=value->revision||value->retainedEpoch!=epoch)
+                                if(!host_tls_sources_merge(observed,&value->sources))error=ERROR_NOT_ENOUGH_MEMORY;
+                            if(!slot->observed||slot->uncertain)observed->unknown=1;
+                            readOwners=observed->owners;readRevision=value->revision;readEpoch=epoch;
+                            if(!error&&native_owner_stopped(readOwners))error=ERROR_ACCESS_DENIED;
                         }
                     }
                 }
@@ -600,7 +660,7 @@ static uint64_t host_native_tls(HostImport *entry,void *caller,uintptr_t *argume
             }
         }
         if(!error&&(native_owner_stopped(owners)||setting&&native_owner_stopped(prepared.owners)
-                ||getting&&native_owner_stopped(exposure.owners)))error=ERROR_ACCESS_DENIED;
+                ||getting&&native_owner_stopped(readOwners)))error=ERROR_ACCESS_DENIED;
         if(!error){SetLastError(incoming);called=1;result=host_tls_original(entry,arguments,slot?slot->adapter:NULL);
             error=GetLastError();returned=1;
             success=allocating?(DWORD)result!=TLS_OUT_OF_INDEXES:getting?
@@ -616,29 +676,45 @@ static uint64_t host_native_tls(HostImport *entry,void *caller,uintptr_t *argume
         if(!called){HostTlsSlot *actual=slot?slot:host_tls_slot_find(fls,index);if(actual)refusal.generation=actual->generation;}
         if(slot&&reserved){
             if(called&&!returned){slot->gap=slot->uncertain=1;if(value)value->uncertain=1;
+                if(value){value->revision++;value->retainedRevision=0;}
                 if(setting&&value){HostTlsSources before=value->sources;value->sources=prepared;prepared=before;value->sources.unknown=1;}
                 if(contribution)aggregation.unknown=1;}
             if(allocating){
-                if(returned&&success){slot->index=(DWORD)result;slot->live=1;
+                if(returned&&success){slot->index=(DWORD)result;
                     HostTlsSlot *old=host_tls_slot_find(fls,slot->index);
-                    if(old){old->live=0;if(!old->closing)old->uncertain=old->gap=1;}
+                    if(old){host_tls_slot_live(old,0);if(!old->closing)old->uncertain=old->gap=1;host_tls_slot_schedule(old);}
+                    host_tls_slot_live(slot,1);
                 }else if(called&&!returned)slot->gap=slot->uncertain=1;
                 if(!published){slot->next=host_tls_slots;host_tls_slots=slot;published=1;}
             }else if(returned&&success){
                 if(setting){HostTlsSources before=value->sources;value->sources=prepared;prepared=before;
-                    value->value=arguments[1];value->initialized=1;value->closed=0;
+                    value->value=arguments[1];value->initialized=1;value->closed=0;value->revision++;value->retainedRevision=0;
                 }else if(getting){
-                    if(!value->initialized&&result||value->initialized&&value->value!=(uintptr_t)result){
-                        value->uncertain=slot->gap=1;
-                        if(result){exposure.unknown=1;value->sources.unknown=1;}}
+                    HostTlsSources *observed=fls?&fiber->observed:&thread->observed;
+                    uint64_t actual=result;
+                    /* A foreign implementation may reenter and store a new
+                     * value during the real read. Retain that current source
+                     * revision before exposing its returned pointer. On an
+                     * allocation failure the read has no memory write to undo;
+                     * refuse the result rather than lose its source lifetime. */
+                    if(value->revision!=readRevision){
+                        if(!host_tls_sources_merge(observed,&value->sources)){
+                            error=ERROR_NOT_ENOUGH_MEMORY;result=0;success=0;
+                        }else readRevision=value->revision;
+                    }
+                    if(!value->initialized&&actual||value->initialized&&value->value!=(uintptr_t)actual){
+                        value->uncertain=slot->gap=1;value->revision++;value->retainedRevision=0;
+                        if(actual){observed->unknown=1;value->sources.unknown=1;}}
                     /* A read receipt survives Set(NULL), SlotFree, detach and
                      * subsequent index reuse. It is retired only with the real
                      * OS thread / actual FLS-context lifecycle. CPU value flow
                      * after returning the opaque pointer is still unobserved. */
-                    HostTlsSources *observed=fls?&fiber->observed:&thread->observed;
-                    HostTlsSources before=*observed;*observed=exposure;exposure=before;
-                }else if(freeing){slot->live=0;
-                    for(HostTlsValue *p=slot->values;p;p=p->next)p->closed=1;
+                    if(!slot->observed||slot->uncertain)observed->unknown=1;
+                    if(success&&value->revision==readRevision&&readEpoch==(fls?fiber->observedEpoch:thread->observedEpoch)
+                            &&!thread->ended&&!thread->gap&&(!fls||!fiber->ended&&!fiber->gap)){
+                        value->retainedRevision=readRevision;value->retainedEpoch=readEpoch;}
+                }else if(freeing){host_tls_slot_live(slot,0);
+                    for(HostTlsValue *p=slot->values;p;p=p->next){p->closed=1;p->revision++;p->retainedRevision=0;}
                     if(slot->callback){
                         /* Public FlsFree has no documented barrier for a
                          * callback already fetched by another OS thread. Keep
@@ -647,6 +723,7 @@ static uint64_t host_native_tls(HostImport *entry,void *caller,uintptr_t *argume
                     }
                 }
             }
+            if(getting&&value&&(!returned||!success))value->retainedRevision=0;
             int needsHistory=(setting||fls&&freeing)&&called&&(!returned||success),aggregateSaved=1;
             if(needsHistory){
                 aggregateSaved=host_tls_sources_add(&slot->aggregate,aggregation.owners,lease,aggregation.unknown);
@@ -658,7 +735,7 @@ static uint64_t host_native_tls(HostImport *entry,void *caller,uintptr_t *argume
                 contribution->valueReceipt=fls&&setting&&returned&&success;contribution->value=fls&&setting?arguments[1]:0;
                 contribution->next=slot->contributions;slot->contributions=contribution;contribution=NULL;
             }
-            if(!allocating&&!slot->observed&&(!called||returned&&!success))slot->live=0;
+            if(!allocating&&!slot->observed&&(!called||returned&&!success))host_tls_slot_live(slot,0);
             if(!allocating){HostTlsOperation **link=&slot->operations;
                 while(*link&&*link!=&operation)link=&(*link)->next;if(*link==&operation)*link=operation.next;
                 if(freeing)slot->closing--;}
@@ -671,9 +748,10 @@ static uint64_t host_native_tls(HostImport *entry,void *caller,uintptr_t *argume
             slot->generation=++host_tls_generation;slot->index=TLS_OUT_OF_INDEXES;
             slot->next=host_tls_slots;host_tls_slots=slot;published=1;
         }
-        host_tls_sources_clear(&prepared);host_tls_sources_clear(&aggregation);host_tls_sources_clear(&exposure);
+        if(slot&&published)host_tls_slot_schedule(slot);
+        host_tls_sources_clear(&prepared);host_tls_sources_clear(&aggregation);
         if(contribution)free(contribution);
-        if(lease)lease->references--;ReleaseSRWLockExclusive(&host_tls_records);
+        if(lease)host_tls_lease_drop(lease);ReleaseSRWLockExclusive(&host_tls_records);
         if(!called)host_tls_refused(&refusal);
         native_owner_links_free(owners);
         // Reads retain the old observation and introduce no zero-reference
@@ -688,91 +766,136 @@ static uint64_t host_native_tls(HostImport *entry,void *caller,uintptr_t *argume
 /* host_tls_handles spans the consumer's check and actual handle effect. */
 static int host_tls_internal_handle(HANDLE handle){
     int found=0;AcquireSRWLockShared(&host_tls_records);
-    for(HostTlsThread *thread=host_tls_threads;thread;thread=thread->next)
+    for(HostTlsThread *thread=host_tls_monitors;thread;thread=thread->monitorNext)
         if(thread->monitor==handle){found=1;break;}
     ReleaseSRWLockShared(&host_tls_records);return found;
 }
 static int host_tls_pending(void){
-    int pending=0;AcquireSRWLockShared(&host_tls_records);
-    for(HostTlsThread *thread=host_tls_threads;thread&&!pending;thread=thread->next)pending=thread->monitor&&!thread->gap;
-    for(HostTlsLease *lease=host_tls_leases;lease&&!pending;lease=lease->next)pending=!lease->references&&!lease->releasing;
+    AcquireSRWLockShared(&host_tls_records);
+    int pending=host_tls_polling||host_tls_retired_leases||host_tls_thread_scan||host_tls_fiber_scan
+            ||host_tls_slot_scan||host_tls_cleanup_retry;
     ReleaseSRWLockShared(&host_tls_records);return pending;
+}
+static void host_tls_values_reap(HostTlsValue **head,HostTlsValue **tail,SIZE_T *count,int fls){
+    SIZE_T limit=*count<32?*count:32;
+    while(limit--){HostTlsValue *value=*head;*head=value->workNext;if(!*head)*tail=NULL;
+        value->workNext=NULL;(*count)--;
+        if(value->slot->busy||fls&&value->slot->callbacks){
+            if(*tail)(*tail)->workNext=value;else *head=value;*tail=value;(*count)++;continue;}
+        value->closed=1;value->revision++;value->retainedRevision=0;host_tls_sources_clear(&value->sources);
+    }
+    if(*head)host_tls_cleanup_retry=1;
 }
 static void host_tls_reap(JNIEnv **environment){
     if(!environment||!*environment)return;JNIEnv *env=*environment;
     /* No new timer or enumerator: the existing retirement daemon observes only
-     * our retained actual thread handles and queued zero-reference leases. */
-    AcquireSRWLockExclusive(&host_tls_handles);AcquireSRWLockExclusive(&host_tls_records);
-    __try {
-    for(HostTlsThread *thread=host_tls_threads;thread;thread=thread->next){
-        if(thread->releasing||thread->reaped)continue;
-        if(!thread->ended){
-            if(!thread->monitor)continue;DWORD status=WaitForSingleObject(thread->monitor,0);
-            if(status!=WAIT_OBJECT_0){if(status==WAIT_FAILED)thread->gap=1;continue;}
-            thread->ended=1;
+     * our retained actual thread handles and queued zero-reference leases.
+     * A pass visits at most 32 records of each kind. Unfinished sweep counters
+     * continue fairly next time; a permanently unresolved gap cannot cause an
+     * immediate self-waking loop. Historical tombstones are never the queue. */
+    AcquireSRWLockExclusive(&host_tls_records);host_tls_cleanup_retry=0;
+    if(!host_tls_thread_scan)host_tls_thread_scan=host_tls_thread_count;
+    if(!host_tls_fiber_scan)host_tls_fiber_scan=host_tls_fiber_count;
+    if(!host_tls_slot_scan)host_tls_slot_scan=host_tls_slot_count;
+    ReleaseSRWLockExclusive(&host_tls_records);
+    for(unsigned n=0;n<32;n++){
+        /* Keep the real monitor protected through query/close and unlink; the
+         * external handle effect takes this same gate shared. Never copy a
+         * bare HANDLE out and then let another thread close/reuse it. The
+         * locks cover one context only, not a complete history walk. */
+        AcquireSRWLockExclusive(&host_tls_handles);AcquireSRWLockExclusive(&host_tls_records);
+        if(!host_tls_thread_scan){ReleaseSRWLockExclusive(&host_tls_records);ReleaseSRWLockExclusive(&host_tls_handles);break;}
+        HostTlsThread *thread=host_tls_active_threads;host_tls_thread_scan--;
+        host_tls_active_threads=thread->activeNext;if(!host_tls_active_threads)host_tls_threads_tail=NULL;
+        thread->queued=0;thread->activeNext=NULL;host_tls_thread_count--;
+        if(!thread->ended&&thread->monitor){DWORD status=WaitForSingleObject(thread->monitor,0);
+            if(status==WAIT_OBJECT_0)thread->ended=1;
+            else if(status==WAIT_FAILED)thread->gap=1;
+            if((thread->ended||status==WAIT_FAILED)&&thread->polling){thread->polling=0;host_tls_polling--;}}
+        if(thread->ended){
+            if(thread->observed.owners||thread->observed.leases||thread->observed.unknown||thread->observed.partial){
+                thread->observedEpoch++;host_tls_sources_clear(&thread->observed);}
+            host_tls_values_reap(&thread->activeValues,&thread->valuesTail,&thread->valueCount,0);
+            if(thread->monitor){
+                if(host_real_close(thread->monitor)){
+                    *thread->monitorLink=thread->monitorNext;
+                    if(thread->monitorNext)thread->monitorNext->monitorLink=thread->monitorLink;
+                    thread->monitorLink=NULL;thread->monitorNext=NULL;thread->monitor=NULL;
+                }else thread->gap=1;
+            }
+            if(!thread->activeValues&&!thread->monitor)thread->reaped=1;
         }
-        host_tls_sources_clear(&thread->observed);
-        int pending=0;
-        for(HostTlsValue *value=thread->values;value;value=value->contextNext){
-            if(value->closed&&!value->sources.owners&&!value->sources.leases&&!value->sources.unknown)continue;
-            if(value->slot->busy){pending=1;continue;}
-            value->closed=1;host_tls_sources_clear(&value->sources);
+        host_tls_thread_schedule(thread);
+        ReleaseSRWLockExclusive(&host_tls_records);ReleaseSRWLockExclusive(&host_tls_handles);
+    }
+    for(unsigned n=0;n<32;n++){
+        AcquireSRWLockExclusive(&host_tls_records);
+        if(!host_tls_fiber_scan){ReleaseSRWLockExclusive(&host_tls_records);break;}
+        HostTlsFiber *fiber=host_tls_active_fibers;host_tls_fiber_scan--;
+        host_tls_active_fibers=fiber->activeNext;if(!host_tls_active_fibers)host_tls_fibers_tail=NULL;
+        fiber->queued=0;fiber->activeNext=NULL;host_tls_fiber_count--;
+        if(fiber->home->ended){
+            // An ended home thread grants no disposal of a migrated/opaque
+            // fiber. Its actual unresolved lifetime and sources stay reported.
+            if(!fiber->ended||fiber->actualFiber||fiber->gap)fiber->gap=1;
+            else {
+                if(fiber->observed.owners||fiber->observed.leases||fiber->observed.unknown||fiber->observed.partial){
+                    fiber->observedEpoch++;host_tls_sources_clear(&fiber->observed);}
+                host_tls_values_reap(&fiber->activeValues,&fiber->valuesTail,&fiber->valueCount,1);
+                if(!fiber->activeValues)fiber->reaped=1;
+            }
         }
-        if(thread->monitor){if(host_real_close(thread->monitor))thread->monitor=NULL;else thread->gap=1;}
-        if(!pending&&!thread->monitor)thread->reaped=1;
+        host_tls_fiber_schedule(fiber);ReleaseSRWLockExclusive(&host_tls_records);
     }
-    for(HostTlsFiber *fiber=host_tls_fibers;fiber;fiber=fiber->next){
-        if(fiber->reaped||!fiber->home->ended)continue;
-        // Migrated/opaque fibers retain the same explicit lifecycle gap and
-        // source leases. An ended home thread grants no fiber disposal.
-        if(!fiber->ended||fiber->actualFiber||fiber->gap){fiber->gap=1;continue;}
-        host_tls_sources_clear(&fiber->observed);int pending=0;
-        for(HostTlsValue *value=fiber->values;value;value=value->contextNext){
-            if(value->closed&&!value->sources.owners&&!value->sources.leases&&!value->sources.unknown)continue;
-            if(value->slot->busy||value->slot->callbacks){pending=1;continue;}
-            value->closed=1;host_tls_sources_clear(&value->sources);
-        }
-        if(!pending)fiber->reaped=1;
-    }
-    for(HostTlsSlot *slot=host_tls_slots;slot;slot=slot->next){
-        if(slot->reaped||slot->live||slot->busy||slot->callbacks||slot->borrowers||slot->uncertain||slot->cleanupGap)continue;
-        if(slot->callback&&slot->index!=TLS_OUT_OF_INDEXES||slot->pin||slot->providerAnchor)continue;
-        host_tls_sources_clear(&slot->allocation);host_tls_sources_clear(&slot->aggregate);
-        HostTlsContribution *p=slot->contributions;slot->contributions=NULL;
-        while(p){HostTlsContribution *next=p->next;host_tls_sources_clear(&p->sources);free(p);p=next;}
-        slot->reaped=1;
-    }
-    } __finally {ReleaseSRWLockExclusive(&host_tls_records);ReleaseSRWLockExclusive(&host_tls_handles);}
     /* Callback adapter pages and their RUNTIME_FUNCTION remain callable
      * tombstones. A failed, unpublished allocation has no OS callback receipt. */
-    for(;;){HostTlsSlot *release=NULL;HMODULE pin=NULL;void *anchor=NULL;
+    for(unsigned n=0;n<32;n++){HostTlsSlot *release=NULL;HMODULE pin=NULL;void *anchor=NULL;
         AcquireSRWLockExclusive(&host_tls_records);
-        for(HostTlsSlot *slot=host_tls_slots;slot;slot=slot->next)
-            if(!slot->live&&!slot->busy&&!slot->callbacks&&!slot->uncertain&&slot->index==TLS_OUT_OF_INDEXES&&(slot->pin||slot->providerAnchor)){
-                release=slot;pin=slot->pin;anchor=slot->providerAnchor;slot->pin=NULL;slot->providerAnchor=NULL;break;}
-        ReleaseSRWLockExclusive(&host_tls_records);if(!release)break;
+        if(!host_tls_slot_scan){ReleaseSRWLockExclusive(&host_tls_records);break;}
+        HostTlsSlot *slot=host_tls_active_slots;host_tls_slot_scan--;
+        host_tls_active_slots=slot->activeNext;if(!host_tls_active_slots)host_tls_slots_tail=NULL;
+        slot->queued=0;slot->activeNext=NULL;host_tls_slot_count--;
+        if(!slot->live&&!slot->busy&&!slot->callbacks&&!slot->borrowers&&!slot->uncertain&&!slot->cleanupGap&&!slot->releasing){
+            if(slot->index==TLS_OUT_OF_INDEXES&&(slot->pin||slot->providerAnchor)){
+                release=slot;pin=slot->pin;anchor=slot->providerAnchor;
+                slot->pin=NULL;slot->providerAnchor=NULL;slot->releasing=1;
+            }else if(!(slot->callback&&slot->index!=TLS_OUT_OF_INDEXES)&&!slot->pin&&!slot->providerAnchor){
+                host_tls_sources_clear(&slot->allocation);host_tls_sources_clear(&slot->aggregate);
+                for(unsigned k=0;k<32&&slot->contributions;k++){
+                    HostTlsContribution *p=slot->contributions;slot->contributions=p->next;
+                    host_tls_sources_clear(&p->sources);free(p);
+                }
+                if(!slot->contributions)slot->reaped=1;else host_tls_cleanup_retry=1;
+            }
+        }
+        if(!release)host_tls_slot_schedule(slot);
+        ReleaseSRWLockExclusive(&host_tls_records);if(!release)continue;
         NativeThread *daemon=native_thread();int freed=0,pinReturned=0;
         if(daemon){NativeToolingScope scope={release->aggregate.owners,NULL,release->aggregate.unknown,daemon->depth,daemon->tooling};
             native_thread_callback_enter(daemon);daemon->tooling=&scope;
             __try {freed=!pin||host_real_free_library(pin);pinReturned=1;}
             __finally {
                 if(!pinReturned){AcquireSRWLockExclusive(&host_tls_records);release->pin=pin;release->providerAnchor=anchor;
-                    release->gap=1;ReleaseSRWLockExclusive(&host_tls_records);}
+                    release->gap=1;release->releasing=0;host_tls_slot_schedule(release);
+                    ReleaseSRWLockExclusive(&host_tls_records);}
                 daemon->tooling=scope.previous;native_thread_callback_leave(daemon);
             }
         }
         if(!freed){AcquireSRWLockExclusive(&host_tls_records);release->pin=pin;release->providerAnchor=anchor;
-            release->gap=1;ReleaseSRWLockExclusive(&host_tls_records);break;}
+            release->gap=1;release->releasing=0;host_tls_slot_schedule(release);
+            ReleaseSRWLockExclusive(&host_tls_records);break;}
         if(anchor)native_thread_worker_heap_drop(anchor);
-        AcquireSRWLockExclusive(&host_tls_records);host_tls_sources_clear(&release->allocation);host_tls_sources_clear(&release->aggregate);
+        AcquireSRWLockExclusive(&host_tls_records);release->releasing=0;host_tls_cleanup_retry=1;host_tls_slot_schedule(release);
         ReleaseSRWLockExclusive(&host_tls_records);
         if(!native_tooling_retirement_jni(environment))break;env=*environment;
     }
-    for(;;){HostTlsLease *lease=NULL;
+    if(!*environment)return;env=*environment;
+    for(unsigned n=0;n<32;n++){HostTlsLease *lease=NULL;
         AcquireSRWLockExclusive(&host_tls_records);
-        HostTlsLease **link=&host_tls_leases;
-        while(*link&&((*link)->references||(*link)->releasing))link=&(*link)->next;
-        if(*link){lease=*link;*link=lease->next;lease->releasing=1;}
+        lease=host_tls_retired_leases;
+        if(lease){host_tls_retired_leases=lease->next;if(!host_tls_retired_leases)host_tls_retired_tail=NULL;
+            lease->next=NULL;lease->queued=0;
+            if(lease->references||lease->releasing)lease=NULL;else lease->releasing=1;}
         ReleaseSRWLockExclusive(&host_tls_records);if(!lease)break;
         if(lease->strong)native_original.DeleteGlobalRef(env,lease->strong);
         host_module_load_drop(lease->load);
@@ -781,6 +904,10 @@ static void host_tls_reap(JNIEnv **environment){
         if(lease->tls)host_tls_source_drop(lease->tls);
         native_owner_links_free(lease->owners);free(lease);
     }
+    AcquireSRWLockShared(&host_tls_records);
+    int more=host_tls_thread_scan||host_tls_fiber_scan||host_tls_slot_scan||host_tls_retired_leases;
+    ReleaseSRWLockShared(&host_tls_records);
+    if(more)native_thread_worker_wake();
 }
 static int host_tls_owner_matches(OwnerLink *head,const Owner *selected,int all){
     if(all)return 1;for(;head;head=head->next)if(head->owner==selected)return 1;return 0;

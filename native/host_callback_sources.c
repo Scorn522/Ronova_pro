@@ -84,7 +84,8 @@ static int host_callback_entry_sources(HostImport *entry,NativeThread *state,voi
         SetLastError(ERROR_INVALID_STATE);return 0;
     }
     int unknown=entry->unknown;
-    int associated=host_entry_association_query(entry,state,owners,selected,&unknown),ready=associated==1;
+    HostLoadSelection selection={0};
+    int associated=host_entry_association_query(entry,state,owners,selected,&unknown,&selection),ready=associated==1;
     DWORD error=associated<0?ERROR_NOT_ENOUGH_MEMORY:associated?ERROR_INVALID_DATA:ERROR_MOD_NOT_FOUND;
     if(ready)ready=host_callback_caller_load(state,caller,owners,&unknown,&error,selectedLoad);
     if(ready)ready=host_callback_scopes_locked(state,owners,&unknown,&error,roots);

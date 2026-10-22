@@ -743,7 +743,13 @@ static int host_library_current(NativeLibrary *library,HMODULE image){
             &&InterlockedCompareExchange(&library->complete,0,0)
             &&!InterlockedCompareExchange(&library->closing,0,0);
 }
-static int host_entry_association_query(HostImport *entry,NativeThread *state,OwnerLink **owners,NativeLibrary **selected,int *unknown){
+typedef struct HostLoadSelection {int queried,status;HostLibraryLoad *load;} HostLoadSelection;
+static int host_entry_select_load(HostImport *entry,NativeThread *state,OwnerLink **owners,int *unknown,HostLoadSelection *selection){
+    if(!selection->queried){selection->queried=1;
+        selection->status=host_module_select_locked(entry->image,state,entry->load,owners,&selection->load,unknown);}
+    return selection->status;
+}
+static int host_entry_association_query(HostImport *entry,NativeThread *state,OwnerLink **owners,NativeLibrary **selected,int *unknown,HostLoadSelection *selection){
     /* Both source directories are locked by the caller. A returned API pointer
      * retains the resolving call's sources, never a cached permission. */
     int associated=0,ready=!owners||native_owner_merge(owners,entry->sources),mixed=0;
@@ -793,7 +799,7 @@ static int host_entry_association_query(HostImport *entry,NativeThread *state,Ow
             }
         }
         if(!associated&&!entry->library&&entry->image->loads){
-            int child=host_module_select_locked(entry->image,state,entry->load,owners,NULL,unknown);
+            int child=host_entry_select_load(entry,state,owners,unknown,selection);
             if(child){associated=1;ready=ready&&child==1;}
         }
         if(!associated&&!entry->library){
@@ -813,14 +819,14 @@ static int host_entry_association_query(HostImport *entry,NativeThread *state,Ow
         }
     }
     if(!associated&&!entry->library){
-        int child=host_module_select_locked(entry->image,state,entry->load,owners,NULL,unknown);
+        int child=host_entry_select_load(entry,state,owners,unknown,selection);
         if(child){associated=1;ready=ready&&child==1;}
     }
     if(selected)*selected=mixed?NULL:chosen;
     return !associated?0:ready?1:-1;
 }
 static int host_entry_association(HostImport *entry,NativeThread *state,OwnerLink **owners,NativeLibrary **selected){
-    return host_entry_association_query(entry,state,owners,selected,NULL);
+    HostLoadSelection selection={0};return host_entry_association_query(entry,state,owners,selected,NULL,&selection);
 }
 #include "host_callback_sources.c"
 static int host_entry_sources_query_load(HostImport *entry,NativeThread *state,void *caller,OwnerLink **owners,NativeLibrary **selected,int retainSources,int *unknown,HostLibraryLoad **selectedLoad,NativeSourceRoots *roots){
@@ -831,13 +837,15 @@ static int host_entry_sources_query_load(HostImport *entry,NativeThread *state,v
             ||state->hostLoad&&state->hostLoad->calling))
         return host_callback_entry_sources(entry,state,caller,owners,selected,retainSources,host_is_thread_admission(entry->kind),unknown,selectedLoad,roots);
     AcquireSRWLockShared(&host_imports);AcquireSRWLockShared(&native_records);
-    int associated=host_entry_association_query(entry,state,owners,selected,&unobserved),ready=associated==1;
+    HostLoadSelection selection={0};
+    int associated=host_entry_association_query(entry,state,owners,selected,&unobserved,&selection),ready=associated==1;
     if(ready&&!entry->library&&entry->image->loads){
-        int child=host_module_select_locked(entry->image,state,entry->load,owners,selectedLoad,&unobserved);
+        int child=host_entry_select_load(entry,state,owners,&unobserved,&selection);
         if(child<0)associated=-1,ready=0;
         // Zero means no current LoadLibrary relation. A real JNI association
         // already established above remains valid; it is not a failed query.
     }
+    if(ready&&selectedLoad)*selectedLoad=selection.load;
     ReleaseSRWLockShared(&native_records);
     ReleaseSRWLockShared(&host_imports);
     JNIEnv *env=NULL;
@@ -1207,10 +1215,10 @@ static uint64_t host_native_call_body(HostImport *entry,void *caller,uintptr_t *
     /* Association reads only the published incarnation, immutable source
      * records and current atomic lifecycle flags. Directory contention is not
      * a failed Win32 call, particularly in a CRT's loader/FLS callback. */
-    AcquireSRWLockExclusive(&entry->image->calls);
+    AcquireSRWLockShared(&entry->image->calls);
     int associated=host_entry_association(entry,state,NULL,NULL);
     if(associated==1)InterlockedIncrement(&entry->image->active);
-    ReleaseSRWLockExclusive(&entry->image->calls);
+    ReleaseSRWLockShared(&entry->image->calls);
     if(associated!=1)return host_native_failure(entry,associated?ERROR_INVALID_DATA:ERROR_MOD_NOT_FOUND,&incoming,&ntBefore);
     uint64_t result=0;int returned=0,callback=state!=NULL;if(callback)native_thread_callback_enter(state);
     __try {
