@@ -150,8 +150,8 @@ public final class CodeSourceBridge {
         public boolean enqueue(){return writer(WALKER.getCallerClass())&&super.enqueue();}
     }
     private static final class ControlKey extends WeakReference<Object>{
-        final int hash;ControlKey previous,next;boolean executionList,executionMap,fieldGate;
-        ControlKey(Object value,ControlKey next){super(value,DEAD_CONTROLS);hash=System.identityHashCode(value);this.next=next;if(next!=null)next.previous=this;}
+        final int hash;final long generation;ControlKey previous;volatile ControlKey next;boolean executionList,executionMap,fieldGate;
+        ControlKey(Object value,ControlKey next,long generation){super(value,DEAD_CONTROLS);hash=System.identityHashCode(value);this.generation=generation;this.next=next;if(next!=null)next.previous=this;}
         public void clear(){if(Key.writer(WALKER.getCallerClass()))super.clear();}
         public boolean enqueue(){return Key.writer(WALKER.getCallerClass())&&super.enqueue();}
     }
@@ -159,12 +159,34 @@ public final class CodeSourceBridge {
     static boolean heapPolicyWriter(Class<?> caller){
         return caller==CodeSourceBridge.class||caller==ControlRegistry.class;
     }
-    /** Used only under its own monitor; registration never enters a monitored JDK map. */
+    /** Incoming identities stay protected throughout an active batch, including
+     * while its index is built and while a Native notification enters the VM. */
+    private static final class ControlPublication {
+        final Object[] values;final ControlPublication previous;volatile Object[] index;
+        ControlPublication(Object[] values,ControlPublication previous){this.values=values;this.previous=previous;}
+        void prepare(){
+            if(values.length>(1<<28))return;int capacity=16;
+            while(capacity<values.length*2)capacity<<=1;
+            Object[] built=new Object[capacity];
+            for(Object value:values){if(value==null)continue;int at=ControlRegistry.bucket(System.identityHashCode(value),capacity);
+                while(built[at]!=null&&built[at]!=value)at=(at+1)&(capacity-1);built[at]=value;}
+            index=built;
+        }
+        boolean contains(Object value){
+            Object[] current=index;if(value==this||value==values||value==current)return true;
+            if(current==null){for(Object item:values)if(item==value)return true;return false;}
+            int at=ControlRegistry.bucket(System.identityHashCode(value),current.length);
+            while(current[at]!=null){if(current[at]==value)return true;at=(at+1)&(current.length-1);}return false;
+        }
+    }
+    /** Writers use the existing monitor. Membership readers acquire published
+     * buckets/links, without waiting for another object's Native notification. */
     private static final class ControlRegistry {
-        private ControlKey[] table=new ControlKey[16];private int size;
+        private volatile ControlKey[] table=new ControlKey[16];private int size;private long generation;
+        private volatile ControlPublication publication;
         ControlRegistry(){
             if(AUTHORITY.getCallerClass()!=CodeSourceBridge.class)throw new SecurityException("ACTUAL_CONTROL_REGISTRY_OWNER_REQUIRED");
-            table[bucket(System.identityHashCode(table),table.length)]=new ControlKey(table,null);size=1;
+            table[bucket(System.identityHashCode(table),table.length)]=new ControlKey(table,null,generation);size=1;
         }
         private void writer(Class<?> caller){
             if(CONTROLS!=null&&this!=CONTROLS||caller!=CodeSourceBridge.class&&caller!=ControlRegistry.class)
@@ -172,12 +194,15 @@ public final class CodeSourceBridge {
         }
         private static int bucket(int hash,int length){return (hash^(hash>>>16))&(length-1);}
         private ControlKey find(Object value){
-            int hash=System.identityHashCode(value);
-            for(ControlKey key=table[bucket(hash,table.length)];key!=null;key=key.next)
+            int hash=System.identityHashCode(value);ControlKey[] current=table;
+            for(ControlKey key=current[bucket(hash,current.length)];key!=null;key=key.next)
                 if(key.hash==hash&&key.get()==value)return key;
             return null;
         }
-        boolean contains(Object value){return find(value)!=null;}
+        boolean contains(Object value){
+            for(ControlPublication p=publication;p!=null;p=p.previous)if(p.contains(value))return true;
+            return find(value)!=null;
+        }
         boolean executionList(Object value){ControlKey key=find(value);return key!=null&&key.executionList;}
         boolean executionMap(Object value){ControlKey key=find(value);return key!=null&&key.executionMap;}
         boolean fieldGate(Object value){ControlKey key=find(value);return key!=null&&key.fieldGate;}
@@ -188,32 +213,48 @@ public final class CodeSourceBridge {
         }
         ControlKey addAll(Object[] values){
             writer(AUTHORITY.getCallerClass());ControlKey result=null;
-            for(int index=0;index<values.length;index++){
+            ControlPublication pending=new ControlPublication(values,publication);publication=pending;
+            try {
+            pending.prepare();
+            // The temporary lookup arrays are controller metadata too. Retain
+            // weak protection while an acquired publication is still held by
+            // a reader after this batch returns; no source verdict is stored.
+            for(int index=-2;index<values.length;index++){
                 // A class image can publish thousands of identities at once.
                 // Retiring only 64 keys per whole publication lets temporary
                 // image history outgrow every later GC. Charge at most one
                 // bounded retirement batch per 64 supplied identities instead.
                 if((index&63)==0){ControlKey retired=(ControlKey)DEAD_CONTROLS.poll();if(retired!=null)reap(retired);}
-                Object value=values[index];
+                Object value=index==-2?pending.values:index==-1?pending.index:values[index];
                 if(value==null)continue;
                 ControlKey known=find(value);if(known!=null){result=known;continue;}
                 NativeControl.heapPolicyChanged(value);
                 if(size>=table.length-(table.length>>>2)&&table.length<(1<<30)){
-                    ControlKey[] prior=table,next=new ControlKey[prior.length*2];
-                    for(ControlKey first:prior)for(ControlKey key=first;key!=null;){
-                        ControlKey following=key.next;int at=bucket(key.hash,next.length);
-                        key.previous=null;key.next=next[at];if(key.next!=null)key.next.previous=key;next[at]=key;key=following;
+                    ControlKey[] prior=table,next=new ControlKey[prior.length*2];long nextGeneration=generation+1;int retained=0;
+                    // Old bucket chains remain intact for a reader that acquired
+                    // the prior table. Rehash fresh weak nodes and publish once.
+                    for(ControlKey first:prior)for(ControlKey key=first;key!=null;key=key.next){
+                        Object actual=key.get();if(actual==null)continue;int at=bucket(key.hash,next.length);
+                        ControlKey copied=new ControlKey(actual,next[at],nextGeneration);
+                        copied.executionList=key.executionList;copied.executionMap=key.executionMap;copied.fieldGate=key.fieldGate;
+                        next[at]=copied;retained++;
                     }
-                    NativeControl.heapPolicyChanged(next);table=next;
+                    NativeControl.heapPolicyChanged(next);
                     // Every new backing keeps its own weak protection entry;
                     // old tables stay protected while held, without retention.
                     int at=bucket(System.identityHashCode(next),next.length);
-                    next[at]=new ControlKey(next,next[at]);size++;
+                    next[at]=new ControlKey(next,next[at],nextGeneration);
+                    generation=nextGeneration;size=retained+1;table=next;
                 }
-                int at=bucket(System.identityHashCode(value),table.length);
-                result=new ControlKey(value,table[at]);table[at]=result;size++;
+                ControlKey[] current=table;int at=bucket(System.identityHashCode(value),current.length);
+                result=new ControlKey(value,current[at],generation);current[at]=result;size++;
+                // Release-publish even an unchanged backing identity. Readers
+                // acquire it once; no guarded Unsafe/VarHandle access is needed
+                // to query the controller's own identity index recursively.
+                table=current;
             }
             return result;
+            }finally{publication=pending.previous;}
         }
         void reap(ControlKey first){
             writer(AUTHORITY.getCallerClass());
@@ -222,14 +263,17 @@ public final class CodeSourceBridge {
             // than hold the controller monitor through an entire GC batch.
             int remaining=64;
             for(ControlKey retired=first;retired!=null;retired=--remaining>0?(ControlKey)DEAD_CONTROLS.poll():null){
+                if(retired.generation!=generation)continue;
                 int at=bucket(retired.hash,table.length);ControlKey previous=retired.previous,next=retired.next;
                 // The queued key is the actual registered node. Unlink it under
                 // this monitor without rescanning the same bucket for every
                 // object collected in a large metadata batch.
-                if(previous==null){if(table[at]!=retired)continue;table[at]=next;}
+                if(previous==null){ControlKey[] current=table;if(current[at]!=retired)continue;current[at]=next;table=current;}
                 else {if(previous.next!=retired)continue;previous.next=next;}
                 if(next!=null)next.previous=previous;
-                retired.previous=null;retired.next=null;size--;
+                // A concurrent reader may still be on this cleared weak key.
+                // Preserve its successor so live identities remain reachable.
+                retired.previous=null;size--;
             }
         }
     }
@@ -1624,7 +1668,6 @@ public final class CodeSourceBridge {
         // protection does not depend on publishing each scalar receipt in the
         // weak directory. Actual native scopes and range checks are unchanged.
         if(object instanceof ControlBridge.RawMemoryMutation||object instanceof FrameworkBuffers.Scalar)return true;
-        synchronized(CONTROLS){
             if(object==CONTROLS)return true;
             // Only this exact component type can be the registry's backing.
             // Other arrays still undergo the ordinary control-identity lookup.
@@ -1634,7 +1677,6 @@ public final class CodeSourceBridge {
             }
             catch(Throwable unavailable){throw new IllegalStateException("CONTROL_TABLE_UNAVAILABLE",unavailable);}
             return CONTROLS.contains(object);
-        }
     }
     private static String callerMethod(){return WALKER.walk(frames->frames.filter(frame->frame.getDeclaringClass().getNestHost()!=CodeSourceBridge.class).findFirst().orElseThrow()).getMethodName();}
     private static Object field(Object receiver,String name){

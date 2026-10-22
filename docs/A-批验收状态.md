@@ -1,5 +1,15 @@
 # Ronova Pro 当前进度
 
+## 2026-10-22：恢复实机，候选 40 修复控制目录读取的实际锁竞争
+
+按用户“继续测试”恢复原 PCL/完整原 Mod 集合及真实 82 项参数，独立世界先备份。候选 39 实际 premain INSTALLED_FULL、Native FULL；Bootstrap 仍有 ForkJoinTask$Aux/FutureTask$WaitNode 待安装边界，未混记全平台 FULL。真实 Java 栈确认早期绘制 SimpleBufferBuilder 字段写在等待 ControlRegistry，同一时刻类变换线程持有该目录监视器，经 ExternalCodeImages.snapshot 批量登记控制身份并逐项通知 Native。匹配符号的原生读取另确认 Owner 仅 11 项、控制区 AVL 高度 18，没有把普通递归帧误记为退化树。
+
+现保留控制目录写者串行与每项 Native 策略撤销通知，仅将普通身份读取改为读取 volatile 发布的目录和链接。扩容复制弱节点后一次发布新根，旧链不改写；GC 只移除死亡身份并保留读者后继，旧目录排队节点按实际目录世代跳过。正在登记的批次通过临时精确身份索引提前受保护，输入/索引数组也保留弱控制保护直到读者不再持有。特殊执行角色仍在原监视器下读写，不缓存停止策略、来源或许可，没有按类名或第三方包放行。
+
+候选 40 完整构建通过（32 秒；首次 ForgeGradle 证书检查失败后原配置重试，没有关闭校验）。复用 live-control-writer 与 system-arraycopy 实际 Native/Unsafe/反射/MethodHandle 写入检查，均退出 0：外来控制写及私有原生读取仍被拒绝，实际控制数组保持不变，普通复制、重叠、原异常和兼容前缀语义保留；未运行 metadata seam。
+
+39 已完成全 Mod 客户端资源、配方/进度加载并启动 IntegratedServer，尚无玩家入场/稳定 Tick。窗口收到关闭操作后未及时退出，结束本轮 JVM（-1）并备份测试世界；首次备份遇 session.lock 尚未释放，监控确认退出后补齐。该轮记录 6 条 TLS 拒绝、未见 VirtualFree 错误，但不据此宣称旧 Native 缺口已修复或干净退出通过。候选 40 双 JAR 已备份更新原 PCL，重新准备参数，attempt-40 正在同一世界继续真实测试；最终世界和正常保存退出验收仍未通过。
+
 ## 2026-10-22：候选 39，收敛 Native 重复维护与历史扫描；实机继续暂停
 
 依据 6bc6f22/候选 38 审查同包完成四项生产修改。普通 API 入场只将 image->calls 的入场读锁改为共享锁，活动计数仍用原子操作，发布/解绑/退役的独占锁及最终活动检查保留。关联查询以本次栈上 HostLoadSelection 带回 queried/status/load，在同一查询内不重复选择加载关系，0 不覆盖有效 JNI-only 关联；受限回调仍另核对实际调用者。
