@@ -165,11 +165,6 @@ static int host_nt_transfer_private_locked(const HostNtTransferRanges *ranges){
     if(!hit)hit=host_memory_output_locked((const void*)(uintptr_t)ranges->out,(SIZE_T)ranges->outBytes);
     return hit;
 }
-static int host_nt_transfer_private_check(const HostNtTransferRanges *ranges,int restricted){
-    if(!ranges->dstBytes&&!ranges->srcBytes&&!ranges->outBytes)return 0;
-    int locked=restricted?TryAcquireSRWLockExclusive(&native_private_gate):(AcquireSRWLockExclusive(&native_private_gate),1);
-    if(!locked)return -1;int hit=host_nt_transfer_private_locked(ranges);ReleaseSRWLockExclusive(&native_private_gate);return hit;
-}
 static uint64_t host_nt_transfer_original(HostImport *entry,HANDLE process,const uintptr_t *a,int native){
     if(native)return (uint64_t)(uint32_t)((HostNtMemoryTransfer)entry->original)(
             process,(PVOID)a[1],(PVOID)a[2],(SIZE_T)a[3],(PSIZE_T)a[4]);
@@ -207,7 +202,6 @@ static uint64_t host_native_memory_transfer(HostImport *entry,void *caller,uintp
              * failure cannot hide an attempted control/count output. */
             ranges=host_nt_transfer_ranges(reading,0,a);
             int hit=host_nt_transfer_control(&ranges,restricted);
-            if(!hit)hit=host_nt_transfer_private_check(&ranges,restricted);
             if(hit)error=hit>0?ERROR_ACCESS_DENIED:restricted?ERROR_BUSY:ERROR_INVALID_DATA;
         }
         if(!error){
@@ -218,21 +212,19 @@ static uint64_t host_native_memory_transfer(HostImport *entry,void *caller,uintp
                 error=GetLastError();if(!error)error=ERROR_INVALID_HANDLE;
             }else local=compare(process,GetCurrentProcess())!=0;
         }
+        /* The count remains the actual caller pointer, including NULL and
+         * aliases into source/destination. After pinning the actual process,
+         * query the resulting endpoints once, then retain the final private
+         * check through the real copy. No output is cleared or reread. */
         int control=0;
         if(!error){
             ranges=host_nt_transfer_ranges(reading,local,a);
             control=host_nt_transfer_control(&ranges,restricted);
             if(control)error=control>0?ERROR_ACCESS_DENIED:restricted?ERROR_BUSY:ERROR_INVALID_DATA;
-        }
-        /* The count remains the actual caller pointer, including NULL and
-         * aliases into source/destination. No output is cleared or reread. */
-        if(!error){
-            control=host_nt_transfer_control(&ranges,restricted);
-            if(control)error=control>0?ERROR_ACCESS_DENIED:restricted?ERROR_BUSY:ERROR_INVALID_DATA;
             else if(native_owner_stopped(owners))error=ERROR_ACCESS_DENIED;
         }
         if(!error&&(ranges.dstBytes||ranges.srcBytes||ranges.outBytes)){
-            int locked=restricted?TryAcquireSRWLockExclusive(&native_private_gate):(AcquireSRWLockExclusive(&native_private_gate),1);
+            int locked=native_private_read_lock(restricted);
             if(!locked)error=ERROR_BUSY;
             else __try {
                 control=host_nt_transfer_private_locked(&ranges);
@@ -247,7 +239,7 @@ static uint64_t host_native_memory_transfer(HostImport *entry,void *caller,uintp
                 }
             } __finally {
                 if(called&&!capturedState){outgoing=host_nt_result(&incoming);capturedState=1;}
-                ReleaseSRWLockExclusive(&native_private_gate);
+                ReleaseSRWLockShared(&native_private_gate);
             }
         }else if(!error){
             host_nt_restore(&incoming);called=1;result=host_nt_transfer_original(entry,process,a,native);

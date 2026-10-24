@@ -3,6 +3,7 @@ package dev.ronova.pro.bootstrap;
 import java.lang.invoke.MethodHandle;
 import java.lang.invoke.MethodHandles;
 import java.lang.invoke.MethodType;
+import java.lang.invoke.VarHandle;
 import java.lang.reflect.Constructor;
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
@@ -12,6 +13,7 @@ import java.util.Set;
 /** VM declarations, independent of Class.ReflectionData and its mutable arrays. */
 public final class PlatformMetadata {
     private static final MethodHandle FIELDS, METHODS, CONSTRUCTORS;
+    private static final VarHandle CLASS_REVISION;
     private static final Class<?> REFLECTION_DATA, INSTRUMENTATION;
     static final Class<?> CLASS_ATOMIC, ANNOTATION_DATA, ANNOTATION_TYPE, ANNOTATION_ACCESS;
     private static final StackWalker WALKER=StackWalker.getInstance(StackWalker.Option.RETAIN_CLASS_REFERENCE);
@@ -30,14 +32,31 @@ public final class PlatformMetadata {
             FIELDS=access.findVirtual(Class.class,"getDeclaredFields0",MethodType.methodType(Field[].class,boolean.class));
             METHODS=access.findVirtual(Class.class,"getDeclaredMethods0",MethodType.methodType(Method[].class,boolean.class));
             CONSTRUCTORS=access.findVirtual(Class.class,"getDeclaredConstructors0",MethodType.methodType(Constructor[].class,boolean.class));
+            VarHandle revision;
+            try{revision=access.findVarHandle(Class.class,"classRedefinedCount",int.class);}
+            catch(NoSuchFieldException|IllegalAccessException unavailable){revision=null;}
+            CLASS_REVISION=revision;
         } catch(ReflectiveOperationException failure) {
             throw new ExceptionInInitializerError(failure);
         }
     }
     private PlatformMetadata(){}
-    static Object[] controls(){return new Object[]{FIELDS,METHODS,CONSTRUCTORS,CLASS_WRITERS};}
+    static Object[] controls(){return new Object[]{FIELDS,METHODS,CONSTRUCTORS,CLASS_REVISION,CLASS_WRITERS};}
+    // The VM advances this same counter for Class's own reflection-data
+    // invalidation, including superclass redefinition. An unavailable counter
+    // disables optional name hints; declaration reads remain unchanged.
+    static int classRevision(Class<?> type){
+        if(CLASS_REVISION==null)return -1;
+        // Direct volatile field access does not customize a protected
+        // MethodHandle's mutable form on this rendering hot path.
+        try{return (int)CLASS_REVISION.getVolatile(type);}
+        catch(Throwable failure){throw unavailable(type,failure);}
+    }
     public static Field[] declaredFields(Class<?> type) {
-        try {return (Field[])FIELDS.invokeExact(type,false);}
+        try {
+            if(NativeControl.declarationsReady())return NativeControl.vmDeclaredFields(type);
+            return (Field[])FIELDS.invokeExact(type,false);
+        }
         catch(Throwable failure){throw unavailable(type,failure);}
     }
     public static Field declaredField(Class<?> type,String name)throws NoSuchFieldException {
@@ -45,7 +64,10 @@ public final class PlatformMetadata {
         throw new NoSuchFieldException(type.getName()+"."+name);
     }
     public static Method[] declaredMethods(Class<?> type) {
-        try {return (Method[])METHODS.invokeExact(type,false);}
+        try {
+            if(NativeControl.declarationsReady())return NativeControl.vmDeclaredMethods(type);
+            return (Method[])METHODS.invokeExact(type,false);
+        }
         catch(Throwable failure){throw unavailable(type,failure);}
     }
     public static Method declaredMethod(Class<?> type,String name,Class<?>... parameters)throws NoSuchMethodException {
@@ -58,7 +80,9 @@ public final class PlatformMetadata {
     }
     public static Constructor<?> declaredConstructor(Class<?> type,Class<?>... parameters)throws NoSuchMethodException {
         try {
-            for(Constructor<?> constructor:(Constructor<?>[])CONSTRUCTORS.invokeExact(type,false))
+            Constructor<?>[] constructors=NativeControl.declarationsReady()?NativeControl.vmDeclaredConstructors(type)
+                    :(Constructor<?>[])CONSTRUCTORS.invokeExact(type,false);
+            for(Constructor<?> constructor:constructors)
                 if(Arrays.equals(constructor.getParameterTypes(),parameters))return constructor;
         } catch(Throwable failure){throw unavailable(type,failure);}
         throw new NoSuchMethodException(type.getName()+".<init>");

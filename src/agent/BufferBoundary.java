@@ -194,7 +194,7 @@ final class BufferBoundary {
         LabelNode start=new LabelNode(),end=new LabelNode(),handler=new LabelNode();
         InsnList entry=new InsnList();entry.add(new VarInsnNode(Opcodes.ALOAD,0));
         Type[] arguments=Type.getArgumentTypes(method.desc);
-        entry.add(new LdcInsnNode(arguments.length));entry.add(new TypeInsnNode(Opcodes.ANEWARRAY,"java/lang/Object"));
+        if(arguments.length!=0){entry.add(new LdcInsnNode(arguments.length));entry.add(new TypeInsnNode(Opcodes.ANEWARRAY,"java/lang/Object"));}
         int slot=1,index=0;
         for(Type argument:arguments){
             entry.add(new InsnNode(Opcodes.DUP));entry.add(new LdcInsnNode(index++));entry.add(new VarInsnNode(argument.getOpcode(Opcodes.ILOAD),slot));
@@ -207,7 +207,9 @@ final class BufferBoundary {
             slot+=argument.getSize();
         }
         entry.add(new LdcInsnNode(Type.getObjectType(owner)));entry.add(new LdcInsnNode(method.name));
-        entry.add(new MethodInsnNode(Opcodes.INVOKESTATIC,BRIDGE,"bufferOperation","(Ljava/lang/Object;[Ljava/lang/Object;Ljava/lang/Class;Ljava/lang/String;)Ljava/lang/Object;",false));
+        String descriptor=arguments.length==0?"(Ljava/lang/Object;Ljava/lang/Class;Ljava/lang/String;)Ljava/lang/Object;"
+                :"(Ljava/lang/Object;[Ljava/lang/Object;Ljava/lang/Class;Ljava/lang/String;)Ljava/lang/Object;";
+        entry.add(new MethodInsnNode(Opcodes.INVOKESTATIC,BRIDGE,"bufferOperation",descriptor,false));
         entry.add(new VarInsnNode(Opcodes.ASTORE,token));entry.add(start);
         for(AbstractInsnNode at:method.instructions.toArray())if(at.getOpcode()>=Opcodes.IRETURN&&at.getOpcode()<=Opcodes.RETURN)method.instructions.insertBefore(at,finish(token));
         method.instructions.insert(entry);method.instructions.add(end);method.instructions.add(handler);method.instructions.add(new VarInsnNode(Opcodes.ASTORE,failure));

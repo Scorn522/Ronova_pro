@@ -44,6 +44,13 @@ public final class IoBridge {
     private static final Set<Class<?>> READ_TASKS=types("sun.nio.ch.WindowsAsynchronousSocketChannelImpl$ReadTask","sun.nio.ch.WindowsAsynchronousFileChannelImpl$ReadTask");
     private static final Class<?> IO_UTIL=type("sun.nio.ch.IOUtil");
     private static final Set<Class<?>> TYPES=allTypes();
+    // TYPES and the VM class hierarchy are immutable; connection ownership is not cached.
+    private static final ClassValue<Boolean> PLATFORM_OBJECT_TYPES=new ClassValue<>(){
+        @Override protected Boolean computeValue(Class<?> type){
+            for(Class<?> current=type;current!=null;current=current.getSuperclass())if(TYPES.contains(current))return true;
+            return false;
+        }
+    };
     private static final Field SOCKET_IMPL=field(Socket.class,"impl"),SERVER_IMPL=field(ServerSocket.class,"impl"),DATAGRAM_DELEGATE=field(DatagramSocket.class,"delegate"),
             IMPL_DELEGATE=field(DELEGATING,"delegate"),FD_NUMBER=field(FileDescriptor.class,"fd");
     private static final Method IMPL_CLOSE=method(NIO_SOCKET,"close"),SET_FAILURE=method(PENDING,"setFailure",Throwable.class),
@@ -151,7 +158,7 @@ public final class IoBridge {
     }
     private static void reap(){for(int i=0;i<32;i++){Key key=(Key)DEAD.poll();if(key==null)return;CONNECTIONS.remove(key);REQUESTS.remove(key);}}
     static boolean platformLayout(Class<?> actual){return TYPES.contains(actual);}
-    static boolean platformObject(Object value){if(value==null)return false;for(Class<?> actual=value.getClass();actual!=null;actual=actual.getSuperclass())if(TYPES.contains(actual))return true;return false;}
+    static boolean platformObject(Object value){return value!=null&&PLATFORM_OBJECT_TYPES.get(value.getClass());}
     static boolean resource(Object value){return value!=null&&(ROOTS.contains(value.getClass())||record(value)!=null);}
     static ResourceBridge.FileRecord record(Object value){synchronized(LOCK){return CONNECTIONS.get(new Key(value,false));}}
     static Module[] currentSources(){Scope scope=CURRENT.get();return scope==null?null:scope.sources;}

@@ -123,8 +123,7 @@ static NativeToolingSlot *native_tooling_extension_slot(JNIEnv *env,NativeToolin
     slot->environment=record;slot->callback=(void*)callback;slot->unknown=unknown||record->unknown;
     int ready=native_owner_merge(&slot->owners,record->owners)&&native_owner_merge(&slot->owners,writers)&&native_capture_image_owners((void*)callback,&slot->owners);
     if(origin&&env&&native_original.NewWeakGlobalRef){slot->origin=native_original.NewWeakGlobalRef(env,origin);if(!slot->origin)ready=0;}
-    if(slot->owners&&env&&native_original.NewGlobalRef){jobjectArray lease=native_tooling_writers(env,slot->owners);
-        if(lease){slot->sourceLease=(jobjectArray)native_original.NewGlobalRef(env,lease);native_original.DeleteLocalRef(env,lease);}ready=ready&&slot->sourceLease;}
+    if(!native_tooling_retain_sources(env,slot->owners,slot->unknown,&slot->sourceLease,&slot->sourceLeaseComplete))ready=0;
     slot->image=native_image((void*)callback);
     if(slot->image&&!GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS,(LPCSTR)callback,&slot->pin))ready=0;
     if(!slot->image)slot->unknown=1;

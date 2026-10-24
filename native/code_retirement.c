@@ -34,32 +34,32 @@ static void code_retirement_initialize(void){
     // PopFrame is intentionally not requested: it re-executes the caller's
     // invoke and emits no FramePop event for our real source cleanup.
 }
+static Owner *code_retirement_declared_identity(JNIEnv *env,CodeFrameIdentity *frame){
+    Owner *owner=frame->module?native_owner_published(env,frame->module):NULL;
+    return owner&&InterlockedCompareExchange(&owner->producer,0,0)?owner:NULL;
+}
 static Owner *code_retirement_declared(JNIEnv *env,jmethodID method){
-    jclass declaring=NULL;jobject module=NULL;Owner *result=NULL;
-    if((*native_ti)->GetMethodDeclaringClass(native_ti,method,&declaring)==JVMTI_ERROR_NONE&&declaring)
-        module=native_original.GetModule(env,declaring);
-    if(module&&TryAcquireSRWLockShared(&native_records)){
-        for(Owner *owner=native_owners;owner;owner=owner->next)
-            if(InterlockedCompareExchange(&owner->producer,0,0)&&native_original.IsSameObject(env,owner->module,module)){result=owner;break;}
-        ReleaseSRWLockShared(&native_records);
-    }
-    if(module)native_original.DeleteLocalRef(env,module);
-    if(declaring)native_original.DeleteLocalRef(env,declaring);return result;
+    CodeFrameIdentity frame;code_frame_identity_open(env,method,&frame);
+    Owner *owner=code_retirement_declared_identity(env,&frame);
+    code_frame_identity_close(env,&frame);return owner;
 }
 static int code_retirement_candidate(JNIEnv *env,jmethodID method,jobject module){
-    Owner *declared=code_retirement_declared(env,method);
-    return declared&&(!module||native_original.IsSameObject(env,declared->module,module))||code_method_relevant(env,method,module);
+    CodeFrameIdentity frame;code_frame_identity_open(env,method,&frame);
+    Owner *declared=code_retirement_declared_identity(env,&frame);
+    int selected=declared&&(!module||native_original.IsSameObject(env,declared->module,module))||code_frame_selected(env,&frame,module,0);
+    code_frame_identity_close(env,&frame);return selected;
 }
 static int code_retirement_observed(JNIEnv *env,jmethodID method,jlocation location,jobject module,int *unknown){
-    Owner *declared=code_retirement_declared(env,method);
+    CodeFrameIdentity frame;code_frame_identity_open(env,method,&frame);
+    Owner *declared=code_retirement_declared_identity(env,&frame);
     int selected=declared&&(!module||native_original.IsSameObject(env,declared->module,module));
-    if(location>=0&&code_method_relevant(env,method,module)){
+    if(location>=0&&code_frame_selected(env,&frame,module,0)){
         OwnerLink *sources=NULL;int known=0,missing=0;
-        if(!code_frame_sources_query(env,method,location,&sources,&known,&missing))*unknown=1;
+        if(!code_frame_sources_identity(env,&frame,location,&sources,&known,&missing,NULL))*unknown=1;
         else {if(sources&&native_owner_matches(env,sources,module))selected=1;if(missing)*unknown=1;}
         code_links_free(sources);
     }
-    return selected;
+    code_frame_identity_close(env,&frame);return selected;
 }
 static CodeRetirementOwner *code_retirement_owner(Owner *owner){
     CodeRetirementOwner *result=NULL;AcquireSRWLockExclusive(&code_retirement_records);
@@ -216,13 +216,13 @@ static void JNICALL code_retirement_step(jvmtiEnv *ti,JNIEnv *env,jthread thread
         if(missing)unmapped=1;native_original.DeleteLocalRef(env,module);
     }
     if(!relevant){
-        jvmtiFrameInfo *frames=NULL;jint count=0;int remains=0;
-        if(!code_trace(thread,&frames,&count)){code_retirement_failure(request);free(frames);goto done;}
-        for(jint i=1;i<count&&!remains;i++)for(OwnerLink *entry=request->owners;entry&&!remains;entry=entry->next){
+        CodeTrace trace;code_trace_init(&trace);int remains=0;
+        if(!code_trace(thread,&trace)){code_retirement_failure(request);code_trace_close(&trace);goto done;}
+        for(jint i=1;i<trace.count&&!remains;i++)for(OwnerLink *entry=request->owners;entry&&!remains;entry=entry->next){
             jobject module=native_original.NewLocalRef(env,entry->owner->module);
-            if(module){remains=code_retirement_candidate(env,frames[i].method,module);native_original.DeleteLocalRef(env,module);}
+            if(module){remains=code_retirement_candidate(env,trace.frames[i].method,module);native_original.DeleteLocalRef(env,module);}
         }
-        free(frames);
+        code_trace_close(&trace);
         if(remains)code_retirement_wait(request,thread,method,bottom,CODE_RETIRE_FRAMEWORK);
         else{code_retirement_event(request,thread,0);InterlockedExchange(&request->active,0);}goto done;
     }
@@ -338,8 +338,9 @@ static void code_retirement_scan(JNIEnv *env,jobject module,jlong *values){
     if((*native_ti)->GetAllThreads(native_ti,&count,&threads)!=JVMTI_ERROR_NONE){
         if(statistics)InterlockedIncrement64(&statistics->failures);if(values)values[2]++;goto done;}
     for(jint i=0;i<count;i++){
-        jvmtiFrameInfo *frames=NULL;jint depth=0;
-        if(code_trace(threads[i],&frames,&depth)){
+        CodeTrace trace;code_trace_init(&trace);
+        if(code_trace(threads[i],&trace)){
+            jvmtiFrameInfo *frames=trace.frames;jint depth=trace.count;
             int found=-1;
             for(jint j=0;j<depth;j++)if(code_retirement_candidate(env,frames[j].method,module)){
                 if(found<0)found=j;
@@ -356,7 +357,7 @@ static void code_retirement_scan(JNIEnv *env,jobject module,jlong *values){
             jint state=0;
             if((*native_ti)->GetThreadState(native_ti,threads[i],&state)!=JVMTI_ERROR_NONE||(state&JVMTI_THREAD_STATE_ALIVE))values[2]++;
         }
-        free(frames);native_original.DeleteLocalRef(env,threads[i]);
+        code_trace_close(&trace);native_original.DeleteLocalRef(env,threads[i]);
     }
 done:
     if(threads)(*native_ti)->Deallocate(native_ti,(unsigned char*)threads);if(current)native_original.DeleteLocalRef(env,current);

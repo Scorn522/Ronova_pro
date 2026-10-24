@@ -90,6 +90,9 @@ public final class Access {
         @Accessor("isDirty") void pro$dirty(boolean dirty);
         @Accessor("itemsById") Int2ObjectMap<net.minecraft.network.syncher.SynchedEntityData.DataItem<?>> pro$items();
     }
+    @Mixin(net.minecraft.world.entity.item.ItemEntity.class) public interface ItemBody {
+        @Accessor("DATA_ITEM") static net.minecraft.network.syncher.EntityDataAccessor<net.minecraft.world.item.ItemStack> pro$itemKey() { throw new AssertionError(); }
+    }
     @Mixin(Entity.class) public interface EntityState {
         @Accessor("remainingFireTicks") void pro$fire(int ticks);
         @Accessor("remainingFireTicks") int pro$fire();

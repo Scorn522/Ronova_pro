@@ -633,11 +633,11 @@ static int native_carrier_physical_call(JNIEnv *env,NativeCarrierFrame *frame,un
                                         const char *name,const char *descriptor,int opcode){
     if(at+3>(unsigned)frame->length||frame->bytes[at]!=opcode||opcode<182||opcode>185)return 0;
     CodePool *pool=&frame->pool;unsigned index=code_be(frame->bytes+at+1,2);
-    if(!code_vm_entry(pool,index))return 0;const unsigned char *entry=pool->entries[index];
+    if(!code_vm_entry(pool,index))return 0;const unsigned char *entry=code_pool_entry(pool,index,NULL);
     if((entry[0]!=10&&entry[0]!=11)||(opcode==185&&entry[0]!=11)||(opcode==182&&entry[0]!=10))return 0;
     unsigned ownerIndex=code_be(entry+1,2),selector=code_be(entry+3,2);
-    if(!code_vm_entry(pool,selector)||pool->entries[selector][0]!=12||!code_vm_entry(pool,ownerIndex)||pool->entries[ownerIndex][0]!=7)return 0;
-    unsigned nameIndex=code_be(pool->entries[selector]+1,2),descriptorIndex=code_be(pool->entries[selector]+3,2);
+    if(!code_vm_entry(pool,selector)||code_pool_entry(pool,selector,NULL)[0]!=12||!code_vm_entry(pool,ownerIndex)||code_pool_entry(pool,ownerIndex,NULL)[0]!=7)return 0;
+    unsigned nameIndex=code_be(code_pool_entry(pool,selector,NULL)+1,2),descriptorIndex=code_be(code_pool_entry(pool,selector,NULL)+3,2);
     if(!code_vm_entry(pool,nameIndex)||!code_vm_entry(pool,descriptorIndex))return 0;
     char *actualName=code_utf(pool,nameIndex),*actualDescriptor=code_utf(pool,descriptorIndex);
     int valid=actualName&&actualDescriptor&&!strcmp(name,actualName)&&!strcmp(descriptor,actualDescriptor);
@@ -668,14 +668,14 @@ static int native_carrier_integer(NativeCarrierFrame *frame,unsigned at,jint *va
     if(at>=(unsigned)frame->length)return 0;unsigned opcode=frame->bytes[at],index=0;
     if(opcode==18&&at+2<=(unsigned)frame->length)index=frame->bytes[at+1];
     else if(opcode==19&&at+3<=(unsigned)frame->length)index=code_be(frame->bytes+at+1,2);else return 0;
-    if(!code_vm_entry(&frame->pool,index)||frame->pool.entries[index][0]!=3)return 0;
-    *value=(jint)code_be(frame->pool.entries[index]+1,4);return 1;
+    if(!code_vm_entry(&frame->pool,index)||code_pool_entry(&frame->pool,index,NULL)[0]!=3)return 0;
+    *value=(jint)code_be(code_pool_entry(&frame->pool,index,NULL)+1,4);return 1;
 }
 static char *native_carrier_call_owner_name(NativeCarrierFrame *frame,unsigned at){
     if(at+3>(unsigned)frame->length)return NULL;unsigned index=code_be(frame->bytes+at+1,2);CodePool *pool=&frame->pool;
-    if(!code_vm_entry(pool,index)||(pool->entries[index][0]!=10&&pool->entries[index][0]!=11))return NULL;
-    unsigned owner=code_be(pool->entries[index]+1,2);if(!code_vm_entry(pool,owner)||pool->entries[owner][0]!=7)return NULL;
-    unsigned name=code_be(pool->entries[owner]+1,2);return code_vm_entry(pool,name)?code_utf(pool,name):NULL;
+    if(!code_vm_entry(pool,index)||(code_pool_entry(pool,index,NULL)[0]!=10&&code_pool_entry(pool,index,NULL)[0]!=11))return NULL;
+    unsigned owner=code_be(code_pool_entry(pool,index,NULL)+1,2);if(!code_vm_entry(pool,owner)||code_pool_entry(pool,owner,NULL)[0]!=7)return NULL;
+    unsigned name=code_be(code_pool_entry(pool,owner,NULL)+1,2);return code_vm_entry(pool,name)?code_utf(pool,name):NULL;
 }
 static int native_carrier_instruction(JNIEnv *env,NativeCarrierFrame *frame,jobject plan,jmethodID query,jstring selector,
                                         unsigned location,jint instruction,jint opcode,jint local,const char *owner,const char *name,const char *descriptor){
@@ -778,8 +778,8 @@ static jclass native_carrier_call_owner(JNIEnv *env,NativeCarrierFrame *caller,N
             ||!code_vm_read(pool->resolved+(uintptr_t)(slot&65535)*sizeof(uintptr_t),&holder,sizeof(holder))||!holder)return NULL;
     if(holder==pool->holder)return (jclass)native_original.NewLocalRef(env,caller->declaring);
     if(holder==callee->pool.holder)return (jclass)native_original.NewLocalRef(env,callee->declaring);
-    if(!code_vm_entry(pool,index)||pool->entries[index][0]!=7)return NULL;
-    unsigned nameIndex=code_be(pool->entries[index]+1,2);if(!code_vm_entry(pool,nameIndex))return NULL;
+    if(!code_vm_entry(pool,index)||code_pool_entry(pool,index,NULL)[0]!=7)return NULL;
+    unsigned nameIndex=code_be(code_pool_entry(pool,index,NULL)+1,2);if(!code_vm_entry(pool,nameIndex))return NULL;
     char *name=code_utf(pool,nameIndex);if(!name)return NULL;
     size_t length=strlen(name);char *signature=(char*)malloc(length+3);jclass result=NULL;NativeCarrierTypes types={0};
     if(signature){signature[0]='L';memcpy(signature+1,name,length);signature[length+1]=';';signature[length+2]=0;
@@ -893,11 +893,11 @@ static int native_carrier_invocation(JNIEnv *env,NativeCarrierFrame *caller,Nati
     unsigned at=(unsigned)caller->actual.location,opcode=caller->bytes[at];
     if(opcode<182||opcode>185||at+3>(unsigned)caller->length||(mode==1&&opcode!=185))return 0;
     unsigned index=code_be(caller->bytes+at+1,2);CodePool *pool=&caller->pool;
-    if(!code_vm_entry(pool,index))return 0;const unsigned char *entry=pool->entries[index];
+    if(!code_vm_entry(pool,index))return 0;const unsigned char *entry=code_pool_entry(pool,index,NULL);
     if((entry[0]!=10&&entry[0]!=11)||(opcode==185&&entry[0]!=11)||(opcode==182&&entry[0]!=10))return 0;
     unsigned ownerIndex=code_be(entry+1,2),selector=code_be(entry+3,2);
-    if(!code_vm_entry(pool,selector)||pool->entries[selector][0]!=12)return 0;
-    unsigned nameIndex=code_be(pool->entries[selector]+1,2),descriptorIndex=code_be(pool->entries[selector]+3,2);
+    if(!code_vm_entry(pool,selector)||code_pool_entry(pool,selector,NULL)[0]!=12)return 0;
+    unsigned nameIndex=code_be(code_pool_entry(pool,selector,NULL)+1,2),descriptorIndex=code_be(code_pool_entry(pool,selector,NULL)+3,2);
     if(!code_vm_entry(pool,nameIndex)||!code_vm_entry(pool,descriptorIndex))return 0;
     char *name=code_utf(pool,nameIndex),*descriptor=code_utf(pool,descriptorIndex);
     int valid=name&&descriptor&&!strcmp(name,callee->name)&&!strcmp(descriptor,callee->descriptor)
@@ -928,10 +928,10 @@ static int native_carrier_adapter_plan(JNIEnv *env,NativeCarrierFrame *frame,job
     unsigned at=(unsigned)frame->actual.location,opcode=frame->bytes[at];CodePool *pool=&frame->pool;
     if(opcode<182||opcode>185||at+3>(unsigned)frame->length)return 0;
     unsigned index=code_be(frame->bytes+at+1,2);if(!code_vm_entry(pool,index))return 0;
-    const unsigned char *call=pool->entries[index];if(call[0]!=10&&call[0]!=11)return 0;
+    const unsigned char *call=code_pool_entry(pool,index,NULL);if(call[0]!=10&&call[0]!=11)return 0;
     unsigned classIndex=code_be(call+1,2),selectorIndex=code_be(call+3,2);
-    if(!code_vm_entry(pool,classIndex)||pool->entries[classIndex][0]!=7||!code_vm_entry(pool,selectorIndex)||pool->entries[selectorIndex][0]!=12)return 0;
-    unsigned ownerIndex=code_be(pool->entries[classIndex]+1,2),nameIndex=code_be(pool->entries[selectorIndex]+1,2),descriptorIndex=code_be(pool->entries[selectorIndex]+3,2);
+    if(!code_vm_entry(pool,classIndex)||code_pool_entry(pool,classIndex,NULL)[0]!=7||!code_vm_entry(pool,selectorIndex)||code_pool_entry(pool,selectorIndex,NULL)[0]!=12)return 0;
+    unsigned ownerIndex=code_be(code_pool_entry(pool,classIndex,NULL)+1,2),nameIndex=code_be(code_pool_entry(pool,selectorIndex,NULL)+1,2),descriptorIndex=code_be(code_pool_entry(pool,selectorIndex,NULL)+3,2);
     if(!code_vm_entry(pool,ownerIndex)||!code_vm_entry(pool,nameIndex)||!code_vm_entry(pool,descriptorIndex))return 0;
     char *owner=code_utf(pool,ownerIndex),*name=code_utf(pool,nameIndex),*descriptor=code_utf(pool,descriptorIndex),*selector=NULL;
     size_t nameLength=strlen(frame->name),descriptorLength=strlen(frame->descriptor);

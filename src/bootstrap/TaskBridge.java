@@ -68,7 +68,7 @@ public final class TaskBridge {
     static final class ThreadOrigin {
         final Set<Module> sources=Collections.newSetFromMap(new IdentityHashMap<>());
         final java.util.concurrent.locks.ReentrantLock io=new java.util.concurrent.locks.ReentrantLock();
-        boolean unknown,interruptPending,observedStart,platformWorker;int starting;
+        boolean unknown,runBoundaryMissing,interruptPending,observedStart,platformWorker;int starting,diagnosticReasons;
     }
     static final class ThreadStart {
         Thread thread,caller=Thread.currentThread();final ThreadOrigin origin;boolean closed;
@@ -96,7 +96,7 @@ public final class TaskBridge {
         }
     };
     static final java.util.Map<EventKey,Thread> TIMER_RUNNING=new java.util.HashMap<>();
-    // Source registration already holds CREATION_OWNERS. Notify only a real
+    // Source registration already holds CREATION_ORIGINS. Notify only a real
     // addition, before publishing it, so repeated observations keep a heap
     // callback's unchanged target permission.
     static void taskSource(Object object,Set<Module> sources,Module source){
@@ -112,7 +112,7 @@ public final class TaskBridge {
         Module direct=actual.length==1?actual[0]:actual.length==0&&!capture.physicalComplete()?invokingModule():null;
         if(direct==null&&actual.length==0&&parent!=null)direct=objectModule(parent);
         if(direct==null&&task.getClass().getClassLoader()!=null)direct=task.getClass().getModule();
-        synchronized(CREATION_OWNERS) {
+        synchronized(CREATION_ORIGINS) {
             reapCreationOwners();EventKey key=new EventKey(task,CREATION_QUEUE);
             Set<Module> owners=TASK_OWNERS.computeIfAbsent(key,ignored->java.util.Collections.newSetFromMap(new java.util.IdentityHashMap<Module,Boolean>()));
             // A completed capture with no producer is an empty source set.
@@ -120,13 +120,18 @@ public final class TaskBridge {
             // it for ordinary platform submissions poisons every successor.
             if(actual.length==0){if(direct!=null||sourceUnknown())taskSource(task,owners,direct);}
             else for(Module source:actual)taskSource(task,owners,source);
-            Set<Module> creation=CREATION_SOURCES.get(new EventKey(task,null));if(creation!=null)for(Module source:creation)taskSource(task,owners,source);
-            Module creator=CREATION_OWNERS.get(new EventKey(task,null));if(creator!=null)taskSource(task,owners,creator);
+            CreationOrigin creation=CREATION_ORIGINS.get(key);
+            if(creation!=null&&creation.sources!=null)for(Module source:creation.sources)taskSource(task,owners,source);
+            // Source notification can reenter registration. Keep the original
+            // fresh singleton observation after delivering the captured set.
+            creation=CREATION_ORIGINS.get(key);Module creator=creation==null?null:creation.single();
+            if(creator!=null)taskSource(task,owners,creator);
             Module definition=DefinitionBridge.module(task.getClass());if(producer(definition))taskSource(task,owners,definition);
             if(scheduler!=null) {
                 TASK_SCHEDULERS.put(key,new java.lang.ref.WeakReference<>(scheduler));
-                schedulerSources(scheduler,owners,CREATION_UNKNOWN.contains(key));
-                Module poolCreator=CREATION_OWNERS.get(new EventKey(scheduler,null));
+                creation=CREATION_ORIGINS.get(key);
+                schedulerSources(scheduler,owners,creation!=null&&creation.unknown);
+                CreationOrigin pool=CREATION_ORIGINS.get(new EventKey(scheduler,null));Module poolCreator=pool==null?null:pool.single();
                 if(poolCreator==null||owners.size()!=1||!owners.contains(poolCreator))SHARED_SCHEDULERS.add(new EventKey(scheduler,CREATION_QUEUE));
             }
         }
@@ -138,7 +143,7 @@ public final class TaskBridge {
     public static String schedulerDisposition(Object value,Module[] modules){
         if(!coreWriter())throw new SecurityException("GROUP_CORE_REQUIRED");
         List<Object> chain=schedulerChain(value);Set<Module> selected=selectedSchedulerModules(modules);
-        synchronized(CREATION_OWNERS){reapCreationOwners();return schedulerDisposition(chain,selected);}
+        synchronized(CREATION_ORIGINS){reapCreationOwners();return schedulerDisposition(chain,selected);}
     }
     static Set<Module> selectedSchedulerModules(Module[] modules){
         Set<Module> selected=Collections.newSetFromMap(new IdentityHashMap<>());
@@ -154,8 +159,9 @@ public final class TaskBridge {
         }
         boolean unknown=false,busy=false;
         for(Object actual:chain){
-            EventKey key=new EventKey(actual,null);Set<Module> creation=CREATION_SOURCES.get(key),uses=SCHEDULER_SOURCES.get(key);
-            if(CREATION_UNKNOWN.contains(key)||creation==null||creation.isEmpty())unknown=true;
+            EventKey key=new EventKey(actual,null);CreationOrigin origin=CREATION_ORIGINS.get(key);
+            Set<Module> creation=origin==null?null:origin.sources,uses=SCHEDULER_SOURCES.get(key);
+            if(origin!=null&&origin.unknown||creation==null||creation.isEmpty())unknown=true;
             if(creation!=null&&!selected.containsAll(creation))return "SHARED";
             if(uses!=null)for(Module source:uses){if(source==null)unknown=true;else if(!selected.contains(source))return "SHARED";}
             busy|=SCHEDULER_SUBMISSIONS.getOrDefault(key,0)!=0;
@@ -181,7 +187,7 @@ public final class TaskBridge {
         List<Object> chain=schedulerChain(value);Set<Module> selected=selectedSchedulerModules(modules);
         for(Module source:selected)if(!modStopped(source))throw new SecurityException("STOPPED_SCHEDULER_SOURCES_REQUIRED");
         SchedulerRetirement retiring;Object pool;
-        synchronized(CREATION_OWNERS){reapCreationOwners();String disposition=schedulerDisposition(chain,selected);
+        synchronized(CREATION_ORIGINS){reapCreationOwners();String disposition=schedulerDisposition(chain,selected);
             if(!disposition.equals("PRIVATE"))throw new IllegalStateException("SCHEDULER_"+disposition);
             pool=chain.get(chain.size()-1);EventKey key=new EventKey(pool,CREATION_QUEUE);
             retiring=SCHEDULER_RETIREMENTS.get(key);
@@ -195,20 +201,20 @@ public final class TaskBridge {
         InterruptRequest previous=RETIRE_INTERRUPTS.get();RETIRE_INTERRUPTS.set(new InterruptRequest(null,pool));
         try{
             @SuppressWarnings("unchecked") List<Runnable> removed=(List<Runnable>)schedulerCall(pool,"shutdownNow",List.class);
-            synchronized(CREATION_OWNERS){
+            synchronized(CREATION_ORIGINS){
                 retiring.removed.addAll(removed);retiring.finished=true;return List.copyOf(retiring.removed);
             }
         }catch(ReflectiveOperationException|RuntimeException|Error failure){
-            synchronized(CREATION_OWNERS){retiring.resultUnknown=true;}throw failure;
+            synchronized(CREATION_ORIGINS){retiring.resultUnknown=true;}throw failure;
         }finally{
             if(previous==null)RETIRE_INTERRUPTS.remove();else RETIRE_INTERRUPTS.set(previous);
-            synchronized(CREATION_OWNERS){retiring.invoking=false;}
+            synchronized(CREATION_ORIGINS){retiring.invoking=false;}
         }
     }
     public static void schedulerDrainAccepted(Object value,Object task){
         if(!coreWriter())throw new SecurityException("GROUP_SCHEDULER_CORE_REQUIRED");
         Object pool=schedulerDelegate(value);if(pool==null)throw new IllegalStateException("SCHEDULER_DELEGATION_UNRESOLVED");
-        synchronized(CREATION_OWNERS){
+        synchronized(CREATION_ORIGINS){
             SchedulerRetirement retiring=SCHEDULER_RETIREMENTS.get(new EventKey(pool,null));
             if(retiring==null||!retiring.finished)throw new IllegalStateException("SCHEDULER_DRAIN_UNOBSERVED");
             retiring.removed.removeIf(actual->actual==task);
@@ -217,7 +223,7 @@ public final class TaskBridge {
     public static boolean schedulerResourceEnded(Object value)throws ReflectiveOperationException {
         if(!coreWriter())throw new SecurityException("GROUP_SCHEDULER_CORE_REQUIRED");
         Object pool=schedulerDelegate(value);if(pool==null)throw new IllegalAccessException("SCHEDULER_DELEGATION_UNRESOLVED");
-        synchronized(CREATION_OWNERS){
+        synchronized(CREATION_ORIGINS){
             SchedulerRetirement retiring=SCHEDULER_RETIREMENTS.get(new EventKey(pool,null));
             if(retiring!=null){
                 if(retiring.resultUnknown)throw new IllegalStateException("SCHEDULER_DRAIN_RESULT_UNOBSERVED");
@@ -251,7 +257,7 @@ public final class TaskBridge {
         Set<Module> selected=selectedSchedulerModules(modules);if(selected.isEmpty())throw new SecurityException("GROUP_THREAD_SOURCES_REQUIRED");
         for(Module source:selected)if(!modStopped(source))throw new SecurityException("STOPPED_THREAD_SOURCES_REQUIRED");
         Object target=ThreadPlatform.TARGET.get(thread);
-        synchronized(CREATION_OWNERS){
+        synchronized(CREATION_ORIGINS){
             ThreadOrigin prior=THREAD_ORIGINS.get(new EventKey(thread,null));
             if(!thread.isAlive()&&ThreadPlatform.STATUS.getInt(thread)!=0&&(prior==null||prior.starting==0))return true;
         }
@@ -259,15 +265,16 @@ public final class TaskBridge {
             Object scheduler=threadScheduler(thread,target);
             if(scheduler==null)throw new IllegalStateException("THREAD_SCHEDULER_UNOBSERVED");
             List<Object> chain=scheduler instanceof java.util.Timer?List.of(scheduler):schedulerChain(scheduler);
-            String disposition;synchronized(CREATION_OWNERS){disposition=schedulerDisposition(chain,selected);}
+            String disposition;synchronized(CREATION_ORIGINS){disposition=schedulerDisposition(chain,selected);}
             if(disposition.equals("SHARED"))return true;
             if(!disposition.equals("PRIVATE")&&!disposition.equals("BUSY"))throw new IllegalStateException("THREAD_SCHEDULER_"+disposition);
             // The scheduler retires all of its workers through its own contract.
             return !thread.isAlive()&&ThreadPlatform.STATUS.getInt(thread)!=0;
         }
-        synchronized(CREATION_OWNERS){
+        synchronized(CREATION_ORIGINS){
             ThreadOrigin origin=threadOrigin(thread,target);if(!selected.containsAll(origin.sources))return true;
             if(origin.unknown||origin.sources.isEmpty())throw new IllegalStateException("THREAD_SOURCES_UNOBSERVED");
+            if(origin.runBoundaryMissing)throw new IllegalStateException("THREAD_RUN_BOUNDARY_UNOBSERVED");
             RETIRED_THREADS.add(new EventKey(thread,CREATION_QUEUE));
             if(origin.starting!=0)return false;
             if(!thread.isAlive())return true;
@@ -310,7 +317,7 @@ public final class TaskBridge {
     static Object threadScheduler(Thread thread,Object target)throws IllegalAccessException {
         if(thread instanceof java.util.concurrent.ForkJoinWorkerThread)return ThreadPlatform.FORK_POOL.get(thread);
         if(target!=null&&target.getClass()==ThreadPlatform.POOL_WORKER)return ThreadPlatform.WORKER_POOL.get(target);
-        synchronized(CREATION_OWNERS){var timer=THREAD_TIMERS.get(new EventKey(thread,null));return timer==null?null:timer.get();}
+        synchronized(CREATION_ORIGINS){var timer=THREAD_TIMERS.get(new EventKey(thread,null));return timer==null?null:timer.get();}
     }
     public static Object threadScheduler(Thread thread)throws ReflectiveOperationException {
         if(!coreWriter())throw new SecurityException("GROUP_THREAD_CORE_REQUIRED");
@@ -330,12 +337,13 @@ public final class TaskBridge {
     }
     static void threadSources(Thread thread,ThreadOrigin origin,Object object){
         if(object==null)return;EventKey key=new EventKey(object,null);
-        Set<Module> creation=CREATION_SOURCES.get(key),tasks=TASK_OWNERS.get(key);
-        if(creation!=null)for(Module source:creation)taskSource(thread,origin.sources,source);
+        CreationOrigin creation=CREATION_ORIGINS.get(key);Set<Module> tasks=TASK_OWNERS.get(key);
+        if(creation!=null&&creation.sources!=null)for(Module source:creation.sources)taskSource(thread,origin.sources,source);
         if(tasks!=null)for(Module source:tasks)taskSource(thread,origin.sources,source);
-        if(origin.sources.contains(null)||CREATION_UNKNOWN.contains(key)){
+        creation=CREATION_ORIGINS.get(key);
+        if(origin.sources.contains(null)||creation!=null&&creation.unknown){
             if(!origin.unknown)NativeControl.heapPolicyChanged(thread);
-            origin.sources.remove(null);origin.unknown=true;
+            origin.sources.remove(null);origin.unknown=true;origin.diagnosticReasons|=1;
         }
         Module definition=DefinitionBridge.module(object.getClass());if(producer(definition))taskSource(thread,origin.sources,definition);
     }
@@ -345,17 +353,22 @@ public final class TaskBridge {
         Class<?> implementation=THREAD_RUN_IMPLEMENTATIONS.get(thread.getClass());Module declaration=DefinitionBridge.module(implementation);
         if(producer(declaration))taskSource(thread,origin.sources,declaration);
         else if(implementation!=Thread.class&&!threadWorker(thread,target)){
-            if(!origin.unknown)NativeControl.heapPolicyChanged(thread);origin.unknown=true;
+            // An uninstrumented run override is a retirement coverage gap,
+            // not a failed observation of the real creation/start sources.
+            // Keep it out of automatic retirement without poisoning every
+            // independently checked JNI operation executed by this thread.
+            if(!origin.runBoundaryMissing)NativeControl.heapPolicyChanged(thread);
+            origin.runBoundaryMissing=true;origin.diagnosticReasons|=2;
         }
         return origin;
     }
     static boolean allThreadSourcesStopped(ThreadOrigin origin){
-        if(origin.unknown||origin.sources.isEmpty())return false;
+        if(origin.unknown||origin.runBoundaryMissing||origin.sources.isEmpty())return false;
         for(Module source:origin.sources)if(!modStopped(source))return false;return true;
     }
     /** Live task invocations and independently started threads keep their real roots. */
     static Module[] currentThreadSources(){
-        synchronized(CREATION_OWNERS){
+        synchronized(CREATION_ORIGINS){
             Thread thread=Thread.currentThread();ThreadOrigin origin=THREAD_ORIGINS.get(new EventKey(thread,null));
             boolean independent=origin!=null&&origin.observedStart&&!origin.platformWorker;
             int count=0;boolean unknown=independent&&origin.unknown;
@@ -372,7 +385,7 @@ public final class TaskBridge {
         }
     }
     static boolean currentThreadSourceUnknown(){
-        synchronized(CREATION_OWNERS){
+        synchronized(CREATION_ORIGINS){
             ThreadOrigin origin=THREAD_ORIGINS.get(new EventKey(Thread.currentThread(),null));
             if(origin!=null&&origin.observedStart&&!origin.platformWorker&&(origin.unknown||origin.sources.contains(null)))return true;
             Thread thread=Thread.currentThread();
@@ -380,8 +393,21 @@ public final class TaskBridge {
             return false;
         }
     }
+    /** Failure diagnosis only: 1 creation/target, 2 unclassified run override,
+     * 4 Java start capture, 8 native start capture, 16 active task scope.
+     * Bit 2 is retirement coverage only; it does not erase or invalidate the
+     * actual source set. These diagnostic bits grant no permission. */
+    static int currentThreadSourceReasons(){
+        synchronized(CREATION_ORIGINS){
+            Thread thread=Thread.currentThread();ThreadOrigin origin=THREAD_ORIGINS.get(new EventKey(thread,null));
+            int reasons=origin!=null&&origin.observedStart&&!origin.platformWorker?origin.diagnosticReasons:0;
+            for(Frame frame=CURRENT.get();frame!=null;frame=frame.previous)
+                if(frame.thread==thread&&!frame.exited&&!frame.retired&&frame.sourcesUnknown)reasons|=16;
+            return reasons;
+        }
+    }
     static boolean currentThreadStoppedSource(){
-        synchronized(CREATION_OWNERS){
+        synchronized(CREATION_ORIGINS){
             ThreadOrigin origin=THREAD_ORIGINS.get(new EventKey(Thread.currentThread(),null));
             Thread thread=Thread.currentThread();
             if(origin!=null&&origin.observedStart&&!origin.platformWorker){
@@ -400,19 +426,20 @@ public final class TaskBridge {
     static Object beginThreadStart(Thread thread,Module[] nativeSources)throws ReflectiveOperationException {
         if(ThreadPlatform.STATUS.getInt(thread)!=0)return null;
         Object target=ThreadPlatform.TARGET.get(thread);boolean worker=threadWorker(thread,target);
-        Module[] sources=worker?new Module[0]:invokingSources();boolean unknown=!worker&&sourceUnknown();
+        Module[] sources=worker?new Module[0]:invokingSources();boolean unknown=!worker&&sourceUnknown();int unknownReasons=unknown?4:0;
         boolean stopped=!worker&&stoppedInvocation();
-        synchronized(CREATION_OWNERS){
+        synchronized(CREATION_ORIGINS){
             reapCreationOwners();ThreadOrigin origin=threadOrigin(thread,target);
             if(!origin.observedStart||origin.platformWorker!=worker)NativeControl.heapPolicyChanged(thread);
             origin.observedStart=true;origin.platformWorker=worker;
             if(!worker&&nativeSources!=null)for(Module source:nativeSources){
-                if(source==null)unknown=true;
+                if(source==null){unknown=true;unknownReasons|=8;}
                 else {stopped|=modStopped(source);if(producer(source))taskSource(thread,origin.sources,source);}
             }
             if(!worker&&(RETIRED_THREADS.contains(new EventKey(thread,null))||stopped))throw new IllegalThreadStateException("RONOVA_RETIRED_THREAD_START");
-            for(Module source:sources)if(source==null)unknown=true;else taskSource(thread,origin.sources,source);
+            for(Module source:sources)if(source==null){unknown=true;unknownReasons|=4;}else taskSource(thread,origin.sources,source);
             if(unknown&&!origin.unknown)NativeControl.heapPolicyChanged(thread);origin.unknown|=unknown;
+            origin.diagnosticReasons|=unknownReasons;
             if(!worker&&allThreadSourcesStopped(origin))throw new IllegalThreadStateException("RONOVA_STOPPED_THREAD_START");
             ThreadStart token=new ThreadStart(thread,origin);origin.starting++;return token;
         }
@@ -424,14 +451,14 @@ public final class TaskBridge {
     static void finishThreadStart(Object value){
         if(value==null)return;
         if(!(value instanceof ThreadStart token)||token.caller!=Thread.currentThread())throw new SecurityException("ACTUAL_THREAD_START_TOKEN_REQUIRED");
-        synchronized(CREATION_OWNERS){
+        synchronized(CREATION_ORIGINS){
             if(token.closed)return;token.closed=true;token.origin.starting--;token.thread=null;token.caller=null;
         }
     }
     public static boolean threadExecutionAllowed(Thread thread)throws ReflectiveOperationException {
         if(WALKER.getCallerClass()!=Thread.class)throw new SecurityException("ACTUAL_THREAD_RUN_REQUIRED");
         Object target=ThreadPlatform.TARGET.get(thread);if(threadWorker(thread,target))return true;
-        synchronized(CREATION_OWNERS){
+        synchronized(CREATION_ORIGINS){
             return !RETIRED_THREADS.contains(new EventKey(thread,null))&&!allThreadSourcesStopped(threadOrigin(thread,target));
         }
     }
@@ -444,15 +471,15 @@ public final class TaskBridge {
         if(request!=null&&!requestedThread(request,thread))return Boolean.FALSE;
         requireThreadControl(thread,2,nativeSources);
         if(request==null)return null;
-        ThreadOrigin origin;synchronized(CREATION_OWNERS){origin=observedThreadOrigin(thread);}
+        ThreadOrigin origin;synchronized(CREATION_ORIGINS){origin=observedThreadOrigin(thread);}
         boolean locked=origin.io.tryLock();
-        if(!locked)synchronized(CREATION_OWNERS){
+        if(!locked)synchronized(CREATION_ORIGINS){
             // A blocker-removal callback unlocks under this same monitor. Retry
             // there so a request cannot arrive just after its final pending check.
             locked=origin.io.tryLock();if(!locked){origin.interruptPending=true;return Boolean.FALSE;}
         }
         try{
-            synchronized(CREATION_OWNERS){
+            synchronized(CREATION_ORIGINS){
                 if(ThreadPlatform.BLOCKER.get(thread)!=null){origin.interruptPending=true;origin.io.unlock();return Boolean.FALSE;}
                 origin.interruptPending=false;
             }
@@ -465,7 +492,7 @@ public final class TaskBridge {
     }
     static void finishThreadInterrupt(Object value){
         if(value==null)return;ThreadIo token=threadIoToken(value);
-        synchronized(CREATION_OWNERS){if(!token.closed){token.closed=true;token.origin.io.unlock();}}
+        synchronized(CREATION_ORIGINS){if(!token.closed){token.closed=true;token.origin.io.unlock();}}
     }
     static boolean requestedThread(InterruptRequest request,Thread thread)throws IllegalAccessException {
         return request.target()==thread||request.scheduler()!=null&&threadScheduler(thread,ThreadPlatform.TARGET.get(thread))==request.scheduler();
@@ -489,12 +516,12 @@ public final class TaskBridge {
     public static Object threadBlocking(Object blocker)throws ReflectiveOperationException,java.io.InterruptedIOException {
         if(WALKER.getCallerClass()!=Thread.class)throw new SecurityException("ACTUAL_THREAD_BLOCKER_REQUIRED");
         Thread thread=Thread.currentThread();ThreadOrigin origin;
-        synchronized(CREATION_OWNERS){origin=observedThreadOrigin(thread);}
+        synchronized(CREATION_ORIGINS){origin=observedThreadOrigin(thread);}
         origin.io.lock();
         try{
             if(blocker!=null){
                 Object scheduler=threadScheduler(thread,ThreadPlatform.TARGET.get(thread));
-                synchronized(CREATION_OWNERS){
+                synchronized(CREATION_ORIGINS){
                     if(RETIRED_THREADS.contains(new EventKey(thread,null))||origin.interruptPending
                             ||scheduler!=null&&SCHEDULER_RETIREMENTS.containsKey(new EventKey(scheduler,null)))
                         throw new java.io.InterruptedIOException("RONOVA_RETIRED_THREAD_IO");
@@ -506,7 +533,7 @@ public final class TaskBridge {
     public static void threadBlockerFinished(Object value,boolean completed)throws ReflectiveOperationException {
         if(WALKER.getCallerClass()!=Thread.class)throw new SecurityException("ACTUAL_THREAD_BLOCKER_REQUIRED");
         ThreadIo token=threadIoToken(value);
-        synchronized(CREATION_OWNERS){
+        synchronized(CREATION_ORIGINS){
             if(token.closed)return;
             try{
                 if(completed&&token.clearing&&token.origin.interruptPending&&ThreadPlatform.BLOCKER.get(Thread.currentThread())==null)
@@ -516,7 +543,7 @@ public final class TaskBridge {
     }
     public static void timerSubmitted(Object timer,Object task){
         if(WALKER.getCallerClass()!=java.util.Timer.class)throw new SecurityException("ACTUAL_TIMER_REQUIRED");
-        synchronized(CREATION_OWNERS){timerThread(timer);}
+        synchronized(CREATION_ORIGINS){timerThread(timer);}
         taskRelation(task,timer,null);
     }
     public static void timerAdmission(Object task){
@@ -528,10 +555,10 @@ public final class TaskBridge {
         if(caller.getClassLoader()!=null||caller.getModule()!=Object.class.getModule()||!caller.getName().equals("java.util.TimerThread"))throw new SecurityException("ACTUAL_TIMER_THREAD_REQUIRED");
     }
     public static boolean timerEnter(Object task){
-        timerThreadCaller();synchronized(CREATION_OWNERS){if(!modOwnerAllowed(task))return false;TIMER_RUNNING.put(new EventKey(task,CREATION_QUEUE),Thread.currentThread());return true;}
+        timerThreadCaller();synchronized(CREATION_ORIGINS){if(!modOwnerAllowed(task))return false;TIMER_RUNNING.put(new EventKey(task,CREATION_QUEUE),Thread.currentThread());return true;}
     }
     public static void timerExit(Object task){
-        timerThreadCaller();synchronized(CREATION_OWNERS){EventKey key=new EventKey(task,null);if(TIMER_RUNNING.get(key)==Thread.currentThread())TIMER_RUNNING.remove(key);}
+        timerThreadCaller();synchronized(CREATION_ORIGINS){EventKey key=new EventKey(task,null);if(TIMER_RUNNING.get(key)==Thread.currentThread())TIMER_RUNNING.remove(key);}
     }
     private static final class TimerPlatform {
         static final Class<?> TYPE=ThreadPlatform.type("java.util.TaskQueue");
@@ -568,7 +595,7 @@ public final class TaskBridge {
             }
             if(!removed.isEmpty())TimerPlatform.HEAP.invoke(queue);
         }
-        java.util.List<Object> published=new java.util.ArrayList<>();synchronized(CREATION_OWNERS){
+        java.util.List<Object> published=new java.util.ArrayList<>();synchronized(CREATION_ORIGINS){
             for(var entry:TASK_SCHEDULERS.entrySet())if(entry.getValue().get()==value){Object task=entry.getKey().get();if(task!=null&&task instanceof java.util.TimerTask)published.add(task);}
         }
         for(Object task:published)if(!seen.contains(task)&&selectedTimerTask(task,selected)) {
@@ -582,41 +609,41 @@ public final class TaskBridge {
             if(TimerPlatform.QUEUE.get(value)!=queue)throw new IllegalStateException("TIMER_QUEUE_OWNER_CHANGED");
             // Successful publication holds this same queue monitor. Decide and cancel
             // without allowing a new outside submission between the two operations.
-            boolean exclusive;synchronized(CREATION_OWNERS){
+            boolean exclusive;synchronized(CREATION_ORIGINS){
                 exclusive=schedulerDisposition(List.of(value),selected).equals("PRIVATE");
                 if(TimerPlatform.SIZE.getInt(queue)!=0){exclusive=false;SHARED_SCHEDULERS.add(new EventKey(value,CREATION_QUEUE));}
             }
             if(exclusive&&retirePrivate){
                 ((java.util.Timer)value).cancel();
                 Thread thread=(Thread)ThreadPlatform.TIMER_THREAD.get(value);
-                synchronized(CREATION_OWNERS){RETIRED_THREADS.add(new EventKey(thread,CREATION_QUEUE));}
+                synchronized(CREATION_ORIGINS){RETIRED_THREADS.add(new EventKey(thread,CREATION_QUEUE));}
                 requestThreadInterrupt(thread);
             }
         }
         return removed;
     }
     static boolean selectedTimerTask(Object task,Set<Module> selected){
-        if(task==null)return false;synchronized(CREATION_OWNERS){
-            EventKey key=new EventKey(task,null);if(CREATION_UNKNOWN.contains(key))return false;
-            Set<Module> sources=TASK_OWNERS.get(key);if(sources==null)sources=CREATION_SOURCES.get(key);
+        if(task==null)return false;synchronized(CREATION_ORIGINS){
+            EventKey key=new EventKey(task,null);CreationOrigin origin=CREATION_ORIGINS.get(key);if(origin!=null&&origin.unknown)return false;
+            Set<Module> sources=TASK_OWNERS.get(key);if(sources==null&&origin!=null)sources=origin.sources;
             return sources!=null&&!sources.isEmpty()&&!sources.contains(null)&&selected.containsAll(sources);
         }
     }
     public static boolean timerResourceEnded(Object value)throws ReflectiveOperationException {
         if(!coreWriter()||value==null||value.getClass()!=java.util.Timer.class)throw new SecurityException("GROUP_TIMER_CORE_REQUIRED");
-        synchronized(CREATION_OWNERS){if(SHARED_SCHEDULERS.contains(new EventKey(value,null)))return true;}
+        synchronized(CREATION_ORIGINS){if(SHARED_SCHEDULERS.contains(new EventKey(value,null)))return true;}
         return !((Thread)ThreadPlatform.TIMER_THREAD.get(value)).isAlive();
     }
     public static boolean timerResourceEnded(Object value,Module[] modules)throws ReflectiveOperationException {
         if(!coreWriter()||value==null||value.getClass()!=java.util.Timer.class)throw new SecurityException("GROUP_TIMER_CORE_REQUIRED");
-        String disposition;synchronized(CREATION_OWNERS){disposition=schedulerDisposition(List.of(value),selectedSchedulerModules(modules));}
+        String disposition;synchronized(CREATION_ORIGINS){disposition=schedulerDisposition(List.of(value),selectedSchedulerModules(modules));}
         if(disposition.equals("SHARED"))return true;
         if(!disposition.equals("PRIVATE"))throw new IllegalStateException("TIMER_"+disposition);
         return !((Thread)ThreadPlatform.TIMER_THREAD.get(value)).isAlive();
     }
     public static boolean timerTaskRetired(Object task)throws ReflectiveOperationException {
         if(!coreWriter()||!(task instanceof java.util.TimerTask))throw new SecurityException("GROUP_TIMER_CORE_REQUIRED");
-        synchronized(CREATION_OWNERS){if(TIMER_RUNNING.containsKey(new EventKey(task,null)))return false;}
+        synchronized(CREATION_ORIGINS){if(TIMER_RUNNING.containsKey(new EventKey(task,null)))return false;}
         Object lock=TimerPlatform.LOCK.get(task);
         synchronized(lock){return TimerPlatform.LOCK.get(task)==lock&&TimerPlatform.STATE.getInt(task)==3;}
     }
@@ -690,16 +717,16 @@ public final class TaskBridge {
         var selected=java.util.Collections.newSetFromMap(new java.util.IdentityHashMap<Module,Boolean>());selected.addAll(java.util.Arrays.asList(modules));
         var rows=new java.util.ArrayList<Object[]>();
         var seen=Collections.newSetFromMap(new IdentityHashMap<Object,Boolean>());
-        synchronized(CREATION_OWNERS) {
+        synchronized(CREATION_ORIGINS) {
             reapCreationOwners();for(var entry:TASK_OWNERS.entrySet()) {
                 Object task=entry.getKey().get();if(task==null||entry.getValue().isEmpty()||!selected.containsAll(entry.getValue()))continue;
                 var scheduler=TASK_SCHEDULERS.get(entry.getKey());rows.add(new Object[]{task,scheduler==null?null:scheduler.get()});seen.add(task);
             }
             // A directly-created Future can have waiters without ever entering a pool.
-            for(var entry:CREATION_SOURCES.entrySet()){
-                Object task=entry.getKey().get();
-                if(task==null||seen.contains(task)||CREATION_UNKNOWN.contains(entry.getKey())||entry.getValue().isEmpty()
-                        ||!selected.containsAll(entry.getValue())||!(task.getClass()==java.util.concurrent.FutureTask.class
+            for(var entry:CREATION_ORIGINS.entrySet()){
+                Object task=entry.getKey().get();CreationOrigin origin=entry.getValue();
+                if(task==null||seen.contains(task)||origin.unknown||origin.sources==null||origin.sources.isEmpty()
+                        ||!selected.containsAll(origin.sources)||!(task.getClass()==java.util.concurrent.FutureTask.class
                         ||task.getClass()==java.util.concurrent.CompletableFuture.class||task instanceof java.util.concurrent.ForkJoinTask<?>))continue;
                 Set<Module> uses=TASK_OWNERS.get(entry.getKey());if(uses!=null&&!selected.containsAll(uses))continue;
                 var scheduler=TASK_SCHEDULERS.get(entry.getKey());rows.add(new Object[]{task,scheduler==null?null:scheduler.get()});seen.add(task);
@@ -709,7 +736,7 @@ public final class TaskBridge {
     }
     public static Object taskScheduler(Object task){
         if(!coreWriter())throw new SecurityException("GROUP_CORE_REQUIRED");
-        synchronized(CREATION_OWNERS){reapCreationOwners();var scheduler=TASK_SCHEDULERS.get(new EventKey(task,null));return scheduler==null?null:scheduler.get();}
+        synchronized(CREATION_ORIGINS){reapCreationOwners();var scheduler=TASK_SCHEDULERS.get(new EventKey(task,null));return scheduler==null?null:scheduler.get();}
     }
 
 
@@ -2049,7 +2076,7 @@ public final class TaskBridge {
             if(task==null||DELIVERING.get()!=null||!boundary(true))return null;
             Frame frame=currentFrame(current);
             token=new Submission(task,scheduler(scheduler,task),frame==null?null:frame.task,current);
-            if(token.pool!=null)synchronized(CREATION_OWNERS){
+            if(token.pool!=null)synchronized(CREATION_ORIGINS){
                 if(SCHEDULER_RETIREMENTS.containsKey(new EventKey(token.pool,null)))throw new SchedulerRetired();
                 SCHEDULER_SUBMISSIONS.merge(new EventKey(token.pool,CREATION_QUEUE),1,Integer::sum);token.schedulerTracked=true;
             }
@@ -2065,7 +2092,7 @@ public final class TaskBridge {
             emit(current,SUBMIT_ENTER,task,token.scheduler,token.parent,token);return token;
         } catch(SchedulerRetired refused){throw refused;}
         catch(Throwable unavailable){
-            if(token!=null&&token.pool!=null)synchronized(CREATION_OWNERS){schedulerSources(token.scheduler,List.of(),true);}
+            if(token!=null&&token.pool!=null)synchronized(CREATION_ORIGINS){schedulerSources(token.scheduler,List.of(),true);}
             lostTask(current,SUBMIT_ENTER,task,token==null?scheduler:token.scheduler,token==null?null:token.parent,token,unavailable);return token;
         }
     }
@@ -2090,7 +2117,7 @@ public final class TaskBridge {
         finally{
             token.ended=true;
             try{
-                if(token.schedulerTracked)synchronized(CREATION_OWNERS){
+                if(token.schedulerTracked)synchronized(CREATION_ORIGINS){
                     EventKey key=new EventKey(token.pool,null);Integer count=SCHEDULER_SUBMISSIONS.get(key);
                     if(count==null||count<=0)lostTask(token.registration,SUBMIT_EXIT,token.task,token.scheduler,token.parent,token,null);else if(count==1)SCHEDULER_SUBMISSIONS.remove(key);else SCHEDULER_SUBMISSIONS.put(key,count-1);
                     token.schedulerTracked=false;

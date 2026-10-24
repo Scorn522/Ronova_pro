@@ -9,6 +9,21 @@ public final class ClientBridge {
     private static final StackWalker WALKER=StackWalker.getInstance(StackWalker.Option.RETAIN_CLASS_REFERENCE);
     private static final ReferenceQueue<Object> DEAD=new ReferenceQueue<>();
     private static final Map<Key,ContributionSources> SOURCES=new HashMap<>();
+    private record FieldNameHint(int revision,String actual){}
+    private record MethodKey(String named,String installed,String descriptor,List<Class<?>> parameters){}
+    private record MethodHint(int revision,Method actual){}
+    private static final ClassValue<java.util.concurrent.ConcurrentHashMap<MethodKey,MethodHint>> CLIENT_METHODS=new ClassValue<>(){
+        protected java.util.concurrent.ConcurrentHashMap<MethodKey,MethodHint> computeValue(Class<?> type){
+            var methods=new java.util.concurrent.ConcurrentHashMap<MethodKey,MethodHint>();
+            synchronized(SOURCES){CodeSourceBridge.contributionControl(methods);}return methods;
+        }
+    };
+    private static final ClassValue<java.util.concurrent.ConcurrentHashMap<String,FieldNameHint>> RESOURCE_FIELD_NAMES=new ClassValue<>(){
+        protected java.util.concurrent.ConcurrentHashMap<String,FieldNameHint> computeValue(Class<?> type){
+            var names=new java.util.concurrent.ConcurrentHashMap<String,FieldNameHint>();
+            synchronized(SOURCES){CodeSourceBridge.contributionControl(names);}return names;
+        }
+    };
     private static final Map<Key,TextureRegistry> TEXTURES=new HashMap<>();
     private static final Map<Key,ImageRecord> IMAGES=new HashMap<>();
     private static final Map<Key,Ref<Object>> PIXELS=new HashMap<>();
@@ -371,9 +386,21 @@ public final class ClientBridge {
         return clientMethod(type,named,installed,descriptor,new Class<?>[0]);
     }
     private static Method clientMethod(Class<?> type,String named,String installed,String descriptor,Class<?>...parameters)throws ReflectiveOperationException{
+        int revision=PlatformMetadata.classRevision(type);
+        var methods=revision<0?null:CLIENT_METHODS.get(type);
+        MethodKey key=methods==null?null:new MethodKey(named,installed,descriptor,List.of(parameters));
+        MethodHint hint=methods==null?null:methods.get(key);
+        if(hint!=null&&hint.revision()==revision&&PlatformMetadata.classRevision(type)==revision)return hint.actual();
         Method result;try{result=type.getDeclaredMethod(named,parameters);}catch(NoSuchMethodException production){result=type.getDeclaredMethod(installed,parameters);}
         if(Modifier.isStatic(result.getModifiers())||!java.lang.invoke.MethodType.methodType(result.getReturnType(),result.getParameterTypes()).descriptorString().equals(descriptor))throw new IllegalStateException("CLIENT_METHOD_LAYOUT_CHANGED:"+type.getName()+"#"+named);
-        result.setAccessible(true);return result;
+        result.setAccessible(true);
+        // Cache validated metadata only. Each invocation still reads live state and
+        // takes the existing caller/source checks; a VM definition change invalidates it.
+        if(methods!=null&&PlatformMetadata.classRevision(type)==revision){
+            MethodHint next=new MethodHint(revision,result);
+            synchronized(SOURCES){overlayProtect(key,key.parameters(),next,result);methods.put(key,next);}
+        }
+        return result;
     }
     private static boolean renderMember(StackWalker.StackFrame at,boolean publication){
         return clientMember(at,RENDER_SYSTEM,publication?"recordRenderCall":"replayQueue",publication?"recordRenderCall":"replayQueue",publication?"(Lcom/mojang/blaze3d/pipeline/RenderCall;)V":"()V");
@@ -1215,9 +1242,14 @@ public final class ClientBridge {
         private record VertexEntry(Object builder,Build build,int prior,Module[] sources,Class<?> type,String method,Thread thread){}
         private record VertexImage(Object batch,List<Module[]> vertices,Object state,Object format,Object mode,int count,int[] indices,byte[] payload,int stride,boolean indexOnly,String pending){}
         private static final class Uploaded {VertexImage image;final BitSet hidden=new BitSet(),erased=new BitSet();String pending="GPU_UPLOAD_PENDING";int vao,vertexId,indexId;long fence;Context context;boolean uploadPending,storageReleased,commandsDrained;}
+        private static final class BuilderImages {
+            final Key builder;final Map<Key,CpuImage> live=new HashMap<>();
+            BuilderImages(Object builder){this.builder=new Key(builder,true);}
+        }
         private static final class CpuImage {
+            BuilderImages group;final Key key;
             final VertexImage image;final Ref<Object> builder;Ref<Object> storage;final int pointer;int capacity;long address;final byte[] retained;final BitSet erased=new BitSet();boolean finished;String pending="";
-            CpuImage(VertexImage image,Object builder,Object storage,int pointer,int capacity,long address,byte[] retained){this.image=image;this.builder=new Ref<>(builder);this.storage=new Ref<>(storage);this.pointer=pointer;this.capacity=capacity;this.address=address;this.retained=retained;}
+            CpuImage(VertexImage image,Object builder,Object storage,int pointer,int capacity,long address,byte[] retained,BuilderImages group,Key key){this.image=image;this.builder=new Ref<>(builder);this.storage=new Ref<>(storage);this.pointer=pointer;this.capacity=capacity;this.address=address;this.retained=retained;this.group=group;this.key=key;}
         }
         private static final class SortImage {
             final VertexImage image;final Ref<Object> builder,points;final Ref<Object>[] identities;final int[] coordinates;final BitSet erased=new BitSet();String pending="";
@@ -1246,6 +1278,10 @@ public final class ClientBridge {
         private record DrawEntry(Context context,Linked linked,int program,int sampler,int enabled,int oldSampler,int oldEnabled,int textureUnit,int oldTexture){}
         private final Map<Key,Build> builds=new HashMap<>();
         private final Map<Key,CpuImage> rendered=new HashMap<>();
+        // Expansion needs only unfinished images of this actual builder.
+        // rendered remains the authority for identity/readback/retirement;
+        // this index uses the same weak result keys and never owns a builder.
+        private final Map<Key,BuilderImages> activeRendered=new HashMap<>();
         private final Map<Key,SortImage> sorting=new HashMap<>(),buildSorting=new HashMap<>();
         private final ThreadLocal<CpuRelease> releasingCpu=new ThreadLocal<>();
         private final ThreadLocal<CpuMaintenance> maintainingCpu=new ThreadLocal<>();
@@ -1258,8 +1294,31 @@ public final class ClientBridge {
         private int number(Object receiver,Class<?> type,String name)throws ReflectiveOperationException{return ((Number)field(receiver,type,name)).intValue();}
         private long bufferNumber(Object receiver,String name,String descriptor)throws ReflectiveOperationException{Field member=java.nio.Buffer.class.getDeclaredField(name);if(Modifier.isStatic(member.getModifiers())||!member.getType().descriptorString().equals(descriptor))throw new IllegalStateException("GPU_CPU_BUFFER_LAYOUT_CHANGED");member.setAccessible(true);return ((Number)member.get(receiver)).longValue();}
         private void protect(Object value){synchronized(SOURCES){CodeSourceBridge.contributionControl(value);}}
-        private byte[] readBytes(java.nio.ByteBuffer storage,int pointer,int length){if(pointer<0||length<0||pointer>storage.limit()-length)throw new IllegalStateException("GPU_CPU_RETAINED_RANGE_CHANGED");byte[] bytes=new byte[length];for(int n=0;n<length;n++)bytes[n]=storage.get(pointer+n);protect(bytes);return bytes;}
-        private boolean cpuBytes(java.nio.ByteBuffer storage,int pointer,byte[] expected,int length){if(pointer<0||length<0||length>expected.length||pointer>storage.limit()-length)return false;for(int n=0;n<length;n++)if(storage.get(pointer+n)!=expected[n])return false;return true;}
+        private BuilderImages builderImages(Object builder){
+            BuilderImages group=activeRendered.get(new Key(builder,false));
+            if(group==null){group=new BuilderImages(builder);protect(group);protect(group.live);activeRendered.put(group.builder,group);}
+            return group;
+        }
+        private void untrackCpu(CpuImage cpu){
+            BuilderImages group=cpu.group;if(group==null)return;
+            group.live.remove(cpu.key,cpu);cpu.group=null;
+            if(group.live.isEmpty())activeRendered.remove(group.builder,group);
+        }
+        private void finishCpu(CpuImage cpu){cpu.finished=true;cpu.pending="";untrackCpu(cpu);}
+        private void readBytes(java.nio.ByteBuffer storage,int pointer,byte[] target,int offset,int length){
+            // Absolute bulk get keeps position/limit/mark untouched and runs the
+            // existing buffer-copy guards for the entire source/destination range.
+            // Do not replace it with Unsafe or a controller-wide read exemption.
+            if(length!=0)storage.get(pointer,target,offset,length);
+        }
+        private byte[] readBytes(java.nio.ByteBuffer storage,int pointer,int length){
+            if(pointer<0||length<0||pointer>storage.limit()-length)throw new IllegalStateException("GPU_CPU_RETAINED_RANGE_CHANGED");
+            byte[] bytes=new byte[length];protect(bytes);readBytes(storage,pointer,bytes,0,length);return bytes;
+        }
+        private boolean cpuBytes(java.nio.ByteBuffer storage,int pointer,byte[] expected,int length){
+            if(pointer<0||length<0||length>expected.length||pointer>storage.limit()-length)return false;
+            return Arrays.equals(readBytes(storage,pointer,length),0,length,expected,0,length);
+        }
         private void buildStorage(Object builder,Class<?> type,Build build)throws ReflectiveOperationException{
             Object storage=field(builder,type,"buffer");if(!(storage instanceof java.nio.ByteBuffer bytes)||storage.getClass().getClassLoader()!=null||!bytes.isDirect())throw new IllegalStateException("ACTUAL_CPU_VERTEX_STORAGE_REQUIRED");
             build.pointer=number(builder,type,"renderedBufferPointer");build.storage=new Ref<>(storage);build.capacity=Math.toIntExact(bufferNumber(storage,"capacity","I"));build.address=bufferNumber(storage,"address","J");build.indexOnly=(Boolean)field(builder,type,"indexOnly");
@@ -1270,14 +1329,15 @@ public final class ClientBridge {
         void complete(Object builder,Object token,StackWalker.StackFrame frame){requireVertexWrite(frame);if(token==null)return;if(!(token instanceof VertexEntry entry)||entry.builder()!=builder||entry.type()!=frame.getDeclaringClass()||!entry.method().equals(frame.getMethodName())||entry.thread()!=Thread.currentThread())throw new SecurityException("ACTUAL_VERTEX_WRITE_REQUIRED");
             try{synchronized(this){Build current=builds.get(new Key(builder,false));if(current!=entry.build())throw new IllegalStateException("GPU_VERTEX_BATCH_CHANGED");int count=number(builder,entry.type(),"vertices");if(entry.prior()!=current.vertices.size()||count<entry.prior()){current.pending="GPU_VERTEX_WRITE_SEQUENCE_UNOBSERVED";return;}while(current.vertices.size()<count)current.vertices.add(entry.sources());
                 if(!buildIdentity(builder,current)||current.indexOnly){current.pending="GPU_CPU_BUILD_STORAGE_CHANGED";return;}int length=Math.multiplyExact(count,current.stride),prior=Math.multiplyExact(entry.prior(),current.stride);if(current.pointer>current.capacity-length||number(builder,entry.type(),"nextElementByte")<current.pointer+length){current.pending="GPU_CPU_BUILD_RANGE_CHANGED";return;}
-                if(current.payload.length<length){current.payload=Arrays.copyOf(current.payload,Math.max(length,Math.max(64,current.payload.length*2)));protect(current.payload);}java.nio.ByteBuffer storage=(java.nio.ByteBuffer)current.storage.get();for(int n=prior;n<length;n++)current.payload[n]=storage.get(current.pointer+n);
+                if(current.payload.length<length){current.payload=Arrays.copyOf(current.payload,Math.max(length,Math.max(64,current.payload.length*2)));protect(current.payload);}java.nio.ByteBuffer storage=(java.nio.ByteBuffer)current.storage.get();readBytes(storage,current.pointer+prior,current.payload,prior,length-prior);
             }}catch(ReflectiveOperationException failure){throw new IllegalStateException("GPU_VERTEX_COMPLETION_UNAVAILABLE",failure);}}
         private boolean buildIdentity(Object builder,Build build)throws ReflectiveOperationException{Class<?> type=builder==null?null:actualBase(builder,"com.mojang.blaze3d.vertex.BufferBuilder");Object storage=build.storage==null?null:build.storage.get();return type!=null&&builder.getClass()==type&&storage instanceof java.nio.ByteBuffer
                 &&field(builder,type,"buffer")==storage&&field(builder,type,"format")==build.format&&field(builder,type,"mode")==build.mode&&number(builder,type,"renderedBufferPointer")==build.pointer
                 &&bufferNumber(storage,"address","J")==build.address&&bufferNumber(storage,"capacity","I")==build.capacity&&(Boolean)field(builder,type,"indexOnly")==build.indexOnly;}
         void capacityChanged(Object builder,StackWalker.StackFrame frame){require(frame,"com.mojang.blaze3d.vertex.BufferBuilder","ensureCapacity","m_85722_","(I)V");try{synchronized(this){Object data=field(builder,frame.getDeclaringClass(),"buffer");if(!(data instanceof java.nio.ByteBuffer storage)||data.getClass().getClassLoader()!=null||!storage.isDirect())throw new IllegalStateException("ACTUAL_CPU_VERTEX_STORAGE_REQUIRED");int capacity=Math.toIntExact(bufferNumber(data,"capacity","I"));long address=bufferNumber(data,"address","J");
             Build build=builds.get(new Key(builder,false));if(build!=null&&build.storage!=null&&build.storage.get()!=data){int length=Math.multiplyExact(build.vertices.size(),build.stride);if(build.pointer==number(builder,frame.getDeclaringClass(),"renderedBufferPointer")&&(build.indexOnly||cpuBytes(storage,build.pointer,build.payload,length))&&capacity>=build.capacity){build.storage=new Ref<>(data);build.capacity=capacity;build.address=address;protect(build.storage);}else build.pending="GPU_CPU_BUILD_REALLOCATION_READBACK_CHANGED";}
-            for(var entry:rendered.entrySet()){Object result=entry.getKey().get();CpuImage cpu=entry.getValue();if(result==null||cpu.finished||cpu.builder.get()!=builder||cpu.storage.get()==data)continue;Class<?> type=actualBase(result,"com.mojang.blaze3d.vertex.BufferBuilder$RenderedBuffer");if(type!=null&&field(result,type,"this$0")==builder&&field(result,type,"drawState")==cpu.image.state()&&number(result,type,"pointer")==cpu.pointer&&capacity>=cpu.capacity&&cpuBytes(storage,cpu.pointer,cpu.retained,cpu.retained.length)){cpu.storage=new Ref<>(data);cpu.capacity=capacity;cpu.address=address;protect(cpu.storage);}else cpu.pending="GPU_CPU_REALLOCATION_READBACK_CHANGED";}
+            BuilderImages group=activeRendered.get(new Key(builder,false));
+            if(group!=null)for(var entry:group.live.entrySet()){Object result=entry.getKey().get();CpuImage cpu=entry.getValue();if(result==null||cpu.finished||cpu.builder.get()!=builder||cpu.storage.get()==data)continue;Class<?> type=actualBase(result,"com.mojang.blaze3d.vertex.BufferBuilder$RenderedBuffer");if(type!=null&&field(result,type,"this$0")==builder&&field(result,type,"drawState")==cpu.image.state()&&number(result,type,"pointer")==cpu.pointer&&capacity>=cpu.capacity&&cpuBytes(storage,cpu.pointer,cpu.retained,cpu.retained.length)){cpu.storage=new Ref<>(data);cpu.capacity=capacity;cpu.address=address;protect(cpu.storage);}else cpu.pending="GPU_CPU_REALLOCATION_READBACK_CHANGED";}
         }}catch(ReflectiveOperationException failure){throw new IllegalStateException("GPU_CPU_REALLOCATION_UNAVAILABLE",failure);}}
         private VertexImage image(Object builder,Object result)throws ReflectiveOperationException{
             Class<?> type=actualBase(result,"com.mojang.blaze3d.vertex.BufferBuilder$RenderedBuffer");if(type==null||type!=result.getClass())throw new SecurityException("ACTUAL_RENDERED_BUFFER_REQUIRED");Object state=field(result,type,"drawState");Class<?> shape=actualBase(state,"com.mojang.blaze3d.vertex.BufferBuilder$DrawState");if(shape==null)throw new SecurityException("ACTUAL_DRAW_STATE_REQUIRED");
@@ -1297,11 +1357,12 @@ public final class ClientBridge {
         void store(Object builder,Object result,StackWalker.StackFrame frame){require(frame,"com.mojang.blaze3d.vertex.BufferBuilder","storeRenderedBuffer","m_231177_","()Lcom/mojang/blaze3d/vertex/BufferBuilder$RenderedBuffer;");try{synchronized(this){VertexImage image=image(builder,result);Class<?> shape=actualBase(result,"com.mojang.blaze3d.vertex.BufferBuilder$RenderedBuffer");Object storage=field(builder,frame.getDeclaringClass(),"buffer");
             if(field(result,shape,"this$0")!=builder||!(storage instanceof java.nio.ByteBuffer))throw new IllegalStateException("GPU_CPU_CARRIER_ASSOCIATION_CHANGED");
             int pointer=number(result,shape,"pointer"),length=((Number)clientMethod(image.state().getClass(),"bufferSize","m_166813_","()I").invoke(image.state())).intValue();byte[] retained=readBytes((java.nio.ByteBuffer)storage,pointer,length);
-            CpuImage cpu=new CpuImage(image,builder,storage,pointer,Math.toIntExact(bufferNumber(storage,"capacity","I")),bufferNumber(storage,"address","J"),retained);Build build=builds.get(new Key(builder,false));if(build!=null&&!image.indexOnly())cpu.erased.or(build.erased);protect(cpu);protect(cpu.builder);protect(cpu.storage);protect(cpu.erased);rendered.put(new Key(result,true),cpu);}}
+            BuilderImages group=builderImages(builder);Key key=new Key(result,true);
+            CpuImage cpu=new CpuImage(image,builder,storage,pointer,Math.toIntExact(bufferNumber(storage,"capacity","I")),bufferNumber(storage,"address","J"),retained,group,key);Build build=builds.get(new Key(builder,false));if(build!=null&&!image.indexOnly())cpu.erased.or(build.erased);protect(cpu);protect(cpu.builder);protect(cpu.storage);protect(cpu.erased);CpuImage previous=rendered.put(key,cpu);if(previous!=null)untrackCpu(previous);group.live.put(key,cpu);activeRendered.put(group.builder,group);}}
             catch(ReflectiveOperationException failure){throw new IllegalStateException("GPU_RENDERED_IMAGE_UNAVAILABLE",failure);}}
-        void released(Object result,StackWalker.StackFrame frame){require(frame,"com.mojang.blaze3d.vertex.BufferBuilder$RenderedBuffer","release","m_231200_","()V");try{synchronized(this){CpuImage cpu=rendered.get(new Key(result,false));if(cpu!=null){if(!(Boolean)field(result,frame.getDeclaringClass(),"released"))throw new IllegalStateException("GPU_CPU_RELEASE_READBACK_PENDING");cpu.finished=true;cpu.pending="";}}}catch(ReflectiveOperationException failure){throw new IllegalStateException("GPU_CPU_RELEASE_READBACK_UNAVAILABLE",failure);}}
+        void released(Object result,StackWalker.StackFrame frame){require(frame,"com.mojang.blaze3d.vertex.BufferBuilder$RenderedBuffer","release","m_231200_","()V");try{synchronized(this){CpuImage cpu=rendered.get(new Key(result,false));if(cpu!=null){if(!(Boolean)field(result,frame.getDeclaringClass(),"released"))throw new IllegalStateException("GPU_CPU_RELEASE_READBACK_PENDING");finishCpu(cpu);}}}catch(ReflectiveOperationException failure){throw new IllegalStateException("GPU_CPU_RELEASE_READBACK_UNAVAILABLE",failure);}}
         void discarded(Object builder,StackWalker.StackFrame frame){require(frame,"com.mojang.blaze3d.vertex.BufferBuilder","discard","m_85730_","()V");try{synchronized(this){if(number(builder,frame.getDeclaringClass(),"renderedBufferCount")!=0||number(builder,frame.getDeclaringClass(),"renderedBufferPointer")!=0||number(builder,frame.getDeclaringClass(),"nextElementByte")!=0)throw new IllegalStateException("GPU_CPU_DISCARD_READBACK_PENDING");
-            for(CpuImage cpu:rendered.values())if(cpu.builder.get()==builder){cpu.finished=true;cpu.pending="";}}}catch(ReflectiveOperationException failure){throw new IllegalStateException("GPU_CPU_DISCARD_READBACK_UNAVAILABLE",failure);}}
+            BuilderImages group=activeRendered.remove(new Key(builder,false));if(group!=null){for(CpuImage cpu:group.live.values()){cpu.finished=true;cpu.pending="";cpu.group=null;}group.live.clear();}}}catch(ReflectiveOperationException failure){throw new IllegalStateException("GPU_CPU_DISCARD_READBACK_UNAVAILABLE",failure);}}
         private int[] pointBits(Object point,Class<?> vector)throws ReflectiveOperationException{
             if(point==null||point.getClass()!=vector||!vector.getName().equals("org.joml.Vector3f"))throw new IllegalStateException("ACTUAL_QUAD_SORT_POINT_REQUIRED");int[] bits=new int[3];String[] names={"x","y","z"};for(int n=0;n<3;n++){Field value=vector.getDeclaredField(names[n]);if(value.getType()!=float.class||Modifier.isStatic(value.getModifiers())||!Modifier.isPublic(value.getModifiers()))throw new IllegalStateException("CLIENT_SORT_POINT_LAYOUT_CHANGED");bits[n]=Float.floatToRawIntBits(value.getFloat(point));}return bits;
         }
@@ -1351,8 +1412,8 @@ public final class ClientBridge {
             if(mode!=0&&mode!=1&&mode!=3&&mode!=4&&mode!=5&&mode!=6){gpu.pending="GPU_PRIMITIVE_LAYOUT_UNSUPPORTED";selected.clear();return selected;}
             selected.andNot(outside);return selected;
         }
-        private boolean sameBytes(java.nio.ByteBuffer current,byte[] original,int offset,int length){for(int n=0;n<length;n++)if(current.get(n)!=original[offset+n])return false;return true;}
-        private boolean zeroBytes(java.nio.ByteBuffer current){for(int n=0;n<current.capacity();n++)if(current.get(n)!=0)return false;return true;}
+        private boolean sameBytes(java.nio.ByteBuffer current,byte[] original,int offset,int length){return Arrays.equals(readBytes(current,0,length),0,length,original,offset,offset+length);}
+        private boolean zeroBytes(java.nio.ByteBuffer current){for(byte value:readBytes(current,0,current.capacity()))if(value!=0)return false;return true;}
         private boolean eraseVertices(Uploaded gpu,BitSet selected)throws ReflectiveOperationException{
             VertexImage image=gpu.image;if(image.payload()==null||image.stride()<=0){gpu.pending="GPU_VERTEX_PAYLOAD_UNOBSERVED";return false;}Context context=gpu.context;int original=integer(context,36662);boolean complete=true;
             try{gl(context,"GL15","glBindBuffer",new Class<?>[]{I,I},36662,gpu.vertexId);long size=((Number)gl(context,"GL15","glGetBufferParameteri",new Class<?>[]{I,I},36662,34660)).longValue();if(size<image.payload().length){gpu.pending="GPU_VERTEX_STORAGE_SIZE_CHANGED";return false;}
@@ -1397,7 +1458,7 @@ public final class ClientBridge {
                 else{if(builds.get(new Key(token.builder,false))!=token.build||token.build.indexOnly||!buildIdentity(token.builder,token.build))return false;Class<?> type=actualBase(token.builder,"com.mojang.blaze3d.vertex.BufferBuilder");if(!(Boolean)field(token.builder,type,"building")||number(token.builder,type,"vertices")!=token.count||number(token.builder,type,"nextElementByte")<token.pointer+token.expected.length)return false;rows=token.build.vertices;}
                 int first=(offset-token.pointer)/token.stride,end=first+length/token.stride;if(end>rows.size())return false;for(int n=first;n<end;n++)if(!token.selected.get(n)||!stoppedCpuSources(rows.get(n)))return false;
                 if(!after){if(token.checked||!cpuBytes(token.storage,token.pointer,token.expected,token.expected.length))return false;token.outside=readBytes(token.storage,0,token.limit);token.checked=true;return true;}
-                if(!token.checked||token.afterVerified||token.outside==null)return false;for(int n=0;n<token.outside.length;n++){byte expected=n>=offset&&n-offset<length?0:token.outside[n];if(token.storage.get(n)!=expected)return false;}token.afterVerified=true;return true;
+                if(!token.checked||token.afterVerified||token.outside==null)return false;byte[] actual=readBytes(token.storage,0,token.outside.length);for(int n=0;n<token.outside.length;n++){byte expected=n>=offset&&n-offset<length?0:token.outside[n];if(actual[n]!=expected)return false;}token.afterVerified=true;return true;
             }catch(ReflectiveOperationException|RuntimeException changed){return false;}
         }
         private String cpuFailure(Throwable failure){while(failure.getCause()!=null&&failure.getCause()!=failure)failure=failure.getCause();return failure.getClass().getSimpleName()+":"+String.valueOf(failure.getMessage());}
@@ -1440,13 +1501,13 @@ public final class ClientBridge {
         private void retireCpu(){
             for(var entry:rendered.entrySet()){Object result=entry.getKey().get();CpuImage cpu=entry.getValue();if(result==null||cpu.finished||cpu.image.vertices().isEmpty()||!cpu.image.pending().isEmpty())continue;
                 try{if(!cpuIdentity(result,cpu)){cpu.pending="GPU_CPU_STORAGE_IDENTITY_CHANGED";continue;}Class<?> type=actualBase(result,"com.mojang.blaze3d.vertex.BufferBuilder$RenderedBuffer");
-                    if((Boolean)field(result,type,"released")){cpu.finished=true;cpu.pending="";continue;}Object builder=cpu.builder.get(),storage=cpu.storage.get();if(!cpu.image.indexOnly())clearRanges(result,builder,null,cpu,cpu.image);
+                    if((Boolean)field(result,type,"released")){finishCpu(cpu);continue;}Object builder=cpu.builder.get(),storage=cpu.storage.get();if(!cpu.image.indexOnly())clearRanges(result,builder,null,cpu,cpu.image);
                     if(!cpu.image.vertices().stream().allMatch(this::retiredSources)||!retiredSources(sources(result)))continue;Class<?> owner=actualBase(builder,"com.mojang.blaze3d.vertex.BufferBuilder");int count=number(builder,owner,"renderedBufferCount");
                     if(count<=0||count==1&&(Boolean)field(builder,owner,"building")){cpu.pending="GPU_CPU_ORIGINAL_RELEASE_NOT_SAFE";continue;}
                     int bytes=((Number)clientMethod(cpu.image.state().getClass(),"bufferSize","m_166813_","()I").invoke(cpu.image.state())).intValue();
                     if(cpu.pointer<0||bytes<0||cpu.pointer>cpu.capacity-bytes||cpu.pointer+bytes>number(builder,owner,"renderedBufferPointer")){cpu.pending="GPU_CPU_RETAINED_RANGE_CHANGED";continue;}
                     CpuRelease token=new CpuRelease(result,cpu,builder,storage,type,owner,count),previous=releasingCpu.get();protect(token);releasingCpu.set(token);
-                    try{platformVoid(result,type,"release");if(!(Boolean)field(result,type,"released"))cpu.pending="GPU_CPU_ORIGINAL_RELEASE_PENDING";else{cpu.finished=true;cpu.pending="";}}
+                    try{platformVoid(result,type,"release");if(!(Boolean)field(result,type,"released"))cpu.pending="GPU_CPU_ORIGINAL_RELEASE_PENDING";else finishCpu(cpu);}
                     finally{if(previous==null)releasingCpu.remove();else releasingCpu.set(previous);}
                 }catch(Throwable failure){cpu.pending="GPU_CPU_ORIGINAL_RELEASE:"+failure.getClass().getSimpleName()+":"+String.valueOf(failure.getMessage());}
             }
@@ -1521,7 +1582,7 @@ public final class ClientBridge {
             long known=sourceVertices(build.vertices,module,null,false);if(receiver==null||known==0||build.indexOnly)return 0;try{Class<?> type=actualBase(receiver,"com.mojang.blaze3d.vertex.BufferBuilder");if(type!=null&&(!(Boolean)field(receiver,type,"building")||number(receiver,type,"vertices")==0))return 0;return sourceVertices(build.vertices,module,cpuReadback(receiver,build,null),true);}catch(ReflectiveOperationException|RuntimeException unavailable){return known;}
         }
         private long cpuPending(Object receiver,CpuImage cpu,Module module){
-            long known=sourceVertices(cpu.image.vertices(),module,null,false);if(receiver==null||cpu.finished||known==0||cpu.image.indexOnly())return 0;try{Class<?> type=actualBase(receiver,"com.mojang.blaze3d.vertex.BufferBuilder$RenderedBuffer");if(type!=null&&(Boolean)field(receiver,type,"released")){cpu.finished=true;return 0;}return sourceVertices(cpu.image.vertices(),module,cpuReadback(receiver,null,cpu),true);}catch(ReflectiveOperationException|RuntimeException unavailable){return known;}
+            long known=sourceVertices(cpu.image.vertices(),module,null,false);if(receiver==null||cpu.finished||known==0||cpu.image.indexOnly())return 0;try{Class<?> type=actualBase(receiver,"com.mojang.blaze3d.vertex.BufferBuilder$RenderedBuffer");if(type!=null&&(Boolean)field(receiver,type,"released")){finishCpu(cpu);return 0;}return sourceVertices(cpu.image.vertices(),module,cpuReadback(receiver,null,cpu),true);}catch(ReflectiveOperationException|RuntimeException unavailable){return known;}
         }
         private long sortPending(Object receiver,SortImage saved,Module module){
             long known=sourceVertices(saved.image.vertices(),module,null,false);if(receiver==null||known==0)return 0;try{Class<?> type=actualBase(receiver,"com.mojang.blaze3d.vertex.BufferBuilder$SortState");if(type==null)type=actualBase(receiver,"com.mojang.blaze3d.vertex.BufferBuilder");if(type==null)return known;Object data=field(receiver,type,"sortingPoints");if(data==null)return 0;if(!(data instanceof Object[] points)||!data.getClass().descriptorString().equals("[Lorg/joml/Vector3f;"))return known;List<Module[]> rows=saved.image.vertices().subList(0,Math.min(saved.image.vertices().size(),Math.multiplyExact(points.length,4)));known=sourceVertices(rows,module,null,false);if(data!=saved.points.get()||!sortIdentity(receiver,saved))return known;BitSet erased=new BitSet();for(int n=saved.erased.nextSetBit(0);n>=0;n=saved.erased.nextSetBit(n+1))if(n<points.length&&points[n]==saved.identities[n].get()&&Arrays.stream(pointBits(points[n],data.getClass().getComponentType())).allMatch(value->value==0))erased.set(n*4,n*4+4);return sourceVertices(rows,module,erased,true);}catch(ReflectiveOperationException|RuntimeException unavailable){return known;}
@@ -1530,7 +1591,7 @@ public final class ClientBridge {
                 &&number(receiver,type,"vertexBufferId")==gpu.vertexId&&number(receiver,type,"indexBufferId")==gpu.indexId&&number(receiver,type,"arrayObjectId")==gpu.vao
                 &&field(receiver,type,"format")==gpu.image.format()&&field(receiver,type,"mode")==gpu.image.mode()&&number(receiver,type,"indexCount")==gpu.image.indices().length;}
         synchronized long pending(Module module){
-            builds.entrySet().removeIf(entry->entry.getKey().get()==null);rendered.entrySet().removeIf(entry->entry.getKey().get()==null);sorting.entrySet().removeIf(entry->entry.getKey().get()==null);buildSorting.entrySet().removeIf(entry->entry.getKey().get()==null);long count=0;
+            builds.entrySet().removeIf(entry->entry.getKey().get()==null);rendered.entrySet().removeIf(entry->{if(entry.getKey().get()!=null)return false;untrackCpu(entry.getValue());return true;});sorting.entrySet().removeIf(entry->entry.getKey().get()==null);buildSorting.entrySet().removeIf(entry->entry.getKey().get()==null);long count=0;
             for(var entry:builds.entrySet())count+=buildPending(entry.getKey().get(),entry.getValue(),module);
             for(var entry:rendered.entrySet())count+=cpuPending(entry.getKey().get(),entry.getValue(),module);
             for(var entry:sortRecords())count+=sortPending(entry.getKey().get(),entry.getValue(),module);
@@ -1549,8 +1610,8 @@ public final class ClientBridge {
             for(Uploaded gpu:uploaded.values())if(gpu.image!=null&&!gpu.storageReleased&&sourceVertices(gpu.image.vertices(),module,gpu.erased,gpu.commandsDrained&&gpu.fence==0)!=0)return gpu.pending.isEmpty()?"GPU_PAYLOAD_RETIREMENT_PENDING":gpu.pending;
             return "GPU_SOURCE_RECEIPT_READBACK_PENDING";
         }
-        synchronized void reap(Key key){builds.remove(key);rendered.remove(key);sorting.remove(key);buildSorting.remove(key);uploaded.remove(key);}
-        Object[] controls(){return new Object[]{this,builds,rendered,sorting,buildSorting,uploaded,contexts,releasingCpu,maintainingCpu,clearingCpu,clearingSort};}
+        synchronized void reap(Key key){builds.remove(key);CpuImage cpu=rendered.remove(key);if(cpu!=null)untrackCpu(cpu);BuilderImages group=activeRendered.remove(key);if(group!=null){for(CpuImage live:group.live.values())live.group=null;group.live.clear();}sorting.remove(key);buildSorting.remove(key);uploaded.remove(key);}
+        Object[] controls(){return new Object[]{this,builds,rendered,activeRendered,sorting,buildSorting,uploaded,contexts,releasingCpu,maintainingCpu,clearingCpu,clearingSort};}
     }
     public static boolean soundAdmitted(Object sound){
         var frame=boundary();if(!clientMember(frame,"net.minecraft.client.sounds.SoundEngine","play","m_120312_","(Lnet/minecraft/client/resources/sounds/SoundInstance;)V")&&!clientMember(frame,"net.minecraft.client.sounds.SoundEngine","playDelayed","m_120276_","(Lnet/minecraft/client/resources/sounds/SoundInstance;I)V")&&!clientMember(frame,"net.minecraft.client.sounds.SoundEngine","queueTickingSound","m_120282_","(Lnet/minecraft/client/resources/sounds/TickableSoundInstance;)V"))throw new SecurityException("ACTUAL_SOUND_ADMISSION_REQUIRED");
@@ -1778,12 +1839,27 @@ public final class ClientBridge {
         }else if(type.getName().equals("net.minecraft.server.packs.resources.ReloadableResourceManager")&&name.equals("listeners")){
             alternate="f_203816_";descriptor="Ljava/util/List;";
         }
-        Field member;
-        try{member=type.getDeclaredField(name);}
-        catch(NoSuchFieldException original){if(alternate==null)throw original;member=type.getDeclaredField(alternate);}
+        int revision=alternate==null?-1:PlatformMetadata.classRevision(type);
+        var names=revision<0?null:RESOURCE_FIELD_NAMES.get(type);
+        FieldNameHint hint=names==null?null:names.get(name);Field member=null;boolean hinted=false;
+        if(hint!=null&&hint.revision()==revision){
+            try{member=type.getDeclaredField(hint.actual());}
+            catch(NoSuchFieldException changed){names.remove(name,hint);}
+            if(member!=null&&PlatformMetadata.classRevision(type)==revision)hinted=true;else member=null;
+        }
+        if(member==null){
+            try{member=type.getDeclaredField(name);}
+            catch(NoSuchFieldException original){if(alternate==null)throw original;member=type.getDeclaredField(alternate);}
+        }
         if(descriptor!=null&&(Modifier.isStatic(member.getModifiers())||!member.getType().descriptorString().equals(descriptor)))
             throw new IllegalStateException("CLIENT_IMAGE_FIELD_LAYOUT_CHANGED:"+type.getName()+"#"+name);
-        member.setAccessible(true);return member;
+        member.setAccessible(true);
+        // Retain only a successful symbol choice for this actual Class and
+        // VM revision. Every use still gets a fresh Field and performs the
+        // original layout/access checks; absence and permissions are not cached.
+        if(!hinted&&names!=null&&PlatformMetadata.classRevision(type)==revision)
+            names.put(name,new FieldNameHint(revision,member.getName()));
+        return member;
     }
     private static Object field(Object object,Class<?> type,String name)throws ReflectiveOperationException{return resourceField(type,name).get(object);}
     private static Class<?> actualBase(Object object,String name){for(Class<?> type=object.getClass();type!=null;type=type.getSuperclass())if(type.getName().equals(name)&&role(type))return type;return null;}
@@ -1979,6 +2055,6 @@ public final class ClientBridge {
         }
         return active!=0||textures!=0||resources!=0||sounds!=0||reloads!=0||gpu!=0||failures!=0||ui!=0||renderCalls!=0||overlays!=0||widgets!=0||toastQueued!=0||toastVisible!=0?"CLIENT_RETIREMENT_PENDING:active="+active+":textures="+textures+":resources="+resources+":sounds="+sounds+":soundState="+soundState+":reloads="+reloads+":reloadState="+reloadState+":gpu="+gpu+":gpuState="+gpuState+":ui="+ui+":renderCalls="+(renderCalls<0?"unknown":Long.toString(renderCalls))+":overlays="+(overlays<0?"unknown":Long.toString(overlays))+":overlayState="+overlayState+":widgets="+widgets+":widgetShared="+widgetShared+":widgetUnknown="+widgetUnknown+":widgetState="+widgetState+":toastQueued="+toastQueued+":toastVisible="+toastVisible+":toastShared="+toastShared+":toastUnknown="+toastUnknown+":toastState="+toastState+":shared="+shared+":releaseFailures="+failures:"";
     }}
-    public static Object[] controlObjects(){agent();List<Object> roots=new ArrayList<>(Arrays.asList(SOURCES,TEXTURES,ROLES,REQUESTED,CURRENT,RELEASING,ACTIVE,DEAD,IMAGES,PIXELS,RETIREMENTS,FAILURES,SOUNDS,SOUND_STOPS,SOUND_RELEASING,RELOAD_LISTENERS,RELOAD_WORK,UI_OWNERS,UI_PENDING,UI_RETIRING,UI_FIELDS,SCREEN_WIDGETS,SCREEN_ADDING,WIDGET_RETIRING,SCREEN_FIELDS,TOASTS,TOAST_FIELDS,OVERLAY_EVENTS,OVERLAY_REGISTRIES,OVERLAY_NAMES,OVERLAY_INITIALIZING,OVERLAY_FIELDS,RENDER_QUEUES,RENDER_REPLAY,RENDER_FIELDS));Collections.addAll(roots,GPU.controls());return roots.toArray();}
+    public static Object[] controlObjects(){agent();List<Object> roots=new ArrayList<>(Arrays.asList(SOURCES,RESOURCE_FIELD_NAMES,TEXTURES,ROLES,REQUESTED,CURRENT,RELEASING,ACTIVE,DEAD,IMAGES,PIXELS,RETIREMENTS,FAILURES,SOUNDS,SOUND_STOPS,SOUND_RELEASING,RELOAD_LISTENERS,RELOAD_WORK,UI_OWNERS,UI_PENDING,UI_RETIRING,UI_FIELDS,SCREEN_WIDGETS,SCREEN_ADDING,WIDGET_RETIRING,SCREEN_FIELDS,TOASTS,TOAST_FIELDS,OVERLAY_EVENTS,OVERLAY_REGISTRIES,OVERLAY_NAMES,OVERLAY_INITIALIZING,OVERLAY_FIELDS,RENDER_QUEUES,RENDER_REPLAY,RENDER_FIELDS));Collections.addAll(roots,GPU.controls());return roots.toArray();}
     private static void reap(){for(Key key;(key=(Key)DEAD.poll())!=null;){SOURCES.remove(key);TEXTURES.remove(key);IMAGES.remove(key);PIXELS.remove(key);FAILURES.remove(key);SOUNDS.remove(key);RELOAD_LISTENERS.remove(key);UI_OWNERS.remove(key);SCREEN_WIDGETS.remove(key);TOASTS.remove(key);OVERLAY_EVENTS.remove(key);OVERLAY_REGISTRIES.remove(key);OVERLAY_NAMES.remove(key);RENDER_QUEUES.remove(key);}}
 }

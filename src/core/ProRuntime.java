@@ -440,8 +440,14 @@ public final class ProRuntime implements AutoCloseable {
         return direct;
     }
     private static Module bodyModule(Entity entity,Set<Module> selected) {
-        Module direct=selectedObjectModule(entity,selected);if(selected.contains(direct))return direct;
+        Module direct=selectedObjectModule(entity,selected);if(selected.isEmpty()||selected.contains(direct))return direct;
         if(entity instanceof net.minecraft.world.entity.item.ItemEntity item) {
+            // Entity constructs its data holder before assigning entityData,
+            // then defines the subclass entries. Internal owner-field writes
+            // must not read a payload which does not exist yet. Nothing is
+            // cached: publication/admission reads the real item once defined.
+            var data=((Access.EntityState)entity).pro$data();
+            if(data==null||((Access.Data)data).pro$item(Access.ItemBody.pro$itemKey())==null)return direct;
             Module value=definedModule(item.getItem().getItem().getClass());if(selected.contains(value))return value;
         }
         return direct;
@@ -3520,10 +3526,7 @@ public final class ProRuntime implements AutoCloseable {
             {"onEffectAdded","m_142540_","(Lnet/minecraft/world/effect/MobEffectInstance;Lnet/minecraft/world/entity/Entity;)V"},
             {"onEffectUpdated","m_141973_","(Lnet/minecraft/world/effect/MobEffectInstance;ZLnet/minecraft/world/entity/Entity;)V"},
             {"onEffectRemoved","m_7285_","(Lnet/minecraft/world/effect/MobEffectInstance;)V"}};
-        for(Class<?> type:List.of(Entity.class,LivingEntity.class))for(String[] entry:entries)
-            for(var method:PlatformAccess.declaredMethods(type))
-                if((method.getName().equals(entry[0])||method.getName().equals(entry[1]))&&java.lang.invoke.MethodType.methodType(method.getReturnType(),method.getParameterTypes()).descriptorString().equals(entry[2]))
-                    declare.invoke(null,type,method.getName(),entry[2]);
+        for(Class<?> type:List.of(Entity.class,LivingEntity.class))declareDispatchMethods(declare,type,entries);
         String[][] foodEntries={
             {"eat","m_38707_","(IF)V"},
             {"eat","m_38712_","(Lnet/minecraft/world/item/Item;Lnet/minecraft/world/item/ItemStack;)V"},
@@ -3531,17 +3534,22 @@ public final class ProRuntime implements AutoCloseable {
             {"addExhaustion","m_38703_","(F)V"},{"setFoodLevel","m_38705_","(I)V"},
             {"setSaturation","m_38717_","(F)V"},{"setExhaustion","m_150378_","(F)V"},
             {"readAdditionalSaveData","m_38715_","(Lnet/minecraft/nbt/CompoundTag;)V"}};
-        for(String[] entry:foodEntries)for(var method:PlatformAccess.declaredMethods(net.minecraft.world.food.FoodData.class))
-            if((method.getName().equals(entry[0])||method.getName().equals(entry[1]))&&java.lang.invoke.MethodType.methodType(method.getReturnType(),method.getParameterTypes()).descriptorString().equals(entry[2]))
-                declare.invoke(null,net.minecraft.world.food.FoodData.class,method.getName(),entry[2]);
+        declareDispatchMethods(declare,net.minecraft.world.food.FoodData.class,foodEntries);
         String[][] effectEntries={{"update","m_19558_","(Lnet/minecraft/world/effect/MobEffectInstance;)Z"},
                 {"setDetailsFrom","m_19548_","(Lnet/minecraft/world/effect/MobEffectInstance;)V"}};
-        for(String[] entry:effectEntries)for(var method:PlatformAccess.declaredMethods(net.minecraft.world.effect.MobEffectInstance.class))
-            if((method.getName().equals(entry[0])||method.getName().equals(entry[1]))&&java.lang.invoke.MethodType.methodType(method.getReturnType(),method.getParameterTypes()).descriptorString().equals(entry[2]))
-                declare.invoke(null,net.minecraft.world.effect.MobEffectInstance.class,method.getName(),entry[2]);
+        declareDispatchMethods(declare,net.minecraft.world.effect.MobEffectInstance.class,effectEntries);
         declare.invoke(null,net.minecraftforge.eventbus.api.Event.class,"setCanceled","(Z)V");
         EquipmentPolicy.declareDispatchTargets(agent);
         agent.getMethod("installDeclaredDispatch").invoke(null);
+    }
+    static void declareDispatchMethods(java.lang.reflect.Method declare,Class<?> owner,String[][] entries)throws ReflectiveOperationException {
+        // One live VM snapshot per owner and installation pass. No declaration
+        // or permission result survives this registration call.
+        var methods=PlatformAccess.declaredMethods(owner);
+        for(String[] entry:entries)for(var method:methods)
+            if((method.getName().equals(entry[0])||!entry[1].isEmpty()&&method.getName().equals(entry[1]))
+                    &&java.lang.invoke.MethodType.methodType(method.getReturnType(),method.getParameterTypes()).descriptorString().equals(entry[2]))
+                declare.invoke(null,owner,method.getName(),entry[2]);
     }
     public static Object equipmentDeniedResult(Object receiver,String operation,Object arguments) {
         return EquipmentPolicy.deniedResult(receiver,operation,arguments);

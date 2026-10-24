@@ -51,7 +51,7 @@ static int native_thread_worker_heap_borrow(NativeThread *state,OwnerLink *fullS
         if(native_tooling_shutdown||!anchor->admitted||stopped
                 ||(environment&&(environment->closing||environment->disposed)))failure=ERROR_ACCESS_DENIED;
         else if(associated&&known&&anchor->active>0&&!anchor->queued&&!anchor->releasing
-                &&anchor->sourceLease&&anchor->heapSourceLeaseComplete&&anchor->pin&&anchor->image==anchor->pin
+                &&anchor->sourceLease&&anchor->sourceLeaseComplete&&anchor->pin&&anchor->image==anchor->pin
                 &&native_thread_worker_heap_sources_cover(anchor->owners,fullSources)
                 &&native_thread_worker_heap_start_in_image(anchor,start)){
             InterlockedIncrement(&anchor->active);environment->active++;

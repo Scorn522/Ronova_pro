@@ -142,6 +142,7 @@ final class ClientBoundary {
                 for(AbstractInsnNode at:method.instructions.toArray())if(at.getOpcode()==Opcodes.RETURN){InsnList hook=new InsnList();hook.add(new VarInsnNode(Opcodes.ALOAD,0));hook.add(new VarInsnNode(Opcodes.ALOAD,vars[0]));hook.add(new VarInsnNode(Opcodes.ALOAD,original));call(hook,"textureRegistered","(Ljava/lang/Object;Ljava/lang/Object;Ljava/lang/Object;)V");method.instructions.insertBefore(at,hook);}changed=true;
             }
             if(name.equals(TEXTURES)&&member(method,"tick","m_7673_","()V")){InsnList hook=new InsnList();hook.add(new VarInsnNode(Opcodes.ALOAD,0));call(hook,"textureTick","(Ljava/lang/Object;)V");method.instructions.insert(hook);changed=true;}
+            if(name.equals(TEXTURES)&&member(method,"close","close","()V"))changed|=textureClose(node,method);
             if(name.equals("net/minecraft/client/Minecraft")&&args.length==1&&Type.getReturnType(method.desc).getSort()==Type.VOID
                     &&(Set.of("setScreen","m_91152_").contains(method.name)&&args[0].getDescriptor().equals("Lnet/minecraft/client/gui/screens/Screen;")
                     ||Set.of("setOverlay","m_91150_").contains(method.name)&&args[0].getDescriptor().equals("Lnet/minecraft/client/gui/screens/Overlay;"))){
@@ -173,6 +174,30 @@ final class ClientBoundary {
             }
         }
         if(!changed)return null;ControlClassWriter writer=new ControlClassWriter(loader,node);node.accept(writer);return writer.toByteArray();
+    }
+    private static boolean textureClose(ClassNode node,MethodNode close){
+        MethodInsnNode missing=null;
+        for(MethodNode method:node.methods)if(member(method,"safeClose","m_118508_","(Lnet/minecraft/resources/ResourceLocation;Lnet/minecraft/client/renderer/texture/AbstractTexture;)V"))
+            for(AbstractInsnNode at:method.instructions.toArray())if(at instanceof MethodInsnNode invoke
+                    &&invoke.getOpcode()==Opcodes.INVOKESTATIC&&invoke.owner.equals("net/minecraft/client/renderer/texture/MissingTextureAtlasSprite")
+                    &&(invoke.name.equals("getTexture")||invoke.name.equals("m_118080_"))&&invoke.desc.equals("()L"+DYNAMIC+";"))missing=invoke;
+        if(missing==null)return false;
+        for(AbstractInsnNode at:close.instructions.toArray())if(at instanceof MethodInsnNode invoke
+                &&invoke.getOpcode()==Opcodes.INVOKEINTERFACE&&invoke.owner.equals("java/util/Map")
+                &&invoke.name.equals("forEach")&&invoke.desc.equals("(Ljava/util/function/BiConsumer;)V")){
+            // safeClose lazily obtains the missing texture, whose constructor
+            // path registers it in this same manager. Resolve that side effect
+            // before forEach takes its modCount snapshot, not in its callback.
+            // Keep the original map/consumer and all per-texture cleanup. An
+            // empty traversal must not create a texture just to close nothing.
+            InsnList prepare=new InsnList();LabelNode ready=new LabelNode();
+            prepare.add(new InsnNode(Opcodes.DUP2));prepare.add(new InsnNode(Opcodes.POP));
+            prepare.add(new MethodInsnNode(Opcodes.INVOKEINTERFACE,"java/util/Map","isEmpty","()Z",true));
+            prepare.add(new JumpInsnNode(Opcodes.IFNE,ready));
+            prepare.add(new MethodInsnNode(missing.getOpcode(),missing.owner,missing.name,missing.desc,missing.itf));
+            prepare.add(new InsnNode(Opcodes.POP));prepare.add(ready);close.instructions.insertBefore(invoke,prepare);return true;
+        }
+        return false;
     }
     private static boolean renderQueueField(AbstractInsnNode at,String owner){
         return at instanceof FieldInsnNode field&&field.getOpcode()==Opcodes.GETSTATIC&&field.owner.equals(owner)

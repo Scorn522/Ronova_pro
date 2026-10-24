@@ -14,6 +14,8 @@ public final class NativeControl {
     private static volatile boolean installRetryable;
     // Set by initialize0 only for an allocation failure before controller prep.
     private static volatile boolean nativeHandoffRetryable;
+    // Published by initialize0 after the exact private Class entries are bound.
+    private static volatile boolean declarationsBound;
     private static boolean installing,nativeLoadAttempted,nativeLoaded,nativeBoundaryInstalled;
     private static java.lang.reflect.Method nativeImageSelector,nativeImageFinalizer;
     private static Class<?> definitionDirectoryOwner;
@@ -45,6 +47,20 @@ public final class NativeControl {
                         &&frame.getMethodName().equals("<init>")).orElse(false));
     }
     private static final StackWalker CALLER=StackWalker.getInstance(StackWalker.Option.RETAIN_CLASS_REFERENCE);
+    static boolean declarationsReady(){return declarationsBound;}
+    private static boolean declarationCaller(){
+        return CALLER.walk(frames->frames.filter(frame->frame.getDeclaringClass()!=NativeControl.class).findFirst()
+                .map(frame->frame.getDeclaringClass()==PlatformMetadata.class).orElse(false));
+    }
+    static java.lang.reflect.Field[] vmDeclaredFields(Class<?> type){
+        return vmDeclaredFields0(java.util.Objects.requireNonNull(type));
+    }
+    static java.lang.reflect.Method[] vmDeclaredMethods(Class<?> type){
+        return vmDeclaredMethods0(java.util.Objects.requireNonNull(type));
+    }
+    static java.lang.reflect.Constructor<?>[] vmDeclaredConstructors(Class<?> type){
+        return vmDeclaredConstructors0(java.util.Objects.requireNonNull(type));
+    }
     static Long lwjglJniPointer(long address,long value,boolean write){
         if(CALLER.getCallerClass()!=ResourceBridge.class)throw new SecurityException("LWJGL_PLATFORM_BRIDGE_REQUIRED");
         if(!available)throw new IllegalStateException("LWJGL_NATIVE_CONTROL_UNAVAILABLE");
@@ -85,7 +101,7 @@ public final class NativeControl {
                 if(dll==null)return installFailure("OBJECT_CLONE_JNI_PAYLOAD_ABSENT",false);
                 nativeLoadAttempted=true;
                 System.load(dll.toString());nativeLoaded=true;
-                if(abi()!=99)throw new UnsatisfiedLinkError("NATIVE_CONTROL_ABI");
+                if(abi()!=100)throw new UnsatisfiedLinkError("NATIVE_CONTROL_ABI");
             }
             if(!nativeBoundaryInstalled){
                 nativeHandoffRetryable=false;
@@ -917,6 +933,9 @@ public final class NativeControl {
     private static native Class<?> controlWriter0();
     private static native Class<?> rawMemoryWriter0();
     private static native boolean initialize0(Class<?> tasks,Class<?> definitions);
+    private static native java.lang.reflect.Field[] vmDeclaredFields0(Class<?> type);
+    private static native java.lang.reflect.Method[] vmDeclaredMethods0(Class<?> type);
+    private static native java.lang.reflect.Constructor<?>[] vmDeclaredConstructors0(Class<?> type);
     private static native boolean initializeDefinitionDirectory0(Class<?> owner);
     private static native boolean protectPlatformStructures0(Object instrumentation);
     private static native boolean captureEntityClass0(Object entity,Class<?> original);

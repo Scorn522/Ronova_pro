@@ -219,13 +219,11 @@ final class ModGroupBoundary {
         boolean changed=false;
         for(MethodNode method:node.methods) {
             if(method.name.equals("<clinit>")) {
-                method.instructions=new InsnList();method.instructions.add(new InsnNode(Opcodes.RETURN));
-                method.tryCatchBlocks.clear();method.localVariables=null;
-                method.visibleLocalVariableAnnotations=null;method.invisibleLocalVariableAnnotations=null;
+                InsnList empty=new InsnList();empty.add(new InsnNode(Opcodes.RETURN));replace(method,empty);
                 changed=true;continue;
             }
             if(method.name.equals("<init>")) {
-                rejectConstructor(method);changed=true;
+                replace(method,constructorRefusal());changed=true;
                 continue;
             }
             if((method.access&Opcodes.ACC_ABSTRACT)!=0)continue;
@@ -236,7 +234,7 @@ final class ModGroupBoundary {
             methods.incrementAndGet();changed=true;
         }
         if(!changed)return null;
-        // Replaced bodies are straight-line returns. Existing constructors keep their original frames.
+        // Replaced bodies are straight-line returns or constructor refusals.
         // Recomputing unrelated Forge hierarchy here would make a mod stop depend on loader resources.
         ClassWriter writer=new ClassWriter(ClassWriter.COMPUTE_MAXS);node.accept(writer);return writer.toByteArray();
     }
@@ -254,11 +252,11 @@ final class ModGroupBoundary {
         }
         throw new IllegalStateException("ACTUAL_FORGE_CONSTRUCT_MOD_ENTRY_UNAVAILABLE");
     }
-    private static void rejectConstructor(MethodNode method){
+    private static InsnList constructorRefusal(){
         InsnList rejected=new InsnList();rejected.add(new TypeInsnNode(Opcodes.NEW,"java/lang/IllegalStateException"));
         rejected.add(new InsnNode(Opcodes.DUP));rejected.add(new LdcInsnNode("RONOVA_MOD_GROUP_CREATION_REFUSED"));
         rejected.add(new MethodInsnNode(Opcodes.INVOKESPECIAL,"java/lang/IllegalStateException","<init>","(Ljava/lang/String;)V",false));
-        rejected.add(new InsnNode(Opcodes.ATHROW));replace(method,rejected);
+        rejected.add(new InsnNode(Opcodes.ATHROW));return rejected;
     }
     /** Every real body reads the current group policy, including private/bridge/synthetic bodies. */
     static byte[] entries(ClassLoader loader,Module module,String name,byte[] bytes){
@@ -275,7 +273,7 @@ final class ModGroupBoundary {
             gate.add(new MethodInsnNode(Opcodes.INVOKESTATIC,"dev/ronova/pro/bootstrap/ControlBridge","modMethodAllowed","(Ljava/lang/Class;Ljava/lang/Object;)Z",false));
             gate.add(new JumpInsnNode(Opcodes.IFNE,allowed));
             if(method.name.equals("<init>")){
-                MethodNode refusal=new MethodNode();rejectConstructor(refusal);gate.add(refusal.instructions);
+                gate.add(constructorRefusal());
             }else{
                 Type result=Type.getReturnType(method.desc);
                 switch(result.getSort()){

@@ -1,5 +1,19 @@
 # B 批实际报告：2026-10-09 代码收敛接续
 
+## 2026-10-24：保存热路径元数据收敛；第 71 次失败收尾，新候选待手动复测
+
+第 71 次运行的保存线程和一次 30 秒 JFR 采样显示：字段写入反复扫描整个 Unsafe 字段表，IoBridge.platformObject 每次遍历类型层级，保存界面的 clientMethod 反复反射查找方法。本批只收敛这些有现场依据的重复工作，不缓存许可、来源、停止状态或实际读写结果。
+
+ControlBridge 将每代不可变 Guards 的字段列表投影为按接收者类型查询的 ClassValue，三个实际调用方迁移后删除原全表扫描；IoBridge 用 ClassValue 保存不可变平台类型分类，替代逐次父类遍历。ClientBridge 只缓存成功解析的方法，键包含别名、描述符和精确参数类型，按实际类修订号失效；失败与未知修订继续走原解析。运行时来源、生命周期、范围、发布和控制检查保留。RecoveryAgent 补齐 UnsafeFields、MethodKey、MethodHint 的启动加载接线，未新增 JNI 接口。静态上减少这些热路径重复查找，未测量实际提速。
+
+统一构建 build-local-receiver-metadata.log 成功 42s：Bootstrap 与 Agent Java 实际重编，核心与 Prelaunch Java、Control Native 与 Storage Native 复用已有产物；jar/reobfJar 成功，20 tasks：12 executed、8 up-to-date。当前 Core SHA256 为 956606BC729B8035E6E0249A2EE2460462EF561BC04D9870B78E75059E7E7AC6，Core 与 Prelaunch 候选同步到既有 distribution/v1.5-whole-mod；该新候选没有部署或运行。
+
+第 71 次实际运行的仍是 60466FC3 候选：18:11:08Z 已实际入世，18:12:01Z 请求正常关闭，18:17:03Z 到达 Saving worlds；保存持续超过一小时未完成，19:29:23.1433819Z 强制终止，退出码 -1，最终 level.dat 的 Time/DayTime=0。CLASS_IMAGE_REJECTED、DISPATCH_DECLARATION_FAILED、FIELD_POLICY_FAILED、NATIVE_MEMORY_RELEASE_BUSY、SOURCE_FLAGS 在本次日志中均为 0；Native 捕获器此前已中断，没有第 71 次转储，不能宣称全程 Native 验证通过。线程、JFR 和失败世界保留；从第 70 次预备份恢复一致测试副本（16 目录、32 文件、11.01 MB，无失败/跳过/不匹配）。
+
+本次源码同步包含此前连续修复且尚未提交的同一运行阻断主线：Native 内存与生命周期、JNI 元数据、字段策略重入、来源记录合并、构造拒绝和 int[] 检查，以及上述元数据收敛。仅同步相关生产源码、必要状态摘要和候选 JAR，本机 IDE 改动与可再生 bin 保留未提交；原始日志、账户信息、转储和存档不上传。起始 HEAD 为 eb26c77174280bf29a1c7e5c6f7f1a2ecfabd82d，提交与推送按用户本轮新授权执行，结果以本轮交付为准。
+
+用户已明确：新候选明天等其说“开始”再测，不安排自动启动。下一步是在保留原 Mod 与启动参数、先备份测试实例的前提下，核对新候选的实际入世、稳定 Tick、正常保存退出及存档重开；这些结论当前均未验证，源码同步和构建成功不视为正式发布。
+
 ## 2026-10-22：attempt-40 终点与候选 41；执行暂停
 
 40 的真实完整 Mod 客户端完成资源加载，08:27:29 启动 IntegratedServer，08:31:11 开始准备主世界，最后 08:44:11 记录出生区 0%。premain INSTALLED_FULL/Native FULL 不代替世界验收；Bootstrap 待安装边界、Native 来源/租约拒绝和 VirtualFree BUSY 继续保留。真实采样显示任务来源捕获仍有重复工作、客户端缓冲读写仍有调用者查询开销，未取得玩家入场、ProRuntime 稳定世界 Tick 或保存退出 PASS。

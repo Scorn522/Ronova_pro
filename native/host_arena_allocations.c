@@ -282,8 +282,8 @@ static void host_arena_release_scoped_original(void *release,uint64_t address,Na
 static DWORD host_arena_range(const void *pointer,size_t bytes,int restricted){
     if(!pointer||!bytes)return 0;int hit=host_memory_range(pointer,bytes,0,restricted);
     if(hit)return hit>0?ERROR_ACCESS_DENIED:restricted?ERROR_BUSY:ERROR_INVALID_DATA;
-    int locked=restricted?TryAcquireSRWLockExclusive(&native_private_gate):(AcquireSRWLockExclusive(&native_private_gate),1);
-    if(!locked)return ERROR_BUSY;hit=host_memory_output_locked(pointer,bytes);ReleaseSRWLockExclusive(&native_private_gate);
+    if(!native_private_read_lock(restricted))return ERROR_BUSY;
+    hit=host_memory_output_locked(pointer,bytes);ReleaseSRWLockShared(&native_private_gate);
     return hit?hit>0?ERROR_ACCESS_DENIED:ERROR_INVALID_DATA:0;
 }
 static int host_arena_read_size(const void *pointer,size_t *value){

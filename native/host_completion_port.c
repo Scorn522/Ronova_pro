@@ -392,7 +392,7 @@ static uint64_t host_completion_dequeue(HostImport *entry,void *caller,uintptr_t
             if(!error)error=host_completion_outputs(outputs,outputCount,restricted,0);
             if(!error&&(native_owner_stopped(owners)))error=ERROR_ACCESS_DENIED;
             if(!error){
-                int locked=restricted?TryAcquireSRWLockExclusive(&native_private_gate):(AcquireSRWLockExclusive(&native_private_gate),1);
+                int locked=native_private_read_lock(restricted);
                 if(!locked)error=ERROR_BUSY;
                 else {
                     error=host_completion_outputs(outputs,outputCount,restricted,1);
@@ -404,7 +404,7 @@ static uint64_t host_completion_dequeue(HostImport *entry,void *caller,uintptr_t
                                 &&host_completion_copy((void*)a[3],&stage->op,sizeof(stage->op));
                         if(!copied)error=ERROR_NOACCESS;
                     }
-                    ReleaseSRWLockExclusive(&native_private_gate);
+                    ReleaseSRWLockShared(&native_private_gate);
                 }
             }
             if(error){result=FALSE;outgoing.windows=error;host_completion_gap(owners,restricted);}

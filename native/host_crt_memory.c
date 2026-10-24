@@ -192,11 +192,10 @@ static int host_crt_memory_control(const HostCrtMemoryRanges *range,int restrict
     int hit=host_memory_range(range->destination,(SIZE_T)range->writing,0,restricted);
     if(!hit)hit=host_memory_range(range->source,(SIZE_T)range->reading,0,restricted);
     if(hit)return hit;
-    int locked=restricted?TryAcquireSRWLockExclusive(&native_private_gate):(AcquireSRWLockExclusive(&native_private_gate),1);
-    if(!locked)return -1;
+    if(!native_private_read_lock(restricted))return -1;
     hit=host_memory_output_locked(range->destination,(SIZE_T)range->writing);
     if(!hit)hit=host_memory_output_locked(range->source,(SIZE_T)range->reading);
-    ReleaseSRWLockExclusive(&native_private_gate);return hit;
+    ReleaseSRWLockShared(&native_private_gate);return hit;
 }
 static uint64_t host_native_crt_memory(HostImport *entry,void *caller,uintptr_t *a,int callbackEntered){
     HostCrtThreadErrors incoming;int errorsReady=host_crt_memory_errors(entry,&incoming),kind=entry->kind;

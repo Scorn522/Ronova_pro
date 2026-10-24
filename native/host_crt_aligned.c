@@ -109,10 +109,10 @@ static uint64_t host_native_crt_aligned(HostImport *entry,void *caller,uintptr_t
         if(!refusal&&address){
             int hit=host_memory_range((const void*)(uintptr_t)address,1,0,restricted);
             if(hit)refusal=hit>0?ERROR_ACCESS_DENIED:restricted?ERROR_BUSY:ERROR_INVALID_DATA;
-            if(!refusal){int locked=restricted?TryAcquireSRWLockExclusive(&native_private_gate):(AcquireSRWLockExclusive(&native_private_gate),1);
+            if(!refusal){int locked=native_private_read_lock(restricted);
                 if(!locked)refusal=ERROR_BUSY;
                 else {hit=host_memory_output_locked((const void*)(uintptr_t)address,1);
-                    if(hit)refusal=hit>0?ERROR_ACCESS_DENIED:ERROR_INVALID_DATA;ReleaseSRWLockExclusive(&native_private_gate);}}
+                    if(hit)refusal=hit>0?ERROR_ACCESS_DENIED:ERROR_INVALID_DATA;ReleaseSRWLockShared(&native_private_gate);}}
             if(!refusal){int denied=0;
                 if(customScope&&!observing){call=native_memory_host_custom_backing_prepare(env,customScope,NATIVE_MEMORY_HOST_CRT,
                         (void*)target->release,0,address,replacing?NATIVE_MEMORY_HOST_REALLOCATE:NATIVE_MEMORY_HOST_FREE,owners,unknown,&denied);

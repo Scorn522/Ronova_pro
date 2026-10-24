@@ -97,6 +97,7 @@ static void native_arraycopy_classify(JNIEnv *env,jclass type,Binding *binding){
 }
 static int native_arraycopy_prepare(JNIEnv *env){
     NativeThread *state=native_thread();if(!state)return 0;state->control++;
+    if(!native_array_types_prepare(env)){state->control--;return 0;}
     // Resolve the VM target before publishing the class/method used by the
     // already active NativeMethodBind callback, including initializer work.
     HMODULE image=native_vm_getenv_image(native_vm);
@@ -153,12 +154,9 @@ static int native_arraycopy_internal(JNIEnv *env,NativeThread *state,Binding *bi
     state->arraycopyQuery--;return internal&&!native_original.ExceptionCheck(env);
 }
 static int native_arraycopy_kind(JNIEnv *env,jobject array,jclass *type,char *kind){
-    char *signature=NULL;*type=native_original.GetObjectClass(env,array);*kind=0;
+    *type=native_original.GetObjectClass(env,array);*kind=0;
     if(!*type)return 0;
-    jvmtiError result=(*native_ti)->GetClassSignature(native_ti,*type,&signature,NULL);
-    if(result!=JVMTI_ERROR_NONE||!signature){if(signature)(*native_ti)->Deallocate(native_ti,(unsigned char*)signature);native_refuse(env,"NATIVE_ARRAYCOPY_TYPE_UNAVAILABLE");return 0;}
-    if(signature[0]=='[')*kind=signature[1]&&strchr("ZBCSIJFD",signature[1])&&signature[2]=='\0'?signature[1]:'L';
-    (*native_ti)->Deallocate(native_ti,(unsigned char*)signature);return 1;
+    return native_array_kind(env,array,*type,kind);
 }
 static jobject native_arraycopy_snapshot(JNIEnv *env,jclass type,char kind,jint length){
     switch(kind){

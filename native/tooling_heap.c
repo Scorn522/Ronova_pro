@@ -249,8 +249,8 @@ static void native_tooling_heap_release(JNIEnv *env,NativeToolingHeapCall *call)
              */
             AcquireSRWLockExclusive(&native_tooling_records);InterlockedExchange(&anchor->admitted,0);
             if(InterlockedCompareExchange(&anchor->active,0,0)>1){
-                /* A real local worker borrowed this already retained image
-                 * and provenance. End only this synchronous call's hold. */
+                /* A real worker, TLS value or load borrowed this retained
+                 * image and provenance. End only the synchronous call hold. */
                 InterlockedDecrement(&anchor->active);native_tooling_slot_queue_locked(anchor);
                 native_tooling_environment_queue_locked(call->environment);
                 ReleaseSRWLockExclusive(&native_tooling_records);memset(slot,0,sizeof(*slot));continue;
@@ -311,29 +311,14 @@ static jvmtiError native_tooling_heap_slot(JNIEnv *env,NativeToolingHeapCall *ca
     if(image&&!GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS,(LPCSTR)callback,&slot->pin))ready=0;
     if(origin&&env&&native_original.NewWeakGlobalRef)slot->origin=native_original.NewWeakGlobalRef(env,origin);
     if(origin&&!slot->origin)ready=0;
-    if(slot->owners&&env&&native_original.NewGlobalRef){
-        jobjectArray lease=native_tooling_writers(env,slot->owners);
-        if(lease){slot->sourceLease=(jobjectArray)native_original.NewGlobalRef(env,lease);native_original.DeleteLocalRef(env,lease);}
-        if(!slot->sourceLease)ready=0;
-    }
+    int complete=0;
+    if(!native_tooling_retain_sources(env,slot->owners,slot->unknown,&slot->sourceLease,&complete))ready=0;
     slot->restricted=native_has_producer(slot->owners);if(slot->restricted)call->restricted=1;
     if(!ready||env&&native_original.ExceptionCheck&&native_original.ExceptionCheck(env))return JVMTI_ERROR_OUT_OF_MEMORY;
     NativeToolingSlot *anchor=slot->retirement;
     anchor->environment=call->environment;anchor->callback=callback;anchor->owners=slot->owners;
     anchor->origin=slot->origin;anchor->sourceLease=slot->sourceLease;anchor->pin=slot->pin;anchor->image=image;anchor->unknown=slot->unknown;
-    /* Record this actual strong preparation while JNI/loader queries are
-     * permitted. A later heap worker can only borrow these retained facts. */
-    if(slot->sourceLease){
-        jsize expected=0;for(OwnerLink *p=slot->owners;p;p=p->next)expected++;
-        jsize count=native_original.GetArrayLength(env,slot->sourceLease);
-        int complete=count==expected&&!native_original.ExceptionCheck(env);
-        for(jsize i=0;i<count&&complete;i++){
-            jobject module=native_original.GetObjectArrayElement(env,slot->sourceLease,i);
-            complete=module&&!native_original.ExceptionCheck(env);
-            if(module)native_original.DeleteLocalRef(env,module);
-        }
-        anchor->heapSourceLeaseComplete=complete;
-    }
+    anchor->sourceLeaseComplete=complete;
     if(native_original.ExceptionCheck(env))return JVMTI_ERROR_OUT_OF_MEMORY;
     if(image&&slot->pin){
         AcquireSRWLockShared(&host_imports);

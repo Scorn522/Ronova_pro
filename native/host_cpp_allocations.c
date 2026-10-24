@@ -397,12 +397,11 @@ static uint64_t host_native_cpp_allocation(HostImport *entry,void *caller,uintpt
             int hit=host_memory_range((const void*)(uintptr_t)address,1,0,restricted);
             if(hit)refusal=hit>0?ERROR_ACCESS_DENIED:restricted?ERROR_BUSY:ERROR_INVALID_DATA;
             if(!refusal){
-                int locked=restricted?TryAcquireSRWLockExclusive(&native_private_gate):
-                        (AcquireSRWLockExclusive(&native_private_gate),1);
+                int locked=native_private_read_lock(restricted);
                 if(!locked)refusal=ERROR_BUSY;
                 else {hit=host_memory_output_locked((const void*)(uintptr_t)address,1);
                     if(hit)refusal=hit>0?ERROR_ACCESS_DENIED:ERROR_INVALID_DATA;
-                    ReleaseSRWLockExclusive(&native_private_gate);}
+                    ReleaseSRWLockShared(&native_private_gate);}
             }
             if(!refusal){int denied=0;
                 if(custom){call=native_memory_host_custom_backing_prepare(env,custom,NATIVE_MEMORY_HOST_CPP,target->release,context,address,

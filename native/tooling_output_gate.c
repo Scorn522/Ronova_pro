@@ -61,10 +61,6 @@ static jvmtiError native_tooling_output_begin(jvmtiEnv *api,void *caller,int cal
 static void native_tooling_output_end(NativeToolingOutputUse *use){
     native_tooling_use_end(&use->retained);
 }
-static int native_tooling_output_lock(int restricted){
-    if(restricted)return TryAcquireSRWLockExclusive(&native_private_gate)!=0;
-    AcquireSRWLockExclusive(&native_private_gate);return 1;
-}
 static jvmtiError native_tooling_output_check_locked(const NativeToolingOutputSpan *spans,size_t count){
     for(size_t i=0;i<count;i++){
         const NativeToolingOutputSpan *span=&spans[i];if(!span->length)continue;
@@ -77,22 +73,24 @@ static jvmtiError native_tooling_output_check_locked(const NativeToolingOutputSp
 static jvmtiError native_tooling_output_commit(NativeToolingOutputUse *use,const NativeToolingOutputSpan *spans,size_t count){
     NativeToolingOutputWrite writer=__atomic_load_n(&native_tooling_output_writer,__ATOMIC_ACQUIRE);
     if(!writer)return JVMTI_ERROR_NOT_AVAILABLE;
-    if(!native_tooling_output_lock(use->restricted))return JVMTI_ERROR_NOT_AVAILABLE;
+    if(!native_private_read_lock(use->restricted))return JVMTI_ERROR_NOT_AVAILABLE;
     jvmtiError result=native_tooling_output_check_locked(spans,count);
     /* Check every destination before the first effect. An accurate control
      * refusal cannot publish just a count, pointer or one part of a result. */
-    for(size_t i=0;result==JVMTI_ERROR_NONE&&i<count;i++)if(spans[i].length){
-        SIZE_T written=0;
-        if(!writer(GetCurrentProcess(),spans[i].target,spans[i].source,spans[i].length,&written)
-                ||written!=spans[i].length)result=JVMTI_ERROR_ILLEGAL_ARGUMENT;
-    }
-    ReleaseSRWLockExclusive(&native_private_gate);return result;
+    __try {
+        for(size_t i=0;result==JVMTI_ERROR_NONE&&i<count;i++)if(spans[i].length){
+            SIZE_T written=0;
+            if(!writer(GetCurrentProcess(),spans[i].target,spans[i].source,spans[i].length,&written)
+                    ||written!=spans[i].length)result=JVMTI_ERROR_ILLEGAL_ARGUMENT;
+        }
+    } __finally {ReleaseSRWLockShared(&native_private_gate);}
+    return result;
 }
 static jvmtiError native_tooling_output_deallocate(NativeToolingOutputUse *use,unsigned char *memory){
     if(use->internal)return use->record->original->Deallocate(use->record->api,memory);
-    if(!native_tooling_output_lock(use->restricted))return JVMTI_ERROR_NOT_AVAILABLE;
+    if(!native_private_read_lock(use->restricted))return JVMTI_ERROR_NOT_AVAILABLE;
     jvmtiError result=memory&&native_private_range_locked((uintptr_t)memory,(uintptr_t)memory)?JVMTI_ERROR_ACCESS_DENIED:JVMTI_ERROR_NONE;
-    ReleaseSRWLockExclusive(&native_private_gate);
+    ReleaseSRWLockShared(&native_private_gate);
     /* Even a callback-safe JVMTI entry may transition a JavaThread into the VM.
      * Never hold our allocation gate across that transition: a safepoint may
      * need a callback which itself retains native storage. A valid live VM

@@ -91,21 +91,21 @@ static uint64_t host_native_allocation(HostImport *entry,void *caller,uintptr_t 
         if(!error){
             int locked=0;
             if(guard){
-                locked=restricted?TryAcquireSRWLockExclusive(&native_private_gate):(AcquireSRWLockExclusive(&native_private_gate),1);
+                locked=native_private_read_lock(restricted);
                 if(!locked)error=ERROR_BUSY;
                 else {int hit=host_memory_range_locked(address,heap?1:bytes,!heap);
                     if(hit)error=hit>0?ERROR_ACCESS_DENIED:restricted?ERROR_BUSY:ERROR_INVALID_DATA;
                     /* Heap exceptions run outside exception filters before
                      * finally unwinds this frame. Those filters may allocate;
                      * keep only the exact generation lease across that call. */
-                    if(heap){ReleaseSRWLockExclusive(&native_private_gate);locked=0;}}
+                    if(heap){ReleaseSRWLockShared(&native_private_gate);locked=0;}}
             }
             __try {
                 int retiring=cleanup&&native_memory_host_cleanup(tracking)&&host_memory_cleanup_scope(entry,state);
                 if(!error&&native_owner_stopped(owners)&&!retiring)error=ERROR_ACCESS_DENIED;
                 else if(!error&&unknown&&(restricted||native_has_producer(owners))&&!retiring)error=ERROR_INVALID_DATA;
                 if(!error){SetLastError(incoming);result=host_allocation_original(entry,process,arguments);error=GetLastError();returned=1;}
-            } __finally {if(locked)ReleaseSRWLockExclusive(&native_private_gate);}
+            } __finally {if(locked)ReleaseSRWLockShared(&native_private_gate);}
         }
         if(tracking){
             NativeHostMemoryCall *finished=tracking;tracking=NULL;

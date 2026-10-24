@@ -63,6 +63,8 @@ public final class CodeSourceBridge {
     private static final Map<Key,Module[]> STATE_READS=new LedgerMap<>();
     private static final Map<Key,Map<Key,Image>> SELECTIONS=new LedgerMap<>();
     private static final Map<Key,Module[]> RESOURCE_SOURCES=new LedgerMap<>();
+    private record ModuleResource(WeakReference<Object> value,boolean reader){}
+    private static final Map<Key,List<ModuleResource>> PENDING_MODULE_RESOURCES=new LedgerMap<>();
     private static final Map<Key,Module[]> CONFIGURATIONS=new LedgerMap<>();
     private static final Map<Key,Image> CONTEXTS=new LedgerMap<>();
     private static final Map<Key,Holder> HOLDERS=new LedgerMap<>();
@@ -150,7 +152,8 @@ public final class CodeSourceBridge {
         public boolean enqueue(){return writer(WALKER.getCallerClass())&&super.enqueue();}
     }
     private static final class ControlKey extends WeakReference<Object>{
-        final int hash;final long generation;ControlKey previous;volatile ControlKey next;boolean executionList,executionMap,fieldGate;
+        final int hash;final long generation;ControlKey previous;volatile ControlKey next;
+        volatile boolean executionList,executionMap,fieldGate;
         ControlKey(Object value,ControlKey next,long generation){super(value,DEAD_CONTROLS);hash=System.identityHashCode(value);this.generation=generation;this.next=next;if(next!=null)next.previous=this;}
         public void clear(){if(Key.writer(WALKER.getCallerClass()))super.clear();}
         public boolean enqueue(){return Key.writer(WALKER.getCallerClass())&&super.enqueue();}
@@ -764,7 +767,7 @@ public final class CodeSourceBridge {
         // The role belongs to this exact constructor-registered object. A clone
         // or another list of the same class cannot inherit it through its fields.
         // Reading this bit grants no registration, access or mutation authority.
-        synchronized(CONTROLS){return CONTROLS.executionList(object);}
+        return CONTROLS.executionList(object);
     }
     static void executionMetadataMap(Object object){
         Class<?> creator=AUTHORITY.getCallerClass();
@@ -779,7 +782,7 @@ public final class CodeSourceBridge {
     }
     static boolean executionMap(Object object){
         if(!(object instanceof HashMap<?,?>))return false;
-        synchronized(CONTROLS){return CONTROLS.executionMap(object);}
+        return CONTROLS.executionMap(object);
     }
     static void fieldGateControls(java.util.concurrent.locks.ReentrantLock gate){
         Class<?> caller=AUTHORITY.getCallerClass();
@@ -799,7 +802,10 @@ public final class CodeSourceBridge {
     }
     static boolean fieldGateMetadata(Object object){
         if(!(object instanceof java.util.concurrent.locks.ReentrantLock||object instanceof java.util.concurrent.locks.AbstractQueuedSynchronizer))return false;
-        synchronized(CONTROLS){return CONTROLS.fieldGate(object);}
+        // Buckets/links and monotonic role bits are release-published. The
+        // constructor still registers both identities before exposing a gate;
+        // this read must not wait behind unrelated Native notifications.
+        return CONTROLS.fieldGate(object);
     }
     static void mutationControls(Object... objects){
         Class<?> caller=AUTHORITY.getCallerClass().getNestHost();
@@ -906,7 +912,14 @@ public final class CodeSourceBridge {
             reap();for(Module module:layer.modules()){
                 var resolved=layer.configuration().findModule(module.getName()).orElse(null);
                 if(resolved==null||resolved.configuration()!=layer.configuration()||layer.findLoader(module.getName())!=module.getClassLoader())continue;
-                MODULES.put(new Key(resolved.reference(),true),new Ref<>(module));protect(resolved.reference());observed.add(module);
+                Object reference=resolved.reference();
+                Key referenceKey=new Key(reference,false);
+                List<ModuleResource> pending=PENDING_MODULE_RESOURCES.get(referenceKey);
+                if(pending!=null)for(ModuleResource resource:pending){
+                    Object value=resource.value().get();if(value!=null)moduleObjectSource(value,module,resource.reader());
+                }
+                MODULES.put(new Key(reference,true),new Ref<>(module));protect(reference);
+                PENDING_MODULE_RESOURCES.remove(referenceKey);observed.add(module);
             }
         }
         for(Module module:observed)notifyProducer(module);
@@ -946,12 +959,31 @@ public final class CodeSourceBridge {
     private static Module[] resourceSources(Object object){synchronized(MODULES){reap();Module[] sources=RESOURCE_SOURCES.get(new Key(object,false));return sources==null?new Module[0]:sources;}}
     private static void resourceSource(Object object,Module[] sources){if(object==null||sources.length==0)return;Module[] copy=sources.clone();protect((Object)copy);synchronized(MODULES){RESOURCE_SOURCES.put(new Key(object,true),copy);}}
     public static void moduleProvider(Object reference,Object provider){
-        boundary("jar");Module module;synchronized(MODULES){WeakReference<Module> actual=MODULES.get(new Key(reference,false));module=actual==null?null:actual.get();}
-        if(module!=null)resourceSource(provider,merge(resourceSources(provider),new Module[]{module}));
+        boundary("jar");moduleObject(reference,provider,false);
     }
     public static void moduleReader(Object reference,Object reader){
-        boundary("open");Module module;synchronized(MODULES){WeakReference<Module> actual=MODULES.get(new Key(reference,false));module=actual==null?null:actual.get();}
-        if(module!=null){resourceSource(reader,new Module[]{module});protect(reader);}
+        boundary("open");moduleObject(reference,reader,true);
+    }
+    private static void moduleObject(Object reference,Object value,boolean reader){
+        if(value==null)return;
+        // A real reader can enter the loader's cache before its layer is
+        // published. Its immutable loading dependency must already be guarded.
+        if(reader)protect(value);
+        synchronized(MODULES){
+            reap();Key lookup=new Key(reference,false);WeakReference<Module> actual=MODULES.get(lookup);
+            Module module=actual==null?null:actual.get();
+            if(module!=null){moduleObjectSource(value,module,reader);return;}
+            List<ModuleResource> pending=PENDING_MODULE_RESOURCES.get(lookup);
+            if(pending==null){pending=new ArrayList<>();protect(pending);PENDING_MODULE_RESOURCES.put(new Key(reference,true),pending);}
+            for(Iterator<ModuleResource> cursor=pending.iterator();cursor.hasNext();){
+                ModuleResource prior=cursor.next();Object observed=prior.value().get();
+                if(observed==null)cursor.remove();else if(observed==value&&prior.reader()==reader)return;
+            }
+            ModuleResource resource=new ModuleResource(new Ref<>(value),reader);protect(resource,resource.value());pending.add(resource);
+        }
+    }
+    private static void moduleObjectSource(Object value,Module module,boolean reader){
+        resourceSource(value,reader?new Module[]{module}:merge(resourceSources(value),new Module[]{module}));
     }
     public static void resourceLocated(Object provider,Object optional){
         boundary("findFile");if(optional instanceof Optional<?> location&&location.isPresent())resourceSource(location.get(),resourceSources(provider));
@@ -1689,5 +1721,5 @@ public final class CodeSourceBridge {
         throw new NoSuchFieldException(type.getName()+":"+name);
     }
     private static byte[] hash(byte[] bytes){byte[] digest=NativeControl.codeDigest(bytes);protect((Object)digest);return digest;}
-    private static void reap(){for(Key key;(key=(Key)DEAD.poll())!=null;){MODULES.remove(key);IMAGES.remove(key);BYTE_CONTRIBUTORS.remove(key);READERS.remove(key);TREES.remove(key);TREE_INPUTS.remove(key);TREE_PARENTS.remove(key);TREE_IMAGES.remove(key);MIXINS.remove(key);MIXIN_TREES.remove(key);MIXIN_OPTIONS.remove(key);MIXIN_RESTRICTIONS.remove(key);TRACKER_RESTRICTIONS.remove(key);METADATA.remove(key);METADATA_TREES.remove(key);METADATA_ROWS.remove(key);MEMBER_IMAGES.remove(key);CONTEXT_READS.remove(key);STATE_READS.remove(key);SELECTIONS.remove(key);RESOURCE_SOURCES.remove(key);CONFIGURATIONS.remove(key);CONTEXTS.remove(key);HOLDERS.remove(key);WRITERS.remove(key);FIELD_HOLDERS.remove(key);}}
+    private static void reap(){for(Key key;(key=(Key)DEAD.poll())!=null;){MODULES.remove(key);IMAGES.remove(key);BYTE_CONTRIBUTORS.remove(key);READERS.remove(key);TREES.remove(key);TREE_INPUTS.remove(key);TREE_PARENTS.remove(key);TREE_IMAGES.remove(key);MIXINS.remove(key);MIXIN_TREES.remove(key);MIXIN_OPTIONS.remove(key);MIXIN_RESTRICTIONS.remove(key);TRACKER_RESTRICTIONS.remove(key);METADATA.remove(key);METADATA_TREES.remove(key);METADATA_ROWS.remove(key);MEMBER_IMAGES.remove(key);CONTEXT_READS.remove(key);STATE_READS.remove(key);SELECTIONS.remove(key);RESOURCE_SOURCES.remove(key);PENDING_MODULE_RESOURCES.remove(key);CONFIGURATIONS.remove(key);CONTEXTS.remove(key);HOLDERS.remove(key);WRITERS.remove(key);FIELD_HOLDERS.remove(key);}}
 }

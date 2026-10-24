@@ -77,25 +77,11 @@ static int host_module_exit_keep_sources(NativeThread *state,HostLibraryLoad *re
     if(!retained->owners){retained->leaseComplete=1;return 1;}
     if(!restricted)return host_module_keep_sources(state,retained);
     if(!state)return 0;
-    HostLibraryLoad *parent=state->hostLoad;
-    if(!parent)parent=host_module_release_sources(state);
-    if(!parent)parent=host_thread_worker_child(state,NULL);
-    if(parent&&TryAcquireSRWLockExclusive(&host_imports)){
-        int ready=!parent->retired&&!parent->releasing&&!parent->unknown&&parent->leaseComplete
-                &&host_module_sources_cover(parent->owners,retained->owners);
-        if(ready){InterlockedIncrement(&parent->borrowers);retained->sourceParent=parent;retained->leaseComplete=1;}
-        ReleaseSRWLockExclusive(&host_imports);if(ready)return 1;
-    }
-    if(state->hostWorker&&TryAcquireSRWLockExclusive(&host_records)){
-        HostThreadWorker *worker=state->hostWorker;while(worker->sourceParent)worker=worker->sourceParent;
-        int ready=!worker->closed&&!worker->releasing&&!worker->unknown
-                &&(worker->sourceLease||worker->sourceAnchor||worker->sourceLoad)
-                &&host_module_sources_cover(worker->owners,retained->owners);
-        if(ready){worker->borrowers++;retained->sourceWorker=worker;retained->leaseComplete=1;}
-        ReleaseSRWLockExclusive(&host_records);if(ready)return 1;
-    }
+    HostLibraryLoad *parent=host_module_borrow_current(state,retained->parentLoad,retained->owners,1);
+    if(parent){retained->sourceParent=parent;return retained->leaseComplete=1;}
+    if(host_thread_worker_load_borrow_mode(state,retained->owners,&retained->sourceWorker,1))return retained->leaseComplete=1;
     if(native_tooling_load_borrow(state,retained->owners,&retained->toolingAnchor))return retained->leaseComplete=1;
-    if(host_tls_source_borrow(state,retained->owners,&retained->tlsAnchor))return retained->leaseComplete=1;
+    if(host_tls_source_borrow(state,retained->owners,retained->parentLoad,&retained->tlsAnchor))return retained->leaseComplete=1;
     return 0;
 }
 static void __attribute__((noreturn)) host_native_module_exit(HostImport *entry,void *caller,uintptr_t *arguments){
@@ -195,8 +181,13 @@ static void host_module_releases_reap(JNIEnv **environment){
                 if(status==WAIT_OBJECT_0){candidate->exitObserved=1;InterlockedExchange(&retained->calling,0);}
                 else if(status==WAIT_FAILED){candidate->exitError=GetLastError();candidate->cleanupGap=1;}
             }
-            if(!retained->calling&&!retained->borrowers&&!retained->releasing){
-                retained->releasing=1;release=candidate;break;}
+            /* TLS and nested releases borrow this embedded load through its
+             * lifetime gate, not host_imports. Claim before freeing any source
+             * so a concurrent borrower cannot race a zero-count observation. */
+            AcquireSRWLockExclusive(&retained->lifetime);
+            if(!candidate->cleanupGap&&!retained->retired&&!retained->calling&&!retained->borrowers&&!retained->releasing){
+                retained->releasing=1;release=candidate;}
+            ReleaseSRWLockExclusive(&retained->lifetime);if(release)break;
         }
         ReleaseSRWLockExclusive(&host_imports);if(!release)break;
         /* The original may have detached its calling thread. Dispose Java refs
@@ -208,29 +199,37 @@ static void host_module_releases_reap(JNIEnv **environment){
             if(!state||state->hostRelease!=release||state->tooling!=&retained->scope||!release->callbackHeld||!state->callbackHolds){
                 /* An abandoned intervening callback is not this call's scope.
                  * Do not erase it, dereference its stack, or pretend it ended. */
-                AcquireSRWLockExclusive(&host_imports);release->cleanupGap=1;retained->releasing=0;
+                AcquireSRWLockExclusive(&host_imports);release->cleanupGap=1;
+                AcquireSRWLockExclusive(&retained->lifetime);retained->releasing=0;ReleaseSRWLockExclusive(&retained->lifetime);
                 ReleaseSRWLockExclusive(&host_imports);continue;
             }
             state->tooling=retained->scope.previous;state->hostRelease=release->previous;
             state->callbackHolds--;release->callbackHeld=0;release->scopeInstalled=0;
             unresolved=!native_thread_module_exit_reaped(state);if(!unresolved)release->thread=NULL;
         }else if(release->thread)unresolved=1;
+        /* Closing a witness can fail after source release. A retryable record
+         * must never advertise the already released lease as complete. */
+        AcquireSRWLockExclusive(&retained->lifetime);retained->leaseComplete=0;ReleaseSRWLockExclusive(&retained->lifetime);
         if(retained->sourceLease){native_original.DeleteGlobalRef(env,retained->sourceLease);retained->sourceLease=NULL;}
         if(retained->origin){native_original.DeleteWeakGlobalRef(env,retained->origin);retained->origin=NULL;}
         if(retained->sourceWorker){host_thread_worker_load_drop(retained->sourceWorker);retained->sourceWorker=NULL;}
         if(retained->toolingAnchor){native_thread_worker_heap_drop(retained->toolingAnchor);retained->toolingAnchor=NULL;}
         if(retained->tlsAnchor){host_tls_source_drop(retained->tlsAnchor);retained->tlsAnchor=NULL;}
         AcquireSRWLockExclusive(&host_imports);
-        if(retained->sourceParent){InterlockedDecrement(&retained->sourceParent->borrowers);retained->sourceParent=NULL;}
+        if(retained->sourceParent){host_module_load_drop(retained->sourceParent);retained->sourceParent=NULL;}
         if(release->callImage){
             if(InterlockedDecrement(&release->callImage->active)==0&&InterlockedCompareExchange(&release->callImage->retiring,0,0))native_thread_worker_wake();
             release->callImage=NULL;
         }
         if(release->exitThread){
-            if(!host_real_close(release->exitThread)){release->exitError=GetLastError();retained->releasing=0;ReleaseSRWLockExclusive(&host_imports);break;}
+            if(!host_real_close(release->exitThread)){release->exitError=GetLastError();
+                AcquireSRWLockExclusive(&retained->lifetime);retained->releasing=0;ReleaseSRWLockExclusive(&retained->lifetime);
+                ReleaseSRWLockExclusive(&host_imports);break;}
             release->exitThread=NULL;
         }
-        if(unresolved){release->cleanupGap=1;retained->retired=1;retained->releasing=0;ReleaseSRWLockExclusive(&host_imports);continue;}
+        if(unresolved){release->cleanupGap=1;
+            AcquireSRWLockExclusive(&retained->lifetime);retained->retired=1;retained->releasing=0;ReleaseSRWLockExclusive(&retained->lifetime);
+            ReleaseSRWLockExclusive(&host_imports);continue;}
         HostModuleRelease **link=&host_module_releases;while(*link&&*link!=release)link=&(*link)->next;
         if(*link)*link=release->next;ReleaseSRWLockExclusive(&host_imports);
         native_owner_links_free(retained->owners);free(release);native_thread_worker_wake();
@@ -314,7 +313,8 @@ static void native_source_diagnostic(NativeThread *state,const char *site){
         if(native_original.ExceptionCheck(env)){native_original.ExceptionClear(env);javaFlags=-2;}
         state->sourceCapture--;state->control--;
     }
-    fprintf(stderr,"RONOVA_NATIVE_SOURCE_FLAGS:site=%s:tls=%d:scopes=%d:java=%x\n",site,tls,scopes,(unsigned)javaFlags);
+    fprintf(stderr,"RONOVA_NATIVE_SOURCE_FLAGS:site=%s:tls=%d:scopes=%d:java=%x:thread=%lu\n",site,tls,scopes,(unsigned)javaFlags,(unsigned long)GetCurrentThreadId());
+    if(scopes&4)native_source_tooling_diagnostic(state,env);
 }
 static uint64_t host_native_module_load(HostImport *entry,void *caller,uintptr_t *arguments){
     DWORD incoming=GetLastError();OwnerLink *owners=NULL;

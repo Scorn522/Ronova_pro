@@ -177,7 +177,7 @@ public final class RecoveryAgent {
             if(!Integer.valueOf(105).equals(bridge.getMethod("abiVersion").invoke(null)))throw new IllegalStateException("TASK_BRIDGE_ABI_MISMATCH");
             // This classfile was first requested beneath a stopped empty-stream return.
             Class.forName("java.util.stream.IntPipeline$Head",false,null);
-            for(String helper:List.of("SourcePublication","SourceIndexMutation","FastListView","FieldMutation","EquipmentInvocations"))
+            for(String helper:List.of("SourcePublication","SourceIndexMutation","FastListView","FieldMutation","EquipmentInvocations","CreationOrigin","FieldPolicyCall","FieldPolicyState","UnsafeFields"))
                 Class.forName("dev.ronova.pro.bootstrap.ControlBridge$"+helper,true,null);
             // Array-change completion iterates this exact TreeMap tail view.
             // Define its view/value/entry iterator chain before JNI can fill
@@ -189,7 +189,7 @@ public final class RecoveryAgent {
                 Class.forName(helper,false,null);
             // These are the metadata carried by one actual RenderSystem queue
             // publication and its poll-to-finally handoff, never a Mod wrapper.
-            for(String helper:List.of("RenderQueueFields","RenderCallEntry","RenderSubmission","RenderReplay","RenderConsumption"))
+            for(String helper:List.of("RenderQueueFields","RenderCallEntry","RenderSubmission","RenderReplay","RenderConsumption","MethodKey","MethodHint"))
                 Class.forName("dev.ronova.pro.bootstrap.ClientBridge$"+helper,false,null);
             for(String helper:List.of("PacketEntry","Deferred","Cleanup","Submission"))
                 Class.forName("dev.ronova.pro.bootstrap.NetworkBridge$"+helper,false,null);
@@ -611,6 +611,10 @@ public final class RecoveryAgent {
             controlFailure=String.valueOf(name)+":"+failure.getClass().getSimpleName()+":"+String.valueOf(failure.getMessage());
             System.err.println("RONOVA_CONTROL_TRANSFORM_FAILED:"+controlFailure);
         }
+        if(required){
+            System.err.println("RONOVA_CLASS_IMAGE_REJECTED:"+name);
+            failure.printStackTrace(System.err);
+        }
         // Observation failure in an unselected source remains a scoped gap. Only a selected
         // definition or an actual control contract refuses the VM's attempted image.
         return required?new byte[]{0,0,0,0}:input;
@@ -1023,6 +1027,7 @@ public final class RecoveryAgent {
             if(name==null)name=new jdk.internal.org.objectweb.asm.ClassReader(bytes).getClassName();
             if(!name.equals(new jdk.internal.org.objectweb.asm.ClassReader(original).getClassName())||!name.equals(new jdk.internal.org.objectweb.asm.ClassReader(bytes).getClassName())){
                 ExternalCodeImages.failed(writers,name+":NATIVE_FINAL_IMAGE:CLASS_NAME_CHANGED");
+                if(confirmed)System.err.println("RONOVA_NATIVE_FINAL_IMAGE_REJECTED:"+name+":CLASS_NAME_CHANGED");
                 return confirmed?new byte[]{0,0,0,0}:bytes;
             }
             if(producer)ExternalCodeImages.nativeEncoded(loader,name,original,bytes,writers);
@@ -1030,10 +1035,14 @@ public final class RecoveryAgent {
             if(baseline==null)baseline=controlImages.transform(module,loader,name,actual,domain,bytes);
             byte[] current=baseline==null?bytes:baseline;
             byte[] result=transformer.transform(module,loader,name,actual,domain,current);
-            return result==null?current:result;
+            byte[] finalized=result==null?current:result;
+            if(confirmed&&(finalized.length<4||finalized[0]!=(byte)0xca||finalized[1]!=(byte)0xfe||finalized[2]!=(byte)0xba||finalized[3]!=(byte)0xbe))
+                System.err.println("RONOVA_NATIVE_FINAL_IMAGE_REJECTED:"+name+":INVALID_OUTPUT:length="+finalized.length);
+            return finalized;
         }catch(Throwable failure){
             ExternalCodeImages.failed(writers,name+":NATIVE_FINAL_IMAGE:"+failure.getClass().getSimpleName());
             if(confirmed&&declaration!=null)ModGroupBoundary.failed(declaration,String.valueOf(name),failure);
+            if(confirmed){System.err.println("RONOVA_NATIVE_FINAL_IMAGE_REJECTED:"+name);failure.printStackTrace(System.err);}
             return confirmed?new byte[]{0,0,0,0}:bytes;
         }
     }

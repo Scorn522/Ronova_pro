@@ -715,15 +715,7 @@ static int host_capture_all_detail(JNIEnv *env,NativeThread *state,void *caller,
     if(roots)roots->process=0;
     jobjectArray sources=(jobjectArray)native_original.CallStaticObjectMethod(env,native_controls,native_process_sources);
     state->sourceCapture--;ready=sources&&!native_original.ExceptionCheck(env);
-    if(ready){
-        jsize count=native_original.GetArrayLength(env,sources);AcquireSRWLockExclusive(&native_records);
-        for(jsize i=0;i<count&&ready&&!native_original.ExceptionCheck(env);i++){
-            jobject module=native_original.GetObjectArrayElement(env,sources,i);
-            if(!module){if(roots)roots->process=1;if(unknown)*unknown=1;else ready=0;}
-            else {Owner *owner=native_owner(env,module);ready=owner&&native_owner_add(owners,owner);native_original.DeleteLocalRef(env,module);}
-        }
-        ReleaseSRWLockExclusive(&native_records);
-    }
+    if(ready)ready=native_owner_modules(env,sources,owners,unknown,roots?&roots->process:NULL);
     if(sources)native_original.DeleteLocalRef(env,sources);state->control--;
     return ready&&!native_original.ExceptionCheck(env);
 }
@@ -1165,7 +1157,7 @@ typedef struct HostCallErrors {DWORD windows;int crt;unsigned long dos;} HostCal
 static HostCallErrors host_call_errors(void){HostCallErrors value={GetLastError(),errno,_doserrno};return value;}
 static void host_call_restore(HostCallErrors value){_doserrno=value.dos;errno=value.crt;SetLastError(value.windows);}
 static uint64_t host_native_failure(HostImport *entry,DWORD error,const HostCallErrors *incoming,const HostNtThreadErrors *ntBefore){
-    if(host_is_tls(entry->kind)||entry->kind==HOST_RESOLVE||host_is_module_load(entry->kind)){
+    if(host_is_tls(entry->kind)||entry->kind==HOST_RESOLVE||host_is_module_load(entry->kind)||host_is_memory_release(entry->kind)){
         static volatile LONG failures;ULONG count=(ULONG)InterlockedIncrement(&failures);
         if(count<=64||!(count&(count-1)))fprintf(stderr,"NATIVE_HOST_ENTRY_REFUSED:kind=%d:error=%lu:thread=%lu:image=%p\n",
                 entry->kind,(unsigned long)error,(unsigned long)GetCurrentThreadId(),entry->image->handle);
@@ -1886,13 +1878,13 @@ static int host_import(HMODULE image){
             if(__atomic_load_n(slot,__ATOMIC_ACQUIRE)!=expected)return 0;
             DWORD protection;
             if(!host_real_virtual_protect((void*)slot,sizeof(*slot),PAGE_READWRITE,&protection))return 0;
-            AcquireSRWLockExclusive(&native_private_gate);
+            native_private_write_lock(0,NATIVE_PRIVATE_IMPORT_PUBLISH);
             host_original_create=(HostCreateProcessW)expected;host_import_slot=slot;
             void *old=InterlockedCompareExchangePointer(slot,(void*)host_create_process,expected);
             int registered=0;
             if(old==expected||old==(void*)host_create_process)
                 registered=native_private_register_locked(&host_process_import_range,(const void*)slot,sizeof(*slot));
-            ReleaseSRWLockExclusive(&native_private_gate);
+            native_private_write_unlock();
             DWORD ignored;BOOL restored=host_real_virtual_protect((void*)slot,sizeof(*slot),protection,&ignored);
             /* Failed restoration does not undo an actual installed control
              * entry. Its stable JDK-image slot remains registered in that case. */
@@ -2013,12 +2005,8 @@ JNIEXPORT void JNICALL Java_dev_ronova_pro_bootstrap_NativeControl_processExpose
     (void)type;if(!host_gate(env,"expose")||!host_identity(env,process))return;
     OwnerLink *owners=NULL;int known=sources&&!native_original.ExceptionCheck(env);
     jsize count=known?native_original.GetArrayLength(env,sources):0;known=known&&count>0;
-    AcquireSRWLockExclusive(&native_records);
-    for(jsize i=0;i<count&&known;i++){
-        jobject module=native_original.GetObjectArrayElement(env,sources,i);Owner *owner=native_owner(env,module);
-        known=owner&&native_owner_add(&owners,owner);if(module)native_original.DeleteLocalRef(env,module);
-    }
-    ReleaseSRWLockExclusive(&native_records);AcquireSRWLockExclusive(&host_records);
+    if(known)known=native_owner_modules(env,sources,&owners,NULL,NULL);
+    AcquireSRWLockExclusive(&host_records);
     for(HostProcess *record=host_processes;record;record=record->next)
         if(record->token==(uint64_t)token&&record->identity&&native_original.IsSameObject(env,record->identity,process)){
             if(!known||!native_owner_merge(&record->owners,owners))record->unknown=1;host_kernel_refresh(record);break;

@@ -18,6 +18,7 @@
     "Access$EquipmentTags",
     "Access$EffectState",
     "Access$Data",
+    "Access$ItemBody",
     "Access$EntityState",
     "Access$Server",
     "Access$Players",

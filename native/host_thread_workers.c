@@ -33,7 +33,7 @@ static int native_tooling_retirement_jni(JNIEnv**);
 static jobjectArray native_tooling_sources(JNIEnv*,OwnerLink*,int);
 static int native_thread_worker_heap_borrow(NativeThread*,OwnerLink*,void*,void**,HMODULE*);
 static void native_thread_worker_heap_drop(void*);
-static int host_tls_source_borrow(NativeThread*,OwnerLink*,void**);
+static int host_tls_source_borrow(NativeThread*,OwnerLink*,HostLibraryLoad*,void**);
 static void host_tls_source_drop(void*);
 
 static int host_is_local_worker_create(int kind){
@@ -52,12 +52,6 @@ static void host_thread_worker_publish(HostThreadWorker *worker){
         worker->next=head;}
     while(InterlockedCompareExchangePointer((void *volatile*)&host_thread_worker_incoming,worker,head)!=head);
     native_thread_worker_wake();
-}
-static int host_thread_worker_sources_cover(OwnerLink *retained,OwnerLink *actual){
-    if(!retained||!actual)return 0;
-    for(;actual;actual=actual->next){OwnerLink *found=retained;
-        while(found&&found->owner!=actual->owner)found=found->next;if(!found)return 0;}
-    return 1;
 }
 static int host_thread_worker_scope_idle(const NativeThread *state){
     /* Pointer comparison only: an abnormal OS exit can leave a scope pointer
@@ -78,22 +72,41 @@ static HostLibraryLoad *host_thread_worker_child(NativeThread *state,HMODULE ima
     HostLibraryLoad *load=worker&&worker->wrapped?worker->sourceLoad:NULL;
     return load&&(!image||worker->image==image)?load:NULL;
 }
-static int host_thread_worker_load_borrow(NativeThread *state,OwnerLink *owners,HostThreadWorker **anchor){
+static int host_thread_worker_load_borrow_mode(NativeThread *state,OwnerLink *owners,HostThreadWorker **anchor,int tryOnly){
     if(anchor)*anchor=NULL;if(!state||!state->hostWorker||!anchor)return 0;
-    AcquireSRWLockExclusive(&host_records);HostThreadWorker *parent=state->hostWorker;
+    if(tryOnly){if(!TryAcquireSRWLockExclusive(&host_records))return 0;}
+    else AcquireSRWLockExclusive(&host_records);
+    HostThreadWorker *parent=state->hostWorker;
     while(parent&&parent->sourceParent)parent=parent->sourceParent;
+    /* Each successful preparation path owns a real lifetime anchor, including
+     * a child load or a composed TLS token. Descendants must retain the same
+     * anchor instead of treating these already wrapped workers as unretained. */
     int ready=parent&&!parent->closed&&!parent->releasing&&!parent->unknown
-            &&(parent->sourceLease||parent->sourceAnchor||parent->sourceLoad)
+            &&(parent->sourceLease||parent->sourceAnchor||parent->sourceLoad||parent->sourceTlsAnchor)
             &&host_module_sources_cover(parent->owners,owners);
     if(ready){parent->borrowers++;*anchor=parent;}ReleaseSRWLockExclusive(&host_records);return ready;
+}
+static int host_thread_worker_load_borrow(NativeThread *state,OwnerLink *owners,HostThreadWorker **anchor){
+    return host_thread_worker_load_borrow_mode(state,owners,anchor,0);
 }
 static void host_thread_worker_load_drop(HostThreadWorker *anchor){
     if(!anchor)return;AcquireSRWLockExclusive(&host_records);anchor->borrowers--;
     ReleaseSRWLockExclusive(&host_records);native_thread_worker_wake();
 }
-static int host_thread_worker_borrow_child(NativeThread *state,HostThreadWorker *worker,void *start){
+static int host_thread_worker_borrow_child(NativeThread *state,HostThreadWorker *worker,void *start,HostLibraryLoad **observed){
+    *observed=NULL;
     HostLibraryLoad *load=NULL;int unknown=0;
-    if(!host_module_capture(state,start,&worker->owners,NULL,&load,&unknown)||unknown||!load)return 0;
+    if(!host_module_capture(state,start,&worker->owners,NULL,&load,&unknown)||unknown){
+        /* Failure/unknown is not the same as a known JNI-only start with no
+         * child receipt. Neither a fresh global ref nor a parent/TLS fallback
+         * may turn this incomplete source query into a fully wrapped worker. */
+        worker->unknown=1;worker->lifecycleGap=1;worker->error=ERROR_INVALID_DATA;return 0;
+    }
+    if(!load)return 0;
+    /* Even when this receipt covers only part of the full source set, retain
+     * its actual identity for the TLS-history plus missing-sources fallback.
+     * The fallback must acquire its own hold; this is no lifetime grant. */
+    *observed=load;
     int ready=host_module_load_hold(load,worker->owners);
     if(ready)worker->sourceLoad=load;return ready;
 }
@@ -124,14 +137,7 @@ static int host_thread_worker_keep_sources(JNIEnv *env,HostThreadWorker *worker)
     return ready&&worker->sourceLease&&!native_original.ExceptionCheck(env);
 }
 static int host_thread_worker_borrow_sources(NativeThread *state,HostThreadWorker *worker){
-    if(!state||!state->hostWorker)return 0;
-    AcquireSRWLockExclusive(&host_records);
-    HostThreadWorker *parent=state->hostWorker;
-    while(parent&&parent->sourceParent)parent=parent->sourceParent;
-    int ready=parent&&!parent->closed&&!parent->releasing&&(parent->sourceLease||parent->sourceAnchor)
-            &&!parent->unknown&&host_thread_worker_sources_cover(parent->owners,worker->owners);
-    if(ready){parent->borrowers++;worker->sourceParent=parent;}
-    ReleaseSRWLockExclusive(&host_records);return ready;
+    return worker->owners&&host_thread_worker_load_borrow(state,worker->owners,&worker->sourceParent);
 }
 
 /* Returns a complete pre-call record, an explicit unwrapped lifecycle gap, or
@@ -170,17 +176,18 @@ static HostThreadWorker *host_thread_worker_prepare(HostImport *entry,NativeThre
          * the exact start DLL, but cannot use JNI or Java-frame discovery to
          * manufacture a new strong source lease in this window.
          */
-        int nativeOnly=state&&(state->vmDetaching||state->vmThreadEnding||state->hostRelease);
+        int nativeOnly=host_native_only(state);
         int attached=!nativeOnly&&native_vm&&(*native_vm)->GetEnv(native_vm,(void**)&env,JNI_VERSION_1_8)==JNI_OK;
         /* An actual child receipt can carry the full already retained lease
          * into a detached worker. The source token is distinct from heap slots. */
-        int child=host_thread_worker_borrow_child(state,worker,start);
+        HostLibraryLoad *childLoad=NULL;int child=host_thread_worker_borrow_child(state,worker,start,&childLoad);
+        if(worker->unknown)return worker;
         if(attached){
             if(!host_thread_worker_keep_sources(env,worker)){
                 worker->error=ERROR_NOT_ENOUGH_MEMORY;*refused=1;return worker;
             }
         }else if(!child&&!host_thread_worker_borrow_sources(state,worker)
-                &&!host_tls_source_borrow(state,worker->owners,&worker->sourceTlsAnchor)){
+                &&!host_tls_source_borrow(state,worker->owners,childLoad,&worker->sourceTlsAnchor)){
             worker->lifecycleGap=1;return worker;
         }
     }

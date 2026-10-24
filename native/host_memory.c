@@ -48,43 +48,11 @@ static int host_memory_cleanup_scope(HostImport *entry,NativeThread *state){
                 &&InterlockedCompareExchange(&scope->library->closing,0,0))return 1;
     return 0;
 }
-static int host_memory_overlaps(uintptr_t first,uintptr_t last,const void *allocation,SIZE_T size){
-    if(!allocation||!size)return 0;uintptr_t base=(uintptr_t)allocation;
-    uintptr_t span=(uintptr_t)(size-1),end=span>UINTPTR_MAX-base?UINTPTR_MAX:base+span;
-    return first<=end&&base<=last;
-}
-/* Only traverse source chains owned by a currently published Host record.
- * The directory lock also covers removal before a release frame frees its
- * owners; temporary admission/query chains are not part of this directory. */
-static int host_memory_source_range(uintptr_t first,uintptr_t last,OwnerLink *sources){
-    for(;sources;sources=sources->next)
-        if(host_memory_overlaps(first,last,sources,sizeof(*sources)))return 1;
-    return 0;
-}
-static int host_memory_import_range(uintptr_t first,uintptr_t last,int restricted){
-    if(restricted){if(!TryAcquireSRWLockShared(&host_imports))return native_range_unknown("HOST_IMPORTS_BUSY");}
-    else AcquireSRWLockShared(&host_imports);
-    int hit=0;
-    for(HostImage *image=host_images;image&&!hit;image=image->next){
-        hit=host_memory_overlaps(first,last,image,sizeof(*image));
-        for(HostImport *entry=image->imports;entry&&!hit;entry=entry->next){
-            hit=host_memory_overlaps(first,last,entry,sizeof(*entry))
-                    ||host_memory_overlaps(first,last,entry->entry,4096)
-                    ||host_memory_source_range(first,last,entry->sources)
-                    ||image->live&&!image->releasing&&host_memory_overlaps(first,last,(void*)entry->slot,sizeof(*entry->slot));
-        }
-    }
-    for(HostLibraryLoad *load=host_library_loads;load&&!hit;load=load->next)
-        hit=host_memory_overlaps(first,last,load,sizeof(*load))||host_memory_source_range(first,last,load->owners);
-    for(HostModuleRelease *release=host_module_releases;release&&!hit;release=release->next)
-        hit=host_memory_overlaps(first,last,release,sizeof(*release))
-                ||host_memory_source_range(first,last,release->retention.owners);
-    ReleaseSRWLockShared(&host_imports);return hit;
-}
 /* Query one actual local write interval. Protection changes affect whole pages,
- * including a protected allocation sharing the requested page. Query each
- * directory separately; no Host lock spans the Native control-range query. */
-static int host_memory_range(const void *address,SIZE_T size,int pages,int restricted){
+ * including a protected allocation sharing the requested page. Native's exact
+ * private index includes Host allocations, thunks and currently registered IAT
+ * slots; no second Host history scan or imports lock is needed here. */
+static int host_memory_range_query(const void *address,SIZE_T size,int pages,int restricted,int deferPrivate){
     NativeThread *state=native_range_state();if(state)state->controlRangeFailure=NULL;
     /* A zero-sized protection request never authorizes a control page; leave
      * its actual success/failure on an ordinary page to the original API. */
@@ -96,8 +64,10 @@ static int host_memory_range(const void *address,SIZE_T size,int pages,int restr
         uintptr_t remaining=page-1-last%page;
         last=remaining>UINTPTR_MAX-last?UINTPTR_MAX:last+remaining;
     }
-    int hit=native_control_range(first,last,restricted);
-    return hit?hit:host_memory_import_range(first,last,restricted);
+    return native_control_range_query(first,last,restricted,deferPrivate);
+}
+static int host_memory_range(const void *address,SIZE_T size,int pages,int restricted){
+    return host_memory_range_query(address,size,pages,restricted,0);
 }
 /* The caller holds native_private_gate. This is only the final local output
  * check: source/Host/VM directory queries must have finished before the gate. */
@@ -142,10 +112,9 @@ static uint64_t host_native_memory_read(HostImport *entry,void *caller,uintptr_t
     if(!error&&!hit&&read)hit=host_memory_range(read,sizeof(*read),0,restricted);
     if(!error&&hit)error=hit>0?ERROR_ACCESS_DENIED:restricted?ERROR_BUSY:ERROR_INVALID_DATA;
     if(!error){
-        int locked=restricted?TryAcquireSRWLockExclusive(&native_private_gate):
-                (AcquireSRWLockExclusive(&native_private_gate),1);
+        int locked=native_private_read_lock(restricted);
         if(!locked)error=ERROR_BUSY;
-        else {
+        else __try {
             hit=host_memory_output_locked(buffer,size);
             if(!hit&&read)hit=host_memory_output_locked(read,sizeof(*read));
             if(hit)error=hit>0?ERROR_ACCESS_DENIED:restricted?ERROR_BUSY:ERROR_INVALID_DATA;
@@ -159,8 +128,7 @@ static uint64_t host_native_memory_read(HostImport *entry,void *caller,uintptr_t
                 result=((HostReadProcessMemory)entry->original)(process,address,buffer,size,read);
                 error=GetLastError();
             }
-            ReleaseSRWLockExclusive(&native_private_gate);
-        }
+        } __finally {ReleaseSRWLockShared(&native_private_gate);}
     }
     if(process&&!host_real_close(process))InterlockedIncrement(&native_failures);
     native_owner_links_free(owners);SetLastError(error);return (uint64_t)result;
@@ -215,10 +183,9 @@ static uint64_t host_native_memory(HostImport *entry,void *caller,uintptr_t *arg
     }
     if(!error&&hit)error=hit>0?ERROR_ACCESS_DENIED:restricted?ERROR_BUSY:ERROR_INVALID_DATA;
     if(!error&&(local||output)){
-        int locked=restricted?TryAcquireSRWLockExclusive(&native_private_gate):
-                (AcquireSRWLockExclusive(&native_private_gate),1);
+        int locked=native_private_read_lock(restricted);
         if(!locked)error=ERROR_BUSY;
-        else {
+        else __try {
             hit=local?host_memory_range_locked(address,size,entry->kind!=HOST_WRITE_PROCESS_MEMORY):0;
             if(!hit&&output)hit=host_memory_output_locked(output,outputSize);
             if(hit)error=hit>0?ERROR_ACCESS_DENIED:restricted?ERROR_BUSY:ERROR_INVALID_DATA;
@@ -229,8 +196,7 @@ static uint64_t host_native_memory(HostImport *entry,void *caller,uintptr_t *arg
                  * effects and optional output contract; no staging or preclear. */
                 SetLastError(incoming);result=host_memory_original(entry,process,arguments);error=GetLastError();
             }
-            ReleaseSRWLockExclusive(&native_private_gate);
-        }
+        } __finally {ReleaseSRWLockShared(&native_private_gate);}
     }else if(!error){
         /* A remote target with no local output has no private local effect. */
         if(native_owner_stopped(owners))error=ERROR_ACCESS_DENIED;
@@ -271,23 +237,27 @@ static int host_memory_allocation_span(const void *address,const void **allocati
     if(cursor<=requested||cursor<=base)return -1;
     *allocation=(const void*)base;*size=(SIZE_T)(cursor-base);*pages=0;return 0;
 }
-static int host_memory_allocation_range(const void *address,int restricted){
+static int host_memory_allocation_preflight(const void *address,int restricted){
     const void *allocation;SIZE_T size;int pages;
     if(host_memory_allocation_span(address,&allocation,&size,&pages))return -1;
-    return host_memory_range(allocation,size,pages,restricted);
+    return host_memory_range_query(allocation,size,pages,restricted,1);
 }
 static int host_memory_allocation_locked(const void *address){
     const void *allocation;SIZE_T size;int pages;
     if(host_memory_allocation_span(address,&allocation,&size,&pages))return -1;
     return host_memory_range_locked(allocation,size,pages);
 }
-static int host_memory_release_range(HostImport *entry,const uintptr_t *arguments,int restricted){
+/* Only the release path uses this deferred preflight. Before the real local
+ * release it must resolve the affected current span again, check every private
+ * byte, and keep the shared gate through the original API. No private verdict
+ * from this preflight is retained or used to authorize that final effect. */
+static int host_memory_release_preflight(HostImport *entry,const uintptr_t *arguments,int restricted){
     const void *address=(const void*)arguments[entry->kind==HOST_VIRTUAL_FREE_EX?1:0];
     if(entry->kind==HOST_UNMAP_VIEW||entry->kind==HOST_UNMAP_VIEW_EX)
-        return host_memory_allocation_range(address,restricted);
+        return host_memory_allocation_preflight(address,restricted);
     SIZE_T size=(SIZE_T)arguments[entry->kind==HOST_VIRTUAL_FREE_EX?2:1];
     DWORD type=(DWORD)arguments[entry->kind==HOST_VIRTUAL_FREE_EX?3:2];
-    if(type==MEM_DECOMMIT&&size)return host_memory_range(address,size,1,restricted);
+    if(type==MEM_DECOMMIT&&size)return host_memory_range_query(address,size,1,restricted,1);
     /* RELEASE(base,0), DECOMMIT(base,0), and unmapping can remove an entire
      * reservation/view containing differently protected segments. Never infer
      * that a non-base or zero-sized request must fail and so needs no guard.
@@ -296,11 +266,11 @@ static int host_memory_release_range(HostImport *entry,const uintptr_t *argument
      * https://learn.microsoft.com/en-us/windows/win32/api/memoryapi/nf-memoryapi-virtualfree
      * https://learn.microsoft.com/en-us/windows/win32/api/memoryapi/nf-memoryapi-unmapviewoffileex
      */
-    int hit=host_memory_allocation_range(address,restricted);
-    return hit||!size?hit:host_memory_range(address,size,1,restricted);
+    int hit=host_memory_allocation_preflight(address,restricted);
+    return hit||!size?hit:host_memory_range_query(address,size,1,restricted,1);
 }
 /* Repeat the affected current reservation/view and explicit interval under
- * the private gate. Reusing release_range here would take domain locks. */
+ * the private gate. Reusing the preflight here would take domain locks. */
 static int host_memory_release_locked(HostImport *entry,const uintptr_t *arguments){
     const void *address=(const void*)arguments[entry->kind==HOST_VIRTUAL_FREE_EX?1:0];
     if(entry->kind==HOST_UNMAP_VIEW||entry->kind==HOST_UNMAP_VIEW_EX)
@@ -320,6 +290,29 @@ static BOOL host_memory_release_original(HostImport *entry,HANDLE process,const 
         default:SetLastError(ERROR_INVALID_FUNCTION);return FALSE;
     }
 }
+/* A late dump can outlive the failing loader/FLS callback. Record only the
+ * actual BUSY failure, after releasing our gates, with the original result
+ * and arguments. This does not retry, infer ownership or change admission. */
+static void host_memory_release_busy(HostImport *entry,void *caller,const uintptr_t *arguments,
+        NativeThread *state,int restricted,const char *site,const char *range,int returned,uint64_t writer){
+    static volatile LONG reports;ULONG count=(ULONG)InterlockedIncrement(&reports);
+    if(count>32&&(count&(count-1)))return;
+    unsigned address=entry->kind==HOST_VIRTUAL_FREE_EX?1:0;
+    int unmap=entry->kind==HOST_UNMAP_VIEW||entry->kind==HOST_UNMAP_VIEW_EX;
+    SIZE_T bytes=unmap?0:(SIZE_T)arguments[address+1];
+    DWORD flags=entry->kind==HOST_UNMAP_VIEW?0:entry->kind==HOST_UNMAP_VIEW_EX?(DWORD)arguments[1]:(DWORD)arguments[address+2];
+    DWORD incoming=GetLastError();int crt=errno;unsigned long dos=_doserrno;
+    /* Sampled immediately after the failed shared acquisition, not now after
+     * source cleanup. A zero sample or later writer cannot identify the thread
+     * that caused contention; the log deliberately calls this a sample. */
+    unsigned long writerBytes=(unsigned long)((writer>>32)&0xffffff);
+    fprintf(stderr,"NATIVE_MEMORY_RELEASE_BUSY:kind=%d:site=%s:range=%s:thread=%lu:caller=%p:image=%p:address=%p:bytes=%llu:flags=%lu:restricted=%d:original_called=%d:detaching=%u:thread_ending=%u:tooling=%u:heap=%u:loader=%d:writer_sample_thread=%lu:writer_sample_site=%s:writer_sample_bytes=%lu:writer_sample_bytes_capped=%d\n",
+            entry->kind,site,range?range:"NONE",(unsigned long)GetCurrentThreadId(),caller,entry->image->handle,
+            (void*)arguments[address],(unsigned long long)bytes,(unsigned long)flags,restricted,returned,
+            state?state->vmDetaching:0,state?state->vmThreadEnding:0,state?state->toolingRestricted:0,state?state->heapCallback:0,host_loader_callout(),
+            (unsigned long)(uint32_t)writer,native_private_writer_site(writer),writerBytes,writerBytes==0xffffff);
+    _doserrno=dos;errno=crt;SetLastError(incoming);
+}
 static uint64_t host_native_memory_release(HostImport *entry,void *caller,uintptr_t *arguments){
     DWORD incoming=GetLastError();OwnerLink *owners=NULL;int unknown=0;
     NativeThread *state=native_tls==TLS_OUT_OF_INDEXES?NULL:(NativeThread*)TlsGetValue(native_tls);
@@ -327,9 +320,12 @@ static uint64_t host_native_memory_release(HostImport *entry,void *caller,uintpt
             ||state->vmThreadEnding||state->hostUnloadImage||state->hostRelease||state->hostLoad&&state->hostLoad->calling));
     if(!restricted)entry=host_consumed_entry(entry,state,caller);
     if(!host_entry_sources_query(entry,state,caller,&owners,NULL,1,&unknown)){
-        DWORD error=GetLastError();native_owner_links_free(owners);SetLastError(error);return FALSE;
+        DWORD error=GetLastError();native_owner_links_free(owners);
+        if(error==ERROR_BUSY)host_memory_release_busy(entry,caller,arguments,state,restricted,"sources",NULL,0,0);
+        SetLastError(error);return FALSE;
     }
     DWORD error=0;HANDLE process=NULL;BOOL result=FALSE;int returned=0;
+    const char *failure="policy",*rangeFailure=NULL;uint64_t privateWriter=0;
     int local=entry->kind!=HOST_VIRTUAL_FREE_EX;
     /* Only the genuine current unload body may release ordinary resources of
      * its stopped image. This relation grants no control-memory permission. */
@@ -338,31 +334,38 @@ static uint64_t host_native_memory_release(HostImport *entry,void *caller,uintpt
         if(native_owner_stopped(owners)&&!cleanup)error=ERROR_ACCESS_DENIED;
         else if(unknown&&(restricted||native_has_producer(owners)))error=ERROR_INVALID_DATA;
         if(!error&&!local){
+            failure="process_handle";
             HostCompareHandles compare=__atomic_load_n(&host_compare_handles,__ATOMIC_ACQUIRE);
             if(!compare&&!restricted&&host_handle_identity_ready())compare=__atomic_load_n(&host_compare_handles,__ATOMIC_ACQUIRE);
             if(!compare)error=ERROR_NOT_SUPPORTED;
             else if(!host_real_duplicate(GetCurrentProcess(),(HANDLE)arguments[0],GetCurrentProcess(),&process,0,FALSE,DUPLICATE_SAME_ACCESS))error=GetLastError();
             else local=compare(process,GetCurrentProcess())!=0;
         }
-        int hit=!error&&local?host_memory_release_range(entry,arguments,restricted):0;
+        if(!error)failure="control_range";
+        int hit=!error&&local?host_memory_release_preflight(entry,arguments,restricted):0;
+        if(hit<0&&state)rangeFailure=state->controlRangeFailure;
         if(!error&&hit)error=hit>0?ERROR_ACCESS_DENIED:restricted?ERROR_BUSY:ERROR_INVALID_DATA;
         if(!error&&local){
-            int locked=restricted?TryAcquireSRWLockExclusive(&native_private_gate):(AcquireSRWLockExclusive(&native_private_gate),1);
-            if(!locked)error=ERROR_BUSY;
+            failure="private_gate";
+            int locked=native_private_read_lock(restricted);
+            if(!locked){error=ERROR_BUSY;privateWriter=state?state->privateRangeWriter:0;}
             else __try {
+                failure="final_range";
                 hit=host_memory_release_locked(entry,arguments);
                 if(hit)error=hit>0?ERROR_ACCESS_DENIED:restricted?ERROR_BUSY:ERROR_INVALID_DATA;
                 else if(native_owner_stopped(owners)&&!(cleanup&&host_memory_cleanup_scope(entry,state)))error=ERROR_ACCESS_DENIED;
-                else {SetLastError(incoming);result=host_memory_release_original(entry,process,arguments);error=GetLastError();returned=1;}
-            } __finally {ReleaseSRWLockExclusive(&native_private_gate);}
+                else {failure="original_api";SetLastError(incoming);result=host_memory_release_original(entry,process,arguments);error=GetLastError();returned=1;}
+            } __finally {ReleaseSRWLockShared(&native_private_gate);}
         }else if(!error){
             if(native_owner_stopped(owners))error=ERROR_ACCESS_DENIED;
-            else {SetLastError(incoming);result=host_memory_release_original(entry,process,arguments);error=GetLastError();returned=1;}
+            else {failure="original_api";SetLastError(incoming);result=host_memory_release_original(entry,process,arguments);error=GetLastError();returned=1;}
         }
     } __finally {
         DWORD interrupted=GetLastError();
         if(process&&!host_real_close(process))InterlockedIncrement(&native_failures);
-        native_owner_links_free(owners);SetLastError(returned||error?error:interrupted);
+        native_owner_links_free(owners);
+        if(!result&&error==ERROR_BUSY)host_memory_release_busy(entry,caller,arguments,state,restricted,failure,rangeFailure,returned,privateWriter);
+        SetLastError(returned||error?error:interrupted);
     }
     return (uint64_t)result;
 }

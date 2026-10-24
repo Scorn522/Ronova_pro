@@ -1,6 +1,41 @@
 /* JNI array pointers always refer to our copy. The real Critical pair ends
  * before control returns to native user code: nested pairs can consult policy
  * without calling Java under the JVM's GC locker. */
+typedef struct NativeArrayTypes {jclass primitive[8],references;} NativeArrayTypes;
+static NativeArrayTypes *native_array_types;
+static const char native_array_kinds[]="BCIJFDSZ";
+/* VM built-in array identities, not caller/source permission. Publish the
+ * complete immutable set before installing either array boundary. A failed
+ * or competing preparation releases only its own unpublished global refs. */
+static int native_array_types_prepare(JNIEnv *env){
+    if(__atomic_load_n(&native_array_types,__ATOMIC_ACQUIRE))return 1;
+    NativeArrayTypes *types=(NativeArrayTypes*)calloc(1,sizeof(*types));if(!types)return 0;
+    int ready=1;
+    for(unsigned i=0;i<9&&ready&&!native_original.ExceptionCheck(env);i++){
+        char primitive[3]={'[',i<8?native_array_kinds[i]:0,0};
+        jclass local=native_original.FindClass(env,i<8?primitive:"[Ljava/lang/Object;");
+        jclass global=local?(jclass)native_original.NewGlobalRef(env,local):NULL;
+        if(local)native_original.DeleteLocalRef(env,local);
+        if(i<8)types->primitive[i]=global;else types->references=global;
+        ready=global!=NULL;
+    }
+    ready=ready&&!native_original.ExceptionCheck(env);
+    if(ready&&!InterlockedCompareExchangePointer((void *volatile*)&native_array_types,types,NULL))return 1;
+    for(unsigned i=0;i<8;i++)if(types->primitive[i])native_original.DeleteGlobalRef(env,types->primitive[i]);
+    if(types->references)native_original.DeleteGlobalRef(env,types->references);
+    free(types);return ready;
+}
+static int native_array_kind(JNIEnv *env,jobject array,jclass type,char *kind){
+    *kind=0;NativeArrayTypes *types=__atomic_load_n(&native_array_types,__ATOMIC_ACQUIRE);
+    if(!types){native_refuse(env,"NATIVE_ARRAY_TYPE_IDENTITIES_UNAVAILABLE");return 0;}
+    for(unsigned i=0;i<8;i++)if(native_original.IsSameObject(env,type,types->primitive[i])){
+        *kind=native_array_kinds[i];return 1;
+    }
+    // Object[] also admits reference-component and multidimensional arrays;
+    // their exact component compatibility is still checked by the copy path.
+    if(native_original.IsInstanceOf(env,array,types->references))*kind='L';
+    return !native_original.ExceptionCheck(env);
+}
 typedef struct NativeArrayCopy {
     jobject array;
     void *contents;
@@ -57,10 +92,10 @@ static void *native_array_copy(JNIEnv *env,jarray array,jboolean *copy,char expe
     if(!native_jni_output_context(env))return NULL;
     if(native_caller_stopped(caller)){native_refuse(env,"RONOVA_STOPPED_NATIVE_ARRAY_POINTER");return NULL;}
     if(!native_pin_allowed(env,array))return NULL;
-    jclass type=native_original.GetObjectClass(env,array);char *signature=NULL;
-    if(!type||(*native_ti)->GetClassSignature(native_ti,type,&signature,NULL)!=JVMTI_ERROR_NONE)return NULL;
-    char kind=signature[0]=='['&&signature[1]&&signature[2]==0?signature[1]:0;
-    (*native_ti)->Deallocate(native_ti,(unsigned char*)signature);native_original.DeleteLocalRef(env,type);
+    jclass type=native_original.GetObjectClass(env,array);char kind=0;
+    if(!type)return NULL;
+    int typed=native_array_kind(env,array,type,&kind);native_original.DeleteLocalRef(env,type);
+    if(!typed)return NULL;
     unsigned width=native_array_width(kind);
     if(!width||(expected&&kind!=expected)){native_refuse(env,"RONOVA_NATIVE_ARRAY_TYPE_MISMATCH");return NULL;}
     jsize length=native_original.GetArrayLength(env,array);if(native_original.ExceptionCheck(env))return NULL;

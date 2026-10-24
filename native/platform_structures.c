@@ -44,6 +44,31 @@ static void native_platform_backend(const NativePlatformEnv17 *normal,jvmtiEnv *
         native_tooling_slot_queue_locked(held);ReleaseSRWLockExclusive(&native_tooling_records);
     }
 }
+/* Resolve only the absence of Java attribution observed before Java startup.
+ * The caller has validated the VM, JPLIS local-storage back pointers and the
+ * actual InstrumentationImpl global receiver. Match the currently installed
+ * callback slots as well: neither a DLL name nor an arbitrary GetEnv result
+ * grants a platform identity. Native/Java owners and other unknowns survive. */
+static void native_platform_startup_sources(const NativePlatformEnv17 *snapshot,jvmtiEnv *api){
+    NativeToolingEnv *record=native_tooling_environment(api);
+    HMODULE backend=(HMODULE)InterlockedCompareExchangePointer((void *volatile*)&native_instrument_backend,NULL,NULL);
+    if(!record||!backend||record->own||record->owners||!record->startupUnknown)return;
+    AcquireSRWLockExclusive(&record->mutation);
+    AcquireSRWLockExclusive(&native_tooling_records);
+    if(!record->closing&&!record->disposed&&snapshot->external==record->shadow&&*api==record->shadow){
+        InterlockedExchange(&record->unknown,0);
+        if(record->version){
+#define PLATFORM_STARTUP_SOURCE(NAME,COUNT) \
+            {NativeToolingSlot *slot=record->version->slots[TOOLING_##NAME]; \
+             if(slot&&slot->admitted&&slot->startupUnknown&&!slot->owners&&slot->image==backend \
+                     &&slot->entry==(void*)snapshot->callbacks.NAME)InterlockedExchange(&slot->unknown,0);}
+            NATIVE_TOOLING_CALLBACKS(PLATFORM_STARTUP_SOURCE)
+#undef PLATFORM_STARTUP_SOURCE
+        }
+    }
+    ReleaseSRWLockExclusive(&native_tooling_records);
+    ReleaseSRWLockExclusive(&record->mutation);
+}
 static int native_platform_profile(JNIEnv *env){
     if(InterlockedCompareExchange(&native_platform_ready,0,0))return 1;
     if(!InitOnceExecuteOnce(&code_vm_once,code_vm_initialize,env,NULL)||!code_vm_layout.ready)return 0;
@@ -70,7 +95,11 @@ static int native_platform_range(uintptr_t first,uintptr_t last,int restricted){
         hit=native_control_overlaps(first,last,(void*)record->address,sizeof(NativePlatformJplis));
         if(!hit){
             NativePlatformJplis image;
-            if(!code_vm_read(record->address,&image,sizeof(image))||image.vm!=native_vm){
+            /* This retained controller anchor is a live local snapshot, just
+             * like the JNI slots checked by the same range admission. Keep
+             * fault handling and the VM identity check without a kernel read
+             * on every scalar Unsafe/NativeImage access. Never cache api. */
+            if(!native_control_snapshot((const void*)record->address,&image,sizeof(image))||image.vm!=native_vm){
                 unknown=1;native_range_unknown("JPLIS_AGENT_UNREADABLE");continue;}
             hit=native_control_overlaps(first,last,image.normal.api,native_platform_env_span(image.normal.api))
                     ||native_control_overlaps(first,last,image.retransform.api,native_platform_env_span(image.retransform.api));
@@ -98,7 +127,7 @@ JNIEXPORT jboolean JNICALL Java_dev_ronova_pro_bootstrap_NativeControl_protectPl
     valid=actual&&native_bootstrap_class(env,actual,"Lsun/instrument/InstrumentationImpl;");
     jfieldID field=valid?native_original.GetFieldID(env,actual,"mNativeAgent","J"):NULL;
     uintptr_t address=field?(uintptr_t)native_original.GetLongField(env,instrumentation,field):0;
-    NativePlatformJplis image;NativePlatformEnv17 normal;
+    NativePlatformJplis image;NativePlatformEnv17 normal,retransform;
     valid=address&&!native_original.ExceptionCheck(env)&&code_vm_read(address,&image,sizeof(image))
             &&image.vm==native_vm&&image.normal.agent==(void*)address&&image.normal.api
             &&(!image.retransform.api||image.retransform.agent==(void*)address);
@@ -107,7 +136,6 @@ JNIEXPORT jboolean JNICALL Java_dev_ronova_pro_bootstrap_NativeControl_protectPl
                 &&normal.magic==0x71ee&&normal.local==(void*)(address+offsetof(NativePlatformJplis,normal));
     }
     if(valid&&image.retransform.api){
-        NativePlatformEnv17 retransform;
         valid=code_vm_read((uintptr_t)image.retransform.api,&retransform,sizeof(retransform))
                 &&retransform.magic==0x71ee&&retransform.local==(void*)(address+offsetof(NativePlatformJplis,retransform));
     }
@@ -125,7 +153,13 @@ JNIEXPORT jboolean JNICALL Java_dev_ronova_pro_bootstrap_NativeControl_protectPl
     if(!found){prepared->next=native_platform_agents;native_platform_agents=prepared;prepared=NULL;}
     else valid=native_original.IsSameObject(env,found->instrumentation,instrumentation);
     ReleaseSRWLockExclusive(&native_platform_gate);
-    if(valid)native_platform_backend(&normal,image.normal.api);
+    if(valid){
+        native_platform_backend(&normal,image.normal.api);
+        if(image.instrumentation){
+            native_platform_startup_sources(&normal,image.normal.api);
+            if(image.retransform.api)native_platform_startup_sources(&retransform,image.retransform.api);
+        }
+    }
 done:
     if(prepared){if(prepared->instrumentation)native_original.DeleteGlobalRef(env,prepared->instrumentation);free(prepared);}
     if(actual)native_original.DeleteLocalRef(env,actual);state->control--;

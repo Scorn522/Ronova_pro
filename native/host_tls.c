@@ -73,7 +73,7 @@ static void WINAPI host_tls_fiber_end(PVOID);
 static HostTlsThread *host_tls_thread_current(void);
 static HostTlsFiber *host_tls_fiber_current(void);
 static HostTlsSlot *host_tls_slot_find(int,DWORD);
-static int host_tls_source_borrow(NativeThread*,OwnerLink*,void**);
+static int host_tls_source_borrow(NativeThread*,OwnerLink*,HostLibraryLoad*,void**);
 static void host_tls_source_drop(void*);
 
 static int host_is_tls(int kind){
@@ -328,7 +328,7 @@ static int host_tls_capture_detail(NativeThread *state,OwnerLink **owners,int *u
      * later JNI/OS operation on this thread. Keep all observed contributors,
      * but obtain call origins from the live Java/native/binding scopes.
      * The value gap remains in observed.unknown, TLS reports, callback scopes
-     * and the complete-lease/retirement checks; it grants no private lease. */
+     * and data-retirement checks; it grants no source identity or lifetime. */
     if(thread){ready=native_owner_merge(owners,thread->observed.owners);if(unknown)*unknown|=thread->ended||thread->gap;}
     /* The private sentinel can run before the application's FLS callbacks.
      * Its ended bit is not termination of the still-executing OS thread.
@@ -337,35 +337,62 @@ static int host_tls_capture_detail(NativeThread *state,OwnerLink **owners,int *u
     ReleaseSRWLockShared(&host_tls_records);SetLastError(incoming);return ready;
 }
 static int host_tls_capture(NativeThread *state,OwnerLink **owners,int *unknown){return host_tls_capture_detail(state,owners,unknown,NULL);}
-static int host_tls_source_borrow(NativeThread *state,OwnerLink *owners,void **token){
+/* Retain identities, not the provenance verdict of an opaque TLS value.
+ * A container can have an unknown/partial data history and still own complete
+ * leases for some named contributors. Only those actual leases can discharge
+ * a requested identity; bare OwnerLinks and partial leases cannot. Callers
+ * hold host_tls_records, including publication of each new reference. */
+static int host_tls_retain_known(HostTlsSources *retained,OwnerLink **missing,const HostTlsSources *from){
+    for(HostTlsLeaseLink *p=from->leases;p&&*missing;p=p->next){HostTlsLease *lease=p->lease;
+        if(lease->unknown||!lease->complete||lease->releasing||lease->queued||lease->references<=0
+                ||native_owner_stopped(lease->owners))continue;
+        int needed=0;
+        for(OwnerLink *actual=*missing;actual&&!needed;actual=actual->next)
+            for(OwnerLink *held=lease->owners;held;held=held->next)if(held->owner==actual->owner){needed=1;break;}
+        if(!needed)continue;
+        if(!host_tls_sources_add(retained,lease->owners,lease,0))return 0;
+        for(OwnerLink **at=missing;*at;){OwnerLink *actual=*at,*held=lease->owners;
+            while(held&&held->owner!=actual->owner)held=held->next;
+            if(held){*at=actual->next;free(actual);}else at=&actual->next;
+        }
+    }
+    return 1;
+}
+static int host_tls_retain_slot_known(HostTlsSources *retained,OwnerLink **missing,const HostTlsSlot *slot){
+    if(!host_tls_retain_known(retained,missing,&slot->aggregate))return 0;
+    if(slot->gap)for(HostTlsContribution *p=slot->contributions;p&&*missing;p=p->next)
+        if(!host_tls_retain_known(retained,missing,&p->sources))return 0;
+    for(HostTlsOperation *p=slot->operations;p&&*missing;p=p->next)
+        if(p->sources&&!host_tls_retain_known(retained,missing,p->sources))return 0;
+    return 1;
+}
+static int host_tls_source_borrow(NativeThread *state,OwnerLink *owners,HostLibraryLoad *selected,void **token){
     if(token)*token=NULL;if(!state||!token||!owners)return 0;
     DWORD incoming=GetLastError();HostTlsThread *thread=host_tls_thread_current();HostTlsFiber *fiber=host_tls_fiber_current();
     if(!thread){SetLastError(incoming);return 0;}HostTlsBorrow *borrow=(HostTlsBorrow*)calloc(1,sizeof(*borrow));
     if(!borrow){SetLastError(incoming);return 0;}
-    /* This leaf never enters the VM or loader while held. Unrelated directory
-     * contention cannot invalidate a real callback's existing source lease. */
+    OwnerLink *missing=NULL;int ready=native_owner_merge(&missing,owners);
+    /* This leaf never enters the VM or loader while held. Unknown history is
+     * left on the original observations/slots for callback and retirement
+     * decisions. The new lifetime token covers only an already-known request. */
     AcquireSRWLockExclusive(&host_tls_records);
-    int ready=host_tls_sources_merge(&borrow->sources,&thread->observed);
-    if(fiber)ready=ready&&host_tls_sources_merge(&borrow->sources,&fiber->observed);
-    if(thread->activation)ready=ready&&host_tls_slot_sources(&borrow->sources,thread->activation->slot,1);
-    ready=ready&&!thread->ended&&!borrow->sources.unknown&&!borrow->sources.partial&&borrow->sources.leases&&!native_owner_stopped(owners);
-    OwnerLink *missing=NULL;
-    if(ready)for(OwnerLink *p=owners;p;p=p->next){OwnerLink *actual=borrow->sources.owners;
-        while(actual&&actual->owner!=p->owner)actual=actual->next;
-        if(!actual&&!native_owner_add(&missing,p->owner)){ready=0;break;}}
+    ready=ready&&!thread->ended&&!thread->gap&&(!fiber||!fiber->gap)&&!native_owner_stopped(owners);
+    if(ready)ready=host_tls_retain_known(&borrow->sources,&missing,&thread->observed);
+    if(ready&&fiber)ready=host_tls_retain_known(&borrow->sources,&missing,&fiber->observed);
+    if(ready&&thread->activation)ready=host_tls_retain_slot_known(&borrow->sources,&missing,thread->activation->slot);
+    ready=ready&&borrow->sources.leases;
     ReleaseSRWLockExclusive(&host_tls_records);
     /* A B worker/load can carry a TLS receipt from A. Retain A's actual read
      * lease and borrow the remaining B sources from a real executing parent;
      * requiring one parent to own both would silently lose the A contribution. */
-    if(ready&&missing){HostLibraryLoad *load=state->hostLoad;
-        if(!load)load=host_module_release_sources(state);
-        if(!load)load=host_thread_worker_child(state,NULL);
-        if(host_module_load_hold(load,missing))borrow->load=load;
+    if(ready&&missing){
+        borrow->load=host_module_borrow_current(state,selected,missing,0);
         if(!borrow->load&&!host_thread_worker_load_borrow(state,missing,&borrow->worker)
                 &&!native_tooling_load_borrow(state,missing,&borrow->tooling))ready=0;
         if(ready&&!native_owner_merge(&borrow->sources.owners,missing))ready=0;
     }
     native_owner_links_free(missing);
+    if(ready)ready=host_tls_cover(borrow->sources.owners,owners)&&!native_owner_stopped(borrow->sources.owners);
     if(ready)*token=borrow;else {
         AcquireSRWLockExclusive(&host_tls_records);host_tls_sources_clear(&borrow->sources);ReleaseSRWLockExclusive(&host_tls_records);
         host_module_load_drop(borrow->load);
@@ -393,14 +420,10 @@ static HostTlsLease *host_tls_lease_prepare(NativeThread *state,OwnerLink *owner
         if(sources)native_original.DeleteLocalRef(env,sources);
         if(!lease->strong||native_original.ExceptionCheck(env))lease->complete=0;
     }else if(!unknown){
-        HostLibraryLoad *candidates[4]={selected,state?state->hostLoad:NULL,
-            state?host_module_release_sources(state):NULL,state?host_thread_worker_child(state,NULL):NULL};
-        for(unsigned i=0;i<4&&!lease->complete;i++){
-            int duplicate=0;for(unsigned j=0;j<i;j++)duplicate|=candidates[j]==candidates[i];
-            if(!duplicate&&host_module_load_hold(candidates[i],owners)){lease->load=candidates[i];lease->complete=1;}}
+        lease->load=host_module_borrow_current(state,selected,owners,0);lease->complete=lease->load!=NULL;
         if(!lease->complete&&host_thread_worker_load_borrow(state,owners,&lease->worker))lease->complete=1;
         if(!lease->complete&&native_tooling_load_borrow(state,owners,&lease->tooling))lease->complete=1;
-        if(!lease->complete&&host_tls_source_borrow(state,owners,&lease->tls))lease->complete=1;
+        if(!lease->complete&&host_tls_source_borrow(state,owners,selected,&lease->tls))lease->complete=1;
     }
     /* Retain even a partial lease as an explicit gap, rather than forgetting
      * an observed source because its weak Java identity later disappears. */

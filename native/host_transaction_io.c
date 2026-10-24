@@ -49,9 +49,9 @@ static DWORD host_transaction_io_outputs(HostTransactionIoOutput *outputs,unsign
 }
 static DWORD host_transaction_io_output_gate(HostTransactionIoOutput *outputs,unsigned count,int restricted){
     DWORD error=host_transaction_io_outputs(outputs,count,restricted,0);if(error||!count)return error;
-    int locked=restricted?TryAcquireSRWLockExclusive(&native_private_gate):(AcquireSRWLockExclusive(&native_private_gate),1);
+    int locked=native_private_read_lock(restricted);
     if(!locked)return ERROR_BUSY;
-    error=host_transaction_io_outputs(outputs,count,restricted,1);ReleaseSRWLockExclusive(&native_private_gate);return error;
+    error=host_transaction_io_outputs(outputs,count,restricted,1);ReleaseSRWLockShared(&native_private_gate);return error;
 }
 /* The original OVERLAPPED contract keeps caller storage valid until its real
  * operation completes. Copy only the actual kernel status/count, under the
@@ -59,13 +59,13 @@ static DWORD host_transaction_io_output_gate(HostTransactionIoOutput *outputs,un
 static int host_transaction_io_status(HostTransactionPendingIo *request,ULONG_PTR high,ULONG_PTR status){
     LPOVERLAPPED target=request?request->publicOverlapped:NULL;if(!target)return 0;
     if(host_memory_range(target,sizeof(*target),0,1))return 0;
-    if(!TryAcquireSRWLockExclusive(&native_private_gate))return 0;int ready=0;
+    if(!native_private_read_lock(1))return 0;int ready=0;
     __try {
         if(!host_memory_output_locked(target,sizeof(*target))){
             __try {target->InternalHigh=high;MemoryBarrier();target->Internal=status;ready=1;}
             __except(EXCEPTION_EXECUTE_HANDLER){ready=0;}
         }
-    } __finally {ReleaseSRWLockExclusive(&native_private_gate);}
+    } __finally {ReleaseSRWLockShared(&native_private_gate);}
     return ready;
 }
 static void host_transaction_io_timer_close(HostTransactionPendingIo *request){

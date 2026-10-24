@@ -23,9 +23,15 @@ static int host_thread_worker_load_borrow(NativeThread*,OwnerLink*,struct HostTh
 static void host_thread_worker_load_drop(struct HostThreadWorker*);
 static int native_tooling_load_borrow(NativeThread*,OwnerLink*,void**);
 static void native_thread_worker_heap_drop(void*);
-static int host_tls_source_borrow(NativeThread*,OwnerLink*,void**);
+static int host_tls_source_borrow(NativeThread*,OwnerLink*,HostLibraryLoad*,void**);
 static void host_tls_source_drop(void*);
 
+/* These actual VM/loader windows cannot acquire a new Java source lease.
+ * Queries may only use their already retained native relationships. */
+static int host_native_only(NativeThread *state){
+    return host_loader_callout()||(state&&(state->heapCallback||state->toolingRestricted||state->vmDetaching
+            ||state->vmThreadEnding||state->hostUnloadImage||state->hostRelease||state->hostLoad&&state->hostLoad->calling));
+}
 static int host_module_sources_cover(OwnerLink *retained,OwnerLink *actual){
     for(;actual;actual=actual->next){OwnerLink *found=retained;
         while(found&&found->owner!=actual->owner)found=found->next;if(!found)return 0;}
@@ -60,20 +66,40 @@ static int host_module_load_current(const HostLibraryLoad *load,HostImage *image
 /* This leaf admission gate is also used when claiming retirement. It never
  * encloses JNI, a loader operation, or a directory acquisition. Image admission
  * serializes the retained pin with a newly admitted borrower. */
-static int host_module_load_hold(HostLibraryLoad *load,OwnerLink *owners){
+static int host_module_load_hold_mode(HostLibraryLoad *load,OwnerLink *owners,int tryOnly){
     if(!load)return 0;HostImage *image=load->image;
-    if(image)AcquireSRWLockExclusive(&image->calls);
-    AcquireSRWLockExclusive(&load->lifetime);
+    if(image){
+        if(tryOnly){if(!TryAcquireSRWLockShared(&image->calls))return 0;}
+        else AcquireSRWLockShared(&image->calls);
+    }
+    if(tryOnly){if(!TryAcquireSRWLockShared(&load->lifetime)){
+        if(image)ReleaseSRWLockShared(&image->calls);return 0;}}
+    else AcquireSRWLockShared(&load->lifetime);
     int ready=!load->retired&&!load->releasing&&!load->unknown&&load->leaseComplete
             &&(!image||image->live&&image->pin&&!image->releasing)
             &&!native_owner_stopped(owners)&&!native_owner_stopped(load->owners)&&host_module_sources_cover(load->owners,owners);
     if(ready)InterlockedIncrement(&load->borrowers);
-    ReleaseSRWLockExclusive(&load->lifetime);
-    if(image)ReleaseSRWLockExclusive(&image->calls);return ready;
+    ReleaseSRWLockShared(&load->lifetime);
+    if(image)ReleaseSRWLockShared(&image->calls);return ready;
 }
+static int host_module_load_hold(HostLibraryLoad *load,OwnerLink *owners){return host_module_load_hold_mode(load,owners,0);}
 static void host_module_load_drop(HostLibraryLoad *load){
-    if(!load)return;AcquireSRWLockExclusive(&load->lifetime);
-    InterlockedDecrement(&load->borrowers);ReleaseSRWLockExclusive(&load->lifetime);
+    if(!load)return;AcquireSRWLockShared(&load->lifetime);
+    InterlockedDecrement(&load->borrowers);ReleaseSRWLockShared(&load->lifetime);
+}
+/* Each candidate is an actual current-call relationship. A failed first hold
+ * does not hide another valid scope; identity deduplication avoids holding the
+ * same receipt twice. The selected receipt is usable without a Java thread,
+ * but only after the complete owners and current lifetime pass load_hold. */
+static HostLibraryLoad *host_module_borrow_current(NativeThread *state,HostLibraryLoad *selected,OwnerLink *owners,int tryOnly){
+    HostLibraryLoad *candidates[4]={selected,state?state->hostLoad:NULL,
+            state?host_module_release_sources(state):NULL,state?host_thread_worker_child(state,NULL):NULL};
+    for(unsigned i=0;i<4;i++){
+        if(!candidates[i])continue;
+        int duplicate=0;for(unsigned j=0;j<i;j++)duplicate|=candidates[j]==candidates[i];
+        if(!duplicate&&host_module_load_hold_mode(candidates[i],owners,tryOnly))return candidates[i];
+    }
+    return NULL;
 }
 /* Source records and links are immutable after release publication and remain
  * tombstones. Normal writers still hold host_imports; callback readers need
@@ -102,18 +128,12 @@ static int host_module_select_locked(HostImage *image,NativeThread *state,HostLi
     }
     /* A B binding/callback/worker executing in a shared child remains B's
      * actual invocation. A's old load alone cannot poison that invocation. */
-    int scoped=0,ready=1;
+    int scoped=state&&(state->registration||state->depth||state->library||state->tooling),ready=1;
     if(state){
-        if(state->registration){scoped=1;if(owners)ready=ready&&native_owner_merge(owners,state->registration->owners);
-            if(unknown)*unknown|=state->registration->unknown;}
-        for(unsigned i=0;i<state->depth;i++){Binding *binding=state->stack[i];
-            if(!binding)continue;scoped=1;if(owners)ready=ready&&native_owner_merge(owners,binding->owners);
-            if(unknown)*unknown|=binding->hostUnknown;}
-        for(NativeLibraryScope *scope=state->library;scope;scope=scope->previous){
-            scoped=1;if(owners)ready=ready&&native_owner_merge(owners,scope->library->owners);}
-        for(NativeToolingScope *scope=state->tooling;scope;scope=scope->previous){
-            scoped=1;if(owners)ready=ready&&native_owner_merge(owners,scope->owners);
-            if(unknown)*unknown|=scope->unknown;}
+        /* Use the complete active registration chain, not just its top entry.
+         * This pure-C collector is also used by actual callback capture; with
+         * no output set it still propagates current unknown-source flags. */
+        if(scoped)ready=native_capture_active_sources(state,owners,unknown,NULL,NULL);
         /* Select a parent relationship only when this actual registration and
          * the complete current native scope cover that receipt's sources. */
         if(scoped&&ready){HostLibraryLoad *chosen=NULL;int mixed=0;
@@ -192,8 +212,10 @@ static HostImage *host_module_address_locked(void *address,HMODULE actual,int re
 static int host_module_capture(NativeThread *state,void *address,OwnerLink **owners,
         HostImage **actualImage,HostLibraryLoad **actualLoad,int *unknown){
     if(actualImage)*actualImage=NULL;if(actualLoad)*actualLoad=NULL;
-    int restricted=state&&(state->heapCallback||state->vmDetaching||state->vmThreadEnding||state->hostUnloadImage||state->hostRelease
-            ||state->hostLoad&&state->hostLoad->calling);
+    /* No physical caller was requested. The caller collects the actual C/Java
+     * scopes separately; a NULL address cannot select an observed image. */
+    if(!address)return 1;
+    int restricted=host_native_only(state);
     HMODULE handle=restricted?NULL:native_image(address);
     if(restricted){if(!TryAcquireSRWLockShared(&host_imports))return 0;}
     else AcquireSRWLockShared(&host_imports);
@@ -204,8 +226,7 @@ static int host_module_capture(NativeThread *state,void *address,OwnerLink **own
 }
 static void host_module_parent(NativeThread *state,void *caller,HostLibraryLoad *load){
     uintptr_t address=(uintptr_t)caller;
-    int restricted=state&&(state->vmDetaching||state->vmThreadEnding||state->hostUnloadImage||state->hostRelease
-            ||state->hostLoad&&state->hostLoad->calling);
+    int restricted=host_native_only(state);
     if(restricted){if(!TryAcquireSRWLockShared(&host_imports)){load->unknown=1;return;}
         if(!TryAcquireSRWLockShared(&native_records)){ReleaseSRWLockShared(&host_imports);load->unknown=1;return;}
     }else {AcquireSRWLockShared(&host_imports);AcquireSRWLockShared(&native_records);}
@@ -240,19 +261,16 @@ static void host_module_binding_leave(Binding *binding){
             &&InterlockedCompareExchange(&binding->hostImage->retiring,0,0))native_thread_worker_wake();
 }
 static int host_module_borrow_load(NativeThread *state,HostLibraryLoad *load){
-    HostLibraryLoad *parent=state?state->hostLoad:NULL;
-    if(!parent&&state)parent=host_module_release_sources(state);
-    if(!parent&&state)parent=host_thread_worker_child(state,NULL);
-    int ready=host_module_load_hold(parent,load->owners);
+    HostLibraryLoad *parent=host_module_borrow_current(state,load->parentLoad,load->owners,0);
+    int ready=parent!=NULL;
     if(ready){load->sourceParent=parent;load->leaseComplete=1;}
     if(!ready&&host_thread_worker_load_borrow(state,load->owners,&load->sourceWorker))ready=load->leaseComplete=1;
     if(!ready&&native_tooling_load_borrow(state,load->owners,&load->toolingAnchor))ready=load->leaseComplete=1;
-    if(!ready&&host_tls_source_borrow(state,load->owners,&load->tlsAnchor))ready=load->leaseComplete=1;
+    if(!ready&&host_tls_source_borrow(state,load->owners,load->parentLoad,&load->tlsAnchor))ready=load->leaseComplete=1;
     return ready;
 }
 static int host_module_keep_sources(NativeThread *state,HostLibraryLoad *load){
-    JNIEnv *env=NULL;int nativeOnly=state&&(state->vmDetaching||state->vmThreadEnding||state->heapCallback||state->hostUnloadImage||state->hostRelease
-            ||state->hostLoad&&state->hostLoad->calling);
+    JNIEnv *env=NULL;int nativeOnly=host_native_only(state);
     int attached=!nativeOnly&&native_vm&&(*native_vm)->GetEnv(native_vm,(void**)&env,JNI_VERSION_1_8)==JNI_OK;
     if(!attached)return !load->unknown&&host_module_borrow_load(state,load);
     jobjectArray sources=native_tooling_sources(env,load->owners,load->unknown);

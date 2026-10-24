@@ -2131,8 +2131,21 @@ public final class EquipmentPolicy {
         }return false;
     }
     static boolean arrayDenied(Object array,int index,Object next){
-        if(array==null||!array.getClass().isArray()||index<0||index>=Array.getLength(array))return false;
-        Object old=Array.get(array,index);if(array.getClass().getComponentType().isPrimitive()?samePrimitive(old,next):old==next)return false;
+        Object old;
+        if(array instanceof int[] values){
+            if(index<0||index>=values.length)return false;
+            // Chunk palette encoding repeatedly stores unchanged ints. Read
+            // that exact value without reflection/boxing; the caller still
+            // performs its guarded store. Changed values keep the full path.
+            if(next instanceof Integer value&&values[index]==value.intValue())return false;
+            // The remaining carrier checks consume prior ItemStack identity,
+            // which cannot occur in an int[]. They still inspect every live
+            // slot/link and the actual next value below.
+            old=null;
+        }else{
+            if(array==null||!array.getClass().isArray()||index<0||index>=Array.getLength(array))return false;
+            old=Array.get(array,index);if(array.getClass().getComponentType().isPrimitive()?samePrimitive(old,next):old==next)return false;
+        }
         if(slotArrayDenied(array,index,next))return true;
         if(listWriteDenied(array,index,next))return true;
         return elementDenied(array,old,next,index);
@@ -2325,13 +2338,13 @@ public final class EquipmentPolicy {
             &&(mapped(frame,operation,ITEM_ACTIONS)||BlockItem.class.isAssignableFrom(frame.getDeclaringClass())&&mapped(frame,operation,BLOCK_ACTIONS)||BottleItem.class.isAssignableFrom(frame.getDeclaringClass())&&mapped(frame,operation,BOTTLE_ACTIONS));}
     static void declareDispatchTargets(Class<?> agent)throws ReflectiveOperationException {
         Method declare=agent.getMethod("declareDispatchArgumentsTarget",Class.class,String.class,String.class);
-        declare(declare,LivingEntity.class,new String[][]{{"setItemSlot","m_8061_","(Lnet/minecraft/world/entity/EquipmentSlot;Lnet/minecraft/world/item/ItemStack;)V"},{"setItemInHand","m_21008_","(Lnet/minecraft/world/InteractionHand;Lnet/minecraft/world/item/ItemStack;)V"}});
-        declare(declare,ItemStack.class,new String[][]{{"setCount","m_41764_","(I)V"},{"grow","m_41769_","(I)V"},{"shrink","m_41774_","(I)V"},{"setTag","m_41751_","(Lnet/minecraft/nbt/CompoundTag;)V"},{"setDamageValue","m_41721_","(I)V"},{"split","m_41620_","(I)Lnet/minecraft/world/item/ItemStack;"},{"copyAndClear","m_278832_","()Lnet/minecraft/world/item/ItemStack;"},{"deserializeNBT","","(Lnet/minecraft/nbt/CompoundTag;)V"},{"hurtAndBreak","m_41622_","(ILnet/minecraft/world/entity/LivingEntity;Ljava/util/function/Consumer;)V"},{"hurt","m_220157_","(ILnet/minecraft/util/RandomSource;Lnet/minecraft/server/level/ServerPlayer;)Z"}});
-        declare(declare,Inventory.class,new String[][]{{"setItem","m_6836_","(ILnet/minecraft/world/item/ItemStack;)V"},{"removeItem","m_7407_","(II)Lnet/minecraft/world/item/ItemStack;"},{"removeItemNoUpdate","m_8016_","(I)Lnet/minecraft/world/item/ItemStack;"},{"removeItem","m_36057_","(Lnet/minecraft/world/item/ItemStack;)V"},{"removeFromSelected","m_182403_","(Z)Lnet/minecraft/world/item/ItemStack;"},{"dropAll","m_36071_","()V"},{"clearContent","m_6211_","()V"},{"load","m_36035_","(Lnet/minecraft/nbt/ListTag;)V"},{"replaceWith","m_36006_","(Lnet/minecraft/world/entity/player/Inventory;)V"}});
-        declare(declare,ContainerHelper.class,new String[][]{{"takeItem","m_18966_","(Ljava/util/List;I)Lnet/minecraft/world/item/ItemStack;"},{"removeItem","m_18969_","(Ljava/util/List;II)Lnet/minecraft/world/item/ItemStack;"}});
-        declare(declare,ARRAY_LIST,new String[][]{{"set","","(ILjava/lang/Object;)Ljava/lang/Object;"},{"replaceAll","","(Ljava/util/function/UnaryOperator;)V"},{"sort","","(Ljava/util/Comparator;)V"}});
+        ProRuntime.declareDispatchMethods(declare,LivingEntity.class,new String[][]{{"setItemSlot","m_8061_","(Lnet/minecraft/world/entity/EquipmentSlot;Lnet/minecraft/world/item/ItemStack;)V"},{"setItemInHand","m_21008_","(Lnet/minecraft/world/InteractionHand;Lnet/minecraft/world/item/ItemStack;)V"}});
+        ProRuntime.declareDispatchMethods(declare,ItemStack.class,new String[][]{{"setCount","m_41764_","(I)V"},{"grow","m_41769_","(I)V"},{"shrink","m_41774_","(I)V"},{"setTag","m_41751_","(Lnet/minecraft/nbt/CompoundTag;)V"},{"setDamageValue","m_41721_","(I)V"},{"split","m_41620_","(I)Lnet/minecraft/world/item/ItemStack;"},{"copyAndClear","m_278832_","()Lnet/minecraft/world/item/ItemStack;"},{"deserializeNBT","","(Lnet/minecraft/nbt/CompoundTag;)V"},{"hurtAndBreak","m_41622_","(ILnet/minecraft/world/entity/LivingEntity;Ljava/util/function/Consumer;)V"},{"hurt","m_220157_","(ILnet/minecraft/util/RandomSource;Lnet/minecraft/server/level/ServerPlayer;)Z"}});
+        ProRuntime.declareDispatchMethods(declare,Inventory.class,new String[][]{{"setItem","m_6836_","(ILnet/minecraft/world/item/ItemStack;)V"},{"removeItem","m_7407_","(II)Lnet/minecraft/world/item/ItemStack;"},{"removeItemNoUpdate","m_8016_","(I)Lnet/minecraft/world/item/ItemStack;"},{"removeItem","m_36057_","(Lnet/minecraft/world/item/ItemStack;)V"},{"removeFromSelected","m_182403_","(Z)Lnet/minecraft/world/item/ItemStack;"},{"dropAll","m_36071_","()V"},{"clearContent","m_6211_","()V"},{"load","m_36035_","(Lnet/minecraft/nbt/ListTag;)V"},{"replaceWith","m_36006_","(Lnet/minecraft/world/entity/player/Inventory;)V"}});
+        ProRuntime.declareDispatchMethods(declare,ContainerHelper.class,new String[][]{{"takeItem","m_18966_","(Ljava/util/List;I)Lnet/minecraft/world/item/ItemStack;"},{"removeItem","m_18969_","(Ljava/util/List;II)Lnet/minecraft/world/item/ItemStack;"}});
+        ProRuntime.declareDispatchMethods(declare,ARRAY_LIST,new String[][]{{"set","","(ILjava/lang/Object;)Ljava/lang/Object;"},{"replaceAll","","(Ljava/util/function/UnaryOperator;)V"},{"sort","","(Ljava/util/Comparator;)V"}});
         Method actions=agent.getMethod("declareEquipmentActionTarget",Class.class,String.class,String.class,String.class);
-        for(Method setter:LivingEntity.class.getDeclaredMethods())if(names(setter.getName(),"setItemSlot","m_8061_")
+        for(Method setter:PlatformAccess.declaredMethods(LivingEntity.class))if(names(setter.getName(),"setItemSlot","m_8061_")
                 &&MethodType.methodType(setter.getReturnType(),setter.getParameterTypes()).descriptorString().equals("(Lnet/minecraft/world/entity/EquipmentSlot;Lnet/minecraft/world/item/ItemStack;)V"))
             actions.invoke(null,LivingEntity.class,setter.getName(),"(Lnet/minecraft/world/entity/EquipmentSlot;Lnet/minecraft/world/item/ItemStack;)V","carrier-call");
         declareActions(actions,ServerPlayerGameMode.class,GAME_ACTIONS);
@@ -2340,12 +2353,9 @@ public final class EquipmentPolicy {
         declareActions(actions,BlockItem.class,BLOCK_ACTIONS);declareActions(actions,BottleItem.class,BOTTLE_ACTIONS);
     }
     private static void declareActions(Method declare,Class<?> owner,String[][] mappings)throws ReflectiveOperationException{
-        for(String[] mapping:mappings)for(Method method:owner.getDeclaredMethods())if(names(method.getName(),mapping[0],mapping[1])
+        Method[] methods=PlatformAccess.declaredMethods(owner);
+        for(String[] mapping:mappings)for(Method method:methods)if(names(method.getName(),mapping[0],mapping[1])
                 &&MethodType.methodType(method.getReturnType(),method.getParameterTypes()).toMethodDescriptorString().equals(mapping[2]))
             declare.invoke(null,owner,method.getName(),mapping[2],mapping[3]);
-    }
-    private static void declare(Method declare,Class<?> owner,String[][] entries)throws ReflectiveOperationException{
-        for(String[] entry:entries)for(Method method:owner.getDeclaredMethods())if((method.getName().equals(entry[0])||!entry[1].isEmpty()&&method.getName().equals(entry[1]))
-                &&MethodType.methodType(method.getReturnType(),method.getParameterTypes()).toMethodDescriptorString().equals(entry[2]))declare.invoke(null,owner,method.getName(),entry[2]);
     }
 }

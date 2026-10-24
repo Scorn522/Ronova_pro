@@ -73,22 +73,34 @@ static int native_jni_approval_prepare(NativeThread *state,const struct JNINativ
     }
     state->jniObserving--;return ready;
 }
-static uintptr_t native_jni_expected_locked(unsigned index,uintptr_t current){
+/* Read under either JNI gate mode. The return value means the approved
+ * baseline must be retired under the exclusive gate; it is not permission
+ * to keep a rejected pointer in a caller's table. */
+static int native_jni_expected_read_locked(unsigned index,uintptr_t current,uintptr_t *expected){
     const uintptr_t *original=(const uintptr_t*)&native_original,*guarded=(const uintptr_t*)&native_guarded;
-    if(native_jni_controlled(index))return guarded[index];
-    if(index<4)return current; /* JNI's reserved words are not function addresses. */
-    uintptr_t *approved=(uintptr_t*)&native_jni_approved.table;
+    if(native_jni_controlled(index)){*expected=guarded[index];return 0;}
+    if(index<4){*expected=current;return 0;} /* Reserved words are not function addresses. */
+    const uintptr_t *approved=(const uintptr_t*)&native_jni_approved.table;
     const NativeJniApproval *publishing=native_jni_publishing;
     int rejectedPublication=0;
     if(publishing&&current==((const uintptr_t*)&publishing->table)[index]){
-        if(!publishing->revoked[index]&&!native_owner_stopped(publishing->sources[index]))return current;
+        if(!publishing->revoked[index]&&!native_owner_stopped(publishing->sources[index])){*expected=current;return 0;}
         rejectedPublication=1;
     }
     if(rejectedPublication||current!=approved[index]||native_owner_stopped(native_jni_approved.sources[index])){
-        approved[index]=original[index];native_owner_links_free(native_jni_approved.sources[index]);native_jni_approved.sources[index]=NULL;
-        InterlockedExchange(&native_jni_pending,1);return original[index];
+        *expected=original[index];return 1;
     }
-    return approved[index];
+    *expected=approved[index];return 0;
+}
+/* Only actual baseline retirement writes require the exclusive gate. */
+static uintptr_t native_jni_expected_locked(unsigned index,uintptr_t current){
+    uintptr_t expected;
+    if(native_jni_expected_read_locked(index,current,&expected)){
+        ((uintptr_t*)&native_jni_approved.table)[index]=expected;
+        native_owner_links_free(native_jni_approved.sources[index]);native_jni_approved.sources[index]=NULL;
+        InterlockedExchange(&native_jni_pending,1);
+    }
+    return expected;
 }
 static void native_jni_live_retired(NativeThread *state,const struct JNINativeInterface_ *table,unsigned char *retired){
     const uintptr_t *targets=(const uintptr_t*)table,*original=(const uintptr_t*)&native_original;
@@ -105,6 +117,8 @@ static void native_jni_revalidate(NativeThread *state){
     struct JNINativeInterface_ snapshot;unsigned char retired[NATIVE_JNI_SLOT_COUNT];
     AcquireSRWLockShared(&native_jni_tables_gate);snapshot=native_jni_approved.table;ReleaseSRWLockShared(&native_jni_tables_gate);
     native_jni_live_retired(state,&snapshot,retired);
+    int changed=0;for(unsigned i=4;i<NATIVE_JNI_SLOT_COUNT;i++)if(retired[i]){changed=1;break;}
+    if(!changed)return;
     const uintptr_t *observed=(const uintptr_t*)&snapshot,*original=(const uintptr_t*)&native_original;
     AcquireSRWLockExclusive(&native_jni_tables_gate);uintptr_t *approved=(uintptr_t*)&native_jni_approved.table;
     for(unsigned i=4;i<NATIVE_JNI_SLOT_COUNT;i++)if(retired[i]){
@@ -116,7 +130,18 @@ static void native_jni_revalidate(NativeThread *state){
     ReleaseSRWLockExclusive(&native_jni_tables_gate);
 }
 static void native_jni_overlay(struct JNINativeInterface_ *table){
-    uintptr_t *incoming=(uintptr_t*)table;AcquireSRWLockExclusive(&native_jni_tables_gate);
+    uintptr_t *incoming=(uintptr_t*)table;int retire=0;
+    AcquireSRWLockShared(&native_jni_tables_gate);
+    for(unsigned i=4;i<NATIVE_JNI_SLOT_COUNT;i++){
+        uintptr_t expected;
+        if(native_jni_expected_read_locked(i,incoming[i],&expected)){retire=1;break;}
+        incoming[i]=expected;
+    }
+    ReleaseSRWLockShared(&native_jni_tables_gate);
+    if(!retire)return;
+    // Re-read every actual approval after changing gate mode. Only the local
+    // copy has changed so far; no baseline or source lifetime crossed locks.
+    AcquireSRWLockExclusive(&native_jni_tables_gate);
     for(unsigned i=4;i<NATIVE_JNI_SLOT_COUNT;i++)incoming[i]=native_jni_expected_locked(i,incoming[i]);
     ReleaseSRWLockExclusive(&native_jni_tables_gate);
 }
@@ -146,16 +171,26 @@ static int native_jni_repair_locked(const struct JNINativeInterface_ *table,cons
     }
     return valid;
 }
+/* Both registered ranges are owned by this state and only changed under the
+ * JNI directory gate, including detach. A matching live snapshot needs no
+ * private-directory publication, even during an all-thread table repair. */
+static int native_jni_ranges_match(NativeThread *state,JNIEnv *env,const struct JNINativeInterface_ *table){
+    return state->jniRange.linked&&state->jniRange.address==(const void*)env
+            &&state->jniRange.length==sizeof(*env)&&state->jniTableRange.linked
+            &&state->jniTableRange.address==(const void*)table&&state->jniTableRange.length==sizeof(*table);
+}
 static int native_jni_observe_locked(NativeThread *state,JNIEnv *env,int restricted){
     struct JNINativeInterface_ copy;const struct JNINativeInterface_ *table=NULL;
     if(!native_jni_snapshot(env,&table,&copy))return 0;
-    if(restricted){if(!TryAcquireSRWLockExclusive(&native_private_gate))return 0;}
-    else AcquireSRWLockExclusive(&native_private_gate);
-    if(state->jniRange.linked&&state->jniRange.address!=(const void*)env)native_private_unregister_locked(&state->jniRange);
-    if(state->jniTableRange.linked&&state->jniTableRange.address!=(const void*)table)native_private_unregister_locked(&state->jniTableRange);
-    int valid=native_private_register_locked(&state->jniRange,env,sizeof(*env))
-            &&native_private_register_locked(&state->jniTableRange,table,sizeof(*table));
-    ReleaseSRWLockExclusive(&native_private_gate);
+    int valid=native_jni_ranges_match(state,env,table);
+    if(!valid){
+        if(!native_private_write_lock(restricted,NATIVE_PRIVATE_JNI_REGISTER))return 0;
+        if(state->jniRange.linked&&state->jniRange.address!=(const void*)env)native_private_unregister_locked(&state->jniRange);
+        if(state->jniTableRange.linked&&state->jniTableRange.address!=(const void*)table)native_private_unregister_locked(&state->jniTableRange);
+        valid=native_private_register_locked(&state->jniRange,env,sizeof(*env))
+                &&native_private_register_locked(&state->jniTableRange,table,sizeof(*table));
+        native_private_write_unlock();
+    }
     if(!state->jniLinked){state->jniNext=native_jni_threads;native_jni_threads=state;state->jniLinked=1;}
     return native_jni_repair_locked(table,&copy)&&valid;
 }
@@ -163,30 +198,29 @@ static int native_jni_observe_locked(NativeThread *state,JNIEnv *env,int restric
  * previously registered, unchanged attachment needs no directory mutation.
  * Hold the JNI reader gate while consulting approvals and retained ranges;
  * publishing, detach and repair retain their exclusive writer gate. */
-static int native_jni_unchanged(NativeThread *state,JNIEnv *env,int restricted){
-    if(restricted){if(!TryAcquireSRWLockShared(&native_jni_tables_gate))return 0;}
-    else AcquireSRWLockShared(&native_jni_tables_gate);
+static int native_jni_unchanged_locked(NativeThread *state,JNIEnv *env){
     struct JNINativeInterface_ copy;const struct JNINativeInterface_ *table=NULL;
-    int valid=state->jniLinked&&state->jniRange.linked&&state->jniRange.address==(const void*)env
-            &&state->jniRange.length==sizeof(*env)&&state->jniTableRange.linked
-            &&native_jni_snapshot(env,&table,&copy)&&state->jniTableRange.address==(const void*)table
-            &&state->jniTableRange.length==sizeof(*table);
+    int valid=state->jniLinked&&native_jni_snapshot(env,&table,&copy)&&native_jni_ranges_match(state,env,table);
     if(valid&&InterlockedCompareExchange(&native_guarded_ready,0,0)&&InterlockedCompareExchange(&native_jni_ready,0,0)){
-        const uintptr_t *incoming=(const uintptr_t*)&copy,*guarded=(const uintptr_t*)&native_guarded;
-        const uintptr_t *approved=(const uintptr_t*)&native_jni_approved.table;
-        const NativeJniApproval *publishing=native_jni_publishing;
+        const uintptr_t *incoming=(const uintptr_t*)&copy;
         for(unsigned i=4;i<NATIVE_JNI_SLOT_COUNT&&valid;i++){
-            if(native_jni_controlled(i)){valid=incoming[i]==guarded[i];continue;}
-            if(publishing&&incoming[i]==((const uintptr_t*)&publishing->table)[i])
-                valid=!publishing->revoked[i]&&!native_owner_stopped(publishing->sources[i]);
-            else valid=incoming[i]==approved[i]&&!native_owner_stopped(native_jni_approved.sources[i]);
+            uintptr_t expected;valid=!native_jni_expected_read_locked(i,incoming[i],&expected)&&incoming[i]==expected;
         }
+    }
+    return valid;
+}
+static int native_jni_unchanged(NativeThread *state,JNIEnv *env,int restricted,int all){
+    if(!native_bounded_read_lock(&native_jni_tables_gate,restricted))return 0;
+    int valid=native_jni_unchanged_locked(state,env);
+    if(all)for(NativeThread *other=native_jni_threads;valid&&other;other=other->jniNext){
+        if(other==state||!other->jniRange.linked)continue;
+        valid=native_jni_unchanged_locked(other,(JNIEnv*)other->jniRange.address);
     }
     ReleaseSRWLockShared(&native_jni_tables_gate);return valid;
 }
 static int native_jni_refresh(NativeThread *state,JNIEnv *env,int all){
     int restricted=native_tooling_restricted();
-    if(!all&&native_jni_unchanged(state,env,restricted))return 1;
+    if(native_jni_unchanged(state,env,restricted,all))return 1;
     if(restricted){
         if(!TryAcquireSRWLockExclusive(&native_jni_tables_gate))return 0;
     }else AcquireSRWLockExclusive(&native_jni_tables_gate);
@@ -211,13 +245,25 @@ static int native_jni_checkpoint(NativeThread *state,JNIEnv *env,int all){
     errno=saved;_doserrno=dos;SetLastError(error);return valid;
 }
 static void native_jni_thread_end(NativeThread *state){
-    if(!state)return;DWORD error=GetLastError();int saved=errno;unsigned long dos=_doserrno;
+    if(!state)return;
+    /* An unlinked state is absent from every foreign all-thread walk. Only
+     * its owning thread can first register it; empty pure-C/repeated teardown
+     * therefore has nothing to pin or remove from either directory. */
+    if(!state->jniLinked&&!state->jniTableRange.linked&&!state->jniRange.linked)return;
+    DWORD error=GetLastError();int saved=errno;unsigned long dos=_doserrno;
     AcquireSRWLockExclusive(&native_jni_tables_gate);
     if(state->jniLinked){NativeThread **at=&native_jni_threads;while(*at&&*at!=state)at=&(*at)->jniNext;
         if(*at==state)*at=state->jniNext;state->jniNext=NULL;state->jniLinked=0;}
-    AcquireSRWLockExclusive(&native_private_gate);
-    native_private_unregister_locked(&state->jniTableRange);native_private_unregister_locked(&state->jniRange);
-    ReleaseSRWLockExclusive(&native_private_gate);ReleaseSRWLockExclusive(&native_jni_tables_gate);
+    ReleaseSRWLockExclusive(&native_jni_tables_gate);
+    /* No foreign all-thread reader can retain this state after the unlink's
+     * exclusive hold. Only its owner can start observation. Keep its private
+     * ranges alive until actual removal, without pinning the JNI directory
+     * behind another private writer; state storage is freed only afterward. */
+    if(state->jniTableRange.linked||state->jniRange.linked){
+        native_private_write_lock(0,NATIVE_PRIVATE_JNI_RETIRE);
+        native_private_unregister_locked(&state->jniTableRange);native_private_unregister_locked(&state->jniRange);
+        native_private_write_unlock();
+    }
     errno=saved;_doserrno=dos;SetLastError(error);
 }
 typedef struct NativeJniProtection {void *address;SIZE_T length;DWORD previous;int changed;} NativeJniProtection;
@@ -327,8 +373,7 @@ static jvmtiError native_jni_publish(NativeToolingEnv *record,JNIEnv *env,const 
     state->jniSynchronizing--;InterlockedExchange(&native_jni_mutating,0);return result;
 }
 static int native_jni_table_range(uintptr_t first,uintptr_t last,int restricted){
-    if(restricted){if(!TryAcquireSRWLockShared(&native_jni_tables_gate))return native_range_unknown("JNI_TABLES_BUSY");}
-    else AcquireSRWLockShared(&native_jni_tables_gate);
+    if(!native_bounded_read_lock(&native_jni_tables_gate,restricted))return native_range_unknown("JNI_TABLES_BUSY");
     uintptr_t vmTable=(uintptr_t)native_jni_vm_table;
     int hit=vmTable&&sizeof(*native_jni_vm_table)-1<=UINTPTR_MAX-vmTable
             &&first<=vmTable+sizeof(*native_jni_vm_table)-1&&vmTable<=last,unknown=0;

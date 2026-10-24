@@ -8,6 +8,7 @@ import java.lang.reflect.Method;
 import java.util.*;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionStage;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.Future;
 import java.util.function.Function;
 import java.util.stream.DoubleStream;
@@ -56,16 +57,26 @@ public final class DefinitionBridge {
         }
     }
     private static final ReferenceQueue<Class<?>> RETIRED=new ReferenceQueue<>();
-    private static final HashMap<ClassKey,Module> ORIGINS=new HashMap<>();
-    private static final HashMap<ClassKey,String> ACCEPTED_IMAGES=new HashMap<>();
+    // Single-class reads never take the registration monitor. Writers and
+    // batch origin snapshots still share it, preserving their atomic boundary.
+    private static final ConcurrentHashMap<ClassKey,Origin> ORIGINS=new ConcurrentHashMap<>();
+    // Cache only the weak identity key, never the current origin or a miss.
+    // Late bindings remain visible through the same authoritative map read.
+    private static final ClassValue<ClassKey> CLASS_KEYS=new ClassValue<>(){
+        protected ClassKey computeValue(Class<?> type){return new ClassKey(type);}
+    };
     private static final IdentityHashMap<Module,String> RETURNS=new IdentityHashMap<>();
     private static final IdentityHashMap<Module,UUID> FIXED=new IdentityHashMap<>();
     private static final IdentityHashMap<Thread,Scope> CURRENT=new IdentityHashMap<>();
     private static volatile Scope[] liveScopes=new Scope[0];
     private static volatile Method transformer,acceptedDefinition;
+    private static final class Origin {
+        final Module module;volatile String acceptedImage;
+        Origin(Module module){this.module=module;}
+    }
     private static final class ClassKey extends WeakReference<Class<?>> {
         final int hash;
-        ClassKey(Class<?> type,boolean registered){super(type,registered?RETIRED:null);hash=System.identityHashCode(type);}
+        ClassKey(Class<?> type){super(type,RETIRED);hash=System.identityHashCode(type);}
         public int hashCode(){return hash;}
         public boolean equals(Object other){return this==other||other instanceof ClassKey key&&get()!=null&&get()==key.get();}
         public void clear(){Class<?> caller=WALKER.getCallerClass();if(caller.getNestHost()==DefinitionBridge.class||ControlBridge.owns(caller))super.clear();}
@@ -88,19 +99,20 @@ public final class DefinitionBridge {
         publish();
     }
     private static void requireAgent(Class<?> caller){if(!ControlBridge.owns(caller))throw new SecurityException("DEFINITION_AGENT_REQUIRED");}
-    private static void publish(){ControlBridge.controlPublication(CURRENT,new Object[]{ORIGINS,ACCEPTED_IMAGES,RETURNS,FIXED,transformer,acceptedDefinition});}
+    private static void publish(){ControlBridge.controlPublication(CURRENT,new Object[]{ORIGINS,CLASS_KEYS,RETURNS,FIXED,transformer,acceptedDefinition});}
     public static Module module(Class<?> type) {
-        synchronized(ORIGINS){Module owner=ORIGINS.get(new ClassKey(type,false));return owner==null?type.getModule():owner;}
+        Origin origin=ORIGINS.get(CLASS_KEYS.get(type));return origin==null?type.getModule():origin.module;
     }
-    private static void bind(Class<?> actual,Module module) {
+    private static Origin bind(Class<?> actual,Module module) {
         synchronized(ORIGINS) {
-            ClassKey stale;while((stale=(ClassKey)RETIRED.poll())!=null){ORIGINS.remove(stale);ACCEPTED_IMAGES.remove(stale);}
-            ClassKey key=new ClassKey(actual,true);if(!ORIGINS.containsKey(key))ORIGINS.put(key,module);
+            ClassKey stale;while((stale=(ClassKey)RETIRED.poll())!=null)ORIGINS.remove(stale);
+            ClassKey key=CLASS_KEYS.get(actual);Origin origin=ORIGINS.get(key);
+            if(origin==null){origin=new Origin(module);ORIGINS.put(key,origin);}return origin;
         }
     }
     private static void accepted(Class<?> actual,Scope scope){
         if(scope.module==null)return;
-        bind(actual,scope.module);
+        Origin origin=bind(actual,scope.module);
         if(!actual.isHidden())return; // Named definitions have a subsequent VM transformer chain.
         Method callback=acceptedDefinition;
         if(callback!=null)try{callback.invoke(null,actual,scope.bytes);}
@@ -110,16 +122,16 @@ public final class DefinitionBridge {
         }catch(ReflectiveOperationException failure){throw new IllegalStateException("ACTUAL_HIDDEN_DEFINITION_RECORD_FAILED",failure);}
         try{
             String image=HexFormat.of().formatHex(java.security.MessageDigest.getInstance("SHA-256").digest(scope.bytes));
-            synchronized(ORIGINS){ACCEPTED_IMAGES.put(new ClassKey(actual,false),image+":accepted-hidden");}
+            origin.acceptedImage=image+":accepted-hidden";
         }catch(java.security.NoSuchAlgorithmException impossible){throw new AssertionError(impossible);}
     }
     /** This is recorded only after the VM supplied the actual class or entered its initializer. */
-    public static String acceptedImage(Class<?> actual){requireAgent(WALKER.getCallerClass());synchronized(ORIGINS){return ACCEPTED_IMAGES.get(new ClassKey(actual,false));}}
+    public static String acceptedImage(Class<?> actual){requireAgent(WALKER.getCallerClass());Origin origin=actual==null?null:ORIGINS.get(CLASS_KEYS.get(actual));return origin==null?null:origin.acceptedImage;}
     /** The final transformer may consult only an actual recorded class or this exact definition scope. */
-    public static Module origin(Class<?> type) {requireAgent(WALKER.getCallerClass());synchronized(ORIGINS){return ORIGINS.get(new ClassKey(type,false));}}
+    public static Module origin(Class<?> type) {requireAgent(WALKER.getCallerClass());Origin origin=type==null?null:ORIGINS.get(CLASS_KEYS.get(type));return origin==null?null:origin.module;}
     public static Module[] origins(Class<?>[] types) {
         requireAgent(WALKER.getCallerClass());Module[] origins=new Module[types.length];
-        synchronized(ORIGINS){for(int i=0;i<types.length;i++)if(types[i]!=null)origins[i]=ORIGINS.get(new ClassKey(types[i],false));}
+        synchronized(ORIGINS){for(int i=0;i<types.length;i++)if(types[i]!=null){Origin origin=ORIGINS.get(CLASS_KEYS.get(types[i]));origins[i]=origin==null?null:origin.module;}}
         return origins;
     }
     public static Module definingModule(ClassLoader loader,String name) {
@@ -222,7 +234,7 @@ public final class DefinitionBridge {
     public static void initializing(Class<?> actual) {
         var caller=WALKER.walk(FRAME);
         if(caller==null||caller.getDeclaringClass()!=actual||!caller.getMethodName().equals("<clinit>"))throw new SecurityException("ACTUAL_DEFINED_INITIALIZER_REQUIRED");
-        synchronized(ORIGINS){if(ORIGINS.containsKey(new ClassKey(actual,false)))return;}
+        if(ORIGINS.containsKey(CLASS_KEYS.get(actual)))return;
         synchronized(CURRENT){Scope scope=CURRENT.get(Thread.currentThread());if(scope==null||scope.module==null)return;
             String name=actual.getName().replace('.','/');
             boolean matches=scope.loader==actual.getClassLoader()&&(name.equals(scope.name)||actual.isHidden()&&name.startsWith(scope.name+"/0x"));

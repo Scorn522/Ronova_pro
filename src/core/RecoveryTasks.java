@@ -453,6 +453,7 @@ final class RecoveryTasks implements AutoCloseable {
             unknownCapture("TASK_CAPTURE_IDENTITY_UNAVAILABLE");return;
         }
         OwnerRegistration[] owners=reserveOwners(row);
+        if(owners.length==0)return;
         CaptureDelivery captured=new CaptureDelivery(owners.length);
         try {
             if(Thread.holdsLock(LISTENERS)) {
@@ -2659,15 +2660,17 @@ final class RecoveryTasks implements AutoCloseable {
     }
     long epoch() { return changes.get(); }
     private void finishResultCancellationsForClose()throws IOException {
-        for(Task task:List.copyOf(tasks.values()))if(task.result&&task.resultCancellationAttempted) {
-            try{finishResultCancellation(task);}
-            catch(ReflectiveOperationException|RuntimeException failure){throw new IOException("TASK_RESULT_COMPLETION_DRAIN_PENDING:"+task.id,failure);}
+        for(Task task:List.copyOf(tasks.values()))if(task.result) {
+            if(task.resultCancellationAttempted){
+                try{finishResultCancellation(task);}
+                catch(ReflectiveOperationException|RuntimeException failure){throw new IOException("TASK_RESULT_COMPLETION_DRAIN_PENDING:"+task.id,failure);}
+            }else task.resultCancelAck=runtime.journal.retryRejected(task.resultCancelRecord,task.resultCancelAck);
         }
     }
     @Override public void close()throws IOException {
         closing=true;
         if(detached) {
-            retirementFactAck=runtime.journal.retryRejected(retirementFact,retirementFactAck);
+            retirementFactAck=retirementFactAck==null?runtime.journal.append(retirementFact):runtime.journal.retryRejected(retirementFact,retirementFactAck);
             return;
         }
         // Ownership of this merge transfers from the stopped server to its retirement worker.
@@ -2675,7 +2678,22 @@ final class RecoveryTasks implements AutoCloseable {
         drain(System.nanoTime()/50_000_000L);
         advancePolicyFences();
         finishResultCancellationsForClose();
+        String intent;CompletableFuture<Void> intentAck;
+        synchronized(LISTENERS){
+            long epoch=changes.get();
+            if(retirementAck==null||retirementEpoch!=epoch){
+                retirementEpoch=epoch;
+                retirementIntent=PREFIX+"\tOBSERVER_RELEASE_INTENT\t"+runtime.session+"\t"+epoch+"\tcount="+tasks.size();
+                retirementAck=null;
+            }
+            intent=retirementIntent;intentAck=retirementAck;
+        }
+        // Journal admission creates/submits real tasks. Its synchronous observer
+        // callbacks must resolve roots outside our publication monitor.
+        intentAck=intentAck==null?runtime.journal.append(intent):runtime.journal.retryRejected(intent,intentAck);
         synchronized(LISTENERS) {
+            if(retirementIntent!=intent)throw new IOException("TASK_OBSERVER_RELEASE_INTENT_CHANGED");
+            retirementAck=intentAck;
             if(capturePublications!=0)throw new IOException("TASK_CAPTURE_PUBLICATION_IN_FLIGHT");
             if(capturePending())throw new IOException("TASK_RETIREMENT_EVENTS_PENDING");
             try {
@@ -2717,7 +2735,6 @@ final class RecoveryTasks implements AutoCloseable {
                 try { if(!waitersReleased(task))throw new IOException("TASK_WAITER_EXIT_OR_REFERENCE_PENDING:"+task.id); }
                 catch(ReflectiveOperationException failure) { throw new IOException("TASK_WAITER_QUERY_UNAVAILABLE",failure); }
                 if(task.result) {
-                    task.resultCancelAck=runtime.journal.retryRejected(task.resultCancelRecord,task.resultCancelAck);
                     try { if(!observeBackend(task)||readField(CompletableFuture.class,"result",task.object)==null)throw new IOException("TASK_RESULT_PENDING:"+task.id); }
                     catch(ReflectiveOperationException failure) { throw new IOException("TASK_RESULT_QUERY_UNAVAILABLE",failure); }
                     continue;
@@ -2763,12 +2780,9 @@ final class RecoveryTasks implements AutoCloseable {
             if(!tasks.isEmpty()&&!gap.isEmpty())throw new IOException("TASK_RETIREMENT_GAP:"+gap);
             for(CaptureGap loss:captureGaps.values())if(!loss.subjects.isEmpty())throw new IOException("TASK_RETIREMENT_GAP:"+loss.reason);
             long epoch=changes.get();
-            if(retirementAck==null||retirementEpoch!=epoch) {
-                // This intent authorizes releasing our own observer references, never a shared pool or task.
-                retirementEpoch=epoch;
-                retirementIntent=PREFIX+"\tOBSERVER_RELEASE_INTENT\t"+runtime.session+"\t"+epoch+"\tcount="+tasks.size();
-                retirementAck=runtime.journal.append(retirementIntent);
-            } else retirementAck=runtime.journal.retryRejected(retirementIntent,retirementAck);
+            // The unlocked admission may have published a late relation. Never
+            // detach against the intent for an older observation epoch.
+            if(retirementEpoch!=epoch)throw new IOException("TASK_OBSERVER_RELEASE_EPOCH_CHANGED");
             // Publication is excluded here: a late ENTER/SUBMIT before this point changes the epoch above.
             LISTENERS.remove(this);
             publishOwners();
@@ -2787,7 +2801,7 @@ final class RecoveryTasks implements AutoCloseable {
             events.clear();pendingCaptures.clear();pendingRoots.clear();tasks.clear();operationTasks.clear();producers.clear();dependents.clear();childrenByParent.clear();synchronized(origins){origins.clear();sharedOrigins.clear();}workerBindings.clear();captureEpochs.clear();captureGaps.clear();
             windows.clear();waiting.clear();policyPending.clear();
             retirementFact=PREFIX+"\tOBSERVER_RELEASED\t"+runtime.session+"\t"+epoch;
-            retirementFactAck=runtime.journal.append(retirementFact);
         }
+        retirementFactAck=runtime.journal.append(retirementFact);
     }
 }
