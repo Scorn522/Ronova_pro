@@ -44,7 +44,7 @@ typedef struct HostTlsValue {
     struct HostTlsValue *next;
 } HostTlsValue;
 typedef struct HostTlsContribution {HostTlsSources sources;uintptr_t value;int valueReceipt;struct HostTlsContribution *next;} HostTlsContribution;
-typedef struct HostTlsOperation {HostTlsSources *sources;uintptr_t value;int freeing,setting;struct HostTlsOperation *next;} HostTlsOperation;
+typedef struct HostTlsOperation {HostTlsSources *sources;uintptr_t value;int freeing,setting;HostTlsThread *thread;HostTlsFiber *fiber;struct HostTlsOperation *next;} HostTlsOperation;
 struct HostTlsSlot {
     uint64_t generation;DWORD index;int fls,observed,live,uncertain,gap,cleanupGap,reaped,queued,releasing;
     LONG busy,callbacks,borrowers;int closing;
@@ -600,19 +600,27 @@ static uint64_t host_native_tls(HostImport *entry,void *caller,uintptr_t *argume
                         else {slot->fls=fls;slot->index=index;slot->generation=++host_tls_generation;
                             host_tls_slot_live(slot,1);slot->uncertain=slot->gap=1;slot->next=host_tls_slots;host_tls_slots=slot;published=1;}}
                     else published=1;
-                    /* Unknown public carriers may use ordinary per-context OS
-                     * storage, never a slot bearing a captured Mod source.
-                     * Check the complete observed history, not just the caller
-                     * or the current opaque pointer. Keep every partial lease
-                     * and unknown bit for reporting and retirement. */
+                    /* Free affects every context and still checks all history.
+                     * Get/Set on a public slot touches only this thread/fiber.
+                     * Allocation sources include the FLS callback's captured
+                     * roots, so a Mod-owned callback never becomes public here.
+                     * Keep all history/partial leases for actual retirement. */
                     if(!error&&(unknown||lease&&!lease->complete)){
-                        int controlled=native_has_producer(slot->allocation.owners)||native_has_producer(slot->aggregate.owners);
-                        for(HostTlsContribution *p=slot->contributions;p&&!controlled;p=p->next)
-                            controlled=native_has_producer(p->sources.owners);
-                        for(HostTlsValue *p=slot->values;p&&!controlled;p=p->next)
-                            controlled=native_has_producer(p->sources.owners);
-                        for(HostTlsOperation *p=slot->operations;p&&!controlled;p=p->next)
-                            controlled=p->sources&&native_has_producer(p->sources->owners);
+                        int controlled=native_has_producer(slot->allocation.owners);
+                        if(freeing){
+                            controlled=controlled||native_has_producer(slot->aggregate.owners);
+                            for(HostTlsContribution *p=slot->contributions;p&&!controlled;p=p->next)
+                                controlled=native_has_producer(p->sources.owners);
+                            for(HostTlsValue *p=slot->values;p&&!controlled;p=p->next)
+                                controlled=native_has_producer(p->sources.owners);
+                            for(HostTlsOperation *p=slot->operations;p&&!controlled;p=p->next)
+                                controlled=p->sources&&native_has_producer(p->sources->owners);
+                        }else if(setting||getting){
+                            HostTlsValue *current=host_tls_value_find(slot,thread,fiber);
+                            controlled=controlled||current&&native_has_producer(current->sources.owners);
+                            for(HostTlsOperation *p=slot->operations;p&&!controlled;p=p->next)
+                                if(slot->fls?p->fiber==fiber:p->thread==thread)controlled=p->sources&&native_has_producer(p->sources->owners);
+                        }
                         if(controlled){error=ERROR_INVALID_DATA;failure="controlled_slot_sources";}
                     }
                     int callbackUse=callbackSlot==slot&&(setting||getting);
@@ -625,6 +633,7 @@ static uint64_t host_native_tls(HostImport *entry,void *caller,uintptr_t *argume
                         error=ERROR_BUSY;failure="slot_closing";}
                     if(!error){slot->busy++;if(freeing)slot->closing++;reserved=1;
                         operation.freeing=freeing;operation.setting=setting;operation.value=setting?arguments[1]:0;
+                        operation.thread=thread;operation.fiber=fiber;
                         operation.next=slot->operations;slot->operations=&operation;
                         if(setting||getting){value=host_tls_value_find(slot,thread,fiber);
                             if(!value){value=(HostTlsValue*)calloc(1,sizeof(*value));

@@ -1,14 +1,11 @@
 package dev.ronova.pro.bootstrap;
 
 import java.lang.invoke.MethodHandles;
-import java.lang.ref.ReferenceQueue;
-import java.lang.ref.WeakReference;
 import java.lang.reflect.Array;
 import java.lang.reflect.Method;
 import java.util.*;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionStage;
-import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.Future;
 import java.util.function.Function;
 import java.util.stream.DoubleStream;
@@ -56,14 +53,11 @@ public final class DefinitionBridge {
             return null;
         }
     }
-    private static final ReferenceQueue<Class<?>> RETIRED=new ReferenceQueue<>();
-    // Single-class reads never take the registration monitor. Writers and
-    // batch origin snapshots still share it, preserving their atomic boundary.
-    private static final ConcurrentHashMap<ClassKey,Origin> ORIGINS=new ConcurrentHashMap<>();
-    // Cache only the weak identity key, never the current origin or a miss.
-    // Late bindings remain visible through the same authoritative map read.
-    private static final ClassValue<ClassKey> CLASS_KEYS=new ClassValue<>(){
-        protected ClassKey computeValue(Class<?> type){return new ClassKey(type);}
+    // Each class owns its authoritative binding slot. Reads observe late
+    // publication directly; registration and batch snapshots share this monitor.
+    // ClassValue also retires the slot with its class, without a second weak map.
+    private static final ClassValue<OriginSlot> ORIGINS=new ClassValue<>(){
+        protected OriginSlot computeValue(Class<?> type){return new OriginSlot();}
     };
     private static final IdentityHashMap<Module,String> RETURNS=new IdentityHashMap<>();
     private static final IdentityHashMap<Module,UUID> FIXED=new IdentityHashMap<>();
@@ -74,14 +68,7 @@ public final class DefinitionBridge {
         final Module module;volatile String acceptedImage;
         Origin(Module module){this.module=module;}
     }
-    private static final class ClassKey extends WeakReference<Class<?>> {
-        final int hash;
-        ClassKey(Class<?> type){super(type,RETIRED);hash=System.identityHashCode(type);}
-        public int hashCode(){return hash;}
-        public boolean equals(Object other){return this==other||other instanceof ClassKey key&&get()!=null&&get()==key.get();}
-        public void clear(){Class<?> caller=WALKER.getCallerClass();if(caller.getNestHost()==DefinitionBridge.class||ControlBridge.owns(caller))super.clear();}
-        public boolean enqueue(){Class<?> caller=WALKER.getCallerClass();return (caller.getNestHost()==DefinitionBridge.class||ControlBridge.owns(caller))&&super.enqueue();}
-    }
+    private static final class OriginSlot { volatile Origin origin; }
     private static final class Scope {
         final Scope previous;final Module module;final ClassLoader loader;final String name;
         final byte[] bytes;final Thread thread;
@@ -99,15 +86,14 @@ public final class DefinitionBridge {
         publish();
     }
     private static void requireAgent(Class<?> caller){if(!ControlBridge.owns(caller))throw new SecurityException("DEFINITION_AGENT_REQUIRED");}
-    private static void publish(){ControlBridge.controlPublication(CURRENT,new Object[]{ORIGINS,CLASS_KEYS,RETURNS,FIXED,transformer,acceptedDefinition});}
+    private static void publish(){ControlBridge.controlPublication(CURRENT,new Object[]{ORIGINS,RETURNS,FIXED,transformer,acceptedDefinition});}
     public static Module module(Class<?> type) {
-        Origin origin=ORIGINS.get(CLASS_KEYS.get(type));return origin==null?type.getModule():origin.module;
+        Origin origin=ORIGINS.get(type).origin;return origin==null?type.getModule():origin.module;
     }
     private static Origin bind(Class<?> actual,Module module) {
         synchronized(ORIGINS) {
-            ClassKey stale;while((stale=(ClassKey)RETIRED.poll())!=null)ORIGINS.remove(stale);
-            ClassKey key=CLASS_KEYS.get(actual);Origin origin=ORIGINS.get(key);
-            if(origin==null){origin=new Origin(module);ORIGINS.put(key,origin);}return origin;
+            OriginSlot slot=ORIGINS.get(actual);Origin origin=slot.origin;
+            if(origin==null){origin=new Origin(module);slot.origin=origin;}return origin;
         }
     }
     private static void accepted(Class<?> actual,Scope scope){
@@ -126,12 +112,12 @@ public final class DefinitionBridge {
         }catch(java.security.NoSuchAlgorithmException impossible){throw new AssertionError(impossible);}
     }
     /** This is recorded only after the VM supplied the actual class or entered its initializer. */
-    public static String acceptedImage(Class<?> actual){requireAgent(WALKER.getCallerClass());Origin origin=actual==null?null:ORIGINS.get(CLASS_KEYS.get(actual));return origin==null?null:origin.acceptedImage;}
+    public static String acceptedImage(Class<?> actual){requireAgent(WALKER.getCallerClass());Origin origin=actual==null?null:ORIGINS.get(actual).origin;return origin==null?null:origin.acceptedImage;}
     /** The final transformer may consult only an actual recorded class or this exact definition scope. */
-    public static Module origin(Class<?> type) {requireAgent(WALKER.getCallerClass());Origin origin=type==null?null:ORIGINS.get(CLASS_KEYS.get(type));return origin==null?null:origin.module;}
+    public static Module origin(Class<?> type) {requireAgent(WALKER.getCallerClass());Origin origin=type==null?null:ORIGINS.get(type).origin;return origin==null?null:origin.module;}
     public static Module[] origins(Class<?>[] types) {
         requireAgent(WALKER.getCallerClass());Module[] origins=new Module[types.length];
-        synchronized(ORIGINS){for(int i=0;i<types.length;i++)if(types[i]!=null){Origin origin=ORIGINS.get(CLASS_KEYS.get(types[i]));origins[i]=origin==null?null:origin.module;}}
+        synchronized(ORIGINS){for(int i=0;i<types.length;i++)if(types[i]!=null){Origin origin=ORIGINS.get(types[i]).origin;origins[i]=origin==null?null:origin.module;}}
         return origins;
     }
     public static Module definingModule(ClassLoader loader,String name) {
@@ -234,7 +220,7 @@ public final class DefinitionBridge {
     public static void initializing(Class<?> actual) {
         var caller=WALKER.walk(FRAME);
         if(caller==null||caller.getDeclaringClass()!=actual||!caller.getMethodName().equals("<clinit>"))throw new SecurityException("ACTUAL_DEFINED_INITIALIZER_REQUIRED");
-        if(ORIGINS.containsKey(CLASS_KEYS.get(actual)))return;
+        if(ORIGINS.get(actual).origin!=null)return;
         synchronized(CURRENT){Scope scope=CURRENT.get(Thread.currentThread());if(scope==null||scope.module==null)return;
             String name=actual.getName().replace('.','/');
             boolean matches=scope.loader==actual.getClassLoader()&&(name.equals(scope.name)||actual.isHidden()&&name.startsWith(scope.name+"/0x"));

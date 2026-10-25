@@ -158,7 +158,8 @@ public final class IoBridge {
     }
     private static void reap(){for(int i=0;i<32;i++){Key key=(Key)DEAD.poll();if(key==null)return;CONNECTIONS.remove(key);REQUESTS.remove(key);}}
     static boolean platformLayout(Class<?> actual){return TYPES.contains(actual);}
-    static boolean platformObject(Object value){return value!=null&&PLATFORM_OBJECT_TYPES.get(value.getClass());}
+    static boolean platformObjectType(Class<?> type){return PLATFORM_OBJECT_TYPES.get(type);}
+    static boolean platformObject(Object value){return value!=null&&platformObjectType(value.getClass());}
     static boolean resource(Object value){return value!=null&&(ROOTS.contains(value.getClass())||record(value)!=null);}
     static ResourceBridge.FileRecord record(Object value){synchronized(LOCK){return CONNECTIONS.get(new Key(value,false));}}
     static Module[] currentSources(){Scope scope=CURRENT.get();return scope==null?null:scope.sources;}
@@ -371,7 +372,9 @@ public final class IoBridge {
         }
         finally{
             synchronized(LOCK){scope.closed=true;if(scope.connection!=null)scope.connection.active--;}
-            if(scope.previous==null)CURRENT.remove();else CURRENT.set(scope.previous);
+            // Clear the business scope while retaining this thread's empty slot.
+            // Source queries otherwise recreate it immediately after every I/O.
+            CURRENT.set(scope.previous);
         }
     }
     private static void throwCleanup(Throwable failure){

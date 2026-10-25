@@ -90,7 +90,7 @@ public final class LiveStatePolicy {
         catch(NoSuchFieldException production){FACTOR_CURRENT=MobEffectInstance.FactorData.class.getDeclaredField("f_216911_");}
         FACTOR_CURRENT.setAccessible(true);
         OWNERS=Collections.synchronizedMap(new WeakIdentityMap<>());
-        CARRIERS=Collections.synchronizedMap(new WeakIdentityMap<>());
+        CARRIERS=new WeakIdentityMap<>();
         SCOPES=Collections.synchronizedMap(new WeakIdentityMap<>());
         FIELDS=Map.copyOf(fields);WALKER=StackWalker.getInstance(StackWalker.Option.RETAIN_CLASS_REFERENCE);
         initialized=true;
@@ -212,7 +212,14 @@ public final class LiveStatePolicy {
     }
     private static List<Link> links(Object value){return !initialized||value==null?List.of():CARRIERS.getOrDefault(value,List.of());}
     private static boolean containsIdentity(Object[] values,int length,Object value){for(int i=0;i<length;i++)if(values[i]==value)return true;return false;}
-    static boolean known(Object value){for(Link link:links(value))if(current(link.owner,link.kind,value))return true;return false;}
+    static boolean hasLinks(Object value){return !links(value).isEmpty();}
+    static boolean known(Object value){
+        List<Link> currentLinks=links(value);
+        for(int i=0;i<currentLinks.size();i++){
+            Link link=currentLinks.get(i);if(current(link.owner,link.kind,value))return true;
+        }
+        return false;
+    }
     private static boolean curativeCurrent(LivingEntity entity,long generation,Object value,Kind kind) {
         if(!initialized||entity==null||value==null)return false;Owner owner=OWNERS.get(entity);
         return owner!=null&&owner.generation==generation&&current(owner,kind,value);

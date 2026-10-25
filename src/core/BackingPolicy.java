@@ -9,13 +9,13 @@ import net.minecraft.world.entity.Entity;
 /** Real carrier fields and backing arrays discovered from an already bound world record. */
 final class BackingPolicy {
     private record Owner(WeakReference<Entity> entity) { }
-    private static final Map<Object,List<Owner>> OWNERS=Collections.synchronizedMap(new WeakIdentityMap<>());
-    private static final Map<Object,WeakReference<Object>> ARRAY_VALUES=Collections.synchronizedMap(new WeakIdentityMap<>());
-    private static final Map<Object,WeakReference<Access.Sections>> SECTION_KEYS=Collections.synchronizedMap(new WeakIdentityMap<>());
-    private static final Set<Object> LINK_ARRAYS=Collections.newSetFromMap(Collections.synchronizedMap(new WeakIdentityMap<>()));
+    private static final Map<Object,List<Owner>> OWNERS=new WeakIdentityMap<>();
+    private static final Map<Object,WeakReference<Object>> ARRAY_VALUES=new WeakIdentityMap<>();
+    private static final Map<Object,WeakReference<Access.Sections>> SECTION_KEYS=new WeakIdentityMap<>();
+    private static final Set<Object> LINK_ARRAYS=Collections.newSetFromMap(new WeakIdentityMap<>());
     private static final Map<Object,Map<Field,Object>> FIELDS=Collections.synchronizedMap(new WeakIdentityMap<>());
-    private static final Map<Object,WeakReference<ProRuntime>> RESOURCES=Collections.synchronizedMap(new WeakIdentityMap<>());
-    private static final Set<Object> SHARED_RESOURCES=Collections.newSetFromMap(Collections.synchronizedMap(new WeakIdentityMap<>()));
+    private static final Map<Object,WeakReference<ProRuntime>> RESOURCES=new WeakIdentityMap<>();
+    private static final Set<Object> SHARED_RESOURCES=Collections.newSetFromMap(new WeakIdentityMap<>());
     private static final StackWalker CALLER=StackWalker.getInstance(StackWalker.Option.RETAIN_CLASS_REFERENCE);
     private static volatile Object unsafe;
     private static volatile Method fieldOffset,staticOffset,arrayBase,arrayScale;
@@ -38,14 +38,22 @@ final class BackingPolicy {
         arrayBase=type.getMethod("arrayBaseOffset",Class.class);arrayScale=type.getMethod("arrayIndexScale",Class.class);
         referenceWidth=(Integer)arrayScale.invoke(unsafe,Object[].class);
         var lookup=java.lang.invoke.MethodHandles.lookup();
-        Class.forName("dev.ronova.pro.bootstrap.ControlBridge",false,null).getMethod("installBackingPolicy",Class.class,java.lang.invoke.MethodHandle.class,java.lang.invoke.MethodHandle.class,java.lang.invoke.MethodHandle.class,java.lang.invoke.MethodHandle.class,java.lang.invoke.MethodHandle.class)
+        Class.forName("dev.ronova.pro.bootstrap.ControlBridge",false,null).getMethod("installBackingPolicy",Class.class,java.lang.invoke.MethodHandle.class,java.lang.invoke.MethodHandle.class,java.lang.invoke.MethodHandle.class,java.lang.invoke.MethodHandle.class,java.lang.invoke.MethodHandle.class,java.lang.invoke.MethodHandle.class)
             .invoke(null,ProRuntime.class,lookup.findStatic(BackingPolicy.class,"known",java.lang.invoke.MethodType.methodType(boolean.class,Object.class)),
                 lookup.findStatic(BackingPolicy.class,"elementDenied",java.lang.invoke.MethodType.methodType(boolean.class,Object.class,Object.class,Object.class)),
                 lookup.findStatic(BackingPolicy.class,"arrayDenied",java.lang.invoke.MethodType.methodType(boolean.class,Object.class,int.class,Object.class)),
                 lookup.findStatic(BackingPolicy.class,"offsetDenied",java.lang.invoke.MethodType.methodType(boolean.class,Object.class,long.class,Object.class)),
-                lookup.findStatic(BackingPolicy.class,"memoryDenied",java.lang.invoke.MethodType.methodType(boolean.class,Object.class,long.class,long.class)));
+                lookup.findStatic(BackingPolicy.class,"memoryDenied",java.lang.invoke.MethodType.methodType(boolean.class,Object.class,long.class,long.class)),
+                lookup.findStatic(BackingPolicy.class,"receiptRevision",java.lang.invoke.MethodType.methodType(long.class,Object.class)));
     }
     static boolean known(Object object) {return object!=null&&(WorldStatePolicy.known(object)||OWNERS.containsKey(object)||SourceMaps.observed(object)||LiveStatePolicy.known(object)||EquipmentPolicy.known(object));}
+    static long receiptRevision(Object object){
+        long revision=WeakIdentityMap.revision();if(object==null||revision<0)return revision;
+        // This is a per-operation registry revision, never a permission result.
+        // Existing live/dormant links can change relevance without a map write.
+        if(!WorldStatePolicy.registrationOnly(object)||LiveStatePolicy.hasLinks(object)||EquipmentPolicy.hasLinks(object))return -1;
+        return revision==WeakIdentityMap.revision()?revision:-1;
+    }
     private static void owner(Object object,Entity entity) {
         if(object==null)return;
         synchronized(OWNERS) {

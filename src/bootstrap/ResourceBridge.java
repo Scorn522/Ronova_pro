@@ -67,6 +67,8 @@ public final class ResourceBridge {
     private static final HashMap<Key,WeakReference<PipeRecord>> PROCESS_VIEWS=new HashMap<>();
     private static final ThreadLocal<ProcessRecord> PROCESS_CLEANUP=new ThreadLocal<>();
     private static final ThreadLocal<Boolean> FILE_OBSERVING=new ThreadLocal<>();
+    // Restore nesting without clearing/reallocating a ThreadLocal entry on every buffer call.
+    private static void restoreFileObservation(Boolean previous){FILE_OBSERVING.set(previous==Boolean.TRUE);}
     private static final ThreadLocal<Set<Module>> FILE_SELECTION=new ThreadLocal<>();
     private static final ThreadLocal<FileKernelScope> FILE_KERNEL=new ThreadLocal<>();
     private static final ThreadLocal<FileKernelCandidate> IO_KERNEL_SELECTION=new ThreadLocal<>();
@@ -696,10 +698,10 @@ public final class ResourceBridge {
     }
     public static void descriptorClosing(FileDescriptor descriptor)throws IOException {
         platform(FileDescriptor.class,"close");
-        if(FILE_OBSERVING.get()!=null)return;
+        if(FILE_OBSERVING.get()==Boolean.TRUE)return;
         FILE_OBSERVING.set(Boolean.TRUE);
         try{if(!ControlBridge.coreWriter()&&(!ControlBridge.taskEffectAllowed(null,"file-close")||!descriptorReleaseAllowed(descriptor)))throw new IOException("RONOVA_FILE_DESCRIPTOR_CLOSE_REFUSED");}
-        finally{FILE_OBSERVING.remove();}
+        finally{FILE_OBSERVING.set(Boolean.FALSE);}
     }
     private static void platform(Class<?> expected,String method){
         var caller=WALKER.walk(PLATFORM_BOUNDARY);
@@ -752,9 +754,9 @@ public final class ResourceBridge {
         }
     }
     private static void resourceCreated(Object value){
-        if(FILE_OBSERVING.get()!=null)return;
+        if(FILE_OBSERVING.get()==Boolean.TRUE)return;
         FILE_OBSERVING.set(Boolean.TRUE);
-        try{Module[] sources=IoBridge.currentSources();if(sources==null)ControlBridge.resourceCreated(value);else ControlBridge.resourceCreated(value,sources);}finally{FILE_OBSERVING.remove();}
+        try{Module[] sources=IoBridge.currentSources();if(sources==null)ControlBridge.resourceCreated(value);else ControlBridge.resourceCreated(value,sources);}finally{FILE_OBSERVING.set(Boolean.FALSE);}
     }
     /** The Windows factory has completed CreateFile and installed this exact handle in the returned descriptor. */
     public static void descriptorOpened(FileDescriptor descriptor){
@@ -766,13 +768,13 @@ public final class ResourceBridge {
     public static void fileOpening(Class<?> declaring,String method)throws IOException {
         platform(declaring,method);
         if(declaring!=FILE_FACTORY&&!LAYOUTS.containsKey(declaring))throw new SecurityException("ACTUAL_FILE_OPEN_REQUIRED");
-        if(FILE_OBSERVING.get()!=null)return;
+        if(FILE_OBSERVING.get()==Boolean.TRUE)return;
         FILE_OBSERVING.set(Boolean.TRUE);
         try{if(!ControlBridge.coreWriter()&&!ControlBridge.taskEffectAllowed(null,"file-open")){
             if(LAYOUTS.containsKey(declaring))throw new FileNotFoundException("RONOVA_TERMINAL_FILE_OPEN_REFUSED");
             throw new IOException("RONOVA_TERMINAL_FILE_OPEN_REFUSED");
         }}
-        finally{FILE_OBSERVING.remove();}
+        finally{FILE_OBSERVING.set(Boolean.FALSE);}
     }
     /** Reserve the actual descriptor immediately after the channel's superclass constructor. */
     public static void fileChannelConstructing(Object channel,FileDescriptor descriptor,String path,Object parent)throws IOException {
@@ -1061,7 +1063,7 @@ public final class ResourceBridge {
         }
     }
     private static Object fileOperation(Object value,Class<?> declaring,String method,Module[] nativeSources)throws IOException {
-        if(FILE_OBSERVING.get()!=null)return null;
+        if(FILE_OBSERVING.get()==Boolean.TRUE)return null;
         FILE_OBSERVING.set(Boolean.TRUE);
         try{
             if(ControlBridge.coreWriter())return null;
@@ -1085,7 +1087,7 @@ public final class ResourceBridge {
                 synchronized(STREAMS){if(record!=null){if(!known)record.unknownUse=true;record.active++;}}
                 FILE_OPERATIONS.set(token);return token;
             }finally{synchronized(STREAMS){if(record!=null)record.observing--;}}
-        }finally{FILE_OBSERVING.remove();}
+        }finally{FILE_OBSERVING.set(Boolean.FALSE);}
     }
     public static void fileOperationFinished(Object value){
         if(value==null)return;
@@ -1123,10 +1125,10 @@ public final class ResourceBridge {
         platform(declaring,method);
         if(declaring==AbstractInterruptibleChannel.class){if(!fileChannel(value))return;}
         else if(!LAYOUTS.containsKey(declaring))throw new SecurityException("ACTUAL_FILE_CLOSE_REQUIRED");
-        if(FILE_OBSERVING.get()!=null)return;
+        if(FILE_OBSERVING.get()==Boolean.TRUE)return;
         FILE_OBSERVING.set(Boolean.TRUE);
         try{if(!ControlBridge.coreWriter()&&(!ControlBridge.taskEffectAllowed(null,"file-close")||!ControlBridge.resourceReleaseAllowed(value)))throw new IOException("RONOVA_FILE_CLOSE_REFUSED");}
-        finally{FILE_OBSERVING.remove();}
+        finally{FILE_OBSERVING.set(Boolean.FALSE);}
     }
     public static void fileChannelClosed(Object channel){
         platform(FILE_CHANNEL,"implCloseChannel");
@@ -1229,14 +1231,14 @@ public final class ResourceBridge {
     public static void mappingExposed(Object action,String method){
         platform(BufferPlatform.UNMAPPER,method);
         if(!method.equals("address")&&!method.equals("fileDescriptor"))throw new SecurityException("ACTUAL_MAPPING_ACCESSOR_REQUIRED");
-        if(FILE_OBSERVING.get()!=null||ControlBridge.coreWriter())return;
+        if(FILE_OBSERVING.get()==Boolean.TRUE||ControlBridge.coreWriter())return;
         if(!ControlBridge.taskEffectAllowed(action,"mapping-address"))throw new IllegalStateException("RONOVA_TERMINAL_MAPPING_ADDRESS");
         synchronized(STREAMS){BufferStorage storage=BUFFER_ACTIONS.get(new Key(action,false));if(storage==null)return;
             if(storage.sealed||storage.cleaned)throw new IllegalStateException("RONOVA_RETIRED_MAPPING_ADDRESS");
             storage.escaped=true;}
     }
     public static void mappingCreated(Object value,Object channel){
-        platform(FILE_CHANNEL,"mapInternal");if(value==null||FILE_OBSERVING.get()!=null)return;
+        platform(FILE_CHANNEL,"mapInternal");if(value==null||FILE_OBSERVING.get()==Boolean.TRUE)return;
         if(!fileChannel(channel)||!(value instanceof Runnable action)||!BufferPlatform.UNMAPPER.isInstance(value))throw new SecurityException("ACTUAL_MAPPING_RESULT_REQUIRED");
         FILE_OBSERVING.set(Boolean.TRUE);
         try{
@@ -1247,7 +1249,7 @@ public final class ResourceBridge {
                 bufferSources(storage,sources);
             }
         }catch(IllegalAccessException failure){throw new IllegalStateException("MAPPING_ORIGINAL_ASSOCIATION_UNAVAILABLE",failure);}
-        finally{FILE_OBSERVING.remove();}
+        finally{FILE_OBSERVING.set(Boolean.FALSE);}
         resourceCreated(value);
     }
     // Native already tracks the actual DirectByteBuffer allocation even when
@@ -1273,7 +1275,7 @@ public final class ResourceBridge {
                 BUFFERS.put(new Key(buffer,true),view);storage.views.add(new WeakReference<>(buffer));storage.viewsVersion++;
             }
         }catch(IllegalAccessException failure){throw new IllegalStateException("BUFFER_ORIGINAL_CLEANUP_UNAVAILABLE",failure);}
-        finally{if(observing==null)FILE_OBSERVING.remove();else FILE_OBSERVING.set(observing);}
+        finally{restoreFileObservation(observing);}
         resourceCreated(action);return new BufferCleanup(storage);
     }
     public static void installBufferWrap(Class<?> actualAgent){
@@ -1391,9 +1393,12 @@ public final class ResourceBridge {
     }
     /** Repeated Java/native guard queries do not consume or broaden this allowance. */
     static boolean bufferWrapMutationAllowed(Object receiver,long offset,Object value,int width){
-        if(WALKER.getCallerClass()!=ControlBridge.class)return false;
+        // Only an actual buffer under construction can receive this allowance.
+        // Ordinary atomic/object writes must not walk their stack to reject it.
+        if(!(receiver instanceof Buffer))return false;
         BufferWrapScope scope=BUFFER_WRAPPING.get();
         if(scope==null||scope.closed||scope.caller!=Thread.currentThread()||receiver!=scope.buffer||scope.buffer.getClass()!=scope.requested)return false;
+        if(WALKER.getCallerClass()!=ControlBridge.class)return false;
         var frame=WALKER.walk(BUFFER_WRAP_WRITER);if(frame==null)return false;Class<?> type=frame.getDeclaringClass();
         if(type!=scope.declaring||scope.role.actual==null||scope.role.actual.get()!=type||scope.role.loader.get()!=type.getClassLoader()
                 ||scope.role.bootstrap!=(type.getClassLoader()==null)||scope.role.module.get()!=DefinitionBridge.module(type)
@@ -1450,7 +1455,7 @@ public final class ResourceBridge {
             // Observing this borrowed view creates neither storage ownership nor native release rights.
             ControlBridge.resourceExposedByOperation(buffer,sources);
         }catch(IllegalAccessException thrown){throw new IllegalStateException("BUFFER_WRAP_VIEW_CAPTURE_FAILED",thrown);}
-        finally{if(observing==null)FILE_OBSERVING.remove();else FILE_OBSERVING.set(observing);}
+        finally{restoreFileObservation(observing);}
     }
     public static Object bufferAllocationEnter(Buffer buffer){
         platform(BufferPlatform.DIRECT,"<init>");BufferAllocation scope=new BufferAllocation(buffer);BUFFER_ALLOCATING.set(scope);return scope;
@@ -1552,7 +1557,7 @@ public final class ResourceBridge {
                 storage.gap=storage.created?"":"BUFFER_ORIGINAL_STORAGE_UNOBSERVED";
             }
         }catch(IllegalAccessException failure){throw new IllegalStateException("BUFFER_VIEW_CAPTURE_FAILED",failure);}
-        finally{if(observing==null)FILE_OBSERVING.remove();else FILE_OBSERVING.set(observing);}
+        finally{restoreFileObservation(observing);}
         resourceCreated(buffer);
     }
     private static void addBuffer(List<Buffer> values,Object value){
@@ -1760,7 +1765,7 @@ public final class ResourceBridge {
                 delivered=true;
                 return lease;
             }finally{synchronized(STREAMS){for(BufferUse use:uses){use.view.observing--;use.view.storage.observing--;if(!delivered)releaseBufferUse(use);}}}
-        }finally{if(previous==null)FILE_OBSERVING.remove();else FILE_OBSERVING.set(previous);}
+        }finally{restoreFileObservation(previous);}
     }
     static void releaseIoBuffers(Object value){
         if(WALKER.getCallerClass()!=IoBridge.class)throw new SecurityException("ACTUAL_IO_BUFFER_RELEASE_REQUIRED");
@@ -1906,7 +1911,7 @@ public final class ResourceBridge {
     }
     public static Object bufferOperation(Object receiver,Object[] arguments,Class<?> declaring,String method){
         platform(declaring,method);if(declaring!=FILE_CHANNEL&&!BufferPlatform.TYPES.contains(declaring))throw new SecurityException("ACTUAL_BUFFER_OPERATION_REQUIRED");
-        if(FILE_OBSERVING.get()!=null)return null;FILE_OBSERVING.set(Boolean.TRUE);
+        if(FILE_OBSERVING.get()==Boolean.TRUE)return null;FILE_OBSERVING.set(Boolean.TRUE);
         Object framework=null;
         // This private per-call list is never a business source. Avoid registering
         // two temporary ArrayLists in the global source directory for every read.
@@ -1946,7 +1951,7 @@ public final class ResourceBridge {
             return operation;
         }finally{
             try{synchronized(STREAMS){for(BufferUse use:uses){use.view.observing--;use.view.storage.observing--;if(!delivered)releaseBufferUse(use);}}}
-            finally{FILE_OBSERVING.remove();if(!delivered)FrameworkBuffers.finishBuffer(framework);}
+            finally{FILE_OBSERVING.set(Boolean.FALSE);if(!delivered)FrameworkBuffers.finishBuffer(framework);}
         }
     }
     public static void bufferOperationFinished(Object value){
@@ -2137,26 +2142,49 @@ public final class ResourceBridge {
         synchronized(STREAMS){BufferView view=BUFFERS.get(new Key(value,false));if(view!=null)view.constructed=true;}
     }
     private static boolean fileChannel(Object value){return value!=null&&value.getClass()==FILE_CHANNEL;}
-    private static boolean platformLayout(Class<?> type){return CharacterWrappers.TYPES.contains(type)||type==PROCESS_TYPE||type==PIPE_REDIRECT||type==BufferedInputStream.class||type==BufferedOutputStream.class||type==FilterInputStream.class||type==FilterOutputStream.class||type==FileDescriptor.class||type==FileInputStream.class
-            ||type==FileOutputStream.class||type==RandomAccessFile.class||NativeControl.libraryMetadataType(type)||type==FILE_CHANNEL||type==FILE_CLOSER||type==AbstractInterruptibleChannel.class||BufferPlatform.TYPES.contains(type)||IoBridge.platformLayout(type);}
+    private static final ClassValue<Boolean> PLATFORM_LAYOUTS=new ClassValue<>(){
+        @Override protected Boolean computeValue(Class<?> type){
+            return CharacterWrappers.TYPES.contains(type)||type==PROCESS_TYPE||type==PIPE_REDIRECT||type==BufferedInputStream.class
+                ||type==BufferedOutputStream.class||type==FilterInputStream.class||type==FilterOutputStream.class||type==FileDescriptor.class
+                ||type==FileInputStream.class||type==FileOutputStream.class||type==RandomAccessFile.class||NativeControl.libraryMetadataType(type)
+                ||type==FILE_CHANNEL||type==FILE_CLOSER||type==AbstractInterruptibleChannel.class||BufferPlatform.TYPES.contains(type)||IoBridge.platformLayout(type);
+        }
+    };
+    private static boolean platformLayout(Class<?> type){return type!=null&&PLATFORM_LAYOUTS.get(type);}
+    private static final ClassValue<Boolean> CRITICAL_TYPES=new ClassValue<>(){
+        @Override protected Boolean computeValue(Class<?> type){
+            // Same exact-class and subclass predicates as critical's original
+            // type-only branch. No loader-based exclusion of stream subclasses.
+            return type==PROCESS_TYPE||type==PIPE_REDIRECT||CharacterWrappers.TYPES.contains(type)||FileDescriptor.class.isAssignableFrom(type)
+                ||FileInputStream.class.isAssignableFrom(type)||FileOutputStream.class.isAssignableFrom(type)||RandomAccessFile.class.isAssignableFrom(type)
+                ||type==FILE_CHANNEL||Buffer.class.isAssignableFrom(type)||BufferPlatform.UNMAPPER.isAssignableFrom(type)
+                ||type==BufferPlatform.DEALLOCATOR||type==BufferPlatform.CLEANER||IoBridge.platformObjectType(type)||NativeControl.libraryMetadataType(type);
+        }
+    };
+    static boolean criticalStateChanged(Object value){
+        Class<?> actual=value.getClass();
+        if(actual!=BufferedInputStream.class&&actual!=BufferedOutputStream.class&&actual!=FileOutputStream.class&&actual!=PIPE_INPUT)return false;
+        synchronized(STREAMS){WeakReference<PipeRecord> link=PROCESS_VIEWS.get(new Key(value,false));return link!=null&&link.get()!=null;}
+    }
     static boolean critical(Object value){
         // A raw native address has no heap receiver or process-view identity.
         // Its range/source checks run at the memory boundary; it cannot use
         // this resource-object registry and must not contend on STREAMS.
         if(value==null)return false;
-        if(value.getClass()==PROCESS_TYPE||value.getClass()==PIPE_REDIRECT)return true;
+        if(value instanceof Class<?> type)return platformLayout(type);
+        if(value instanceof Buffer)return true;
+        Class<?> actual=value.getClass();
+        // Application objects cannot be one of the exact JDK process-view
+        // keys below. CRITICAL_TYPES still includes every original inherited
+        // resource case (streams, IO classes, Buffer and Unmapper).
+        if(actual.getClassLoader()!=null)return CRITICAL_TYPES.get(actual);
         // processConstructed publishes only the exact JDK buffered views and
         // the validated original pipe stream types. Other receivers (notably
         // CompletableFuture nodes and buffers) cannot be keys in this map.
         // Eligible identities still consult the live weak association under
         // STREAMS; this is a type exclusion, never a cached negative lookup.
-        Class<?> actual=value.getClass();
-        if(actual==BufferedInputStream.class||actual==BufferedOutputStream.class||actual==FileOutputStream.class||actual==PIPE_INPUT)
-            synchronized(STREAMS){WeakReference<PipeRecord> link=PROCESS_VIEWS.get(new Key(value,false));if(link!=null&&link.get()!=null)return true;}
-        return characterWrapper(value)||value instanceof FileDescriptor||value instanceof FileInputStream
-            ||value instanceof FileOutputStream||value instanceof RandomAccessFile||fileChannel(value)||value instanceof Buffer
-            ||value!=null&&(BufferPlatform.UNMAPPER.isInstance(value)||value.getClass()==BufferPlatform.DEALLOCATOR||value.getClass()==BufferPlatform.CLEANER)
-            ||IoBridge.platformObject(value)||NativeControl.libraryMetadataValue(value)||value instanceof Class<?> type&&platformLayout(type);}
+        if(criticalStateChanged(value))return true;
+        return CRITICAL_TYPES.get(actual);}
     private static Object unsafe(){
         try{
             Class<?> type=Class.forName("sun.misc.Unsafe",true,ClassLoader.getPlatformClassLoader());

@@ -233,6 +233,13 @@ final class WorldStatePolicy {
             if(CLOCK_FIELDS.contains(slot.field)&&overlap(query.offset,query.length,slot.offset,slot.width))return true;
         return false;
     }
+    static boolean registrationOnly(Object value){
+        if(!initialized||value==null)return false;Class<?> type=value.getClass();
+        // Mutable world containers and custom carriers always get a fresh
+        // world-chain query, even when no registry entry changed.
+        return type.getClassLoader()==null&&!type.isArray()&&!(value instanceof Map<?,?>)
+                &&!(value instanceof Collection<?>)&&!(value instanceof Iterator<?>)&&!FIELDS.containsKey(type)&&!clockCandidate(value);
+    }
     static boolean known(Object value){return candidate(value)&&query(new Query(Kind.KNOWN,value,null,-1,null,0,0));}
     static boolean arrayDenied(Object array,int index,Object next){
         if(!candidate(array)||!array.getClass().isArray()||index<0||index>=Array.getLength(array))return false;

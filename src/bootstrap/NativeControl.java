@@ -101,7 +101,7 @@ public final class NativeControl {
                 if(dll==null)return installFailure("OBJECT_CLONE_JNI_PAYLOAD_ABSENT",false);
                 nativeLoadAttempted=true;
                 System.load(dll.toString());nativeLoaded=true;
-                if(abi()!=100)throw new UnsatisfiedLinkError("NATIVE_CONTROL_ABI");
+                if(abi()!=101)throw new UnsatisfiedLinkError("NATIVE_CONTROL_ABI");
             }
             if(!nativeBoundaryInstalled){
                 nativeHandoffRetryable=false;
@@ -875,15 +875,16 @@ public final class NativeControl {
         return memoryMutationBoundary0(receiver);
     }
     static boolean unsafeMutationBoundary(Object receiver,long offset,long length,String kind,boolean bulk){
-        if(CALLER.getCallerClass()!=ControlBridge.class)return false;
+        // Native validates this wrapper and the actual ControlBridge entry
+        // together with the live operation, without a Java stack-walk allocation.
         return unsafeMutationBoundary0(receiver,offset,length,kind,bulk,false);
     }
     private static boolean unsafeMetadata(Object receiver){return CodeSourceBridge.fieldGateMetadata(receiver);}
     static boolean unsafeReadBoundary(Object receiver,long offset,String kind){
-        return CALLER.getCallerClass()==ControlBridge.class&&unsafeMutationBoundary0(receiver,offset,0,kind,false,true);
+        return unsafeMutationBoundary0(receiver,offset,0,kind,false,true);
     }
     static boolean unsafeCopyBoundary(Object source,long sourceOffset,Object receiver,long offset,long length){
-        return CALLER.getCallerClass()==ControlBridge.class&&unsafeCopyBoundary0(source,sourceOffset,receiver,offset,length);
+        return unsafeCopyBoundary0(source,sourceOffset,receiver,offset,length);
     }
     static boolean unsafeControlScope(){return CALLER.getCallerClass()==ControlBridge.class&&available&&unsafeControlScope0();}
     static long memoryWriteBegin(long address,long bytes,Module[] contributors,boolean reading){

@@ -17,7 +17,7 @@ public final class BlockGroupPolicy {
     private record Entry(ProRuntime runtime,ServerLevel level,BlockPos pos,
             WeakReference<Map<BlockPos,BlockEntity>> container) { }
     private record Slot(BlockPos pos,WeakReference<BlockEntity> entity) { }
-    private static final Map<BlockEntity,Entry> protectedBlocks=Collections.synchronizedMap(new WeakIdentityMap<>());
+    private static final Map<BlockEntity,Entry> protectedBlocks=new WeakIdentityMap<>();
     private static final Map<Object,List<Slot>> containerSlots=Collections.synchronizedMap(new WeakIdentityMap<>());
     private BlockGroupPolicy() { }
 

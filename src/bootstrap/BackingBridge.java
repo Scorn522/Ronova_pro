@@ -8,22 +8,33 @@ import java.util.function.*;
 /** Array, exact fastutil and native mutation adapters. No caller supplies registration or authority. */
 public final class BackingBridge {
     public static final Object UNHANDLED=new Object();
-    private record Policy(MethodHandle known,MethodHandle element,MethodHandle array,MethodHandle offset,MethodHandle memory) { }
+    record Policy(MethodHandle known,MethodHandle element,MethodHandle array,MethodHandle offset,MethodHandle memory,MethodHandle revision) { }
     private static volatile Policy policy;
     private static final ThreadLocal<Boolean> POLICY_CALLBACK=new ThreadLocal<>();
+    // Keep one entry per participating thread; inactive state retains no business object.
+    private static void restorePolicyCallback(Boolean previous){POLICY_CALLBACK.set(previous==Boolean.TRUE);}
     private BackingBridge() { }
-    static void install(MethodHandle known,MethodHandle element,MethodHandle array,MethodHandle offset,MethodHandle memory) {
+    static void install(MethodHandle known,MethodHandle element,MethodHandle array,MethodHandle offset,MethodHandle memory,MethodHandle revision) {
         policy=new Policy(known.asType(MethodType.methodType(boolean.class,Object.class)),
                 element.asType(MethodType.methodType(boolean.class,Object.class,Object.class,Object.class)),
                 array.asType(MethodType.methodType(boolean.class,Object.class,int.class,Object.class)),
                 offset.asType(MethodType.methodType(boolean.class,Object.class,long.class,Object.class)),
-                memory.asType(MethodType.methodType(boolean.class,Object.class,long.class,long.class)));
+                memory.asType(MethodType.methodType(boolean.class,Object.class,long.class,long.class)),
+                revision.asType(MethodType.methodType(long.class,Object.class)));
     }
+    static Policy registration(){return policy;}
+    static long receiptRevision(Policy registration,Object value){
+        if(registration==null)return 0;
+        Boolean active=POLICY_CALLBACK.get();POLICY_CALLBACK.set(true);
+        try{return (long)registration.revision.invokeExact(value);}catch(Throwable e){throw new IllegalStateException("BACKING_REVISION",e);}
+        finally{restorePolicyCallback(active);}
+    }
+    static boolean unchanged(Policy registration,long revision){return revision>=0&&registration==policy&&revision==receiptRevision(registration,null)&&registration==policy;}
     public static boolean offsetAllowed(Object receiver,long offset,Object value) {
         Policy current=policy;if(current==null)return true;
         Boolean active=POLICY_CALLBACK.get();POLICY_CALLBACK.set(true);
         try {return !(boolean)current.offset.invokeExact(receiver,offset,value);}catch(Throwable e){throw new IllegalStateException("BACKING_OFFSET_GUARD",e);}
-        finally {if(active==null)POLICY_CALLBACK.remove();else POLICY_CALLBACK.set(active);}
+        finally {restorePolicyCallback(active);}
     }
     public static boolean arrayAllowed(Object array,int index,Object value) {
         // arrayWriteAllowed already checks this array's control identity and
@@ -33,7 +44,7 @@ public final class BackingBridge {
         Policy current=policy;if(current==null)return true;
         Boolean active=POLICY_CALLBACK.get();POLICY_CALLBACK.set(true);
         try {return !(boolean)current.array.invokeExact(array,index,value);}catch(Throwable e){throw new IllegalStateException("BACKING_ARRAY_GUARD",e);}
-        finally {if(active==null)POLICY_CALLBACK.remove();else POLICY_CALLBACK.set(active);}
+        finally {restorePolicyCallback(active);}
     }
     /** 0 denies the store, 1 requires the existing value checks, 2 permits this bulk store. */
     static int nativePrimitiveArrayPolicy(Object array) {
@@ -49,7 +60,7 @@ public final class BackingBridge {
         Policy current=policy;if(current==null)return false;
         Boolean active=POLICY_CALLBACK.get();POLICY_CALLBACK.set(true);
         try {return (boolean)current.known.invokeExact(value);}catch(Throwable e){throw new IllegalStateException("BACKING_LOOKUP",e);}
-        finally {if(active==null)POLICY_CALLBACK.remove();else POLICY_CALLBACK.set(active);}
+        finally {restorePolicyCallback(active);}
     }
     static boolean nativePointerAllowed(Object array){
         if(!ControlBridge.controlMutationAllowed(array))return false;
@@ -66,7 +77,7 @@ public final class BackingBridge {
         Policy current=policy;if(current==null)return false;
         Boolean active=POLICY_CALLBACK.get();POLICY_CALLBACK.set(true);
         try {return (boolean)current.element.invokeExact(container,prior,next);}catch(Throwable e){throw new IllegalStateException("BACKING_ELEMENT_GUARD",e);}
-        finally {if(active==null)POLICY_CALLBACK.remove();else POLICY_CALLBACK.set(active);}
+        finally {restorePolicyCallback(active);}
     }
     public static boolean incomingAllowed(Object receiver,Object value) {return !deny(receiver,null,value);}
     static boolean incomingPairAllowed(Object receiver,Object key,Object value){
@@ -78,7 +89,7 @@ public final class BackingBridge {
         try{return !(boolean)current.element.invokeExact(receiver,(Object)null,value)
                 &&(key==value||!(boolean)current.element.invokeExact(receiver,(Object)null,key));}
         catch(Throwable failure){throw new IllegalStateException("BACKING_ELEMENT_GUARD",failure);}
-        finally{if(active==null)POLICY_CALLBACK.remove();else POLICY_CALLBACK.set(active);}
+        finally{restorePolicyCallback(active);}
     }
     private static Object arrayMutation(Object array,int index,int length){
         // A miss only omits an unneeded receipt. arrayAllowed still performs
@@ -290,7 +301,7 @@ public final class BackingBridge {
         Policy current=policy;if(current==null)return true;
         Boolean active=POLICY_CALLBACK.get();POLICY_CALLBACK.set(true);
         try {return !(boolean)current.memory.invokeExact(receiver,offset,length);}catch(Throwable e){throw new IllegalStateException("BACKING_MEMORY_GUARD",e);}
-        finally {if(active==null)POLICY_CALLBACK.remove();else POLICY_CALLBACK.set(active);}
+        finally {restorePolicyCallback(active);}
     }
     public static MethodHandle wrapArraySetter(MethodHandle original) {
         if(WRAPPING.get()!=null)return original;WRAPPING.set(true);
@@ -350,7 +361,7 @@ public final class BackingBridge {
     /** The exact fastutil writer owns the receiver gate before inspecting proposals. */
     @SuppressWarnings({"rawtypes","unchecked"})
     public static Object fastCollectionMutation(Object receiver,String method,Object[] args){
-        if(POLICY_CALLBACK.get()!=null||receiver==null||!known(receiver))return UNHANDLED;
+        if(POLICY_CALLBACK.get()==Boolean.TRUE||receiver==null||!known(receiver))return UNHANDLED;
         String type=receiver.getClass().getName();
         boolean listType=type.equals("it.unimi.dsi.fastutil.objects.ObjectArrayList");
         if(!listType&&!type.equals("it.unimi.dsi.fastutil.objects.ObjectOpenHashSet"))return UNHANDLED;

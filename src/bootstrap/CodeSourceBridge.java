@@ -2,6 +2,7 @@ package dev.ronova.pro.bootstrap;
 
 import java.lang.module.ModuleReference;
 import java.lang.ref.*;
+import java.lang.reflect.Field;
 import java.lang.reflect.Method;
 import java.security.MessageDigest;
 import java.util.*;
@@ -96,10 +97,52 @@ public final class CodeSourceBridge {
     }
     private static final List<CodeFields> CODE_FIELDS=new ArrayList<>();
     private static final List<CodeValues> CODE_VALUES=new ArrayList<>();
-    // Existing registration records only. A miss never creates a bucket, and
-    // every lookup still matches the actual Class/loader identity below.
-    private static final Map<String,List<CodeFields>> CODE_FIELD_INDEX=new LedgerMap<>();
-    private static final Map<String,List<CodeValues>> CODE_VALUE_INDEX=new LedgerMap<>();
+    // Buckets are versioned registration metadata; every projection still
+    // matches the actual Class/loader identity below.
+    private static final Map<String,FieldBucket> CODE_FIELD_INDEX=new LedgerMap<>();
+    private static final Map<String,ValueBucket> CODE_VALUE_INDEX=new LedgerMap<>();
+    private static final class FieldBucket {volatile List<CodeFields> rows=List.of();}
+    private static final class ValueBucket {volatile List<CodeValues> rows=List.of();}
+    private record FieldProjection(List<CodeFields> revision,Map<String,CodeField> first,boolean tracked){}
+    private record ValueProjection(List<CodeValues> revision,boolean tracked){}
+    // Only registered metadata revisions, never an ownership or permission decision.
+    static record FieldTracking(FieldProjection fields,ValueProjection values){
+        boolean tracked(){return fields.tracked()||values.tracked();}
+    }
+    private static final class FieldLookup {
+        final Class<?> type;final FieldBucket fields;final ValueBucket values;
+        volatile FieldProjection fieldProjection;volatile ValueProjection valueProjection;
+        volatile FieldTracking tracking;
+        FieldLookup(Class<?> type,FieldBucket fields,ValueBucket values){this.type=type;this.fields=fields;this.values=values;}
+        FieldProjection fields(){
+            List<CodeFields> rows=fields.rows;FieldProjection result=fieldProjection;
+            if(result!=null&&result.revision()==rows)return result;
+            Map<String,CodeField> first=null;boolean tracked=false;
+            for(CodeFields row:rows)if(codeMatches(row.name(),row.loader(),row.bootstrap(),row.actual(),type)){
+                if(first==null)first=row.fields();tracked|=!row.fields().isEmpty();
+            }
+            result=new FieldProjection(rows,first==null?Map.of():first,tracked);fieldProjection=result;return result;
+        }
+        ValueProjection values(){
+            List<CodeValues> rows=values.rows;ValueProjection result=valueProjection;
+            if(result!=null&&result.revision()==rows)return result;
+            boolean tracked=false;for(CodeValues row:rows)if(!row.fields().isEmpty()&&codeMatches(row.name(),row.loader(),row.bootstrap(),row.actual(),type)){tracked=true;break;}
+            result=new ValueProjection(rows,tracked);valueProjection=result;return result;
+        }
+        FieldTracking tracking(){
+            FieldProjection currentFields=fields();ValueProjection currentValues=values();FieldTracking result=tracking;
+            if(result!=null&&result.fields()==currentFields&&result.values()==currentValues)return result;
+            result=new FieldTracking(currentFields,currentValues);tracking=result;return result;
+        }
+    }
+    private static final ClassValue<FieldLookup> FIELD_LOOKUPS=new ClassValue<>(){
+        @Override protected FieldLookup computeValue(Class<?> type){
+            FieldBucket fields;ValueBucket values;String name=type.getName();
+            synchronized(CODE_FIELDS){fields=CODE_FIELD_INDEX.computeIfAbsent(name,ignored->new FieldBucket());}
+            synchronized(CODE_VALUES){values=CODE_VALUE_INDEX.computeIfAbsent(name,ignored->new ValueBucket());}
+            return new FieldLookup(type,fields,values);
+        }
+    };
     private static final Map<Key,Set<FieldHold>> FIELD_HOLDERS=new LedgerMap<>();
     private static final List<WeakReference<Class<?>>> FIELD_CLASSES=new ArrayList<>();
     private static volatile Class<?> agent;
@@ -168,7 +211,7 @@ public final class CodeSourceBridge {
         final Object[] values;final ControlPublication previous;volatile Object[] index;
         ControlPublication(Object[] values,ControlPublication previous){this.values=values;this.previous=previous;}
         void prepare(){
-            if(values.length>(1<<28))return;int capacity=16;
+            if(values.length<=4||values.length>(1<<28))return;int capacity=16;
             while(capacity<values.length*2)capacity<<=1;
             Object[] built=new Object[capacity];
             for(Object value:values){if(value==null)continue;int at=ControlRegistry.bucket(System.identityHashCode(value),capacity);
@@ -222,13 +265,13 @@ public final class CodeSourceBridge {
             // The temporary lookup arrays are controller metadata too. Retain
             // weak protection while an acquired publication is still held by
             // a reader after this batch returns; no source verdict is stored.
-            for(int index=-2;index<values.length;index++){
+            for(int index=0;index<values.length;index++){
                 // A class image can publish thousands of identities at once.
                 // Retiring only 64 keys per whole publication lets temporary
                 // image history outgrow every later GC. Charge at most one
                 // bounded retirement batch per 64 supplied identities instead.
                 if((index&63)==0){ControlKey retired=(ControlKey)DEAD_CONTROLS.poll();if(retired!=null)reap(retired);}
-                Object value=index==-2?pending.values:index==-1?pending.index:values[index];
+                Object value=values[index];
                 if(value==null)continue;
                 ControlKey known=find(value);if(known!=null){result=known;continue;}
                 NativeControl.heapPolicyChanged(value);
@@ -300,7 +343,7 @@ public final class CodeSourceBridge {
         metadataImages=actualAgent.getMethod("externalMixinMetadata",Object.class,Module.class,Module[].class);
         memberImage=actualAgent.getMethod("externalMemberMetadata",Object.class);
         prepared=actualAgent.getMethod("externalClassPrepared",Class.class);
-        ControlBridge.controlPublication(MODULES,new Object[]{IMAGES,BYTE_CONTRIBUTORS,READERS,TREES,TREE_INPUTS,TREE_PARENTS,TREE_IMAGES,MIXINS,MIXIN_TREES,MIXIN_OPTIONS,MIXIN_RESTRICTIONS,TRACKER_RESTRICTIONS,METADATA,METADATA_TREES,METADATA_ROWS,MEMBER_IMAGES,CONTEXT_READS,STATE_READS,SELECTIONS,RESOURCE_SOURCES,CONFIGURATIONS,CONTEXTS,HOLDERS,WRITERS,COPYING,PREPARING_CONFIGS,REGISTRATIONS,METADATA_USE,CONTROLS,ROLES,CODE_METHODS,FRAME_METHODS,CODE_FIELDS,CODE_VALUES,CODE_FIELD_INDEX,CODE_VALUE_INDEX,FIELD_HOLDERS,FIELD_CLASSES,agent,producer,encoder,baseline,begin,end,copied,encoded,observed,dependency,payload,selection,metadataImages,memberImage,prepared});
+        ControlBridge.controlPublication(MODULES,new Object[]{IMAGES,BYTE_CONTRIBUTORS,READERS,TREES,TREE_INPUTS,TREE_PARENTS,TREE_IMAGES,MIXINS,MIXIN_TREES,MIXIN_OPTIONS,MIXIN_RESTRICTIONS,TRACKER_RESTRICTIONS,METADATA,METADATA_TREES,METADATA_ROWS,MEMBER_IMAGES,CONTEXT_READS,STATE_READS,SELECTIONS,RESOURCE_SOURCES,CONFIGURATIONS,CONTEXTS,HOLDERS,WRITERS,COPYING,PREPARING_CONFIGS,REGISTRATIONS,METADATA_USE,CONTROLS,ROLES,CODE_METHODS,FRAME_METHODS,CODE_FIELDS,CODE_VALUES,CODE_FIELD_INDEX,CODE_VALUE_INDEX,FIELD_LOOKUPS,FIELD_HOLDERS,FIELD_CLASSES,agent,producer,encoder,baseline,begin,end,copied,encoded,observed,dependency,payload,selection,metadataImages,memberImage,prepared});
     }
     public static void codeMethods(ClassLoader loader,String name,String[] methods){
         requireAgent();codeMethods(loader,name,methods,null);
@@ -693,11 +736,13 @@ public final class CodeSourceBridge {
     }
     private static void indexCodeFields(String name){
         List<CodeFields> rows=new ArrayList<>();for(CodeFields entry:CODE_FIELDS)if(entry.name().equals(name))rows.add(entry);
-        List<CodeFields> bucket=List.copyOf(rows);protect(bucket);CODE_FIELD_INDEX.put(name,bucket);
+        List<CodeFields> published=List.copyOf(rows);FieldBucket bucket=CODE_FIELD_INDEX.computeIfAbsent(name,ignored->new FieldBucket());
+        protect(bucket,published);bucket.rows=published;
     }
     private static void indexCodeValues(String name){
         List<CodeValues> rows=new ArrayList<>();for(CodeValues entry:CODE_VALUES)if(entry.name().equals(name))rows.add(entry);
-        List<CodeValues> bucket=List.copyOf(rows);protect(bucket);CODE_VALUE_INDEX.put(name,bucket);
+        List<CodeValues> published=List.copyOf(rows);ValueBucket bucket=CODE_VALUE_INDEX.computeIfAbsent(name,ignored->new ValueBucket());
+        protect(bucket,published);bucket.rows=published;
     }
     private static boolean codeMatches(String name,WeakReference<ClassLoader> loader,boolean bootstrap,WeakReference<Class<?>> exact,Class<?> actual){
         return exact!=null?exact.get()==actual:!actual.isHidden()&&name.equals(actual.getName())&&bootstrap==(actual.getClassLoader()==null)&&loader.get()==actual.getClassLoader();
@@ -784,6 +829,15 @@ public final class CodeSourceBridge {
         if(!(object instanceof HashMap<?,?>))return false;
         return CONTROLS.executionMap(object);
     }
+    private static final class FieldGateLayout {
+        static final Field SYNC=syncField();
+        private static Field syncField(){
+            try{
+                Field field=PlatformMetadata.declaredField(java.util.concurrent.locks.ReentrantLock.class,"sync");
+                field.setAccessible(true);return field;
+            }catch(ReflectiveOperationException unavailable){throw new ExceptionInInitializerError(unavailable);}
+        }
+    }
     static void fieldGateControls(java.util.concurrent.locks.ReentrantLock gate){
         Class<?> caller=AUTHORITY.getCallerClass();
         if(caller!=ControlBridge.class||gate.getClass()!=java.util.concurrent.locks.ReentrantLock.class)
@@ -793,12 +847,15 @@ public final class CodeSourceBridge {
         // installed. Read the real synchronizer without repeating a JVMTI
         // class-field enumeration for every ordinary receiver gate.
         try{
-            var field=PlatformMetadata.declaredField(java.util.concurrent.locks.ReentrantLock.class,"sync");field.setAccessible(true);sync=field.get(gate);
+            sync=FieldGateLayout.SYNC.get(gate);
         }catch(ReflectiveOperationException unavailable){throw new IllegalStateException("FIELD_GATE_SYNC_UNAVAILABLE",unavailable);}
         if(!(sync instanceof java.util.concurrent.locks.AbstractQueuedSynchronizer))throw new IllegalStateException("FIELD_GATE_SYNC_UNAVAILABLE");
         // Bind both exact identities before the gate is published. Its JDK
         // synchronizer is controller state, never a business heap carrier.
-        synchronized(CONTROLS){reapControls();CONTROLS.add(gate).fieldGate=true;CONTROLS.add(sync).fieldGate=true;}
+        synchronized(CONTROLS){
+            reapControls();CONTROLS.addAll(new Object[]{gate,sync});
+            CONTROLS.find(gate).fieldGate=true;CONTROLS.find(sync).fieldGate=true;
+        }
     }
     static boolean fieldGateMetadata(Object object){
         if(!(object instanceof java.util.concurrent.locks.ReentrantLock||object instanceof java.util.concurrent.locks.AbstractQueuedSynchronizer))return false;
@@ -813,19 +870,19 @@ public final class CodeSourceBridge {
         protect(objects);
     }
     private static CodeField codeField(Class<?> declaring,String name){
-        synchronized(CODE_FIELDS){List<CodeFields> bucket=CODE_FIELD_INDEX.get(declaring.getName());if(bucket!=null)for(CodeFields entry:bucket)
-            if(codeMatches(entry.name(),entry.loader(),entry.bootstrap(),entry.actual(),declaring))return entry.fields().get(name);}return null;
+        return FIELD_LOOKUPS.get(declaring).fields().first().get(name);
     }
     static boolean fieldMutationTracked(Class<?> declaring){
         if(declaring==null)return false;
         // These are actual recorded code-field roots, including fields added
         // to an external class. Its defining Module alone cannot identify them.
-        String name=declaring.getName();
-        synchronized(CODE_FIELDS){List<CodeFields> bucket=CODE_FIELD_INDEX.get(name);if(bucket!=null)for(CodeFields entry:bucket)
-            if(!entry.fields().isEmpty()&&codeMatches(entry.name(),entry.loader(),entry.bootstrap(),entry.actual(),declaring))return true;}
-        synchronized(CODE_VALUES){List<CodeValues> bucket=CODE_VALUE_INDEX.get(name);if(bucket!=null)for(CodeValues entry:bucket)
-            if(!entry.fields().isEmpty()&&codeMatches(entry.name(),entry.loader(),entry.bootstrap(),entry.actual(),declaring))return true;}
-        return false;
+        return fieldMutationTracking(declaring).tracked();
+    }
+    static FieldTracking fieldMutationTracking(Class<?> declaring){return FIELD_LOOKUPS.get(declaring).tracking();}
+    static boolean fieldMutationTrackingChanged(Class<?> declaring,FieldTracking checked){
+        FieldLookup lookup=FIELD_LOOKUPS.get(declaring);
+        // No projection/type walk when both authoritative buckets are unchanged.
+        return lookup.fields.rows!=checked.fields().revision()||lookup.values.rows!=checked.values().revision();
     }
     static boolean fieldAllowed(Object receiver,Class<?> declaring,String name){
         CodeField source=codeField(declaring,name);if(source==null)return true;
@@ -882,9 +939,7 @@ public final class CodeSourceBridge {
     }
     private static boolean fieldRangeAllowed(Object receiver,Class<?> actual,boolean statik,long offset,long length){
         for(Class<?> type=actual;type!=null;type=statik?null:type.getSuperclass()){
-            CodeFields entry=null;synchronized(CODE_FIELDS){for(CodeFields candidate:CODE_FIELDS)if(codeMatches(candidate.name(),candidate.loader(),candidate.bootstrap(),candidate.actual(),type)){entry=candidate;break;}}
-            if(entry==null)continue;
-            for(CodeField source:entry.fields().values())try{
+            for(CodeField source:FIELD_LOOKUPS.get(type).fields().first().values())try{
                 var field=PlatformMetadata.declaredField(type,source.name());if(java.lang.reflect.Modifier.isStatic(field.getModifiers())!=statik||!field.getType().descriptorString().equals(source.descriptor()))continue;
                 long[] span=ResourceBridge.fieldSpan(field,receiver);if(span==null)continue;
                 if(offset<0||length>Long.MAX_VALUE-offset)return false;

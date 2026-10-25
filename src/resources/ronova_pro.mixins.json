@@ -38,6 +38,7 @@
     "Access$Block",
     "Access$World",
     "Access$Packet",
+    "ServerShutdownHooks",
     "EntityHooks",
     "PresentationHooks",
     "WorldControlHooks$World",

@@ -118,7 +118,7 @@ static int native_unsafe_network_retirement(JNIEnv *env,NativeThread *state,Bind
 static int native_unsafe_begin(JNIEnv *env,NativeThread *state,Binding *binding,unsigned char *frame){
     unsigned depth=state->depth-1;NativeUnsafeFrame *use=&state->unsafeFrames[depth];memset(use,0,sizeof(*use));
     if(binding->unsafeOperation>=UNSAFE_ALLOCATE&&binding->unsafeOperation<=UNSAFE_FREE)return native_memory_call_begin(env,state,binding,frame);
-    NativeUnsafeMutation mutation;memset(&mutation,0,sizeof(mutation));
+    NativeUnsafeMutation mutation;memset(&mutation,0,sizeof(mutation));mutation.binding=binding;
     native_unsafe_destination(binding,frame,&mutation.receiver,&mutation.offset,&mutation.length);
     /* Heap access keeps the existing Java control gate. A raw getter needs
      * only the control-range fence; private allocation leases are disabled. */
@@ -179,10 +179,43 @@ static void native_unsafe_end(JNIEnv *env,NativeThread *state,Binding *binding,u
     }
     state->control++;native_end_mutation(env,use->token,applied);state->control--;memset(use,0,sizeof(*use));
 }
+/* These three live frames replace the Java caller-class walk, not its
+ * authority check. A reflective/direct native call cannot borrow a live token
+ * without the exact wrapper and the entry invoked by native_unsafe_begin. */
+static int native_unsafe_boundary_caller(jmethodID boundary,jmethodID wrapper,jmethodID entry){
+    jvmtiFrameInfo frames[3];jint found=0;
+    return native_ti&&boundary&&wrapper&&entry
+            &&(*native_ti)->GetStackTrace(native_ti,NULL,0,3,frames,&found)==JVMTI_ERROR_NONE&&found==3
+            &&frames[0].method==boundary&&frames[1].method==wrapper&&frames[2].method==entry;
+}
+/* The raw scalar callback is already bound to a real Unsafe JNI operation.
+ * Authenticate its complete live prefix here rather than reentering Java's
+ * generic writer selector. Other callers retain that selector unchanged. */
+static int native_unsafe_memory_authority(JNIEnv *env,jclass type,jlong address,jlong length,jboolean reading,jboolean snapshot){
+    NativeThread *state=native_thread();NativeUnsafeMutation *mutation=state?state->unsafeMutation:NULL;
+    if(!mutation||!mutation->binding||mutation->receiver||mutation->bulk||mutation->reading||mutation->copy
+            ||reading||snapshot||address!=mutation->offset||!native_controller
+            ||!native_original.IsSameObject(env,type,native_controller)||native_original.ExceptionCheck(env))return 0;
+    Binding *binding=mutation->binding;const char *kind=binding->unsafeKind;
+    if(!kind)return 0;
+    jlong width=!strcmp(kind,"Boolean")||!strcmp(kind,"Byte")?1
+            :!strcmp(kind,"Char")||!strcmp(kind,"Short")?2
+            :!strcmp(kind,"Int")||!strcmp(kind,"Float")?4
+            :!strcmp(kind,"Long")||!strcmp(kind,"Double")?8:0;
+    if(!width||length!=width||!native_ti||!native_unsafe_memory_begin||!native_unsafe_memory_wrapper
+            ||!native_unsafe_raw_receipt||!native_unsafe_raw_write||!native_unsafe_begin_query||!binding->method)return 0;
+    jvmtiFrameInfo frames[6];jint found=0;
+    return (*native_ti)->GetStackTrace(native_ti,NULL,0,6,frames,&found)==JVMTI_ERROR_NONE&&found==6
+            &&frames[0].method==native_unsafe_memory_begin&&frames[1].method==native_unsafe_memory_wrapper
+            &&frames[2].method==native_unsafe_raw_receipt&&frames[3].method==native_unsafe_raw_write
+            &&frames[4].method==native_unsafe_begin_query&&frames[5].method==binding->method;
+}
 JNIEXPORT jboolean JNICALL Java_dev_ronova_pro_bootstrap_NativeControl_unsafeMutationBoundary0(JNIEnv *env,jclass type,jobject receiver,jlong offset,jlong length,jstring kind,jboolean bulk,jboolean reading){
     (void)type;NativeThread *state=native_thread();NativeUnsafeMutation *mutation=state?state->unsafeMutation:NULL;
     return mutation&&mutation->offset==offset&&mutation->length==length&&mutation->bulk==bulk&&mutation->reading==reading
-            &&native_original.IsSameObject(env,mutation->receiver,receiver)&&native_original.IsSameObject(env,mutation->kind,kind)?JNI_TRUE:JNI_FALSE;
+            &&native_original.IsSameObject(env,mutation->receiver,receiver)&&native_original.IsSameObject(env,mutation->kind,kind)
+            &&native_unsafe_boundary_caller(native_unsafe_boundary,reading?native_unsafe_read_wrapper:native_unsafe_write_wrapper,
+                    reading?native_unsafe_read_begin_query:native_unsafe_begin_query)?JNI_TRUE:JNI_FALSE;
 }
 JNIEXPORT jboolean JNICALL Java_dev_ronova_pro_bootstrap_NativeControl_unsafeControlScope0(JNIEnv *env,jclass type){
     (void)env;(void)type;NativeThread *state=native_thread();return state&&state->control?JNI_TRUE:JNI_FALSE;
@@ -190,7 +223,8 @@ JNIEXPORT jboolean JNICALL Java_dev_ronova_pro_bootstrap_NativeControl_unsafeCon
 JNIEXPORT jboolean JNICALL Java_dev_ronova_pro_bootstrap_NativeControl_unsafeCopyBoundary0(JNIEnv *env,jclass type,jobject source,jlong sourceOffset,jobject receiver,jlong offset,jlong length){
     (void)type;NativeThread *state=native_thread();NativeUnsafeMutation *mutation=state?state->unsafeMutation:NULL;
     return mutation&&mutation->copy&&mutation->sourceOffset==sourceOffset&&mutation->offset==offset&&mutation->length==length
-            &&native_original.IsSameObject(env,mutation->source,source)&&native_original.IsSameObject(env,mutation->receiver,receiver)?JNI_TRUE:JNI_FALSE;
+            &&native_original.IsSameObject(env,mutation->source,source)&&native_original.IsSameObject(env,mutation->receiver,receiver)
+            &&native_unsafe_boundary_caller(native_unsafe_copy_boundary,native_unsafe_copy_wrapper,native_unsafe_copy_begin_query)?JNI_TRUE:JNI_FALSE;
 }
 static uint64_t native_unsafe_result(JNIEnv *env,Binding *binding,unsigned char *frame){
     if(binding->unsafeOperation!=UNSAFE_EXCHANGE)return 0;
@@ -226,6 +260,15 @@ static int native_unsafe_prepare(JNIEnv *env){
     if(!native_original.ExceptionCheck(env))native_unsafe_begin_query=native_original.GetStaticMethodID(env,native_controls,"beginNativeUnsafeMutation","(Ljava/lang/Object;JJLjava/lang/Object;Ljava/lang/String;Z[Ljava/lang/Module;)Ljava/lang/Object;");
     if(!native_original.ExceptionCheck(env))native_unsafe_read_begin_query=native_original.GetStaticMethodID(env,native_controls,"beginNativeUnsafeRead","(Ljava/lang/Object;JLjava/lang/String;[Ljava/lang/Module;)Ljava/lang/Object;");
     if(!native_original.ExceptionCheck(env))native_unsafe_copy_begin_query=native_original.GetStaticMethodID(env,native_controls,"beginNativeUnsafeCopy","(Ljava/lang/Object;JLjava/lang/Object;JJ[Ljava/lang/Module;)Ljava/lang/Object;");
+    if(!native_original.ExceptionCheck(env))native_unsafe_boundary=native_original.GetStaticMethodID(env,native_controller,"unsafeMutationBoundary0","(Ljava/lang/Object;JJLjava/lang/String;ZZ)Z");
+    if(!native_original.ExceptionCheck(env))native_unsafe_copy_boundary=native_original.GetStaticMethodID(env,native_controller,"unsafeCopyBoundary0","(Ljava/lang/Object;JLjava/lang/Object;JJ)Z");
+    if(!native_original.ExceptionCheck(env))native_unsafe_write_wrapper=native_original.GetStaticMethodID(env,native_controller,"unsafeMutationBoundary","(Ljava/lang/Object;JJLjava/lang/String;Z)Z");
+    if(!native_original.ExceptionCheck(env))native_unsafe_read_wrapper=native_original.GetStaticMethodID(env,native_controller,"unsafeReadBoundary","(Ljava/lang/Object;JLjava/lang/String;)Z");
+    if(!native_original.ExceptionCheck(env))native_unsafe_copy_wrapper=native_original.GetStaticMethodID(env,native_controller,"unsafeCopyBoundary","(Ljava/lang/Object;JLjava/lang/Object;JJ)Z");
+    if(!native_original.ExceptionCheck(env))native_unsafe_memory_begin=native_original.GetStaticMethodID(env,native_controller,"memoryWriteBegin0","(JJ[Ljava/lang/Module;ZZ)J");
+    if(!native_original.ExceptionCheck(env))native_unsafe_memory_wrapper=native_original.GetStaticMethodID(env,native_controller,"memoryWriteBegin","(JJ[Ljava/lang/Module;Z)J");
+    if(!native_original.ExceptionCheck(env))native_unsafe_raw_receipt=native_original.GetStaticMethodID(env,native_controls,"rawReceipt","(JJ[Ljava/lang/Module;Z)Ljava/lang/Object;");
+    if(!native_original.ExceptionCheck(env))native_unsafe_raw_write=native_original.GetStaticMethodID(env,native_controls,"rawReceipt","(JJ[Ljava/lang/Module;)Ljava/lang/Object;");
     if(!native_original.ExceptionCheck(env))native_network_retirement_write_query=native_original.GetStaticMethodID(env,native_controls,"networkRetirementWriteAllowed","(Ljava/lang/Object;JLjava/lang/Object;Ljava/lang/String;)Z");
     if(!native_original.ExceptionCheck(env))native_network_retirement_owner_query=native_original.GetStaticMethodID(env,native_controls,"networkRetirementOwnerAllowed","(Ljava/lang/Object;Ljava/lang/Object;JLjava/lang/Object;Ljava/lang/String;)Z");
     if(!native_original.ExceptionCheck(env))native_network_retirement_active_query=native_original.GetStaticMethodID(env,native_controls,"networkRetirementActive","()Z");
@@ -236,7 +279,10 @@ static int native_unsafe_prepare(JNIEnv *env){
     jobject denied=no?native_original.GetStaticObjectField(env,booleanType,no):NULL;
     if(denied){native_unsafe_denied=native_original.NewGlobalRef(env,denied);native_original.DeleteLocalRef(env,denied);}
     if(unsafe)native_original.DeleteLocalRef(env,unsafe);if(backing)native_original.DeleteLocalRef(env,backing);if(booleanType)native_original.DeleteLocalRef(env,booleanType);
-    int ready=native_unsafe_class&&native_unsafe_backing&&native_unsafe_register&&native_unsafe_read_query&&native_unsafe_begin_query&&native_unsafe_read_begin_query&&native_unsafe_copy_begin_query&&native_network_retirement_write_query&&native_network_retirement_owner_query&&native_network_retirement_active_query&&native_unsafe_metadata_query&&native_memory_gate&&native_unsafe_denied&&!native_original.ExceptionCheck(env);
+    int ready=native_unsafe_class&&native_unsafe_backing&&native_unsafe_register&&native_unsafe_read_query&&native_unsafe_begin_query&&native_unsafe_read_begin_query&&native_unsafe_copy_begin_query
+            &&native_unsafe_boundary&&native_unsafe_copy_boundary&&native_unsafe_write_wrapper&&native_unsafe_read_wrapper&&native_unsafe_copy_wrapper
+            &&native_unsafe_memory_begin&&native_unsafe_memory_wrapper&&native_unsafe_raw_receipt&&native_unsafe_raw_write
+            &&native_network_retirement_write_query&&native_network_retirement_owner_query&&native_network_retirement_active_query&&native_unsafe_metadata_query&&native_memory_gate&&native_unsafe_denied&&!native_original.ExceptionCheck(env);
     state->control--;return ready;
 }
 static NativeUnsafeInstall *native_unsafe_registration(JNIEnv *env,NativeThread *state,jclass type,const JNINativeMethod *methods,jint count,void *caller){

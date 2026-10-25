@@ -272,7 +272,13 @@ static int host_module_borrow_load(NativeThread *state,HostLibraryLoad *load){
 static int host_module_keep_sources(NativeThread *state,HostLibraryLoad *load){
     JNIEnv *env=NULL;int nativeOnly=host_native_only(state);
     int attached=!nativeOnly&&native_vm&&(*native_vm)->GetEnv(native_vm,(void**)&env,JNI_VERSION_1_8)==JNI_OK;
-    if(!attached)return !load->unknown&&host_module_borrow_load(state,load);
+    if(!attached){
+        if(load->unknown)return 0;
+        /* A known platform call has no Mod owners to keep alive. Match the
+         * exit path; borrowing a nonempty private lease is inapplicable. */
+        if(!load->owners){load->leaseComplete=1;return 1;}
+        return host_module_borrow_load(state,load);
+    }
     jobjectArray sources=native_tooling_sources(env,load->owners,load->unknown);
     load->leaseComplete=!load->unknown&&host_module_sources_complete(env,sources);
     if(sources)load->sourceLease=(jobjectArray)native_original.NewGlobalRef(env,sources);

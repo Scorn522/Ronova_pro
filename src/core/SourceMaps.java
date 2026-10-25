@@ -8,8 +8,8 @@ import java.util.concurrent.ConcurrentHashMap;
 final class SourceMaps {
     private record Owner(java.lang.ref.WeakReference<RecoverySources.Source> source,Field field,
                          java.lang.ref.WeakReference<Object> map) { }
-    private static final Map<Object,List<Owner>> OWNERS=Collections.synchronizedMap(new WeakIdentityMap<>());
-    private static final Map<Object,List<Owner>> HOLDERS=Collections.synchronizedMap(new WeakIdentityMap<>());
+    private static final Map<Object,List<Owner>> OWNERS=new WeakIdentityMap<>();
+    private static final Map<Object,List<Owner>> HOLDERS=new WeakIdentityMap<>();
     private record RetiringField(Object holder,Field field,Object expected) { }
     private static final ThreadLocal<RetiringField> RETIRING_FIELD=new ThreadLocal<>();
     private record RetiringList(Object list,Object backing,Object[] before){}

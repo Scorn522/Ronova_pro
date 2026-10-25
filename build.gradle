@@ -166,3 +166,15 @@ tasks.register('runTaskStateChecks',JavaExec) {
     jvmArgs '--add-opens=java.base/java.util.concurrent=ALL-UNNAMED'
     javaLauncher = javaToolchains.launcherFor { languageVersion = JavaLanguageVersion.of(17) }
 }
+
+// Focused regressions for the attempt-79 hot paths; no agent or game startup.
+tasks.register('runRuntimeHotPathChecks',JavaExec) {
+    dependsOn tasks.named('stateChecksClasses')
+    classpath = sourceSets.stateChecks.runtimeClasspath
+    mainClass = 'dev.ronova.pro.RuntimeHotPathCheck'
+    ['java.lang','java.lang.ref','java.io','java.net','java.nio','java.util','java.util.concurrent',
+     'java.util.concurrent.locks','sun.nio.cs','sun.nio.ch','jdk.internal.loader','jdk.internal.ref'].each {
+        jvmArgs "--add-opens=java.base/${it}=ALL-UNNAMED"
+    }
+    javaLauncher = javaToolchains.launcherFor { languageVersion = JavaLanguageVersion.of(17) }
+}

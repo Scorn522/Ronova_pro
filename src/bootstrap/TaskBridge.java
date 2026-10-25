@@ -37,13 +37,13 @@ public final class TaskBridge {
     private static volatile Map.Entry<Long,Set<String>> boundaryCapabilities=Map.entry(0L,Set.of());
     static final int ADMISSION_LIMIT=8192;
     static final Object BLOCKED=new Object();
-    static final java.util.Map<EventKey,Set<Module>> TASK_OWNERS=new java.util.HashMap<>();
+    static final OriginMap<OriginSources> TASK_OWNERS=new OriginMap<>();
     static final java.util.Map<EventKey,java.lang.ref.WeakReference<Object>> TASK_SCHEDULERS=new java.util.HashMap<>();
     static final java.util.Set<EventKey> SHARED_SCHEDULERS=new java.util.HashSet<>();
     static final Map<EventKey,Set<Module>> SCHEDULER_SOURCES=new HashMap<>();
     static final Map<EventKey,Integer> SCHEDULER_SUBMISSIONS=new HashMap<>();
     static final Map<EventKey,SchedulerRetirement> SCHEDULER_RETIREMENTS=new HashMap<>();
-    static final Map<EventKey,ThreadOrigin> THREAD_ORIGINS=new HashMap<>();
+    static final OriginMap<ThreadOrigin> THREAD_ORIGINS=new OriginMap<>();
     static final Set<EventKey> RETIRED_THREADS=new java.util.HashSet<>();
     static final Map<EventKey,java.lang.ref.WeakReference<Object>> THREAD_TIMERS=new HashMap<>();
     private static final Object EQUIPMENT_ASYNC_LOCK=new Object();
@@ -66,10 +66,14 @@ public final class TaskBridge {
         AsyncBinding(EquipmentAsync installation,Object ticket){this.installation=installation;this.ticket=ticket;}
     }
     static final class ThreadOrigin {
-        final Set<Module> sources=Collections.newSetFromMap(new IdentityHashMap<>());
+        final OriginSources sources=new OriginSources();
         final java.util.concurrent.locks.ReentrantLock io=new java.util.concurrent.locks.ReentrantLock();
-        boolean unknown,runBoundaryMissing,interruptPending,observedStart,platformWorker;int starting,diagnosticReasons;
+        volatile boolean unknown,runBoundaryMissing;boolean interruptPending,observedStart,platformWorker,retired;int starting,diagnosticReasons;
+        volatile ThreadSources published=new ThreadSources(NO_SOURCES,false,false,false,false,false,0);
+        ThreadSources snapshot(){return new ThreadSources(sources.snapshot(),observedStart,platformWorker,unknown,runBoundaryMissing,retired,diagnosticReasons);}
+        void publish(){published=snapshot();}
     }
+    record ThreadSources(Module[] sources,boolean observedStart,boolean platformWorker,boolean unknown,boolean runBoundaryMissing,boolean retired,int diagnosticReasons){}
     static final class ThreadStart {
         Thread thread,caller=Thread.currentThread();final ThreadOrigin origin;boolean closed;
         ThreadStart(Thread thread,ThreadOrigin origin){this.thread=thread;this.origin=origin;}
@@ -99,9 +103,9 @@ public final class TaskBridge {
     // Source registration already holds CREATION_ORIGINS. Notify only a real
     // addition, before publishing it, so repeated observations keep a heap
     // callback's unchanged target permission.
-    static void taskSource(Object object,Set<Module> sources,Module source){
+    static void taskSource(Object object,OriginSources sources,Module source){
         if(sources.contains(source))return;
-        NativeControl.heapPolicyChanged(object);sources.add(source);
+        NativeControl.heapPolicyChanged(object);sources.addSource(source);
     }
     static void taskRelation(Object task,Object scheduler,Object parent) {
         if(task==null)return;
@@ -113,27 +117,30 @@ public final class TaskBridge {
         if(direct==null&&actual.length==0&&parent!=null)direct=objectModule(parent);
         if(direct==null&&task.getClass().getClassLoader()!=null)direct=task.getClass().getModule();
         synchronized(CREATION_ORIGINS) {
+            OriginStripe originWrite=beginOrigins(task);try {
             reapCreationOwners();EventKey key=new EventKey(task,CREATION_QUEUE);
-            Set<Module> owners=TASK_OWNERS.computeIfAbsent(key,ignored->java.util.Collections.newSetFromMap(new java.util.IdentityHashMap<Module,Boolean>()));
+            OriginSources owners=TASK_OWNERS.get(task);
+            if(owners==null){owners=new OriginSources();TASK_OWNERS.put(task,owners);}
             // A completed capture with no producer is an empty source set.
             // Null is reserved for an actually incomplete capture; inserting
             // it for ordinary platform submissions poisons every successor.
             if(actual.length==0){if(direct!=null||sourceUnknown())taskSource(task,owners,direct);}
             else for(Module source:actual)taskSource(task,owners,source);
-            CreationOrigin creation=CREATION_ORIGINS.get(key);
+            CreationOrigin creation=CREATION_ORIGINS.get(key.get());
             if(creation!=null&&creation.sources!=null)for(Module source:creation.sources)taskSource(task,owners,source);
             // Source notification can reenter registration. Keep the original
             // fresh singleton observation after delivering the captured set.
-            creation=CREATION_ORIGINS.get(key);Module creator=creation==null?null:creation.single();
+            creation=CREATION_ORIGINS.get(key.get());Module creator=creation==null?null:creation.single();
             if(creator!=null)taskSource(task,owners,creator);
             Module definition=DefinitionBridge.module(task.getClass());if(producer(definition))taskSource(task,owners,definition);
             if(scheduler!=null) {
                 TASK_SCHEDULERS.put(key,new java.lang.ref.WeakReference<>(scheduler));
-                creation=CREATION_ORIGINS.get(key);
+                creation=CREATION_ORIGINS.get(key.get());
                 schedulerSources(scheduler,owners,creation!=null&&creation.unknown);
-                CreationOrigin pool=CREATION_ORIGINS.get(new EventKey(scheduler,null));Module poolCreator=pool==null?null:pool.single();
+                CreationOrigin pool=CREATION_ORIGINS.get(scheduler);Module poolCreator=pool==null?null:pool.single();
                 if(poolCreator==null||owners.size()!=1||!owners.contains(poolCreator))SHARED_SCHEDULERS.add(new EventKey(scheduler,CREATION_QUEUE));
             }
+            }finally{endOrigins(originWrite,task);}
         }
     }
 
@@ -159,7 +166,7 @@ public final class TaskBridge {
         }
         boolean unknown=false,busy=false;
         for(Object actual:chain){
-            EventKey key=new EventKey(actual,null);CreationOrigin origin=CREATION_ORIGINS.get(key);
+            EventKey key=new EventKey(actual,null);CreationOrigin origin=CREATION_ORIGINS.get(key.get());
             Set<Module> creation=origin==null?null:origin.sources,uses=SCHEDULER_SOURCES.get(key);
             if(origin!=null&&origin.unknown||creation==null||creation.isEmpty())unknown=true;
             if(creation!=null&&!selected.containsAll(creation))return "SHARED";
@@ -258,7 +265,7 @@ public final class TaskBridge {
         for(Module source:selected)if(!modStopped(source))throw new SecurityException("STOPPED_THREAD_SOURCES_REQUIRED");
         Object target=ThreadPlatform.TARGET.get(thread);
         synchronized(CREATION_ORIGINS){
-            ThreadOrigin prior=THREAD_ORIGINS.get(new EventKey(thread,null));
+            ThreadOrigin prior=THREAD_ORIGINS.get(thread);
             if(!thread.isAlive()&&ThreadPlatform.STATUS.getInt(thread)!=0&&(prior==null||prior.starting==0))return true;
         }
         if(threadWorker(thread,target)){
@@ -275,7 +282,7 @@ public final class TaskBridge {
             ThreadOrigin origin=threadOrigin(thread,target);if(!selected.containsAll(origin.sources))return true;
             if(origin.unknown||origin.sources.isEmpty())throw new IllegalStateException("THREAD_SOURCES_UNOBSERVED");
             if(origin.runBoundaryMissing)throw new IllegalStateException("THREAD_RUN_BOUNDARY_UNOBSERVED");
-            RETIRED_THREADS.add(new EventKey(thread,CREATION_QUEUE));
+            retireThread(thread);
             if(origin.starting!=0)return false;
             if(!thread.isAlive())return true;
         }
@@ -330,24 +337,29 @@ public final class TaskBridge {
         }catch(IllegalAccessException unavailable){throw new IllegalStateException("TIMER_THREAD_UNOBSERVED",unavailable);}
     }
     static ThreadOrigin observedThreadOrigin(Thread thread){
-        EventKey key=new EventKey(thread,null);ThreadOrigin origin=THREAD_ORIGINS.get(key);
+        ThreadOrigin origin=THREAD_ORIGINS.get(thread);
         if(origin!=null)return origin;
-        NativeControl.heapPolicyChanged(thread);origin=new ThreadOrigin();
-        THREAD_ORIGINS.put(new EventKey(thread,CREATION_QUEUE),origin);return origin;
+        OriginStripe originWrite=beginOrigins(thread);try {
+            NativeControl.heapPolicyChanged(thread);origin=THREAD_ORIGINS.get(thread);if(origin!=null)return origin;
+            origin=new ThreadOrigin();THREAD_ORIGINS.put(thread,origin);return origin;
+        }finally{endOrigins(originWrite,thread);}
     }
     static void threadSources(Thread thread,ThreadOrigin origin,Object object){
+        OriginStripe originWrite=beginOrigins(thread);try {
         if(object==null)return;EventKey key=new EventKey(object,null);
-        CreationOrigin creation=CREATION_ORIGINS.get(key);Set<Module> tasks=TASK_OWNERS.get(key);
+        CreationOrigin creation=CREATION_ORIGINS.get(key.get());Set<Module> tasks=TASK_OWNERS.get(key.get());
         if(creation!=null&&creation.sources!=null)for(Module source:creation.sources)taskSource(thread,origin.sources,source);
         if(tasks!=null)for(Module source:tasks)taskSource(thread,origin.sources,source);
-        creation=CREATION_ORIGINS.get(key);
+        creation=CREATION_ORIGINS.get(key.get());
         if(origin.sources.contains(null)||creation!=null&&creation.unknown){
             if(!origin.unknown)NativeControl.heapPolicyChanged(thread);
-            origin.sources.remove(null);origin.unknown=true;origin.diagnosticReasons|=1;
+            origin.sources.removeSource(null);origin.unknown=true;origin.diagnosticReasons|=1;
         }
         Module definition=DefinitionBridge.module(object.getClass());if(producer(definition))taskSource(thread,origin.sources,definition);
+            }finally{endOrigins(originWrite,thread);}
     }
     static ThreadOrigin threadOrigin(Thread thread,Object target)throws NoSuchMethodException {
+        OriginStripe originWrite=beginOrigins(thread);try {
         ThreadOrigin origin=observedThreadOrigin(thread);
         threadSources(thread,origin,thread);threadSources(thread,origin,target);
         Class<?> implementation=THREAD_RUN_IMPLEMENTATIONS.get(thread.getClass());Module declaration=DefinitionBridge.module(implementation);
@@ -361,63 +373,69 @@ public final class TaskBridge {
             origin.runBoundaryMissing=true;origin.diagnosticReasons|=2;
         }
         return origin;
+            }finally{endOrigins(originWrite,thread);}
     }
     static boolean allThreadSourcesStopped(ThreadOrigin origin){
         if(origin.unknown||origin.runBoundaryMissing||origin.sources.isEmpty())return false;
         for(Module source:origin.sources)if(!modStopped(source))return false;return true;
     }
+    /** One coherent publication for the actual thread, with no global read lock. */
+    static ThreadSources threadSourcesSnapshot(Thread thread){
+        OriginStripe stripe=originStripe(thread);Thread current=Thread.currentThread();
+        for(;;){
+            long revision=stripe.version;Thread writer=stripe.writer;
+            if(writer!=current&&(writer!=null||(revision&1)!=0)){Thread.onSpinWait();continue;}
+            ThreadOrigin origin=THREAD_ORIGINS.get(thread);
+            ThreadSources sources=origin==null?null:writer==current?origin.snapshot():origin.published;
+            if(writer==current||revision==stripe.version&&stripe.writer==null)return sources;
+        }
+    }
     /** Live task invocations and independently started threads keep their real roots. */
     static Module[] currentThreadSources(){
-        synchronized(CREATION_ORIGINS){
-            Thread thread=Thread.currentThread();ThreadOrigin origin=THREAD_ORIGINS.get(new EventKey(thread,null));
-            boolean independent=origin!=null&&origin.observedStart&&!origin.platformWorker;
-            int count=0;boolean unknown=independent&&origin.unknown;
-            if(independent)for(Module source:origin.sources)if(source==null)unknown=true;else count++;
-            for(Frame frame=CURRENT.get();frame!=null;frame=frame.previous)if(frame.thread==thread&&!frame.exited&&!frame.retired){
-                unknown|=frame.sourcesUnknown;for(Module source:frame.sources)if(source==null)unknown=true;else count++;
-            }
-            if(count==0&&!unknown)return NO_SOURCES;
-            Module[] sources=new Module[count+(unknown?1:0)];int at=unknown?1:0;
-            if(independent)for(Module source:origin.sources)if(source!=null)sources[at++]=source;
-            for(Frame frame=CURRENT.get();frame!=null;frame=frame.previous)if(frame.thread==thread&&!frame.exited&&!frame.retired)
-                for(Module source:frame.sources)if(source!=null)sources[at++]=source;
-            return sources;
+        Thread thread=Thread.currentThread();ThreadSources origin=threadSourcesSnapshot(thread);
+        boolean independent=origin!=null&&origin.observedStart()&&!origin.platformWorker();
+        int count=0;boolean unknown=independent&&origin.unknown();
+        if(independent)for(Module source:origin.sources())if(source==null)unknown=true;else count++;
+        for(Frame frame=CURRENT.get();frame!=null;frame=frame.previous)if(frame.thread==thread&&!frame.exited&&!frame.retired){
+            unknown|=frame.sourcesUnknown;for(Module source:frame.sources)if(source==null)unknown=true;else count++;
         }
+        if(count==0&&!unknown)return NO_SOURCES;
+        Module[] sources=new Module[count+(unknown?1:0)];int at=unknown?1:0;
+        if(independent)for(Module source:origin.sources())if(source!=null)sources[at++]=source;
+        for(Frame frame=CURRENT.get();frame!=null;frame=frame.previous)if(frame.thread==thread&&!frame.exited&&!frame.retired)
+            for(Module source:frame.sources)if(source!=null)sources[at++]=source;
+        return sources;
     }
     static boolean currentThreadSourceUnknown(){
-        synchronized(CREATION_ORIGINS){
-            ThreadOrigin origin=THREAD_ORIGINS.get(new EventKey(Thread.currentThread(),null));
-            if(origin!=null&&origin.observedStart&&!origin.platformWorker&&(origin.unknown||origin.sources.contains(null)))return true;
-            Thread thread=Thread.currentThread();
-            for(Frame frame=CURRENT.get();frame!=null;frame=frame.previous)if(frame.thread==thread&&!frame.exited&&!frame.retired&&frame.sourcesUnknown)return true;
-            return false;
+        Thread thread=Thread.currentThread();ThreadSources origin=threadSourcesSnapshot(thread);
+        if(origin!=null&&origin.observedStart()&&!origin.platformWorker()){
+            if(origin.unknown())return true;for(Module source:origin.sources())if(source==null)return true;
         }
+        for(Frame frame=CURRENT.get();frame!=null;frame=frame.previous)if(frame.thread==thread&&!frame.exited&&!frame.retired&&frame.sourcesUnknown)return true;
+        return false;
     }
-    /** Failure diagnosis only: 1 creation/target, 2 unclassified run override,
-     * 4 Java start capture, 8 native start capture, 16 active task scope.
-     * Bit 2 is retirement coverage only; it does not erase or invalidate the
-     * actual source set. These diagnostic bits grant no permission. */
+    /** Bit 2 is retirement coverage only, not an unknown caller or permission. */
     static int currentThreadSourceReasons(){
-        synchronized(CREATION_ORIGINS){
-            Thread thread=Thread.currentThread();ThreadOrigin origin=THREAD_ORIGINS.get(new EventKey(thread,null));
-            int reasons=origin!=null&&origin.observedStart&&!origin.platformWorker?origin.diagnosticReasons:0;
-            for(Frame frame=CURRENT.get();frame!=null;frame=frame.previous)
-                if(frame.thread==thread&&!frame.exited&&!frame.retired&&frame.sourcesUnknown)reasons|=16;
-            return reasons;
-        }
+        Thread thread=Thread.currentThread();ThreadSources origin=threadSourcesSnapshot(thread);
+        int reasons=origin!=null&&origin.observedStart()&&!origin.platformWorker()?origin.diagnosticReasons():0;
+        for(Frame frame=CURRENT.get();frame!=null;frame=frame.previous)
+            if(frame.thread==thread&&!frame.exited&&!frame.retired&&frame.sourcesUnknown)reasons|=16;
+        return reasons;
     }
     static boolean currentThreadStoppedSource(){
-        synchronized(CREATION_ORIGINS){
-            ThreadOrigin origin=THREAD_ORIGINS.get(new EventKey(Thread.currentThread(),null));
-            Thread thread=Thread.currentThread();
-            if(origin!=null&&origin.observedStart&&!origin.platformWorker){
-                for(Module source:origin.sources)if(modStopped(source))return true;
-                if(RETIRED_THREADS.contains(new EventKey(thread,null)))return true;
-            }
-            for(Frame frame=CURRENT.get();frame!=null;frame=frame.previous)if(frame.thread==thread&&!frame.exited&&!frame.retired)
-                for(Module source:frame.sources)if(modStopped(source))return true;
-            return false;
+        Thread thread=Thread.currentThread();ThreadSources origin=threadSourcesSnapshot(thread);
+        if(origin!=null&&origin.observedStart()&&!origin.platformWorker()){
+            for(Module source:origin.sources())if(modStopped(source))return true;
+            if(origin.retired())return true;
         }
+        for(Frame frame=CURRENT.get();frame!=null;frame=frame.previous)if(frame.thread==thread&&!frame.exited&&!frame.retired)
+            for(Module source:frame.sources)if(modStopped(source))return true;
+        return false;
+    }
+    private static void retireThread(Thread thread){
+        OriginStripe originWrite=beginOrigins(thread);
+        try{RETIRED_THREADS.add(new EventKey(thread,CREATION_QUEUE));observedThreadOrigin(thread).retired=true;}
+        finally{endOrigins(originWrite,thread);}
     }
     public static Object threadStarting(Thread thread)throws ReflectiveOperationException {
         if(WALKER.getCallerClass()!=Thread.class)throw new SecurityException("ACTUAL_THREAD_START_REQUIRED");
@@ -429,6 +447,7 @@ public final class TaskBridge {
         Module[] sources=worker?new Module[0]:invokingSources();boolean unknown=!worker&&sourceUnknown();int unknownReasons=unknown?4:0;
         boolean stopped=!worker&&stoppedInvocation();
         synchronized(CREATION_ORIGINS){
+            OriginStripe originWrite=beginOrigins(thread);try {
             reapCreationOwners();ThreadOrigin origin=threadOrigin(thread,target);
             if(!origin.observedStart||origin.platformWorker!=worker)NativeControl.heapPolicyChanged(thread);
             origin.observedStart=true;origin.platformWorker=worker;
@@ -442,6 +461,7 @@ public final class TaskBridge {
             origin.diagnosticReasons|=unknownReasons;
             if(!worker&&allThreadSourcesStopped(origin))throw new IllegalThreadStateException("RONOVA_STOPPED_THREAD_START");
             ThreadStart token=new ThreadStart(thread,origin);origin.starting++;return token;
+            }finally{endOrigins(originWrite,thread);}
         }
     }
     public static void threadStartFinished(Object value){
@@ -616,7 +636,7 @@ public final class TaskBridge {
             if(exclusive&&retirePrivate){
                 ((java.util.Timer)value).cancel();
                 Thread thread=(Thread)ThreadPlatform.TIMER_THREAD.get(value);
-                synchronized(CREATION_ORIGINS){RETIRED_THREADS.add(new EventKey(thread,CREATION_QUEUE));}
+                synchronized(CREATION_ORIGINS){retireThread(thread);}
                 requestThreadInterrupt(thread);
             }
         }
@@ -624,8 +644,8 @@ public final class TaskBridge {
     }
     static boolean selectedTimerTask(Object task,Set<Module> selected){
         if(task==null)return false;synchronized(CREATION_ORIGINS){
-            EventKey key=new EventKey(task,null);CreationOrigin origin=CREATION_ORIGINS.get(key);if(origin!=null&&origin.unknown)return false;
-            Set<Module> sources=TASK_OWNERS.get(key);if(sources==null&&origin!=null)sources=origin.sources;
+            EventKey key=new EventKey(task,null);CreationOrigin origin=CREATION_ORIGINS.get(key.get());if(origin!=null&&origin.unknown)return false;
+            Set<Module> sources=TASK_OWNERS.get(key.get());if(sources==null&&origin!=null)sources=origin.sources;
             return sources!=null&&!sources.isEmpty()&&!sources.contains(null)&&selected.containsAll(sources);
         }
     }
@@ -719,12 +739,12 @@ public final class TaskBridge {
         var seen=Collections.newSetFromMap(new IdentityHashMap<Object,Boolean>());
         synchronized(CREATION_ORIGINS) {
             reapCreationOwners();for(var entry:TASK_OWNERS.entrySet()) {
-                Object task=entry.getKey().get();if(task==null||entry.getValue().isEmpty()||!selected.containsAll(entry.getValue()))continue;
+                Object task=entry.getKey();if(task==null||entry.getValue().isEmpty()||!selected.containsAll(entry.getValue()))continue;
                 var scheduler=TASK_SCHEDULERS.get(entry.getKey());rows.add(new Object[]{task,scheduler==null?null:scheduler.get()});seen.add(task);
             }
             // A directly-created Future can have waiters without ever entering a pool.
             for(var entry:CREATION_ORIGINS.entrySet()){
-                Object task=entry.getKey().get();CreationOrigin origin=entry.getValue();
+                Object task=entry.getKey();CreationOrigin origin=entry.getValue();
                 if(task==null||seen.contains(task)||origin.unknown||origin.sources==null||origin.sources.isEmpty()
                         ||!selected.containsAll(origin.sources)||!(task.getClass()==java.util.concurrent.FutureTask.class
                         ||task.getClass()==java.util.concurrent.CompletableFuture.class||task instanceof java.util.concurrent.ForkJoinTask<?>))continue;
@@ -1815,7 +1835,7 @@ public final class TaskBridge {
     public static void body(Object task) {
         Registration current=registration;
         try {
-            if(task!=null&&boundary(false))emit(current,BODY,task,null,currentTask(),currentExecution());
+            if(current!=null&&task!=null&&boundary(false))emit(current,BODY,task,null,currentTask(),currentExecution());
         } catch(Throwable unavailable){lostTask(current,BODY,task,null,null,null,unavailable);}
     }
     public static void created(Object task) {
@@ -1836,8 +1856,10 @@ public final class TaskBridge {
     public static void delegated(Object wrapper,Object delegate) {
         Registration current=registration;
         try {
-            if(wrapper!=null&&delegate!=null&&boundary(false)){taskRelation(delegate,null,wrapper);}
-            if(wrapper!=null&&delegate!=null&&boundary(false))emit(current,21,delegate,wrapper,wrapper,null);
+            if(wrapper!=null&&delegate!=null&&boundary(false)){
+                taskRelation(delegate,null,wrapper);
+                if(current!=null)emit(current,21,delegate,wrapper,wrapper,null);
+            }
         } catch(Throwable unavailable) {lostTask(current,21,delegate,wrapper,wrapper,null,unavailable);}
     }
     /** The production source observer binds a real save/load to the actual nested execution frames. */
@@ -2224,7 +2246,12 @@ public final class TaskBridge {
         }
     }
     static boolean boundary(boolean submission) {
-        return WALKER.walk(frames->frames.dropWhile(frame->frame.getDeclaringClass()==TaskBridge.class).findFirst().map(frame->{
+        var frame=WALKER.walk(frames->{
+            var cursor=frames.iterator();while(cursor.hasNext()){
+                var next=cursor.next();if(next.getDeclaringClass()!=TaskBridge.class)return next;
+            }return null;
+        });
+        if(frame==null)return false;
             Class<?> owner=frame.getDeclaringClass();
             if(owner.getClassLoader()!=null||!"java.base".equals(owner.getModule().getName()))return false;
             String name=owner.getName(),method=frame.getMethodName();
@@ -2240,10 +2267,9 @@ public final class TaskBridge {
                 ||name.equals("java.util.concurrent.ThreadPoolExecutor$CallerRunsPolicy")&&method.equals("rejectedExecution")
                 ||name.equals("java.util.concurrent.ScheduledThreadPoolExecutor$ScheduledFutureTask")&&method.equals("run")
                 ||name.equals("java.util.concurrent.Executors$RunnableAdapter")&&method.equals("call")
-                ||java.util.Set.of("java.util.concurrent.ForkJoinTask$AdaptedRunnable","java.util.concurrent.ForkJoinTask$AdaptedRunnableAction",
-                        "java.util.concurrent.ForkJoinTask$RunnableExecuteAction","java.util.concurrent.ForkJoinTask$AdaptedCallable").contains(name)&&method.equals("exec")
+                ||method.equals("exec")&&(name.equals("java.util.concurrent.ForkJoinTask$AdaptedRunnable")||name.equals("java.util.concurrent.ForkJoinTask$AdaptedRunnableAction")
+                        ||name.equals("java.util.concurrent.ForkJoinTask$RunnableExecuteAction")||name.equals("java.util.concurrent.ForkJoinTask$AdaptedCallable"))
                 ||name.equals("java.util.concurrent.ForkJoinTask")&&method.equals("doExec");
-        }).orElse(false));
     }
     static final class Frame {
         Object task;

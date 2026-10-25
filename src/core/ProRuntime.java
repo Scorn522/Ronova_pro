@@ -14,6 +14,9 @@ import net.minecraft.world.level.storage.LevelResource;
 /** Server-thread authority: one work map, current bindings, shared SOFT guards and HARD final gate. */
 public final class ProRuntime implements AutoCloseable {
     private static final Map<MinecraftServer,ProRuntime> SERVERS=Collections.synchronizedMap(new IdentityHashMap<>());
+    // Immutable membership view, invalidated under SERVERS on every registry change.
+    // Policy state on each runtime is still read live by every caller.
+    private static List<ProRuntime> sourceRuntimeSnapshot=List.of();
     private final WorldControl worldControl=new WorldControl();
     private final WorldArchive worldArchive;
     private final FieldGraph fieldGraphs=new FieldGraph(this);
@@ -27,17 +30,17 @@ public final class ProRuntime implements AutoCloseable {
             Collections.synchronizedMap(new IdentityHashMap<>());
     // Cross-thread policy snapshot: exact object -> published protection state. Readers never touch world state.
     private static final Map<Object,ProtectionSnapshot> PROTECTION=
-            Collections.synchronizedMap(new WeakIdentityMap<>());
+            new WeakIdentityMap<>();
     // Real-owner associations: a data item and an attribute instance do not point back to their entity, so the
     // association is captured where the game state is already being walked. No extra traversal is added.
     private enum LifeCarrierKind { DATA,HEALTH_ITEMS,HEALTH,ABSORPTION,MAX_HEALTH }
     private record LifeCarrier(java.lang.ref.WeakReference<Entity> entity,long generation,LifeCarrierKind kind,
             java.lang.ref.WeakReference<Object> items) { }
-    private static final Map<Object,LifeCarrier> SYNC_OWNERS=Collections.synchronizedMap(new WeakIdentityMap<>());
+    private static final Map<Object,LifeCarrier> SYNC_OWNERS=new WeakIdentityMap<>();
     // Only actual world containers observed while installing protection enter this weak identity index.
     private record IndexSlot(java.lang.ref.WeakReference<Entity> entity,
             java.lang.ref.WeakReference<Object> value,Object key,long generation) { }
-    private static final Map<Object,List<IndexSlot>> INDEX_CONTAINERS=Collections.synchronizedMap(new WeakIdentityMap<>());
+    private static final Map<Object,List<IndexSlot>> INDEX_CONTAINERS=new WeakIdentityMap<>();
     // Conservative identity filter: collisions only cause an extra exact lookup, never grant a write.
     private static volatile long indexContainerMask;
     private static volatile String indexGuardState="NOT_INSTALLED";
@@ -69,20 +72,22 @@ public final class ProRuntime implements AutoCloseable {
         lifecycleAction("starting");
         synchronized(SERVERS) {
             if(SERVERS.containsKey(s))throw new IOException("RUNTIME_ALREADY_STARTED");
-            SERVERS.put(s,new ProRuntime(s));
+            try { SERVERS.put(s,new ProRuntime(s)); }
+            finally { sourceRuntimeSnapshot=null; }
         }
     }
     public static void stop(MinecraftServer s) throws IOException {
         lifecycleAction("stopped");
         ProRuntime r=SERVERS.get(s);
         if(r==null)return;
-        try { r.close();synchronized(SERVERS) { if(SERVERS.get(s)==r)SERVERS.remove(s); } }
+        try { r.close();removeRuntime(s,r); }
         catch(IOException pending) {
             // Durable shutdown receipts are asynchronous. Give ordinary ACKs a bounded
-            // drain window before the dedicated server exits; live tasks remain unresolved.
+            // drain window before the dedicated server exits. A capture between
+            // reservation and publication is also transient; live tasks stay unresolved.
             long deadline=System.nanoTime()+java.util.concurrent.TimeUnit.SECONDS.toNanos(2);
-            while(System.nanoTime()<deadline&&(pending.getMessage().contains("ACK_PENDING")||pending.getMessage().contains("EVENTS_PENDING"))) {
-                try { Thread.sleep(10);r.finishClose();synchronized(SERVERS) { if(SERVERS.get(s)==r)SERVERS.remove(s); }return; }
+            while(System.nanoTime()<deadline&&(pending.getMessage().contains("ACK_PENDING")||pending.getMessage().contains("EVENTS_PENDING")||pending.getMessage().contains("PUBLICATION_IN_FLIGHT"))) {
+                try { Thread.sleep(10);r.finishClose();removeRuntime(s,r);return; }
                 catch(InterruptedException interrupted) { Thread.currentThread().interrupt();break; }
                 catch(IOException next) { pending=next; }
             }
@@ -96,7 +101,7 @@ public final class ProRuntime implements AutoCloseable {
     private void retireStoppedRuntime() {
         try {
             finishClose();
-            synchronized(SERVERS) { if(SERVERS.get(server)==this)SERVERS.remove(server); }
+            removeRuntime(server,this);
         } catch(IOException|RuntimeException pending) {
             long delay=Math.min(5000,250L<<Math.min(5,retirementFailures++));
             RETIREMENTS.schedule(this::retireStoppedRuntime,delay,java.util.concurrent.TimeUnit.MILLISECONDS);
@@ -2915,7 +2920,19 @@ public final class ProRuntime implements AutoCloseable {
         }
         return null;
     }
-    static List<ProRuntime> sourceRuntimes() { synchronized(SERVERS) { return List.copyOf(SERVERS.values()); } }
+    private static void removeRuntime(MinecraftServer server,ProRuntime expected) {
+        synchronized(SERVERS) {
+            if(SERVERS.get(server)!=expected)return;
+            try { SERVERS.remove(server); }
+            finally { sourceRuntimeSnapshot=null; }
+        }
+    }
+    static List<ProRuntime> sourceRuntimes() {
+        synchronized(SERVERS) {
+            if(sourceRuntimeSnapshot==null)sourceRuntimeSnapshot=List.copyOf(SERVERS.values());
+            return sourceRuntimeSnapshot;
+        }
+    }
     private static boolean playerLifecycleAllows(Entity entity) {
         ArrayDeque<LifecyclePermit> stack=PLAYER_LIFECYCLE.get();
         if(stack==null||stack.isEmpty())return false;
@@ -3233,7 +3250,11 @@ public final class ProRuntime implements AutoCloseable {
     public static boolean preventFieldWrite(Object receiver,Class<?> declaring,String fieldName,Object value) {
         if(value instanceof Entity entity&&preventAdmission(entity))return true;
         if(BlockGroupPolicy.fieldDenied(receiver,declaring,fieldName,value))return true;
-        for(ProRuntime runtime:sourceRuntimes())if(!runtime.closing&&runtime.recoveryRecords.fieldWriteDenied(receiver,declaring,fieldName,value))return true;
+        List<ProRuntime> runtimes=sourceRuntimes();
+        for(int i=0;i<runtimes.size();i++) {
+            ProRuntime runtime=runtimes.get(i);
+            if(!runtime.closing&&runtime.recoveryRecords.fieldWriteDenied(receiver,declaring,fieldName,value))return true;
+        }
         if(receiver==declaring&&receiver instanceof Class<?> type&&SourceMaps.staticHolderDenied(type,fieldName,value))return true;
         if(receiver!=null&&!(receiver instanceof Class<?>)&&SourceMaps.instanceHolderDenied(receiver,declaring,fieldName,value))return true;
         if(clientFieldDenied(receiver,declaring,fieldName,value)||BackingPolicy.fieldDenied(receiver,declaring,fieldName,value))return true;

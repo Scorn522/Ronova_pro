@@ -179,6 +179,7 @@ public final class RecoveryAgent {
             Class.forName("java.util.stream.IntPipeline$Head",false,null);
             for(String helper:List.of("SourcePublication","SourceIndexMutation","FastListView","FieldMutation","EquipmentInvocations","CreationOrigin","FieldPolicyCall","FieldPolicyState","UnsafeFields"))
                 Class.forName("dev.ronova.pro.bootstrap.ControlBridge$"+helper,true,null);
+            Class.forName("dev.ronova.pro.bootstrap.DefinitionBridge$OriginSlot",false,null);
             // Array-change completion iterates this exact TreeMap tail view.
             // Define its view/value/entry iterator chain before JNI can fill
             // those class bytes through the same guarded array-completion path.
@@ -199,6 +200,18 @@ public final class RecoveryAgent {
             Class.forName("dev.ronova.pro.bootstrap.CodeSourceBridge$LedgerMap",false,null);
             Class.forName("dev.ronova.pro.bootstrap.CodeSourceBridge$FrameMethods",false,null);
             Class.forName("dev.ronova.pro.bootstrap.CodeSourceBridge$MethodBucket",false,null);
+            Class.forName("dev.ronova.pro.bootstrap.CodeSourceBridge$FieldBucket",false,null);
+            Class.forName("dev.ronova.pro.bootstrap.CodeSourceBridge$ValueBucket",false,null);
+            Class.forName("dev.ronova.pro.bootstrap.CodeSourceBridge$FieldLookup",false,null);
+            Class.forName("dev.ronova.pro.bootstrap.ControlBridge$OriginStripe",false,null);
+            Class.forName("dev.ronova.pro.bootstrap.ControlBridge$OriginMap",false,null);
+            Class.forName("dev.ronova.pro.bootstrap.ControlBridge$OriginMap$Node",false,null);
+            Class.forName("dev.ronova.pro.bootstrap.ControlBridge$OriginSources",false,null);
+            Class.forName("dev.ronova.pro.bootstrap.TaskBridge$ThreadSources",false,null);
+            Class.forName("dev.ronova.pro.bootstrap.CodeSourceBridge$FieldProjection",false,null);
+            Class.forName("dev.ronova.pro.bootstrap.CodeSourceBridge$FieldTracking",false,null);
+            Class.forName("dev.ronova.pro.bootstrap.CodeSourceBridge$FieldGateLayout",false,null);
+            Class.forName("dev.ronova.pro.bootstrap.CodeSourceBridge$ValueProjection",false,null);
             Class.forName("dev.ronova.pro.bootstrap.ControlBridge$ProducerFrame",false,null);
             Class.forName("dev.ronova.pro.bootstrap.EventFaultBridge",true,null);
             Class<?> control=Class.forName("dev.ronova.pro.bootstrap.ControlBridge",true,null);

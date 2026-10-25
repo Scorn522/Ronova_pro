@@ -132,6 +132,7 @@ public final class ControlBridge {
     private static final ThreadLocal<SourceQuery> SOURCE_QUERIES=new ThreadLocal<>();
     private static final class SourceQuery {
         final Thread thread=Thread.currentThread();Module[] partial=NO_SOURCES;boolean physicalComplete,active;
+        int originBufferHint=64;
         void retain(Module[] incoming){
             if(incoming==null||incoming.length==0)return;int additions=0;
             for(int i=0;i<incoming.length;i++){
@@ -193,6 +194,9 @@ public final class ControlBridge {
     // The estimate is only initial storage; unusual deep nesting still refills.
     static final StackWalker MEMORY_WRITER_WALKER=StackWalker.getInstance(Set.of(StackWalker.Option.RETAIN_CLASS_REFERENCE,StackWalker.Option.SHOW_HIDDEN_FRAMES),8);
     static final StackWalker ORIGIN_WALKER=StackWalker.getInstance(Set.of(StackWalker.Option.RETAIN_CLASS_REFERENCE,StackWalker.Option.SHOW_HIDDEN_FRAMES),64);
+    // Java 17 estimateDepth sizes the initial buffer, not the traversal limit:
+    // StackFrameTraverser uses Integer.MAX_VALUE and fetches subsequent batches.
+    private static final StackWalker COMPACT_ORIGIN_WALKER=StackWalker.getInstance(Set.of(StackWalker.Option.RETAIN_CLASS_REFERENCE,StackWalker.Option.SHOW_HIDDEN_FRAMES),32);
     static final java.util.function.Function<java.util.stream.Stream<StackWalker.StackFrame>,Module> INVOKING=new Invoking();
     static final java.util.function.Function<java.util.stream.Stream<StackWalker.StackFrame>,Boolean> STOPPED_CALL=new StoppedCall();
     static final java.util.function.Function<java.util.stream.Stream<StackWalker.StackFrame>,Class<?>> MEMORY_CALLER=new MemoryCaller();
@@ -281,16 +285,24 @@ public final class ControlBridge {
     }
     static final class InvokingSources implements java.util.function.Function<java.util.stream.Stream<StackWalker.StackFrame>,Module[]> {
         public Module[] apply(java.util.stream.Stream<StackWalker.StackFrame> frames){
+            SourceQuery query=currentSourceQuery();int inspected=0;
+            try{
             var cursor=frames.iterator();while(cursor.hasNext()){
-                var frame=cursor.next();Module[] sources=CodeSourceBridge.frameSources(frame);if(sources.length!=0)return retainQuerySources(sources);
+                var frame=cursor.next();inspected++;Module[] sources=CodeSourceBridge.frameSources(frame);if(sources.length!=0)return retainQuerySources(sources);
                 sources=producerRootSources(frame);if(sources.length!=0)return retainQuerySources(sources);
-                Module physical=DefinitionBridge.module(frame.getDeclaringClass());if(producer(physical))return retainQuerySources(new Module[]{physical});
+                // frameSources already merges this frame's current declaration
+                // module. Do not look up and classify that same module twice.
             }
-            SourceQuery query=currentSourceQuery();if(query!=null)query.physicalComplete=true;
+            if(query!=null)query.physicalComplete=true;
             Frame task=CURRENT.get();
             if(task==null||task.exited||DELIVERING.get()!=null||CREATION_DELIVERY.get()!=null||PRODUCER_DELIVERY.get()!=null||OWN_LEDGER_MUTATION.get()!=null)return NO_SOURCES;
             retainQuerySources(task.sources);
             return task.sources.clone();
+            }finally{
+                // Retain allocation sizing only. Neither walker bounds the loop
+                // or reuses a source/permission result from an earlier query.
+                if(query!=null)query.originBufferHint=inspected<=32?32:64;
+            }
         }
     }
     static final class ControlWriterCaller implements java.util.function.Function<java.util.stream.Stream<StackWalker.StackFrame>,Class<?>> {
@@ -354,8 +366,8 @@ public final class ControlBridge {
     private static volatile ProducerModule[] producerModules=new ProducerModule[0];
     private static volatile int producerRegistrations;
     private static final class ProducerModule extends java.lang.ref.WeakReference<Module>{
-        final boolean nullModule;
-        ProducerModule(Module module){super(module);nullModule=module==null;}
+        final boolean nullModule;final int hash;
+        ProducerModule(Module module){super(module);nullModule=module==null;hash=System.identityHashCode(module);}
         boolean matches(Module module){return module==null?nullModule:get()==module;}
         boolean live(){return nullModule||get()!=null;}
         public void clear(){Class<?> caller=WALKER.getCallerClass();if(caller.getNestHost()==ControlBridge.class||ControlBridge.owns(caller))super.clear();}
@@ -370,10 +382,11 @@ public final class ControlBridge {
                 NativeControl.heapPolicyChanged(null);
                 for(;;){
                     ProducerModule[] prior=producerModules;if(producer(prior,module))return;
-                    ProducerModule[] next=new ProducerModule[prior.length+1];int count=0;
-                    for(ProducerModule entry:prior)if(entry.live())next[count++]=entry;
-                    next[count++]=new ProducerModule(module);
-                    if(count!=next.length)next=Arrays.copyOf(next,count);
+                    int live=0;for(ProducerModule entry:prior)if(entry!=null&&entry.live())live++;
+                    int capacity=16;while(live>=capacity/2)capacity=Math.multiplyExact(capacity,2);
+                    ProducerModule[] next=new ProducerModule[capacity];
+                    for(ProducerModule entry:prior)if(entry!=null&&entry.live())insertProducer(next,entry);
+                    insertProducer(next,new ProducerModule(module));
                     controlPublication(next,new Object[0]);
                     // A Native notification can reenter registration. Rebase
                     // on that completed publication instead of dropping it.
@@ -390,9 +403,9 @@ public final class ControlBridge {
         SourceQuery query=beginSourceQuery(NO_SOURCES);
         try{return ORIGIN_WALKER.walk(INVOKING);}finally{endSourceQuery(query);}
     }
-    /* The one authoritative weak registry is published on rare registration.
-     * Read current references without a monitor, allocation or cached verdict;
-     * unloading a module never becomes a strong retention through this index. */
+    /* The authoritative weak identity table is rebuilt only on registration.
+     * Cleared references stay as probe-chain tombstones until that rebuild;
+     * every match still reads the live reference, never a cached verdict. */
     static boolean producer(Module module) {
         ProducerModule[] observed=producerModules;boolean found=producer(observed,module);
         if(producerRegistrations==0&&observed==producerModules)return found;
@@ -400,13 +413,25 @@ public final class ControlBridge {
         // including same-thread reentry. Only an overlapping writer waits.
         synchronized(PRODUCER_MODULES){return producer(producerModules,module);}
     }
-    private static boolean producer(ProducerModule[] entries,Module module){for(ProducerModule entry:entries)if(entry.matches(module))return true;return false;}
+    private static int producerBucket(int hash,int length){return (hash^(hash>>>16))&(length-1);}
+    private static void insertProducer(ProducerModule[] table,ProducerModule entry){
+        int at=producerBucket(entry.hash,table.length);
+        while(table[at]!=null)at=(at+1)&(table.length-1);
+        table[at]=entry;
+    }
+    private static boolean producer(ProducerModule[] table,Module module){
+        if(table.length==0)return false;
+        int hash=System.identityHashCode(module),at=producerBucket(hash,table.length);
+        for(ProducerModule entry=table[at];entry!=null;entry=table[at=(at+1)&(table.length-1)])
+            if(entry.hash==hash&&entry.matches(module))return true;
+        return false;
+    }
     private static boolean hasProducers(){
         ProducerModule[] observed=producerModules;boolean found=hasProducers(observed);
         if(producerRegistrations==0&&observed==producerModules)return found;
         synchronized(PRODUCER_MODULES){return hasProducers(producerModules);}
     }
-    private static boolean hasProducers(ProducerModule[] entries){for(ProducerModule entry:entries)if(entry.live())return true;return false;}
+    private static boolean hasProducers(ProducerModule[] entries){for(ProducerModule entry:entries)if(entry!=null&&entry.live())return true;return false;}
     static Object nativeThreadOperation(Thread thread,Module[] sources,int operation)throws ReflectiveOperationException {
         if(!NativeControl.threadOperationBoundary(thread,sources,operation))throw new SecurityException("ACTUAL_NATIVE_THREAD_OPERATION_REQUIRED");
         if(operation==1)return beginThreadStart(thread,sources);
@@ -477,8 +502,9 @@ public final class ControlBridge {
     static boolean modProtected(Module module){for(Module actual:protectedModules)if(actual==module)return true;return false;}
     public static boolean protectedModClass(Class<?> type){return type!=null&&modProtected(DefinitionBridge.module(type));}
     private static boolean protectedMutationAllowed(Object target,Class<?> declaring){
-        return protectedMutationAllowed(target,declaring,objectModule(target==null?declaring:target));
+        return protectedModules.length==0||protectedMutationAllowed(target,declaring,objectModule(target==null?declaring:target));
     }
+    private static Module mutationOwner(Object target){return protectedModules.length==0&&stoppedModules.length==0?null:objectModule(target);}
     private static boolean protectedMutationAllowed(Object target,Class<?> declaring,Module owner){
         if(!modProtected(owner)&&!(declaring!=null&&modProtected(DefinitionBridge.module(declaring))))return true;
         if(coreWriter())return true;
@@ -682,7 +708,7 @@ public final class ControlBridge {
     public static boolean deliveringCreationTo(Class<?> owner) { return CREATION_DELIVERY.get()==owner; }
     public static Module creationModule(Object object) {
         if(object==null)return null;
-        synchronized(CREATION_ORIGINS) {CreationOrigin origin=CREATION_ORIGINS.get(new EventKey(object,null));return origin==null?null:origin.single();}
+        return (Module)originValue(object,3);
     }
     static Module[] invokingSources(){
         return invokingSources(NO_SOURCES);
@@ -730,7 +756,9 @@ public final class ControlBridge {
         // Inspect the live registries on every operation. Before any producer,
         // external instruction row or execution frame exists, walking all of
         // Minecraft's construction frames can only return this same empty set.
-        return hasProducers()||CodeSourceBridge.hasFrameSources()?ORIGIN_WALKER.walk(INVOKING_SOURCES):NO_SOURCES;
+        if(!hasProducers()&&!CodeSourceBridge.hasFrameSources())return NO_SOURCES;
+        SourceQuery query=currentSourceQuery();
+        return (query!=null&&query.originBufferHint<=32?COMPACT_ORIGIN_WALKER:ORIGIN_WALKER).walk(INVOKING_SOURCES);
     }
     static boolean stoppedEffects(){return stoppedInvocation();}
     static Set<Module> addModuleSources(Set<Module> sources,Module[] modules,boolean producersOnly){
@@ -785,7 +813,7 @@ public final class ControlBridge {
     }
     public static Module[] creationSources(Object object){
         synchronized(CREATION_ORIGINS){
-            CreationOrigin origin=CREATION_ORIGINS.get(new EventKey(object,null));
+            CreationOrigin origin=CREATION_ORIGINS.get(object);
             return origin==null||origin.sources==null?new Module[0]:origin.sources.toArray(new Module[0]);
         }
     }
@@ -810,29 +838,10 @@ public final class ControlBridge {
     }
     public static Module[] objectSources(Object object){
         if(object==null)return new Module[0];
-        synchronized(CREATION_ORIGINS){
-            Object previous=SOURCE_LOOKUP.target;int previousHash=SOURCE_LOOKUP.hash;SOURCE_LOOKUP.bind(object);
-            try{
-                ThreadOrigin thread=object instanceof Thread?THREAD_ORIGINS.get(SOURCE_LOOKUP):null;
-                if(thread!=null){
-                    Set<Module> sources=Collections.newSetFromMap(new IdentityHashMap<>());sources.addAll(thread.sources);
-                    CreationOrigin creation=CREATION_ORIGINS.get(SOURCE_LOOKUP);Set<Module> tasks=TASK_OWNERS.get(SOURCE_LOOKUP);
-                    if(creation!=null&&creation.sources!=null)sources.addAll(creation.sources);if(tasks!=null)sources.addAll(tasks);return sources.toArray(new Module[0]);
-                }
-                Set<Module> tasks=TASK_OWNERS.get(SOURCE_LOOKUP);if(tasks!=null)return tasks.toArray(new Module[0]);
-                CreationOrigin creation=CREATION_ORIGINS.get(SOURCE_LOOKUP);if(creation!=null&&creation.sources!=null)return creation.sources.toArray(new Module[0]);
-            }finally{SOURCE_LOOKUP.restore(previous,previousHash);}
-        }
+        Module[] observed=(Module[])originValue(object,1);if(observed!=null)return observed;
         Module module=objectModule(object);return module==null?new Module[0]:new Module[]{module};
     }
-    public static boolean objectSourceUnknown(Object object){synchronized(CREATION_ORIGINS){
-        Object previous=SOURCE_LOOKUP.target;int previousHash=SOURCE_LOOKUP.hash;SOURCE_LOOKUP.bind(object);
-        try{
-            CreationOrigin creation=CREATION_ORIGINS.get(SOURCE_LOOKUP);
-            ThreadOrigin thread=object instanceof Thread?THREAD_ORIGINS.get(SOURCE_LOOKUP):null;
-            return creation!=null&&creation.unknown||thread!=null&&(thread.unknown||thread.runBoundaryMissing);
-        }finally{SOURCE_LOOKUP.restore(previous,previousHash);}
-    }}
+    public static boolean objectSourceUnknown(Object object){return object!=null&&(Boolean)originValue(object,2);}
     /** Native heap mutations use this actual object's current observed sources. */
     public static synchronized boolean nativeHeapTargetAllowed(Object object,Module[] actualSources){
         if(object==null||actualSources==null||actualSources.length==0
@@ -854,35 +863,35 @@ public final class ControlBridge {
         if(WALKER.getCallerClass()!=NativeControl.class)throw new SecurityException("ACTUAL_NATIVE_SOURCE_STATE_REQUIRED");
         Set<Object> unresolved=Collections.newSetFromMap(new IdentityHashMap<>());
         synchronized(CREATION_ORIGINS){reapCreationOwners();for(var entry:CREATION_ORIGINS.entrySet()){
-            CreationOrigin origin=entry.getValue();Object actual=entry.getKey().get();
+            CreationOrigin origin=entry.getValue();Object actual=entry.getKey();
             if(origin.unknown&&actual!=null&&origin.sources!=null&&origin.sources.contains(module))unresolved.add(actual);
         }
             for(var entry:THREAD_ORIGINS.entrySet())if((entry.getValue().unknown||entry.getValue().runBoundaryMissing)&&entry.getValue().sources.contains(module)){
-                Object actual=entry.getKey().get();if(actual!=null)unresolved.add(actual);
+                Object actual=entry.getKey();if(actual!=null)unresolved.add(actual);
             }
         }return unresolved.isEmpty()?"":"EXTERNAL_OBJECT_SOURCE_UNOBSERVED:objects="+unresolved.size();
     }
     static void createdBy(Object object,Module[] sources,boolean onlyAbsent){
-        EventKey lookup=new EventKey(object,null);
-        CreationOrigin prior=CREATION_ORIGINS.get(lookup);
+        OriginStripe originWrite=beginOrigins(object);try {
+        CreationOrigin prior=CREATION_ORIGINS.get(object);
         if(sourceUnknown()){
             if(prior==null||!prior.unknown)NativeControl.heapPolicyChanged(object);
-            prior=CREATION_ORIGINS.get(lookup);
+            prior=CREATION_ORIGINS.get(object);
             prior=new CreationOrigin(prior==null?null:prior.sources,true);
-            CREATION_ORIGINS.put(new EventKey(object,CREATION_QUEUE),prior);
+            CREATION_ORIGINS.put(object,prior);
         }
-        prior=CREATION_ORIGINS.get(lookup);
+        prior=CREATION_ORIGINS.get(object);
         if(onlyAbsent&&prior!=null&&prior.sources!=null)return;
-        EventKey key=new EventKey(object,CREATION_QUEUE);
         Set<Module> actual=java.util.Collections.newSetFromMap(new java.util.IdentityHashMap<Module,Boolean>());actual.addAll(java.util.Arrays.asList(sources));actual.remove(null);
-        prior=CREATION_ORIGINS.get(lookup);Set<Module> previous=prior==null?null:prior.sources;
+        prior=CREATION_ORIGINS.get(object);Set<Module> previous=prior==null?null:prior.sources;
         if(previous==null||!previous.equals(actual))NativeControl.heapPolicyChanged(object);
         // A policy notification may reenter source registration. Preserve its
         // sticky unknown flag while publishing this operation's actual set.
-        prior=CREATION_ORIGINS.get(lookup);boolean unknown=prior!=null&&prior.unknown;
-        CREATION_ORIGINS.put(key,new CreationOrigin(actual,unknown));
+        prior=CREATION_ORIGINS.get(object);boolean unknown=prior!=null&&prior.unknown;
+        CREATION_ORIGINS.put(object,new CreationOrigin(actual,unknown));
         if(object instanceof java.util.concurrent.ExecutorService)schedulerSources(object,actual,unknown);
         if(object.getClass()==java.util.Timer.class)timerThread(object);
+            }finally{endOrigins(originWrite,object);}
     }
     static void lookupDerived(java.lang.invoke.MethodHandles.Lookup source,java.lang.invoke.MethodHandles.Lookup result,Class<?> caller) {
         if(WALKER.getCallerClass()!=DefinitionBridge.class)throw new SecurityException("DEFINITION_BRIDGE_REQUIRED");
@@ -893,46 +902,151 @@ public final class ControlBridge {
         if(!producer(module))return;
         synchronized(CREATION_ORIGINS){reapCreationOwners();createdBy(result,new Module[]{module},true);}
     }
-    // Used only under CREATION_ORIGINS and never inserted into a directory.
-    // Save/restore below also covers reentrant instrumentation on this thread.
-    private static final class SourceLookup {
-        Object target;int hash;
-        void bind(Object object){
-            // All directories use EventKey's identity hash. Compute it before
-            // changing this reentrant cursor, then reuse it for this query's
-            // directory reads. No owner or permission result is retained.
-            int identity=System.identityHashCode(object);target=object;hash=identity;
+    /** Serialized writers, lock-free weak identity reads; no JDK CAS-backed container. */
+    static final class OriginMap<V> extends java.util.AbstractMap<Object,V> {
+        private static final class Node<V> {
+            final EventKey key;final V value;final Node<V> next;
+            Node(EventKey key,V value,Node<V> next){this.key=key;this.value=value;this.next=next;}
         }
-        void restore(Object previous,int previousHash){target=previous;hash=previousHash;}
-        public int hashCode(){return hash;}
-        public boolean equals(Object other){return other instanceof EventKey key&&target!=null&&target==key.get();}
+        private volatile Node<V>[] table=table(16);private int count;private long revision;
+        @SuppressWarnings("unchecked") private static <V> Node<V>[] table(int size){return (Node<V>[])new Node<?>[size];}
+        private static int bucket(int hash,int size){return (hash^(hash>>>16))&(size-1);}
+        @Override public V get(Object target){
+            if(target==null)return null;int hash=System.identityHashCode(target);Node<V>[] observed=table;
+            for(Node<V> node=observed[bucket(hash,observed.length)];node!=null;node=node.next)
+                if(node.key.hash==hash&&node.key.get()==target)return node.value;
+            return null;
+        }
+        @Override public V put(Object target,V value){
+            Objects.requireNonNull(target);
+            int hash=System.identityHashCode(target);
+            for(;;){
+                long version=revision;Node<V>[] observed=table;int at=bucket(hash,observed.length);Node<V> prior=null;
+                for(Node<V> node=observed[at];node!=null;node=node.next)if(node.key.hash==hash&&node.key.get()==target){prior=node;break;}
+                if(prior!=null){
+                    Node<V> next=null;
+                    for(Node<V> node=observed[at];node!=null;node=node.next)next=new Node<>(node.key,node==prior?value:node.value,next);
+                    if(version!=revision)continue;observed[at]=next;revision++;table=observed;return prior.value;
+                }
+                if(count>=observed.length-(observed.length>>>2)&&observed.length<1<<30){
+                    Node<V>[] next=table(observed.length*2);int live=0;
+                    for(Node<V> head:observed)for(Node<V> node=head;node!=null;node=node.next){
+                        if(node.key.get()==null)continue;live++;
+                        int into=bucket(node.key.hash,next.length);next[into]=new Node<>(node.key,node.value,next[into]);
+                    }
+                    publishOriginBacking(next);
+                    // Control publication may reenter registration on this thread.
+                    if(version!=revision)continue;count=live;revision++;table=next;continue;
+                }
+                Node<V> inserted=new Node<>(new EventKey(target,CREATION_QUEUE),value,observed[at]);
+                if(version!=revision)continue;observed[at]=inserted;count++;revision++;table=observed;return null;
+            }
+        }
+        void retire(EventKey key){
+            Node<V>[] observed=table;int at=bucket(key.hash,observed.length);boolean found=false;
+            for(Node<V> node=observed[at];node!=null;node=node.next)if(node.key==key){found=true;break;}
+            if(!found)return;Node<V> next=null;
+            for(Node<V> node=observed[at];node!=null;node=node.next)if(node.key!=key)next=new Node<>(node.key,node.value,next);
+            observed[at]=next;count--;revision++;table=observed;
+        }
+        @Override public Set<Map.Entry<Object,V>> entrySet(){
+            return new java.util.AbstractSet<>(){
+                public int size(){return count;}
+                public java.util.Iterator<Map.Entry<Object,V>> iterator(){
+                    Node<V>[] observed=table;
+                    return new java.util.Iterator<>(){
+                        int bucket;Node<V> next;Object live;
+                        public boolean hasNext(){
+                            while(live==null){
+                                while(next==null&&bucket<observed.length)next=observed[bucket++];
+                                if(next==null)return false;live=next.key.get();if(live==null)next=next.next;
+                            }return true;
+                        }
+                        public Map.Entry<Object,V> next(){
+                            if(!hasNext())throw new java.util.NoSuchElementException();
+                            var entry=new java.util.AbstractMap.SimpleImmutableEntry<>(live,next.value);live=null;next=next.next;return entry;
+                        }
+                    };
+                }
+            };
+        }
     }
-    private static final SourceLookup SOURCE_LOOKUP=new SourceLookup();
+    /** Mutable only under CREATION_ORIGINS; readers consume the published array. */
+    static final class OriginSources extends java.util.AbstractSet<Module> {
+        private volatile Module[] published=NO_SOURCES;
+        Module[] snapshot(){return published;}
+        boolean addSource(Module source){
+            Module[] prior=published;
+            if(prior.length==0){published=new Module[]{source};return true;}
+            if(prior[0]==source)return false;
+            for(int i=1;i<prior.length;i++)if(prior[i]==source)return false;
+            Module[] next=new Module[prior.length+1];for(int i=0;i<prior.length;i++)next[i]=prior[i];next[prior.length]=source;
+            published=next;return true;
+        }
+        boolean removeSource(Object source){
+            Module[] prior=published;
+            if(prior.length==0)return false;
+            if(prior.length==1){if(prior[0]!=source)return false;published=NO_SOURCES;return true;}
+            int at=-1;for(int i=0;i<prior.length;i++)if(prior[i]==source){at=i;break;}
+            if(at<0)return false;Module[] next=new Module[prior.length-1];for(int i=0,j=0;i<prior.length;i++)if(i!=at)next[j++]=prior[i];
+            published=next;return true;
+        }
+        @Override public boolean contains(Object source){for(Module actual:published)if(actual==source)return true;return false;}
+        @Override public int size(){return published.length;}
+        @Override public java.util.Iterator<Module> iterator(){return Arrays.asList(published).iterator();}
+    }
+    private static void publishOriginBacking(Object value){
+        try{CodeSourceBridge.mutationControls(value);}catch(RuntimeException|Error failure){controlCaptureHealthy=false;throw failure;}
+    }
+    static final class OriginStripe {volatile long version;volatile Thread writer;int depth;}
+    private static final OriginStripe[] ORIGIN_STRIPES=originStripes();
+    private static OriginStripe[] originStripes(){OriginStripe[] stripes=new OriginStripe[64];for(int i=0;i<stripes.length;i++)stripes[i]=new OriginStripe();return stripes;}
+    static OriginStripe beginOrigins(Object object){
+        // Writers already hold CREATION_ORIGINS. Same-thread callbacks may
+        // observe their in-progress writes, as with the original monitor.
+        OriginStripe stripe=ORIGIN_STRIPES[System.identityHashCode(object)&63];
+        if(stripe.depth++==0){stripe.writer=Thread.currentThread();stripe.version++;}return stripe;
+    }
+    static OriginStripe originStripe(Object target){return ORIGIN_STRIPES[System.identityHashCode(target)&63];}
+    static void endOrigins(OriginStripe stripe,Object target){
+        try{if(target instanceof Thread){ThreadOrigin origin=THREAD_ORIGINS.get(target);if(origin!=null)origin.publish();}}
+        finally{if(--stripe.depth==0){stripe.version++;stripe.writer=null;}}
+    }
+    private static Object originValue(Object object,int query){
+        OriginStripe stripe=originStripe(object);Thread current=Thread.currentThread();
+        for(;;){
+            long revision=stripe.version;Thread writer=stripe.writer;
+            if(writer!=current&&(writer!=null||(revision&1)!=0)){Thread.onSpinWait();continue;}
+            CreationOrigin creation=CREATION_ORIGINS.get(object);
+            ThreadOrigin observed=query!=3&&object instanceof Thread?THREAD_ORIGINS.get(object):null;
+            ThreadSources thread=observed==null?null:writer==current?observed.snapshot():observed.published;
+            OriginSources owners=query==0||query==1?TASK_OWNERS.get(object):null;
+            Module[] tasks=owners==null?null:owners.snapshot();Object result;
+            if(query==2)result=creation!=null&&creation.unknown||thread!=null&&(thread.unknown()||thread.runBoundaryMissing());
+            else if(query==3)result=creation==null?null:creation.single();
+            else if(query==1){
+                if(thread!=null){
+                    Set<Module> sources=Collections.newSetFromMap(new IdentityHashMap<>());Collections.addAll(sources,thread.sources());
+                    if(creation!=null&&creation.sources!=null)sources.addAll(creation.sources);if(tasks!=null)Collections.addAll(sources,tasks);result=sources.toArray(new Module[0]);
+                }else result=tasks!=null?tasks.clone():creation!=null&&creation.sources!=null?creation.sources.toArray(new Module[0]):null;
+            }else if(creation!=null&&creation.unknown)result=null;
+            else if(thread!=null)result=thread.unknown()||thread.runBoundaryMissing()?null:singleThreadSource(thread.sources(),creation,tasks);
+            else if(tasks!=null)result=tasks.length==1?tasks[0]:null;
+            else result=creation!=null&&creation.sources!=null?creation.single():DefinitionBridge.module(object instanceof Class<?> type?type:object.getClass());
+            if(writer==current||revision==stripe.version&&stripe.writer==null)return result;
+        }
+    }
     public static Module objectModule(Object object) {
         if(object==null)return null;
         Module definition=DefinitionBridge.module(object instanceof Class<?> type?type:object.getClass());
         if(producer(definition))return definition;
-        synchronized(CREATION_ORIGINS) {
-            Object previous=SOURCE_LOOKUP.target;int previousHash=SOURCE_LOOKUP.hash;SOURCE_LOOKUP.bind(object);
-            try{
-                CreationOrigin creation=CREATION_ORIGINS.get(SOURCE_LOOKUP);
-                if(creation!=null&&creation.unknown)return null;
-                ThreadOrigin thread=object instanceof Thread?THREAD_ORIGINS.get(SOURCE_LOOKUP):null;
-                if(thread!=null){if(thread.unknown||thread.runBoundaryMissing)return null;return singleThreadSource(SOURCE_LOOKUP,thread,creation);}
-                Set<Module> owners=TASK_OWNERS.get(SOURCE_LOOKUP);
-                if(owners!=null) {if(owners.size()!=1)return null;return owners.iterator().next();}
-                return creation!=null&&creation.sources!=null?creation.single():definition;
-            }finally{SOURCE_LOOKUP.restore(previous,previousHash);}
-        }
+        return (Module)originValue(object,0);
     }
-    private static Module singleThreadSource(Object key,ThreadOrigin thread,CreationOrigin origin){
-        // CREATION_ORIGINS is held. The caller only consumes a singleton, so
-        // compare all three actual sets without constructing a union and array.
-        Set<Module> creation=origin==null?null:origin.sources,tasks=TASK_OWNERS.get(key);Module selected=null;
-        for(int i=0;i<3;i++){
-            Set<Module> sources=i==0?thread.sources:i==1?creation:tasks;if(sources==null)continue;
-            for(Module source:sources){if(source==null)return null;if(selected==null)selected=source;else if(selected!=source)return null;}
-        }
+    private static Module singleThreadSource(Module[] thread,CreationOrigin origin,Module[] tasks){
+        Module selected=null;
+        for(Module source:thread){if(source==null)return null;if(selected==null)selected=source;else if(selected!=source)return null;}
+        if(origin!=null&&origin.sources!=null)for(Module source:origin.sources){if(source==null)return null;if(selected==null)selected=source;else if(selected!=source)return null;}
+        if(tasks!=null)for(Module source:tasks){if(source==null)return null;if(selected==null)selected=source;else if(selected!=source)return null;}
         return selected;
     }
     /** Keep only the actual carrier declaration out of this slot's business origins. */
@@ -953,7 +1067,7 @@ public final class ControlBridge {
         synchronized(CREATION_ORIGINS){
             reapCreationOwners();
             for(var entry:CREATION_ORIGINS.entrySet())if(entry.getValue().sources!=null&&entry.getValue().sources.stream().anyMatch(selected::contains)){
-                Object value=entry.getKey().get();if(value!=null&&carrier.isInstance(value))found.add(value);
+                Object value=entry.getKey();if(value!=null&&carrier.isInstance(value))found.add(value);
             }
         }
         return found.toArray();
@@ -968,10 +1082,10 @@ public final class ControlBridge {
             reapCreationOwners();
             for(var entry:CREATION_ORIGINS.entrySet())if(!entry.getValue().unknown&&entry.getValue().sources!=null
                     &&!entry.getValue().sources.isEmpty()&&selected.containsAll(entry.getValue().sources)){
-                Object value=entry.getKey().get();if(value!=null)found.add(value);
+                Object value=entry.getKey();if(value!=null)found.add(value);
             }
             for(var entry:THREAD_ORIGINS.entrySet())if(!entry.getValue().unknown&&!entry.getValue().runBoundaryMissing&&!entry.getValue().sources.isEmpty()&&selected.containsAll(entry.getValue().sources)){
-                Object value=entry.getKey().get();if(value!=null)found.add(value);
+                Object value=entry.getKey();if(value!=null)found.add(value);
             }
         }
         return found.toArray();
@@ -1526,22 +1640,28 @@ public final class ControlBridge {
         var guard=resourceGuard;if(guard==null)return true;
         try {return !(boolean)guard.invokeExact(resource);}catch(Throwable failure){throw new IllegalStateException("RESOURCE_RELEASE_GUARD",failure);}
     }
-    public static synchronized void installBackingPolicy(Class<?> owner,java.lang.invoke.MethodHandle known,java.lang.invoke.MethodHandle element,java.lang.invoke.MethodHandle array,java.lang.invoke.MethodHandle offset,java.lang.invoke.MethodHandle memory) {
+    public static synchronized void installBackingPolicy(Class<?> owner,java.lang.invoke.MethodHandle known,java.lang.invoke.MethodHandle element,java.lang.invoke.MethodHandle array,java.lang.invoke.MethodHandle offset,java.lang.invoke.MethodHandle memory,java.lang.invoke.MethodHandle revision) {
         requirePolicyInstaller();
         if(guards==null||guards.owner()!=owner)throw new IllegalArgumentException("BACKING_OWNER");
-        BackingBridge.install(known,element,array,offset,memory);
+        BackingBridge.install(known,element,array,offset,memory,revision);
     }
+    private static final ClassValue<Class<?>> OWN_STATE_LAYOUTS=new ClassValue<>(){
+        @Override protected Class<?> computeValue(Class<?> type){
+            if(!type.getName().startsWith("dev.ronova.pro."))return Void.class;
+            return type.getClassLoader()==null?type.getNestHost():type;
+        }
+    };
     static boolean ownState(Class<?> declaring) {
         // Every controller host and the Core/Agent alternatives below require
         // this namespace. A nest cannot cross its runtime package. Test the
         // necessary immutable name first: ordinary arrays must not enter the
         // guarded native Class.getNestHost0 path on every element store.
-        if(declaring==null||!declaring.getName().startsWith("dev.ronova.pro."))return false;
-        Class<?> host=declaring.getClassLoader()==null?declaring.getNestHost():declaring;Guards current=guards;
+        if(declaring==null)return false;Class<?> host=OWN_STATE_LAYOUTS.get(declaring);if(host==Void.class)return false;
+        Guards current=guards;
         if(host==FrameworkBuffers.class||host==TaskBridge.class||host==BackingBridge.class||host==CarrierBridge.class||host==SourceMapBridge.class||host==NativeControl.class||host==DefinitionBridge.class||host==ResourceBridge.class||host==IoBridge.class||host==CodeSourceBridge.class||host==NetworkBridge.class||host==ClientBridge.class
                 ||host==EventFaultBridge.class||host==EventBusBridge.class||host==ControlBridge.class||host==ExecutionFlow.class||host==NetworkCleanup.class||host==PlatformMetadata.class)return true;
         if(ControlBridge.owns(declaring))return true;
-        return current!=null&&DefinitionBridge.module(declaring)==current.owner().getModule()&&declaring.getClassLoader()==current.owner().getClassLoader()&&declaring.getName().startsWith("dev.ronova.pro.");
+        return current!=null&&DefinitionBridge.module(declaring)==current.owner().getModule()&&declaring.getClassLoader()==current.owner().getClassLoader();
     }
     static volatile Class<?> eventBoundary;
     public static void installEventBoundary(Class<?> type) {
@@ -1608,9 +1728,9 @@ public final class ControlBridge {
         if(!CodeSourceBridge.fieldRangeAllowed(receiver,offset,resourceWidth)&&!coreWriter())return false;
         if(!ResourceBridge.bufferWrapMutationAllowed(receiver,offset,value,resourceWidth)
                 &&!ResourceBridge.unsafeMutationAllowed(receiver,offset,resourceWidth))return false;
-        boolean targetStopped=modStopped(objectModule(receiver));
+        Module mutationOwner=mutationOwner(receiver);boolean targetStopped=modStopped(mutationOwner);
         boolean ownMirror=receiver instanceof Class<?> owner&&ownState(owner);
-        if(!protectedMutationAllowed(receiver,receiver instanceof Class<?> type?type:receiver==null?null:receiver.getClass()))return false;
+        if(!protectedMutationAllowed(receiver,receiver instanceof Class<?> type?type:receiver==null?null:receiver.getClass(),mutationOwner))return false;
         // Exact JDK cache maintenance returned above, including when an in-flight
         // stopped caller requested it. Business writes still use current policy.
         if((targetStopped||stoppedInvocation())&&!coreWriter()
@@ -1654,12 +1774,13 @@ public final class ControlBridge {
         if(!EventBusBridge.memoryAllowed(receiver,offset,length))return false;
         // Bulk writes can never be Class.newReflectionData's exact reference CAS.
         if(receiver instanceof Class<?> mirror&&!ResourceBridge.mirrorStaticRange(mirror,offset,length))return false;
-        if(!protectedMutationAllowed(receiver,receiver instanceof Class<?> type?type:receiver==null?null:receiver.getClass()))return false;
+        Module owner=mutationOwner(receiver);
+        if(!protectedMutationAllowed(receiver,receiver instanceof Class<?> type?type:receiver==null?null:receiver.getClass(),owner))return false;
         if(!CodeSourceBridge.fieldRangeAllowed(receiver,offset,length)&&!coreWriter())return false;
         if(!ResourceBridge.unsafeMutationAllowed(receiver,offset,length))return false;
-        if((modStopped(objectModule(receiver))||stoppedInvocation())&&!coreWriter())return false;
+        if((modStopped(owner)||stoppedInvocation())&&!coreWriter())return false;
         Guards current=guards;if(current==null||receiver==null||length<=0)return true;
-        if(receiver instanceof Class<?> owner&&ownState(owner)||ownState(receiver.getClass()))return false;
+        if(receiver instanceof Class<?> mirror&&ownState(mirror)||ownState(receiver.getClass()))return false;
         if(!BackingBridge.memoryWriteAllowed(receiver,offset,length))return false;
         final long end;try {end=Math.addExact(offset,length);}catch(ArithmeticException overflow){return false;}
         for(UnsafeField field:current.unsafeFields().get(receiver.getClass())) {
@@ -1719,9 +1840,13 @@ public final class ControlBridge {
     public static boolean nativeArrayPointerAllowed(Object array){
         return arrayWriteAllowed(array)&&BackingBridge.nativePointerAllowed(array);
     }
-    static boolean arrayWriteAllowed(Object array){return protectedMutationAllowed(array,array==null?null:array.getClass())&&!(controlled(array)&&!controlCaller())&&!((modStopped(objectModule(array))||stoppedInvocation())&&!coreWriter());}
+    static boolean arrayWriteAllowed(Object array){
+        Module owner=mutationOwner(array);
+        return protectedMutationAllowed(array,array==null?null:array.getClass(),owner)&&!(controlled(array)&&!controlCaller())&&!((modStopped(owner)||stoppedInvocation())&&!coreWriter());
+    }
     static boolean arrayWriteAllowed(Object array,int index,Object value){
-        return protectedMutationAllowed(array,array==null?null:array.getClass())&&!(controlled(array)&&!controlCaller())&&(!((modStopped(objectModule(array))||stoppedInvocation())&&!coreWriter())
+        Module owner=mutationOwner(array);
+        return protectedMutationAllowed(array,array==null?null:array.getClass(),owner)&&!(controlled(array)&&!controlCaller())&&(!((modStopped(owner)||stoppedInvocation())&&!coreWriter())
                 ||NetworkBridge.retirementArrayAllowed(array,index,value));
     }
     public static boolean nativeRegistrationTargetAllowed(Class<?> type){
@@ -1799,6 +1924,7 @@ public final class ControlBridge {
     // A nested writer for the same receiver retains incoming locks until its outer writer exits.
     static final Map<Thread,SourcePublication> SOURCE_PUBLICATIONS=new IdentityHashMap<>();
     private static final IdentityHashMap<Object,Integer> SOURCE_PUBLICATION_TARGETS=new IdentityHashMap<>();
+    private static volatile int sourcePublicationTargets;
     static boolean sourcePublicationActive(){
         synchronized(SOURCE_PUBLICATIONS){if(!SOURCE_PUBLICATIONS.isEmpty())return true;}
         synchronized(SOURCE_INDEX_MUTATIONS){return !SOURCE_INDEX_MUTATIONS.isEmpty();}
@@ -1810,18 +1936,21 @@ public final class ControlBridge {
             this.receiver=receiver;CodeSourceBridge.mutationControls(this,SOURCE_PUBLICATIONS,SOURCE_PUBLICATION_TARGETS,incoming);
             synchronized(SOURCE_PUBLICATIONS){
                 previous=SOURCE_PUBLICATIONS.put(thread,this);SOURCE_PUBLICATION_TARGETS.merge(receiver,1,Integer::sum);
+                sourcePublicationTargets=SOURCE_PUBLICATION_TARGETS.size();
             }
         }
         void reserve(Object target){
             synchronized(SOURCE_PUBLICATIONS){
                 if(closed||thread!=Thread.currentThread())throw new IllegalMonitorStateException("SOURCE_PUBLICATION_THREAD_REQUIRED");
                 incoming.add(target);SOURCE_PUBLICATION_TARGETS.merge(target,1,Integer::sum);
+                sourcePublicationTargets=SOURCE_PUBLICATION_TARGETS.size();
             }
         }
         private static void drop(Object target){
             Integer count=SOURCE_PUBLICATION_TARGETS.get(target);
             if(count==null)throw new IllegalStateException("SOURCE_PUBLICATION_TARGET_MISSING");
             if(count==1)SOURCE_PUBLICATION_TARGETS.remove(target);else SOURCE_PUBLICATION_TARGETS.put(target,count-1);
+            sourcePublicationTargets=SOURCE_PUBLICATION_TARGETS.size();
         }
         void cancel(Object target){
             synchronized(SOURCE_PUBLICATIONS){
@@ -1958,9 +2087,12 @@ public final class ControlBridge {
     public static Object beginOwnStaticFieldMutation(double value,String signature){return staticFieldMutation(Double.valueOf(value),WALKER.getCallerClass(),signature);}
     public static Object beginStaticFieldMutation(double value,Class<?> symbolic,String signature){return staticFieldMutation(Double.valueOf(value),symbolic,signature);}
     private static boolean fieldMutationReceiptRequired(Object target,Class<?> declaring){
-        return fieldMutationReceiptRequired(target,declaring,objectModule(target));
+        return fieldMutationReceiptRequired(target,declaring,mutationOwner(target));
     }
     private static boolean fieldMutationReceiptRequired(Object target,Class<?> declaring,Module owner){
+        return fieldMutationReceiptRequired(target,declaring,owner,null);
+    }
+    private static boolean fieldMutationReceiptRequired(Object target,Class<?> declaring,Module owner,CodeSourceBridge.FieldTracking tracking){
         // A policy for another Mod is not a policy for this receiver. Keep
         // exact protected/stopped targets and live stopped callers on the
         // original gated path, without serializing unrelated JVM writes.
@@ -1973,7 +2105,7 @@ public final class ControlBridge {
         if(current!=null&&!current.unsafeFields().get(target.getClass()).isEmpty())return true;
         if(ownState(declaring)||ownState(target.getClass())||controlled(target))return true;
         if(SourceMapBridge.registered(target))return true;
-        if(CodeSourceBridge.fieldMutationTracked(declaring))return true;
+        if(tracking==null?CodeSourceBridge.fieldMutationTracked(declaring):tracking.tracked())return true;
         if(BackingBridge.known(target)||ResourceBridge.critical(target)
                 ||target!=declaring&&ResourceBridge.critical(declaring))return true;
         Class<?> type=target.getClass();
@@ -1982,15 +2114,33 @@ public final class ControlBridge {
                 ||type.getName().equals("[Ljava.util.concurrent.ForkJoinPool$WorkQueue;")))return true;
         // Include adopted incoming identities before registration, without
         // sending unrelated objects through another thread's publication gate.
-        synchronized(SOURCE_PUBLICATIONS){if(SOURCE_PUBLICATION_TARGETS.containsKey(target))return true;}
+        if(sourcePublicationTargets!=0)synchronized(SOURCE_PUBLICATIONS){if(SOURCE_PUBLICATION_TARGETS.containsKey(target))return true;}
         return false;
+    }
+    private static boolean fieldMutationReceiptChanged(Object target,Class<?> declaring,Guards checked,BackingBridge.Policy backing,long revision){
+        return fieldMutationReceiptChanged(target,declaring,checked,backing,revision,null);
+    }
+    private static boolean fieldMutationReceiptChanged(Object target,Class<?> declaring,Guards checked,BackingBridge.Policy backing,long revision,CodeSourceBridge.FieldTracking tracking){
+        if(checked!=guards)return fieldMutationReceiptRequired(target,declaring);
+        Module owner=mutationOwner(target),declaration=declaring==null?null:DefinitionBridge.module(declaring);
+        if(modProtected(owner)||modStopped(owner)||modProtected(declaration)||modStopped(declaration)||stoppedInvocation())return true;
+        // Exact type-only gates were checked before the policy callback. Live
+        // registrations, ownership, resource state and publications are not cached.
+        if(ownState(declaring)||ownState(target.getClass())||controlled(target)||SourceMapBridge.registered(target)
+                ||(tracking==null||CodeSourceBridge.fieldMutationTrackingChanged(declaring,tracking))&&CodeSourceBridge.fieldMutationTracked(declaring)||ResourceBridge.critical(target)
+                ||target!=declaring&&ResourceBridge.critical(declaring))return true;
+        if(sourcePublicationTargets!=0)synchronized(SOURCE_PUBLICATIONS){if(SOURCE_PUBLICATION_TARGETS.containsKey(target))return true;}
+        if(target.getClass().isArray()&&!arrayWriteAllowed(target))return true;
+        return !BackingBridge.unchanged(backing,revision)&&BackingBridge.known(target);
     }
     public static Object beginFieldMutation(Object receiver,Class<?> symbolic,String name,String descriptor,Object value) {
         Class<?> declaring=actualFieldOwner(symbolic,name,descriptor);
         if(declaring==null||declaring==Void.class){lost();return Boolean.FALSE;}
         Object target=receiver==null?declaring:receiver;
-        Module owner=objectModule(target);
-        if(!fieldMutationReceiptRequired(target,declaring,owner)){
+        CodeSourceBridge.FieldTracking tracking=CodeSourceBridge.fieldMutationTracking(declaring);
+        Module owner=mutationOwner(target);Guards checked=guards;BackingBridge.Policy backing=BackingBridge.registration();
+        long revision=BackingBridge.receiptRevision(backing,target);
+        if(!fieldMutationReceiptRequired(target,declaring,owner,tracking)){
             // The receipt predicate just read the live stopped caller. Its
             // final recheck below repeats that read before any store, so this
             // advisory fast-path policy call needs no third identical walk.
@@ -1998,7 +2148,7 @@ public final class ControlBridge {
             // Re-read the actual target after the live policy query. A newly
             // selected receiver or publication must use its existing gate.
             // The shared identity lookup still reads ownership anew.
-            if(!fieldMutationReceiptRequired(target,declaring,objectModule(target)))return null;
+            if(!fieldMutationReceiptChanged(target,declaring,checked,backing,revision,tracking))return null;
         }
         java.util.concurrent.locks.ReentrantLock gate=fieldGate(target);gate.lock();
         Object receipt=memoryReceipt(gate,target);
@@ -2110,11 +2260,12 @@ public final class ControlBridge {
         // actual write policy before admitting it; avoid collecting sources
         // merely to discard them inside unsafeReceipt.
         if(CodeSourceBridge.fieldGateMetadata(receiver))return (bulk?unsafeMemoryAllowed(receiver,offset,bytes):fieldGateMutationAllowed())?null:Boolean.FALSE;
+        Guards checked=guards;BackingBridge.Policy backing=BackingBridge.registration();long revision=BackingBridge.receiptRevision(backing,receiver);
         if(!unsafeMutationReceiptRequired(receiver)){
             if(!(bulk?unsafeMemoryAllowed(receiver,offset,bytes):unsafeWriteAllowed(receiver,offset,proposed,kind)))return Boolean.FALSE;
             // As with PUTFIELD, a newly selected target/publication still takes
             // its gate. Do not retain a negative ownership or permission result.
-            if(!unsafeMutationReceiptRequired(receiver))return null;
+            if(!unsafeMutationReceiptChanged(receiver,checked,backing,revision))return null;
         }
         Object token=unsafeReceipt(receiver,offset,bytes,NO_SOURCES,!bulk&&referenceKind(kind));
         try{
@@ -2183,6 +2334,15 @@ public final class ControlBridge {
         // Unlike PUTFIELD, an Unsafe offset supplies no declaring class. An
         // inherited protected/source field must keep its gate even if the
         // concrete receiver belongs to an unrelated module.
+        for(Class<?> parent=type.getSuperclass();parent!=null;parent=parent.getSuperclass()){
+            Module module=DefinitionBridge.module(parent);
+            if(modProtected(module)||modStopped(module)||ownState(parent)||CodeSourceBridge.fieldMutationTracked(parent))return true;
+        }
+        return false;
+    }
+    private static boolean unsafeMutationReceiptChanged(Object receiver,Guards checked,BackingBridge.Policy backing,long revision){
+        Class<?> type=receiver instanceof Class<?> mirror?mirror:receiver.getClass();
+        if(fieldMutationReceiptChanged(receiver,type,checked,backing,revision))return true;
         for(Class<?> parent=type.getSuperclass();parent!=null;parent=parent.getSuperclass()){
             Module module=DefinitionBridge.module(parent);
             if(modProtected(module)||modStopped(module)||ownState(parent)||CodeSourceBridge.fieldMutationTracked(parent))return true;
@@ -2992,10 +3152,10 @@ public final class ControlBridge {
     }
     static void reapCreationOwners() {
         EventKey stale;while((stale=(EventKey)CREATION_QUEUE.poll())!=null) {
-            CREATION_ORIGINS.remove(stale);TASK_OWNERS.remove(stale);TASK_SCHEDULERS.remove(stale);SHARED_SCHEDULERS.remove(stale);
+            CREATION_ORIGINS.retire(stale);TASK_OWNERS.retire(stale);TASK_SCHEDULERS.remove(stale);SHARED_SCHEDULERS.remove(stale);
             TIMER_RUNNING.remove(stale);
             SCHEDULER_SOURCES.remove(stale);SCHEDULER_SUBMISSIONS.remove(stale);SCHEDULER_RETIREMENTS.remove(stale);
-            THREAD_ORIGINS.remove(stale);RETIRED_THREADS.remove(stale);THREAD_TIMERS.remove(stale);
+            THREAD_ORIGINS.retire(stale);RETIRED_THREADS.remove(stale);THREAD_TIMERS.remove(stale);
         }
     }
     static final java.lang.ref.ReferenceQueue<Object> EVENT_QUEUE=new java.lang.ref.ReferenceQueue<>();
@@ -3011,7 +3171,7 @@ public final class ControlBridge {
         CreationOrigin(Set<Module> sources,boolean unknown){this.sources=sources;this.unknown=unknown;}
         Module single(){return !unknown&&sources!=null&&sources.size()==1?sources.iterator().next():null;}
     }
-    static final java.util.Map<EventKey,CreationOrigin> CREATION_ORIGINS=new java.util.HashMap<>();
+    static final OriginMap<CreationOrigin> CREATION_ORIGINS=new OriginMap<>();
 
 
 

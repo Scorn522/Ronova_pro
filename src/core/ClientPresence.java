@@ -41,7 +41,7 @@ public final class ClientPresence {
             java.lang.ref.WeakReference<Object> data,java.lang.ref.WeakReference<Object> items,
             java.lang.ref.WeakReference<net.minecraft.network.syncher.SynchedEntityData.DataItem<Float>> health,
             java.lang.ref.WeakReference<net.minecraft.network.syncher.SynchedEntityData.DataItem<Float>> absorption) { }
-    private static final Map<Object,LocalBody> localBodies=Collections.synchronizedMap(new WeakIdentityMap<>());
+    private static final Map<Object,LocalBody> localBodies=new WeakIdentityMap<>();
     private static boolean controlsInstalled;
     private static volatile Object connection;
     private static UUID watchSession;
@@ -341,7 +341,8 @@ public final class ClientPresence {
     }
     public static boolean healthWriteDenied(net.minecraft.world.entity.LivingEntity entity,float value) {
         if(entity==null||!Minecraft.getInstance().isSameThread())return false;
-        LocalBody body=localBodies.get(entity);
+        Object binding=localBodies.get(entity);if(binding==null)return false;
+        LocalBody body=(LocalBody)binding;
         if(!currentBody(body)||body.entity.get()!=entity)return false;
         return healthDenied(body,value);
     }
@@ -351,8 +352,13 @@ public final class ClientPresence {
             var raw=(Access.Block)block;
             if(switch(field){case "remove","f_58859_"->Boolean.TRUE.equals(value);case "level","f_58857_"->value!=raw.pro$level();case "worldPosition","f_58858_"->!Objects.equals(value,raw.pro$pos());default->false;})return true;
         }
-        LocalBody body=localBodies.get(receiver);
-        if(currentBody(body)&&localBodies.containsKey(body.entity.get())) {
+        // Most field writes have no client body. Do not enter a body-typed
+        // policy method for a null binding: its boundary can resolve LocalBody
+        // while a class transformer is itself creating unrelated ASM fields.
+        Object binding=localBodies.get(receiver);
+        if(binding!=null) {
+          LocalBody body=(LocalBody)binding;
+          if(currentBody(body)&&localBodies.containsKey(body.entity.get())) {
             var entity=body.entity.get();
             var storage=(Access.Data)((Access.EntityState)entity).pro$data();
             if(receiver==entity&&declaring==Entity.class&&(field.equals("entityData")||field.equals("f_19804_")))
@@ -380,12 +386,14 @@ public final class ClientPresence {
                 case "removalReason","f_146795_" -> value!=null;
                 default -> false;
             };
+          }
         }
         if(receiver instanceof net.minecraftforge.eventbus.api.Event event&&(field.equals("isCanceled")||field.equals("canceled")))return clientDispatch(event,"setCanceled",value);
         return false;
     }
     public static Object clientLifeResult(Object receiver,String method) {
-        LocalBody body=localBodies.get(receiver);
+        Object binding=localBodies.get(receiver);if(binding==null)return null;
+        LocalBody body=(LocalBody)binding;
         if(!currentBody(body)||body.entity().get()!=receiver||!protectedBody(body))return null;
         return switch(method) {
             case "getHealth","m_21223_" -> {
@@ -399,7 +407,8 @@ public final class ClientPresence {
     }
     public static boolean clientDispatch(Object receiver,String method,Object value) {
         if(method.equals("health-storage-remove")) {
-            LocalBody body=localBodies.get(receiver);
+            Object binding=localBodies.get(receiver);if(binding==null)return false;
+            LocalBody body=(LocalBody)binding;
             if(!currentBody(body))return false;
             var entity=body.entity.get();var data=(Access.Data)((Access.EntityState)entity).pro$data();
             return receiver==data.pro$items()&&(value==null||value instanceof Number n&&n.intValue()==Access.Living.pro$healthKey().getId()
@@ -407,7 +416,8 @@ public final class ClientPresence {
                         &&absorptionId.intValue()==Access.PlayerState.pro$absorptionKey().getId());
         }
         if(receiver instanceof net.minecraft.world.entity.Entity entity) {
-            LocalBody body=localBodies.get(entity);
+            Object binding=localBodies.get(entity);if(binding==null)return false;
+            LocalBody body=(LocalBody)binding;
             if(!currentBody(body)||body.entity.get()!=entity)return false;
             return switch(method) {
                 case "remove","m_142467_","setRemoved","m_142687_","discard","m_146870_","kill","m_6074_",

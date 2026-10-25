@@ -122,6 +122,7 @@ public final class EquipmentPolicy {
     private static volatile boolean initialized;
     private static Map<LivingEntity,Owner> OWNERS;
     private static Map<Object,List<Link>> CARRIERS;
+    private static Set<Class<?>> FIELD_DECLARATIONS;
     private static Map<Thread,Scope> SCOPES;
     private static Map<LivingEntity,Mining> MINING;
     private static Map<Thread,Driver> DRIVERS;
@@ -316,8 +317,10 @@ public final class EquipmentPolicy {
         CARRIER_CALL_SITE=MethodHandles.publicLookup().findStatic(carrierBridge,"callSite",MethodType.methodType(long[].class,Object.class,Class.class,String.class,String.class,int.class,Class.class,String.class,String.class,int.class));
         CALLBACK_FRAME=MethodHandles.publicLookup().findStatic(carrierBridge,"callback",MethodType.methodType(boolean.class,Object.class,Class.class,String.class,String.class,int.class,Class.class,String.class,String.class,int.class));
         ASYNC_TASK_BRIDGE=Class.forName("dev.ronova.pro.bootstrap.TaskBridge",false,null);
-        OWNERS=Collections.synchronizedMap(new WeakIdentityMap<>());CARRIERS=Collections.synchronizedMap(new WeakIdentityMap<>());
+        OWNERS=Collections.synchronizedMap(new WeakIdentityMap<>());CARRIERS=new WeakIdentityMap<>();
         SCOPES=Collections.synchronizedMap(new WeakIdentityMap<>());FIELDS=Map.copyOf(fields);
+        Set<Class<?>> declarations=new HashSet<>();for(List<Slot> slots:fields.values())for(Slot slot:slots)declarations.add(slot.field.getDeclaringClass());
+        FIELD_DECLARATIONS=Set.copyOf(declarations);
         MINING=Collections.synchronizedMap(new WeakIdentityMap<>());DRIVERS=Collections.synchronizedMap(new WeakIdentityMap<>());INVOCATIONS=Collections.synchronizedMap(new WeakIdentityMap<>());
         CAP_SCOPES=Collections.synchronizedMap(new WeakIdentityMap<>());
         CAP_QUERIES=Collections.synchronizedMap(new WeakIdentityMap<>());
@@ -362,20 +365,40 @@ public final class EquipmentPolicy {
         return List.of();
     }
     private static List<Slot> mutationSlots(Object value){
-        List<Slot> slotFields=new ArrayList<>();
-        for(Link link:links(value))if(link.kind==Kind.SLOT_CARRIER&&active(link.owner))for(var use:slotView(link.owner).fields())if(use.receiver()==value){
-            boolean found=false;for(Slot prior:slotFields)if(prior.field.equals(use.field())){found=true;break;}
-            if(!found)slotFields.add(new Slot(use.field(),use.offset(),use.width()));
+        List<Slot> slotFields=null;
+        List<Link> carriers=links(value);
+        // No owner callback ran, so there is no dynamic association to refresh.
+        if(carriers.isEmpty())return slots(value);
+        for(int i=0;i<carriers.size();i++){
+            Link link=carriers.get(i);if(link.kind!=Kind.SLOT_CARRIER||!active(link.owner))continue;
+            var uses=slotView(link.owner).fields();
+            for(var use:uses)if(use.receiver()==value){
+                if(slotFields==null)slotFields=new ArrayList<>();
+                if(!hasSlotField(slotFields,use.field()))slotFields.add(new Slot(use.field(),use.offset(),use.width()));
+            }
         }
-        boolean dynamic=false;for(Link link:links(value))if((link.kind==Kind.CAPABILITY||link.kind==Kind.NBT||link.kind==Kind.CURATIVE_CARRIER||link.kind==Kind.CURATIVE_LIST
-                ||link.kind==Kind.STACK&&value.getClass()!=ItemStack.class)&&current(link,value)){dynamic=true;break;}
-        if(!dynamic){if(slotFields.isEmpty())return slots(value);for(Slot slot:slots(value))if(slotFields.stream().noneMatch(prior->prior.field.equals(slot.field)))slotFields.add(slot);return slotFields;}
+        // Re-read live associations as before; only temporary list construction changes.
+        boolean dynamic=false;carriers=links(value);
+        for(int i=0;i<carriers.size();i++){
+            Link link=carriers.get(i);
+            if((link.kind==Kind.CAPABILITY||link.kind==Kind.NBT||link.kind==Kind.CURATIVE_CARRIER||link.kind==Kind.CURATIVE_LIST
+                    ||link.kind==Kind.STACK&&value.getClass()!=ItemStack.class)&&current(link,value)){dynamic=true;break;}
+        }
+        if(!dynamic){
+            if(slotFields==null)return slots(value);
+            List<Slot> base=slots(value);
+            for(int i=0;i<base.size();i++){Slot slot=base.get(i);if(!hasSlotField(slotFields,slot.field))slotFields.add(slot);}
+            return slotFields;
+        }
         List<Slot> result=new ArrayList<>(slots(value));
-        for(Slot slot:slotFields)if(result.stream().noneMatch(prior->prior.field.equals(slot.field)))result.add(slot);
+        if(slotFields!=null)for(int i=0;i<slotFields.size();i++){Slot slot=slotFields.get(i);if(!hasSlotField(result,slot.field))result.add(slot);}
         for(EquipmentCarrierGraph.Slot actual:EquipmentCarrierGraph.fields(value)){
-            boolean found=false;for(Slot prior:result)if(prior.field.equals(actual.field())){found=true;break;}
-            if(!found)result.add(new Slot(actual.field(),actual.offset(),actual.width()));
+            if(!hasSlotField(result,actual.field()))result.add(new Slot(actual.field(),actual.offset(),actual.width()));
         }return result;
+    }
+    private static boolean hasSlotField(List<Slot> slots,Field field){
+        for(int i=0;i<slots.size();i++)if(slots.get(i).field.equals(field))return true;
+        return false;
     }
     private static Inventory inventory(Owner owner){LivingEntity entity=owner.entity.get();return entity instanceof Player player?((Access.PlayerState)player).pro$inventory():null;}
     private static NonNullList<ItemStack> list(Owner owner,int part){
@@ -469,7 +492,12 @@ public final class EquipmentPolicy {
         for(Slot slot:slots(compartments))if(slot.field.getType().isArray()&&slot.field.get(compartments)==expected)return true;
         return false;
     }
-    static boolean known(Object value){for(Link link:links(value))if(current(link,value))return true;return false;}
+    static boolean hasLinks(Object value){return !links(value).isEmpty();}
+    static boolean known(Object value){
+        List<Link> currentLinks=links(value);
+        for(int i=0;i<currentLinks.size();i++)if(current(currentLinks.get(i),value))return true;
+        return false;
+    }
     /** The existing successful-store observer supplies this actual receiver. */
     static void carrierChanged(Object receiver){
         if(!initialized||receiver==null)return;
@@ -2152,7 +2180,11 @@ public final class EquipmentPolicy {
     }
     static boolean fieldDenied(Object receiver,Class<?> declaring,String name,Object next){
         if(!initialized||receiver==null||declaring==null)return false;Slot selected=null;
-        for(Slot slot:mutationSlots(receiver))if(slot.field.getDeclaringClass()==declaring&&slot.field.getName().equals(name)){selected=slot;break;}
+        if(!FIELD_DECLARATIONS.contains(declaring)&&links(receiver).isEmpty())return false;
+        List<Slot> candidates=mutationSlots(receiver);
+        for(int i=0;i<candidates.size();i++){
+            Slot slot=candidates.get(i);if(slot.field.getDeclaringClass()==declaring&&slot.field.getName().equals(name)){selected=slot;break;}
+        }
         if(selected==null)return false;
         Object old;
         if(!links(receiver).isEmpty())old=EquipmentSlotGraph.readField(receiver,selected.field);
@@ -2257,7 +2289,9 @@ public final class EquipmentPolicy {
     private static boolean overlaps(long first,long length,long second,long width){return first>=0&&length>0&&second>=0&&width>0&&first<=Long.MAX_VALUE-length&&second<=Long.MAX_VALUE-width&&first<second+width&&second<first+length;}
     static boolean offsetDenied(Object receiver,long offset,Object next){
         if(!initialized||receiver==null)return false;int width=next==null||!(next instanceof Number||next instanceof Boolean||next instanceof Character)?REFERENCE_WIDTH:next instanceof Long||next instanceof Double?8:next instanceof Byte||next instanceof Boolean?1:next instanceof Short||next instanceof Character?2:4;
-        for(Slot slot:mutationSlots(receiver))if(overlaps(offset,width,slot.offset,slot.width)){
+        List<Slot> candidates=mutationSlots(receiver);
+        for(int i=0;i<candidates.size();i++){
+            Slot slot=candidates.get(i);if(!overlaps(offset,width,slot.offset,slot.width))continue;
             if((offset!=slot.offset||width!=slot.width)&&carrierRangeDenied(receiver,slot))return true;
             Object value=offset==slot.offset&&width==slot.width?next:null;
             if(slot.field.getType()==float.class&&value instanceof Integer bits)value=Float.intBitsToFloat(bits);
@@ -2285,7 +2319,9 @@ public final class EquipmentPolicy {
                 if(link.kind==Kind.NBT){if(!permitStack(link,false))return true;cancelToolMining(link);}
             }return false;
         }
-        for(Slot slot:mutationSlots(receiver))if(overlaps(offset,length,slot.offset,slot.width)){
+        List<Slot> candidates=mutationSlots(receiver);
+        for(int i=0;i<candidates.size();i++){
+            Slot slot=candidates.get(i);if(!overlaps(offset,length,slot.offset,slot.width))continue;
             if(carrierRangeDenied(receiver,slot))return true;
             if(fieldDenied(receiver,slot.field.getDeclaringClass(),slot.field.getName(),null))return true;
         }

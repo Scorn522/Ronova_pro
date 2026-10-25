@@ -41,10 +41,9 @@ static int native_memory_sources(JNIEnv *env,NativeThread *state,jobjectArray su
 }
 static int native_memory_authority(JNIEnv *env,jclass type){
     if(!native_controller||!native_original.IsSameObject(env,type,native_controller)||!native_memory_gate)return 0;
-    /* One complete caller selector per entry, including scalar begin/end.
-     * The former JVMTI prefix did not accept real Unsafe writers and made
-     * them pay both VM stack queries. No source/range or policy result is
-     * cached; the original Java authority remains required on every call. */
+    /* Generic callers, reads, copies and completions retain the original
+     * Java selector. The actual Native Unsafe scalar begin has its own exact
+     * live prefix check; no source/range or policy result is cached. */
     return !native_original.ExceptionCheck(env)
             &&native_original.CallStaticBooleanMethod(env,native_controls,native_memory_gate)&&!native_original.ExceptionCheck(env);
 }
@@ -73,8 +72,7 @@ static int native_memory_call_begin(JNIEnv *env,NativeThread *state,Binding *bin
     return ready;
 }
 JNIEXPORT jlong JNICALL Java_dev_ronova_pro_bootstrap_NativeControl_memoryWriteBegin0(JNIEnv *env,jclass type,jlong address,jlong length,jobjectArray contributors,jboolean reading,jboolean snapshot){
-    (void)snapshot;
-    if(!native_memory_authority(env,type)){native_refuse(env,"ACTUAL_NATIVE_MEMORY_BOUNDARY_REQUIRED");return 0;}
+    if(!native_unsafe_memory_authority(env,type,address,length,reading,snapshot)&&!native_memory_authority(env,type)){native_refuse(env,"ACTUAL_NATIVE_MEMORY_BOUNDARY_REQUIRED");return 0;}
     NativeThread *state=native_thread();if(!state||length<0){native_refuse(env,"NATIVE_MEMORY_SCOPE_UNAVAILABLE");return 0;}
     NativeMemoryWrite *scope=native_memory_scope_take(state);if(!scope){native_refuse(env,"NATIVE_MEMORY_SCOPE_CAPACITY");return 0;}
     scope->address=(uint64_t)address;scope->length=(uint64_t)length;scope->reading=reading==JNI_TRUE;

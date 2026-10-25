@@ -58,7 +58,7 @@ enum { UNSAFE_PUT=1,UNSAFE_CAS,UNSAFE_EXCHANGE,UNSAFE_SET,UNSAFE_COPY,UNSAFE_SWA
 typedef struct NativeFileFrame {jobject receiver,token;jclass declaring;jstring method,path;jobjectArray sources,references;jlongArray arguments;jint operation;jlong address,length;int finishing;} NativeFileFrame;
 typedef struct NativeBindingSeed {jmethodID method;jclass declaring;uintptr_t version[3];int captured;struct NativeBindingSeed *previous;} NativeBindingSeed;
 typedef struct NativeThreadFrame {jobject receiver,token;jobjectArray sources;jint operation;int finishing,completed,skipped,tokenGlobal;} NativeThreadFrame;
-typedef struct NativeUnsafeMutation {jobject receiver,source;jstring kind;jlong offset,length,sourceOffset;jboolean bulk,reading,copy;struct NativeUnsafeMutation *previous;} NativeUnsafeMutation;
+typedef struct NativeUnsafeMutation {jobject receiver,source;jstring kind;jlong offset,length,sourceOffset;jboolean bulk,reading,copy;struct NativeUnsafeMutation *previous;Binding *binding;} NativeUnsafeMutation;
 typedef struct NativeCodeBodySnapshot {
     struct CodeImage *image;struct CodeMethod *method;struct CodeAcceptedMethod *accepted;
 } NativeCodeBodySnapshot;
@@ -135,6 +135,8 @@ static jmethodID native_process_sources,native_process_source_flags;
 static jclass native_unsafe_class,native_unsafe_backing;
 static jobject native_unsafe_denied;
 static jmethodID native_unsafe_begin_query,native_unsafe_read_begin_query,native_unsafe_copy_begin_query,native_unsafe_read_query,native_unsafe_register,native_unsafe_metadata_query;
+static jmethodID native_unsafe_boundary,native_unsafe_copy_boundary,native_unsafe_write_wrapper,native_unsafe_read_wrapper,native_unsafe_copy_wrapper;
+static jmethodID native_unsafe_memory_begin,native_unsafe_memory_wrapper,native_unsafe_raw_receipt,native_unsafe_raw_write;
 static jmethodID native_network_retirement_write_query,native_network_retirement_owner_query,native_network_retirement_active_query;
 static jmethodID native_memory_gate;
 static struct JNINativeInterface_ native_original;
@@ -605,7 +607,49 @@ static int native_field_allowed(JNIEnv *env,jobject object,jclass type,jfieldID 
     jboolean allowed=reflected?native_original.CallStaticBooleanMethod(env,native_controls,native_field_gate,reflected,statik?NULL:object,value):JNI_FALSE;
     if(reflected)native_original.DeleteLocalRef(env,reflected);if(declaring)native_original.DeleteLocalRef(env,declaring);state->control--;return allowed&&!native_original.ExceptionCheck(env);
 }
-static jobject native_box(JNIEnv *env,const char *name,const char *signature,jvalue value){NativeThread *state=native_thread();if(!state)return NULL;state->control++;jclass type=native_original.FindClass(env,name);jmethodID method=type?native_original.GetStaticMethodID(env,type,"valueOf",signature):NULL;jobject result=method?native_original.CallStaticObjectMethodA(env,type,method,&value):NULL;if(type)native_original.DeleteLocalRef(env,type);state->control--;return result;}
+typedef struct NativeBoxMetadata {jclass type;jmethodID valueOf;} NativeBoxMetadata;
+typedef struct NativeBoxKind {const char *name,*signature;NativeBoxMetadata *volatile metadata;} NativeBoxKind;
+/* Only bootstrap class/method identities live here, never boxed values,
+ * callers or permission results. JNI method IDs follow live redefinitions. */
+static NativeBoxKind native_box_kinds[]={
+    {"java/lang/Boolean","(Z)Ljava/lang/Boolean;",NULL},{"java/lang/Byte","(B)Ljava/lang/Byte;",NULL},
+    {"java/lang/Character","(C)Ljava/lang/Character;",NULL},{"java/lang/Short","(S)Ljava/lang/Short;",NULL},
+    {"java/lang/Integer","(I)Ljava/lang/Integer;",NULL},{"java/lang/Long","(J)Ljava/lang/Long;",NULL},
+    {"java/lang/Float","(F)Ljava/lang/Float;",NULL},{"java/lang/Double","(D)Ljava/lang/Double;",NULL}
+};
+static NativeBoxMetadata *native_box_metadata(JNIEnv *env,NativeBoxKind *kind){
+    NativeBoxMetadata *known=(NativeBoxMetadata*)InterlockedCompareExchangePointer((void *volatile*)&kind->metadata,NULL,NULL);
+    if(known)return known;
+    jclass local=native_original.FindClass(env,kind->name);if(!local)return NULL;
+    jmethodID method=native_original.GetStaticMethodID(env,local,"valueOf",kind->signature);
+    if(!method||!native_bootstrap_class(env,local,kind->signature+3)){
+        native_original.DeleteLocalRef(env,local);
+        if(!native_original.ExceptionCheck(env))native_refuse(env,"NATIVE_BOX_METADATA_UNAVAILABLE");return NULL;
+    }
+    NativeBoxMetadata *candidate=(NativeBoxMetadata*)calloc(1,sizeof(*candidate));
+    if(!candidate){native_original.DeleteLocalRef(env,local);native_refuse(env,"NATIVE_BOX_METADATA_UNAVAILABLE");return NULL;}
+    candidate->type=(jclass)native_original.NewGlobalRef(env,local);candidate->valueOf=method;
+    native_original.DeleteLocalRef(env,local);
+    if(!candidate->type){free(candidate);return NULL;}
+    known=(NativeBoxMetadata*)InterlockedCompareExchangePointer((void *volatile*)&kind->metadata,candidate,NULL);
+    if(known){native_original.DeleteGlobalRef(env,candidate->type);free(candidate);return known;}
+    return candidate;
+}
+static jobject native_box(JNIEnv *env,const char *name,const char *signature,jvalue value){
+    NativeThread *state=native_thread();if(!state)return NULL;state->control++;
+    for(unsigned i=0;i<sizeof(native_box_kinds)/sizeof(*native_box_kinds);i++){
+        NativeBoxKind *kind=&native_box_kinds[i];
+        if(strcmp(name,kind->name)||strcmp(signature,kind->signature))continue;
+        NativeBoxMetadata *metadata=native_box_metadata(env,kind);
+        jobject result=metadata?native_original.CallStaticObjectMethodA(env,metadata->type,metadata->valueOf,&value):NULL;
+        state->control--;return result;
+    }
+    /* Preserve the original lookup for any non-primitive caller contract. */
+    jclass type=native_original.FindClass(env,name);
+    jmethodID method=type?native_original.GetStaticMethodID(env,type,"valueOf",signature):NULL;
+    jobject result=method?native_original.CallStaticObjectMethodA(env,type,method,&value):NULL;
+    if(type)native_original.DeleteLocalRef(env,type);state->control--;return result;
+}
 static jclass native_module_identity;
 /* Only the VM's built-in array component identity is retained. Every returned
  * source array is new and reads the operation's actual weak module roots. */

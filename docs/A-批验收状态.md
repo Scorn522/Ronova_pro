@@ -1,5 +1,62 @@
 # Ronova Pro 当前进度
 
+## 2026-10-25：第 80 次实机完成，启动与世界内性能仍失败；本批收口后暂停
+
+第 79 次 Core 995E7289 实际入世仍耗时约 29.5 分钟（前端约 19 分钟、出生区约 517 秒），用户反馈仍为个位数帧或经常未响应，性能失败。沿用 load79.jfr / loading-threads.txt 定位的四个根因；补充 play79.jfr 有 34 个 Java 执行样本和 7 个监视器事件，样本计数不作为 FPS 或提速比例。第 79 次三个维度保存完成，17:47:43.7207211Z 自行退出码 0，没有强制终止；Time/DayTime 从 2376 推进到 2743。TASK_CAPTURE_PUBLICATION_IN_FLIGHT、RONOVA_PRO_UNSETTLED_SHUTDOWN、NATIVE_TLS_REFUSED、NATIVE_MEMORY_RELEASE_BUSY 均为 0。
+
+OriginSources 的增删只在既有 CREATION_ORIGINS 写事务中发布私有不可变来源数组，删除每次变化时对该数组的控制目录登记和 Native 通知；空集合、单来源与重复来源走紧凑分支。OriginMap / OriginSources 内部重复的 StackWalker 调用者检查退出，外层写入口鉴权与事务保留；OriginMap 真正的桶表扩容仍发布受控 backing 并处理重入版本。
+
+ControlPublication 保留在途 values / index / 自身身份保护，但这些短命数组不再成为永久 ControlKey，也不再触发额外 heapPolicyChanged。最多四项的批次直接做身份线性查询；大批次仍用身份索引。字段门的 ReentrantLock.sync Field 由一次初始化的静态布局复用，gate 与真实 sync 在同一批次登记后设置原 fieldGate 角色位。TaskBridge.body 无观察者时不再遍历调用栈；delegated 合并一次边界检查，仍在无观察者时维护真实任务关系。
+
+字段路径保留原有防护决策入口。ownState 的命名空间及 nest、ResourceBridge 的固定平台布局和资源继承分类按实际 Class 复用；真实 agent / guards / Module 归属、权限与进程管道关联不缓存。FileInputStream / FileOutputStream / RandomAccessFile、Buffer、IO 与 Unmapper 子类保持原判定。FieldTracking 将原字段／常量投影版本用于同一次写操作，后置检查在权威桶更新时重新判定；控制身份、停止状态、源登记、发布目标与 Backing 变化仍实时检查。没有将负面来源结论跨调用缓存。
+
+统一 build-local-79-hot-paths.log 成功 1m（20 tasks：14 executed、6 up-to-date）：Bootstrap、Agent Java 与 Control、Storage Native 实际重编，Core / Prelaunch Java 复用已有产物；jar / reobfJar 成功。Core SHA256 6869B7EE2388E59FEDD1CFEDEEA16B2046AFADCD9954068C9F77E87EA472F83D，Control DLL 4E7A416A9D2298D2503B9A366C2FF8F7CEE77433A8B0AA939B3A6CB4E25363EC，Native ABI 101。既有 Zig/libunwind 属性警告保留。
+
+按本轮明确要求运行 runRuntimeHotPathChecks，21s 成功：私有来源数组及旧快照、在途保护与临时数组退出、字段门双身份角色、晚到字段／常量登记、资源子类、实时管道关联均通过。该独立 JVM 单测没有 agent / Native 拦截，不能证明实机攻防或帧率。17:49:21Z 已先完整备份再部署第 80 次（241 目录、673 文件、559.74 MB，无失败、跳过或不匹配），27 个其他 Mod 文件及状态不变，沿用 82 项参数和 Time=2743 世界。实际启动 17:49:43.1881703Z，玩家入场 18:20:59.8872015Z，总计 31.278 分钟；前端至内置服务器启动约 19 分钟，出生区日志耗时 611943 ms。对比第 79 次约 29.5 分钟和 517 秒，没有显著改善，出生区反而更慢；用户确认仍为个位数帧或经常未响应，性能明确失败。
+
+第 80 次已正常结束：18:28:33Z 三个维度全部区块保存完成，18:30:47.4728733Z 自行退出码 0，未强制终止。Time/DayTime 从 2743 推进到 3112，仅证明保存值推进，不证明正常 TPS。TASK_CAPTURE_PUBLICATION_IN_FLIGHT、RONOVA_PRO_UNSETTLED_SHUTDOWN、NATIVE_TLS_REFUSED、NATIVE_MEMORY_RELEASE_BUSY、ACTUAL_ORIGIN_WRITER_REQUIRED、ACTUAL_NATIVE_UNSAFE_MUTATION_REQUIRED 均为 0。捕获器正常结束，没有触发 Native 转储。
+
+本轮 load80.jfr 的 286 个 Java 执行样本中，261 个来自 Mixin 处理线程，包含 ExternalCodeImages 快照/规范化及控制目录登记；10 个监视器事件来自早期显示线程的 CodeSourceBridge.protect。约运行 8.6 分钟时退休线程累计 CPU 4.48 秒，这与第 79 次阶段不完全相同，不换算提速比例。region80.jfr 有 12 个 Java 样本、0 个监视器事件，但渲染线程仍有 memoryWriteBegin0，服务器仍有数组复制和 Unsafe/CAS 样本。play80.jfr 有 162 个 Java 样本、0 个监视器事件，服务器热点仍包括 Unsafe CAS、ControlRegistry.find、SynchronizedMap.get、ThreadLocal.set 与 DefinitionBridge.controlled；采样不是帧率测量。
+
+当前没有构建或部署阻断，但性能目标未达成。下一个最高价值工作包是沿本次实际栈收敛 Mixin 外部代码快照/控制登记的重复工作，并减少字段策略和 Native 写入边界内同一次操作的重复查询，保持实时归属、真实权限和恢复义务。本批按用户“这次弄完停下”的要求完成同步后暂停，不自动启动第 81 次；原始现场、存档、备份与本机 IDE 修改保留在本地。
+
+
+## 2026-10-25：修复第 78 次来源表 CAS 回路；第 79 次验证中
+
+第 78 次运行 Core EBB46A18，启动内置服务器约耗时 31 分钟，出生区阶段继续严重卡顿；15:54:07Z 才观察到玩家入场。它最终把 Time/DayTime 从 2016 推进到 2376，16:23:22Z 三个维度保存完成，16:25:43.6190191Z 自行退出码 0，没有强制终止。TASK_CAPTURE_PUBLICATION_IN_FLIGHT、NATIVE_TLS_REFUSED、NATIVE_MEMORY_RELEASE_BUSY 均为 0；这些退出结果只属于本候选。性能明确失败，不能把正常退出当成性能通过。
+
+根因是上一批引入的 ConcurrentHashMap / CopyOnWriteArraySet 与本工程拦截链相互作用：受控来源目录的 put、computeIfAbsent、addCount 等调用进入 Unsafe CAS，再进入 Native 写入许可与调用栈查询，并长时间持有 CREATION_ORIGINS。用户提供的现场同时显示，渲染线程逐字节写入时又在四个当前线程来源查询上等待该全局锁。一次实际加载阶段 30 秒 JFR 获得 19 个 Java 执行样本及 4 次监视器事件；主线程样本含 Native CAS、controlWriter0 和 memoryWriteBegin0。加载阶段样本不与第 76 次入世采样直接换算提速。
+
+现以包内专用 OriginMap 替代三个来源目录：volatile 桶数组、不可变节点链、实际弱身份键，查询直接用 identityHashCode 和 referent == target，没有 SourceLookup 或临时 EventKey。写入仍处于原 CREATION_ORIGINS 事务，只通过普通 Java 字段/数组赋值并以 volatile 引用发布；扩容复制存活链，控制元数据发布发生重入时按版本重做，避免覆盖已完成的登记。写入口保留实际 ControlBridge / TaskBridge 调用者检查，新桶和来源数组继续登记为受控元数据。旧 CAS 容器及共享游标路径已退出。
+
+任务及线程来源由 OriginSources 在既有写事务中发布不可变 Module[]；没有 CopyOnWriteArraySet。ThreadOrigin 将 observedStart、platformWorker、unknown、runBoundaryMissing、diagnosticReasons、retired 和来源数组作为完整 ThreadSources 快照发布，两个退休入口同步更新退休状态。四个 currentThreadSource* 查询改为直接按当前线程身份读取并以 OriginStripe 验证一致性，保留同线程重入可见性、私有 CURRENT Frame 栈遍历和每次真实 modStopped 判断，删除全局监视器与 EventKey 分配。
+
+CodeSourceBridge.fieldRangeAllowed 的父类查询已接入 FIELD_LOOKUPS.get(type).fields().first()，移除遗漏的 CODE_FIELDS 全表扫描和监视器。原字段描述符、实际偏移/跨度、边界溢出与重叠权限检查完整保留。核心 WeakIdentityMap 同时移除原子桶数组和 AtomicLong / AtomicInteger 修订计数，改用 volatile 桶表与普通 Java 发布；读路径仍不回收队列，写入及元数据修订保持同步，避免在受控记账对象里再引入 CAS。没有缓存权限或负面来源结论。
+
+第 76 次的其余精确修复继续保留：装备槽位无关联时省去重复查找，字段/常量 ClassValue 投影随真实登记版本更新，源发布目录活跃计数在原锁内更新；无收据二次检查只在本次操作的登记版本确实未变且类型没有动态关联时省去重复完整关联查询，实时权限与发布检查仍执行。退出的 2 秒排空包含 PUBLICATION_IN_FLIGHT；已知且无所有者的平台调用保留完整空租约；公共 TLS/FLS 的 get/set 只查询当前上下文及必要分配/回调来源，free 仍检查全局历史。
+
+统一 build-local-origin-snapshots.log 成功 48s：核心、Bootstrap、Agent Java 实际重编；Prelaunch Java、Control Native 和 Storage Native 复用已有产物；jar / reobfJar 成功，20 tasks：13 executed、7 up-to-date。Core SHA256 995E72899CD153C79925B7ED8F1795D28597B7D1869057B68DB2ADAB48945F7A；Native 仍为 ABI 101、Control DLL 3C7EBEFBB4349FA73AE56CFADD59FF647481B7E4EDD23A705C771C9CEDD39892。旧 Java API 弃用警告保留。
+
+16:34:48Z 已先备份再部署第 79 次（240 目录、669 文件、556.79 MB，无失败、跳过或不匹配）。27 个其他 Mod 文件及启用状态、82 项参数保持，沿用 Time=2376 世界。本候选尚在运行，快速入世、实际帧率、世界时间推进及保存退出仍待本轮确认。当前 HEAD 为 acb82f8906ee7f7af1915b1fe66e66ab76a628aa，生产修改已保留，尚未提交或推送本批。
+
+## 2026-10-25：世界可保存退出，性能仍失败；来源查询与内存入口继续收敛
+
+第 72 次关闭时，已到期的服务器任务预算阻止保存所需的完成任务入队执行，现场仍有 591 个区块保存等待和 3,759 个主线程待办。ServerShutdownHooks 只在服务器已停止且为服务器本线程时放行 pollTaskInternal / shouldRun 的时间预算检查，保留原等待条件、任务身份、完成和异常处理。第 73–76 次均实际玩家入世、三个维度保存完成并自行退出码 0；这些运行各有自己的候选证据，不代表后续构建自动通过。第 73 次还出现客户端绑定为空时的类解析递归：ClientPresence 全部相关调用方现先读取 Object 绑定并判空，再进入 LocalBody 策略，原有效绑定校验与失效清理保留。
+
+第 76 次实际运行 Core 296074BB840AC813BB5A70161C92EF0B2EB677EAD8F862B2A250322EF1FE8C3E。用户明确反馈仍为个位数帧或经常未响应，性能失败。13:27:13.8442900Z 正常关闭请求，13:32:30Z 三个维度保存完成，13:34:23.3551273Z 自行退出码 0，未强制终止；Time/DayTime 从 1698 到 2016。退出时有 TASK_CAPTURE_PUBLICATION_IN_FLIGHT 和 3 条 NATIVE_TLS_REFUSED，未取得最终任务退休完成证据。捕获器在进程退出后获取句柄失败，生成的零字节文件不是有效转储；现修正既有捕获流程的退出竞态，后续失败与转储是否有效分别记录。
+
+本批连续收敛有实际栈与分配样本支持的重复工作：BackingBridge / ResourceBridge 保留空闲布尔线程槽并统一显式活动判断，IoBridge 清空业务引用而保留空槽；ProRuntime 在既有锁内维护不可变运行时成员快照，注册和删除使其失效，三个删除入口共用 removeRuntime；EquipmentPolicy / LiveStatePolicy 的实际关联与字段检查改为索引遍历并按需构造字段集合。WeakIdentityMap 的 get、containsKey、getOrDefault 共用一次身份查询，正确区分已存 null；单次读取最多清理 16 个过期节点，写入和大小/快照查询仍完整清理。DefinitionBridge 以实际 Class 的 ClassValue<OriginSlot> 替代旧弱键表与回收队列，晚到来源绑定仍即时可见，Agent 加载接线同步迁移。
+
+第 76 次的渲染样本仍落在纹理插值逐像素内存操作及来源查询。ControlBridge 的权威 producer 登记改为不可变弱引用身份哈希表，原整表扫描退出；回收的键保持探测链，登记时重建，保留并发发布、重入登记和 null 来源语义。来源栈查询只按上一次实际遍历量选择初始缓冲大小，仍遍历全部所需帧；StackWalker estimateDepth 是分配提示而非深度上限，没有减少来源覆盖。frameSources 已提供的声明来源不再二次查询。TaskBridge 的调用者选择改为单次迭代，并删除每次创建 ForkJoin 适配器集合的路径。
+
+NativeUnsafe 写入、读取、复制的调用者认证集中到实际 TLS 操作与固定三个 JVMTI 帧，Java / Native ABI 同步到 101，删除对应 Java 重复栈检查。真实 Native 标量原始地址写入进一步核对完整六帧、实际 Unsafe 绑定、地址与宽度，命中后替代通用 Java 调用者选择；其他调用、读、复制和完成保留原选择器。所有来源、停止状态、受控内存范围和作用域检查继续执行。八种基础类型装箱共用经过实际 bootstrap 身份校验的类 / valueOf 元数据，仍用本次值装箱；删除热路径反复 FindClass / GetStaticMethodID，保留非基础类型原处理。没有新增 Mod 白名单，没有缓存许可或停止结论。
+
+按用户指定只读对照了当前 SuperSteve 6.10.12f、WoZhiZhan 的 ForeverLoveSword1.20.1、apphhzpLIB / Native，以及 Embeddium Forge 1.20.1 和 ModernFix 的相关代码。SuperSteve 有 10 ms 与 500 ms 工作循环，不能据此断言其承担全部卡顿；直接对象头、VM 内存及 Instrumentation 操作也说明不能以放宽写入防护换取帧率。未安装其他 Mod、未复制参考源码。参考：[Embeddium 顶点布局与批量写入](https://github.com/FiniteReality/embeddium/blob/dee0ebde6aea8b158613cd3b8ea5cdf0c1f6a9bf/src/main/java/me/jellysquid/mods/sodium/mixin/core/render/immediate/consumer/BufferBuilderMixin.java)、[ModernFix 区块查询](https://github.com/embeddedt/ModernFix/blob/1.20/src/main/java/org/embeddedt/modernfix/common/mixin/perf/ticking_chunk_alloc/ChunkHolderMixin.java)、[ForeverLoveSword Unsafe](https://github.com/WoZhiZhan/ForeverLoveSword1.20.1/blob/b04b172344adfc8faa5d33ffc593a77a8df001f0/src/main/java/net/wzz/forever_love_sword/util/UnsafeUtil.java)、[apphhzpLIB VM 线程](https://github.com/apphhzp/apphhzpLIB/blob/ccb1da7bf00efbc021ec05142949d8ea2449cb31/src/main/java/apphhzp/lib/hotspot/runtime/Thread.java)。
+
+最新 Java 两次构建分别成功 22s / 30s，Bootstrap 实际重编，其余 Java 与两项 Native 复用。最终 build-local-raw-memory-authority.log 成功 34s：Control Native 实际重编，Java 与 Storage Native 复用，jar / reobfJar 成功，20 tasks：10 executed、10 up-to-date。Core SHA256 DC7ACC640DA8BDE1575F41AA978110BAF053C5E0F25A8FF2D6E05A89C3C324D7，Control DLL SHA256 8B33B7352E941EDF6293477953A178CBE251D662FC71F6B4B8E9CE0C52DF4C4F。既有 Host 完成端口 ULONG 比较警告仍在。仅能静态确认减少重复查找、分配与跨语言认证，尚无实际提速结论。
+
+第 77 次于 14:16:32Z 完成备份部署（236 目录、659 文件、548.29 MB，无失败、跳过或不匹配）。用户随后给出新的精确根因；本次在启动期间请求正常关闭，未实际入世，14:38:55.5713971Z 自行退出码 0，Time/DayTime 仍为 2016。stderr 有 2 条 NATIVE_MEMORY_RELEASE_BUSY，首次捕获时进程已退出，没有有效转储；没有本次性能结论。本次也不代表后续根因修复的验证。起始 HEAD acb82f8906ee7f7af1915b1fe66e66ab76a628aa。公开同步仅包含生产源码、摘要和对应候选；本机 IDE、私人历史笔记、账户、原始日志、转储和存档保留本地。
+
 ## 2026-10-24：保存热路径元数据收敛；第 71 次失败收尾，新候选待手动复测
 
 第 71 次运行的保存线程和一次 30 秒 JFR 采样显示：字段写入反复扫描整个 Unsafe 字段表，IoBridge.platformObject 每次遍历类型层级，保存界面的 clientMethod 反复反射查找方法。本批只收敛这些有现场依据的重复工作，不缓存许可、来源、停止状态或实际读写结果。
