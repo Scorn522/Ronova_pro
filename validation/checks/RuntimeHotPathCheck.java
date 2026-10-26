@@ -14,6 +14,8 @@ public final class RuntimeHotPathCheck {
     private static final Class<?> CODE=type("CodeSourceBridge"),CONTROL=type("ControlBridge"),RESOURCE=type("ResourceBridge");
     public static final class Bean { public int value; }
     public static final class ConstantBean { public static int value; }
+    public static class ParentBean {public int inherited;}
+    public static final class ChildBean extends ParentBean {public long own;}
     private static final class Input extends FileInputStream {Input(){super(new FileDescriptor());}}
     private static final class Output extends FileOutputStream {Output(){super(new FileDescriptor());}}
     private static final class CustomSocket extends Socket {}
@@ -103,21 +105,72 @@ public final class RuntimeHotPathCheck {
         finally{synchronized(lock){views.remove(key);}}
         require(!critical(view),"removed process association cached as permission");
     }
+    private static void declarations()throws Exception {
+        Class<?> metadata=type("PlatformMetadata");
+        Field[] first=(Field[])call(metadata,null,"declaredFields",new Class<?>[]{Class.class},Bean.class);
+        first[0].setAccessible(true);first[0]=null;
+        Field[] next=(Field[])call(metadata,null,"declaredFields",new Class<?>[]{Class.class},Bean.class);
+        require(next.length==1&&next[0]!=null&&next[0].getName().equals("value"),"returned array changed cached declarations");
+        require(!next[0].isAccessible(),"returned Field leaked accessibility into cache");
+        Field selected=(Field)call(metadata,null,"declaredField",new Class<?>[]{Class.class,String.class},Bean.class,"value");
+        Bean bean=new Bean();selected.set(bean,19);require(selected.getInt(bean)==19,"cached declaration cannot perform real access");
+        boolean privateLayoutRefused=false;
+        try{call(metadata,null,"controlFields",new Class<?>[]{Class.class},Bean.class);}
+        catch(SecurityException denied){privateLayoutRefused=true;}
+        require(privateLayoutRefused,"foreign reader obtained private cached Field mirrors");
+        Class<?> backing=type("BackingBridge");
+        require(call(backing,null,"setterDeclaration",new Class<?>[]{Class.class,String.class},ChildBean.class,"inherited")==ParentBean.class,"inherited setter declaration lost");
+        require(call(backing,null,"setterDeclaration",new Class<?>[]{Class.class,String.class},ChildBean.class,"own")==ChildBean.class,"actual setter declaration lost");
+        require(call(backing,null,"setterDeclaration",new Class<?>[]{Class.class,String.class},ParentBean.class,"own")==null,"subclass field leaked into parent layout");
+    }
+    private static void methodProjection()throws Exception {
+        Object before=call(CODE,null,"frameMethods",new Class<?>[]{Class.class},ChildBean.class);
+        require(((String[])call(before.getClass(),before,"selectors",new Class<?>[0])).length==0,"fresh class has method rows");
+        call(CODE,null,"codeMethods",new Class<?>[]{ClassLoader.class,String.class,String[].class,Class.class},ChildBean.class.getClassLoader(),ChildBean.class.getName(),new String[]{"late()V"},ChildBean.class);
+        Object after=call(CODE,null,"frameMethods",new Class<?>[]{Class.class},ChildBean.class);
+        require(before!=after&&Arrays.asList((String[])call(after.getClass(),after,"selectors",new Class<?>[0])).contains("late()V"),"late method registration lost behind projection");
+        require(after==call(CODE,null,"frameMethods",new Class<?>[]{Class.class},ChildBean.class),"unchanged method projection rebuilt");
+    }
+    private static void sourceUnions()throws Exception {
+        Module a=String.class.getModule(),b=java.sql.Driver.class.getModule();
+        Module[] left={a,null,a},right={b,null};
+        Module[] merged=(Module[])call(CONTROL,null,"mergeOperationSources",new Class<?>[]{Module[].class,Module[].class},left,right);
+        require(merged.length==3&&Arrays.asList(merged).containsAll(Arrays.asList(a,b,null)),"Native/scoped/unknown union lost");
+        require(left[0]==a&&right[0]==b,"source input mutated");
+        Object target=new Object(),lock=read(CONTROL,"CREATION_ORIGINS");
+        Map<?,?> origins=(Map<?,?>)lock;
+        synchronized(lock){
+            call(CONTROL,null,"createdBy",new Class<?>[]{Object.class,Module[].class,boolean.class},target,new Module[]{a},false);
+            Object first=origins.get(target);
+            call(CONTROL,null,"createdBy",new Class<?>[]{Object.class,Module[].class,boolean.class},target,new Module[]{a,a},false);
+            require(first==origins.get(target),"unchanged source rebuilt origin record");
+            call(CONTROL,null,"createdBy",new Class<?>[]{Object.class,Module[].class,boolean.class},target,new Module[]{b},false);
+            require(first!=origins.get(target),"changed source skipped publication");
+        }
+    }
     public static void main(String[] args)throws Exception {
         if(args.length==1&&args[0].equals("installed-memory-writers")){installedMemoryWriters();return;}
-        origins();publications();registrations();resources();
-        System.out.println("RUNTIME_HOT_PATH_CHECKS_PASS origins publication_lifetime field_gate_roles late_registration resource_subclasses live_process_views; METADATA_ONLY");
+        origins();publications();registrations();resources();declarations();methodProjection();sourceUnions();
+        System.out.println("RUNTIME_HOT_PATH_CHECKS_PASS origins publication_lifetime field_gate_roles late_registration resource_subclasses live_process_views declaration_isolation inherited_setters late_methods Native_unknown_union unchanged_origin; METADATA_ONLY");
     }
     private static void installedMemoryWriters()throws Exception {
         Class<?> nativeControl=Class.forName(PREFIX+"NativeControl",false,null);
         require((boolean)nativeControl.getMethod("available").invoke(null),"actual premain Native backend required");
         require(CONTROL.getClassLoader()==null,"actual bootstrap bridge required");
+        declarations();
         Bean bean=new Bean();VarHandle value=MethodHandles.lookup().findVarHandle(Bean.class,"value",int.class);
         value.setVolatile(bean,7);require(value.compareAndSet(bean,7,11),"legitimate VarHandle CAS refused");
         require((int)value.getAndAdd(bean,2)==11&&bean.value==13,"legitimate VarHandle update changed");
         var lock=new java.util.concurrent.locks.ReentrantLock();lock.lock();
         try{require(lock.isHeldByCurrentThread(),"legitimate JDK lock CAS refused");}finally{lock.unlock();}
-        require(java.util.concurrent.CompletableFuture.completedFuture(3).thenApply(n->n+4).join()==7,"legitimate task stage failed");
+        var pending=new java.util.concurrent.CompletableFuture<Integer>();
+        var stage=pending.thenApply(n->n+4);
+        Object completion=field(java.util.concurrent.CompletableFuture.class,"stack").get(pending);
+        Map<?,?> taskOwners=(Map<?,?>)read(type("TaskBridge"),"TASK_OWNERS");
+        require(completion!=null&&taskOwners.get(completion)!=null,"real JDK completion creation did not publish its capture");
+        pending.complete(3);require(stage.join()==7,"legitimate task stage failed");
+        Object forgedTask=new Object();type("TaskBridge").getMethod("created",Object.class).invoke(null,forgedTask);
+        require(taskOwners.get(forgedTask)==null,"foreign reflective task creation borrowed JDK authority");
         ByteBuffer buffer=ByteBuffer.allocateDirect(16);buffer.putLong(0,0x123456789abcdefL);
         require(buffer.getLong(0)==0x123456789abcdefL,"real buffer read/write lifecycle changed");
         boolean refused=false;

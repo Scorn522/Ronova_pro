@@ -107,9 +107,22 @@ public final class TaskBridge {
         if(sources.contains(source))return;
         NativeControl.heapPolicyChanged(object);sources.addSource(source);
     }
+    static void taskSources(Object object,OriginSources owners,Module[] sources){
+        synchronized(CREATION_ORIGINS){
+            boolean changed=false;for(Module source:sources)if(!owners.contains(source)){changed=true;break;}
+            if(!changed)return;
+            NativeControl.heapPolicyChanged(object);
+            // One invalidation precedes this entire publication. addSource
+            // reads the current snapshot, retaining any reentrant additions.
+            for(Module source:sources)owners.addSource(source);
+        }
+    }
     static void taskRelation(Object task,Object scheduler,Object parent) {
         if(task==null)return;
-        TaskInvocation capture=taskInvocation();Module[] actual=capture.sources();
+        taskRelation(task,scheduler,parent,taskInvocation());
+    }
+    private static void taskRelation(Object task,Object scheduler,Object parent,TaskInvocation capture) {
+        Module[] actual=capture.sources();
         // A fully traversed empty physical stack already answered this same
         // producer question. Scoped/partial shortcuts still take the original
         // fallback; no origin or permission is retained across task captures.
@@ -118,24 +131,24 @@ public final class TaskBridge {
         if(direct==null&&task.getClass().getClassLoader()!=null)direct=task.getClass().getModule();
         synchronized(CREATION_ORIGINS) {
             OriginStripe originWrite=beginOrigins(task);try {
-            reapCreationOwners();EventKey key=new EventKey(task,CREATION_QUEUE);
+            reapCreationOwners();
             OriginSources owners=TASK_OWNERS.get(task);
             if(owners==null){owners=new OriginSources();TASK_OWNERS.put(task,owners);}
             // A completed capture with no producer is an empty source set.
             // Null is reserved for an actually incomplete capture; inserting
             // it for ordinary platform submissions poisons every successor.
             if(actual.length==0){if(direct!=null||sourceUnknown())taskSource(task,owners,direct);}
-            else for(Module source:actual)taskSource(task,owners,source);
-            CreationOrigin creation=CREATION_ORIGINS.get(key.get());
+            else taskSources(task,owners,actual);
+            CreationOrigin creation=CREATION_ORIGINS.get(task);
             if(creation!=null&&creation.sources!=null)for(Module source:creation.sources)taskSource(task,owners,source);
             // Source notification can reenter registration. Keep the original
             // fresh singleton observation after delivering the captured set.
-            creation=CREATION_ORIGINS.get(key.get());Module creator=creation==null?null:creation.single();
+            creation=CREATION_ORIGINS.get(task);Module creator=creation==null?null:creation.single();
             if(creator!=null)taskSource(task,owners,creator);
             Module definition=DefinitionBridge.module(task.getClass());if(producer(definition))taskSource(task,owners,definition);
             if(scheduler!=null) {
-                TASK_SCHEDULERS.put(key,new java.lang.ref.WeakReference<>(scheduler));
-                creation=CREATION_ORIGINS.get(key.get());
+                TASK_SCHEDULERS.put(new EventKey(task,CREATION_QUEUE),new java.lang.ref.WeakReference<>(scheduler));
+                creation=CREATION_ORIGINS.get(task);
                 schedulerSources(scheduler,owners,creation!=null&&creation.unknown);
                 CreationOrigin pool=CREATION_ORIGINS.get(scheduler);Module poolCreator=pool==null?null:pool.single();
                 if(poolCreator==null||owners.size()!=1||!owners.contains(poolCreator))SHARED_SCHEDULERS.add(new EventKey(scheduler,CREATION_QUEUE));
@@ -1841,8 +1854,9 @@ public final class TaskBridge {
     public static void created(Object task) {
         Registration current=registration;
         try {
-            if(task!=null&&boundary(false)){
-                taskRelation(task,null,currentTask());
+            TaskInvocation capture=task==null?null:creationCapture();
+            if(capture!=null){
+                taskRelation(task,null,currentTask(),capture);
                 emit(current,11,task,null,currentTask(),null);
             }
         } catch(Throwable unavailable){lostTask(current,11,task,null,null,null,unavailable);}
@@ -1856,8 +1870,9 @@ public final class TaskBridge {
     public static void delegated(Object wrapper,Object delegate) {
         Registration current=registration;
         try {
-            if(wrapper!=null&&delegate!=null&&boundary(false)){
-                taskRelation(delegate,null,wrapper);
+            TaskInvocation capture=wrapper==null||delegate==null?null:creationCapture();
+            if(capture!=null){
+                taskRelation(delegate,null,wrapper,capture);
                 if(current!=null)emit(current,21,delegate,wrapper,wrapper,null);
             }
         } catch(Throwable unavailable) {lostTask(current,21,delegate,wrapper,wrapper,null,unavailable);}
@@ -2245,12 +2260,37 @@ public final class TaskBridge {
             }
         }
     }
+    private static final java.util.function.Function<java.util.stream.Stream<StackWalker.StackFrame>,TaskInvocation> CREATION_CAPTURE=new CreationCapture();
+    private static final class CreationCapture implements java.util.function.Function<java.util.stream.Stream<StackWalker.StackFrame>,TaskInvocation>{
+        public TaskInvocation apply(java.util.stream.Stream<StackWalker.StackFrame> frames){return captureCreation(frames.iterator());}
+    }
+    private static TaskInvocation creationCapture(){return ORIGIN_WALKER.walk(CREATION_CAPTURE);}
+    private static TaskInvocation captureCreation(java.util.Iterator<StackWalker.StackFrame> cursor){
+        var prefix=new ArrayList<StackWalker.StackFrame>(4);StackWalker.StackFrame caller=null;
+        while(cursor.hasNext()){
+            var frame=cursor.next();prefix.add(frame);
+            if(frame.getDeclaringClass().getNestHost()!=TaskBridge.class){caller=frame;break;}
+        }
+        // Installed JDK creation/delegation hooks are direct invokestatic
+        // calls. A hidden/reflective intermediary is not that real call site.
+        // Keep every inspected frame for provenance, including hidden frames;
+        // only boundary selection skips this bridge's own implementation.
+        if(!boundary(caller,false))return null;
+        var head=prefix.iterator();
+        return taskInvocation(new java.util.Iterator<StackWalker.StackFrame>(){
+            public boolean hasNext(){return head.hasNext()||cursor.hasNext();}
+            public StackWalker.StackFrame next(){return head.hasNext()?head.next():cursor.next();}
+        });
+    }
     static boolean boundary(boolean submission) {
         var frame=WALKER.walk(frames->{
             var cursor=frames.iterator();while(cursor.hasNext()){
                 var next=cursor.next();if(next.getDeclaringClass()!=TaskBridge.class)return next;
             }return null;
         });
+        return boundary(frame,submission);
+    }
+    private static boolean boundary(StackWalker.StackFrame frame,boolean submission){
         if(frame==null)return false;
             Class<?> owner=frame.getDeclaringClass();
             if(owner.getClassLoader()!=null||!"java.base".equals(owner.getModule().getName()))return false;

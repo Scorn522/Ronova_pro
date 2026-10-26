@@ -285,9 +285,12 @@ public final class ControlBridge {
     }
     static final class InvokingSources implements java.util.function.Function<java.util.stream.Stream<StackWalker.StackFrame>,Module[]> {
         public Module[] apply(java.util.stream.Stream<StackWalker.StackFrame> frames){
+            return read(frames.iterator());
+        }
+        static Module[] read(java.util.Iterator<StackWalker.StackFrame> cursor){
             SourceQuery query=currentSourceQuery();int inspected=0;
             try{
-            var cursor=frames.iterator();while(cursor.hasNext()){
+            while(cursor.hasNext()){
                 var frame=cursor.next();inspected++;Module[] sources=CodeSourceBridge.frameSources(frame);if(sources.length!=0)return retainQuerySources(sources);
                 sources=producerRootSources(frame);if(sources.length!=0)return retainQuerySources(sources);
                 // frameSources already merges this frame's current declaration
@@ -720,6 +723,17 @@ public final class ControlBridge {
         SourceQuery query=beginSourceQuery(NO_SOURCES);
         try{return new TaskInvocation(querySources(),query.physicalComplete);}finally{endSourceQuery(query);}
     }
+    static TaskInvocation taskInvocation(java.util.Iterator<StackWalker.StackFrame> frames){
+        if(WALKER.getCallerClass()!=TaskBridge.class)throw new SecurityException("ACTUAL_TASK_CAPTURE_REQUIRED");
+        SourceQuery active=currentSourceQuery();if(active!=null)return new TaskInvocation(active.partial,false);
+        Module[] framework=FrameworkBuffers.bufferSources();if(framework!=null)return new TaskInvocation(framework,false);
+        SourceQuery query=beginSourceQuery(NO_SOURCES);
+        try{
+            Module[] scoped=scopedSources();
+            Module[] sources=scoped.length!=0?scoped:!hasProducers()&&!CodeSourceBridge.hasFrameSources()?NO_SOURCES:InvokingSources.read(frames);
+            return new TaskInvocation(sources,query.physicalComplete);
+        }finally{endSourceQuery(query);}
+    }
     private static Module[] querySources(){
         Module[] scoped=scopedSources();return scoped.length!=0?scoped:sourceFrameWalk();
     }
@@ -874,24 +888,35 @@ public final class ControlBridge {
     static void createdBy(Object object,Module[] sources,boolean onlyAbsent){
         OriginStripe originWrite=beginOrigins(object);try {
         CreationOrigin prior=CREATION_ORIGINS.get(object);
-        if(sourceUnknown()){
-            if(prior==null||!prior.unknown)NativeControl.heapPolicyChanged(object);
+        if(sourceUnknown()&&(prior==null||!prior.unknown)){
+            NativeControl.heapPolicyChanged(object);
             prior=CREATION_ORIGINS.get(object);
             prior=new CreationOrigin(prior==null?null:prior.sources,true);
             CREATION_ORIGINS.put(object,prior);
         }
         prior=CREATION_ORIGINS.get(object);
         if(onlyAbsent&&prior!=null&&prior.sources!=null)return;
-        Set<Module> actual=java.util.Collections.newSetFromMap(new java.util.IdentityHashMap<Module,Boolean>());actual.addAll(java.util.Arrays.asList(sources));actual.remove(null);
+        Set<Module> actual=prior!=null&&sameCreationSources(prior.sources,sources)?prior.sources:null;
+        if(actual==null){actual=java.util.Collections.newSetFromMap(new java.util.IdentityHashMap<Module,Boolean>());actual.addAll(java.util.Arrays.asList(sources));actual.remove(null);}
         prior=CREATION_ORIGINS.get(object);Set<Module> previous=prior==null?null:prior.sources;
         if(previous==null||!previous.equals(actual))NativeControl.heapPolicyChanged(object);
         // A policy notification may reenter source registration. Preserve its
         // sticky unknown flag while publishing this operation's actual set.
         prior=CREATION_ORIGINS.get(object);boolean unknown=prior!=null&&prior.unknown;
-        CREATION_ORIGINS.put(object,new CreationOrigin(actual,unknown));
+        if(prior==null||prior.sources!=actual)CREATION_ORIGINS.put(object,new CreationOrigin(actual,unknown));
         if(object instanceof java.util.concurrent.ExecutorService)schedulerSources(object,actual,unknown);
         if(object.getClass()==java.util.Timer.class)timerThread(object);
             }finally{endOrigins(originWrite,object);}
+    }
+    private static boolean sameCreationSources(Set<Module> retained,Module[] sources){
+        if(retained==null)return false;int count=0;
+        for(int i=0;i<sources.length;i++){
+            Module source=sources[i];if(source==null)continue;
+            if(!retained.contains(source))return false;
+            boolean duplicate=false;for(int j=0;j<i;j++)if(sources[j]==source){duplicate=true;break;}
+            if(!duplicate)count++;
+        }
+        return count==retained.size();
     }
     static void lookupDerived(java.lang.invoke.MethodHandles.Lookup source,java.lang.invoke.MethodHandles.Lookup result,Class<?> caller) {
         if(WALKER.getCallerClass()!=DefinitionBridge.class)throw new SecurityException("DEFINITION_BRIDGE_REQUIRED");
@@ -2212,9 +2237,19 @@ public final class ControlBridge {
     }
     static Module[] mutationSources(Module[] nativeSources){
         Objects.requireNonNull(nativeSources);
-        Set<Module> sources=addModuleSources(null,invokingSources(nativeSources),false);
-        sources=addModuleSources(sources,nativeSources,false);
-        return sources==null?new Module[0]:sources.toArray(new Module[0]);
+        return mergeOperationSources(invokingSources(nativeSources),nativeSources);
+    }
+    private static Module[] mergeOperationSources(Module[] first,Module[] second){
+        // Both inputs remain live operation inputs, including null (unknown).
+        // Nothing is stored on a shared object or retained between operations.
+        Module[] unique=new Module[first.length+second.length];int count=0;
+        for(int pass=0;pass<2;pass++)for(Module source:pass==0?first:second){
+            boolean known=false;for(int i=0;i<count;i++)if(unique[i]==source){known=true;break;}
+            if(!known)unique[count++]=source;
+        }
+        if(count==0)return NO_SOURCES;
+        if(count==unique.length)return unique;
+        Module[] exact=new Module[count];for(int i=0;i<count;i++)exact[i]=unique[i];return exact;
     }
     public static Object beginNativeArrayMutation(Object receiver,int start,int length,Module[] contributors){
         if(!NativeControl.memoryMutationBoundary(receiver))throw new SecurityException("ACTUAL_NATIVE_ARRAY_MUTATION_REQUIRED");

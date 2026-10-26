@@ -273,20 +273,47 @@ public final class BackingBridge {
         return ControlBridge.unsafeWriteAllowed(receiver,offset,proposed,kind);
     }
     private static boolean setterAllowed(Class<?> owner,String name,Object receiver,Object value) {
-        Class<?> declaring=owner;
-        while(declaring!=null)try {PlatformMetadata.declaredField(declaring,name);break;}catch(NoSuchFieldException absent){declaring=declaring.getSuperclass();}
+        Class<?> declaring=setterDeclaration(owner,name);
         return declaring==null||ControlBridge.fieldWriteAllowed(receiver,declaring,name,value);
+    }
+    private record SetterLayout(int revision,Map<String,Class<?>> declarations){}
+    private static final class SetterSlot {volatile SetterLayout layout;}
+    private static final ClassValue<SetterSlot> SETTER_LAYOUTS=new ClassValue<>(){
+        @Override protected SetterSlot computeValue(Class<?> type){return new SetterSlot();}
+    };
+    private static Class<?> setterDeclaration(Class<?> owner,String name){
+        SetterSlot slot=SETTER_LAYOUTS.get(owner);
+        for(;;){
+            int revision=PlatformMetadata.classRevision(owner);SetterLayout layout=slot.layout;
+            if(revision>=0&&layout!=null&&layout.revision()==revision)return layout.declarations().get(name);
+            Map<String,Class<?>> declarations=new HashMap<>();
+            for(Class<?> type=owner;type!=null;type=type.getSuperclass())
+                for(Field field:PlatformMetadata.declaredFields(type))declarations.putIfAbsent(field.getName(),type);
+            if(revision!=PlatformMetadata.classRevision(owner))continue;
+            layout=new SetterLayout(revision,Map.copyOf(declarations));if(revision>=0)slot.layout=layout;
+            return layout.declarations().get(name);
+        }
+    }
+    private static final class SetterTests {
+        static final MethodHandle INSTANCE,STATIC,ARRAY;
+        static {
+            try{
+                var lookup=MethodHandles.lookup();
+                INSTANCE=lookup.findStatic(BackingBridge.class,"setterAllowed",MethodType.methodType(boolean.class,Class.class,String.class,Object.class,Object.class));
+                STATIC=lookup.findStatic(BackingBridge.class,"staticSetterAllowed",MethodType.methodType(boolean.class,Class.class,String.class,Object.class));
+                ARRAY=lookup.findStatic(BackingBridge.class,"arraySetterAllowed",MethodType.methodType(boolean.class,Object.class,int.class,Object.class));
+            }catch(ReflectiveOperationException failure){throw new ExceptionInInitializerError(failure);}
+        }
     }
     private static boolean staticSetterAllowed(Class<?> owner,String name,Object value) {return setterAllowed(owner,name,owner,value);}
     public static MethodHandle wrapSetter(MethodHandle original,Class<?> owner,String name) {
         if(WRAPPING.get()!=null)return original;WRAPPING.set(true);
         try {
             boolean statik=original.type().parameterCount()==1;
-            MethodHandle test=MethodHandles.lookup().findStatic(BackingBridge.class,statik?"staticSetterAllowed":"setterAllowed",
-                    statik?MethodType.methodType(boolean.class,Class.class,String.class,Object.class):MethodType.methodType(boolean.class,Class.class,String.class,Object.class,Object.class));
+            MethodHandle test=statik?SetterTests.STATIC:SetterTests.INSTANCE;
             test=MethodHandles.insertArguments(test,0,owner,name).asType(original.type().changeReturnType(boolean.class));
             return MethodHandles.guardWithTest(test,original,MethodHandles.empty(original.type()));
-        }catch(ReflectiveOperationException e){throw new IllegalStateException("SETTER_WRAPPER",e);}finally {WRAPPING.remove();}
+        }finally {WRAPPING.remove();}
     }
     public static MethodHandle wrapSetter(MethodHandle original,Field field) {return wrapSetter(original,field.getDeclaringClass(),field.getName());}
     private static boolean arraySetterAllowed(Object array,int index,Object value) {
@@ -306,9 +333,9 @@ public final class BackingBridge {
     public static MethodHandle wrapArraySetter(MethodHandle original) {
         if(WRAPPING.get()!=null)return original;WRAPPING.set(true);
         try {
-            MethodHandle test=MethodHandles.lookup().findStatic(BackingBridge.class,"arraySetterAllowed",MethodType.methodType(boolean.class,Object.class,int.class,Object.class));
+            MethodHandle test=SetterTests.ARRAY;
             return MethodHandles.guardWithTest(test.asType(original.type().changeReturnType(boolean.class)),original,MethodHandles.empty(original.type()));
-        }catch(ReflectiveOperationException e){throw new IllegalStateException("ARRAY_SETTER_WRAPPER",e);}finally {WRAPPING.remove();}
+        }finally {WRAPPING.remove();}
     }
     private static boolean arrayWrite(Class<?> owner,String name) {
         return owner==Array.class&&Set.of("set","setBoolean","setByte","setChar","setShort","setInt","setLong","setFloat","setDouble").contains(name);

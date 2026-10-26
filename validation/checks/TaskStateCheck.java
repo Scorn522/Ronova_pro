@@ -24,143 +24,107 @@ public final class TaskStateCheck {
         for(String name:CASES)System.out.println("TASK_STATE_METADATA_CASE_PASS "+name);
         System.out.println("TASK_STATE_METADATA_CHECKS_PASS count="+CASES.size()+"; NO_PRODUCTION_OUTCOME_EVIDENCE");
     }
-    private static ProRuntime.Subject subject() {
-        var subject=new ProRuntime.Subject();subject.generation=1;subject.terminal=true;return subject;
+    private static RecoveryTasks model;
+    private static ProRuntime runtime;
+    private static void model()throws Exception {
+        if(model!=null)return;
+        Field f=sun.misc.Unsafe.class.getDeclaredField("theUnsafe");f.setAccessible(true);
+        var unsafe=(sun.misc.Unsafe)f.get(null);
+        runtime=(ProRuntime)unsafe.allocateInstance(ProRuntime.class);
+        assign(ProRuntime.class,runtime,"subjects",new HashMap<>());
+        assign(ProRuntime.class,runtime,"groupMembers",new HashMap<>());
+        model=(RecoveryTasks)unsafe.allocateInstance(RecoveryTasks.class);
+        assign(RecoveryTasks.class,model,"runtime",runtime);
+        for(String name:List.of("pendingRoots","workerBindings","captureGaps","drainedTasks"))assign(RecoveryTasks.class,model,name,new IdentityHashMap<>());
+        assign(RecoveryTasks.class,model,"events",new ConcurrentLinkedQueue<>());
+        assign(RecoveryTasks.class,model,"pendingCaptures",new ConcurrentLinkedQueue<>());
+        assign(RecoveryTasks.class,model,"gap","");
+        assign(RecoveryTasks.class,null,"boundarySnapshot",QueryBoundary.class.getMethod("snapshot",String[].class));
+        assign(RecoveryTasks.class,null,"boundaryCapabilities",null);
+        assign(RecoveryTasks.class,null,"activeInvocations",QueryBoundary.class.getMethod("references",Object.class));
+        assign(RecoveryTasks.class,null,"helperReferences",QueryBoundary.class.getMethod("references",Object.class));
+    }
+    private static void assign(Class<?> type,Object receiver,String name,Object value)throws Exception {
+        Field field=type.getDeclaredField(name);field.setAccessible(true);field.set(receiver,value);
+    }
+    private static ProRuntime.Subject subject()throws Exception {
+        model();var subject=new ProRuntime.Subject();subject.generation=1;subject.terminal=true;
+        runtime.subjects.put(subject.id,subject);return subject;
     }
     private static Object task(ProRuntime.Subject subject)throws Exception {
         var constructor=TASK.getDeclaredConstructor(Object.class,ClassLoader.class,boolean.class,Class.class);constructor.setAccessible(true);
-        var object=new FutureTask<Void>(()->null);Object task=constructor.newInstance(object,object.getClass().getClassLoader(),false,null);
+        // A delegated invocation claims its observed execution, not disposal of
+        // an invented FutureTask/callable or a synthetic durable ACK.
+        Object task=constructor.newInstance(new Object(),null,false,null);
         set(task,"authority",subject);set(task,"qualification",1L);set(task,"revision",1L);
-        values(task,"subjects").add(subject.id);set(task,"queue",new LinkedBlockingQueue<>());set(task,"queueRemoved",true);
-        set(task,"ack",CompletableFuture.completedFuture(null));set(task,"releaseAck",CompletableFuture.completedFuture(null));
-        set(task,"coverageConfirmed",true);set(task,"backendEpoch",1L);set(task,"callableReleased",true);
-        return task;
+        values(task,"subjects").add(subject.id);set(task,"delegated",true);set(task,"queueRemoved",true);
+        set(task,"callableReleased",true);set(task,"state","QUIESCENT_TASK_SCOPE");return task;
     }
     private static Object field(Object task,String name)throws Exception {
         Field field=TASK.getDeclaredField(name);field.setAccessible(true);return field.get(task);
     }
-    private static void set(Object task,String name,Object value)throws Exception {
-        Field field=TASK.getDeclaredField(name);field.setAccessible(true);field.set(task,value);
-    }
-    @SuppressWarnings("unchecked")
-    private static Set<Object> values(Object task,String name)throws Exception { return (Set<Object>)field(task,name); }
-    private static Object invoke(String name,Class<?>[] types,Object... arguments)throws Exception {
+    private static void set(Object task,String name,Object value)throws Exception {assign(TASK,task,name,value);}
+    @SuppressWarnings("unchecked") private static Set<Object> values(Object task,String name)throws Exception {return (Set<Object>)field(task,name);}
+    private static Object invoke(String name,Class<?>[] types,Object...arguments)throws Exception {
         Method method=RecoveryTasks.class.getDeclaredMethod(name,types);method.setAccessible(true);
-        try { return method.invoke(null,arguments); }
-        catch(InvocationTargetException failure) {
-            if(failure.getCause() instanceof Exception exception)throw exception;
-            if(failure.getCause() instanceof Error error)throw error;
-            throw failure;
-        }
+        try{return method.invoke(Modifier.isStatic(method.getModifiers())?null:model,arguments);}
+        catch(InvocationTargetException failure){if(failure.getCause() instanceof Exception e)throw e;if(failure.getCause() instanceof Error e)throw e;throw failure;}
     }
-    private static boolean sampled(Object task,long tick,long epoch)throws Exception {
-        return (Boolean)invoke("observeStable",new Class<?>[]{TASK,long.class,long.class},task,tick,epoch);
-    }
-    private static boolean current(Object task,long tick,long epoch)throws Exception {
-        return (Boolean)invoke("localCurrent",new Class<?>[]{TASK,long.class,long.class},task,tick,epoch);
-    }
-    private static boolean durable(Object task,long tick,long epoch)throws Exception {
-        return (Boolean)invoke("currentFact",new Class<?>[]{TASK,long.class,long.class},task,tick,epoch);
-    }
-    private static void link(Object parent,Object child,long tick)throws Exception {
-        invoke("linkObserved",new Class<?>[]{TASK,TASK,long.class},parent,child,tick);
-    }
-    private static void settled(Object task,long start,long epoch)throws Exception {
-        require(!sampled(task,start,epoch),"a new window is not stable");
-        require(!sampled(task,start+10,epoch),"ten ticks is not twenty");
-        require(sampled(task,start+20,epoch),"continuous twenty-tick window");
-        set(task,"state","QUIESCENT_TASK_SCOPE");receipt(task,epoch,CompletableFuture.completedFuture(null));
-        require(durable(task,start+20,epoch),"matching current receipt");
-    }
-    private static void receipt(Object task,long epoch,CompletableFuture<Void> ack)throws Exception {
-        set(task,"settledRevision",field(task,"revision"));set(task,"settledCaptureEpoch",epoch);
-        set(task,"settledWindowStart",field(task,"stableSince"));set(task,"fact",ack);
-        set(task,"settledBackendEpoch",field(task,"backendEpoch"));
-    }
+    private static boolean current(Object task,long tick,long epoch)throws Exception {return (Boolean)invoke("localCurrent",new Class<?>[]{TASK,long.class,long.class},task,tick,epoch);}
+    private static boolean durable(Object task,long tick,long epoch)throws Exception {return (Boolean)invoke("currentFact",new Class<?>[]{TASK,long.class,long.class},task,tick,epoch);}
+    private static void link(Object parent,Object child,long tick)throws Exception {invoke("linkObserved",new Class<?>[]{TASK,TASK,long.class},parent,child,tick);}
     private static void lateDescendant()throws Exception {
         var subject=subject();Object grand=task(subject),parent=task(subject),child=task(subject),unrelated=task(subject());
-        link(grand,parent,0);settled(parent,0,0);settled(grand,0,0);settled(unrelated,0,0);
-        Object oldFact=field(grand,"fact");link(parent,child,21);
-        require(!current(parent,21,0)&&!current(grand,21,0),"late child invalidates all ancestors");
-        require(field(grand,"fact")==oldFact&&((CompletableFuture<?>)oldFact).isDone(),"historical ACK retained");
-        require(!durable(grand,21,0),"old ACK is not a current fact");
-        require(current(unrelated,21,0),"unrelated task graph is not invalidated");
-        CASES.add("LATE_DESCENDANT_INVALIDATES_ANCESTORS_AND_RETAINS_HISTORY");
+        link(grand,parent,0);set(grand,"state","QUIESCENT_TASK_SCOPE");set(parent,"state","QUIESCENT_TASK_SCOPE");
+        long revision=(Long)field(grand,"revision");link(parent,child,21);
+        require((Long)field(grand,"revision")==revision+1,"late child invalidates ancestor revision");
+        require(!durable(grand,21,0)&&!durable(parent,21,0),"late child invalidates settled state");
+        require(durable(unrelated,21,0),"unrelated graph retains live facts");
+        CASES.add("LATE_DESCENDANT_INVALIDATES_ANCESTORS_WITHOUT_TOUCHING_INDEPENDENT_ROOT");
     }
     private static void duplicateEdge()throws Exception {
         var subject=subject();Object parent=task(subject),child=task(subject);
-        link(parent,child,1);long revision=(Long)field(parent,"revision");
-        link(parent,child,2);require((Long)field(parent,"revision")==revision,"duplicate edge is not a new source revision");
-        // Defensive identity traversal must terminate even for an unresolved cycle.
-        link(child,parent,3);invoke("changed",new Class<?>[]{TASK,long.class},child,4L);
-        require((Long)field(parent,"stableSince")==-1L,"cyclic relation cannot retain a stable window");
+        link(parent,child,1);long revision=(Long)field(parent,"revision");link(parent,child,2);
+        require((Long)field(parent,"revision")==revision,"duplicate edge is not new source revision");
+        link(child,parent,3);revision=(Long)field(parent,"revision");invoke("changed",new Class<?>[]{TASK,long.class},child,4L);
+        require((Long)field(parent,"revision")==revision+1,"cycle must invalidate each task once");
         CASES.add("IDEMPOTENT_EDGE_AND_CYCLE_SAFE_INVALIDATION");
     }
     private static void freshnessAndReceipts()throws Exception {
-        Object task=task(subject());settled(task,0,0);
-        require(current(task,30,0),"maximum ten-tick observation interval");
-        require(!current(task,31,0),"expired observation cannot be current");
-        require(!sampled(task,31,0),"gap restarts the window");
-        require(!sampled(task,41,0)&&sampled(task,51,0),"new full window after gap");
-        set(task,"state","QUIESCENT_TASK_SCOPE");
-        require(!durable(task,51,0),"old window receipt cannot become current again");
-        var ack=new CompletableFuture<Void>();receipt(task,0,ack);
-        require(current(task,51,0)&&!durable(task,51,0),"current state is distinct from delayed durable ACK");
-        ack.complete(null);require(durable(task,51,0),"matching ACK can confirm the current fact");
-        require(!current(task,51,1)&&!durable(task,51,1),"capture invalidates before server merge");
-        require(!sampled(task,50,1),"backward time cannot extend a window");
-        CASES.add("SAMPLE_GAP_WINDOW_IDENTITY_DELAYED_ACK_AND_CAPTURE_EPOCH");
+        Object task=task(subject());require(durable(task,20,0),"live obligations permit fact");
+        QueryBoundary.references=1;
+        try{require(!durable(task,20,0),"republished live reference revokes old fact");}finally{QueryBoundary.references=0;}
+        set(task,"admissionFenced",true);require(!durable(task,20,0),"unreleased admission remains obligation");
+        set(task,"admissionReleased",true);require(durable(task,20,0),"released admission rechecks all live facts");
+        CASES.add("LIVE_REFERENCES_AND_ADMISSION_RECHECKED_WITHOUT_HISTORICAL_ACK");
     }
     private static void qualificationAndExecution()throws Exception {
-        var subject=subject();Object task=task(subject);settled(task,0,0);
-        subject.terminal=false;require(!current(task,20,0),"revoked qualification");subject.terminal=true;
-        subject.generation++;require(!current(task,20,0),"new generation is not old authority");subject.generation--;
-        Object invocation=new Object();values(task,"executions").add(invocation);
-        require(!current(task,20,0),"actual running invocation is not closed");values(task,"executions").clear();
-        values(task,"workerReferences").add(invocation);
-        require(!current(task,20,0),"callback exit does not clear worker locals");values(task,"workerReferences").clear();
-        set(task,"callableReleased",false);require(!current(task,20,0),"callable remains a separate obligation");set(task,"callableReleased",true);
-        set(task,"coverageConfirmed",false);require(!current(task,20,0),"missing boundaries revoke facts");set(task,"coverageConfirmed",true);
-        set(task,"backendEpoch",2L);require(!current(task,20,0),"old backend generation cannot qualify new facts");set(task,"backendEpoch",1L);
-        set(task,"entered",true);set(task,"exitObserved",false);
-        require(!current(task,20,0),"cancel acceptance cannot replace an observed exit");
-        CASES.add("QUALIFICATION_AND_ACTUAL_EXIT_ARE_REQUIRED");
+        var subject=subject();Object task=task(subject());set(task,"authority",subject);values(task,"subjects").clear();values(task,"subjects").add(subject.id);
+        require(current(task,20,0),"qualified live task");subject.generation++;
+        require(!current(task,20,0),"generation change revokes authority");subject.generation--;
+        for(String name:List.of("executions","dispatches","submissions","workerReferences","waiters")){
+            values(task,name).add(new Object());require(!current(task,20,0),name+" remains a separate obligation");values(task,name).clear();
+        }
+        set(task,"callableReleased",false);require(!current(task,20,0),"callable release required");set(task,"callableReleased",true);
+        QueryBoundary.ready=false;try{require(!current(task,20,0),"revoked capability blocks fact");}finally{QueryBoundary.ready=true;}
+        set(task,"entered",true);set(task,"exitObserved",false);require(!current(task,20,0),"cancel cannot replace observed exit");
+        CASES.add("QUALIFICATION_COVERAGE_AND_ACTUAL_EXIT_REQUIRED");
     }
-    /** Only the query is exercised; these metadata fixtures never authorize a production write. */
     private static void scopeIsolation()throws Exception {
-        Field unsafeField=sun.misc.Unsafe.class.getDeclaredField("theUnsafe");unsafeField.setAccessible(true);
-        var unsafe=(sun.misc.Unsafe)unsafeField.get(null);
-        RecoveryTasks owner=(RecoveryTasks)unsafe.allocateInstance(RecoveryTasks.class);
-        Field gap=RecoveryTasks.class.getDeclaredField("gap");gap.setAccessible(true);gap.set(owner,"");
-        Field epochs=RecoveryTasks.class.getDeclaredField("captureEpochs");epochs.setAccessible(true);epochs.set(owner,new HashMap<UUID,Long>());
-        Field boundary=RecoveryTasks.class.getDeclaredField("boundarySnapshot");boundary.setAccessible(true);
-        Object original=boundary.get(null);
-        Method query=RecoveryTasks.class.getDeclaredMethod("currentScopes",Collection.class,long.class);query.setAccessible(true);
-        var scheduler=new ThreadPoolExecutor(0,1,1,TimeUnit.SECONDS,new LinkedBlockingQueue<>());
-        try {
-            boundary.set(null,QueryBoundary.class.getMethod("snapshot",String[].class));
-            var subject=subject();Object independent=task(subject),parent=task(subject),missing=task(subject);
-            link(parent,missing,0);
-            for(Object item:List.of(independent,parent)) {
-                set(item,"scheduler",scheduler);set(item,"backendEpoch",7L);settled(item,0,0);
-                set(item,"localRevision",field(item,"revision"));set(item,"localCaptureEpoch",0L);
-                set(item,"localWindowStart",0L);set(item,"localBackendEpoch",7L);set(item,"localAck",CompletableFuture.completedFuture(null));
-            }
-            for(long stale:new long[]{6L,-1L}) {
-                set(missing,"backendEpoch",stale);QueryBoundary.epoch=7;QueryBoundary.advance=false;
-                Set<?> current=(Set<?>)query.invoke(owner,List.of(independent,parent),20L);
-                require(current.contains(independent),"a missing backend must not stale an independent root");
-                require(!current.contains(parent)&&!current.contains(missing),"missing evidence still propagates to actual ancestors");
-            }
-            QueryBoundary.epoch=7;QueryBoundary.advance=true;
-            require(((Set<?>)query.invoke(owner,List.of(independent,parent),20L)).isEmpty(),"a real backend change during the query remains stale");
-        } finally { QueryBoundary.advance=false;boundary.set(null,original);scheduler.shutdown(); }
+        var subject=subject();Object independent=task(subject),parent=task(subject),missing=task(subject);
+        link(parent,missing,0);set(parent,"state","QUIESCENT_TASK_SCOPE");
+        set(missing,"callableReleased",false);
+        Set<?> current=(Set<?>)invoke("currentScopes",new Class<?>[]{Collection.class,long.class},List.of(independent,parent),20L);
+        require(current.contains(independent)&&!current.contains(parent)&&!current.contains(missing),"missing obligation propagates only to connected ancestors");
+        set(missing,"callableReleased",true);QueryBoundary.advance=true;
+        try{require(((Set<?>)invoke("currentScopes",new Class<?>[]{Collection.class,long.class},List.of(independent,parent),20L)).isEmpty(),"mixed live backend generations are stale");}
+        finally{QueryBoundary.advance=false;}
         CASES.add("QUERY_FAILURE_ISOLATION_AND_ACTUAL_BACKEND_CHANGE");
     }
     public static final class QueryBoundary {
-        static long epoch=7;
-        static boolean advance;
-        public static long[] snapshot(String[] required) { return new long[]{advance?epoch++:epoch,1}; }
+        static long epoch=7;static boolean advance,ready=true;static int references;
+        public static long[] snapshot(String[] required){return new long[]{advance?epoch++:epoch,ready?1:0};}
+        public static int references(Object task){return references;}
     }
     private static void boundaryGate() {
         // This bridge is app-loaded in a separate metadata JVM, never the production bootstrap instance.

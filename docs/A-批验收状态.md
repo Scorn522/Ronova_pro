@@ -1,5 +1,27 @@
 # Ronova Pro 当前进度
 
+## 2026-10-26：元数据与任务创建来源聚合；82 性能失败，83 实机未完成
+
+本批基线为 0e5168cdb2f03b952ba96ca6aa7d17d5f3da0ef8。当前源码对应 Core 7DB5A140E23E2E71062131F8BC691901A8C42FD581658F64CB21BD15BC03701A，Native ABI 102 未变；这是待完成实机验证的开发候选，不能标记为性能通过。
+
+PlatformMetadata 只为 CodeSourceBridge 控制载体扫描缓存私有字段声明，绑定实际 Class、VM 重定义计数及 Native 声明后端状态；公开 declaredFields / declaredField 继续返回新反射对象，避免共享可变 Field 根对象。BackingBridge 缓存实际类及重定义版本对应的 setter 声明布局，并复用固定测试句柄；每次真实写入仍进入当前权限策略。RecoverySources 复用构造路径选择器及固定 NBT 类型/签名，每次仍读取真实调用帧及当前 codec 身份，没有缓存构造授权。
+
+CodeSourceBridge.frameSources 接入按实际类投影的 CODE_METHODS 快照，用登记修订和类定义计数检测失效；命中后仍通过 Native 读取当前 BCI/定义代的行级来源。已永久登记的控制身份避免重复进入登记锁；在途发布仍加入原事务。ExternalCodeImages 仅在完整解析模式及字节完全相同时复用元数据行，实际指令/异常处理器身份仍逐次读取，没有复用可变 ASM 树的来源结论。
+
+ControlBridge 对相同创建来源保留已有记录，避免重复集合及 OriginMap 节点重建；未知标志、调度器登记及真实来源变化仍处理。Native 来源与 Java 来源保留显式并集，包括 null 未知标记。TaskBridge 在原来源锁和 OriginStripe 写事务内批量通知实际新增来源，保留通知重入时新增的来源。
+
+第二批将真实 JDK created/delegated 钩子的入口校验和来源读取合并到一次带隐藏帧的遍历。已检查前缀也保留在来源游标中，捕获结果仅向本次 taskRelation 传递；不跨调用缓存，不将部分/空来源提升为完整证明。实际织入点是直接调用；隐藏或反射中介不能冒用该创建入口。其他任务入口仍采用各自原有捕获路径；Buffer、Unsafe、句柄及 producer 链路的全部重复查栈尚未收敛。
+
+统一构建成功。Java Core、Agent、Bootstrap 在本轮实际编译；最后一批 Core/Agent 复用、Bootstrap 重编。Control/Storage Native 无修改，均复用已有产物；Prelaunch 复用。末次 jar、runTaskStateChecks、runRuntimeHotPathChecks 成功 54s（23 tasks：13 executed、10 up-to-date）。旧 TaskStateCheck 依赖已删除的 ack/稳定时间窗，已迁移到现有实时义务模型，8 项任务状态用例通过；热路径检查覆盖字段结果隔离、继承 setter、晚到方法登记、Native/未知来源并集及不变来源记录。真实 premain/Native 检查成功 23s（14 tasks：5 executed、9 up-to-date），验证 VarHandle、JDK 锁、实际 CF Completion 节点登记与执行、DirectByteBuffer，以及外部伪造入口拒绝。测试不代表完整实机性能或全部攻防边界通过。
+
+第 81 次误用了已被调整的实例 Mod 组合，因第三方必需依赖缺失退出 1，不纳入对比。第 82 次先备份，再按第 80 次备份逐文件恢复 Mod 集合；启动文件一致，仍使用 82 项参数。Core DAAC4FF3F1B78C46EE16D14957E3B750BE7D7A927A8985A34C1446A53CFCA841 实际入世约 39.787 分钟，出生区 736537 ms；第 80 次为 31.278 分钟和 611943 ms。用户确认仍个位数帧或经常未响应，性能明确失败。
+
+82 的加载、出生区、入世后三段各 30 秒 JFR 已保留。出生区分配样本 7786→6418，但包含 sourceFrameWalk 的分配样本 1783→1712；入世后分配样本 5133→4335，包含 sourceFrameWalk 的样本 550→656。采样计数不等于分配字节、CPU 百分比或 FPS，加载采样时点及存档进度也有差异；82 还包含此前未实测的 ABI 102 改动，不能把差异全部归因于本批。加载线程现场仍有文件读取来源遍历、rawMemoryCaller，以及 SuperSteve 图像处理中的创建来源登记。
+
+82 正常保存三个维度后于 2026-10-26T07:53:13Z 自行退出 0，未强制终止；Time/DayTime 从 3112 到 3507，仅证明存档值推进。六个既有退出/来源拒绝标签计数均为 0。原实例配置和候选 6869B7EE 已恢复，原始现场留在本地。
+
+第二批候选 7DB5A140 已部署并启动第 83 次，但用户中断执行后仅留下启动记录和 premain 日志：无入世、JFR、正常退出码记录。同步前核对该实例已无游戏进程，恢复了测试前 Mod 集合、启动文件与候选 6869B7EE；存档仍为 Time/DayTime 3507。83 不继承 82 的实机结果。当前剩余重点是完成第二批实测，并继续沿真实 Buffer/文件/Unsafe 来源链收敛同次操作的重复查询；整 Mod 控制、晚到登记、行级来源和恢复边界保持要求。
+
 ## 2026-10-25：收敛内存写入调用者栈分配与 Buffer 空桥接；实机仍暂停
 
 基线为已推送的 3378b5fd6e55df6eeb09a45896dda23269090e00。第 80 次仍是性能失败：入世 31.278 分钟、出生区 611943 ms，用户报告个位数帧或经常未响应；本批不以源码或独立 JVM 结果覆盖该结论，没有启动第 81 次。核对 region80.jfr 摘要：30 秒内有 7786 个 ObjectAllocationSample 和 16121 个 GCPhaseParallel 事件；分配样本计数不是分配字节占比，不能据此承诺 10～20 倍提速。

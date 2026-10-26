@@ -41,10 +41,15 @@ public final class PlatformMetadata {
         }
     }
     private PlatformMetadata(){}
-    static Object[] controls(){return new Object[]{FIELDS,METHODS,CONSTRUCTORS,CLASS_REVISION,CLASS_WRITERS};}
+    static Object[] controls(){return new Object[]{FIELDS,METHODS,CONSTRUCTORS,CLASS_REVISION,CLASS_WRITERS,FIELD_DECLARATIONS};}
+    private record FieldDeclarations(int revision,boolean nativeBound,Field[] roots){}
+    private static final class FieldSlot {volatile FieldDeclarations value;}
+    private static final ClassValue<FieldSlot> FIELD_DECLARATIONS=new ClassValue<>(){
+        @Override protected FieldSlot computeValue(Class<?> type){return new FieldSlot();}
+    };
     // The VM advances this same counter for Class's own reflection-data
     // invalidation, including superclass redefinition. An unavailable counter
-    // disables optional name hints; declaration reads remain unchanged.
+    // disables caching. Never retain a layout without a VM definition counter.
     static int classRevision(Class<?> type){
         if(CLASS_REVISION==null)return -1;
         // Direct volatile field access does not customize a protected
@@ -54,14 +59,40 @@ public final class PlatformMetadata {
     }
     public static Field[] declaredFields(Class<?> type) {
         try {
-            if(NativeControl.declarationsReady())return NativeControl.vmDeclaredFields(type);
-            return (Field[])FIELDS.invokeExact(type,false);
+            return readFields(type,NativeControl.declarationsReady());
         }
         catch(Throwable failure){throw unavailable(type,failure);}
     }
     public static Field declaredField(Class<?> type,String name)throws NoSuchFieldException {
         for(Field field:declaredFields(type))if(field.getName().equals(name))return field;
         throw new NoSuchFieldException(type.getName()+"."+name);
+    }
+    static Field[] controlFields(Class<?> type){
+        // Only the control-backing scanner consumes these private mirrors.
+        // Public reflection results remain fresh: sharing Field.root would
+        // allow an escaped mirror to poison a later metadata read.
+        if(WALKER.getCallerClass()!=CodeSourceBridge.class)throw new SecurityException("ACTUAL_CONTROL_LAYOUT_READER_REQUIRED");
+        try{return fieldDeclarations(type);}catch(Throwable failure){throw unavailable(type,failure);}
+    }
+    private static Field[] fieldDeclarations(Class<?> type)throws Throwable {
+        int revision=classRevision(type);boolean bound=NativeControl.declarationsReady();
+        if(revision<0)return readFields(type,bound);
+        FieldSlot slot=FIELD_DECLARATIONS.get(type);FieldDeclarations found=slot.value;
+        if(found!=null&&found.revision()==revision&&found.nativeBound()==bound)return found.roots();
+        // A miss can race a redefinition or the Native handoff. Read again
+        // instead of labelling old declarations with the newer generation.
+        // Do not hold a class-local monitor across a JNI metadata callback.
+        for(;;){
+            Field[] fields=readFields(type,bound);
+            if(revision==classRevision(type)&&bound==NativeControl.declarationsReady()){
+                slot.value=new FieldDeclarations(revision,bound,fields);return fields;
+            }
+            revision=classRevision(type);bound=NativeControl.declarationsReady();
+            if(revision<0)return readFields(type,bound);
+        }
+    }
+    private static Field[] readFields(Class<?> type,boolean bound)throws Throwable {
+        return bound?NativeControl.vmDeclaredFields(type):(Field[])FIELDS.invokeExact(type,false);
     }
     public static Method[] declaredMethods(Class<?> type) {
         try {

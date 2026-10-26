@@ -1249,25 +1249,44 @@ public final class RecoverySources implements AutoCloseable {
             throw new SecurityException("ACTUAL_NBT_DYNAMIC_MAP_REQUIRED");
         if(from!=to)copyRecord(from,to);
     }
+    private static final class NbtConstructorLayout {
+        static final Class<?> BUILDER;
+        static final String BUILD=java.lang.invoke.MethodType.methodType(com.mojang.serialization.DataResult.class,CompoundTag.class,Tag.class).descriptorString();
+        static {try{BUILDER=Class.forName("net.minecraft.nbt.NbtOps$NbtRecordBuilder",false,NbtOps.class.getClassLoader());}
+            catch(ClassNotFoundException unavailable){throw new ExceptionInInitializerError(unavailable);}}
+    }
     private static boolean nbtRecordBuilder(Class<?> caller){
-        try{return caller==Class.forName("net.minecraft.nbt.NbtOps$NbtRecordBuilder",false,NbtOps.class.getClassLoader());}
-        catch(ClassNotFoundException unavailable){throw new IllegalStateException("ACTUAL_NBT_RECORD_BUILDER_UNAVAILABLE",unavailable);}
+        return caller==NbtConstructorLayout.BUILDER;
     }
     public static Object tagPut(Map<Object,Object> map,Object key,Object value) {
         GRAPH.writeLock().lock();try { return map.put(key,value); }finally { GRAPH.writeLock().unlock(); }
     }
-    public static boolean graphConstructor(Class<?> type) {
-        try { return StackWalker.getInstance(StackWalker.Option.RETAIN_CLASS_REFERENCE).walk(frames->frames
-                .dropWhile(frame->frame.getDeclaringClass()!=type||!frame.getMethodName().equals("<init>"))
-                .skip(1).findFirst().map(frame->{
+    private static final StackWalker GRAPH_CALLER=StackWalker.getInstance(StackWalker.Option.RETAIN_CLASS_REFERENCE);
+    private static final ClassValue<GraphConstructor> GRAPH_CONSTRUCTORS=new ClassValue<>(){
+        @Override protected GraphConstructor computeValue(Class<?> type){return new GraphConstructor(type);}
+    };
+    private record GraphConstructor(Class<?> type) implements java.util.function.Function<java.util.stream.Stream<StackWalker.StackFrame>,Boolean> {
+        public Boolean apply(java.util.stream.Stream<StackWalker.StackFrame> frames){
+            var cursor=frames.iterator();
+            while(cursor.hasNext()){
+                var constructor=cursor.next();
+                if(constructor.getDeclaringClass()!=type||!constructor.getMethodName().equals("<init>"))continue;
+                if(!cursor.hasNext())return false;
+                var frame=cursor.next();
                     Class<?> caller=frame.getDeclaringClass();
                     if(caller==type&&(frame.getMethodName().equals("<init>")||frame.getMethodName().equals("copy")
-                            ||frame.getMethodName().equals("m_6426_")&&frame.getMethodType().parameterCount()==0))return true;
-                    if(type==CompoundTag.class&&nbtRecordBuilder(caller)&&frame.getMethodType().equals(java.lang.invoke.MethodType.methodType(
-                            com.mojang.serialization.DataResult.class,CompoundTag.class,Tag.class)))return true;
+                            ||frame.getMethodName().equals("m_6426_")&&frame.getDescriptor().startsWith("()")))return true;
+                    if(type==CompoundTag.class&&nbtRecordBuilder(caller)&&frame.getDescriptor().equals(NbtConstructorLayout.BUILD))return true;
                     Object codec=type==CompoundTag.class?CompoundTag.TYPE:type==ListTag.class?ListTag.TYPE:null;
                     return codec!=null&&caller==codec.getClass();
-                }).orElse(false));
+            }
+            return false;
+        }
+    }
+    public static boolean graphConstructor(Class<?> type) {
+        // Cache only the selector. Every invocation still observes the live
+        // constructor and its actual caller, including current codec identity.
+        try { return GRAPH_CALLER.walk(GRAPH_CONSTRUCTORS.get(type));
         } catch(RuntimeException|LinkageError unavailable) { return false; }
     }
     public static void graphExposed(Runnable invalidate) {

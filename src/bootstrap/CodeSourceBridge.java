@@ -81,19 +81,26 @@ public final class CodeSourceBridge {
         final List<CodeMethods> entries=new ArrayList<>();volatile long revision;
         MethodBucket(){protect(this,entries);}
     }
-    private record FrameMethods(MethodBucket bucket,long revision,Set<String> selectors){}
+    private record FrameMethods(MethodBucket bucket,long revision,int definition,String[] selectors){}
     private static final ClassValue<FrameMethods> FRAME_METHODS=new ClassValue<>(){
         @Override protected FrameMethods computeValue(Class<?> type){
             synchronized(CODE_METHODS){
                 MethodBucket bucket=methodBucket(type.getName());Set<String> selected=new HashSet<>();
                 for(CodeMethods entry:bucket.entries)
                     if(codeMatches(entry.name(),entry.loader(),entry.bootstrap(),entry.actual(),type))selected.addAll(entry.methods());
-                FrameMethods methods=new FrameMethods(bucket,bucket.revision,Set.copyOf(selected));protect(methods,methods.selectors());return methods;
+                FrameMethods methods=new FrameMethods(bucket,bucket.revision,PlatformMetadata.classRevision(type),selected.toArray(new String[0]));protect(methods,methods.selectors());return methods;
             }
         }
     };
     private static MethodBucket methodBucket(String name){
         MethodBucket bucket=CODE_METHODS.get(name);if(bucket==null){bucket=new MethodBucket();CODE_METHODS.put(name,bucket);}return bucket;
+    }
+    private static FrameMethods frameMethods(Class<?> type){
+        for(;;){
+            FrameMethods found=FRAME_METHODS.get(type);
+            if(found.revision()==found.bucket().revision&&found.definition()==PlatformMetadata.classRevision(type))return found;
+            FRAME_METHODS.remove(type);
+        }
     }
     private static final List<CodeFields> CODE_FIELDS=new ArrayList<>();
     private static final List<CodeValues> CODE_VALUES=new ArrayList<>();
@@ -360,7 +367,8 @@ public final class CodeSourceBridge {
             // Only this actual definition registration invalidates the lazy
             // selector index. NativeControl still resolves the current BCI and
             // definition generation whenever the selected method is queried.
-            MethodBucket bucket=methodBucket(name);bucket.revision=Math.addExact(bucket.revision,1);codeMethodsPresent=true;
+            MethodBucket bucket=methodBucket(name);
+            try {
             List<CodeMethods> entries=bucket.entries;
             entries.removeIf(entry->!entry.bootstrap()&&entry.loader().get()==null||entry.actual()!=null&&entry.actual().get()==null);
             for(int i=0;i<entries.size();i++){
@@ -371,16 +379,13 @@ public final class CodeSourceBridge {
                 }
             }
             CodeMethods entry=new CodeMethods(name,new Ref<>(loader),loader==null,selected,actual==null?null:new Ref<>(actual));protect(entry,entry.loader(),entry.methods(),entry.actual());entries.add(entry);
+            }finally{bucket.revision=Math.addExact(bucket.revision,1);codeMethodsPresent=true;}
         }
     }
     static Module[] frameSources(StackWalker.StackFrame frame){
         if(codeMethodsPresent&&frame.getByteCodeIndex()>=0){
             boolean candidate=false;Class<?> type=frame.getDeclaringClass();
-            synchronized(CODE_METHODS){
-                MethodBucket bucket=CODE_METHODS.get(type.getName());
-                if(bucket!=null)for(CodeMethods entry:bucket.entries)if(codeMatches(entry.name(),entry.loader(),entry.bootstrap(),entry.actual(),type))
-                    for(String selector:entry.methods())if(frameSelector(frame,selector)){candidate=true;break;}
-            }
+            for(String selector:frameMethods(type).selectors())if(frameSelector(frame,selector)){candidate=true;break;}
             if(candidate){
                 Module[] observed=NativeControl.codeFrame(frame);
                 // A selector describes the current catalogue, not an obsolete
@@ -765,12 +770,17 @@ public final class CodeSourceBridge {
     }
     private static void reapControls(){ControlKey first=(ControlKey)DEAD_CONTROLS.poll();if(first!=null)CONTROLS.reap(first);}
     private static void protect(Object... objects){
+        // Only permanent weak entries qualify. An in-flight publication is not
+        // a completed registration and must still join the writer transaction.
+        boolean registered=true;for(Object object:objects)if(object!=null&&CONTROLS.find(object)==null){registered=false;break;}
+        if(registered)return;
         synchronized(CONTROLS){
             reapControls();
             CONTROLS.addAll(objects);
         }
     }
     private static void protectOne(Object object){
+        if(object==null||CONTROLS.find(object)!=null)return;
         synchronized(CONTROLS){reapControls();if(object!=null)CONTROLS.add(object);}
     }
     static void executionControls(Object object){
@@ -1709,7 +1719,7 @@ public final class CodeSourceBridge {
         }
         if(pending!=null)while(!pending.isEmpty()){
             Object value=pending.removeFirst();if(!found.add(value)||!(value instanceof Map<?,?>||value instanceof Collection<?>))continue;
-            for(Class<?> type=value.getClass();type!=null&&type!=Object.class;type=type.getSuperclass())for(var field:PlatformMetadata.declaredFields(type))
+            for(Class<?> type=value.getClass();type!=null&&type!=Object.class;type=type.getSuperclass())for(var field:PlatformMetadata.controlFields(type))
                 if(!java.lang.reflect.Modifier.isStatic(field.getModifiers())&&(field.getType().isArray()||Map.class.isAssignableFrom(field.getType())||Collection.class.isAssignableFrom(field.getType()))){
                     if(!NativeControl.available()&&!field.trySetAccessible())throw new IllegalStateException("CONTROL_BACKING_FIELD_UNAVAILABLE:"+field.getName());
                     Object child=controlField(field,value);if(child!=null)pending.add(child);

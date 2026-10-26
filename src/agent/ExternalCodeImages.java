@@ -98,9 +98,14 @@ final class ExternalCodeImages {
     private record Instruction(long id,AbstractInsnNode code,String content,Map<LabelNode,Long> labels){}
     private record Handler(long id,long start,long end,long handler,String type){}
     private record Body(MethodNode method,List<Instruction> instructions,List<Handler> handlers){}
-    private record Snapshot(byte[] bytes,ClassNode node,Map<String,Body> methods,Map<String,String> metadata){
+    private record Snapshot(byte[] bytes,ClassNode node,Map<String,Body> methods,Map<String,String> metadata,boolean fullMetadata){
+        Snapshot{protect(metadata);}
         Snapshot(byte[] bytes,ClassNode node,Map<String,Body> methods){
-            this(bytes,node,methods,Map.copyOf(metadataRows(node)));protect(metadata);
+            this(bytes,node,methods,Map.copyOf(metadataRows(node)),true);
+        }
+        Snapshot(byte[] bytes,ClassNode node,Map<String,Body> methods,Snapshot previous){
+            this(bytes,node,methods,previous!=null&&previous.fullMetadata()&&ControlImages.sameBytes(bytes,previous.bytes())
+                    ?previous.metadata():Map.copyOf(metadataRows(node)),true);
         }
     }
     private record Patch(Module[] owners,Snapshot before,Snapshot after,Module[] writers){
@@ -260,7 +265,7 @@ final class ExternalCodeImages {
         if(history==null){
             for(Module owner:owners)gap(owner,"TRANSFORM_INPUT_SOURCE_UNOBSERVED");return null;
         }
-        Snapshot before=history.current==null?materialize(root,history):snapshot(root);
+        Snapshot before=history.current==null?materialize(root,history):snapshot(root,image(root),history.current);
         if(!ControlImages.sameBytes(canonical(history.current.bytes()),canonical(before.bytes())))history.patches.add(new Patch(new Module[0],history.current,before));
         Capture capture=new Capture(input,root,history,before,owners.clone(),writers.clone());ControlImages.protect(capture,capture.owners,capture.writers);return capture;
     }
@@ -269,7 +274,7 @@ final class ExternalCodeImages {
         if(capture.ended)return;capture.ended=true;
         Snapshot after;boolean wholeTree;
         try{wholeTree=library("org.objectweb.asm.tree.ClassNode",output.getClass().getClassLoader()).isInstance(output);}catch(ClassNotFoundException failure){throw new IllegalStateException(failure);}
-        if(wholeTree){after=snapshot(output);TREES.put(new Key(output,true),capture.history);parents(output);}
+        if(wholeTree){after=snapshot(output,image(output),capture.before);TREES.put(new Key(output,true),capture.history);parents(output);}
         else after=memberResult(capture,output);
         Module[] owners=join(capture.owners,consumers);ControlImages.protect((Object)owners);
         if(!ControlImages.sameBytes(canonical(capture.before.bytes()),canonical(after.bytes())))capture.history.patches.add(new Patch(owners,capture.before,after,capture.writers));
@@ -288,7 +293,7 @@ final class ExternalCodeImages {
             // Unchanged members retain their real instruction identities in the projection.
             for(String kind:List.of("methods","fields"))if(!kind.equals(member))type.getField(kind).set(projection,get(capture.root,kind));
             for(int i=0;i<projected.size();i++)if(i!=index)projected.set(i,originals.get(i));
-            return snapshot(projection);
+            return snapshot(projection,image(projection),capture.before);
         }catch(ReflectiveOperationException failure){throw new IllegalStateException("TRANSFORM_MEMBER_RESULT_UNOBSERVED",failure);}
     }
     static synchronized void copied(Object tree,Object visitor){
@@ -348,7 +353,7 @@ final class ExternalCodeImages {
             List<Handler> handlers=new ArrayList<>();for(TryCatchBlockNode handler:method.tryCatchBlocks)handlers.add(new Handler(nextIdentity(),labels.get(handler.start),labels.get(handler.end),labels.get(handler.handler),handler.type));
             bodies.put(key,new Body(method,List.copyOf(instructions),List.copyOf(handlers)));
         }
-        return new Snapshot(bytes.clone(),node,Map.copyOf(bodies));
+        return new Snapshot(bytes.clone(),node,Map.copyOf(bodies),Map.copyOf(metadataRows(node)),parsing==0);
     }
     static synchronized Module[] encoded(Object writer,byte[] bytes){
         History history=WRITERS.get(new Key(writer,false));if(history==null)return new Module[0];
@@ -371,6 +376,9 @@ final class ExternalCodeImages {
         return snapshot(tree,image(tree));
     }
     private static Snapshot snapshot(Object tree,byte[] bytes){
+        return snapshot(tree,bytes,null);
+    }
+    private static Snapshot snapshot(Object tree,byte[] bytes,Snapshot previous){
         ClassNode node=new ClassNode();new ClassReader(bytes).accept(node,0);
         try{
             OpcodeReader opcodes=new OpcodeReader();
@@ -397,7 +405,9 @@ final class ExternalCodeImages {
                 for(int i=0;i<handlers.length;i++){TryCatchBlockNode handler=method.tryCatchBlocks.get(i);handlers[i]=new Handler(id(actualHandlers.get(i)),parsedLabels.get(handler.start),parsedLabels.get(handler.end),parsedLabels.get(handler.handler),handler.type);}
                 bodies.put(method.name+method.desc,new Body(method,List.of(code),List.of(handlers)));
             }
-            Snapshot snapshot=new Snapshot(bytes,node,Map.copyOf(bodies));
+            // Reuse only serialized structure for byte-identical images. The
+            // real instruction/handler identities above are always read anew.
+            Snapshot snapshot=new Snapshot(bytes,node,Map.copyOf(bodies),previous);
             Object[] roots=new Object[bodies.size()+3];roots[0]=bytes;roots[1]=node;roots[2]=snapshot.methods();int at=3;
             // Every instruction in a method retains the same parsedLabels map.
             // Protect the union once for this fresh snapshot, including each
