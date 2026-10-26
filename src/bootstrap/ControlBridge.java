@@ -2508,6 +2508,10 @@ public final class ControlBridge {
     static Class<?> actualMemoryCaller(){
         // getCallerClass always hides MethodHandle/VarHandle frames, including
         // real JDK writers. Inspect the first actual frame outside this bridge.
+        // The installed Native selector follows the same class-identity rule
+        // without materializing Java StackFrame buffers. Admission stays below
+        // at requireUnsafeWriter / requireHandleWriter and the live policies.
+        if(NativeControl.available())return NativeControl.memoryWriterCaller();
         return MEMORY_WRITER_WALKER.walk(MEMORY_CALLER);
     }
     static void requireHandleWriter(Class<?> caller){

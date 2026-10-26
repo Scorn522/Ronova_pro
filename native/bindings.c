@@ -126,6 +126,8 @@ static HMODULE native_java_image,native_instrument_backend;
 static volatile LONG native_library_present,native_library_ready;
 static jclass native_controls,native_definitions;
 static jmethodID native_writer_select,native_writer_raw_select;
+static jclass native_memory_task_bridge;
+static jmethodID native_memory_writer_query,native_memory_writer_wrapper,native_memory_writer_entry;
 static jmethodID native_owner_gate,native_field_gate,native_module_query,native_return_query;
 static jmethodID native_image_query,native_defined_query,native_after_query,native_created_query;
 static jmethodID native_array_query,native_array_policy,native_pin_query,native_registration_query,native_registration_target,native_object_module;
@@ -2672,6 +2674,12 @@ JNIEXPORT jboolean JNICALL Java_dev_ronova_pro_bootstrap_NativeControl_initializ
     native_writer_select=native_original.GetStaticMethodID(env,task,"controlWriterFrame","(Ljava/lang/Class;Ljava/lang/String;)Z");
     native_writer_raw_select=native_original.GetStaticMethodID(env,task,"rawMemoryWriterFrame","(Ljava/lang/Class;Ljava/lang/String;)Z");
     if(!native_writer_select||!native_writer_raw_select){(*native_ti)->Deallocate(native_ti,(unsigned char*)table);return JNI_FALSE;}
+    native_memory_writer_query=native_original.GetStaticMethodID(env,type,"memoryWriter0","()Ljava/lang/Class;");
+    native_memory_writer_wrapper=native_original.GetStaticMethodID(env,type,"memoryWriterCaller","()Ljava/lang/Class;");
+    native_memory_writer_entry=native_original.GetStaticMethodID(env,task,"actualMemoryCaller","()Ljava/lang/Class;");
+    jclass memoryTaskBridge=native_original.FindClass(env,"dev/ronova/pro/bootstrap/TaskBridge");
+    if(memoryTaskBridge){native_memory_task_bridge=(jclass)native_original.NewGlobalRef(env,memoryTaskBridge);native_original.DeleteLocalRef(env,memoryTaskBridge);}
+    if(!native_memory_writer_query||!native_memory_writer_wrapper||!native_memory_writer_entry||!native_memory_task_bridge){(*native_ti)->Deallocate(native_ti,(unsigned char*)table);return JNI_FALSE;}
     if(!code_prepare(env)||!native_unsafe_prepare(env)||!native_file_prepare(env)||!native_thread_prepare(env)||!native_buffer_prepare(env)||!native_arraycopy_prepare(env)){(*native_ti)->Deallocate(native_ti,(unsigned char*)table);return JNI_FALSE;}
     native_tooling_thread_query=native_original.GetStaticMethodID(env,tasks,"nativeThreadOperation","(Ljava/lang/Thread;[Ljava/lang/Module;I)Ljava/lang/Object;");
     native_tooling_frame_query=native_original.GetStaticMethodID(env,tasks,"ownState","(Ljava/lang/Class;)Z");
@@ -2847,6 +2855,41 @@ static jclass native_live_writer(JNIEnv *env,jclass type,int raw){
 }
 JNIEXPORT jclass JNICALL Java_dev_ronova_pro_bootstrap_NativeControl_controlWriter0(JNIEnv *env,jclass type){return native_live_writer(env,type,0);}
 JNIEXPORT jclass JNICALL Java_dev_ronova_pro_bootstrap_NativeControl_rawMemoryWriter0(JNIEnv *env,jclass type){return native_live_writer(env,type,1);}
+
+/* MemoryCaller skips only the two exact bridge classes, not java.base or a
+ * caller namespace. Keep hidden/reflective writers and arbitrary depth. The
+ * stack buffers are native locals; no permission/source result is cached. */
+JNIEXPORT jclass JNICALL Java_dev_ronova_pro_bootstrap_NativeControl_memoryWriter0(JNIEnv *env,jclass type){
+    if(!native_ti||!native_controller||!native_controls||!native_memory_task_bridge
+            ||!native_memory_writer_query||!native_memory_writer_wrapper||!native_memory_writer_entry
+            ||!native_original.IsSameObject(env,type,native_controller)){
+        native_refuse(env,"ACTUAL_MEMORY_WRITER_STACK_UNAVAILABLE");return NULL;
+    }
+    jint depth=0;
+    for(;;){
+        jvmtiFrameInfo frames[8];jint count=0;
+        jvmtiError error=(*native_ti)->GetStackTrace(native_ti,NULL,depth,8,frames,&count);
+        if(error==JVMTI_ERROR_ILLEGAL_ARGUMENT&&depth>0)return NULL;
+        if(error!=JVMTI_ERROR_NONE){native_refuse(env,"ACTUAL_MEMORY_WRITER_STACK_UNAVAILABLE");return NULL;}
+        jint first=0;
+        if(depth==0){
+            if(count<3||frames[0].method!=native_memory_writer_query||frames[1].method!=native_memory_writer_wrapper
+                    ||frames[2].method!=native_memory_writer_entry){native_refuse(env,"ACTUAL_MEMORY_WRITER_ENTRY_REQUIRED");return NULL;}
+            first=3;
+        }
+        for(jint at=first;at<count;at++){
+            jclass declaring=NULL;
+            if((*native_ti)->GetMethodDeclaringClass(native_ti,frames[at].method,&declaring)!=JVMTI_ERROR_NONE||!declaring){
+                native_refuse(env,"ACTUAL_MEMORY_WRITER_FRAME_UNAVAILABLE");return NULL;
+            }
+            if(!native_original.IsSameObject(env,declaring,native_controls)
+                    &&!native_original.IsSameObject(env,declaring,native_memory_task_bridge))return declaring;
+            native_original.DeleteLocalRef(env,declaring);
+        }
+        if(count<8)return NULL;
+        depth+=count;
+    }
+}
 
 JNIEXPORT jint JNICALL Java_dev_ronova_pro_bootstrap_NativeControl_networkBoundaryDepth0(JNIEnv *env,jclass type,jclass boundary,jstring boundaryMethod){
     NativeThread *state=native_thread();

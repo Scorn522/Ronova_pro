@@ -1,5 +1,21 @@
 # Ronova Pro 当前进度
 
+## 2026-10-25：收敛内存写入调用者栈分配与 Buffer 空桥接；实机仍暂停
+
+基线为已推送的 3378b5fd6e55df6eeb09a45896dda23269090e00。第 80 次仍是性能失败：入世 31.278 分钟、出生区 611943 ms，用户报告个位数帧或经常未响应；本批不以源码或独立 JVM 结果覆盖该结论，没有启动第 81 次。核对 region80.jfr 摘要：30 秒内有 7786 个 ObjectAllocationSample 和 16121 个 GCPhaseParallel 事件；分配样本计数不是分配字节占比，不能据此承诺 10～20 倍提速。
+
+当前生产接线不能支持“ThreadLocal 为空即无 Mod 来源”的全局免检查分支：producerEnter 只接受 CREATION_SITES，CreationBoundary 的生产入口跳过构造器／类初始化；helperEnter 记录部分 JDK FJP/CF helper，ModGroupBoundary 的方法入口目前是允许性门槛，并非完整 enter/exit 来源栈。BufferOperation.sources 也可能来自未完成的递归查询，currentBufferSources 表达的是读后贡献；空值不能升级成完整来源证明。普通 JDK 调用仍可能操作受控对象，尚未登记的 FastUtil 载体也有并发登记和发布义务，因此没有引入 java.base 白名单、空线程免查、未登记 Buffer/容器免锁或启动期静默。
+
+已替换 actualMemoryCaller 的已安装后端路径：NativeControl.memoryWriterCaller → memoryWriter0 用实时 JVMTI 栈选出第一个不属于 ControlBridge / TaskBridge 的实际类。Native 先匹配本 native 方法、包装方法和 actualMemoryCaller 的三个真实方法 ID，再逐批读取 8 帧；批大小不是深度上限，较深桥接栈继续读取。没有按 java.base 放行、没有缓存调用者或权限结论。requireUnsafeWriter / requireHandleWriter、目标归属、停止判定、范围与写入收据保持原路径；Native 尚不可用时保留原 Java 隐藏帧选择器。Java 声明、JNI 注册、Native 实现与 ABI 102 同批接齐。
+
+已删除 CodeSourceBridge.executionBufferCall / executionBufferObserved 两个只鉴权、无状态作用的旧桥接，以及 BufferOperation.execution 和全部调用方。读后 observed 贡献、向上一操作传播、真实读写收据、STREAMS 租约与异常清理保留。currentBufferSources 在无观察来源时复用既有空数组，不再每次新建 Module[0]；这只是空容器复用，不缓存来源判断。删除路径有 attempt-80 加载线程栈依据。
+
+统一 build-local-memory-writer-stack.log 成功 26s（20 tasks：12 executed、8 up-to-date）：Bootstrap Java、Control Native、Storage Native 实际重编；Core、Agent、Prelaunch Java 复用；jar / reobfJar 成功。Core SHA256 23CB9EB7AD2AFA32D501D47384DCD6F161A6BA5CFE735622531E4A666EFD1CF1，Control DLL 49E24C784FEDEB29D869B06B63BDEAA627F212FF14FC0BF43AA963B9DD93C295，Native ABI 102。既有 Host 完成端口比较警告保留。
+
+复用 runRuntimeHotPathChecks 的显式 nativeMemoryWriters 模式，只启动一次独立 JVM：真实 premain / Native 后端安装成功，VarHandle CAS/getAndAdd、ReentrantLock、CompletableFuture 阶段、DirectByteBuffer 读写及外部反射伪造写入口拒绝均通过；11s、退出码 0。未启动 Minecraft、旧验收矩阵或额外性能基准；该检查不代表完整停组／卸载恢复或游戏性能通过。当前实例仍保留第 80 次候选，新产物仅更新仓库分发 JAR。
+
+后续仍需处理完整来源查询的重复工作和 Mixin 快照／登记成本。若要用线程来源栈完全替代物理栈，必须先建立并验证实际入口覆盖、异步与 Native 来源、未知状态、晚到登记和生命周期失效；当前没有实现或声称这项覆盖。实机保持暂停。本批源码、候选和公开摘要已暂存；当前 HEAD 仍为 3378b5fd6e55df6eeb09a45896dda23269090e00，尚未提交或推送。
+
 ## 2026-10-25：第 80 次实机完成，启动与世界内性能仍失败；本批收口后暂停
 
 第 79 次 Core 995E7289 实际入世仍耗时约 29.5 分钟（前端约 19 分钟、出生区约 517 秒），用户反馈仍为个位数帧或经常未响应，性能失败。沿用 load79.jfr / loading-threads.txt 定位的四个根因；补充 play79.jfr 有 34 个 Java 执行样本和 7 个监视器事件，样本计数不作为 FPS 或提速比例。第 79 次三个维度保存完成，17:47:43.7207211Z 自行退出码 0，没有强制终止；Time/DayTime 从 2376 推进到 2743。TASK_CAPTURE_PUBLICATION_IN_FLIGHT、RONOVA_PRO_UNSETTLED_SHUTDOWN、NATIVE_TLS_REFUSED、NATIVE_MEMORY_RELEASE_BUSY 均为 0。

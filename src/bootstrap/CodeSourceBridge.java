@@ -575,10 +575,6 @@ public final class CodeSourceBridge {
         if(AUTHORITY.getCallerClass()!=ControlBridge.class)throw new SecurityException("ACTUAL_MEMORY_READ_BOUNDARY_REQUIRED");
         return holder==null?NO_FRAME_SOURCES:ControlBridge.objectSources(holder);
     }
-    static Object executionBufferCall(Object receiver,Class<?> declaring,String method){
-        if(AUTHORITY.getCallerClass()!=ResourceBridge.class)throw new SecurityException("ACTUAL_BUFFER_VALUE_CALL_REQUIRED");
-        return null;
-    }
     static Object executionByteMemoryReadBefore(Object carrier,long offset,long length){
         if(AUTHORITY.getCallerClass()!=ControlBridge.class)throw new SecurityException("ACTUAL_MEMORY_READ_BOUNDARY_REQUIRED");
         return carrier==null?null:ControlBridge.objectSources(carrier);
@@ -589,9 +585,6 @@ public final class CodeSourceBridge {
     }
     static void executionByteMemoryReadEnd(Object token){
         if(AUTHORITY.getCallerClass()!=ControlBridge.class)throw new SecurityException("ACTUAL_MEMORY_READ_COMPLETION_REQUIRED");
-    }
-    static void executionBufferObserved(Object token,Module[] sources){
-        if(AUTHORITY.getCallerClass()!=ResourceBridge.class)throw new SecurityException("ACTUAL_BUFFER_VALUE_RESULT_REQUIRED");
     }
     public static void executionHeapAfter(Object token,int instruction,Object reference){
         if(token==null)return;ExecutionFlow.heapAfter(token,instruction,reference,executionSite(token));

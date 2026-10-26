@@ -101,7 +101,7 @@ public final class NativeControl {
                 if(dll==null)return installFailure("OBJECT_CLONE_JNI_PAYLOAD_ABSENT",false);
                 nativeLoadAttempted=true;
                 System.load(dll.toString());nativeLoaded=true;
-                if(abi()!=101)throw new UnsatisfiedLinkError("NATIVE_CONTROL_ABI");
+                if(abi()!=102)throw new UnsatisfiedLinkError("NATIVE_CONTROL_ABI");
             }
             if(!nativeBoundaryInstalled){
                 nativeHandoffRetryable=false;
@@ -186,6 +186,10 @@ public final class NativeControl {
     static Class<?> controlWriterCaller(){
         if(CALLER.getCallerClass()!=ControlBridge.class)throw new SecurityException("ACTUAL_CONTROL_WRITER_READER_REQUIRED");
         return controlWriter0();
+    }
+    static Class<?> memoryWriterCaller(){
+        // Native authenticates this wrapper and actualMemoryCaller together.
+        return memoryWriter0();
     }
     private static Class<?> definitionDirectoryCaller(){
         Class<?> caller=CALLER.walk(frames->frames.map(StackWalker.StackFrame::getDeclaringClass)
@@ -932,6 +936,7 @@ public final class NativeControl {
     private static native java.util.UUID returnIdentifier0();
     private static native java.util.concurrent.CompletableFuture<?> returnFuture0();
     private static native Class<?> controlWriter0();
+    private static native Class<?> memoryWriter0();
     private static native Class<?> rawMemoryWriter0();
     private static native boolean initialize0(Class<?> tasks,Class<?> definitions);
     private static native java.lang.reflect.Field[] vmDeclaredFields0(Class<?> type);

@@ -3,6 +3,7 @@ package dev.ronova.pro;
 import java.io.*;
 import java.lang.ref.*;
 import java.lang.reflect.*;
+import java.lang.invoke.*;
 import java.net.Socket;
 import java.nio.ByteBuffer;
 import java.util.*;
@@ -103,7 +104,28 @@ public final class RuntimeHotPathCheck {
         require(!critical(view),"removed process association cached as permission");
     }
     public static void main(String[] args)throws Exception {
+        if(args.length==1&&args[0].equals("installed-memory-writers")){installedMemoryWriters();return;}
         origins();publications();registrations();resources();
         System.out.println("RUNTIME_HOT_PATH_CHECKS_PASS origins publication_lifetime field_gate_roles late_registration resource_subclasses live_process_views; METADATA_ONLY");
+    }
+    private static void installedMemoryWriters()throws Exception {
+        Class<?> nativeControl=Class.forName(PREFIX+"NativeControl",false,null);
+        require((boolean)nativeControl.getMethod("available").invoke(null),"actual premain Native backend required");
+        require(CONTROL.getClassLoader()==null,"actual bootstrap bridge required");
+        Bean bean=new Bean();VarHandle value=MethodHandles.lookup().findVarHandle(Bean.class,"value",int.class);
+        value.setVolatile(bean,7);require(value.compareAndSet(bean,7,11),"legitimate VarHandle CAS refused");
+        require((int)value.getAndAdd(bean,2)==11&&bean.value==13,"legitimate VarHandle update changed");
+        var lock=new java.util.concurrent.locks.ReentrantLock();lock.lock();
+        try{require(lock.isHeldByCurrentThread(),"legitimate JDK lock CAS refused");}finally{lock.unlock();}
+        require(java.util.concurrent.CompletableFuture.completedFuture(3).thenApply(n->n+4).join()==7,"legitimate task stage failed");
+        ByteBuffer buffer=ByteBuffer.allocateDirect(16);buffer.putLong(0,0x123456789abcdefL);
+        require(buffer.getLong(0)==0x123456789abcdefL,"real buffer read/write lifecycle changed");
+        boolean refused=false;
+        try{CONTROL.getMethod("beginHandleMutation",Object.class,long.class,String.class).invoke(null,bean,0L,"Int");}
+        catch(InvocationTargetException failure){
+            refused=failure.getCause() instanceof SecurityException&&"ACTUAL_HANDLE_WRITE_REQUIRED".equals(failure.getCause().getMessage());
+        }
+        require(refused,"foreign reflective caller borrowed the handle writer entry");
+        System.out.println("INSTALLED_MEMORY_WRITERS_PASS real_Native VarHandle_CAS JDK_lock CF_stage direct_buffer foreign_caller_refused; NO_GAMEPLAY_CLAIM");
     }
 }

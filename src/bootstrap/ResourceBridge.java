@@ -364,7 +364,7 @@ public final class ResourceBridge {
     private static final class BufferOperation {
         final Thread caller=Thread.currentThread();final Class<?> declaring;final String method;
         final List<BufferUse> uses;final BufferOperation previous=BUFFER_OPERATIONS.get();boolean closed;
-        BufferWrite write;BufferRead read;Object execution,framework;Module[] sources;
+        BufferWrite write;BufferRead read;Object framework;Module[] sources;
         Set<Module> observed;
         BufferOperation(Class<?> declaring,String method,List<BufferUse> uses){this.declaring=declaring;this.method=method;this.uses=uses;}
         void observe(Module[] sources){
@@ -1840,7 +1840,7 @@ public final class ResourceBridge {
         for(BufferOperation operation=BUFFER_OPERATIONS.get();operation!=null;operation=operation.previous)if(!operation.closed&&operation.observed!=null&&!operation.observed.isEmpty()){
             if(sources==null)sources=Collections.newSetFromMap(new IdentityHashMap<>());sources.addAll(operation.observed);
         }
-        return sources==null?new Module[0]:sources.toArray(new Module[0]);
+        return sources==null?ControlBridge.NO_SOURCES:sources.toArray(new Module[0]);
     }
     /** Called under STREAMS; only live storage uses need an entry in the operation. */
     private static void observeBufferUse(List<BufferUse> uses,Object value){
@@ -1941,7 +1941,6 @@ public final class ResourceBridge {
             synchronized(STREAMS){for(BufferUse use:uses){use.view.active++;use.view.storage.active++;}}
             BUFFER_OPERATIONS.set(operation);
             try{if(receiver instanceof Buffer buffer){
-                operation.execution=CodeSourceBridge.executionBufferCall(buffer,declaring,method);
                 if(read)operation.read=bufferRead(buffer,arguments,method,operation);
                 if(write)operation.write=bufferWrite(buffer,arguments,method,operation);
             }}catch(RuntimeException|Error failure){
@@ -1968,7 +1967,6 @@ public final class ResourceBridge {
                 operation.observe(operation.read.before);operation.observe(ControlBridge.bufferReadSources(operation.read.receipt));
             }
             if(operation.observed!=null&&!operation.observed.isEmpty()){
-                CodeSourceBridge.executionBufferObserved(operation.execution,operation.observed.toArray(new Module[0]));
                 if(operation.previous!=null&&!operation.previous.closed)operation.previous.observe(operation.observed);
             }
         }catch(RuntimeException|Error failure){failed=failure;}
