@@ -6,6 +6,7 @@ import java.util.concurrent.*;
 
 /** Real filesystem / force / reopen tests. No Minecraft or model ACK implementation. */
 public final class JournalCheck {
+    private static final int VERSION=dev.ronova.pro.persistence.JournalLineage.VERSION;
     public static void main(String[] args) throws Exception {
         Path base=Path.of(args[0]);Files.createDirectories(base);
         UUID realm;
@@ -16,12 +17,14 @@ public final class JournalCheck {
             List<CompletableFuture<Void>> acks=new ArrayList<>();
             for(int i=0;i<100;i++)acks.add(j.append("INTENT\t"+i));
             CompletableFuture.allOf(acks.toArray(CompletableFuture[]::new)).get(10,TimeUnit.SECONDS);
-            require(j.history().size()==106,"real acknowledgements plus five migration digests and header");
+            require(j.history().size()==100+VERSION,"real acknowledgements plus migration digests and header");
+            require(j.verifyReplay().get(10,TimeUnit.SECONDS).contains("一致")&&j.history().size()==100+VERSION,"read-only replay validation changed effects or failed");
+            j.append("INTENT\tafter-replay").get(10,TimeUnit.SECONDS);
         }
         try(IntentJournal j=new IntentJournal(base.resolve("normal"))) {
             require(j.realm.equals(realm),"realm survives reopen");
-            require(j.history().size()==106,"frames survive reopen");
-            for(int i=0;i<100;i++)require(j.history().get(i+6).equals("INTENT\t"+i),"ordered frame "+i);
+            require(j.history().size()==101+VERSION,"frames survive replay verification and reopen");
+            for(int i=0;i<100;i++)require(j.history().get(i+VERSION).equals("INTENT\t"+i),"ordered frame "+i);
         }
         try(IntentJournal j=new IntentJournal(base.resolve("delay"))) {
             var f=IntentJournal.class.getDeclaredField("writer");f.setAccessible(true);
@@ -29,7 +32,7 @@ public final class JournalCheck {
             ((Executor)f.get(j)).execute(()->{started.countDown();try{release.await();}catch(InterruptedException x){Thread.currentThread().interrupt();}});
             started.await();
             var ack=j.append("INTENT\tdelayed");
-            require(!ack.isDone() && j.history().size()==6,"queue acceptance is not ACK");
+            require(!ack.isDone() && j.history().size()==VERSION,"queue acceptance is not ACK");
             release.countDown();ack.get(10,TimeUnit.SECONDS);
         }
         Path torn=base.resolve("torn");
@@ -83,12 +86,12 @@ public final class JournalCheck {
         require(Arrays.equals(v1Original,Files.readAllBytes(v1Path))&&Arrays.equals(v2Original,Files.readAllBytes(v2Path)),"both legacy files byte-identical");
         try(IntentJournal j=new IntentJournal(v2Migration)) { require(j.healthy(),"three-version reopen"); }
         Path futureFile=base.resolve("future-file");Files.createDirectories(futureFile);
-        frame(futureFile.resolve("intent-v7.log"),"HEADER\t7\t"+UUID.randomUUID());
+        frame(futureFile.resolve("intent-v"+(VERSION+1)+".log"),"HEADER\t"+(VERSION+1)+"\t"+UUID.randomUUID());
         try(IntentJournal j=new IntentJournal(futureFile)) { require(!j.healthy(),"future filename rejects writes"); }
-        require(Files.size(futureFile.resolve("intent-v6.log"))==0,"future file never creates a new writable V6 history");
+        require(Files.size(futureFile.resolve("intent-v"+VERSION+".log"))==0,"future file never creates a new writable history");
         Path prefix=base.resolve("migration-prefix");Files.createDirectories(prefix);
-        UUID prefixRealm=UUID.randomUUID();frame(prefix.resolve("intent-v6.log"),"HEADER\t6\t"+prefixRealm);
-        try(IntentJournal j=new IntentJournal(prefix)) { require(j.healthy()&&j.history().size()==6,"crashed valid migration prefix resumes"); }
+        UUID prefixRealm=UUID.randomUUID();frame(prefix.resolve("intent-v"+VERSION+".log"),"HEADER\t"+VERSION+"\t"+prefixRealm);
+        try(IntentJournal j=new IntentJournal(prefix)) { require(j.healthy()&&j.history().size()==VERSION,"crashed valid migration prefix resumes"); }
         Path v3Migration=base.resolve("v3-migration");Files.createDirectories(v3Migration);
         UUID v3Realm=UUID.randomUUID();Path oldV3=v3Migration.resolve("intent-v3.log");
         frame(oldV3,"HEADER\t3\t"+v3Realm);
@@ -129,14 +132,40 @@ public final class JournalCheck {
             CountDownLatch entered=new CountDownLatch(1),release=new CountDownLatch(1);
             ((Executor)f.get(j)).execute(()->{entered.countDown();try { release.await(); }catch(InterruptedException ex) { Thread.currentThread().interrupt(); }});
             require(entered.await(5,TimeUnit.SECONDS),"writer timing blocker entered");
-            List<CompletableFuture<Void>> pending=new ArrayList<>();
-            for(int i=0;i<256;i++)pending.add(j.append("BUDGET\t"+i));
+            List<CompletableFuture<Void>> pending=new ArrayList<>();List<Integer> acknowledged=new ArrayList<>();
+            for(int i=0;i<256;i++){int index=i;pending.add(j.append("BUDGET\t"+i).thenRun(()->acknowledged.add(index)));}
             var rejected=j.append("BUDGET\tretry");require(rejected.isCompletedExceptionally()&&j.healthy(),"queue budget is backpressure, not corrupt truth");
             release.countDown();CompletableFuture.allOf(pending.toArray(CompletableFuture[]::new)).get(10,TimeUnit.SECONDS);
+            for(int i=0;i<256;i++)require(acknowledged.get(i)==i,"durable batch acknowledgements retain order");
             j.retryRejected("BUDGET\tretry",rejected).get(10,TimeUnit.SECONDS);
             require(j.history().stream().filter("BUDGET\tretry"::equals).count()==1,"rejected admission resumes once");
         }
+        failedBatch(base.resolve("failed-batch"));
+        closeDrain(base.resolve("close-drain"));
         System.out.println("JOURNAL_REAL_IO_CHECKS_PASS");
+    }
+    private static void failedBatch(Path directory)throws Exception {
+        try(IntentJournal journal=new IntentJournal(directory)){
+            var field=IntentJournal.class.getDeclaredField("writer");field.setAccessible(true);
+            CountDownLatch entered=new CountDownLatch(1),release=new CountDownLatch(1);
+            ((Executor)field.get(journal)).execute(()->{entered.countDown();try{release.await();}catch(InterruptedException failure){Thread.currentThread().interrupt();}});
+            require(entered.await(5,TimeUnit.SECONDS),"failure batch blocker entered");
+            long before=Files.size(directory.resolve("intent-v"+VERSION+".log"));
+            var written=journal.append("BATCH\tWRITTEN_BEFORE_FAILURE");var invalid=journal.append("");var later=journal.append("BATCH\tAFTER_FAILURE");
+            release.countDown();
+            for(var ack:List.of(written,invalid,later))try{ack.get(10,TimeUnit.SECONDS);throw new AssertionError("failed batch acknowledged");}
+            catch(ExecutionException expected){require(!(expected.getCause() instanceof RejectedExecutionException),"I/O batch failure cannot be retried as no-byte rejection");}
+            require(Files.size(directory.resolve("intent-v"+VERSION+".log"))>before,"real batch bytes precede failure");
+            require(!journal.healthy()&&!journal.recorded("BATCH\tWRITTEN_BEFORE_FAILURE")&&journal.history().size()==VERSION,"unforced batch does not publish durable authority");
+            require(journal.retryRejected("BATCH\tWRITTEN_BEFORE_FAILURE",written)==written,"uncertain write never retried");
+            require(journal.append("FORBIDDEN").isCompletedExceptionally(),"writer remains closed after partial batch failure");
+        }
+    }
+    private static void closeDrain(Path directory)throws Exception {
+        IntentJournal journal=new IntentJournal(directory);List<CompletableFuture<Void>> pending=new ArrayList<>();
+        try{for(int i=0;i<80;i++)pending.add(journal.append("CLOSE\t"+i));}finally{journal.close();}
+        for(var ack:pending)require(ack.isDone()&&!ack.isCompletedExceptionally(),"close drains every admitted batch before releasing the file");
+        try(IntentJournal reopened=new IntentJournal(directory)){require(reopened.history().size()==VERSION+80,"closed final batch survives reopen");}
     }
     private static void segmented(Path directory)throws Exception {
         // A real logical intent larger than both a physical frame and the former
@@ -154,7 +183,7 @@ public final class JournalCheck {
         }
         require(dev.ronova.pro.persistence.JournalLineage.read(directory).records().equals(committed),"early launcher reads complete original segmented intent");
         require(dev.ronova.pro.persistence.JournalLineage.decodeText(encoded).equals(text),"source locator text retains every UTF16 unit");
-        Path file=directory.resolve("intent-v6.log");
+        Path file=directory.resolve("intent-v"+VERSION+".log");
         try(var channel=java.nio.channels.FileChannel.open(file,StandardOpenOption.WRITE)){channel.truncate(channel.size()-1);}
         long tornSize=Files.size(file);
         try(IntentJournal journal=new IntentJournal(directory)) {

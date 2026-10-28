@@ -19,22 +19,93 @@ public final class ResourceBridge {
     private static final Object[] NO_BUFFER_ARGUMENTS=new Object[0];
     private static final StackWalker WALKER=StackWalker.getInstance(Set.of(StackWalker.Option.RETAIN_CLASS_REFERENCE,
             StackWalker.Option.SHOW_HIDDEN_FRAMES));
+    private static final Class<?> BUFFER_STACK_TRAVERSER=bufferStackTraverser();
+    private static Class<?> bufferStackTraverser(){
+        try{
+            Class<?> type=Class.forName("java.lang.StackStreamFactory$StackFrameTraverser",false,null);
+            return type.getClassLoader()==null&&type.getModule()==StackWalker.class.getModule()?type:null;
+        }catch(ClassNotFoundException|LinkageError|SecurityException unavailable){return null;}
+    }
+    private static boolean resourceBridgeFrame(Class<?> type){
+        if(type==ResourceBridge.class)return true;
+        return type.getClassLoader()==null&&type.getName().startsWith("dev.ronova.pro.bootstrap.")
+                &&type.getNestHost()==ResourceBridge.class;
+    }
     private static final class PlatformBoundary implements java.util.function.Function<java.util.stream.Stream<StackWalker.StackFrame>,StackWalker.StackFrame>{
         public StackWalker.StackFrame apply(java.util.stream.Stream<StackWalker.StackFrame> frames){
             var cursor=frames.iterator();
             while(cursor.hasNext()){
                 var frame=cursor.next();Class<?> type=frame.getDeclaringClass();
-                if(type==ResourceBridge.class)continue;
                 // Only a class in the same runtime package can share this
                 // bootstrap nest. Foreign resource callers need no nest query.
-                if(type.getClassLoader()==null&&type.getName().startsWith("dev.ronova.pro.bootstrap.")
-                        &&type.getNestHost()==ResourceBridge.class)continue;
+                if(resourceBridgeFrame(type))continue;
                 return frame;
             }
             throw new NoSuchElementException();
         }
     }
     private static final PlatformBoundary PLATFORM_BOUNDARY=new PlatformBoundary();
+    private static final class SourceFramePrefix {
+        final StackWalker.StackFrame frame;SourceFramePrefix next;
+        SourceFramePrefix(StackWalker.StackFrame frame){this.frame=frame;}
+    }
+    /** One live walk supplies the actual platform caller and, when needed, its sources. */
+    private static final class BufferEntry implements java.util.function.Function<Object,Object>,Iterator<StackWalker.StackFrame> {
+        final Object receiver;final Object[] arguments;final Class<?> declaring;final String method;final boolean callSite;
+        final Thread caller=Thread.currentThread();boolean used,active,sourcesSupplied;BufferOperation operation;
+        Iterator<StackWalker.StackFrame> remaining;
+        // The two exported overloads and their real platform caller fit here.
+        // Keep unusual deeper bridge prefixes without bounding the traversal.
+        StackWalker.StackFrame first,second,third;
+        SourceFramePrefix overflow,last;int saved,read;
+        BufferEntry(Object receiver,Object[] arguments,Class<?> declaring,String method,boolean callSite){
+            if(WALKER.getCallerClass()!=ResourceBridge.class)throw new SecurityException("ACTUAL_BUFFER_ENTRY_OWNER_REQUIRED");
+            this.receiver=receiver;this.arguments=arguments;this.declaring=declaring;this.method=method;this.callSite=callSite;
+        }
+        private void authenticate(){
+            while(remaining.hasNext()){
+                var frame=remaining.next();
+                switch(saved++){
+                    case 0->first=frame;case 1->second=frame;case 2->third=frame;
+                    default->{SourceFramePrefix next=new SourceFramePrefix(frame);if(last==null)overflow=next;else last.next=next;last=next;}
+                }
+                if(resourceBridgeFrame(frame.getDeclaringClass()))continue;
+                if(callSite?frame.getDeclaringClass()!=GuardedCalls.class||!frame.getMethodName().equals("buffer"):
+                        frame.getDeclaringClass()!=declaring||!frame.getMethodName().equals(method))
+                    throw new SecurityException("ACTUAL_FILE_RESOURCE_BOUNDARY_REQUIRED");
+                return;
+            }
+            throw new NoSuchElementException();
+        }
+        public boolean hasNext(){return read<saved||remaining.hasNext();}
+        public StackWalker.StackFrame next(){
+            if(read>=saved)return remaining.next();
+            return switch(read++){
+                case 0->first;case 1->second;case 2->third;
+                default->{var frame=overflow.frame;overflow=overflow.next;yield frame;}
+            };
+        }
+        @SuppressWarnings("unchecked")
+        public Object apply(Object stream){
+            // Object -> Object is the erased Function method itself: no
+            // synthetic bridge may hide an external or reflective caller.
+            if(BUFFER_STACK_TRAVERSER==null||WALKER.getCallerClass()!=BUFFER_STACK_TRAVERSER
+                    ||used||caller!=Thread.currentThread()||!(stream instanceof java.util.stream.Stream<?>))
+                throw new SecurityException("ACTUAL_BUFFER_STACK_CALLBACK_REQUIRED");
+            used=true;active=true;
+            try{remaining=((java.util.stream.Stream<StackWalker.StackFrame>)stream).iterator();authenticate();return bufferOperation(receiver,arguments,declaring,method,this);}
+            finally{active=false;operation=null;remaining=null;first=null;second=null;third=null;overflow=null;last=null;}
+        }
+    }
+    /** Structural validation only. The source-query boundary authenticates
+     * its actual ResourceBridge caller before asking about this cursor. This
+     * helper neither consumes a frame nor publishes/returns a source verdict. */
+    static void requireBufferEntryCursor(Iterator<StackWalker.StackFrame> frames){
+        if(!(frames instanceof BufferEntry entry)
+                ||!entry.active||entry.caller!=Thread.currentThread()||entry.sourcesSupplied
+                ||entry.remaining==null||entry.operation==null||entry.operation.closed)
+            throw new SecurityException("ACTUAL_BUFFER_SOURCE_CURSOR_REQUIRED");
+    }
     private static final ReferenceQueue<Object> RETIRED=new ReferenceQueue<>();
     private static final HashMap<Key,StreamRecord> STREAMS=new HashMap<>();
     private static final HashMap<Key,WrapperRecord> WRAPPERS=new HashMap<>();
@@ -1533,6 +1604,7 @@ public final class ResourceBridge {
             view.storage.cleaner=new WeakReference<>(cleaner);BUFFER_CLEANERS.put(new Key(cleaner,true),view.storage);}
     }
     public static void bufferConstructed(Buffer buffer,Class<?> declaring){
+        if(fastBufferConstructed(buffer,declaring))return;
         platform(declaring,"<init>");if(!BufferPlatform.TYPES.contains(declaring))throw new SecurityException("ACTUAL_BUFFER_CONSTRUCTOR_REQUIRED");
         Boolean observing=FILE_OBSERVING.get();FILE_OBSERVING.set(Boolean.TRUE);
         try{
@@ -1619,17 +1691,21 @@ public final class ResourceBridge {
     private static boolean contains(BufferSpan outer,BufferSpan inner){
         return outer.holder==inner.holder&&outer.storage==inner.storage&&inner.address>=outer.address&&inner.bytes<=outer.bytes&&inner.address-outer.address<=outer.bytes-inner.bytes;
     }
-    private static Module[] bufferOperationSources(BufferOperation operation){
+    private static Module[] bufferOperationSources(BufferOperation operation,BufferEntry entry){
+        if(WALKER.getCallerClass()!=ResourceBridge.class||entry!=null&&(!entry.active||entry.caller!=Thread.currentThread()||entry.operation!=operation))
+            throw new SecurityException("ACTUAL_BUFFER_SOURCE_OPERATION_REQUIRED");
         // This snapshot belongs only to this entering operation. Storage use
         // consumes it immediately; a data-only path asks only after finding a
         // real span that will have a receipt. No later operation inherits it.
         if(operation.sources==null){
             Module[] captured=IoBridge.currentSources();if(captured==null)captured=currentFileSources();
-            operation.sources=ControlBridge.resourceOperationSources(captured);
+            try{operation.sources=entry==null?ControlBridge.resourceOperationSources(captured):ControlBridge.resourceOperationSources(captured,entry);}
+            finally{if(entry!=null)entry.sourcesSupplied=true;}
         }
         return operation.sources;
     }
-    private static BufferRead bufferRead(Buffer buffer,Object[] arguments,String method,BufferOperation operation){
+    private static BufferRead bufferRead(Buffer buffer,Object[] arguments,String method,BufferOperation operation,BufferEntry entry){
+        if(WALKER.getCallerClass()!=ResourceBridge.class)throw new SecurityException("ACTUAL_BUFFER_DATA_ENTRY_REQUIRED");
         if(!BufferPlatform.READS.contains(method))return null;
         try{
             long position=(Integer)CodeSourceBridge.controlField(BufferPlatform.POSITION,buffer),index=position,bytes=valueBytes(buffer,method);int width=elementBytes(buffer);
@@ -1644,14 +1720,15 @@ public final class ResourceBridge {
                 destination=array;destinationOffset=layout[0]+offset*width;bytes=count*width;break;
             }
             BufferSpan source=bufferSpan(buffer,index,bytes);if(source==null)return null;
-            Module[] sources=bufferOperationSources(operation);
+            Module[] sources=bufferOperationSources(operation,entry);
             Object receipt=destination==null?ControlBridge.bufferReadBefore(source.holder,source.address,source.bytes,sources)
                     :ControlBridge.bufferDataBefore(destination,destinationOffset,bytes,source.holder,source.address,source.bytes,true,sources);
             try{return new BufferRead(receipt,ControlBridge.bufferReadSources(receipt));}
             catch(RuntimeException|Error failure){try{ControlBridge.bufferDataFinished(receipt,false);}catch(Throwable cleanup){if(cleanup!=failure)failure.addSuppressed(cleanup);}throw failure;}
         }catch(IllegalAccessException failure){throw new IllegalStateException("BUFFER_READ_LAYOUT_UNAVAILABLE",failure);}
     }
-    private static BufferWrite bufferWrite(Buffer buffer,Object[] arguments,String method,BufferOperation operation){
+    private static BufferWrite bufferWrite(Buffer buffer,Object[] arguments,String method,BufferOperation operation,BufferEntry entry){
+        if(WALKER.getCallerClass()!=ResourceBridge.class)throw new SecurityException("ACTUAL_BUFFER_DATA_ENTRY_REQUIRED");
         if(!method.startsWith("put")&&!method.equals("_put")&&!method.equals("compact"))return null;
         try{
             int width=elementBytes(buffer);long index=(Integer)CodeSourceBridge.controlField(BufferPlatform.POSITION,buffer),limit=(Integer)CodeSourceBridge.controlField(BufferPlatform.LIMIT,buffer),count=1;
@@ -1699,7 +1776,7 @@ public final class ResourceBridge {
             BufferSpan destination=bufferSpan(buffer,index,bytes);if(destination==null)return null;
             for(BufferOperation outer=BUFFER_OPERATIONS.get();outer!=null;outer=outer.previous){BufferWrite write=outer.write;
                 if(write!=null&&contains(write.span,destination))return null;}
-            Module[] sources=bufferOperationSources(operation);
+            Module[] sources=bufferOperationSources(operation,entry);
             if(valueSources!=null&&valueSources.length!=0){
                 Set<Module> combined=Collections.newSetFromMap(new IdentityHashMap<>());Collections.addAll(combined,sources);Collections.addAll(combined,valueSources);sources=combined.toArray(new Module[0]);
             }
@@ -1910,7 +1987,102 @@ public final class ResourceBridge {
         return bufferOperation(receiver,NO_BUFFER_ARGUMENTS,declaring,method);
     }
     public static Object bufferOperation(Object receiver,Object[] arguments,Class<?> declaring,String method){
-        platform(declaring,method);if(declaring!=FILE_CHANNEL&&!BufferPlatform.TYPES.contains(declaring))throw new SecurityException("ACTUAL_BUFFER_OPERATION_REQUIRED");
+        if(scalarBufferOperation(arguments,method)&&scalarBufferFast(receiver))return null;
+        if(java.util.Set.of("duplicate","slice","order","get","put","getArray","putArray","putBuffer","asCharBuffer","asShortBuffer","asIntBuffer","asLongBuffer","asFloatBuffer","asDoubleBuffer").contains(method)){
+            boolean fast=bufferBulkFast(receiver,null);
+            for(Object argument:arguments)if(argument instanceof Buffer||argument!=null&&argument.getClass().isArray())fast&=bufferBulkFast(receiver,argument);
+            if(fast)return null;
+        }
+        // Nested controller work still performs its original caller check,
+        // but needs no retained source cursor. Both paths keep the existing
+        // small initial frame buffer; the source traversal has no depth cap.
+        if(FILE_OBSERVING.get()==Boolean.TRUE){
+            platform(declaring,method);if(declaring!=FILE_CHANNEL&&!BufferPlatform.TYPES.contains(declaring))throw new SecurityException("ACTUAL_BUFFER_OPERATION_REQUIRED");
+            return null;
+        }
+        if(BUFFER_STACK_TRAVERSER==null){
+            platform(declaring,method);return bufferOperation(receiver,arguments,declaring,method,null);
+        }
+        return WALKER.walk(new BufferEntry(receiver,arguments,declaring,method,false));
+    }
+    static Object bufferCallSite(Object receiver,Object[] arguments,Class<?> declaring,String method){
+        if(WALKER.getCallerClass()!=GuardedCalls.class||declaring.getClassLoader()!=null||!BufferPlatform.TYPES.contains(declaring))
+            throw new SecurityException("ACTUAL_MOD_BUFFER_CALL_REQUIRED");
+        boolean fast=bufferBulkFast(receiver,null);
+        for(Object argument:arguments)if(argument instanceof Buffer||argument!=null&&argument.getClass().isArray())fast&=bufferBulkFast(receiver,argument);
+        if(fast)return null;
+        return WALKER.walk(new BufferEntry(receiver,arguments,declaring,method,true));
+    }
+    static void bufferCallSiteFinished(Object token,boolean written){
+        if(WALKER.getCallerClass()!=GuardedCalls.class)throw new SecurityException("ACTUAL_MOD_BUFFER_COMPLETION_REQUIRED");
+        if(token==null)return;
+        if(!(token instanceof BufferOperation operation)||operation.caller!=Thread.currentThread())throw new SecurityException("ACTUAL_BUFFER_OPERATION_TOKEN_REQUIRED");
+        finishEnteredBufferOperation(operation,written);
+    }
+    private static boolean scalarBufferOperation(Object[] arguments,String method){
+        if(!switch(method){case "get","_get","put","_put","getByte","getChar","getShort","getInt","getLong","getFloat","getDouble",
+                "putByte","putChar","putShort","putInt","putLong","putFloat","putDouble"->true;default->false;})return false;
+        if(arguments.length>2)return false;
+        for(Object argument:arguments)if(!(argument instanceof Number)&&!(argument instanceof Character))return false;
+        return true;
+    }
+    private static boolean scalarBufferUnrestricted(Buffer buffer){
+        synchronized(STREAMS){
+            BufferView view=BUFFERS.get(new Key(buffer,false));
+            return view==null||scalarStorageUnrestricted(view.storage);
+        }
+    }
+    public static boolean scalarBufferFast(Object receiver){
+        return ScalarPolicy.directBufferCandidate(receiver)
+                &&(!ControlBridge.hasStoppedModules()||scalarBufferUnrestricted((Buffer)receiver));
+    }
+    public static boolean bufferBulkFast(Object receiver,Object other){
+        if(!scalarBufferFast(receiver)||ControlBridge.controlled(receiver)||SourceMapBridge.registered(receiver)||BackingBridge.registeredBacking(receiver))return false;
+        if(other==null)return true;
+        if(other instanceof Buffer)return scalarBufferFast(other)&&!ControlBridge.controlled(other)&&!SourceMapBridge.registered(other)&&!BackingBridge.registeredBacking(other);
+        return ControlBridge.ordinaryPrimitiveArray(other);
+    }
+    private static boolean fastBufferConstructed(Buffer buffer,Class<?> declaring){
+        if(declaring.getClassLoader()!=null||buffer.getClass().getClassLoader()!=null||!ScalarPolicy.directBufferCandidate(buffer)||!BufferPlatform.TYPES.contains(declaring))return false;
+        try{
+            Field member=BufferPlatform.PARENT.get(buffer.getClass());Object parent=member==null?null:CodeSourceBridge.controlField(member,buffer);
+            if(!(parent instanceof Buffer)||!bufferBulkFast(parent,null))return false;
+            synchronized(STREAMS){
+                BufferView owner=BUFFERS.get(new Key(parent,false));if(owner==null||!owner.constructed||!scalarStorageUnrestricted(owner.storage))return false;
+                BufferView current=BUFFERS.get(new Key(buffer,false));
+                if(current!=null)return current.storage==owner.storage&&current.parent.get()==parent&&currentBufferView(buffer,current)&&current.constructed;
+                BufferView view=new BufferView(buffer,owner.storage,parent);
+                if(view.address<owner.address||view.bytes<0||view.address-owner.address>owner.bytes-view.bytes)return false;
+                BUFFERS.put(new Key(buffer,true),view);owner.storage.views.add(new WeakReference<>(buffer));owner.storage.viewsVersion++;
+                view.constructed=true;view.memoryObserved=true;
+                bufferSources(owner.storage,ControlBridge.scopedSources());
+                bufferSources(owner.storage,ModSources.current());
+                bufferSources(owner.storage,ControlBridge.objectSources(buffer));
+                return true;
+            }
+        }catch(ReflectiveOperationException unavailable){throw new IllegalStateException("BUFFER_VIEW_CAPTURE_FAILED",unavailable);}
+    }
+    private static boolean scalarStorageUnrestricted(BufferStorage storage){
+        if(storage.cleaning||storage.cleaned||storage.failed)return false;
+        for(Module source:storage.sources)if(source==null||ControlBridge.modStopped(source))return false;
+        return true;
+    }
+    static boolean scalarAddressUnrestricted(long address,long length){
+        if(address==0||length<=0||Long.compareUnsigned(address+length,address)<0)return false;
+        synchronized(STREAMS){
+            // Only queried while stops are active. Re-read live sources and
+            // storage state; no cached negative range/ownership verdict.
+            for(BufferView view:BUFFERS.values())if(Long.compareUnsigned(address,view.address+view.bytes)<0
+                    &&Long.compareUnsigned(view.address,address+length)<0&&!scalarStorageUnrestricted(view.storage))return false;
+        }
+        return true;
+    }
+    private static Object bufferOperation(Object receiver,Object[] arguments,Class<?> declaring,String method,BufferEntry entry){
+        Class<?> caller=WALKER.getCallerClass();
+        if(entry==null?caller!=ResourceBridge.class:caller!=BufferEntry.class||!entry.active||entry.caller!=Thread.currentThread()
+                ||entry.receiver!=receiver||entry.arguments!=arguments||entry.declaring!=declaring||entry.method!=method)
+            throw new SecurityException("ACTUAL_BUFFER_ENTRY_REQUIRED");
+        if(declaring!=FILE_CHANNEL&&!BufferPlatform.TYPES.contains(declaring))throw new SecurityException("ACTUAL_BUFFER_OPERATION_REQUIRED");
         if(FILE_OBSERVING.get()==Boolean.TRUE)return null;FILE_OBSERVING.set(Boolean.TRUE);
         Object framework=null;
         // This private per-call list is never a business source. Avoid registering
@@ -1927,8 +2099,9 @@ public final class ResourceBridge {
             if(!ControlBridge.coreWriter()&&!(receiver instanceof Buffer buffer&&IoBridge.finishingBuffer(buffer))&&!ControlBridge.taskEffectAllowed(receiver,"buffer-io"))throw new IllegalStateException("RONOVA_TERMINAL_BUFFER_IO");
             boolean read=BufferPlatform.READS.contains(method),write=method.startsWith("put")||method.equals("_put")||method.equals("compact");
             BufferOperation operation=new BufferOperation(declaring,method,uses);
+            if(entry!=null)entry.operation=operation;
             operation.framework=framework;
-            Module[] sources=uses.isEmpty()?null:bufferOperationSources(operation);
+            Module[] sources=uses.isEmpty()?null:bufferOperationSources(operation,entry);
             for(BufferUse use:uses){
                 boolean known=ControlBridge.resourceExposedByOperation(use.buffer,sources);
                 synchronized(STREAMS){
@@ -1941,10 +2114,10 @@ public final class ResourceBridge {
             synchronized(STREAMS){for(BufferUse use:uses){use.view.active++;use.view.storage.active++;}}
             BUFFER_OPERATIONS.set(operation);
             try{if(receiver instanceof Buffer buffer){
-                if(read)operation.read=bufferRead(buffer,arguments,method,operation);
-                if(write)operation.write=bufferWrite(buffer,arguments,method,operation);
+                if(read)operation.read=bufferRead(buffer,arguments,method,operation,entry);
+                if(write)operation.write=bufferWrite(buffer,arguments,method,operation,entry);
             }}catch(RuntimeException|Error failure){
-                try{finishBufferOperation(operation,false);}catch(Throwable cleanup){if(cleanup!=failure)failure.addSuppressed(cleanup);}throw failure;
+                try{finishEnteredBufferOperation(operation,false);}catch(Throwable cleanup){if(cleanup!=failure)failure.addSuppressed(cleanup);}throw failure;
             }
             delivered=true;
             return operation;
@@ -1959,7 +2132,14 @@ public final class ResourceBridge {
     private static void finishBufferOperation(Object value,boolean written){
         if(value==null)return;
         if(!(value instanceof BufferOperation operation)||operation.caller!=Thread.currentThread())throw new SecurityException("ACTUAL_BUFFER_OPERATION_TOKEN_REQUIRED");
-        platform(operation.declaring,operation.method);if(operation.closed)return;
+        platform(operation.declaring,operation.method);
+        finishEnteredBufferOperation(operation,written);
+    }
+    /** Also used by the already-authenticated entry if creating its receipt fails. */
+    private static void finishEnteredBufferOperation(BufferOperation operation,boolean written){
+        if(WALKER.getCallerClass()!=ResourceBridge.class)throw new SecurityException("ACTUAL_BUFFER_COMPLETION_OWNER_REQUIRED");
+        if(operation.caller!=Thread.currentThread())throw new SecurityException("ACTUAL_BUFFER_OPERATION_TOKEN_REQUIRED");
+        if(operation.closed)return;
         if(BUFFER_OPERATIONS.get()!=operation)throw new SecurityException("ACTUAL_BUFFER_OPERATION_ORDER_REQUIRED");
         Throwable failed=null;
         try{

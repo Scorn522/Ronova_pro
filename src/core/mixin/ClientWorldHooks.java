@@ -169,11 +169,15 @@ public final class ClientWorldHooks {
         // Forge's ModelData/RenderType overload is the actual tessellation call, not the vanilla delegate.
         @Redirect(method="renderBatched(Lnet/minecraft/world/level/block/state/BlockState;Lnet/minecraft/core/BlockPos;Lnet/minecraft/world/level/BlockAndTintGetter;Lcom/mojang/blaze3d/vertex/PoseStack;Lcom/mojang/blaze3d/vertex/VertexConsumer;ZLnet/minecraft/util/RandomSource;Lnet/minecraftforge/client/model/data/ModelData;Lnet/minecraft/client/renderer/RenderType;)V",remap=false,at=@At(value="INVOKE",target="Lnet/minecraft/client/renderer/block/ModelBlockRenderer;tesselateBlock(Lnet/minecraft/world/level/BlockAndTintGetter;Lnet/minecraft/client/resources/model/BakedModel;Lnet/minecraft/world/level/block/state/BlockState;Lnet/minecraft/core/BlockPos;Lcom/mojang/blaze3d/vertex/PoseStack;Lcom/mojang/blaze3d/vertex/VertexConsumer;ZLnet/minecraft/util/RandomSource;JILnet/minecraftforge/client/model/data/ModelData;Lnet/minecraft/client/renderer/RenderType;)V",remap=false),require=1,allow=1)
         private void pro$block(ModelBlockRenderer renderer,BlockAndTintGetter view,BakedModel model,BlockState state,BlockPos position,PoseStack pose,VertexConsumer vertices,boolean checkSides,RandomSource random,long seed,int overlay,ModelData data,RenderType layer){
-            ClientWorldVisuals.block(vertices,view,position,()->renderer.tesselateBlock(view,model,state,position,pose,vertices,checkSides,random,seed,overlay,data,layer));
+            Object sample=ClientWorldVisuals.blockBegin(vertices,view,position);
+            try{renderer.tesselateBlock(view,model,state,position,pose,vertices,checkSides,random,seed,overlay,data,layer);}
+            finally{ClientWorldVisuals.blockEnd(sample);}
         }
         @Redirect(method="renderLiquid(Lnet/minecraft/core/BlockPos;Lnet/minecraft/world/level/BlockAndTintGetter;Lcom/mojang/blaze3d/vertex/VertexConsumer;Lnet/minecraft/world/level/block/state/BlockState;Lnet/minecraft/world/level/material/FluidState;)V",at=@At(value="INVOKE",target="Lnet/minecraft/client/renderer/block/LiquidBlockRenderer;tesselate(Lnet/minecraft/world/level/BlockAndTintGetter;Lnet/minecraft/core/BlockPos;Lcom/mojang/blaze3d/vertex/VertexConsumer;Lnet/minecraft/world/level/block/state/BlockState;Lnet/minecraft/world/level/material/FluidState;)V"),require=1,allow=1)
         private void pro$liquid(LiquidBlockRenderer renderer,BlockAndTintGetter view,BlockPos position,VertexConsumer vertices,BlockState state,FluidState fluid){
-            ClientWorldVisuals.block(vertices,view,position,()->renderer.tesselate(view,position,vertices,state,fluid));
+            Object sample=ClientWorldVisuals.blockBegin(vertices,view,position);
+            try{renderer.tesselate(view,position,vertices,state,fluid);}
+            finally{ClientWorldVisuals.blockEnd(sample);}
         }
     }
 

@@ -12,7 +12,7 @@ import net.minecraftforge.network.*;
 import net.minecraftforge.network.simple.SimpleChannel;
 
 public final class ProNetwork {
-    static final String WIRE_VERSION="v1.5-whole-mod-retry";
+    static final String WIRE_VERSION="v1.5-weapon-panel-2";
     static final SimpleChannel CHANNEL=NetworkRegistry.newSimpleChannel(new ResourceLocation("ronova_pro","presence"),
             ()->WIRE_VERSION,v->v.equals(WIRE_VERSION)||v.equals(NetworkRegistry.ABSENT),v->v.equals(WIRE_VERSION)||v.equals(NetworkRegistry.ABSENT));
     public record Probe(UUID session,UUID operation,UUID challenge,String dimension,int entityId,UUID entityUuid) {}
@@ -38,7 +38,46 @@ public final class ProNetwork {
     record WorldBody(int id,UUID uuid) {}
     record WorldPolicy(UUID session,long scope,String dimension,long revision,long gameTime,long dayTime,boolean daylight,boolean clock,int page,int pages,List<WorldArea> areas,List<WorldBody> bodies) {}
     private ProNetwork() {}
+    record WeaponOpen() {}
+    record WeaponSwing() {}
+    record WeaponRow(UUID key,String title,String state,int[] actions) {}
+    record WeaponPanel(UUID session,long sequence,int tab,int page,int pages,boolean linkedStop,boolean clock,boolean host,List<WeaponRow> rows,String message) {}
+    record WeaponRequest(UUID session,long sequence,int action,int tab,int page,int size,UUID selection) {}
+    record WeaponResult(UUID session,long sequence,int page,int pages,String text) {}
+    static void panel(ServerPlayer player,WeaponPanel panel){if(present(player))CHANNEL.send(PacketDistributor.PLAYER.with(()->player),panel);}
+    static void weaponResult(ServerPlayer player,UUID session,long sequence,String text){
+        if(!present(player))return;var parts=new java.util.ArrayList<String>();
+        for(int start=0;start<text.length();){int end=Math.min(text.length(),start+24000);if(end<text.length()&&Character.isHighSurrogate(text.charAt(end-1)))end--;parts.add(text.substring(start,end));start=end;}
+        if(parts.isEmpty())parts.add("");for(int page=0;page<parts.size();page++)CHANNEL.send(PacketDistributor.PLAYER.with(()->player),new WeaponResult(session,sequence,page,parts.size(),parts.get(page)));
+    }
+    static void weaponOpen(){CHANNEL.sendToServer(new WeaponOpen());}
+    static void weaponSwing(){CHANNEL.sendToServer(new WeaponSwing());}
+    static void weaponRequest(WeaponRequest request){CHANNEL.sendToServer(request);}
+    private static WeaponPanel readPanel(FriendlyByteBuf b){
+        UUID session=b.readUUID();long sequence=b.readLong();int tab=b.readVarInt(),page=b.readVarInt(),pages=b.readVarInt();boolean linked=b.readBoolean(),clock=b.readBoolean(),host=b.readBoolean();
+        int count=b.readVarInt();if(count<0||count>8)throw new IllegalArgumentException("Invalid weapon row count");var rows=new java.util.ArrayList<WeaponRow>(count);
+        for(int i=0;i<count;i++){UUID key=b.readUUID();String title=b.readUtf(512),state=b.readUtf(2048);int actions=b.readVarInt();if(actions<0||actions>8)throw new IllegalArgumentException("Invalid weapon action count");int[] values=new int[actions];for(int j=0;j<actions;j++)values[j]=b.readVarInt();rows.add(new WeaponRow(key,title,state,values));}
+        return new WeaponPanel(session,sequence,tab,page,pages,linked,clock,host,List.copyOf(rows),b.readUtf(2000));
+    }
     public static void init() {
+        CHANNEL.messageBuilder(WeaponOpen.class,12,NetworkDirection.PLAY_TO_SERVER)
+            .encoder((p,b)->{}).decoder(b->new WeaponOpen())
+            .consumerMainThread((p,c)->{ServerPlayer player=c.get().getSender();if(player!=null)ProMod.openWeaponPanel(player);}).add();
+        CHANNEL.messageBuilder(WeaponPanel.class,13,NetworkDirection.PLAY_TO_CLIENT)
+            .encoder((p,b)->{b.writeUUID(p.session);b.writeLong(p.sequence);b.writeVarInt(p.tab);b.writeVarInt(p.page);b.writeVarInt(p.pages);b.writeBoolean(p.linkedStop);b.writeBoolean(p.clock);b.writeBoolean(p.host);b.writeVarInt(p.rows.size());for(WeaponRow row:p.rows){b.writeUUID(row.key);b.writeUtf(row.title,512);b.writeUtf(row.state,2048);b.writeVarInt(row.actions.length);for(int action:row.actions)b.writeVarInt(action);}b.writeUtf(p.message,2000);})
+            .decoder(ProNetwork::readPanel)
+            .consumerMainThread((p,c)->DistExecutor.unsafeRunWhenOn(Dist.CLIENT,()->()->ClientWeapon.panel(p,c.get().getNetworkManager()))).add();
+        CHANNEL.messageBuilder(WeaponRequest.class,14,NetworkDirection.PLAY_TO_SERVER)
+            .encoder((p,b)->{b.writeUUID(p.session);b.writeLong(p.sequence);b.writeVarInt(p.action);b.writeVarInt(p.tab);b.writeVarInt(p.page);b.writeVarInt(p.size);b.writeUUID(p.selection);})
+            .decoder(b->new WeaponRequest(b.readUUID(),b.readLong(),b.readVarInt(),b.readVarInt(),b.readVarInt(),b.readVarInt(),b.readUUID()))
+            .consumerMainThread((p,c)->{ServerPlayer player=c.get().getSender();if(player!=null)ProMod.weaponPacket(player,p);}).add();
+        CHANNEL.messageBuilder(WeaponSwing.class,16,NetworkDirection.PLAY_TO_SERVER)
+            .encoder((p,b)->{}).decoder(b->new WeaponSwing())
+            .consumerMainThread((p,c)->{ServerPlayer player=c.get().getSender();if(player!=null)ProMod.swingPacket(player);}).add();
+        CHANNEL.messageBuilder(WeaponResult.class,15,NetworkDirection.PLAY_TO_CLIENT)
+            .encoder((p,b)->{b.writeUUID(p.session);b.writeLong(p.sequence);b.writeVarInt(p.page);b.writeVarInt(p.pages);b.writeUtf(p.text,24000);})
+            .decoder(b->new WeaponResult(b.readUUID(),b.readLong(),b.readVarInt(),b.readVarInt(),b.readUtf(24000)))
+            .consumerMainThread((p,c)->DistExecutor.unsafeRunWhenOn(Dist.CLIENT,()->()->ClientWeapon.result(p,c.get().getNetworkManager()))).add();
         CHANNEL.messageBuilder(Probe.class,0,NetworkDirection.PLAY_TO_CLIENT)
             .encoder((p,b)-> { b.writeUUID(p.session);b.writeUUID(p.operation);b.writeUUID(p.challenge);b.writeUtf(p.dimension,256);b.writeVarInt(p.entityId);b.writeUUID(p.entityUuid); })
             .decoder(b->new Probe(b.readUUID(),b.readUUID(),b.readUUID(),b.readUtf(256),b.readVarInt(),b.readUUID()))

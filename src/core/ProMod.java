@@ -1,14 +1,6 @@
 package dev.ronova.pro;
 
 import java.util.UUID;
-import com.mojang.brigadier.arguments.StringArgumentType;
-import com.mojang.brigadier.arguments.BoolArgumentType;
-import com.mojang.brigadier.arguments.IntegerArgumentType;
-import com.mojang.brigadier.arguments.DoubleArgumentType;
-import net.minecraft.commands.Commands;
-import net.minecraft.commands.arguments.EntityArgument;
-import net.minecraft.commands.arguments.coordinates.BlockPosArgument;
-import net.minecraft.commands.arguments.coordinates.Vec3Argument;
 import net.minecraft.network.chat.Component;
 import net.minecraftforge.common.MinecraftForge;
 import net.minecraftforge.event.*;
@@ -21,6 +13,9 @@ import net.minecraftforge.fml.common.Mod;
 
 @Mod("ronova_pro")
 public final class ProMod {
+    private static ProMod instance;
+    private final java.util.Map<UUID,WeaponSession> weaponSessions=new java.util.HashMap<>();
+    private final ThreadLocal<Authority> weaponAuthority=new ThreadLocal<>();
     private static final org.slf4j.Logger LOG=com.mojang.logging.LogUtils.getLogger();
     private record Feedback(UUID player,String last,long next,boolean failed) { }
     private final java.util.LinkedHashMap<UUID,Feedback> feedback=new java.util.LinkedHashMap<>();
@@ -46,16 +41,24 @@ public final class ProMod {
         }catch(Throwable failure){throw new IllegalStateException("RONOVA_FORGE_BUS_PROTECTION_UNAVAILABLE",failure);}
         net.minecraftforge.fml.DistExecutor.unsafeRunWhenOn(net.minecraftforge.api.distmarker.Dist.CLIENT,()->ClientFaults::install);
         ProNetwork.init();
+        instance=this;
+        ProWeapon.register(net.minecraftforge.fml.javafmlmod.FMLJavaModLoadingContext.get().getModEventBus());
         var bus=MinecraftForge.EVENT_BUS;
         bus.addListener(this::starting);
         bus.addListener(this::stopping);
         bus.addListener(this::stopped);
         bus.addListener(EventPriority.NORMAL,this::tick);
         bus.addListener(EventPriority.LOWEST,this::feedbackTick);
-        bus.addListener(this::commands);
+        bus.addListener(this::passiveTick);
+        bus.addListener(this::weaponAttack);
+        bus.addListener(this::weaponBlock);
         bus.addListener(EventPriority.LOWEST,this::joined);
         bus.addListener(this::participant);
         bus.addListener(this::playerClone);
+        // Fail during Mod construction rather than after generating the spawn area.
+        // ProRuntime still requires the same completed preparation before publishing policy.
+        try{RuntimeClasses.prepare();}
+        catch(ReflectiveOperationException failure){throw new IllegalStateException("RONOVA_RUNTIME_PRELOAD_UNAVAILABLE",failure);}
     }
     private static void bindControlOwner(){
         try {
@@ -71,6 +74,7 @@ public final class ProMod {
         catch(Exception ex) { throw new IllegalStateException("Ronova Pro durable authority unavailable; refusing writes",ex); }
     }
     private void stopped(ServerStoppedEvent e) {
+        weaponSessions.clear();weaponAuthority.remove();passives.clear();strikes.clear();linkedStop=false;
         feedback.clear();feedbackReady.clear();
         try { ProRuntime.stop(e.getServer()); }
         catch(Exception ex) { System.err.println("RONOVA_PRO_UNSETTLED_SHUTDOWN "+ex); }
@@ -111,6 +115,8 @@ public final class ProMod {
         if(!(event instanceof PlayerEvent.PlayerLoggedOutEvent || event instanceof PlayerEvent.PlayerLoggedInEvent
                 || event instanceof PlayerEvent.PlayerChangedDimensionEvent || event instanceof PlayerEvent.PlayerRespawnEvent))return;
         if(event.getEntity() instanceof ServerPlayer p) {
+            weaponSessions.remove(p.getUUID());
+            if(event instanceof PlayerEvent.PlayerLoggedOutEvent){passives.remove(p.getUUID());strikes.remove(p.getUUID());}
             ProRuntime r=ProRuntime.get(p.server);if(r==null)return;
             r.participantChanged(p);
             if(event instanceof PlayerEvent.PlayerLoggedInEvent) {r.playerPolicyChanged(p);r.sendModGroup(p);}
@@ -124,171 +130,183 @@ public final class ProMod {
             ProRuntime r=ProRuntime.get(replacement.server);if(r!=null)r.playerCloned(original,replacement);
         }
     }
-    private void commands(RegisterCommandsEvent e) {
-        e.getDispatcher().register(Commands.literal("ronova_pro").requires(s->s.hasPermission(2))
-            .then(Commands.literal("host").then(Commands.literal("protect-jvm")
-                .then(Commands.argument("enabled",BoolArgumentType.bool()).executes(c->{
-                    String state=ProRuntime.get(c.getSource().getServer()).hostJvmProtection(BoolArgumentType.getBool(c,"enabled"));
-                    c.getSource().sendSuccess(()->Component.literal(state),false);return 1;
-                }))))
-            .then(Commands.literal("fields")
-                .then(Commands.literal("snapshot").then(Commands.argument("targets",EntityArgument.entities())
-                    .executes(c->{UUID id=ProRuntime.get(c.getSource().getServer()).fieldImage(EntityArgument.getEntities(c,"targets"),false,false);c.getSource().sendSuccess(()->Component.literal("字段图采集已受理："+id),false);return 1;})
-                    .then(Commands.argument("declared-static",BoolArgumentType.bool()).executes(c->{UUID id=ProRuntime.get(c.getSource().getServer()).fieldImage(EntityArgument.getEntities(c,"targets"),BoolArgumentType.getBool(c,"declared-static"),false);c.getSource().sendSuccess(()->Component.literal("字段图采集已受理："+id),false);return 1;}))))
-                .then(Commands.literal("clear").then(Commands.argument("targets",EntityArgument.entities())
-                    .executes(c->{UUID id=ProRuntime.get(c.getSource().getServer()).fieldImage(EntityArgument.getEntities(c,"targets"),false,true);c.getSource().sendSuccess(()->Component.literal("字段图清除已受理："+id),false);return 1;})
-                    .then(Commands.argument("declared-static",BoolArgumentType.bool()).executes(c->{UUID id=ProRuntime.get(c.getSource().getServer()).fieldImage(EntityArgument.getEntities(c,"targets"),BoolArgumentType.getBool(c,"declared-static"),true);c.getSource().sendSuccess(()->Component.literal("字段图清除已受理："+id),false);return 1;}))))
-                .then(Commands.literal("restore").then(Commands.argument("image",StringArgumentType.word()).executes(c->{boolean accepted=ProRuntime.get(c.getSource().getServer()).fieldRestore(UUID.fromString(StringArgumentType.getString(c,"image")));c.getSource().sendSuccess(()->Component.literal(accepted?"字段图恢复已受理。":"当前字段图不能恢复。"),false);return accepted?1:0;})))
-                .then(Commands.literal("status").then(Commands.argument("image",StringArgumentType.word()).executes(c->{String state=ProRuntime.get(c.getSource().getServer()).fieldState(UUID.fromString(StringArgumentType.getString(c,"image")));c.getSource().sendSuccess(()->Component.literal(state),false);return 1;})))
-                .then(Commands.literal("forget").then(Commands.argument("image",StringArgumentType.word()).executes(c->{boolean removed=ProRuntime.get(c.getSource().getServer()).fieldForget(UUID.fromString(StringArgumentType.getString(c,"image")));c.getSource().sendSuccess(()->Component.literal(removed?"字段图引用已释放。":"字段图仍在处理或不存在。"),false);return removed?1:0;}))))
-            .then(Commands.literal("world")
-                .then(Commands.literal("snapshot").then(Commands.argument("from",BlockPosArgument.blockPos()).then(Commands.argument("to",BlockPosArgument.blockPos()).executes(c->{
-                    UUID id=ProRuntime.get(c.getSource().getServer()).worldSnapshot(c.getSource().getLevel(),BlockPosArgument.getBlockPos(c,"from"),BlockPosArgument.getBlockPos(c,"to"),false);
-                    c.getSource().sendSuccess(()->Component.literal("世界历史采集已受理："+id),false);return 1;
-                }))))
-                .then(Commands.literal("regenerate").then(Commands.argument("from",BlockPosArgument.blockPos()).then(Commands.argument("to",BlockPosArgument.blockPos()).executes(c->{
-                    UUID id=ProRuntime.get(c.getSource().getServer()).worldSnapshot(c.getSource().getLevel(),BlockPosArgument.getBlockPos(c,"from"),BlockPosArgument.getBlockPos(c,"to"),true);
-                    c.getSource().sendSuccess(()->Component.literal("按当前世界种子重生成已受理："+id+"；原状态保留为历史。"),false);return 1;
-                }))))
-                .then(Commands.literal("rollback").then(Commands.argument("snapshot",StringArgumentType.word()).executes(c->{
-                    UUID id=ProRuntime.get(c.getSource().getServer()).worldRollback(UUID.fromString(StringArgumentType.getString(c,"snapshot")));
-                    c.getSource().sendSuccess(()->Component.literal("世界历史回溯已受理："+id),false);return 1;
-                })))
-                .then(Commands.literal("status").then(Commands.argument("operation",StringArgumentType.word()).executes(c->{
-                    String state=ProRuntime.get(c.getSource().getServer()).worldHistoryState(UUID.fromString(StringArgumentType.getString(c,"operation")));
-                    c.getSource().sendSuccess(()->Component.literal(state),false);return 1;
-                })))
-                .then(Commands.literal("cancel").then(Commands.argument("operation",StringArgumentType.word()).executes(c->{
-                    boolean cancelled=ProRuntime.get(c.getSource().getServer()).worldHistoryCancel(UUID.fromString(StringArgumentType.getString(c,"operation")));
-                    c.getSource().sendSuccess(()->Component.literal(cancelled?"世界工作已停止；已发生的作用保留。":"没有可取消的世界工作。"),false);return cancelled?1:0;
-                })))
-                .then(Commands.literal("retry").then(Commands.argument("operation",StringArgumentType.word()).executes(c->{
-                    boolean resumed=ProRuntime.get(c.getSource().getServer()).worldHistoryRetry(UUID.fromString(StringArgumentType.getString(c,"operation")));
-                    c.getSource().sendSuccess(()->Component.literal(resumed?"已接续原世界工作。":"没有可重试的世界工作。"),false);return resumed?1:0;
-                }))))
-            .then(Commands.literal("region")
-                .then(Commands.literal("freeze").then(Commands.argument("from",BlockPosArgument.blockPos())
-                    .then(Commands.argument("to",BlockPosArgument.blockPos()).then(Commands.argument("ticks",IntegerArgumentType.integer(1)).executes(c->{
-                        UUID id=ProRuntime.get(c.getSource().getServer()).worldRule(c.getSource().getLevel(),BlockPosArgument.getBlockPos(c,"from"),BlockPosArgument.getBlockPos(c,"to"),IntegerArgumentType.getInteger(c,"ticks"),true,false);
-                        c.getSource().sendSuccess(()->Component.literal("区域时停："+id),false);return 1;
-                    })))))
-                .then(Commands.literal("spawn-ban").then(Commands.argument("from",BlockPosArgument.blockPos())
-                    .then(Commands.argument("to",BlockPosArgument.blockPos()).then(Commands.argument("ticks",IntegerArgumentType.integer(1)).executes(c->{
-                        UUID id=ProRuntime.get(c.getSource().getServer()).worldRule(c.getSource().getLevel(),BlockPosArgument.getBlockPos(c,"from"),BlockPosArgument.getBlockPos(c,"to"),IntegerArgumentType.getInteger(c,"ticks"),false,false);
-                        c.getSource().sendSuccess(()->Component.literal("临时禁生成："+id),false);return 1;
-                    })))))
-                .then(Commands.literal("clear").then(Commands.argument("from",BlockPosArgument.blockPos()).then(Commands.argument("to",BlockPosArgument.blockPos()).executes(c->{
-                    int count=ProRuntime.get(c.getSource().getServer()).clearArea(c.getSource().getLevel(),BlockPosArgument.getBlockPos(c,"from"),BlockPosArgument.getBlockPos(c,"to"));
-                    c.getSource().sendSuccess(()->Component.literal("已受理区域身体清除："+count),false);return count;
-                }))))
-                .then(Commands.literal("resume").then(Commands.argument("operation",StringArgumentType.word()).executes(c->{
-                    boolean resumed=ProRuntime.get(c.getSource().getServer()).worldResume(UUID.fromString(StringArgumentType.getString(c,"operation")));
-                    c.getSource().sendSuccess(()->Component.literal(resumed?"区域规则已解除；原计划 tick 将继续。":"未找到当前区域规则。"),false);return resumed?1:0;
-                })))
-                .then(Commands.literal("status").executes(c->{String state=ProRuntime.get(c.getSource().getServer()).worldState();c.getSource().sendSuccess(()->Component.literal(state),false);return 1;})))
-            .then(Commands.literal("time-stop").then(Commands.argument("ticks",IntegerArgumentType.integer(1)).executes(c->{
-                var level=c.getSource().getLevel();UUID id=ProRuntime.get(c.getSource().getServer()).worldRule(level,
-                        new net.minecraft.core.BlockPos(-30000000,level.getMinBuildHeight(),-30000000),new net.minecraft.core.BlockPos(30000000,level.getMaxBuildHeight()-1,30000000),IntegerArgumentType.getInteger(c,"ticks"),true,true);
-                c.getSource().sendSuccess(()->Component.literal("实际共享时钟时停："+id+"；region status 列出受影响维度，region resume 可提前恢复。"),false);return 1;
-            })))
-            .then(Commands.literal("ray").then(Commands.argument("distance",DoubleArgumentType.doubleArg(0.01)).executes(c->{
-                UUID id=ProRuntime.get(c.getSource().getServer()).clearRay(c.getSource().getEntityOrException(),DoubleArgumentType.getDouble(c,"distance"));
-                c.getSource().sendSuccess(()->Component.literal(id==null?"视线内没有目标身体。":"射线身体清除已受理："+id),false);return id==null?0:1;
-            })))
-            .then(Commands.literal("teleport").then(Commands.argument("target",EntityArgument.entity()).then(Commands.argument("position",Vec3Argument.vec3()).executes(c->{
-                boolean moved=ProRuntime.get(c.getSource().getServer()).worldTeleport(EntityArgument.getEntity(c,"target"),c.getSource().getLevel(),Vec3Argument.getVec3(c,"position"));
-                c.getSource().sendSuccess(()->Component.literal(moved?"目标已传送。":"实际传送未完成。"),false);return moved?1:0;
-            }))))
-            .then(Commands.literal("clear").then(Commands.argument("target",EntityArgument.entity()).executes(c-> {
-                var r=ProRuntime.get(c.getSource().getServer());
-                var target=EntityArgument.getEntity(c,"target");UUID id=r.clear(target);watch(c.getSource(),r,id,target);
-                c.getSource().sendSuccess(()->Component.literal("身体处置已受理："+id),false);return 1;
-            })))
-            .then(Commands.literal("mod")
-                .then(Commands.literal("retire").then(Commands.argument("ids",StringArgumentType.greedyString()).executes(c->{
-                    String result=ProRuntime.get(c.getSource().getServer()).stopModGroup(StringArgumentType.getString(c,"ids"));
-                    c.getSource().sendSuccess(()->Component.literal(result+";HANDOFF=RETIREMENT_REQUESTED;NEXT_JVM_REQUIRES_EXPLICIT_ARTIFACT_HANDOFF"),false);
-                    return result.startsWith("GROUP_FAILURES=")?result.startsWith("GROUP_FAILURES=0;")?1:0:result.contains(";FAILED=0")&&result.contains("BODY_FAILURES=0")?1:0;
-                })))
-                .then(Commands.literal("stop").then(Commands.argument("ids",StringArgumentType.greedyString()).executes(c->{
-                    String result=ProRuntime.get(c.getSource().getServer()).stopModGroup(StringArgumentType.getString(c,"ids"));
-                    c.getSource().sendSuccess(()->Component.literal(result),false);
-                    return result.startsWith("GROUP_FAILURES=")?result.startsWith("GROUP_FAILURES=0;")?1:0
-                            :result.contains(";FAILED=0")&&result.contains("BODY_FAILURES=0")?1:0;
-                })))
-                .then(Commands.literal("protect").then(Commands.argument("ids",StringArgumentType.greedyString()).executes(c->{
-                    String result=ProRuntime.get(c.getSource().getServer()).protectModGroup(StringArgumentType.getString(c,"ids"));
-                    c.getSource().sendSuccess(()->Component.literal(result),false);
-                    return result.startsWith("GROUP_FAILURES=")?result.startsWith("GROUP_FAILURES=0;")?1:0
-                            :result.contains("FAILED=0")?1:0;
-                })))
-                .then(Commands.literal("status")
-                    .then(Commands.argument("ids",StringArgumentType.greedyString()).executes(c->{
-                        String state=ProRuntime.get(c.getSource().getServer()).modGroupState(StringArgumentType.getString(c,"ids"));
-                        c.getSource().sendSuccess(()->Component.literal(state),false);return 1;
-                    }))
-                    .executes(c->{
-                    String state=ProRuntime.get(c.getSource().getServer()).modGroupState();
-                    c.getSource().sendSuccess(()->Component.literal(state),false);return 1;
-                })))
-            .then(Commands.literal("protect").then(Commands.argument("target",EntityArgument.entity()).executes(c-> {
-                var runtime=ProRuntime.get(c.getSource().getServer());var target=EntityArgument.getEntity(c,"target");
-                UUID id=runtime.protect(target);watch(c.getSource(),runtime,id,target);
-                c.getSource().sendSuccess(()->Component.literal(runtime.operationSummary(id)+"；操作："+id),false);return 1;
-            })))
-            .then(Commands.literal("no-heal").then(Commands.argument("target",EntityArgument.entity())
-                .then(Commands.argument("enabled",BoolArgumentType.bool()).executes(c->{
-                    boolean enabled=BoolArgumentType.getBool(c,"enabled");
-                    boolean applied=ProRuntime.get(c.getSource().getServer()).noHeal(EntityArgument.getEntity(c,"target"),enabled);
-                    c.getSource().sendSuccess(()->Component.literal(applied?(enabled?"目标禁疗已启用。":"目标禁疗已解除；其他保护保持。"):"目标没有当前生命策略。"),false);
-                    return applied?1:0;
-                }))))
-            .then(Commands.literal("release").then(Commands.argument("target",EntityArgument.entity()).executes(c-> {
-                ProRuntime.get(c.getSource().getServer()).revoke(EntityArgument.getEntity(c,"target"));return 1;
-            })))
-            .then(Commands.literal("block").then(Commands.argument("position",BlockPosArgument.blockPos()).executes(c-> {
-                UUID id=ProRuntime.get(c.getSource().getServer()).clearBlock(c.getSource().getLevel(),BlockPosArgument.getLoadedBlockPos(c,"position"));
-                c.getSource().sendSuccess(()->Component.literal("方块实体处置已受理："+id),false);return 1;
-            })))
-            .then(Commands.literal("presentation").then(Commands.argument("owner",StringArgumentType.word()).then(Commands.argument("entry",StringArgumentType.word()).executes(c->{
-                var runtime=ProRuntime.get(c.getSource().getServer());UUID operation=runtime.clearPresentation(UUID.fromString(StringArgumentType.getString(c,"owner")),UUID.fromString(StringArgumentType.getString(c,"entry")));
-                c.getSource().sendSuccess(()->Component.literal(runtime.operationSummary(operation)+"；操作："+operation),false);return 1;
-            }))))
-            .then(Commands.literal("status").then(Commands.argument("operation",StringArgumentType.word()).executes(c-> {
-                var runtime=ProRuntime.get(c.getSource().getServer());
-                UUID operation=UUID.fromString(StringArgumentType.getString(c,"operation"));
-                c.getSource().sendSuccess(()->Component.literal(runtime.operationSummary(operation)),false);
-                return runtime.query(operation)==null?0:1;
-            })))
-            .then(Commands.literal("cancel").then(Commands.argument("operation",StringArgumentType.word()).executes(c-> {
-                ProRuntime.get(c.getSource().getServer()).cancel(UUID.fromString(StringArgumentType.getString(c,"operation")));
-                c.getSource().sendSuccess(()->Component.literal("当前操作已撤销；已发生的效果保留在历史记录中。"),false);return 1;
-            })))
-            .then(Commands.literal("participant")
-                .then(Commands.argument("operation",StringArgumentType.word())
-                .then(Commands.argument("player",EntityArgument.player())
-                .then(Commands.argument("required",BoolArgumentType.bool()).executes(c-> {
-                    ProRuntime.get(c.getSource().getServer()).participant(UUID.fromString(StringArgumentType.getString(c,"operation")),
-                            EntityArgument.getPlayer(c,"player").getUUID(),BoolArgumentType.getBool(c,"required"));
-                    c.getSource().sendSuccess(()->Component.literal("参与要求已登记；已有必要客户端不会被降为可选。"),false);return 1;
-                })))))
-            .then(Commands.literal("recovery").then(Commands.argument("operation",StringArgumentType.word()).executes(c-> {
-                var rows=ProRuntime.get(c.getSource().getServer()).recoveryStatus(UUID.fromString(StringArgumentType.getString(c,"operation")));
-                for(String row:rows)c.getSource().sendSuccess(()->Component.literal(row),false);
-                return rows.size();
-            })))
-            .then(Commands.literal("history").then(Commands.argument("operation",StringArgumentType.word()).executes(c-> {
-                var rows=ProRuntime.get(c.getSource().getServer()).historicalOperation(UUID.fromString(StringArgumentType.getString(c,"operation")));
-                for(String row:rows)c.getSource().sendSuccess(()->Component.literal(row),false);
-                return rows.size();
-            })))
-            .then(Commands.literal("bootstrap").executes(c-> {
-                // Honest startup report: the exact state and, when unavailable, the exact reason.
-                c.getSource().sendSuccess(()->Component.literal("引导状态："+ProBootstrap.state()),false);
-                c.getSource().sendSuccess(()->Component.literal("分派控制："+ProRuntime.dispatchState()),false);
-                c.getSource().sendSuccess(()->Component.literal("存储 Native："+StorageNative.capability()),false);
-                return ProBootstrap.available()?1:0;
-            }))
-        );
+    private static final StackWalker WEAPON_CALLER=StackWalker.getInstance(StackWalker.Option.RETAIN_CLASS_REFERENCE);
+    private static final UUID NONE=new UUID(0,0);
+    private final java.util.Map<UUID,PassiveState> passives=new java.util.HashMap<>();
+    private final java.util.Map<UUID,Long> strikes=new java.util.HashMap<>();
+    private boolean linkedStop;
+    private static final class PassiveState {
+        final ServerPlayer player;final boolean priorFlight;UUID protection;boolean grantedFlight;
+        PassiveState(ServerPlayer player){this.player=player;priorFlight=player.getAbilities().mayfly;}
     }
+    private record Authority(ServerPlayer player,PassiveState passive) {}
+    private record Selection(String kind,String mod,UUID id,java.lang.ref.WeakReference<net.minecraft.world.entity.Entity> entity,java.util.Set<WeaponAction> actions) {}
+    private record Row(String title,String state,Selection selection) {}
+    private static final class WeaponSession {
+        final ServerPlayer player;final UUID nonce=UUID.randomUUID();
+        final java.util.Map<UUID,Selection> rows=new java.util.HashMap<>();
+        long expires,sequence,nextTick;int tab,page,size=3;
+        WeaponSession(ServerPlayer player){this.player=player;expires=player.server.getTickCount()+12000L;}
+    }
+    private static boolean online(ServerPlayer player){return player!=null&&player.server.isSameThread()&&player.server.getPlayerList().getPlayer(player.getUUID())==player&&ProRuntime.get(player.server)!=null;}
+    private static boolean weaponPlayer(ServerPlayer player){return online(player)&&player.hasPermissions(2)&&ProWeapon.carried(player);}
+    static boolean weaponActionAuthorized(ProRuntime runtime){
+        ProMod mod=instance;Authority authority=mod==null?null:mod.weaponAuthority.get();
+        if(authority==null||!online(authority.player())||ProRuntime.get(authority.player().server)!=runtime)return false;
+        return authority.passive()==null?weaponPlayer(authority.player()):mod.passives.get(authority.player().getUUID())==authority.passive();
+    }
+    @FunctionalInterface private interface WeaponWork {void run(net.minecraft.commands.CommandSourceStack source)throws Exception;}
+    private String weaponRun(ServerPlayer player,PassiveState passive,WeaponWork work){
+        if(!(passive==null?weaponPlayer(player):online(player)&&passives.get(player.getUUID())==passive)||weaponAuthority.get()!=null)throw new SecurityException("RONOVA_WEAPON_AUTHORITY_REQUIRED");
+        StringBuilder result=new StringBuilder();
+        net.minecraft.commands.CommandSource output=new net.minecraft.commands.CommandSource(){
+            public void sendSystemMessage(Component message){result.append(message.getString()).append('\n');}
+            public boolean acceptsSuccess(){return true;}public boolean acceptsFailure(){return true;}public boolean shouldInformAdmins(){return false;}
+        };
+        weaponAuthority.set(new Authority(player,passive));
+        try{work.run(player.createCommandSourceStack().withSource(output));}
+        catch(Exception failure){result.append("操作未完成：").append(failure.getMessage()==null?failure.getClass().getSimpleName():failure.getMessage());LOG.warn("RONOVA_WEAPON_ACTION {} {}",player.getUUID(),failure.toString());}
+        finally{weaponAuthority.remove();}
+        return result.isEmpty()?"操作已执行。":result.toString();
+    }
+    private void passiveTick(TickEvent.PlayerTickEvent event){
+        if(event.phase!=TickEvent.Phase.END||!(event.player instanceof ServerPlayer player)||!online(player))return;
+        PassiveState state=passives.get(player.getUUID());boolean carried=ProWeapon.carried(player);
+        if(carried&&player.isAlive()){
+            if(state==null||state.player!=player){state=new PassiveState(player);passives.put(player.getUUID(),state);}
+            PassiveState current=state;ProRuntime runtime=ProRuntime.get(player.server);
+            if(!runtime.weaponProtected(player))weaponRun(player,current,source->{current.protection=runtime.protect(player);});
+            if(!player.getAbilities().mayfly){player.getAbilities().mayfly=true;current.grantedFlight=true;player.onUpdateAbilities();}
+        }else if(state!=null){
+            PassiveState current=state;ProRuntime runtime=ProRuntime.get(player.server);
+            if(current.protection!=null&&runtime.weaponOwnProtection(player,current.protection)&&!runtime.weaponNoHeal(player))weaponRun(player,current,source->runtime.cancel(current.protection));
+            if(current.grantedFlight&&!current.priorFlight&&!player.isCreative()&&!player.isSpectator()){player.getAbilities().mayfly=false;player.getAbilities().flying=false;player.onUpdateAbilities();}
+            passives.remove(player.getUUID());
+        }
+    }
+    static void openWeaponPanel(ServerPlayer player){
+        if(WEAPON_CALLER.getCallerClass()!=ProNetwork.class)throw new SecurityException("RONOVA_WEAPON_PACKET_REQUIRED");
+        if(instance!=null)instance.openPanel(player);
+    }
+    private void openPanel(ServerPlayer player){
+        if(!weaponPlayer(player)){player.sendSystemMessage(Component.literal("携带 Ronova Pro 武器并拥有管理员权限后才能操作控制台。"));return;}
+        WeaponSession session=new WeaponSession(player);weaponSessions.put(player.getUUID(),session);sendPanel(session,"左键：96 格视线与近身抹除；右键：64 格清场。背包携带时自动守护与允许飞行。");
+    }
+    private static Row row(String title,String state,String kind,String mod,UUID id,net.minecraft.world.entity.Entity entity,WeaponAction... actions){
+        return new Row(title,state,new Selection(kind,mod,id,entity==null?null:new java.lang.ref.WeakReference<>(entity),java.util.Set.of(actions)));
+    }
+    private java.util.List<Row> rows(ServerPlayer player,int tab){
+        ProRuntime runtime=ProRuntime.get(player.server);java.util.List<Row> rows=new java.util.ArrayList<>();
+        switch(tab){
+            case 0->{for(var mod:net.minecraftforge.fml.ModList.get().getMods())if(!java.util.Set.of("minecraft","forge","ronova_pro").contains(mod.getModId()))rows.add(row(mod.getDisplayName()+" · "+mod.getModId(),runtime.weaponModState(mod.getModId()),"mod",mod.getModId(),NONE,null,WeaponAction.MOD_STOP,WeaponAction.MOD_RETIRE,WeaponAction.MOD_PROTECT,WeaponAction.MOD_STATUS));}
+            case 1->{
+                for(WeaponEntry entry:runtime.weaponRules())rows.add(row(entry.title(),entry.state(),"rule","",entry.id(),null,WeaponAction.RULE_RESUME));
+                for(WeaponEntry entry:runtime.weaponWorldJobs())rows.add(row(entry.title(),entry.state(),"world","",entry.id(),null,WeaponAction.WORLD_ROLLBACK,WeaponAction.WORLD_STATUS,WeaponAction.WORLD_CANCEL,WeaponAction.WORLD_RETRY));
+            }
+            case 2->{
+                var entities=player.serverLevel().getEntities(player,player.getBoundingBox().inflate(64),e->!(e instanceof net.minecraft.world.entity.player.Player)&&!e.isRemoved()&&e.distanceToSqr(player)<=64*64);
+                entities.sort(java.util.Comparator.comparingDouble(player::distanceToSqr));
+                for(var entity:entities)rows.add(row(entity.getName().getString()+" · "+net.minecraft.core.registries.BuiltInRegistries.ENTITY_TYPE.getKey(entity.getType()),(runtime.weaponProtected(entity)?"已保护":"未保护")+" · "+(int)Math.sqrt(entity.distanceToSqr(player))+" 格","entity","",entity.getUUID(),entity,WeaponAction.ENTITY_CLEAR,WeaponAction.ENTITY_PROTECT,WeaponAction.ENTITY_MOD_STOP,WeaponAction.ENTITY_FIELDS,WeaponAction.ENTITY_FIELDS_CLEAR,WeaponAction.ENTITY_NO_HEAL,WeaponAction.ENTITY_TELEPORT));
+                for(WeaponEntry entry:runtime.weaponFields())rows.add(row(entry.title(),entry.state(),"fields","",entry.id(),null,WeaponAction.FIELD_RESTORE,WeaponAction.FIELD_FORGET,WeaponAction.FIELD_STATUS));
+            }
+            case 3->{for(WeaponEntry entry:runtime.weaponOperations())rows.add(row(entry.title(),entry.state(),"operation","",entry.id(),null,WeaponAction.OP_CANCEL,WeaponAction.OP_STATUS,WeaponAction.OP_RECOVERY,WeaponAction.OP_HISTORY,WeaponAction.OP_REQUIRED,WeaponAction.OP_OPTIONAL));}
+            default->throw new IllegalArgumentException("未知控制台页");
+        }
+        return rows;
+    }
+    private void sendPanel(WeaponSession session,String message){
+        if(!weaponPlayer(session.player))return;
+        var all=rows(session.player,session.tab);int pages=Math.max(1,(all.size()+session.size-1)/session.size);session.page=Math.max(0,Math.min(session.page,pages-1));session.rows.clear();
+        var output=new java.util.ArrayList<ProNetwork.WeaponRow>();int start=session.page*session.size;
+        for(Row row:all.subList(start,Math.min(all.size(),start+session.size))){UUID key=UUID.randomUUID();session.rows.put(key,row.selection());output.add(new ProNetwork.WeaponRow(key,row.title(),row.state(),row.selection().actions().stream().sorted().mapToInt(Enum::ordinal).toArray()));}
+        var runtime=ProRuntime.get(session.player.server);
+        ProNetwork.panel(session.player,new ProNetwork.WeaponPanel(session.nonce,session.sequence,session.tab,session.page,pages,linkedStop,!runtime.weaponClockRules().isEmpty(),runtime.weaponHostProtected(),output,message.length()>2000?message.substring(0,2000):message));
+    }
+    static void weaponPacket(ServerPlayer player,ProNetwork.WeaponRequest request){
+        if(WEAPON_CALLER.getCallerClass()!=ProNetwork.class)throw new SecurityException("RONOVA_WEAPON_PACKET_REQUIRED");
+        ProMod mod=instance;if(mod==null||!weaponPlayer(player))return;
+        WeaponSession session=mod.weaponSessions.get(player.getUUID());long now=player.server.getTickCount();
+        if(session==null||session.player!=player||!session.nonce.equals(request.session())||now>session.expires)return;
+        if(request.sequence()!=session.sequence+1||now<session.nextTick)return;
+        session.sequence=request.sequence();session.expires=now+12000;session.nextTick=now+2;
+        String message=mod.weaponRun(player,null,source->{
+            WeaponAction action=WeaponAction.at(request.action());
+            Selection selected=NONE.equals(request.selection())?null:session.rows.get(request.selection());
+            if(selected!=null&&!selected.actions().contains(action)||!NONE.equals(request.selection())&&selected==null)throw new IllegalArgumentException("列表已变化，先刷新再操作");
+            session.tab=Math.max(0,Math.min(3,request.tab()));session.page=Math.max(0,request.page());session.size=Math.max(1,Math.min(8,request.size()));
+            mod.panelAction(player,source,session,action,selected);
+        });
+        ProNetwork.weaponResult(player,session.nonce,session.sequence,message);mod.sendPanel(session,message);
+    }
+    private net.minecraft.world.entity.Entity selectedEntity(ServerPlayer player,Selection selected){
+        if(selected==null||!selected.kind().equals("entity")||selected.entity()==null)throw new IllegalArgumentException("实体选择已失效");
+        var target=selected.entity().get();
+        if(target==null||target.isRemoved()||player.serverLevel().getEntity(selected.id())!=target||target.distanceToSqr(player)>64*64)throw new IllegalArgumentException("目标已离场或超过 64 格");return target;
+    }
+    private void panelAction(ServerPlayer player,net.minecraft.commands.CommandSourceStack source,WeaponSession session,WeaponAction action,Selection selected)throws Exception {
+        ProRuntime runtime=ProRuntime.get(player.server);String message="";UUID id=selected==null?null:selected.id();
+        switch(action){
+            case REFRESH->message="列表已刷新。";
+            case LINK_STOP->{if(selected!=null)throw new IllegalArgumentException("无效开关");linkedStop=!linkedStop;message="攻击连带停 Mod："+(linkedStop?"开":"关");}
+            case TIME_STOP->{var rules=runtime.weaponClockRules();if(!rules.isEmpty()){for(UUID rule:rules)runtime.worldResume(rule);message="全维度时停已关闭。";}else{var level=player.serverLevel();id=runtime.worldRule(level,new net.minecraft.core.BlockPos(-30000000,level.getMinBuildHeight(),-30000000),new net.minecraft.core.BlockPos(30000000,level.getMaxBuildHeight()-1,30000000),Integer.MAX_VALUE,true,true);message="全维度时停已开启。";}}
+            case HOST->message=runtime.hostJvmProtection(!runtime.weaponHostProtected());
+            case DIAGNOSTICS->message="引导："+ProBootstrap.state()+"\n分派："+ProRuntime.dispatchState()+"\n存储："+StorageNative.capability()+"\n"+runtime.worldState();
+            case REPLAY->{UUID nonce=session.nonce;long sequence=session.sequence;runtime.weaponReplay().whenComplete((text,failure)->player.server.execute(()->{WeaponSession live=weaponSessions.get(player.getUUID());if(live==session&&weaponPlayer(player)){String result=failure==null?text:"重放核对失败："+failure;ProNetwork.weaponResult(player,nonce,sequence,result);}}));message="已提交只读重放核对；不会再次执行清除/恢复动作。";}
+            case MOD_STOP,MOD_RETIRE,MOD_PROTECT,MOD_STATUS->{if(selected==null||!selected.kind().equals("mod"))throw new IllegalArgumentException("Mod 选择已失效");message=action==WeaponAction.MOD_PROTECT?runtime.protectModGroup(selected.mod()):action==WeaponAction.MOD_STATUS?runtime.modGroupState(selected.mod()):runtime.stopModGroup(selected.mod());if(action==WeaponAction.MOD_RETIRE)message+=";HANDOFF=RETIREMENT_REQUESTED;NEXT_JVM_REQUIRES_EXPLICIT_ARTIFACT_HANDOFF";}
+            case FREEZE,SPAWN_BAN->{var position=player.blockPosition();id=runtime.worldRule(player.serverLevel(),position.offset(-32,-32,-32),position.offset(32,32,32),Integer.MAX_VALUE,action==WeaponAction.FREEZE,false);message="区域规则已开启，可在列表中一键解除。";}
+            case UNLOAD->message=runtime.weaponUnload(player);
+            case SNAPSHOT,REGENERATE,REGENERATE_TWO->{var level=player.serverLevel();int radius=action==WeaponAction.SNAPSHOT?1:action==WeaponAction.REGENERATE_TWO?2:0;var chunk=player.chunkPosition();id=runtime.worldSnapshot(level,new net.minecraft.core.BlockPos((chunk.x-radius)*16,level.getMinBuildHeight(),(chunk.z-radius)*16),new net.minecraft.core.BlockPos((chunk.x+radius)*16+15,level.getMaxBuildHeight()-1,(chunk.z+radius)*16+15),action!=WeaponAction.SNAPSHOT);message="世界工作已受理："+id;}
+            case RULE_RESUME->{requireSelection(selected,"rule");message=runtime.worldResume(id)?"区域规则已解除。":"该规则已经结束。";}
+            case WORLD_ROLLBACK,WORLD_STATUS,WORLD_CANCEL,WORLD_RETRY->{requireSelection(selected,"world");message=switch(action){case WORLD_ROLLBACK->"回溯已受理："+runtime.worldRollback(id);case WORLD_STATUS->runtime.worldHistoryState(id);case WORLD_CANCEL->"取消结果："+runtime.worldHistoryCancel(id);default->"重试结果："+runtime.worldHistoryRetry(id);};}
+            case ENTITY_CLEAR,ENTITY_PROTECT,ENTITY_MOD_STOP,ENTITY_FIELDS,ENTITY_FIELDS_CLEAR,ENTITY_NO_HEAL,ENTITY_TELEPORT->{var target=selectedEntity(player,selected);switch(action){
+                case ENTITY_CLEAR->dispose(player,source,java.util.List.of(target));
+                case ENTITY_PROTECT->{if(runtime.weaponProtected(target)){runtime.revoke(target);message="保护已解除。";}else{id=runtime.protect(target);watch(source,runtime,id,target);message="保护已开启。";}}
+                case ENTITY_MOD_STOP->{String ids=runtime.weaponTargetMods(target);message=ids.isEmpty()?"目标没有可停的第三方 Mod 归属。":runtime.stopModGroup(ids);}
+                case ENTITY_FIELDS,ENTITY_FIELDS_CLEAR->{id=runtime.fieldImage(java.util.List.of(target),false,action==WeaponAction.ENTITY_FIELDS_CLEAR);message="字段图工作已受理："+id;}
+                case ENTITY_NO_HEAL->message="禁疗设置结果："+runtime.noHeal(target,!runtime.weaponNoHeal(target));
+                case ENTITY_TELEPORT->message="传送结果："+runtime.worldTeleport(target,player.serverLevel(),player.position().add(player.getLookAngle().scale(2)));
+                default->throw new IllegalArgumentException("未知实体动作");
+            }}
+            case FIELD_RESTORE,FIELD_FORGET,FIELD_STATUS->{requireSelection(selected,"fields");message=action==WeaponAction.FIELD_RESTORE?"恢复结果："+runtime.fieldRestore(id):action==WeaponAction.FIELD_FORGET?"释放结果："+runtime.fieldForget(id):runtime.fieldState(id);}
+            case OP_CANCEL,OP_STATUS,OP_RECOVERY,OP_HISTORY,OP_REQUIRED,OP_OPTIONAL->{requireSelection(selected,"operation");switch(action){
+                case OP_CANCEL->{runtime.cancel(id);message="操作已撤销；已发生作用保留在历史中。";}
+                case OP_STATUS->message=runtime.operationSummary(id);
+                case OP_RECOVERY->message=String.join("\n",runtime.recoveryStatus(id));
+                case OP_HISTORY->message=String.join("\n",runtime.historicalOperation(id));
+                case OP_REQUIRED,OP_OPTIONAL->{for(ServerPlayer participant:player.server.getPlayerList().getPlayers())runtime.participant(id,participant.getUUID(),action==WeaponAction.OP_REQUIRED);message="已更新当前在线客户端的参与要求，已有必要客户端不会降级。";}
+                default->throw new IllegalArgumentException("未知操作");
+            }}
+        }
+        if(!message.isEmpty()){String text=message;source.sendSuccess(()->Component.literal(text),false);}
+    }
+    private static void requireSelection(Selection selected,String kind){if(selected==null||!selected.kind().equals(kind))throw new IllegalArgumentException("列表目标已失效");}
+    private boolean weaponTurn(ServerPlayer player){if(!weaponPlayer(player)||!ProWeapon.held(player))return false;long now=player.server.getTickCount();if(now<strikes.getOrDefault(player.getUUID(),0L))return false;strikes.put(player.getUUID(),now+4);return true;}
+    static void useWeapon(ServerPlayer player){
+        if(WEAPON_CALLER.getCallerClass()!=ProWeapon.class)throw new SecurityException("RONOVA_WEAPON_ITEM_REQUIRED");
+        if(!WEAPON_CALLER.walk(frames->frames.anyMatch(f->f.getDeclaringClass()==net.minecraft.server.level.ServerPlayerGameMode.class)))return;
+        ProMod mod=instance;if(mod==null)return;if(player.isShiftKeyDown()){mod.openPanel(player);return;}if(!mod.weaponTurn(player))return;
+        String result=mod.weaponRun(player,null,source->{var targets=player.serverLevel().getEntities(player,player.getBoundingBox().inflate(64),e->!(e instanceof net.minecraft.world.entity.player.Player)&&!e.isRemoved()&&e.distanceToSqr(player)<=64*64);mod.dispose(player,source,targets);});player.displayClientMessage(Component.literal(result),true);player.sendSystemMessage(Component.literal(result));
+    }
+    private void dispose(ServerPlayer player,net.minecraft.commands.CommandSourceStack source,java.util.Collection<? extends net.minecraft.world.entity.Entity> targets){
+        ProRuntime runtime=ProRuntime.get(player.server);java.util.Set<String> stop=new java.util.LinkedHashSet<>();int count=0;
+        for(var target:java.util.List.copyOf(targets)){if(linkedStop){String ids=runtime.weaponTargetMods(target);if(!ids.isEmpty())stop.addAll(java.util.List.of(ids.split(",")));}UUID id=runtime.clear(target);watch(source,runtime,id,target);count++;}
+        int accepted=count;source.sendSuccess(()->Component.literal("已受理身体抹除："+accepted+" 个目标。"),false);
+        if(!stop.isEmpty()){String state=runtime.stopModGroup(String.join(",",stop));source.sendSuccess(()->Component.literal(state),false);}
+    }
+    static void swingPacket(ServerPlayer player){if(WEAPON_CALLER.getCallerClass()!=ProNetwork.class)throw new SecurityException("RONOVA_WEAPON_PACKET_REQUIRED");if(instance!=null)instance.swing(player,null);}
+    private void swing(ServerPlayer player,net.minecraft.core.BlockPos block){
+        if(!weaponTurn(player))return;
+        String result=weaponRun(player,null,source->{
+            var runtime=ProRuntime.get(player.server);var targets=new java.util.LinkedHashSet<net.minecraft.world.entity.Entity>();var ray=runtime.weaponRayTarget(player,96);
+            if(ray!=null)targets.add(ray);
+            for(var entity:player.serverLevel().getEntities(player,player.getBoundingBox().inflate(4),e->!e.isRemoved())){var delta=entity.position().subtract(player.position());if(delta.lengthSqr()<=16&&delta.dot(player.getLookAngle())>=0)targets.add(entity);}
+            if(!targets.isEmpty())dispose(player,source,targets);
+            net.minecraft.core.BlockPos selected=block;
+            if(selected==null&&ray==null&&player.pick(96,0,false) instanceof net.minecraft.world.phys.BlockHitResult hit&&hit.getType()==net.minecraft.world.phys.HitResult.Type.BLOCK)selected=hit.getBlockPos();
+            if(selected!=null){UUID id=runtime.clearBlock(player.serverLevel(),selected);source.sendSuccess(()->Component.literal("方块处置已受理："+id),false);}
+            else if(targets.isEmpty())source.sendSuccess(()->Component.literal("视线与前方没有目标。"),false);
+        });player.displayClientMessage(Component.literal(result),true);
+    }
+    private void weaponAttack(net.minecraftforge.event.entity.player.AttackEntityEvent event){if(event.getEntity() instanceof ServerPlayer player&&ProWeapon.held(player)){event.setCanceled(true);if(WEAPON_CALLER.walk(frames->frames.anyMatch(f->f.getDeclaringClass()==net.minecraft.server.network.ServerGamePacketListenerImpl.class)))swing(player,null);}}
+    private void weaponBlock(net.minecraftforge.event.entity.player.PlayerInteractEvent.LeftClickBlock event){if(event.getEntity() instanceof ServerPlayer player&&ProWeapon.held(player)){event.setCanceled(true);if(WEAPON_CALLER.walk(frames->frames.anyMatch(f->f.getDeclaringClass()==net.minecraft.server.level.ServerPlayerGameMode.class)))swing(player,event.getPos());}}
 }

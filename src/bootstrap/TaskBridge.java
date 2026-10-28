@@ -1274,7 +1274,7 @@ public final class TaskBridge {
         finally { if(prior==null)AUTHORITY.remove();else AUTHORITY.set(prior); }
     }
     private TaskBridge() {}
-    public static int abiVersion(){return 105;}
+    public static int abiVersion(){return 106;}
     public static synchronized void installEquipmentAsync(Class<?> owner,java.lang.invoke.MethodHandle capture,java.lang.invoke.MethodHandle invoke){
         requirePolicyInstaller();if(guards==null||guards.owner()!=owner||equipmentAsync!=null&&equipmentAsync.owner!=owner)throw new SecurityException("EQUIPMENT_ASYNC_OWNER");
         equipmentAsync=null;
@@ -1490,7 +1490,8 @@ public final class TaskBridge {
     /** Called inside the JDK's normal callback exception handling, so rejection completes its Future. */
     public static void requireInvocation(Object callback) {
         Guards current=guards;
-        if(!taskEffectAllowed(current,callback,"invoke")||!taskEffectAllowed(current,currentTask(),"invoke"))
+        Object task=currentTask();
+        if(!taskEffectAllowed(current,callback,"invoke")||(task!=callback&&!taskEffectAllowed(current,task,"invoke")))
             throw new java.util.concurrent.CancellationException("RONOVA_TASK_INVOCATION_REFUSED");
     }
     static final class NativeClone {

@@ -507,7 +507,7 @@ final class SourceMaps {
                 Class<?> agent=Class.forName("dev.ronova.pro.agent.RecoveryAgent",false,ClassLoader.getSystemClassLoader());
                 bridgeState=PlatformAccess.declaredMethod(bridge,"state");state=PlatformAccess.declaredMethod(agent,"sourceFieldState");
             }
-            return "INSTALLED".equals(state.invoke(null))&&"SOURCE_FIELDS_INSTALLED:JDK_CONTAINER_HOOKS_REMOVED".equals(bridgeState.invoke(null));
+            return "CALL_SITES_ONLY".equals(state.invoke(null))&&"SOURCE_FIELDS_CALL_SITES_ONLY:JDK_CONTAINER_HOOKS_REMOVED".equals(bridgeState.invoke(null));
         } catch(ReflectiveOperationException|RuntimeException|LinkageError missing) { return false; }
     }
     static String unavailable(Object map) {
@@ -568,12 +568,12 @@ final class SourceMaps {
         final Object map;
         Object[] root;Object next,primitiveKeys;
         KnownContainers.Image known;
-        int bucket;long revision=-1;
+        int bucket,knownRemoved;long revision=-1;
         String gap="";
         boolean complete,removed,setElements;
         Cursor(Object map){this.map=map;}
         private void reset(Object[] root,long revision){
-            this.root=root;bucket=0;next=null;this.revision=revision;complete=false;removed=false;known=null;gap="";
+            this.root=root;bucket=0;knownRemoved=0;next=null;this.revision=revision;complete=false;removed=false;known=null;gap="";
         }
     }
     @FunctionalInterface interface Visitor {
@@ -616,11 +616,21 @@ final class SourceMaps {
             }
             int remaining=budget;
             while(remaining-->0&&cursor.bucket<cursor.root.length){
-                KnownContainers.Row row=(KnownContainers.Row)cursor.root[cursor.bucket];cursor.next=row;cursor.removed=false;
+                KnownContainers.Row original=(KnownContainers.Row)cursor.root[cursor.bucket];
+                // Exact maps can rotate/compact on removal. Sequences retain the verified survivor order.
+                KnownContainers.Row row=KnownContainers.map(carrier)?cursor.known.mapping(original.key)
+                        :cursor.known.rows[cursor.bucket-cursor.knownRemoved];
+                if(row==null||row.key!=original.key||row.value!=original.value){cursor.reset(null,revision(carrier));return;}
+                cursor.next=row;cursor.removed=false;
                 try{if(!visitor.entry(row.key,row.value,row,cursor))break;}
                 catch(java.io.IOException unavailable){failure[0]=unavailable;break;}
                 if(cursor.removed){
-                    KnownContainers.Image image=KnownContainers.snapshot(carrier);cursor.reset(image.rows,image.revision);cursor.known=image;
+                    if(KnownContainers.lockFree(carrier)){
+                        // Concurrent producers may have changed the live chain; their new nodes require a fresh traversal.
+                        KnownContainers.Image image=KnownContainers.snapshot(carrier);cursor.reset(image.rows,image.revision);cursor.known=image;
+                        continue;
+                    }
+                    cursor.knownRemoved++;cursor.bucket++;
                 }else if(cursor.revision!=revision(carrier)){cursor.reset(null,revision(carrier));return;}
                 else cursor.bucket++;
             }
@@ -630,6 +640,81 @@ final class SourceMaps {
             }
         });
         if(failure[0]!=null)throw failure[0];return ran;
+    }
+    /** Observe/retain children before removal. Only exact synchronized vectors
+     * batch their writes; other backends retain their immediate selected-row path. */
+    static boolean retire(Object carrier,Cursor cursor,int budget,Visitor observer,ProRuntime runtime,ProRuntime.Subject group,
+            boolean filtering,boolean privateContents)throws ReflectiveOperationException,java.io.IOException{
+        if(!filtering||!KnownContainers.vector(cursor.map))return visit(cursor.map,cursor,budget,(key,value,node,position)->{
+            if(!observer.entry(key,value,node,position))return false;
+            if(filtering)removeVisited(position,node,runtime,group,privateContents&&privateContainer(carrier,runtime,group));return true;
+        });
+        java.io.IOException[] failure={null};
+        boolean ran=with(cursor.map,()->{
+            if(!group.commitGate.tryLock())throw new IllegalStateException("GROUP_VECTOR_POLICY_BUSY");
+            try{
+                long generation=group.generation;
+                if(!group.terminal||runtime.canonicalSubject(group.id)!=group)throw new IllegalStateException("GROUP_VECTOR_POLICY_CHANGED");
+                if(!RecoverySources.tryRecordGraph())throw new IllegalStateException("GROUP_RECORD_GRAPH_BUSY");
+                try{
+                    if(cursor.known==null||!KnownContainers.unchanged(cursor.known)){
+                        KnownContainers.Image image=KnownContainers.snapshot(cursor.map);cursor.reset(image.rows,image.revision);cursor.known=image;
+                    }
+                    int first=cursor.bucket-cursor.knownRemoved,scanned=0;
+                    while(scanned<budget&&cursor.bucket+scanned<cursor.root.length){
+                        KnownContainers.Row original=(KnownContainers.Row)cursor.root[cursor.bucket+scanned],row=cursor.known.rows[first+scanned];
+                        if(row.value!=original.value){cursor.reset(null,revision(cursor.map));return;}
+                        cursor.next=row;cursor.removed=false;
+                        try{if(!observer.entry(row.key,row.value,row,cursor))break;}
+                        catch(java.io.IOException unavailable){failure[0]=unavailable;return;}
+                        scanned++;
+                    }
+                    if(scanned!=0){
+                        Module[] definitions=new Module[scanned];boolean fixed=!privateContents;
+                        // Preclassification is not authority. Dynamic sources
+                        // are re-queried immediately before each real unlink.
+                        for(int offset=0;offset<scanned;offset++){
+                            KnownContainers.Row row=cursor.known.rows[first+offset];
+                            if(!group.terminal||group.generation!=generation||runtime.canonicalSubject(group.id)!=group)
+                                throw new IllegalStateException("GROUP_VECTOR_POLICY_CHANGED");
+                            boolean selected=selectedKnown(cursor,row,runtime,group,privateContents&&privateContainer(carrier,runtime,group));
+                            if(!selected&&unresolvedElement(row.value,runtime,group))cursor.gap="GROUP_CONTAINER_ELEMENT_OWNERSHIP_UNRESOLVED";
+                            if(!selected||(definitions[offset]=runtime.boundDefinition(row.value))==null)fixed=false;
+                        }
+                        KnownContainers.Removal removal=fixed?runtime.compactBoundVector(cursor.known,first,definitions,group,generation):null;
+                        if(removal==null){
+                            fixed=false;
+                            int removed=0;
+                            try{for(int offset=0;offset<scanned;offset++){
+                                KnownContainers.Row row=cursor.known.rows[first+offset-removed];
+                                if(!group.terminal||group.generation!=generation||runtime.canonicalSubject(group.id)!=group)
+                                    throw new IllegalStateException("GROUP_VECTOR_POLICY_CHANGED");
+                                if(selectedKnown(cursor,row,runtime,group,privateContents&&privateContainer(carrier,runtime,group))){
+                                    if(removeKnown(cursor,row))removed++;
+                                }else if(unresolvedElement(row.value,runtime,group))cursor.gap="GROUP_CONTAINER_ELEMENT_OWNERSHIP_UNRESOLVED";
+                            }}catch(ReflectiveOperationException|RuntimeException|Error failureDuringUnlink){cursor.reset(null,-1);throw failureDuringUnlink;}
+                            removal=new KnownContainers.Removal(removed,cursor.known);
+                        }
+                        cursor.known=removal.after();cursor.revision=cursor.known.revision;
+                        cursor.knownRemoved+=removal.count();cursor.bucket+=scanned;cursor.next=null;cursor.removed=removal.removed();
+                        if(fixed&&removal.removed())changed(cursor.map);
+                    }
+                    if(cursor.bucket>=cursor.root.length){
+                        if(!KnownContainers.unchanged(cursor.known)){cursor.reset(null,revision(cursor.map));return;}
+                        cursor.complete=true;
+                    }
+                }finally{RecoverySources.releaseRecordGraph();}
+            }finally{group.commitGate.unlock();}
+        });
+        if(failure[0]!=null)throw failure[0];return ran;
+    }
+    /** Permission to shift retained identities exists only around physical
+     * compaction/readback, never while calling source-selection observers. */
+    static KnownContainers.Image retireVectorStorage(KnownContainers.Image image,int first,boolean[] selected,int removed)throws ReflectiveOperationException{
+        if(!KnownContainers.vector(image.carrier)||!Thread.holdsLock(image.carrier))throw new IllegalAccessException("ACTUAL_VECTOR_MONITOR_REQUIRED");
+        RetiringList previous=RETIRING_LIST.get();RETIRING_LIST.set(new RetiringList(image.carrier,image.backing,image.slots));
+        try{return KnownContainers.compactVectorObserved(image,first,selected,removed);}
+        finally{if(previous==null)RETIRING_LIST.remove();else RETIRING_LIST.set(previous);}
     }
     private static Object primitiveKey(Object map,Object keys,int index){
         if(map.getClass()==it.unimi.dsi.fastutil.longs.Long2ObjectOpenHashMap.class)return Long.valueOf(((long[])keys)[index]);
@@ -732,10 +817,7 @@ final class SourceMaps {
         if(target instanceof KnownContainers.Row row&&KnownContainers.supported(cursor.map)){
             if(!RecoverySources.tryRecordGraph())throw new IllegalStateException("GROUP_RECORD_GRAPH_BUSY");
             try{
-                boolean selectedKey=selectedElement(row.key,runtime,group),selectedValue=!cursor.setElements&&selectedElement(row.value,runtime,group);
-                if(!selectedKey&&!selectedValue&&!(privateContents&&(cursor.setElements?privateElement(row.key,runtime,group):privateEntry(row.key,row.value,runtime,group))))return;
-                if(selectedKey)validateRecordKey(row.key,runtime,group);if(selectedValue)validateRecordKey(row.value,runtime,group);
-                removeKnown(cursor,row);
+                if(selectedKnown(cursor,row,runtime,group,privateContents))removeKnown(cursor,row);
             }finally{RecoverySources.releaseRecordGraph();}return;
         }
         if(fastSet(cursor.map)){
@@ -770,15 +852,21 @@ final class SourceMaps {
         }
         throw new IllegalStateException(unavailable(cursor.map));
     }
+    private static boolean selectedKnown(Cursor cursor,KnownContainers.Row row,ProRuntime runtime,ProRuntime.Subject group,boolean privateContents){
+        boolean selectedKey=selectedElement(row.key,runtime,group),selectedValue=!cursor.setElements&&selectedElement(row.value,runtime,group);
+        if(!selectedKey&&!selectedValue&&!(privateContents&&(cursor.setElements?privateElement(row.key,runtime,group):privateEntry(row.key,row.value,runtime,group))))return false;
+        if(selectedKey)validateRecordKey(row.key,runtime,group);if(selectedValue)validateRecordKey(row.value,runtime,group);return true;
+    }
     private static boolean removeKnown(Cursor cursor,KnownContainers.Row row)throws ReflectiveOperationException{
         if(cursor.known==null)return false;
         String gap=KnownContainers.removalGap(cursor.known,row);if(!gap.isEmpty()){cursor.gap=gap;return false;}
         RetiringList previous=RETIRING_LIST.get();Object backing=KnownContainers.arrayBacking(cursor.map);
         if(backing!=null)RETIRING_LIST.set(new RetiringList(cursor.map,backing,cursor.known.slots));
-        boolean removed;
-        try{removed=KnownContainers.remove(cursor.known,row);}
+        KnownContainers.Removal removal;
+        try{removal=KnownContainers.removeObserved(cursor.known,row);}
         finally{if(backing!=null){if(previous==null)RETIRING_LIST.remove();else RETIRING_LIST.set(previous);}}
-        if(!removed)return false;
+        if(!removal.removed())return false;
+        if(removal.after()!=null)cursor.known=removal.after();
         cursor.removed=true;cursor.revision=revision(cursor.map);changed(cursor.map);return true;
     }
     /** Creation attribution is required; an observed outside holder or source prevents whole-carrier disposal. */

@@ -172,6 +172,7 @@ final class WorldArchive {
         return true;
     }
     String state(UUID id){Job job=jobs.get(id);return job==null?"未找到世界工作。":"WORLD="+job.id+";ACTION="+job.kind+";STATE="+job.state+";CHUNKS="+job.cursor+"/"+job.count()+";BLOCK_CURSOR="+job.blockCursor+";WORLD_SAVE="+(job.kind==Kind.CAPTURE?"NOT_CHANGED":job.vanillaFlush?"COMPLETED_CHUNKS_VANILLA_FLUSHED":"LEGACY_WORLD_SAVE_UNCONFIRMED")+";RESTART=UNVERIFIED;REASON="+job.reason;}
+    List<WeaponEntry> weaponJobs(){List<WeaponEntry> result=new ArrayList<>();for(Job job:jobs.values())result.add(new WeaponEntry(job.id,(job.kind==Kind.CAPTURE?"快照":job.kind==Kind.REGENERATE?"种子重生成":"回溯")+" · "+job.dimension.location()+" ["+job.minX()+", "+job.minZ()+"]",job.state+" · "+job.cursor+"/"+job.count()));Collections.reverse(result);return List.copyOf(result);}
     void tick(){
         if(jobs.isEmpty())return;List<Job> order=new ArrayList<>(jobs.values());
         for(int i=0;i<order.size();i++){Job job=order.get(next++%order.size());if(next<0)next=0;if(job.stopped&&!job.state.equals("ACCEPTING")||job.state.equals("COMPLETE"))continue;

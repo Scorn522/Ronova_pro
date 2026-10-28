@@ -250,8 +250,9 @@ typedef struct HostImport {
     int kind,delayed,returned,slotOwned,unknown;
     RUNTIME_FUNCTION unwind;
     NativePrivateRange slotRange;
-    struct HostImport *next;
+    struct HostImport *next,*delayNext,*delayHashNext,*returnedHashNext;
 } HostImport;
+enum { HOST_IMPORT_BUCKETS=64 };
 typedef struct HostImageLibrary {NativeLibrary *library;struct HostImageLibrary *next;} HostImageLibrary;
 typedef struct HostImage {
     /* Leaf admission gate: never held across a source query, VM/loader call
@@ -260,7 +261,8 @@ typedef struct HostImage {
     HMODULE handle;
     HMODULE pin;
     DWORD size,functionsRva,functionCount;
-    HostImport *imports;
+    HostImport *imports,*delayEntries;
+    HostImport *delaySlots[HOST_IMPORT_BUCKETS],*returnedEntries[HOST_IMPORT_BUCKETS];
     void *createTarget,*createATarget,*resolveTarget;
     void *targets[HOST_KIND_COUNT];
     volatile LONG live;
@@ -281,9 +283,27 @@ typedef struct HostImage {
  * never reactivates an old import entry or carries its former sources forward. */
 static SRWLOCK host_imports=SRWLOCK_INIT;
 static HostImage *host_images;
+static size_t host_import_bucket(const void *value){
+    uintptr_t address=(uintptr_t)value;
+    return ((address>>3)^(address>>11)^(address>>19))&(HOST_IMPORT_BUCKETS-1);
+}
 static void host_import_publish(HostImage *image,HostImport *entry){
     HostImport *prior=__atomic_load_n(&image->imports,__ATOMIC_ACQUIRE);
     do {entry->next=prior;}while(!__atomic_compare_exchange_n(&image->imports,&prior,entry,0,__ATOMIC_RELEASE,__ATOMIC_ACQUIRE));
+    /* These indexes retain the same image/entry incarnations as imports. They
+     * select candidates only: consumption still reads the real instruction,
+     * IAT pointer, target and current owners. Delay slots are installed under
+     * host_imports; returned receipts can publish concurrently under calls. */
+    if(entry->delayed==1){
+        size_t bucket=host_import_bucket((const void*)entry->slot);
+        entry->delayHashNext=image->delaySlots[bucket];image->delaySlots[bucket]=entry;
+        entry->delayNext=image->delayEntries;image->delayEntries=entry;
+    }
+    if(entry->returned){
+        HostImport **bucket=&image->returnedEntries[host_import_bucket(entry->entry)];
+        prior=__atomic_load_n(bucket,__ATOMIC_ACQUIRE);
+        do {entry->returnedHashNext=prior;}while(!__atomic_compare_exchange_n(bucket,&prior,entry,0,__ATOMIC_RELEASE,__ATOMIC_ACQUIRE));
+    }
 }
 /* host_imports is held; only the current logical image incarnation may keep
  * an outside IAT address registered. Retained thunk tombstones keep no such
@@ -1450,8 +1470,8 @@ static void host_install_slot(HostImage *image,void *volatile *slot,int declared
     if(!host_exchange_import(entry,actual,entry->entry))image->failed=1;
 }
 static int host_delay_gaps(HostImage *image){
-    for(HostImport *entry=image->imports;entry;entry=entry->next)
-        if(entry->delayed==1&&!host_controlled_entry(image,
+    for(HostImport *entry=image->delayEntries;entry;entry=entry->delayNext)
+        if(!host_controlled_entry(image,
                 __atomic_load_n(entry->slot,__ATOMIC_ACQUIRE),entry->kind))return 1;
     return 0;
 }
@@ -1465,11 +1485,12 @@ static void host_promote_delays(HostImage *image,Owner *owner,HostImport *only){
      * slot containing one of our actual resolution results can be rebound.
      * The original returned pointer and its provenance remain untouched. */
     if(!image->live)return;
-    for(HostImport *slot=image->imports;slot;slot=slot->next){
-        if(slot->delayed!=1||!slot->slot)continue;
+    for(HostImport *slot=image->delayEntries;slot;slot=slot->delayNext){
+        if(!slot->slot)continue;
         void *actual=__atomic_load_n(slot->slot,__ATOMIC_ACQUIRE);HostImport *result=NULL;
-        for(HostImport *candidate=image->imports;candidate;candidate=candidate->next)
-            if(candidate->returned&&candidate->entry==actual&&candidate->kind==slot->kind
+        for(HostImport *candidate=__atomic_load_n(&image->returnedEntries[host_import_bucket(actual)],__ATOMIC_ACQUIRE);
+                candidate;candidate=candidate->returnedHashNext)
+            if(candidate->entry==actual&&candidate->kind==slot->kind
                     &&(!only||candidate==only)&&host_result_has_owner(candidate,owner)
                     &&host_target_matches(image,candidate->original,slot->kind)){result=candidate;break;}
         if(!result)continue;
@@ -1579,11 +1600,19 @@ static int host_call_queue(unsigned char *marks,DWORD *queue,size_t *count,DWORD
     if(marks[offset]==0xff)return 0;
     if(!marks[offset]){marks[offset]=0x80;queue[(*count)++]=offset;}return 1;
 }
-static void *volatile *host_delay_call_slot(HostImage *image,void *caller){
+static void *volatile *host_delay_call_slot(HostImage *image,void *caller,int kind){
     uintptr_t pc=(uintptr_t)caller,base=(uintptr_t)image->handle;
     if(pc<base||pc-base<6||pc-base>image->size||!image->functionCount)return NULL;
     const unsigned char *call=(const unsigned char*)(pc-6);
     if(call[0]!=0xff||call[1]!=0x15)return NULL;
+    int32_t displacement;memcpy(&displacement,call+2,sizeof(displacement));
+    void *volatile *candidateAddress=(void *volatile*)(pc+(intptr_t)displacement);
+    HostImport *candidate=image->delaySlots[host_import_bucket((const void*)candidateAddress)];
+    while(candidate&&(candidate->slot!=candidateAddress||candidate->kind!=kind))candidate=candidate->delayHashNext;
+    if(!candidate)return NULL;
+    /* A matching byte suffix alone does not prove an instruction boundary.
+     * Reject unrelated addresses before allocating the decoder workspaces,
+     * then retain the complete live function/control-flow proof below. */
     /* PE .pdata supplies an instruction entry point for this actual image.
      * Read it for each consumption; no previous call grants a later permission. */
     RUNTIME_FUNCTION *functions=(RUNTIME_FUNCTION*)(base+image->functionsRva);
@@ -1621,13 +1650,15 @@ static void *volatile *host_delay_call_slot(HostImage *image,void *caller){
     }
     /* Direct branch targets must agree with decoded boundaries. Do not turn
      * embedded data, overlapping instructions or an unknown path into a slot. */
-    free(marks);free(queue);return proven?address:NULL;
+    free(marks);free(queue);return proven&&address==candidateAddress?address:NULL;
 }
 static HostImport *host_consumed_entry(HostImport *entry,NativeThread *state,void *caller){
     if(state&&(state->heapCallback||state->toolingRestricted||state->vmDetaching||state->vmThreadEnding))return entry;
     if(!entry->returned)return entry;
     HostImport *consumed=entry;HostImage *image=entry->image;
-    AcquireSRWLockExclusive(&host_imports);int mapped=image->live;
+    AcquireSRWLockExclusive(&host_imports);
+    if(!image->delayEntries){ReleaseSRWLockExclusive(&host_imports);return entry;}
+    int mapped=image->live;
     if(!mapped&&state){
         AcquireSRWLockShared(&native_records);
         for(NativeLibraryScope *scope=state->library;scope&&!mapped;scope=scope->previous)
@@ -1637,10 +1668,10 @@ static HostImport *host_consumed_entry(HostImport *entry,NativeThread *state,voi
         ReleaseSRWLockShared(&native_records);
     }
     if(mapped){
-        void *volatile *address=host_delay_call_slot(image,caller);
+        void *volatile *address=host_delay_call_slot(image,caller,entry->kind);
         host_promote_delays(image,NULL,NULL);
-        if(address)for(HostImport *slot=image->imports;slot;slot=slot->next)
-            if(slot->delayed==1&&slot->slot==address&&slot->kind==entry->kind&&slot->slotOwned
+        if(address)for(HostImport *slot=image->delaySlots[host_import_bucket((const void*)address)];slot;slot=slot->delayHashNext)
+            if(slot->slot==address&&slot->kind==entry->kind&&slot->slotOwned
                     &&slot->original==entry->original
                     &&__atomic_load_n(slot->slot,__ATOMIC_ACQUIRE)==slot->entry){
                 /* The current invocation fetched r through this exact slot,

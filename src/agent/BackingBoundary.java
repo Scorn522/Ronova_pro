@@ -29,10 +29,14 @@ final class BackingBoundary {
     static boolean coreInstalled() {return CORE_INSTALLED.containsAll(Set.of("java/util/concurrent/ThreadPoolExecutor","java/util/concurrent/ScheduledThreadPoolExecutor"));}
     static boolean installed(String name) {return CORE_INSTALLED.contains(name);}
     static byte[] transform(ClassLoader loader,String name,byte[] bytes) {
-        return transform(loader,null,name,bytes);
+        ClassNode node=new ClassNode();new ClassReader(bytes).accept(node,0);
+        if(!transform(loader,null,name,node))return null;
+        ControlClassWriter writer=new ControlClassWriter(loader,node);node.accept(writer);
+        byte[] result=writer.toByteArray();published(loader,name);return result;
     }
-    static byte[] transform(ClassLoader loader,Module module,String name,byte[] bytes) {
-        ClassNode node=new ClassNode();new ClassReader(bytes).accept(node,0);boolean changed=false;
+    static void published(ClassLoader loader,String name){if(loader==null)CORE_INSTALLED.add(name);}
+    static boolean transform(ClassLoader loader,Module module,String name,ClassNode node) {
+        boolean changed=false;
         if(loader==null&&(name.equals("java/util/concurrent/ThreadPoolExecutor")||name.equals("java/util/concurrent/ScheduledThreadPoolExecutor"))) {
             CORE_INSTALLED.remove(name);
             for(MethodNode method:node.methods)if(method.name.equals("shutdown")||method.name.equals("shutdownNow")) {
@@ -41,7 +45,7 @@ final class BackingBoundary {
                 code.add(new JumpInsnNode(Opcodes.IFNE,allowed));
                 if(method.name.equals("shutdownNow")) {code.add(new MethodInsnNode(Opcodes.INVOKESTATIC,"java/util/Collections","emptyList","()Ljava/util/List;",false));code.add(new InsnNode(Opcodes.ARETURN));}
                 else code.add(new InsnNode(Opcodes.RETURN));
-                code.add(allowed);method.instructions.insert(code);changed=true;
+                code.add(allowed);method.instructions.insert(code);method.maxStack=Math.max(method.maxStack,1);changed=true;
             }
         } else if(loader!=null&&(module==null||!ModGroupBoundary.ids(module).contains("ronova_pro"))) {
             for(MethodNode method:node.methods)for(AbstractInsnNode at:method.instructions.toArray()) {
@@ -62,7 +66,6 @@ final class BackingBoundary {
                 }
             }
         }
-        if(!changed)return null;ControlClassWriter writer=new ControlClassWriter(loader,node);node.accept(writer);
-        if(loader==null)CORE_INSTALLED.add(name);return writer.toByteArray();
+        return changed;
     }
 }

@@ -20,8 +20,10 @@ final class BackingPolicy {
     private static volatile Object unsafe;
     private static volatile Method fieldOffset,staticOffset,arrayBase,arrayScale;
     private static volatile int referenceWidth=8;
+    private static volatile boolean metadataPrepared;
     private BackingPolicy() { }
-    static void initialize(Class<?> bridge)throws ReflectiveOperationException {
+    static synchronized void prepare()throws ReflectiveOperationException {
+        if(metadataPrepared)return;
         Class<?> agent=Class.forName("dev.ronova.pro.agent.RecoveryAgent",false,ClassLoader.getSystemClassLoader());
         Class<?>[] carriers={net.minecraft.world.entity.Entity.class,net.minecraft.server.level.ServerLevel.class,net.minecraft.server.players.PlayerList.class,
             net.minecraft.world.level.Level.class,net.minecraft.server.level.ChunkMap.class,
@@ -37,6 +39,10 @@ final class BackingPolicy {
         fieldOffset=type.getMethod("objectFieldOffset",Field.class);staticOffset=type.getMethod("staticFieldOffset",Field.class);
         arrayBase=type.getMethod("arrayBaseOffset",Class.class);arrayScale=type.getMethod("arrayIndexScale",Class.class);
         referenceWidth=(Integer)arrayScale.invoke(unsafe,Object[].class);
+        metadataPrepared=true;
+    }
+    static void initialize(Class<?> bridge)throws ReflectiveOperationException {
+        prepare();
         var lookup=java.lang.invoke.MethodHandles.lookup();
         Class.forName("dev.ronova.pro.bootstrap.ControlBridge",false,null).getMethod("installBackingPolicy",Class.class,java.lang.invoke.MethodHandle.class,java.lang.invoke.MethodHandle.class,java.lang.invoke.MethodHandle.class,java.lang.invoke.MethodHandle.class,java.lang.invoke.MethodHandle.class,java.lang.invoke.MethodHandle.class)
             .invoke(null,ProRuntime.class,lookup.findStatic(BackingPolicy.class,"known",java.lang.invoke.MethodType.methodType(boolean.class,Object.class)),

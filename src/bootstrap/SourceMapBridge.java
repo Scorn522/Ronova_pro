@@ -112,7 +112,7 @@ public final class SourceMapBridge {
     }
     public static String state() {
         if(!failure.isEmpty())return "SOURCE_FIELDS_UNAVAILABLE:"+failure+":JDK_CONTAINER_HOOKS_REMOVED";
-        return (writeGuard!=null&&changeObserver!=null?"SOURCE_FIELDS_INSTALLED":"SOURCE_FIELDS_NOT_INSTALLED")+":JDK_CONTAINER_HOOKS_REMOVED";
+        return (writeGuard!=null&&changeObserver!=null?"SOURCE_FIELDS_CALL_SITES_ONLY":"SOURCE_FIELDS_NOT_INSTALLED")+":JDK_CONTAINER_HOOKS_REMOVED";
     }
     private static void sweep(int budget) {
         indexWriter(CALLER.getCallerClass());

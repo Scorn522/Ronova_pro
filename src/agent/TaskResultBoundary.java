@@ -5,20 +5,6 @@ import jdk.internal.org.objectweb.asm.tree.*;
 /** Included in the canonical JDK boundary image, not applied after its certification. */
 final class TaskResultBoundary {
     private static final String BRIDGE="dev/ronova/pro/bootstrap/TaskBridge",CF="java/util/concurrent/CompletableFuture";
-    private static String contract(MethodInsnNode call){
-        String key=call.owner+"#"+call.name+call.desc;
-        return switch(key){
-            case "java/util/function/Function#apply(Ljava/lang/Object;)Ljava/lang/Object;"->"function";
-            case "java/util/function/Consumer#accept(Ljava/lang/Object;)V"->"consumer";
-            case "java/util/function/Supplier#get()Ljava/lang/Object;"->"supplier";
-            case "java/lang/Runnable#run()V"->"runnable";
-            case "java/util/concurrent/Callable#call()Ljava/lang/Object;"->"callable";
-            case "java/util/function/BiFunction#apply(Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;"->"bifunction";
-            case "java/util/function/BiConsumer#accept(Ljava/lang/Object;Ljava/lang/Object;)V"->"biconsumer";
-            case "java/util/function/Predicate#test(Ljava/lang/Object;)Z"->"predicate";
-            default->null;
-        };
-    }
     static void instrument(ClassNode node) {
         for(MethodNode m:node.methods) {
             if(m.name.startsWith("<"))continue;
@@ -31,19 +17,11 @@ final class TaskResultBoundary {
                     &&(call.owner.startsWith("java/util/function/")||call.owner.equals("java/util/concurrent/Callable")||call.owner.equals("java/lang/Runnable"))) {
                 Type[] args=Type.getArgumentTypes(call.desc);int[] locals=new int[args.length];InsnList c=new InsnList();
                 for(int i=args.length-1;i>=0;i--) { locals[i]=m.maxLocals;m.maxLocals+=args[i].getSize();c.add(new VarInsnNode(args[i].getOpcode(Opcodes.ISTORE),locals[i])); }
-                String contract=contract(call);
-                if(contract==null){
-                    c.add(new InsnNode(Opcodes.DUP));c.add(new MethodInsnNode(Opcodes.INVOKESTATIC,BRIDGE,"requireInvocation","(Ljava/lang/Object;)V",false));
-                    for(int i=0;i<args.length;i++)c.add(new VarInsnNode(args[i].getOpcode(Opcodes.ILOAD),locals[i]));m.instructions.insertBefore(call,c);
-                }else{
-                    for(int i=0;i<2;i++)c.add(i<args.length?new VarInsnNode(Opcodes.ALOAD,locals[i]):new InsnNode(Opcodes.ACONST_NULL));
-                    c.add(new LdcInsnNode(contract));m.instructions.insertBefore(call,c);
-                    MethodInsnNode wrapped=new MethodInsnNode(Opcodes.INVOKESTATIC,BRIDGE,"invokeEquipmentCallback","(Ljava/lang/Object;Ljava/lang/Object;Ljava/lang/Object;Ljava/lang/String;)Ljava/lang/Object;",false);m.instructions.set(call,wrapped);
-                    InsnList returned=new InsnList();Type result=Type.getReturnType(call.desc);
-                    if(result.getSort()==Type.VOID)returned.add(new InsnNode(Opcodes.POP));
-                    else if(result.getSort()==Type.BOOLEAN){returned.add(new TypeInsnNode(Opcodes.CHECKCAST,"java/lang/Boolean"));returned.add(new MethodInsnNode(Opcodes.INVOKEVIRTUAL,"java/lang/Boolean","booleanValue","()Z",false));}
-                    if(returned.size()>0)m.instructions.insert(wrapped,returned);
-                }
+                // Preserve the real SAM invocation and the JDK's original exception/completion path.
+                c.add(new InsnNode(Opcodes.DUP));
+                c.add(new MethodInsnNode(Opcodes.INVOKESTATIC,BRIDGE,"requireInvocation","(Ljava/lang/Object;)V",false));
+                for(int i=0;i<args.length;i++)c.add(new VarInsnNode(args[i].getOpcode(Opcodes.ILOAD),locals[i]));
+                m.instructions.insertBefore(call,c);
             }
             boolean future=node.name.equals("java/util/concurrent/FutureTask")&&m.name.equals("set")&&m.desc.equals("(Ljava/lang/Object;)V");
             boolean cf=node.name.equals(CF)&&Set.of("completeNull","completeValue","completeRelay","internalComplete").contains(m.name)

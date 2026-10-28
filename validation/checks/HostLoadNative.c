@@ -2157,7 +2157,6 @@ extern DWORD (WINAPI *__imp_FlsAlloc)(PFLS_CALLBACK_FUNCTION);
 extern BOOL (WINAPI *__imp_FlsSetValue)(DWORD,PVOID);
 extern PVOID (WINAPI *__imp_FlsGetValue)(DWORD);
 extern BOOL (WINAPI *__imp_FlsFree)(DWORD);
-extern HANDLE (WINAPI *__imp_HeapCreate)(DWORD,SIZE_T,SIZE_T);
 typedef struct LoadTlsPrivateCase {
     DWORD tls,fls;void *parentFiber;volatile LONG callbacks,error;int threadValue,fiberValue;
 } LoadTlsPrivateCase;
@@ -2196,15 +2195,67 @@ static DWORD WINAPI load_tls_private_thread(PVOID data){
     if(!TlsSetValue(test->tls,NULL)||!ConvertFiberToThread())InterlockedOr(&test->error,1024);
     return test->error?1:0;
 }
+typedef struct LoadTlsParallel LoadTlsParallel;
+typedef struct LoadTlsParallelWorker {LoadTlsParallel *test;unsigned index;} LoadTlsParallelWorker;
+struct LoadTlsParallel {
+    DWORD slots[2],shared;HANDLE start;volatile LONG errors;
+    LoadTlsParallelWorker workers[2];
+};
+static DWORD WINAPI load_tls_parallel_thread(PVOID data){
+    LoadTlsParallelWorker *worker=(LoadTlsParallelWorker*)data;LoadTlsParallel *test=worker->test;
+    unsigned index=worker->index;int local[2]={17+(int)index,41+(int)index};
+    if(WaitForSingleObject(test->start,10000)!=WAIT_OBJECT_0){InterlockedOr(&test->errors,1);return 1;}
+    if(TlsGetValue(test->slots[index])!=NULL||FlsGetValue(test->shared)!=NULL){InterlockedOr(&test->errors,8);return 1;}
+    for(unsigned pass=0;pass<64;pass++){
+        if(!TlsSetValue(test->slots[index],&local[pass&1])||TlsGetValue(test->slots[index])!=&local[pass&1]
+                ||TlsGetValue(test->slots[index^1])!=NULL
+                ||!FlsSetValue(test->shared,&local[pass&1])||FlsGetValue(test->shared)!=&local[pass&1]){
+            InterlockedOr(&test->errors,2);break;
+        }
+        SwitchToThread();
+    }
+    if(!TlsSetValue(test->slots[index],NULL)||!FlsSetValue(test->shared,NULL))InterlockedOr(&test->errors,4);
+    return test->errors?1:0;
+}
+static int load_tls_parallel(JNIEnv *env){
+    LoadTlsParallel *test=(LoadTlsParallel*)HeapAlloc(GetProcessHeap(),HEAP_ZERO_MEMORY,sizeof(*test));
+    if(!test)return load_thread_fail(env,"HOST_TLS_PARALLEL_STORAGE");
+    test->slots[0]=test->slots[1]=TLS_OUT_OF_INDEXES;test->shared=FLS_OUT_OF_INDEXES;
+    HANDLE threads[2]={NULL,NULL};int complete=1,valid=0;
+    test->start=CreateEventW(NULL,TRUE,FALSE,NULL);
+    test->slots[0]=TlsAlloc();test->slots[1]=TlsAlloc();test->shared=FlsAlloc(NULL);
+    if(!test->start||test->slots[0]==TLS_OUT_OF_INDEXES||test->slots[1]==TLS_OUT_OF_INDEXES||test->shared==FLS_OUT_OF_INDEXES)goto parallel_done;
+    for(unsigned index=0;index<2;index++){
+        test->workers[index].test=test;test->workers[index].index=index;
+        threads[index]=CreateThread(NULL,0,load_tls_parallel_thread,&test->workers[index],0,NULL);
+    }
+    SetEvent(test->start);valid=threads[0]&&threads[1];
+    for(unsigned index=0;index<2;index++)if(threads[index]){
+        if(WaitForSingleObject(threads[index],10000)!=WAIT_OBJECT_0){complete=0;valid=0;}
+        else {DWORD result=1;if(!GetExitCodeThread(threads[index],&result)||result)valid=0;}
+    }
+    valid=valid&&!test->errors;
+parallel_done:
+    for(unsigned index=0;index<2;index++)if(threads[index])CloseHandle(threads[index]);
+    if(complete){
+        if(test->shared!=FLS_OUT_OF_INDEXES&&!FlsFree(test->shared))valid=0;
+        for(unsigned index=0;index<2;index++)if(test->slots[index]!=TLS_OUT_OF_INDEXES&&!TlsFree(test->slots[index]))valid=0;
+        if(test->start)CloseHandle(test->start);HeapFree(GetProcessHeap(),0,test);
+    }
+    if(!valid)return load_thread_fail(env,"HOST_TLS_PARALLEL_CONTEXT_OR_LIFETIME");
+    return 1;
+}
 JNIEXPORT jboolean JNICALL Java_dev_ronova_pro_AuditFixCheck_hostTlsPrivate0(JNIEnv *env,jclass check){
     (void)check;const char *failure=NULL;DWORD incoming=GetLastError();
     LoadTlsPrivateCase *test=(LoadTlsPrivateCase*)HeapAlloc(GetProcessHeap(),HEAP_ZERO_MEMORY,sizeof(*test));
     if(!test)return load_thread_fail(env,"HOST_TLS_FIXTURE_STORAGE");
     test->tls=TLS_OUT_OF_INDEXES;test->fls=FLS_OUT_OF_INDEXES;HANDLE thread=NULL;int running=0;
-    void *imports[]={(void*)__imp_HeapCreate,(void*)__imp_TlsAlloc,(void*)__imp_TlsSetValue,(void*)__imp_TlsGetValue,
+    void *imports[]={(void*)__imp_TlsAlloc,(void*)__imp_TlsSetValue,(void*)__imp_TlsGetValue,
         (void*)__imp_TlsFree,(void*)__imp_FlsAlloc,(void*)__imp_FlsSetValue,(void*)__imp_FlsGetValue,(void*)__imp_FlsFree};
     for(unsigned i=0;i<sizeof(imports)/sizeof(imports[0]);i++)if(!load_private_entry(imports[i])){
-        failure="HOST_POOL_TLS_FLS_ACTUAL_IAT_ENTRY";goto tls_done;}
+        MEMORY_BASIC_INFORMATION actual={0};VirtualQuery(imports[i],&actual,sizeof(actual));
+        fprintf(stderr,"HOST_TLS_IAT_MISSING index=%u entry=%p allocation=%p type=%lx protect=%lx\n",i,imports[i],actual.AllocationBase,(unsigned long)actual.Type,(unsigned long)actual.Protect);
+        failure="HOST_TLS_FLS_ACTUAL_IAT_ENTRY";goto tls_done;}
     HMODULE kernel=GetModuleHandleW(L"kernel32.dll");
     void *(WINAPI *get2)(DWORD)=kernel?(void *(WINAPI*)(DWORD))GetProcAddress(kernel,"TlsGetValue2"):NULL;
     if(get2&&!load_private_entry((void*)get2)){failure="HOST_TLS_GET2_ACTUAL_GPA_ENTRY";goto tls_done;}
@@ -2237,6 +2288,8 @@ tls_done:
     }
     SetLastError(incoming);
     if(failure){load_thread_fail(env,failure);return JNI_FALSE;}
+    if(!load_tls_parallel(env))return JNI_FALSE;
+    SetLastError(incoming);
     fprintf(stdout,"HOST_TLS_FLS_PASS actual_IAT separate_kernel_threads actual_fiber_switch_DeleteFiber callback_once_per_nonnull_FLS FlsFree NULL_success TlsGetValue2=%s no_Core_producer_authority\n",get2?"actual_GPA_error_preserved":"not_exported");
     return JNI_TRUE;
 }
@@ -3475,23 +3528,48 @@ done:
 JNIEXPORT void JNICALL Java_dev_ronova_pro_AuditFixCheck_hostWin32Allocations0(JNIEnv *env,jclass check){
     (void)check;load_win32_allocation_check(env);
 }
+typedef struct LoadRawUnsafeScope {
+    const void *slots[3];uintptr_t before[3];DWORD thread;JNIEnv *environment;int lifetimeKnown;
+    struct LoadRawUnsafeScope *previous;
+} LoadRawUnsafeScope;
+static __declspec(thread) LoadRawUnsafeScope *load_raw_unsafe_scope;
+/* This is not a raw-address API. Only the three actual first slots captured
+ * by the enclosing synchronous JNI call can be compared, on that thread. */
+JNIEXPORT jboolean JNICALL Java_dev_ronova_pro_AuditFixCheck_rawUnsafeSlotUnchanged0(JNIEnv *env,jclass check,jint index){
+    (void)check;LoadRawUnsafeScope *scope=load_raw_unsafe_scope;
+    if(!scope||!scope->lifetimeKnown||scope->thread!=GetCurrentThreadId()||scope->environment!=env||index<0||index>=3)return JNI_FALSE;
+    uintptr_t observed=*(volatile const uintptr_t*)scope->slots[index];
+    if(observed!=scope->before[index]){scope->lifetimeKnown=0;return JNI_FALSE;}
+    return JNI_TRUE;
+}
 JNIEXPORT void JNICALL Java_dev_ronova_pro_AuditFixCheck_hostRawUnsafe0(JNIEnv *env,jclass check){
     JavaVM *vm=NULL;jvmtiEnv *api=NULL;
     if((*env)->GetJavaVM(env,&vm)!=JNI_OK||!vm
             ||(*vm)->GetEnv(vm,(void**)&api,JVMTI_VERSION_1_2)!=JNI_OK||!api){
         load_thread_fail(env,"RAW_UNSAFE_ACTUAL_VM_JVMTI_ENVIRONMENT_REQUIRED");return;
     }
-    /* Only actual public first slots leave this synchronous fixture call. No
-     * controller registration, source identity or replacement table is made. */
+    /* Capture actual public first slots in C: protected raw getters must not
+     * be used as a baseline/readback bypass. No controller registration,
+     * source identity, arbitrary address reader or replacement table is made. */
     jclass lifetimeFailure=(*env)->FindClass(env,"dev/ronova/pro/AuditFixCheck$RawUnsafeLifetimeFailure");
-    jmethodID action=lifetimeFailure?(*env)->GetStaticMethodID(env,check,"rawUnsafeSlots","(JJJ)V"):NULL;
-    if(action)(*env)->CallStaticVoidMethod(env,check,action,(jlong)(uintptr_t)vm,(jlong)(uintptr_t)api,(jlong)(uintptr_t)env);
+    jmethodID action=lifetimeFailure?(*env)->GetStaticMethodID(env,check,"rawUnsafeSlots","(JJJJJJ)V"):NULL;
+    LoadRawUnsafeScope scope={{vm,api,env},{0},GetCurrentThreadId(),env,1,load_raw_unsafe_scope};
+    if(action){
+        for(unsigned i=0;i<3;i++)scope.before[i]=*(volatile const uintptr_t*)scope.slots[i];
+        load_raw_unsafe_scope=&scope;
+        (*env)->CallStaticVoidMethod(env,check,action,(jlong)(uintptr_t)vm,(jlong)(uintptr_t)api,(jlong)(uintptr_t)env,
+                (jlong)scope.before[0],(jlong)scope.before[1],(jlong)scope.before[2]);
+        load_raw_unsafe_scope=scope.previous;
+    }
     jthrowable failure=(*env)->ExceptionOccurred(env);
     if(failure)(*env)->ExceptionClear(env);
-    if(failure&&lifetimeFailure&&(*env)->IsInstanceOf(env,failure,lifetimeFailure)){
+    if(!scope.lifetimeKnown||failure&&lifetimeFailure&&(*env)->IsInstanceOf(env,failure,lifetimeFailure)){
         /* An unexpectedly accepted free/reallocation may have invalidated api.
          * Preserve that failure without dereferencing it during cleanup. */
-        (*env)->DeleteLocalRef(env,lifetimeFailure);(*env)->Throw(env,failure);(*env)->DeleteLocalRef(env,failure);return;
+        if(lifetimeFailure)(*env)->DeleteLocalRef(env,lifetimeFailure);
+        if(failure){(*env)->Throw(env,failure);(*env)->DeleteLocalRef(env,failure);}
+        else load_thread_fail(env,"RAW_UNSAFE_CONTROL_LIFETIME_UNCONFIRMED");
+        return;
     }
     jvmtiError disposed=(*api)->DisposeEnvironment(api);
     if(lifetimeFailure)(*env)->DeleteLocalRef(env,lifetimeFailure);

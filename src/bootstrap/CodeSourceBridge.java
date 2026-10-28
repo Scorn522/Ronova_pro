@@ -81,14 +81,51 @@ public final class CodeSourceBridge {
         final List<CodeMethods> entries=new ArrayList<>();volatile long revision;
         MethodBucket(){protect(this,entries);}
     }
-    private record FrameMethods(MethodBucket bucket,long revision,int definition,String[] selectors){}
+    private record FrameMethods(MethodBucket bucket,long revision,int definition,String[] names,String[] descriptors,String[] ambiguous){
+        boolean matches(StackWalker.StackFrame frame){
+            if(names.length!=0){
+                String name=frame.getMethodName();int low=0,high=names.length;
+                while(low<high){int middle=(low+high)>>>1;if(names[middle].compareTo(name)<0)low=middle+1;else high=middle;}
+                if(low<names.length&&names[low].equals(name)){
+                    String descriptor=frame.getDescriptor();
+                    for(int at=low;at<names.length&&names[at].equals(name);at++)if(descriptors[at].equals(descriptor))return true;
+                }
+            }
+            for(String selector:ambiguous)if(frameSelector(frame,selector))return true;
+            return false;
+        }
+    }
     private static final ClassValue<FrameMethods> FRAME_METHODS=new ClassValue<>(){
         @Override protected FrameMethods computeValue(Class<?> type){
             synchronized(CODE_METHODS){
-                MethodBucket bucket=methodBucket(type.getName());Set<String> selected=new HashSet<>();
+                MethodBucket bucket=methodBucket(type.getName());
+                // Publication may reenter registration. An older selector
+                // image must keep its old revision so frameMethods retries.
+                long revision=bucket.revision;int definition=PlatformMetadata.classRevision(type);
+                Set<String> selected=new HashSet<>();
                 for(CodeMethods entry:bucket.entries)
                     if(codeMatches(entry.name(),entry.loader(),entry.bootstrap(),entry.actual(),type))selected.addAll(entry.methods());
-                FrameMethods methods=new FrameMethods(bucket,bucket.revision,PlatformMetadata.classRevision(type),selected.toArray(new String[0]));protect(methods,methods.selectors());return methods;
+                // Index declarations once, not every selector for every walked
+                // frame. The walked name/descriptor must never be concatenated:
+                // String's byte copy can reenter this very source query.
+                Map<String,List<String>> grouped=new TreeMap<>();List<String> ambiguous=new ArrayList<>();
+                for(String selector:selected){
+                    int split=selector.indexOf('(');
+                    // JVM names can themselves contain '('. Such selectors
+                    // retain the original exact matcher; never guess where
+                    // an unusual bytecode method name or class name ends.
+                    if(split<=0||selector.indexOf('(',split+1)>=0){ambiguous.add(selector);continue;}
+                    grouped.computeIfAbsent(selector.substring(0,split),ignored->new ArrayList<>()).add(selector.substring(split));
+                }
+                // Flat parallel arrays avoid another controlled allocation and
+                // Native publication for each individual method name.
+                int count=selected.size()-ambiguous.size(),index=0;
+                String[] names=new String[count],descriptors=new String[count];
+                for(var entry:grouped.entrySet())for(String descriptor:entry.getValue()){
+                    names[index]=entry.getKey();descriptors[index]=descriptor;index++;
+                }
+                FrameMethods methods=new FrameMethods(bucket,revision,definition,names,descriptors,ambiguous.toArray(new String[0]));
+                protect(methods,names,descriptors,methods.ambiguous());return methods;
             }
         }
     };
@@ -168,7 +205,7 @@ public final class CodeSourceBridge {
     private record FieldHold(Class<?> declaring,String name,String descriptor){}
     private record Image(Module module,byte[] digest,Module[] sources){}
     private record Replayed(Object tree,boolean metadataChanged,boolean scheduleChanged){}
-    private record CodeCapture(Object token,Image original,Module[] sources,Ref<Object> context){}
+    private record CodeCapture(Object token,Image original,Module[] sources,Ref<Object> context,Object transform){}
     private record MetadataUse(Object context,Object mixin,Object state,MetadataUse previous){}
     private record MemberChange(Object member,Object[] values,Image original,Module[] sources){}
     private record Reader(Image image,WeakReference<byte[]> bytes,Class<?> declaring){}
@@ -215,7 +252,7 @@ public final class CodeSourceBridge {
     /** Incoming identities stay protected throughout an active batch, including
      * while its index is built and while a Native notification enters the VM. */
     private static final class ControlPublication {
-        final Object[] values;final ControlPublication previous;volatile Object[] index;
+        final Object[] values;final ControlPublication previous;volatile Object[] index,changes;
         ControlPublication(Object[] values,ControlPublication previous){this.values=values;this.previous=previous;}
         void prepare(){
             if(values.length<=4||values.length>(1<<28))return;int capacity=16;
@@ -226,7 +263,7 @@ public final class CodeSourceBridge {
             index=built;
         }
         boolean contains(Object value){
-            Object[] current=index;if(value==this||value==values||value==current)return true;
+            Object[] current=index;if(value==this||value==values||value==current||value==changes)return true;
             if(current==null){for(Object item:values)if(item==value)return true;return false;}
             int at=ControlRegistry.bucket(System.identityHashCode(value),current.length);
             while(current[at]!=null){if(current[at]==value)return true;at=(at+1)&(current.length-1);}return false;
@@ -269,9 +306,15 @@ public final class CodeSourceBridge {
             ControlPublication pending=new ControlPublication(values,publication);publication=pending;
             try {
             pending.prepare();
-            // The temporary lookup arrays are controller metadata too. Retain
-            // weak protection while an acquired publication is still held by
-            // a reader after this batch returns; no source verdict is stored.
+            // Authenticate/invalidate once for this exact batch. Already
+            // registered identities must not revoke an unrelated ongoing heap
+            // walk again; incoming identities remain covered by publication.
+            Object[] changes=null;
+            for(int i=0;i<values.length;i++)if(values[i]!=null&&find(values[i])==null){
+                if(changes==null){changes=new Object[values.length];pending.changes=changes;}
+                changes[i]=values[i];
+            }
+            if(changes!=null)NativeControl.heapPoliciesChanged(changes);
             for(int index=0;index<values.length;index++){
                 // A class image can publish thousands of identities at once.
                 // Retiring only 64 keys per whole publication lets temporary
@@ -281,7 +324,6 @@ public final class CodeSourceBridge {
                 Object value=values[index];
                 if(value==null)continue;
                 ControlKey known=find(value);if(known!=null){result=known;continue;}
-                NativeControl.heapPolicyChanged(value);
                 if(size>=table.length-(table.length>>>2)&&table.length<(1<<30)){
                     ControlKey[] prior=table,next=new ControlKey[prior.length*2];long nextGeneration=generation+1;int retained=0;
                     // Old bucket chains remain intact for a reader that acquired
@@ -384,9 +426,8 @@ public final class CodeSourceBridge {
     }
     static Module[] frameSources(StackWalker.StackFrame frame){
         if(codeMethodsPresent&&frame.getByteCodeIndex()>=0){
-            boolean candidate=false;Class<?> type=frame.getDeclaringClass();
-            for(String selector:frameMethods(type).selectors())if(frameSelector(frame,selector)){candidate=true;break;}
-            if(candidate){
+            Class<?> type=frame.getDeclaringClass();
+            if(frameMethods(type).matches(frame)){
                 Module[] observed=NativeControl.codeFrame(frame);
                 // A selector describes the current catalogue, not an obsolete
                 // physical method. Never replace a failed VM observation with
@@ -575,21 +616,6 @@ public final class CodeSourceBridge {
     static Module[] executionUnsafeReadSources(Object receipt){
         if(AUTHORITY.getCallerClass().getNestHost()!=ExecutionFlow.class)throw new SecurityException("ACTUAL_EXECUTION_SOURCE_STATE_REQUIRED");
         return ControlBridge.executedUnsafeReadSources(receipt);
-    }
-    static Module[] executionByteMemorySources(Object holder,long offset,long length){
-        if(AUTHORITY.getCallerClass()!=ControlBridge.class)throw new SecurityException("ACTUAL_MEMORY_READ_BOUNDARY_REQUIRED");
-        return holder==null?NO_FRAME_SOURCES:ControlBridge.objectSources(holder);
-    }
-    static Object executionByteMemoryReadBefore(Object carrier,long offset,long length){
-        if(AUTHORITY.getCallerClass()!=ControlBridge.class)throw new SecurityException("ACTUAL_MEMORY_READ_BOUNDARY_REQUIRED");
-        return carrier==null?null:ControlBridge.objectSources(carrier);
-    }
-    static Module[] executionByteMemoryReadSources(Object token){
-        if(AUTHORITY.getCallerClass()!=ControlBridge.class)throw new SecurityException("ACTUAL_MEMORY_READ_RESULT_REQUIRED");
-        return token instanceof Module[] sources?sources.clone():NO_FRAME_SOURCES;
-    }
-    static void executionByteMemoryReadEnd(Object token){
-        if(AUTHORITY.getCallerClass()!=ControlBridge.class)throw new SecurityException("ACTUAL_MEMORY_READ_COMPLETION_REQUIRED");
     }
     public static void executionHeapAfter(Object token,int instruction,Object reference){
         if(token==null)return;ExecutionFlow.heapAfter(token,instruction,reference,executionSite(token));
@@ -1617,10 +1643,13 @@ public final class CodeSourceBridge {
         return capture(tree,source==null?new Module[0]:source.sources(),writers,null);
     }
     private static Object capture(Object tree,Module[] sources,Module[] writers,Object context){
+        Object transform=TransformScope.enter(tree.getClass());boolean captured=false;
+        try{
         Image original;synchronized(MODULES){original=TREES.get(new Key(tree,false));}
         Module[] actual=sources.clone(),authors=writers.clone();Ref<Object> consumer=new Ref<>(context);Object token=call(begin,tree,actual,authors);
         if(token!=null){Object root=treeRoot(tree);if(root!=null)synchronized(MODULES){TREE_INPUTS.remove(new Key(root,false));}}
-        CodeCapture record=new CodeCapture(token,original,actual,consumer);protect(record,actual,authors,consumer);return record;
+        CodeCapture record=new CodeCapture(token,original,actual,consumer,transform);protect(record,actual,authors,consumer);captured=true;return record;
+        }finally{if(!captured)TransformScope.exit(transform);}
     }
     public static void transformerContext(Object holder,Object implementation,Object service){
         boundary("<init>");
@@ -1640,6 +1669,7 @@ public final class CodeSourceBridge {
     public static void codeEnd(Object token,Object tree){
         String method=callerMethod();if(!Set.of("applyMixin","preApply","postApply","transform").contains(method))throw new SecurityException("ACTUAL_EXTERNAL_APPLY_REQUIRED");
         boundary(method);if(!(token instanceof CodeCapture record)||!controlled(record))throw new SecurityException("ACTUAL_EXTERNAL_CAPTURE_REQUIRED");
+        try{
         Module[] used=record.sources();Object context=record.context().get();
         if(context!=null)synchronized(MODULES){Module[] reads=CONTEXT_READS.get(new Key(context,false));if(reads!=null)used=merge(used,reads);}
         call(end,record.token(),tree,used);Image source;synchronized(MODULES){source=TREES.get(new Key(tree,false));}
@@ -1653,6 +1683,7 @@ public final class CodeSourceBridge {
             }
         }
         rememberTreeParents(tree);
+        }finally{TransformScope.exit(record.transform());}
     }
     public static void codeControls(Object[] objects){requireAgent();protectControls(objects);}
     public static Object[] imageControlFields(Object holder,java.lang.reflect.Field[] fields){
@@ -1680,7 +1711,7 @@ public final class CodeSourceBridge {
     }
     static Object controlField(java.lang.reflect.Field field,Object holder){
         Class<?> caller=AUTHORITY.getCallerClass();
-        if(caller!=CodeSourceBridge.class&&caller!=ControlBridge.class&&caller.getNestHost()!=ResourceBridge.class)
+        if(caller!=CodeSourceBridge.class&&caller!=ControlBridge.class&&caller.getNestHost()!=ResourceBridge.class&&caller.getNestHost()!=GuardedCalls.class)
             throw new SecurityException("ACTUAL_CONTROL_FIELD_READER_REQUIRED");
         // The bootstrap module already has access to the JDK containers used
         // by our control images. Read their actual backing directly; calling
@@ -1725,15 +1756,12 @@ public final class CodeSourceBridge {
                     Object child=controlField(field,value);if(child!=null)pending.add(child);
                 }
         }
-        // Keep registration after successful discovery. The registry already
-        // de-duplicates leaf identities; no expanded flattened result array is
-        // needed, and every actual discovered backing is still registered.
-        synchronized(CONTROLS){
-            reapControls();
-            for(int i=0;i<roots.length;i++)if(roots[i] instanceof Map<?,?>||roots[i] instanceof Collection<?>)roots[i]=null;
-            CONTROLS.addAll(roots);
-            if(found!=null)CONTROLS.addAll(found.toArray());
-        }
+        // Discovery is still live even for registered containers: a later
+        // backing must join this operation. Publish the exact union once,
+        // rather than opening separate root/backing transactions and notices.
+        if(found==null){protect(roots);return;}
+        for(Object root:roots)if(root!=null)found.add(root);
+        protect(found.toArray());
     }
     static void controlBacking(Object parent,Object next){
         if(AUTHORITY.getCallerClass()!=ControlBridge.class)throw new SecurityException("CONTROL_BACKING_OWNER");
@@ -1757,7 +1785,7 @@ public final class CodeSourceBridge {
         // always control state, including before/after a live operation. Their
         // protection does not depend on publishing each scalar receipt in the
         // weak directory. Actual native scopes and range checks are unchanged.
-        if(object instanceof ControlBridge.RawMemoryMutation||object instanceof FrameworkBuffers.Scalar)return true;
+        if(object instanceof ControlBridge.RawMemoryMutation||object instanceof FrameworkBuffers.Scalar||object instanceof FrameworkBuffers.Draw)return true;
             if(object==CONTROLS)return true;
             // Only this exact component type can be the registry's backing.
             // Other arrays still undergo the ordinary control-identity lookup.

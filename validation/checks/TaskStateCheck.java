@@ -20,7 +20,7 @@ public final class TaskStateCheck {
     }
     private TaskStateCheck() { }
     public static void main(String[] arguments)throws Exception {
-        lateDescendant();duplicateEdge();freshnessAndReceipts();qualificationAndExecution();scopeIsolation();bridgeOwnership();boundaryGate();inFlightDetach();
+        lateDescendant();duplicateEdge();freshnessAndReceipts();qualificationAndExecution();scopeIsolation();qualificationIndex();bridgeOwnership();boundaryGate();inFlightDetach();
         for(String name:CASES)System.out.println("TASK_STATE_METADATA_CASE_PASS "+name);
         System.out.println("TASK_STATE_METADATA_CHECKS_PASS count="+CASES.size()+"; NO_PRODUCTION_OUTCOME_EVIDENCE");
     }
@@ -36,6 +36,11 @@ public final class TaskStateCheck {
         model=(RecoveryTasks)unsafe.allocateInstance(RecoveryTasks.class);
         assign(RecoveryTasks.class,model,"runtime",runtime);
         for(String name:List.of("pendingRoots","workerBindings","captureGaps","drainedTasks"))assign(RecoveryTasks.class,model,name,new IdentityHashMap<>());
+        assign(RecoveryTasks.class,model,"tasks",new IdentityHashMap<>());
+        assign(RecoveryTasks.class,model,"subjectTasks",new HashMap<>());
+        assign(RecoveryTasks.class,model,"operationTasks",new HashMap<>());
+        assign(RecoveryTasks.class,model,"waiting",new ArrayDeque<>());
+        assign(RecoveryTasks.class,model,"windows",new ArrayDeque<>());
         assign(RecoveryTasks.class,model,"events",new ConcurrentLinkedQueue<>());
         assign(RecoveryTasks.class,model,"pendingCaptures",new ConcurrentLinkedQueue<>());
         assign(RecoveryTasks.class,model,"gap","");
@@ -120,6 +125,33 @@ public final class TaskStateCheck {
         try{require(((Set<?>)invoke("currentScopes",new Class<?>[]{Collection.class,long.class},List.of(independent,parent),20L)).isEmpty(),"mixed live backend generations are stale");}
         finally{QueryBoundary.advance=false;}
         CASES.add("QUERY_FAILURE_ISOLATION_AND_ACTUAL_BACKEND_CHANGE");
+    }
+    @SuppressWarnings("unchecked") private static void qualificationIndex()throws Exception {
+        var owner=subject();var outside=subject();UUID operation=UUID.randomUUID();
+        Object first=task(owner),late=task(owner),shared=task(outside);
+        Field tasks=RecoveryTasks.class.getDeclaredField("tasks");tasks.setAccessible(true);
+        for(Object task:List.of(first,late,shared)){
+            set(task,"authority",null);values(task,"subjects").clear();
+            ((Map<Object,Object>)tasks.get(model)).put(field(task,"object"),task);
+        }
+        invoke("observeSubjects",new Class<?>[]{TASK,Collection.class},first,Set.of(owner.id));
+        invoke("observeSubjects",new Class<?>[]{TASK,Collection.class},shared,Set.of(outside.id));
+        model.qualify(owner,operation);
+        require(field(first,"authority")==owner&&field(first,"operation")==operation,"unqualified task is indexed before operation assignment");
+        require(field(shared,"authority")==null&&field(late,"authority")==null,"unrelated and not-yet-observed tasks stay untouched");
+        invoke("observeSubjects",new Class<?>[]{TASK,Collection.class},late,Set.of(owner.id));model.qualify(owner,operation);
+        require(field(late,"authority")==owner,"late source is included after an earlier qualification");
+        invoke("observeSubjects",new Class<?>[]{TASK,Collection.class},first,Set.of(outside.id));model.qualify(owner,operation);
+        require(field(first,"reason").equals("SHARED_TASK_MULTIPLE_GROUPS"),"shared source rechecks current group authority");
+        Field groups=ProRuntime.class.getDeclaredField("groupMembers");groups.setAccessible(true);
+        ((Map<UUID,UUID>)groups.get(runtime)).put(outside.id,owner.id);owner.addMember(outside.id);owner.generation++;
+        model.qualify(owner,operation);
+        require(field(first,"reason").equals("")&&(Long)field(first,"qualification")==owner.generation,"group adoption rechecks sharing and generation");
+        require(field(shared,"authority")==owner,"group union includes old unqualified member tasks");
+        invoke("forgetTask",new Class<?>[]{TASK},first);
+        Collection<?> candidates=(Collection<?>)invoke("qualificationCandidates",new Class<?>[]{ProRuntime.Subject.class},owner);
+        require(!candidates.contains(first)&&candidates.contains(late)&&candidates.contains(shared),"retirement removes every source index entry only for the actual task");
+        CASES.add("QUALIFICATION_INDEX_INCLUDES_LATE_SHARED_MERGED_AND_UNQUALIFIED_TASKS");
     }
     public static final class QueryBoundary {
         static long epoch=7;static boolean advance,ready=true;static int references;

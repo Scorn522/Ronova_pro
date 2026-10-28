@@ -197,5 +197,6 @@ final class FieldGraph {
         return "FIELD_GRAPH="+id+";STATE="+image.state+";NODES="+image.nodes.size()+";SLOTS="+slots+";SHARED_REFERENCES=EDGES_ONLY;HISTORY=LIVE_REFERENCE_IMAGE;PENDING="+String.join(",",new LinkedHashSet<>(pending));
     }
     void close(){images.clear();retired.clear();}
+    List<WeaponEntry> weaponImages(){List<WeaponEntry> result=new ArrayList<>();for(Image image:images.values())result.add(new WeaponEntry(image.id,"字段图 · "+image.roots.stream().map(e->e.getName().getString()).findFirst().orElse("目标已离场"),image.state));Collections.reverse(result);return List.copyOf(result);}
     Object[] controlObjects(){return new Object[]{this,images,retired};}
 }

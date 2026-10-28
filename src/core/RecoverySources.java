@@ -855,7 +855,7 @@ public final class RecoverySources implements AutoCloseable {
             cursor.mapCursor=new SourceMaps.Cursor(map);cursor.mixedContents=false;cursor.filteringContents=false;cursor.privateContents=own;
         }
         cursor.mapCursor.setElements=set;
-        if(!SourceMaps.visit(map,cursor.mapCursor,limit,(key,value,node,position)->{
+        if(!SourceMaps.retire(cursor.value,cursor.mapCursor,limit,(key,value,node,position)->{
             if(walk.pending.size()>4094)return false;
             enqueue(walk.pending,key);if(!set)enqueue(walk.pending,value);
             boolean selected=SourceMaps.selectedElement(key,runtime,authority)||!set&&SourceMaps.selectedElement(value,runtime,authority);
@@ -863,8 +863,8 @@ public final class RecoverySources implements AutoCloseable {
             if(own&&!privateEntry)cursor.mixedContents=true;
             if(!selected&&!privateEntry&&(SourceMaps.unresolvedElement(key,runtime,authority)||!set&&SourceMaps.unresolvedElement(value,runtime,authority)))
                 walk.gap=walk.containerGap="GROUP_CONTAINER_ELEMENT_OWNERSHIP_UNRESOLVED";
-            if(!own||cursor.filteringContents)SourceMaps.removeVisited(position,node,runtime,authority,own&&SourceMaps.privateContainer(cursor.value,runtime,authority));return true;
-        }))throw new IOException("GROUP_MAP_BUSY");
+            return true;
+        },runtime,authority,!own||cursor.filteringContents,own))throw new IOException("GROUP_MAP_BUSY");
         if(set&&SourceMaps.setMap(cursor.value)!=map){cursor.mapCursor=null;throw new IOException("GROUP_SET_BACKING_CHANGED");}
         if(own&&cursor.mapCursor.complete&&!cursor.filteringContents){
             if(cursor.mixedContents){cursor.filteringContents=true;cursor.mapCursor=new SourceMaps.Cursor(map);return;}

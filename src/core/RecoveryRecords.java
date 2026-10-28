@@ -12,6 +12,7 @@ import net.minecraft.world.entity.Entity;
 final class RecoveryRecords implements AutoCloseable {
     private final CopyOnWriteArrayList<FieldRead> fieldReads=new CopyOnWriteArrayList<>();
     private final Map<Object,Map<Class<?>,Map<String,FieldRead>>> writerFields=Collections.synchronizedMap(new WeakIdentityMap<>());
+    private volatile boolean writerFieldsActive;
     private final Map<Entity,List<FieldRead>> creationReads=Collections.synchronizedMap(new WeakIdentityMap<>());
     private final CopyOnWriteArrayList<Selector> selectors=new CopyOnWriteArrayList<>();
     private static final class Selector {
@@ -109,6 +110,14 @@ final class RecoveryRecords implements AutoCloseable {
     RecoveryRecords(ProRuntime runtime,RecoverySources sources) {
         this.runtime=runtime;
     }
+    /** Resolve the field reader's own return/cast types before publishing a callable field policy. */
+    static void prepareFieldPolicy()throws ReflectiveOperationException {
+        ClassLoader loader=RecoveryRecords.class.getClassLoader();
+        Class.forName(FieldRead.class.getName(),true,loader);
+        Class.forName(Selector.class.getName(),true,loader);
+        java.lang.invoke.MethodHandles.lookup().findVirtual(RecoveryRecords.class,"fieldRead",
+                java.lang.invoke.MethodType.methodType(FieldRead.class,Object.class,Class.class,String.class));
+    }
 
     void qualify(ProRuntime.Subject subject,UUID operation) {
         ProRuntime.Subject canonical=runtime.canonicalSubject(subject.id);
@@ -134,8 +143,9 @@ final class RecoveryRecords implements AutoCloseable {
     Object observedField(Object receiver,Object[] packet) {
         if(packet.length!=5||packet[0]!=receiver||!(packet[1] instanceof Class<?> owner)
                 ||!(packet[2] instanceof String name)||!(packet[3] instanceof String descriptor)||receiver instanceof Entity)return null;
-        if(owner.getClassLoader()==null||owner.getName().startsWith("net.minecraft.")||owner.getName().startsWith("dev.ronova.pro."))return null;
+        if(owner.getClassLoader()==null||owner.getName().startsWith("net.minecraft.")||owner.getName().startsWith("com.mojang.")||owner.getName().startsWith("dev.ronova.pro."))return null;
         Field field=FIELDS.get(owner).get(name+":"+descriptor);if(field==null)return null;
+        if(field.getType().isPrimitive())return null;
         if(Modifier.isStatic(field.getModifiers())!=(receiver instanceof Class<?>))return null;
         if(receiver instanceof Class<?>)receiver=field.getDeclaringClass();
         Object value=packet[4];
@@ -152,6 +162,7 @@ final class RecoveryRecords implements AutoCloseable {
                 if(previous!=null)read.selectors=previous.selectors;
                 synchronized(writerFields) {
                     writerFields.computeIfAbsent(receiver,key->new HashMap<>()).computeIfAbsent(field.getDeclaringClass(),key->new HashMap<>()).put(name,read);
+                    writerFieldsActive=true;
                 }
             }
         }
@@ -222,6 +233,10 @@ final class RecoveryRecords implements AutoCloseable {
         if(added&&source!=null)scanned.remove(source);
     }
     boolean fieldWriteDenied(Object receiver,Class<?> declaring,String name,Object incoming) {
+        if(!writerFieldsActive||declaring==null)return false;
+        String owner=declaring.getName();
+        if(owner.startsWith("net.minecraft.")||owner.startsWith("com.mojang.")||owner.startsWith("dev.ronova.pro."))return false;
+        if(PRIMITIVES.get(declaring).contains(name))return false;
         FieldRead read=fieldRead(receiver,declaring,name);
         if(read!=null) {
             if(incoming instanceof UUID uuid)for(Selector selector:read.selectors)
@@ -254,6 +269,9 @@ final class RecoveryRecords implements AutoCloseable {
             var fields=receiverFields.get(owner);return fields==null?null:fields.get(name);
         }
     }
+    private static final ClassValue<Set<String>> PRIMITIVES=new ClassValue<>(){
+        @Override protected Set<String> computeValue(Class<?> type){Set<String> names=new HashSet<>();for(Field field:type.getDeclaredFields())if(field.getType().isPrimitive())names.add(field.getName());return Set.copyOf(names);}
+    };
     private static boolean sameFieldValue(Field field,Object left,Object right) {
         return field.getType().isPrimitive()?Objects.equals(left,right):left==right;
     }
@@ -563,6 +581,15 @@ final class RecoveryRecords implements AutoCloseable {
         if(value instanceof Entity||value!=null&&value.getClass()==CompoundTag.class)return value;
         return wrapperTarget(value,runtime,allowTag);
     }
+    /** Only profiles whose ownership cannot change through a later record
+     * delegate query may participate in definition-only bulk retirement. */
+    static boolean definitionOnlyValue(Object value) {
+        if(value==null||value instanceof Entity||value instanceof net.minecraft.nbt.Tag||value instanceof Thread
+                ||value instanceof Runnable||value instanceof java.util.concurrent.Callable<?>||value instanceof java.util.concurrent.Future<?>
+                ||value instanceof java.util.concurrent.CompletionStage<?>||value instanceof java.util.concurrent.Executor)return false;
+        Field[] fields=WRAPPER_FIELDS.get(value.getClass());if(fields==OPAQUE_WRAPPER)return true;
+        for(Field field:fields)if(!field.getType().isPrimitive())return false;return true;
+    }
     static boolean emptyWrapper(Object value,ProRuntime runtime){return wrapperProfile(value,runtime,true)==Boolean.TRUE;}
     static boolean immutableScalar(Object value) {
         Class<?> type=value.getClass();
@@ -809,6 +836,6 @@ final class RecoveryRecords implements AutoCloseable {
         for(Edge edge:edges.values()) {
             edge.object=null;edge.target=null;edge.container=null;
         }
-        edges.clear();policies.clear();gaps.clear();scanned.clear();scans.clear();fieldReads.clear();writerFields.clear();creationReads.clear();selectors.clear();
+        edges.clear();policies.clear();gaps.clear();scanned.clear();scans.clear();fieldReads.clear();writerFields.clear();writerFieldsActive=false;creationReads.clear();selectors.clear();
     }
 }

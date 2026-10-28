@@ -96,6 +96,8 @@ public final class AuditFixCheck {
         if(args.length==1&&args[0].equals("file-client-entries")){fileClientEntries();return;}
         if(args.length==1&&args[0].equals("client-dispatch-entry")){clientDispatchEntry();return;}
         if(args.length==1&&args[0].equals("scoped-transform-failure")){scopedTransformFailure();return;}
+        if(args.length==1&&args[0].equals("agent-pipeline")){agentPipeline();return;}
+        if(args.length==1&&args[0].equals("image-snapshot")){imageSnapshot();return;}
         if(args.length==1&&args[0].equals("startup-batches")){startupBatch();return;}
         if(args.length==1&&args[0].equals("retirement-readback")){retirementReadback();return;}
         if(args.length==1&&args[0].equals("physical-token")){physicalToken();return;}
@@ -590,6 +592,140 @@ public final class AuditFixCheck {
         require(seen.get()==2&&dispatched.get()==2&&thrown==expected,"unselected actual EventBus dispatch/Throwable was replaced or duplicated");
         bus.unregister(listener);
         System.out.println("CLIENT_DISPATCH_PASS actual_late_Forge_EventBus_ClassPrepare accepted_exact_class original_listener_once original_Throwable handler_absent_fallback no_Core_or_GL_install_claim");
+    }
+    public static final class PipelineBody {
+        public long number;public double fraction;public Object[] values;
+        public PipelineBody(){number=41L;fraction=2.5;values=new Object[]{new Object()};}
+        public PipelineBody(boolean empty){}
+        public Object create(){return new Object();}
+    }
+    private static Object internalTree(byte[] bytes)throws Exception{
+        Class<?> reader=Class.forName("jdk.internal.org.objectweb.asm.ClassReader"),node=Class.forName("jdk.internal.org.objectweb.asm.tree.ClassNode"),visitor=Class.forName("jdk.internal.org.objectweb.asm.ClassVisitor");
+        Object tree=node.getConstructor().newInstance();reader.getMethod("accept",visitor,int.class).invoke(reader.getConstructor(byte[].class).newInstance((Object)bytes),tree,0);return tree;
+    }
+    private static byte[] internalImage(Object tree)throws Exception{
+        Class<?> writer=Class.forName("jdk.internal.org.objectweb.asm.ClassWriter"),visitor=Class.forName("jdk.internal.org.objectweb.asm.ClassVisitor");Object output=writer.getConstructor(int.class).newInstance(0);
+        tree.getClass().getMethod("accept",visitor).invoke(tree,output);return (byte[])writer.getMethod("toByteArray").invoke(output);
+    }
+    private static Map<String,Integer> pipelineCalls(byte[] bytes){
+        var node=new org.objectweb.asm.tree.ClassNode();new org.objectweb.asm.ClassReader(bytes).accept(node,0);Map<String,Integer> result=new HashMap<>();
+        for(var method:node.methods)for(var instruction:method.instructions)if(instruction instanceof org.objectweb.asm.tree.MethodInsnNode call
+                &&call.owner.startsWith("dev/ronova/pro/bootstrap/"))result.merge(call.name,1,Integer::sum);return result;
+    }
+    /** Isolated production bytecode and immutable-history checks, without granting runtime source authority. */
+    @SuppressWarnings("unchecked")
+    private static void agentPipeline()throws Exception{
+        Class<?> agent=Class.forName("dev.ronova.pro.agent.RecoveryAgent"),group=Class.forName("dev.ronova.pro.agent.ModGroupBoundary"),pipeline=Class.forName("dev.ronova.pro.agent.ApplicationBoundary");
+        Class<?> controls=Class.forName("dev.ronova.pro.bootstrap.ControlBridge",true,null),sources=Class.forName("dev.ronova.pro.bootstrap.CodeSourceBridge",true,null);
+        Field controller=controls.getDeclaredField("instrumentationOwner"),sourceBridge=agent.getDeclaredField("codeSourceBridge"),sourceAgent=sources.getDeclaredField("agent");
+        Field metadata=group.getDeclaredField("metadata"),producers=agent.getDeclaredField("producerModules");
+        for(Field field:List.of(controller,sourceBridge,sourceAgent,metadata,producers))field.setAccessible(true);
+        Object previousController=controller.get(null),previousBridge=sourceBridge.get(null),previousAgent=sourceAgent.get(null);
+        Map<Module,Set<String>> metadataRows=(Map<Module,Set<String>>)metadata.get(null);Map<Module,Boolean> producerRows=(Map<Module,Boolean>)producers.get(null);
+        class Loader extends ClassLoader {Loader(){super(AuditFixCheck.class.getClassLoader());}Class<?> body(byte[] bytes){return defineClass(null,bytes,0,bytes.length);}}
+        Loader loader=new Loader();Module module=loader.getUnnamedModule();String original=PipelineBody.class.getName().replace('.','/'),name="audit/CheckedPipelineBody";
+        var input=new org.objectweb.asm.tree.ClassNode();try(var resource=PipelineBody.class.getResourceAsStream("/"+original+".class")){new org.objectweb.asm.ClassReader(Objects.requireNonNull(resource).readAllBytes()).accept(input,0);}
+        input.nestHostClass=null;input.nestMembers=null;input.innerClasses.clear();input.outerClass=null;
+        // Legal spare locals must not force the new guard temporaries beyond
+        // the classfile limit when an old intermediate writer removed them.
+        for(var method:input.methods)if(method.name.equals("<init>")&&method.desc.equals("()V"))method.maxLocals=65535;
+        var remapped=new org.objectweb.asm.ClassWriter(0);input.accept(new org.objectweb.asm.commons.ClassRemapper(remapped,new org.objectweb.asm.commons.SimpleRemapper(original,name)));byte[] bytes=remapped.toByteArray();
+        Method transform=pipeline.getDeclaredMethod("transform",ClassLoader.class,Module.class,String.class,Class.class,byte[].class,boolean.class),defined=pipeline.getDeclaredMethod("defined",ClassLoader.class,Module.class,byte[].class);
+        transform.setAccessible(true);defined.setAccessible(true);
+        try{
+            controller.set(null,agent);sourceBridge.set(null,sources);sourceAgent.set(null,agent);metadataRows.put(module,Set.of("audit_pipeline"));producerRows.remove(module);
+            byte[] changed=(byte[])transform.invoke(null,loader,module,name,null,bytes,true);Map<String,Integer> calls=pipelineCalls(changed);
+            require(calls.getOrDefault("modMethodAllowed",0)==3,"shared pipeline lost a real entry guard");
+            require(calls.getOrDefault("beginFieldMutation",0)==3&&calls.getOrDefault("arrayStore",0)==1,"shared pipeline lost field or array mutation guards");
+            require(calls.getOrDefault("creationObserved",0)>=4&&calls.getOrDefault("producerEnter",0)==1,"constructor analysis lost creation or producer observations");
+            require(loader.body(changed).getConstructors().length==2,"merged constructor/long/double frames failed JVM verification");
+            Class<?> creation=Class.forName("dev.ronova.pro.agent.CreationBoundary"),nodeType=Class.forName("jdk.internal.org.objectweb.asm.tree.ClassNode");
+            Method recorded=creation.getDeclaredMethod("recorded",byte[].class,nodeType);recorded.setAccessible(true);Object emission=recorded.invoke(null,changed,internalTree(changed));
+            require(emission!=null,"final output lost its creation emission identity");Field sites=emission.getClass().getDeclaredField("sites");sites.setAccessible(true);
+            int expected=calls.getOrDefault("creationObserved",0)+calls.getOrDefault("creationFailed",0)+calls.getOrDefault("producerEnter",0)+calls.getOrDefault("producerReceiver",0);
+            require(((List<?>)sites.get(emission)).size()==expected,"final emission omitted or duplicated creation/producer call positions");
+            byte[] guarded=(byte[])defined.invoke(null,loader,module,bytes);Object before=internalTree(guarded);
+            // Force SourceInterpreter to fail only after earlier constructor
+            // edits. The live input tree must retain all prior guards verbatim.
+            Class<?> methodType=Class.forName("jdk.internal.org.objectweb.asm.tree.MethodNode");
+            for(Object method:(List<?>)nodeType.getField("methods").get(before))if(methodType.getField("name").get(method).equals("create"))methodType.getField("maxStack").setInt(method,0);
+            byte[] beforeBytes=internalImage(before);Method creationTransform=creation.getDeclaredMethod("transform",ClassLoader.class,String.class,Class.class,nodeType,boolean.class);creationTransform.setAccessible(true);
+            require(creationTransform.invoke(null,loader,name,null,before,true)==null,"injected analysis failure unexpectedly published creation sites");
+            require(Arrays.equals(beforeBytes,internalImage(before)),"failed creation weave leaked partial edits into guarded fallback");
+            require(pipelineCalls(beforeBytes).getOrDefault("beginFieldMutation",0)==3,"creation failure discarded earlier field guards");
+            Class<?> snapshot=Class.forName("dev.ronova.pro.agent.ExternalCodeImages$Snapshot");
+            Constructor<?> constructor=snapshot.getDeclaredConstructor(byte[].class,nodeType,Map.class,Map.class,boolean.class);constructor.setAccessible(true);
+            Method canonical=snapshot.getDeclaredMethod("canonical"),snapshotBytes=snapshot.getDeclaredMethod("bytes");canonical.setAccessible(true);snapshotBytes.setAccessible(true);
+            byte[] supplied=bytes.clone();Object frozen=constructor.newInstance(supplied,internalTree(supplied),Map.of(),Map.of(),true);byte[] first=(byte[])canonical.invoke(frozen);supplied[0]=0;
+            require(first==canonical.invoke(frozen)&&((byte[])snapshotBytes.invoke(frozen))[0]==(byte)0xca,"snapshot canonical cache retained writable transformer bytes");
+            var updated=new org.objectweb.asm.tree.ClassNode();new org.objectweb.asm.ClassReader(bytes).accept(updated,0);
+            for(var method:updated.methods)for(var instruction:method.instructions)if(instruction instanceof org.objectweb.asm.tree.LdcInsnNode constant&&Long.valueOf(41).equals(constant.cst))constant.cst=42L;
+            var writer=new org.objectweb.asm.ClassWriter(0);updated.accept(writer);byte[] replacement=writer.toByteArray();Object newer=constructor.newInstance(replacement,internalTree(replacement),Map.of(),Map.of(),true);
+            require(!Arrays.equals(first,(byte[])canonical.invoke(newer)),"new class bytes reused the old canonical history");
+        }finally{
+            metadataRows.remove(module);producerRows.remove(module);controller.set(null,previousController);sourceBridge.set(null,previousBridge);sourceAgent.set(null,previousAgent);
+        }
+        System.out.println("AGENT_PIPELINE_PASS real_internal_stages constructor_and_wide_field_guards JVM_frame_verification final_creation_emission partial_failure_rollback privately_frozen_canonical_images no_runtime_registration_or_gameplay_claim");
+    }
+    public static final class SnapshotBody {
+        public static long choose(boolean first){try{if(first)return 41L;return 42L;}catch(RuntimeException failure){return 43L;}}
+    }
+    private static byte[] externalImage(org.objectweb.asm.tree.ClassNode tree){var writer=new org.objectweb.asm.ClassWriter(0);tree.accept(writer);return writer.toByteArray();}
+    private static Object imageBody(Object snapshot,String method)throws Exception{return ((Map<?,?>)invoke(snapshot,"methods")).get(method);}
+    /** Same bytes still require the current foreign identities; no image cache is permission metadata. */
+    @SuppressWarnings("unchecked")
+    private static void imageSnapshot()throws Exception{
+        Class<?> agent=Class.forName("dev.ronova.pro.agent.RecoveryAgent"),images=Class.forName("dev.ronova.pro.agent.ExternalCodeImages"),snapshot=Class.forName("dev.ronova.pro.agent.ExternalCodeImages$Snapshot");
+        Class<?> controls=Class.forName("dev.ronova.pro.bootstrap.ControlBridge",true,null),sources=Class.forName("dev.ronova.pro.bootstrap.CodeSourceBridge",true,null);
+        Field controller=controls.getDeclaredField("instrumentationOwner"),sourceBridge=agent.getDeclaredField("codeSourceBridge"),sourceAgent=sources.getDeclaredField("agent"),imageReader=agent.getDeclaredField("imageControlReader");
+        for(Field field:List.of(controller,sourceBridge,sourceAgent,imageReader))field.setAccessible(true);
+        Object previousController=controller.get(null),previousBridge=sourceBridge.get(null),previousAgent=sourceAgent.get(null),previousReader=imageReader.get(null);
+        Method capture=images.getDeclaredMethod("snapshot",Object.class,byte[].class,snapshot);capture.setAccessible(true);
+        try{
+            controller.set(null,agent);sourceBridge.set(null,sources);sourceAgent.set(null,agent);
+            imageReader.set(null,sources.getMethod("imageControlFields",Object[].class,Field[][].class));
+            var tree=new org.objectweb.asm.tree.ClassNode();String path="/"+SnapshotBody.class.getName().replace('.','/')+".class";
+            try(var stream=SnapshotBody.class.getResourceAsStream(path)){new org.objectweb.asm.ClassReader(Objects.requireNonNull(stream).readAllBytes()).accept(tree,0);}
+            byte[] bytes=externalImage(tree);Object before=capture.invoke(null,tree,bytes,null);
+            require(before==capture.invoke(null,tree,externalImage(tree),before),"unchanged live identities did not retain their frozen image");
+            var copied=new org.objectweb.asm.tree.ClassNode();tree.accept(copied);byte[] copiedBytes=externalImage(copied);
+            require(Arrays.equals(bytes,copiedBytes),"copy fixture changed bytecode before identity check");
+            Object copy=capture.invoke(null,copied,copiedBytes,before);require(copy!=before,"equal bytecode concealed replacement instruction identities");
+            List<?> originalInstructions=(List<?>)invoke(imageBody(before,"choose(Z)J"),"instructions"),copiedInstructions=(List<?>)invoke(imageBody(copy,"choose(Z)J"),"instructions");
+            boolean reusedConstant=false,distinctJump=false;
+            for(int i=0;i<originalInstructions.size();i++){
+                Object a=originalInstructions.get(i),b=copiedInstructions.get(i);require(!invoke(a,"id").equals(invoke(b,"id")),"copied opcode inherited a foreign identity");
+                Object opcode=invoke(a,"code");int operation=(int)opcode.getClass().getMethod("getOpcode").invoke(opcode);
+                if(operation==org.objectweb.asm.Opcodes.LDC){require(invoke(a,"content")==invoke(b,"content"),"equal frozen constant rebuilt its serialized content");reusedConstant=true;}
+                if(operation==org.objectweb.asm.Opcodes.IFEQ){require(!invoke(a,"content").equals(invoke(b,"content")),"copied branch retained a prior target identity");distinctJump=true;}
+            }
+            require(reusedConstant&&distinctJump,"fixture did not exercise constants and target-sensitive branches");
+            org.objectweb.asm.tree.MethodNode selected=copied.methods.stream().filter(method->method.name.equals("choose")).findFirst().orElseThrow();
+            for(var at:selected.instructions)if(at instanceof org.objectweb.asm.tree.LdcInsnNode constant&&Long.valueOf(41).equals(constant.cst)){constant.cst=44L;break;}
+            Object changed=capture.invoke(null,copied,externalImage(copied),copy);require(changed!=copy,"in-place constant write reused a stale image");
+            List<?> changedInstructions=(List<?>)invoke(imageBody(changed,"choose(Z)J"),"instructions");boolean changedContent=false;
+            for(int i=0;i<copiedInstructions.size();i++){
+                Object a=copiedInstructions.get(i),b=changedInstructions.get(i);require(invoke(a,"id").equals(invoke(b,"id")),"in-place edit replaced its real instruction identity");
+                if(!invoke(a,"content").equals(invoke(b,"content")))changedContent=true;
+            }
+            require(changedContent,"in-place edit disappeared from exact instruction content");
+            var handler=selected.tryCatchBlocks.get(0);selected.tryCatchBlocks.set(0,new org.objectweb.asm.tree.TryCatchBlockNode(handler.start,handler.end,handler.handler,handler.type));
+            Object newHandler=capture.invoke(null,copied,externalImage(copied),changed);require(newHandler!=changed,"equal exception table concealed replacement handler identity");
+            Object oldHandler=((List<?>)invoke(imageBody(changed,"choose(Z)J"),"handlers")).get(0),freshHandler=((List<?>)invoke(imageBody(newHandler,"choose(Z)J"),"handlers")).get(0);
+            require(!invoke(oldHandler,"id").equals(invoke(freshHandler,"id")),"replacement handler inherited prior ownership identity");
+            Method protect=sources.getDeclaredMethod("protectControls",Object[].class),controlled=sources.getDeclaredMethod("controlled",Object.class);protect.setAccessible(true);controlled.setAccessible(true);
+            var container=new ArrayList<>();container.add(new Object());Field backing=ArrayList.class.getDeclaredField("elementData");backing.setAccessible(true);Object oldBacking=backing.get(container);
+            protect.invoke(null,(Object)new Object[]{container,container,oldBacking});require((boolean)controlled.invoke(null,container)&&(boolean)controlled.invoke(null,oldBacking),"merged control batch lost a root or backing");
+            container.ensureCapacity(64);Object nextBacking=backing.get(container);require(nextBacking!=oldBacking,"late backing fixture did not resize");
+            protect.invoke(null,(Object)new Object[]{container});require((boolean)controlled.invoke(null,nextBacking)&&(boolean)controlled.invoke(null,oldBacking),"known container hid a new backing or retired a still-live old one");
+            Class<?> draw=Class.forName("dev.ronova.pro.bootstrap.FrameworkBuffers$Draw",true,null);Constructor<?> drawConstructor=draw.getDeclaredConstructor(Module[].class);drawConstructor.setAccessible(true);
+            Module[] drawSources={null};Object receipt=drawConstructor.newInstance((Object)drawSources);
+            require((boolean)controlled.invoke(null,receipt)&&(boolean)controlled.invoke(null,(Object)drawSources),"exact draw metadata or actual source array lost control protection");
+            Field registry=sources.getDeclaredField("CONTROLS");registry.setAccessible(true);Object directory=registry.get(null);Method find=directory.getClass().getDeclaredMethod("find",Object.class);find.setAccessible(true);
+            require(find.invoke(directory,receipt)==null,"transient draw still created a permanent weak registration");
+            require(!(boolean)controlled.invoke(null,new Object()),"exact draw classification granted unrelated objects controller identity");
+        }finally{imageReader.set(null,previousReader);controller.set(null,previousController);sourceBridge.set(null,previousBridge);sourceAgent.set(null,previousAgent);}
+        System.out.println("IMAGE_SNAPSHOT_PASS live_instruction_and_handler_identity in_place_content_changes frozen_content_reuse branch_target_identity late_control_backing exact_transient_draw no_Native_heap_callback_or_gameplay_claim");
     }
     private static final class ScopedTransformBody {static int value(){return 7;}}
     /** One observed producer failure must not acquire the refusal authority of a selected/control image. */
@@ -1168,6 +1304,10 @@ public final class AuditFixCheck {
             }catch(java.io.IOException failure){throw new AssertionError("actual C++ storage consumer failed",failure);}
             return;
         }
+        if(phase.equals("tls")){
+            require(hostTlsPrivate0(),"actual concurrent dynamic TLS/FLS boundary failed");
+            return;
+        }
         if(phase.equals("pool-tls-cpp")){
             hostWin32Allocations0();
             require(hostCrtAllocations0(),"CRT release source admission failed");
@@ -1182,7 +1322,8 @@ public final class AuditFixCheck {
         }
         if(phase.equals("raw-unsafe")){
             hostRawUnsafe0();
-            System.out.println("RAW_UNSAFE_PASS actual_sun_misc_putLong_free_reallocate actual_internal_native_putLong_setMemory0_copyMemory0_freeMemory0_reallocateMemory0 VM_JVMTI_JNI_first_slots_same_value_and_lifetime_refused_bytes_preserved ordinary_allocate_put_set_copy_grow_shrink_zero_length_NULL_conventions_paired_free actual_Dispose no_fabricated_authority");
+            require(!rawUnsafeSlotUnchanged0(0),"raw control readback escaped its synchronous Native call");
+            System.out.println("RAW_UNSAFE_PASS actual_sun_misc_control_read_putLong_free_reallocate actual_internal_native_putLong_setMemory0_copyMemory0_freeMemory0_reallocateMemory0 VM_JVMTI_JNI_first_slots_C_capture_scoped_boolean_readback_same_value_and_lifetime_refused ordinary_allocate_put_set_copy_grow_shrink_zero_length_NULL_conventions_paired_free actual_Dispose no_fabricated_authority");
             return;
         }
         if(phase.equals("memory-effects")){
@@ -1254,10 +1395,11 @@ public final class AuditFixCheck {
     private static final class RawUnsafeLifetimeFailure extends AssertionError {
         RawUnsafeLifetimeFailure(String operation,Throwable failure){super(operation+" did not confirm rejection; control lifetime is now unknown",failure);}
     }
-    private static void rawUnsafeRefused(long address,byte[] before,String operation,RawUnsafeAction action)throws Exception {
-        rawUnsafeRefused(address,before,operation,"NATIVE_MEMORY_CONTROL_WRITE_DENIED",false,action);
+    private static native boolean rawUnsafeSlotUnchanged0(int slot);
+    private static void rawUnsafeRefused(int slot,String operation,RawUnsafeAction action)throws Exception {
+        rawUnsafeRefused(slot,operation,"NATIVE_CONTROL_MEMORY_DENIED",false,action);
     }
-    private static void rawUnsafeRefused(long address,byte[] before,String operation,String expected,boolean lifetime,RawUnsafeAction action)throws Exception {
+    private static void rawUnsafeRefused(int slot,String operation,String expected,boolean lifetime,RawUnsafeAction action)throws Exception {
         Throwable refused=null;
         try {action.run();}
         catch(InvocationTargetException wrapped){refused=wrapped.getCause();}
@@ -1266,11 +1408,15 @@ public final class AuditFixCheck {
         // Never inspect or dispose a possibly freed/reallocated control target.
         if(!denied&&lifetime)throw new RawUnsafeLifetimeFailure(operation,refused);
         require(denied,operation+" was not refused at the actual Native control destination: "+refused);
-        for(int offset=0;offset<before.length;offset++)require(U.getByte(address+offset)==before[offset],operation+" changed first-slot bytes");
+        if(!rawUnsafeSlotUnchanged0(slot))throw new RawUnsafeLifetimeFailure(operation,new AssertionError("actual first slot changed or its synchronous readback scope ended"));
     }
     /** Invoked synchronously by the fixture JNI call while its real JVMTI environment is still live. */
-    private static void rawUnsafeSlots(long vm,long api,long env)throws Exception {
+    private static void rawUnsafeSlots(long vm,long api,long env,long vmFirst,long apiFirst,long envFirst)throws Exception {
         require(U.addressSize()==Long.BYTES&&vm!=0&&api!=0&&env!=0&&vm!=api&&api!=env&&vm!=env,"actual x64 VM/JVMTI/JNI slots required");
+        require(!rawUnsafeSlotUnchanged0(-1)&&!rawUnsafeSlotUnchanged0(3),"raw control readback accepted a non-slot index");
+        boolean[] foreignReadback={true};
+        Thread peer=new Thread(()->foreignReadback[0]=rawUnsafeSlotUnchanged0(0),"audit-raw-readback-peer");
+        peer.start();peer.join();require(!foreignReadback[0],"raw control readback escaped to another thread");
         Class<?> internal=Class.forName("jdk.internal.misc.Unsafe",false,null);
         Field singleton=internal.getDeclaredField("theUnsafe");singleton.setAccessible(true);Object unsafe=singleton.get(null);
         Method putLong=internal.getDeclaredMethod("putLong",Object.class,long.class,long.class);
@@ -1308,21 +1454,23 @@ public final class AuditFixCheck {
             fromNull=U.reallocateMemory(0,Long.BYTES);require(fromNull!=0,"legal NULL public reallocation did not allocate");
             U.putLong(fromNull,0x123456789abcdef0L);require(U.getLong(fromNull)==0x123456789abcdef0L,"NULL-origin allocation did not retain ordinary data");
             fromNull=U.reallocateMemory(fromNull,0);require(fromNull==0,"public zero-length reallocation did not return NULL");
-            for(long address:new long[]{vm,api,env}) {
-                byte[] before=new byte[Long.BYTES];for(int offset=0;offset<before.length;offset++)before[offset]=U.getByte(address+offset);
-                long value=U.getLong(address);require(value!=0,"actual Native first table pointer required");
-                rawUnsafeRefused(address,before,"sun.misc.putLong",()->U.putLong(address,value));
-                rawUnsafeRefused(address,before,"internal.native.putLong",()->putLong.invoke(unsafe,null,address,value));
-                rawUnsafeRefused(address,before,"internal.native.setMemory0",()->setMemory.invoke(unsafe,null,address,1L,before[0]));
+            long[] addresses={vm,api,env},originals={vmFirst,apiFirst,envFirst};
+            for(int slot=0;slot<addresses.length;slot++) {
+                long address=addresses[slot],value=originals[slot];require(value!=0,"actual Native first table pointer required");
+                rawUnsafeRefused(slot,"sun.misc.getByte",()->U.getByte(address));
+                rawUnsafeRefused(slot,"sun.misc.getLong",()->U.getLong(address));
+                rawUnsafeRefused(slot,"sun.misc.putLong",()->U.putLong(address,value));
+                rawUnsafeRefused(slot,"internal.native.putLong",()->putLong.invoke(unsafe,null,address,value));
+                rawUnsafeRefused(slot,"internal.native.setMemory0",()->setMemory.invoke(unsafe,null,address,1L,(byte)value));
                 U.putLong(first,value);long source=first;
-                rawUnsafeRefused(address,before,"internal.native.copyMemory0",()->copyMemory.invoke(unsafe,null,source,null,address,(long)Long.BYTES));
-                rawUnsafeRefused(address,before,"sun.misc.freeMemory","NATIVE_MEMORY_CONTROL_FREE_DENIED",true,()->U.freeMemory(address));
-                rawUnsafeRefused(address,before,"internal.native.freeMemory0","NATIVE_MEMORY_CONTROL_FREE_DENIED",true,()->freeMemory.invoke(unsafe,address));
-                rawUnsafeRefused(address,before,"sun.misc.reallocateMemory","NATIVE_MEMORY_CONTROL_REALLOCATE_DENIED",true,()->U.reallocateMemory(address,16));
-                rawUnsafeRefused(address,before,"internal.native.reallocateMemory0","NATIVE_MEMORY_CONTROL_REALLOCATE_DENIED",true,()->reallocateMemory.invoke(unsafe,address,16L));
+                rawUnsafeRefused(slot,"internal.native.copyMemory0",()->copyMemory.invoke(unsafe,null,source,null,address,(long)Long.BYTES));
+                rawUnsafeRefused(slot,"sun.misc.freeMemory","NATIVE_CONTROL_MEMORY_DENIED",true,()->U.freeMemory(address));
+                rawUnsafeRefused(slot,"internal.native.freeMemory0","NATIVE_CONTROL_MEMORY_DENIED",true,()->freeMemory.invoke(unsafe,address));
+                rawUnsafeRefused(slot,"sun.misc.reallocateMemory","NATIVE_CONTROL_MEMORY_DENIED",true,()->U.reallocateMemory(address,16));
+                rawUnsafeRefused(slot,"internal.native.reallocateMemory0","NATIVE_CONTROL_MEMORY_DENIED",true,()->reallocateMemory.invoke(unsafe,address,16L));
                 // The JDK public wrapper implements size zero by calling freeMemory.
-                rawUnsafeRefused(address,before,"sun.misc.reallocateMemory.zero","NATIVE_MEMORY_CONTROL_FREE_DENIED",true,()->U.reallocateMemory(address,0));
-                rawUnsafeRefused(address,before,"internal.native.reallocateMemory0.zero","NATIVE_MEMORY_CONTROL_REALLOCATE_DENIED",true,()->reallocateMemory.invoke(unsafe,address,0L));
+                rawUnsafeRefused(slot,"sun.misc.reallocateMemory.zero","NATIVE_CONTROL_MEMORY_DENIED",true,()->U.reallocateMemory(address,0));
+                rawUnsafeRefused(slot,"internal.native.reallocateMemory0.zero","NATIVE_CONTROL_MEMORY_DENIED",true,()->reallocateMemory.invoke(unsafe,address,0L));
             }
             // A refused copy must close its read scope; a following ordinary copy still executes.
             U.copyMemory(first,second,Long.BYTES);
@@ -2802,7 +2950,144 @@ public final class AuditFixCheck {
         ConcurrentLinkedQueue<Object> concurrent=new ConcurrentLinkedQueue<>();concurrent.add(removed);
         var image=KnownContainers.snapshot(concurrent);concurrent.add(kept);KnownContainers.clear(image);
         require(concurrent.size()==1&&concurrent.peek()==kept,"captured queue cleanup swallowed new publication");
+        knownCursorCleanup(removed,kept);
+        vectorBatchCleanup(removed,kept);
         System.out.println("KNOWN_CONTAINER_CLEANUP_PASS: actual JDK containers, identity removal, nulls, bitmaps, no user callbacks, concurrent new entry preserved");
+    }
+    private static void knownCursorCleanup(Object removed,Object kept)throws Exception{
+        for(Collection<Object> carrier:List.<Collection<Object>>of(new Vector<>(),new Stack<>(),new LinkedList<>(),new ArrayDeque<>(),new LinkedBlockingQueue<>())){
+            carrier.add(kept);carrier.add(removed);carrier.add(kept);carrier.add(removed);
+            cleanCursor(carrier,removed,4);
+            Object[] remaining=carrier.toArray();require(remaining.length==2&&remaining[0]==kept&&remaining[1]==kept,"resumed sequence lost unselected duplicate identities");
+        }
+        var identity=new IdentityHashMap<Object,Object>();
+        for(int i=0;i<4;i++)identity.put(new NoCallbacks(),(i&1)==0?kept:removed);
+        cleanCursor(identity,removed,4);require(identity.size()==2&&identity.values().stream().allMatch(value->value==kept),"compacted identity map lost unselected keys");
+        var tree=new TreeMap<Integer,Object>();for(int i=0;i<8;i++)tree.put(i,(i&1)==0?kept:removed);
+        cleanCursor(tree,removed,8);require(tree.size()==4&&tree.keySet().equals(Set.of(0,2,4,6)),"rotated tree cursor skipped or removed a neighbor");
+        var enumerated=new EnumMap<SmallEnum,Object>(SmallEnum.class);enumerated.put(SmallEnum.A,removed);enumerated.put(SmallEnum.B,kept);enumerated.put(SmallEnum.C,removed);
+        cleanCursor(enumerated,removed,3);require(enumerated.size()==1&&enumerated.get(SmallEnum.B)==kept,"enum map cursor lost unselected ordinal");
+        var bits=EnumSet.allOf(SmallEnum.class);cleanCursor(bits,SmallEnum.B,3);
+        require(bits.equals(EnumSet.of(SmallEnum.A,SmallEnum.C)),"enum set cursor lost unselected bits");
+        var changed=new Vector<Object>();changed.add(kept);changed.add(removed);
+        var image=KnownContainers.snapshot(changed);changed.set(0,new NoCallbacks());
+        require(KnownContainers.revision(changed)==image.revision,"nonstructural change fixture unexpectedly changed modCount");
+        try{KnownContainers.removeObserved(image,image.rows[1]);throw new AssertionError("unselected in-place change escaped full readback");}
+        catch(IllegalAccessException expected){require(changed.size()==2&&changed.get(1)==removed,"stale image mutated the selected row");}
+        var resumed=new Vector<Object>();resumed.add(kept);resumed.add(kept);var cursor=new SourceMaps.Cursor(resumed);
+        require(SourceMaps.visit(resumed,cursor,1,(key,value,node,position)->true)&&!cursor.complete,"cursor did not stop at its budget");
+        resumed.set(0,removed);
+        while(!cursor.complete)require(SourceMaps.visit(resumed,cursor,1,(key,value,node,position)->{
+            if(value==removed)require(SourceMaps.removeIdentityVisited(position,key),"late changed row was not removed");return true;
+        }),"resumed container scope unavailable");
+        require(resumed.size()==1&&resumed.get(0)==kept,"in-place source change behind cursor was skipped");
+    }
+    private static void cleanCursor(Object carrier,Object selected,int expected)throws Exception{
+        var cursor=new SourceMaps.Cursor(carrier);int[] seen={0};
+        for(int step=0;!cursor.complete&&step<expected+2;step++)require(SourceMaps.visit(carrier,cursor,2,(key,value,node,position)->{
+            seen[0]++;if(key==selected||value==selected)require(SourceMaps.removeIdentityVisited(position,key),"cursor direct identity removal refused");return true;
+        }),"known cursor scope unavailable");
+        require(cursor.complete&&seen[0]==expected,"own removals restarted traversal or skipped an original row");
+    }
+    private static void vectorBatchCleanup(Object removed,Object kept)throws Exception{
+        for(Vector<Object> carrier:List.<Vector<Object>>of(new Vector<>(),new Stack<>())){
+            carrier.addAll(List.of(kept,removed,kept,removed,removed,kept));
+            synchronized(carrier){
+                var before=KnownContainers.snapshot(carrier);
+                var after=SourceMaps.retireVectorStorage(before,1,new boolean[]{true,false,true},2);
+                require(after.revision==before.revision+1,"bounded batch was not one actual vector mutation");
+                Object[] rows=carrier.toArray();require(rows.length==4&&rows[0]==kept&&rows[1]==kept&&rows[2]==removed&&rows[3]==kept,"batch changed prefix, unselected order, or an out-of-budget duplicate");
+                require(KnownContainers.unchanged(after),"batch did not return its actual full readback");
+            }
+        }
+        var changed=new Vector<Object>();changed.add(removed);changed.add(kept);
+        synchronized(changed){
+            var before=KnownContainers.snapshot(changed);Object replacement=new Object();
+            changed.set(1,replacement);
+            try{SourceMaps.retireVectorStorage(before,0,new boolean[]{true},1);throw new AssertionError("batch accepted changed unselected contents");}
+            catch(IllegalAccessException expected){require(changed.size()==2&&changed.get(0)==removed&&changed.get(1)==replacement,"failed full readback performed a destructive compaction");}
+        }
+        // Qualification-only model: the real containers and production selection
+        // are exercised; these supplied group bindings certify no installed policy.
+        ProRuntime runtime=(ProRuntime)U.allocateInstance(ProRuntime.class);var group=new ProRuntime.Subject();group.terminal=true;group.generation=1;
+        put(runtime,"subjects",new HashMap<>(Map.of(group.id,group)));put(runtime,"groupMembers",new HashMap<>());
+        Map<Module,ProRuntime.Subject> modules=new IdentityHashMap<>();modules.put(removed.getClass().getModule(),group);put(runtime,"moduleSubjects",modules);
+        Class<?> definitions;
+        try{definitions=Class.forName("dev.ronova.pro.bootstrap.DefinitionBridge",true,null);}
+        catch(ClassNotFoundException unattached){definitions=Class.forName("dev.ronova.pro.bootstrap.DefinitionBridge");}
+        Method bind=definitions.getDeclaredMethod("bind",Class.class,Module.class);bind.setAccessible(true);
+        Method boundQuery=definitions.getMethod("boundModule",Class.class);
+        bind.invoke(null,removed.getClass(),removed.getClass().getModule());
+        bind.invoke(null,removed.getClass(),Object.class.getModule());
+        require(boundQuery.invoke(null,removed.getClass())==removed.getClass().getModule(),"published definition origin was replaced by a later registration");
+        Field query=ProRuntime.class.getDeclaredField("boundDefinitionQuery");query.setAccessible(true);Object priorQuery=query.get(null);query.set(null,boundQuery);
+        try{
+        var bound=new Vector<Object>();bound.add(removed);bound.add(kept);Module source=removed.getClass().getModule();
+        synchronized(bound){group.commitGate.lock();try{
+            var before=KnownContainers.snapshot(bound);modules.put(source,new ProRuntime.Subject());
+            var refused=runtime.compactBoundVector(before,0,new Module[]{source,null},group,group.generation);
+            require(refused==null&&bound.get(0)==removed,"changed definition binding did not return to current per-row classification");
+            modules.put(source,group);
+            var accepted=runtime.compactBoundVector(before,0,new Module[]{source,null},group,group.generation);
+            require(accepted.count()==1&&bound.size()==1&&bound.get(0)==kept,"current exact module binding failed to compact or lost its neighbor");
+        }finally{group.commitGate.unlock();}}
+        var allBound=new Vector<Object>();allBound.addAll(List.of(removed,removed,removed));var boundedCursor=new SourceMaps.Cursor(allBound);
+        require(SourceMaps.retire(allBound,boundedCursor,2,(key,value,node,position)->true,runtime,group,true,false)
+                &&allBound.size()==1&&allBound.get(0)==removed&&!boundedCursor.complete,"fixed-definition batch crossed the current budget");
+        require(SourceMaps.retire(allBound,boundedCursor,2,(key,value,node,position)->true,runtime,group,true,false)
+                &&allBound.isEmpty()&&boundedCursor.complete,"fixed-definition batch failed to resume its last actual row");
+        var forged=new Vector<Object>();Object foreign=new Object();forged.add(foreign);
+        synchronized(forged){group.commitGate.lock();try{
+            var before=KnownContainers.snapshot(forged);
+            var rejected=runtime.compactBoundVector(before,0,new Module[]{source},group,group.generation);
+            require(!rejected.removed()&&forged.size()==1&&forged.get(0)==foreign,"forged module candidate deleted a row without that actual bound definition");
+        }finally{group.commitGate.unlock();}}
+        bind.invoke(null,BoundVectorTask.class,source);var taskCarrier=new Vector<Object>();Object task=new BoundVectorTask();taskCarrier.add(task);
+        synchronized(taskCarrier){group.commitGate.lock();try{
+            var rejected=runtime.compactBoundVector(KnownContainers.snapshot(taskCarrier),0,new Module[]{source},group,group.generation);
+            require(!rejected.removed()&&taskCarrier.get(0)==task,"matching definition candidate bypassed actual task structural eligibility");
+        }finally{group.commitGate.unlock();}}
+        for(Vector<Object> carrier:List.<Vector<Object>>of(new Vector<>(),new Stack<>())){
+            carrier.addAll(List.of("outside",removed,"outside",removed,removed,"outside"));
+            var cursor=new SourceMaps.Cursor(carrier);int[] seen={0};
+            for(int step=0;!cursor.complete&&step<8;step++)require(SourceMaps.retire(carrier,cursor,2,(key,value,node,position)->{seen[0]++;return true;},runtime,group,true,false),"vector retirement scope unavailable");
+            require(cursor.complete&&seen[0]==6&&carrier.equals(List.of("outside","outside","outside")),"production budget cursor missed or revisited retained rows");
+        }
+        var fenced=new Vector<Object>();fenced.add(removed);var cursor=new SourceMaps.Cursor(fenced);
+        try{SourceMaps.retire(fenced,cursor,1,(key,value,node,position)->{group.generation++;return true;},runtime,group,true,false);throw new AssertionError("changed generation retained old batch authority");}
+        catch(IllegalStateException expected){require(expected.getMessage().equals("GROUP_VECTOR_POLICY_CHANGED")&&fenced.get(0)==removed,"generation change damaged the selected value");}
+        require(SourceMaps.retire(fenced,cursor,1,(key,value,node,position)->true,runtime,group,true,false)&&fenced.isEmpty(),"failed batch leaked the actual monitor, policy, or graph scope");
+        lateVectorSourceRevocation(runtime,group,removed.getClass().getModule());
+        }finally{query.set(null,priorQuery);}
+    }
+    private static final class BoundVectorTask implements Runnable {public void run(){}}
+    private static Object vectorFirst,vectorSecond;
+    private static Module vectorSource;
+    private static int vectorSecondQueries;
+    private static boolean vectorFirstShared;
+    public static boolean vectorSourceUnknown(Object value){return false;}
+    public static boolean vectorSourceDelivering(Class<?> owner){return false;}
+    public static Module vectorDefinedModule(Class<?> type){return type.getModule();}
+    public static Module[] vectorCurrentSources(Object value){
+        if(value==vectorSecond&&++vectorSecondQueries==2)vectorFirstShared=true;
+        if(value==vectorFirst&&vectorFirstShared)return new Module[]{vectorSource,Object.class.getModule()};
+        return value==vectorFirst||value==vectorSecond?new Module[]{vectorSource}:new Module[0];
+    }
+    private static void lateVectorSourceRevocation(ProRuntime runtime,ProRuntime.Subject group,Module module)throws Exception{
+        // Supply only query observations to the existing metadata fixture. The
+        // second row's later query changes the first row's actual current set;
+        // no Vector contents, GRAPH state or group generation changes.
+        Field access=ProRuntime.class.getDeclaredField("creationAccess");access.setAccessible(true);Object previous=access.get(null);
+        var constructor=access.getType().getDeclaredConstructor(Method.class,Method.class,Method.class,Method.class);constructor.setAccessible(true);
+        Object observed=constructor.newInstance(AuditFixCheck.class.getMethod("vectorSourceUnknown",Object.class),AuditFixCheck.class.getMethod("vectorCurrentSources",Object.class),
+                AuditFixCheck.class.getMethod("vectorSourceDelivering",Class.class),AuditFixCheck.class.getMethod("vectorDefinedModule",Class.class));
+        vectorFirst=new Object();vectorSecond=new Object();vectorSource=module;vectorSecondQueries=0;vectorFirstShared=false;
+        var carrier=new Vector<Object>();carrier.add(vectorFirst);carrier.add(vectorSecond);var cursor=new SourceMaps.Cursor(carrier);
+        try{
+            access.set(null,observed);
+            require(SourceMaps.retire(carrier,cursor,2,(key,value,node,position)->{SourceMaps.selectedElement(value,runtime,group);return true;},runtime,group,true,false),"late-source retirement scope unavailable");
+            require(vectorFirstShared&&carrier.size()==1&&carrier.get(0)==vectorFirst,"later source query revoked an earlier row, but stale batch permission still deleted it");
+        }finally{access.set(null,previous);vectorFirst=vectorSecond=null;vectorSource=null;}
     }
     private static void cleanIdentity(Object carrier,Object selected)throws ReflectiveOperationException{
         SourceMaps.Action action=()->{
@@ -2810,7 +3095,7 @@ public final class AuditFixCheck {
                 var image=KnownContainers.snapshot(carrier);KnownContainers.Row match=null;
                 for(var row:image.rows)if(row.key==selected||row.value==selected){match=row;break;}
                 if(match==null)return;
-                require(KnownContainers.remove(image,match),"direct known-container remove refused");
+                require(KnownContainers.removeObserved(image,match).removed(),"direct known-container remove refused");
             }
         };
         if(KnownContainers.lockFree(carrier)||KnownContainers.blocking(carrier))require(KnownContainers.withConcurrentScope(carrier,action),"queue scope unavailable");

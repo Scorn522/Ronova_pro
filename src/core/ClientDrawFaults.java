@@ -3,6 +3,9 @@ package dev.ronova.pro;
 import com.mojang.blaze3d.vertex.*;
 import java.util.*;
 import java.lang.ref.*;
+import java.lang.invoke.*;
+import java.lang.reflect.Field;
+import java.lang.reflect.Modifier;
 import net.minecraft.client.*;
 import net.minecraft.client.gui.*;
 import net.minecraft.client.gui.components.Renderable;
@@ -279,6 +282,34 @@ public final class ClientDrawFaults {
         Deque<PoseStack.Pose> stack=((PoseAccess)pose).ronova$poses();stack.clear();
         for(SavedPose entry:saved) { entry.pose.pose().set(entry.matrix);entry.pose.normal().set(entry.normal);stack.addLast(entry.pose); }
     }
+    private static MethodHandle glGetter(Class<?> owner,String name,String srg,Class<?> expected,boolean statik)throws ReflectiveOperationException {
+        Field field;try{field=PlatformAccess.declaredField(owner,name);}catch(NoSuchFieldException unmapped){field=PlatformAccess.declaredField(owner,srg);}
+        if(field.getType()!=expected||Modifier.isStatic(field.getModifiers())!=statik||!field.trySetAccessible())throw new IllegalStateException("GL_CACHE_FIELD_LAYOUT_CHANGED:"+owner.getName()+"#"+name);
+        MethodHandle getter=MethodHandles.lookup().unreflectGetter(field);if(statik)getter=MethodHandles.dropArguments(getter,0,Object.class);
+        return getter.asType(MethodType.methodType(expected.isPrimitive()?expected:Object.class,Object.class));
+    }
+    private static GlCache prepareGlCache(){
+        try{
+            ClassLoader loader=GlStateManager.class.getClassLoader();String prefix=GlStateManager.class.getName()+"$";
+            Class<?> blend=Class.forName(prefix+"BlendState",false,loader),depth=Class.forName(prefix+"DepthState",false,loader),cull=Class.forName(prefix+"CullState",false,loader),scissor=Class.forName(prefix+"ScissorState",false,loader),mode=Class.forName(prefix+"BooleanState",false,loader);
+            Class.forName("dev.ronova.pro.agent.RecoveryAgent",false,ClassLoader.getSystemClassLoader()).getMethod("openBackingAccess",Class.class,Class[].class)
+                    .invoke(null,ClientDrawFaults.class,(Object)new Class<?>[]{GlStateManager.class,blend,depth,cull,scissor,mode});
+            return new GlCache(new MethodHandle[]{
+                    glGetter(GlStateManager.class,"BLEND","BLEND",blend,true),glGetter(GlStateManager.class,"DEPTH","DEPTH",depth,true),glGetter(GlStateManager.class,"CULL","CULL",cull,true),glGetter(GlStateManager.class,"SCISSOR","SCISSOR",scissor,true),
+                    glGetter(blend,"mode","f_84577_",mode,false),glGetter(depth,"mode","f_84626_",mode,false),glGetter(cull,"enable","f_84621_",mode,false),glGetter(scissor,"mode","f_84732_",mode,false),
+                    glGetter(mode,"enabled","f_84586_",boolean.class,false),glGetter(depth,"mask","f_84627_",boolean.class,false),glGetter(depth,"func","f_84628_",int.class,false),
+                    glGetter(blend,"srcRgb","f_84578_",int.class,false),glGetter(blend,"dstRgb","f_84579_",int.class,false),glGetter(blend,"srcAlpha","f_84580_",int.class,false),glGetter(blend,"dstAlpha","f_84581_",int.class,false)});
+        }catch(ReflectiveOperationException failure){throw new ExceptionInInitializerError(failure);}
+    }
+    /** Fixed getters, not cached values: late state-object replacements are read afresh. */
+    private static final class GlCache {
+        static final GlCache INSTANCE=prepareGlCache();
+        final MethodHandle blend,depth,cull,scissor,blendMode,depthMode,cullMode,scissorMode,enabled,mask,func,srcRgb,dstRgb,srcAlpha,dstAlpha;
+        GlCache(MethodHandle[] fields){blend=fields[0];depth=fields[1];cull=fields[2];scissor=fields[3];blendMode=fields[4];depthMode=fields[5];cullMode=fields[6];scissorMode=fields[7];enabled=fields[8];mask=fields[9];func=fields[10];srcRgb=fields[11];dstRgb=fields[12];srcAlpha=fields[13];dstAlpha=fields[14];}
+        Object object(MethodHandle getter,Object value){try{return (Object)getter.invokeExact(value);}catch(Throwable failure){throw new IllegalStateException("GL_CACHE_READ_FAILED",failure);}}
+        boolean flag(MethodHandle getter,Object value){try{return (boolean)getter.invokeExact(value);}catch(Throwable failure){throw new IllegalStateException("GL_CACHE_READ_FAILED",failure);}}
+        int number(MethodHandle getter,Object value){try{return (int)getter.invokeExact(value);}catch(Throwable failure){throw new IllegalStateException("GL_CACHE_READ_FAILED",failure);}}
+    }
     /** Render state only; no proof ledger or persistent work is created for a failed frame. */
     private static final class State {
         final ShaderInstance shader=RenderSystem.getShader();
@@ -286,19 +317,23 @@ public final class ClientDrawFaults {
         final Matrix4f projection=new Matrix4f(RenderSystem.getProjectionMatrix()),texture=new Matrix4f(RenderSystem.getTextureMatrix());
         final VertexSorting sorting=RenderSystem.getVertexSorting();
         final List<SavedPose> modelView=new ArrayList<>();
-        final boolean blend=GL11.glIsEnabled(GL11.GL_BLEND),depth=GL11.glIsEnabled(GL11.GL_DEPTH_TEST),cull=GL11.glIsEnabled(GL11.GL_CULL_FACE),scissor=GL11.glIsEnabled(GL11.GL_SCISSOR_TEST);
-        final boolean depthMask=GL11.glGetBoolean(GL11.GL_DEPTH_WRITEMASK);
-        final int depthFunc=GL11.glGetInteger(GL11.GL_DEPTH_FUNC),srcRgb=GL11.glGetInteger(GL14.GL_BLEND_SRC_RGB),dstRgb=GL11.glGetInteger(GL14.GL_BLEND_DST_RGB),
-                srcAlpha=GL11.glGetInteger(GL14.GL_BLEND_SRC_ALPHA),dstAlpha=GL11.glGetInteger(GL14.GL_BLEND_DST_ALPHA),
-                drawFbo=GL11.glGetInteger(GL30.GL_DRAW_FRAMEBUFFER_BINDING),readFbo=GL11.glGetInteger(GL30.GL_READ_FRAMEBUFFER_BINDING),
-                program=GL11.glGetInteger(GL20.GL_CURRENT_PROGRAM),activeTexture=GlStateManager._getActiveTexture();
+        final boolean blend,depth,cull,scissor,depthMask;
+        final int depthFunc,srcRgb,dstRgb,srcAlpha,dstAlpha,drawFbo,readFbo,program,activeTexture=GlStateManager._getActiveTexture();
         final int[] viewport=new int[4],scissorBox=new int[4],textures=new int[12];
         State() {
+            GlCache cached=GlCache.INSTANCE;Object blendState=cached.object(cached.blend,null),depthState=cached.object(cached.depth,null);
+            blend=cached.flag(cached.enabled,cached.object(cached.blendMode,blendState));depth=cached.flag(cached.enabled,cached.object(cached.depthMode,depthState));
+            cull=cached.flag(cached.enabled,cached.object(cached.cullMode,cached.object(cached.cull,null)));scissor=cached.flag(cached.enabled,cached.object(cached.scissorMode,cached.object(cached.scissor,null)));
+            depthMask=cached.flag(cached.mask,depthState);depthFunc=cached.number(cached.func,depthState);srcRgb=cached.number(cached.srcRgb,blendState);dstRgb=cached.number(cached.dstRgb,blendState);srcAlpha=cached.number(cached.srcAlpha,blendState);dstAlpha=cached.number(cached.dstAlpha,blendState);
+            // These states have no GlStateManager cache. Preserve actual readback,
+            // using the existing array instead of LWJGL's per-query MemoryStack view.
+            drawFbo=query(GL30.GL_DRAW_FRAMEBUFFER_BINDING,viewport);readFbo=query(GL30.GL_READ_FRAMEBUFFER_BINDING,viewport);program=query(GL20.GL_CURRENT_PROGRAM,viewport);
             GL11.glGetIntegerv(GL11.GL_VIEWPORT,viewport);if(scissor)GL11.glGetIntegerv(GL11.GL_SCISSOR_BOX,scissorBox);
             for(PoseStack.Pose entry:((PoseAccess)RenderSystem.getModelViewStack()).ronova$poses())
                 modelView.add(new SavedPose(entry,new Matrix4f(entry.pose()),new Matrix3f(entry.normal())));
             for(int i=0;i<textures.length;i++)textures[i]=RenderSystem.getShaderTexture(i);
         }
+        private static int query(int parameter,int[] scratch){GL11.glGetIntegerv(parameter,scratch);return scratch[0];}
         void restore() {
             Deque<PoseStack.Pose> stack=((PoseAccess)RenderSystem.getModelViewStack()).ronova$poses();stack.clear();
             for(SavedPose entry:modelView) { entry.pose.pose().set(entry.matrix);entry.pose.normal().set(entry.normal);stack.addLast(entry.pose); }

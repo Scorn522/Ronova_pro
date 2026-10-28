@@ -63,8 +63,18 @@ final class CreationBoundary {
                 .invoke(null,loader,name.replace('/','.'),sites.toArray(String[]::new),actual);
         } catch(ReflectiveOperationException failure) { throw new IllegalStateException("CREATION_SITE_REGISTRY",failure); }
     }
-    static byte[] transform(ClassLoader loader,String name,Class<?> actual,byte[] bytes,boolean observeInputs) {
-        ClassNode node=new ClassNode();new ClassReader(bytes).accept(node,0);
+    static byte[] transform(ClassLoader loader,String name,Class<?> actual,ClassNode input,boolean observeInputs) {
+        // Creation observation may fail after editing earlier methods. Keep
+        // the already installed field/group/backing guards as the fallback.
+        // Fresh ASM labels prevent MethodNode.visitLabel from reusing another
+        // tree's Label.info nodes while copying; no classfile round trip occurs.
+        Object scope=dev.ronova.pro.bootstrap.TransformScope.enter(null);try {
+        for(MethodNode method:input.methods)method.instructions.resetLabels();
+        ClassNode node=new ClassNode();input.accept(node);
+        return transformNode(loader,name,actual,node,observeInputs);
+        }finally{dev.ronova.pro.bootstrap.TransformScope.exit(scope);}
+    }
+    private static byte[] transformNode(ClassLoader loader,String name,Class<?> actual,ClassNode node,boolean observeInputs) {
         Weaving weaving=weave(loader,name,node,observeInputs,Set.of());
         if(weaving==null){sites(loader,name,actual,List.of());return null;}
         try{

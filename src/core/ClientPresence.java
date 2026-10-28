@@ -48,6 +48,8 @@ public final class ClientPresence {
     private static long tick,awaitingAfterScope=-1,worldAppliedScope=-1,lastResetScope=-1;
     private static String lastResetDimension;
     private static volatile Object world;
+    // Published by the client policy turn; chunk tessellators never enter context().
+    private static volatile Level visualWorld;
     private static boolean challengeOverflow,policyOverflowReported;
     private static List<ProNetwork.WorldArea> worldAreas=List.of();
     private static volatile boolean worldClock;
@@ -633,6 +635,7 @@ public final class ClientPresence {
     public static boolean interactionDenied(net.minecraft.world.entity.Entity entity) {return renderDenied(entity);}
     private static String levelDimension(Minecraft mc) { return mc.level==null?null:mc.level.dimension().location().toString(); }
     private static void clearWorldPolicy(){
+        visualWorld=null;
         ClientWorldVisuals.clearFrames();
         try(var ignored=new WorldClockGate(Minecraft.getInstance().level)){
             worldAreas=List.of();worldClock=false;worldBodies.clear();worldFrames.clear();terrainFrames.clear();weatherFrames.clear();worldRuleClocks.clear();rendererClock=null;weatherVertices=null;worldMirrorScope=-1;
@@ -666,7 +669,7 @@ public final class ClientPresence {
         if(packet==null||awaitingScope||mc.level==null||connection==null||!Objects.equals(policy.session(),packet.session())
                 ||policy.scope()!=packet.scope()||!Objects.equals(levelDimension(mc),packet.dimension()))return;
         if(!controlsInstalled){installControls();if(!controlsInstalled)return;}
-        boolean wasClock=worldClock;var level=mc.level;
+        boolean wasClock=worldClock;var level=mc.level;var previousAreas=worldAreas;
         float receivedClock=mc.levelRenderer.getTicks()+mc.getFrameTime();
         boolean clock=packet.clock();
         try(var ignored=new WorldClockGate(level,clock||wasClock)){
@@ -675,6 +678,7 @@ public final class ClientPresence {
             try{if(clock||wasClock)WorldStatePolicy.applyClientClock(level,packet.gameTime(),packet.dayTime());}
             finally{applyingWorldClock=false;}
             worldAreas=List.copyOf(packet.areas());worldBodies.clear();worldBodies.addAll(packet.bodies());worldMirrorScope=packet.scope();worldClock=clock;
+            visualWorld=worldAreas.isEmpty()&&worldBodies.isEmpty()?null:level;
             Set<UUID> currentRules=new HashSet<>();for(ProNetwork.WorldArea area:worldAreas){currentRules.add(area.rule());worldRuleClocks.putIfAbsent(area.rule(),receivedClock);}
             worldRuleClocks.keySet().retainAll(currentRules);
         }catch(ReflectiveOperationException unavailable){throw new IllegalStateException("CLIENT_WORLD_CLOCK_POLICY_UNAVAILABLE",unavailable);}
@@ -692,6 +696,9 @@ public final class ClientPresence {
             entry.getValue().close();return true;
         });
         ClientWorldVisuals.pruneFrames();
+        // Inactive meshes contain no per-quad visual labels. Rebuild when a late
+        // region policy first needs them, using the real tessellators and current rule.
+        if(!worldAreas.isEmpty()&&!previousAreas.equals(worldAreas)&&mc.levelRenderer!=null)mc.levelRenderer.allChanged();
         weatherFrames.entrySet().removeIf(entry->{
             WeatherColumn column=entry.getKey();entry.getValue().keySet().removeIf(y->!selectedWorldPosition(new BlockPos(column.x(),y,column.z())));return entry.getValue().isEmpty();
         });
@@ -715,6 +722,7 @@ public final class ClientPresence {
     public static boolean worldFrozen(Particle particle){Minecraft mc=context();return particle!=null&&activeWorld(mc,mc.level)&&selectedWorldObject(mc,particle);}
     private static void dropWorldFrame(Object object){WorldFrame previous=worldFrames.remove(object);if(previous!=null&&previous.visual!=null)previous.visual.close();}
     public static boolean worldVisualsActive(){Minecraft mc=context();return activeWorld(mc,mc.level)&&(!worldAreas.isEmpty()||!worldBodies.isEmpty());}
+    static boolean worldVisualsNeeded(Level candidate){Level current=visualWorld;return candidate!=null&&candidate==current&&world==current&&connection!=null&&!awaitingScope;}
     public static ClientWorldVisuals.Frame worldVisualFrame(Object object){
         WorldFrame frame=renderingFrame(object);if(frame==null)return null;
         if(frame.visual==null||!frame.visual.isOpen())frame.visual=new ClientWorldVisuals.Frame(object);

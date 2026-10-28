@@ -22,6 +22,10 @@ public final class IntentJournal implements AutoCloseable {
     private final List<FileChannel> lineageFiles=new ArrayList<>();
     private final List<FileLock> lineageLocks=new ArrayList<>();
     private final ThreadPoolExecutor writer;
+    private static final int MAX_DURABLE_BATCH=64;
+    // Writer-thread confined. Each append still runs as its own observed executor task.
+    private final AppendTask[] pendingWrites=new AppendTask[MAX_DURABLE_BATCH];
+    private int pendingWriteCount;
     private volatile Throwable failed;
     private final List<String> history = Collections.synchronizedList(new ArrayList<>());
     private List<String> historyView;
@@ -97,7 +101,15 @@ public final class IntentJournal implements AutoCloseable {
         realm=parsedRealm;
         writer = new ThreadPoolExecutor(1,1,0,TimeUnit.MILLISECONDS,new ArrayBlockingQueue<>(256),
                 r -> { Thread t = new Thread(r,"ronova-pro-durable"); t.setDaemon(true); return t; },
-                new ThreadPoolExecutor.AbortPolicy());
+                new ThreadPoolExecutor.AbortPolicy()) {
+            @Override protected void afterExecute(Runnable task,Throwable failure) {
+                super.afterExecute(task,failure);
+                if(failure!=null)failPending(failure);
+                // Never wait to form a batch, and flush before an unrelated executor task.
+                if(pendingWriteCount!=0&&(pendingWriteCount>=MAX_DURABLE_BATCH
+                        ||!(getQueue().peek() instanceof AppendTask)))flushPending();
+            }
+        };
     }
 
     /** V6 splits nonempty logical records into the original bounded physical frames. */
@@ -109,17 +121,47 @@ public final class IntentJournal implements AutoCloseable {
         file.force(true);
         synchronized(history){history.add(record);historyView=null;committed.add(record);}
     }
+    private final class AppendTask implements Runnable {
+        final String record;
+        final CompletableFuture<Void> ack;
+        AppendTask(String record,CompletableFuture<Void> ack){this.record=record;this.ack=ack;}
+        @Override public void run() {
+            if(failed!=null){ack.completeExceptionally(failed);return;}
+            // Include the current record before I/O: a partial frame is never admission rejection.
+            try { pendingWrites[pendingWriteCount++]=this;writeRecord(file,record); }
+            catch(Throwable failure){failPending(failure);ack.completeExceptionally(failure);}
+        }
+    }
+    private void failPending(Throwable failure) {
+        failed=failure;
+        completePending(failure);
+    }
+    private void completePending(Throwable failure) {
+        int count=pendingWriteCount;pendingWriteCount=0;
+        for(int index=0;index<count;index++){
+            AppendTask task=pendingWrites[index];pendingWrites[index]=null;
+            if(failure==null)task.ack.complete(null);else task.ack.completeExceptionally(failure);
+        }
+    }
+    private void flushPending() {
+        try {
+            if(failed!=null)throw new IOException("WRITER_FAILED",failed);
+            file.force(true);
+            synchronized(history){
+                for(int index=0;index<pendingWriteCount;index++){
+                    AppendTask task=pendingWrites[index];history.add(task.record);committed.add(task.record);
+                }
+                historyView=null;
+            }
+        } catch(Throwable failure){failPending(failure);return;}
+        // Completion can invoke arbitrary continuations; no history/queue lock is held here.
+        completePending(null);
+    }
     public CompletableFuture<Void> append(String record) {
         CompletableFuture<Void> ack=new CompletableFuture<>();
         if(failed!=null) { ack.completeExceptionally(failed); return ack; }
         try {
-            writer.execute(() -> {
-                try {
-                    if(failed!=null) throw new IOException("WRITER_FAILED",failed);
-                    appendNow(record);
-                    ack.complete(null);
-                } catch(Throwable ex) { failed=ex; ack.completeExceptionally(ex); }
-            });
+            writer.execute(new AppendTask(record,ack));
         } catch(RejectedExecutionException ex) { ack.completeExceptionally(ex); }
         return ack;
     }
@@ -140,6 +182,32 @@ public final class IntentJournal implements AutoCloseable {
         return false;
     }
     public List<String> history() { synchronized(history) { if(historyView==null)historyView=List.copyOf(history);return historyView; } }
+    /** Read-only replay validation on the writer's ordered turn; never re-executes an effect. */
+    public CompletableFuture<String> verifyReplay(){
+        CompletableFuture<String> result=new CompletableFuture<>();
+        try{writer.execute(()->{
+            if(failed!=null){result.completeExceptionally(failed);return;}
+            long[] positions=new long[lineageFiles.size()];List<String> records=new ArrayList<>(),migrations=new ArrayList<>();Throwable failure=null;
+            try{
+                if(pendingWriteCount!=0)flushPending();if(failed!=null)throw new IOException("WRITER_FAILED",failed);
+                for(int i=0;i<positions.length;i++)positions[i]=lineageFiles.get(i).position();
+                for(int version=1;version<=VERSION;version++){
+                    FileChannel channel=lineageFiles.get(version-1);List<String> part=new ArrayList<>();readAll(channel,part);
+                    if(!part.isEmpty()){
+                        if(!Objects.equals(realm,headerRealm(part.get(0),version)))throw new IOException("MIGRATION_REALM_MISMATCH");
+                        for(int i=0;i<version-1&&part.size()>i+1;i++)if(!part.get(i+1).equals(migrations.get(i)))throw new IOException("LEGACY_BYTES_CHANGED_AFTER_MIGRATION");
+                        records.addAll(part);
+                    }
+                    if(version<VERSION)migrations.add("MIGRATED_V"+version+"\t"+hash(channel)+"\t"+channel.size());
+                }
+                if(!records.equals(history()))throw new IOException("REPLAY_COMMITTED_HISTORY_MISMATCH");
+            }catch(Throwable unavailable){failure=unavailable;failed=unavailable;}
+            finally{for(int i=0;i<positions.length;i++)try{lineageFiles.get(i).position(positions[i]);}catch(IOException unavailable){if(failure==null)failure=unavailable;else failure.addSuppressed(unavailable);failed=unavailable;}}
+            if(failure!=null)result.completeExceptionally(failure);
+            else result.complete("只读重放核对完成："+records.size()+" 条已确认记录；帧摘要、版本迁移、世界身份和内存历史一致。未重执行清除或恢复动作。");
+        });}catch(RejectedExecutionException unavailable){result.completeExceptionally(unavailable);}
+        return result;
+    }
     boolean recorded(String record){return committed.contains(record);}
     CompletableFuture<Void> registerSession(UUID session) {
         var process=ProcessHandle.current();

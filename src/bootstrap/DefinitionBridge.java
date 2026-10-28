@@ -90,6 +90,11 @@ public final class DefinitionBridge {
     public static Module module(Class<?> type) {
         Origin origin=ORIGINS.get(type).origin;return origin==null?type.getModule():origin.module;
     }
+    /** A published Origin is bind-once and its module is final. Absence is
+     * queried afresh; the VM-module fallback is not a completed origin binding. */
+    public static Module boundModule(Class<?> type) {
+        Origin origin=type==null?null:ORIGINS.get(type).origin;return origin==null?null:origin.module;
+    }
     private static Origin bind(Class<?> actual,Module module) {
         synchronized(ORIGINS) {
             OriginSlot slot=ORIGINS.get(actual);Origin origin=slot.origin;

@@ -21,19 +21,19 @@ public final class ProBootstrap {
 
     public static synchronized String state() {
         String actual=agentState();
-        String current=(state.equals("ATTACHED")||state.equals("ALREADY_INSTALLED")||state.endsWith("_READY"))&&!actual.equals("INSTALLED_FULL")?"UNAVAILABLE":state;
+        String current=(state.equals("ATTACHED")||state.equals("ALREADY_INSTALLED")||state.endsWith("_READY"))&&!actual.equals("INSTALLED_PERFORMANCE")?"UNAVAILABLE":state;
         return current+":STAGE="+startupStage()+":AGENT="+actual+(detail.isEmpty()?"":":HANDOVER="+detail)
                 +(ProRuntime.productionControlsInstalled()?"":":CORE_CONTROLS="+ProRuntime.dispatchState());
     }
     public static synchronized boolean available() {
-        return agentState().equals("INSTALLED_FULL")&&ProRuntime.productionControlsInstalled();
+        return agentState().equals("INSTALLED_PERFORMANCE")&&ProRuntime.productionControlsInstalled();
     }
 
     /** Called once, as early as the mod can run. Safe to call again: an already installed agent is left alone. */
     public static synchronized void install() {
         try {
             String actual=agentState();
-            if(actual.equals("INSTALLED_FULL")) { state=startupStage().startsWith("PREMAIN")?"PREMAIN_READY":"RUNTIME_CONTINUATION_READY";detail="";return; }
+            if(actual.equals("INSTALLED_PERFORMANCE")) { state=startupStage().startsWith("PREMAIN")?"PREMAIN_READY":"RUNTIME_CONTINUATION_READY";detail="";return; }
             // Installing, partial and failed agents retain their existing hooks. A second attach cannot repair
             // those hooks, and a timed-out helper may still have an installation running in the target JVM.
             if(!actual.equals("NOT_ATTEMPTED")&&!actual.equals("NOT_PRESENT")) { fail(actual);return; }
@@ -48,7 +48,7 @@ public final class ProBootstrap {
             handOverStarted=true;state="ATTACHING";detail="";
             String outcome=handOver(agent,bootstrap);
             actual=agentState();
-            if(!actual.equals("INSTALLED_FULL")) { fail(outcome+":AGENT="+actual);return; }
+            if(!actual.equals("INSTALLED_PERFORMANCE")) { fail(outcome+":AGENT="+actual);return; }
             state="RUNTIME_CONTINUATION_READY";
             detail=agent.getFileName().toString();
         } catch(ReflectiveOperationException|IOException|RuntimeException|LinkageError unavailable) {

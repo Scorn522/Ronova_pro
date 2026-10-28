@@ -16,7 +16,7 @@ public final class ProRuntime implements AutoCloseable {
     private static final Map<MinecraftServer,ProRuntime> SERVERS=Collections.synchronizedMap(new IdentityHashMap<>());
     // Immutable membership view, invalidated under SERVERS on every registry change.
     // Policy state on each runtime is still read live by every caller.
-    private static List<ProRuntime> sourceRuntimeSnapshot=List.of();
+    private static volatile List<ProRuntime> sourceRuntimeSnapshot=List.of();
     private final WorldControl worldControl=new WorldControl();
     private final WorldArchive worldArchive;
     private final FieldGraph fieldGraphs=new FieldGraph(this);
@@ -70,6 +70,9 @@ public final class ProRuntime implements AutoCloseable {
     public static ProRuntime get(MinecraftServer s) { return SERVERS.get(s); }
     public static void start(MinecraftServer s) throws IOException {
         lifecycleAction("starting");
+        // A client field policy can already be active. Resolve server reader/backing
+        // metadata before SERVERS exposes this runtime to those concurrent readers.
+        try{preparePolicyMetadata();}catch(ReflectiveOperationException failure){throw new IOException("FIELD_POLICY_METADATA_UNAVAILABLE",failure);}
         synchronized(SERVERS) {
             if(SERVERS.containsKey(s))throw new IOException("RUNTIME_ALREADY_STARTED");
             try { SERVERS.put(s,new ProRuntime(s)); }
@@ -228,6 +231,45 @@ public final class ProRuntime implements AutoCloseable {
     private static Module definedModule(Class<?> type){
         try{return (Module)creationAccess().module.invoke(null,type);}
         catch(ReflectiveOperationException unavailable){return type.getModule();}
+    }
+    private static volatile java.lang.reflect.Method boundDefinitionQuery;
+    Module boundDefinition(Object value) {
+        if(!RecoveryRecords.definitionOnlyValue(value))return null;
+        try{
+            var query=boundDefinitionQuery;
+            if(query==null)boundDefinitionQuery=query=Class.forName("dev.ronova.pro.bootstrap.DefinitionBridge",false,null).getMethod("boundModule",Class.class);
+            return (Module)query.invoke(null,value instanceof Class<?> type?type:value.getClass());
+        }catch(ReflectiveOperationException unavailable){return null;}
+    }
+    KnownContainers.Removal compactBoundVector(KnownContainers.Image image,int first,Module[] definitions,Subject group,long generation)throws ReflectiveOperationException{
+        if(!group.commitGate.isHeldByCurrentThread())throw new IllegalStateException("GROUP_VECTOR_POLICY_GATE_REQUIRED");
+        if(!KnownContainers.vector(image.carrier)||!Thread.holdsLock(image.carrier))throw new IllegalAccessException("ACTUAL_VECTOR_MONITOR_REQUIRED");
+        if(definitions==null||first<0||first>image.rows.length-definitions.length)throw new IllegalArgumentException("ACTUAL_VECTOR_RANGE_REQUIRED");
+        if(image.rows.length!=image.size||!KnownContainers.unchanged(image))throw new IllegalAccessException("SOURCE_JDK_CONTAINER_CHANGED_OR_LAYOUT_UNAVAILABLE");
+        Module[] actualDefinitions=new Module[definitions.length];Object[] actualValues=(Object[])image.backing;
+        for(int index=0;index<definitions.length;index++)if(definitions[index]!=null){
+            int position=first+index;Object value=actualValues[position];
+            if(image.rows[position].position!=position||image.rows[position].value!=value)throw new IllegalAccessException("SOURCE_JDK_CONTAINER_CHANGED_OR_LAYOUT_UNAVAILABLE");
+            // Supplied modules are candidates, never authority for another row.
+            // Re-read the actual value's immutable binding and structural eligibility.
+            Module observed=boundDefinition(value);
+            if(observed==definitions[index])actualDefinitions[index]=observed;
+        }
+        // All normal module-table writes use this exact synchronized map. The
+        // order is policy gate -> module table; no mutable object-origin query
+        // or caller callback runs while this binding transaction is held.
+        synchronized(moduleSubjects){
+            if(!group.terminal||group.generation!=generation||canonicalSubject(group.id)!=group)throw new IllegalStateException("GROUP_VECTOR_POLICY_CHANGED");
+            boolean[] selected=new boolean[actualDefinitions.length];int count=0;
+            for(int index=0;index<actualDefinitions.length;index++)if(actualDefinitions[index]!=null){
+                // A changed/unmapped definition can still have dynamic object
+                // sources. Let the caller reclassify every row at its unlink.
+                if(moduleSubjects.get(actualDefinitions[index])!=group)return null;
+                selected[index]=true;count++;
+            }
+            if(count==0){if(!KnownContainers.unchanged(image))throw new IllegalAccessException("SOURCE_JDK_CONTAINER_CHANGED_OR_LAYOUT_UNAVAILABLE");return new KnownContainers.Removal(0,image);}
+            return new KnownContainers.Removal(count,SourceMaps.retireVectorStorage(image,first,selected,count));
+        }
     }
     boolean sameGroup(Collection<UUID> ids,Subject authority) {return authority!=null&&groupAuthority(ids)==canonicalSubject(authority.id);}
     Subject groupSubject(Object value) {
@@ -758,30 +800,43 @@ public final class ProRuntime implements AutoCloseable {
     /** Public request methods are command entrypoints, not an authority granted to every in-process mod. */
     private void commandAction() {
         thread();
-        boolean ownCommand=ACTION_CALLER.walk(frames->{
-            var stack=frames.toList();
-            boolean ownLambda=stack.stream().filter(frame->frame.getDeclaringClass()!=ProRuntime.class)
-                    .findFirst().map(frame->frame.getDeclaringClass()==ProMod.class
-                            &&frame.getMethodName().startsWith("lambda$commands$")).orElse(false);
-            if(!ownLambda)return false;
-            // A mod can call Brigadier with a forged level-4 CommandSourceStack. Require
-            // the actual player packet or dedicated console dispatch on this stack.
-            boolean player=stack.stream().anyMatch(frame->{
-                Class<?> owner=frame.getDeclaringClass();String method=frame.getMethodName();
-                return owner==net.minecraft.server.network.ServerGamePacketListenerImpl.class
-                        &&(method.equals("performChatCommand")||method.equals("m_246958_"));
-            });
-            if(player)return true;
-            boolean console=stack.stream().anyMatch(frame->frame.getDeclaringClass()==net.minecraft.server.dedicated.DedicatedServer.class
-                    &&(frame.getMethodName().equals("handleConsoleInputs")||frame.getMethodName().equals("m_139665_")));
-            if(!console)return false;
-            try {
-                Class<?> bridge=Class.forName("dev.ronova.pro.bootstrap.TaskBridge",false,null);
-                return Boolean.TRUE.equals(Class.forName("dev.ronova.pro.bootstrap.ControlBridge",false,null).getMethod("consoleDispatchTrusted").invoke(null));
-            } catch(ReflectiveOperationException unavailable) {return false;}
-        });
+        boolean ownCommand=ProMod.weaponActionAuthorized(this)&&ACTION_CALLER.walk(frames->frames
+                .filter(frame->frame.getDeclaringClass()!=ProRuntime.class).findFirst()
+                .map(frame->frame.getDeclaringClass()==ProMod.class).orElse(false));
         if(!ownCommand)throw new SecurityException("RONOVA_COMMAND_AUTHORITY_REQUIRED");
     }
+    /** Resolve actual definition ownership before disposal; registry namespaces are not authority. */
+    String weaponTargetMods(Entity target){
+        commandAction();
+        try{
+            Class<?> agent=Class.forName("dev.ronova.pro.agent.RecoveryAgent",false,ClassLoader.getSystemClassLoader());
+            String[] ids=(String[])agent.getMethod("modGroupIds",Module.class).invoke(null,definedModule(target.getClass()));
+            return Arrays.stream(ids).filter(id->!Set.of("minecraft","forge","ronova_pro").contains(id)).distinct().collect(java.util.stream.Collectors.joining(","));
+        }catch(ReflectiveOperationException failure){throw new IllegalStateException("实际 Mod 归属不可用",failure);}
+    }
+    Entity weaponRayTarget(Entity observer,double distance){commandAction();return worldControl.ray(observer,distance);}
+    boolean weaponProtected(Entity entity){thread();ProtectionSnapshot snapshot=currentLifePolicy(entity);return snapshot!=null&&snapshot.protectedNow()&&!snapshot.binding().subject.terminal;}
+    boolean weaponNoHeal(Entity entity){thread();return noHealBinding(entity)!=null;}
+    boolean weaponOwnProtection(Entity entity,UUID operation){thread();Binding binding=bindings.get(entity);return binding!=null&&binding.latest!=null&&binding.latest.id.equals(operation)&&binding.latest.action.equals("PROTECT")&&binding.latest.generation==binding.subject.generation;}
+    String weaponModState(String id){thread();return (stoppedMods.contains(id)?"已停止":"运行中")+(protectedMods.contains(id)?" · 已保护":"");}
+    List<WeaponEntry> weaponRules(){thread();return worldControl.weaponRules();}
+    List<UUID> weaponClockRules(){thread();return worldControl.weaponClockRules();}
+    List<WeaponEntry> weaponWorldJobs(){thread();return worldArchive.weaponJobs();}
+    List<WeaponEntry> weaponFields(){thread();return fieldGraphs.weaponImages();}
+    boolean weaponHostProtected(){thread();return hostJvmProtected;}
+    List<WeaponEntry> weaponOperations(){
+        thread();ArrayDeque<Work> recent=new ArrayDeque<>();for(Work item:work.values()){if(recent.size()==48)recent.removeFirst();recent.addLast(item);}
+        List<WeaponEntry> rows=new ArrayList<>();for(var it=recent.descendingIterator();it.hasNext();){Work item=it.next();rows.add(new WeaponEntry(item.id,item.action+" · "+(item.binding==null?"世界方块":item.binding.entity()==null?"目标已离场":item.binding.entity().getName().getString()),item.state));}return List.copyOf(rows);
+    }
+    String weaponUnload(ServerPlayer player){
+        commandAction();ServerLevel level=player.serverLevel();Access.Tracking map=(Access.Tracking)level.getChunkSource().chunkMap;
+        int eligible=0,retained=0;var center=player.chunkPosition();
+        for(var holder:map.pro$visibleChunks().values())if(Math.abs(holder.getPos().x-center.x)<=2&&Math.abs(holder.getPos().z-center.z)<=2){if(holder.getTicketLevel()>33)eligible++;else retained++;}
+        long deadline=System.nanoTime()+java.util.concurrent.TimeUnit.MILLISECONDS.toNanos(5);
+        level.getChunkSource().tick(()->System.nanoTime()<deadline,false);
+        return "已运行原版保存/卸载流程；周围可释放 "+eligible+" 个，活动票据保留 "+retained+" 个。玩家、出生点及必要加载票据保持有效。";
+    }
+    java.util.concurrent.CompletableFuture<String> weaponReplay(){commandAction();return journal.verifyReplay();}
     private void writable() {
         thread();
         if(closing || !journal.healthy() || journal.realm==null)
@@ -2360,7 +2415,7 @@ public final class ProRuntime implements AutoCloseable {
         static{
             try{
                 Class<?> agent=Class.forName("dev.ronova.pro.agent.RecoveryAgent",false,ClassLoader.getSystemClassLoader());
-                agent.getMethod("openBackingAccess",Class.class,Class[].class).invoke(null,ProRuntime.class,(Object)new Class<?>[]{ServerBossEvent.class,net.minecraft.world.BossEvent.class,net.minecraft.network.protocol.game.ClientboundBossEventPacket.class});
+                agent.getMethod("openBackingAccess",Class.class,Class[].class).invoke(null,PresentationFields.class,(Object)new Class<?>[]{ServerBossEvent.class,net.minecraft.world.BossEvent.class,net.minecraft.network.protocol.game.ClientboundBossEventPacket.class});
                 PLAYERS=field(ServerBossEvent.class,"players","f_8296_",Set.class);VISIBLE=field(ServerBossEvent.class,"visible","f_8298_",boolean.class);ID=field(net.minecraft.world.BossEvent.class,"id","f_18847_",UUID.class);PACKET_ID=field(net.minecraft.network.protocol.game.ClientboundBossEventPacket.class,"id","f_131750_",UUID.class);
             }catch(ReflectiveOperationException unavailable){throw new ExceptionInInitializerError(unavailable);}
         }
@@ -2928,9 +2983,12 @@ public final class ProRuntime implements AutoCloseable {
         }
     }
     static List<ProRuntime> sourceRuntimes() {
+        List<ProRuntime> snapshot=sourceRuntimeSnapshot;
+        if(snapshot!=null)return snapshot;
         synchronized(SERVERS) {
-            if(sourceRuntimeSnapshot==null)sourceRuntimeSnapshot=List.copyOf(SERVERS.values());
-            return sourceRuntimeSnapshot;
+            snapshot=sourceRuntimeSnapshot;
+            if(snapshot==null)sourceRuntimeSnapshot=snapshot=List.copyOf(SERVERS.values());
+            return snapshot;
         }
     }
     private static boolean playerLifecycleAllows(Entity entity) {
@@ -3190,6 +3248,15 @@ public final class ProRuntime implements AutoCloseable {
      */
     private static volatile java.lang.invoke.MethodHandle clientFields,clientDispatch,clientLifeResults;
     private static volatile boolean clientBasePolicyInstalled;
+    static void prepareControlOwner()throws ReflectiveOperationException {
+        if(ACTION_CALLER.getCallerClass()!=RuntimeClasses.class)throw new SecurityException("ACTUAL_RUNTIME_PREPARATION_REQUIRED");
+        Class.forName("dev.ronova.pro.bootstrap.ControlBridge",false,null).getMethod("preparePolicyOwner",Class.class).invoke(null,ProRuntime.class);
+    }
+    private static void preparePolicyMetadata()throws ReflectiveOperationException {
+        RuntimeClasses.prepare();
+        RecoveryRecords.prepareFieldPolicy();
+        BackingPolicy.prepare();
+    }
     static void installClientControls(java.lang.invoke.MethodHandle fields,java.lang.invoke.MethodHandle dispatch,java.lang.invoke.MethodHandle results) {
         Class<?> caller=LIFECYCLE_WALKER.getCallerClass();
         if(!caller.getName().equals("dev.ronova.pro.ClientPresence")||caller.getClassLoader()!=ProRuntime.class.getClassLoader())throw new SecurityException("CLIENT_CONTROL_OWNER");
@@ -3197,6 +3264,7 @@ public final class ProRuntime implements AutoCloseable {
         catch(ReflectiveOperationException unavailable){throw new IllegalStateException("CLIENT_LIFE_FIELD_UNAVAILABLE",unavailable);}
         clientFields=fields;clientDispatch=dispatch;clientLifeResults=results;
         if(!productionControlsInstalled&&!clientBasePolicyInstalled)try {
+            preparePolicyMetadata();
             LiveStatePolicy.initialize();EquipmentPolicy.initialize();WorldStatePolicy.initialize();
             var lookup=java.lang.invoke.MethodHandles.lookup();
             Class<?> bridge=Class.forName("dev.ronova.pro.bootstrap.TaskBridge",false,null);
@@ -3435,8 +3503,9 @@ public final class ProRuntime implements AutoCloseable {
             LiveStatePolicy.initialize();
             EquipmentPolicy.initialize();
             WorldStatePolicy.initialize();
+            preparePolicyMetadata();
             Class<?> bridge=Class.forName("dev.ronova.pro.bootstrap.TaskBridge",false,null);
-            if(!Integer.valueOf(105).equals(bridge.getMethod("abiVersion").invoke(null)))throw new IllegalStateException("INDEX_BRIDGE_ABI_MISMATCH");
+            if(!Integer.valueOf(106).equals(bridge.getMethod("abiVersion").invoke(null)))throw new IllegalStateException("INDEX_BRIDGE_ABI_MISMATCH");
             var lookup=java.lang.invoke.MethodHandles.lookup();
             var field=lookup.findStatic(ProRuntime.class,"preventFieldWrite",java.lang.invoke.MethodType.methodType(boolean.class,Object.class,Class.class,String.class,Object.class));
             var dispatch=lookup.findStatic(ProRuntime.class,"preventDispatch",java.lang.invoke.MethodType.methodType(boolean.class,Object.class,String.class,Object.class));

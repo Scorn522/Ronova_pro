@@ -23,14 +23,17 @@ typedef struct HostTlsLease {
 typedef struct HostTlsLeaseLink {HostTlsLease *lease;LONG references;struct HostTlsLeaseLink *next;} HostTlsLeaseLink;
 typedef struct HostTlsSources {OwnerLink *owners;HostTlsLeaseLink *leases;int unknown,partial;} HostTlsSources;
 typedef struct HostTlsSlot HostTlsSlot;
+enum { HOST_TLS_SLOT_BUCKETS=1024,HOST_TLS_VALUE_BUCKETS=32 };
 typedef struct HostTlsActivation {HostTlsSlot *slot;struct HostTlsActivation *previous;} HostTlsActivation;
 typedef struct HostTlsThread {
+    SRWLOCK gate;
     uint64_t generation,observedEpoch;HANDLE monitor;HostTlsSources observed;
     HostTlsActivation *activation;int ended,gap,releasing,reaped,queued,polling;
     struct HostTlsValue *values,*activeValues,*valuesTail;SIZE_T valueCount;
     struct HostTlsThread *next,*activeNext,*monitorNext,**monitorLink;
 } HostTlsThread;
 typedef struct HostTlsFiber {
+    SRWLOCK gate;
     uint64_t generation,observedEpoch;HostTlsThread *home;HostTlsSources observed;
     void *fiber;int actualFiber,ended,gap,reaped,queued;
     struct HostTlsValue *values,*activeValues,*valuesTail;SIZE_T valueCount;
@@ -41,27 +44,33 @@ typedef struct HostTlsValue {
     HostTlsSlot *slot;struct HostTlsValue *contextNext,*workNext;
     uint64_t revision,retainedRevision,retainedEpoch;
     uintptr_t value;int initialized,uncertain,closed;
-    struct HostTlsValue *next;
+    struct HostTlsValue *next,*lookupNext;
 } HostTlsValue;
 typedef struct HostTlsContribution {HostTlsSources sources;uintptr_t value;int valueReceipt;struct HostTlsContribution *next;} HostTlsContribution;
 typedef struct HostTlsOperation {HostTlsSources *sources;uintptr_t value;int freeing,setting;HostTlsThread *thread;HostTlsFiber *fiber;struct HostTlsOperation *next;} HostTlsOperation;
 struct HostTlsSlot {
+    SRWLOCK gate;
     uint64_t generation;DWORD index;int fls,observed,live,uncertain,gap,cleanupGap,reaped,queued,releasing;
     LONG busy,callbacks,borrowers;int closing;
-    HostTlsSources allocation,aggregate;HostTlsValue *values;
+    HostTlsSources allocation,aggregate;HostTlsValue *values,*valueIndex[HOST_TLS_VALUE_BUCKETS];
     HostTlsContribution *contributions;HostTlsOperation *operations;
     HostFlsCallback callback;void *adapter;HMODULE provider,pin;void *providerAnchor;
     RUNTIME_FUNCTION unwind;struct HostTlsSlot *next,*activeNext,*liveNext,**liveLink;
 };
 typedef struct HostTlsBorrow {HostTlsSources sources;HostLibraryLoad *load;struct HostThreadWorker *worker;void *tooling;} HostTlsBorrow;
 static SRWLOCK host_tls_records=SRWLOCK_INIT;
+static SRWLOCK host_tls_lease_queue=SRWLOCK_INIT;
 static HostTlsSlot *host_tls_slots;
 static HostTlsThread *host_tls_threads;
 static HostTlsFiber *host_tls_fibers;
 static HostTlsThread *host_tls_active_threads,*host_tls_threads_tail,*host_tls_monitors;
 static HostTlsFiber *host_tls_active_fibers,*host_tls_fibers_tail;
 static HostTlsSlot *host_tls_active_slots,*host_tls_slots_tail;
-static HostTlsSlot *host_tls_live_slots;
+/* Directory entries are actual slot/context incarnations, not source verdicts.
+ * Global exclusive access coordinates publication, reuse, callbacks and reap.
+ * Ordinary observed-slot access holds it shared, then thread -> fiber -> slot.
+ * No record lock is held across the original OS call or VM/loader entry. */
+static HostTlsSlot *host_tls_live_slots[HOST_TLS_SLOT_BUCKETS];
 static HostTlsLease *host_tls_retired_leases,*host_tls_retired_tail;
 static SIZE_T host_tls_thread_count,host_tls_fiber_count,host_tls_slot_count,host_tls_polling;
 static SIZE_T host_tls_thread_scan,host_tls_fiber_scan,host_tls_slot_scan;
@@ -133,27 +142,57 @@ static int host_tls_restricted(NativeThread *state){
     return state&&(state->heapCallback||state->toolingRestricted||state->vmDetaching||state->vmThreadEnding
             ||state->hostUnloadImage||state->hostRelease||state->hostLoad&&state->hostLoad->calling);
 }
-static int host_tls_lock(int restricted){
-    /* This directory never enters the VM or loader while held. Contention is
-     * not an OS TLS failure: returning BUSY during CRT/FLS teardown can leave
-     * its destruction sentinel installed for the next OS callback. */
-    (void)restricted;AcquireSRWLockExclusive(&host_tls_records);return 1;
+typedef struct HostTlsAccess {
+    HostTlsThread *thread;HostTlsFiber *fiber;HostTlsSlot *slot;int shared;
+} HostTlsAccess;
+static void host_tls_context_shared(HostTlsThread *thread,HostTlsFiber *fiber){
+    if(thread)AcquireSRWLockShared(&thread->gate);if(fiber)AcquireSRWLockShared(&fiber->gate);
+}
+static void host_tls_context_shared_end(HostTlsThread *thread,HostTlsFiber *fiber){
+    if(fiber)ReleaseSRWLockShared(&fiber->gate);if(thread)ReleaseSRWLockShared(&thread->gate);
+}
+static void host_tls_access_begin(HostTlsAccess *access,HostTlsThread *thread,HostTlsFiber *fiber,
+        int fls,DWORD index,HostTlsSlot *reserved,int ordinary){
+    if(ordinary&&thread){
+        AcquireSRWLockShared(&host_tls_records);
+        AcquireSRWLockExclusive(&thread->gate);if(fiber)AcquireSRWLockExclusive(&fiber->gate);
+        HostTlsSlot *slot=reserved?reserved:host_tls_slot_find(fls,index);
+        if(slot&&slot->observed&&slot->live){
+            AcquireSRWLockExclusive(&slot->gate);
+            *access=(HostTlsAccess){thread,fiber,slot,1};return;
+        }
+        if(fiber)ReleaseSRWLockExclusive(&fiber->gate);ReleaseSRWLockExclusive(&thread->gate);
+        ReleaseSRWLockShared(&host_tls_records);
+    }
+    /* Unknown/new incarnations, Free, callback tombstones and retirement retain
+     * the global transaction. Never upgrade a shared lock or invent ERROR_BUSY. */
+    AcquireSRWLockExclusive(&host_tls_records);
+}
+static void host_tls_access_end(HostTlsAccess *access){
+    if(!access->shared){ReleaseSRWLockExclusive(&host_tls_records);return;}
+    ReleaseSRWLockExclusive(&access->slot->gate);
+    if(access->fiber)ReleaseSRWLockExclusive(&access->fiber->gate);
+    ReleaseSRWLockExclusive(&access->thread->gate);ReleaseSRWLockShared(&host_tls_records);
 }
 static int host_tls_cover(OwnerLink *retained,OwnerLink *actual){
     for(;actual;actual=actual->next){OwnerLink *p=retained;while(p&&p->owner!=actual->owner)p=p->next;if(!p)return 0;}return 1;
 }
-/* All source-container operations below hold host_tls_records. They only copy
- * already captured links/leases; none enter a loader, VM, or Host directory. */
+/* Source heads hold either the global exclusive transaction or their actual
+ * context/slot lock under global shared access. Immutable lease tails cross
+ * those domains, so their references are atomic; zero-reference work has its
+ * own leaf queue lock. None of these operations enter a loader or the VM. */
 static void host_tls_lease_drop(HostTlsLease *lease){
-    if(!--lease->references&&!lease->queued&&!lease->releasing){
+    if(InterlockedDecrement(&lease->references))return;
+    int queued=0;AcquireSRWLockExclusive(&host_tls_lease_queue);
+    if(!lease->queued&&!lease->releasing){
         lease->queued=1;lease->next=NULL;
         if(host_tls_retired_tail)host_tls_retired_tail->next=lease;else host_tls_retired_leases=lease;
-        host_tls_retired_tail=lease;
-        native_thread_worker_wake();
+        host_tls_retired_tail=lease;queued=1;
     }
+    ReleaseSRWLockExclusive(&host_tls_lease_queue);if(queued)native_thread_worker_wake();
 }
 static void host_tls_links_drop(HostTlsLeaseLink *p){
-    while(p&&!--p->references){HostTlsLeaseLink *next=p->next;host_tls_lease_drop(p->lease);free(p);p=next;}
+    while(p&&!InterlockedDecrement(&p->references)){HostTlsLeaseLink *next=p->next;host_tls_lease_drop(p->lease);free(p);p=next;}
 }
 static void host_tls_sources_clear(HostTlsSources *sources){
     native_owner_links_free(sources->owners);sources->owners=NULL;
@@ -162,7 +201,7 @@ static void host_tls_sources_clear(HostTlsSources *sources){
 static int host_tls_sources_new_lease(HostTlsSources *sources,HostTlsLease *lease){
     if(!lease)return 1;
     HostTlsLeaseLink *p=(HostTlsLeaseLink*)calloc(1,sizeof(*p));if(!p){sources->unknown=1;return 0;}
-    p->lease=lease;p->references=1;p->next=sources->leases;sources->leases=p;lease->references++;return 1;
+    p->lease=lease;p->references=1;p->next=sources->leases;sources->leases=p;InterlockedIncrement(&lease->references);return 1;
 }
 static int host_tls_sources_add(HostTlsSources *sources,OwnerLink *owners,HostTlsLease *lease,int unknown){
     // Only the fresh lease of this admitted API invocation is added here.
@@ -179,7 +218,7 @@ static int host_tls_sources_merge(HostTlsSources *to,const HostTlsSources *from)
      * values/read observations no longer duplicate the complete old chain. */
     if(to->leases==from->leases)return ready;
     for(HostTlsLeaseLink *p=from->leases;p;p=p->next)if(!to->leases||p==to->leases){
-        from->leases->references++;host_tls_links_drop(to->leases);to->leases=from->leases;return ready;}
+        InterlockedIncrement(&from->leases->references);host_tls_links_drop(to->leases);to->leases=from->leases;return ready;}
     for(HostTlsLeaseLink *p=to->leases;p;p=p->next)if(p==from->leases)return ready;
     /* Tail sharing may miss when two slots already contributed equivalent
      * lease identities through different nodes. Build one transient identity
@@ -233,10 +272,18 @@ static void host_tls_slot_schedule(HostTlsSlot *slot){
     if(host_tls_slots_tail)host_tls_slots_tail->activeNext=slot;else host_tls_active_slots=slot;
     host_tls_slots_tail=slot;host_tls_slot_count++;
 }
+static size_t host_tls_slot_bucket(int fls,DWORD index){
+    return ((size_t)index^(index>>10)^(fls?0x2abu:0))&(HOST_TLS_SLOT_BUCKETS-1);
+}
+static size_t host_tls_value_bucket(HostTlsSlot *slot,HostTlsThread *thread,HostTlsFiber *fiber){
+    uintptr_t context=(uintptr_t)(slot->fls?(void*)fiber:(void*)thread);
+    return ((context>>4)^(context>>13))&(HOST_TLS_VALUE_BUCKETS-1);
+}
 static void host_tls_slot_live(HostTlsSlot *slot,int live){
     slot->live=live;
-    if(live&&!slot->liveLink){slot->liveNext=host_tls_live_slots;slot->liveLink=&host_tls_live_slots;
-        if(host_tls_live_slots)host_tls_live_slots->liveLink=&slot->liveNext;host_tls_live_slots=slot;}
+    if(live&&!slot->liveLink){HostTlsSlot **bucket=&host_tls_live_slots[host_tls_slot_bucket(slot->fls,slot->index)];
+        slot->liveNext=*bucket;slot->liveLink=bucket;
+        if(*bucket)(*bucket)->liveLink=&slot->liveNext;*bucket=slot;}
     else if(!live&&slot->liveLink){*slot->liveLink=slot->liveNext;
         if(slot->liveNext)slot->liveNext->liveLink=slot->liveLink;slot->liveNext=NULL;slot->liveLink=NULL;}
 }
@@ -263,6 +310,7 @@ static HostTlsFiber *host_tls_fiber_current(void){
 static HostTlsThread *host_tls_thread_get(int restricted){
     HostTlsThread *thread=host_tls_thread_current();if(thread)return thread;
     thread=(HostTlsThread*)calloc(1,sizeof(*thread));if(!thread){SetLastError(ERROR_NOT_ENOUGH_MEMORY);return NULL;}
+    InitializeSRWLock(&thread->gate);
     /* The actual kernel-thread handle is the terminal witness. Thread IDs and
      * a JVM detach/ThreadEnd never retire a TLS value or its read receipt. */
     /* This leaf gate also spans external handle checks and their actual OS
@@ -285,16 +333,17 @@ static HostTlsThread *host_tls_thread_get(int restricted){
 static HostTlsFiber *host_tls_fiber_get(HostTlsThread *thread,int restricted){
     HostTlsFiber *fiber=host_tls_fiber_current();BOOL actual=IsThreadAFiber();void *identity=actual?GetCurrentFiber():NULL;
     if(fiber){
-        if(!host_tls_lock(restricted)){SetLastError(ERROR_BUSY);return NULL;}
+        AcquireSRWLockShared(&host_tls_records);AcquireSRWLockExclusive(&fiber->gate);
         if(actual){fiber->actualFiber=1;fiber->fiber=identity;}
         if(fiber->home!=thread)fiber->gap=1;
-        ReleaseSRWLockExclusive(&host_tls_records);
+        ReleaseSRWLockExclusive(&fiber->gate);ReleaseSRWLockShared(&host_tls_records);
         /* The sentinel can precede the user's still-running callbacks. The
          * same private FLS value still identifies that actual storage; ending
          * it does not invalidate an otherwise legal original FlsGet/Set. */
         return fiber;
     }
     fiber=(HostTlsFiber*)calloc(1,sizeof(*fiber));if(!fiber){SetLastError(ERROR_NOT_ENOUGH_MEMORY);return NULL;}
+    InitializeSRWLock(&fiber->gate);
     fiber->home=thread;fiber->actualFiber=actual;fiber->fiber=identity;
     /* An internal FLS value travels with the actual FLS storage, including a
      * migrated fiber. The OS callback ends that incarnation; a recycled fiber
@@ -322,6 +371,7 @@ static int host_tls_capture_detail(NativeThread *state,OwnerLink **owners,int *u
     DWORD incoming=GetLastError();HostTlsThread *thread=host_tls_thread_current();HostTlsFiber *fiber=host_tls_fiber_current();
     int ready=1;
     AcquireSRWLockShared(&host_tls_records);
+    host_tls_context_shared(thread,fiber);
     if(roots)*roots=(thread?((thread->ended?1:0)|(thread->gap?2:0)|(thread->observed.unknown?8:0)):0)
             |(fiber?((fiber->gap?4:0)|(fiber->observed.unknown?16:0)):0);
     /* A TLS value's opaque data history is not an unknown caller of every
@@ -334,6 +384,7 @@ static int host_tls_capture_detail(NativeThread *state,OwnerLink **owners,int *u
      * Its ended bit is not termination of the still-executing OS thread.
      * Migrated/deleted fibers retain their separate actual lifecycle gap. */
     if(fiber){ready=ready&&native_owner_merge(owners,fiber->observed.owners);if(unknown)*unknown|=fiber->gap;}
+    host_tls_context_shared_end(thread,fiber);
     ReleaseSRWLockShared(&host_tls_records);SetLastError(incoming);return ready;
 }
 static int host_tls_capture(NativeThread *state,OwnerLink **owners,int *unknown){return host_tls_capture_detail(state,owners,unknown,NULL);}
@@ -341,10 +392,10 @@ static int host_tls_capture(NativeThread *state,OwnerLink **owners,int *unknown)
  * A container can have an unknown/partial data history and still own complete
  * leases for some named contributors. Only those actual leases can discharge
  * a requested identity; bare OwnerLinks and partial leases cannot. Callers
- * hold host_tls_records, including publication of each new reference. */
+ * protect the actual source head; immutable tails retain atomic references. */
 static int host_tls_retain_known(HostTlsSources *retained,OwnerLink **missing,const HostTlsSources *from){
     for(HostTlsLeaseLink *p=from->leases;p&&*missing;p=p->next){HostTlsLease *lease=p->lease;
-        if(lease->unknown||!lease->complete||lease->releasing||lease->queued||lease->references<=0
+        if(lease->unknown||!lease->complete||lease->releasing||lease->queued||InterlockedCompareExchange(&lease->references,0,0)<=0
                 ||native_owner_stopped(lease->owners))continue;
         int needed=0;
         for(OwnerLink *actual=*missing;actual&&!needed;actual=actual->next)
@@ -375,13 +426,15 @@ static int host_tls_source_borrow(NativeThread *state,OwnerLink *owners,HostLibr
     /* This leaf never enters the VM or loader while held. Unknown history is
      * left on the original observations/slots for callback and retirement
      * decisions. The new lifetime token covers only an already-known request. */
-    AcquireSRWLockExclusive(&host_tls_records);
+    AcquireSRWLockShared(&host_tls_records);host_tls_context_shared(thread,fiber);
     ready=ready&&!thread->ended&&!thread->gap&&(!fiber||!fiber->gap)&&!native_owner_stopped(owners);
     if(ready)ready=host_tls_retain_known(&borrow->sources,&missing,&thread->observed);
     if(ready&&fiber)ready=host_tls_retain_known(&borrow->sources,&missing,&fiber->observed);
-    if(ready&&thread->activation)ready=host_tls_retain_slot_known(&borrow->sources,&missing,thread->activation->slot);
+    if(ready&&thread->activation){HostTlsSlot *slot=thread->activation->slot;
+        AcquireSRWLockShared(&slot->gate);ready=host_tls_retain_slot_known(&borrow->sources,&missing,slot);
+        ReleaseSRWLockShared(&slot->gate);}
     ready=ready&&borrow->sources.leases;
-    ReleaseSRWLockExclusive(&host_tls_records);
+    host_tls_context_shared_end(thread,fiber);ReleaseSRWLockShared(&host_tls_records);
     /* A B worker/load can carry a TLS receipt from A. Retain A's actual read
      * lease and borrow the remaining B sources from a real executing parent;
      * requiring one parent to own both would silently lose the A contribution. */
@@ -394,7 +447,7 @@ static int host_tls_source_borrow(NativeThread *state,OwnerLink *owners,HostLibr
     native_owner_links_free(missing);
     if(ready)ready=host_tls_cover(borrow->sources.owners,owners)&&!native_owner_stopped(borrow->sources.owners);
     if(ready)*token=borrow;else {
-        AcquireSRWLockExclusive(&host_tls_records);host_tls_sources_clear(&borrow->sources);ReleaseSRWLockExclusive(&host_tls_records);
+        AcquireSRWLockShared(&host_tls_records);host_tls_sources_clear(&borrow->sources);ReleaseSRWLockShared(&host_tls_records);
         host_module_load_drop(borrow->load);
         if(borrow->worker)host_thread_worker_load_drop(borrow->worker);
         if(borrow->tooling)native_thread_worker_heap_drop(borrow->tooling);free(borrow);
@@ -403,7 +456,7 @@ static int host_tls_source_borrow(NativeThread *state,OwnerLink *owners,HostLibr
 }
 static void host_tls_source_drop(void *token){
     if(!token)return;DWORD incoming=GetLastError();HostTlsBorrow *borrow=(HostTlsBorrow*)token;
-    AcquireSRWLockExclusive(&host_tls_records);host_tls_sources_clear(&borrow->sources);ReleaseSRWLockExclusive(&host_tls_records);
+    AcquireSRWLockShared(&host_tls_records);host_tls_sources_clear(&borrow->sources);ReleaseSRWLockShared(&host_tls_records);
     host_module_load_drop(borrow->load);
     if(borrow->worker)host_thread_worker_load_drop(borrow->worker);
     if(borrow->tooling)native_thread_worker_heap_drop(borrow->tooling);
@@ -437,10 +490,14 @@ static int host_tls_callback_sources(NativeThread *state,void *callback,OwnerLin
     if(!ready)SetLastError(error);return ready;
 }
 static HostTlsSlot *host_tls_slot_find(int fls,DWORD index){
-    for(HostTlsSlot *slot=host_tls_live_slots;slot;slot=slot->liveNext)if(slot->fls==fls&&slot->index==index)return slot;return NULL;
+    for(HostTlsSlot *slot=host_tls_live_slots[host_tls_slot_bucket(fls,index)];slot;slot=slot->liveNext)
+        if(slot->fls==fls&&slot->index==index)return slot;return NULL;
+}
+static HostTlsSlot *host_tls_slot_new(void){
+    HostTlsSlot *slot=(HostTlsSlot*)calloc(1,sizeof(*slot));if(slot)InitializeSRWLock(&slot->gate);return slot;
 }
 static HostTlsValue *host_tls_value_find(HostTlsSlot *slot,HostTlsThread *thread,HostTlsFiber *fiber){
-    for(HostTlsValue *value=slot->values;value;value=value->next)
+    for(HostTlsValue *value=slot->valueIndex[host_tls_value_bucket(slot,thread,fiber)];value;value=value->lookupNext)
         if(slot->fls?value->fiber==fiber:value->thread==thread)return value;return NULL;
 }
 static uint64_t host_tls_original(HostImport *entry,const uintptr_t *a,void *callback){
@@ -553,7 +610,7 @@ static uint64_t host_native_tls(HostImport *entry,void *caller,uintptr_t *argume
         }
         if(!error&&(allocating||setting||fls&&freeing)){
             if(kind==HOST_FLS_ALLOC&&arguments[0]){
-                slot=(HostTlsSlot*)calloc(1,sizeof(*slot));if(!slot)error=ERROR_NOT_ENOUGH_MEMORY;
+                slot=host_tls_slot_new();if(!slot)error=ERROR_NOT_ENOUGH_MEMORY;
                 else {slot->fls=1;slot->index=TLS_OUT_OF_INDEXES;slot->callback=(HostFlsCallback)arguments[0];
                     if(state&&state->heapCallback){
                         if(!native_thread_worker_heap_borrow(state,owners,(void*)slot->callback,&slot->providerAnchor,&slot->provider))error=GetLastError();
@@ -581,10 +638,10 @@ static uint64_t host_native_tls(HostImport *entry,void *caller,uintptr_t *argume
                 else if(!lease->complete&&native_has_producer(owners)){error=ERROR_INVALID_DATA;failure="source_lease";}}
         }
         if(!error){
-            if(!host_tls_lock(restricted))error=ERROR_BUSY;
-            else {
+            HostTlsAccess access={0};
+            host_tls_access_begin(&access,thread,fiber,fls,index,NULL,(setting||getting)&&!unknown&&(!lease||lease->complete));
                 if(allocating){
-                    if(!slot)slot=(HostTlsSlot*)calloc(1,sizeof(*slot));
+                    if(!slot)slot=host_tls_slot_new();
                     if(!slot)error=ERROR_NOT_ENOUGH_MEMORY;
                     else {slot->fls=fls;slot->observed=1;slot->index=TLS_OUT_OF_INDEXES;
                         slot->generation=++host_tls_generation;slot->busy=1;reserved=1;
@@ -595,7 +652,7 @@ static uint64_t host_native_tls(HostImport *entry,void *caller,uintptr_t *argume
                     slot=host_tls_slot_find(fls,index);
                     HostTlsSlot *callbackSlot=thread&&thread->activation?thread->activation->slot:NULL;
                     if(!slot&&callbackSlot&&callbackSlot->fls==fls&&callbackSlot->index==index)slot=callbackSlot;
-                    if(!slot){slot=(HostTlsSlot*)calloc(1,sizeof(*slot));
+                    if(!slot){slot=host_tls_slot_new();
                         if(!slot)error=ERROR_NOT_ENOUGH_MEMORY;
                         else {slot->fls=fls;slot->index=index;slot->generation=++host_tls_generation;
                             host_tls_slot_live(slot,1);slot->uncertain=slot->gap=1;slot->next=host_tls_slots;host_tls_slots=slot;published=1;}}
@@ -642,6 +699,8 @@ static uint64_t host_native_tls(HostImport *entry,void *caller,uintptr_t *argume
                                 if(value){
                                     value->thread=thread;value->fiber=fiber;value->slot=slot;value->revision=1;
                                     value->next=slot->values;slot->values=value;
+                                    size_t bucket=host_tls_value_bucket(slot,thread,fiber);
+                                    value->lookupNext=slot->valueIndex[bucket];slot->valueIndex[bucket]=value;
                                     if(fls){value->contextNext=fiber->values;fiber->values=value;
                                         if(fiber->valuesTail)fiber->valuesTail->workNext=value;else fiber->activeValues=value;
                                         fiber->valuesTail=value;fiber->valueCount++;}
@@ -688,25 +747,28 @@ static uint64_t host_native_tls(HostImport *entry,void *caller,uintptr_t *argume
                         }
                     }
                 }
-                ReleaseSRWLockExclusive(&host_tls_records);
-            }
+            host_tls_access_end(&access);
         }
         if(!error&&(native_owner_stopped(owners)||setting&&native_owner_stopped(prepared.owners)
                 ||getting&&native_owner_stopped(readOwners)))error=ERROR_ACCESS_DENIED;
         if(!error){SetLastError(incoming);called=1;result=host_tls_original(entry,arguments,slot?slot->adapter:NULL);
             error=GetLastError();returned=1;
-            success=allocating?(DWORD)result!=TLS_OUT_OF_INDEXES:getting?
-                    (kind==HOST_TLS_GET2?result!=0||slot->observed:
-                     kind==HOST_FLS_GET?result!=0||error==ERROR_SUCCESS||slot->observed&&!slot->uncertain:
-                     result!=0||error==ERROR_SUCCESS):result!=0;
+            success=allocating?(DWORD)result!=TLS_OUT_OF_INDEXES:!getting&&result!=0;
         }
     } __finally {
         DWORD interrupted=GetLastError();
         if(!called){refusal.site=failure;refusal.error=error?error:ERROR_INVALID_DATA;refusal.leaseComplete=lease?lease->complete:-1;
             refusal.unknown=unknown;refusal.producer=native_has_producer(owners)||refusal.callbackProducer;}
-        AcquireSRWLockExclusive(&host_tls_records);
+        HostTlsAccess access={0};
+        host_tls_access_begin(&access,thread,fiber,fls,index,slot,
+                (setting||getting)&&!unknown&&(!lease||lease->complete)&&slot!=NULL);
         if(!called){HostTlsSlot *actual=slot?slot:host_tls_slot_find(fls,index);if(actual)refusal.generation=actual->generation;}
         if(slot&&reserved){
+            /* uncertain is mutable across contexts; decide the original read
+             * outcome with this incarnation locked, before publishing it. */
+            if(getting&&returned)success=kind==HOST_TLS_GET2?result!=0||slot->observed:
+                    kind==HOST_FLS_GET?result!=0||error==ERROR_SUCCESS||slot->observed&&!slot->uncertain:
+                    result!=0||error==ERROR_SUCCESS;
             if(called&&!returned){slot->gap=slot->uncertain=1;if(value)value->uncertain=1;
                 if(value){value->revision++;value->retainedRevision=0;}
                 if(setting&&value){HostTlsSources before=value->sources;value->sources=prepared;prepared=before;value->sources.unknown=1;}
@@ -783,7 +845,7 @@ static uint64_t host_native_tls(HostImport *entry,void *caller,uintptr_t *argume
         if(slot&&published)host_tls_slot_schedule(slot);
         host_tls_sources_clear(&prepared);host_tls_sources_clear(&aggregation);
         if(contribution)free(contribution);
-        if(lease)host_tls_lease_drop(lease);ReleaseSRWLockExclusive(&host_tls_records);
+        if(lease)host_tls_lease_drop(lease);host_tls_access_end(&access);
         if(!called)host_tls_refused(&refusal);
         native_owner_links_free(owners);
         // Reads retain the old observation and introduce no zero-reference
@@ -803,10 +865,10 @@ static int host_tls_internal_handle(HANDLE handle){
     ReleaseSRWLockShared(&host_tls_records);return found;
 }
 static int host_tls_pending(void){
-    AcquireSRWLockShared(&host_tls_records);
+    AcquireSRWLockShared(&host_tls_records);AcquireSRWLockShared(&host_tls_lease_queue);
     int pending=host_tls_polling||host_tls_retired_leases||host_tls_thread_scan||host_tls_fiber_scan
             ||host_tls_slot_scan||host_tls_cleanup_retry;
-    ReleaseSRWLockShared(&host_tls_records);return pending;
+    ReleaseSRWLockShared(&host_tls_lease_queue);ReleaseSRWLockShared(&host_tls_records);return pending;
 }
 static void host_tls_values_reap(HostTlsValue **head,HostTlsValue **tail,SIZE_T *count,int fls){
     SIZE_T limit=*count<32?*count:32;
@@ -923,12 +985,12 @@ static void host_tls_reap(JNIEnv **environment){
     }
     if(!*environment)return;env=*environment;
     for(unsigned n=0;n<32;n++){HostTlsLease *lease=NULL;
-        AcquireSRWLockExclusive(&host_tls_records);
+        AcquireSRWLockExclusive(&host_tls_records);AcquireSRWLockExclusive(&host_tls_lease_queue);
         lease=host_tls_retired_leases;
         if(lease){host_tls_retired_leases=lease->next;if(!host_tls_retired_leases)host_tls_retired_tail=NULL;
             lease->next=NULL;lease->queued=0;
-            if(lease->references||lease->releasing)lease=NULL;else lease->releasing=1;}
-        ReleaseSRWLockExclusive(&host_tls_records);if(!lease)break;
+            if(InterlockedCompareExchange(&lease->references,0,0)||lease->releasing)lease=NULL;else lease->releasing=1;}
+        ReleaseSRWLockExclusive(&host_tls_lease_queue);ReleaseSRWLockExclusive(&host_tls_records);if(!lease)break;
         if(lease->strong)native_original.DeleteGlobalRef(env,lease->strong);
         host_module_load_drop(lease->load);
         if(lease->worker)host_thread_worker_load_drop(lease->worker);
@@ -936,9 +998,9 @@ static void host_tls_reap(JNIEnv **environment){
         if(lease->tls)host_tls_source_drop(lease->tls);
         native_owner_links_free(lease->owners);free(lease);
     }
-    AcquireSRWLockShared(&host_tls_records);
+    AcquireSRWLockShared(&host_tls_records);AcquireSRWLockShared(&host_tls_lease_queue);
     int more=host_tls_thread_scan||host_tls_fiber_scan||host_tls_slot_scan||host_tls_retired_leases;
-    ReleaseSRWLockShared(&host_tls_records);
+    ReleaseSRWLockShared(&host_tls_lease_queue);ReleaseSRWLockShared(&host_tls_records);
     if(more)native_thread_worker_wake();
 }
 static int host_tls_owner_matches(OwnerLink *head,const Owner *selected,int all){
@@ -948,7 +1010,10 @@ static int host_tls_state(JNIEnv *env,jobject module,jlong *values){
     int all=module==NULL;Owner *selected=all?NULL:native_owner_published(env,module);
     if(native_original.ExceptionCheck(env))return 0;
     if(!all&&!selected)return 1;
-    AcquireSRWLockShared(&host_tls_records);
+    /* Reporting spans all contexts and slot histories, unlike an ordinary
+     * Get/Set. Retain one coherent retirement view without locking arbitrary
+     * context/slot pairs in an order opposite to the access path. */
+    AcquireSRWLockExclusive(&host_tls_records);
     for(HostTlsSlot *slot=host_tls_slots;slot;slot=slot->next){
         int matches=host_tls_owner_matches(slot->aggregate.owners,selected,all),retained=0;
         for(HostTlsContribution *p=slot->contributions;p;p=p->next){
@@ -970,5 +1035,5 @@ static int host_tls_state(JNIEnv *env,jobject module,jlong *values){
     for(HostTlsFiber *fiber=host_tls_fibers;fiber;fiber=fiber->next)
         if(host_tls_owner_matches(fiber->observed.owners,selected,all)){
             if(fiber->observed.leases)values[36]++;if(fiber->gap||fiber->observed.unknown||fiber->observed.partial)values[35]++;}
-    ReleaseSRWLockShared(&host_tls_records);return 1;
+    ReleaseSRWLockExclusive(&host_tls_records);return 1;
 }

@@ -10,30 +10,51 @@ public final class BackingBridge {
     public static final Object UNHANDLED=new Object();
     record Policy(MethodHandle known,MethodHandle element,MethodHandle array,MethodHandle offset,MethodHandle memory,MethodHandle revision) { }
     private static volatile Policy policy;
+    private static boolean adaptersLinked;
     private static final ThreadLocal<Boolean> POLICY_CALLBACK=new ThreadLocal<>();
     // Keep one entry per participating thread; inactive state retains no business object.
     private static void restorePolicyCallback(Boolean previous){POLICY_CALLBACK.set(previous==Boolean.TRUE);}
     private BackingBridge() { }
-    static void install(MethodHandle known,MethodHandle element,MethodHandle array,MethodHandle offset,MethodHandle memory,MethodHandle revision) {
-        policy=new Policy(known.asType(MethodType.methodType(boolean.class,Object.class)),
+    static synchronized void install(MethodHandle known,MethodHandle element,MethodHandle array,MethodHandle offset,MethodHandle memory,MethodHandle revision) {
+        Policy next=new Policy(known.asType(MethodType.methodType(boolean.class,Object.class)),
                 element.asType(MethodType.methodType(boolean.class,Object.class,Object.class,Object.class)),
                 array.asType(MethodType.methodType(boolean.class,Object.class,int.class,Object.class)),
                 offset.asType(MethodType.methodType(boolean.class,Object.class,long.class,Object.class)),
                 memory.asType(MethodType.methodType(boolean.class,Object.class,long.class,long.class)),
                 revision.asType(MethodType.methodType(long.class,Object.class)));
+        prepareAdapters();policy=next;
     }
+    /** Resolve these exact invokeExact sites before publishing a callback that can reenter them. */
+    static synchronized void prepareAdapters(){
+        if(adaptersLinked)return;
+        try{
+            callKnown(MethodHandles.empty(MethodType.methodType(boolean.class,Object.class)),null);
+            callElement(MethodHandles.empty(MethodType.methodType(boolean.class,Object.class,Object.class,Object.class)),null,null,null);
+            callArray(MethodHandles.empty(MethodType.methodType(boolean.class,Object.class,int.class,Object.class)),null,0,null);
+            callOffset(MethodHandles.empty(MethodType.methodType(boolean.class,Object.class,long.class,Object.class)),null,0L,null);
+            callMemory(MethodHandles.empty(MethodType.methodType(boolean.class,Object.class,long.class,long.class)),null,0L,0L);
+            callRevision(MethodHandles.empty(MethodType.methodType(long.class,Object.class)),null);
+        }catch(Throwable failure){throw new IllegalStateException("BACKING_ADAPTER_LINKAGE_FAILED",failure);}
+        adaptersLinked=true;
+    }
+    private static boolean callKnown(MethodHandle callback,Object value)throws Throwable{return (boolean)callback.invokeExact(value);}
+    private static boolean callElement(MethodHandle callback,Object receiver,Object prior,Object next)throws Throwable{return (boolean)callback.invokeExact(receiver,prior,next);}
+    private static boolean callArray(MethodHandle callback,Object array,int index,Object value)throws Throwable{return (boolean)callback.invokeExact(array,index,value);}
+    private static boolean callOffset(MethodHandle callback,Object receiver,long offset,Object value)throws Throwable{return (boolean)callback.invokeExact(receiver,offset,value);}
+    private static boolean callMemory(MethodHandle callback,Object receiver,long offset,long length)throws Throwable{return (boolean)callback.invokeExact(receiver,offset,length);}
+    private static long callRevision(MethodHandle callback,Object value)throws Throwable{return (long)callback.invokeExact(value);}
     static Policy registration(){return policy;}
     static long receiptRevision(Policy registration,Object value){
         if(registration==null)return 0;
         Boolean active=POLICY_CALLBACK.get();POLICY_CALLBACK.set(true);
-        try{return (long)registration.revision.invokeExact(value);}catch(Throwable e){throw new IllegalStateException("BACKING_REVISION",e);}
+        try{return callRevision(registration.revision,value);}catch(Throwable e){throw new IllegalStateException("BACKING_REVISION",e);}
         finally{restorePolicyCallback(active);}
     }
     static boolean unchanged(Policy registration,long revision){return revision>=0&&registration==policy&&revision==receiptRevision(registration,null)&&registration==policy;}
     public static boolean offsetAllowed(Object receiver,long offset,Object value) {
         Policy current=policy;if(current==null)return true;
         Boolean active=POLICY_CALLBACK.get();POLICY_CALLBACK.set(true);
-        try {return !(boolean)current.offset.invokeExact(receiver,offset,value);}catch(Throwable e){throw new IllegalStateException("BACKING_OFFSET_GUARD",e);}
+        try {return !callOffset(current.offset,receiver,offset,value);}catch(Throwable e){throw new IllegalStateException("BACKING_OFFSET_GUARD",e);}
         finally {restorePolicyCallback(active);}
     }
     public static boolean arrayAllowed(Object array,int index,Object value) {
@@ -43,7 +64,7 @@ public final class BackingBridge {
         if(!ControlBridge.arrayWriteAllowed(array,index,value))return false;
         Policy current=policy;if(current==null)return true;
         Boolean active=POLICY_CALLBACK.get();POLICY_CALLBACK.set(true);
-        try {return !(boolean)current.array.invokeExact(array,index,value);}catch(Throwable e){throw new IllegalStateException("BACKING_ARRAY_GUARD",e);}
+        try {return !callArray(current.array,array,index,value);}catch(Throwable e){throw new IllegalStateException("BACKING_ARRAY_GUARD",e);}
         finally {restorePolicyCallback(active);}
     }
     /** 0 denies the store, 1 requires the existing value checks, 2 permits this bulk store. */
@@ -57,9 +78,13 @@ public final class BackingBridge {
     static boolean known(Object value) {
         if(ControlBridge.controlled(value))return true;
         if(value!=null&&value.getClass().isArray()&&!ControlBridge.arrayWriteAllowed(value))return true;
+        return registeredBacking(value);
+    }
+    /** Exact live backing lookup after the caller already checked control/stop identity. */
+    static boolean registeredBacking(Object value) {
         Policy current=policy;if(current==null)return false;
         Boolean active=POLICY_CALLBACK.get();POLICY_CALLBACK.set(true);
-        try {return (boolean)current.known.invokeExact(value);}catch(Throwable e){throw new IllegalStateException("BACKING_LOOKUP",e);}
+        try {return callKnown(current.known,value);}catch(Throwable e){throw new IllegalStateException("BACKING_LOOKUP",e);}
         finally {restorePolicyCallback(active);}
     }
     static boolean nativePointerAllowed(Object array){
@@ -76,7 +101,7 @@ public final class BackingBridge {
         if(!ControlBridge.controlMutationAllowed(container))return true;
         Policy current=policy;if(current==null)return false;
         Boolean active=POLICY_CALLBACK.get();POLICY_CALLBACK.set(true);
-        try {return (boolean)current.element.invokeExact(container,prior,next);}catch(Throwable e){throw new IllegalStateException("BACKING_ELEMENT_GUARD",e);}
+        try {return callElement(current.element,container,prior,next);}catch(Throwable e){throw new IllegalStateException("BACKING_ELEMENT_GUARD",e);}
         finally {restorePolicyCallback(active);}
     }
     public static boolean incomingAllowed(Object receiver,Object value) {return !deny(receiver,null,value);}
@@ -86,8 +111,8 @@ public final class BackingBridge {
         if(!ControlBridge.controlMutationAllowed(receiver))return false;
         Policy current=policy;if(current==null)return true;
         Boolean active=POLICY_CALLBACK.get();POLICY_CALLBACK.set(true);
-        try{return !(boolean)current.element.invokeExact(receiver,(Object)null,value)
-                &&(key==value||!(boolean)current.element.invokeExact(receiver,(Object)null,key));}
+        try{return !callElement(current.element,receiver,null,value)
+                &&(key==value||!callElement(current.element,receiver,null,key));}
         catch(Throwable failure){throw new IllegalStateException("BACKING_ELEMENT_GUARD",failure);}
         finally{restorePolicyCallback(active);}
     }
@@ -102,45 +127,52 @@ public final class BackingBridge {
         int length=Array.getLength(array);if(index<0||index>=length)throw new ArrayIndexOutOfBoundsException(index);
         Class<?> component=array.getClass().getComponentType();
         if(!component.isPrimitive()&&value!=null&&!component.isInstance(value))throw new ArrayStoreException(value.getClass().getName());
+        if(component.isPrimitive()&&ControlBridge.ordinaryPrimitiveArray(array)){Array.set(array,index,value);return;}
         Object gate=arrayMutation(array,index,1);
         boolean written=false;try {if(arrayAllowed(array,index,value)){Array.set(array,index,value);written=true;}}finally {ControlBridge.finishFieldMutation(gate,written);}
     }
     public static void intStore(Object array,int index,int value) {
         int[] values=(int[])array;int prior=values[index];int next=(int)value;
+        if(ControlBridge.ordinaryPrimitiveArray(array)){values[index]=next;return;}
         Object gate=arrayMutation(array,index,1);
         boolean written=false;try {if(arrayAllowed(array,index,Integer.valueOf(next))){values[index]=next;written=true;}}finally {ControlBridge.finishFieldMutation(gate,written);}
     }
     public static void longStore(Object array,int index,long value) {
         long[] values=(long[])array;long prior=values[index];long next=(long)value;
+        if(ControlBridge.ordinaryPrimitiveArray(array)){values[index]=next;return;}
         Object gate=arrayMutation(array,index,1);
         boolean written=false;try {if(arrayAllowed(array,index,Long.valueOf(next))){values[index]=next;written=true;}}finally {ControlBridge.finishFieldMutation(gate,written);}
     }
     public static void floatStore(Object array,int index,float value) {
         float[] values=(float[])array;float prior=values[index];float next=(float)value;
+        if(ControlBridge.ordinaryPrimitiveArray(array)){values[index]=next;return;}
         Object gate=arrayMutation(array,index,1);
         boolean written=false;try {if(arrayAllowed(array,index,Float.valueOf(next))){values[index]=next;written=true;}}finally {ControlBridge.finishFieldMutation(gate,written);}
     }
     public static void doubleStore(Object array,int index,double value) {
         double[] values=(double[])array;double prior=values[index];double next=(double)value;
+        if(ControlBridge.ordinaryPrimitiveArray(array)){values[index]=next;return;}
         Object gate=arrayMutation(array,index,1);
         boolean written=false;try {if(arrayAllowed(array,index,Double.valueOf(next))){values[index]=next;written=true;}}finally {ControlBridge.finishFieldMutation(gate,written);}
     }
     public static void charStore(Object array,int index,int value) {
         char[] values=(char[])array;char prior=values[index];char next=(char)value;
+        if(ControlBridge.ordinaryPrimitiveArray(array)){values[index]=next;return;}
         Object gate=arrayMutation(array,index,1);
         boolean written=false;try {if(arrayAllowed(array,index,Character.valueOf(next))){values[index]=next;written=true;}}finally {ControlBridge.finishFieldMutation(gate,written);}
     }
     public static void shortStore(Object array,int index,int value) {
         short[] values=(short[])array;short prior=values[index];short next=(short)value;
+        if(ControlBridge.ordinaryPrimitiveArray(array)){values[index]=next;return;}
         Object gate=arrayMutation(array,index,1);
         boolean written=false;try {if(arrayAllowed(array,index,Short.valueOf(next))){values[index]=next;written=true;}}finally {ControlBridge.finishFieldMutation(gate,written);}
     }
     public static void byteStore(Object array,int index,int value) {
         if(array instanceof byte[] bytes&&FrameworkBuffers.scratch(bytes)){bytes[index]=(byte)value;return;}
         if(array instanceof boolean[] values) {boolean prior=values[index],next=(value&1)!=0;
-            Object gate=arrayMutation(array,index,1);boolean written=false;try {if(arrayAllowed(array,index,Boolean.valueOf(next))){values[index]=next;written=true;}}finally {ControlBridge.finishFieldMutation(gate,written);}}
+            if(ControlBridge.ordinaryPrimitiveArray(array)){values[index]=next;return;} Object gate=arrayMutation(array,index,1);boolean written=false;try {if(arrayAllowed(array,index,Boolean.valueOf(next))){values[index]=next;written=true;}}finally {ControlBridge.finishFieldMutation(gate,written);}}
         else {byte[] values=(byte[])array;byte prior=values[index],next=(byte)value;
-            Object gate=arrayMutation(array,index,1);boolean written=false;try {if(arrayAllowed(array,index,Byte.valueOf(next))){values[index]=next;written=true;}}finally {ControlBridge.finishFieldMutation(gate,written);}}
+            if(ControlBridge.ordinaryPrimitiveArray(array)){values[index]=next;return;} Object gate=arrayMutation(array,index,1);boolean written=false;try {if(arrayAllowed(array,index,Byte.valueOf(next))){values[index]=next;written=true;}}finally {ControlBridge.finishFieldMutation(gate,written);}}
     }
     public static void copy(Object source,int from,Object target,int to,int count) {
         if(source==null||target==null)throw new NullPointerException();
@@ -320,6 +352,7 @@ public final class BackingBridge {
         int length=Array.getLength(array);if(index<0||index>=length)throw new ArrayIndexOutOfBoundsException(index);
         Class<?> component=array.getClass().getComponentType();
         if(!component.isPrimitive()&&value!=null&&!component.isInstance(value))throw new ArrayStoreException(value.getClass().getName());
+        if(component.isPrimitive()&&ControlBridge.ordinaryPrimitiveArray(array))return true;
         return arrayAllowed(array,index,value);
     }
     public static boolean memoryWriteAllowed(Object receiver,long offset,long length) {
@@ -327,7 +360,7 @@ public final class BackingBridge {
         if(!ControlBridge.controlMutationAllowed(receiver))return false;
         Policy current=policy;if(current==null)return true;
         Boolean active=POLICY_CALLBACK.get();POLICY_CALLBACK.set(true);
-        try {return !(boolean)current.memory.invokeExact(receiver,offset,length);}catch(Throwable e){throw new IllegalStateException("BACKING_MEMORY_GUARD",e);}
+        try {return !callMemory(current.memory,receiver,offset,length);}catch(Throwable e){throw new IllegalStateException("BACKING_MEMORY_GUARD",e);}
         finally {restorePolicyCallback(active);}
     }
     public static MethodHandle wrapArraySetter(MethodHandle original) {

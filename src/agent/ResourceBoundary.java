@@ -182,7 +182,7 @@ final class ResourceBoundary {
                 for(AbstractInsnNode instruction:method.instructions.toArray())if(instruction.getOpcode()==Opcodes.RETURN){
                     InsnList code=new InsnList();code.add(new VarInsnNode(Opcodes.ALOAD,0));code.add(new MethodInsnNode(Opcodes.INVOKESTATIC,BRIDGE,"fileChannelClosed","(Ljava/lang/Object;)V",false));method.instructions.insertBefore(instruction,code);closed=true;
                 }
-            }else if((method.access&Opcodes.ACC_PUBLIC)!=0&&(method.access&(Opcodes.ACC_STATIC|Opcodes.ACC_NATIVE|Opcodes.ACC_ABSTRACT))==0){scopedFile(node.name,method);BufferBoundary.scope(node.name,method);}
+            }else if((method.access&Opcodes.ACC_PUBLIC)!=0&&(method.access&(Opcodes.ACC_STATIC|Opcodes.ACC_NATIVE|Opcodes.ACC_ABSTRACT))==0){scopedFile(node.name,method);fileBufferScope(node.name,method);}
             if(method.name.equals("mapInternal")&&Type.getReturnType(method.desc).getDescriptor().equals("Lsun/nio/ch/FileChannelImpl$Unmapper;")){
                 for(AbstractInsnNode at:method.instructions.toArray())if(at.getOpcode()==Opcodes.ARETURN){
                     InsnList code=new InsnList();code.add(new InsnNode(Opcodes.DUP));code.add(new VarInsnNode(Opcodes.ALOAD,0));
@@ -252,5 +252,38 @@ final class ResourceBoundary {
         }
         if(!constructor||!creation||!cleaner||!close)throw new IllegalStateException("PROCESS_ORIGINAL_LIFETIME_LAYOUT_UNAVAILABLE");
         ControlClassWriter writer=new ControlClassWriter(loader,node);node.accept(writer);return writer.toByteArray();
+    }
+    static void fileBufferScope(String owner,MethodNode method){
+        int token=method.maxLocals++,failure=method.maxLocals++;
+        LabelNode start=new LabelNode(),end=new LabelNode(),handler=new LabelNode();
+        InsnList entry=new InsnList();entry.add(new VarInsnNode(Opcodes.ALOAD,0));
+        Type[] arguments=Type.getArgumentTypes(method.desc);
+        if(arguments.length!=0){entry.add(new LdcInsnNode(arguments.length));entry.add(new TypeInsnNode(Opcodes.ANEWARRAY,"java/lang/Object"));}
+        int slot=1,index=0;
+        for(Type argument:arguments){
+            entry.add(new InsnNode(Opcodes.DUP));entry.add(new LdcInsnNode(index++));entry.add(new VarInsnNode(argument.getOpcode(Opcodes.ILOAD),slot));
+            if(argument.getSort()!=Type.OBJECT&&argument.getSort()!=Type.ARRAY){
+                String box=switch(argument.getSort()){case Type.BOOLEAN->"Boolean";case Type.BYTE->"Byte";case Type.CHAR->"Character";case Type.SHORT->"Short";
+                    case Type.INT->"Integer";case Type.LONG->"Long";case Type.FLOAT->"Float";case Type.DOUBLE->"Double";default->throw new IllegalArgumentException("BUFFER_ARGUMENT_TYPE");};
+                entry.add(new MethodInsnNode(Opcodes.INVOKESTATIC,"java/lang/"+box,"valueOf","("+argument.getDescriptor()+")Ljava/lang/"+box+";",false));
+            }
+            entry.add(new InsnNode(Opcodes.AASTORE));
+            slot+=argument.getSize();
+        }
+        entry.add(new LdcInsnNode(Type.getObjectType(owner)));entry.add(new LdcInsnNode(method.name));
+        String descriptor=arguments.length==0?"(Ljava/lang/Object;Ljava/lang/Class;Ljava/lang/String;)Ljava/lang/Object;"
+                :"(Ljava/lang/Object;[Ljava/lang/Object;Ljava/lang/Class;Ljava/lang/String;)Ljava/lang/Object;";
+        entry.add(new MethodInsnNode(Opcodes.INVOKESTATIC,BRIDGE,"bufferOperation",descriptor,false));
+        entry.add(new VarInsnNode(Opcodes.ASTORE,token));entry.add(start);
+        for(AbstractInsnNode at:method.instructions.toArray())if(at.getOpcode()>=Opcodes.IRETURN&&at.getOpcode()<=Opcodes.RETURN)method.instructions.insertBefore(at,fileBufferFinish(token));
+        method.instructions.insert(entry);method.instructions.add(end);method.instructions.add(handler);method.instructions.add(new VarInsnNode(Opcodes.ASTORE,failure));
+        method.instructions.add(new VarInsnNode(Opcodes.ALOAD,token));method.instructions.add(new VarInsnNode(Opcodes.ALOAD,failure));
+        method.instructions.add(new MethodInsnNode(Opcodes.INVOKESTATIC,BRIDGE,"bufferOperationFailed","(Ljava/lang/Object;Ljava/lang/Throwable;)V",false));
+        method.instructions.add(new VarInsnNode(Opcodes.ALOAD,failure));method.instructions.add(new InsnNode(Opcodes.ATHROW));
+        method.tryCatchBlocks.add(new TryCatchBlockNode(start,end,handler,"java/lang/Throwable"));
+    }
+    private static InsnList fileBufferFinish(int token){
+        InsnList code=new InsnList();code.add(new VarInsnNode(Opcodes.ALOAD,token));
+        code.add(new MethodInsnNode(Opcodes.INVOKESTATIC,BRIDGE,"bufferOperationFinished","(Ljava/lang/Object;)V",false));return code;
     }
 }

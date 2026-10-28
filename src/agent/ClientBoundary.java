@@ -115,9 +115,9 @@ final class ClientBoundary {
             if(name.equals(TOAST_INSTANCE)&&member(method,"render","m_280442_","(ILnet/minecraft/client/gui/GuiGraphics;)Z")){toastLifecycle(method,"toastDrawing",-1,false);changed=true;}
             if(name.equals(BUILDER)){
                 if(member(method,"begin","m_166779_",BEGIN)){afterVoid(method,"verticesBegin");changed=true;}
-                if(member(method,"ensureCapacity","m_85722_","(I)V")){afterVoid(method,"verticesCapacityChanged");changed=true;}
+                if(member(method,"ensureCapacity","m_85722_","(I)V")){capacityWrites(node,method);changed=true;}
                 if(member(method,"setQuadSorting","m_277127_","(Lcom/mojang/blaze3d/vertex/VertexSorting;)V")){afterVoid(method,"verticesSortingChanged");changed=true;}
-                if(member(method,"endVertex","m_5752_","()V")||member(method,"putBulkData","putBulkData","(Ljava/nio/ByteBuffer;)V")){vertices(method,args.length==1?vars[0]:-1);changed=true;}
+                if(member(method,"endVertex","m_5752_","()V")||member(method,"putBulkData","putBulkData","(Ljava/nio/ByteBuffer;)V")){vertices(node,method,args.length==1?vars[0]:-1);changed=true;}
                 if(member(method,"storeRenderedBuffer","m_231177_","()"+RENDERED)){afterObject(method,"verticesStored");changed=true;}
                 if(member(method,"discard","m_85730_","()V")){afterVoid(method,"verticesDiscarded");changed=true;}
                 if(member(method,"getSortState","m_166770_","()"+SORTING)){afterObject(method,"verticesSortState");changed=true;}
@@ -403,9 +403,34 @@ final class ClientBoundary {
     private static int[] locals(MethodNode method,Type[] args){int[] vars=new int[args.length];int next=(method.access&Opcodes.ACC_STATIC)==0?1:0;for(int i=0;i<args.length;i++){vars[i]=next;next+=args[i].getSize();}return vars;}
     private static void call(InsnList code,String name,String descriptor){code.add(new MethodInsnNode(Opcodes.INVOKESTATIC,BRIDGE,name,descriptor,false));}
     private static void afterVoid(MethodNode method,String name){for(AbstractInsnNode at:method.instructions.toArray())if(at.getOpcode()==Opcodes.RETURN){InsnList hook=new InsnList();hook.add(new VarInsnNode(Opcodes.ALOAD,0));call(hook,name,"(Ljava/lang/Object;)V");method.instructions.insertBefore(at,hook);}}
+    private static void capacityWrites(ClassNode owner,MethodNode method){
+        java.util.Set<String> storage=new java.util.HashSet<>();
+        for(AbstractInsnNode at:method.instructions.toArray())if(at instanceof FieldInsnNode field&&field.getOpcode()==Opcodes.PUTFIELD&&field.owner.equals(owner.name)&&field.desc.equals("Ljava/nio/ByteBuffer;"))storage.add(field.name);
+        if(storage.size()!=1)throw new IllegalStateException("GPU_CAPACITY_STORAGE_LAYOUT_CHANGED");
+        // ensureCapacity is called after every vertex. Notify on the actual storage
+        // replacement, preserving realloc validation without work on its no-op branch.
+        for(AbstractInsnNode at:method.instructions.toArray())if(at instanceof FieldInsnNode field&&field.getOpcode()==Opcodes.PUTFIELD&&field.owner.equals(owner.name)&&storage.contains(field.name)&&field.desc.equals("Ljava/nio/ByteBuffer;")){
+            InsnList hook=new InsnList();hook.add(new VarInsnNode(Opcodes.ALOAD,0));call(hook,"verticesCapacityChanged","(Ljava/lang/Object;)V");method.instructions.insert(at,hook);
+        }
+    }
     private static void afterObject(MethodNode method,String name){for(AbstractInsnNode at:method.instructions.toArray())if(at.getOpcode()==Opcodes.ARETURN){InsnList hook=new InsnList();hook.add(new InsnNode(Opcodes.DUP));hook.add(new VarInsnNode(Opcodes.ALOAD,0));hook.add(new InsnNode(Opcodes.SWAP));call(hook,name,"(Ljava/lang/Object;Ljava/lang/Object;)V");method.instructions.insertBefore(at,hook);}}
-    private static void vertices(MethodNode method,int bulk){int token=method.maxLocals++;InsnList entry=new InsnList();entry.add(new VarInsnNode(Opcodes.ALOAD,0));if(bulk<0)entry.add(new InsnNode(Opcodes.ACONST_NULL));else entry.add(new VarInsnNode(Opcodes.ALOAD,bulk));call(entry,"verticesEntering","(Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;");entry.add(new VarInsnNode(Opcodes.ASTORE,token));method.instructions.insert(entry);
-        for(AbstractInsnNode at:method.instructions.toArray())if(at.getOpcode()==Opcodes.RETURN){InsnList exit=new InsnList();exit.add(new VarInsnNode(Opcodes.ALOAD,0));exit.add(new VarInsnNode(Opcodes.ALOAD,token));call(exit,"verticesCompleted","(Ljava/lang/Object;Ljava/lang/Object;)V");method.instructions.insertBefore(at,exit);}}
+    private static String vertexCounter(ClassNode node){
+        java.util.Set<String> fields=new java.util.HashSet<>();
+        for(MethodNode method:node.methods)if(member(method,"endVertex","m_5752_","()V")){
+            AbstractInsnNode previous=null,before=null;
+            for(AbstractInsnNode at:method.instructions)if(at.getOpcode()>=0){
+                if(at.getOpcode()==Opcodes.IADD&&previous!=null&&previous.getOpcode()==Opcodes.ICONST_1&&before instanceof FieldInsnNode field&&field.getOpcode()==Opcodes.GETFIELD&&field.owner.equals(node.name)&&field.desc.equals("I"))fields.add(field.name);
+                before=previous;previous=at;
+            }
+        }
+        if(fields.size()!=1)throw new IllegalStateException("GPU_VERTEX_COUNTER_LAYOUT_CHANGED");return fields.iterator().next();
+    }
+    private static void vertices(ClassNode node,MethodNode method,int bulk){
+        String count=vertexCounter(node);int token=method.maxLocals++,failure=method.maxLocals++;LabelNode start=new LabelNode(),end=new LabelNode(),handler=new LabelNode();InsnList entry=new InsnList();entry.add(new VarInsnNode(Opcodes.ALOAD,0));if(bulk<0)entry.add(new InsnNode(Opcodes.ACONST_NULL));else entry.add(new VarInsnNode(Opcodes.ALOAD,bulk));
+        entry.add(new VarInsnNode(Opcodes.ALOAD,0));entry.add(new FieldInsnNode(Opcodes.GETFIELD,node.name,count,"I"));call(entry,"verticesEntering","(Ljava/lang/Object;Ljava/lang/Object;I)Ljava/lang/Object;");entry.add(new VarInsnNode(Opcodes.ASTORE,token));entry.add(start);method.instructions.insert(entry);
+        for(AbstractInsnNode at:method.instructions.toArray())if(at.getOpcode()==Opcodes.RETURN){InsnList exit=new InsnList();exit.add(new VarInsnNode(Opcodes.ALOAD,0));exit.add(new VarInsnNode(Opcodes.ALOAD,token));exit.add(new VarInsnNode(Opcodes.ALOAD,0));exit.add(new FieldInsnNode(Opcodes.GETFIELD,node.name,count,"I"));call(exit,"verticesCompleted","(Ljava/lang/Object;Ljava/lang/Object;I)V");method.instructions.insertBefore(at,exit);}
+        method.instructions.add(end);method.instructions.add(handler);method.instructions.add(new VarInsnNode(Opcodes.ASTORE,failure));method.instructions.add(new VarInsnNode(Opcodes.ALOAD,0));method.instructions.add(new VarInsnNode(Opcodes.ALOAD,token));method.instructions.add(new VarInsnNode(Opcodes.ALOAD,0));method.instructions.add(new FieldInsnNode(Opcodes.GETFIELD,node.name,count,"I"));call(method.instructions,"verticesFailed","(Ljava/lang/Object;Ljava/lang/Object;I)V");method.instructions.add(new VarInsnNode(Opcodes.ALOAD,failure));method.instructions.add(new InsnNode(Opcodes.ATHROW));method.tryCatchBlocks.add(new TryCatchBlockNode(start,end,handler,"java/lang/Throwable"));method.maxStack=Math.max(method.maxStack,4);
+    }
     private static void upload(MethodNode method,int rendered){int token=method.maxLocals++;
         for(AbstractInsnNode at:method.instructions.toArray())if(at.getOpcode()==Opcodes.RETURN){InsnList exit=new InsnList();exit.add(new VarInsnNode(Opcodes.ALOAD,0));exit.add(new VarInsnNode(Opcodes.ALOAD,token));call(exit,"verticesUploaded","(Ljava/lang/Object;Ljava/lang/Object;)V");method.instructions.insertBefore(at,exit);}
         LabelNode allowed=new LabelNode();InsnList entry=new InsnList();entry.add(new VarInsnNode(Opcodes.ALOAD,0));entry.add(new VarInsnNode(Opcodes.ALOAD,rendered));call(entry,"verticesUploading","(Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;");entry.add(new VarInsnNode(Opcodes.ASTORE,token));entry.add(new VarInsnNode(Opcodes.ALOAD,token));entry.add(new FieldInsnNode(Opcodes.GETSTATIC,"java/lang/Boolean","FALSE","Ljava/lang/Boolean;"));entry.add(new JumpInsnNode(Opcodes.IF_ACMPNE,allowed));entry.add(new InsnNode(Opcodes.RETURN));entry.add(allowed);method.instructions.insert(entry);}

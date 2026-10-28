@@ -75,6 +75,7 @@ public final class ClientBridge {
     private static final GpuImages GPU=new GpuImages();
     private static final List<Role> ROLES=new ArrayList<>();
     private static final Set<Module> REQUESTED=Collections.newSetFromMap(new IdentityHashMap<>());
+    private static volatile boolean gpuRequestsActive;
     private static final ThreadLocal<Scope> CURRENT=new ThreadLocal<>();
     private static final ThreadLocal<Object> RELEASING=new ThreadLocal<>();
     private static final Set<Scope> ACTIVE=Collections.newSetFromMap(new IdentityHashMap<>());
@@ -1190,8 +1191,9 @@ public final class ClientBridge {
         }
     }
     public static void verticesBegin(Object builder){GPU.begin(builder,boundary());}
-    public static Object verticesEntering(Object builder,Object bulk){return GPU.enter(builder,bulk,boundary());}
-    public static void verticesCompleted(Object builder,Object token){GPU.complete(builder,token,boundary());}
+    public static Object verticesEntering(Object builder,Object bulk,int count){return GPU.enter(builder,bulk,count);}
+    public static void verticesCompleted(Object builder,Object token,int count){GPU.complete(builder,token,count);}
+    public static void verticesFailed(Object builder,Object token,int count){GPU.vertexFailed(builder,token,count);}
     public static void verticesStored(Object builder,Object rendered){GPU.store(builder,rendered,boundary());}
     public static void verticesCapacityChanged(Object builder){GPU.capacityChanged(builder,boundary());}
     public static void verticesSortingChanged(Object builder){GPU.sortingChanged(builder,boundary());}
@@ -1202,8 +1204,8 @@ public final class ClientBridge {
     public static void verticesSortRestored(Object builder,Object sorting){GPU.sortRestore(builder,sorting,boundary());}
     public static Object verticesUploading(Object buffer,Object rendered){return GPU.uploading(buffer,rendered,boundary());}
     public static void verticesUploaded(Object buffer,Object token){GPU.uploaded(buffer,token,boundary());}
-    public static Object verticesDrawing(Object buffer){return GPU.drawing(buffer,boundary());}
-    public static void verticesDrawn(Object token){GPU.drawn(token,boundary());}
+    public static Object verticesDrawing(Object buffer){return gpuRequestsActive?GPU.drawing(buffer,boundary()):null;}
+    public static void verticesDrawn(Object token){if(token!=null)GPU.drawn(token,boundary());}
     public static void verticesClosed(Object buffer){GPU.closed(buffer,boundary());}
     public static List<String> shaderSource(int shader,List<String> source){return GPU.shaderSource(shader,source,boundary());}
     public static void shaderLinked(int program){GPU.linked(program,boundary());}
@@ -1236,10 +1238,52 @@ public final class ClientBridge {
     /** Original CPU vertex/index identities and a fragment mask preserve the original draw and primitive IDs. */
     private static final class GpuImages {
         private static final Class<?> I=int.class;
-        private static final class Build {
-            Object batch=new Object();final List<Module[]> vertices=new ArrayList<>();final BitSet erased=new BitSet();Object mode,format;Ref<Object> storage;int pointer,stride,capacity;long address;byte[] payload=new byte[0];boolean indexOnly;String pending="",retirementPending="";
+        /** Equal consecutive source snapshots form one run, with no object per vertex. */
+        private static final class VertexSources extends AbstractList<Module[]> {
+            private final List<Module[]> sources=new ArrayList<>();private int[] ends=new int[8];private int count;
+            @Override public int size(){return count;}
+            @Override public Module[] get(int index){Objects.checkIndex(index,count);int run=Arrays.binarySearch(ends,0,sources.size(),index+1);return sources.get(run>=0?run:-run-1);}
+            @Override public boolean add(Module[] value){modCount++;int last=sources.size()-1;if(last>=0&&Arrays.equals(sources.get(last),value)){ends[last]=++count;return true;}if(sources.size()==ends.length)ends=Arrays.copyOf(ends,ends.length*2);sources.add(value);ends[sources.size()-1]=++count;return true;}
+            @Override public void add(int index,Module[] value){if(index<0||index>count)throw new IndexOutOfBoundsException(index);if(index==count){add(value);return;}List<Module[]> previous=snapshot();clear();for(int i=0;i<previous.size();i++){if(i==index)add(value);add(previous.get(i));}}
+            @Override public boolean addAll(Collection<? extends Module[]> values){Collection<? extends Module[]> actual=values==this?snapshot():values;boolean changed=false;for(Module[] value:actual){add(value);changed=true;}return changed;}
+            @Override public void clear(){if(count!=0){sources.clear();count=0;modCount++;}}
+            void truncate(int size){if(size<0||size>count)throw new IndexOutOfBoundsException(size);if(size==count)return;if(size==0){clear();return;}int at=Arrays.binarySearch(ends,0,sources.size(),size);int last=at>=0?at:-at-1;sources.subList(last+1,sources.size()).clear();ends[last]=size;count=size;modCount++;}
+            List<Module[]> snapshot(){List<Module[]> rows=List.copyOf(sources);int[] limits=Arrays.copyOf(ends,rows.size());int size=count;return new AbstractList<>(){public int size(){return size;}public Module[] get(int index){Objects.checkIndex(index,size);int at=Arrays.binarySearch(limits,index+1);return rows.get(at>=0?at:-at-1);}};}
         }
-        private record VertexEntry(Object builder,Build build,int prior,Module[] sources,Class<?> type,String method,Thread thread){}
+        private static final class Build {
+            Ref<Object> cursorBuilder;Thread thread;volatile boolean closed;Module[] baseline=new Module[0],mods,client,owners;int prior;boolean entering;
+            Object batch=new Object();final VertexSources vertices=new VertexSources();final BitSet erased=new BitSet();Object mode,format;Ref<Object> storage;int pointer,stride,capacity;long address;byte[] payload=new byte[0];boolean indexOnly;String pending="",retirementPending="";
+        }
+        private static class BuildKey extends WeakReference<Object>{
+            final int hash;BuildKey(Object builder,ReferenceQueue<Object> queue){super(builder,queue);hash=System.identityHashCode(builder);}
+            Object target(){return get();}public int hashCode(){return hash;}
+            public boolean equals(Object other){Object target=target();return this==other||target!=null&&other instanceof BuildKey key&&target==key.target();}
+        }
+        private static final class BuildLookup extends BuildKey {
+            Object value;BuildLookup(){super(null,null);}Object target(){return value;}public int hashCode(){return System.identityHashCode(value);}
+        }
+        /** Thread confined lookup cursor; weak keys and write-only queue draining. */
+        private static final class BuildIndex {
+            final ReferenceQueue<Object> queue=new ReferenceQueue<>();final Map<BuildKey,Build> entries=new HashMap<>();final BuildLookup lookup=new BuildLookup();
+            Build get(Object builder){lookup.value=builder;try{return entries.get(lookup);}finally{lookup.value=null;}}
+            void reap(){for(Reference<?> key;(key=queue.poll())!=null;)entries.remove(key);}
+            void put(Object builder,Build build){reap();entries.put(new BuildKey(builder,queue),build);}
+            Build remove(Object builder){reap();lookup.value=builder;try{return entries.remove(lookup);}finally{lookup.value=null;}}
+        }
+        private final ThreadLocal<Build> cursor=new ThreadLocal<>();
+        private final ThreadLocal<BuildIndex> activeBuilds=new ThreadLocal<>();
+        private BuildIndex buildIndex(){BuildIndex index=activeBuilds.get();if(index==null){index=new BuildIndex();activeBuilds.set(index);}return index;}
+        private void activate(Object builder,Build build){finishCursor(builder);build.closed=false;build.cursorBuilder=new Ref<>(builder);build.thread=Thread.currentThread();buildIndex().put(builder,build);cursor.set(build);}
+        private Build currentBuild(Object builder){
+            Build recent=cursor.get();if(recent!=null&&!recent.closed&&recent.cursorBuilder.get()==builder)return recent;
+            BuildIndex index=activeBuilds.get();Build build=index==null?null:index.get(builder);
+            if(build==null||build.closed){
+                // A legal sequential handoff pays for the shared lookup only once.
+                synchronized(this){build=builds.get(new Key(builder,false));}
+                if(build==null||build.closed)return null;buildIndex().put(builder,build);
+            }
+            cursor.set(build);return build;
+        }
         private record VertexImage(Object batch,List<Module[]> vertices,Object state,Object format,Object mode,int count,int[] indices,byte[] payload,int stride,boolean indexOnly,String pending){}
         private static final class Uploaded {VertexImage image;final BitSet hidden=new BitSet(),erased=new BitSet();String pending="GPU_UPLOAD_PENDING";int vao,vertexId,indexId;long fence;Context context;boolean uploadPending,storageReleased,commandsDrained;}
         private static final class BuilderImages {
@@ -1324,18 +1368,48 @@ public final class ClientBridge {
             build.pointer=number(builder,type,"renderedBufferPointer");build.storage=new Ref<>(storage);build.capacity=Math.toIntExact(bufferNumber(storage,"capacity","I"));build.address=bufferNumber(storage,"address","J");build.indexOnly=(Boolean)field(builder,type,"indexOnly");
             Class<?> format=actualBase(build.format,"com.mojang.blaze3d.vertex.VertexFormat");if(format==null||build.format.getClass()!=format)throw new IllegalStateException("ACTUAL_VERTEX_FORMAT_REQUIRED");build.stride=((Number)clientMethod(format,"getVertexSize","m_86020_","()I").invoke(build.format)).intValue();if(build.stride<=0)throw new IllegalStateException("GPU_VERTEX_STRIDE_CHANGED");protect(build.storage);protect(build.erased);protect(build.payload);
         }
-        void begin(Object builder,StackWalker.StackFrame frame){require(frame,"com.mojang.blaze3d.vertex.BufferBuilder","begin","m_166779_","(Lcom/mojang/blaze3d/vertex/VertexFormat$Mode;Lcom/mojang/blaze3d/vertex/VertexFormat;)V");try{Build build=new Build();build.mode=field(builder,frame.getDeclaringClass(),"mode");build.format=field(builder,frame.getDeclaringClass(),"format");buildStorage(builder,frame.getDeclaringClass(),build);if(number(builder,frame.getDeclaringClass(),"vertices")!=0)build.pending="GPU_BEGIN_VERTEX_STATE_UNOBSERVED";protect(build.vertices);synchronized(this){builds.put(new Key(builder,true),build);buildSorting.remove(new Key(builder,false));}}catch(ReflectiveOperationException failure){throw new IllegalStateException("GPU_BEGIN_UNAVAILABLE",failure);}}
-        Object enter(Object builder,Object bulk,StackWalker.StackFrame frame){requireVertexWrite(frame);try{Build build;synchronized(this){build=builds.get(new Key(builder,false));}if(build==null)return null;Module[] owners=union(ControlBridge.invokingSources(),currentSources(),origins(bulk));protect(owners);return new VertexEntry(builder,build,number(builder,frame.getDeclaringClass(),"vertices"),owners,frame.getDeclaringClass(),frame.getMethodName(),Thread.currentThread());}catch(ReflectiveOperationException failure){throw new IllegalStateException("GPU_VERTEX_ENTRY_UNAVAILABLE",failure);}}
-        void complete(Object builder,Object token,StackWalker.StackFrame frame){requireVertexWrite(frame);if(token==null)return;if(!(token instanceof VertexEntry entry)||entry.builder()!=builder||entry.type()!=frame.getDeclaringClass()||!entry.method().equals(frame.getMethodName())||entry.thread()!=Thread.currentThread())throw new SecurityException("ACTUAL_VERTEX_WRITE_REQUIRED");
-            try{synchronized(this){Build current=builds.get(new Key(builder,false));if(current!=entry.build())throw new IllegalStateException("GPU_VERTEX_BATCH_CHANGED");int count=number(builder,entry.type(),"vertices");if(entry.prior()!=current.vertices.size()||count<entry.prior()){current.pending="GPU_VERTEX_WRITE_SEQUENCE_UNOBSERVED";return;}while(current.vertices.size()<count)current.vertices.add(entry.sources());
-                if(!buildIdentity(builder,current)||current.indexOnly){current.pending="GPU_CPU_BUILD_STORAGE_CHANGED";return;}int length=Math.multiplyExact(count,current.stride),prior=Math.multiplyExact(entry.prior(),current.stride);if(current.pointer>current.capacity-length||number(builder,entry.type(),"nextElementByte")<current.pointer+length){current.pending="GPU_CPU_BUILD_RANGE_CHANGED";return;}
-                if(current.payload.length<length){current.payload=Arrays.copyOf(current.payload,Math.max(length,Math.max(64,current.payload.length*2)));protect(current.payload);}java.nio.ByteBuffer storage=(java.nio.ByteBuffer)current.storage.get();readBytes(storage,current.pointer+prior,current.payload,prior,length-prior);
-            }}catch(ReflectiveOperationException failure){throw new IllegalStateException("GPU_VERTEX_COMPLETION_UNAVAILABLE",failure);}}
+        void begin(Object builder,StackWalker.StackFrame frame){require(frame,"com.mojang.blaze3d.vertex.BufferBuilder","begin","m_166779_","(Lcom/mojang/blaze3d/vertex/VertexFormat$Mode;Lcom/mojang/blaze3d/vertex/VertexFormat;)V");try{Build build=new Build();build.baseline=union(ControlBridge.invokingSources(),currentSources());build.mode=field(builder,frame.getDeclaringClass(),"mode");build.format=field(builder,frame.getDeclaringClass(),"format");buildStorage(builder,frame.getDeclaringClass(),build);if(number(builder,frame.getDeclaringClass(),"vertices")!=0)build.pending="GPU_BEGIN_VERTEX_STATE_UNOBSERVED";protect(build.vertices);activate(builder,build);synchronized(this){builds.put(new Key(builder,true),build);buildSorting.remove(new Key(builder,false));}}catch(ReflectiveOperationException failure){throw new IllegalStateException("GPU_BEGIN_UNAVAILABLE",failure);}}
+        Object enter(Object builder,Object bulk,int count){
+            Build build=currentBuild(builder);if(build==null)return null;
+            synchronized(build){
+                if(build.closed)return null;if(build.entering){build.pending="GPU_VERTEX_REENTRANT_SEQUENCE";return null;}if(build.thread!=Thread.currentThread()){build.baseline=union(build.baseline,ControlBridge.invokingSources(),currentSources());build.thread=Thread.currentThread();build.owners=null;}
+                Scope scope=CURRENT.get();Module[] client=scope==null?NO_GPU_SOURCES:scope.sources,mods=ModSources.current();
+                if(build.owners==null||build.client!=client||build.mods!=mods){build.client=client;build.mods=mods;build.owners=union(build.baseline,client,mods);}
+                if(bulk!=null)build.owners=union(build.owners,ControlBridge.objectSources(bulk));
+                build.prior=count;build.entering=true;return build;
+            }
+        }
+        void complete(Object builder,Object token,int count){
+            if(token==null)return;
+            if(!(token instanceof Build build)||currentBuild(builder)!=build||build.thread!=Thread.currentThread())throw new SecurityException("ACTUAL_VERTEX_WRITE_REQUIRED");
+            synchronized(build){
+                if(!build.entering)return;build.entering=false;
+                if(build.prior!=build.vertices.size()||count<build.prior){
+                    build.pending="GPU_VERTEX_WRITE_SEQUENCE_UNOBSERVED";
+                    int prior=Math.max(0,Math.min(build.prior,count));
+                    if(build.vertices.size()>prior)build.vertices.truncate(prior);
+                    while(build.vertices.size()<prior)build.vertices.add(NO_GPU_SOURCES);
+                }
+                if(count<0){build.vertices.clear();return;}
+                while(build.vertices.size()<count)build.vertices.add(build.owners);
+            }
+        }
+        void vertexFailed(Object builder,Object token,int count){
+            if(token==null)return;
+            if(!(token instanceof Build build)||currentBuild(builder)!=build||build.thread!=Thread.currentThread())throw new SecurityException("ACTUAL_VERTEX_WRITE_REQUIRED");
+            synchronized(build){build.entering=false;build.pending="GPU_VERTEX_WRITE_FAILED";if(build.vertices.size()>Math.max(0,count))build.vertices.truncate(Math.max(0,count));while(build.vertices.size()<count)build.vertices.add(NO_GPU_SOURCES);}
+        }
+        private static final Module[] NO_GPU_SOURCES=new Module[0];
+        private void finishCursor(Object builder){
+            BuildIndex index=activeBuilds.get();Build build=index==null?null:index.remove(builder);
+            if(build==null)synchronized(this){build=builds.get(new Key(builder,false));}
+            if(build!=null)build.closed=true;Build recent=cursor.get();if(recent!=null&&recent.cursorBuilder.get()==builder){recent.closed=true;cursor.remove();}
+        }
         private boolean buildIdentity(Object builder,Build build)throws ReflectiveOperationException{Class<?> type=builder==null?null:actualBase(builder,"com.mojang.blaze3d.vertex.BufferBuilder");Object storage=build.storage==null?null:build.storage.get();return type!=null&&builder.getClass()==type&&storage instanceof java.nio.ByteBuffer
                 &&field(builder,type,"buffer")==storage&&field(builder,type,"format")==build.format&&field(builder,type,"mode")==build.mode&&number(builder,type,"renderedBufferPointer")==build.pointer
                 &&bufferNumber(storage,"address","J")==build.address&&bufferNumber(storage,"capacity","I")==build.capacity&&(Boolean)field(builder,type,"indexOnly")==build.indexOnly;}
         void capacityChanged(Object builder,StackWalker.StackFrame frame){require(frame,"com.mojang.blaze3d.vertex.BufferBuilder","ensureCapacity","m_85722_","(I)V");try{synchronized(this){Object data=field(builder,frame.getDeclaringClass(),"buffer");if(!(data instanceof java.nio.ByteBuffer storage)||data.getClass().getClassLoader()!=null||!storage.isDirect())throw new IllegalStateException("ACTUAL_CPU_VERTEX_STORAGE_REQUIRED");int capacity=Math.toIntExact(bufferNumber(data,"capacity","I"));long address=bufferNumber(data,"address","J");
-            Build build=builds.get(new Key(builder,false));if(build!=null&&build.storage!=null&&build.storage.get()!=data){int length=Math.multiplyExact(build.vertices.size(),build.stride);if(build.pointer==number(builder,frame.getDeclaringClass(),"renderedBufferPointer")&&(build.indexOnly||cpuBytes(storage,build.pointer,build.payload,length))&&capacity>=build.capacity){build.storage=new Ref<>(data);build.capacity=capacity;build.address=address;protect(build.storage);}else build.pending="GPU_CPU_BUILD_REALLOCATION_READBACK_CHANGED";}
+            Build build=builds.get(new Key(builder,false));if(build!=null&&build.storage!=null&&build.storage.get()!=data){int length=Math.multiplyExact(build.vertices.size(),build.stride);if(build.pointer==number(builder,frame.getDeclaringClass(),"renderedBufferPointer")&&capacity>=build.capacity){build.storage=new Ref<>(data);build.capacity=capacity;build.address=address;protect(build.storage);}else build.pending="GPU_CPU_BUILD_REALLOCATION_READBACK_CHANGED";}
             BuilderImages group=activeRendered.get(new Key(builder,false));
             if(group!=null)for(var entry:group.live.entrySet()){Object result=entry.getKey().get();CpuImage cpu=entry.getValue();if(result==null||cpu.finished||cpu.builder.get()!=builder||cpu.storage.get()==data)continue;Class<?> type=actualBase(result,"com.mojang.blaze3d.vertex.BufferBuilder$RenderedBuffer");if(type!=null&&field(result,type,"this$0")==builder&&field(result,type,"drawState")==cpu.image.state()&&number(result,type,"pointer")==cpu.pointer&&capacity>=cpu.capacity&&cpuBytes(storage,cpu.pointer,cpu.retained,cpu.retained.length)){cpu.storage=new Ref<>(data);cpu.capacity=capacity;cpu.address=address;protect(cpu.storage);}else cpu.pending="GPU_CPU_REALLOCATION_READBACK_CHANGED";}
         }}catch(ReflectiveOperationException failure){throw new IllegalStateException("GPU_CPU_REALLOCATION_UNAVAILABLE",failure);}}
@@ -1344,7 +1418,7 @@ public final class ClientBridge {
             Object mode=clientMethod(shape,"mode","f_85735_","()Lcom/mojang/blaze3d/vertex/VertexFormat$Mode;").invoke(state),format=clientMethod(shape,"format","f_85733_","()Lcom/mojang/blaze3d/vertex/VertexFormat;").invoke(state);
             int count=((Number)clientMethod(shape,"vertexCount","f_85734_","()I").invoke(state)).intValue(),indexCount=((Number)clientMethod(shape,"indexCount","f_166797_","()I").invoke(state)).intValue();
             boolean indexOnly=(Boolean)clientMethod(shape,"indexOnly","f_166799_","()Z").invoke(state),sequential=(Boolean)clientMethod(shape,"sequentialIndex","f_166800_","()Z").invoke(state);
-            Build build=builds.get(new Key(builder,false));List<Module[]> rows=build==null?List.of():List.copyOf(build.vertices);String pending=build==null?"GPU_VERTEX_BATCH_UNOBSERVED":build.pending;
+            Build build=builds.get(new Key(builder,false));List<Module[]> rows=build==null?List.of():build.vertices.snapshot();String pending=build==null?"GPU_VERTEX_BATCH_UNOBSERVED":build.pending;
             if(rows.size()!=count)pending="GPU_VERTEX_COUNT_UNOBSERVED";if(build!=null&&(build.mode!=mode||build.format!=format))pending="GPU_VERTEX_LAYOUT_CHANGED";
             int[] indices=new int[indexCount];Class<?> modeType=actualBase(mode,"com.mojang.blaze3d.vertex.VertexFormat$Mode");if(modeType==null)throw new SecurityException("ACTUAL_VERTEX_MODE_REQUIRED");
             if(sequential){String kind=((Enum<?>)mode).name();int[] offsets=kind.equals("QUADS")?new int[]{0,1,2,2,3,0}:kind.equals("LINES")?new int[]{0,1,2,3,2,1}:null;for(int n=0;n<indexCount;n++)indices[n]=offsets==null?n:n/6*4+offsets[n%6];}
@@ -1352,24 +1426,46 @@ public final class ClientBridge {
             for(int index:indices)if(index<0||index>=count){pending="GPU_INDEX_OUTSIDE_OBSERVED_VERTICES";break;}
             Class<?> formatType=actualBase(format,"com.mojang.blaze3d.vertex.VertexFormat");if(formatType==null||format.getClass()!=formatType)throw new SecurityException("ACTUAL_VERTEX_FORMAT_REQUIRED");int stride=((Number)clientMethod(formatType,"getVertexSize","m_86020_","()I").invoke(format)).intValue();byte[] payload=null;
             if(!indexOnly){java.nio.ByteBuffer data=((java.nio.ByteBuffer)clientMethod(type,"vertexBuffer","m_231196_","()Ljava/nio/ByteBuffer;").invoke(result)).duplicate();int length=Math.multiplyExact(count,stride);if(length!=data.remaining())pending="GPU_VERTEX_PAYLOAD_LENGTH_CHANGED";else{payload=new byte[length];data.get(payload);protect(payload);}}
+            if(build!=null&&!indexOnly&&payload!=null){synchronized(build){build.payload=payload;}}
             protect(indices);VertexImage image=new VertexImage(build==null?null:build.batch,rows,state,format,mode,count,indices,payload,stride,indexOnly,pending);protect(rows);return image;
         }
-        void store(Object builder,Object result,StackWalker.StackFrame frame){require(frame,"com.mojang.blaze3d.vertex.BufferBuilder","storeRenderedBuffer","m_231177_","()Lcom/mojang/blaze3d/vertex/BufferBuilder$RenderedBuffer;");try{synchronized(this){VertexImage image=image(builder,result);Class<?> shape=actualBase(result,"com.mojang.blaze3d.vertex.BufferBuilder$RenderedBuffer");Object storage=field(builder,frame.getDeclaringClass(),"buffer");
+        void store(Object builder,Object result,StackWalker.StackFrame frame){finishCursor(builder);require(frame,"com.mojang.blaze3d.vertex.BufferBuilder","storeRenderedBuffer","m_231177_","()Lcom/mojang/blaze3d/vertex/BufferBuilder$RenderedBuffer;");try{synchronized(this){VertexImage image=image(builder,result);Class<?> shape=actualBase(result,"com.mojang.blaze3d.vertex.BufferBuilder$RenderedBuffer");Object storage=field(builder,frame.getDeclaringClass(),"buffer");
             if(field(result,shape,"this$0")!=builder||!(storage instanceof java.nio.ByteBuffer))throw new IllegalStateException("GPU_CPU_CARRIER_ASSOCIATION_CHANGED");
             int pointer=number(result,shape,"pointer"),length=((Number)clientMethod(image.state().getClass(),"bufferSize","m_166813_","()I").invoke(image.state())).intValue();byte[] retained=readBytes((java.nio.ByteBuffer)storage,pointer,length);
             BuilderImages group=builderImages(builder);Key key=new Key(result,true);
             CpuImage cpu=new CpuImage(image,builder,storage,pointer,Math.toIntExact(bufferNumber(storage,"capacity","I")),bufferNumber(storage,"address","J"),retained,group,key);Build build=builds.get(new Key(builder,false));if(build!=null&&!image.indexOnly())cpu.erased.or(build.erased);protect(cpu);protect(cpu.builder);protect(cpu.storage);protect(cpu.erased);CpuImage previous=rendered.put(key,cpu);if(previous!=null)untrackCpu(previous);group.live.put(key,cpu);activeRendered.put(group.builder,group);}}
             catch(ReflectiveOperationException failure){throw new IllegalStateException("GPU_RENDERED_IMAGE_UNAVAILABLE",failure);}}
         void released(Object result,StackWalker.StackFrame frame){require(frame,"com.mojang.blaze3d.vertex.BufferBuilder$RenderedBuffer","release","m_231200_","()V");try{synchronized(this){CpuImage cpu=rendered.get(new Key(result,false));if(cpu!=null){if(!(Boolean)field(result,frame.getDeclaringClass(),"released"))throw new IllegalStateException("GPU_CPU_RELEASE_READBACK_PENDING");finishCpu(cpu);}}}catch(ReflectiveOperationException failure){throw new IllegalStateException("GPU_CPU_RELEASE_READBACK_UNAVAILABLE",failure);}}
-        void discarded(Object builder,StackWalker.StackFrame frame){require(frame,"com.mojang.blaze3d.vertex.BufferBuilder","discard","m_85730_","()V");try{synchronized(this){if(number(builder,frame.getDeclaringClass(),"renderedBufferCount")!=0||number(builder,frame.getDeclaringClass(),"renderedBufferPointer")!=0||number(builder,frame.getDeclaringClass(),"nextElementByte")!=0)throw new IllegalStateException("GPU_CPU_DISCARD_READBACK_PENDING");
+        void discarded(Object builder,StackWalker.StackFrame frame){finishCursor(builder);require(frame,"com.mojang.blaze3d.vertex.BufferBuilder","discard","m_85730_","()V");try{synchronized(this){if(number(builder,frame.getDeclaringClass(),"renderedBufferCount")!=0||number(builder,frame.getDeclaringClass(),"renderedBufferPointer")!=0||number(builder,frame.getDeclaringClass(),"nextElementByte")!=0)throw new IllegalStateException("GPU_CPU_DISCARD_READBACK_PENDING");
             BuilderImages group=activeRendered.remove(new Key(builder,false));if(group!=null){for(CpuImage cpu:group.live.values()){cpu.finished=true;cpu.pending="";cpu.group=null;}group.live.clear();}}}catch(ReflectiveOperationException failure){throw new IllegalStateException("GPU_CPU_DISCARD_READBACK_UNAVAILABLE",failure);}}
         private int[] pointBits(Object point,Class<?> vector)throws ReflectiveOperationException{
             if(point==null||point.getClass()!=vector||!vector.getName().equals("org.joml.Vector3f"))throw new IllegalStateException("ACTUAL_QUAD_SORT_POINT_REQUIRED");int[] bits=new int[3];String[] names={"x","y","z"};for(int n=0;n<3;n++){Field value=vector.getDeclaredField(names[n]);if(value.getType()!=float.class||Modifier.isStatic(value.getModifiers())||!Modifier.isPublic(value.getModifiers()))throw new IllegalStateException("CLIENT_SORT_POINT_LAYOUT_CHANGED");bits[n]=Float.floatToRawIntBits(value.getFloat(point));}return bits;
         }
+        private SortImage sealSort(VertexImage image,Object builder,Object points,Ref<Object>[] identities,int[] coordinates){
+            SortImage result=new SortImage(image,builder,points,identities,coordinates);
+            protect(result);protect(result.builder);protect(result.points);protect(identities);protect(coordinates);protect(result.erased);return result;
+        }
+        @SuppressWarnings("unchecked") private SortImage countChangedSort(Object builder,Object points,Build build,List<Module[]> rows){
+            build.pending="GPU_QUAD_SORTING_COUNT_CHANGED";
+            VertexImage fallback=new VertexImage(build.batch,rows,null,build.format,build.mode,rows.size(),new int[0],null,0,true,build.pending);
+            return sealSort(fallback,builder,points,new Ref[0],new int[0]);
+        }
         @SuppressWarnings("unchecked") private SortImage sortImage(Object builder,Object carrier,Build build)throws ReflectiveOperationException{
-            Class<?> type=actualBase(carrier,carrier==builder?"com.mojang.blaze3d.vertex.BufferBuilder":"com.mojang.blaze3d.vertex.BufferBuilder$SortState");if(type==null||carrier.getClass()!=type)throw new IllegalStateException("ACTUAL_QUAD_SORT_CARRIER_REQUIRED");Object points=field(carrier,type,"sortingPoints");List<Module[]> rows=List.copyOf(build.vertices);protect(rows);VertexImage image=new VertexImage(build.batch,rows,null,build.format,build.mode,rows.size(),new int[0],null,0,true,build.pending);
-            if(points==null){SortImage result=new SortImage(image,builder,null,new Ref[0],new int[0]);protect(result);protect(result.builder);protect(result.points);protect(result.identities);protect(result.coordinates);protect(result.erased);return result;}if(!(points instanceof Object[] values)||!points.getClass().descriptorString().equals("[Lorg/joml/Vector3f;")||!(build.mode instanceof Enum<?> mode)||!mode.name().equals("QUADS")||rows.size()/4!=values.length||number(carrier,type,"vertices")!=rows.size()||field(carrier,type,"mode")!=build.mode)throw new IllegalStateException("GPU_QUAD_SORTING_LAYOUT_CHANGED");
-            Ref<Object>[] identities=new Ref[values.length];int[] coordinates=new int[Math.multiplyExact(values.length,3)];Class<?> vector=points.getClass().getComponentType();for(int n=0;n<values.length;n++){identities[n]=new Ref<>(values[n]);int[] bits=pointBits(values[n],vector);System.arraycopy(bits,0,coordinates,n*3,3);protect(identities[n]);}protect(identities);protect(coordinates);SortImage result=new SortImage(image,builder,points,identities,coordinates);protect(result);protect(result.builder);protect(result.points);protect(result.erased);return result;
+            Class<?> type=actualBase(carrier,carrier==builder?"com.mojang.blaze3d.vertex.BufferBuilder":"com.mojang.blaze3d.vertex.BufferBuilder$SortState");
+            if(type==null||carrier.getClass()!=type)throw new IllegalStateException("ACTUAL_QUAD_SORT_CARRIER_REQUIRED");
+            Object points=field(carrier,type,"sortingPoints");List<Module[]> rows=build.vertices.snapshot();protect(rows);
+            if(points!=null){
+                if(!(points instanceof Object[] values)||!points.getClass().descriptorString().equals("[Lorg/joml/Vector3f;")||!(build.mode instanceof Enum<?> mode)||!mode.name().equals("QUADS")||field(carrier,type,"mode")!=build.mode)throw new IllegalStateException("GPU_QUAD_SORTING_LAYOUT_CHANGED");
+                if(rows.size()/4!=values.length||number(carrier,type,"vertices")!=rows.size()){
+                    // Keep rendering, but never report these unobserved rows as fully retired.
+                    return countChangedSort(builder,points,build,rows);
+                }
+            }
+            VertexImage image=new VertexImage(build.batch,rows,null,build.format,build.mode,rows.size(),new int[0],null,0,true,build.pending);
+            if(points==null)return sealSort(image,builder,null,new Ref[0],new int[0]);
+            Object[] values=(Object[])points;Ref<Object>[] identities=new Ref[values.length];int[] coordinates=new int[Math.multiplyExact(values.length,3)];Class<?> vector=points.getClass().getComponentType();
+            for(int n=0;n<values.length;n++){identities[n]=new Ref<>(values[n]);int[] bits=pointBits(values[n],vector);System.arraycopy(bits,0,coordinates,n*3,3);protect(identities[n]);}
+            return sealSort(image,builder,points,identities,coordinates);
         }
         private boolean sortIdentity(Object carrier,SortImage saved)throws ReflectiveOperationException{
             if(carrier==null)return false;Class<?> type=actualBase(carrier,"com.mojang.blaze3d.vertex.BufferBuilder$SortState");if(type==null){type=actualBase(carrier,"com.mojang.blaze3d.vertex.BufferBuilder");Build build=builds.get(new Key(carrier,false));if(build==null||build.batch!=saved.image.batch())return false;}return type!=null&&carrier.getClass()==type&&field(carrier,type,"sortingPoints")==saved.points.get()&&field(carrier,type,"mode")==saved.image.mode()&&number(carrier,type,"vertices")==saved.image.count();
@@ -1377,7 +1473,7 @@ public final class ClientBridge {
         void sortingChanged(Object builder,StackWalker.StackFrame frame){require(frame,"com.mojang.blaze3d.vertex.BufferBuilder","setQuadSorting","m_277127_","(Lcom/mojang/blaze3d/vertex/VertexSorting;)V");try{synchronized(this){Build build=builds.get(new Key(builder,false));if(build!=null){SortImage previous=buildSorting.get(new Key(builder,false));if(previous==null||!sortIdentity(builder,previous))buildSorting.put(new Key(builder,true),sortImage(builder,builder,build));}}}catch(ReflectiveOperationException failure){throw new IllegalStateException("GPU_QUAD_SORTING_ORIGIN_UNAVAILABLE",failure);}}
         void sortState(Object builder,Object state,StackWalker.StackFrame frame){require(frame,"com.mojang.blaze3d.vertex.BufferBuilder","getSortState","m_166770_","()Lcom/mojang/blaze3d/vertex/BufferBuilder$SortState;");try{synchronized(this){Build build=builds.get(new Key(builder,false));if(build==null)return;SortImage saved=sortImage(builder,state,build);copySortReceipts(saved);sorting.put(new Key(state,true),saved);}}catch(ReflectiveOperationException failure){throw new IllegalStateException("GPU_SORTING_ORIGIN_UNAVAILABLE",failure);}}
         boolean sortAllowed(Object builder,Object state,StackWalker.StackFrame frame){require(frame,"com.mojang.blaze3d.vertex.BufferBuilder","restoreSortState","m_166775_","(Lcom/mojang/blaze3d/vertex/BufferBuilder$SortState;)V");if(stopped(sources(state))||ControlBridge.stoppedEffects())return false;synchronized(this){SortImage saved=sorting.get(new Key(state,false));return saved==null||saved.image.vertices().isEmpty()||!saved.image.vertices().stream().allMatch(this::retiredSources);}}
-        void sortRestore(Object builder,Object state,StackWalker.StackFrame frame){require(frame,"com.mojang.blaze3d.vertex.BufferBuilder","restoreSortState","m_166775_","(Lcom/mojang/blaze3d/vertex/BufferBuilder$SortState;)V");try{synchronized(this){SortImage saved=sorting.get(new Key(state,false));Build build=builds.get(new Key(builder,false));if(build==null||saved==null){if(build!=null)build.pending="GPU_SORTING_ORIGIN_UNOBSERVED";return;}Build restored=new Build();restored.batch=saved.image.batch();restored.vertices.addAll(saved.image.vertices());restored.mode=saved.image.mode();restored.format=saved.image.format();restored.pending=saved.image.pending();buildStorage(builder,frame.getDeclaringClass(),restored);protect(restored.vertices);builds.put(new Key(builder,true),restored);SortImage points=sortImage(builder,builder,restored);copySortReceipts(points);buildSorting.put(new Key(builder,true),points);}}catch(ReflectiveOperationException failure){throw new IllegalStateException("GPU_SORTING_RESTORE_UNAVAILABLE",failure);}}
+        void sortRestore(Object builder,Object state,StackWalker.StackFrame frame){require(frame,"com.mojang.blaze3d.vertex.BufferBuilder","restoreSortState","m_166775_","(Lcom/mojang/blaze3d/vertex/BufferBuilder$SortState;)V");try{synchronized(this){SortImage saved=sorting.get(new Key(state,false));Build build=builds.get(new Key(builder,false));if(build==null||saved==null){if(build!=null)build.pending="GPU_SORTING_ORIGIN_UNOBSERVED";return;}Build restored=new Build();restored.batch=saved.image.batch();restored.vertices.addAll(saved.image.vertices());restored.mode=saved.image.mode();restored.format=saved.image.format();restored.pending=saved.image.pending();restored.baseline=union(ControlBridge.invokingSources(),currentSources());buildStorage(builder,frame.getDeclaringClass(),restored);protect(restored.vertices);activate(builder,restored);builds.put(new Key(builder,true),restored);SortImage points=sortImage(builder,builder,restored);copySortReceipts(points);buildSorting.put(new Key(builder,true),points);}}catch(ReflectiveOperationException failure){throw new IllegalStateException("GPU_SORTING_RESTORE_UNAVAILABLE",failure);}}
         Object uploading(Object buffer,Object result,StackWalker.StackFrame frame){require(frame,"com.mojang.blaze3d.vertex.VertexBuffer","upload","m_231221_","(Lcom/mojang/blaze3d/vertex/BufferBuilder$RenderedBuffer;)V");try{synchronized(this){CpuImage cpu=rendered.get(new Key(result,false));Class<?> type=actualBase(result,"com.mojang.blaze3d.vertex.BufferBuilder$RenderedBuffer");
             if(type==null||type!=result.getClass())throw new SecurityException("ACTUAL_RENDERED_BUFFER_REQUIRED");if((Boolean)field(result,type,"released")||cpu!=null&&cpu.finished)return Boolean.FALSE;
             Uploaded gpu=uploaded.computeIfAbsent(new Key(buffer,true),ignored->new Uploaded());VertexImage incoming=cpu==null?null:cpu.image;gpu.pending="GPU_UPLOAD_PENDING";gpu.uploadPending=true;return new UploadEntry(buffer,gpu,incoming,frame.getDeclaringClass());}}
@@ -1497,7 +1593,20 @@ public final class ClientBridge {
                 }catch(ReflectiveOperationException|RuntimeException unavailable){saved.pending="GPU_CPU_SORT_POINT_ERASE:"+cpuFailure(unavailable);}
             }
         }
-        private void retireBuilds(){for(var entry:builds.entrySet()){Object builder=entry.getKey().get();Build build=entry.getValue();if(builder==null||build.indexOnly||build.vertices.isEmpty()||!build.pending.isEmpty())continue;try{Class<?> type=actualBase(builder,"com.mojang.blaze3d.vertex.BufferBuilder");if(type==null||!(Boolean)field(builder,type,"building"))continue;if(!buildIdentity(builder,build)||number(builder,type,"vertices")!=build.vertices.size()){build.retirementPending="GPU_CPU_BUILD_IDENTITY_CHANGED";continue;}clearRanges(builder,builder,build,null,buildImage(build));}catch(ReflectiveOperationException|RuntimeException unavailable){build.retirementPending="GPU_CPU_PAYLOAD_ERASE:"+cpuFailure(unavailable);}}}
+        private void retireBuilds(){
+            for(var entry:builds.entrySet()){
+                Object builder=entry.getKey().get();Build build=entry.getValue();
+                synchronized(build){
+                    if(builder==null||build.indexOnly||build.vertices.isEmpty()||!build.pending.isEmpty())continue;
+                    try{Class<?> type=actualBase(builder,"com.mojang.blaze3d.vertex.BufferBuilder");if(type==null||!(Boolean)field(builder,type,"building"))continue;
+                        if(build.entering){build.retirementPending="GPU_VERTEX_WRITE_IN_FLIGHT";continue;}
+                        if(!buildIdentity(builder,build)||number(builder,type,"vertices")!=build.vertices.size()){build.retirementPending="GPU_CPU_BUILD_IDENTITY_CHANGED";continue;}
+                        int bytes=Math.multiplyExact(build.vertices.size(),build.stride);if(build.payload.length!=bytes)build.payload=readBytes((java.nio.ByteBuffer)build.storage.get(),build.pointer,bytes);
+                        clearRanges(builder,builder,build,null,buildImage(build));
+                    }catch(ReflectiveOperationException|RuntimeException unavailable){build.retirementPending="GPU_CPU_PAYLOAD_ERASE:"+cpuFailure(unavailable);}
+                }
+            }
+        }
         private void retireCpu(){
             for(var entry:rendered.entrySet()){Object result=entry.getKey().get();CpuImage cpu=entry.getValue();if(result==null||cpu.finished||cpu.image.vertices().isEmpty()||!cpu.image.pending().isEmpty())continue;
                 try{if(!cpuIdentity(result,cpu)){cpu.pending="GPU_CPU_STORAGE_IDENTITY_CHANGED";continue;}Class<?> type=actualBase(result,"com.mojang.blaze3d.vertex.BufferBuilder$RenderedBuffer");
@@ -2008,7 +2117,7 @@ public final class ClientBridge {
                 ||declaring.getName().equals("com.mojang.blaze3d.platform.NativeImage")&&Set.of("pixels","f_84964_").contains(name)
                 ||declaring.getName().equals("com.mojang.blaze3d.vertex.VertexBuffer")&&Set.of("vertexBufferId","f_231217_","indexBufferId","f_166860_","arrayObjectId","f_166862_").contains(name);
     }
-    public static void retire(Module[] modules){agent();synchronized(SOURCES){Collections.addAll(REQUESTED,modules);}retireReloadListeners();}
+    public static void retire(Module[] modules){agent();synchronized(SOURCES){Collections.addAll(REQUESTED,modules);gpuRequestsActive=!REQUESTED.isEmpty();}retireReloadListeners();}
     public static String retirementGap(Module module){agent();long gpu=GPU.pending(module);String gpuState=gpu==0?"":GPU.gap(module);synchronized(SOURCES){reap();long active=ACTIVE.stream().filter(scope->Arrays.stream(scope.sources).anyMatch(source->source==module)).count();
         long textures=0;for(TextureRegistry registry:TEXTURES.values())for(Texture texture:registry.entries().values())if(texture.object().get()!=null&&Arrays.stream(texture.modules()).anyMatch(source->source==module))textures++;
         long resources=RETIREMENTS.values().stream().filter(row->Arrays.stream(row.modules).anyMatch(source->source==module)).count();

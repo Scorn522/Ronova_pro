@@ -155,7 +155,9 @@ final class BufferBoundary {
             if((method.access&(Opcodes.ACC_STATIC|Opcodes.ACC_NATIVE|Opcodes.ACC_ABSTRACT))!=0)continue;
             if(method.name.equals("<init>")){
                 if(name.startsWith("java/nio/Direct")||name.startsWith("java/nio/ByteBufferAs"))constructed(node,method);
-            }else scope(node.name,method);
+            }
+            // ModMemoryBoundary guards observed Mod invocations. Ordinary JDK
+            // data operations keep their original implementation and intrinsics.
         }
         ControlClassWriter writer=new ControlClassWriter(loader,node);node.accept(writer);return writer.toByteArray();
     }
@@ -174,7 +176,12 @@ final class BufferBoundary {
                 code.add(new MethodInsnNode(Opcodes.INVOKESTATIC,BRIDGE,"bufferConstructed","(Ljava/nio/Buffer;Ljava/lang/Class;)V",false));method.instructions.insertBefore(at,code);
             }
         }
-        if(node.name.equals("java/nio/DirectByteBuffer"))allocationScope(node,method);
+        if(node.name.equals("java/nio/DirectByteBuffer")){
+            boolean allocates=false;
+            for(AbstractInsnNode at:method.instructions)if(at instanceof MethodInsnNode call
+                    &&(call.name.equals("allocateMemory")||call.owner.equals("java/nio/Bits")&&call.name.equals("reserveMemory")||call.owner.equals("jdk/internal/ref/Cleaner")&&call.name.equals("create")))allocates=true;
+            if(allocates)allocationScope(node,method);
+        }
     }
     private static void allocationScope(ClassNode node,MethodNode method){
         AbstractInsnNode initialized=null;
@@ -189,39 +196,6 @@ final class BufferBoundary {
     }
     private static InsnList allocationFinish(int token,int failure){InsnList code=new InsnList();code.add(new VarInsnNode(Opcodes.ALOAD,token));
         if(failure<0)code.add(new InsnNode(Opcodes.ACONST_NULL));else code.add(new VarInsnNode(Opcodes.ALOAD,failure));code.add(new MethodInsnNode(Opcodes.INVOKESTATIC,BRIDGE,"bufferAllocationExit","(Ljava/lang/Object;Ljava/lang/Throwable;)V",false));return code;}
-    static void scope(String owner,MethodNode method){
-        int token=method.maxLocals++,failure=method.maxLocals++;
-        LabelNode start=new LabelNode(),end=new LabelNode(),handler=new LabelNode();
-        InsnList entry=new InsnList();entry.add(new VarInsnNode(Opcodes.ALOAD,0));
-        Type[] arguments=Type.getArgumentTypes(method.desc);
-        if(arguments.length!=0){entry.add(new LdcInsnNode(arguments.length));entry.add(new TypeInsnNode(Opcodes.ANEWARRAY,"java/lang/Object"));}
-        int slot=1,index=0;
-        for(Type argument:arguments){
-            entry.add(new InsnNode(Opcodes.DUP));entry.add(new LdcInsnNode(index++));entry.add(new VarInsnNode(argument.getOpcode(Opcodes.ILOAD),slot));
-            if(argument.getSort()!=Type.OBJECT&&argument.getSort()!=Type.ARRAY){
-                String box=switch(argument.getSort()){case Type.BOOLEAN->"Boolean";case Type.BYTE->"Byte";case Type.CHAR->"Character";case Type.SHORT->"Short";
-                    case Type.INT->"Integer";case Type.LONG->"Long";case Type.FLOAT->"Float";case Type.DOUBLE->"Double";default->throw new IllegalArgumentException("BUFFER_ARGUMENT_TYPE");};
-                entry.add(new MethodInsnNode(Opcodes.INVOKESTATIC,"java/lang/"+box,"valueOf","("+argument.getDescriptor()+")Ljava/lang/"+box+";",false));
-            }
-            entry.add(new InsnNode(Opcodes.AASTORE));
-            slot+=argument.getSize();
-        }
-        entry.add(new LdcInsnNode(Type.getObjectType(owner)));entry.add(new LdcInsnNode(method.name));
-        String descriptor=arguments.length==0?"(Ljava/lang/Object;Ljava/lang/Class;Ljava/lang/String;)Ljava/lang/Object;"
-                :"(Ljava/lang/Object;[Ljava/lang/Object;Ljava/lang/Class;Ljava/lang/String;)Ljava/lang/Object;";
-        entry.add(new MethodInsnNode(Opcodes.INVOKESTATIC,BRIDGE,"bufferOperation",descriptor,false));
-        entry.add(new VarInsnNode(Opcodes.ASTORE,token));entry.add(start);
-        for(AbstractInsnNode at:method.instructions.toArray())if(at.getOpcode()>=Opcodes.IRETURN&&at.getOpcode()<=Opcodes.RETURN)method.instructions.insertBefore(at,finish(token));
-        method.instructions.insert(entry);method.instructions.add(end);method.instructions.add(handler);method.instructions.add(new VarInsnNode(Opcodes.ASTORE,failure));
-        method.instructions.add(new VarInsnNode(Opcodes.ALOAD,token));method.instructions.add(new VarInsnNode(Opcodes.ALOAD,failure));
-        method.instructions.add(new MethodInsnNode(Opcodes.INVOKESTATIC,BRIDGE,"bufferOperationFailed","(Ljava/lang/Object;Ljava/lang/Throwable;)V",false));
-        method.instructions.add(new VarInsnNode(Opcodes.ALOAD,failure));method.instructions.add(new InsnNode(Opcodes.ATHROW));
-        method.tryCatchBlocks.add(new TryCatchBlockNode(start,end,handler,"java/lang/Throwable"));
-    }
-    private static InsnList finish(int token){
-        InsnList code=new InsnList();code.add(new VarInsnNode(Opcodes.ALOAD,token));
-        code.add(new MethodInsnNode(Opcodes.INVOKESTATIC,BRIDGE,"bufferOperationFinished","(Ljava/lang/Object;)V",false));return code;
-    }
     private static void action(String owner,MethodNode method){
         int token=method.maxLocals++,failure=method.maxLocals++;LabelNode start=new LabelNode(),end=new LabelNode(),handler=new LabelNode();
         InsnList enter=new InsnList();enter.add(new VarInsnNode(Opcodes.ALOAD,0));enter.add(new LdcInsnNode(Type.getObjectType(owner)));

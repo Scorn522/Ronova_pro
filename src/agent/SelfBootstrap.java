@@ -32,7 +32,7 @@ public final class SelfBootstrap {
         Process helper=null;
         try {
             String active=state();
-            if(active.equals("INSTALLED_FULL"))return true;
+            if(active.equals("INSTALLED_PERFORMANCE"))return true;
             if(!active.equals("NOT_PRESENT")&&!active.equals("NOT_ATTEMPTED")) {
                 report("RONOVA_SELF_BOOTSTRAP_EXISTING_BACKEND:"+active);return false;
             }
@@ -62,7 +62,7 @@ public final class SelfBootstrap {
             if(!helper.waitFor(timeoutSeconds,TimeUnit.SECONDS)) {
                 helper.destroyForcibly();
                 String actual=state();
-                if(actual.equals("INSTALLED_FULL"))return true;
+                if(actual.equals("INSTALLED_PERFORMANCE"))return true;
                 report("RONOVA_SELF_BOOTSTRAP_TIMEOUT:BACKEND="+actual);
                 return false;
             }
@@ -73,16 +73,16 @@ public final class SelfBootstrap {
             }
             // The attach call returning is not the backend result; the agent's own state is.
             String state=state();
-            if(state.equals("INSTALLED_FULL"))return true;
+            if(state.equals("INSTALLED_PERFORMANCE"))return true;
             report("RONOVA_SELF_BOOTSTRAP_BACKEND_NOT_INSTALLED:"+state);
             return false;
         } catch(InterruptedException interrupted) {
             Thread.currentThread().interrupt();
             report("RONOVA_SELF_BOOTSTRAP_INTERRUPTED");
-            return state().equals("INSTALLED_FULL");
+            return state().equals("INSTALLED_PERFORMANCE");
         } catch(Throwable unavailable) {
             report("RONOVA_SELF_BOOTSTRAP_UNAVAILABLE:"+unavailable.getClass().getSimpleName());
-            return state().equals("INSTALLED_FULL");
+            return state().equals("INSTALLED_PERFORMANCE");
         } finally {
             if(helper!=null&&helper.isAlive())helper.destroyForcibly();
         }

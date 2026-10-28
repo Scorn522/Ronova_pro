@@ -12,12 +12,17 @@ final class FieldWriteBoundary {
             "canUpdate","isAddedToWorld","dead","f_20890_","deathTime","f_20919_","value","f_135391_","remove","f_58859_");
     private static final Set<String> OWNERS=Set.of("net/minecraft/world/entity/Entity","net/minecraft/world/entity/LivingEntity",
             "net/minecraft/network/syncher/SynchedEntityData$DataItem");
-    static byte[] transform(ClassLoader loader,byte[] bytes) {return transform(loader,null,bytes);}
-    static byte[] transform(ClassLoader loader,Module module,byte[] bytes) {
-        ClassNode node=new ClassNode();new ClassReader(bytes).accept(node,0);boolean changed=false;
+    static byte[] transform(ClassLoader loader,byte[] bytes) {
+        ClassNode node=new ClassNode();new ClassReader(bytes).accept(node,0);
+        if(!transform(null,node))return null;
+        ControlClassWriter writer=new ControlClassWriter(loader,node);node.accept(writer);return writer.toByteArray();
+    }
+    static boolean transform(Module module,ClassNode node) {
+        boolean changed=false;
         // Core initializes its own policy maps before publishing guards. Its internal constructors are not
         // third-party writer sites; instrumenting them re-enters partially initialized policy classes.
-        if(module!=null&&ModGroupBoundary.ids(module).contains("ronova_pro"))return null;
+        if(module!=null&&ModGroupBoundary.ids(module).contains("ronova_pro"))return false;
+        boolean modWriter=RecoveryAgent.producerModule(module);
         for(MethodNode method:node.methods) {
             ConstructorFlow.Entry constructor;
             try{constructor=ConstructorFlow.entry(node,method);}
@@ -34,6 +39,7 @@ final class FieldWriteBoundary {
             for(int position=0;position<original.length;position++) {
                 AbstractInsnNode insn=original[position];
                 if(!(insn instanceof FieldInsnNode field)||(field.getOpcode()!=Opcodes.PUTFIELD&&field.getOpcode()!=Opcodes.PUTSTATIC))continue;
+                if(!modWriter&&!sensitive(field))continue;
                 // Only the actual uninitialized receiver is ineligible for a bridge call.
                 // Writes to existing objects remain guarded even before this/super initialization.
                 if(constructor!=null&&constructor.uninitializedWrites().contains(field))continue;
@@ -82,6 +88,14 @@ final class FieldWriteBoundary {
                     code.add(new MethodInsnNode(Opcodes.INVOKESTATIC,"java/util/Objects","requireNonNull","(Ljava/lang/Object;)Ljava/lang/Object;",false));
                 }
                 else code.add(new InsnNode(Opcodes.ACONST_NULL));
+                if(type.getSort()!=Type.OBJECT&&type.getSort()!=Type.ARRAY){
+                    LabelNode guarded=new LabelNode();
+                    code.add(new InsnNode(Opcodes.DUP));code.add(new LdcInsnNode(Type.getObjectType(field.owner)));
+                    code.add(new MethodInsnNode(Opcodes.INVOKESTATIC,BRIDGE,"primitiveValueUntracked","(Ljava/lang/Object;Ljava/lang/Class;)Z",false));
+                    code.add(new JumpInsnNode(Opcodes.IFEQ,guarded));code.add(new InsnNode(Opcodes.POP));
+                    code.add(new InsnNode(Opcodes.ACONST_NULL));code.add(new VarInsnNode(Opcodes.ASTORE,ticket));
+                    code.add(new JumpInsnNode(Opcodes.GOTO,start));code.add(guarded);
+                }
                 code.add(new LdcInsnNode(Type.getObjectType(field.owner)));code.add(new LdcInsnNode(field.name));
                 code.add(new LdcInsnNode(field.desc));
                 code.add(new VarInsnNode(type.getOpcode(Opcodes.ILOAD),value));ControlClassWriter.box(code,type);
@@ -103,6 +117,10 @@ final class FieldWriteBoundary {
                 method.instructions.insertBefore(field,code);method.instructions.remove(field);changed=true;
                 method.tryCatchBlocks.add(0,new TryCatchBlockNode(start,end,handler,null));
             }
+            // SourceInterpreter in the following creation stage needs room
+            // for DUP2 + declaring Class + selector before frames are emitted.
+            // All sites reuse these extra slots; they do not accumulate.
+            if(handlers!=null)method.maxStack+=4;
             if(handlers!=null)for(var entry:handlers.entrySet()) {
                 LabelNode handler=entry.getValue(),end=new LabelNode();
                 method.instructions.add(handler);
@@ -115,7 +133,19 @@ final class FieldWriteBoundary {
                 for(TryCatchBlockNode block:entry.getKey().catches())method.tryCatchBlocks.add(new TryCatchBlockNode(handler,end,block.handler,block.type));
             }
         }
-        if(!changed)return null;ControlClassWriter writer=new ControlClassWriter(loader,node);node.accept(writer);
-        return writer.toByteArray();
+        return changed;
+    }
+    private static boolean sensitive(FieldInsnNode field){
+        if(field.owner.startsWith("dev/ronova/pro/"))return true;
+        if(OWNERS.contains(field.owner))return FIELDS.contains(field.name)
+                ||Set.of("uuid","f_19820_","stringUUID","f_19821_","entityData","f_19804_","level","f_19853_").contains(field.name);
+        return field.owner.equals("net/minecraft/world/entity/ai/attributes/AttributeInstance")
+                ||field.owner.equals("net/minecraft/world/item/ItemStack")
+                ||field.owner.equals("net/minecraft/world/entity/player/Inventory")
+                ||field.owner.equals("net/minecraft/world/food/FoodData")
+                ||field.owner.equals("net/minecraft/world/effect/MobEffectInstance")
+                ||field.owner.startsWith("net/minecraft/world/level/storage/PrimaryLevelData")
+                ||field.owner.startsWith("net/minecraft/world/level/storage/DerivedLevelData")
+                ||field.owner.equals("net/minecraft/network/syncher/SynchedEntityData");
     }
 }

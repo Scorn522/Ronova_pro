@@ -14,10 +14,16 @@ public final class FrameworkBuffers {
     private static final ThreadLocal<Scratch> SCRATCH=new ThreadLocal<>();
     private static final Set<String> SCALAR_OPERATIONS=Set.of("capacity","remaining","hasRemaining","position","limit","clear","flip","rewind","isDirect","isReadOnly",
             "put","putFloat","putInt","putDouble","putLong","putShort","putChar");
-    private static final class Draw {
+    static final class Draw {
         final Draw previous=DRAW.get();final Thread thread=Thread.currentThread();final Module[] sources;
         boolean tainted,closed;
-        Draw(Module[] sources){this.sources=sources;CodeSourceBridge.mutationControls(this,sources,DRAW,SCALAR);}
+        Draw(Module[] sources){
+            this.sources=sources;
+            // Every exact Draw is intrinsically controller metadata, just as
+            // Scalar is. Its actual source array and thread-local holders keep
+            // ordinary identity protection and late-publication checks.
+            CodeSourceBridge.mutationControls(sources,DRAW,SCALAR);
+        }
     }
     static final class Scalar {
         final Scalar previous=SCALAR.get();final Draw draw;final Thread thread=Thread.currentThread();

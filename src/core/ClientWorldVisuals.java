@@ -20,18 +20,32 @@ import net.minecraft.world.level.Level;
 
 /** Draw-time isolation of the actual portal clock and animated block-atlas pixels. */
 public final class ClientWorldVisuals {
-    private static final Map<BufferBuilder,List<Range>> building=Collections.synchronizedMap(new WeakIdentityMap<>());
-    private static final Map<BufferBuilder.RenderedBuffer,List<Range>> rendered=Collections.synchronizedMap(new WeakIdentityMap<>());
+    private static final Map<BufferBuilder,Ranges> building=Collections.synchronizedMap(new WeakIdentityMap<>());
+    private static final Map<BufferBuilder.RenderedBuffer,Ranges> rendered=Collections.synchronizedMap(new WeakIdentityMap<>());
     private static final Map<VertexBuffer,Mesh> meshes=new WeakIdentityMap<>();
     private static final Map<SpriteContents,Map<Integer,Upload>> uploads=new IdentityHashMap<>();
     private static final Map<TextureAtlas,List<TextureAtlasSprite>> atlasSprites=new WeakIdentityMap<>();
     private static final Set<Frame> frames=Collections.newSetFromMap(new IdentityHashMap<>());
     private static DrawContext drawing;
-    private record Source(Level level,BlockPos position) {}
-    private record Range(int first,int end,Source source) {}
+    /** One private packed batch per mesh. All positions survive late-arriving freeze policies. */
+    private static final class Ranges {
+        private int[] first=new int[64],end=new int[64];
+        private long[] positions=new long[64];
+        private final Level level;
+        private Level[] levels;
+        private int size;
+        Ranges(Level level){this.level=level;}
+        void add(int from,int to,Level actual,BlockPos position){
+            if(size==first.length){int capacity=size*2;first=Arrays.copyOf(first,capacity);end=Arrays.copyOf(end,capacity);positions=Arrays.copyOf(positions,capacity);if(levels!=null)levels=Arrays.copyOf(levels,capacity);}
+            if(actual!=level&&levels==null){levels=new Level[first.length];Arrays.fill(levels,0,size,level);}
+            if(levels!=null)levels[size]=actual;
+            first[size]=from;end[size]=to;positions[size]=position.asLong();size++;
+        }
+        Level level(int index){return levels==null?level:levels[index];}
+    }
     private record UV(float lowU,float highU,float lowV,float highV) {}
-    private record Quad(Source source,UV uv) {}
-    private record Mesh(Quad[] quads,int[] order) {}
+    private record Quad(int source,UV uv) {}
+    private record Mesh(Quad[] quads,int[] order,Ranges ranges) {}
     private record DrawContext(Frame frame,boolean portal) {}
     private ClientWorldVisuals() {}
 
@@ -98,44 +112,53 @@ public final class ClientWorldVisuals {
         return context.frame.shaderTime;
     }
 
-    /** Keep the real source position while the original Forge tessellator and its callbacks run. */
-    public static void block(VertexConsumer vertices,BlockAndTintGetter view,BlockPos position,Runnable tessellate){
+    private static final class BlockSample {
+        final BufferBuilder builder;final Level level;final BlockPos position;final int first;final Thread thread=Thread.currentThread();boolean closed;
+        BlockSample(BufferBuilder builder,Level level,BlockPos position,int first){this.builder=builder;this.level=level;this.position=position;this.first=first;}
+    }
+    /** The caller executes the original tessellator directly; inactive policies allocate nothing here. */
+    public static Object blockBegin(VertexConsumer vertices,BlockAndTintGetter view,BlockPos position){
         Level level=view instanceof Level direct?direct:view instanceof RenderChunkRegion region?((ClientWorldHooks.ChunkRegion)region).pro$level():null;
-        if(!(vertices instanceof BufferBuilder builder)||level==null){tessellate.run();return;}
-        int first=((ClientWorldHooks.BuilderLabels)builder).pro$vertices();
-        try{tessellate.run();}finally{
-            int end=((ClientWorldHooks.BuilderLabels)builder).pro$vertices();
-            if(end>first){
-                synchronized(building){building.computeIfAbsent(builder,ignored->new ArrayList<>()).add(new Range(first,end,new Source(level,position.immutable())));}
-            }
+        if(!(vertices instanceof BufferBuilder builder)||!ClientPresence.worldVisualsNeeded(level))return null;
+        return new BlockSample(builder,level,position,((ClientWorldHooks.BuilderLabels)builder).pro$vertices());
+    }
+    public static void blockEnd(Object token){
+        if(token==null)return;
+        if(!(token instanceof BlockSample sample)||sample.thread!=Thread.currentThread())throw new IllegalStateException("BLOCK_VISUAL_SCOPE_CHANGED");
+        if(sample.closed)return;sample.closed=true;
+        int end=((ClientWorldHooks.BuilderLabels)sample.builder).pro$vertices();
+        if(end>sample.first){
+            synchronized(building){Ranges ranges=building.get(sample.builder);if(ranges==null){ranges=new Ranges(sample.level);building.put(sample.builder,ranges);}ranges.add(sample.first,end,sample.level,sample.position);}
         }
     }
     public static void stored(BufferBuilder builder,BufferBuilder.RenderedBuffer buffer){
-        if(buffer.drawState().indexOnly())return;
-        List<Range> ranges=building.remove(builder);
-        if(ranges!=null)rendered.put(buffer,List.copyOf(ranges));
+        Ranges ranges=building.remove(builder);
+        if(ranges==null||!ClientPresence.worldVisualsNeeded(ranges.level)||buffer.drawState().indexOnly())return;
+        rendered.put(buffer,ranges);
     }
     public static void discard(BufferBuilder builder){building.remove(builder);}
     public static void released(BufferBuilder.RenderedBuffer buffer){rendered.remove(buffer);}
     public static void closed(VertexBuffer buffer){meshes.remove(buffer);}
     public static void uploaded(VertexBuffer buffer,BufferBuilder.RenderedBuffer upload){
+        if(!ClientPresence.worldVisualsActive()){rendered.remove(upload);meshes.remove(buffer);return;}
         if(buffer.isInvalid()){rendered.remove(upload);return;}
         BufferBuilder.DrawState state=upload.drawState();
         if(state.mode()!=VertexFormat.Mode.QUADS||state.indexCount()%6!=0){meshes.remove(buffer);rendered.remove(upload);return;}
         Mesh previous=meshes.get(buffer);
-        Quad[] quads;
+        Quad[] quads;Ranges ranges;
         if(state.indexOnly()){
             if(previous==null)return;
             quads=previous.quads;
+            ranges=previous.ranges;
         }else{
             int count=state.vertexCount()/4;
             if(state.vertexCount()%4!=0){meshes.remove(buffer);rendered.remove(upload);return;}
-            quads=new Quad[count];Source[] sources=new Source[count];
-            List<Range> ranges=rendered.remove(upload);
-            if(ranges!=null)for(Range range:ranges){
+            quads=new Quad[count];int[] sources=new int[count];Arrays.fill(sources,-1);
+            ranges=rendered.remove(upload);
+            if(ranges!=null)for(int r=0;r<ranges.size;r++){
                 // Nested actual tessellations finish first and keep their more specific positions.
-                int low=(range.first+3)/4,high=Math.min(count,range.end/4);
-                for(int quad=low;quad<high;quad++)if(sources[quad]==null)sources[quad]=range.source;
+                int low=(ranges.first[r]+3)/4,high=Math.min(count,ranges.end[r]/4);
+                for(int quad=low;quad<high;quad++)if(sources[quad]<0)sources[quad]=r;
             }
             int uvOffset=-1;
             List<VertexFormatElement> elements=state.format().getElements();
@@ -170,7 +193,7 @@ public final class ClientWorldVisuals {
                 order[i]=quad;
             }
         }
-        meshes.put(buffer,new Mesh(quads,order));
+        meshes.put(buffer,new Mesh(quads,order,ranges));
     }
     private static int index(ByteBuffer bytes,int offset,int size){return size==2?Short.toUnsignedInt(bytes.getShort(offset)):bytes.getInt(offset);}
 
@@ -258,7 +281,7 @@ public final class ClientWorldVisuals {
         int first=0;FrozenSprite previous=null;
         for(int i=0;i<mesh.order.length;i++){
             Quad quad=mesh.quads[mesh.order[i]];Frame frame=object;
-            if(frame==null&&quad.source!=null)frame=ClientPresence.terrainVisualFrame(quad.source.level,quad.source.position);
+            if(frame==null&&quad.source>=0&&mesh.ranges!=null)frame=ClientPresence.terrainVisualFrame(mesh.ranges.level(quad.source),BlockPos.of(mesh.ranges.positions[quad.source]));
             FrozenSprite frozen=null;
             if(frame!=null&&quad.uv!=null){
                 for(TextureAtlasSprite sprite:sprites)if(contains(sprite,quad.uv)){frozen=frame.sprite(sprite,atlas.getId());break;}

@@ -102,6 +102,8 @@ final class RecoveryTasks implements AutoCloseable {
     // observation cannot also serve as exclusive ownership for destructive graph writes.
     private final Set<Object> sharedOrigins=Collections.newSetFromMap(new WeakIdentityMap<>());
     private final Map<Object,Task> tasks=new IdentityHashMap<>();
+    // Includes observed tasks before qualification; operationTasks has a different lifecycle.
+    private final Map<UUID,Set<Task>> subjectTasks=new HashMap<>();
     private final Map<UUID,Set<Task>> operationTasks=new HashMap<>();
     private final Map<Object,Set<Task>> producers=new IdentityHashMap<>();
     private final Map<Object,Set<Task>> dependents=new IdentityHashMap<>();
@@ -374,7 +376,7 @@ final class RecoveryTasks implements AutoCloseable {
         try {
             bridge=Class.forName("dev.ronova.pro.bootstrap.TaskBridge",false,null);
             if(bridge.getClassLoader()!=null)throw new IllegalStateException("NON_BOOTSTRAP_TASK_BRIDGE");
-            if(!Integer.valueOf(105).equals(bridge.getMethod("abiVersion").invoke(null)))throw new IllegalStateException("TASK_BRIDGE_ABI_MISMATCH");
+            if(!Integer.valueOf(106).equals(bridge.getMethod("abiVersion").invoke(null)))throw new IllegalStateException("TASK_BRIDGE_ABI_MISMATCH");
             Class<?> agent=Class.forName("dev.ronova.pro.agent.RecoveryAgent",false,ClassLoader.getSystemClassLoader());
             if(!Boolean.TRUE.equals(agent.getMethod("openTaskAccess",Class.class).invoke(null,RecoveryTasks.class)))
                 throw new IllegalStateException("TASK_ACCESS_UNAVAILABLE");
@@ -1346,7 +1348,7 @@ final class RecoveryTasks implements AutoCloseable {
             if(task.inline!=event.inline||task.callbackDefinition!=event.callbackDefinition) { task.reason="CALLBACK_DEFINITION_BINDING_CHANGED";continue; }
             // Merge the event first. A queued source delivery can still add another owner;
             // an exact-object fence is decided only after the publication batch is complete.
-            if(task.subjects.addAll(event.subjects))task.resources=null;
+            observeSubjects(task,event.subjects);
             queuePolicy(task);
             if(drainedTasks.get(task.object)==runtime.groupAuthority(task.subjects))task.queueRemoved=true;
             changed(task,tick);
@@ -1374,7 +1376,7 @@ final class RecoveryTasks implements AutoCloseable {
                         result=new Task(event.output,event.output.getClass().getClassLoader(),false,null);tasks.put(event.output,result);
                     }
                     if(result!=null&&result.result) {
-                        result.subjects.addAll(event.subjects);
+                        observeSubjects(result,event.subjects);
                         result.ownedResult|=event.inline&&dependencies(event.dependency,event.otherDependency).stream().noneMatch(input->input==event.output);
                         link(task,result,tick);changed(result,tick);
                     }
@@ -1559,10 +1561,18 @@ final class RecoveryTasks implements AutoCloseable {
     }
     /** Read at the real JDK entry/result writer. Capture uses only proven object relations. */
     boolean deniesEffect(Object object) {
-        Set<UUID> related;
-        synchronized(workerBindings) { related=workerBindings.get(object); }
+        if(object==null)return false;
         UUID direct=origins.get(object);
-        Set<UUID> established=new HashSet<>();if(related!=null)established.addAll(related);if(direct!=null)established.add(direct);
+        Set<UUID> established;
+        synchronized(workerBindings) {
+            Set<UUID> related=workerBindings.get(object);
+            if(related==null||related.isEmpty()) {
+                if(direct==null)return false;
+                established=java.util.Collections.singleton(direct);
+            } else {
+                established=new HashSet<>(related);if(direct!=null)established.add(direct);
+            }
+        }
         ProRuntime.Subject subject=runtime.groupAuthority(established);
         return subject!=null&&subject.terminal;
     }
@@ -1586,7 +1596,7 @@ final class RecoveryTasks implements AutoCloseable {
     void qualify(ProRuntime.Subject subject,UUID operation) {
         ProRuntime.Subject canonical=runtime.canonicalSubject(subject.id);
         if(canonical!=null&&canonical!=subject) {qualify(canonical,runtime.groupOperation(canonical.id,operation));return;}
-        for(Task task:tasks.values())if(!Collections.disjoint(task.subjects,subject.members)) {
+        for(Task task:qualificationCandidates(subject)) {
             if(!runtime.sameGroup(task.subjects,subject)) {task.reason="SHARED_TASK_MULTIPLE_GROUPS";continue;}
             if(task.reason.equals("SHARED_TASK_MULTIPLE_GROUPS"))task.reason="";
             if(task.authority!=null&&task.authority!=subject) {
@@ -1602,6 +1612,33 @@ final class RecoveryTasks implements AutoCloseable {
             if(task.authority==subject&&task.operation!=null&&task.qualification==subject.generation)continue;
             task.authority=subject;assignOperation(task,operation);task.qualification=subject.generation;task.resources=null;
             enqueue(task);
+        }
+    }
+    private void observeSubjects(Task task,Collection<UUID> observed) {
+        for(UUID subject:observed)if(task.subjects.add(subject)) {
+            subjectTasks.computeIfAbsent(subject,ignored->Collections.newSetFromMap(new IdentityHashMap<>())).add(task);
+            task.resources=null;
+        }
+    }
+    private Collection<Task> qualificationCandidates(ProRuntime.Subject subject) {
+        Set<Task> first=null,union=null;
+        // Resolve the current member set every time: group adoption must include old and late tasks.
+        for(UUID member:subject.members) {
+            Set<Task> candidates=subjectTasks.get(member);
+            if(candidates==null||candidates.isEmpty())continue;
+            if(first==null)first=candidates;
+            else {
+                if(union==null){union=Collections.newSetFromMap(new IdentityHashMap<>());union.addAll(first);}
+                union.addAll(candidates);
+            }
+        }
+        return union!=null?union:first!=null?first:Set.of();
+    }
+    private void forgetTask(Task task) {
+        tasks.remove(task.object);removeOperation(task);
+        for(UUID subject:task.subjects) {
+            Set<Task> candidates=subjectTasks.get(subject);
+            if(candidates!=null&&candidates.remove(task)&&candidates.isEmpty())subjectTasks.remove(subject);
         }
     }
     private void assignOperation(Task task,UUID operation) {
@@ -2436,7 +2473,7 @@ final class RecoveryTasks implements AutoCloseable {
                             catch(ReflectiveOperationException failure) {throw new IllegalStateException("QUEUE_RETIREMENT_READBACK_UNAVAILABLE",failure);}
                         }
                         for(Task task:group) {
-                            retiredObjects.put(task.object,task.id);tasks.remove(task.object);removeOperation(task);
+                            retiredObjects.put(task.object,task.id);forgetTask(task);
                             windows.remove(task);waiting.remove(task);policyPending.remove(task);task.policyQueued=false;
                             task.scheduler=null;task.queue=null;task.resources=null;task.completionSources.clear();task.completionOutputs.clear();task.completionReleaseCursors.clear();task.completionReadbacks.clear();
                             task.delegateOwners.clear();task.servicedOwnerQueues.clear();task.forkCaptureEdges.clear();
@@ -2462,8 +2499,8 @@ final class RecoveryTasks implements AutoCloseable {
             checkBridge();List<String> out=new ArrayList<>();
             // Installation history is diagnostic, not a veto on a known invocation whose
             // real entry, exit, successors and release are observed below. Actual gaps remain.
-            boolean installedHistory=backend.equals("AGENT_LATE_ATTACH_COVERAGE_GAP:PRE_ATTACH_ACTIVITY_NOT_OBSERVED:INSTALLED_FULL")
-                    ||backend.equals("AGENT_EXISTING_STATE:INSTALLED_FULL");
+            boolean installedHistory=backend.equals("AGENT_LATE_ATTACH_COVERAGE_GAP:PRE_ATTACH_ACTIVITY_NOT_OBSERVED:INSTALLED_PERFORMANCE")
+                    ||backend.equals("AGENT_EXISTING_STATE:INSTALLED_PERFORMANCE");
             if(bridge==null||!installedHistory&&(backend.startsWith("AGENT_")||backend.startsWith("TASK_AGENT_")||backend.equals("PARTIAL_TASK_BOUNDARIES")))out.add("TASK_BACKEND:"+backend);
             if(!gap.isEmpty())out.add(gap);
             if(!transientIssue.isEmpty())out.add("TASK_TRANSIENT:"+transientIssue);
@@ -2798,7 +2835,7 @@ final class RecoveryTasks implements AutoCloseable {
             }
             detached=true;
             // Every collection is owned by this observer. External queues, delegates and pools are untouched.
-            events.clear();pendingCaptures.clear();pendingRoots.clear();tasks.clear();operationTasks.clear();producers.clear();dependents.clear();childrenByParent.clear();synchronized(origins){origins.clear();sharedOrigins.clear();}workerBindings.clear();captureEpochs.clear();captureGaps.clear();
+            events.clear();pendingCaptures.clear();pendingRoots.clear();tasks.clear();subjectTasks.clear();operationTasks.clear();producers.clear();dependents.clear();childrenByParent.clear();synchronized(origins){origins.clear();sharedOrigins.clear();}workerBindings.clear();captureEpochs.clear();captureGaps.clear();
             windows.clear();waiting.clear();policyPending.clear();
             retirementFact=PREFIX+"\tOBSERVER_RELEASED\t"+runtime.session+"\t"+epoch;
         }

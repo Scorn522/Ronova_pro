@@ -19,7 +19,7 @@ typedef struct NativePrivateNode {
 } NativePrivateNode;
 typedef struct NativePrivateRange {
     const void *address;SIZE_T length;
-    int linked;unsigned kind;
+    int linked;unsigned kind;volatile LONG retired;
     NativePrivateNode metadata,span;
 } NativePrivateRange;
 
@@ -156,7 +156,7 @@ static void native_private_node(NativePrivateNode *node,NativePrivateRange *owne
     native_private_index=native_private_insert(native_private_index,node);
 }
 static void native_private_link(NativePrivateRange *range){
-    range->linked=1;
+    __atomic_store_n(&range->retired,0,__ATOMIC_RELEASE);range->linked=1;
     /* A CRT span starts at its header and covers the entire range record.
      * Indexing that record again doubles tree mutations on every allocation
      * without protecting any additional byte. External/virtual metadata is
@@ -175,7 +175,8 @@ static int native_private_query(NativePrivateNode *root,uintptr_t first,uintptr_
     if(!root||root->upper<first)return 0;
     if(root->left&&root->left->upper>=first&&native_private_query(root->left,first,last))return 1;
     if(root->first>last)return 0;
-    return root->last>=first||native_private_query(root->right,first,last);
+    return (root->last>=first&&!__atomic_load_n(&root->owner->retired,__ATOMIC_ACQUIRE))
+            ||native_private_query(root->right,first,last);
 }
 static NativePrivateRange *native_private_allocation_at(NativePrivateNode *root,uintptr_t address,unsigned kind){
     if(!root)return NULL;
@@ -322,6 +323,13 @@ static int native_private_register_locked(NativePrivateRange *range,const void *
 static void native_private_unregister_locked(NativePrivateRange *range){
     if(!range||!range->linked)return;native_private_unlink(range);
     range->address=NULL;range->length=0;range->linked=0;range->kind=NATIVE_PRIVATE_EXTERNAL;
+}
+/* Removal-only publication under a shared directory hold. The intrusive
+ * nodes and owner MUST remain alive until a later exclusive unlink; no new
+ * address or permission is published here. Used by detached JNI records. */
+static void native_private_retire_locked(NativePrivateRange *range){
+    if(range&&range->linked&&range->kind==NATIVE_PRIVATE_EXTERNAL)
+        __atomic_store_n(&range->retired,1,__ATOMIC_RELEASE);
 }
 static int native_private_register(NativePrivateRange *range,const void *address,SIZE_T length){
     native_private_write_lock(0,NATIVE_PRIVATE_REGISTER);int ready=native_private_register_locked(range,address,length);

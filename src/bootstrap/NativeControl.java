@@ -101,7 +101,7 @@ public final class NativeControl {
                 if(dll==null)return installFailure("OBJECT_CLONE_JNI_PAYLOAD_ABSENT",false);
                 nativeLoadAttempted=true;
                 System.load(dll.toString());nativeLoaded=true;
-                if(abi()!=102)throw new UnsatisfiedLinkError("NATIVE_CONTROL_ABI");
+                if(abi()!=106)throw new UnsatisfiedLinkError("NATIVE_CONTROL_ABI");
             }
             if(!nativeBoundaryInstalled){
                 nativeHandoffRetryable=false;
@@ -178,6 +178,12 @@ public final class NativeControl {
                 &&!CodeSourceBridge.heapPolicyWriter(caller))
             throw new SecurityException("ACTUAL_HEAP_POLICY_PUBLICATION_REQUIRED");
         heapPolicyChanged0(object);
+    }
+    static void heapPoliciesChanged(Object[] values){
+        if(!available)return;
+        if(!CodeSourceBridge.heapPolicyWriter(CALLER.getCallerClass()))
+            throw new SecurityException("ACTUAL_HEAP_POLICY_PUBLICATION_REQUIRED");
+        heapPoliciesChanged0(values);
     }
     static Class<?> rawMemoryWriterCaller(){
         if(CALLER.getCallerClass()!=ControlBridge.class)throw new SecurityException("ACTUAL_RAW_MEMORY_WRITER_QUERY_REQUIRED");
@@ -708,7 +714,7 @@ public final class NativeControl {
         if(!available||token==0)return "HOST_PROCESS_CREATION_UNOBSERVED";
         String gap=processRetire0(process,token);return gap==null?"HOST_PROCESS_DISPOSITION_UNAVAILABLE":gap;
     }
-    public static String state() { return state+":INSTALL_MODE="+installMode+":INSTALL_RETRYABLE="+installRetryable+":NATIVE_LIBRARY_BOUNDARY="+(libraryBoundaryReady?"READY":"UNAVAILABLE")
+    public static String state() { return state+":COVERAGE="+GuardedCalls.COVERAGE+":INSTALL_MODE="+installMode+":INSTALL_RETRYABLE="+installRetryable+":NATIVE_LIBRARY_BOUNDARY="+(libraryBoundaryReady?"READY":"UNAVAILABLE")
             +":HOST_PROCESS_BOUNDARY="+(available&&hostReady0()?"JDK_PROCESSIMPL_CREATEPROCESSW_BOUND":"AWAITING_ACTUAL_JDK_PROCESSIMPL_CREATEPROCESSW_BIND")
             +":HOST_NATIVE_CREATE_SCOPE=REGISTERED_EXACT_CREATEPROCESSA_W_NORMAL_OR_RESOLVED_DELAY_IMPORTS_AND_OBSERVED_GETPROCADDRESS_RESULTS_AFTER_OS_LOAD_RETURN"
             +":VERIFIED_RIP_RELATIVE_DELAY_IAT_CALLS_USE_CURRENT_BINDING_DYNAMIC_POINTERS_RETAIN_RESOLUTION_SOURCES"
@@ -764,6 +770,7 @@ public final class NativeControl {
     private static Class<?> boundCoreStateOwner(Class<?> actual)throws ReflectiveOperationException{
         return (Class<?>)coreStateAgent().getMethod("nativeStateOwner",Class.class).invoke(null,actual);
     }
+    static boolean boundCoreOwner(Class<?> actual){return actual!=null&&actual==coreStateOwner;}
     /** Only the agent's already authenticated ProMod binding publishes this role. */
     public static boolean coreStateOwner(Class<?> actual)throws ReflectiveOperationException{
         if(CALLER.getCallerClass()!=coreStateAgent()||actual==null||boundCoreStateOwner(actual)!=actual
@@ -884,9 +891,6 @@ public final class NativeControl {
         return unsafeMutationBoundary0(receiver,offset,length,kind,bulk,false);
     }
     private static boolean unsafeMetadata(Object receiver){return CodeSourceBridge.fieldGateMetadata(receiver);}
-    static boolean unsafeReadBoundary(Object receiver,long offset,String kind){
-        return unsafeMutationBoundary0(receiver,offset,0,kind,false,true);
-    }
     static boolean unsafeCopyBoundary(Object source,long sourceOffset,Object receiver,long offset,long length){
         return unsafeCopyBoundary0(source,sourceOffset,receiver,offset,length);
     }
@@ -962,6 +966,7 @@ public final class NativeControl {
     private static native boolean platformQueueQuiescent0(Class<?> pool,Class<?> queue);
     private static native Class<?> codeFieldOwner0(Class<?> symbolic,String name,String descriptor);
     private static native void heapPolicyChanged0(Object object);
+    private static native void heapPoliciesChanged0(Object[] values);
     private static native Object[] heapReadField0(Object holder,Class<?> declaring,String name,String descriptor);
     private static native byte[] codeDigest0(byte[] bytes);
     private static native byte[] heapArrayImage0(Object array,long start,int length);

@@ -14,7 +14,7 @@ import java.util.concurrent.locks.ReentrantLock;
 final class KnownContainers {
     private KnownContainers() { }
     static boolean map(Object value){return value!=null&&(value.getClass()==TreeMap.class||value.getClass()==IdentityHashMap.class||value.getClass()==EnumMap.class);}
-    private static boolean vector(Object value){return value!=null&&(value.getClass()==Vector.class||value.getClass()==Stack.class);}
+    static boolean vector(Object value){return value!=null&&(value.getClass()==Vector.class||value.getClass()==Stack.class);}
     static boolean lockFree(Object value){return value!=null&&(value.getClass()==ConcurrentLinkedQueue.class||value.getClass()==ConcurrentLinkedDeque.class);}
     static boolean blocking(Object value){return value!=null&&value.getClass()==LinkedBlockingQueue.class;}
     static boolean sequence(Object value){return value!=null&&(value.getClass()==LinkedList.class||value.getClass()==ArrayDeque.class
@@ -87,6 +87,7 @@ final class KnownContainers {
     static final class Image {
         final Object carrier,backing,last;final long revision;final int size,head,tail;final Object[] slots;final Row[] rows;
         final Row[] links;final Class<?> enumType;final Object[] universe;final long bits;final long[] words;final Object count;
+        private IdentityHashMap<Object,Row> mappings;
         Image(Object carrier,Object backing,Object last,long revision,int size,int head,int tail,Object[] slots,List<Row> rows){
             this(carrier,backing,last,revision,size,head,tail,slots,rows,null,null,null,0,null,null);
         }
@@ -95,6 +96,12 @@ final class KnownContainers {
             this.carrier=carrier;this.backing=backing;this.last=last;this.revision=revision;this.size=size;this.head=head;this.tail=tail;
             this.slots=slots;this.rows=rows.toArray(Row[]::new);
             this.links=links==null?null:links.toArray(Row[]::new);this.enumType=enumType;this.universe=universe;this.bits=bits;this.words=words;this.count=count;
+        }
+        Row mapping(Object key){
+            if(mappings==null){
+                var index=new IdentityHashMap<Object,Row>();for(Row row:rows)index.put(row.key,row);mappings=index;
+            }
+            return mappings.get(key);
         }
     }
     static long revision(Object carrier)throws ReflectiveOperationException{
@@ -341,11 +348,39 @@ final class KnownContainers {
         // A CLQ tombstone is its native logical deletion; keeping links avoids touching a concurrent producer's new node.
         if(item.get(row.node)!=null)throw new IllegalStateException("SOURCE_CONCURRENT_QUEUE_REMOVAL_READBACK_FAILED");return true;
     }
-    static boolean remove(Image image,Row row)throws ReflectiveOperationException{
+    record Removal(int count,Image after) { boolean removed(){return count!=0;} }
+    /** Mechanical stage only; the caller supplies this operation's freshly
+     * selected positions while holding the actual Vector writer monitor. */
+    static Image compactVectorObserved(Image image,int first,boolean[] selected,int removed)throws ReflectiveOperationException{
+        if(!vector(image.carrier)||!Thread.holdsLock(image.carrier))throw new IllegalAccessException("ACTUAL_VECTOR_MONITOR_REQUIRED");
+        if(first<0||first>image.rows.length-selected.length)throw new IllegalArgumentException("ACTUAL_VECTOR_RANGE_REQUIRED");
+        int expected=0;for(boolean item:selected)if(item)expected++;
+        // Source inspection can run other observers. Recheck every actual slot,
+        // including unselected rows and spare capacity, before any write.
+        if(removed<=0||removed!=expected||!unchanged(image))throw changed();
+        Object[] elements=(Object[])image.backing;int write=first,end=first+selected.length;
+        slot(AbstractList.class,"modCount",int.class,false).setInt(image.carrier,(int)image.revision+1);
+        for(int read=first;read<image.size;read++){
+            if(read<end&&selected[read-first])continue;
+            if(write!=read)elements[write]=image.slots[read];write++;
+        }
+        Arrays.fill(elements,write,image.size,null);
+        slot(Vector.class,"elementCount",int.class,false).setInt(image.carrier,write);
+        Image after=snapshot(image.carrier);
+        if(after.backing!=image.backing||after.size!=image.size-removed)throw new IllegalStateException("SOURCE_VECTOR_BATCH_READBACK_FAILED");
+        int at=0;
+        for(int before=0;before<image.size;before++){
+            if(before>=first&&before<end&&selected[before-first])continue;
+            if(after.rows[at++].value!=image.rows[before].value)throw new IllegalStateException("SOURCE_JDK_UNSELECTED_ELEMENT_CHANGED");
+        }
+        return after;
+    }
+    /** The verified readback is also the next traversal image; it is never an ownership decision. */
+    static Removal removeObserved(Image image,Row row)throws ReflectiveOperationException{
         boolean present=false;for(Row actual:image.rows)if(actual==row){present=true;break;}
         if(!present||!unchanged(image))throw changed();Object carrier=image.carrier;
-        if(!removalGap(image,row).isEmpty())return false;
-        if(lockFree(carrier))return removeConcurrent(image,row);
+        if(!removalGap(image,row).isEmpty())return new Removal(0,null);
+        if(lockFree(carrier))return new Removal(removeConcurrent(image,row)?1:0,null);
         if(carrier.getClass()==TreeMap.class)operation(TreeMap.class,"deleteEntry",void.class,nested("java.util.TreeMap$Entry")).invoke(carrier,row.node);
         else if(carrier.getClass()==IdentityHashMap.class){
             // Work from the observed raw slot, including NULL_KEY, without consulting a key method or a replaceable sentinel.
@@ -376,14 +411,15 @@ final class KnownContainers {
         Image after=snapshot(carrier);
         if(after.size!=image.size-1)throw new IllegalStateException("SOURCE_JDK_REMOVAL_READBACK_FAILED");
         if(map(carrier)){
-            var retained=new IdentityHashMap<Object,Object>();for(Row actual:after.rows)retained.put(actual.key,actual.value);
-            for(Row before:image.rows)if(before!=row&&(!retained.containsKey(before.key)||retained.get(before.key)!=before.value))
-                throw new IllegalStateException("SOURCE_JDK_UNSELECTED_MAPPING_CHANGED");
+            for(Row before:image.rows)if(before!=row){
+                Row retained=after.mapping(before.key);
+                if(retained==null||retained.value!=before.value)throw new IllegalStateException("SOURCE_JDK_UNSELECTED_MAPPING_CHANGED");
+            }
         }else{
             int at=0;for(Row before:image.rows)if(before!=row&&after.rows[at++].value!=before.value)
                 throw new IllegalStateException("SOURCE_JDK_UNSELECTED_ELEMENT_CHANGED");
         }
-        return true;
+        return new Removal(1,after);
     }
     static boolean clear(Image image)throws ReflectiveOperationException{
         if(lockFree(image.carrier)){

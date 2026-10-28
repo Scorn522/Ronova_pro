@@ -79,6 +79,39 @@ JNIEXPORT void JNICALL Java_dev_ronova_pro_bootstrap_NativeControl_heapPolicyCha
     ReleaseSRWLockShared(&native_tooling_heap_records);
 }
 
+JNIEXPORT void JNICALL Java_dev_ronova_pro_bootstrap_NativeControl_heapPoliciesChanged0(JNIEnv *env,jclass type,jobjectArray objects){
+    if(!InterlockedCompareExchange(&native_tooling_heap_policy_active,0,0))return;
+    if(!native_controller||!native_original.IsSameObject(env,type,native_controller)||!objects)return;
+    jsize length=native_original.GetArrayLength(env,objects);
+    if(native_original.ExceptionCheck(env)||length<=0)return;
+    /* One live local reference at a time, regardless of image size. Failure
+     * propagates before Java publishes any permanent registration. */
+    if(native_original.EnsureLocalCapacity(env,1)!=JNI_OK)return;
+    for(jsize at=0;at<length;){
+        jsize end=length-at>64?at+64:length;
+        /* Do not pin environment retirement behind an arbitrarily large
+         * class image. The Java publication covers every identity throughout
+         * this batch, including between these bounded lock acquisitions. */
+        AcquireSRWLockShared(&native_tooling_heap_records);
+        for(;at<end;at++){
+            jobject object=native_original.GetObjectArrayElement(env,objects,at);
+            if(native_original.ExceptionCheck(env))break;
+            if(!object)continue;
+            for(NativeToolingHeapEnvironment *entry=native_tooling_heap_environments;entry;entry=entry->next){
+                NativeToolingHeapCall *call=(NativeToolingHeapCall*)InterlockedCompareExchangePointer((void *volatile*)&entry->walking,NULL,NULL);
+                if(!call||!call->restricted||InterlockedCompareExchange(&call->policyChanged,0,0))continue;
+                if(!call->objectsPublished){InterlockedExchange(&call->policyChanged,1);continue;}
+                for(size_t i=0;i<call->objectCount;i++)if(native_original.IsSameObject(env,object,call->objects[i].object)){
+                    InterlockedExchange(&call->policyChanged,1);break;
+                }
+            }
+            native_original.DeleteLocalRef(env,object);
+        }
+        ReleaseSRWLockShared(&native_tooling_heap_records);
+        if(native_original.ExceptionCheck(env))return;
+    }
+}
+
 static NativeToolingHeapEnvironment *native_tooling_heap_environment(NativeToolingEnv *record,int create){
     NativeToolingHeapEnvironment *found=NULL;AcquireSRWLockExclusive(&native_tooling_heap_records);
     for(NativeToolingHeapEnvironment *entry=native_tooling_heap_environments;entry;entry=entry->next)

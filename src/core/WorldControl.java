@@ -494,5 +494,11 @@ final class WorldControl {
     String state(){return "WORLD_RULES="+rules.size()+";DEFERRED_TICKS="+held.values().stream().mapToLong(List::size).sum()
             +";CLOCK_DIMENSIONS="+clockLevels.stream().map(level->level.dimension().location().toString()).sorted().toList()
             +";CLOCK_BACKING_UNSUPPORTED="+(clockUnknown.isEmpty()?"NONE":clockUnknown);}
+    List<WeaponEntry> weaponRules(){
+        List<WeaponEntry> result=new ArrayList<>();
+        for(Rule rule:rules.values())if(!rule.archive)result.add(new WeaponEntry(rule.id,(rule.clock?"全维度时停":rule.freeze?"区域冻结":"区域禁生成")+" · "+rule.area.level().dimension().location(),"剩余 "+Math.max(0,rule.until-tick)+" tick"));
+        return List.copyOf(result);
+    }
+    List<UUID> weaponClockRules(){return rules.values().stream().filter(rule->rule.clock&&!rule.archive).map(rule->rule.id).toList();}
     Object[] controlObjects(){return new Object[]{this,rules,activeRules,levels,held,postProcessing,upgrades,moving,spawnAreas,frozenAreas,mutationAreas,clockLevels};}
 }

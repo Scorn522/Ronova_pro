@@ -24,7 +24,7 @@ public final class RecoveryAgent {
     private static final Map<String,PlatformImage> platformImages=new ConcurrentHashMap<>();
     private static final ThreadLocal<Map<String,PlatformImage>> platformReturns=ThreadLocal.withInitial(HashMap::new);
     /** True once the reflection field-write entry points carry the policy guard. */
-    private static volatile boolean reflectionGuarded,unsafeGuarded;
+    private static volatile boolean reflectionGuarded;
     private static volatile boolean eventFaultGuarded;
     private record EventFaultImage(java.lang.ref.WeakReference<Class<?>> actual,boolean initial,boolean valid,boolean accepted){}
     private static final Map<ClassLoader,EventFaultImage> eventFaultImages=Collections.synchronizedMap(new WeakHashMap<>());
@@ -65,7 +65,7 @@ public final class RecoveryAgent {
         startupMode="PREMAIN";
         start(argument,api,"PREMAIN");
         String actual=installState();
-        if(!actual.equals("INSTALLED_FULL"))throw new IllegalStateException("AGENT_PREMAIN_BACKEND_UNAVAILABLE:"+actual);
+        if(!actual.equals("INSTALLED_PERFORMANCE"))throw new IllegalStateException("AGENT_PREMAIN_BACKEND_UNAVAILABLE:"+actual);
         report("AGENT_PREMAIN_READY:"+actual);
     }
     /**
@@ -95,7 +95,7 @@ public final class RecoveryAgent {
                     Class<?> nativeControl=Class.forName("dev.ronova.pro.bootstrap.NativeControl",false,null);
                     if(retryNative)report(String.valueOf(nativeControl.getMethod("install",Path.class).invoke(null,nativeBootstrapPath)));
                     if(javaInstallationFinished&&"FULL".equals(nativeInstallMode()))resumePlatformBoundaries(nativeControl);
-                    installState=installationComplete()?"INSTALLED_FULL":"INSTALLED_PARTIAL:NATIVE_RETRY_JAVA_CHAIN_RETAINED";
+                    installState=installationComplete()?"INSTALLED_PERFORMANCE":"INSTALLED_PARTIAL:NATIVE_RETRY_JAVA_CHAIN_RETAINED";
                 }catch(ReflectiveOperationException|UnmodifiableClassException|RuntimeException|LinkageError unavailable){report("AGENT_NATIVE_RETRY_UNAVAILABLE:"+unavailable.getClass().getSimpleName());}
                 report("AGENT_EXISTING_STATE:"+installState());return;
             }
@@ -118,7 +118,7 @@ public final class RecoveryAgent {
                 trace.setDaemon(true);trace.start();
             }
             install(argument,api);
-            installState=installationComplete()?"INSTALLED_FULL":"INSTALLED_PARTIAL";
+            installState=installationComplete()?"INSTALLED_PERFORMANCE":"INSTALLED_PARTIAL";
         } catch(Throwable unavailable) {
             while(unavailable instanceof java.lang.reflect.InvocationTargetException&&unavailable.getCause()!=null)unavailable=unavailable.getCause();
             installState="FAILED:"+unavailable.getClass().getSimpleName()+":"+unavailable.getMessage();
@@ -137,10 +137,10 @@ public final class RecoveryAgent {
         if(actual.startsWith("FAILED:"))return actual+":NATIVE="+nativeInstallMode()+":NATIVE_RETRYABLE="+nativeRetryable();
         String failure=controlFailure;
         if(failure!=null)return actual.startsWith("INSTALLING:")?actual+":TRANSFORM_FAILED:"+failure:"INSTALLED_PARTIAL:TRANSFORM_FAILED:"+failure;
-        if(actual.equals("INSTALLED_FULL")&&!installationComplete())return "INSTALLED_PARTIAL:CURRENT_BOUNDARY_UNAVAILABLE:NATIVE="+nativeInstallMode()
+        if(actual.equals("INSTALLED_PERFORMANCE")&&!installationComplete())return "INSTALLED_PARTIAL:CURRENT_BOUNDARY_UNAVAILABLE:NATIVE="+nativeInstallMode()
                 +":PLATFORM_PENDING="+platformImages.entrySet().stream().filter(entry->!entry.getValue().accepted()).map(Map.Entry::getKey).sorted().toList()
-                +":REFLECTION="+reflectionGuarded+":UNSAFE="+unsafeGuarded+":CONTROL="+controlReady();
-        if(actual.startsWith("INSTALLED_PARTIAL"))return installationComplete()?"INSTALLED_FULL":actual+":NATIVE="+nativeInstallMode()+":NATIVE_RETRYABLE="+nativeRetryable();
+                +":REFLECTION="+reflectionGuarded+":MEMORY=CALL_SITES_ONLY:CONTROL="+controlReady();
+        if(actual.startsWith("INSTALLED_PARTIAL"))return installationComplete()?"INSTALLED_PERFORMANCE":actual+":NATIVE="+nativeInstallMode()+":NATIVE_RETRYABLE="+nativeRetryable();
         return actual;
     }
     private static String nativeInstallMode(){
@@ -156,14 +156,14 @@ public final class RecoveryAgent {
     private static boolean installationComplete() {
         try {
             return javaInstallationFinished&&platformPreparationTracked&&"FULL".equals(nativeInstallMode())&&platformImages.values().stream().allMatch(PlatformImage::accepted)
-                    &&reflectionGuarded&&unsafeGuarded&&controlReady();
+                    &&reflectionGuarded&&controlReady();
         } catch(RuntimeException|LinkageError unavailable) { return false; }
     }
     public static String sourceMapState() { return "REMOVED:JDK_CONTAINER_HOOKS_UNAVAILABLE"; }
     public static String sourcePublicationState(){return "UNAVAILABLE:JDK_CONTAINER_HOOKS_REMOVED";}
     /** Remaining exact field writers; this does not certify ordinary JDK collection mutations. */
-    public static String sourceFieldState(){return reflectionGuarded&&unsafeGuarded&&loadedHandleBoundariesReady()
-            &&installState().equals("INSTALLED_FULL")?"INSTALLED":"SOURCE_FIELD_SCOPE_UNAVAILABLE";}
+    public static String sourceFieldState(){return reflectionGuarded&&loadedHandleBoundariesReady()
+            &&installState().equals("INSTALLED_PERFORMANCE")?"CALL_SITES_ONLY":"SOURCE_FIELD_SCOPE_UNAVAILABLE";}
     private static volatile String installState="NOT_ATTEMPTED";
     private static synchronized void install(String argument,Instrumentation api) throws Exception {
         if(api==null)throw new IllegalArgumentException("INSTRUMENTATION_REQUIRED");
@@ -174,7 +174,7 @@ public final class RecoveryAgent {
             bootstrap=search.jar();nativeBootstrapPath=search.payload();
             report("BOOTSTRAP_SEARCH_READY:"+search.route()+":"+bootstrap.getName());
             bridge=Class.forName("dev.ronova.pro.bootstrap.TaskBridge",true,null);
-            if(!Integer.valueOf(105).equals(bridge.getMethod("abiVersion").invoke(null)))throw new IllegalStateException("TASK_BRIDGE_ABI_MISMATCH");
+            if(!Integer.valueOf(106).equals(bridge.getMethod("abiVersion").invoke(null)))throw new IllegalStateException("TASK_BRIDGE_ABI_MISMATCH");
             // This classfile was first requested beneath a stopped empty-stream return.
             Class.forName("java.util.stream.IntPipeline$Head",false,null);
             for(String helper:List.of("SourcePublication","SourceIndexMutation","FastListView","FieldMutation","EquipmentInvocations","CreationOrigin","FieldPolicyCall","FieldPolicyState","UnsafeFields"))
@@ -215,7 +215,7 @@ public final class RecoveryAgent {
             Class.forName("dev.ronova.pro.bootstrap.ControlBridge$ProducerFrame",false,null);
             Class.forName("dev.ronova.pro.bootstrap.EventFaultBridge",true,null);
             Class<?> control=Class.forName("dev.ronova.pro.bootstrap.ControlBridge",true,null);
-            if(!Integer.valueOf(105).equals(control.getMethod("abiVersion").invoke(null)))throw new IllegalStateException("CONTROL_BRIDGE_ABI_MISMATCH");
+            if(!Integer.valueOf(106).equals(control.getMethod("abiVersion").invoke(null)))throw new IllegalStateException("CONTROL_BRIDGE_ABI_MISMATCH");
             Module base=Object.class.getModule(),ours=RecoveryAgent.class.getModule();
             api.redefineModule(base,Set.of(bridge.getModule()),Map.of(
                     "jdk.internal.org.objectweb.asm",Set.of(ours),"jdk.internal.org.objectweb.asm.commons",Set.of(ours),
@@ -229,7 +229,12 @@ public final class RecoveryAgent {
             // A Forge scanning thread may run newly transformed code immediately after addTransformer.
             // Finish the bootstrap helper's access and initialization before publishing any such call site.
             Class.forName("dev.ronova.pro.bootstrap.BackingBridge",true,null);
-            Class.forName("dev.ronova.pro.bootstrap.ResourceBridge",true,null);
+            Class.forName("dev.ronova.pro.bootstrap.GuardedCalls",true,null).getDeclaredClasses();
+            // Fast scalar stores no longer incidentally load the resource
+            // helpers through the old heavy guard. Resolve this hook family's
+            // nested classes before instrumented file/Buffer loading can need
+            // their own class bytes. Static setup below remains explicit.
+            Class.forName("dev.ronova.pro.bootstrap.ResourceBridge",true,null).getDeclaredClasses();
             Class.forName("dev.ronova.pro.bootstrap.EventBusBridge",true,null);
             Class.forName("dev.ronova.pro.bootstrap.ResourceBridge$BufferPlatform",true,null);
             Class.forName("dev.ronova.pro.bootstrap.ResourceBridge$CharacterWrappers",true,null);
@@ -241,6 +246,7 @@ public final class RecoveryAgent {
             // Resolve the observed field-write and completed-result dependencies
             // before Native/JDK hooks can encounter their own class bytes.
             Class.forName("dev.ronova.pro.bootstrap.ControlBridge$HandleWriters",true,null);
+            Class.forName("dev.ronova.pro.bootstrap.ScalarPolicy",true,null);
             Class.forName("java.util.concurrent.CompletableFuture",true,null);
             // Native source queries enter these bridges immediately, including
             // while another bootstrap initializer performs a guarded Unsafe CAS.
@@ -334,8 +340,7 @@ public final class RecoveryAgent {
                             api.redefineModule(module,Set.of(bridge.getModule()),Map.of(),Map.of(targetPackage,Set.of(bridge.getModule())),Set.of(),Map.of());}
                         clientBridge.getMethod("expect",String.class,ClassLoader.class,Module.class).invoke(null,name.replace('/','.'),loader,module);
                         byte[] client=ClientBoundary.transform(loader,name,bytes);if(client!=null){
-                            byte[] fields=FieldWriteBoundary.transform(loader,module,client);if(fields!=null)client=fields;
-                            byte[] creations=CreationBoundary.transform(loader,name,type,client,producerModule(module)||externalSources);return creations==null?client:creations;
+                            return ApplicationBoundary.client(loader,module,name,type,client,producerModule(module)||externalSources);
                         }
                     }
                     if(name!=null&&NetworkBoundary.TARGETS.contains(name)&&!producerModule(module)){
@@ -401,18 +406,13 @@ public final class RecoveryAgent {
                         if(module!=null&&!module.canRead(bridge.getModule()))
                             api.redefineModule(module,Set.of(bridge.getModule()),Map.of(),Map.of(),Set.of(),Map.of());
                         byte[] index=FastutilIndexBoundary.transform(loader,name,bytes);
-                        if(name.startsWith("it/unimi/dsi/fastutil/objects/")){byte[] backing=BackingBoundary.transform(loader,module,name,index);if(backing!=null)index=backing;}
-                        byte[] fields=FieldWriteBoundary.transform(loader,index);return fields==null?index:fields;
+                        return ApplicationBoundary.index(loader,module,name,index);
                     }
                     // Reflection is one of the two real paths to a field write that bypasses the public setter.
                     byte[] guarded=ReflectionWriteBoundary.transform(loader,name,bytes);
                     if(guarded!=null)return guarded;
-                    byte[] unsafe=UnsafeWriteBoundary.transform(loader,name,bytes);
-                    if(unsafe==null)unsafe=InternalUnsafeBoundary.transform(loader,name,bytes);
-                    if(unsafe!=null) {
-                        if(module!=null&&!module.canRead(bridge.getModule()))api.redefineModule(module,Set.of(bridge.getModule()),Map.of(),Map.of(),Set.of(),Map.of());
-                        return unsafe;
-                    }
+                    // JDK Unsafe writers are original. Observed Mod call sites
+                    // receive ModMemoryBoundary guards in the application pass.
                     // A declared entry point carries a receiver-level policy check, so a target that returns early
                     // or swallows its normal entry still cannot execute against a protected exact object.
                     byte[] compatible=ForgeFieldBoundary.TARGET.equals(name)?ForgeFieldBoundary.transform(loader,bytes):bytes;
@@ -448,12 +448,8 @@ public final class RecoveryAgent {
                     // Native entries are enumerated, never rewritten: swapping a body would change behaviour
                     // without a real backend, which is worse than reporting the gap honestly.
                     NativeBindingBoundary.observe(name,bytes);
-                    byte[] entries=ModGroupBoundary.entries(loader,module,name,current);if(entries!=null)current=entries;
-                    byte[] fields=FieldWriteBoundary.transform(loader,module,current);
-                    if(fields!=null)current=fields;
-                    byte[] backings=BackingBoundary.transform(loader,module,name,current);if(backings!=null)current=backings;
-                    byte[] creations=CreationBoundary.transform(loader,name,type,current,producerModule(module)||externalSources);
-                    if(creations!=null)current=creations;
+                    byte[] applicationImage=ApplicationBoundary.transform(loader,module,name,type,current,producerModule(module)||externalSources);
+                    if(applicationImage!=null)current=applicationImage;
                     byte[] transformed=current==bytes?null:current;
                     if(transformed!=null&&module!=null&&module.isNamed()&&!module.canRead(bridge.getModule()))
                         api.redefineModule(module,Set.of(bridge.getModule()),Map.of(),Map.of(),Set.of(),Map.of());
@@ -520,7 +516,7 @@ public final class RecoveryAgent {
                 if(loader==null&&(name.equals(InstrumentationBoundary.MANAGER)||name.equals(InstrumentationBoundary.API)))instrumentationClasses.add(loaded);
                 else if(name.startsWith("dev/ronova/pro/agent/")||name.startsWith("dev/ronova/pro/bootstrap/"))controls.add(loaded);
                 else if(loader==null&&JdkTaskBoundaryContract.registered(name))tasks.add(loaded);
-                else if(name.equals("java/lang/reflect/Field")||name.equals("sun/misc/Unsafe")||name.equals("jdk/internal/misc/Unsafe")
+                else if(name.equals("java/lang/reflect/Field")
                         ||HandleWriteBoundary.targets().contains(name)&&!name.equals("java/lang/invoke/MethodHandles")&&!name.equals("java/lang/invoke/MethodHandles$Lookup"))writers.add(loaded);
                 else if(loader==null&&startupPlatformTarget(name))platform.add(loaded);
                 else if(name.equals(EventFaultBoundary.TARGET))events.add(loaded);
@@ -554,7 +550,7 @@ public final class RecoveryAgent {
             // bodies. Unused variants are woven when first defined, without forcing them.
             retransformStartup(api,writers,"FIELD_AND_HANDLE_GUARDS",false);
             report(ReflectionWriteBoundary.state());
-            report("UNSAFE_OBJECT_PUT_CAS_ATOMIC_OBJECT_BULK:"+unsafeGuarded+":UNOBSERVED_RAW_NATIVE_AND_UNWOVEN_COMPILER_INTRINSIC_WRITERS_UNSUPPORTED");
+            report(dev.ronova.pro.bootstrap.GuardedCalls.COVERAGE);
             report("EXECUTOR_RELEASE_BOUNDARY:"+loadedExecutorBoundariesReady()+":JDK_CONTAINER_HOOKS:REMOVED:HANDLE_FACTORIES:"+HandleWriteBoundary.installedCount()+"/"+HandleWriteBoundary.targets().size());
             DispatchBoundary.retransformDeclared(api,startup);
             for(Class<?> type:events) {
@@ -639,8 +635,7 @@ public final class RecoveryAgent {
     private static boolean platformGuardTarget(ClassLoader loader,String name){
         if(name==null)return false;
         return loader==null&&(taskReadinessTarget(loader,name)||HandleWriteBoundary.targets().contains(name)
-                ||name.equals("java/lang/reflect/Field"))
-                ||name.equals("sun/misc/Unsafe")&&(loader==null||loader==ClassLoader.getPlatformClassLoader());
+                ||name.equals("java/lang/reflect/Field"));
     }
     private static boolean platformModule(Module module,ClassLoader loader){
         return (loader==null||loader==ClassLoader.getPlatformClassLoader())&&module!=null&&module.isNamed()
@@ -666,7 +661,6 @@ public final class RecoveryAgent {
         if(!platformGuardTarget(loader,name))return;
         platformImages.put(name,new PlatformImage(actual,false,false));platformReturns.get().remove(name);
         if(name.equals("java/lang/reflect/Field"))reflectionGuarded=false;
-        if(name.equals("sun/misc/Unsafe"))unsafeGuarded=false;
         if(loader==null&&(name.equals("java/lang/Thread")||name.equals("java/util/Timer")||name.equals("java/util/TimerThread")))boundary(name,false);
     }
     /** This receipt describes only the image our last Java transformer actually returned. */
@@ -687,7 +681,6 @@ public final class RecoveryAgent {
             else if(name.equals("java/lang/Thread"))valid=ThreadBoundary.installed();
             else if(name.equals("java/util/Timer")||name.equals("java/util/TimerThread"))valid=TimerBoundary.installed(name);
             else if(name.equals("java/lang/reflect/Field"))valid=ReflectionWriteBoundary.guardedCount()==9;
-            else if(name.equals("sun/misc/Unsafe"))valid=UnsafeWriteBoundary.entries()==31;
         }
         PlatformImage image=new PlatformImage(actual,valid,false);
         platformImages.put(name,image);platformReturns.get().put(name,image);
@@ -724,7 +717,6 @@ public final class RecoveryAgent {
         PlatformImage accepted=new PlatformImage(actual,true,true);
         if(!platformImages.replace(name,returned,accepted))return;
         if(name.equals("java/lang/reflect/Field"))reflectionGuarded=true;
-        if(name.equals("sun/misc/Unsafe"))unsafeGuarded=true;
         if(taskReadinessTarget(loader,name))boundary(name,true);
     }
     private static boolean loadedTaskBoundariesReady(){
@@ -780,7 +772,7 @@ public final class RecoveryAgent {
         catch(ReflectiveOperationException unavailable){return "NATIVE_FILE_BINDINGS_UNAVAILABLE";}
     }
     /** Whether the reflection field-write guard is installed on this JVM. */
-    public static boolean unsafeFieldWriteGuarded() { return unsafeGuarded; }
+    public static boolean unsafeFieldWriteGuarded() { return false; }
     public static boolean reflectionFieldWriteGuarded() { return reflectionGuarded; }
     /** Exact guard state, including how many write entries carry it. */
     public static String reflectionGuardState() { return ReflectionWriteBoundary.state(); }
@@ -1075,8 +1067,7 @@ public final class RecoveryAgent {
         byte[] stopped=ModGroupBoundary.transform(loader,module,name,null,current);
         if(stopped!=null){current=stopped;publishStoppedModule(module);}
         else{
-            byte[] entries=ModGroupBoundary.entries(loader,module,name,current);if(entries!=null)current=entries;
-            byte[] fields=FieldWriteBoundary.transform(loader,module,current);if(fields!=null)current=fields;
+            byte[] guarded=ApplicationBoundary.defined(loader,module,current);if(guarded!=null)current=guarded;
         }
         NativeBindingBoundary.observe(name,bytes);
         return ExternalCodeRuntime.finish(loader,name,null,source,current);

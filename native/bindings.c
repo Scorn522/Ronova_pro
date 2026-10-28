@@ -47,18 +47,22 @@ typedef struct NativeUnsafeInstall {
     HMODULE image;jmethodID installer;jint frames;int consumed;
     JNINativeMethod *methods;jmethodID *actual;jint count;OwnerLink *owners;void *caller;
 } NativeUnsafeInstall;
-typedef struct Binding {jmethodID method;jweak type,origin;Owner *owner,*declared;OwnerLink *owners;NativeLibrary *library,*loading;struct HostImage *hostImage;HostLibraryLoad *hostLoad;int hostUnknown;void *original,*entry;char *signature,*fileMethod;char result;unsigned unsafeOperation,fileOperation,fileArgument,threadOperation,arraycopyOperation;const char *unsafeKind;volatile LONG active,current,valid;RUNTIME_FUNCTION unwind;struct Binding *previous,*next;} Binding;
+typedef struct Binding {jmethodID method;jweak type,origin;Owner *owner,*declared;OwnerLink *owners;NativeLibrary *library,*loading;struct HostImage *hostImage;HostLibraryLoad *hostLoad;int hostUnknown,vmMechanical;void *original,*entry;char *signature,*fileMethod;char result;unsigned unsafeOperation,fileOperation,fileArgument,threadOperation,arraycopyOperation;const char *unsafeKind;volatile LONG active,current,valid;RUNTIME_FUNCTION unwind;struct Binding *previous,*next;} Binding;
 typedef struct NativeDefinition {jclass declaring;jobject loader;jbyteArray bytes;unsigned phase;struct NativeDefinition *previous;} NativeDefinition;
 typedef struct CodeExit {
     jmethodID method;jint bottom;
     struct CodeRetirementOwner *retirementOwner;struct CodeExit *previous;
 } CodeExit;
-typedef struct NativeUnsafeFrame {jobject token;uint64_t expected;} NativeUnsafeFrame;
+typedef struct NativeUnsafeFrame {jobject token;uint64_t expected;jlong rawMemoryToken;} NativeUnsafeFrame;
 enum { UNSAFE_PUT=1,UNSAFE_CAS,UNSAFE_EXCHANGE,UNSAFE_SET,UNSAFE_COPY,UNSAFE_SWAP,UNSAFE_ALLOCATE,UNSAFE_REALLOCATE,UNSAFE_FREE,UNSAFE_READ };
 typedef struct NativeFileFrame {jobject receiver,token;jclass declaring;jstring method,path;jobjectArray sources,references;jlongArray arguments;jint operation;jlong address,length;int finishing;} NativeFileFrame;
 typedef struct NativeBindingSeed {jmethodID method;jclass declaring;uintptr_t version[3];int captured;struct NativeBindingSeed *previous;} NativeBindingSeed;
 typedef struct NativeThreadFrame {jobject receiver,token;jobjectArray sources;jint operation;int finishing,completed,skipped,tokenGlobal;} NativeThreadFrame;
-typedef struct NativeUnsafeMutation {jobject receiver,source;jstring kind;jlong offset,length,sourceOffset;jboolean bulk,reading,copy;struct NativeUnsafeMutation *previous;Binding *binding;} NativeUnsafeMutation;
+typedef struct NativeUnsafeMutation {
+    jobject receiver,source;jstring kind;
+    jlong offset,length,sourceOffset,rawMemoryToken;jboolean bulk,reading,copy;
+    struct NativeUnsafeMutation *previous;Binding *binding;
+} NativeUnsafeMutation;
 typedef struct NativeCodeBodySnapshot {
     struct CodeImage *image;struct CodeMethod *method;struct CodeAcceptedMethod *accepted;
 } NativeCodeBodySnapshot;
@@ -89,7 +93,7 @@ typedef struct NativeThread {
     struct HostModuleRelease *hostRelease;
     unsigned callbackHolds,vmDetaching,vmThreadEnding;
     int storageOwned,vmAttached,javaEnded,javaCleaning;
-    NativePrivateRange jniRange,jniTableRange;
+    struct NativeJniRanges *jniRanges;
     struct NativeThread *jniNext;int jniLinked;unsigned jniObserving,jniSynchronizing;
     const char *controlRangeFailure;
     uint64_t privateRangeWriter;
@@ -134,10 +138,11 @@ static jmethodID native_array_query,native_array_policy,native_pin_query,native_
 static jmethodID native_mutation_field,native_mutation_array,native_mutation_end;
 static jmethodID native_network_sources;
 static jmethodID native_process_sources,native_process_source_flags;
-static jclass native_unsafe_class,native_unsafe_backing;
+static jclass native_unsafe_class,native_unsafe_public_class,native_unsafe_backing,native_unsafe_raw_type;
+static jfieldID native_unsafe_raw_token,native_unsafe_raw_closed,native_unsafe_raw_reading,native_unsafe_raw_thread;
 static jobject native_unsafe_denied;
-static jmethodID native_unsafe_begin_query,native_unsafe_read_begin_query,native_unsafe_copy_begin_query,native_unsafe_read_query,native_unsafe_register,native_unsafe_metadata_query;
-static jmethodID native_unsafe_boundary,native_unsafe_copy_boundary,native_unsafe_write_wrapper,native_unsafe_read_wrapper,native_unsafe_copy_wrapper;
+static jmethodID native_unsafe_begin_query,native_unsafe_copy_begin_query,native_unsafe_read_query,native_unsafe_register,native_unsafe_metadata_query;
+static jmethodID native_unsafe_boundary,native_unsafe_copy_boundary,native_unsafe_write_wrapper,native_unsafe_copy_wrapper;
 static jmethodID native_unsafe_memory_begin,native_unsafe_memory_wrapper,native_unsafe_raw_receipt,native_unsafe_raw_write;
 static jmethodID native_network_retirement_write_query,native_network_retirement_owner_query,native_network_retirement_active_query;
 static jmethodID native_memory_gate;
@@ -169,6 +174,9 @@ static int native_unsafe_registered(JNIEnv*,NativeThread*,jclass,const JNINative
 static void native_carrier_metadata_registered(JNIEnv*,jclass,const JNINativeMethod*,jmethodID*,jint,void*);
 static int native_unsafe_vm_target(jmethodID,void*);
 static int native_unsafe_begin(JNIEnv*,NativeThread*,Binding*,unsigned char*);
+static int native_memory_scalar_receipt(JNIEnv*,NativeThread*,jlong,jobject);
+static int native_memory_scalar_pending(NativeThread*,jlong);
+static void native_memory_scalar_end(JNIEnv*,NativeThread*,jlong,jobject);
 static int native_unsafe_network_retirement(JNIEnv*,NativeThread*,Binding*,unsigned char*,jobject);
 static void native_unsafe_end(JNIEnv*,NativeThread*,Binding*,unsigned char*);
 static uint64_t native_unsafe_result(JNIEnv*,Binding*,unsigned char*);
@@ -396,6 +404,16 @@ JNIEXPORT jboolean JNICALL Java_dev_ronova_pro_bootstrap_NativeControl_sourceCap
 }
 static uint64_t native_enter(JNIEnv *env,jobject receiver,Binding *binding,unsigned char *frame) {
     NativeThread *state=native_thread();if(!state||state->depth==128){native_refuse(env,"RONOVA_NATIVE_SCOPE_CAPACITY");return 0;}
+    /* Explicit performance profile. These exact current VM implementations
+     * are not global memory-policy boundaries; observed Mod callers hold the
+     * Java destination guard. Unwoven bridges are a reported coverage gap. */
+    if(binding->vmMechanical&&InterlockedCompareExchange(&binding->valid,0,0)&&InterlockedCompareExchange(&binding->current,0,0)
+            &&!binding->hostUnknown&&!native_owner_stopped(binding->owners)){
+        if(!host_module_binding_enter(binding))return 0;
+        memset(&state->unsafeFrames[state->depth],0,sizeof(NativeUnsafeFrame));
+        state->entries[state->depth]=binding;state->stack[state->depth++]=binding;
+        InterlockedIncrement(&binding->active);return (uint64_t)(uintptr_t)binding->original;
+    }
     if(!native_thread_jni_observed(state,env)
             ||(!state->control&&!state->sourceCapture&&!native_jni_synchronize(state,env))){native_refuse(env,"RONOVA_JNI_TABLE_CONTROL_UNAVAILABLE");return 0;}
     if(binding->fileOperation)memset(&state->fileFrames[state->depth],0,sizeof(NativeFileFrame));
@@ -543,6 +561,8 @@ static void JNICALL native_binding(jvmtiEnv *api,JNIEnv *env,jthread thread,jmet
     int imageReady=vmUnsafe||(host_module_capture(state,target,&imageSources,&childImage,&childLoad,&childUnknown)
             &&native_capture_image_owners(target,&imageSources));
     native_arraycopy_prepare_binding(env,type,method,target);
+    int vmMechanical=vmUnsafe||native_unsafe_class&&native_original.IsSameObject(env,type,native_unsafe_class)&&native_unsafe_vm_target(method,target)
+            ||native_arraycopy_vm_target(method,target);
     AcquireSRWLockExclusive(&native_records);
     Binding *previous=NULL,*aliased=NULL;
     for(Binding *old=native_bindings;old;old=old->next){
@@ -559,6 +579,9 @@ static void JNICALL native_binding(jvmtiEnv *api,JNIEnv *env,jthread thread,jmet
         int fileReady=native_file_classify(env,type,binding,name);
         native_thread_classify(env,type,binding);
         native_arraycopy_classify(env,type,binding);
+        binding->vmMechanical=vmMechanical&&(binding->arraycopyOperation||binding->unsafeOperation==UNSAFE_READ
+                ||binding->unsafeOperation==UNSAFE_PUT||binding->unsafeOperation==UNSAFE_CAS||binding->unsafeOperation==UNSAFE_EXCHANGE
+                ||binding->unsafeOperation==UNSAFE_SET||binding->unsafeOperation==UNSAFE_COPY||binding->unsafeOperation==UNSAFE_SWAP);
         ready=fileReady&&native_owner_add(&binding->owners,declared);
         ready=ready&&native_owner_merge(&binding->owners,imageSources);
         binding->hostImage=aliased?aliased->hostImage:childImage;binding->hostLoad=aliased?aliased->hostLoad:childLoad;
@@ -1232,7 +1255,7 @@ static int native_thread_java_pending(const NativeThread *state){
         const NativeUnsafeFrame *unsafe=&state->unsafeFrames[i];
         const NativeFileFrame *file=&state->fileFrames[i];
         const NativeThreadFrame *thread=&state->threadFrames[i];
-        if(state->stack[i]||state->entries[i]||unsafe->token
+        if(state->stack[i]||state->entries[i]||unsafe->token||unsafe->rawMemoryToken
                 ||file->receiver||file->token||file->declaring||file->method||file->sources||file->references||file->arguments
                 ||thread->receiver||thread->token||thread->sources||thread->operation)return 1;
     }

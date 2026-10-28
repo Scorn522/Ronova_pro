@@ -7,6 +7,31 @@ static const struct jvmtiInterface_1_ *native_jni_vm_original;
 static const struct JNINativeInterface_ *native_jni_vm_table;
 static NativePrivateRange native_jni_vm_range;
 static volatile LONG native_jni_mutating,native_jni_pending;
+
+/* Range nodes must outlive their NativeThread after logical detach. Reuse
+ * these privately allocated records only after an exclusive directory hold
+ * has unlinked both nodes. Pool access/reaping uses the JNI writer gate;
+ * retirement only pushes to the atomic pending stack. */
+typedef struct NativeJniRanges {
+    NativePrivateRange environment,table;
+    struct NativeJniRanges *next;
+} NativeJniRanges;
+static NativeJniRanges *native_jni_ranges_free,*native_jni_ranges_retired;
+static NativeJniRanges *native_jni_ranges_take(void){
+    NativeJniRanges *ranges=native_jni_ranges_free;
+    if(ranges){native_jni_ranges_free=ranges->next;ranges->next=NULL;return ranges;}
+    return (NativeJniRanges*)calloc(1,sizeof(*ranges));
+}
+/* Both writer gates are held. One existing registration also reclaims at
+ * most one detached record, instead of adding a standalone private writer
+ * at every thread exit (which raced restricted VirtualFree callbacks). */
+static void native_jni_ranges_reap_locked(void){
+    NativeJniRanges *ranges=__atomic_load_n(&native_jni_ranges_retired,__ATOMIC_ACQUIRE);
+    while(ranges&&!__atomic_compare_exchange_n(&native_jni_ranges_retired,&ranges,ranges->next,0,__ATOMIC_ACQ_REL,__ATOMIC_ACQUIRE)){}
+    if(!ranges)return;
+    native_private_unregister_locked(&ranges->environment);native_private_unregister_locked(&ranges->table);
+    ranges->next=native_jni_ranges_free;native_jni_ranges_free=ranges;
+}
 enum { NATIVE_JNI_SLOT_COUNT=sizeof(struct JNINativeInterface_)/sizeof(uintptr_t) };
 typedef struct NativeJniApproval {
     struct JNINativeInterface_ table;OwnerLink *sources[NATIVE_JNI_SLOT_COUNT];
@@ -175,20 +200,23 @@ static int native_jni_repair_locked(const struct JNINativeInterface_ *table,cons
  * JNI directory gate, including detach. A matching live snapshot needs no
  * private-directory publication, even during an all-thread table repair. */
 static int native_jni_ranges_match(NativeThread *state,JNIEnv *env,const struct JNINativeInterface_ *table){
-    return state->jniRange.linked&&state->jniRange.address==(const void*)env
-            &&state->jniRange.length==sizeof(*env)&&state->jniTableRange.linked
-            &&state->jniTableRange.address==(const void*)table&&state->jniTableRange.length==sizeof(*table);
+    NativeJniRanges *ranges=state->jniRanges;
+    return ranges&&ranges->environment.linked&&ranges->environment.address==(const void*)env
+            &&ranges->environment.length==sizeof(*env)&&ranges->table.linked
+            &&ranges->table.address==(const void*)table&&ranges->table.length==sizeof(*table);
 }
 static int native_jni_observe_locked(NativeThread *state,JNIEnv *env,int restricted){
     struct JNINativeInterface_ copy;const struct JNINativeInterface_ *table=NULL;
     if(!native_jni_snapshot(env,&table,&copy))return 0;
     int valid=native_jni_ranges_match(state,env,table);
     if(!valid){
+        if(!state->jniRanges){state->jniRanges=native_jni_ranges_take();if(!state->jniRanges)return 0;}
         if(!native_private_write_lock(restricted,NATIVE_PRIVATE_JNI_REGISTER))return 0;
-        if(state->jniRange.linked&&state->jniRange.address!=(const void*)env)native_private_unregister_locked(&state->jniRange);
-        if(state->jniTableRange.linked&&state->jniTableRange.address!=(const void*)table)native_private_unregister_locked(&state->jniTableRange);
-        valid=native_private_register_locked(&state->jniRange,env,sizeof(*env))
-                &&native_private_register_locked(&state->jniTableRange,table,sizeof(*table));
+        native_jni_ranges_reap_locked();NativeJniRanges *ranges=state->jniRanges;
+        if(ranges->environment.linked&&ranges->environment.address!=(const void*)env)native_private_unregister_locked(&ranges->environment);
+        if(ranges->table.linked&&ranges->table.address!=(const void*)table)native_private_unregister_locked(&ranges->table);
+        valid=native_private_register_locked(&ranges->environment,env,sizeof(*env))
+                &&native_private_register_locked(&ranges->table,table,sizeof(*table));
         native_private_write_unlock();
     }
     if(!state->jniLinked){state->jniNext=native_jni_threads;native_jni_threads=state;state->jniLinked=1;}
@@ -213,8 +241,8 @@ static int native_jni_unchanged(NativeThread *state,JNIEnv *env,int restricted,i
     if(!native_bounded_read_lock(&native_jni_tables_gate,restricted))return 0;
     int valid=native_jni_unchanged_locked(state,env);
     if(all)for(NativeThread *other=native_jni_threads;valid&&other;other=other->jniNext){
-        if(other==state||!other->jniRange.linked)continue;
-        valid=native_jni_unchanged_locked(other,(JNIEnv*)other->jniRange.address);
+        if(other==state||!other->jniRanges||!other->jniRanges->environment.linked)continue;
+        valid=native_jni_unchanged_locked(other,(JNIEnv*)other->jniRanges->environment.address);
     }
     ReleaseSRWLockShared(&native_jni_tables_gate);return valid;
 }
@@ -226,8 +254,8 @@ static int native_jni_refresh(NativeThread *state,JNIEnv *env,int all){
     }else AcquireSRWLockExclusive(&native_jni_tables_gate);
     int valid=native_jni_observe_locked(state,env,restricted);
     if(all)for(NativeThread *other=native_jni_threads;other;other=other->jniNext){
-        if(other==state||!other->jniRange.linked)continue;
-        if(!native_jni_observe_locked(other,(JNIEnv*)other->jniRange.address,restricted))valid=0;
+        if(other==state||!other->jniRanges||!other->jniRanges->environment.linked)continue;
+        if(!native_jni_observe_locked(other,(JNIEnv*)other->jniRanges->environment.address,restricted))valid=0;
     }
     ReleaseSRWLockExclusive(&native_jni_tables_gate);return valid;
 }
@@ -237,7 +265,7 @@ static int native_jni_refresh(NativeThread *state,JNIEnv *env,int all){
 static int native_jni_checkpoint(NativeThread *state,JNIEnv *env,int all){
     DWORD error=GetLastError();int saved=errno;unsigned long dos=_doserrno;int valid=0;
     if(state&&env){
-        if(state->jniObserving)valid=state->jniRange.linked&&state->jniRange.address==(const void*)env;
+        if(state->jniObserving)valid=state->jniRanges&&state->jniRanges->environment.linked&&state->jniRanges->environment.address==(const void*)env;
         else if(native_jni_current(env)){
             state->jniObserving++;valid=native_jni_refresh(state,env,all);state->jniObserving--;
         }
@@ -249,20 +277,30 @@ static void native_jni_thread_end(NativeThread *state){
     /* An unlinked state is absent from every foreign all-thread walk. Only
      * its owning thread can first register it; empty pure-C/repeated teardown
      * therefore has nothing to pin or remove from either directory. */
-    if(!state->jniLinked&&!state->jniTableRange.linked&&!state->jniRange.linked)return;
+    if(!state->jniLinked&&!state->jniRanges)return;
     DWORD error=GetLastError();int saved=errno;unsigned long dos=_doserrno;
     AcquireSRWLockExclusive(&native_jni_tables_gate);
     if(state->jniLinked){NativeThread **at=&native_jni_threads;while(*at&&*at!=state)at=&(*at)->jniNext;
         if(*at==state)*at=state->jniNext;state->jniNext=NULL;state->jniLinked=0;}
+    NativeJniRanges *ranges=state->jniRanges;state->jniRanges=NULL;
+    /* A refused first publication has no intrusive nodes to retire. Reuse
+     * that empty record immediately, so repeated restricted-admission failure
+     * cannot grow a pending list that needs a successful writer to drain. */
+    if(ranges&&!ranges->environment.linked&&!ranges->table.linked){
+        ranges->next=native_jni_ranges_free;native_jni_ranges_free=ranges;ranges=NULL;
+    }
     ReleaseSRWLockExclusive(&native_jni_tables_gate);
-    /* No foreign all-thread reader can retain this state after the unlink's
-     * exclusive hold. Only its owner can start observation. Keep its private
-     * ranges alive until actual removal, without pinning the JNI directory
-     * behind another private writer; state storage is freed only afterward. */
-    if(state->jniTableRange.linked||state->jniRange.linked){
-        native_private_write_lock(0,NATIVE_PRIVATE_JNI_RETIRE);
-        native_private_unregister_locked(&state->jniTableRange);native_private_unregister_locked(&state->jniRange);
-        native_private_write_unlock();
+    /* No foreign JNI walk can retain this state after the unlink above.
+     * Logical removal changes no tree links and needs only a shared private
+     * hold, so a restricted ordinary release is no longer blocked by detach.
+     * Separate range storage stays alive until a later registration reaps it;
+     * it can never become a dangling pointer into a freed NativeThread. */
+    if(ranges){
+        native_private_read_lock(0);
+        native_private_retire_locked(&ranges->table);native_private_retire_locked(&ranges->environment);
+        NativeJniRanges *prior=__atomic_load_n(&native_jni_ranges_retired,__ATOMIC_ACQUIRE);
+        do{ranges->next=prior;}while(!__atomic_compare_exchange_n(&native_jni_ranges_retired,&prior,ranges,0,__ATOMIC_RELEASE,__ATOMIC_ACQUIRE));
+        ReleaseSRWLockShared(&native_private_gate);
     }
     errno=saved;_doserrno=dos;SetLastError(error);
 }
@@ -379,7 +417,7 @@ static int native_jni_table_range(uintptr_t first,uintptr_t last,int restricted)
             &&first<=vmTable+sizeof(*native_jni_vm_table)-1&&vmTable<=last,unknown=0;
     for(NativeThread *state=native_jni_threads;state&&!hit;state=state->jniNext){
         const struct JNINativeInterface_ *table=NULL;
-        if(!state->jniRange.linked||!native_jni_read(state->jniRange.address,&table,sizeof(table))||!table){
+        if(!state->jniRanges||!state->jniRanges->environment.linked||!native_jni_read(state->jniRanges->environment.address,&table,sizeof(table))||!table){
             unknown=1;native_range_unknown("JNI_ENV_UNREADABLE");continue;}
         uintptr_t address=(uintptr_t)table;
         if(sizeof(*table)-1>UINTPTR_MAX-address){unknown=1;native_range_unknown("JNI_TABLE_OVERFLOW");continue;}

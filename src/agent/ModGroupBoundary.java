@@ -259,9 +259,9 @@ final class ModGroupBoundary {
         rejected.add(new InsnNode(Opcodes.ATHROW));return rejected;
     }
     /** Every real body reads the current group policy, including private/bridge/synthetic bodies. */
-    static byte[] entries(ClassLoader loader,Module module,String name,byte[] bytes){
-        if(loader==null||!RecoveryAgent.producerModule(module))return null;
-        ClassNode node=new ClassNode();new ClassReader(bytes).accept(node,0);boolean changed=false;
+    static boolean entries(ClassLoader loader,Module module,ClassNode node){
+        if(loader==null||!RecoveryAgent.producerModule(module))return false;
+        boolean changed=false;
         for(MethodNode method:node.methods){
             if((method.access&(Opcodes.ACC_ABSTRACT|Opcodes.ACC_NATIVE))!=0||method.instructions.size()==0)continue;
             boolean exists=false;for(AbstractInsnNode at:method.instructions.toArray())if(at instanceof MethodInsnNode call
@@ -285,10 +285,21 @@ final class ModGroupBoundary {
                     default -> {gate.add(new InsnNode(Opcodes.ACONST_NULL));gate.add(new InsnNode(Opcodes.ARETURN));}
                 }
             }
-            gate.add(allowed);method.instructions.insert(gate);changed=true;
+            gate.add(allowed);
+            if(!method.name.startsWith("<")){
+                int scope=method.maxLocals++;LabelNode start=new LabelNode(),end=new LabelNode(),handler=new LabelNode();
+                gate.add(new LdcInsnNode(Type.getObjectType(node.name)));
+                gate.add(new MethodInsnNode(Opcodes.INVOKESTATIC,"dev/ronova/pro/bootstrap/ModSources","enter","(Ljava/lang/Class;)Ljava/lang/Object;",false));
+                gate.add(new VarInsnNode(Opcodes.ASTORE,scope));gate.add(start);
+                for(AbstractInsnNode instruction:method.instructions.toArray())if(instruction.getOpcode()>=Opcodes.IRETURN&&instruction.getOpcode()<=Opcodes.RETURN){InsnList exit=new InsnList();exit.add(new VarInsnNode(Opcodes.ALOAD,scope));exit.add(new MethodInsnNode(Opcodes.INVOKESTATIC,"dev/ronova/pro/bootstrap/ModSources","exit","(Ljava/lang/Object;)V",false));method.instructions.insertBefore(instruction,exit);}
+                method.instructions.add(end);method.instructions.add(handler);method.instructions.add(new VarInsnNode(Opcodes.ALOAD,scope));method.instructions.add(new MethodInsnNode(Opcodes.INVOKESTATIC,"dev/ronova/pro/bootstrap/ModSources","exit","(Ljava/lang/Object;)V",false));method.instructions.add(new InsnNode(Opcodes.ATHROW));method.tryCatchBlocks.add(new jdk.internal.org.objectweb.asm.tree.TryCatchBlockNode(start,end,handler,null));
+            }
+            method.instructions.insert(gate);changed=true;
+            // The next stage analyzes constructors before the final writer
+            // recomputes frames. The refusal NEW/DUP/message needs three slots.
+            method.maxStack=Math.max(method.maxStack,3);
         }
-        if(!changed)return null;
-        ControlClassWriter writer=new ControlClassWriter(loader,node);node.accept(writer);return writer.toByteArray();
+        return changed;
     }
     private static void replace(MethodNode method,InsnList code) {
         method.instructions=code;method.tryCatchBlocks.clear();method.localVariables=null;

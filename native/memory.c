@@ -2,7 +2,7 @@
  * objects and byte contents have no Ronova SDK ledger or recovery image.
  * A scope holds only the actual caller/source set for a real Unsafe/JNI body. */
 typedef struct NativeMemoryWrite {
-    OwnerLink *sources;uint64_t address,length;jlong token;int reading,unknown;
+    OwnerLink *sources;uint64_t address,length;jlong token;int reading,unknown,nativeScalar;
     struct NativeMemoryWrite *previous;
 } NativeMemoryWrite;
 static volatile LONG64 native_memory_generation;
@@ -71,8 +71,7 @@ static int native_memory_call_begin(JNIEnv *env,NativeThread *state,Binding *bin
     if(!ready&&!native_original.ExceptionCheck(env))native_refuse(env,"NATIVE_MEMORY_SOURCES_UNAVAILABLE");
     return ready;
 }
-JNIEXPORT jlong JNICALL Java_dev_ronova_pro_bootstrap_NativeControl_memoryWriteBegin0(JNIEnv *env,jclass type,jlong address,jlong length,jobjectArray contributors,jboolean reading,jboolean snapshot){
-    if(!native_unsafe_memory_authority(env,type,address,length,reading,snapshot)&&!native_memory_authority(env,type)){native_refuse(env,"ACTUAL_NATIVE_MEMORY_BOUNDARY_REQUIRED");return 0;}
+static jlong native_memory_begin(JNIEnv *env,jlong address,jlong length,jobjectArray contributors,jboolean reading){
     NativeThread *state=native_thread();if(!state||length<0){native_refuse(env,"NATIVE_MEMORY_SCOPE_UNAVAILABLE");return 0;}
     NativeMemoryWrite *scope=native_memory_scope_take(state);if(!scope){native_refuse(env,"NATIVE_MEMORY_SCOPE_CAPACITY");return 0;}
     scope->address=(uint64_t)address;scope->length=(uint64_t)length;scope->reading=reading==JNI_TRUE;
@@ -83,6 +82,56 @@ JNIEXPORT jlong JNICALL Java_dev_ronova_pro_bootstrap_NativeControl_memoryWriteB
     scope->token=native_memory_token();
     if(!scope->token){native_memory_scope_recycle(state,scope);native_refuse(env,"NATIVE_MEMORY_SCOPE_CAPACITY");return 0;}
     scope->previous=state->memoryWrite;state->memoryWrite=scope;return scope->token;
+}
+JNIEXPORT jlong JNICALL Java_dev_ronova_pro_bootstrap_NativeControl_memoryWriteBegin0(JNIEnv *env,jclass type,jlong address,jlong length,jobjectArray contributors,jboolean reading,jboolean snapshot){
+    int scalar=native_unsafe_memory_authority(env,type,address,length,reading,snapshot);
+    if(!scalar&&!native_memory_authority(env,type)){native_refuse(env,"ACTUAL_NATIVE_MEMORY_BOUNDARY_REQUIRED");return 0;}
+    NativeThread *state=native_thread();NativeUnsafeMutation *mutation=scalar?state->unsafeMutation:NULL;
+    jlong token=native_memory_begin(env,address,length,contributors,reading);
+    if(token&&mutation){state->memoryWrite->nativeScalar=1;mutation->rawMemoryToken=token;}
+    return token;
+}
+static int native_memory_scalar_pending(NativeThread *state,jlong token){
+    NativeMemoryWrite *scope=state?state->memoryWrite:NULL;
+    return scope&&scope->token==token&&scope->nativeScalar&&!scope->reading;
+}
+static int native_memory_scalar_receipt(JNIEnv *env,NativeThread *state,jlong token,jobject receipt){
+    NativeMemoryWrite *scope=state?state->memoryWrite:NULL;
+    if(!scope||scope->token!=token||!scope->nativeScalar||scope->reading||!receipt)return 0;
+    jclass actual=native_original.GetObjectClass(env,receipt);
+    int valid=actual&&native_original.IsSameObject(env,actual,native_unsafe_raw_type);
+    if(actual)native_original.DeleteLocalRef(env,actual);
+    if(valid)valid=native_original.GetLongField(env,receipt,native_unsafe_raw_token)==token
+            &&!native_original.GetBooleanField(env,receipt,native_unsafe_raw_closed)
+            &&!native_original.GetBooleanField(env,receipt,native_unsafe_raw_reading);
+    if(valid){
+        jobject owner=native_original.GetObjectField(env,receipt,native_unsafe_raw_thread);jthread current=NULL;
+        valid=owner&&(*native_ti)->GetCurrentThread(native_ti,&current)==JVMTI_ERROR_NONE&&current
+                &&native_original.IsSameObject(env,owner,current);
+        if(current)native_original.DeleteLocalRef(env,current);if(owner)native_original.DeleteLocalRef(env,owner);
+    }
+    // JNI field access can dispatch a watch callback. A recycled node at the
+    // same address is not the same scope: recheck its never-reused token too.
+    return valid&&!native_original.ExceptionCheck(env)&&state->memoryWrite==scope&&native_memory_scalar_pending(state,token);
+}
+/* Only the actual VM scalar's native_leave reaches this helper. Heap and copy
+ * receipts still use their original Java completion. A Java allocation failure
+ * closes its own token before the begin returns, so it never enters this path. */
+static void native_memory_scalar_end(JNIEnv *env,NativeThread *state,jlong token,jobject receipt){
+    jthrowable failure=native_original.ExceptionOccurred(env);if(failure)native_original.ExceptionClear(env);
+    NativeMemoryWrite *scope=state?state->memoryWrite:NULL;
+    int valid=scope&&scope->token==token&&scope->nativeScalar&&!scope->reading
+            &&(!receipt||native_memory_scalar_receipt(env,state,token,receipt));
+    if(valid){
+        // Finish the exact Native scope before a field-watch callback can
+        // observe closed. Such a callback may reenter, but cannot consume this
+        // retired token or make us follow a recycled scope node afterwards.
+        state->memoryWrite=scope->previous;native_memory_scope_recycle(state,scope);
+        if(receipt)native_original.SetBooleanField(env,receipt,native_unsafe_raw_closed,JNI_TRUE);
+    }else native_refuse(env,"ACTUAL_NATIVE_RAW_RECEIPT_REQUIRED");
+    if(failure){if(native_original.ExceptionCheck(env)){native_original.ExceptionClear(env);InterlockedIncrement(&native_failures);}
+        native_original.Throw(env,failure);native_original.DeleteLocalRef(env,failure);}
+    if(receipt)native_original.DeleteLocalRef(env,receipt);
 }
 JNIEXPORT void JNICALL Java_dev_ronova_pro_bootstrap_NativeControl_memoryWriteEnd0(JNIEnv *env,jclass type,jlong token,jboolean written){
     (void)written;if(!native_memory_authority(env,type)){native_refuse(env,"ACTUAL_NATIVE_MEMORY_BOUNDARY_REQUIRED");return;}
